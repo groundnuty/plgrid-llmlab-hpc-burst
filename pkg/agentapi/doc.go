@@ -128,6 +128,20 @@
 // interval, and nothing in a Report needs to be stored as it arrives (HBEP-7,
 // Operational readiness 2: it "reads the agents' next reports").
 //
+// # Report order
+//
+// Reports can reach the Backend out of the order the agent built them: a
+// periodic report already sent when the agent stops can arrive after its last
+// report. So every Report carries Seq, the agent instance's own count of the
+// reports it builds, from 1, periodic and last alike. A Backend keeps a report
+// only if its Seq is newer than the newest it holds for that agent instance ID
+// (ReportIsNewer), and answers an older one, or a repeat, as accepted without
+// keeping it; it takes no other effect from it. It raises the count it holds
+// only when it keeps a report, so a report it refused is not taken for an old
+// one when the agent sends it again. A new agent instance ID starts its own
+// count. The held counts are in memory, like registrations: a restart clears
+// them. A Report with no Seq is refused (CheckSeq).
+//
 // What must survive a restart is the controller's judgement, which it writes
 // to the API: the Instance's phase, conditions, end reason and end time,
 // start-instruction and ready times, throughput, AgentRegistration and restart

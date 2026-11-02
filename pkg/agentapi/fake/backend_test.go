@@ -86,7 +86,7 @@ func TestBackendForgetDropsEveryRegistration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := b.Report(bgndCtx, caller(agent1), agentapi.Report{Time: t0}); err != nil {
+	if err := b.Report(bgndCtx, caller(agent1), agentapi.Report{Seq: 1, Time: t0}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -126,13 +126,13 @@ func TestBackendFailNextFailsTheNextCallOfThatMethodOnce(t *testing.T) {
 	if _, err := b.Desired(bgndCtx, caller(agent1)); err != nil {
 		t.Errorf("Desired failed after FailNext(Report): %v", err)
 	}
-	if err := b.Report(bgndCtx, caller(agent1), agentapi.Report{Time: t0}); !errors.Is(err, boom) {
+	if err := b.Report(bgndCtx, caller(agent1), agentapi.Report{Seq: 1, Time: t0}); !errors.Is(err, boom) {
 		t.Fatalf("first Report: err = %v, want boom", err)
 	}
 	if got := len(b.Reports(allocUID)); got != 0 {
 		t.Errorf("the failed Report was recorded: %d reports", got)
 	}
-	if err := b.Report(bgndCtx, caller(agent1), agentapi.Report{Time: t0}); err != nil {
+	if err := b.Report(bgndCtx, caller(agent1), agentapi.Report{Seq: 1, Time: t0}); err != nil {
 		t.Errorf("second Report: %v, want success", err)
 	}
 	if got := len(b.Reports(allocUID)); got != 1 {
@@ -317,7 +317,7 @@ func TestBackendOwnsTheDesiredStateItStoresAndServes(t *testing.T) {
 func richReport() agentapi.Report {
 	start := t0.Add(time.Second)
 	read := t0.Add(2 * time.Second)
-	return agentapi.Report{Time: t0, Instance: &agentapi.InstanceReport{
+	return agentapi.Report{Seq: 1, Time: t0, Instance: &agentapi.InstanceReport{
 		UID:     "inst-uid-1",
 		Staging: &agentapi.Staging{Phase: agentapi.StagingDone},
 		Workers: []agentapi.WorkerReport{{
@@ -414,7 +414,7 @@ func TestBackendReportsInOrderPerAllocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for n := range 3 {
-		if err := b.Report(bgndCtx, caller(agent1), agentapi.Report{Time: t0.Add(time.Duration(n) * time.Second)}); err != nil {
+		if err := b.Report(bgndCtx, caller(agent1), agentapi.Report{Seq: uint64(n + 1), Time: t0.Add(time.Duration(n) * time.Second)}); err != nil {
 			t.Fatal(err)
 		}
 	}

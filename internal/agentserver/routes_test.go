@@ -77,7 +77,7 @@ func TestRegisterAnswers200WithTheBackendsResponse(t *testing.T) {
 func TestReportAnswers204AndTheBackendHoldsTheReport(t *testing.T) {
 	x := newRig(t)
 	x.register(x.good())
-	sent := agentapi.Report{Time: time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC), Instance: &agentapi.InstanceReport{UID: "inst-uid-1", Generation: 3}}
+	sent := agentapi.Report{Seq: 1, Time: time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC), Instance: &agentapi.InstanceReport{UID: "inst-uid-1", Generation: 3}}
 
 	rec := x.do(http.MethodPost, agentapi.PathReport, x.good(), reportBody(t, sent))
 	if rec.Code != http.StatusNoContent || rec.Body.Len() != 0 {
@@ -115,7 +115,7 @@ func TestANotRegisteredAgentGets409WithThatCode(t *testing.T) {
 		body         []byte
 	}{
 		{http.MethodGet, agentapi.PathDesired, nil},
-		{http.MethodPost, agentapi.PathReport, reportBody(t, agentapi.Report{Time: time.Unix(1, 0).UTC()})},
+		{http.MethodPost, agentapi.PathReport, reportBody(t, agentapi.Report{Seq: 1, Time: time.Unix(1, 0).UTC()})},
 	} {
 		rec := x.do(c.method, c.path, x.good(), c.body)
 		if rec.Code != http.StatusConflict {

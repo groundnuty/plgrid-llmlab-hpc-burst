@@ -72,7 +72,7 @@ func TestServerAnswersAsTheGateDoes(t *testing.T) {
 			}
 			presented := gate.As(id.credential, id.tag, id.jobID)
 			asCaller := agentapi.Caller{AgentInstanceID: id.instanceID}
-			report := agentapi.Report{Time: time.Unix(1, 0).UTC()}
+			report := agentapi.Report{Seq: 1, Time: time.Unix(1, 0).UTC()}
 
 			for _, call := range calls {
 				var gateErr error

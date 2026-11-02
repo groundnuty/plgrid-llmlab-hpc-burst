@@ -26,6 +26,10 @@ type registration struct {
 	cpuArch         string
 	gpus            []agentapi.GPU
 	at              time.Time
+	// seq is the Seq of the newest report kept from this agent instance, 0
+	// while none was: a report is kept only if it is newer (agentapi.ReportIsNewer).
+	// It lives and dies with the registration, in memory.
+	seq uint64
 }
 
 // agentState is what the Backend holds of one Allocation's agent.
@@ -144,12 +148,28 @@ func (b *Backend) registered(c agentapi.Caller) bool {
 
 // Report takes the caller's latest full snapshot. The Instance's key, sent
 // until the controller says it is stored, is written to its mode-600 file.
+//
+// Only a report newer than the newest kept from the same agent instance is
+// kept (agentapi.ReportIsNewer, HBEP-7, Report order). An older one, or a
+// repeat, is answered as accepted and has no other effect: no key written, no
+// sample taken, no pass enqueued. The count held for the instance rises only
+// when the report is kept, so one that was refused is not taken for an old one
+// when the agent sends it again.
 func (b *Backend) Report(ctx context.Context, c agentapi.Caller, r agentapi.Report) error {
 	if err := b.serving(); err != nil {
 		return err
 	}
 	if !b.registered(c) {
 		return agentapi.Errorf(agentapi.CodeNotRegistered, "agent instance %s is not registered", c.AgentInstanceID)
+	}
+	if err := agentapi.CheckSeq(r.Seq); err != nil {
+		return agentapi.Errorf(agentapi.CodeBadRequest, "%v", err)
+	}
+	// Early, so that an old report writes no key; checked again where the
+	// report is kept, since another report of the same agent can be kept in
+	// between.
+	if !b.newerThanKept(c, r.Seq) {
+		return nil
 	}
 	// Before anything is stored: a refused report has no effect, and the
 	// earlier one stays the latest.
@@ -167,6 +187,16 @@ func (b *Backend) Report(ctx context.Context, c agentapi.Caller, r agentapi.Repo
 	}
 	b.mu.Lock()
 	s := b.state(c)
+	reg, ok := s.regs[c.AgentInstanceID]
+	if !ok {
+		b.mu.Unlock()
+		return agentapi.Errorf(agentapi.CodeNotRegistered, "agent instance %s is not registered", c.AgentInstanceID)
+	}
+	if !agentapi.ReportIsNewer(r.Seq, reg.seq) {
+		b.mu.Unlock()
+		return nil
+	}
+	reg.seq = r.Seq
 	rc := r
 	s.report, s.reportAt, s.reportFrom = &rc, now, c.AgentInstanceID
 	if r.Instance != nil {
@@ -179,6 +209,19 @@ func (b *Backend) Report(ctx context.Context, c agentapi.Caller, r agentapi.Repo
 	b.mu.Unlock()
 	b.enqueueFor(ctx, c)
 	return nil
+}
+
+// newerThanKept says whether a report counted seq is newer than the newest kept
+// from the caller's agent instance.
+func (b *Backend) newerThanKept(c agentapi.Caller, seq uint64) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	s, ok := b.agents[c.AllocationUID]
+	if !ok {
+		return true
+	}
+	reg, ok := s.regs[c.AgentInstanceID]
+	return !ok || agentapi.ReportIsNewer(seq, reg.seq)
 }
 
 // checkWorkerNames refuses a report in which two workers share a name. A

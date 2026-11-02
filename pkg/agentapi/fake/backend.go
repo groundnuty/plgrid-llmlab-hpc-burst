@@ -42,6 +42,11 @@ type Backend struct {
 	desired map[string]agentapi.DesiredState
 	regs    map[string][]Registration
 	reports map[string][]agentapi.Report
+	// seqs is the Seq of the newest report kept from each agent instance, and
+	// dropped counts the reports a Report call answered as accepted and did not
+	// keep, per Allocation (agentapi.ReportIsNewer).
+	seqs    map[seqKey]uint64
+	dropped map[string]int
 	fail    map[string][]error
 	calls   map[string]int
 }
@@ -54,6 +59,8 @@ func NewBackend() *Backend {
 		desired: map[string]agentapi.DesiredState{},
 		regs:    map[string][]Registration{},
 		reports: map[string][]agentapi.Report{},
+		seqs:    map[seqKey]uint64{},
+		dropped: map[string]int{},
 		fail:    map[string][]error{},
 		calls:   map[string]int{},
 	}
@@ -69,12 +76,26 @@ func (b *Backend) SetDesired(allocUID string, d agentapi.DesiredState) {
 	b.desired[allocUID] = cloneDesired(d)
 }
 
-// Forget drops every registration, as a controller restart does. The reports
-// recorded so far stay, for inspection.
+// Forget drops every registration and the report counts held for the agent
+// instances, as a controller restart does. The reports recorded so far stay, for
+// inspection.
 func (b *Backend) Forget() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	clear(b.regs)
+	clear(b.seqs)
+}
+
+// seqKey names an agent instance of an Allocation.
+type seqKey struct{ allocUID, agentInstanceID string }
+
+// Dropped returns how many reports for the Allocation a Report call answered as
+// accepted without keeping them, being older than the newest kept from the same
+// agent instance, or repeats of it.
+func (b *Backend) Dropped(allocUID string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.dropped[allocUID]
 }
 
 // FailNext makes the next call of the method (MethodRegister, MethodDesired or
@@ -166,7 +187,11 @@ func (b *Backend) Desired(_ context.Context, c agentapi.Caller) (agentapi.Desire
 	return cloneDesired(d).WithVersion(), nil
 }
 
-// Report appends the report to the Allocation's list.
+// Report appends the report to the Allocation's list, if it is newer than the
+// newest kept from the same agent instance (agentapi.ReportIsNewer); an older
+// one, or a repeat, is answered as accepted, counted by Dropped and not kept. A
+// report without a Seq is refused. The count held for the instance rises only
+// when a report is kept.
 func (b *Backend) Report(_ context.Context, c agentapi.Caller, r agentapi.Report) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -181,6 +206,15 @@ func (b *Backend) Report(_ context.Context, c agentapi.Caller, r agentapi.Report
 	if !b.registered(c) {
 		return notRegistered(c)
 	}
+	if err := agentapi.CheckSeq(r.Seq); err != nil {
+		return agentapi.Errorf(agentapi.CodeBadRequest, "%s: %v", MethodReport, err)
+	}
+	k := seqKey{c.AllocationUID, c.AgentInstanceID}
+	if !agentapi.ReportIsNewer(r.Seq, b.seqs[k]) {
+		b.dropped[c.AllocationUID]++
+		return nil
+	}
+	b.seqs[k] = r.Seq
 	b.reports[c.AllocationUID] = append(b.reports[c.AllocationUID], cloneReport(r))
 	return nil
 }
