@@ -118,7 +118,10 @@ func (c *Controller) keepAccounting(ctx context.Context, p *pass, s *allocState,
 // one, is kept, so a restarted Controller keeps the wait.
 func (c *Controller) waitForFinalRead(ctx context.Context, p *pass, s *allocState) (wait bool, err error) {
 	if s.prior.AbsentSince == nil {
-		obs := s.prior.DeepCopy()
+		// From the status as it stands, not the pass's prior one: the pass's
+		// own write of jobCompleting (mirrorBlocker) is already in it, and
+		// writing the prior status back would undo it.
+		obs := s.a.Status.AtProvider.DeepCopy()
 		obs.AbsentSince = mt(p.now)
 		s.a.Status.AtProvider = *obs // after the last Update, which restores the stored status
 		if err := updateStatus(ctx, c.Client, s.a); err != nil {

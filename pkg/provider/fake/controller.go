@@ -241,7 +241,12 @@ import (
 //     listing's own state decides. A deleting Allocation whose job completes
 //     keeps its finalizer: it does not cancel the job again, writes no
 //     accounting record and removes no files until the flag has cleared, then
-//     all three happen once.
+//     all three happen once. The same holds while any other job with the tag
+//     completes: one blocking job (the recorded one if it is completing, else
+//     the lowest ID) gates the finalizer and is written as jobCompleting and
+//     the condition, whose message names it when it is not the recorded job, so
+//     the slot count keeps the Allocation. Once nothing completes, the deleting
+//     pass writes jobCompleting false.
 //   - Retention: every status written mirrors status.retention.effectiveMode
 //     from spec.retentionPolicy (RetentionPolicy.EffectiveMode: Keep when unset).
 //   - Prerequisites (opt-in, the Prerequisites field): before it claims an

@@ -207,3 +207,17 @@ func completingMessage(id string, job provider.Job) string {
 	}
 	return fmt.Sprintf("job %s is completing in state %s since %s", id, base, job.CompletingSince.UTC().Format(time.RFC3339))
 }
+
+// blockerMessage is the JobCompleting message of a deleting Allocation: the
+// recorded job's own message, or, when another job with the tag is the one that
+// completes, that job's with the reason it is named (the real provider's text).
+func blockerMessage(recorded string, b provider.Job) string {
+	msg := completingMessage(b.ID, b)
+	switch {
+	case b.ID == recorded:
+		return msg
+	case recorded == "":
+		return msg + "; it carries the tag and no job is recorded"
+	}
+	return msg + "; it carries the tag but is not the recorded job " + recorded
+}

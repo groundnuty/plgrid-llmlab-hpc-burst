@@ -61,13 +61,17 @@ func (c *Controller) syncDeleting(ctx context.Context, p *pass, s *allocState) e
 	}
 	// A completing job has an end time but is still live: its processes and
 	// its epilog may run. The record, the files and the finalizer wait for the
-	// flag to clear. It is not cancelled again; scancel would answer that it
-	// is already completing (the real provider's observeDeleting does the
-	// same).
-	if err := c.mirrorDeletingCompleting(ctx, p, s, jobs); err != nil {
+	// flag to clear. It is not cancelled again: it has ended as far as Slurm
+	// goes, so a cancel would only be a no-op, AlreadyEnded (the real
+	// provider's observeDeleting does the same; #207). One job decides, the recorded one if it is completing, else the
+	// lowest ID among the others with the tag, and the same value gates the
+	// finalizer and is written as jobCompleting and the JobCompleting condition,
+	// so the slot count and the finalizer never disagree.
+	blocker, blocked := completingBlocker(jobs, a.Annotations[v1alpha1.AnnotationJobID])
+	if err := c.mirrorBlocker(ctx, p, s, blocker, blocked); err != nil {
 		return err
 	}
-	if completing(jobs) {
+	if blocked {
 		return nil
 	}
 	if unresolved(s.rec) && a.Annotations[v1alpha1.AnnotationJobID] == "" && !c.attemptReleased(s, p.now) {
@@ -129,36 +133,46 @@ func liveIDs(jobs []provider.Job) []string {
 	return ids
 }
 
-// completing reports whether any job carries the COMPLETING flag.
-func completing(jobs []provider.Job) bool {
-	for _, j := range jobs {
-		if j.Completing {
-			return true
+// completingBlocker is the one predicate that says a job with the tag is live
+// because it is completing, for a deleting Allocation: the recorded job if it is
+// completing, else the lowest ID among the other jobs with the tag that are,
+// the real provider's rule (internal/providerctl, completingBlocker). jobs are
+// sorted by ID, the recorded job read by its ID may follow them.
+func completingBlocker(jobs []provider.Job, recorded string) (provider.Job, bool) {
+	first := -1
+	for i, j := range jobs {
+		switch {
+		case !j.Completing:
+		case j.ID == recorded:
+			return j, true
+		case first < 0:
+			first = i
 		}
 	}
-	return false
+	if first < 0 {
+		return provider.Job{}, false
+	}
+	return jobs[first], true
 }
 
-// mirrorDeletingCompleting writes status.atProvider.jobCompleting and the
-// JobCompleting condition from the deleting pass's reads, as the real provider
-// does: a job the delete cancelled shows COMPLETING while its epilog runs, and a
-// deletion that waits on it must say so (HBEP-4, Risks). The recorded job's flag
-// is mirrored when a read lists it and cleared when neither read does; nothing
-// is written when the stored status already says the same. It is, with the
-// absentSince anchor, the only status a deleting pass writes.
-func (c *Controller) mirrorDeletingCompleting(ctx context.Context, p *pass, s *allocState, jobs []provider.Job) error {
-	id := s.a.Annotations[v1alpha1.AnnotationJobID]
-	if id == "" {
-		return nil
-	}
-	job, listed := jobByID(jobs, id)
+// mirrorBlocker writes status.atProvider.jobCompleting and the JobCompleting
+// condition from the deleting pass's reads, as the real provider does: a job the
+// delete cancelled shows COMPLETING while its epilog runs, and a deletion that
+// waits on it must say so, naming the job when it is not the recorded one (HBEP-4,
+// Risks). The blocking job's flag is written, or, when the reads show none, the
+// flag is cleared: jobCompleting is false and a condition that was True turns
+// False. Nothing is written when the stored status already says the same. It
+// is, with the absentSince anchor, the only status a deleting pass writes.
+func (c *Controller) mirrorBlocker(ctx context.Context, p *pass, s *allocState, blocker provider.Job, blocked bool) error {
+	recorded := s.a.Annotations[v1alpha1.AnnotationJobID]
 	obs := s.prior.DeepCopy()
+	obs.JobCompleting = false
 	var conds []xpv2.Condition
 	switch cur := s.a.GetCondition(v1alpha1.ConditionJobCompleting); {
-	case listed && job.Completing:
+	case blocked:
 		obs.JobCompleting = true
 		conds = append(conds, xpv2.Condition{Type: v1alpha1.ConditionJobCompleting, Status: corev1.ConditionTrue, Reason: v1alpha1.ReasonJobCompleting,
-			LastTransitionTime: metav1.NewTime(p.now), Message: completingMessage(id, job)})
+			LastTransitionTime: metav1.NewTime(p.now), Message: blockerMessage(recorded, blocker)})
 	case cur.Status == corev1.ConditionTrue:
 		conds = append(conds, xpv2.Condition{Type: v1alpha1.ConditionJobCompleting, Status: corev1.ConditionFalse, Reason: v1alpha1.ReasonJobNotCompleting,
 			LastTransitionTime: metav1.NewTime(p.now)})

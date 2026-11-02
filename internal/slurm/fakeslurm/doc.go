@@ -185,10 +185,11 @@
 //     --jobs=<id>, and it is not purged, however long ago it ended. squeue
 //     reports pending, running and completing jobs by default, and the purge
 //     (_list_find_job_old, Slurm 24.11, src/slurmctld/job_mgr.c) returns for a
-//     completing job before it looks at its age. scancel gives "Job/step
-//     already completing or completed" and sends nothing more to the
-//     processes (job_signal returns ESLURM_ALREADY_DONE when
-//     IS_JOB_FINISHED, which ignores the COMPLETING flag); scontrol release
+//     completing job before it looks at its age. scancel prints nothing and
+//     exits 0, as for any ended job (since #207; Config.NoisyScancel prints
+//     "Job/step already completing or completed" and exits 1), and sends
+//     nothing more to the processes (job_signal returns ESLURM_ALREADY_DONE
+//     when IS_JOB_FINISHED, which ignores the COMPLETING flag); scontrol release
 //     gives "Job has already finished" (update_job, ESLURM_JOB_FINISHED).
 //     MinJobAge counts from the end (the job's end_time), not from when the
 //     processes were gone, as in Slurm: clearing COMPLETING leaves end_time
