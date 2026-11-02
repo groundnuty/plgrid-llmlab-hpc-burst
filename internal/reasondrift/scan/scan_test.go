@@ -207,8 +207,9 @@ func TestResolvesEachWayAReasonArrives(t *testing.T) {
 		}
 	}
 	for fn, why := range map[string]string{
-		"Controller.discarded": "not used",   // built and thrown away
-		"Controller.stored":    "*ssa.Store", // handed over through a slice
+		"Controller.discarded":      "not used",                // built and thrown away
+		"Controller.stored":         "*ssa.Store",              // handed over through a slice
+		"Controller.wrongParameter": "does not carry an event", // passed where no event goes
 	} {
 		e := emitOf(t, code, fn)
 		if e.Unproven == "" || !strings.Contains(e.Unproven, why) || len(e.Reasons) != 1 {
@@ -225,7 +226,7 @@ func TestResolvesEachWayAReasonArrives(t *testing.T) {
 	for _, p := range got {
 		funcs = append(funcs, p.Func)
 	}
-	if want := []string{"Controller.notBuilt", "Controller.stored"}; !slices.Equal(funcs, want) {
+	if want := []string{"Controller.notBuilt", "Controller.stored", "Controller.wrongParameter"}; !slices.Equal(funcs, want) {
 		t.Errorf("event-not-constructed problems in %v, want %v", funcs, want)
 	}
 	// The synthetic module has no other problem, and its wrappers are met,

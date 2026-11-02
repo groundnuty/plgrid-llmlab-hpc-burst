@@ -9,3 +9,7 @@ type ManagedEvent struct{ Type, Reason, Action, Note string }
 func NewManagedEvent(action, reason, note string) ManagedEvent {
 	return ManagedEvent{Type: "Normal", Reason: reason, Action: action, Note: note}
 }
+
+// GetName makes a ManagedEvent usable where a regarding object is wanted, so a
+// test can pass one at the wrong parameter.
+func (ManagedEvent) GetName() string { return "" }

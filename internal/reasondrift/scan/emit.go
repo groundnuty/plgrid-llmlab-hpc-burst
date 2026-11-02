@@ -307,7 +307,19 @@ func (s *scanner) reach(ci ssa.CallInstruction) ([]string, string) {
 		return nil, "the event is built and its value is not used"
 	}
 	kinds := map[string]bool{}
-	for _, r := range *refs {
+	// The value, and the conversions that only change its type (into an
+	// interface, say), are followed to the calls that use them.
+	queue := []ssa.Instruction{}
+	queue = append(queue, *refs...)
+	for len(queue) > 0 {
+		r := queue[0]
+		queue = queue[1:]
+		if conv, ok := r.(ssa.Value); ok && isConversion(r) {
+			if more := conv.Referrers(); more != nil {
+				queue = append(queue, *more...)
+			}
+			continue
+		}
 		rc, ok := r.(ssa.CallInstruction)
 		if !ok {
 			return nil, fmt.Sprintf("the event is used by %T, not passed to a recorder", r)
@@ -325,6 +337,15 @@ func (s *scanner) reach(ci ssa.CallInstruction) ([]string, string) {
 		}
 	}
 	return sorted(kinds), ""
+}
+
+// isConversion reports whether an instruction only changes the type of its operand.
+func isConversion(in ssa.Instruction) bool {
+	switch in.(type) {
+	case *ssa.MakeInterface, *ssa.ChangeInterface, *ssa.ChangeType, *ssa.Convert:
+		return true
+	}
+	return false
 }
 
 // receiver returns the regarding argument of the call if it receives the event

@@ -51,3 +51,9 @@ func (c *Controller) unreadReason(in *Instance, r string) {
 }
 
 func (c *Controller) callUnreadReason(in *Instance) { c.unreadReason(in, v1alpha1.ReasonB) }
+
+// wrongParameter passes the built event where the wrapper takes its regarding
+// object, not an event.
+func (c *Controller) wrongParameter(ev provider.ManagedEvent) {
+	c.record(provider.NewManagedEvent("degraded", v1alpha1.ReasonC, "n"), ev)
+}
