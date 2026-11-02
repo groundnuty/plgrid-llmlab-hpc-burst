@@ -1,4 +1,4 @@
-package reasondrift_test
+package guard_test
 
 import (
 	"os"
@@ -28,21 +28,19 @@ var strict = os.Getenv("REASONDRIFT_STRICT") == "1"
 // that no longer drifts, so the list can only shrink and the erratum's merge
 // forces its entries out. When the list is empty, delete it and the switch.
 //
-// The two code-only entries are for the HBEP: a deployment's event regards the
-// Instance once the ModelDeployment is gone (internal/lifecycle, mdObject), and
-// HBEP-8's table says ModelDeployment only. The erratum splits the lifecycle row
-// so that VerificationFailed and CapacityDropped regard the ModelDeployment,
-// else the Instance; the report on #239 has the wording the guard accepts.
+// Both entries are for the HBEP: a deployment's event regards the Instance once
+// the ModelDeployment is gone (internal/lifecycle, mdObject), and HBEP-8's table
+// says ModelDeployment only. The erratum splits the lifecycle row so that
+// VerificationFailed and CapacityDropped regard the ModelDeployment, else the
+// Instance; the report on #239 has the wording the guard accepts.
 //
-// The three no-constant entries are for the code: reasons written as string
-// literals at their call sites in internal/lifecycle. The contracts PR after
-// #239 adds their constants to api/v1alpha1, uses them there and removes these
-// entries. (Builders do not edit api/.) A reason an emit site takes from a
-// package-local constant needs no entry: the scan reaches it by reference.
+// A reason an emit site takes from a package-local constant needs no entry: the
+// scan reaches it by reference. A reason written as a string literal needs a
+// constant in api/v1alpha1; the three that were literals have theirs in this PR.
 var knownDriftUntilHBEP8Erratum = []reasondrift.Entry{
-	{Kind: reasondrift.NoConstant, Reason: "HandedOver", Why: "string literal at its call site in internal/lifecycle; the contracts PR after #239 adds the constant"},
-	{Kind: reasondrift.NoConstant, Reason: "NoReplacementReady", Why: "string literal at its call site in internal/lifecycle; the contracts PR after #239 adds the constant"},
-	{Kind: reasondrift.NoConstant, Reason: "Ready", Why: "string literal at its call site in internal/lifecycle; the contracts PR after #239 adds the constant"},
+	{Kind: reasondrift.NoConstant, Reason: "HandedOver", Why: "string literal at its call site in internal/lifecycle; the next commit names it"},
+	{Kind: reasondrift.NoConstant, Reason: "NoReplacementReady", Why: "string literal at its call site in internal/lifecycle; the next commit names it"},
+	{Kind: reasondrift.NoConstant, Reason: "Ready", Why: "string literal at its call site in internal/lifecycle; the next commit names it"},
 	{Kind: reasondrift.CodeOnly, Action: "degraded", Reason: "CapacityDropped", Regarding: "Instance", Package: "internal/lifecycle", Why: "mdObject falls back to the Instance when the ModelDeployment is gone; the table lists ModelDeployment only"},
 	{Kind: reasondrift.CodeOnly, Action: "degraded", Reason: "VerificationFailed", Regarding: "Instance", Package: "internal/lifecycle", Why: "mdObject falls back to the Instance when the ModelDeployment is gone; the table lists ModelDeployment only"},
 }
@@ -56,44 +54,51 @@ var requiredPackages = []string{
 
 func repoRoot(t *testing.T) string {
 	t.Helper()
-	dir, err := filepath.Abs("../..")
+	dir, err := filepath.Abs("../../..")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
-		t.Fatalf("the repository root is not two levels up: %v", err)
+		t.Fatalf("the repository root is not three levels up: %v", err)
 	}
 	return dir
 }
 
-func scanTree(t *testing.T, overlay map[string][]byte) *reasondrift.Code {
-	t.Helper()
-	code, err := scan.Scan(scan.Options{
-		Root: repoRoot(t), Overlay: overlay, Wrappers: reasondrift.WrapperNames(), Require: requiredPackages,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Each scan holds the whole module's syntax and types; give it back before
-	// the next one, so the test binary's peak is one scan's.
-	runtime.GC()
-	debug.FreeOSMemory()
-	return code
+// Each scan holds the whole module's syntax and types, so each runs once per
+// test binary, however many times the tests run (-count=N): the results are kept.
+type scanned struct {
+	once sync.Once
+	code *reasondrift.Code
+	err  error
 }
 
-// The scan of the unchanged tree takes seconds, so the tests share one.
+func (s *scanned) get(t *testing.T, overlay map[string][]byte) *reasondrift.Code {
+	t.Helper()
+	s.once.Do(func() {
+		s.code, s.err = scan.Scan(scan.Options{
+			Root: repoRoot(t), Overlay: overlay, Wrappers: reasondrift.WrapperNames(), Require: requiredPackages,
+		})
+		// Give the memory back before the next scan, so the test binary's peak
+		// is one scan's.
+		runtime.GC()
+		debug.FreeOSMemory()
+	})
+	return s.code
+}
+
 var (
-	realOnce sync.Once
-	realCode *reasondrift.Code
+	realScanned    scanned // the unchanged tree
+	overlayScanned scanned // the tree with the mutants of TestEmitsAddedByAnOverlayAreCaught
+	unknownScanned scanned // the tree with an emit through a recorder the scan does not know
 )
 
 func realScan(t *testing.T) *reasondrift.Code {
 	t.Helper()
-	realOnce.Do(func() { realCode = scanTree(t, nil) })
-	if realCode == nil {
-		t.Fatal("the scan of the tree failed in an earlier test")
+	code := realScanned.get(t, nil)
+	if realScanned.err != nil {
+		t.Fatal(realScanned.err)
 	}
-	return realCode
+	return code
 }
 
 func realDocs(t *testing.T) (md8, md7 []byte) {
@@ -362,7 +367,10 @@ func TestEmitsAddedByAnOverlayAreCaught(t *testing.T) {
 		filepath.Join(root, "internal/lifecycle/zz_mutant_overlay.go"): []byte(mutantEmits),
 		filepath.Join(root, "internal/front/router.go"):                frontRouterWithALiteral(t),
 	}
-	code := scanTree(t, overlay)
+	code := overlayScanned.get(t, overlay)
+	if overlayScanned.err != nil {
+		t.Fatal(overlayScanned.err)
+	}
 	md8, md7 := realDocs(t)
 
 	// A reason the front took from a named constant is fine, and the same
@@ -405,8 +413,8 @@ func TestEmitsAddedByAnOverlayAreCaught(t *testing.T) {
 func TestAnEmitThroughAnUnknownRecorderFails(t *testing.T) {
 	src := "package lifecycle\n\ntype mutantRecorder interface{ Event(string) }\n\nfunc mutantRelay(m mutantRecorder) { m.Event(\"X\") }\n"
 	overlay := map[string][]byte{filepath.Join(repoRoot(t), "internal/lifecycle/zz_mutant_overlay.go"): []byte(src)}
-	_, err := scan.Scan(scan.Options{Root: repoRoot(t), Overlay: overlay, Wrappers: reasondrift.WrapperNames(), Require: requiredPackages})
-	if err == nil || !strings.Contains(err.Error(), "mutantRelay") {
+	unknownScanned.get(t, overlay)
+	if err := unknownScanned.err; err == nil || !strings.Contains(err.Error(), "mutantRelay") {
 		t.Errorf("error %v, want one that names mutantRelay", err)
 	}
 }
