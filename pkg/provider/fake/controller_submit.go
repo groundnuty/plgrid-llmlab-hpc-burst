@@ -146,12 +146,17 @@ func errText(err error) string {
 // then a job that ran (it has a start time), then any. Within each class it is
 // the lowest job ID; jobs are sorted by ID, never taken in the order given. The
 // caller passes at least one job.
+//
+// A completing job is one that ran (#198's final rule), whatever its base
+// state: a requeued job, PENDING with the flag, has no end time and would rank
+// as live and unheld, so a lower ID would beat a job that is running. It is
+// never in the first class, and is in the second even with no start time.
 func pickAdopted(jobs []provider.Job) provider.Job {
 	sorted := append([]provider.Job(nil), jobs...)
 	byID(sorted)
 	for _, class := range []func(provider.Job) bool{
-		func(j provider.Job) bool { return live(j) && !j.Held() },
-		func(j provider.Job) bool { return j.StartTime != nil },
+		func(j provider.Job) bool { return live(j) && !j.Held() && !j.Completing },
+		func(j provider.Job) bool { return j.StartTime != nil || j.Completing },
 		func(provider.Job) bool { return true },
 	} {
 		for _, j := range sorted {

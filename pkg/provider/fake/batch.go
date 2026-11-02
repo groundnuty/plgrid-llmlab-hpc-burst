@@ -105,6 +105,17 @@ type Script struct {
 	// "NODE_FAIL"). Zero is a failed start.
 	FailAfter *time.Duration
 	FailState string
+	// Epilog, when above 0, makes a job that has started stay COMPLETING for
+	// that long after its end, whether it ended by its limit, by FailAfter or
+	// by a cancel: the processes are gone, the epilog still runs (HBEP-4,
+	// Phases, A completing job). Until end plus Epilog the record carries the
+	// COMPLETING flag beside the end state, its Source stays the queue
+	// listing past MinJobAge (Slurm's purge skips a completing job), its
+	// EndTime is set, and it counts neither against the submit limit nor
+	// against the GPU cap, since Slurm frees both when it sets the flag. A
+	// job that never started has no epilog. Zero is no epilog: the end state
+	// stands alone, as it did before this field.
+	Epilog time.Duration
 	// AdminHold makes the job land held by an administrator (JobHeldAdmin),
 	// whatever the request's Hold.
 	AdminHold bool
@@ -459,6 +470,8 @@ func (b *Batch) ReadAccounting(_ context.Context, jobID string) (provider.Job, b
 	}
 	r := b.record(j, b.clock.Now())
 	r.Source = provider.SourceAccounting
+	// Accounting never carries the flag, whatever the queue listing shows.
+	r.State, r.Completing, r.CompletingSince = r.State[:1], false, nil
 	r.Accounting = b.accountingOf(j, r, b.clock.Now())
 	return r, true, nil
 }

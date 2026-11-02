@@ -317,8 +317,24 @@ func (b *Batch) readAccounting(ctx context.Context, line string) ([]provider.Job
 // FindByTag implements provider.Batch: every job of the calling user whose
 // name is exactly tag, from the queue listing, and from accounting since
 // since for any job the listing does not show. Sorted by job ID.
+//
+// "Shows" is by job ID, whatever name the listing gives the job: the queue
+// listing is the evidence for a job it lists, so an accounting record of a job
+// the listing shows under another name is dropped, never merged. Otherwise the
+// two halves would disagree about one job: the listing's name differs, so the
+// tag lookup skips the row, and accounting, which says the tag and a terminal
+// state and never carries COMPLETING, would stand in for it and hide the flag
+// (Astra B1 on PR 217). The job is then absent here, and a caller that records
+// it reads it by ID, which reads the listing first (Observe).
 func (b *Batch) FindByTag(ctx context.Context, tag string, since time.Time) ([]provider.Job, error) {
-	listed, err := b.ListByTag(ctx, tag)
+	if err := CheckValue("tag", tag); err != nil {
+		return nil, fmt.Errorf("%w: %v", provider.ErrInvalidRequest, err)
+	}
+	l, err := b.queue(ctx)
+	if err != nil {
+		return nil, err
+	}
+	listed, err := b.queueJobs(l, func(r queueRecord) bool { return r.Name == tag })
 	if err != nil {
 		return nil, err
 	}
@@ -329,8 +345,8 @@ func (b *Batch) FindByTag(ctx context.Context, tag string, since time.Time) ([]p
 	}
 	out := append([]provider.Job(nil), listed...)
 	seen := map[string]bool{}
-	for _, j := range listed {
-		seen[j.ID] = true
+	for _, r := range l.records {
+		seen[fmt.Sprint(r.JobID)] = true
 	}
 	for _, j := range acct {
 		if j.Name == tag && !seen[j.ID] {

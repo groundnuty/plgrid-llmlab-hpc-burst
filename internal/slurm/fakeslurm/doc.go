@@ -83,8 +83,10 @@
 //
 // # Modelling choices the brief left open
 //
-//   - Only a running job's end hands its slot to a phantom job. Requeueing a
-//     running job ends that execution, so it frees its slot to a phantom too.
+//   - Only a running job's end hands its slot to a phantom job, once its node
+//     is free: at once, or, for a job that is completing, when its flag clears.
+//     Requeueing a running job ends that execution, so it frees its slot to a
+//     phantom too.
 //   - scancel and scontrol release on another user's job give "Access/
 //     permission denied", exit 1.
 //   - scancel of an ended or unknown job prints nothing and exits 0, as real
@@ -185,10 +187,11 @@
 //     --jobs=<id>, and it is not purged, however long ago it ended. squeue
 //     reports pending, running and completing jobs by default, and the purge
 //     (_list_find_job_old, Slurm 24.11, src/slurmctld/job_mgr.c) returns for a
-//     completing job before it looks at its age. scancel gives "Job/step
-//     already completing or completed" and sends nothing more to the
-//     processes (job_signal returns ESLURM_ALREADY_DONE when
-//     IS_JOB_FINISHED, which ignores the COMPLETING flag); scontrol release
+//     completing job before it looks at its age. scancel prints nothing and
+//     exits 0, as for any ended job (since #207; Config.NoisyScancel prints
+//     "Job/step already completing or completed" and exits 1), and sends
+//     nothing more to the processes (job_signal returns ESLURM_ALREADY_DONE
+//     when IS_JOB_FINISHED, which ignores the COMPLETING flag); scontrol release
 //     gives "Job has already finished" (update_job, ESLURM_JOB_FINISHED).
 //     MinJobAge counts from the end (the job's end_time), not from when the
 //     processes were gone, as in Slurm: clearing COMPLETING leaves end_time
@@ -199,6 +202,26 @@
 //     purges in periodic passes, the fake on the next query. A job whose
 //     processes cannot be cleared (Finished stays false) completes for ever
 //     and is never purged.
+//   - The flag outlasts the processes by RunMode.Epilog (default none), on the
+//     platform's clock, counted from the moment they were gone: Slurm's epilog
+//     and the nodes' reports run after the job's processes end, and
+//     COMPLETING stays until they are done. Job.Completing says so; Finished
+//     does not (it is true once the processes are gone). The job is listed
+//     with the flag in both NotListed modes, and not purged, until the epilog
+//     ends; after that the mode's rule applies, so the Athena shape (listed in
+//     its end state until MinJobAge, counted from the end) shows only for an
+//     epilog that ends before end + MinJobAge, and the Helios shape drops the
+//     job at once. Slurm sets the flag when it sets the end state, and frees
+//     the job's submit slot and its GPUs then: a completing job is neither
+//     pending nor running, so the submit limit and the GPU cap do not count
+//     it, and a pending job that was waiting on them starts while it
+//     completes. A partition's slots (Partition.Slots) still count it, because
+//     Slurm frees a node only once its epilog has completed and takes no
+//     COMPLETING node for a new job (make_node_comp and make_node_idle in
+//     src/slurmctld/node_mgr.c, Slurm 24.11.5, lines 4599-4646 and 4752-4845;
+//     _pick_best_nodes in src/slurmctld/node_scheduler.c, lines 1832-1846):
+//     the slot is the completing job's until its flag clears, and then goes to
+//     a phantom job, as any ended job's slot does.
 //   - Job carries the execution's PID, Finished, its exit code or signal, when
 //     TERM and KILL were sent, and CleanupErr. Finished is true once the
 //     execution is terminal and none of its processes is left (the shell is

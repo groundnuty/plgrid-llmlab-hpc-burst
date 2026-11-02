@@ -54,8 +54,17 @@ if [ -n "$id" ]; then
   sed -i "/^$id|/d" "$Q"
   echo "slurm_load_jobs error: Invalid job id specified" >&2; exit 1
 fi
+# A late registration, counted in reads of the listing after the test binary ran: STUB_HIDE_READS hides the
+# late job from the first reads (it is in the queue but not yet shown), and STUB_LATE_JOB is added to the
+# queue at read STUB_LATE_AFTER (a job that registers after the first snapshot).
+late=""
+if [ "$fmt" = '%i|%j|%P' ] && [ -e "$STUB_STATE/ran" ]; then
+  r=$(( $(cat "$STUB_STATE/late-reads" 2>/dev/null || echo 0) + 1 )); echo $r > "$STUB_STATE/late-reads"
+  [ -z "${STUB_LATE_JOB:-}" ] || [ "$r" -ne "${STUB_LATE_AFTER:-1}" ] || echo "$STUB_LATE_JOB" >> "$Q"
+  [ "$r" -gt "${STUB_HIDE_READS:-0}" ] || late=hb-late-bbbbbbbbbbbb
+fi
 case $fmt in
-  '%i|%j|%P') awk -F'|' '{print $1"|"$2"|"$4}' "$Q" ;;
+  '%i|%j|%P') awk -F'|' -v hide="$late" '$2 != hide || hide == "" {print $1"|"$2"|"$4}' "$Q" ;;
   '%q|%P') awk -F'|' '{print $3"|"$4}' "$Q" ;;
 esac
 `
@@ -69,6 +78,7 @@ printf '%s\n' "$*" >> "$STUB_STATE/sbatch-argv"
 case " $* " in
   *" --test-only "*)
     echo "sbatch test-only" >> "$STUB_STATE/events"
+    if [ -n "${STUB_TESTONLY_REJECT:-}" ]; then echo "sbatch: error: Batch job submission failed: Requested node configuration is not available (account SEEDACCT, seedhost01)" >&2; exit 1; fi
     echo "sbatch: Job 424242 to start at 2030-01-01T00:00:00 using 4 processors on nodes seedhost01 in partition p [account SEEDACCT] see https://seed.example/x?token=SEEDTOKEN" >&2
     exit 0 ;;
 esac
@@ -106,6 +116,7 @@ echo "COMPLETED|0:0"
 
 const stubScancel = `#!/bin/bash
 echo "$1" >> "$STUB_STATE/cancelled"
+[ -z "${STUB_SCANCEL_KEEP:-}" ] || exit 0
 sed -i "/^$1|/d" "$STUB_STATE/queue"
 `
 
@@ -133,6 +144,8 @@ run=""; prev=""
 for a in "$@"; do [ "$prev" = -test.run ] && run=$a; prev=$a; done
 t=${run#^}; t=${t%\$}
 echo "testbin $t" >> "$STUB_STATE/events"
+printf '%s\n' "$*" > "$STUB_STATE/testbin-argv-$t"
+touch "$STUB_STATE/ran"
 if [ -n "${STUB_BUILD_LOCK:-}" ]; then
   if flock -n "$STUB_BUILD_LOCK" true; then echo free >> "$STUB_STATE/testbin-lock"; else echo held >> "$STUB_STATE/testbin-lock"; fi
 fi
@@ -152,6 +165,7 @@ leave() {
   # Someone else's hb- job, new in the same partition during the run: not this run's to cancel.
   [ -z "${STUB_FOREIGN:-}" ] || echo "9002|hb-controller-xxxxxxxxxxxx|${STUB_JOB_QOS:-normal}|${STUB_JOB_PART:-plgrid}|RUNNING" >> "$STUB_STATE/queue"
 }
+notrun() { [ -z "${HPCBURST_CONF_OUT:-}" ] || echo "step 1: a job did not start within the bound" > "$HPCBURST_CONF_OUT/not-run.txt"; }
 case $mode in
   pass) echo "=== RUN   $t"; echo "--- PASS: $t (0.01s)"; echo PASS ;;
   skip) echo "--- SKIP: $t (0.00s)"; echo PASS ;;
@@ -161,5 +175,24 @@ case $mode in
   skip-sub) echo "=== RUN   $t"; echo "    --- SKIP: $t/part (0.00s)"; echo "--- PASS: $t (0.01s)"; echo PASS ;;
   fail-sub) echo "    --- FAIL: $t/SEEDKEY-424242 (0.00s)"; echo "--- FAIL: $t (0.01s)"; echo FAIL; exit 1 ;;
   sleep) leave; touch "$STUB_STATE/started"; exec sleep 3600 ;;
+  # The test stopped on its start-wait bound: it skips and leaves the marker in its record directory.
+  # A submission the test could not settle: its tag is written down, nothing is queued (or the late job is
+  # queued, hidden from the first reads), and in the unresolved mode the test says so in unresolved.txt.
+  late) echo "hb-late-bbbbbbbbbbbb" >> "$HPCBURST_CONF_OUT/job-tags.txt"; echo "9003|hb-late-bbbbbbbbbbbb|normal|plgrid|PENDING" >> "$STUB_STATE/queue"; echo "--- PASS: $t (0.01s)"; echo PASS ;;
+  # A test stopped before it finished writes nothing about what it could not settle; the tag is all there is.
+  timed-out) echo "hb-late-bbbbbbbbbbbb" >> "$HPCBURST_CONF_OUT/job-tags.txt"; exit 124 ;;
+  sleep-late) echo "hb-late-bbbbbbbbbbbb" >> "$HPCBURST_CONF_OUT/job-tags.txt"; touch "$STUB_STATE/started"; exec sleep 3600 ;;
+  late-fail) echo "hb-late-bbbbbbbbbbbb" >> "$HPCBURST_CONF_OUT/job-tags.txt"; echo "--- FAIL: $t (0.01s)"; echo FAIL; exit 1 ;;
+  unresolved-symlink) echo "hb-late-bbbbbbbbbbbb" >> "$HPCBURST_CONF_OUT/job-tags.txt"; ln -s "$HPCBURST_CONF_OUT/job-tags.txt" "$HPCBURST_CONF_OUT/unresolved.txt"; echo "--- PASS: $t (0.01s)"; echo PASS ;;
+  unresolved-junk) printf '%s\n' 'not a tag; touch /tmp/x' '../../etc/passwd' > "$HPCBURST_CONF_OUT/unresolved.txt"; echo "--- PASS: $t (0.01s)"; echo PASS ;;
+  late-tag) echo "hb-late-bbbbbbbbbbbb" >> "$HPCBURST_CONF_OUT/job-tags.txt"; echo "--- PASS: $t (0.01s)"; echo PASS ;;
+  late-unresolved) echo "hb-late-bbbbbbbbbbbb" >> "$HPCBURST_CONF_OUT/job-tags.txt"; echo "hb-late-bbbbbbbbbbbb" >> "$HPCBURST_CONF_OUT/unresolved.txt"; echo "--- PASS: $t (0.01s)"; echo PASS ;;
+  not-run) notrun; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  not-run-leave) leave; notrun; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  not-run-fail) notrun; echo "--- FAIL: $t (0.01s)"; echo FAIL; exit 1 ;;
+  not-run-link) echo "x" > "$HPCBURST_CONF_OUT/elsewhere.txt"; ln -s elsewhere.txt "$HPCBURST_CONF_OUT/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  not-run-rc) notrun; echo "--- SKIP: $t (0.00s)"; echo PASS; exit 1 ;;
+  not-run-subfail) notrun; echo "    --- FAIL: $t/part (0.00s)"; echo "--- SKIP: $t (0.00s)"; echo FAIL; exit 1 ;;
+  not-run-sub) notrun; echo "    --- SKIP: $t/part (0.00s)"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
 esac
 `

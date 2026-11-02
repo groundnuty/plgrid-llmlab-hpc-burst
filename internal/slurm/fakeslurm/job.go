@@ -48,6 +48,9 @@ type execution struct {
 	// run is the execution's process in run mode; nil before it starts and
 	// outside run mode.
 	run *jobRun
+	// heldCompleting is Platform.HoldCompleting: the execution is COMPLETING
+	// by a test's say-so, with no process behind it.
+	heldCompleting bool
 }
 
 // job is one submitted job, guarded by Platform.mu.
@@ -76,6 +79,15 @@ type job struct {
 	estimate *time.Time
 	// acctHidden hides every accounting record of the job from sacct.
 	acctHidden bool
+	// slotOwed is true from the moment a job that held a partition slot ends or
+	// is requeued until its node is free, which is when it stops completing; the
+	// slot is the job's until then, and then goes to a phantom job
+	// (Platform.settleSlots).
+	slotOwed bool
+	// listedName is the name squeue lists the job under when it is not the
+	// name the job was submitted with (Platform.RenameListed); "" for none.
+	// sacct keeps name.
+	listedName string
 	// env is the submitting login's environment, which sbatch exports to
 	// the job by default (run mode).
 	env map[string]string
@@ -91,18 +103,40 @@ func (j *job) cur() *execution { return j.execs[len(j.execs)-1] }
 // state is the latest execution's state.
 func (j *job) state() string { return j.cur().state }
 
+// listName is the name squeue shows for the job: the one it was submitted with,
+// unless RenameListed changed what the listing says.
+func (j *job) listName() string {
+	if j.listedName != "" {
+		return j.listedName
+	}
+	return j.name
+}
+
 // Completing is Slurm's flag for a job whose end state is set while some of
 // its processes still live: squeue lists the pair, ["CANCELLED",
 // "COMPLETING"] (state code CG), until they are gone.
 const Completing = "COMPLETING"
 
 // completing reports whether the job's current execution has its end state
-// while its processes still live (run mode): an execution that never had a
-// process, or whose processes are all gone, is not completing.
+// while its processes still live, or its epilog still runs (run mode,
+// RunMode.Epilog): an execution that never had a process, or whose processes
+// are gone and whose epilog has ended, is not completing. Slurm frees the
+// job's submit slot and its GPUs when it sets the flag, which is when the end
+// state is set, so a completing job is neither live nor running here: the
+// submit limit and the GPU cap do not count it. A partition's slots still do,
+// since a node is freed only when its epilog has completed (Platform.running).
 func (j *job) completing() bool {
 	e := j.cur()
-	return IsTerminal(e.state) && e.run != nil && !e.run.done
+	if e.heldCompleting && (IsTerminal(e.state) || j.requeuedPending()) {
+		return true
+	}
+	return IsTerminal(e.state) && e.run != nil && e.run.completing()
 }
+
+// requeuedPending reports whether the current execution is the PENDING one a
+// requeue opened: Slurm lists a job requeued while its nodes clean up as
+// ["PENDING", "COMPLETING"] (_set_requeued_job_pending_completing, job_mgr.c).
+func (j *job) requeuedPending() bool { return j.state() == Pending && j.restartCnt > 0 }
 
 // live reports whether the job is pending or running.
 func (j *job) live() bool { return j.state() == Pending || j.state() == Running }
@@ -238,6 +272,13 @@ type Job struct {
 	// "" when neither.
 	QOS string
 
+	// Completing is true while the current execution has its end state and
+	// still has processes, or its epilog (RunMode.Epilog) has not ended: the
+	// job squeue lists with the COMPLETING flag. Finished is not it: a job is
+	// Finished when its processes are gone, and completing until its epilog
+	// has ended too.
+	Completing bool
+
 	// Run mode only, for the current execution; zero otherwise.
 	//
 	// PID is the batch shell's PID, which is also its process group and
@@ -284,6 +325,7 @@ func (j *job) snapshot() Job {
 	if j.held {
 		s.HoldReason = e.reason
 	}
+	s.Completing = j.completing()
 	if r := e.run; r != nil {
 		s.PID, s.Finished, s.TermAt, s.KillAt = r.pid, r.done, r.termAt, r.killAt
 		s.StartErr, s.CleanupErr = r.startErr, r.cleanupErr
