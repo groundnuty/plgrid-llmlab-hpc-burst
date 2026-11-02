@@ -7,7 +7,8 @@
 #
 # Optional:
 #   HPCBURST_SSHD           sshd for the fake login node and the gateway (default /usr/sbin/sshd)
-#   REHEARSAL_RUN           a -test.run pattern (default every rehearsal test)
+#   REHEARSAL_RUN           a -test.run pattern (default '^TestRehearsal(Direct|SSH)$', issue #146's two;
+#                           '^TestRehearsalPart3$' runs issue #193's third part, about 8 minutes more)
 #   REHEARSAL_OUT           where the binaries go (default a new temporary directory)
 #   REHEARSAL_PREBUILT=1    run the binaries already in REHEARSAL_OUT instead of building them,
 #                           so the run can take a host's resource lock without a build inside it
@@ -105,7 +106,7 @@ cd internal/rehearsal/scenario
 HPCBURST_REHEARSAL=1 HPCBURST_REHEARSAL_BIN="$out" HPCBURST_REQUIRE_FRP=1 HPCBURST_REQUIRE_SSHD=1 \
 	systemd-run --user --scope --collect -q --unit="$unit" \
 	-p MemoryMax="${REHEARSAL_MEMORY_MAX:-4G}" -p MemorySwapMax=0 \
-	"$out/rehearsal.test" -test.v -test.timeout "${REHEARSAL_TIMEOUT:-30m}" -test.run "${REHEARSAL_RUN:-^TestRehearsal}" &
+	"$out/rehearsal.test" -test.v -test.timeout "${REHEARSAL_TIMEOUT:-30m}" -test.run "${REHEARSAL_RUN:-^TestRehearsal(Direct|SSH)\$}" &
 child=$!
 rc=0
 wait "$child" || rc=$?

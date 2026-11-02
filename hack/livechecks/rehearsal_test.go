@@ -54,7 +54,7 @@ if [ -n "${STUB_REHEARSAL_HOLD:-}" ]; then
   while :; do sleep 0.1; done
 fi
 echo "running the binaries in $REHEARSAL_OUT"
-HPCBURST_REHEARSAL=1 "$REHEARSAL_OUT/rehearsal.test" -test.v -test.timeout "${REHEARSAL_TIMEOUT:-30m}" -test.run "${REHEARSAL_RUN:-^TestRehearsal}"
+HPCBURST_REHEARSAL=1 "$REHEARSAL_OUT/rehearsal.test" -test.v -test.timeout "${REHEARSAL_TIMEOUT:-30m}" -test.run "${REHEARSAL_RUN:-^TestRehearsal(Direct|SSH)\$}"
 rc=$?
 if [ -n "${STUB_REHEARSAL_LEFT:-}" ]; then
   echo "rehearsal.sh: processes left in the scope after the test returned (exit $rc):" >&2
