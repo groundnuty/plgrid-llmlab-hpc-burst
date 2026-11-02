@@ -256,6 +256,10 @@ func TestFrontSettingsRefusesAFileOfTwoCertificates(t *testing.T) {
 // manager's stop (review of PR 132: N3; run_test.go stops during a
 // submission), and the supervisor's kill grace for the controller is longer
 // than the lifecycle manager's (launcher.TestControllerStopBudget; PR #159).
+// The sum is nominal: the release budgets bound the retries, not the first
+// requests, which run under the elector's release context (see providerGrace),
+// so against a slow API server a Provider manager's stop can pass 30 s
+// (review of PR #215: N1).
 func TestProviderGraceFitsTheStop(t *testing.T) {
 	const others = 8 * time.Second // the lifecycle controller, the caches and the health server
 	if stop := providerGrace + leaderlock.ReleaseBudget + leaderlock.AfterStartBudget; stop+others > lifecycle.ShutdownGrace {
