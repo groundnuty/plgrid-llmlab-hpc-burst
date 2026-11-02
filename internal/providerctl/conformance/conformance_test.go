@@ -27,6 +27,11 @@
 //	HPCBURST_CONF_QOS          optional: the Provider's qos, which the profile must list
 //	                           in its qos. Unset: no --qos. Helios plgrid-gpu-gh200 needs
 //	                           now: its normal qos will not start a job for weeks
+//	HPCBURST_CONF_START_WAIT   optional, 1m to 30m: a step whose job has not started this
+//	                           long after its acceptance stops the run. The run cancels
+//	                           its jobs by their tags and ends as NOT RUN (a skip and the
+//	                           marker not-run.txt in HPCBURST_CONF_OUT), not as a failure.
+//	                           Unset: each step waits up to 30 minutes and then fails
 //	HPCBURST_CONF_STAGING      a directory below the profile's stagingDir (for example
 //	                           $SCRATCH/<own dir>), not the root. Each run stages into
 //	                           a run-<12 hex> directory of its own below it, and removes
@@ -91,6 +96,8 @@ type private struct {
 	t   testing.TB
 	dir string
 	f   *os.File
+	// tags are the job tags written down so far, for the run's cancel by tag.
+	tags []string
 }
 
 func newPrivate(t testing.TB, dir string) *private {
@@ -123,6 +130,7 @@ func (p *private) tag(tag string) {
 	if _, err := fmt.Fprintln(f, tag); err != nil {
 		p.t.Fatalf("the job tag could not be recorded: %v", err)
 	}
+	p.tags = append(p.tags, tag)
 }
 
 // jobTagsFile is the file of this run's job tags in the private directory.
@@ -184,6 +192,13 @@ type world struct {
 	jobIDs  map[string]bool
 	digest  string
 	credDir string
+	// now and sleep are the clock of the start wait; nil is the wall clock. A
+	// test sets them to wait on a fake one.
+	now   func() time.Time
+	sleep func(time.Duration)
+	// poll replaces one reconcile and read of an Allocation in untilRuns, for a
+	// test with no controller.
+	poll func(name string) *v1alpha1.Allocation
 }
 
 const testNS = "conformance"
@@ -415,7 +430,7 @@ func TestConformance(t *testing.T) {
 	if len(tag) != v1alpha1.JobTagLength {
 		t.Fatalf("the tag has %d characters, want %d", len(tag), v1alpha1.JobTagLength)
 	}
-	a = w.until(name, "the job runs", 30*time.Minute, func(a *v1alpha1.Allocation) bool {
+	a = w.untilRuns("step 1", name, "the job runs", w.at(), false, func(a *v1alpha1.Allocation) bool {
 		return a.Status.AtProvider.Phase == v1alpha1.AllocationRunning
 	})
 	words := w.callWords()
@@ -515,9 +530,10 @@ func TestConformance(t *testing.T) {
 	if err != nil || outcome != provider.Accepted {
 		t.Fatalf("direct held submit: %s %v", outcome, err)
 	}
+	accepted2 := w.at()
 	w.jobIDs[id2] = true
 	w.p.log("lost-record job %s submitted held", id2)
-	b = w.until(lostName, "the lost-record job is adopted and runs", 30*time.Minute, func(a *v1alpha1.Allocation) bool {
+	b = w.untilRuns("step 3", lostName, "the lost-record job is adopted and runs", accepted2, true, func(a *v1alpha1.Allocation) bool {
 		return a.Annotations[v1alpha1.AnnotationJobID] == id2 && a.Status.AtProvider.Phase == v1alpha1.AllocationRunning
 	})
 	words = w.callWords()

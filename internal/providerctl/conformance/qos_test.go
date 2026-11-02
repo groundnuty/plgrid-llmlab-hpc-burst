@@ -86,9 +86,9 @@ func TestReadSettingsRefusesAQOSTheProfileDoesNotList(t *testing.T) {
 
 // shapeRow is one row of the script's cluster table: name | host | profile |
 // partition | qos | slot | account key | GPUs | CPUs | memory | time limit |
-// timeout (min) | extra.
+// timeout (min) | extra | start wait (min). The last column is optional.
 type shapeRow struct {
-	name, host, profile, partition, qos, slot, acctKey, gpus, cpus, memory, timeLimit, timeout, extra string
+	name, host, profile, partition, qos, slot, acctKey, gpus, cpus, memory, timeLimit, timeout, extra, startWait string
 }
 
 func readShapeRows(t *testing.T) []shapeRow {
@@ -107,10 +107,13 @@ func readShapeRows(t *testing.T) []shapeRow {
 			in = false
 		case in && line != "" && !strings.HasPrefix(line, "#"):
 			f := strings.Split(line, "|")
-			if len(f) != 13 {
-				t.Fatalf("a cluster row has %d fields, want 13: %q", len(f), line)
+			if len(f) != 13 && len(f) != 14 {
+				t.Fatalf("a cluster row has %d fields, want 13 or 14: %q", len(f), line)
 			}
-			rows = append(rows, shapeRow{f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11], f[12]})
+			if len(f) == 13 {
+				f = append(f, "-")
+			}
+			rows = append(rows, shapeRow{f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11], f[12], f[13]})
 		}
 	}
 	if len(rows) == 0 {
@@ -130,6 +133,9 @@ func (r shapeRow) env(creds string) map[string]string {
 	}
 	if r.qos != "-" {
 		m["HPCBURST_CONF_QOS"] = r.qos
+	}
+	if r.startWait != "-" {
+		m["HPCBURST_CONF_START_WAIT"] = r.startWait + "m"
 	}
 	return m
 }
@@ -247,8 +253,8 @@ func TestGH200RowIsCheckedUnderQOSNow(t *testing.T) {
 		t.Fatal("hack/live-checks.sh has no conformance-helios-gh200 row")
 	}
 	if row.host != "helios" || row.profile != "helios" || row.partition != "plgrid-gpu-gh200" || row.qos != "now" || row.slot != "now" ||
-		row.acctKey != "ACCOUNT_HELIOS_GH200" || row.gpus != "1" {
-		t.Errorf("row = %+v, want Helios, profile helios, plgrid-gpu-gh200, qos now, slot now, ACCOUNT_HELIOS_GH200, 1 GPU", *row)
+		row.acctKey != "ACCOUNT_HELIOS_GH200" || row.gpus != "1" || row.startWait != "10" {
+		t.Errorf("row = %+v, want Helios, profile helios, plgrid-gpu-gh200, qos now, slot now, ACCOUNT_HELIOS_GH200, 1 GPU, a start wait of 10 min", *row)
 	}
 	s, v := row.validated(t)
 	good := row.request(t, s)
@@ -318,5 +324,37 @@ func TestNoDirectSubmitIsBuiltWithoutTheQOS(t *testing.T) {
 	}
 	if literals < 2 {
 		t.Errorf("found %d provider.SubmitRequest literals, want at least heldRequest's and the fake test's: the scan is not looking at the code", literals)
+	}
+}
+
+// The row's start wait (the science agent's ruling, 2 Nov 2026: each step's job
+// must start within 10 minutes of its acceptance) reaches the run as
+// HPCBURST_CONF_START_WAIT, and the row's timeout is not below what the test
+// can take with it: two start waits and the test's other deadlines on jobs that
+// already run (5 min to delete, 3 for accounting, 8 for the second job, 3 for
+// accounting, 3 for the name round trip).
+func TestTheGH200RowsStartWaitReachesTheRunAndItsTimeoutCoversTheTest(t *testing.T) {
+	const otherDeadlines = 5 + 3 + 8 + 3 + 3
+	for _, r := range readShapeRows(t) {
+		if r.profile == "-" || r.startWait == "-" {
+			continue
+		}
+		t.Run(r.name, func(t *testing.T) {
+			n, err := strconv.Atoi(r.startWait)
+			if err != nil || n < 1 || n > 30 {
+				t.Fatalf("start wait %q is not whole minutes from 1 to 30", r.startWait)
+			}
+			s, _ := r.validated(t)
+			if s.startWait != time.Duration(n)*time.Minute {
+				t.Errorf("the run's startWait = %v, the row says %d min", s.startWait, n)
+			}
+			timeout, err := strconv.Atoi(r.timeout)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := 2*n + otherDeadlines; timeout < want {
+				t.Errorf("timeout %d min is below the test's own deadlines with this start wait, %d min", timeout, want)
+			}
+		})
 	}
 }

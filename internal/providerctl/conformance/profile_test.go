@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/yaml"
@@ -39,6 +40,10 @@ type settings struct {
 	// qos is the Provider's qos (HPCBURST_CONF_QOS), or "" for none: the Provider
 	// sends no --qos, and every request the run submits agrees (heldRequest).
 	qos string
+	// startWait, when it is above zero, bounds each step's wait for its job to
+	// start (HPCBURST_CONF_START_WAIT, startwait_test.go). Zero: the steps'
+	// own deadlines of 30 minutes.
+	startWait time.Duration
 	// runStaging is this run's own staging directory, below staging
 	// (newRunStaging); the profile's stagingDir is it, and it is removed when the
 	// run ends.
@@ -95,8 +100,9 @@ func loadProfile(dir, name, partition, staging string) (*v1alpha1.PlatformProfil
 
 // readSettings reads the run's settings from env, a lookup that returns "" for
 // an unset name. Every missing or malformed setting is reported at once.
-// HPCBURST_CONF_QOS is the one optional setting; when it is set, the profile
-// must list it in its qos (the Provider's own check, run here before any call).
+// HPCBURST_CONF_QOS and HPCBURST_CONF_START_WAIT are the optional settings; a
+// qos must be one the profile lists in its qos (the Provider's own check, run
+// here before any call).
 func readSettings(env func(string) string) (settings, error) {
 	var problems []string
 	get := func(k string) string {
@@ -134,6 +140,13 @@ func readSettings(env func(string) string) (settings, error) {
 		if env(k) != "" {
 			problems = append(problems, k+" is not read any more: the profile holds it; unset it")
 		}
+	}
+	if v := env("HPCBURST_CONF_START_WAIT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < time.Minute || d > maxStartWait {
+			problems = append(problems, "HPCBURST_CONF_START_WAIT is not a duration from 1m to "+maxStartWait.String()+", for example 10m")
+		}
+		s.startWait = d
 	}
 	profile := get("HPCBURST_CONF_PROFILE")
 	if len(problems) > 0 {

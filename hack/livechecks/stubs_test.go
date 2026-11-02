@@ -152,6 +152,7 @@ leave() {
   # Someone else's hb- job, new in the same partition during the run: not this run's to cancel.
   [ -z "${STUB_FOREIGN:-}" ] || echo "9002|hb-controller-xxxxxxxxxxxx|${STUB_JOB_QOS:-normal}|${STUB_JOB_PART:-plgrid}|RUNNING" >> "$STUB_STATE/queue"
 }
+notrun() { [ -z "${HPCBURST_CONF_OUT:-}" ] || echo "step 1: a job did not start within the bound" > "$HPCBURST_CONF_OUT/not-run.txt"; }
 case $mode in
   pass) echo "=== RUN   $t"; echo "--- PASS: $t (0.01s)"; echo PASS ;;
   skip) echo "--- SKIP: $t (0.00s)"; echo PASS ;;
@@ -161,5 +162,10 @@ case $mode in
   skip-sub) echo "=== RUN   $t"; echo "    --- SKIP: $t/part (0.00s)"; echo "--- PASS: $t (0.01s)"; echo PASS ;;
   fail-sub) echo "    --- FAIL: $t/SEEDKEY-424242 (0.00s)"; echo "--- FAIL: $t (0.01s)"; echo FAIL; exit 1 ;;
   sleep) leave; touch "$STUB_STATE/started"; exec sleep 3600 ;;
+  # The test stopped on its start-wait bound: it skips and leaves the marker in its record directory.
+  not-run) notrun; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  not-run-leave) leave; notrun; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  not-run-fail) notrun; echo "--- FAIL: $t (0.01s)"; echo FAIL; exit 1 ;;
+  not-run-sub) notrun; echo "    --- SKIP: $t/part (0.00s)"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
 esac
 `
