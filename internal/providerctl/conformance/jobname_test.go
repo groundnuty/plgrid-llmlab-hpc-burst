@@ -181,7 +181,7 @@ func (w *world) jobNameRoundTrip() {
 	}
 	a := w.newAlloc("conformance-job-name-round-trip-of-56-chars") // 43 characters, cut to 40 in the tag
 	tag := v1alpha1.JobTag(a.Namespace, a.Name, a.UID)
-	req := provider.SubmitRequest{Tag: tag, Hold: true, Account: w.s.account, Params: *a.Spec.ForProvider.Batch}
+	req := heldRequest(w.s, tag, *a.Spec.ForProvider.Batch)
 	id, got, err := roundTripJobName(context.Background(), w.batch, req, 36, func() { time.Sleep(5 * time.Second) })
 	if id != "" {
 		w.jobIDs[id] = true

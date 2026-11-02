@@ -24,6 +24,14 @@
 //	HPCBURST_CONF_GPUS         GPUs per job (0 for a CPU partition)
 //	HPCBURST_CONF_CPUS         cpusPerTask
 //	HPCBURST_CONF_MEMORY       memory, a Kubernetes quantity
+//	HPCBURST_CONF_QOS          optional: the Provider's qos, which the profile must list
+//	                           in its qos. Unset: no --qos. Helios plgrid-gpu-gh200 needs
+//	                           now: its normal qos will not start a job for weeks
+//	HPCBURST_CONF_START_WAIT   optional, 1m to 30m: a step whose job has not started this
+//	                           long after its acceptance stops the run. The run cancels
+//	                           its jobs by their tags and ends as NOT RUN (a skip and the
+//	                           marker not-run.txt in HPCBURST_CONF_OUT), not as a failure.
+//	                           Unset: each step waits up to 30 minutes and then fails
 //	HPCBURST_CONF_STAGING      a directory below the profile's stagingDir (for example
 //	                           $SCRATCH/<own dir>), not the root. Each run stages into
 //	                           a run-<12 hex> directory of its own below it, and removes
@@ -88,6 +96,10 @@ type private struct {
 	t   testing.TB
 	dir string
 	f   *os.File
+	// tags are the job tags written down so far, for the run's cancel by tag.
+	tags []string
+	// unresolved are the tags written to unresolved.txt so far.
+	unresolved map[string]bool
 }
 
 func newPrivate(t testing.TB, dir string) *private {
@@ -120,10 +132,39 @@ func (p *private) tag(tag string) {
 	if _, err := fmt.Fprintln(f, tag); err != nil {
 		p.t.Fatalf("the job tag could not be recorded: %v", err)
 	}
+	p.tags = append(p.tags, tag)
 }
 
 // jobTagsFile is the file of this run's job tags in the private directory.
 const jobTagsFile = "job-tags.txt"
+
+// unresolvedFile lists, one tag per line (mode 600), the submissions whose
+// outcome the run could not settle: an ambiguous sbatch, whose job may still
+// register. hack/live-checks.sh waits longer for them in its cleanup, and still
+// cancels by tag whatever registers.
+const unresolvedFile = "unresolved.txt"
+
+// unresolve writes the tag of a submission the run could not settle to
+// unresolved.txt, once.
+func (p *private) unresolve(tag string) {
+	if p.unresolved[tag] {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(p.dir, unresolvedFile), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		p.t.Errorf("the unresolved tag could not be recorded: %v", err)
+		return
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintln(f, tag); err != nil {
+		p.t.Errorf("the unresolved tag could not be recorded: %v", err)
+		return
+	}
+	if p.unresolved == nil {
+		p.unresolved = map[string]bool{}
+	}
+	p.unresolved[tag] = true
+}
 
 func (p *private) save(name string, b []byte) {
 	_ = os.WriteFile(filepath.Join(p.dir, name), b, 0o600)
@@ -181,13 +222,48 @@ type world struct {
 	jobIDs  map[string]bool
 	digest  string
 	credDir string
+	// now and sleep are the clock of the start wait; nil is the wall clock. A
+	// test sets them to wait on a fake one.
+	now   func() time.Time
+	sleep func(time.Duration)
+	// poll replaces one reconcile and read of an Allocation in untilRuns, for a
+	// test with no controller.
+	poll func(name string) *v1alpha1.Allocation
+	// nudge replaces one reconcile pass (the controller's), for a test with no
+	// controller.
+	nudge func(name string)
+	// began is when the run began, the lower bound of its accounting reads.
+	began time.Time
 }
 
 const testNS = "conformance"
 
+// allocTimeLimit is every Allocation's time limit, and the hard end the run
+// asserts. hack/live-checks.sh carries it in each conformance row's time limit
+// (TestConformanceRowsPassTheRequestCheck compares the two).
+const allocTimeLimit = "5m"
+
+// conformanceProvider is the Provider of the run: it names the shipped profile
+// and allows the one partition under test, under the account and the qos of the
+// settings. newWorld creates it, so a test of it tests the run's own Provider.
+func conformanceProvider(s settings) *v1alpha1.Provider {
+	return &v1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "conformance"}, Spec: v1alpha1.ProviderSpec{
+		PlatformProfileRef: v1alpha1.ObjectReference{Name: s.profile.Name}, Account: s.account, AllowedPartitions: []string{s.partition},
+		QOS: s.qos, CredentialsRef: &v1alpha1.CredentialsReference{File: s.creds},
+	}}
+}
+
+// heldRequest is a held submission of the run, built where the Provider's
+// settings are known: the plugin refuses a request whose qos is not the
+// Provider's (slurm.CheckRequest), so every direct submit of the run is made
+// here and none writes the literal.
+func heldRequest(s settings, tag string, params v1alpha1.BatchParameters) provider.SubmitRequest {
+	return provider.SubmitRequest{Tag: tag, Hold: true, Account: s.account, QOS: s.qos, Params: params}
+}
+
 func newWorld(t *testing.T) *world {
 	s := load(t)
-	w := &world{t: t, s: s, p: newPrivate(t, s.out), jobIDs: map[string]bool{}}
+	w := &world{t: t, s: s, p: newPrivate(t, s.out), jobIDs: map[string]bool{}, began: time.Now()}
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -199,10 +275,7 @@ func newWorld(t *testing.T) *world {
 	// The profile is the shipped file as read; the Provider names it and allows
 	// the one partition under test.
 	pp := s.profile
-	prov := &v1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "conformance"}, Spec: v1alpha1.ProviderSpec{
-		PlatformProfileRef: v1alpha1.ObjectReference{Name: pp.Name}, Account: s.account, AllowedPartitions: []string{s.partition},
-		CredentialsRef: &v1alpha1.CredentialsReference{File: s.creds},
-	}}
+	prov := conformanceProvider(s)
 	w.c = clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(pp, prov).
 		WithStatusSubresource(&v1alpha1.Allocation{}, &v1alpha1.Provider{}).Build()
 
@@ -292,7 +365,7 @@ func (w *world) newAlloc(name string) *v1alpha1.Allocation {
 			ProviderConfigReference: &xpv2.ProviderConfigReference{Kind: v1alpha1.ProviderConfigKind, Name: "conformance"},
 			ManagementPolicies:      v1alpha1.DefaultManagementPolicies(),
 			ForProvider: v1alpha1.AllocationParameters{Batch: &v1alpha1.BatchParameters{
-				Partition: w.s.partition, TimeLimit: "5m", GPUs: w.s.gpus, CPUsPerTask: w.s.cpus, Memory: w.s.memory, Nodes: 1, AgentDigest: w.digest,
+				Partition: w.s.partition, TimeLimit: allocTimeLimit, GPUs: w.s.gpus, CPUsPerTask: w.s.cpus, Memory: w.s.memory, Nodes: 1, AgentDigest: w.digest,
 			}},
 		},
 	}
@@ -320,6 +393,10 @@ func (w *world) get(name string) *v1alpha1.Allocation {
 }
 
 func (w *world) reconcile(name string) {
+	if w.nudge != nil {
+		w.nudge(name)
+		return
+	}
 	_, err := w.ctl.Reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Namespace: testNS, Name: name}})
 	if err != nil {
 		w.p.log("reconcile %s: %v", name, err)
@@ -329,6 +406,9 @@ func (w *world) reconcile(name string) {
 			w.jobIDs[id] = true
 		}
 		w.p.log("%s phase %s reason %q job %s", name, a.Status.AtProvider.Phase, a.Status.AtProvider.Reason, a.Annotations[v1alpha1.AnnotationJobID])
+		if a.Status.AtProvider.Phase == v1alpha1.AllocationSubmissionUnknown {
+			w.p.unresolve(v1alpha1.JobTag(a.Namespace, a.Name, a.UID))
+		}
 	}
 }
 
@@ -377,7 +457,7 @@ func count(words []string, w string) int {
 
 // TestConformance is the run on one platform.
 //
-//livecheck:conformance-helios,conformance-athena
+//livecheck:conformance-helios,conformance-helios-gh200,conformance-athena
 func TestConformance(t *testing.T) {
 	w := newWorld(t)
 	ctx := context.Background()
@@ -392,7 +472,7 @@ func TestConformance(t *testing.T) {
 	if len(tag) != v1alpha1.JobTagLength {
 		t.Fatalf("the tag has %d characters, want %d", len(tag), v1alpha1.JobTagLength)
 	}
-	a = w.until(name, "the job runs", 30*time.Minute, func(a *v1alpha1.Allocation) bool {
+	a = w.untilRuns("step 1", name, "the job runs", w.at(), false, func(a *v1alpha1.Allocation) bool {
 		return a.Status.AtProvider.Phase == v1alpha1.AllocationRunning
 	})
 	words := w.callWords()
@@ -488,13 +568,17 @@ func TestConformance(t *testing.T) {
 	if err := w.batch.EnsureFile(ctx, provider.File{Path: agentapi.StagedCredentialPath(lostTag), SHA256: hex.EncodeToString(csum[:]), Mode: 0o600, Content: cred}); err != nil {
 		t.Fatal(err)
 	}
-	id2, outcome, err := w.batch.Submit(ctx, provider.SubmitRequest{Tag: lostTag, Hold: true, Account: w.s.account, Params: *b.Spec.ForProvider.Batch})
+	id2, outcome, err := w.batch.Submit(ctx, heldRequest(w.s, lostTag, *b.Spec.ForProvider.Batch))
 	if err != nil || outcome != provider.Accepted {
+		if outcome == provider.Unknown {
+			w.p.unresolve(lostTag) // the job may still register: the cleanup waits for it, and cancels it by its tag
+		}
 		t.Fatalf("direct held submit: %s %v", outcome, err)
 	}
+	accepted2 := w.at()
 	w.jobIDs[id2] = true
 	w.p.log("lost-record job %s submitted held", id2)
-	b = w.until(lostName, "the lost-record job is adopted and runs", 30*time.Minute, func(a *v1alpha1.Allocation) bool {
+	b = w.untilRuns("step 3", lostName, "the lost-record job is adopted and runs", accepted2, true, func(a *v1alpha1.Allocation) bool {
 		return a.Annotations[v1alpha1.AnnotationJobID] == id2 && a.Status.AtProvider.Phase == v1alpha1.AllocationRunning
 	})
 	words = w.callWords()
@@ -515,6 +599,10 @@ func TestConformance(t *testing.T) {
 	// squeue and from sacct (jobname_test.go). After the counts above, since it
 	// adds one sbatch and one scancel of its own.
 	w.jobNameRoundTrip()
+
+	// No late duplicate is left: the controller cancels a held job it finds
+	// beside the recorded one (HBEP-4), and the run asserts that it did.
+	w.settleDuplicates([]string{lostName}, duplicateWait)
 
 	if w.ssh.Starts() != 1 {
 		t.Errorf("%d ssh masters were started; want 1 for the whole run", w.ssh.Starts())
