@@ -57,6 +57,8 @@
 #   LIVE_DIALHOME_MODE           direct or ssh: how the jobs reach the host (HBEP-6)
 #   LIVE_DIALHOME_ADDR           host:port of the dial-home route, as the compute nodes see it
 #   LIVE_DIALHOME_KEY            ssh mode only: the restricted dial-home key file, mode 600
+#   LIVE_DIALHOME_LISTEN         direct mode: host:port of the front's dial-home listener on this host, where the
+#                                owner's route arrives; a direct run without it fails at its first step, naming it
 #   LIVE_BIN_DIR                 absolute path of the directory with k3s-1.36.5/ and the pinned frp
 #   LIVE_TUNNEL_LEASE_MINUTES    optional, the tunnel rows' lease in minutes, 106 to 240 (default 137, the shape below): the owner's
 #                                choice when giving the go; the shape, the hold note and the test follow it
@@ -372,7 +374,7 @@ load_settings() {
     [ "$k" != "$line" ] || continue
     v=${v%\"}; v=${v#\"}; v=${v%\'}; v=${v#\'}
     case $k in
-      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_BIN_DIR|LIVE_OWNER_GO_HELIOS_NOW|LIVE_TUNNEL_LEASE_MINUTES|LIVE_PROBE_HOST|LIVE_PROBE_PORT|LIVE_PROBE_LABEL)
+      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_DIALHOME_LISTEN|LIVE_BIN_DIR|LIVE_OWNER_GO_HELIOS_NOW|LIVE_TUNNEL_LEASE_MINUTES|LIVE_PROBE_HOST|LIVE_PROBE_PORT|LIVE_PROBE_LABEL)
         S[$k]=$v ;;
     esac
   done 2>/dev/null < "$HPCBURST_LIVE_SETTINGS"
@@ -844,8 +846,9 @@ env_alpha() {
   case $n in
     tunnel-hour-*) local lh lm; IFS=: read -r lh lm _ <<<"${TLIMIT[$n]}"; export HPCBURST_ALPHA_LEASE_MINUTES=$((10#$lh * 60 + 10#$lm)) ;;
   esac
-  unset HPCBURST_ALPHA_QOS HPCBURST_ALPHA_DIALHOME_KEY
+  unset HPCBURST_ALPHA_QOS HPCBURST_ALPHA_DIALHOME_KEY HPCBURST_ALPHA_DIALHOME_LISTEN
   [ "${QOS[$n]}" = - ] || export HPCBURST_ALPHA_QOS=${QOS[$n]}
+  [ -z "${S[LIVE_DIALHOME_LISTEN]:-}" ] || export HPCBURST_ALPHA_DIALHOME_LISTEN=${S[LIVE_DIALHOME_LISTEN]}
   [ "${S[LIVE_DIALHOME_MODE]}" != ssh ] || export HPCBURST_ALPHA_DIALHOME_KEY=${S[LIVE_DIALHOME_KEY]}
 }
 

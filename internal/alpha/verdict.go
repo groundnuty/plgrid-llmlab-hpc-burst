@@ -79,21 +79,22 @@ func streamChecks(streams []Stream, drainStart time.Time) []string {
 // README.md:614).
 func deploymentChecks(row Row, d DeploymentSpec) []string {
 	var f []string
+	tm := row.Clock()
 	if len(d.Providers) != 1 {
 		f = append(f, "the deployment does not allow exactly one Provider")
 	} else if d.Providers[0].Cluster != row.Cluster {
 		f = append(f, "the deployment's Provider is not on the row's cluster")
 	}
 	switch {
-	case d.LeaseLimit <= Lead():
+	case d.LeaseLimit <= tm.Lead():
 		f = append(f, "the deployment's leaseLimit is not longer than the lead an Instance needs (PartitionTooShort)")
 	case d.LeaseLimit != row.Lease:
 		f = append(f, "the deployment's leaseLimit is not the row's shortest lease")
 	}
-	if d.MaxRequestDuration != MaxRequestDuration {
+	if d.MaxRequestDuration != tm.MaxRequestDuration {
 		f = append(f, "the deployment's routing.maxRequestDuration is not the row's")
 	}
-	if want := row.Plan(); want.ReleaseWhenIdle && (!d.ReleaseWhenIdle || d.IdleLimit <= 0 || d.IdleLimit > 10*time.Minute) {
+	if want := row.Plan(); want.ReleaseWhenIdle && (!d.ReleaseWhenIdle || d.IdleLimit <= 0 || d.IdleLimit > tm.MaxIdleLimit) {
 		f = append(f, "the no-overlap deployment lacks ReleaseWhenIdle with a short idleLimit")
 	}
 	return f
@@ -326,12 +327,13 @@ func SuccessorQueueWait(pre, suc provider.Job) (d time.Duration, ok bool) {
 // pass: the session check is what fails it.
 func VerifyTunnelHour(row Row, o TunnelHourObs, jobs []provider.Job) []string {
 	f := deploymentChecks(row, o.Deployment)
+	tm := row.Clock()
 	if o.DrainStart.IsZero() {
 		f = append(f, "the Instance's drain start was not observed, so the hour cannot be placed before it")
 	}
-	f = append(f, requestChecks(o.Requests, o.DrainStart)...)
-	f = append(f, sessionChecks(o.Requests, o.Samples)...)
-	f = append(f, trafficChecks(o.Requests)...)
+	f = append(f, requestChecks(o.Requests, o.DrainStart, tm)...)
+	f = append(f, sessionChecks(o.Requests, o.Samples, tm)...)
+	f = append(f, trafficChecks(o.Requests, tm)...)
 	r := o.Rate
 	switch {
 	case !r.OK:
@@ -354,7 +356,7 @@ func VerifyTunnelHour(row Row, o TunnelHourObs, jobs []provider.Job) []string {
 		case !ok:
 		case j.StartTime == nil || j.EndTime == nil:
 			f = append(f, "the cluster's record lacks the job's start or end time, so it cannot show the hour")
-		case j.EndTime.Sub(*j.StartTime) < Hour:
+		case j.EndTime.Sub(*j.StartTime) < tm.Hour:
 			f = append(f, "the cluster's record shows the job ran under an hour")
 		}
 	}
@@ -379,7 +381,7 @@ func span(reqs []Stream) (first, last time.Time) {
 }
 
 // requestChecks judges each request, and that together they cover the hour and end before the drain start.
-func requestChecks(reqs []Stream, drainStart time.Time) []string {
+func requestChecks(reqs []Stream, drainStart time.Time, tm Timing) []string {
 	if len(reqs) == 0 {
 		return []string{"no request was made during the hour"}
 	}
@@ -392,13 +394,13 @@ func requestChecks(reqs []Stream, drainStart time.Time) []string {
 			f = append(f, "a stream was cut during the hour")
 		case !s.Complete:
 			f = append(f, "a stream did not complete")
-		case s.Ended.Sub(s.Opened) > MaxRequestDuration:
+		case s.Ended.Sub(s.Opened) > tm.MaxRequestDuration:
 			// The front would have cut it: an observation of one means the deadline was not the deployment's.
 			f = append(f, "a request outlasted the deployment's request deadline")
 		}
 	}
 	first, last := span(reqs)
-	if last.Sub(first) < Hour {
+	if last.Sub(first) < tm.Hour {
 		f = append(f, "the requests lasted less than an hour")
 	}
 	if !drainStart.IsZero() && last.After(drainStart) {
@@ -412,7 +414,7 @@ func requestChecks(reqs []Stream, drainStart time.Time) []string {
 // last), come no more than MaxSampleGap apart, all show the Instance's
 // TunnelConnected True, and all carry the same frps lastStartTime for its proxy:
 // a different one is a login of frpc in between, which the requests alone cannot show.
-func sessionChecks(reqs []Stream, samples []TunnelSample) []string {
+func sessionChecks(reqs []Stream, samples []TunnelSample, tm Timing) []string {
 	if len(samples) < 2 {
 		return []string{"the tunnel session was looked at fewer than twice, so one session for the hour is not shown"}
 	}
@@ -438,7 +440,7 @@ func sessionChecks(reqs []Stream, samples []TunnelSample) []string {
 		if !s.Connected {
 			f = append(f, "TunnelConnected was not True throughout the hour")
 		}
-		if i > 0 && s.At.Sub(ss[i-1].At) > MaxSampleGap {
+		if i > 0 && s.At.Sub(ss[i-1].At) > tm.MaxSampleGap {
 			f = append(f, "the tunnel session went more than 2 minutes without a look")
 		}
 	}
@@ -446,37 +448,37 @@ func sessionChecks(reqs []Stream, samples []TunnelSample) []string {
 }
 
 // trafficChecks: the hour must have contained what tests an hour of a tunnel.
-func trafficChecks(reqs []Stream) []string {
+func trafficChecks(reqs []Stream, tm Timing) []string {
 	var f []string
-	if longestChain(reqs) < MinChain {
+	if longestChain(reqs, tm.MaxChainGap) < tm.MinChain {
 		f = append(f, "the hour held no run of requests back to back")
 	}
 	long := false
 	for _, r := range reqs {
-		if d := r.Ended.Sub(r.Opened); d >= NearDeadline && d <= MaxRequestDuration {
+		if d := r.Ended.Sub(r.Opened); d >= tm.NearDeadline && d <= tm.MaxRequestDuration {
 			long = true
 		}
 	}
 	if !long {
 		f = append(f, "the hour held no request of about 4 minutes, near the deadline")
 	}
-	if concurrentStreams(reqs) < ConcurrentStreams {
+	if concurrentStreams(reqs, tm.StreamRate) < tm.ConcurrentStreams {
 		f = append(f, "the hour held no 16 concurrent streams at 20 tokens a second")
 	}
-	if longestIdle(reqs) < MinIdleGap {
+	if longestIdle(reqs) < tm.MinIdleGap {
 		f = append(f, "the hour held no idle stretch of 2 minutes with heartbeats only")
 	}
 	return f
 }
 
-// longestChain is the most requests that follow one another with no more than MaxChainGap between.
-func longestChain(reqs []Stream) int {
+// longestChain is the most requests that follow one another with no more than maxGap between.
+func longestChain(reqs []Stream, maxGap time.Duration) int {
 	rs := append([]Stream(nil), reqs...)
 	sort.Slice(rs, func(a, b int) bool { return rs[a].Opened.Before(rs[b].Opened) })
 	best, run := 0, 0
 	for i, r := range rs {
 		// One that starts after the last ended, within MaxChainGap: concurrent streams are not a run.
-		if gap := r.Opened.Sub(rs[max(i-1, 0)].Ended); i > 0 && gap >= 0 && gap <= MaxChainGap {
+		if gap := r.Opened.Sub(rs[max(i-1, 0)].Ended); i > 0 && gap >= 0 && gap <= maxGap {
 			run++
 		} else {
 			run = 1
@@ -488,13 +490,13 @@ func longestChain(reqs []Stream) int {
 	return best
 }
 
-// concurrentStreams is the most streams open together at one moment that each ran at StreamRate tokens a second or more.
-func concurrentStreams(reqs []Stream) int {
+// concurrentStreams is the most streams open together at one moment that each ran at rate tokens a second or more.
+func concurrentStreams(reqs []Stream, rate float64) int {
 	best := 0
 	for _, at := range reqs {
 		open := 0
 		for _, r := range reqs {
-			if !r.Opened.After(at.Opened) && r.Ended.After(at.Opened) && r.TokensPerSecond() >= StreamRate {
+			if !r.Opened.After(at.Opened) && r.Ended.After(at.Opened) && r.TokensPerSecond() >= rate {
 				open++
 			}
 		}

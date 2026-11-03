@@ -229,7 +229,9 @@ func TestADryBinaryRefusesLiveSettings(t *testing.T) {
 	}
 }
 
-func TestALiveRunWithNoScenarioFailsLoudlyAndUsesNoCluster(t *testing.T) {
+// The harness's settings are direct mode with no LIVE_DIALHOME_LISTEN: the live
+// steps stop at their first step with the named error, before any stack or job.
+func TestALiveRunWithNoListenerFailsLoudlyAndUsesNoCluster(t *testing.T) {
 	w := newAlphaWorld(t)
 	w.installDry(liveWrapper, realTestBinary(t, "HPCBURST_LIVECHECKS_ALPHA_TEST", alphaPkg), filepath.Join(repoRoot(t), alphaPkg))
 	// The caller asks for a dry run: the script must not pass it on.
@@ -238,7 +240,7 @@ func TestALiveRunWithNoScenarioFailsLoudlyAndUsesNoCluster(t *testing.T) {
 		t.Fatalf("exit %d, want 1:\n%s", res.code, res.out)
 	}
 	log, _ := os.ReadFile(filepath.Join(w.out(), "alpha-athena-handover.log"))
-	for _, want := range []string{"LIVE RUN", "wait for #161"} {
+	for _, want := range []string{"LIVE RUN", "set LIVE_DIALHOME_LISTEN"} {
 		if !strings.Contains(string(log), want) {
 			t.Errorf("the log lacks %q:\n%s", want, log)
 		}

@@ -8,6 +8,7 @@ package alpha
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -194,19 +195,55 @@ func TestAScenarioErrorFailsTheRunAndClosesTheSteps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st := &closing{notWired: notWired{}}
+	st := &closing{failedSteps: failedSteps{ErrNoDialHomeListen}}
 	_, err = Run(context.Background(), cfg, st, rec, t.Logf)
-	if err == nil || !strings.Contains(err.Error(), "wait for #161") {
-		t.Fatalf("err = %v, want the not-wired error", err)
+	if !errors.Is(err, ErrNoDialHomeListen) {
+		t.Fatalf("err = %v, want the steps' named error", err)
 	}
 	if !st.closed {
 		t.Error("the steps were not closed after a failed scenario")
 	}
 }
 
+// A live tunnel row whose queue wait reaches its deployment's first end cannot
+// keep to one job: its steps return the named error before anything starts.
+func TestALiveTunnelRowRefusesAQueueWaitPastItsFirstEnd(t *testing.T) {
+	m := liveSettings("tunnel-hour-athena")
+	m[envPending] = "259200"
+	cfg, skip, err := ConfigFromEnv(env(m), "tunnel-hour-athena")
+	if skip != "" || err != nil {
+		t.Fatalf("skip %q, err %v", skip, err)
+	}
+	st, ok := liveSteps(t, cfg).(failedSteps)
+	if !ok || !errors.Is(st.err, ErrQueueWaitPastEnd) {
+		t.Fatalf("liveSteps = %#v, want the steps that return ErrQueueWaitPastEnd", st)
+	}
+}
+
 type closing struct {
-	notWired
+	failedSteps
 	closed bool
+}
+
+// A live run in direct mode with no local dial-home listener cannot start: its
+// steps return the named error, before anything is started or submitted.
+func TestALiveRunWithoutItsListenerNamesWhatIsMissing(t *testing.T) {
+	m := liveSettings("alpha-athena-handover")
+	delete(m, envListen)
+	cfg, skip, err := ConfigFromEnv(env(m), "alpha-athena-handover")
+	if skip != "" || err != nil {
+		t.Fatalf("skip %q, err %v", skip, err)
+	}
+	st, ok := liveSteps(t, cfg).(failedSteps)
+	if !ok || !errors.Is(st.err, ErrNoDialHomeListen) {
+		t.Fatalf("liveSteps = %#v, want the steps that return ErrNoDialHomeListen", st)
+	}
+	if _, err := st.Handover(context.Background(), Plan{}); !errors.Is(err, ErrNoDialHomeListen) {
+		t.Errorf("Handover returned %v", err)
+	}
+	if _, err := st.Ledger().Jobs(context.Background(), []string{"hb-x-1"}); !errors.Is(err, ErrNoLedger) {
+		t.Errorf("the ledger of a run that never started returned %v, want ErrNoLedger", err)
+	}
 }
 
 func (c *closing) Close(context.Context) error { c.closed = true; return nil }

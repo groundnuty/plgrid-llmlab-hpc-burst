@@ -2,16 +2,10 @@ package alpha
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
-
-// ErrNotWired is what the live steps return until the one-host rehearsal's
-// scenario code (PR #161) is wired in: the run fails, loudly, and has used no
-// cluster.
-var ErrNotWired = errors.New("the live scenario steps are not wired yet: they wait for #161 (internal/rehearsal/scenario)")
 
 // Plan is what a scenario is given.
 type Plan struct {
@@ -37,8 +31,9 @@ type Ledger interface {
 
 // Steps is the seam between the scenario and the judgement. A scenario starts
 // the stack, drives it and returns what it saw; it never judges. The dry run's
-// stand-in steps (dry_test.go) and the live steps (steps_live_test.go) are the
-// two implementations.
+// stand-in steps (dry_test.go) and the live steps (steps_live_test.go and
+// live_flows_test.go, over the real cluster or the stand-in one) are the two
+// implementations.
 type Steps interface {
 	Handover(ctx context.Context, p Plan) (HandoverObs, error)
 	NoOverlap(ctx context.Context, p Plan) (NoOverlapObs, error)
