@@ -197,8 +197,8 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'hack/live-checks.sh@@[ -z "${FRONTLABEL[$1]:-}" ] || export HPCBURST_FRONT_HOST_LABEL=${S[LIVE_FRONT_HOST_LABEL]}@@true'
   'hack/live-checks.sh@@still take it.
   export_front_label "$n"@@still take it.'
-  'hack/live-checks.sh@@LIVE_PENDING_MAX_SECONDS:-7200}
-  export_front_label "$n"@@LIVE_PENDING_MAX_SECONDS:-7200}'
+  'hack/live-checks.sh@@PENDING_MAX_SECONDS=$(pending_max "$n")
+  export_front_label "$n"@@PENDING_MAX_SECONDS=$(pending_max "$n")'
   'hack/live-checks.sh@@gpu-accounting-athena
 # END FRONT LABEL@@# END FRONT LABEL'
   'rows.go@@return lease - (MaxRequestDuration + DrainMargin) - TunnelHour@@return lease - (MaxRequestDuration + DrainMargin) + TunnelHour'
