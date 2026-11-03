@@ -125,20 +125,22 @@ func TestRealEnginePendingTimeIsNotRunTime(t *testing.T) {
 }
 
 // The wait in the queue of real-engine, a row in QOS now, is 30 minutes (the science agent's ruling, 2 Nov 2026), written
-// out here; a job still pending past it fails the run (not NOT RUN: this row has no skip protocol) and is cancelled. The
-// operator's own wait overrides it, exactly, even a part of a minute. The fake clock moves one step per poll of the job,
-// and the run gives up at the first poll that finds the clock more than the bound past its submission, so the polls
-// the run made are the bound read off the clock: 30 min in 60 s steps is 31 polls (30 min is not past 30 min, 31 are),
-// 10 min is 11, 90 s in 60 s steps is 2, 2 h in 1 h steps is 3. A bound a minute either way changes the count.
-func TestRealEngineJobPendingForTooLongIsCancelled(t *testing.T) {
+// out here, and a job still pending past it ends the run as NOT RUN with exit 3, as issue #222 defines the consequence of a
+// pend past the bound: the job never started, so it is not a failure. The script's cleanup cancels it (here the one job the
+// stub submitted), nothing is posted, and the row is neither a pass nor a failure. The operator's own wait overrides the
+// bound, exactly, even a part of a minute. The fake clock moves one step per poll of the job, and the run gives up at the
+// first poll that finds the clock more than the bound past its submission, so the polls the run made are the bound read off
+// the clock: 30 min in 60 s steps is 31 polls (30 min is not past 30 min, 31 are), 10 min is 11, 90 s in 60 s steps is 2,
+// 2 h in 1 h steps is 3. A bound a minute either way changes the count.
+func TestRealEngineJobPendingPastTheBoundIsNotRunNotFailed(t *testing.T) {
 	for _, c := range []struct {
 		name, setting, step, want string
 		polls                     int
 	}{
-		{"the default", "", "60", "FAIL (the job was still pending after 30 min; cancelling it)", 31},
-		{"a shorter wait asked for", "LIVE_PENDING_MAX_SECONDS=600", "60", "FAIL (the job was still pending after 10 min; cancelling it)", 11},
-		{"a longer wait asked for", "LIVE_PENDING_MAX_SECONDS=7200", "3600", "FAIL (the job was still pending after 120 min; cancelling it)", 3},
-		{"a part of a minute", "LIVE_PENDING_MAX_SECONDS=90", "60", "FAIL (the job was still pending after 1 min 30 s; cancelling it)", 2},
+		{"the default", "", "60", "real-engine: NOT RUN (a job was still pending after 30 min in the queue and was cancelled by its tag; not a failure)", 31},
+		{"a shorter wait asked for", "LIVE_PENDING_MAX_SECONDS=600", "60", "real-engine: NOT RUN (a job was still pending after 10 min in the queue and was cancelled by its tag; not a failure)", 11},
+		{"a longer wait asked for", "LIVE_PENDING_MAX_SECONDS=7200", "3600", "real-engine: NOT RUN (a job was still pending after 120 min in the queue and was cancelled by its tag; not a failure)", 3},
+		{"a part of a minute", "LIVE_PENDING_MAX_SECONDS=90", "60", "real-engine: NOT RUN (a job was still pending after 1 min 30 s in the queue and was cancelled by its tag; not a failure)", 2},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			w := newWorld(t)
@@ -148,18 +150,36 @@ func TestRealEngineJobPendingForTooLongIsCancelled(t *testing.T) {
 				env = append(env, c.setting)
 			}
 			res := w.run(env, "--run", "real-engine", "--yes")
-			if res.code != 1 {
-				t.Fatalf("exit %d, want 1:\n%s", res.code, res.out)
+			if res.code != 3 {
+				t.Fatalf("exit %d, want 3:\n%s", res.code, res.out)
 			}
 			w.contains(res, c.want, "cleanup: left behind 0 (cancelled 1)")
+			if strings.Contains(res.out, "real-engine: FAIL") || strings.Contains(res.out, "real-engine: PASS") || strings.Contains(res.out, "job ended") {
+				t.Errorf("a NOT RUN was also reported as a failure or a pass, or the run went on:\n%s", res.out)
+			}
 			if got := strings.Count(w.stateFile("events"), "squeue %T job\n"); got != c.polls {
 				t.Errorf("the run polled the job %d times before giving up, want %d", got, c.polls)
 			}
 			if got := lines(w.stateFile("cancelled")); len(got) != 1 || got[0] != "7001" {
 				t.Errorf("cancelled %v, want the submitted job", got)
 			}
+			if m := slotUse.FindStringSubmatch(res.out); m == nil || m[1] != "now" {
+				t.Errorf("no slot-use line for QOS now:\n%s", res.out)
+			}
 		})
 	}
+}
+
+// A NOT RUN whose cleanup leaves the job behind is a failure, as for every row: the job was still pending past the bound and
+// the cancel did nothing, so the slot is still held.
+func TestRealEngineNotRunStaysAFailureWhenTheCleanupLeavesTheJob(t *testing.T) {
+	w := newWorld(t)
+	w.useStubGo()
+	res := w.run(append(w.fakeClock(), "STUB_CLOCK_STEP=3600", "STUB_JOB_FOREVER=PENDING", "STUB_SCANCEL_KEEP=1"), "--run", "real-engine", "--yes")
+	if res.code != 1 {
+		t.Fatalf("exit %d, want 1:\n%s", res.code, res.out)
+	}
+	w.contains(res, "real-engine: NOT RUN", "cleanup: left behind 1", "a job was left behind")
 }
 
 func TestRealEngineJobRunningPastItsLimitIsCancelled(t *testing.T) {

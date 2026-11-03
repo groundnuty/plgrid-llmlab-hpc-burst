@@ -71,13 +71,13 @@ func slotWorld(t *testing.T, name string) *world {
 
 var (
 	pendingEnv     = regexp.MustCompile(`(?m)^HPCBURST_(?:ALPHA|CONF)_PENDING_MAX_SECONDS=(\d+)$`)
-	realEngineWait = regexp.MustCompile(`still pending after (?:(\d+) min)? ?(?:(\d+) s)?; cancelling it`)
+	realEngineWait = regexp.MustCompile(`a job was still pending after (?:(\d+) min)? ?(?:(\d+) s)? in the queue`)
 )
 
 // deliveredBound is the wait in the queue, in seconds, that a slot row with no start wait gets from the script, with no
 // override set; 0 when none reaches it. A test of the stack, accounting or reach kind has it in its environment.
-// real-engine has no test to hand it to: its run polls the job and gives up at the bound, so the message it gives and
-// the polls it made, on a clock the stub moves a minute at each, are the bound. A row of another kind is not read here,
+// real-engine has no test to hand it to: its run polls the job and ends as NOT RUN, exit 3, at the bound, so the message
+// it gives and the polls it made, on a clock the stub moves a minute at each, are the bound. A row of another kind is not read here,
 // and fails the rule until this test learns how.
 func deliveredBound(t *testing.T, r slotRow) int {
 	t.Helper()
@@ -85,7 +85,7 @@ func deliveredBound(t *testing.T, r slotRow) int {
 	if r.name == "real-engine" {
 		res := w.run(append(w.fakeClock(), "STUB_CLOCK_STEP=60", "STUB_JOB_FOREVER=PENDING"), "--run", r.name, "--yes")
 		m := realEngineWait.FindStringSubmatch(res.out)
-		if res.code != 1 || m == nil {
+		if res.code != 3 || m == nil {
 			t.Fatalf("%s: exit %d, and no overrun message to read the bound from:\n%s", r.name, res.code, res.out)
 		}
 		mins, _ := strconv.Atoi(m[1])

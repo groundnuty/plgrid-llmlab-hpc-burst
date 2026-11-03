@@ -25,8 +25,8 @@
 # that loads no rows; 3 refused or NOT RUN (a
 # setting is missing, a file is not mode 600, the one-job slot is in use; or a
 # job of a row with a start-wait bound did not start within it and was cancelled
-# by its tag, or a row that holds QOS now's GPU for hours was still pending after its wait in the queue (below)
-# and was cancelled by its tag: not a failure, try again later; or the scheduler rejected the
+# by its tag, or a row in a one-job slot with no start wait (the stack rows that hold QOS now's GPU for hours, and
+# real-engine) was still pending after its wait in the queue (below) and was cancelled by its tag: not a failure, try again later; or the scheduler rejected the
 # row's shape in the dry-run estimate, with or without --yes); 4 a cluster test
 # was not run because --yes was not given.
 #
@@ -51,9 +51,11 @@
 #
 # The rule behind both: a row in a one-job slot (the cluster table's slot column), on either cluster, must have a start
 # wait of 10 min or less or a wait in the queue of 30 min or less (pending_max), and it passes the slot guard
-# (check_slot) before it runs. real-engine, which is not a test of ours to skip, has the 30 min as its wait in the queue
-# and ends as a failure when it is passed; hack/livechecks reads the table and fails, naming the row, for a slot row
-# that has neither bound, so a new row cannot miss it.
+# (check_slot) before it runs. real-engine, which runs no test of ours to skip, has the 30 min as its wait in the queue
+# too, and a job still pending at the bound is NOT RUN with the same consequence (issue #222): the cleanup cancels the
+# job by its tag, nothing is posted, and the exit is 3, since a job that never started is not a failure. On a row with no
+# slot the same overrun is a failure. hack/livechecks reads the table and fails, naming the row, for a slot row that has
+# neither bound, so a new row cannot miss it.
 #
 # The settings file is named by HPCBURST_LIVE_SETTINGS: KEY=VALUE lines, mode
 # 600, owned by you. Keys (none is ever printed):
@@ -1065,8 +1067,8 @@ prepare_real_engine() {
 
 # execute_real_engine <name>: submit, poll, fetch. The slot is held from the submit to the job's end.
 # The job's budget has two clocks: the time it may wait in the queue (pending_max: 30 min in its one-job slot, or
-# LIVE_PENDING_MAX_SECONDS; a job still pending past it is cancelled and the run fails), and, from the first state that
-# is not PENDING, its time limit plus a margin. A wait of 40 minutes in QOS now must not eat the run's time.
+# LIVE_PENDING_MAX_SECONDS; a job still pending past it ends the run as NOT RUN, exit 3, and the cleanup cancels it by its
+# tag), and, from the first state that is not PENDING, its time limit plus a margin. A wait of 40 minutes in QOS now must not eat the run's time.
 execute_real_engine() {
   local n=$1 host=${HOST[$1]} w=$RE_DIR tag=$RE_TAG acct reply state last="" errs=0 st log finished
   local submit_t run_t="" now limit_s pend_max margin=${LIVE_RUN_MARGIN_SECONDS:-900}
@@ -1096,7 +1098,10 @@ EOS
     now=$(now_epoch)
     if [ "$state" != PENDING ] && [ "$state" != error ] && [ -z "$run_t" ]; then run_t=$now; fi
     if [ -z "$run_t" ] && [ $((now - submit_t)) -gt "$pend_max" ]; then
-      say "$n: FAIL (the job was still pending after $(fmt_pending "$pend_max"); cancelling it)"; return 1
+      # The job never started: not a failure (issue #222). The cleanup after this cancels it by its tag, and the run's exit is 3
+      # unless that leaves a job behind, which is a failure.
+      NOT_RUN=1
+      say "$n: NOT RUN (a job was still pending after $(fmt_pending "$pend_max") in the queue and was cancelled by its tag; not a failure)"; return 3
     fi
     if [ -n "$run_t" ] && [ $((now - run_t)) -gt $((limit_s + margin)) ]; then
       say "$n: FAIL (the job ran past its time limit plus $((margin/60)) minutes; cancelling it)"; return 1
