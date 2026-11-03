@@ -42,6 +42,14 @@ func runRow(t *testing.T, family string, rows ...string) {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.PendingMax+cfg.Row.Budget)
 	defer cancel()
 	failures, err := Run(ctx, cfg, st, rec, t.Logf)
+	if NotRun(cfg.Row, err) {
+		// The protocol of #210: the marker, then the test's one top-level skip. The scenario has cancelled
+		// the run's jobs by their tags; no record and no text to post were written.
+		if merr := rec.SaveText(NotRunFile, NotRunNote(cfg.Row, cfg.PendingMax)); merr != nil {
+			t.Fatalf("%s: a job did not start within %s, but the not-run marker could not be written: %v", cfg.Row.Name, cfg.PendingMax, merr)
+		}
+		t.Skipf("NOT RUN: %s: a job was still pending after %s; it was cancelled by its tag", cfg.Row.Name, cfg.PendingMax)
+	}
 	if err != nil {
 		t.Fatalf("%s did not finish: %v", cfg.Row.Name, err)
 	}
