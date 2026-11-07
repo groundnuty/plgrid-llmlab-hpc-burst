@@ -41,8 +41,8 @@ const (
 // name stops the run: a typo must not pass as "no fault".
 var dryFaults = map[string][]string{
 	"handover":  {"cut", "no-stream", "two-restarts", "no-restart", "no-handover", "late-successor", "wrong-partition", "untagged", "unattributed", "adds-helios", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "no-responses"},
-	"nooverlap": {"nocap", "nogap", "noslot", "cut", "no-stream", "late-submit", "untagged", "wrong-partition", "adds-athena", "default-lease", "short-lease", "no-release-when-idle", "duplicate-tag", "extra-allocation", "two-restarts", "no-restart"},
-	"tunnel":    {"short", "cut", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition", "adds-other-cluster", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "past-deadline", "past-drain", "no-drain-start", "stream-cut-error", "reconnect", "disconnected", "sparse-samples", "late-first-sample", "no-concurrency", "slow-streams", "no-idle-gap", "no-long-stream", "no-back-to-back", "no-load-rate", "slow-start"},
+	"nooverlap": {"nocap", "nogap", "noslot", "cut", "no-stream", "late-submit", "untagged", "wrong-partition", "adds-athena", "default-lease", "short-lease", "no-release-when-idle", "duplicate-tag", "extra-allocation", "two-restarts", "no-restart", "pend-past-bound"},
+	"tunnel":    {"short", "cut", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition", "adds-other-cluster", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "past-deadline", "past-drain", "no-drain-start", "stream-cut-error", "reconnect", "disconnected", "sparse-samples", "late-first-sample", "no-concurrency", "slow-streams", "no-idle-gap", "no-long-stream", "no-back-to-back", "no-load-rate", "slow-start", "pend-past-bound"},
 }
 
 type drySteps struct {
@@ -156,6 +156,11 @@ func (d *drySteps) now() time.Time         { return d.clock.Now() }
 func (d *drySteps) tick(x time.Duration)   { d.clock.Advance(x) }
 func (d *drySteps) fault(name string) bool { return d.cfg.DryFault == name }
 
+// gateWrap is the batch script of a job that runs until its release file appears.
+func (d *drySteps) gateWrap(n int) string {
+	return fmt.Sprintf("while [ ! -e %s ]; do sleep 0.02; done", d.gate(n))
+}
+
 // tag makes an Allocation's job tag the way the controller does and, unless
 // the fault says otherwise, writes it down first.
 func (d *drySteps) tag(p Plan, name string) string {
@@ -175,12 +180,11 @@ func (d *drySteps) submit(tag, partition, qos string) (n int, id string) {
 	d.t.Helper()
 	d.jobs++
 	n = d.jobs
-	wrap := fmt.Sprintf("while [ ! -e %s ]; do sleep 0.02; done", d.gate(n))
 	line := fmt.Sprintf("sbatch --parsable --no-requeue --job-name=%s --partition=%s --account=example-account --time=%s --gres=gpu:1 --cpus-per-task=1 --mem=1024 --output=%s --error=%s", tag, partition, slurmTime(d.deployment().LeaseLimit), d.out(n), d.out(n))
 	if qos != "" {
 		line += " --qos=" + qos
 	}
-	line += " '--wrap=" + wrap + "'"
+	line += " '--wrap=" + d.gateWrap(n) + "'"
 	res, err := d.sess.Run(context.Background(), slurm.Command{Line: line})
 	if err != nil || res.ExitCode != 0 {
 		d.t.Fatalf("sbatch %q: %v exit %d %s", tag, err, res.ExitCode, res.Stderr)
@@ -194,7 +198,7 @@ func (d *drySteps) submit(tag, partition, qos string) (n int, id string) {
 
 // submitHeld is a second submission under a tag that already names a job, held so that it never runs: the
 // duplicate a lost reply and a retry can leave on a real cluster.
-func (d *drySteps) submitHeld(tag, partition, qos string) {
+func (d *drySteps) submitHeld(tag, partition, qos string) string {
 	d.t.Helper()
 	line := fmt.Sprintf("sbatch --parsable --no-requeue --hold --job-name=%s --partition=%s --account=example-account --time=%s --gres=gpu:1 --cpus-per-task=1 --mem=1024", tag, partition, slurmTime(d.deployment().LeaseLimit))
 	if qos != "" {
@@ -204,7 +208,9 @@ func (d *drySteps) submitHeld(tag, partition, qos string) {
 	if err != nil || res.ExitCode != 0 {
 		d.t.Fatalf("sbatch --hold %q: %v exit %d %s", tag, err, res.ExitCode, res.Stderr)
 	}
-	d.held = append(d.held, strings.TrimSpace(strings.SplitN(string(res.Stdout), ";", 2)[0]))
+	id := strings.TrimSpace(strings.SplitN(string(res.Stdout), ";", 2)[0])
+	d.held = append(d.held, id)
+	return id
 }
 
 // extras applies the faults that add jobs the row does not allow: a held second submission under a tag, or a
@@ -249,6 +255,78 @@ func (d *drySteps) end(n int, id string) provider.Job {
 func (d *drySteps) pending(id string) {
 	d.waitFor("a job to pend", func(j provider.Job) bool { return j.StartTime == nil && j.EndTime == nil }, id)
 }
+
+// submitOwner is the owner's own job in the one-job QOS, from another project: it holds the QOS's one GPU until its
+// release file appears, as submit's jobs do, and the cleanup writes every release file. It is released by that gate
+// and by nothing else, so the run's job pends behind it however long the test stalls: no wall-clock window decides
+// whether the slot is busy. Its time limit outlasts the bound by an hour, so the fake clock never ends it.
+func (d *drySteps) submitOwner(p Plan) string {
+	d.t.Helper()
+	d.jobs++
+	n := d.jobs
+	line := fmt.Sprintf("sbatch --parsable --no-requeue --job-name=owner-other-project-job --partition=%s --qos=%s --account=example-account --time=%s --gres=gpu:1 --cpus-per-task=1 --mem=1024 --output=%s --error=%s '--wrap=%s'",
+		d.cfg.Row.Partition, d.cfg.Row.QOS, slurmTime(p.PendingMax+time.Hour), d.out(n), d.out(n), d.gateWrap(n))
+	res, err := d.sess.Run(context.Background(), slurm.Command{Line: line})
+	if err != nil || res.ExitCode != 0 {
+		d.t.Fatalf("the owner's job was not accepted: %v exit %d %s", err, res.ExitCode, res.Stderr)
+	}
+	id := strings.TrimSpace(strings.SplitN(string(res.Stdout), ";", 2)[0])
+	if _, err := strconv.Atoi(id); err != nil {
+		d.t.Fatalf("sbatch printed %q", res.Stdout)
+	}
+	return id
+}
+
+// pendPastBound is the fault pend-past-bound: the run's first job cannot start, so the first clock runs out.
+// Under a one-job QOS the owner's own job holds its one GPU (the case that matters: the owner's slot is busy),
+// and the run's job pends behind it; a partition with no cap has the run's job held, which pends just the same.
+// The fake clock then moves to one second before the bound, where the cluster still shows the job pending (the
+// run must not give up early), and one second past it, where the run cancels its jobs by their tags, as the
+// live scenario must, and reports ErrNotStarted. Both readings are logged with the time since the job's
+// submission on the fake clock, for the tests to judge against the bound they asked for, written out in them.
+// The owner's job is not the run's to touch.
+func (d *drySteps) pendPastBound(p Plan) error {
+	tag := d.tag(p, "pre")
+	var id string
+	if d.cfg.Row.QOS != "" {
+		d.running(d.submitOwner(p))
+		_, id = d.submit(tag, d.cfg.Row.Partition, d.cfg.Row.QOS)
+	} else {
+		id = d.submitHeld(tag, d.cfg.Row.Partition, "")
+	}
+	d.pending(id)
+	began := d.now()
+	d.tick(p.PendingMax - time.Second)
+	d.pending(id)
+	p.Logf(pendStillPending, d.now().Sub(began))
+	d.tick(2 * time.Second)
+	jobs, err := d.batch.ListByTag(context.Background(), tag)
+	if err != nil {
+		return fmt.Errorf("listing the run's jobs by their tag: %w", err)
+	}
+	var ids []string
+	for _, j := range jobs {
+		if j.EndTime == nil {
+			ids = append(ids, j.ID)
+		}
+	}
+	for _, r := range d.batch.Cancel(context.Background(), ids) {
+		if r.Outcome == provider.CancelError {
+			return fmt.Errorf("cancelling the run's job by its tag: %w", r.Err)
+		}
+	}
+	for _, jid := range ids {
+		d.waitFor("a cancelled job to end", func(j provider.Job) bool { return j.EndTime != nil }, jid)
+	}
+	p.Logf(pendCancelled, d.now().Sub(began))
+	return ErrNotStarted
+}
+
+// The two readings pendPastBound logs, each with the time since the job's submission on the fake clock.
+const (
+	pendStillPending = "stand-in: the job is still pending %s after its submission"
+	pendCancelled    = "stand-in: the run's jobs are cancelled by their tags %s after the job's submission"
+)
 
 func (d *drySteps) Ledger() Ledger              { return dryLedger{d} }
 func (d *drySteps) Close(context.Context) error { return nil }
@@ -337,6 +415,9 @@ func (d *drySteps) Handover(_ context.Context, p Plan) (HandoverObs, error) {
 }
 
 func (d *drySteps) NoOverlap(_ context.Context, p Plan) (NoOverlapObs, error) {
+	if d.fault("pend-past-bound") {
+		return NoOverlapObs{}, d.pendPastBound(p)
+	}
 	tag0 := d.tag(p, "pre")
 	n0, id0 := d.submit(tag0, d.partitionFor(false), d.cfg.Row.QOS)
 	j0 := d.running(id0)
@@ -396,6 +477,9 @@ func (d *drySteps) NoOverlap(_ context.Context, p Plan) (NoOverlapObs, error) {
 }
 
 func (d *drySteps) TunnelHour(_ context.Context, p Plan) (TunnelHourObs, error) {
+	if d.fault("pend-past-bound") {
+		return TunnelHourObs{}, d.pendPastBound(p)
+	}
 	tag := d.tag(p, "tunnel")
 	// The run's only job is the one the wrong-partition fault sends elsewhere.
 	n, id := d.submit(tag, d.partitionFor(true), d.cfg.Row.QOS)
