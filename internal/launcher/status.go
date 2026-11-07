@@ -63,6 +63,11 @@ type StatusReport struct {
 	// (#158), set when controllers run. Its Checked is false when the API server was not asked
 	// (--no-api, or an unhealthy host) or could not give the profiles, and Detail says why.
 	AgentBuilds *AgentBuilds `json:"agent_builds,omitempty"`
+	// CRDGuard is the state of the CRD deletion guard (guard.go), asked of the API server: nil when
+	// it was not asked (--no-api, an unhealthy host) or could not say, in which case a reason names
+	// the failure. An absent guard is a state, not a fault, as FrontAbsent is: hosts started before
+	// the guard existed run without it until their next start (issue #242).
+	CRDGuard *GuardState `json:"crd_guard,omitempty"`
 }
 
 // StatusOptions are the inputs of Status.
@@ -257,7 +262,24 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 		}
 	}
 	final()
+	// Last, so that it is asked only of a host that is healthy after every other check.
+	statusGuard(ctx, cfg, rep, bad)
 	return rep, nil
+}
+
+// statusGuard sets rep.CRDGuard from the API server, and only for a host judged healthy by every other
+// check: an unhealthy host is not asked, and reports nothing, as the ruling says (`@hpc-burst-science-agent`,
+// 2 Nov 2026, for #242). An absent guard changes nothing about the host's health; a failure to ask does.
+func statusGuard(ctx context.Context, cfg *rest.Config, rep *StatusReport, bad func(string, ...any)) {
+	if rep.Health != Healthy || rep.Readyz == nil || !*rep.Readyz {
+		return
+	}
+	gs, err := CheckGuard(ctx, cfg)
+	if err != nil {
+		bad("the CRD deletion guard could not be checked: %v", err)
+		return
+	}
+	rep.CRDGuard = gs
 }
 
 // checkBuildsInStatus sets rep.AgentBuilds from the API server's PlatformProfiles, and makes every
