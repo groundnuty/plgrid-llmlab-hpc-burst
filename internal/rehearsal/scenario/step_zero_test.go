@@ -41,7 +41,7 @@ func (r *rig) stepScaleToZero(steps string) {
 	patchAt := r.scaleToZero()
 	r.waitAllEnded(insts)
 	r.checkShutdown(insts, patchAt)
-	r.checkAllocations(uids)
+	r.checkAllocations(uids, nil)
 	r.waitRecords(uids)
 	r.waitJobsGone()
 	r.checkProxiesOffline(r.watch.uids())
@@ -147,7 +147,8 @@ func (r *rig) checkShutdown(insts []types.UID, patchAt time.Time) {
 // normal stop ends a job CANCELLED or COMPLETED, which is Ended
 // (pkg/provider/phase.go); a released Allocation is deleted
 // (internal/lifecycle/retention.go), in the rehearsal while still Running.
-func (r *rig) checkAllocations(atZero map[types.UID]string) {
+// failedOK names the Allocations a step failed on purpose (#193's requeue).
+func (r *rig) checkAllocations(atZero map[types.UID]string, failedOK map[types.UID]bool) {
 	r.t.Helper()
 	type seen struct {
 		name    string
@@ -169,7 +170,9 @@ func (r *rig) checkAllocations(atZero map[types.UID]string) {
 		s.deleted = s.deleted || a.deleted
 		switch a.phase {
 		case v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:
-			r.t.Errorf("Allocation %s was seen %s at %s", a.name, a.phase, a.at.Format(time.RFC3339Nano))
+			if !failedOK[a.uid] {
+				r.t.Errorf("Allocation %s was seen %s at %s", a.name, a.phase, a.at.Format(time.RFC3339Nano))
+			}
 		}
 	}
 	for uid, name := range atZero {
@@ -339,16 +342,6 @@ func (r *rig) stackProcesses() []procID {
 	return procs
 }
 
-// stackPorts are the stack's listeners: the front's client and dial-home
-// listeners and up's block from portBase (13 ports).
-func stackPorts() []int {
-	ports := []int{29500, 29501}
-	for p := portBase; p <= portBase+12; p++ {
-		ports = append(ports, p)
-	}
-	return ports
-}
-
 // downAndCheck runs hpcburst down, then checks that every process of the
 // stack recorded before it is gone and that nothing listens on its ports.
 // down removes its own record (internal/launcher/down.go, clearRecord), so
@@ -371,7 +364,7 @@ func (r *rig) downAndCheck() {
 		}
 		return len(left) == 0, fmt.Sprintf("still running: %v", left)
 	})
-	if l := listening(r.t, stackPorts()); len(l) > 0 {
+	if l := listening(r.t, r.ports.all()); len(l) > 0 {
 		r.t.Errorf("step (g): ports %v still listen after down", l)
 	}
 	r.t.Logf("step (g): down stopped %d processes of the stack in %s", len(procs), time.Since(start).Round(100*time.Millisecond))

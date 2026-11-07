@@ -6,7 +6,6 @@ package scenario_test
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -84,6 +83,14 @@ func (r *rig) instance(name string) (v1alpha1.Instance, bool) {
 // takeover, ends with its finish reason and [DONE].
 func (r *rig) stepControllerRestart(in *v1alpha1.Instance, key string) {
 	r.t.Helper()
+	r.controllerRestart(in, key, chatBody(restartTokens, restartTokens, true), restartTokens)
+}
+
+// controllerRestart is step (f) with a streamed request body whose reply is
+// tokens long, which must outlast the new controller's takeover of the Lease.
+// It returns the stream and its usage record.
+func (r *rig) controllerRestart(in *v1alpha1.Instance, key, body string, tokens int) (streamed, usageRow) {
+	r.t.Helper()
 	defer r.stepTimer("f")()
 	r.beforeDrain("f", in)
 	before, ok := r.instance(in.Name)
@@ -101,7 +108,7 @@ func (r *rig) stepControllerRestart(in *v1alpha1.Instance, key string) {
 	if oldPID == 0 || oldHolder == "" {
 		r.t.Fatalf("step (f): the controller's PID %d or Lease holder %q is unknown", oldPID, oldHolder)
 	}
-	first, done := r.startStream(chatBody(restartTokens, restartTokens, true), key)
+	first, done := r.startStream(body, key)
 	<-first
 	if err := syscall.Kill(oldPID, syscall.SIGKILL); err != nil {
 		r.t.Fatalf("kill the controller %d: %v", oldPID, err)
@@ -111,7 +118,7 @@ func (r *rig) stepControllerRestart(in *v1alpha1.Instance, key string) {
 		p := r.statusPID("controller")
 		h := r.leaseHolder()
 		return p != 0 && p != oldPID && h != "" && h != oldHolder &&
-			httpStatus(fmt.Sprintf("http://127.0.0.1:%d/readyz", portBase+6)) == http.StatusOK
+			httpStatus(r.ports.url(6, "/readyz")) == http.StatusOK
 	})
 	ledAt := time.Now()
 	r.t.Logf("step (f): a new controller led the Lease %s after the kill", ledAt.Sub(killAt).Round(100*time.Millisecond))
@@ -145,7 +152,7 @@ func (r *rig) stepControllerRestart(in *v1alpha1.Instance, key string) {
 	if n := len(r.allocations()); n != allocs {
 		r.t.Errorf("step (f): %d Allocations after the controller restart, %d before", n, allocs)
 	}
-	r.checkRestartStream(in, done, killAt, ledAt)
+	return r.checkRestartStream(in, done, killAt, ledAt, tokens)
 }
 
 // restartTokens is step (f)'s stream: 2,250 tokens at tokenDelay, about 45 s,
@@ -154,7 +161,7 @@ const restartTokens = 2250
 
 // checkRestartStream: the stream was in flight at the controller's kill and
 // after the new controller led the Lease, and ended uncut with [DONE].
-func (r *rig) checkRestartStream(in *v1alpha1.Instance, done <-chan streamed, killAt, ledAt time.Time) {
+func (r *rig) checkRestartStream(in *v1alpha1.Instance, done <-chan streamed, killAt, ledAt time.Time, tokens int) (streamed, usageRow) {
 	r.t.Helper()
 	var s streamed
 	select {
@@ -162,12 +169,13 @@ func (r *rig) checkRestartStream(in *v1alpha1.Instance, done <-chan streamed, ki
 	case <-time.After(requestTimeout):
 		r.t.Fatalf("step (f): the stream did not end within %s", requestTimeout)
 	}
-	row := r.checkStream("f", s, in, restartTokens)
+	row := r.checkStream("f", s, in, tokens)
 	rs, re := parseRecordTime(row.StartTime), parseRecordTime(row.EndTime)
 	if !rs.Before(killAt) || !re.After(ledAt) {
 		r.t.Errorf("step (f): the stream ran %s to %s, not across the kill %s and the new leader %s", row.StartTime, row.EndTime,
 			killAt.UTC().Format(time.RFC3339Nano), ledAt.UTC().Format(time.RFC3339Nano))
 	}
+	return s, row
 }
 
 // frpsProxies lists the tcpmux proxies frps reports online, by name, from its
@@ -178,7 +186,7 @@ func (r *rig) frpsProxies() map[string]bool {
 	if err != nil {
 		r.t.Fatalf("frps's web password: %v", err)
 	}
-	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/api/proxy/tcpmux", portBase+11), nil)
+	req, _ := http.NewRequest(http.MethodGet, r.ports.url(11, "/api/proxy/tcpmux"), nil)
 	req.SetBasicAuth("hpcburst", strings.TrimSpace(string(pw)))
 	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
 	if err != nil {

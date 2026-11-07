@@ -62,6 +62,9 @@ func fixtureFiles() map[string]string {
 	for p, c := range alphaFixtureFiles() {
 		m[p] = c
 	}
+	for p, c := range rehearsalFixtureFiles() {
+		m[p] = c
+	}
 	return m
 }
 
@@ -198,7 +201,7 @@ type result struct {
 func (w *world) env(extra []string) []string {
 	var env []string
 	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "HPCBURST_") || strings.HasPrefix(e, "HB_") || strings.HasPrefix(e, "LIVE_") || strings.HasPrefix(e, "STUB_") {
+		if strings.HasPrefix(e, "HPCBURST_") || strings.HasPrefix(e, "HB_") || strings.HasPrefix(e, "LIVE_") || strings.HasPrefix(e, "STUB_") || strings.HasPrefix(e, "REHEARSAL_") {
 			continue
 		}
 		env = append(env, e)

@@ -20,24 +20,30 @@ import (
 // usageRow is the part of a usage record (internal/front/usage, Record) the
 // rehearsal reads.
 type usageRow struct {
-	Counter        uint64  `json:"counter"`
-	RequestID      string  `json:"requestID"`
-	StartTime      string  `json:"startTime"`
-	EndTime        string  `json:"endTime"`
-	Path           string  `json:"path"`
-	RequestedModel string  `json:"requestedModel"`
-	Instance       string  `json:"instance"`
-	InstanceUID    string  `json:"instanceUID"`
-	Emitter        string  `json:"emitter"`
-	Status         int     `json:"status"`
-	Stream         bool    `json:"stream"`
-	Finish         *string `json:"finish"`
-	CutBy          *string `json:"cutBy"`
-	ErrorCode      *string `json:"errorCode"`
+	Counter        uint64 `json:"counter"`
+	RequestID      string `json:"requestID"`
+	StartTime      string `json:"startTime"`
+	EndTime        string `json:"endTime"`
+	Path           string `json:"path"`
+	RequestedModel string `json:"requestedModel"`
+	Provider       string `json:"provider"`
+	// ModelDeployment and DeploymentID name the target's deployment and its
+	// full deployment ID (a managed entry's managed ID).
+	ModelDeployment string  `json:"modelDeployment"`
+	DeploymentID    string  `json:"deploymentID"`
+	Instance        string  `json:"instance"`
+	InstanceUID     string  `json:"instanceUID"`
+	Emitter         string  `json:"emitter"`
+	Status          int     `json:"status"`
+	Stream          bool    `json:"stream"`
+	Finish          *string `json:"finish"`
+	CutBy           *string `json:"cutBy"`
+	ErrorCode       *string `json:"errorCode"`
 	// CompletionTokens and DurationMs: the reply's tokens and the request's
 	// time at the front.
 	CompletionTokens *int64 `json:"completionTokens"`
 	DurationMs       int64  `json:"durationMs"`
+	FirstTokenMs     *int64 `json:"firstTokenMs"`
 }
 
 // usageRows reads every usage record so far, by counter.
@@ -124,10 +130,10 @@ func (r *rig) stepRequests(in *v1alpha1.Instance, key string) {
 			r.t.Errorf("step (b) record %d: finish %v, cut by %v", i, row.Finish, row.CutBy)
 		case row.Stream != (i == 1):
 			r.t.Errorf("step (b) record %d: stream %v", i, row.Stream)
-		case row.CompletionTokens == nil || time.Duration(row.DurationMs)*time.Millisecond < time.Duration(*row.CompletionTokens)*tokenDelay:
+		case row.CompletionTokens == nil || time.Duration(row.DurationMs)*time.Millisecond < time.Duration(*row.CompletionTokens)*r.tokenDelay:
 			// Each token takes tokenDelay: the mode reached the engine
 			// through the launch's env and Apptainer's --cleanenv.
-			r.t.Errorf("step (b) record %d: %v tokens in %d ms, below %s a token: the engine double's token-delay mode did not reach the engine", i, row.CompletionTokens, row.DurationMs, tokenDelay)
+			r.t.Errorf("step (b) record %d: %v tokens in %d ms, below %s a token: the engine double's token-delay mode did not reach the engine", i, row.CompletionTokens, row.DurationMs, r.tokenDelay)
 		}
 	}
 	r.checkNoGap(r.usageRows())
