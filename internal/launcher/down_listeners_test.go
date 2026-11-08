@@ -263,11 +263,12 @@ func shortReleaseWait(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { socketReleaseWait = old })
 }
 
-// TestDownReportsARealForeignListener: a listener of this test process, not of anything launched,
-// sits on a recorded port the whole time. down reports it and says so in its log, leaves it
-// listening, and gives it the release wait first: a listener that is still there at the end of the
-// wait is foreign, one that is gone is not (the next test).
-func TestDownReportsARealForeignListener(t *testing.T) {
+// TestDownReportsARealForeignListenerOnce: a listener of this test process, not of anything
+// launched, sits on a recorded port the whole time, through the stop of both groups (a supervisor,
+// then k3s). down reports it once, after the last group, and says so in its log; it leaves it
+// listening, and gives it the release wait first (a listener that is gone by then is not foreign:
+// the next test).
+func TestDownReportsARealForeignListenerOnce(t *testing.T) {
 	const wait = 1500 * time.Millisecond
 	shortReleaseWait(t, wait)
 	ports := downBlock(t)
@@ -276,8 +277,9 @@ func TestDownReportsARealForeignListener(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer foreign.Close()
+	sup := startListenHelper(t, nil, addrs(ports.API+3))
 	k3s := startListenHelper(t, addrs(ports.API), nil)
-	l := downFixtureAt(t, ports, recorded(t, "k3s", k3s.pid))
+	l := downFixtureAt(t, ports, recorded(t, "k3s", k3s.pid), recorded(t, supervisorName, sup.pid))
 	log := &lockedLog{}
 	start := time.Now()
 	rep, err := Down(context.Background(), DownOptions{StateDir: l.dir, Grace: 20 * time.Second, Log: log})
@@ -287,10 +289,15 @@ func TestDownReportsARealForeignListener(t *testing.T) {
 	}
 	want := addrs(ports.API + 5)
 	if len(rep.ForeignOnPorts) != 1 || rep.ForeignOnPorts[0] != want[0] {
-		t.Fatalf("foreign = %v, want %v; log:\n%s", rep.ForeignOnPorts, want, log)
+		t.Fatalf("foreign = %v, want exactly %v; log:\n%s", rep.ForeignOnPorts, want, log)
 	}
-	if !strings.Contains(log.String(), "warning: "+want[0]+" listens on one of the recorded ports") {
-		t.Errorf("no warning for %s in the log:\n%s", want[0], log)
+	warning := "warning: " + want[0] + " listens on one of the recorded ports"
+	text := log.String()
+	if n := strings.Count(text, "warning:"); n != 1 || !strings.Contains(text, warning) {
+		t.Errorf("want one warning, %q; log:\n%s", warning, text)
+	}
+	if strings.Index(text, warning) < strings.Index(text, "sent SIGTERM to k3s") {
+		t.Errorf("the warning came before the last group was stopped; log:\n%s", text)
 	}
 	if took < wait {
 		t.Errorf("down took %s: it reported the listener without waiting %s for it to be released", took, wait)
@@ -298,8 +305,8 @@ func TestDownReportsARealForeignListener(t *testing.T) {
 	if refused(want[0]) {
 		t.Error("down closed the foreign listener")
 	}
-	if !refused(addrs(ports.API)[0]) {
-		t.Error("k3s's own port still listens")
+	if !refused(addrs(ports.API)[0]) || !refused(addrs(ports.API + 3)[0]) {
+		t.Error("a launched process's port still listens")
 	}
 }
 
@@ -340,5 +347,140 @@ func TestDownDoesNotReportAListenerThatGoesDuringTheWait(t *testing.T) {
 	}
 	if took := time.Since(start); took > 15*time.Second {
 		t.Errorf("down took %s: it waited out the whole release wait for a listener that was already gone", took)
+	}
+}
+
+// fakeRow is one LISTEN socket of a fake /proc/net/tcp.
+type fakeRow struct {
+	port  int
+	inode string
+}
+
+// writeListenRows writes the fake kernel's table of listening sockets (IPv4 loopback).
+func writeListenRows(t *testing.T, root string, rows []fakeRow) {
+	t.Helper()
+	tab := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+	for i, r := range rows {
+		tab += fmt.Sprintf("   %d: 0100007F:%04X 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1001        0 %s 1 0000000000000000 100 0 0 10 0\n", i, r.port, r.inode)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "net"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "net", "tcp"), []byte(tab), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const (
+	lingerSupervisorPID = 4301
+	lingerK3sPID        = 4302
+)
+
+// lingerHost is a launched host on a fake /proc tree, recorded as a supervisor (holding base+3) and
+// k3s (holding base). SIGTERM ends a process and releases its socket, except for the process named
+// keep: the fake kernel keeps that one's socket listening after the process is gone, which a real
+// kernel does while another process, outside the tree, still holds the same socket.
+type lingerHost struct {
+	root string
+	f    *fakePidfd
+	st   *State
+	rows map[int]fakeRow // pid -> the socket it holds, while the kernel still lists it
+	t    *testing.T
+}
+
+func newLingerHost(t *testing.T, keep int) *lingerHost {
+	t.Helper()
+	root := fakeProc(t, "boot-A")
+	ports := downBlock(t)
+	h := &lingerHost{root: root, f: newFakePidfd(lingerSupervisorPID, lingerK3sPID), t: t,
+		rows: map[int]fakeRow{lingerK3sPID: {ports.API, "9201"}, lingerSupervisorPID: {ports.API + 3, "9202"}}}
+	useFakePidfds(t, h.f)
+	var recs []ProcRec
+	for _, p := range []struct {
+		pid  int
+		name string
+	}{{lingerK3sPID, "k3s"}, {lingerSupervisorPID, supervisorName}} {
+		writeFakeProc(t, root, p.pid, "S", 1, 1000)
+		dir := filepath.Join(root, strconv.Itoa(p.pid), "fd")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("socket:["+h.rows[p.pid].inode+"]", filepath.Join(dir, "3")); err != nil {
+			t.Fatal(err)
+		}
+		recs = append(recs, ProcRec{Name: p.name, PID: p.pid, StartTicks: 1000, BootID: "boot-A"})
+	}
+	h.st = &State{Version: "v1.36.5+k3s1", Ports: ports, Procs: recs, StartedAt: time.Now()}
+	h.f.onSignal = func(pid int, sig syscall.Signal) {
+		if sig != syscall.SIGTERM {
+			return
+		}
+		h.f.setAlive(pid, false)
+		if pid != keep {
+			delete(h.rows, pid)
+		}
+		h.write()
+	}
+	h.write()
+	return h
+}
+
+func (h *lingerHost) write() {
+	var rows []fakeRow
+	for _, r := range h.rows {
+		rows = append(rows, r)
+	}
+	writeListenRows(h.t, h.root, rows)
+}
+
+// TestASocketOfOursThatStaysIsAHardErrorNotAForeignListener: a socket held by a launched process
+// still listens after that process is gone and the release wait is over. That stays the hard
+// error it was ("a socket they held still listens"), whichever group held it; it is never
+// re-labelled a foreign listener, which down would only warn about. The control releases both
+// sockets, so the errors come from the socket that stays and not from the fixture.
+func TestASocketOfOursThatStaysIsAHardErrorNotAForeignListener(t *testing.T) {
+	ports := downBlock(t)
+	for _, c := range []struct {
+		name string
+		keep int // the pid whose socket stays; 0: none
+		port int // that socket's port
+	}{
+		{"the supervisor group's socket stays", lingerSupervisorPID, ports.API + 3},
+		{"the k3s group's socket stays", lingerK3sPID, ports.API},
+		{"control: both are released", 0, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			shortReleaseWait(t, 300*time.Millisecond)
+			h := newLingerHost(t, c.keep)
+			log := &lockedLog{}
+			rep, err := stopRecorded(context.Background(), h.st, 5*time.Second, log)
+			if len(rep.ForeignOnPorts) != 0 || strings.Contains(log.String(), "warning") {
+				t.Errorf("foreign %v reported; log:\n%s", rep.ForeignOnPorts, log)
+			}
+			if c.keep == 0 {
+				if err != nil || rep.GoneListeners != 2 {
+					t.Errorf("control: err %v, %d listeners released, want nil and 2", err, rep.GoneListeners)
+				}
+				return
+			}
+			want := fmt.Sprintf("a socket they held still listens on 127.0.0.1:%d", c.port)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("stop = %v, want an error containing %q", err, want)
+			}
+		})
+	}
+}
+
+// TestForeignListenersLeavesOutTheSocketsOfLaunchedProcesses: of three listeners in the kernel's
+// table, one held by a launched process (its inode is in the set), one outside the recorded ports,
+// and one foreign on a recorded port, only the last is reported.
+func TestForeignListenersLeavesOutTheSocketsOfLaunchedProcesses(t *testing.T) {
+	shortReleaseWait(t, 300*time.Millisecond)
+	root := fakeProc(t, "boot-A")
+	ports := downBlock(t)
+	writeListenRows(t, root, []fakeRow{{ports.API, "9301"}, {ports.API + 5, "9302"}, {ports.API + 40, "9303"}})
+	got, err := foreignListeners(ports, map[string]bool{"9301": true}, nil)
+	if want := addrs(ports.API + 5); err != nil || len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("foreign = %v, %v; want %v", got, err, want)
 	}
 }
