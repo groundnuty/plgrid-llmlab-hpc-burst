@@ -59,11 +59,16 @@ type ManagedEvent struct {
 // reason code, its Kubernetes type set from the action and its note cut to
 // MaxEventNote bytes.
 func NewManagedEvent(action, reason, note string) ManagedEvent {
-	typ := EventKindOrdinary
+	return ManagedEvent{Type: EventKindOf(action), Reason: reason, Action: action, Note: CutNote(note)}
+}
+
+// EventKindOf is the Kubernetes event type of an event of HBEP-8's type
+// action: Warning for degraded and failing, Normal for the others.
+func EventKindOf(action string) string {
 	if action == EventActionDegraded || action == EventActionFailing {
-		typ = EventKindWarning
+		return EventKindWarning
 	}
-	return ManagedEvent{Type: typ, Reason: reason, Action: action, Note: CutNote(note)}
+	return EventKindOrdinary
 }
 
 // CutNote returns s cut to at most MaxEventNote bytes, on a character

@@ -58,12 +58,12 @@ var readyReasons = []string{v1alpha1.ReasonFileRead, v1alpha1.ReasonKeyAccepted,
 // failing and degraded for each bad condition reason (badAction), degraded
 // CatalogEntrySkipped and CatalogTruncated, and ready for each cleared
 // condition's reason, each with the Kubernetes type provider.NewManagedEvent
-// gives its action. Each is created at 0 for every managed Provider (HBEP-8,
+// gives its action (provider.EventKindOf). Each is created at 0 for every managed Provider (HBEP-8,
 // Raised events).
 func RaisedEvents() []eventcount.Series {
 	var out []eventcount.Series
 	add := func(action, reason string) {
-		out = append(out, eventcount.Series{Reason: reason, Action: action, Type: provider.NewManagedEvent(action, reason, "").Type})
+		out = append(out, eventcount.Series{Reason: reason, Action: action, Type: provider.EventKindOf(action)})
 	}
 	for _, reason := range []string{v1alpha1.ReasonFileRefused, v1alpha1.ReasonNoCredentialsFile, v1alpha1.ReasonKeyRejected,
 		v1alpha1.ReasonExpired, v1alpha1.ReasonReadsFailing, v1alpha1.ReasonExpiresWithinADay} {
