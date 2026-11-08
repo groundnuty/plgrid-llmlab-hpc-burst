@@ -12,9 +12,12 @@ package lifecycle
 //
 // The tests use #61's envtest block (managerPortBase) under envtest.lock. The
 // copies' metrics and health servers bind by address through controller-runtime
-// in this PR's block, 29720-29739 (portPairs); a copy whose bind finds its port
-// taken starts again on the next pair, at most maxBindRetries times, each
-// logged, as cmd/hpcburst-controller's tests do (#219).
+// in this PR's block, 29720-29739: the rig hands each copy, in this process or
+// the child, a pair of its own (portPairs), and no pair twice in a test. A copy
+// whose bind still finds a port taken, a rare race with some other process,
+// starts again on the next pair, at most maxBindRetries times, each logged, as
+// cmd/hpcburst-controller's tests do (#219). A normal run needs none; each test
+// logs its count, and TestMetricsCopiesStartAgainOnALostPort forces one.
 
 import (
 	"bytes"
@@ -67,11 +70,18 @@ type portPairs struct{ next int }
 
 func (p *portPairs) take(t *testing.T) copyPorts {
 	t.Helper()
+	c := p.peek(t)
+	p.next++
+	return c
+}
+
+// peek returns the pair take would hand out next, without taking it.
+func (p *portPairs) peek(t *testing.T) copyPorts {
+	t.Helper()
 	if p.next == servingPortPairs {
 		t.Fatalf("all %d port pairs of %d-%d are taken", servingPortPairs, servingPortBase, servingPortBase+2*servingPortPairs-1)
 	}
 	base := servingPortBase + 2*p.next
-	p.next++
 	return copyPorts{metrics: fmt.Sprintf("127.0.0.1:%d", base), health: fmt.Sprintf("127.0.0.1:%d", base+1)}
 }
 
@@ -188,6 +198,7 @@ func (g *servingRig) startChildCopy(t *testing.T) (*childCopy, copyPorts) {
 			t.Fatalf("the child copy exited (%v) before it answered on %s and %s; its output:\n%s", c.waitErr, p.metrics, p.health, c.out.String())
 		}
 		c.once.Do(func() {}) // it exited; the cleanup has nothing to stop
+		g.retries++
 		t.Logf("the child copy's start %d found a port of %s or %s taken; starting again on the next pair (retry %d of %d)",
 			attempt+1, p.metrics, p.health, attempt+1, maxBindRetries)
 	}
@@ -267,6 +278,8 @@ type servingRig struct {
 	kubeconfig, creds, builds string
 	cl                        client.Client
 	ports                     portPairs
+	// retries counts the copies' starts that found a port taken (startCopy, startChildCopy).
+	retries int
 }
 
 func newServingRig(t *testing.T) *servingRig {
@@ -366,6 +379,7 @@ func (g *servingRig) startCopy(t *testing.T, name string, o Options) (*inProcess
 		if !addrInUse(err.Error()) || attempt == maxBindRetries {
 			t.Fatalf("%s on %s and %s: %v", name, p.metrics, p.health, err)
 		}
+		g.retries++
 		t.Logf("%s's start %d found a port of %s or %s taken (%v); starting again on the next pair (retry %d of %d)",
 			name, attempt+1, p.metrics, p.health, err, attempt+1, maxBindRetries)
 		awaitUnregistered(t) // a Start that failed may still be unregistering its collectors
@@ -567,34 +581,14 @@ func (g *servingRig) writeAccounting(t *testing.T, name string) {
 // stops: B takes the Lease and exports both gauges at 1, with the live Instance unknown, reason
 // stale, as it has no report. Last, a copy that leads while one kind's informer is held unsynced
 // exports no hpcburst_ series, and exports them once it is released.
-//
-// Each copy's start also goes through #219's retry once: a stranger holds the first and the third
-// pair's health ports, which copy A's and copy B's NewManager find taken, so A serves on the second
-// pair and B on the fourth. The health port is the one held because its bind is in NewManager and
-// fails at once; a metrics port found taken fails Start, which returns only after the manager's
-// 30 s shutdown grace, the same retry at a cost every run would pay.
 func TestMetricsStandbyOnTwoManagers(t *testing.T) {
 	g := newServingRig(t)
-	stranger := func(addr string) {
-		l, err := net.Listen("tcp", addr)
-		if err != nil {
-			t.Fatalf("the stranger's bind of %s: %v", addr, err)
-		}
-		t.Cleanup(func() { _ = l.Close() })
-	}
-	stranger(fmt.Sprintf("127.0.0.1:%d", servingPortBase+1)) // the first pair's health port
-	stranger(fmt.Sprintf("127.0.0.1:%d", servingPortBase+5)) // the third pair's health port
+	defer g.logPorts(t)
 	a, pa := g.startCopy(t, "copy A", Options{})
-	if want := fmt.Sprintf("127.0.0.1:%d", servingPortBase+2); pa.metrics != want {
-		t.Fatalf("copy A serves its metrics on %s, want %s: the second pair, after one retry", pa.metrics, want)
-	}
 	g.awaitServing(t, "copy A", pa)
 	holderA := holderOf(g.leaseOf(t))
 
 	b, pb := g.startChildCopy(t)
-	if want := fmt.Sprintf("127.0.0.1:%d", servingPortBase+6); pb.metrics != want {
-		t.Fatalf("copy B serves its metrics on %s, want %s: the fourth pair, after one retry", pb.metrics, want)
-	}
 	eventually(t, 2*time.Minute, "copy B is a standby with synced caches", func() (bool, string) {
 		caches, leading := readyzCodes(t, pb.health)
 		return caches == http.StatusOK && leading == http.StatusInternalServerError, fmt.Sprintf("/readyz/caches %d, /readyz/leading %d; output:\n%s", caches, leading, b.out.String())
@@ -748,6 +742,7 @@ func awaitUnregistered(t *testing.T) {
 // later scrape of A has none, and A answers after B leads, so the window was there.
 func TestMetricsLostLeaseStopsBeforeANewCopyLeads(t *testing.T) {
 	g := newServingRig(t)
+	defer g.logPorts(t)
 	f := leasefault.New(v1alpha1.ControllerNamespace, v1alpha1.LeaseLifecycle)
 	defer f.OpenHeld()
 	a, pa := g.startCopy(t, "copy A", Options{Config: f.Config(g.cfg)})
@@ -834,4 +829,41 @@ func TestMetricsLostLeaseStopsBeforeANewCopyLeads(t *testing.T) {
 	}
 	t.Logf("fault at %s; copy A's first empty scrape ended %s after it; copy B acquired %s after it; %d scrapes of copy A answered after the take",
 		faultAt.Format(time.RFC3339Nano), got[firstEmpty].end.Sub(faultAt), bAcquire.Sub(faultAt), aliveAfter)
+}
+
+// logPorts logs the pairs the test's copies took and how many starts found a port taken.
+func (g *servingRig) logPorts(t *testing.T) {
+	t.Helper()
+	t.Logf("the copies took %d port pairs from %d; %d starts found a port taken", g.ports.next, servingPortBase, g.retries)
+}
+
+// TestMetricsCopiesStartAgainOnALostPort covers the tests' own retry (#219): a copy whose bind
+// finds a port taken starts again on the next pair, once, logged. A stranger holds the health port
+// of the pair a copy is about to take, first for an in-process copy, whose NewManager finds it
+// taken, then for the child, whose NewManager exits on it; each copy then serves on the next pair,
+// and the count of retries is one per copy. The health port is the one held because its bind is in
+// NewManager and fails at once; a metrics port found taken fails Start, which returns only after
+// the manager's 30 s shutdown grace, the same path at a higher cost.
+func TestMetricsCopiesStartAgainOnALostPort(t *testing.T) {
+	g := newServingRig(t)
+	defer g.logPorts(t)
+	stranger := func(addr string) {
+		l, err := net.Listen("tcp", addr)
+		if err != nil {
+			t.Fatalf("the stranger's bind of %s: %v", addr, err)
+		}
+		t.Cleanup(func() { _ = l.Close() })
+	}
+	held := g.ports.peek(t)
+	stranger(held.health)
+	_, pa := g.startCopy(t, "copy A", Options{})
+	if pa == held || g.retries != 1 {
+		t.Fatalf("copy A serves on %+v after %d retries; want the pair after %+v, after one", pa, g.retries, held)
+	}
+	held = g.ports.peek(t)
+	stranger(held.health)
+	_, pb := g.startChildCopy(t)
+	if pb == held || g.retries != 2 {
+		t.Fatalf("the child copy serves on %+v after %d retries in all; want the pair after %+v, and one retry of its own", pb, g.retries, held)
+	}
 }
