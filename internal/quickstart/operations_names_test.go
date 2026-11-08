@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -121,6 +122,10 @@ var guideNames = map[string]string{
 	"MaxSubmitJobsPerAccount":     provider.ReasonMaxSubmitJobsPerAccount,
 	"QOSGrpSubmitJobsLimit":       provider.ReasonQOSGrpSubmitJobsLimit,
 	"AssocGrpSubmitJobsLimit":     provider.ReasonAssocGrpSubmitJobsLimit,
+
+	// A failed check's reason code, in the message of QualificationFailed (HBEP-7, Instance start,
+	// Reasoning models): pkg/agentapi's, as the agent reports it.
+	"ReasoningBudgetExhausted": agentapi.ReasonReasoningBudgetExhausted,
 
 	// Retention modes (HBEP-7, Retention).
 	"Keep":            string(v1alpha1.RetentionKeep),

@@ -281,6 +281,19 @@ An Instance that fails ends with one of these reasons in `status.endReason`, and
 
 `Drained` is the normal end: a drain, a lease end or a shutdown. It is not a failure.
 
+### A reasoning model that exhausts its budget
+
+A model served with a `reasoning-parser` engine flag can fail qualification with the reason `ReasoningBudgetExhausted` in the message of its `QualificationFailed` end.
+
+- **Means:** a check asked for a short answer and got only reasoning back: the reply holds reasoning, no final answer and no tool call, and stopped at its output limit. The tool-call smoke test (`toolCall`) and the behaviour check (`behaviour`) each allow their own answer budget plus 4,096 tokens for reasoning, and judge only the final answer, so this is never counted as a wrong answer. The 4,096 is fixed in alpha, a known limit; a per-deployment setting comes after alpha ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Instance start, Reasoning models). The message names the check and, for the behaviour check, the context it ran at: "the behaviour check failed (`ReasoningBudgetExhausted`) at <n> context tokens: the model ran out of reasoning budget ..." (`internal/lifecycle/judge.go`, `judgeQualify`; `internal/agent/engine/chat.go`, `reasoningExhausted`).
+- **The controller** fails the Instance like any failed qualification: it ends with `QualificationFailed`, releases the Allocation and creates a replacement. The failure counts toward the class's `RestartLoop` streak, which bounds the repeats, and does not stop provisioning in the class, so a model that always runs out of budget fails again on each replacement until `RestartLoop` pauses the class or you change something (`internal/lifecycle/judge.go`, `judgeQualify`).
+- **You:** the budget cannot be raised in alpha. The one setting in your hands is the deployment's `spec.workload.contextTokens.longest`:
+  - it bounds the behaviour check's prompt, which runs at the smaller of `contextTokens.longest` and the context that leaves the 4,096 reasoning tokens room in the engine's `max-model-len`, and never below `contextTokens.typical`. Only a `longest` below the context in the message makes that prompt shorter, and it must stay at or above `contextTokens.typical`;
+  - it does not raise the budget, and it does not touch the tool-call smoke test, whose prompt is fixed: if the message names `toolCall`, this does not apply;
+  - warm-up's longest shape follows it too, and nothing then checks a context longer than `longest`; the front does not refuse a longer request;
+  - the edit reaches the replacement's checks, not the Instance that failed. Nothing in HBEP-7 says that a shorter prompt makes a model finish its reasoning in 4,096 tokens, so read the next failure's message to see whether it did;
+  - otherwise, wait for the per-deployment budget, or serve a model that finishes within 4,096 reasoning tokens at that context ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Instance start; `pkg/agentapi/checks.go`; `internal/agent/engine/warmup.go`).
+
 ## The Allocation
 
 An Allocation is one Slurm job, found by its tag. Its phase is in `status.atProvider.phase`: `Submitting`, `SubmissionUnknown`, `Held`, `Pending`, `Running`, `Ended`, `Failed`, `Lost` or `Refused` ([HBEP-4](../hbep/0004-provider-interface/README.md), Core operations, Phases). The Provider's controller writes its conditions:
