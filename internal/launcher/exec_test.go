@@ -37,6 +37,10 @@ func TestMain(m *testing.M) {
 		execLoopHelper()
 		return
 	}
+	if os.Getenv(listenEnv) != "" || os.Getenv(listenChildEnv) != "" {
+		runListenHelper()
+		return
+	}
 	if d := os.Getenv(abortLauncherEnv); d != "" { // before superviseEnv: its process sets both
 		runAbortedLauncherHelper(d)
 		return
