@@ -25,6 +25,13 @@
 // recorder call, or a listed wrapper at the parameter that carries the event;
 // otherwise the reasons are reported as unproven, and a recorder or wrapper
 // that receives an event no constructor built is a problem.
+//
+// Every recorder the module builds must be wrapped to count its events (#256,
+// HBEP-8, Raised events): the value of a call of a builder (a manager's
+// GetEventRecorder and GetEventRecorderFor, a broadcaster's NewRecorder) must
+// be the first argument of eventcount.Events or eventcount.Legacy and go
+// nowhere else. A builder used in any other way, or taken as a value, is a
+// RecorderNotCounted problem, and each site accepted is listed in Code.Recorders.
 package scan
 
 import (
