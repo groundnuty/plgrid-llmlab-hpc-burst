@@ -20,8 +20,10 @@ package main
 //
 // The residuals: that last window, from the release to the bind, which the retry
 // covers; frps, a real process of the tunnel tests, which binds its three ports
-// itself and has them released just before it starts (releaseForFrps); and a
-// restart of a copy, which rebinds the addresses its previous run closed.
+// itself and has them released just before it starts (releaseForFrps), and whose
+// start that finds one taken is repeated on a fresh block, with the binary
+// running on it (startFrps, issue #261); and a restart of a copy, which rebinds
+// the addresses its previous run closed.
 
 import (
 	"errors"
@@ -304,8 +306,16 @@ const maxBindRetries = 3
 // state directory, front and the rest of f stay: they do not depend on the ports.
 func repickPorts(t testing.TB, f flags, avoid ...flags) flags {
 	t.Helper()
+	return repickBlock(t, f, []int{agentapi.ControllerMetricsPortOffset}, avoid...)
+}
+
+// repickBlock is repickPorts for a block with the given other offsets (the ports
+// a process binds from an address, which the test releases just before that
+// process starts): the tunnel tests' include frps's three.
+func repickBlock(t testing.TB, f flags, other []int, avoid ...flags) flags {
+	t.Helper()
 	for range 50 {
-		base := holdBlock(t, []int{agentapi.FrpsPluginPortOffset}, []int{agentapi.ControllerMetricsPortOffset})
+		base := holdBlock(t, []int{agentapi.FrpsPluginPortOffset}, other)
 		clear := true
 		for _, a := range avoid {
 			if d := base - a.host.PortBase; d <= agentapi.ControllerMetricsPortOffset && d >= -agentapi.ControllerMetricsPortOffset {
@@ -313,7 +323,7 @@ func repickPorts(t testing.TB, f flags, avoid ...flags) flags {
 			}
 		}
 		if !clear {
-			dropBlock(base, agentapi.FrpsPluginPortOffset, agentapi.ControllerMetricsPortOffset)
+			dropBlock(base, append([]int{agentapi.FrpsPluginPortOffset}, other...)...)
 			continue
 		}
 		_, health := holdLoopback(t)
