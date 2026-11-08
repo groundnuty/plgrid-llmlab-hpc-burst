@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent"
@@ -624,37 +625,81 @@ func TestAJobCancellationDuringTheLastReportCutsItsTries(t *testing.T) {
 // after an agent stopped on instruction could read the 5 s timer that goroutine
 // armed through the timer hook, in place of the 2.5 s wait it was waiting for
 // (and a test waiting for the 5 s cut could take the same stray one and then
-// wait for it to fire). The test holds the goroutine at the point where it has
-// armed its timer, with the fake timers that never fire, and ends the watch:
-// the goroutine can leave only through that end, so a stop that does not wait
-// for it returns first.
+// wait for it to fire).
+//
+// The test gates the goroutine's cleanup: the stop function of the timer it
+// armed blocks until the test opens the gate. In a synctest bubble, Wait
+// returns only when every goroutine is blocked or gone, so after it the ending
+// of the watch has either returned (a stop that does not wait for the
+// goroutine) or is still waiting (one that does), whatever the schedule: no
+// timing, and no window for the goroutine to finish its cleanup first. Then the
+// gate opens and the end of the watch must return, with the timer stopped.
 func TestTheWatchOnTheLastReportsTriesHasReturnedWhenItIsEnded(t *testing.T) {
-	timers := installFakeTimers(t)
-	jobCtx, endJob := context.WithCancel(context.Background())
-	defer endJob()
-	var cut atomic.Bool
-	stop := agent.ClampAtTermForTest(jobCtx, func() { cut.Store(true) })
-	endJob() // the job's cancellation: the watch arms its cut
-	var at *armedTimer
-	select {
-	case at = <-timers.arms:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the watch armed no timer after the job's context ended")
-	}
-	if at.d != jobEndBudget {
-		t.Fatalf("the watch armed a %v timer, want %v", at.d, jobEndBudget)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		gate := make(chan struct{})
+		release := sync.OnceFunc(func() { close(gate) })
+		arms := make(chan *armedTimer, 8)
+		defer agent.SetTimerForTest(func(d time.Duration) (<-chan time.Time, func()) {
+			at := &armedTimer{d: d, c: make(chan time.Time)} // never fires
+			arms <- at
+			return at.c, func() {
+				<-gate // the goroutine's cleanup waits here
+				at.stopped.Store(true)
+			}
+		})()
 
-	stop()
-	if !at.stopped.Load() {
-		t.Error("the watch's timer was still running when its end returned: the watch's goroutine outlives the end of the watch")
-	}
-	if cut.Load() {
-		t.Error("the watch cut the tries though it was ended before its timer fired")
-	}
-	if n := len(timers.arms); n != 0 {
-		t.Errorf("the watch armed %d more timers", n)
-	}
+		jobCtx, endJob := context.WithCancel(context.Background())
+		var cut atomic.Bool
+		stop := sync.OnceFunc(agent.ClampAtTermForTest(jobCtx, func() { cut.Store(true) }))
+		defer func() {
+			// However the test ends, the goroutine must leave the bubble: open the
+			// gate, and end the watch if the test did not (stop is single-use).
+			release()
+			endJob()
+			stop()
+		}()
+
+		endJob() // the job's cancellation: the watch arms its cut
+		synctest.Wait()
+		var at *armedTimer
+		select {
+		case at = <-arms:
+		default:
+			t.Fatal("the watch armed no timer after the job's context ended")
+		}
+		if at.d != jobEndBudget {
+			t.Fatalf("the watch armed a %v timer, want %v", at.d, jobEndBudget)
+		}
+
+		returned := make(chan struct{})
+		go func() {
+			stop()
+			close(returned)
+		}()
+		synctest.Wait() // the end of the watch has done all it can with the gate shut
+		select {
+		case <-returned:
+			t.Error("the end of the watch returned while the watch's goroutine was still cleaning up: the goroutine outlives the end of the watch")
+		default:
+		}
+
+		release()
+		synctest.Wait()
+		select {
+		case <-returned:
+		default:
+			t.Error("the end of the watch did not return after the watch's goroutine finished its cleanup")
+		}
+		if !at.stopped.Load() {
+			t.Error("the watch's timer was still running when its end returned")
+		}
+		if cut.Load() {
+			t.Error("the watch cut the tries though it was ended before its timer fired")
+		}
+		if n := len(arms); n != 0 {
+			t.Errorf("the watch armed %d more timers", n)
+		}
+	})
 }
 
 // Periodic reports close when the stop begins, not when the workers have
