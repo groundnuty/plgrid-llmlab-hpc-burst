@@ -562,11 +562,24 @@ func TestSrunProgramThatIgnoresItsInput(t *testing.T) {
 // processes it can find are gone and the streams have had a moment to run
 // dry, with what was written, and the escapee is left running (the limit
 // doc.go names for jobs too). The test kills it by its PID.
+//
+// The escape must be over before the step's program exits: the sweep lists
+// the step's session, then kills each listed process that still has the
+// start time it was listed with, and a process listed before its setsid keeps
+// that start time after it (PR 255: 1 failure in 31 under load, the escapee's
+// PID written and the escapee gone). So the step waits for the escapee's PID,
+// which it writes only from its new session, before it exits. The escape
+// starts a third of a second late, so that a step that does not wait exits
+// before it, and the escapee never writes its PID: the order is forced, not
+// left to the scheduler.
 func TestSrunReturnsWhileAnEscapeeHoldsItsOutput(t *testing.T) {
 	r := newRunRig(t, RunMode{})
 	id := r.holdJob(r.s, r.root+"/release")
 	esc := r.root + "/escapee"
-	script := "echo before\nsetsid sh -c 'echo $$ > " + esc + "; exec sleep 300' &\nexit 0\n"
+	script := "echo before\n" +
+		"sh -c 'sleep 0.3; exec setsid sh -c \"echo \\$\\$ > " + esc + ".tmp && mv " + esc + ".tmp " + esc + "; exec sleep 300\"' &\n" +
+		"while [ ! -s " + esc + " ]; do sleep 0.01; done\n" +
+		"exit 0\n"
 	out, errOut, code := r.runAs(r.s, srunLine(id), []byte(script))
 	if out != "before\n" || errOut != "" || code != 0 {
 		t.Errorf("srun gave stdout %q, stderr %q, exit %d; want %q, none, 0", out, errOut, code, "before\n")
