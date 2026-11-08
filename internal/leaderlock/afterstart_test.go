@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr/funcr"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
@@ -338,5 +339,64 @@ func TestRenewalsRecordTheElectorsRelease(t *testing.T) {
 				t.Fatalf("%s left, needed %v; want needed %v with part of %s left", left, needed, tc.needed, ReleaseBudget)
 			}
 		})
+	}
+}
+
+// RenewedWithin (PR #254 review, B2) counts the renewTime of the last acquire
+// or renew write that named this holder and succeeded, set by the elector
+// before the write: within d of it the holder leads, from d on it does not. A
+// write that fails, or another holder's record, leaves it as it was; a release
+// ends it at once, whatever the release's outcome; a later renew starts it
+// again. A lock that never wrote does not lead.
+func TestRenewalsRenewedWithin(t *testing.T) {
+	const d = 10 * time.Second
+	f := &fakeLease{}
+	r := TrackRenewals(f)
+	t0 := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+	if r.RenewedWithin(t0, d) {
+		t.Fatal("a lock with no write leads")
+	}
+	at := func(ts time.Time) resourcelock.LeaderElectionRecord {
+		rec := renew
+		rec.RenewTime = metav1.NewTime(ts)
+		return rec
+	}
+	other := resourcelock.LeaderElectionRecord{HolderIdentity: "host_2222", LeaseDurationSeconds: 15, RenewTime: metav1.NewTime(t0.Add(5 * time.Second))}
+	ctx := context.Background()
+	for i, step := range []struct {
+		what    string
+		write   bool // the step writes rec; otherwise it only reads at now
+		rec     resourcelock.LeaderElectionRecord
+		failing int
+		now     time.Time
+		want    bool
+	}{
+		{"an acquire that lands", true, at(t0), 0, t0, true},
+		{"just before the bound", false, renew, 0, t0.Add(d - time.Nanosecond), true},
+		{"at the bound", false, renew, 0, t0.Add(d), false},
+		{"a renew that lands later", true, at(t0.Add(8 * time.Second)), 0, t0.Add(d), true},
+		{"a renew that fails", true, at(t0.Add(12 * time.Second)), 1, t0.Add(17 * time.Second), true},
+		{"the failed renew moved nothing", false, renew, 0, t0.Add(18 * time.Second), false},
+		{"another holder's record that lands", true, other, 0, t0.Add(9 * time.Second), true},
+		{"a renew that lands again", true, at(t0.Add(20 * time.Second)), 0, t0.Add(21 * time.Second), true},
+		{"a release that fails", true, release, 1, t0.Add(21 * time.Second), false},
+		{"a renew after the release", true, at(t0.Add(30 * time.Second)), 0, t0.Add(31 * time.Second), true},
+		{"a release that lands", true, release, 0, t0.Add(31 * time.Second), false},
+	} {
+		f.mu.Lock()
+		f.failing = step.failing
+		f.mu.Unlock()
+		switch {
+		case !step.write:
+		case i == 0:
+			if err := r.Create(ctx, step.rec); err != nil {
+				t.Fatalf("step %d, %s: Create returned %v", i, step.what, err)
+			}
+		default:
+			_ = r.Update(ctx, step.rec)
+		}
+		if got := r.RenewedWithin(step.now, d); got != step.want {
+			t.Fatalf("step %d, %s: leads %v, want %v", i, step.what, got, step.want)
+		}
 	}
 }

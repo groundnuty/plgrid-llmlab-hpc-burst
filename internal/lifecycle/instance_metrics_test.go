@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"bufio"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -13,8 +14,10 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"k8s.io/apimachinery/pkg/types"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -60,10 +63,29 @@ var (
 	labelPair  = regexp.MustCompile(`([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"`)
 )
 
-// scrape serves the rig's engine gauges as /metrics and parses the text.
+// collector is the rig's controller's collector, as NewManager builds it
+// (metricsCollectors): over the store (the manager's cache), the controller's
+// Backend and start, and serving, which says whether this copy serves. It
+// reads the rig's current Backend and Reconciler, so it follows a
+// restartController.
+func (rg *rig) collector(serving func() bool) *stateCollector {
+	return newStateCollector(rg.c, rg.backend, rg.clock, func() time.Time { return rg.r.memory().started }, serving)
+}
+
+func always() bool { return true }
+
+// storeCollector is a serving copy's collector over a store and a Backend, with
+// the system clock and a process that started now.
+func storeCollector(c client.Reader, b *Backend) *stateCollector {
+	started := time.Now()
+	return newStateCollector(c, b, SystemClock{}, func() time.Time { return started }, always)
+}
+
+// scrape serves the rig's series as /metrics, as the serving copy serves
+// them, and parses the text.
 func scrape(t *testing.T, rg *rig) exposition {
 	t.Helper()
-	return scrapeCollectors(t, &instanceCollector{inv: rg.r.inventory(), backend: rg.backend, clock: rg.clock})
+	return scrapeCollectors(t, rg.collector(always))
 }
 
 // scrapeCollectors serves collectors as /metrics through a pedantic registry
@@ -340,29 +362,35 @@ func TestMetricsNotReportedSeries(t *testing.T) {
 	}
 }
 
-// TestMetricsSeriesScope (`@hpc-burst-science-agent`, 31 Oct 2026, for #111):
-// an Instance with no agent yet has its info series and nothing else; once it
-// has ended, nothing of it is left.
+// TestMetricsSeriesScope (`@hpc-burst-science-agent`, 31 Oct 2026, for #111,
+// and 2 Nov 2026, for #249): an Instance with no agent yet has its info series
+// and every engine metric of worker-0 unknown, stale; once it has ended,
+// nothing of it is left.
 func TestMetricsSeriesScope(t *testing.T) {
-	t.Run("pending-info-only", func(t *testing.T) {
+	t.Run("pending-unknown", func(t *testing.T) {
 		rg := newRig(t)
 		rg.noAgents = true
 		rg.create(mdSpec("md"))
-		rg.run(time.Minute, startTick)
+		rg.until(10*time.Minute, startTick, "a pending Instance of md", func() bool {
+			insts := rg.instances("md")
+			return len(insts) == 1 && insts[0].Status.Phase == v1alpha1.InstancePending
+		})
 		insts := rg.instances("md")
-		if len(insts) != 1 || insts[0].Status.Phase != v1alpha1.InstancePending {
-			t.Fatalf("Instances %v, want one pending", phases(insts))
+		// The fixture must not register an agent first: that Instance would
+		// have been skipped as a pending one never was (#249).
+		if insts[0].Status.Agent != nil || len(rg.agents) != 0 {
+			t.Fatalf("the pending Instance has agent %+v, and %d agents run; the case proves nothing", insts[0].Status.Agent, len(rg.agents))
 		}
 		uid := string(insts[0].UID)
 		ex := scrape(t, rg)
-		var of []expoSample
-		for _, s := range ex.samples {
-			if s.labels["instance_uid"] == uid {
-				of = append(of, s)
-			}
+		if len(ex.find("hpcburst_instance_info", map[string]string{"instance_uid": uid})) != 1 {
+			t.Fatal("no info series for the pending Instance")
 		}
-		if len(of) != 1 || of[0].name != "hpcburst_instance_info" {
-			t.Fatalf("series of the pending Instance %v, want its info series only", of)
+		if u := ex.unknowns(uid, "worker-0"); len(u) != 1 || !slices.Equal(u[unknownStale], sorted(engineNames)) {
+			t.Fatalf("unknown series %v, want every engine metric of worker-0 with reason stale", u)
+		}
+		if series := ex.engineSeries(uid); len(series) != 0 {
+			t.Fatalf("engine series %v of an Instance with no agent; an unknown value is absent", series)
 		}
 	})
 	// HBEP-8, Test plan, Series scope: an Instance not yet ready whose report
@@ -577,41 +605,58 @@ func TestMetricsNoReportSinceRestartIsUnknown(t *testing.T) {
 // TestMetricsNewInstanceWithNoReportIsStale (HBEP-8, Test plan, Series scope):
 // an Instance whose agent has registered and has sent no report yet has its
 // info series and, for worker-0, every engine metric as an unknown series with
-// reason stale; with the agent judged unreachable, agent_unreachable. An
-// Instance with no agent yet has its info series only. The collector is built
-// over an inventory and an empty Backend, the state of a new Instance.
+// reason stale; with the agent judged unreachable (the Instance's condition),
+// agent_unreachable. An Instance with no agent yet is unknown the same way
+// (#249). The collector is built over a store of two Instances and an empty
+// Backend, the state of a new Instance; the store is the cache, so the unknown
+// series follow what the objects say at each scrape.
 func TestMetricsNewInstanceWithNoReportIsStale(t *testing.T) {
-	md := types.NamespacedName{Namespace: rigNS, Name: "md"}
-	inv := &inventory{}
-	inv.setIdentity(md, instanceEntry{uid: "uid-new", namespace: rigNS, name: "inst-new", md: "md", provider: "helios", gpuMdl: "gpu"})
-	inv.setIdentity(md, instanceEntry{uid: "uid-pending", namespace: rigNS, name: "inst-pending", md: "md", provider: "helios", gpuMdl: "gpu"})
-	inv.setAgent(md, "uid-new", "alloc-uid", "agent-1", false, 10*time.Second)
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	owner := []metav1.OwnerReference{{Kind: "ModelDeployment", Name: "md", Controller: ptrTo(true)}}
+	registered := &v1alpha1.Instance{
+		ObjectMeta: metav1.ObjectMeta{Namespace: rigNS, Name: "inst-new", UID: "uid-new", OwnerReferences: owner},
+		Spec:       v1alpha1.InstanceSpec{AllocationRef: v1alpha1.ObjectReference{Name: "alloc-new"}},
+		Status:     v1alpha1.InstanceStatus{Phase: v1alpha1.InstanceStarting, Agent: &v1alpha1.AgentRegistration{AgentInstanceID: "agent-1"}},
+	}
+	pending := &v1alpha1.Instance{
+		ObjectMeta: metav1.ObjectMeta{Namespace: rigNS, Name: "inst-pending", UID: "uid-pending", OwnerReferences: owner},
+		Spec:       v1alpha1.InstanceSpec{AllocationRef: v1alpha1.ObjectReference{Name: "alloc-pending"}},
+		Status:     v1alpha1.InstanceStatus{Phase: v1alpha1.InstancePending},
+	}
+	alloc := &v1alpha1.Allocation{ObjectMeta: metav1.ObjectMeta{Namespace: rigNS, Name: "alloc-new", UID: "alloc-uid"}}
+	c := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(registered, pending, alloc).Build()
 	scrapeNew := func() exposition {
-		return scrapeCollectors(t, &instanceCollector{inv: inv, backend: &Backend{}, clock: SystemClock{}})
+		return scrapeCollectors(t, storeCollector(c, &Backend{}))
 	}
 	check := func(reason string) {
 		t.Helper()
 		ex := scrapeNew()
-		if series := ex.engineSeries("uid-new"); len(series) != 0 {
-			t.Fatalf("engine series %v for an Instance with no report; an unknown value is absent", series)
+		for _, uid := range []string{"uid-new", "uid-pending"} {
+			if series := ex.engineSeries(uid); len(series) != 0 {
+				t.Fatalf("engine series %v for %s with no report; an unknown value is absent", series, uid)
+			}
+			if len(ex.find("hpcburst_instance_info", map[string]string{"instance_uid": uid})) != 1 {
+				t.Fatalf("no info series for %s", uid)
+			}
 		}
 		if u := ex.unknowns("uid-new", "worker-0"); len(u) != 1 || !slices.Equal(u[reason], sorted(engineNames)) {
 			t.Fatalf("unknown series %v, want every engine metric of worker-0 with reason %s", u, reason)
 		}
-		if len(ex.find("hpcburst_instance_info", map[string]string{"instance_uid": "uid-new"})) != 1 {
-			t.Fatal("no info series for the new Instance")
-		}
-		var pending []expoSample
-		for _, s := range ex.samples {
-			if s.labels["instance_uid"] == "uid-pending" {
-				pending = append(pending, s)
-			}
-		}
-		if len(pending) != 1 || pending[0].name != "hpcburst_instance_info" {
-			t.Fatalf("series of the Instance with no agent %v, want its info series only", pending)
+		if u := ex.unknowns("uid-pending", "worker-0"); len(u) != 1 || !slices.Equal(u[unknownStale], sorted(engineNames)) {
+			t.Fatalf("unknown series %v of the Instance with no agent, want every engine metric of worker-0 with reason stale", u)
 		}
 	}
 	check(unknownStale)
-	inv.setAgent(md, "uid-new", "alloc-uid", "agent-1", true, 10*time.Second)
+	var got v1alpha1.Instance
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(registered), &got); err != nil {
+		t.Fatal(err)
+	}
+	got.Status.Conditions = []metav1.Condition{{Type: v1alpha1.ConditionAgentUnreachable, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonReportsMissing, LastTransitionTime: metav1.Now()}}
+	if err := c.Update(context.Background(), &got); err != nil {
+		t.Fatal(err)
+	}
 	check(unknownAgentUnreachable)
 }

@@ -124,6 +124,11 @@ type Renewals struct {
 	// before. released is whether that Update returned nil.
 	releaseAt time.Time
 	released  bool
+	// renewedAt is the renewTime of the last acquire or renew write that
+	// named this holder and succeeded, as the elector set it before sending
+	// the write; zero before any, and again from the start of a release
+	// (RenewedWithin).
+	renewedAt time.Time
 }
 
 // Create implements resourcelock.Interface.
@@ -147,6 +152,7 @@ func (r *Renewals) Update(ctx context.Context, ler resourcelock.LeaderElectionRe
 // outcome: the elector's release, which comes before any release after Start.
 func (r *Renewals) release(ctx context.Context, ler resourcelock.LeaderElectionRecord) error {
 	r.mu.Lock()
+	r.renewedAt = time.Time{} // giving the Lease up: it leads no more
 	first := r.releaseAt.IsZero()
 	if first {
 		r.releaseAt = time.Now()
@@ -184,12 +190,42 @@ func (r *Renewals) wrote(ctx context.Context, ler resourcelock.LeaderElectionRec
 	if ler.HolderIdentity == "" || ler.HolderIdentity != r.Identity() {
 		return
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err == nil {
+		r.renewedAt = ler.RenewTime.Time
+	}
 	if err != nil && errors.Is(ctx.Err(), context.Canceled) {
 		return
 	}
+	r.ok = err == nil
+}
+
+// RenewedWithin reports whether this holder leads at now by its own writes:
+// its last acquire or renew write that named it succeeded, that write's
+// renewTime is less than d before now, and no release has started since. It
+// reads no Lease. It is the lifecycle controller's "leading" readiness check,
+// which gates what the controller serves (HBEP-8, Unknown samples: a copy
+// exports its state-derived series only while it leads; PR #254 review, B2).
+//
+// The elector's Elected channel, once closed, stays closed, and client-go
+// calls OnStoppedLeading only after its release read
+// (k8s.io/client-go v0.35.3, tools/leaderelection/leaderelection.go:
+// renew, then release, then Run's deferred OnStoppedLeading), which can
+// outlast the Lease's expiry; another copy can lead meanwhile. A renewTime is
+// set before its write is sent, and another copy that read the record can
+// take the Lease only once it has seen it unchanged for leaseDurationSeconds
+// by its own clock (isLeaseValid against the time it first read it, after the
+// write's commit): not before renewTime + leaseDuration. So with d no longer
+// than the lease duration this holder stops counting itself as leader no
+// later than any other copy can lead. The lifecycle manager passes its renew
+// deadline (10 s against a 15 s lease), so the turn comes at least 5 s
+// before another copy can lead, and before its own elector gives up, whose
+// failing renew poll starts a retry period after the last success.
+func (r *Renewals) RenewedWithin(now time.Time, d time.Duration) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.ok = err == nil
+	return !r.renewedAt.IsZero() && now.Before(r.renewedAt.Add(d))
 }
 
 // ledToTheEnd reports whether the last counted write succeeded: the manager

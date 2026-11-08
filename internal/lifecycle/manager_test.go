@@ -457,18 +457,34 @@ func TestManagerOnControlPlane(t *testing.T) {
 		t.Fatalf("GET /readyz/serving: %d, want 404 (the check was split into %s and %s)", code, ReadyzCaches, ReadyzLeading)
 	}
 	// /metrics on loopback at the configured address (HBEP-8, Metrics): the
-	// pending Instance's info series, and controller-runtime's own work-queue
-	// metrics beside it.
-	eventually(t, time.Minute, "/metrics serves the Instance's info series", func() (bool, string) {
+	// pending Instance's info series, its engine metrics unknown (stale, since
+	// it has no agent; the leader lists it from its cache, wired through
+	// NewManager's cached client and readiness), both reads' success gauges at
+	// 1, which needs both registered on one registry (the manager would not
+	// start otherwise), and controller-runtime's own work-queue metrics beside
+	// them (`@hpc-burst-science-agent`, 2 and 6 Nov 2026, for #249).
+	eventually(t, time.Minute, "/metrics serves the Instance's info series, its unknown samples and both success gauges", func() (bool, string) {
 		body := getBody(t, "http://"+managerMetricsAddr+"/metrics")
-		info := fmt.Sprintf(`instance_uid="%s"`, in.UID)
-		for _, line := range strings.Split(body, "\n") {
-			if strings.HasPrefix(line, "hpcburst_instance_info{") && strings.Contains(line, info) && strings.HasSuffix(line, " 1") &&
-				strings.Contains(body, "workqueue_") {
-				return true, ""
+		for _, c := range []string{collectorInstances, collectorAccounting} {
+			if !strings.Contains(body, fmt.Sprintf("hpcburst_collector_success{collector=%q} 1\n", c)) {
+				return false, "no hpcburst_collector_success{collector=" + c + "} 1"
 			}
 		}
-		return false, "no hpcburst_instance_info line for " + string(in.UID)
+		info := fmt.Sprintf(`instance_uid="%s"`, in.UID)
+		hasInfo, unknown := false, 0
+		for _, line := range strings.Split(body, "\n") {
+			if strings.HasPrefix(line, "hpcburst_instance_info{") && strings.Contains(line, info) && strings.HasSuffix(line, " 1") {
+				hasInfo = true
+			}
+			if strings.HasPrefix(line, "hpcburst_instance_metrics_unknown{") && strings.Contains(line, info) &&
+				strings.Contains(line, `worker="worker-0"`) && strings.Contains(line, `reason="stale"`) && strings.HasSuffix(line, " 1") {
+				unknown++
+			}
+		}
+		if !hasInfo || unknown != len(engineNames) || !strings.Contains(body, "workqueue_") {
+			return false, fmt.Sprintf("info series %v, %d of %d unknown samples for %s", hasInfo, unknown, len(engineNames), in.UID)
+		}
+		return true, ""
 	})
 	// A first start, with no previous Lease, raises no ObservationGap (HBEP-8,
 	// Gaps after a restart). The collision's event above shows the recorder
