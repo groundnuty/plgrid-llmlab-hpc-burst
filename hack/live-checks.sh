@@ -825,16 +825,21 @@ wait_child() {
 # ---------------------------------------------------------------- results
 
 # not_run_verdict <name> <rc> <failed> <skipped> <named result>: the NOT RUN protocol (see the header). True only for
-# a row with a start wait, a row of the owner-go table (a bound on its wait in the queue), or a tunnel row (its job
-# still pending a minute before its deployment's first end: the science agent's ruling on PR 255), whose test skipped
-# once at the top level with no failure, exit status 0 and the marker, a regular file (not a link) in this run's record
-# directory. Anything else is not a NOT RUN.
+# a row with a start wait, or a row of the owner-go table (a bound on its wait in the queue), or a tunnel row whose
+# marker says its job was still pending a minute before its deployment's first end (the science agent's ruling on PR
+# 255; first_end_marker), whose test skipped once at the top level with no failure, exit status 0 and the marker, a
+# regular file (not a link) in this run's record directory. Anything else is not a NOT RUN.
 not_run_verdict() {
   local n=$1 rc=$2 failed=$3 skipped=$4 named=$5
-  [ "${SWAIT[$n]:--}" != - ] || [ -n "${OGSET[$n]:-}" ] || case $n in tunnel-hour-*) true ;; *) false ;; esac || return 1
   [ "$named" = SKIP ] && [ "$rc" = 0 ] && [ "$failed" = 0 ] && [ "$skipped" = 1 ] || return 1
-  [ -n "$REC_DIR" ] && [ -f "$REC_DIR/not-run.txt" ] && [ ! -L "$REC_DIR/not-run.txt" ]
+  [ -n "$REC_DIR" ] && [ -f "$REC_DIR/not-run.txt" ] && [ ! -L "$REC_DIR/not-run.txt" ] || return 1
+  [ "${SWAIT[$n]:--}" != - ] || [ -n "${OGSET[$n]:-}" ] && return 0
+  case $n in tunnel-hour-*) first_end_marker ;; *) return 1 ;; esac
 }
+
+# first_end_marker: the run's NOT RUN marker says its job was still pending a minute before its deployment's first
+# end (internal/alpha, NotRunNote), the one NOT RUN of a tunnel row that has no other bound.
+first_end_marker() { grep -q "a minute before the deployment's first end" "$REC_DIR/not-run.txt" 2>/dev/null; }
 
 # judge <name> <log> <rc>: the verdict from the test's verbose log and exit status. A skip is not a pass, at
 # any level. Only counts and fixed labels reach the screen: a subtest's name can hold anything.
@@ -851,7 +856,7 @@ judge() {
     NOT_RUN=1
     if [ "${SWAIT[$n]:--}" != - ]; then
       say "$n: NOT RUN (a job did not start within ${SWAIT[$n]} min of its acceptance and was cancelled by its tag; not a failure)"
-    elif grep -q "a minute before the deployment's first end" "$REC_DIR/not-run.txt" 2>/dev/null; then
+    elif first_end_marker; then
       say "$n: NOT RUN (a job was still pending a minute before its deployment's first end and was cancelled by its tag; not a failure)"
     else
       say "$n: NOT RUN (a job was still pending after $(fmt_pending "$(pending_max "$n")") in the queue and was cancelled by its tag; not a failure)"
