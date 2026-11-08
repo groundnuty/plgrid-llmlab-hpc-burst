@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -31,6 +32,12 @@ const (
 func SetTimerForTest(f func(d time.Duration) (<-chan time.Time, func())) (reset func()) {
 	timerHook.Store(&f)
 	return func() { timerHook.Store(nil) }
+}
+
+// ClampAtTermForTest starts the watch that cuts the last report's tries at a job cancellation (clampAtTerm) and
+// returns the function that ends it.
+func ClampAtTermForTest(jobCtx context.Context, cancel context.CancelFunc) (stop func()) {
+	return clampAtTerm(jobCtx, cancel)
 }
 
 // QueuedReportForTest says whether a periodic report waits in a's reporter, not yet taken to be sent.

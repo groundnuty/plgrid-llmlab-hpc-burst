@@ -618,6 +618,45 @@ func TestAJobCancellationDuringTheLastReportCutsItsTries(t *testing.T) {
 	}
 }
 
+// The watch that cuts the last report's tries at a job cancellation has
+// returned by the time it is ended, with its timer stopped. Issue #262: the
+// watch's goroutine used to outlive the end of the watch, so a rig that ran
+// after an agent stopped on instruction could read the 5 s timer that goroutine
+// armed through the timer hook, in place of the 2.5 s wait it was waiting for
+// (and a test waiting for the 5 s cut could take the same stray one and then
+// wait for it to fire). The test holds the goroutine at the point where it has
+// armed its timer, with the fake timers that never fire, and ends the watch:
+// the goroutine can leave only through that end, so a stop that does not wait
+// for it returns first.
+func TestTheWatchOnTheLastReportsTriesHasReturnedWhenItIsEnded(t *testing.T) {
+	timers := installFakeTimers(t)
+	jobCtx, endJob := context.WithCancel(context.Background())
+	defer endJob()
+	var cut atomic.Bool
+	stop := agent.ClampAtTermForTest(jobCtx, func() { cut.Store(true) })
+	endJob() // the job's cancellation: the watch arms its cut
+	var at *armedTimer
+	select {
+	case at = <-timers.arms:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the watch armed no timer after the job's context ended")
+	}
+	if at.d != jobEndBudget {
+		t.Fatalf("the watch armed a %v timer, want %v", at.d, jobEndBudget)
+	}
+
+	stop()
+	if !at.stopped.Load() {
+		t.Error("the watch's timer was still running when its end returned: the watch's goroutine outlives the end of the watch")
+	}
+	if cut.Load() {
+		t.Error("the watch cut the tries though it was ended before its timer fired")
+	}
+	if n := len(timers.arms); n != 0 {
+		t.Errorf("the watch armed %d more timers", n)
+	}
+}
+
 // Periodic reports close when the stop begins, not when the workers have
 // stopped (issue #223, review B3). A worker that ignores TERM keeps the agent
 // stopping for the whole stop grace: no report from that time says stopping,
