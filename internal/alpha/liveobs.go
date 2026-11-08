@@ -124,12 +124,6 @@ func StreamOf(rec usage.Record, end ClientEnd) Stream {
 		s.Tokens = int(*rec.CompletionTokens)
 	}
 	s.Complete = rec.Status == http.StatusOK && rec.Finish != nil && rec.CutBy == nil && end.Done && end.Finished && end.ErrorCode == ""
-	// The upload of the body, as the front sent it upstream (issue #224); absent when it never wrote it.
-	if rec.BodyBytes != nil {
-		s.BodyBytes = int(*rec.BodyBytes)
-	}
-	s.BodyStart, _ = time.Parse(time.RFC3339Nano, rec.BodyStartTime)
-	s.BodyEnd, _ = time.Parse(time.RFC3339Nano, rec.BodyEndTime)
 	return s
 }
 

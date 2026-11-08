@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/usage"
 )
 
 func TestTheUploadsRequestBody(t *testing.T) {
@@ -34,23 +33,6 @@ func TestTheUploadsRequestBody(t *testing.T) {
 		if m.Model != "example-org/example-model" || m.MaxTokens != 1 || !m.Stream || len(m.Messages) != 1 || m.Messages[0].Content != "hello" || len(m.User) < n-200 {
 			t.Errorf("%d bytes: %+v (user %d bytes)", n, m.Messages, len(m.User))
 		}
-	}
-}
-
-// The upload as the front recorded it reaches the observation; a record without one gives none.
-func TestStreamOfTakesTheUploadFromTheRecord(t *testing.T) {
-	n := int64(131072)
-	rec := usage.Record{RequestID: "r1", StartTime: "2026-11-02T09:00:00.000Z", EndTime: "2026-11-02T09:00:01.000Z", Status: 200,
-		BodyBytes: &n, BodyStartTime: "2026-11-02T09:00:00.000250Z", BodyEndTime: "2026-11-02T09:00:00.004750Z"}
-	s := StreamOf(rec, ClientEnd{})
-	want0 := time.Date(2026, 11, 2, 9, 0, 0, 250_000, time.UTC)
-	want1 := time.Date(2026, 11, 2, 9, 0, 0, 4_750_000, time.UTC)
-	if s.BodyBytes != 131072 || !s.BodyStart.Equal(want0) || !s.BodyEnd.Equal(want1) || !s.UploadRecorded() {
-		t.Errorf("StreamOf = %d bytes, %s to %s", s.BodyBytes, s.BodyStart, s.BodyEnd)
-	}
-	none := StreamOf(usage.Record{RequestID: "r2", Status: 200}, ClientEnd{})
-	if none.BodyBytes != 0 || none.UploadRecorded() {
-		t.Errorf("a record with no upload gave %d bytes, recorded %v", none.BodyBytes, none.UploadRecorded())
 	}
 }
 

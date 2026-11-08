@@ -315,8 +315,6 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'ledger.go@@	return len(j.State) > 0 && endedStates[strings.ToUpper(j.State[0])]@@	return len(j.State) > 0'
   'ledger.go@@		if !endedBase(j) {@@		if false {'
   # Issue #224 in the live tunnel hour: the upload as the front records it, its request body and its rate.
-  'liveobs.go@@	if rec.BodyBytes != nil {@@	if false {'
-  'liveobs.go@@	s.BodyStart, _ = time.Parse(time.RFC3339Nano, rec.BodyStartTime)@@	s.BodyStart, _ = time.Parse(time.RFC3339Nano, rec.BodyEndTime)'
   'liveobs.go@@		if !u.Complete || !u.UploadRecorded() || u.BodyBytes <= 0 {@@		if !u.UploadRecorded() || u.BodyBytes <= 0 {'
   'liveobs.go@@		if !u.Complete || !u.UploadRecorded() || u.BodyBytes <= 0 {@@		if !u.Complete || u.BodyBytes <= 0 {'
   'liveobs.go@@		if u.BodyStart.Before(allOpen) || u.BodyEnd.After(firstEnd) {@@		if u.BodyEnd.After(firstEnd) {'

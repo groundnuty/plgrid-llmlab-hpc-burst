@@ -311,7 +311,6 @@ func (p *Proxy) send(x *exchange, r *http.Request, t *target, body []byte, rb re
 		d := p.cfg.StreamHeadersTimeout.D()
 		ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{WroteRequest: func(httptrace.WroteRequestInfo) { x.armHeaders(gen, d) }})
 	}
-	ctx = httptrace.WithClientTrace(ctx, x.bodyTrace(len(out)))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return nil, &dialError{err: err}
@@ -414,7 +413,6 @@ func (p *Proxy) finish(x *exchange) {
 	end := p.clk.Now()
 	x.rec.EndTime = usage.Time(end)
 	x.rec.DurationMs = end.Sub(x.start).Milliseconds()
-	x.recordBody()
 	// Counted whether or not its record could be written: the client got
 	// its answer either way, and the sink counts the loss on its own.
 	p.metrics.observe(x.rec)
