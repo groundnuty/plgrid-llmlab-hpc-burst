@@ -79,11 +79,27 @@ func (p *portPairs) take(t *testing.T) copyPorts {
 func addrInUse(s string) bool { return strings.Contains(s, "address already in use") }
 
 // bound reports whether a copy answers on both its ports: /healthz 200, and /metrics 200 with
-// controller-runtime's series (controlSeries), so the answer is a copy's, not a stranger's.
-func bound(t *testing.T, p copyPorts) bool {
-	code, body := scrapeText(p.metrics)
-	return getStatus(t, "http://"+p.health+"/healthz") == http.StatusOK && code == http.StatusOK && strings.Contains(body, controlSeries)
+// controller-runtime's series (controlSeries), so the answer is a copy's, not a stranger's. It
+// probes with bindProbe: a stranger that holds a port may accept and never answer.
+func bound(p copyPorts) bool {
+	get := func(url string) (int, string) {
+		resp, err := bindProbe.Get(url)
+		if err != nil {
+			return 0, ""
+		}
+		defer resp.Body.Close()
+		var b bytes.Buffer
+		_, _ = b.ReadFrom(resp.Body)
+		return resp.StatusCode, b.String()
+	}
+	health, _ := get("http://" + p.health + "/healthz")
+	code, body := get("http://" + p.metrics + "/metrics")
+	return health == http.StatusOK && code == http.StatusOK && strings.Contains(body, controlSeries)
 }
+
+// bindProbe is bound's client: no connection kept alive (probeClient's reason), and a short
+// timeout, since bound is polled.
+var bindProbe = &http.Client{Transport: &http.Transport{DisableKeepAlives: true}, Timeout: time.Second}
 
 // bindWait bounds the wait for a copy to answer on its ports.
 const bindWait = time.Minute
@@ -183,7 +199,7 @@ func (c *childCopy) awaitBound(t *testing.T, p copyPorts) bool {
 	t.Helper()
 	deadline := time.Now().Add(bindWait)
 	for {
-		if bound(t, p) {
+		if bound(p) {
 			return true
 		}
 		select {
@@ -369,7 +385,7 @@ func (g *servingRig) launchCopy(t *testing.T, name string, o Options, p copyPort
 	go func() { c.done <- mgr.Start(mctx) }()
 	t.Cleanup(func() { c.stop(t, name) })
 	deadline := time.Now().Add(bindWait)
-	for !bound(t, p) {
+	for !bound(p) {
 		select {
 		case err := <-c.done:
 			c.once.Do(func() {}) // it has returned; the cleanup must not wait for it
@@ -552,9 +568,11 @@ func (g *servingRig) writeAccounting(t *testing.T, name string) {
 // stale, as it has no report. Last, a copy that leads while one kind's informer is held unsynced
 // exports no hpcburst_ series, and exports them once it is released.
 //
-// Each copy's start also goes through #219's retry once: a stranger holds the first pair's metrics
-// port, which copy A's Start finds taken, and the third pair's health port, which copy B's
-// NewManager finds taken, so A serves on the second pair and B on the fourth.
+// Each copy's start also goes through #219's retry once: a stranger holds the first and the third
+// pair's health ports, which copy A's and copy B's NewManager find taken, so A serves on the second
+// pair and B on the fourth. The health port is the one held because its bind is in NewManager and
+// fails at once; a metrics port found taken fails Start, which returns only after the manager's
+// 30 s shutdown grace, the same retry at a cost every run would pay.
 func TestMetricsStandbyOnTwoManagers(t *testing.T) {
 	g := newServingRig(t)
 	stranger := func(addr string) {
@@ -564,7 +582,7 @@ func TestMetricsStandbyOnTwoManagers(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = l.Close() })
 	}
-	stranger(fmt.Sprintf("127.0.0.1:%d", servingPortBase))   // the first pair's metrics port
+	stranger(fmt.Sprintf("127.0.0.1:%d", servingPortBase+1)) // the first pair's health port
 	stranger(fmt.Sprintf("127.0.0.1:%d", servingPortBase+5)) // the third pair's health port
 	a, pa := g.startCopy(t, "copy A", Options{})
 	if want := fmt.Sprintf("127.0.0.1:%d", servingPortBase+2); pa.metrics != want {
