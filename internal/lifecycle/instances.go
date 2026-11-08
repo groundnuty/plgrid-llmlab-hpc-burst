@@ -422,25 +422,18 @@ func (p *pass) running(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) error 
 func (p *pass) agent(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, st settings) (agentView, error) {
 	rep, at, from := p.r.Backend.latest(alloc.UID)
 	av := agentView{now: p.now, probeInterval: st.probeInterval}
-	last := p.mem.started
-	if in.Status.StartInstructionTime != nil && in.Status.StartInstructionTime.After(last) {
-		last = in.Status.StartInstructionTime.Time
+	var startInstr, reportAt time.Time
+	if in.Status.StartInstructionTime != nil {
+		startInstr = in.Status.StartInstructionTime.Time
 	}
 	if rep != nil && from == in.Status.Agent.AgentInstanceID {
-		if at.After(last) {
-			last = at
-		}
+		reportAt = at
 		if rep.Instance != nil && rep.Instance.UID == string(in.UID) {
 			av.report, av.reportAt, av.reportTime = rep.Instance, at, rep.Time
 		}
 	}
-	deadline := last.Add(st.agentTimeout)
-	// After the controller's own restart every agent registers again within a
-	// long poll and a report interval; none is judged unreachable before that,
-	// however short health.agentTimeout is (HBEP-7, registration is soft state).
-	if grace := p.mem.started.Add(agentGrace); grace.After(deadline) {
-		deadline = grace
-	}
+	last := lastAgentSign(p.mem.started, startInstr, reportAt)
+	deadline := agentDeadline(p.mem.started, startInstr, reportAt, st.agentTimeout)
 	av.unreachable = !p.now.Before(deadline)
 	if !av.unreachable {
 		p.at(deadline)
@@ -469,6 +462,34 @@ func (p *pass) agent(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, st setti
 			fmt.Sprintf("the agent has sent no report since %s, longer than health.agentTimeout (%s); the Instance's engine readings are unknown, and nothing restarts on that alone", last.UTC().Format(time.RFC3339), st.agentTimeout))
 	}
 	return av, nil
+}
+
+// lastAgentSign is the last sign of an Instance's agent the controller counts:
+// this process's start, the Instance's start instruction, or the agent's
+// latest report to this process, whichever is latest (zero times are none).
+func lastAgentSign(started, startInstr, reportAt time.Time) time.Time {
+	last := started
+	if startInstr.After(last) {
+		last = startInstr
+	}
+	if reportAt.After(last) {
+		last = reportAt
+	}
+	return last
+}
+
+// agentDeadline is when an Instance's agent is judged unreachable:
+// health.agentTimeout after its last sign (lastAgentSign). After the
+// controller's own restart every agent registers again within a long poll and
+// a report interval; none is judged unreachable before that, however short
+// health.agentTimeout is (HBEP-7, registration is soft state). The pass and
+// the metrics collector judge by it alike.
+func agentDeadline(started, startInstr, reportAt time.Time, timeout time.Duration) time.Time {
+	deadline := lastAgentSign(started, startInstr, reportAt).Add(timeout)
+	if grace := started.Add(agentGrace); grace.After(deadline) {
+		deadline = grace
+	}
+	return deadline
 }
 
 // drainStart returns the Instance's drain start: its lease end minus its drain

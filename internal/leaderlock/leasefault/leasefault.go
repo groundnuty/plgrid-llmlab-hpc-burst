@@ -63,6 +63,14 @@ const (
 	// renews fail until it gives up its leadership, and its release read fails
 	// too, so the Lease keeps naming the holder.
 	All
+	// RenewsFailReleaseHeld fails every marked request of the lock, so the
+	// elector's renews fail until it gives up its leadership, and holds every
+	// read that is not marked, client-go's release read, until OpenHeld is
+	// called, whatever the read's context says, then fails it. client-go calls
+	// OnStoppedLeading only after that read returns, so the manager runs on,
+	// with its Elected channel closed, for as long as the test holds it: past
+	// the Lease's expiry, and past another copy's take (PR #254 review, B2).
+	RenewsFailReleaseHeld
 )
 
 // Request is one request of the lock for the Lease that reached the
@@ -96,12 +104,21 @@ type Faults struct {
 	delay     time.Duration
 	conflicts int
 	requests  []Request
+
+	// held is closed by OpenHeld (RenewsFailReleaseHeld).
+	held     chan struct{}
+	openHeld sync.Once
 }
 
 // New returns Faults for the Lease name in namespace, failing nothing yet.
 func New(namespace, name string) *Faults {
-	return &Faults{path: "/apis/coordination.k8s.io/v1/namespaces/" + namespace + "/leases/" + name}
+	return &Faults{path: "/apis/coordination.k8s.io/v1/namespaces/" + namespace + "/leases/" + name, held: make(chan struct{})}
 }
+
+// OpenHeld lets the reads RenewsFailReleaseHeld holds go on, to fail, and
+// every later one fail at once. A test that sets that mode calls it before it
+// ends, also on failure, or the held request's goroutine stays blocked.
+func (f *Faults) OpenHeld() { f.openHeld.Do(func() { close(f.held) }) }
 
 // Set changes the mode; the requests already recorded are kept.
 func (f *Faults) Set(m Mode) {
@@ -189,8 +206,8 @@ func (f *Faults) MarkedAfterReleaseRead() int {
 }
 
 // arrive records the request and returns its index, its hold and what to do
-// with it.
-func (f *Faults) arrive(req *http.Request) (i int, delay time.Duration, fail, conflict bool) {
+// with it. held is true for a request to hold until OpenHeld, then fail.
+func (f *Faults) arrive(req *http.Request) (i int, delay time.Duration, fail, conflict, held bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	r := Request{Method: req.Method, Marked: Marked(req.Context()), At: time.Now()}
@@ -199,13 +216,16 @@ func (f *Faults) arrive(req *http.Request) (i int, delay time.Duration, fail, co
 		r.Failed = r.Method == http.MethodGet && !r.Marked
 	case All:
 		r.Failed = true
+	case RenewsFailReleaseHeld:
+		held = r.Method == http.MethodGet && !r.Marked
+		r.Failed = r.Marked || held
 	}
 	if !r.Failed && f.conflicts > 0 && r.Method == http.MethodPut && !r.Marked {
 		f.conflicts--
 		r.Conflict = true
 	}
 	f.requests = append(f.requests, r)
-	return len(f.requests) - 1, f.delay, r.Failed, r.Conflict
+	return len(f.requests) - 1, f.delay, r.Failed, r.Conflict, held
 }
 
 // done records how the request at i ended.
@@ -231,7 +251,12 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.URL.Path != t.f.path || !strings.HasSuffix(req.Header.Get("User-Agent"), "/"+leaderlock.UserAgent) {
 		return t.next.RoundTrip(req)
 	}
-	i, delay, fail, conflict := t.f.arrive(req)
+	i, delay, fail, conflict, held := t.f.arrive(req)
+	if held {
+		// Held whatever the request's context says: client-go's own timeout
+		// would end the hold before the test lets it go.
+		<-t.f.held
+	}
 	// A request that is not passed on still has its body closed, as a
 	// RoundTripper must.
 	unsent := func(status int) {

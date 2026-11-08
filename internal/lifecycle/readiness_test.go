@@ -10,11 +10,14 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/leaderlock"
 )
 
 // The two readiness checks' names are read by `hpcburst status` (internal/launcher). Both sides
@@ -187,7 +190,7 @@ func TestReadinessChecks(t *testing.T) {
 		t.Fatal("readiness must start without the Lease: the caches' check does not wait for it")
 	}
 	elected := make(chan struct{})
-	le := &readiness{elected: elected, leaderElection: true}
+	le := &readiness{elected: elected, leaderElection: true, lease: renewedLease(t, time.Now()), renewWithin: leaderRenewDeadline}
 	if le.checkCaches() == nil || le.checkLeading() == nil || le.serving() {
 		t.Fatal("before the caches synced and the Lease is held, both checks fail and the controller does not serve")
 	}
@@ -210,6 +213,73 @@ func TestReadinessChecks(t *testing.T) {
 	}
 	if off.checkCaches() == nil || off.serving() {
 		t.Error("without leader election the caches still count, and the controller does not serve before it is elected")
+	}
+}
+
+// renewedLease is the lifecycle Lease's lock as the manager leads through it,
+// over a fake lock, after one successful renew whose renewTime is at.
+func renewedLease(t *testing.T, at time.Time) *leaderlock.Renewals {
+	t.Helper()
+	inner := &stubLeaseLock{id: "copy-a"}
+	r := leaderlock.TrackRenewals(inner)
+	rec := resourcelock.LeaderElectionRecord{HolderIdentity: "copy-a", LeaseDurationSeconds: 15, RenewTime: metav1.NewTime(at)}
+	if err := r.Update(context.Background(), rec); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// stubLeaseLock is a Lease lock whose writes succeed.
+type stubLeaseLock struct {
+	resourcelock.Interface
+	id string
+}
+
+func (s *stubLeaseLock) Update(context.Context, resourcelock.LeaderElectionRecord) error { return nil }
+func (s *stubLeaseLock) Identity() string                                                { return s.id }
+
+// TestReadinessLeadingIsCurrent (PR #254 review, B2): the Elected channel,
+// once closed, stays closed, so "leading", and with it serving, also needs the
+// manager's last renew of the Lease within its renew deadline. A copy whose
+// last renew is older fails both although Elected is closed; one with no lease
+// tracker never leads; a release that starts ends the leading at once; and
+// without leader election none of it applies.
+func TestReadinessLeadingIsCurrent(t *testing.T) {
+	elected := make(chan struct{})
+	close(elected)
+	for _, tc := range []struct {
+		name    string
+		lease   *leaderlock.Renewals
+		leading bool
+	}{
+		{"renewed just now", renewedLease(t, time.Now()), true},
+		{"renewed a second within the deadline", renewedLease(t, time.Now().Add(-leaderRenewDeadline+time.Second)), true},
+		{"renewed longer ago than the deadline", renewedLease(t, time.Now().Add(-leaderRenewDeadline-time.Millisecond)), false},
+		{"no lease tracker", nil, false},
+	} {
+		r := &readiness{elected: elected, leaderElection: true, lease: tc.lease, renewWithin: leaderRenewDeadline}
+		r.synced.Store(true)
+		if got := r.checkLeading() == nil; got != tc.leading {
+			t.Errorf("%s: leading %v, want %v", tc.name, got, tc.leading)
+		}
+		if got := r.serving(); got != tc.leading {
+			t.Errorf("%s: serving %v, want %v", tc.name, got, tc.leading)
+		}
+	}
+	lease := renewedLease(t, time.Now())
+	r := &readiness{elected: elected, leaderElection: true, lease: lease, renewWithin: leaderRenewDeadline}
+	r.synced.Store(true)
+	if !r.serving() {
+		t.Fatal("a fresh renew: not serving")
+	}
+	_ = lease.Update(context.Background(), resourcelock.LeaderElectionRecord{LeaseDurationSeconds: 1}) // client-go's release record
+	if r.checkLeading() == nil || r.serving() {
+		t.Error("after its release started the copy still leads")
+	}
+	off := &readiness{elected: elected, leaderElection: false}
+	off.synced.Store(true)
+	if off.checkLeading() != nil || !off.serving() {
+		t.Error("without leader election, a synced and elected copy leads and serves with no lease")
 	}
 }
 

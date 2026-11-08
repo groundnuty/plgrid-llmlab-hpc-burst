@@ -201,9 +201,12 @@ func (s stopSignal) Start(ctx context.Context) error {
 
 func (s stopSignal) NeedLeaderElection() bool { return false }
 
-// leaderRenewDeadline is controller-runtime's default renew deadline
-// (v0.23.1, pkg/manager/manager.go, defaultRenewDeadline), which the lifecycle
-// Lease's lock sizes its client timeout by.
+// leaderRenewDeadline is the lifecycle manager's renew deadline,
+// controller-runtime's default (v0.23.1, pkg/manager/manager.go,
+// defaultRenewDeadline), set on the manager explicitly. The lifecycle Lease's
+// lock sizes its client timeout by it, and the readiness check "leading"
+// needs a renew within it (readiness.leading); it is below the default 15 s
+// lease duration, as leaderlock.Renewals.RenewedWithin needs.
 const leaderRenewDeadline = 10 * time.Second
 
 // NewManager builds the lifecycle controller: one controller-runtime manager
@@ -232,7 +235,7 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	if metricsAddr == "" {
 		metricsAddr = "0"
 	}
-	grace := ShutdownGrace
+	grace, renewDeadline := ShutdownGrace, leaderRenewDeadline
 	mapperStop := make(chan struct{})
 	mopts := manager.Options{
 		Scheme:                        scheme,
@@ -242,6 +245,7 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		LeaderElectionID:              v1alpha1.LeaseLifecycle,
 		LeaderElectionNamespace:       v1alpha1.ControllerNamespace,
 		LeaderElectionReleaseOnCancel: true,
+		RenewDeadline:                 &renewDeadline,
 		GracefulShutdownTimeout:       &grace,
 		NewCache:                      o.newCache,
 		MapperProvider:                boundedMapper(cmp.Or(o.discoveryTimeout, DiscoveryTimeout), mapperStop),
@@ -274,7 +278,8 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	for _, w := range watches {
 		kinds = append(kinds, w.obj)
 	}
-	ready := &readiness{cache: mgr.GetCache(), elected: mgr.Elected(), leaderElection: o.LeaderElection, kinds: kinds}
+	ready := &readiness{cache: mgr.GetCache(), elected: mgr.Elected(), leaderElection: o.LeaderElection, kinds: kinds,
+		lease: renewals, renewWithin: leaderRenewDeadline}
 	if err := mgr.Add(ready); err != nil {
 		return nil, nil, err
 	}
@@ -317,10 +322,8 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	if reg == nil {
 		reg = ctrlmetrics.Registry
 	}
-	if err := mgr.Add(&collectorRegistration{reg: reg, cs: []prometheus.Collector{
-		&instanceCollector{cache: mgr.GetClient(), backend: backend, clock: clock, serving: ready.serving},
-		&accountingCollector{allocs: mgr.GetClient()},
-	}}); err != nil {
+	if err := mgr.Add(&collectorRegistration{reg: reg, cs: metricsCollectors(mgr.GetClient(), backend, clock,
+		func() time.Time { return r.memory().started }, ready.serving)}); err != nil {
 		return nil, nil, err
 	}
 	workers := o.Workers
@@ -543,6 +546,14 @@ const cacheRetry = 2 * time.Second
 //
 // Alpha runs one controller; a standby replica after alpha would need a
 // readiness state of its own, since this one would call it not ready.
+//
+// "leading" is current: the Elected channel, once closed, stays closed after
+// the Lease is lost, so leading also needs the manager's last renew of the
+// Lease to be recent (leaderlock.Renewals.RenewedWithin). The Backend and the
+// metrics collector serve by the same two checks (serving), so a copy that
+// has lost its Lease stops serving agents and exporting state-derived series
+// from that moment, not once its elector has stopped (HBEP-8, Unknown
+// samples; PR #254 review, B2).
 type readiness struct {
 	cache cache.Cache
 	// elected is the manager's Elected channel: closed once the Lease is held,
@@ -550,7 +561,13 @@ type readiness struct {
 	// without, :620-625 with).
 	elected        <-chan struct{}
 	leaderElection bool
-	kinds          []client.Object
+	// lease is the lock the manager leads through under leader election, and
+	// renewWithin the manager's renew deadline: leading needs a renew of the
+	// Lease within it (leaderlock.Renewals.RenewedWithin). A readiness with
+	// leader election and no lease never leads.
+	lease       *leaderlock.Renewals
+	renewWithin time.Duration
+	kinds       []client.Object
 	// retry is the wait between two tries to start an informer; zero means
 	// cacheRetry.
 	retry  time.Duration
@@ -627,9 +644,21 @@ func (r *readiness) isElected() bool {
 	}
 }
 
-// serving is what the Backend answers agents by: the caches have synced and
-// the controller is elected, with or without leader election.
-func (r *readiness) serving() bool { return r.synced.Load() && r.isElected() }
+// leading reports whether the controller leads its Lease now: elected, and its
+// last renew of the Lease within the renew deadline. Without leader election
+// there is no Lease to lead, and it is true.
+func (r *readiness) leading() bool {
+	if !r.leaderElection {
+		return true
+	}
+	return r.isElected() && r.lease != nil && r.lease.RenewedWithin(time.Now(), r.renewWithin)
+}
+
+// serving is what the Backend answers agents by and what the metrics collector
+// exports by: the caches have synced and the controller leads now (HBEP-8:
+// "caches" and "leading" pass). Without leader election it also waits for the
+// Elected channel, which closes at the manager's start.
+func (r *readiness) serving() bool { return r.synced.Load() && r.isElected() && r.leading() }
 
 // checkCaches is the readiness check ReadyzCaches.
 func (r *readiness) checkCaches() error {
@@ -641,9 +670,10 @@ func (r *readiness) checkCaches() error {
 
 // checkLeading is the readiness check ReadyzLeading. Without leader election
 // there is no Lease to lead, so it passes, even before Elected closes
-// (`@hpc-burst-science-agent`, 1 Nov 2026, #147).
+// (`@hpc-burst-science-agent`, 1 Nov 2026, #147). With it, it fails from the
+// moment the last renew is older than the renew deadline (leading).
 func (r *readiness) checkLeading() error {
-	if !r.leaderElection || r.isElected() {
+	if r.leading() {
 		return nil
 	}
 	return errors.New("not leading its Lease")
@@ -704,11 +734,11 @@ func checkpointSource(o Options, clock Clock) CheckpointSource {
 	return NewCachedSource(&HubSource{BaseURL: o.HubEndpoint}, clock)
 }
 
-// collectorRegistration registers the lifecycle controller's collectors, the
-// engine gauges and the accounting gauges, while the manager runs, on every
-// replica (the engine gauges are emitted by the leader only, see
-// instanceCollector), and unregisters them at the stop, so a manager started
-// again in the same process registers afresh.
+// collectorRegistration registers the lifecycle controller's collectors
+// (metricsCollectors) while the manager runs, on every replica (only the
+// serving one exports their series, see stateCollector), and unregisters them
+// at the stop, so a manager started again in the same process registers
+// afresh.
 type collectorRegistration struct {
 	reg prometheus.Registerer
 	cs  []prometheus.Collector

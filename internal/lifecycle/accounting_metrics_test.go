@@ -55,7 +55,7 @@ func TestMetricsAccountingGauges(t *testing.T) {
 		// Elapsed time unknown (a requeued job): both unknown.
 		accountedAllocation("team-a", "alloc-requeued", "helios-gpu", &v1alpha1.AllocationAccounting{AllocatedGPUs: i32(2), AllocatedCPUs: i32(32), ReadTime: read}),
 	).Build()
-	ex := scrapeCollectors(t, &accountingCollector{allocs: c})
+	ex := scrapeCollectors(t, storeCollector(c, &Backend{}))
 	if got := collectorSuccess(t, ex, collectorAccounting); got != "1" {
 		t.Errorf("hpcburst_collector_success{collector=accounting} %s after a successful list, want 1", got)
 	}
@@ -150,9 +150,9 @@ func TestMetricsAccountingListFailureKeepsTheScrape(t *testing.T) {
 		accountedAllocation("team-a", "alloc-1", "helios-gpu", &v1alpha1.AllocationAccounting{AllocatedGPUs: i32(4), AllocatedCPUs: i32(64), ElapsedSeconds: i64(3600), ReadTime: read}))}
 	const gpu, cpu = "hpcburst_allocation_allocated_gpu_seconds", "hpcburst_allocation_allocated_cpu_seconds"
 	scrapeBoth := func() exposition {
-		return scrapeCollectors(t,
-			rg.instanceCollector(always),
-			&accountingCollector{allocs: lister})
+		c := rg.collector(always)
+		c.accounting = &accountingCollector{allocs: lister}
+		return scrapeCollectors(t, c)
 	}
 	check := func(when, success string, series bool) {
 		t.Helper()
@@ -181,7 +181,7 @@ func TestMetricsAccountingListFailureKeepsTheScrape(t *testing.T) {
 // 1 and no accounting series, which tells "no Allocations" from "could not list
 // them" (success 0).
 func TestMetricsAccountingNoAllocationsIsNotAFailure(t *testing.T) {
-	ex := scrapeCollectors(t, &accountingCollector{allocs: allocationReader(t)})
+	ex := scrapeCollectors(t, storeCollector(allocationReader(t), &Backend{}))
 	if got := collectorSuccess(t, ex, collectorAccounting); got != "1" {
 		t.Errorf("hpcburst_collector_success{collector=accounting} %s for an empty list, want 1", got)
 	}

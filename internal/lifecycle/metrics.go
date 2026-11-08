@@ -25,13 +25,14 @@ import (
 // one is absent, and hpcburst_instance_metrics_unknown says which and why,
 // never 0 and never NaN (HBEP-8, Unknown samples).
 //
-// Only the leader emits them, and it builds the Instances it lists from its
-// informer cache, which HBEP-11 starts before the election, not from its
-// reconciles: a new leader lists every live Instance at once, each unknown
-// until its first report to this leader, so a share-of-unknown query reads
-// them as unknown rather than 0 over 0 (HBEP-8, Unknown samples;
-// `@hpc-burst-science-agent`, 2 Nov 2026, for #249). A standby emits no
-// Instance series, so two replicas never give duplicate ones.
+// Only the serving copy exports them (stateCollector), and it builds the
+// Instances it lists from its informer cache, which HBEP-11 starts before the
+// election, not from its reconciles: a new leader lists every live Instance at
+// once, each unknown until its first report to this leader, so a
+// share-of-unknown query reads them as unknown rather than 0 over 0 (HBEP-8,
+// Unknown samples; `@hpc-burst-science-agent`, 2 Nov 2026, for #249). That
+// inventory read can fail, and then hpcburst_collector_success{collector=
+// "instances"} is 0 and no Instance series is exposed (6 Nov 2026, for #249).
 
 // Reasons of hpcburst_instance_metrics_unknown (HBEP-8, Unknown samples).
 const (
@@ -137,6 +138,10 @@ var (
 // instanceListTimeout bounds a scrape's reads of the manager's cache.
 const instanceListTimeout = 10 * time.Second
 
+// collectorInstances is the collector label of the Instance series'
+// hpcburst_collector_success series.
+const collectorInstances = "instances"
+
 // instanceEntry is what the cache says of one Instance that has not ended: its
 // identity, and how to find and judge its agent's report.
 type instanceEntry struct {
@@ -148,30 +153,37 @@ type instanceEntry struct {
 	// for it, empty while none has.
 	allocUID types.UID
 	agentID  string
-	// unreachable is the pass's AgentUnreachable judgement, as the Instance's
-	// condition keeps it.
-	unreachable   bool
+	// unreachable is the Instance's AgentUnreachable condition as persisted:
+	// the judgement of the pass that wrote it, maybe a previous leader's. It
+	// stands only while this process holds no report from the agent (collect).
+	unreachable bool
+	// startInstr is the Instance's start instruction time, zero when unset,
+	// and agentTimeout and probeInterval its profile's health.agentTimeout and
+	// probe interval: what the pass judges the agent by.
+	startInstr    time.Time
+	agentTimeout  time.Duration
 	probeInterval time.Duration
 }
 
-// instanceCollector is a prometheus.Collector that builds the engine series at
-// scrape time from the Instances in the controller's cache and each worker's
-// latest health sample in the Backend. The sample's freshness is judged at the
-// scrape, by the controller's clock (agentapi.Health.MetricsFresh), since
-// passes can be further apart than the freshness bound.
+// instanceCollector builds the Instance series at scrape time from the
+// Instances in the controller's cache and each worker's latest health sample
+// in the Backend. The sample's freshness is judged at the scrape, by the
+// controller's clock (agentapi.Health.MetricsFresh), since passes can be
+// further apart than the freshness bound. It is one of stateCollector's two
+// reads, not a collector registered on its own.
 type instanceCollector struct {
 	// cache reads Instances, Allocations, Providers and PlatformProfiles: the
 	// manager's cached client.
 	cache   client.Reader
 	backend *Backend
 	clock   Clock
-	// serving reports whether this replica has synced its caches and leads
-	// (readiness.serving). A replica that does not emits no Instance series.
-	serving func() bool
+	// started is when this process started, as the passes count it (memory
+	// started): the base of the agents' restart grace (agentDeadline).
+	started func() time.Time
 }
 
-// Describe implements prometheus.Collector.
-func (c *instanceCollector) Describe(ch chan<- *prometheus.Desc) {
+// describe sends the descriptors of the Instance series.
+func (c *instanceCollector) describe(ch chan<- *prometheus.Desc) {
 	ch <- descInfo
 	ch <- descReadAt
 	ch <- descUnknown
@@ -180,34 +192,48 @@ func (c *instanceCollector) Describe(ch chan<- *prometheus.Desc) {
 	}
 }
 
-// Collect implements prometheus.Collector. A replica that is not serving (a
-// standby, or one whose caches have not synced) emits no Instance series. The
-// leader lists the Instances that have not ended from its cache at every
-// scrape; one with no report from its agent to this leader is unknown, also
-// one still pending with no agent (HBEP-8, Unknown samples). A read of the
-// cache that fails exposes none of the series for this scrape and is logged,
-// as for the accounting gauges.
-func (c *instanceCollector) Collect(ch chan<- prometheus.Metric) {
-	if !c.serving() {
-		return
-	}
+// collect appends to out the Instance series and
+// hpcburst_collector_success{collector="instances"}. It lists the Instances
+// that have not ended from the cache; one with no report from its agent to
+// this process is unknown, also one still pending with no agent (HBEP-8,
+// Unknown samples). An inventory read that fails, the list or a cache read of
+// an Instance's Allocation, Provider or PlatformProfile other than a
+// not-found, gives no Instance series and the gauge at 0, and is logged; one
+// that succeeds gives 1 (HBEP-8, Unknown samples; `@hpc-burst-science-agent`,
+// 6 Nov 2026, for #249).
+//
+// A report the agent sent to this process supersedes the persisted
+// AgentUnreachable condition, which a previous leader may have written: with
+// one, the agent is judged from that report's receipt as the pass judges it
+// (agentDeadline), so its first fresh report to a new leader shows real
+// values at once, without waiting for a reconcile to clear the condition
+// (PR #254 review, B3). Without one the persisted condition stands.
+func (c *instanceCollector) collect(out []prometheus.Metric) []prometheus.Metric {
 	ctx, cancel := context.WithTimeout(context.Background(), instanceListTimeout)
 	defer cancel()
 	entries, err := c.live(ctx)
 	if err != nil {
-		ctrl.Log.WithName("metrics").Error(err, "the Instance gauges are not exposed for this scrape")
-		return
+		ctrl.Log.WithName("metrics").Error(err, "the Instance series are not exposed for this scrape")
+		return append(out, successSample(collectorInstances, false))
 	}
+	out = append(out, successSample(collectorInstances, true))
 	now := c.clock.Now().UTC()
+	started := c.started()
 	for _, e := range entries {
-		ch <- prometheus.MustNewConstMetric(descInfo, prometheus.GaugeValue, 1, string(e.uid), e.namespace, e.name, e.md, e.provider, e.gpuMdl)
+		out = append(out, prometheus.MustNewConstMetric(descInfo, prometheus.GaugeValue, 1, string(e.uid), e.namespace, e.name, e.md, e.provider, e.gpuMdl))
 		var rep *agentapi.Report
 		var at time.Time
 		var from string
 		if e.allocUID != "" {
 			rep, at, from = c.backend.latest(e.allocUID)
 		}
-		if rep == nil || e.agentID == "" || from != e.agentID || rep.Instance == nil || rep.Instance.UID != string(e.uid) {
+		unreachable := e.unreachable
+		if rep != nil && e.agentID != "" && from == e.agentID {
+			unreachable = !now.Before(agentDeadline(started, e.startInstr, at, e.agentTimeout))
+		} else {
+			rep = nil
+		}
+		if rep == nil || rep.Instance == nil || rep.Instance.UID != string(e.uid) {
 			// No report of this Instance from its agent since this controller
 			// started, so no worker is reported: the alpha Instance's one
 			// desired worker (the Backend's desiredInstance) stands in, and
@@ -215,16 +241,16 @@ func (c *instanceCollector) Collect(ch chan<- prometheus.Metric) {
 			// pending, or whose agent has not reported to this leader yet or
 			// never reports again, has the info series only, and a
 			// share-of-unknown query reads 0/0.
-			c.collectUnreported(ch, e)
+			out = collectUnreported(out, e, unreachable)
 			continue
 		}
-		av := agentView{report: rep.Instance, reportAt: at, reportTime: rep.Time, unreachable: e.unreachable, now: now, probeInterval: e.probeInterval}
+		av := agentView{report: rep.Instance, reportAt: at, reportTime: rep.Time, unreachable: unreachable, now: now, probeInterval: e.probeInterval}
 		gen := strconv.FormatInt(rep.Instance.Generation, 10)
 		for i := range rep.Instance.Workers {
-			w := &rep.Instance.Workers[i]
-			c.collectWorker(ch, e, av, w, gen)
+			out = collectWorker(out, e, av, &rep.Instance.Workers[i], gen)
 		}
 	}
+	return out
 }
 
 // live reads, from the cache, the Instances that have not ended and are a
@@ -249,6 +275,9 @@ func (c *instanceCollector) live(ctx context.Context) ([]instanceEntry, error) {
 			e.agentID = in.Status.Agent.AgentInstanceID
 		}
 		e.unreachable = apimeta.IsStatusConditionTrue(in.Status.Conditions, v1alpha1.ConditionAgentUnreachable)
+		if t := in.Status.StartInstructionTime; t != nil {
+			e.startInstr = t.Time
+		}
 		pf, ok := facts[e.provider]
 		if !ok {
 			var err error
@@ -257,7 +286,7 @@ func (c *instanceCollector) live(ctx context.Context) ([]instanceEntry, error) {
 			}
 			facts[e.provider] = pf
 		}
-		e.gpuMdl, e.probeInterval = pf.gpuModel, pf.probeInterval
+		e.gpuMdl, e.agentTimeout, e.probeInterval = pf.gpuModel, pf.agentTimeout, pf.probeInterval
 		if name := in.Spec.AllocationRef.Name; name != "" {
 			var a v1alpha1.Allocation
 			switch err := c.cache.Get(ctx, client.ObjectKey{Namespace: in.Namespace, Name: name}, &a); {
@@ -274,10 +303,11 @@ func (c *instanceCollector) live(ctx context.Context) ([]instanceEntry, error) {
 }
 
 // providerFacts are what an Instance's info series and freshness take from its
-// Provider: the GPU model of the partition it allows, and the probe interval
-// its profile sets.
+// Provider: the GPU model of the partition it allows, and the agent timeout
+// and probe interval its profile sets.
 type providerFacts struct {
 	gpuModel      string
+	agentTimeout  time.Duration
 	probeInterval time.Duration
 }
 
@@ -287,7 +317,7 @@ type providerFacts struct {
 // (settingsOf, loadProviders).
 func (c *instanceCollector) providerFacts(ctx context.Context, name string) (providerFacts, error) {
 	def, _ := resolveSettings(v1alpha1.PlatformProfileSpec{})
-	f := providerFacts{probeInterval: def.probeInterval}
+	f := providerFacts{agentTimeout: def.agentTimeout, probeInterval: def.probeInterval}
 	var prov v1alpha1.Provider
 	if err := c.cache.Get(ctx, client.ObjectKey{Name: name}, &prov); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -304,7 +334,7 @@ func (c *instanceCollector) providerFacts(ctx context.Context, name string) (pro
 		return f, fmt.Errorf("get PlatformProfile %s: %w", ref, err)
 	}
 	s, err := resolveSettings(prof.Spec)
-	f.probeInterval = s.probeInterval
+	f.agentTimeout, f.probeInterval = s.agentTimeout, s.probeInterval
 	if err != nil || prof.Spec.ProviderKind != v1alpha1.PlatformBatch {
 		return f, nil
 	}
@@ -314,31 +344,31 @@ func (c *instanceCollector) providerFacts(ctx context.Context, name string) (pro
 	return f, nil
 }
 
-// collectUnreported sends the unknown series of an Instance whose agent has
+// collectUnreported appends the unknown series of an Instance whose agent has
 // sent no report of it since this controller started: pending with no agent
 // yet, new, or after a restart or a change of leader (reports are held in
 // memory). Every engine metric of its desired state's one worker, worker-0 in
 // alpha, is unknown. It has no fresh read, so the reason is stale, or
-// agent_unreachable once the pass has judged the agent unreachable
-// (health.agentTimeout, with the restart grace); not_reported is for a metric
-// the engine does not export (HBEP-8, Unknown samples; `@hpc-burst-science-agent`,
-// 1 Nov 2026, for #111).
-func (c *instanceCollector) collectUnreported(ch chan<- prometheus.Metric, e instanceEntry) {
+// agent_unreachable when the agent is judged unreachable (collect); not_reported
+// is for a metric the engine does not export (HBEP-8, Unknown samples;
+// `@hpc-burst-science-agent`, 1 Nov 2026, for #111).
+func collectUnreported(out []prometheus.Metric, e instanceEntry, unreachable bool) []prometheus.Metric {
 	reason := unknownStale
-	if e.unreachable {
+	if unreachable {
 		reason = unknownAgentUnreachable
 	}
 	for _, m := range engineMetrics {
-		ch <- prometheus.MustNewConstMetric(descUnknown, prometheus.GaugeValue, 1, string(e.uid), agentapi.WorkerName(0), m.name, reason)
+		out = append(out, prometheus.MustNewConstMetric(descUnknown, prometheus.GaugeValue, 1, string(e.uid), agentapi.WorkerName(0), m.name, reason))
 	}
+	return out
 }
 
-// collectWorker sends one worker's series: per engine metric, its value when
+// collectWorker appends one worker's series: per engine metric, its value when
 // known, or an unknown series with the reason, never both and never neither.
-func (c *instanceCollector) collectWorker(ch chan<- prometheus.Metric, e instanceEntry, av agentView, w *agentapi.WorkerReport, gen string) {
+func collectWorker(out []prometheus.Metric, e instanceEntry, av agentView, w *agentapi.WorkerReport, gen string) []prometheus.Metric {
 	uid := string(e.uid)
 	if w.Health != nil && w.Health.MetricsReadAt != nil {
-		ch <- prometheus.MustNewConstMetric(descReadAt, prometheus.GaugeValue, float64(w.Health.MetricsReadAt.UnixNano())/1e9, uid, w.Name)
+		out = append(out, prometheus.MustNewConstMetric(descReadAt, prometheus.GaugeValue, float64(w.Health.MetricsReadAt.UnixNano())/1e9, uid, w.Name))
 	}
 	reason := ""
 	switch {
@@ -351,7 +381,7 @@ func (c *instanceCollector) collectWorker(ch chan<- prometheus.Metric, e instanc
 	for _, m := range engineMetrics {
 		if reason == "" {
 			if s, ok := m.value(w.Health, labels); ok {
-				ch <- s
+				out = append(out, s)
 				continue
 			}
 		}
@@ -359,6 +389,7 @@ func (c *instanceCollector) collectWorker(ch chan<- prometheus.Metric, e instanc
 		if r == "" {
 			r = unknownNotReported
 		}
-		ch <- prometheus.MustNewConstMetric(descUnknown, prometheus.GaugeValue, 1, uid, w.Name, m.name, r)
+		out = append(out, prometheus.MustNewConstMetric(descUnknown, prometheus.GaugeValue, 1, uid, w.Name, m.name, r))
 	}
+	return out
 }

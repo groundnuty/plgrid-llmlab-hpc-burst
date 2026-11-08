@@ -63,21 +63,29 @@ var (
 	labelPair  = regexp.MustCompile(`([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"`)
 )
 
-// instanceCollector is the rig's controller's engine-gauge collector, as
-// NewManager builds it: over the store (the manager's cache), the controller's
-// Backend, and serving, which says whether this replica leads. It reads the
-// rig's current Backend, so it follows a restartController.
-func (rg *rig) instanceCollector(serving func() bool) *instanceCollector {
-	return &instanceCollector{cache: rg.c, backend: rg.backend, clock: rg.clock, serving: serving}
+// collector is the rig's controller's collector, as NewManager builds it
+// (metricsCollectors): over the store (the manager's cache), the controller's
+// Backend and start, and serving, which says whether this copy serves. It
+// reads the rig's current Backend and Reconciler, so it follows a
+// restartController.
+func (rg *rig) collector(serving func() bool) *stateCollector {
+	return newStateCollector(rg.c, rg.backend, rg.clock, func() time.Time { return rg.r.memory().started }, serving)
 }
 
 func always() bool { return true }
 
-// scrape serves the rig's engine gauges as /metrics, as the leader serves
+// storeCollector is a serving copy's collector over a store and a Backend, with
+// the system clock and a process that started now.
+func storeCollector(c client.Reader, b *Backend) *stateCollector {
+	started := time.Now()
+	return newStateCollector(c, b, SystemClock{}, func() time.Time { return started }, always)
+}
+
+// scrape serves the rig's series as /metrics, as the serving copy serves
 // them, and parses the text.
 func scrape(t *testing.T, rg *rig) exposition {
 	t.Helper()
-	return scrapeCollectors(t, rg.instanceCollector(always))
+	return scrapeCollectors(t, rg.collector(always))
 }
 
 // scrapeCollectors serves collectors as /metrics through a pedantic registry
@@ -363,11 +371,11 @@ func TestMetricsSeriesScope(t *testing.T) {
 		rg := newRig(t)
 		rg.noAgents = true
 		rg.create(mdSpec("md"))
-		rg.run(time.Minute, startTick)
+		rg.until(10*time.Minute, startTick, "a pending Instance of md", func() bool {
+			insts := rg.instances("md")
+			return len(insts) == 1 && insts[0].Status.Phase == v1alpha1.InstancePending
+		})
 		insts := rg.instances("md")
-		if len(insts) != 1 || insts[0].Status.Phase != v1alpha1.InstancePending {
-			t.Fatalf("Instances %v, want one pending", phases(insts))
-		}
 		// The fixture must not register an agent first: that Instance would
 		// have been skipped as a pending one never was (#249).
 		if insts[0].Status.Agent != nil || len(rg.agents) != 0 {
@@ -621,7 +629,7 @@ func TestMetricsNewInstanceWithNoReportIsStale(t *testing.T) {
 	alloc := &v1alpha1.Allocation{ObjectMeta: metav1.ObjectMeta{Namespace: rigNS, Name: "alloc-new", UID: "alloc-uid"}}
 	c := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(registered, pending, alloc).Build()
 	scrapeNew := func() exposition {
-		return scrapeCollectors(t, &instanceCollector{cache: c, backend: &Backend{}, clock: SystemClock{}, serving: always})
+		return scrapeCollectors(t, storeCollector(c, &Backend{}))
 	}
 	check := func(reason string) {
 		t.Helper()
