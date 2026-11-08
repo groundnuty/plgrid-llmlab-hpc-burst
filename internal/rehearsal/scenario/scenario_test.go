@@ -85,6 +85,14 @@ type rig struct {
 	// tokenDelay is the engine double's token-delay mode of the served
 	// deployment: each generated token takes this long.
 	tokenDelay time.Duration
+	// orphanBase is the TunnelOrphaned check's first read of the raised-events
+	// counter (absence_test.go), taken once the controller it covers serves
+	// and before any Instance ends.
+	orphanBase *absenceBase
+	// onLed, when set, runs in a controller restart once the new controller
+	// leads and answers /readyz: the earliest point the new process serves,
+	// where a check takes its first read.
+	onLed func()
 	// dir is the test's short scratch directory.
 	dir string
 }
@@ -248,6 +256,9 @@ func TestRehearsalDirect(t *testing.T) {
 	r.stepWorkerRestart(in, key)
 	r.stepTunnelLoss(in, key)
 	r.stepControllerRestart(in, key)
+	// No Instance has ended yet; the restarted controller serves the steps
+	// that end them, (c) and (g).
+	r.orphanBase = r.baseline("after step (f)'s controller restart", keyTunnelOrphaned)
 	r.stepHandover(in)
 	done = r.stepTimer("g")
 	r.stepScaleToZero("c, g")
@@ -312,6 +323,7 @@ func (r *rig) jobSSHForwards(jobID int) []int {
 func TestRehearsalSSH(t *testing.T) {
 	r := startRig(t, "ssh")
 	in := r.stepStart()
+	r.orphanBase = r.baseline("after step (a)", keyTunnelOrphaned)
 	jobID, _ := strconv.Atoi(in.Status.JobID)
 	fwd := r.jobSSHForwards(jobID)
 	if len(fwd) < 2 {

@@ -122,6 +122,9 @@ func (r *rig) controllerRestart(in *v1alpha1.Instance, key, body string, tokens 
 	})
 	ledAt := time.Now()
 	r.t.Logf("step (f): a new controller led the Lease %s after the kill", ledAt.Sub(killAt).Round(100*time.Millisecond))
+	if r.onLed != nil {
+		r.onLed()
+	}
 	// For one agentTimeout the new controller would have judged a silent
 	// agent unreachable; sample until then that nothing gave way.
 	until := time.Now().Add(rehearsalAgentTimeout + 5*time.Second)

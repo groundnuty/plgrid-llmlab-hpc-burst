@@ -76,7 +76,10 @@ func (p3 *part3) expectedEvents() []wantEvent {
 // forbiddenEvents must not appear: HBEP-7 sets no ReplacementLate in
 // no-overlap mode; a primary whose replacement is never ready at its drain
 // start is not handed over (HBEP-8 Test plan: HandedOver only when a
-// replacement serves); and a real teardown leaves no orphaned tunnel.
+// replacement serves); and a real teardown leaves no orphaned tunnel. One
+// found in the Events is a failure; their absence is proven on the
+// raised-events counter (checkForbidden, assertNoOrphans), since a list of
+// Events cannot show one the recorder has not yet delivered (#256).
 func (p3 *part3) forbiddenEvents() []wantEvent {
 	var out []wantEvent
 	for _, d := range p3.deps {
@@ -227,6 +230,7 @@ func (p3 *part3) checkEvents() {
 	for _, p := range problems {
 		r.t.Error(p)
 	}
+	p3.checkForbidden()
 	typed := 0
 	for _, e := range evs {
 		if typedEvent(e) {
