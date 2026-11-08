@@ -176,17 +176,18 @@ func (c *Controller) SetupWithManager(mgr manager.Manager) error {
 // (#59): it adds the Provider's controller to mgr, built from mgr's client,
 // API reader, event recorder and logger, with the real clock and transport.
 // The recorder counts each event in events, the lifecycle copy's counter,
-// under provider-<name>, and the Provider's series are created at 0 there
-// (HBEP-8, Raised events); the lifecycle controller's serving collector
-// exports them, since a Provider manager binds no metrics port. It panics on
-// a nil counter.
+// under provider-<name>, and once the controller is added to mgr the
+// Provider's series are created at 0 there (HBEP-8, Raised events); the
+// lifecycle controller's serving collector exports them, since a Provider
+// manager binds no metrics port. A Setup that fails creates none. Forget
+// deletes them when the supervisor drops the Provider. It panics on a nil
+// counter.
 func Setup(events *eventcount.Counter) func(mgr manager.Manager, provider string) error {
 	if events == nil {
 		panic("managed: Setup with no raised-events counter")
 	}
 	return func(mgr manager.Manager, provider string) error {
 		controller := eventcount.ControllerProvider(provider)
-		events.Zero(controller, RaisedEvents())
 		c, err := New(Options{
 			Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Provider: provider,
 			Recorder: eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerProvider), events, controller),
@@ -195,7 +196,27 @@ func Setup(events *eventcount.Counter) func(mgr manager.Manager, provider string
 		if err != nil {
 			return err
 		}
-		return c.SetupWithManager(mgr)
+		if err := c.SetupWithManager(mgr); err != nil {
+			return err
+		}
+		events.Zero(controller, RaisedEvents())
+		return nil
+	}
+}
+
+// Forget returns the managed supervisor's Dropped hook
+// (providerctl.Supervisor): it deletes from events the series a managed
+// Provider's controller can raise, those Setup created at 0, once the
+// supervisor no longer runs the Provider (deleted, or now of another kind).
+// Only those: a batch Provider of the same name counts under the same
+// controller label with action none, which no managed series has. It panics
+// on a nil counter.
+func Forget(events *eventcount.Counter) func(provider string) {
+	if events == nil {
+		panic("managed: Forget with no raised-events counter")
+	}
+	return func(provider string) {
+		events.Forget(eventcount.ControllerProvider(provider), RaisedEvents())
 	}
 }
 

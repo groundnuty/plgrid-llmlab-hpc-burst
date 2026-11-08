@@ -128,6 +128,13 @@ type Supervisor struct {
 	// Setup registers the Provider's controller with its manager, for
 	// example with Setup.
 	Setup func(mgr manager.Manager, provider string) error
+	// Dropped, when set, is called with a Provider's name once the supervisor
+	// stops running it because it is no longer one of the supervisor's kind
+	// (deleted, or its PlatformProfile gone or of another kind), after its
+	// manager has stopped. It is not called when a manager is started again
+	// after a failure, nor when the supervisor itself stops: the Provider is
+	// still one to run then.
+	Dropped func(provider string)
 	// Interval is how often the Providers are listed; zero means 5 s.
 	Interval time.Duration
 	// MinBackoff and MaxBackoff bound the restart backoff; zero means 1 s and
@@ -248,15 +255,22 @@ func (s *Supervisor) pass(ctx context.Context) error {
 	}
 	s.mu.Lock()
 	var stop []*run
+	var dropped []string
 	for name, r := range s.runs {
 		if !want[name] {
 			stop = append(stop, r)
+			dropped = append(dropped, name)
 			delete(s.runs, name)
 		}
 	}
 	s.mu.Unlock()
 	for _, r := range stop {
 		r.stop()
+	}
+	if s.Dropped != nil {
+		for _, name := range dropped {
+			s.Dropped(name)
+		}
 	}
 	now := time.Now()
 	for name := range want {

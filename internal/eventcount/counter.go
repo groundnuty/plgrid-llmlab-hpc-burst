@@ -93,6 +93,17 @@ func (c *Counter) Zero(controller string, series []Series) {
 	}
 }
 
+// Forget deletes the controller's series named in series, whatever their
+// counts: a Provider's manager that has stopped for good (its Provider gone, or
+// now of another kind) raises nothing more, so series created at 0 for it would
+// read as a Provider that raised nothing. A series that does not exist is
+// skipped.
+func (c *Counter) Forget(controller string, series []Series) {
+	for _, s := range series {
+		c.vec.DeleteLabelValues(controller, s.Reason, s.Action, s.Type)
+	}
+}
+
 // count adds one event to its series.
 func (c *Counter) count(controller, reason, action, eventtype string) {
 	if action == "" {

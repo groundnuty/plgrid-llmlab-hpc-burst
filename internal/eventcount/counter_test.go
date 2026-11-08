@@ -229,6 +229,32 @@ func TestZeroCreatesTheSeriesAtZero(t *testing.T) {
 	}
 }
 
+// TestForgetDeletesOnlyTheNamedSeries: Forget deletes the controller's named
+// series, a raised one too, and leaves another series of the same controller
+// (a batch Provider's, action none) and another controller's.
+func TestForgetDeletesOnlyTheNamedSeries(t *testing.T) {
+	c := New()
+	prov := ControllerProvider("example")
+	managed := []Series{{"CatalogRead", "ready", provider.EventKindOrdinary}, {"CatalogTruncated", "degraded", provider.EventKindWarning}}
+	c.Zero(prov, managed)
+	Events(&innerEvents{t: t, c: c, controller: prov}, c, prov).Eventf(subject, nil, provider.EventKindOrdinary, "CatalogRead", "ready", "n")
+	Legacy(&innerLegacy{t: t, c: c, controller: prov}, c, prov).Event(subject, provider.EventKindOrdinary, "CreatedExternalResource", "m")
+	c.Zero(ControllerLifecycle, managed)
+	c.Forget(prov, managed)
+	c.Forget(prov, []Series{{"NeverCreated", "ready", provider.EventKindOrdinary}}) // a series that does not exist is skipped
+	for _, s := range managed {
+		if got, ok := value(t, c, Key{prov, s.Reason, s.Action, s.Type}); ok {
+			t.Errorf("%s %+v reads %g after Forget, want no series", prov, s, got)
+		}
+		if _, ok := value(t, c, Key{ControllerLifecycle, s.Reason, s.Action, s.Type}); !ok {
+			t.Errorf("%s %+v is gone: Forget deleted another controller's series", ControllerLifecycle, s)
+		}
+	}
+	if got, ok := value(t, c, Key{prov, "CreatedExternalResource", NoAction, provider.EventKindOrdinary}); !ok || got != 1 {
+		t.Errorf("the batch series reads %g (present %v), want 1: Forget deleted a series it was not given", got, ok)
+	}
+}
+
 // TestTheCounterHasHBEP8sNameAndHelp: the exposition carries HBEP-8's name,
 // help text and labels.
 func TestTheCounterHasHBEP8sNameAndHelp(t *testing.T) {

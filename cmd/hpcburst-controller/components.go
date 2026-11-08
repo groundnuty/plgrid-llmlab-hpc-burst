@@ -435,7 +435,8 @@ func mount(mgr manager.Manager, w wiring, backend agentapi.Backend) error {
 	}
 	catalog := &providerctl.Supervisor{
 		Kind: v1alpha1.PlatformManaged, Client: mgr.GetClient(), NewManager: w.newProviderManager, Setup: managed.Setup(w.events),
-		Log: logging.NewLogrLogger(w.log.WithName("providers-managed")),
+		Dropped: managed.Forget(w.events),
+		Log:     logging.NewLogrLogger(w.log.WithName("providers-managed")),
 	}
 	srv, err := agentserver.New(agentserver.Config{
 		Lookup: agentserver.NewClientLookup(mgr.GetClient()), CredentialsDir: w.host.CredentialsDir(),
