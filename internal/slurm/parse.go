@@ -48,12 +48,77 @@ func knownDataParser(v string) bool {
 	return false
 }
 
+// Slurm's "no value" and "unlimited" markers (slurm/slurm.h, tag
+// slurm-24-11-5-1, lines 124-129: INFINITE 0xffffffff, INFINITE64
+// 0xffffffffffffffff, NO_VAL 0xfffffffe, NO_VAL64 0xfffffffffffffffe).
+//
+// The triple {set, infinite, number} is how the data parser shows a field that
+// can hold one (UINT32_NO_VAL and UINT64_NO_VAL, and TIMESTAMP_NO_VAL over the
+// latter: DUMP_FUNC at src/plugins/data_parser/v0.0.42/parsers.c, same tag,
+// lines 2838, 2955 and 5308): NO_VAL is {set: false}, INFINITE {infinite:
+// true}. A field that the parser declares a plain TIMESTAMP is dumped by
+// DUMP_FUNC(TIMESTAMP) (line 5285) as a bare uint64 with no such check, so a
+// marker in it reaches us as the bare number. That is sacct's time.start,
+// time.submission, time.eligible and time.end (PARSER_ARRAY(JOB), from line
+// 6938). The GH200 conformance run (#93, issue #267) got the real reply of a
+// job cancelled before it started with time.start 4294967294.
+const (
+	slurmNoVal32    uint64 = 0xfffffffe
+	slurmInfinite32 uint64 = 0xffffffff
+	slurmNoVal64    uint64 = 0xfffffffffffffffe
+	slurmInfinite64 uint64 = 0xffffffffffffffff
+)
+
+// marker is which Slurm marker a JSON number is, if any.
+type marker int
+
+const (
+	notMarker marker = iota
+	markerNoVal
+	markerInfinite
+)
+
+// markerOf reads a JSON number token, as the reply wrote it, and says whether it
+// is one of Slurm's markers. The match is exact and on the token: a float64
+// cannot tell NO_VAL64 from INFINITE64 (both round to 2**64), and a range check
+// would also take the numbers around the markers. A token that is not a plain
+// unsigned integer is not a marker.
+func markerOf(token string) marker {
+	u, err := strconv.ParseUint(token, 10, 64)
+	if err != nil {
+		return notMarker
+	}
+	switch u {
+	case slurmNoVal32, slurmNoVal64:
+		return markerNoVal
+	case slurmInfinite32, slurmInfinite64:
+		return markerInfinite
+	}
+	return notMarker
+}
+
 // noVal is Slurm's {set, infinite, number} triple. A bare number reads as a set
-// value.
+// value, unless it is one of Slurm's markers (NO_VAL, INFINITE and their 64-bit
+// forms), which read as unset and infinite, as the triple shows them. The same
+// markers inside a triple that says "set" read that way too, so that no field
+// the parser reads can turn a marker into a number: a NO_VAL start time is not a
+// time in 2106 (issue #267).
 type noVal struct {
 	Set      bool
 	Infinite bool
 	Number   float64
+}
+
+// noValOf builds the value of a number read as f, from the token it was written
+// as, and set and infinite as its triple gave them (a bare number is set).
+func noValOf(set, infinite bool, f float64, token string) noVal {
+	switch markerOf(token) {
+	case markerNoVal:
+		return noVal{}
+	case markerInfinite:
+		return noVal{Set: true, Infinite: true}
+	}
+	return noVal{Set: set, Infinite: infinite, Number: f}
 }
 
 func (n *noVal) UnmarshalJSON(b []byte) error {
@@ -67,18 +132,27 @@ func (n *noVal) UnmarshalJSON(b []byte) error {
 		if err := json.Unmarshal(b, &f); err != nil {
 			return fmt.Errorf("neither a number nor a {set, infinite, number} object")
 		}
-		*n = noVal{Set: true, Number: f}
+		*n = noValOf(true, false, f, string(b))
 		return nil
 	}
 	var o struct {
-		Set      bool    `json:"set"`
-		Infinite bool    `json:"infinite"`
-		Number   float64 `json:"number"`
+		Set      bool            `json:"set"`
+		Infinite bool            `json:"infinite"`
+		Number   json.RawMessage `json:"number"`
 	}
 	if err := json.Unmarshal(b, &o); err != nil {
 		return err
 	}
-	*n = noVal{Set: o.Set, Infinite: o.Infinite, Number: o.Number}
+	var f float64
+	token := string(bytes.TrimSpace(o.Number))
+	if token != "" && token != "null" {
+		if err := json.Unmarshal(o.Number, &f); err != nil {
+			return fmt.Errorf("the number of a {set, infinite, number} object: %w", err)
+		}
+	} else {
+		token = ""
+	}
+	*n = noValOf(o.Set, o.Infinite, f, token)
 	return nil
 }
 
