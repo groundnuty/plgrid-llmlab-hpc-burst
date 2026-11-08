@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	afake "github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi/fake"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/deploymentid"
@@ -128,6 +129,11 @@ type rig struct {
 	source *stubSource
 	rec    *MemoryRecorder
 	creds  string
+	// events is the rig's raised-events counter: the Reconciler's recorder
+	// is KubeRecorder over eventcount.Events, as NewManager builds it, into
+	// memEvents, which hands each event to rec (raised_test.go).
+	events    *eventcount.Counter
+	memEvents *memoryEvents
 
 	r       *Reconciler
 	backend *Backend
@@ -269,6 +275,11 @@ func newRig(t *testing.T, opts ...rigOption) *rig {
 		source: &stubSource{}, rec: &MemoryRecorder{}, creds: t.TempDir(),
 		agents: map[string]*rigAgent{}, sw: &switchBackend{},
 	}
+	rg.events = eventcount.New()
+	rg.memEvents = newMemoryEvents(rg.rec, rg.events)
+	// Every event the rig's passes raise is counted once, before the recorder
+	// receives it (HBEP-8, Test plan, Raised events: Counting).
+	t.Cleanup(func() { rg.memEvents.check(t) })
 	rg.gate = afake.NewGate(rg.sw)
 	rg.startController(cfg.front)
 	return rg
@@ -280,7 +291,8 @@ func newRig(t *testing.T, opts ...rigOption) *rig {
 func (rg *rig) startController(front bool) {
 	rg.backend = &Backend{Reader: rg.c, Clock: rg.clock, CredentialsDir: rg.creds}
 	rg.r = &Reconciler{
-		Client: rg.c, Reader: rg.c, Clock: rg.clock, Backend: rg.backend, Checkpoints: rg.source, Recorder: rg.rec,
+		Client: rg.c, Reader: rg.c, Clock: rg.clock, Backend: rg.backend, Checkpoints: rg.source,
+		Recorder: KubeRecorder{R: eventcount.Events(rg.memEvents, rg.events, eventcount.ControllerLifecycle)},
 		Config: Config{CredentialsDir: rg.creds, FrontConfigured: front,
 			AgentDigest: func(string) (string, error) { return rigAgentDigest, nil }},
 	}

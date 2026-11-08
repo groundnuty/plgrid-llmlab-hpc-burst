@@ -102,6 +102,10 @@ type Options struct {
 	// that the start's ObservationGap counts: a test waits on it to know the
 	// elector has read a Lease another copy holds.
 	onLeaseRead func()
+	// onObserve and onGap, when set, are the observer's and the gap
+	// emitter's test hooks (observer.onPass, gapEmitter.onDone).
+	onObserve func(began time.Time)
+	onGap     func()
 }
 
 // Scheme returns the scheme the controller uses: the built-in kinds and the
@@ -324,11 +328,11 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		Config:   Config{CredentialsDir: o.CredentialsDir, FrontConfigured: o.FrontConfigured, AgentDigest: builds.digest},
 	}
 	if lock != nil {
-		if err := mgr.Add(&gapEmitter{lock: lock, reader: mgr.GetAPIReader(), rec: r.Recorder}); err != nil {
+		if err := mgr.Add(&gapEmitter{lock: lock, reader: mgr.GetAPIReader(), rec: r.Recorder, onDone: o.onGap}); err != nil {
 			return nil, nil, err
 		}
 	}
-	if err := mgr.Add(&observer{r: r, every: observeEvery}); err != nil {
+	if err := mgr.Add(&observer{r: r, every: observeEvery, onPass: o.onObserve}); err != nil {
 		return nil, nil, err
 	}
 	reg := o.Registry

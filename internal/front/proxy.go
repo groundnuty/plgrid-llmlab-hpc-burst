@@ -37,6 +37,11 @@ type Proxy struct {
 	managed  *http.Transport
 	running  sync.WaitGroup // the handlers in flight, for a stop
 	instKeys sync.Map       // Instance UID -> its key, for redaction
+	// afterFinish, when set, runs at the end of each request's finish, after
+	// its usage record's write and any event that write raised: the request
+	// path has no pass marker of its own, so a test proves that a request
+	// raised no event by it (HBEP-8, Raised events, condition 3).
+	afterFinish func(requestID string)
 }
 
 // ProxyOptions are the inputs of NewProxy.
@@ -424,4 +429,7 @@ func (p *Proxy) finish(x *exchange) {
 	}
 	p.log.Info("request", "request", x.id, "path", x.rec.Path, "model", x.rec.RequestedModel, "status", x.rec.Status,
 		"emitter", x.rec.Emitter, "provider", x.rec.Provider, "instance", x.rec.Instance, "durationMs", x.rec.DurationMs)
+	if p.afterFinish != nil {
+		p.afterFinish(x.id)
+	}
 }

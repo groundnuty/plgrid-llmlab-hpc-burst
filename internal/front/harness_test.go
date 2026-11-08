@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/clock"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/enginetest"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/inventory"
@@ -43,18 +44,24 @@ var t0 = time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
 // harness is a front built from its parts, fed by a hand-built snapshot
 // instead of a watch, with engine doubles behind StaticTransports.
 type harness struct {
-	t         *testing.T
-	clk       *clock.Fake
-	cfg       Config
-	dir       string
-	host      agentapi.Host
-	trans     *StaticTransports
-	router    *Router
-	proxy     *Proxy
-	sink      *usage.Sink
-	metrics   *Metrics
-	free      *freeSpace
-	rec       *MemoryRecorder
+	t       *testing.T
+	clk     *clock.Fake
+	cfg     Config
+	dir     string
+	host    agentapi.Host
+	trans   *StaticTransports
+	router  *Router
+	proxy   *Proxy
+	sink    *usage.Sink
+	metrics *Metrics
+	free    *freeSpace
+	rec     *MemoryRecorder
+	// events is the front's raised-events counter: the router's recorder is
+	// KubeRecorder over eventcount.Events, as NewKubeRecorder builds it, into
+	// memEvents, which hands each event to rec (raised_test.go); metrics
+	// exports it.
+	events    *eventcount.Counter
+	memEvents *memoryEvents
 	logs      *syncBuffer
 	url       string
 	clientKey string
@@ -117,8 +124,13 @@ func newHarnessOn(t *testing.T, real clock.Clock, edit func(*Config)) *harness {
 	}
 	log := slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	h.free = &freeSpace{n: 1 << 40}
-	h.metrics = NewMetrics(h.sink, h.cfg.UsageDir, h.free.get, nil)
-	h.router = NewRouter(h.cfg, clk, h.trans, h.rec, log, h.metrics)
+	h.events = eventcount.New()
+	h.memEvents = newMemoryEvents(h.rec, h.events)
+	// Every event the front raises is counted once, before the recorder
+	// receives it (HBEP-8, Test plan, Raised events: Counting).
+	t.Cleanup(func() { h.memEvents.check(t) })
+	h.metrics = NewMetrics(h.sink, h.cfg.UsageDir, h.free.get, h.events)
+	h.router = NewRouter(h.cfg, clk, h.trans, KubeRecorder{R: eventcount.Events(h.memEvents, h.events, eventcount.ControllerFront)}, log, h.metrics)
 	h.proxy = NewProxy(ProxyOptions{Config: h.cfg, Host: h.host, Clock: clk, Router: h.router, Transports: h.trans, Keys: keys, Sink: h.sink, Metrics: h.metrics, Log: log})
 	ln, err := enginetest.Listen(testPortLo, testPortHi)
 	if err != nil {

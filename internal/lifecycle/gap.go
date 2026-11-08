@@ -143,11 +143,19 @@ type gapEmitter struct {
 	reader client.Reader
 	rec    Recorder
 	once   sync.Once
+	// onDone, when set, runs once the start's decision is made and any event
+	// handed to the recorder, whether one was raised or not: the emitter has
+	// no pass marker of its own, so a test proves that it raised no event by
+	// it (HBEP-8, Raised events, condition 3).
+	onDone func()
 }
 
 // Start implements manager.Runnable. It emits at most once per process and
 // returns: a lost lead stops the manager, so a process leads only once.
 func (g *gapEmitter) Start(ctx context.Context) error {
+	if g.onDone != nil {
+		defer g.onDone()
+	}
 	g.once.Do(func() {
 		since, ok := g.lock.gapStart()
 		if !ok {
