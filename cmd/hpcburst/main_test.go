@@ -66,9 +66,19 @@ func cli(t *testing.T, args ...string) cliResult {
 	return cliIn(t, "", args...)
 }
 
-// cliIn is cli with the child's working directory set to dir (empty: this process's). The test
-// binary is named by an absolute path, which a relative os.Args[0] would not survive.
-func cliIn(t *testing.T, dir string, args ...string) cliResult {
+// cliIn is cli with the child's working directory set to dir (empty: this process's). A down run
+// through it must not name any foreign listener (downGuardProblem): that is the guard every
+// normal shutdown is under. The test binary is named by an absolute path, which a relative
+// os.Args[0] would not survive.
+func cliIn(t testing.TB, dir string, args ...string) cliResult {
+	t.Helper()
+	return cliRun(t, dir, nil, args...)
+}
+
+// cliRun runs the command as cliIn does. wantForeign is nil for a normal shutdown. A test that
+// leaves listeners of its own on the recorded ports on purpose names them (cliExpectingForeign),
+// and its down is judged against exactly that list.
+func cliRun(t testing.TB, dir string, wantForeign []string, args ...string) cliResult {
 	t.Helper()
 	self, err := os.Executable()
 	if err != nil {
@@ -93,13 +103,8 @@ func cliIn(t *testing.T, dir string, args ...string) cliResult {
 		where = "(in " + dir + ") "
 	}
 	t.Logf("%s$ hpcburst %s\nexit %d\n%s%s", where, strings.Join(args, " "), code, so.String(), se.String())
-	// No test here leaves someone else's listener on a recorded port, so a foreign-listener warning
-	// from down names the host's own sockets: it was k3s's own ports, in every down of the real-k3s
-	// runs, until issue #264 (down judged k3s's listeners while k3s was still to be stopped). Only
-	// the final warning counts: down's earlier "waiting up to" line is a socket that was still
-	// being released, which it tolerates.
-	if len(args) > 0 && args[0] == "down" && strings.Contains(se.String()+so.String(), "but not as a launched process; left alone") {
-		t.Errorf("down called one of the host's own ports a foreign listener:\n%s%s", so.String(), se.String())
+	if problem := downGuardProblem(args, so.String()+se.String(), wantForeign); problem != "" {
+		t.Errorf("%s", problem)
 	}
 	return cliResult{so.String(), se.String(), code}
 }

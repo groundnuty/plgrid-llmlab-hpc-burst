@@ -329,7 +329,11 @@ func TestUpStatusDown(t *testing.T) {
 	if r.code != exitFail || rep.Health != "unhealthy" || rep.Processes[0].Verdict != "foreign" {
 		t.Errorf("with a wrong start time status says exit %d %+v", r.code, rep)
 	}
-	r = cli(t, h.args("down", "--grace", "5s")...)
+	// down must leave k3s running, so its four listeners (asserted above, in down's own form for
+	// IPv6) are still on the recorded ports when down looks: it names exactly those as foreign.
+	// This is the one down of this test that the guard in cliIn lets warn.
+	r = cliExpectingForeign(t, []string{"127.0.0.1:29220", "127.0.0.1:29221", "127.0.0.1:29222", "[::1]:29221"},
+		h.args("down", "--grace", "5s")...)
 	if r.code != exitOK || !strings.Contains(r.out, "foreign") {
 		t.Errorf("down with a foreign PID: exit %d, %q", r.code, r.out)
 	}
