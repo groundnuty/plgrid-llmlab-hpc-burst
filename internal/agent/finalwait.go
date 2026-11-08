@@ -89,10 +89,14 @@ func (a *Agent) sendLastReport(jobCtx context.Context, cancelRep context.CancelF
 }
 
 // clampAtTerm cancels the last report's tries jobEndReportBudget after jobCtx
-// ends, if they are still going; the returned function ends the watch.
+// ends, if they are still going. The returned function ends the watch and waits
+// for its goroutine to return, with its timer stopped: a watch that outlived
+// its end could arm a timer after the agent had stopped (issue #262).
 func clampAtTerm(jobCtx context.Context, cancel context.CancelFunc) (stop func()) {
 	quit := make(chan struct{})
+	exited := make(chan struct{})
 	go func() {
+		defer close(exited)
 		select {
 		case <-quit:
 		case <-jobCtx.Done():
@@ -105,7 +109,10 @@ func clampAtTerm(jobCtx context.Context, cancel context.CancelFunc) (stop func()
 			}
 		}
 	}()
-	return func() { close(quit) }
+	return func() {
+		close(quit)
+		<-exited
+	}
 }
 
 // sendLastReportAtJobEnd sends the last report of an agent whose job ended,
