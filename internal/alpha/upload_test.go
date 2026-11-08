@@ -175,7 +175,7 @@ func TestInputTokensOf(t *testing.T) {
 		// The form, but it does not add up, or it is no refusal for length.
 		{"This model's maximum context length is 32768 tokens. However, you requested 65536 tokens (32767 in the messages, 32768 in the completion).", 0, false},
 		{"This model's maximum context length is 32768 tokens. However, you requested 32768 tokens (16384 in the messages, 16384 in the completion).", 0, false},
-		{"This model's maximum context length is 32768 tokens. However, you requested 32768 tokens (0 in the messages, 32768 in the completion).", 0, false},
+		{"This model's maximum context length is 32768 tokens. However, you requested 32769 tokens (0 in the messages, 32769 in the completion).", 0, false},
 		// The counts without the context length: a message that only looks like the form.
 		{"However, you requested 65535 tokens (32767 in the messages, 32768 in the completion).", 0, false},
 		{"CUDA out of memory in the engine", 0, false},

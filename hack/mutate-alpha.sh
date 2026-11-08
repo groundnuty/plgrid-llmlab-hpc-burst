@@ -333,9 +333,25 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
 		}@@		n, _ := count(w)'
   'liveobs.go@@func (l TokenLine) MaxWords(maxModelLen int) int { return (maxModelLen - 1 - l.Fixed) / l.Per }@@func (l TokenLine) MaxWords(maxModelLen int) int { return (maxModelLen - l.Fixed) / l.Per }'
   'verdict.go@@		if r.BodyBytes < MinLargeBody {@@		if true {'
-  'liveobs.go@@!strings.Contains(e.Error.Message, "context length")@@false'
-  'liveobs.go@@	regexp.MustCompile(`([0-9]+) input tokens`),@@'
-  'liveobs.go@@	regexp.MustCompile(`([0-9]+) in the messages`),@@'
+  # The delta round of PR 255. B1: a large body answered otherwise than by a refusal of its length fails the row, on a
+  # line of its own; a fourth calibration prompt, half the large prompt's words, must lie on the line.
+  'liveobs.go@@func NearScaleWords(words int) int { return (words + 1) / 2 }@@func NearScaleWords(words int) int { return 4001 }'
+  'liveobs.go@@	if _, err := Calibrate(append(pts, [2]int{near, n})...); err != nil {@@	if _, err := Calibrate(append(pts, [2]int{near, n})...); err != nil && false {'
+  'liveobs.go@@	n, err := count(near)
+	if err != nil {
+		return "", 0, err
+	}@@	n, _ := count(near)'
+  'liveobs.go@@	s.ArrivedTokens, _ = InputTokensOf(reply)@@'
+  'observe.go@@func (s Stream) RefusedForLength() bool { return s.ArrivedTokens > 0 }@@func (s Stream) RefusedForLength() bool { return true }'
+  'verdict.go@@		if otherwise {@@		if false {'
+  'verdict.go@@			case !l.ArrivalVerified():@@			case false:'
+  # B2: an exact count only, in the one form, adding up and over the context.
+  'liveobs.go@@However, you requested ([0-9]+) tokens \(([0-9]+) in the messages@@However, you requested (?:at least )?([0-9]+) tokens \((?:at least )?([0-9]+) in the messages'
+  'liveobs.go@@	if prompt <= 0 || total != prompt+completion || total <= ctx {@@	if prompt <= 0 || total <= ctx {'
+  'liveobs.go@@	if prompt <= 0 || total != prompt+completion || total <= ctx {@@	if prompt <= 0 || total != prompt+completion {'
+  'liveobs.go@@	if prompt <= 0 || total != prompt+completion || total <= ctx {@@	if total != prompt+completion || total <= ctx {'
+  # B3: the request near the deadline is a completed stream.
+  'verdict.go@@r.Complete && d >= tm.NearDeadline@@d >= tm.NearDeadline'
   'observe.go@@return s.ExpectedTokens > 0 && s.ArrivedTokens == s.ExpectedTokens@@return s.ArrivedTokens == s.ExpectedTokens'
   'observe.go@@return s.ExpectedTokens > 0 && s.ArrivedTokens == s.ExpectedTokens@@return s.ExpectedTokens > 0 && s.ArrivedTokens >= s.ExpectedTokens'
   'liveobs.go@@				if from.Before(w[1]) && to.After(w[0]) {@@				if from.Before(w[1]) {'
@@ -343,7 +359,6 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'liveobs.go@@const HeadOfLineStall = time.Second@@const HeadOfLineStall = 2 * time.Second'
   'verdict.go@@	live := o.UploadNotMeasured != ""@@	live := false'
   'verdict.go@@		case !found && dir == DirUpload && uploadNotMeasured:@@		case false:'
-  'verdict.go@@			if !l.ArrivalVerified() {@@			if !l.ArrivalVerified() && false {'
   'verdict.go@@		if largeInFlightAmongStreams(reqs, tm) == 0 {@@		if false {'
   'verdict.go@@		if l.SendStart.IsZero() || !l.SendEnd.After(l.SendStart) {@@		if false {'
   'verdict.go@@		case !s.Complete && !s.ArrivalVerified():@@		case !s.Complete:'
