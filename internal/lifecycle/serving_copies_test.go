@@ -10,15 +10,18 @@ package lifecycle
 // NewManager with the production wiring: leader election on, the collectors on
 // controller-runtime's registry, served by its metrics server.
 //
-// The tests use #61's envtest block (managerPortBase) under envtest.lock, and
-// these listeners in #61's block 29300-29319: copy A's metrics and health
-// servers at 29310 and 29311, copy B's at 29312 and 29313.
+// The tests use #61's envtest block (managerPortBase) under envtest.lock. The
+// copies' metrics and health servers bind by address through controller-runtime
+// in this PR's block, 29720-29739 (portPairs); a copy whose bind finds its port
+// taken starts again on the next pair, at most maxBindRetries times, each
+// logged, as cmd/hpcburst-controller's tests do (#219).
 
 import (
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -47,11 +50,43 @@ import (
 )
 
 const (
-	copyAMetricsAddr = "127.0.0.1:29310"
-	copyAHealthAddr  = "127.0.0.1:29311"
-	copyBMetricsAddr = "127.0.0.1:29312"
-	copyBHealthAddr  = "127.0.0.1:29313"
+	// servingPortBase is the first port of this PR's block, 29720-29739: ten
+	// pairs, each a copy's metrics server (even) and health server (odd).
+	servingPortBase  = 29720
+	servingPortPairs = 10
+	// maxBindRetries is how many times a copy whose bind found its port
+	// taken is started again on the next pair (#219).
+	maxBindRetries = 3
 )
+
+// copyPorts are a copy's metrics and health addresses.
+type copyPorts struct{ metrics, health string }
+
+// portPairs hands out a test's pairs of the block, in order from its base.
+type portPairs struct{ next int }
+
+func (p *portPairs) take(t *testing.T) copyPorts {
+	t.Helper()
+	if p.next == servingPortPairs {
+		t.Fatalf("all %d port pairs of %d-%d are taken", servingPortPairs, servingPortBase, servingPortBase+2*servingPortPairs-1)
+	}
+	base := servingPortBase + 2*p.next
+	p.next++
+	return copyPorts{metrics: fmt.Sprintf("127.0.0.1:%d", base), health: fmt.Sprintf("127.0.0.1:%d", base+1)}
+}
+
+// addrInUse reports whether a bind's error text says its port was taken.
+func addrInUse(s string) bool { return strings.Contains(s, "address already in use") }
+
+// bound reports whether a copy answers on both its ports: /healthz 200, and /metrics 200 with
+// controller-runtime's series (controlSeries), so the answer is a copy's, not a stranger's.
+func bound(t *testing.T, p copyPorts) bool {
+	code, body := scrapeText(p.metrics)
+	return getStatus(t, "http://"+p.health+"/healthz") == http.StatusOK && code == http.StatusOK && strings.Contains(body, controlSeries)
+}
+
+// bindWait bounds the wait for a copy to answer on its ports.
+const bindWait = time.Minute
 
 // The child copy's settings, passed in its environment.
 const (
@@ -113,26 +148,71 @@ func (l *lockedBuffer) String() string {
 
 // childCopy is a copy of the controller running in a child process of its own group.
 type childCopy struct {
-	cmd  *exec.Cmd
-	done chan error
-	out  *lockedBuffer
-	once sync.Once
+	cmd *exec.Cmd
+	// exited is closed once the process has been waited for; waitErr is set before that.
+	exited  chan struct{}
+	waitErr error
+	out     *lockedBuffer
+	once    sync.Once
 }
 
-// startChildCopy starts the child copy against the rig's API server, its metrics and health servers
-// at the given addresses. It is stopped when the test ends if the test has not.
-func (g *servingRig) startChildCopy(t *testing.T, metrics, health string) *childCopy {
+// startChildCopy starts the child copy against the rig's API server on the rig's next pair of
+// ports, and waits until it answers on both. A child that exits having found a port taken is
+// started again on the next pair, at most maxBindRetries times, each logged. It is stopped when the
+// test ends if the test has not.
+func (g *servingRig) startChildCopy(t *testing.T) (*childCopy, copyPorts) {
+	t.Helper()
+	for attempt := 0; ; attempt++ {
+		p := g.ports.take(t)
+		c := g.launchChild(t, p)
+		if c.awaitBound(t, p) {
+			return c, p
+		}
+		if !addrInUse(c.out.String()) || attempt == maxBindRetries {
+			t.Fatalf("the child copy exited (%v) before it answered on %s and %s; its output:\n%s", c.waitErr, p.metrics, p.health, c.out.String())
+		}
+		c.once.Do(func() {}) // it exited; the cleanup has nothing to stop
+		t.Logf("the child copy's start %d found a port of %s or %s taken; starting again on the next pair (retry %d of %d)",
+			attempt+1, p.metrics, p.health, attempt+1, maxBindRetries)
+	}
+}
+
+// awaitBound waits until the child answers on p (true) or exits first (false). A child that does
+// neither within bindWait fails the test.
+func (c *childCopy) awaitBound(t *testing.T, p copyPorts) bool {
+	t.Helper()
+	deadline := time.Now().Add(bindWait)
+	for {
+		if bound(t, p) {
+			return true
+		}
+		select {
+		case <-c.exited:
+			return false
+		case <-time.After(100 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the child copy answered on neither %s nor %s within %s; its output:\n%s", p.metrics, p.health, bindWait, c.out.String())
+		}
+	}
+}
+
+// launchChild starts the child process on p.
+func (g *servingRig) launchChild(t *testing.T, p copyPorts) *childCopy {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestLifecycleCopyChild$", "-test.count=1", "-test.timeout=8m")
 	cmd.Env = append(os.Environ(), childKubeconfigEnv+"="+g.kubeconfig, childCredsEnv+"="+g.creds, childBuildsEnv+"="+g.builds,
-		childMetricsEnv+"="+metrics, childHealthEnv+"="+health)
+		childMetricsEnv+"="+p.metrics, childHealthEnv+"="+p.health)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	c := &childCopy{cmd: cmd, done: make(chan error, 1), out: &lockedBuffer{}}
+	c := &childCopy{cmd: cmd, exited: make(chan struct{}), out: &lockedBuffer{}}
 	cmd.Stdout, cmd.Stderr = c.out, c.out
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	go func() { c.done <- cmd.Wait() }()
+	go func() {
+		c.waitErr = cmd.Wait()
+		close(c.exited)
+	}()
 	t.Cleanup(func() { c.stop(t) })
 	return c
 }
@@ -146,13 +226,13 @@ func (c *childCopy) stop(t *testing.T) {
 		pgid := c.cmd.Process.Pid
 		_ = syscall.Kill(-pgid, syscall.SIGTERM)
 		select {
-		case err := <-c.done:
-			if err != nil {
-				t.Errorf("the child copy exited with %v; its output:\n%s", err, c.out.String())
+		case <-c.exited:
+			if c.waitErr != nil {
+				t.Errorf("the child copy exited with %v; its output:\n%s", c.waitErr, c.out.String())
 			}
 		case <-time.After(managerStopLimit):
 			_ = syscall.Kill(-pgid, syscall.SIGKILL)
-			<-c.done
+			<-c.exited
 			t.Errorf("the child copy did not stop within %s of SIGTERM and was killed; its output:\n%s", managerStopLimit, c.out.String())
 		}
 		if err := syscall.Kill(-pgid, 0); !errors.Is(err, syscall.ESRCH) {
@@ -170,6 +250,7 @@ type servingRig struct {
 	cfg                       *rest.Config
 	kubeconfig, creds, builds string
 	cl                        client.Client
+	ports                     portPairs
 }
 
 func newServingRig(t *testing.T) *servingRig {
@@ -248,23 +329,62 @@ type inProcessCopy struct {
 	ok     bool
 }
 
-// startCopy starts an in-process copy built from o, completed with the rig's settings, on a context
-// marked for leasefault. It is stopped when the test ends if the test has not.
-func (g *servingRig) startCopy(t *testing.T, name string, o Options) *inProcessCopy {
+// startCopy starts an in-process copy built from o, completed with the rig's settings and its next
+// pair of ports, on a context marked for leasefault, and waits until it answers on both ports. A
+// copy whose bind finds a port taken, the health port in NewManager or the metrics port in Start,
+// is started again on the next pair, at most maxBindRetries times, each logged. It is stopped when
+// the test ends if the test has not.
+func (g *servingRig) startCopy(t *testing.T, name string, o Options) (*inProcessCopy, copyPorts) {
 	t.Helper()
 	if o.Config == nil {
 		o.Config = g.cfg
 	}
 	o.CredentialsDir, o.AgentBuildsDir, o.FrontConfigured, o.Checkpoints, o.LeaderElection = g.creds, g.builds, true, &stubSource{}, true
+	for attempt := 0; ; attempt++ {
+		p := g.ports.take(t)
+		o.MetricsAddr, o.HealthAddr = p.metrics, p.health
+		c, err := g.launchCopy(t, name, o, p)
+		if err == nil {
+			return c, p
+		}
+		if !addrInUse(err.Error()) || attempt == maxBindRetries {
+			t.Fatalf("%s on %s and %s: %v", name, p.metrics, p.health, err)
+		}
+		t.Logf("%s's start %d found a port of %s or %s taken (%v); starting again on the next pair (retry %d of %d)",
+			name, attempt+1, p.metrics, p.health, err, attempt+1, maxBindRetries)
+		awaitUnregistered(t) // a Start that failed may still be unregistering its collectors
+	}
+}
+
+// launchCopy builds and starts one in-process copy on p, and returns once it answers on both ports,
+// or with the error of a NewManager or a Start that failed first.
+func (g *servingRig) launchCopy(t *testing.T, name string, o Options, p copyPorts) (*inProcessCopy, error) {
+	t.Helper()
 	mgr, _, err := NewManager(o)
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	mctx, cancel := context.WithCancel(leasefault.Mark(g.ctx))
 	c := &inProcessCopy{cancel: cancel, done: make(chan error, 1)}
 	go func() { c.done <- mgr.Start(mctx) }()
 	t.Cleanup(func() { c.stop(t, name) })
-	return c
+	deadline := time.Now().Add(bindWait)
+	for !bound(t, p) {
+		select {
+		case err := <-c.done:
+			c.once.Do(func() {}) // it has returned; the cleanup must not wait for it
+			cancel()
+			if err == nil {
+				err = errors.New("the manager returned before it answered on its ports")
+			}
+			return nil, err
+		case <-time.After(100 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s answered on neither %s nor %s within %s", name, p.metrics, p.health, bindWait)
+		}
+	}
+	return c, nil
 }
 
 // stop cancels the copy and waits once for it (stopManager).
@@ -378,7 +498,7 @@ func holderOf(l coordinationv1.Lease) string {
 // awaitServing waits until the copy at metrics and health leads and serves the rig's state: its
 // Instance and Allocation, the latter's accounting written by the test as the Provider's
 // controller writes it. It returns the Instance and the Allocation's name.
-func (g *servingRig) awaitServing(t *testing.T, what, metrics, health string) (*v1alpha1.Instance, string) {
+func (g *servingRig) awaitServing(t *testing.T, what string, p copyPorts) (*v1alpha1.Instance, string) {
 	t.Helper()
 	var in v1alpha1.Instance
 	eventually(t, 2*time.Minute, what+": the Instance and its Allocation exist", func() (bool, string) {
@@ -396,10 +516,10 @@ func (g *servingRig) awaitServing(t *testing.T, what, metrics, health string) (*
 	alloc := in.Spec.AllocationRef.Name
 	g.writeAccounting(t, alloc)
 	eventually(t, 2*time.Minute, what+": leads and serves the Instance and accounting series", func() (bool, string) {
-		if code := getStatus(t, "http://"+health+"/readyz"); code != http.StatusOK {
+		if code := getStatus(t, "http://"+p.health+"/readyz"); code != http.StatusOK {
 			return false, fmt.Sprintf("/readyz %d", code)
 		}
-		return servesState(metrics, &in, alloc)
+		return servesState(p.metrics, &in, alloc)
 	})
 	return &in, alloc
 }
@@ -431,24 +551,43 @@ func (g *servingRig) writeAccounting(t *testing.T, name string) {
 // stops: B takes the Lease and exports both gauges at 1, with the live Instance unknown, reason
 // stale, as it has no report. Last, a copy that leads while one kind's informer is held unsynced
 // exports no hpcburst_ series, and exports them once it is released.
+//
+// Each copy's start also goes through #219's retry once: a stranger holds the first pair's metrics
+// port, which copy A's Start finds taken, and the third pair's health port, which copy B's
+// NewManager finds taken, so A serves on the second pair and B on the fourth.
 func TestMetricsStandbyOnTwoManagers(t *testing.T) {
 	g := newServingRig(t)
-	a := g.startCopy(t, "copy A", Options{MetricsAddr: copyAMetricsAddr, HealthAddr: copyAHealthAddr})
-	g.awaitServing(t, "copy A", copyAMetricsAddr, copyAHealthAddr)
+	stranger := func(addr string) {
+		l, err := net.Listen("tcp", addr)
+		if err != nil {
+			t.Fatalf("the stranger's bind of %s: %v", addr, err)
+		}
+		t.Cleanup(func() { _ = l.Close() })
+	}
+	stranger(fmt.Sprintf("127.0.0.1:%d", servingPortBase))   // the first pair's metrics port
+	stranger(fmt.Sprintf("127.0.0.1:%d", servingPortBase+5)) // the third pair's health port
+	a, pa := g.startCopy(t, "copy A", Options{})
+	if want := fmt.Sprintf("127.0.0.1:%d", servingPortBase+2); pa.metrics != want {
+		t.Fatalf("copy A serves its metrics on %s, want %s: the second pair, after one retry", pa.metrics, want)
+	}
+	g.awaitServing(t, "copy A", pa)
 	holderA := holderOf(g.leaseOf(t))
 
-	b := g.startChildCopy(t, copyBMetricsAddr, copyBHealthAddr)
+	b, pb := g.startChildCopy(t)
+	if want := fmt.Sprintf("127.0.0.1:%d", servingPortBase+6); pb.metrics != want {
+		t.Fatalf("copy B serves its metrics on %s, want %s: the fourth pair, after one retry", pb.metrics, want)
+	}
 	eventually(t, 2*time.Minute, "copy B is a standby with synced caches", func() (bool, string) {
-		caches, leading := readyzCodes(t, copyBHealthAddr)
+		caches, leading := readyzCodes(t, pb.health)
 		return caches == http.StatusOK && leading == http.StatusInternalServerError, fmt.Sprintf("/readyz/caches %d, /readyz/leading %d; output:\n%s", caches, leading, b.out.String())
 	})
 	if h := holderOf(g.leaseOf(t)); h != holderA {
 		t.Fatalf("the Lease names %q, want copy A, %q, still", h, holderA)
 	}
-	exportsNothing(t, "copy B, a standby", copyBMetricsAddr)
+	exportsNothing(t, "copy B, a standby", pb.metrics)
 	eventually(t, time.Minute, "copy A still serves", func() (bool, string) {
 		in, alloc := g.currentInstance(t)
-		return servesState(copyAMetricsAddr, in, alloc)
+		return servesState(pa.metrics, in, alloc)
 	})
 
 	if !a.stop(t, "copy A") {
@@ -456,10 +595,10 @@ func TestMetricsStandbyOnTwoManagers(t *testing.T) {
 	}
 	in, alloc := g.currentInstance(t)
 	eventually(t, 2*time.Minute, "copy B takes the Lease and serves", func() (bool, string) {
-		if _, leading := readyzCodes(t, copyBHealthAddr); leading != http.StatusOK {
+		if _, leading := readyzCodes(t, pb.health); leading != http.StatusOK {
 			return false, fmt.Sprintf("/readyz/leading %d", leading)
 		}
-		return servesState(copyBMetricsAddr, in, alloc)
+		return servesState(pb.metrics, in, alloc)
 	})
 	if h := holderOf(g.leaseOf(t)); h == holderA || h == "" {
 		t.Fatalf("copy B serves while the Lease names %q", h)
@@ -471,7 +610,7 @@ func TestMetricsStandbyOnTwoManagers(t *testing.T) {
 	release := sync.OnceFunc(func() { close(gate) })
 	defer release()
 	held := &heldKindCache{kind: fmt.Sprintf("%T", &v1alpha1.Instance{}), gate: gate, asked: make(chan struct{})}
-	g.startCopy(t, "copy C", Options{MetricsAddr: copyAMetricsAddr, HealthAddr: copyAHealthAddr,
+	_, pc := g.startCopy(t, "copy C", Options{
 		newCache: func(c *rest.Config, o cache.Options) (cache.Cache, error) {
 			inner, err := cache.New(c, o)
 			if err != nil {
@@ -481,13 +620,13 @@ func TestMetricsStandbyOnTwoManagers(t *testing.T) {
 			return held, nil
 		}})
 	eventually(t, 2*time.Minute, "copy C leads with its caches not synced", func() (bool, string) {
-		caches, leading := readyzCodes(t, copyAHealthAddr)
+		caches, leading := readyzCodes(t, pc.health)
 		return caches == http.StatusInternalServerError && leading == http.StatusOK, fmt.Sprintf("/readyz/caches %d, /readyz/leading %d", caches, leading)
 	})
-	exportsNothing(t, "copy C, leading with its caches not synced", copyAMetricsAddr)
+	exportsNothing(t, "copy C, leading with its caches not synced", pc.metrics)
 	release()
 	eventually(t, 2*time.Minute, "copy C serves once its caches have synced", func() (bool, string) {
-		return servesState(copyAMetricsAddr, in, alloc)
+		return servesState(pc.metrics, in, alloc)
 	})
 }
 
@@ -593,16 +732,16 @@ func TestMetricsLostLeaseStopsBeforeANewCopyLeads(t *testing.T) {
 	g := newServingRig(t)
 	f := leasefault.New(v1alpha1.ControllerNamespace, v1alpha1.LeaseLifecycle)
 	defer f.OpenHeld()
-	a := g.startCopy(t, "copy A", Options{Config: f.Config(g.cfg), MetricsAddr: copyAMetricsAddr, HealthAddr: copyAHealthAddr})
-	in, alloc := g.awaitServing(t, "copy A", copyAMetricsAddr, copyAHealthAddr)
+	a, pa := g.startCopy(t, "copy A", Options{Config: f.Config(g.cfg)})
+	in, alloc := g.awaitServing(t, "copy A", pa)
 	holderA := holderOf(g.leaseOf(t))
-	b := g.startChildCopy(t, copyBMetricsAddr, copyBHealthAddr)
+	b, pb := g.startChildCopy(t)
 	eventually(t, 2*time.Minute, "copy B is a standby with synced caches", func() (bool, string) {
-		caches, leading := readyzCodes(t, copyBHealthAddr)
+		caches, leading := readyzCodes(t, pb.health)
 		return caches == http.StatusOK && leading == http.StatusInternalServerError, fmt.Sprintf("/readyz/caches %d, /readyz/leading %d; output:\n%s", caches, leading, b.out.String())
 	})
 
-	scrapes := startScrapeLog(copyAMetricsAddr)
+	scrapes := startScrapeLog(pa.metrics)
 	defer scrapes.finish()
 	eventually(t, time.Minute, "a scrape of copy A has hpcburst_ series", func() (bool, string) { return scrapes.served(), "none yet" })
 	faultAt := time.Now()
@@ -618,10 +757,10 @@ func TestMetricsLostLeaseStopsBeforeANewCopyLeads(t *testing.T) {
 		bAcquire = l.Spec.AcquireTime.Time
 		return true, ""
 	})
-	eventually(t, 2*time.Minute, "copy B serves", func() (bool, string) { return servesState(copyBMetricsAddr, in, alloc) })
+	eventually(t, 2*time.Minute, "copy B serves", func() (bool, string) { return servesState(pb.metrics, in, alloc) })
 	// A runs on while its release read is held: see it answer after B's take.
 	eventually(t, time.Minute, "copy A answers after copy B's take", func() (bool, string) {
-		code, body := scrapeText(copyAMetricsAddr)
+		code, body := scrapeText(pa.metrics)
 		return code == http.StatusOK && strings.Contains(body, controlSeries) && time.Now().After(bAcquire.Add(time.Second)), fmt.Sprintf("/metrics %d", code)
 	})
 	got := scrapes.finish()
