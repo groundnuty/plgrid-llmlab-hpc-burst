@@ -254,9 +254,10 @@ func TestDownDoesNotCallTheNextGroupsListenersForeign(t *testing.T) {
 	}
 }
 
-// shortReleaseWait shortens the wait for the whole test, so a foreign listener does not cost the
-// full socketReleaseWait in every run. The tests that depend on the wait read the value back.
-func shortReleaseWait(t *testing.T, d time.Duration) {
+// setReleaseWait sets the wait for the whole test: short, so a foreign listener does not cost the
+// full socketReleaseWait in every run, or long, so that the only way down can return early is a
+// clean scan. The tests that depend on the wait read the value back.
+func setReleaseWait(t *testing.T, d time.Duration) {
 	t.Helper()
 	old := socketReleaseWait
 	socketReleaseWait = d
@@ -270,7 +271,7 @@ func shortReleaseWait(t *testing.T, d time.Duration) {
 // the next test).
 func TestDownReportsARealForeignListenerOnce(t *testing.T) {
 	const wait = 1500 * time.Millisecond
-	shortReleaseWait(t, wait)
+	setReleaseWait(t, wait)
 	ports := downBlock(t)
 	foreign, err := net.Listen("tcp", addrs(ports.API + 5)[0])
 	if err != nil {
@@ -314,9 +315,15 @@ func TestDownReportsARealForeignListenerOnce(t *testing.T) {
 // recorded port when down first looks, and is closed while down waits for it (a socket the kernel
 // is still releasing, say). It is closed on the observable event, down's own log line that says
 // it is waiting, not after a delay, so the test does not depend on how fast the machine is. It is
-// not reported afterwards.
+// not reported afterwards, and down stops polling at the first scan that finds the ports clean.
+//
+// That last point is judged on down's own return, with no clock deciding it: the release wait is so
+// long that down cannot come back by waiting it out, so it returns within the test's deadline only
+// if the clean scan ended the polling. The deadline is far above any machine's speed and far below
+// the wait, and it matters only when the test fails.
 func TestDownDoesNotReportAListenerThatGoesDuringTheWait(t *testing.T) {
-	shortReleaseWait(t, 20*time.Second) // never reached: the listener goes at the first line
+	const wait, deadline = 10 * time.Minute, 2 * time.Minute
+	setReleaseWait(t, wait)
 	ports := downBlock(t)
 	late, err := net.Listen("tcp", addrs(ports.API + 6)[0])
 	if err != nil {
@@ -332,21 +339,36 @@ func TestDownDoesNotReportAListenerThatGoesDuringTheWait(t *testing.T) {
 			once.Do(func() { late.Close(); closedAt <- time.Now() })
 		}
 	}}
-	start := time.Now()
-	rep, err := Down(context.Background(), DownOptions{StateDir: l.dir, Grace: 20 * time.Second, Log: log})
-	if err != nil {
-		t.Fatalf("down: %v", err)
+	type outcome struct {
+		rep *StopReport
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		rep, err := Down(context.Background(), DownOptions{StateDir: l.dir, Grace: 20 * time.Second, Log: log})
+		done <- outcome{rep, err}
+	}()
+	var got outcome
+	select {
+	case got = <-done:
+	case <-time.After(deadline):
+		select {
+		case <-closedAt:
+			t.Fatalf("down was still polling %s after the listener it was waiting for had gone (release wait %s): it does not stop at the first clean scan; log:\n%s", deadline, wait, log)
+		default:
+			t.Fatalf("down never said it was waiting for the listener, so the test never closed it, and it did not return in %s; log:\n%s", deadline, log)
+		}
+	}
+	if got.err != nil {
+		t.Fatalf("down: %v", got.err)
 	}
 	select {
 	case <-closedAt:
 	default:
 		t.Fatalf("down never said it was waiting for the listener, so the test never closed it; log:\n%s", log)
 	}
-	if len(rep.ForeignOnPorts) != 0 || strings.Contains(log.String(), "warning") {
-		t.Errorf("a listener that went during the wait was reported: %v; log:\n%s", rep.ForeignOnPorts, log)
-	}
-	if took := time.Since(start); took > 15*time.Second {
-		t.Errorf("down took %s: it waited out the whole release wait for a listener that was already gone", took)
+	if len(got.rep.ForeignOnPorts) != 0 || strings.Contains(log.String(), "warning") {
+		t.Errorf("a listener that went during the wait was reported: %v; log:\n%s", got.rep.ForeignOnPorts, log)
 	}
 }
 
@@ -450,7 +472,7 @@ func TestASocketOfOursThatStaysIsAHardErrorNotAForeignListener(t *testing.T) {
 		{"control: both are released", 0, 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			shortReleaseWait(t, 300*time.Millisecond)
+			setReleaseWait(t, 300*time.Millisecond)
 			h := newLingerHost(t, c.keep)
 			log := &lockedLog{}
 			rep, err := stopRecorded(context.Background(), h.st, 5*time.Second, log)
@@ -475,7 +497,7 @@ func TestASocketOfOursThatStaysIsAHardErrorNotAForeignListener(t *testing.T) {
 // table, one held by a launched process (its inode is in the set), one outside the recorded ports,
 // and one foreign on a recorded port, only the last is reported.
 func TestForeignListenersLeavesOutTheSocketsOfLaunchedProcesses(t *testing.T) {
-	shortReleaseWait(t, 300*time.Millisecond)
+	setReleaseWait(t, 300*time.Millisecond)
 	root := fakeProc(t, "boot-A")
 	ports := downBlock(t)
 	writeListenRows(t, root, []fakeRow{{ports.API, "9301"}, {ports.API + 5, "9302"}, {ports.API + 40, "9303"}})

@@ -234,6 +234,12 @@ func stopGroup(ctx context.Context, st *State, recs []ProcRec, grace time.Durati
 // recorded process is stopped. A listener that is not ours is first given the wait our own sockets
 // get: it may be one that the kernel is still releasing, or one a launched process opened after
 // its sockets were listed. It is foreign only if it is still there when socketReleaseWait is over.
+//
+// Known limit: owned is the union of the inodes of every group stopped, and the check is by inode
+// number. An inode number can in principle be given to a new socket once the old one is closed, so
+// a foreign listener that took a number released earlier in this same shutdown would count as
+// ours and go unreported. That is a missed warning, never a signal to anything, and it needs an
+// exact reuse inside one down, so it is not guarded against.
 func foreignListeners(ports Ports, owned map[string]bool, log io.Writer) ([]string, error) {
 	recorded := map[int]bool{}
 	for _, p := range ports.All() {
