@@ -7,16 +7,19 @@
 #
 # Optional:
 #   HPCBURST_SSHD           sshd for the fake login node and the gateway (default /usr/sbin/sshd)
-#   REHEARSAL_RUN           a -test.run pattern (default every rehearsal test)
+#   REHEARSAL_RUN           a -test.run pattern (default '^TestRehearsal(Direct|SSH)$', issue #146's two;
+#                           '^TestRehearsalPart3$' runs issue #193's third part, about 8 minutes more)
 #   REHEARSAL_OUT           where the binaries go (default a new temporary directory)
 #   REHEARSAL_PREBUILT=1    run the binaries already in REHEARSAL_OUT instead of building them,
 #                           so the run can take a host's resource lock without a build inside it
 #   REHEARSAL_MEMORY_MAX    the run's memory cap (default 4G); the stack peaks under 1 GiB
+#   REHEARSAL_TIMEOUT       the test binary's -test.timeout (default 30m); its waits give up two
+#                           minutes before it, so a slow run still cleans up
 #   HPCBURST_TEST_ROOT_K3S=1  a system k3s runs here: the test fails unless it listens on 6443,
 #                           6444 and 10250. Without it, the test records whichever of them listen
 #                           and fails if that changes.
-# It binds 127.0.0.1 only, on ports 29500-29539 and kernel-chosen ones, and never touches a
-# system k3s.
+# It binds 127.0.0.1 only, on ports 29500-29539 (issue #146's tests), 29680-29699 (issue #193's)
+# and kernel-chosen ones, and never touches a system k3s.
 #
 # The test starts k3s, the supervisor, the fake jobs and the sshds in sessions of their own, and
 # only its clean-up stops them: go test's -test.timeout panic and a signal both skip it. So the
@@ -96,14 +99,14 @@ trap 'echo "rehearsal.sh: terminated; stopping $scope" >&2; exit 143' TERM
 
 echo "the test runs in $scope"
 cd internal/rehearsal/scenario
-# -test.timeout 30m: twice the target of 15 minutes (issue #146). The test's waits give up two
-# minutes before it, so a slow run fails with its clean-up done; the scope is the backstop.
+# -test.timeout 30m by default: twice the target of 15 minutes (issue #146). The test's waits give
+# up two minutes before it, so a slow run fails with its clean-up done; the scope is the backstop.
 # In the background, so that a trapped signal ends the wait at once: bash runs a trap only after
 # a foreground command returns.
 HPCBURST_REHEARSAL=1 HPCBURST_REHEARSAL_BIN="$out" HPCBURST_REQUIRE_FRP=1 HPCBURST_REQUIRE_SSHD=1 \
 	systemd-run --user --scope --collect -q --unit="$unit" \
 	-p MemoryMax="${REHEARSAL_MEMORY_MAX:-4G}" -p MemorySwapMax=0 \
-	"$out/rehearsal.test" -test.v -test.timeout 30m -test.run "${REHEARSAL_RUN:-^TestRehearsal}" &
+	"$out/rehearsal.test" -test.v -test.timeout "${REHEARSAL_TIMEOUT:-30m}" -test.run "${REHEARSAL_RUN:-^TestRehearsal(Direct|SSH)\$}" &
 child=$!
 rc=0
 wait "$child" || rc=$?

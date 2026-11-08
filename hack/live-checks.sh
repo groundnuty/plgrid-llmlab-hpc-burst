@@ -20,12 +20,21 @@
 # prints what it would use and the queue estimate (sbatch --test-only), then
 # runs only with --yes. A skipped test is a failure, not a pass.
 #
+# rehearsal-part3 (issue #193) is a local row that runs the one-host rehearsal: the real hpcburst stack over a
+# fake Slurm on this host, no cluster and no --yes. It runs only through hack/rehearsal.sh, never the test binary on
+# its own: that script puts everything the test starts in a systemd scope and kills the scope however the run ends,
+# and a test run any other way would leave the stack's processes behind when its own clean-up is skipped (a
+# timeout panic, a signal). The builds come first, under the build lock, into a directory of the row's own; the
+# run itself takes no lock (REHEARSAL_PREBUILT=1). It needs LIVE_BIN_DIR, and lasts up to 35 minutes: the
+# test's -test.timeout of 30 minutes, then the scope's teardown. An interrupt waits for that teardown.
+#
 # Exit codes: 0 all passed; 1 a test failed, skipped, left a job behind or
 # timed out; 2 usage error, an unreadable range or a table of this script
 # that loads no rows; 3 refused or NOT RUN (a
 # setting is missing, a file is not mode 600, the one-job slot is in use; or a
 # job of a row with a start-wait bound did not start within it and was cancelled
-# by its tag: not a failure, try again later; or the scheduler rejected the
+# by its tag, or a row in a one-job slot with no start wait (the stack rows that hold QOS now's GPU for hours, and
+# real-engine) was still pending after its wait in the queue (below) and was cancelled by its tag: not a failure, try again later; or the scheduler rejected the
 # row's shape in the dry-run estimate, with or without --yes); 4 a cluster test
 # was not run because --yes was not given.
 #
@@ -40,6 +49,21 @@
 # failure, above a pass), like a busy one-job slot: the run could not be done now, try again later. Every other
 # skip stays a failure, and so does a NOT RUN whose cleanup leaves a job behind. A new row opts in by giving
 # its start wait and having its test follow the protocol; no row-specific code is needed.
+#
+# The other NOT RUN: a row that holds QOS now's GPU for hours (the owner-go table) has the same protocol with a
+# different bound. Its first clock, the wait in the queue (HPCBURST_ALPHA_PENDING_MAX_SECONDS), defaults to 30 min,
+# not the 2 h of the other rows, because a job of ours that pends in the owner's one-job slot is in the owner's way
+# (issue #222); an explicit LIVE_PENDING_MAX_SECONDS overrides it. A job still pending at the bound is cancelled by its
+# tag, the test writes not-run.txt and skips, and the script reports "<row>: NOT RUN" and exits 3. On a row that holds no
+# such slot the same overrun is a failure.
+#
+# The rule behind both: a row in a one-job slot (the cluster table's slot column), on either cluster, must have a start
+# wait of 10 min or less or a wait in the queue of 30 min or less (pending_max), and it passes the slot guard
+# (check_slot) before it runs. real-engine, which runs no test of ours to skip, has the 30 min as its wait in the queue
+# too, and a job still pending at the bound is NOT RUN with the same consequence (issue #222): the cleanup cancels the
+# job by its tag, nothing is posted, and the exit is 3, since a job that never started is not a failure. On a row with no
+# slot the same overrun is a failure. hack/livechecks reads the table and fails, naming the row, for a slot row that has
+# neither bound, so a new row cannot miss it.
 #
 # The settings file is named by HPCBURST_LIVE_SETTINGS: KEY=VALUE lines, mode
 # 600, owned by you. Keys (none is ever printed):
@@ -59,7 +83,8 @@
 #   LIVE_DIALHOME_KEY            ssh mode only: the restricted dial-home key file, mode 600
 #   LIVE_DIALHOME_LISTEN         direct mode: host:port of the front's dial-home listener on this host, where the
 #                                owner's route arrives; a direct run without it fails at its first step, naming it
-#   LIVE_BIN_DIR                 absolute path of the directory with k3s-1.36.5/ and the pinned frp
+#   LIVE_BIN_DIR                 absolute path of the directory with k3s-1.36.5/ and the pinned frp (frps, frpc); read by
+#                                the rows that run the stack and by rehearsal-part3
 #   LIVE_TUNNEL_LEASE_MINUTES    optional, the tunnel rows' lease in minutes, 106 to 240 (default 137, the shape below): the owner's
 #                                choice when giving the go; the shape, the hold note and the test follow it
 #   LIVE_OWNER_GO_HELIOS_NOW     today's UTC date (YYYY-MM-DD), once the owner has said yes to the run: the rows that hold
@@ -110,6 +135,7 @@ live_table() {
 # BEGIN LIVE TESTS
 llmlab-smoke|local|internal/front|^TestLLMLabThroughTheFront$|HPCBURST_LLMLAB_CREDENTIALS|-|host|ready
 hub-golden|local|pkg/hubfiles|^TestGoldenHub$|HPCBURST_TEST_HUB|spikes/s7/checkpoints.env,spikes/s7/results/run1/hub,spikes/s7/results/run1/hash-*.jsonl|host|ready
+rehearsal-part3|local|internal/rehearsal/scenario|^TestRehearsalPart3$|HPCBURST_REHEARSAL|hack/rehearsal.sh,config/crd|host|ready
 conformance-helios|cluster|internal/providerctl/conformance|^TestConformance$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
 conformance-helios-gh200|cluster|internal/providerctl/conformance|^TestConformance$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
 conformance-athena|cluster|internal/providerctl/conformance|^TestConformance$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
@@ -165,12 +191,14 @@ TABLE
 # after the start waits being for jobs that already run, plus 2 min for the end-of-run check for a
 # late duplicate, 44 in all) and a margin of 1 min, so a slow cleanup fails in the test, with its
 # message, before this cap does.
+# conformance-athena, in Athena's one-job slot (the partition plgrid-now), has the same guard, the same start wait and so the
+# same timeout (the science agent's rule of 2 Nov 2026: every slot row has a bound; see the header).
 cluster_table() {
   cat <<'TABLE'
 # BEGIN CLUSTER SHAPES
 conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|80|-
 conformance-helios-gh200|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|45|-C memfs|10
-conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|80|-
+conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|45|-|10
 real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|75|-C memfs
 alpha-athena-handover|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|01:46:00|150|-
 alpha-helios-nooverlap|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|200|-C memfs
@@ -186,7 +214,9 @@ TABLE
 
 # The rows that run the whole stack (the controllers, the front, frps and the agent) take the dependency
 # closure of these packages too, in each of their build contexts, so --plan names them when a stack package
-# changes: the thin test package alone would show none of it. name | packages (comma separated).
+# changes: the thin test package alone would show none of it. name | packages (comma separated). The
+# rehearsal row (issue #193) builds exactly these packages and runs the binaries (prepare_rehearsal below;
+# hack/livechecks compares them with the go build line of hack/rehearsal.sh).
 plan_stack_table() {
   cat <<'TABLE'
 # BEGIN PLAN STACK
@@ -194,6 +224,7 @@ alpha-athena-handover|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cm
 alpha-helios-nooverlap|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 tunnel-hour-helios|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 tunnel-hour-athena|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
+rehearsal-part3|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 # END PLAN STACK
 TABLE
 }
@@ -226,6 +257,29 @@ alpha-helios-nooverlap|LIVE_OWNER_GO_HELIOS_NOW|160
 tunnel-hour-helios|LIVE_OWNER_GO_HELIOS_NOW|140
 # END OWNER GO
 TABLE
+}
+
+# The wait in the queue, in seconds, that a queued row allows its job before the run cancels it (the first clock of
+# the run; the row's run time is the second): 2 h for a row that waits in a long queue, 30 min for a row in a one-job
+# slot (the cluster table's slot column: QOS now on Helios, the partition plgrid-now on Athena), where our pending job
+# stands in the owner's way (issue #222, the owner's go; the science agent's ruling of 2 Nov 2026, which includes
+# real-engine). LIVE_PENDING_MAX_SECONDS, when set, overrides either.
+PENDING_MAX_DEFAULT=7200
+PENDING_MAX_NOW=1800
+
+# pending_max <name>: the wait in the queue, in seconds, that applies to the row.
+pending_max() {
+  if [ -n "${LIVE_PENDING_MAX_SECONDS:-}" ]; then printf '%s' "$LIVE_PENDING_MAX_SECONDS"
+  elif [ "${SLOT[$1]:--}" != - ]; then printf '%s' "$PENDING_MAX_NOW"
+  else printf '%s' "$PENDING_MAX_DEFAULT"; fi
+}
+
+# fmt_pending <seconds>: a wait in the queue as the operator reads it, exact: "30 min" for whole minutes, else "59 s"
+# or "1 min 30 s".
+fmt_pending() {
+  if [ $(($1 % 60)) -eq 0 ]; then printf '%d min' $(($1 / 60))
+  elif [ "$1" -lt 60 ]; then printf '%d s' "$1"
+  else printf '%d min %d s' $(($1 / 60)) $(($1 % 60)); fi
 }
 
 # The tunnel rows' lease is a parameter of the run (LIVE_TUNNEL_LEASE_MINUTES), so the owner can choose when giving
@@ -392,6 +446,7 @@ check_settings() {
     case $name in
       llmlab-smoke) need LIVE_LLMLAB_CREDENTIALS && { private_file LIVE_LLMLAB_CREDENTIALS "${S[LIVE_LLMLAB_CREDENTIALS]}" || bad=1; } ;;
       hub-golden) ;;
+      rehearsal-part3) check_rehearsal_settings || bad=1 ;;
       *)
         [ "${KIND[$name]}" = cluster ] || continue
         need LIVE_LOCK_DIR && { [ -d "${S[LIVE_LOCK_DIR]}" ] || { say "live-checks: LIVE_LOCK_DIR is not a directory"; bad=1; }; }
@@ -417,9 +472,10 @@ check_settings() {
 # fmt_hold <minutes>: "2 h 40 min".
 fmt_hold() { printf '%d h %02d min' $(($1 / 60)) $(($1 % 60)); }
 
-# owner_go_note <name>: what a row that holds QOS now's GPU says before it runs.
+# owner_go_note <name>: what a row that holds QOS now's GPU says before it runs: the wait in the queue it may
+# take first, past which it is cancelled and the run is NOT RUN, and the hold once it runs.
 owner_go_note() {
-  say "$1: holds QOS now's GPU for about $(fmt_hold "${OGMIN[$1]}"); the owner's go is needed (the development rule on #145)"
+  say "$1: may pend up to $(fmt_pending "$(pending_max "$1")") in the queue (then it is cancelled by its tag and the run is NOT RUN), then holds QOS now's GPU for about $(fmt_hold "${OGMIN[$1]}"); the owner's go is needed (the development rule on #145)"
 }
 
 # today_utc: the date the owner's go is compared with. LIVE_FAKE_DATE_FILE is a test seam, like LIVE_FAKE_CLOCK: a
@@ -437,6 +493,23 @@ check_owner_go() {
   [ "${2:-}" = quiet ] || owner_go_note "$name"
   say "live-checks: setting $key must hold today's UTC date ($today) once the owner has said yes to this hold; it is missing or from another day"
   return 1
+}
+
+# check_rehearsal_settings: what the rehearsal row needs (issue #193): the directory with the pinned k3s and frp. It
+# must be absolute, because the test runs in its package directory, and it must hold what hack/rehearsal.sh and the
+# test look for, so that a missing binary refuses the row (exit 3) before the builds instead of failing a long run.
+# Every problem is reported.
+check_rehearsal_settings() {
+  local bad=0 d f
+  [ -n "${S[LIVE_BIN_DIR]:-}" ] || { say "live-checks: setting LIVE_BIN_DIR is missing"; return 1; }
+  d=${S[LIVE_BIN_DIR]}
+  case $d in /*) ;; *) say "live-checks: LIVE_BIN_DIR must be an absolute path"; return 1 ;; esac
+  [ -d "$d" ] || { say "live-checks: LIVE_BIN_DIR is not a directory"; return 1; }
+  [ -f "$d/k3s-1.36.5/k3s" ] && [ -x "$d/k3s-1.36.5/k3s" ] || { say "live-checks: LIVE_BIN_DIR has no executable k3s-1.36.5/k3s (hack/fetch-k3s.sh)"; bad=1; }
+  for f in frps frpc; do
+    [ -f "$d/$f" ] && [ -x "$d/$f" ] || { say "live-checks: LIVE_BIN_DIR has no executable $f (hack/fetch-frp.sh)"; bad=1; }
+  done
+  return $bad
 }
 
 # check_reach_settings: what a reach row needs besides a cluster test's own settings (issue #225): the gateway's forwarded
@@ -708,14 +781,15 @@ on_exit() {
   exit "$rc"
 }
 
-# wait_child: waits for CHILD; a signal to this script stops it. Sets CHILD_RC.
+# wait_child [steps]: waits for CHILD; a signal to this script stops it: TERM, then KILL after steps of 0.2 s
+# (default 50, ten seconds). Sets CHILD_RC.
 wait_child() {
   local i
   CHILD_RC=0
   wait "$CHILD" || CHILD_RC=$?
   if [ -n "$INTERRUPTED" ]; then
     kill -TERM "$CHILD" 2>/dev/null
-    for i in $(seq 1 50); do kill -0 "$CHILD" 2>/dev/null || break; sleep 0.2; done
+    for i in $(seq 1 "${1:-50}"); do kill -0 "$CHILD" 2>/dev/null || break; sleep 0.2; done
     kill -KILL "$CHILD" 2>/dev/null
     wait "$CHILD" 2>/dev/null
     CHILD_RC=130
@@ -729,11 +803,12 @@ wait_child() {
 # ---------------------------------------------------------------- results
 
 # not_run_verdict <name> <rc> <failed> <skipped> <named result>: the NOT RUN protocol (see the header). True only for
-# a row with a start wait whose test skipped once at the top level with no failure, exit status 0 and the marker,
-# a regular file (not a link) in this run's record directory. Anything else is not a NOT RUN.
+# a row with a start wait, or a row of the owner-go table (a bound on its wait in the queue), whose test skipped once at
+# the top level with no failure, exit status 0 and the marker, a regular file (not a link) in this run's record
+# directory. Anything else is not a NOT RUN.
 not_run_verdict() {
   local n=$1 rc=$2 failed=$3 skipped=$4 named=$5
-  [ "${SWAIT[$n]:--}" != - ] || return 1
+  [ "${SWAIT[$n]:--}" != - ] || [ -n "${OGSET[$n]:-}" ] || return 1
   [ "$named" = SKIP ] && [ "$rc" = 0 ] && [ "$failed" = 0 ] && [ "$skipped" = 1 ] || return 1
   [ -n "$REC_DIR" ] && [ -f "$REC_DIR/not-run.txt" ] && [ ! -L "$REC_DIR/not-run.txt" ]
 }
@@ -751,7 +826,11 @@ judge() {
   if [ "$rc" = 124 ]; then say "$n: FAIL (timed out)"; return 1; fi
   if not_run_verdict "$n" "$rc" "${fail:-0}" "${skip:-0}" "$named"; then
     NOT_RUN=1
-    say "$n: NOT RUN (a job did not start within ${SWAIT[$n]} min of its acceptance and was cancelled by its tag; not a failure)"
+    if [ "${SWAIT[$n]:--}" != - ]; then
+      say "$n: NOT RUN (a job did not start within ${SWAIT[$n]} min of its acceptance and was cancelled by its tag; not a failure)"
+    else
+      say "$n: NOT RUN (a job was still pending after $(fmt_pending "$(pending_max "$n")") in the queue and was cancelled by its tag; not a failure)"
+    fi
     return 3
   fi
   if [ "$named" = SKIP ]; then say "$n: FAIL (skipped: its gate was not met, so nothing ran)"; return 1; fi
@@ -819,7 +898,7 @@ env_conformance() {
   unset HPCBURST_CONF_PENDING_MAX_SECONDS HPCBURST_ALPHA_DRY HPCBURST_ALPHA_DRY_FAULT HPCBURST_ALPHA_ROW HPCBURST_ALPHA_OUT
   case $n in
     # Only a row with no start wait: with one, the bound is the first clock and the test takes no other.
-    gpu-accounting-*|reach-*) [ "${SWAIT[$n]:--}" != - ] || export HPCBURST_CONF_PENDING_MAX_SECONDS=${LIVE_PENDING_MAX_SECONDS:-7200} ;;
+    gpu-accounting-*|reach-*) [ "${SWAIT[$n]:--}" != - ] || export HPCBURST_CONF_PENDING_MAX_SECONDS=$(pending_max "$n") ;;
   esac
   # The gateway's forwarded port reaches the reach rows only (issue #225); the host and the port are private, the label is
   # what the text to post carries.
@@ -841,7 +920,7 @@ env_alpha() {
   export HPCBURST_ALPHA_HOST_LOCK=${S[LIVE_LOCK_DIR]}/$host.lock HPCBURST_ALPHA_CONTROL_DIR=$CONTROL_DIR
   export HPCBURST_ALPHA_OUT=$REC_DIR HPCBURST_ALPHA_BIN_DIR=${S[LIVE_BIN_DIR]} HPCBURST_ALPHA_BUILD_DIR=${ALPHA_BUILD_DIR:-}
   export HPCBURST_ALPHA_DIALHOME_MODE=${S[LIVE_DIALHOME_MODE]} HPCBURST_ALPHA_DIALHOME_ADDR=${S[LIVE_DIALHOME_ADDR]}
-  export HPCBURST_ALPHA_PENDING_MAX_SECONDS=${LIVE_PENDING_MAX_SECONDS:-7200}
+  export HPCBURST_ALPHA_PENDING_MAX_SECONDS=$(pending_max "$n")
   # A tunnel row's lease, in minutes, as the shape holds it (after LIVE_TUNNEL_LEASE_MINUTES): the test judges that value.
   case $n in
     tunnel-hour-*) local lh lm; IFS=: read -r lh lm _ <<<"${TLIMIT[$n]}"; export HPCBURST_ALPHA_LEASE_MINUTES=$((10#$lh * 60 + 10#$lm)) ;;
@@ -854,10 +933,60 @@ env_alpha() {
 
 run_local() { # <name>
   local n=$1 bin="$OUT/$1.test" setup
+  case $n in rehearsal-part3) run_rehearsal "$n"; return ;; esac
   case $n in llmlab-smoke) setup=env_llmlab ;; hub-golden) setup=env_hub ;; esac
   build_test_binary "$n" "$bin" || return 1
   [ -z "$INTERRUPTED" ] || { say "$n: FAIL (interrupted before the run started)"; return 1; }
   run_binary "$n" "$bin" "$LOCAL_TIMEOUT_MIN" "$setup"
+  judge "$n" "$OUT/$n.log" "$CHILD_RC"
+}
+
+# The one-host rehearsal (issue #193). Its test binary is never run on its own: hack/rehearsal.sh runs it in a
+# systemd scope that it stops however the run ends, and a plain run would leave k3s and the other processes of
+# the stack behind whenever the test's own clean-up is skipped. LOCAL_TIMEOUT_MIN (15) is the rehearsal's own
+# target and would end a normal run, so the row has its own: rehearsal.sh gives the test REHEARSAL_TIMEOUT (its
+# waits give up two minutes before it), and this script's timeout leaves the scope's teardown (up to a minute
+# of SIGKILLs) and a margin after it. An interrupt gets as long as that teardown before the KILL.
+REHEARSAL_TEST_TIMEOUT_MIN=30
+REHEARSAL_RUN_TIMEOUT_MIN=35
+REHEARSAL_STOP_STEPS=450
+
+# prepare_rehearsal <name>: builds what hack/rehearsal.sh runs, the stack's binaries (the row's plan-stack
+# packages: hack/livechecks compares them with the script's own build line) and the row's test binary, under
+# the build lock and into one directory of the row's own that every run overwrites (REHEARSAL_DIR). The run
+# itself then takes no lock (REHEARSAL_PREBUILT=1): a build lock held for a run of half an hour would stop every
+# build on the host.
+REHEARSAL_DIR=""
+prepare_rehearsal() {
+  local n=$1 w="$OUT/$1-bin" p
+  local -a pkgs=()
+  for p in ${STACK[$n]}; do pkgs+=("./$p"); done
+  mkdir -p -m 700 "$w" || { say "$n: FAIL (the build directory could not be made)"; return 1; }
+  say "$n: building the stack's binaries and the test binary"
+  ( cd "$ROOT" &&
+    with_build_lock go build -o "$w/" "${pkgs[@]}" &&
+    with_build_lock go test -c -o "$w/rehearsal.test" "./${PKG[$n]}" ) >"$OUT/$n-build.log" 2>&1 ||
+    { say "$n: FAIL (a build step failed; see the build log in the output directory)"; return 1; }
+  REHEARSAL_DIR=$w
+}
+
+# run_rehearsal <name>: the builds, then hack/rehearsal.sh with the row's -run pattern, its output in the row's log,
+# and the verdict from that log like any local row's. The directory of the pinned k3s and frp is LIVE_BIN_DIR. Every
+# REHEARSAL_ variable that the run depends on is set here, so the caller's shell cannot redirect the run; the
+# caller's HPCBURST_TEST_ROOT_K3S, HPCBURST_SSHD and REHEARSAL_MEMORY_MAX pass through (rehearsal.sh's header).
+run_rehearsal() {
+  local n=$1
+  prepare_rehearsal "$n" || return 1
+  [ -z "$INTERRUPTED" ] || { say "$n: FAIL (interrupted before the run started)"; return 1; }
+  (
+    [ -z "$RUN_FD" ] || eval "exec ${RUN_FD}>&-"
+    export HPCBURST_BIN_DIR=${S[LIVE_BIN_DIR]} HPCBURST_FRP_DIR=${S[LIVE_BIN_DIR]}
+    export REHEARSAL_RUN=${TEST[$n]} REHEARSAL_OUT=$REHEARSAL_DIR REHEARSAL_PREBUILT=1 REHEARSAL_TIMEOUT=${REHEARSAL_TEST_TIMEOUT_MIN}m
+    cd "$ROOT" || exit 1
+    exec timeout "${REHEARSAL_RUN_TIMEOUT_MIN}m" "$ROOT/hack/rehearsal.sh"
+  ) >"$OUT/$n.log" 2>&1 &
+  CHILD=$!
+  wait_child "$REHEARSAL_STOP_STEPS"
   judge "$n" "$OUT/$n.log" "$CHILD_RC"
 }
 
@@ -915,11 +1044,11 @@ execute_cluster() {
     alpha-*|tunnel-hour-*)
       # The test owns the two clocks of a queued run (HPCBURST_ALPHA_PENDING_MAX_SECONDS, then the row's run
       # budget); this timeout is their sum, so a long wait in the queue does not eat the run's time.
-      run_binary "$n" "$OUT/$n.test" "$(( ${TMIN[$n]} + ${LIVE_PENDING_MAX_SECONDS:-7200} / 60 ))" env_alpha
+      run_binary "$n" "$OUT/$n.test" "$(( ${TMIN[$n]} + ($(pending_max "$n") + 59) / 60 ))" env_alpha
       judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
     gpu-accounting-*|reach-*)
       # A row with a start wait has the bound as its first clock; one without has the operator's wait in the queue.
-      wait=$(( ${LIVE_PENDING_MAX_SECONDS:-7200} / 60 ))
+      wait=$(( ($(pending_max "$n") + 59) / 60 ))
       [ "${SWAIT[$n]:--}" = - ] || wait=0
       run_binary "$n" "$OUT/$n.test" "$(( ${TMIN[$n]} + wait ))" env_conformance
       judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
@@ -1022,12 +1151,13 @@ prepare_real_engine() {
 }
 
 # execute_real_engine <name>: submit, poll, fetch. The slot is held from the submit to the job's end.
-# The job's budget has two clocks: the time it may wait in the queue, and, from the first state that is not
-# PENDING, its time limit plus a margin. A wait of 40 minutes in QOS now must not eat the run's time.
+# The job's budget has two clocks: the time it may wait in the queue (pending_max: 30 min in its one-job slot, or
+# LIVE_PENDING_MAX_SECONDS; a job still pending past it ends the run as NOT RUN, exit 3, and the cleanup cancels it by its
+# tag), and, from the first state that is not PENDING, its time limit plus a margin. A wait of 40 minutes in QOS now must not eat the run's time.
 execute_real_engine() {
   local n=$1 host=${HOST[$1]} w=$RE_DIR tag=$RE_TAG acct reply state last="" errs=0 st log finished
-  local submit_t run_t="" now limit_s pend_max=${LIVE_PENDING_MAX_SECONDS:-7200} margin=${LIVE_RUN_MARGIN_SECONDS:-900}
-  acct=${S[${ACCTKEY[$n]}]}
+  local submit_t run_t="" now limit_s pend_max margin=${LIVE_RUN_MARGIN_SECONDS:-900}
+  acct=${S[${ACCTKEY[$n]}]}; pend_max=$(pending_max "$n")
   # The job's name is written down before the submit. If the reply is lost, or a signal arrives, the
   # cleanup finds the job by this name and cancels it.
   printf 'hb-live-%s\n' "$tag" >"$RE_DIR/submission-tag" || { say "$n: FAIL (the submission tag could not be written)"; return 1; }
@@ -1053,7 +1183,10 @@ EOS
     now=$(now_epoch)
     if [ "$state" != PENDING ] && [ "$state" != error ] && [ -z "$run_t" ]; then run_t=$now; fi
     if [ -z "$run_t" ] && [ $((now - submit_t)) -gt "$pend_max" ]; then
-      say "$n: FAIL (the job was still pending after $((pend_max/60)) minutes; cancelling it)"; return 1
+      # The job never started: not a failure (issue #222). The cleanup after this cancels it by its tag, and the run's exit is 3
+      # unless that leaves a job behind, which is a failure.
+      NOT_RUN=1
+      say "$n: NOT RUN (a job was still pending after $(fmt_pending "$pend_max") in the queue and was cancelled by its tag; not a failure)"; return 3
     fi
     if [ -n "$run_t" ] && [ $((now - run_t)) -gt $((limit_s + margin)) ]; then
       say "$n: FAIL (the job ran past its time limit plus $((margin/60)) minutes; cancelling it)"; return 1

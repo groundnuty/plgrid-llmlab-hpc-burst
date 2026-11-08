@@ -120,6 +120,33 @@ func TestADryRunNeedsNoLiveSettingAndRefusesAnyOfThem(t *testing.T) {
 	}
 }
 
+// A dry run keeps the wait in the queue the script announced, so a test of the script judges the bound it asked for
+// (PR 230, B1): 600 s is 10 minutes, not the dry run's own minute; unset, the minute; a wait that is not a positive
+// number of seconds is refused, as it is in a live run.
+func TestADryRunKeepsTheWaitInTheQueueItIsGiven(t *testing.T) {
+	dry := func(pending string) (Config, error) {
+		m := map[string]string{envRow: "alpha-helios-nooverlap", envOut: "/private/out", envDry: "1"}
+		if pending != "" {
+			m[envPending] = pending
+		}
+		cfg, _, err := ConfigFromEnv(env(m), "alpha-helios-nooverlap")
+		return cfg, err
+	}
+	for _, c := range []struct {
+		pending string
+		want    time.Duration
+	}{{"", time.Minute}, {"600", 10 * time.Minute}, {"1800", 30 * time.Minute}, {"59", 59 * time.Second}} {
+		if cfg, err := dry(c.pending); err != nil || cfg.PendingMax != c.want {
+			t.Errorf("a dry run given %q: PendingMax %s, err %v, want %s", c.pending, cfg.PendingMax, err, c.want)
+		}
+	}
+	for _, bad := range []string{"0", "-5", "ten", "1.5"} {
+		if _, err := dry(bad); err == nil || !strings.Contains(err.Error(), envPending+" must be a positive number of seconds") {
+			t.Errorf("a dry run given %q: err %v, want the wait refused", bad, err)
+		}
+	}
+}
+
 func TestTagsAreWrittenDownBeforeTheyReturn(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "out")
 	r, err := NewRecorder(dir)
