@@ -691,8 +691,8 @@ EOS
 
 # OWN_PREFIX: the tag prefix of the stack rows' jobs (alpha-*, tunnel-hour-*; issue #245, review of PR 255, B3). The
 # script draws a run ID for each such row before it runs the test (new_run_id) and passes it on
-# (HPCBURST_ALPHA_RUN_ID); the test names its deployment after it, so every Allocation, and every job the controller
-# submits for it, has a name that starts with "hb-alpha-<run ID>-". The cleanup owns a job of that prefix whether
+# (HPCBURST_ALPHA_RUN_ID); the test names its Provider after it, and the controller names every Allocation after its
+# Provider, so every job the controller submits for the run has a name that starts with "hb-alpha-<run ID>-". The cleanup owns a job of that prefix whether
 # or not the test wrote its tag down: a tag the watch never delivered, or a write that failed, leaves no job
 # behind. The ID is 10 random hex digits, so no other run's job, nor the owner's, has the prefix.
 OWN_PREFIX=""

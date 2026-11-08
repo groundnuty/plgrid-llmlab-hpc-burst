@@ -104,12 +104,12 @@ func (e *NotStartedError) Is(target error) bool {
 
 // The run's own names (review of PR 255, B3). hack/live-checks.sh draws a run
 // ID for each stack row it runs and passes it on (HPCBURST_ALPHA_RUN_ID); the
-// run's deployment is named after it (DeploymentName), the lifecycle
-// controller names every Allocation after the deployment
-// (internal/lifecycle/provision.go, randomName), and a job's tag after its
-// Allocation (v1alpha1.JobTag), so every job of the run has TagPrefix. The
-// script's cleanup and the steps' Close find the run's jobs by it in the queue,
-// whatever the recorder holds.
+// run's Provider and deployment are named after it (RunName), the lifecycle
+// controller names every Allocation after its Provider
+// (internal/lifecycle/provision.go, randomName(pv.name)), and a job's tag
+// after its Allocation (v1alpha1.JobTag), so every job of the run has
+// TagPrefix. The script's cleanup and the steps' Close find the run's jobs by
+// it in the queue, whatever the recorder holds.
 
 // runIDRE is the shape of a run ID: 10 lowercase hex digits, 40 random bits.
 var runIDRE = regexp.MustCompile(`^[0-9a-f]{10}$`)
@@ -131,14 +131,14 @@ func CheckRunID(id string) error {
 	return nil
 }
 
-// DeploymentName is the run's ModelDeployment's name.
-func DeploymentName(runID string) string { return "alpha-" + runID }
+// RunName is the name of the run's Provider and of its ModelDeployment.
+func RunName(runID string) string { return "alpha-" + runID }
 
-// TagPrefix is how every job tag of the run begins: "hb-", the deployment's
-// name and the dash before the Allocation's random suffix. The name is 16
-// bytes, under the 40 that an Allocation's name keeps of it and the 40 that a
-// tag keeps of the Allocation's name.
-func TagPrefix(runID string) string { return "hb-" + DeploymentName(runID) + "-" }
+// TagPrefix is how every job tag of the run begins: "hb-", the Provider's
+// name and the dash before the Allocation's random suffix. The Allocation's
+// name is 22 bytes, under the 40 that a tag keeps of it, and a tag 38, under
+// the 56 that Helios's job names allow (profiles/helios.yaml, jobName).
+func TagPrefix(runID string) string { return "hb-" + RunName(runID) + "-" }
 
 // ClusterClockLine reads the cluster's clock on its login node: whole seconds
 // since the epoch. The controller compares a deployment's end with the jobs'

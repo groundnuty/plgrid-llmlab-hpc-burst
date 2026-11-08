@@ -204,8 +204,17 @@ type liveRun struct {
 	// oneEnd is a row of one job's deployment end, its Instance's drain start (oneJob).
 	oneEnd time.Time
 
-	// The two-job guard (TwoJobGuard), run from its own goroutine.
+	// The two-job guard (TwoJobGuard), run from its own goroutine every
+	// guardEvery (default guardEveryLive). lookFn, setEndFn and fatalf are
+	// look, endAt and t.Fatalf unless a test sets them.
 	guard      *TwoJobGuard
+	guardEvery time.Duration
+	// resultWait bounds guardResult's wait for the successor's drain start
+	// (default six looks).
+	resultWait time.Duration
+	lookFn     func(context.Context) (Look, error)
+	setEndFn   func(time.Time) (time.Time, error)
+	fatalf     func(format string, args ...any)
 	guardQuit  chan struct{}
 	guardDone  chan struct{}
 	guardFail  chan struct{}
@@ -220,10 +229,23 @@ type liveRun struct {
 	replies []http.Header
 }
 
+// newLiveRun is a run in the world w. The run's Provider and deployment are
+// named after its run ID (RunName), so that every job of the run has the
+// run's tag prefix (TagPrefix).
 func newLiveRun(t *testing.T, cfg Config, w world) *liveRun {
+	name := RunName(cfg.RunID)
 	md := w.md.DeepCopy()
-	md.Name = DeploymentName(cfg.RunID)
-	w.md = md
+	md.Name = name
+	objs := make([]client.Object, 0, len(w.objects))
+	for _, o := range w.objects {
+		if p, ok := o.(*v1alpha1.Provider); ok {
+			p = p.DeepCopy()
+			p.Name = name
+			o = p
+		}
+		objs = append(objs, o)
+	}
+	w.md, w.objects, w.provider = md, objs, name
 	return &liveRun{t: t, cfg: cfg, w: w, tm: cfg.Row.Clock(), prefix: TagPrefix(cfg.RunID), guardFail: make(chan struct{})}
 }
 
@@ -491,14 +513,22 @@ func (r *liveRun) endAt(t time.Time) (time.Time, error) {
 	return end.Time, nil
 }
 
-// guardEvery is how often the two-job guard looks at the cluster, and
+// guardEveryLive is how often the two-job guard looks at the cluster, and
 // guardLookFails how many looks in a row may fail before it stops the run: an
 // end it cannot move on is still a bound, but one that stops moving is reached
 // in the time limit less the drain window.
 const (
-	guardEvery     = 10 * time.Second
+	guardEveryLive = 10 * time.Second
 	guardLookFails = 3
 )
+
+// every is the guard's interval.
+func (r *liveRun) every() time.Duration {
+	if r.guardEvery > 0 {
+		return r.guardEvery
+	}
+	return guardEveryLive
+}
 
 // look is one look at the cluster for the guard: the cluster's clock, then a
 // fresh queue listing, and the run's jobs in it (by its prefix and tags).
@@ -527,6 +557,13 @@ func (r *liveRun) look(ctx context.Context) (Look, error) {
 // stops it and fails the run's next wait (checkGuard; review of PR 255, B6).
 func (r *liveRun) startGuard() {
 	r.guardQuit, r.guardDone = make(chan struct{}), make(chan struct{})
+	look, setEnd := r.lookFn, r.setEndFn
+	if look == nil {
+		look = r.look
+	}
+	if setEnd == nil {
+		setEnd = r.endAt
+	}
 	go func() {
 		defer close(r.guardDone)
 		fails := 0
@@ -534,10 +571,10 @@ func (r *liveRun) startGuard() {
 			select {
 			case <-r.guardQuit:
 				return
-			case <-time.After(guardEvery):
+			case <-time.After(r.every()):
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			l, err := r.look(ctx)
+			l, err := look(ctx)
 			cancel()
 			if err != nil {
 				if fails++; fails >= guardLookFails {
@@ -549,7 +586,7 @@ func (r *liveRun) startGuard() {
 			fails = 0
 			end, final, err := r.guard.Next(l)
 			if err == nil {
-				_, err = r.endAt(end)
+				_, err = setEnd(end)
 			}
 			if err != nil {
 				r.failGuard(err)
@@ -591,7 +628,11 @@ func (r *liveRun) checkGuard() {
 		r.mu.Lock()
 		err := r.guardErr
 		r.mu.Unlock()
-		r.t.Fatalf("the job-count guard stopped the run: %v", err)
+		fatalf := r.fatalf
+		if fatalf == nil {
+			fatalf = r.t.Fatalf
+		}
+		fatalf("the job-count guard stopped the run: %v", err)
 	default:
 	}
 }
@@ -600,7 +641,11 @@ func (r *liveRun) checkGuard() {
 // successor's drain start as the deployment's end, stops it, and reads the
 // end back from the API: a run of two jobs must end with that bound observed.
 func (r *liveRun) guardResult() error {
-	deadline := time.Now().Add(3*guardEvery + time.Minute)
+	wait := r.resultWait
+	if wait == 0 {
+		wait = 6 * r.every()
+	}
+	deadline := time.Now().Add(wait)
 	for {
 		select {
 		case <-r.guardFail:
@@ -639,10 +684,11 @@ func (r *liveRun) guardResult() error {
 // stopped on an error.
 func (r *liveRun) waitFor(d time.Duration, what string, cond func() bool) {
 	r.t.Helper()
-	stack.WaitFor(r.t, d, what, func() bool {
+	guarded := func() bool {
 		r.checkGuard()
 		return cond()
-	})
+	}
+	stack.WaitFor(r.t, d, what, guarded)
 }
 
 func dur(d time.Duration) *v1alpha1.Duration { s := v1alpha1.Duration(d.String()); return &s }

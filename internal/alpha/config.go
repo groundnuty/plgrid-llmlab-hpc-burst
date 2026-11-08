@@ -63,8 +63,9 @@ type Config struct {
 	DialHomeListen string
 	// Profile names the row's shipped platform profile (profiles/<name>.yaml).
 	Profile string
-	// RunID names the run's deployment, and so begins every job tag of the run
-	// (TagPrefix): hack/live-checks.sh draws it and cleans up by it.
+	// RunID names the run's Provider and deployment, and so begins every job
+	// tag of the run (TagPrefix): hack/live-checks.sh draws it and cleans up
+	// by it.
 	RunID string
 }
 

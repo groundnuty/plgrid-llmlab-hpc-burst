@@ -128,20 +128,22 @@ func TestParseClusterClock(t *testing.T) {
 }
 
 // Every job of a run has the run's prefix: the lifecycle controller names an
-// Allocation after its deployment (internal/lifecycle/provision.go, randomName:
-// the name less trailing dashes and dots, a dash and 5 characters), and the tag
-// after the Allocation (v1alpha1.JobTag). Another run's ID gives another prefix.
+// Allocation after its Provider (internal/lifecycle/provision.go,
+// randomName(pv.name): the name less trailing dashes and dots, a dash and 5
+// characters), the run names its Provider RunName, and the tag is made from
+// the Allocation's name (v1alpha1.JobTag). Another run's ID gives another
+// prefix.
 func TestEveryJobOfARunHasItsPrefix(t *testing.T) {
 	id := "0a1b2c3d4e"
 	if err := CheckRunID(id); err != nil {
 		t.Fatal(err)
 	}
-	if got := DeploymentName(id); got != "alpha-0a1b2c3d4e" {
-		t.Errorf("DeploymentName = %q", got)
+	if got := RunName(id); got != "alpha-0a1b2c3d4e" {
+		t.Errorf("RunName = %q", got)
 	}
-	alloc := DeploymentName(id) + "-x7k2p"
+	alloc := RunName(id) + "-x7k2p"
 	tag := v1alpha1.JobTag("default", alloc, types.UID("4f6c2c1e-0000-4000-8000-000000000001"))
-	if p := TagPrefix(id); p != "hb-alpha-0a1b2c3d4e-" || !strings.HasPrefix(tag, p) || !tagRE.MatchString(tag) {
+	if p := TagPrefix(id); p != "hb-alpha-0a1b2c3d4e-" || !strings.HasPrefix(tag, p) || !tagRE.MatchString(tag) || len(tag) > 56 {
 		t.Errorf("tag %q, prefix %q", tag, TagPrefix(id))
 	}
 	if strings.HasPrefix(tag, TagPrefix("0a1b2c3d4f")) {
