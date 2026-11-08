@@ -30,7 +30,12 @@ const (
 
 // stopTexts steps the rig until the deployment's class is stopped by a failed verification and returns three texts: the
 // event of the verifying pass, the Degraded message of that pass (the first the condition shows), and the Degraded
-// message of a later pass, which is the class stop read back from the verification record.
+// message of the next pass, which is the first to read the class stop back from the verification record.
+//
+// The next pass is exactly one reconcile, made at the moment the first message shows: no clock moves and no further
+// round follows. A wait of several rounds would read the message after a first read-back pass had already come and
+// gone, so a wrong clause on that pass alone, put right by the next, would go unseen. If the first read-back pass does
+// not show the record, the test fails here rather than waiting for a later pass to show it.
 func stopTexts(rg *rig, md string) (event RecordedEvent, first, later string) {
 	rg.t.Helper()
 	rg.until(10*time.Minute, 10*time.Second, "the class stop", func() bool {
@@ -41,10 +46,10 @@ func stopTexts(rg *rig, md string) (event RecordedEvent, first, later string) {
 		}
 		return false
 	})
-	rg.run(time.Minute, 10*time.Second)
+	rg.reconcileAll()
 	c := rg.condition(md, v1alpha1.ConditionDegraded)
-	if c.Reason != v1alpha1.ReasonVerificationFailed {
-		rg.t.Fatalf("Degraded %s/%s after more passes, want the class stop still shown", c.Reason, c.Message)
+	if c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonVerificationFailed || !strings.Contains(c.Message, "verification record") {
+		rg.t.Fatalf("Degraded %s/%s/%q on the first pass after the stop, want the class stop read back from the verification record", c.Status, c.Reason, c.Message)
 	}
 	later = c.Message
 	for _, e := range rg.rec.Events() {

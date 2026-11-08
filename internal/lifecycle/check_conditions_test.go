@@ -6,11 +6,15 @@ package lifecycle
 // the Instance is ready only with all three True. The expected statuses are the contract's, written out here.
 
 import (
+	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	afake "github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi/fake"
@@ -155,47 +159,135 @@ func TestOnlyTrueCountsAsATrueCheck(t *testing.T) {
 	}
 }
 
+// failureGeneration is the Instance generation of the failure tests. The fake API server never sets one, so without it
+// every Instance has generation 0, and a condition written with the wrong value (0) cannot be told from one written
+// with the Instance's own.
+const failureGeneration = 5
+
+// conditionWrite is one write of an Instance's status as the API server took it: its place on the shared sequence and
+// the conditions it stored.
+type conditionWrite struct {
+	seq   int
+	name  string
+	conds []metav1.Condition
+}
+
+// failureRig makes a rig with one deployment "md" and an engine double, whose Instances carry failureGeneration, and whose
+// recorder and Instance status writes are numbered from one Sequence (as sequencedRig does), so that a test can ask what
+// was stored when an event was recorded. It steps until the first Instance exists and returns it with the writes, which
+// grow as the rig steps. The writes are kept as they were stored, so a later write does not change an earlier one.
+func failureRig(t *testing.T, eng afake.Engine) (*rig, v1alpha1.Instance, *[]conditionWrite) {
+	t.Helper()
+	seq := &Sequence{}
+	writes := &[]conditionWrite{}
+	rg := newRig(t, withInterceptors(interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if in, ok := obj.(*v1alpha1.Instance); ok {
+				in.Generation = failureGeneration
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, o ...client.SubResourceUpdateOption) error {
+			if err := c.SubResource(sub).Update(ctx, obj, o...); err != nil {
+				return err
+			}
+			if in, ok := obj.(*v1alpha1.Instance); ok && sub == "status" {
+				*writes = append(*writes, conditionWrite{seq: seq.Next(), name: in.Name, conds: append([]metav1.Condition(nil), in.Status.Conditions...)})
+			}
+			return nil
+		},
+	}))
+	rg.rec.Seq = seq
+	rg.engine = func(string) afake.Engine { return eng }
+	rg.create(mdSpec("md"))
+	startUntil(rg, "md", 2*time.Minute, "an Instance", func() bool { return len(rg.instances("md")) >= 1 })
+	in := rg.instances("md")[0]
+	if in.Generation != failureGeneration {
+		t.Fatalf("the Instance has generation %d, want the %d the rig gave it: the tests below could not tell a generation written from none", in.Generation, failureGeneration)
+	}
+	return rg, in, writes
+}
+
+// storedBeforeEvent reports whether, before the event was recorded, an Instance status write stored the condition as
+// False with the reason Failed and the Instance's generation.
+func storedBeforeEvent(writes []conditionWrite, name, typ string, event RecordedEvent) (found bool, saw string) {
+	for _, w := range writes {
+		if w.name != name || w.seq >= event.Seq {
+			continue
+		}
+		c := apimeta.FindStatusCondition(w.conds, typ)
+		if c == nil {
+			continue
+		}
+		saw = fmt.Sprintf("%s/%s at generation %d", c.Status, c.Reason, c.ObservedGeneration)
+		if c.Status == metav1.ConditionFalse && c.Reason == v1alpha1.ReasonFailed && c.ObservedGeneration == failureGeneration {
+			found = true
+		}
+	}
+	return found, saw
+}
+
 // A failed check is False with the reason Failed, on the condition that failed, and the checks after it are still
 // pending (Unknown): verification failing on a contradiction, qualification failing on the KV capacity, and warm-up
-// failing because the latency never settles. The Instance ends in each case, and never was ready.
+// failing because the latency never settles. The Instance ends in each case, and never was ready. The condition is the
+// Instance's own generation's (ObservedGeneration), and it is stored before the Instance's failure event is recorded and
+// before the Instance ends, so that whoever reads the event or the end finds the condition there.
 func TestAFailedCheckIsFalseAndTheNextOnesStayPending(t *testing.T) {
+	type outcome struct {
+		status metav1.ConditionStatus
+		reason string
+	}
 	for _, tc := range []struct {
 		name      string
 		eng       afake.Engine
+		failing   int // the index in checkConditions of the condition that fails
 		endReason string
-		want      [3]struct {
-			status metav1.ConditionStatus
-			reason string
-		}
+		want      [3]outcome
 	}{
-		{"verification", afake.Engine{Verify: afake.VerifyMaxModelLen("16384")}, v1alpha1.ReasonVerificationFailed, [3]struct {
-			status metav1.ConditionStatus
-			reason string
-		}{{metav1.ConditionFalse, v1alpha1.ReasonFailed}, {metav1.ConditionUnknown, v1alpha1.ReasonPending}, {metav1.ConditionUnknown, v1alpha1.ReasonPending}}},
-		{"qualification", afake.Engine{Qualify: afake.QualifyKVCapacity(16383)}, v1alpha1.ReasonQualificationFailed, [3]struct {
-			status metav1.ConditionStatus
-			reason string
-		}{{metav1.ConditionTrue, v1alpha1.ReasonPassed}, {metav1.ConditionFalse, v1alpha1.ReasonFailed}, {metav1.ConditionUnknown, v1alpha1.ReasonPending}}},
-		{"warm-up", afake.Engine{WarmUpRound: afake.WarmUpNeverSettles}, v1alpha1.ReasonQualificationFailed, [3]struct {
-			status metav1.ConditionStatus
-			reason string
-		}{{metav1.ConditionTrue, v1alpha1.ReasonPassed}, {metav1.ConditionTrue, v1alpha1.ReasonPassed}, {metav1.ConditionFalse, v1alpha1.ReasonFailed}}},
+		{"verification", afake.Engine{Verify: afake.VerifyMaxModelLen("16384")}, 0, v1alpha1.ReasonVerificationFailed,
+			[3]outcome{{metav1.ConditionFalse, v1alpha1.ReasonFailed}, {metav1.ConditionUnknown, v1alpha1.ReasonPending}, {metav1.ConditionUnknown, v1alpha1.ReasonPending}}},
+		{"qualification", afake.Engine{Qualify: afake.QualifyKVCapacity(16383)}, 1, v1alpha1.ReasonQualificationFailed,
+			[3]outcome{{metav1.ConditionTrue, v1alpha1.ReasonPassed}, {metav1.ConditionFalse, v1alpha1.ReasonFailed}, {metav1.ConditionUnknown, v1alpha1.ReasonPending}}},
+		{"warm-up", afake.Engine{WarmUpRound: afake.WarmUpNeverSettles}, 2, v1alpha1.ReasonQualificationFailed,
+			[3]outcome{{metav1.ConditionTrue, v1alpha1.ReasonPassed}, {metav1.ConditionTrue, v1alpha1.ReasonPassed}, {metav1.ConditionFalse, v1alpha1.ReasonFailed}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rg, in := verifRig(t, func() afake.Engine { return tc.eng })
+			rg, in, writes := failureRig(t, tc.eng)
 			st, everReady := verifEnded(rg, in.Name)
 			if everReady || st.EndReason != tc.endReason {
 				t.Fatalf("ever ready %v, end reason %q, want never ready and %s", everReady, st.EndReason, tc.endReason)
 			}
 			got := rg.instance(in.Name)
+			if got.Generation != failureGeneration {
+				t.Fatalf("the Instance has generation %d at the end, want %d", got.Generation, failureGeneration)
+			}
 			for i, c := range checkConditions {
 				wantCheck(t, "after the "+tc.name+" failed", got, c, tc.want[i].status, tc.want[i].reason)
+				if cc := apimeta.FindStatusCondition(got.Status.Conditions, c); cc != nil && cc.ObservedGeneration != failureGeneration {
+					t.Errorf("after the %s failed: %s observed generation %d, want the Instance's %d", tc.name, c, cc.ObservedGeneration, failureGeneration)
+				}
 			}
+			failing := checkConditions[tc.failing]
 			if tc.name != "verification" {
 				// The failing condition says why, in the words of the event.
-				if c := apimeta.FindStatusCondition(got.Status.Conditions, checkConditions[map[string]int{"qualification": 1, "warm-up": 2}[tc.name]]); c == nil || c.Message == "" {
+				if c := apimeta.FindStatusCondition(got.Status.Conditions, failing); c == nil || c.Message == "" {
 					t.Errorf("the failed condition holds no message: %+v", c)
 				}
+			}
+			// The Instance's own failure event (the deployment's Degraded event carries the same code, and is not it).
+			var event RecordedEvent
+			var n int
+			for _, e := range rg.rec.Events() {
+				if e.Kind == "*v1alpha1.Instance" && e.Name == in.Name && e.Code == tc.endReason {
+					event, n = e, n+1
+				}
+			}
+			if n != 1 {
+				t.Fatalf("the Instance recorded %d %s events, want 1", n, tc.endReason)
+			}
+			if found, saw := storedBeforeEvent(*writes, in.Name, failing, event); !found {
+				t.Errorf("before the Instance's %s event, no status write stored %s as False/%s at generation %d (last stored: %q): the condition is written after the failure, or with another generation",
+					tc.endReason, failing, v1alpha1.ReasonFailed, failureGeneration, saw)
 			}
 		})
 	}
