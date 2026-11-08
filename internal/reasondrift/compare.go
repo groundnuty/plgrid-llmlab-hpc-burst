@@ -65,6 +65,11 @@ type Code struct {
 	// through a recorder it does not know, a wrapper that does not forward, a
 	// use of a recorder method outside the packages it loaded.
 	Problems []Problem
+	// Recorders are the calls that build an event recorder (a manager's
+	// GetEventRecorder and GetEventRecorderFor, a broadcaster's NewRecorder)
+	// whose value was shown to go to a counting wrapper and nowhere else
+	// (#256). One that was not is a Problem of kind RecorderNotCounted.
+	Recorders []Recorder
 	// WatchedTypes are the condition types the managed controller raises
 	// events about (internal/managed, watched).
 	WatchedTypes []string
@@ -75,6 +80,18 @@ type Code struct {
 	// an over-approximation of what the managed controller emits at any one
 	// moment.
 	ManagedWrites []ManagedWrite
+}
+
+// Recorder is a call that builds an event recorder, with the counting wrapper
+// that receives its value.
+type Recorder struct {
+	// Package and Func name the function that builds it, as Emit does.
+	Package, Func string
+	// Pos is file:line, for messages.
+	Pos string
+	// Builder is the full name of the method that builds the recorder, and
+	// Counter the full name of the wrapper that counts what it records.
+	Builder, Counter string
 }
 
 // ManagedWrite is a reason written into a condition of a watched type.
@@ -105,6 +122,11 @@ const (
 	// at a parameter that carries one is not the value of a known constructor,
 	// so its reason cannot be read.
 	EventNotConstructed = "event-not-constructed"
+	// RecorderNotCounted: a call that builds an event recorder whose value does
+	// not go, and only go, to eventcount.Events or eventcount.Legacy as their
+	// first argument (HBEP-8, Raised events, for #256), or such a method taken
+	// as a value. An event raised through that recorder would not be counted.
+	RecorderNotCounted = "recorder-not-counted"
 )
 
 // Problem is something the scan met and could not accept. Compare turns each
