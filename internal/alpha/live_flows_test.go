@@ -435,26 +435,26 @@ func (pr *prober) end() int {
 // the client's window from its first byte sent to its reply read, and the
 // body's bytes and its prompt's own input tokens.
 type sentLarge struct {
-	reply           stack.Reply
-	start, end      time.Time
-	bytes, expected int
+	reply            stack.Reply
+	start, sent, end time.Time
+	bytes, expected  int
 }
 
 // arrivalBody is the hour's large request and its prompt's own input tokens
-// (ArrivalSize), with the engine's count read from its refusals through the
-// front, sized under the deployment's max-model-len.
+// (ArrivalSize), with the engine's count read from its completed responses'
+// usage through the front, sized under the deployment's max-model-len.
 func (r *liveRun) arrivalBody(key string) (body string, expected int, err error) {
 	mml, err := r.maxModelLen()
 	if err != nil {
 		return "", 0, err
 	}
 	count := func(words int) (int, error) {
-		rp := r.fc.Send("/v1/chat/completions", ArrivalPrompt(r.fc.Model, words, mml), key)
-		n, ok := InputTokensOf(rp.Body)
+		rp := r.fc.Send("/v1/chat/completions", ArrivalPrompt(r.fc.Model, words, ArrivalMaxTokens), key)
+		n, ok := PromptTokensOf(rp.Body)
 		if !ok {
-			return 0, fmt.Errorf("a prompt of %d words with max_tokens %d was answered %d, not refused for its length with an exact count of input tokens: the large bodies' arrival cannot be shown", words, mml, rp.Status)
+			return 0, fmt.Errorf("a prompt of %d words with max_tokens %d was answered %d, not completed with its usage.prompt_tokens: the large bodies' arrival cannot be shown", words, ArrivalMaxTokens, rp.Status)
 		}
-		r.t.Logf("%s: calibration: a prompt of %d words was refused for its length, stating %d input tokens", r.cfg.Row.Name, words, n)
+		r.t.Logf("%s: calibration: a prompt of %d words was answered with usage.prompt_tokens %d", r.cfg.Row.Name, words, n)
 		return n, nil
 	}
 	body, expected, err = ArrivalSize(count, r.fc.Model, r.tm.UploadBody, mml)
@@ -467,7 +467,7 @@ func (r *liveRun) arrivalBody(key string) (body string, expected int, err error)
 // largeRequests is the hour's upload direction (issue #224), with no
 // sender-side timing on the live path in alpha (the science agent's ruling (4)
 // on PR 255): tm.UploadStreams senders, each sending the large request body
-// (arrivalBody), which the engine refuses for its length, pausing
+// (arrivalBody), which the engine answers with one token, pausing
 // tm.UploadPause after a reply, and sending the next until rateAsked has
 // passed. It runs beside the burst's streams, from its own goroutines.
 func (r *liveRun) largeRequests(key, body string, expected int) []sentLarge {
@@ -484,10 +484,10 @@ func (r *liveRun) largeRequests(key, body string, expected int) []sentLarge {
 			defer wg.Done()
 			for time.Now().Before(until) {
 				start := time.Now()
-				rp := r.fc.Send("/v1/chat/completions", body, key)
+				rp, sent := r.fc.SendTimed("/v1/chat/completions", body, key)
 				end := time.Now()
 				mu.Lock()
-				outs = append(outs, sentLarge{reply: rp, start: start, end: end, bytes: len(body), expected: expected})
+				outs = append(outs, sentLarge{reply: rp, start: start, sent: sent, end: end, bytes: len(body), expected: expected})
 				mu.Unlock()
 				if tm.UploadPause > 0 {
 					time.Sleep(tm.UploadPause)
@@ -501,12 +501,14 @@ func (r *liveRun) largeRequests(key, body string, expected int) []sentLarge {
 
 // observeLarge is a large request as an observation: the front's record of
 // it, its body and its prompt's own input tokens, the input tokens the
-// engine's refusal stated, and the client's window.
+// engine's usage counted, and the client's window. It is no stream: the
+// client reads no [DONE], so it is never Complete and never stands in for the
+// completed stream near the deadline (the delta round's B3).
 func (r *liveRun) observeLarge(l sentLarge) Stream {
 	if l.reply.ID == "" {
 		return Stream{Error: "no reply", BodyBytes: l.bytes, ExpectedTokens: l.expected}
 	}
-	return WithArrival(StreamOf(r.fc.RowOf(l.reply.ID), ClientEnd{}), l.reply.Body, l.bytes, l.expected, l.start, l.end)
+	return WithArrival(StreamOf(r.fc.RowOf(l.reply.ID), ClientEnd{}), l.reply.Body, l.bytes, l.expected, l.start, l.sent, l.end)
 }
 
 // maxModelLen is the deployment's max-model-len flag; a deployment without
@@ -695,10 +697,10 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	if !rs.FirstAt.IsZero() {
 		pr.TimedSeconds = rs.EndAt.Sub(rs.FirstAt).Seconds()
 	}
-	var windows [][2]time.Time
+	var windows []LargeWindow
 	for _, l := range larges {
 		reqs = append(reqs, r.observeLarge(l))
-		windows = append(windows, [2]time.Time{l.start, l.end})
+		windows = append(windows, LargeWindow{Start: l.start, Sent: l.sent, End: l.end})
 	}
 	// Heartbeats only.
 	idle := time.Now().Add(tm.MinIdleGap + 15*time.Second)
@@ -720,8 +722,9 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 		return TunnelHourObs{}, err
 	}
 	hol := HeadOfLineOf(reqs, windows)
-	p.Logf("%s: %d requests over %s; path rate, download %.0f B/s and %.0f tokens/s; %d large requests of %d bytes; head-of-line %s in flight, %s elsewhere", p.Row.Name, len(reqs),
-		time.Since(first).Round(time.Second), pr.BytesPerSecond(), pr.TokensPerSecond(), len(larges), tm.UploadBody, hol.InFlight.Round(time.Millisecond), hol.Elsewhere.Round(time.Millisecond))
+	p.Logf("%s: %d requests over %s; path rate, download %.0f B/s and %.0f tokens/s; %d large requests of %d bytes; head-of-line %s in flight (%s send, %s prefill), %s elsewhere", p.Row.Name, len(reqs),
+		time.Since(first).Round(time.Second), pr.BytesPerSecond(), pr.TokensPerSecond(), len(larges), tm.UploadBody, hol.InFlight.Round(time.Millisecond),
+		hol.Send.Round(time.Millisecond), hol.Prefill.Round(time.Millisecond), hol.Elsewhere.Round(time.Millisecond))
 	return TunnelHourObs{Tags: tags, Requests: reqs, Samples: samples, DrainStart: ds, Deployment: dep, Rates: []PathRate{pr},
 		UploadNotMeasured: UploadNotMeasuredLive, HeadOfLine: &hol}, nil
 }

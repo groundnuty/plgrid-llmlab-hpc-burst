@@ -7,11 +7,17 @@ package stack
 
 import (
 	"encoding/json"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestChatBody(t *testing.T) {
@@ -105,6 +111,43 @@ func TestTokenEvent(t *testing.T) {
 		if got := TokenEvent(c.line); got != c.want {
 			t.Errorf("TokenEvent(%s) = %v, want %v", c.line, got, c.want)
 		}
+	}
+}
+
+// SendTimed returns when the client wrote the request's last byte: inside the call, before its response (the server
+// reads the whole body first), and zero for a request that was never written (nothing listens).
+func TestSendTimed(t *testing.T) {
+	read := make(chan time.Time, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		read <- time.Now()
+		_, _ = w.Write([]byte(strconv.Itoa(len(b))))
+	}))
+	defer srv.Close()
+	c := &Client{T: t, H: &Host{Ports: Ports{ClientAddr: strings.TrimPrefix(srv.URL, "http://")}, ClientKey: "k"}, MaxRequest: time.Second}
+	body := strings.Repeat("x", 1<<20)
+	before := time.Now()
+	rp, sent := c.SendTimed("/v1/chat/completions", body, "")
+	after := time.Now()
+	if rp.Err != nil || rp.Status != http.StatusOK || string(rp.Body) != strconv.Itoa(1<<20) {
+		t.Fatalf("reply %d %q %v; want 200 and the body's length", rp.Status, rp.Body, rp.Err)
+	}
+	if sent.IsZero() || sent.Before(before) || sent.After(after) {
+		t.Errorf("sent at %v; want inside the call, %v to %v", sent, before, after)
+	}
+	if at := <-read; at.Before(before) {
+		t.Errorf("the server read the body at %v, before the call at %v", at, before)
+	}
+	// Nothing listens at a closed listener's address: the request is never written.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	_ = l.Close()
+	c.H.Ports.ClientAddr = addr
+	if rp, sent := c.SendTimed("/v1/chat/completions", body, ""); rp.Err == nil || !sent.IsZero() {
+		t.Errorf("an unreachable front: err %v, sent at %v; want an error and no time", rp.Err, sent)
 	}
 }
 

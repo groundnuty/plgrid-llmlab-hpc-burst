@@ -14,11 +14,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -57,8 +59,55 @@ func (c *Client) RequestCtx() (context.Context, context.CancelFunc) {
 // Send posts body to the front's client listener with the client key and,
 // when key is set, the x-session-id conversation key.
 func (c *Client) Send(path, body, key string) Reply {
+	rp, _ := c.SendTimed(path, body, key)
+	return rp
+}
+
+// SendTimed is Send, and also returns when the client wrote the request's
+// last byte to its connection (net/http/httptrace's WroteRequest): the end of
+// the body's send as the client sees it, the bytes then in the connection's
+// buffers, not yet at the far end. Zero when the request was not written.
+//
+// The transport may hand back the response before its writer has called the
+// hook, so once a response has come, SendTimed waits for the hook's call (a
+// channel, at most wroteWait): it comes at once for a request that was written.
+func (c *Client) SendTimed(path, body, key string) (Reply, time.Time) {
+	var (
+		once  sync.Once
+		sent  time.Time
+		wrote = make(chan struct{})
+	)
 	ctx, cancel := c.RequestCtx()
 	defer cancel()
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{WroteRequest: func(info httptrace.WroteRequestInfo) {
+		if info.Err == nil {
+			once.Do(func() { sent = time.Now(); close(wrote) })
+		}
+	}})
+	rp := c.send(ctx, path, body, key)
+	wait := time.NewTimer(wroteWait)
+	defer wait.Stop()
+	if rp.Status != 0 {
+		select {
+		case <-wrote:
+			return rp, sent
+		case <-wait.C:
+		}
+	}
+	select {
+	case <-wrote:
+		return rp, sent
+	default:
+		return rp, time.Time{}
+	}
+}
+
+// wroteWait bounds SendTimed's wait for the transport's write hook after a
+// response came: the hook runs as the writer returns, within microseconds.
+const wroteWait = 5 * time.Second
+
+// send is one request of Send and SendTimed under ctx.
+func (c *Client) send(ctx context.Context, path, body, key string) Reply {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+c.H.Ports.ClientAddr+path, strings.NewReader(body))
 	if err != nil {
 		return Reply{Err: err}

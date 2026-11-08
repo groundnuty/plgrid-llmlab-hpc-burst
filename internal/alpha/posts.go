@@ -112,7 +112,7 @@ func largeLine(o TunnelHourObs, tm Timing) string {
 				arrived++
 			}
 		}
-		return fmt.Sprintf("- large requests (a body of 0.1 MB or more): %d, bodies of %d to %d bytes; %d of them in flight while the %d streams were open (by the client's window); %d shown arrived whole by the engine's refusal of their length\n",
+		return fmt.Sprintf("- large requests (a body of 0.1 MB or more): %d, bodies of %d to %d bytes; %d of them in flight while the %d streams were open (by the client's window); %d shown arrived whole by the engine's count of their prompt (usage.prompt_tokens)\n",
 			len(large), lo, hi, largeInFlightAmongStreams(reqs, tm), tm.ConcurrentStreams, arrived)
 	}
 	return fmt.Sprintf("- large requests (a body of 0.1 MB or more): %d, bodies of %d to %d bytes; %d of them sent while the %d streams were open\n", len(large), lo, hi, largeAmongStreams(reqs, tm), tm.ConcurrentStreams)
@@ -124,8 +124,8 @@ func headOfLineLine(o TunnelHourObs) string {
 	if h == nil {
 		return ""
 	}
-	return fmt.Sprintf("- head-of-line: longest gap between two tokens of a stream while a large body was in flight: %s (over %d gaps); elsewhere in the hour: %s\n",
-		h.InFlight.Round(time.Millisecond), h.Gaps, h.Elsewhere.Round(time.Millisecond))
+	return fmt.Sprintf("- head-of-line: longest gap between two tokens of a stream while a large body was in flight: %s (over %d gaps; %s in a send window, %s in a prefill window); elsewhere in the hour: %s\n",
+		h.InFlight.Round(time.Millisecond), h.Gaps, h.Send.Round(time.Millisecond), h.Prefill.Round(time.Millisecond), h.Elsewhere.Round(time.Millisecond))
 }
 
 // rateLines: the path rate of each direction, separately, upload first (issue #224). The download is the token

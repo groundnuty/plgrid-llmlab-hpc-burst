@@ -35,29 +35,32 @@ type Stream struct {
 	// The live hour's large requests (the science agent's ruling (4) on PR 255: no
 	// sender-side timing on the live path in alpha). ExpectedTokens is the
 	// prompt's own input tokens (TokenLine), and ArrivedTokens the input tokens
-	// the engine said it read, in its refusal of a prompt over its context
-	// (ArrivalVerified). SendStart and SendEnd are the client's own window of the
+	// the engine counted in its completed response (usage.prompt_tokens,
+	// PromptTokensOf; ArrivalVerified). SendStart and SendEnd are the client's own window of the
 	// request, from its first byte sent to its reply read: the body is in flight
 	// inside it.
+	// SendBodyEnd is the client's last byte of the body written to its
+	// connection: its send window ends there and its prefill window begins.
 	ExpectedTokens int       `json:"expectedTokens,omitempty"`
 	ArrivedTokens  int       `json:"arrivedTokens,omitempty"`
 	SendStart      time.Time `json:"sendStart,omitzero"`
+	SendBodyEnd    time.Time `json:"sendBodyEnd,omitzero"`
 	SendEnd        time.Time `json:"sendEnd,omitzero"`
 	// Ticks are the times, on the client's clock, at which the reply's data
 	// lines (its tokens) arrived; not in the record.
 	Ticks []time.Time `json:"-"`
 }
 
-// RefusedForLength reports whether the engine answered the request with a
-// context-length refusal stating an exact count of input tokens
-// (InputTokensOf, WithArrival): ArrivedTokens is set from nothing else. A body
-// cut short in the tunnel is no longer JSON, and is answered otherwise.
-func (s Stream) RefusedForLength() bool { return s.ArrivedTokens > 0 }
+// PromptCounted reports whether the engine answered the request with a
+// completed response whose usage counts its prompt (PromptTokensOf,
+// WithArrival): ArrivedTokens is set from nothing else. A body cut short in
+// the tunnel is no longer JSON, and is answered otherwise.
+func (s Stream) PromptCounted() bool { return s.ArrivedTokens > 0 }
 
 // ArrivalVerified reports whether the engine read the request's whole prompt:
-// it refused it for its length, stating exactly the prompt's own input tokens.
-// That is the second check, after the refusal itself (RefusedForLength): the
-// engine tokenized the whole well-formed body. A path that rewrites a body
+// its completed response counted exactly the prompt's own input tokens. That
+// is the second check, after the completed response itself (PromptCounted):
+// the engine tokenized the whole well-formed body. A path that rewrites a body
 // into other well-formed JSON is out of scope (ArrivalPrompt).
 func (s Stream) ArrivalVerified() bool {
 	return s.ExpectedTokens > 0 && s.ArrivedTokens == s.ExpectedTokens
@@ -231,12 +234,15 @@ type TunnelHourObs struct {
 	HeadOfLine *HeadOfLine `json:"headOfLine,omitempty"`
 }
 
-// HeadOfLine is the head-of-line measure of the tunnel hour: the longest gap
-// between two tokens of any stream while a large request was in flight (by
-// the client's window of it), the longest elsewhere in the hour, and how many
-// gaps fell in such a window.
+// HeadOfLine is the head-of-line measure of the tunnel hour (HeadOfLineOf):
+// the longest gap between two tokens of any stream in a large request's send
+// window (Send), in a prefill window and no send window (Prefill), either
+// (InFlight), and in neither (Elsewhere), and how many gaps fell in a send or
+// prefill window.
 type HeadOfLine struct {
 	InFlight  time.Duration `json:"inFlight"`
+	Send      time.Duration `json:"send"`
+	Prefill   time.Duration `json:"prefill"`
 	Elsewhere time.Duration `json:"elsewhere"`
 	Gaps      int           `json:"gapsInFlight"`
 }

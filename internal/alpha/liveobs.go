@@ -129,28 +129,38 @@ func StreamOf(rec usage.Record, end ClientEnd) Stream {
 }
 
 // ArrivalPrompt is a chat request whose prompt is words words ("hello", each
-// a token or more), asking for maxTokens tokens: with maxTokens the
-// deployment's max-model-len, its prompt and output can never fit the context,
-// so the engine refuses it, after tokenizing it and before any prefill, and its
-// refusal states the input tokens it read (InputTokensOf). The science agent's
-// ruling (4) on PR 255: that count, matched against the prompt's own
-// (TokenLine), shows the body arrived whole.
+// a token or more), asking for maxTokens tokens (ArrivalMaxTokens in the live
+// hour). Under the context, the engine serves it whole, and its response's
+// usage.prompt_tokens counts every token of the prompt it read
+// (PromptTokensOf). The science agent's ruling (4) on PR 255: that count,
+// matched against the prompt's own (TokenLine), shows the body arrived whole.
+// The parent's reading of vLLM v0.32.0, after the delta round: a refusal is no
+// count. Under the context vLLM clamps max_tokens and serves the request
+// (api_utils.py, get_max_tokens), and over it the refusal says "at least N
+// input tokens", the tokenizer having stopped past the limit (renderers/
+// params.py, _token_len_check). usage.prompt_tokens is the OpenAI API's own
+// count, and the front passes the response through.
 //
 // What it shows, and what it does not (the delta round of PR 255, B1). frp is
 // a byte tunnel: it carries the body's bytes and never reads them. A body cut
 // short on the way is no longer JSON (its closing brace comes last), nor is
-// one with a byte of its structure broken, so the engine answers it with
-// another error (a decode error), not a refusal for its length, and the row
-// fails on any large body answered otherwise. Equal counts are the second
-// check: the engine tokenized the whole well-formed body. A path that rewrites
-// a body into other well-formed JSON (a letter for a letter, or a word dropped
-// from every message) is out of scope; the calibration prompts take the same
-// path, so a rewrite that drops a word from each moves the line with it.
+// one with a byte of its structure broken, so the engine answers it with an
+// error (a decode error), not a completed response, and the row fails on any
+// large body answered otherwise. Equal counts are the second check: the
+// engine tokenized the whole well-formed body. A path that rewrites a body
+// into other well-formed JSON (a letter for a letter, or a word dropped from
+// every message) is out of scope; the calibration prompts take the same path,
+// so a rewrite that drops a word from each moves the line with it.
 func ArrivalPrompt(model string, words, maxTokens int) string {
 	m, _ := json.Marshal(model)
 	return `{"model":` + string(m) + `,"messages":[{"role":"user","content":"hello` + strings.Repeat(" hello", max(words, 1)-1) +
 		`"}],"max_tokens":` + strconv.Itoa(maxTokens) + `}`
 }
+
+// ArrivalMaxTokens is what each calibration prompt and large body asks for: one
+// token, so that the engine reads the whole prompt (a prefill of all of it) and
+// answers at once, with its count in usage.prompt_tokens.
+const ArrivalMaxTokens = 1
 
 // WordsForBytes is the fewest words whose ArrivalPrompt is at least n bytes.
 func WordsForBytes(model string, n, maxTokens int) int {
@@ -161,19 +171,19 @@ func WordsForBytes(model string, n, maxTokens int) int {
 
 // TokenLine is a prompt's input tokens as its engine counts them, as a
 // function of its words: Per tokens a word, and Fixed more, the chat
-// template's. Calibrate finds it from refusals of prompts of known words.
+// template's. Calibrate finds it from the counts of prompts of known words.
 type TokenLine struct{ Per, Fixed int }
 
 // Tokens is the input tokens of a prompt of words words.
 func (l TokenLine) Tokens(words int) int { return l.Per*words + l.Fixed }
 
-// MaxWords is the most words whose prompt has fewer tokens than maxModelLen: a
-// prompt the engine would serve, refused only for the completion it asks for,
-// so that its refusal is the one InputTokensOf reads, for the prompt and the
-// completion together.
+// MaxWords is the most words whose prompt has fewer tokens than maxModelLen,
+// leaving room for the one token asked (ArrivalMaxTokens): a prompt the engine
+// serves whole, so that usage.prompt_tokens counts every token of it. Over the
+// context vLLM v0.32.0 refuses it, stating at best a lower bound.
 func (l TokenLine) MaxWords(maxModelLen int) int { return (maxModelLen - 1 - l.Fixed) / l.Per }
 
-// CalibrationWords are the prompts, in words, whose refusals give the
+// CalibrationWords are the prompts, in words, whose counts give the
 // engine's TokenLine: two fix the line, and the third must lie on it. A
 // fourth, of half the large prompt's words (NearScaleWords), is sent once the
 // line has sized it, and must lie on the line too.
@@ -219,12 +229,13 @@ func Calibrate(pts ...[2]int) (TokenLine, error) {
 
 // ArrivalSize is the hour's large request and its prompt's own input tokens
 // (the science agent's ruling (4) on PR 255). count sends a prompt of the
-// given words (ArrivalPrompt) and returns the input tokens its refusal stated;
+// given words (ArrivalPrompt, ArrivalMaxTokens) and returns the input tokens
+// its completed response counted (PromptTokensOf);
 // the CalibrationWords prompts give the engine's TokenLine (Calibrate). The
 // large prompt holds as many words as bytes bytes take, but fewer tokens than
 // maxModelLen (MaxWords). A prompt of half its words (NearScaleWords) is then
-// counted too, and must lie on the line. A refusal with no exact count, a
-// count off the line, or a context that cannot hold a large body
+// counted too, and must lie on the line. A response with no count, a count
+// off the line, or a context that cannot hold a large body
 // (MinLargeBody) under it is an error: the row fails closed.
 func ArrivalSize(count func(words int) (int, error), model string, bytes, maxModelLen int) (body string, expected int, err error) {
 	var pts [][2]int
@@ -239,8 +250,8 @@ func ArrivalSize(count func(words int) (int, error), model string, bytes, maxMod
 	if err != nil {
 		return "", 0, err
 	}
-	words := min(WordsForBytes(model, bytes, maxModelLen), line.MaxWords(maxModelLen))
-	body = ArrivalPrompt(model, words, maxModelLen)
+	words := min(WordsForBytes(model, bytes, ArrivalMaxTokens), line.MaxWords(maxModelLen))
+	body = ArrivalPrompt(model, words, ArrivalMaxTokens)
 	if len(body) < MinLargeBody {
 		return "", 0, fmt.Errorf("the deployment's max-model-len %d holds a prompt of %d bytes at most (%d tokens a word, %d more), under the %d bytes of a large body", maxModelLen, len(body), line.Per, line.Fixed, MinLargeBody)
 	}
@@ -255,88 +266,109 @@ func ArrivalSize(count func(words int) (int, error), model string, bytes, maxMod
 	return body, line.Tokens(words), nil
 }
 
-// lengthRefusalRE is the one form of a context-length refusal read: "This
-// model's maximum context length is C tokens. However, you requested X tokens
-// (Y in the messages, Z in the completion)", Y being the prompt's input tokens:
-// the form the delta round of PR 255 (B2) names as vLLM's, and the engine
-// double's. vLLM v0.32.0's source was not read, so whether it refuses in this
-// form is unverified on the clusters; a refusal in another form fails the row.
-var lengthRefusalRE = regexp.MustCompile(`maximum context length is ([0-9]+) tokens\. However, you requested ([0-9]+) tokens \(([0-9]+) in the messages, ([0-9]+) in the completion\)`)
-
-// InputTokensOf reads the input tokens a context-length refusal states, from
-// the error reply's message; false when the reply is not such a refusal with
-// an exact count. Only lengthRefusalRE's form is read, and only when it adds
-// up (X is Y and Z) and X is over the context C, as a refusal for length must
-// be. A lower bound ("at least N input tokens") is no count: lower bounds that
-// lie on a line do not show the engine's count is that line. Any other
-// wording, an exact one included ("your request has N input tokens"), is not
-// read either: the row fails closed on a form it was not built for.
-func InputTokensOf(reply []byte) (int, bool) {
-	var e struct {
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
+// PromptTokensOf reads the prompt's input tokens from the engine's completed
+// response to an ArrivalPrompt: usage.prompt_tokens of a chat.completion whose
+// every choice finished ("stop", or "length" at its one token), and whose
+// usage adds up (total_tokens is prompt_tokens and completion_tokens). false
+// for anything else: an error (a body cut short in the tunnel is no longer
+// JSON, and is answered with a decode error), a refusal of any wording, a
+// response that did not finish, or usage that is missing, counts no prompt
+// token, or does not add up.
+func PromptTokensOf(reply []byte) (int, bool) {
+	var r struct {
+		Object  string `json:"object"`
+		Choices []struct {
+			FinishReason *string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage *struct {
+			PromptTokens     *int `json:"prompt_tokens"`
+			CompletionTokens *int `json:"completion_tokens"`
+			TotalTokens      *int `json:"total_tokens"`
+		} `json:"usage"`
 	}
-	if json.Unmarshal(reply, &e) != nil {
+	if json.Unmarshal(reply, &r) != nil || r.Object != "chat.completion" || len(r.Choices) == 0 || r.Usage == nil {
 		return 0, false
 	}
-	m := lengthRefusalRE.FindStringSubmatch(e.Error.Message)
-	if m == nil {
-		return 0, false
-	}
-	var n [4]int
-	for i := range n {
-		v, err := strconv.Atoi(m[i+1])
-		if err != nil {
+	for _, c := range r.Choices {
+		if c.FinishReason == nil || (*c.FinishReason != "stop" && *c.FinishReason != "length") {
 			return 0, false
 		}
-		n[i] = v
 	}
-	ctx, total, prompt, completion := n[0], n[1], n[2], n[3]
-	if prompt <= 0 || total != prompt+completion || total <= ctx {
+	u := r.Usage
+	if u.PromptTokens == nil || u.CompletionTokens == nil || u.TotalTokens == nil {
 		return 0, false
 	}
-	return prompt, true
+	if *u.PromptTokens <= 0 || *u.TotalTokens != *u.PromptTokens+*u.CompletionTokens {
+		return 0, false
+	}
+	return *u.PromptTokens, true
 }
 
 // WithArrival is a large request s as the live hour observes it: its body's
 // bytes, its prompt's own input tokens (expected), the client's window from
-// its first byte sent to its reply read, and the input tokens the engine's
-// reply stated (InputTokensOf), set only from a context-length refusal with an
-// exact count. A body cut short on the way gets another reply, and so no
-// arrived count (RefusedForLength).
-func WithArrival(s Stream, reply []byte, bytes, expected int, start, end time.Time) Stream {
-	s.BodyBytes, s.ExpectedTokens, s.SendStart, s.SendEnd = bytes, expected, start, end
-	s.ArrivedTokens, _ = InputTokensOf(reply)
+// its first byte sent (start) through its last byte written to the connection
+// (sent) to its reply read (end), and the input tokens the engine
+// counted (PromptTokensOf), set only from a completed response with usage. A
+// body cut short on the way gets another reply, and so no arrived count
+// (PromptCounted).
+func WithArrival(s Stream, reply []byte, bytes, expected int, start, sent, end time.Time) Stream {
+	s.BodyBytes, s.ExpectedTokens, s.SendStart, s.SendBodyEnd, s.SendEnd = bytes, expected, start, sent, end
+	s.ArrivedTokens, _ = PromptTokensOf(reply)
 	return s
 }
 
+// LargeWindow is one large request on the client's clock: Start its first
+// byte sent, Sent its last byte written to the connection (stack's
+// SendTimed), End its response read. Its send window is Start to Sent, the
+// body on its way; its prefill window Sent to End, the engine reading and
+// prefilling the whole prompt before its one token (the science agent's
+// addition to the switch to usage.prompt_tokens: a stall FLAG names the
+// window, so that a reader can tell a tunnel stall from engine work). A Sent
+// not recorded, or not inside the window, leaves it all a send window.
+type LargeWindow struct{ Start, Sent, End time.Time }
+
+// split is where the window's send ends and its prefill begins.
+func (w LargeWindow) split() time.Time {
+	if w.Sent.IsZero() || w.Sent.Before(w.Start) || w.Sent.After(w.End) {
+		return w.End
+	}
+	return w.Sent
+}
+
+// overlaps reports whether the gap from..to overlaps the window a..b.
+func overlaps(from, to, a, b time.Time) bool { return from.Before(b) && to.After(a) }
+
 // HeadOfLineOf is the head-of-line measure (HeadOfLine) of the hour's
 // streams: for every two tokens of one stream in a row, the gap between them
-// is in flight when it overlaps a window in which a large request was in
-// flight (from its first byte sent to its reply read, on the client's clock),
-// and elsewhere when it does not.
-func HeadOfLineOf(reqs []Stream, windows [][2]time.Time) HeadOfLine {
+// is in a send window when it overlaps any large request's send window, in a
+// prefill window when it overlaps a prefill window and no send window (two
+// senders interleave, so a gap often overlaps both: the send, the tunnel's
+// part, comes first), and elsewhere when it overlaps neither.
+func HeadOfLineOf(reqs []Stream, windows []LargeWindow) HeadOfLine {
 	var h HeadOfLine
 	for _, r := range reqs {
 		for i := 1; i < len(r.Ticks); i++ {
 			from, to := r.Ticks[i-1], r.Ticks[i]
 			gap := to.Sub(from)
-			in := false
+			send, prefill := false, false
 			for _, w := range windows {
-				if from.Before(w[1]) && to.After(w[0]) {
-					in = true
-					break
-				}
+				s := w.split()
+				send = send || overlaps(from, to, w.Start, s)
+				prefill = prefill || overlaps(from, to, s, w.End)
 			}
-			if in {
+			switch {
+			case send:
 				h.Gaps++
-				h.InFlight = max(h.InFlight, gap)
-			} else {
+				h.Send = max(h.Send, gap)
+			case prefill:
+				h.Gaps++
+				h.Prefill = max(h.Prefill, gap)
+			default:
 				h.Elsewhere = max(h.Elsewhere, gap)
 			}
 		}
 	}
+	h.InFlight = max(h.Send, h.Prefill)
 	return h
 }
 
@@ -351,7 +383,10 @@ const UploadNotMeasuredLive = "no sender-side timing on the live path"
 // load must hold (StreamRate). An engine's scheduling hiccup is tens of
 // milliseconds; a gap of a second while a body is in flight is the tunnel
 // holding the token direction behind the body, the head-of-line blocking
-// issue #224 asks to see.
+// issue #224 asks to see. A confound: each large body is also a prefill of its
+// whole prompt on the same engine (about 16,000 to 32,000 tokens live), which
+// can lengthen the streams' gaps by itself; so each FLAG names its window
+// (HeadOfLineOf): a body's send, its prefill, or neither.
 const HeadOfLineStall = time.Second
 
 // WorkerRestarts counts the restarts at the worker rung that the run's

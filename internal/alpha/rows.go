@@ -70,8 +70,9 @@ const (
 	// agent's ruling (4) on PR 255): prompts of up to 0.4 MB, the top of #224's
 	// 0.1 to 0.4 MB, and fewer tokens than the deployment's context, from two
 	// senders, each pausing half a second after a reply, for the 30 s beside the
-	// download's measurement: bodies among the 16 streams, each refused by the
-	// engine for its length (no prefill).
+	// download's measurement: bodies among the 16 streams, each served by the
+	// engine with one token, a prefill of the whole prompt, and counted in its
+	// usage (PromptTokensOf).
 	UploadBody    = 400_000
 	UploadStreams = 2
 	UploadPause   = 500 * time.Millisecond

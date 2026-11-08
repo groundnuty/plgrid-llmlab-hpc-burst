@@ -427,7 +427,7 @@ func requestChecks(reqs []Stream, drainStart time.Time, tm Timing) []string {
 		case s.CutBy != "" || s.Error == "stream_cut":
 			f = append(f, "a stream was cut during the hour")
 		case !s.Complete && !s.ArrivalVerified():
-			// A large request the engine refused for its length, showing it read the whole prompt, is the live
+			// A large request the engine answered with its count, showing it read the whole prompt, is the live
 			// hour's proof of arrival, not a failed stream.
 			f = append(f, "a stream did not complete")
 		case s.Ended.Sub(s.Opened) > tm.MaxRequestDuration:
@@ -491,8 +491,8 @@ func trafficChecks(reqs []Stream, tm Timing, uploadNotMeasured bool) []string {
 	}
 	long := false
 	for _, r := range reqs {
-		// A completed stream (the delta round of PR 255, B3): a large request's refusal that came late is no
-		// request near the deadline, though it passes requestChecks.
+		// A completed stream (the delta round of PR 255, B3): a large request that came late is no request near
+		// the deadline, though it passes requestChecks.
 		if d := r.Ended.Sub(r.Opened); r.Complete && d >= tm.NearDeadline && d <= tm.MaxRequestDuration {
 			long = true
 		}
@@ -513,23 +513,23 @@ func trafficChecks(reqs []Stream, tm Timing, uploadNotMeasured bool) []string {
 		f = append(f, "no request body reached 0.1 MB, so the upload direction was not exercised")
 	case uploadNotMeasured:
 		// Live, in alpha (the science agent's ruling (4) on PR 255): each large body shows it arrived whole by the
-		// engine's refusal, and one was in flight, by the client's window of it, while the 16 streams were open.
-		// First the refusal itself: a body cut short in the byte tunnel is no longer JSON and is answered otherwise
-		// (the delta round's B1). Then its count: the whole well-formed body was tokenized.
+		// engine's count of its prompt, and one was in flight, by the client's window of it, while the 16 streams
+		// were open. First a completed response with usage: a body cut short in the byte tunnel is no longer JSON
+		// and is answered otherwise (the delta round's B1). Then its count: the whole well-formed body was tokenized.
 		otherwise, miscounted := false, false
 		for _, l := range LargeRequests(reqs) {
 			switch {
-			case !l.RefusedForLength():
+			case !l.PromptCounted():
 				otherwise = true
 			case !l.ArrivalVerified():
 				miscounted = true
 			}
 		}
 		if otherwise {
-			f = append(f, "a request of 0.1 MB or more was answered other than by a refusal of its length stating an exact count: a body cut short in the tunnel is no longer JSON")
+			f = append(f, "a request of 0.1 MB or more was not answered with a completed response counting its prompt (usage.prompt_tokens): a body cut short in the tunnel is no longer JSON")
 		}
 		if miscounted {
-			f = append(f, "a request of 0.1 MB or more did not show it arrived whole: the engine's refusal must state its prompt's own input tokens")
+			f = append(f, "a request of 0.1 MB or more did not show it arrived whole: the engine's usage.prompt_tokens must be its prompt's own input tokens")
 		}
 		if largeInFlightAmongStreams(reqs, tm) == 0 {
 			f = append(f, "no request of 0.1 MB or more was in flight while the 16 streams were open")
@@ -693,11 +693,21 @@ func TunnelHourFlags(o TunnelHourObs) []string {
 			break
 		}
 	}
-	// Head-of-line (the science agent's ruling (4) on PR 255): a stall of the token direction while a large body
-	// was in flight.
-	if h := o.HeadOfLine; h != nil && h.InFlight > HeadOfLineStall {
-		fl = append(fl, fmt.Sprintf("head-of-line: a stream waited %s between two tokens while a large body was in flight, over the %s that marks a stall (the longest elsewhere in the hour: %s)",
-			h.InFlight.Round(time.Millisecond), HeadOfLineStall, h.Elsewhere.Round(time.Millisecond)))
+	// Head-of-line (the science agent's ruling (4) on PR 255): a stall of the token direction, each FLAG naming
+	// the window its gap overlapped (HeadOfLineOf), so that a reader can tell a tunnel stall from engine work.
+	if h := o.HeadOfLine; h != nil {
+		if h.Send > HeadOfLineStall {
+			fl = append(fl, fmt.Sprintf("head-of-line, in a send window: a stream waited %s between two tokens while a large body was being sent, over the %s that marks a stall (a body on its way through the tunnel; another body's prefill may overlap)",
+				h.Send.Round(time.Millisecond), HeadOfLineStall))
+		}
+		if h.Prefill > HeadOfLineStall {
+			fl = append(fl, fmt.Sprintf("head-of-line, in a prefill window: a stream waited %s between two tokens after a large body was sent and before its response, with no body being sent, over the %s that marks a stall (the engine prefilling a body's whole prompt, not the tunnel's upload)",
+				h.Prefill.Round(time.Millisecond), HeadOfLineStall))
+		}
+		if h.Elsewhere > HeadOfLineStall {
+			fl = append(fl, fmt.Sprintf("head-of-line, in neither window: a stream waited %s between two tokens while no large body was in flight, over the %s that marks a stall",
+				h.Elsewhere.Round(time.Millisecond), HeadOfLineStall))
+		}
 	}
 	return fl
 }

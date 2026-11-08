@@ -154,10 +154,8 @@ func lastUserText(msgs []message) string {
 // maxTokensOf resolves max_tokens as vLLM does: max_completion_tokens when
 // set (a chat request's; nil for a completions request), else max_tokens
 // (chat_completion/serving.py), else what remains of the context after the
-// prompt. The error message states the exact count of the prompt's tokens, in
-// the form PR 255's delta round (B2) names as vLLM's: "However, you requested
-// X tokens (Y in the messages, Z in the completion)"; the v0.32.0 source of
-// vLLM's text was not read.
+// prompt. The error message is the double's own wording of a context-length
+// overflow: the v0.32.0 source of vLLM's text was not read.
 func (h *handler) maxTokensOf(promptLen int, maxTokens, maxCompletionTokens *int) (int, error) {
 	max := h.cfg.MaxModelLen - promptLen
 	switch {
@@ -167,8 +165,8 @@ func (h *handler) maxTokensOf(promptLen int, maxTokens, maxCompletionTokens *int
 		max = *maxTokens
 	}
 	if max < 1 || promptLen+max > h.cfg.MaxModelLen {
-		return 0, fmt.Errorf("This model's maximum context length is %d tokens. However, you requested %d tokens (%d in the messages, %d in the completion). Please reduce the length of the messages or completion.",
-			h.cfg.MaxModelLen, promptLen+max, promptLen, max)
+		return 0, fmt.Errorf("This model's maximum context length is %d tokens. However, you requested %d output tokens and your prompt contains at least %d input tokens, for a total of %d tokens. Please reduce the length of the input prompt or the number of requested output tokens.",
+			h.cfg.MaxModelLen, max, promptLen, promptLen+max)
 	}
 	return max, nil
 }

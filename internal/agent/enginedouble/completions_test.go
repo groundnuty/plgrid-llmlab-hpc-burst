@@ -327,8 +327,7 @@ func TestCompletionRefusals(t *testing.T) {
 		{"another model", completionBody(2, map[string]any{"model": "other"}), 404, "NotFoundError", "`other` does not exist"},
 		{"min_tokens above max_tokens", completionBody(2, map[string]any{"max_tokens": 10, "min_tokens": 11}), 400, "BadRequestError", "min_tokens must be"},
 		{"a negative min_tokens", completionBody(2, map[string]any{"max_tokens": 10, "min_tokens": -1}), 400, "BadRequestError", "min_tokens must be"},
-		// The exact count, in the form PR 255's delta round names (B2): 60 prompt words and 41 asked, 101 in all.
-		{"one token over the context", completionBody(60, map[string]any{"max_tokens": 41}), 400, "BadRequestError", "This model's maximum context length is 100 tokens. However, you requested 101 tokens (60 in the messages, 41 in the completion). Please reduce the length of the messages or completion."},
+		{"one token over the context", completionBody(60, map[string]any{"max_tokens": 41}), 400, "BadRequestError", "maximum context length is 100"},
 		{"not an object", "just a string", 400, "BadRequestError", "JSON decode error"},
 	}
 	for _, tc := range cases {
