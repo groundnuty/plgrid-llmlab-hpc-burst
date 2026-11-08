@@ -2,13 +2,17 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
@@ -150,19 +154,90 @@ func releaseUnderLatency(t *testing.T, ctx context.Context, cl client.Client, cf
 	}
 }
 
+// TestStartLifecycleLeaderOfAManagerThatLeadsBeforeTheLeaseIsRead (issue #252):
+// a manager that takes a free Lease at once must pass startLifecycleLeader's
+// wait, however late the helper first reads the Lease. The helper reads the
+// Lease through a client whose reads are held until the manager holds it, as
+// they land when a fast election wins the race against the helper's first
+// read. A helper that took "the holder before the manager started" from such a
+// read would take the manager's own identity and wait for the Lease to change
+// to the end of its deadline; this one waits for the Lease to name the manager.
+func TestStartLifecycleLeaderOfAManagerThatLeadsBeforeTheLeaseIsRead(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	cfg, cl := leaseControlPlane(t, ctx)
+	if h, err := leaseHolderOf(ctx, cl); err == nil && h != "" {
+		t.Fatalf("the Lease is held by %q before the manager starts; the test needs a free one", h)
+	}
+	released := make(chan struct{})
+	go func() {
+		// The release is a watch on the Lease through the client that is not
+		// held: the manager has led once the Lease names a holder.
+		for ctx.Err() == nil {
+			if h, err := leaseHolderOf(ctx, cl); err == nil && h != "" {
+				close(released)
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
+	held := &heldLeaseReads{Client: cl, until: released}
+	holder, stop, done := startLifecycleLeader(t, ctx, held, Options{
+		Config: cfg, CredentialsDir: t.TempDir(), AgentBuildsDir: t.TempDir(), LeaderElection: true,
+		Checkpoints: &stubSource{}, Registry: prometheus.NewRegistry(),
+	})
+	select {
+	case <-released:
+	default:
+		t.Fatal("the helper returned before the manager held the Lease")
+	}
+	if got, err := leaseHolderOf(ctx, cl); err != nil || got != holder {
+		t.Fatalf("the helper returned %q as the holder; the Lease names %q (error %v)", holder, got, err)
+	}
+	stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the manager returned %v", err)
+		}
+	case <-time.After(time.Minute):
+		t.Fatalf("the manager did not return within a minute of its cancel; goroutines:\n%s", goroutines())
+	}
+}
+
+// heldLeaseReads is a client whose reads wait until until is closed (or their
+// own context ends), and then go through.
+type heldLeaseReads struct {
+	client.Client
+	until <-chan struct{}
+}
+
+func (h *heldLeaseReads) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	select {
+	case <-h.until:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return h.Client.Get(ctx, key, obj, opts...)
+}
+
 // afterAWholeGrace is when a stop whose runnables used the lifecycle
 // manager's whole shutdown grace would end, with the release taking took.
 func afterAWholeGrace(took time.Duration) time.Duration { return ShutdownGrace + took }
 
 // startLifecycleLeader starts a lifecycle manager built from o on a marked
 // context and waits, with a generous deadline, until it leads and the
-// lifecycle Lease names it; a manager whose Lease another holder still holds
-// waits until that expires. It returns the holder, the manager's cancel and
-// the channel of Start's result, and stops the manager when the test ends if
-// the test has not.
+// lifecycle Lease names it: the Lease's holder is the identity of the lock the
+// manager was built with, so the wait asks whose Lease it is, never whether the
+// Lease has changed since some earlier read (issue #252: a read taken after the
+// manager started could already name the new manager, and the wait then never
+// ended). A manager whose Lease another holder still holds waits until that
+// expires. It returns the holder (the manager's identity), the manager's cancel
+// and the channel of Start's result, and stops the manager when the test ends
+// if the test has not.
 func startLifecycleLeader(t *testing.T, ctx context.Context, cl client.Client, o Options) (string, func(), <-chan error) {
 	t.Helper()
-	mgr, _, err := NewManager(o)
+	mgr, identity, err := newManagerWithIdentity(o)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,12 +245,7 @@ func startLifecycleLeader(t *testing.T, ctx context.Context, cl client.Client, o
 	done := make(chan error, 1)
 	go func() { done <- mgr.Start(mctx) }()
 	t.Cleanup(stop)
-	before, err := leaseHolderOf(ctx, cl)
-	if err != nil {
-		before = ""
-	}
 	elected := mgr.Elected()
-	var holder string
 	eventually(t, 2*time.Minute, "the manager leads and holds the lifecycle Lease", func() (bool, string) {
 		select {
 		case <-elected:
@@ -186,8 +256,29 @@ func startLifecycleLeader(t *testing.T, ctx context.Context, cl client.Client, o
 		if err != nil {
 			return false, err.Error()
 		}
-		holder = h
-		return h != "" && h != before, "the Lease names " + h
+		return h == identity, "the Lease names " + h + ", want " + identity
 	})
-	return holder, stop, done
+	return identity, stop, done
+}
+
+// newManagerWithIdentity builds the lifecycle manager from o, which must have
+// leader election on, and returns the identity of the Lease lock it was built
+// with: the holder it writes into the Lease. It wraps newLeaseLock only while
+// NewManager builds the lock.
+func newManagerWithIdentity(o Options) (manager.Manager, string, error) {
+	var identity string
+	realLock := newLeaseLock
+	defer func() { newLeaseLock = realLock }()
+	newLeaseLock = func(cfg *rest.Config, ns, name string, renew time.Duration, log logr.Logger) (resourcelock.Interface, error) {
+		l, err := realLock(cfg, ns, name, renew, log)
+		if err == nil {
+			identity = l.Identity()
+		}
+		return l, err
+	}
+	mgr, _, err := NewManager(o)
+	if err == nil && identity == "" {
+		err = errors.New("NewManager built no lifecycle Lease lock: the options need LeaderElection")
+	}
+	return mgr, identity, err
 }
