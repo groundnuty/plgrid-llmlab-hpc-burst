@@ -67,10 +67,11 @@ const (
 	MinLargeBody = 100_000
 	// UploadBody, UploadStreams and UploadPause are the live tunnel hour's large
 	// requests (issue #224, the upload direction, front to node; the science
-	// agent's ruling (4) on PR 255): prompts of 0.4 MB, the top of #224's 0.1 to
-	// 0.4 MB, from two senders, each pausing half a second after a reply, for
-	// the 30 s beside the download's measurement: about a hundred bodies among
-	// the 16 streams, each refused by the engine for its length (no prefill).
+	// agent's ruling (4) on PR 255): prompts of up to 0.4 MB, the top of #224's
+	// 0.1 to 0.4 MB, and fewer tokens than the deployment's context, from two
+	// senders, each pausing half a second after a reply, for the 30 s beside the
+	// download's measurement: bodies among the 16 streams, each refused by the
+	// engine for its length (no prefill).
 	UploadBody    = 400_000
 	UploadStreams = 2
 	UploadPause   = 500 * time.Millisecond

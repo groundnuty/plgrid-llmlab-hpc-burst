@@ -152,6 +152,14 @@ func standInWorld(t *testing.T, row Row) world {
 	}
 	hub := stack.StartHub(t)
 	md := stack.ServedDeployment(stm, v1alpha1.EnvVar{Name: "HB_ENGINE_DOUBLE", Value: "token-delay=" + standInTokenDelay.String()})
+	if strings.HasPrefix(row.Name, "tunnel-hour-") {
+		// The live deployment's context (steps_live_test.go), so that a large body (MinLargeBody) fits under it.
+		for i, f := range md.Spec.Source.Served.Flags {
+			if f.Name == "max-model-len" {
+				md.Spec.Source.Served.Flags[i].Value = "32768"
+			}
+		}
+	}
 	return world{
 		name: "stand-in", bins: b, place: func(h *stack.Host) { h.PlaceAgentBuild(arch) },
 		dh: stack.DialHome{Mode: "direct", Addr: standInPorts.DialHomeListen}, ports: standInPorts,

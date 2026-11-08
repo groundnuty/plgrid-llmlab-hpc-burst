@@ -514,7 +514,7 @@ func trafficChecks(reqs []Stream, tm Timing, uploadNotMeasured bool) []string {
 		// engine's refusal, and one was in flight, by the client's window of it, while the 16 streams were open.
 		for _, l := range LargeRequests(reqs) {
 			if !l.ArrivalVerified() {
-				f = append(f, "a request of 0.1 MB or more did not show it arrived whole: the engine's refusal must state at least its prompt's words in input tokens")
+				f = append(f, "a request of 0.1 MB or more did not show it arrived whole: the engine's refusal must state its prompt's own input tokens")
 				break
 			}
 		}
@@ -536,23 +536,8 @@ func largeInFlightAmongStreams(reqs []Stream, tm Timing) int {
 		if l.SendStart.IsZero() || !l.SendEnd.After(l.SendStart) {
 			continue
 		}
-		at := []time.Time{l.SendStart}
-		for _, r := range reqs {
-			if isStream(r, tm.StreamRate) && r.Opened.After(l.SendStart) && r.Opened.Before(l.SendEnd) {
-				at = append(at, r.Opened)
-			}
-		}
-		for _, t := range at {
-			open := 0
-			for _, r := range reqs {
-				if isStream(r, tm.StreamRate) && !r.Opened.After(t) && r.Ended.After(t) {
-					open++
-				}
-			}
-			if open >= tm.ConcurrentStreams {
-				n++
-				break
-			}
+		if streamsOpenDuring(reqs, l.SendStart, l.SendEnd, tm) {
+			n++
 		}
 	}
 	return n
@@ -589,32 +574,46 @@ func largeAmongStreams(reqs []Stream, tm Timing) int {
 		if !l.UploadRecorded() {
 			continue
 		}
-		// The moments that matter are the upload's start and each stream's opening inside it.
-		at := []time.Time{l.BodyStart}
-		for _, r := range reqs {
-			if isStream(r, tm.StreamRate) && r.Opened.After(l.BodyStart) && r.Opened.Before(l.BodyEnd) {
-				at = append(at, r.Opened)
-			}
-		}
-		for _, t := range at {
-			open := 0
-			for _, r := range reqs {
-				if isStream(r, tm.StreamRate) && !r.Opened.After(t) && r.Ended.After(t) {
-					open++
-				}
-			}
-			if open >= tm.ConcurrentStreams {
-				n++
-				break
-			}
+		if streamsOpenDuring(reqs, l.BodyStart, l.BodyEnd, tm) {
+			n++
 		}
 	}
 	return n
 }
 
-// longestChain is the most requests that follow one another with no more than maxGap between.
+// streamsOpenDuring reports whether, at some moment from from to to, at least tm.ConcurrentStreams streams, each at
+// tm.StreamRate or more, were open. The moments that matter are from itself and each stream's opening inside it.
+func streamsOpenDuring(reqs []Stream, from, to time.Time, tm Timing) bool {
+	at := []time.Time{from}
+	for _, r := range reqs {
+		if isStream(r, tm.StreamRate) && r.Opened.After(from) && r.Opened.Before(to) {
+			at = append(at, r.Opened)
+		}
+	}
+	for _, t := range at {
+		open := 0
+		for _, r := range reqs {
+			if isStream(r, tm.StreamRate) && !r.Opened.After(t) && r.Ended.After(t) {
+				open++
+			}
+		}
+		if open >= tm.ConcurrentStreams {
+			return true
+		}
+	}
+	return false
+}
+
+// longestChain is the most requests that follow one another with no more than maxGap between. The large requests
+// (MinLargeBody or more) are not counted: the live hour sends them a fraction of a second apart, inside the burst,
+// and they must not stand in for the run back to back near the deadline.
 func longestChain(reqs []Stream, maxGap time.Duration) int {
-	rs := append([]Stream(nil), reqs...)
+	var rs []Stream
+	for _, r := range reqs {
+		if r.BodyBytes < MinLargeBody {
+			rs = append(rs, r)
+		}
+	}
 	sort.Slice(rs, func(a, b int) bool { return rs[a].Opened.Before(rs[b].Opened) })
 	best, run := 0, 0
 	for i, r := range rs {

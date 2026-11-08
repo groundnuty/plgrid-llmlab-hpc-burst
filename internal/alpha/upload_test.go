@@ -13,12 +13,9 @@ import (
 	"time"
 )
 
-func TestTheArrivalRequestBody(t *testing.T) {
-	for _, n := range []int{100_000, 128 << 10, 400_000} {
-		b, words := ArrivalRequestBody("example-org/example-model", n, 32768)
-		if len(b) < n || len(b) > n+6 {
-			t.Errorf("a body asked for %d bytes has %d", n, len(b))
-		}
+func TestTheArrivalPrompt(t *testing.T) {
+	for _, words := range []int{1, 1000, 21_838, 32_700} {
+		b := ArrivalPrompt("example-org/example-model", words, 32768)
 		var m struct {
 			Model     string `json:"model"`
 			MaxTokens int    `json:"max_tokens"`
@@ -27,18 +24,46 @@ func TestTheArrivalRequestBody(t *testing.T) {
 			} `json:"messages"`
 		}
 		if err := json.Unmarshal([]byte(b), &m); err != nil {
-			t.Fatalf("%d bytes: not JSON: %v", n, err)
+			t.Fatalf("%d words: not JSON: %v", words, err)
 		}
-		// One user message of "hello" words, as many as the function says, asking for the whole context.
+		// One user message of exactly that many "hello" words, asking for the whole context.
 		if m.Model != "example-org/example-model" || m.MaxTokens != 32768 || len(m.Messages) != 1 || m.Messages[0].Role != "user" ||
 			len(strings.Fields(m.Messages[0].Content)) != words || strings.Trim(m.Messages[0].Content, "hello ") != "" {
-			t.Errorf("%d bytes: model %q, max_tokens %d, %d messages, %d words (said %d)", n, m.Model, m.MaxTokens, len(m.Messages), len(strings.Fields(m.Messages[0].Content)), words)
+			t.Errorf("%d words: model %q, max_tokens %d, %d messages, %d words", words, m.Model, m.MaxTokens, len(m.Messages), len(strings.Fields(m.Messages[0].Content)))
 		}
 	}
 	// Model "m", max_tokens 1: 51 bytes of JSON before the prompt and 19 after it, and "hello" then " hello" w-1
 	// times is 6w-1 bytes, so the least w with 70+6w-1 >= 400,000 is 66,656 (a body of 400,005 bytes).
-	if b, words := ArrivalRequestBody("m", 400_000, 1); words != 66_656 || len(b) != 400_005 {
-		t.Errorf("a 400,000-byte body holds %d words in %d bytes, want 66,656 in 400,005", words, len(b))
+	if w := WordsForBytes("m", 400_000, 1); w != 66_656 || len(ArrivalPrompt("m", w, 1)) != 400_005 {
+		t.Errorf("WordsForBytes(400,000) = %d (%d bytes), want 66,656 (400,005)", w, len(ArrivalPrompt("m", w, 1)))
+	}
+	if w := WordsForBytes("m", 400_005, 1); w != 66_656 {
+		t.Errorf("WordsForBytes(400,005) = %d, want 66,656", w)
+	}
+	if w := WordsForBytes("m", 400_006, 1); w != 66_657 {
+		t.Errorf("WordsForBytes(400,006) = %d, want 66,657", w)
+	}
+}
+
+// Two refusals give the engine's count as a line in the words; a line that is no tokenizer's is refused.
+func TestCalibrate(t *testing.T) {
+	// The engine double's: a token a word, and 4 for the chat template and its roles.
+	l, err := Calibrate(1000, 1004, 2000, 2004)
+	if err != nil || l != (TokenLine{Per: 1, Fixed: 4}) {
+		t.Fatalf("Calibrate = %+v, %v", l, err)
+	}
+	// Under a 32,768-token context: 32,763 words make 32,767 tokens, one under it.
+	if w := l.MaxWords(32768); w != 32_763 || l.Tokens(w) != 32_767 {
+		t.Errorf("MaxWords(32768) = %d (%d tokens), want 32,763 (32,767)", w, l.Tokens(w))
+	}
+	// Two tokens a word and a 30-token template.
+	if l, err := Calibrate(1000, 2030, 2000, 4030); err != nil || l != (TokenLine{Per: 2, Fixed: 30}) || l.MaxWords(32768) != 16_368 {
+		t.Errorf("Calibrate(2 a word) = %+v (MaxWords %d), %v", l, l.MaxWords(32768), err)
+	}
+	for _, c := range [][4]int{{1000, 1004, 2000, 2500}, {1000, 1004, 1000, 1004}, {1000, 1004, 2000, 1004}, {1000, 900, 2000, 1900}, {2000, 2004, 1000, 1004}} {
+		if l, err := Calibrate(c[0], c[1], c[2], c[3]); err == nil {
+			t.Errorf("Calibrate%v = %+v, want an error", c, l)
+		}
 	}
 }
 
@@ -69,11 +94,11 @@ func TestInputTokensOf(t *testing.T) {
 
 func TestArrivalVerified(t *testing.T) {
 	for _, c := range []struct {
-		words, tokens int
-		want          bool
-	}{{66_660, 66_683, true}, {66_660, 66_660, true}, {66_660, 66_659, false}, {66_660, 0, false}, {0, 10, false}} {
-		if got := (Stream{PromptWords: c.words, ArrivedTokens: c.tokens}).ArrivalVerified(); got != c.want {
-			t.Errorf("%d words, %d tokens: %v, want %v", c.words, c.tokens, got, c.want)
+		expected, arrived int
+		want              bool
+	}{{21_842, 21_842, true}, {21_842, 21_843, false}, {21_842, 21_841, false}, {21_842, 0, false}, {0, 0, false}} {
+		if got := (Stream{ExpectedTokens: c.expected, ArrivedTokens: c.arrived}).ArrivalVerified(); got != c.want {
+			t.Errorf("expected %d, arrived %d: %v, want %v", c.expected, c.arrived, got, c.want)
 		}
 	}
 }
@@ -114,7 +139,7 @@ func scaledLiveHour(r Row) TunnelHourObs {
 	o.Requests = append([]Stream(nil), o.Requests...)
 	for i, q := range o.Requests {
 		if q.BodyBytes >= MinLargeBody {
-			o.Requests[i] = Stream{ID: q.ID, Opened: q.Opened, Ended: q.Ended, BodyBytes: 400_000, PromptWords: 66_660, ArrivedTokens: 66_683,
+			o.Requests[i] = Stream{ID: q.ID, Opened: q.Opened, Ended: q.Ended, BodyBytes: 196_400, ExpectedTokens: 32_737, ArrivedTokens: 32_737,
 				SendStart: q.Opened, SendEnd: q.Opened.Add(time.Second)}
 		}
 	}
@@ -144,14 +169,14 @@ func TestALiveHourIsJudgedWithoutTheUploadTimingAndADryOneWithIt(t *testing.T) {
 			t.Errorf("the dry reading lacks %q: %v", want, f)
 		}
 	}
-	// Live, but a large body whose refusal stated fewer tokens than its words: not shown arrived.
+	// Live, but a large body whose refusal stated another count than its prompt's own: not shown arrived.
 	short := scaledLiveHour(r)
 	for i := range short.Requests {
 		if short.Requests[i].BodyBytes >= MinLargeBody {
-			short.Requests[i].ArrivedTokens = 66_000
+			short.Requests[i].ArrivedTokens = 32_736
 		}
 	}
-	if f := VerifyTunnelHour(r, short, jobs); !slices.Contains(f, "a request of 0.1 MB or more did not show it arrived whole: the engine's refusal must state at least its prompt's words in input tokens") ||
+	if f := VerifyTunnelHour(r, short, jobs); !slices.Contains(f, "a request of 0.1 MB or more did not show it arrived whole: the engine's refusal must state its prompt's own input tokens") ||
 		!slices.Contains(f, "a stream did not complete") {
 		t.Errorf("a large body not shown arrived passed: %v", f)
 	}
@@ -192,7 +217,7 @@ func TestTheLiveHoursTextToPost(t *testing.T) {
 	post := tunnelHourPost(r, o, VerifyTunnelHour(r, o, jobs))
 	for _, want := range []string{
 		"- path rate, upload (front to node): not measured in alpha (no sender-side timing on the live path)\n",
-		"- large requests (a body of 0.1 MB or more): 1, bodies of 400000 to 400000 bytes; 1 of them in flight while the 16 streams were open (by the client's window); 1 shown arrived whole by the engine's refusal of their length\n",
+		"- large requests (a body of 0.1 MB or more): 1, bodies of 196400 to 196400 bytes; 1 of them in flight while the 16 streams were open (by the client's window); 1 shown arrived whole by the engine's refusal of their length\n",
 		"- head-of-line: longest gap between two tokens of a stream while a large body was in flight: 80ms (over 16 gaps); elsewhere in the hour: 120ms\n",
 	} {
 		if !strings.Contains(post, want) {
@@ -209,5 +234,33 @@ func TestTheLiveHoursTextToPost(t *testing.T) {
 	o.HeadOfLine.InFlight = HeadOfLineStall
 	if fl := TunnelHourFlags(o); len(fl) != 0 {
 		t.Errorf("a gap of exactly the threshold was flagged: %v", fl)
+	}
+}
+
+// The large requests follow one another a fraction of a second apart; they are no run back to back. A live hour
+// whose only chain is its refusals fails (stand-in, before the fix: "longest run back to back: 113").
+func TestRefusalsAreNoRunBackToBack(t *testing.T) {
+	r := scaledTunnel()
+	_, jobs := scaledHour(r)
+	o := scaledLiveHour(r)
+	var reqs []Stream
+	for _, q := range o.Requests {
+		if q.ID != "a1" { // the chain a0, a1, a2 broken
+			reqs = append(reqs, q)
+		}
+	}
+	at := o.Requests[0].Opened.Add(155 * time.Second)
+	for i := 0; i < 5; i++ {
+		from := at.Add(time.Duration(i) * 300 * time.Millisecond)
+		reqs = append(reqs, Stream{ID: "x" + string(rune('0'+i)), Opened: from, Ended: from.Add(200 * time.Millisecond), BodyBytes: 196_400,
+			ExpectedTokens: 32_737, ArrivedTokens: 32_737, SendStart: from, SendEnd: from.Add(200 * time.Millisecond)})
+	}
+	o.Requests = reqs
+	if f := VerifyTunnelHour(r, o, jobs); !slices.Contains(f, "the hour held no run of requests back to back") {
+		t.Errorf("a chain of refusals stood in for the run back to back: %v", f)
+	}
+	// a2, then the burst that opens as it ends: 2. The five refusals, 0.1 s apart, would make 5.
+	if n := longestChain(reqs, r.Clock().MaxChainGap); n != 2 {
+		t.Errorf("longestChain = %d, want 2", n)
 	}
 }

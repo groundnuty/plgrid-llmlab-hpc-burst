@@ -6,8 +6,10 @@ package alpha
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -431,24 +433,62 @@ func (pr *prober) end() int {
 
 // sentLarge is one large request of the hour as the client sent it: the reply,
 // the client's window from its first byte sent to its reply read, and the
-// body's bytes and prompt words.
+// body's bytes and its prompt's own input tokens.
 type sentLarge struct {
-	reply        stack.Reply
-	start, end   time.Time
-	bytes, words int
+	reply           stack.Reply
+	start, end      time.Time
+	bytes, expected int
+}
+
+// arrivalBody is the hour's large request (the science agent's ruling (4) on
+// PR 255) and its prompt's own input tokens. Two prompts of 1,000 and 2,000
+// words, each refused for its length, give the engine's count as a function of
+// the words (Calibrate). The body then holds as many words as tm.UploadBody
+// bytes take, but fewer tokens than the deployment's max-model-len, so that
+// the engine reads and states its whole count; a context that cannot hold a
+// large body (MinLargeBody) under it fails the row, as does a refusal that
+// states no count.
+func (r *liveRun) arrivalBody(key string) (body string, expected int, err error) {
+	mml, err := r.maxModelLen()
+	if err != nil {
+		return "", 0, err
+	}
+	count := func(words int) (int, error) {
+		rp := r.fc.Send("/v1/chat/completions", ArrivalPrompt(r.fc.Model, words, mml), key)
+		n, ok := InputTokensOf(rp.Body)
+		if !ok {
+			return 0, fmt.Errorf("a prompt of %d words with max_tokens %d was answered %d, not refused with its input tokens stated: the large bodies' arrival cannot be shown", words, mml, rp.Status)
+		}
+		return n, nil
+	}
+	n1, err := count(1000)
+	if err != nil {
+		return "", 0, err
+	}
+	n2, err := count(2000)
+	if err != nil {
+		return "", 0, err
+	}
+	line, err := Calibrate(1000, n1, 2000, n2)
+	if err != nil {
+		return "", 0, err
+	}
+	words := min(WordsForBytes(r.fc.Model, r.tm.UploadBody, mml), line.MaxWords(mml))
+	body = ArrivalPrompt(r.fc.Model, words, mml)
+	if len(body) < MinLargeBody {
+		return "", 0, fmt.Errorf("the deployment's max-model-len %d holds a prompt of %d bytes at most (%d tokens a word, %d more), under the %d bytes of a large body", mml, len(body), line.Per, line.Fixed, MinLargeBody)
+	}
+	return body, line.Tokens(words), nil
 }
 
 // largeRequests is the hour's upload direction (issue #224), with no
 // sender-side timing on the live path in alpha (the science agent's ruling (4)
-// on PR 255): tm.UploadStreams senders, each sending a request whose prompt is
-// tm.UploadBody bytes of words and that asks for the deployment's whole
-// context (ArrivalRequestBody), so that the engine refuses it for its length
-// and states the input tokens it read, which shows the body arrived whole. Each
-// sender pauses tm.UploadPause after a reply and sends the next until rateAsked
-// has passed. It runs beside the burst's streams, from its own goroutines.
-func (r *liveRun) largeRequests(key string) []sentLarge {
+// on PR 255): tm.UploadStreams senders, each sending the large request body
+// (arrivalBody), which the engine refuses for its length, pausing
+// tm.UploadPause after a reply, and sending the next until rateAsked has
+// passed. It runs beside the burst's streams, from its own goroutines.
+func (r *liveRun) largeRequests(key, body string, expected int) []sentLarge {
 	tm := r.tm
-	body, words := ArrivalRequestBody(r.fc.Model, tm.UploadBody, r.maxModelLen())
 	until := time.Now().Add(rateAsked)
 	var (
 		mu   sync.Mutex
@@ -464,7 +504,7 @@ func (r *liveRun) largeRequests(key string) []sentLarge {
 				rp := r.fc.Send("/v1/chat/completions", body, key)
 				end := time.Now()
 				mu.Lock()
-				outs = append(outs, sentLarge{reply: rp, start: start, end: end, bytes: len(body), words: words})
+				outs = append(outs, sentLarge{reply: rp, start: start, end: end, bytes: len(body), expected: expected})
 				mu.Unlock()
 				if tm.UploadPause > 0 {
 					time.Sleep(tm.UploadPause)
@@ -477,27 +517,31 @@ func (r *liveRun) largeRequests(key string) []sentLarge {
 }
 
 // observeLarge is a large request as an observation: the front's record of
-// it, its body and prompt, the input tokens the engine's refusal stated, and
-// the client's window.
+// it, its body and its prompt's own input tokens, the input tokens the
+// engine's refusal stated, and the client's window.
 func (r *liveRun) observeLarge(l sentLarge) Stream {
 	if l.reply.ID == "" {
-		return Stream{Error: "no reply", BodyBytes: l.bytes, PromptWords: l.words}
+		return Stream{Error: "no reply", BodyBytes: l.bytes, ExpectedTokens: l.expected}
 	}
 	s := StreamOf(r.fc.RowOf(l.reply.ID), ClientEnd{})
-	s.BodyBytes, s.PromptWords, s.SendStart, s.SendEnd = l.bytes, l.words, l.start, l.end
+	s.BodyBytes, s.ExpectedTokens, s.SendStart, s.SendEnd = l.bytes, l.expected, l.start, l.end
 	s.ArrivedTokens, _ = InputTokensOf(l.reply.Body)
 	return s
 }
 
-// maxModelLen is the deployment's max-model-len flag (4096 when it has none).
-func (r *liveRun) maxModelLen() int {
-	n := 4096
+// maxModelLen is the deployment's max-model-len flag; a deployment without
+// one is an error, since the large bodies are sized under it.
+func (r *liveRun) maxModelLen() (int, error) {
 	for _, f := range r.w.md.Spec.Source.Served.Flags {
 		if f.Name == "max-model-len" {
-			fmt.Sscan(f.Value, &n)
+			n, err := strconv.Atoi(f.Value)
+			if err != nil || n <= 0 {
+				return 0, fmt.Errorf("the deployment's max-model-len %q is not a positive number", f.Value)
+			}
+			return n, nil
 		}
 	}
-	return n
+	return 0, errors.New("the deployment has no max-model-len flag, which the large bodies are sized under")
 }
 
 // sampler looks at the tunnel session of an Instance every interval: frps's
@@ -625,6 +669,11 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	if err != nil {
 		return TunnelHourObs{}, err
 	}
+	// The large request, measured against the engine's own count before the hour (issue #224; the ruling (4) on PR 255).
+	largeBody, largeExpected, err := r.arrivalBody(key)
+	if err != nil {
+		return TunnelHourObs{}, err
+	}
 	smp := r.startSampler(in, tm.MaxSampleGap/4)
 	first := time.Now()
 	var reqs []Stream
@@ -641,7 +690,7 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 		<-s.first
 	}
 	largeDone := make(chan []sentLarge, 1)
-	go func() { largeDone <- r.largeRequests(key) }()
+	go func() { largeDone <- r.largeRequests(key, largeBody, largeExpected) }()
 	rs := r.wait(r.openStream(nRate, key, ""))
 	var larges []sentLarge
 	select {

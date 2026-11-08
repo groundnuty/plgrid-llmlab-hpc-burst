@@ -128,20 +128,52 @@ func StreamOf(rec usage.Record, end ClientEnd) Stream {
 	return s
 }
 
-// ArrivalRequestBody is a chat request whose prompt is at least n bytes of
-// words ("hello", each a token or more), asking for maxTokens tokens, the
-// deployment's max-model-len: its prompt and output can never fit the context,
-// so the engine refuses it, and its refusal states the input tokens it read
-// (InputTokensOf), which shows the whole body arrived (Stream.ArrivalVerified)
-// at the cost of a tokenization, not a prefill. It returns the body and the
-// prompt's words (the science agent's ruling (4) on PR 255).
-func ArrivalRequestBody(model string, n, maxTokens int) (body string, words int) {
+// ArrivalPrompt is a chat request whose prompt is words words ("hello", each
+// a token or more), asking for maxTokens tokens: with maxTokens the
+// deployment's max-model-len, its prompt and output can never fit the context,
+// so the engine refuses it, after tokenizing it and before any prefill, and its
+// refusal states the input tokens it read (InputTokensOf). The science agent's
+// ruling (4) on PR 255: that count, matched against the prompt's own
+// (TokenLine), shows the body arrived whole.
+func ArrivalPrompt(model string, words, maxTokens int) string {
 	m, _ := json.Marshal(model)
-	head := `{"model":` + string(m) + `,"messages":[{"role":"user","content":"`
-	tail := `"}],"max_tokens":` + strconv.Itoa(maxTokens) + `}`
-	// "hello", then words-1 times " hello": len(head)+len(tail)+6*words-1 bytes, at least n.
-	words = max((n-len(head)-len(tail)+1+len(" hello")-1)/len(" hello"), 1)
-	return head + "hello" + strings.Repeat(" hello", words-1) + tail, words
+	return `{"model":` + string(m) + `,"messages":[{"role":"user","content":"hello` + strings.Repeat(" hello", max(words, 1)-1) +
+		`"}],"max_tokens":` + strconv.Itoa(maxTokens) + `}`
+}
+
+// WordsForBytes is the fewest words whose ArrivalPrompt is at least n bytes.
+func WordsForBytes(model string, n, maxTokens int) int {
+	fixed := len(ArrivalPrompt(model, 1, maxTokens)) - len("hello")
+	// "hello", then words-1 times " hello": 6 words - 1 bytes.
+	return max((n-fixed+1+len(" hello")-1)/len(" hello"), 1)
+}
+
+// TokenLine is a prompt's input tokens as its engine counts them, as a
+// function of its words: Per tokens a word, and Fixed more, the chat
+// template's. Calibrate finds it from two refusals of prompts of known words.
+type TokenLine struct{ Per, Fixed int }
+
+// Tokens is the input tokens of a prompt of words words.
+func (l TokenLine) Tokens(words int) int { return l.Per*words + l.Fixed }
+
+// MaxWords is the most words whose prompt has fewer tokens than maxModelLen,
+// so that an engine that stops counting just past its context still states
+// the prompt's whole count.
+func (l TokenLine) MaxWords(maxModelLen int) int { return (maxModelLen - 1 - l.Fixed) / l.Per }
+
+// Calibrate is the TokenLine through two prompts of w1 and w2 words whose
+// refusals stated n1 and n2 input tokens. A line that is not whole tokens a
+// word, or whose template count is negative, is no tokenizer's: an error.
+func Calibrate(w1, n1, w2, n2 int) (TokenLine, error) {
+	if w2 <= w1 || n2 <= n1 || (n2-n1)%(w2-w1) != 0 {
+		return TokenLine{}, fmt.Errorf("prompts of %d and %d words were counted %d and %d input tokens: not a whole number of tokens a word", w1, w2, n1, n2)
+	}
+	per := (n2 - n1) / (w2 - w1)
+	l := TokenLine{Per: per, Fixed: n1 - per*w1}
+	if l.Fixed < 0 {
+		return TokenLine{}, fmt.Errorf("prompts of %d and %d words were counted %d and %d input tokens: fewer than their words", w1, w2, n1, n2)
+	}
+	return l, nil
 }
 
 // inputTokensRE are the forms in which an engine's context-length refusal

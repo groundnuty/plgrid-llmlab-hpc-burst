@@ -33,24 +33,27 @@ type Stream struct {
 	BodyStart time.Time `json:"bodyStart,omitzero"`
 	BodyEnd   time.Time `json:"bodyEnd,omitzero"`
 	// The live hour's large requests (the science agent's ruling (4) on PR 255: no
-	// sender-side timing on the live path in alpha). PromptWords is the words of
-	// the request's prompt, and ArrivedTokens the input tokens the engine said it
-	// read, in its refusal of a prompt over its context (ArrivalVerified).
-	// SendStart and SendEnd are the client's own window of the request, from its
-	// first byte sent to its reply read: the body is in flight inside it.
-	PromptWords   int       `json:"promptWords,omitempty"`
-	ArrivedTokens int       `json:"arrivedTokens,omitempty"`
-	SendStart     time.Time `json:"sendStart,omitzero"`
-	SendEnd       time.Time `json:"sendEnd,omitzero"`
+	// sender-side timing on the live path in alpha). ExpectedTokens is the
+	// prompt's own input tokens (TokenLine), and ArrivedTokens the input tokens
+	// the engine said it read, in its refusal of a prompt over its context
+	// (ArrivalVerified). SendStart and SendEnd are the client's own window of the
+	// request, from its first byte sent to its reply read: the body is in flight
+	// inside it.
+	ExpectedTokens int       `json:"expectedTokens,omitempty"`
+	ArrivedTokens  int       `json:"arrivedTokens,omitempty"`
+	SendStart      time.Time `json:"sendStart,omitzero"`
+	SendEnd        time.Time `json:"sendEnd,omitzero"`
 	// Ticks are the times, on the client's clock, at which the reply's data
 	// lines (its tokens) arrived; not in the record.
 	Ticks []time.Time `json:"-"`
 }
 
 // ArrivalVerified reports whether the engine read the request's whole prompt:
-// its refusal stated at least as many input tokens as the prompt had words.
-// Every word is at least one token, so a prompt cut short would show fewer.
-func (s Stream) ArrivalVerified() bool { return s.PromptWords > 0 && s.ArrivedTokens >= s.PromptWords }
+// its refusal stated exactly the prompt's own input tokens. A body cut short
+// would not parse, and a prompt changed on the way would count otherwise.
+func (s Stream) ArrivalVerified() bool {
+	return s.ExpectedTokens > 0 && s.ArrivedTokens == s.ExpectedTokens
+}
 
 // UploadRecorded reports whether the upload interval is recorded: a start, and an end after it.
 func (s Stream) UploadRecorded() bool {
