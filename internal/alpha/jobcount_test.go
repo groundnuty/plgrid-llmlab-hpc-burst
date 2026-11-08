@@ -105,6 +105,8 @@ func TestANotStartedErrorIsNotRunWhereTheRulingsSay(t *testing.T) {
 		{"alpha-athena-handover", pending, false},
 		{"alpha-athena-handover", ErrQueueWaitPastEnd, false},
 		{"tunnel-hour-athena", errors.New("another"), false},
+		{"tunnel-hour-helios", errors.New("another"), false},
+		{"alpha-helios-nooverlap", ErrQueueWaitPastEnd, false},
 	} {
 		if got := NotRun(rowOf(c.row), c.err); got != c.want {
 			t.Errorf("NotRun(%s, %v) = %v, want %v", c.row, c.err, got, c.want)

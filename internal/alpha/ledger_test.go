@@ -391,19 +391,19 @@ func TestEndJobsWaitsOutACompletingJobAndCancelsARequeuedOne(t *testing.T) {
 	b := slurm.NewBatch(sess, prof, provider.Settings{Provider: "example", Account: "example-account", Partition: standInPartition},
 		slurm.Options{Clock: clock, PollInterval: time.Nanosecond, BusyInterval: time.Nanosecond})
 	prefix := "hb-alpha-0a1b2c3d4e-"
-	done := plat.OutsideJob(standInUser, prefix+"done1-000000000001", standInPartition, "", 1)
+	done1 := plat.OutsideJob(standInUser, prefix+"done1-000000000001", standInPartition, "", 1)
 	requeued := plat.OutsideJob(standInUser, prefix+"reque-000000000002", standInPartition, "", 1)
 	other := plat.OutsideJob(standInUser, "hb-alpha-ffffffffff-other-000000000003", standInPartition, "", 1)
-	for _, id := range []int{done, requeued, other} {
+	for _, id := range []int{done1, requeued, other} {
 		if err := plat.Start(id); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// The first: cancelled, its processes still ending. The second: requeued, and running again.
-	if err := plat.End(done, "CANCELLED"); err != nil {
+	if err := plat.End(done1, "CANCELLED"); err != nil {
 		t.Fatal(err)
 	}
-	if err := plat.HoldCompleting(done, true); err != nil {
+	if err := plat.HoldCompleting(done1, true); err != nil {
 		t.Fatal(err)
 	}
 	if err := plat.Requeue(requeued); err != nil {
@@ -412,29 +412,62 @@ func TestEndJobsWaitsOutACompletingJobAndCancelsARequeuedOne(t *testing.T) {
 	if err := plat.Start(requeued); err != nil {
 		t.Fatal(err)
 	}
+	// EndJobs runs until a pass finds none of the run's jobs alive. The test waits on what it can see: the
+	// requeued job cancelled, then three more reads of the queue with the completing job still listed, and
+	// EndJobs still running; only then does the flag clear, after which EndJobs must return nil.
 	owned := RunOwned(prefix, nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	err := EndJobs(ctx, b, owned, 10*time.Millisecond)
-	cancel()
-	if err == nil || !strings.Contains(err.Error(), "still alive") {
-		t.Fatalf("EndJobs = %v while a job of the run is still completing, want the jobs left alive", err)
-	}
-	if j, _ := plat.Job(requeued); j.State != "CANCELLED" {
-		t.Errorf("the requeued job running again is %s, want CANCELLED", j.State)
+	cb := &countingEnder{JobEnder: b}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- EndJobs(ctx, cb, owned, 10*time.Millisecond) }()
+	deadline := time.Now().Add(time.Minute)
+	var after int32
+	for {
+		select {
+		case err := <-done:
+			t.Fatalf("EndJobs returned (%v) while a job of the run was still completing", err)
+		default:
+		}
+		if j, _ := plat.Job(requeued); j.State == "CANCELLED" {
+			if after == 0 {
+				after = cb.reads.Load()
+			} else if cb.reads.Load() >= after+3 {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("within a minute: requeued job %v, %d reads of the queue", func() string { j, _ := plat.Job(requeued); return j.State }(), cb.reads.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	if j, _ := plat.Job(other); j.State != "RUNNING" {
 		t.Errorf("another run's job is %s, want RUNNING: it is not this run's", j.State)
 	}
-	if err := plat.HoldCompleting(done, false); err != nil {
+	if err := plat.HoldCompleting(done1, false); err != nil {
 		t.Fatal(err)
 	}
 	// The cancelled requeue may still be listed COMPLETING: the fake clears that as the clock moves.
 	clock.Advance(time.Minute)
-	ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := EndJobs(ctx, b, owned, 10*time.Millisecond); err != nil {
-		t.Fatalf("EndJobs once the flag cleared: %v", err)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("EndJobs once the flag cleared: %v", err)
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("EndJobs did not return within a minute of the flag clearing")
 	}
+}
+
+// countingEnder counts the reads of the queue.
+type countingEnder struct {
+	JobEnder
+	reads atomic.Int32
+}
+
+func (c *countingEnder) Queue(ctx context.Context) ([]provider.Job, error) {
+	c.reads.Add(1)
+	return c.JobEnder.Queue(ctx)
 }
 
 func TestBatchLedgerWithoutAClientIsNamed(t *testing.T) {

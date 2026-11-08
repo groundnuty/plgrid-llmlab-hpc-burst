@@ -119,28 +119,18 @@ mutants=(
   'workerfault.go@@err4 != nil || pid <= 0@@err4 != nil || pid < 0'
   'workerfault.go@@strings.Contains(base, "apptainer")@@strings.Contains(base, "x-apptainer")'
   'workerfault.go@@strings.HasPrefix(base, "starter")@@false'
-  'workerfault.go@@if n < 1 || len(argv) < n+1 {@@if n < 1 || len(argv) < n {'
-  'workerfault.go@@if n < 1 || len(argv) < n+1 {@@if len(argv) < n+1 {'
-  'workerfault.go@@got[:gi] != want[:wi]@@false'
   'workerfault.go@@ok && parent.InJob && isApptainer(parent.Argv)@@ok && isApptainer(parent.Argv)'
   'workerfault.go@@ok && parent.InJob && isApptainer(parent.Argv)@@ok && parent.InJob'
   'workerfault.go@@if len(found) != 1 {@@if len(found) < 1 {'
-  'workerfault.go@@[ "${20}" = "` + p.Start + `" ]@@[ "${20}" != "x` + p.Start + `" ]'
   'workerfault.go@@== "killed "+strconv.Itoa(p.PID)@@!= "killed "+strconv.Itoa(p.PID)'
   'workerfault.go@@if tr '"'"'\0'"'"' '"'"'\n'"'"' < "$d/environ" 2>/dev/null | grep -qx@@if tr '"'"'\0'"'"' '"'"'\n'"'"' < "$d/environ" 2>/dev/null | grep -q'
   'ledger.go@@if l == nil || l.Finder == nil {@@if l == nil {'
-  'ledger.go@@			if liveJob(j) {@@			if true {'
   'ledger.go@@if live == 0 && len(errs) == 0 {@@if live == 0 {'
-  'ledger.go@@case v1alpha1.AllocationHeld, v1alpha1.AllocationPending, v1alpha1.AllocationRunning:@@case v1alpha1.AllocationHeld, v1alpha1.AllocationPending:'
   'config.go@@	if c.StandIn {@@	if false {'
   # issue #245: the deployment ends that keep the stack rows to their job counts.
-  'jobcount.go@@return created.Add(lease - drainWindow).Truncate(time.Second)@@return created.Add(lease).Truncate(time.Second)'
   'jobcount.go@@return drainStart.Add(-time.Minute).Truncate(time.Second)@@return drainStart.Truncate(time.Second)'
   'jobcount.go@@end := succDrainStart.Truncate(time.Second)@@end := succDrainStart'
   'jobcount.go@@if !end.After(predDrainStart) {@@if end.Before(predDrainStart) {'
-  'jobcount.go@@if row.MostJobs == 1 && pendingMax+time.Minute > row.Lease-drainWindow {@@if row.MostJobs == 1 && pendingMax > row.Lease-drainWindow {'
-  'jobcount.go@@if row.MostJobs == 1 && pendingMax+time.Minute > row.Lease-drainWindow {@@if pendingMax+time.Minute > row.Lease-drainWindow {'
-  'jobcount.go@@pendingMax+time.Minute > row.Lease-drainWindow@@pendingMax+time.Minute >= row.Lease-drainWindow'
   # issue #245: a row is judged on its own clock (Row.Clock), and the zero Timing is the live one.
   'verdict.go@@case d.LeaseLimit <= tm.Lead():@@case d.LeaseLimit <= Lead():'
   'verdict.go@@if last.Sub(first) < tm.Hour {@@if last.Sub(first) < Hour {'
@@ -210,10 +200,57 @@ mutants=(
   'internal/providerctl/conformance/gpuacct_test.go@@			cfg.QOS = append(cfg.QOS, fakeslurm.QOS{Name: q, MaxGPUsPerUser: fakeslurm.Cap(1)})@@			cfg.QOS = nil'
   'internal/providerctl/conformance/gpuacct_test.go@@		vars["HPCBURST_CONF_START_WAIT"] = r.StartWait.String()@@		vars["HPCBURST_CONF_PENDING_MAX_SECONDS"] = "60"'
   'internal/providerctl/conformance/gpuacct_test.go@@	return ph == v1alpha1.AllocationRunning || ph == v1alpha1.AllocationEnded@@	return ph == v1alpha1.AllocationEnded'
-  'run.go@@func NotRun(row Row, err error) bool { return row.SlotHold > 0 && errors.Is(err, ErrNotStarted) }@@func NotRun(row Row, err error) bool { return errors.Is(err, ErrNotStarted) }'
-  'run.go@@func NotRun(row Row, err error) bool { return row.SlotHold > 0 && errors.Is(err, ErrNotStarted) }@@func NotRun(row Row, err error) bool { return row.SlotHold > 0 }'
+  # The review of PR 255 (B1-B8): each blocking fix has a mutant that a test kills.
+  # B1: the kill goes through a pidfd, after the process at the PID is checked, and needs one.
+  'workerfault.go@@        pidfd_send_signal(fd, signal.SIGKILL)@@        os.kill(pid, signal.SIGKILL)'
+  'workerfault.go@@        if not same(pid, start, cmdline):@@        if False:'
+  'workerfault.go@@    if got != pid:@@    if False:'
+  'workerfault.go@@command -v python3 >/dev/null 2>&1 || { echo no-pidfd; exit 0; }@@true'
+  # B2: the engine is the launch's program, directly or as a Python console script, with exactly its arguments.
+  'workerfault.go@@	if !isProgram(rest[0], command[0]) {@@	if false {'
+  'workerfault.go@@		if len(rest) == 0 || !strings.HasPrefix(rest[0], "/") || !isProgram(rest[0], command[0]) {@@		if len(rest) == 0 {'
+  'workerfault.go@@	return arg == program || (strings.HasPrefix(arg, "/") && filepath.Base(arg) == program)@@	return arg == program || filepath.Base(arg) == program'
+  'workerfault.go@@	if len(rest) != len(command) {@@	if len(rest) < len(command) {'
+  'workerfault.go@@		if rest[i] != command[i] {@@		if false {'
+  'workerfault.go@@	pyFlagsRE = regexp.MustCompile(`^-[sSuEIBO]+$`)@@	pyFlagsRE = regexp.MustCompile(`^-`)'
+  # nit: a process of the job by its cgroup too.
+  'workerfault.go@@  if grep -q "/job_$job/" "$d/cgroup" 2>/dev/null; then injob=1; fi@@  :'
+  'workerfault.go@@  if grep -q "/job_$job/" "$d/cgroup"@@  if grep -q "/job_$job" "$d/cgroup"'
+  # B3: the run's jobs are its prefix's, whatever the recorder holds.
+  'ledger.go@@		if prefix != "" && strings.HasPrefix(name, prefix) {@@		if false {'
+  'hack/live-checks.sh@@      { [ -n "$OWN_PREFIX" ] && [ "${name#"$OWN_PREFIX"}" != "$name" ]; }; then echo "$id"; fi@@      false; then echo "$id"; fi'
+  'hack/live-checks.sh@@ HPCBURST_ALPHA_RUN_ID=$RUN_ID@@'
+  # B4: a job is alive by the scheduler's state, COMPLETING included.
+  'ledger.go@@	return j.Completing || !endedBase(j)@@	return !endedBase(j)'
+  'ledger.go@@	return len(j.State) > 0 && endedStates[strings.ToUpper(j.State[0])]@@	return len(j.State) > 0'
+  'ledger.go@@		if !endedBase(j) {@@		if false {'
+  # B5: the two-job guard.
+  'jobcount.go@@	if e := l.Clock.Add(g.TimeLimit - g.DrainWindow).Truncate(time.Second); e.After(g.end) {@@	if e := l.Clock.Add(g.TimeLimit).Truncate(time.Second); e.After(g.end) {'
+  'jobcount.go@@e.After(g.end) {@@true {'
+  'jobcount.go@@	case len(others) > 0 && (g.final || len(others) > 1):@@	case len(others) > 0 && g.final:'
+  'jobcount.go@@		if j.HardEnd == nil || j.HardEnd.Sub(*j.StartTime) != g.TimeLimit {@@		if j.HardEnd == nil {'
+  'jobcount.go@@	return j.StartTime != nil && (j.EndTime == nil || j.EndTime.After(*j.StartTime))@@	return j.StartTime != nil'
+  'jobcount.go@@	if g.pred == "" && len(started) > 0 {@@	if len(started) > 0 {'
+  'jobcount.go@@	return clusterNow.Add(timeLimit - drainWindow).Truncate(time.Second)@@	return clusterNow.Add(timeLimit).Truncate(time.Second)'
+  # B6: the guard's failures fail the step, and the run ends with the successor's drain start observed.
+  'steps_live_test.go@@				if fails++; fails >= guardLookFails {@@				if fails++; false {'
+  'steps_live_test.go@@				_, err = setEnd(end)@@				_ = end'
+  'steps_live_test.go@@	stack.WaitFor(r.t, d, what, guarded)@@	stack.WaitFor(r.t, d, what, cond); _ = guarded'
+  'steps_live_test.go@@			if md.Spec.EndTime == nil || !md.Spec.EndTime.Time.Equal(end) {@@			if false {'
+  'steps_live_test.go@@			return errors.New("the successor never started, so the run'"'"'s deployment never ended at its drain start")@@			return nil'
+  # B7: the first clock, and a tunnel row's NOT RUN at its first end.
+  'jobcount.go@@		if c := timeLimit - drainWindow - time.Minute; c < pendingMax {@@		if c := timeLimit - drainWindow; c < pendingMax {'
+  'jobcount.go@@		if c := timeLimit - drainWindow - time.Minute; c < pendingMax {@@		if c := timeLimit - drainWindow - time.Minute; c <= pendingMax {'
+  'run.go@@ || (row.MostJobs == 1 && errors.Is(err, ErrQueueWaitPastEnd))@@'
+  'run.go@@		if ns.PastEnd {@@		if false {'
+  'hack/live-checks.sh@@  [ "${SWAIT[$n]:--}" != - ] || [ -n "${OGSET[$n]:-}" ] || case $n in tunnel-hour-*) true ;; *) false ;; esac || return 1@@  [ "${SWAIT[$n]:--}" != - ] || [ -n "${OGSET[$n]:-}" ] || return 1'
+  'hack/live-checks.sh@@  [ "${SWAIT[$n]:--}" != - ] || [ -n "${OGSET[$n]:-}" ] || case $n in tunnel-hour-*) true ;; *) false ;; esac || return 1@@  [ "${SWAIT[$n]:--}" != - ] || case $n in tunnel-hour-*) true ;; *) false ;; esac || return 1'
+  'hack/live-checks.sh@@    elif grep -q "a minute before the deployment'"'"'s first end" "$REC_DIR/not-run.txt" 2>/dev/null; then@@    elif false; then'
+  'dry_test.go@@	d.tick(bound - time.Second)@@	d.tick(bound - time.Minute)'
+  'run.go@@	return (row.SlotHold > 0 && errors.Is(err, ErrNotStarted)) ||@@	return errors.Is(err, ErrNotStarted) ||'
+  'run.go@@	return (row.SlotHold > 0 && errors.Is(err, ErrNotStarted)) ||@@	return (row.SlotHold > 0) ||'
+  'alpha_live_test.go@@		if merr := rec.SaveText(NotRunFile, note); merr != nil {@@		if merr := error(nil); merr != nil {'
   'run.go@@			if errors.Is(err, ErrNotStarted) {@@			if false {'
-  'alpha_live_test.go@@		if merr := rec.SaveText(NotRunFile, NotRunNote(cfg.Row, cfg.PendingMax)); merr != nil {@@		if merr := error(nil); merr != nil {'
   'alpha_live_test.go@@	if NotRun(cfg.Row, err) {@@	if false {'
   'hack/live-checks.sh@@PENDING_MAX_NOW=1800@@PENDING_MAX_NOW=7200'
   'hack/live-checks.sh@@  elif [ "${SLOT[$1]:--}" != - ]; then printf '"'"'%s'"'"' "$PENDING_MAX_NOW"@@  elif false; then printf '"'"'%s'"'"' "$PENDING_MAX_NOW"'
@@ -221,7 +258,6 @@ mutants=(
   'hack/live-checks.sh@@  export HPCBURST_ALPHA_PENDING_MAX_SECONDS=$(pending_max "$n")@@  export HPCBURST_ALPHA_PENDING_MAX_SECONDS=${LIVE_PENDING_MAX_SECONDS:-7200}'
   'hack/live-checks.sh@@"$(( ${TMIN[$n]} + ($(pending_max "$n") + 59) / 60 ))" env_alpha@@"$(( ${TMIN[$n]} + ${LIVE_PENDING_MAX_SECONDS:-7200} / 60 ))" env_alpha'
   'hack/live-checks.sh@@"$(( ${TMIN[$n]} + ($(pending_max "$n") + 59) / 60 ))" env_alpha@@"$(( ${TMIN[$n]} + $(pending_max "$n") / 60 ))" env_alpha'
-  'hack/live-checks.sh@@  [ "${SWAIT[$n]:--}" != - ] || [ -n "${OGSET[$n]:-}" ] || return 1@@  [ "${SWAIT[$n]:--}" != - ] || return 1'
   'hack/live-checks.sh@@may pend up to $(fmt_pending "$(pending_max "$1")") in the queue@@may pend up to $((7200 / 60)) min in the queue'
   'hack/live-checks.sh@@was still pending after $(fmt_pending "$(pending_max "$n")") in the queue@@was still pending after 30 min in the queue'
   'hack/live-checks.sh@@  say "$1: may pend up to $(fmt_pending "$(pending_max "$1")") in the queue (then it is cancelled by its tag and the run is NOT RUN), then holds QOS@@  say "$1: holds QOS'
@@ -239,7 +275,6 @@ mutants=(
   'config.go@@if v := getenv(envPending); v != "" {@@if v := getenv(envPending); v == "x" {'
   'config.go@@return time.Duration(s) * time.Second, nil@@return time.Duration(s+60) * time.Second, nil'
   'config.go@@if err != nil || s <= 0 {@@if err != nil || s < 0 {'
-  'dry_test.go@@d.tick(p.PendingMax - time.Second)@@d.tick(p.PendingMax - time.Minute)'
   'dry_test.go@@d.tick(2 * time.Second)@@d.tick(61 * time.Second)'
   'dry_test.go@@d.out(n), d.out(n), d.gateWrap(n))@@d.out(n), d.out(n), "sleep 5")'
   'rows.go@@SlotHold: 15 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#145 and #93"@@SlotHold: 15 * time.Minute, MostJobs: 1, PostsTo: "#145 and #93"'
@@ -273,7 +308,7 @@ open(p, 'w').write(s.replace(a, b, 1))
 PY
   then echo "BROKEN   $file: the text '$from' does not occur exactly once"; broken=$((broken+1)); continue; fi
   case $path in
-    hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 -failfast -run 'AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot' ./hack/livechecks) ;;
+    hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 -failfast -run 'AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd' ./hack/livechecks) ;;
     "$pkg"/alpha_live_test.go)
       # The dry runs of the script run the alpha test binary: build it from the mutated file, to one fixed path.
       tests=(bash -c 'go test -c -o "$1" ./internal/alpha && HPCBURST_LIVECHECKS_ALPHA_TEST=$1 go test -count=1 -timeout 9m -run PendingPastTheBound ./hack/livechecks' _ "$tmp/alpha-mutant.test") ;;
