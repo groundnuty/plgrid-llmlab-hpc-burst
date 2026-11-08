@@ -59,7 +59,14 @@ type Recorder interface {
 // KubeRecorder emits events.k8s.io Events whose reason is the CamelCase code
 // alone and whose action is HBEP-8's type (@hpc-burst-science-agent's HBEP-8
 // draft, 31 Oct 2026; it replaces the "<type>/<code>" reason).
-type KubeRecorder struct{ R events.EventRecorder }
+type KubeRecorder struct {
+	R events.EventRecorder
+	// Counter is the raised-events counter R counts into, when
+	// NewKubeRecorder built R. Run exports this one on the front's /metrics,
+	// so the recorder and the export cannot name two counters (HBEP-8,
+	// Raised events).
+	Counter *eventcount.Counter
+}
 
 // Event implements Recorder.
 func (k KubeRecorder) Event(obj runtime.Object, warning bool, typ, code, message string) {
@@ -68,6 +75,17 @@ func (k KubeRecorder) Event(obj runtime.Object, warning bool, typ, code, message
 		et = provider.EventKindWarning
 	}
 	k.R.Eventf(obj, nil, et, code, typ, "%s", cutNote(message))
+}
+
+// raisedEvents is the counter the front's /metrics exports: the one its
+// recorder counts into, when that is a KubeRecorder NewKubeRecorder built, so
+// the two cannot come apart; otherwise a new one, into which nothing counts
+// (a test's MemoryRecorder).
+func raisedEvents(rec Recorder) *eventcount.Counter {
+	if k, ok := rec.(KubeRecorder); ok && k.Counter != nil {
+		return k.Counter
+	}
+	return eventcount.New()
 }
 
 // RaisedEvents returns the series the front can raise, each created at 0 on
@@ -90,13 +108,9 @@ func RaisedEvents() []eventcount.Series {
 
 // NewKubeRecorder starts an events broadcaster on the clientset and returns
 // its recorder and a stop function that flushes it. The recorder counts each
-// event it hands over in counted, the front's raised-events counter, which
-// Options.Events must name so that the front's /metrics exports it (HBEP-8,
-// Raised events). It panics on a nil counter.
-func NewKubeRecorder(cs kubernetes.Interface, counted *eventcount.Counter) (KubeRecorder, func(), error) {
-	if counted == nil {
-		panic("front: NewKubeRecorder with no raised-events counter")
-	}
+// event it hands over in a raised-events counter of its own, one per front,
+// which it carries as Counter for Run to export (HBEP-8, Raised events).
+func NewKubeRecorder(cs kubernetes.Interface) (KubeRecorder, func(), error) {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		return KubeRecorder{}, nil, err
@@ -109,7 +123,9 @@ func NewKubeRecorder(cs kubernetes.Interface, counted *eventcount.Counter) (Kube
 	b := events.NewBroadcaster(&events.EventSinkImpl{Interface: cs.EventsV1()})
 	stop := make(chan struct{})
 	b.StartRecordingToSink(stop)
-	return KubeRecorder{R: eventcount.Events(b.NewRecorder(scheme, fieldManagerFront), counted, eventcount.ControllerFront)}, func() { close(stop); b.Shutdown() }, nil
+	counted := eventcount.New()
+	return KubeRecorder{R: eventcount.Events(b.NewRecorder(scheme, fieldManagerFront), counted, eventcount.ControllerFront), Counter: counted},
+		func() { close(stop); b.Shutdown() }, nil
 }
 
 // RecordedEvent is one event a MemoryRecorder holds.

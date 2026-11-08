@@ -22,7 +22,10 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	coordinationv1 "k8s.io/api/coordination/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	kubefake "k8s.io/client-go/kubernetes/fake"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
@@ -238,5 +241,30 @@ func TestFrontRequestPathAbsenceOfUsageWriteFailed(t *testing.T) {
 				t.Fatalf("Require = %v", err)
 			}
 		})
+	}
+}
+
+// TestRunExportsTheCounterItsRecorderCountsInto: the counter Run puts on the
+// front's /metrics (raisedEvents) is the one the recorder NewKubeRecorder
+// builds counts into, so an event raised through that recorder shows there;
+// a recorder that counts nothing, a test's, gets a counter of its own (HBEP-8,
+// Raised events: Export).
+func TestRunExportsTheCounterItsRecorderCountsInto(t *testing.T) {
+	rec, stop, err := NewKubeRecorder(kubefake.NewSimpleClientset())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	exported := raisedEvents(rec)
+	if exported != rec.Counter || exported == nil {
+		t.Fatal("Run would export a counter other than the one its recorder counts into")
+	}
+	m := NewMetrics(nil, t.TempDir(), func(string) (uint64, error) { return 1 << 30, nil }, exported)
+	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "front", UID: "lease-uid-1"}}
+	rec.Event(lease, true, eventFailing, reasonUsageWriteFailed, "a message")
+	wantSample(t, scrape(t, m), 1, eventcount.Name, "controller", eventcount.ControllerFront, "reason", reasonUsageWriteFailed,
+		"action", eventFailing, "type", provider.EventKindWarning)
+	if raisedEvents(&MemoryRecorder{}) == nil {
+		t.Fatal("a recorder that counts nothing gets no counter")
 	}
 }

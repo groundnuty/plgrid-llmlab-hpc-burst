@@ -15,7 +15,6 @@ import (
 	kubefake "k8s.io/client-go/kubernetes/fake"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 )
 
 // capturingRecorder is an events.EventRecorder that keeps each call's
@@ -53,7 +52,7 @@ func TestKubeEventReasonIsTheCodeAlone(t *testing.T) {
 // for an event about a Lease to reach the API.
 func TestKubeRecorderRecordsAnEventAboutALease(t *testing.T) {
 	cs := kubefake.NewSimpleClientset()
-	rec, stop, err := NewKubeRecorder(cs, eventcount.New())
+	rec, stop, err := NewKubeRecorder(cs)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -23,7 +23,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/clock"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -78,10 +77,7 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	// One raised-events counter: the recorder counts into it, and the front's
-	// /metrics exports it (HBEP-8, Raised events).
-	events := eventcount.New()
-	rec, stopEvents, err := front.NewKubeRecorder(cs, events)
+	rec, stopEvents, err := front.NewKubeRecorder(cs)
 	if err != nil {
 		return err
 	}
@@ -89,9 +85,7 @@ func run(args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	o := options(cfg, agentapi.Host{StateDir: *stateDir, PortBase: *portBase}, *mode, dyn, cs, rec, log, *health)
-	o.Events = events
-	return front.Run(ctx, o)
+	return front.Run(ctx, options(cfg, agentapi.Host{StateDir: *stateDir, PortBase: *portBase}, *mode, dyn, cs, rec, log, *health))
 }
 
 // options are Run's inputs in production. They set no Transports, so Run
