@@ -7,6 +7,7 @@ package alpha
 
 import (
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -45,10 +46,10 @@ func TestTheArrivalPrompt(t *testing.T) {
 	}
 }
 
-// Two refusals give the engine's count as a line in the words; a line that is no tokenizer's is refused.
+// Three refusals give the engine's count as a line in the words; a count that is no line is refused.
 func TestCalibrate(t *testing.T) {
 	// The engine double's: a token a word, and 4 for the chat template and its roles.
-	l, err := Calibrate(1000, 1004, 2000, 2004)
+	l, err := Calibrate([2]int{1000, 1004}, [2]int{2000, 2004}, [2]int{4000, 4004})
 	if err != nil || l != (TokenLine{Per: 1, Fixed: 4}) {
 		t.Fatalf("Calibrate = %+v, %v", l, err)
 	}
@@ -57,12 +58,76 @@ func TestCalibrate(t *testing.T) {
 		t.Errorf("MaxWords(32768) = %d (%d tokens), want 32,763 (32,767)", w, l.Tokens(w))
 	}
 	// Two tokens a word and a 30-token template.
-	if l, err := Calibrate(1000, 2030, 2000, 4030); err != nil || l != (TokenLine{Per: 2, Fixed: 30}) || l.MaxWords(32768) != 16_368 {
+	if l, err := Calibrate([2]int{1000, 2030}, [2]int{2000, 4030}, [2]int{4000, 8030}); err != nil || l != (TokenLine{Per: 2, Fixed: 30}) || l.MaxWords(32768) != 16_368 {
 		t.Errorf("Calibrate(2 a word) = %+v (MaxWords %d), %v", l, l.MaxWords(32768), err)
 	}
-	for _, c := range [][4]int{{1000, 1004, 2000, 2500}, {1000, 1004, 1000, 1004}, {1000, 1004, 2000, 1004}, {1000, 900, 2000, 1900}, {2000, 2004, 1000, 1004}} {
-		if l, err := Calibrate(c[0], c[1], c[2], c[3]); err == nil {
-			t.Errorf("Calibrate%v = %+v, want an error", c, l)
+	for name, pts := range map[string][][2]int{
+		// A tokenizer that merges two words into one token every 3,000 words: the first two points are on a line
+		// of a token a word, the third is one under it.
+		"a count that bends after the first two": {{1000, 1004}, {2000, 2004}, {4000, 4003}},
+		"a third point one over the line":        {{1000, 1004}, {2000, 2004}, {4000, 4005}},
+		"two points only":                        {{1000, 1004}, {2000, 2004}},
+		"a fractional count a word":              {{1000, 1004}, {2000, 2500}, {4000, 3500}},
+		"the same words twice":                   {{1000, 1004}, {1000, 1004}, {4000, 4004}},
+		"a count that falls":                     {{1000, 1004}, {2000, 1004}, {4000, 4004}},
+		"fewer tokens than words":                {{1000, 900}, {2000, 1900}, {4000, 3900}},
+		"words that fall":                        {{2000, 2004}, {1000, 1004}, {4000, 4004}},
+		"a third prompt shorter than the second": {{1000, 1004}, {2000, 2004}, {1500, 1504}},
+	} {
+		if l, err := Calibrate(pts...); err == nil {
+			t.Errorf("%s: Calibrate%v = %+v, want an error", name, pts, l)
+		}
+	}
+}
+
+// engineCount is an engine's count of an ArrivalPrompt of words words, as its refusal states it: tokens a word,
+// a template's count, and one token less for every merge words (0: none).
+func engineCount(per, fixed, merge int) func(int) (int, error) {
+	return func(words int) (int, error) {
+		n := per*words + fixed
+		if merge > 0 {
+			n -= words / merge
+		}
+		return n, nil
+	}
+}
+
+// The large request is sized from the engine's own count, under the context, and the row fails closed on any
+// engine whose count is no line, on a refusal with no count, and on a context too small for a large body.
+func TestArrivalSize(t *testing.T) {
+	var asked []int
+	count := engineCount(1, 4, 0)
+	logged := func(w int) (int, error) { asked = append(asked, w); return count(w) }
+	body, expected, err := ArrivalSize(logged, "m", 400_000, 32768)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(asked, []int{1000, 2000, 4000}) {
+		t.Errorf("the calibration asked for %v words, want 1,000, 2,000 and 4,000", asked)
+	}
+	// 32,763 words, 32,767 tokens, one under the context; the body is "hello" then " hello" 32,762 times in the
+	// 74 bytes of JSON around it with max_tokens 32768: 196,577 + 74 = 196,651 bytes.
+	if words := len(strings.Fields(strings.Trim(strings.SplitN(strings.SplitN(body, `"content":"`, 2)[1], `"`, 2)[0], " "))); words != 32_763 || expected != 32_767 || len(body) != 196_651 {
+		t.Errorf("ArrivalSize = %d words, %d bytes, %d tokens expected; want 32,763, 196,651, 32,767", words, len(body), expected)
+	}
+	// A body that fits whole: its words, not the context, bound it.
+	if body, expected, err := ArrivalSize(engineCount(1, 4, 0), "m", 131_072, 32768); err != nil || len(body) < 131_072 || len(body) > 131_078 || expected != WordsForBytes("m", 131_072, 32768)+4 {
+		t.Errorf("a 128 KiB body: %d bytes, %d expected, %v", len(body), expected, err)
+	}
+	for name, c := range map[string]struct {
+		count func(int) (int, error)
+		mml   int
+		want  string
+	}{
+		"an engine whose count bends every 3,000 words": {engineCount(1, 4, 3000), 32768, "not linear in the words"},
+		"an engine whose count bends every 1,500 words": {engineCount(1, 4, 1500), 32768, "not a whole number of tokens a word"},
+		"a refusal that states no count": {func(w int) (int, error) {
+			return 0, errors.New("a prompt of 1000 words was answered 200, not refused with its input tokens stated")
+		}, 32768, "not refused with its input tokens stated"},
+		"a context too small for a large body": {engineCount(1, 4, 0), 8192, "under the 100000 bytes of a large body"},
+	} {
+		if body, n, err := ArrivalSize(c.count, "m", 400_000, c.mml); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %d bytes, %d expected, err %v; want an error naming %q", name, len(body), n, err, c.want)
 		}
 	}
 }

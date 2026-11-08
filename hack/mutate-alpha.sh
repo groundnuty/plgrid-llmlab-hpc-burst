@@ -320,6 +320,17 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'liveobs.go@@	return max((n-fixed+1+len(" hello")-1)/len(" hello"), 1)@@	return max((n-fixed)/len(" hello"), 1)'
   'liveobs.go@@	if w2 <= w1 || n2 <= n1 || (n2-n1)%(w2-w1) != 0 {@@	if w2 <= w1 || n2 <= n1 {'
   'liveobs.go@@	if l.Fixed < 0 {@@	if false {'
+  'liveobs.go@@		if p[1] != l.Tokens(p[0]) {@@		if false {'
+  'liveobs.go@@	if len(pts) < 3 {@@	if len(pts) < 2 {'
+  'liveobs.go@@		if p[0] <= prev {@@		if false {'
+  'liveobs.go@@var CalibrationWords = []int{1000, 2000, 4000}@@var CalibrationWords = []int{1000, 2000}'
+  'liveobs.go@@	words := min(WordsForBytes(model, bytes, maxModelLen), line.MaxWords(maxModelLen))@@	words := WordsForBytes(model, bytes, maxModelLen)'
+  'liveobs.go@@	if len(body) < MinLargeBody {@@	if false {'
+  'liveobs.go@@	return body, line.Tokens(words), nil@@	return body, words, nil'
+  'liveobs.go@@		n, err := count(w)
+		if err != nil {
+			return "", 0, err
+		}@@		n, _ := count(w)'
   'liveobs.go@@func (l TokenLine) MaxWords(maxModelLen int) int { return (maxModelLen - 1 - l.Fixed) / l.Per }@@func (l TokenLine) MaxWords(maxModelLen int) int { return (maxModelLen - l.Fixed) / l.Per }'
   'verdict.go@@		if r.BodyBytes < MinLargeBody {@@		if true {'
   'liveobs.go@@!strings.Contains(e.Error.Message, "context length")@@false'

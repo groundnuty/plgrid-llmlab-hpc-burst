@@ -150,7 +150,7 @@ func WordsForBytes(model string, n, maxTokens int) int {
 
 // TokenLine is a prompt's input tokens as its engine counts them, as a
 // function of its words: Per tokens a word, and Fixed more, the chat
-// template's. Calibrate finds it from two refusals of prompts of known words.
+// template's. Calibrate finds it from refusals of prompts of known words.
 type TokenLine struct{ Per, Fixed int }
 
 // Tokens is the input tokens of a prompt of words words.
@@ -161,10 +161,21 @@ func (l TokenLine) Tokens(words int) int { return l.Per*words + l.Fixed }
 // the prompt's whole count.
 func (l TokenLine) MaxWords(maxModelLen int) int { return (maxModelLen - 1 - l.Fixed) / l.Per }
 
-// Calibrate is the TokenLine through two prompts of w1 and w2 words whose
-// refusals stated n1 and n2 input tokens. A line that is not whole tokens a
-// word, or whose template count is negative, is no tokenizer's: an error.
-func Calibrate(w1, n1, w2, n2 int) (TokenLine, error) {
+// CalibrationWords are the prompts, in words, whose refusals give the
+// engine's TokenLine: two fix the line, and the third must lie on it.
+var CalibrationWords = []int{1000, 2000, 4000}
+
+// Calibrate is the TokenLine through prompts of known words (each point is
+// {words, input tokens stated}, words rising). The first two fix it: whole
+// tokens a word, and a template count not negative. Every further point must
+// lie on it exactly: an engine whose count bends (a merge every so many
+// words) gives no line, and no count of a large prompt can be expected from
+// it. Fewer than three points cannot show a line at all.
+func Calibrate(pts ...[2]int) (TokenLine, error) {
+	if len(pts) < 3 {
+		return TokenLine{}, fmt.Errorf("%d calibration prompts: a line needs a third on it", len(pts))
+	}
+	w1, n1, w2, n2 := pts[0][0], pts[0][1], pts[1][0], pts[1][1]
 	if w2 <= w1 || n2 <= n1 || (n2-n1)%(w2-w1) != 0 {
 		return TokenLine{}, fmt.Errorf("prompts of %d and %d words were counted %d and %d input tokens: not a whole number of tokens a word", w1, w2, n1, n2)
 	}
@@ -173,7 +184,46 @@ func Calibrate(w1, n1, w2, n2 int) (TokenLine, error) {
 	if l.Fixed < 0 {
 		return TokenLine{}, fmt.Errorf("prompts of %d and %d words were counted %d and %d input tokens: fewer than their words", w1, w2, n1, n2)
 	}
+	prev := w2
+	for _, p := range pts[2:] {
+		if p[0] <= prev {
+			return TokenLine{}, fmt.Errorf("calibration prompts of %d then %d words: the words must rise", prev, p[0])
+		}
+		if p[1] != l.Tokens(p[0]) {
+			return TokenLine{}, fmt.Errorf("a prompt of %d words was counted %d input tokens, off the line of %d tokens a word and %d more (%d): the engine's count is not linear in the words", p[0], p[1], l.Per, l.Fixed, l.Tokens(p[0]))
+		}
+		prev = p[0]
+	}
 	return l, nil
+}
+
+// ArrivalSize is the hour's large request and its prompt's own input tokens
+// (the science agent's ruling (4) on PR 255). count sends a prompt of the
+// given words (ArrivalPrompt) and returns the input tokens its refusal stated;
+// the CalibrationWords prompts give the engine's TokenLine (Calibrate). The
+// large prompt holds as many words as bytes bytes take, but fewer tokens than
+// maxModelLen, so that the engine reads and states its whole count. A refusal
+// with no count, a count off the line, or a context that cannot hold a large
+// body (MinLargeBody) under it is an error: the row fails closed.
+func ArrivalSize(count func(words int) (int, error), model string, bytes, maxModelLen int) (body string, expected int, err error) {
+	var pts [][2]int
+	for _, w := range CalibrationWords {
+		n, err := count(w)
+		if err != nil {
+			return "", 0, err
+		}
+		pts = append(pts, [2]int{w, n})
+	}
+	line, err := Calibrate(pts...)
+	if err != nil {
+		return "", 0, err
+	}
+	words := min(WordsForBytes(model, bytes, maxModelLen), line.MaxWords(maxModelLen))
+	body = ArrivalPrompt(model, words, maxModelLen)
+	if len(body) < MinLargeBody {
+		return "", 0, fmt.Errorf("the deployment's max-model-len %d holds a prompt of %d bytes at most (%d tokens a word, %d more), under the %d bytes of a large body", maxModelLen, len(body), line.Per, line.Fixed, MinLargeBody)
+	}
+	return body, line.Tokens(words), nil
 }
 
 // inputTokensRE are the forms in which an engine's context-length refusal

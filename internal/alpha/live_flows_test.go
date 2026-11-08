@@ -440,14 +440,9 @@ type sentLarge struct {
 	bytes, expected int
 }
 
-// arrivalBody is the hour's large request (the science agent's ruling (4) on
-// PR 255) and its prompt's own input tokens. Two prompts of 1,000 and 2,000
-// words, each refused for its length, give the engine's count as a function of
-// the words (Calibrate). The body then holds as many words as tm.UploadBody
-// bytes take, but fewer tokens than the deployment's max-model-len, so that
-// the engine reads and states its whole count; a context that cannot hold a
-// large body (MinLargeBody) under it fails the row, as does a refusal that
-// states no count.
+// arrivalBody is the hour's large request and its prompt's own input tokens
+// (ArrivalSize), with the engine's count read from its refusals through the
+// front, sized under the deployment's max-model-len.
 func (r *liveRun) arrivalBody(key string) (body string, expected int, err error) {
 	mml, err := r.maxModelLen()
 	if err != nil {
@@ -461,24 +456,7 @@ func (r *liveRun) arrivalBody(key string) (body string, expected int, err error)
 		}
 		return n, nil
 	}
-	n1, err := count(1000)
-	if err != nil {
-		return "", 0, err
-	}
-	n2, err := count(2000)
-	if err != nil {
-		return "", 0, err
-	}
-	line, err := Calibrate(1000, n1, 2000, n2)
-	if err != nil {
-		return "", 0, err
-	}
-	words := min(WordsForBytes(r.fc.Model, r.tm.UploadBody, mml), line.MaxWords(mml))
-	body = ArrivalPrompt(r.fc.Model, words, mml)
-	if len(body) < MinLargeBody {
-		return "", 0, fmt.Errorf("the deployment's max-model-len %d holds a prompt of %d bytes at most (%d tokens a word, %d more), under the %d bytes of a large body", mml, len(body), line.Per, line.Fixed, MinLargeBody)
-	}
-	return body, line.Tokens(words), nil
+	return ArrivalSize(count, r.fc.Model, r.tm.UploadBody, mml)
 }
 
 // largeRequests is the hour's upload direction (issue #224), with no
