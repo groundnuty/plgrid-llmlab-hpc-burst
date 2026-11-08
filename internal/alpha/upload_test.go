@@ -265,6 +265,16 @@ func TestALiveHourIsJudgedWithoutTheUploadTimingAndADryOneWithIt(t *testing.T) {
 	if f := VerifyTunnelHour(r, nowin, jobs); !slices.Contains(f, "no request of 0.1 MB or more was in flight while the 16 streams were open") {
 		t.Errorf("a large request with no window passed: %v", f)
 	}
+	// Live, but the client's window ends before it starts, its start inside the burst: not a window, not counted.
+	backwards := scaledLiveHour(r)
+	for i := range backwards.Requests {
+		if backwards.Requests[i].BodyBytes >= MinLargeBody {
+			backwards.Requests[i].SendEnd = backwards.Requests[i].SendStart.Add(-time.Second)
+		}
+	}
+	if f := VerifyTunnelHour(r, backwards, jobs); !slices.Contains(f, "no request of 0.1 MB or more was in flight while the 16 streams were open") {
+		t.Errorf("a large request whose window ends before it starts passed: %v", f)
+	}
 	// Live, with an upload rate posted after all: it is judged like any rate.
 	posted := scaledLiveHour(r)
 	posted.Rates = append(posted.Rates, PathRate{Direction: DirUpload, OK: true, AskedSeconds: 10, TimedSeconds: 10, Bytes: 1, UnderLoad: true})
