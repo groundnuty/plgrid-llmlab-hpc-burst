@@ -59,6 +59,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/lifecycle"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
@@ -146,8 +147,10 @@ func checkCredentialsDir(dir string) error {
 // without leader election that serves the frpsplugin Handler on
 // host.FrpsPluginAddr() (base+8) with an Index fed from mgr's cache of
 // Allocations and Instances and the credential files, and adds the leader
-// component that writes each Instance's TunnelConnected condition.
-var extraRunnables = []func(mgr manager.Manager, host agentapi.Host, backend agentapi.Backend, listen func(addr string) (net.Listener, error)) (manager.Runnable, error){addTunnel}
+// component that writes each Instance's TunnelConnected condition. events is
+// the copy's raised-events counter, which a component that raises events
+// counts into through its recorder (HBEP-8, Raised events).
+var extraRunnables = []func(mgr manager.Manager, host agentapi.Host, backend agentapi.Backend, listen func(addr string) (net.Listener, error), events *eventcount.Counter) (manager.Runnable, error){addTunnel}
 
 func run(ctx context.Context, f flags, d deps) error {
 	// The agent endpoint and frps's plugin are bound through ls (components.go),
@@ -174,6 +177,12 @@ func run(ctx context.Context, f flags, d deps) error {
 	}
 	opts := managerOptions(f, cfg, os.Getenv)
 	opts.Registry = d.registry
+	// One raised-events counter for this copy: the lifecycle controller, its
+	// tunnel-state reader and the Provider managers count into it, and the
+	// lifecycle controller's serving collector exports it (HBEP-8, Raised
+	// events).
+	events := eventcount.New()
+	opts.Events = events
 	if opts.HubEndpoint != "" {
 		if err := agentapi.CheckHubEndpoint(opts.HubEndpoint); err != nil {
 			return fmt.Errorf("%s: %w", hubEndpointEnv, err)
@@ -183,12 +192,12 @@ func run(ctx context.Context, f flags, d deps) error {
 	if err != nil {
 		return err
 	}
-	w := wiring{cfg: cfg, host: f.host, scheme: scheme, front: front, hubEndpoint: opts.HubEndpoint, newPlatform: d.newPlatform, listen: ls.Listen, log: ctrl.Log.WithName("hpcburst-controller").WithValues("portBase", f.host.PortBase)}
+	w := wiring{cfg: cfg, host: f.host, scheme: scheme, front: front, hubEndpoint: opts.HubEndpoint, newPlatform: d.newPlatform, listen: ls.Listen, events: events, log: ctrl.Log.WithName("hpcburst-controller").WithValues("portBase", f.host.PortBase)}
 	if err := mount(mgr, w, backend); err != nil {
 		return err
 	}
 	for _, add := range extraRunnables {
-		r, err := add(mgr, f.host, backend, ls.Listen)
+		r, err := add(mgr, f.host, backend, ls.Listen, events)
 		if err != nil {
 			return err
 		}

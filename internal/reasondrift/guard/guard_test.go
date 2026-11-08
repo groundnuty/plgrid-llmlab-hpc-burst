@@ -1,6 +1,7 @@
 package guard_test
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,7 +18,7 @@ import (
 
 // requiredPackages are the packages whose syntax the scan must have loaded.
 var requiredPackages = []string{
-	"api/v1alpha1", "cmd/hpcburst-controller", "internal/front", "internal/lifecycle",
+	"api/v1alpha1", "cmd/hpcburst-controller", "internal/eventcount", "internal/front", "internal/lifecycle",
 	"internal/managed", "internal/providerctl", "pkg/provider", "pkg/provider/fake",
 }
 
@@ -397,6 +398,105 @@ func (e *external) mutantDirect(a *v1alpha1.Allocation) {
 func (e *external) mutantDirectStruct(a *v1alpha1.Allocation) { e.s.o.Recorder.Event(a, event.Event{}) }
 `
 
+// mutantLifecycleRecorders is a file added to internal/lifecycle: recorders
+// built and not wrapped to count their events, each in a function of its own
+// (#256), and three that are wrapped, which the check must accept. Each of the
+// others is one RecorderNotCounted problem, in the function that names it:
+// among them a helper that hands back a Manager's recorder through an
+// interface of the package's own, and client-go's fake recorder.
+const mutantLifecycleRecorders = `package lifecycle
+
+import (
+	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/cluster"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
+)
+
+type mutantHolder struct{ rec events.EventRecorder }
+
+func mutantRecorderInField(mgr manager.Manager) mutantHolder {
+	return mutantHolder{rec: mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle)}
+}
+
+func mutantRecorderAsValue(mgr manager.Manager) func(string) events.EventRecorder {
+	return mgr.GetEventRecorder
+}
+
+func mutantRecorderUnused(cl cluster.Cluster) {
+	_ = cl.GetEventRecorderFor("mutant")
+}
+
+func mutantRecorderCountedAndNot(mgr manager.Manager, c *eventcount.Counter) (events.EventRecorder, events.EventRecorder) {
+	r := mgr.GetEventRecorder("mutant")
+	return r, eventcount.Events(r, c, eventcount.ControllerLifecycle)
+}
+
+func mutantIdentity(r events.EventRecorder) events.EventRecorder { return r }
+
+func mutantRecorderToAnother(mgr manager.Manager) events.EventRecorder {
+	return mutantIdentity(mgr.GetEventRecorder("mutant"))
+}
+
+func mutantRecorderDeferred(mgr manager.Manager) {
+	defer mgr.GetEventRecorder("mutant")
+}
+
+func mutantRecorderCounted(mgr manager.Manager, c *eventcount.Counter) events.EventRecorder {
+	r := mgr.GetEventRecorder("mutant")
+	return eventcount.Events(r, c, eventcount.ControllerLifecycle)
+}
+
+func mutantLegacyCounted(cl cluster.Cluster, c *eventcount.Counter) record.EventRecorder {
+	return eventcount.Legacy(cl.GetEventRecorderFor("mutant"), c, eventcount.ControllerLifecycle)
+}
+
+type mutantRecorderSource interface {
+	GetEventRecorder(name string) events.EventRecorder
+}
+
+func mutantThroughOwnInterface(src mutantRecorderSource) events.EventRecorder {
+	return src.GetEventRecorder("mutant")
+}
+
+func mutantOwnInterfaceCounted(src mutantRecorderSource, c *eventcount.Counter) events.EventRecorder {
+	return eventcount.Events(src.GetEventRecorder("mutant"), c, eventcount.ControllerLifecycle)
+}
+
+func mutantFakeRecorder() record.EventRecorder { return record.NewFakeRecorder(1) }
+`
+
+// mutantFrontRecorders is a file added to internal/front: the recorders of
+// client-go's two event broadcasters built and not wrapped, and the method
+// that builds one taken as a value (#256). Each is one RecorderNotCounted
+// problem, in the function that names it.
+const mutantFrontRecorders = `package front
+
+import (
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/tools/record"
+)
+
+type mutantFrontHolder struct{ rec events.EventRecorder }
+
+func mutantBroadcasterRecorderInField(b events.EventBroadcaster, s *runtime.Scheme) mutantFrontHolder {
+	return mutantFrontHolder{rec: b.NewRecorder(s, "mutant")}
+}
+
+func mutantLegacyBroadcasterRecorder(b record.EventBroadcaster, s *runtime.Scheme) record.EventRecorder {
+	return b.NewRecorder(s, corev1.EventSource{Component: "mutant"})
+}
+
+func mutantBroadcasterAsValue(b events.EventBroadcaster) func(*runtime.Scheme, string) events.EventRecorderLogger {
+	return b.NewRecorder
+}
+`
+
 // replaceOnce returns the file at rel (under the root) with the one occurrence
 // of from replaced by to.
 func replaceOnce(t *testing.T, rel, from, to string) []byte {
@@ -405,6 +505,13 @@ func replaceOnce(t *testing.T, rel, from, to string) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return replaceIn(t, src, rel, from, to)
+}
+
+// replaceIn is replaceOnce on source already read, so that one file takes
+// several changes.
+func replaceIn(t *testing.T, src []byte, rel, from, to string) []byte {
+	t.Helper()
 	if n := strings.Count(string(src), from); n != 1 {
 		t.Fatalf("%s has %d occurrences of %q, want 1", rel, n, from)
 	}
@@ -434,6 +541,22 @@ func mutantOverlay(t *testing.T) map[string][]byte {
 		// B6: the Provider controller raises a reason of its own, and hands its
 		// recorder an event no constructor built.
 		filepath.Join(root, "internal/providerctl/zz_mutant_overlay.go"): []byte(mutantProviderctl),
+		// #256: the reconciler's recorder is built without its counting wrapper
+		// (the wrapper dropped from the one call), and recorders built and not
+		// wrapped in two more packages.
+		filepath.Join(root, "internal/lifecycle/manager.go"): replaceOnce(t, "internal/lifecycle/manager.go",
+			"eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle), counted, eventcount.ControllerLifecycle)",
+			"mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle)"),
+		filepath.Join(root, "internal/lifecycle/zz_mutant_recorders.go"): []byte(mutantLifecycleRecorders),
+		filepath.Join(root, "internal/front/zz_mutant_recorders.go"):     []byte(mutantFrontRecorders),
+		// #256: the counting wrappers' calls of the recorders they wrap stop
+		// passing on the type (events.k8s.io) and the reason (core/v1).
+		filepath.Join(root, "internal/eventcount/counter.go"): replaceIn(t,
+			replaceOnce(t, "internal/eventcount/counter.go",
+				"r.inner.Eventf(regarding, related, eventtype, reason, action, note, args...)",
+				`r.inner.Eventf(regarding, related, "Warning", reason, action, note, args...)`),
+			"internal/eventcount/counter.go",
+			"r.inner.Event(object, eventtype, reason, message)", "r.inner.Event(object, eventtype, message, reason)"),
 	}
 }
 
@@ -463,6 +586,27 @@ func TestMutantsAreCaught(t *testing.T) {
 		keyF(reasondrift.WrapperDoesNotForward, "", lc, "KubeRecorder.Event"),
 		// B7: a call through a recorder the scan does not know.
 		keyF(reasondrift.UnknownRecorder, "", lc, "mutantRelay"),
+		// #256: a recorder built without the counting wrapper is found wherever it
+		// is: the reconciler's, a field, a method value, an unused value, a value
+		// returned beside its wrapped copy, one handed to another function, one
+		// deferred, one handed back through an interface of the package's own,
+		// client-go's fake recorder, and the two broadcasters' recorders and a
+		// method value in the front. A wrapper of the counting wrapper's that
+		// stops passing on its type or its reason is found too.
+		keyF(reasondrift.RecorderNotCounted, "", lc, "NewManager"),
+		keyF(reasondrift.RecorderNotCounted, "", lc, "mutantRecorderInField"),
+		keyF(reasondrift.RecorderNotCounted, "", lc, "mutantRecorderAsValue"),
+		keyF(reasondrift.RecorderNotCounted, "", lc, "mutantRecorderUnused"),
+		keyF(reasondrift.RecorderNotCounted, "", lc, "mutantRecorderCountedAndNot"),
+		keyF(reasondrift.RecorderNotCounted, "", lc, "mutantRecorderToAnother"),
+		keyF(reasondrift.RecorderNotCounted, "", lc, "mutantRecorderDeferred"),
+		keyF(reasondrift.RecorderNotCounted, "", lc, "mutantThroughOwnInterface"),
+		keyF(reasondrift.RecorderNotCounted, "", lc, "mutantFakeRecorder"),
+		keyF(reasondrift.RecorderNotCounted, "", "internal/front", "mutantBroadcasterRecorderInField"),
+		keyF(reasondrift.RecorderNotCounted, "", "internal/front", "mutantLegacyBroadcasterRecorder"),
+		keyF(reasondrift.RecorderNotCounted, "", "internal/front", "mutantBroadcasterAsValue"),
+		keyF(reasondrift.WrapperDoesNotForward, "", "internal/eventcount", "eventsRecorder.Eventf"),
+		keyF(reasondrift.WrapperDoesNotForward, "", "internal/eventcount", "legacyRecorder.Event"),
 		// The managed controller: a built reason is unresolved, and a constant the
 		// bullet does not list is one more it can raise.
 		keyF(reasondrift.ManagedUnresolved, "", "internal/managed", "mutantBuiltReason"),
@@ -509,6 +653,42 @@ func TestMutantsAreCaught(t *testing.T) {
 	slices.Sort(want)
 	if !slices.Equal(got, want) || n != 1 {
 		t.Errorf("with the changes: %v and %d compiler-made, want %v and 1", got, n, want)
+	}
+
+	// #256: the keys above hold one entry per function, so the problems are
+	// counted too: exactly one for each of the functions, none anywhere else,
+	// and the two wrapped recorders of the overlay are seen and accepted.
+	wantUncounted := map[string]int{
+		lc + ".NewManager":                                1,
+		lc + ".mutantRecorderInField":                     1,
+		lc + ".mutantRecorderAsValue":                     1,
+		lc + ".mutantRecorderUnused":                      1,
+		lc + ".mutantRecorderCountedAndNot":               1,
+		lc + ".mutantRecorderToAnother":                   1,
+		lc + ".mutantRecorderDeferred":                    1,
+		lc + ".mutantThroughOwnInterface":                 1,
+		lc + ".mutantFakeRecorder":                        1,
+		"internal/front.mutantBroadcasterRecorderInField": 1,
+		"internal/front.mutantLegacyBroadcasterRecorder":  1,
+		"internal/front.mutantBroadcasterAsValue":         1,
+	}
+	gotUncounted := map[string]int{}
+	for _, p := range code.Problems {
+		if p.Kind == reasondrift.RecorderNotCounted {
+			gotUncounted[p.Package+"."+p.Func]++
+		}
+	}
+	if !maps.Equal(gotUncounted, wantUncounted) {
+		t.Errorf("recorders built and not counted: %v, want %v", gotUncounted, wantUncounted)
+	}
+	wrapped := map[string]string{}
+	for _, r := range code.Recorders {
+		wrapped[r.Package+"."+r.Func] = counterName(r)
+	}
+	for fn, want := range map[string]string{lc + ".mutantRecorderCounted": "Events", lc + ".mutantLegacyCounted": "Legacy", lc + ".mutantOwnInterfaceCounted": "Events"} {
+		if wrapped[fn] != want {
+			t.Errorf("%s: wrapped by %q, want %q: the check must accept a wrapped recorder in the changed tree too", fn, wrapped[fn], want)
+		}
 	}
 
 	// With rows for the first two, the code-only ones go, and a row for an event

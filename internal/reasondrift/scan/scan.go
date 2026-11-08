@@ -25,6 +25,13 @@
 // recorder call, or a listed wrapper at the parameter that carries the event;
 // otherwise the reasons are reported as unproven, and a recorder or wrapper
 // that receives an event no constructor built is a problem.
+//
+// Every recorder the module builds must be wrapped to count its events (#256,
+// HBEP-8, Raised events): the value of a call of a builder (a manager's
+// GetEventRecorder and GetEventRecorderFor, a broadcaster's NewRecorder) must
+// be the first argument of eventcount.Events or eventcount.Legacy and go
+// nowhere else. A builder used in any other way, or taken as a value, is a
+// RecorderNotCounted problem, and each site accepted is listed in Code.Recorders.
 package scan
 
 import (
@@ -60,6 +67,12 @@ type Options struct {
 	// argument is the condition, as {mod}-templated full names; the default is
 	// meta.SetStatusCondition.
 	ConditionSetters []string
+	// Builders are the methods that build an event recorder, which
+	// collectRecorders checks (the default is defaultBuilders).
+	Builders []Builder
+	// Counters are the functions whose first argument a recorder must go to,
+	// as {mod}-templated full names (the default is defaultCounters).
+	Counters []string
 	// Require lists package directories that must be loaded with their
 	// syntax, so a scan that lost one fails instead of finding fewer sites.
 	Require []string
@@ -191,6 +204,20 @@ func Scan(o Options) (*reasondrift.Code, error) {
 	}
 	s.index()
 	s.collect(code)
+	s.builders = o.Builders
+	if len(s.builders) == 0 {
+		s.builders = defaultBuilders
+	}
+	s.counters = map[string]bool{}
+	counters := o.Counters
+	if len(counters) == 0 {
+		counters = defaultCounters
+	}
+	for _, c := range counters {
+		s.counters[strings.ReplaceAll(c, "{mod}", mod)] = true
+	}
+	s.indexImplementers(prog)
+	s.collectRecorders(code)
 	setters := o.ConditionSetters
 	if len(setters) == 0 {
 		setters = defaultSetters

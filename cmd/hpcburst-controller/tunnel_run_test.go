@@ -44,10 +44,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/frpsplugin"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
 // What HBEP-6 says the condition is, as literals: the test does not borrow them from the code.
@@ -197,6 +199,9 @@ type tunnelRig struct {
 	// tried is every block the rig left for a fresh one, in order: a fresh block shares no port with
 	// any of them, not only with the one it replaces.
 	tried []flags
+	// reg is the metrics registry of the copy start last ran, where its serving collector exports
+	// the copy's raised-events counter.
+	reg *prometheus.Registry
 }
 
 func newTunnelRig(t *testing.T) *tunnelRig {
@@ -669,7 +674,34 @@ func (r *tunnelRig) pluginRefusesLogin(token string) bool {
 // are registered once per registry, and a test that runs two copies in one process (one after the
 // other, as the restart does) would fail on the second with controller-runtime's.
 func (r *tunnelRig) start() *binary {
-	return launchBinary(r.t, r.f, deps{providerScheme: providerScheme, registry: prometheus.NewRegistry()})
+	r.reg = prometheus.NewRegistry()
+	return launchBinary(r.t, r.f, deps{providerScheme: providerScheme, registry: r.reg})
+}
+
+// raised reads one series of the raised-events counter from the registry of the copy start last
+// ran, as a scrape would; ok is false when the series is absent.
+func (r *tunnelRig) raised(k eventcount.Key) (float64, bool) {
+	r.t.Helper()
+	fams, err := r.reg.Gather()
+	if err != nil {
+		r.t.Fatalf("gather the copy's metrics: %v", err)
+	}
+	for _, f := range fams {
+		if f.GetName() != eventcount.Name {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			got := map[string]string{}
+			for _, l := range m.GetLabel() {
+				got[l.GetName()] = l.GetValue()
+			}
+			if got[eventcount.LabelController] == k.Controller && got[eventcount.LabelReason] == k.Reason &&
+				got[eventcount.LabelAction] == k.Action && got[eventcount.LabelType] == k.Type {
+				return m.GetCounter().GetValue(), true
+			}
+		}
+	}
+	return 0, false
 }
 
 // TestTunnelWithRealFrpsAndFrpc is the path end to end: what the plugin refuses, what each state of
@@ -830,6 +862,14 @@ func TestTunnelWithRealFrpsAndFrpc(t *testing.T) {
 		if want := "degraded Warning Allocation al-a hpcburst-lifecycle"; got != want {
 			t.Fatalf("a TunnelOrphaned event is %q, want %q (action, type, regarding, reporting controller)", got, want)
 		}
+	}
+	// The tunnel-state reader counts into the copy's own counter, the one its serving collector
+	// exports (HBEP-8, Raised events): an event the API holds was counted before the recorder's
+	// queue, so the series reads at least 1 now.
+	orphaned := eventcount.Key{Controller: eventcount.ControllerLifecycle, Reason: v1alpha1.EventReasonTunnelOrphaned,
+		Action: "degraded", Type: provider.EventKindWarning}
+	if n, ok := r.raised(orphaned); !ok || n < 1 {
+		t.Fatalf("%s = %g (present %v) on the copy's registry while the API holds the event, want at least 1", orphaned, n, ok)
 	}
 
 	// frps stops while a1 is True: Unknown, never False, and no write at all while it stays down.

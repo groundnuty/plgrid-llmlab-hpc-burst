@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -449,4 +450,113 @@ func TestAMissingRequiredPackageFails(t *testing.T) {
 func readFile(path string) (string, error) {
 	b, err := os.ReadFile(path)
 	return string(b), err
+}
+
+// scanRecorders scans the synthetic module with recorder builders named after
+// its own package rb, and counters that include two the default list does not
+// have, so that the tests reach what the real builders (controller-runtime's
+// manager, client-go's broadcasters) and counters (eventcount.Events and
+// Legacy) do through the defaults.
+func scanRecorders(t *testing.T) *reasondrift.Code {
+	t.Helper()
+	return scanSynthetic(t, nil, func(o *Options) {
+		o.Builders = []Builder{
+			{Name: "GetEventRecorder", Pkgs: []string{"{mod}/internal/rb"}},
+			{Name: "NewRecorder", Pkgs: []string{"{mod}/internal/rb"}},
+		}
+		o.Counters = []string{
+			"{mod}/internal/eventcount.Events", "{mod}/internal/eventcount.Legacy",
+			"{mod}/internal/eventcount.Behind", "{mod}/internal/eventcount.Twice",
+		}
+	})
+}
+
+// TestARecorderMustBeWrappedToCount: the expectations are written out from
+// testdata/mod/internal/recorders/recorders.go. A recorder is accepted when its
+// value is the first argument of a counter, through a variable and through
+// the conversion of a Logger into a Recorder, and refused in every other use.
+func TestARecorderMustBeWrappedToCount(t *testing.T) {
+	code := scanRecorders(t)
+	const pkg = "internal/recorders"
+	wrapped := map[string]string{}
+	for _, r := range code.Recorders {
+		if r.Package != pkg {
+			t.Errorf("a recorder outside %s: %+v", pkg, r)
+		}
+		wrapped[r.Func] = r.Counter
+	}
+	const events, legacy = "github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount.Events", "github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount.Legacy"
+	if want := map[string]string{
+		"countedOnManager":               events,
+		"countedLegacy":                  legacy,
+		"countedThroughVariable":         events,
+		"countedThroughMethodExpression": events,
+		"countedThroughOwnInterface":     events,
+	}; !maps.Equal(wrapped, want) {
+		t.Errorf("recorders accepted: %v, want %v", wrapped, want)
+	}
+
+	// Each of the others is one problem, in the function that holds it, and
+	// says why. The method that is only named (a value, an expression) is a
+	// problem where it is named, not in the wrapper the compiler makes.
+	refused := map[string]string{
+		"inField":        "used by a Store instruction",
+		"returned":       "used by a Return instruction",
+		"unused":         "its value is not used",
+		"goroutine":      "started with go or defer",
+		"deferred":       "started with go or defer",
+		"passedOn":       "passed to github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/recorders.identity, which is not a counter",
+		"countedAndKept": "used by a Return instruction",
+		"twice":          "at arguments 0 and 1",
+		"behind":         "at argument 1, not 0",
+		// A variable a closure captures lives in a cell the closure shares.
+		"captured":            "used by a Store instruction",
+		"methodValue":         "is taken as a value",
+		"concreteMethodValue": "is taken as a value",
+		"methodExpression":    "is taken as a value",
+		// Through an interface of the package's own that rb.Manager
+		// implements, and one only a struct that embeds a Manager implements.
+		"ownInterfaceReturned":    "used by a Return instruction",
+		"ownInterfaceMethodValue": "is taken as a value",
+		"throughEmbeddingOnly":    "used by a Return instruction",
+	}
+	got := map[string][]string{}
+	for _, p := range problemsOf(code, reasondrift.RecorderNotCounted) {
+		if p.Package != pkg {
+			t.Errorf("a problem outside %s: %+v", pkg, p)
+		}
+		got[p.Func] = append(got[p.Func], p.Detail)
+	}
+	for fn, why := range refused {
+		if len(got[fn]) != 1 || !strings.Contains(got[fn][0], why) {
+			t.Errorf("%s: problems %q, want one that says %q", fn, got[fn], why)
+		}
+	}
+	for fn := range got {
+		if _, ok := refused[fn]; !ok {
+			t.Errorf("%s is refused, and the test does not expect it: %q", fn, got[fn])
+		}
+	}
+	// No other problem of the kinds this module's recorders can cause: the two
+	// that are no builder (a method of another package, a function) raise
+	// nothing, and the compiler's wrappers of the method values add none of
+	// their own. (The event-not-constructed ones are the lifecycle package's,
+	// which TestResolvesEachWayAReasonArrives lists.)
+	for _, p := range code.Problems {
+		if p.Kind != reasondrift.RecorderNotCounted && p.Kind != reasondrift.EventNotConstructed {
+			t.Errorf("problem %+v, want only the recorders'", p)
+		}
+	}
+}
+
+// TestTheDefaultBuildersAreThoseOfThisModule: with no builders named, the scan
+// looks for controller-runtime's and client-go's, which the synthetic module
+// has none of, so it finds none of its recorders; and a builder is matched by
+// its package, so the names the synthetic module's own package uses are no
+// builders to it.
+func TestTheDefaultBuildersAreThoseOfThisModule(t *testing.T) {
+	code := scanSynthetic(t, nil, nil)
+	if len(code.Recorders) != 0 || len(problemsOf(code, reasondrift.RecorderNotCounted)) != 0 {
+		t.Errorf("recorders %+v, problems %+v: the default builders matched the synthetic module's", code.Recorders, code.Problems)
+	}
 }

@@ -20,6 +20,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/managed"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/managed/llmlabtest"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
@@ -105,7 +106,7 @@ func startManaged(t *testing.T, name, key string, gw *llmlabtest.Server, clock *
 	}
 	if clock == nil {
 		// The supervisor's hook, with the real clock.
-		if err := managed.Setup(mgr, name); err != nil {
+		if err := managed.Setup(eventcount.New())(mgr, name); err != nil {
 			t.Fatal(err)
 		}
 	} else {
@@ -335,7 +336,7 @@ func TestTwoManagedProvidersInOneProcess(t *testing.T) {
 
 // The type of internal/providerctl's Supervisor.Setup: the
 // assignment fails to compile if managed.Setup drifts from it.
-var _ func(manager.Manager, string) error = managed.Setup
+var _ func(manager.Manager, string) error = managed.Setup(eventcount.New())
 
 // managed.Setup has the signature of the per-Provider manager supervisor's
 // hook (internal/providerctl, Supervisor.Setup, #59) and starts the loop on

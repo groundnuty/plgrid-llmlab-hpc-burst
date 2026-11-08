@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 )
 
 // TestMetricsCollectorsRegisterOnOneRegistry: the collectors NewManager
@@ -19,7 +21,7 @@ import (
 func TestMetricsCollectorsRegisterOnOneRegistry(t *testing.T) {
 	reg := prometheus.NewPedanticRegistry()
 	started := time.Now()
-	for _, c := range metricsCollectors(gateStore(t), &Backend{}, SystemClock{}, func() time.Time { return started }, always) {
+	for _, c := range metricsCollectors(gateStore(t), &Backend{}, SystemClock{}, func() time.Time { return started }, always, eventcount.New()) {
 		if err := reg.Register(c); err != nil {
 			t.Fatalf("register the manager's collectors on one registry: %v", err)
 		}

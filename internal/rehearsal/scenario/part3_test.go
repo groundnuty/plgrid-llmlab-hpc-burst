@@ -146,6 +146,10 @@ type part3 struct {
 	managedID v1alpha1.FullDeploymentID
 	// requeued is the Allocation the requeue failed (HBEP-3).
 	requeued requeueResult
+	// base is the absence checks' first read of the raised-events counter,
+	// taken as soon as the controller restarted in longStreamAcrossRestart
+	// serves (part3_absence_test.go, orphans_test.go).
+	base *absenceBase
 }
 
 // objects starts the LLMLab double, writes the managed Provider's
@@ -217,7 +221,14 @@ func TestRehearsalPart3(t *testing.T) {
 	done()
 	p3.gauges(q, "before the restart")
 	done = r.stepTimer("7,000-token stream across a controller restart")
+	// The absence checks cover the restarted controller, from its first
+	// moment of serving: no Instance has ended and no drain start has passed.
+	r.onLed = func() {
+		p3.base = r.baseline("as part 3's restarted controller serves", keyTunnelOrphaned, keyReplacementLate, keyHandedOver)
+		r.orphanBase = p3.base
+	}
 	p3.longStreamAcrossRestart(q)
+	r.onLed = nil
 	done()
 	p3.gauges(q, "after the restart")
 	done = r.stepTimer("no-overlap handovers")

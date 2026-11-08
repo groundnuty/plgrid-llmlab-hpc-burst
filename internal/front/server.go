@@ -119,7 +119,9 @@ func Run(ctx context.Context, o Options) error {
 			o.Log.Error("usage sink", "error", err.Error())
 		}
 	}()
-	metrics := NewMetrics(sink, cfg.UsageDir, o.FreeBytes)
+	// The front's /metrics exports the raised-events counter its recorder
+	// counts into, with the front's series created at 0 (HBEP-8, Raised events).
+	metrics := NewMetrics(sink, cfg.UsageDir, o.FreeBytes, raisedEvents(o.Recorder))
 	router := NewRouter(cfg, o.Clock, o.Transports, o.Recorder, o.Log, metrics)
 	watch, err := startWatch(ctx, o, router)
 	if err != nil {

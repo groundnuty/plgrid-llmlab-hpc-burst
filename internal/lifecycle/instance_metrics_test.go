@@ -20,6 +20,7 @@ import (
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	afake "github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi/fake"
 )
@@ -69,7 +70,7 @@ var (
 // reads the rig's current Backend and Reconciler, so it follows a
 // restartController.
 func (rg *rig) collector(serving func() bool) *stateCollector {
-	return newStateCollector(rg.c, rg.backend, rg.clock, func() time.Time { return rg.r.memory().started }, serving)
+	return newStateCollector(rg.c, rg.backend, rg.clock, func() time.Time { return rg.r.memory().started }, serving, eventcount.New())
 }
 
 func always() bool { return true }
@@ -78,7 +79,7 @@ func always() bool { return true }
 // the system clock and a process that started now.
 func storeCollector(c client.Reader, b *Backend) *stateCollector {
 	started := time.Now()
-	return newStateCollector(c, b, SystemClock{}, func() time.Time { return started }, always)
+	return newStateCollector(c, b, SystemClock{}, func() time.Time { return started }, always, eventcount.New())
 }
 
 // scrape serves the rig's series as /metrics, as the serving copy serves

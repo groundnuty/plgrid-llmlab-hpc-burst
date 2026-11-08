@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -24,6 +25,7 @@ import (
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/managed/llmlabtest"
 )
 
@@ -159,6 +161,88 @@ type env struct {
 	ctl   *Controller
 	path  string // the credentials file
 	key   string
+	// events is the raised-events counter the controller's recorder counts
+	// into, when the test gave a recorder.
+	events *eventcount.Counter
+}
+
+// countCheck stands between the counting wrapper and a test's recorder: it
+// notes how many events of each series it receives, and whether the count had
+// risen to include each when it arrived, then hands the event on.
+type countCheck struct {
+	inner      events.EventRecorder
+	c          *eventcount.Counter
+	controller string
+
+	mu     sync.Mutex
+	handed map[eventcount.Key]float64
+	early  []string
+}
+
+func (k *countCheck) Eventf(regarding runtime.Object, related runtime.Object, eventtype, reason, action, note string, args ...interface{}) {
+	key := eventcount.Key{Controller: k.controller, Reason: reason, Action: action, Type: eventtype}
+	k.mu.Lock()
+	k.handed[key]++
+	n := k.handed[key]
+	k.mu.Unlock()
+	if got := raisedCounts(k.c)[key]; got < n {
+		k.mu.Lock()
+		k.early = append(k.early, fmt.Sprintf("%s arrived with the count at %g, below the %g received", key, got, n))
+		k.mu.Unlock()
+	}
+	k.inner.Eventf(regarding, related, eventtype, reason, action, note, args...)
+}
+
+// check fails unless every event received was counted exactly once with its
+// labels, nothing else was counted, and none arrived before its count.
+func (k *countCheck) check(t *testing.T) {
+	t.Helper()
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for _, s := range k.early {
+		t.Errorf("raised events: %s", s)
+	}
+	all := raisedCounts(k.c)
+	for key, n := range k.handed {
+		if all[key] != n {
+			t.Errorf("raised events: %s was handed to the recorder %g times and counted %g times", key, n, all[key])
+		}
+	}
+	for key, n := range all {
+		if n != 0 && k.handed[key] == 0 {
+			t.Errorf("raised events: %s counted %g times, never handed to the recorder", key, n)
+		}
+	}
+}
+
+// raisedCounts reads every series of the counter through a registry, as a
+// scrape would.
+func raisedCounts(c *eventcount.Counter) map[eventcount.Key]float64 {
+	out := map[eventcount.Key]float64{}
+	reg := prometheus.NewRegistry()
+	if err := reg.Register(c); err != nil {
+		return out
+	}
+	fams, _ := reg.Gather()
+	for _, f := range fams {
+		for _, m := range f.GetMetric() {
+			var key eventcount.Key
+			for _, l := range m.GetLabel() {
+				switch l.GetName() {
+				case eventcount.LabelController:
+					key.Controller = l.GetValue()
+				case eventcount.LabelReason:
+					key.Reason = l.GetValue()
+				case eventcount.LabelAction:
+					key.Action = l.GetValue()
+				case eventcount.LabelType:
+					key.Type = l.GetValue()
+				}
+			}
+			out[key] = m.GetCounter().GetValue()
+		}
+	}
+	return out
 }
 
 func newEnv(t *testing.T, opts ...envOption) *env {
@@ -208,7 +292,18 @@ func newEnv(t *testing.T, opts ...envOption) *env {
 		e.clock = &manualClock{t: at(12, 0, 0)}
 		clk = e.clock
 	}
-	ctl, err := New(Options{Client: c, Provider: testProvider, Clock: clk, Recorder: cfg.recorder, Log: cfg.log, Transport: cfg.transport})
+	// A test's recorder receives the events through the counting wrapper, as
+	// Setup builds it, and the env's end checks that each was counted once,
+	// with its labels, before the recorder received it (HBEP-8, Test plan,
+	// Raised events: Counting).
+	rec := cfg.recorder
+	if rec != nil {
+		e.events = eventcount.New()
+		chk := &countCheck{inner: rec, c: e.events, controller: eventcount.ControllerProvider(testProvider), handed: map[eventcount.Key]float64{}}
+		t.Cleanup(func() { chk.check(t) })
+		rec = eventcount.Events(chk, e.events, chk.controller)
+	}
+	ctl, err := New(Options{Client: c, Provider: testProvider, Clock: clk, Recorder: rec, Log: cfg.log, Transport: cfg.transport})
 	if err != nil {
 		t.Fatal(err)
 	}

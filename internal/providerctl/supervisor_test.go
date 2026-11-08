@@ -108,6 +108,43 @@ func TestSupervisorStopsANeverStartedRunWithoutPanic(t *testing.T) {
 	}
 }
 
+// #256: Dropped is called once for a Provider the supervisor no longer runs,
+// after its run is stopped, and never for a Provider whose manager is started
+// again after a failure: the managed supervisor deletes the Provider's
+// raised-events series with it, which must not happen while the Provider is
+// still one to run.
+func TestSupervisorCallsDroppedOnceForAProviderItNoLongerRuns(t *testing.T) {
+	c := supWorld(t, supProfile("pp", v1alpha1.PlatformBatch), supProvider("p1", "pp"), supProvider("p2", "pp"))
+	b := &builds{}
+	s := newTestSupervisor(c, "", b)
+	s.MinBackoff, s.MaxBackoff = time.Nanosecond, time.Nanosecond // every failed build is started again at the next pass
+	var dropped []string
+	s.Dropped = func(name string) { dropped = append(dropped, name) }
+	ctx := context.Background()
+	for range 3 {
+		if err := s.pass(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := b.got(); len(got) != 6 {
+		t.Fatalf("precondition: NewManager called %d times (%v), want 6: each Provider started again after each failure", len(got), got)
+	}
+	if len(dropped) != 0 {
+		t.Fatalf("Dropped called for %v while both Providers are still to run", dropped)
+	}
+	if err := c.Delete(ctx, supProvider("p1", "pp")); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := s.pass(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(dropped) != 1 || dropped[0] != "p1" {
+		t.Errorf("Dropped called for %v, want once for p1", dropped)
+	}
+}
+
 // The parent's addition for #69: Kind picks the providerKind the supervisor
 // runs; zero means batch, so existing callers are unchanged. A managed-kind
 // supervisor starts a manager for the managed Provider only, a batch one (and

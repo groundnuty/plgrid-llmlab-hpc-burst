@@ -61,6 +61,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/lifecycle"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/managed"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/managed/llmlabtest"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
@@ -855,6 +858,37 @@ func testBinaryComponents(t *testing.T, api *apiServer) {
 		}
 		return false
 	})
+
+	// The raised-events counter on the lifecycle controller's /metrics, which
+	// this serving copy exports for every controller of its process (HBEP-8,
+	// Raised events): the batch Provider's CreatedExternalResource, which the
+	// API holds, was counted under provider-<name> with action none; the
+	// managed Provider's series and the lifecycle controller's exist at 0 or
+	// more, created when each was set up.
+	b.eventually(t, "the lifecycle /metrics counts the Provider managers' events", 60*time.Second, func() bool {
+		body, ok := metricsBody(f.host.ControllerMetricsAddr())
+		if !ok {
+			return false
+		}
+		created, err := eventcount.ParseRead(body, eventcount.Key{Controller: eventcount.ControllerProvider(x86Prov.Name),
+			Reason: "CreatedExternalResource", Action: eventcount.NoAction, Type: provider.EventKindOrdinary})
+		if err != nil || !created.HasCount || created.Count < 1 {
+			return false
+		}
+		for ctl, series := range map[string][]eventcount.Series{
+			eventcount.ControllerProvider(managedProv.Name): managed.RaisedEvents(),
+			eventcount.ControllerLifecycle:                  lifecycle.RaisedEvents(),
+		} {
+			for _, s := range series {
+				r, err := eventcount.ParseRead(body, eventcount.Key{Controller: ctl, Reason: s.Reason, Action: s.Action, Type: s.Type})
+				if err != nil || !r.HasCount {
+					t.Logf("no series %s/%s/%s for %s yet", s.Action, s.Reason, s.Type, ctl)
+					return false
+				}
+			}
+		}
+		return true
+	})
 	if n := gw.Count(http.MethodGet, "/v1/models"); n < 1 {
 		t.Errorf("the double saw %d catalog reads, want at least 1", n)
 	}
@@ -1162,4 +1196,16 @@ func TestControllerBinaryProvidersFollowTheLifecycleLeader(t *testing.T) {
 	if err := cc.stop(t); err != nil {
 		t.Fatalf("the --leader-elect=false copy's run returned %v after its context ended, want nil", err)
 	}
+}
+
+// metricsBody reads a /metrics endpoint's body; ok is false when it does not
+// answer 200.
+func metricsBody(addr string) ([]byte, bool) {
+	resp, err := http.Get("http://" + addr + "/metrics")
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	return b, err == nil && resp.StatusCode == http.StatusOK
 }
