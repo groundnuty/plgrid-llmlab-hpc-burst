@@ -32,6 +32,38 @@ type Stream struct {
 	// is not after the start) is not counted as sent while the streams were open.
 	BodyStart time.Time `json:"bodyStart,omitzero"`
 	BodyEnd   time.Time `json:"bodyEnd,omitzero"`
+	// The live hour's large requests (the science agent's ruling (4) on PR 255: no
+	// sender-side timing on the live path in alpha). ExpectedTokens is the
+	// prompt's own input tokens (TokenLine), and ArrivedTokens the input tokens
+	// the engine counted in its completed response (usage.prompt_tokens,
+	// PromptTokensOf; ArrivalVerified). SendStart and SendEnd are the client's own window of the
+	// request, from its first byte sent to its reply read: the body is in flight
+	// inside it.
+	// SendBodyEnd is the client's last byte of the body written to its
+	// connection: its send window ends there and its prefill window begins.
+	ExpectedTokens int       `json:"expectedTokens,omitempty"`
+	ArrivedTokens  int       `json:"arrivedTokens,omitempty"`
+	SendStart      time.Time `json:"sendStart,omitzero"`
+	SendBodyEnd    time.Time `json:"sendBodyEnd,omitzero"`
+	SendEnd        time.Time `json:"sendEnd,omitzero"`
+	// Ticks are the times, on the client's clock, at which the reply's data
+	// lines (its tokens) arrived; not in the record.
+	Ticks []time.Time `json:"-"`
+}
+
+// PromptCounted reports whether the engine answered the request with a
+// completed response whose usage counts its prompt (PromptTokensOf,
+// WithArrival): ArrivedTokens is set from nothing else. A body cut short in
+// the tunnel is no longer JSON, and is answered otherwise.
+func (s Stream) PromptCounted() bool { return s.ArrivedTokens > 0 }
+
+// ArrivalVerified reports whether the engine read the request's whole prompt:
+// its completed response counted exactly the prompt's own input tokens. That
+// is the second check, after the completed response itself (PromptCounted):
+// the engine tokenized the whole well-formed body. A path that rewrites a body
+// into other well-formed JSON is out of scope (ArrivalPrompt).
+func (s Stream) ArrivalVerified() bool {
+	return s.ExpectedTokens > 0 && s.ArrivedTokens == s.ExpectedTokens
 }
 
 // UploadRecorded reports whether the upload interval is recorded: a start, and an end after it.
@@ -77,6 +109,9 @@ type HandoverObs struct {
 	Handovers int `json:"handovers"`
 	// WorkerRestarts counts the restarts at the worker rung the run made.
 	WorkerRestarts int `json:"workerRestarts"`
+	// WorkerRestart is the times of the run's worker-rung fault, posted (the
+	// science agent's ruling of 2 Nov 2026, condition 5); zero in a dry run.
+	WorkerRestart RestartTimes `json:"workerRestart"`
 	// Responses counts the responses the run received; Attributed those that
 	// carried HBEP-5's attribution headers.
 	Responses  int `json:"responses"`
@@ -97,6 +132,8 @@ type NoOverlapObs struct {
 	// WorkerRestarts counts the restarts at the worker rung the run made on this
 	// platform (HBEP-7: one on each alpha platform).
 	WorkerRestarts int `json:"workerRestarts"`
+	// WorkerRestart is the times of the run's worker-rung fault (as HandoverObs's).
+	WorkerRestart RestartTimes `json:"workerRestart"`
 	// NoOverlapSlotSeen is true when the deployment carried the NoOverlapSlot
 	// reason between the two (HBEP-7, No-overlap mode).
 	NoOverlapSlotSeen bool `json:"noOverlapSlotSeen"`
@@ -185,6 +222,29 @@ type TunnelHourObs struct {
 	Deployment DeploymentSpec `json:"deployment"`
 	// Rates are the path rates, one per direction (DirUpload and DirDownload).
 	Rates []PathRate `json:"rates"`
+	// UploadNotMeasured, when set, says why the upload's interval and rate were
+	// not measured: a live row in alpha, with no sender-side timing on the live
+	// path (the science agent's ruling (4) on PR 255; front-side timing is #273).
+	// The verdict then takes the large requests' arrival and their client
+	// windows in place of their upload intervals; a dry run leaves it empty and
+	// keeps #244's full check.
+	UploadNotMeasured string `json:"uploadNotMeasured,omitempty"`
+	// HeadOfLine is the streams' longest gap between two tokens while a large
+	// body was in flight, against the rest of the hour (live rows).
+	HeadOfLine *HeadOfLine `json:"headOfLine,omitempty"`
+}
+
+// HeadOfLine is the head-of-line measure of the tunnel hour (HeadOfLineOf):
+// the longest gap between two tokens of any stream in a large request's send
+// window (Send), in a prefill window and no send window (Prefill), either
+// (InFlight), and in neither (Elsewhere), and how many gaps fell in a send or
+// prefill window.
+type HeadOfLine struct {
+	InFlight  time.Duration `json:"inFlight"`
+	Send      time.Duration `json:"send"`
+	Prefill   time.Duration `json:"prefill"`
+	Elsewhere time.Duration `json:"elsewhere"`
+	Gaps      int           `json:"gapsInFlight"`
 }
 
 // AccountingObs is the kept accounting record of one real GPU job beside the

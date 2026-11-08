@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -90,6 +91,21 @@ case $mode in
   late-hidden) echo "hb-late-bbbbbbbbbbbb" >> "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/job-tags.txt"; echo "9003|hb-late-bbbbbbbbbbbb|normal|plgrid|PENDING" >> "$STUB_STATE/queue"; echo "--- PASS: $t (0.01s)"; echo PASS ;;
   not-run) echo "step: a job did not start within the start-wait bound of 10m0s; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   sleep) leave; touch "$STUB_STATE/started"; exec sleep 3600 ;;
+  # A job of the run's own prefix whose tag was never written down (a watch that never delivered, a write that
+  # failed), beside a job of another run's prefix; with untagged-not-run, the run ended NOT RUN with it pending.
+  # The step dies mid-wait (the science agent's requirement on PR 255): the run's predecessor running and its successor
+  # pending, neither written down, and the test binary gone as a panic leaves it.
+  die-mid-wait)
+    echo "9007|hb-alpha-${HPCBURST_ALPHA_RUN_ID:-none}-p1abc-0123456789ab|${HPCBURST_ALPHA_QOS:-normal}|${HPCBURST_ALPHA_PARTITION:-plgrid}|RUNNING" >> "$STUB_STATE/queue"
+    echo "9008|hb-alpha-${HPCBURST_ALPHA_RUN_ID:-none}-s2def-0123456789ab|${HPCBURST_ALPHA_QOS:-normal}|${HPCBURST_ALPHA_PARTITION:-plgrid}|PENDING" >> "$STUB_STATE/queue"
+    echo "=== RUN   $t"; echo "panic: the step died mid-wait"; exit 2 ;;
+  untagged|untagged-not-run)
+    echo "9005|hb-alpha-${HPCBURST_ALPHA_RUN_ID:-none}-x7k2p-0123456789ab|${HPCBURST_ALPHA_QOS:-normal}|${HPCBURST_ALPHA_PARTITION:-plgrid}|PENDING" >> "$STUB_STATE/queue"
+    echo "9006|hb-alpha-ffffffffff-x7k2p-0123456789ab|${HPCBURST_ALPHA_QOS:-normal}|${HPCBURST_ALPHA_PARTITION:-plgrid}|PENDING" >> "$STUB_STATE/queue"
+    if [ "$mode" = untagged ]; then echo "--- PASS: $t (0.01s)"; echo PASS; else
+      echo "$HPCBURST_ALPHA_ROW: a job was still pending after 2h1m0s, a minute before the deployment's first end; this run's jobs were cancelled by tag" > "$HPCBURST_ALPHA_OUT/not-run.txt"
+      echo "--- SKIP: $t (0.00s)"; echo PASS
+    fi ;;
 esac
 `
 
@@ -456,6 +472,78 @@ func TestAJobWhoseTagWasWrittenLateIsStillCancelled(t *testing.T) {
 				t.Errorf("the foreign job left the queue: %s", w.stateFile("queue"))
 			}
 		})
+	}
+}
+
+// A job of the run's own prefix is the run's, whether or not its tag was written down (review of PR 255, B3): the
+// script draws the run's ID, passes it to the test, and its cleanup cancels every job whose name begins with
+// "hb-alpha-<ID>-", and no job of another run's prefix. Each stack row draws its own ID, 10 hex digits.
+func TestTheCleanupFindsTheRunsJobsByItsPrefix(t *testing.T) {
+	for _, row := range []string{"alpha-helios-nooverlap", "alpha-athena-handover", "tunnel-hour-helios", "tunnel-hour-athena"} {
+		t.Run(row, func(t *testing.T) {
+			w := newAlphaWorld(t)
+			res := w.run([]string{"STUB_ALPHA_MODE=untagged"}, "--run", row, "--yes")
+			if res.code != 0 {
+				t.Fatalf("exit %d, want 0 (the run's job was cancelled by its prefix):\n%s", res.code, res.out)
+			}
+			w.contains(res, "cleanup: left behind 0 (cancelled 1)")
+			if got := strings.TrimSpace(w.stateFile("cancelled")); got != "9005" {
+				t.Errorf("cancelled %q, want exactly 9005, the job of the run's prefix", got)
+			}
+			if q := w.stateFile("queue"); !strings.Contains(q, "9006|hb-alpha-ffffffffff-") || strings.Contains(q, "9005|") {
+				t.Errorf("the queue after the cleanup:\n%s", q)
+			}
+			env := w.stateFile("test-env-" + map[bool]string{true: "TestTunnelHour", false: map[bool]string{true: "TestAlphaHeliosNoOverlap", false: "TestAlphaAthenaHandover"}[strings.Contains(row, "nooverlap")]}[strings.HasPrefix(row, "tunnel-hour-")])
+			if !regexp.MustCompile(`(?m)^HPCBURST_ALPHA_RUN_ID=[0-9a-f]{10}$`).MatchString(env) {
+				t.Errorf("the test was not given a run ID of 10 hex digits:\n%s", env)
+			}
+		})
+	}
+}
+
+// A step that dies mid-wait leaves a definite outcome (the science agent's requirement on PR 255): the row is a
+// failure, never a pass nor a NOT RUN, and the cleanup cancels both of the run's jobs by its prefix, though neither was
+// written down. internal/lifecycle shows the deployment then ends at the guard's last end with no third Allocation.
+func TestAStepThatDiesMidWaitFailsAndItsJobsAreCancelled(t *testing.T) {
+	for _, row := range []string{"alpha-helios-nooverlap", "alpha-athena-handover"} {
+		t.Run(row, func(t *testing.T) {
+			w := newAlphaWorld(t)
+			res := w.run([]string{"STUB_ALPHA_MODE=die-mid-wait"}, "--run", row, "--yes")
+			if res.code != 1 {
+				t.Fatalf("exit %d, want 1:\n%s", res.code, res.out)
+			}
+			w.contains(res, row+": FAIL", "cleanup: left behind 0 (cancelled 2)")
+			if strings.Contains(res.out, row+": PASS") || strings.Contains(res.out, row+": NOT RUN") {
+				t.Errorf("a step that died was reported as a pass or a NOT RUN:\n%s", res.out)
+			}
+			if got := strings.Fields(w.stateFile("cancelled")); !slices.Equal(got, []string{"9007", "9008"}) {
+				t.Errorf("cancelled %v, want both of the run's jobs, 9007 and 9008", got)
+			}
+		})
+	}
+}
+
+// A tunnel row whose job was still pending a minute before its deployment's first end is NOT RUN, exit 3, on
+// either cluster (the science agent's ruling on PR 255), with the script's line for it, and the cleanup cancels
+// a job of the run's prefix still pending then, whether or not its tag was written down.
+func TestATunnelRowNotRunAtItsFirstEndIsCleanedUpByItsPrefix(t *testing.T) {
+	for _, row := range []string{"tunnel-hour-helios", "tunnel-hour-athena"} {
+		t.Run(row, func(t *testing.T) {
+			w := newAlphaWorld(t)
+			res := w.run([]string{"STUB_ALPHA_MODE=untagged-not-run"}, "--run", row, "--yes")
+			if res.code != 3 {
+				t.Fatalf("exit %d, want 3:\n%s", res.code, res.out)
+			}
+			w.contains(res, row+": NOT RUN (a job was still pending a minute before its deployment's first end and was cancelled by its tag; not a failure)", "cleanup: left behind 0 (cancelled 1)")
+			if got := strings.TrimSpace(w.stateFile("cancelled")); got != "9005" {
+				t.Errorf("cancelled %q, want exactly 9005", got)
+			}
+		})
+	}
+	// The handover row has no first end: the same marker is no NOT RUN there.
+	w := newAlphaWorld(t)
+	if res := w.run([]string{"STUB_ALPHA_MODE=untagged-not-run"}, "--run", "alpha-athena-handover", "--yes"); res.code != 1 || strings.Contains(res.out, "NOT RUN") {
+		t.Errorf("alpha-athena-handover with a not-run marker: exit %d, want 1 and no NOT RUN:\n%s", res.code, res.out)
 	}
 }
 

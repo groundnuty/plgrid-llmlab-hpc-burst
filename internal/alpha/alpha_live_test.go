@@ -9,6 +9,7 @@ package alpha
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -45,10 +46,11 @@ func runRow(t *testing.T, family string, rows ...string) {
 	if NotRun(cfg.Row, err) {
 		// The protocol of #210: the marker, then the test's one top-level skip. The scenario has cancelled
 		// the run's jobs by their tags; no record and no text to post were written.
-		if merr := rec.SaveText(NotRunFile, NotRunNote(cfg.Row, cfg.PendingMax)); merr != nil {
-			t.Fatalf("%s: a job did not start within %s, but the not-run marker could not be written: %v", cfg.Row.Name, cfg.PendingMax, merr)
+		note := NotRunNote(cfg.Row, cfg.PendingMax, err)
+		if merr := rec.SaveText(NotRunFile, note); merr != nil {
+			t.Fatalf("%s: a job did not start in time, but the not-run marker could not be written: %v", cfg.Row.Name, merr)
 		}
-		t.Skipf("NOT RUN: %s: a job was still pending after %s; it was cancelled by its tag", cfg.Row.Name, cfg.PendingMax)
+		t.Skipf("NOT RUN: %s", strings.TrimSpace(note))
 	}
 	if err != nil {
 		t.Fatalf("%s did not finish: %v", cfg.Row.Name, err)

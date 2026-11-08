@@ -282,7 +282,9 @@ func (d *drySteps) submitOwner(p Plan) string {
 // and the run's job pends behind it; a partition with no cap has the run's job held, which pends just the same.
 // The fake clock then moves to one second before the bound, where the cluster still shows the job pending (the
 // run must not give up early), and one second past it, where the run cancels its jobs by their tags, as the
-// live scenario must, and reports ErrNotStarted. Both readings are logged with the time since the job's
+// live scenario's Close does, and reports a NotStartedError. The bound is the live steps' first clock
+// (FirstClock): the wait asked for, or for a tunnel row a minute before its deployment's first end when that
+// comes first (the science agent's ruling on PR 255), at the row's lease and the live drain window. Both readings are logged with the time since the job's
 // submission on the fake clock, for the tests to judge against the bound they asked for, written out in them.
 // The owner's job is not the run's to touch.
 func (d *drySteps) pendPastBound(p Plan) error {
@@ -295,8 +297,10 @@ func (d *drySteps) pendPastBound(p Plan) error {
 		id = d.submitHeld(tag, d.cfg.Row.Partition, "")
 	}
 	d.pending(id)
+	tm := p.Row.Clock()
+	bound, pastEnd := FirstClock(p.Row, p.PendingMax, p.Row.Plan().LeaseLimit.Truncate(time.Minute), DrainWindow(tm.MaxRequestDuration, tm.DrainMargin, 0))
 	began := d.now()
-	d.tick(p.PendingMax - time.Second)
+	d.tick(bound - time.Second)
 	d.pending(id)
 	p.Logf(pendStillPending, d.now().Sub(began))
 	d.tick(2 * time.Second)
@@ -319,7 +323,7 @@ func (d *drySteps) pendPastBound(p Plan) error {
 		d.waitFor("a cancelled job to end", func(j provider.Job) bool { return j.EndTime != nil }, jid)
 	}
 	p.Logf(pendCancelled, d.now().Sub(began))
-	return ErrNotStarted
+	return &NotStartedError{Bound: bound, PastEnd: pastEnd}
 }
 
 // The two readings pendPastBound logs, each with the time since the job's submission on the fake clock.

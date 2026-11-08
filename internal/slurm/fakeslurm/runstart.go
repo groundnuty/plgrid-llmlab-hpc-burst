@@ -76,7 +76,8 @@ func (p *Platform) startIn(r *jobRun, dir string) error {
 	cmd := exec.Command(jobShell, script)
 	cmd.Dir = submitDir
 	cmd.Env = p.jobEnv(j, submitDir, vars)
-	cmd.Stdout, cmd.Stderr = out, errOut // files, so no copy goroutine waits on a grandchild
+	r.submitDir, r.env = submitDir, cmd.Env // a step (srun.go) runs in the same directory and environment
+	cmd.Stdout, cmd.Stderr = out, errOut    // files, so no copy goroutine waits on a grandchild
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		return err

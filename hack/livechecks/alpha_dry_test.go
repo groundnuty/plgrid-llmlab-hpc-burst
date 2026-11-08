@@ -234,14 +234,25 @@ func TestAJobPendingPastTheBoundIsNotRunOnTheNowRowsAndAFailureElsewhere(t *test
 		{"tunnel-hour-helios", "LIVE_PENDING_MAX_SECONDS=600", 3, "NOT RUN (a job was still pending after 10 min in the queue and was cancelled by its tag; not a failure)", "9m59s", "10m1s"},
 		{"alpha-helios-nooverlap", "LIVE_PENDING_MAX_SECONDS=90", 3, "NOT RUN (a job was still pending after 1 min 30 s in the queue and was cancelled by its tag; not a failure)", "1m29s", "1m31s"},
 		{"tunnel-hour-athena", "", 1, "", "1h59m59s", "2h0m1s"},
+		// A tunnel row's first clock stops a minute before its deployment's first end (the science agent's ruling on
+		// PR 255): at the default lease, 2 h 17 min, less the 15 min drain window and the minute, 2 h 1 min; at the
+		// longest, 4 h, 3 h 44 min. A job still pending then is NOT RUN on both clusters, whatever wait was asked.
+		{"tunnel-hour-athena", "LIVE_PENDING_MAX_SECONDS=10800", 3, "NOT RUN (a job was still pending a minute before its deployment's first end and was cancelled by its tag; not a failure)", "2h0m59s", "2h1m1s"},
+		{"tunnel-hour-helios", "LIVE_PENDING_MAX_SECONDS=10800", 3, "NOT RUN (a job was still pending a minute before its deployment's first end and was cancelled by its tag; not a failure)", "2h0m59s", "2h1m1s"},
+		{"tunnel-hour-athena", "LIVE_PENDING_MAX_SECONDS=86400 LIVE_TUNNEL_LEASE_MINUTES=240", 3, "NOT RUN (a job was still pending a minute before its deployment's first end and was cancelled by its tag; not a failure)", "3h43m59s", "3h44m1s"},
 	} {
 		t.Run(c.row+"/"+c.setting, func(t *testing.T) {
 			t.Parallel()
 			w := newAlphaWorld(t)
 			w.installDry(dryWrapper, real, realDir)
 			env := []string{"STUB_DRY_FAULT=pend-past-bound"}
-			if c.setting != "" {
-				env = append(env, c.setting)
+			for _, kv := range strings.Fields(c.setting) {
+				// The tunnel lease is a setting of the settings file; the wait in the queue is the environment's.
+				if k, v, _ := strings.Cut(kv, "="); k == "LIVE_TUNNEL_LEASE_MINUTES" {
+					w.alphaSettings(func(m map[string]string) { m[k] = v })
+					continue
+				}
+				env = append(env, kv)
 			}
 			res := w.run(env, "--run", c.row, "--yes")
 			if res.code != c.code {
@@ -306,7 +317,9 @@ func TestADryBinaryRefusesLiveSettings(t *testing.T) {
 	}
 }
 
-func TestALiveRunWithNoScenarioFailsLoudlyAndUsesNoCluster(t *testing.T) {
+// The harness's settings are direct mode with no LIVE_DIALHOME_LISTEN: the live
+// steps stop at their first step with the named error, before any stack or job.
+func TestALiveRunWithNoListenerFailsLoudlyAndUsesNoCluster(t *testing.T) {
 	w := newAlphaWorld(t)
 	w.installDry(liveWrapper, realTestBinary(t, "HPCBURST_LIVECHECKS_ALPHA_TEST", alphaPkg), filepath.Join(repoRoot(t), alphaPkg))
 	// The caller asks for a dry run: the script must not pass it on.
@@ -315,7 +328,7 @@ func TestALiveRunWithNoScenarioFailsLoudlyAndUsesNoCluster(t *testing.T) {
 		t.Fatalf("exit %d, want 1:\n%s", res.code, res.out)
 	}
 	log, _ := os.ReadFile(filepath.Join(w.out(), "alpha-athena-handover.log"))
-	for _, want := range []string{"LIVE RUN", "wait for #161"} {
+	for _, want := range []string{"LIVE RUN", "set LIVE_DIALHOME_LISTEN"} {
 		if !strings.Contains(string(log), want) {
 			t.Errorf("the log lacks %q:\n%s", want, log)
 		}

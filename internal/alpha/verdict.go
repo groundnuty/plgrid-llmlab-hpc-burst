@@ -79,21 +79,22 @@ func streamChecks(streams []Stream, drainStart time.Time) []string {
 // README.md:614).
 func deploymentChecks(row Row, d DeploymentSpec) []string {
 	var f []string
+	tm := row.Clock()
 	if len(d.Providers) != 1 {
 		f = append(f, "the deployment does not allow exactly one Provider")
 	} else if d.Providers[0].Cluster != row.Cluster {
 		f = append(f, "the deployment's Provider is not on the row's cluster")
 	}
 	switch {
-	case d.LeaseLimit <= Lead():
+	case d.LeaseLimit <= tm.Lead():
 		f = append(f, "the deployment's leaseLimit is not longer than the lead an Instance needs (PartitionTooShort)")
 	case d.LeaseLimit != row.Lease:
 		f = append(f, "the deployment's leaseLimit is not the row's shortest lease")
 	}
-	if d.MaxRequestDuration != MaxRequestDuration {
+	if d.MaxRequestDuration != tm.MaxRequestDuration {
 		f = append(f, "the deployment's routing.maxRequestDuration is not the row's")
 	}
-	if want := row.Plan(); want.ReleaseWhenIdle && (!d.ReleaseWhenIdle || d.IdleLimit <= 0 || d.IdleLimit > 10*time.Minute) {
+	if want := row.Plan(); want.ReleaseWhenIdle && (!d.ReleaseWhenIdle || d.IdleLimit <= 0 || d.IdleLimit > tm.MaxIdleLimit) {
 		f = append(f, "the no-overlap deployment lacks ReleaseWhenIdle with a short idleLimit")
 	}
 	return f
@@ -329,13 +330,16 @@ func SuccessorQueueWait(pre, suc provider.Job) (d time.Duration, ok bool) {
 // pass: the session check is what fails it.
 func VerifyTunnelHour(row Row, o TunnelHourObs, jobs []provider.Job) []string {
 	f := deploymentChecks(row, o.Deployment)
+	tm := row.Clock()
 	if o.DrainStart.IsZero() {
 		f = append(f, "the Instance's drain start was not observed, so the hour cannot be placed before it")
 	}
-	f = append(f, requestChecks(o.Requests, o.DrainStart)...)
-	f = append(f, sessionChecks(o.Requests, o.Samples)...)
-	f = append(f, trafficChecks(o.Requests)...)
-	f = append(f, rateChecks(o.Rates)...)
+	f = append(f, requestChecks(o.Requests, o.DrainStart, tm)...)
+	f = append(f, sessionChecks(o.Requests, o.Samples, tm)...)
+	// A live row in alpha has no sender-side timing of the upload (the science agent's ruling (4) on PR 255).
+	live := o.UploadNotMeasured != ""
+	f = append(f, trafficChecks(o.Requests, tm, live)...)
+	f = append(f, rateChecks(o.Rates, live)...)
 	lf, by := ledgerChecks(row, o.Tags, jobs)
 	f = append(f, lf...)
 	f = append(f, tagCountChecks(row, o.Tags, "a tunnel run makes exactly one Allocation")...)
@@ -347,7 +351,7 @@ func VerifyTunnelHour(row Row, o TunnelHourObs, jobs []provider.Job) []string {
 		case !ok:
 		case j.StartTime == nil || j.EndTime == nil:
 			f = append(f, "the cluster's record lacks the job's start or end time, so it cannot show the hour")
-		case j.EndTime.Sub(*j.StartTime) < Hour:
+		case j.EndTime.Sub(*j.StartTime) < tm.Hour:
 			f = append(f, "the cluster's record shows the job ran under an hour")
 		}
 	}
@@ -358,7 +362,7 @@ func VerifyTunnelHour(row Row, o TunnelHourObs, jobs []provider.Job) []string {
 // (front to node) and download (node to front), as S1's C6 asks of the token
 // direction: ok, at least 30 s asked, at least 29 s timed, bytes moved, measured
 // under load; the download also moves tokens (issue #224).
-func rateChecks(rates []PathRate) []string {
+func rateChecks(rates []PathRate, uploadNotMeasured bool) []string {
 	var f []string
 	by := map[string]PathRate{}
 	for _, r := range rates {
@@ -376,6 +380,8 @@ func rateChecks(rates []PathRate) []string {
 	for _, dir := range []string{DirUpload, DirDownload} {
 		r, found := by[dir]
 		switch {
+		case !found && dir == DirUpload && uploadNotMeasured:
+			// Not measured in alpha on a live row, and said so in the text to post.
 		case !found:
 			f = append(f, "the "+dir+" path rate was not posted: both directions are needed")
 		case !r.OK:
@@ -409,7 +415,7 @@ func span(reqs []Stream) (first, last time.Time) {
 }
 
 // requestChecks judges each request, and that together they cover the hour and end before the drain start.
-func requestChecks(reqs []Stream, drainStart time.Time) []string {
+func requestChecks(reqs []Stream, drainStart time.Time, tm Timing) []string {
 	if len(reqs) == 0 {
 		return []string{"no request was made during the hour"}
 	}
@@ -420,15 +426,17 @@ func requestChecks(reqs []Stream, drainStart time.Time) []string {
 			f = append(f, "a request has no opening or ending time")
 		case s.CutBy != "" || s.Error == "stream_cut":
 			f = append(f, "a stream was cut during the hour")
-		case !s.Complete:
+		case !s.Complete && !s.ArrivalVerified():
+			// A large request the engine answered with its count, showing it read the whole prompt, is the live
+			// hour's proof of arrival, not a failed stream.
 			f = append(f, "a stream did not complete")
-		case s.Ended.Sub(s.Opened) > MaxRequestDuration:
+		case s.Ended.Sub(s.Opened) > tm.MaxRequestDuration:
 			// The front would have cut it: an observation of one means the deadline was not the deployment's.
 			f = append(f, "a request outlasted the deployment's request deadline")
 		}
 	}
 	first, last := span(reqs)
-	if last.Sub(first) < Hour {
+	if last.Sub(first) < tm.Hour {
 		f = append(f, "the requests lasted less than an hour")
 	}
 	if !drainStart.IsZero() && last.After(drainStart) {
@@ -442,7 +450,7 @@ func requestChecks(reqs []Stream, drainStart time.Time) []string {
 // last), come no more than MaxSampleGap apart, all show the Instance's
 // TunnelConnected True, and all carry the same frps lastStartTime for its proxy:
 // a different one is a login of frpc in between, which the requests alone cannot show.
-func sessionChecks(reqs []Stream, samples []TunnelSample) []string {
+func sessionChecks(reqs []Stream, samples []TunnelSample, tm Timing) []string {
 	if len(samples) < 2 {
 		return []string{"the tunnel session was looked at fewer than twice, so one session for the hour is not shown"}
 	}
@@ -468,7 +476,7 @@ func sessionChecks(reqs []Stream, samples []TunnelSample) []string {
 		if !s.Connected {
 			f = append(f, "TunnelConnected was not True throughout the hour")
 		}
-		if i > 0 && s.At.Sub(ss[i-1].At) > MaxSampleGap {
+		if i > 0 && s.At.Sub(ss[i-1].At) > tm.MaxSampleGap {
 			f = append(f, "the tunnel session went more than 2 minutes without a look")
 		}
 	}
@@ -476,34 +484,76 @@ func sessionChecks(reqs []Stream, samples []TunnelSample) []string {
 }
 
 // trafficChecks: the hour must have contained what tests an hour of a tunnel.
-func trafficChecks(reqs []Stream) []string {
+func trafficChecks(reqs []Stream, tm Timing, uploadNotMeasured bool) []string {
 	var f []string
-	if longestChain(reqs) < MinChain {
+	if longestChain(reqs, tm.MaxChainGap) < tm.MinChain {
 		f = append(f, "the hour held no run of requests back to back")
 	}
 	long := false
 	for _, r := range reqs {
-		if d := r.Ended.Sub(r.Opened); d >= NearDeadline && d <= MaxRequestDuration {
+		// A completed stream (the delta round of PR 255, B3): a large request that came late is no request near
+		// the deadline, though it passes requestChecks.
+		if d := r.Ended.Sub(r.Opened); r.Complete && d >= tm.NearDeadline && d <= tm.MaxRequestDuration {
 			long = true
 		}
 	}
 	if !long {
 		f = append(f, "the hour held no request of about 4 minutes, near the deadline")
 	}
-	if concurrentStreams(reqs) < ConcurrentStreams {
+	if concurrentStreams(reqs, tm.StreamRate) < tm.ConcurrentStreams {
 		f = append(f, "the hour held no 16 concurrent streams at 20 tokens a second")
 	}
-	if longestIdle(reqs) < MinIdleGap {
+	if longestIdle(reqs) < tm.MinIdleGap {
 		f = append(f, "the hour held no idle stretch of 2 minutes with heartbeats only")
 	}
 	// The upload direction (issue #224): large request bodies, sent while the 16 streams were open, so that the
 	// shared tunnel's head-of-line pressure is exercised in the direction the front's request bodies take.
-	if largestBody(reqs) < MinLargeBody {
+	switch {
+	case largestBody(reqs) < MinLargeBody:
 		f = append(f, "no request body reached 0.1 MB, so the upload direction was not exercised")
-	} else if largeAmongStreams(reqs) == 0 {
+	case uploadNotMeasured:
+		// Live, in alpha (the science agent's ruling (4) on PR 255): each large body shows it arrived whole by the
+		// engine's count of its prompt, and one was in flight, by the client's window of it, while the 16 streams
+		// were open. First a completed response with usage: a body cut short in the byte tunnel is no longer JSON
+		// and is answered otherwise (the delta round's B1). Then its count: the whole well-formed body was tokenized.
+		otherwise, miscounted := false, false
+		for _, l := range LargeRequests(reqs) {
+			switch {
+			case !l.PromptCounted():
+				otherwise = true
+			case !l.ArrivalVerified():
+				miscounted = true
+			}
+		}
+		if otherwise {
+			f = append(f, "a request of 0.1 MB or more was not answered with a completed response counting its prompt (usage.prompt_tokens): a body cut short in the tunnel is no longer JSON")
+		}
+		if miscounted {
+			f = append(f, "a request of 0.1 MB or more did not show it arrived whole: the engine's usage.prompt_tokens must be its prompt's own input tokens")
+		}
+		if largeInFlightAmongStreams(reqs, tm) == 0 {
+			f = append(f, "no request of 0.1 MB or more was in flight while the 16 streams were open")
+		}
+	case largeAmongStreams(reqs, tm) == 0:
 		f = append(f, "no request of 0.1 MB or more was sent while the 16 streams were open")
 	}
 	return f
+}
+
+// largeInFlightAmongStreams counts the large requests in flight, from the client's first byte sent to its reply read
+// (SendStart to SendEnd), at a moment when at least tm.ConcurrentStreams streams were open: the live hour's measure,
+// where the upload interval itself is not measured. A request whose window is not recorded is not counted.
+func largeInFlightAmongStreams(reqs []Stream, tm Timing) int {
+	n := 0
+	for _, l := range LargeRequests(reqs) {
+		if l.SendStart.IsZero() || !l.SendEnd.After(l.SendStart) {
+			continue
+		}
+		if streamsOpenDuring(reqs, l.SendStart, l.SendEnd, tm) {
+			n++
+		}
+	}
+	return n
 }
 
 // largestBody is the largest request body any request sent, in bytes.
@@ -527,47 +577,61 @@ func LargeRequests(reqs []Stream) []Stream {
 }
 
 // largeAmongStreams counts the large requests whose upload (the body, from its first byte to its last) was in progress
-// at a moment when at least ConcurrentStreams streams, each at StreamRate or more, were open too. It is the upload
+// at a moment when at least tm.ConcurrentStreams streams, each at tm.StreamRate or more, were open too. It is the upload
 // interval that counts (PR 244, B2): a 100,000-byte body can be sent before the streams open, and its response then stay
 // open across their start; the request was open among the streams, and its body was not. A request whose upload interval
 // is not recorded is not counted.
-func largeAmongStreams(reqs []Stream) int {
+func largeAmongStreams(reqs []Stream, tm Timing) int {
 	n := 0
 	for _, l := range LargeRequests(reqs) {
 		if !l.UploadRecorded() {
 			continue
 		}
-		// The moments that matter are the upload's start and each stream's opening inside it.
-		at := []time.Time{l.BodyStart}
-		for _, r := range reqs {
-			if isStream(r) && r.Opened.After(l.BodyStart) && r.Opened.Before(l.BodyEnd) {
-				at = append(at, r.Opened)
-			}
-		}
-		for _, t := range at {
-			open := 0
-			for _, r := range reqs {
-				if isStream(r) && !r.Opened.After(t) && r.Ended.After(t) {
-					open++
-				}
-			}
-			if open >= ConcurrentStreams {
-				n++
-				break
-			}
+		if streamsOpenDuring(reqs, l.BodyStart, l.BodyEnd, tm) {
+			n++
 		}
 	}
 	return n
 }
 
-// longestChain is the most requests that follow one another with no more than MaxChainGap between.
-func longestChain(reqs []Stream) int {
-	rs := append([]Stream(nil), reqs...)
+// streamsOpenDuring reports whether, at some moment from from to to, at least tm.ConcurrentStreams streams, each at
+// tm.StreamRate or more, were open. The moments that matter are from itself and each stream's opening inside it.
+func streamsOpenDuring(reqs []Stream, from, to time.Time, tm Timing) bool {
+	at := []time.Time{from}
+	for _, r := range reqs {
+		if isStream(r, tm.StreamRate) && r.Opened.After(from) && r.Opened.Before(to) {
+			at = append(at, r.Opened)
+		}
+	}
+	for _, t := range at {
+		open := 0
+		for _, r := range reqs {
+			if isStream(r, tm.StreamRate) && !r.Opened.After(t) && r.Ended.After(t) {
+				open++
+			}
+		}
+		if open >= tm.ConcurrentStreams {
+			return true
+		}
+	}
+	return false
+}
+
+// longestChain is the most requests that follow one another with no more than maxGap between. The large requests
+// (MinLargeBody or more) are not counted: the live hour sends them a fraction of a second apart, inside the burst,
+// and they must not stand in for the run back to back near the deadline.
+func longestChain(reqs []Stream, maxGap time.Duration) int {
+	var rs []Stream
+	for _, r := range reqs {
+		if r.BodyBytes < MinLargeBody {
+			rs = append(rs, r)
+		}
+	}
 	sort.Slice(rs, func(a, b int) bool { return rs[a].Opened.Before(rs[b].Opened) })
 	best, run := 0, 0
 	for i, r := range rs {
 		// One that starts after the last ended, within MaxChainGap: concurrent streams are not a run.
-		if gap := r.Opened.Sub(rs[max(i-1, 0)].Ended); i > 0 && gap >= 0 && gap <= MaxChainGap {
+		if gap := r.Opened.Sub(rs[max(i-1, 0)].Ended); i > 0 && gap >= 0 && gap <= maxGap {
 			run++
 		} else {
 			run = 1
@@ -579,16 +643,16 @@ func longestChain(reqs []Stream) int {
 	return best
 }
 
-// isStream: a request that ran at StreamRate tokens a second or more is one of the streams the hour's load is made of.
-func isStream(r Stream) bool { return r.TokensPerSecond() >= StreamRate }
+// isStream: a request that ran at rate tokens a second or more is one of the streams the hour's load is made of.
+func isStream(r Stream, rate float64) bool { return r.TokensPerSecond() >= rate }
 
-// concurrentStreams is the most streams open together at one moment that each ran at StreamRate tokens a second or more.
-func concurrentStreams(reqs []Stream) int {
+// concurrentStreams is the most streams open together at one moment that each ran at rate tokens a second or more.
+func concurrentStreams(reqs []Stream, rate float64) int {
 	best := 0
 	for _, at := range reqs {
 		open := 0
 		for _, r := range reqs {
-			if !r.Opened.After(at.Opened) && r.Ended.After(at.Opened) && isStream(r) {
+			if !r.Opened.After(at.Opened) && r.Ended.After(at.Opened) && isStream(r, rate) {
 				open++
 			}
 		}
@@ -621,13 +685,31 @@ func longestIdle(reqs []Stream) time.Duration {
 // TunnelHourFlags are the observations S1's verdict prints as FLAG lines: they
 // are posted with the result and do not fail it.
 func TunnelHourFlags(o TunnelHourObs) []string {
+	var fl []string
 	// S1's flag is on the token direction, node to front (C6); the upload has no flag.
 	for _, r := range o.Rates {
 		if bps := r.BytesPerSecond(); r.Direction == DirDownload && r.OK && bps > 0 && bps < minRate {
-			return []string{fmt.Sprintf("download path rate %.0f B/s is under 629146 B/s (6 MiB window over 10 s)", bps)}
+			fl = append(fl, fmt.Sprintf("download path rate %.0f B/s is under 629146 B/s (6 MiB window over 10 s)", bps))
+			break
 		}
 	}
-	return nil
+	// Head-of-line (the science agent's ruling (4) on PR 255): a stall of the token direction, each FLAG naming
+	// the window its gap overlapped (HeadOfLineOf), so that a reader can tell a tunnel stall from engine work.
+	if h := o.HeadOfLine; h != nil {
+		if h.Send > HeadOfLineStall {
+			fl = append(fl, fmt.Sprintf("head-of-line, in a send window: a stream waited %s between two tokens while a large body was being sent, over the %s that marks a stall (a body on its way through the tunnel; another body's prefill may overlap)",
+				h.Send.Round(time.Millisecond), HeadOfLineStall))
+		}
+		if h.Prefill > HeadOfLineStall {
+			fl = append(fl, fmt.Sprintf("head-of-line, in a prefill window: a stream waited %s between two tokens after a large body was sent and before its response, with no body being sent, over the %s that marks a stall (the engine prefilling a body's whole prompt, not the tunnel's upload)",
+				h.Prefill.Round(time.Millisecond), HeadOfLineStall))
+		}
+		if h.Elsewhere > HeadOfLineStall {
+			fl = append(fl, fmt.Sprintf("head-of-line, in neither window: a stream waited %s between two tokens while no large body was in flight, over the %s that marks a stall",
+				h.Elsewhere.Round(time.Millisecond), HeadOfLineStall))
+		}
+	}
+	return fl
 }
 
 // VerifyAccounting judges gpu-accounting-*.

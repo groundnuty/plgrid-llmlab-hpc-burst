@@ -6,6 +6,7 @@ package fakeslurm
 
 import (
 	"io/fs"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -193,6 +194,20 @@ func TestSha256sum(t *testing.T) {
 	out, errOut, code := r.run("sha256sum /d/missing")
 	if code != 1 || out != "" || !strings.Contains(errOut, "No such file or directory") {
 		t.Errorf("sha256sum of a missing file: exit %d stdout %q stderr %q, want exit 1, no output, an error", code, out, errOut)
+	}
+}
+
+// date -u +%s is the platform clock's time in seconds; any other form is refused.
+func TestDate(t *testing.T) {
+	r := newRig(t, Config{})
+	want := strconv.FormatInt(r.clock.Now().Unix(), 10) + "\n"
+	if out := r.must("date -u +%s"); out != want {
+		t.Errorf("date -u +%%s = %q, want %q", out, want)
+	}
+	for _, line := range []string{"date", "date +%s", "date -u", "date -u +%Y"} {
+		if out, _, code := r.run(line); code != 1 || out != "" {
+			t.Errorf("%q: exit %d stdout %q, want a refusal", line, code, out)
+		}
 	}
 }
 

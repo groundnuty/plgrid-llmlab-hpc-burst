@@ -17,9 +17,14 @@
 // observation, and writes the text to post.
 //
 // Steps are supplied by the test files: the stand-in steps of the dry run
-// (dry_test.go), which drive a fake Slurm in run mode, and the live steps
-// (steps_live_test.go), which wait for the one-host rehearsal's scenario code
-// (PR #161) and fail loudly until it is wired.
+// (dry_test.go), which drive a fake Slurm in run mode with no stack, and the
+// live steps (steps_live_test.go, live_flows_test.go; issue #245), which start
+// the whole stack on this host with the one-host rehearsal's harness
+// (internal/rehearsal/stack) and drive it against the row's cluster. The live
+// steps also run against a stand-in cluster, the fake Slurm in run mode behind
+// the rehearsal's sshd (standin_test.go, HPCBURST_ALPHA_STANDIN=1), which proves
+// the wiring and not a cluster. What they read is built into observations by
+// pure functions (liveobs.go, workerfault.go, ledger.go).
 //
 // Provenance: new package. The judged criteria are HBEP-5, HBEP-6, HBEP-7 and
 // HBEP-8's; the path-rate rule is spike S1's verdict C6 (spikes/s1-frp).

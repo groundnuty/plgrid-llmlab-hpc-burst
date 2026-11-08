@@ -34,7 +34,8 @@
 # setting is missing, a file is not mode 600, the one-job slot is in use; or a
 # job of a row with a start-wait bound did not start within it and was cancelled
 # by its tag, or a row in a one-job slot with no start wait (the stack rows that hold QOS now's GPU for hours, and
-# real-engine) was still pending after its wait in the queue (below) and was cancelled by its tag: not a failure, try again later; or the scheduler rejected the
+# real-engine) was still pending after its wait in the queue (below) and was cancelled by its tag, or a tunnel row's job was
+# still pending a minute before its deployment's first end and was cancelled by its tag: not a failure, try again later; or the scheduler rejected the
 # row's shape in the dry-run estimate, with or without --yes); 4 a cluster test
 # was not run because --yes was not given.
 #
@@ -56,6 +57,13 @@
 # (issue #222); an explicit LIVE_PENDING_MAX_SECONDS overrides it. A job still pending at the bound is cancelled by its
 # tag, the test writes not-run.txt and skips, and the script reports "<row>: NOT RUN" and exits 3. On a row that holds no
 # such slot the same overrun is a failure.
+#
+# A third NOT RUN: a tunnel row's deployment is created ending at the earliest drain start its one job can have (the time
+# limit less the drain window after its creation), so that the controller plans the job no replacement (the science
+# agent's ruling on PR 255). Its first clock is therefore also at most a minute before that end, whatever
+# LIVE_PENDING_MAX_SECONDS allows: a job still pending then is cancelled by its tag, the test writes not-run.txt saying
+# so and skips, and the script reports "<row>: NOT RUN" and exits 3, on either cluster (docs/alpha-runbook.md gives
+# each lease's cap).
 #
 # The rule behind both: a row in a one-job slot (the cluster table's slot column), on either cluster, must have a start
 # wait of 10 min or less or a wait in the queue of 30 min or less (pending_max), and it passes the slot guard
@@ -81,6 +89,8 @@
 #   LIVE_DIALHOME_MODE           direct or ssh: how the jobs reach the host (HBEP-6)
 #   LIVE_DIALHOME_ADDR           host:port of the dial-home route, as the compute nodes see it
 #   LIVE_DIALHOME_KEY            ssh mode only: the restricted dial-home key file, mode 600
+#   LIVE_DIALHOME_LISTEN         direct mode: host:port of the front's dial-home listener on this host, where the
+#                                owner's route arrives; a direct run without it fails at its first step, naming it
 #   LIVE_BIN_DIR                 absolute path of the directory with k3s-1.36.5/ and the pinned frp (frps, frpc); read by
 #                                the rows that run the stack and by rehearsal-part3
 #   LIVE_TUNNEL_LEASE_MINUTES    optional, the tunnel rows' lease in minutes, 106 to 240 (default 137, the shape below): the owner's
@@ -477,7 +487,7 @@ load_settings() {
     [ "$k" != "$line" ] || continue
     v=${v%\"}; v=${v#\"}; v=${v%\'}; v=${v#\'}
     case $k in
-      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_BIN_DIR|LIVE_OWNER_GO_HELIOS_NOW|LIVE_TUNNEL_LEASE_MINUTES|LIVE_PROBE_HOST|LIVE_PROBE_PORT|LIVE_PROBE_LABEL|LIVE_FRONT_HOST_LABEL)
+      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_DIALHOME_LISTEN|LIVE_BIN_DIR|LIVE_OWNER_GO_HELIOS_NOW|LIVE_TUNNEL_LEASE_MINUTES|LIVE_PROBE_HOST|LIVE_PROBE_PORT|LIVE_PROBE_LABEL|LIVE_FRONT_HOST_LABEL)
         S[$k]=$v ;;
     esac
   done 2>/dev/null < "$HPCBURST_LIVE_SETTINGS"
@@ -774,6 +784,18 @@ EOS
   printf '%s\n' "$reply" | grep -c '^cancelled=1$' || true
 }
 
+# OWN_PREFIX: the tag prefix of the stack rows' jobs (alpha-*, tunnel-hour-*; issue #245, review of PR 255, B3). The
+# script draws a run ID for each such row before it runs the test (new_run_id) and passes it on
+# (HPCBURST_ALPHA_RUN_ID); the test names its Provider after it, and the controller names every Allocation after its
+# Provider, so every job the controller submits for the run has a name that starts with "hb-alpha-<run ID>-". The cleanup owns a job of that prefix whether
+# or not the test wrote its tag down: a tag the watch never delivered, or a write that failed, leaves no job
+# behind. The ID is 10 random hex digits, so no other run's job, nor the owner's, has the prefix.
+OWN_PREFIX=""
+RUN_ID=""
+
+# new_run_id: 10 random lowercase hex digits.
+new_run_id() { od -An -N5 -tx1 /dev/urandom | tr -d ' \n'; }
+
 # own_tags: the job names this run submitted (or may have submitted), one per line, from OWN_TAGS_FILE.
 # The real-engine run writes its tag there before it submits; a conformance run's test writes each
 # Allocation's tag before anything can submit it (job-tags.txt). Only a name of this shape is accepted.
@@ -784,12 +806,14 @@ own_tags() {
 }
 
 # owned_present <queue listing> <tags>: the IDs in the listing (id|name|partition lines) that this run owns,
-# one per line: a job named by one of the tags, or the job ID the run was given.
+# one per line: a job named by one of the tags, a job whose name has the run's own prefix (OWN_PREFIX), or the job
+# ID the run was given.
 owned_present() {
   local now=$1 tags=$2 id name
   while IFS='|' read -r id name _; do
     [ -n "$id" ] || continue
-    if { [ -n "$tags" ] && has_line "$tags" "$name"; } || { [ -n "$JOBID" ] && [ "$id" = "$JOBID" ]; }; then echo "$id"; fi
+    if { [ -n "$tags" ] && has_line "$tags" "$name"; } || { [ -n "$JOBID" ] && [ "$id" = "$JOBID" ]; } ||
+      { [ -n "$OWN_PREFIX" ] && [ "${name#"$OWN_PREFIX"}" != "$name" ]; }; then echo "$id"; fi
   done <<<"$now"
 }
 
@@ -825,7 +849,7 @@ clean_cluster() {
   # A run that was stopped (a timeout, a signal, a panic) never got to say what it could not settle: every owned
   # tag counts as unresolved, and an interrupt at any time does too.
   stopped=0
-  if { [ "$TEST_STOPPED" = 1 ] || [ -n "$INTERRUPTED" ]; } && { [ -n "$tags" ] || [ -n "$JOBID" ]; }; then
+  if { [ "$TEST_STOPPED" = 1 ] || [ -n "$INTERRUPTED" ]; } && { [ -n "$tags" ] || [ -n "$JOBID" ] || [ -n "$OWN_PREFIX" ]; }; then
     stopped=1; need=$((CLEAN_QUIET_POLLS+CLEAN_UNRESOLVED_POLLS))
   fi
   while :; do
@@ -896,15 +920,21 @@ wait_child() {
 # ---------------------------------------------------------------- results
 
 # not_run_verdict <name> <rc> <failed> <skipped> <named result>: the NOT RUN protocol (see the header). True only for
-# a row with a start wait, or a row of the owner-go table (a bound on its wait in the queue), whose test skipped once at
-# the top level with no failure, exit status 0 and the marker, a regular file (not a link) in this run's record
-# directory. Anything else is not a NOT RUN.
+# a row with a start wait, or a row of the owner-go table (a bound on its wait in the queue), or a tunnel row whose
+# marker says its job was still pending a minute before its deployment's first end (the science agent's ruling on PR
+# 255; first_end_marker), whose test skipped once at the top level with no failure, exit status 0 and the marker, a
+# regular file (not a link) in this run's record directory. Anything else is not a NOT RUN.
 not_run_verdict() {
   local n=$1 rc=$2 failed=$3 skipped=$4 named=$5
-  [ "${SWAIT[$n]:--}" != - ] || [ -n "${OGSET[$n]:-}" ] || return 1
   [ "$named" = SKIP ] && [ "$rc" = 0 ] && [ "$failed" = 0 ] && [ "$skipped" = 1 ] || return 1
-  [ -n "$REC_DIR" ] && [ -f "$REC_DIR/not-run.txt" ] && [ ! -L "$REC_DIR/not-run.txt" ]
+  [ -n "$REC_DIR" ] && [ -f "$REC_DIR/not-run.txt" ] && [ ! -L "$REC_DIR/not-run.txt" ] || return 1
+  [ "${SWAIT[$n]:--}" != - ] || [ -n "${OGSET[$n]:-}" ] && return 0
+  case $n in tunnel-hour-*) first_end_marker ;; *) return 1 ;; esac
 }
+
+# first_end_marker: the run's NOT RUN marker says its job was still pending a minute before its deployment's first
+# end (internal/alpha, NotRunNote), the one NOT RUN of a tunnel row that has no other bound.
+first_end_marker() { grep -q "a minute before the deployment's first end" "$REC_DIR/not-run.txt" 2>/dev/null; }
 
 # judge <name> <log> <rc>: the verdict from the test's verbose log and exit status. A skip is not a pass, at
 # any level. Only counts and fixed labels reach the screen: a subtest's name can hold anything.
@@ -921,6 +951,8 @@ judge() {
     NOT_RUN=1
     if [ "${SWAIT[$n]:--}" != - ]; then
       say "$n: NOT RUN (a job did not start within ${SWAIT[$n]} min of its acceptance and was cancelled by its tag; not a failure)"
+    elif first_end_marker; then
+      say "$n: NOT RUN (a job was still pending a minute before its deployment's first end and was cancelled by its tag; not a failure)"
     else
       say "$n: NOT RUN (a job was still pending after $(fmt_pending "$(pending_max "$n")") in the queue and was cancelled by its tag; not a failure)"
     fi
@@ -1016,14 +1048,15 @@ env_alpha() {
   export HPCBURST_ALPHA_HOST_LOCK=${S[LIVE_LOCK_DIR]}/$host.lock HPCBURST_ALPHA_CONTROL_DIR=$CONTROL_DIR
   export HPCBURST_ALPHA_OUT=$REC_DIR HPCBURST_ALPHA_BIN_DIR=${S[LIVE_BIN_DIR]} HPCBURST_ALPHA_BUILD_DIR=${ALPHA_BUILD_DIR:-}
   export HPCBURST_ALPHA_DIALHOME_MODE=${S[LIVE_DIALHOME_MODE]} HPCBURST_ALPHA_DIALHOME_ADDR=${S[LIVE_DIALHOME_ADDR]}
-  export HPCBURST_ALPHA_PENDING_MAX_SECONDS=$(pending_max "$n")
+  export HPCBURST_ALPHA_PENDING_MAX_SECONDS=$(pending_max "$n") HPCBURST_ALPHA_RUN_ID=$RUN_ID
   export_front_label "$n"
   # A tunnel row's lease, in minutes, as the shape holds it (after LIVE_TUNNEL_LEASE_MINUTES): the test judges that value.
   case $n in
     tunnel-hour-*) local lh lm; IFS=: read -r lh lm _ <<<"${TLIMIT[$n]}"; export HPCBURST_ALPHA_LEASE_MINUTES=$((10#$lh * 60 + 10#$lm)) ;;
   esac
-  unset HPCBURST_ALPHA_QOS HPCBURST_ALPHA_DIALHOME_KEY
+  unset HPCBURST_ALPHA_QOS HPCBURST_ALPHA_DIALHOME_KEY HPCBURST_ALPHA_DIALHOME_LISTEN
   [ "${QOS[$n]}" = - ] || export HPCBURST_ALPHA_QOS=${QOS[$n]}
+  [ -z "${S[LIVE_DIALHOME_LISTEN]:-}" ] || export HPCBURST_ALPHA_DIALHOME_LISTEN=${S[LIVE_DIALHOME_LISTEN]}
   [ "${S[LIVE_DIALHOME_MODE]}" != ssh ] || export HPCBURST_ALPHA_DIALHOME_KEY=${S[LIVE_DIALHOME_KEY]}
 }
 
@@ -1186,6 +1219,14 @@ run_cluster() {
   REC_DIR="$OUT/$n-$(date -u +%Y%m%dT%H%M%SZ)-$$"
   mkdir -m 700 "$REC_DIR" || { release_run_lock; say "$n: FAIL (the record directory could not be made)"; return 1; }
   if [ "$n" = real-engine ]; then OWN_TAGS_FILE="$RE_DIR/submission-tag"; else OWN_TAGS_FILE="$REC_DIR/job-tags.txt"; fi
+  # A stack row's jobs carry the run's own prefix, set before the test can submit anything.
+  RUN_ID=""; OWN_PREFIX=""
+  case $n in
+    alpha-*|tunnel-hour-*)
+      RUN_ID=$(new_run_id)
+      [[ $RUN_ID =~ ^[0-9a-f]{10}$ ]] || { release_run_lock; say "$n: FAIL (no run ID could be drawn)"; return 1; }
+      OWN_PREFIX="hb-alpha-$RUN_ID-" ;;
+  esac
   JOBID=""; CLEAN_TRIES=0; NOT_RUN=0; TEST_STOPPED=0
   ACTIVE_HOST=$host
   t0=$(date +%s)

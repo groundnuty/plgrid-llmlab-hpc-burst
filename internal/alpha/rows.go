@@ -65,6 +65,17 @@ const (
 	// #224): the hour must send such requests, among the streams, so that the upload
 	// direction carries real load and the tunnel's head-of-line pressure shows there.
 	MinLargeBody = 100_000
+	// UploadBody, UploadStreams and UploadPause are the live tunnel hour's large
+	// requests (issue #224, the upload direction, front to node; the science
+	// agent's ruling (4) on PR 255): prompts of up to 0.4 MB, the top of #224's
+	// 0.1 to 0.4 MB, and fewer tokens than the deployment's context, from two
+	// senders, each pausing half a second after a reply, for the 30 s beside the
+	// download's measurement: bodies among the 16 streams, each served by the
+	// engine with one token, a prefill of the whole prompt, and counted in its
+	// usage (PromptTokensOf).
+	UploadBody    = 400_000
+	UploadStreams = 2
+	UploadPause   = 500 * time.Millisecond
 	// MinIdleGap is the shortest stretch with no request open at all, where the
 	// session carries heartbeats only.
 	MinIdleGap = 2 * time.Minute
@@ -178,6 +189,89 @@ type Row struct {
 	MostJobs int
 	// PostsTo names where the run's result and its slot use are posted.
 	PostsTo string
+	// Timing is the clock the row is judged on; the zero Timing is the live
+	// one (Clock).
+	Timing Timing
+}
+
+// Timing is the clock a row's judgement runs on: the deployment timing its
+// scenario applies and what its hour of traffic must hold. The zero Timing is
+// the live one: a zero field means this file's constant (LiveTiming). Only a
+// stand-in run of the live steps, which drives the real stack against a fake
+// cluster within a 20-minute hold, scales it (issue #245); every live row keeps
+// the zero Timing.
+type Timing struct {
+	MaxRequestDuration, DrainMargin, HandoverMargin, StartTimeout time.Duration
+	// IdleLimit is the no-overlap row's idleLimit, and MaxIdleLimit the longest
+	// one its verdict takes as short.
+	IdleLimit, MaxIdleLimit time.Duration
+	// TunnelHour is how long the hour's traffic runs, and Hour the span its
+	// requests and the job must cover.
+	TunnelHour, Hour  time.Duration
+	MinChain          int
+	MaxChainGap       time.Duration
+	NearDeadline      time.Duration
+	ConcurrentStreams int
+	StreamRate        float64
+	MinIdleGap        time.Duration
+	MaxSampleGap      time.Duration
+	// UploadBody is the size of the large requests' bodies in bytes,
+	// UploadStreams how many senders send them, and UploadPause the pause each
+	// sender takes after a reply.
+	UploadBody, UploadStreams int
+	UploadPause               time.Duration
+}
+
+// LiveTiming is the live rows' clock: this file's constants, and S1's hour.
+func LiveTiming() Timing {
+	return Timing{MaxRequestDuration: MaxRequestDuration, DrainMargin: DrainMargin, HandoverMargin: HandoverMargin, StartTimeout: StartTimeout,
+		IdleLimit: IdleLimit, MaxIdleLimit: 10 * time.Minute, TunnelHour: TunnelHour, Hour: Hour, MinChain: MinChain, MaxChainGap: MaxChainGap,
+		NearDeadline: NearDeadline, ConcurrentStreams: ConcurrentStreams, StreamRate: StreamRate, MinIdleGap: MinIdleGap, MaxSampleGap: MaxSampleGap,
+		UploadBody: UploadBody, UploadStreams: UploadStreams, UploadPause: UploadPause}
+}
+
+// Clock is the row's Timing with each zero field taken from LiveTiming.
+func (r Row) Clock() Timing {
+	t, l := r.Timing, LiveTiming()
+	fill := func(v *time.Duration, d time.Duration) {
+		if *v == 0 {
+			*v = d
+		}
+	}
+	fill(&t.MaxRequestDuration, l.MaxRequestDuration)
+	fill(&t.DrainMargin, l.DrainMargin)
+	fill(&t.HandoverMargin, l.HandoverMargin)
+	fill(&t.StartTimeout, l.StartTimeout)
+	fill(&t.IdleLimit, l.IdleLimit)
+	fill(&t.MaxIdleLimit, l.MaxIdleLimit)
+	fill(&t.TunnelHour, l.TunnelHour)
+	fill(&t.Hour, l.Hour)
+	fill(&t.MaxChainGap, l.MaxChainGap)
+	fill(&t.NearDeadline, l.NearDeadline)
+	fill(&t.MinIdleGap, l.MinIdleGap)
+	fill(&t.MaxSampleGap, l.MaxSampleGap)
+	if t.MinChain == 0 {
+		t.MinChain = l.MinChain
+	}
+	if t.ConcurrentStreams == 0 {
+		t.ConcurrentStreams = l.ConcurrentStreams
+	}
+	if t.StreamRate == 0 {
+		t.StreamRate = l.StreamRate
+	}
+	if t.UploadBody == 0 {
+		t.UploadBody = l.UploadBody
+	}
+	if t.UploadStreams == 0 {
+		t.UploadStreams = l.UploadStreams
+	}
+	fill(&t.UploadPause, l.UploadPause)
+	return t
+}
+
+// Lead is the lead an Instance needs under this timing (see the package-level Lead).
+func (t Timing) Lead() time.Duration {
+	return t.MaxRequestDuration + t.DrainMargin + t.HandoverMargin + t.StartTimeout
 }
 
 // ProviderRef is a Provider a deployment allows, by name and by the platform it
@@ -203,9 +297,10 @@ type DeploymentSpec struct {
 // ReleaseWhenIdle with a short idle limit (hbep/0007-lifecycle-controller/
 // README.md, the alpha run on Helios).
 func (r Row) Plan() DeploymentSpec {
-	d := DeploymentSpec{Providers: []ProviderRef{{Name: r.Cluster, Cluster: r.Cluster}}, LeaseLimit: r.Lease, MaxRequestDuration: MaxRequestDuration}
+	tm := r.Clock()
+	d := DeploymentSpec{Providers: []ProviderRef{{Name: r.Cluster, Cluster: r.Cluster}}, LeaseLimit: r.Lease, MaxRequestDuration: tm.MaxRequestDuration}
 	if r.Name == "alpha-helios-nooverlap" {
-		d.ReleaseWhenIdle, d.IdleLimit = true, IdleLimit
+		d.ReleaseWhenIdle, d.IdleLimit = true, tm.IdleLimit
 	}
 	return d
 }

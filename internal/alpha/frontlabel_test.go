@@ -129,7 +129,7 @@ func TestARunWithNoFrontLabelIsRefused(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		st := &closing{notWired: notWired{}}
+		st := &closing{}
 		if _, err := Run(context.Background(), cfg, st, rec, t.Logf); err == nil || !strings.Contains(err.Error(), "front host label") {
 			t.Errorf("label %q: err = %v, want a refusal that names the front host label", label, err)
 		}

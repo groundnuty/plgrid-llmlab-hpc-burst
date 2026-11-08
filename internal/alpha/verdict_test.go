@@ -462,16 +462,16 @@ func TestTheTrafficOfTheHourAtItsBoundaries(t *testing.T) {
 					reqs = append(reqs, r)
 				}
 			}
-			wantFailure(t, trafficChecks(reqs), c.want)
+			wantFailure(t, trafficChecks(reqs, LiveTiming(), false), c.want)
 		})
 	}
 	// The burst's streams, side by side, are not a run back to back: without the chains there is none.
 	burstOnly := goodMix().requests(at(0))[3 : 3+ConcurrentStreams]
 	// And the runs of the good mix are exactly MinChain long, so a run of one fewer is not enough.
-	if n := longestChain(goodMix().requests(at(0))[:3]); n != MinChain {
+	if n := longestChain(goodMix().requests(at(0))[:3], MaxChainGap); n != MinChain {
 		t.Errorf("the good mix's first run is %d requests, want %d", n, MinChain)
 	}
-	if n := longestChain(burstOnly); n != 1 {
+	if n := longestChain(burstOnly, MaxChainGap); n != 1 {
 		t.Errorf("a run of %d among concurrent streams, want 1", n)
 	}
 	// And the shortest idle stretch is the longest gap, not the first.

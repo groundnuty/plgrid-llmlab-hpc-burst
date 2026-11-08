@@ -212,10 +212,10 @@ func TestAScenarioErrorFailsTheRunAndClosesTheSteps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st := &closing{notWired: notWired{}}
+	st := &closing{failedSteps: failedSteps{ErrNoDialHomeListen}}
 	_, err = Run(context.Background(), cfg, st, rec, t.Logf)
-	if err == nil || !strings.Contains(err.Error(), "wait for #161") {
-		t.Fatalf("err = %v, want the not-wired error", err)
+	if !errors.Is(err, ErrNoDialHomeListen) {
+		t.Fatalf("err = %v, want the steps' named error", err)
 	}
 	if !st.closed {
 		t.Error("the steps were not closed after a failed scenario")
@@ -223,8 +223,29 @@ func TestAScenarioErrorFailsTheRunAndClosesTheSteps(t *testing.T) {
 }
 
 type closing struct {
-	notWired
+	failedSteps
 	closed bool
+}
+
+// A live run in direct mode with no local dial-home listener cannot start: its
+// steps return the named error, before anything is started or submitted.
+func TestALiveRunWithoutItsListenerNamesWhatIsMissing(t *testing.T) {
+	m := liveSettings("alpha-athena-handover")
+	delete(m, envListen)
+	cfg, skip, err := ConfigFromEnv(env(m), "alpha-athena-handover")
+	if skip != "" || err != nil {
+		t.Fatalf("skip %q, err %v", skip, err)
+	}
+	st, ok := liveSteps(t, cfg).(failedSteps)
+	if !ok || !errors.Is(st.err, ErrNoDialHomeListen) {
+		t.Fatalf("liveSteps = %#v, want the steps that return ErrNoDialHomeListen", st)
+	}
+	if _, err := st.Handover(context.Background(), Plan{}); !errors.Is(err, ErrNoDialHomeListen) {
+		t.Errorf("Handover returned %v", err)
+	}
+	if _, err := st.Ledger().Jobs(context.Background(), []string{"hb-x-1"}); !errors.Is(err, ErrNoLedger) {
+		t.Errorf("the ledger of a run that never started returned %v, want ErrNoLedger", err)
+	}
 }
 
 func (c *closing) Close(context.Context) error { c.closed = true; return nil }
@@ -368,7 +389,7 @@ func containsLine(lines []string, want string) bool {
 
 // notStarted is a scenario whose first job never started; its Close can fail.
 type notStarted struct {
-	notWired
+	failedSteps
 	closeErr error
 }
 
@@ -407,7 +428,7 @@ func TestACloseThatFailsTurnsANotRunIntoAFailure(t *testing.T) {
 
 // The marker names the row and the wait, and no job: the script prints and posts around it.
 func TestTheNotRunNoteNamesNoJob(t *testing.T) {
-	note := NotRunNote(rowOf("tunnel-hour-helios"), 30*time.Minute)
+	note := NotRunNote(rowOf("tunnel-hour-helios"), 30*time.Minute, ErrNotStarted)
 	if want := "tunnel-hour-helios: a job was still pending after 30m0s;"; !strings.Contains(note, want) {
 		t.Errorf("note %q lacks %q", note, want)
 	}

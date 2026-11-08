@@ -1,6 +1,6 @@
 package fakeslurm
 
-// New. The file and environment commands of the grammar: cat >, printenv,
+// New. The file and environment commands of the grammar: cat >, date -u +%s, printenv,
 // sha256sum, umask, mkdir -p, chmod, mv -f and mv -fT, rm -f, rm -rf and test -f, over
 // the platform's file system (in memory, or on disk in run mode).
 
@@ -31,6 +31,17 @@ func (sh *shell) cat(c simpleCmd) int {
 	if err := fsys.write(name, sh.stdin, sh.fileMode(), sh.s.user); err != nil {
 		return sh.fail(1, "bash: line 1: %s: %v", name, err)
 	}
+	return 0
+}
+
+// date is "date -u +%s": the platform clock's time, in whole seconds since the
+// epoch, the cluster's own clock as a login node reads it. A run that places
+// times on the cluster's clock reads it so (internal/alpha, ClusterClockLine).
+func (sh *shell) date(args []string) int {
+	if len(args) != 2 || args[0] != "-u" || args[1] != "+%s" {
+		return sh.fail(1, "date: the fake supports only: date -u +%%s")
+	}
+	sh.out("%d\n", sh.now.Unix())
 	return 0
 }
 

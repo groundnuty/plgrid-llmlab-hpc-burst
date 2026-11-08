@@ -8,11 +8,6 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
-// ErrNotWired is what the live steps return until the one-host rehearsal's
-// scenario code (PR #161) is wired in: the run fails, loudly, and has used no
-// cluster.
-var ErrNotWired = errors.New("the live scenario steps are not wired yet: they wait for #161 (internal/rehearsal/scenario)")
-
 // ErrNotStarted is what a scenario returns when a job of the run was still
 // pending when the first clock (Plan.PendingMax) ran out, after it cancelled the
 // run's jobs by their tags. For a row that holds QOS now's one-job slot
@@ -44,8 +39,9 @@ type Ledger interface {
 
 // Steps is the seam between the scenario and the judgement. A scenario starts
 // the stack, drives it and returns what it saw; it never judges. The dry run's
-// stand-in steps (dry_test.go) and the live steps (steps_live_test.go) are the
-// two implementations.
+// stand-in steps (dry_test.go) and the live steps (steps_live_test.go and
+// live_flows_test.go, over the real cluster or the stand-in one) are the two
+// implementations.
 type Steps interface {
 	Handover(ctx context.Context, p Plan) (HandoverObs, error)
 	NoOverlap(ctx context.Context, p Plan) (NoOverlapObs, error)

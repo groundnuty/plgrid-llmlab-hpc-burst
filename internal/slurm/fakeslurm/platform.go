@@ -88,6 +88,11 @@ type Config struct {
 	// both; the default is the real behaviour. The option stands for a Slurm
 	// that is noisy, such as one run with -v.
 	NoisyScancel bool
+	// FirstJobID is the ID of the first job the Platform gives; 0 keeps the
+	// default, 1001. Platforms in different tests of one machine can then
+	// number their jobs apart, so that a job found by its ID (SLURM_JOB_ID in
+	// run mode) is never another Platform's. A negative value is a test bug.
+	FirstJobID int
 	// Run, when set, puts the platform in run mode (doc.go, Run mode): the
 	// file system is a real directory, and each job's --wrap runs as a local
 	// process. A Platform in run mode must be closed.
@@ -100,8 +105,8 @@ type Call struct {
 	// Words are the command's words with quotes stripped. "cat > f" is
 	// ["cat", ">", "f"].
 	Words []string
-	// StdinLen is the length of the standard input of a cat command; the
-	// content is never stored.
+	// StdinLen is the length of the standard input of a cat command or an
+	// srun step, the two that read it; the content is never stored.
 	StdinLen int
 	Time     time.Time
 }
@@ -158,9 +163,16 @@ func New(clock Clock, cfg Config) *Platform {
 	if err != nil {
 		panic(fmt.Sprintf("fakeslurm: TimeZone: %v", err))
 	}
+	if cfg.FirstJobID < 0 {
+		panic(fmt.Sprintf("fakeslurm: FirstJobID %d is negative", cfg.FirstJobID))
+	}
+	first := firstJobID
+	if cfg.FirstJobID != 0 {
+		first = cfg.FirstJobID
+	}
 	cfg.Partitions = append([]Partition(nil), cfg.Partitions...)
 	p := &Platform{
-		clock: clock, cfg: cfg, zone: zone, nextID: firstJobID, fs: newFS(),
+		clock: clock, cfg: cfg, zone: zone, nextID: first, fs: newFS(),
 		phantoms: map[string]int{}, gates: map[string][]*Gate{},
 	}
 	if cfg.Run != nil {
@@ -220,7 +232,8 @@ func (s *Session) Generation() uint64 { return s.gen.Load() }
 func (s *Session) Reconnect() { s.gen.Add(1) }
 
 // Run implements slurm.Runner. See doc.go for the grammar. The context ends a
-// command that waits at a gate; the command's Timeout is ignored.
+// command that waits at a gate; the command's Timeout is ignored, except by
+// srun, which it and the context both bound (srun.go).
 func (s *Session) Run(ctx context.Context, cmd slurm.Command) (slurm.Result, error) {
 	p := s.p
 	p.enter()
@@ -242,7 +255,7 @@ func (s *Session) Run(ctx context.Context, cmd slurm.Command) (slurm.Result, err
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.execLine(s, cmds, cmd.Stdin)
+	return p.execLine(ctx, s, cmds, cmd)
 }
 
 func (p *Platform) enter() {

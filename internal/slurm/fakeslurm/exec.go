@@ -5,6 +5,7 @@ package fakeslurm
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -19,13 +20,17 @@ func isNotStarted(err error) bool { return errors.Is(err, slurm.ErrNotStarted) }
 // shell is the state of one line: the shell a non-interactive ssh command
 // starts, with its umask, its standard input and the output so far.
 type shell struct {
-	p      *Platform
-	s      *Session
-	now    time.Time
-	umask  fs.FileMode
-	stdin  []byte
-	stdout bytes.Buffer
-	stderr bytes.Buffer
+	p *Platform
+	s *Session
+	// ctx and timeout are the Run call's: only srun, the one command that
+	// outlives the lock, is bound by them (srun.go).
+	ctx     context.Context
+	timeout time.Duration
+	now     time.Time
+	umask   fs.FileMode
+	stdin   []byte
+	stdout  bytes.Buffer
+	stderr  bytes.Buffer
 	// runErr is a runner error that a command decided on after it had done
 	// its work (a lost sbatch reply); the line then returns it with no result.
 	runErr error
@@ -37,10 +42,12 @@ type command func(sh *shell, args []string) int
 
 var commands = map[string]command{
 	"sbatch":    (*shell).sbatch,
+	"srun":      (*shell).srun,
 	"squeue":    (*shell).squeue,
 	"sacct":     (*shell).sacct,
 	"scancel":   (*shell).scancel,
 	"scontrol":  (*shell).scontrol,
+	"date":      (*shell).date,
 	"printenv":  (*shell).printenv,
 	"sha256sum": (*shell).sha256sum,
 	"umask":     (*shell).setUmask,
@@ -51,14 +58,16 @@ var commands = map[string]command{
 	"test":      (*shell).test,
 }
 
-// execLine runs the commands of one line with mu held. Each command is logged
-// as it begins; a command that exits non-zero ends the line.
-func (p *Platform) execLine(s *Session, cmds []simpleCmd, stdin []byte) (slurm.Result, error) {
-	sh := &shell{p: p, s: s, now: p.clock.Now(), umask: 0o022, stdin: stdin}
+// execLine runs the commands of one line with mu held (srun lets go of it
+// while its step runs). Each command is logged as it begins; a command that
+// exits non-zero ends the line.
+func (p *Platform) execLine(ctx context.Context, s *Session, cmds []simpleCmd, cmd slurm.Command) (slurm.Result, error) {
+	stdin := cmd.Stdin
+	sh := &shell{p: p, s: s, ctx: ctx, timeout: cmd.Timeout, now: p.clock.Now(), umask: 0o022, stdin: stdin}
 	code := 0
 	for _, c := range cmds {
 		stdinLen := 0
-		if c.redirected {
+		if c.redirected || c.words[0] == "srun" { // the two commands that read standard input
 			stdinLen = len(stdin)
 		}
 		p.logCall(s, c, stdinLen, sh.now)
