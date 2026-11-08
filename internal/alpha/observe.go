@@ -32,7 +32,25 @@ type Stream struct {
 	// is not after the start) is not counted as sent while the streams were open.
 	BodyStart time.Time `json:"bodyStart,omitzero"`
 	BodyEnd   time.Time `json:"bodyEnd,omitzero"`
+	// The live hour's large requests (the science agent's ruling (4) on PR 255: no
+	// sender-side timing on the live path in alpha). PromptWords is the words of
+	// the request's prompt, and ArrivedTokens the input tokens the engine said it
+	// read, in its refusal of a prompt over its context (ArrivalVerified).
+	// SendStart and SendEnd are the client's own window of the request, from its
+	// first byte sent to its reply read: the body is in flight inside it.
+	PromptWords   int       `json:"promptWords,omitempty"`
+	ArrivedTokens int       `json:"arrivedTokens,omitempty"`
+	SendStart     time.Time `json:"sendStart,omitzero"`
+	SendEnd       time.Time `json:"sendEnd,omitzero"`
+	// Ticks are the times, on the client's clock, at which the reply's data
+	// lines (its tokens) arrived; not in the record.
+	Ticks []time.Time `json:"-"`
 }
+
+// ArrivalVerified reports whether the engine read the request's whole prompt:
+// its refusal stated at least as many input tokens as the prompt had words.
+// Every word is at least one token, so a prompt cut short would show fewer.
+func (s Stream) ArrivalVerified() bool { return s.PromptWords > 0 && s.ArrivedTokens >= s.PromptWords }
 
 // UploadRecorded reports whether the upload interval is recorded: a start, and an end after it.
 func (s Stream) UploadRecorded() bool {
@@ -190,6 +208,26 @@ type TunnelHourObs struct {
 	Deployment DeploymentSpec `json:"deployment"`
 	// Rates are the path rates, one per direction (DirUpload and DirDownload).
 	Rates []PathRate `json:"rates"`
+	// UploadNotMeasured, when set, says why the upload's interval and rate were
+	// not measured: a live row in alpha, with no sender-side timing on the live
+	// path (the science agent's ruling (4) on PR 255; front-side timing is #273).
+	// The verdict then takes the large requests' arrival and their client
+	// windows in place of their upload intervals; a dry run leaves it empty and
+	// keeps #244's full check.
+	UploadNotMeasured string `json:"uploadNotMeasured,omitempty"`
+	// HeadOfLine is the streams' longest gap between two tokens while a large
+	// body was in flight, against the rest of the hour (live rows).
+	HeadOfLine *HeadOfLine `json:"headOfLine,omitempty"`
+}
+
+// HeadOfLine is the head-of-line measure of the tunnel hour: the longest gap
+// between two tokens of any stream while a large request was in flight (by
+// the client's window of it), the longest elsewhere in the hour, and how many
+// gaps fell in such a window.
+type HeadOfLine struct {
+	InFlight  time.Duration `json:"inFlight"`
+	Elsewhere time.Duration `json:"elsewhere"`
+	Gaps      int           `json:"gapsInFlight"`
 }
 
 // AccountingObs is the kept accounting record of one real GPU job beside the

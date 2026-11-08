@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -127,49 +128,95 @@ func StreamOf(rec usage.Record, end ClientEnd) Stream {
 	return s
 }
 
-// UploadRequestBody is a streamed chat request of one token whose body is at least n
-// bytes: the bytes are the "user" member, which OpenAI's API defines as an
-// end-user identifier and an engine does not tokenize, so a body of megabytes
-// costs the engine a JSON parse, not a prompt (issue #224, the upload).
-func UploadRequestBody(model string, n int) string {
+// ArrivalRequestBody is a chat request whose prompt is at least n bytes of
+// words ("hello", each a token or more), asking for maxTokens tokens, the
+// deployment's max-model-len: its prompt and output can never fit the context,
+// so the engine refuses it, and its refusal states the input tokens it read
+// (InputTokensOf), which shows the whole body arrived (Stream.ArrivalVerified)
+// at the cost of a tokenization, not a prefill. It returns the body and the
+// prompt's words (the science agent's ruling (4) on PR 255).
+func ArrivalRequestBody(model string, n, maxTokens int) (body string, words int) {
 	m, _ := json.Marshal(model)
-	head := `{"model":` + string(m) + `,"messages":[{"role":"user","content":"hello"}],"max_tokens":1,"stream":true,"stream_options":{"include_usage":true},"user":"`
-	pad := max(n-len(head)-2, 0)
-	return head + strings.Repeat("u", pad) + `"}`
+	head := `{"model":` + string(m) + `,"messages":[{"role":"user","content":"`
+	tail := `"}],"max_tokens":` + strconv.Itoa(maxTokens) + `}`
+	// "hello", then words-1 times " hello": len(head)+len(tail)+6*words-1 bytes, at least n.
+	words = max((n-len(head)-len(tail)+1+len(" hello")-1)/len(" hello"), 1)
+	return head + "hello" + strings.Repeat(" hello", words-1) + tail, words
 }
 
-// UploadRate is the path rate in the upload direction, front to node, from
-// the upload's requests (issue #224; S1's C6): the bytes of their bodies over
-// the time from the first body's first byte to the last body's last byte, as
-// the front sent them (its usage records), asked for the time the senders
-// were asked to send. It is under load when every body was sent while all the
-// streams of the load were open, from allOpen (the last of them to deliver its
-// first token) to firstEnd (the first of them to end). It is not OK when there
-// is no request, or one did not complete or has no upload recorded.
-func UploadRate(ups []Stream, asked time.Duration, allOpen, firstEnd time.Time) PathRate {
-	r := PathRate{Direction: DirUpload, AskedSeconds: asked.Seconds(), OK: len(ups) > 0, UnderLoad: len(ups) > 0}
-	var first, last time.Time
-	for _, u := range ups {
-		if !u.Complete || !u.UploadRecorded() || u.BodyBytes <= 0 {
-			r.OK = false
-			continue
-		}
-		r.Bytes += int64(u.BodyBytes)
-		if first.IsZero() || u.BodyStart.Before(first) {
-			first = u.BodyStart
-		}
-		if u.BodyEnd.After(last) {
-			last = u.BodyEnd
-		}
-		if u.BodyStart.Before(allOpen) || u.BodyEnd.After(firstEnd) {
-			r.UnderLoad = false
-		}
-	}
-	if !first.IsZero() {
-		r.TimedSeconds = last.Sub(first).Seconds()
-	}
-	return r
+// inputTokensRE are the forms in which an engine's context-length refusal
+// states the input tokens it read, vLLM's, which the engine double follows:
+// "N input tokens" ("your prompt contains at least N input tokens", "your
+// request has N input tokens") and "N in the messages"; the first that matches
+// is taken. The wording of the v0.32.0 engine was not read (unverified on the
+// clusters).
+var inputTokensRE = []*regexp.Regexp{
+	regexp.MustCompile(`([0-9]+) input tokens`),
+	regexp.MustCompile(`([0-9]+) in the messages`),
 }
+
+// InputTokensOf reads the input tokens a context-length refusal states, from
+// the error reply's message; false when the reply is not such a refusal.
+func InputTokensOf(reply []byte) (int, bool) {
+	var e struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(reply, &e) != nil || !strings.Contains(e.Error.Message, "context length") {
+		return 0, false
+	}
+	for _, re := range inputTokensRE {
+		if m := re.FindStringSubmatch(e.Error.Message); m != nil {
+			n, err := strconv.Atoi(m[1])
+			return n, err == nil
+		}
+	}
+	return 0, false
+}
+
+// HeadOfLineOf is the head-of-line measure (HeadOfLine) of the hour's
+// streams: for every two tokens of one stream in a row, the gap between them
+// is in flight when it overlaps a window in which a large request was in
+// flight (from its first byte sent to its reply read, on the client's clock),
+// and elsewhere when it does not.
+func HeadOfLineOf(reqs []Stream, windows [][2]time.Time) HeadOfLine {
+	var h HeadOfLine
+	for _, r := range reqs {
+		for i := 1; i < len(r.Ticks); i++ {
+			from, to := r.Ticks[i-1], r.Ticks[i]
+			gap := to.Sub(from)
+			in := false
+			for _, w := range windows {
+				if from.Before(w[1]) && to.After(w[0]) {
+					in = true
+					break
+				}
+			}
+			if in {
+				h.Gaps++
+				h.InFlight = max(h.InFlight, gap)
+			} else {
+				h.Elsewhere = max(h.Elsewhere, gap)
+			}
+		}
+	}
+	return h
+}
+
+// UploadNotMeasuredLive is why a live row's upload interval and rate are not
+// measured in alpha (the science agent's ruling (4) on PR 255; front-side
+// sender timing is post-alpha, #273).
+const UploadNotMeasuredLive = "no sender-side timing on the live path"
+
+// HeadOfLineStall is the longest gap between two tokens of a stream while a
+// large body is in flight that is not flagged as a stall: a second, twenty
+// times the 50 ms a token takes at the 20 tokens a second every stream of the
+// load must hold (StreamRate). An engine's scheduling hiccup is tens of
+// milliseconds; a gap of a second while a body is in flight is the tunnel
+// holding the token direction behind the body, the head-of-line blocking
+// issue #224 asks to see.
+const HeadOfLineStall = time.Second
 
 // WorkerRestarts counts the restarts at the worker rung that the run's
 // Instances recorded (status.restarts whose part is a worker, HBEP-7, Health

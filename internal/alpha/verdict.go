@@ -336,8 +336,10 @@ func VerifyTunnelHour(row Row, o TunnelHourObs, jobs []provider.Job) []string {
 	}
 	f = append(f, requestChecks(o.Requests, o.DrainStart, tm)...)
 	f = append(f, sessionChecks(o.Requests, o.Samples, tm)...)
-	f = append(f, trafficChecks(o.Requests, tm)...)
-	f = append(f, rateChecks(o.Rates)...)
+	// A live row in alpha has no sender-side timing of the upload (the science agent's ruling (4) on PR 255).
+	live := o.UploadNotMeasured != ""
+	f = append(f, trafficChecks(o.Requests, tm, live)...)
+	f = append(f, rateChecks(o.Rates, live)...)
 	lf, by := ledgerChecks(row, o.Tags, jobs)
 	f = append(f, lf...)
 	f = append(f, tagCountChecks(row, o.Tags, "a tunnel run makes exactly one Allocation")...)
@@ -360,7 +362,7 @@ func VerifyTunnelHour(row Row, o TunnelHourObs, jobs []provider.Job) []string {
 // (front to node) and download (node to front), as S1's C6 asks of the token
 // direction: ok, at least 30 s asked, at least 29 s timed, bytes moved, measured
 // under load; the download also moves tokens (issue #224).
-func rateChecks(rates []PathRate) []string {
+func rateChecks(rates []PathRate, uploadNotMeasured bool) []string {
 	var f []string
 	by := map[string]PathRate{}
 	for _, r := range rates {
@@ -378,6 +380,8 @@ func rateChecks(rates []PathRate) []string {
 	for _, dir := range []string{DirUpload, DirDownload} {
 		r, found := by[dir]
 		switch {
+		case !found && dir == DirUpload && uploadNotMeasured:
+			// Not measured in alpha on a live row, and said so in the text to post.
 		case !found:
 			f = append(f, "the "+dir+" path rate was not posted: both directions are needed")
 		case !r.OK:
@@ -422,7 +426,9 @@ func requestChecks(reqs []Stream, drainStart time.Time, tm Timing) []string {
 			f = append(f, "a request has no opening or ending time")
 		case s.CutBy != "" || s.Error == "stream_cut":
 			f = append(f, "a stream was cut during the hour")
-		case !s.Complete:
+		case !s.Complete && !s.ArrivalVerified():
+			// A large request the engine refused for its length, showing it read the whole prompt, is the live
+			// hour's proof of arrival, not a failed stream.
 			f = append(f, "a stream did not complete")
 		case s.Ended.Sub(s.Opened) > tm.MaxRequestDuration:
 			// The front would have cut it: an observation of one means the deadline was not the deployment's.
@@ -478,7 +484,7 @@ func sessionChecks(reqs []Stream, samples []TunnelSample, tm Timing) []string {
 }
 
 // trafficChecks: the hour must have contained what tests an hour of a tunnel.
-func trafficChecks(reqs []Stream, tm Timing) []string {
+func trafficChecks(reqs []Stream, tm Timing, uploadNotMeasured bool) []string {
 	var f []string
 	if longestChain(reqs, tm.MaxChainGap) < tm.MinChain {
 		f = append(f, "the hour held no run of requests back to back")
@@ -500,12 +506,56 @@ func trafficChecks(reqs []Stream, tm Timing) []string {
 	}
 	// The upload direction (issue #224): large request bodies, sent while the 16 streams were open, so that the
 	// shared tunnel's head-of-line pressure is exercised in the direction the front's request bodies take.
-	if largestBody(reqs) < MinLargeBody {
+	switch {
+	case largestBody(reqs) < MinLargeBody:
 		f = append(f, "no request body reached 0.1 MB, so the upload direction was not exercised")
-	} else if largeAmongStreams(reqs, tm) == 0 {
+	case uploadNotMeasured:
+		// Live, in alpha (the science agent's ruling (4) on PR 255): each large body shows it arrived whole by the
+		// engine's refusal, and one was in flight, by the client's window of it, while the 16 streams were open.
+		for _, l := range LargeRequests(reqs) {
+			if !l.ArrivalVerified() {
+				f = append(f, "a request of 0.1 MB or more did not show it arrived whole: the engine's refusal must state at least its prompt's words in input tokens")
+				break
+			}
+		}
+		if largeInFlightAmongStreams(reqs, tm) == 0 {
+			f = append(f, "no request of 0.1 MB or more was in flight while the 16 streams were open")
+		}
+	case largeAmongStreams(reqs, tm) == 0:
 		f = append(f, "no request of 0.1 MB or more was sent while the 16 streams were open")
 	}
 	return f
+}
+
+// largeInFlightAmongStreams counts the large requests in flight, from the client's first byte sent to its reply read
+// (SendStart to SendEnd), at a moment when at least tm.ConcurrentStreams streams were open: the live hour's measure,
+// where the upload interval itself is not measured. A request whose window is not recorded is not counted.
+func largeInFlightAmongStreams(reqs []Stream, tm Timing) int {
+	n := 0
+	for _, l := range LargeRequests(reqs) {
+		if l.SendStart.IsZero() || !l.SendEnd.After(l.SendStart) {
+			continue
+		}
+		at := []time.Time{l.SendStart}
+		for _, r := range reqs {
+			if isStream(r, tm.StreamRate) && r.Opened.After(l.SendStart) && r.Opened.Before(l.SendEnd) {
+				at = append(at, r.Opened)
+			}
+		}
+		for _, t := range at {
+			open := 0
+			for _, r := range reqs {
+				if isStream(r, tm.StreamRate) && !r.Opened.After(t) && r.Ended.After(t) {
+					open++
+				}
+			}
+			if open >= tm.ConcurrentStreams {
+				n++
+				break
+			}
+		}
+	}
+	return n
 }
 
 // largestBody is the largest request body any request sent, in bytes.
@@ -623,13 +673,21 @@ func longestIdle(reqs []Stream) time.Duration {
 // TunnelHourFlags are the observations S1's verdict prints as FLAG lines: they
 // are posted with the result and do not fail it.
 func TunnelHourFlags(o TunnelHourObs) []string {
+	var fl []string
 	// S1's flag is on the token direction, node to front (C6); the upload has no flag.
 	for _, r := range o.Rates {
 		if bps := r.BytesPerSecond(); r.Direction == DirDownload && r.OK && bps > 0 && bps < minRate {
-			return []string{fmt.Sprintf("download path rate %.0f B/s is under 629146 B/s (6 MiB window over 10 s)", bps)}
+			fl = append(fl, fmt.Sprintf("download path rate %.0f B/s is under 629146 B/s (6 MiB window over 10 s)", bps))
+			break
 		}
 	}
-	return nil
+	// Head-of-line (the science agent's ruling (4) on PR 255): a stall of the token direction while a large body
+	// was in flight.
+	if h := o.HeadOfLine; h != nil && h.InFlight > HeadOfLineStall {
+		fl = append(fl, fmt.Sprintf("head-of-line: a stream waited %s between two tokens while a large body was in flight, over the %s that marks a stall (the longest elsewhere in the hour: %s)",
+			h.InFlight.Round(time.Millisecond), HeadOfLineStall, h.Elsewhere.Round(time.Millisecond)))
+	}
+	return fl
 }
 
 // VerifyAccounting judges gpu-accounting-*.

@@ -462,7 +462,7 @@ func TestTheTrafficOfTheHourAtItsBoundaries(t *testing.T) {
 					reqs = append(reqs, r)
 				}
 			}
-			wantFailure(t, trafficChecks(reqs, LiveTiming()), c.want)
+			wantFailure(t, trafficChecks(reqs, LiveTiming(), false), c.want)
 		})
 	}
 	// The burst's streams, side by side, are not a run back to back: without the chains there is none.

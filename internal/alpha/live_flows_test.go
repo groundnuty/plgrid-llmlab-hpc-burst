@@ -58,7 +58,9 @@ func (r *liveRun) observe(out stack.Streamed) Stream {
 		return Stream{Error: "no reply"}
 	}
 	done, finished := stack.SSEDone(out.Body)
-	return StreamOf(r.fc.RowOf(out.ID), ClientEnd{Done: done, Finished: finished, ErrorCode: stack.StreamErrorCode(out.Body)})
+	s := StreamOf(r.fc.RowOf(out.ID), ClientEnd{Done: done, Finished: finished, ErrorCode: stack.StreamErrorCode(out.Body)})
+	s.Ticks = out.Ticks
+	return s
 }
 
 // finish waits for a stream and observes it.
@@ -427,21 +429,30 @@ func (pr *prober) end() int {
 	return pr.noReady
 }
 
-// uploads is the hour's upload load (issue #224, the upload direction, front
-// to node): tm.UploadStreams senders, each sending a streamed request of one
-// token whose body is tm.UploadBody bytes (UploadRequestBody), waiting for its reply,
-// pausing tm.UploadPause, and sending the next, until rateAsked has passed.
-// Every body is a large request (MinLargeBody or more). It runs beside the
-// burst's streams, from its own goroutines, and returns every reply as the
-// client read it; one that did not end within the request's time out has no
-// request ID, which the observation counts as no reply.
-func (r *liveRun) uploads(key string) []stack.Streamed {
+// sentLarge is one large request of the hour as the client sent it: the reply,
+// the client's window from its first byte sent to its reply read, and the
+// body's bytes and prompt words.
+type sentLarge struct {
+	reply        stack.Reply
+	start, end   time.Time
+	bytes, words int
+}
+
+// largeRequests is the hour's upload direction (issue #224), with no
+// sender-side timing on the live path in alpha (the science agent's ruling (4)
+// on PR 255): tm.UploadStreams senders, each sending a request whose prompt is
+// tm.UploadBody bytes of words and that asks for the deployment's whole
+// context (ArrivalRequestBody), so that the engine refuses it for its length
+// and states the input tokens it read, which shows the body arrived whole. Each
+// sender pauses tm.UploadPause after a reply and sends the next until rateAsked
+// has passed. It runs beside the burst's streams, from its own goroutines.
+func (r *liveRun) largeRequests(key string) []sentLarge {
 	tm := r.tm
-	body := UploadRequestBody(r.fc.Model, tm.UploadBody)
+	body, words := ArrivalRequestBody(r.fc.Model, tm.UploadBody, r.maxModelLen())
 	until := time.Now().Add(rateAsked)
 	var (
 		mu   sync.Mutex
-		outs []stack.Streamed
+		outs []sentLarge
 		wg   sync.WaitGroup
 	)
 	for range tm.UploadStreams {
@@ -449,14 +460,11 @@ func (r *liveRun) uploads(key string) []stack.Streamed {
 		go func() {
 			defer wg.Done()
 			for time.Now().Before(until) {
-				_, done := r.fc.StartStream(body, key)
-				var out stack.Streamed
-				select {
-				case out = <-done:
-				case <-time.After(r.fc.RequestTimeout() + time.Minute):
-				}
+				start := time.Now()
+				rp := r.fc.Send("/v1/chat/completions", body, key)
+				end := time.Now()
 				mu.Lock()
-				outs = append(outs, out)
+				outs = append(outs, sentLarge{reply: rp, start: start, end: end, bytes: len(body), words: words})
 				mu.Unlock()
 				if tm.UploadPause > 0 {
 					time.Sleep(tm.UploadPause)
@@ -466,6 +474,30 @@ func (r *liveRun) uploads(key string) []stack.Streamed {
 	}
 	wg.Wait()
 	return outs
+}
+
+// observeLarge is a large request as an observation: the front's record of
+// it, its body and prompt, the input tokens the engine's refusal stated, and
+// the client's window.
+func (r *liveRun) observeLarge(l sentLarge) Stream {
+	if l.reply.ID == "" {
+		return Stream{Error: "no reply", BodyBytes: l.bytes, PromptWords: l.words}
+	}
+	s := StreamOf(r.fc.RowOf(l.reply.ID), ClientEnd{})
+	s.BodyBytes, s.PromptWords, s.SendStart, s.SendEnd = l.bytes, l.words, l.start, l.end
+	s.ArrivedTokens, _ = InputTokensOf(l.reply.Body)
+	return s
+}
+
+// maxModelLen is the deployment's max-model-len flag (4096 when it has none).
+func (r *liveRun) maxModelLen() int {
+	n := 4096
+	for _, f := range r.w.md.Spec.Source.Served.Flags {
+		if f.Name == "max-model-len" {
+			fmt.Sscan(f.Value, &n)
+		}
+	}
+	return n
 }
 
 // sampler looks at the tunnel session of an Instance every interval: frps's
@@ -599,8 +631,8 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	for i := 0; i < tm.MinChain; i++ {
 		reqs = append(reqs, r.finish(r.openStream(nLong, key, "")))
 	}
-	// The burst, and the path rates inside it: the download with one more
-	// stream, the upload beside it once every stream of the burst runs.
+	// The burst, and inside it the download's path rate with one more stream,
+	// and the large requests beside it once every stream of the burst runs.
 	var bs []stream
 	for i := 0; i < tm.ConcurrentStreams; i++ {
 		bs = append(bs, r.openStream(nBurst, key, ""))
@@ -608,29 +640,24 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	for _, s := range bs {
 		<-s.first
 	}
-	allOpen := time.Now()
-	upDone := make(chan []stack.Streamed, 1)
-	go func() { upDone <- r.uploads(key) }()
+	largeDone := make(chan []sentLarge, 1)
+	go func() { largeDone <- r.largeRequests(key) }()
 	rs := r.wait(r.openStream(nRate, key, ""))
-	var ups []stack.Streamed
+	var larges []sentLarge
 	select {
-	case ups = <-upDone:
+	case larges = <-largeDone:
 	case <-r.guardFail:
 		r.checkGuard()
 	case <-time.After(rateAsked + r.fc.RequestTimeout() + 2*time.Minute):
-		r.t.Fatal("the upload's senders did not finish")
+		r.t.Fatal("the large requests' senders did not finish")
 	}
 	var outs []stack.Streamed
 	for _, s := range bs {
 		outs = append(outs, r.wait(s))
 	}
 	under := true
-	firstEnd := time.Time{}
 	for _, o := range outs {
 		under = under && !o.EndAt.Before(rs.EndAt)
-		if firstEnd.IsZero() || o.EndAt.Before(firstEnd) {
-			firstEnd = o.EndAt
-		}
 		reqs = append(reqs, r.observe(o))
 	}
 	rateObs := r.observe(rs)
@@ -639,12 +666,11 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	if !rs.FirstAt.IsZero() {
 		pr.TimedSeconds = rs.EndAt.Sub(rs.FirstAt).Seconds()
 	}
-	var upObs []Stream
-	for _, u := range ups {
-		upObs = append(upObs, r.observe(u))
+	var windows [][2]time.Time
+	for _, l := range larges {
+		reqs = append(reqs, r.observeLarge(l))
+		windows = append(windows, [2]time.Time{l.start, l.end})
 	}
-	reqs = append(reqs, upObs...)
-	up := UploadRate(upObs, rateAsked, allOpen, firstEnd)
 	// Heartbeats only.
 	idle := time.Now().Add(tm.MinIdleGap + 15*time.Second)
 	r.waitFor(tm.MinIdleGap+time.Minute, "the idle stretch", func() bool { return !time.Now().Before(idle) })
@@ -664,7 +690,9 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	if err != nil {
 		return TunnelHourObs{}, err
 	}
-	p.Logf("%s: %d requests over %s; path rate, download %.0f B/s and %.0f tokens/s, upload %.0f B/s over %d requests of %d bytes", p.Row.Name, len(reqs),
-		time.Since(first).Round(time.Second), pr.BytesPerSecond(), pr.TokensPerSecond(), up.BytesPerSecond(), len(upObs), tm.UploadBody)
-	return TunnelHourObs{Tags: tags, Requests: reqs, Samples: samples, DrainStart: ds, Deployment: dep, Rates: []PathRate{up, pr}}, nil
+	hol := HeadOfLineOf(reqs, windows)
+	p.Logf("%s: %d requests over %s; path rate, download %.0f B/s and %.0f tokens/s; %d large requests of %d bytes; head-of-line %s in flight, %s elsewhere", p.Row.Name, len(reqs),
+		time.Since(first).Round(time.Second), pr.BytesPerSecond(), pr.TokensPerSecond(), len(larges), tm.UploadBody, hol.InFlight.Round(time.Millisecond), hol.Elsewhere.Round(time.Millisecond))
+	return TunnelHourObs{Tags: tags, Requests: reqs, Samples: samples, DrainStart: ds, Deployment: dep, Rates: []PathRate{pr},
+		UploadNotMeasured: UploadNotMeasuredLive, HeadOfLine: &hol}, nil
 }

@@ -52,10 +52,9 @@ var standInPair = Timing{MaxRequestDuration: 90 * time.Second, DrainMargin: 30 *
 // requests of about a minute near it, a 30 s idle stretch, a look at least
 // every 30 s, and a 12-minute lease, so that the hour ends before the drain
 // start, which the one-job end puts a minute early (LatestReady: 12 min less
-// 1 min 45 s less 5 min 5 s, over 5 minutes). The upload (issue #224) sends
-// bodies of 128 KiB, large requests, from one sender that pauses 250 ms after
-// each reply: on this host's loopback an unpaced sender would move gigabytes in
-// the 30 s, so the stand-in's upload rate is its pacing's, not a path's.
+// 1 min 45 s less 5 min 5 s, over 5 minutes). The large requests (issue #224)
+// are prompts of 128 KiB from one sender that pauses 250 ms after each reply,
+// to keep the stand-in's load on this host light.
 var standInTunnel = Timing{MaxRequestDuration: 75 * time.Second, DrainMargin: 30 * time.Second, HandoverMargin: 30 * time.Second,
 	StartTimeout: 4 * time.Minute, TunnelHour: 5*time.Minute + 5*time.Second, Hour: 5 * time.Minute, NearDeadline: time.Minute,
 	MinIdleGap: 30 * time.Second, MaxSampleGap: 30 * time.Second,

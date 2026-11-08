@@ -86,7 +86,7 @@ func tunnelHourPost(row Row, o TunnelHourObs, failures []string) string {
 	fmt.Fprintf(&b, "%s\n%s\n- the hour: %d requests over %s; longest run back to back: %d; peak streams at %.0f tokens/s or more: %d; longest idle stretch: %s; requests cut: %d\n- the tunnel session: %d distinct frps lastStartTime across %d looks (one is the pass); TunnelConnected True in %d of them\n%s",
 		verdictLine(row, failures), deploymentLine(o.Deployment), len(o.Requests), last.Sub(first).Round(time.Second), longestChain(o.Requests, tm.MaxChainGap),
 		tm.StreamRate, concurrentStreams(o.Requests, tm.StreamRate), longestIdle(o.Requests).Round(time.Second), cut,
-		len(sessions), len(o.Samples), connected, largeLine(o.Requests, tm)+rateLines(o.Rates))
+		len(sessions), len(o.Samples), connected, largeLine(o, tm)+rateLines(o)+headOfLineLine(o))
 	for _, fl := range TunnelHourFlags(o) {
 		fmt.Fprintf(&b, "- FLAG: %s\n", fl)
 	}
@@ -95,7 +95,8 @@ func tunnelHourPost(row Row, o TunnelHourObs, failures []string) string {
 
 // largeLine: how many requests had a body of 0.1 MB or more, the range of the bodies, and how many of them were
 // sent while the 16 streams were open (issue #224).
-func largeLine(reqs []Stream, tm Timing) string {
+func largeLine(o TunnelHourObs, tm Timing) string {
+	reqs := o.Requests
 	large := LargeRequests(reqs)
 	if len(large) == 0 {
 		return "- large requests (a body of 0.1 MB or more): none; largest body sent: " + fmt.Sprint(largestBody(reqs)) + " bytes\n"
@@ -104,12 +105,33 @@ func largeLine(reqs []Stream, tm Timing) string {
 	for _, r := range large {
 		lo, hi = min(lo, r.BodyBytes), max(hi, r.BodyBytes)
 	}
+	if o.UploadNotMeasured != "" {
+		arrived := 0
+		for _, r := range large {
+			if r.ArrivalVerified() {
+				arrived++
+			}
+		}
+		return fmt.Sprintf("- large requests (a body of 0.1 MB or more): %d, bodies of %d to %d bytes; %d of them in flight while the %d streams were open (by the client's window); %d shown arrived whole by the engine's refusal of their length\n",
+			len(large), lo, hi, largeInFlightAmongStreams(reqs, tm), tm.ConcurrentStreams, arrived)
+	}
 	return fmt.Sprintf("- large requests (a body of 0.1 MB or more): %d, bodies of %d to %d bytes; %d of them sent while the %d streams were open\n", len(large), lo, hi, largeAmongStreams(reqs, tm), tm.ConcurrentStreams)
+}
+
+// headOfLineLine is the head-of-line measure, for a run that took one.
+func headOfLineLine(o TunnelHourObs) string {
+	h := o.HeadOfLine
+	if h == nil {
+		return ""
+	}
+	return fmt.Sprintf("- head-of-line: longest gap between two tokens of a stream while a large body was in flight: %s (over %d gaps); elsewhere in the hour: %s\n",
+		h.InFlight.Round(time.Millisecond), h.Gaps, h.Elsewhere.Round(time.Millisecond))
 }
 
 // rateLines: the path rate of each direction, separately, upload first (issue #224). The download is the token
 // direction, with S1's tokens a second; a direction that was not measured says so.
-func rateLines(rates []PathRate) string {
+func rateLines(o TunnelHourObs) string {
+	rates := o.Rates
 	var b strings.Builder
 	for _, dir := range []string{DirUpload, DirDownload} {
 		label := "download (node to front)"
@@ -124,6 +146,8 @@ func rateLines(rates []PathRate) string {
 			}
 		}
 		switch {
+		case r == nil && dir == DirUpload && o.UploadNotMeasured != "":
+			fmt.Fprintf(&b, "- path rate, %s: not measured in alpha (%s)\n", label, o.UploadNotMeasured)
 		case r == nil:
 			fmt.Fprintf(&b, "- path rate, %s: not posted\n", label)
 		case dir == DirDownload:

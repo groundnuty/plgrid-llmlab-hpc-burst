@@ -168,6 +168,9 @@ func (c *Client) KeyFor(in *v1alpha1.Instance) string {
 type Streamed struct {
 	Reply
 	FirstAt, EndAt time.Time // the first data line and the end of the body
+	// Ticks are the arrival times of the body's data lines, in order: a
+	// stream's tokens as the client read them.
+	Ticks []time.Time
 }
 
 // StartStream sends a streamed request and reads it as it arrives. first is
@@ -207,9 +210,13 @@ func (c *Client) StartStream(body, key string) (first <-chan struct{}, done <-ch
 		sc := bufio.NewScanner(resp.Body)
 		sc.Buffer(make([]byte, 1<<20), 1<<20)
 		for sc.Scan() {
-			if strings.HasPrefix(sc.Text(), "data:") && out.FirstAt.IsZero() {
-				out.FirstAt = time.Now()
-				once()
+			if strings.HasPrefix(sc.Text(), "data:") {
+				now := time.Now()
+				out.Ticks = append(out.Ticks, now)
+				if out.FirstAt.IsZero() {
+					out.FirstAt = now
+					once()
+				}
 			}
 			buf.Write(sc.Bytes())
 			buf.WriteByte('\n')

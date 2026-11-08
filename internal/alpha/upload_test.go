@@ -1,72 +1,213 @@
 package alpha
 
-// The upload direction of the tunnel hour (issue #224): the body of a large
-// request, the upload as the front's usage record gives it, and the upload's
-// path rate, worked out by hand.
+// The live tunnel hour's upload direction in alpha (issue #224; the science
+// agent's ruling (4) on PR 255: no sender-side timing on the live path): the
+// large requests' bodies, the proof that each arrived whole, the head-of-line
+// measure, and the verdict's live and dry readings, worked out by hand.
 
 import (
 	"encoding/json"
+	"slices"
+	"strings"
 	"testing"
 	"time"
-
 )
 
-func TestTheUploadsRequestBody(t *testing.T) {
-	for _, n := range []int{100_000, 128 << 10, 8 << 20} {
-		b := UploadRequestBody("example-org/example-model", n)
-		if len(b) != n {
+func TestTheArrivalRequestBody(t *testing.T) {
+	for _, n := range []int{100_000, 128 << 10, 400_000} {
+		b, words := ArrivalRequestBody("example-org/example-model", n, 32768)
+		if len(b) < n || len(b) > n+6 {
 			t.Errorf("a body asked for %d bytes has %d", n, len(b))
 		}
 		var m struct {
 			Model     string `json:"model"`
 			MaxTokens int    `json:"max_tokens"`
-			Stream    bool   `json:"stream"`
-			User      string `json:"user"`
 			Messages  []struct {
-				Content string `json:"content"`
+				Role, Content string
 			} `json:"messages"`
 		}
 		if err := json.Unmarshal([]byte(b), &m); err != nil {
 			t.Fatalf("%d bytes: not JSON: %v", n, err)
 		}
-		// The bytes are in "user", never in the prompt: one short message, one token asked, streamed.
-		if m.Model != "example-org/example-model" || m.MaxTokens != 1 || !m.Stream || len(m.Messages) != 1 || m.Messages[0].Content != "hello" || len(m.User) < n-200 {
-			t.Errorf("%d bytes: %+v (user %d bytes)", n, m.Messages, len(m.User))
+		// One user message of "hello" words, as many as the function says, asking for the whole context.
+		if m.Model != "example-org/example-model" || m.MaxTokens != 32768 || len(m.Messages) != 1 || m.Messages[0].Role != "user" ||
+			len(strings.Fields(m.Messages[0].Content)) != words || strings.Trim(m.Messages[0].Content, "hello ") != "" {
+			t.Errorf("%d bytes: model %q, max_tokens %d, %d messages, %d words (said %d)", n, m.Model, m.MaxTokens, len(m.Messages), len(strings.Fields(m.Messages[0].Content)), words)
+		}
+	}
+	// Model "m", max_tokens 1: 51 bytes of JSON before the prompt and 19 after it, and "hello" then " hello" w-1
+	// times is 6w-1 bytes, so the least w with 70+6w-1 >= 400,000 is 66,656 (a body of 400,005 bytes).
+	if b, words := ArrivalRequestBody("m", 400_000, 1); words != 66_656 || len(b) != 400_005 {
+		t.Errorf("a 400,000-byte body holds %d words in %d bytes, want 66,656 in 400,005", words, len(b))
+	}
+}
+
+// The forms of an engine's refusal of a prompt over its context: the engine double's (vLLM's older wording), and
+// vLLM's newer ones. Anything else shows no arrival.
+func TestInputTokensOf(t *testing.T) {
+	for _, c := range []struct {
+		msg  string
+		want int
+		ok   bool
+	}{
+		{"This model's maximum context length is 4096 tokens. However, you requested 4096 output tokens and your prompt contains at least 21848 input tokens, for a total of 25944 tokens. Please reduce the length of the input prompt or the number of requested output tokens.", 21848, true},
+		{"This model's maximum context length is 32768 tokens. However, your request has 66683 input tokens. Please reduce the length of the input messages.", 66683, true},
+		{"This model's maximum context length is 32768 tokens. However, you requested 99451 tokens (66683 in the messages, 32768 in the completion). Please reduce the length of the messages or completion.", 66683, true},
+		{"CUDA out of memory in the engine", 0, false},
+		{"rate limited: 5 input tokens a second at most", 0, false},
+		{"maximum context length is 32768 tokens", 0, false},
+	} {
+		body, _ := json.Marshal(map[string]any{"error": map[string]any{"message": c.msg, "type": "BadRequestError", "code": 400}})
+		if got, ok := InputTokensOf(body); got != c.want || ok != c.ok {
+			t.Errorf("%q: %d %v, want %d %v", c.msg[:30], got, ok, c.want, c.ok)
+		}
+	}
+	if _, ok := InputTokensOf([]byte("not json")); ok {
+		t.Error("a body that is not JSON showed an arrival")
+	}
+}
+
+func TestArrivalVerified(t *testing.T) {
+	for _, c := range []struct {
+		words, tokens int
+		want          bool
+	}{{66_660, 66_683, true}, {66_660, 66_660, true}, {66_660, 66_659, false}, {66_660, 0, false}, {0, 10, false}} {
+		if got := (Stream{PromptWords: c.words, ArrivedTokens: c.tokens}).ArrivalVerified(); got != c.want {
+			t.Errorf("%d words, %d tokens: %v, want %v", c.words, c.tokens, got, c.want)
 		}
 	}
 }
 
-// Three uploads of 8 MiB from 09:00:01 to 09:00:31.5, the load's 16 streams all open from 09:00:00 to 09:01:00:
-// 24 MiB (25,165,824 bytes) over 30.5 s, asked 30 s, under load.
-func TestUploadRate(t *testing.T) {
+// Two streams, ticks 50 ms apart but for one gap of 1.2 s (from 10.0 s) and one of 300 ms (from 30.0 s); one large
+// request in flight from 9.9 s to 10.5 s. The 1.2 s gap overlaps it, the 300 ms gap does not, and neither does a gap
+// of 50 ms that ends exactly when the window opens.
+func TestHeadOfLineOf(t *testing.T) {
 	at := func(ms int) time.Time {
 		return time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC).Add(time.Duration(ms) * time.Millisecond)
 	}
-	up := func(from, to int) Stream {
-		return Stream{Complete: true, BodyBytes: 8 << 20, BodyStart: at(from), BodyEnd: at(to)}
+	var a, b []time.Time
+	for ms := 9_000; ms <= 10_000; ms += 50 {
+		a = append(a, at(ms))
 	}
-	ups := []Stream{up(1000, 11000), up(11500, 21000), up(21500, 31500)}
-	r := UploadRate(ups, 30*time.Second, at(0), at(60_000))
-	if r.Direction != DirUpload || !r.OK || !r.UnderLoad || r.Bytes != 25_165_824 || r.TimedSeconds != 30.5 || r.AskedSeconds != 30 || r.Tokens != 0 {
-		t.Fatalf("UploadRate = %+v", r)
+	a = append(a, at(11_200), at(11_250))
+	for ms := 29_000; ms <= 30_000; ms += 50 {
+		b = append(b, at(ms))
 	}
-	if bps := r.BytesPerSecond(); bps < 825_108 || bps > 825_110 {
-		t.Errorf("the rate is %.1f B/s, want 25,165,824 / 30.5 = 825,109.0", bps)
+	b = append(b, at(30_300))
+	edge := []time.Time{at(9_850), at(9_900)}
+	reqs := []Stream{{Ticks: a}, {Ticks: b}, {Ticks: edge}, {Ticks: []time.Time{at(9_950)}}}
+	h := HeadOfLineOf(reqs, [][2]time.Time{{at(9_900), at(10_500)}})
+	// In flight: a's 9,900-9,950 and 9,950-10,000 (50 ms each) and 10,000-11,200 (1.2 s).
+	if h.InFlight != 1200*time.Millisecond || h.Elsewhere != 300*time.Millisecond || h.Gaps != 3 {
+		t.Errorf("HeadOfLineOf = %+v, want 1.2s in flight over 3 gaps, 300ms elsewhere", h)
 	}
-	for name, c := range map[string]struct {
-		ups             []Stream
-		allOpen, endsAt time.Time
-		ok, under       bool
-	}{
-		"no upload":                          {nil, at(0), at(60_000), false, false},
-		"an upload that did not complete":    {[]Stream{up(1000, 11000), {BodyBytes: 8 << 20, BodyStart: at(12000), BodyEnd: at(13000)}}, at(0), at(60_000), false, true},
-		"an upload with no interval":         {[]Stream{up(1000, 11000), {Complete: true, BodyBytes: 8 << 20}}, at(0), at(60_000), false, true},
-		"one that began before all opened":   {ups, at(1500), at(60_000), true, false},
-		"one that ended after the first end": {ups, at(0), at(31_000), true, false},
-	} {
-		r := UploadRate(c.ups, 30*time.Second, c.allOpen, c.endsAt)
-		if r.OK != c.ok || r.UnderLoad != c.under {
-			t.Errorf("%s: OK %v under load %v, want %v %v", name, r.OK, r.UnderLoad, c.ok, c.under)
+	if h := HeadOfLineOf(reqs, nil); h.InFlight != 0 || h.Gaps != 0 || h.Elsewhere != 1200*time.Millisecond {
+		t.Errorf("with no window: %+v", h)
+	}
+}
+
+// scaledLiveHour is scaledHour (timing_test.go) as a live run reports it in alpha: its large request is a prompt
+// the engine refused for its length, stating its input tokens, in flight by the client's window while the 16
+// streams were open, with no upload interval and no upload rate.
+func scaledLiveHour(r Row) TunnelHourObs {
+	o, _ := scaledHour(r)
+	o.Requests = append([]Stream(nil), o.Requests...)
+	for i, q := range o.Requests {
+		if q.BodyBytes >= MinLargeBody {
+			o.Requests[i] = Stream{ID: q.ID, Opened: q.Opened, Ended: q.Ended, BodyBytes: 400_000, PromptWords: 66_660, ArrivedTokens: 66_683,
+				SendStart: q.Opened, SendEnd: q.Opened.Add(time.Second)}
 		}
+	}
+	o.Rates = []PathRate{o.Rates[1]} // the download alone
+	o.UploadNotMeasured = UploadNotMeasuredLive
+	o.HeadOfLine = &HeadOfLine{InFlight: 80 * time.Millisecond, Elsewhere: 120 * time.Millisecond, Gaps: 16}
+	return o
+}
+
+// The live reading accepts the upload as not measured, and judges the large requests by their arrival and their
+// client windows; the dry reading keeps #244's full check, so the same observation without the live marker fails.
+func TestALiveHourIsJudgedWithoutTheUploadTimingAndADryOneWithIt(t *testing.T) {
+	r := scaledTunnel()
+	_, jobs := scaledHour(r)
+	o := scaledLiveHour(r)
+	if f := VerifyTunnelHour(r, o, jobs); len(f) > 0 {
+		t.Fatalf("a live hour with its arrivals shown failed: %v", f)
+	}
+	dry := o
+	dry.UploadNotMeasured = ""
+	f := VerifyTunnelHour(r, dry, jobs)
+	for _, want := range []string{
+		"the upload path rate was not posted: both directions are needed",
+		"no request of 0.1 MB or more was sent while the 16 streams were open",
+	} {
+		if !slices.Contains(f, want) {
+			t.Errorf("the dry reading lacks %q: %v", want, f)
+		}
+	}
+	// Live, but a large body whose refusal stated fewer tokens than its words: not shown arrived.
+	short := scaledLiveHour(r)
+	for i := range short.Requests {
+		if short.Requests[i].BodyBytes >= MinLargeBody {
+			short.Requests[i].ArrivedTokens = 66_000
+		}
+	}
+	if f := VerifyTunnelHour(r, short, jobs); !slices.Contains(f, "a request of 0.1 MB or more did not show it arrived whole: the engine's refusal must state at least its prompt's words in input tokens") ||
+		!slices.Contains(f, "a stream did not complete") {
+		t.Errorf("a large body not shown arrived passed: %v", f)
+	}
+	// Live, but the large request in flight only after the streams ended.
+	late := scaledLiveHour(r)
+	for i := range late.Requests {
+		if late.Requests[i].BodyBytes >= MinLargeBody {
+			late.Requests[i].SendStart, late.Requests[i].SendEnd = late.Requests[i].Opened.Add(20*time.Second), late.Requests[i].Opened.Add(21*time.Second)
+		}
+	}
+	if f := VerifyTunnelHour(r, late, jobs); !slices.Contains(f, "no request of 0.1 MB or more was in flight while the 16 streams were open") {
+		t.Errorf("a large request in flight after the streams passed: %v", f)
+	}
+	// Live, but the client's window not recorded: not counted.
+	nowin := scaledLiveHour(r)
+	for i := range nowin.Requests {
+		if nowin.Requests[i].BodyBytes >= MinLargeBody {
+			nowin.Requests[i].SendStart, nowin.Requests[i].SendEnd = time.Time{}, time.Time{}
+		}
+	}
+	if f := VerifyTunnelHour(r, nowin, jobs); !slices.Contains(f, "no request of 0.1 MB or more was in flight while the 16 streams were open") {
+		t.Errorf("a large request with no window passed: %v", f)
+	}
+	// Live, with an upload rate posted after all: it is judged like any rate.
+	posted := scaledLiveHour(r)
+	posted.Rates = append(posted.Rates, PathRate{Direction: DirUpload, OK: true, AskedSeconds: 10, TimedSeconds: 10, Bytes: 1, UnderLoad: true})
+	if f := VerifyTunnelHour(r, posted, jobs); !slices.Contains(f, "the upload path rate was asked for under 30 s, timed under 29 s, or moved no bytes") {
+		t.Errorf("a short upload rate passed on a live hour: %v", f)
+	}
+}
+
+// The text to post says the upload was not measured and why, how many large bodies were shown arrived, and the
+// head-of-line measure; a stall over HeadOfLineStall is flagged.
+func TestTheLiveHoursTextToPost(t *testing.T) {
+	r := scaledTunnel()
+	_, jobs := scaledHour(r)
+	o := scaledLiveHour(r)
+	post := tunnelHourPost(r, o, VerifyTunnelHour(r, o, jobs))
+	for _, want := range []string{
+		"- path rate, upload (front to node): not measured in alpha (no sender-side timing on the live path)\n",
+		"- large requests (a body of 0.1 MB or more): 1, bodies of 400000 to 400000 bytes; 1 of them in flight while the 16 streams were open (by the client's window); 1 shown arrived whole by the engine's refusal of their length\n",
+		"- head-of-line: longest gap between two tokens of a stream while a large body was in flight: 80ms (over 16 gaps); elsewhere in the hour: 120ms\n",
+	} {
+		if !strings.Contains(post, want) {
+			t.Errorf("the text to post lacks %q:\n%s", want, post)
+		}
+	}
+	if strings.Contains(post, "head-of-line: a stream waited") {
+		t.Errorf("an 80 ms gap was flagged:\n%s", post)
+	}
+	o.HeadOfLine.InFlight = 1500 * time.Millisecond
+	if fl := TunnelHourFlags(o); !slices.Contains(fl, "head-of-line: a stream waited 1.5s between two tokens while a large body was in flight, over the 1s that marks a stall (the longest elsewhere in the hour: 120ms)") {
+		t.Errorf("a 1.5 s stall was not flagged: %v", fl)
+	}
+	o.HeadOfLine.InFlight = HeadOfLineStall
+	if fl := TunnelHourFlags(o); len(fl) != 0 {
+		t.Errorf("a gap of exactly the threshold was flagged: %v", fl)
 	}
 }
