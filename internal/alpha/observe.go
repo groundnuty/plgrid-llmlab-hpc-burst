@@ -48,9 +48,17 @@ type Stream struct {
 	Ticks []time.Time `json:"-"`
 }
 
+// RefusedForLength reports whether the engine answered the request with a
+// context-length refusal stating an exact count of input tokens
+// (InputTokensOf, WithArrival): ArrivedTokens is set from nothing else. A body
+// cut short in the tunnel is no longer JSON, and is answered otherwise.
+func (s Stream) RefusedForLength() bool { return s.ArrivedTokens > 0 }
+
 // ArrivalVerified reports whether the engine read the request's whole prompt:
-// its refusal stated exactly the prompt's own input tokens. A body cut short
-// would not parse, and a prompt changed on the way would count otherwise.
+// it refused it for its length, stating exactly the prompt's own input tokens.
+// That is the second check, after the refusal itself (RefusedForLength): the
+// engine tokenized the whole well-formed body. A path that rewrites a body
+// into other well-formed JSON is out of scope (ArrivalPrompt).
 func (s Stream) ArrivalVerified() bool {
 	return s.ExpectedTokens > 0 && s.ArrivedTokens == s.ExpectedTokens
 }

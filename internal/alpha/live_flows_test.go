@@ -452,11 +452,16 @@ func (r *liveRun) arrivalBody(key string) (body string, expected int, err error)
 		rp := r.fc.Send("/v1/chat/completions", ArrivalPrompt(r.fc.Model, words, mml), key)
 		n, ok := InputTokensOf(rp.Body)
 		if !ok {
-			return 0, fmt.Errorf("a prompt of %d words with max_tokens %d was answered %d, not refused with its input tokens stated: the large bodies' arrival cannot be shown", words, mml, rp.Status)
+			return 0, fmt.Errorf("a prompt of %d words with max_tokens %d was answered %d, not refused for its length with an exact count of input tokens: the large bodies' arrival cannot be shown", words, mml, rp.Status)
 		}
+		r.t.Logf("%s: calibration: a prompt of %d words was refused for its length, stating %d input tokens", r.cfg.Row.Name, words, n)
 		return n, nil
 	}
-	return ArrivalSize(count, r.fc.Model, r.tm.UploadBody, mml)
+	body, expected, err = ArrivalSize(count, r.fc.Model, r.tm.UploadBody, mml)
+	if err == nil {
+		r.t.Logf("%s: the large prompt: %d bytes, %d input tokens expected, under the max-model-len of %d", r.cfg.Row.Name, len(body), expected, mml)
+	}
+	return body, expected, err
 }
 
 // largeRequests is the hour's upload direction (issue #224), with no
@@ -501,10 +506,7 @@ func (r *liveRun) observeLarge(l sentLarge) Stream {
 	if l.reply.ID == "" {
 		return Stream{Error: "no reply", BodyBytes: l.bytes, ExpectedTokens: l.expected}
 	}
-	s := StreamOf(r.fc.RowOf(l.reply.ID), ClientEnd{})
-	s.BodyBytes, s.ExpectedTokens, s.SendStart, s.SendEnd = l.bytes, l.expected, l.start, l.end
-	s.ArrivedTokens, _ = InputTokensOf(l.reply.Body)
-	return s
+	return WithArrival(StreamOf(r.fc.RowOf(l.reply.ID), ClientEnd{}), l.reply.Body, l.bytes, l.expected, l.start, l.end)
 }
 
 // maxModelLen is the deployment's max-model-len flag; a deployment without

@@ -491,7 +491,9 @@ func trafficChecks(reqs []Stream, tm Timing, uploadNotMeasured bool) []string {
 	}
 	long := false
 	for _, r := range reqs {
-		if d := r.Ended.Sub(r.Opened); d >= tm.NearDeadline && d <= tm.MaxRequestDuration {
+		// A completed stream (the delta round of PR 255, B3): a large request's refusal that came late is no
+		// request near the deadline, though it passes requestChecks.
+		if d := r.Ended.Sub(r.Opened); r.Complete && d >= tm.NearDeadline && d <= tm.MaxRequestDuration {
 			long = true
 		}
 	}
@@ -512,11 +514,22 @@ func trafficChecks(reqs []Stream, tm Timing, uploadNotMeasured bool) []string {
 	case uploadNotMeasured:
 		// Live, in alpha (the science agent's ruling (4) on PR 255): each large body shows it arrived whole by the
 		// engine's refusal, and one was in flight, by the client's window of it, while the 16 streams were open.
+		// First the refusal itself: a body cut short in the byte tunnel is no longer JSON and is answered otherwise
+		// (the delta round's B1). Then its count: the whole well-formed body was tokenized.
+		otherwise, miscounted := false, false
 		for _, l := range LargeRequests(reqs) {
-			if !l.ArrivalVerified() {
-				f = append(f, "a request of 0.1 MB or more did not show it arrived whole: the engine's refusal must state its prompt's own input tokens")
-				break
+			switch {
+			case !l.RefusedForLength():
+				otherwise = true
+			case !l.ArrivalVerified():
+				miscounted = true
 			}
+		}
+		if otherwise {
+			f = append(f, "a request of 0.1 MB or more was answered other than by a refusal of its length stating an exact count: a body cut short in the tunnel is no longer JSON")
+		}
+		if miscounted {
+			f = append(f, "a request of 0.1 MB or more did not show it arrived whole: the engine's refusal must state its prompt's own input tokens")
 		}
 		if largeInFlightAmongStreams(reqs, tm) == 0 {
 			f = append(f, "no request of 0.1 MB or more was in flight while the 16 streams were open")

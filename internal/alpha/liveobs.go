@@ -135,6 +135,17 @@ func StreamOf(rec usage.Record, end ClientEnd) Stream {
 // refusal states the input tokens it read (InputTokensOf). The science agent's
 // ruling (4) on PR 255: that count, matched against the prompt's own
 // (TokenLine), shows the body arrived whole.
+//
+// What it shows, and what it does not (the delta round of PR 255, B1). frp is
+// a byte tunnel: it carries the body's bytes and never reads them. A body cut
+// short on the way is no longer JSON (its closing brace comes last), nor is
+// one with a byte of its structure broken, so the engine answers it with
+// another error (a decode error), not a refusal for its length, and the row
+// fails on any large body answered otherwise. Equal counts are the second
+// check: the engine tokenized the whole well-formed body. A path that rewrites
+// a body into other well-formed JSON (a letter for a letter, or a word dropped
+// from every message) is out of scope; the calibration prompts take the same
+// path, so a rewrite that drops a word from each moves the line with it.
 func ArrivalPrompt(model string, words, maxTokens int) string {
 	m, _ := json.Marshal(model)
 	return `{"model":` + string(m) + `,"messages":[{"role":"user","content":"hello` + strings.Repeat(" hello", max(words, 1)-1) +
@@ -156,14 +167,23 @@ type TokenLine struct{ Per, Fixed int }
 // Tokens is the input tokens of a prompt of words words.
 func (l TokenLine) Tokens(words int) int { return l.Per*words + l.Fixed }
 
-// MaxWords is the most words whose prompt has fewer tokens than maxModelLen,
-// so that an engine that stops counting just past its context still states
-// the prompt's whole count.
+// MaxWords is the most words whose prompt has fewer tokens than maxModelLen: a
+// prompt the engine would serve, refused only for the completion it asks for,
+// so that its refusal is the one InputTokensOf reads, for the prompt and the
+// completion together.
 func (l TokenLine) MaxWords(maxModelLen int) int { return (maxModelLen - 1 - l.Fixed) / l.Per }
 
 // CalibrationWords are the prompts, in words, whose refusals give the
-// engine's TokenLine: two fix the line, and the third must lie on it.
+// engine's TokenLine: two fix the line, and the third must lie on it. A
+// fourth, of half the large prompt's words (NearScaleWords), is sent once the
+// line has sized it, and must lie on the line too.
 var CalibrationWords = []int{1000, 2000, 4000}
+
+// NearScaleWords is the calibration prompt near the large prompt's scale: at
+// least half its words (the delta round of PR 255, B1). A count that is a line
+// up to 4,000 words and bends further on (a token more every 5,000 words, say)
+// is off the line there, and the row fails closed.
+func NearScaleWords(words int) int { return (words + 1) / 2 }
 
 // Calibrate is the TokenLine through prompts of known words (each point is
 // {words, input tokens stated}, words rising). The first two fix it: whole
@@ -202,9 +222,10 @@ func Calibrate(pts ...[2]int) (TokenLine, error) {
 // given words (ArrivalPrompt) and returns the input tokens its refusal stated;
 // the CalibrationWords prompts give the engine's TokenLine (Calibrate). The
 // large prompt holds as many words as bytes bytes take, but fewer tokens than
-// maxModelLen, so that the engine reads and states its whole count. A refusal
-// with no count, a count off the line, or a context that cannot hold a large
-// body (MinLargeBody) under it is an error: the row fails closed.
+// maxModelLen (MaxWords). A prompt of half its words (NearScaleWords) is then
+// counted too, and must lie on the line. A refusal with no exact count, a
+// count off the line, or a context that cannot hold a large body
+// (MinLargeBody) under it is an error: the row fails closed.
 func ArrivalSize(count func(words int) (int, error), model string, bytes, maxModelLen int) (body string, expected int, err error) {
 	var pts [][2]int
 	for _, w := range CalibrationWords {
@@ -223,38 +244,71 @@ func ArrivalSize(count func(words int) (int, error), model string, bytes, maxMod
 	if len(body) < MinLargeBody {
 		return "", 0, fmt.Errorf("the deployment's max-model-len %d holds a prompt of %d bytes at most (%d tokens a word, %d more), under the %d bytes of a large body", maxModelLen, len(body), line.Per, line.Fixed, MinLargeBody)
 	}
+	near := NearScaleWords(words)
+	n, err := count(near)
+	if err != nil {
+		return "", 0, err
+	}
+	if _, err := Calibrate(append(pts, [2]int{near, n})...); err != nil {
+		return "", 0, fmt.Errorf("the calibration prompt of %d words, half the large prompt's %d: %w", near, words, err)
+	}
 	return body, line.Tokens(words), nil
 }
 
-// inputTokensRE are the forms in which an engine's context-length refusal
-// states the input tokens it read, vLLM's, which the engine double follows:
-// "N input tokens" ("your prompt contains at least N input tokens", "your
-// request has N input tokens") and "N in the messages"; the first that matches
-// is taken. The wording of the v0.32.0 engine was not read (unverified on the
-// clusters).
-var inputTokensRE = []*regexp.Regexp{
-	regexp.MustCompile(`([0-9]+) input tokens`),
-	regexp.MustCompile(`([0-9]+) in the messages`),
-}
+// lengthRefusalRE is the one form of a context-length refusal read: "This
+// model's maximum context length is C tokens. However, you requested X tokens
+// (Y in the messages, Z in the completion)", Y being the prompt's input tokens:
+// the form the delta round of PR 255 (B2) names as vLLM's, and the engine
+// double's. vLLM v0.32.0's source was not read, so whether it refuses in this
+// form is unverified on the clusters; a refusal in another form fails the row.
+var lengthRefusalRE = regexp.MustCompile(`maximum context length is ([0-9]+) tokens\. However, you requested ([0-9]+) tokens \(([0-9]+) in the messages, ([0-9]+) in the completion\)`)
 
 // InputTokensOf reads the input tokens a context-length refusal states, from
-// the error reply's message; false when the reply is not such a refusal.
+// the error reply's message; false when the reply is not such a refusal with
+// an exact count. Only lengthRefusalRE's form is read, and only when it adds
+// up (X is Y and Z) and X is over the context C, as a refusal for length must
+// be. A lower bound ("at least N input tokens") is no count: lower bounds that
+// lie on a line do not show the engine's count is that line. Any other
+// wording, an exact one included ("your request has N input tokens"), is not
+// read either: the row fails closed on a form it was not built for.
 func InputTokensOf(reply []byte) (int, bool) {
 	var e struct {
 		Error struct {
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if json.Unmarshal(reply, &e) != nil || !strings.Contains(e.Error.Message, "context length") {
+	if json.Unmarshal(reply, &e) != nil {
 		return 0, false
 	}
-	for _, re := range inputTokensRE {
-		if m := re.FindStringSubmatch(e.Error.Message); m != nil {
-			n, err := strconv.Atoi(m[1])
-			return n, err == nil
-		}
+	m := lengthRefusalRE.FindStringSubmatch(e.Error.Message)
+	if m == nil {
+		return 0, false
 	}
-	return 0, false
+	var n [4]int
+	for i := range n {
+		v, err := strconv.Atoi(m[i+1])
+		if err != nil {
+			return 0, false
+		}
+		n[i] = v
+	}
+	ctx, total, prompt, completion := n[0], n[1], n[2], n[3]
+	if prompt <= 0 || total != prompt+completion || total <= ctx {
+		return 0, false
+	}
+	return prompt, true
+}
+
+// WithArrival is a large request s as the live hour observes it: its body's
+// bytes, its prompt's own input tokens (expected), the client's window from
+// its first byte sent to its reply read, and the input tokens the engine's
+// reply stated (InputTokensOf), set only from a context-length refusal with an
+// exact count. A body cut short on the way gets another reply, and so no
+// arrived count (RefusedForLength).
+func WithArrival(s Stream, reply []byte, bytes, expected int, start, end time.Time) Stream {
+	s.BodyBytes, s.ExpectedTokens, s.SendStart, s.SendEnd = bytes, expected, start, end
+	s.ArrivedTokens, _ = InputTokensOf(reply)
+	return s
 }
 
 // HeadOfLineOf is the head-of-line measure (HeadOfLine) of the hour's

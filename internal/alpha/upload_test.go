@@ -8,10 +8,15 @@ package alpha
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/enginedouble"
 )
 
 func TestTheArrivalPrompt(t *testing.T) {
@@ -81,12 +86,16 @@ func TestCalibrate(t *testing.T) {
 }
 
 // engineCount is an engine's count of an ArrivalPrompt of words words, as its refusal states it: tokens a word,
-// a template's count, and one token less for every merge words (0: none).
+// a template's count, and one token less for every merge words (0: none; below 0: one token more for every -merge
+// words, a tokenizer that splits).
 func engineCount(per, fixed, merge int) func(int) (int, error) {
 	return func(words int) (int, error) {
 		n := per*words + fixed
-		if merge > 0 {
+		switch {
+		case merge > 0:
 			n -= words / merge
+		case merge < 0:
+			n += words / -merge
 		}
 		return n, nil
 	}
@@ -102,17 +111,22 @@ func TestArrivalSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(asked, []int{1000, 2000, 4000}) {
-		t.Errorf("the calibration asked for %v words, want 1,000, 2,000 and 4,000", asked)
+	// The fourth prompt is half the large prompt's 32,763 words, rounded up: 16,382 (the delta round of PR 255, B1).
+	if !slices.Equal(asked, []int{1000, 2000, 4000, 16_382}) {
+		t.Errorf("the calibration asked for %v words, want 1,000, 2,000, 4,000 and 16,382", asked)
 	}
 	// 32,763 words, 32,767 tokens, one under the context; the body is "hello" then " hello" 32,762 times in the
 	// 74 bytes of JSON around it with max_tokens 32768: 196,577 + 74 = 196,651 bytes.
 	if words := len(strings.Fields(strings.Trim(strings.SplitN(strings.SplitN(body, `"content":"`, 2)[1], `"`, 2)[0], " "))); words != 32_763 || expected != 32_767 || len(body) != 196_651 {
 		t.Errorf("ArrivalSize = %d words, %d bytes, %d tokens expected; want 32,763, 196,651, 32,767", words, len(body), expected)
 	}
-	// A body that fits whole: its words, not the context, bound it.
-	if body, expected, err := ArrivalSize(engineCount(1, 4, 0), "m", 131_072, 32768); err != nil || len(body) < 131_072 || len(body) > 131_078 || expected != WordsForBytes("m", 131_072, 32768)+4 {
-		t.Errorf("a 128 KiB body: %d bytes, %d expected, %v", len(body), expected, err)
+	// A body that fits whole: its words, not the context, bound it, and the fourth prompt is half of them. Model "m",
+	// max_tokens 32768: 74 bytes of JSON around the prompt and 6w-1 in it, so the least w with 73+6w >= 131,072 is
+	// 21,834 (131,077 bytes; 21,833 make 131,071), counted 21,838, and half of it, rounded up, is 10,917.
+	asked = nil
+	count = engineCount(1, 4, 0)
+	if body, expected, err := ArrivalSize(logged, "m", 131_072, 32768); err != nil || len(body) != 131_077 || expected != 21_838 || !slices.Equal(asked, []int{1000, 2000, 4000, 10_917}) {
+		t.Errorf("a 128 KiB body: %d bytes, %d expected, asked %v, %v; want 131,077 bytes, 21,838, and 10,917 words last", len(body), expected, asked, err)
 	}
 	for name, c := range map[string]struct {
 		count func(int) (int, error)
@@ -121,6 +135,15 @@ func TestArrivalSize(t *testing.T) {
 	}{
 		"an engine whose count bends every 3,000 words": {engineCount(1, 4, 3000), 32768, "not linear in the words"},
 		"an engine whose count bends every 1,500 words": {engineCount(1, 4, 1500), 32768, "not a whole number of tokens a word"},
+		// Astra's engine: words + 4 + floor(words/5000) lies on the line of a token a word and 4 up to 4,000 words; at
+		// 16,382 it counts 16,389, three over the line's 16,386.
+		"an engine that counts a token more every 5,000 words": {engineCount(1, 4, -5000), 32768, "the calibration prompt of 16382 words, half the large prompt's 32763: a prompt of 16382 words was counted 16389 input tokens, off the line"},
+		"a refusal with no count at the fourth prompt": {func(w int) (int, error) {
+			if w > 4000 {
+				return 0, errors.New("a prompt of 16382 words was answered 400, not refused for its length")
+			}
+			return w + 4, nil
+		}, 32768, "not refused for its length"},
 		"a refusal that states no count": {func(w int) (int, error) {
 			return 0, errors.New("a prompt of 1000 words was answered 200, not refused with its input tokens stated")
 		}, 32768, "not refused with its input tokens stated"},
@@ -132,17 +155,29 @@ func TestArrivalSize(t *testing.T) {
 	}
 }
 
-// The forms of an engine's refusal of a prompt over its context: the engine double's (vLLM's older wording), and
-// vLLM's newer ones. Anything else shows no arrival.
+// One form of an engine's refusal of a prompt over its context is read, the exact count the delta round of PR 255
+// names as vLLM's (B2), and only when it adds up and is over the context. A lower bound and every other wording,
+// an exact one included, show no arrival: the row fails closed.
 func TestInputTokensOf(t *testing.T) {
 	for _, c := range []struct {
 		msg  string
 		want int
 		ok   bool
 	}{
-		{"This model's maximum context length is 4096 tokens. However, you requested 4096 output tokens and your prompt contains at least 21848 input tokens, for a total of 25944 tokens. Please reduce the length of the input prompt or the number of requested output tokens.", 21848, true},
-		{"This model's maximum context length is 32768 tokens. However, your request has 66683 input tokens. Please reduce the length of the input messages.", 66683, true},
+		{"This model's maximum context length is 32768 tokens. However, you requested 65535 tokens (32767 in the messages, 32768 in the completion). Please reduce the length of the messages or completion.", 32767, true},
 		{"This model's maximum context length is 32768 tokens. However, you requested 99451 tokens (66683 in the messages, 32768 in the completion). Please reduce the length of the messages or completion.", 66683, true},
+		// A lower bound is no count, in any form.
+		{"This model's maximum context length is 4096 tokens. However, you requested 4096 output tokens and your prompt contains at least 21848 input tokens, for a total of 25944 tokens. Please reduce the length of the input prompt or the number of requested output tokens.", 0, false},
+		{"This model's maximum context length is 32768 tokens. However, you requested at least 65535 tokens (at least 32767 in the messages, 32768 in the completion).", 0, false},
+		// Another wording, exact or not, is not read.
+		{"This model's maximum context length is 32768 tokens. However, your request has 66683 input tokens. Please reduce the length of the input messages.", 0, false},
+		{"This model's maximum context length is 32768 tokens. However, you requested 66683 tokens in the messages, Please reduce the length of the messages.", 0, false},
+		// The form, but it does not add up, or it is no refusal for length.
+		{"This model's maximum context length is 32768 tokens. However, you requested 65536 tokens (32767 in the messages, 32768 in the completion).", 0, false},
+		{"This model's maximum context length is 32768 tokens. However, you requested 32768 tokens (16384 in the messages, 16384 in the completion).", 0, false},
+		{"This model's maximum context length is 32768 tokens. However, you requested 32768 tokens (0 in the messages, 32768 in the completion).", 0, false},
+		// The counts without the context length: a message that only looks like the form.
+		{"However, you requested 65535 tokens (32767 in the messages, 32768 in the completion).", 0, false},
 		{"CUDA out of memory in the engine", 0, false},
 		{"rate limited: 5 input tokens a second at most", 0, false},
 		{"maximum context length is 32768 tokens", 0, false},
@@ -337,5 +372,102 @@ func TestRefusalsAreNoRunBackToBack(t *testing.T) {
 	// a2, then the burst that opens as it ends: 2. The five refusals, 0.1 s apart, would make 5.
 	if n := longestChain(reqs, r.Clock().MaxChainGap); n != 2 {
 		t.Errorf("longestChain = %d, want 2", n)
+	}
+}
+
+// A body cut short in the tunnel (the delta round of PR 255, B1). frp is a byte tunnel, so a body cut on the way is no
+// longer JSON, and the engine answers it otherwise than with a refusal of its length: the row fails. The engine is
+// the engine double, vLLM's HTTP subset, served in the test without a listener; the large body is sized from its own
+// refusals, as the live hour sizes it. The whole body passes; every cut of it, and a byte of its structure broken,
+// fails with the line that names the refusal, not the count's.
+func TestACutBodyIsAnsweredOtherwiseAndFailsTheRow(t *testing.T) {
+	cfg := enginedouble.DefaultConfig()
+	h := enginedouble.Handler(cfg)
+	send := func(body string) []byte {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		h.ServeHTTP(w, req)
+		return w.Body.Bytes()
+	}
+	count := func(words int) (int, error) {
+		reply := send(ArrivalPrompt(cfg.ServedName, words, cfg.MaxModelLen))
+		n, ok := InputTokensOf(reply)
+		if !ok {
+			return 0, fmt.Errorf("a prompt of %d words was not refused for its length: %.300s", words, reply)
+		}
+		return n, nil
+	}
+	body, expected, err := ArrivalSize(count, cfg.ServedName, 400_000, cfg.MaxModelLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := scaledTunnel()
+	_, jobs := scaledHour(r)
+	judge := func(reply []byte) []string {
+		o := scaledLiveHour(r)
+		for i, q := range o.Requests {
+			if q.BodyBytes >= MinLargeBody {
+				o.Requests[i] = WithArrival(Stream{ID: q.ID, Opened: q.Opened, Ended: q.Ended}, reply, len(body), expected, q.SendStart, q.SendEnd)
+			}
+		}
+		return VerifyTunnelHour(r, o, jobs)
+	}
+	const (
+		otherwise  = "a request of 0.1 MB or more was answered other than by a refusal of its length stating an exact count: a body cut short in the tunnel is no longer JSON"
+		miscounted = "a request of 0.1 MB or more did not show it arrived whole: the engine's refusal must state its prompt's own input tokens"
+	)
+	if f := judge(send(body)); len(f) > 0 {
+		t.Fatalf("the whole body, refused for its length with its own count, failed the row: %v", f)
+	}
+	content := strings.Index(body, `"content":"`) + len(`"content":"`)
+	maxTokens := strings.LastIndex(body, `:`) + 3 // two digits of max_tokens
+	broken := []byte(body)
+	broken[content-1] = 'x' // the quote that opens the prompt
+	for name, cut := range map[string]string{
+		"cut in the prompt's words":             body[:content+1000],
+		"cut at half the body":                  body[:len(body)/2],
+		"cut inside max_tokens":                 body[:maxTokens],
+		"cut one byte before the closing brace": body[:len(body)-1],
+		"a byte of its structure broken":        string(broken),
+	} {
+		reply := send(cut)
+		if n, ok := InputTokensOf(reply); ok {
+			t.Errorf("%s: the engine stated %d input tokens; want another reply", name, n)
+		}
+		if f := judge(reply); !slices.Contains(f, otherwise) || slices.Contains(f, miscounted) {
+			t.Errorf("%s: the row's failures %v; want %q and not the count's", name, f, otherwise)
+		}
+	}
+}
+
+// The request near the deadline must be a completed stream (the delta round of PR 255, B3): a large request whose
+// refusal came late passes the request checks, but is no stream of about 4 minutes. Here every completed stream is
+// under the scaled 48 s, and the only request over it is such a refusal, of 50 s.
+func TestALateRefusalIsNoRequestNearTheDeadline(t *testing.T) {
+	r := scaledTunnel()
+	_, jobs := scaledHour(r)
+	o := scaledLiveHour(r)
+	o.Requests = append([]Stream(nil), o.Requests...)
+	for i, q := range o.Requests {
+		if q.ID == "a0" || q.ID == "a1" || q.ID == "a2" || q.ID == "b0" {
+			o.Requests[i].Ended = q.Opened.Add(47 * time.Second) // the chain's pauses grow to 4 s, under its 10 s
+		}
+	}
+	at := o.Requests[0].Opened.Add(100 * time.Second)
+	late := Stream{ID: "x0", Opened: at, Ended: at.Add(50 * time.Second), BodyBytes: 196_400, ExpectedTokens: 32_737, ArrivedTokens: 32_737,
+		SendStart: at, SendEnd: at.Add(50 * time.Second)}
+	o.Requests = append(o.Requests, late)
+	if f := VerifyTunnelHour(r, o, jobs); !slices.Equal(f, []string{"the hour held no request of about 4 minutes, near the deadline"}) {
+		t.Errorf("an hour whose only request near the deadline is a late refusal: failures %v; want the near-deadline one alone", f)
+	}
+	// The control: the same hour with one completed stream of 50 s passes.
+	for i, q := range o.Requests {
+		if q.ID == "b0" {
+			o.Requests[i].Ended = q.Opened.Add(50 * time.Second)
+		}
+	}
+	if f := VerifyTunnelHour(r, o, jobs); len(f) > 0 {
+		t.Errorf("the same hour with a completed stream of 50 s failed: %v", f)
 	}
 }
