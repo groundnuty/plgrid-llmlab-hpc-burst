@@ -20,7 +20,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/enginedouble"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
@@ -51,9 +50,16 @@ type ClusterShape struct {
 }
 
 // StartCluster starts the fake cluster in dir, with jobEnv added to every
-// job's environment, and its login node, and registers their Close.
-func StartCluster(t T, dir string, shape ClusterShape, jobEnv map[string]string) *Cluster {
+// job's environment, and its login node, and registers their Close. install
+// puts the engine double's fake apptainer (and the programs beside it) into a
+// directory: the caller passes enginedouble.Install from a _test.go file, the
+// only kind of file that may import the engine double
+// (internal/agent/enginedouble, TestPackageImportsAndImporters).
+func StartCluster(t T, dir string, shape ClusterShape, install func(dir string) error, jobEnv map[string]string) *Cluster {
 	t.Helper()
+	if install == nil {
+		t.Fatal("StartCluster needs the engine double's installer (enginedouble.Install, passed from a _test.go file)")
+	}
 	c := &Cluster{Root: filepath.Join(dir, "c"), Fakes: filepath.Join(dir, "fk")}
 	c.Home, c.Scratch = filepath.Join(c.Root, "home", ClusterUser), filepath.Join(c.Root, "scratch", ClusterUser)
 	for _, d := range []string{c.Home, c.Scratch, c.Fakes} {
@@ -66,7 +72,7 @@ func StartCluster(t T, dir string, shape ClusterShape, jobEnv map[string]string)
 	if err := os.Mkdir(filepath.Join(dir, "ln"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := enginedouble.Install(c.Fakes); err != nil {
+	if err := install(c.Fakes); err != nil {
 		t.Fatal(err)
 	}
 	env := map[string]string{

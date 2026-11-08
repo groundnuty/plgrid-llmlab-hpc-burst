@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/enginedouble"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
@@ -120,7 +121,7 @@ func standInWorld(t *testing.T, row Row) world {
 	// Job IDs of this process's own: the worker fault finds the job's processes by
 	// SLURM_JOB_ID, and other agents' fake clusters on this host number from 1001.
 	shape := stack.ClusterShape{FirstJobID: 10_000_000 + 8*os.Getpid()}
-	arch := stack.CPUArch()
+	arch := stack.CPUArch(t)
 	prof := stack.BatchProfile(arch, stm)
 	prov := stack.BatchProvider("")
 	if row.QOS != "" {
@@ -132,7 +133,7 @@ func standInWorld(t *testing.T, row Row) world {
 			{Name: row.QOS, MaxSubmitPerUser: stack.Ptr(int32(1)), MaxGPUsPerUser: stack.Ptr(int32(1))}}
 		prov.Spec.QOS = row.QOS
 	}
-	cl := stack.StartCluster(t, dir, shape, nil)
+	cl := stack.StartCluster(t, dir, shape, enginedouble.Install, nil)
 	creds := filepath.Join(dir, "provider-ssh")
 	if err := cl.Login.WriteCredentials(creds); err != nil {
 		t.Fatal(err)
@@ -149,7 +150,7 @@ func standInWorld(t *testing.T, row Row) world {
 		dh: stack.DialHome{Mode: "direct", Addr: standInPorts.DialHomeListen}, ports: standInPorts,
 		// The controller lists the checkpoint from the Hub double through HF_ENDPOINT, which up passes on to it.
 		env:     stack.CleanEnv("HF_ENDPOINT=" + hub.URL),
-		objects: []client.Object{prof, prov}, provider: stack.ProviderName, cluster: row.Cluster, md: md, profile: prof.Spec,
+		objects: []client.Object{prof, prov}, provider: stack.ProviderName, cluster: row.Cluster, qos: row.QOS, md: md, profile: prof.Spec,
 		controlDir: ctl, hostLock: filepath.Join(dir, "host.lock"),
 	}
 }
@@ -161,7 +162,11 @@ func runStandIn(t *testing.T, name string) {
 		t.Skipf("the stand-in proof of the live steps runs only with %s=1 (internal/alpha, standin_test.go)", envStandIn)
 	}
 	row := standInRow(t, name)
-	cfg := Config{Row: row, StandIn: true, Out: filepath.Join(t.TempDir(), "out"), PendingMax: 2 * time.Minute}
+	id, err := NewRunID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Row: row, StandIn: true, Out: filepath.Join(t.TempDir(), "out"), PendingMax: 2 * time.Minute, RunID: id}
 	t.Logf("%s: %s", row.Name, cfg.Mode())
 	rec, err := NewRecorder(cfg.Out)
 	if err != nil {

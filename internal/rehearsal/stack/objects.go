@@ -49,15 +49,18 @@ type Timing struct {
 	Lease, MaxRequest, DrainMargin, DrainWindow, HandoverMargin, StopGrace, AgentTimeout, StartTimeout string
 }
 
-// CPUArch is this host's architecture as a profile names it; "" when no
-// profile names it.
-func CPUArch() string {
+// CPUArch is this host's architecture as a profile names it. A host whose
+// architecture no profile names fails the test at once, as the scenario's
+// cpuArch does: a stand-in must not go on into its setup with an empty class.
+func CPUArch(t T) string {
+	t.Helper()
 	switch runtime.GOARCH {
 	case "amd64":
 		return "x86_64"
 	case "arm64":
 		return "aarch64"
 	}
+	t.Fatalf("no profile CPU architecture for GOARCH %s", runtime.GOARCH)
 	return ""
 }
 
