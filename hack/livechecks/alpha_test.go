@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -92,6 +93,12 @@ case $mode in
   sleep) leave; touch "$STUB_STATE/started"; exec sleep 3600 ;;
   # A job of the run's own prefix whose tag was never written down (a watch that never delivered, a write that
   # failed), beside a job of another run's prefix; with untagged-not-run, the run ended NOT RUN with it pending.
+  # The step dies mid-wait (the science agent's requirement on PR 255): the run's predecessor running and its successor
+  # pending, neither written down, and the test binary gone as a panic leaves it.
+  die-mid-wait)
+    echo "9007|hb-alpha-${HPCBURST_ALPHA_RUN_ID:-none}-p1abc-0123456789ab|${HPCBURST_ALPHA_QOS:-normal}|${HPCBURST_ALPHA_PARTITION:-plgrid}|RUNNING" >> "$STUB_STATE/queue"
+    echo "9008|hb-alpha-${HPCBURST_ALPHA_RUN_ID:-none}-s2def-0123456789ab|${HPCBURST_ALPHA_QOS:-normal}|${HPCBURST_ALPHA_PARTITION:-plgrid}|PENDING" >> "$STUB_STATE/queue"
+    echo "=== RUN   $t"; echo "panic: the step died mid-wait"; exit 2 ;;
   untagged|untagged-not-run)
     echo "9005|hb-alpha-${HPCBURST_ALPHA_RUN_ID:-none}-x7k2p-0123456789ab|${HPCBURST_ALPHA_QOS:-normal}|${HPCBURST_ALPHA_PARTITION:-plgrid}|PENDING" >> "$STUB_STATE/queue"
     echo "9006|hb-alpha-ffffffffff-x7k2p-0123456789ab|${HPCBURST_ALPHA_QOS:-normal}|${HPCBURST_ALPHA_PARTITION:-plgrid}|PENDING" >> "$STUB_STATE/queue"
@@ -489,6 +496,28 @@ func TestTheCleanupFindsTheRunsJobsByItsPrefix(t *testing.T) {
 			env := w.stateFile("test-env-" + map[bool]string{true: "TestTunnelHour", false: map[bool]string{true: "TestAlphaHeliosNoOverlap", false: "TestAlphaAthenaHandover"}[strings.Contains(row, "nooverlap")]}[strings.HasPrefix(row, "tunnel-hour-")])
 			if !regexp.MustCompile(`(?m)^HPCBURST_ALPHA_RUN_ID=[0-9a-f]{10}$`).MatchString(env) {
 				t.Errorf("the test was not given a run ID of 10 hex digits:\n%s", env)
+			}
+		})
+	}
+}
+
+// A step that dies mid-wait leaves a definite outcome (the science agent's requirement on PR 255): the row is a
+// failure, never a pass nor a NOT RUN, and the cleanup cancels both of the run's jobs by its prefix, though neither was
+// written down. internal/lifecycle shows the deployment then ends at the guard's last end with no third Allocation.
+func TestAStepThatDiesMidWaitFailsAndItsJobsAreCancelled(t *testing.T) {
+	for _, row := range []string{"alpha-helios-nooverlap", "alpha-athena-handover"} {
+		t.Run(row, func(t *testing.T) {
+			w := newAlphaWorld(t)
+			res := w.run([]string{"STUB_ALPHA_MODE=die-mid-wait"}, "--run", row, "--yes")
+			if res.code != 1 {
+				t.Fatalf("exit %d, want 1:\n%s", res.code, res.out)
+			}
+			w.contains(res, row+": FAIL", "cleanup: left behind 0 (cancelled 2)")
+			if strings.Contains(res.out, row+": PASS") || strings.Contains(res.out, row+": NOT RUN") {
+				t.Errorf("a step that died was reported as a pass or a NOT RUN:\n%s", res.out)
+			}
+			if got := strings.Fields(w.stateFile("cancelled")); !slices.Equal(got, []string{"9007", "9008"}) {
+				t.Errorf("cancelled %v, want both of the run's jobs, 9007 and 9008", got)
 			}
 		})
 	}

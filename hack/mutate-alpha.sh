@@ -423,7 +423,7 @@ PY
       esac || { echo "BROKEN   $file: $from  ->  $to: the mutant does not compile: $cerr"; broken=$((broken+1)); cp "${saved[$path]}" "$path"; continue; } ;;
   esac
   case $path in
-    hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 -failfast -run 'AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat' ./hack/livechecks) ;;
+    hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 -failfast -run 'AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat' ./hack/livechecks) ;;
     "$pkg"/alpha_live_test.go)
       # The dry runs of the script run the alpha test binary: the one compiled above, from the mutated file.
       tests=(env HPCBURST_LIVECHECKS_ALPHA_TEST="$tmp/pkg.test" go test -count=1 -timeout 9m -run PendingPastTheBound ./hack/livechecks) ;;

@@ -52,6 +52,15 @@ func (g *twoJobGuard) look(rg *rig) alpha.Look {
 	return l
 }
 
+// first is the end the live steps create the deployment with: the guard's, from the clock read before it.
+func (g *twoJobGuard) first(rg *rig) time.Time {
+	e, _, err := g.g.Next(alpha.Look{Clock: rg.clock.Now()})
+	if err != nil {
+		g.t.Fatal(err)
+	}
+	return e
+}
+
 func (g *twoJobGuard) before(rg *rig) {
 	end, _, err := g.g.Next(g.look(rg))
 	if err != nil {
@@ -142,12 +151,39 @@ func alphaGuardRig(t *testing.T, c guardCase) (*rig, *v1alpha1.ModelDeployment) 
 	return rg, md
 }
 
+// stoppingGuard is the live steps' guard until the step dies (when says so, before a round), and nothing after:
+// the deployment keeps the last end the guard set (last).
+type stoppingGuard struct {
+	inner   *twoJobGuard
+	when    func(rg *rig) bool
+	stopped bool
+	last    time.Time
+}
+
+func (g *stoppingGuard) first(rg *rig) time.Time { return g.inner.first(rg) }
+
+func (g *stoppingGuard) before(rg *rig) {
+	if !g.stopped && g.when(rg) {
+		g.stopped = true
+		if md := rg.md(alphaGuardMD); md.Spec.EndTime != nil {
+			g.last = md.Spec.EndTime.Time
+		}
+	}
+	if !g.stopped {
+		g.inner.before(rg)
+	}
+}
+
 // guardRun is what a run showed: every Allocation the deployment ever had (by name: when it was first seen
-// and when its job started), whether a successor became ready, and the deployment's end at the run's end.
+// and when its job started, and the round it was first seen in), whether a successor became ready, the
+// deployment's end at the run's end, and the run's jobs that the fake Slurm still shows alive then.
 type guardRun struct {
 	allocs    map[string]string
+	firstSeen map[string]time.Time
+	jobs      map[string]string
 	succReady bool
 	end       time.Time
+	liveJobs  []string
 }
 
 // runGuarded runs the case with the guard, in 10 s rounds with the guard before each, until 10 minutes past
@@ -158,22 +194,24 @@ func runGuarded(t *testing.T, c guardCase, untilThird bool, guard func(rg *rig) 
 	rg, md := alphaGuardRig(t, c)
 	g := guard(rg)
 	// The live steps create the deployment with the guard's first end, from the clock read before it.
-	if tg, ok := g.(*twoJobGuard); ok {
-		e, _, err := tg.g.Next(alpha.Look{Clock: rg.clock.Now()})
-		if err != nil {
-			t.Fatal(err)
-		}
-		mt := metav1.NewTime(e)
+	if fg, ok := g.(interface{ first(*rig) time.Time }); ok {
+		mt := metav1.NewTime(fg.first(rg))
 		md.Spec.EndTime = &mt
 	}
 	rg.create(md)
-	r := guardRun{allocs: map[string]string{}}
+	r := guardRun{allocs: map[string]string{}, firstSeen: map[string]time.Time{}, jobs: map[string]string{}}
 	limit := rigStart.Add(c.firstWait + c.succWait + 5*time.Hour)
 	for rg.clock.Now().Before(limit) {
 		g.before(rg)
 		rg.clock.Advance(10 * time.Second)
 		rg.Step()
 		for _, a := range rg.allocations(alphaGuardMD) {
+			if _, ok := r.firstSeen[a.Name]; !ok {
+				r.firstSeen[a.Name] = rg.clock.Now()
+			}
+			if id := a.Status.AtProvider.JobID; id != "" {
+				r.jobs[a.Name] = id
+			}
 			seen := "seen " + rg.clock.Now().Format(time.TimeOnly)
 			if st := a.Status.AtProvider.StartTime; st != nil {
 				seen += ", started " + st.Format(time.TimeOnly)
@@ -195,6 +233,11 @@ func runGuarded(t *testing.T, c guardCase, untilThird bool, guard func(rg *rig) 
 		}
 		if cur := rg.md(alphaGuardMD); cur.Spec.EndTime != nil && !rg.clock.Now().Before(cur.Spec.EndTime.Add(10*time.Minute)) {
 			r.end = cur.Spec.EndTime.Time
+			for alloc, id := range r.jobs {
+				if j, ok := rg.batch.Job(id); !ok || j.EndTime == nil {
+					r.liveJobs = append(r.liveJobs, alloc)
+				}
+			}
 			return r
 		}
 	}
@@ -239,6 +282,63 @@ func TestTheTwoJobGuardKeepsALongWaitToTwoAllocations(t *testing.T) {
 				t.Errorf("the control (an end set at the successor's lease end) created %d Allocations: the case does not reach the race it is for: %v", len(cr.allocs), cr.allocs)
 			} else {
 				t.Logf("the control created %d Allocations: %v", len(cr.allocs), cr.allocs)
+			}
+		})
+	}
+}
+
+// The step dies mid-wait (the science agent's requirement on PR 255): the guard stops patching, at three
+// moments of the 90-minute cases. The deployment then ends at the last end the guard set, which is no later
+// than the drain start of any job not yet started, so the controller never creates a third Allocation, nor any
+// after the end, and it ends every job of the run (the row itself fails: hack/livechecks shows the script's
+// FAIL and its cleanup by the run's prefix).
+func TestADeadStepLeavesTheDeploymentAtItsLastEnd(t *testing.T) {
+	dw, limit := 15*time.Minute, 106*time.Minute
+	started := func(rg *rig) int {
+		n := 0
+		for _, a := range rg.allocations(alphaGuardMD) {
+			if a.Status.AtProvider.StartTime != nil {
+				n++
+			}
+		}
+		return n
+	}
+	for _, c := range []struct {
+		name string
+		gc   guardCase
+		when func(rg *rig) bool
+	}{
+		{"while the first job pends", guardCase{row: "alpha-athena-handover", firstWait: 90 * time.Minute, succWait: 95 * time.Minute},
+			func(rg *rig) bool { return !rg.clock.Now().Before(rigStart.Add(30 * time.Minute)) }},
+		{"as the predecessor starts", guardCase{row: "alpha-athena-handover", firstWait: 90 * time.Minute, succWait: 95 * time.Minute},
+			func(rg *rig) bool { return started(rg) > 0 }},
+		{"while the successor waits for the GPU", guardCase{row: "alpha-helios-nooverlap", firstWait: 90 * time.Minute, noOverlapQueue: true},
+			func(rg *rig) bool { return len(rg.allocations(alphaGuardMD)) == 2 && started(rg) == 1 }},
+		{"while the successor waits in the queue", guardCase{row: "alpha-athena-handover", firstWait: 90 * time.Minute, succWait: 95 * time.Minute},
+			func(rg *rig) bool { return len(rg.allocations(alphaGuardMD)) == 2 && started(rg) == 1 }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var sg *stoppingGuard
+			r := runGuarded(t, c.gc, false, func(rg *rig) endGuard {
+				sg = &stoppingGuard{inner: &twoJobGuard{t: t, g: &alpha.TwoJobGuard{TimeLimit: limit, DrainWindow: dw}}, when: c.when}
+				return sg
+			})
+			if !sg.stopped {
+				t.Fatal("the step never died: the case does not test what it names")
+			}
+			if !r.end.Equal(sg.last) {
+				t.Errorf("the deployment ended at %s, want the guard's last end %s", r.end.Format(time.TimeOnly), sg.last.Format(time.TimeOnly))
+			}
+			if len(r.allocs) > 2 {
+				t.Errorf("%d Allocations, want at most 2: %v", len(r.allocs), r.allocs)
+			}
+			for name, at := range r.firstSeen {
+				if at.After(r.end) {
+					t.Errorf("Allocation %s was created at %s, after the deployment's end %s", name, at.Format(time.TimeOnly), r.end.Format(time.TimeOnly))
+				}
+			}
+			if len(r.liveJobs) > 0 {
+				t.Errorf("jobs of %v are alive 10 minutes after the deployment's end", r.liveJobs)
 			}
 		})
 	}
