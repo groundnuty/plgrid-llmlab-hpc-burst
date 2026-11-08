@@ -47,6 +47,7 @@ var commands = map[string]command{
 	"sacct":     (*shell).sacct,
 	"scancel":   (*shell).scancel,
 	"scontrol":  (*shell).scontrol,
+	"date":      (*shell).date,
 	"printenv":  (*shell).printenv,
 	"sha256sum": (*shell).sha256sum,
 	"umask":     (*shell).setUmask,
