@@ -77,13 +77,31 @@ func (k KubeRecorder) Event(obj runtime.Object, warning bool, typ, code, message
 	k.R.Eventf(obj, nil, et, code, typ, "%s", cutNote(message))
 }
 
+// EventsCounter returns the raised-events counter the recorder counts into,
+// nil when NewKubeRecorder did not build it. It is a method of the value, so
+// a *KubeRecorder, which Options.Recorder accepts as well, has it too.
+func (k KubeRecorder) EventsCounter() *eventcount.Counter { return k.Counter }
+
+// countingRecorder is a Recorder that names the raised-events counter it
+// counts into: a KubeRecorder, or a pointer to one.
+type countingRecorder interface {
+	Recorder
+	EventsCounter() *eventcount.Counter
+}
+
 // raisedEvents is the counter the front's /metrics exports: the one its
-// recorder counts into, when that is a KubeRecorder NewKubeRecorder built, so
-// the two cannot come apart; otherwise a new one, into which nothing counts
-// (a test's MemoryRecorder).
+// recorder counts into, when the recorder names one (a KubeRecorder that
+// NewKubeRecorder built, passed as a value or a pointer), so the two cannot
+// come apart; otherwise a new one, into which nothing counts (a test's
+// MemoryRecorder).
 func raisedEvents(rec Recorder) *eventcount.Counter {
-	if k, ok := rec.(KubeRecorder); ok && k.Counter != nil {
-		return k.Counter
+	if k, ok := rec.(*KubeRecorder); ok && k == nil {
+		return eventcount.New() // a nil pointer names no counter; its Event would panic first
+	}
+	if k, ok := rec.(countingRecorder); ok {
+		if c := k.EventsCounter(); c != nil {
+			return c
+		}
 	}
 	return eventcount.New()
 }

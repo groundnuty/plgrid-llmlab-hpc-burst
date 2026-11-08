@@ -173,28 +173,27 @@ func hookRequests(h *harness) *hookedRequests {
 	return r
 }
 
-// next waits until the proxy has finished one more request than it had at
-// the call's start, and returns when it did.
-func (r *hookedRequests) next(t *testing.T, before int) time.Time {
+// finished waits until the proxy has finished the request with the given ID,
+// and returns when it did. Another request's finish proves nothing about this
+// one (HBEP-8, Test plan, Raised events: a pass of another subject).
+func (r *hookedRequests) finished(t *testing.T, id string) time.Time {
 	t.Helper()
+	if id == "" {
+		t.Fatal("the response names no request ID, so its finish cannot be told from another request's")
+	}
 	deadline := time.After(time.Minute)
 	for {
 		r.mu.Lock()
-		if len(r.done) > before {
-			var last time.Time
-			for _, at := range r.done {
-				if at.After(last) {
-					last = at
-				}
-			}
-			r.mu.Unlock()
-			return last
-		}
+		at, ok := r.done[id]
+		n := len(r.done)
 		r.mu.Unlock()
+		if ok {
+			return at
+		}
 		select {
 		case <-r.more:
 		case <-deadline:
-			t.Fatal("the proxy finished no request within a minute")
+			t.Fatalf("the proxy did not finish request %s within a minute (%d other requests finished)", id, n)
 		}
 	}
 }
@@ -230,7 +229,8 @@ func TestFrontRequestPathAbsenceOfUsageWriteFailed(t *testing.T) {
 			if resp.StatusCode != http.StatusOK {
 				t.Fatalf("status %d, want 200: the front keeps serving", resp.StatusCode)
 			}
-			b := eventcount.Barrier{What: "the request's finish (" + tc.name + ")", PassStart: change, Observed: hook.next(t, 0)}
+			id := resp.Header.Get(HeaderRequestID)
+			b := eventcount.Barrier{What: "the finish of request " + id + " (" + tc.name + ")", PassStart: change, Observed: hook.finished(t, id)}
 			second := frontRead(t, f.metrics, k)
 			a := eventcount.Absence{Key: k, First: first, Second: second, Change: change, Barriers: []eventcount.Barrier{b}, Quiet: quiet}
 			v, why := a.Judge()
@@ -246,25 +246,40 @@ func TestFrontRequestPathAbsenceOfUsageWriteFailed(t *testing.T) {
 
 // TestRunExportsTheCounterItsRecorderCountsInto: the counter Run puts on the
 // front's /metrics (raisedEvents) is the one the recorder NewKubeRecorder
-// builds counts into, so an event raised through that recorder shows there;
-// a recorder that counts nothing, a test's, gets a counter of its own (HBEP-8,
+// builds counts into, so an event raised through that recorder shows there,
+// whether Options.Recorder holds the KubeRecorder or a pointer to it; a
+// recorder that counts nothing, a test's, gets a counter of its own (HBEP-8,
 // Raised events: Export).
 func TestRunExportsTheCounterItsRecorderCountsInto(t *testing.T) {
-	rec, stop, err := NewKubeRecorder(kubefake.NewSimpleClientset())
-	if err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct {
+		name string
+		as   func(rec KubeRecorder) Recorder
+	}{
+		{"the recorder", func(rec KubeRecorder) Recorder { return rec }},
+		{"a pointer to it", func(rec KubeRecorder) Recorder { return &rec }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec, stop, err := NewKubeRecorder(kubefake.NewSimpleClientset())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stop()
+			opt := tc.as(rec)
+			exported := raisedEvents(opt)
+			if exported != rec.Counter || exported == nil {
+				t.Fatal("Run would export a counter other than the one its recorder counts into")
+			}
+			m := NewMetrics(nil, t.TempDir(), func(string) (uint64, error) { return 1 << 30, nil }, exported)
+			lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "front", UID: "lease-uid-1"}}
+			opt.Event(lease, true, eventFailing, reasonUsageWriteFailed, "a message")
+			wantSample(t, scrape(t, m), 1, eventcount.Name, "controller", eventcount.ControllerFront, "reason", reasonUsageWriteFailed,
+				"action", eventFailing, "type", provider.EventKindWarning)
+		})
 	}
-	defer stop()
-	exported := raisedEvents(rec)
-	if exported != rec.Counter || exported == nil {
-		t.Fatal("Run would export a counter other than the one its recorder counts into")
-	}
-	m := NewMetrics(nil, t.TempDir(), func(string) (uint64, error) { return 1 << 30, nil }, exported)
-	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "front", UID: "lease-uid-1"}}
-	rec.Event(lease, true, eventFailing, reasonUsageWriteFailed, "a message")
-	wantSample(t, scrape(t, m), 1, eventcount.Name, "controller", eventcount.ControllerFront, "reason", reasonUsageWriteFailed,
-		"action", eventFailing, "type", provider.EventKindWarning)
 	if raisedEvents(&MemoryRecorder{}) == nil {
 		t.Fatal("a recorder that counts nothing gets no counter")
+	}
+	if raisedEvents((*KubeRecorder)(nil)) == nil {
+		t.Fatal("a nil KubeRecorder pointer gets no counter")
 	}
 }
