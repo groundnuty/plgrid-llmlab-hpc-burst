@@ -199,10 +199,12 @@ func (p *pass) restart(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal
 			s.Restarts = s.Restarts[n-maxRestartsKept:]
 		}
 		s.Phase = v1alpha1.InstanceVerifying
-		cond(&s.Conditions, v1alpha1.ConditionVerified, metav1.ConditionFalse, reason, "reverifying after the restart", in.Generation, now)
-		cond(&s.Conditions, v1alpha1.ConditionWarmedUp, metav1.ConditionFalse, reason, "warming up again after the restart", in.Generation, now)
+		// The checks run again: Unknown, not False (api/v1alpha1/conditions.go, ReasonWorkerRestart and
+		// ReasonInstanceRestart). A worker restart keeps Qualified.
+		cond(&s.Conditions, v1alpha1.ConditionVerified, metav1.ConditionUnknown, reason, "reverifying after the restart", in.Generation, now)
+		cond(&s.Conditions, v1alpha1.ConditionWarmedUp, metav1.ConditionUnknown, reason, "warming up again after the restart", in.Generation, now)
 		if part == v1alpha1.PartInstance {
-			cond(&s.Conditions, v1alpha1.ConditionQualified, metav1.ConditionFalse, reason, "qualifying again after the restart", in.Generation, now)
+			cond(&s.Conditions, v1alpha1.ConditionQualified, metav1.ConditionUnknown, reason, "qualifying again after the restart", in.Generation, now)
 		}
 		cond(&s.Conditions, v1alpha1.ConditionHealthy, metav1.ConditionFalse, signal, msg, in.Generation, now)
 	}); err != nil {

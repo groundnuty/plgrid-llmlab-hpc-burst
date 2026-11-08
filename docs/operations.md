@@ -160,7 +160,7 @@ A ModelDeployment with a managed source (an entry LLMLab serves) gets none of th
 ### `VerificationFailed`
 
 - **Means:** an Instance's verification found that the engine runs other settings than the spec declares (a settings contradiction), or that a workload shape does not fit the context limit the engine reported (a shape misfit). The message names the accelerator class and the verification record, `ver-<instance UID>-<generation>`.
-- **The controller** ended that Instance at once with `VerificationFailed`, released its Allocation, and stopped provisioning in its class. A contradiction stops the class until the serving spec changes. A shape misfit stops it until the spec changes or a `workload` edit makes the shapes fit, which lifts the stop with a `ready` event `ShapesFit` ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Instance start, verifying).
+- **The controller** ended that Instance at once with `VerificationFailed`, released its Allocation, and stopped provisioning in its class. A contradiction stops the class until the serving spec changes. A shape misfit stops it until the spec changes or the workload's resolved shapes change, and a change that makes the shapes fit lifts the stop with a `ready` event `ShapesFit`. The exception is a misfit whose verification record holds no context limit to test the shapes against: only a spec change lifts that one, and the message says so. A verification of this release always records the limit, so the exception applies only to a record without one (`internal/lifecycle/verify.go`, `stopLifts` and `classBlocked`; `judge.go`; [HBEP-7](../hbep/0007-lifecycle-controller/README.md), Instance start, verifying).
 - **You:** read the record, which holds the settings the engine reported and the verdict:
 
   ```
@@ -168,7 +168,7 @@ A ModelDeployment with a managed source (an entry LLMLab serves) gets none of th
   hbk get controllerrevision <record> -o yaml
   ```
 
-  Declare the value as the engine reports it (a model hook can rewrite one, HBEP-7's known limit), or fix the workload. The message says "until the serving spec changes" for both causes; for a shape misfit a `workload` edit is enough.
+  Declare the value as the engine reports it (a model hook can rewrite one, HBEP-7's known limit), or fix the workload. The message says what lifts the stop: "until the serving spec changes" for a contradiction, and for a misfit whose record holds no context limit; "until the serving spec or the workload's resolved shapes change" for any other misfit, for which a `workload` edit that makes the shapes fit is enough.
 
 ### `IdentityUnresolved`
 
@@ -241,8 +241,8 @@ An Instance moves through `pending`, `starting`, `verifying`, `ready`, `draining
 
 | Condition | Reasons | What it says |
 |---|---|---|
-| `Verified` | `Pending`, `Passed`, `Failed`, `WorkerRestart`, `InstanceRestart` | false with `Pending` from the agent's registration until checked; true with `Passed`; false with `Failed` when a verification fails; false with the restart's reason while it verifies again after a restart |
-| `Qualified`, `WarmedUp` | `Pending`, `Passed`, `WorkerRestart`, `InstanceRestart` | false with `Pending` until checked; true with `Passed`. A worker restart resets `WarmedUp` only, a whole-Instance restart both. A failed check writes neither: the Instance ends with `QualificationFailed`, in `status.endReason` and on `Healthy` (`internal/lifecycle/verify.go`, `health.go`) |
+| `Verified` | `Pending`, `Passed`, `Failed`, `WorkerRestart`, `InstanceRestart` | unknown with `Pending` from the agent's registration until checked; true with `Passed`; false with `Failed` when a verification fails; unknown with the restart's reason while it verifies again after a restart. Unknown means the check has not run, or not yet again; false means it ran and failed (`internal/lifecycle/instances.go`, `pending`; `verify.go`, `verified`; `health.go`, `restart`) |
+| `Qualified`, `WarmedUp` | `Pending`, `Passed`, `Failed`, `WorkerRestart`, `InstanceRestart` | unknown with `Pending` until checked; true with `Passed`. A worker restart sets `WarmedUp` to unknown with `WorkerRestart` and keeps `Qualified`; a whole-Instance restart sets both to unknown with `InstanceRestart`. A failed check writes its own condition, `Qualified` or `WarmedUp`, false with `Failed` and the outcome as its message, and the Instance ends with `QualificationFailed`, in `status.endReason` and on `Healthy` (`internal/lifecycle/instances.go`, `pending` and `failCheck`; `verify.go`, `starting`; `health.go`, `restart`) |
 | `Healthy` | `Healthy`, `ProbeFailing`, `ErrorsOnly`, `NoProgress`, `PartExited` and other signals | true with `Healthy` once ready; false with the signal behind a restart ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Health and restarts), or with the end reason of an Instance that failed |
 | `AgentUnreachable` | `ReportsMissing`, `Reporting` | no report from the agent for `health.agentTimeout`. The front routes no new request to it, and nothing restarts on that basis alone |
 | `TunnelConnected` | `ProxyOnline`, `ProxyOffline`, `ProxyListUnreadable` | whether frps lists the Instance's proxy online. It gates only an Instance's first entry to `ready`: an Instance that has been ready returns to `ready` after a restart whatever it says. The front does not route on it, but on its own probe of the path ([HBEP-6](../hbep/0006-instance-reachability/README.md), Path state; `internal/lifecycle/verify.go`; `internal/front/inventory/build.go`) |
@@ -259,7 +259,7 @@ An Instance that fails ends with one of these reasons in `status.endReason`, and
 | `StartTimeout` | not ready within `health.startTimeout` of its start instruction, with its tunnel connected or not yet read | the engine's start: `hbk describe instance <instance>` shows which check had not passed |
 | `TunnelNotConnected` | as `StartTimeout`, but its `TunnelConnected` was false or unknown at the deadline | [A tunnel that won't connect](#a-tunnel-that-wont-connect) |
 | `VerificationFailed` | a settings contradiction or a shape misfit, which also stops the class ([`VerificationFailed`](#verificationfailed)), or a checkpoint rehash that failed again after restaging, which does not | the verification record; for a rehash, the checkpoint staged on the cluster |
-| `QualificationFailed` | a qualification or warm-up check failed, a warm-up that has not settled after five rounds included | the check outcome in the Instance's conditions and events |
+| `QualificationFailed` | a qualification or warm-up check failed, a warm-up that has not settled after five rounds included | the failed check's condition, `Qualified` or `WarmedUp` (false with `Failed`, the outcome as its message), and the events |
 | `RestartLoop` | the worker and whole-Instance rungs are spent within `restart.window` | the `failing` events before it name each signal |
 | `AllocationFailed`, `AllocationLost`, `AllocationRefused` | the Allocation's phase became `Failed`, `Lost` (gone from the queue and from accounting for longer than `lostGrace`) or `Refused` | the Allocation's `status.atProvider.reason` |
 | `Requeued` | the scheduler requeued the job, or a second execution of it registered | nothing from the first execution is reused; a requeue is a site's action |
