@@ -85,6 +85,7 @@ func TestMatchesCommand(t *testing.T) {
 		"the program by a relative path":         {with("bin/vllm"), false},
 		"an interpreter that is not Python":      {with("/bin/bash", "/usr/local/bin/vllm"), false},
 		"an interpreter flag with a value":       {with("python3", "-X", "dev", "/usr/local/bin/vllm"), false},
+		"an option whose value is the path":      {with("python3", "-X", "/usr/local/bin/vllm"), false},
 		"a module run with -m":                   {with("python3", "-m", "vllm"), false},
 		"a name that only ends with it":          {with("/usr/local/bin/xvllm"), false},
 		"bound paths rewritten (a stand-in's)":   {[]string{"/t/alpha.test", "serve", "/tmp/c/model", "--port=8000", "--uds=/tmp/r/engine.sock"}, false},
