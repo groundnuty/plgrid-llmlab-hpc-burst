@@ -20,9 +20,10 @@ import (
 // real constant, and the Degraded section follows HBEP-7's ranking.
 
 // guideNames is every condition, reason, phase and mode the guide names, with the constant that
-// holds it (issue #240: every reason named is a real constant). It is the one list the HBEP-8 drift
-// guard (#239) will be hooked to. A name the guide drops must leave it, and a name the guide adds
-// must join it with its constant.
+// holds it (issue #240: every reason named is a real constant). The events the guide states and its
+// Degraded headings are also held to HBEP-8's table and HBEP-7's ranking, as the drift guard (#239)
+// parses them, by operations_drift_test.go. A name the guide drops must leave this list, and a name
+// the guide adds must join it with its constant.
 var guideNames = map[string]string{
 	// ModelDeployment conditions and reasons (HBEP-7, Events and conditions).
 	"Ready":                 v1alpha1.ConditionReady,
