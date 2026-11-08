@@ -189,7 +189,7 @@ The API refuses a new event without `action` or `reason`, with either over 128 c
 - **Namespace.** An event about a cluster-scoped object lands in `default` (`event_recorder.go`, lines 91–96).
 - **The legacy recorder differs.** crossplane-runtime's recorder, which the Provider controller uses, writes through client-go's `tools/record` with no `action` ([`pkg/event/event.go`, lines 93–106](https://github.com/crossplane/crossplane-runtime/blob/v2.4.3/pkg/event/event.go#L93-L106)). That path also has a spam filter, 25 events per object and then one per 5 minutes, and it folds more than 10 similar events within 10 minutes into one "combined" event ([`tools/record/events_cache.go`, lines 36–48](https://github.com/kubernetes/client-go/blob/v0.35.3/tools/record/events_cache.go#L36-L48)). Accessed 2026-10-31.
 
-So a test checks for at least one event of a type and reason on a resource, never for a count or for every note. The message a test must see is checked on the condition. The order of a recorder call against a status write is checked on one shared sequence: the in-memory recorder and a client interceptor on status writes number their calls from one counter. The API cannot show that order.
+So a test checks for at least one event of a type and reason on a resource, never for a count or for every note, in the Events the API holds. The raised-events counter (Metrics, Controller metrics) counts hand-overs exactly, and is where a count or an absence is checked. The message a test must see is checked on the condition. The order of a recorder call against a status write is checked on one shared sequence: the in-memory recorder and a client interceptor on status writes number their calls from one counter. The API cannot show that order.
 
 **Observers.** Each observer has a heartbeat and a staleness rule. The component that judges it does not depend on it:
 
@@ -281,18 +281,31 @@ No client key ID is a label: per-key usage is in the records.
 **Controller metrics.** Besides the engine gauges, the lifecycle controller exports the accounting gauges (Provider accounting). Like the engine gauges, only the serving copy exports them (Unknown samples).
 
 **Raised events** (science-agent ruling, 8 Nov 2026, for #256). A test that lists Events cannot prove an event was not raised, because client-go's event recorder delivers asynchronously. So each controller counts the events it hands to its recorder.
-- **The counter:** `hpcburst_events_raised_total{controller, reason, type}`, with the help text "events handed to the event recorder, not events delivered: the recorder may aggregate or drop them".
-- **The labels are bounded:**
-  - `controller` is `lifecycle`, `provider-<Provider name>` or `front`;
-  - `reason` comes from the Reasons table, which the drift guard checks;
+- **The counter:** `hpcburst_events_raised_total{controller, reason, action, type}`, with the help text "events handed to the event recorder, not events delivered: the recorder may aggregate or drop them".
+  - `controller` is `lifecycle`, `provider-<Provider name>` (a batch or a managed Provider; each runs its own manager) or `front`.
+  - `action` is HBEP-8's type (Events), or `none` for an event with no action.
   - `type` is `Normal` or `Warning`.
-- **It rises in the same call that hands the event over,** before the recorder's queue, so a count is final once the emitting code has returned. It starts at 0 in each process.
-- **The count is taken where each recorder is built,** by a wrapper, so no emit site can raise an event uncounted.
-- **Where it's exported:**
-  - The controller process's counts are on the lifecycle controller's `/metrics`. That includes the Provider managers' counts, since they bind no metrics port.
-  - Only the serving copy exports them, like the other `hpcburst_` series (Unknown samples). Every controller that raises events in that process runs only on the copy that leads `lifecycle`.
-  - The front's counts are on the front's own `/metrics`.
-- **How absence is proven:** the counter for that reason is unchanged across a barrier that proves a later pass of the same serialized loop has started. A barrier that proves only that the emitting read completed is not enough.
+  - `reason`'s values come from each controller's own source, all constants, so the labels stay bounded:
+    - `lifecycle` and `front`: the Reasons table;
+    - a managed Provider: the managed catalog controller's reasons (Events);
+    - a batch Provider: its own reasons, which the drift guard lists as code-only, plus crossplane-runtime's managed reconciler reasons.
+- **Counting:**
+  - The count rises in the same call that hands the event over, before the recorder's queue, so it is final once the emitting code has returned. The help text covers the events a recorder then drops.
+  - The count is taken by a wrapper where each recorder is built, so no emit site can raise an event uncounted. Each copy of a manager has one counter, never a package-level one.
+  - **Series are created at 0** for every reason, action and type that `lifecycle`, `front` and a managed Provider can raise, so an event never raised shows a real 0 (Unknown samples, on counts of the framework's own events). A batch Provider's series appear at its first event.
+- **Export:**
+  - The controller process's counts are on the lifecycle controller's `/metrics`, the Provider managers' included, since they bind no metrics port. Only the serving copy exports them, like the other `hpcburst_` series (Unknown samples); every controller that raises events in that process runs only on the copy that leads `lifecycle`.
+  - The front's counts are on the front's own `/metrics`, which also gains the process collector's `process_start_time_seconds`.
+- **Proving that an event was not raised** takes all four of these. Otherwise the result is inconclusive, never a pass:
+  1. **The first read comes before the change** that could raise the event.
+  2. **Both reads come from the same process while it serves:** `process_start_time_seconds` is unchanged, and on the lifecycle controller both `hpcburst_collector_success` series are present. A restart or a hand-over between the reads makes the check inconclusive.
+  3. **Between the reads, a pass of the emitting loop, for the same subject, observed the change and finished emitting,** and that pass started after the time the event would have been due (for example, `tunnelOrphanGrace` for `TunnelOrphaned`). The barrier per loop:
+     - **the lifecycle reconciler:** a later `status.lastReconcileTime` write of the same ModelDeployment. It runs several workers, serialized per key only, so a pass of another ModelDeployment proves nothing;
+     - **the tunnel-state reader:** a condition write of a later pass;
+     - **a managed Provider's catalog controller:** the next pass's write;
+     - **the front's `Lease` keeper:** the next beat's `renewTime`;
+     - **the observer, the gap emitter and the front's request path:** none on `main` (Code that differs). For these, absence is proven by a test hook that signals after the emitter's recorder call, or by a test that calls the emitting function itself and reads the counter after it returns.
+  4. **Other sources of the same series are quiet:** for example, `HeartbeatMissed` from the observer shares `lifecycle`'s series with the reconciler's.
 
 ### Usage records
 
@@ -359,9 +372,13 @@ What the code had to change to match this HBEP, as read on 31 Oct 2026. The PRs 
 - **Contracts:** a `LeaseFront` constant next to `LeaseLifecycle`, in the next contracts PR.
 - **The serving gate (6 Nov 2026):** done in PR #254 (#249). One collector exports the Instance series, the accounting gauges and both success gauges, only while the copy serves. "Leading" there needs a renew of the `lifecycle` `Lease` within the renew deadline.
 - **Raised events (8 Nov 2026):** not yet (#256). Still to come:
-  - the counting wrapper where the recorders are built: `cmd/hpcburst-controller/components.go`, `cmd/hpcburst-controller/tunnel.go`, `internal/lifecycle/manager.go`, `internal/managed/controller.go`, and the front's events/v1 broadcaster in `internal/front/events.go`;
-  - a drift-guard check that every recorder is wrapped;
-  - PR #247's absence checks waiting on the counter.
+  - **The counting wrapper** where the recorders are built: `cmd/hpcburst-controller/components.go`, `cmd/hpcburst-controller/tunnel.go`, `internal/lifecycle/manager.go`, `internal/managed/controller.go`, and the front's events/v1 broadcaster in `internal/front/events.go`.
+    - For the Provider controller, wrap the inner `GetEventRecorderFor` recorder, `AnnotatedEventf` included, inside its created-event filter: crossplane's `WithAnnotations` rebuilds the recorder from that inner one and drops the filter.
+    - Use one counter per manager copy, registered on the manager's registry, and export it through the serving collector of PR #254. Registered directly, it would bypass the serving gate.
+  - **Series created at 0,** and the front's `process_start_time_seconds`.
+  - **A test hook** signalling after the recorder call for the observer, the gap emitter and the front's request path.
+  - **A drift-guard check** that every recorder is wrapped.
+  - **PR #247's absence checks** meeting the four conditions.
 
 ### Test plan
 
@@ -379,7 +396,16 @@ Tests use the fake Slurm of spike S4, the engine double behind a real agent (`in
 - **A failed Allocation list.** `/metrics` answers 200 with `hpcburst_collector_success{collector="accounting"} 0` and no accounting series; after the next successful list, 1 and the series again.
 - **A failed Instance inventory read.** `/metrics` answers 200 with `hpcburst_collector_success{collector="instances"} 0` and no Instance series; after the next successful read, 1 and the series again.
 - **A standby.** Two managers with leader election on one API server, each read on its own `/metrics`. The standby's has no `hpcburst_` series, while the serving copy's has the Instance and accounting series and both success gauges. After the serving copy stops, the other gains both gauges at 1, and every live Instance shows as unknown with reason `stale` until it reports. A leading copy whose caches have not synced exports no `hpcburst_` series. A fixture with one replica, or one that injects the serving predicate into a collector, proves nothing here.
-- **Raised events.** For each reason a test raises, `hpcburst_events_raised_total` rises by one in the same call that hands the event over, with its `controller` and `type`. An absence check reads the counter before and after a barrier that proves a later pass of the same loop has started, and finds it unchanged. A recorder built without the counting wrapper fails the drift guard. None of these proves anything here: a single read showing 0, a count kept in the test's own client, or a barrier that shows only that the emitting read completed.
+- **Raised events.**
+  - **Counting:** for each reason a test raises, `hpcburst_events_raised_total` rises by one, with its `controller`, `action` and `type`, in the same call that hands the event over, including an event raised through crossplane's `WithAnnotations`. A suppressed `CreatedExternalResource` is not counted.
+  - **Series at 0:** a reason never raised reads 0 on a serving copy.
+  - **The drift guard** fails on any recorder built without the counting wrapper.
+  - **Absence:** an absence check meets the four conditions (Metrics, Controller metrics). With a restart or a hand-over between its reads, it is inconclusive.
+  - **None of these proves anything here:**
+    - a single read showing 0;
+    - a first read taken after the change;
+    - a count kept in the test's own client;
+    - a barrier that shows only that the emitting read completed, or a pass of another subject or made before the event was due.
 - **A restart of the lifecycle controller.** Until the agent's next report, each engine metric of `worker-0` is `hpcburst_instance_metrics_unknown` with reason `stale`.
 - **An engine's metrics endpoint times out or returns nothing:** the series are absent and `hpcburst_instance_metrics_unknown` names the reason, never a 0.
 - **An engine double that omits the prefix-cache counter lines:** those series are absent with reason `not_reported`, and the other series are present. A real vLLM v0.32.0 with prefix caching off still exports both counters, at 0, since it registers them unconditionally (`loggers.py`, lines 660–677): its series are present, and the hit rate is 0 over 0, with no value.
@@ -533,7 +559,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-01: the `acct-` record waits until the last job no longer carries `COMPLETING` (HBEP-4's amendment of the same day, for #198).
 - 2026-11-02: the Reasons table split for the Instance fallback of `VerificationFailed` and `CapacityDropped`, its "proposed" marks dropped, "Code that differs" read as done, and the Instance metrics' inventory built from the cache across a leadership change (from #239, #241 and #249; PR #248).
 - 2026-11-06: the `instances` collector gets a success gauge, since its inventory is now read from the cache, and only the serving copy exports state-derived series, accounting included (rulings for #249; PR #258, from PR #254's open points).
-- 2026-11-08: a raised-events counter, so a test or an operator can prove that an event was not raised (ruling for #256).
+- 2026-11-08: a raised-events counter, so a test or an operator can prove that an event was not raised (ruling for #256). Code that differs records the serving gate as done in PR #254, where "leading" needs a renew within the renew deadline.
 
 ## Amendments
 
@@ -560,4 +586,9 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - **2026-11-01: the kept record waits for a completing job** (Provider accounting, The kept record; Test plan). Made with HBEP-4's amendment of the same day, for #198, from PR #200's review round. The `acct-` record is written once the Allocation's last job has ended and no longer carries `COMPLETING`, since a completing job is live and keeps the finalizer; the `lostGrace` wait for the final read starts only then. A job stuck in `COMPLETING` blocks deletion, HBEP-4's known risk. The accounting test waits for the flag in both of HBEP-4's listing shapes. Before, "has ended" read as the base state alone, and the text said the record never blocks deletion.
 - **2026-11-02: the Reasons table against the code** (Events; Code that differs; Unknown samples). An amendment, settled in PR #248's review (Astra and a fresh Opus), from #239's drift guard and #241's operator guide. The lifecycle controller's `degraded` row is split. `VerificationFailed` and `CapacityDropped` regard the ModelDeployment, else the Instance once the ModelDeployment is gone, as the code has done since #88; the text did not say so. Every reason in the table is emitted on `main`, so the "proposed" marks are dropped, and the three that are still literals are named. The drift guard is described as PR #246's. "Code that differs" is read as done unless an item says otherwise. Added after the round, for #249: the leader builds the Instance metrics' inventory from its informer cache, so a leadership change shows every live Instance as unknown at once, and a standby emits no Instance series.
 - **2026-11-06: only the serving copy exports state-derived series** (Unknown samples; Controller metrics; Code that differs; Test plan; Operational readiness). An amendment, from PR #254's open points for #249, settled in PR #258's review (Astra and a fresh Opus). Since 2 Nov the Instance inventory is read from the informer cache, so that read can fail. The `instances` collector now has `hpcburst_collector_success`, like `accounting`, and a failed read shows as 0 with no Instance series. A copy exports both collectors' series and gauges only while it serves (leading and caches synced), so replicas duplicate nothing outside one hand-over's unfenced overlap. A reader takes the unknown share only while the `instances` gauge is 1, and readiness needs both gauges at 1 on the serving copy. Before, the text said only `accounting` could fail to read, and only the Instance series were the leader's alone.
-- **2026-11-08: a raised-events counter** (Metrics, Controller metrics; Code that differs; Test plan). An amendment, from #256, found by #193's rehearsal (PR #247). client-go's event recorder delivers asynchronously, so listing Events cannot prove that one was not raised. Each controller now counts, in the same call, the events it hands to its recorder: `hpcburst_events_raised_total{controller, reason, type}`, exported by the serving copy like the other `hpcburst_` series, and by the front on its own `/metrics`. Before, HBEP-8 had no metric for events.
+- **2026-11-08: a raised-events counter** (Metrics, Controller metrics; Code that differs; Test plan). An amendment, from #256, found by #193's rehearsal (PR #247). client-go's event recorder delivers asynchronously, so listing Events cannot prove that one was not raised. Each controller now counts, in the same call, the events it hands to its recorder: `hpcburst_events_raised_total{controller, reason, type}`, exported by the serving copy like the other `hpcburst_` series, and by the front on its own `/metrics`. Settled in PR #275's review (Astra and a fresh Opus):
+  - the labels are `controller`, `reason`, `action` and `type`, with each controller's source of reasons named;
+  - series are created at 0;
+  - an absence proof has four conditions, with a barrier per loop, and test hooks where a loop has no pass marker.
+
+  Code that differs also records the serving gate as done in PR #254, where "leading" needs a renew of the `lifecycle` `Lease` within the renew deadline. Before, HBEP-8 had no metric for events.
