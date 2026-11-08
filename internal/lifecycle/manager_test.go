@@ -459,11 +459,17 @@ func TestManagerOnControlPlane(t *testing.T) {
 	// /metrics on loopback at the configured address (HBEP-8, Metrics): the
 	// pending Instance's info series, its engine metrics unknown (stale, since
 	// it has no agent; the leader lists it from its cache, wired through
-	// NewManager's cached client and readiness), and controller-runtime's own
-	// work-queue metrics beside them (`@hpc-burst-science-agent`, 2 Nov 2026,
-	// for #249).
-	eventually(t, time.Minute, "/metrics serves the Instance's info series and its unknown samples", func() (bool, string) {
+	// NewManager's cached client and readiness), both reads' success gauges at
+	// 1, which needs both registered on one registry (the manager would not
+	// start otherwise), and controller-runtime's own work-queue metrics beside
+	// them (`@hpc-burst-science-agent`, 2 and 6 Nov 2026, for #249).
+	eventually(t, time.Minute, "/metrics serves the Instance's info series, its unknown samples and both success gauges", func() (bool, string) {
 		body := getBody(t, "http://"+managerMetricsAddr+"/metrics")
+		for _, c := range []string{collectorInstances, collectorAccounting} {
+			if !strings.Contains(body, fmt.Sprintf("hpcburst_collector_success{collector=%q} 1\n", c)) {
+				return false, "no hpcburst_collector_success{collector=" + c + "} 1"
+			}
+		}
 		info := fmt.Sprintf(`instance_uid="%s"`, in.UID)
 		hasInfo, unknown := false, 0
 		for _, line := range strings.Split(body, "\n") {
