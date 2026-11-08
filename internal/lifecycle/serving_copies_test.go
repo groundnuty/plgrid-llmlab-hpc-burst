@@ -48,6 +48,7 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/leaderlock/leasefault"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
 )
@@ -734,7 +735,7 @@ func (l *scrapeLog) finish() []copyScrape {
 // registers its collectors on the same registry.
 func awaitUnregistered(t *testing.T) {
 	t.Helper()
-	probe := &stateCollector{serving: func() bool { return false }, instances: &instanceCollector{}, accounting: &accountingCollector{}}
+	probe := &stateCollector{serving: func() bool { return false }, instances: &instanceCollector{}, accounting: &accountingCollector{}, events: eventcount.New()}
 	eventually(t, time.Minute, "the lost copy's collectors leave controller-runtime's registry", func() (bool, string) {
 		if err := ctrlmetrics.Registry.Register(probe); err != nil {
 			return false, err.Error()
