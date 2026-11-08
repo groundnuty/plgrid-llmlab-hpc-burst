@@ -20,8 +20,10 @@ package main
 //
 // The residuals: that last window, from the release to the bind, which the retry
 // covers; frps, a real process of the tunnel tests, which binds its three ports
-// itself and has them released just before it starts (releaseForFrps); and a
-// restart of a copy, which rebinds the addresses its previous run closed.
+// itself and has them released just before it starts (releaseForFrps), and whose
+// start that finds one taken is repeated on a fresh block, with the binary
+// running on it (startFrps, issue #261); and a restart of a copy, which rebinds
+// the addresses its previous run closed.
 
 import (
 	"errors"
@@ -126,10 +128,15 @@ func (h *heldPorts) rehold(t testing.TB, addr string) {
 	h.hold(t, ln)
 }
 
+// listenTCP is how holdBlock and holdLoopback bind: the kernel's own net.Listen. A test of the
+// allocator replaces it (through setVars) with a model of the kernel's port table, so the ports
+// a pick sees, and the strangers on them, are the test's and not the machine's.
+var listenTCP = net.Listen
+
 // holdLoopback binds a port of the kernel's choice on loopback and holds it.
 func holdLoopback(t testing.TB) (net.Listener, string) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := listenTCP("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +172,7 @@ func releaseAtStart(f flags) {
 func holdBlock(t testing.TB, binary, other []int) int {
 	t.Helper()
 	for range 100 {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		ln, err := listenTCP("tcp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -176,7 +183,7 @@ func holdBlock(t testing.TB, binary, other []int) int {
 			if !ok {
 				break
 			}
-			l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(base+off)))
+			l, err := listenTCP("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(base+off)))
 			if err != nil {
 				ok = false
 				break
@@ -202,6 +209,36 @@ func holdBlock(t testing.TB, binary, other []int) int {
 func dropBlock(base int, offsets ...int) {
 	for _, off := range append([]int{agentapi.AgentEndpointPortOffset}, offsets...) {
 		heldAddrs.drop(net.JoinHostPort("127.0.0.1", strconv.Itoa(base+off)))
+	}
+}
+
+// blockAddrs are the addresses a tunnel block's reservations and servers sit on: the agent
+// endpoint, the plugin, frps's bind, tcpmux and web ports, the metrics, and the health address.
+func blockAddrs(f flags) []string {
+	return []string{
+		f.host.AgentEndpointAddr(), f.host.FrpsPluginAddr(),
+		f.host.FrpsBindAddr(), f.host.FrpsTCPMuxAddr(), f.host.FrpsWebAddr(),
+		f.host.ControllerMetricsAddr(), f.healthAddr,
+	}
+}
+
+// dropOldBlock releases what the block old still holds once the test has moved to the block live:
+// its reservations, and its health address, which nothing but its own binary releases. It leaves
+// every address the live block uses. A block's reservations are found by address, and the
+// addresses of two blocks can coincide: the ports a block released for frps are free for a later
+// pick (its agent endpoint, or the kernel's choice of a health address), so closing the old
+// block's addresses blindly would close the live block's listener. A pick that avoids every
+// attempted block (repickBlock) keeps the blocks apart; this keeps the live block's own safe
+// whatever the pick did.
+func dropOldBlock(old, live flags) {
+	keep := map[string]bool{}
+	for _, a := range blockAddrs(live) {
+		keep[a] = true
+	}
+	for _, a := range blockAddrs(old) {
+		if !keep[a] {
+			heldAddrs.drop(a)
+		}
 	}
 }
 
@@ -304,8 +341,16 @@ const maxBindRetries = 3
 // state directory, front and the rest of f stay: they do not depend on the ports.
 func repickPorts(t testing.TB, f flags, avoid ...flags) flags {
 	t.Helper()
+	return repickBlock(t, f, []int{agentapi.ControllerMetricsPortOffset}, avoid...)
+}
+
+// repickBlock is repickPorts for a block with the given other offsets (the ports
+// a process binds from an address, which the test releases just before that
+// process starts): the tunnel tests' include frps's three.
+func repickBlock(t testing.TB, f flags, other []int, avoid ...flags) flags {
+	t.Helper()
 	for range 50 {
-		base := holdBlock(t, []int{agentapi.FrpsPluginPortOffset}, []int{agentapi.ControllerMetricsPortOffset})
+		base := holdBlock(t, []int{agentapi.FrpsPluginPortOffset}, other)
 		clear := true
 		for _, a := range avoid {
 			if d := base - a.host.PortBase; d <= agentapi.ControllerMetricsPortOffset && d >= -agentapi.ControllerMetricsPortOffset {
@@ -313,7 +358,7 @@ func repickPorts(t testing.TB, f flags, avoid ...flags) flags {
 			}
 		}
 		if !clear {
-			dropBlock(base, agentapi.FrpsPluginPortOffset, agentapi.ControllerMetricsPortOffset)
+			dropBlock(base, append([]int{agentapi.FrpsPluginPortOffset}, other...)...)
 			continue
 		}
 		_, health := holdLoopback(t)

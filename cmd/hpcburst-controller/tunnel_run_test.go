@@ -21,11 +21,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -71,14 +74,17 @@ const (
 // bind, tcpmux and web ports (+9 to +11) for frps. frps is a real process that binds those three
 // itself and cannot take a listener, so they are held until startFrps releases them just before it
 // starts frps: the residual window is that start, not the test's whole run. A stranger that takes
-// one in it fails frps's start, which startFrps reports (a failed test, not a passing one). The rig
-// starts the binary with launchBinary, with no retry on a taken port: once frps runs, its block
-// cannot change.
+// one in it fails frps's start, and startFrps repeats that start on a fresh block (issue #261).
+// The rig starts the binary with launchBinary, with no retry on a taken port: once frps runs, its
+// block cannot change.
 func freeTunnelPortBase(t *testing.T) int {
 	t.Helper()
-	return holdBlock(t, []int{agentapi.FrpsPluginPortOffset},
-		[]int{agentapi.ControllerMetricsPortOffset, agentapi.FrpsBindPortOffset, agentapi.FrpsTCPMuxPortOffset, agentapi.FrpsWebPortOffset})
+	return holdBlock(t, []int{agentapi.FrpsPluginPortOffset}, tunnelOtherOffsets)
 }
+
+// tunnelOtherOffsets are the tunnel block's offsets that are not the binary's own servers: the
+// metrics, released at the binary's start, and frps's three, released at frps's.
+var tunnelOtherOffsets = []int{agentapi.ControllerMetricsPortOffset, agentapi.FrpsBindPortOffset, agentapi.FrpsTCPMuxPortOffset, agentapi.FrpsWebPortOffset}
 
 // condObs is one observed state of an Instance's TunnelConnected condition.
 type condObs struct{ name, status, reason, rv string }
@@ -186,6 +192,11 @@ type tunnelRig struct {
 	frpsDone bool
 	watch    *condWatch
 	nfrpc    int
+	// logf is where a retry of frps's start is logged: the test's log, or a test's own recorder.
+	logf func(format string, args ...any)
+	// tried is every block the rig left for a fresh one, in order: a fresh block shares no port with
+	// any of them, not only with the one it replaces.
+	tried []flags
 }
 
 func newTunnelRig(t *testing.T) *tunnelRig {
@@ -210,12 +221,61 @@ func newTunnelRig(t *testing.T) *tunnelRig {
 		t.Fatal(err)
 	}
 	t.Cleanup(bin.Close)
-	return &tunnelRig{t: t, api: api, f: f, frpcPath: frpc, frpsBin: bin, watch: startCondWatch(t, api)}
+	return &tunnelRig{t: t, api: api, f: f, frpcPath: frpc, frpsBin: bin, watch: startCondWatch(t, api), logf: t.Logf}
 }
 
+// beforeFrps, when set, runs in each attempt to start frps, after the three ports frps binds are
+// released and before frps starts: a test puts a stranger on one of them, or breaks the start
+// some other way.
+var beforeFrps func(t *testing.T, attempt int, f flags)
+
+// errFrpsPortTaken is what an attempt to start frps returns when frps exited with status 1 and
+// this attempt's output holds frps's bind-error line for one of its three ports ("listen tcp A:
+// bind: address already in use", frpsBindFailure): a stranger took one of the ports between their
+// release and frps's bind. It is the only failure of a start that is repeated.
+var errFrpsPortTaken = errors.New("frps found one of its ports taken")
+
 // startFrps starts frps with the launcher's own functions on the block of the binary's port base,
-// as hpcburst up does, and waits until its web server answers.
-func (r *tunnelRig) startFrps() {
+// as hpcburst up does, and waits until its web server answers. frps binds its three ports itself,
+// so a stranger can take one between their release and the bind (issue #261); a start whose frps
+// lost a port (errFrpsPortTaken) is repeated on a fresh block, at most maxBindRetries times, each
+// logged (startWithRetries). Every port the binary and frps use is the port base plus an offset,
+// so a fresh block is a fresh base for both: b, the binary running on the old one (nil if none is
+// yet), is stopped and started again on the new one, and startFrps returns that binary. The
+// caller reads r.f.host again afterwards. A start that fails any other way fails the test.
+func (r *tunnelRig) startFrps(b *binary) *binary {
+	r.t.Helper()
+	err := startWithRetries(r.logf, r.tryFrps, func(int) { b = r.freshBlock(b) })
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return b
+}
+
+// startWithRetries runs attempt (numbered from 0) until it returns nil. An attempt that returns
+// errFrpsPortTaken is repeated after retry(n), at most maxBindRetries times, and each repeat is
+// logged with logf; any other error is returned at once, as it is.
+func startWithRetries(logf func(format string, args ...any), attempt func(n int) error, retry func(n int)) error {
+	for n := 0; ; n++ {
+		err := attempt(n)
+		if err == nil || !errors.Is(err, errFrpsPortTaken) {
+			return err
+		}
+		if n == maxBindRetries {
+			return fmt.Errorf("frps still found a port taken after %d retries: %w", maxBindRetries, err)
+		}
+		logf("frps's start %d found one of its ports taken (%v); picking a fresh block and starting again (retry %d of %d)",
+			n+1, err, n+1, maxBindRetries)
+		retry(n)
+	}
+}
+
+// tryFrps is one attempt to start frps on the rig's block. It returns nil once frps's web server
+// answers; errFrpsPortTaken when frps exited with a bind failure (frpsExitError: exit status 1 and
+// a bind-error line in everything it wrote during this attempt, read from where the log ended
+// before the start, since the log is appended to); and any other failure as an error that is not
+// errFrpsPortTaken: the process exits for another reason, or its web server does not answer in 30 s.
+func (r *tunnelRig) tryFrps(attempt int) error {
 	r.t.Helper()
 	host := r.f.host
 	pw, _, err := launcher.EnsureFrpsWebPassword(host)
@@ -226,31 +286,119 @@ func (r *tunnelRig) startFrps() {
 	if err != nil {
 		r.t.Fatal(err)
 	}
+	logPath := launcher.FrpsLogFile(host)
+	var from int64
+	if fi, err := os.Stat(logPath); err == nil {
+		from = fi.Size()
+	}
 	releaseForFrps(host)
-	proc, err := launcher.StartFrps(launcher.FrpsSpec{Bin: r.frpsBin, Config: cfg, Log: launcher.FrpsLogFile(host), Dir: host.StateDir})
+	if beforeFrps != nil {
+		beforeFrps(r.t, attempt, r.f)
+	}
+	proc, err := launcher.StartFrps(launcher.FrpsSpec{Bin: r.frpsBin, Config: cfg, Log: logPath, Dir: host.StateDir})
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	r.frps, r.frpsDone = proc, false
-	r.t.Cleanup(func() { r.stopFrpsIfRunning() })
 	hc := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}}
-	waitUntil(r.t, 30*time.Second, "frps's web server to answer /healthz", func() bool {
+	deadline := time.Now().Add(30 * time.Second)
+	for {
 		select {
 		case <-proc.Done():
-			b, _ := os.ReadFile(launcher.FrpsLogFile(host))
-			if len(b) > 1500 {
-				b = b[len(b)-1500:]
-			}
-			r.t.Fatalf("frps exited at its start: %s\n%s", proc.ExitStatus(), b)
+			defer proc.Release() // exited: nothing to stop, and its pidfd is closed
+			return frpsExitError(logFrom(logPath, from), proc.ExitStatus(),
+				[]string{host.FrpsBindAddr(), host.FrpsTCPMuxAddr(), host.FrpsWebAddr()})
 		default:
 		}
-		resp, err := hc.Get("http://" + host.FrpsWebAddr() + "/healthz")
-		if err != nil {
-			return false
+		if resp, err := hc.Get("http://" + host.FrpsWebAddr() + "/healthz"); err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				r.frps, r.frpsDone = proc, false
+				r.t.Cleanup(func() { r.stopFrpsIfRunning() })
+				return nil
+			}
 		}
-		resp.Body.Close()
-		return resp.StatusCode == http.StatusOK
-	})
+		if time.Now().After(deadline) {
+			if _, err := proc.Stop(context.Background(), 5*time.Second); err != nil {
+				r.t.Errorf("stop the frps whose web server never answered: %v", err)
+			}
+			return fmt.Errorf("frps's web server did not answer /healthz on %s within 30 s", host.FrpsWebAddr())
+		}
+		select {
+		case <-proc.Done():
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// frpsBindErrorLine is frps 0.71.1's own report of a port it cannot bind, as a whole line of its
+// output: "create server listener error, listen tcp A: bind: address already in use" for the bind
+// and tcpmux ports, and the web server's "listen tcp A: bind: address already in use" for the web
+// port (checked by hand with a stranger on each of the three). The match is of the whole line, so
+// the phrase inside another complaint (a configuration key that spells it, a path) is not it, and
+// A is the address, which the caller checks against frps's three.
+var frpsBindErrorLine = regexp.MustCompile(`^(?:create server listener error, )?listen tcp (\S+): bind: address already in use$`)
+
+// frpsBindExit is the exit status frps gives when it fails to bind (os/exec's text for status 1).
+const frpsBindExit = "exit status 1"
+
+// frpsBindFailure returns the line of out that is frps's bind error for one of the addresses in
+// ports, and true, when frps ended with the exit status of a failed bind. out is everything frps
+// wrote during the attempt, whole.
+func frpsBindFailure(out, status string, ports []string) (string, bool) {
+	if status != frpsBindExit {
+		return "", false
+	}
+	for line := range strings.SplitSeq(out, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if m := frpsBindErrorLine.FindStringSubmatch(line); m != nil && slices.Contains(ports, m[1]) {
+			return line, true
+		}
+	}
+	return "", false
+}
+
+// frpsExitError is the error of an attempt whose frps exited at its start: out is everything frps
+// wrote during the attempt, status how it ended, ports its three addresses. It is errFrpsPortTaken
+// (carrying the bind line) for a failed bind and an ordinary error otherwise. The attempt is
+// classified on its whole output, and only the text of the error is cut to its last 1,500 bytes.
+func frpsExitError(out, status string, ports []string) error {
+	shown := out
+	if len(shown) > 1500 {
+		shown = shown[len(shown)-1500:]
+	}
+	if line, ok := frpsBindFailure(out, status, ports); ok {
+		return fmt.Errorf("%w: frps exited at its start: %s: %s\n%s", errFrpsPortTaken, status, line, shown)
+	}
+	return fmt.Errorf("frps exited at its start: %s\n%s", status, shown)
+}
+
+// logFrom is what the file holds from offset on, "" if it cannot be read.
+func logFrom(path string, offset int64) string {
+	b, err := os.ReadFile(path)
+	if err != nil || int64(len(b)) < offset {
+		return ""
+	}
+	return string(b[offset:])
+}
+
+// freshBlock moves the rig to a fresh port block, held as the first was, for a start of frps that
+// found a port of the old one taken. b, the binary running on the old block, is stopped and
+// started again on the new one (r.start); freshBlock returns the new binary, nil if b was nil.
+func (r *tunnelRig) freshBlock(b *binary) *binary {
+	r.t.Helper()
+	if b != nil {
+		if err := b.stop(r.t); err != nil {
+			r.t.Fatalf("run returned %v after its context ended, want nil", err)
+		}
+	}
+	old := r.f
+	r.tried = append(r.tried, old)
+	r.f = repickBlock(r.t, old, tunnelOtherOffsets, r.tried...)
+	dropOldBlock(old, r.f) // what the old block still held, except what the fresh one uses
+	if b == nil {
+		return nil
+	}
+	return r.start()
 }
 
 func (r *tunnelRig) stopFrpsIfRunning() {
@@ -556,8 +704,11 @@ func TestTunnelWithRealFrpsAndFrpc(t *testing.T) {
 		t.Errorf("the ended Instance has the condition %s/%s, want none", s, rs)
 	}
 
-	// frps comes up, with no proxy: the list reads, and every Instance is offline.
-	r.startFrps()
+	// frps comes up, with no proxy: the list reads, and every Instance is offline. A start that
+	// found a port taken has moved the rig to a fresh block and started the binary on it again,
+	// so b and the host are read again.
+	b = r.startFrps(b)
+	host = r.f.host
 	for _, in := range []*v1alpha1.Instance{a1, a2, b1} {
 		r.waitCond(b, in, statusFalse, reasonOffline)
 	}
@@ -729,7 +880,7 @@ func TestTunnelTriggerCausesARead(t *testing.T) {
 	r := newTunnelRig(t)
 	allocA, credA := r.allocation("al-a", v1alpha1.AllocationRunning)
 	a1 := r.instance("in-a1", allocA.Name, "")
-	r.startFrps() // before the binary, so that its read at the start reads the list
+	r.startFrps(nil) // before the binary, so that its read at the start reads the list
 	before := tunnelReads.Load()
 	b := r.start()
 	// The read at the start says offline. Only now does frpc start, so that the start's read
