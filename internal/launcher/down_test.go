@@ -12,11 +12,17 @@ import (
 // downFixture records the process as a launched host in a fresh state directory.
 func downFixture(t *testing.T, rec ProcRec) layout {
 	t.Helper()
+	return downFixtureAt(t, Ports{API: 59001, HTTPS: 59002, KCM: 59003, LB: 59006}, rec)
+}
+
+// downFixtureAt records the processes as a launched host with the given ports.
+func downFixtureAt(t *testing.T, ports Ports, recs ...ProcRec) layout {
+	t.Helper()
 	l, err := newLayout(shortDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	st := &State{Version: "v1.36.5+k3s1", Ports: Ports{API: 59001, HTTPS: 59002, KCM: 59003, LB: 59006}, Procs: []ProcRec{rec}, StartedAt: time.Now()}
+	st := &State{Version: "v1.36.5+k3s1", Ports: ports, Procs: recs, StartedAt: time.Now()}
 	if err := l.saveState(st); err != nil {
 		t.Fatal(err)
 	}

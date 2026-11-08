@@ -66,9 +66,19 @@ func cli(t *testing.T, args ...string) cliResult {
 	return cliIn(t, "", args...)
 }
 
-// cliIn is cli with the child's working directory set to dir (empty: this process's). The test
-// binary is named by an absolute path, which a relative os.Args[0] would not survive.
-func cliIn(t *testing.T, dir string, args ...string) cliResult {
+// cliIn is cli with the child's working directory set to dir (empty: this process's). A down run
+// through it must not name any foreign listener (downGuardProblem): that is the guard every
+// normal shutdown is under. The test binary is named by an absolute path, which a relative
+// os.Args[0] would not survive.
+func cliIn(t testing.TB, dir string, args ...string) cliResult {
+	t.Helper()
+	return cliRun(t, dir, nil, args...)
+}
+
+// cliRun runs the command as cliIn does. wantForeign is nil for a normal shutdown. A test that
+// leaves listeners of its own on the recorded ports on purpose names them (cliExpectingForeign),
+// and its down is judged against exactly that list.
+func cliRun(t testing.TB, dir string, wantForeign []string, args ...string) cliResult {
 	t.Helper()
 	self, err := os.Executable()
 	if err != nil {
@@ -93,6 +103,9 @@ func cliIn(t *testing.T, dir string, args ...string) cliResult {
 		where = "(in " + dir + ") "
 	}
 	t.Logf("%s$ hpcburst %s\nexit %d\n%s%s", where, strings.Join(args, " "), code, so.String(), se.String())
+	if problem := downGuardProblem(args, so.String()+se.String(), wantForeign); problem != "" {
+		t.Errorf("%s", problem)
+	}
 	return cliResult{so.String(), se.String(), code}
 }
 

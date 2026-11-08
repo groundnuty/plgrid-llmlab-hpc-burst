@@ -39,7 +39,8 @@ func checkGrace(st *State, grace time.Duration) error {
 const killWait = 10 * time.Second
 
 // socketReleaseWait is how long down waits for the kernel to release the sockets of a dead process.
-const socketReleaseWait = 5 * time.Second
+// It is a variable so that a test can shorten it.
+var socketReleaseWait = 5 * time.Second
 
 func logf(w io.Writer, format string, a ...any) {
 	if w != nil {
@@ -58,7 +59,8 @@ type ProcStop struct {
 }
 
 // StopReport describes a stop. ForeignOnPorts lists listeners that sit on the recorded ports
-// afterwards but belong to someone else: down leaves them alone and says so.
+// after every recorded process is stopped and given the release wait, and that no launched
+// process held: down leaves them alone and says so.
 type StopReport struct {
 	Procs          []ProcStop `json:"processes"`
 	GoneListeners  int        `json:"listeners_gone"`
@@ -69,6 +71,8 @@ type StopReport struct {
 // stops its children and is waited for, then the rest (k3s). So the controllers never lose their
 // API server while they shut down. Each group is stopped by stopGroup. A process whose identity
 // cannot be established does not keep the rest from being stopped; the stop fails at the end.
+// Foreign listeners on the recorded ports are looked for once, after the last group, so that a
+// group still to be stopped is never mistaken for one.
 func stopRecorded(ctx context.Context, st *State, grace time.Duration, log io.Writer) (*StopReport, error) {
 	var first, rest []ProcRec
 	for _, rec := range st.Procs {
@@ -80,6 +84,7 @@ func stopRecorded(ctx context.Context, st *State, grace time.Duration, log io.Wr
 	}
 	out := &StopReport{Procs: make([]ProcStop, 0, len(st.Procs))}
 	var unknown []string
+	released := map[string]bool{} // the socket inodes of every group stopped so far
 	for _, group := range [][]ProcRec{first, rest} {
 		if len(group) == 0 {
 			continue
@@ -92,15 +97,24 @@ func stopRecorded(ctx context.Context, st *State, grace time.Duration, log io.Wr
 			logf(log, "the supervisor runs the front, which needs %s to stop: waiting up to %s for it, not %s", FrontTermGrace, SupervisorGraceWithFront, g)
 			g = SupervisorGraceWithFront
 		}
-		rep, unk, err := stopGroup(ctx, st, group, g, log)
+		rep, inodes, unk, err := stopGroup(ctx, st, group, g, log)
 		out.Procs = append(out.Procs, rep.Procs...)
 		out.GoneListeners += rep.GoneListeners
-		out.ForeignOnPorts = append(out.ForeignOnPorts, rep.ForeignOnPorts...)
+		for inode := range inodes {
+			released[inode] = true
+		}
 		unknown = append(unknown, unk...)
 		if err != nil {
 			return out, err
 		}
 	}
+	// Only now: while the second group is still running, its listeners sit on recorded ports and
+	// belong to no process of the first, though they are not foreign (issue #264).
+	foreign, err := foreignListeners(st.Ports, released, log)
+	if err != nil {
+		return out, err
+	}
+	out.ForeignOnPorts = foreign
 	// Report in the order of the record, whatever the order of stopping.
 	at := map[int]int{}
 	for i, rec := range st.Procs {
@@ -120,13 +134,15 @@ func stopRecorded(ctx context.Context, st *State, grace time.Duration, log io.Wr
 // process gets SIGTERM through its pidfd, and SIGKILL (verified again) after the grace period. Its
 // descendants, adopted through their own verified pidfds while it was held, are held to the same
 // rule. Exits are read from the pidfds. Then it confirms that the sockets they held no longer
-// listen. A cancelled ctx cuts the grace period short, never the wait after SIGKILL.
-func stopGroup(ctx context.Context, st *State, recs []ProcRec, grace time.Duration, log io.Writer) (rep *StopReport, unknown []string, err error) {
+// listen, and returns their inodes, so the caller can tell the group's sockets from a
+// foreign listener once every group is stopped. A cancelled ctx cuts the grace period short, never
+// the wait after SIGKILL.
+func stopGroup(ctx context.Context, st *State, recs []ProcRec, grace time.Duration, log io.Writer) (rep *StopReport, inodes map[string]bool, unknown []string, err error) {
 	rep = &StopReport{Procs: make([]ProcStop, 0, len(recs))}
 	var roots, all []*procHandle
 	defer func() { closeAll(all) }()
 	rootIdx := map[*procHandle]int{} // index into rep.Procs
-	inodes := map[string]bool{}
+	inodes = map[string]bool{}
 	for _, rec := range recs {
 		h, v, detail := openRec(rec)
 		rep.Procs = append(rep.Procs, ProcStop{Name: rec.Name, PID: rec.PID, Before: v.String(), Detail: detail})
@@ -138,7 +154,7 @@ func stopGroup(ctx context.Context, st *State, recs []ProcRec, grace time.Durati
 			rootIdx[h] = len(rep.Procs) - 1
 			owned, _, err := ownedListeners(tree)
 			if err != nil {
-				return rep, unknown, fmt.Errorf("cannot list the listeners of %s (pid %d), so could not confirm later that they are gone: %w", rec.Name, rec.PID, err)
+				return rep, nil, unknown, fmt.Errorf("cannot list the listeners of %s (pid %d), so could not confirm later that they are gone: %w", rec.Name, rec.PID, err)
 			}
 			for _, s := range owned {
 				inodes[s.inode] = true
@@ -156,7 +172,7 @@ func stopGroup(ctx context.Context, st *State, recs []ProcRec, grace time.Durati
 	for _, h := range roots {
 		starts[h] = time.Now()
 		if sent, err := signalHandle(h, syscall.SIGTERM); err != nil {
-			return rep, unknown, fmt.Errorf("SIGTERM to %s (pid %d): %w", h.rec.Name, h.rec.PID, err)
+			return rep, nil, unknown, fmt.Errorf("SIGTERM to %s (pid %d): %w", h.rec.Name, h.rec.PID, err)
 		} else if sent {
 			rep.Procs[rootIdx[h]].Signals = "TERM"
 			logf(log, "sent SIGTERM to %s (pid %d)", h.rec.Name, h.rec.PID)
@@ -166,7 +182,7 @@ func stopGroup(ctx context.Context, st *State, recs []ProcRec, grace time.Durati
 		for _, h := range all {
 			sent, err := signalHandle(h, syscall.SIGKILL)
 			if err != nil {
-				return rep, unknown, fmt.Errorf("SIGKILL to %s (pid %d): %w", h.rec.Name, h.rec.PID, err)
+				return rep, nil, unknown, fmt.Errorf("SIGKILL to %s (pid %d): %w", h.rec.Name, h.rec.PID, err)
 			}
 			if sent {
 				if i, ok := rootIdx[h]; ok {
@@ -179,7 +195,7 @@ func stopGroup(ctx context.Context, st *State, recs []ProcRec, grace time.Durati
 		if !waitExited(context.Background(), all, killWait) {
 			for _, h := range all {
 				if gone, err := h.exited(); err != nil || !gone {
-					return rep, unknown, fmt.Errorf("%s (pid %d) is still alive %s after SIGKILL", h.rec.Name, h.rec.PID, killWait)
+					return rep, nil, unknown, fmt.Errorf("%s (pid %d) is still alive %s after SIGKILL", h.rec.Name, h.rec.PID, killWait)
 				}
 			}
 		}
@@ -190,15 +206,10 @@ func stopGroup(ctx context.Context, st *State, recs []ProcRec, grace time.Durati
 	// Confirm: none of the sockets they held still listens. The kernel releases a dead process's
 	// sockets slightly after the process is gone (a zombie can briefly still show its listeners),
 	// so a socket that is still there is given a few seconds before it counts as a failure.
-	ports := map[int]bool{}
-	for _, p := range st.Ports.All() {
-		ports[p] = true
-	}
-	var socks []sock
 	for deadline := time.Now().Add(socketReleaseWait); ; {
-		var err error
-		if socks, err = listenSockets(); err != nil {
-			return rep, unknown, fmt.Errorf("cannot confirm that the listeners are gone: %w", err)
+		socks, err := listenSockets()
+		if err != nil {
+			return rep, nil, unknown, fmt.Errorf("cannot confirm that the listeners are gone: %w", err)
 		}
 		var held *sock
 		for i, s := range socks {
@@ -210,20 +221,58 @@ func stopGroup(ctx context.Context, st *State, recs []ProcRec, grace time.Durati
 			break
 		}
 		if time.Now().After(deadline) {
-			return rep, unknown, fmt.Errorf("the processes are gone, but a socket they held still listens on %s", held.Listener)
+			return rep, nil, unknown, fmt.Errorf("the processes are gone, but a socket they held still listens on %s", held.Listener)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	for _, s := range socks {
-		if ports[s.Port] {
-			rep.ForeignOnPorts = append(rep.ForeignOnPorts, s.Listener.String())
-		}
-	}
 	rep.GoneListeners = len(inodes)
-	for _, f := range rep.ForeignOnPorts {
-		logf(log, "warning: %s listens on one of the recorded ports, but not as a launched process; left alone", f)
+	return rep, inodes, unknown, nil
+}
+
+// foreignListeners returns the listeners on the recorded ports that none of the launched processes
+// held (owned is the inodes of all their sockets), and says so in the log. It is called once every
+// recorded process is stopped. A listener that is not ours is first given the wait our own sockets
+// get: it may be one that the kernel is still releasing, or one a launched process opened after
+// its sockets were listed. It is foreign only if it is still there when socketReleaseWait is over.
+//
+// Known limit: owned is the union of the inodes of every group stopped, and the check is by inode
+// number. An inode number can in principle be given to a new socket once the old one is closed, so
+// a foreign listener that took a number released earlier in this same shutdown would count as
+// ours and go unreported. That is a missed warning, never a signal to anything, and it needs an
+// exact reuse inside one down, so it is not guarded against.
+func foreignListeners(ports Ports, owned map[string]bool, log io.Writer) ([]string, error) {
+	recorded := map[int]bool{}
+	for _, p := range ports.All() {
+		recorded[p] = true
 	}
-	return rep, unknown, nil
+	waiting := false
+	for deadline := time.Now().Add(socketReleaseWait); ; {
+		socks, err := listenSockets()
+		if err != nil {
+			return nil, fmt.Errorf("cannot confirm that the listeners are gone: %w", err)
+		}
+		var left []string
+		for _, s := range socks {
+			if recorded[s.Port] && !owned[s.inode] {
+				left = append(left, s.Listener.String())
+			}
+		}
+		if len(left) == 0 {
+			return nil, nil
+		}
+		sort.Strings(left)
+		if time.Now().After(deadline) {
+			for _, f := range left {
+				logf(log, "warning: %s listens on one of the recorded ports, but not as a launched process; left alone", f)
+			}
+			return left, nil
+		}
+		if !waiting {
+			waiting = true
+			logf(log, "%s listens on one of the recorded ports, but not as a launched process: waiting up to %s for it to go", strings.Join(left, ", "), socketReleaseWait)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // DownOptions are the inputs of Down.

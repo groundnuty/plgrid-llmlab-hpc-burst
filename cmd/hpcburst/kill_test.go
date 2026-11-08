@@ -88,8 +88,10 @@ func TestStatusAfterTheProcessIsKilled(t *testing.T) {
 		t.Errorf("text status: exit %d: %q", r.code, r.out)
 	}
 
-	// down: the record is cleared, and the decoys (this test process's sockets) are left alone.
-	if r := cli(t, h.args("down")...); r.code != exitOK {
+	// down: the record is cleared, and the decoys (this test process's sockets) are left alone. They
+	// are listeners on the recorded ports that no launched process held, so down names exactly
+	// them as foreign: the one down of this test that the guard in cliIn lets warn.
+	if r := cliExpectingForeign(t, []string{"127.0.0.1:29220", "127.0.0.1:29221", "127.0.0.1:29222"}, h.args("down")...); r.code != exitOK {
 		t.Fatalf("down exited %d", r.code)
 	}
 	rows := listeningInRange(t, launcherPortsLo, launcherPortsHi)
