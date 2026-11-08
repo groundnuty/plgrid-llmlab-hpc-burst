@@ -79,6 +79,35 @@ func TestSSEDoneAndErrors(t *testing.T) {
 	}
 }
 
+// Only a chunk that carries tokens is a token's arrival: the head-of-line measure's gaps are between tokens, and a
+// role-only, finish-only or usage chunk, an error event or [DONE] that comes late is no gap between two of them.
+func TestTokenEvent(t *testing.T) {
+	for _, c := range []struct {
+		line string
+		want bool
+	}{
+		{`data: {"choices":[{"index":0,"delta":{"content":"a"}}]}`, true},
+		{`data:{"choices":[{"index":0,"delta":{"content":" b"},"finish_reason":null}]}`, true},
+		{`data: {"choices":[{"index":0,"text":"a"}]}`, true},
+		{`data: {"choices":[{"index":0,"delta":{"reasoning_content":"so"}}]}`, true},
+		{`data: {"choices":[{"index":0,"delta":{"reasoning":"so"}}]}`, true},
+		{`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{"}}]}}]}`, true},
+		{`data: {"choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}`, false},
+		{`data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}`, false},
+		{`data: {"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}`, false},
+		{`data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":8}}`, false},
+		{`data: {"choices":[{"index":0,"delta":{"content":null}}]}`, false},
+		{`data: {"error":{"code":"stream_cut","detail":null}}`, false},
+		{`data: [DONE]`, false},
+		{`event: ping`, false},
+		{`{"choices":[{"delta":{"content":"a"}}]}`, false},
+	} {
+		if got := TokenEvent(c.line); got != c.want {
+			t.Errorf("TokenEvent(%s) = %v, want %v", c.line, got, c.want)
+		}
+	}
+}
+
 func TestBinariesMissing(t *testing.T) {
 	dir := t.TempDir()
 	exe := func(name string, mode os.FileMode) string {

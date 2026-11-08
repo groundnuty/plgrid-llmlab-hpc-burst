@@ -168,8 +168,8 @@ func (c *Client) KeyFor(in *v1alpha1.Instance) string {
 type Streamed struct {
 	Reply
 	FirstAt, EndAt time.Time // the first data line and the end of the body
-	// Ticks are the arrival times of the body's data lines, in order: a
-	// stream's tokens as the client read them.
+	// Ticks are the arrival times of the body's token-bearing data lines
+	// (TokenEvent), in order: a stream's tokens as the client read them.
 	Ticks []time.Time
 }
 
@@ -212,7 +212,9 @@ func (c *Client) StartStream(body, key string) (first <-chan struct{}, done <-ch
 		for sc.Scan() {
 			if strings.HasPrefix(sc.Text(), "data:") {
 				now := time.Now()
-				out.Ticks = append(out.Ticks, now)
+				if TokenEvent(sc.Text()) {
+					out.Ticks = append(out.Ticks, now)
+				}
 				if out.FirstAt.IsZero() {
 					out.FirstAt = now
 					once()
@@ -279,6 +281,40 @@ func ErrorOf(body []byte) FrontError {
 	}
 	_ = json.Unmarshal(body, &e)
 	return e.Error
+}
+
+// TokenEvent reports whether an SSE line is a data line that carries tokens: a
+// chunk with a choice whose text (a completions stream's) or delta (a chat
+// stream's content, reasoning or tool calls) is not empty. The role-only first
+// chunk, a finish-only or usage chunk, an error event and [DONE] carry none,
+// so a late one is no gap between two tokens (the head-of-line measure, issue
+// #224; Astra's nit on PR 255's delta round).
+func TokenEvent(line string) bool {
+	payload, ok := strings.CutPrefix(line, "data:")
+	if !ok {
+		return false
+	}
+	var c struct {
+		Choices []struct {
+			Text  string `json:"text"`
+			Delta struct {
+				Content          string            `json:"content"`
+				ReasoningContent string            `json:"reasoning_content"`
+				Reasoning        string            `json:"reasoning"`
+				ToolCalls        []json.RawMessage `json:"tool_calls"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal([]byte(strings.TrimSpace(payload)), &c) != nil {
+		return false
+	}
+	for _, ch := range c.Choices {
+		d := ch.Delta
+		if ch.Text != "" || d.Content != "" || d.ReasoningContent != "" || d.Reasoning != "" || len(d.ToolCalls) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // SSEDone reports whether a streamed body ends with "data: [DONE]" and has a
