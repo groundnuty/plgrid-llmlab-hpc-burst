@@ -233,11 +233,11 @@ mutants=(
   'jobcount.go@@	if g.pred == "" && len(started) > 0 {@@	if len(started) > 0 {'
   'jobcount.go@@	return clusterNow.Add(timeLimit - drainWindow).Truncate(time.Second)@@	return clusterNow.Add(timeLimit).Truncate(time.Second)'
   # B6: the guard's failures fail the step, and the run ends with the successor's drain start observed.
-  'steps_live_test.go@@				if fails++; fails >= guardLookFails {@@				if fails++; false {'
-  'steps_live_test.go@@				_, err = setEnd(end)@@				_ = end'
-  'steps_live_test.go@@	stack.WaitFor(r.t, d, what, guarded)@@	stack.WaitFor(r.t, d, what, cond); _ = guarded'
-  'steps_live_test.go@@			if md.Spec.EndTime == nil || !md.Spec.EndTime.Time.Equal(end) {@@			if false {'
-  'steps_live_test.go@@			return errors.New("the successor never started, so the run'"'"'s deployment never ended at its drain start")@@			return nil'
+  'guard_live_test.go@@				if fails++; fails >= guardLookFails {@@				if fails++; false {'
+  'guard_live_test.go@@				_, err = setEnd(end)@@				_ = end'
+  'guard_live_test.go@@	stack.WaitFor(r.t, d, what, guarded)@@	stack.WaitFor(r.t, d, what, cond); _ = guarded'
+  'guard_live_test.go@@			if md.Spec.EndTime == nil || !md.Spec.EndTime.Time.Equal(end) {@@			if false {'
+  'guard_live_test.go@@			return errors.New("the successor never started, so the run'"'"'s deployment never ended at its drain start")@@			return nil'
   # B7: the first clock, and a tunnel row's NOT RUN at its first end.
   'jobcount.go@@		if c := timeLimit - drainWindow - time.Minute; c < pendingMax {@@		if c := timeLimit - drainWindow; c < pendingMax {'
   'jobcount.go@@		if c := timeLimit - drainWindow - time.Minute; c < pendingMax {@@		if c := timeLimit - drainWindow - time.Minute; c <= pendingMax {'
