@@ -16,7 +16,7 @@ func liveSettings(row string) map[string]string {
 		envRow: row, envOut: "/private/out", envAccount: "SECRETACCT", envCreds: "/private/SECRETCREDS",
 		envHostLock: "/locks/host.lock", envControlDir: "/ctl", envBinDir: "/bin-dir", envBuildDir: "/build-dir",
 		envMode: "direct", envAddr: "gateway.example:29227", envPartition: r.Partition, envQOS: r.QOS,
-		envGPUs: "1", envPending: "7200",
+		envGPUs: "1", envPending: "7200", EnvFrontLabel: testFrontLabel,
 	}
 	if strings.HasPrefix(row, "tunnel-hour-") {
 		m[envLease] = "137"
@@ -100,12 +100,12 @@ func TestSettingsThatContradictTheRowAreAnError(t *testing.T) {
 
 func TestADryRunNeedsNoLiveSettingAndRefusesAnyOfThem(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "out")
-	cfg, skip, err := ConfigFromEnv(env(map[string]string{envRow: "tunnel-hour-athena", envOut: dir, envDry: "1", envDryFault: "short"}), "tunnel-hour-athena")
+	cfg, skip, err := ConfigFromEnv(env(map[string]string{envRow: "tunnel-hour-athena", envOut: dir, envDry: "1", envDryFault: "short", EnvFrontLabel: testFrontLabel}), "tunnel-hour-athena")
 	if skip != "" || err != nil || !cfg.Dry || cfg.DryFault != "short" || !strings.HasPrefix(cfg.Mode(), "DRY RUN") {
 		t.Fatalf("cfg %+v skip %q err %v", cfg, skip, err)
 	}
 	for _, k := range liveEnv {
-		_, _, err := ConfigFromEnv(env(map[string]string{envRow: "tunnel-hour-athena", envOut: dir, envDry: "1", k: "/a/live/value"}), "tunnel-hour-athena")
+		_, _, err := ConfigFromEnv(env(map[string]string{envRow: "tunnel-hour-athena", envOut: dir, envDry: "1", k: "/a/live/value", EnvFrontLabel: testFrontLabel}), "tunnel-hour-athena")
 		if err == nil || !strings.Contains(err.Error(), k) {
 			t.Errorf("a dry run with %s set: err %v, want a refusal naming it", k, err)
 		}
@@ -117,7 +117,7 @@ func TestADryRunNeedsNoLiveSettingAndRefusesAnyOfThem(t *testing.T) {
 // number of seconds is refused, as it is in a live run.
 func TestADryRunKeepsTheWaitInTheQueueItIsGiven(t *testing.T) {
 	dry := func(pending string) (Config, error) {
-		m := map[string]string{envRow: "alpha-helios-nooverlap", envOut: "/private/out", envDry: "1"}
+		m := map[string]string{envRow: "alpha-helios-nooverlap", envOut: "/private/out", envDry: "1", EnvFrontLabel: testFrontLabel}
 		if pending != "" {
 			m[envPending] = pending
 		}
@@ -224,7 +224,7 @@ func TestATunnelRowTakesItsLeaseFromTheSettings(t *testing.T) {
 		t.Errorf("a handover row with a lease: err %v", err)
 	}
 	// A dry run takes the row's default, or the value.
-	dry := map[string]string{envRow: "tunnel-hour-helios", envOut: "/o", envDry: "1"}
+	dry := map[string]string{envRow: "tunnel-hour-helios", envOut: "/o", envDry: "1", EnvFrontLabel: testFrontLabel}
 	if cfg, _, err := ConfigFromEnv(env(dry), "tunnel-hour-helios"); err != nil || cfg.Row.Lease != DefaultTunnelLease() {
 		t.Errorf("dry default: %v %v", cfg.Row.Lease, err)
 	}

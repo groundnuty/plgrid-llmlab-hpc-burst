@@ -213,6 +213,11 @@ func TestOnlyAMarkedCleanSkipOfARowWithABoundIsNotRun(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			w := newWorld(t)
 			w.useStubGo()
+			if strings.HasPrefix(tc.row, "gpu-accounting-") {
+				// A row that writes a text to post is refused without the front label (issue #224): give it one, or the
+				// exit 3 of that refusal would stand in for the failure this case is about.
+				w.alphaSettings(nil)
+			}
 			res := w.run([]string{"STUB_TEST_MODE=" + tc.mode}, "--run", tc.row, "--yes")
 			if res.code != 1 {
 				t.Fatalf("exit %d, want 1:\n%s", res.code, res.out)
