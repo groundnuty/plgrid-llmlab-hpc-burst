@@ -23,6 +23,22 @@ var Wrappers = []Wrapper{
 		Forwards: []Forward{{Arg: 0, Param: 0}, {Arg: 3, Of: "ManagedEvent", Field: "Reason"}, {Arg: 4, Of: "ManagedEvent", Field: "Action"}},
 	},
 	{
+		Func: "internal/eventcount.eventsRecorder.Eventf", Why: "counts the event, then hands every argument unchanged to client-go's events.k8s.io recorder; the callers of the recorder it wraps are the emit sites",
+		Forwards: []Forward{{Arg: 0, Param: 0}, {Arg: 1, Param: 1}, {Arg: 2, Param: 2}, {Arg: 3, Param: 3}, {Arg: 4, Param: 4}, {Arg: 5, Param: 5}, {Arg: 6, Param: 6}},
+	},
+	{
+		Func: "internal/eventcount.legacyRecorder.Event", Why: "counts the event, then hands every argument unchanged to client-go's core/v1 recorder; the callers of the recorder it wraps are the emit sites",
+		Forwards: []Forward{{Arg: 0, Param: 0}, {Arg: 1, Param: 1}, {Arg: 2, Param: 2}, {Arg: 3, Param: 3}},
+	},
+	{
+		Func: "internal/eventcount.legacyRecorder.Eventf", Why: "counts the event, then hands every argument unchanged to client-go's core/v1 recorder; the callers of the recorder it wraps are the emit sites",
+		Forwards: []Forward{{Arg: 0, Param: 0}, {Arg: 1, Param: 1}, {Arg: 2, Param: 2}, {Arg: 3, Param: 3}, {Arg: 4, Param: 4}},
+	},
+	{
+		Func: "internal/eventcount.legacyRecorder.AnnotatedEventf", Why: "counts the event, then hands every argument unchanged to client-go's core/v1 recorder; the callers of the recorder it wraps are the emit sites",
+		Forwards: []Forward{{Arg: 0, Param: 0}, {Arg: 1, Param: 1}, {Arg: 2, Param: 2}, {Arg: 3, Param: 3}, {Arg: 4, Param: 4}, {Arg: 5, Param: 5}},
+	},
+	{
 		Func: "internal/providerctl.createdFilter.Event", Why: "passes crossplane-runtime's own events on, minus one; event.Normal and event.Warning are the emit sites",
 		Forwards: []Forward{{Arg: 0, Param: 0}, {Arg: 1, Param: 1, Event: true}},
 	},
