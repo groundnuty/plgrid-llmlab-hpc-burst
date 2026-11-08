@@ -66,6 +66,9 @@ type degradedReason struct{ reason, message string }
 type pass struct {
 	r   *Reconciler
 	ctx context.Context
+	// now is the pass's clock, read once, after observe has read the API and
+	// before anything uses it (Reconcile). Every time the pass stamps is
+	// p.now, so each is no earlier than any transition the pass saw.
 	now time.Time
 	key types.NamespacedName
 	mem *memory
@@ -119,7 +122,7 @@ func (p *pass) degrade(reason, format string, a ...any) {
 // Reconcile runs one pass (HBEP-7, Reconcile loop). Every step re-reads what it
 // acts on and is idempotent.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	p := &pass{r: r, ctx: ctx, now: r.Clock.Now().UTC().Truncate(time.Second), key: req.NamespacedName, mem: r.memory()}
+	p := &pass{r: r, ctx: ctx, key: req.NamespacedName, mem: r.memory()}
 	var md v1alpha1.ModelDeployment
 	err := r.Reader.Get(ctx, req.NamespacedName, &md)
 	switch {
@@ -132,6 +135,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err := p.observe(); err != nil {
 		return ctrl.Result{}, err
 	}
+	// The pass's clock is read here, after the reads, never before them. A
+	// writer of another component (the path-state writer's TunnelConnected, in
+	// this process and on this clock) can land between a clock read at the
+	// pass's start and the list that sees it, and a time stamped from the early
+	// read is then earlier than a transition it depends on: an Instance ready
+	// before its tunnel connected, which HBEP-7 rules out (Instance start and
+	// ready; issue #263). A read after observe is no earlier than any
+	// transition observe returned, so every stamp of the pass, the ready time,
+	// Healthy's transition, the class's start-to-ready time and the status
+	// times, follows what the pass saw. Nothing before this line reads p.now.
+	p.now = r.Clock.Now().UTC().Truncate(time.Second)
 	if err := p.run(); err != nil {
 		return ctrl.Result{}, err
 	}
