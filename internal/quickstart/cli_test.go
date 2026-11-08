@@ -305,43 +305,52 @@ func TestScriptCommandsAreAcceptedByTheScripts(t *testing.T) {
 		if !strings.HasPrefix(c.words[0], "hack/") {
 			continue
 		}
-		stop, ok := scriptStops[c.words[0]]
-		if !ok {
+		if _, ok := scriptStops[c.words[0]]; !ok {
 			t.Errorf("%q: the test has no way to run %s without side effects; add it to scriptStops", c.line, c.words[0])
 			continue
 		}
 		seen[c.words[0]] = true
-		t.Run(c.line, func(t *testing.T) {
-			if _, err := os.Stat(filepath.Join(root, c.words[0])); err != nil {
-				t.Fatal(err)
-			}
-			env := append(baseEnv(home), stop.env(t)...)
-			script, err := filepath.Abs(filepath.Join(root, c.words[0]))
-			if err != nil {
-				t.Fatal(err)
-			}
-			out, code := run(t, env, script, c.words[1:]...)
-			if strings.Contains(out, "usage:") {
-				t.Errorf("the script refuses the arguments:\n%s", out)
-			}
-			if code == 0 {
-				t.Errorf("the script ran to the end (exit 0) under an environment built to stop it:\n%s", out)
-			}
-			found := false
-			for _, r := range stop.reached {
-				found = found || strings.Contains(out, r)
-			}
-			if !found {
-				t.Errorf("the script stopped for another reason than the one the test provoked (want one of %q):\n%s", stop.reached, out)
-			}
-			if entries, _ := filepath.Glob(filepath.Join(c.words[len(c.words)-1], ".build.*")); len(entries) > 0 {
-				t.Errorf("the script left its build stage behind: %v", entries)
-			}
-		})
+		runScript(t, home, c)
 	}
 	for _, s := range []string{"hack/fetch-k3s.sh", "hack/fetch-frp.sh", "hack/build-agents.sh"} {
 		if !seen[s] {
 			t.Errorf("the quickstart no longer runs %s", s)
 		}
 	}
+}
+
+// runScript runs one hack/ script command of a guide with the guide's arguments, under the
+// environment in scriptStops that stops it right after it has read them, and fails when the script
+// refuses the arguments or stops for another reason. The caller has checked that scriptStops holds
+// the script.
+func runScript(t *testing.T, home string, c command) {
+	t.Helper()
+	stop := scriptStops[c.words[0]]
+	t.Run(c.line, func(t *testing.T) {
+		if _, err := os.Stat(filepath.Join(root, c.words[0])); err != nil {
+			t.Fatal(err)
+		}
+		env := append(baseEnv(home), stop.env(t)...)
+		script, err := filepath.Abs(filepath.Join(root, c.words[0]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, code := run(t, env, script, c.words[1:]...)
+		if strings.Contains(out, "usage:") {
+			t.Errorf("the script refuses the arguments:\n%s", out)
+		}
+		if code == 0 {
+			t.Errorf("the script ran to the end (exit 0) under an environment built to stop it:\n%s", out)
+		}
+		found := false
+		for _, r := range stop.reached {
+			found = found || strings.Contains(out, r)
+		}
+		if !found {
+			t.Errorf("the script stopped for another reason than the one the test provoked (want one of %q):\n%s", stop.reached, out)
+		}
+		if entries, _ := filepath.Glob(filepath.Join(c.words[len(c.words)-1], ".build.*")); len(entries) > 0 {
+			t.Errorf("the script left its build stage behind: %v", entries)
+		}
+	})
 }
