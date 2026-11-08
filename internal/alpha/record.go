@@ -20,6 +20,10 @@ const (
 	RecordFile = "record.json"
 	// PostsFile holds the text to post on the issues the row names.
 	PostsFile = "posts.md"
+	// NotRunFile is the marker of a run that ended as NOT RUN (NotRun): a job
+	// pended past the first clock and was cancelled by its tag. hack/live-checks.sh
+	// reads it, with the test's one top-level skip, as the protocol of #210.
+	NotRunFile = "not-run.txt"
 )
 
 // tagRE is the shape of a tag the script accepts (hack/live-checks.sh, own_tags).

@@ -374,7 +374,7 @@ func (p *pass) becomeReady(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) er
 		return err
 	}
 	if first {
-		p.r.Recorder.Event(in, nil, eventReady, "Ready", "verified, qualified and warmed up; the front routes to it")
+		p.r.Recorder.Event(in, nil, eventReady, v1alpha1.EventReasonReady, "verified, qualified and warmed up; the front routes to it")
 	}
 	return nil
 }

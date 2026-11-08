@@ -549,7 +549,7 @@ func (av agentView) noRequestReadAfter(t time.Time) bool {
 func (p *pass) handOver(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agentView) error {
 	repl := p.replacementOf(in)
 	if repl != nil && repl.Status.Phase == v1alpha1.InstanceReady {
-		p.r.Recorder.Event(in, nil, eventReplaced, "HandedOver", fmt.Sprintf("drain start reached; Instance %s serves in its place", repl.Name))
+		p.r.Recorder.Event(in, nil, eventReplaced, v1alpha1.EventReasonHandedOver, fmt.Sprintf("drain start reached; Instance %s serves in its place", repl.Name))
 	} else {
 		p.r.Recorder.Event(p.mdObject(in), in, eventDegraded, v1alpha1.ReasonCapacityDropped, "drain start reached with no replacement ready: capacity drops (HBEP-7, drain rule)")
 	}

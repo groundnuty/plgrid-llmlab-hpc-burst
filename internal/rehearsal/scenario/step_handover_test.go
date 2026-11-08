@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,12 +61,12 @@ func (r *rig) replacementReady(p *v1alpha1.Instance) v1alpha1.Instance {
 	r.t.Helper()
 	var repl v1alpha1.Instance
 	waitFor(r.t, waitDeadline, "the primary and its replacement to be ready and registered at the front", func() bool {
-		if reg, known := registered(p); !known || !reg {
+		if reg, known := r.registered(p); !known || !reg {
 			return false
 		}
 		for _, in := range r.instances() {
 			if in.Annotations[v1alpha1.AnnotationPredecessor] == p.Name && in.Status.Phase == v1alpha1.InstanceReady {
-				if reg, known := registered(&in); known && reg {
+				if reg, known := r.registered(&in); known && reg {
 					repl = in
 					return true
 				}
@@ -95,34 +96,46 @@ func waitState(t *testing.T, d time.Duration, what string, cond func() (bool, st
 	}
 }
 
+// strOrNil prints a record's optional string.
+func strOrNil(p *string) string {
+	if p == nil {
+		return "null"
+	}
+	return *p
+}
+
 func parseRecordTime(s string) time.Time {
 	t, _ := time.Parse(time.RFC3339Nano, s)
 	return t
 }
 
-// checkStream holds a long stream to the issue: it reached the Instance and
-// ended with its finish reason and [DONE], never stream_cut; its record names
-// the Instance, has all its tokens, no cut, and took at least tokens times
+// checkStream holds a long stream to the issue: the client received all its
+// tokens of content, its one finish reason, length, its usage and [DONE],
+// never stream_cut (sseParse, streamProblems); its record names the
+// Instance, has all its tokens, no cut, and took at least tokens times
 // tokenDelay.
 func (r *rig) checkStream(step string, s streamed, in *v1alpha1.Instance, tokens int) usageRow {
 	r.t.Helper()
 	if s.err != nil || s.status != 200 {
 		r.t.Fatalf("step (%s) stream: %d %v: %.300s", step, s.status, s.err, s.body)
 	}
-	if done, finished := sseDone(s.body); !done || !finished || bytes.Contains(s.body, []byte("stream_cut")) {
-		r.t.Errorf("step (%s) stream: [DONE] %v, a finish reason %v, stream_cut %v; its end: %.300s", step, done, finished,
+	got := sseParse(s.body)
+	if p := streamProblems(got, tokens); len(p) > 0 || bytes.Contains(s.body, []byte("stream_cut")) {
+		r.t.Errorf("step (%s) stream as the client received it: %s; stream_cut %v; its end: %.300s", step, strings.Join(p, "; "),
 			bytes.Contains(s.body, []byte("stream_cut")), s.body[max(0, len(s.body)-300):])
 	}
+	r.t.Logf("step (%s) stream: the client received %d tokens of content in %d events, finish %q, usage %d, [DONE] %v",
+		step, got.words, got.chunks, got.finishes, got.usageTokens, got.done)
 	row := r.rowOf(s.id)
 	switch {
 	case row.InstanceUID != string(in.UID):
 		r.t.Errorf("step (%s) stream went to %s (%s), not %s", step, row.Instance, row.InstanceUID, in.Name)
 	case !row.Stream || row.Finish == nil || *row.Finish != "length" || row.CutBy != nil:
-		r.t.Errorf("step (%s) stream's record: stream %v, finish %v, cut by %v; want a stream finished by length, uncut", step, row.Stream, row.Finish, row.CutBy)
+		r.t.Errorf("step (%s) stream's record: stream %v, finish %s, cut by %s; want a stream finished by length, uncut", step, row.Stream, strOrNil(row.Finish), strOrNil(row.CutBy))
 	case row.CompletionTokens == nil || *row.CompletionTokens != int64(tokens):
 		r.t.Errorf("step (%s) stream's record has %v completion tokens, want %d", step, row.CompletionTokens, tokens)
-	case time.Duration(row.DurationMs)*time.Millisecond < time.Duration(tokens)*tokenDelay:
-		r.t.Errorf("step (%s) stream took %d ms, below %d tokens at %s", step, row.DurationMs, tokens, tokenDelay)
+	case time.Duration(row.DurationMs)*time.Millisecond < time.Duration(tokens)*r.tokenDelay:
+		r.t.Errorf("step (%s) stream took %d ms, below %d tokens at %s", step, row.DurationMs, tokens, r.tokenDelay)
 	}
 	return row
 }

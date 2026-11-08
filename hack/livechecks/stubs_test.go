@@ -156,6 +156,8 @@ case $t in
   TestConformance) [ "${HPCBURST_CONFORMANCE:-}" = 1 ] && [ -n "${HPCBURST_CONF_ACCOUNT:-}" ] || mode=skip ;;
   TestLLMLabThroughTheFront) [ -n "${HPCBURST_LLMLAB_CREDENTIALS:-}" ] || mode=skip ;;
   TestGoldenHub) [ "${HPCBURST_TEST_HUB:-}" = 1 ] || mode=skip ;;
+  # The rehearsal test skips unless hack/rehearsal.sh runs it (issue #193): a run of the binary on its own is a skip.
+  TestRehearsalPart3) [ "${HPCBURST_REHEARSAL:-}" = 1 ] || mode=skip ;;
   TestRealEnginePlan) echo '{}' > "$HB_REAL_PLAN_OUT"; echo "--- PASS: $t (0.01s)"; exit 0 ;;
 esac
 leave() {

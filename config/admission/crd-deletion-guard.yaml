@@ -2,9 +2,12 @@
 # and Admission). Deleting a CRD deletes every resource of that kind, and the
 # Allocation finalizers would cancel every provider job.
 #
-# Uninstalling the framework removes the binding first, as an explicit step:
-#   kubectl delete validatingadmissionpolicybinding hpcburst-protect-crds
-# This file is written by hand. hack/generate.sh does not touch it.
+# hpcburst up installs both objects on every start, whatever --manifests names. Uninstalling the
+# framework removes them first, as an explicit step (never a side effect of down or a restart):
+#   hpcburst guard remove
+# hpcburst status reports whether the guard is present.
+# This file is written by hand. hack/generate.sh does not touch it. The launcher embeds it
+# (config/admission/embed.go), so what up installs is this file.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -24,7 +27,7 @@ spec:
       messageExpression: >-
         'refusing to delete the custom resource definition ' + oldObject.metadata.name +
         ': it would delete every resource of that kind and cancel their provider jobs.' +
-        ' Remove the binding hpcburst-protect-crds first (HBEP-11)'
+        ' Remove the guard first with hpcburst guard remove (HBEP-11)'
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

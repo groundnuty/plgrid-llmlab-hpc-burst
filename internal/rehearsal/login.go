@@ -79,6 +79,12 @@ type LoginConfig struct {
 	Login fakeslurm.Login
 	// SSHD is the sshd binary; "" means $HPCBURST_SSHD, then /usr/sbin/sshd.
 	SSHD string
+	// Around, when set, runs each relayed command: it gets the command line
+	// and a function that runs it on the Platform, which it must call once,
+	// and returns that function's result. It runs in the test process, so a
+	// test can read the Platform's state just before and just after a
+	// command, at the command itself rather than at a sample (issue #193).
+	Around func(line string, run func() (slurm.Result, error)) (slurm.Result, error)
 }
 
 // LoginNode is a running fake login node.
@@ -120,7 +126,7 @@ func StartLoginNode(cfg LoginConfig) (*LoginNode, error) {
 		return nil, err
 	}
 	n.sess = cfg.Platform.Login(cfg.Login)
-	if n.relay, err = startRelay(n.sock, n.sess); err != nil {
+	if n.relay, err = startRelay(n.sock, n.sess, cfg.Around); err != nil {
 		return nil, err
 	}
 	forced := fmt.Sprintf("%s=%s %s=%s %s", EnvRole, RoleRelay, EnvRelay, n.sock, exe)
