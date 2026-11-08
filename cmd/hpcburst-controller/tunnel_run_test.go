@@ -27,6 +27,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -192,6 +194,9 @@ type tunnelRig struct {
 	nfrpc    int
 	// logf is where a retry of frps's start is logged: the test's log, or a test's own recorder.
 	logf func(format string, args ...any)
+	// tried is every block the rig left for a fresh one, in order: a fresh block shares no port with
+	// any of them, not only with the one it replaces.
+	tried []flags
 }
 
 func newTunnelRig(t *testing.T) *tunnelRig {
@@ -224,15 +229,16 @@ func newTunnelRig(t *testing.T) *tunnelRig {
 // some other way.
 var beforeFrps func(t *testing.T, attempt int, f flags)
 
-// errFrpsPortTaken is what an attempt to start frps returns when frps exited and this attempt's
-// part of its log says "address already in use": a stranger took one of its three ports between
-// their release and frps's bind. It is the only failure of a start that is repeated.
+// errFrpsPortTaken is what an attempt to start frps returns when frps exited with status 1 and
+// this attempt's output holds frps's bind-error line for one of its three ports ("listen tcp A:
+// bind: address already in use", frpsBindFailure): a stranger took one of the ports between their
+// release and frps's bind. It is the only failure of a start that is repeated.
 var errFrpsPortTaken = errors.New("frps found one of its ports taken")
 
 // startFrps starts frps with the launcher's own functions on the block of the binary's port base,
 // as hpcburst up does, and waits until its web server answers. frps binds its three ports itself,
-// so a stranger can take one between their release and the bind (issue #261); a start that fails
-// with "address already in use" is repeated on a fresh block, at most maxBindRetries times, each
+// so a stranger can take one between their release and the bind (issue #261); a start whose frps
+// lost a port (errFrpsPortTaken) is repeated on a fresh block, at most maxBindRetries times, each
 // logged (startWithRetries). Every port the binary and frps use is the port base plus an offset,
 // so a fresh block is a fresh base for both: b, the binary running on the old one (nil if none is
 // yet), is stopped and started again on the new one, and startFrps returns that binary. The
@@ -265,10 +271,10 @@ func startWithRetries(logf func(format string, args ...any), attempt func(n int)
 }
 
 // tryFrps is one attempt to start frps on the rig's block. It returns nil once frps's web server
-// answers; errFrpsPortTaken when frps exited and what it wrote during this attempt (the log is
-// appended to, so it is read from where it ended before the start) says "address already in use";
-// and any other failure as an error that is not errFrpsPortTaken: the process exits for another
-// reason, or its web server does not answer in 30 s.
+// answers; errFrpsPortTaken when frps exited with a bind failure (frpsExitError: exit status 1 and
+// a bind-error line in everything it wrote during this attempt, read from where the log ended
+// before the start, since the log is appended to); and any other failure as an error that is not
+// errFrpsPortTaken: the process exits for another reason, or its web server does not answer in 30 s.
 func (r *tunnelRig) tryFrps(attempt int) error {
 	r.t.Helper()
 	host := r.f.host
@@ -299,14 +305,8 @@ func (r *tunnelRig) tryFrps(attempt int) error {
 		select {
 		case <-proc.Done():
 			defer proc.Release() // exited: nothing to stop, and its pidfd is closed
-			out := logFrom(logPath, from)
-			if len(out) > 1500 {
-				out = out[len(out)-1500:]
-			}
-			if addrInUseText(out) {
-				return fmt.Errorf("%w: frps exited at its start: %s\n%s", errFrpsPortTaken, proc.ExitStatus(), out)
-			}
-			return fmt.Errorf("frps exited at its start: %s\n%s", proc.ExitStatus(), out)
+			return frpsExitError(logFrom(logPath, from), proc.ExitStatus(),
+				[]string{host.FrpsBindAddr(), host.FrpsTCPMuxAddr(), host.FrpsWebAddr()})
 		default:
 		}
 		if resp, err := hc.Get("http://" + host.FrpsWebAddr() + "/healthz"); err == nil {
@@ -330,6 +330,48 @@ func (r *tunnelRig) tryFrps(attempt int) error {
 	}
 }
 
+// frpsBindErrorLine is frps 0.71.1's own report of a port it cannot bind, as a whole line of its
+// output: "create server listener error, listen tcp A: bind: address already in use" for the bind
+// and tcpmux ports, and the web server's "listen tcp A: bind: address already in use" for the web
+// port (checked by hand with a stranger on each of the three). The match is of the whole line, so
+// the phrase inside another complaint (a configuration key that spells it, a path) is not it, and
+// A is the address, which the caller checks against frps's three.
+var frpsBindErrorLine = regexp.MustCompile(`^(?:create server listener error, )?listen tcp (\S+): bind: address already in use$`)
+
+// frpsBindExit is the exit status frps gives when it fails to bind (os/exec's text for status 1).
+const frpsBindExit = "exit status 1"
+
+// frpsBindFailure returns the line of out that is frps's bind error for one of the addresses in
+// ports, and true, when frps ended with the exit status of a failed bind. out is everything frps
+// wrote during the attempt, whole.
+func frpsBindFailure(out, status string, ports []string) (string, bool) {
+	if status != frpsBindExit {
+		return "", false
+	}
+	for line := range strings.SplitSeq(out, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if m := frpsBindErrorLine.FindStringSubmatch(line); m != nil && slices.Contains(ports, m[1]) {
+			return line, true
+		}
+	}
+	return "", false
+}
+
+// frpsExitError is the error of an attempt whose frps exited at its start: out is everything frps
+// wrote during the attempt, status how it ended, ports its three addresses. It is errFrpsPortTaken
+// (carrying the bind line) for a failed bind and an ordinary error otherwise. The attempt is
+// classified on its whole output, and only the text of the error is cut to its last 1,500 bytes.
+func frpsExitError(out, status string, ports []string) error {
+	shown := out
+	if len(shown) > 1500 {
+		shown = shown[len(shown)-1500:]
+	}
+	if line, ok := frpsBindFailure(out, status, ports); ok {
+		return fmt.Errorf("%w: frps exited at its start: %s: %s\n%s", errFrpsPortTaken, status, line, shown)
+	}
+	return fmt.Errorf("frps exited at its start: %s\n%s", status, shown)
+}
+
 // logFrom is what the file holds from offset on, "" if it cannot be read.
 func logFrom(path string, offset int64) string {
 	b, err := os.ReadFile(path)
@@ -349,9 +391,10 @@ func (r *tunnelRig) freshBlock(b *binary) *binary {
 			r.t.Fatalf("run returned %v after its context ended, want nil", err)
 		}
 	}
-	old := r.f.host.PortBase
-	r.f = repickBlock(r.t, r.f, tunnelOtherOffsets)
-	dropBlock(old, append([]int{agentapi.FrpsPluginPortOffset}, tunnelOtherOffsets...)...) // what the old block still held
+	old := r.f
+	r.tried = append(r.tried, old)
+	r.f = repickBlock(r.t, old, tunnelOtherOffsets, r.tried...)
+	dropOldBlock(old, r.f) // what the old block still held, except what the fresh one uses
 	if b == nil {
 		return nil
 	}

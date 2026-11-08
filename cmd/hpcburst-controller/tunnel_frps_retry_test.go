@@ -6,8 +6,10 @@ package main
 // and 11) itself, so the rig releases them just before it starts frps (releaseForFrps) and a
 // stranger can take one in that window. On 3 Nov 2026 a CI run lost one that way: "listen tcp
 // 127.0.0.1:<port>: bind: address already in use", frps exited at its start, and the test failed.
-// startFrps now repeats a start that fails like that on a fresh block, at most maxBindRetries
-// times, each logged, and no start that fails any other way.
+// startFrps now repeats a start that fails like that (exit status 1, and frps's own bind-error line
+// in its output) on a fresh block, at most maxBindRetries times, each logged, and no start that
+// fails any other way. The fresh block shares no port with any block the rig has tried, and the old
+// block's cleanup closes only the old block's own addresses (tunnel_frps_block_test.go).
 //
 // Every test here makes the collision itself: beforeFrps binds the port at the offset under test
 // after the rig has released it and before frps starts, so frps's bind finds it taken. A run in
@@ -215,18 +217,24 @@ func TestFrpsRetryRestartsTheRunningBinaryOnTheFreshBlock(t *testing.T) {
 
 // A start that fails for any other reason is not repeated, even after a repeat that was right. The
 // log of frps is appended to, so a start that read all of it would see the first attempt's line in
-// the second's failure and repeat again: the test breaks the second attempt's configuration (frps
+// the second's failure and repeat again: one row breaks the second attempt's configuration (frps
 // refuses an unknown key), and shows that its failure is returned at once while the file still
-// holds the first attempt's "address already in use".
+// holds the first attempt's "address already in use". Another row breaks the first attempt's
+// configuration with a key that is the phrase itself: frps's complaint, "unknown field", quotes it,
+// so the attempt's own output mentions "address already in use" and frps exits with status 1, as it
+// does when it loses a port; it is not a bind failure, and is not repeated.
 func TestFrpsStartIsNotRepeatedForAnyOtherFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
-		stranger  bool  // a port is taken in attempt 0
-		breakAt   int   // the attempt whose configuration is broken
-		wantTries []int // the attempts that ran
+		stranger  bool   // a port is taken in attempt 0
+		breakAt   int    // the attempt whose configuration is broken
+		breakLine string // the line added to its configuration
+		wantTries []int  // the attempts that ran
+		mentions  string // what the failure's output must say, to show the phrase is in it
 	}{
-		{"the first attempt fails", false, 0, []int{0}},
-		{"the second attempt fails after a repeat", true, 1, []int{0, 1}},
+		{"the first attempt fails", false, 0, "noSuchSetting = 1", []int{0}, ""},
+		{"the second attempt fails after a repeat", true, 1, "noSuchSetting = 1", []int{0, 1}, ""},
+		{"the output of the attempt mentions the phrase", false, 0, `"address already in use" = 1`, []int{0}, `unknown field "address already in use"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newTunnelRig(t)
@@ -245,7 +253,7 @@ func TestFrpsStartIsNotRepeatedForAnyOtherFailure(t *testing.T) {
 					inner(t, attempt, f)
 				}
 				if attempt == tc.breakAt {
-					breakFrpsConfig(t, f)
+					breakFrpsConfig(t, f, tc.breakLine)
 				}
 			}
 			var fresh []int
@@ -259,8 +267,11 @@ func TestFrpsStartIsNotRepeatedForAnyOtherFailure(t *testing.T) {
 			if errors.Is(err, errFrpsPortTaken) || !strings.Contains(err.Error(), "frps exited at its start") {
 				t.Errorf("the failure is %v, want frps's exit at its start, not a taken port", err)
 			}
-			if strings.Contains(err.Error(), "address already in use") {
-				t.Errorf("the failure carries the text of an earlier attempt: %v", err)
+			if strings.Contains(err.Error(), "bind: address already in use") {
+				t.Errorf("the failure carries the bind error of an earlier attempt: %v", err)
+			}
+			if tc.mentions != "" && !strings.Contains(err.Error(), tc.mentions) {
+				t.Errorf("the failure does not say %q, so the attempt's output does not mention the phrase and the row shows nothing: %v", tc.mentions, err)
 			}
 			if !slices.Equal(attempts, tc.wantTries) {
 				t.Errorf("attempts %v, want %v", attempts, tc.wantTries)
@@ -277,16 +288,62 @@ func TestFrpsStartIsNotRepeatedForAnyOtherFailure(t *testing.T) {
 	}
 }
 
-// breakFrpsConfig adds a key frps does not know to its configuration, which its strict parsing
-// refuses: frps exits at its start, for a reason that is not a taken port.
-func breakFrpsConfig(t *testing.T, f flags) {
+// breakFrpsConfig adds a line to frps's configuration that frps does not know, which its strict
+// parsing refuses: frps exits at its start, for a reason that is not a taken port.
+func breakFrpsConfig(t *testing.T, f flags, line string) {
 	t.Helper()
 	fh, err := os.OpenFile(launcher.FrpsConfigFile(f.host), os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer fh.Close()
-	if _, err := fh.WriteString("noSuchSetting = 1\n"); err != nil {
+	if _, err := fh.WriteString(line + "\n"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestFrpsExitErrorIsAPortTakenOnlyForABindLineAndExitStatusOne: an exit of frps is a lost port only for a line that is frps's own bind error
+// for one of its three ports, in everything it wrote during the attempt, and the exit status 1 a
+// failed bind gives. The lines are the ones frps 0.71.1 writes (checked by hand with a stranger on
+// each port): the bind and tcpmux ports say "create server listener error, listen tcp A: bind:
+// address already in use", the web server's says "listen tcp A: bind: address already in use".
+func TestFrpsExitErrorIsAPortTakenOnlyForABindLineAndExitStatusOne(t *testing.T) {
+	frpsPorts := []string{"127.0.0.1:40009", "127.0.0.1:40010", "127.0.0.1:40011"}
+	startLine := "2026-11-08 01:06:03.024 [I] [frps/root.go:115] frps uses config file: /state/frps/frps.toml\n"
+	filler := strings.Repeat("2026-11-08 01:06:03.024 [I] [server/service.go:210] an unrelated line of frps's log\n", 40) // over 1500 bytes
+	for _, tc := range []struct {
+		name   string
+		out    string
+		status string
+		want   bool
+	}{
+		{"the bind port", startLine + "create server listener error, listen tcp 127.0.0.1:40009: bind: address already in use\n", "exit status 1", true},
+		{"the tcpmux port", startLine + "create server listener error, listen tcp 127.0.0.1:40010: bind: address already in use\n", "exit status 1", true},
+		{"the web port, in its own words", startLine + "listen tcp 127.0.0.1:40011: bind: address already in use\n", "exit status 1", true},
+		{"no final newline", "listen tcp 127.0.0.1:40011: bind: address already in use", "exit status 1", true},
+		{"the line is the first of more than 1500 bytes", "create server listener error, listen tcp 127.0.0.1:40009: bind: address already in use\n" + filler, "exit status 1", true},
+		{"the right line, another exit status", startLine + "listen tcp 127.0.0.1:40011: bind: address already in use\n", "exit status 2", false},
+		{"the right line, killed by a signal", startLine + "listen tcp 127.0.0.1:40011: bind: address already in use\n", "signal: killed", false},
+		{"the phrase in another complaint", startLine + "json: unknown field \"address already in use\"\n", "exit status 1", false},
+		{"the phrase at the end of a log line", startLine + "2026-11-08 01:06:03.024 [W] retrying: listen tcp 127.0.0.1:40009: bind: address already in use\n", "exit status 1", false},
+		{"the phrase with text after it", startLine + "listen tcp 127.0.0.1:40009: bind: address already in use (config path)\n", "exit status 1", false},
+		{"a bind error of a port that is not one of frps's three", startLine + "listen tcp 127.0.0.1:40008: bind: address already in use\n", "exit status 1", false},
+		{"no bind error at all", startLine + "json: unknown field \"noSuchSetting\"\n", "exit status 1", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := frpsExitError(tc.out, tc.status, frpsPorts)
+			if err == nil {
+				t.Fatal("frpsExitError returned nil for an exit")
+			}
+			if got := errors.Is(err, errFrpsPortTaken); got != tc.want {
+				t.Errorf("a port taken: %v, want %v (status %q, error %v)", got, tc.want, tc.status, err)
+			}
+			if !strings.Contains(err.Error(), "frps exited at its start") || !strings.Contains(err.Error(), tc.status) {
+				t.Errorf("the error %q does not say that frps exited at its start with %q", err, tc.status)
+			}
+			if tc.want && !strings.Contains(err.Error(), "bind: address already in use") {
+				t.Errorf("the error does not carry the bind line, so a retry's log would not name its cause: %v", err)
+			}
+		})
 	}
 }
