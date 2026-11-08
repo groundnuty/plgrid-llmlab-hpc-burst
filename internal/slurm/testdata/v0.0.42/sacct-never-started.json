@@ -29,7 +29,7 @@
     "submission": 1793351400,
     "suspended": 0,
     "system": {"seconds": 0, "microseconds": 0},
-    "limit": {"set": true, "infinite": false, "number": 5},
+    "limit": {"set": true, "infinite": false, "number": 10},
     "total": {"seconds": 0, "microseconds": 0},
     "user": {"seconds": 0, "microseconds": 0}
    },
@@ -54,9 +54,9 @@
    "qos": "normal",
    "qosreq": "normal",
    "required": {
-    "CPUs": 1,
+    "CPUs": 2,
     "memory_per_cpu": {"set": false, "infinite": false, "number": 0},
-    "memory_per_node": {"set": true, "infinite": false, "number": 1024}
+    "memory_per_node": {"set": true, "infinite": false, "number": 2048}
    },
    "kill_request_user": "example-user",
    "restart_cnt": 0,
@@ -74,7 +74,7 @@
    "tres": {
     "allocated": [],
     "requested": [
-     {"type": "cpu", "name": "", "id": 1, "count": 1}
+     {"type": "cpu", "name": "", "id": 1, "count": 2}
     ]
    },
    "used_gres": "",

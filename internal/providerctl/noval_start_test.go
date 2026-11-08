@@ -87,29 +87,46 @@ func neverStartedJob(t *testing.T) (*slurm.Batch, *recordingRunner, provider.Job
 
 // allocatedRead is the accounting read made once a job is first seen started,
 // for the CPUs and GPUs it was allocated; it is not made for a job that has not
-// started, nor for one that accounting already gave. The job here came from
-// accounting, so it makes no call either way: what the NO_VAL start changed is
-// the StartTime it carries, which is what the status block is built from. A
-// job that never started has no allocated hours: its block stays unset (its
-// hours are unknown, never 0), and with a start in 2106 it was set, with an
-// elapsed time of 0 s.
+// started, nor for one that accounting already gave. A job that never started
+// has no allocated hours: its status block stays unset (they are unknown,
+// never 0), and with a start in 2106 it was set, with an elapsed time of 0 s.
+//
+// Two shapes of the same job. As accounting gives it, it carries its Accounting
+// already, so allocatedRead returns early whatever its start is: only the
+// StartTime and the status block it leads to are checked there. As a job
+// without Accounting, the shape of one the queue listing shows, the start time
+// is the only thing between it and a read; the read is the call that a job
+// taken for started would make.
 func TestAllocatedReadGivesNoHoursForAJobWhoseStartIsNoVal(t *testing.T) {
-	b, r, job := neverStartedJob(t)
-	e := &external{s: &shared{}, p: b}
-	own := r.count("sacct")
-	prior := &v1alpha1.AllocationObservation{}
-	got, read, err := e.allocatedRead(context.Background(), job, prior, at(12, 0, 0))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if read || r.count("sacct") != own {
-		t.Errorf("allocatedRead read accounting (read %v, %d sacct calls, %d from the observe); a job that never started has nothing allocated to read", read, r.count("sacct"), own)
-	}
-	if got.StartTime != nil {
-		t.Errorf("StartTime = %s, want none: the job never started", got.StartTime)
-	}
-	if a := provider.MirrorAccounting(got, 1, prior, at(12, 0, 0), read); a != nil {
-		t.Errorf("the status accounting block = %+v, want none: no allocated hours", a)
+	for _, tc := range []struct {
+		name         string
+		noAccounting bool
+	}{
+		{"as accounting gives the job", false},
+		{"without Accounting, as a listing gives it", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, r, job := neverStartedJob(t)
+			if tc.noAccounting {
+				job.Accounting = nil
+			}
+			e := &external{s: &shared{}, p: b}
+			own := r.count("sacct")
+			prior := &v1alpha1.AllocationObservation{}
+			got, read, err := e.allocatedRead(context.Background(), job, prior, at(12, 0, 0))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if read || r.count("sacct") != own {
+				t.Errorf("allocatedRead read accounting (read %v, %d sacct calls, %d from the observe); a job that never started has nothing allocated to read", read, r.count("sacct"), own)
+			}
+			if got.StartTime != nil {
+				t.Errorf("StartTime = %s, want none: the job never started", got.StartTime)
+			}
+			if a := provider.MirrorAccounting(got, 1, prior, at(12, 0, 0), read); a != nil {
+				t.Errorf("the status accounting block = %+v, want none: no allocated hours", a)
+			}
+		})
 	}
 }
 

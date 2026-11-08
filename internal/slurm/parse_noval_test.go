@@ -8,7 +8,7 @@ package slurm
 //
 // Every expected value is written out by hand from the fixture's raw fields
 // (testdata/v0.0.42/sacct-never-started.json: submission 1793351400, end
-// 1793351462, limit 5 minutes) and from the markers' values in Slurm's
+// 1793351462, limit 10 minutes) and from the markers' values in Slurm's
 // slurm/slurm.h, never from this package's output. A fixture whose time.start
 // is 0 or absent would prove nothing: both always read as no time.
 
@@ -110,12 +110,12 @@ func TestNoValTripleNumberOfTheWrongTypeIsAnError(t *testing.T) {
 const neverStartedStart = `"start": 4294967294`
 
 // checkNeverStarted: the job of testdata/v0.0.42/sacct-never-started.json, with
-// whatever time.start it was given, did not start. The limit is 5 minutes, so
+// whatever time.start it was given, did not start. The limit is 10 minutes, so
 // a start time would give it a hard end: that there is none is the check.
 func checkNeverStarted(t *testing.T, j provider.Job) {
 	t.Helper()
-	if j.TimeLimit != 5*time.Minute {
-		t.Fatalf("precondition: TimeLimit %s, want the fixture's 5m0s", j.TimeLimit)
+	if j.TimeLimit != 10*time.Minute {
+		t.Fatalf("precondition: TimeLimit %s, want the fixture's 10m0s", j.TimeLimit)
 	}
 	if j.StartTime != nil {
 		t.Errorf("StartTime = %s, want none: the job never started", j.StartTime)
