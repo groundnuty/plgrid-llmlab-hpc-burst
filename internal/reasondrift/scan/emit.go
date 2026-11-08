@@ -29,6 +29,11 @@ type scanner struct {
 	// callees lists, for each function, the functions it calls statically or
 	// builds a closure of.
 	callees map[*ssa.Function][]*ssa.Function
+
+	// builders and counters are what collectRecorders checks, the counters
+	// by full name.
+	builders []Builder
+	counters map[string]bool
 }
 
 // functions lists the functions that can hold a call or a use of a function:
