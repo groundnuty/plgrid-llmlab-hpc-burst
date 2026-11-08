@@ -11,10 +11,12 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,7 +27,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/leaderelection"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
@@ -182,18 +186,25 @@ func metricsRead(t *testing.T, reg *prometheus.Registry, k eventcount.Key) event
 	return r
 }
 
-// passLog records the passes a hook reports, and waits for one.
+// observedPass is one observer pass its hook reported: when it began, when
+// the hook signalled, and the pass's outcome.
+type observedPass struct {
+	began, ended time.Time
+	err          error
+}
+
+// passLog records the passes a hook reports, and waits for them.
 type passLog struct {
 	mu     sync.Mutex
-	passes []eventcount.Barrier
+	passes []observedPass
 	more   chan struct{}
 }
 
 func newPassLog() *passLog { return &passLog{more: make(chan struct{}, 1)} }
 
-func (l *passLog) add(began time.Time) {
+func (l *passLog) add(began time.Time, err error) {
 	l.mu.Lock()
-	l.passes = append(l.passes, eventcount.Barrier{PassStart: began, Observed: time.Now()})
+	l.passes = append(l.passes, observedPass{began: began, ended: time.Now(), err: err})
 	l.mu.Unlock()
 	select {
 	case l.more <- struct{}{}:
@@ -201,28 +212,45 @@ func (l *passLog) add(began time.Time) {
 	}
 }
 
-// after waits for a pass that began at or after t, and returns it.
-func (l *passLog) after(t *testing.T, at time.Time, what string) eventcount.Barrier {
+// barrierAfter waits for the passes that began at or after at, and returns the
+// first of them that read what it judges (a nil error) as the barrier. A pass
+// whose read failed judged nothing, so it is no barrier (HBEP-8, Test plan,
+// Raised events: a barrier that shows only that the emitting read completed
+// proves nothing). When the first n such passes all failed, it returns a
+// barrier with no pass, which makes the check inconclusive: it waits on the
+// count of passes, never on a window.
+func (l *passLog) barrierAfter(t *testing.T, at time.Time, what string, n int) eventcount.Barrier {
 	t.Helper()
 	deadline := time.After(time.Minute)
 	for {
 		l.mu.Lock()
+		var failed []error
 		for _, p := range l.passes {
-			if !p.PassStart.Before(at) {
-				l.mu.Unlock()
-				p.What = what
-				return p
+			if p.began.Before(at) {
+				continue
 			}
+			if p.err == nil {
+				l.mu.Unlock()
+				return eventcount.Barrier{What: what, PassStart: p.began, Observed: p.ended}
+			}
+			failed = append(failed, p.err)
 		}
-		n := len(l.passes)
+		seen := len(l.passes)
 		l.mu.Unlock()
+		if len(failed) >= n {
+			return eventcount.Barrier{What: fmt.Sprintf("%s: none of the %d passes since %s read what it judges (first: %v)", what, len(failed), at.Format(time.RFC3339Nano), failed[0])}
+		}
 		select {
 		case <-l.more:
 		case <-deadline:
-			t.Fatalf("no %s began after %s within a minute (%d passes seen)", what, at.Format(time.RFC3339Nano), n)
+			t.Fatalf("no %s began after %s within a minute (%d passes seen, %d failed)", what, at.Format(time.RFC3339Nano), seen, len(failed))
 		}
 	}
 }
+
+// barrierPasses is how many failed passes in a row make an observer barrier
+// inconclusive.
+const barrierPasses = 5
 
 // TestObserverAbsenceOfHeartbeatMissed proves, by the four conditions, that
 // the observer raised no HeartbeatMissed for a Provider whose read is still
@@ -254,7 +282,7 @@ func TestObserverAbsenceOfHeartbeatMissed(t *testing.T) {
 		close(done)
 	}()
 	defer func() { cancel(); <-done }()
-	b := log.after(t, change, "an observer pass over the Provider")
+	b := log.barrierAfter(t, change, "an observer pass over the Provider", barrierPasses)
 	b.Due = change
 	second := metricsRead(t, reg, k)
 	a := eventcount.Absence{Key: k, First: first, Second: second, Change: change, Collectors: eventcount.LifecycleCollectors,
@@ -266,13 +294,78 @@ func TestObserverAbsenceOfHeartbeatMissed(t *testing.T) {
 	// The control: past 5 min the same pass raises it, and the same check says so.
 	rg.clock.Advance(2 * time.Minute)
 	change = time.Now()
-	b = log.after(t, change, "an observer pass over the stale Provider")
+	b = log.barrierAfter(t, change, "an observer pass over the stale Provider", barrierPasses)
 	b.Due = change
 	third := metricsRead(t, reg, k)
 	a = eventcount.Absence{Key: k, First: second, Second: third, Change: change, Collectors: eventcount.LifecycleCollectors,
 		Barriers: []eventcount.Barrier{b}, Quiet: quiet}
 	if v, why := a.Judge(); v != eventcount.Raised {
 		t.Fatalf("a stale Provider: %s (%s), want raised", v, why)
+	}
+}
+
+// TestObserverAbsenceNeedsASuccessfulRead: an observer pass whose Provider
+// list fails judged no Provider, so it is no barrier, and the absence check
+// across such passes is inconclusive, never "not raised", although the count
+// did not rise. Here the Provider is stale through the failing passes, so
+// HeartbeatMissed is due and a check that took a failed pass as its barrier
+// would pass on an event that was never judged. Once the list reads again, the
+// next pass raises it, and the same check says raised. The counter is read
+// with the process collector, registered on their own: no serving predicate
+// is injected.
+func TestObserverAbsenceNeedsASuccessfulRead(t *testing.T) {
+	var failing atomic.Bool
+	rg := newRig(t, withInterceptors(interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*v1alpha1.ProviderList); ok && failing.Load() {
+				return errors.New("the Provider list fails (injected)")
+			}
+			return c.List(ctx, list, opts...)
+		},
+	}))
+	rg.events.Zero(eventcount.ControllerLifecycle, RaisedEvents())
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(rg.events, collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	if err := rg.prov.Sync(rg.ctx); err != nil {
+		t.Fatal(err)
+	}
+	k := eventcount.Key{Controller: eventcount.ControllerLifecycle, Reason: reasonHeartbeatMissed, Action: eventFailing, Type: provider.EventKindWarning}
+	quiet := "the rig runs no reconcile pass, has no Instance and no front Lease, so the observer's Provider judgement is the one source of HeartbeatMissed"
+	first := metricsRead(t, reg, k)
+
+	// The change: the Provider's read ages past the 5 min rule while its
+	// list fails.
+	failing.Store(true)
+	rg.clock.Advance(6 * time.Minute)
+	change := time.Now()
+	log := newPassLog()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		_ = (&observer{r: rg.r, every: 20 * time.Millisecond, onPass: log.add}).Start(ctx)
+		close(done)
+	}()
+	defer func() { cancel(); <-done }()
+	b := log.barrierAfter(t, change, "an observer pass over the Provider", barrierPasses)
+	b.Due = change
+	second := metricsRead(t, reg, k)
+	if second.Count != first.Count {
+		t.Fatalf("%s rose from %g to %g while the Provider list failed", k, first.Count, second.Count)
+	}
+	a := eventcount.Absence{Key: k, First: first, Second: second, Change: change, Barriers: []eventcount.Barrier{b}, Quiet: quiet}
+	if v, why := a.Judge(); v != eventcount.Inconclusive {
+		t.Fatalf("passes whose Provider list failed: %s (%s), want inconclusive", v, why)
+	}
+
+	// The control: the list reads again, and the next pass raises it.
+	failing.Store(false)
+	change = time.Now()
+	b = log.barrierAfter(t, change, "an observer pass over the stale Provider", barrierPasses)
+	b.Due = change
+	third := metricsRead(t, reg, k)
+	a = eventcount.Absence{Key: k, First: second, Second: third, Change: change, Barriers: []eventcount.Barrier{b}, Quiet: quiet}
+	if v, why := a.Judge(); v != eventcount.Raised {
+		t.Fatalf("a stale Provider read again: %s (%s), want raised", v, why)
 	}
 }
 

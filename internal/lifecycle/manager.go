@@ -104,7 +104,7 @@ type Options struct {
 	onLeaseRead func()
 	// onObserve and onGap, when set, are the observer's and the gap
 	// emitter's test hooks (observer.onPass, gapEmitter.onDone).
-	onObserve func(began time.Time)
+	onObserve func(began time.Time, err error)
 	onGap     func()
 }
 

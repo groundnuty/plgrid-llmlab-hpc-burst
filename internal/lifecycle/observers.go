@@ -66,11 +66,13 @@ type observer struct {
 	r     *Reconciler
 	every time.Duration
 	// onPass, when set, runs after each pass, whether it raised an event or
-	// not, with the wall-clock time the pass began: the loop has no pass
-	// marker of its own, so a test proves that a pass raised no event by it
-	// (HBEP-8, Raised events, condition 3: a test hook that signals after the
-	// emitter's recorder call).
-	onPass func(began time.Time)
+	// not, with the wall-clock time the pass began and the pass's outcome
+	// (checkHeartbeats' error, nil when every read succeeded): the loop has no
+	// pass marker of its own, so a test proves that a pass raised no event by
+	// it (HBEP-8, Raised events, condition 3: a test hook that signals after
+	// the emitter's recorder call). A pass whose read failed judged nothing it
+	// could not read, so only a pass with a nil error is a barrier.
+	onPass func(began time.Time, err error)
 }
 
 // Start judges the heartbeats at once, then every o.every until ctx ends. A
@@ -81,11 +83,12 @@ func (o *observer) Start(ctx context.Context) error {
 	defer t.Stop()
 	for {
 		began := time.Now()
-		if err := o.r.checkHeartbeats(ctx); err != nil {
+		err := o.r.checkHeartbeats(ctx)
+		if err != nil {
 			ctrl.LoggerFrom(ctx).Error(err, "judging the observers' heartbeats")
 		}
 		if o.onPass != nil {
-			o.onPass(began)
+			o.onPass(began, err)
 		}
 		select {
 		case <-ctx.Done():
