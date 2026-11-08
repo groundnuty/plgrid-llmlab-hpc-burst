@@ -568,17 +568,20 @@ func TestSrunProgramThatIgnoresItsInput(t *testing.T) {
 // start time it was listed with, and a process listed before its setsid keeps
 // that start time after it (PR 255: 1 failure in 31 under load, the escapee's
 // PID written and the escapee gone). So the step waits for the escapee's PID,
-// which it writes only from its new session, before it exits. The escape
-// starts a third of a second late, so that a step that does not wait exits
-// before it, and the escapee never writes its PID: the order is forced, not
-// left to the scheduler.
+// which it writes only from its new session, before it exits. The order is
+// forced by a handshake, not by time (Astra's nit on PR 255's delta round):
+// the escape starts only once a go file exists, and only the step's wait loop
+// writes it. A step that does not wait never writes it, so its escaper is
+// still in the step's session, waiting, when the step exits; the sweep kills
+// it, the escapee never writes its PID, and the test fails, however the
+// processes are scheduled.
 func TestSrunReturnsWhileAnEscapeeHoldsItsOutput(t *testing.T) {
 	r := newRunRig(t, RunMode{})
 	id := r.holdJob(r.s, r.root+"/release")
-	esc := r.root + "/escapee"
+	esc, gate := r.root+"/escapee", r.root+"/go"
 	script := "echo before\n" +
-		"sh -c 'sleep 0.3; exec setsid sh -c \"echo \\$\\$ > " + esc + ".tmp && mv " + esc + ".tmp " + esc + "; exec sleep 300\"' &\n" +
-		"while [ ! -s " + esc + " ]; do sleep 0.01; done\n" +
+		"sh -c 'while [ ! -e " + gate + " ]; do sleep 0.01; done; exec setsid sh -c \"echo \\$\\$ > " + esc + ".tmp && mv " + esc + ".tmp " + esc + "; exec sleep 300\"' &\n" +
+		"while [ ! -s " + esc + " ]; do : > " + gate + "; sleep 0.01; done\n" +
 		"exit 0\n"
 	out, errOut, code := r.runAs(r.s, srunLine(id), []byte(script))
 	if out != "before\n" || errOut != "" || code != 0 {
