@@ -13,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	afake "github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi/fake"
 )
 
@@ -90,7 +91,7 @@ func checkServes(t *testing.T, when string, ex exposition) {
 func TestMetricsACopyThatDoesNotServeExportsNothing(t *testing.T) {
 	var serving atomic.Bool
 	started := time.Now()
-	c := newStateCollector(gateStore(t), &Backend{}, SystemClock{}, func() time.Time { return started }, serving.Load)
+	c := newStateCollector(gateStore(t), &Backend{}, SystemClock{}, func() time.Time { return started }, serving.Load, eventcount.New())
 	if got := hpcburstSamples(scrapeCollectors(t, c)); len(got) != 0 {
 		t.Fatalf("a copy that does not serve exported %d hpcburst_ samples, want none: %v", len(got), got)
 	}
@@ -128,7 +129,7 @@ func TestMetricsACopyThatStopsServingDuringTheReadsExportsNothing(t *testing.T) 
 		}
 	}}
 	started := time.Now()
-	c := newStateCollector(reader, &Backend{}, SystemClock{}, func() time.Time { return started }, serving.Load)
+	c := newStateCollector(reader, &Backend{}, SystemClock{}, func() time.Time { return started }, serving.Load, eventcount.New())
 	serving.Store(true)
 	checkServes(t, "a scrape while the copy serves throughout", scrapeCollectors(t, c))
 	flip.Store(true)

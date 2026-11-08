@@ -48,6 +48,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agentserver"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/managed"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl"
@@ -310,7 +311,10 @@ type wiring struct {
 	hubEndpoint string // HF_ENDPOINT, for agent.json
 	newPlatform providerctl.PlatformFactory
 	listen      func(addr string) (net.Listener, error)
-	log         logr.Logger
+	// events is the copy's raised-events counter: each Provider manager's
+	// recorder counts into it under provider-<name> (HBEP-8, Raised events).
+	events *eventcount.Counter
+	log    logr.Logger
 }
 
 // providerGrace is each Provider manager's shutdown grace. The Provider
@@ -364,6 +368,13 @@ func (w wiring) newProviderManager(provider string) (manager.Manager, error) {
 // reach the API; providerctl's default drops them (#90's wiring note; HBEP-8,
 // Code that differs). It writes core/v1 Events with no action, which readers
 // treat as type "other" (HBEP-8, open question 14).
+//
+// The manager's recorder is counted under provider-<name> with action none
+// (HBEP-8, Raised events). The count wraps the inner recorder, which
+// providerctl's created-event filter wraps in turn, so an event the filter
+// suppresses is not counted, and crossplane-runtime's WithAnnotations, which
+// builds a new APIRecorder over that inner recorder, keeps the count. A batch
+// Provider's series appear at its first event.
 func (w wiring) setupBatch(pm manager.Manager, provider string) error {
 	return providerctl.Setup(pm, providerctl.Options{
 		Provider:       provider,
@@ -374,7 +385,7 @@ func (w wiring) setupBatch(pm manager.Manager, provider string) error {
 		Front:          w.front,
 		HubEndpoint:    w.hubEndpoint,
 		Log:            logging.NewLogrLogger(pm.GetLogger().WithName("provider").WithValues("provider", provider)),
-		Recorder:       event.NewAPIRecorder(pm.GetEventRecorderFor(v1alpha1.FieldManagerProvider)),
+		Recorder:       event.NewAPIRecorder(eventcount.Legacy(pm.GetEventRecorderFor(v1alpha1.FieldManagerProvider), w.events, eventcount.ControllerProvider(provider))),
 	})
 }
 
@@ -423,7 +434,7 @@ func mount(mgr manager.Manager, w wiring, backend agentapi.Backend) error {
 		Log: logging.NewLogrLogger(w.log.WithName("providers-batch")),
 	}
 	catalog := &providerctl.Supervisor{
-		Kind: v1alpha1.PlatformManaged, Client: mgr.GetClient(), NewManager: w.newProviderManager, Setup: managed.Setup,
+		Kind: v1alpha1.PlatformManaged, Client: mgr.GetClient(), NewManager: w.newProviderManager, Setup: managed.Setup(w.events),
 		Log: logging.NewLogrLogger(w.log.WithName("providers-managed")),
 	}
 	srv, err := agentserver.New(agentserver.Config{

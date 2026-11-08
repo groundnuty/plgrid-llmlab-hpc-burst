@@ -11,6 +11,7 @@ import (
 	"k8s.io/client-go/tools/events"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -69,9 +70,33 @@ func (k KubeRecorder) Event(obj runtime.Object, warning bool, typ, code, message
 	k.R.Eventf(obj, nil, et, code, typ, "%s", cutNote(message))
 }
 
+// RaisedEvents returns the series the front can raise, each created at 0 on
+// its /metrics (HBEP-8, Raised events): the rows of HBEP-8's Reasons table
+// whose emitter is the front, with ObservationGap at its start and
+// HeartbeatMissed for its probe and the lifecycle Lease. Every one is
+// degraded or failing, so every one is a Warning. The drift guard checks this
+// list against the emit sites.
+func RaisedEvents() []eventcount.Series {
+	var out []eventcount.Series
+	for _, r := range []struct{ action, reason string }{
+		{eventDegraded, reasonCapacityDrop}, {eventDegraded, reasonCountsDrift}, {eventDegraded, reasonDrainWinShort},
+		{eventDegraded, reasonPathProbeFailing}, {eventDegraded, reasonObservationGap},
+		{eventFailing, reasonHeartbeatMissed}, {eventFailing, reasonUsageWriteFailed},
+	} {
+		out = append(out, eventcount.Series{Reason: r.reason, Action: r.action, Type: provider.EventKindWarning})
+	}
+	return out
+}
+
 // NewKubeRecorder starts an events broadcaster on the clientset and returns
-// its recorder and a stop function that flushes it.
-func NewKubeRecorder(cs kubernetes.Interface) (KubeRecorder, func(), error) {
+// its recorder and a stop function that flushes it. The recorder counts each
+// event it hands over in counted, the front's raised-events counter, which
+// Options.Events must name so that the front's /metrics exports it (HBEP-8,
+// Raised events). It panics on a nil counter.
+func NewKubeRecorder(cs kubernetes.Interface, counted *eventcount.Counter) (KubeRecorder, func(), error) {
+	if counted == nil {
+		panic("front: NewKubeRecorder with no raised-events counter")
+	}
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		return KubeRecorder{}, nil, err
@@ -84,7 +109,7 @@ func NewKubeRecorder(cs kubernetes.Interface) (KubeRecorder, func(), error) {
 	b := events.NewBroadcaster(&events.EventSinkImpl{Interface: cs.EventsV1()})
 	stop := make(chan struct{})
 	b.StartRecordingToSink(stop)
-	return KubeRecorder{R: b.NewRecorder(scheme, fieldManagerFront)}, func() { close(stop); b.Shutdown() }, nil
+	return KubeRecorder{R: eventcount.Events(b.NewRecorder(scheme, fieldManagerFront), counted, eventcount.ControllerFront)}, func() { close(stop); b.Shutdown() }, nil
 }
 
 // RecordedEvent is one event a MemoryRecorder holds.

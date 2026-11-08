@@ -117,7 +117,7 @@ func newHarnessOn(t *testing.T, real clock.Clock, edit func(*Config)) *harness {
 	}
 	log := slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	h.free = &freeSpace{n: 1 << 40}
-	h.metrics = NewMetrics(h.sink, h.cfg.UsageDir, h.free.get)
+	h.metrics = NewMetrics(h.sink, h.cfg.UsageDir, h.free.get, nil)
 	h.router = NewRouter(h.cfg, clk, h.trans, h.rec, log, h.metrics)
 	h.proxy = NewProxy(ProxyOptions{Config: h.cfg, Host: h.host, Clock: clk, Router: h.router, Transports: h.trans, Keys: keys, Sink: h.sink, Metrics: h.metrics, Log: log})
 	ln, err := enginetest.Listen(testPortLo, testPortHi)

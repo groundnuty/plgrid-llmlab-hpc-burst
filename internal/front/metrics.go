@@ -7,8 +7,10 @@ import (
 	"syscall"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/usage"
 )
 
@@ -39,8 +41,13 @@ type Metrics struct {
 
 // NewMetrics registers the front's metrics. sink, when set, feeds the three
 // usage metrics at each scrape; dir is the usage directory whose free space
-// hpcburst_usage_dir_free_bytes reports, read with free (nil: statfs).
-func NewMetrics(sink *usage.Sink, dir string, free FreeBytesFunc) *Metrics {
+// hpcburst_usage_dir_free_bytes reports, read with free (nil: statfs). events,
+// when set, is the front's raised-events counter, which its recorder counts
+// into (NewKubeRecorder): it is registered here with the front's series
+// created at 0, beside the process collector, whose
+// process_start_time_seconds tells a restarted front from the same one
+// (HBEP-8, Raised events).
+func NewMetrics(sink *usage.Sink, dir string, free FreeBytesFunc, events *eventcount.Counter) *Metrics {
 	if free == nil {
 		free = statfsFree
 	}
@@ -64,7 +71,11 @@ func NewMetrics(sink *usage.Sink, dir string, free FreeBytesFunc) *Metrics {
 			Buckets: ttftBuckets,
 		}, []string{"provider", "model_deployment", "endpoint"}),
 	}
-	m.reg.MustRegister(m.requests, m.cuts, m.pauses, m.ttft)
+	m.reg.MustRegister(m.requests, m.cuts, m.pauses, m.ttft, collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	if events != nil {
+		events.Zero(eventcount.ControllerFront, RaisedEvents())
+		m.reg.MustRegister(events)
+	}
 	m.known("", "") // the cuts of a request that never had a target
 	if sink != nil {
 		m.reg.MustRegister(&usageCollector{sink: sink, dir: dir, free: free})

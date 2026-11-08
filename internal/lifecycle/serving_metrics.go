@@ -5,6 +5,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 )
 
 // descCollectorSuccess is node_exporter's node_scrape_collector_success
@@ -46,10 +48,16 @@ func successSample(collector string, ok bool) prometheus.Metric {
 // before the reads and again after them, and nothing is sent when it has
 // turned false meanwhile, so a scrape that began while the copy led does not
 // export once it has lost the Lease (PR #254 review, B2).
+//
+// It exports this copy's raised-events counter the same way (HBEP-8, Raised
+// events): the counter is never registered on its own, which would bypass
+// this gate, and every controller that raises events in this process runs
+// only on the copy that leads the lifecycle Lease.
 type stateCollector struct {
 	serving    func() bool
 	instances  *instanceCollector
 	accounting *accountingCollector
+	events     *eventcount.Counter
 }
 
 // Describe implements prometheus.Collector.
@@ -57,6 +65,7 @@ func (c *stateCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descCollectorSuccess
 	c.instances.describe(ch)
 	c.accounting.describe(ch)
+	c.events.Describe(ch)
 }
 
 // Collect implements prometheus.Collector.
@@ -66,6 +75,7 @@ func (c *stateCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	out := c.instances.collect(nil)
 	out = c.accounting.collect(out)
+	out = collectEvents(out, c.events)
 	if !c.serving() {
 		return
 	}
@@ -74,19 +84,34 @@ func (c *stateCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
+// collectEvents appends the counter's series to out.
+func collectEvents(out []prometheus.Metric, events *eventcount.Counter) []prometheus.Metric {
+	ch := make(chan prometheus.Metric)
+	go func() {
+		events.Collect(ch)
+		close(ch)
+	}()
+	for m := range ch {
+		out = append(out, m)
+	}
+	return out
+}
+
 // metricsCollectors are the collectors NewManager registers: the one
 // stateCollector, over the manager's cached client, the agent Backend, the
-// controller's clock, this process's start as the passes count it, and the
-// readiness that says whether the copy serves.
-func metricsCollectors(cache client.Reader, backend *Backend, clock Clock, started func() time.Time, serving func() bool) []prometheus.Collector {
-	return []prometheus.Collector{newStateCollector(cache, backend, clock, started, serving)}
+// controller's clock, this process's start as the passes count it, the
+// readiness that says whether the copy serves, and the copy's raised-events
+// counter.
+func metricsCollectors(cache client.Reader, backend *Backend, clock Clock, started func() time.Time, serving func() bool, events *eventcount.Counter) []prometheus.Collector {
+	return []prometheus.Collector{newStateCollector(cache, backend, clock, started, serving, events)}
 }
 
 // newStateCollector is the stateCollector of metricsCollectors.
-func newStateCollector(cache client.Reader, backend *Backend, clock Clock, started func() time.Time, serving func() bool) *stateCollector {
+func newStateCollector(cache client.Reader, backend *Backend, clock Clock, started func() time.Time, serving func() bool, events *eventcount.Counter) *stateCollector {
 	return &stateCollector{
 		serving:    serving,
 		instances:  &instanceCollector{cache: cache, backend: backend, clock: clock, started: started},
 		accounting: &accountingCollector{allocs: cache},
+		events:     events,
 	}
 }

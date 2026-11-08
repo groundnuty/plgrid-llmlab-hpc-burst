@@ -16,6 +16,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/clock"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/inventory"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/usage"
@@ -52,6 +53,11 @@ type Options struct {
 	// FreeBytes reads the free space behind hpcburst_usage_dir_free_bytes;
 	// nil is statfs. A test moves it.
 	FreeBytes FreeBytesFunc
+	// Events is the front's raised-events counter, the one its Recorder
+	// counts into (NewKubeRecorder); its /metrics exports it with the front's
+	// series created at 0 (HBEP-8, Raised events). nil means a new one, into
+	// which nothing counts unless Recorder does: a test with a MemoryRecorder.
+	Events *eventcount.Counter
 }
 
 // DefaultShutdownGrace is how long a stop lets requests in flight finish.
@@ -119,7 +125,11 @@ func Run(ctx context.Context, o Options) error {
 			o.Log.Error("usage sink", "error", err.Error())
 		}
 	}()
-	metrics := NewMetrics(sink, cfg.UsageDir, o.FreeBytes)
+	events := o.Events
+	if events == nil {
+		events = eventcount.New()
+	}
+	metrics := NewMetrics(sink, cfg.UsageDir, o.FreeBytes, events)
 	router := NewRouter(cfg, o.Clock, o.Transports, o.Recorder, o.Log, metrics)
 	watch, err := startWatch(ctx, o, router)
 	if err != nil {

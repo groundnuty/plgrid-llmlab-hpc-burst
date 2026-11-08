@@ -42,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/leaderlock"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
@@ -83,6 +84,13 @@ type Options struct {
 	HubEndpoint string
 	// Clock is the time source; nil means SystemClock.
 	Clock Clock
+	// Events is this copy's raised-events counter (HBEP-8, Raised events):
+	// the lifecycle controller's recorder counts into it, and the serving
+	// collector exports it, so a copy that does not serve exports none of it.
+	// hpcburst-controller passes its own, which its tunnel-state reader and
+	// Provider managers count into too; nil means a new one for this manager.
+	// Never share one between copies.
+	Events *eventcount.Counter
 
 	// newCache, when set, builds the manager's cache: a test holds the
 	// caches' sync with it.
@@ -305,9 +313,14 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	}
 	src := checkpointSource(o, clock)
 	builds := &agentBuilds{dir: o.AgentBuildsDir}
+	counted := o.Events
+	if counted == nil {
+		counted = eventcount.New()
+	}
+	counted.Zero(eventcount.ControllerLifecycle, RaisedEvents())
 	r := &Reconciler{
 		Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Clock: clock, Backend: backend, Checkpoints: src,
-		Recorder: KubeRecorder{R: mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle)},
+		Recorder: KubeRecorder{R: eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle), counted, eventcount.ControllerLifecycle)},
 		Config:   Config{CredentialsDir: o.CredentialsDir, FrontConfigured: o.FrontConfigured, AgentDigest: builds.digest},
 	}
 	if lock != nil {
@@ -323,7 +336,7 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		reg = ctrlmetrics.Registry
 	}
 	if err := mgr.Add(&collectorRegistration{reg: reg, cs: metricsCollectors(mgr.GetClient(), backend, clock,
-		func() time.Time { return r.memory().started }, ready.serving)}); err != nil {
+		func() time.Time { return r.memory().started }, ready.serving, counted)}); err != nil {
 		return nil, nil, err
 	}
 	workers := o.Workers

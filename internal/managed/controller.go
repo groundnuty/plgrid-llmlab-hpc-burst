@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -170,20 +171,32 @@ func (c *Controller) SetupWithManager(mgr manager.Manager) error {
 	return mgr.Add(c)
 }
 
-// Setup is the per-Provider manager supervisor's hook for a managed Provider,
-// with the signature of internal/providerctl's Supervisor.Setup (#59): it
-// adds the Provider's controller to mgr, built from mgr's client, API reader,
-// event recorder and logger, with the real clock and transport.
-func Setup(mgr manager.Manager, provider string) error {
-	c, err := New(Options{
-		Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Provider: provider,
-		Recorder: mgr.GetEventRecorder(v1alpha1.FieldManagerProvider),
-		Log:      mgr.GetLogger().WithName("managed-catalog"),
-	})
-	if err != nil {
-		return err
+// Setup returns the per-Provider manager supervisor's hook for a managed
+// Provider, with the signature of internal/providerctl's Supervisor.Setup
+// (#59): it adds the Provider's controller to mgr, built from mgr's client,
+// API reader, event recorder and logger, with the real clock and transport.
+// The recorder counts each event in events, the lifecycle copy's counter,
+// under provider-<name>, and the Provider's series are created at 0 there
+// (HBEP-8, Raised events); the lifecycle controller's serving collector
+// exports them, since a Provider manager binds no metrics port. It panics on
+// a nil counter.
+func Setup(events *eventcount.Counter) func(mgr manager.Manager, provider string) error {
+	if events == nil {
+		panic("managed: Setup with no raised-events counter")
 	}
-	return c.SetupWithManager(mgr)
+	return func(mgr manager.Manager, provider string) error {
+		controller := eventcount.ControllerProvider(provider)
+		events.Zero(controller, RaisedEvents())
+		c, err := New(Options{
+			Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Provider: provider,
+			Recorder: eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerProvider), events, controller),
+			Log:      mgr.GetLogger().WithName("managed-catalog"),
+		})
+		if err != nil {
+			return err
+		}
+		return c.SetupWithManager(mgr)
+	}
 }
 
 // NeedLeaderElection implements manager.LeaderElectionRunnable: only the

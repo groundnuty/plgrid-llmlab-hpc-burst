@@ -8,6 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -47,6 +48,33 @@ var badAction = map[string]string{
 	v1alpha1.ReasonExpired:           provider.EventActionFailing,
 	v1alpha1.ReasonReadsFailing:      provider.EventActionFailing,
 	v1alpha1.ReasonExpiresWithinADay: provider.EventActionDegraded,
+}
+
+// readyReasons are the reasons a cleared condition is written with, which its
+// ready event carries (HBEP-8, Events).
+var readyReasons = []string{v1alpha1.ReasonFileRead, v1alpha1.ReasonKeyAccepted, v1alpha1.ReasonNotExpiring, v1alpha1.ReasonCatalogRead}
+
+// RaisedEvents returns the series a managed Provider's controller can raise:
+// failing and degraded for each bad condition reason (badAction), degraded
+// CatalogEntrySkipped and CatalogTruncated, and ready for each cleared
+// condition's reason, each with the Kubernetes type provider.NewManagedEvent
+// gives its action. Each is created at 0 for every managed Provider (HBEP-8,
+// Raised events).
+func RaisedEvents() []eventcount.Series {
+	var out []eventcount.Series
+	add := func(action, reason string) {
+		out = append(out, eventcount.Series{Reason: reason, Action: action, Type: provider.NewManagedEvent(action, reason, "").Type})
+	}
+	for _, reason := range []string{v1alpha1.ReasonFileRefused, v1alpha1.ReasonNoCredentialsFile, v1alpha1.ReasonKeyRejected,
+		v1alpha1.ReasonExpired, v1alpha1.ReasonReadsFailing, v1alpha1.ReasonExpiresWithinADay} {
+		add(badAction[reason], reason)
+	}
+	add(provider.EventActionDegraded, provider.EventCatalogEntrySkipped)
+	add(provider.EventActionDegraded, provider.EventCatalogTruncated)
+	for _, reason := range readyReasons {
+		add(provider.EventActionReady, reason)
+	}
+	return out
 }
 
 // watched lists the conditions that raise events, with the status that is bad.

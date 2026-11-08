@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/frpsplugin"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/lifecycle"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -80,7 +81,7 @@ var _ tunnelCache = cache.Cache(nil)
 // a leader component (`component.leader`) starts only in the copy that leads
 // the lifecycle Lease, a plain one in every copy. frps need not run when this
 // starts; the reads then say Unknown until it does.
-func addTunnel(mgr manager.Manager, host agentapi.Host, _ agentapi.Backend, listen func(addr string) (net.Listener, error)) (manager.Runnable, error) {
+func addTunnel(mgr manager.Manager, host agentapi.Host, _ agentapi.Backend, listen func(addr string) (net.Listener, error), events *eventcount.Counter) (manager.Runnable, error) {
 	reader, err := frpsplugin.NewHostReader(host)
 	if err != nil {
 		return nil, err
@@ -99,8 +100,9 @@ func addTunnel(mgr manager.Manager, host agentapi.Host, _ agentapi.Backend, list
 	state := &pathState{
 		cache: mgr.GetCache(), cached: mgr.GetClient(), fresh: mgr.GetAPIReader(), writer: mgr.GetClient(),
 		reader: reader, trigger: trigger.C(), log: named("tunnel-state"),
-		// TunnelOrphaned is the lifecycle controller's event, from its own recorder (HBEP-8).
-		rec:      lifecycle.KubeRecorder{R: mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle)},
+		// TunnelOrphaned is the lifecycle controller's event, from its own recorder (HBEP-8),
+		// counted in the copy's counter under the lifecycle controller's label.
+		rec:      lifecycle.KubeRecorder{R: eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle), events, eventcount.ControllerLifecycle)},
 		admitted: admitted,
 	}
 	if err := mgr.Add(component{name: "tunnel-state", log: state.log, leader: true, start: state.run}); err != nil {
