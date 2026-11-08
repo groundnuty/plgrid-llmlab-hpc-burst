@@ -53,14 +53,18 @@ type world struct {
 	frontTuning string
 	// objects are the PlatformProfile and the Provider.
 	objects []client.Object
-	// provider is the Provider's name, and cluster the platform it is on.
-	provider, cluster string
+	// provider is the Provider's name, cluster the platform it is on, and qos
+	// the Provider's spec.qos ("" for none).
+	provider, cluster, qos string
 	// md is the served deployment before the row's plan is applied.
 	md *v1alpha1.ModelDeployment
 	// profile is the platform profile's spec, for the drain window.
 	profile v1alpha1.PlatformProfileSpec
 	// controlDir and hostLock are the run's own ssh transport's.
 	controlDir, hostLock string
+	// matchEngine tells the engine among the job's processes (PickEngine):
+	// MatchesCommand on a cluster, the stand-in's own for its fake Apptainer.
+	matchEngine func(argv, command []string) bool
 }
 
 // livePorts are the live stack's ports on this host: the launcher's block
@@ -74,14 +78,6 @@ func livePorts(listen string) stack.Ports {
 func liveSteps(t *testing.T, cfg Config) Steps {
 	t.Helper()
 	w, err := liveWorld(cfg)
-	if err != nil {
-		return failedSteps{err}
-	}
-	maxReq := v1alpha1.Duration(cfg.Row.Clock().MaxRequestDuration.String())
-	dw, err := v1alpha1.InstanceDrainWindow(w.profile, &v1alpha1.Routing{MaxRequestDuration: &maxReq})
-	if err == nil {
-		err = CheckQueueWait(cfg.Row, cfg.PendingMax, dw)
-	}
 	if err != nil {
 		return failedSteps{err}
 	}
@@ -137,8 +133,8 @@ func liveWorld(cfg Config) (world, error) {
 		place: func(h *stack.Host) { copyBuilds(h, builds) },
 		dh:    stack.DialHome{Mode: cfg.DialHomeMode, Addr: cfg.DialHomeAddr, KeyPath: cfg.DialHomeKey},
 		ports: livePorts(cfg.DialHomeListen), env: stack.CleanEnv(),
-		objects: []client.Object{&pp, prov}, provider: r.Cluster, cluster: r.Cluster, md: &md, profile: pp.Spec,
-		controlDir: cfg.ControlDir, hostLock: cfg.HostLock,
+		objects: []client.Object{&pp, prov}, provider: r.Cluster, cluster: r.Cluster, qos: r.QOS, md: &md, profile: pp.Spec,
+		controlDir: cfg.ControlDir, hostLock: cfg.HostLock, matchEngine: MatchesCommand,
 	}, nil
 }
 
@@ -183,6 +179,15 @@ type liveRun struct {
 	w   world
 	tm  Timing
 
+	// prefix begins every job tag of the run (TagPrefix): Close and the
+	// guard find the run's jobs by it, whatever the recorder holds.
+	prefix string
+	// dw is the drain window as the controller and the front work it out
+	// (v1alpha1.InstanceDrainWindow), and limit the jobs' time limit as the
+	// controller sets it (v1alpha1.AllocationTimeLimit): the one source of
+	// both for every end, drain start and wait of the run.
+	dw, limit time.Duration
+
 	since time.Time
 	tags  *Recorder
 	h     *stack.Host
@@ -192,8 +197,23 @@ type liveRun struct {
 	batch *slurm.Batch
 	tr    *sshrun.SSH
 
+	// created is this host's time just before the deployment was created,
+	// from which the first clock runs, and clusterAtCreate the cluster's clock
+	// read before it, from which its first end is placed.
+	created, clusterAtCreate time.Time
 	// oneEnd is a row of one job's deployment end, its Instance's drain start (oneJob).
 	oneEnd time.Time
+
+	// The two-job guard (TwoJobGuard), run from its own goroutine.
+	guard      *TwoJobGuard
+	guardQuit  chan struct{}
+	guardDone  chan struct{}
+	guardFail  chan struct{}
+	guardOnce  sync.Once
+	guardStop  sync.Once
+	guardErr   error
+	guardFinal bool
+	guardEnd   time.Time
 
 	mu      sync.Mutex
 	tagErrs []error
@@ -201,27 +221,35 @@ type liveRun struct {
 }
 
 func newLiveRun(t *testing.T, cfg Config, w world) *liveRun {
-	return &liveRun{t: t, cfg: cfg, w: w, tm: cfg.Row.Clock()}
+	md := w.md.DeepCopy()
+	md.Name = DeploymentName(cfg.RunID)
+	w.md = md
+	return &liveRun{t: t, cfg: cfg, w: w, tm: cfg.Row.Clock(), prefix: TagPrefix(cfg.RunID), guardFail: make(chan struct{})}
 }
 
 // closeTimeout bounds Close: hpcburst down and the cancel of the run's jobs.
 const closeTimeout = 5 * time.Minute
 
-// Close stops the stack, then ends the run's jobs by their tags and checks
-// none is left live, then stops the run's ssh master. It runs on every exit of
-// Run, a failed step and a run past its deadline included, so it takes a time
-// of its own rather than the run's, which may be over.
+// Close stops the guard and the stack, then ends the run's jobs, found by the
+// run's tag prefix and its written tags in the queue, and checks none is left
+// alive, then stops the run's ssh master. It runs on every exit of Run, a
+// failed step, a first job that never started and a run past its deadline
+// included, so it takes a time of its own rather than the run's, which may be
+// over.
 func (r *liveRun) Close(ctx context.Context) error {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
 	defer cancel()
+	r.stopGuard()
 	var errs []error
 	if r.h != nil {
 		// First, so that no controller submits a job after the cancel.
 		errs = append(errs, r.h.DownErr())
 	}
-	if r.batch != nil && r.tags != nil {
-		if err := EndJobs(cctx, r.batch, r.tags.Tags(), 5*time.Second); err != nil {
+	if r.batch != nil {
+		if err := EndJobs(cctx, r.batch, RunOwned(r.prefix, r.tags), 5*time.Second); err != nil {
 			errs = append(errs, fmt.Errorf("the run's jobs: %w", err))
+		} else if r.cfg.Row.Name != "" {
+			r.t.Logf("%s: the run's jobs are ended: none of its prefix or its tags is alive in the queue", r.cfg.Row.Name)
 		}
 	}
 	if r.tr != nil {
@@ -239,13 +267,15 @@ func (r *liveRun) Ledger() Ledger {
 }
 
 // start brings the stack up, creates the Provider, makes the run's own
-// transport, and creates the row's deployment with every Allocation's tag
-// written down as the watch first sees it.
+// transport, and creates the row's deployment with the end that keeps it to
+// its job count, every Allocation's tag written down as the watch first sees
+// it. A row of two jobs starts its guard.
 func (r *liveRun) start(p Plan) {
 	t := r.t
 	t.Helper()
 	r.since, r.tags = time.Now(), p.Rec
 	p.Logf("%s: starting the stack (%s world)", p.Row.Name, r.w.name)
+	r.dw, r.limit = r.controllerWindow(), r.timeLimit()
 	r.h = stack.StartHost(t, r.w.bins, stack.ShortDir(t), r.w.dh, r.w.env, r.w.ports, r.w.frontTuning)
 	r.w.place(r.h)
 	r.c = stack.KubeClient(t, r.h.State)
@@ -260,20 +290,25 @@ func (r *liveRun) start(p Plan) {
 	}
 	r.batch, r.tr = b, tr
 	var prov v1alpha1.Provider
-	stack.WaitFor(t, stack.WaitDeadline, "the Provider to be Ready", func() bool {
+	r.waitFor(stack.WaitDeadline, "the Provider to be Ready", func() bool {
 		ctx, cancel := stack.CallCtx(t)
 		defer cancel()
 		return r.c.Get(ctx, client.ObjectKey{Name: r.w.provider}, &prov) == nil && v1alpha1.ProviderReady(&prov, time.Now())
 	})
 	md := r.deployment(p.Row)
+	p.Logf("%s: the deployment's first end is %s after the cluster's clock read before its creation", p.Row.Name, md.Spec.EndTime.Sub(r.clusterAtCreate).Round(time.Second))
+	r.created = time.Now()
 	stack.Create(t, r.c, md)
+	if r.guard != nil {
+		r.startGuard()
+	}
 	r.fc = &stack.Client{T: t, H: r.h, Model: md.Spec.Model, MaxRequest: r.tm.MaxRequestDuration}
 }
 
 // tag writes an Allocation's job tag down the first time the watch sees the
-// Allocation. The Provider's controller submits only after it has set the tag
-// as the Allocation's external name, a write the watch delivers too, so the
-// tag is down before the job in all but the window of one watch delivery.
+// Allocation. A tag the watch delivers late, or that cannot be written, does
+// not lose the job: it has the run's prefix, by which Close and the script's
+// cleanup find it (review of PR 255, B3); Run fails a run with such a tag.
 func (r *liveRun) tag(a *v1alpha1.Allocation) {
 	tg := v1alpha1.JobTag(a.Namespace, a.Name, a.UID)
 	r.mu.Lock()
@@ -305,9 +340,14 @@ func (r *liveRun) runTags() ([]string, error) {
 }
 
 // deployment is the world's deployment with the row's plan applied: the row's
-// Provider alone, its lease, its request deadline, and for the no-overlap row
-// ReleaseWhenIdle with its idle limit.
+// Provider alone, its lease, its request deadline, for the no-overlap row
+// ReleaseWhenIdle with its idle limit, and the first end that keeps the row
+// to its job count, from the cluster's clock read now, before the deployment
+// exists (the review of PR 255, nit: the controller compares the end with the
+// jobs' times on that clock, not on this host's).
 func (r *liveRun) deployment(row Row) *v1alpha1.ModelDeployment {
+	t := r.t
+	t.Helper()
 	md := r.w.md.DeepCopy()
 	plan := row.Plan()
 	md.Spec.Providers = v1alpha1.ProviderSelection{Names: []string{r.w.provider}}
@@ -316,10 +356,27 @@ func (r *liveRun) deployment(row Row) *v1alpha1.ModelDeployment {
 	if plan.ReleaseWhenIdle {
 		md.Spec.RetentionPolicy = &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: dur(plan.IdleLimit)}
 	}
-	if row.MostJobs == 1 {
-		end := metav1.NewTime(FirstEndOfOne(time.Now(), row.Lease, r.controllerWindow()))
-		md.Spec.EndTime = &end
+	ctx, cancel := stack.CallCtx(t)
+	defer cancel()
+	now, err := r.clusterNow(ctx)
+	if err != nil {
+		t.Fatalf("the cluster's clock before the deployment: %v", err)
 	}
+	r.clusterAtCreate = now
+	var end time.Time
+	switch row.MostJobs {
+	case 1:
+		end = FirstEndOfOne(now, r.limit, r.dw)
+	case 2:
+		r.guard = &TwoJobGuard{TimeLimit: r.limit, DrainWindow: r.dw}
+		if end, _, err = r.guard.Next(Look{Clock: now}); err != nil {
+			t.Fatalf("the two-job guard's first end: %v", err)
+		}
+	default:
+		t.Fatalf("%s: no end keeps a row of %d jobs to its count", row.Name, row.MostJobs)
+	}
+	e := metav1.NewTime(end)
+	md.Spec.EndTime = &e
 	return md
 }
 
@@ -335,6 +392,56 @@ func (r *liveRun) controllerWindow() time.Duration {
 	return dw
 }
 
+// timeLimit is the time limit the controller gives the row's jobs
+// (internal/lifecycle, allocationTimeLimit): the shortest of the partition's
+// maxTime, the QOS limits' maxWall and the lease, in whole minutes. A job's
+// lease end is its start plus it.
+func (r *liveRun) timeLimit() time.Duration {
+	t := r.t
+	t.Helper()
+	row := r.cfg.Row
+	var part *v1alpha1.PartitionProfile
+	for i := range r.w.profile.Partitions {
+		if r.w.profile.Partitions[i].Name == row.Partition {
+			part = &r.w.profile.Partitions[i]
+		}
+	}
+	if part == nil {
+		t.Fatalf("the profile has no partition %s", row.Partition)
+	}
+	var maxT *time.Duration
+	if part.MaxTime != nil {
+		d, err := part.MaxTime.AsDuration()
+		if err != nil {
+			t.Fatalf("partition %s maxTime: %v", part.Name, err)
+		}
+		maxT = &d
+	}
+	limits, err := v1alpha1.EffectiveQOSLimits(&r.w.profile, *part, r.w.qos)
+	if err != nil {
+		t.Fatalf("the QOS limits: %v", err)
+	}
+	lease := row.Plan().LeaseLimit.Truncate(time.Minute)
+	lim, _, ok := v1alpha1.AllocationTimeLimit(maxT, limits.MaxWall, &lease)
+	if !ok {
+		t.Fatalf("the row's jobs have no time limit of a minute or more")
+	}
+	return lim
+}
+
+// clusterNow reads the cluster's clock on its login node through the run's
+// own transport.
+func (r *liveRun) clusterNow(ctx context.Context) (time.Time, error) {
+	res, err := r.tr.Run(ctx, slurm.Command{Line: ClusterClockLine, Timeout: 30 * time.Second})
+	if err != nil {
+		return time.Time{}, fmt.Errorf("the cluster's clock: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return time.Time{}, fmt.Errorf("the cluster's clock: exit %d", res.ExitCode)
+	}
+	return ParseClusterClock(res.Stdout)
+}
+
 // oneJob keeps a row of one job (MostJobs 1, the tunnel rows) to one job. With
 // no queue wait observed, the lifecycle controller creates a primary's
 // replacement at the primary's start (HBEP-7, Handover), which such a row must
@@ -344,11 +451,11 @@ func (r *liveRun) controllerWindow() time.Duration {
 // ending at the earliest drain start its first job can have (deployment), and,
 // once the Instance's lease end is known, moved to a minute before the
 // Instance's own drain start. The Instance drains at that end, which oneJob
-// returns as its drain start.
+// returns as its drain start. A failed move fails the step at once.
 func (r *liveRun) oneJob(in v1alpha1.Instance) time.Time {
 	t := r.t
 	t.Helper()
-	ds, ok := DrainStartOf(&in, r.controllerWindow())
+	ds, ok := DrainStartOf(&in, r.dw)
 	if !ok {
 		t.Fatal("the Instance has no lease end")
 	}
@@ -359,8 +466,9 @@ func (r *liveRun) oneJob(in v1alpha1.Instance) time.Time {
 	return end
 }
 
-// endAt sets the run's deployment's end to t, and returns the end it has. It
-// never fails the test itself: the successor guard calls it from its goroutine.
+// endAt sets the run's deployment's end to t, and returns the end the API
+// then holds, which must be t: a write the API did not keep is an error. It
+// never fails the test itself: the guard calls it from its goroutine.
 func (r *liveRun) endAt(t time.Time) (time.Time, error) {
 	end := metav1.NewTime(t.Truncate(time.Second))
 	var md v1alpha1.ModelDeployment
@@ -377,83 +485,164 @@ func (r *liveRun) endAt(t time.Time) (time.Time, error) {
 	if err := r.c.Patch(ctx, &md, patch); err != nil {
 		return time.Time{}, fmt.Errorf("set the run's deployment's end: %w", err)
 	}
+	if md.Spec.EndTime == nil || !md.Spec.EndTime.Equal(&end) {
+		return time.Time{}, errors.New("the API did not keep the run's deployment's end")
+	}
 	return end.Time, nil
 }
 
-// lastJob keeps a row of two jobs to two: once the successor has a lease end,
-// the deployment ends at the successor's own drain start, where its lease
-// drains it anyway, so the lifecycle controller plans it no replacement
-// (internal/lifecycle/handover.go). The drain start is the controller's own
-// (v1alpha1.InstanceDrainWindow), to the second: a later end would let the
-// replacement through, an earlier one could fall before the predecessor's
-// drain start and stop its handover. The successor's replacement would come
-// health.startTimeout and a minute, less the class's start-to-ready time and
-// any queue wait, after the successor's start (replacementTime), long after
-// this runs.
-func (r *liveRun) lastJob(pred, succ v1alpha1.Instance) error {
-	maxReq := v1alpha1.Duration(r.tm.MaxRequestDuration.String())
-	dw, err := v1alpha1.InstanceDrainWindow(r.w.profile, &v1alpha1.Routing{MaxRequestDuration: &maxReq})
+// guardEvery is how often the two-job guard looks at the cluster, and
+// guardLookFails how many looks in a row may fail before it stops the run: an
+// end it cannot move on is still a bound, but one that stops moving is reached
+// in the time limit less the drain window.
+const (
+	guardEvery     = 10 * time.Second
+	guardLookFails = 3
+)
+
+// look is one look at the cluster for the guard: the cluster's clock, then a
+// fresh queue listing, and the run's jobs in it (by its prefix and tags).
+func (r *liveRun) look(ctx context.Context) (Look, error) {
+	now, err := r.clusterNow(ctx)
 	if err != nil {
-		return fmt.Errorf("the successor's drain window: %w", err)
+		return Look{}, err
 	}
-	if pred.Status.LeaseEnd == nil {
-		return errors.New("the predecessor has no lease end, so the deployment's end cannot be placed after its drain start")
-	}
-	dsPred := pred.Status.LeaseEnd.Add(-dw)
-	at, err := EndOfTwo(dsPred, succ.Status.LeaseEnd.Add(-dw))
+	js, err := r.batch.Queue(ctx)
 	if err != nil {
-		return err
+		return Look{}, fmt.Errorf("the queue: %w", err)
 	}
-	end, err := r.endAt(at)
-	if err == nil {
-		r.t.Logf("the successor's lease ends in %s; the deployment now ends in %s, at its drain start, %s after the predecessor's",
-			time.Until(succ.Status.LeaseEnd.Time).Round(time.Second), time.Until(end).Round(time.Second), end.Sub(dsPred))
+	owned := RunOwned(r.prefix, r.tags)
+	l := Look{Clock: now}
+	for _, j := range js {
+		if owned(j.Name) {
+			l.Jobs = append(l.Jobs, j)
+		}
 	}
-	return err
+	return l, nil
 }
 
-// guardSuccessor runs lastJob, from a goroutine, as soon as the replacement of
-// pred has a lease end: in a handover the successor may start long before the
-// steps reach it, and in no-overlap mode only once the predecessor is gone, so
-// pred is the predecessor as the run saw it ready, with its lease end. stop
-// ends the guard and returns its error, or one saying the successor never
-// started.
-func (r *liveRun) guardSuccessor(pred v1alpha1.Instance) (stop func() error) {
-	quit, done := make(chan struct{}), make(chan error, 1)
+// startGuard runs the two-job guard from its own goroutine until stopGuard:
+// every guardEvery it looks at the cluster and sets the deployment's end the
+// guard gives. Any error of the guard, a failed write of the end included,
+// stops it and fails the run's next wait (checkGuard; review of PR 255, B6).
+func (r *liveRun) startGuard() {
+	r.guardQuit, r.guardDone = make(chan struct{}), make(chan struct{})
 	go func() {
+		defer close(r.guardDone)
+		fails := 0
 		for {
-			var l v1alpha1.InstanceList
-			ctx, cancel := context.WithTimeout(context.Background(), stack.APICallTimeout)
-			err := r.c.List(ctx, &l, client.InNamespace(r.w.md.Namespace))
-			cancel()
-			if err == nil {
-				for _, x := range l.Items {
-					if x.Annotations[v1alpha1.AnnotationPredecessor] == pred.Name && x.Status.LeaseEnd != nil {
-						done <- r.lastJob(pred, x)
-						return
-					}
-				}
-			}
 			select {
-			case <-quit:
-				done <- errors.New("the successor never started, so the run's deployment kept no end")
+			case <-r.guardQuit:
 				return
-			case <-time.After(time.Second):
+			case <-time.After(guardEvery):
 			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			l, err := r.look(ctx)
+			cancel()
+			if err != nil {
+				if fails++; fails >= guardLookFails {
+					r.failGuard(fmt.Errorf("%d looks at the cluster in a row failed, the last: %w", fails, err))
+					return
+				}
+				continue
+			}
+			fails = 0
+			end, final, err := r.guard.Next(l)
+			if err == nil {
+				_, err = r.endAt(end)
+			}
+			if err != nil {
+				r.failGuard(err)
+				return
+			}
+			r.mu.Lock()
+			r.guardEnd, r.guardFinal = end, final
+			r.mu.Unlock()
 		}
 	}()
-	var once sync.Once
-	var result error
-	stop = func() error {
-		once.Do(func() {
-			close(quit)
-			result = <-done
-		})
-		return result
+}
+
+// failGuard records the guard's error, once.
+func (r *liveRun) failGuard(err error) {
+	r.guardOnce.Do(func() {
+		r.mu.Lock()
+		r.guardErr = err
+		r.mu.Unlock()
+		close(r.guardFail)
+	})
+}
+
+// stopGuard stops the guard's goroutine and waits for it.
+func (r *liveRun) stopGuard() {
+	if r.guardQuit == nil {
+		return
 	}
-	// A step that fails before it stops the guard: the guard stops at the end of the test.
-	r.t.Cleanup(func() { _ = stop() })
-	return stop
+	r.guardStop.Do(func() { close(r.guardQuit) })
+	<-r.guardDone
+}
+
+// checkGuard fails the step at once when the guard has stopped on an error:
+// the deployment's end may no longer keep the row to its job count, and Close
+// must cancel the run's jobs.
+func (r *liveRun) checkGuard() {
+	r.t.Helper()
+	select {
+	case <-r.guardFail:
+		r.mu.Lock()
+		err := r.guardErr
+		r.mu.Unlock()
+		r.t.Fatalf("the job-count guard stopped the run: %v", err)
+	default:
+	}
+}
+
+// guardResult waits, a few looks at most, for the guard to set the
+// successor's drain start as the deployment's end, stops it, and reads the
+// end back from the API: a run of two jobs must end with that bound observed.
+func (r *liveRun) guardResult() error {
+	deadline := time.Now().Add(3*guardEvery + time.Minute)
+	for {
+		select {
+		case <-r.guardFail:
+			r.mu.Lock()
+			err := r.guardErr
+			r.mu.Unlock()
+			return fmt.Errorf("the job-count guard stopped the run: %w", err)
+		default:
+		}
+		r.mu.Lock()
+		final, end := r.guardFinal, r.guardEnd
+		r.mu.Unlock()
+		if final {
+			r.stopGuard()
+			var md v1alpha1.ModelDeployment
+			ctx, cancel := context.WithTimeout(context.Background(), stack.APICallTimeout)
+			defer cancel()
+			if err := r.c.Get(ctx, client.ObjectKey{Name: r.w.md.Name, Namespace: r.w.md.Namespace}, &md); err != nil {
+				return fmt.Errorf("the run's deployment: %w", err)
+			}
+			if md.Spec.EndTime == nil || !md.Spec.EndTime.Time.Equal(end) {
+				return errors.New("the run's deployment does not end at the successor's drain start the guard set")
+			}
+			r.t.Logf("the deployment ends at the successor's drain start, %s after the predecessor's", end.Sub(r.guard.predDrainStart))
+			return nil
+		}
+		if time.Now().After(deadline) {
+			r.stopGuard()
+			return errors.New("the successor never started, so the run's deployment never ended at its drain start")
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+// waitFor is stack.WaitFor that fails the step at once when the guard has
+// stopped on an error.
+func (r *liveRun) waitFor(d time.Duration, what string, cond func() bool) {
+	r.t.Helper()
+	stack.WaitFor(r.t, d, what, func() bool {
+		r.checkGuard()
+		return cond()
+	})
 }
 
 func dur(d time.Duration) *v1alpha1.Duration { s := v1alpha1.Duration(d.String()); return &s }
@@ -475,35 +664,30 @@ func (r *liveRun) instances() []v1alpha1.Instance {
 	return l.Items
 }
 
-// drainWindow is the deployment's drain window from its spec and the profile's (DrainWindow).
-func (r *liveRun) drainWindow() time.Duration {
-	get := func(d *v1alpha1.Duration) time.Duration {
-		if d == nil {
-			return 0
-		}
-		x, _ := d.AsDuration()
-		return x
-	}
-	margin := get(r.w.profile.DrainMargin)
-	if margin == 0 {
-		margin = 10 * time.Minute // the schema default (HBEP-4, Platform profile schema)
-	}
-	return DrainWindow(r.tm.MaxRequestDuration, margin, get(r.w.profile.DrainWindow))
-}
-
-// firstJobStarted is the run's first clock (Plan.PendingMax): the first
+// firstJobStarted is the run's first clock (FirstClock): the first
 // Allocation's job must start within it of the deployment's creation. Past it
-// the run ends, and Close cancels the jobs by their tags; on a shared one-job
-// slot that is the owner's GPU waiting.
-func (r *liveRun) firstJobStarted(p Plan) {
-	stack.WaitFor(r.t, p.PendingMax, "the run's first job to start within the queue wait the run allows (HPCBURST_ALPHA_PENDING_MAX_SECONDS); the run ends and its jobs are cancelled", func() bool {
+// the run ends with a NotStartedError, and Close stops the stack and cancels
+// the run's jobs by their prefix and tags, and checks that none is left; on a
+// one-job slot that was the owner's GPU waiting.
+func (r *liveRun) firstJobStarted(p Plan) error {
+	bound, pastEnd := FirstClock(p.Row, p.PendingMax, r.limit, r.dw)
+	if pastEnd {
+		p.Logf("%s: the first job may wait %s in the queue, a minute before the deployment's first end, not the %s allowed", p.Row.Name, bound, p.PendingMax)
+	}
+	deadline := r.created.Add(bound)
+	for {
+		r.checkGuard()
 		for _, o := range r.watch.Allocations() {
 			if o.Allocation.Status.AtProvider.StartTime != nil {
-				return true
+				return nil
 			}
 		}
-		return false
-	})
+		if !time.Now().Before(deadline) {
+			p.Logf("%s: the run's first job was still pending %s after the deployment's creation; the run ends and its jobs are cancelled", p.Row.Name, time.Since(r.created).Round(time.Second))
+			return &NotStartedError{Bound: bound, PastEnd: pastEnd}
+		}
+		time.Sleep(time.Second)
+	}
 }
 
 // readyWait is how long the run waits, once its first job runs, for the
@@ -514,13 +698,15 @@ func (r *liveRun) readyWait() time.Duration {
 
 // firstReady waits for the first job to start, then for the deployment's
 // first Instance (no predecessor) to be ready and registered at the front.
-func (r *liveRun) firstReady(p Plan) v1alpha1.Instance {
-	r.firstJobStarted(p)
+func (r *liveRun) firstReady(p Plan) (v1alpha1.Instance, error) {
+	if err := r.firstJobStarted(p); err != nil {
+		return v1alpha1.Instance{}, err
+	}
 	if p.Row.MostJobs == 1 {
 		// At once: the deployment's first end holds only until a job that
-		// waited the whole PendingMax could have moved it (CheckQueueWait).
+		// waited the whole first clock could have moved it (FirstClock).
 		var first v1alpha1.Instance
-		stack.WaitFor(r.t, stack.WaitDeadline, "the first Instance's lease end", func() bool {
+		r.waitFor(stack.WaitDeadline, "the first Instance's lease end", func() bool {
 			for _, x := range r.instances() {
 				if x.Annotations[v1alpha1.AnnotationPredecessor] == "" && x.Status.LeaseEnd != nil {
 					first = x
@@ -532,7 +718,7 @@ func (r *liveRun) firstReady(p Plan) v1alpha1.Instance {
 		r.oneEnd = r.oneJob(first)
 	}
 	var in v1alpha1.Instance
-	stack.WaitFor(r.t, r.readyWait(), "the first Instance to be ready and registered at the front", func() bool {
+	r.waitFor(r.readyWait(), "the first Instance to be ready and registered at the front", func() bool {
 		for _, x := range r.instances() {
 			if x.Annotations[v1alpha1.AnnotationPredecessor] == "" && x.Status.Phase == v1alpha1.InstanceReady {
 				if reg, known := stack.Registered(r.h.Ports, &x); known && reg {
@@ -544,7 +730,7 @@ func (r *liveRun) firstReady(p Plan) v1alpha1.Instance {
 		return false
 	})
 	p.Logf("%s: the first Instance is ready", p.Row.Name)
-	return in
+	return in, nil
 }
 
 // successorOf waits, within d, for the replacement of pred to be ready and
@@ -552,6 +738,7 @@ func (r *liveRun) firstReady(p Plan) v1alpha1.Instance {
 func (r *liveRun) successorOf(pred string, d time.Duration) (v1alpha1.Instance, bool) {
 	deadline, _ := stack.BoundedDeadline(r.t, d)
 	for time.Now().Before(deadline) {
+		r.checkGuard()
 		for _, x := range r.instances() {
 			if x.Annotations[v1alpha1.AnnotationPredecessor] != pred {
 				continue

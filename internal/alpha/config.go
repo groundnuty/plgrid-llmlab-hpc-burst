@@ -32,6 +32,7 @@ const (
 	envProfile    = "HPCBURST_ALPHA_PROFILE"
 	envPending    = "HPCBURST_ALPHA_PENDING_MAX_SECONDS"
 	envLease      = "HPCBURST_ALPHA_LEASE_MINUTES"
+	envRunID      = "HPCBURST_ALPHA_RUN_ID"
 )
 
 // liveEnv are the settings only a live run has. A dry run refuses to start
@@ -62,6 +63,9 @@ type Config struct {
 	DialHomeListen string
 	// Profile names the row's shipped platform profile (profiles/<name>.yaml).
 	Profile string
+	// RunID names the run's deployment, and so begins every job tag of the run
+	// (TagPrefix): hack/live-checks.sh draws it and cleans up by it.
+	RunID string
 }
 
 // Mode names the run's mode for the log, so a dry pass cannot be read as a live one.
@@ -168,6 +172,13 @@ func ConfigFromEnv(getenv func(string) string, mine ...string) (cfg Config, skip
 		bad = append(bad, perr.Error())
 	} else {
 		cfg.PendingMax = d
+	}
+	// The script's cleanup finds the run's jobs by the prefix this ID makes: a run without the script's ID would
+	// submit jobs that cleanup cannot see.
+	if cfg.RunID = need(envRunID); cfg.RunID != "" {
+		if err := CheckRunID(cfg.RunID); err != nil {
+			bad = append(bad, envRunID+": "+err.Error())
+		}
 	}
 	return cfg, "", joinBad(bad)
 }

@@ -30,6 +30,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
+	pfake "github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/fake"
 )
 
 const (
@@ -255,7 +256,16 @@ func TestEndJobsCancelsOnlyTheRunsTags(t *testing.T) {
 	s.waitJob("to run", idOther, func(j fakeslurm.Job) bool { return j.State == "RUNNING" })
 	t.Cleanup(func() { _ = os.WriteFile(s.release(other), nil, 0o600) })
 	b := s.standInBatch(ctx)
-	if err := EndJobs(ctx, b, []string{mine, pending}, 100*time.Millisecond); err != nil {
+	rec, err := NewRecorder(filepath.Join(t.TempDir(), "out"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tg := range []string{mine, pending} {
+		if err := rec.Tag(tg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := EndJobs(ctx, b, RunOwned("", rec), 100*time.Millisecond); err != nil {
 		t.Fatalf("EndJobs: %v", err)
 	}
 	if j := s.job(idMine); j.State != "CANCELLED" {
@@ -277,16 +287,16 @@ type enderDouble struct {
 	cancels   atomic.Int32
 }
 
-func (e *enderDouble) ListByTag(context.Context, string) ([]provider.Job, error) {
+func (e *enderDouble) Queue(context.Context) ([]provider.Job, error) {
 	if e.listErr != nil {
 		return nil, e.listErr
 	}
 	n := e.lists.Add(1)
-	phase := v1alpha1.AllocationRunning
+	state := "RUNNING"
 	if e.cancelled.Load() && int(n) > e.liveFor+1 {
-		phase = v1alpha1.AllocationEnded
+		state = "CANCELLED"
 	}
-	return []provider.Job{{ID: "1", Name: "hb-x-1", Phase: phase}}, nil
+	return []provider.Job{{ID: "1", Name: "hb-x-1", State: []string{state}}}, nil
 }
 
 func (e *enderDouble) Cancel(_ context.Context, ids []string) []provider.CancelResult {
@@ -298,12 +308,15 @@ func (e *enderDouble) Cancel(_ context.Context, ids []string) []provider.CancelR
 	return []provider.CancelResult{{JobID: ids[0], Outcome: provider.Cancelled}}
 }
 
+// ownedX owns the doubles' job by its prefix.
+var ownedX = RunOwned("hb-x-", nil)
+
 func TestEndJobsWaitsForTheSchedulerToAct(t *testing.T) {
 	// The scheduler lists the job running for two more reads after the cancel: EndJobs must keep reading.
 	e := &enderDouble{cancelOK: true, liveFor: 2}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := EndJobs(ctx, e, []string{"hb-x-1"}, time.Millisecond); err != nil {
+	if err := EndJobs(ctx, e, ownedX, time.Millisecond); err != nil {
 		t.Fatalf("EndJobs: %v", err)
 	}
 	if n := e.lists.Load(); n < 4 {
@@ -319,7 +332,7 @@ func TestEndJobsReportsWhatIsLeft(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 			defer cancel()
-			err := EndJobs(ctx, e, []string{"hb-x-1"}, 10*time.Millisecond)
+			err := EndJobs(ctx, e, ownedX, 10*time.Millisecond)
 			if err == nil {
 				t.Fatal("EndJobs returned nil with the job never ended")
 			}
@@ -327,6 +340,100 @@ func TestEndJobsReportsWhatIsLeft(t *testing.T) {
 				t.Errorf("EndJobs's error names a tag: %v", err)
 			}
 		})
+	}
+}
+
+// A job's liveness is the scheduler's (review of PR 255, B4): squeue's job states, from squeue(1), and its
+// COMPLETING flag. A cancelled job whose processes are still ending, and a requeued job that runs again (the
+// plugin's phase Failed), are alive; a job whose end state is set and that is not completing is not.
+func TestLiveJobIsTheSchedulersLiveness(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		state      []string
+		completing bool
+		live       bool
+	}{
+		{"pending", []string{"PENDING"}, false, true},
+		{"running", []string{"RUNNING"}, false, true},
+		{"suspended", []string{"SUSPENDED"}, false, true},
+		{"requeued, pending again", []string{"PENDING", "REQUEUED"}, false, true},
+		{"requeued, running again", []string{"RUNNING"}, false, true},
+		{"configuring, a state this does not name", []string{"CONFIGURING"}, false, true},
+		{"no state", nil, false, true},
+		{"cancelled, still completing", []string{"CANCELLED", "COMPLETING"}, true, true},
+		{"completed, still completing", []string{"COMPLETED", "COMPLETING"}, true, true},
+		{"cancelled", []string{"CANCELLED"}, false, false},
+		{"completed", []string{"COMPLETED"}, false, false},
+		{"timeout", []string{"TIMEOUT"}, false, false},
+		{"node fail", []string{"NODE_FAIL"}, false, false},
+		{"failed", []string{"FAILED"}, false, false},
+		{"preempted", []string{"PREEMPTED"}, false, false},
+		{"out of memory", []string{"OUT_OF_MEMORY"}, false, false},
+		{"boot fail", []string{"BOOT_FAIL"}, false, false},
+		{"deadline", []string{"DEADLINE"}, false, false},
+	} {
+		if got := liveJob(provider.Job{State: c.state, Completing: c.completing}); got != c.live {
+			t.Errorf("%s: liveJob = %v, want %v", c.name, got, c.live)
+		}
+	}
+}
+
+// EndJobs over the fake Slurm (not in run mode, on a manual clock) and the plugin's real batch client: the job
+// states are the fake scheduler's, read through squeue as the run reads a real one. A job cancelled while its
+// processes still end is COMPLETING: EndJobs keeps it alive, and does not return until the flag clears; a requeued
+// job that runs again is cancelled. The phase alone (Ended, and Failed for a requeue) would let both through.
+func TestEndJobsWaitsOutACompletingJobAndCancelsARequeuedOne(t *testing.T) {
+	clock := pfake.NewClock(time.Date(2026, 11, 2, 8, 0, 0, 0, time.UTC))
+	plat := fakeslurm.New(clock, fakeslurm.Config{Partitions: []fakeslurm.Partition{{Name: standInPartition}}})
+	sess := plat.Login(fakeslurm.Login{User: standInUser, Env: map[string]string{"HOME": "/home/example-user", "SCRATCH": "/scratch/example-user"}})
+	prof := provider.Profile{Name: "example", Spec: v1alpha1.PlatformProfileSpec{JSONDataParser: "v0.0.42", StagingDir: "/scratch/example-user"},
+		Partition: v1alpha1.PartitionProfile{Name: standInPartition}}
+	b := slurm.NewBatch(sess, prof, provider.Settings{Provider: "example", Account: "example-account", Partition: standInPartition},
+		slurm.Options{Clock: clock, PollInterval: time.Nanosecond, BusyInterval: time.Nanosecond})
+	prefix := "hb-alpha-0a1b2c3d4e-"
+	done := plat.OutsideJob(standInUser, prefix+"done1-000000000001", standInPartition, "", 1)
+	requeued := plat.OutsideJob(standInUser, prefix+"reque-000000000002", standInPartition, "", 1)
+	other := plat.OutsideJob(standInUser, "hb-alpha-ffffffffff-other-000000000003", standInPartition, "", 1)
+	for _, id := range []int{done, requeued, other} {
+		if err := plat.Start(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The first: cancelled, its processes still ending. The second: requeued, and running again.
+	if err := plat.End(done, "CANCELLED"); err != nil {
+		t.Fatal(err)
+	}
+	if err := plat.HoldCompleting(done, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := plat.Requeue(requeued); err != nil {
+		t.Fatal(err)
+	}
+	if err := plat.Start(requeued); err != nil {
+		t.Fatal(err)
+	}
+	owned := RunOwned(prefix, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	err := EndJobs(ctx, b, owned, 10*time.Millisecond)
+	cancel()
+	if err == nil || !strings.Contains(err.Error(), "still alive") {
+		t.Fatalf("EndJobs = %v while a job of the run is still completing, want the jobs left alive", err)
+	}
+	if j, _ := plat.Job(requeued); j.State != "CANCELLED" {
+		t.Errorf("the requeued job running again is %s, want CANCELLED", j.State)
+	}
+	if j, _ := plat.Job(other); j.State != "RUNNING" {
+		t.Errorf("another run's job is %s, want RUNNING: it is not this run's", j.State)
+	}
+	if err := plat.HoldCompleting(done, false); err != nil {
+		t.Fatal(err)
+	}
+	// The cancelled requeue may still be listed COMPLETING: the fake clears that as the clock moves.
+	clock.Advance(time.Minute)
+	ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := EndJobs(ctx, b, owned, 10*time.Millisecond); err != nil {
+		t.Fatalf("EndJobs once the flag cleared: %v", err)
 	}
 }
 
@@ -362,7 +469,7 @@ func TestCloseEndsTheRunsJobsUnderADeadContext(t *testing.T) {
 	if err := rec.Tag(tag); err != nil {
 		t.Fatal(err)
 	}
-	r := &liveRun{t: t, batch: b, tr: tr, tags: rec}
+	r := &liveRun{t: t, batch: b, tr: tr, tags: rec, guardFail: make(chan struct{})}
 	dead, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := r.Close(dead); err != nil {
@@ -370,5 +477,50 @@ func TestCloseEndsTheRunsJobsUnderADeadContext(t *testing.T) {
 	}
 	if j := s.job(id); j.State != "CANCELLED" {
 		t.Errorf("the run's job is %s after Close, want CANCELLED", j.State)
+	}
+}
+
+// Close finds the run's jobs by the run's own prefix, not only by the tags the recorder holds (review of PR 255,
+// B3): a job whose Allocation the watch never delivered, or whose tag could not be written down, is still the
+// run's. Here the recorder holds nothing (its tag write failed: its directory is gone); the job of the run's prefix
+// must end cancelled, and a job of another run's prefix must keep running.
+func TestCloseEndsAJobOfTheRunsPrefixThatWasNeverWrittenDown(t *testing.T) {
+	s := startStandIn(t)
+	id := "0a1b2c3d4e"
+	mine, other := TagPrefix(id)+"x7k2p-0123456789ab", TagPrefix("ffffffffff")+"x7k2p-0123456789ab"
+	idMine, idOther := s.submit(mine, 7), s.submit(other, 7)
+	s.waitJob("to run", idMine, func(j fakeslurm.Job) bool { return j.State == "RUNNING" })
+	s.waitJob("to run", idOther, func(j fakeslurm.Job) bool { return j.State == "RUNNING" })
+	t.Cleanup(func() {
+		for _, tg := range []string{mine, other} {
+			_ = os.WriteFile(s.release(tg), nil, 0o600)
+		}
+	})
+	ctx, cancelMake := context.WithTimeout(context.Background(), time.Minute)
+	b, tr, err := SSHBatch(ctx, s.apiWith(), standInProvider, s.ctl, filepath.Join(s.dir, "host.lock"))
+	cancelMake()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "out")
+	rec, err := NewRecorder(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(out); err != nil {
+		t.Fatal(err)
+	}
+	if err := rec.Tag(mine); err == nil {
+		t.Fatal("a tag write into a directory that is gone succeeded")
+	}
+	r := &liveRun{t: t, batch: b, tr: tr, tags: rec, prefix: TagPrefix(id), guardFail: make(chan struct{})}
+	if err := r.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if j := s.job(idMine); j.State != "CANCELLED" {
+		t.Errorf("the run's job, never written down, is %s after Close, want CANCELLED", j.State)
+	}
+	if j := s.job(idOther); j.State != "RUNNING" {
+		t.Errorf("another run's job is %s after Close, want RUNNING", j.State)
 	}
 }

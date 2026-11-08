@@ -44,6 +44,8 @@ func (r *liveRun) wait(s stream) stack.Streamed {
 			r.keep(out.Header)
 		}
 		return out
+	case <-r.guardFail:
+		r.checkGuard()
 	case <-time.After(r.fc.RequestTimeout() + time.Minute):
 		r.t.Fatalf("a stream did not end within %s", r.fc.RequestTimeout()+time.Minute)
 	}
@@ -203,7 +205,7 @@ func (r *liveRun) workerRestart(ctx context.Context, p Plan, in v1alpha1.Instanc
 	if err != nil {
 		t.Fatalf("worker fault: %v", err)
 	}
-	eng, err := PickEngine(procs, in.Spec.Launch.Command)
+	eng, err := PickEngine(procs, in.Spec.Launch.Command, r.w.matchEngine)
 	if err != nil {
 		t.Fatalf("worker fault: %v", err)
 	}
@@ -220,7 +222,7 @@ func (r *liveRun) workerRestart(ctx context.Context, p Plan, in v1alpha1.Instanc
 	}
 	times := RestartTimes{Killed: time.Now()}
 	p.Logf("%s: killed the engine of the run's job by its PID (command digest %s)", p.Row.Name, CommandDigest(eng.Argv))
-	stack.WaitFor(t, r.tm.StartTimeout+5*time.Minute, "the worker restart and the Instance serving the key again", func() bool {
+	r.waitFor(r.tm.StartTimeout+5*time.Minute, "the worker restart and the Instance serving the key again", func() bool {
 		now, ok := r.lookup(in)
 		if !ok {
 			r.whyGone(in, times.Killed)
@@ -265,7 +267,7 @@ func (r *liveRun) untilBefore(t time.Time, lead time.Duration, what string) {
 	if time.Now().After(at) {
 		r.t.Fatalf("%s: the time to open the streams, %s before the drain start, has passed: the steps before it took too long for the lease", what, lead)
 	}
-	stack.WaitFor(r.t, time.Until(at)+time.Minute, what, func() bool { return !time.Now().Before(at) })
+	r.waitFor(time.Until(at)+time.Minute, what, func() bool { return !time.Now().Before(at) })
 }
 
 // Handover is alpha-athena-handover: a worker-rung restart on the primary,
@@ -273,13 +275,15 @@ func (r *liveRun) untilBefore(t time.Time, lead time.Duration, what string) {
 // takes over.
 func (r *liveRun) Handover(ctx context.Context, p Plan) (HandoverObs, error) {
 	r.start(p)
-	pre := r.firstReady(p)
-	guard := r.guardSuccessor(pre)
+	pre, err := r.firstReady(p)
+	if err != nil {
+		return HandoverObs{}, err
+	}
 	key := r.fc.KeyFor(&pre)
 	rate := r.rate(key)
 	times := r.workerRestart(ctx, p, pre)
 	pre = r.current(pre)
-	ds, ok := DrainStartOf(&pre, r.drainWindow())
+	ds, ok := DrainStartOf(&pre, r.dw)
 	if !ok {
 		r.t.Fatal("the primary has no lease end")
 	}
@@ -299,12 +303,13 @@ func (r *liveRun) Handover(ctx context.Context, p Plan) (HandoverObs, error) {
 	<-s1.first
 	s2 := r.openStream(n, key, "")
 	streams := []Stream{r.finish(s1), r.finish(s2)}
-	stack.WaitFor(r.t, r.drainWindow()+5*time.Minute, "the primary to end", func() bool {
+	r.waitFor(r.dw+5*time.Minute, "the primary to end", func() bool {
 		_, ended := r.watch.First(pre.UID, time.Time{}, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceEnded })
 		return ended
 	})
-	if err := guard(); err != nil {
-		p.Logf("%s: %v", p.Row.Name, err)
+	// The successor's drain start must be the end the API holds (review of PR 255, B6).
+	if err := r.guardResult(); err != nil {
+		return HandoverObs{}, err
 	}
 	tags, err := r.runTags()
 	if err != nil {
@@ -327,13 +332,15 @@ func (r *liveRun) Handover(ctx context.Context, p Plan) (HandoverObs, error) {
 // paced requests through it.
 func (r *liveRun) NoOverlap(ctx context.Context, p Plan) (NoOverlapObs, error) {
 	r.start(p)
-	pre := r.firstReady(p)
-	guard := r.guardSuccessor(pre)
+	pre, err := r.firstReady(p)
+	if err != nil {
+		return NoOverlapObs{}, err
+	}
 	key := r.fc.KeyFor(&pre)
 	rate := r.rate(key)
 	times := r.workerRestart(ctx, p, pre)
 	pre = r.current(pre)
-	ds, ok := DrainStartOf(&pre, r.drainWindow())
+	ds, ok := DrainStartOf(&pre, r.dw)
 	if !ok {
 		r.t.Fatal("the primary has no lease end")
 	}
@@ -350,12 +357,13 @@ func (r *liveRun) NoOverlap(ctx context.Context, p Plan) (NoOverlapObs, error) {
 	succ, ok := r.successorOf(pre.Name, time.Until(pre.Status.LeaseEnd.Time)+p.PendingMax+r.tm.StartTimeout+5*time.Minute)
 	noReady := pr.end()
 	p.Logf("%s: the gap prober's replies by status and code: %v", p.Row.Name, pr.replies)
-	if err := guard(); err != nil {
-		p.Logf("%s: %v", p.Row.Name, err)
-	}
 	streams := []Stream{r.finish(s)}
 	if !ok {
 		p.Logf("%s: the successor was not ready in time", p.Row.Name)
+	}
+	// The successor's drain start must be the end the API holds (review of PR 255, B6).
+	if err := r.guardResult(); err != nil {
+		return NoOverlapObs{}, err
 	}
 	tags, err := r.runTags()
 	if err != nil {
@@ -494,7 +502,7 @@ func (r *liveRun) endDeployment(ctx context.Context, p Plan) {
 		t.Fatalf("delete the run's deployment: %v", err)
 	}
 	led := r.Ledger()
-	stack.WaitFor(t, r.drainWindow()+5*time.Minute, "every job of the run to end in the cluster's record", func() bool {
+	r.waitFor(r.dw+5*time.Minute, "every job of the run to end in the cluster's record", func() bool {
 		tags, _ := r.runTags()
 		jobs, err := led.Jobs(ctx, tags)
 		if err != nil || len(jobs) == 0 {
@@ -522,7 +530,10 @@ const rateAsked = 30 * time.Second
 // until TunnelHour has run.
 func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error) {
 	r.start(p)
-	in := r.firstReady(p)
+	in, err := r.firstReady(p)
+	if err != nil {
+		return TunnelHourObs{}, err
+	}
 	ds := r.oneEnd
 	key := r.fc.KeyFor(&in)
 	rate := r.rate(key)
@@ -578,7 +589,7 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	}
 	// Heartbeats only.
 	idle := time.Now().Add(tm.MinIdleGap + 15*time.Second)
-	stack.WaitFor(r.t, tm.MinIdleGap+time.Minute, "the idle stretch", func() bool { return !time.Now().Before(idle) })
+	r.waitFor(tm.MinIdleGap+time.Minute, "the idle stretch", func() bool { return !time.Now().Before(idle) })
 	for time.Since(first) < tm.TunnelHour {
 		if time.Now().Add(long).After(ds) {
 			p.Logf("%s: the drain start comes before the hour is over", p.Row.Name)

@@ -10,14 +10,30 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
-// NotRun reports whether err ends the row's run as NOT RUN rather than as a failure: a
-// job pended past the first clock (ErrNotStarted) on a row that holds QOS now's one-job slot,
-// where a busy queue is not the run's fault and the slot must not be held waiting. On any other
-// row the same error is a failure.
-func NotRun(row Row, err error) bool { return row.SlotHold > 0 && errors.Is(err, ErrNotStarted) }
+// NotRun reports whether err ends the row's run as NOT RUN rather than as a failure:
+//   - a job pended past the first clock (ErrNotStarted) on a row that holds QOS now's one-job
+//     slot, where a busy queue is not the run's fault and the slot must not be held waiting;
+//   - a tunnel row's job pended until a minute before its deployment's first end
+//     (ErrQueueWaitPastEnd), on either cluster: the job did not start in time (the science
+//     agent's ruling on PR 255).
+//
+// On any other row the same error is a failure.
+func NotRun(row Row, err error) bool {
+	return (row.SlotHold > 0 && errors.Is(err, ErrNotStarted)) || (row.MostJobs == 1 && errors.Is(err, ErrQueueWaitPastEnd))
+}
 
-// NotRunNote is the text of the marker (NotRunFile): the row, the wait and the fact, never a job ID or a tag.
-func NotRunNote(row Row, pendingMax time.Duration) string {
+// NotRunNote is the text of the marker (NotRunFile): the row, the wait and the fact, never a job
+// ID or a tag. err is the run's error: a NotStartedError gives the bound that ran out, and says
+// when it was the deployment's first end, which hack/live-checks.sh reads off the marker for its
+// line; any other gives pendingMax.
+func NotRunNote(row Row, pendingMax time.Duration, err error) string {
+	var ns *NotStartedError
+	if errors.As(err, &ns) {
+		if ns.PastEnd {
+			return fmt.Sprintf("%s: a job was still pending after %s, a minute before the deployment's first end; this run's jobs were cancelled by tag\n", row.Name, ns.Bound)
+		}
+		pendingMax = ns.Bound
+	}
 	return fmt.Sprintf("%s: a job was still pending after %s; this run's jobs were cancelled by tag\n", row.Name, pendingMax)
 }
 

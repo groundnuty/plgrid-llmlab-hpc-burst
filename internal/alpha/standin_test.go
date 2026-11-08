@@ -151,7 +151,39 @@ func standInWorld(t *testing.T, row Row) world {
 		// The controller lists the checkpoint from the Hub double through HF_ENDPOINT, which up passes on to it.
 		env:     stack.CleanEnv("HF_ENDPOINT=" + hub.URL),
 		objects: []client.Object{prof, prov}, provider: stack.ProviderName, cluster: row.Cluster, qos: row.QOS, md: md, profile: prof.Spec,
-		controlDir: ctl, hostLock: filepath.Join(dir, "host.lock"),
+		controlDir: ctl, hostLock: filepath.Join(dir, "host.lock"), matchEngine: standInEngineMatch(t),
+	}
+}
+
+// standInEngineMatch tells the stand-in's engine among the job's processes: the fake Apptainer runs the engine
+// double as itself, this test binary (os.Executable, through the symlink enginedouble.Install made), with the
+// launch's arguments, each bound path rewritten to the host's. Only here may an argument differ from the launch's,
+// and only a path for a path with the same text before its first "/" (a flag's name); the program must be this
+// binary, and the count of arguments the launch's. A cluster's engine is matched by MatchesCommand alone.
+func standInEngineMatch(t *testing.T) func(argv, command []string) bool {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exe, err = filepath.EvalSymlinks(exe); err != nil {
+		t.Fatal(err)
+	}
+	return func(argv, command []string) bool {
+		if len(command) < 2 || len(argv) != len(command) || argv[0] != exe {
+			return false
+		}
+		for i := 1; i < len(command); i++ {
+			got, want := argv[i], command[i]
+			if got == want {
+				continue
+			}
+			gi, wi := strings.Index(got, "/"), strings.Index(want, "/")
+			if gi < 0 || wi < 0 || got[:gi] != want[:wi] {
+				return false
+			}
+		}
+		return true
 	}
 }
 

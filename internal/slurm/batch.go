@@ -284,6 +284,18 @@ func (b *Batch) ListByTag(ctx context.Context, tag string) ([]provider.Job, erro
 	return b.queueJobs(l, func(r queueRecord) bool { return r.Name == tag })
 }
 
+// Queue returns every job of the calling user in the queue listing: held,
+// pending, running and recently ended jobs, not accounting. A run that ends its
+// own jobs by its tag prefix reads it (internal/alpha, EndJobs): a job the run
+// never wrote down is still in it.
+func (b *Batch) Queue(ctx context.Context) ([]provider.Job, error) {
+	l, err := b.queue(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return b.queueJobs(l, func(queueRecord) bool { return true })
+}
+
 // accounting runs one sacct line and merges its records. A failed read is
 // counted in Health.ReadFailures: the listing can succeed while accounting
 // fails, and then ListingFailed stays false.

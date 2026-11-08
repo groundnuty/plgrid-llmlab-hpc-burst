@@ -208,21 +208,6 @@ func TestAScenarioErrorFailsTheRunAndClosesTheSteps(t *testing.T) {
 	}
 }
 
-// A live tunnel row whose queue wait reaches its deployment's first end cannot
-// keep to one job: its steps return the named error before anything starts.
-func TestALiveTunnelRowRefusesAQueueWaitPastItsFirstEnd(t *testing.T) {
-	m := liveSettings("tunnel-hour-athena")
-	m[envPending] = "259200"
-	cfg, skip, err := ConfigFromEnv(env(m), "tunnel-hour-athena")
-	if skip != "" || err != nil {
-		t.Fatalf("skip %q, err %v", skip, err)
-	}
-	st, ok := liveSteps(t, cfg).(failedSteps)
-	if !ok || !errors.Is(st.err, ErrQueueWaitPastEnd) {
-		t.Fatalf("liveSteps = %#v, want the steps that return ErrQueueWaitPastEnd", st)
-	}
-}
-
 type closing struct {
 	failedSteps
 	closed bool
@@ -429,7 +414,7 @@ func TestACloseThatFailsTurnsANotRunIntoAFailure(t *testing.T) {
 
 // The marker names the row and the wait, and no job: the script prints and posts around it.
 func TestTheNotRunNoteNamesNoJob(t *testing.T) {
-	note := NotRunNote(rowOf("tunnel-hour-helios"), 30*time.Minute)
+	note := NotRunNote(rowOf("tunnel-hour-helios"), 30*time.Minute, ErrNotStarted)
 	if want := "tunnel-hour-helios: a job was still pending after 30m0s;"; !strings.Contains(note, want) {
 		t.Errorf("note %q lacks %q", note, want)
 	}

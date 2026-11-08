@@ -16,7 +16,7 @@ func liveSettings(row string) map[string]string {
 		envRow: row, envOut: "/private/out", envAccount: "SECRETACCT", envCreds: "/private/SECRETCREDS",
 		envHostLock: "/locks/host.lock", envControlDir: "/ctl", envBinDir: "/bin-dir", envBuildDir: "/build-dir",
 		envMode: "direct", envAddr: "gateway.example:29227", envPartition: r.Partition, envQOS: r.QOS,
-		envGPUs: "1", envPending: "7200", envProfile: r.Cluster, envListen: "127.0.0.1:29714",
+		envGPUs: "1", envPending: "7200", envProfile: r.Cluster, envListen: "127.0.0.1:29714", envRunID: "0123456789",
 	}
 	if strings.HasPrefix(row, "tunnel-hour-") {
 		m[envLease] = "137"
@@ -71,7 +71,7 @@ func TestEveryMissingSettingIsReportedAtOnce(t *testing.T) {
 	if err == nil {
 		t.Fatal("no error")
 	}
-	for _, k := range []string{envAccount, envCreds, envHostLock, envControlDir, envBinDir, envBuildDir, envMode, envAddr, envPartition, envGPUs, envPending, envProfile} {
+	for _, k := range []string{envAccount, envCreds, envHostLock, envControlDir, envBinDir, envBuildDir, envMode, envAddr, envPartition, envGPUs, envPending, envProfile, envRunID} {
 		if !strings.Contains(err.Error(), k+" is not set") {
 			t.Errorf("the error does not name %s: %v", k, err)
 		}
@@ -88,6 +88,9 @@ func TestSettingsThatContradictTheRowAreAnError(t *testing.T) {
 		"pending":                   func(m map[string]string) { m[envPending] = "0" },
 		"relative out":              func(m map[string]string) { m[envOut] = "out" },
 		"a dry fault in a live run": func(m map[string]string) { m[envDryFault] = "cut" },
+		"a run ID too short":        func(m map[string]string) { m[envRunID] = "012345678" },
+		"a run ID in capitals":      func(m map[string]string) { m[envRunID] = "0123456789AB"[2:] },
+		"a run ID with a dash":      func(m map[string]string) { m[envRunID] = "01234-6789" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			m := liveSettings("tunnel-hour-athena")

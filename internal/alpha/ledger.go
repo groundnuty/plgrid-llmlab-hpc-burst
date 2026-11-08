@@ -12,11 +12,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/sshrun"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
@@ -83,21 +83,42 @@ func SSHBatch(ctx context.Context, r client.Reader, providerName, controlDir, ho
 	return slurm.NewBatch(tr, v.Profile, v.Settings, fresh), tr, nil
 }
 
-// JobEnder is what EndJobs needs of the batch client (slurm.Batch).
+// JobEnder is what EndJobs needs of the batch client (slurm.Batch): the
+// queue listing of every job of the user, read fresh, and the cancel.
 type JobEnder interface {
-	ListByTag(ctx context.Context, tag string) ([]provider.Job, error)
+	Queue(ctx context.Context) ([]provider.Job, error)
 	Cancel(ctx context.Context, jobIDs []string) []provider.CancelResult
 }
 
-// EndJobs ends the run's jobs: it reads the queue for each tag and cancels the
-// jobs it still lists live, and repeats every interval until a pass finds none
-// live, or ctx ends. A cancelled job leaves the live states only when the
-// scheduler has acted, so the pass after a cancel is what shows it worked. The
-// batch client must read the queue fresh on every pass (SSHBatch's does). Its
-// errors name no job: a tag's position in the run stands for it.
-func EndJobs(ctx context.Context, b JobEnder, tags []string, every time.Duration) error {
+// Owned says which job names of the queue listing are the run's own.
+type Owned func(name string) bool
+
+// RunOwned is the run's ownership: a name with the run's own tag prefix
+// (TagPrefix: every Allocation of the run's deployment is named after it, so
+// every job the controller submits for the run carries it), or a tag the run
+// wrote down. The prefix does not depend on the recorder: a job whose
+// Allocation the watch never delivered, or whose tag could not be written, is
+// still the run's (review of PR 255, B3). A name that is neither is never
+// touched, whoever's it is.
+func RunOwned(prefix string, rec *Recorder) Owned {
+	return func(name string) bool {
+		if prefix != "" && strings.HasPrefix(name, prefix) {
+			return true
+		}
+		return rec != nil && rec.Tagged(name)
+	}
+}
+
+// EndJobs ends the run's jobs: it reads the queue listing, cancels the run's
+// jobs (owned) that the scheduler still runs or queues, and repeats every
+// interval until a pass finds none of the run's jobs alive, or ctx ends. A
+// cancelled job is alive until the scheduler has acted, and a job whose end
+// state is set stays alive while it is COMPLETING, so the pass after a cancel
+// is what shows it worked. The batch client must read the queue fresh on every
+// pass (SSHBatch's does). Its errors name no job and no tag.
+func EndJobs(ctx context.Context, b JobEnder, owned Owned, every time.Duration) error {
 	for {
-		live, errs := endPass(ctx, b, tags)
+		live, errs := endPass(ctx, b, owned)
 		if live == 0 && len(errs) == 0 {
 			return nil
 		}
@@ -106,7 +127,7 @@ func EndJobs(ctx context.Context, b JobEnder, tags []string, every time.Duration
 		case <-ctx.Done():
 			t.Stop()
 			if live > 0 {
-				errs = append(errs, fmt.Errorf("%d of the run's jobs were still live when the time to end them ran out", live))
+				errs = append(errs, fmt.Errorf("%d of the run's jobs were still alive when the time to end them ran out", live))
 			}
 			return errors.Join(errs...)
 		case <-t.C:
@@ -114,40 +135,56 @@ func EndJobs(ctx context.Context, b JobEnder, tags []string, every time.Duration
 	}
 }
 
-// endPass is one pass of EndJobs: how many jobs it found live, which it cancelled.
-func endPass(ctx context.Context, b JobEnder, tags []string) (live int, errs []error) {
-	for i, tg := range tags {
-		js, err := b.ListByTag(ctx, tg)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("the queue could not be read for the run's tag %d: %w", i+1, err))
+// endPass is one pass of EndJobs: how many of the run's jobs it found alive.
+// It cancels each that has not ended; one whose end state is set but that is
+// still COMPLETING is counted, not cancelled again.
+func endPass(ctx context.Context, b JobEnder, owned Owned) (live int, errs []error) {
+	js, err := b.Queue(ctx)
+	if err != nil {
+		return 0, []error{fmt.Errorf("the queue could not be read: %w", err)}
+	}
+	var ids []string
+	for _, j := range js {
+		if !owned(j.Name) || !liveJob(j) {
 			continue
 		}
-		var ids []string
-		for _, j := range js {
-			if liveJob(j) {
-				ids = append(ids, j.ID)
-			}
+		live++
+		if !endedBase(j) {
+			ids = append(ids, j.ID)
 		}
-		live += len(ids)
-		if len(ids) == 0 {
-			continue
-		}
-		for _, res := range b.Cancel(ctx, ids) {
-			if res.Outcome == provider.CancelError {
-				errs = append(errs, fmt.Errorf("a job of the run's tag %d could not be cancelled: %w", i+1, res.Err))
-			}
+	}
+	if len(ids) == 0 {
+		return live, nil
+	}
+	for _, res := range b.Cancel(ctx, ids) {
+		if res.Outcome == provider.CancelError {
+			errs = append(errs, fmt.Errorf("a job of the run could not be cancelled: %w", res.Err))
 		}
 	}
 	return live, errs
 }
 
-// liveJob reports whether a job can still hold a GPU or a queue place: held,
-// pending or running. A cancelled job whose processes are still ending
-// (COMPLETING) has the phase of its base state, Ended.
+// endedStates are Slurm's base states of a job that is over (squeue(1), JOB
+// STATE CODES): its end state is set. Any other base state, one this list does
+// not know included, is a job the scheduler still holds, queues or runs.
+var endedStates = map[string]bool{
+	"BOOT_FAIL": true, "CANCELLED": true, "COMPLETED": true, "DEADLINE": true, "FAILED": true,
+	"NODE_FAIL": true, "OUT_OF_MEMORY": true, "PREEMPTED": true, "TIMEOUT": true,
+}
+
+// endedBase reports whether the job's base state (State[0]) is an end state.
+// A job with no state has not shown that it ended.
+func endedBase(j provider.Job) bool {
+	return len(j.State) > 0 && endedStates[strings.ToUpper(j.State[0])]
+}
+
+// liveJob reports whether the scheduler still counts a job as alive, by its
+// own state, not by the plugin's phase: a job whose base state has not ended
+// (held, pending, running, suspended, a requeued job queued or running again,
+// or a state this does not know), and a job whose end state is set but that
+// is still COMPLETING, whose processes or epilog may still run on its node.
+// The phase would miss both: a requeued running job has the phase Failed, and
+// a cancelled one still completing the phase Ended (review of PR 255, B4).
 func liveJob(j provider.Job) bool {
-	switch j.Phase {
-	case v1alpha1.AllocationHeld, v1alpha1.AllocationPending, v1alpha1.AllocationRunning:
-		return true
-	}
-	return false
+	return j.Completing || !endedBase(j)
 }
