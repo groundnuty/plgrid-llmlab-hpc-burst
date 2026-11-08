@@ -16,24 +16,66 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 )
 
-// startToReadyOf is the longest start-to-ready time the deployment's status
-// records, the time HBEP-7 counts a replacement's start back from the drain
-// start by (ReplacementLate's due time: the drain start minus the class's
-// start-to-ready time); ok is false when it records none.
-func startToReadyOf(md *v1alpha1.ModelDeployment) (time.Duration, bool) {
-	var longest time.Duration
-	ok := false
+// defaultStartToReady is the controller's start-to-ready time for a class
+// with no measurement (internal/lifecycle, settings.go; HBEP-7, Handover).
+const defaultStartToReady = 30 * time.Minute
+
+// classStartToReady is the deployment's measured start-to-ready time per
+// accelerator class, as its status records them (one entry per class, the
+// newest measurement).
+func classStartToReady(md *v1alpha1.ModelDeployment) map[v1alpha1.AcceleratorClass]time.Duration {
+	out := map[v1alpha1.AcceleratorClass]time.Duration{}
 	for _, s := range md.Status.StartToReady {
-		d, err := s.Duration.AsDuration()
-		if err != nil {
-			continue
+		if d, err := s.Duration.AsDuration(); err == nil {
+			out[s.AcceleratorClass] = d
 		}
-		if d > longest {
-			longest = d
-		}
-		ok = true
 	}
-	return longest, ok
+	return out
+}
+
+// lateStartToReady is the start-to-ready time ReplacementLate's due time
+// counts back from the drain start by, for condition 1: the controller uses
+// the primary's class's entry, or defaultStartToReady when there is none
+// (internal/lifecycle, plan.go: startToReady). A later measurement overwrites
+// the class's entry, so the value read after the handovers can be shorter
+// than the one the controller judged by at the first read; the larger of the
+// two read (the first read's snapshot and the final status), each with the
+// default where it has no entry, is never later than the earliest due time
+// they give. In between the first read and the handovers no Instance becomes
+// ready, so no measurement changes it.
+func lateStartToReady(class v1alpha1.AcceleratorClass, atFirst, final map[v1alpha1.AcceleratorClass]time.Duration) time.Duration {
+	of := func(m map[v1alpha1.AcceleratorClass]time.Duration) time.Duration {
+		if d, ok := m[class]; ok {
+			return d
+		}
+		return defaultStartToReady
+	}
+	return max(of(atFirst), of(final))
+}
+
+// primaryClass is the accelerator class the controller judges the primary
+// by: its Provider's (the Instance's provider label) first allowed partition
+// in the Provider's PlatformProfile (internal/lifecycle, topology.go:
+// allowedPartition); ok is false when one of them cannot be read.
+func (r *rig) primaryClass(in *v1alpha1.Instance) (v1alpha1.AcceleratorClass, string, bool) {
+	name := in.Labels[v1alpha1.LabelProvider]
+	var p v1alpha1.Provider
+	if name == "" || !r.get(&p, name, "") {
+		return v1alpha1.AcceleratorClass{}, fmt.Sprintf("the primary %s's Provider %q cannot be read", in.Name, name), false
+	}
+	var prof v1alpha1.PlatformProfile
+	if !r.get(&prof, p.Spec.PlatformProfileRef.Name, "") {
+		return v1alpha1.AcceleratorClass{}, fmt.Sprintf("Provider %s's PlatformProfile %q cannot be read", p.Name, p.Spec.PlatformProfileRef.Name), false
+	}
+	if len(p.Spec.AllowedPartitions) == 0 {
+		return v1alpha1.AcceleratorClass{}, "Provider " + p.Name + " allows no partition", false
+	}
+	for _, part := range prof.Spec.Partitions {
+		if part.Name == p.Spec.AllowedPartitions[0] {
+			return part.AcceleratorClass, "", true
+		}
+	}
+	return v1alpha1.AcceleratorClass{}, fmt.Sprintf("PlatformProfile %s describes no partition %s", prof.Name, p.Spec.AllowedPartitions[0]), false
 }
 
 // ownedBy reports whether the ModelDeployment named md is the Instance's
@@ -70,10 +112,15 @@ func (p3 *part3) checkForbidden() {
 		if changeHanded.IsZero() || d.ds.Before(changeHanded) {
 			changeHanded = d.ds
 		}
-		if s2r, ok := startToReadyOf(&md); !ok {
-			unmetLate = append(unmetLate, fmt.Sprintf("condition 1: %s records no start-to-ready time, so when ReplacementLate could be raised is unknown", d.name))
-		} else if late := d.ds.Add(-s2r); changeLate.IsZero() || late.Before(changeLate) {
-			changeLate = late
+		if class, why, ok := r.primaryClass(d.primary); !ok {
+			unmetLate = append(unmetLate, fmt.Sprintf("condition 1: %s: %s, so the class whose start-to-ready time ReplacementLate counts by is unknown", d.name, why))
+		} else {
+			s2r := lateStartToReady(class, base.startToReady[d.name], classStartToReady(&md))
+			r.t.Logf("%s: ReplacementLate counts back %s from the drain start %s (class %v; at the first read %v, now %v)",
+				d.name, s2r, ts(d.ds), class, base.startToReady[d.name], classStartToReady(&md))
+			if late := d.ds.Add(-s2r); changeLate.IsZero() || late.Before(changeLate) {
+				changeLate = late
+			}
 		}
 		due := d.ds
 		for _, in := range r.instances() {

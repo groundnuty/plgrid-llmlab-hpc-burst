@@ -104,6 +104,17 @@ type absenceBase struct {
 	// change is just after the reads: the steps that could raise the events
 	// begin after it.
 	change time.Time
+	// first is when the first read was answered.
+	first time.Time
+	// live holds the UIDs of the Instances not ended in a list taken just
+	// after the first read. An end is final, so each had not ended at the
+	// first read either: it was live then, or not yet created.
+	live map[string]bool
+	// startToReady holds each ModelDeployment's per-class start-to-ready
+	// times, read just after the first read: the values the controller judged
+	// ReplacementLate by then, before a later measurement overwrites its
+	// class's entry (part3_absence_test.go).
+	startToReady map[string]map[v1alpha1.AcceleratorClass]time.Duration
 	// orphanable lists the proxies frps listed online for an Instance that
 	// had ended or was gone at the first read: one a TunnelOrphaned event
 	// could be raised for before the first read.
@@ -116,15 +127,31 @@ func (r *rig) baseline(what string, keys ...eventcount.Key) *absenceBase {
 	r.t.Helper()
 	b := &absenceBase{what: what, reads: r.countReads(what, keys...)}
 	b.change = time.Now()
-	live := map[string]bool{}
+	for _, rd := range b.reads {
+		b.first = rd.Answered // one body answers every key
+	}
+	b.live = map[string]bool{}
 	for _, in := range r.instances() {
 		if in.Status.Phase != v1alpha1.InstanceEnded {
-			live[string(in.UID)] = true
+			b.live[string(in.UID)] = true
 		}
 	}
 	for uid, online := range r.frpsProxies() {
-		if online && !live[uid] {
+		if online && !b.live[uid] {
 			b.orphanable = append(b.orphanable, uid)
+		}
+	}
+	var mds v1alpha1.ModelDeploymentList
+	ctx, cancel := callCtx(r.t)
+	err := r.c.List(ctx, &mds)
+	cancel()
+	if err != nil {
+		r.t.Fatalf("list ModelDeployments for the first read's start-to-ready times: %v", err)
+	}
+	b.startToReady = map[string]map[v1alpha1.AcceleratorClass]time.Duration{}
+	for i := range mds.Items {
+		if mds.Items[i].Namespace == namespace {
+			b.startToReady[mds.Items[i].Name] = classStartToReady(&mds.Items[i])
 		}
 	}
 	for k, rd := range b.reads {

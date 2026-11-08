@@ -25,7 +25,8 @@ type observation struct {
 	at          time.Time
 	name        string
 	uid         types.UID
-	alloc       string // spec.allocationRef.name
+	created     time.Time // metadata.creationTimestamp, cut to the second
+	alloc       string    // spec.allocationRef.name
 	phase       v1alpha1.InstancePhase
 	endReason   string
 	drainBegan  string                 // the drain-started annotation (annotationDrainStarted)
@@ -155,7 +156,7 @@ func follow(ctx context.Context, wc client.WithWatch, list client.ObjectList, ad
 
 func (rec *recorder) add(in *v1alpha1.Instance, deleted bool) {
 	c := in.Status.Conditions
-	o := observation{at: time.Now(), name: in.Name, uid: in.UID, alloc: in.Spec.AllocationRef.Name, phase: in.Status.Phase,
+	o := observation{at: time.Now(), name: in.Name, uid: in.UID, created: in.CreationTimestamp.Time, alloc: in.Spec.AllocationRef.Name, phase: in.Status.Phase,
 		endReason: in.Status.EndReason, restarts: len(in.Status.Restarts), drainBegan: in.Annotations[annotationDrainStarted],
 		verified:    meta.IsStatusConditionTrue(c, v1alpha1.ConditionVerified),
 		qualified:   meta.IsStatusConditionTrue(c, v1alpha1.ConditionQualified),
@@ -221,6 +222,19 @@ func (rec *recorder) first(uid types.UID, since time.Time, match func(observatio
 		}
 	}
 	return observation{}, false
+}
+
+// createdAt returns the Instance's creationTimestamp from the watch, and
+// whether the watch saw the Instance with one.
+func (rec *recorder) createdAt(uid types.UID) (time.Time, bool) {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	for _, o := range rec.obs {
+		if o.uid == uid && !o.created.IsZero() {
+			return o.created, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // of returns every observation of the Instance, in the order received.
