@@ -65,8 +65,9 @@ const (
 // copyPorts are a copy's metrics and health addresses.
 type copyPorts struct{ metrics, health string }
 
-// portPairs hands out a test's pairs of the block, in order from its base.
-type portPairs struct{ next int }
+// portPairs hands out a test's pairs of a block, in order from its base:
+// servingPortBase unless base is set (#256's tests use their own block).
+type portPairs struct{ base, next int }
 
 func (p *portPairs) take(t *testing.T) copyPorts {
 	t.Helper()
@@ -78,10 +79,14 @@ func (p *portPairs) take(t *testing.T) copyPorts {
 // peek returns the pair take would hand out next, without taking it.
 func (p *portPairs) peek(t *testing.T) copyPorts {
 	t.Helper()
-	if p.next == servingPortPairs {
-		t.Fatalf("all %d port pairs of %d-%d are taken", servingPortPairs, servingPortBase, servingPortBase+2*servingPortPairs-1)
+	first := p.base
+	if first == 0 {
+		first = servingPortBase
 	}
-	base := servingPortBase + 2*p.next
+	if p.next == servingPortPairs {
+		t.Fatalf("all %d port pairs of %d-%d are taken", servingPortPairs, first, first+2*servingPortPairs-1)
+	}
+	base := first + 2*p.next
 	return copyPorts{metrics: fmt.Sprintf("127.0.0.1:%d", base), health: fmt.Sprintf("127.0.0.1:%d", base+1)}
 }
 
@@ -284,6 +289,13 @@ type servingRig struct {
 
 func newServingRig(t *testing.T) *servingRig {
 	t.Helper()
+	return newServingRigAt(t, servingPortBase)
+}
+
+// newServingRigAt is newServingRig with the copies' pairs of ports taken from
+// the block of ten pairs at base.
+func newServingRigAt(t *testing.T, base int) *servingRig {
+	t.Helper()
 	if os.Getenv("HPCBURST_TESTENV_PORT_BASE") == "" {
 		t.Setenv("HPCBURST_TESTENV_PORT_BASE", managerPortBase)
 	}
@@ -342,7 +354,7 @@ func newServingRig(t *testing.T) *servingRig {
 	if err := cl.Create(ctx, md); err != nil {
 		t.Fatalf("create ModelDeployment: %v", err)
 	}
-	g := &servingRig{ctx: ctx, cfg: cp.Config, kubeconfig: cp.Kubeconfig, creds: t.TempDir(), builds: t.TempDir(), cl: cl}
+	g := &servingRig{ctx: ctx, cfg: cp.Config, kubeconfig: cp.Kubeconfig, creds: t.TempDir(), builds: t.TempDir(), cl: cl, ports: portPairs{base: base}}
 	if err := os.WriteFile(filepath.Join(g.builds, "hb-agent-"+rigArch), []byte("a stand-in for the agent build"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -834,7 +846,11 @@ func TestMetricsLostLeaseStopsBeforeANewCopyLeads(t *testing.T) {
 // logPorts logs the pairs the test's copies took and how many starts found a port taken.
 func (g *servingRig) logPorts(t *testing.T) {
 	t.Helper()
-	t.Logf("the copies took %d port pairs from %d; %d starts found a port taken", g.ports.next, servingPortBase, g.retries)
+	first := g.ports.base
+	if first == 0 {
+		first = servingPortBase
+	}
+	t.Logf("the copies took %d port pairs from %d; %d starts found a port taken", g.ports.next, first, g.retries)
 }
 
 // TestMetricsCopiesStartAgainOnALostPort covers the tests' own retry (#219): a copy whose bind
