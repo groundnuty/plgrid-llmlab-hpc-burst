@@ -55,32 +55,43 @@ func readManifests(dir string) ([]*unstructured.Unstructured, error) {
 		if err != nil {
 			return nil, err
 		}
-		dec := yaml.NewYAMLOrJSONDecoder(f, 4096)
-		for i := 1; ; i++ {
-			obj := &unstructured.Unstructured{}
-			err := dec.Decode(&obj.Object)
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				f.Close()
-				return nil, fmt.Errorf("%s, document %d: %w", n, i, err)
-			}
-			if len(obj.Object) == 0 {
-				continue // an empty document between separators
-			}
-			if obj.GetAPIVersion() == "" || obj.GetKind() == "" || obj.GetName() == "" {
-				f.Close()
-				return nil, fmt.Errorf("%s, document %d: apiVersion, kind and metadata.name are all required", n, i)
-			}
-			out = append(out, obj)
-		}
+		objs, err := decodeManifests(f, n)
 		f.Close()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, objs...)
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("no manifests (*.yaml, *.yml, *.json) found in %s", dir)
 	}
 	return out, nil
+}
+
+// decodeManifests decodes the YAML or JSON documents of r into objects, in order. name is what
+// the errors call the source. Every object needs apiVersion, kind and metadata.name; an empty
+// document between separators is skipped. The guard (guard.go) goes through it as the files of
+// --manifests do, so both are checked the same way.
+func decodeManifests(r io.Reader, name string) ([]*unstructured.Unstructured, error) {
+	var out []*unstructured.Unstructured
+	dec := yaml.NewYAMLOrJSONDecoder(r, 4096)
+	for i := 1; ; i++ {
+		obj := &unstructured.Unstructured{}
+		err := dec.Decode(&obj.Object)
+		if errors.Is(err, io.EOF) {
+			return out, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%s, document %d: %w", name, i, err)
+		}
+		if len(obj.Object) == 0 {
+			continue // an empty document between separators
+		}
+		if obj.GetAPIVersion() == "" || obj.GetKind() == "" || obj.GetName() == "" {
+			return nil, fmt.Errorf("%s, document %d: apiVersion, kind and metadata.name are all required", name, i)
+		}
+		out = append(out, obj)
+	}
 }
 
 // ApplyManifests applies the manifests of dir to the host with server-side apply, so repeating
@@ -99,15 +110,10 @@ func ApplyManifests(ctx context.Context, cfg *rest.Config, dir string, log io.Wr
 			others = append(others, o)
 		}
 	}
-	dyn, err := dynamic.NewForConfig(cfg)
+	dyn, mapper, err := newApplier(cfg)
 	if err != nil {
 		return 0, err
 	}
-	dc, err := discovery.NewDiscoveryClientForConfig(cfg)
-	if err != nil {
-		return 0, err
-	}
-	mapper := restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(dc))
 	n := 0
 	for _, o := range crds {
 		if err := applyOne(ctx, dyn, mapper, o); err != nil {
@@ -130,6 +136,19 @@ func ApplyManifests(ctx context.Context, cfg *rest.Config, dir string, log io.Wr
 		logf(log, "applied %s %s", o.GetKind(), o.GetName())
 	}
 	return n, nil
+}
+
+// newApplier returns the dynamic client and the discovery-backed mapper that applyOne needs.
+func newApplier(cfg *rest.Config) (dynamic.Interface, meta.ResettableRESTMapper, error) {
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	dc, err := discovery.NewDiscoveryClientForConfig(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return dyn, restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(dc)), nil
 }
 
 func applyOne(ctx context.Context, dyn dynamic.Interface, mapper meta.ResettableRESTMapper, o *unstructured.Unstructured) error {

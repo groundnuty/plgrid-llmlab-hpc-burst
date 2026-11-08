@@ -129,19 +129,29 @@ const (
 )
 
 func servedDeployment(tm timing, engineEnv ...v1alpha1.EnvVar) *v1alpha1.ModelDeployment {
+	return servedDeploymentAs(served{name: mdName, model: model, provider: providerName, maxModelLen: "4096"}, tm, engineEnv...)
+}
+
+// served names one served ModelDeployment: its name, the model clients ask
+// for, its one Provider and the engine's max-model-len.
+type served struct {
+	name, model, provider, maxModelLen string
+}
+
+func servedDeploymentAs(d served, tm timing, engineEnv ...v1alpha1.EnvVar) *v1alpha1.ModelDeployment {
 	return &v1alpha1.ModelDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: mdName, Namespace: namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: d.name, Namespace: namespace},
 		Spec: v1alpha1.ModelDeploymentSpec{
-			Model: model,
+			Model: d.model,
 			Source: v1alpha1.ModelSource{Served: &v1alpha1.ServingSpec{
 				Checkpoint: v1alpha1.CheckpointSpec{Repository: checkpointRepo, Revision: checkpointRev},
 				Engine: v1alpha1.EngineSpec{Name: "vllm", Version: "0.32.0", ImageDigest: engineDigest,
 					Image: "docker.io/vllm/vllm-openai"},
-				Flags: []v1alpha1.EngineFlag{{Name: "max-model-len", Value: "4096"}},
+				Flags: []v1alpha1.EngineFlag{{Name: "max-model-len", Value: d.maxModelLen}},
 				Env:   engineEnv,
 			}},
 			Instances:  1,
-			Providers:  v1alpha1.ProviderSelection{Names: []string{providerName}},
+			Providers:  v1alpha1.ProviderSelection{Names: []string{d.provider}},
 			LeaseLimit: dur(tm.lease),
 			// Step (g) expects the Allocations to end at scale 0: the default,
 			// Keep, would hold a warm Allocation until its hard end. 10 s is

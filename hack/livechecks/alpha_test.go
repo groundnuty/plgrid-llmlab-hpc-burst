@@ -481,13 +481,15 @@ func TestASignalDuringAnAlphaRunRunsTheCleanup(t *testing.T) {
 
 func TestPlanNamesTheAlphaRowsWhenTheStackChanges(t *testing.T) {
 	alphaRows := []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-athena", "tunnel-hour-helios"}
+	// The rehearsal row (issue #193) builds and runs the same stack, on this host: it is a local row.
+	stackRows := append(append([]string{}, alphaRows...), "rehearsal-part3")
 	cases := []struct {
 		name, path, content string
 		want                []string
 	}{
-		{"a package only the stack imports", "internal/stack/stack.go", "package stack\n\nvar X = 1\n", alphaRows},
+		{"a package only the stack imports", "internal/stack/stack.go", "package stack\n\nvar X = 1\n", stackRows},
 		{"the rows' own package", "internal/alpha/alpha.go", "package alpha\n\nvar X = 1\n", alphaRows},
-		{"a stack binary", "cmd/hpcburst-front/main.go", "package main\n\nimport _ \"example.test/fx/internal/stack\"\n\nfunc main() { _ = 1 }\n", alphaRows},
+		{"a stack binary", "cmd/hpcburst-front/main.go", "package main\n\nimport _ \"example.test/fx/internal/stack\"\n\nfunc main() { _ = 1 }\n", stackRows},
 		{"the example the rows apply", "examples/provider-athena-a100.yaml", "kind: Provider\nx: 1\n", []string{"alpha-athena-handover"}},
 		{"a package the accounting rows and conformance run, not the stack", "internal/providerctl/providerctl.go", "package providerctl\n\nimport _ \"example.test/fx/internal/slurm\"\n\nvar X = 1\n",
 			[]string{"conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-helios", "reach-athena", "reach-helios"}},
@@ -506,7 +508,11 @@ func TestPlanNamesTheAlphaRowsWhenTheStackChanges(t *testing.T) {
 			}
 			// The plan names what changed for each row it covers: that is its map from a row to code.
 			for _, r := range c.want {
-				w.contains(res, "covered: "+r+" (cluster; gate ")
+				kind := "cluster"
+				if r == "rehearsal-part3" {
+					kind = "local"
+				}
+				w.contains(res, "covered: "+r+" ("+kind+"; gate ")
 			}
 		})
 	}
