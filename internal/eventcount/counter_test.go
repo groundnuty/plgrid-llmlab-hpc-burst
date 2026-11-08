@@ -124,8 +124,11 @@ func TestEventsCountsInTheCallThatHandsOver(t *testing.T) {
 		if !ok || after != before+1 {
 			t.Fatalf("call %d (%s): the series reads %g (present %v) after the call, want %g", i, k, after, ok, before+1)
 		}
-		got := inner.got[len(inner.got)-1]
-		if len(inner.got) != i+1 || got.reason != call.reason || got.action != call.action || got.typ != call.typ || got.msg != fmt.Sprintf("note %d", i) {
+		if len(inner.got) != i+1 {
+			t.Fatalf("call %d: the recorder received %d calls, want %d: each event is handed over", i, len(inner.got), i+1)
+		}
+		got := inner.got[i]
+		if got.reason != call.reason || got.action != call.action || got.typ != call.typ || got.msg != fmt.Sprintf("note %d", i) {
 			t.Fatalf("call %d: the recorder received %d calls, the last %+v; want the call handed over unchanged", i, len(inner.got), got)
 		}
 		if got.countAtHandOver != before+1 {
