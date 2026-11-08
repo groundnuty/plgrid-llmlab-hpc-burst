@@ -46,12 +46,31 @@ type allocObservation struct {
 	uid     types.UID
 	phase   v1alpha1.AllocationPhase
 	deleted bool
+	// deletion is the version's deletionTimestamp, zero for none: when the
+	// API server took the delete request, cut to the second.
+	deletion time.Time
+}
+
+// mdObservation is one ModelDeployment version as the watch delivered it:
+// its Degraded and Ready conditions, "" when absent.
+type mdObservation struct {
+	at              time.Time
+	name            string
+	degraded        metav1.ConditionStatus
+	degradedReason  string
+	degradedMessage string
+	ready           metav1.ConditionStatus
+	readyReason     string
 }
 
 type recorder struct {
 	mu     sync.Mutex
 	obs    []observation
 	allocs []allocObservation
+	mds    []mdObservation
+	// firstSpec is the spec of the first Instance the watch delivered: the
+	// tunnel witness's (orphans_test.go).
+	firstSpec *v1alpha1.InstanceSpec
 }
 
 // startWatch records every version of the namespace's Instances and
@@ -70,7 +89,7 @@ func (r *rig) startWatch() {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	r.t.Cleanup(func() { cancel(); wg.Wait() })
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		follow(ctx, wc, &v1alpha1.InstanceList{}, func(t watch.EventType, o client.Object) {
@@ -84,6 +103,14 @@ func (r *rig) startWatch() {
 		follow(ctx, wc, &v1alpha1.AllocationList{}, func(t watch.EventType, o client.Object) {
 			if a, ok := o.(*v1alpha1.Allocation); ok {
 				rec.addAlloc(a, t == watch.Deleted)
+			}
+		})
+	}()
+	go func() {
+		defer wg.Done()
+		follow(ctx, wc, &v1alpha1.ModelDeploymentList{}, func(_ watch.EventType, o client.Object) {
+			if md, ok := o.(*v1alpha1.ModelDeployment); ok {
+				rec.addMD(md)
 			}
 		})
 	}()
@@ -140,12 +167,46 @@ func (rec *recorder) add(in *v1alpha1.Instance, deleted bool) {
 	}
 	rec.mu.Lock()
 	rec.obs = append(rec.obs, o)
+	if rec.firstSpec == nil {
+		rec.firstSpec = in.Spec.DeepCopy()
+	}
 	rec.mu.Unlock()
 }
 
-func (rec *recorder) addAlloc(a *v1alpha1.Allocation, deleted bool) {
+func (rec *recorder) addMD(md *v1alpha1.ModelDeployment) {
+	o := mdObservation{at: time.Now(), name: md.Name}
+	if c := meta.FindStatusCondition(md.Status.Conditions, v1alpha1.ConditionDegraded); c != nil {
+		o.degraded, o.degradedReason, o.degradedMessage = c.Status, c.Reason, c.Message
+	}
+	if c := meta.FindStatusCondition(md.Status.Conditions, v1alpha1.ConditionReady); c != nil {
+		o.ready, o.readyReason = c.Status, c.Reason
+	}
 	rec.mu.Lock()
-	rec.allocs = append(rec.allocs, allocObservation{at: time.Now(), name: a.Name, uid: a.UID, phase: a.Status.AtProvider.Phase, deleted: deleted})
+	rec.mds = append(rec.mds, o)
+	rec.mu.Unlock()
+}
+
+// deployment returns every observation of the named ModelDeployment, in the
+// order received.
+func (rec *recorder) deployment(name string) []mdObservation {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var out []mdObservation
+	for _, o := range rec.mds {
+		if o.name == name {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+func (rec *recorder) addAlloc(a *v1alpha1.Allocation, deleted bool) {
+	o := allocObservation{at: time.Now(), name: a.Name, uid: a.UID, phase: a.Status.AtProvider.Phase, deleted: deleted}
+	if a.DeletionTimestamp != nil {
+		o.deletion = a.DeletionTimestamp.Time
+	}
+	rec.mu.Lock()
+	rec.allocs = append(rec.allocs, o)
 	rec.mu.Unlock()
 }
 
@@ -227,10 +288,6 @@ func (rec *recorder) between(uid types.UID, from, to time.Time) []observation {
 	return out
 }
 
-// tunnelReadPeriod is how often the controller reads frps's list (HBEP-6,
-// Path state and the inventory).
-const tunnelReadPeriod = 10 * time.Second
-
 // proxyEnded waits until frps no longer lists the Instance's proxy online and
 // records when that was first seen: a bound the proxy's end lies before.
 func (r *rig) proxyEnded(uid types.UID) {
@@ -247,41 +304,5 @@ func (r *rig) markProxyEnd(uid types.UID, at time.Time) {
 	}
 	if _, ok := r.proxyEnds[uid]; !ok {
 		r.proxyEnds[uid] = at
-	}
-}
-
-// assertNoOrphans fails on any TunnelOrphaned event, once every one the
-// recorded proxy ends could have raised exists: a real teardown (steps c and
-// g, real frps and frpc) must raise none.
-//
-// The controller raises TunnelOrphaned only at a read of frps's list that
-// lists the proxy online with no current Instance (internal/frpsplugin,
-// Reader.Read: an orphan is an online proxy; tunnel_state.go, reportOrphans),
-// after TunnelOrphanGrace of such reads. The plugin admits no proxy for an
-// ended Instance, which its index leaves out (internal/frpsplugin, index.go),
-// so a proxy of an ended Instance that frps has listed offline never comes
-// back. Every event about it was therefore raised at a read that began before
-// the test saw it offline, and one read period and a margin after that, the
-// read in flight then has written its events too. Waiting the whole grace
-// after the proxy's end would prove nothing more.
-func (r *rig) assertNoOrphans(steps string) {
-	r.t.Helper()
-	var last time.Time
-	for _, end := range r.proxyEnds {
-		if end.After(last) {
-			last = end
-		}
-	}
-	if last.IsZero() {
-		r.t.Fatal("no proxy end was recorded: the TunnelOrphaned check would be vacuous")
-	}
-	until := last.Add(tunnelReadPeriod + 5*time.Second) // a lower bound: one read and a margin
-	waitFor(r.t, time.Until(until)+time.Minute, "one frps read after the last proxy end", func() bool { return !time.Now().Before(until) })
-	read := time.Now()
-	for uid, end := range r.proxyEnds {
-		r.t.Logf("TunnelOrphaned check: proxy %s offline by %s, %s before the event read", uid, end.UTC().Format(time.RFC3339), read.Sub(end).Round(time.Second))
-	}
-	if n := reportOrphanedTunnels(r.t, r.c, steps); n > 0 {
-		r.t.Errorf("%d TunnelOrphaned events across steps (%s): a real teardown left a proxy online with no current Instance", n, steps)
 	}
 }

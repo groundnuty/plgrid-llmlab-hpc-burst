@@ -157,25 +157,26 @@ A past project served models on several Slurm clusters behind its own fronts. It
 
 The API refuses a new event without `action` or `reason`, with either over 128 characters, or with a note over 1,024 ([`pkg/apis/core/validation/events.go`, lines 35–38 and 172–186](https://github.com/k3s-io/kubernetes/blob/v1.36.5-k3s1/pkg/apis/core/validation/events.go#L35-L38), in the Kubernetes that k3s v1.36.5+k3s1 builds, [`go.mod`, line 64](https://github.com/k3s-io/k3s/blob/v1.36.5%2Bk3s1/go.mod#L64); accessed 2026-10-31). So each emitter cuts its note to 1,024 bytes.
 
-**Reasons in alpha.** The reason strings are the contracts' (`api/v1alpha1/conditions.go`), plus those marked proposed:
+**Reasons in alpha.** Every reason below is emitted on `main`. Most are constants of the contracts (`api/v1alpha1`) or of the emitting package; `Ready`, `HandedOver` and `NoReplacementReady` are still literals at their emit sites until PR #246 makes them constants. #239's drift guard, in PR #246, is to check each row's type, reasons and Regarding kinds against the code's emit sites, both ways; it does not compare the Emitter column:
 
 | Type | Reasons | Regarding | Emitter |
 |---|---|---|---|
-| `started` | `AgentRegistered` (proposed in PR #88) | Instance | lifecycle controller |
-| `ready` | `Ready` (proposed in PR #88); `ShapesFit` (proposed in PR #88) | Instance; ModelDeployment | lifecycle controller |
-| `degraded` | `ReplacementLate`, `RestartLoop`, `VerificationFailed`, `IdentityUnresolved`, `CapacityDropped` | ModelDeployment | lifecycle controller |
-| `degraded` | `CapacityDropped`, `CountsDrift` (proposed in PR #95) | ModelDeployment | front |
+| `started` | `AgentRegistered` | Instance | lifecycle controller |
+| `ready` | `Ready`; `ShapesFit` | Instance; ModelDeployment | lifecycle controller |
+| `degraded` | `ReplacementLate`, `RestartLoop`, `IdentityUnresolved` | ModelDeployment | lifecycle controller |
+| `degraded` | `VerificationFailed`, `CapacityDropped` | ModelDeployment, else the Instance once the ModelDeployment is gone | lifecycle controller |
+| `degraded` | `CapacityDropped`, `CountsDrift` | ModelDeployment | front |
 | `degraded` | `DrainWindowShort` | PlatformProfile | front |
-| `degraded` | `PathProbeFailing` (proposed, HBEP-6) | Instance | front |
-| `degraded` | `TunnelOrphaned` (proposed, HBEP-6) | the Allocation whose credential admitted the tunnel, else the `lifecycle` `Lease` | lifecycle controller |
-| `degraded` | `ObservationGap` (proposed) | the emitter's own `Lease` | the lifecycle controller and the front, at start |
+| `degraded` | `PathProbeFailing` | Instance | front |
+| `degraded` | `TunnelOrphaned` | the Allocation whose credential admitted the tunnel, else the `lifecycle` `Lease` | lifecycle controller |
+| `degraded` | `ObservationGap` | the emitter's own `Lease` | the lifecycle controller and the front, at start |
 | `failing` | `WorkerRestart`, `InstanceRestart`, `RestartLoop`, `RegistrationTimeout`, `StartTimeout`, `TunnelNotConnected`, `QualificationFailed`, `VerificationFailed`, `AllocationFailed`, `AllocationLost`, `AllocationRefused`, `Requeued`, `SubmittedAsOther`, `AllocationEndedEarly` | Instance | lifecycle controller |
-| `failing` | `HeartbeatMissed` (proposed) | the stale observer's resource (Observers) | the component that judges it |
-| `failing` | `UsageWriteFailed` (proposed) | the front's `Lease` | front |
-| `replaced` | `HandedOver` (proposed in PR #88) | Instance | lifecycle controller |
-| `ending-soon` | `NoReplacementReady` (proposed in PR #88) | Instance | lifecycle controller |
+| `failing` | `HeartbeatMissed` | the stale observer's resource (Observers) | the component that judges it |
+| `failing` | `UsageWriteFailed` | the front's `Lease` | front |
+| `replaced` | `HandedOver` | Instance | lifecycle controller |
+| `ending-soon` | `NoReplacementReady` | Instance | lifecycle controller |
 
-- An event about a deployment caused by one Instance regards the ModelDeployment, with the Instance in `related`.
+- An event about a deployment caused by one Instance regards the ModelDeployment, with the Instance in `related`. `VerificationFailed`'s `degraded` event and `CapacityDropped`'s regard the Instance instead once the ModelDeployment is gone (`mdObject`, `internal/lifecycle/verify.go`), since nothing else is left to attach them to.
 - The managed catalog controller's events take these types too. Their reasons are the condition reasons it writes: `failing` for `FileRefused` and `NoCredentialsFile` (`CredentialsInvalid`), `KeyRejected` (`CredentialsRejected`), `Expired` (`CredentialsExpiring`) and `ReadsFailing` (`Ready`); `degraded` for `ExpiresWithinADay`, `CatalogEntrySkipped` and `CatalogTruncated`; and `ready` for `FileRead`, `KeyAccepted`, `NotExpiring` and `CatalogRead` when a failing or degraded condition clears.
 - The Provider controller's events are HBEP-4's diagnostics, untyped in alpha (open question 14).
 
@@ -253,11 +254,11 @@ All accessed 2026-10-31. So:
 - an engine series is absent while its value is unknown: while the agent is unreachable, while `Health.MetricsFresh` is false (HBEP-7, Only fresh gauges act), or while the engine does not report that metric;
 - `hpcburst_instance_metrics_unknown{instance_uid, worker, metric, reason} 1` stands in for each absent one, with `metric` the `hpcburst_` name and `reason` one of `agent_unreachable`, `stale` or `not_reported`;
 - the share of unknown samples is then a query: the count of `hpcburst_instance_metrics_unknown` series over the count of engine metrics expected per worker.
-- **A collector whose read fails** exposes none of its series and sets `hpcburst_collector_success{collector} 0`, which is 1 after a successful read, following node_exporter's `node_scrape_collector_success`. So `/metrics` answers even then, and "none" is told from "could not read". In alpha the one collector that reads at scrape time is `accounting`, whose read is the Allocation list; the engine gauges come from the inventory and reports held in memory, which cannot fail, so they have no success gauge, and a missing or stale report shows per worker as below (science-agent rulings, 1 Nov 2026, for #111 and from PR #142's review);
-- an Instance with no report yet, new or after the controller restarted (reports are held in memory, HBEP-7), has, for each worker of its desired state (in alpha one, `worker-0`), every engine metric as `hpcburst_instance_metrics_unknown` with reason `stale`, unless `agent_unreachable` applies; `not_reported` is kept for a metric the engine does not export (science-agent ruling, 1 Nov 2026, for #111);
+- **A collector whose read fails** exposes none of its series and sets `hpcburst_collector_success{collector} 0`, which is 1 after a successful read, following node_exporter's `node_scrape_collector_success`. So `/metrics` answers even then, and "none" is told from "could not read". In alpha two collectors read at scrape time. `accounting` reads the Allocation list. `instances` reads the Instance inventory from the informer cache (below), and the engine values from the reports held in memory. Its inventory read is the Instance list and the cache reads of each Instance's Allocation, Provider and PlatformProfile; any error other than not-found fails it, and `instances` then exposes no Instance series and sets `hpcburst_collector_success{collector="instances"} 0`. A reader takes the share of unknown samples only while that gauge is 1: 0 is a failed read, and the gauge absent on every copy means no copy serves (below). A missing or stale report shows per worker as below (science-agent rulings, 1 Nov 2026, for #111 and from PR #142's review; the `instances` collector's success gauge, 6 Nov 2026, for #249);
+- an Instance with no report yet, new or after the controller restarted (reports are held in memory, HBEP-7), has, for each worker of its desired state (in alpha one, `worker-0`), every engine metric as `hpcburst_instance_metrics_unknown` with reason `stale`, unless `agent_unreachable` applies; `not_reported` is kept for a metric the engine does not export (science-agent ruling, 1 Nov 2026, for #111). An Instance still pending, with no agent yet, is one of them. The leader builds this inventory from its informer cache, which HBEP-11 starts before the election, not from its reconciles. So after a leadership change the new leader lists every live Instance at once, each unknown until its first report to that leader, and a share-of-unknown query reads them as unknown rather than 0 over 0. A copy exports these series, the accounting series and both collectors' `hpcburst_collector_success` only while it serves: `/readyz`'s `leading` passes (it holds the `lifecycle` `Lease`, or runs with `--leader-elect=false`) and its `caches` passes. Otherwise it exports no `hpcburst_` series; controller-runtime's own series stay, and `leader_election_master_status{name="lifecycle"}` tells a standby (0) from a broken copy. So one copy exports at a time, except during the overlap of one hand-over, which a `Lease` does not fence (HBEP-11). Prometheus's staleness can also show a short duplicate or gap across a hand-over, depending on scrape order (science-agent rulings, 2 and 6 Nov 2026, for #249);
 
 **Which Instances have series** (science-agent ruling, 1 Nov 2026, for #111). The names are this HBEP's:
-- every Instance that has not ended has its `hpcburst_instance_info` series;
+- on the serving copy, after a successful inventory read, every Instance that has not ended has its `hpcburst_instance_info` series;
 - each worker in the Instance's latest report has, for each engine metric, either that metric's series or `hpcburst_instance_metrics_unknown` with its reason. The reason is `stale` while the worker has no fresh read, for example while it starts, unless `agent_unreachable` applies;
 - an ended Instance has no series.
 
@@ -277,7 +278,7 @@ Prometheus's advice to export 0 for series that may exist ([instrumentation prac
 
 No client key ID is a label: per-key usage is in the records.
 
-**Controller metrics.** Besides the engine gauges, the lifecycle controller exports the accounting gauges (Provider accounting).
+**Controller metrics.** Besides the engine gauges, the lifecycle controller exports the accounting gauges (Provider accounting). Like the engine gauges, only the serving copy exports them (Unknown samples).
 
 ### Usage records
 
@@ -334,14 +335,15 @@ Alpha counts **allocated** time, from the scheduler's accounting: elapsed time t
 
 ### Code that differs
 
-What the code must change to match this HBEP, as read on 31 Oct 2026. Items marked done are on `main`:
+What the code had to change to match this HBEP, as read on 31 Oct 2026. The PRs named have since merged, so each item is done unless it says "not yet" or names a later change:
 - **PR #88, the lifecycle controller:** in its fix round: `ending-soon` emitted as `Normal`; `CapacityDropped` regarding the ModelDeployment, with the Instance in `related` (a `related` parameter on `Recorder`); the `reasons.go` comment; notes cut to 1,024 bytes. After #88 (#111): the observer events (`AgentUnreachable`, `HeartbeatMissed`, `ObservationGap`) and the metrics server at base + 12, with the 1 Nov 2026 rulings: a never-read Provider judged by its `creationTimestamp`, no event for an absent front `Lease`, no `ObservationGap` under `--leader-elect=false`, and the series of every Instance not ended; also, from PR #142, `hpcburst_collector_success{collector="accounting"}` in place of the invalid metric a failed Allocation list emits today, and `stale` for each desired worker of an Instance with no report yet. The controller's `/readyz` already needs synced caches and leadership on `main` (`internal/lifecycle/manager.go`, `readiness`). In #90's wiring: `providerctl.Options.Recorder` set, since it defaults to a no-op recorder.
 - **The front:** done in PR #95: the reason is the code alone; `coordination.k8s.io/v1` is registered; the usage sink syncs before it returns and its failures are not sticky. Still on `main`, fixed in PR #117 (#112): notes are not cut to 1,024 bytes, `UsageWriteFailed` regards a ModelDeployment, and there is no `/metrics`, no daily file, no `/healthz` `usage` block and no `front` `Lease`. In #90's front part: HBEP-6's probe and `PathProbeFailing`.
-- **The launcher:** done in PR #134 (#64's front supervision): `hpcburst status` reads the front's `/healthz` and shows "degraded: usage writes failing". Still to come, in no PR yet: reading the lifecycle controller's `/readyz` and showing an absent front.
+- **The launcher:** done in PR #134 (#64's front supervision): `hpcburst status` reads the front's `/healthz` and shows "degraded: usage writes failing". Done in PR #187 (#147): reading the lifecycle controller's `/readyz` (`internal/launcher/readyz.go`) and showing an absent front (`StatusReport.FrontAbsent`).
 - **The managed catalog controller:** done in PR #116 (#114): HBEP-8's types, the `ready` events, and the hourly gate with the skip cap. The hourly summary's note (`SkippedSummaryNote`, `pkg/provider/managedstatus.go`) carries a count only; naming the remaining entries comes with its next change.
 - **`agentapi.Health`:** done in PR #115 (#110): the four new fields, the sum and maximum, the non-finite rule and the time-per-output-token pair. Not yet built: an engine that lacks a series entirely is not detected, so a missing contributor still gives a partial total (`internal/agent/engine/metrics.go`). No effect in alpha, which runs one engine per Instance (HBEP-7).
 - **The Slurm plugin:** in PR #118 (#113), at its fix round: `tres.allocated`, the accounting read and the `acct-<UID>` record; a requeued job's hours unknown, not summed; the status write throttled; and the delete rule above (a failed tag lookup keeps the finalizer).
 - **Contracts:** a `LeaseFront` constant next to `LeaseLifecycle`, in the next contracts PR.
+- **The serving gate (6 Nov 2026):** not yet: the accounting gauges' serving gate, and the `instances` collector's success gauge (PR #254, for #249). On `main` the accounting gauges are exported on every copy.
 
 ### Test plan
 
@@ -357,6 +359,8 @@ Tests use the fake Slurm of spike S4, the engine double behind a real agent (`in
 - **Readiness.** The lifecycle controller's `/readyz` fails while a second copy holds the `lifecycle` `Lease`, and while its caches have not synced; its `/healthz` answers in both. `hpcburst status` reports the controller by its `/readyz`.
 - **Series scope.** An Instance in `starting` has its info series, and each engine metric of `worker-0` is `hpcburst_instance_metrics_unknown` with `reason="stale"`, before its first report and until the first fresh read. Once the Instance ends, none of its series is exposed.
 - **A failed Allocation list.** `/metrics` answers 200 with `hpcburst_collector_success{collector="accounting"} 0` and no accounting series; after the next successful list, 1 and the series again.
+- **A failed Instance inventory read.** `/metrics` answers 200 with `hpcburst_collector_success{collector="instances"} 0` and no Instance series; after the next successful read, 1 and the series again.
+- **A standby.** Two managers with leader election on one API server, each read on its own `/metrics`. The standby's has no `hpcburst_` series, while the serving copy's has the Instance and accounting series and both success gauges. After the serving copy stops, the other gains both gauges at 1, and every live Instance shows as unknown with reason `stale` until it reports. A leading copy whose caches have not synced exports no `hpcburst_` series. A fixture with one replica, or one that injects the serving predicate into a collector, proves nothing here.
 - **A restart of the lifecycle controller.** Until the agent's next report, each engine metric of `worker-0` is `hpcburst_instance_metrics_unknown` with reason `stale`.
 - **An engine's metrics endpoint times out or returns nothing:** the series are absent and `hpcburst_instance_metrics_unknown` names the reason, never a 0.
 - **An engine double that omits the prefix-cache counter lines:** those series are absent with reason `not_reported`, and the other series are present. A real vLLM v0.32.0 with prefix caching off still exports both counters, at 0, since it registers them unconditionally (`loggers.py`, lines 660–677): its series are present, and the hit rate is 0 over 0, with no value.
@@ -404,7 +408,7 @@ Tests use the fake Slurm of spike S4, the engine double behind a real agent (`in
 
 ## Operational readiness
 
-1. **Working:** every observer's heartbeat is within its rule: each Provider's `lastSuccessfulStatusRead`, each Instance's last report, the front's probe ages, and the `front` and `lifecycle` `Lease`s. Both `/metrics` endpoints answer, with every `hpcburst_collector_success` at 1. End to end, a request through the front appears in the usage file with its deployment and Instance, and in `hpcburst_front_requests_total`. A `HeartbeatMissed` event, an endpoint that does not answer, or a request missing from usage says it is not working.
+1. **Working:** every observer's heartbeat is within its rule: each Provider's `lastSuccessfulStatusRead`, each Instance's last report, the front's probe ages, and the `front` and `lifecycle` `Lease`s. Both `/metrics` endpoints answer, and the serving lifecycle copy's has `hpcburst_collector_success` for `accounting` and for `instances`, each at 1. If no copy has them, no copy serves, which is not working. End to end, a request through the front appears in the usage file with its deployment and Instance, and in `hpcburst_front_requests_total`. A `HeartbeatMissed` event, an endpoint that does not answer, or a request missing from usage says it is not working.
 2. **Restart:** an observer re-reads the inventory and resumes, and the lifecycle controller and the front emit one `ObservationGap` each. Engine counters start new series under new generation labels. The usage counter resumes at the persisted block end. A crash, a failed batch or a reservation of uncertain persistence leaves a gap; a clean stop does not. Events in the store survive a k3s restart, with their TTL restarted.
 3. **Silent failure:**
    - a collector that cannot read: `hpcburst_collector_success` 0, with none of its series;
@@ -508,6 +512,8 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-01: `hpcburst status` shows the front as absent only when none is configured (ruling for #147, with HBEP-11's amendment of the same day).
 - 2026-11-01: the controller's `/readyz` reads by its two named checks, so a standby shows "not leading" (HBEP-11's amendment of the same day, for #147).
 - 2026-11-01: the `acct-` record waits until the last job no longer carries `COMPLETING` (HBEP-4's amendment of the same day, for #198).
+- 2026-11-02: the Reasons table split for the Instance fallback of `VerificationFailed` and `CapacityDropped`, its "proposed" marks dropped, "Code that differs" read as done, and the Instance metrics' inventory built from the cache across a leadership change (from #239, #241 and #249; PR #248).
+- 2026-11-06: the `instances` collector gets a success gauge, since its inventory is now read from the cache, and only the serving copy exports state-derived series, accounting included (rulings for #249; PR #258, from PR #254's open points).
 
 ## Amendments
 
@@ -532,3 +538,5 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - **2026-11-01: an absent front in `hpcburst status`** (science-agent ruling for #147). The front is shown absent only when the host has no front configured; a configured front with no `Lease` is unhealthy. An absent front `Lease` still raises no event. Before, any absent front `Lease` was shown as an absent front, which could hide a front that failed to start.
 - **2026-11-01: a standby's readiness** (science-agent ruling for #147, with HBEP-11's amendment of the same day). `/readyz` still fails on a copy that does not lead. Its two named checks show why: `caches` passes and `leading` fails, so `hpcburst status` shows "not leading". Before, the text left a standby's state for after alpha.
 - **2026-11-01: the kept record waits for a completing job** (Provider accounting, The kept record; Test plan). Made with HBEP-4's amendment of the same day, for #198, from PR #200's review round. The `acct-` record is written once the Allocation's last job has ended and no longer carries `COMPLETING`, since a completing job is live and keeps the finalizer; the `lostGrace` wait for the final read starts only then. A job stuck in `COMPLETING` blocks deletion, HBEP-4's known risk. The accounting test waits for the flag in both of HBEP-4's listing shapes. Before, "has ended" read as the base state alone, and the text said the record never blocks deletion.
+- **2026-11-02: the Reasons table against the code** (Events; Code that differs; Unknown samples). An amendment, settled in PR #248's review (Astra and a fresh Opus), from #239's drift guard and #241's operator guide. The lifecycle controller's `degraded` row is split. `VerificationFailed` and `CapacityDropped` regard the ModelDeployment, else the Instance once the ModelDeployment is gone, as the code has done since #88; the text did not say so. Every reason in the table is emitted on `main`, so the "proposed" marks are dropped, and the three that are still literals are named. The drift guard is described as PR #246's. "Code that differs" is read as done unless an item says otherwise. Added after the round, for #249: the leader builds the Instance metrics' inventory from its informer cache, so a leadership change shows every live Instance as unknown at once, and a standby emits no Instance series.
+- **2026-11-06: only the serving copy exports state-derived series** (Unknown samples; Controller metrics; Code that differs; Test plan; Operational readiness). An amendment, from PR #254's open points for #249, settled in PR #258's review (Astra and a fresh Opus). Since 2 Nov the Instance inventory is read from the informer cache, so that read can fail. The `instances` collector now has `hpcburst_collector_success`, like `accounting`, and a failed read shows as 0 with no Instance series. A copy exports both collectors' series and gauges only while it serves (leading and caches synced), so replicas duplicate nothing outside one hand-over's unfenced overlap. A reader takes the unknown share only while the `instances` gauge is 1, and readiness needs both gauges at 1 on the serving copy. Before, the text said only `accounting` could fail to read, and only the Instance series were the leader's alone.

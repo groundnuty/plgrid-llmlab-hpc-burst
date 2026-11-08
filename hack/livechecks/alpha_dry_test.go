@@ -33,8 +33,16 @@ const dryWrapper = `#!/bin/bash
 echo "testbin dry" >> "$STUB_STATE/events"
 fault=${STUB_DRY_FAULT:-}
 if [ -n "${HPCBURST_CONFORMANCE:-}" ]; then
-  # the accounting rows: the row is named by the platform, the record directory is the run's
-  export HPCBURST_ALPHA_ROW="gpu-accounting-$HPCBURST_CONF_PROFILE" HPCBURST_ALPHA_OUT="$HPCBURST_CONF_OUT"
+  # the conformance package's rows: the row is named by the platform, the record directory is the run's. The reach
+  # rows (issue #225) keep the gateway's settings, which are what the test points its probe at (the stand-in the
+  # caller started); they go under the dry names, and every live setting goes.
+  case " $* " in
+    *" -test.run ^TestReach$ "*)
+      export HPCBURST_ALPHA_ROW="reach-$HPCBURST_CONF_PROFILE" HPCBURST_ALPHA_PROBE_HOST="$HPCBURST_CONF_PROBE_HOST" \
+        HPCBURST_ALPHA_PROBE_PORT="$HPCBURST_CONF_PROBE_PORT" HPCBURST_ALPHA_PROBE_LABEL="$HPCBURST_CONF_PROBE_LABEL" ;;
+    *) export HPCBURST_ALPHA_ROW="gpu-accounting-$HPCBURST_CONF_PROFILE" ;;
+  esac
+  export HPCBURST_ALPHA_OUT="$HPCBURST_CONF_OUT"
   unset $(env | sed -n 's/^\(HPCBURST_CONF[A-Z_]*\)=.*/\1/p')
 else
   unset HPCBURST_ALPHA_ACCOUNT HPCBURST_ALPHA_CREDENTIALS HPCBURST_ALPHA_HOST_LOCK HPCBURST_ALPHA_CONTROL_DIR HPCBURST_ALPHA_BIN_DIR \
@@ -200,6 +208,83 @@ func TestEveryAlphaRowPassesItsDryRunAndEveryFaultFailsIt(t *testing.T) {
 				_ = shape
 			})
 		}
+	}
+}
+
+// A job of a row that holds QOS now's GPU for hours that is still pending when the wait in the queue runs out is
+// cancelled by its tag and the row is NOT RUN, exit 3 (issue #222, using #210's protocol): the owner's slot was busy,
+// try again later. The row's own test is the real one, in dry mode, with the owner's job holding the one GPU of the
+// fake QOS; the owner's job is left alone. The same overrun on a row with no such slot is a failure, exit 1, with no
+// marker: NOT RUN is for the slot rows only. The default bound is the issue's 30 minutes, written out here, not read
+// from the script; a wait the operator asks for is the one named. The dry run keeps the bound the script gives it
+// (PR 230, B1), and the test judges it by the states on the dry run's manual clock: the job still pending one second
+// before the bound, cancelled one second after it (the stand-in's two logged readings, written out per case), so a
+// bound a minute out in either direction fails the case, whatever the script announced.
+func TestAJobPendingPastTheBoundIsNotRunOnTheNowRowsAndAFailureElsewhere(t *testing.T) {
+	real := realTestBinary(t, "HPCBURST_LIVECHECKS_ALPHA_TEST", alphaPkg)
+	realDir := filepath.Join(repoRoot(t), alphaPkg)
+	for _, c := range []struct {
+		row, setting string
+		code         int
+		wantLine     string // "" for a failure
+		still, gone  string // the stand-in's readings of the manual clock, since the job's submission
+	}{
+		{"alpha-helios-nooverlap", "", 3, "NOT RUN (a job was still pending after 30 min in the queue and was cancelled by its tag; not a failure)", "29m59s", "30m1s"},
+		{"tunnel-hour-helios", "", 3, "NOT RUN (a job was still pending after 30 min in the queue and was cancelled by its tag; not a failure)", "29m59s", "30m1s"},
+		{"tunnel-hour-helios", "LIVE_PENDING_MAX_SECONDS=600", 3, "NOT RUN (a job was still pending after 10 min in the queue and was cancelled by its tag; not a failure)", "9m59s", "10m1s"},
+		{"alpha-helios-nooverlap", "LIVE_PENDING_MAX_SECONDS=90", 3, "NOT RUN (a job was still pending after 1 min 30 s in the queue and was cancelled by its tag; not a failure)", "1m29s", "1m31s"},
+		{"tunnel-hour-athena", "", 1, "", "1h59m59s", "2h0m1s"},
+	} {
+		t.Run(c.row+"/"+c.setting, func(t *testing.T) {
+			t.Parallel()
+			w := newAlphaWorld(t)
+			w.installDry(dryWrapper, real, realDir)
+			env := []string{"STUB_DRY_FAULT=pend-past-bound"}
+			if c.setting != "" {
+				env = append(env, c.setting)
+			}
+			res := w.run(env, "--run", c.row, "--yes")
+			if res.code != c.code {
+				t.Fatalf("exit %d, want %d:\n%s", res.code, c.code, res.out)
+			}
+			log, _ := os.ReadFile(filepath.Join(w.out(), c.row+".log"))
+			for _, want := range []string{
+				"stand-in: the job is still pending " + c.still + " after its submission",
+				"stand-in: the run's jobs are cancelled by their tags " + c.gone + " after the job's submission",
+			} {
+				if !strings.Contains(string(log), want) {
+					t.Errorf("the dry run's log does not hold %q:\n%s", want, log)
+				}
+			}
+			markers, _ := filepath.Glob(filepath.Join(w.out(), c.row+"-*", "not-run.txt"))
+			if posts, _ := filepath.Glob(filepath.Join(w.out(), c.row+"-*", "posts.md")); len(posts) != 0 {
+				t.Errorf("a run that ended on the first clock left a text to post: %v", posts)
+			}
+			if c.wantLine == "" {
+				w.contains(res, c.row+": FAIL", "cleanup: left behind 0")
+				if strings.Contains(res.out, "NOT RUN") || len(markers) != 0 {
+					t.Errorf("a row with no slot ended as NOT RUN (markers %v):\n%s", markers, res.out)
+				}
+				// It failed for the overrun, not for something else.
+				if !strings.Contains(string(log), "was still pending when the wait in the queue ran out") {
+					t.Errorf("the test's log does not give the overrun as the reason:\n%s", log)
+				}
+				return
+			}
+			w.contains(res, c.row+": tests: 0 passed, 0 failed, 1 skipped", c.row+": "+c.wantLine, "cleanup: left behind 0")
+			if strings.Contains(res.out, c.row+": FAIL") || strings.Contains(res.out, c.row+": PASS") {
+				t.Errorf("a NOT RUN run was also reported as a pass or a failure:\n%s", res.out)
+			}
+			if len(markers) != 1 {
+				t.Fatalf("want one not-run marker, found %v", markers)
+			}
+			if fi, err := os.Stat(markers[0]); err != nil || fi.Mode().Perm() != 0o600 {
+				t.Errorf("the marker: %v mode %v, want a file of mode 600", err, fi)
+			}
+			if b, _ := os.ReadFile(markers[0]); strings.Contains(string(b), "hb-") {
+				t.Errorf("the marker names a tag: %s", b)
+			}
+		})
 	}
 }
 
