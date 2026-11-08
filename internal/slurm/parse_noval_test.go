@@ -28,17 +28,24 @@ import (
 // dumps a plain TIMESTAMP, and in the {set, infinite, number} triple, where
 // Slurm itself writes NO_VAL as {set: false} and INFINITE as {infinite: true},
 // and where a "set" triple that carries a marker's number is read the same.
-var markerForms = []struct{ name, raw string }{
-	{"bare NO_VAL", `4294967294`},
-	{"bare INFINITE", `4294967295`},
-	{"bare NO_VAL64", `18446744073709551614`},
-	{"bare INFINITE64", `18446744073709551615`},
-	{"triple, not set", `{"set": false, "infinite": false, "number": 0}`},
-	{"triple, infinite", `{"set": false, "infinite": true, "number": 0}`},
-	{"set triple with NO_VAL", `{"set": true, "infinite": false, "number": 4294967294}`},
-	{"set triple with INFINITE", `{"set": true, "infinite": false, "number": 4294967295}`},
-	{"set triple with NO_VAL64", `{"set": true, "infinite": false, "number": 18446744073709551614}`},
-	{"set triple with INFINITE64", `{"set": true, "infinite": false, "number": 18446744073709551615}`},
+var markerForms = []struct {
+	name, raw string
+	// infinite is whether the value is INFINITE, which noVal keeps apart from
+	// NO_VAL: "unlimited" is not "unset".
+	infinite bool
+}{
+	{"bare NO_VAL", `4294967294`, false},
+	{"bare INFINITE", `4294967295`, true},
+	// A native 64-bit marker is dumped as null by Slurm's UINT64 dumper (see
+	// parse.go), so the four 64-bit rows are defensive.
+	{"bare NO_VAL64", `18446744073709551614`, false},
+	{"bare INFINITE64", `18446744073709551615`, true},
+	{"triple, not set", `{"set": false, "infinite": false, "number": 0}`, false},
+	{"triple, infinite", `{"set": false, "infinite": true, "number": 0}`, true},
+	{"set triple with NO_VAL", `{"set": true, "infinite": false, "number": 4294967294}`, false},
+	{"set triple with INFINITE", `{"set": true, "infinite": false, "number": 4294967295}`, true},
+	{"set triple with NO_VAL64", `{"set": true, "infinite": false, "number": 18446744073709551614}`, false},
+	{"set triple with INFINITE64", `{"set": true, "infinite": false, "number": 18446744073709551615}`, true},
 }
 
 // Each marker, in each form, is no value: not a number, not a time, not a
@@ -54,6 +61,9 @@ func TestNoValReadsSlurmMarkersAsNoValue(t *testing.T) {
 			if v, ok := n.value(); ok {
 				t.Errorf("value() = %v, true; want no value", v)
 			}
+			if n.Infinite != f.infinite {
+				t.Errorf("Infinite = %v, want %v: INFINITE is unlimited, NO_VAL is unset", n.Infinite, f.infinite)
+			}
 			if e := n.epoch(); e != nil {
 				t.Errorf("epoch() = %s, want none", e)
 			}
@@ -66,11 +76,17 @@ func TestNoValReadsSlurmMarkersAsNoValue(t *testing.T) {
 		name, raw string
 		want      float64
 		epoch     *time.Time
+		// noEpoch skips the epoch check: no int64 holds the number, and
+		// nothing reads such a number as a time.
+		noEpoch bool
 	}{
-		{"bare epoch", `1793351400`, 1793351400, ptr(at(2026, 10, 30, 9, 10, 0))},
-		{"set triple", `{"set": true, "infinite": false, "number": 1793351400}`, 1793351400, ptr(at(2026, 10, 30, 9, 10, 0))},
-		{"one below NO_VAL", `4294967293`, 4294967293, ptr(at(2106, 2, 7, 6, 28, 13))},
-		{"bare zero", `0`, 0, nil},
+		{"bare epoch", `1793351400`, 1793351400, ptr(at(2026, 10, 30, 9, 10, 0)), false},
+		{"set triple", `{"set": true, "infinite": false, "number": 1793351400}`, 1793351400, ptr(at(2026, 10, 30, 9, 10, 0)), false},
+		{"one below NO_VAL", `4294967293`, 4294967293, ptr(at(2106, 2, 7, 6, 28, 13)), false},
+		// 0xfffffffffffffffd is NO_CONSUME_VAL64, a TRES marker and not one of
+		// these; float64 holds it as 2**64, the same as the markers beside it.
+		{"one below NO_VAL64", `18446744073709551613`, 1 << 64, nil, true},
+		{"bare zero", `0`, 0, nil, false},
 	} {
 		t.Run("control: "+c.name, func(t *testing.T) {
 			var n noVal
@@ -79,6 +95,9 @@ func TestNoValReadsSlurmMarkersAsNoValue(t *testing.T) {
 			}
 			if v, ok := n.value(); !ok || v != c.want {
 				t.Errorf("value() = %v, %v; want %v, true", v, ok, c.want)
+			}
+			if c.noEpoch {
+				return
 			}
 			if e := n.epoch(); !reflect.DeepEqual(e, c.epoch) {
 				t.Errorf("epoch() = %v, want %v", e, c.epoch)

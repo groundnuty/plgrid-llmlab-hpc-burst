@@ -57,11 +57,16 @@ func knownDataParser(v string) bool {
 // latter: DUMP_FUNC at src/plugins/data_parser/v0.0.42/parsers.c, same tag,
 // lines 2838, 2955 and 5308): NO_VAL is {set: false}, INFINITE {infinite:
 // true}. A field that the parser declares a plain TIMESTAMP is dumped by
-// DUMP_FUNC(TIMESTAMP) (line 5285) as a bare uint64 with no such check, so a
-// marker in it reaches us as the bare number. That is sacct's time.start,
-// time.submission, time.eligible and time.end (PARSER_ARRAY(JOB), from line
-// 6938). The GH200 conformance run (#93, issue #267) got the real reply of a
-// job cancelled before it started with time.start 4294967294.
+// DUMP_FUNC(TIMESTAMP) (line 5285) through DUMP_FUNC(UINT64) (line 2885), which
+// turns NO_VAL64 and INFINITE64 into null but passes every other number, the
+// 32-bit markers among them (a time_t that holds 0xfffffffe is not NO_VAL64).
+// So the 32-bit marker in such a field reaches us as the bare number. That is
+// sacct's time.start, time.submission, time.eligible and time.end
+// (PARSER_ARRAY(JOB), from line 6938). The GH200 conformance run (#93, issue
+// #267) got the real reply of a job cancelled before it started with
+// time.start 4294967294. A native 64-bit marker is dumped as null, which
+// noVal reads as no value already, so the 64-bit forms below are defensive:
+// the dumper of these fields does not write them as numbers.
 const (
 	slurmNoVal32    uint64 = 0xfffffffe
 	slurmInfinite32 uint64 = 0xffffffff
