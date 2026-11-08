@@ -52,10 +52,18 @@ var standInPair = Timing{MaxRequestDuration: 90 * time.Second, DrainMargin: 30 *
 // requests of about a minute near it, a 30 s idle stretch, a look at least
 // every 30 s, and a 12-minute lease, so that the hour ends before the drain
 // start, which the one-job end puts a minute early (LatestReady: 12 min less
-// 1 min 45 s less 5 min 5 s, over 5 minutes).
+// 1 min 45 s less 5 min 5 s, over 5 minutes). The upload (issue #224) sends
+// bodies of 128 KiB, large requests, from one sender that pauses 250 ms after
+// each reply: on this host's loopback an unpaced sender would move gigabytes in
+// the 30 s, so the stand-in's upload rate is its pacing's, not a path's.
 var standInTunnel = Timing{MaxRequestDuration: 75 * time.Second, DrainMargin: 30 * time.Second, HandoverMargin: 30 * time.Second,
 	StartTimeout: 4 * time.Minute, TunnelHour: 5*time.Minute + 5*time.Second, Hour: 5 * time.Minute, NearDeadline: time.Minute,
-	MinIdleGap: 30 * time.Second, MaxSampleGap: 30 * time.Second}
+	MinIdleGap: 30 * time.Second, MaxSampleGap: 30 * time.Second,
+	UploadBody: 128 << 10, UploadStreams: 1, UploadPause: 250 * time.Millisecond}
+
+// standInFrontLabel says where the stand-in's front ran (issue #224): this
+// development host, its note saying the run reached no cluster.
+const standInFrontLabel = "the development host, outside Cyfronet's network (stand-in run, no cluster)"
 
 // standInTokenDelay is the engine double's time per token: 50 tokens a second
 // a stream, above the 20 the tunnel row's streams need.
@@ -198,7 +206,7 @@ func runStandIn(t *testing.T, name string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := Config{Row: row, StandIn: true, Out: filepath.Join(t.TempDir(), "out"), PendingMax: 2 * time.Minute, RunID: id}
+	cfg := Config{Row: row, StandIn: true, Out: filepath.Join(t.TempDir(), "out"), PendingMax: 2 * time.Minute, RunID: id, FrontLabel: standInFrontLabel}
 	t.Logf("%s: %s", row.Name, cfg.Mode())
 	rec, err := NewRecorder(cfg.Out)
 	if err != nil {

@@ -65,6 +65,13 @@ const (
 	// #224): the hour must send such requests, among the streams, so that the upload
 	// direction carries real load and the tunnel's head-of-line pressure shows there.
 	MinLargeBody = 100_000
+	// UploadBody and UploadStreams are the live tunnel hour's upload load (issue
+	// #224, the upload direction, front to node): request bodies of 8 MiB, more
+	// than frp's 6 MiB window and the sockets' buffers can hold, so that the
+	// front's upload interval of each is the path's, sent back to back by two
+	// senders, so that the path is busy while one waits for its reply.
+	UploadBody    = 8 << 20
+	UploadStreams = 2
 	// MinIdleGap is the shortest stretch with no request open at all, where the
 	// session carries heartbeats only.
 	MinIdleGap = 2 * time.Minute
@@ -204,13 +211,20 @@ type Timing struct {
 	StreamRate        float64
 	MinIdleGap        time.Duration
 	MaxSampleGap      time.Duration
+	// UploadBody is the size of the upload's request bodies in bytes, UploadStreams
+	// how many senders send them, and UploadPause the pause each sender takes
+	// after a reply (none on the live clock: the senders keep the path busy; a
+	// stand-in paces its loopback).
+	UploadBody, UploadStreams int
+	UploadPause               time.Duration
 }
 
 // LiveTiming is the live rows' clock: this file's constants, and S1's hour.
 func LiveTiming() Timing {
 	return Timing{MaxRequestDuration: MaxRequestDuration, DrainMargin: DrainMargin, HandoverMargin: HandoverMargin, StartTimeout: StartTimeout,
 		IdleLimit: IdleLimit, MaxIdleLimit: 10 * time.Minute, TunnelHour: TunnelHour, Hour: Hour, MinChain: MinChain, MaxChainGap: MaxChainGap,
-		NearDeadline: NearDeadline, ConcurrentStreams: ConcurrentStreams, StreamRate: StreamRate, MinIdleGap: MinIdleGap, MaxSampleGap: MaxSampleGap}
+		NearDeadline: NearDeadline, ConcurrentStreams: ConcurrentStreams, StreamRate: StreamRate, MinIdleGap: MinIdleGap, MaxSampleGap: MaxSampleGap,
+		UploadBody: UploadBody, UploadStreams: UploadStreams}
 }
 
 // Clock is the row's Timing with each zero field taken from LiveTiming.
@@ -242,6 +256,13 @@ func (r Row) Clock() Timing {
 	if t.StreamRate == 0 {
 		t.StreamRate = l.StreamRate
 	}
+	if t.UploadBody == 0 {
+		t.UploadBody = l.UploadBody
+	}
+	if t.UploadStreams == 0 {
+		t.UploadStreams = l.UploadStreams
+	}
+	fill(&t.UploadPause, l.UploadPause)
 	return t
 }
 

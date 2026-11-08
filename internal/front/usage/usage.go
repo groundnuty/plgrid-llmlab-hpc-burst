@@ -59,10 +59,24 @@ type Record struct {
 	// ErrorCode is the error.code of a stream that ended with an engine
 	// error after it started (response.failed), when the event has one.
 	ErrorCode *string `json:"errorCode,omitempty"`
+	// BodyBytes, BodyStartTime and BodyEndTime are the request body the front
+	// sent upstream and its upload interval: from the request's headers written
+	// to the request written whole, as the front handed them to the connection
+	// to the target (proposed names, issue #224: the upload direction, front to
+	// node). The times are UTC RFC 3339 to the microsecond (TimeMicro), since a
+	// small body is written in less than a millisecond. Absent when the request
+	// was never written upstream.
+	BodyBytes     *int64 `json:"bodyBytes,omitempty"`
+	BodyStartTime string `json:"bodyStartTime,omitempty"`
+	BodyEndTime   string `json:"bodyEndTime,omitempty"`
 }
 
 // Time formats a time as a usage record does: UTC, millisecond RFC 3339.
 func Time(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z07:00") }
+
+// TimeMicro formats a time as a usage record's upload interval does: UTC,
+// microsecond RFC 3339.
+func TimeMicro(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000000Z07:00") }
 
 // Files in the usage directory.
 const (

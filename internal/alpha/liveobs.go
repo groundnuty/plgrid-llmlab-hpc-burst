@@ -8,6 +8,7 @@ package alpha
 // their inputs. Nothing here reads a log line.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -123,7 +124,57 @@ func StreamOf(rec usage.Record, end ClientEnd) Stream {
 		s.Tokens = int(*rec.CompletionTokens)
 	}
 	s.Complete = rec.Status == http.StatusOK && rec.Finish != nil && rec.CutBy == nil && end.Done && end.Finished && end.ErrorCode == ""
+	// The upload of the body, as the front sent it upstream (issue #224); absent when it never wrote it.
+	if rec.BodyBytes != nil {
+		s.BodyBytes = int(*rec.BodyBytes)
+	}
+	s.BodyStart, _ = time.Parse(time.RFC3339Nano, rec.BodyStartTime)
+	s.BodyEnd, _ = time.Parse(time.RFC3339Nano, rec.BodyEndTime)
 	return s
+}
+
+// UploadRequestBody is a streamed chat request of one token whose body is at least n
+// bytes: the bytes are the "user" member, which OpenAI's API defines as an
+// end-user identifier and an engine does not tokenize, so a body of megabytes
+// costs the engine a JSON parse, not a prompt (issue #224, the upload).
+func UploadRequestBody(model string, n int) string {
+	m, _ := json.Marshal(model)
+	head := `{"model":` + string(m) + `,"messages":[{"role":"user","content":"hello"}],"max_tokens":1,"stream":true,"stream_options":{"include_usage":true},"user":"`
+	pad := max(n-len(head)-2, 0)
+	return head + strings.Repeat("u", pad) + `"}`
+}
+
+// UploadRate is the path rate in the upload direction, front to node, from
+// the upload's requests (issue #224; S1's C6): the bytes of their bodies over
+// the time from the first body's first byte to the last body's last byte, as
+// the front sent them (its usage records), asked for the time the senders
+// were asked to send. It is under load when every body was sent while all the
+// streams of the load were open, from allOpen (the last of them to deliver its
+// first token) to firstEnd (the first of them to end). It is not OK when there
+// is no request, or one did not complete or has no upload recorded.
+func UploadRate(ups []Stream, asked time.Duration, allOpen, firstEnd time.Time) PathRate {
+	r := PathRate{Direction: DirUpload, AskedSeconds: asked.Seconds(), OK: len(ups) > 0, UnderLoad: len(ups) > 0}
+	var first, last time.Time
+	for _, u := range ups {
+		if !u.Complete || !u.UploadRecorded() || u.BodyBytes <= 0 {
+			r.OK = false
+			continue
+		}
+		r.Bytes += int64(u.BodyBytes)
+		if first.IsZero() || u.BodyStart.Before(first) {
+			first = u.BodyStart
+		}
+		if u.BodyEnd.After(last) {
+			last = u.BodyEnd
+		}
+		if u.BodyStart.Before(allOpen) || u.BodyEnd.After(firstEnd) {
+			r.UnderLoad = false
+		}
+	}
+	if !first.IsZero() {
+		r.TimedSeconds = last.Sub(first).Seconds()
+	}
+	return r
 }
 
 // WorkerRestarts counts the restarts at the worker rung that the run's

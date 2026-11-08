@@ -427,12 +427,46 @@ func (pr *prober) end() int {
 	return pr.noReady
 }
 
-// tunnelBodyPad is the further message the hour's requests carry. On main it
-// is none: issue #224 (PR #244) adds the large request bodies (MinLargeBody
-// bytes, among the streams), their sizes (Stream.BodyBytes) and the upload
-// direction's rate (TunnelHourObs.Rates); they are wired here, in TunnelHour's
-// traffic and its rate, when that merges.
-const tunnelBodyPad = ""
+// uploads is the hour's upload load (issue #224, the upload direction, front
+// to node): tm.UploadStreams senders, each sending a streamed request of one
+// token whose body is tm.UploadBody bytes (UploadRequestBody), waiting for its reply,
+// pausing tm.UploadPause, and sending the next, until rateAsked has passed.
+// Every body is a large request (MinLargeBody or more). It runs beside the
+// burst's streams, from its own goroutines, and returns every reply as the
+// client read it; one that did not end within the request's time out has no
+// request ID, which the observation counts as no reply.
+func (r *liveRun) uploads(key string) []stack.Streamed {
+	tm := r.tm
+	body := UploadRequestBody(r.fc.Model, tm.UploadBody)
+	until := time.Now().Add(rateAsked)
+	var (
+		mu   sync.Mutex
+		outs []stack.Streamed
+		wg   sync.WaitGroup
+	)
+	for range tm.UploadStreams {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for time.Now().Before(until) {
+				_, done := r.fc.StartStream(body, key)
+				var out stack.Streamed
+				select {
+				case out = <-done:
+				case <-time.After(r.fc.RequestTimeout() + time.Minute):
+				}
+				mu.Lock()
+				outs = append(outs, out)
+				mu.Unlock()
+				if tm.UploadPause > 0 {
+					time.Sleep(tm.UploadPause)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return outs
+}
 
 // sampler looks at the tunnel session of an Instance every interval: frps's
 // proxy list for its lastStartTime and the API for its TunnelConnected. It
@@ -525,9 +559,11 @@ const rateAsked = 30 * time.Second
 // TunnelHour is tunnel-hour-*: S1's hour over this wiring. With a look at the
 // tunnel session every quarter of MaxSampleGap, it sends requests back to back
 // near the deadline; a burst of ConcurrentStreams streams, inside which it
-// measures the path rate in the token direction with one more stream asked for
-// 30 s; an idle stretch longer than MinIdleGap; and requests back to back again
-// until TunnelHour has run.
+// measures the path rate in both directions for 30 s each (issue #224): the
+// download, node to front, with one more stream, and the upload, front to
+// node, with large request bodies sent back to back (uploads), whose upload
+// intervals the front records; an idle stretch longer than MinIdleGap; and
+// requests back to back again until TunnelHour has run.
 func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error) {
 	r.start(p)
 	in, err := r.firstReady(p)
@@ -561,24 +597,40 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	first := time.Now()
 	var reqs []Stream
 	for i := 0; i < tm.MinChain; i++ {
-		reqs = append(reqs, r.finish(r.openStream(nLong, key, tunnelBodyPad)))
+		reqs = append(reqs, r.finish(r.openStream(nLong, key, "")))
 	}
-	// The burst, and the path rate inside it.
+	// The burst, and the path rates inside it: the download with one more
+	// stream, the upload beside it once every stream of the burst runs.
 	var bs []stream
 	for i := 0; i < tm.ConcurrentStreams; i++ {
-		bs = append(bs, r.openStream(nBurst, key, tunnelBodyPad))
+		bs = append(bs, r.openStream(nBurst, key, ""))
 	}
 	for _, s := range bs {
 		<-s.first
 	}
+	allOpen := time.Now()
+	upDone := make(chan []stack.Streamed, 1)
+	go func() { upDone <- r.uploads(key) }()
 	rs := r.wait(r.openStream(nRate, key, ""))
+	var ups []stack.Streamed
+	select {
+	case ups = <-upDone:
+	case <-r.guardFail:
+		r.checkGuard()
+	case <-time.After(rateAsked + r.fc.RequestTimeout() + 2*time.Minute):
+		r.t.Fatal("the upload's senders did not finish")
+	}
 	var outs []stack.Streamed
 	for _, s := range bs {
 		outs = append(outs, r.wait(s))
 	}
 	under := true
+	firstEnd := time.Time{}
 	for _, o := range outs {
 		under = under && !o.EndAt.Before(rs.EndAt)
+		if firstEnd.IsZero() || o.EndAt.Before(firstEnd) {
+			firstEnd = o.EndAt
+		}
 		reqs = append(reqs, r.observe(o))
 	}
 	rateObs := r.observe(rs)
@@ -587,6 +639,12 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	if !rs.FirstAt.IsZero() {
 		pr.TimedSeconds = rs.EndAt.Sub(rs.FirstAt).Seconds()
 	}
+	var upObs []Stream
+	for _, u := range ups {
+		upObs = append(upObs, r.observe(u))
+	}
+	reqs = append(reqs, upObs...)
+	up := UploadRate(upObs, rateAsked, allOpen, firstEnd)
 	// Heartbeats only.
 	idle := time.Now().Add(tm.MinIdleGap + 15*time.Second)
 	r.waitFor(tm.MinIdleGap+time.Minute, "the idle stretch", func() bool { return !time.Now().Before(idle) })
@@ -595,7 +653,7 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 			p.Logf("%s: the drain start comes before the hour is over", p.Row.Name)
 			break
 		}
-		reqs = append(reqs, r.finish(r.openStream(nLong, key, tunnelBodyPad)))
+		reqs = append(reqs, r.finish(r.openStream(nLong, key, "")))
 	}
 	samples := smp.end()
 	dep := r.observedDeployment()
@@ -606,6 +664,7 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	if err != nil {
 		return TunnelHourObs{}, err
 	}
-	p.Logf("%s: %d requests over %s; path rate %.0f B/s, %.0f tokens/s", p.Row.Name, len(reqs), time.Since(first).Round(time.Second), pr.BytesPerSecond(), pr.TokensPerSecond())
-	return TunnelHourObs{Tags: tags, Requests: reqs, Samples: samples, DrainStart: ds, Deployment: dep, Rates: []PathRate{pr}}, nil
+	p.Logf("%s: %d requests over %s; path rate, download %.0f B/s and %.0f tokens/s, upload %.0f B/s over %d requests of %d bytes", p.Row.Name, len(reqs),
+		time.Since(first).Round(time.Second), pr.BytesPerSecond(), pr.TokensPerSecond(), up.BytesPerSecond(), len(upObs), tm.UploadBody)
+	return TunnelHourObs{Tags: tags, Requests: reqs, Samples: samples, DrainStart: ds, Deployment: dep, Rates: []PathRate{up, pr}}, nil
 }

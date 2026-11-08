@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"net/http/httptrace"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/clock"
@@ -65,6 +67,40 @@ type exchange struct {
 	headers     clock.Timer // streamHeadersTimeout, armed at the request's last byte
 	headersGen  int         // the attempt the headers timer belongs to
 	headersDone bool        // the attempt's headers came, or it ended
+
+	// The upload of the request's body to the target, on the transport's
+	// write goroutine: when its headers were written, when the request was
+	// written whole (UnixNano of the exchange's clock), and the bytes, of the
+	// last attempt that wrote it (bodyTrace).
+	bodyStart, bodyEnd, bodyBytes atomic.Int64
+}
+
+// bodyTrace records the upload of an attempt's body of n bytes: its headers
+// written, then the request written whole without an error, as the transport
+// hands them to the connection (issue #224, the upload direction).
+func (x *exchange) bodyTrace(n int) *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		WroteHeaders: func() { x.bodyStart.Store(x.clk.Now().UnixNano()) },
+		WroteRequest: func(i httptrace.WroteRequestInfo) {
+			if i.Err == nil {
+				x.bodyBytes.Store(int64(n))
+				x.bodyEnd.Store(x.clk.Now().UnixNano())
+			}
+		},
+	}
+}
+
+// recordBody puts the upload of the body into the usage record, when an
+// attempt wrote it whole.
+func (x *exchange) recordBody() {
+	end := x.bodyEnd.Load()
+	if end == 0 {
+		return
+	}
+	n := x.bodyBytes.Load()
+	x.rec.BodyBytes = &n
+	x.rec.BodyStartTime = usage.TimeMicro(time.Unix(0, x.bodyStart.Load()))
+	x.rec.BodyEndTime = usage.TimeMicro(time.Unix(0, end))
 }
 
 func newExchange(r *http.Request, clk clock.Clock, maxReq time.Duration) *exchange {

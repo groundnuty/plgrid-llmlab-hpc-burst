@@ -22,6 +22,8 @@ var liveTimingByHand = Timing{
 	TunnelHour: 61 * time.Minute, Hour: time.Hour,
 	MinChain: 3, MaxChainGap: 10 * time.Second, NearDeadline: 4 * time.Minute,
 	ConcurrentStreams: 16, StreamRate: 20, MinIdleGap: 2 * time.Minute, MaxSampleGap: 2 * time.Minute,
+	// The upload (issue #224): 8 MiB bodies, over frp's 6 MiB window, from two senders with no pause.
+	UploadBody: 8 << 20, UploadStreams: 2,
 }
 
 func TestLiveRowsKeepTheLiveTiming(t *testing.T) {
