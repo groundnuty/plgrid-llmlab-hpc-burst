@@ -93,6 +93,12 @@ func cliIn(t *testing.T, dir string, args ...string) cliResult {
 		where = "(in " + dir + ") "
 	}
 	t.Logf("%s$ hpcburst %s\nexit %d\n%s%s", where, strings.Join(args, " "), code, so.String(), se.String())
+	// No test here leaves someone else's listener on a recorded port, so a foreign-listener warning
+	// from down names the host's own sockets: it was k3s's own ports, in every down of the real-k3s
+	// runs, until issue #264 (down judged k3s's listeners while k3s was still to be stopped).
+	if len(args) > 0 && args[0] == "down" && strings.Contains(se.String()+so.String(), "listens on one of the recorded ports") {
+		t.Errorf("down called one of the host's own ports a foreign listener:\n%s%s", so.String(), se.String())
+	}
 	return cliResult{so.String(), se.String(), code}
 }
 
