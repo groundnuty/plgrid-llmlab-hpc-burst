@@ -160,7 +160,7 @@ A ModelDeployment with a managed source (an entry LLMLab serves) gets none of th
 ### `VerificationFailed`
 
 - **Means:** an Instance's verification found that the engine runs other settings than the spec declares (a settings contradiction), or that a workload shape does not fit the context limit the engine reported (a shape misfit). The message names the accelerator class and the verification record, `ver-<instance UID>-<generation>`.
-- **The controller** ended that Instance at once with `VerificationFailed`, released its Allocation, and stopped provisioning in its class. A contradiction stops the class until the serving spec changes. A shape misfit stops it until the spec changes or a `workload` edit makes the shapes fit, which lifts the stop with a `ready` event `ShapesFit` ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Instance start, verifying).
+- **The controller** ended that Instance at once with `VerificationFailed`, released its Allocation, and stopped provisioning in its class. A contradiction stops the class until the serving spec changes. A shape misfit stops it until the spec changes or the workload's resolved shapes change, and a change that makes the shapes fit lifts the stop with a `ready` event `ShapesFit`. The exception is a misfit whose verification record holds no context limit to test the shapes against: only a spec change lifts that one, and the message says so. A verification of this release always records the limit, so the exception applies only to a record without one (`internal/lifecycle/verify.go`, `stopLifts` and `classBlocked`; `judge.go`; [HBEP-7](../hbep/0007-lifecycle-controller/README.md), Instance start, verifying).
 - **You:** read the record, which holds the settings the engine reported and the verdict:
 
   ```
@@ -168,7 +168,7 @@ A ModelDeployment with a managed source (an entry LLMLab serves) gets none of th
   hbk get controllerrevision <record> -o yaml
   ```
 
-  Declare the value as the engine reports it (a model hook can rewrite one, HBEP-7's known limit), or fix the workload. The message says "until the serving spec changes" for both causes; for a shape misfit a `workload` edit is enough.
+  Declare the value as the engine reports it (a model hook can rewrite one, HBEP-7's known limit), or fix the workload. The message says what lifts the stop: "until the serving spec changes" for a contradiction, and for a misfit whose record holds no context limit; "until the serving spec or the workload's resolved shapes change" for any other misfit, for which a `workload` edit that makes the shapes fit is enough.
 
 ### `IdentityUnresolved`
 
