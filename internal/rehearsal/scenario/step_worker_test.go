@@ -114,7 +114,7 @@ func (r *rig) stepWorkerRestart(in *v1alpha1.Instance, key string) {
 		r.t.Fatalf("step (d): job %d has %d engine processes %v, want 1", jobID, len(engines), engines)
 	}
 	leader := r.workerLeader(jobID, engines[0])
-	pauses, ok := frontCounter("hpcburst_front_pauses_total")
+	pauses, ok := r.frontCounter("hpcburst_front_pauses_total")
 	if !ok {
 		r.t.Fatal("step (d): the front's /metrics cannot be read")
 	}
@@ -149,8 +149,8 @@ func (r *rig) stepWorkerRestart(in *v1alpha1.Instance, key string) {
 	for i := 0; i <= pauseAfterFailures; i++ {
 		burst = append(burst, send())
 	}
-	pausesAfter, _ := frontCounter("hpcburst_front_pauses_total")
-	reg, known := registered(in)
+	pausesAfter, _ := r.frontCounter("hpcburst_front_pauses_total")
+	reg, known := r.registered(in)
 	still, _ := r.instance(in.Name)
 	moved, left := r.watch.first(in.UID, killAt, func(o observation) bool { return o.phase != v1alpha1.InstanceReady })
 	resume()

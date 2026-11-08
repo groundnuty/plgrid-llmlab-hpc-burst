@@ -88,7 +88,7 @@ func (r *rig) stepTunnelLoss(in *v1alpha1.Instance, key string) {
 	defer r.stepTimer("e")()
 	r.beforeDrain("e", in)
 	before, ok := r.instance(in.Name)
-	if reg, known := registered(in); !ok || before.Status.Phase != v1alpha1.InstanceReady ||
+	if reg, known := r.registered(in); !ok || before.Status.Phase != v1alpha1.InstanceReady ||
 		!conditionTrue(before.Status.Conditions, v1alpha1.ConditionTunnelConnected) || !known || !reg {
 		r.t.Fatalf("step (e) needs a ready, connected and registered Instance %s: %+v, registered %v (known %v)", in.Name, before.Status, reg, known)
 	}
@@ -106,7 +106,7 @@ func (r *rig) stepTunnelLoss(in *v1alpha1.Instance, key string) {
 		if o, ok := r.watch.first(in.UID, start, func(o observation) bool { return o.tunnel == metav1.ConditionFalse }); ok && falseAt.IsZero() {
 			falseAt = o.at
 		}
-		if reg, known := registered(in); known && !reg && goneAt.IsZero() {
+		if reg, known := r.registered(in); known && !reg && goneAt.IsZero() {
 			goneAt = time.Now()
 		}
 		if !falseAt.IsZero() && !goneAt.IsZero() {
@@ -158,7 +158,7 @@ func (r *rig) requestDuringLoss(in *v1alpha1.Instance, key string, jobID int, st
 		}
 	}()
 	rp := r.send("/v1/chat/completions", chatBody(4, 0, false), key)
-	reg, known := registered(in)
+	reg, known := r.registered(in)
 	close(stop)
 	for _, p := range <-done {
 		killed[p] = true
@@ -196,7 +196,7 @@ func (r *rig) checkTunnelBack(in *v1alpha1.Instance, key string, jobID int, stag
 	lost := time.Now()
 	waitFor(r.t, waitDeadline, "TunnelConnected True and the front's registration back", func() bool {
 		now, ok := r.instance(in.Name)
-		reg, known := registered(in)
+		reg, known := r.registered(in)
 		return ok && conditionTrue(now.Status.Conditions, v1alpha1.ConditionTunnelConnected) && known && reg
 	})
 	r.t.Logf("step (e): the tunnel and the registration came back %s after the agent's new frpc was seen", time.Since(lost).Round(100*time.Millisecond))

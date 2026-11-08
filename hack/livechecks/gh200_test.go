@@ -140,7 +140,7 @@ func TestGH200ConformanceGivesTheTestItsQOSAndNoOtherRowDoes(t *testing.T) {
 		}
 	}
 
-	for _, row := range []string{"conformance-helios", "conformance-athena"} {
+	for _, row := range []string{"conformance-helios"} {
 		t.Run(row, func(t *testing.T) {
 			w := newWorld(t)
 			w.useStubGo()
@@ -208,7 +208,7 @@ func TestOnlyAMarkedCleanSkipOfARowWithABoundIsNotRun(t *testing.T) {
 		{"a failed subtest beside the marker", "conformance-helios-gh200", "not-run-subfail"},
 		{"a skip with no marker", "conformance-helios-gh200", "skip"},
 		{"a marker from a row with no bound", "conformance-helios", "not-run"},
-		{"a marker from another row with no bound", "conformance-athena", "not-run"},
+		{"a marker from another row with no bound", "gpu-accounting-athena", "not-run"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := newWorld(t)
