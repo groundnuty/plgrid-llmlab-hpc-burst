@@ -216,6 +216,7 @@ func Scan(o Options) (*reasondrift.Code, error) {
 	for _, c := range counters {
 		s.counters[strings.ReplaceAll(c, "{mod}", mod)] = true
 	}
+	s.indexImplementers(prog)
 	s.collectRecorders(code)
 	setters := o.ConditionSetters
 	if len(setters) == 0 {

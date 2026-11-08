@@ -491,6 +491,7 @@ func TestARecorderMustBeWrappedToCount(t *testing.T) {
 		"countedLegacy":                  legacy,
 		"countedThroughVariable":         events,
 		"countedThroughMethodExpression": events,
+		"countedThroughOwnInterface":     events,
 	}; !maps.Equal(wrapped, want) {
 		t.Errorf("recorders accepted: %v, want %v", wrapped, want)
 	}
@@ -513,6 +514,11 @@ func TestARecorderMustBeWrappedToCount(t *testing.T) {
 		"methodValue":         "is taken as a value",
 		"concreteMethodValue": "is taken as a value",
 		"methodExpression":    "is taken as a value",
+		// Through an interface of the package's own that rb.Manager
+		// implements, and one only a struct that embeds a Manager implements.
+		"ownInterfaceReturned":    "used by a Return instruction",
+		"ownInterfaceMethodValue": "is taken as a value",
+		"throughEmbeddingOnly":    "used by a Return instruction",
 	}
 	got := map[string][]string{}
 	for _, p := range problemsOf(code, reasondrift.RecorderNotCounted) {

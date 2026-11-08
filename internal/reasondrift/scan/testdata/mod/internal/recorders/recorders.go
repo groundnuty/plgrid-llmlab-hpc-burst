@@ -66,6 +66,45 @@ func concreteMethodValue(b *rb.Broadcaster) func(string) rb.Logger { return b.Ne
 
 func methodExpression() func(rb.Manager, string) rb.Recorder { return rb.Manager.GetEventRecorder }
 
+// Through an interface of this package's own, which rb.Manager implements, and
+// a struct of this package that embeds a Manager, used only through it: the
+// calls are a builder's.
+
+type recorderSource interface {
+	GetEventRecorder(name string) rb.Recorder
+}
+
+type embedsManager struct{ rb.Manager }
+
+func countedThroughOwnInterface(m recorderSource) rb.Recorder {
+	return eventcount.Events(m.GetEventRecorder("a"), "c")
+}
+
+func ownInterfaceReturned(m recorderSource) rb.Recorder { return m.GetEventRecorder("a") }
+
+func ownInterfaceMethodValue(m recorderSource) func(string) rb.Recorder { return m.GetEventRecorder }
+
+// Other gives the struct one more method, so embeddedSource is implemented by
+// it, through its embedded Manager, and not by rb.Manager.
+func (embedsManager) Other() {}
+
+type embeddedSource interface {
+	GetEventRecorder(name string) rb.Recorder
+	Other()
+}
+
+func throughEmbeddingOnly(e embeddedSource) rb.Recorder { return e.GetEventRecorder("a") }
+
+// An interface no builder's type implements (it has one more method): its
+// method of a builder's name is no builder.
+
+type closingSource interface {
+	GetEventRecorder(name string) rb.Recorder
+	Close()
+}
+
+func notABuilderInterface(c closingSource) rb.Recorder { return c.GetEventRecorder("a") }
+
 // Not builders: a method of the same name on a type of another package, and a
 // function of the same name.
 

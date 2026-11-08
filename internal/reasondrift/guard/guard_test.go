@@ -400,8 +400,10 @@ func (e *external) mutantDirectStruct(a *v1alpha1.Allocation) { e.s.o.Recorder.E
 
 // mutantLifecycleRecorders is a file added to internal/lifecycle: recorders
 // built and not wrapped to count their events, each in a function of its own
-// (#256), and two that are wrapped, which the check must accept. Each of the
-// first six is one RecorderNotCounted problem, in the function that names it.
+// (#256), and three that are wrapped, which the check must accept. Each of the
+// others is one RecorderNotCounted problem, in the function that names it:
+// among them a helper that hands back a Manager's recorder through an
+// interface of the package's own, and client-go's fake recorder.
 const mutantLifecycleRecorders = `package lifecycle
 
 import (
@@ -451,6 +453,20 @@ func mutantRecorderCounted(mgr manager.Manager, c *eventcount.Counter) events.Ev
 func mutantLegacyCounted(cl cluster.Cluster, c *eventcount.Counter) record.EventRecorder {
 	return eventcount.Legacy(cl.GetEventRecorderFor("mutant"), c, eventcount.ControllerLifecycle)
 }
+
+type mutantRecorderSource interface {
+	GetEventRecorder(name string) events.EventRecorder
+}
+
+func mutantThroughOwnInterface(src mutantRecorderSource) events.EventRecorder {
+	return src.GetEventRecorder("mutant")
+}
+
+func mutantOwnInterfaceCounted(src mutantRecorderSource, c *eventcount.Counter) events.EventRecorder {
+	return eventcount.Events(src.GetEventRecorder("mutant"), c, eventcount.ControllerLifecycle)
+}
+
+func mutantFakeRecorder() record.EventRecorder { return record.NewFakeRecorder(1) }
 `
 
 // mutantFrontRecorders is a file added to internal/front: the recorders of
@@ -573,9 +589,10 @@ func TestMutantsAreCaught(t *testing.T) {
 		// #256: a recorder built without the counting wrapper is found wherever it
 		// is: the reconciler's, a field, a method value, an unused value, a value
 		// returned beside its wrapped copy, one handed to another function, one
-		// deferred, and the two broadcasters' recorders and a method value in the
-		// front. A wrapper of the counting wrapper's that stops passing on its
-		// type or its reason is found too.
+		// deferred, one handed back through an interface of the package's own,
+		// client-go's fake recorder, and the two broadcasters' recorders and a
+		// method value in the front. A wrapper of the counting wrapper's that
+		// stops passing on its type or its reason is found too.
 		keyF(reasondrift.RecorderNotCounted, "", lc, "NewManager"),
 		keyF(reasondrift.RecorderNotCounted, "", lc, "mutantRecorderInField"),
 		keyF(reasondrift.RecorderNotCounted, "", lc, "mutantRecorderAsValue"),
@@ -583,6 +600,8 @@ func TestMutantsAreCaught(t *testing.T) {
 		keyF(reasondrift.RecorderNotCounted, "", lc, "mutantRecorderCountedAndNot"),
 		keyF(reasondrift.RecorderNotCounted, "", lc, "mutantRecorderToAnother"),
 		keyF(reasondrift.RecorderNotCounted, "", lc, "mutantRecorderDeferred"),
+		keyF(reasondrift.RecorderNotCounted, "", lc, "mutantThroughOwnInterface"),
+		keyF(reasondrift.RecorderNotCounted, "", lc, "mutantFakeRecorder"),
 		keyF(reasondrift.RecorderNotCounted, "", "internal/front", "mutantBroadcasterRecorderInField"),
 		keyF(reasondrift.RecorderNotCounted, "", "internal/front", "mutantLegacyBroadcasterRecorder"),
 		keyF(reasondrift.RecorderNotCounted, "", "internal/front", "mutantBroadcasterAsValue"),
@@ -647,6 +666,8 @@ func TestMutantsAreCaught(t *testing.T) {
 		lc + ".mutantRecorderCountedAndNot":               1,
 		lc + ".mutantRecorderToAnother":                   1,
 		lc + ".mutantRecorderDeferred":                    1,
+		lc + ".mutantThroughOwnInterface":                 1,
+		lc + ".mutantFakeRecorder":                        1,
 		"internal/front.mutantBroadcasterRecorderInField": 1,
 		"internal/front.mutantLegacyBroadcasterRecorder":  1,
 		"internal/front.mutantBroadcasterAsValue":         1,
@@ -664,7 +685,7 @@ func TestMutantsAreCaught(t *testing.T) {
 	for _, r := range code.Recorders {
 		wrapped[r.Package+"."+r.Func] = counterName(r)
 	}
-	for fn, want := range map[string]string{lc + ".mutantRecorderCounted": "Events", lc + ".mutantLegacyCounted": "Legacy"} {
+	for fn, want := range map[string]string{lc + ".mutantRecorderCounted": "Events", lc + ".mutantLegacyCounted": "Legacy", lc + ".mutantOwnInterfaceCounted": "Events"} {
 		if wrapped[fn] != want {
 			t.Errorf("%s: wrapped by %q, want %q: the check must accept a wrapped recorder in the changed tree too", fn, wrapped[fn], want)
 		}

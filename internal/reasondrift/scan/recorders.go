@@ -10,26 +10,100 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/reasondrift"
 )
 
-// Builder is a method that builds an event recorder: a method called Name of a
-// type from one of the packages Pkgs, which are path prefixes ({mod} stands for
-// the module path). A method is matched by its name, the package it is declared
-// in and the package of the type it is called on, never by its full name:
+// Builder is a method or function that builds an event recorder: one called
+// Name, a method of a type from one of the packages Pkgs or a function of one
+// of them, which are path prefixes ({mod} stands for the module path). A
+// method is matched by its name, the package it is declared in and the
+// package of the type it is called on, never by its full name:
 // controller-runtime's Manager gets GetEventRecorder from the interface
 // cluster.Cluster embeds, and the name that go/types gives it depends on which
-// of them the call goes through.
+// of them the call goes through. A method of an interface of any other
+// package (one the module declares) is a builder too when a type that
+// implements the interface has a builder of that name (implementedBuilder).
 type Builder struct {
 	Name string
 	Pkgs []string
 }
 
-// defaultBuilders are the methods that build the recorders of this module
-// (#256): a manager's two recorders, through controller-runtime, and the
-// recorders of client-go's event broadcasters, events.k8s.io and core/v1.
-// client-go declares its recorder in tools/internal/events, behind aliases.
+// defaultBuilders are the methods and functions that build recorders (#256):
+// a manager's two recorders, through controller-runtime; the recorders of
+// client-go's event broadcasters, events.k8s.io and core/v1, and of its
+// broadcaster adapter, whose DeprecatedNewLegacyRecorder builds a core/v1 one;
+// and client-go's two fake recorders (NewFakeRecorder, in tools/events and
+// tools/record), which a test uses but a fake package in the module could
+// too. client-go declares its recorder in tools/internal/events, behind
+// aliases.
 var defaultBuilders = []Builder{
 	{Name: "GetEventRecorder", Pkgs: []string{"sigs.k8s.io/controller-runtime"}},
 	{Name: "GetEventRecorderFor", Pkgs: []string{"sigs.k8s.io/controller-runtime"}},
 	{Name: "NewRecorder", Pkgs: []string{"k8s.io/client-go/tools/events", "k8s.io/client-go/tools/record", "k8s.io/client-go/tools/internal/events"}},
+	{Name: "DeprecatedNewLegacyRecorder", Pkgs: []string{"k8s.io/client-go/tools/events"}},
+	{Name: "NewFakeRecorder", Pkgs: []string{"k8s.io/client-go/tools/events", "k8s.io/client-go/tools/record"}},
+}
+
+// implementer is a type with a recorder builder in its method set: a type of a
+// builder's package, or one that embeds such a type (a struct of the module
+// that embeds a Manager). typ is the named type, or a pointer to it, whose
+// method set holds method.
+type implementer struct {
+	typ    types.Type
+	method *types.Func
+}
+
+// indexImplementers lists every package-level named type of the program that
+// has a builder in its method set (an implementer), for implementedBuilder.
+// Generic types are skipped: no builder is one.
+func (s *scanner) indexImplementers(prog *ssa.Program) {
+	s.implementers = nil
+	for _, p := range prog.AllPackages() {
+		scope := p.Pkg.Scope()
+		for _, name := range scope.Names() {
+			tn, ok := scope.Lookup(name).(*types.TypeName)
+			if !ok || tn.IsAlias() {
+				continue
+			}
+			named, ok := tn.Type().(*types.Named)
+			if !ok || named.TypeParams().Len() > 0 {
+				continue
+			}
+			var typ types.Type = named
+			if !types.IsInterface(named) {
+				typ = types.NewPointer(named) // its method set holds the value's methods too
+			}
+			for _, b := range s.builders {
+				obj, _, _ := types.LookupFieldOrMethod(typ, false, nil, b.Name)
+				f, ok := obj.(*types.Func)
+				if !ok {
+					continue
+				}
+				if _, is := s.builderMethod(f, named); is {
+					s.implementers = append(s.implementers, implementer{typ: typ, method: f})
+				}
+			}
+		}
+	}
+}
+
+// implementedBuilder reports whether a method of an interface that no
+// builder's package declares (an interface of the module's own) is a recorder
+// builder: a type that implements the interface has a builder of the method's
+// name in its method set. So a recorder built through such an interface, from
+// a Manager or a struct that embeds one, is checked as one built through the
+// Manager. recv is the interface type.
+func (s *scanner) implementedBuilder(obj *types.Func, recv types.Type) (string, bool) {
+	if recv == nil {
+		return "", false
+	}
+	iface, ok := recv.Underlying().(*types.Interface)
+	if !ok {
+		return "", false
+	}
+	for _, im := range s.implementers {
+		if im.method.Name() == obj.Name() && types.Implements(im.typ, iface) {
+			return obj.FullName() + ", which " + types.TypeString(im.typ, nil) + " implements with " + im.method.FullName(), true
+		}
+	}
+	return "", false
 }
 
 // defaultCounters are the functions that wrap a recorder so that it counts
@@ -55,7 +129,13 @@ func (s *scanner) builder(cc *ssa.CallCommon) (string, bool) {
 	if obj == nil {
 		return "", false
 	}
-	return s.builderMethod(obj, recv)
+	if full, ok := s.builderMethod(obj, recv); ok {
+		return full, true
+	}
+	if cc.IsInvoke() {
+		return s.implementedBuilder(obj, recv)
+	}
+	return "", false
 }
 
 // builderMethod reports whether a method is a recorder builder: its name is a
@@ -124,7 +204,11 @@ func (s *scanner) isBuilderWrapper(fn *ssa.Function) bool {
 	if !ok {
 		return false
 	}
-	_, is := s.builderMethod(obj, nil)
+	if _, is := s.builderMethod(obj, nil); is {
+		return true
+	}
+	// The closure of a method value of an interface of the module's own.
+	_, is := s.implementedBuilder(obj, ownReceiver(obj))
 	return is
 }
 
@@ -135,9 +219,9 @@ func (s *scanner) isBuilderWrapper(fn *ssa.Function) bool {
 // change its type; a builder taken as a value, started with go or defer, or
 // whose value is unused, stored, returned or passed anywhere else is a
 // RecorderNotCounted problem. A recorder that is not wrapped raises events that
-// the counter does not see, so the check fails closed. It does not read a type
-// whose method set holds a promoted builder (a struct that embeds a Manager)
-// and is only used through an interface of the module's own.
+// the counter does not see, so the check fails closed. A call through an
+// interface of the module's own is a builder's when a Manager, or a struct
+// that embeds one, implements the interface (implementedBuilder).
 func (s *scanner) collectRecorders(code *reasondrift.Code) {
 	problem := func(fn *ssa.Function, pos ssa.Instruction, detail string) {
 		code.Problems = append(code.Problems, reasondrift.Problem{

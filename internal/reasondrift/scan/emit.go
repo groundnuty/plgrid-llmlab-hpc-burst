@@ -34,6 +34,9 @@ type scanner struct {
 	// by full name.
 	builders []Builder
 	counters map[string]bool
+	// implementers are the types with a builder in their method set
+	// (indexImplementers).
+	implementers []implementer
 }
 
 // functions lists the functions that can hold a call or a use of a function:
