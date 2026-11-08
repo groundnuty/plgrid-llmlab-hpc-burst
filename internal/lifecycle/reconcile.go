@@ -380,13 +380,13 @@ func (p *pass) prepareServed() error {
 			p.degrade(v1alpha1.ReasonIdentityUnresolved, "class %s/%s has no current deployment ID: %s", c.class.GPUModel, c.class.CPUArch, c.problem)
 			continue
 		}
-		blocked, err := p.r.classBlocked(p.ctx, p.md, c.id, resolveShapes(p.md))
+		blocked, lifts, err := p.r.classBlocked(p.ctx, p.md, c.id, resolveShapes(p.md))
 		if err != nil {
 			return err
 		}
 		if blocked != "" {
 			p.ids[c.class].blocked = blocked
-			p.degrade(v1alpha1.ReasonVerificationFailed, "provisioning in class %s/%s is stopped until the serving spec changes: %s", c.class.GPUModel, c.class.CPUArch, blocked)
+			p.degrade(v1alpha1.ReasonVerificationFailed, "provisioning in class %s/%s is stopped until %s: %s", c.class.GPUModel, c.class.CPUArch, lifts, blocked)
 		}
 	}
 	return nil

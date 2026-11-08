@@ -583,7 +583,7 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	}
 	rateObs := r.observe(rs)
 	reqs = append(reqs, rateObs)
-	pr := PathRate{Direction: "up", OK: rateObs.Complete, AskedSeconds: rateAsked.Seconds(), Bytes: int64(len(rs.Body)), Tokens: int64(rateObs.Tokens), UnderLoad: under}
+	pr := PathRate{Direction: DirDownload, OK: rateObs.Complete, AskedSeconds: rateAsked.Seconds(), Bytes: int64(len(rs.Body)), Tokens: int64(rateObs.Tokens), UnderLoad: under}
 	if !rs.FirstAt.IsZero() {
 		pr.TimedSeconds = rs.EndAt.Sub(rs.FirstAt).Seconds()
 	}
@@ -607,5 +607,5 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 		return TunnelHourObs{}, err
 	}
 	p.Logf("%s: %d requests over %s; path rate %.0f B/s, %.0f tokens/s", p.Row.Name, len(reqs), time.Since(first).Round(time.Second), pr.BytesPerSecond(), pr.TokensPerSecond())
-	return TunnelHourObs{Tags: tags, Requests: reqs, Samples: samples, DrainStart: ds, Deployment: dep, Rate: pr}, nil
+	return TunnelHourObs{Tags: tags, Requests: reqs, Samples: samples, DrainStart: ds, Deployment: dep, Rates: []PathRate{pr}}, nil
 }

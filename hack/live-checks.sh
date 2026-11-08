@@ -97,6 +97,15 @@
 #                                choice when giving the go; the shape, the hold note and the test follow it
 #   LIVE_OWNER_GO_HELIOS_NOW     today's UTC date (YYYY-MM-DD), once the owner has said yes to the run: the rows that hold
 #                                QOS now's GPU for hours (alpha-helios-nooverlap, tunnel-hour-helios) refuse without it
+#   LIVE_FRONT_HOST_LABEL        where the front ran, in three parts (issue #224): a ROLE from a fixed list (the FRONT ROLES
+#                                table below), a comma and a space, a POSITION that is exactly inside or outside Cyfronet
+#                                (or Cyfronet's network), and an optional NOTE in parentheses. The text to post of every row
+#                                that writes one (the alpha rows, tunnel-hour-*, gpu-accounting-*) names it, because the host
+#                                that runs the front decides the path to the login nodes, and so the timings. The note holds
+#                                words of letters and numbers with a unit (3.4 ms, 40 MB/s) and , ; ' - only: no word with a
+#                                digit in it, no dotted name or address, no colon. At most 120 bytes. A row that needs it
+#                                refuses (exit 3) without a valid one. Example: the development host, outside Cyfronet
+#                                (3.4 ms to the Helios login, behind a gateway)
 #   The reach rows (issue #225) confirm that a compute node reaches the gateway's forwarded port:
 #   LIVE_PROBE_HOST, LIVE_PROBE_PORT   the forwarded port as the compute nodes see it; private, read only by the reach rows,
 #                                and never printed, shown on the screen or posted (the host a name or an address, the port 1 to 65535)
@@ -317,6 +326,33 @@ apply_tunnel_lease() {
   done
 }
 
+# The rows whose text to post names where the front ran (issue #224): the rows that write a posts.md, which hack/livechecks
+# compares with the alpha package's rows. They need LIVE_FRONT_HOST_LABEL.
+front_label_table() {
+  cat <<'TABLE'
+# BEGIN FRONT LABEL
+alpha-athena-handover
+alpha-helios-nooverlap
+tunnel-hour-helios
+tunnel-hour-athena
+gpu-accounting-helios
+gpu-accounting-athena
+# END FRONT LABEL
+TABLE
+}
+
+# The roles a front host label may name, the first of its three parts (issue #224). The list is this script's and the alpha
+# package's (alpha.FrontRoles; hack/livechecks compares them): a role is added by a change in both, never by the setting.
+front_role_table() {
+  cat <<'TABLE'
+# BEGIN FRONT ROLES
+the development host
+a Cyfronet-network host
+a cloud host
+# END FRONT ROLES
+TABLE
+}
+
 # A bare name that stands for several rows, one per cluster, run one after the other (issue #194).
 # name | rows.
 alias_table() {
@@ -339,7 +375,8 @@ CLEAN_UNRESOLVED_POLLS=${LIVE_CLEAN_UNRESOLVED_POLLS:-20} # more quiet polls whe
 declare -a NAMES=()
 declare -A KIND PKG TEST GATES INPUTS CONTEXTS STATUS
 declare -A HOST PROFILE PARTITION QOS SLOT ACCTKEY GPUS CPUS MEM TLIMIT TMIN EXTRA SWAIT
-declare -A STACK ALIAS OGSET OGMIN MOSTJOBS
+declare -A STACK ALIAS OGSET OGMIN MOSTJOBS FRONTLABEL
+declare -a FRONT_ROLES=()
 declare -A S=()
 
 # load_tables: reads the tables above into the arrays. Comment and blank lines are skipped in the loop itself:
@@ -395,6 +432,20 @@ load_tables() {
     OGSET[$name]=$og_key OGMIN[$name]=$og_min
   done < <(owner_go_table)
   [ "$n" -gt 0 ] || { table_empty "OWNER GO"; return 2; }
+  n=0
+  while IFS= read -r name || [ -n "$name" ]; do
+    case $name in ''|'#'*) continue ;; esac
+    n=$((n+1))
+    FRONTLABEL[$name]=1
+  done < <(front_label_table)
+  [ "$n" -gt 0 ] || { table_empty "FRONT LABEL"; return 2; }
+  n=0
+  while IFS= read -r name || [ -n "$name" ]; do
+    case $name in ''|'#'*) continue ;; esac
+    n=$((n+1))
+    FRONT_ROLES+=("$name")
+  done < <(front_role_table)
+  [ "$n" -gt 0 ] || { table_empty "FRONT ROLES"; return 2; }
 }
 
 # table_empty <name>: says that the table between "# BEGIN <name>" and "# END <name>" gave no rows.
@@ -436,7 +487,7 @@ load_settings() {
     [ "$k" != "$line" ] || continue
     v=${v%\"}; v=${v#\"}; v=${v%\'}; v=${v#\'}
     case $k in
-      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_DIALHOME_LISTEN|LIVE_BIN_DIR|LIVE_OWNER_GO_HELIOS_NOW|LIVE_TUNNEL_LEASE_MINUTES|LIVE_PROBE_HOST|LIVE_PROBE_PORT|LIVE_PROBE_LABEL)
+      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_DIALHOME_LISTEN|LIVE_BIN_DIR|LIVE_OWNER_GO_HELIOS_NOW|LIVE_TUNNEL_LEASE_MINUTES|LIVE_PROBE_HOST|LIVE_PROBE_PORT|LIVE_PROBE_LABEL|LIVE_FRONT_HOST_LABEL)
         S[$k]=$v ;;
     esac
   done 2>/dev/null < "$HPCBURST_LIVE_SETTINGS"
@@ -471,10 +522,54 @@ check_settings() {
           alpha-*|tunnel-hour-*) check_alpha_settings "$name" || bad=1 ;;
           reach-*) check_reach_settings || bad=1 ;;
         esac
+        [ -z "${FRONTLABEL[$name]:-}" ] || check_front_label || bad=1
         check_owner_go "$name" || bad=1 ;;
     esac
   done
   return $bad
+}
+
+# check_front_label: the label of where the front ran (issue #224). It is a description for the text to post, so it is held
+# to a form on the properties this script owns, not on what a host looks like: ROLE ", " POSITION [ " (" NOTE ")" ], with the
+# role from the FRONT ROLES table, the position exactly inside or outside Cyfronet (or Cyfronet's network), and a note of
+# words of letters and numbers with a unit only (no word with a digit in it, no dotted name or address, no colon), at most
+# 120 bytes in all. The refusal names the setting and the part that is wrong, never its value. The alpha package holds the same
+# rule (alpha.ValidFrontLabel); hack/livechecks runs both on the same labels. The C locale makes the length count bytes and the
+# letters ASCII, as the package's do.
+check_front_label() {
+  local LC_ALL=C
+  local l=${S[LIVE_FRONT_HOST_LABEL]:-} role rest="" pos note="" has_note="" have_role="" have_pos=""
+  # In variables, so that no character is read as an escape: the apostrophe and the hyphen of a word, and the unit's slash.
+  local word="[A-Za-z]+(['-][A-Za-z]+)*" qty="[0-9]+(\\.[0-9]+)? ?(ms|s|MB/s|Mb/s|%)" item note_re
+  item="($qty|$word)"; note_re="^$item([,;]? $item)*\$"
+  if [ -z "$l" ]; then say "live-checks: setting LIVE_FRONT_HOST_LABEL is missing"; return 1; fi
+  if [ "${#l}" -gt 120 ]; then say "live-checks: LIVE_FRONT_HOST_LABEL is longer than 120 bytes"; return 1; fi
+  for role in "${FRONT_ROLES[@]}"; do
+    case $l in "$role, "*) rest=${l#"$role, "}; have_role=1; break ;; esac
+  done
+  if [ -z "$have_role" ]; then
+    say "live-checks: LIVE_FRONT_HOST_LABEL must begin with a role, then a comma and a space: one of $(IFS=';'; printf '%s' "${FRONT_ROLES[*]}")"
+    return 1
+  fi
+  for pos in "inside Cyfronet's network" "outside Cyfronet's network" "inside Cyfronet" "outside Cyfronet"; do
+    if [ "$rest" = "$pos" ]; then have_pos=1; break; fi
+    case $rest in "$pos ("*")") have_pos=1; has_note=1; note=${rest#"$pos ("}; note=${note%")"}; break ;; esac
+  done
+  if [ -z "$have_pos" ]; then
+    say "live-checks: LIVE_FRONT_HOST_LABEL must say inside or outside Cyfronet (or Cyfronet's network) after its role, then at most a note in parentheses"
+    return 1
+  fi
+  if [ -n "$has_note" ] && ! [[ $note =~ $note_re ]]; then
+    say "live-checks: the note of LIVE_FRONT_HOST_LABEL may hold only words of letters, numbers with a unit (3.4 ms, 40 MB/s) and , ; ' - (no word with a digit in it, no dotted name or address, no colon)"
+    return 1
+  fi
+}
+
+# export_front_label <name>: where the front ran (issue #224) goes to the test of a row that writes a text to post, as the
+# settings give it, and to no other. A value the caller's shell holds never reaches a test: the script drops it once, right
+# after it reads the settings (the unset before the run's checks).
+export_front_label() {
+  [ -z "${FRONTLABEL[$1]:-}" ] || export HPCBURST_FRONT_HOST_LABEL=${S[LIVE_FRONT_HOST_LABEL]}
 }
 
 # fmt_hold <minutes>: "2 h 40 min".
@@ -935,6 +1030,9 @@ env_conformance() {
   case $n in
     reach-*) export HPCBURST_CONF_PROBE_HOST=${S[LIVE_PROBE_HOST]} HPCBURST_CONF_PROBE_PORT=${S[LIVE_PROBE_PORT]} HPCBURST_CONF_PROBE_LABEL=${S[LIVE_PROBE_LABEL]} ;;
   esac
+  # Where the front ran (issue #224): the variable is not HPCBURST_CONF_*, so the accounting rows' dry runs, which drop that
+  # family, still take it.
+  export_front_label "$n"
 }
 
 # env_alpha <name>: the environment of an alpha row's test binary (issue #194). The row's name is the gate; the
@@ -951,6 +1049,7 @@ env_alpha() {
   export HPCBURST_ALPHA_OUT=$REC_DIR HPCBURST_ALPHA_BIN_DIR=${S[LIVE_BIN_DIR]} HPCBURST_ALPHA_BUILD_DIR=${ALPHA_BUILD_DIR:-}
   export HPCBURST_ALPHA_DIALHOME_MODE=${S[LIVE_DIALHOME_MODE]} HPCBURST_ALPHA_DIALHOME_ADDR=${S[LIVE_DIALHOME_ADDR]}
   export HPCBURST_ALPHA_PENDING_MAX_SECONDS=$(pending_max "$n") HPCBURST_ALPHA_RUN_ID=$RUN_ID
+  export_front_label "$n"
   # A tunnel row's lease, in minutes, as the shape holds it (after LIVE_TUNNEL_LEASE_MINUTES): the test judges that value.
   case $n in
     tunnel-hour-*) local lh lm; IFS=: read -r lh lm _ <<<"${TLIMIT[$n]}"; export HPCBURST_ALPHA_LEASE_MINUTES=$((10#$lh * 60 + 10#$lm)) ;;
@@ -1494,6 +1593,9 @@ for name in "${REQUESTED[@]}"; do
   [ "${STATUS[$name]}" = ready ] || { say "live-checks: $name is pending and cannot run yet"; exit 2; }
 done
 load_settings || exit 3
+# The label comes from the settings, to the rows that post it (export_front_label); one that the caller's shell holds goes to
+# no row, so a row that writes no text through the front (the science agent's ruling 1, 2 Nov 2026) never takes one.
+unset HPCBURST_FRONT_HOST_LABEL
 case " ${REQUESTED[*]} " in *" tunnel-hour-"*) apply_tunnel_lease || exit 3 ;; esac
 check_settings "${REQUESTED[@]}" || exit 3
 OUT=${S[LIVE_OUT_DIR]}

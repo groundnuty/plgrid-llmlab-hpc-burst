@@ -54,6 +54,8 @@ type Config struct {
 	Out string
 	// PendingMax is the first clock (the wait in the queue).
 	PendingMax time.Duration
+	// FrontLabel says where the front ran (issue #224); every text to post names it.
+	FrontLabel string
 	// The live run's settings.
 	Account, Credentials, HostLock, ControlDir string
 	BinDir, BuildDir                           string
@@ -117,6 +119,11 @@ func ConfigFromEnv(getenv func(string) string, mine ...string) (cfg Config, skip
 	}
 	if !filepath.IsAbs(cfg.Out) {
 		bad = append(bad, envOut+" must be an absolute path")
+	}
+	// Read before the dry run returns: a dry run's text to post names it too.
+	cfg.FrontLabel = getenv(EnvFrontLabel)
+	if err := ValidFrontLabel(cfg.FrontLabel); err != nil {
+		bad = append(bad, EnvFrontLabel+": "+err.Error())
 	}
 	if getenv(envDry) == "1" {
 		cfg.Dry, cfg.DryFault = true, getenv(envDryFault)

@@ -81,7 +81,8 @@ func scaledTunnel() Row {
 
 // scaledHour is a passing hour on scaledTunnel's clock, worked out by hand: three
 // requests of 50 s back to back (0-152 s), 16 streams of 20 s at 25 tokens/s
-// (152-172 s), 40 s idle, one more request of 50 s (212-262 s); a look every 10 s.
+// (152-172 s) with a 0.2 MB body sent among them (155-157 s), 40 s idle, one
+// more request of 50 s (212-262 s); a look every 10 s; both path rates.
 func scaledHour(r Row) (TunnelHourObs, []provider.Job) {
 	t0 := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
 	s := func(d time.Duration) time.Time { return t0.Add(d) }
@@ -92,6 +93,9 @@ func scaledHour(r Row) (TunnelHourObs, []provider.Job) {
 	for i := 0; i < 16; i++ {
 		reqs = append(reqs, Stream{ID: "c" + string(rune('a'+i)), Opened: s(152 * time.Second), Ended: s(172 * time.Second), Complete: true, Tokens: 500})
 	}
+	// A large request (issue #224), its body sent while the 16 streams were open.
+	reqs = append(reqs, Stream{ID: "l0", Opened: s(155 * time.Second), Ended: s(160 * time.Second), Complete: true,
+		BodyBytes: 200_000, BodyStart: s(155 * time.Second), BodyEnd: s(157 * time.Second)})
 	reqs = append(reqs, Stream{ID: "b0", Opened: s(212 * time.Second), Ended: s(262 * time.Second), Complete: true})
 	var samples []TunnelSample
 	for at := time.Duration(0); at <= 272*time.Second; at += 10 * time.Second {
@@ -99,7 +103,8 @@ func scaledHour(r Row) (TunnelHourObs, []provider.Job) {
 	}
 	tag := "hb-tunnel-0123456789"
 	o := TunnelHourObs{Tags: []string{tag}, Requests: reqs, Samples: samples, DrainStart: s(10 * time.Minute), Deployment: r.Plan(),
-		Rate: PathRate{Direction: "up", OK: true, AskedSeconds: 30, TimedSeconds: 30.2, Bytes: 31 << 20, Tokens: 9600, UnderLoad: true}}
+		Rates: []PathRate{{Direction: DirUpload, OK: true, AskedSeconds: 30, TimedSeconds: 30.1, Bytes: 24 << 20, UnderLoad: true},
+			{Direction: DirDownload, OK: true, AskedSeconds: 30, TimedSeconds: 30.2, Bytes: 31 << 20, Tokens: 9600, UnderLoad: true}}}
 	start, end := s(-2*time.Minute), s(5*time.Minute)
 	jobs := []provider.Job{{ID: "101", Name: tag, Partition: r.Partition, TimeLimit: r.Lease, SubmitTime: s(-3 * time.Minute), StartTime: &start, EndTime: &end}}
 	return o, jobs

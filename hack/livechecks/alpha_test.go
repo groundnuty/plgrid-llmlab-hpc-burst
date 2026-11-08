@@ -127,6 +127,7 @@ func (w *world) alphaSettings(mutate func(m map[string]string)) {
 		m["LIVE_DIALHOME_ADDR"] = "gateway-seed.example:29999"
 		m["LIVE_BIN_DIR"] = bin
 		m["LIVE_OWNER_GO_HELIOS_NOW"] = time.Now().UTC().Format("2006-01-02")
+		m["LIVE_FRONT_HOST_LABEL"] = exampleFrontLabel
 		if mutate != nil {
 			mutate(m)
 		}
