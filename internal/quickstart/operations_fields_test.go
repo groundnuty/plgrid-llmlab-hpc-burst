@@ -6,13 +6,15 @@ import (
 	"testing"
 )
 
-// The guide gives an operator one field of a ModelDeployment to change: the workload's
-// contextTokens.longest, for a reasoning model that exhausts its budget (issue #266). A field the
-// guide names as spec.workload.<path> must be a property of the ModelDeployment's stored schema in
-// config/crd, which is generated from the Go types, so a renamed or misspelt field fails here.
+// For a reasoning model that exhausts its budget, the guide tells the operator to declare the
+// workload's outputTokens.typical as the typical total output, reasoning included (issue #266).
+// A field the guide names as spec.workload.<path> must be a property of the ModelDeployment's
+// stored schema in config/crd, which is generated from the Go types, so a renamed or misspelt
+// field fails here.
 //
 // The test reads the guide's path and the schema, and nothing of what the field does: its effect
-// is checked by reading the code (internal/agent/engine/qualify.go, pkg/agentapi/checks.go).
+// is checked by reading the code (internal/agent/engine/qualify.go, pkg/agentapi/checks.go,
+// internal/lifecycle/spec.go).
 func TestOperationsWorkloadFieldsAreInTheSchema(t *testing.T) {
 	kind := readCRDNames(t)["modeldeployment"]
 	if kind == nil {
@@ -38,7 +40,7 @@ func TestOperationsWorkloadFieldsAreInTheSchema(t *testing.T) {
 			}
 		}
 	}
-	if !found["spec.workload.contextTokens.longest"] {
-		t.Errorf("the guide no longer names spec.workload.contextTokens.longest, the lever for a reasoning model's exhausted budget; it names %v", found)
+	if !found["spec.workload.outputTokens.typical"] {
+		t.Errorf("the guide no longer names spec.workload.outputTokens.typical, the figure to declare for a reasoning model; it names %v", found)
 	}
 }
