@@ -103,7 +103,7 @@ func git(t *testing.T, dir string, args ...string) string {
 // commands, a stub cluster state and a settings file that is complete.
 func newWorld(t *testing.T) *world {
 	t.Helper()
-	for _, tool := range []string{"git", "go", "flock", "timeout", "tar", "bash"} {
+	for _, tool := range []string{"git", "go", "flock", "timeout", "tar", "bash", "python3"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Fatalf("the script tests need %s on PATH: %v", tool, err)
 		}

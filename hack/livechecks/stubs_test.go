@@ -58,6 +58,9 @@ if [ -n "$id" ]; then
   sed -i "/^$id|/d" "$Q"
   echo "slurm_load_jobs error: Invalid job id specified" >&2; exit 1
 fi
+# STUB_SQUEUE_LIST_FAILS_AFTER_POLL=1: the listing (squeue --me, the cleanup's read) fails once the job has been polled by its number, so
+# the poll loop reaches its bound and only the cleanup's own read of the queue breaks (#300 review, nit 1).
+[ -z "${STUB_SQUEUE_LIST_FAILS_AFTER_POLL:-}" ] || [ ! -e "$STUB_STATE/polled" ] || { echo "squeue: error: unable to contact slurm controller seedhost01" >&2; exit 1; }
 # A late registration, counted in reads of the listing after the test binary ran: STUB_HIDE_READS hides the
 # late job from the first reads (it is in the queue but not yet shown), and STUB_LATE_JOB is added to the
 # queue at read STUB_LATE_AFTER (a job that registers after the first snapshot).
