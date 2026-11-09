@@ -49,6 +49,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agentserver"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/hostdial"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/managed"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl"
@@ -383,10 +384,25 @@ func (w wiring) setupBatch(pm manager.Manager, provider string) error {
 		CredentialsDir: w.host.CredentialsDir(),
 		AgentBuildsDir: w.host.AgentBuildsDir(),
 		Front:          w.front,
+		Relays:         w.relaySettings(),
 		HubEndpoint:    w.hubEndpoint,
 		Log:            logging.NewLogrLogger(pm.GetLogger().WithName("provider").WithValues("provider", provider)),
 		Recorder:       event.NewAPIRecorder(eventcount.Legacy(pm.GetEventRecorderFor(v1alpha1.FieldManagerProvider), w.events, eventcount.ControllerProvider(provider))),
 	})
+}
+
+// relaySettings are host-dialed mode's relay settings for every batch
+// Provider (HBEP-6, Dial-home modes, host-dialed mode), nil in the other
+// modes: control relays dial the agent endpoint (base+3), serving relays the
+// dial-home listener (base+7); every Provider of this process takes its
+// relays' slots from one hostdial.SharedSlots, so the cap of 4 per login node
+// holds across Providers on one cluster; and the relays' ssh configuration
+// file is kept beside the ssh masters' sockets.
+func (w wiring) relaySettings() *providerctl.RelaySettings {
+	if w.front == nil || w.front.Mode != agentapi.DialHomeHostDialed {
+		return nil
+	}
+	return &providerctl.RelaySettings{Ports: w.host.RelayChannelPorts(), Slots: hostdial.SharedSlots, ControlDir: sshControlDir(w.host)}
 }
 
 // component is one part of the binary in the lifecycle controller's manager.
