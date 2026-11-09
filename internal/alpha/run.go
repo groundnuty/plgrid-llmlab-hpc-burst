@@ -10,22 +10,27 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
-// NotRun reports whether err ends the row's run as NOT RUN rather than as a failure:
-//   - a job pended past the first clock (ErrNotStarted) on a row that holds QOS now's one-job
-//     slot, where a busy queue is not the run's fault and the slot must not be held waiting;
-//   - a tunnel row's job pended until a minute before its deployment's first end
-//     (ErrQueueWaitPastEnd), on either cluster: the job did not start in time (the science
-//     agent's ruling on PR 255).
+// NotRun reports whether err ends the row's run as NOT RUN rather than as a failure: a job of the
+// run never started within a bound, whichever bound ran out and whichever row it is (the science
+// agent's ruling of 8 Nov 2026 on #272, replacing #230's no-slot failure). The bounds are:
+//   - the wait in the queue, the first clock (ErrNotStarted), HPCBURST_ALPHA_PENDING_MAX_SECONDS;
+//   - a tunnel row's deployment end, a minute before its first end (ErrQueueWaitPastEnd; a
+//     NotStartedError with PastEnd is both errors).
 //
-// On any other row the same error is a failure.
-func NotRun(row Row, err error) bool {
-	return (row.SlotHold > 0 && errors.Is(err, ErrNotStarted)) || (row.MostJobs == 1 && errors.Is(err, ErrQueueWaitPastEnd))
+// A FAIL means the property the row tests was absent, and a queue wait tests nothing. The row is a
+// parameter so that no rule by row can come back unseen: TestEveryRowEndsNotRunWhenItsJobNeverStarts
+// asks it of every row in Rows.
+func NotRun(_ Row, err error) bool { return neverStarted(err) }
+
+// neverStarted is whether err says a job of the run never started within a bound.
+func neverStarted(err error) bool {
+	return errors.Is(err, ErrNotStarted) || errors.Is(err, ErrQueueWaitPastEnd)
 }
 
 // NotRunNote is the text of the marker (NotRunFile): the row, the wait and the fact, never a job
 // ID or a tag. err is the run's error: a NotStartedError gives the bound that ran out, and says
-// when it was the deployment's first end, which hack/live-checks.sh reads off the marker for its
-// line; any other gives pendingMax.
+// when it was the deployment's first end, which hack/live-checks.sh reads off the marker to name
+// that bound in its line (the wait in the queue otherwise); any other gives pendingMax.
 func NotRunNote(row Row, pendingMax time.Duration, err error) string {
 	var ns *NotStartedError
 	if errors.As(err, &ns) {
@@ -46,7 +51,7 @@ func NotRunNote(row Row, pendingMax time.Duration, err error) string {
 func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(string, ...any)) (failures []string, err error) {
 	defer func() {
 		if cerr := st.Close(ctx); cerr != nil {
-			if errors.Is(err, ErrNotStarted) {
+			if neverStarted(err) {
 				// A close that failed may have left a job: that is a failure, never a NOT RUN.
 				err = fmt.Errorf("closing the steps after a job that did not start: %v (%v)", cerr, err)
 				return

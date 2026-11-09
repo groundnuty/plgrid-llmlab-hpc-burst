@@ -10,9 +10,9 @@ import (
 
 // ErrNotStarted is what a scenario returns when a job of the run was still
 // pending when the first clock (Plan.PendingMax) ran out, after it cancelled the
-// run's jobs by their tags. For a row that holds QOS now's one-job slot
-// (Row.SlotHold) that ends the run as NOT RUN (NotRun): the owner's slot was busy,
-// try again later. For any other row it is a failure.
+// run's jobs by their tags. That ends the run as NOT RUN (NotRun) on every row
+// (the science agent's ruling of 8 Nov 2026, #272): the job never started, so
+// the property the row tests was never put to the test; try again later.
 var ErrNotStarted = errors.New("a job of the run was still pending when the wait in the queue ran out, and was cancelled by its tag")
 
 // Plan is what a scenario is given.

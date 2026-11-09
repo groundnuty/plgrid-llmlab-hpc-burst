@@ -31,7 +31,10 @@
 //	                           long after its acceptance stops the run. The run cancels
 //	                           its jobs by their tags and ends as NOT RUN (a skip and the
 //	                           marker not-run.txt in HPCBURST_CONF_OUT), not as a failure.
-//	                           Unset: each step waits up to 30 minutes and then fails
+//	                           Unset: each step waits for the wait in the queue below,
+//	                           and ends as NOT RUN the same way
+//	HPCBURST_CONF_PENDING_MAX_SECONDS  optional: the wait in the queue of a run with no
+//	                           start wait, in seconds (30 minutes unset)
 //	HPCBURST_CONF_STAGING      a directory below the profile's stagingDir (for example
 //	                           $SCRATCH/<own dir>), not the root. Each run stages into
 //	                           a run-<12 hex> directory of its own below it, and removes

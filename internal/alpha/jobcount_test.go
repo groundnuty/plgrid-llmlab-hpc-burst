@@ -84,8 +84,8 @@ func TestFirstClock(t *testing.T) {
 }
 
 // A first clock that ran out is ErrNotStarted, and ErrQueueWaitPastEnd too when
-// the deployment's first end bounded it; NotRun then holds on both tunnel rows,
-// and on the slot rows for either.
+// the deployment's first end bounded it; NotRun then holds on every row, for
+// either (the science agent's ruling of 8 Nov 2026, #272).
 func TestANotStartedErrorIsNotRunWhereTheRulingsSay(t *testing.T) {
 	pastEnd := &NotStartedError{Bound: 121 * time.Minute, PastEnd: true}
 	pending := &NotStartedError{Bound: 2 * time.Hour}
@@ -99,14 +99,14 @@ func TestANotStartedErrorIsNotRunWhereTheRulingsSay(t *testing.T) {
 	}{
 		{"tunnel-hour-athena", pastEnd, true},
 		{"tunnel-hour-helios", pastEnd, true},
-		{"tunnel-hour-athena", pending, false},
+		{"tunnel-hour-athena", pending, true},
 		{"tunnel-hour-helios", pending, true},
 		{"alpha-helios-nooverlap", pending, true},
-		{"alpha-athena-handover", pending, false},
-		{"alpha-athena-handover", ErrQueueWaitPastEnd, false},
+		{"alpha-athena-handover", pending, true},
+		{"alpha-athena-handover", ErrQueueWaitPastEnd, true},
 		{"tunnel-hour-athena", errors.New("another"), false},
 		{"tunnel-hour-helios", errors.New("another"), false},
-		{"alpha-helios-nooverlap", ErrQueueWaitPastEnd, false},
+		{"alpha-helios-nooverlap", ErrQueueWaitPastEnd, true},
 	} {
 		if got := NotRun(rowOf(c.row), c.err); got != c.want {
 			t.Errorf("NotRun(%s, %v) = %v, want %v", c.row, c.err, got, c.want)

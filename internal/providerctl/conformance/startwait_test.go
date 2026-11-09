@@ -1,13 +1,14 @@
 package conformance
 
-// The start-wait bound (HPCBURST_CONF_START_WAIT). A job under a one-job QOS
-// can queue for a long time, and the run holds the slot while it waits. With
-// the bound set, a step whose job has not started within it, counted from the
-// moment the wait began (the Allocation is created and reconciled at once, or
-// the direct sbatch has just returned), stops the whole run: the job is
-// cancelled by its tag, and the run ends as NOT RUN, which hack/live-checks.sh
-// reports apart from a failure. A job that was never accepted is a failure.
-// Unset, the steps keep their own deadline of 30 minutes.
+// The first clock of a job: the bound within which it must start. A job under a one-job QOS can queue for a long
+// time, and the run holds the slot while it waits; a job in a long queue holds nothing but is no use to wait for
+// without end. A job that has not started when the bound passes, counted from the moment the wait began (the
+// Allocation is created and reconciled at once, or the direct sbatch has just returned), stops the whole run: the
+// job is cancelled by its tag, and the run ends as NOT RUN, which hack/live-checks.sh reports apart from a failure,
+// on every row and whichever bound it was (the science agent's ruling of 8 Nov 2026, #272: a queue wait tests
+// nothing, so it is never a FAIL). The bound is the row's start wait (HPCBURST_CONF_START_WAIT) when it has one,
+// else the wait in the queue (HPCBURST_CONF_PENDING_MAX_SECONDS, 30 minutes when unset). A job that was never
+// accepted is a failure.
 
 import (
 	"context"
@@ -20,12 +21,8 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
-// maxStartWait is the longest bound HPCBURST_CONF_START_WAIT can name: the
-// steps' own deadline, above which the bound would never be the one that fires.
+// maxStartWait is the longest bound HPCBURST_CONF_START_WAIT can name, the default of the wait in the queue.
 const maxStartWait = 30 * time.Minute
-
-// stepDeadline is the deadline of a step's wait when no bound is set.
-const stepDeadline = 30 * time.Minute
 
 // notRunFile is the marker, in the private output directory, that tells
 // hack/live-checks.sh the run stopped on the bound. It holds the step and the
@@ -91,27 +88,32 @@ func (w *world) at() time.Time {
 	return now()
 }
 
-// untilRuns waits until cond holds for the Allocation, as until does with its
-// 30 minutes, unless the run has a start-wait bound: then the wait is bounded
-// by it (see the top of this file). since is when the wait began, accepted says
-// the job was accepted before it did (step 3's direct sbatch), step names the
+// firstClock is the bound a job's start is waited for, and what a message calls it: the row's start wait when it has
+// one, else the wait in the queue.
+func (w *world) firstClock() (bound time.Duration, name string) {
+	if w.s.startWait > 0 {
+		return w.s.startWait, "the start-wait bound"
+	}
+	return w.s.pendingMax, "the wait in the queue"
+}
+
+// untilRuns waits until cond holds for the Allocation, within the first clock (see the top of this file). since is
+// when the wait began, accepted says the job was accepted before it did (step 3's direct sbatch), step names the
 // step in the output.
 func (w *world) untilRuns(step, name, what string, since time.Time, accepted bool, cond func(*v1alpha1.Allocation) bool) *v1alpha1.Allocation {
 	w.t.Helper()
-	if w.s.startWait == 0 {
-		return w.until(name, what, stepDeadline, cond)
-	}
+	bound, boundName := w.firstClock()
 	var last *v1alpha1.Allocation
 	probe := func() (bool, bool) {
 		last = w.pollAllocation(name)
 		return last != nil && cond(last), accepted || (last != nil && last.Annotations[v1alpha1.AnnotationJobID] != "")
 	}
 	now, sleep := w.clock()
-	switch waitStart(now, sleep, since, w.s.startWait, 3*time.Second, probe) {
+	switch waitStart(now, sleep, since, bound, 3*time.Second, probe) {
 	case jobStarted:
 		return last
 	case jobNotAccepted:
-		w.t.Fatalf("%s: no job was accepted within the start-wait bound of %s", step, w.s.startWait)
+		w.t.Fatalf("%s: no job was accepted within %s of %s", step, boundName, bound)
 	default:
 		w.notRun(step)
 	}
@@ -121,18 +123,24 @@ func (w *world) untilRuns(step, name, what string, since time.Time, accepted boo
 // notRun ends the run as NOT RUN: it cancels every job this run tagged, by its
 // tag, checks that none is left live, writes the marker and skips the test. A
 // cancel that fails, or a job left live, is a failure instead, because a job
-// would be left on the platform.
+// would be left on the platform. The marker and the skip say which bound ran out.
 func (w *world) notRun(step string) {
 	w.t.Helper()
+	bound, boundName := w.firstClock()
 	ctx := context.Background()
 	if err := w.cancelByTag(ctx); err != nil {
-		w.t.Fatalf("%s: the job did not start within %s, and cancelling this run's jobs by tag failed: %v", step, w.s.startWait, err)
+		w.t.Fatalf("%s: the job did not start within %s of %s, and cancelling this run's jobs by tag failed: %v", step, boundName, bound, err)
 	}
-	note := fmt.Sprintf("%s: a job did not start within the start-wait bound of %s; this run's jobs were cancelled by tag\n", step, w.s.startWait)
+	note := fmt.Sprintf("%s: a job did not start within the start-wait bound of %s; this run's jobs were cancelled by tag\n", step, bound)
+	skip := fmt.Sprintf("NOT RUN: %s: a job did not start within %s of its acceptance; it was cancelled by its tag", step, bound)
+	if w.s.startWait == 0 {
+		note = fmt.Sprintf("%s: a job was still pending after %s in the queue; this run's jobs were cancelled by tag\n", step, bound)
+		skip = fmt.Sprintf("NOT RUN: %s: a job was still pending after %s in the queue (the wait in the queue); it was cancelled by its tag", step, bound)
+	}
 	if err := os.WriteFile(filepath.Join(w.p.dir, notRunFile), []byte(note), 0o600); err != nil {
-		w.t.Fatalf("%s: the job did not start within %s, but the not-run marker could not be written: %v", step, w.s.startWait, err)
+		w.t.Fatalf("%s: the job did not start within %s of %s, but the not-run marker could not be written: %v", step, boundName, bound, err)
 	}
-	w.t.Skipf("NOT RUN: %s: a job did not start within %s of its acceptance; it was cancelled by its tag", step, w.s.startWait)
+	w.t.Skipf("%s", skip)
 }
 
 // cancelByTag cancels every live job whose name is one of the tags this run

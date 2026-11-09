@@ -90,6 +90,8 @@ var dryGPUFaults = map[string][2]string{
 	"smi-whole-node": {"1", "8"}, "cvd-unset": {"-", "1"},
 	// slot-held is a healthy node whose job cannot start (dryAccountingWorld).
 	"slot-held": {"1", "1"},
+	// queue-held is the same for a row with no slot: a cap on the partition that another job of the owner's fills.
+	"queue-held": {"1", "1"},
 }
 
 // TestGPUAccounting is the run on one platform.
@@ -134,7 +136,8 @@ func dryGPUAccounting(t *testing.T) {
 // The settings are the row's, as the script would pass them. The faults are the node's (dryGPUFaults) and
 // slot-held: the owner's other job holds QOS now's one GPU, so this run's job pends past the start-wait bound,
 // on a clock that moves only when the wait sleeps, so that the bound is reached at once and the job can never
-// have started. The other runs wait on the real clock, for a job that starts in seconds.
+// have started; and queue-held, the same for a row with no slot, whose bound is the wait in the queue (a cap on the
+// fake partition that the owner's job fills). The other runs wait on the real clock, for a job that starts in seconds.
 func dryAccountingWorld(t *testing.T, row, fault, out string) (*world, *fakeslurm.Platform) {
 	t.Helper()
 	r, ok := alpha.RowByName(row)
@@ -217,6 +220,13 @@ func dryWorld(t *testing.T, r alpha.Row, fault, out string, shape dryShape, agen
 			t.Fatalf("the dry fault slot-held needs a one-job slot: a QOS of the row, or a QOS of the partition's own")
 		}
 	}
+	// A row with no slot: the fake partition gets a cap of its own, which the owner's other job fills.
+	if fault == "queue-held" {
+		if r.QOS != "" || r.StartWait > 0 {
+			t.Fatalf("the dry fault queue-held is for a row with no slot and no start wait; use slot-held")
+		}
+		partQOS = "dry-queue-cap"
+	}
 	cfg := fakeslurm.Config{
 		DataParser: s.profile.Spec.JSONDataParser, NotListed: notListed,
 		Partitions: []fakeslurm.Partition{{Name: r.Partition, GPUOnly: true, QOS: partQOS}}, Run: run,
@@ -244,7 +254,7 @@ func dryWorld(t *testing.T, r alpha.Row, fault, out string, shape dryShape, agen
 		}
 	})
 	session := plat.Login(fakeslurm.Login{User: "example-user", Env: map[string]string{"HOME": home, "SCRATCH": scratch}})
-	if fault == "slot-held" {
+	if fault == "slot-held" || fault == "queue-held" {
 		// The owner's other project: one GPU job under the same slot through the same login, running (a process
 		// that sleeps) until the test ends it. It takes the slot's one GPU, so this run's job pends.
 		qosFlag := ""
@@ -276,7 +286,7 @@ func dryWorld(t *testing.T, r alpha.Row, fault, out string, shape dryShape, agen
 	}})
 	// The fake cluster's file system, the credentials and the key are where a dry run leaves its files.
 	w.artefacts = append(w.artefacts, dir)
-	if fault == "slot-held" {
+	if fault == "slot-held" || fault == "queue-held" {
 		ft := newFakeTime()
 		w.now, w.sleep = ft.now, ft.sleep
 	}
@@ -299,16 +309,12 @@ func gpuAccountingBody(t testing.TB, w *world, rowName string) {
 	a := w.newAlloc(name)
 	tag := v1alpha1.JobTag(a.Namespace, a.Name, a.UID)
 	uid := a.UID
-	// The job waits in the queue (the first clock), runs, and ends by itself. Under a one-job QOS the first
-	// clock is the start-wait bound: past it the job is cancelled by its tag and the run is NOT RUN, with no
-	// record (issue #194; startwait_test.go); else it is the wait the operator allows.
+	// The job waits in the queue (the first clock), runs, and ends by itself. The first clock is the start-wait
+	// bound under a one-job QOS, else the wait the operator allows: past either the job is cancelled by its tag
+	// and the run is NOT RUN, with no record (issues #194 and #272; startwait_test.go).
 	notFailed := func(a *v1alpha1.Allocation) { accountingNotFailed(t, a) }
 	startedOrEnded := func(a *v1alpha1.Allocation) bool { return accountingStarted(t, a) }
-	if w.s.startWait > 0 {
-		w.untilRuns("the job", name, "the job runs", w.at(), false, startedOrEnded)
-	} else {
-		w.until(name, "the job starts", w.s.pendingMax, startedOrEnded)
-	}
+	w.untilRuns("the job", name, "the job runs", w.at(), false, startedOrEnded)
 	w.until(name, "the job ends", accountingEndWait, func(a *v1alpha1.Allocation) bool {
 		notFailed(a)
 		return a.Status.AtProvider.Phase == v1alpha1.AllocationEnded

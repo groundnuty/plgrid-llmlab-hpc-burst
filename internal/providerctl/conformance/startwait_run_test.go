@@ -262,6 +262,65 @@ func TestAJobHeldPastTheBoundIsCancelledByItsTagAndTheRunIsNotRun(t *testing.T) 
 	}
 }
 
+// A run with no start wait waits for the wait in the queue instead (HPCBURST_CONF_PENDING_MAX_SECONDS; the science
+// agent's ruling of 8 Nov 2026, #272): a job held past it is cancelled by its tag and the run is NOT RUN, with the
+// marker saying it was the wait in the queue, not the start-wait bound. The expected bound is written out.
+func TestAJobHeldPastTheWaitInTheQueueIsCancelledByItsTagAndTheRunIsNotRun(t *testing.T) {
+	h := newHeld(t)
+	h.w.s.startWait, h.w.s.pendingMax = 0, 20*time.Minute
+	h.w.poll = h.pending("step")
+	began := h.ft.now()
+	ends(func() { h.w.untilRuns("step 1", "step", "the job runs", h.w.at(), false, running) })
+
+	if h.rec.failed != "" {
+		t.Fatalf("the run failed: %s", h.rec.failed)
+	}
+	if !strings.HasPrefix(h.rec.skipped, "NOT RUN: step 1: a job was still pending after 20m0s in the queue") {
+		t.Fatalf("skipped = %q, want a NOT RUN for step 1 naming the wait in the queue", h.rec.skipped)
+	}
+	if waited := h.ft.since(began); waited < 20*time.Minute || waited > 21*time.Minute {
+		t.Errorf("the wait lasted %s, want the wait in the queue of 20m plus the cancel's few seconds", waited)
+	}
+	if st, started := h.state(t, h.ours); st != string(fakeslurm.Cancelled) || started {
+		t.Errorf("the run's job is %s (started %v), want cancelled and never started", st, started)
+	}
+	if st, _ := h.state(t, h.foreign); st == string(fakeslurm.Cancelled) {
+		t.Errorf("the foreign job was cancelled")
+	}
+	raw, err := os.ReadFile(filepath.Join(h.dir, notRunFile))
+	if err != nil {
+		t.Fatalf("no marker: %v", err)
+	}
+	if !strings.Contains(string(raw), "still pending after 20m0s in the queue") || strings.Contains(string(raw), "start-wait") {
+		t.Errorf("marker = %q, want it to name the wait in the queue and not the start-wait bound", raw)
+	}
+	// The same wait with a job never accepted, and with a cancel that fails, stays a failure.
+	t.Run("never accepted", func(t *testing.T) {
+		h := newHeld(t)
+		h.w.s.startWait, h.w.s.pendingMax = 0, 20*time.Minute
+		h.w.poll = func(name string) *v1alpha1.Allocation {
+			return &v1alpha1.Allocation{ObjectMeta: metav1.ObjectMeta{Name: name}}
+		}
+		ends(func() { h.w.untilRuns("step 1", "step", "the job runs", h.w.at(), false, running) })
+		if !strings.Contains(h.rec.failed, "step 1: no job was accepted within the wait in the queue of 20m0s") || h.rec.skipped != "" {
+			t.Errorf("failed %q, skipped %q; want a failure for a job never accepted", h.rec.failed, h.rec.skipped)
+		}
+	})
+	t.Run("the cancel fails", func(t *testing.T) {
+		h := newHeld(t)
+		h.w.s.startWait, h.w.s.pendingMax = 0, 20*time.Minute
+		*h.cancelFails = true
+		h.w.poll = h.pending("step")
+		ends(func() { h.w.untilRuns("step 1", "step", "the job runs", h.w.at(), false, running) })
+		if !strings.Contains(h.rec.failed, "cancelling this run's jobs by tag failed") || h.rec.skipped != "" {
+			t.Errorf("failed %q, skipped %q; want a failure naming the cancel", h.rec.failed, h.rec.skipped)
+		}
+		if _, err := os.Stat(filepath.Join(h.dir, notRunFile)); err == nil {
+			t.Error("a marker was written although a job may be live")
+		}
+	})
+}
+
 // A job that starts in time is a start: nothing is cancelled and no marker is
 // written. A job that was never accepted is a failure, with nothing cancelled
 // (nothing of the run's was submitted by the step) and no marker.

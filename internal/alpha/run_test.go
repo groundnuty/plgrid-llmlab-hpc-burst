@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 )
 
@@ -292,12 +293,12 @@ func TestTheChosenLeaseDecidesWhetherASlowStartCanPass(t *testing.T) {
 }
 
 // A job that pends past the first clock is cancelled by its tag and the run ends without a verdict: NOT RUN on
-// a row that holds QOS now's one-job slot (the owner's slot was busy: try again later), a failure on any other
-// row (a queue that long is the operator's to read, not a pass-by). Either way no record and no text to post
-// are written, the run's own job was cancelled and never started, and the owner's job under the same QOS is
-// left running. The expected outcomes are the issue's (#222), not read from SlotHold. The bound is the one the
-// case names, written out in its own units, and the states are read at the times the issue's clock gives: the
-// job still pending one second before the bound, cancelled by its tag after it, not a minute either side.
+// every row (the science agent's ruling of 8 Nov 2026, #272: a row with no slot, such as tunnel-hour-athena, used
+// to fail here, and a queue wait tests nothing). No record and no text to post are written, the run's own job
+// was cancelled and never started, and the owner's job under the same QOS is left running. The expected outcome
+// is the ruling's, not read from the code under test. The bound is the one the case names, written out in its own
+// units, and the states are read at the times the issue's clock gives: the job still pending one second before
+// the bound, cancelled by its tag after it, not a minute either side.
 func TestAJobPendingPastTheBoundIsCancelledByItsTag(t *testing.T) {
 	for _, c := range []struct {
 		row                    string
@@ -307,7 +308,7 @@ func TestAJobPendingPastTheBoundIsCancelledByItsTag(t *testing.T) {
 	}{
 		{"alpha-helios-nooverlap", 10 * time.Minute, "9m59s", "10m1s", true, true},
 		{"tunnel-hour-helios", 30 * time.Minute, "29m59s", "30m1s", true, true},
-		{"tunnel-hour-athena", time.Minute, "59s", "1m1s", false, false},
+		{"tunnel-hour-athena", time.Minute, "59s", "1m1s", true, false},
 	} {
 		t.Run(c.row, func(t *testing.T) {
 			row := rowOf(c.row)
@@ -387,42 +388,97 @@ func containsLine(lines []string, want string) bool {
 	return false
 }
 
-// notStarted is a scenario whose first job never started; its Close can fail.
+// notStarted is a scenario whose first job never started, with the error it ends on; its Close can fail.
 type notStarted struct {
 	failedSteps
 	closeErr error
 }
 
-func (notStarted) NoOverlap(context.Context, Plan) (NoOverlapObs, error) {
-	return NoOverlapObs{}, ErrNotStarted
-}
 func (n notStarted) Close(context.Context) error { return n.closeErr }
 
-// A close that failed may have left a job behind: the run is then a failure, not a NOT RUN.
-func TestACloseThatFailsTurnsANotRunIntoAFailure(t *testing.T) {
-	row := rowOf("alpha-helios-nooverlap")
-	for _, c := range []struct {
-		name       string
-		closeErr   error
-		wantNotRun bool
-	}{
-		{"the steps close cleanly", nil, true},
-		{"the steps fail to close", errors.New("scancel did not answer"), false},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			cfg := Config{Row: row, Out: filepath.Join(t.TempDir(), "out"), FrontLabel: testFrontLabel}
-			rec, err := NewRecorder(cfg.Out)
-			if err != nil {
-				t.Fatal(err)
+// neverStartedErrors are the three ways a job of a run never starts within a bound, written out here: the wait in
+// the queue (the first clock), the deployment's first end (both the bare sentinel and the error that carries the
+// bound), as the ruling of 8 Nov 2026 on #272 lists them.
+func neverStartedErrors() map[string]error {
+	return map[string]error{
+		"the wait in the queue":   &NotStartedError{Bound: 2 * time.Hour},
+		"the bare sentinel":       ErrNotStarted,
+		"the deployment's end":    &NotStartedError{Bound: 121 * time.Minute, PastEnd: true},
+		"the bare end sentinel":   ErrQueueWaitPastEnd,
+		"a wrapped end":           fmt.Errorf("the scenario: %w", &NotStartedError{Bound: time.Hour, PastEnd: true}),
+		"a wrapped pending bound": fmt.Errorf("the scenario: %w", &NotStartedError{Bound: time.Hour}),
+	}
+}
+
+// stackRows are the rows this package runs through Run; the count is written out so that a row added later is
+// added to the table below, not left out of it.
+func stackRows(t *testing.T) []Row {
+	t.Helper()
+	out := Rows()
+	if len(out) != 4 {
+		t.Fatalf("the package runs %d stack rows, the table below was written for 4: add the new row's cases", len(out))
+	}
+	return out
+}
+
+// allRows are the rows of every kind (stack, accounting, reach); the count is written out too.
+func allRows(t *testing.T) []Row {
+	t.Helper()
+	out := append(append(Rows(), AccountingRows()...), ReachRows()...)
+	if len(out) != 8 {
+		t.Fatalf("there are %d rows, the table below was written for 8: add the new row's cases", len(out))
+	}
+	return out
+}
+
+// A job that never started within its bound is NOT RUN on EVERY row, whichever bound ran out (the science agent's
+// ruling of 8 Nov 2026, #272): the rule reads no property of the row, so a rule by row (a slot, a job count) added
+// later fails here. Rows with no test of this package (the accounting and reach rows) are in the table too, since
+// the rule is the same function; an error that is not a never-started one is a failure on every row.
+func TestEveryRowEndsNotRunWhenItsJobNeverStarts(t *testing.T) {
+	for _, r := range allRows(t) {
+		for name, err := range neverStartedErrors() {
+			if !NotRun(r, err) {
+				t.Errorf("%s: NotRun(%s) = false, want true on every row", r.Name, name)
 			}
-			_, err = Run(context.Background(), cfg, notStarted{closeErr: c.closeErr}, rec, t.Logf)
-			if err == nil {
-				t.Fatal("the run returned no error")
+		}
+		for _, err := range []error{errors.New("another"), fmt.Errorf("the transport: %w", slurm.ErrNotStarted), context.DeadlineExceeded, nil} {
+			if NotRun(r, err) {
+				t.Errorf("%s: NotRun(%v) = true, want a failure for an error that is not a job that never started", r.Name, err)
 			}
-			if got := NotRun(row, err); got != c.wantNotRun {
-				t.Errorf("NotRun(%v) = %t, want %t", err, got, c.wantNotRun)
+		}
+	}
+}
+
+// Through Run, on every stack row and for each way a job never starts: a clean close ends NOT RUN, a close that
+// failed may have left a job behind and is a failure, never a NOT RUN.
+func TestEveryStackRowRunsToNotRunAndAFailedCloseIsAFailure(t *testing.T) {
+	for _, row := range stackRows(t) {
+		for name, nerr := range neverStartedErrors() {
+			for _, c := range []struct {
+				close      string
+				closeErr   error
+				wantNotRun bool
+			}{
+				{"closes cleanly", nil, true},
+				{"fails to close", errors.New("scancel did not answer"), false},
+			} {
+				t.Run(row.Name+"/"+name+"/"+c.close, func(t *testing.T) {
+					cfg := Config{Row: row, Out: filepath.Join(t.TempDir(), "out"), FrontLabel: testFrontLabel}
+					rec, err := NewRecorder(cfg.Out)
+					if err != nil {
+						t.Fatal(err)
+					}
+					_, err = Run(context.Background(), cfg, notStarted{failedSteps: failedSteps{err: nerr}, closeErr: c.closeErr}, rec, t.Logf)
+					if err == nil {
+						t.Fatal("the run returned no error")
+					}
+					if got := NotRun(row, err); got != c.wantNotRun {
+						t.Errorf("NotRun(%v) = %t, want %t", err, got, c.wantNotRun)
+					}
+				})
 			}
-		})
+		}
 	}
 }
 
