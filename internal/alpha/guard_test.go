@@ -442,7 +442,8 @@ func TestTheSuccessorsWaitEndsAtItsStartBoundOnAFreshRead(t *testing.T) {
 		{"the scheduler's clock is behind this host's and short of the bound", onTheScheduler(startBy.Add(-time.Second), first, waiting), past},
 		{"it started, whatever the guard last saw: readiness goes on", onTheScheduler(startBy.Add(time.Hour), first, second), past},
 		{"the look fails, which decides nothing", func(int) (Look, error) { return Look{}, errors.New("ssh: connection lost") }, past},
-		{"this host's clock is short of the bound, so nothing is looked at", onTheScheduler(startBy.Add(time.Hour), first, waiting), func(g *guardedRun) func() bool {
+		// The scheduler's clock is past the bound here, and only this host's is short, so that it is this host's that holds the look back.
+		{"this host's clock is short of the bound, so nothing is looked at", onTheScheduler(time.Now().Add(2*time.Hour), first, waiting), func(g *guardedRun) func() bool {
 			return g.secondPastItsBound(predTag, time.Now().Add(time.Hour))
 		}},
 		{"no bound of its own", onTheScheduler(startBy.Add(time.Hour), first, waiting), func(*guardedRun) func() bool { return nil }},
@@ -529,6 +530,7 @@ func newCloseWorld(t *testing.T) *closeWorld {
 	if err := plat.Start(first); err != nil {
 		t.Fatal(err)
 	}
+	clock.Advance(time.Minute) // so that its cancel comes after its start, and it reads as a job that started (JobStarted)
 	waiting := plat.OutsideJob(standInUser, prefix+"secnd-000000000002", standInPartition, "", 1)
 	for _, tag := range []string{prefix + "first-000000000001", prefix + "secnd-000000000002"} {
 		if err := rec.Tag(tag); err != nil {
