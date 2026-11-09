@@ -80,7 +80,6 @@ func TestRehearsalHostDialed(t *testing.T) {
 	r := startRigWith(t, rigSetup{mode: string(agentapi.DialHomeHostDialed), ports: portsHostDialed})
 	r.engineEnv = []v1alpha1.EnvVar{{Name: "HB_ENGINE_DOUBLE", Value: "token-delay=" + tokenDelay.String()}}
 	in := r.stepStart()
-	r.orphanBase = r.baseline("after step (a)", keyTunnelOrphaned)
 	jobID := in.Status.JobID
 	id, _ := strconv.Atoi(jobID)
 	seen := map[int]bool{}
@@ -100,6 +99,10 @@ func TestRehearsalHostDialed(t *testing.T) {
 	key := r.fc.KeyFor(in)
 	r.relayKilledMidStream(in, key, relays, seen)
 	r.hostDialedControllerRestart(in, key, seen)
+	// No Instance has ended yet; the restarted controller serves the step that
+	// ends them, (g), so the absence check's first read is taken from it
+	// (HBEP-8's condition 2: both reads from one process).
+	r.orphanBase = r.baseline("after the controller restart", keyTunnelOrphaned)
 	r.stepScaleToZero("g")
 	for pid := range seen {
 		if stack.Alive(pid) {
