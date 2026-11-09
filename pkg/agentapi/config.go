@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -33,7 +34,23 @@ const (
 	// cluster through a port forward on the gateway at another port
 	// (`@hpc-burst-science-agent`, 31 Oct 2026).
 	DialHomeSSH DialHomeMode = "ssh"
+	// DialHomeHostDialed: the control-plane host dials the job, through the
+	// login node, for a host that compute nodes cannot reach (HBEP-6,
+	// Dial-home modes, host-dialed mode; science-agent decision, 9 Nov 2026).
+	// The agent binds two loopback listeners, control and serving, and runs
+	// each channel's multiplexed session over the relay that the batch
+	// Provider's controller starts in an srun step (RelayLine): the control
+	// client dials the control listener, and frpc's serverPort is the serving
+	// listener's port. agent.json names no endpoint and no ssh settings in
+	// this mode: nothing in the job dials the control-plane host's address.
+	DialHomeHostDialed DialHomeMode = "host-dialed"
 )
+
+// DialHomeModes are the dial-home modes, in the order the HBEP names them.
+var DialHomeModes = []DialHomeMode{DialHomeDirect, DialHomeSSH, DialHomeHostDialed}
+
+// ValidDialHomeMode reports whether m is one of DialHomeModes.
+func ValidDialHomeMode(m DialHomeMode) bool { return slices.Contains(DialHomeModes, m) }
 
 // AgentConfig is agent.json, which the provider writes into the Allocation's
 // directory, mode 600, and the agent reads at start (HBEP-4, Submission). It
@@ -67,7 +84,7 @@ type AgentConfig struct {
 	// FrpcDigest is the SHA-256 of the staged frpc binary, 64 lowercase hex
 	// characters, which the agent checks before it runs frpc. frpc is staged
 	// at StagedFrpcPath(FrpcDigest) under StagingDir (HBEP-4, Submission:
-	// Files first). It is required in both dial-home modes, with no default:
+	// Files first). It is required in every dial-home mode, with no default:
 	// frpc runs in the job in both (HBEP-6, Dial-home modes; HBEP-7, the
 	// allocation agent), and an agent.json without it would let a job skip
 	// the check (`@hpc-burst-science-agent`, 31 Oct 2026).
@@ -179,11 +196,19 @@ func (c AgentConfig) Validate() error {
 	if len(c.Tag) > 56 || !tagForm.MatchString(c.Tag) {
 		bad("tag %q is not a job tag, hb-<name>-<12 hex>, at most 56 characters", c.Tag)
 	}
-	host, port, err := net.SplitHostPort(c.Endpoint)
-	if err != nil || host == "" {
-		bad("endpoint %q: want host:port", c.Endpoint)
-	} else if p, err := strconv.Atoi(port); err != nil || p < 1 || p > 65535 {
-		bad("endpoint %q: %q is not a port", c.Endpoint, port)
+	if c.Mode == DialHomeHostDialed {
+		// Nothing in the job dials the control-plane host in this mode: the
+		// relays reach the job (HBEP-6, Dial-home modes, host-dialed mode).
+		if c.Endpoint != "" {
+			bad("endpoint %q is set in host-dialed mode: the agent dials only its own loopback listeners, so agent.json names no endpoint", c.Endpoint)
+		}
+	} else {
+		host, port, err := net.SplitHostPort(c.Endpoint)
+		if err != nil || host == "" {
+			bad("endpoint %q: want host:port", c.Endpoint)
+		} else if p, err := strconv.Atoi(port); err != nil || p < 1 || p > 65535 {
+			bad("endpoint %q: %q is not a port", c.Endpoint, port)
+		}
 	}
 	switch c.Mode {
 	case DialHomeDirect:
@@ -207,16 +232,20 @@ func (c AgentConfig) Validate() error {
 				bad("ssh.dialHomePort %d is also ssh.agentPort: connection 2 must forward to the dial-home listener, not the agent endpoint", c.SSH.DialHomePort)
 			}
 		}
+	case DialHomeHostDialed:
+		if c.SSH != nil {
+			bad("ssh is set in host-dialed mode")
+		}
 	default:
-		bad("mode %q: want %q or %q", c.Mode, DialHomeDirect, DialHomeSSH)
+		bad("mode %q: want %q, %q or %q", c.Mode, DialHomeDirect, DialHomeSSH, DialHomeHostDialed)
 	}
 	if !pinForm.MatchString(c.CertSPKISHA256) {
 		bad("certSPKISHA256: want 64 lowercase hex characters")
 	}
-	// frpc runs in both modes (HBEP-6, Dial-home modes), so its digest is
+	// frpc runs in every mode (HBEP-6, Dial-home modes), so its digest is
 	// always required.
 	if !pinForm.MatchString(c.FrpcDigest) {
-		bad("frpcDigest %q: want the SHA-256 of the staged frpc, 64 lowercase hex characters; it is required in both dial-home modes", c.FrpcDigest)
+		bad("frpcDigest %q: want the SHA-256 of the staged frpc, 64 lowercase hex characters; it is required in every dial-home mode", c.FrpcDigest)
 	}
 	for name, p := range map[string]string{"stagingDir": c.StagingDir, "dialHomeDir": c.DialHomeDir} {
 		if !safePath.MatchString(p) || strings.Contains(p, "/../") || strings.HasSuffix(p, "/..") {
