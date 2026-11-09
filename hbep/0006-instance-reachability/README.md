@@ -232,7 +232,7 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
   - **It runs** `srun -u --overlap --jobid=<job> --ntasks=1 <the job's agent binary> relay <channel> --dir <Allocation directory> --allocation <UID> --epoch <E> --seq <N>`.
     - `-u` is required: without it `srun` holds output that ends without a newline until the stream closes, and with it the task's stdout is a pty with `OPOST` cleared (Slurm 24.11.5 and 23.11.7, `src/slurmd/slurmstepd/io.c`), which carried all 256 byte values unchanged.
     - Alpha's Instances are single-node, so the step lands on the job's one node.
-  - **Before each start,** the Provider's latest queue listing (one per poll interval, HBEP-4) must show the recorded job ID RUNNING, with its name equal to the Allocation's tag. Otherwise the relay isn't started. An `srun` refusal that the job doesn't exist or is completing ends the relay for good.
+  - **Before each start,** the Provider's latest queue listing (one per poll interval, HBEP-4) must show the recorded job ID RUNNING, with its name equal to the Allocation's tag; otherwise the relay waits for the next listing (HBEP-4's absence grace), starting no `srun`. An `srun` refusal that the job doesn't exist or is completing ends the relay for good.
 - **The wire:** `relay` first writes one preamble line, `hpcburst-relay/1 <Allocation UID>`. After it comes one multiplexed session: `fatedier/yamux` v0.2.0, the same version frp v0.71.1 pins, with a 10 s keepalive and a 10 s write timeout.
   - The host side requires the preamble within 30 s of the start. Anything else first is refused as named output ("unexpected output before the preamble"), counted and retried.
   - The host side dials only its channel's loopback port for each stream the job side opens, so a job can't reach any other port, the plugin endpoint included.
@@ -260,7 +260,7 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
       - "agent not ready".
     - **Final, with no restart:**
       - `superseded`;
-      - the job not listed, ended or completing;
+      - the job listed as ended or completing, or `srun`'s refusal that it doesn't exist or is completing;
       - `srun`'s step-limit refusal;
       - more than 120 restarts of one channel within an hour.
 
@@ -609,5 +609,6 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
   - **What ends a relay:** retried or final, with `RelayFailed`, and never an engine restart.
   - **The owner's two decisions:** relays run without asking Cyfronet first, and a controller restart cuts host-dialed streams in alpha, with a relay keeper deferred to beta (open question 13).
 - **2026-11-09: erratum:** `RelayFailed` is an untyped Warning, not a `failing` event (#301).
+- **2026-11-09: erratum:** a job missing from the listing is retried, not a final end (#301).
 
   Before, a host that compute nodes could not reach was out of alpha, and alpha waited for the gateway's forward.
