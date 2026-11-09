@@ -1257,13 +1257,15 @@ run_cluster() {
       [[ $RUN_ID =~ ^[0-9a-f]{10}$ ]] || { release_run_lock; say "$n: FAIL (no run ID could be drawn)"; return 1; }
       OWN_PREFIX="hb-alpha-$RUN_ID-" ;;
   esac
-  JOBID=""; CLEAN_TRIES=0; NOT_RUN=0; TEST_STOPPED=0
+  JOBID=""; CLEAN_TRIES=0; NOT_RUN=0; TEST_STOPPED=0; RE_PENDING_JOB=""; RE_PENDING_BOUND=0
   ACTIVE_HOST=$host
   t0=$(date +%s)
   execute_cluster "$n" || { [ "$NOT_RUN" = 1 ] || verdict=1; }
   clean_cluster || true
   t1=$(date +%s)
   slot_report "$n" "$t0" "$t1"
+  # real-engine's job pending at its bound: the cleanup has cancelled it, and its history now says what the run ends as (#297).
+  if [ "$n" = real-engine ] && [ "$NOT_RUN" = 1 ]; then settle_real_engine_not_run "$n" "$host" || verdict=1; fi
   [ "$CLEAN_LEFT" -eq 0 ] || verdict=1
   release_run_lock
   # Not run, with nothing left behind: exit 3, below a failure.
@@ -1292,6 +1294,8 @@ now_epoch() { if [ -n "${LIVE_FAKE_CLOCK:-}" ]; then cat "$LIVE_FAKE_CLOCK"; els
 
 RE_DIR=""
 RE_TAG=""
+RE_PENDING_JOB=""     # the real-engine job still pending at its bound, whose history settle_real_engine_not_run reads
+RE_PENDING_BOUND=0    # the wait in the queue it was given, in seconds
 
 # prepare_real_engine <name>: build the arm64 agent and its test binary, write the plan, stage all of it.
 # Nothing here holds the slot.
@@ -1353,13 +1357,12 @@ EOS
     if [ "$state" != PENDING ] && [ "$state" != error ] && [ -z "$run_t" ]; then run_t=$now; fi
     # Only a read that says PENDING can end the wait in the queue: the job can have started since the last good read, so a
     # failed read at the bound tells nothing about a start, and the three-error guard above decides it (review of PR 284, B4).
-    # The limit: a job that starts in the seconds between this read and the cleanup's cancel still reads NOT RUN. A read of
-    # sacct's text could close it, whose form for a job never started cannot be checked here without a live run.
     if [ "$state" = PENDING ] && [ -z "$run_t" ] && [ $((now - submit_t)) -gt "$pend_max" ]; then
-      # The job never started: not a failure (issue #222). The cleanup after this cancels it by its tag, and the run's exit is 3
-      # unless that leaves a job behind, which is a failure.
-      NOT_RUN=1
-      say "$n: NOT RUN (a job was still pending after $(fmt_pending "$pend_max") in the queue and was cancelled by its tag; not a failure)"; return 3
+      # The read says the job waits, but it can start in the seconds before the cleanup's cancel (#297). So this ends the wait and
+      # nothing more: the cleanup cancels the job by its tag, and settle_real_engine_not_run then reads its history, and only
+      # that says NOT RUN (a job that never started, issue #222: exit 3), a FAIL for a start, or a FAIL for a history it cannot read.
+      NOT_RUN=1; RE_PENDING_BOUND=$pend_max; RE_PENDING_JOB=$JOBID
+      say "$n: the job was still pending after $(fmt_pending "$pend_max") in the queue: cancelling it, then reading its history"; return 3
     fi
     if [ -n "$run_t" ] && [ $((now - run_t)) -gt $((limit_s + margin)) ]; then
       say "$n: FAIL (the job ran past its time limit plus $((margin/60)) minutes; cancelling it)"; return 1
@@ -1379,6 +1382,105 @@ EOS
 }
 
 slurm_seconds() { local h m s; IFS=: read -r h m s <<<"$1"; echo $(( 10#$h * 3600 + 10#$m * 60 + 10#${s:-0} )); }
+
+# ---------------------------------------------------------------- the pending job's history (#297)
+
+# The sacct start of a job that never started is the bare number 4294967294 (Slurm's NO_VAL, 0xfffffffe, in a field the data parser dumps
+# as a plain timestamp), as the real GH200 reply showed (#267, #269; internal/slurm/testdata/v0.0.42/sacct-never-started.json,
+# and internal/slurm/parse.go says why). Only that form is read as "never started", and only on a job that is CANCELLED, since a job the
+# cancel has not reached yet shows the same start. A start that is a real time is a job that started. Everything else is a history this
+# check cannot read: the same rule as the other rows' (internal/providerctl/conformance, notRun: a read that fails, a job with no record and
+# a job that started are each a FAIL), so a form nobody has seen is a FAIL that says so, never a NOT RUN.
+NO_VAL_START=4294967294
+
+# json_count <regexp> <text>: how many times the extended regular expression matches in the text.
+json_count() { printf '%s' "$2" | grep -o -E -e "$1" | wc -l | tr -d ' '; }
+
+# history_verdict <job> <sacct --json reply>: one line, "never", "started <epoch>" or "unclear <what>". The reply is read with its whitespace
+# removed, so that the layout of the JSON (one line or one key to a line) does not matter, and only fixed words reach the screen:
+# nothing of the reply is echoed but a number made of digits. It wants exactly one job record, the job asked about, with one start, an empty
+# list of errors and one state.
+history_verdict() {
+  local job=$1 flat start end state
+  case $job in ''|*[!0-9]*) echo "unclear the job number is not a plain number"; return ;; esac
+  flat=$(printf '%s' "$2" | tr -d ' \t\r\n')
+  case $flat in *'"errors":[]'*) ;; *) echo "unclear the reply carries no empty errors list"; return ;; esac
+  [ "$(json_count "\"job_id\":$job[,}]" "$flat")" = 1 ] || { echo "unclear the reply does not list this job exactly once"; return; }
+  [ "$(json_count '"start":' "$flat")" = 1 ] || { echo "unclear the reply does not hold exactly one start time"; return; }
+  start=$(printf '%s' "$flat" | grep -o -E -e '"start":[^,}]*' | head -1); start=${start#'"start":'}
+  case $start in
+    ''|*[!0-9]*) echo "unclear its start is not a plain number"; return ;;
+  esac
+  state=$(printf '%s' "$flat" | grep -o -E -e '"state":\{"current":\[[^]]*\]' | head -1)
+  if [ "$start" = "$NO_VAL_START" ]; then
+    if [ "$(json_count '"state":\{"current":' "$flat")" = 1 ] && [ "$state" = '"state":{"current":["CANCELLED"]' ]; then echo never; return; fi
+    echo "unclear its start is not set but its state is not CANCELLED yet"; return
+  fi
+  # A time: 1 to 4294967293, ten digits at most. 0 and every marker other than the one above are forms nobody has seen here.
+  if [ "${#start}" -gt 10 ] || [ "$((10#$start))" -lt 1 ] || [ "$((10#$start))" -ge "$NO_VAL_START" ]; then echo "unclear its start is a marker of a form not known"; return; fi
+  end=$(printf '%s' "$flat" | grep -o -E -e '"end":[0-9]+' | head -1); end=${end#'"end":'}
+  # alpha.JobStarted counts a start that is not before the end as no start; here that is a record this check cannot read either way.
+  # An end of 0 is a job still running (sacct has none yet), and the markers are no end either: those are a start and no end.
+  if [ -n "$end" ] && [ "${#end}" -le 10 ] && [ "$((10#$end))" -ge 1 ] && [ "$((10#$end))" -lt "$NO_VAL_START" ] && [ "$((10#$end))" -le "$((10#$start))" ]; then
+    echo "unclear its end is not after its start"; return
+  fi
+  echo "started $((10#$start))"
+}
+
+# job_history <host> <job>: the job's accounting record, as sacct --json (-X: the job, not its steps; -D: every execution, as the real
+# capture was read) with the status of the command on a line of its own before it, so that a login banner or a failed command cannot pass
+# for a reply.
+job_history() {
+  { preamble JOB "$2"; cat <<'EOS'
+out=$(sacct -j "$JOB" --json -X -D 2>/dev/null); rc=$?
+echo "sacct_rc=$rc"
+echo "---SACCT---"
+printf '%s\n' "$out"
+EOS
+  } | remote "$1"
+}
+
+# real_engine_history_verdict <host> <job>: history_verdict of what sacct says now, asked up to five times a few seconds apart (LIVE_SACCT_GAP,
+# as fetch_real_engine does): accounting can lag the job's leaving the queue by a moment. A "never" or a "started" ends it at once. A read that
+# fails, an empty reply and every other "unclear" are asked again, and the last one stands.
+real_engine_history_verdict() {
+  local host=$1 job=$2 i reply rc body v="unclear sacct was not asked"
+  for i in 1 2 3 4 5; do
+    [ -z "$INTERRUPTED" ] || { echo "unclear the run was interrupted"; return; }
+    if ! reply=$(job_history "$host" "$job"); then
+      v="unclear the read did not complete"
+    else
+      rc=$(printf '%s\n' "$reply" | sed -n -E 's/^sacct_rc=([0-9]+)$/\1/p' | head -1)
+      body=$(printf '%s\n' "$reply" | sed -n '/^---SACCT---$/,$p' | tail -n +2)
+      if [ "$rc" != 0 ]; then v="unclear sacct failed"
+      elif [ -z "$(printf '%s' "$body" | tr -d ' \t\r\n')" ]; then v="unclear sacct returned nothing"
+      else v=$(history_verdict "$job" "$body"); fi
+    fi
+    case $v in never|started\ *) break ;; esac
+    [ "$i" = 5 ] || sleep "${LIVE_SACCT_GAP:-2}"
+  done
+  printf '%s\n' "$v"
+}
+
+# settle_real_engine_not_run <name> <host>: what the pending bound ends as, once the cleanup has cancelled the job. Returns 0 for a NOT RUN
+# (the history says it never started) and 1 for a FAIL, which also takes the NOT RUN back: a job that started, a history that cannot be read
+# and a job the cleanup left in the queue (whose history is not a history of a cancelled job). The wait it adds is the sacct reads of
+# real_engine_history_verdict (five at most, LIVE_SACCT_GAP apart), after the pending bound and never inside the run's own clock.
+settle_real_engine_not_run() {
+  local n=$1 host=$2 v
+  if [ "$CLEAN_LEFT" -ne 0 ]; then
+    NOT_RUN=0; say "$n: FAIL (the cleanup left the job in the queue, so its history cannot show that it never started)"; return 1
+  fi
+  v=$(real_engine_history_verdict "$host" "$RE_PENDING_JOB")
+  case $v in
+    never)
+      say "$n: NOT RUN (a job was still pending after $(fmt_pending "$RE_PENDING_BOUND") in the queue and was cancelled by its tag; not a failure)"; return 0 ;;
+    started\ *)
+      NOT_RUN=0; say "$n: FAIL (the job had started by its cancel, with a start time of ${v#started } as sacct gives it: a started job is never NOT RUN)"; return 1 ;;
+    *)
+      NOT_RUN=0; say "$n: FAIL (the job's history could not be read after its cancel, so it cannot be called a job that never started: ${v#unclear })"; return 1 ;;
+  esac
+}
 
 # fetch_real_engine <name> <tag> <job> <dir>: the job's log, its final state, and the run's record.
 fetch_real_engine() {

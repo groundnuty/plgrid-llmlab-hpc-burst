@@ -111,7 +111,32 @@ echo "$id;seedcluster"
 
 // stubSacct is empty for its first STUB_SACCT_EMPTY calls, as sacct can be
 // right after a job leaves squeue.
+//
+// With --json it answers the history read of #297 (hack/live-checks.sh, settle_real_engine_not_run) from a file: the real
+// GH200 reply of a job cancelled before it started (installStubs puts it in the state directory) unless STUB_SACCT_JSON
+// names another file. Only the job number in it is the queried job's (the stub's jobs are 7001 and the like, the capture's
+// 4311), which is what the real reply holds for whatever job was asked. STUB_SACCT_JSON_EMPTY=N: nothing for the first N
+// of these reads; STUB_SACCT_JSON_RC=N: the command fails with that status and says so on stderr; STUB_SACCT_JSON_SHOWS=
+// <state>: the first STUB_SACCT_JSON_LAG reads (default 1) show the job's state as that one, as accounting does before it has the cancel.
+// Every read is an event ("sacct json", with the number of the read), so that a test can say what it came after.
 const stubSacct = `#!/bin/bash
+case " $* " in
+  *" --json "*)
+    j=""; prev=""
+    for a in "$@"; do [ "$prev" = -j ] && j=$a; prev=$a; done
+    k=$(( $(cat "$STUB_STATE/sacct-json-calls" 2>/dev/null || echo 0) + 1 )); echo $k > "$STUB_STATE/sacct-json-calls"
+    echo "sacct json $k" >> "$STUB_STATE/events"
+    printf '%s\n' "$*" >> "$STUB_STATE/sacct-json-argv"
+    [ "$k" -gt "${STUB_SACCT_JSON_EMPTY:-0}" ] || exit 0
+    if [ -n "${STUB_SACCT_JSON_RC:-}" ]; then echo "sacct: error: slurmdbd is not answering" >&2; exit "$STUB_SACCT_JSON_RC"; fi
+    doc=${STUB_SACCT_JSON:-$STUB_STATE/sacct-never-started.json}
+    if [ -n "${STUB_SACCT_JSON_SHOWS:-}" ] && [ "$k" -le "${STUB_SACCT_JSON_LAG:-1}" ]; then
+      sed -e "s/\"job_id\": 4311,/\"job_id\": $j,/" -e "s/\"current\": \[\"CANCELLED\"\]/\"current\": [\"$STUB_SACCT_JSON_SHOWS\"]/" "$doc"
+    else
+      sed -e "s/\"job_id\": 4311,/\"job_id\": $j,/" "$doc"
+    fi
+    exit 0 ;;
+esac
 n=$(cat "$STUB_STATE/sacct-calls" 2>/dev/null || echo 0)
 echo $((n+1)) > "$STUB_STATE/sacct-calls"
 [ "$n" -ge "${STUB_SACCT_EMPTY:-0}" ] || exit 0
@@ -120,6 +145,7 @@ echo "COMPLETED|0:0"
 
 const stubScancel = `#!/bin/bash
 echo "$1" >> "$STUB_STATE/cancelled"
+echo "scancel $1" >> "$STUB_STATE/events"
 [ -z "${STUB_SCANCEL_KEEP:-}" ] || exit 0
 sed -i "/^$1|/d" "$STUB_STATE/queue"
 `
