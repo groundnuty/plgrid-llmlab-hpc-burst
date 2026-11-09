@@ -303,3 +303,43 @@ func TestASecondHostDialedProviderOnOneLoginHostIsRefused(t *testing.T) {
 }
 
 var err0 = errors.New("the register refused its first claim")
+
+// A running job that a listing misses for a while keeps its relays (review
+// of the final round): while it is absent, within the Provider's absence
+// grace, each start is refused, not ended for good, and the Allocation stays
+// Running, so its observation does not change; once it is listed again, the
+// relays start again. A final end there would leave the Allocation without
+// relays for the rest of its life.
+func TestAJobMissingFromTheListingForAWhileKeepsItsRelays(t *testing.T) {
+	e := newEnv(t, hostDialed)
+	runRelays(e)
+	e.newAlloc("alloc-a")
+	e.run("alloc-a", 4)
+	a := e.get("alloc-a")
+	tag, job := tagOf(a), a.Status.AtProvider.JobID
+	waitRelays(t, "both relays started", func() bool {
+		rs := relaysOf(e, tag)
+		return len(rs) == 2 && rs[0].Starts >= 1 && rs[1].Starts >= 1
+	})
+	e.batch.Vanish(job)
+	waitRelays(t, "both starts refused while the job is not listed", func() bool {
+		rs := relaysOf(e, tag)
+		return len(rs) == 2 && strings.Contains(rs[0].LastRefusal, "not listed under tag") && strings.Contains(rs[1].LastRefusal, "not listed under tag")
+	})
+	e.run("alloc-a", 2)
+	if p := e.get("alloc-a").Status.AtProvider.Phase; p != v1alpha1.AllocationRunning {
+		t.Fatalf("the Allocation is %s within the absence grace, want Running", p)
+	}
+	starts := map[agentapi.RelayChannel]int{}
+	for _, r := range relaysOf(e, tag) {
+		if r.Final {
+			t.Errorf("the %s relay ended for good (%s) while its job was missing from the listing", r.Channel, r.FinalCause)
+		}
+		starts[r.Channel] = r.Starts
+	}
+	e.batch.Reappear(job)
+	waitRelays(t, "both relays started again once the job is listed", func() bool {
+		rs := relaysOf(e, tag)
+		return len(rs) == 2 && rs[0].Starts > starts[rs[0].Channel] && rs[1].Starts > starts[rs[1].Channel]
+	})
+}

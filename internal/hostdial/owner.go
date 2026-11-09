@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/sshrun"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
@@ -36,9 +37,11 @@ const (
 )
 
 // RelayStartWorstCase is the longest from the moment a relay is due until its
-// ssh runs, once its pair of slots is held and the listing shows the job: the
-// longest backoff. A live run's derived timeouts count it by this name.
-const RelayStartWorstCase = DefaultMaxBackoff
+// session is up, once its pair of slots is held and the listing shows the
+// job: the longest backoff, ssh's ConnectTimeout to the login node, and the
+// wait for the relay's preamble. A live run's derived timeouts count it by
+// this name.
+const RelayStartWorstCase = DefaultMaxBackoff + sshrun.RelayConnectTimeout + PreambleTimeout
 
 // JobReader is the Provider's latest queue listing (one read per poll
 // interval, HBEP-4), under an Allocation's tag; *slurm.Batch implements it.
@@ -584,10 +587,17 @@ func (r *relay) once(ctx context.Context) (time.Duration, bool, EndKind, string)
 
 // jobIsOurs reads the Provider's latest listing under the Allocation's tag
 // and returns the job ID to start on: the recorded job, listed RUNNING with
-// the tag as its name. A job listed pending or held is waited for; one not
-// listed, ended or completing is the job's end (HBEP-6: "Before each start,
-// the Provider's latest queue listing ... must show the recorded job ID
-// RUNNING, with its name equal to the Allocation's tag").
+// the tag as its name (HBEP-6: "Before each start, the Provider's latest queue
+// listing ... must show the recorded job ID RUNNING, with its name equal to
+// the Allocation's tag. Otherwise the relay isn't started."). A job listed
+// ended or completing is the job's end, final. A job listed pending or held,
+// or not listed under the tag, is not started on and is read again after the
+// backoff: a listing can miss a running job for a while (the Provider's
+// absence grace, LostGrace), and a final end there would leave a running
+// Allocation without relays for good, since its observation never changes.
+// The controller's Drop stops the relays once it sees the job end, and srun's
+// own refusal that the job does not exist or is completing ends one for good
+// (ClassifyEnd).
 func (r *relay) jobIsOurs(ctx context.Context) (string, EndKind, string) {
 	jobs, err := r.t.Jobs.ListByTag(ctx, r.t.Tag)
 	if err != nil {
@@ -607,7 +617,7 @@ func (r *relay) jobIsOurs(ctx context.Context) (string, EndKind, string) {
 		}
 		return "", EndJobGone, fmt.Sprintf("job %s is %s, not running", j.ID, j.Phase)
 	}
-	return "", EndJobGone, fmt.Sprintf("job %s is not listed under tag %s", r.t.JobID, r.t.Tag)
+	return "", EndRetried, fmt.Sprintf("job %s is not listed under tag %s", r.t.JobID, r.t.Tag)
 }
 
 // process is a started relay ssh: its pipes are the session's transport.

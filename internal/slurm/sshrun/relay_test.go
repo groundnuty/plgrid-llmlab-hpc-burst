@@ -1,9 +1,13 @@
 package sshrun
 
 import (
+	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 )
 
 // The relay's ssh is on a connection of its own (HBEP-6, Dial-home modes,
@@ -46,5 +50,43 @@ func TestClassifyARelayLine(t *testing.T) {
 	l.w.WriteString("example@login.example: Permission denied (publickey).\n")
 	if got := Classify(cmd); got != "authentication was refused" {
 		t.Errorf("Classify = %q, want the kind only", got)
+	}
+}
+
+// The login host is ssh -G's hostname through the relays' own -F file (HBEP-6,
+// Capacity): ssh writes host names in lower case, so two Providers that spell
+// one host differently, with any user, are one login host. When ssh -G
+// cannot run, it is the configured HostName as given.
+func TestRelayLoginIsSSHGsHostName(t *testing.T) {
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("no ssh client on this host")
+	}
+	relay := func(name, host, user, bin string) *Relay {
+		dir, err := os.MkdirTemp("", "rl")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		r, err := NewRelay(RelayOptions{Name: name, Binary: bin, ControlDir: dir,
+			Config: slurm.SSHConfig{HostName: host, Port: 2222, User: user, IdentityFile: "/nonexistent/key", UserKnownHostsFile: "/nonexistent/known_hosts"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = r.Close() })
+		return r
+	}
+	a := relay("helios-a", "LOGIN01.Example.org", "example-user", "ssh")
+	b := relay("helios-b", "login01.example.org", "other-user", "ssh")
+	if got := a.Login(); got != "login01.example.org" {
+		t.Errorf("Login = %q, want ssh -G's hostname login01.example.org", got)
+	}
+	if a.Login() != b.Login() {
+		t.Errorf("one login host spelt two ways gives two keys: %q and %q", a.Login(), b.Login())
+	}
+	if got := relay("helios-c", "LOGIN01.Example.org", "example-user", "/bin/false").Login(); got != "LOGIN01.Example.org" {
+		t.Errorf("with no ssh -G, Login = %q, want the configured HostName", got)
 	}
 }

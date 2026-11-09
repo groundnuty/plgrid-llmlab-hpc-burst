@@ -206,13 +206,15 @@ func TestHostDialedAStaleRendezvousIsAgentNotReady(t *testing.T) {
 }
 
 // The job-is-ours read happens before every start, not only the first
-// (review N2), from the Provider's listing: once the relays run, the job is
+// (review N2), from the Provider's listing. Once the relays run, the job is
 // listed under another name; the serving relay is killed, and its next start
-// ends the relay for good as the job's end, with no srun and no RelayFailed.
+// is refused, with no srun, no RelayFailed and no final end, since a listing
+// can miss a running job for a while. Once the listing shows the job under
+// its tag again, the relay starts again and bytes cross it.
 func TestHostDialedEveryStartReadsTheJobAgain(t *testing.T) {
 	w := newWorld(t)
 	j := w.submit("hb-relay-rea-0123456789ab", 30*time.Second)
-	own, _, _ := w.owner(hostdial.OwnerOptions{})
+	own, _, _ := w.owner(hostdial.OwnerOptions{MinBackoff: 100 * time.Millisecond, MaxBackoff: 200 * time.Millisecond})
 	var f failures
 	tg := w.target(j)
 	f.hook(&tg)
@@ -220,25 +222,39 @@ func TestHostDialedEveryStartReadsTheJobAgain(t *testing.T) {
 	up := waitUp(t, own, j.tag)
 	roundTrip(t, j, serving, "serving", payload(1000))
 	waitFor(t, time.Minute, "both relays' srun steps logged", func() bool { return len(w.sruns(j.id)) == 2 })
+	listed := func(want bool) func() bool {
+		return func() bool {
+			jobs, err := w.jobs.ListByTag(t.Context(), j.tag)
+			return err == nil && (len(jobs) == 1) == want
+		}
+	}
 	if err := w.plat.RenameListed(atoi(t, j.id), "hb-relay-oth-0123456789ab"); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, time.Minute, "the Provider's listing to show the job under another name", func() bool {
-		jobs, err := w.jobs.ListByTag(t.Context(), j.tag)
-		return err == nil && len(jobs) == 0
-	})
+	waitFor(t, time.Minute, "the Provider's listing to show the job under another name", listed(false))
 	if err := syscall.Kill(up[serving].PID, syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, time.Minute, "the serving relay ended for good", func() bool { return relayOf(own, j.tag, serving).Final })
-	if r := relayOf(own, j.tag, serving); !strings.Contains(r.FinalCause, "not listed under tag") || r.Starts != 1 {
-		t.Errorf("the serving relay %+v: want a final end, not listed under its tag, after its one start", r)
+	waitFor(t, time.Minute, "the serving relay's next start refused", func() bool {
+		return strings.Contains(relayOf(own, j.tag, serving).LastRefusal, "not listed under tag")
+	})
+	if r := relayOf(own, j.tag, serving); r.Final || r.PID != 0 || r.Starts != 1 {
+		t.Errorf("the serving relay %+v: want refused, not final, after its one start", r)
 	}
 	if n := len(w.sruns(j.id)); n != 2 {
 		t.Errorf("the fake ran %d srun steps in the job, want the first 2 only: %q", n, w.sruns(j.id))
 	}
+	if err := w.plat.RenameListed(atoi(t, j.id), j.tag); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, time.Minute, "the Provider's listing to show the job under its tag again", listed(true))
+	waitFor(t, time.Minute, "the serving relay up again", func() bool {
+		r := relayOf(own, j.tag, serving)
+		return r.PID != 0 && r.Starts == 2
+	})
+	roundTrip(t, j, serving, "serving", payload(1000))
 	if got := f.list(); len(got) != 0 {
-		t.Errorf("the job's end raised RelayFailed: %q", got)
+		t.Errorf("a job missing from the listing for a while raised RelayFailed: %q", got)
 	}
 }
 
@@ -377,9 +393,16 @@ func TestHostDialedTheJobsEndEndsTheRelayWithoutRelayFailed(t *testing.T) {
 	if err := w.plat.End(atoi(t, j.id), "CANCELLED"); err != nil {
 		t.Fatal(err)
 	}
+	// The job's end stops each relay's process with its srun step; a later
+	// start is refused or ends for good, by the listing or by srun, and
+	// never starts a step.
 	for _, ch := range agentapi.RelayChannels {
-		waitFor(t, time.Minute, "the "+string(ch)+" relay ended for good with the job", func() bool { return relayOf(own, j.tag, ch).Final })
-		if r := relayOf(own, j.tag, ch); !strings.HasPrefix(r.FinalCause, "the job's end") {
+		waitFor(t, time.Minute, "the "+string(ch)+" relay stopped by the job's end", func() bool {
+			r := relayOf(own, j.tag, ch)
+			return r.PID == 0 && (strings.HasPrefix(r.FinalCause, "the job's end") ||
+				strings.Contains(r.LastRefusal, "not listed under tag") || strings.Contains(r.LastRefusal, "not running"))
+		})
+		if r := relayOf(own, j.tag, ch); r.Final && !strings.HasPrefix(r.FinalCause, "the job's end") {
 			t.Errorf("the %s relay ended %q, want the job's end", ch, r.FinalCause)
 		}
 	}

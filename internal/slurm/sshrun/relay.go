@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 )
@@ -97,7 +99,7 @@ func RelayArgs(config, line string) []string {
 		"-o", "UpdateHostKeys=no",
 		"-o", "ServerAliveInterval=10",
 		"-o", "ServerAliveCountMax=3",
-		"-o", "ConnectTimeout=20",
+		"-o", "ConnectTimeout=" + strconv.Itoa(int(RelayConnectTimeout/time.Second)),
 		"-o", "LogLevel=ERROR",
 		"-o", "ControlMaster=no",
 		"-o", "ControlPath=none",
@@ -161,6 +163,10 @@ func Classify(cmd *exec.Cmd) string {
 
 // relayLinePrefix starts the relay step's own messages on its standard error.
 const relayLinePrefix = "hb-relay: "
+
+// RelayConnectTimeout is the relay's ssh ConnectTimeout: how long a relay may
+// take to reach the login node before its ssh gives up.
+const RelayConnectTimeout = 20 * time.Second
 
 // Stderr is what an ended relay's command kept of its standard error, up to
 // 4 KiB. It may name the host and the user, so it is for classifying the end

@@ -382,9 +382,9 @@ func TestHostDialedRelayStartsOnlyOnTheAllocationsJob(t *testing.T) {
 	wrong := w.target(mine)
 	wrong.JobID = other.id // the Allocation's record names a job that is not under its tag
 	own.Want(wrong)
-	waitFor(t, time.Minute, "both relays ended for good", func() bool {
+	waitFor(t, time.Minute, "both relays refused", func() bool {
 		for _, ch := range agentapi.RelayChannels {
-			if !relayOf(own, mine.tag, ch).Final {
+			if !strings.Contains(relayOf(own, mine.tag, ch).LastRefusal, "not listed under tag") {
 				return false
 			}
 		}
@@ -394,9 +394,6 @@ func TestHostDialedRelayStartsOnlyOnTheAllocationsJob(t *testing.T) {
 		r := relayOf(own, mine.tag, ch)
 		if r.Starts != 0 || r.PID != 0 {
 			t.Errorf("the %s relay started (%d starts) on a job not listed under its tag", ch, r.Starts)
-		}
-		if !strings.Contains(r.FinalCause, "not listed under tag") {
-			t.Errorf("the %s relay's end %q does not say the job is not under the tag", ch, r.FinalCause)
 		}
 		if c, err := dial(other, ch, 15*time.Second); err == nil {
 			c.close()
