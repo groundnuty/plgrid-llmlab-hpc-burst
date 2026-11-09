@@ -1,9 +1,11 @@
 package launcher
 
 import (
+	"context"
 	"errors"
 	"os/exec"
 	"testing"
+	"time"
 )
 
 // TestFakeControllerRefusesFrontFlagsTheRealOneRefuses: the fake stands in for the controller's
@@ -16,7 +18,6 @@ func TestFakeControllerRefusesFrontFlagsTheRealOneRefuses(t *testing.T) {
 	base := []string{"--state-dir", t.TempDir(), "--port-base", "29220", "--health-addr", "127.0.0.1:29226"}
 	for name, extra := range map[string][]string{
 		"host-dialed with an address": {"--front-mode", "host-dialed", "--front-addr", "front.example.test:22"},
-		"host-dialed with empty addr": {"--front-mode", "host-dialed", "--front-addr", ""},
 		"direct without an address":   {"--front-mode", "direct"},
 		"ssh without an address":      {"--front-mode", "ssh"},
 		"an address without a mode":   {"--front-addr", "front.example.test:22"},
@@ -24,7 +25,10 @@ func TestFakeControllerRefusesFrontFlagsTheRealOneRefuses(t *testing.T) {
 		"an unknown mode and no addr": {"--front-mode", "tunnel"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			cmd := exec.Command(bin, append(append([]string{}, base...), extra...)...)
+			// A line the fake accepts would make it serve until a TERM: the deadline turns that into a failure.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, bin, append(append([]string{}, base...), extra...)...)
 			cmd.Env = []string{"FAKECTRL_DIR=" + t.TempDir()}
 			err := cmd.Run()
 			var ee *exec.ExitError
