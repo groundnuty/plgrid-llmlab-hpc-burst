@@ -2,10 +2,9 @@ package providerctl
 
 // The Provider controller's side of HBEP-6's host-dialed mode: what each
 // observation tells the relay owner (syncRelays), read back from what the
-// owner keeps (Controller.Relays). No relay process runs here: the fake
-// Platform reads no fresh listing, so every start is refused (freshJobs fails
-// closed), and the ssh client is /bin/false. The relays themselves are tested
-// through the real path in internal/hostdial.
+// owner keeps (Controller.Relays), and the events it raises. The ssh client
+// is /bin/false, so every relay ends at once and is retried; the relays
+// themselves are tested through the real path in internal/hostdial.
 
 import (
 	"context"
@@ -25,7 +24,15 @@ import (
 )
 
 // hostDialed makes the env's controller host-dialed.
-func hostDialed(e *env) {
+func hostDialed(e *env) { hostDialedOn(hostdial.NewHosts(), 1000)(e) }
+
+// hostDialedOn makes the env's controller host-dialed, with the given
+// one-Provider-per-host register and restart limit.
+func hostDialedOn(hosts *hostdial.Hosts, restartLimit int) envOption {
+	return func(e *env) { hostDialedWith(e, hosts, restartLimit) }
+}
+
+func hostDialedWith(e *env, hosts *hostdial.Hosts, restartLimit int) {
 	front := exampleFront(e.t, e.buildDir)
 	front.Mode, front.Endpoint = agentapi.DialHomeHostDialed, ""
 	dir, err := os.MkdirTemp("", "pr")
@@ -35,8 +42,9 @@ func hostDialed(e *env) {
 	e.t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	e.opts.Front = front
 	e.opts.Relays = &RelaySettings{
-		Ports: map[agentapi.RelayChannel]int{agentapi.RelayControl: 1, agentapi.RelayServing: 2}, Slots: hostdial.NewSlots(0),
-		ControlDir: dir, SSHBinary: "/bin/false", MinBackoff: 10 * time.Millisecond, MaxBackoff: 50 * time.Millisecond,
+		Ports: map[agentapi.RelayChannel]int{agentapi.RelayControl: 1, agentapi.RelayServing: 2}, Slots: hostdial.NewSlots(0), Hosts: hosts,
+		ControlDir: dir, SSHBinary: "/bin/false", MinBackoff: 20 * time.Millisecond, MaxBackoff: 50 * time.Millisecond,
+		RestartLimit: restartLimit, Epoch: func(context.Context) (int64, error) { return 3, nil },
 	}
 }
 
@@ -79,9 +87,9 @@ func waitRelays(t *testing.T, what string, cond func() bool) {
 }
 
 // Through the reconciler: a submitted Allocation whose job runs gets its two
-// relays, for its recorded job, the staged agent and the credentials'
-// generation; each start is refused because the fake Platform reads no fresh
-// listing, never from a cached one (N3); and the job's end stops them.
+// relays, for its recorded job and the credentials' generation, started on
+// the job the Provider's listing shows (the ssh, /bin/false, ends at once and
+// is retried), with the Lease's epoch; and the job's end stops them.
 func TestARunningAllocationKeepsItsRelaysUntilItsJobEnds(t *testing.T) {
 	e := newEnv(t, hostDialed)
 	runRelays(e)
@@ -101,17 +109,14 @@ func TestARunningAllocationKeepsItsRelaysUntilItsJobEnds(t *testing.T) {
 			t.Errorf("relay %+v: want job %s and the credentials' generation", r, job)
 		}
 	}
-	waitRelays(t, "both starts refused", func() bool {
+	waitRelays(t, "both relays started on the listed job and retried", func() bool {
 		for _, r := range relaysOf(e, tag) {
-			if !strings.Contains(r.LastRefusal, "reads no fresh listing") {
+			if r.Starts < 2 || r.Epoch != 3 || !strings.HasPrefix(r.LastEnd, "retried") {
 				return false
 			}
 		}
 		return true
 	})
-	if rs := relaysOf(e, tag); rs[0].Starts != 0 || rs[1].Starts != 0 {
-		t.Errorf("a relay started on a Platform that reads no fresh listing: %+v", rs)
-	}
 	e.batch.CancelExternally(job)
 	e.run("alloc-a", 3)
 	if p := e.get("alloc-a").Status.AtProvider.Phase; p == v1alpha1.AllocationRunning {
@@ -222,3 +227,51 @@ func TestCredentialsGen(t *testing.T) {
 		t.Error("the generation is not stable")
 	}
 }
+
+// The emit site of RelayFailed (HBEP-6, What ends a relay; HBEP-8): a relay
+// that ends for good for a reason other than superseded or the job's end, here
+// more restarts than the limit, raises RelayFailed regarding its Allocation,
+// naming the channel and the cause.
+func TestARelayThatEndsForGoodRaisesRelayFailed(t *testing.T) {
+	e := newEnv(t, hostDialedOn(hostdial.NewHosts(), 2))
+	runRelays(e)
+	e.newAlloc("alloc-a")
+	e.run("alloc-a", 4)
+	waitRelays(t, "RelayFailed raised", func() bool { return e.rec.has(v1alpha1.EventReasonRelayFailed) })
+	tag := tagOf(e.get("alloc-a"))
+	waitRelays(t, "both relays ended for good", func() bool {
+		rs := relaysOf(e, tag)
+		return len(rs) == 2 && rs[0].Final && rs[1].Final
+	})
+	for _, r := range relaysOf(e, tag) {
+		if !strings.Contains(r.FinalCause, "more than 2 restarts") {
+			t.Errorf("relay %s ended %q, want more than 2 restarts", r.Channel, r.FinalCause)
+		}
+	}
+}
+
+// One host-dialed Provider per login host (HBEP-6, Capacity): a second
+// Provider of the process on the same login host, as ssh -G resolves it, gets
+// no relays and raises RelayFailed naming the Provider that holds the host.
+func TestASecondHostDialedProviderOnOneLoginHostIsRefused(t *testing.T) {
+	hosts := hostdial.NewHosts()
+	if _, ok := hosts.Claim("login.example.org", "another-provider"); !ok {
+		t.Fatal(err0)
+	}
+	e := newEnv(t, hostDialedOn(hosts, 1000))
+	runRelays(e)
+	e.newAlloc("alloc-a")
+	e.run("alloc-a", 4)
+	a := e.get("alloc-a")
+	if a.Status.AtProvider.Phase != v1alpha1.AllocationRunning {
+		t.Fatalf("the Allocation is %s, want Running", a.Status.AtProvider.Phase)
+	}
+	if rs := relaysOf(e, tagOf(a)); len(rs) != 0 {
+		t.Errorf("a second Provider on the login host keeps %d relays", len(rs))
+	}
+	if !e.rec.has(v1alpha1.EventReasonRelayFailed) {
+		t.Errorf("no RelayFailed for the refused Provider; events %v", e.rec.reasons())
+	}
+}
+
+var err0 = errors.New("the register refused its first claim")

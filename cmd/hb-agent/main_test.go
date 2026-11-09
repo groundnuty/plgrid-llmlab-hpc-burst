@@ -56,7 +56,7 @@ func TestMain(m *testing.M) {
 	if os.Getenv("HB_TEST_ROLE") == roleAgent {
 		if len(os.Args) > 1 && os.Args[1] == agentapi.RelaySubcommand {
 			// As main does: the agent binary as a relay step's program.
-			os.Exit(relay(os.Args[0], os.Args[2:], os.Getenv, os.Stdin, os.Stdout, os.Stderr))
+			os.Exit(relay(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
 		}
 		os.Exit(run(os.Args[1:], os.Getenv, os.Stderr))
 	}

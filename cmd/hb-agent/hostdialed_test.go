@@ -34,29 +34,28 @@ type relayPipes struct {
 
 func (p relayPipes) Close() error { return p.WriteCloser.Close() }
 
-// keepRelay runs "relay <ch>" processes, one at a time, each serving its
+// keepRelay runs "relay <ch> ..." processes, one at a time, each serving its
 // session to target, and starts another 100 ms after one ends (the first ones
-// end at once, before the agent has made its sockets), until ctx ends.
-func keepRelay(t *testing.T, ctx context.Context, ch agentapi.RelayChannel, stagingDir, relayRoot, target string, wg *sync.WaitGroup) {
-	exe, err := os.Executable()
+// end at once, before the agent has published its socket), each with the next
+// sequence of the epoch, until ctx ends.
+func keepRelay(t *testing.T, ctx context.Context, ch agentapi.RelayChannel, allocDir, uid, target string, wg *sync.WaitGroup) {
+	self, err := os.Executable()
 	if err != nil {
-		t.Fatal(err)
-	}
-	// The relay finds its pointer from its own path, the staged agent's
-	// (<stagingDir>/agent/<digest>/hb-agent): this binary, linked there.
-	self := filepath.Join(stagingDir, agentapi.StagedAgentPath(strings.Repeat("e", 64)))
-	if err := os.MkdirAll(filepath.Dir(self), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Link(exe, self); err != nil {
 		t.Fatal(err)
 	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for ctx.Err() == nil {
-			cmd := exec.Command(self, agentapi.RelaySubcommand, string(ch))
-			cmd.Env = append(os.Environ(), "HB_TEST_ROLE="+roleAgent, "SLURM_JOB_ID="+eJobID, agentapi.EnvRelayRoot+"="+relayRoot)
+		for seq := int64(1); ctx.Err() == nil; seq++ {
+			a := agentapi.RelayArgs{Channel: ch, Dir: allocDir, Allocation: uid, Epoch: 1, Seq: seq}
+			line, err := agentapi.RelayLine("1", self, a)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			words := strings.Fields(line)
+			cmd := exec.Command(self, words[6:]...) // the agent binary's own words: relay <ch> --dir ...
+			cmd.Env = append(os.Environ(), "HB_TEST_ROLE="+roleAgent, "SLURM_JOB_ID="+eJobID)
 			in, _ := cmd.StdinPipe()
 			out, _ := cmd.StdoutPipe()
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -65,7 +64,7 @@ func keepRelay(t *testing.T, ctx context.Context, ch agentapi.RelayChannel, stag
 			}
 			sctx, cancel := context.WithCancel(ctx)
 			served := make(chan struct{})
-			go func() { _ = hostdial.Serve(sctx, relayPipes{out, in}, target, ch, nil, nil); close(served) }()
+			go func() { _ = hostdial.Serve(sctx, relayPipes{out, in}, target, uid, nil, nil); close(served) }()
 			waited := make(chan struct{})
 			go func() { _ = cmd.Wait(); close(waited) }()
 			select {
@@ -84,60 +83,53 @@ func keepRelay(t *testing.T, ctx context.Context, ch agentapi.RelayChannel, stag
 	}()
 }
 
+const eUIDHostDialed = "0a1b2c3d-0000-4000-8000-000000000099"
+
 func TestAgentEndToEndHostDialed(t *testing.T) {
 	root := shortRoot(t)
 	ep := startEndpoint(t, root)
-	relayRoot := filepath.Join(root, "x")
-	if err := os.Mkdir(relayRoot, 0o700); err != nil {
-		t.Fatal(err)
-	}
 	j := newJob(t, root, agentapi.AgentConfig{
 		ProtocolVersion: agentapi.ProtocolVersion, Tag: eTag, Mode: agentapi.DialHomeHostDialed,
-		CertSPKISHA256: ep.pin, FrpcDigest: strings.Repeat("d", 64),
+		CertSPKISHA256: ep.pin, FrpcDigest: strings.Repeat("d", 64), Allocation: eUIDHostDialed,
 	})
 	j.hostDialed = true
-	j.extraEnv = append(j.extraEnv, agentapi.EnvRelayRoot+"="+relayRoot)
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	defer func() { cancel(); wg.Wait() }()
-	keepRelay(t, ctx, agentapi.RelayControl, j.stagingDir, relayRoot, ep.addr, &wg)
+	keepRelay(t, ctx, agentapi.RelayControl, j.allocDir, eUIDHostDialed, ep.addr, &wg)
 	out := exercise(t, ep, j)
 	if !strings.Contains(out, "relay session up") {
 		t.Errorf("the agent logged no relay session:\n%s", out)
 	}
-	if left, _ := filepath.Glob(filepath.Join(relayRoot, "hb-relay-*")); len(left) != 0 {
-		t.Errorf("relay directories %v are left after the agent stopped", left)
+	if _, err := os.Stat(agentapi.RelaySocketFile(j.allocDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the rendezvous file is left after the agent stopped: %v", err)
 	}
-	ptr, _ := agentapi.RelayPointerPath(j.stagingDir, eJobID)
-	if _, err := os.Stat(ptr); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("the relay pointer %s is left after the agent stopped: %v", ptr, err)
+	if left, _ := filepath.Glob(filepath.Join(root, "tmp", "hb-relay-*")); len(left) != 0 {
+		t.Errorf("relay socket directories %v are left after the agent stopped", left)
 	}
 }
 
 func TestRelayUsage(t *testing.T) {
-	env := func(kv ...string) func(string) string {
-		m := map[string]string{}
-		for i := 0; i+1 < len(kv); i += 2 {
-			m[kv[i]] = kv[i+1]
-		}
-		return func(k string) string { return m[k] }
-	}
 	var out, errs bytes.Buffer
+	dir := t.TempDir()
+	good := []string{"control", "--dir", dir, "--allocation", "u-1", "--epoch", "1", "--seq", "1"}
 	for name, c := range map[string]struct {
 		args []string
-		env  func(string) string
 		want int
+		line string
 	}{
-		"no channel":      {nil, env(), 2},
-		"another channel": {[]string{"plugin"}, env("SLURM_JOB_ID", "1"), 2},
-		"two channels":    {[]string{"control", "serving"}, env("SLURM_JOB_ID", "1"), 2},
-		"no job":          {[]string{"control"}, env(), 1},
-		"no agent socket": {[]string{"control"}, env("SLURM_JOB_ID", "1", agentapi.EnvRelayRoot, t.TempDir()), 1},
+		"no channel":      {nil, 2, ""},
+		"another channel": {[]string{"plugin", "--dir", dir, "--allocation", "u-1", "--epoch", "1", "--seq", "1"}, 2, ""},
+		"no fence":        {[]string{"control", "--dir", dir, "--allocation", "u-1"}, 2, ""},
+		"no agent yet":    {good, hostdial.ExitNotReady, "hb-relay: agent not ready"},
 	} {
 		out.Reset()
 		errs.Reset()
-		if got := relay("/s/agent/"+strings.Repeat("e", 64)+"/hb-agent", c.args, c.env, strings.NewReader(""), &out, &errs); got != c.want {
+		if got := relay(c.args, strings.NewReader(""), &out, &errs); got != c.want {
 			t.Errorf("%s: relay exited %d, want %d (stderr %q)", name, got, c.want, errs.String())
+		}
+		if c.line != "" && !strings.HasPrefix(errs.String(), c.line) {
+			t.Errorf("%s: relay's first stderr line %q, want %q", name, errs.String(), c.line)
 		}
 		if out.Len() != 0 {
 			t.Errorf("%s: relay wrote %q to stdout, which carries only the session", name, out.String())
