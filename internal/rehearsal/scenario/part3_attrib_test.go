@@ -115,7 +115,7 @@ func attributionProblems(status int, h http.Header, row usageRow, w wantAttr) []
 func (p3 *part3) sendAs(path, body, key string) reply {
 	ctx, cancel := p3.requestCtx()
 	defer cancel()
-	return doRequest(ctx, p3.ports.client, path, body, key)
+	return doRequest(ctx, p3.ports.ClientAddr, path, body, key)
 }
 
 func doRequest(ctx context.Context, addr, path, body, key string) reply {
@@ -142,7 +142,7 @@ func doRequest(ctx context.Context, addr, path, body, key string) reply {
 func (p3 *part3) errorsAttributed() {
 	r := p3.rig
 	r.t.Helper()
-	ok := r.h.clientKey
+	ok := r.h.ClientKey
 	cases := []struct {
 		what, key, body          string
 		status                   int

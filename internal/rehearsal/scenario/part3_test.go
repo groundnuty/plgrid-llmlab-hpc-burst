@@ -42,7 +42,7 @@ import (
 // 29693 and 29694. The LLMLab double binds the first free port of
 // 29695-29699 (llmlabtest takes a range, not a kernel-chosen port).
 // Everything else is kernel-chosen.
-var ports193 = stackPorts{base: 29680, client: "127.0.0.1:29693", dialHome: "127.0.0.1:29694"}
+var ports193 = stack.Ports{Base: 29680, ClientAddr: "127.0.0.1:29693", DialHomeListen: "127.0.0.1:29694"}
 
 const llmlabPortLo, llmlabPortHi = 29695, 29699
 

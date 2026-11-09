@@ -26,7 +26,7 @@ import (
 // 0 when it reports none running.
 func (r *rig) statusPID(name string) int {
 	r.t.Helper()
-	out, err := stack.Run(r.t, stack.Within(r.t, stack.StatusTimeout), r.h.env, r.b.hpcburst, "status", "--state-dir", r.h.state, "--json", "--no-api")
+	out, err := stack.Run(r.t, stack.Within(r.t, stack.StatusTimeout), r.h.Env, r.b.HPCBurst, "status", "--state-dir", r.h.State, "--json", "--no-api")
 	var doc any
 	if jerr := json.Unmarshal([]byte(out), &doc); jerr != nil {
 		r.t.Logf("hpcburst status --json (%v): %v: %.300s", err, jerr, out)
@@ -119,7 +119,7 @@ func (r *rig) controllerRestart(in *v1alpha1.Instance, key, body string, tokens 
 		p := r.statusPID("controller")
 		h := r.leaseHolder()
 		return p != 0 && p != oldPID && h != "" && h != oldHolder &&
-			stack.HTTPStatus(r.ports.url(6, "/readyz")) == http.StatusOK
+			stack.HTTPStatus(r.ports.URL(6, "/readyz")) == http.StatusOK
 	})
 	ledAt := time.Now()
 	r.t.Logf("step (f): a new controller led the Lease %s after the kill", ledAt.Sub(killAt).Round(100*time.Millisecond))
@@ -186,11 +186,11 @@ func (r *rig) checkRestartStream(in *v1alpha1.Instance, done <-chan streamed, ki
 // web API (base+11, user hpcburst, the password in <state>/frps/web-password).
 func (r *rig) frpsProxies() map[string]bool {
 	r.t.Helper()
-	pw, err := os.ReadFile(filepath.Join(r.h.state, "frps", "web-password"))
+	pw, err := os.ReadFile(filepath.Join(r.h.State, "frps", "web-password"))
 	if err != nil {
 		r.t.Fatalf("frps's web password: %v", err)
 	}
-	req, _ := http.NewRequest(http.MethodGet, r.ports.url(11, "/api/proxy/tcpmux"), nil)
+	req, _ := http.NewRequest(http.MethodGet, r.ports.URL(11, "/api/proxy/tcpmux"), nil)
 	req.SetBasicAuth("hpcburst", strings.TrimSpace(string(pw)))
 	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
 	if err != nil {

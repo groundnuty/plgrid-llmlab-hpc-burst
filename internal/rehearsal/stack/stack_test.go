@@ -280,6 +280,42 @@ func TestUsageRowReadsTheWireNames(t *testing.T) {
 	}
 }
 
+// DownErr runs hpcburst down once, with the state directory it was given, and returns its failure with its output.
+func TestDownErrRunsOnce(t *testing.T) {
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	bin := filepath.Join(dir, "hpcburst")
+	script := "#!/bin/sh\necho \"$@\" >> " + calls + "\necho went wrong\nexit 3\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(dir, "st")
+	h := &Host{T: t, B: Binaries{HPCBurst: bin}, State: state, Env: os.Environ()}
+	if err := h.DownErr(); err != nil || h.Downed() {
+		t.Fatalf("no state directory: %v, downed %v; want nothing to stop", err, h.Downed())
+	}
+	if err := os.Mkdir(state, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := h.DownErr()
+	if err == nil || !strings.Contains(err.Error(), "hpcburst down") || !strings.Contains(err.Error(), "went wrong") {
+		t.Errorf("a failing down: %v; want its name and output", err)
+	}
+	if !h.Downed() {
+		t.Error("down has run, and Downed says it has not")
+	}
+	if err := h.DownErr(); err != nil {
+		t.Errorf("a second call: %v, want nothing", err)
+	}
+	b, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(b), "down --state-dir "+state+"\n"; got != want {
+		t.Errorf("the commands run: %q, want %q once", got, want)
+	}
+}
+
 func TestBinariesMissing(t *testing.T) {
 	dir := t.TempDir()
 	exe := func(name string, mode os.FileMode) string {

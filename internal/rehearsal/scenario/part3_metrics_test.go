@@ -159,7 +159,7 @@ var frontCuts = []string{"front_deadline", "front_idle", "front_headers", "tunne
 func (p3 *part3) frontMetricsBothKinds(d *depRun) {
 	r := p3.rig
 	r.t.Helper()
-	url := r.ports.url(4, "/metrics")
+	url := r.ports.URL(4, "/metrics")
 	before, err := scrape(url)
 	if err != nil {
 		r.t.Fatalf("the front's /metrics: %v", err)
@@ -370,7 +370,7 @@ func (p3 *part3) servedTokens(uid string) float64 {
 func (p3 *part3) gauges(d *depRun, when string) {
 	r := p3.rig
 	r.t.Helper()
-	url := r.ports.url(12, "/metrics")
+	url := r.ports.URL(12, "/metrics")
 	in, _ := r.instance(d.primary.Name)
 	min := p3.servedTokens(string(in.UID))
 	if min <= 0 {
@@ -461,7 +461,7 @@ type restartScraper struct {
 func (p3 *part3) startRestartScraper(uid string) *restartScraper {
 	s := &restartScraper{stop: make(chan struct{}), done: make(chan struct{})}
 	p3.t.Cleanup(s.halt)
-	url := p3.ports.url(12, "/metrics")
+	url := p3.ports.URL(12, "/metrics")
 	go func() {
 		defer close(s.done)
 		for {

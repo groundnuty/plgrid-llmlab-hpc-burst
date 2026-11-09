@@ -280,7 +280,7 @@ func (p procID) gone() bool {
 // supervised entry that runs (the controller, the front, frps).
 func (r *rig) stackProcesses() []procID {
 	r.t.Helper()
-	out, err := stack.Run(r.t, stack.Within(r.t, stack.StatusTimeout), r.h.env, r.b.hpcburst, "status", "--state-dir", r.h.state, "--json", "--no-api")
+	out, err := stack.Run(r.t, stack.Within(r.t, stack.StatusTimeout), r.h.Env, r.b.HPCBurst, "status", "--state-dir", r.h.State, "--json", "--no-api")
 	var st struct {
 		Processes []struct {
 			Name    string `json:"name"`
@@ -352,7 +352,7 @@ func (r *rig) downAndCheck() {
 	r.t.Helper()
 	procs := r.stackProcesses()
 	start := time.Now()
-	r.h.down()
+	r.h.Down()
 	if d := time.Since(start); d > 40*time.Second {
 		r.t.Errorf("step (g): hpcburst down took %s, above its default grace of 40 s", d)
 	}
@@ -365,7 +365,7 @@ func (r *rig) downAndCheck() {
 		}
 		return len(left) == 0, fmt.Sprintf("still running: %v", left)
 	})
-	if l := stack.Listening(r.t, r.ports.all()); len(l) > 0 {
+	if l := stack.Listening(r.t, r.ports.All()); len(l) > 0 {
 		r.t.Errorf("step (g): ports %v still listen after down", l)
 	}
 	r.t.Logf("step (g): down stopped %d processes of the stack in %s", len(procs), time.Since(start).Round(100*time.Millisecond))

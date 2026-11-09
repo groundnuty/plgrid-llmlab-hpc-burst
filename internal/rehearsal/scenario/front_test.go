@@ -50,7 +50,7 @@ type usageRow struct {
 // usageRows reads every usage record so far, by counter.
 func (r *rig) usageRows() []usageRow {
 	r.t.Helper()
-	files, _ := filepath.Glob(filepath.Join(r.h.usageDir, "usage*.jsonl"))
+	files, _ := filepath.Glob(filepath.Join(r.h.UsageDir, "usage*.jsonl"))
 	var rows []usageRow
 	for _, f := range files {
 		b, err := os.ReadFile(f)

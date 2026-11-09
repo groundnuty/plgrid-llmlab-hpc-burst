@@ -214,7 +214,7 @@ func (r *rig) tunnelWitness() (*v1alpha1.Instance, time.Time, *metav1.Condition,
 	created := time.Now()
 	// A test that fails before the check deletes it while the API serves.
 	r.t.Cleanup(func() {
-		if !r.h.downed {
+		if !r.h.Downed() {
 			r.deleteWitness(w)
 		}
 	})

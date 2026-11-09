@@ -36,6 +36,10 @@ import (
 // rather than with the helper the controller and the front share.
 var rehearsalTiming = stack.Timing{Lease: "7m", MaxRequest: "90s", DrainMargin: "30s", DrainWindow: "10m", StopGrace: "5s", AgentTimeout: "20s", StartTimeout: "4m"}
 
+// rehearsalFrontTuning is the front's scaled probe and pause times (step d): a
+// 2 s probe, and a 10 s pause after HBEP-5's three Instance-emitted 5xx in a row.
+const rehearsalFrontTuning = `"probeInterval":"2s","pauseAfterFailures":3,"pauseDuration":"10s",`
+
 // rehearsalAgentTimeout is rehearsalTiming's agentTimeout: how long a
 // controller waits for a silent agent before it judges it unreachable.
 const rehearsalAgentTimeout = 20 * time.Second
@@ -70,9 +74,9 @@ func drainStartOf(in *v1alpha1.Instance) (time.Time, bool) {
 // rig is one running rehearsal: the fake cluster, the host and the API.
 type rig struct {
 	t   *testing.T
-	b   binaries
+	b   stack.Binaries
 	cl  *cluster
-	h   *host
+	h   *stack.Host
 	hub *stack.Hub
 	c   client.Client
 	// engineEnv is the served deployment's engine env: the engine double's
@@ -83,8 +87,8 @@ type rig struct {
 	// proxyEnds is when frps was first seen to list each ended Instance's
 	// proxy offline (proxyEnded), for the TunnelOrphaned window.
 	proxyEnds map[types.UID]time.Time
-	// ports are the stack's fixed listeners (stackPorts).
-	ports stackPorts
+	// ports are the stack's fixed listeners.
+	ports stack.Ports
 	// tokenDelay is the engine double's token-delay mode of the served
 	// deployment: each generated token takes this long.
 	tokenDelay time.Duration
@@ -105,7 +109,7 @@ type rig struct {
 // and, when it needs them, the fake cluster's QOSes and its own objects.
 type rigSetup struct {
 	mode  string // "direct" or "ssh"
-	ports stackPorts
+	ports stack.Ports
 	shape clusterShape
 	// objects returns the PlatformProfiles and Providers to create once the
 	// stack is up, given the rig, the host's CPU architecture and the batch
@@ -131,16 +135,16 @@ func startRigWith(t *testing.T, s rigSetup) *rig {
 	if err := r.cl.login.WriteCredentials(creds); err != nil {
 		t.Fatal(err)
 	}
-	dh := dialHome{mode: "direct", addr: s.ports.dialHome}
+	dh := stack.DialHome{Mode: "direct", Addr: s.ports.DialHomeListen}
 	if s.mode == "ssh" {
 		dh = r.startGateway(dir)
 	}
 	// The controller lists the checkpoint from the Hub double through
 	// HF_ENDPOINT, which up passes on to it.
-	r.h = startHost(t, b, dir, s.ports, dh, stack.CleanEnv("HF_ENDPOINT="+r.hub.URL))
+	r.h = stack.StartHost(t, b, dir, dh, stack.CleanEnv("HF_ENDPOINT="+r.hub.URL), s.ports, rehearsalFrontTuning)
 	arch := stack.CPUArch(t)
-	r.h.placeAgentBuild(arch)
-	r.c = stack.KubeClient(t, r.h.state)
+	r.h.PlaceAgentBuild(arch)
+	r.c = stack.KubeClient(t, r.h.State)
 	objs := []client.Object{stack.BatchProfile(arch, rehearsalTiming), stack.BatchProvider(creds)}
 	if s.objects != nil {
 		objs = s.objects(r, arch, creds)
@@ -272,13 +276,13 @@ func TestRehearsalDirect(t *testing.T) {
 // HBEP-6's restricted key for the agent endpoint (base+3) and the front's
 // dial-home listener (base+7), and puts the key and known_hosts where the
 // agent looks, the cluster user's ~/.hpcburst/dial-home.
-func (r *rig) startGateway(dir string) dialHome {
+func (r *rig) startGateway(dir string) stack.DialHome {
 	r.t.Helper()
 	gwDir := filepath.Join(dir, "gw")
 	if err := os.Mkdir(gwDir, 0o700); err != nil {
 		r.t.Fatal(err)
 	}
-	gw, err := rehearsal.StartGateway(rehearsal.GatewayConfig{Dir: gwDir, AgentPort: r.ports.base + 3, DialHomePort: r.ports.base + 7})
+	gw, err := rehearsal.StartGateway(rehearsal.GatewayConfig{Dir: gwDir, AgentPort: r.ports.Base + 3, DialHomePort: r.ports.Base + 7})
 	if err != nil {
 		r.t.Fatalf("the dial-home gateway: %v", err)
 	}
@@ -294,7 +298,7 @@ func (r *rig) startGateway(dir string) dialHome {
 	if err := gw.WriteDialHome(dhDir); err != nil {
 		r.t.Fatalf("the dial-home files: %v", err)
 	}
-	return dialHome{mode: "ssh", addr: gw.Addr(), keyPath: filepath.Join(dhDir, "key")}
+	return stack.DialHome{Mode: "ssh", Addr: gw.Addr(), KeyPath: filepath.Join(dhDir, "key")}
 }
 
 // jobSSHForwards lists the agent's ssh processes in its job: the system ssh

@@ -61,7 +61,7 @@ var (
 // them only while it serves, and creates them at 0.
 func (r *rig) countReads(what string, keys ...eventcount.Key) map[eventcount.Key]eventcount.Read {
 	r.t.Helper()
-	url := r.ports.url(12, "/metrics")
+	url := r.ports.URL(12, "/metrics")
 	var out map[eventcount.Key]eventcount.Read
 	stack.WaitState(r.t, stack.WaitDeadline, "the controller's /metrics from a serving copy, for "+what, func() (bool, string) {
 		sent := time.Now()

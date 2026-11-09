@@ -53,11 +53,11 @@ func (r *rig) sendCtx(parent context.Context, path, body, key string) reply {
 	d, _ := stack.BoundedDeadline(r.t, requestTimeout)
 	ctx, cancel := context.WithDeadline(parent, d)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+r.ports.client+path, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+r.ports.ClientAddr+path, strings.NewReader(body))
 	if err != nil {
 		return reply{err: err}
 	}
-	req.Header.Set("Authorization", "Bearer "+r.h.clientKey)
+	req.Header.Set("Authorization", "Bearer "+r.h.ClientKey)
 	req.Header.Set("Content-Type", "application/json")
 	if key != "" {
 		req.Header.Set("X-Session-Id", key)
@@ -153,12 +153,12 @@ func (r *rig) startStream(body, key string) (first <-chan struct{}, done <-chan 
 		defer once()
 		ctx, cancel := r.requestCtx()
 		defer cancel()
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+r.ports.client+"/v1/chat/completions", strings.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+r.ports.ClientAddr+"/v1/chat/completions", strings.NewReader(body))
 		if err != nil {
 			out.err = err
 			return
 		}
-		req.Header.Set("Authorization", "Bearer "+r.h.clientKey)
+		req.Header.Set("Authorization", "Bearer "+r.h.ClientKey)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Session-Id", key)
 		resp, err := http.DefaultClient.Do(req)
@@ -193,7 +193,7 @@ func (r *rig) startStream(body, key string) (first <-chan struct{}, done <-chan 
 
 // frontHealth reads the front's /healthz (base+4).
 func (r *rig) frontHealth() (map[string]any, bool) {
-	resp, err := (&http.Client{Timeout: 3 * time.Second}).Get(r.ports.url(4, "/healthz"))
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Get(r.ports.URL(4, "/healthz"))
 	if err != nil {
 		return nil, false
 	}
@@ -226,7 +226,7 @@ func (r *rig) registered(in *v1alpha1.Instance) (reg, known bool) {
 
 // frontCounter sums a counter's samples on the front's /metrics (base+4).
 func (r *rig) frontCounter(name string) (float64, bool) {
-	resp, err := (&http.Client{Timeout: 3 * time.Second}).Get(r.ports.url(4, "/metrics"))
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Get(r.ports.URL(4, "/metrics"))
 	if err != nil {
 		return 0, false
 	}

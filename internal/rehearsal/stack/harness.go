@@ -438,6 +438,9 @@ func (h *Host) DownErr() error {
 	return nil
 }
 
+// Downed reports whether hpcburst down has run: the API no longer serves.
+func (h *Host) Downed() bool { return h.downed }
+
 // PlaceAgentBuild puts the hb-agent build and the pinned frpc where the
 // controller reads them, as an operator does (HBEP-4:
 // <state>/agent-builds/hb-agent-<cpuArch> and frpc-<cpuArch>); the controller

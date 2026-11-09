@@ -83,7 +83,7 @@ type recorder struct {
 func (r *rig) startWatch() {
 	r.t.Helper()
 	// No client timeout here: a watch is long, and its context ends it.
-	wc, err := client.NewWithWatch(stack.RestConfig(r.t, r.h.state), client.Options{Scheme: stack.APIScheme(r.t)})
+	wc, err := client.NewWithWatch(stack.RestConfig(r.t, r.h.State), client.Options{Scheme: stack.APIScheme(r.t)})
 	if err != nil {
 		r.t.Fatalf("a watching client: %v", err)
 	}
