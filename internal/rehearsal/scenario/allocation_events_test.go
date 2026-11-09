@@ -49,10 +49,10 @@ func viewsOf(obs []stack.AllocObservation) (map[types.UID]*allocView, []types.UI
 // Lost or Refused, and each of atZero was last seen Ended or deleted. The
 // caller has first made the watch catch up with the API (syncWatch), whose
 // result is res: waitAllEnded ends on an API LIST, which leads the watch, so a
-// read straight after it can precede an event that is only late. What the
-// catch-up found lost it has reported, with its own message, and is not judged
-// again here; an Allocation last seen Running after a catch-up that found the
-// watch current stayed Running.
+// read straight after it can precede an event that is only late. What a
+// catch-up found lost, this one or an earlier one, it has reported, with its own
+// message, and is not judged again here; an Allocation last seen Running after a
+// catch-up that found the watch current stayed Running.
 func checkAllocationEvents(t stack.T, read func() []stack.AllocObservation, res stack.CatchUpResult, atZero map[types.UID]string, failedOK map[types.UID]bool) {
 	t.Helper()
 	obs := read()
@@ -69,6 +69,8 @@ func checkAllocationEvents(t stack.T, read func() []stack.AllocObservation, res 
 		s := views[uid]
 		switch {
 		case res.Lost(uid):
+		case s == nil && res.Unknown != "":
+			t.Errorf("step (g): the watch never saw Allocation %s, and was not shown to have caught up with the API (%s)", name, res.Unknown)
 		case s == nil:
 			t.Errorf("step (g): the watch never saw Allocation %s", name)
 		case !s.delivered() && res.Unknown != "":

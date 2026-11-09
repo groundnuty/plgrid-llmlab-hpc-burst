@@ -109,6 +109,39 @@ func TestAllocationEventsWhenTheCatchUpCouldNotTell(t *testing.T) {
 	}
 }
 
+// An event an earlier catch-up found lost and reported (part 3's requeue, say) is
+// still lost at step (g), whose own catch-up reports nothing new: the Allocation
+// is not called one that stayed Running, nor one the watch never saw.
+func TestAllocationEventsDoNotMislabelAnEarlierLoss(t *testing.T) {
+	res := stack.CatchUpResult{EarlierLost: []stack.Behind{{Kind: stack.KindAllocations, Name: "rehearsal-a", UID: uidA, Delivered: "150"}}}
+	rt := &recordT{T: t}
+	reportCatchUp(rt, "step (g): the Allocations", res)
+	if len(rt.errs) != 0 {
+		t.Errorf("the catch-up reported %q again, want nothing new", rt.errs)
+	}
+	for name, obs := range map[string][]stack.AllocObservation{
+		"last seen Running": {version(uidA, "rehearsal-a", v1alpha1.AllocationRunning, false)},
+		"never seen":        nil,
+	} {
+		rt = &recordT{T: t}
+		checkAllocationEvents(rt, reads(obs...), res, oneAtZero, nil)
+		if len(rt.errs) != 0 {
+			t.Errorf("%s: the check reported %q, want nothing: the earlier catch-up reported it lost", name, rt.errs)
+		}
+	}
+}
+
+// An Allocation the watch never saw, after a catch-up that could not tell, is
+// not said flatly to have been missed: the doubt goes with it (PR #292's B1).
+func TestAllocationEventsNeverSeenWhenTheCatchUpCouldNotTell(t *testing.T) {
+	res := stack.CatchUpResult{Unknown: "the Allocation watch was reset"}
+	rt := &recordT{T: t}
+	checkAllocationEvents(rt, reads(), res, oneAtZero, nil)
+	if len(rt.errs) != 1 || !strings.Contains(rt.errs[0], "never saw Allocation rehearsal-a") || !strings.Contains(rt.errs[0], "was reset") {
+		t.Errorf("reported %q; want the Allocation with the catch-up's doubt", rt.errs)
+	}
+}
+
 // An Allocation the watch never saw has a message of its own.
 func TestAllocationEventsReportAnAllocationNeverSeen(t *testing.T) {
 	rt := &recordT{T: t}

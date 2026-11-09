@@ -626,10 +626,12 @@ func (r *liveRun) successorOf(pred string, d time.Duration) (v1alpha1.Instance, 
 // it that follows something the API showed (stack.Recorder.CatchUp): the API
 // leads the watch, so such a read can precede an event that is only late
 // (issue #281). what names the read. The error says that an event was lost, or
-// that it could not be told whether the watch had caught up.
-func (r *liveRun) syncWatch(kinds stack.Kinds, what string) error {
+// that it could not be told whether the watch had caught up. ctx is the row's:
+// the catch-up stops at its deadline, and takes at most stack.CatchUpWorstCase
+// of the row's time.
+func (r *liveRun) syncWatch(ctx context.Context, kinds stack.Kinds, what string) error {
 	r.t.Helper()
-	res := r.watch.CatchUp(r.t, r.c, r.w.md.Namespace, kinds, what)
+	res := r.watch.CatchUp(ctx, r.t, r.c, r.w.md.Namespace, kinds, what)
 	if p := res.Problem(); p != "" {
 		return fmt.Errorf("%s: %s", what, p)
 	}

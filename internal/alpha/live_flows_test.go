@@ -98,9 +98,9 @@ func (r *liveRun) tokensFor(d time.Duration, rate float64) (int, error) {
 // whyGone logs what the API recorded of an Instance that went away: its last
 // version's conditions, the events about it and about the deployment, and the
 // times that decide a drain, each from the kill.
-func (r *liveRun) whyGone(in v1alpha1.Instance, killed time.Time) {
+func (r *liveRun) whyGone(ctx context.Context, in v1alpha1.Instance, killed time.Time) {
 	t := r.t
-	if err := r.syncWatch(stack.KindInstances|stack.KindDeployments, "what became of the Instance"); err != nil {
+	if err := r.syncWatch(ctx, stack.KindInstances|stack.KindDeployments, "what became of the Instance"); err != nil {
 		t.Errorf("%v", err)
 	}
 	obs := r.watch.Of(in.UID)
@@ -232,7 +232,7 @@ func (r *liveRun) workerRestart(ctx context.Context, p Plan, in v1alpha1.Instanc
 	r.waitFor(r.tm.StartTimeout+5*time.Minute, "the worker restart and the Instance serving the key again", func() bool {
 		now, ok := r.lookup(in)
 		if !ok {
-			r.whyGone(in, times.Killed)
+			r.whyGone(ctx, in, times.Killed)
 			t.Fatalf("worker fault: Instance %s is gone", in.Name)
 		}
 		if len(now.Status.Restarts) <= before || now.Status.Phase != v1alpha1.InstanceReady {
@@ -256,7 +256,7 @@ func (r *liveRun) workerRestart(ctx context.Context, p Plan, in v1alpha1.Instanc
 		times.Restarted = now.Status.Restarts[before].Time.Time
 		return true
 	})
-	if err := r.syncWatch(stack.KindInstances, "the Instance's versions after the kill"); err != nil {
+	if err := r.syncWatch(ctx, stack.KindInstances, "the Instance's versions after the kill"); err != nil {
 		t.Errorf("%v", err)
 	}
 	if o, ok := r.watch.First(in.UID, times.Killed.Add(-time.Second), func(o stack.Observation) bool { return healthyPartExited(o.Instance) }); ok {
@@ -323,7 +323,7 @@ func (r *liveRun) Handover(ctx context.Context, p Plan) (HandoverObs, error) {
 	}
 	// The result is read from the watch, straight after the API showed the
 	// primary ended (issue #281).
-	if err := r.syncWatch(stack.KindInstances|stack.KindAllocations, "the handover's result"); err != nil {
+	if err := r.syncWatch(ctx, stack.KindInstances|stack.KindAllocations, "the handover's result"); err != nil {
 		return HandoverObs{}, err
 	}
 	tags, err := r.runTags()
@@ -380,7 +380,7 @@ func (r *liveRun) NoOverlap(ctx context.Context, p Plan) (NoOverlapObs, error) {
 	if err := r.guardResult(); err != nil {
 		return NoOverlapObs{}, err
 	}
-	if err := r.syncWatch(stack.KindInstances|stack.KindAllocations|stack.KindDeployments, "the no-overlap row's result"); err != nil {
+	if err := r.syncWatch(ctx, stack.KindInstances|stack.KindAllocations|stack.KindDeployments, "the no-overlap row's result"); err != nil {
 		return NoOverlapObs{}, err
 	}
 	tags, err := r.runTags()
@@ -610,7 +610,7 @@ func (r *liveRun) endDeployment(ctx context.Context, p Plan) {
 	led := r.Ledger()
 	// The run's tags are read from the watch while the jobs end: every Allocation
 	// of the run must be in it (issue #281).
-	if err := r.syncWatch(stack.KindAllocations, "the run's Allocations"); err != nil {
+	if err := r.syncWatch(ctx, stack.KindAllocations, "the run's Allocations"); err != nil {
 		t.Errorf("%v", err)
 	}
 	r.waitFor(r.dw+5*time.Minute, "every job of the run to end in the cluster's record", func() bool {

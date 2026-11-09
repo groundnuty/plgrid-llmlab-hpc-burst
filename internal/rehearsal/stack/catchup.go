@@ -6,22 +6,31 @@ package stack
 // stream, a process, a clock) can precede an event that is only late. CatchUp is
 // the one wait every such read takes first.
 //
-// It LISTs the kinds the read covers and waits until the Recorder holds, for
-// every object the API lists, a version at its resourceVersion or later, and a
-// DELETED version for every object the Recorder knows live that the LIST, taken
-// at its collection's resourceVersion, no longer has. A kind's watch delivers
-// its events in version order, with no gap while a connection resumes from the
-// last version it delivered (Follow), so once the newest listed version of an
-// object is in, every earlier event of it is; this is why a reader of every
-// version ever seen (a scan for a Failed phase, the tags of a run) is covered.
-// What it does not cover is an object created and deleted after the newest
-// version listed. Versions are compared as apimachinery does
+// Its promise: the Recorder holds everything the API has shown up to this LIST.
+// It LISTs the kinds the read covers and waits until each kind's stream has
+// reached the LIST's collection resourceVersion, through an event or a bookmark.
+// A kind's watch delivers its events in version order, with no gap while a
+// connection resumes from the last version it reached (Follow), so a stream at
+// that version has delivered every event up to it, also those of an object
+// created and deleted while the watch was behind, which no LIST shows. It also
+// waits until the Recorder holds, for every object the API lists, a version at
+// its resourceVersion or later, and a DELETED version for every object it holds
+// live that the LIST no longer has: those name what is missing.
+//
+// A check that cannot tell reports not known, never caught up: a LIST that
+// failed, a version that does not parse, a wait cut short, a stream that did not
+// reach the LIST's version in time, and a stream that was reset (Follow): after
+// a reset a current version no longer shows that the earlier ones were delivered.
+//
+// Versions are compared as apimachinery does
 // (resourceversion.CompareResourceVersion: positive integers, as etcd and k3s's
-// kine give them); one that does not parse is reported as not known.
+// kine give them).
 
 import (
+	"cmp"
+	"context"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -41,6 +50,9 @@ const (
 	KindDeployments
 )
 
+// allKinds are the Recorder's streams.
+var allKinds = []Kinds{KindInstances, KindAllocations, KindDeployments}
+
 // label names the kind of an object, for a report.
 func (k Kinds) label() string {
 	switch k {
@@ -57,72 +69,18 @@ func (k Kinds) label() string {
 // CatchUpWait is how long a catch-up waits for the watch. On a healthy server
 // the watch trails a LIST by microseconds to milliseconds (measured on the
 // rehearsal's k3s for #281: at most a few milliseconds in 1,400 deletions,
-// quiet and loaded), so an event that has not come in this long is lost.
+// quiet and loaded), and a quiet stream reaches a LIST's version with its next
+// bookmark, in seconds (connectionSeconds), so what has not come in this long is
+// not coming.
 const CatchUpWait = 30 * time.Second
+
+// CatchUpWorstCase is the most one catch-up takes of its caller's time: its LIST's
+// timeout, then its wait. A row's budget counts it once for each catch-up on the
+// row's path; the row's context still stops it.
+const CatchUpWorstCase = APICallTimeout + CatchUpWait
 
 // catchUpPoll is how often a catch-up reads the Recorder.
 const catchUpPoll = 50 * time.Millisecond
-
-// Behind is one object the watch has not caught up on.
-type Behind struct {
-	Kind      Kinds
-	Name      string
-	UID       types.UID
-	Listed    string // the resourceVersion the API listed; empty when the API no longer has the object
-	Delivered string // the newest resourceVersion the watch delivered; empty when none
-}
-
-// Explain says what the watch is behind on.
-func (b Behind) Explain() string {
-	switch {
-	case b.Listed == "":
-		return fmt.Sprintf("%s %s: gone from the API, and the watch delivered no deletion (its newest version is %s)", b.Kind.label(), b.Name, b.Delivered)
-	case b.Delivered == "":
-		return fmt.Sprintf("%s %s: the API lists version %s, and the watch delivered none", b.Kind.label(), b.Name, b.Listed)
-	}
-	return fmt.Sprintf("%s %s: the API lists version %s, and the watch delivered up to %s", b.Kind.label(), b.Name, b.Listed, b.Delivered)
-}
-
-// CatchUpResult is what a catch-up found.
-type CatchUpResult struct {
-	// Waited is how long the watch trailed the API, zero when it did not.
-	Waited time.Duration
-	// Missing are the objects whose events did not come in CatchUpWait: lost
-	// events. Each is named once; the Recorder leaves it out of later catch-ups.
-	Missing []Behind
-	// Unknown says why it could not be told whether the watch is behind: the
-	// API could not be listed, a version did not parse, or the wait was cut
-	// short by the test's deadline. Empty otherwise.
-	Unknown string
-}
-
-// OK reports whether the watch had caught up.
-func (r CatchUpResult) OK() bool { return len(r.Missing) == 0 && r.Unknown == "" }
-
-// Lost reports whether the catch-up found the object's event lost.
-func (r CatchUpResult) Lost(uid types.UID) bool {
-	for _, b := range r.Missing {
-		if b.UID == uid {
-			return true
-		}
-	}
-	return false
-}
-
-// Problem is what to report of the catch-up, empty when it is OK.
-func (r CatchUpResult) Problem() string {
-	switch {
-	case r.Unknown != "":
-		return "whether the watch has caught up with the API is not known: " + r.Unknown
-	case len(r.Missing) == 0:
-		return ""
-	}
-	var parts []string
-	for _, b := range r.Missing {
-		parts = append(parts, b.Explain())
-	}
-	return fmt.Sprintf("the watch delivered nothing newer in %s after the API listed it: %s: the event was lost", r.Waited.Round(time.Millisecond), strings.Join(parts, "; "))
-}
 
 // listedObject is one object the API listed.
 type listedObject struct {
@@ -137,6 +95,26 @@ type listedObject struct {
 type listing struct {
 	objs       []listedObject
 	collection map[Kinds]string
+}
+
+// invalid says why a version of the listing does not parse, for the kinds; it is
+// checked before any is compared, so that one the Recorder has not seen the
+// object of counts too.
+func (l listing) invalid(kinds Kinds) string {
+	for _, kind := range allKinds {
+		if kinds&kind == 0 {
+			continue
+		}
+		if _, err := resourceversion.CompareResourceVersion(l.collection[kind], "1"); err != nil {
+			return fmt.Sprintf("the %s collection's version %q: %v", kind.label(), l.collection[kind], err)
+		}
+	}
+	for _, o := range l.objs {
+		if _, err := resourceversion.CompareResourceVersion(o.rv, "1"); err != nil {
+			return fmt.Sprintf("the version %q of %s %s: %v", o.rv, o.kind.label(), o.name, err)
+		}
+	}
+	return ""
 }
 
 // newest is the newest version the Recorder holds of one object.
@@ -172,28 +150,54 @@ func (rec *Recorder) holding(kind Kinds) map[types.UID]newest {
 	return out
 }
 
+// lag is how the Recorder stands against a listing.
+type lag struct {
+	behind   []Behind // the objects it is behind on
+	trailing []string // the streams that have not reached the listing's version
+	earlier  []Behind // what earlier catch-ups found lost, of the kinds
+	unknown  string   // why it cannot tell
+}
+
+// caughtUp reports whether nothing is left to wait for.
+func (g lag) caughtUp() bool { return len(g.behind) == 0 && len(g.trailing) == 0 }
+
 // behindOn compares what the Recorder holds with the listing, for the kinds.
-// It returns the objects the watch is behind on, or why it cannot tell.
-func (rec *Recorder) behindOn(kinds Kinds, l listing) (behind []Behind, unknown string) {
+func (rec *Recorder) behindOn(kinds Kinds, l listing) lag {
+	var g lag
 	rec.mu.Lock()
-	lost := map[types.UID]bool{}
-	for uid := range rec.lost {
-		lost[uid] = true
+	lost := map[types.UID]Behind{}
+	for uid, b := range rec.lost {
+		lost[uid] = b
+		if kinds&b.Kind != 0 {
+			g.earlier = append(g.earlier, b)
+		}
+	}
+	reached := map[Kinds]string{}
+	for kind, s := range rec.streams {
+		reached[kind] = s.reached
 	}
 	rec.mu.Unlock()
 	compare := func(a, b string) (int, bool) {
 		c, err := resourceversion.CompareResourceVersion(a, b)
 		if err != nil {
-			if unknown == "" {
-				unknown = fmt.Sprintf("comparing the versions %q and %q: %v", a, b, err)
+			if g.unknown == "" {
+				g.unknown = fmt.Sprintf("comparing the versions %q and %q: %v", a, b, err)
 			}
 			return 0, false
 		}
 		return c, true
 	}
-	for _, kind := range []Kinds{KindInstances, KindAllocations, KindDeployments} {
+	for _, kind := range allKinds {
 		if kinds&kind == 0 {
 			continue
+		}
+		switch r := reached[kind]; {
+		case r == "":
+			g.trailing = append(g.trailing, fmt.Sprintf("the %s stream has reached no version, and the LIST was at %s", kind.label(), l.collection[kind]))
+		default:
+			if c, ok := compare(r, l.collection[kind]); ok && c < 0 {
+				g.trailing = append(g.trailing, fmt.Sprintf("the %s stream is at version %s, and the LIST was at %s", kind.label(), r, l.collection[kind]))
+			}
 		}
 		have := rec.holding(kind)
 		listed := map[types.UID]bool{}
@@ -202,16 +206,16 @@ func (rec *Recorder) behindOn(kinds Kinds, l listing) (behind []Behind, unknown 
 				continue
 			}
 			listed[o.uid] = true
-			if lost[o.uid] {
+			if _, was := lost[o.uid]; was {
 				continue
 			}
 			h, ok := have[o.uid]
 			if !ok {
-				behind = append(behind, Behind{Kind: kind, Name: o.name, UID: o.uid, Listed: o.rv})
+				g.behind = append(g.behind, Behind{Kind: kind, Name: o.name, UID: o.uid, Listed: o.rv})
 				continue
 			}
 			if c, ok := compare(h.rv, o.rv); ok && c < 0 {
-				behind = append(behind, Behind{Kind: kind, Name: o.name, UID: o.uid, Listed: o.rv, Delivered: h.rv})
+				g.behind = append(g.behind, Behind{Kind: kind, Name: o.name, UID: o.uid, Listed: o.rv, Delivered: h.rv})
 			}
 		}
 		if kind == KindDeployments {
@@ -221,80 +225,103 @@ func (rec *Recorder) behindOn(kinds Kinds, l listing) (behind []Behind, unknown 
 		// the newest version held is no newer than the LIST: a newer one was
 		// created or changed after it.
 		for uid, h := range have {
-			if listed[uid] || h.deleted || lost[uid] {
+			_, was := lost[uid]
+			if listed[uid] || h.deleted || was {
 				continue
 			}
 			if c, ok := compare(h.rv, l.collection[kind]); ok && c <= 0 {
-				behind = append(behind, Behind{Kind: kind, Name: h.name, UID: uid, Delivered: h.rv})
+				g.behind = append(g.behind, Behind{Kind: kind, Name: h.name, UID: uid, Delivered: h.rv})
 			}
 		}
 	}
-	sort.Slice(behind, func(i, j int) bool {
-		if behind[i].Kind != behind[j].Kind {
-			return behind[i].Kind < behind[j].Kind
-		}
-		return behind[i].Name < behind[j].Name
-	})
-	return behind, unknown
+	byKindAndName := func(a, b Behind) int {
+		return cmp.Or(cmp.Compare(a.Kind, b.Kind), cmp.Compare(a.Name, b.Name))
+	}
+	slices.SortFunc(g.behind, byKindAndName)
+	slices.SortFunc(g.earlier, byKindAndName)
+	return g
 }
 
 // CatchUp waits until the watch has caught up with the API on the kinds, for a
 // read of the Recorder that follows something the API showed (what names the
-// read, for the log). The API is listed with c in the namespace. When the
-// watch trailed, the log says by how long.
-func (rec *Recorder) CatchUp(t T, c client.Reader, ns string, kinds Kinds, what string) CatchUpResult {
+// read, for the log). The API is listed with c in the namespace; ctx bounds the
+// LIST and the wait, as the test's deadline does, so that a row with a deadline
+// of its own gets its time back. The log says how long each catch-up took.
+func (rec *Recorder) CatchUp(ctx context.Context, t T, c client.Reader, ns string, kinds Kinds, what string) CatchUpResult {
 	t.Helper()
-	list := func() (listing, error) { return listKinds(t, c, ns, kinds) }
-	return catchUp(t, rec, list, kinds, what, CatchUpWait, func() { time.Sleep(catchUpPoll) })
+	list := func() (listing, error) { return listKinds(ctx, t, c, ns, kinds) }
+	return catchUp(ctx, t, rec, list, kinds, what, CatchUpWait, func() { time.Sleep(catchUpPoll) })
 }
 
 // catchUp is CatchUp with its LIST, its wait and its pause between two reads
 // given, so that a test can order the API and the watch itself.
-func catchUp(t T, rec *Recorder, list func() (listing, error), kinds Kinds, what string, wait time.Duration, pause func()) CatchUpResult {
+func catchUp(ctx context.Context, t T, rec *Recorder, list func() (listing, error), kinds Kinds, what string, wait time.Duration, pause func()) CatchUpResult {
 	t.Helper()
 	l, err := list()
 	if err != nil {
 		return CatchUpResult{Unknown: fmt.Sprintf("the API could not be listed: %v", err)}
 	}
-	start := time.Now()
-	deadline, cut := BoundedDeadline(t, wait)
-	behind, unknown := rec.behindOn(kinds, l)
-	first := len(behind)
-	for unknown == "" && len(behind) > 0 && time.Now().Before(deadline) {
-		pause()
-		behind, unknown = rec.behindOn(kinds, l)
+	if why := l.invalid(kinds); why != "" {
+		return CatchUpResult{Unknown: why}
 	}
-	res := CatchUpResult{Unknown: unknown}
-	if first > 0 {
+	start := time.Now()
+	deadline, cut := waitDeadline(ctx, t, wait)
+	g := rec.behindOn(kinds, l)
+	res := CatchUpResult{EarlierLost: g.earlier}
+	if why := rec.resets(kinds); why != "" {
+		res.Unknown = why
+		return res
+	}
+	waited := !g.caughtUp()
+	for g.unknown == "" && !g.caughtUp() && ctx.Err() == nil && time.Now().Before(deadline) {
+		pause()
+		g = rec.behindOn(kinds, l)
+	}
+	if waited {
 		res.Waited = time.Since(start)
 	}
+	res.EarlierLost = g.earlier
+	cutShort := ctx.Err() != nil || (cut && res.Waited < wait)
 	switch {
-	case unknown != "":
-	case len(behind) == 0:
-		if first > 0 {
-			t.Logf("catch-up (%s): the watch trailed the API on %d object(s) by %s", what, first, res.Waited.Round(time.Microsecond))
-		}
-	case cut && res.Waited < wait:
-		res.Unknown = fmt.Sprintf("the wait was cut short by the test's deadline after %s, with %d object(s) behind", res.Waited.Round(time.Millisecond), len(behind))
-	default:
-		res.Missing = behind
+	case g.unknown != "":
+		res.Unknown = g.unknown
+	case g.caughtUp():
+		t.Logf("catch-up (%s): the watch reached the API's version in %s", what, res.Waited.Round(time.Microsecond))
+	case cutShort:
+		res.Unknown = fmt.Sprintf("the wait was cut short by a deadline after %s, with %d object(s) behind and %d stream(s) short of the LIST's version", res.Waited.Round(time.Millisecond), len(g.behind), len(g.trailing))
+	case len(g.behind) > 0:
+		res.Missing = g.behind
 		rec.mu.Lock()
 		if rec.lost == nil {
-			rec.lost = map[types.UID]bool{}
+			rec.lost = map[types.UID]Behind{}
 		}
-		for _, b := range behind {
-			rec.lost[b.UID] = true
+		for _, b := range g.behind {
+			rec.lost[b.UID] = b
 		}
 		rec.mu.Unlock()
+	default:
+		res.Unknown = fmt.Sprintf("after %s %s", res.Waited.Round(time.Millisecond), strings.Join(g.trailing, "; "))
 	}
 	return res
 }
 
-// listKinds lists the kinds in the namespace.
-func listKinds(t T, c client.Reader, ns string, kinds Kinds) (listing, error) {
+// waitDeadline is when a wait of d gives up: now plus d, the test's WaitCap or
+// ctx's deadline, whichever comes first; cut says one of the last two shortened it.
+func waitDeadline(ctx context.Context, t T, d time.Duration) (time.Time, bool) {
+	deadline, cut := BoundedDeadline(t, d)
+	if c, ok := ctx.Deadline(); ok && c.Before(deadline) {
+		return c, true
+	}
+	return deadline, cut
+}
+
+// listKinds lists the kinds in the namespace, bounded by ctx as well as by one
+// call's timeout and the test's deadline.
+func listKinds(ctx context.Context, t T, c client.Reader, ns string, kinds Kinds) (listing, error) {
 	t.Helper()
 	l := listing{collection: map[Kinds]string{}}
-	ctx, cancel := CallCtx(t)
+	d, _ := BoundedDeadline(t, APICallTimeout)
+	ctx, cancel := context.WithDeadline(ctx, d)
 	defer cancel()
 	if kinds&KindInstances != 0 {
 		var list v1alpha1.InstanceList
