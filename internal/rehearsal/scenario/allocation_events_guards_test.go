@@ -33,6 +33,10 @@ func (r *recordT) Logf(format string, args ...any) {
 	r.logs = append(r.logs, fmt.Sprintf(format, args...))
 }
 
+// Deadline reports none, so that a small -timeout of the test binary does not
+// cut a wait (stack.WaitCap) that these tests size themselves.
+func (r *recordT) Deadline() (time.Time, bool) { return time.Time{}, false }
+
 func version(uid types.UID, name string, phase v1alpha1.AllocationPhase, deleted bool) stack.AllocObservation {
 	return stack.AllocObservation{At: time.Now(), Name: name, UID: uid, Phase: phase, Deleted: deleted}
 }
