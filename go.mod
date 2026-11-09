@@ -9,6 +9,7 @@ require (
 	github.com/go-logr/logr v1.4.4
 	github.com/groundnuty/plgrid-llmlab-hpc-burst/third_party/forked/kubeai v0.0.0
 	github.com/hanwen/go-fuse/v2 v2.12.1
+	github.com/hashicorp/yamux v0.1.2
 	github.com/openai/openai-go/v3 v3.71.1
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2

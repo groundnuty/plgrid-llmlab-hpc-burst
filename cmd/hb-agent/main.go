@@ -4,6 +4,7 @@
 // (HBEP-4, Submission):
 //
 //	hb-agent <allocation directory>
+//	hb-agent relay <channel>
 //	hb-agent -version
 //
 // It reads agent.json and the credential from that directory and the job's ID
@@ -19,8 +20,17 @@
 //
 // It is built statically, with CGO_ENABLED=0, for amd64 and arm64.
 //
-// Exit codes: 0 when it stopped on instruction or on a signal, 1 when it could
-// not start, 2 on a usage error.
+// In host-dialed mode (HBEP-6, Dial-home modes, host-dialed mode) the same
+// binary is also each relay's program, in an srun step that the batch
+// Provider's controller starts from the login node: "hb-agent relay
+// <channel>" connects to the agent's socket for the channel (control or
+// serving) in the job's relay directory, which it finds from SLURM_JOB_ID
+// alone (agentapi.RelayDir), and hands the step's standard input and output
+// over. It writes nothing else to standard output, which carries the
+// channel's multiplexed session.
+//
+// Exit codes: 0 when it stopped on instruction or on a signal (a relay: when
+// its session ended), 1 when it could not start, 2 on a usage error.
 package main
 
 import (
@@ -38,6 +48,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/engine"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/stage"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/hostdial"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -45,7 +56,35 @@ import (
 var version = "dev"
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == agentapi.RelaySubcommand {
+		os.Exit(relay(os.Args[2:], os.Getenv, os.Stdin, os.Stdout, os.Stderr))
+	}
 	os.Exit(run(os.Args[1:], os.Getenv, os.Stderr))
+}
+
+// relay is "hb-agent relay <channel>" (HBEP-6, Dial-home modes, host-dialed
+// mode): a pipe between the step's standard streams and the agent's socket
+// for the channel. Everything it says goes to stderr: stdout is the session.
+func relay(args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		fmt.Fprintln(stderr, "usage: hb-agent relay control|serving")
+		return 2
+	}
+	ch, err := agentapi.ParseRelayChannel(args[0])
+	if err != nil {
+		fmt.Fprintln(stderr, "hb-agent relay:", err)
+		return 2
+	}
+	dir, err := agentapi.RelayDir(agentapi.RelayRoot(getenv), getenv("SLURM_JOB_ID"))
+	if err != nil {
+		fmt.Fprintln(stderr, "hb-agent relay: the job's relay directory (SLURM_JOB_ID):", err)
+		return 1
+	}
+	if err := hostdial.Pipe(dir, ch, stdin, stdout); err != nil {
+		fmt.Fprintln(stderr, "hb-agent relay "+string(ch)+":", err)
+		return 1
+	}
+	return 0
 }
 
 func run(args []string, getenv func(string) string, stderr io.Writer) int {

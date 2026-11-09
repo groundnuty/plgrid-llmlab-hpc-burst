@@ -36,8 +36,11 @@ func checkConfigValues(c slurm.SSHConfig) error {
 // place by rename, so ssh never reads a partial one. It is rewritten at every
 // master start, which also restores a file that something deleted. Errors say
 // nothing about the values or paths.
-func (s *SSH) writeConfig() error {
-	c := s.o.Config
+func (s *SSH) writeConfig() error { return writeConfigFile(s.o.ControlDir, s.config, s.o.Config) }
+
+// writeConfigFile writes c as a private ssh configuration file at dest, by a
+// temporary file in dir and a rename.
+func writeConfigFile(dir, dest string, c slurm.SSHConfig) error {
 	var b strings.Builder
 	b.WriteString("# Written by the hpc-burst controller; removed when the transport closes.\n")
 	b.WriteString("Host " + alias + "\n")
@@ -50,7 +53,7 @@ func (s *SSH) writeConfig() error {
 	if c.UserKnownHostsFile != "" {
 		b.WriteString("  UserKnownHostsFile " + c.UserKnownHostsFile + "\n")
 	}
-	f, err := os.CreateTemp(s.o.ControlDir, ".conf-*")
+	f, err := os.CreateTemp(dir, ".conf-*")
 	if err != nil {
 		return errors.New("the ssh configuration file could not be created")
 	}
@@ -59,7 +62,7 @@ func (s *SSH) writeConfig() error {
 		werr = cerr
 	}
 	if werr == nil {
-		werr = os.Rename(f.Name(), s.config)
+		werr = os.Rename(f.Name(), dest)
 	}
 	if werr != nil {
 		_ = os.Remove(f.Name())

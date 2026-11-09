@@ -827,3 +827,15 @@ func (b *Batch) resolve(ctx context.Context, staging string) (Paths, error) {
 	}
 	return Paths{Home: home, Staging: staging}, nil
 }
+
+// ListByTagFresh is ListByTag from a listing read now, never the cached one:
+// HBEP-6's relay reads the job ID again under the Allocation's tag before
+// each start (Dial-home modes, host-dialed mode), as HBEP-7's worker restart
+// does, so a relay never lands on a job the cache still shows.
+func (b *Batch) ListByTagFresh(ctx context.Context, tag string) ([]provider.Job, error) {
+	if err := CheckValue("tag", tag); err != nil {
+		return nil, fmt.Errorf("%w: %v", provider.ErrInvalidRequest, err)
+	}
+	b.markStale()
+	return b.ListByTag(ctx, tag)
+}
