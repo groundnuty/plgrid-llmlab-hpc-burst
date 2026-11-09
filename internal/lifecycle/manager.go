@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -106,6 +107,10 @@ type Options struct {
 	// emitter's test hooks (observer.onPass, gapEmitter.onDone).
 	onObserve func(began time.Time, err error)
 	onGap     func()
+	// logger, when set, is the manager's logger: a test learns from it when
+	// the controller has started its workers, which nothing else shows. Unset,
+	// controller-runtime uses its global logger.
+	logger logr.Logger
 }
 
 // Scheme returns the scheme the controller uses: the built-in kinds and the
@@ -261,6 +266,7 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		GracefulShutdownTimeout:       &grace,
 		NewCache:                      o.newCache,
 		MapperProvider:                boundedMapper(cmp.Or(o.discoveryTimeout, DiscoveryTimeout), mapperStop),
+		Logger:                        o.logger,
 	}
 	// With leader election off there is no Lease to read or regard, so no
 	// ObservationGap (`@hpc-burst-science-agent`, 31 Oct 2026, for #111).

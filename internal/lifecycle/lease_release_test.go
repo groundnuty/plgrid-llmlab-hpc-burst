@@ -4,15 +4,18 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/leaderlock"
@@ -33,6 +36,12 @@ import (
 // the Lease itself. Each round takes the Lease the previous one released at
 // once; after a lost release it would wait until the Lease expired by its own
 // clock, controller-runtime's 15 s.
+//
+// Each round stops a manager that has fully started: it leads, holds the Lease,
+// every watched informer has synced and the controller has started its workers.
+// A 200 ms poll used to leave it there by chance in all but a round or so of 200,
+// and outlasted that state by up to about 100 ms a round (#282); the round now
+// waits for the state itself.
 func TestLifecycleManagerReleasesItsLeaseOnEveryStop(t *testing.T) {
 	const (
 		stopRounds = 200
@@ -95,6 +104,8 @@ func stopRound(t *testing.T, ctx context.Context, cl client.Client, round int, f
 		f.Set(leasefault.ReleaseRead)
 	}
 	o.Config = f.Config(cfg)
+	workers := &workersSink{}
+	o.logger = logr.New(workers)
 	mgr, _, err := NewManager(o)
 	if err != nil {
 		t.Fatalf("round %d: %v", round, err)
@@ -115,24 +126,24 @@ func stopRound(t *testing.T, ctx context.Context, cl client.Client, round int, f
 			}
 		}
 	}()
+	// One minute for all of it: to lead, to hold the Lease and to start fully.
+	deadline := time.Now().Add(time.Minute)
 	select {
 	case <-mgr.Elected():
-	case <-time.After(time.Minute):
+	case <-time.After(time.Until(deadline)):
 		t.Fatalf("round %d: the manager did not lead within a minute", round)
 	}
-	eventually(t, time.Minute, fmt.Sprintf("round %d: the manager holds the lifecycle Lease", round), func() (bool, string) {
+	eventually(t, time.Until(deadline), fmt.Sprintf("round %d: the manager holds the lifecycle Lease", round), func() (bool, string) {
 		holder, err := leaseHolderOf(ctx, cl)
 		if err != nil {
 			return false, err.Error()
 		}
 		return holder != "", "no holder"
 	})
-	if stopsSynced(round) {
-		synced, cancelSync := context.WithTimeout(mctx, time.Minute)
-		defer cancelSync()
-		if !mgr.GetCache().WaitForCacheSync(synced) {
-			t.Fatalf("round %d: the manager's caches did not sync within a minute", round)
-		}
+	awaitFullStart(t, ctx, mgr, workers, round, deadline)
+	// Read again, apart from the wait: a wait that passes too early, or none, must fail here and not go unseen.
+	if ok, msg := fullyStarted(ctx, mgr, workers); !ok {
+		t.Fatalf("round %d: the manager would stop before it has fully started: %s", round, msg)
 	}
 	stop()
 	stopped = true
@@ -163,14 +174,55 @@ func stopRound(t *testing.T, ctx context.Context, cl client.Client, round int, f
 	}
 }
 
-// stopsSynced says which rounds stop a manager whose caches have synced; the
-// others stop it as soon as it leads, while its controllers are still starting.
-// A round used to wait out eventually's 200 ms pause whichever came first, 40 s of
-// the test's 50 s (#282), and its stop fell between the two: the manager leads
-// within tens of milliseconds, and 25 of 200 rounds had synced by then. Two of
-// every eight rounds wait for the sync, one faulted and one not, so both states
-// are reached with and without the fault, by waiting on them.
-func stopsSynced(round int) bool { return round%8 < 2 }
+// workersStartedLine is what the controller logs as it starts its workers
+// (controller-runtime v0.23.1, pkg/internal/controller/controller.go:306), the
+// only signal of that. If a bump rewords it, the first round fails at its
+// one-minute deadline, naming this line (docs/development.md, Pinned versions).
+const workersStartedLine = "Starting workers"
+
+// workersSink is a manager's log in one round, kept only for workersStartedLine.
+type workersSink struct{ started atomic.Bool }
+
+func (s *workersSink) Init(logr.RuntimeInfo) {}
+func (s *workersSink) Enabled(int) bool      { return true }
+func (s *workersSink) Info(_ int, msg string, _ ...any) {
+	if msg == workersStartedLine {
+		s.started.Store(true)
+	}
+}
+func (s *workersSink) Error(error, string, ...any)    {}
+func (s *workersSink) WithValues(...any) logr.LogSink { return s }
+func (s *workersSink) WithName(string) logr.LogSink   { return s }
+
+// fullyStarted says whether every watched informer has synced, read as readiness.Start reads them,
+// and the controller has started its workers. The cache's own WaitForCacheSync will not do: it
+// waits only for the informers that exist (readiness.Start), and the controller sees the sync up to
+// about 100 ms after they do, at the next poll of its own.
+func fullyStarted(ctx context.Context, mgr manager.Manager, workers *workersSink) (bool, string) {
+	// No kind is named "", so this reads all of them.
+	if ok, msg := othersSynced(ctx, mgr, ""); !ok {
+		return false, msg
+	}
+	if !workers.started.Load() {
+		return false, fmt.Sprintf("the controller has not logged %q, which says it has started its workers", workersStartedLine)
+	}
+	return true, ""
+}
+
+// awaitFullStart waits for fullyStarted until deadline.
+func awaitFullStart(t *testing.T, ctx context.Context, mgr manager.Manager, workers *workersSink, round int, deadline time.Time) {
+	t.Helper()
+	for {
+		ok, msg := fullyStarted(ctx, mgr, workers)
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("round %d: the manager did not fully start within a minute: %s", round, msg)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
 
 // leaseHolderOf reads the lifecycle Lease's holderIdentity, "" when it names
 // none.
