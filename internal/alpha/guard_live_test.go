@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"time"
 
+	eventsv1 "k8s.io/api/events/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -213,7 +214,20 @@ func (r *liveRun) secondNeverFinal() error {
 	if waiting == 0 {
 		return errors.New("the queue lists no second job of the run: the successor was never accepted")
 	}
-	return ErrSecondNotStarted
+	return &SecondNotStartedError{ReplacementLate: r.replacementLate()}
+}
+
+// replacementLate reads, for the NOT RUN's line alone, whether the controller raised ReplacementLate for the run's
+// deployment. It is its own read, not stack.Events, which fails the test when the list fails: a read that fails here
+// says so, and changes nothing about how the run ends.
+func (r *liveRun) replacementLate() string {
+	var l eventsv1.EventList
+	ctx, cancel := context.WithTimeout(context.Background(), stack.APICallTimeout)
+	defer cancel()
+	if err := r.c.List(ctx, &l); err != nil {
+		return LateUnknown
+	}
+	return ReplacementLateOf(l.Items, r.w.md.Name)
 }
 
 // lookNow is one look at the cluster, as the guard takes it, for a step's read at a bound.

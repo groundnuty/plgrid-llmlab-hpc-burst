@@ -178,6 +178,134 @@ func TestTheDeadlineLeavesAWaitTime(t *testing.T) {
 	}
 }
 
+// A kill with no failing test says what it was: a panic, a timeout, an exit status (#285). A compile error in the Go a mutant
+// changes reads BROKEN (TestMutateAlphaReportsAMutantThatDoesNotCompileAsBrokenNotKilled).
+func TestMutateAlphaSaysWhatAKillWithNoFailingTestWas(t *testing.T) {
+	const noTestFailed = `package alpha
+
+import "os"
+
+// Each is on when its mutant says so: a run that ends with no test named as failed.
+const panics, timesOut, exits = false, false, false
+
+func init() {
+	if panics {
+		panic("the package could not start")
+	}
+	if timesOut {
+		panic("test timed out after 300s") // what the testing package prints, with no wait for it
+	}
+	if exits {
+		os.Exit(7)
+	}
+}
+`
+	const passes = "package alpha\n\nimport \"testing\"\n\nfunc TestPasses(t *testing.T) {}\n"
+	code, out := runMutateFixture(t, map[string]string{"internal/alpha/fx.go": noTestFailed, "internal/alpha/fx_test.go": passes,
+		"mutants.txt": strings.Join([]string{"fx.go@@const panics, timesOut, exits = false, false, false@@const panics, timesOut, exits = true, false, false",
+			"fx.go@@const panics, timesOut, exits = false, false, false@@const panics, timesOut, exits = false, true, false",
+			"fx.go@@const panics, timesOut, exits = false, false, false@@const panics, timesOut, exits = false, false, true"}, "\n") + "\n"})
+	if code != 0 {
+		t.Errorf("exit %d, want 0:\n%s", code, out)
+	}
+	for _, want := range []string{
+		"= true, false, false: by a panic, no test named as failed",
+		"= false, true, false: by a timeout, no test named as failed",
+		"= false, false, true: by exit 7, no test named as failed",
+		"mutants: 3, killed 3, survived 0, broken 0",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the output lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+// A test that goes red after the baseline (a flake, a date, a port) would kill every mutant it meets. The science agent's rule on
+// PR 284: such a kill reads BROKEN, with the test named, so a red test can never read as a perfect score. It stands for one
+// here by counting its runs: green at the baseline, red from then on. The mutant changes what no test reads, so the
+// test is all that fails. Beside it, a mutant a real test catches is a kill, even with a red test in the run.
+func TestMutateAlphaReadsAKillTheUnmutatedTestsAlsoMakeAsBroken(t *testing.T) {
+	const goesRed = `package alpha
+
+import (
+	"os"
+	"testing"
+)
+
+func TestGoesRedAfterTheBaseline(t *testing.T) {
+	_, err := os.Stat("ran-once")
+	if err == nil {
+		t.Fatal("red, with or without a mutant")
+	}
+	if err := os.WriteFile("ran-once", nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+`
+	files := func(mutants string) map[string]string {
+		return map[string]string{"internal/alpha/fx.go": mutateFixture, "internal/alpha/a_test.go": goesRed, "mutants.txt": mutants + "\n"}
+	}
+	code, out := runMutateFixture(t, files("fx.go@@return string(n)@@return string(n) + \".\""))
+	if code != 1 {
+		t.Errorf("exit %d, want 1:\n%s", code, out)
+	}
+	for _, want := range []string{"BROKEN   fx.go: return string(n)", "killed only by TestGoesRedAfterTheBaseline, which also fails with no mutant", "mutants: 1, killed 0, survived 0, broken 1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "KILLED") || strings.Contains(out, "kills by what failed") {
+		t.Errorf("a test that is red with no mutant was counted as a kill:\n%s", out)
+	}
+}
+
+// A test seen green with no mutant is not run again for ten minutes: two kills by one test cost one look, so the script's slow
+// tests are not run once per mutant. Its runs are counted: the baseline, the first mutant, the look, the second mutant.
+func TestMutateAlphaLooksAgainAtAKillingTestOnce(t *testing.T) {
+	const counted = `package alpha
+
+import (
+	"os"
+	"testing"
+)
+
+func TestCounted(t *testing.T) {
+	f, err := os.OpenFile("runs", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString("run\n"); err != nil {
+		t.Fatal(err)
+	}
+	if Clamp(5) != 5 {
+		t.Fatal("clamp")
+	}
+}
+`
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "go.mod"), "module example.test/fx\n\ngo 1.26\n", 0o644)
+	write(t, filepath.Join(dir, "internal/alpha/fx.go"), mutateFixture, 0o644)
+	write(t, filepath.Join(dir, "internal/alpha/fx_test.go"), counted, 0o644)
+	write(t, filepath.Join(dir, "mutants.txt"), "fx.go@@return v@@return v + 1\nfx.go@@return v@@return v + 2\n", 0o644)
+	cmd := exec.Command("bash", filepath.Join(repoRoot(t), "hack", "mutate-alpha.sh"))
+	cmd.Env = append(os.Environ(), "MUTATE_ALPHA_ROOT="+dir, "MUTATE_ALPHA_MUTANTS="+filepath.Join(dir, "mutants.txt"))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v:\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "mutants: 2, killed 2, survived 0, broken 0") {
+		t.Errorf("want both killed:\n%s", out)
+	}
+	runs, err := os.ReadFile(filepath.Join(dir, "internal/alpha/runs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(runs), "run\n"); n != 4 {
+		t.Errorf("the test ran %d times, want 4: the baseline, a mutant, one look with no mutant, the other mutant", n)
+	}
+}
+
 // Each kill names the test that failed, and the run ends with how many each made, so that one test failing for every
 // mutant shows (#285). A kill count alone is the verification that proves nothing.
 func TestMutateAlphaNamesTheTestThatKilledEachMutant(t *testing.T) {

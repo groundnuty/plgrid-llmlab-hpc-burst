@@ -493,7 +493,11 @@ func TestASecondJobThatNeverStartedIsNotRunUnlessAnEarlierFailureStands(t *testi
 			fault, wantFailure string
 		}{
 			{"second-never-started", ""},
+			// What was read of ReplacementLate is information: each reading ends the same way, either way.
+			{"second-never-started-late", ""},
+			{"second-never-started-unknown", ""},
 			{"second-never-started-cut", "a stream was cut"},
+			{"second-never-started-late-cut", "a stream was cut"},
 			{"second-never-started-no-restart", "0 restarts at the worker rung, want 1"},
 		} {
 			t.Run(row+"/"+c.fault, func(t *testing.T) {
@@ -568,7 +572,7 @@ func (failingClose) Close(context.Context) error { return errors.New("scancel di
 // The marker names the row and the wait, and no job: the script prints and posts around it.
 func TestTheNotRunNoteNamesNoJob(t *testing.T) {
 	second := NotRunNote(rowOf("alpha-helios-nooverlap"), 30*time.Minute, fmt.Errorf("the scenario: %w", ErrSecondNotStarted))
-	if want := "alpha-helios-nooverlap: the first job ran and the second never started; this run's jobs were cancelled by tag\n"; second != want {
+	if want := "alpha-helios-nooverlap: the first job ran and the second never started; ReplacementLate for its deployment: unknown; this run's jobs were cancelled by tag\n"; second != want {
 		t.Errorf("note %q, want %q", second, want)
 	}
 	note := NotRunNote(rowOf("tunnel-hour-helios"), 30*time.Minute, ErrNotStarted)

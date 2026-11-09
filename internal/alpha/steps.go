@@ -3,6 +3,7 @@ package alpha
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
@@ -23,6 +24,26 @@ var ErrNotStarted = errors.New("a job of the run was still pending when the wait
 // property the row tests was never put to the test. The scenario returns what it
 // saw beside it.
 var ErrSecondNotStarted = errors.New("the first job of the run ran and the second never started, and was cancelled by its tag")
+
+// What a run read of ReplacementLate for its deployment, in a second job's NOT RUN.
+const (
+	LateRaised    = "raised"
+	LateNotRaised = "not raised"
+	LateUnknown   = "unknown"
+)
+
+// SecondNotStartedError is ErrSecondNotStarted with whether the controller raised ReplacementLate for the run's
+// deployment (the science agent, on PR 284). That is information for whoever reads the line, and no check: nothing
+// decides on it, and an event that could not be read says so. In no-overlap mode the gap is planned, and the controller
+// does not raise it (internal/lifecycle/handover.go), so "not raised" is what that row expects.
+type SecondNotStartedError struct{ ReplacementLate string }
+
+func (e *SecondNotStartedError) Error() string {
+	return fmt.Sprintf("%v; ReplacementLate for its deployment: %s", ErrSecondNotStarted, e.ReplacementLate)
+}
+
+// Is makes the error ErrSecondNotStarted, whatever it read.
+func (e *SecondNotStartedError) Is(target error) bool { return target == ErrSecondNotStarted }
 
 // Plan is what a scenario is given.
 type Plan struct {

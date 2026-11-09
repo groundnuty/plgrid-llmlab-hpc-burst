@@ -165,18 +165,25 @@ func TestAMarkerAnEarlierRowLeftIsNeverALocalRowsNotRun(t *testing.T) {
 func TestASecondJobThatNeverStartedIsNotRunOnTheTwoJobRows(t *testing.T) {
 	real := realTestBinary(t, "HPCBURST_LIVECHECKS_ALPHA_TEST", alphaPkg)
 	realDir := filepath.Join(repoRoot(t), alphaPkg)
+	const handover = "NOT RUN (the first job ran and the second never started by the first's drain start, and was cancelled by its tag; not a failure)"
+	const noOverlap = "NOT RUN (the first job ran and the second never started within 30 min of the first's lease end, and was cancelled by its tag; not a failure)"
 	for _, c := range []struct {
-		row, setting, want string
+		row, fault, setting, want, wantLate string
 	}{
-		{"alpha-athena-handover", "", "NOT RUN (the first job ran and the second never started by the first's drain start, and was cancelled by its tag; not a failure)"},
-		{"alpha-helios-nooverlap", "", "NOT RUN (the first job ran and the second never started within 30 min of the first's lease end, and was cancelled by its tag; not a failure)"},
-		{"alpha-helios-nooverlap", "LIVE_PENDING_MAX_SECONDS=90", "NOT RUN (the first job ran and the second never started within 1 min 30 s of the first's lease end, and was cancelled by its tag; not a failure)"},
+		{"alpha-athena-handover", "second-never-started", "", handover, "not raised"},
+		{"alpha-helios-nooverlap", "second-never-started", "", noOverlap, "not raised"},
+		{"alpha-helios-nooverlap", "second-never-started", "LIVE_PENDING_MAX_SECONDS=90", "NOT RUN (the first job ran and the second never started within 1 min 30 s of the first's lease end, and was cancelled by its tag; not a failure)", "not raised"},
+		// What the run read of ReplacementLate is one line of information, and changes nothing else (the science agent, on PR 284).
+		{"alpha-athena-handover", "second-never-started-late", "", handover, "raised"},
+		{"alpha-athena-handover", "second-never-started-unknown", "", handover, "unknown"},
+		{"alpha-helios-nooverlap", "second-never-started-late", "", noOverlap, "raised"},
+		{"alpha-helios-nooverlap", "second-never-started-unknown", "", noOverlap, "unknown"},
 	} {
-		t.Run(c.row+"/"+c.setting, func(t *testing.T) {
+		t.Run(c.row+"/"+c.fault+"/"+c.setting, func(t *testing.T) {
 			t.Parallel()
 			w := newAlphaWorld(t)
 			w.installDry(dryWrapper, real, realDir)
-			env := []string{"STUB_DRY_FAULT=second-never-started"}
+			env := []string{"STUB_DRY_FAULT=" + c.fault}
 			if c.setting != "" {
 				env = append(env, c.setting)
 			}
@@ -184,7 +191,8 @@ func TestASecondJobThatNeverStartedIsNotRunOnTheTwoJobRows(t *testing.T) {
 			if res.code != 3 {
 				t.Fatalf("exit %d, want 3:\n%s", res.code, res.out)
 			}
-			w.contains(res, c.row+": tests: 0 passed, 0 failed, 1 skipped", c.row+": "+c.want, "cleanup: left behind 0")
+			w.contains(res, c.row+": tests: 0 passed, 0 failed, 1 skipped", c.row+": "+c.want, "cleanup: left behind 0",
+				c.row+": ReplacementLate for its deployment: "+c.wantLate+" (information, not a check)")
 			if strings.Contains(res.out, c.row+": FAIL") || strings.Contains(res.out, c.row+": PASS") {
 				t.Errorf("a NOT RUN run was also reported as a pass or a failure:\n%s", res.out)
 			}

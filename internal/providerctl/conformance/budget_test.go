@@ -10,9 +10,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -179,23 +177,12 @@ func (r *waitReader) of(fn *ast.FuncDecl, seen map[string]bool) waitSum {
 	return sum
 }
 
-// statedWorstCase is the figure the script's comment states for a row, in minutes: "worst case of <row>: <n> min".
-var statedWorstCase = regexp.MustCompile(`(?m)^# worst case of ([a-z0-9-]+): (?:the wait \+ )?(\d+) min`)
-
-// Every conformance, accounting and reach row: the timeout is above the worst case its test's source adds up to, with the
-// margin, and the worst case the script's comment states is that sum, so a figure in a comment cannot drift either. A
-// row with no start wait has the wait in the queue on top of its timeout column (execute_cluster), so the column need
-// not hold it. The stack rows and real-engine are hack/livechecks's (TestEveryStackRowsTimeoutIsAboveItsWorstCase and
-// TestEveryRowsTimeoutIsAboveItsStatedWorstCase), which also fails a row with no stated figure.
+// Every conformance, accounting and reach row: its timeout is above the worst case derived from the row's own bounds in
+// the table (its start wait) and the waits its test's source holds, with the margin. A row with no start wait has the
+// wait in the queue on top of its timeout column (execute_cluster), so the column need not hold it. The stack rows and
+// real-engine are hack/livechecks's (TestEveryRowsTimeoutIsDerivedFromItsBounds), which also fails a row of a kind no
+// test derives.
 func TestEveryRowsTimeoutIsAboveTheWorstCaseItsSourceAddsUpTo(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "hack", "live-checks.sh"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	stated := map[string]int{}
-	for _, m := range statedWorstCase.FindAllStringSubmatch(string(raw), -1) {
-		stated[m[1]], _ = strconv.Atoi(m[2])
-	}
 	reader := newWaitReader(t)
 	seen := 0
 	for _, row := range readShapeRows(t) {
@@ -239,9 +226,6 @@ func TestEveryRowsTimeoutIsAboveTheWorstCaseItsSourceAddsUpTo(t *testing.T) {
 			}
 			if got := time.Duration(timeout) * time.Minute; got < worst+budgetMargin {
 				t.Errorf("timeout %s is below the worst case %s from the source of %s and the margin of %s", got, worst, body, budgetMargin)
-			}
-			if got, ok := stated[row.name]; !ok || time.Duration(got)*time.Minute != worst {
-				t.Errorf("the script's comment states a worst case of %d min (stated: %t), and the source of %s adds up to %s", got, ok, body, worst)
 			}
 		})
 	}

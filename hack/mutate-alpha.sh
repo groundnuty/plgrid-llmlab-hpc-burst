@@ -9,10 +9,11 @@
 #
 # Before the first mutant of each kind the tests of that kind run with no mutant, under the same command: if they fail, or do
 # not compile, the run stops (exit 2), since a test that already fails would count every mutant as killed (#285).
-# A mutant ends as KILLED (a test fails, and the line names it), SURVIVED (every test passes) or BROKEN: its text does not
-# occur exactly once, or the Go file it changes no longer compiles. A mutant that does not compile fails to build the tests,
-# and that is not a test failing, so it is reported as BROKEN, never as killed; the run fails for a survivor and for a broken
-# mutant alike. The run ends with how many kills each failing test made, so a shared cause shows. The
+# A mutant ends as KILLED (a test fails and passes with no mutant, and the line names it, or names the timeout or the panic that
+# ended a run with no failing test), SURVIVED (every test passes) or BROKEN: its text does not occur exactly once, the Go file it
+# changes no longer compiles, or the only tests that failed also fail with no mutant when run again, which is no kill. A mutant that
+# does not compile fails to build the tests, and that is not a test failing, so it is reported as BROKEN, never as killed; the
+# run fails for a survivor and for a broken mutant alike. The run ends with how many kills each failing test made, so a shared cause shows. The
 # compile is its own step, to one fixed test-binary path per package, and the binary then runs: so MUTATE_ALPHA_BUILD_LOCK,
 # a lock file, is taken (flock -o) around each compile only, never around a test run.
 #
@@ -482,6 +483,12 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'run.go@@				return noOverlapFirstJobChecks(cfg.Row, o, j)@@				return VerifyNoOverlap(cfg.Row, o, j)'
   'run.go@@ || errors.Is(err, ErrSecondNotStarted)@@'
   'run.go@@	if errors.Is(err, ErrSecondNotStarted) {@@	if false {'
+  'run.go@@			late = s.ReplacementLate@@			_ = s'
+  'liveobs.go@@		if e.Reason == v1alpha1.ReasonReplacementLate && e.Regarding.Name == deployment {@@		if e.Reason == v1alpha1.ReasonReplacementLate {'
+  'liveobs.go@@		if e.Reason == v1alpha1.ReasonReplacementLate && e.Regarding.Name == deployment {@@		if e.Regarding.Name == deployment {'
+  'guard_live_test.go@@		return LateUnknown@@		return LateNotRaised'
+  'hack/live-checks.sh@@      [ -z "$late" ] || say "$n: ReplacementLate for its deployment: $late (information, not a check)"@@      :'
+  'steps.go@@func (e *SecondNotStartedError) Is(target error) bool { return target == ErrSecondNotStarted }@@func (e *SecondNotStartedError) Is(target error) bool { return target == ErrSecondNotStarted && e.ReplacementLate != LateRaised }'
   'run.go@@		post += "- " + secondNotStartedWords + "; the failed checks are the first job'"'"'s\n"@@		_ = secondNotStartedWords'
   'steps_live_test.go@@		if !startBy.IsZero() && time.Now().After(startBy.Add(2*r.every())) && !r.secondStarted() {@@		if false {'
   'steps_live_test.go@@		if !startBy.IsZero() && time.Now().After(startBy.Add(2*r.every())) && !r.secondStarted() {@@		if !startBy.IsZero() && !r.secondStarted() {'
@@ -497,12 +504,10 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'internal/providerctl/conformance/gpuacct_test.go@@	accountingEndWait    = 10 * time.Minute@@	accountingEndWait    = 11 * time.Minute'
   'internal/providerctl/conformance/gpuacct_test.go@@	accountingDeleteWait = 5 * time.Minute@@	accountingDeleteWait = 6 * time.Minute'
   'internal/providerctl/conformance/reach_run_test.go@@const reachEndWait = 3 * time.Minute@@const reachEndWait = 4 * time.Minute'
+  'hack/live-checks.sh@@local submit_t run_t="" now limit_s pend_max margin=${LIVE_RUN_MARGIN_SECONDS:-900}@@local submit_t run_t="" now limit_s pend_max margin=${LIVE_RUN_MARGIN_SECONDS:-1200}'
+  'hack/live-checks.sh@@real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|75|-C memfs@@real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|70|-C memfs'
   'hack/live-checks.sh@@conformance-helios-gh200|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|50|-C memfs|10@@conformance-helios-gh200|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|45|-C memfs|10'
   'hack/live-checks.sh@@conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|50|-|10@@conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|45|-|10'
-  'hack/live-checks.sh@@# worst case of alpha-helios-nooverlap: 2 waits + 177 min@@# worst case of alpha-helios-nooverlap: the wait + 177 min'
-  'hack/live-checks.sh@@# worst case of alpha-athena-handover: the wait + 122 min@@# worst case of alpha-athena-handover: the wait + 117 min'
-  'hack/live-checks.sh@@# worst case of real-engine: the wait + 72 min@@# worst case of real-engine: the wait + 71 min'
-  'hack/live-checks.sh@@# worst case of reach-athena: 13 min@@# worst case reach-athena: 13 min'
   'budget.go@@	CloseTimeout = 5 * time.Minute@@	CloseTimeout = 4 * time.Minute'
   'budget.go@@	ReadyMargin = 5 * time.Minute@@	ReadyMargin = 4 * time.Minute'
   'budget.go@@	EndMargin = 5 * time.Minute@@	EndMargin = 4 * time.Minute'
@@ -568,38 +573,88 @@ compile_of() {
     *.go) compile_tests "$pkg" "$tmp/pkg.test" ;;
   esac
 }
-# tests_of <path>: the command that judges a mutant of path, in the array tests. The package's run has -test.timeout 300s, not
-# less: internal/rehearsal/stack gives up its waits two minutes before the test's deadline (CleanupMargin), so at 120s every
-# wait on state failed at once and the unmutated tests failed, which counted every mutant of the package as killed.
+# The tests of the script's kind.
+script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot'
+# tests_of <path> [<names>]: the command that judges a mutant of path, in the array tests. With names (a regexp), the command that
+# runs those tests alone, to the end, with no mutant: from the binaries kept at the baseline, the tree being as it was. The
+# package's run has -test.timeout 300s, not less: internal/rehearsal/stack gives up its waits two minutes before the test's deadline
+# (CleanupMargin), so at 120s every wait on state failed at once and the unmutated tests failed, which counted every mutant
+# of the package as killed (#285).
 tests_of() {
+  local names=${2:-} pkgbin=$tmp/pkg.test confbin=$tmp/conf.test
+  local bin=(-test.count=1 -test.timeout 300s -test.failfast) sel=(-failfast -run "$script_tests") dry=PendingPastTheBound
+  if [ -n "$names" ]; then
+    pkgbin=$tmp/base-pkg.test confbin=$tmp/base-conf.test dry=$names
+    bin=(-test.count=1 -test.timeout 300s -test.run "$names") sel=(-run "$names")
+  fi
   case $1 in
-    hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 -failfast -run 'AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot' ./hack/livechecks) ;;
-    "$pkg"/alpha_live_test.go)
-      # The dry runs of the script run the alpha test binary: the one compiled above, from the mutated file.
-      tests=(env HPCBURST_LIVECHECKS_ALPHA_TEST="$tmp/pkg.test" go test -count=1 -timeout 9m -run PendingPastTheBound ./hack/livechecks) ;;
-    internal/providerctl/*) tests=(bash -c 'cd "$1/internal/providerctl/conformance" && "$2" -test.count=1 -test.timeout 300s -test.failfast && cd "$1/$3" && "$4" -test.count=1 -test.timeout 300s -test.failfast' _ "$here" "$tmp/conf.test" "$pkg" "$tmp/pkg.test") ;;
-    *) tests=(bash -c 'cd "$1/$2" && "$3" -test.count=1 -test.timeout 300s -test.failfast' _ "$here" "$pkg" "$tmp/pkg.test") ;;
+    hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 "${sel[@]}" ./hack/livechecks) ;;
+    # The dry runs of the script run the alpha test binary: the one compiled above, from the mutated file.
+    "$pkg"/alpha_live_test.go) tests=(env HPCBURST_LIVECHECKS_ALPHA_TEST="$pkgbin" go test -count=1 -timeout 9m -run "$dry" ./hack/livechecks) ;;
+    internal/providerctl/*) tests=(bash -c 'cd "$1/internal/providerctl/conformance" && "$2" "${@:5}" && cd "$1/$3" && "$4" "${@:5}"' _ "$here" "$confbin" "$pkg" "$pkgbin" "${bin[@]}") ;;
+    *) tests=(bash -c 'cd "$1/$2" && "$3" "${@:4}"' _ "$here" "$pkg" "$pkgbin" "${bin[@]}") ;;
   esac
 }
-# failing_tests <log>: the top-level tests a run's log says failed, or the panic that ended it.
-failing_tests() { sed -n -E 's/^--- FAIL: ([^ ]+).*/\1/p; s/^panic: (test timed out).*/\1/p' "$1" | head -n 3 | paste -s -d ' ' -; }
-# baseline <path>: the tests that judge a mutant of path must pass with no mutant, once per kind, or a failing test would count
-# every mutant as killed and "0 survived" would say nothing. A tree they fail on stops the run (exit 2), with no mutant tried.
+# failing_tests <log>: the top-level tests a run's log says failed, at most three.
+failing_tests() { sed -n -E 's/^--- FAIL: ([^ ]+).*/\1/p' "$1" | head -n 3 | paste -s -d ' ' -; }
+# no_test_failed <log> <exit status>: what ended a failed run that names no failing test.
+no_test_failed() {
+  if grep -q '^panic: test timed out' "$1"; then printf 'a timeout, no test named as failed'
+  elif grep -q '^panic: ' "$1"; then printf 'a panic, no test named as failed'
+  elif grep -q -E 'build failed|setup failed' "$1"; then printf 'a compile error, no test ran'
+  else printf 'exit %s, no test named as failed' "$2"; fi
+}
+# kind_of <path>: the name of the kind of mutant, by the tests that judge it.
+kind_of() {
+  case $1 in
+    hack/live-checks.sh) printf "the script's" ;;
+    "$pkg"/alpha_live_test.go) printf "the dry runs'" ;;
+    internal/providerctl/*) printf "the conformance package's" ;;
+    *) printf "the package's" ;;
+  esac
+}
+# baseline <path>: the tests that judge a mutant of path must pass with no mutant, once per kind, under that kind's own command, or a
+# failing test would count every mutant as killed and "0 survived" would say nothing. A tree they fail on stops the run (exit 2),
+# with no mutant tried, --only or not. The binaries are kept, for red_with_no_mutant.
 declare -A based=()
 baseline() {
-  local kind
-  case $1 in
-    hack/live-checks.sh) kind="the script's" ;;
-    "$pkg"/alpha_live_test.go) kind="the dry runs'" ;;
-    internal/providerctl/*) kind="the conformance package's" ;;
-    *) kind="the package's" ;;
-  esac
+  local kind rc=0
+  kind=$(kind_of "$1")
   [ -z "${based[$kind]:-}" ] || return 0
   based[$kind]=1
   compile_of "$1" || { echo "mutate-alpha: $kind tests do not compile with no mutant, so nothing can be checked: $cerr" >&2; exit 2; }
+  case $1 in
+    internal/providerctl/*) cp "$tmp/conf.test" "$tmp/base-conf.test"; cp "$tmp/pkg.test" "$tmp/base-pkg.test" ;;
+    *.go) cp "$tmp/pkg.test" "$tmp/base-pkg.test" ;;
+  esac
   tests_of "$1"
-  "${tests[@]}" >"$tmp/baseline.log" 2>&1 || {
-    echo "mutate-alpha: $kind tests fail with no mutant, so every mutant would count as killed: $(failing_tests "$tmp/baseline.log")" >&2; exit 2; }
+  "${tests[@]}" >"$tmp/baseline.log" 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || {
+    by=$(failing_tests "$tmp/baseline.log")
+    echo "mutate-alpha: $kind tests fail with no mutant, so every mutant would count as killed: ${by:-$(no_test_failed "$tmp/baseline.log" "$rc")}" >&2; exit 2; }
+}
+# red_with_no_mutant <path> <names>: sets red to those of the tests that failed under a mutant that fail with no mutant too (in this
+# shell, not a subshell, since it keeps green_at): the tree must be as it was.
+# A test that goes red after the baseline (a flake, a date, a port) would kill every mutant it meets, so a kill it alone made is
+# not one (the science agent, on PR 284): the caller reads that as BROKEN, with the test named. A test seen green in the last
+# ten minutes is not run again: the script's tests take minutes, and a kill costs one look, not one run per mutant.
+declare -A green_at=()
+red_with_no_mutant() {
+  local path=$1 kind now name todo="" rc=0 failed
+  red=""
+  kind=$(kind_of "$path"); now=$(date +%s)
+  for name in $2; do
+    [ $((now - ${green_at[$kind|$name]:-0})) -lt 600 ] || todo="$todo${todo:+|}$name"
+  done
+  [ -n "$todo" ] || return 0
+  tests_of "$path" "^($todo)\$"
+  "${tests[@]}" >"$tmp/again.log" 2>&1 || rc=$?
+  failed=" $(failing_tests "$tmp/again.log") "
+  # The failure can leave no test named (a panic, a timeout): every test asked about is then red, by what ended the run.
+  [ "$rc" -eq 0 ] || [ "$failed" != "  " ] || failed=" ${todo//|/ } "
+  for name in $2; do
+    case "$failed" in *" $name "*) red="$red${red:+ }$name" ;; *) green_at[$kind|$name]=$now ;; esac
+  done
 }
 killed=0 survived=0 broken=0 total=0
 for m in "${mutants[@]}"; do
@@ -625,16 +680,28 @@ PY
       compile_of "$path" || { echo "BROKEN   $file: $from  ->  $to: the mutant does not compile: $cerr"; broken=$((broken+1)); cp "${saved[$path]}" "$path"; continue; } ;;
   esac
   tests_of "$path"
-  if "${tests[@]}" >"$tmp/mutant.log" 2>&1; then
-    echo "SURVIVED $file: $from  ->  $to"; survived=$((survived+1))
-  else
-    killed=$((killed+1))
-    # A kill names what failed, so that one test failing for every mutant shows (#285).
-    by=$(failing_tests "$tmp/mutant.log")
-    echo "KILLED   $file: $from  ->  $to: by ${by:-no test it could name}"
-    printf '%s\n' "${by:-no test it could name}" >>"$tmp/kills"
-  fi
+  rc=0
+  "${tests[@]}" >"$tmp/mutant.log" 2>&1 || rc=$?
   cp "${saved[$path]}" "$path"
+  if [ "$rc" -eq 0 ]; then
+    echo "SURVIVED $file: $from  ->  $to"; survived=$((survived+1)); continue
+  fi
+  by=$(failing_tests "$tmp/mutant.log")
+  if [ -z "$by" ]; then
+    # Nothing to look at again: what ended the run is the mutant's, and the line says what it was (#285).
+    by=$(no_test_failed "$tmp/mutant.log" "$rc")
+    killed=$((killed+1)); echo "KILLED   $file: $from  ->  $to: by $by"; printf '%s\n' "$by" >>"$tmp/kills"
+    continue
+  fi
+  # With the tree as it was. A kill needs a test that fails under the mutant and passes with no mutant.
+  red_with_no_mutant "$path" "$by"
+  real=""
+  for name in $by; do case " $red " in *" $name "*) ;; *) real="$real${real:+ }$name" ;; esac; done
+  if [ -z "$real" ]; then
+    echo "BROKEN   $file: $from  ->  $to: killed only by $red, which also fails with no mutant"; broken=$((broken+1))
+  else
+    killed=$((killed+1)); echo "KILLED   $file: $from  ->  $to: by $real"; printf '%s\n' "$real" >>"$tmp/kills"
+  fi
 done
 [ -z "$only" ] || [ "$total" -gt 0 ] || { echo "mutate-alpha: --only $only selected no mutant, so nothing was checked" >&2; exit 2; }
 [ ! -s "$tmp/kills" ] || { echo "kills by what failed:"; sort "$tmp/kills" | uniq -c | sort -rn | sed 's/^/  /'; }

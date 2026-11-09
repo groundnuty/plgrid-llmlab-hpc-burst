@@ -36,7 +36,12 @@ func neverStarted(err error) bool {
 // that bound in its line (the wait in the queue otherwise); any other gives pendingMax.
 func NotRunNote(row Row, pendingMax time.Duration, err error) string {
 	if errors.Is(err, ErrSecondNotStarted) {
-		return fmt.Sprintf("%s: %s; this run's jobs were cancelled by tag\n", row.Name, secondNotStartedWords)
+		late := LateUnknown
+		var s *SecondNotStartedError
+		if errors.As(err, &s) {
+			late = s.ReplacementLate
+		}
+		return fmt.Sprintf("%s: %s; ReplacementLate for its deployment: %s; this run's jobs were cancelled by tag\n", row.Name, secondNotStartedWords, late)
 	}
 	var ns *NotStartedError
 	if errors.As(err, &ns) {

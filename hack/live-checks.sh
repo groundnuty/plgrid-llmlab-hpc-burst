@@ -209,24 +209,12 @@ TABLE
 # conformance-athena, in Athena's one-job slot (the partition plgrid-now), has the same guard, the same start wait and so the
 # same timeout (the science agent's rule of 2 Nov 2026: every slot row has a bound; see the header).
 #
-# Each row's worst case: every wait its test has, each to its end, added up from the code, so that the timeout lets the row's
-# bound fire first and a slow cleanup fails in the test, with its message. The timeout column is that and a margin of at
-# least 3 min, for the calls each poll makes and the run's own cleanup. "the wait" is the row's wait in the queue, which the
-# script adds to the column (execute_cluster), one for each of a row's jobs. The figures are checked against the code:
-# internal/providerctl/conformance (budget_test.go) adds up each test's own source; hack/livechecks (budget_test.go) has
-# the stack rows' from internal/alpha, Row.WorstCase, and fails a row with no figure.
-# worst case of conformance-helios: 87 min (two start waits of 30, then 5 to delete, 3 for accounting, 8 for the second job, 3 for accounting, 6 for the job name's two loops of 36 polls 5 s apart, 2 for a late duplicate)
-# worst case of conformance-helios-gh200: 47 min (two start waits of 10, then the same 27)
-# worst case of conformance-athena: 47 min (the same)
-# worst case of real-engine: the wait + 72 min (its time limit of 57 and the margin of 15; no timeout wraps it, its own two clocks end it)
-# worst case of alpha-athena-handover: the wait + 122 min (91 to the drain start, 5 for the streams across it, 15 and 5 for the primary to end, 1 for the guard's last looks, 5 to close; its successor must start by the drain start)
-# worst case of alpha-helios-nooverlap: 2 waits + 177 min (the wait, 106 for the predecessor's lease, the wait, 60 and 5 for the successor to be ready, 1 for the guard's last looks, 5 to close)
-# worst case of tunnel-hour-helios: the wait + 147 min (at the default lease of 137: 122 to the drain start, 15 and 5 for the job to end, 5 to close)
-# worst case of tunnel-hour-athena: the wait + 147 min (the same)
-# worst case of gpu-accounting-helios: 25 min (a start wait of 10, then 10 for the job to end and 5 for the deletion)
-# worst case of gpu-accounting-athena: the wait + 15 min (the same, with the wait for the start wait)
-# worst case of reach-helios: 13 min (a start wait of 10, then 3 for the job to end)
-# worst case of reach-athena: 13 min (the same)
+# Each row's timeout must let its bound fire first, and a slow cleanup fail in the test, with its message: it is at least every
+# wait the row's test has, each to its end, and a margin of 3 min for the calls each poll makes and the run's own cleanup. The
+# wait in the queue is on top of the column, one for each of a row's jobs (execute_cluster). Tests derive that sum from
+# this table's bounds and the real waits, and fail when a timeout can fire first: internal/providerctl/conformance
+# (budget_test.go) adds up each test's own source, and hack/livechecks (budget_test.go) has the stack rows' from
+# internal/alpha, Row.WorstCase, and real-engine's from its time limit and its poll's margin (no timeout wraps it).
 cluster_table() {
   cat <<'TABLE'
 # BEGIN CLUSTER SHAPES
@@ -974,7 +962,7 @@ second_job_bound() {
 # judge <name> <log> <rc>: the verdict from the test's verbose log and exit status. A skip is not a pass, at
 # any level. Only counts and fixed labels reach the screen: a subtest's name can hold anything.
 judge() {
-  local n=$1 log=$2 rc=$3 test pass fail skip named
+  local n=$1 log=$2 rc=$3 test pass fail skip named late
   test=${TEST[$n]#^}; test=${test%\$}
   pass=$(grep -c -E '^--- PASS: ' "$log" 2>/dev/null); fail=$(grep -c -E '^ *--- FAIL: ' "$log" 2>/dev/null)
   skip=$(grep -c -E '^ *--- SKIP: ' "$log" 2>/dev/null)
@@ -986,6 +974,8 @@ judge() {
     NOT_RUN=1
     if second_job_marker; then
       say "$n: NOT RUN (the first job ran and the second never started $(second_job_bound "$n"), and was cancelled by its tag; not a failure)"
+      late=$(sed -n -E 's/.*ReplacementLate for its deployment: (raised|not raised|unknown);.*/\1/p' "$REC_DIR/not-run.txt" 2>/dev/null | head -1)
+      [ -z "$late" ] || say "$n: ReplacementLate for its deployment: $late (information, not a check)"
     elif [ "${SWAIT[$n]:--}" != - ]; then
       say "$n: NOT RUN (a job did not start within ${SWAIT[$n]} min of its acceptance and was cancelled by its tag; not a failure)"
     elif first_end_marker; then

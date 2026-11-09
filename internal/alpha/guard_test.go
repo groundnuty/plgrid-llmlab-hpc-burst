@@ -18,8 +18,11 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -217,6 +220,8 @@ func TestASuccessorThatNeverStartedIsNotRunOnlyOnARead(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			g := newGuardedRun(t, func(int) (Look, error) { return c.look() }, written)
 			g.guardEvery, g.resultWait = time.Hour, time.Nanosecond
+			g.c = crfake.NewClientBuilder().WithScheme(eventScheme(t)).Build()
+			g.w.md = &v1alpha1.ModelDeployment{ObjectMeta: metav1.ObjectMeta{Name: "alpha-0a1b2c3d4e", Namespace: "default"}}
 			g.startGuard()
 			err := g.guardResult()
 			if c.want == "" {
@@ -230,6 +235,75 @@ func TestASuccessorThatNeverStartedIsNotRunOnlyOnARead(t *testing.T) {
 			}
 			if NotRun(rowOf("alpha-athena-handover"), err) {
 				t.Errorf("guardResult = %v, which ends the run NOT RUN", err)
+			}
+		})
+	}
+}
+
+// eventScheme is a scheme with the events of the API, and the Allocations.
+func eventScheme(t *testing.T) *k8sruntime.Scheme {
+	t.Helper()
+	sch := k8sruntime.NewScheme()
+	if err := v1alpha1.AddToScheme(sch); err != nil {
+		t.Fatal(err)
+	}
+	if err := eventsv1.AddToScheme(sch); err != nil {
+		t.Fatal(err)
+	}
+	return sch
+}
+
+// The second job's NOT RUN says, as information, whether the controller raised ReplacementLate for the run's deployment
+// (the science agent, on PR 284). It is no check, so it cannot change how the run ends: every reading, a read that
+// fails included, ends the same NOT RUN through the real waiter, and only the marker's word differs. Another
+// deployment's event, and another reason regarding this one, are not it.
+func TestWhatTheRunReadOfReplacementLateNeverChangesItsEnd(t *testing.T) {
+	const name = "alpha-0a1b2c3d4e"
+	event := func(evName, reason, deployment string) *eventsv1.Event {
+		return &eventsv1.Event{ObjectMeta: metav1.ObjectMeta{Name: evName, Namespace: "default"}, Reason: reason, Regarding: corev1.ObjectReference{Name: deployment}}
+	}
+	withEvents := func(t *testing.T, evs ...client.Object) client.Client {
+		return crfake.NewClientBuilder().WithScheme(eventScheme(t)).WithObjects(evs...).Build()
+	}
+	for _, c := range []struct {
+		name   string
+		client func(t *testing.T) client.Client
+		want   string
+	}{
+		{"raised", func(t *testing.T) client.Client {
+			return withEvents(t, event("e1", v1alpha1.ReasonReplacementLate, name))
+		}, LateRaised},
+		{"not raised", func(t *testing.T) client.Client { return withEvents(t) }, LateNotRaised},
+		{"raised for another deployment", func(t *testing.T) client.Client {
+			return withEvents(t, event("e1", v1alpha1.ReasonReplacementLate, "alpha-ffffffffff"))
+		}, LateNotRaised},
+		{"another reason for this deployment", func(t *testing.T) client.Client { return withEvents(t, event("e1", "HandedOver", name)) }, LateNotRaised},
+		// A scheme with no events: the list fails, as a read of the API can.
+		{"the events cannot be read", func(t *testing.T) client.Client {
+			sch := k8sruntime.NewScheme()
+			if err := v1alpha1.AddToScheme(sch); err != nil {
+				t.Fatal(err)
+			}
+			return crfake.NewClientBuilder().WithScheme(sch).Build()
+		}, LateUnknown},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			first := guardJob("p", guardAt)
+			g := newGuardedRun(t, func(int) (Look, error) {
+				return Look{Clock: guardAt, Jobs: []provider.Job{first, waitingJob("s", v1alpha1.AllocationPending)}}, nil
+			}, written)
+			g.guardEvery, g.resultWait = time.Hour, time.Nanosecond
+			g.c = c.client(t)
+			g.w.md = &v1alpha1.ModelDeployment{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"}}
+			g.startGuard()
+			err := g.guardResult()
+			row := rowOf("alpha-athena-handover")
+			if !errors.Is(err, ErrSecondNotStarted) || !NotRun(row, err) {
+				t.Fatalf("guardResult = %v, want the NOT RUN of a second job that never started, whatever was read", err)
+			}
+			note := NotRunNote(row, 10*time.Minute, err)
+			if want := "alpha-athena-handover: the first job ran and the second never started; ReplacementLate for its deployment: " + c.want + "; this run's jobs were cancelled by tag\n"; note != want {
+				t.Errorf("note %q, want %q", note, want)
 			}
 		})
 	}
