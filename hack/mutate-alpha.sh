@@ -604,6 +604,8 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'internal/providerctl/conformance/reach_run_test.go@@			if !bytes.Equal(b, payload) && holds(b) {@@			if false && holds(b) {'
   'internal/providerctl/conformance/reach_run_test.go@@	if plat != nil {@@	if false {'
   'internal/providerctl/conformance/testdata/reach-probe.sh@@  SSH-) echo ssh; exit 0 ;;@@  SSX-) echo ssh; exit 0 ;;'
+  # #285 (the ruling on PR 292): the live steps report their watch's real resets. A stand-in run has none, and compared the post with the same call.
+  'steps_live_test.go@@func (r *liveRun) WatchResets() int { return r.watch.ResetCount() }@@func (r *liveRun) WatchResets() int { return 0 }'
 )
 # The mutants of a test of this script: a file with one mutant per line, in place of the list above.
 [ -z "${MUTATE_ALPHA_MUTANTS:-}" ] || mapfile -t mutants < "$MUTATE_ALPHA_MUTANTS"
