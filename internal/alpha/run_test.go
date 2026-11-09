@@ -483,8 +483,94 @@ func TestEveryStackRowRunsToNotRunAndAFailedCloseIsAFailure(t *testing.T) {
 	}
 }
 
+// The two-job rows through Run, with the stand-in's real fake cluster (review of PR 284, B3): the first job ran and the
+// second never started is NOT RUN, with no record and no text to post. An earlier failure of the first job's part still
+// wins: the row fails with that failure's words and says so in its record and its text. Each row's checks of the
+// second job (the handover itself, the gap) are not among them, since nothing tested them.
+func TestASecondJobThatNeverStartedIsNotRunUnlessAnEarlierFailureStands(t *testing.T) {
+	for _, row := range []string{"alpha-athena-handover", "alpha-helios-nooverlap"} {
+		for _, c := range []struct {
+			fault, wantFailure string
+		}{
+			{"second-never-started", ""},
+			{"second-never-started-cut", "a stream was cut"},
+			{"second-never-started-no-restart", "0 restarts at the worker rung, want 1"},
+		} {
+			t.Run(row+"/"+c.fault, func(t *testing.T) {
+				cfg := Config{Row: rowOf(row), Dry: true, DryFault: c.fault, Out: filepath.Join(t.TempDir(), "out"), PendingMax: 10 * time.Minute, FrontLabel: testFrontLabel}
+				rec, err := NewRecorder(cfg.Out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				st := newDrySteps(t, cfg, familyOf(row))
+				failures, err := Run(context.Background(), cfg, st, rec, t.Logf)
+				_, postErr := os.Stat(filepath.Join(cfg.Out, PostsFile))
+				_, recErr := os.Stat(filepath.Join(cfg.Out, RecordFile))
+				if c.wantFailure == "" {
+					if !errors.Is(err, ErrSecondNotStarted) || !NotRun(cfg.Row, err) || len(failures) != 0 {
+						t.Fatalf("failures %v, err %v; want the NOT RUN of a second job that never started", failures, err)
+					}
+					if postErr == nil || recErr == nil {
+						t.Errorf("a NOT RUN wrote a text to post (%v) or a record (%v)", postErr, recErr)
+					}
+				} else {
+					if err != nil || NotRun(cfg.Row, err) {
+						t.Fatalf("err %v: an earlier failure must end the run as that failure", err)
+					}
+					if len(failures) != 1 || failures[0] != c.wantFailure {
+						t.Fatalf("failures %v, want only %q: nothing about the second job, which tested nothing", failures, c.wantFailure)
+					}
+					if postErr != nil || recErr != nil {
+						t.Errorf("a failed run wrote no text to post (%v) or no record (%v)", postErr, recErr)
+					}
+					post, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
+					if !strings.Contains(string(post), "the first job ran and the second never started") {
+						t.Errorf("the text to post does not say the second job never started:\n%s", post)
+					}
+				}
+				// The cluster agrees: the first job ran, and the second was cancelled and never started.
+				var ran, never int
+				for _, j := range st.plat.Jobs() {
+					switch {
+					case !j.Start.IsZero():
+						ran++
+					case j.State == fakeslurm.Cancelled:
+						never++
+					}
+				}
+				if ran != 1 || never != 1 {
+					t.Errorf("%d jobs ran and %d were cancelled unstarted, want one of each", ran, never)
+				}
+			})
+		}
+	}
+}
+
+// A close that fails after a second job that never started may have left a job behind: a failure, never a NOT RUN.
+func TestAFailedCloseAfterASecondJobThatNeverStartedIsAFailure(t *testing.T) {
+	cfg := Config{Row: rowOf("alpha-athena-handover"), Dry: true, DryFault: "second-never-started", Out: filepath.Join(t.TempDir(), "out"), PendingMax: 10 * time.Minute, FrontLabel: testFrontLabel}
+	rec, err := NewRecorder(cfg.Out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := failingClose{newDrySteps(t, cfg, "handover")}
+	_, err = Run(context.Background(), cfg, st, rec, t.Logf)
+	if err == nil || NotRun(cfg.Row, err) || !strings.Contains(err.Error(), "scancel did not answer") {
+		t.Errorf("err = %v, want a failure that names the close", err)
+	}
+}
+
+// failingClose is the stand-in's steps with a Close that fails.
+type failingClose struct{ *drySteps }
+
+func (failingClose) Close(context.Context) error { return errors.New("scancel did not answer") }
+
 // The marker names the row and the wait, and no job: the script prints and posts around it.
 func TestTheNotRunNoteNamesNoJob(t *testing.T) {
+	second := NotRunNote(rowOf("alpha-helios-nooverlap"), 30*time.Minute, fmt.Errorf("the scenario: %w", ErrSecondNotStarted))
+	if want := "alpha-helios-nooverlap: the first job ran and the second never started; this run's jobs were cancelled by tag\n"; second != want {
+		t.Errorf("note %q, want %q", second, want)
+	}
 	note := NotRunNote(rowOf("tunnel-hour-helios"), 30*time.Minute, ErrNotStarted)
 	if want := "tunnel-hour-helios: a job was still pending after 30m0s;"; !strings.Contains(note, want) {
 		t.Errorf("note %q lacks %q", note, want)

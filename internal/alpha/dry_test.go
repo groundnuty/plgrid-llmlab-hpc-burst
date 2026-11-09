@@ -40,8 +40,8 @@ const (
 // dryFaults lists every fault the stand-in knows, per row family. An unknown
 // name stops the run: a typo must not pass as "no fault".
 var dryFaults = map[string][]string{
-	"handover":  {"cut", "no-stream", "two-restarts", "no-restart", "no-handover", "late-successor", "wrong-partition", "untagged", "unattributed", "adds-helios", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "no-responses", "pend-past-bound"},
-	"nooverlap": {"nocap", "nogap", "noslot", "cut", "no-stream", "late-submit", "untagged", "wrong-partition", "adds-athena", "default-lease", "short-lease", "no-release-when-idle", "duplicate-tag", "extra-allocation", "two-restarts", "no-restart", "pend-past-bound"},
+	"handover":  {"cut", "no-stream", "two-restarts", "no-restart", "no-handover", "late-successor", "wrong-partition", "untagged", "unattributed", "adds-helios", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "no-responses", "pend-past-bound", "second-never-started", "second-never-started-cut", "second-never-started-no-restart"},
+	"nooverlap": {"nocap", "nogap", "noslot", "cut", "no-stream", "late-submit", "untagged", "wrong-partition", "adds-athena", "default-lease", "short-lease", "no-release-when-idle", "duplicate-tag", "extra-allocation", "two-restarts", "no-restart", "pend-past-bound", "second-never-started", "second-never-started-cut", "second-never-started-no-restart"},
 	"tunnel":    {"short", "cut", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition", "adds-other-cluster", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "past-deadline", "past-drain", "no-drain-start", "stream-cut-error", "reconnect", "disconnected", "sparse-samples", "late-first-sample", "no-concurrency", "slow-streams", "no-idle-gap", "no-long-stream", "no-back-to-back", "no-load-rate", "slow-start", "no-large", "large-apart", "response-overlap", "no-upload-rate", "no-download-rate", "upload-not-under-load", "pend-past-bound"},
 }
 
@@ -304,6 +304,15 @@ func (d *drySteps) pendPastBound(p Plan) error {
 	d.pending(id)
 	p.Logf(pendStillPending, d.now().Sub(began))
 	d.tick(2 * time.Second)
+	if err := d.cancelTag(tag); err != nil {
+		return err
+	}
+	p.Logf(pendCancelled, d.now().Sub(began))
+	return &NotStartedError{Bound: bound, PastEnd: pastEnd}
+}
+
+// cancelTag cancels the live jobs of a tag, as the live scenario's Close does, and waits until the cluster says they ended.
+func (d *drySteps) cancelTag(tag string) error {
 	jobs, err := d.batch.ListByTag(context.Background(), tag)
 	if err != nil {
 		return fmt.Errorf("listing the run's jobs by their tag: %w", err)
@@ -322,8 +331,66 @@ func (d *drySteps) pendPastBound(p Plan) error {
 	for _, jid := range ids {
 		d.waitFor("a cancelled job to end", func(j provider.Job) bool { return j.EndTime != nil }, jid)
 	}
-	p.Logf(pendCancelled, d.now().Sub(began))
-	return &NotStartedError{Bound: bound, PastEnd: pastEnd}
+	return nil
+}
+
+// secondNeverStarts is whether the fault is one of a first job that ran and a second that never started. On its own
+// the row ends NOT RUN; -cut and -no-restart add a failure of the first job's part, which then wins (review of
+// PR 284, B3).
+func (d *drySteps) secondNeverStarts() bool {
+	return strings.HasPrefix(d.cfg.DryFault, "second-never-started")
+}
+
+// firstRanSecondPends runs the first job to its end with a second beside it, held so that it never starts, and
+// cancels the second by its tag at the end, as the live scenario's Close does. It returns the tags, the first job's
+// start and end, and the drain start: the second job is still waiting at each of them.
+func (d *drySteps) firstRanSecondPends(p Plan, qos string) (tags []string, opened, ended, drain time.Time, err error) {
+	tag0 := d.tag(p, "pre")
+	n0, id0 := d.submit(tag0, d.partitionFor(false), qos)
+	opened = *d.running(id0).StartTime
+	d.tick(10 * time.Minute)
+	tag1 := d.tag(p, "suc")
+	id1 := d.submitHeld(tag1, d.cfg.Row.Partition, qos)
+	d.pending(id1)
+	drain = d.now().Add(time.Minute)
+	d.tick(3 * time.Minute)
+	ended = *d.end(n0, id0).EndTime
+	d.tick(time.Minute)
+	d.pending(id1)
+	return []string{tag0, tag1}, opened, ended, drain, d.cancelTag(tag1)
+}
+
+func (d *drySteps) handoverSecondNeverStarts(p Plan) (HandoverObs, error) {
+	tags, opened, ended, drain, err := d.firstRanSecondPends(p, "")
+	if err != nil {
+		return HandoverObs{}, err
+	}
+	streams := []Stream{{ID: "s1", Opened: opened, Ended: drain.Add(time.Minute), Complete: true}, {ID: "s2", Opened: opened.Add(time.Minute), Ended: drain.Add(time.Minute), Complete: true}}
+	if d.fault("second-never-started-cut") {
+		streams[0].Complete, streams[0].CutBy = false, "tunnel"
+	}
+	obs := HandoverObs{Tags: tags, Streams: streams, DrainStart: drain, WorkerRestarts: 1, Responses: 20, Attributed: 20,
+		Instances: []InstanceSpan{{Tag: tags[0], ReadyAt: opened, EndedAt: ended}, {Tag: tags[1]}}, Deployment: d.deployment()}
+	if d.fault("second-never-started-no-restart") {
+		obs.WorkerRestarts = 0
+	}
+	return obs, ErrSecondNotStarted
+}
+
+func (d *drySteps) noOverlapSecondNeverStarts(p Plan) (NoOverlapObs, error) {
+	tags, opened, _, drain, err := d.firstRanSecondPends(p, d.cfg.Row.QOS)
+	if err != nil {
+		return NoOverlapObs{}, err
+	}
+	streams := []Stream{{ID: "s1", Opened: opened, Ended: drain.Add(time.Minute), Complete: true}}
+	if d.fault("second-never-started-cut") {
+		streams[0].Complete, streams[0].CutBy = false, "tunnel"
+	}
+	obs := NoOverlapObs{Tags: tags, Streams: streams, DrainStart: drain, NoOverlapSlotSeen: true, WorkerRestarts: 1, Deployment: d.deployment()}
+	if d.fault("second-never-started-no-restart") {
+		obs.WorkerRestarts = 0
+	}
+	return obs, ErrSecondNotStarted
 }
 
 // The two readings pendPastBound logs, each with the time since the job's submission on the fake clock.
@@ -361,6 +428,9 @@ func (d *drySteps) Handover(_ context.Context, p Plan) (HandoverObs, error) {
 	t := d.t
 	if d.fault("pend-past-bound") {
 		return HandoverObs{}, d.pendPastBound(p)
+	}
+	if d.secondNeverStarts() {
+		return d.handoverSecondNeverStarts(p)
 	}
 	tag0 := d.tag(p, "pre")
 	n0, id0 := d.submit(tag0, d.partitionFor(false), "")
@@ -424,6 +494,9 @@ func (d *drySteps) Handover(_ context.Context, p Plan) (HandoverObs, error) {
 func (d *drySteps) NoOverlap(_ context.Context, p Plan) (NoOverlapObs, error) {
 	if d.fault("pend-past-bound") {
 		return NoOverlapObs{}, d.pendPastBound(p)
+	}
+	if d.secondNeverStarts() {
+		return d.noOverlapSecondNeverStarts(p)
 	}
 	tag0 := d.tag(p, "pre")
 	n0, id0 := d.submit(tag0, d.partitionFor(false), d.cfg.Row.QOS)

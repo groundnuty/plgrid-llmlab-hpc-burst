@@ -138,7 +138,8 @@ func LatestReady(lease time.Duration) time.Duration {
 
 // WithTunnelLease is the row with another lease, for the owner's choice. Only a
 // tunnel row takes one, in whole minutes, from MinLease (the lead plus a minute) to
-// MaxTunnelLease; the row's slot hold follows the lease.
+// MaxTunnelLease; the row's slot hold and run budget follow the lease, the budget as
+// the script's timeout does (a quarter of an hour over it).
 func WithTunnelLease(r Row, lease time.Duration) (Row, error) {
 	if !strings.HasPrefix(r.Name, "tunnel-hour-") {
 		return r, fmt.Errorf("only a tunnel row takes a lease of its own")
@@ -147,6 +148,7 @@ func WithTunnelLease(r Row, lease time.Duration) (Row, error) {
 		return r, fmt.Errorf("a tunnel lease is whole minutes from %s to %s", MinLease(), MaxTunnelLease)
 	}
 	r.Lease = lease
+	r.Budget = lease + 15*time.Minute
 	if r.SlotHold > 0 {
 		r.SlotHold = lease
 	}

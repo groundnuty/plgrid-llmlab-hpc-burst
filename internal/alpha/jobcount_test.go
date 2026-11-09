@@ -89,6 +89,11 @@ func TestFirstClock(t *testing.T) {
 func TestANotStartedErrorIsNotRunWhereTheRulingsSay(t *testing.T) {
 	pastEnd := &NotStartedError{Bound: 121 * time.Minute, PastEnd: true}
 	pending := &NotStartedError{Bound: 2 * time.Hour}
+	for _, r := range Rows() {
+		if !NotRun(r, ErrSecondNotStarted) || !NotRun(r, fmt.Errorf("the scenario: %w", ErrSecondNotStarted)) {
+			t.Errorf("%s: a second job that never started is not NOT RUN", r.Name)
+		}
+	}
 	if !errors.Is(pastEnd, ErrQueueWaitPastEnd) || !errors.Is(pastEnd, ErrNotStarted) || errors.Is(pending, ErrQueueWaitPastEnd) || !errors.Is(pending, ErrNotStarted) {
 		t.Fatal("NotStartedError's Is")
 	}

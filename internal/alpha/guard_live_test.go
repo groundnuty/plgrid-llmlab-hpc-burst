@@ -17,21 +17,17 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
-// guardEveryLive is how often the two-job guard looks at the cluster, and
-// guardLookFails how many looks in a row may fail before it stops the run: an
-// end it cannot move on is still a bound, but one that stops moving is reached
-// in the time limit less the drain window.
-const (
-	guardEveryLive = 10 * time.Second
-	guardLookFails = 3
-)
+// guardLookFails is how many looks at the cluster in a row may fail before the
+// two-job guard stops the run: an end it cannot move on is still a bound, but one
+// that stops moving is reached in the time limit less the drain window.
+const guardLookFails = 3
 
 // every is the guard's interval.
 func (r *liveRun) every() time.Duration {
 	if r.guardEvery > 0 {
 		return r.guardEvery
 	}
-	return guardEveryLive
+	return GuardEvery
 }
 
 // look is one look at the cluster for the guard: the cluster's clock, then a
@@ -147,7 +143,7 @@ func (r *liveRun) checkGuard() {
 func (r *liveRun) guardResult() error {
 	wait := r.resultWait
 	if wait == 0 {
-		wait = 6 * r.every()
+		wait = GuardResultLooks * r.every()
 	}
 	deadline := time.Now().Add(wait)
 	for {
@@ -178,10 +174,64 @@ func (r *liveRun) guardResult() error {
 		}
 		if time.Now().After(deadline) {
 			r.stopGuard()
-			return errors.New("the successor never started, so the run's deployment never ended at its drain start")
+			return r.secondNeverFinal()
 		}
 		time.Sleep(time.Second)
 	}
+}
+
+// secondNeverFinal is the end of a run whose guard never saw its second job start (review of PR 284, B3). A look made
+// now decides, with the guard stopped: the first job known to have started and a second one the scheduler shows
+// waiting is ErrSecondNotStarted, NOT RUN unless the first job's part failed (Run). A look that fails, and a second
+// job that started, went away or never was, are failures that name what they found: a job the controller never made
+// is a property of the row that was absent, not a queue wait.
+func (r *liveRun) secondNeverFinal() error {
+	l, err := r.lookNow()
+	if err != nil {
+		return fmt.Errorf("the successor's state could not be read: %w", err)
+	}
+	_, final, err := r.guard.Next(l)
+	if err != nil {
+		return fmt.Errorf("the job-count guard stopped the run: %w", err)
+	}
+	if final {
+		return errors.New("the successor has started, but only after the wait for it, so the run's deployment never ended at its drain start in time")
+	}
+	if r.guard.pred == "" {
+		return errors.New("no first job of the run is known to have started")
+	}
+	waiting := 0
+	for _, j := range l.Jobs {
+		if j.ID == r.guard.pred {
+			continue
+		}
+		if !WaitingToStart(j) {
+			return fmt.Errorf("a second job of the run is %s (reason %q), so it cannot be called one that never started", j.Phase, j.Reason)
+		}
+		waiting++
+	}
+	if waiting == 0 {
+		return errors.New("the queue lists no second job of the run: the successor was never accepted")
+	}
+	return ErrSecondNotStarted
+}
+
+// lookNow is one look at the cluster, as the guard takes it, for a step's read at a bound.
+func (r *liveRun) lookNow() (Look, error) {
+	look := r.lookFn
+	if look == nil {
+		look = r.look
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	return look(ctx)
+}
+
+// secondStarted is whether the guard has seen the run's second job start.
+func (r *liveRun) secondStarted() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.guardFinal
 }
 
 // waitFor is stack.WaitFor that fails the step at once when the guard has

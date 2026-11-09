@@ -205,7 +205,7 @@ type liveRun struct {
 	oneEnd time.Time
 
 	// The two-job guard (TwoJobGuard), run from its own goroutine every
-	// guardEvery (default guardEveryLive). lookFn, setEndFn and fatalf are
+	// guardEvery (default GuardEvery). lookFn, setEndFn and fatalf are
 	// look, endAt and t.Fatalf unless a test sets them.
 	guard      *TwoJobGuard
 	guardEvery time.Duration
@@ -215,6 +215,9 @@ type liveRun struct {
 	lookFn     func(context.Context) (Look, error)
 	setEndFn   func(time.Time) (time.Time, error)
 	fatalf     func(format string, args ...any)
+	// allocsFn is the watch's Allocation versions, and boundedFn stack.BoundedDeadline, unless a test sets them.
+	allocsFn   func() []stack.AllocObservation
+	boundedFn  func(time.Duration) (time.Time, bool)
 	guardQuit  chan struct{}
 	guardDone  chan struct{}
 	guardFail  chan struct{}
@@ -249,9 +252,6 @@ func newLiveRun(t *testing.T, cfg Config, w world) *liveRun {
 	return &liveRun{t: t, cfg: cfg, w: w, tm: cfg.Row.Clock(), prefix: TagPrefix(cfg.RunID), guardFail: make(chan struct{})}
 }
 
-// closeTimeout bounds Close: hpcburst down and the cancel of the run's jobs.
-const closeTimeout = 5 * time.Minute
-
 // Close stops the guard and the stack, then ends the run's jobs, found by the
 // run's tag prefix and its written tags in the queue, and checks none is left
 // alive, then stops the run's ssh master. It runs on every exit of Run, a
@@ -259,7 +259,7 @@ const closeTimeout = 5 * time.Minute
 // included, so it takes a time of its own rather than the run's, which may be
 // over.
 func (r *liveRun) Close(ctx context.Context) error {
-	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), CloseTimeout)
 	defer cancel()
 	r.stopGuard()
 	var errs []error
@@ -536,7 +536,11 @@ func (r *liveRun) instances() []v1alpha1.Instance {
 // Allocation's job must start within it of the deployment's creation. Past it
 // the run ends with a NotStartedError, and Close stops the stack and cancels
 // the run's jobs by their prefix and tags, and checks that none is left; on a
-// one-job slot that was the owner's GPU waiting.
+// one-job slot that was the owner's GPU waiting. That is for a job a read at the
+// bound shows waiting, and for nothing else (review of PR 284, B2): a version of
+// an Allocation with no start time and a phase past waiting ends the wait at once,
+// and a read that cannot call the job waiting (firstJobWaiting) ends it at the
+// bound; both are failures that name what they found, never NOT RUN.
 func (r *liveRun) firstJobStarted(p Plan) error {
 	bound, pastEnd := FirstClock(p.Row, p.PendingMax, r.limit, r.dw)
 	if pastEnd {
@@ -545,12 +549,20 @@ func (r *liveRun) firstJobStarted(p Plan) error {
 	deadline := r.created.Add(bound)
 	for {
 		r.checkGuard()
-		for _, o := range r.watch.Allocations() {
-			if o.Allocation.Status.AtProvider.StartTime != nil {
+		for _, o := range r.allocations() {
+			st := o.Allocation.Status.AtProvider
+			if st.StartTime != nil {
 				return nil
+			}
+			switch st.Phase {
+			case v1alpha1.AllocationRunning, v1alpha1.AllocationEnded, v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:
+				return fmt.Errorf("a job of the run is %s (reason %q) with no start time to read, so it cannot be called one that never started", st.Phase, st.Reason)
 			}
 		}
 		if !time.Now().Before(deadline) {
+			if err := r.firstJobWaiting(); err != nil {
+				return fmt.Errorf("the first clock of %s ran out, and the run's first job cannot be called one that never started: %w", bound, err)
+			}
 			p.Logf("%s: the run's first job was still pending %s after the deployment's creation; the run ends and its jobs are cancelled", p.Row.Name, time.Since(r.created).Round(time.Second))
 			return &NotStartedError{Bound: bound, PastEnd: pastEnd}
 		}
@@ -558,10 +570,36 @@ func (r *liveRun) firstJobStarted(p Plan) error {
 	}
 }
 
+// firstJobWaiting is the read at the first clock's end: the run's jobs in a look made now, every one of them waiting.
+// nil is the one way to NOT RUN. A look that fails, and a queue with no job of the run in it, tell nothing about a start.
+func (r *liveRun) firstJobWaiting() error {
+	l, err := r.lookNow()
+	if err != nil {
+		return fmt.Errorf("the queue could not be read: %w", err)
+	}
+	if len(l.Jobs) == 0 {
+		return errors.New("the queue lists no job of the run")
+	}
+	for _, j := range l.Jobs {
+		if !WaitingToStart(j) {
+			return fmt.Errorf("a job of the run is %s (reason %q)", j.Phase, j.Reason)
+		}
+	}
+	return nil
+}
+
+// allocations are the Allocation versions the watch saw.
+func (r *liveRun) allocations() []stack.AllocObservation {
+	if r.allocsFn != nil {
+		return r.allocsFn()
+	}
+	return r.watch.Allocations()
+}
+
 // readyWait is how long the run waits, once its first job runs, for the
 // Instance to become ready: health.startTimeout, and a margin.
 func (r *liveRun) readyWait() time.Duration {
-	return r.tm.StartTimeout + 5*time.Minute
+	return r.tm.StartTimeout + ReadyMargin
 }
 
 // firstReady waits for the first job to start, then for the deployment's
@@ -602,11 +640,21 @@ func (r *liveRun) firstReady(p Plan) (v1alpha1.Instance, error) {
 }
 
 // successorOf waits, within d, for the replacement of pred to be ready and
-// registered at the front; ok is false when it was not.
-func (r *liveRun) successorOf(pred string, d time.Duration) (v1alpha1.Instance, bool) {
-	deadline, _ := stack.BoundedDeadline(r.t, d)
+// registered at the front; ok is false when it was not. startBy, when set, is the
+// successor job's own bound: past it, and two of the guard's looks later, so that a
+// job that started by then is seen, a job that has not started ends the wait. It
+// does not stand in the queue for the part of d that only a job that started needs.
+func (r *liveRun) successorOf(pred string, d time.Duration, startBy time.Time) (v1alpha1.Instance, bool) {
+	bounded := r.boundedFn
+	if bounded == nil {
+		bounded = func(d time.Duration) (time.Time, bool) { return stack.BoundedDeadline(r.t, d) }
+	}
+	deadline, _ := bounded(d)
 	for time.Now().Before(deadline) {
 		r.checkGuard()
+		if !startBy.IsZero() && time.Now().After(startBy.Add(2*r.every())) && !r.secondStarted() {
+			return v1alpha1.Instance{}, false
+		}
 		for _, x := range r.instances() {
 			if x.Annotations[v1alpha1.AnnotationPredecessor] != pred {
 				continue

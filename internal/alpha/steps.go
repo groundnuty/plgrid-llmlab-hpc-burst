@@ -15,6 +15,15 @@ import (
 // the property the row tests was never put to the test; try again later.
 var ErrNotStarted = errors.New("a job of the run was still pending when the wait in the queue ran out, and was cancelled by its tag")
 
+// ErrSecondNotStarted is what a scenario of two jobs returns when its first job
+// ran and its second never started within its bound, a job the scheduler still
+// shows waiting. The first job's part of the run stands: Run judges it, and an
+// earlier failure there wins. With none, the run is NOT RUN (NotRun, the ruling of
+// 8 Nov 2026 on #272, review of PR 284, B3): the second job never started, so the
+// property the row tests was never put to the test. The scenario returns what it
+// saw beside it.
+var ErrSecondNotStarted = errors.New("the first job of the run ran and the second never started, and was cancelled by its tag")
+
 // Plan is what a scenario is given.
 type Plan struct {
 	Row Row
