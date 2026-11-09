@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 func (p3 *part3) scaleToZero() {
@@ -21,7 +22,7 @@ func (p3 *part3) scaleToZero() {
 	for _, a := range r.allocations() {
 		uids[a.UID] = a.Name
 	}
-	insts := r.watch.uids()
+	insts := r.watch.UIDs()
 	for _, in := range r.instances() {
 		if !slices.Contains(insts, in.UID) {
 			insts = append(insts, in.UID)
@@ -30,16 +31,16 @@ func (p3 *part3) scaleToZero() {
 	patchAt := time.Now()
 	for _, d := range p3.deps {
 		var md v1alpha1.ModelDeployment
-		if !r.get(&md, d.name, namespace) {
-			r.t.Fatalf("scale to 0: no ModelDeployment %s", d.name)
+		if !r.get(&md, d.Name, stack.Namespace) {
+			r.t.Fatalf("scale to 0: no ModelDeployment %s", d.Name)
 		}
 		patch := client.MergeFrom(md.DeepCopy())
 		md.Spec.Instances = 0
-		ctx, cancel := callCtx(r.t)
+		ctx, cancel := stack.CallCtx(r.t)
 		err := r.c.Patch(ctx, &md, patch)
 		cancel()
 		if err != nil {
-			r.t.Fatalf("scale %s to 0: %v", d.name, err)
+			r.t.Fatalf("scale %s to 0: %v", d.Name, err)
 		}
 	}
 	r.waitAllEnded(insts)
@@ -47,7 +48,7 @@ func (p3 *part3) scaleToZero() {
 	r.checkAllocations(uids, map[types.UID]bool{p3.requeued.uid: true})
 	r.waitRecords(uids)
 	r.waitJobsGone()
-	r.checkProxiesOffline(r.watch.uids())
+	r.checkProxiesOffline(r.watch.UIDs())
 	r.assertNoOrphans("part 3")
 	r.downAndCheck()
 }

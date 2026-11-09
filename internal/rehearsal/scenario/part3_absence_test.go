@@ -14,6 +14,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 // defaultStartToReady is the controller's start-to-ready time for a class
@@ -106,29 +107,29 @@ func (p3 *part3) checkForbidden() {
 	dues := map[string]time.Time{}
 	for _, d := range p3.deps {
 		var md v1alpha1.ModelDeployment
-		if !r.get(&md, d.name, namespace) {
-			r.t.Fatalf("no ModelDeployment %s", d.name)
+		if !r.get(&md, d.Name, stack.Namespace) {
+			r.t.Fatalf("no ModelDeployment %s", d.Name)
 		}
 		if changeHanded.IsZero() || d.ds.Before(changeHanded) {
 			changeHanded = d.ds
 		}
 		if class, why, ok := r.primaryClass(d.primary); !ok {
-			unmetLate = append(unmetLate, fmt.Sprintf("condition 1: %s: %s, so the class whose start-to-ready time ReplacementLate counts by is unknown", d.name, why))
+			unmetLate = append(unmetLate, fmt.Sprintf("condition 1: %s: %s, so the class whose start-to-ready time ReplacementLate counts by is unknown", d.Name, why))
 		} else {
-			s2r := lateStartToReady(class, base.startToReady[d.name], classStartToReady(&md))
+			s2r := lateStartToReady(class, base.startToReady[d.Name], classStartToReady(&md))
 			r.t.Logf("%s: ReplacementLate counts back %s from the drain start %s (class %v; at the first read %v, now %v)",
-				d.name, s2r, ts(d.ds), class, base.startToReady[d.name], classStartToReady(&md))
+				d.Name, s2r, ts(d.ds), class, base.startToReady[d.Name], classStartToReady(&md))
 			if late := d.ds.Add(-s2r); changeLate.IsZero() || late.Before(changeLate) {
 				changeLate = late
 			}
 		}
 		due := d.ds
 		for _, in := range r.instances() {
-			if ds, ok := drainStartOf(&in); ok && ownedBy(&in, d.name) && ds.Before(time.Now()) && ds.After(due) {
+			if ds, ok := drainStartOf(&in); ok && ownedBy(&in, d.Name) && ds.Before(time.Now()) && ds.After(due) {
 				due = ds
 			}
 		}
-		dues[d.name] = due
+		dues[d.Name] = due
 	}
 	// The managed deployment's passes take the managed path, which raises
 	// neither event; its barrier needs only to follow both changes.
@@ -137,7 +138,7 @@ func (p3 *part3) checkForbidden() {
 		dues[managedMD] = changeLate
 	}
 	var all v1alpha1.ModelDeploymentList
-	ctx, cancel := callCtx(r.t)
+	ctx, cancel := stack.CallCtx(r.t)
 	err := r.c.List(ctx, &all)
 	cancel()
 	if err != nil {
@@ -145,7 +146,7 @@ func (p3 *part3) checkForbidden() {
 	}
 	quiet := "ReplacementLate and HandedOver are raised only by a ModelDeployment's reconcile pass, and every ModelDeployment has a barrier pass"
 	for _, md := range all.Items {
-		if _, ok := dues[md.Name]; !ok || md.Namespace != namespace {
+		if _, ok := dues[md.Name]; !ok || md.Namespace != stack.Namespace {
 			quiet = "" // a deployment with no barrier: its passes are not shown quiet
 			r.t.Logf("ModelDeployment %s/%s has no barrier", md.Namespace, md.Name)
 		}
@@ -153,9 +154,9 @@ func (p3 *part3) checkForbidden() {
 	var barriers []eventcount.Barrier
 	for name, due := range dues {
 		var b eventcount.Barrier
-		waitState(r.t, waitDeadline, "a reconcile pass of "+name+" that began at or after "+ts(due), func() (bool, string) {
+		stack.WaitState(r.t, stack.WaitDeadline, "a reconcile pass of "+name+" that began at or after "+ts(due), func() (bool, string) {
 			var md v1alpha1.ModelDeployment
-			if !r.get(&md, name, namespace) || md.Status.LastReconcileTime == nil {
+			if !r.get(&md, name, stack.Namespace) || md.Status.LastReconcileTime == nil {
 				return false, "no lastReconcileTime"
 			}
 			at := md.Status.LastReconcileTime.Time

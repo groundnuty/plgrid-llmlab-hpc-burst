@@ -33,6 +33,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -60,9 +61,9 @@ var (
 // them only while it serves, and creates them at 0.
 func (r *rig) countReads(what string, keys ...eventcount.Key) map[eventcount.Key]eventcount.Read {
 	r.t.Helper()
-	url := r.ports.url(12, "/metrics")
+	url := r.ports.URL(12, "/metrics")
 	var out map[eventcount.Key]eventcount.Read
-	waitState(r.t, waitDeadline, "the controller's /metrics from a serving copy, for "+what, func() (bool, string) {
+	stack.WaitState(r.t, stack.WaitDeadline, "the controller's /metrics from a serving copy, for "+what, func() (bool, string) {
 		sent := time.Now()
 		resp, err := (&http.Client{Timeout: 10 * time.Second}).Get(url)
 		if err != nil {
@@ -142,7 +143,7 @@ func (r *rig) baseline(what string, keys ...eventcount.Key) *absenceBase {
 		}
 	}
 	var mds v1alpha1.ModelDeploymentList
-	ctx, cancel := callCtx(r.t)
+	ctx, cancel := stack.CallCtx(r.t)
 	err := r.c.List(ctx, &mds)
 	cancel()
 	if err != nil {
@@ -150,7 +151,7 @@ func (r *rig) baseline(what string, keys ...eventcount.Key) *absenceBase {
 	}
 	b.startToReady = map[string]map[v1alpha1.AcceleratorClass]time.Duration{}
 	for i := range mds.Items {
-		if mds.Items[i].Namespace == namespace {
+		if mds.Items[i].Namespace == stack.Namespace {
 			b.startToReady[mds.Items[i].Name] = classStartToReady(&mds.Items[i])
 		}
 	}
@@ -186,6 +187,6 @@ func (r *rig) judgeAbsence(b *absenceBase, k eventcount.Key, change time.Time, u
 // instanceEnded is when the watch first delivered the Instance ended: a
 // bound its end lies before. ok is false when the watch saw no such version.
 func (r *rig) instanceEnded(uid types.UID) (time.Time, bool) {
-	o, ok := r.watch.first(uid, time.Time{}, func(o observation) bool { return o.phase == v1alpha1.InstanceEnded })
-	return o.at, ok
+	o, ok := r.watch.First(uid, time.Time{}, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceEnded })
+	return o.At, ok
 }

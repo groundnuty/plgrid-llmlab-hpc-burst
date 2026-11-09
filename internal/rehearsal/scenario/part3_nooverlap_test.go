@@ -23,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 )
 
@@ -37,7 +38,7 @@ type depRun struct {
 	succ      *v1alpha1.Instance
 	succAlloc string
 	succJob   int
-	stream    <-chan streamed // the stream in flight at the drain start
+	stream    <-chan stack.Streamed // the stream in flight at the drain start
 	probes    []probe
 	// gateJob is the successor's job the engine gate held, from gateHeld
 	// (its engine start reached the gate) until gateReleased, once
@@ -51,7 +52,7 @@ type depRun struct {
 type probe struct {
 	model string
 	sent  time.Time
-	rp    reply
+	rp    stack.Reply
 }
 
 // prober sends one short request for each model every probeEvery until it is
@@ -78,7 +79,7 @@ func (p3 *part3) startProber(models ...string) *prober {
 		for {
 			for _, m := range models {
 				sent := time.Now()
-				rp := p3.sendCtx(ctx, "/v1/chat/completions", chatBodyFor(m, 1, 0, false), "")
+				rp := p3.fc.SendCtx(ctx, "/v1/chat/completions", stack.ChatBody(m, 1, 0, false, ""), "")
 				pr.mu.Lock()
 				pr.got = append(pr.got, probe{model: m, sent: sent, rp: rp})
 				pr.mu.Unlock()
@@ -134,31 +135,31 @@ func (p3 *part3) noOverlap() {
 	p3.atLeastBefore(order[0], "the no-overlap phase", streamLead+10*time.Second)
 	var models []string
 	for _, d := range p3.deps {
-		models = append(models, d.model)
+		models = append(models, d.Model)
 		if d.oneSlot {
 			// Before its drain start the one-slot path has no successor at
 			// all: no Allocation is created while the slot is held.
-			if n := len(p3.allocationsOf(d.name)); n != 1 {
-				r.t.Errorf("%s: %d Allocations before the drain start, want the primary's alone (HBEP-7, one-slot path)", d.name, n)
+			if n := len(p3.allocationsOf(d.Name)); n != 1 {
+				r.t.Errorf("%s: %d Allocations before the drain start, want the primary's alone (HBEP-7, one-slot path)", d.Name, n)
 			}
 		}
 	}
 	gate := r.cl.gate
 	if gate == nil {
-		r.t.Fatal("the no-overlap phase needs the engine gate (clusterShape.engineGate)")
+		r.t.Fatal("the no-overlap phase needs the engine gate (rigSetup.engineGate)")
 	}
 	if err := gate.arm(); err != nil {
 		r.t.Fatalf("arm the engine gate: %v", err)
 	}
 	pr := p3.startProber(models...)
 	for _, d := range order {
-		waitFor(r.t, time.Until(d.ds)+time.Minute, "the drain start of "+d.name+" minus the stream's lead", func() bool {
+		stack.WaitFor(r.t, time.Until(d.ds)+time.Minute, "the drain start of "+d.Name+" minus the stream's lead", func() bool {
 			return !time.Now().Before(d.ds.Add(-streamLead))
 		})
-		first, done := r.startStream(chatBodyFor(d.model, longTokens, longTokens, true), "rehearsal-part3-drain-"+d.name)
+		first, done := r.fc.StartStream(stack.ChatBody(d.Model, longTokens, longTokens, true, ""), "rehearsal-part3-drain-"+d.Name)
 		<-first
 		d.stream = done
-		r.t.Logf("%s: a %d-token stream started %s before the drain start", d.name, longTokens, time.Until(d.ds).Round(100*time.Millisecond))
+		r.t.Logf("%s: a %d-token stream started %s before the drain start", d.Name, longTokens, time.Until(d.ds).Round(100*time.Millisecond))
 	}
 	p3.waitSuccessors(pr)
 	if err := gate.open(); err != nil {
@@ -167,7 +168,7 @@ func (p3 *part3) noOverlap() {
 	probes := pr.end()
 	for _, d := range p3.deps {
 		for _, pb := range probes {
-			if pb.model == d.model {
+			if pb.model == d.Model {
 				d.probes = append(d.probes, pb)
 			}
 		}
@@ -190,7 +191,7 @@ func (p3 *part3) noOverlap() {
 func (p3 *part3) waitSuccessors(pr *prober) {
 	r := p3.rig
 	r.t.Helper()
-	waitState(r.t, waitDeadline+2*time.Minute, "each successor to be held at the engine gate through its gap, then to serve", func() (bool, string) {
+	stack.WaitState(r.t, stack.WaitDeadline+2*time.Minute, "each successor to be held at the engine gate through its gap, then to serve", func() (bool, string) {
 		replies := pr.replies()
 		var waiting []string
 		for _, d := range p3.deps {
@@ -211,10 +212,10 @@ func (p3 *part3) waitSuccessors(pr *prober) {
 	})
 	for _, d := range p3.deps {
 		if d.succJob != d.gateJob {
-			r.t.Errorf("%s: the successor runs on job %d, but the engine gate held job %d", d.name, d.succJob, d.gateJob)
+			r.t.Errorf("%s: the successor runs on job %d, but the engine gate held job %d", d.Name, d.succJob, d.gateJob)
 		}
 		r.t.Logf("%s: successor %s serves on job %d; the engine gate held it from %s to %s, released once %d requests had been answered in the gap",
-			d.name, d.succ.Name, d.succJob, ts(d.gateHeld), ts(d.gateReleased), d.gateReplies)
+			d.Name, d.succ.Name, d.succJob, ts(d.gateHeld), ts(d.gateReleased), d.gateReplies)
 	}
 }
 
@@ -230,16 +231,16 @@ func (p3 *part3) releaseGate(d *depRun, replies []probe) string {
 	}
 	job := 0
 	for _, id := range held {
-		if j, ok := r.cl.plat.Job(id); ok && id != d.primaryJob && j.Partition == d.partition {
+		if j, ok := r.cl.Plat.Job(id); ok && id != d.primaryJob && j.Partition == d.partition {
 			job = id
 		}
 	}
 	if job == 0 {
-		return d.name + ": no successor's engine start is held at the gate yet"
+		return d.Name + ": no successor's engine start is held at the gate yet"
 	}
-	n := gapReplies(replies, d.model, d.ds.Add(gapSlack))
+	n := gapReplies(replies, d.Model, d.ds.Add(gapSlack))
 	if n < minGapProbes {
-		return fmt.Sprintf("%s: the successor's job %d is held at the engine gate; %d of %d requests answered in the gap", d.name, job, n, minGapProbes)
+		return fmt.Sprintf("%s: the successor's job %d is held at the engine gate; %d of %d requests answered in the gap", d.Name, job, n, minGapProbes)
 	}
 	at, _ := r.cl.gate.held(job)
 	if err := r.cl.gate.release(job); err != nil {
@@ -255,12 +256,12 @@ func (p3 *part3) releaseGate(d *depRun, replies []probe) string {
 func gapReplies(replies []probe, model string, from time.Time) int {
 	n := 0
 	for _, pb := range replies {
-		if pb.model != model || pb.sent.Before(from) || pb.rp.err != nil || pb.rp.status != http.StatusServiceUnavailable {
+		if pb.model != model || pb.sent.Before(from) || pb.rp.Err != nil || pb.rp.Status != http.StatusServiceUnavailable {
 			continue
 		}
-		e := errorOf(pb.rp.body)
-		if pb.rp.header.Get(hdrEmitter) == "front" && e.Code == "model_inactive" && derefS(e.Detail) == "no_ready_target" &&
-			pb.rp.header.Get("Retry-After") == "30" {
+		e := stack.ErrorOf(pb.rp.Body)
+		if pb.rp.Header.Get(hdrEmitter) == "front" && e.Code == "model_inactive" && derefS(e.Detail) == "no_ready_target" &&
+			pb.rp.Header.Get("Retry-After") == "30" {
 			n++
 		}
 	}
@@ -274,26 +275,26 @@ func (p3 *part3) successorServes(d *depRun, replies []probe) string {
 	r := p3.rig
 	r.t.Helper()
 	var succ *v1alpha1.Instance
-	for _, in := range p3.instancesOf(d.name) {
+	for _, in := range p3.instancesOf(d.Name) {
 		if in.Annotations[v1alpha1.AnnotationPredecessor] == d.primary.Name && in.Status.Phase == v1alpha1.InstanceReady {
 			in := in
 			succ = &in
 		}
 	}
 	if succ == nil {
-		return d.name + ": its successor is not ready yet"
+		return d.Name + ": its successor is not ready yet"
 	}
-	if reg, known := r.registered(succ); !known || !reg {
-		return d.name + ": the successor " + succ.Name + " is ready but not registered at the front"
+	if reg, known := stack.Registered(r.ports, succ); !known || !reg {
+		return d.Name + ": the successor " + succ.Name + " is ready but not registered at the front"
 	}
 	for _, pb := range replies {
-		if pb.model == d.model && pb.rp.status == http.StatusOK && pb.rp.header.Get("Hpcburst-Instance-Uid") == string(succ.UID) {
+		if pb.model == d.Model && pb.rp.Status == http.StatusOK && pb.rp.Header.Get("Hpcburst-Instance-Uid") == string(succ.UID) {
 			d.succ, d.succAlloc = succ, succ.Spec.AllocationRef.Name
 			d.succJob = jobIDOf(r.t, succ)
 			return ""
 		}
 	}
-	return d.name + ": the successor " + succ.Name + " has served no probe yet"
+	return d.Name + ": the successor " + succ.Name + " has served no probe yet"
 }
 
 // checkDrainStream: the stream in flight at the drain start ran to its end,
@@ -301,19 +302,19 @@ func (p3 *part3) successorServes(d *depRun, replies []probe) string {
 func (p3 *part3) checkDrainStream(d *depRun) {
 	r := p3.rig
 	r.t.Helper()
-	var s streamed
+	var s stack.Streamed
 	select {
 	case s = <-d.stream:
-	case <-time.After(requestTimeout):
-		r.t.Fatalf("%s: the stream in flight at the drain start did not end within %s", d.name, requestTimeout)
+	case <-time.After(r.fc.RequestTimeout()):
+		r.t.Fatalf("%s: the stream in flight at the drain start did not end within %s", d.Name, r.fc.RequestTimeout())
 	}
-	row := r.checkStream("drain "+d.name, s, d.primary, longTokens)
-	p3.attribute("the stream in flight at "+d.name+"'s drain start", s.reply, row, wantInstance(d, d.primary))
+	row := r.checkStream("drain "+d.Name, s, d.primary, longTokens)
+	p3.attribute("the stream in flight at "+d.Name+"'s drain start", s.Reply, row, wantInstance(d, d.primary))
 	rs, re := parseRecordTime(row.StartTime), parseRecordTime(row.EndTime)
 	if !rs.Before(d.ds) || !d.ds.Before(re) {
-		r.t.Errorf("%s: no stream in flight at the drain start %s: its record runs %s to %s", d.name, d.ds.UTC().Format(time.RFC3339), row.StartTime, row.EndTime)
+		r.t.Errorf("%s: no stream in flight at the drain start %s: its record runs %s to %s", d.Name, d.ds.UTC().Format(time.RFC3339), row.StartTime, row.EndTime)
 	}
-	r.t.Logf("%s: the drain-start stream ran %s to %s, %s past the drain start; finish %s, cut by %s", d.name, row.StartTime, row.EndTime,
+	r.t.Logf("%s: the drain-start stream ran %s to %s, %s past the drain start; finish %s, cut by %s", d.Name, row.StartTime, row.EndTime,
 		re.Sub(d.ds).Round(100*time.Millisecond), derefS(row.Finish), derefS(row.CutBy))
 }
 
@@ -330,28 +331,28 @@ func (p3 *part3) checkGap(d *depRun) {
 	if d.succ.Status.ReadyTime != nil {
 		in.succReady = d.succ.Status.ReadyTime.Time
 	}
-	if o, ok := r.watch.first(d.succ.UID, time.Time{}, func(o observation) bool { return o.phase == v1alpha1.InstanceReady }); ok {
-		in.succReadySeen = o.at
+	if o, ok := r.watch.First(d.succ.UID, time.Time{}, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceReady }); ok {
+		in.succReadySeen = o.At
 	}
 	for _, pb := range d.probes {
-		if pb.rp.err != nil {
-			in.probes = append(in.probes, gapProbe{err: pb.rp.err.Error()})
+		if pb.rp.Err != nil {
+			in.probes = append(in.probes, gapProbe{err: pb.rp.Err.Error()})
 			continue
 		}
-		row := r.rowOf(pb.rp.id)
-		p3.attribute("a probe of "+d.name, pb.rp, row, p3.wantForProbe(d, row))
-		e := errorOf(pb.rp.body)
-		in.probes = append(in.probes, gapProbe{start: parseRecordTime(row.StartTime), status: pb.rp.status, emitter: row.Emitter,
-			instanceUID: row.InstanceUID, code: e.Code, detail: derefS(e.Detail), retryAfter: pb.rp.header.Get("Retry-After")})
+		row := r.fc.RowOf(pb.rp.ID)
+		p3.attribute("a probe of "+d.Name, pb.rp, row, p3.wantForProbe(d, row))
+		e := stack.ErrorOf(pb.rp.Body)
+		in.probes = append(in.probes, gapProbe{start: parseRecordTime(row.StartTime), status: pb.rp.Status, emitter: row.Emitter,
+			instanceUID: row.InstanceUID, code: e.Code, detail: derefS(e.Detail), retryAfter: pb.rp.Header.Get("Retry-After")})
 	}
 	rep, problems := gapProblems(in)
 	for _, p := range problems {
-		r.t.Errorf("%s: %s", d.name, p)
+		r.t.Errorf("%s: %s", d.Name, p)
 	}
-	o, _ := r.watch.first(d.primary.UID, time.Time{}, func(o observation) bool { return o.drainBegan != "" })
-	began, _ := time.Parse(time.RFC3339, o.drainBegan)
-	pj, _ := r.cl.plat.Job(d.primaryJob)
-	sj, _ := r.cl.plat.Job(d.succJob)
+	o, _ := r.watch.First(d.primary.UID, time.Time{}, func(o stack.Observation) bool { return o.DrainBegan != "" })
+	began, _ := time.Parse(time.RFC3339, o.DrainBegan)
+	pj, _ := r.cl.Plat.Job(d.primaryJob)
+	sj, _ := r.cl.Plat.Job(d.succJob)
 	since := func(t time.Time) string {
 		if t.IsZero() {
 			return "never"
@@ -361,7 +362,7 @@ func (p3 *part3) checkGap(d *depRun) {
 	r.t.Logf("GAP %s: %d requests in the gap, all 503 no_ready_target; first 503 %s after the drain start, first served by the successor %s after it; "+
 		"the controller: drain recorded %s, successor ready %s (%s); the fake: predecessor's job ended %s, successor's started %s (%s queue wait after the GPU or slot freed); "+
 		"the engine gate held the successor's engine start from %s to %s (%s after the drain start)",
-		d.name, rep.inGap, since(rep.first503), since(rep.firstSucc),
+		d.Name, rep.inGap, since(rep.first503), since(rep.firstSucc),
 		began.UTC().Format(time.RFC3339), in.succReady.UTC().Format(time.RFC3339), in.succReady.Sub(began).Round(time.Second),
 		pj.End.UTC().Format(time.RFC3339Nano), sj.Start.UTC().Format(time.RFC3339Nano), sj.Start.Sub(pj.End).Round(100*time.Millisecond),
 		ts(d.gateHeld), ts(d.gateReleased), since(d.gateHeld))
@@ -369,7 +370,7 @@ func (p3 *part3) checkGap(d *depRun) {
 
 // wantForProbe is what a probe's reply must carry: an Instance's attribution
 // when one served it, else the front's error before a target.
-func (p3 *part3) wantForProbe(d *depRun, row usageRow) wantAttr {
+func (p3 *part3) wantForProbe(d *depRun, row stack.UsageRow) wantAttr {
 	switch row.InstanceUID {
 	case string(d.primary.UID):
 		return wantInstance(d, d.primary)
@@ -485,13 +486,13 @@ func ts(t time.Time) string { return t.UTC().Format("15:04:05.000") }
 func (p3 *part3) checkNoOverlapSlot(d *depRun) {
 	r := p3.rig
 	r.t.Helper()
-	o, _ := r.watch.first(d.succ.UID, time.Time{}, func(o observation) bool { return o.phase == v1alpha1.InstanceReady })
-	for _, p := range noOverlapSlotProblems(r.watch.deployment(d.name), d.ds, o.at) {
-		r.t.Errorf("%s: %s", d.name, p)
+	o, _ := r.watch.First(d.succ.UID, time.Time{}, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceReady })
+	for _, p := range noOverlapSlotProblems(r.deploymentObservations(d.Name), d.ds, o.At) {
+		r.t.Errorf("%s: %s", d.Name, p)
 	}
-	waitFor(r.t, waitDeadline, d.name+"'s NoOverlapSlot to clear once its successor is ready", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, d.Name+"'s NoOverlapSlot to clear once its successor is ready", func() bool {
 		var md v1alpha1.ModelDeployment
-		if !r.get(&md, d.name, namespace) {
+		if !r.get(&md, d.Name, stack.Namespace) {
 			return false
 		}
 		for _, c := range md.Status.Conditions {
@@ -544,17 +545,17 @@ func noOverlapSlotProblems(obs []mdObservation, drainStart, succReady time.Time)
 func (p3 *part3) checkQueuedHandover(d *depRun) {
 	r := p3.rig
 	r.t.Helper()
-	pj, _ := r.cl.plat.Job(d.primaryJob)
-	sj, _ := r.cl.plat.Job(d.succJob)
+	pj, _ := r.cl.Plat.Job(d.primaryJob)
+	sj, _ := r.cl.Plat.Job(d.succJob)
 	if sj.Start.Before(pj.End) || pj.End.IsZero() {
-		r.t.Errorf("%s: the successor's job %d started %s, before the predecessor's job %d ended (%s): it ran beside it", d.name, d.succJob, ts(sj.Start), d.primaryJob, ts(pj.End))
+		r.t.Errorf("%s: the successor's job %d started %s, before the predecessor's job %d ended (%s): it ran beside it", d.Name, d.succJob, ts(sj.Start), d.primaryJob, ts(pj.End))
 	}
 	if !sj.Submit.Before(d.ds) {
-		r.t.Errorf("%s: the successor's job %d was submitted at %s, not before the drain start %s: it did not pend through the gap", d.name, d.succJob, ts(sj.Submit), ts(d.ds))
+		r.t.Errorf("%s: the successor's job %d was submitted at %s, not before the drain start %s: it did not pend through the gap", d.Name, d.succJob, ts(sj.Submit), ts(d.ds))
 	}
 	var a v1alpha1.Allocation
-	if !r.get(&a, d.succAlloc, namespace) || a.Annotations[v1alpha1.AnnotationQueuedSuccessor] == "" {
-		r.t.Errorf("%s: the successor's Allocation %s carries no queued-successor mark (HBEP-7, No-overlap mode)", d.name, d.succAlloc)
+	if !r.get(&a, d.succAlloc, stack.Namespace) || a.Annotations[v1alpha1.AnnotationQueuedSuccessor] == "" {
+		r.t.Errorf("%s: the successor's Allocation %s carries no queued-successor mark (HBEP-7, No-overlap mode)", d.Name, d.succAlloc)
 	}
 }
 
@@ -569,29 +570,29 @@ func (p3 *part3) checkOneSlot(d *depRun) {
 	r.t.Helper()
 	atts := r.cl.cmds.submissions(d.partition)
 	lastLive, cmds := r.cl.cmds.lastHeld(d.partition, d.primaryJob)
-	for _, p := range oneSlotProblems(r.cl.plat.Calls(), r.cl.plat.Jobs(), atts, d.partition, d.succJob, lastLive) {
-		r.t.Errorf("%s: %s", d.name, p)
+	for _, p := range oneSlotProblems(r.cl.Plat.Calls(), r.cl.Plat.Jobs(), atts, d.partition, d.succJob, lastLive) {
+		r.t.Errorf("%s: %s", d.Name, p)
 	}
 	var a v1alpha1.Allocation
-	if r.get(&a, d.succAlloc, namespace) && a.Annotations[v1alpha1.AnnotationQueuedSuccessor] != "" {
-		r.t.Errorf("%s: the one-slot successor's Allocation %s carries the queued-successor mark %q", d.name, d.succAlloc, a.Annotations[v1alpha1.AnnotationQueuedSuccessor])
+	if r.get(&a, d.succAlloc, stack.Namespace) && a.Annotations[v1alpha1.AnnotationQueuedSuccessor] != "" {
+		r.t.Errorf("%s: the one-slot successor's Allocation %s carries the queued-successor mark %q", d.Name, d.succAlloc, a.Annotations[v1alpha1.AnnotationQueuedSuccessor])
 	}
 	if aw, ok := p3.allocFirstSeen(d.succAlloc); ok && !aw.After(lastLive) {
-		r.t.Errorf("%s: the successor's Allocation %s was first seen at %s, while the predecessor's job %d still held the slot (at the command of %s)", d.name, d.succAlloc, ts(aw), d.primaryJob, ts(lastLive))
+		r.t.Errorf("%s: the successor's Allocation %s was first seen at %s, while the predecessor's job %d still held the slot (at the command of %s)", d.Name, d.succAlloc, ts(aw), d.primaryJob, ts(lastLive))
 	}
 	held := 0
 	for _, x := range atts {
 		held = max(held, len(x.holders))
 	}
 	r.t.Logf("%s: %d sbatch attempts on the partition, each read with the slot's holders just before it ran (at most %d other job held it then); %d commands recorded; the predecessor's job %d last held the slot at the command of %s",
-		d.name, len(atts), held, cmds, d.primaryJob, ts(lastLive))
+		d.Name, len(atts), held, cmds, d.primaryJob, ts(lastLive))
 }
 
 // allocFirstSeen is when the watch first saw the named Allocation.
 func (p3 *part3) allocFirstSeen(name string) (time.Time, bool) {
-	for _, a := range p3.watch.allocations() {
-		if a.name == name {
-			return a.at, true
+	for _, a := range p3.watch.Allocations() {
+		if a.Name == name {
+			return a.At, true
 		}
 	}
 	return time.Time{}, false

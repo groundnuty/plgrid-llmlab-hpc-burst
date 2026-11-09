@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 // stepScaleToZero is step (g): scale to 0. Every Instance ends Drained, each
@@ -32,7 +33,7 @@ func (r *rig) stepScaleToZero(steps string) {
 	for _, a := range r.allocations() {
 		uids[a.UID] = a.Name
 	}
-	insts := r.watch.uids()
+	insts := r.watch.UIDs()
 	for _, in := range r.instances() {
 		if !slices.Contains(insts, in.UID) {
 			insts = append(insts, in.UID)
@@ -44,7 +45,7 @@ func (r *rig) stepScaleToZero(steps string) {
 	r.checkAllocations(uids, nil)
 	r.waitRecords(uids)
 	r.waitJobsGone()
-	r.checkProxiesOffline(r.watch.uids())
+	r.checkProxiesOffline(r.watch.UIDs())
 	r.assertNoOrphans(steps)
 	r.downAndCheck()
 }
@@ -55,13 +56,13 @@ func (r *rig) stepScaleToZero(steps string) {
 func (r *rig) scaleToZero() time.Time {
 	r.t.Helper()
 	var md v1alpha1.ModelDeployment
-	if !r.get(&md, mdName, namespace) {
+	if !r.get(&md, stack.MDName, stack.Namespace) {
 		r.t.Fatal("step (g): no ModelDeployment")
 	}
 	patch := client.MergeFrom(md.DeepCopy())
 	md.Spec.Instances = 0
 	at := time.Now()
-	ctx, cancel := callCtx(r.t)
+	ctx, cancel := stack.CallCtx(r.t)
 	defer cancel()
 	if err := r.c.Patch(ctx, &md, patch); err != nil {
 		r.t.Fatalf("scale to 0: %v", err)
@@ -75,13 +76,13 @@ func (r *rig) scaleToZero() time.Time {
 func (r *rig) waitAllEnded(insts []types.UID) {
 	r.t.Helper()
 	last := time.Now()
-	waitFor(r.t, waitDeadline, "every Instance to end and every Allocation to end or go", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "every Instance to end and every Allocation to end or go", func() bool {
 		if time.Since(last) > 10*time.Second {
 			r.t.Logf("step (g) waiting:%s", r.describe())
 			last = time.Now()
 		}
 		for _, uid := range insts {
-			if _, ok := r.watch.first(uid, time.Time{}, func(o observation) bool { return o.phase == v1alpha1.InstanceEnded }); !ok {
+			if _, ok := r.watch.First(uid, time.Time{}, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceEnded }); !ok {
 				return false
 			}
 		}
@@ -107,32 +108,32 @@ func (r *rig) checkShutdown(insts []types.UID, patchAt time.Time) {
 	r.t.Helper()
 	ready, other := 0, 0
 	for _, uid := range insts {
-		obs := r.watch.of(uid)
-		var at observation // the last version seen before the scale
+		obs := r.watch.Of(uid)
+		var at stack.Observation // the last version seen before the scale
 		for _, o := range obs {
-			if o.at.Before(patchAt) {
+			if o.At.Before(patchAt) {
 				at = o
 			}
 		}
-		if at.phase == v1alpha1.InstanceEnded {
+		if at.Phase == v1alpha1.InstanceEnded {
 			continue
 		}
-		after := slices.DeleteFunc(slices.Clone(obs), func(o observation) bool { return o.at.Before(patchAt) })
-		end := slices.IndexFunc(after, func(o observation) bool { return o.phase == v1alpha1.InstanceEnded })
+		after := slices.DeleteFunc(slices.Clone(obs), func(o stack.Observation) bool { return o.At.Before(patchAt) })
+		end := slices.IndexFunc(after, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceEnded })
 		switch {
 		case end < 0:
-			r.t.Errorf("step (g): Instance %s (%s) was never seen ended after the scale to 0", at.name, uid)
+			r.t.Errorf("step (g): Instance %s (%s) was never seen ended after the scale to 0", at.Name, uid)
 			continue
-		case after[end].endReason != v1alpha1.ReasonDrained:
-			r.t.Errorf("step (g): Instance %s ended %q after the scale to 0, not %s", after[end].name, after[end].endReason, v1alpha1.ReasonDrained)
+		case after[end].EndReason != v1alpha1.ReasonDrained:
+			r.t.Errorf("step (g): Instance %s ended %q after the scale to 0, not %s", after[end].Name, after[end].EndReason, v1alpha1.ReasonDrained)
 		}
-		if at.phase != v1alpha1.InstanceReady {
+		if at.Phase != v1alpha1.InstanceReady {
 			other++
 			continue
 		}
 		ready++
-		if !slices.ContainsFunc(after[:end], func(o observation) bool { return o.phase == v1alpha1.InstanceDraining }) {
-			r.t.Errorf("step (g): Instance %s was ready at the scale to 0 and ended with no draining version: it was not drained", at.name)
+		if !slices.ContainsFunc(after[:end], func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceDraining }) {
+			r.t.Errorf("step (g): Instance %s was ready at the scale to 0 and ended with no draining version: it was not drained", at.Name)
 		}
 	}
 	r.t.Logf("step (g): %d Instances were ready at the scale to 0, %d others had not ended; each held to the drain above", ready, other)
@@ -157,21 +158,21 @@ func (r *rig) checkAllocations(atZero map[types.UID]string, failedOK map[types.U
 	}
 	all := map[types.UID]*seen{}
 	var order []types.UID
-	for _, a := range r.watch.allocations() {
-		s := all[a.uid]
+	for _, a := range r.watch.Allocations() {
+		s := all[a.UID]
 		if s == nil {
-			s = &seen{name: a.name}
-			all[a.uid] = s
-			order = append(order, a.uid)
+			s = &seen{name: a.Name}
+			all[a.UID] = s
+			order = append(order, a.UID)
 		}
-		if n := len(s.phases); n == 0 || s.phases[n-1] != a.phase {
-			s.phases = append(s.phases, a.phase)
+		if n := len(s.phases); n == 0 || s.phases[n-1] != a.Phase {
+			s.phases = append(s.phases, a.Phase)
 		}
-		s.deleted = s.deleted || a.deleted
-		switch a.phase {
+		s.deleted = s.deleted || a.Deleted
+		switch a.Phase {
 		case v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:
-			if !failedOK[a.uid] {
-				r.t.Errorf("Allocation %s was seen %s at %s", a.name, a.phase, a.at.Format(time.RFC3339Nano))
+			if !failedOK[a.UID] {
+				r.t.Errorf("Allocation %s was seen %s at %s", a.Name, a.Phase, a.At.Format(time.RFC3339Nano))
 			}
 		}
 	}
@@ -192,9 +193,9 @@ func (r *rig) checkAllocations(atZero map[types.UID]string, failedOK map[types.U
 // waitRecords waits for the acct-<UID> record of every Allocation.
 func (r *rig) waitRecords(uids map[types.UID]string) {
 	r.t.Helper()
-	waitFor(r.t, waitDeadline, "an acct- record for every Allocation", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "an acct- record for every Allocation", func() bool {
 		var l appsv1.ControllerRevisionList
-		ctx, cancel := callCtx(r.t)
+		ctx, cancel := stack.CallCtx(r.t)
 		defer cancel()
 		if err := r.c.List(ctx, &l); err != nil {
 			return false
@@ -216,10 +217,10 @@ func (r *rig) waitRecords(uids map[types.UID]string) {
 // waitJobsGone waits until no job of the fake cluster has a process left.
 func (r *rig) waitJobsGone() {
 	r.t.Helper()
-	for _, j := range r.cl.plat.Jobs() {
+	for _, j := range r.cl.Plat.Jobs() {
 		id := j.ID
-		waitFor(r.t, waitDeadline, fmt.Sprintf("job %d's processes to be gone", id), func() bool {
-			pids, err := r.cl.plat.Processes(id)
+		stack.WaitFor(r.t, stack.WaitDeadline, fmt.Sprintf("job %d's processes to be gone", id), func() bool {
+			pids, err := r.cl.Plat.Processes(id)
 			return err == nil && len(pids) == 0
 		})
 	}
@@ -271,7 +272,7 @@ func procStart(pid int) (uint64, bool) {
 // under it, or a zombie, which holds nothing.
 func (p procID) gone() bool {
 	st, ok := procStart(p.pid)
-	return !ok || st != p.start || !alive(p.pid)
+	return !ok || st != p.start || !stack.Alive(p.pid)
 }
 
 // stackProcesses lists every process hpcburst status reports for the host:
@@ -279,7 +280,7 @@ func (p procID) gone() bool {
 // supervised entry that runs (the controller, the front, frps).
 func (r *rig) stackProcesses() []procID {
 	r.t.Helper()
-	out, err := run(r.t, within(r.t, statusTimeout), r.h.env, r.b.hpcburst, "status", "--state-dir", r.h.state, "--json", "--no-api")
+	out, err := stack.Run(r.t, stack.Within(r.t, stack.StatusTimeout), r.h.Env, r.b.HPCBurst, "status", "--state-dir", r.h.State, "--json", "--no-api")
 	var st struct {
 		Processes []struct {
 			Name    string `json:"name"`
@@ -351,11 +352,11 @@ func (r *rig) downAndCheck() {
 	r.t.Helper()
 	procs := r.stackProcesses()
 	start := time.Now()
-	r.h.down()
+	r.h.Down()
 	if d := time.Since(start); d > 40*time.Second {
 		r.t.Errorf("step (g): hpcburst down took %s, above its default grace of 40 s", d)
 	}
-	waitState(r.t, 30*time.Second, "every process of the stack to be gone after down", func() (bool, string) {
+	stack.WaitState(r.t, 30*time.Second, "every process of the stack to be gone after down", func() (bool, string) {
 		var left []string
 		for _, p := range procs {
 			if !p.gone() {
@@ -364,7 +365,7 @@ func (r *rig) downAndCheck() {
 		}
 		return len(left) == 0, fmt.Sprintf("still running: %v", left)
 	})
-	if l := listening(r.t, r.ports.all()); len(l) > 0 {
+	if l := stack.Listening(r.t, r.ports.All()); len(l) > 0 {
 		r.t.Errorf("step (g): ports %v still listen after down", l)
 	}
 	r.t.Logf("step (g): down stopped %d processes of the stack in %s", len(procs), time.Since(start).Round(100*time.Millisecond))

@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -33,9 +34,9 @@ import (
 func (r *rig) stepStart() *v1alpha1.Instance {
 	r.t.Helper()
 	r.providerReady()
-	create(r.t, r.c, servedDeployment(rehearsalTiming, r.engineEnv...))
+	stack.Create(r.t, r.c, stack.ServedDeployment(rehearsalTiming, r.engineEnv...))
 	var alloc v1alpha1.Allocation
-	waitFor(r.t, waitDeadline, "an Allocation with a job ID", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "an Allocation with a job ID", func() bool {
 		for _, a := range r.allocations() {
 			if a.Status.AtProvider.JobID != "" {
 				alloc = a
@@ -49,14 +50,14 @@ func (r *rig) stepStart() *v1alpha1.Instance {
 	if err != nil {
 		r.t.Fatalf("job ID %q: %v", alloc.Status.AtProvider.JobID, err)
 	}
-	waitFor(r.t, waitDeadline, "the job to start in the fake cluster", func() bool {
-		j, ok := r.cl.plat.Job(id)
+	stack.WaitFor(r.t, stack.WaitDeadline, "the job to start in the fake cluster", func() bool {
+		j, ok := r.cl.Plat.Job(id)
 		return ok && j.PID > 0
 	})
 	r.checkReleased(id)
 	uid := r.holdTunnel(alloc.Name, id)
 	var ready *v1alpha1.Instance
-	waitFor(r.t, waitDeadline, "the primary Instance to be ready", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "the primary Instance to be ready", func() bool {
 		for _, in := range r.instances() {
 			if in.UID == uid && in.Status.Phase == v1alpha1.InstanceReady {
 				in := in
@@ -79,10 +80,10 @@ func (r *rig) stepStart() *v1alpha1.Instance {
 // scontrol release of its own ID (the fake cluster's call log).
 func (r *rig) checkReleased(id int) {
 	r.t.Helper()
-	j, _ := r.cl.plat.Job(id)
+	j, _ := r.cl.Plat.Job(id)
 	want := strconv.Itoa(id)
 	var seen []string
-	for _, c := range r.cl.plat.Calls() {
+	for _, c := range r.cl.Plat.Calls() {
 		if len(c.Words) == 0 || c.Words[0] != "scontrol" {
 			continue
 		}
@@ -109,7 +110,7 @@ func (r *rig) checkReleased(id int) {
 // True at the controller's next read of frps's list.
 func (r *rig) holdTunnel(allocName string, jobID int) types.UID {
 	r.t.Helper()
-	deadline, _ := boundedDeadline(r.t, waitDeadline)
+	deadline, _ := stack.BoundedDeadline(r.t, stack.WaitDeadline)
 	start := time.Now()
 	agent, uid := 0, types.UID("")
 	killed := map[int]bool{}
@@ -119,8 +120,8 @@ func (r *rig) holdTunnel(allocName string, jobID int) types.UID {
 			agent, lastScan = r.jobAgent(jobID), time.Now()
 		}
 		if agent != 0 {
-			for _, c := range childrenOf(agent) {
-				if killed[c] || !isStagedFrpc(processExe(c)) {
+			for _, c := range stack.ChildrenOf(agent) {
+				if killed[c] || !isStagedFrpc(stack.ProcessExe(c)) {
 					continue
 				}
 				if err := syscall.Kill(c, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
@@ -130,11 +131,11 @@ func (r *rig) holdTunnel(allocName string, jobID int) types.UID {
 			}
 		}
 		if uid == "" {
-			uid, _ = r.watch.onAllocation(allocName)
+			uid, _ = r.watch.OnAllocation(allocName)
 		}
 		if uid != "" && warmAt.IsZero() {
-			if o, ok := r.watch.first(uid, time.Time{}, func(o observation) bool { return o.warmedUp }); ok {
-				warmAt = o.at
+			if o, ok := r.watch.First(uid, time.Time{}, func(o stack.Observation) bool { return o.WarmedUp }); ok {
+				warmAt = o.At
 			}
 		}
 		if !warmAt.IsZero() && time.Since(warmAt) >= agentapi.ReportInterval {
@@ -156,12 +157,12 @@ func (r *rig) holdTunnel(allocName string, jobID int) types.UID {
 // jobAgent is the PID of the job's agent, the staged hb-agent
 // (agentapi.StagedAgentPath), 0 while none runs.
 func (r *rig) jobAgent(jobID int) int {
-	pids, err := r.cl.plat.Processes(jobID)
+	pids, err := r.cl.Plat.Processes(jobID)
 	if err != nil {
 		return 0
 	}
 	for _, p := range pids {
-		exe := processExe(p)
+		exe := stack.ProcessExe(p)
 		if filepath.Base(exe) == agentapi.AgentBinaryName && filepath.Base(filepath.Dir(filepath.Dir(exe))) == "agent" {
 			return p
 		}
@@ -184,27 +185,27 @@ func isStagedFrpc(exe string) bool {
 // time set, the checks judged in their order.
 func (r *rig) checkFirstEntry(in *v1alpha1.Instance) {
 	r.t.Helper()
-	obs := r.watch.of(in.UID)
-	firstReady := slices.IndexFunc(obs, func(o observation) bool { return o.phase == v1alpha1.InstanceReady })
+	obs := r.watch.Of(in.UID)
+	firstReady := slices.IndexFunc(obs, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceReady })
 	if firstReady < 0 {
 		r.t.Fatalf("step (a): the watch never saw Instance %s ready", in.Name)
 	}
 	held, tunnelUp := -1, -1
 	for i, o := range obs[:firstReady] {
-		switch o.phase {
+		switch o.Phase {
 		case "", v1alpha1.InstancePending, v1alpha1.InstanceStarting, v1alpha1.InstanceVerifying:
 		default:
-			r.t.Errorf("step (a): before its first ready, Instance %s was seen %s at %s", in.Name, o.phase, o.at.Format(time.RFC3339Nano))
+			r.t.Errorf("step (a): before its first ready, Instance %s was seen %s at %s", in.Name, o.Phase, o.At.Format(time.RFC3339Nano))
 		}
-		if o.warmedUp && o.tunnel != metav1.ConditionTrue {
-			if o.phase != v1alpha1.InstanceVerifying {
-				r.t.Errorf("step (a): with its warm-up judged and TunnelConnected %q, Instance %s was %s, not verifying", o.tunnel, in.Name, o.phase)
+		if o.WarmedUp && o.Tunnel != metav1.ConditionTrue {
+			if o.Phase != v1alpha1.InstanceVerifying {
+				r.t.Errorf("step (a): with its warm-up judged and TunnelConnected %q, Instance %s was %s, not verifying", o.Tunnel, in.Name, o.Phase)
 			}
 			if held < 0 {
 				held = i
 			}
 		}
-		if held >= 0 && tunnelUp < 0 && o.tunnel == metav1.ConditionTrue {
+		if held >= 0 && tunnelUp < 0 && o.Tunnel == metav1.ConditionTrue {
 			tunnelUp = i
 		}
 	}
@@ -214,18 +215,18 @@ func (r *rig) checkFirstEntry(in *v1alpha1.Instance) {
 		r.t.Errorf("step (a): Instance %s was never seen with WarmedUp True and TunnelConnected not True: the gate was not what kept it out of ready", in.Name)
 	case tunnelUp < 0:
 		r.t.Errorf("step (a): Instance %s was first seen ready at %s with no TunnelConnected True seen after its warm-up: it entered ready with its tunnel down",
-			in.Name, f.at.Format(time.RFC3339Nano))
+			in.Name, f.At.Format(time.RFC3339Nano))
 	default:
 		r.t.Logf("step (a): Instance %s verifying with its checks done and its tunnel down from %s, TunnelConnected True %s, ready %s", in.Name,
-			obs[held].at.Format(time.RFC3339Nano), obs[tunnelUp].at.Format(time.RFC3339Nano), f.at.Format(time.RFC3339Nano))
+			obs[held].At.Format(time.RFC3339Nano), obs[tunnelUp].At.Format(time.RFC3339Nano), f.At.Format(time.RFC3339Nano))
 	}
-	if f.tunnel != metav1.ConditionTrue || !f.verified || !f.qualified || !f.warmedUp || !f.readyTime {
+	if f.Tunnel != metav1.ConditionTrue || !f.Verified || !f.Qualified || !f.WarmedUp || !f.ReadyTime {
 		r.t.Errorf("step (a): Instance %s's first ready version: TunnelConnected %q, Verified %v, Qualified %v, WarmedUp %v, readyTime set %v; want all", in.Name,
-			f.tunnel, f.verified, f.qualified, f.warmedUp, f.readyTime)
+			f.Tunnel, f.Verified, f.Qualified, f.WarmedUp, f.ReadyTime)
 	}
-	iv := slices.IndexFunc(obs, func(o observation) bool { return o.verified })
-	iq := slices.IndexFunc(obs, func(o observation) bool { return o.qualified })
-	iw := slices.IndexFunc(obs, func(o observation) bool { return o.warmedUp })
+	iv := slices.IndexFunc(obs, func(o stack.Observation) bool { return o.Verified })
+	iq := slices.IndexFunc(obs, func(o stack.Observation) bool { return o.Qualified })
+	iw := slices.IndexFunc(obs, func(o stack.Observation) bool { return o.WarmedUp })
 	if iv < 0 || iq < iv || iw < iq {
 		r.t.Errorf("step (a): Instance %s's checks were first seen True at versions %d (Verified), %d (Qualified), %d (WarmedUp): not in the order the controller judges them", in.Name, iv, iq, iw)
 	}
@@ -271,12 +272,10 @@ func (r *rig) checkStartRecords(in *v1alpha1.Instance) {
 // LFS file's SHA-256 from the listing, so only the agent fetches the weights.
 func (r *rig) checkAgentStaged() {
 	r.t.Helper()
-	for _, p := range r.hub.resolved() {
-		for _, f := range hubFiles {
-			if f.lfs && f.path == p {
-				return
-			}
+	for _, p := range r.hub.Resolved() {
+		if stack.HubFileIsLFS(p) {
+			return
 		}
 	}
-	r.t.Errorf("the agent never downloaded the LFS weights from the Hub double (downloads %v): agent.json's hubEndpoint did not reach it", r.hub.resolved())
+	r.t.Errorf("the agent never downloaded the LFS weights from the Hub double (downloads %v): agent.json's hubEndpoint did not reach it", r.hub.Resolved())
 }

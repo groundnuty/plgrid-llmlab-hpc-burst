@@ -7,6 +7,7 @@ package scenario_test
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 // sample is one line of Prometheus's text format.
@@ -158,7 +160,7 @@ var frontCuts = []string{"front_deadline", "front_idle", "front_headers", "tunne
 func (p3 *part3) frontMetricsBothKinds(d *depRun) {
 	r := p3.rig
 	r.t.Helper()
-	url := r.ports.url(4, "/metrics")
+	url := r.ports.URL(4, "/metrics")
 	before, err := scrape(url)
 	if err != nil {
 		r.t.Fatalf("the front's /metrics: %v", err)
@@ -166,31 +168,31 @@ func (p3 *part3) frontMetricsBothKinds(d *depRun) {
 	type target struct {
 		kind, model string
 		want        wantAttr
-		rows        []usageRow
+		rows        []stack.UsageRow
 	}
 	targets := []*target{
-		{kind: "the Instance", model: d.model, want: wantInstance(d, d.primary)},
+		{kind: "the Instance", model: d.Model, want: wantInstance(d, d.primary)},
 		{kind: "the managed target", model: managedModel, want: p3.wantManaged()},
 	}
 	for _, tg := range targets {
-		rp := r.send("/v1/chat/completions", chatBodyFor(tg.model, 16, 0, false), "")
-		if rp.err != nil || rp.status != http.StatusOK {
-			r.t.Fatalf("a chat request to %s: %d %v: %.300s", tg.kind, rp.status, rp.err, rp.body)
+		rp := r.fc.SendCtx(context.Background(), "/v1/chat/completions", stack.ChatBody(tg.model, 16, 0, false, ""), "")
+		if rp.Err != nil || rp.Status != http.StatusOK {
+			r.t.Fatalf("a chat request to %s: %d %v: %.300s", tg.kind, rp.Status, rp.Err, rp.Body)
 		}
-		row := r.rowOf(rp.id)
+		row := r.fc.RowOf(rp.ID)
 		p3.attribute("a chat request to "+tg.kind, rp, row, tg.want)
-		first, done := r.startStream(chatBodyFor(tg.model, 16, 0, true), "rehearsal-part3-metrics")
+		first, done := r.fc.StartStream(stack.ChatBody(tg.model, 16, 0, true, ""), "rehearsal-part3-metrics")
 		<-first
 		s := <-done
-		if s.err != nil || s.status != http.StatusOK {
-			r.t.Fatalf("a streamed chat request to %s: %d %v: %.300s", tg.kind, s.status, s.err, s.body)
+		if s.Err != nil || s.Status != http.StatusOK {
+			r.t.Fatalf("a streamed chat request to %s: %d %v: %.300s", tg.kind, s.Status, s.Err, s.Body)
 		}
-		if fin, ok := sseDone(s.body); !fin || !ok {
+		if fin, ok := stack.SSEDone(s.Body); !fin || !ok {
 			r.t.Errorf("the streamed chat request to %s: [DONE] %v, a finish reason %v", tg.kind, fin, ok)
 		}
-		srow := r.rowOf(s.id)
-		p3.attribute("a streamed chat request to "+tg.kind, s.reply, srow, tg.want)
-		tg.rows = []usageRow{row, srow}
+		srow := r.fc.RowOf(s.ID)
+		p3.attribute("a streamed chat request to "+tg.kind, s.Reply, srow, tg.want)
+		tg.rows = []stack.UsageRow{row, srow}
 	}
 	after, err := scrape(url)
 	if err != nil {
@@ -228,7 +230,7 @@ func (p3 *part3) frontMetricsBothKinds(d *depRun) {
 		}
 		r.t.Logf("front metrics, %s: provider %s, model_deployment %s: requests +2, time to first token +%d", tg.kind, prov, dep, firsts)
 	}
-	recs := len(r.usageRows())
+	recs := len(r.fc.UsageRows())
 	if got := sum(find(after, "hpcburst_usage_records_total", nil)); got < float64(recs) {
 		r.t.Errorf("hpcburst_usage_records_total is %v, below the %d records in the usage files", got, recs)
 	}
@@ -354,7 +356,7 @@ func gaugeProblems(ss []sample, v gaugeView) []string {
 // tokens of its usage records.
 func (p3 *part3) servedTokens(uid string) float64 {
 	var n float64
-	for _, row := range p3.usageRows() {
+	for _, row := range p3.fc.UsageRows() {
 		if row.InstanceUID == uid && row.CompletionTokens != nil {
 			n += float64(*row.CompletionTokens)
 		}
@@ -369,14 +371,14 @@ func (p3 *part3) servedTokens(uid string) float64 {
 func (p3 *part3) gauges(d *depRun, when string) {
 	r := p3.rig
 	r.t.Helper()
-	url := r.ports.url(12, "/metrics")
+	url := r.ports.URL(12, "/metrics")
 	in, _ := r.instance(d.primary.Name)
 	min := p3.servedTokens(string(in.UID))
 	if min <= 0 {
 		r.t.Fatalf("gauges %s: the front saw Instance %s generate nothing yet: a read now would prove nothing", when, in.Name)
 	}
 	var ss []sample
-	waitState(r.t, waitDeadline, "the controller's gauges to show the tokens the primary generated", func() (bool, string) {
+	stack.WaitState(r.t, stack.WaitDeadline, "the controller's gauges to show the tokens the primary generated", func() (bool, string) {
 		var err error
 		ss, err = scrape(url)
 		if err != nil {
@@ -385,18 +387,18 @@ func (p3 *part3) gauges(d *depRun, when string) {
 		g := find(ss, gGenerated, map[string]string{"instance_uid": string(in.UID), "worker": "worker-0"})
 		return len(g) == 1 && g[0].value >= min, fmt.Sprintf("%s: %v, want at least %v", gGenerated, g, min)
 	})
-	view := gaugeView{uid: string(in.UID), namespace: in.Namespace, name: in.Name, deployment: d.name, provider: d.provider,
+	view := gaugeView{uid: string(in.UID), namespace: in.Namespace, name: in.Name, deployment: d.Name, provider: d.Provider,
 		gpuModel: "example-gpu", reported: true, minGenerated: min}
 	for _, p := range gaugeProblems(ss, view) {
 		r.t.Errorf("gauges %s, primary %s: %s", when, in.Name, p)
 	}
 	var pending []string
-	for _, x := range p3.instancesOf(d.name) {
+	for _, x := range p3.instancesOf(d.Name) {
 		if x.Status.Phase != v1alpha1.InstancePending {
 			continue
 		}
 		pending = append(pending, x.Name)
-		pv := gaugeView{uid: string(x.UID), namespace: x.Namespace, name: x.Name, deployment: d.name, provider: d.provider,
+		pv := gaugeView{uid: string(x.UID), namespace: x.Namespace, name: x.Name, deployment: d.Name, provider: d.Provider,
 			gpuModel: "example-gpu", staleReason: "stale"}
 		problems, none := pendingGaugeProblems(ss, pv)
 		for _, p := range problems {
@@ -460,7 +462,7 @@ type restartScraper struct {
 func (p3 *part3) startRestartScraper(uid string) *restartScraper {
 	s := &restartScraper{stop: make(chan struct{}), done: make(chan struct{})}
 	p3.t.Cleanup(s.halt)
-	url := p3.ports.url(12, "/metrics")
+	url := p3.ports.URL(12, "/metrics")
 	go func() {
 		defer close(s.done)
 		for {
