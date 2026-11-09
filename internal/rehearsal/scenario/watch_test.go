@@ -88,3 +88,24 @@ func (r *rig) markProxyEnd(uid types.UID, at time.Time) {
 		r.proxyEnds[uid] = at
 	}
 }
+
+// syncWatch makes the watch catch up with the API on the kinds before a read of
+// it that follows something the API showed (stack.Recorder.CatchUp): the API
+// leads the watch, so such a read can precede an event that is only late
+// (issue #281). what names the read. The event of an object that does not come
+// is reported as lost, and a catch-up that cannot tell as not known, each once.
+func (r *rig) syncWatch(kinds stack.Kinds, what string) stack.CatchUpResult {
+	r.t.Helper()
+	res := r.watch.CatchUp(r.t, r.c, stack.Namespace, kinds, what)
+	reportCatchUp(r.t, what, res)
+	return res
+}
+
+// reportCatchUp fails the test for a catch-up that found the watch behind or
+// could not tell.
+func reportCatchUp(t stack.T, what string, res stack.CatchUpResult) {
+	t.Helper()
+	if p := res.Problem(); p != "" {
+		t.Errorf("%s: %s", what, p)
+	}
+}

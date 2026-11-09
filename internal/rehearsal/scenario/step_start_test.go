@@ -185,6 +185,7 @@ func isStagedFrpc(exe string) bool {
 // time set, the checks judged in their order.
 func (r *rig) checkFirstEntry(in *v1alpha1.Instance) {
 	r.t.Helper()
+	r.syncWatch(stack.KindInstances, "step (a): the Instance's versions") // the API showed it ready, polled
 	obs := r.watch.Of(in.UID)
 	firstReady := slices.IndexFunc(obs, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceReady })
 	if firstReady < 0 {

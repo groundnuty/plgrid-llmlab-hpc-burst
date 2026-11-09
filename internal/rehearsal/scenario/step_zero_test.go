@@ -149,11 +149,12 @@ func (r *rig) checkShutdown(insts []types.UID, patchAt time.Time) {
 // (pkg/provider/phase.go); a released Allocation is deleted
 // (internal/lifecycle/retention.go), in the rehearsal while still Running.
 // failedOK names the Allocations a step failed on purpose (#193's requeue).
-// The API's LIST that waitAllEnded ends on leads the watch, so the check waits
-// for the watch to deliver each end or deletion (allocation_events_test.go).
+// The API's LIST that waitAllEnded ends on leads the watch, so the check first
+// makes the watch catch up (syncWatch, issue #281).
 func (r *rig) checkAllocations(atZero map[types.UID]string, failedOK map[types.UID]bool) {
 	r.t.Helper()
-	checkAllocationEvents(r.t, r.watch.Allocations, r.apiAllocation, atZero, failedOK, allocDeliveryWait)
+	res := r.syncWatch(stack.KindAllocations, "step (g): the Allocations")
+	checkAllocationEvents(r.t, r.watch.Allocations, res, atZero, failedOK)
 }
 
 // waitRecords waits for the acct-<UID> record of every Allocation.

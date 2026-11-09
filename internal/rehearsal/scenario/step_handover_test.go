@@ -164,6 +164,7 @@ func (r *rig) checkDrained(pred, repl *v1alpha1.Instance, ds, streamEnd time.Tim
 	r.t.Helper()
 	// The ended Instance may already be gone with its Allocation: the
 	// controller's recorded drain start is read from the watch.
+	r.syncWatch(stack.KindInstances, "step (c): the primary's recorded drain start")
 	o, _ := r.watch.First(pred.UID, time.Time{}, func(o stack.Observation) bool { return o.DrainBegan != "" })
 	began, err := time.Parse(time.RFC3339, o.DrainBegan)
 	if err != nil || began.Before(ds) || !began.Before(streamEnd) {

@@ -622,6 +622,20 @@ func (r *liveRun) successorOf(pred string, d time.Duration) (v1alpha1.Instance, 
 	return v1alpha1.Instance{}, false
 }
 
+// syncWatch makes the watch catch up with the API on the kinds before a read of
+// it that follows something the API showed (stack.Recorder.CatchUp): the API
+// leads the watch, so such a read can precede an event that is only late
+// (issue #281). what names the read. The error says that an event was lost, or
+// that it could not be told whether the watch had caught up.
+func (r *liveRun) syncWatch(kinds stack.Kinds, what string) error {
+	r.t.Helper()
+	res := r.watch.CatchUp(r.t, r.c, r.w.md.Namespace, kinds, what)
+	if p := res.Problem(); p != "" {
+		return fmt.Errorf("%s: %s", what, p)
+	}
+	return nil
+}
+
 // tagOf is the job tag of an Instance's Allocation.
 func (r *liveRun) tagOf(in v1alpha1.Instance) string {
 	for _, o := range r.watch.Allocations() {

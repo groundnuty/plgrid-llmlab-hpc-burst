@@ -210,6 +210,7 @@ func (r *rig) checkTunnelBack(in *v1alpha1.Instance, key string, jobID int, stag
 		r.t.Errorf("step (e): the key's request after the tunnel came back went to %s, not %s", row.Instance, in.Name)
 	}
 	phases := map[v1alpha1.InstancePhase]bool{}
+	r.syncWatch(stack.KindInstances, "step (e): the Instance's versions during the loss") // the absence of AgentUnreachable is read from them
 	for _, o := range r.watch.Between(in.UID, start, time.Now()) {
 		phases[o.Phase] = true
 		if o.Unreachable {

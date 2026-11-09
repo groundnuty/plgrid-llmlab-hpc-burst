@@ -41,7 +41,8 @@ const (
 	KindDeployments
 )
 
-func (k Kinds) String() string {
+// label names the kind of an object, for a report.
+func (k Kinds) label() string {
 	switch k {
 	case KindInstances:
 		return "Instance"
@@ -71,14 +72,15 @@ type Behind struct {
 	Delivered string // the newest resourceVersion the watch delivered; empty when none
 }
 
-func (b Behind) String() string {
+// Explain says what the watch is behind on.
+func (b Behind) Explain() string {
 	switch {
 	case b.Listed == "":
-		return fmt.Sprintf("%s %s: gone from the API, and the watch delivered no deletion (its newest version is %s)", b.Kind, b.Name, b.Delivered)
+		return fmt.Sprintf("%s %s: gone from the API, and the watch delivered no deletion (its newest version is %s)", b.Kind.label(), b.Name, b.Delivered)
 	case b.Delivered == "":
-		return fmt.Sprintf("%s %s: the API lists version %s, and the watch delivered none", b.Kind, b.Name, b.Listed)
+		return fmt.Sprintf("%s %s: the API lists version %s, and the watch delivered none", b.Kind.label(), b.Name, b.Listed)
 	}
-	return fmt.Sprintf("%s %s: the API lists version %s, and the watch delivered up to %s", b.Kind, b.Name, b.Listed, b.Delivered)
+	return fmt.Sprintf("%s %s: the API lists version %s, and the watch delivered up to %s", b.Kind.label(), b.Name, b.Listed, b.Delivered)
 }
 
 // CatchUpResult is what a catch-up found.
@@ -117,7 +119,7 @@ func (r CatchUpResult) Problem() string {
 	}
 	var parts []string
 	for _, b := range r.Missing {
-		parts = append(parts, b.String())
+		parts = append(parts, b.Explain())
 	}
 	return fmt.Sprintf("the watch delivered nothing newer in %s after the API listed it: %s: the event was lost", r.Waited.Round(time.Millisecond), strings.Join(parts, "; "))
 }
@@ -137,21 +139,21 @@ type listing struct {
 	collection map[Kinds]string
 }
 
-// held is the newest version the Recorder holds of one object.
-type held struct {
+// newest is the newest version the Recorder holds of one object.
+type newest struct {
 	name    string
 	rv      string
 	deleted bool
 }
 
 // holding returns the newest version of each object of the kind.
-func (rec *Recorder) holding(kind Kinds) map[types.UID]held {
+func (rec *Recorder) holding(kind Kinds) map[types.UID]newest {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
-	out := map[types.UID]held{}
+	out := map[types.UID]newest{}
 	put := func(uid types.UID, name, rv string, deleted bool) {
 		h := out[uid]
-		out[uid] = held{name: name, rv: rv, deleted: h.deleted || deleted}
+		out[uid] = newest{name: name, rv: rv, deleted: h.deleted || deleted}
 	}
 	switch kind {
 	case KindInstances:
