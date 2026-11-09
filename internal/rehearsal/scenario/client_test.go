@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 // requestTimeout bounds a request the rehearsal sends: the front cuts every
@@ -36,7 +37,7 @@ type reply struct {
 
 // requestCtx bounds one request by requestTimeout and waitCap.
 func (r *rig) requestCtx() (context.Context, context.CancelFunc) {
-	d, _ := boundedDeadline(r.t, requestTimeout)
+	d, _ := stack.BoundedDeadline(r.t, requestTimeout)
 	return context.WithDeadline(context.Background(), d)
 }
 
@@ -49,7 +50,7 @@ func (r *rig) send(path, body, key string) reply {
 // sendCtx is send, also ended when parent ends: a background sender's stop
 // cancels the request it has in flight.
 func (r *rig) sendCtx(parent context.Context, path, body, key string) reply {
-	d, _ := boundedDeadline(r.t, requestTimeout)
+	d, _ := stack.BoundedDeadline(r.t, requestTimeout)
 	ctx, cancel := context.WithDeadline(parent, d)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+r.ports.client+path, strings.NewReader(body))
@@ -97,7 +98,7 @@ func (r *rig) rowOf(id string) usageRow {
 		r.t.Fatal("a reply without the front's request ID (Hpcburst-Request-Id)")
 	}
 	var row usageRow
-	waitFor(r.t, waitDeadline, "the usage record of request "+id, func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "the usage record of request "+id, func() bool {
 		for _, x := range r.usageRows() {
 			if x.RequestID == id {
 				row = x

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 // sample is one line of Prometheus's text format.
@@ -376,7 +377,7 @@ func (p3 *part3) gauges(d *depRun, when string) {
 		r.t.Fatalf("gauges %s: the front saw Instance %s generate nothing yet: a read now would prove nothing", when, in.Name)
 	}
 	var ss []sample
-	waitState(r.t, waitDeadline, "the controller's gauges to show the tokens the primary generated", func() (bool, string) {
+	stack.WaitState(r.t, stack.WaitDeadline, "the controller's gauges to show the tokens the primary generated", func() (bool, string) {
 		var err error
 		ss, err = scrape(url)
 		if err != nil {

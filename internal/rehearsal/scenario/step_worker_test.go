@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 // pauseAfterFailures is the front config's pauseAfterFailures (startHost):
@@ -166,7 +167,7 @@ func (r *rig) stepWorkerRestart(in *v1alpha1.Instance, key string) {
 		r.t.Errorf("step (d): Instance %s left ready (%s; first seen %s at %s) before the request after the 5xx: the controller, not the pause, may have moved its key",
 			in.Name, still.Status.Phase, moved.phase, moved.at.Format(time.RFC3339Nano))
 	}
-	waitFor(r.t, waitDeadline, "the primary to serve again after a worker restart", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "the primary to serve again after a worker restart", func() bool {
 		rp := send()
 		o := outcome{rp: rp, row: r.rowOf(rp.id)}
 		outs = append(outs, o)
@@ -186,8 +187,8 @@ func (r *rig) workerLeader(jobID, engine int) int {
 	leader := parentOf(engine)
 	pids, err := r.cl.plat.Processes(jobID)
 	self, serr := os.Executable()
-	if err != nil || serr != nil || leader == 0 || !slices.Contains(pids, leader) || processExe(leader) != self {
-		r.t.Fatalf("step (d): the engine %d's parent %d (%s) is not the fake Apptainer of job %d (%v, %v)", engine, leader, processExe(leader), jobID, err, serr)
+	if err != nil || serr != nil || leader == 0 || !slices.Contains(pids, leader) || stack.ProcessExe(leader) != self {
+		r.t.Fatalf("step (d): the engine %d's parent %d (%s) is not the fake Apptainer of job %d (%v, %v)", engine, leader, stack.ProcessExe(leader), jobID, err, serr)
 	}
 	return leader
 }

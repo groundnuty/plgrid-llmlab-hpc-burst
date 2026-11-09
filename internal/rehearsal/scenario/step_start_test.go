@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -35,7 +36,7 @@ func (r *rig) stepStart() *v1alpha1.Instance {
 	r.providerReady()
 	create(r.t, r.c, servedDeployment(rehearsalTiming, r.engineEnv...))
 	var alloc v1alpha1.Allocation
-	waitFor(r.t, waitDeadline, "an Allocation with a job ID", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "an Allocation with a job ID", func() bool {
 		for _, a := range r.allocations() {
 			if a.Status.AtProvider.JobID != "" {
 				alloc = a
@@ -49,14 +50,14 @@ func (r *rig) stepStart() *v1alpha1.Instance {
 	if err != nil {
 		r.t.Fatalf("job ID %q: %v", alloc.Status.AtProvider.JobID, err)
 	}
-	waitFor(r.t, waitDeadline, "the job to start in the fake cluster", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "the job to start in the fake cluster", func() bool {
 		j, ok := r.cl.plat.Job(id)
 		return ok && j.PID > 0
 	})
 	r.checkReleased(id)
 	uid := r.holdTunnel(alloc.Name, id)
 	var ready *v1alpha1.Instance
-	waitFor(r.t, waitDeadline, "the primary Instance to be ready", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "the primary Instance to be ready", func() bool {
 		for _, in := range r.instances() {
 			if in.UID == uid && in.Status.Phase == v1alpha1.InstanceReady {
 				in := in
@@ -109,7 +110,7 @@ func (r *rig) checkReleased(id int) {
 // True at the controller's next read of frps's list.
 func (r *rig) holdTunnel(allocName string, jobID int) types.UID {
 	r.t.Helper()
-	deadline, _ := boundedDeadline(r.t, waitDeadline)
+	deadline, _ := stack.BoundedDeadline(r.t, stack.WaitDeadline)
 	start := time.Now()
 	agent, uid := 0, types.UID("")
 	killed := map[int]bool{}
@@ -119,8 +120,8 @@ func (r *rig) holdTunnel(allocName string, jobID int) types.UID {
 			agent, lastScan = r.jobAgent(jobID), time.Now()
 		}
 		if agent != 0 {
-			for _, c := range childrenOf(agent) {
-				if killed[c] || !isStagedFrpc(processExe(c)) {
+			for _, c := range stack.ChildrenOf(agent) {
+				if killed[c] || !isStagedFrpc(stack.ProcessExe(c)) {
 					continue
 				}
 				if err := syscall.Kill(c, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
@@ -161,7 +162,7 @@ func (r *rig) jobAgent(jobID int) int {
 		return 0
 	}
 	for _, p := range pids {
-		exe := processExe(p)
+		exe := stack.ProcessExe(p)
 		if filepath.Base(exe) == agentapi.AgentBinaryName && filepath.Base(filepath.Dir(filepath.Dir(exe))) == "agent" {
 			return p
 		}

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 )
@@ -170,7 +171,7 @@ func TestEngineGate(t *testing.T) {
 		t.Fatalf("a build while armed: %v", err)
 	}
 	done := start("exec", "image", "vllm")
-	waitFor(t, 30*time.Second, "the exec's marker at the gate", func() bool {
+	stack.WaitFor(t, 30*time.Second, "the exec's marker at the gate", func() bool {
 		_, ok := g.held(7)
 		return ok
 	})

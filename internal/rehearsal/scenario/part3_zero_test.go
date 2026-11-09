@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 func (p3 *part3) scaleToZero() {
@@ -35,7 +36,7 @@ func (p3 *part3) scaleToZero() {
 		}
 		patch := client.MergeFrom(md.DeepCopy())
 		md.Spec.Instances = 0
-		ctx, cancel := callCtx(r.t)
+		ctx, cancel := stack.CallCtx(r.t)
 		err := r.c.Patch(ctx, &md, patch)
 		cancel()
 		if err != nil {

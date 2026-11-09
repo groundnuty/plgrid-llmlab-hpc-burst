@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 const (
@@ -60,7 +61,7 @@ func restConfig(t *testing.T, state string) *rest.Config {
 // which the timeout would cut.
 func pollingConfig(t *testing.T, state string) *rest.Config {
 	cfg := restConfig(t, state)
-	cfg.Timeout = apiCallTimeout
+	cfg.Timeout = stack.APICallTimeout
 	return cfg
 }
 
@@ -172,7 +173,7 @@ func servedDeploymentAs(d served, tm timing, engineEnv ...v1alpha1.EnvVar) *v1al
 func create(t *testing.T, c client.Client, objs ...client.Object) {
 	t.Helper()
 	for _, o := range objs {
-		ctx, cancel := callCtx(t)
+		ctx, cancel := stack.CallCtx(t)
 		err := c.Create(ctx, o)
 		cancel()
 		if err != nil {
@@ -190,7 +191,7 @@ func conditionTrue(conds []metav1.Condition, typ string) bool {
 func eventsFor(t *testing.T, c client.Client, name string) []corev1.Event {
 	t.Helper()
 	var l corev1.EventList
-	ctx, cancel := callCtx(t)
+	ctx, cancel := stack.CallCtx(t)
 	defer cancel()
 	if err := c.List(ctx, &l); err != nil {
 		t.Fatalf("list events: %v", err)
@@ -211,7 +212,7 @@ func eventsFor(t *testing.T, c client.Client, name string) []corev1.Event {
 func orphanEvents(t *testing.T, c client.Client) []eventsv1.Event {
 	t.Helper()
 	var l eventsv1.EventList
-	ctx, cancel := callCtx(t)
+	ctx, cancel := stack.CallCtx(t)
 	defer cancel()
 	if err := c.List(ctx, &l); err != nil {
 		t.Fatalf("list events.k8s.io events: %v", err)

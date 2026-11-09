@@ -331,17 +331,35 @@ func TestCleanEnvDropsTheFakes(t *testing.T) {
 	}
 }
 
+// TestRootK3sGuard: a host with no system k3s, such as a CI runner, may run the stack unless HPCBURST_TEST_ROOT_K3S=1
+// says one runs there; a change of its listeners across the run fails it, whichever they were.
 func TestRootK3sGuard(t *testing.T) {
-	if RootK3sBefore("6443,10250", true) == nil {
-		t.Error("a required root k3s with a port missing passed")
+	for _, c := range []struct {
+		before   string
+		required bool
+		ok       bool
+	}{
+		{"", false, true},                // a CI runner
+		{"6443,6444,10250", false, true}, // this VM, unstated
+		{"6443,6444,10250", true, true},
+		{"", true, false},
+		{"6443,10250", true, false},
+	} {
+		if err := RootK3sBefore(c.before, c.required); (err == nil) != c.ok {
+			t.Errorf("RootK3sBefore(%q, %v) = %v, want ok %v", c.before, c.required, err, c.ok)
+		}
 	}
-	if RootK3sBefore("", false) != nil || RootK3sBefore("6443,6444,10250", true) != nil {
-		t.Error("a host as required failed")
-	}
-	if RootK3sAfter("6443,6444,10250", "6443,10250") == nil {
-		t.Error("a listener lost across the run passed")
-	}
-	if RootK3sAfter("", "") != nil {
-		t.Error("no root k3s before or after failed")
+	for _, c := range []struct {
+		before, after string
+		ok            bool
+	}{
+		{"", "", true},
+		{"6443,6444,10250", "6443,6444,10250", true},
+		{"6443,6444,10250", "6443,10250", false},
+		{"", "6443", false},
+	} {
+		if err := RootK3sAfter(c.before, c.after); (err == nil) != c.ok {
+			t.Errorf("RootK3sAfter(%q, %q) = %v, want ok %v", c.before, c.after, err, c.ok)
+		}
 	}
 }

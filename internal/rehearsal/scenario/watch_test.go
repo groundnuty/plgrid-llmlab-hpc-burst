@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 // observation is one Instance version as the watch delivered it, with the
@@ -306,7 +307,7 @@ func (rec *recorder) between(uid types.UID, from, to time.Time) []observation {
 // records when that was first seen: a bound the proxy's end lies before.
 func (r *rig) proxyEnded(uid types.UID) {
 	r.t.Helper()
-	waitFor(r.t, waitDeadline, "frps to list the proxy "+string(uid)+" offline", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "frps to list the proxy "+string(uid)+" offline", func() bool {
 		return !r.frpsProxies()[string(uid)]
 	})
 	r.markProxyEnd(uid, time.Now())

@@ -11,23 +11,18 @@ package scenario_test
 // go test ./... skips it; with that set, a missing piece fails the test.
 
 import (
-	"bytes"
-	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/enginedouble"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
@@ -92,45 +87,6 @@ func (p stackPorts) all() []int {
 	return out
 }
 
-// waitDeadline bounds every wait on state; the stack's own start is slower.
-const waitDeadline = 3 * time.Minute
-
-// cleanupMargin is how long before the test binary's deadline (-test.timeout)
-// every wait, request and command gives up. The deadline's panic skips
-// t.Cleanup, which is what stops the stack, so a run that is too slow must end
-// in t.Fatal early enough for the clean-up to run: hpcburst down within its
-// 40 s grace, the fake cluster's KILL of every job, and the ssh servers.
-const cleanupMargin = 2 * time.Minute
-
-// waitCap is when the test's waits and bounded calls give up: cleanupMargin
-// before the test's deadline, or never when it has none.
-func waitCap(t *testing.T) (time.Time, bool) {
-	d, ok := t.Deadline()
-	if !ok {
-		return time.Time{}, false
-	}
-	return d.Add(-cleanupMargin), true
-}
-
-// boundedDeadline is now plus d, or waitCap when that comes first; cut says
-// the cap shortened it.
-func boundedDeadline(t *testing.T, d time.Duration) (deadline time.Time, cut bool) {
-	deadline = time.Now().Add(d)
-	if c, ok := waitCap(t); ok && c.Before(deadline) {
-		return c, true
-	}
-	return deadline, false
-}
-
-// apiCallTimeout bounds one call to the API server.
-const apiCallTimeout = 30 * time.Second
-
-// callCtx bounds one call to the API server by apiCallTimeout and waitCap.
-func callCtx(t *testing.T) (context.Context, context.CancelFunc) {
-	d, _ := boundedDeadline(t, apiCallTimeout)
-	return context.WithDeadline(context.Background(), d)
-}
-
 // binaries are what the rehearsal runs: the four of this repo, built by
 // hack/rehearsal.sh into $HPCBURST_REHEARSAL_BIN, k3s from $HPCBURST_BIN_DIR,
 // and the pinned frps and frpc from $HPCBURST_FRP_DIR.
@@ -167,229 +123,6 @@ func requireRehearsal(t *testing.T) binaries {
 	}
 	b.repo = repo
 	return b
-}
-
-// shortDir is a scratch directory with a short path: k3s's sockets bound the
-// state directory to 80 bytes and an engine's unix socket in a job's TMPDIR to
-// 108. It is removed at the end of the test.
-func shortDir(t *testing.T) string {
-	t.Helper()
-	d, err := os.MkdirTemp("", "hr")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(d) > 48 {
-		t.Fatalf("scratch directory %s is longer than 48 bytes; set TMPDIR to a shorter path", d)
-	}
-	t.Cleanup(func() { os.RemoveAll(d) })
-	return d
-}
-
-// cpuArch is this host's architecture as a profile names it.
-func cpuArch(t *testing.T) string {
-	switch runtime.GOARCH {
-	case "amd64":
-		return "x86_64"
-	case "arm64":
-		return "aarch64"
-	}
-	t.Fatalf("no profile CPU architecture for GOARCH %s", runtime.GOARCH)
-	return ""
-}
-
-// waitFor polls cond until it holds, failing at the deadline, or at waitCap
-// when that comes first.
-func waitFor(t *testing.T, d time.Duration, what string, cond func() bool) {
-	t.Helper()
-	deadline, cut := boundedDeadline(t, d)
-	for !cond() {
-		if time.Now().After(deadline) {
-			if cut {
-				t.Fatalf("gave up waiting for %s %s before the test's deadline, so that its clean-up runs", what, cleanupMargin)
-			}
-			t.Fatalf("timed out after %s waiting for %s", d, what)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-}
-
-// httpStatus is the status of a GET, 0 when it fails.
-func httpStatus(url string) int {
-	c := http.Client{Timeout: 5 * time.Second}
-	resp, err := c.Get(url)
-	if err != nil {
-		return 0
-	}
-	resp.Body.Close()
-	return resp.StatusCode
-}
-
-// rootK3sPorts are a system k3s's ports (IMPL-COMMON), which the rehearsal
-// never touches; a CI runner has no system k3s at all.
-var rootK3sPorts = []int{6443, 6444, 10250}
-
-// listening lists which of ports have a TCP listener on this host, from
-// ss(8), in the order given.
-func listening(t *testing.T, ports []int) []int {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "ss", "-ltnH").Output()
-	if err != nil {
-		t.Fatalf("ss -ltnH: %v", err)
-	}
-	var have []int
-	for _, p := range ports {
-		for _, l := range strings.Split(string(out), "\n") {
-			if f := strings.Fields(l); len(f) >= 4 && strings.HasSuffix(f[3], ":"+strconv.Itoa(p)) {
-				have = append(have, p)
-				break
-			}
-		}
-	}
-	return have
-}
-
-// rootK3sListening is which of the system k3s's ports listen, "6443,6444,10250"
-// on a host that runs one, "" on a CI runner (internal/frpsplugin's rig).
-func rootK3sListening(t *testing.T) string {
-	t.Helper()
-	var s []string
-	for _, p := range listening(t, rootK3sPorts) {
-		s = append(s, strconv.Itoa(p))
-	}
-	return strings.Join(s, ",")
-}
-
-// rootK3sBefore is the guard before the run: with HPCBURST_TEST_ROOT_K3S=1 a
-// system k3s must listen on all its ports; without it none need to, so the
-// rehearsal runs on a host with no system k3s, such as a CI runner.
-func rootK3sBefore(before string, required bool) error {
-	if required && before != "6443,6444,10250" {
-		return fmt.Errorf("HPCBURST_TEST_ROOT_K3S=1, but the root k3s listens only on %q", before)
-	}
-	return nil
-}
-
-// rootK3sAfter is the check after the run: the system k3s's listeners are the
-// ones there were before it, whichever those were.
-func rootK3sAfter(before, after string) error {
-	if after != before {
-		return fmt.Errorf("the root k3s's listeners changed across the rehearsal: %q -> %q", before, after)
-	}
-	return nil
-}
-
-// Bounds of the stack's commands. hpcburst up starts k3s and waits for it; down
-// stops everything within its 40 s grace and then k3s; status only reads.
-const (
-	upTimeout     = 5 * time.Minute
-	downTimeout   = 100 * time.Second
-	statusTimeout = 30 * time.Second
-)
-
-// run runs one of the stack's commands within timeout and returns its output.
-// The command is killed at its deadline, and its output is read for at most
-// 10 s after that, in case a process it started kept the pipe open.
-func run(t *testing.T, timeout time.Duration, env []string, name string, args ...string) (string, error) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Env = env
-	cmd.WaitDelay = 10 * time.Second
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	err := cmd.Run()
-	if ctx.Err() != nil {
-		err = errors.Join(err, fmt.Errorf("%s did not end within %s", filepath.Base(name), timeout))
-	}
-	return out.String(), err
-}
-
-// within is d, or less when waitCap comes first: a command the test body runs
-// ends before the clean-up's margin.
-func within(t *testing.T, d time.Duration) time.Duration {
-	dl, _ := boundedDeadline(t, d)
-	return max(time.Until(dl), time.Second)
-}
-
-// cleanEnv is the environment for hpcburst up: this process's, without
-// anything that would point the controller at a fake ssh. up passes its whole
-// environment on to the controller (internal/launcher/supervise.go), whose ssh
-// client is found on PATH; the engine double's fakes are reached only through
-// the fake Slurm's job environment.
-func cleanEnv(extra ...string) []string {
-	var env []string
-	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "HPCBURST_SSH=") || strings.HasPrefix(kv, "HPCBURST_APPTAINER=") || strings.HasPrefix(kv, "HB_TEST_ROLE=") {
-			continue
-		}
-		env = append(env, kv)
-	}
-	return append(env, extra...)
-}
-
-// memoryPeak reads the peak memory of this process's cgroup, which also holds
-// everything up started: the run's memory cap applies to the whole stack.
-func memoryPeak() string {
-	b, err := os.ReadFile("/proc/self/cgroup")
-	if err != nil {
-		return "unknown (" + err.Error() + ")"
-	}
-	line := strings.TrimSpace(string(b))
-	i := strings.LastIndex(line, "::")
-	if i < 0 {
-		return "unknown (no cgroup v2 line)"
-	}
-	peak, err := os.ReadFile(filepath.Join("/sys/fs/cgroup", line[i+2:], "memory.peak"))
-	if err != nil {
-		return "unknown (" + err.Error() + ")"
-	}
-	n, _ := strconv.ParseInt(strings.TrimSpace(string(peak)), 10, 64)
-	return fmt.Sprintf("%d MiB", n>>20)
-}
-
-// processExe is the executable of a live process, "" when it is gone.
-func processExe(pid int) string {
-	exe, _ := os.Readlink("/proc/" + strconv.Itoa(pid) + "/exe")
-	return exe
-}
-
-// childrenOf lists the live direct children of pid. The kernel lists a
-// child under the thread that forked it, and a Go program forks from any of
-// its threads, so every thread's list is read.
-func childrenOf(pid int) []int {
-	tasks, err := os.ReadDir(fmt.Sprintf("/proc/%d/task", pid))
-	if err != nil {
-		return nil
-	}
-	var out []int
-	for _, task := range tasks {
-		b, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%s/children", pid, task.Name()))
-		if err != nil {
-			continue // the thread ended since the listing
-		}
-		for _, f := range strings.Fields(string(b)) {
-			if n, err := strconv.Atoi(f); err == nil {
-				out = append(out, n)
-			}
-		}
-	}
-	return out
-}
-
-// alive reports whether pid names a live process (not a zombie).
-func alive(pid int) bool {
-	if syscall.Kill(pid, 0) != nil {
-		return false
-	}
-	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
-	if err != nil {
-		return false
-	}
-	f := strings.Fields(string(b[bytes.LastIndexByte(b, ')')+1:]))
-	return len(f) > 0 && f[0] != "Z"
 }
 
 // cluster is the fake Slurm in run mode and its login node.
@@ -532,14 +265,14 @@ func startHost(t *testing.T, b binaries, dir string, ports stackPorts, dh dialHo
 	if err := os.WriteFile(cfg, []byte(front), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	before := rootK3sListening(t)
-	if err := rootK3sBefore(before, os.Getenv("HPCBURST_TEST_ROOT_K3S") == "1"); err != nil {
+	before := stack.RootK3sListening(t)
+	if err := stack.RootK3sBefore(before, os.Getenv("HPCBURST_TEST_ROOT_K3S") == "1"); err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("the root k3s's listeners before the rehearsal: %q", before)
 	// Registered before down's clean-up, so it runs after it.
 	t.Cleanup(func() {
-		if err := rootK3sAfter(before, rootK3sListening(t)); err != nil {
+		if err := stack.RootK3sAfter(before, stack.RootK3sListening(t)); err != nil {
 			t.Error(err)
 		}
 	})
@@ -550,11 +283,11 @@ func startHost(t *testing.T, b binaries, dir string, ports stackPorts, dh dialHo
 		args = append(args, "--front-key", dh.keyPath)
 	}
 	t.Cleanup(h.down)
-	if out, err := run(t, within(t, upTimeout), env, b.hpcburst, args...); err != nil {
+	if out, err := stack.Run(t, stack.Within(t, stack.UpTimeout), env, b.hpcburst, args...); err != nil {
 		t.Fatalf("hpcburst up: %v\n%s", err, out)
 	}
-	waitFor(t, waitDeadline, "the controller's /readyz", func() bool {
-		return httpStatus(ports.url(6, "/readyz")) == http.StatusOK
+	stack.WaitFor(t, stack.WaitDeadline, "the controller's /readyz", func() bool {
+		return stack.HTTPStatus(ports.url(6, "/readyz")) == http.StatusOK
 	})
 	return h
 }
@@ -567,11 +300,11 @@ func (h *host) down() {
 		return
 	}
 	h.downed = true
-	out, err := run(h.t, downTimeout, h.env, h.b.hpcburst, "down", "--state-dir", h.state)
+	out, err := stack.Run(h.t, stack.DownTimeout, h.env, h.b.hpcburst, "down", "--state-dir", h.state)
 	if err != nil {
 		h.t.Errorf("hpcburst down: %v\n%s", err, out)
 	}
-	h.t.Logf("memory peak of the run's cgroup (the whole stack): %s", memoryPeak())
+	h.t.Logf("memory peak of the run's cgroup (the whole stack): %s", stack.MemoryPeak())
 }
 
 // placeAgentBuild puts the hb-agent build and the pinned frpc where the

@@ -33,6 +33,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -62,7 +63,7 @@ func (r *rig) countReads(what string, keys ...eventcount.Key) map[eventcount.Key
 	r.t.Helper()
 	url := r.ports.url(12, "/metrics")
 	var out map[eventcount.Key]eventcount.Read
-	waitState(r.t, waitDeadline, "the controller's /metrics from a serving copy, for "+what, func() (bool, string) {
+	stack.WaitState(r.t, stack.WaitDeadline, "the controller's /metrics from a serving copy, for "+what, func() (bool, string) {
 		sent := time.Now()
 		resp, err := (&http.Client{Timeout: 10 * time.Second}).Get(url)
 		if err != nil {
@@ -142,7 +143,7 @@ func (r *rig) baseline(what string, keys ...eventcount.Key) *absenceBase {
 		}
 	}
 	var mds v1alpha1.ModelDeploymentList
-	ctx, cancel := callCtx(r.t)
+	ctx, cancel := stack.CallCtx(r.t)
 	err := r.c.List(ctx, &mds)
 	cancel()
 	if err != nil {

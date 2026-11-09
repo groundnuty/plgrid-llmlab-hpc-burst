@@ -14,6 +14,7 @@ import (
 	eventsv1 "k8s.io/api/events/v1"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -201,7 +202,7 @@ func eventProblems(evs []eventsv1.Event, want, forbid []wantEvent) (missing []wa
 // cluster-scoped object's land in default, the Leases' in hpcburst-system.
 func (p3 *part3) listAllEvents() []eventsv1.Event {
 	var l eventsv1.EventList
-	ctx, cancel := callCtx(p3.t)
+	ctx, cancel := stack.CallCtx(p3.t)
 	defer cancel()
 	if err := p3.c.List(ctx, &l); err != nil {
 		p3.t.Fatalf("list events.k8s.io events: %v", err)
@@ -218,7 +219,7 @@ func (p3 *part3) checkEvents() {
 	var missing []wantEvent
 	var problems []string
 	var evs []eventsv1.Event
-	waitState(r.t, waitDeadline, "every expected event", func() (bool, string) {
+	stack.WaitState(r.t, stack.WaitDeadline, "every expected event", func() (bool, string) {
 		evs = p3.listAllEvents()
 		missing, problems = eventProblems(evs, want, forbid)
 		var s []string

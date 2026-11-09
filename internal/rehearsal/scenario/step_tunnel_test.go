@@ -21,6 +21,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -57,7 +58,7 @@ func (r *rig) frpcProcesses(jobID int, staged string) []int {
 	}
 	var out []int
 	for _, p := range pids {
-		if processExe(p) == staged && alive(p) {
+		if stack.ProcessExe(p) == staged && stack.Alive(p) {
 			out = append(out, p)
 		}
 	}
@@ -102,7 +103,7 @@ func (r *rig) stepTunnelLoss(in *v1alpha1.Instance, key string) {
 	start := time.Now()
 	killed := map[int]bool{}
 	var falseAt, goneAt time.Time
-	waitFor(r.t, waitDeadline, "TunnelConnected False and the front's registration dropped", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "TunnelConnected False and the front's registration dropped", func() bool {
 		if o, ok := r.watch.first(in.UID, start, func(o observation) bool { return o.tunnel == metav1.ConditionFalse }); ok && falseAt.IsZero() {
 			falseAt = o.at
 		}
@@ -150,7 +151,7 @@ func (r *rig) requestDuringLoss(in *v1alpha1.Instance, key string, jobID int, st
 				continue
 			}
 			for _, p := range pids {
-				if !seen[p] && processExe(p) == staged && syscall.Kill(p, syscall.SIGKILL) == nil {
+				if !seen[p] && stack.ProcessExe(p) == staged && syscall.Kill(p, syscall.SIGKILL) == nil {
 					seen[p] = true
 					more = append(more, p)
 				}
@@ -181,7 +182,7 @@ func (r *rig) requestDuringLoss(in *v1alpha1.Instance, key string, jobID int, st
 func (r *rig) checkTunnelBack(in *v1alpha1.Instance, key string, jobID int, staged string, killed map[int]bool, parent int, start time.Time) {
 	r.t.Helper()
 	fresh := 0
-	waitFor(r.t, waitDeadline, "the agent to start frpc again", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "the agent to start frpc again", func() bool {
 		for _, p := range r.frpcProcesses(jobID, staged) {
 			if !killed[p] {
 				fresh = p
@@ -194,7 +195,7 @@ func (r *rig) checkTunnelBack(in *v1alpha1.Instance, key string, jobID int, stag
 		r.t.Errorf("step (e): the new frpc %d has parent %d; the killed one had %d, the agent", fresh, pp, parent)
 	}
 	lost := time.Now()
-	waitFor(r.t, waitDeadline, "TunnelConnected True and the front's registration back", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "TunnelConnected True and the front's registration back", func() bool {
 		now, ok := r.instance(in.Name)
 		reg, known := r.registered(in)
 		return ok && conditionTrue(now.Status.Conditions, v1alpha1.ConditionTunnelConnected) && known && reg

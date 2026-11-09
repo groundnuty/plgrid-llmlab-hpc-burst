@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 )
 
@@ -91,7 +92,7 @@ func (p3 *part3) checkQueuedSuccessor(d *depRun) {
 	r.t.Helper()
 	var succ v1alpha1.Instance
 	var jobID int
-	waitState(r.t, waitDeadline, "the queued successor's job to be accepted and released", func() (bool, string) {
+	stack.WaitState(r.t, stack.WaitDeadline, "the queued successor's job to be accepted and released", func() (bool, string) {
 		for _, in := range p3.instancesOf(d.name) {
 			if in.Annotations[v1alpha1.AnnotationPredecessor] != d.primary.Name {
 				continue
@@ -164,7 +165,7 @@ func (p3 *part3) requeue(d *depRun) {
 		r.t.Fatalf("%s: requeue job %d: %v", d.name, d.succJob, err)
 	}
 	var repl v1alpha1.Allocation
-	waitState(r.t, waitDeadline, "the requeued Instance to fail, its Allocation to go and a new one to take its place", func() (bool, string) {
+	stack.WaitState(r.t, stack.WaitDeadline, "the requeued Instance to fail, its Allocation to go and a new one to take its place", func() (bool, string) {
 		o, ended := r.watch.first(in.UID, at, func(o observation) bool { return o.phase == v1alpha1.InstanceEnded })
 		gone := slices.ContainsFunc(r.watch.allocations(), func(o allocObservation) bool { return o.uid == a.UID && o.deleted })
 		j, _ := r.cl.plat.Job(d.succJob)
@@ -214,7 +215,7 @@ func (p3 *part3) requeue(d *depRun) {
 		r.t.Errorf("%s: %s", d.name, p)
 	}
 	var ri v1alpha1.Instance
-	waitFor(r.t, waitDeadline, "the replacement's Instance on the new Allocation "+repl.Name, func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "the replacement's Instance on the new Allocation "+repl.Name, func() bool {
 		for _, x := range p3.instancesOf(d.name) {
 			if x.Spec.AllocationRef.Name == repl.Name {
 				ri = x

@@ -19,13 +19,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 // statusPID is the PID that hpcburst status reports for a supervised entry,
 // 0 when it reports none running.
 func (r *rig) statusPID(name string) int {
 	r.t.Helper()
-	out, err := run(r.t, within(r.t, statusTimeout), r.h.env, r.b.hpcburst, "status", "--state-dir", r.h.state, "--json", "--no-api")
+	out, err := stack.Run(r.t, stack.Within(r.t, stack.StatusTimeout), r.h.env, r.b.hpcburst, "status", "--state-dir", r.h.state, "--json", "--no-api")
 	var doc any
 	if jerr := json.Unmarshal([]byte(out), &doc); jerr != nil {
 		r.t.Logf("hpcburst status --json (%v): %v: %.300s", err, jerr, out)
@@ -57,7 +58,7 @@ func (r *rig) statusPID(name string) int {
 // leaseHolder is the lifecycle controller's Lease holder, "" when unknown.
 func (r *rig) leaseHolder() string {
 	var l coordinationv1.Lease
-	ctx, cancel := callCtx(r.t)
+	ctx, cancel := stack.CallCtx(r.t)
 	defer cancel()
 	if err := r.c.Get(ctx, types.NamespacedName{Namespace: v1alpha1.ControllerNamespace, Name: v1alpha1.LeaseLifecycle}, &l); err != nil || l.Spec.HolderIdentity == nil {
 		return ""
@@ -114,11 +115,11 @@ func (r *rig) controllerRestart(in *v1alpha1.Instance, key, body string, tokens 
 		r.t.Fatalf("kill the controller %d: %v", oldPID, err)
 	}
 	killAt := time.Now()
-	waitFor(r.t, waitDeadline, "the supervisor to start a new controller that leads the Lease", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "the supervisor to start a new controller that leads the Lease", func() bool {
 		p := r.statusPID("controller")
 		h := r.leaseHolder()
 		return p != 0 && p != oldPID && h != "" && h != oldHolder &&
-			httpStatus(r.ports.url(6, "/readyz")) == http.StatusOK
+			stack.HTTPStatus(r.ports.url(6, "/readyz")) == http.StatusOK
 	})
 	ledAt := time.Now()
 	r.t.Logf("step (f): a new controller led the Lease %s after the kill", ledAt.Sub(killAt).Round(100*time.Millisecond))

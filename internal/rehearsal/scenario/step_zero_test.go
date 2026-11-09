@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 // stepScaleToZero is step (g): scale to 0. Every Instance ends Drained, each
@@ -61,7 +62,7 @@ func (r *rig) scaleToZero() time.Time {
 	patch := client.MergeFrom(md.DeepCopy())
 	md.Spec.Instances = 0
 	at := time.Now()
-	ctx, cancel := callCtx(r.t)
+	ctx, cancel := stack.CallCtx(r.t)
 	defer cancel()
 	if err := r.c.Patch(ctx, &md, patch); err != nil {
 		r.t.Fatalf("scale to 0: %v", err)
@@ -75,7 +76,7 @@ func (r *rig) scaleToZero() time.Time {
 func (r *rig) waitAllEnded(insts []types.UID) {
 	r.t.Helper()
 	last := time.Now()
-	waitFor(r.t, waitDeadline, "every Instance to end and every Allocation to end or go", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "every Instance to end and every Allocation to end or go", func() bool {
 		if time.Since(last) > 10*time.Second {
 			r.t.Logf("step (g) waiting:%s", r.describe())
 			last = time.Now()
@@ -192,9 +193,9 @@ func (r *rig) checkAllocations(atZero map[types.UID]string, failedOK map[types.U
 // waitRecords waits for the acct-<UID> record of every Allocation.
 func (r *rig) waitRecords(uids map[types.UID]string) {
 	r.t.Helper()
-	waitFor(r.t, waitDeadline, "an acct- record for every Allocation", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "an acct- record for every Allocation", func() bool {
 		var l appsv1.ControllerRevisionList
-		ctx, cancel := callCtx(r.t)
+		ctx, cancel := stack.CallCtx(r.t)
 		defer cancel()
 		if err := r.c.List(ctx, &l); err != nil {
 			return false
@@ -218,7 +219,7 @@ func (r *rig) waitJobsGone() {
 	r.t.Helper()
 	for _, j := range r.cl.plat.Jobs() {
 		id := j.ID
-		waitFor(r.t, waitDeadline, fmt.Sprintf("job %d's processes to be gone", id), func() bool {
+		stack.WaitFor(r.t, stack.WaitDeadline, fmt.Sprintf("job %d's processes to be gone", id), func() bool {
 			pids, err := r.cl.plat.Processes(id)
 			return err == nil && len(pids) == 0
 		})
@@ -271,7 +272,7 @@ func procStart(pid int) (uint64, bool) {
 // under it, or a zombie, which holds nothing.
 func (p procID) gone() bool {
 	st, ok := procStart(p.pid)
-	return !ok || st != p.start || !alive(p.pid)
+	return !ok || st != p.start || !stack.Alive(p.pid)
 }
 
 // stackProcesses lists every process hpcburst status reports for the host:
@@ -279,7 +280,7 @@ func (p procID) gone() bool {
 // supervised entry that runs (the controller, the front, frps).
 func (r *rig) stackProcesses() []procID {
 	r.t.Helper()
-	out, err := run(r.t, within(r.t, statusTimeout), r.h.env, r.b.hpcburst, "status", "--state-dir", r.h.state, "--json", "--no-api")
+	out, err := stack.Run(r.t, stack.Within(r.t, stack.StatusTimeout), r.h.env, r.b.hpcburst, "status", "--state-dir", r.h.state, "--json", "--no-api")
 	var st struct {
 		Processes []struct {
 			Name    string `json:"name"`
@@ -355,7 +356,7 @@ func (r *rig) downAndCheck() {
 	if d := time.Since(start); d > 40*time.Second {
 		r.t.Errorf("step (g): hpcburst down took %s, above its default grace of 40 s", d)
 	}
-	waitState(r.t, 30*time.Second, "every process of the stack to be gone after down", func() (bool, string) {
+	stack.WaitState(r.t, 30*time.Second, "every process of the stack to be gone after down", func() (bool, string) {
 		var left []string
 		for _, p := range procs {
 			if !p.gone() {
@@ -364,7 +365,7 @@ func (r *rig) downAndCheck() {
 		}
 		return len(left) == 0, fmt.Sprintf("still running: %v", left)
 	})
-	if l := listening(r.t, r.ports.all()); len(l) > 0 {
+	if l := stack.Listening(r.t, r.ports.all()); len(l) > 0 {
 		r.t.Errorf("step (g): ports %v still listen after down", l)
 	}
 	r.t.Logf("step (g): down stopped %d processes of the stack in %s", len(procs), time.Since(start).Round(100*time.Millisecond))

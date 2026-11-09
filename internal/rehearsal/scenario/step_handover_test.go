@@ -12,12 +12,12 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"testing"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 const (
@@ -60,7 +60,7 @@ func (r *rig) beforeDrain(step string, in *v1alpha1.Instance) {
 func (r *rig) replacementReady(p *v1alpha1.Instance) v1alpha1.Instance {
 	r.t.Helper()
 	var repl v1alpha1.Instance
-	waitFor(r.t, waitDeadline, "the primary and its replacement to be ready and registered at the front", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "the primary and its replacement to be ready and registered at the front", func() bool {
 		if reg, known := r.registered(p); !known || !reg {
 			return false
 		}
@@ -75,25 +75,6 @@ func (r *rig) replacementReady(p *v1alpha1.Instance) v1alpha1.Instance {
 		return false
 	})
 	return repl
-}
-
-// waitState is waitFor whose failure names the state cond saw last.
-func waitState(t *testing.T, d time.Duration, what string, cond func() (bool, string)) {
-	t.Helper()
-	deadline, cut := boundedDeadline(t, d)
-	for {
-		ok, state := cond()
-		if ok {
-			return
-		}
-		if time.Now().After(deadline) {
-			if cut {
-				t.Fatalf("gave up waiting for %s %s before the test's deadline, so that its clean-up runs; last: %s", what, cleanupMargin, state)
-			}
-			t.Fatalf("timed out after %s waiting for %s; last: %s", d, what, state)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
 }
 
 // strOrNil prints a record's optional string.
@@ -151,11 +132,11 @@ func (r *rig) stepHandover(p *v1alpha1.Instance) {
 	}
 	repl := r.replacementReady(&pred)
 	key := r.keyFor(&pred) // the ring as it is now, with both Instances
-	waitFor(r.t, time.Until(ds), "the drain start minus the stream's lead", func() bool { return !time.Now().Before(ds.Add(-streamLead)) })
+	stack.WaitFor(r.t, time.Until(ds), "the drain start minus the stream's lead", func() bool { return !time.Now().Before(ds.Add(-streamLead)) })
 	first, done := r.startStream(chatBody(handoverTokens, handoverTokens, true), key)
 	<-first
 	var drainSeen time.Time
-	waitFor(r.t, waitDeadline, "the primary to drain", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "the primary to drain", func() bool {
 		o, ok := r.watch.first(pred.UID, time.Time{}, func(o observation) bool { return o.phase == v1alpha1.InstanceDraining })
 		drainSeen = o.at
 		return ok
@@ -208,7 +189,7 @@ func (r *rig) checkDrained(pred, repl *v1alpha1.Instance, ds, streamEnd time.Tim
 	// ended; the Allocation ends gone or Ended, and its job leaves the fake
 	// cluster's queue.
 	jobID, _ := strconv.Atoi(pred.Status.JobID)
-	waitState(r.t, waitDeadline, "the primary to end Drained, its Allocation to end and its job to finish", func() (bool, string) {
+	stack.WaitState(r.t, stack.WaitDeadline, "the primary to end Drained, its Allocation to end and its job to finish", func() (bool, string) {
 		o, ended := r.watch.first(pred.UID, time.Time{}, func(o observation) bool { return o.phase == v1alpha1.InstanceEnded })
 		var a v1alpha1.Allocation
 		gone := !r.get(&a, alloc.Name, namespace)
@@ -225,9 +206,9 @@ func (r *rig) checkDrained(pred, repl *v1alpha1.Instance, ds, streamEnd time.Tim
 	}
 	defer reportOrphanedTunnels(r.t, r.c, "c")
 	r.proxyEnded(pred.UID)
-	waitFor(r.t, waitDeadline, "the primary's Allocation's record "+name, func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "the primary's Allocation's record "+name, func() bool {
 		var l appsv1.ControllerRevisionList
-		ctx, cancel := callCtx(r.t)
+		ctx, cancel := stack.CallCtx(r.t)
 		defer cancel()
 		if err := r.c.List(ctx, &l); err != nil {
 			return false

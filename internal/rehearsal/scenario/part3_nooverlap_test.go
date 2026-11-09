@@ -23,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 )
 
@@ -152,7 +153,7 @@ func (p3 *part3) noOverlap() {
 	}
 	pr := p3.startProber(models...)
 	for _, d := range order {
-		waitFor(r.t, time.Until(d.ds)+time.Minute, "the drain start of "+d.name+" minus the stream's lead", func() bool {
+		stack.WaitFor(r.t, time.Until(d.ds)+time.Minute, "the drain start of "+d.name+" minus the stream's lead", func() bool {
 			return !time.Now().Before(d.ds.Add(-streamLead))
 		})
 		first, done := r.startStream(chatBodyFor(d.model, longTokens, longTokens, true), "rehearsal-part3-drain-"+d.name)
@@ -190,7 +191,7 @@ func (p3 *part3) noOverlap() {
 func (p3 *part3) waitSuccessors(pr *prober) {
 	r := p3.rig
 	r.t.Helper()
-	waitState(r.t, waitDeadline+2*time.Minute, "each successor to be held at the engine gate through its gap, then to serve", func() (bool, string) {
+	stack.WaitState(r.t, stack.WaitDeadline+2*time.Minute, "each successor to be held at the engine gate through its gap, then to serve", func() (bool, string) {
 		replies := pr.replies()
 		var waiting []string
 		for _, d := range p3.deps {
@@ -489,7 +490,7 @@ func (p3 *part3) checkNoOverlapSlot(d *depRun) {
 	for _, p := range noOverlapSlotProblems(r.watch.deployment(d.name), d.ds, o.at) {
 		r.t.Errorf("%s: %s", d.name, p)
 	}
-	waitFor(r.t, waitDeadline, d.name+"'s NoOverlapSlot to clear once its successor is ready", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, d.name+"'s NoOverlapSlot to clear once its successor is ready", func() bool {
 		var md v1alpha1.ModelDeployment
 		if !r.get(&md, d.name, namespace) {
 			return false

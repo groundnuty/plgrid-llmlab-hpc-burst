@@ -14,6 +14,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 // defaultStartToReady is the controller's start-to-ready time for a class
@@ -137,7 +138,7 @@ func (p3 *part3) checkForbidden() {
 		dues[managedMD] = changeLate
 	}
 	var all v1alpha1.ModelDeploymentList
-	ctx, cancel := callCtx(r.t)
+	ctx, cancel := stack.CallCtx(r.t)
 	err := r.c.List(ctx, &all)
 	cancel()
 	if err != nil {
@@ -153,7 +154,7 @@ func (p3 *part3) checkForbidden() {
 	var barriers []eventcount.Barrier
 	for name, due := range dues {
 		var b eventcount.Barrier
-		waitState(r.t, waitDeadline, "a reconcile pass of "+name+" that began at or after "+ts(due), func() (bool, string) {
+		stack.WaitState(r.t, stack.WaitDeadline, "a reconcile pass of "+name+" that began at or after "+ts(due), func() (bool, string) {
 			var md v1alpha1.ModelDeployment
 			if !r.get(&md, name, namespace) || md.Status.LastReconcileTime == nil {
 				return false, "no lastReconcileTime"

@@ -32,6 +32,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/managed/llmlabtest"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
@@ -263,7 +264,7 @@ func (p3 *part3) start() {
 	r.t.Helper()
 	for _, name := range []string{queuedDep.provider, oneSlotDep.provider} {
 		var pv v1alpha1.Provider
-		waitFor(r.t, waitDeadline, "Provider "+name+" to be Ready over the login node", func() bool {
+		stack.WaitFor(r.t, stack.WaitDeadline, "Provider "+name+" to be Ready over the login node", func() bool {
 			return r.get(&pv, name, "") && v1alpha1.ProviderReady(&pv, time.Now())
 		})
 	}
@@ -284,7 +285,7 @@ func (p3 *part3) start() {
 func (p3 *part3) waitManaged() {
 	r := p3.rig
 	r.t.Helper()
-	waitFor(r.t, waitDeadline, "the managed deployment to be Ready on the LLMLab double's catalog", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "the managed deployment to be Ready on the LLMLab double's catalog", func() bool {
 		var pv v1alpha1.Provider
 		var md v1alpha1.ModelDeployment
 		if !r.get(&pv, managedProvider, "") || !r.get(&md, managedMD, namespace) {
@@ -327,7 +328,7 @@ func (p3 *part3) instancesOf(md string) []v1alpha1.Instance {
 func (p3 *part3) waitPrimary(d *depRun) {
 	r := p3.rig
 	r.t.Helper()
-	waitState(r.t, waitDeadline, "the primary of "+d.name+" to be ready and registered at the front", func() (bool, string) {
+	stack.WaitState(r.t, stack.WaitDeadline, "the primary of "+d.name+" to be ready and registered at the front", func() (bool, string) {
 		for _, in := range p3.instancesOf(d.name) {
 			if in.Annotations[v1alpha1.AnnotationPredecessor] != "" || in.Status.Phase != v1alpha1.InstanceReady {
 				continue

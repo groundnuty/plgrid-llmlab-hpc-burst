@@ -18,6 +18,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 // rehearsalTiming: a 7 min lease whose drain window is 90 s + 30 s (the
@@ -118,7 +119,7 @@ func startRig(t *testing.T, mode string) *rig {
 func startRigWith(t *testing.T, s rigSetup) *rig {
 	t.Helper()
 	b := requireRehearsal(t)
-	dir := shortDir(t)
+	dir := stack.ShortDir(t)
 	r := &rig{t: t, b: b, hub: startHub(t), ports: s.ports, tokenDelay: tokenDelay, dir: dir}
 	// The job's environment has no HF_ENDPOINT: the agent learns the Hub
 	// from agent.json, which the controller writes from its own (ruling of 1
@@ -134,8 +135,8 @@ func startRigWith(t *testing.T, s rigSetup) *rig {
 	}
 	// The controller lists the checkpoint from the Hub double through
 	// HF_ENDPOINT, which up passes on to it.
-	r.h = startHost(t, b, dir, s.ports, dh, cleanEnv("HF_ENDPOINT="+r.hub.url))
-	arch := cpuArch(t)
+	r.h = startHost(t, b, dir, s.ports, dh, stack.CleanEnv("HF_ENDPOINT="+r.hub.url))
+	arch := stack.CPUArch(t)
 	r.h.placeAgentBuild(arch)
 	r.c = kubeClient(t, r.h.state)
 	objs := []client.Object{batchProfile(arch, rehearsalTiming), batchProvider(creds)}
@@ -150,7 +151,7 @@ func startRigWith(t *testing.T, s rigSetup) *rig {
 }
 
 func (r *rig) get(obj client.Object, name, ns string) bool {
-	ctx, cancel := callCtx(r.t)
+	ctx, cancel := stack.CallCtx(r.t)
 	defer cancel()
 	return r.c.Get(ctx, client.ObjectKey{Name: name, Namespace: ns}, obj) == nil
 }
@@ -160,7 +161,7 @@ func (r *rig) get(obj client.Object, name, ns string) bool {
 func (r *rig) providerReady() {
 	r.t.Helper()
 	var p v1alpha1.Provider
-	waitFor(r.t, waitDeadline, "the Provider to be Ready over the login node", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "the Provider to be Ready over the login node", func() bool {
 		return r.get(&p, providerName, "") && v1alpha1.ProviderReady(&p, time.Now())
 	})
 	r.assertRealSSH()
@@ -181,8 +182,8 @@ func (r *rig) assertRealSSH() {
 		r.t.Fatalf("the system ssh (%v) or this binary (%v) is unknown", err, serr)
 	}
 	pid, found := r.statusPID("controller"), false
-	for _, c := range childrenOf(pid) {
-		switch exe := processExe(c); exe {
+	for _, c := range stack.ChildrenOf(pid) {
+		switch exe := stack.ProcessExe(c); exe {
 		case want:
 			found = true
 		case self:
@@ -197,7 +198,7 @@ func (r *rig) assertRealSSH() {
 // allocations lists the deployment's Allocations.
 func (r *rig) allocations() []v1alpha1.Allocation {
 	var l v1alpha1.AllocationList
-	ctx, cancel := callCtx(r.t)
+	ctx, cancel := stack.CallCtx(r.t)
 	defer cancel()
 	if err := r.c.List(ctx, &l, client.InNamespace(namespace)); err != nil {
 		r.t.Fatalf("list allocations: %v", err)
@@ -207,7 +208,7 @@ func (r *rig) allocations() []v1alpha1.Allocation {
 
 func (r *rig) instances() []v1alpha1.Instance {
 	var l v1alpha1.InstanceList
-	ctx, cancel := callCtx(r.t)
+	ctx, cancel := stack.CallCtx(r.t)
 	defer cancel()
 	if err := r.c.List(ctx, &l, client.InNamespace(namespace)); err != nil {
 		r.t.Fatalf("list instances: %v", err)
@@ -308,7 +309,7 @@ func (r *rig) jobSSHForwards(jobID int) []int {
 	var out []int
 	for _, p := range pids {
 		args, _ := os.ReadFile("/proc/" + strconv.Itoa(p) + "/cmdline")
-		if processExe(p) == want && strings.Contains(string(args), "-L\x00") {
+		if stack.ProcessExe(p) == want && strings.Contains(string(args), "-L\x00") {
 			out = append(out, p)
 		}
 	}
@@ -331,7 +332,7 @@ func TestRehearsalSSH(t *testing.T) {
 	}
 	r.stepScaleToZero("g")
 	for _, p := range fwd {
-		if alive(p) {
+		if stack.Alive(p) {
 			t.Errorf("the agent's ssh forward %d outlived its job (HBEP-6: no ssh process behind)", p)
 		}
 	}
