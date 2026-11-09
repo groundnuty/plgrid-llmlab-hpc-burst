@@ -9,8 +9,12 @@
 # machine's architecture is fetched; VERSION is as in `hpcburst up --version` (1.36.5, v1.36.5+k3s1).
 #
 # The pins are in internal/launcher/k3s-pins.txt, the same file the launcher embeds and checks
-# before it starts a binary. A file that is already there with the right hash is left alone; a
-# download with the wrong hash is deleted and the script fails. Nothing is written outside DEST_DIR.
+# before it starts a binary. A file that is already there with the right hash is left alone, and
+# nothing is downloaded for it; a file there with another hash is downloaded again, and a download
+# with the wrong hash is deleted and the script fails. Nothing is written outside DEST_DIR.
+#
+# DEST_DIR may be a restored CI cache (the workflow saves it between runs, so that a GitHub outage
+# does not fail every job). It is never trusted: each file is checked against its pin on every run.
 #
 # K3S_RELEASE_BASE overrides the download site (default: the k3s-io/k3s GitHub releases), for
 # mirrors and for tests. K3S_PINS_FILE overrides the pins file, for tests only.
@@ -75,7 +79,10 @@ while read -r version parch asset sum; do
   part=$target.part.$$
   trap 'rm -f "$part"' EXIT
   echo "fetching $version from $url"
-  curl -fsSL --retry 3 -o "$part" "$url"
+  if ! curl -fsSL --retry 3 -o "$part" "$url"; then
+    echo "fetch-k3s.sh: download of $url failed, and $target is not there with its pinned sha256" >&2
+    exit 1
+  fi
   if ! echo "$sum  $part" | sha256sum -c --status -; then
     got=$(sha256sum "$part" | cut -d' ' -f1)
     rm -f "$part"
