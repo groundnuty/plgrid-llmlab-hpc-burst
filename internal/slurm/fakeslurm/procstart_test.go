@@ -123,16 +123,19 @@ func TestProcessesEndWhenTheirHostDiesWithoutClose(t *testing.T) {
 			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
+			exited := make(chan error, 1)
+			reaped := make(chan struct{})
+			go func() { exited <- cmd.Wait(); close(reaped) }()
 			var pids []int
 			t.Cleanup(func() { // a leak found below must not outlive this test either
+				_ = cmd.Process.Kill() // the host itself, if it stalled before its job and step ran
+				<-reaped
 				for _, pid := range pids {
 					if !procGone(pid) && ownedBy(pid, root) {
 						_ = syscall.Kill(pid, syscall.SIGKILL)
 					}
 				}
 			})
-			exited := make(chan error, 1)
-			go func() { exited <- cmd.Wait() }()
 			waitFor(t, "the helper host to have a job and a step running", func() bool {
 				select {
 				case err := <-exited:
