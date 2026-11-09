@@ -124,6 +124,27 @@ func standInWorld(t *testing.T, row Row) world {
 	return w
 }
 
+// standInDirect is the stand-in's dial-home in direct mode: the front's
+// dial-home listener on loopback, which the fake job reaches as a node would.
+var standInDirect = stack.DialHome{Mode: "direct", Addr: standInPorts.DialHomeListen}
+
+// standInHostDialed is the stand-in's dial-home in host-dialed mode (HBEP-6,
+// Dial-home modes): no address, no key; the controller's relays reach the job
+// through the stand-in's login node, over the fake Slurm's srun -u --overlap
+// steps, as alpha's host reaches Helios and Athena.
+var standInHostDialed = stack.DialHome{Mode: "host-dialed"}
+
+// inMode is a stand-in world in another dial-home mode: host-dialed has no
+// dial-home listener for the nodes, so the front's stays at its loopback
+// default, base+7.
+func inMode(w world, dh stack.DialHome) world {
+	w.dh = dh
+	if dh.Mode != "direct" {
+		w.ports.DialHomeListen = ""
+	}
+	return w
+}
+
 // standInWorldShaped is standInWorld with a change to the cluster's shape, and the cluster.
 func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)) (world, *stack.Cluster) {
 	t.Helper()
@@ -173,7 +194,7 @@ func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)
 	}
 	return world{
 		name: "stand-in", bins: b, place: func(h *stack.Host) { h.PlaceAgentBuild(arch) },
-		dh: stack.DialHome{Mode: "direct", Addr: standInPorts.DialHomeListen}, ports: standInPorts,
+		dh: standInDirect, ports: standInPorts,
 		// The controller lists the checkpoint from the Hub double through HF_ENDPOINT, which up passes on to it.
 		env:     stack.CleanEnv("HF_ENDPOINT=" + hub.URL),
 		objects: []client.Object{prof, prov}, provider: stack.ProviderName, cluster: row.Cluster, qos: row.QOS, md: md, profile: prof.Spec,
@@ -215,7 +236,10 @@ func standInEngineMatch(t *testing.T) func(argv, command []string) bool {
 
 // runStandIn runs one row's LIVE steps over the stand-in, through Run, and
 // requires its verdict to pass.
-func runStandIn(t *testing.T, name string) {
+func runStandIn(t *testing.T, name string) { runStandInIn(t, name, standInDirect) }
+
+// runStandInIn is runStandIn in the dial-home mode dh.
+func runStandInIn(t *testing.T, name string, dh stack.DialHome) {
 	if os.Getenv(envStandIn) != "1" {
 		t.Skipf("the stand-in proof of the live steps runs only with %s=1 (internal/alpha, standin_test.go)", envStandIn)
 	}
@@ -224,13 +248,14 @@ func runStandIn(t *testing.T, name string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := Config{Row: row, StandIn: true, Out: filepath.Join(t.TempDir(), "out"), PendingMax: 2 * time.Minute, RunID: id, FrontLabel: standInFrontLabel}
-	t.Logf("%s: %s", row.Name, cfg.Mode())
+	cfg := Config{Row: row, StandIn: true, Out: filepath.Join(t.TempDir(), "out"), PendingMax: 2 * time.Minute, RunID: id, FrontLabel: standInFrontLabel,
+		DialHomeMode: dh.Mode, DialHomeAddr: dh.Addr}
+	t.Logf("%s: %s, dial-home mode %s", row.Name, cfg.Mode(), dh.Mode)
 	rec, err := NewRecorder(cfg.Out)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var st Steps = newLiveRun(t, cfg, standInWorld(t, row))
+	var st Steps = newLiveRun(t, cfg, inMode(standInWorld(t, row), dh))
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.PendingMax+20*time.Minute)
 	defer cancel()
 	failures, err := Run(ctx, cfg, st, rec, t.Logf)
@@ -375,3 +400,30 @@ func TestStandInTunnelHour(t *testing.T) { runStandIn(t, "tunnel-hour-athena") }
 //
 //livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
 func TestStandInTunnelHourHelios(t *testing.T) { runStandIn(t, "tunnel-hour-helios") }
+
+// TestStandInHandoverHostDialed is alpha-athena-handover's live steps over the
+// stand-in in host-dialed mode (HBEP-6, Dial-home modes): both jobs' agents
+// reach this host only over the controller's relays, so the handover's
+// streams and the successor's start cross them.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInHandoverHostDialed(t *testing.T) {
+	runStandInIn(t, "alpha-athena-handover", standInHostDialed)
+}
+
+// TestStandInNoOverlapHostDialed is alpha-helios-nooverlap's live steps over
+// the stand-in in host-dialed mode.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInNoOverlapHostDialed(t *testing.T) {
+	runStandInIn(t, "alpha-helios-nooverlap", standInHostDialed)
+}
+
+// TestStandInTunnelHourHostDialed is tunnel-hour-athena's live steps over the
+// stand-in in host-dialed mode: S1's hour, its path rate measured over the
+// serving relay.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInTunnelHourHostDialed(t *testing.T) {
+	runStandInIn(t, "tunnel-hour-athena", standInHostDialed)
+}
