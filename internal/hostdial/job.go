@@ -280,20 +280,20 @@ func (c *channel) acceptConns() {
 				c.mu.Unlock()
 				_ = conn.Close()
 			}()
-			st, err := c.open()
+			st, gone, err := c.open()
 			if err != nil {
 				c.j.o.Logger.Warn("a connection found no relay session and is closed", "channel", c.name, "err", err)
 				return
 			}
-			join(conn, st)
+			join(conn, st, gone)
 		}()
 	}
 }
 
-// open opens a stream on the channel's session, waiting up to Wait for one.
-// A session that ends between the look and the open is waited past, within
-// the same deadline.
-func (c *channel) open() (*yamux.Stream, error) {
+// open opens a stream on the channel's session, waiting up to Wait for one,
+// and returns it with the session's close channel. A session that ends
+// between the look and the open is waited past, within the same deadline.
+func (c *channel) open() (*yamux.Stream, <-chan struct{}, error) {
 	deadline := time.NewTimer(c.j.o.Wait)
 	defer deadline.Stop()
 	for {
@@ -303,22 +303,24 @@ func (c *channel) open() (*yamux.Stream, error) {
 		if sess != nil && !sess.IsClosed() {
 			st, err := sess.OpenStream()
 			if err == nil {
-				return st, nil
+				return st, sess.CloseChan(), nil
 			}
 		}
 		select {
 		case <-changed:
 		case <-deadline.C:
-			return nil, fmt.Errorf("no relay session within %s", c.j.o.Wait)
+			return nil, nil, fmt.Errorf("no relay session within %s", c.j.o.Wait)
 		case <-c.j.closed:
-			return nil, errors.New("the job side is closing")
+			return nil, nil, errors.New("the job side is closing")
 		}
 	}
 }
 
 // join copies both ways between a and b, passing each direction's end on as a
-// half-close, and returns once both directions have ended.
-func join(a, b net.Conn) {
+// half-close, and returns once both directions have ended. When gone is
+// closed (the session ended), it closes both, so a copy blocked on a peer
+// that sends nothing (a long poll, an idle tunnel) ends too.
+func join(a, b net.Conn, gone <-chan struct{}) {
 	done := make(chan struct{}, 2)
 	copyHalf := func(dst, src net.Conn) {
 		_, _ = io.Copy(dst, src)
@@ -327,8 +329,16 @@ func join(a, b net.Conn) {
 	}
 	go copyHalf(a, b)
 	go copyHalf(b, a)
-	<-done
-	<-done
+	for n := 0; n < 2; {
+		select {
+		case <-done:
+			n++
+		case <-gone:
+			_ = a.Close()
+			_ = b.Close()
+			gone = nil
+		}
+	}
 }
 
 // closeWrite ends dst's writing side: a TCP or Unix half-close, a stream's

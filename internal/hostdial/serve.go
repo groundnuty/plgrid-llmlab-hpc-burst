@@ -68,8 +68,9 @@ func Serve(ctx context.Context, rwc io.ReadWriteCloser, target string, log *slog
 			}
 			stats.Joined.Add(1)
 			defer conn.Close()
-			// A session that ends closes the stream, which ends both copies.
-			join(conn, st)
+			// A session that ends closes the stream and the connection, which
+			// ends both copies.
+			join(conn, st, sess.CloseChan())
 		}()
 	}
 }

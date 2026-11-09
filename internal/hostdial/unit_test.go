@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/yamux"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -103,5 +105,50 @@ func TestStartJobRefusesALinkedOrMissingDirectory(t *testing.T) {
 	}
 	if err := Pipe(filepath.Join(base, "missing"), agentapi.RelayControl, nil, io.Discard); err == nil {
 		t.Error("Pipe accepted a relay directory that does not exist")
+	}
+}
+
+// Serve returns once its session ends, even while a joined connection's
+// target is silent and never closes (a long poll, an idle tunnel): the relay
+// owner waits for Serve before it starts the relay again.
+func TestServeReturnsWhenItsSessionEndsUnderASilentTarget(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	held := make(chan net.Conn, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			held <- c // never read, never written, never closed until the test ends
+		}
+	}()
+	jobEnd, hostEnd := net.Pipe()
+	served := make(chan error, 1)
+	go func() { served <- Serve(context.Background(), hostEnd, ln.Addr().String(), nil, nil) }()
+	sess, err := yamux.Client(jobEnd, sessionConfig(nil, "job"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := sess.OpenStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	var c net.Conn
+	select {
+	case c = <-held:
+		defer c.Close()
+	case <-time.After(30 * time.Second):
+		t.Fatal("the stream was not joined to the target")
+	}
+	_ = sess.Close()
+	select {
+	case <-served:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Serve did not return after its session ended, with a silent target joined")
 	}
 }
