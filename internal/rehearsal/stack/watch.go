@@ -67,6 +67,9 @@ type Recorder struct {
 	obs    []Observation
 	allocs []AllocObservation
 	mds    []DeploymentObservation
+	// lost holds the objects a catch-up found an event lost on, which later
+	// catch-ups leave out (catchup.go).
+	lost map[types.UID]bool
 }
 
 // StartWatch records every version of the namespace's Instances, Allocations
