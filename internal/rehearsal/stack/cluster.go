@@ -10,17 +10,20 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // ClusterUser is the fake cluster's own user, never this host's.
@@ -96,6 +99,13 @@ func StartCluster(t T, dir string, shape ClusterShape, install func(dir string) 
 	t.Cleanup(func() {
 		if err := c.Plat.Close(); err != nil {
 			t.Errorf("the fake cluster's Close: %v", err)
+		}
+		// Close KILLs every job still running, and a killed agent cannot
+		// remove its relay socket's directory. Under the job's TMPDIR it goes
+		// with the job; one the agent made under /dev/shm, its fallback, would
+		// stay on this host, so it is removed by the agent's own record.
+		for _, d := range RemoveRecordedRelayDirs(c.Root) {
+			t.Logf("removed the relay socket directory %s that a killed agent left", d)
 		}
 	})
 	var around func(string, func() (slurm.Result, error)) (slurm.Result, error)
@@ -257,4 +267,35 @@ func (h *Hub) Resolved() []string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]string(nil), h.resolves...)
+}
+
+// RemoveRecordedRelayDirs removes the relay socket directories that the
+// agents' rendezvous files under root name (agentapi.RelaySocketFileName,
+// HBEP-6, The rendezvous), when each is still there, is a directory of this
+// user's and is named hb-relay-*, and returns them. It removes by record only:
+// nothing is found by a pattern of names.
+func RemoveRecordedRelayDirs(root string) []string {
+	var removed []string
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || d.Name() != agentapi.RelaySocketFileName {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil || len(b) > 4096 {
+			return nil
+		}
+		dir := filepath.Dir(strings.TrimSpace(string(b)))
+		fi, err := os.Lstat(dir)
+		if err != nil || !fi.IsDir() || !strings.HasPrefix(filepath.Base(dir), "hb-relay-") {
+			return nil
+		}
+		if st, ok := fi.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != os.Geteuid() {
+			return nil
+		}
+		if os.RemoveAll(dir) == nil {
+			removed = append(removed, dir)
+		}
+		return nil
+	})
+	return removed
 }

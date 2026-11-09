@@ -8,9 +8,11 @@ package hostdial
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -202,47 +204,53 @@ func TestTheRendezvousFile(t *testing.T) {
 	}
 }
 
-// The socket's directory goes under /dev/shm first, then under TMPDIR when
-// /dev/shm is missing or too long for a socket path, and a job side with
-// neither fails by name.
-func TestTheSocketDirectoryIsDevShmThenTMPDIR(t *testing.T) {
+// The socket's directory goes under the job's TMPDIR (science-agent ruling on
+// #301), and under /dev/shm only when the socket's path under TMPDIR would
+// pass 107 bytes, which is logged; an unset TMPDIR, an unusable one, or one
+// too long with /dev/shm too long too fails by name.
+func TestTheSocketDirectoryIsTMPDIRThenDevShm(t *testing.T) {
 	alloc := filepath.Join(shortDir(t), "a")
 	if err := os.Mkdir(alloc, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	shm, tmp := shortDir(t), shortDir(t)
+	var logs bytes.Buffer
 	start := func(o JobOptions) (*Job, error) {
-		o.AllocDir, o.Allocation = alloc, "u-1"
+		logs.Reset()
+		o.AllocDir, o.Allocation, o.Logger = alloc, "u-1", slog.New(slog.NewTextHandler(&logs, nil))
 		return StartJob(o)
 	}
 	j, err := start(JobOptions{ShmDir: shm, TmpDir: tmp})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(j.Socket(), shm+"/hb-relay-") {
-		t.Errorf("with both: the socket is %s, want under the shm directory %s", j.Socket(), shm)
+	if !strings.HasPrefix(j.Socket(), tmp+"/hb-relay-") || strings.Contains(logs.String(), "fallback") {
+		t.Errorf("with both: the socket is %s, want under TMPDIR %s, and no fallback logged: %s", j.Socket(), tmp, logs.String())
+	}
+	_ = j.Close()
+	long := filepath.Join(tmp, strings.Repeat("d", 90))
+	if err := os.Mkdir(long, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	j, err = start(JobOptions{ShmDir: shm, TmpDir: long})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(j.Socket(), shm+"/hb-relay-") || !strings.Contains(logs.String(), "would pass 107 bytes") {
+		t.Errorf("with a TMPDIR too long: the socket is %s, want under %s, with the fallback logged: %s", j.Socket(), shm, logs.String())
 	}
 	_ = j.Close()
 	for name, o := range map[string]JobOptions{
-		"no shm":     {ShmDir: filepath.Join(shm, "missing"), TmpDir: tmp},
-		"a long shm": {ShmDir: filepath.Join(shm, strings.Repeat("d", 90)), TmpDir: tmp},
+		"no TMPDIR":                 {ShmDir: shm, TmpDir: ""},
+		"a TMPDIR that is missing":  {ShmDir: shm, TmpDir: filepath.Join(tmp, "missing")},
+		"a TMPDIR and shm too long": {ShmDir: long, TmpDir: long},
 	} {
-		if strings.Contains(name, "long") {
-			if err := os.Mkdir(o.ShmDir, 0o700); err != nil {
-				t.Fatal(err)
+		if j, err := start(o); !errors.Is(err, ErrNoSocketDir) {
+			if j != nil {
+				_ = j.Close()
 			}
+			t.Errorf("%s: %v, want ErrNoSocketDir, not a fallback", name, err)
 		}
-		j, err := start(o)
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		if !strings.HasPrefix(j.Socket(), tmp+"/hb-relay-") {
-			t.Errorf("%s: the socket is %s, want under TMPDIR %s", name, j.Socket(), tmp)
-		}
-		_ = j.Close()
-	}
-	if _, err := start(JobOptions{ShmDir: filepath.Join(shm, "missing"), TmpDir: ""}); !errors.Is(err, ErrNoSocketDir) {
-		t.Errorf("neither: %v, want ErrNoSocketDir", err)
 	}
 }
 

@@ -156,9 +156,8 @@ func TestHostDialedRotatedCredentialsReachRunningRelays(t *testing.T) {
 }
 
 // The rendezvous: a batch step and a relay step with different TMPDIR values
-// still meet through relay-socket (HBEP-6, Test plan). The job side has no
-// /dev/shm here (HB_TEST_SHM names a missing directory), so its socket falls
-// back to the batch step's TMPDIR; the relay steps get a TMPDIR of their own
+// still meet through relay-socket (HBEP-6, Test plan). The job side's socket
+// is under the batch step's TMPDIR; the relay steps get a TMPDIR of their own
 // (fakeslurm.RunMode.StepEnv), as a step srun starts from the login node may.
 func TestHostDialedRendezvousAcrossDifferentTMPDIRs(t *testing.T) {
 	stepTmp, err := os.MkdirTemp("", "hs")
@@ -166,13 +165,10 @@ func TestHostDialedRendezvousAcrossDifferentTMPDIRs(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(stepTmp) })
-	w := newWorld(t, func(c *worldConfig) {
-		c.stepEnv = map[string]string{"TMPDIR": stepTmp}
-		c.jobEnv = map[string]string{"HB_TEST_SHM": filepath.Join(stepTmp, "no-shm")}
-	})
+	w := newWorld(t, func(c *worldConfig) { c.stepEnv = map[string]string{"TMPDIR": stepTmp} })
 	j := w.submit("hb-relay-tmp-0123456789ab", 30*time.Second)
-	if strings.HasPrefix(j.ports.Socket, stepTmp) || strings.HasPrefix(j.ports.Socket, hostdial.DevShm) || !strings.HasPrefix(j.ports.Socket, w.base) {
-		t.Fatalf("the agent's socket %s is not under the batch step's TMPDIR (in %s): the TMPDIRs do not differ as the test needs", j.ports.Socket, w.base)
+	if strings.HasPrefix(j.ports.Socket, stepTmp) || !strings.HasPrefix(j.ports.Socket, w.jobDir()) {
+		t.Fatalf("the agent's socket %s is not under the batch step's TMPDIR (in %s): the TMPDIRs do not differ as the test needs", j.ports.Socket, w.jobDir())
 	}
 	own, _, _ := w.owner(hostdial.OwnerOptions{})
 	own.Want(w.target(j))
@@ -418,4 +414,35 @@ func waitRunning(t *testing.T, w *world, j job) {
 		s, ok := w.plat.Job(atoi(t, j.id))
 		return ok && s.State == "RUNNING"
 	})
+}
+
+// A killed job side's directory goes with its job (science-agent ruling on
+// #301): the socket's directory is under the job's TMPDIR, which the site
+// removes when the job ends, so a SIGKILLed job side, which cannot clean up,
+// leaves nothing behind once its job has ended. The fake Slurm removes a
+// job's execution directory, TMPDIR included, once its processes are gone,
+// as a site's per-job TMPDIR goes.
+func TestHostDialedAKilledJobSidesDirectoryGoesWithItsJob(t *testing.T) {
+	w := newWorld(t)
+	j := w.submit("hb-relay-kil-0123456789ab", 30*time.Second)
+	dir := filepath.Dir(j.ports.Socket)
+	if !strings.HasPrefix(dir, w.jobDir()+"/") || !strings.HasPrefix(filepath.Base(dir), "hb-relay-") {
+		t.Fatalf("the socket's directory %s is not a hb-relay-* directory under the job's TMPDIR, in %s", dir, w.jobDir())
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("the socket's directory %s: %v", dir, err)
+	}
+	if err := syscall.Kill(j.ports.PID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, time.Minute, "the killed job's socket directory gone with the job", func() bool {
+		_, err := os.Stat(dir)
+		return os.IsNotExist(err)
+	})
+	if s, ok := w.plat.Job(atoi(t, j.id)); !ok || s.State == "RUNNING" {
+		t.Errorf("job %s is %+v after its batch process was killed", j.id, s)
+	}
+	if left, _ := filepath.Glob(filepath.Join(w.base, "s", "hb-relay-*")); len(left) != 0 {
+		t.Errorf("the fallback directory holds %v: the job side fell back from TMPDIR", left)
+	}
 }

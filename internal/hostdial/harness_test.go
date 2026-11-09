@@ -266,9 +266,9 @@ func newWorld(t *testing.T, mods ...func(*worldConfig)) *world {
 	})
 	w.node, err = rehearsal.StartLoginNode(rehearsal.LoginConfig{
 		Dir: filepath.Join(base, "n"), Platform: w.plat,
-		// Each world's job sides make their sockets in a directory of its
-		// own, which the world's clean-up removes: a job the fake kills never
-		// closes its socket, and the host's /dev/shm would keep it.
+		// The job sides' sockets are under each job's TMPDIR, in the world's
+		// directory; their fallback, for a TMPDIR too long for a socket, is a
+		// directory of the world's too, never the host's /dev/shm.
 		Login: fakeslurm.Login{User: clusterUser, Env: loginEnv(home, map[string]string{"HB_TEST_SHM": filepath.Join(base, "s")}, cfg.jobEnv)},
 	})
 	if err != nil {
@@ -441,6 +441,9 @@ func (w *world) owner(o hostdial.OwnerOptions) (*hostdial.Owner, context.CancelF
 	})
 	return own, cancel, done
 }
+
+// jobDir is where the fake keeps each job's execution, TMPDIR included.
+func (w *world) jobDir() string { return filepath.Join(w.base, "j") }
 
 // loginEnv is the login's environment, which jobs inherit: HOME, then each
 // of extras in order, a later one replacing an earlier one's variable.

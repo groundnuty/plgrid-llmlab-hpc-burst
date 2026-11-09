@@ -24,7 +24,8 @@
 //     connection that finds no session waits for one up to Wait (30 s), then
 //     is closed; frpc and the control client retry. The relays meet the agent
 //     on one Unix socket, in a directory with a random name and mode 700
-//     under /dev/shm, else the job's TMPDIR, whose path the agent writes to
+//     under the job's TMPDIR (/dev/shm only when that path would be too long
+//     for a socket), whose path the agent writes to
 //     the Allocation directory's relay-socket file (HBEP-6, The rendezvous).
 //     It refuses another user's peer (SO_PEERCRED), greets with the
 //     Allocation's UID, and keeps the relay with the highest (E, N) on each

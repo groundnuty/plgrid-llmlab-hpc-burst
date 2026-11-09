@@ -63,28 +63,31 @@ func (w logWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// DevShm is where the socket's directory goes first: node-local memory, on no
-// shared file system and outside any partition's tmpDir that a job's
-// bootstrap exports as TMPDIR. The job's TMPDIR is the fallback, which the
-// second probe found the same for the batch step and an --overlap step on
-// Athena (#145, comment 6749523168).
+// DevShm is the socket directory's fallback, used only when the socket's path
+// under the job's TMPDIR would pass agentapi.MaxRelaySocketPath. TMPDIR is the
+// default (science-agent ruling on #301, 9 Nov 2026): the site scopes it per
+// job and cleans it at the job's end, so a killed agent's directory goes with
+// its job; on Helios the bootstrap points it at $MEMFS; and the second probe
+// found an --overlap step's TMPDIR the same as its batch step's (#145, comment
+// 6749523168). A directory under /dev/shm outlives an agent that is killed.
 const DevShm = "/dev/shm"
 
-// ErrNoSocketDir is a job side that found neither /dev/shm nor its TMPDIR
-// usable for the relay socket's directory.
-var ErrNoSocketDir = errors.New("no directory for the relay socket under /dev/shm or TMPDIR")
+// ErrNoSocketDir is a job side that could make no directory for its relay
+// socket: TMPDIR unset or unusable, or too long with /dev/shm too long too.
+var ErrNoSocketDir = errors.New("no directory for the relay socket under TMPDIR, or under /dev/shm when TMPDIR is too long")
 
 // socketName is the agent's socket in its random directory.
 const socketName = "relay.sock"
 
 // JobOptions configure the job side.
 type JobOptions struct {
-	// ShmDir is where the socket's random directory goes first; "" means
-	// DevShm. A test points it elsewhere.
-	ShmDir string
-	// TmpDir is the job's TMPDIR, the socket directory's fallback when ShmDir
-	// is missing, not writable, or too long for agentapi.MaxRelaySocketPath.
+	// TmpDir is the job's TMPDIR, under which the socket's random directory
+	// goes (HBEP-6, The rendezvous).
 	TmpDir string
+	// ShmDir is the fallback when the socket's path under TmpDir would pass
+	// agentapi.MaxRelaySocketPath; "" means DevShm. A test points it
+	// elsewhere.
+	ShmDir string
 	// AllocDir is the Allocation's directory, where the rendezvous file goes
 	// (agentapi.RelaySocketFile).
 	AllocDir string
@@ -148,9 +151,12 @@ func StartJob(o JobOptions) (*Job, error) {
 	if o.ShmDir == "" {
 		o.ShmDir = DevShm
 	}
-	dir, err := socketDir(o.ShmDir, o.TmpDir)
+	dir, fellBack, err := socketDir(o.TmpDir, o.ShmDir)
 	if err != nil {
 		return nil, err
+	}
+	if fellBack != "" {
+		o.Logger.Warn("the relay socket's directory is under the fallback, not TMPDIR, and outlives a killed agent", "dir", dir, "why", fellBack)
 	}
 	j := &Job{o: o, dir: dir, sock: filepath.Join(dir, socketName), chans: map[agentapi.RelayChannel]*channel{}, closed: make(chan struct{})}
 	fail := func(err error) (*Job, error) {
@@ -183,33 +189,33 @@ func StartJob(o JobOptions) (*Job, error) {
 }
 
 // socketDir makes the socket's directory, with a random name and mode 700,
-// under shm, or under tmp when shm is missing, not writable, or the socket's
-// path there would be too long (HBEP-6, The rendezvous: "under its $TMPDIR or
-// /dev/shm (never a predictable path)").
-func socketDir(shm, tmp string) (string, error) {
-	var errs []error
-	for _, root := range []string{shm, tmp} {
-		if root == "" || !filepath.IsAbs(root) {
-			continue
-		}
-		// os.MkdirTemp appends up to 10 digits.
-		if len(filepath.Join(root, "hb-relay-0123456789", socketName)) > agentapi.MaxRelaySocketPath {
-			errs = append(errs, fmt.Errorf("the socket under %s would pass %d bytes", root, agentapi.MaxRelaySocketPath))
-			continue
-		}
-		dir, err := os.MkdirTemp(root, "hb-relay-")
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		if err := privateDir(dir, true); err != nil {
-			_ = os.Remove(dir)
-			errs = append(errs, err)
-			continue
-		}
-		return dir, nil
+// under tmp, the job's TMPDIR, or under shm when the socket's path under tmp
+// would pass agentapi.MaxRelaySocketPath; fellBack then says why. A TMPDIR
+// that is unset, not absolute or unusable is an error, not a fallback.
+func socketDir(tmp, shm string) (dir, fellBack string, err error) {
+	if tmp == "" || !filepath.IsAbs(tmp) {
+		return "", "", fmt.Errorf("hostdial: %w: TMPDIR %q is not an absolute directory", ErrNoSocketDir, tmp)
 	}
-	return "", fmt.Errorf("hostdial: %w: %w", ErrNoSocketDir, errors.Join(errs...))
+	// os.MkdirTemp appends up to 10 digits.
+	tooLong := func(root string) bool {
+		return len(filepath.Join(root, "hb-relay-0123456789", socketName)) > agentapi.MaxRelaySocketPath
+	}
+	root := tmp
+	if tooLong(tmp) {
+		if shm == "" || tooLong(shm) {
+			return "", "", fmt.Errorf("hostdial: %w: the socket under TMPDIR %s and under %s would pass %d bytes", ErrNoSocketDir, tmp, shm, agentapi.MaxRelaySocketPath)
+		}
+		root, fellBack = shm, fmt.Sprintf("the socket under TMPDIR %s would pass %d bytes", tmp, agentapi.MaxRelaySocketPath)
+	}
+	dir, err = os.MkdirTemp(root, "hb-relay-")
+	if err != nil {
+		return "", "", fmt.Errorf("hostdial: %w: %v", ErrNoSocketDir, err)
+	}
+	if err := privateDir(dir, true); err != nil {
+		_ = os.Remove(dir)
+		return "", "", fmt.Errorf("hostdial: %w: %v", ErrNoSocketDir, err)
+	}
+	return dir, fellBack, nil
 }
 
 // publish writes the socket's path to the rendezvous file, mode 600, by a

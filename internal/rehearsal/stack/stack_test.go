@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -19,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	"time"
 )
 
@@ -458,5 +461,37 @@ func TestDialHomeFlagsPerMode(t *testing.T) {
 				t.Errorf("front configuration member %q, want %q", got, c.member)
 			}
 		})
+	}
+}
+
+// RemoveRecordedRelayDirs removes a killed agent's relay socket directory by
+// the agent's rendezvous file, and nothing its record does not name: a
+// directory that is not hb-relay-*, and a hb-relay-* directory no file names.
+func TestRemoveRecordedRelayDirs(t *testing.T) {
+	root, elsewhere := t.TempDir(), t.TempDir()
+	mk := func(name string) string {
+		d := filepath.Join(elsewhere, name)
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	named, other, unnamed := mk("hb-relay-1234"), mk("not-a-relay"), mk("hb-relay-5678")
+	for i, d := range []string{named, other} {
+		alloc := filepath.Join(root, "stage", "alloc", fmt.Sprintf("hb-x-%d", i))
+		if err := os.MkdirAll(alloc, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(alloc, agentapi.RelaySocketFileName), []byte(filepath.Join(d, "relay.sock")+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := RemoveRecordedRelayDirs(root); len(got) != 1 || got[0] != named {
+		t.Errorf("removed %v, want only %s", got, named)
+	}
+	for _, d := range []string{other, unnamed} {
+		if _, err := os.Stat(d); err != nil {
+			t.Errorf("%s was removed: %v", d, err)
+		}
 	}
 }
