@@ -316,6 +316,33 @@ func TestDownErrRunsOnce(t *testing.T) {
 	}
 }
 
+// A down past its bound: by default its error is the command's own, as the alpha rows' has been; with NameDownBound it
+// also says the bound, as the rehearsal's has been. The expected texts are those of main before PR #283.
+func TestDownPastItsBound(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "hpcburst")
+	// It prints nothing and runs until the bound kills it; exec, so that the kill leaves no child behind.
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexec sleep 600\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const bound = 3 * time.Second
+	for name, c := range map[string]struct {
+		opts []HostOption
+		want string
+	}{
+		"the default":   {nil, "hpcburst down: signal: killed\n"},
+		"NameDownBound": {[]HostOption{NameDownBound}, "hpcburst down: signal: killed\nhpcburst did not end within 3s\n"},
+	} {
+		h := &Host{T: t, B: Binaries{HPCBurst: bin}, State: dir, Env: os.Environ(), DownBound: bound}
+		for _, o := range c.opts {
+			o(h)
+		}
+		if err := h.DownErr(); err == nil || err.Error() != c.want {
+			t.Errorf("%s: %q, want %q", name, err, c.want)
+		}
+	}
+}
+
 func TestBinariesMissing(t *testing.T) {
 	dir := t.TempDir()
 	exe := func(name string, mode os.FileMode) string {
@@ -343,10 +370,14 @@ func TestBinariesMissing(t *testing.T) {
 	if m := b.Missing(); !slices.Equal(m, []string{b.Front, b.Agent, "", ""}) {
 		t.Errorf("Missing with no frps or frpc = %q", m)
 	}
-	// A directory has the executable bit and is not a binary.
+	// A directory has the executable bit and is not a binary: the alpha rows' check
+	// counts it as missing, and the rehearsal's leaves it to fail when it is run.
 	b.HPCBurst = dir
-	if m := b.MissingBuilds(); !slices.Contains(m, dir) {
-		t.Errorf("MissingBuilds = %v, want the directory named as hpcburst", m)
+	if m := b.Missing(); !slices.Contains(m, dir) {
+		t.Errorf("Missing = %v, want the directory named as hpcburst", m)
+	}
+	if m := b.MissingBuilds(); slices.Contains(m, dir) {
+		t.Errorf("MissingBuilds = %v, want the directory left out", m)
 	}
 }
 

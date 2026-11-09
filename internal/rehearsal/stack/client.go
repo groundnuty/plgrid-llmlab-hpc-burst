@@ -35,6 +35,11 @@ type Client struct {
 	// MaxRequest is the deployment's routing.maxRequestDuration: the front cuts
 	// every request at it, so one with no answer by then and a margin hangs.
 	MaxRequest time.Duration
+	// NoWriteWait makes Send, and so KeyFor, return as soon as the reply is read,
+	// as SendCtx does. The rehearsal sets it: it reads no send times, and a wait
+	// for the write hook in its key search would eat a handover's headroom. The
+	// zero value is the alpha rows' behaviour: Send goes through SendTimed.
+	NoWriteWait bool
 }
 
 // RequestTimeout bounds a request: the deployment's deadline and 30 s.
@@ -58,6 +63,9 @@ func (c *Client) RequestCtx() (context.Context, context.CancelFunc) {
 // Send posts body to the front's client listener with the client key and,
 // when key is set, the x-session-id conversation key.
 func (c *Client) Send(path, body, key string) Reply {
+	if c.NoWriteWait {
+		return c.SendCtx(context.Background(), path, body, key)
+	}
 	rp, _ := c.SendTimed(path, body, key)
 	return rp
 }
@@ -80,7 +88,7 @@ func (c *Client) SendCtx(parent context.Context, path, body, key string) Reply {
 //
 // The transport may hand back the response before its writer has called the
 // hook, so once a response has come, SendTimed waits for the hook's call (a
-// channel, at most wroteWait): it comes at once for a request that was written.
+// channel, at most WroteWait): it comes at once for a request that was written.
 func (c *Client) SendTimed(path, body, key string) (Reply, time.Time) {
 	var (
 		once  sync.Once
@@ -95,7 +103,7 @@ func (c *Client) SendTimed(path, body, key string) (Reply, time.Time) {
 		}
 	}})
 	rp := c.send(ctx, path, body, key)
-	wait := time.NewTimer(wroteWait)
+	wait := time.NewTimer(WroteWait)
 	defer wait.Stop()
 	if rp.Status != 0 {
 		select {
@@ -112,9 +120,11 @@ func (c *Client) SendTimed(path, body, key string) (Reply, time.Time) {
 	}
 }
 
-// wroteWait bounds SendTimed's wait for the transport's write hook after a
-// response came: the hook runs as the writer returns, within microseconds.
-const wroteWait = 5 * time.Second
+// WroteWait bounds SendTimed's wait for the transport's write hook after a
+// response came: the hook runs as the writer returns, within microseconds. It is
+// a variable so that a test can raise it, and tell a path that does not wait from
+// one that does by a generous deadline rather than a narrow window.
+var WroteWait = 5 * time.Second
 
 // send is one request of Send and SendTimed under ctx.
 func (c *Client) send(ctx context.Context, path, body, key string) Reply {

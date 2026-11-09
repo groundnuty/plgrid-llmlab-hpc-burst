@@ -146,8 +146,8 @@ func startRigWith(t *testing.T, s rigSetup) *rig {
 	}
 	// The controller lists the checkpoint from the Hub double through
 	// HF_ENDPOINT, which up passes on to it.
-	r.h = stack.StartHost(t, b, dir, dh, stack.CleanEnv("HF_ENDPOINT="+r.hub.URL), s.ports, rehearsalFrontTuning)
-	r.fc = &stack.Client{T: t, H: r.h, Model: stack.Model, MaxRequest: maxRequestDuration}
+	r.h = startRigHost(t, b, dir, dh, stack.CleanEnv("HF_ENDPOINT="+r.hub.URL), s.ports)
+	r.fc = rigClient(t, r.h)
 	arch := stack.CPUArch(t)
 	r.h.PlaceAgentBuild(arch)
 	r.c = stack.KubeClient(t, r.h.State)
@@ -160,6 +160,19 @@ func startRigWith(t *testing.T, s rigSetup) *rig {
 	// Allocation from its first version.
 	r.watch = stack.StartWatch(r.t, r.h.State, stack.Namespace, nil)
 	return r
+}
+
+// startRigHost is the stack's hpcburst up with the rehearsal's own choices: its
+// front tuning, and a down past its bound that says so.
+func startRigHost(t *testing.T, b stack.Binaries, dir string, dh stack.DialHome, env []string, ports stack.Ports) *stack.Host {
+	t.Helper()
+	return stack.StartHost(t, b, dir, dh, env, ports, rehearsalFrontTuning, stack.NameDownBound)
+}
+
+// rigClient is the rig's client of the front. The rehearsal reads no send times,
+// so no request of its waits for the transport's write hook.
+func rigClient(t *testing.T, h *stack.Host) *stack.Client {
+	return &stack.Client{T: t, H: h, Model: stack.Model, MaxRequest: maxRequestDuration, NoWriteWait: true}
 }
 
 func (r *rig) get(obj client.Object, name, ns string) bool {

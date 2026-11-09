@@ -11,7 +11,8 @@
 // scenario's TestNoCopyOfStack). Where the rehearsal and the alpha rows need
 // different behaviour, the choice is explicit: ClusterShape's Around and
 // WrapApptainer, the rehearsal's own fixtures, whose zero values leave them out;
-// Send, SendCtx and SendTimed; and StartHost's frontTuning.
+// Client's NoWriteWait, with Send, SendCtx and SendTimed; StartHost's frontTuning
+// and NameDownBound; and Binaries' Missing and MissingBuilds.
 //
 // Everything is asserted from the API, events, the front's usage files,
 // /healthz and /metrics, and frps's proxy list, never from log lines.
