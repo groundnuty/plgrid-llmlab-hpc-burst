@@ -209,24 +209,25 @@ TABLE
 # conformance-athena, in Athena's one-job slot (the partition plgrid-now), has the same guard, the same start wait and so the
 # same timeout (the science agent's rule of 2 Nov 2026: every slot row has a bound; see the header).
 #
-# Each row's timeout must let its bound fire first, and a slow cleanup fail in the test, with its message: it is at least every
-# wait the row's test has, each to its end, and a margin of 3 min for the calls each poll makes and the run's own cleanup. The
-# wait in the queue is on top of the column, one for each of a row's jobs (execute_cluster). Tests derive that sum from
-# this table's bounds and the real waits, and fail when a timeout can fire first: internal/providerctl/conformance
+# Each row's timeout must let its bound fire first, and a slow cleanup fail in the test, with its message: it is at least the
+# row's own bounds in this table, every other wait its test has, each to its end, a quarter more for what a scan can miss
+# (internal/alpha, BudgetFactorPercent; a timeout that fires late costs only time), and a margin of 3 min for the calls each poll makes
+# and the run's own cleanup. The wait in the queue is on top of the column, one for each of a row's jobs (execute_cluster).
+# Tests derive that from this table's bounds and the real waits, and fail when a timeout can fire first: internal/providerctl/conformance
 # (budget_test.go) adds up each test's own source, and hack/livechecks (budget_test.go) has the stack rows' from
 # internal/alpha, Row.WorstCase, and real-engine's from its time limit and its poll's margin (no timeout wraps it).
 cluster_table() {
   cat <<'TABLE'
 # BEGIN CLUSTER SHAPES
-conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|90|-|30
-conformance-helios-gh200|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|50|-C memfs|10
-conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|50|-|10
-real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|75|-C memfs
+conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|97|-|30
+conformance-helios-gh200|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|57|-C memfs|10
+conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|57|-|10
+real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|79|-C memfs
 alpha-athena-handover|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|01:46:00|150|-
-alpha-helios-nooverlap|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|200|-C memfs
-tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|02:17:00|162|-C memfs
-tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|162|-
-gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|30|-|10
+alpha-helios-nooverlap|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|210|-C memfs
+tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|02:17:00|165|-C memfs
+tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|165|-
+gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|32|-|10
 gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|25|-
 reach-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:02:00|20|-C memfs|10
 reach-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|1|1Gi|00:02:00|20|-|10
@@ -325,7 +326,7 @@ apply_tunnel_lease() {
     case $name in
       tunnel-hour-*)
         TLIMIT[$name]=$(printf '%02d:%02d:00' $((v / 60)) $((v % 60)))
-        TMIN[$name]=$((v + 25))
+        TMIN[$name]=$((v + 28))
         [ -z "${OGSET[$name]:-}" ] || OGMIN[$name]=$(((v + 9) / 10 * 10)) ;;
     esac
   done

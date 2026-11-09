@@ -1,17 +1,31 @@
 package alpha
 
-import "time"
+import (
+	"time"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
+)
 
 // The waits of the live steps (steps_live_test.go, live_flows_test.go, guard_live_test.go), named here because each
 // row's worst case is added up from them: the steps use these, and hack/livechecks checks the script's timeout against
 // the sum (review of PR 284, B5 and B6), so a longer wait that outgrows a row's timeout fails a test rather than a run.
+//
+// A wait of the stack's is named from the stack, never copied, so that a change there flows through. When #292 and this meet, the
+// second to merge adds stack.CatchUpWorstCase by name to WorstCase below, once for each catch-up a row's flow makes, and to
+// liveWaits (budget_test.go).
 const (
-	// StartupWait is the stack's start, before the first clock runs: hpcburst up (stack.UpTimeout), then the controller's and the
-	// Provider's readiness (stack.WaitDeadline each).
-	StartupWait = 11 * time.Minute
-	// TunnelRunOver is what a tunnel row's run budget, and the script's timeout for it, keep over its lease: the startup, the job's
-	// end and Close, and a margin.
-	TunnelRunOver = 25 * time.Minute
+	// StartupWait is the stack's start, before the first clock runs: hpcburst up, then the controller's and the Provider's readiness.
+	StartupWait = stack.UpTimeout + 2*stack.WaitDeadline
+	// BudgetFactorPercent is the margin of every derived timeout, in the safe direction (the science agent, on PR 284): the waits the
+	// code adds past a row's own bounds count this much of themselves, since a scan of the source can miss one. A timeout that fires
+	// late costs only time; one that fires before its bounds is the bug. A row's bounds in its table (a start wait, the wait
+	// in the queue, a time limit) are exact and cannot be missed, so they count once, and a long wait in the queue is not
+	// inflated by a quarter for nothing.
+	BudgetFactorPercent = 125
+	// TunnelRunOver is what a tunnel row's run budget, and the script's timeout for it, keep over its lease: what follows the
+	// lease in the worst case, with the factor (TestEachStackRowsWorstCaseIsItsWaitsAddedUp), and the two minutes before
+	// the test's deadline at which its waits give up.
+	TunnelRunOver = 28 * time.Minute
 	// CloseTimeout bounds Close: hpcburst down and the cancel of the run's jobs.
 	CloseTimeout = 5 * time.Minute
 	// ReadyMargin is what a job that started has beyond health.startTimeout to become ready.
@@ -58,4 +72,24 @@ func (r Row) WorstCase(pendingMax time.Duration) time.Duration {
 		return StartupWait + first + r.Lease + SuccessorWait(tm, pendingMax) + lastLooks + CloseTimeout
 	}
 	return StartupWait + first + (r.Lease - dw) + dw + EndMargin + CloseTimeout
+}
+
+// Scaled is the waits the code adds past a row's bounds, with the margin (BudgetFactorPercent).
+func Scaled(waits time.Duration) time.Duration { return waits * BudgetFactorPercent / 100 }
+
+// bounds is the part of WorstCase that is the row's own bounds in its table: its wait in the queue, one for each wait it has, and
+// its lease.
+func (r Row) bounds(pendingMax time.Duration) time.Duration {
+	tm := r.Clock()
+	first, _ := FirstClock(r, pendingMax, r.Lease, DrainWindow(tm.MaxRequestDuration, tm.DrainMargin, 0))
+	if r.Name == "alpha-helios-nooverlap" {
+		first += pendingMax
+	}
+	return first + r.Lease
+}
+
+// MinTimeout is the shortest a stack row's timeout may be: its bounds, and the rest of its worst case with the margin.
+func (r Row) MinTimeout(pendingMax time.Duration) time.Duration {
+	b := r.bounds(pendingMax)
+	return b + Scaled(r.WorstCase(pendingMax)-b)
 }

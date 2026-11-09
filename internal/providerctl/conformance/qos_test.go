@@ -267,8 +267,8 @@ func TestGH200RowIsCheckedUnderQOSNow(t *testing.T) {
 		t.Fatal("hack/live-checks.sh has no conformance-helios-gh200 row")
 	}
 	if row.host != "helios" || row.profile != "helios" || row.partition != "plgrid-gpu-gh200" || row.qos != "now" || row.slot != "now" ||
-		row.acctKey != "ACCOUNT_HELIOS_GH200" || row.gpus != "1" || row.startWait != "10" || row.timeout != "50" {
-		t.Errorf("row = %+v, want Helios, profile helios, plgrid-gpu-gh200, qos now, slot now, ACCOUNT_HELIOS_GH200, 1 GPU, a start wait of 10 min and a timeout of 50 min (the test reaches the timeout command: TestTheRowsTimeoutReachesTheTestBinary)", *row)
+		row.acctKey != "ACCOUNT_HELIOS_GH200" || row.gpus != "1" || row.startWait != "10" || row.timeout != "57" {
+		t.Errorf("row = %+v, want Helios, profile helios, plgrid-gpu-gh200, qos now, slot now, ACCOUNT_HELIOS_GH200, 1 GPU, a start wait of 10 min and a timeout of 57 min (the test reaches the timeout command: TestTheRowsTimeoutReachesTheTestBinary)", *row)
 	}
 	s, v := row.validated(t)
 	good := row.request(t, s)

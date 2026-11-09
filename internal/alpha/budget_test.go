@@ -10,8 +10,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 // Each stack row's worst case, added up by hand from the review of PR 284 (B5), not by the code it checks: a no-overlap
@@ -27,17 +25,17 @@ func TestEachStackRowsWorstCaseIsItsWaitsAddedUp(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		row  Row
-		// pending and want are in minutes.
-		pending, want, wantDeadline int
+		// pending and want are in minutes, and wantRest the waits past its bounds, which count 1.25 times (MinTimeout).
+		pending, want, wantDeadline, wantRest int
 	}{
-		{"handover, 30", rowOf("alpha-athena-handover"), 30, 11 + 30 + 91 + 5 + 15 + 5 + 1 + 5, 2*30 + 150},
-		{"handover, 2 h", rowOf("alpha-athena-handover"), 120, 11 + 120 + 91 + 5 + 15 + 5 + 1 + 5, 2*120 + 150},
-		{"no-overlap, 30", rowOf("alpha-helios-nooverlap"), 30, 11 + 30 + 106 + 30 + 60 + 5 + 1 + 5, 2*30 + 200},
-		{"no-overlap, 2 h", rowOf("alpha-helios-nooverlap"), 120, 11 + 120 + 106 + 120 + 60 + 5 + 1 + 5, 2*120 + 200},
-		{"the hour on Helios, 30", rowOf("tunnel-hour-helios"), 30, 11 + 30 + 122 + 15 + 5 + 5, 30 + 162},
-		{"the hour on Athena, 2 h", rowOf("tunnel-hour-athena"), 120, 11 + 120 + 122 + 15 + 5 + 5, 120 + 162},
-		{"the hour on Athena, its wait capped a minute before the first end", rowOf("tunnel-hour-athena"), 180, 11 + 121 + 122 + 15 + 5 + 5, 180 + 162},
-		{"the hour at the longest lease", long, 120, 11 + 120 + 225 + 15 + 5 + 5, 120 + 265},
+		{"handover, 30", rowOf("alpha-athena-handover"), 30, 11 + 30 + 91 + 5 + 15 + 5 + 1 + 5, 2*30 + 150, 11 + 5 + 5 + 1 + 5},
+		{"handover, 2 h", rowOf("alpha-athena-handover"), 120, 11 + 120 + 91 + 5 + 15 + 5 + 1 + 5, 2*120 + 150, 11 + 5 + 5 + 1 + 5},
+		{"no-overlap, 30", rowOf("alpha-helios-nooverlap"), 30, 11 + 30 + 106 + 30 + 60 + 5 + 1 + 5, 2*30 + 210, 11 + 60 + 5 + 1 + 5},
+		{"no-overlap, 2 h", rowOf("alpha-helios-nooverlap"), 120, 11 + 120 + 106 + 120 + 60 + 5 + 1 + 5, 2*120 + 210, 11 + 60 + 5 + 1 + 5},
+		{"the hour on Helios, 30", rowOf("tunnel-hour-helios"), 30, 11 + 30 + 122 + 15 + 5 + 5, 30 + 165, 11 + 5 + 5},
+		{"the hour on Athena, 2 h", rowOf("tunnel-hour-athena"), 120, 11 + 120 + 122 + 15 + 5 + 5, 120 + 165, 11 + 5 + 5},
+		{"the hour on Athena, its wait capped a minute before the first end", rowOf("tunnel-hour-athena"), 180, 11 + 121 + 122 + 15 + 5 + 5, 180 + 165, 11 + 5 + 5},
+		{"the hour at the longest lease", long, 120, 11 + 120 + 225 + 15 + 5 + 5, 120 + 268, 11 + 5 + 5},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			p := time.Duration(c.pending) * time.Minute
@@ -46,6 +44,10 @@ func TestEachStackRowsWorstCaseIsItsWaitsAddedUp(t *testing.T) {
 			}
 			if got, want := c.row.RunDeadline(p), time.Duration(c.wantDeadline)*time.Minute; got != want {
 				t.Errorf("RunDeadline = %s, want %s", got, want)
+			}
+			// The bounds count once, and the rest a quarter more.
+			if got, want := c.row.MinTimeout(p), time.Duration(c.want)*time.Minute+time.Duration(c.wantRest)*15*time.Second; got != want {
+				t.Errorf("MinTimeout = %s, want %s", got, want)
 			}
 			// The run's context ends the ledger's read after the scenario, so it must outlast every wait but Close's, which
 			// takes a time of its own: otherwise a run in time fails on its last read.
@@ -56,10 +58,10 @@ func TestEachStackRowsWorstCaseIsItsWaitsAddedUp(t *testing.T) {
 	}
 }
 
-// The stack's start is what the stack itself allows: hpcburst up, then two waits on state, for the controller and the Provider.
+// The stack's start is named from the stack (budget.go), and this says the figures above still hold when a change there flows through.
 func TestTheStartupInTheWorstCaseIsTheStacksOwn(t *testing.T) {
-	if want := stack.UpTimeout + 2*stack.WaitDeadline; StartupWait != want {
-		t.Errorf("StartupWait = %s, and stack.UpTimeout and two of stack.WaitDeadline are %s", StartupWait, want)
+	if StartupWait != 11*time.Minute {
+		t.Errorf("StartupWait = %s; the figures in this file were worked out with 5 for hpcburst up and 3 each for the two waits, 11 minutes", StartupWait)
 	}
 }
 

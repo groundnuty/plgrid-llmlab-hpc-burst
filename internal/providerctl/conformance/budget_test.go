@@ -16,10 +16,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/alpha"
 )
 
-// budgetMargin is what a row's timeout keeps beyond the sum of its waits: the calls each poll makes over the transport
-// and the run's own cleanup (the cancel of what is left, the staging directory), which no sum holds.
+// budgetMargin is what a row's timeout keeps beyond its waits: the calls each poll makes over the transport and the run's own
+// cleanup (the cancel of what is left, the staging directory), which no sum holds. Separately, what the code adds past the
+// row's own bounds counts alpha.BudgetFactorPercent of itself, for what the scan cannot see.
 const budgetMargin = 3 * time.Minute
 
 // waitSum is what a test body can wait for: its start waits, whose length is the row's, and the rest.
@@ -271,7 +274,8 @@ func TestEveryRowsTimeoutIsAboveTheWorstCaseItsSourceAddsUpTo(t *testing.T) {
 			if waits.startWaits != wantStartWaits {
 				t.Errorf("%s has %d waits for a job to start, want %d", body, waits.startWaits, wantStartWaits)
 			}
-			worst := waits.rest
+			// The row's own start waits are exact, and count once; what the code adds counts with the margin.
+			worst := alpha.Scaled(waits.rest)
 			if row.startWait != "-" {
 				n, err := strconv.Atoi(row.startWait)
 				if err != nil {
@@ -284,7 +288,7 @@ func TestEveryRowsTimeoutIsAboveTheWorstCaseItsSourceAddsUpTo(t *testing.T) {
 				t.Fatal(err)
 			}
 			if got := time.Duration(timeout) * time.Minute; got < worst+budgetMargin {
-				t.Errorf("timeout %s is below the worst case %s from the source of %s and the margin of %s", got, worst, body, budgetMargin)
+				t.Errorf("timeout %s is below the worst case %s from the source of %s, with its factor of %d%%, and the margin of %s", got, worst, body, alpha.BudgetFactorPercent, budgetMargin)
 			}
 		})
 	}

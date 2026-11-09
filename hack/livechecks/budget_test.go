@@ -63,8 +63,8 @@ func TestEveryRowsTimeoutIsDerivedFromItsBounds(t *testing.T) {
 				t.Fatal("real-engine's margin is not in the script")
 			}
 			seconds, _ := strconv.Atoi(m[1])
-			if got, want := time.Duration(timeout)*time.Minute, limit+time.Duration(seconds)*time.Second+budgetMargin; got < want {
-				t.Errorf("real-engine: its timeout %s is below its time limit, its poll's margin of %d s and the margin of %s", got, seconds, budgetMargin)
+			if got, want := time.Duration(timeout)*time.Minute, limit+alpha.Scaled(time.Duration(seconds)*time.Second)+budgetMargin; got < want {
+				t.Errorf("real-engine: its timeout %s is below its time limit, its poll's margin of %d s with its factor of %d%%, and the margin of %s", got, seconds, alpha.BudgetFactorPercent, budgetMargin)
 			}
 		default:
 			t.Errorf("%s is a row no test derives a timeout for: say how its bounds and its waits add up", name)
@@ -123,8 +123,8 @@ func TestEveryStackRowsTimeoutIsAboveItsWorstCase(t *testing.T) {
 					}
 					minutes, _ := strconv.Atoi(m[1])
 					giveUp := time.Duration(minutes)*time.Minute - waitsGiveUp
-					if worst := r.WorstCase(time.Duration(pendingSeconds) * time.Second); worst >= giveUp {
-						t.Errorf("-test.timeout %dm: the waits give up at %s, and the row's worst case is %s, so the timeout fires before its bound can", minutes, giveUp, worst)
+					if least := r.MinTimeout(time.Duration(pendingSeconds) * time.Second); least >= giveUp {
+						t.Errorf("-test.timeout %dm: the waits give up at %s, and the row needs %s with its factor of %d%%, so the timeout can fire before its bound", minutes, giveUp, least, alpha.BudgetFactorPercent)
 					}
 				})
 			}
