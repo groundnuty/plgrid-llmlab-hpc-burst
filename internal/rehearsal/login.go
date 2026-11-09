@@ -19,6 +19,28 @@
 // ssh's ControlMaster (ssh -N) opens no session, so no command runs for it;
 // each mux client opens one session, so one relayed command.
 //
+// # Streaming an srun line
+//
+// A line whose first word is srun does not go as one request and one reply: it
+// streams (issue #298). The relay of HBEP-6's host-dialed mode runs "srun -u
+// --overlap --jobid=<id> --ntasks=1 <agent> relay <channel>" through this
+// login node and carries one multiplexed session over the step's standard
+// input and output for the job's whole life. The forced command copies
+// standard input to the server as it arrives, and the step's standard output
+// and error back as they arrive, in length-prefixed frames of at most 64 KiB
+// (wire.go, Streaming), and exits with the step's exit code. The end of
+// standard input is sent as an end frame and the output goes on (half-close).
+// The server runs fakeslurm.Session.Stream, through LoginConfig.Around when it
+// is set, with a run function whose Result carries only the exit code. When
+// the ssh session goes away (the forced command finds its output pipes
+// without a reader, or the connection closes) the step's context ends and the
+// fake kills the step, as real srun cancels its step on SIGHUP; Close ends
+// every live stream the same way. Bytes cross exact, in order and unchanged:
+// no line translation, none added or dropped. Every other line keeps the
+// request and reply format, byte for byte, and Command.Timeout is not part of a
+// stream: the controller's own ssh client ends a command that runs past it,
+// which ends the session.
+//
 // # Choices
 //
 //   - A runner error of the Session (slurm.ErrNotStarted, ErrTimeout,
@@ -83,7 +105,9 @@ type LoginConfig struct {
 	// and a function that runs it on the Platform, which it must call once,
 	// and returns that function's result. It runs in the test process, so a
 	// test can read the Platform's state just before and just after a
-	// command, at the command itself rather than at a sample (issue #193).
+	// command, at the command itself rather than at a sample (issue #193). For
+	// an srun line, which streams, the function runs the whole stream and the
+	// Result carries only the exit code; it returns when the step has ended.
 	Around func(line string, run func() (slurm.Result, error)) (slurm.Result, error)
 }
 

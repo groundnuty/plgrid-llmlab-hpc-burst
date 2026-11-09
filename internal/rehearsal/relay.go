@@ -48,18 +48,26 @@ const failExit = 255
 // local socket that is either listening or gone.
 const dialTimeout = 10 * time.Second
 
-// relayClient is the forced command: it returns the process's exit code.
+// clientFail writes one line to standard error and returns failExit.
+func clientFail(format string, a ...any) int {
+	fmt.Fprintf(os.Stderr, "rehearsal login node: "+format+"\n", a...)
+	return failExit
+}
+
+// relayClient is the forced command: it returns the process's exit code. An
+// srun line streams (relayStreamClient); every other line is one request and
+// one reply.
 func relayClient(sock string) int {
-	fail := func(format string, a ...any) int {
-		fmt.Fprintf(os.Stderr, "rehearsal login node: "+format+"\n", a...)
-		return failExit
-	}
+	fail := clientFail
 	line, ok := os.LookupEnv("SSH_ORIGINAL_COMMAND")
 	switch {
 	case sock == "":
 		return fail("%s is not set", EnvRelay)
 	case !ok:
 		return fail("no command: only commands are offered, not a shell")
+	}
+	if isSrunLine(line) {
+		return relayStreamClient(sock, line)
 	}
 	stdin, err := io.ReadAll(io.LimitReader(os.Stdin, maxField+1))
 	if err != nil {
@@ -102,7 +110,8 @@ type relayServer struct {
 }
 
 // readTimeout bounds how long the server waits for a request that a client
-// started and did not finish.
+// started and did not finish. It applies to the request's header only: a
+// stream's frames have no deadline.
 const readTimeout = 60 * time.Second
 
 func startRelay(sock string, sess *fakeslurm.Session, around func(string, func() (slurm.Result, error)) (slurm.Result, error)) (*relayServer, error) {
@@ -151,6 +160,10 @@ func (r *relayServer) handle(c net.Conn) {
 		return // the client went away or sent garbage: no reply to give
 	}
 	_ = c.SetReadDeadline(time.Time{})
+	if q.stream {
+		r.handleStream(c, q.line)
+		return
+	}
 	var stdin []byte
 	if len(q.stdin) > 0 {
 		stdin = q.stdin
@@ -185,7 +198,7 @@ func toReply(res slurm.Result, err error) reply {
 }
 
 // close stops the listener, ends every request (one blocked at a gate comes
-// free) and waits for the handlers.
+// free, a live stream's step is killed) and waits for the handlers.
 func (r *relayServer) close() {
 	r.mu.Lock()
 	r.closed = true
