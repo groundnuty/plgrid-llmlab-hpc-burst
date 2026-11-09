@@ -38,9 +38,9 @@ func jobsByTag(jobs []provider.Job) map[string]provider.Job {
 // criteria say "no request cut", and both tests warn that a run with nothing in
 // flight proves nothing:
 //
-//	hbep/0007-lifecycle-controller/README.md:597: "A run with no stream in flight at the drain start proves nothing here"
-//	hbep/0007-lifecycle-controller/README.md:635: "one deployment completes one handover end to end through the front with no request cut"
-//	hbep/0006-instance-reachability/README.md:349: "A test that restarts the controller with no stream running proves nothing about cuts."
+//	hbep/0007-lifecycle-controller/README.md:621: "A run with no stream in flight at the drain start proves nothing here"
+//	hbep/0007-lifecycle-controller/README.md:660: "one deployment completes one handover end to end through the front with no request cut"
+//	hbep/0006-instance-reachability/README.md:430: "A test that restarts the controller with no stream running proves nothing about cuts."
 func streamChecks(streams []Stream, drainStart time.Time) []string {
 	var f []string
 	inFlight := 0
@@ -221,8 +221,8 @@ func tagCountChecks(row Row, tags []string, label string) []string {
 
 // VerifyHandover judges alpha-athena-handover.
 //
-//	hbep/0007-lifecycle-controller/README.md:635: "on Athena `plgrid-gpu-a100`, one deployment completes one handover end to end through the front with no request cut;"
-//	hbep/0007-lifecycle-controller/README.md:637: "on each alpha platform, Helios `plgrid-gpu-gh200` and Athena `plgrid-gpu-a100`, one restart at the worker rung;"
+//	hbep/0007-lifecycle-controller/README.md:660: "on Athena `plgrid-gpu-a100`, one deployment completes one handover end to end through the front with no request cut;"
+//	hbep/0007-lifecycle-controller/README.md:662: "on each alpha platform, Helios `plgrid-gpu-gh200` and Athena `plgrid-gpu-a100`, one restart at the worker rung;"
 //	hbep/0005-llmlab-compatible-front/README.md:450: "on Athena `plgrid-gpu-a100`, through the front, one handover cuts no request (with HBEP-7)."
 func VerifyHandover(row Row, o HandoverObs, jobs []provider.Job) []string {
 	f := handoverFirstJobChecks(row, o, jobs)
@@ -260,9 +260,9 @@ func handoverFirstJobChecks(row Row, o HandoverObs, jobs []provider.Job) []strin
 
 // VerifyNoOverlap judges alpha-helios-nooverlap.
 //
-//	hbep/0007-lifecycle-controller/README.md:636: "on Helios `plgrid-gpu-gh200` under QOS `now`, one deployment goes through no-overlap mode end to end through the front with no request cut, and the gap is measured"
-//	hbep/0007-lifecycle-controller/README.md:608: "The replacement is created at its planned time, accepted, and pends on the fake's GPU cap while the predecessor runs; it never starts before the predecessor's job ends ... A fixture without a GPU cap proves nothing here, since its replacement would start beside the predecessor."
-//	hbep/0007-lifecycle-controller/README.md:471: "the gap is the time from the primary's drain start until its successor is `ready`."
+//	hbep/0007-lifecycle-controller/README.md:661: "on Helios `plgrid-gpu-gh200` under QOS `now`, one deployment goes through no-overlap mode end to end through the front with no request cut, and the gap is measured"
+//	hbep/0007-lifecycle-controller/README.md:632: "The replacement is created at its planned time, accepted, and pends on the fake's GPU cap while the predecessor runs; it never starts before the predecessor's job ends ... A fixture without a GPU cap proves nothing here, since its replacement would start beside the predecessor."
+//	hbep/0007-lifecycle-controller/README.md:484: "the gap is the time from the primary's drain start until its successor is `ready`."
 func VerifyNoOverlap(row Row, o NoOverlapObs, jobs []provider.Job) []string {
 	f := noOverlapFirstJobChecks(row, o, jobs)
 	f = append(f, tagCountChecks(row, o.Tags, "a no-overlap run makes exactly two Allocations: a predecessor and a successor")...)
@@ -326,8 +326,8 @@ func SuccessorQueueWait(pre, suc provider.Job) (d time.Duration, ok bool) {
 
 // VerifyTunnelHour judges tunnel-hour-helios and tunnel-hour-athena.
 //
-//	hbep/0006-instance-reachability/README.md:354: "S1's one-hour runs pass with this wiring on Helios and on Athena, in the mode each uses, with the path rate measured."
-//	hbep/0006-instance-reachability/README.md:375: "S1's one-hour runs pass with this wiring on Helios and on Athena, with the path rate from compute node to front measured;"
+//	hbep/0006-instance-reachability/README.md:435: "S1's one-hour runs pass with this wiring on Helios and on Athena, in the mode each uses, with the path rate measured."
+//	hbep/0006-instance-reachability/README.md:456: "S1's one-hour runs pass with this wiring on Helios and on Athena, with the path rate from compute node to front measured;"
 //	spikes/s1-frp/README.md:284 and :285 (C2, C3; branch spike/s1-frp-dial-home, 01c2ecd): every lane stays reachable, uncut, for at least an hour.
 //	spikes/s1-frp/README.md:288 (C6): the path rate is "ok, at least 30 s asked, at least 29 s timed at the VM's receiver", and moved bytes.
 //
@@ -733,7 +733,7 @@ func TunnelHourFlags(o TunnelHourObs) []string {
 
 // VerifyAccounting judges gpu-accounting-*.
 //
-//	hbep/0008-observability-and-events/README.md:395: "the kept accounting record's GPU entry is checked once on a real GPU job on each alpha partition;"
+//	hbep/0008-observability-and-events/README.md:444: "the kept accounting record's GPU entry is checked once on a real GPU job on each alpha partition;"
 //	hbep/0008-observability-and-events/README.md:331: the record holds "`allocatedGPUs` ... and `basis: allocated`".
 //
 // The record is built from the scheduler's accounting, so it is never checked

@@ -264,7 +264,7 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
       - `srun`'s step-limit refusal;
       - more than 120 restarts of one channel within an hour.
 
-      A final end other than `superseded` or the job's end raises a `failing` event, reason `RelayFailed`, regarding the Allocation, naming the channel and the cause. The code adds the reason to HBEP-8's table, since a new reason isn't an amendment.
+      A final end other than `superseded` or the job's end raises a Warning event, reason `RelayFailed`, regarding the Allocation, naming the channel and the cause (untyped, like every Provider-controller event in alpha; HBEP-8, open question 14). The code adds the reason to HBEP-8's table, since a new reason isn't an amendment.
     - **Steps:** at the 30 s cap two relays make at most about 240 `srun` steps an hour, about 11,500 in 48 h, below the 40,000 `MaxStepCount` that both profiles record.
   - **A path that fails never restarts a healthy engine.** HBEP-7's rules apply unchanged:
     - an Instance first becomes `ready` only with `TunnelConnected` True, from frps;
@@ -608,5 +608,6 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
   - **Capacity:** a Provider limit of 2 Allocations, with relays reserved in whole pairs.
   - **What ends a relay:** retried or final, with `RelayFailed`, and never an engine restart.
   - **The owner's two decisions:** relays run without asking Cyfronet first, and a controller restart cuts host-dialed streams in alpha, with a relay keeper deferred to beta (open question 13).
+- **2026-11-09: erratum:** `RelayFailed` is an untyped Warning, not a `failing` event (#301).
 
   Before, a host that compute nodes could not reach was out of alpha, and alpha waited for the gateway's forward.
