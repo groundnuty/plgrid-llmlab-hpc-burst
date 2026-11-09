@@ -163,7 +163,7 @@ func (e *external) syncRelays(ctx context.Context, a *v1alpha1.Allocation, tag s
 		Tag: tag, JobID: o.JobID,
 		AgentPath: path.Join(paths.Staging, agentapi.StagedAgentPath(a.Spec.ForProvider.Batch.AgentDigest)),
 		Login:     sshrun.LoginOf(e.v.SSH), Jobs: freshJobs{e.p}, Command: cmd, Describe: sshrun.Classify,
-		Gen:       credentialsGen(e.v.SSH),
+		Gen: credentialsGen(e.v.SSH),
 	})
 }
 
