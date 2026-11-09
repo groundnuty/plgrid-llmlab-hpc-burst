@@ -297,6 +297,7 @@ func TestRealEngineNotRunAReplyThatIsNotExactlyThisJobsRecordIsAFailure(t *testi
 		{"a second job record, with no start in it", func(t *testing.T) string {
 			return edited(t, endOfJobs, "  },\n  {\"job_id\": 7002, \"name\": \"hb-example-other\"}\n ],\n \"meta\": {")
 		}, reMoreThanThis},
+		{"only the record of another job, a plain one", func(t *testing.T) string { return edited(t, realJobIDText, `"job_id": 7002,`) }, reNotThisJob},
 		{"only the record of another job, whose array carries this job's number", func(t *testing.T) string {
 			return editedAll(t, realJobIDText, `"job_id": 7002,`, realArrayText, "\"array\": {\n    \"job_id\": 7001,")
 		}, reNotThisJob},
@@ -365,7 +366,7 @@ func TestRealEngineNotRunAJobWithoutAKnownZeroRestartCountIsNotNeverStarted(t *t
 // The decode runs under python3, which the host must have: a host without it fails before the run submits anything (it would
 // otherwise wait out the queue for a job and only then say it cannot read the history), and a python3 that fails or answers
 // something this script does not understand at the read is a FAIL that says so, never NOT RUN.
-func TestRealEngineWithoutPythonFailsBeforeItSubmitsAnything(t *testing.T) {
+func TestRealEngineNotRunWithoutPythonFailsBeforeItSubmitsAnything(t *testing.T) {
 	w := newWorld(t)
 	w.useStubGo()
 	res := w.run([]string{"LIVE_PYTHON=" + filepath.Join(t.TempDir(), "no-such-python3")}, "--run", "real-engine", "--yes")
@@ -378,7 +379,7 @@ func TestRealEngineWithoutPythonFailsBeforeItSubmitsAnything(t *testing.T) {
 	}
 }
 
-func TestRealEngineAPythonThatFailsOrIsNotUnderstoodIsAFailureThatSaysSo(t *testing.T) {
+func TestRealEngineNotRunAPythonThatFailsOrIsNotUnderstoodIsAFailureThatSaysSo(t *testing.T) {
 	for _, c := range []struct{ name, body, label string }{
 		{"python3 exits with an error", "exit 3", "the reply could not be decoded (python3 did not run it)"},
 		{"python3 answers nothing", "exit 0", "the decoder's answer was not understood"},
