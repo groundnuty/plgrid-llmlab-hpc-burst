@@ -6,7 +6,9 @@ package stack
 // its users (internal/alpha's stand-in run, the rehearsal).
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -151,6 +153,133 @@ func TestSendTimed(t *testing.T) {
 	}
 }
 
+// SendCtx ends with its parent, which is how a background sender's stop cancels the request it has in flight.
+func TestSendCtxEndsWithItsParent(t *testing.T) {
+	arrived := make(chan struct{})
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(arrived)
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+	c := &Client{T: t, H: &Host{Ports: Ports{ClientAddr: strings.TrimPrefix(srv.URL, "http://")}, ClientKey: "k"}, MaxRequest: time.Minute}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan Reply, 1)
+	go func() { done <- c.SendCtx(ctx, "/v1/chat/completions", "{}", "") }()
+	<-arrived
+	cancel()
+	if rp := <-done; !errors.Is(rp.Err, context.Canceled) {
+		t.Errorf("a cancelled parent: %d %v, want context.Canceled", rp.Status, rp.Err)
+	}
+}
+
+// SendCtx carries the client's key and, when one is given, the conversation key, as Send does.
+func TestSendCtxHeaders(t *testing.T) {
+	type seen struct{ auth, session, kind, body string }
+	got := make(chan seen, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got <- seen{r.Header.Get("Authorization"), r.Header.Get("X-Session-Id"), r.Header.Get("Content-Type"), string(b)}
+		w.Header().Set("Hpcburst-Request-Id", "req-1")
+	}))
+	defer srv.Close()
+	c := &Client{T: t, H: &Host{Ports: Ports{ClientAddr: strings.TrimPrefix(srv.URL, "http://")}, ClientKey: "k1"}, MaxRequest: time.Minute}
+	rp := c.SendCtx(context.Background(), "/v1/chat/completions", "{}", "conv")
+	if rp.Err != nil || rp.Status != http.StatusOK || rp.ID != "req-1" {
+		t.Fatalf("reply %d %q %v", rp.Status, rp.ID, rp.Err)
+	}
+	if s := <-got; s != (seen{"Bearer k1", "conv", "application/json", "{}"}) {
+		t.Errorf("the request carried %+v", s)
+	}
+}
+
+func TestPorts(t *testing.T) {
+	p := Ports{Base: 29520, ClientAddr: "127.0.0.1:29500", DialHomeListen: "127.0.0.1:29501"}
+	if u := p.URL(6, "/readyz"); u != "http://127.0.0.1:29526/readyz" {
+		t.Errorf("URL = %q", u)
+	}
+	want := []int{29500, 29501, 29520, 29521, 29522, 29523, 29524, 29525, 29526, 29527, 29528, 29529, 29530, 29531, 29532}
+	if a := p.All(); !slices.Equal(a, want) {
+		t.Errorf("All = %v, want %v", a, want)
+	}
+	// With no dial-home listener set, up takes base+7, already in the block.
+	if a := (Ports{Base: 29520, ClientAddr: "127.0.0.1:29500"}).All(); !slices.Equal(a, append([]int{29500}, want[2:]...)) {
+		t.Errorf("All with no dial-home listener = %v", a)
+	}
+}
+
+// A job's apptainer is the double's, or what the wrapper puts in its place; the caller's job environment has the last word.
+func TestClusterJobEnv(t *testing.T) {
+	double := filepath.Join("fk", "apptainer")
+	wrap := func(fakes string) string { return filepath.Join(fakes, "gate", "apptainer") }
+	wrapped := filepath.Join("fk", "gate", "apptainer")
+	for name, c := range map[string]struct {
+		wrap func(string) string
+		job  map[string]string
+		want string
+	}{
+		"the double":                  {nil, nil, double},
+		"the wrapper":                 {wrap, nil, wrapped},
+		"the caller over the double":  {nil, map[string]string{"HPCBURST_APPTAINER": "own"}, "own"},
+		"the caller over the wrapper": {wrap, map[string]string{"HPCBURST_APPTAINER": "own"}, "own"},
+	} {
+		env := clusterJobEnv("fk", c.wrap, c.job)
+		if env["HPCBURST_APPTAINER"] != c.want {
+			t.Errorf("%s: apptainer %q, want %q", name, env["HPCBURST_APPTAINER"], c.want)
+		}
+		if env["HPCBURST_NVIDIA_SMI"] != filepath.Join("fk", "no-nvidia-smi") {
+			t.Errorf("%s: nvidia-smi %q", name, env["HPCBURST_NVIDIA_SMI"])
+		}
+	}
+}
+
+func TestHubFileIsLFS(t *testing.T) {
+	if !HubFileIsLFS("model.safetensors") {
+		t.Error("the weights are in LFS")
+	}
+	for _, p := range []string{"config.json", "generation_config.json", "no-such-file"} {
+		if HubFileIsLFS(p) {
+			t.Errorf("%s reads as an LFS file", p)
+		}
+	}
+}
+
+// ServedDeployment is ServedDeploymentAs under the rehearsal's own names, and the names given reach the object.
+func TestServedDeploymentAs(t *testing.T) {
+	tm := Timing{Lease: "7m", MaxRequest: "90s"}
+	d := ServedDeployment(tm)
+	if d.Name != MDName || d.Spec.Model != Model || d.Spec.Providers.Names[0] != ProviderName || d.Spec.Source.Served.Flags[0].Value != "4096" {
+		t.Errorf("ServedDeployment: %s, %s, %v, %v", d.Name, d.Spec.Model, d.Spec.Providers.Names, d.Spec.Source.Served.Flags)
+	}
+	o := ServedDeploymentAs(Served{Name: "n", Model: "example-org/m", Provider: "p", MaxModelLen: "8192"}, tm)
+	if o.Name != "n" || o.Namespace != Namespace || o.Spec.Model != "example-org/m" || o.Spec.Providers.Names[0] != "p" || o.Spec.Source.Served.Flags[0].Value != "8192" {
+		t.Errorf("ServedDeploymentAs: %s/%s, %s, %v, %v", o.Namespace, o.Name, o.Spec.Model, o.Spec.Providers.Names, o.Spec.Source.Served.Flags)
+	}
+}
+
+// The usage record's member names are HBEP-5's, written out here from the scenario's own reading of them: UsageRow is
+// the front's own type, so a member renamed there would still decode in a run that read it through that type alone.
+func TestUsageRowReadsTheWireNames(t *testing.T) {
+	wire := `{"counter":7,"requestID":"r","startTime":"s","endTime":"e","path":"/p","requestedModel":"m","provider":"pr",
+		"modelDeployment":"md","deploymentID":"d","instance":"i","instanceUID":"u","emitter":"em","status":200,"stream":true,
+		"finish":"f","cutBy":"c","errorCode":"x","completionTokens":3,"durationMs":9,"firstTokenMs":4}`
+	var r UsageRow
+	if err := json.Unmarshal([]byte(wire), &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.Counter != 7 || r.RequestID != "r" || r.StartTime != "s" || r.EndTime != "e" || r.Path != "/p" || r.RequestedModel != "m" ||
+		r.Provider != "pr" || r.ModelDeployment != "md" || r.DeploymentID != "d" || r.Instance != "i" || r.InstanceUID != "u" ||
+		r.Emitter != "em" || r.Status != 200 || !r.Stream || r.DurationMs != 9 {
+		t.Errorf("the plain members: %+v", r)
+	}
+	if r.Finish == nil || *r.Finish != "f" || r.CutBy == nil || *r.CutBy != "c" || r.ErrorCode == nil || *r.ErrorCode != "x" ||
+		r.CompletionTokens == nil || *r.CompletionTokens != 3 || r.FirstTokenMs == nil || *r.FirstTokenMs != 4 {
+		t.Errorf("the optional members: %+v", r)
+	}
+}
+
 func TestBinariesMissing(t *testing.T) {
 	dir := t.TempDir()
 	exe := func(name string, mode os.FileMode) string {
@@ -169,6 +298,19 @@ func TestBinariesMissing(t *testing.T) {
 	m := b.Missing()
 	if !slices.Equal(m, []string{b.Front, b.Agent}) {
 		t.Errorf("Missing = %v, want the front (not executable) and the agent (absent)", m)
+	}
+	// Before frps and frpc are known: MissingBuilds does not ask for them, and Missing does.
+	b.Frps, b.Frpc = "", ""
+	if m := b.MissingBuilds(); !slices.Equal(m, []string{b.Front, b.Agent}) {
+		t.Errorf("MissingBuilds = %v, want the front and the agent", m)
+	}
+	if m := b.Missing(); !slices.Equal(m, []string{b.Front, b.Agent, "", ""}) {
+		t.Errorf("Missing with no frps or frpc = %q", m)
+	}
+	// A directory has the executable bit and is not a binary.
+	b.HPCBurst = dir
+	if m := b.MissingBuilds(); !slices.Contains(m, dir) {
+		t.Errorf("MissingBuilds = %v, want the directory named as hpcburst", m)
 	}
 }
 

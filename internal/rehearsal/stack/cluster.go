@@ -47,6 +47,14 @@ type ClusterShape struct {
 	// A run that finds its processes by SLURM_JOB_ID on this shared host sets one
 	// no other fake cluster here uses.
 	FirstJobID int
+	// WrapApptainer, when set, runs once the engine double is installed in the
+	// directory it is given, and returns the program jobs run as apptainer in
+	// its place: the rehearsal's engine gate. nil leaves the double's own.
+	WrapApptainer func(fakes string) string
+	// Around, when set, is given the fake cluster before the login node starts,
+	// and returns the login node's LoginConfig.Around: the rehearsal's record of
+	// the commands the controller ran. nil records nothing.
+	Around func(*fakeslurm.Platform) func(line string, run func() (slurm.Result, error)) (slurm.Result, error)
 }
 
 // StartCluster starts the fake cluster in dir, with jobEnv added to every
@@ -75,14 +83,7 @@ func StartCluster(t T, dir string, shape ClusterShape, install func(dir string) 
 	if err := install(c.Fakes); err != nil {
 		t.Fatal(err)
 	}
-	env := map[string]string{
-		"HPCBURST_APPTAINER": filepath.Join(c.Fakes, "apptainer"),
-		// No GPU on this host: the agent's GPU probe only warns without one.
-		"HPCBURST_NVIDIA_SMI": filepath.Join(c.Fakes, "no-nvidia-smi"),
-	}
-	for k, v := range jobEnv {
-		env[k] = v
-	}
+	env := clusterJobEnv(c.Fakes, shape.WrapApptainer, jobEnv)
 	if len(shape.Partitions) == 0 {
 		shape.Partitions = []fakeslurm.Partition{{Name: Partition, GPUOnly: true}}
 	}
@@ -99,8 +100,12 @@ func StartCluster(t T, dir string, shape ClusterShape, install func(dir string) 
 			t.Errorf("the fake cluster's Close: %v", err)
 		}
 	})
+	var around func(string, func() (slurm.Result, error)) (slurm.Result, error)
+	if shape.Around != nil {
+		around = shape.Around(c.Plat)
+	}
 	login, err := rehearsal.StartLoginNode(rehearsal.LoginConfig{
-		Dir: filepath.Join(dir, "ln"), Platform: c.Plat,
+		Dir: filepath.Join(dir, "ln"), Platform: c.Plat, Around: around,
 		Login: fakeslurm.Login{User: ClusterUser, Env: map[string]string{"HOME": c.Home, "SCRATCH": c.Scratch}},
 	})
 	if err != nil {
@@ -113,6 +118,24 @@ func StartCluster(t T, dir string, shape ClusterShape, install func(dir string) 
 	})
 	c.Login = login
 	return c
+}
+
+// clusterJobEnv is every job's environment on the stand-in cluster: the engine
+// double's apptainer, or what wrap puts in its place, and no GPU; jobEnv, the
+// caller's, has the last word.
+func clusterJobEnv(fakes string, wrap func(fakes string) string, jobEnv map[string]string) map[string]string {
+	env := map[string]string{
+		"HPCBURST_APPTAINER": filepath.Join(fakes, "apptainer"),
+		// No GPU on this host: the agent's GPU probe only warns without one.
+		"HPCBURST_NVIDIA_SMI": filepath.Join(fakes, "no-nvidia-smi"),
+	}
+	if wrap != nil {
+		env["HPCBURST_APPTAINER"] = wrap(fakes)
+	}
+	for k, v := range jobEnv {
+		env[k] = v
+	}
+	return env
 }
 
 // ShortDir is a scratch directory with a short path: k3s's sockets bound the
@@ -144,6 +167,18 @@ var hubFiles = []hubFile{
 	{path: "config.json", content: []byte(`{"model_type":"rehearsal","max_position_embeddings":4096}` + "\n")},
 	{path: "generation_config.json", content: []byte(`{"temperature":0.7}` + "\n")},
 	{path: "model.safetensors", content: []byte(strings.Repeat("rehearsal weights\n", 512)), lfs: true},
+}
+
+// HubFileIsLFS reports whether path is one of the rehearsal checkpoint's LFS
+// files. The controller takes an LFS file's SHA-256 from the listing, so only
+// an agent downloads one.
+func HubFileIsLFS(path string) bool {
+	for _, f := range hubFiles {
+		if f.lfs && f.path == path {
+			return true
+		}
+	}
+	return false
 }
 
 // Hub is the local Hub double: the Hugging Face endpoints the controller lists

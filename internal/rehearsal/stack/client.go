@@ -63,6 +63,17 @@ func (c *Client) Send(path, body, key string) Reply {
 	return rp
 }
 
+// SendCtx is Send, also ended when parent ends: a background sender's stop
+// cancels the request it has in flight. It takes no write time, so it returns
+// as soon as the reply is read, even when the front answered before the client
+// finished writing the request.
+func (c *Client) SendCtx(parent context.Context, path, body, key string) Reply {
+	d, _ := BoundedDeadline(c.T, c.RequestTimeout())
+	ctx, cancel := context.WithDeadline(parent, d)
+	defer cancel()
+	return c.send(ctx, path, body, key)
+}
+
 // SendTimed is Send, and also returns when the client wrote the request's
 // last byte to its connection (net/http/httptrace's WroteRequest): the end of
 // the body's send as the client sees it, the bytes then in the connection's

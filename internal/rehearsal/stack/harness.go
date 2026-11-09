@@ -295,13 +295,25 @@ type Binaries struct {
 
 // Missing lists the binaries that are not executable files.
 func (b Binaries) Missing() []string {
-	var missing []string
-	for _, p := range []string{b.HPCBurst, b.Controller, b.Front, b.Agent, filepath.Join(b.K3sDir, "k3s-1.36.5", "k3s"), b.Frps, b.Frpc} {
+	return append(b.MissingBuilds(), notExecutable(b.Frps, b.Frpc)...)
+}
+
+// MissingBuilds is Missing without frps and frpc, for a caller that finds those
+// afterwards: testenv.FrpBinaries may skip the test, which a missing build must
+// not turn into a pass.
+func (b Binaries) MissingBuilds() []string {
+	return notExecutable(b.HPCBurst, b.Controller, b.Front, b.Agent, filepath.Join(b.K3sDir, "k3s-1.36.5", "k3s"))
+}
+
+// notExecutable lists the paths that are not executable files.
+func notExecutable(paths ...string) []string {
+	var out []string
+	for _, p := range paths {
 		if fi, err := os.Stat(p); err != nil || fi.Mode()&0o111 == 0 || fi.IsDir() {
-			missing = append(missing, p)
+			out = append(out, p)
 		}
 	}
-	return missing
+	return out
 }
 
 // Ports are one stack's loopback ports: hpcburst up's block (base..base+12),
@@ -311,6 +323,28 @@ type Ports struct {
 	Base           int
 	ClientAddr     string
 	DialHomeListen string
+}
+
+// URL is http://127.0.0.1:<base+off><path>, one of up's listeners.
+func (p Ports) URL(off int, path string) string {
+	return fmt.Sprintf("http://127.0.0.1:%d%s", p.Base+off, path)
+}
+
+// All lists the stack's listening ports: the front's client and dial-home
+// listeners, those that are set, and up's block from Base (13 ports).
+func (p Ports) All() []int {
+	var out []int
+	for _, a := range []string{p.ClientAddr, p.DialHomeListen} {
+		if i := strings.LastIndexByte(a, ':'); i >= 0 {
+			if n, err := strconv.Atoi(a[i+1:]); err == nil {
+				out = append(out, n)
+			}
+		}
+	}
+	for n := p.Base; n <= p.Base+12; n++ {
+		out = append(out, n)
+	}
+	return out
 }
 
 // DialHome is how jobs reach this host: direct, to the front's dial-home
@@ -375,7 +409,7 @@ func StartHost(t T, b Binaries, dir string, dh DialHome, env []string, ports Por
 		t.Fatalf("hpcburst up: %v\n%s", err, out)
 	}
 	WaitFor(t, WaitDeadline, "the controller's /readyz", func() bool {
-		return HTTPStatus(fmt.Sprintf("http://127.0.0.1:%d/readyz", ports.Base+6)) == http.StatusOK
+		return HTTPStatus(ports.URL(6, "/readyz")) == http.StatusOK
 	})
 	return h
 }
@@ -396,11 +430,7 @@ func (h *Host) DownErr() error {
 		return nil
 	}
 	h.downed = true
-	ctx, cancel := context.WithTimeout(context.Background(), DownTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, h.B.HPCBurst, "down", "--state-dir", h.State)
-	cmd.Env, cmd.WaitDelay = h.Env, 10*time.Second
-	out, err := cmd.CombinedOutput()
+	out, err := Run(h.T, DownTimeout, h.Env, h.B.HPCBurst, "down", "--state-dir", h.State)
 	h.T.Logf("memory peak of the run's cgroup (the whole stack): %s", MemoryPeak())
 	if err != nil {
 		return fmt.Errorf("hpcburst down: %v\n%s", err, out)

@@ -57,12 +57,18 @@ type AllocObservation struct {
 	Allocation *v1alpha1.Allocation
 }
 
+// DeploymentObservation is one ModelDeployment version as the watch delivered it.
+type DeploymentObservation struct {
+	At         time.Time
+	Deployment *v1alpha1.ModelDeployment
+}
+
 // Recorder holds what the watch delivered.
 type Recorder struct {
 	mu     sync.Mutex
 	obs    []Observation
 	allocs []AllocObservation
-	mds    []*v1alpha1.ModelDeployment
+	mds    []DeploymentObservation
 }
 
 // StartWatch records every version of the namespace's Instances, Allocations
@@ -106,9 +112,7 @@ func StartWatch(t T, state, namespace string, onAlloc func(*v1alpha1.Allocation)
 		defer wg.Done()
 		Follow(ctx, wc, namespace, &v1alpha1.ModelDeploymentList{}, func(_ watch.EventType, o client.Object) {
 			if md, ok := o.(*v1alpha1.ModelDeployment); ok {
-				rec.mu.Lock()
-				rec.mds = append(rec.mds, md.DeepCopy())
-				rec.mu.Unlock()
+				rec.addDeployment(md)
 			}
 		})
 	}()
@@ -172,6 +176,13 @@ func (rec *Recorder) add(in *v1alpha1.Instance, deleted bool) {
 func (rec *Recorder) addAlloc(a *v1alpha1.Allocation, deleted bool) {
 	rec.mu.Lock()
 	rec.allocs = append(rec.allocs, AllocObservation{At: time.Now(), Name: a.Name, UID: a.UID, Phase: a.Status.AtProvider.Phase, Deleted: deleted, Allocation: a.DeepCopy()})
+	rec.mu.Unlock()
+}
+
+func (rec *Recorder) addDeployment(md *v1alpha1.ModelDeployment) {
+	o := DeploymentObservation{At: time.Now(), Deployment: md.DeepCopy()}
+	rec.mu.Lock()
+	rec.mds = append(rec.mds, o)
 	rec.mu.Unlock()
 }
 
@@ -253,9 +264,18 @@ func (rec *Recorder) Allocations() []AllocObservation {
 
 // Deployments returns every ModelDeployment version, in the order received.
 func (rec *Recorder) Deployments() []*v1alpha1.ModelDeployment {
+	var out []*v1alpha1.ModelDeployment
+	for _, o := range rec.DeploymentVersions() {
+		out = append(out, o.Deployment)
+	}
+	return out
+}
+
+// DeploymentVersions is Deployments with the time each version arrived.
+func (rec *Recorder) DeploymentVersions() []DeploymentObservation {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
-	return append([]*v1alpha1.ModelDeployment(nil), rec.mds...)
+	return append([]DeploymentObservation(nil), rec.mds...)
 }
 
 // Between returns the Instance's observations received in [from, to].
