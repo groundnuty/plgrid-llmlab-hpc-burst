@@ -23,6 +23,9 @@ var watchReaders = map[string]stack.WatchClass{
 	"checkNoOverlapSlot": {Syncs: []string{"KindDeployments|KindInstances"}},
 	"checkOneSlot":       {Syncs: []string{"KindAllocations"}},
 
+	"relayKilledMidStream":        {Syncs: []string{"KindInstances"}},
+	"hostDialedControllerRestart": {Syncs: []string{"KindInstances"}},
+
 	"allocFirstSeen":         {Why: "helper: checkOneSlot makes the catch-up before it calls this"},
 	"deploymentObservations": {Why: "helper: checkNoOverlapSlot makes the catch-up before it calls this"},
 
