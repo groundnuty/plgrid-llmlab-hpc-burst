@@ -12,7 +12,7 @@ Commands run from the repository root. `<user>`, `<account>`, `<grant>` and `<lo
 - **Go 1.26 or later**, to build the binaries ([development.md](development.md) lists the pins), plus `curl`, `openssl` and an OpenSSH client. The frps download in step 2 is pinned for Linux on x86_64; on another architecture, supply your own frps with `hpcburst up --frps-bin`, which checks it against the launcher's pin.
 - **For a batch Provider** (Helios, Athena): a grant there, an ssh key for the login node that works without a passphrase prompt (the transport runs ssh in batch mode, [HBEP-4](../hbep/0004-provider-interface/README.md), Transport), and a login node that has been reached by hand once, so its host key is in your `known_hosts` (the transport always checks it).
 - **For the LLMLab Provider**: an LLMLab API key.
-- **A way for the jobs to reach your host**, the dial-home route. See [Alpha's limits](#alphas-limits); you choose the mode in step 4.
+- **A way for the jobs and your host to reach each other**, the dial-home mode. A host that compute nodes can reach (`direct`), or that has a gateway with a restricted key for them (`ssh`), needs a route you provide. A host they cannot reach runs `host-dialed`, which needs nothing beyond the Provider's ssh credentials. See [Alpha's limits](#alphas-limits); you choose the mode in step 4.
 
 ## 2. Build and fetch the binaries
 
@@ -105,9 +105,20 @@ bin/hpcburst up --state-dir "$STATE" --bin-dir "$BIN" --manifests config/crd \
 bin/hpcburst status --state-dir "$STATE"
 ```
 
+That is `ssh` mode. In `host-dialed` mode the flags that name a route go, and `--front-mode host-dialed` stands alone:
+
+```
+bin/hpcburst up --state-dir "$STATE" --bin-dir "$BIN" --manifests config/crd \
+  --front-config ~/.config/hpcburst/front.json \
+  --front-mode host-dialed
+```
+
 - `--manifests config/crd` installs the framework's CRDs once the host is ready ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), the launcher).
 - `up` also installs the CRD deletion guard, on every start, whatever `--manifests` names: deleting a framework CRD would delete every resource of its kind and cancel every provider job, and the guard refuses it. `status` prints whether the guard is present (`ABSENT` on a host that an earlier release started, until its next `up`). To uninstall the framework, run `bin/hpcburst guard remove --state-dir "$STATE"` first; it is the only step that removes the guard, and `down` and a restart leave it alone.
-- `--front-mode`, `--front-addr` and, in `ssh` mode, `--front-key` (the path of the restricted dial-home key, recorded and never read) say how jobs reach the front. With none of them, `up` warns, the controllers submit no job, and every ModelDeployment shows `FrontNotConfigured`. `--front-mode direct --front-addr <host>:<port>` is the other mode, and also needs `dialHomeListen` in `front.json`. [Alpha's limits](#alphas-limits) says what each mode asks of you.
+- `--front-mode` says how the jobs and your host reach each other: `direct`, `ssh` or `host-dialed`. With none of the front flags, `up` warns, the controllers submit no job, and every ModelDeployment shows `FrontNotConfigured`. [Alpha's limits](#alphas-limits) says what each mode asks of you.
+  - `ssh` also takes `--front-addr` and `--front-key` (the path of the restricted dial-home key, recorded and never read).
+  - `direct` takes `--front-addr <host>:<port>`, and also needs `dialHomeListen` in `front.json`.
+  - `host-dialed` takes neither `--front-addr` nor `--front-key`, and `up` refuses either one. You set up no gateway port forward and no restricted key, and `front.json` needs no `dialHomeListen`: the front's dial-home listener stays on loopback at the port base plus 7, as in `ssh` mode. The Provider's ssh credentials from step 3 are all it asks. The controller keeps two relays for each running Allocation, one for the agent's control traffic and one for the token tunnel. Each relay is an `ssh` from your host to the Provider's login node that runs an `srun` step in the job, and the job's two connections run back over it. Two costs follow: restarting the controller cuts the streams in flight, and a login node carries at most 4 relays, which is 2 Allocations. Operations ([Host-dialed relays](operations.md#host-dialed-relays)) says how to see the relays and what their failures mean.
 - `up` prints the kubeconfig path, `kubeconfig` in the state directory. `status` and `down` take the same `--state-dir`; without it they use the launcher's default, which is not `"$STATE"` if you chose another directory. `status` exits 0 when the host is healthy, 1 when it is not, and 3 when it is stopped. `up` exits 4 when the host is up but an agent build that a profile needs is missing or wrong; the host keeps running, and the message names the command that fixes the build.
 
 Use that kubeconfig with the `kubectl` of the k3s you fetched, or with your own. The alias reads `STATE` and `BIN` when you run it:
@@ -181,7 +192,8 @@ bin/hpcburst down --state-dir "$STATE"
 
 ## Alpha's limits
 
-- **The dial-home route is yours to provide.** Jobs on compute nodes dial home to your host ([HBEP-6](../hbep/0006-instance-reachability/README.md), Dial-home modes). In `direct` mode the front's dial-home listener (`dialHomeListen` in the front's configuration) must be reachable from the compute nodes. In `ssh` mode each job holds two `ssh -N -L` connections to a gateway with a restricted key, which you create and authorize once per cluster (`up` only checks that the `--front-key` file exists); the key's lines name the launcher's port block, so another `--port-base` needs new keys ([HBEP-6](../hbep/0006-instance-reachability/README.md), Ssh mode). The key's staging on the cluster is in [HBEP-4](../hbep/0004-provider-interface/README.md), Submission. Nothing in this repository sets either route up for you.
+- **The dial-home route is yours to provide, except in `host-dialed` mode.** Jobs on compute nodes dial home to your host ([HBEP-6](../hbep/0006-instance-reachability/README.md), Dial-home modes). In `direct` mode the front's dial-home listener (`dialHomeListen` in the front's configuration) must be reachable from the compute nodes. In `ssh` mode each job holds two `ssh -N -L` connections to a gateway with a restricted key, which you create and authorize once per cluster (`up` only checks that the `--front-key` file exists); the key's lines name the launcher's port block, so another `--port-base` needs new keys ([HBEP-6](../hbep/0006-instance-reachability/README.md), Ssh mode). The key's staging on the cluster is in [HBEP-4](../hbep/0004-provider-interface/README.md), Submission. Nothing in this repository sets either route up for you.
+- **In `host-dialed` mode no job dials your host,** so a host that compute nodes cannot reach works with the Provider's ssh credentials alone ([HBEP-6](../hbep/0006-instance-reachability/README.md), Host-dialed mode). The host dials each job through the Provider's login node. The price is that the controller owns the relays: restarting the controller stops them, and the token streams on them are cut, which a restart does not do in `direct` and `ssh` modes. A login node carries at most 4 relays in alpha, 2 Allocations, the handover pair; a fifth relay waits for a slot. Each relay is an ssh session and an `srun` client on the login node that compute nothing ([HBEP-4](../hbep/0004-provider-interface/README.md), open question 14).
 - **One user, one host.** The host is a single-user k3s on one machine ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md)); a team option is not part of alpha.
 - **One partition per Provider**, and a Provider names exactly one ([HBEP-4](../hbep/0004-provider-interface/README.md), open question 12). A second partition is a second Provider.
 - **Short-job partitions host no model.** Helios `plgrid` and Athena `plgrid-now` are in the profiles for conformance runs and short checks only ([`profiles/README.md`](../profiles/README.md)).
