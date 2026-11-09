@@ -7,9 +7,12 @@
 #   hack/mutate-alpha.sh --only <regexp>  # only the mutants whose line matches (egrep), to try a new one; exit 2, and
 #                                         # nothing run, for an expression that is not valid or matches no mutant
 #
-# A mutant ends as KILLED (a test fails), SURVIVED (every test passes) or BROKEN: its text does not occur exactly once, or
-# the Go file it changes no longer compiles. A mutant that does not compile fails to build the tests, and that is not a test
-# failing, so it is reported as BROKEN, never as killed; the run fails for a survivor and for a broken mutant alike. The
+# Before the first mutant of each kind the tests of that kind run with no mutant, under the same command: if they fail, or do
+# not compile, the run stops (exit 2), since a test that already fails would count every mutant as killed (#285).
+# A mutant ends as KILLED (a test fails, and the line names it), SURVIVED (every test passes) or BROKEN: its text does not
+# occur exactly once, or the Go file it changes no longer compiles. A mutant that does not compile fails to build the tests,
+# and that is not a test failing, so it is reported as BROKEN, never as killed; the run fails for a survivor and for a broken
+# mutant alike. The run ends with how many kills each failing test made, so a shared cause shows. The
 # compile is its own step, to one fixed test-binary path per package, and the binary then runs: so MUTATE_ALPHA_BUILD_LOCK,
 # a lock file, is taken (flock -o) around each compile only, never around a test run.
 #
@@ -236,7 +239,7 @@ mutants=(
   'frontlabel.go@@(?:[,;]? @@(?:[,;]?'
   'frontlabel.go@@return first + "\n" + FrontLine(label) + "\n" + rest@@return first + "\n" + rest'
   'run.go@@if lerr := ValidFrontLabel(cfg.FrontLabel); lerr != nil {@@if lerr := ValidFrontLabel(cfg.FrontLabel); false && lerr != nil {'
-  'run.go@@InsertFrontLine(summary(failures, jobs), cfg.FrontLabel)@@summary(failures, jobs)'
+  'run.go@@InsertFrontLine(post, cfg.FrontLabel)@@post'
   'run.go@@"frontLabel": cfg.FrontLabel, @@'
   'config.go@@bad = append(bad, EnvFrontLabel+": "+err.Error())@@_ = err'
   'config.go@@cfg.FrontLabel = getenv(EnvFrontLabel)@@cfg.FrontLabel = ""'
@@ -397,7 +400,6 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'guard_live_test.go@@				_, err = setEnd(end)@@				_ = end'
   'guard_live_test.go@@	stack.WaitFor(r.t, d, what, guarded)@@	stack.WaitFor(r.t, d, what, cond); _ = guarded'
   'guard_live_test.go@@			if md.Spec.EndTime == nil || !md.Spec.EndTime.Time.Equal(end) {@@			if false {'
-  'guard_live_test.go@@			return errors.New("the successor never started, so the run'"'"'s deployment never ended at its drain start")@@			return nil'
   # B7: the first clock, and a tunnel row's NOT RUN at its first end.
   'jobcount.go@@		if c := timeLimit - drainWindow - time.Minute; c < pendingMax {@@		if c := timeLimit - drainWindow; c < pendingMax {'
   'jobcount.go@@		if c := timeLimit - drainWindow - time.Minute; c < pendingMax {@@		if c := timeLimit - drainWindow - time.Minute; c <= pendingMax {'
@@ -427,6 +429,70 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'hack/live-checks.sh@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|85|-|30@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|85|-'
   'hack/live-checks.sh@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|85|-|30@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|85|-|20'
   'hack/live-checks.sh@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|85|-|30@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|80|-|30'
+  # The review of PR 284. B1, B2 and B4: a job that started, or that a read cannot tell about, is never NOT RUN.
+  'internal/providerctl/conformance/startwait_test.go@@			accountingNotFailed(w.t, last) // no job starts@@			_ = last // no job starts'
+  'internal/providerctl/conformance/startwait_test.go@@		if why := w.whyNotWaiting(last, acceptedID); why != "" {@@		if why := ""; why != "" {'
+  'internal/providerctl/conformance/startwait_test.go@@	if o.StartTime != nil || o.Phase == v1alpha1.AllocationRunning || o.Phase == v1alpha1.AllocationEnded {@@	if false {'
+  'internal/providerctl/conformance/startwait_test.go@@	if o.StartTime != nil || o.Phase == v1alpha1.AllocationRunning || o.Phase == v1alpha1.AllocationEnded {@@	if o.Phase == v1alpha1.AllocationRunning || o.Phase == v1alpha1.AllocationEnded {'
+  'internal/providerctl/conformance/startwait_test.go@@	if o.StartTime != nil || o.Phase == v1alpha1.AllocationRunning || o.Phase == v1alpha1.AllocationEnded {@@	if o.StartTime != nil || o.Phase == v1alpha1.AllocationEnded {'
+  'internal/providerctl/conformance/startwait_test.go@@	if o.StartTime != nil || o.Phase == v1alpha1.AllocationRunning || o.Phase == v1alpha1.AllocationEnded {@@	if o.StartTime != nil || o.Phase == v1alpha1.AllocationRunning {'
+  'internal/providerctl/conformance/startwait_test.go@@		return fmt.Sprintf("its state could not be read: %v", err)@@		return ""'
+  'internal/providerctl/conformance/startwait_test.go@@		return "the queue does not list it"@@		return ""'
+  'internal/providerctl/conformance/startwait_test.go@@	case !alpha.WaitingToStart(j):@@	case false:'
+  'internal/providerctl/conformance/startwait_test.go@@		return "its Allocation could not be read"@@		return ""'
+  'internal/providerctl/conformance/startwait_test.go@@		return "there is no platform to read it on"@@		return ""'
+  'internal/providerctl/conformance/startwait_test.go@@		id = a.Annotations[v1alpha1.AnnotationJobID]@@		id = acceptedID'
+  'internal/providerctl/conformance/startwait_test.go@@	id := acceptedID@@	id := ""'
+  'jobcount.go@@	return j.StartTime == nil && j.EndTime == nil && !j.Requeued && (j.Phase == v1alpha1.AllocationPending || j.Phase == v1alpha1.AllocationHeld)@@	return j.EndTime == nil && !j.Requeued && (j.Phase == v1alpha1.AllocationPending || j.Phase == v1alpha1.AllocationHeld)'
+  'jobcount.go@@	return j.StartTime == nil && j.EndTime == nil && !j.Requeued && (j.Phase == v1alpha1.AllocationPending || j.Phase == v1alpha1.AllocationHeld)@@	return j.StartTime == nil && !j.Requeued && (j.Phase == v1alpha1.AllocationPending || j.Phase == v1alpha1.AllocationHeld)'
+  'jobcount.go@@	return j.StartTime == nil && j.EndTime == nil && !j.Requeued && (j.Phase == v1alpha1.AllocationPending || j.Phase == v1alpha1.AllocationHeld)@@	return j.StartTime == nil && j.EndTime == nil && (j.Phase == v1alpha1.AllocationPending || j.Phase == v1alpha1.AllocationHeld)'
+  'jobcount.go@@	return j.StartTime == nil && j.EndTime == nil && !j.Requeued && (j.Phase == v1alpha1.AllocationPending || j.Phase == v1alpha1.AllocationHeld)@@	return j.StartTime == nil && j.EndTime == nil && !j.Requeued'
+  'jobcount.go@@	return j.StartTime == nil && j.EndTime == nil && !j.Requeued && (j.Phase == v1alpha1.AllocationPending || j.Phase == v1alpha1.AllocationHeld)@@	return j.StartTime == nil && j.EndTime == nil && !j.Requeued && j.Phase == v1alpha1.AllocationPending'
+  'jobcount.go@@	return j.StartTime == nil && j.EndTime == nil && !j.Requeued && (j.Phase == v1alpha1.AllocationPending || j.Phase == v1alpha1.AllocationHeld)@@	return j.StartTime == nil && j.EndTime == nil && !j.Requeued && j.Phase == v1alpha1.AllocationHeld'
+  'steps_live_test.go@@			if st.StartTime != nil {@@			if false {'
+  'steps_live_test.go@@			case v1alpha1.AllocationRunning, v1alpha1.AllocationEnded, v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:@@			case v1alpha1.AllocationEnded, v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:'
+  'steps_live_test.go@@			case v1alpha1.AllocationRunning, v1alpha1.AllocationEnded, v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:@@			case v1alpha1.AllocationRunning, v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:'
+  'steps_live_test.go@@			case v1alpha1.AllocationRunning, v1alpha1.AllocationEnded, v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:@@			case v1alpha1.AllocationRunning, v1alpha1.AllocationEnded, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:'
+  'steps_live_test.go@@			case v1alpha1.AllocationRunning, v1alpha1.AllocationEnded, v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:@@			case v1alpha1.AllocationRunning, v1alpha1.AllocationEnded, v1alpha1.AllocationFailed, v1alpha1.AllocationRefused:'
+  'steps_live_test.go@@			case v1alpha1.AllocationRunning, v1alpha1.AllocationEnded, v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:@@			case v1alpha1.AllocationRunning, v1alpha1.AllocationEnded, v1alpha1.AllocationFailed, v1alpha1.AllocationLost:'
+  'steps_live_test.go@@			if err := r.firstJobWaiting(); err != nil {@@			if err := error(nil); err != nil {'
+  'steps_live_test.go@@		return fmt.Errorf("the queue could not be read: %w", err)@@		return nil'
+  'steps_live_test.go@@		return errors.New("the queue lists no job of the run")@@		return nil'
+  'steps_live_test.go@@		if !WaitingToStart(j) {@@		if false {'
+  # B3: the first job ran and the second never started is NOT RUN unless an earlier failure stands; its own bound.
+  'guard_live_test.go@@			return r.secondNeverFinal()@@			return ErrSecondNotStarted'
+  'guard_live_test.go@@		return fmt.Errorf("the successor'"'"'s state could not be read: %w", err)@@		return ErrSecondNotStarted'
+  'guard_live_test.go@@	_, final, err := r.guard.Next(l)@@	_, final, _ := r.guard.Next(l)'
+  'guard_live_test.go@@		return errors.New("the successor has started, but only after the wait for it, so the run'"'"'s deployment never ended at its drain start in time")@@		return ErrSecondNotStarted'
+  'guard_live_test.go@@	if r.guard.pred == "" {@@	if false {'
+  'guard_live_test.go@@		if !WaitingToStart(j) {@@		if false {'
+  'guard_live_test.go@@	if waiting == 0 {@@	if false {'
+  'run.go@@	if second != nil && len(failures) == 0 {@@	if second != nil {'
+  'run.go@@	if second != nil && len(failures) == 0 {@@	if false {'
+  'run.go@@func stopsTheRun(err error) bool { return err != nil && !errors.Is(err, ErrSecondNotStarted) }@@func stopsTheRun(err error) bool { return err != nil }'
+  'run.go@@				return handoverFirstJobChecks(cfg.Row, o, j)@@				return VerifyHandover(cfg.Row, o, j)'
+  'run.go@@				return noOverlapFirstJobChecks(cfg.Row, o, j)@@				return VerifyNoOverlap(cfg.Row, o, j)'
+  'run.go@@ || errors.Is(err, ErrSecondNotStarted)@@'
+  'run.go@@	if errors.Is(err, ErrSecondNotStarted) {@@	if false {'
+  'run.go@@		post += "- " + secondNotStartedWords + "; the failed checks are the first job'"'"'s\n"@@		_ = secondNotStartedWords'
+  'steps_live_test.go@@		if !startBy.IsZero() && time.Now().After(startBy.Add(2*r.every())) && !r.secondStarted() {@@		if false {'
+  'steps_live_test.go@@		if !startBy.IsZero() && time.Now().After(startBy.Add(2*r.every())) && !r.secondStarted() {@@		if !startBy.IsZero() && !r.secondStarted() {'
+  'steps_live_test.go@@		if !startBy.IsZero() && time.Now().After(startBy.Add(2*r.every())) && !r.secondStarted() {@@		if !startBy.IsZero() && time.Now().After(startBy.Add(2*r.every())) {'
+  'steps_live_test.go@@		if !startBy.IsZero() && time.Now().After(startBy.Add(2*r.every())) && !r.secondStarted() {@@		if time.Now().After(startBy.Add(2*r.every())) && !r.secondStarted() {'
+  'live_flows_test.go@@time.Until(leaseEnd)+SuccessorWait(r.tm, p.PendingMax), leaseEnd.Add(p.PendingMax))@@time.Until(leaseEnd)+SuccessorWait(r.tm, p.PendingMax), time.Time{})'
+  # B5 and B6: the sums. Each is compared with a figure worked out by hand, so a longer wait fails a test, not a run.
+  'budget.go@@	CloseTimeout = 5 * time.Minute@@	CloseTimeout = 4 * time.Minute'
+  'budget.go@@	ReadyMargin = 5 * time.Minute@@	ReadyMargin = 4 * time.Minute'
+  'budget.go@@	EndMargin = 5 * time.Minute@@	EndMargin = 4 * time.Minute'
+  'budget.go@@	GuardEvery       = 10 * time.Second@@	GuardEvery       = 5 * time.Second'
+  'budget.go@@	GuardResultLooks = 6@@	GuardResultLooks = 3'
+  'budget.go@@	return pendingMax + tm.StartTimeout + ReadyMargin@@	return tm.StartTimeout + ReadyMargin'
+  'budget.go@@	return time.Duration(r.MostJobs)*pendingMax + r.Budget@@	return pendingMax + r.Budget'
+  'budget.go@@		return first + (r.Lease - dw) + tm.MaxRequestDuration + dw + EndMargin + lastLooks + CloseTimeout@@		return first + (r.Lease - dw) + dw + EndMargin + lastLooks + CloseTimeout'
+  'budget.go@@		return first + r.Lease + SuccessorWait(tm, pendingMax) + lastLooks + CloseTimeout@@		return first + r.Lease + lastLooks + CloseTimeout'
+  'budget.go@@	return first + (r.Lease - dw) + dw + EndMargin + CloseTimeout@@	return first + (r.Lease - dw) + EndMargin + CloseTimeout'
+  'budget.go@@	first, _ := FirstClock(r, pendingMax, r.Lease, dw)@@	first := pendingMax'
+  'rows.go@@	r.Budget = lease + 15*time.Minute@@	_ = r.Budget'
   'dry_test.go@@	d.tick(bound - time.Second)@@	d.tick(bound - time.Minute)'
   'alpha_live_test.go@@		if merr := rec.SaveText(NotRunFile, note); merr != nil {@@		if merr := error(nil); merr != nil {'
   'run.go@@			if neverStarted(err) {@@			if false {'
@@ -471,6 +537,47 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
 # The mutants of a test of this script: a file with one mutant per line, in place of the list above.
 [ -z "${MUTATE_ALPHA_MUTANTS:-}" ] || mapfile -t mutants < "$MUTATE_ALPHA_MUTANTS"
 here=$PWD
+# compile_of <path>: the test binaries that judge a mutant of path, from the tree as it is now; on failure $cerr says why.
+compile_of() {
+  cerr=""
+  case $1 in
+    internal/providerctl/*) compile_tests internal/providerctl/conformance "$tmp/conf.test" && compile_tests "$pkg" "$tmp/pkg.test" ;;
+    *.go) compile_tests "$pkg" "$tmp/pkg.test" ;;
+  esac
+}
+# tests_of <path>: the command that judges a mutant of path, in the array tests. The package's run has -test.timeout 300s, not
+# less: internal/rehearsal/stack gives up its waits two minutes before the test's deadline (CleanupMargin), so at 120s every
+# wait on state failed at once and the unmutated tests failed, which counted every mutant of the package as killed.
+tests_of() {
+  case $1 in
+    hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 -failfast -run 'AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot' ./hack/livechecks) ;;
+    "$pkg"/alpha_live_test.go)
+      # The dry runs of the script run the alpha test binary: the one compiled above, from the mutated file.
+      tests=(env HPCBURST_LIVECHECKS_ALPHA_TEST="$tmp/pkg.test" go test -count=1 -timeout 9m -run PendingPastTheBound ./hack/livechecks) ;;
+    internal/providerctl/*) tests=(bash -c 'cd "$1/internal/providerctl/conformance" && "$2" -test.count=1 -test.timeout 300s -test.failfast && cd "$1/$3" && "$4" -test.count=1 -test.timeout 300s -test.failfast' _ "$here" "$tmp/conf.test" "$pkg" "$tmp/pkg.test") ;;
+    *) tests=(bash -c 'cd "$1/$2" && "$3" -test.count=1 -test.timeout 300s -test.failfast' _ "$here" "$pkg" "$tmp/pkg.test") ;;
+  esac
+}
+# failing_tests <log>: the top-level tests a run's log says failed, or the panic that ended it.
+failing_tests() { sed -n -E 's/^--- FAIL: ([^ ]+).*/\1/p; s/^panic: (test timed out).*/\1/p' "$1" | head -n 3 | paste -s -d ' ' -; }
+# baseline <path>: the tests that judge a mutant of path must pass with no mutant, once per kind, or a failing test would count
+# every mutant as killed and "0 survived" would say nothing. A tree they fail on stops the run (exit 2), with no mutant tried.
+declare -A based=()
+baseline() {
+  local kind
+  case $1 in
+    hack/live-checks.sh) kind="the script's" ;;
+    "$pkg"/alpha_live_test.go) kind="the dry runs'" ;;
+    internal/providerctl/*) kind="the conformance package's" ;;
+    *) kind="the package's" ;;
+  esac
+  [ -z "${based[$kind]:-}" ] || return 0
+  based[$kind]=1
+  compile_of "$1" || { echo "mutate-alpha: $kind tests do not compile with no mutant, so nothing can be checked: $cerr" >&2; exit 2; }
+  tests_of "$1"
+  "${tests[@]}" >"$tmp/baseline.log" 2>&1 || {
+    echo "mutate-alpha: $kind tests fail with no mutant, so every mutant would count as killed: $(failing_tests "$tmp/baseline.log")" >&2; exit 2; }
+}
 killed=0 survived=0 broken=0 total=0
 for m in "${mutants[@]}"; do
   [ -z "$only" ] || printf '%s\n' "$m" | grep -q -E -e "$only" || continue
@@ -480,6 +587,7 @@ for m in "${mutants[@]}"; do
   total=$((total+1))
   keep "$path"
   cp "${saved[$path]}" "$path"
+  baseline "$path"
   if ! python3 - "$path" "$from" "$to" <<'PY'
 import sys
 p, a, b = sys.argv[1:4]
@@ -491,27 +599,21 @@ PY
   then echo "BROKEN   $file: the text '$from' does not occur exactly once"; broken=$((broken+1)); continue; fi
   case $path in
     *.go|internal/providerctl/*)
-      cerr=""
-      case $path in
-        internal/providerctl/*) compile_tests internal/providerctl/conformance "$tmp/conf.test" && compile_tests "$pkg" "$tmp/pkg.test" ;;
-        *) compile_tests "$pkg" "$tmp/pkg.test" ;;
-      esac || { echo "BROKEN   $file: $from  ->  $to: the mutant does not compile: $cerr"; broken=$((broken+1)); cp "${saved[$path]}" "$path"; continue; } ;;
+      compile_of "$path" || { echo "BROKEN   $file: $from  ->  $to: the mutant does not compile: $cerr"; broken=$((broken+1)); cp "${saved[$path]}" "$path"; continue; } ;;
   esac
-  case $path in
-    hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 -failfast -run 'AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot' ./hack/livechecks) ;;
-    "$pkg"/alpha_live_test.go)
-      # The dry runs of the script run the alpha test binary: the one compiled above, from the mutated file.
-      tests=(env HPCBURST_LIVECHECKS_ALPHA_TEST="$tmp/pkg.test" go test -count=1 -timeout 9m -run PendingPastTheBound ./hack/livechecks) ;;
-    internal/providerctl/*) tests=(bash -c 'cd "$1/internal/providerctl/conformance" && "$2" -test.count=1 -test.timeout 300s && cd "$1/$3" && "$4" -test.count=1 -test.timeout 300s' _ "$here" "$tmp/conf.test" "$pkg" "$tmp/pkg.test") ;;
-    *) tests=(bash -c 'cd "$1/$2" && "$3" -test.count=1 -test.timeout 120s' _ "$here" "$pkg" "$tmp/pkg.test") ;;
-  esac
-  if "${tests[@]}" >/dev/null 2>&1; then
+  tests_of "$path"
+  if "${tests[@]}" >"$tmp/mutant.log" 2>&1; then
     echo "SURVIVED $file: $from  ->  $to"; survived=$((survived+1))
   else
     killed=$((killed+1))
+    # A kill names what failed, so that one test failing for every mutant shows (#285).
+    by=$(failing_tests "$tmp/mutant.log")
+    echo "KILLED   $file: $from  ->  $to: by ${by:-no test it could name}"
+    printf '%s\n' "${by:-no test it could name}" >>"$tmp/kills"
   fi
   cp "${saved[$path]}" "$path"
 done
 [ -z "$only" ] || [ "$total" -gt 0 ] || { echo "mutate-alpha: --only $only selected no mutant, so nothing was checked" >&2; exit 2; }
+[ ! -s "$tmp/kills" ] || { echo "kills by what failed:"; sort "$tmp/kills" | uniq -c | sort -rn | sed 's/^/  /'; }
 echo "mutants: $total, killed $killed, survived $survived, broken $broken"
 [ "$survived" -eq 0 ] && [ "$broken" -eq 0 ]
