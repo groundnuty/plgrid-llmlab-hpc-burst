@@ -29,7 +29,9 @@
 // the preamble and then the channel's multiplexed session.
 //
 // Exit codes: 0 when it stopped on instruction or on a signal (a relay: when
-// its session ended), 1 when it could not start, 2 on a usage error.
+// its session ended), 1 when it could not start, 2 on a usage error; a relay
+// also exits 4 when the agent is not ready (hostdial.ExitNotReady) and 5 when
+// the agent keeps a newer relay (hostdial.ExitSuperseded).
 package main
 
 import (
