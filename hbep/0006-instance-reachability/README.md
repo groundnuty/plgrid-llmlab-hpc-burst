@@ -2,7 +2,7 @@
 
 ## Summary
 
-On batch providers, compute nodes are reachable only through login nodes, and on some clusters not at all. This HBEP decides how the front (HBEP-5) reaches an instance: the instance dials home. For alpha the tunnel is frp v0.71.1. Each Instance's frpc connects out over `wss` to the front's dial-home listener, which passes it to frps on the control-plane host. frps routes the front's requests by the Instance's UID. A server plugin in the lifecycle controller admits each tunnel with the Allocation's credential. The HBEP sets the wiring of both dial-home modes, the heartbeats, the front's deadlines and end-to-end probe, path state and teardown. Login-node relays and port forwards are not used in alpha. Every path has one owner, a liveness signal and a defined teardown.
+On batch providers, compute nodes are reachable only through login nodes, and on some clusters not at all. This HBEP decides how the front (HBEP-5) reaches an instance: the instance dials home. For alpha the tunnel is frp v0.71.1. Each Instance's frpc connects out over `wss` to the front's dial-home listener, which passes it to frps on the control-plane host. frps routes the front's requests by the Instance's UID. A server plugin in the lifecycle controller admits each tunnel with the Allocation's credential. The HBEP sets the wiring of the three dial-home modes (in host-dialed mode the control-plane host opens the connections, through the login node, for a host that compute nodes cannot reach), the heartbeats, the front's deadlines and end-to-end probe, path state and teardown. Port forwards are not used in alpha, and login-node relays only in host-dialed mode. Every path has one owner, a liveness signal and a defined teardown.
 
 ## Motivation
 
@@ -24,7 +24,7 @@ Problems:
 - The front reaches every instance by its instance identity. No client or operator computes a host, address or port.
 - Each path has exactly one owner, and the path ends when its owner ends.
 - Path liveness is checked end to end, through the path to the engine.
-- Teardown leaves nothing behind. Every process the framework starts outside an allocation is in the inventory, and is removed by record, never by pattern.
+- Teardown leaves nothing behind. Every process the framework starts outside an allocation is in the inventory, and is removed by record, never by pattern. Host-dialed relays are in the controller's own records, and stopped by PID.
 - Only the path carries traffic from outside an allocation. Engine HTTP listeners bind to loopback or a Unix socket and are reached through the tunnel agent.
 
 ### Non-goals
@@ -50,7 +50,8 @@ Problems:
   - The development VM sits behind a NAT, and from those nodes only port 22 answered at its address. That sshd turned out to be a gateway's, not the VM's: its host key differs (issue #18, 31 Oct 2026; L-17.7). The tunnel still runs inside ssh, with a restricted key (ssh mode). The route is a port forward on the gateway, so the clusters reach the VM's sshd at the gateway's address and port (owner decision, 31 Oct 2026, [issue #18, comment 6546958511](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/18#issuecomment-6546958511)). So ssh mode runs over the configured ssh port, 22 by default.
   - Sano was not measured. It is not an alpha platform (HBEP-4).
   - Where dial home works stays a per-partition fact in the platform profile (HBEP-4).
-- **The front needs an address that compute nodes reach** (HBEP-11, open question 8): directly on the dial-home port (direct mode), or through ssh on the configured ssh port, 22 by default, with a restricted key (ssh mode). A host reachable by neither is out of alpha, and HBEP-11's launcher checks it.
+- **The front needs an address that compute nodes reach** (HBEP-11, open question 8): directly on the dial-home port (direct mode), or through ssh on the configured ssh port, 22 by default, with a restricted key (ssh mode). Or it needs none: in host-dialed mode the control-plane host dials each job through the login node, and the job's connections run back over it (Dial-home modes; science-agent decision, 9 Nov 2026, on the owner's "we have to solve this, you should wait for nothing. just dial whatever you want from this host").
+- **What the control-plane host reaches** (probes of 9 Nov 2026, from the alpha host, Helios's CPU nodes and Athena's A100 nodes, #145): the login nodes over ssh, and through them its own job, with `srun --overlap` steps whose standard input and output cross both ways. It can't open ssh on a compute node: after a public-key partial success, the node's sshd asks for a Kerberos ticket ("Permission denied (gssapi-keyex,gssapi-with-mic)"). A reverse forward on a login node binds its loopback only, so compute nodes can't reach it.
 - **The center consents** to outbound tunnels from compute nodes (owner, 31 Oct 2026; open question 9).
 - **Inside the instance,** the engine listens on a Unix socket in the job's private temporary directory (HBEP-7). frpc reaches it through that socket, with the Instance's own key on the serving path (HBEP-9). That key is not the Allocation's credential, which admits the tunnel. A key covers only part of the engine's HTTP API (Risks).
 - **All tokens of every reply cross the path.** Its throughput and latency under many concurrent streams are part of serving capacity (Operational readiness 5).
@@ -58,7 +59,7 @@ Problems:
 
 ### Risks and mitigations
 
-- **Outbound is blocked or proxied.** It is a profile fact, measured per partition. Every alpha partition dials out (S1's step 0), so no relay is built for alpha (open question 3).
+- **Outbound is blocked or proxied.** It is a profile fact, measured per partition. Every alpha partition dials out (S1's step 0). A relay is built only for host-dialed mode, where nothing reaches the control-plane host (open question 3).
 - **Streams on one tunnel block each other (head-of-line blocking).** frp multiplexes every stream of a tunnel over one connection (yamux, with up to 6 MiB of send credit per stream). In S1c this happened in every valid run, on every transport: on a 1 MB/s link, one 4 MiB reply held every other stream's tokens back for 4.47–4.54 s, and one slowly read reply for up to 7.4 s. With separate connections behind the same shared cap the delay stayed under 0.15 s. Mitigations:
   - the agent's control traffic has its own connection, never the token tunnel (Dial-home modes);
   - the tunnel carries every request HBEP-5 routes to an Instance: its listed endpoints and its passthrough of every other JSON `POST` under `/v1/` (HBEP-5, Contract), so any large non-streamed reply can stall the streams of its Instance. An Instance serves one model, and vLLM v0.32.0 serves `/v1/embeddings` only for a pooling model and the chat and completions routes only for a generative one: a server's tasks come from its one runner type (`vllm/v1/worker/gpu_model_runner.py:3158-3164`), the generation routes need `generate` (`vllm/entrypoints/launchers/api_server/routers.py:49-54`), and the embeddings route needs `embed` (`vllm/entrypoints/pooling/factories.py:132-135`; `pooling/embed/api_router.py:28-29`). So embeddings and token streams never share an Instance's tunnel. The risk that remains is any large non-streamed reply of a generative model, from a listed endpoint or the passthrough, which can stall its Instance's streams for seconds on a slow path. The path rate is measured in S1's one-hour runs (Graduation criteria);
@@ -66,13 +67,13 @@ Problems:
 - **A short heartbeat timeout drops a healthy tunnel.** With a 6 s timeout, a slow reader queued more than 6 s of data in S1c, a heartbeat timed out, and all 16 streams were cut, in both passes. S1's set survived every run. Heartbeat timeouts are budgeted from the queueing delay (Heartbeats). yamux's ping timeout is fixed at 10 s, so on a slow path a queue of more than 10 s drops the tunnel at any setting.
 - **The tunnel drops while the instance is healthy.** frpc and the ssh forwards reconnect on their own. Meanwhile the front holds the Instance as not eligible, not dead (HBEP-5), and the controller restarts nothing on that basis (HBEP-7).
 - **Requests hang in a dead tunnel before frps notices.** frps answers the front's `CONNECT` before it takes a work connection (frp facts), so a silent path still accepts requests. frps then closes each of them itself, after the front's write and before any response byte: a request that waits for a work connection at `userConnTimeout` (10 s), and the one that drew the spare work connection when the session is torn down (12–20 s at S1's settings, over 15 s at frp's defaults in S1c). The front returns that as 502 `upstream_closed` (HBEP-5, Errors), does not resend it, and its probe takes the Instance out of rotation (The front's half).
-- **A lifecycle-controller outage blocks new logins.** The plugin handles `Login`, `NewProxy` and `CloseProxy` only, so frps consults it only when a session logs in or registers a proxy, and established tunnels survive a controller restart. While the plugin is down, frps refuses every login and proxy (frp facts), so an frpc that reconnects meanwhile cannot log in. It keeps retrying (`loginFailExit = false`) and returns when the plugin is back. `Ping` is not subscribed (science-agent decision, 31 Oct 2026): frps would turn a failed `Ping` call into an error answer, on which frpc closes its session (frp facts), so a controller outage would cut every tunnel.
+- **A lifecycle-controller outage blocks new logins.** The plugin handles `Login`, `NewProxy` and `CloseProxy` only, so frps consults it only when a session logs in or registers a proxy, and established tunnels survive a controller restart, except in host-dialed mode, where the relays are the controller's children (Dial-home modes). While the plugin is down, frps refuses every login and proxy (frp facts), so an frpc that reconnects meanwhile cannot log in. It keeps retrying (`loginFailExit = false`) and returns when the plugin is back. `Ping` is not subscribed (science-agent decision, 31 Oct 2026): frps would turn a failed `Ping` call into an error answer, on which frpc closes its session (frp facts), so a controller outage would cut every tunnel.
 - **A slow plugin stalls a tunnel.** frps's plugin client has no timeout, and `NewProxy` runs on the session's read loop (frp facts). A plugin that waits holds that tunnel's control messages, and past 25 s frps drops it. So the plugin answers from in-memory state within 1 s, and refuses rather than waiting on the API server (Admission).
 - **A false instance registers and receives prompts.** frps admits a tunnel only through the plugin: the login must carry a live Allocation's credential, and a proxy may claim only the UID of an Instance placed on that Allocation (Admission). The Instance takes traffic only after the controller's verification (HBEP-7, HBEP-9). One limit remains: frps attaches a work connection to a session by its run ID alone, and neither the plugin nor frps's empty token checks it (frp facts). frps draws run IDs at random. They appear in frps's log and the plugin's calls on the control-plane host, and frpc logs its own and prefixes every later line with it. Anyone who read that log could, in direct mode, attach a work connection through the public dial-home listener and receive requests, with the Instance's key in their headers. So frpc's log goes only to a file in the job's private temporary directory, never to the job's output files on shared storage (frpc in the job). A shared frps token with `auth.additionalScopes = ["NewWorkConns"]` would close this; it is not in alpha.
 - **The tunnel's ping succeeds while the engine is dead.** The front's probe goes through the path to the engine.
 - **An engine API key is taken for isolation.** A vLLM API key covers only part of the engine's HTTP API (vLLM's security documentation), and traffic between an engine's ranks is unauthenticated by default. So engine HTTP listeners bind to a Unix socket or loopback and are reached through frpc. A multi-node instance's rank traffic still crosses the cluster network unauthenticated. That is a known limitation, recorded in each platform profile (HBEP-4).
 - **Engine internals listen off loopback.** In spike S2 phase B each vLLM worker had its API port on the IPv4 loopback address and six more TCP listeners on the node's cluster address, although `--host` and `VLLM_HOST_IP` were both set to that loopback address (HBEP-5, Risks). The serving path needs the Instance's key. The other listeners are engine internals, which no key covers, so an Instance on a shared cluster network exposes them unless the provider's network isolates it.
-- **Loopback is shared.** Other users' jobs on a shared compute node can reach the ssh forwards' local ports, and other local users on the control-plane host can reach frps and the plugin endpoint (L-7.5). The forwards lead only to endpoints that check the Allocation's credential or the Instance's key. The alpha host is single-user. Recorded as a known limit.
+- **Loopback is shared.** Other users' jobs on a shared compute node can reach the ssh forwards' local ports, and in host-dialed mode the agent's two listeners, and other local users on the control-plane host can reach frps and the plugin endpoint (L-7.5). The forwards lead only to endpoints that check the Allocation's credential or the Instance's key. The alpha host is single-user. Recorded as a known limit.
 - **No end-to-end encryption from front to engine.** TLS ends at the front's dial-home listener; from frps to frpc's socket the bytes are plain inside the TLS hop (open question 2). Security is not the main concern for alpha (owner), so this is a recorded limit.
 - **Paths outlive their owner.** frpc ends with its Instance and at the latest with the job. Owner references and garbage collection (HBEP-11) remove the front-side records.
 - **Teardown kills the wrong process.** The launcher stops frps by its recorded process ID plus start time (HBEP-11). The agent stops frpc and its ssh forwards as its own children. No respawners outside the controller and the launcher.
@@ -82,16 +83,17 @@ Problems:
 
 1. **Tunnel protocol.** **Decided** (science-agent decision, 31 Oct 2026): frp v0.71.1 (`fatedier/frp`), as two pinned release binaries, frps and frpc, with frpc's `wss` transport to the front's dial-home listener and `tcpmux` routing (`httpconnect`) by the Instance's UID. Source: spike S1c (PR #78). With no impairment, at 1 to 256 streams of 20 tokens/s, frp added 1–4 ms to the median time to first token over tcpmux, wss and ssh. At 256 streams wss cost the front 7.9–8.7% of a core per 1,000 tokens/s against 6.6–6.9% for frp's plain tcp (at 64 streams, 15–16% against 8.8–11.5%), and about 5% more payload, and it is ordinary HTTPS. frps v0.71.1 cannot serve wss itself, so the front's TLS terminator passes the websocket on (S1c's self-test; frp facts).
 2. **Encryption.** **Decided for alpha** (science-agent decision, 31 Oct 2026, under the owner's "security is not the main concern"): TLS terminates at the front's dial-home listener, which frpc verifies against the launcher's certificate. In ssh mode that TLS runs inside ssh. Front to frps is loopback on the control-plane host. frpc reaches the engine through its Unix socket on the node, and the engine checks the Instance's key (HBEP-9). There is no end-to-end TLS from front to engine (Risks). Source: S1c's wss arm, where frpc verified the front's certificate and every request completed.
-3. **Relay fallback form.** **Not needed for alpha:** every alpha partition dials out on 443 with no proxy (S1's step 0: Helios CPU, Helios GH200 and Athena A100). A partition without outbound needs a relay first.
+3. **Relay fallback form.** **Decided for alpha** (science-agent decision, 9 Nov 2026): host-dialed mode's relays, an `srun -u --overlap` step reached over ssh through the login node (Dial-home modes). It serves a control-plane host that compute nodes cannot reach. A partition without outbound needs nothing more, since host-dialed mode needs none. Source: the probe of 9 Nov 2026.
 4. **Port forwards.** **Not needed for alpha:** an ssh port forward that an operator opens is never a routing path in alpha. A network forward on a gateway in front of the control-plane host, which ssh mode may cross, is not this (open question 8). Whether forwards ever become a supported path, with an owner and a teardown, stays the owner's decision after alpha.
 5. **Multi-node instances.** **Not needed for alpha:** alpha Instances are single-node (HBEP-7, Provisioning).
 6. **Heartbeats.** **Decided** (science-agent decision, 31 Oct 2026): S1's set, on both ends, as the tested starting point (Heartbeats). Source: S1c. frps noticed a silent path (a frozen path or a node crash) in 12–20 s, against 28–34 s at frp's defaults, and the set survived every head-of-line run. The tight set (2 s interval, 6 s timeout) noticed in 4–6 s but dropped a healthy tunnel. S1c ran on loopback, so the real path rate from compute node to front is unknown. It is measured in S1's one-hour runs, and is an alpha graduation criterion.
 7. **Credential.** **Decided for alpha** (science-agent decision, 31 Oct 2026): HBEP-7's per-Allocation random 256-bit token, valid for the Allocation's life. frpc sends it in its login metadata, and the frps server plugin checks it (Admission). Source: frp v0.71.1's plugin interface (frp facts). **Not needed for alpha:** renewal over the tunnel, since the token lives no longer than its Allocation's lease.
-8. **A front behind NAT,** as in a single-user setup. **Decided for alpha** by HBEP-11 (its open question 8): no rendezvous relay. The alpha host is reached directly on the dial-home port, or through ssh on the configured ssh port, 22 by default, with a restricted key. Source: S1's step 0, where the development VM's address, behind a NAT, answered the compute nodes on port 22 and nothing else. That sshd was a gateway's, as its host key showed (L-17.7). The route is a port forward on the gateway to the VM's sshd, reached at the gateway's address and port (owner decision, 31 Oct 2026, issue #18). **Not needed for alpha:** a relay for other setups.
+8. **A front behind NAT,** as in a single-user setup. **Decided for alpha** by HBEP-11 (its open question 8): no rendezvous relay. The alpha host is reached directly on the dial-home port, or through ssh on the configured ssh port, 22 by default, with a restricted key. Source: S1's step 0, where the development VM's address, behind a NAT, answered the compute nodes on port 22 and nothing else. That sshd was a gateway's, as its host key showed (L-17.7). The route is a port forward on the gateway to the VM's sshd, reached at the gateway's address and port (owner decision, 31 Oct 2026, issue #18). **Amended, 9 Nov 2026:** the gateway's forward is not awaited. The alpha host runs in host-dialed mode (Dial-home modes; open question 3).
 9. **Center consent.** **Decided** (owner, 31 Oct 2026): "The outbound tunnels are acceptable use, yes."
 10. **Compute-node reachability.** **Decided for alpha's partitions** by S1's step 0 and probe 2 (issue #18): outbound 443 works on Helios CPU, Helios GH200 and Athena A100, and the home directory, which holds the ssh-mode key, is readable from their compute nodes (HBEP-4, open question 16). Inbound reachability is not needed, since Instances dial home. **Not needed for alpha:** Sano, which is not an alpha platform (HBEP-4).
 11. **Many tunnels on one front.** **Open (blocks beta):** S1c measured one frpc. frps's CPU and memory with hundreds of tunnels, and many tunnels sharing one link, need a measurement.
 12. **Bulk endpoints off the token tunnel.** **Open (blocks beta):** embeddings, file transfers and large non-streamed replies get their own frpc proxy with `transport.bandwidthLimit`, or a separate frpc with `transport.tcpMux = false`. S1c tested neither.
+13. **A relay keeper.** **Open (blocks beta):** host-dialed relays live in the controller's process, so a controller restart cuts their streams (owner, 9 Nov 2026: "Accept cuts for alpha"). A launcher-supervised process holding the relays across restarts, taking its desired relays from the leading controller, would keep HBEP-6's no-cut promise in that mode as well.
 
 ## Design details
 
@@ -107,7 +109,10 @@ Problems:
 | control-plane host | the front's dial-home listener (HBEP-5) | terminates TLS with the launcher's certificate; passes `/agent/v1/` to the agent endpoint in direct mode, and frpc's websocket to frps |
 | control-plane host | frps | routes the front's `CONNECT <UID>` to the Instance's tunnel; started and supervised by the launcher (HBEP-11) |
 | control-plane host | the plugin endpoint, in the lifecycle controller's process | admits logins and proxies, and triggers the reads of path state |
-| job | the allocation agent | starts frpc, and in ssh mode its two ssh forwards |
+| job | the allocation agent | starts frpc, and in ssh mode its two ssh forwards; in host-dialed mode it holds the two channels' loopback listeners and their sessions |
+| control-plane host | the relays (host-dialed mode), owned by the batch Provider's controller | two per running Allocation, one per channel; each dials only its channel's loopback port |
+| login node | an ssh session and an `srun` client per relay (host-dialed mode) | carry the relay's bytes; they compute nothing (HBEP-4, open question 14) |
+| job | `relay <channel>`, the agent binary in an `srun --overlap` step (host-dialed mode) | hands the step's standard input and output to the agent |
 | job | frpc | dials home over `wss` and serves one `tcpmux` proxy, named by the Instance's UID, from the engine's Unix socket |
 
 **Loopback ports on the control-plane host,** by offset from the launcher's port base. `docs/development.md` (host layout) assigns base to base+7: the API server, its HTTPS port and the controller manager at base to base+2, the agent endpoint at base+3, the front's `/healthz` at base+4, the load balancer's reserved base+5, the lifecycle controller's `/healthz` at base+6 and the dial-home listener at base+7. The tunnel's ports take the next free offsets. Those marked "proposed" are proposals for the code agent, who owns `pkg/agentapi` and `internal/launcher`. With them the block grows to base+11, and `PortsFromBase`'s range check grows with it.
@@ -159,8 +164,8 @@ ops = ["Login", "NewProxy", "CloseProxy"]
 The Provider's controller stages frpc for the partition's CPU architecture under `stagingDir`, by its own digest, at `frpc/<digest>/frpc` (HBEP-4), together with the launcher's certificate, which is public (HBEP-4, Submission). The agent checks frpc's SHA-256 before it runs it. It writes frpc's configuration into the job's private temporary directory, mode 600, because it holds the credential. frpc reads it by path, so the credential is never on a command line. The agent starts frpc with `http_proxy` unset, because frp otherwise takes it as its proxy to frps (frp facts).
 
 ```toml
-serverAddr = "<direct: the front's DNS name; ssh: 127.0.0.1>"
-serverPort = <direct: the dial-home port; ssh: connection 2's local port>
+serverAddr = "<direct: the front's DNS name; ssh and host-dialed: 127.0.0.1>"
+serverPort = <direct: the dial-home port; ssh: connection 2's local port; host-dialed: the agent's serving listener>
 loginFailExit = false
 log.to = "<the job's private temporary directory>/frpc.log"
 metadatas.token = "<the Allocation's credential>"
@@ -184,7 +189,7 @@ unixPath = "<the engine's socket>"
 ```
 
 - **Certificate checks.** frpc skips verification silently when `trustedCaFile` is empty (frp facts). So the agent refuses to start frpc without the staged certificate, and only after checking that the certificate's public-key pin equals `agent.json`'s pin (HBEP-7). Go accepts a self-signed certificate that is itself in the trusted pool (`crypto/x509/verify.go:835-836` at go1.25.0) and then checks `serverName` against its DNS names.
-- **The server name** is a fixed synthetic name in the launcher's certificate (HBEP-11). `dial-home.hpcburst.invalid` is a proposal for the code agent; the `.invalid` top-level domain never resolves. It is the same in both modes, because in ssh mode frpc dials loopback.
+- **The server name** is a fixed synthetic name in the launcher's certificate (HBEP-11). `dial-home.hpcburst.invalid` is a proposal for the code agent; the `.invalid` top-level domain never resolves. It is the same in every mode, because in ssh and host-dialed modes frpc dials loopback.
 - **`loginFailExit = false`.** frp's default makes frpc exit when its first login fails. With `false` it keeps retrying, like the ssh forwards. frpc is part of the agent's transport, not a part of the Instance: the agent restarts it with backoff if it exits, without asking the controller, as it keeps its ssh forwards (HBEP-7). A tunnel down is not a dead Instance.
 - **`user` is not set,** so frps sees the proxy name unchanged (frp facts).
 - **Logs.** frpc logs to a file in the job's private temporary directory (`log.to`), and its console output is discarded. frpc logs its run ID, which is enough to attach a work connection to its session (Risks), so the log never reaches the job's output files on shared storage.
@@ -210,7 +215,66 @@ unixPath = "<the engine's socket>"
 
   The two ports are base+3 and base+7, so they are fixed for a given launcher base. A custom base needs new key lines.
 
-**The dial-home listener's paths** (HBEP-5) in both modes: `/agent/v1/` goes to the agent endpoint. A `GET /~!frp` websocket upgrade goes to frps's bind port on loopback. frps matches the exact bytes `GET /~!frp` (frp facts), so the listener forwards the request line unchanged, never re-encoded. Every other path gets 404.
+**Host-dialed mode** (science-agent decision, 9 Nov 2026, on the owner's "we have to solve this, you should wait for nothing. just dial whatever you want from this host"). It's for a control-plane host that compute nodes cannot reach. The host dials each job through the login node, and the job's two connections run back over what the host opened. frp, the dial-home listener and its TLS, the server plugin and the agent's control protocol are unchanged.
+
+The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 6747458195](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/145#issuecomment-6747458195), and the second probe's on the same issue, at 18:11–18:22 UTC):
+- an `srun -u --overlap` step reached over ssh through the login node carries bytes both ways. All 256 byte values arrived intact each way on Athena's A100 nodes.
+- **Throughput:** 48–85 MB/s each way, with a 2.3–2.5 ms median round trip. Those figures are from Helios's CPU nodes and Athena's A100 nodes. Helios's GH200 partition was down that day, so it's unmeasured, and it's an alpha precondition there (HBEP-4, open question 16).
+- **A Unix socket that the batch step created** is reachable from an `--overlap` step under `/dev/shm`, under the batch step's `$TMPDIR` (the step's is the same), and under `$HOME`, on Athena.
+- **No preamble:** nothing appeared on standard output before the bridge's own first line.
+
+- **The mode's value** is `host-dialed`: a launcher setting, per host in alpha, written into `agent.json`'s `mode` key, as for direct and ssh. In this mode `agent.json` carries no `endpoint` and no `ssh`; the certificate pin and the server name are as today. The dial-home listener binds loopback at base+7, as in ssh mode (HBEP-5), and no address that compute nodes reach is needed (HBEP-11, open question 8).
+- **Two relays per running Allocation,** one per channel, so control and the token tunnel still never share a connection (Risks):
+  - `control` ends at the agent endpoint's loopback port (base+3);
+  - `serving` ends at the dial-home listener's (base+7).
+- **A relay's host side** is an `ssh` child of the process that leads `lifecycle`, where the batch Provider's controller runs (HBEP-11). The controller runs the relay's session end itself.
+  - **The ssh process** is its own connection, never the Provider's shared master. It uses the Provider's private `-F` configuration with its hardening (HBEP-4, Transport), plus `ControlMaster=no`, `ControlPath=none`, `-T`, `ServerAliveInterval=10` and `ServerAliveCountMax=3`. It's started from a thread that stays locked for good, with `Pdeathsig=SIGKILL` (as for the fake Slurm's processes, #274), so it dies with the controller process. It's stopped by PID.
+  - **It runs** `srun -u --overlap --jobid=<job> --ntasks=1 <the job's agent binary> relay <channel> --dir <Allocation directory> --allocation <UID> --epoch <E> --seq <N>`.
+    - `-u` is required: without it `srun` holds output that ends without a newline until the stream closes, and with it the task's stdout is a pty with `OPOST` cleared (Slurm 24.11.5 and 23.11.7, `src/slurmd/slurmstepd/io.c`), which carried all 256 byte values unchanged.
+    - Alpha's Instances are single-node, so the step lands on the job's one node.
+  - **Before each start,** the Provider's latest queue listing (one per poll interval, HBEP-4) must show the recorded job ID RUNNING, with its name equal to the Allocation's tag. Otherwise the relay isn't started. An `srun` refusal that the job doesn't exist or is completing ends the relay for good.
+- **The wire:** `relay` first writes one preamble line, `hpcburst-relay/1 <Allocation UID>`. After it comes one multiplexed session: `fatedier/yamux` v0.2.0, the same version frp v0.71.1 pins, with a 10 s keepalive and a 10 s write timeout.
+  - The host side requires the preamble within 30 s of the start. Anything else first is refused as named output ("unexpected output before the preamble"), counted and retried.
+  - The host side dials only its channel's loopback port for each stream the job side opens, so a job can't reach any other port, the plugin endpoint included.
+  - TLS stays end to end: frpc's `wss` to the dial-home listener, and the agent's HTTPS to `/agent/v1/`. Inside the serving relay, frpc's own single multiplexed connection is one stream.
+- **The job side:**
+  - **The agent's listeners:** the agent binds two loopback listeners at its start, one per channel, on ports it asks the kernel for, and keeps them for the Allocation's life. Nothing is handed between processes. frpc's `serverPort` is the serving listener's port, and the control client uses the control listener; neither changes when a relay restarts.
+  - **The rendezvous:** the agent creates a Unix socket in a directory with a random name (never a predictable path) and mode 0700, under its `$TMPDIR` or `/dev/shm`. The socket's absolute path, at most 107 bytes, goes into `<Allocation directory>/relay-socket`: mode 600, written to a temporary file, then renamed. `relay` reads that file, connects, and checks that the agent's greeting names its `--allocation`. The agent accepts only a peer of its own user (`SO_PEERCRED`). A missing file, or a socket nobody answers, ends that relay as "agent not ready", which is retried.
+  - **A connection accepted while its channel has no session** waits up to 30 s for one, then is closed. The control client's TLS handshake gives up after 10 s anyway. frpc and the control client retry, as they do today.
+  - **Fencing:** a relay carries the epoch `E`, the `leaseTransitions` of the `provider-<name>` `Lease` when its controller took the lead, and a per-channel sequence `N`.
+    - The agent keeps the session with the highest `(E, N)` on each channel, and refuses a lower one with the reason `superseded`.
+    - A controller whose relay ends `superseded` doesn't start it again.
+    - A copy that loses the lead stops all its relays by PID before it releases the `Lease`.
+
+    So an unfenced hand-over (HBEP-11) can't make two copies take turns cutting each other.
+  - **`relay` exits** when its standard input closes or its socket closes.
+- **The control-plane side:**
+  - **When relays start and stop:** the controller starts both relays once the Allocation's job runs. It keeps them level-triggered: a dropped relay is started again, and a controller that takes the lead starts the relays of every running Allocation. It stops them by PID when the job ends or the Allocation is deleted. `srun` ends a step with its job, so no relay outlives the job.
+  - **Capacity:** in host-dialed mode a Provider has at most 2 Allocations, pending or running. That's a submit limit (`SubmitLimitReached`, HBEP-4), so the planner counts it, and the handover pair fits.
+    - Each running Allocation's pair of relays is reserved together and held through a relay's backoff. So the 4 relays per login node that the probe held without refusal are never exceeded by one copy, and no Allocation is left with half a pair.
+    - **Only one Provider per login host runs in host-dialed mode.** The login host is its `HostName` as `ssh -G` resolves it through the Provider's own `-F` file. The Provider's controller refuses a second Provider on that host: it submits nothing, and sets the Provider's `Ready` condition to False with reason `LoginHostInUse`, naming the login host and the Provider holding it. The planner then treats that Provider as unusable (`ProviderUnavailable`, HBEP-7), so no Allocation waits on it. A per-platform budget stays HBEP-4's open question 17.
+  - **What ends a relay:**
+    - **Retried**, with a backoff of 1 s doubling to 30 s with jitter (first starts jittered too, since all relays start together after a restart), reset once a relay has stayed up for 60 s:
+      - ssh dropping, or the login node killing it;
+      - a missing preamble or unexpected output;
+      - "agent not ready".
+    - **Final, with no restart:**
+      - `superseded`;
+      - the job not listed, ended or completing;
+      - `srun`'s step-limit refusal;
+      - more than 120 restarts of one channel within an hour.
+
+      A final end other than `superseded` or the job's end raises a `failing` event, reason `RelayFailed`, regarding the Allocation, naming the channel and the cause. The code adds the reason to HBEP-8's table, since a new reason isn't an amendment.
+    - **Steps:** at the 30 s cap two relays make at most about 240 `srun` steps an hour, about 11,500 in 48 h, below the 40,000 `MaxStepCount` that both profiles record.
+  - **A path that fails never restarts a healthy engine.** HBEP-7's rules apply unchanged:
+    - an Instance first becomes `ready` only with `TunnelConnected` True, from frps;
+    - relay restarts don't reset its start deadline;
+    - a `ready` Instance whose path is down takes no new requests (the front's probe), and `AgentUnreachable` follows its own timeout.
+- **What a drop costs:** the streams on that session reset. A token stream in flight is cut and counted as cut, and a request already written is never replayed (HBEP-5). frpc logs in again once the relay is back.
+- **A controller restart cuts the relays** (owner decision, 9 Nov 2026: "Accept cuts for alpha"). The relays are children of the controller process, so a restart cuts every stream in flight, counted as cuts and never replayed, and the new leader starts both relays of every running Allocation within the backoff. A relay keeper, a separate process the launcher supervises that would keep relays across restarts, moves to beta (open question 13).
+- **The login node:** each relay keeps an ssh session and an `srun` client there for its Allocation's life. They relay bytes and compute nothing (HBEP-4, open question 14, as amended the same day, with the owner's go). Model weights and images never cross a relay; staging stays in the job (HBEP-7).
+
+**The dial-home listener's paths** (HBEP-5) in every mode: `/agent/v1/` goes to the agent endpoint. A `GET /~!frp` websocket upgrade goes to frps's bind port on loopback. frps matches the exact bytes `GET /~!frp` (frp facts), so the listener forwards the request line unchanged, never re-encoded. Every other path gets 404.
 
 ### Admission: the server plugin
 
@@ -228,7 +292,7 @@ The lifecycle controller's process serves frps's HTTP plugin on loopback at base
 - **After a start,** the plugin refuses every `Login` until the controller's caches have synced. A login it accepted too early could be followed by a `NewProxy` it must refuse, and frpc retries a refused proxy only every 30 s, while it retries a refused login with a backoff of at most 20 s (frp facts).
 - **Reject reasons** reach frpc and frps's log, so they name the rule that failed and never the token.
 - **Fail closed.** A plugin that cannot be reached refuses every login and proxy (frp facts). frpc retries.
-- **No `Ping`** (science-agent decision, 31 Oct 2026). A failed `Ping` call becomes an error answer to frpc, and frpc closes its session (frp facts). Subscribed, it would make every tunnel drop within one heartbeat interval whenever the plugin is down, as during a restart of the controller binary. Unsubscribed, a controller restart cuts no established tunnel; only logins and proxy registrations wait for the plugin. Liveness rests on frps's own heartbeat timeout (Heartbeats) and the front's probe.
+- **No `Ping`** (science-agent decision, 31 Oct 2026). A failed `Ping` call becomes an error answer to frpc, and frpc closes its session (frp facts). Subscribed, it would make every tunnel drop within one heartbeat interval whenever the plugin is down, as during a restart of the controller binary. Unsubscribed, a controller restart cuts no established tunnel in direct or ssh mode; only logins and proxy registrations wait for the plugin. Liveness rests on frps's own heartbeat timeout (Heartbeats) and the front's probe.
 
 ### Path state and the inventory
 
@@ -274,6 +338,7 @@ S1's set, on both ends (open question 6):
 - **The fixed yamux timeout.** yamux's ping timeout is fixed at 10 s (S1c, from fatedier/yamux v0.2.0), so a queue of more than 10 s, possible on a slow path, drops the tunnel at any setting.
 - **The path rate** from compute node to front is unknown, because S1c ran on loopback. S1's one-hour runs measure it, and alpha graduation needs it.
 - **ssh mode** adds ssh's own liveness, `ServerAliveInterval=10` with `ServerAliveCountMax=3`, which S1c did not test.
+- **Host-dialed mode** adds the same ssh liveness on each relay, and the relay session's yamux keepalive every 10 s with a 10 s write timeout, inside frps's 12–20 s detection of a silent path.
 
 ### Local listeners
 
@@ -286,7 +351,7 @@ Engine and router listeners bind a Unix socket or loopback, never a cluster addr
 | Dial-home tunnel (frpc) | the Instance | frp's heartbeats, plus the front's probe through the path to the engine | frpc stops when the Instance ends, and at the latest the job's end closes its connection. frps drops the proxy on the close, or within 12–20 s if the path went silent. The condition follows frps's list |
 | Control connection (the agent's HTTPS) | the Allocation | the agent's reports (HBEP-7) | ends with the agent, at the latest with the job |
 | ssh forwards (ssh mode) | the Allocation | `ServerAliveInterval` and the traffic they carry | the agent's children; they end with the job, and their sshd sessions with them |
-| Login-node relay | none in alpha (open question 3) | | |
+| Relays (host-dialed mode) | the Allocation | `ServerAliveInterval`, the session's keepalive, and the traffic they carry | stopped by PID with the Allocation; their `srun` steps end with the job at the latest |
 | ssh port forward opened by an operator | never a routing path in alpha (open question 4) | | |
 
 ### frp facts this design rests on
@@ -334,7 +399,23 @@ Read at frp v0.71.1 (`fatedier/frp`, tag `v0.71.1`, commit `d8cf180`). Paths are
 ### Test plan
 
 Against the launcher's frps, the front, the agent and an engine double on one host first, then on Helios and Athena.
-- **Wiring, both modes.** An Instance's frpc logs in and registers its proxy. The front's `CONNECT <UID>:80` gets 200 and a reply from the engine double. In ssh mode both forwards carry their traffic, and the agent's control traffic never uses frpc's connection.
+- **Wiring, every mode.** An Instance's frpc logs in and registers its proxy. The front's `CONNECT <UID>:80` gets 200 and a reply from the engine double. In ssh mode both forwards carry their traffic, and the agent's control traffic never uses frpc's connection.
+- **Host-dialed mode.** The fake Slurm's `srun --overlap` carries the relays.
+  - **Channels stay apart:** frpc logs in and serves through the serving relay, and the agent's control traffic uses only the control relay.
+  - **A relay killed mid-stream:** the stream is cut and counted, the relay starts again within the backoff, frpc logs in again, and the next request completes.
+  - **A stream on either relay can reach only its channel's port.**
+  - **A restart of the Provider's controller:** its relays are stopped by PID, and the new leader starts both relays of every running Allocation.
+  - **Two relays for one channel:** the agent keeps the newer.
+  - **A fifth relay on one login node** waits.
+  - **An `srun` command line without `-u`** fails a test of the argument list.
+  - **The fake Slurm gains a streaming `srun -u` mode** (incremental standard input and output both ways, no output cap, no command time-out for a relay step), since today's fake returns output at exit.
+  - **Fencing:** an old copy's relay that arrives after the new copy's, with a lower epoch, is refused as `superseded`, and isn't started again. A copy that loses the lead stops its relays before it releases the `Lease`.
+  - **The rendezvous:** a batch step and a relay step with different `$TMPDIR` values still meet through `relay-socket`; a stale `relay-socket` (no listener) ends the relay as "agent not ready"; a peer of another user is refused.
+  - **Capacity:** a third Allocation of a host-dialed Provider waits at submission (`SubmitLimitReached`); a pair is reserved whole, and neither relay of a running Allocation's pair is ever missing while the other runs.
+  - **What ends a relay:** a step-limit refusal, the job ending while a relay starts, repeated login-side kills (more than 120 an hour), and a missing preamble each end as specified, with `RelayFailed` where specified, and never restart the engine.
+  - **The nested stack under slow readers:** frpc's tunnel inside the serving relay, with a slow token reader, keeps the other streams moving within frp's window.
+  - **The real platforms, at the first live run:** all 256 byte values cross each way, an `--overlap` step reaches the agent's socket, and the step lands on the batch host. The fake uses pipes, so none of this is shown by the fake.
+  - **None of these proves anything here:** a relay test with both ends in one process and no `srun` standard input and output between them, or a count of relays with no byte crossing.
 - **Loopback only.** frps holds exactly its three loopback ports, and `ss` shows no frps listener on another address. A positive control: started without `bindAddr`, frps listens on every interface, so the check can fail.
 - **Plugin refusals** (alpha graduation): a login with a wrong token, an ended Allocation's token, or no token; a proxy whose domain is not one of the token's Allocation's Instances; a proxy of type `tcp`, or `tcpmux` with another multiplexer; two domains; a `subdomain`, a `group` or an `http_user`. Each is refused, and frps lists no proxy. A test that only shows a valid login accepted proves nothing.
 - **Certificate.** frpc with the right certificate connects. frpc facing another certificate, and frpc with the right certificate but another `serverName`, are refused. The agent refuses to start frpc without the certificate file, and with a certificate whose pin differs from `agent.json`'s. A test with no `trustedCaFile` that "connects" proves nothing, since frpc then verifies nothing.
@@ -346,11 +427,11 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
 - **Deadlines.** On a live tunnel, an engine double that reads the request and never answers gives a streamed request 504 `request_timeout` with detail `headers` at `streamHeadersTimeout` (30 s), and it is not resent. A `CONNECT` for an unknown UID gets 404 and is resent once to the next Instance. A first token after 1,100 s still completes (HBEP-5).
 - **Heartbeats.** Freeze the path: frps drops the proxy within 12–20 s, and the condition turns False. A slow reader on the tunnel, as in S1c, drops no healthy tunnel.
 - **Reconnects.** Restart frps: every frpc logs in again without help, and the probes pass again. Restart the front: the same.
-- **Controller restart** (alpha graduation). Restart the lifecycle controller while streams run through established tunnels: no tunnel drops and no stream is cut. An frpc that reconnects during the restart is refused, retries, and logs in once the plugin is back. A test that restarts the controller with no stream running proves nothing about cuts.
+- **Controller restart** (alpha graduation). Restart the lifecycle controller while streams run through established tunnels: in direct and ssh modes no tunnel drops and no stream is cut. In host-dialed mode the streams in flight are cut and counted as cut, no request already written is replayed, and both relays of every running Allocation are back within the backoff. An frpc that reconnects during the restart is refused, retries, and logs in once the plugin is back. A test that restarts the controller with no stream running proves nothing about cuts.
 - **Plugin speed.** With the API server stopped, the plugin still answers every call within 1 s, from memory, and refuses what it cannot decide.
 - **The orphan grace.** A proxy that stays online after its Instance ended raises no `TunnelOrphaned` at 1 min 59 s of listed orphan time and one at 2 min. A successful read that shows it offline or absent restarts the clock. A failed read between two that list it changes neither. An Instance that ends on a kept Allocation, whose agent stops frpc, raises none: the reader is fed frps's real list across the teardown, since a stub that lists an orphan from the start cannot show that a normal teardown raises nothing.
 - **A restart before the first `ready`.** An Instance restarted before it was ever `ready`, whose tunnel is down, ends with `TunnelNotConnected` at `health.startTimeout` from its latest restart.
-- **Teardown** (alpha graduation). End the allocation at its hard limit, and cancel one early: no online proxy for the ended Allocation's Instances in frps's list (offline entries may remain as history), no ssh process in the job's process tree or on the control-plane host, and no record left. Both cases end with a live node that sends a FIN, so also freeze the path with no FIN, through a relay on the path stopped with SIGSTOP as in S1c: frps drops the proxy within 12–20 s, and the forwards' sshd sessions end within sshd's client-alive window. frps itself is stopped only by its recorded process ID and start time.
+- **Teardown** (alpha graduation). End the allocation at its hard limit, and cancel one early: no online proxy for the ended Allocation's Instances in frps's list (offline entries may remain as history), no ssh process in the job's process tree or on the control-plane host, no relay's `srun` client on the login node and no relay step in the job, and no record left. Both cases end with a live node that sends a FIN, so also freeze the path with no FIN, through a relay on the path stopped with SIGSTOP as in S1c: frps drops the proxy within 12–20 s, and the forwards' sshd sessions end within sshd's client-alive window. frps itself is stopped only by its recorded process ID and start time.
 - **One-hour runs** (alpha graduation). S1's one-hour runs pass with this wiring on Helios and on Athena, in the mode each uses, with the path rate measured.
 
 ### Compatibility and upgrades
@@ -367,16 +448,17 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
 - **The plugin endpoint** answers only frps's calls, on loopback. The restricted key does not open its port.
 - **frps's web server** is on loopback, behind a password the launcher generates into its web password file and frps's configuration file, both mode 600.
 - **Trust boundary:** an Instance can reach only the agent endpoint and the dial-home listener's two paths. The front reaches an Instance only through frps and its tunnel.
-- **Prompts** cross center networks inside the dial-home listener's TLS, and in ssh mode inside ssh as well. There is no end-to-end TLS from front to engine (Risks). Nothing on the path stores prompts or replies.
+- **Prompts** cross center networks inside the dial-home listener's TLS, and in ssh mode inside ssh as well. In host-dialed mode they cross ssh to the login node, then Slurm's own step I/O on the cluster network, still inside that TLS. There is no end-to-end TLS from front to engine (Risks). Nothing on the path stores prompts or replies.
 
 ### Graduation criteria
 
 - **Alpha:**
-  - S1's one-hour runs pass with this wiring on Helios and on Athena, with the path rate from compute node to front measured;
+  - S1's one-hour runs pass with this wiring on Helios and on Athena, with the path rate from compute node to front measured, in the mode the alpha host uses: host-dialed, since 9 Nov 2026;
   - the plugin's refusals are tested: a wrong token, a domain that is not one of the Allocation's Instances, and a wrong proxy type;
   - a dead engine behind a live tunnel is caught by the probe;
-  - teardown leaves no online frps proxy for the ended Allocation's Instances, offline history aside, and no ssh process behind;
-  - a lifecycle-controller restart while serving cuts no established tunnel.
+  - teardown leaves no online frps proxy for the ended Allocation's Instances, offline history aside, and no ssh process, relay `srun` client or relay step behind;
+  - a lifecycle-controller restart while serving cuts no established tunnel in direct or ssh mode; in host-dialed mode it cuts the streams in flight, counted and never replayed, and the relays return within the backoff (owner, 9 Nov 2026);
+  - in host-dialed mode, on each alpha platform, a relay works on the partition the Instances use (HBEP-4, open question 16), Helios GH200 included.
 - **Beta:**
   - many tunnels on one front are measured (open question 11);
   - bulk endpoints run off the token tunnel (open question 12).
@@ -390,7 +472,7 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
    - not working: a probe that fails on a connected tunnel (the `degraded` event), or a condition that is False or Unknown for a running Instance.
 2. **Restart:**
    - frps: every tunnel drops and frpc logs in again on its own. Streams through it are cut. The controller's next list read shows the new state.
-   - The lifecycle controller: established tunnels stay up. While its plugin endpoint is down, logins and new proxies are refused, so an frpc that reconnects meanwhile retries until the plugin is back (Risks). After the restart the controller rebuilds path state from frps's list.
+   - The lifecycle controller: established tunnels stay up in direct and ssh modes; in host-dialed mode its relays, and the streams on them, are cut and restarted within the backoff. While its plugin endpoint is down, logins and new proxies are refused, so an frpc that reconnects meanwhile retries until the plugin is back (Risks). After the restart the controller rebuilds path state from frps's list.
    - The front: its dial-home listener carries frpc's connections, so every tunnel drops and reconnects. Its probe state starts empty, and each Instance is eligible again at its first passing probe.
    - frpc or an ssh forward: the agent restarts it with backoff.
 3. **Silent failure:**
@@ -401,7 +483,7 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
    - frpc that does not verify the front's certificate: the agent refuses to start it without the certificate and its pin;
    - frps listening off loopback: the launcher's check of its ports;
    - a record left after its allocation ended: the inventory compared with frps's list and the provider's job list.
-4. **Provider limits:** outbound 443 per partition (S1's step 0); in ssh mode, the configured ssh port to the control-plane host's sshd, 22 by default; loopback shared with other users' jobs on a node; lease ends, which end the tunnel.
+4. **Provider limits:** outbound 443 per partition (S1's step 0); in ssh mode, the configured ssh port to the control-plane host's sshd, 22 by default; loopback shared with other users' jobs on a node; lease ends, which end the tunnel. In host-dialed mode: the login node's process policy and sshd throttle, its availability (an outage or maintenance there cuts every path on that cluster at once), and each job's `MaxStepCount`.
 5. **Capacity:** S1c's figures, from one tunnel at up to 256 streams on loopback.
    - **Front CPU:** 7.9–8.7% of a core per 1,000 tokens/s over wss (frps plus the TLS terminator), 6.6–6.9% over frp's plain tcp, and 7.5–7.8% for the ssh path (frps plus sshd). The cost per token was higher at 64 streams (8.8–16%).
    - **Per front core:** about 580–630 wss streams at 20 tokens/s (11,500–12,600 tokens/s), or 720–760 over tcp. This is extrapolated linearly from 36–39% of a core at 256 streams; the front near full CPU was not measured.
@@ -412,6 +494,7 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
 6. **Idle cost:**
    - per Instance: one frpc process, one `wss` connection, a yamux ping and an application heartbeat every 10 s, and one probe every 10 s;
    - per Allocation in ssh mode: two ssh connections with their keepalives;
+   - per Allocation in host-dialed mode: two ssh connections, two `srun` clients on the login node and two `srun` steps in the job;
    - on the control-plane host: frps and the plugin endpoint;
    - no grant hours beyond the Allocation's own, and nothing while the job waits in the queue.
 7. **Rollback:** stop frps, or stop the Instances' frpc. Instances keep running but take no traffic until a path returns, and streams in flight are cut. frps keeps no stored state, so nothing needs cleaning beyond the launcher's record.
@@ -419,13 +502,16 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
 ## Drawbacks
 
 - Every token makes an extra hop through the front's host.
-- The front must be reachable from every center's compute network.
+- The front must be reachable from every center's compute network, except in host-dialed mode, which goes through the login node instead.
 - All streams of an Instance share one connection, so a large reply delays the others (Risks).
 - New tunnels cannot log in while the lifecycle controller is down (Risks).
 
 ## Alternatives
 
-- **Login-node relays everywhere.** They work without outbound, but they are subject to login throttles and login-node process policies, and each relay is one more process to own.
+- **Login-node relays everywhere.** They work without outbound, but they are subject to login throttles and login-node process policies, and each relay is one more process to own. Adopted only in host-dialed mode, where nothing else reaches the job, with 2 relays per Allocation and at most 4 per login node in alpha.
+- **ssh into the job's compute node, with reverse forwards** (probe of 9 Nov 2026). It would need no `srun` client on the login node. Rejected: after a public-key partial success, the compute nodes' sshd asks for a Kerberos ticket, which the alpha host doesn't have.
+- **A reverse forward on the login node** (probe of 9 Nov 2026). Rejected: it binds the login node's loopback only, so compute nodes can't reach it.
+- **Waiting for the gateway's forwarded port** (direct and ssh modes). Kept as modes, no longer awaited for alpha (owner, 9 Nov 2026).
 - **Port forwards from the front.** Simple for one instance. In bulk they became the unowned tunnels listed in Motivation.
 - **Instances listening on cluster interfaces.** Reachable only inside the cluster, and exposed to every user on it.
 - **A center-provided ingress.** Where a center offers one, it may be the best path. Whether any target center does is not known yet.
@@ -444,6 +530,7 @@ Dial home replaces www-2027's central relays and forward watchdogs, which kept h
 |---|---|---|---|
 | frp v0.71.1 (frps, frpc) | [fatedier/frp](https://github.com/fatedier/frp), release `v0.71.1` | Apache-2.0 (its `LICENSE`, read 2026-10-31) | Dependency: two pinned release binaries, recorded in `internal/launcher/frp-pins.txt` (HBEP-15). frps runs on the control-plane host, started by the launcher; frpc runs in each job, staged by the Provider's controller. Its server plugin interface admits each tunnel. frp's Go packages are not imported |
 | vLLM | [vllm-project/vllm](https://github.com/vllm-project/vllm) v0.32.0 | Apache-2.0 | Dependency (HBEP-9): the engine behind the tunnel; its unguarded `/health` is the probe's target |
+| yamux | [hashicorp/yamux](https://github.com/hashicorp/yamux), or frp's fork [fatedier/yamux](https://github.com/fatedier/yamux) v0.2.0 (frp's `go.mod`, line 9, read 2026-11-09) | MPL-2.0 (both `LICENSE` files, read 2026-11-09) | Dependency in host-dialed mode: the multiplexed session over a relay's `srun` standard input and output |
 | Headscale + tsnet | [juanfont/headscale](https://github.com/juanfont/headscale); [tsnet](https://pkg.go.dev/tailscale.com/tsnet) | BSD-3-Clause (both) | Optional, not in alpha: a front behind NAT without root (open question 8) |
 
 ### Designs and published work borrowed
@@ -463,8 +550,8 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 |---|---|---|
 | Compute-node listeners were reachable only through login nodes. | L-7.1 | Instances dial home on 443 or through ssh; nobody opens a port. |
 | Hand-made tunnels and watchdogs multiplied, with clashing names and pid files. | L-7.2 | One tunnel per Instance, owned by it, named by its UID, and ending with it. |
-| Parallel logins tripped a login node's connection limit. | L-7.3 | No login-node connections in alpha: jobs dial the control-plane host. |
-| Pollers that each opened a new ssh connection filled a host's sshd. | L-7.4 | Two long-lived forwards per Allocation in ssh mode, never one per request. |
+| Parallel logins tripped a login node's connection limit. | L-7.3 | In direct and ssh modes, no login-node connections beyond the Provider's master: jobs dial the control-plane host. In host-dialed mode, at most 4 relays per login node, and jittered restarts. |
+| Pollers that each opened a new ssh connection filled a host's sshd. | L-7.4 | Two long-lived forwards per Allocation in ssh mode, and two long-lived relays in host-dialed mode, never one per request. |
 | Loopback ports on a shared host were live service tunnels. | L-7.5 | Every loopback endpoint checks a credential or a key, and frps admits only through the plugin. |
 | Fixed and job-ID-derived ports collided. | L-2.4 | The forwards' local ports come from the kernel; the engine uses a Unix socket. |
 | Loopback relay ports clashed between jobs on a shared node. | L-7.7 | No serving port on the node; the forwards' ports are kernel-chosen and retried. |
@@ -501,6 +588,7 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - 2026-11-01: the `TunnelConnected` gate applies to an Instance's first entry to `ready` only (ruled for #167, with HBEP-7's amendment of the same day).
 - 2026-11-01: an orphan proxy must be listed so for `TunnelOrphanGrace` (2 min), a failed read skipped, so a normal teardown raises no event; a restart before the first `ready` is still gated, its deadline from its latest restart (ruled for #167, settled in PR #186).
 - 2026-11-02: erratum: `PathProbeFailing` is no longer marked proposed, since the front emits it (PR #248).
+- 2026-11-09: host-dialed mode. The control-plane host dials each job through the login node, with two `srun -u --overlap` relays per Allocation carrying multiplexed sessions, because compute nodes can't reach the alpha host and the gateway's forward isn't awaited (owner, 9 Nov 2026; the probe of that day).
 
 ## Amendments
 
@@ -512,3 +600,13 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - **2026-11-01: the tunnel gate on first entry only** (science-agent ruling for #167, the final tunnel PR, from its Opus review). An Instance first becomes `ready` only with `TunnelConnected` True. After a restart it returns to `ready` when its checks pass; a tunnel that is down then makes it ineligible at the front, as for any healthy Instance whose tunnel drops, and nothing restarts, ends or is released on that basis. Before, the gate applied on every entry, so a tunnel outage after a restart climbed the restart ladder and released the Allocation, against this HBEP's own rule.
 - **2026-11-01: the orphan grace, and a restart before ready** (Path state and the inventory; Test plan). Science-agent rulings for #167, the final tunnel PR, settled in PR #186's review. An online proxy naming no current Instance is an orphan only once it has been listed so for `TunnelOrphanGrace` (proposed, 2 min); a successful read showing it offline or absent restarts the clock, and a failed read is skipped. So a normal teardown, whose proxy goes offline within that time, raises no `TunnelOrphaned`. An Instance restarted before it was ever `ready` is still at its first entry: the tunnel gate applies, its deadline runs from its latest restart, and it ends `TunnelNotConnected` when its tunnel is down. Before, every proxy that outlived its Instance by one read was an orphan, and a restart before the first `ready` was not covered.
 - **2026-11-02: erratum, `PathProbeFailing`** (The front's half). The front emits the reason on `main`, so its "proposed" mark is dropped, as in HBEP-8's Reasons table (PR #248). No behaviour changes.
+- **2026-11-09: host-dialed mode** (Summary; Notes; Open questions 3 and 8; Components; Dial-home modes; Paths; Test plan; Graduation criteria; Alternatives; Prior art). An amendment, on the owner's "we have to solve this, you should wait for nothing. just dial whatever you want from this host" (9 Nov 2026). The same day's probe, from the alpha host to Helios and Athena `plgrid-now`, measured three things. An `srun --overlap` step reached over ssh through the login node carries bytes both ways at 48–85 MB/s with a 2.3 ms median round trip, given `srun -u`. ssh into a compute node needs a Kerberos ticket. A reverse forward on a login node binds its loopback only. So the batch Provider's controller now holds two relays per running Allocation, one per channel, each a yamux session over a step's standard input and output. The agent owns its loopback listeners, and frp, TLS, the plugin and the agent's protocol are unchanged. Settled in PR #298's review (Astra and a fresh Opus):
+  - **The mode's value and listeners:** `host-dialed`, with the listener on loopback.
+  - **Fencing:** an epoch and a sequence on every relay; a copy that loses the lead stops its relays before it releases.
+  - **The rendezvous:** through `relay-socket` in the Allocation directory, with peer checks.
+  - **The wire:** a preamble before a pinned yamux.
+  - **Capacity:** a Provider limit of 2 Allocations, with relays reserved in whole pairs.
+  - **What ends a relay:** retried or final, with `RelayFailed`, and never an engine restart.
+  - **The owner's two decisions:** relays run without asking Cyfronet first, and a controller restart cuts host-dialed streams in alpha, with a relay keeper deferred to beta (open question 13).
+
+  Before, a host that compute nodes could not reach was out of alpha, and alpha waited for the gateway's forward.
