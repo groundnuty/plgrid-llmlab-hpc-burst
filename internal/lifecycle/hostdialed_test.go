@@ -16,7 +16,9 @@ import (
 	"testing"
 	"time"
 
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
@@ -148,5 +150,40 @@ func TestHostDialedLimitsLeaveTheirArgument(t *testing.T) {
 	pv = &providerView{limits: hostDialedLimits(v1alpha1.QOSLimits{})}
 	if got, want := submitLimitText(pv), "maxSubmitPerUser 2 (host-dialed mode, HBEP-6)"; got != want {
 		t.Fatalf("with no QOS limit submitLimitText = %q, want %q", got, want)
+	}
+}
+
+// TestHostDialedLoginHostInUseProviderGetsNoAllocation: a host-dialed Provider
+// that another holds its login host is Ready False with LoginHostInUse while
+// its reads succeed (HBEP-6, Capacity, as #298 merged it), and the planner
+// treats it as unusable: no Allocation, and the deployment's Degraded is
+// ProviderUnavailable naming it not Ready. Its last successful read is fresh,
+// so only the condition can make it unready: a Provider made unready by
+// failing reads would pass this test whether the condition counts or not.
+func TestHostDialedLoginHostInUseProviderGetsNoAllocation(t *testing.T) {
+	rg := newRig(t, withHostDialed())
+	rg.Step() // the Provider's first status: Ready, from a successful read
+	var prov v1alpha1.Provider
+	if err := rg.c.Get(rg.ctx, client.ObjectKey{Name: rigProvider}, &prov); err != nil {
+		t.Fatal(err)
+	}
+	now := metav1.NewTime(rg.clock.Now())
+	prov.Status.LastSuccessfulStatusRead = &now
+	apimeta.SetStatusCondition(&prov.Status.Conditions, metav1.Condition{
+		Type: v1alpha1.ConditionProviderReady, Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonLoginHostInUse,
+		Message: "login host login.example.org is in use by host-dialed Provider another-provider", LastTransitionTime: now,
+	})
+	if err := rg.c.Status().Update(rg.ctx, &prov); err != nil {
+		t.Fatal(err)
+	}
+	rg.create(mdSpec("md-a"))
+	rg.reconcileAll()
+	rg.reconcileAll()
+	if n := len(rg.allAllocations()); n != 0 {
+		t.Fatalf("%d Allocations on a Provider whose login host is in use, want 0", n)
+	}
+	c := rg.condition("md-a", v1alpha1.ConditionDegraded)
+	if c.Reason != v1alpha1.ReasonProviderUnavailable || !strings.Contains(c.Message, "is not Ready") {
+		t.Errorf("Degraded = %s/%s %q, want ProviderUnavailable naming the Provider not Ready", c.Status, c.Reason, c.Message)
 	}
 }
