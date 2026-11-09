@@ -48,6 +48,7 @@ func (p *Platform) wait(r *jobRun) {
 	r.sweepErr = sweepErr // before the reap: Processes tells a failed sweep from one in progress
 	p.mu.Unlock()
 	p.reap(r)
+	r.keeper.stop() // in order, and reaped, before the execution is done: a Close that returns leaves no keeper
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -74,6 +75,7 @@ func (p *Platform) waitFailed(r *jobRun, cause error) {
 	r.procMu.Unlock()
 	_ = r.cmd.Process.Kill() // no-op if it has exited
 	_ = r.cmd.Wait()
+	r.keeper.stop()
 	status := syscall.WaitStatus(0)
 	if ps := r.cmd.ProcessState; ps != nil {
 		if ws, ok := ps.Sys().(syscall.WaitStatus); ok {

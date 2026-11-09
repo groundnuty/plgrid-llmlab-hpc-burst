@@ -293,8 +293,13 @@
 //     from one goroutine that keeps its thread for good, because in Go the
 //     signal fires when the forking thread exits, not the process (issue
 //     #274; before it, such a shell looped for days). What the shell started
-//     is not reached: a descendant it left running outlives a host that died
-//     without Close, and only Close's sweep ends it. Real Slurm would keep the
-//     job, which outlives the login session; the fake does not, since its
-//     host is a test.
+//     in the background is ended by the job's keeper, a small sh of its own in
+//     a session of its own that reads a pipe the host holds: the kernel closes
+//     the pipe when the host dies, and the keeper then kills every process of
+//     the job's session (keeper.go, issue #288; it costs one sh per job). The
+//     keeper does not reach a process that called setsid, and a step's program
+//     is covered by the parent-death signal only: what it started outlives a
+//     host that died without Close, and only Close's sweep ends it. Real Slurm
+//     would keep the job, which outlives the login session; the fake does not,
+//     since its host is a test.
 package fakeslurm

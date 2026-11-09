@@ -24,6 +24,8 @@ const waitDeadline = 60 * time.Second
 // hb-agent starts its engine, writes "<pid> <pgid>" to the file and sleeps
 // for at most two minutes. "die-with-jobs <root> <file> <how>" is a host of
 // a run-mode platform that dies without Close (procstart_test.go).
+// "die-with-loop <root> <file>" is one whose job starts a loop in the
+// background, killed by SIGKILL (keeper_test.go).
 const helperEnv = "FAKESLURM_TEST_HELPER"
 
 func TestMain(m *testing.M) {
@@ -34,6 +36,8 @@ func TestMain(m *testing.M) {
 		os.Exit(setpgidTerm(os.Args[1], os.Args[2]))
 	case "die-with-jobs":
 		os.Exit(dieWithJobs(os.Args[1], os.Args[2], os.Args[3]))
+	case "die-with-loop":
+		os.Exit(dieWithLoop(os.Args[1], os.Args[2]))
 	}
 	os.Exit(m.Run())
 }

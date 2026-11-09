@@ -151,8 +151,9 @@ type jobRun struct {
 	j       *job
 	e       *execution
 	cmd     *exec.Cmd
-	pid     int    // the batch shell: its PID, process group and session
-	dir     string // the execution's directory under JobDir
+	pid     int     // the batch shell: its PID, process group and session
+	keeper  *keeper // ends the session if the host dies without Close (keeper.go)
+	dir     string  // the execution's directory under JobDir
 	started time.Time
 	limit   *time.Timer
 
