@@ -13,7 +13,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -78,8 +77,8 @@ func (p *Platform) startIn(r *jobRun, dir string) error {
 	cmd.Env = p.jobEnv(j, submitDir, vars)
 	r.submitDir, r.env = submitDir, cmd.Env // a step (srun.go) runs in the same directory and environment
 	cmd.Stdout, cmd.Stderr = out, errOut    // files, so no copy goroutine waits on a grandchild
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
+	cmd.SysProcAttr = sessionAttr()
+	if err := startProc(cmd); err != nil {
 		return err
 	}
 	r.cmd, r.pid, r.started = cmd, cmd.Process.Pid, time.Now()
