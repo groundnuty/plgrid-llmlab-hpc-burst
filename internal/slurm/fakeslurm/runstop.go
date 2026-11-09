@@ -191,8 +191,8 @@ const closeTimeout = 60 * time.Second
 // error naming the jobs whose processes outlived the wait or the sweep, or
 // whose processes could not be listed. Outside run mode Close does nothing. A
 // test that uses run mode closes the Platform in its cleanup; a process that
-// exits without Close leaves its jobs running, as a Slurm job outlives the
-// login session.
+// dies without Close takes each batch shell and step program with it (a
+// parent-death signal, procstart.go), but not what they started.
 func (p *Platform) Close() error {
 	p.mu.Lock()
 	p.closed = true
