@@ -56,10 +56,11 @@ func frpTarball(t *testing.T, version, arch string, frps, frpc []byte) []byte {
 	return buf.Bytes()
 }
 
-// fakeRelease is a release of version 0.71.1 for the given architectures, the frpc of each a text
-// naming it.
+// fakeRelease is a release of version 0.71.1 for the given architectures, the frps and frpc of each
+// a text naming it.
 type fakeRelease struct {
 	base, pins string            // the mirror's directory, and the pins file made for it
+	frps       map[string][]byte // by frp architecture
 	frpc       map[string][]byte // by frp architecture
 	tarball    map[string]string // the tarball's path, by frp architecture
 }
@@ -67,7 +68,7 @@ type fakeRelease struct {
 func newFakeRelease(t *testing.T, archs ...string) fakeRelease {
 	t.Helper()
 	const version = "0.71.1"
-	r := fakeRelease{base: t.TempDir(), frpc: map[string][]byte{}, tarball: map[string]string{}}
+	r := fakeRelease{base: t.TempDir(), frps: map[string][]byte{}, frpc: map[string][]byte{}, tarball: map[string]string{}}
 	if err := os.MkdirAll(filepath.Join(r.base, "v"+version), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +81,7 @@ func newFakeRelease(t *testing.T, archs ...string) fakeRelease {
 		if err := os.WriteFile(r.tarball[arch], tgz, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		r.frpc[arch] = frpc
+		r.frps[arch], r.frpc[arch] = frps, frpc
 		lines = append(lines, fmt.Sprintf("%s %s %s %s %s %s", version, arch, name, sumHex(tgz), sumHex(frps), sumHex(frpc)))
 	}
 	r.pins = filepath.Join(t.TempDir(), "frp-pins.txt")
