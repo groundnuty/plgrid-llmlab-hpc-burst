@@ -18,6 +18,7 @@ package scenario_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"slices"
@@ -66,11 +67,8 @@ func TestWatchOverhead(t *testing.T) {
 		t.Skip("the measurement of the short watch connections runs only with HPCBURST_WATCH_OVERHEAD=<seconds per arm> (hack/rehearsal.sh)")
 	}
 	r := startRigWith(t, rigSetup{mode: "direct", ports: ports146, noWatch: true})
-	pid := r.h.StatusPID("k3s")
-	if pid == 0 {
-		t.Fatal("hpcburst status names no running k3s of this stack")
-	}
-	t.Logf("OVERHEAD measuring k3s (status of this stack's state directory), %d rounds of %d s an arm", overheadRounds, window)
+	pid := ownK3s(t, r)
+	t.Logf("OVERHEAD measuring this stack's k3s, %d rounds of %d s an arm", overheadRounds, window)
 	arms := []overheadArm{{"none", 0}, {"long", 3600}, {"short", 3}}
 	runs := map[string][]armRun{}
 	for round := range overheadRounds {
@@ -91,6 +89,31 @@ func TestWatchOverhead(t *testing.T) {
 		}
 	}
 	reportOverhead(t, arms, runs)
+}
+
+// ownK3s is the PID of the k3s that hpcburst status finds to be this stack's own: its
+// state directory's record, checked by the process's identity, never a search of the
+// host, where another k3s runs.
+func ownK3s(t *testing.T, r *rig) int {
+	t.Helper()
+	out, err := stack.Run(t, stack.StatusTimeout, r.h.Env, r.h.B.HPCBurst, "status", "--state-dir", r.h.State, "--json", "--no-api")
+	var doc struct {
+		Processes []struct {
+			Name    string `json:"name"`
+			PID     int    `json:"pid"`
+			Verdict string `json:"verdict"`
+		} `json:"processes"`
+	}
+	if jerr := json.Unmarshal([]byte(out), &doc); jerr != nil {
+		t.Fatalf("hpcburst status --json (%v): %v: %.300s", err, jerr, out)
+	}
+	for _, p := range doc.Processes {
+		if p.Name == "k3s" && p.Verdict == "ours" && p.PID > 0 {
+			return p.PID
+		}
+	}
+	t.Fatalf("hpcburst status names no k3s of this stack: %.300s", out)
+	return 0
 }
 
 // measureArm starts the arm's streams, lets them settle, runs the load over the window
