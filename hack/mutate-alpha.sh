@@ -401,17 +401,35 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   # B7: the first clock, and a tunnel row's NOT RUN at its first end.
   'jobcount.go@@		if c := timeLimit - drainWindow - time.Minute; c < pendingMax {@@		if c := timeLimit - drainWindow; c < pendingMax {'
   'jobcount.go@@		if c := timeLimit - drainWindow - time.Minute; c < pendingMax {@@		if c := timeLimit - drainWindow - time.Minute; c <= pendingMax {'
-  'run.go@@ || (row.MostJobs == 1 && errors.Is(err, ErrQueueWaitPastEnd))@@'
   'run.go@@		if ns.PastEnd {@@		if false {'
-  'hack/live-checks.sh@@  case $n in tunnel-hour-*) first_end_marker ;; *) return 1 ;; esac@@  return 1'
-  'hack/live-checks.sh@@  case $n in tunnel-hour-*) first_end_marker ;; *) return 1 ;; esac@@  case $n in tunnel-hour-*) true ;; *) return 1 ;; esac'
-  'hack/live-checks.sh@@  [ "${SWAIT[$n]:--}" != - ] || [ -n "${OGSET[$n]:-}" ] && return 0@@  [ "${SWAIT[$n]:--}" != - ] && return 0'
   'hack/live-checks.sh@@    elif first_end_marker; then@@    elif false; then'
+  # #272: a job that never started within its bound is NOT RUN on every row. One mutant per bound sends it to FAIL (exit 1);
+  # each is killed by a row with no slot as well as by the slot rows, since the no-slot rows are what the ruling changed.
+  # The wait in the queue (the first clock), then a tunnel row's deployment end (both the sentinel and the error that
+  # carries it), then a start wait (the conformance tests), then the rule by row that #230 had, which comes back:
+  'run.go@@	return errors.Is(err, ErrNotStarted) || errors.Is(err, ErrQueueWaitPastEnd)@@	return errors.Is(err, ErrQueueWaitPastEnd)'
+  'run.go@@	return errors.Is(err, ErrNotStarted) || errors.Is(err, ErrQueueWaitPastEnd)@@	return errors.Is(err, ErrNotStarted)'
+  'run.go@@func NotRun(_ Row, err error) bool { return neverStarted(err) }@@func NotRun(row Row, err error) bool { return row.SlotHold > 0 && neverStarted(err) }'
+  'run.go@@func NotRun(_ Row, err error) bool { return neverStarted(err) }@@func NotRun(row Row, err error) bool { return row.MostJobs == 1 && neverStarted(err) }'
+  'jobcount.go@@	return target == ErrNotStarted || (e.PastEnd && target == ErrQueueWaitPastEnd)@@	return (target == ErrNotStarted && !e.PastEnd) || (e.PastEnd && target == ErrQueueWaitPastEnd && false)'
+  'internal/providerctl/conformance/startwait_test.go@@	w.t.Skipf("%s", skip)@@	if w.s.startWait > 0 { w.t.Fatalf("%s", skip) }; w.t.Skipf("%s", skip)'
+  'internal/providerctl/conformance/startwait_test.go@@	w.t.Skipf("%s", skip)@@	if w.s.startWait == 0 { w.t.Fatalf("%s", skip) }; w.t.Skipf("%s", skip)'
+  'internal/providerctl/conformance/startwait_test.go@@		return w.s.pendingMax, "the wait in the queue"@@		return maxStartWait, "the wait in the queue"'
+  'hack/live-checks.sh@@  [ -n "${HOST[$n]:-}" ] || return 1@@  [ "${SLOT[$n]:--}" != - ] || return 1'
+  'hack/live-checks.sh@@  [ -n "${HOST[$n]:-}" ] || return 1@@  [ "${SWAIT[$n]:--}" != - ] || return 1'
+  'hack/live-checks.sh@@  [ -n "${HOST[$n]:-}" ] || return 1@@  [ "${SWAIT[$n]:--}" = - ] || [ "${SLOT[$n]:--}" != - ] || return 1'
+  'hack/live-checks.sh@@  [ -n "${HOST[$n]:-}" ] || return 1@@  [ "${SWAIT[$n]:--}" = - ] || return 1'
+  'hack/live-checks.sh@@  [ -n "${HOST[$n]:-}" ] || return 1@@  true'
+  'hack/live-checks.sh@@  ! first_end_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac@@  ! first_end_marker || case $n in tunnel-hour-*) false ;; *) false ;; esac'
+  'hack/live-checks.sh@@  ! first_end_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac@@  true'
+  'hack/live-checks.sh@@  [ "$CLEAN_LEFT" -eq 0 ] || verdict=1@@  [ "$CLEAN_LEFT" -eq 0 ] || [ "$NOT_RUN" = 1 ] || verdict=1'
+  'hack/live-checks.sh@@  [ "$verdict" -ne 0 ] || [ "$NOT_RUN" != 1 ] || verdict=3@@  [ "$verdict" -ne 0 ] || [ "$NOT_RUN" != 1 ] || verdict=1'
+  'hack/live-checks.sh@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|85|-|30@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|85|-'
+  'hack/live-checks.sh@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|85|-|30@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|85|-|20'
+  'hack/live-checks.sh@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|85|-|30@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|80|-|30'
   'dry_test.go@@	d.tick(bound - time.Second)@@	d.tick(bound - time.Minute)'
-  'run.go@@	return (row.SlotHold > 0 && errors.Is(err, ErrNotStarted)) ||@@	return errors.Is(err, ErrNotStarted) ||'
-  'run.go@@	return (row.SlotHold > 0 && errors.Is(err, ErrNotStarted)) ||@@	return (row.SlotHold > 0) ||'
   'alpha_live_test.go@@		if merr := rec.SaveText(NotRunFile, note); merr != nil {@@		if merr := error(nil); merr != nil {'
-  'run.go@@			if errors.Is(err, ErrNotStarted) {@@			if false {'
+  'run.go@@			if neverStarted(err) {@@			if false {'
   'alpha_live_test.go@@	if NotRun(cfg.Row, err) {@@	if false {'
   'hack/live-checks.sh@@PENDING_MAX_NOW=1800@@PENDING_MAX_NOW=7200'
   'hack/live-checks.sh@@  elif [ "${SLOT[$1]:--}" != - ]; then printf '"'"'%s'"'"' "$PENDING_MAX_NOW"@@  elif false; then printf '"'"'%s'"'"' "$PENDING_MAX_NOW"'
@@ -480,7 +498,7 @@ PY
       esac || { echo "BROKEN   $file: $from  ->  $to: the mutant does not compile: $cerr"; broken=$((broken+1)); cp "${saved[$path]}" "$path"; continue; } ;;
   esac
   case $path in
-    hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 -failfast -run 'AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat' ./hack/livechecks) ;;
+    hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 -failfast -run 'AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot' ./hack/livechecks) ;;
     "$pkg"/alpha_live_test.go)
       # The dry runs of the script run the alpha test binary: the one compiled above, from the mutated file.
       tests=(env HPCBURST_LIVECHECKS_ALPHA_TEST="$tmp/pkg.test" go test -count=1 -timeout 9m -run PendingPastTheBound ./hack/livechecks) ;;

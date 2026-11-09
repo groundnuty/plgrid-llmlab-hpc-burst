@@ -540,7 +540,8 @@ func TestATunnelRowNotRunAtItsFirstEndIsCleanedUpByItsPrefix(t *testing.T) {
 			}
 		})
 	}
-	// The handover row has no first end: the same marker is no NOT RUN there.
+	// The handover row has no first end: a marker that names one is no NOT RUN there (its other bound, the wait in the
+	// queue, is NOT RUN with a marker that names that: TestEveryRowCanBeNotRunWhateverItsBound).
 	w := newAlphaWorld(t)
 	if res := w.run([]string{"STUB_ALPHA_MODE=untagged-not-run"}, "--run", "alpha-athena-handover", "--yes"); res.code != 1 || strings.Contains(res.out, "NOT RUN") {
 		t.Errorf("alpha-athena-handover with a not-run marker: exit %d, want 1 and no NOT RUN:\n%s", res.code, res.out)

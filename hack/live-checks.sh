@@ -924,12 +924,14 @@ wait_child() {
 # a wait in the queue, or a tunnel row's deployment end; the science agent's ruling of 8 Nov 2026, #272) whose test
 # skipped once at the top level with no failure, exit status 0 and the marker, a regular file (not a link) in this
 # run's record directory. Anything else is not a NOT RUN: a local row has no queue to wait in, and a skip with no
-# marker, a marker beside a failure or a skipped subtest, and a marker that is a link are all failures.
+# marker, a marker beside a failure or a skipped subtest, and a marker that is a link are all failures. So is a marker
+# that names a deployment's first end on a row that has none: only a tunnel row has that bound.
 not_run_verdict() {
   local n=$1 rc=$2 failed=$3 skipped=$4 named=$5
   [ "$named" = SKIP ] && [ "$rc" = 0 ] && [ "$failed" = 0 ] && [ "$skipped" = 1 ] || return 1
   [ -n "$REC_DIR" ] && [ -f "$REC_DIR/not-run.txt" ] && [ ! -L "$REC_DIR/not-run.txt" ] || return 1
-  [ -n "${HOST[$n]:-}" ]
+  [ -n "${HOST[$n]:-}" ] || return 1
+  ! first_end_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac
 }
 
 # first_end_marker: the run's NOT RUN marker says its job was still pending a minute before its deployment's first
