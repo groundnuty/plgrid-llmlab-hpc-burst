@@ -48,6 +48,11 @@ type Steps interface {
 	TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	// Ledger is the cluster's record of this run's jobs.
 	Ledger() Ledger
+	// WatchResets is how many times the run's watch started again from the
+	// current versions (stack.Recorder.ResetCount), for the text to post: a
+	// measured fact (the science agent's addition on PR 292). The verdicts do not
+	// judge it; a reset fails the test by the watch's own rule.
+	WatchResets() int
 	// Close stops the stack and ends the run's jobs. Run calls it on every
 	// exit, a failed scenario included.
 	Close(ctx context.Context) error

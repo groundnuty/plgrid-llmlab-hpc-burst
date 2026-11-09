@@ -66,8 +66,8 @@ func TestAResetsFailureNamesTheReadsThatCrossedIt(t *testing.T) {
 }
 
 // A read with a window crosses a reset only if the window reaches the reset's gap:
-// from the stream's last progress before it to the LIST after it. Instance reads,
-// on a stream fed by hand, with the times the test chose.
+// from the stream's last progress before it to the LIST after it. Instance reads, on
+// a stream fed by hand, against the Recorder's own clock.
 func TestAReadsWindowCrossesAResetOnlyIfItReachesTheGap(t *testing.T) {
 	never := func(Observation) bool { return false }
 	for name, c := range map[string]struct {
@@ -84,21 +84,17 @@ func TestAReadsWindowCrossesAResetOnlyIfItReachesTheGap(t *testing.T) {
 		"Of, the whole record":        {func(rec *Recorder, _, _, _ time.Time) { rec.Of("u") }, "Of"},
 		"OnAllocation, the whole one": {func(rec *Recorder, _, _, _ time.Time) { rec.OnAllocation("a") }, "OnAllocation"},
 		"UIDs, the whole one":         {func(rec *Recorder, _, _, _ time.Time) { rec.UIDs() }, "UIDs"},
-		"Last, through Of and UIDs":   {func(rec *Recorder, _, _, _ time.Time) { rec.Last() }, "UIDs"},
+		"Last, through UIDs":          {func(rec *Recorder, _, _, _ time.Time) { rec.Last() }, "UIDs"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			rec := &Recorder{}
 			st := rec.stream(KindInstances, nil)
+			before := time.Now().Add(-time.Millisecond)
 			st.Reached("5")
-			before := time.Now().Add(-time.Minute)
-			from := time.Now()
 			st.Reset("the watch could not resume from version 5")
+			inGap := time.Now()
 			st.Reached("100") // the LIST after it
-			rec.mu.Lock()
-			s := rec.streams[KindInstances]
-			s.resets[0].from, s.resets[0].to = from, from.Add(time.Second)
-			rec.mu.Unlock()
-			c.read(rec, before, from.Add(time.Millisecond), from.Add(time.Minute))
+			c.read(rec, before, inGap, time.Now().Add(time.Millisecond))
 			got := rec.resets(KindInstances)
 			if c.crossed == "" && !strings.Contains(got, "no read's window crossed it") {
 				t.Errorf("%q; want no read's window crossing it", got)

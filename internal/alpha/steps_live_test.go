@@ -171,6 +171,7 @@ func (f failedSteps) TunnelHour(context.Context, Plan) (TunnelHourObs, error) {
 }
 func (f failedSteps) Ledger() Ledger              { return &BatchLedger{} }
 func (f failedSteps) Close(context.Context) error { return nil }
+func (f failedSteps) WatchResets() int            { return 0 }
 
 // liveRun is one run of the live steps in a world.
 type liveRun struct {
@@ -287,6 +288,9 @@ func (r *liveRun) Ledger() Ledger {
 	}
 	return &BatchLedger{Finder: r.batch, Since: r.since.Add(-AccountingSlack)}
 }
+
+// WatchResets counts the resets of the run's watch.
+func (r *liveRun) WatchResets() int { return r.watch.ResetCount() }
 
 // start brings the stack up, creates the Provider, makes the run's own
 // transport, and creates the row's deployment with the end that keeps it to

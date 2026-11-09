@@ -109,13 +109,14 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 	if len(failures) > 0 {
 		verdict = "fail"
 	}
+	resets := st.WatchResets()
 	if serr := rec.SaveJSON(RecordFile, map[string]any{
 		"row": cfg.Row.Name, "mode": cfg.Mode(), "frontLabel": cfg.FrontLabel, "verdict": verdict, "failures": failures,
-		"observation": obs, "jobs": jobs, "finished": time.Now().UTC().Format(time.RFC3339),
+		"observation": obs, "jobs": jobs, "watchResets": resets, "finished": time.Now().UTC().Format(time.RFC3339),
 	}); serr != nil {
 		return failures, fmt.Errorf("the record could not be written: %w", serr)
 	}
-	if serr := rec.SaveText(PostsFile, InsertFrontLine(summary(failures, jobs), cfg.FrontLabel)); serr != nil {
+	if serr := rec.SaveText(PostsFile, InsertFrontLine(summary(failures, jobs)+watchResetsLine(resets), cfg.FrontLabel)); serr != nil {
 		return failures, fmt.Errorf("the text to post could not be written: %w", serr)
 	}
 	return failures, nil

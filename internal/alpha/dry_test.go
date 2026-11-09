@@ -61,6 +61,9 @@ type drySteps struct {
 	// untaggedAt is the 1-based position of the tag the fault "untagged" does
 	// not write down: the successor's, or the only one of a one-job run.
 	untaggedAt int
+	// watchResets is the count the run reports: a dry run has no watch, so none
+	// unless a test sets one.
+	watchResets int
 }
 
 func newDrySteps(t *testing.T, cfg Config, family string) *drySteps {
@@ -351,6 +354,7 @@ const (
 
 func (d *drySteps) Ledger() Ledger              { return dryLedger{d} }
 func (d *drySteps) Close(context.Context) error { return nil }
+func (d *drySteps) WatchResets() int            { return d.watchResets }
 
 type dryLedger struct{ d *drySteps }
 
