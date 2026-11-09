@@ -78,10 +78,27 @@ func (p *Platform) startIn(r *jobRun, dir string) error {
 	r.submitDir, r.env = submitDir, cmd.Env // a step (srun.go) runs in the same directory and environment
 	cmd.Stdout, cmd.Stderr = out, errOut    // files, so no copy goroutine waits on a grandchild
 	cmd.SysProcAttr = sessionAttr()
-	if err := startProc(cmd); err != nil {
+	// The keeper (keeper.go) ends the job's session if the host dies without
+	// Close; it starts first, so a keeper that cannot start fails the job
+	// before its shell exists.
+	k, err := startKeeper(submitDir)
+	if err != nil {
 		return err
 	}
-	r.cmd, r.pid, r.started = cmd, cmd.Process.Pid, time.Now()
+	if err := startProc(cmd); err != nil {
+		k.stop()
+		return err
+	}
+	if err := k.attach(cmd.Process.Pid); err != nil {
+		// The keeper is gone, so this shell would run unkept: end it, a
+		// moment after its start, rather than run a job the host's death
+		// would leave behind.
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		k.stop()
+		return err
+	}
+	r.cmd, r.pid, r.started, r.keeper = cmd, cmd.Process.Pid, time.Now(), k
 	return nil
 }
 

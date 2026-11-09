@@ -22,10 +22,14 @@ import (
 //     limit, a control) keeps the state it was given.
 //  3. It kills whatever is left in the session, as Slurm's cgroup does when a
 //     job's batch script ends, and removes the execution's directory.
-//  4. It reaps the shell, under the lock that keeps every scan of /proc out
+//  4. It stops the job's keeper (keeper.go), in order and reaped, and only
+//     then reaps the shell, under the lock that keeps every scan of /proc out
 //     while it does, and marks the execution done, unless the sweep failed:
 //     processes that survive KILL, or a /proc that cannot be read, leave it
 //     not done (Finished stays false) with the error in the Job and in Close.
+//     The keeper goes first because it kills by session ID: the shell's reap
+//     frees that ID, and a keeper still armed then, with the host suspended
+//     and killed after an unrelated session took the ID, would kill that one.
 func (p *Platform) wait(r *jobRun) {
 	defer close(r.settled)
 	if err := waitExit(r.pid); err != nil {
@@ -47,6 +51,7 @@ func (p *Platform) wait(r *jobRun) {
 	p.mu.Lock()
 	r.sweepErr = sweepErr // before the reap: Processes tells a failed sweep from one in progress
 	p.mu.Unlock()
+	r.keeper.stop() // disarmed and reaped while the zombie shell still holds the session ID (reap frees it); a Close that returns leaves no keeper
 	p.reap(r)
 
 	p.mu.Lock()
@@ -66,13 +71,16 @@ func (p *Platform) wait(r *jobRun) {
 // execution is shut out first, then the shell is killed through its pidfd (a
 // shell that is still alive would otherwise be waited for under the lock that
 // Close's KILL needs) and reaped. The execution is not swept and not done, and
-// the error is kept. This path is not tested: waitid on a child does not
-// fail.
+// the error is kept. The keeper is stopped before the shell is reaped, as in
+// wait. A real waitid on a child does not fail, so a test reaches this path
+// through the exitStatus seam.
 func (p *Platform) waitFailed(r *jobRun, cause error) {
 	r.procMu.Lock()
 	r.leaderReaped = true
 	r.procMu.Unlock()
-	_ = r.cmd.Process.Kill() // no-op if it has exited
+	_ = r.cmd.Process.Kill() // no-op if it has exited; the shell is not reaped, so it holds its session ID
+	r.keeper.stop()          // disarmed before the reap frees that ID
+	p.beforeReap(r)
 	_ = r.cmd.Wait()
 	status := syscall.WaitStatus(0)
 	if ps := r.cmd.ProcessState; ps != nil {
@@ -89,9 +97,18 @@ func (p *Platform) waitFailed(r *jobRun, cause error) {
 	p.schedule(p.clock.Now())
 }
 
+// beforeReap calls the test hook of the moment just before the shell is
+// reaped, with no lock held.
+func (p *Platform) beforeReap(r *jobRun) {
+	if h := p.knobs.beforeReap; h != nil {
+		h(r)
+	}
+}
+
 // reap reaps the batch shell. Every scan of the session has finished before
 // it returns and none starts afterwards (jobRun.scanLive).
 func (p *Platform) reap(r *jobRun) {
+	p.beforeReap(r)
 	r.procMu.Lock()
 	defer r.procMu.Unlock()
 	_ = r.cmd.Wait() // the status was recorded from the zombie; Wait only reaps

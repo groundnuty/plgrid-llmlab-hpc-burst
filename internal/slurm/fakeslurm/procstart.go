@@ -19,9 +19,11 @@ import (
 // Close, scancel and the time limit do the orderly ending; this is only for the
 // host that never reaches them.
 //
-// It reaches the process itself, not what that process started: a descendant
-// that the batch shell left running outlives a host that died without Close,
-// and only Close's sweep ends it.
+// It reaches the process itself, not what that process started: the kernel
+// clears the signal on fork. What a job's batch shell started in the background
+// is ended by the job's keeper (keeper.go), and what a step's program started
+// is not: it outlives a host that died without Close, and only Close's sweep
+// ends it.
 func sessionAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{Setsid: true, Pdeathsig: syscall.SIGKILL}
 }
