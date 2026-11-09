@@ -348,8 +348,8 @@ func TestHostDialedTooManyRestartsEndTheRelayWithRelayFailed(t *testing.T) {
 	if !strings.Contains(r.FinalCause, "more than 3 restarts") || r.Starts != 5 {
 		t.Errorf("the serving relay %+v: want a final end after 5 starts, more than 3 restarts", r)
 	}
-	if got := f.list(); len(got) != 1 || !strings.Contains(got[0], "more than 3 restarts") {
-		t.Errorf("RelayFailed %q: want one, naming the restarts", got)
+	if got := f.list(); len(got) != 1 || !strings.Contains(got[0], "more than 3 restarts") || !strings.Contains(got[0], "the last end: retried") {
+		t.Errorf("RelayFailed %q: want one, naming the restarts and the last end's cause (N3)", got)
 	}
 }
 
