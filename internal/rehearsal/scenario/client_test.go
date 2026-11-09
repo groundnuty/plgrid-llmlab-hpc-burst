@@ -74,7 +74,7 @@ func (r *rig) sendCtx(parent context.Context, path, body, key string) reply {
 // chatBody is a chat request for the plain model name. minTokens equal to
 // maxTokens fixes the output length (the engine double's doc).
 func chatBody(maxTokens, minTokens int, stream bool) string {
-	return chatBodyFor(model, maxTokens, minTokens, stream)
+	return chatBodyFor(stack.Model, maxTokens, minTokens, stream)
 }
 
 // chatBodyFor is chatBody for another model name.

@@ -31,8 +31,10 @@ import (
 // whose time limit, here the 7 min leaseLimit, is not longer than the lead,
 // the drain window plus handoverMargin plus health.startTimeout, so the lead
 // is 2 min + 0 s + 4 min = 6 min. An Instance of the rehearsal is ready in
-// under a minute.
-var rehearsalTiming = timing{lease: "7m", maxRequest: "90s", drainMargin: "30s", drainWindow: "10m", stopGrace: "5s", agentTimeout: "20s", startTimeout: "4m"}
+// under a minute. The profile sets drainWindow explicitly, longer than the
+// sum, so the test computes the drain start from the spec alone (drainStartOf)
+// rather than with the helper the controller and the front share.
+var rehearsalTiming = stack.Timing{Lease: "7m", MaxRequest: "90s", DrainMargin: "30s", DrainWindow: "10m", StopGrace: "5s", AgentTimeout: "20s", StartTimeout: "4m"}
 
 // rehearsalAgentTimeout is rehearsalTiming's agentTimeout: how long a
 // controller waits for a silent agent before it judges it unreachable.
@@ -138,12 +140,12 @@ func startRigWith(t *testing.T, s rigSetup) *rig {
 	r.h = startHost(t, b, dir, s.ports, dh, stack.CleanEnv("HF_ENDPOINT="+r.hub.url))
 	arch := stack.CPUArch(t)
 	r.h.placeAgentBuild(arch)
-	r.c = kubeClient(t, r.h.state)
-	objs := []client.Object{batchProfile(arch, rehearsalTiming), batchProvider(creds)}
+	r.c = stack.KubeClient(t, r.h.state)
+	objs := []client.Object{stack.BatchProfile(arch, rehearsalTiming), stack.BatchProvider(creds)}
 	if s.objects != nil {
 		objs = s.objects(r, arch, creds)
 	}
-	create(t, r.c, objs...)
+	stack.Create(t, r.c, objs...)
 	// Before the deployment exists, so the watch sees every Instance and
 	// Allocation from its first version.
 	r.startWatch()
@@ -162,7 +164,7 @@ func (r *rig) providerReady() {
 	r.t.Helper()
 	var p v1alpha1.Provider
 	stack.WaitFor(r.t, stack.WaitDeadline, "the Provider to be Ready over the login node", func() bool {
-		return r.get(&p, providerName, "") && v1alpha1.ProviderReady(&p, time.Now())
+		return r.get(&p, stack.ProviderName, "") && v1alpha1.ProviderReady(&p, time.Now())
 	})
 	r.assertRealSSH()
 }
@@ -200,7 +202,7 @@ func (r *rig) allocations() []v1alpha1.Allocation {
 	var l v1alpha1.AllocationList
 	ctx, cancel := stack.CallCtx(r.t)
 	defer cancel()
-	if err := r.c.List(ctx, &l, client.InNamespace(namespace)); err != nil {
+	if err := r.c.List(ctx, &l, client.InNamespace(stack.Namespace)); err != nil {
 		r.t.Fatalf("list allocations: %v", err)
 	}
 	return l.Items
@@ -210,7 +212,7 @@ func (r *rig) instances() []v1alpha1.Instance {
 	var l v1alpha1.InstanceList
 	ctx, cancel := stack.CallCtx(r.t)
 	defer cancel()
-	if err := r.c.List(ctx, &l, client.InNamespace(namespace)); err != nil {
+	if err := r.c.List(ctx, &l, client.InNamespace(stack.Namespace)); err != nil {
 		r.t.Fatalf("list instances: %v", err)
 	}
 	return l.Items
@@ -221,7 +223,7 @@ func (r *rig) instances() []v1alpha1.Instance {
 func (r *rig) describe() string {
 	var md v1alpha1.ModelDeployment
 	s := ""
-	if r.get(&md, mdName, namespace) {
+	if r.get(&md, stack.MDName, stack.Namespace) {
 		for _, c := range md.Status.Conditions {
 			s += fmt.Sprintf(" md:%s=%s(%s: %.160s)", c.Type, c.Status, c.Reason, c.Message)
 		}

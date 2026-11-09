@@ -36,7 +36,7 @@ type wantAttr struct {
 }
 
 func wantInstance(d *depRun, in *v1alpha1.Instance) wantAttr {
-	return wantAttr{emitter: "instance", provider: d.provider, deploymentID: in.Spec.DeploymentID.Display(),
+	return wantAttr{emitter: "instance", provider: d.Provider, deploymentID: in.Spec.DeploymentID.Display(),
 		instance: in.Namespace + "/" + in.Name, instanceUID: string(in.UID)}
 }
 
@@ -148,9 +148,9 @@ func (p3 *part3) errorsAttributed() {
 		status                   int
 		code, detail, retryAfter string
 	}{
-		{"a wrong client key", strings.Repeat("e0", 32), chatBodyFor(queuedDep.model, 1, 0, false), http.StatusUnauthorized, "invalid_api_key", "", ""},
+		{"a wrong client key", strings.Repeat("e0", 32), chatBodyFor(queuedDep.Model, 1, 0, false), http.StatusUnauthorized, "invalid_api_key", "", ""},
 		{"a body that is not JSON", ok, "not json", http.StatusBadRequest, "invalid_request", "", ""},
-		{"a provider nobody configured", ok, chatBodyFor(queuedDep.model+"@no-such-provider", 1, 0, false), http.StatusBadRequest, "invalid_model_name", "unknown_provider", ""},
+		{"a provider nobody configured", ok, chatBodyFor(queuedDep.Model+"@no-such-provider", 1, 0, false), http.StatusBadRequest, "invalid_model_name", "unknown_provider", ""},
 		{"a model no deployment attaches", ok, chatBodyFor("example-org/not-attached", 1, 0, false), http.StatusServiceUnavailable, "model_inactive", "not_attached", "30"},
 	}
 	for _, c := range cases {

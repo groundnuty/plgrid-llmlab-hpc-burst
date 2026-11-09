@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 // usageRow is the part of a usage record (internal/front/usage, Record) the
@@ -108,7 +109,7 @@ func (r *rig) stepRequests(in *v1alpha1.Instance, key string) {
 	reqs := []struct{ path, body string }{
 		{"/v1/chat/completions", chatBody(16, 0, false)},
 		{"/v1/chat/completions", chatBody(16, 0, true)},
-		{"/v1/completions", `{"model":"` + model + `","prompt":"hello","max_tokens":16}`},
+		{"/v1/completions", `{"model":"` + stack.Model + `","prompt":"hello","max_tokens":16}`},
 	}
 	for i, q := range reqs {
 		rp := r.send(q.path, q.body, key)
@@ -122,8 +123,8 @@ func (r *rig) stepRequests(in *v1alpha1.Instance, key string) {
 		}
 		row := r.rowOf(rp.id)
 		switch {
-		case row.Path != q.path || row.RequestedModel != model || row.Status != http.StatusOK:
-			r.t.Errorf("step (b) record %d: %+v, want %s, %s, 200", i, row, q.path, model)
+		case row.Path != q.path || row.RequestedModel != stack.Model || row.Status != http.StatusOK:
+			r.t.Errorf("step (b) record %d: %+v, want %s, %s, 200", i, row, q.path, stack.Model)
 		case row.InstanceUID != string(in.UID) || row.Instance != in.Namespace+"/"+in.Name || row.Emitter != "instance":
 			r.t.Errorf("step (b) record %d names Instance %s (%s), emitter %s; want %s/%s (%s), instance", i, row.Instance, row.InstanceUID, row.Emitter, in.Namespace, in.Name, in.UID)
 		case row.Finish == nil || *row.Finish == "stream_cut" || row.CutBy != nil:

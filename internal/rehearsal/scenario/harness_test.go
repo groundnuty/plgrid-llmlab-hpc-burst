@@ -158,7 +158,7 @@ func (s clusterShape) partitionsOrDefault() []fakeslurm.Partition {
 	if len(s.partitions) > 0 {
 		return s.partitions
 	}
-	return []fakeslurm.Partition{{Name: partition, GPUOnly: true}}
+	return []fakeslurm.Partition{{Name: stack.Partition, GPUOnly: true}}
 }
 
 func startCluster(t *testing.T, dir string, jobEnv map[string]string, shape clusterShape) *cluster {

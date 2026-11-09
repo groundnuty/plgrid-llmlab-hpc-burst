@@ -170,7 +170,7 @@ func (p3 *part3) frontMetricsBothKinds(d *depRun) {
 		rows        []usageRow
 	}
 	targets := []*target{
-		{kind: "the Instance", model: d.model, want: wantInstance(d, d.primary)},
+		{kind: "the Instance", model: d.Model, want: wantInstance(d, d.primary)},
 		{kind: "the managed target", model: managedModel, want: p3.wantManaged()},
 	}
 	for _, tg := range targets {
@@ -386,18 +386,18 @@ func (p3 *part3) gauges(d *depRun, when string) {
 		g := find(ss, gGenerated, map[string]string{"instance_uid": string(in.UID), "worker": "worker-0"})
 		return len(g) == 1 && g[0].value >= min, fmt.Sprintf("%s: %v, want at least %v", gGenerated, g, min)
 	})
-	view := gaugeView{uid: string(in.UID), namespace: in.Namespace, name: in.Name, deployment: d.name, provider: d.provider,
+	view := gaugeView{uid: string(in.UID), namespace: in.Namespace, name: in.Name, deployment: d.Name, provider: d.Provider,
 		gpuModel: "example-gpu", reported: true, minGenerated: min}
 	for _, p := range gaugeProblems(ss, view) {
 		r.t.Errorf("gauges %s, primary %s: %s", when, in.Name, p)
 	}
 	var pending []string
-	for _, x := range p3.instancesOf(d.name) {
+	for _, x := range p3.instancesOf(d.Name) {
 		if x.Status.Phase != v1alpha1.InstancePending {
 			continue
 		}
 		pending = append(pending, x.Name)
-		pv := gaugeView{uid: string(x.UID), namespace: x.Namespace, name: x.Name, deployment: d.name, provider: d.provider,
+		pv := gaugeView{uid: string(x.UID), namespace: x.Namespace, name: x.Name, deployment: d.Name, provider: d.Provider,
 			gpuModel: "example-gpu", staleReason: "stale"}
 		problems, none := pendingGaugeProblems(ss, pv)
 		for _, p := range problems {

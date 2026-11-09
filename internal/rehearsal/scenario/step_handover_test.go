@@ -176,7 +176,7 @@ func (r *rig) checkDrained(pred, repl *v1alpha1.Instance, ds, streamEnd time.Tim
 		r.t.Errorf("step (c): no HandedOver event on %s: the replacement was not ready at the drain start (events %v)", pred.Name, r.eventReasons(pred.Name))
 	}
 	var alloc v1alpha1.Allocation
-	if !r.get(&alloc, pred.Spec.AllocationRef.Name, namespace) || alloc.Status.AtProvider.StartTime == nil {
+	if !r.get(&alloc, pred.Spec.AllocationRef.Name, stack.Namespace) || alloc.Status.AtProvider.StartTime == nil {
 		r.t.Fatalf("step (c): the primary's Allocation %s or its start is unknown", pred.Spec.AllocationRef.Name)
 	}
 	if repl.CreationTimestamp.Before(alloc.Status.AtProvider.StartTime) || repl.Status.ReadyTime == nil || !repl.Status.ReadyTime.Time.Before(ds) {
@@ -192,7 +192,7 @@ func (r *rig) checkDrained(pred, repl *v1alpha1.Instance, ds, streamEnd time.Tim
 	stack.WaitState(r.t, stack.WaitDeadline, "the primary to end Drained, its Allocation to end and its job to finish", func() (bool, string) {
 		o, ended := r.watch.first(pred.UID, time.Time{}, func(o observation) bool { return o.phase == v1alpha1.InstanceEnded })
 		var a v1alpha1.Allocation
-		gone := !r.get(&a, alloc.Name, namespace)
+		gone := !r.get(&a, alloc.Name, stack.Namespace)
 		j, _ := r.cl.plat.Job(jobID)
 		state := fmt.Sprintf("Instance %s seen ended %v (reason %q); Allocation gone %v phase %s; job %d %s finished %v",
 			pred.Name, ended, o.endReason, gone, a.Status.AtProvider.Phase, jobID, j.State, j.Finished)

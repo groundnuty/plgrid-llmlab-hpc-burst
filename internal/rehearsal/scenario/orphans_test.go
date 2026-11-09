@@ -204,7 +204,7 @@ func (r *rig) tunnelWitness() (*v1alpha1.Instance, time.Time, *metav1.Condition,
 	if spec == nil {
 		r.t.Fatal("the watch saw no Instance: the tunnel witness has no spec to copy")
 	}
-	w := &v1alpha1.Instance{ObjectMeta: metav1.ObjectMeta{Name: witnessName, Namespace: namespace}, Spec: *spec.DeepCopy()}
+	w := &v1alpha1.Instance{ObjectMeta: metav1.ObjectMeta{Name: witnessName, Namespace: stack.Namespace}, Spec: *spec.DeepCopy()}
 	ctx, cancel := stack.CallCtx(r.t)
 	err := r.c.Create(ctx, w)
 	cancel()
@@ -224,7 +224,7 @@ func (r *rig) tunnelWitness() (*v1alpha1.Instance, time.Time, *metav1.Condition,
 	var last *metav1.Condition
 	for {
 		var cur v1alpha1.Instance
-		if r.get(&cur, w.Name, namespace) {
+		if r.get(&cur, w.Name, stack.Namespace) {
 			if c := meta.FindStatusCondition(cur.Status.Conditions, v1alpha1.ConditionTunnelConnected); c != nil {
 				last = c.DeepCopy()
 				if fromSuccessfulRead(c) {
@@ -248,7 +248,7 @@ func (r *rig) tunnelWitness() (*v1alpha1.Instance, time.Time, *metav1.Condition,
 func (r *rig) deleteWitness(w *v1alpha1.Instance) {
 	r.t.Helper()
 	ctx, cancel := stack.CallCtx(r.t)
-	err := r.c.Delete(ctx, &v1alpha1.Instance{ObjectMeta: metav1.ObjectMeta{Name: w.Name, Namespace: namespace}})
+	err := r.c.Delete(ctx, &v1alpha1.Instance{ObjectMeta: metav1.ObjectMeta{Name: w.Name, Namespace: stack.Namespace}})
 	cancel()
 	if err != nil && !apierrors.IsNotFound(err) {
 		r.t.Errorf("delete the tunnel witness: %v", err)
@@ -256,6 +256,6 @@ func (r *rig) deleteWitness(w *v1alpha1.Instance) {
 	}
 	stack.WaitFor(r.t, stack.WaitDeadline, "the tunnel witness to be gone", func() bool {
 		var cur v1alpha1.Instance
-		return !r.get(&cur, w.Name, namespace)
+		return !r.get(&cur, w.Name, stack.Namespace)
 	})
 }

@@ -48,7 +48,7 @@ const (
 func (p3 *part3) expectedEvents() []wantEvent {
 	var out []wantEvent
 	inst := func(action, reason, name, why string) wantEvent {
-		return wantEvent{action: action, reason: reason, kind: "Instance", ns: namespace, name: name, controller: lifecycleController, why: why}
+		return wantEvent{action: action, reason: reason, kind: "Instance", ns: stack.Namespace, name: name, controller: lifecycleController, why: why}
 	}
 	for _, d := range p3.deps {
 		for _, in := range []string{d.primary.Name, d.succ.Name} {
@@ -59,9 +59,9 @@ func (p3 *part3) expectedEvents() []wantEvent {
 					"ready with its drain start under an hour away (the 7 min lease) and no replacement ready: in no-overlap mode none can be (ending-soon)"))
 		}
 		out = append(out,
-			wantEvent{action: "degraded", reason: v1alpha1.ReasonCapacityDropped, kind: "ModelDeployment", ns: namespace, name: d.name, controller: lifecycleController,
+			wantEvent{action: "degraded", reason: v1alpha1.ReasonCapacityDropped, kind: "ModelDeployment", ns: stack.Namespace, name: d.Name, controller: lifecycleController,
 				related: d.primary.Name, why: "the drain start with no replacement ready (degraded, regarding the deployment, the Instance related; HBEP-7 No-overlap mode)"},
-			wantEvent{action: "degraded", reason: v1alpha1.ReasonCapacityDropped, kind: "ModelDeployment", ns: namespace, name: d.name, controller: frontController,
+			wantEvent{action: "degraded", reason: v1alpha1.ReasonCapacityDropped, kind: "ModelDeployment", ns: stack.Namespace, name: d.Name, controller: frontController,
 				why: "the primary leaves routing at its drain start below the desired count (degraded by the front; HBEP-5 Drain)"})
 	}
 	out = append(out,
@@ -69,7 +69,7 @@ func (p3 *part3) expectedEvents() []wantEvent {
 		wantEvent{action: "degraded", reason: "ObservationGap", kind: "Lease", ns: v1alpha1.ControllerNamespace, name: v1alpha1.LeaseLifecycle,
 			controller: lifecycleController, why: "the controller restart of step (f) (degraded, the lifecycle Lease; Gaps after a restart)"},
 		// A cluster-scoped object's event regards it with no namespace.
-		wantEvent{action: "degraded", reason: v1alpha1.ReasonDrainWindowShort, kind: "PlatformProfile", name: profileName, controller: frontController,
+		wantEvent{action: "degraded", reason: v1alpha1.ReasonDrainWindowShort, kind: "PlatformProfile", name: stack.ProfileName, controller: frontController,
 			why: "the front's maxRequestDuration (the 2 h default; the rehearsal's front config sets none) plus the profile's drainMargin (30 s) is above its drainWindow (10 min) (HBEP-5, Drain-window check)"})
 	return out
 }
@@ -85,8 +85,8 @@ func (p3 *part3) forbiddenEvents() []wantEvent {
 	var out []wantEvent
 	for _, d := range p3.deps {
 		out = append(out,
-			wantEvent{action: "degraded", reason: v1alpha1.ReasonReplacementLate, kind: "ModelDeployment", ns: namespace, name: d.name, why: "no-overlap mode plans the gap"},
-			wantEvent{action: "replaced", reason: "HandedOver", kind: "Instance", ns: namespace, name: d.primary.Name, why: "no replacement is ready at the drain start"})
+			wantEvent{action: "degraded", reason: v1alpha1.ReasonReplacementLate, kind: "ModelDeployment", ns: stack.Namespace, name: d.Name, why: "no-overlap mode plans the gap"},
+			wantEvent{action: "replaced", reason: "HandedOver", kind: "Instance", ns: stack.Namespace, name: d.primary.Name, why: "no replacement is ready at the drain start"})
 	}
 	return out
 }

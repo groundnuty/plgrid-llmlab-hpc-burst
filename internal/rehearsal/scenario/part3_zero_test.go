@@ -31,8 +31,8 @@ func (p3 *part3) scaleToZero() {
 	patchAt := time.Now()
 	for _, d := range p3.deps {
 		var md v1alpha1.ModelDeployment
-		if !r.get(&md, d.name, namespace) {
-			r.t.Fatalf("scale to 0: no ModelDeployment %s", d.name)
+		if !r.get(&md, d.Name, stack.Namespace) {
+			r.t.Fatalf("scale to 0: no ModelDeployment %s", d.Name)
 		}
 		patch := client.MergeFrom(md.DeepCopy())
 		md.Spec.Instances = 0
@@ -40,7 +40,7 @@ func (p3 *part3) scaleToZero() {
 		err := r.c.Patch(ctx, &md, patch)
 		cancel()
 		if err != nil {
-			r.t.Fatalf("scale %s to 0: %v", d.name, err)
+			r.t.Fatalf("scale %s to 0: %v", d.Name, err)
 		}
 	}
 	r.waitAllEnded(insts)

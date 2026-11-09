@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
@@ -189,15 +190,15 @@ func TestAttributionProblems(t *testing.T) {
 
 func event(action, reason, kind, name, controller, typ string) eventsv1.Event {
 	return eventsv1.Event{ObjectMeta: metav1.ObjectMeta{Name: "e-" + reason}, Action: action, Reason: reason, Type: typ,
-		Regarding: corev1.ObjectReference{Kind: kind, Namespace: namespace, Name: name}, ReportingController: controller, Note: "n"}
+		Regarding: corev1.ObjectReference{Kind: kind, Namespace: stack.Namespace, Name: name}, ReportingController: controller, Note: "n"}
 }
 
 func TestEventProblems(t *testing.T) {
 	want := []wantEvent{
-		{action: "ready", reason: "Ready", kind: "Instance", ns: namespace, name: "p", controller: lifecycleController},
-		{action: "degraded", reason: "CapacityDropped", kind: "ModelDeployment", ns: namespace, name: "md", controller: lifecycleController, related: "p"},
+		{action: "ready", reason: "Ready", kind: "Instance", ns: stack.Namespace, name: "p", controller: lifecycleController},
+		{action: "degraded", reason: "CapacityDropped", kind: "ModelDeployment", ns: stack.Namespace, name: "md", controller: lifecycleController, related: "p"},
 	}
-	forbid := []wantEvent{{action: "degraded", reason: "ReplacementLate", kind: "ModelDeployment", ns: namespace, name: "md"}}
+	forbid := []wantEvent{{action: "degraded", reason: "ReplacementLate", kind: "ModelDeployment", ns: stack.Namespace, name: "md"}}
 	good := func() []eventsv1.Event {
 		cd := event("degraded", "CapacityDropped", "ModelDeployment", "md", lifecycleController, provider.EventKindWarning)
 		cd.Related = &corev1.ObjectReference{Kind: "Instance", Name: "p"}

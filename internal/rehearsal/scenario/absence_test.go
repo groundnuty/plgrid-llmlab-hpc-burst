@@ -151,7 +151,7 @@ func (r *rig) baseline(what string, keys ...eventcount.Key) *absenceBase {
 	}
 	b.startToReady = map[string]map[v1alpha1.AcceleratorClass]time.Duration{}
 	for i := range mds.Items {
-		if mds.Items[i].Namespace == namespace {
+		if mds.Items[i].Namespace == stack.Namespace {
 			b.startToReady[mds.Items[i].Name] = classStartToReady(&mds.Items[i])
 		}
 	}

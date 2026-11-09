@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 type hubFile struct {
@@ -68,8 +70,8 @@ func startHub(t *testing.T) *hub {
 }
 
 func (h *hub) handle(w http.ResponseWriter, r *http.Request) {
-	tree := "/api/models/" + checkpointRepo + "/tree/" + checkpointRev
-	resolve := "/" + checkpointRepo + "/resolve/" + checkpointRev + "/"
+	tree := "/api/models/" + stack.CheckpointRepo + "/tree/" + stack.CheckpointRev
+	resolve := "/" + stack.CheckpointRepo + "/resolve/" + stack.CheckpointRev + "/"
 	switch {
 	case r.URL.Path == tree:
 		var entries []map[string]any

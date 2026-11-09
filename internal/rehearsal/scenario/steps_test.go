@@ -68,7 +68,7 @@ func (r *rig) leaseHolder() string {
 
 func (r *rig) instance(name string) (v1alpha1.Instance, bool) {
 	var in v1alpha1.Instance
-	ok := r.get(&in, name, namespace)
+	ok := r.get(&in, name, stack.Namespace)
 	return in, ok
 }
 

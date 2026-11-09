@@ -56,7 +56,7 @@ func (r *rig) stepScaleToZero(steps string) {
 func (r *rig) scaleToZero() time.Time {
 	r.t.Helper()
 	var md v1alpha1.ModelDeployment
-	if !r.get(&md, mdName, namespace) {
+	if !r.get(&md, stack.MDName, stack.Namespace) {
 		r.t.Fatal("step (g): no ModelDeployment")
 	}
 	patch := client.MergeFrom(md.DeepCopy())

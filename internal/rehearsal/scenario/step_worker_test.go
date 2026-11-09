@@ -76,7 +76,7 @@ func countReason(evs []string, reason string) int {
 
 func (r *rig) eventReasons(name string) []string {
 	var out []string
-	for _, e := range eventsFor(r.t, r.c, name) {
+	for _, e := range stack.EventsFor(r.t, r.c, name) {
 		out = append(out, e.Reason)
 	}
 	return out
