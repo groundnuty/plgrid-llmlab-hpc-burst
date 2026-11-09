@@ -63,18 +63,27 @@ func (w logWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// DevShm is the socket directory's second choice, when the job's TMPDIR is
-// unset or too long for a socket path.
+// DevShm is where the socket's directory goes first: node-local memory, on no
+// shared file system and outside any partition's tmpDir that a job's
+// bootstrap exports as TMPDIR. The job's TMPDIR is the fallback, which the
+// second probe found the same for the batch step and an --overlap step on
+// Athena (#145, comment 6749523168).
 const DevShm = "/dev/shm"
+
+// ErrNoSocketDir is a job side that found neither /dev/shm nor its TMPDIR
+// usable for the relay socket's directory.
+var ErrNoSocketDir = errors.New("no directory for the relay socket under /dev/shm or TMPDIR")
 
 // socketName is the agent's socket in its random directory.
 const socketName = "relay.sock"
 
 // JobOptions configure the job side.
 type JobOptions struct {
-	// TmpDir is the job's TMPDIR, under which the socket's random directory
-	// goes; DevShm when it is empty or the socket's path there would pass
-	// agentapi.MaxRelaySocketPath.
+	// ShmDir is where the socket's random directory goes first; "" means
+	// DevShm. A test points it elsewhere.
+	ShmDir string
+	// TmpDir is the job's TMPDIR, the socket directory's fallback when ShmDir
+	// is missing, not writable, or too long for agentapi.MaxRelaySocketPath.
 	TmpDir string
 	// AllocDir is the Allocation's directory, where the rendezvous file goes
 	// (agentapi.RelaySocketFile).
@@ -136,7 +145,10 @@ func StartJob(o JobOptions) (*Job, error) {
 	if o.AllocDir == "" || o.Allocation == "" {
 		return nil, errors.New("hostdial: the job side needs the Allocation's directory and UID")
 	}
-	dir, err := socketDir(o.TmpDir)
+	if o.ShmDir == "" {
+		o.ShmDir = DevShm
+	}
+	dir, err := socketDir(o.ShmDir, o.TmpDir)
 	if err != nil {
 		return nil, err
 	}
@@ -171,11 +183,12 @@ func StartJob(o JobOptions) (*Job, error) {
 }
 
 // socketDir makes the socket's directory, with a random name and mode 700,
-// under tmp, or under DevShm when tmp is empty or the socket's path there
-// would be too long.
-func socketDir(tmp string) (string, error) {
+// under shm, or under tmp when shm is missing, not writable, or the socket's
+// path there would be too long (HBEP-6, The rendezvous: "under its $TMPDIR or
+// /dev/shm (never a predictable path)").
+func socketDir(shm, tmp string) (string, error) {
 	var errs []error
-	for _, root := range []string{tmp, DevShm} {
+	for _, root := range []string{shm, tmp} {
 		if root == "" || !filepath.IsAbs(root) {
 			continue
 		}
@@ -196,7 +209,7 @@ func socketDir(tmp string) (string, error) {
 		}
 		return dir, nil
 	}
-	return "", fmt.Errorf("hostdial: no directory for the relay socket: %w", errors.Join(errs...))
+	return "", fmt.Errorf("hostdial: %w: %w", ErrNoSocketDir, errors.Join(errs...))
 }
 
 // publish writes the socket's path to the rendezvous file, mode 600, by a

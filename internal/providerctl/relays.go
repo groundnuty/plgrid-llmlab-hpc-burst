@@ -147,6 +147,27 @@ func (r *relayState) relay(cfg slurm.SSHConfig) (*sshrun.Relay, error) {
 	return r.ssh, nil
 }
 
+// claimLogin claims the Provider's login host, as ssh -G resolves its
+// HostName through the relays' own -F file, for this Provider's relays. It
+// returns the host, and the other Provider that holds it when the claim is
+// refused: one host-dialed Provider per login host (HBEP-6, Capacity).
+func (r *relayState) claimLogin(cfg slurm.SSHConfig) (login, holder string, err error) {
+	rel, err := r.relay(cfg)
+	if err != nil {
+		return "", "", err
+	}
+	login = rel.Login()
+	if h, ok := r.hosts.Claim(login, r.provider); !ok {
+		return login, h, nil
+	}
+	return login, "", nil
+}
+
+// loginHostInUse is the refusal's text, naming the host and its holder.
+func loginHostInUse(login, holder string) string {
+	return fmt.Sprintf("login host %s is in use by host-dialed Provider %s: one host-dialed Provider per login host (HBEP-6, Capacity)", login, holder)
+}
+
 func (r *relayState) close() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -172,9 +193,10 @@ func credentialsGen(c slurm.SSHConfig) string {
 // keeps both relays, and one that is being deleted, refused, or whose job is
 // not running (pending, held, completing, ended, lost) has them stopped by
 // PID. A failed read leaves the observed phase as it was, so the relays stay
-// as they were. A second Provider on a login host that another host-dialed
-// Provider of this process already serves gets no relays (HBEP-6, Capacity).
-// It is a no-op outside host-dialed mode.
+// as they were. A Provider whose login host another host-dialed Provider of
+// this process holds gets no relays; its Ready condition says so
+// (LoginHostInUse, statusLoop), so no event is raised here. It is a no-op
+// outside host-dialed mode.
 func (e *external) syncRelays(ctx context.Context, a *v1alpha1.Allocation, tag string) {
 	r := e.s.relays
 	if r == nil {
@@ -195,12 +217,14 @@ func (e *external) syncRelays(ctx context.Context, a *v1alpha1.Allocation, tag s
 		e.s.o.Log.Info("the relays' ssh client cannot be made", "tag", tag, "error", err)
 		return
 	}
-	login := rel.Login()
-	if holder, ok := r.hosts.Claim(login, r.provider); !ok {
+	login, holder, err := r.claimLogin(e.v.SSH)
+	if err != nil {
+		e.s.o.Log.Info("the relays' ssh client cannot be made", "tag", tag, "error", err)
+		return
+	}
+	if holder != "" {
 		r.owner.Drop(tag)
-		msg := fmt.Sprintf("Provider %s already runs host-dialed relays on login host %s: one host-dialed Provider per login host (HBEP-6, Capacity)", holder, login)
-		e.s.o.Log.Info("no relays for this Provider", "tag", tag, "why", msg)
-		e.event(a, event.Warning(v1alpha1.EventReasonRelayFailed, errors.New(msg)))
+		e.s.o.Log.Info("no relays for this Provider", "tag", tag, "why", loginHostInUse(login, holder))
 		return
 	}
 	ref := a.DeepCopy()

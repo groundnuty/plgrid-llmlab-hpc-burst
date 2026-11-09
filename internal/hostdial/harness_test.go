@@ -110,7 +110,9 @@ func jobMain(args []string) int {
 	term := make(chan os.Signal, 1)
 	signal.Notify(term, syscall.SIGTERM, syscall.SIGINT)
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	j, err := hostdial.StartJob(hostdial.JobOptions{TmpDir: os.Getenv("TMPDIR"), AllocDir: args[2], Allocation: args[3], Wait: wait, Logger: log})
+	// HB_TEST_SHM, when set, replaces /dev/shm, so a test can make the job
+	// side fall back to its TMPDIR.
+	j, err := hostdial.StartJob(hostdial.JobOptions{ShmDir: os.Getenv("HB_TEST_SHM"), TmpDir: os.Getenv("TMPDIR"), AllocDir: args[2], Allocation: args[3], Wait: wait, Logger: log})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "job:", err)
 		return 1
@@ -227,6 +229,8 @@ type worldConfig struct {
 	// stepEnv is added to every srun step's environment (fakeslurm.RunMode's
 	// StepEnv).
 	stepEnv map[string]string
+	// jobEnv is added to every job's environment.
+	jobEnv map[string]string
 }
 
 func newWorld(t *testing.T, mods ...func(*worldConfig)) *world {
@@ -244,7 +248,7 @@ func newWorld(t *testing.T, mods ...func(*worldConfig)) *world {
 	w := &world{t: t, base: base}
 	root := filepath.Join(base, "r")
 	home := filepath.Join(root, "home", clusterUser)
-	for _, d := range []string{home, filepath.Join(base, "c"), filepath.Join(base, "n")} {
+	for _, d := range []string{home, filepath.Join(base, "c"), filepath.Join(base, "n"), filepath.Join(base, "s")} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -262,7 +266,10 @@ func newWorld(t *testing.T, mods ...func(*worldConfig)) *world {
 	})
 	w.node, err = rehearsal.StartLoginNode(rehearsal.LoginConfig{
 		Dir: filepath.Join(base, "n"), Platform: w.plat,
-		Login: fakeslurm.Login{User: clusterUser, Env: map[string]string{"HOME": home}},
+		// Each world's job sides make their sockets in a directory of its
+		// own, which the world's clean-up removes: a job the fake kills never
+		// closes its socket, and the host's /dev/shm would keep it.
+		Login: fakeslurm.Login{User: clusterUser, Env: loginEnv(home, map[string]string{"HB_TEST_SHM": filepath.Join(base, "s")}, cfg.jobEnv)},
 	})
 	if err != nil {
 		t.Fatalf("StartLoginNode: %v", err)
@@ -433,6 +440,18 @@ func (w *world) owner(o hostdial.OwnerOptions) (*hostdial.Owner, context.CancelF
 		}
 	})
 	return own, cancel, done
+}
+
+// loginEnv is the login's environment, which jobs inherit: HOME, then each
+// of extras in order, a later one replacing an earlier one's variable.
+func loginEnv(home string, extras ...map[string]string) map[string]string {
+	env := map[string]string{"HOME": home}
+	for _, extra := range extras {
+		for k, v := range extra {
+			env[k] = v
+		}
+	}
+	return env
 }
 
 // epoch is a fixed fence epoch E for an Owner.

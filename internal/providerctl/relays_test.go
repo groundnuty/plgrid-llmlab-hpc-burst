@@ -15,7 +15,9 @@ import (
 	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/hostdial"
@@ -250,9 +252,12 @@ func TestARelayThatEndsForGoodRaisesRelayFailed(t *testing.T) {
 	}
 }
 
-// One host-dialed Provider per login host (HBEP-6, Capacity): a second
-// Provider of the process on the same login host, as ssh -G resolves it, gets
-// no relays and raises RelayFailed naming the Provider that holds the host.
+// One host-dialed Provider per login host (HBEP-6, Capacity; #298, 56746eb):
+// a Provider whose login host, as ssh -G resolves it, another host-dialed
+// Provider of the process holds goes Ready False with LoginHostInUse, naming
+// the host and the holder; it submits nothing even for an Allocation made
+// before, keeps no relays, and raises no RelayFailed. The planner gives an
+// unready Provider no Allocation (ProviderUnavailable, internal/lifecycle).
 func TestASecondHostDialedProviderOnOneLoginHostIsRefused(t *testing.T) {
 	hosts := hostdial.NewHosts()
 	if _, ok := hosts.Claim("login.example.org", "another-provider"); !ok {
@@ -260,17 +265,40 @@ func TestASecondHostDialedProviderOnOneLoginHostIsRefused(t *testing.T) {
 	}
 	e := newEnv(t, hostDialedOn(hosts, 1000))
 	runRelays(e)
+	ready := func() *metav1.Condition {
+		t.Helper()
+		if err := e.ctl.SyncStatus(e.ctx); err != nil {
+			t.Fatal(err)
+		}
+		var prov v1alpha1.Provider
+		if err := e.c.Get(e.ctx, client.ObjectKey{Name: testProvider}, &prov); err != nil {
+			t.Fatal(err)
+		}
+		return apimeta.FindStatusCondition(prov.Status.Conditions, v1alpha1.ConditionProviderReady)
+	}
+	c := ready()
+	if c == nil || c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonLoginHostInUse ||
+		!strings.Contains(c.Message, "login.example.org") || !strings.Contains(c.Message, "another-provider") {
+		t.Fatalf("Ready is %+v; want False, LoginHostInUse, naming login.example.org and another-provider", c)
+	}
 	e.newAlloc("alloc-a")
 	e.run("alloc-a", 4)
-	a := e.get("alloc-a")
-	if a.Status.AtProvider.Phase != v1alpha1.AllocationRunning {
-		t.Fatalf("the Allocation is %s, want Running", a.Status.AtProvider.Phase)
+	if n := e.count("sbatch"); n != 0 {
+		t.Errorf("%d sbatch calls for a Provider refused its login host, want 0", n)
 	}
-	if rs := relaysOf(e, tagOf(a)); len(rs) != 0 {
-		t.Errorf("a second Provider on the login host keeps %d relays", len(rs))
+	if rs := relaysOf(e, tagOf(e.get("alloc-a"))); len(rs) != 0 {
+		t.Errorf("a refused Provider keeps %d relays", len(rs))
 	}
-	if !e.rec.has(v1alpha1.EventReasonRelayFailed) {
-		t.Errorf("no RelayFailed for the refused Provider; events %v", e.rec.reasons())
+	if e.rec.has(v1alpha1.EventReasonRelayFailed) {
+		t.Errorf("a refused login host raised RelayFailed; Ready carries it")
+	}
+	hosts.Release("another-provider")
+	if c := ready(); c == nil || c.Reason == v1alpha1.ReasonLoginHostInUse {
+		t.Errorf("Ready after the host was released: %+v, want it no longer LoginHostInUse", c)
+	}
+	e.run("alloc-a", 2)
+	if n := e.count("sbatch"); n != 1 {
+		t.Errorf("%d sbatch calls once the host was free, want 1", n)
 	}
 }
 

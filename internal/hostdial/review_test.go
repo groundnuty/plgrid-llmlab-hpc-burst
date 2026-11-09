@@ -156,19 +156,23 @@ func TestHostDialedRotatedCredentialsReachRunningRelays(t *testing.T) {
 }
 
 // The rendezvous: a batch step and a relay step with different TMPDIR values
-// still meet through relay-socket (HBEP-6, Test plan). The relay steps get a
-// TMPDIR of their own (fakeslurm.RunMode.StepEnv), as a step srun starts from
-// the login node may; the agent's socket is under the batch step's TMPDIR.
+// still meet through relay-socket (HBEP-6, Test plan). The job side has no
+// /dev/shm here (HB_TEST_SHM names a missing directory), so its socket falls
+// back to the batch step's TMPDIR; the relay steps get a TMPDIR of their own
+// (fakeslurm.RunMode.StepEnv), as a step srun starts from the login node may.
 func TestHostDialedRendezvousAcrossDifferentTMPDIRs(t *testing.T) {
 	stepTmp, err := os.MkdirTemp("", "hs")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(stepTmp) })
-	w := newWorld(t, func(c *worldConfig) { c.stepEnv = map[string]string{"TMPDIR": stepTmp} })
+	w := newWorld(t, func(c *worldConfig) {
+		c.stepEnv = map[string]string{"TMPDIR": stepTmp}
+		c.jobEnv = map[string]string{"HB_TEST_SHM": filepath.Join(stepTmp, "no-shm")}
+	})
 	j := w.submit("hb-relay-tmp-0123456789ab", 30*time.Second)
-	if strings.HasPrefix(j.ports.Socket, stepTmp) {
-		t.Fatalf("the agent's socket %s is under the steps' TMPDIR %s: the two do not differ", j.ports.Socket, stepTmp)
+	if strings.HasPrefix(j.ports.Socket, stepTmp) || strings.HasPrefix(j.ports.Socket, hostdial.DevShm) || !strings.HasPrefix(j.ports.Socket, w.base) {
+		t.Fatalf("the agent's socket %s is not under the batch step's TMPDIR (in %s): the TMPDIRs do not differ as the test needs", j.ports.Socket, w.base)
 	}
 	own, _, _ := w.owner(hostdial.OwnerOptions{})
 	own.Want(w.target(j))

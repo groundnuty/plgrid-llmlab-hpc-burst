@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -104,8 +105,14 @@ func TestAgentEndToEndHostDialed(t *testing.T) {
 	if _, err := os.Stat(agentapi.RelaySocketFile(j.allocDir)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the rendezvous file is left after the agent stopped: %v", err)
 	}
-	if left, _ := filepath.Glob(filepath.Join(root, "tmp", "hb-relay-*")); len(left) != 0 {
-		t.Errorf("relay socket directories %v are left after the agent stopped", left)
+	m := regexp.MustCompile(`host-dialed: listening for the relays.* socket=(\S+)`).FindStringSubmatch(out)
+	if m == nil {
+		t.Fatalf("the agent logged no relay socket:\n%s", out)
+	}
+	if dir := filepath.Dir(strings.Trim(m[1], `"`)); !strings.HasPrefix(filepath.Base(dir), "hb-relay-") {
+		t.Errorf("the relay socket %s is not in a hb-relay-<random> directory", m[1])
+	} else if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the relay socket's directory %s is left after the agent stopped: %v", dir, err)
 	}
 }
 

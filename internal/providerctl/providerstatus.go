@@ -83,7 +83,7 @@ func (l *statusLoop) Start(ctx context.Context) error {
 // The poll is every PollInterval, within v1alpha1.ProviderPollInterval, so
 // Ready always rests on a real read (docs/development.md, Provider readiness).
 func (l *statusLoop) sync(ctx context.Context) error {
-	_, p, cfgErr := l.s.h.get(ctx)
+	v, p, cfgErr := l.s.h.get(ctx)
 	var pollErr error
 	var health slurm.Health
 	if cfgErr == nil {
@@ -91,6 +91,15 @@ func (l *statusLoop) sync(ctx context.Context) error {
 		health = p.Health()
 	} else if p, _ := l.s.h.current(); p != nil {
 		health = p.Health()
+	}
+	// In host-dialed mode the Provider claims its login host; a refused claim
+	// makes it unready, so the planner gives it no Allocation (HBEP-6,
+	// Capacity).
+	var inUse string
+	if r := l.s.relays; r != nil && cfgErr == nil {
+		if login, holder, err := r.claimLogin(v.SSH); err == nil && holder != "" {
+			inUse = loginHostInUse(login, holder)
+		}
 	}
 	l.mu.Lock()
 	readsFailed := health.ReadFailures != l.failures // != : a new Batch counts from 0
@@ -101,7 +110,7 @@ func (l *statusLoop) sync(ctx context.Context) error {
 		if err = l.s.reader.Get(ctx, client.ObjectKey{Name: l.s.o.Provider}, &prov); err != nil {
 			return fmt.Errorf("get Provider %s: %w", l.s.o.Provider, err)
 		}
-		if !l.compute(&prov, health, cfgErr, pollErr, readsFailed) {
+		if !l.compute(&prov, health, cfgErr, pollErr, readsFailed, inUse) {
 			break
 		}
 		err = l.s.kube.Status().Update(ctx, &prov)
@@ -123,8 +132,9 @@ func (l *statusLoop) sync(ctx context.Context) error {
 // whether the status changed. The pass failed when the profile, the poll, the
 // latest listing read, or any required status read since the last pass failed
 // (readsFailed: an accounting read counts, Astra B7), as pkg/provider/fake's
-// Controller judges a pass.
-func (l *statusLoop) compute(prov *v1alpha1.Provider, h slurm.Health, cfgErr, pollErr error, readsFailed bool) bool {
+// Controller judges a pass. inUse, when set, is a host-dialed Provider's
+// refused login host: Ready is False with LoginHostInUse whatever the reads.
+func (l *statusLoop) compute(prov *v1alpha1.Provider, h slurm.Health, cfgErr, pollErr error, readsFailed bool, inUse string) bool {
 	now := l.s.o.Clock.Now()
 	stamp := *mt(now)
 	st := &prov.Status
@@ -160,6 +170,9 @@ func (l *statusLoop) compute(prov *v1alpha1.Provider, h slurm.Health, cfgErr, po
 			msg += "; no read is made: the credentials are refused"
 		}
 		set(v1alpha1.ConditionProviderReady, metav1.ConditionFalse, v1alpha1.ReasonReadsFailing, msg)
+	}
+	if inUse != "" {
+		set(v1alpha1.ConditionProviderReady, metav1.ConditionFalse, v1alpha1.ReasonLoginHostInUse, inUse)
 	}
 	l.conditions(st, set, h, cfgErr)
 

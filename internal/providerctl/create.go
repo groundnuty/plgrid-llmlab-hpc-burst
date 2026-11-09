@@ -44,6 +44,18 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 	if e.refused != nil {
 		return managed.ExternalCreation{}, e.refused
 	}
+	if r := e.s.relays; r != nil {
+		// A refused Provider submits nothing (HBEP-6, Capacity): its jobs could
+		// never be reached. The planner sees Ready False and creates no
+		// Allocation for it; this holds for one made before Ready said so.
+		login, holder, err := r.claimLogin(e.v.SSH)
+		if err != nil {
+			return managed.ExternalCreation{}, fmt.Errorf("refusing to submit: the relays' ssh client cannot be made: %w", err)
+		}
+		if holder != "" {
+			return managed.ExternalCreation{}, errors.New("refusing to submit: " + loginHostInUse(login, holder))
+		}
+	}
 	name := meta.GetExternalName(a)
 	if tag := v1alpha1.JobTag(a.Namespace, a.Name, a.UID); name != tag {
 		return managed.ExternalCreation{}, fmt.Errorf("refusing to submit: the external name is not this Allocation's job tag %s", tag)

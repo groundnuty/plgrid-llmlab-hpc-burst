@@ -170,7 +170,7 @@ func startTestJob(t *testing.T, wait time.Duration) (*Job, string) {
 	if err := os.Mkdir(alloc, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	j, err := StartJob(JobOptions{TmpDir: base, AllocDir: alloc, Allocation: "u-1", Wait: wait})
+	j, err := StartJob(JobOptions{ShmDir: base, TmpDir: base, AllocDir: alloc, Allocation: "u-1", Wait: wait})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,26 +202,47 @@ func TestTheRendezvousFile(t *testing.T) {
 	}
 }
 
-// A TMPDIR too long for a socket path falls back to /dev/shm.
-func TestATooLongTMPDIRFallsBackToDevShm(t *testing.T) {
-	if fi, err := os.Stat(DevShm); err != nil || !fi.IsDir() {
-		t.Skip("no /dev/shm on this host")
-	}
-	long := filepath.Join(shortDir(t), strings.Repeat("d", 90))
-	if err := os.Mkdir(long, 0o700); err != nil {
-		t.Fatal(err)
-	}
+// The socket's directory goes under /dev/shm first, then under TMPDIR when
+// /dev/shm is missing or too long for a socket path, and a job side with
+// neither fails by name.
+func TestTheSocketDirectoryIsDevShmThenTMPDIR(t *testing.T) {
 	alloc := filepath.Join(shortDir(t), "a")
 	if err := os.Mkdir(alloc, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	j, err := StartJob(JobOptions{TmpDir: long, AllocDir: alloc, Allocation: "u-1"})
+	shm, tmp := shortDir(t), shortDir(t)
+	start := func(o JobOptions) (*Job, error) {
+		o.AllocDir, o.Allocation = alloc, "u-1"
+		return StartJob(o)
+	}
+	j, err := start(JobOptions{ShmDir: shm, TmpDir: tmp})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer j.Close()
-	if !strings.HasPrefix(j.Socket(), DevShm+"/hb-relay-") {
-		t.Errorf("the socket is %s, want under %s", j.Socket(), DevShm)
+	if !strings.HasPrefix(j.Socket(), shm+"/hb-relay-") {
+		t.Errorf("with both: the socket is %s, want under the shm directory %s", j.Socket(), shm)
+	}
+	_ = j.Close()
+	for name, o := range map[string]JobOptions{
+		"no shm":     {ShmDir: filepath.Join(shm, "missing"), TmpDir: tmp},
+		"a long shm": {ShmDir: filepath.Join(shm, strings.Repeat("d", 90)), TmpDir: tmp},
+	} {
+		if strings.Contains(name, "long") {
+			if err := os.Mkdir(o.ShmDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		j, err := start(o)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !strings.HasPrefix(j.Socket(), tmp+"/hb-relay-") {
+			t.Errorf("%s: the socket is %s, want under TMPDIR %s", name, j.Socket(), tmp)
+		}
+		_ = j.Close()
+	}
+	if _, err := start(JobOptions{ShmDir: filepath.Join(shm, "missing"), TmpDir: ""}); !errors.Is(err, ErrNoSocketDir) {
+		t.Errorf("neither: %v, want ErrNoSocketDir", err)
 	}
 }
 
