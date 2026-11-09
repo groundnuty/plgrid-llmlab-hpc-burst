@@ -23,8 +23,13 @@ var notCopies = map[string]string{
 }
 
 // minShapeNodes is the smallest body the shape check compares, in syntax nodes:
-// a few lines, below which unrelated helpers have the same shape.
+// a few lines, below which unrelated helpers have the same shape. Shorter bodies
+// are compared by exactOf, down to minExactNodes.
 const minShapeNodes = 40
+
+// minExactNodes is the smallest body the exact check compares: below it a body
+// only returns an argument or a field, which two helpers can share by chance.
+const minExactNodes = 5
 
 // decl is one top-level declaration, or a method.
 type decl struct {
@@ -32,6 +37,7 @@ type decl struct {
 	short string // the name, case-folded and without its receiver
 	shape string // a function's body with every name and literal dropped
 	nodes int    // the size of that body
+	exact string // a function's body with only its own names numbered
 	at    string
 }
 
@@ -55,9 +61,9 @@ func TestNoCopyOfStack(t *testing.T) {
 }
 
 // TestCopyProblems: the check itself, on fixtures: it finds a copy under the
-// same name in another case, a renamed copy of a body, a method's copy as a
-// free function, and a type or constant of the same name, and it passes a
-// different body and an excused name.
+// same name in another case, a renamed copy of a body, long or short, a method's
+// copy as a free function, and a type or constant of the same name, and it passes
+// a different body and an excused name.
 func TestCopyProblems(t *testing.T) {
 	st := parseDecls(t, `package stack
 
@@ -78,6 +84,18 @@ func (c *Client) RowOf(id string) string {
 }
 
 func Listening(t T, ports []int) []int { return ports }
+
+func sha256Hex(b []byte) string {
+	s := sha256.Sum256(b)
+	return hex.EncodeToString(s[:])
+}
+
+func (c *Client) RequestCtx() (context.Context, context.CancelFunc) {
+	d, _ := BoundedDeadline(c.T, c.RequestTimeout())
+	return context.WithDeadline(context.Background(), d)
+}
+
+func Label(name string) string { return "a-" + strings.ToLower(name) }
 `)
 	for name, src := range map[string]string{
 		"the same name in another case":       `func listening(t *testing.T, ports []int) []int { return ports }`,
@@ -96,6 +114,18 @@ func Listening(t T, ports []int) []int { return ports }
 	r.t.Logf("none for %s", id)
 	return ""
 }`,
+		"a short body under another name, with its own names kept": `func digestBytes(b []byte) string {
+	s := sha256.Sum256(b)
+	return hex.EncodeToString(s[:])
+}`,
+		"a short body under another name, with its own names changed": `func digestBytes(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}`,
+		"a short body whose calls of stack are qualified": `func (r *rig) boundedCall() (context.Context, context.CancelFunc) {
+	end, _ := stack.BoundedDeadline(r.T, r.RequestTimeout())
+	return context.WithDeadline(context.Background(), end)
+}`,
 	} {
 		if p := copyProblems(parseDecls(t, "package scenario_test\n\n"+src+"\n"), st, nil); len(p) != 1 {
 			t.Errorf("%s: %v, want one problem", name, p)
@@ -104,6 +134,11 @@ func Listening(t T, ports []int) []int { return ports }
 	for name, src := range map[string]string{
 		"another name and body":                             `func checkNoGap(rows []int) int { return len(rows) }`,
 		"a small body of the same shape under another name": `func ownPorts(t *testing.T, p []int) []int { return p }`,
+		"a short body of the same shape with another call": `func md5Hex(b []byte) string {
+	s := md5.Sum(b)
+	return hex.EncodeToString(s[:])
+}`,
+		"a short body of the same shape with another literal": `func otherLabel(name string) string { return "b-" + strings.ToLower(name) }`,
 	} {
 		if p := copyProblems(parseDecls(t, "package scenario_test\n\n"+src+"\n"), st, nil); len(p) != 0 {
 			t.Errorf("%s: %v, want none", name, p)
@@ -115,17 +150,42 @@ func Listening(t T, ports []int) []int { return ports }
 	}
 }
 
+// Astra's example on PR #283: stack's real sha256Hex, copied as digestBytes into a
+// new test file, is found under the guard's real reading of stack's sources.
+func TestCopyProblemsFindsARenamedShortHelper(t *testing.T) {
+	st, err := declsOf(filepath.Join("..", "stack"), func(name string) bool { return !strings.HasSuffix(name, "_test.go") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	own := parseDecls(t, `package scenario_test
+
+func digestBytes(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+`)
+	p := copyProblems(own, st, nil)
+	if len(p) != 1 || !strings.Contains(p[0], "digestBytes") || !strings.Contains(p[0], "sha256Hex") {
+		t.Errorf("%v, want one problem naming digestBytes and sha256Hex", p)
+	}
+}
+
 // copyProblems lists each declaration of own that repeats one of st's: by its
-// name, case-folded, whatever its receiver; or, for a function of minShapeNodes
-// or more, by the shape of its body. excused holds own's names (Name, or
-// Recv.Name) that are not copies.
+// name, case-folded, whatever its receiver; for a function of minShapeNodes or
+// more, by the shape of its body; and for a shorter one, down to minExactNodes,
+// by its exact body. excused holds own's names (Name, or Recv.Name) that are not
+// copies.
 func copyProblems(own, st []decl, excused map[string]string) []string {
 	names := map[string][]decl{}
 	shapes := map[string][]decl{}
+	exacts := map[string][]decl{}
 	for _, d := range st {
 		names[d.short] = append(names[d.short], d)
-		if d.nodes >= minShapeNodes {
+		switch {
+		case d.nodes >= minShapeNodes:
 			shapes[d.shape] = append(shapes[d.shape], d)
+		case d.nodes >= minExactNodes:
+			exacts[d.exact] = append(exacts[d.exact], d)
 		}
 	}
 	var out []string
@@ -137,10 +197,15 @@ func copyProblems(own, st []decl, excused map[string]string) []string {
 			out = append(out, fmt.Sprintf("%s (%s) has the name of stack's %s (%s): use stack's, or give notCopies the reason", d.name, d.at, m[0].name, m[0].at))
 			continue
 		}
-		if d.nodes >= minShapeNodes {
-			if m := shapes[d.shape]; len(m) > 0 {
-				out = append(out, fmt.Sprintf("%s (%s) has the body of stack's %s (%s), with other names: use stack's", d.name, d.at, m[0].name, m[0].at))
-			}
+		var m []decl
+		switch {
+		case d.nodes >= minShapeNodes:
+			m = shapes[d.shape]
+		case d.nodes >= minExactNodes:
+			m = exacts[d.exact]
+		}
+		if len(m) > 0 {
+			out = append(out, fmt.Sprintf("%s (%s) has the body of stack's %s (%s), with other names: use stack's", d.name, d.at, m[0].name, m[0].at))
 		}
 	}
 	sort.Strings(out)
@@ -198,6 +263,7 @@ func fileDecls(fset *token.FileSet, file *ast.File) []decl {
 			}
 			if d.Body != nil {
 				x.shape, x.nodes = shapeOf(d.Body)
+				x.exact = exactOf(d)
 			}
 			out = append(out, x)
 		case *ast.GenDecl:
@@ -252,4 +318,103 @@ func shapeOf(body *ast.BlockStmt) (string, int) {
 		return true
 	})
 	return b.String(), nodes
+}
+
+// exactOf is a function's body with the names it declares itself (its receiver,
+// parameters, results and locals) numbered by their first use. Everything else
+// stays, case-folded: the operators, the literals, the calls and fields, and the
+// names from elsewhere, without a stack qualifier, which a copy in this package
+// needs and the original has not. So two bodies match when they differ only in
+// their own names.
+func exactOf(fn *ast.FuncDecl) string {
+	own := ownNames(fn)
+	order := map[string]int{}
+	foreign := map[*ast.Ident]bool{} // a field or a literal's key, whatever its spelling
+	var b strings.Builder
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case nil:
+			b.WriteByte(')')
+			return false
+		case *ast.Ident:
+			if !own[n.Name] || foreign[n] {
+				b.WriteString(strings.ToLower(n.Name) + " ")
+				return false
+			}
+			if _, seen := order[n.Name]; !seen {
+				order[n.Name] = len(order)
+			}
+			fmt.Fprintf(&b, "$%d ", order[n.Name])
+			return false
+		case *ast.BasicLit:
+			b.WriteString(n.Value + " ")
+			return false
+		case *ast.SelectorExpr:
+			foreign[n.Sel] = true
+			if x, ok := n.X.(*ast.Ident); ok && x.Name == "stack" {
+				b.WriteString(strings.ToLower(n.Sel.Name) + " ")
+				return false
+			}
+		case *ast.KeyValueExpr:
+			if k, ok := n.Key.(*ast.Ident); ok {
+				foreign[k] = true
+			}
+		case *ast.BinaryExpr:
+			b.WriteString(n.Op.String())
+		case *ast.UnaryExpr:
+			b.WriteString(n.Op.String())
+		case *ast.AssignStmt:
+			b.WriteString(n.Tok.String())
+		case *ast.IncDecStmt:
+			b.WriteString(n.Tok.String())
+		case *ast.BranchStmt:
+			b.WriteString(n.Tok.String())
+		}
+		fmt.Fprintf(&b, "(%T", n)
+		return true
+	})
+	return b.String()
+}
+
+// ownNames are the names a function declares: its receiver, parameters and
+// results, and those of its body and its function literals.
+func ownNames(fn *ast.FuncDecl) map[string]bool {
+	own := map[string]bool{}
+	fields := func(l *ast.FieldList) {
+		if l == nil {
+			return
+		}
+		for _, f := range l.List {
+			for _, id := range f.Names {
+				own[id.Name] = true
+			}
+		}
+	}
+	idents := func(defined bool, exprs ...ast.Expr) {
+		for _, e := range exprs {
+			if id, ok := e.(*ast.Ident); ok && defined {
+				own[id.Name] = true
+			}
+		}
+	}
+	fields(fn.Recv)
+	fields(fn.Type.Params)
+	fields(fn.Type.Results)
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			idents(n.Tok == token.DEFINE, n.Lhs...)
+		case *ast.RangeStmt:
+			idents(n.Tok == token.DEFINE, n.Key, n.Value)
+		case *ast.ValueSpec:
+			for _, id := range n.Names {
+				own[id.Name] = true
+			}
+		case *ast.FuncType:
+			fields(n.Params)
+			fields(n.Results)
+		}
+		return true
+	})
+	return own
 }
