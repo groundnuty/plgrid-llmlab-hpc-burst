@@ -36,6 +36,8 @@ func withContext(ctx context.Context, r *rig) {
 func methodValue(r *rig) { check(r.watch.Allocations) }
 
 func starts(r *rig) { r.watch = stack.StartWatch(t, state, ns, nil) }
+
+func counts(r *rig) int { return r.watch.ResetCount() }
 `
 	full := map[string]WatchClass{
 		"guarded":     {Syncs: []string{"KindAllocations|KindInstances"}},

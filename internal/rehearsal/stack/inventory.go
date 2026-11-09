@@ -32,13 +32,17 @@ type WatchUse struct {
 	SyncContexts []string
 }
 
-// recorderReads are the Recorder's exported methods, except the catch-up: a new
-// one counts as a read without anyone listing it here.
+// notReads are the Recorder's exported methods that read no version it holds: the
+// catch-up, and the count of its resets.
+var notReads = []string{"CatchUp", "ResetCount"}
+
+// recorderReads are the Recorder's exported methods but notReads: a new one counts
+// as a read without anyone listing it here.
 func recorderReads() map[string]bool {
 	out := map[string]bool{}
 	ty := reflect.TypeFor[*Recorder]()
 	for i := range ty.NumMethod() {
-		if name := ty.Method(i).Name; name != "CatchUp" {
+		if name := ty.Method(i).Name; !slices.Contains(notReads, name) {
 			out[name] = true
 		}
 	}
@@ -113,7 +117,7 @@ func watchUse(fset *token.FileSet, fd *ast.FuncDecl, reads map[string]bool) (Wat
 				if !slices.Contains(use.Reads, x.Sel.Name) {
 					use.Reads = append(use.Reads, x.Sel.Name)
 				}
-			case x.Sel.Name == "CatchUp":
+			case slices.Contains(notReads, x.Sel.Name):
 				classed[inner] = true
 			}
 		}

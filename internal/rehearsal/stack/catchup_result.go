@@ -35,16 +35,17 @@ func (b Behind) Explain() string {
 type CatchUpResult struct {
 	// Waited is how long the watch trailed the API, zero when it did not.
 	Waited time.Duration
-	// Missing are the objects whose events did not come in CatchUpWait: lost
-	// events, found by this catch-up.
+	// Missing are the objects whose events did not come, on a stream that
+	// reached the LIST's version without them: lost events, found by this
+	// catch-up.
 	Missing []Behind
 	// EarlierLost are the objects an earlier catch-up found an event lost on
 	// and reported: this one did not wait for them, and does not report them.
 	EarlierLost []Behind
 	// Unknown says why it could not be told whether the watch is behind: the
 	// API could not be listed, a version did not parse, the wait was cut short,
-	// a stream did not reach the LIST's version, or a stream was reset. Empty
-	// otherwise.
+	// a stream did not reach the LIST's version, with what it has yet to deliver,
+	// or a stream was reset. Empty otherwise.
 	Unknown string
 }
 
