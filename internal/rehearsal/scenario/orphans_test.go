@@ -66,7 +66,7 @@ func (r *rig) assertNoOrphans(steps string) {
 	if len(base.orphanable) > 0 {
 		unmet = append(unmet, fmt.Sprintf("condition 1: at the first read frps listed proxies online for ended or gone Instances %v", base.orphanable))
 	}
-	unmet = append(unmet, orphanFirstReadProblems(r.proxyEnds, base.live, r.watch.createdAt, base.first)...)
+	unmet = append(unmet, orphanFirstReadProblems(r.proxyEnds, base.live, r.createdAt, base.first)...)
 	for uid, end := range r.proxyEnds {
 		if !end.After(base.change) {
 			unmet = append(unmet, fmt.Sprintf("condition 1: the proxy %s was seen offline at %s, not after the first read at %s", uid, ts(end), ts(base.change)))
@@ -195,12 +195,10 @@ func conditionString(c *metav1.Condition) string {
 // written its TunnelConnected condition from a successful read of frps. It
 // returns the witness, when it was created, the last condition seen, and when
 // a successful read's condition was first seen: zero when none came within
-// waitDeadline, which makes the check inconclusive (witnessBarrier).
+// stack.WaitDeadline, which makes the check inconclusive (witnessBarrier).
 func (r *rig) tunnelWitness() (*v1alpha1.Instance, time.Time, *metav1.Condition, time.Time) {
 	r.t.Helper()
-	r.watch.mu.Lock()
-	spec := r.watch.firstSpec
-	r.watch.mu.Unlock()
+	spec := r.firstSpec()
 	if spec == nil {
 		r.t.Fatal("the watch saw no Instance: the tunnel witness has no spec to copy")
 	}

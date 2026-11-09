@@ -84,8 +84,8 @@ type rig struct {
 	// engineEnv is the served deployment's engine env: the engine double's
 	// modes (direct run only).
 	engineEnv []v1alpha1.EnvVar
-	// watch records every Instance version the API sends (startWatch).
-	watch *recorder
+	// watch records every Instance version the API sends.
+	watch *stack.Recorder
 	// proxyEnds is when frps was first seen to list each ended Instance's
 	// proxy offline (proxyEnded), for the TunnelOrphaned window.
 	proxyEnds map[types.UID]time.Time
@@ -158,7 +158,7 @@ func startRigWith(t *testing.T, s rigSetup) *rig {
 	stack.Create(t, r.c, objs...)
 	// Before the deployment exists, so the watch sees every Instance and
 	// Allocation from its first version.
-	r.startWatch()
+	r.watch = stack.StartWatch(r.t, r.h.State, stack.Namespace, nil)
 	return r
 }
 

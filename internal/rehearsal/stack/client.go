@@ -2,9 +2,8 @@ package stack
 
 // The front's client side: requests keyed by a conversation key, the usage
 // record of each request by its request ID, a stream read as it arrives, and
-// the front's health and metrics (HBEP-5, HBEP-8). Copied from
-// internal/rehearsal/scenario's client_test.go and front_test.go (issue #251
-// moves the scenario onto it); the model and the deadline are the Client's.
+// the front's health (HBEP-5, HBEP-8). The model and the deadline are the
+// Client's.
 
 import (
 	"bufio"

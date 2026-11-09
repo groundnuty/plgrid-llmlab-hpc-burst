@@ -4,8 +4,6 @@ package stack
 // fake cluster's, one Provider over the login node, and one served
 // ModelDeployment. The engine double's modes travel as the engine's env, the
 // way the real controller writes a launch (internal/lifecycle/desired.go).
-// Copied from internal/rehearsal/scenario's objects_test.go (issue #251 moves
-// the scenario onto it).
 
 import (
 	"runtime"
@@ -50,8 +48,8 @@ type Timing struct {
 }
 
 // CPUArch is this host's architecture as a profile names it. A host whose
-// architecture no profile names fails the test at once, as the scenario's
-// cpuArch does: a stand-in must not go on into its setup with an empty class.
+// architecture no profile names fails the test at once: a stand-in must not go
+// on into its setup with an empty class.
 func CPUArch(t T) string {
 	t.Helper()
 	switch runtime.GOARCH {

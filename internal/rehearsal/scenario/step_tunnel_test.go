@@ -105,8 +105,8 @@ func (r *rig) stepTunnelLoss(in *v1alpha1.Instance, key string) {
 	killed := map[int]bool{}
 	var falseAt, goneAt time.Time
 	stack.WaitFor(r.t, stack.WaitDeadline, "TunnelConnected False and the front's registration dropped", func() bool {
-		if o, ok := r.watch.first(in.UID, start, func(o observation) bool { return o.tunnel == metav1.ConditionFalse }); ok && falseAt.IsZero() {
-			falseAt = o.at
+		if o, ok := r.watch.First(in.UID, start, func(o stack.Observation) bool { return o.Tunnel == metav1.ConditionFalse }); ok && falseAt.IsZero() {
+			falseAt = o.At
 		}
 		if reg, known := stack.Registered(r.ports, in); known && !reg && goneAt.IsZero() {
 			goneAt = time.Now()
@@ -210,10 +210,10 @@ func (r *rig) checkTunnelBack(in *v1alpha1.Instance, key string, jobID int, stag
 		r.t.Errorf("step (e): the key's request after the tunnel came back went to %s, not %s", row.Instance, in.Name)
 	}
 	phases := map[v1alpha1.InstancePhase]bool{}
-	for _, o := range r.watch.between(in.UID, start, time.Now()) {
-		phases[o.phase] = true
-		if o.unreachable {
-			r.t.Errorf("step (e): Instance %s was judged AgentUnreachable at %s: the agent's reports do not use frpc", in.Name, o.at.Format(time.RFC3339Nano))
+	for _, o := range r.watch.Between(in.UID, start, time.Now()) {
+		phases[o.Phase] = true
+		if o.Unreachable {
+			r.t.Errorf("step (e): Instance %s was judged AgentUnreachable at %s: the agent's reports do not use frpc", in.Name, o.At.Format(time.RFC3339Nano))
 		}
 	}
 	r.t.Logf("step (e): the Instance's phases during the loss: %v", phases)

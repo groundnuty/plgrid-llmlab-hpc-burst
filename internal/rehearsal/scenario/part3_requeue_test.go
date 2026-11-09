@@ -157,8 +157,8 @@ func (p3 *part3) requeue(d *depRun) {
 	}
 	p3.requeued = requeueResult{alloc: a.Name, uid: a.UID, inst: in.Name, instUID: in.UID, job: d.succJob}
 	known := map[types.UID]bool{}
-	for _, o := range r.watch.allocations() {
-		known[o.uid] = true
+	for _, o := range r.watch.Allocations() {
+		known[o.UID] = true
 	}
 	at := time.Now()
 	if err := r.cl.Plat.RequeueHold(d.succJob); err != nil {
@@ -166,8 +166,8 @@ func (p3 *part3) requeue(d *depRun) {
 	}
 	var repl v1alpha1.Allocation
 	stack.WaitState(r.t, stack.WaitDeadline, "the requeued Instance to fail, its Allocation to go and a new one to take its place", func() (bool, string) {
-		o, ended := r.watch.first(in.UID, at, func(o observation) bool { return o.phase == v1alpha1.InstanceEnded })
-		gone := slices.ContainsFunc(r.watch.allocations(), func(o allocObservation) bool { return o.uid == a.UID && o.deleted })
+		o, ended := r.watch.First(in.UID, at, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceEnded })
+		gone := slices.ContainsFunc(r.watch.Allocations(), func(o stack.AllocObservation) bool { return o.UID == a.UID && o.Deleted })
 		j, _ := r.cl.Plat.Job(d.succJob)
 		var fresh *v1alpha1.Allocation
 		for _, x := range p3.allocationsOf(d.Name) {
@@ -176,15 +176,15 @@ func (p3 *part3) requeue(d *depRun) {
 				fresh = &x
 			}
 		}
-		state := fmt.Sprintf("Instance %s ended %v (%q); Allocation %s deleted %v; job %d %s; new Allocation %v", in.Name, ended, o.endReason, a.Name, gone, d.succJob, j.State, fresh != nil)
+		state := fmt.Sprintf("Instance %s ended %v (%q); Allocation %s deleted %v; job %d %s; new Allocation %v", in.Name, ended, o.EndReason, a.Name, gone, d.succJob, j.State, fresh != nil)
 		if fresh != nil {
 			repl = *fresh
 		}
 		return ended && gone && j.State == "CANCELLED" && fresh != nil, state
 	})
-	o, _ := r.watch.first(in.UID, at, func(o observation) bool { return o.phase == v1alpha1.InstanceEnded })
-	if o.endReason != v1alpha1.ReasonRequeued {
-		r.t.Errorf("%s: the requeued Instance %s ended %q, want %s (HBEP-3, open question 13)", d.Name, in.Name, o.endReason, v1alpha1.ReasonRequeued)
+	o, _ := r.watch.First(in.UID, at, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceEnded })
+	if o.EndReason != v1alpha1.ReasonRequeued {
+		r.t.Errorf("%s: the requeued Instance %s ended %q, want %s (HBEP-3, open question 13)", d.Name, in.Name, o.EndReason, v1alpha1.ReasonRequeued)
 	}
 	j, _ := r.cl.Plat.Job(d.succJob)
 	if j.RestartCount < 1 || j.Executions < 2 {
@@ -200,15 +200,15 @@ func (p3 *part3) requeue(d *depRun) {
 		}
 	}
 	var deletion, deletedSeen time.Time
-	for _, o := range r.watch.allocations() {
-		if o.uid != a.UID {
+	for _, o := range r.watch.Allocations() {
+		if o.UID != a.UID {
 			continue
 		}
-		if deletion.IsZero() && !o.deletion.IsZero() {
-			deletion = o.deletion
+		if d := o.Allocation.DeletionTimestamp; deletion.IsZero() && d != nil {
+			deletion = d.Time // when the API server took the delete request, cut to the second
 		}
-		if o.deleted && deletedSeen.IsZero() {
-			deletedSeen = o.at
+		if o.Deleted && deletedSeen.IsZero() {
+			deletedSeen = o.At
 		}
 	}
 	for _, p := range finalizerCancelProblems(r.cl.Plat.Calls(), d.succJob, at, deletion, deletedSeen) {
@@ -226,7 +226,7 @@ func (p3 *part3) requeue(d *depRun) {
 	})
 	p3.checkIdentity(d, &ri)
 	r.t.Logf("%s: the requeue of job %d failed Instance %s (%s); Allocation %s deleted (deletionTimestamp %s, gone by %s) and its job cancelled inside that window; replacement %s on the new Allocation %s",
-		d.Name, d.succJob, in.Name, o.endReason, a.Name, deletion.UTC().Format(time.RFC3339), ts(deletedSeen), ri.Name, repl.Name)
+		d.Name, d.succJob, in.Name, o.EndReason, a.Name, deletion.UTC().Format(time.RFC3339), ts(deletedSeen), ri.Name, repl.Name)
 }
 
 // finalizerCancelProblems: the requeued job was cancelled by its

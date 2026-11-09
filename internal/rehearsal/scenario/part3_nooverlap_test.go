@@ -331,8 +331,8 @@ func (p3 *part3) checkGap(d *depRun) {
 	if d.succ.Status.ReadyTime != nil {
 		in.succReady = d.succ.Status.ReadyTime.Time
 	}
-	if o, ok := r.watch.first(d.succ.UID, time.Time{}, func(o observation) bool { return o.phase == v1alpha1.InstanceReady }); ok {
-		in.succReadySeen = o.at
+	if o, ok := r.watch.First(d.succ.UID, time.Time{}, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceReady }); ok {
+		in.succReadySeen = o.At
 	}
 	for _, pb := range d.probes {
 		if pb.rp.Err != nil {
@@ -349,8 +349,8 @@ func (p3 *part3) checkGap(d *depRun) {
 	for _, p := range problems {
 		r.t.Errorf("%s: %s", d.Name, p)
 	}
-	o, _ := r.watch.first(d.primary.UID, time.Time{}, func(o observation) bool { return o.drainBegan != "" })
-	began, _ := time.Parse(time.RFC3339, o.drainBegan)
+	o, _ := r.watch.First(d.primary.UID, time.Time{}, func(o stack.Observation) bool { return o.DrainBegan != "" })
+	began, _ := time.Parse(time.RFC3339, o.DrainBegan)
 	pj, _ := r.cl.Plat.Job(d.primaryJob)
 	sj, _ := r.cl.Plat.Job(d.succJob)
 	since := func(t time.Time) string {
@@ -486,8 +486,8 @@ func ts(t time.Time) string { return t.UTC().Format("15:04:05.000") }
 func (p3 *part3) checkNoOverlapSlot(d *depRun) {
 	r := p3.rig
 	r.t.Helper()
-	o, _ := r.watch.first(d.succ.UID, time.Time{}, func(o observation) bool { return o.phase == v1alpha1.InstanceReady })
-	for _, p := range noOverlapSlotProblems(r.watch.deployment(d.Name), d.ds, o.at) {
+	o, _ := r.watch.First(d.succ.UID, time.Time{}, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceReady })
+	for _, p := range noOverlapSlotProblems(r.deploymentObservations(d.Name), d.ds, o.At) {
 		r.t.Errorf("%s: %s", d.Name, p)
 	}
 	stack.WaitFor(r.t, stack.WaitDeadline, d.Name+"'s NoOverlapSlot to clear once its successor is ready", func() bool {
@@ -590,9 +590,9 @@ func (p3 *part3) checkOneSlot(d *depRun) {
 
 // allocFirstSeen is when the watch first saw the named Allocation.
 func (p3 *part3) allocFirstSeen(name string) (time.Time, bool) {
-	for _, a := range p3.watch.allocations() {
-		if a.name == name {
-			return a.at, true
+	for _, a := range p3.watch.Allocations() {
+		if a.Name == name {
+			return a.At, true
 		}
 	}
 	return time.Time{}, false

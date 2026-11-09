@@ -33,7 +33,7 @@ func (r *rig) stepScaleToZero(steps string) {
 	for _, a := range r.allocations() {
 		uids[a.UID] = a.Name
 	}
-	insts := r.watch.uids()
+	insts := r.watch.UIDs()
 	for _, in := range r.instances() {
 		if !slices.Contains(insts, in.UID) {
 			insts = append(insts, in.UID)
@@ -45,7 +45,7 @@ func (r *rig) stepScaleToZero(steps string) {
 	r.checkAllocations(uids, nil)
 	r.waitRecords(uids)
 	r.waitJobsGone()
-	r.checkProxiesOffline(r.watch.uids())
+	r.checkProxiesOffline(r.watch.UIDs())
 	r.assertNoOrphans(steps)
 	r.downAndCheck()
 }
@@ -82,7 +82,7 @@ func (r *rig) waitAllEnded(insts []types.UID) {
 			last = time.Now()
 		}
 		for _, uid := range insts {
-			if _, ok := r.watch.first(uid, time.Time{}, func(o observation) bool { return o.phase == v1alpha1.InstanceEnded }); !ok {
+			if _, ok := r.watch.First(uid, time.Time{}, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceEnded }); !ok {
 				return false
 			}
 		}
@@ -108,32 +108,32 @@ func (r *rig) checkShutdown(insts []types.UID, patchAt time.Time) {
 	r.t.Helper()
 	ready, other := 0, 0
 	for _, uid := range insts {
-		obs := r.watch.of(uid)
-		var at observation // the last version seen before the scale
+		obs := r.watch.Of(uid)
+		var at stack.Observation // the last version seen before the scale
 		for _, o := range obs {
-			if o.at.Before(patchAt) {
+			if o.At.Before(patchAt) {
 				at = o
 			}
 		}
-		if at.phase == v1alpha1.InstanceEnded {
+		if at.Phase == v1alpha1.InstanceEnded {
 			continue
 		}
-		after := slices.DeleteFunc(slices.Clone(obs), func(o observation) bool { return o.at.Before(patchAt) })
-		end := slices.IndexFunc(after, func(o observation) bool { return o.phase == v1alpha1.InstanceEnded })
+		after := slices.DeleteFunc(slices.Clone(obs), func(o stack.Observation) bool { return o.At.Before(patchAt) })
+		end := slices.IndexFunc(after, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceEnded })
 		switch {
 		case end < 0:
-			r.t.Errorf("step (g): Instance %s (%s) was never seen ended after the scale to 0", at.name, uid)
+			r.t.Errorf("step (g): Instance %s (%s) was never seen ended after the scale to 0", at.Name, uid)
 			continue
-		case after[end].endReason != v1alpha1.ReasonDrained:
-			r.t.Errorf("step (g): Instance %s ended %q after the scale to 0, not %s", after[end].name, after[end].endReason, v1alpha1.ReasonDrained)
+		case after[end].EndReason != v1alpha1.ReasonDrained:
+			r.t.Errorf("step (g): Instance %s ended %q after the scale to 0, not %s", after[end].Name, after[end].EndReason, v1alpha1.ReasonDrained)
 		}
-		if at.phase != v1alpha1.InstanceReady {
+		if at.Phase != v1alpha1.InstanceReady {
 			other++
 			continue
 		}
 		ready++
-		if !slices.ContainsFunc(after[:end], func(o observation) bool { return o.phase == v1alpha1.InstanceDraining }) {
-			r.t.Errorf("step (g): Instance %s was ready at the scale to 0 and ended with no draining version: it was not drained", at.name)
+		if !slices.ContainsFunc(after[:end], func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceDraining }) {
+			r.t.Errorf("step (g): Instance %s was ready at the scale to 0 and ended with no draining version: it was not drained", at.Name)
 		}
 	}
 	r.t.Logf("step (g): %d Instances were ready at the scale to 0, %d others had not ended; each held to the drain above", ready, other)
@@ -158,21 +158,21 @@ func (r *rig) checkAllocations(atZero map[types.UID]string, failedOK map[types.U
 	}
 	all := map[types.UID]*seen{}
 	var order []types.UID
-	for _, a := range r.watch.allocations() {
-		s := all[a.uid]
+	for _, a := range r.watch.Allocations() {
+		s := all[a.UID]
 		if s == nil {
-			s = &seen{name: a.name}
-			all[a.uid] = s
-			order = append(order, a.uid)
+			s = &seen{name: a.Name}
+			all[a.UID] = s
+			order = append(order, a.UID)
 		}
-		if n := len(s.phases); n == 0 || s.phases[n-1] != a.phase {
-			s.phases = append(s.phases, a.phase)
+		if n := len(s.phases); n == 0 || s.phases[n-1] != a.Phase {
+			s.phases = append(s.phases, a.Phase)
 		}
-		s.deleted = s.deleted || a.deleted
-		switch a.phase {
+		s.deleted = s.deleted || a.Deleted
+		switch a.Phase {
 		case v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:
-			if !failedOK[a.uid] {
-				r.t.Errorf("Allocation %s was seen %s at %s", a.name, a.phase, a.at.Format(time.RFC3339Nano))
+			if !failedOK[a.UID] {
+				r.t.Errorf("Allocation %s was seen %s at %s", a.Name, a.Phase, a.At.Format(time.RFC3339Nano))
 			}
 		}
 	}

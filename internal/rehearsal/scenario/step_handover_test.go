@@ -27,9 +27,6 @@ const (
 	// streamLead is how long before the drain start step (c)'s stream
 	// starts; the stream then runs about 30 s past it.
 	streamLead = 20 * time.Second
-	// annotationDrainStarted is the time the lifecycle controller recorded
-	// for an Instance's drain (internal/lifecycle/instances.go).
-	annotationDrainStarted = v1alpha1.Group + "/drain-started"
 )
 
 // stepTimer logs a step's elapsed time when the returned func runs.
@@ -137,8 +134,8 @@ func (r *rig) stepHandover(p *v1alpha1.Instance) {
 	<-first
 	var drainSeen time.Time
 	stack.WaitFor(r.t, stack.WaitDeadline, "the primary to drain", func() bool {
-		o, ok := r.watch.first(pred.UID, time.Time{}, func(o observation) bool { return o.phase == v1alpha1.InstanceDraining })
-		drainSeen = o.at
+		o, ok := r.watch.First(pred.UID, time.Time{}, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceDraining })
+		drainSeen = o.At
 		return ok
 	})
 	var s stack.Streamed
@@ -167,10 +164,10 @@ func (r *rig) checkDrained(pred, repl *v1alpha1.Instance, ds, streamEnd time.Tim
 	r.t.Helper()
 	// The ended Instance may already be gone with its Allocation: the
 	// controller's recorded drain start is read from the watch.
-	o, _ := r.watch.first(pred.UID, time.Time{}, func(o observation) bool { return o.drainBegan != "" })
-	began, err := time.Parse(time.RFC3339, o.drainBegan)
+	o, _ := r.watch.First(pred.UID, time.Time{}, func(o stack.Observation) bool { return o.DrainBegan != "" })
+	began, err := time.Parse(time.RFC3339, o.DrainBegan)
 	if err != nil || began.Before(ds) || !began.Before(streamEnd) {
-		r.t.Errorf("step (c): the recorded drain start %q (%v) is not in [drain start %s, stream end %s)", o.drainBegan, err, ds.Format(time.RFC3339), streamEnd.Format(time.RFC3339Nano))
+		r.t.Errorf("step (c): the recorded drain start %q (%v) is not in [drain start %s, stream end %s)", o.DrainBegan, err, ds.Format(time.RFC3339), streamEnd.Format(time.RFC3339Nano))
 	}
 	if countReason(r.eventReasons(pred.Name), "HandedOver") == 0 {
 		r.t.Errorf("step (c): no HandedOver event on %s: the replacement was not ready at the drain start (events %v)", pred.Name, r.eventReasons(pred.Name))
@@ -190,13 +187,13 @@ func (r *rig) checkDrained(pred, repl *v1alpha1.Instance, ds, streamEnd time.Tim
 	// cluster's queue.
 	jobID, _ := strconv.Atoi(pred.Status.JobID)
 	stack.WaitState(r.t, stack.WaitDeadline, "the primary to end Drained, its Allocation to end and its job to finish", func() (bool, string) {
-		o, ended := r.watch.first(pred.UID, time.Time{}, func(o observation) bool { return o.phase == v1alpha1.InstanceEnded })
+		o, ended := r.watch.First(pred.UID, time.Time{}, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceEnded })
 		var a v1alpha1.Allocation
 		gone := !r.get(&a, alloc.Name, stack.Namespace)
 		j, _ := r.cl.Plat.Job(jobID)
 		state := fmt.Sprintf("Instance %s seen ended %v (reason %q); Allocation gone %v phase %s; job %d %s finished %v",
-			pred.Name, ended, o.endReason, gone, a.Status.AtProvider.Phase, jobID, j.State, j.Finished)
-		return ended && o.endReason == v1alpha1.ReasonDrained &&
+			pred.Name, ended, o.EndReason, gone, a.Status.AtProvider.Phase, jobID, j.State, j.Finished)
+		return ended && o.EndReason == v1alpha1.ReasonDrained &&
 			(gone || a.Status.AtProvider.Phase == v1alpha1.AllocationEnded) &&
 			(j.Finished || j.State != "PENDING" && j.State != "RUNNING"), state
 	})

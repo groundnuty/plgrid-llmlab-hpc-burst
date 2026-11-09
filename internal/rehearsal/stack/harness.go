@@ -1,10 +1,8 @@
 package stack
 
 // The host side: bounded waits and commands, the root k3s guard, process
-// helpers, and one hpcburst up. Copied from internal/rehearsal/scenario's
-// harness_test.go and steps_test.go (statusPID); the rehearsal's fixed ports
-// are Ports here, and its front tuning FrontTuning (issue #251 moves the
-// scenario onto these).
+// helpers, and one hpcburst up. The ports and the front's tuning are the
+// caller's.
 
 import (
 	"bytes"

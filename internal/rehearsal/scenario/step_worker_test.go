@@ -23,7 +23,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
-// pauseAfterFailures is the front config's pauseAfterFailures (startHost):
+// pauseAfterFailures is the front config's pauseAfterFailures (rehearsalFrontTuning):
 // HBEP-5's three Instance-emitted 5xx in a row.
 const pauseAfterFailures = 3
 
@@ -154,7 +154,7 @@ func (r *rig) stepWorkerRestart(in *v1alpha1.Instance, key string) {
 	pausesAfter, _ := r.frontCounter("hpcburst_front_pauses_total")
 	reg, known := stack.Registered(r.ports, in)
 	still, _ := r.instance(in.Name)
-	moved, left := r.watch.first(in.UID, killAt, func(o observation) bool { return o.phase != v1alpha1.InstanceReady })
+	moved, left := r.watch.First(in.UID, killAt, func(o stack.Observation) bool { return o.Phase != v1alpha1.InstanceReady })
 	resume()
 	var outs []outcome
 	for _, rp := range burst {
@@ -164,9 +164,9 @@ func (r *rig) stepWorkerRestart(in *v1alpha1.Instance, key string) {
 	switch {
 	case !known || !reg:
 		r.t.Errorf("step (d): after the burst the front's probe no longer held Instance %s registered (known %v): the probe, not the pause, may have moved its key", in.Name, known)
-	case still.Status.Phase != v1alpha1.InstanceReady || left && !moved.at.After(parseRecordTime(outs[pauseAfterFailures].row.StartTime)):
+	case still.Status.Phase != v1alpha1.InstanceReady || left && !moved.At.After(parseRecordTime(outs[pauseAfterFailures].row.StartTime)):
 		r.t.Errorf("step (d): Instance %s left ready (%s; first seen %s at %s) before the request after the 5xx: the controller, not the pause, may have moved its key",
-			in.Name, still.Status.Phase, moved.phase, moved.at.Format(time.RFC3339Nano))
+			in.Name, still.Status.Phase, moved.Phase, moved.At.Format(time.RFC3339Nano))
 	}
 	stack.WaitFor(r.t, stack.WaitDeadline, "the primary to serve again after a worker restart", func() bool {
 		rp := send()
@@ -267,7 +267,7 @@ func (r *rig) checkWorkerRestart(in *v1alpha1.Instance, before v1alpha1.Instance
 	if n := countReason(r.eventReasons(in.Name), v1alpha1.ReasonWorkerRestart); n <= events {
 		r.t.Errorf("step (d): %d WorkerRestart events on Instance %s, %d before the kill", n, in.Name, events)
 	}
-	if _, ok := r.watch.first(in.UID, killAt, func(o observation) bool { return o.phase != v1alpha1.InstanceReady }); !ok {
+	if _, ok := r.watch.First(in.UID, killAt, func(o stack.Observation) bool { return o.Phase != v1alpha1.InstanceReady }); !ok {
 		r.t.Errorf("step (d): Instance %s was never seen out of ready after the kill: no reverification", in.Name)
 	}
 	if now.Spec.AllocationRef.Name != before.Spec.AllocationRef.Name {

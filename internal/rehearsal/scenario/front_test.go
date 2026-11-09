@@ -24,7 +24,7 @@ func (r *rig) checkNoGap(rows []stack.UsageRow) {
 
 // stepRequests is step (b): chat, streamed chat and completions through the
 // front by the plain model name, with a conversation key the ring maps to the
-// primary (keyFor), since its replacement is routable too. Each is served by
+// primary (stack.Client.KeyFor), since its replacement is routable too. Each is served by
 // the primary, and its usage record names it; the counters have no gap. The
 // front's record names an Instance by its inventory key, namespace/name
 // (internal/front/inventory/build.go), and its UID.

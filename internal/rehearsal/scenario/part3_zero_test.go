@@ -22,7 +22,7 @@ func (p3 *part3) scaleToZero() {
 	for _, a := range r.allocations() {
 		uids[a.UID] = a.Name
 	}
-	insts := r.watch.uids()
+	insts := r.watch.UIDs()
 	for _, in := range r.instances() {
 		if !slices.Contains(insts, in.UID) {
 			insts = append(insts, in.UID)
@@ -48,7 +48,7 @@ func (p3 *part3) scaleToZero() {
 	r.checkAllocations(uids, map[types.UID]bool{p3.requeued.uid: true})
 	r.waitRecords(uids)
 	r.waitJobsGone()
-	r.checkProxiesOffline(r.watch.uids())
+	r.checkProxiesOffline(r.watch.UIDs())
 	r.assertNoOrphans("part 3")
 	r.downAndCheck()
 }

@@ -1,10 +1,8 @@
 package stack
 
 // The stand-in cluster: the fake Slurm in run mode behind the rehearsal's
-// login node, and the Hub double. Copied from internal/rehearsal/scenario's
-// harness_test.go (startCluster) and hub_test.go (issue #251 moves the
-// scenario onto it); the partitions and QOSes are the caller's, so a stand-in
-// can have Helios's shape.
+// login node, and the Hub double. The partitions and QOSes are the caller's, so
+// a stand-in can have Helios's shape.
 
 import (
 	"crypto/sha1" // the git blob id is a SHA-1 by definition

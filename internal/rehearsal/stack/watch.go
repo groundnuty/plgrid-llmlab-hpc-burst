@@ -1,11 +1,9 @@
 package stack
 
 // The watch: every version of a namespace's Instances, Allocations and
-// ModelDeployments the API sends, with the time it arrived. Copied from
-// internal/rehearsal/scenario's watch_test.go (issue #251 moves the scenario
-// onto it); this copy also keeps each version's object, the deployments'
-// versions, and a hook on each Allocation version, which the alpha rows use to
-// write a job tag down as soon as its Allocation exists.
+// ModelDeployments the API sends, with the time it arrived and the version's
+// object. A hook on each Allocation version lets the alpha rows write a job tag
+// down as soon as its Allocation exists.
 
 import (
 	"context"

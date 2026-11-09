@@ -131,11 +131,11 @@ func (r *rig) holdTunnel(allocName string, jobID int) types.UID {
 			}
 		}
 		if uid == "" {
-			uid, _ = r.watch.onAllocation(allocName)
+			uid, _ = r.watch.OnAllocation(allocName)
 		}
 		if uid != "" && warmAt.IsZero() {
-			if o, ok := r.watch.first(uid, time.Time{}, func(o observation) bool { return o.warmedUp }); ok {
-				warmAt = o.at
+			if o, ok := r.watch.First(uid, time.Time{}, func(o stack.Observation) bool { return o.WarmedUp }); ok {
+				warmAt = o.At
 			}
 		}
 		if !warmAt.IsZero() && time.Since(warmAt) >= agentapi.ReportInterval {
@@ -185,27 +185,27 @@ func isStagedFrpc(exe string) bool {
 // time set, the checks judged in their order.
 func (r *rig) checkFirstEntry(in *v1alpha1.Instance) {
 	r.t.Helper()
-	obs := r.watch.of(in.UID)
-	firstReady := slices.IndexFunc(obs, func(o observation) bool { return o.phase == v1alpha1.InstanceReady })
+	obs := r.watch.Of(in.UID)
+	firstReady := slices.IndexFunc(obs, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceReady })
 	if firstReady < 0 {
 		r.t.Fatalf("step (a): the watch never saw Instance %s ready", in.Name)
 	}
 	held, tunnelUp := -1, -1
 	for i, o := range obs[:firstReady] {
-		switch o.phase {
+		switch o.Phase {
 		case "", v1alpha1.InstancePending, v1alpha1.InstanceStarting, v1alpha1.InstanceVerifying:
 		default:
-			r.t.Errorf("step (a): before its first ready, Instance %s was seen %s at %s", in.Name, o.phase, o.at.Format(time.RFC3339Nano))
+			r.t.Errorf("step (a): before its first ready, Instance %s was seen %s at %s", in.Name, o.Phase, o.At.Format(time.RFC3339Nano))
 		}
-		if o.warmedUp && o.tunnel != metav1.ConditionTrue {
-			if o.phase != v1alpha1.InstanceVerifying {
-				r.t.Errorf("step (a): with its warm-up judged and TunnelConnected %q, Instance %s was %s, not verifying", o.tunnel, in.Name, o.phase)
+		if o.WarmedUp && o.Tunnel != metav1.ConditionTrue {
+			if o.Phase != v1alpha1.InstanceVerifying {
+				r.t.Errorf("step (a): with its warm-up judged and TunnelConnected %q, Instance %s was %s, not verifying", o.Tunnel, in.Name, o.Phase)
 			}
 			if held < 0 {
 				held = i
 			}
 		}
-		if held >= 0 && tunnelUp < 0 && o.tunnel == metav1.ConditionTrue {
+		if held >= 0 && tunnelUp < 0 && o.Tunnel == metav1.ConditionTrue {
 			tunnelUp = i
 		}
 	}
@@ -215,18 +215,18 @@ func (r *rig) checkFirstEntry(in *v1alpha1.Instance) {
 		r.t.Errorf("step (a): Instance %s was never seen with WarmedUp True and TunnelConnected not True: the gate was not what kept it out of ready", in.Name)
 	case tunnelUp < 0:
 		r.t.Errorf("step (a): Instance %s was first seen ready at %s with no TunnelConnected True seen after its warm-up: it entered ready with its tunnel down",
-			in.Name, f.at.Format(time.RFC3339Nano))
+			in.Name, f.At.Format(time.RFC3339Nano))
 	default:
 		r.t.Logf("step (a): Instance %s verifying with its checks done and its tunnel down from %s, TunnelConnected True %s, ready %s", in.Name,
-			obs[held].at.Format(time.RFC3339Nano), obs[tunnelUp].at.Format(time.RFC3339Nano), f.at.Format(time.RFC3339Nano))
+			obs[held].At.Format(time.RFC3339Nano), obs[tunnelUp].At.Format(time.RFC3339Nano), f.At.Format(time.RFC3339Nano))
 	}
-	if f.tunnel != metav1.ConditionTrue || !f.verified || !f.qualified || !f.warmedUp || !f.readyTime {
+	if f.Tunnel != metav1.ConditionTrue || !f.Verified || !f.Qualified || !f.WarmedUp || !f.ReadyTime {
 		r.t.Errorf("step (a): Instance %s's first ready version: TunnelConnected %q, Verified %v, Qualified %v, WarmedUp %v, readyTime set %v; want all", in.Name,
-			f.tunnel, f.verified, f.qualified, f.warmedUp, f.readyTime)
+			f.Tunnel, f.Verified, f.Qualified, f.WarmedUp, f.ReadyTime)
 	}
-	iv := slices.IndexFunc(obs, func(o observation) bool { return o.verified })
-	iq := slices.IndexFunc(obs, func(o observation) bool { return o.qualified })
-	iw := slices.IndexFunc(obs, func(o observation) bool { return o.warmedUp })
+	iv := slices.IndexFunc(obs, func(o stack.Observation) bool { return o.Verified })
+	iq := slices.IndexFunc(obs, func(o stack.Observation) bool { return o.Qualified })
+	iw := slices.IndexFunc(obs, func(o stack.Observation) bool { return o.WarmedUp })
 	if iv < 0 || iq < iv || iw < iq {
 		r.t.Errorf("step (a): Instance %s's checks were first seen True at versions %d (Verified), %d (Qualified), %d (WarmedUp): not in the order the controller judges them", in.Name, iv, iq, iw)
 	}

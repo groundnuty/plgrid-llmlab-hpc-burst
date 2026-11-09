@@ -187,6 +187,6 @@ func (r *rig) judgeAbsence(b *absenceBase, k eventcount.Key, change time.Time, u
 // instanceEnded is when the watch first delivered the Instance ended: a
 // bound its end lies before. ok is false when the watch saw no such version.
 func (r *rig) instanceEnded(uid types.UID) (time.Time, bool) {
-	o, ok := r.watch.first(uid, time.Time{}, func(o observation) bool { return o.phase == v1alpha1.InstanceEnded })
-	return o.at, ok
+	o, ok := r.watch.First(uid, time.Time{}, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceEnded })
+	return o.At, ok
 }
