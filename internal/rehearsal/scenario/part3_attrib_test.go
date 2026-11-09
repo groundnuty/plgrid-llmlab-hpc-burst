@@ -11,8 +11,10 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 // The attribution headers (HBEP-5, Attribution headers), in the canonical
@@ -55,12 +57,12 @@ type attributed struct {
 
 // attribute checks one reply's headers against its usage record and against
 // what the test expects, and keeps it for the summary.
-func (p3 *part3) attribute(what string, rp reply, row usageRow, w wantAttr) {
+func (p3 *part3) attribute(what string, rp stack.Reply, row stack.UsageRow, w wantAttr) {
 	p3.t.Helper()
-	for _, p := range attributionProblems(rp.status, rp.header, row, w) {
+	for _, p := range attributionProblems(rp.Status, rp.Header, row, w) {
 		p3.t.Errorf("%s: %s", what, p)
 	}
-	p3.replies = append(p3.replies, attributed{what: what, status: rp.status, emitter: row.Emitter})
+	p3.replies = append(p3.replies, attributed{what: what, status: rp.Status, emitter: row.Emitter})
 }
 
 // attributionProblems is HBEP-5's rule for one reply: the request ID and the
@@ -69,7 +71,7 @@ func (p3 *part3) attribute(what string, rp reply, row usageRow, w wantAttr) {
 // the first two for a front error before a target. The record names the same
 // request, emitter, provider, deployment (its full ID, whose first 12
 // characters are the header's) and Instance, with the same status.
-func attributionProblems(status int, h http.Header, row usageRow, w wantAttr) []string {
+func attributionProblems(status int, h http.Header, row stack.UsageRow, w wantAttr) []string {
 	var out []string
 	field := func(name, header, record, want string) {
 		if header != want || record != want {
@@ -112,28 +114,28 @@ func attributionProblems(status int, h http.Header, row usageRow, w wantAttr) []
 
 // sendAs posts body to path with the given client key ("" sends none),
 // outside the rig's own key, for the front's error rows.
-func (p3 *part3) sendAs(path, body, key string) reply {
-	ctx, cancel := p3.requestCtx()
+func (p3 *part3) sendAs(path, body, key string) stack.Reply {
+	ctx, cancel := p3.fc.RequestCtx()
 	defer cancel()
-	return doRequest(ctx, p3.ports.ClientAddr, path, body, key)
+	return doRequest(ctx, p3.fc.RequestTimeout(), p3.ports.ClientAddr, path, body, key)
 }
 
-func doRequest(ctx context.Context, addr, path, body, key string) reply {
+func doRequest(ctx context.Context, timeout time.Duration, addr, path, body, key string) stack.Reply {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+path, strings.NewReader(body))
 	if err != nil {
-		return reply{err: err}
+		return stack.Reply{Err: err}
 	}
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: requestTimeout}).Do(req)
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
 	if err != nil {
-		return reply{err: err}
+		return stack.Reply{Err: err}
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	return reply{status: resp.StatusCode, header: resp.Header, body: b, err: err, id: resp.Header.Get(hdrRequestID)}
+	return stack.Reply{Status: resp.StatusCode, Header: resp.Header, Body: b, Err: err, ID: resp.Header.Get(hdrRequestID)}
 }
 
 // errorsAttributed sends one request for each front error the scenario can
@@ -148,22 +150,22 @@ func (p3 *part3) errorsAttributed() {
 		status                   int
 		code, detail, retryAfter string
 	}{
-		{"a wrong client key", strings.Repeat("e0", 32), chatBodyFor(queuedDep.Model, 1, 0, false), http.StatusUnauthorized, "invalid_api_key", "", ""},
+		{"a wrong client key", strings.Repeat("e0", 32), stack.ChatBody(queuedDep.Model, 1, 0, false, ""), http.StatusUnauthorized, "invalid_api_key", "", ""},
 		{"a body that is not JSON", ok, "not json", http.StatusBadRequest, "invalid_request", "", ""},
-		{"a provider nobody configured", ok, chatBodyFor(queuedDep.Model+"@no-such-provider", 1, 0, false), http.StatusBadRequest, "invalid_model_name", "unknown_provider", ""},
-		{"a model no deployment attaches", ok, chatBodyFor("example-org/not-attached", 1, 0, false), http.StatusServiceUnavailable, "model_inactive", "not_attached", "30"},
+		{"a provider nobody configured", ok, stack.ChatBody(queuedDep.Model+"@no-such-provider", 1, 0, false, ""), http.StatusBadRequest, "invalid_model_name", "unknown_provider", ""},
+		{"a model no deployment attaches", ok, stack.ChatBody("example-org/not-attached", 1, 0, false, ""), http.StatusServiceUnavailable, "model_inactive", "not_attached", "30"},
 	}
 	for _, c := range cases {
 		rp := p3.sendAs("/v1/chat/completions", c.body, c.key)
-		if rp.err != nil {
-			r.t.Fatalf("%s: %v", c.what, rp.err)
+		if rp.Err != nil {
+			r.t.Fatalf("%s: %v", c.what, rp.Err)
 		}
-		e := errorOf(rp.body)
-		if rp.status != c.status || e.Code != c.code || derefS(e.Detail) != orNil(c.detail) || rp.header.Get("Retry-After") != c.retryAfter {
-			r.t.Errorf("%s: %d code %q detail %q Retry-After %q, want %d %q %q %q: %.300s", c.what, rp.status, e.Code, derefS(e.Detail),
-				rp.header.Get("Retry-After"), c.status, c.code, c.detail, c.retryAfter, rp.body)
+		e := stack.ErrorOf(rp.Body)
+		if rp.Status != c.status || e.Code != c.code || derefS(e.Detail) != orNil(c.detail) || rp.Header.Get("Retry-After") != c.retryAfter {
+			r.t.Errorf("%s: %d code %q detail %q Retry-After %q, want %d %q %q %q: %.300s", c.what, rp.Status, e.Code, derefS(e.Detail),
+				rp.Header.Get("Retry-After"), c.status, c.code, c.detail, c.retryAfter, rp.Body)
 		}
-		p3.attribute(c.what, rp, r.rowOf(rp.id), wantFront())
+		p3.attribute(c.what, rp, r.fc.RowOf(rp.ID), wantFront())
 	}
 }
 

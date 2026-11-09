@@ -203,7 +203,7 @@ func TestGapReplies(t *testing.T) {
 		h := http.Header{}
 		h.Set(hdrEmitter, "front")
 		h.Set("Retry-After", "30")
-		return probe{model: "m", sent: sent, rp: reply{status: 503, header: h, body: []byte(`{"error":{"code":"model_inactive","detail":"no_ready_target"}}`)}}
+		return probe{model: "m", sent: sent, rp: stack.Reply{Status: 503, Header: h, Body: []byte(`{"error":{"code":"model_inactive","detail":"no_ready_target"}}`)}}
 	}
 	good := []probe{gap(from), gap(from.Add(time.Second))}
 	if n := gapReplies(good, "m", from); n != 2 {
@@ -212,18 +212,18 @@ func TestGapReplies(t *testing.T) {
 	for name, pb := range map[string]func(probe) probe{
 		"sent before the gap": func(p probe) probe { p.sent = from.Add(-time.Millisecond); return p },
 		"another model":       func(p probe) probe { p.model = "x"; return p },
-		"a 200":               func(p probe) probe { p.rp.status = 200; return p },
+		"a 200":               func(p probe) probe { p.rp.Status = 200; return p },
 		"from the instance": func(p probe) probe {
-			p.rp.header = p.rp.header.Clone()
-			p.rp.header.Set(hdrEmitter, "instance")
+			p.rp.Header = p.rp.Header.Clone()
+			p.rp.Header.Set(hdrEmitter, "instance")
 			return p
 		},
 		"another detail": func(p probe) probe {
-			p.rp.body = []byte(`{"error":{"code":"model_inactive","detail":"not_attached"}}`)
+			p.rp.Body = []byte(`{"error":{"code":"model_inactive","detail":"not_attached"}}`)
 			return p
 		},
-		"no Retry-After": func(p probe) probe { p.rp.header = p.rp.header.Clone(); p.rp.header.Del("Retry-After"); return p },
-		"unanswered":     func(p probe) probe { p.rp.err = fmt.Errorf("reset"); return p },
+		"no Retry-After": func(p probe) probe { p.rp.Header = p.rp.Header.Clone(); p.rp.Header.Del("Retry-After"); return p },
+		"unanswered":     func(p probe) probe { p.rp.Err = fmt.Errorf("reset"); return p },
 	} {
 		if n := gapReplies([]probe{pb(gap(from))}, "m", from); n != 0 {
 			t.Errorf("%s: counted as a gap reply", name)

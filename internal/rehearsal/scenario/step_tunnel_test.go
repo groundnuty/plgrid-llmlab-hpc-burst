@@ -8,6 +8,7 @@ package scenario_test
 
 import (
 	"bytes"
+	"context"
 	"io/fs"
 	"maps"
 	"net/http"
@@ -89,7 +90,7 @@ func (r *rig) stepTunnelLoss(in *v1alpha1.Instance, key string) {
 	defer r.stepTimer("e")()
 	r.beforeDrain("e", in)
 	before, ok := r.instance(in.Name)
-	if reg, known := r.registered(in); !ok || before.Status.Phase != v1alpha1.InstanceReady ||
+	if reg, known := stack.Registered(r.ports, in); !ok || before.Status.Phase != v1alpha1.InstanceReady ||
 		!conditionTrue(before.Status.Conditions, v1alpha1.ConditionTunnelConnected) || !known || !reg {
 		r.t.Fatalf("step (e) needs a ready, connected and registered Instance %s: %+v, registered %v (known %v)", in.Name, before.Status, reg, known)
 	}
@@ -107,7 +108,7 @@ func (r *rig) stepTunnelLoss(in *v1alpha1.Instance, key string) {
 		if o, ok := r.watch.first(in.UID, start, func(o observation) bool { return o.tunnel == metav1.ConditionFalse }); ok && falseAt.IsZero() {
 			falseAt = o.at
 		}
-		if reg, known := r.registered(in); known && !reg && goneAt.IsZero() {
+		if reg, known := stack.Registered(r.ports, in); known && !reg && goneAt.IsZero() {
 			goneAt = time.Now()
 		}
 		if !falseAt.IsZero() && !goneAt.IsZero() {
@@ -158,16 +159,16 @@ func (r *rig) requestDuringLoss(in *v1alpha1.Instance, key string, jobID int, st
 			}
 		}
 	}()
-	rp := r.send("/v1/chat/completions", chatBody(4, 0, false), key)
-	reg, known := r.registered(in)
+	rp := r.fc.SendCtx(context.Background(), "/v1/chat/completions", stack.ChatBody(stack.Model, 4, 0, false, ""), key)
+	reg, known := stack.Registered(r.ports, in)
 	close(stop)
 	for _, p := range <-done {
 		killed[p] = true
 	}
-	if rp.err != nil || rp.status != http.StatusOK {
-		r.t.Fatalf("step (e): a request with the primary's key during the loss: %d %v: %.300s", rp.status, rp.err, rp.body)
+	if rp.Err != nil || rp.Status != http.StatusOK {
+		r.t.Fatalf("step (e): a request with the primary's key during the loss: %d %v: %.300s", rp.Status, rp.Err, rp.Body)
 	}
-	row := r.rowOf(rp.id)
+	row := r.fc.RowOf(rp.ID)
 	if row.Emitter != "instance" || row.InstanceUID == "" || row.InstanceUID == string(in.UID) {
 		r.t.Errorf("step (e): the primary's key during the loss went to %s (%s, emitter %s), not to another Instance; the primary registered %v (known %v) after it",
 			row.Instance, row.InstanceUID, row.Emitter, reg, known)
@@ -197,15 +198,15 @@ func (r *rig) checkTunnelBack(in *v1alpha1.Instance, key string, jobID int, stag
 	lost := time.Now()
 	stack.WaitFor(r.t, stack.WaitDeadline, "TunnelConnected True and the front's registration back", func() bool {
 		now, ok := r.instance(in.Name)
-		reg, known := r.registered(in)
+		reg, known := stack.Registered(r.ports, in)
 		return ok && conditionTrue(now.Status.Conditions, v1alpha1.ConditionTunnelConnected) && known && reg
 	})
 	r.t.Logf("step (e): the tunnel and the registration came back %s after the agent's new frpc was seen", time.Since(lost).Round(100*time.Millisecond))
-	rp := r.send("/v1/chat/completions", chatBody(4, 0, false), key)
-	if rp.err != nil || rp.status != 200 {
-		r.t.Fatalf("step (e): a request after the tunnel came back: %d %v: %.300s", rp.status, rp.err, rp.body)
+	rp := r.fc.SendCtx(context.Background(), "/v1/chat/completions", stack.ChatBody(stack.Model, 4, 0, false, ""), key)
+	if rp.Err != nil || rp.Status != 200 {
+		r.t.Fatalf("step (e): a request after the tunnel came back: %d %v: %.300s", rp.Status, rp.Err, rp.Body)
 	}
-	if row := r.rowOf(rp.id); row.InstanceUID != string(in.UID) {
+	if row := r.fc.RowOf(rp.ID); row.InstanceUID != string(in.UID) {
 		r.t.Errorf("step (e): the key's request after the tunnel came back went to %s, not %s", row.Instance, in.Name)
 	}
 	phases := map[v1alpha1.InstancePhase]bool{}
@@ -216,5 +217,5 @@ func (r *rig) checkTunnelBack(in *v1alpha1.Instance, key string, jobID int, stag
 		}
 	}
 	r.t.Logf("step (e): the Instance's phases during the loss: %v", phases)
-	r.checkNoGap(r.usageRows())
+	r.checkNoGap(r.fc.UsageRows())
 }

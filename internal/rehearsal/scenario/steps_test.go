@@ -22,39 +22,6 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
-// statusPID is the PID that hpcburst status reports for a supervised entry,
-// 0 when it reports none running.
-func (r *rig) statusPID(name string) int {
-	r.t.Helper()
-	out, err := stack.Run(r.t, stack.Within(r.t, stack.StatusTimeout), r.h.Env, r.b.HPCBurst, "status", "--state-dir", r.h.State, "--json", "--no-api")
-	var doc any
-	if jerr := json.Unmarshal([]byte(out), &doc); jerr != nil {
-		r.t.Logf("hpcburst status --json (%v): %v: %.300s", err, jerr, out)
-		return 0
-	}
-	pid := 0
-	var walk func(any)
-	walk = func(o any) {
-		switch v := o.(type) {
-		case map[string]any:
-			if v["name"] == name && v["running"] == true {
-				if p, ok := v["pid"].(float64); ok {
-					pid = int(p)
-				}
-			}
-			for _, x := range v {
-				walk(x)
-			}
-		case []any:
-			for _, x := range v {
-				walk(x)
-			}
-		}
-	}
-	walk(doc)
-	return pid
-}
-
 // leaseHolder is the lifecycle controller's Lease holder, "" when unknown.
 func (r *rig) leaseHolder() string {
 	var l coordinationv1.Lease
@@ -84,13 +51,13 @@ func (r *rig) instance(name string) (v1alpha1.Instance, bool) {
 // takeover, ends with its finish reason and [DONE].
 func (r *rig) stepControllerRestart(in *v1alpha1.Instance, key string) {
 	r.t.Helper()
-	r.controllerRestart(in, key, chatBody(restartTokens, restartTokens, true), restartTokens)
+	r.controllerRestart(in, key, stack.ChatBody(stack.Model, restartTokens, restartTokens, true, ""), restartTokens)
 }
 
 // controllerRestart is step (f) with a streamed request body whose reply is
 // tokens long, which must outlast the new controller's takeover of the Lease.
 // It returns the stream and its usage record.
-func (r *rig) controllerRestart(in *v1alpha1.Instance, key, body string, tokens int) (streamed, usageRow) {
+func (r *rig) controllerRestart(in *v1alpha1.Instance, key, body string, tokens int) (stack.Streamed, stack.UsageRow) {
 	r.t.Helper()
 	defer r.stepTimer("f")()
 	r.beforeDrain("f", in)
@@ -105,18 +72,18 @@ func (r *rig) controllerRestart(in *v1alpha1.Instance, key, body string, tokens 
 	if !online[string(in.UID)] {
 		r.t.Fatalf("step (f): frps lists no online proxy for Instance %s (%s) before the kill (online: %v); the check would be vacuous", in.Name, in.UID, online)
 	}
-	oldPID, oldHolder := r.statusPID("controller"), r.leaseHolder()
+	oldPID, oldHolder := r.h.StatusPID("controller"), r.leaseHolder()
 	if oldPID == 0 || oldHolder == "" {
 		r.t.Fatalf("step (f): the controller's PID %d or Lease holder %q is unknown", oldPID, oldHolder)
 	}
-	first, done := r.startStream(body, key)
+	first, done := r.fc.StartStream(body, key)
 	<-first
 	if err := syscall.Kill(oldPID, syscall.SIGKILL); err != nil {
 		r.t.Fatalf("kill the controller %d: %v", oldPID, err)
 	}
 	killAt := time.Now()
 	stack.WaitFor(r.t, stack.WaitDeadline, "the supervisor to start a new controller that leads the Lease", func() bool {
-		p := r.statusPID("controller")
+		p := r.h.StatusPID("controller")
 		h := r.leaseHolder()
 		return p != 0 && p != oldPID && h != "" && h != oldHolder &&
 			stack.HTTPStatus(r.ports.URL(6, "/readyz")) == http.StatusOK
@@ -165,13 +132,13 @@ const restartTokens = 2250
 
 // checkRestartStream: the stream was in flight at the controller's kill and
 // after the new controller led the Lease, and ended uncut with [DONE].
-func (r *rig) checkRestartStream(in *v1alpha1.Instance, done <-chan streamed, killAt, ledAt time.Time, tokens int) (streamed, usageRow) {
+func (r *rig) checkRestartStream(in *v1alpha1.Instance, done <-chan stack.Streamed, killAt, ledAt time.Time, tokens int) (stack.Streamed, stack.UsageRow) {
 	r.t.Helper()
-	var s streamed
+	var s stack.Streamed
 	select {
 	case s = <-done:
-	case <-time.After(requestTimeout):
-		r.t.Fatalf("step (f): the stream did not end within %s", requestTimeout)
+	case <-time.After(r.fc.RequestTimeout()):
+		r.t.Fatalf("step (f): the stream did not end within %s", r.fc.RequestTimeout())
 	}
 	row := r.checkStream("f", s, in, tokens)
 	rs, re := parseRecordTime(row.StartTime), parseRecordTime(row.EndTime)

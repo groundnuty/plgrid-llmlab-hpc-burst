@@ -38,7 +38,7 @@ type depRun struct {
 	succ      *v1alpha1.Instance
 	succAlloc string
 	succJob   int
-	stream    <-chan streamed // the stream in flight at the drain start
+	stream    <-chan stack.Streamed // the stream in flight at the drain start
 	probes    []probe
 	// gateJob is the successor's job the engine gate held, from gateHeld
 	// (its engine start reached the gate) until gateReleased, once
@@ -52,7 +52,7 @@ type depRun struct {
 type probe struct {
 	model string
 	sent  time.Time
-	rp    reply
+	rp    stack.Reply
 }
 
 // prober sends one short request for each model every probeEvery until it is
@@ -79,7 +79,7 @@ func (p3 *part3) startProber(models ...string) *prober {
 		for {
 			for _, m := range models {
 				sent := time.Now()
-				rp := p3.sendCtx(ctx, "/v1/chat/completions", chatBodyFor(m, 1, 0, false), "")
+				rp := p3.fc.SendCtx(ctx, "/v1/chat/completions", stack.ChatBody(m, 1, 0, false, ""), "")
 				pr.mu.Lock()
 				pr.got = append(pr.got, probe{model: m, sent: sent, rp: rp})
 				pr.mu.Unlock()
@@ -156,7 +156,7 @@ func (p3 *part3) noOverlap() {
 		stack.WaitFor(r.t, time.Until(d.ds)+time.Minute, "the drain start of "+d.Name+" minus the stream's lead", func() bool {
 			return !time.Now().Before(d.ds.Add(-streamLead))
 		})
-		first, done := r.startStream(chatBodyFor(d.Model, longTokens, longTokens, true), "rehearsal-part3-drain-"+d.Name)
+		first, done := r.fc.StartStream(stack.ChatBody(d.Model, longTokens, longTokens, true, ""), "rehearsal-part3-drain-"+d.Name)
 		<-first
 		d.stream = done
 		r.t.Logf("%s: a %d-token stream started %s before the drain start", d.Name, longTokens, time.Until(d.ds).Round(100*time.Millisecond))
@@ -256,12 +256,12 @@ func (p3 *part3) releaseGate(d *depRun, replies []probe) string {
 func gapReplies(replies []probe, model string, from time.Time) int {
 	n := 0
 	for _, pb := range replies {
-		if pb.model != model || pb.sent.Before(from) || pb.rp.err != nil || pb.rp.status != http.StatusServiceUnavailable {
+		if pb.model != model || pb.sent.Before(from) || pb.rp.Err != nil || pb.rp.Status != http.StatusServiceUnavailable {
 			continue
 		}
-		e := errorOf(pb.rp.body)
-		if pb.rp.header.Get(hdrEmitter) == "front" && e.Code == "model_inactive" && derefS(e.Detail) == "no_ready_target" &&
-			pb.rp.header.Get("Retry-After") == "30" {
+		e := stack.ErrorOf(pb.rp.Body)
+		if pb.rp.Header.Get(hdrEmitter) == "front" && e.Code == "model_inactive" && derefS(e.Detail) == "no_ready_target" &&
+			pb.rp.Header.Get("Retry-After") == "30" {
 			n++
 		}
 	}
@@ -284,11 +284,11 @@ func (p3 *part3) successorServes(d *depRun, replies []probe) string {
 	if succ == nil {
 		return d.Name + ": its successor is not ready yet"
 	}
-	if reg, known := r.registered(succ); !known || !reg {
+	if reg, known := stack.Registered(r.ports, succ); !known || !reg {
 		return d.Name + ": the successor " + succ.Name + " is ready but not registered at the front"
 	}
 	for _, pb := range replies {
-		if pb.model == d.Model && pb.rp.status == http.StatusOK && pb.rp.header.Get("Hpcburst-Instance-Uid") == string(succ.UID) {
+		if pb.model == d.Model && pb.rp.Status == http.StatusOK && pb.rp.Header.Get("Hpcburst-Instance-Uid") == string(succ.UID) {
 			d.succ, d.succAlloc = succ, succ.Spec.AllocationRef.Name
 			d.succJob = jobIDOf(r.t, succ)
 			return ""
@@ -302,14 +302,14 @@ func (p3 *part3) successorServes(d *depRun, replies []probe) string {
 func (p3 *part3) checkDrainStream(d *depRun) {
 	r := p3.rig
 	r.t.Helper()
-	var s streamed
+	var s stack.Streamed
 	select {
 	case s = <-d.stream:
-	case <-time.After(requestTimeout):
-		r.t.Fatalf("%s: the stream in flight at the drain start did not end within %s", d.Name, requestTimeout)
+	case <-time.After(r.fc.RequestTimeout()):
+		r.t.Fatalf("%s: the stream in flight at the drain start did not end within %s", d.Name, r.fc.RequestTimeout())
 	}
 	row := r.checkStream("drain "+d.Name, s, d.primary, longTokens)
-	p3.attribute("the stream in flight at "+d.Name+"'s drain start", s.reply, row, wantInstance(d, d.primary))
+	p3.attribute("the stream in flight at "+d.Name+"'s drain start", s.Reply, row, wantInstance(d, d.primary))
 	rs, re := parseRecordTime(row.StartTime), parseRecordTime(row.EndTime)
 	if !rs.Before(d.ds) || !d.ds.Before(re) {
 		r.t.Errorf("%s: no stream in flight at the drain start %s: its record runs %s to %s", d.Name, d.ds.UTC().Format(time.RFC3339), row.StartTime, row.EndTime)
@@ -335,15 +335,15 @@ func (p3 *part3) checkGap(d *depRun) {
 		in.succReadySeen = o.at
 	}
 	for _, pb := range d.probes {
-		if pb.rp.err != nil {
-			in.probes = append(in.probes, gapProbe{err: pb.rp.err.Error()})
+		if pb.rp.Err != nil {
+			in.probes = append(in.probes, gapProbe{err: pb.rp.Err.Error()})
 			continue
 		}
-		row := r.rowOf(pb.rp.id)
+		row := r.fc.RowOf(pb.rp.ID)
 		p3.attribute("a probe of "+d.Name, pb.rp, row, p3.wantForProbe(d, row))
-		e := errorOf(pb.rp.body)
-		in.probes = append(in.probes, gapProbe{start: parseRecordTime(row.StartTime), status: pb.rp.status, emitter: row.Emitter,
-			instanceUID: row.InstanceUID, code: e.Code, detail: derefS(e.Detail), retryAfter: pb.rp.header.Get("Retry-After")})
+		e := stack.ErrorOf(pb.rp.Body)
+		in.probes = append(in.probes, gapProbe{start: parseRecordTime(row.StartTime), status: pb.rp.Status, emitter: row.Emitter,
+			instanceUID: row.InstanceUID, code: e.Code, detail: derefS(e.Detail), retryAfter: pb.rp.Header.Get("Retry-After")})
 	}
 	rep, problems := gapProblems(in)
 	for _, p := range problems {
@@ -370,7 +370,7 @@ func (p3 *part3) checkGap(d *depRun) {
 
 // wantForProbe is what a probe's reply must carry: an Instance's attribution
 // when one served it, else the front's error before a target.
-func (p3 *part3) wantForProbe(d *depRun, row usageRow) wantAttr {
+func (p3 *part3) wantForProbe(d *depRun, row stack.UsageRow) wantAttr {
 	switch row.InstanceUID {
 	case string(d.primary.UID):
 		return wantInstance(d, d.primary)

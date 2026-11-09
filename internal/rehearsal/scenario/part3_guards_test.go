@@ -140,7 +140,7 @@ func TestNoOverlapSlotProblems(t *testing.T) {
 	}
 }
 
-func attrFixture() (http.Header, usageRow, wantAttr) {
+func attrFixture() (http.Header, stack.UsageRow, wantAttr) {
 	h := http.Header{}
 	h.Set(hdrRequestID, "r1")
 	h.Set(hdrEmitter, "instance")
@@ -148,7 +148,7 @@ func attrFixture() (http.Header, usageRow, wantAttr) {
 	h.Set(hdrDeploymentID, "0123456789ab")
 	h.Set(hdrInstance, "default/inst")
 	h.Set(hdrInstanceUID, "uid-1")
-	row := usageRow{RequestID: "r1", Emitter: "instance", Provider: "prov", DeploymentID: "0123456789ab" + strings.Repeat("c", 52),
+	row := stack.UsageRow{RequestID: "r1", Emitter: "instance", Provider: "prov", DeploymentID: "0123456789ab" + strings.Repeat("c", 52),
 		Instance: "default/inst", InstanceUID: "uid-1", Status: 200}
 	return h, row, wantAttr{emitter: "instance", provider: "prov", deploymentID: "0123456789ab", instance: "default/inst", instanceUID: "uid-1"}
 }
@@ -161,20 +161,20 @@ func TestAttributionProblems(t *testing.T) {
 	fh := http.Header{}
 	fh.Set(hdrRequestID, "r2")
 	fh.Set(hdrEmitter, "front")
-	frow := usageRow{RequestID: "r2", Emitter: "front", Status: 503}
+	frow := stack.UsageRow{RequestID: "r2", Emitter: "front", Status: 503}
 	if p := attributionProblems(503, fh, frow, wantFront()); len(p) != 0 {
 		t.Fatalf("a correct front error: %v", p)
 	}
-	for name, breakIt := range map[string]func(http.Header, *usageRow){
-		"no request ID":             func(h http.Header, _ *usageRow) { h.Del(hdrRequestID) },
-		"another request's record":  func(_ http.Header, r *usageRow) { r.RequestID = "r9" },
-		"no Instance header":        func(h http.Header, _ *usageRow) { h.Del(hdrInstance) },
-		"a record naming another":   func(_ http.Header, r *usageRow) { r.InstanceUID = "uid-2" },
-		"a full ID in the header":   func(h http.Header, r *usageRow) { h.Set(hdrDeploymentID, r.DeploymentID) },
-		"a short ID in the record":  func(_ http.Header, r *usageRow) { r.DeploymentID = "0123456789ab" },
-		"another status recorded":   func(_ http.Header, r *usageRow) { r.Status = 500 },
-		"the wrong emitter":         func(h http.Header, r *usageRow) { h.Set(hdrEmitter, "front"); r.Emitter = "front" },
-		"no provider in the record": func(_ http.Header, r *usageRow) { r.Provider = "" },
+	for name, breakIt := range map[string]func(http.Header, *stack.UsageRow){
+		"no request ID":             func(h http.Header, _ *stack.UsageRow) { h.Del(hdrRequestID) },
+		"another request's record":  func(_ http.Header, r *stack.UsageRow) { r.RequestID = "r9" },
+		"no Instance header":        func(h http.Header, _ *stack.UsageRow) { h.Del(hdrInstance) },
+		"a record naming another":   func(_ http.Header, r *stack.UsageRow) { r.InstanceUID = "uid-2" },
+		"a full ID in the header":   func(h http.Header, r *stack.UsageRow) { h.Set(hdrDeploymentID, r.DeploymentID) },
+		"a short ID in the record":  func(_ http.Header, r *stack.UsageRow) { r.DeploymentID = "0123456789ab" },
+		"another status recorded":   func(_ http.Header, r *stack.UsageRow) { r.Status = 500 },
+		"the wrong emitter":         func(h http.Header, r *stack.UsageRow) { h.Set(hdrEmitter, "front"); r.Emitter = "front" },
+		"no provider in the record": func(_ http.Header, r *stack.UsageRow) { r.Provider = "" },
 	} {
 		h, row, w := attrFixture()
 		breakIt(h, &row)

@@ -61,12 +61,12 @@ func (r *rig) replacementReady(p *v1alpha1.Instance) v1alpha1.Instance {
 	r.t.Helper()
 	var repl v1alpha1.Instance
 	stack.WaitFor(r.t, stack.WaitDeadline, "the primary and its replacement to be ready and registered at the front", func() bool {
-		if reg, known := r.registered(p); !known || !reg {
+		if reg, known := stack.Registered(r.ports, p); !known || !reg {
 			return false
 		}
 		for _, in := range r.instances() {
 			if in.Annotations[v1alpha1.AnnotationPredecessor] == p.Name && in.Status.Phase == v1alpha1.InstanceReady {
-				if reg, known := r.registered(&in); known && reg {
+				if reg, known := stack.Registered(r.ports, &in); known && reg {
 					repl = in
 					return true
 				}
@@ -95,19 +95,19 @@ func parseRecordTime(s string) time.Time {
 // never stream_cut (sseParse, streamProblems); its record names the
 // Instance, has all its tokens, no cut, and took at least tokens times
 // tokenDelay.
-func (r *rig) checkStream(step string, s streamed, in *v1alpha1.Instance, tokens int) usageRow {
+func (r *rig) checkStream(step string, s stack.Streamed, in *v1alpha1.Instance, tokens int) stack.UsageRow {
 	r.t.Helper()
-	if s.err != nil || s.status != 200 {
-		r.t.Fatalf("step (%s) stream: %d %v: %.300s", step, s.status, s.err, s.body)
+	if s.Err != nil || s.Status != 200 {
+		r.t.Fatalf("step (%s) stream: %d %v: %.300s", step, s.Status, s.Err, s.Body)
 	}
-	got := sseParse(s.body)
-	if p := streamProblems(got, tokens); len(p) > 0 || bytes.Contains(s.body, []byte("stream_cut")) {
+	got := sseParse(s.Body)
+	if p := streamProblems(got, tokens); len(p) > 0 || bytes.Contains(s.Body, []byte("stream_cut")) {
 		r.t.Errorf("step (%s) stream as the client received it: %s; stream_cut %v; its end: %.300s", step, strings.Join(p, "; "),
-			bytes.Contains(s.body, []byte("stream_cut")), s.body[max(0, len(s.body)-300):])
+			bytes.Contains(s.Body, []byte("stream_cut")), s.Body[max(0, len(s.Body)-300):])
 	}
 	r.t.Logf("step (%s) stream: the client received %d tokens of content in %d events, finish %q, usage %d, [DONE] %v",
 		step, got.words, got.chunks, got.finishes, got.usageTokens, got.done)
-	row := r.rowOf(s.id)
+	row := r.fc.RowOf(s.ID)
 	switch {
 	case row.InstanceUID != string(in.UID):
 		r.t.Errorf("step (%s) stream went to %s (%s), not %s", step, row.Instance, row.InstanceUID, in.Name)
@@ -131,9 +131,9 @@ func (r *rig) stepHandover(p *v1alpha1.Instance) {
 		r.t.Fatalf("step (c) reached %s before the drain start %s: too late to start its stream before it; lengthen the lease", left.Round(time.Second), ds.Format(time.RFC3339))
 	}
 	repl := r.replacementReady(&pred)
-	key := r.keyFor(&pred) // the ring as it is now, with both Instances
+	key := r.fc.KeyFor(&pred) // the ring as it is now, with both Instances
 	stack.WaitFor(r.t, time.Until(ds), "the drain start minus the stream's lead", func() bool { return !time.Now().Before(ds.Add(-streamLead)) })
-	first, done := r.startStream(chatBody(handoverTokens, handoverTokens, true), key)
+	first, done := r.fc.StartStream(stack.ChatBody(stack.Model, handoverTokens, handoverTokens, true, ""), key)
 	<-first
 	var drainSeen time.Time
 	stack.WaitFor(r.t, stack.WaitDeadline, "the primary to drain", func() bool {
@@ -141,11 +141,11 @@ func (r *rig) stepHandover(p *v1alpha1.Instance) {
 		drainSeen = o.at
 		return ok
 	})
-	var s streamed
+	var s stack.Streamed
 	select {
 	case s = <-done:
-	case <-time.After(requestTimeout):
-		r.t.Fatalf("step (c): the stream did not end within %s", requestTimeout)
+	case <-time.After(r.fc.RequestTimeout()):
+		r.t.Fatalf("step (c): the stream did not end within %s", r.fc.RequestTimeout())
 	}
 	row := r.checkStream("c", s, &pred, handoverTokens)
 	rs, re := parseRecordTime(row.StartTime), parseRecordTime(row.EndTime)

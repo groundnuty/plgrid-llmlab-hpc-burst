@@ -333,7 +333,7 @@ func (p3 *part3) waitPrimary(d *depRun) {
 			if in.Annotations[v1alpha1.AnnotationPredecessor] != "" || in.Status.Phase != v1alpha1.InstanceReady {
 				continue
 			}
-			if reg, known := r.registered(&in); known && reg {
+			if reg, known := stack.Registered(r.ports, &in); known && reg {
 				in := in
 				d.primary = &in
 				return true, ""
@@ -373,7 +373,7 @@ func (p3 *part3) longStreamAcrossRestart(d *depRun) {
 	p3.t.Helper()
 	p3.atLeastBefore(d, "the 7,000-token stream", 2*time.Minute+streamLead)
 	sc := p3.startRestartScraper(string(d.primary.UID))
-	s, row := p3.controllerRestart(d.primary, "rehearsal-part3-long", chatBodyFor(d.Model, longTokens, longTokens, true), longTokens)
+	s, row := p3.controllerRestart(d.primary, "rehearsal-part3-long", stack.ChatBody(d.Model, longTokens, longTokens, true, ""), longTokens)
 	reads := sc.end()
 	problems, stale, fresh, unserved := restartReadProblems(reads, string(d.primary.UID))
 	for _, p := range problems {
@@ -394,7 +394,7 @@ func (p3 *part3) longStreamAcrossRestart(d *depRun) {
 			"the leader's passes fill): HBEP-8 gives every Instance not ended its info series, and after a controller restart each engine metric "+
 			"unknown with reason stale until the agent's next report (Test plan); a share-of-unknown query reads 0/0 there", unserved)
 	}
-	p3.attribute("the 7,000-token stream", s.reply, row, wantInstance(d, d.primary))
+	p3.attribute("the 7,000-token stream", s.Reply, row, wantInstance(d, d.primary))
 	p3.t.Logf("the 7,000-token stream: %d tokens in %d ms through the front, finish %v, across the controller restart", deref(row.CompletionTokens), row.DurationMs, derefS(row.Finish))
 }
 

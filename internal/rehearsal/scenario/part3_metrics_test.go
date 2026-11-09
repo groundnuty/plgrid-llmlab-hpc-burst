@@ -7,6 +7,7 @@ package scenario_test
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -167,31 +168,31 @@ func (p3 *part3) frontMetricsBothKinds(d *depRun) {
 	type target struct {
 		kind, model string
 		want        wantAttr
-		rows        []usageRow
+		rows        []stack.UsageRow
 	}
 	targets := []*target{
 		{kind: "the Instance", model: d.Model, want: wantInstance(d, d.primary)},
 		{kind: "the managed target", model: managedModel, want: p3.wantManaged()},
 	}
 	for _, tg := range targets {
-		rp := r.send("/v1/chat/completions", chatBodyFor(tg.model, 16, 0, false), "")
-		if rp.err != nil || rp.status != http.StatusOK {
-			r.t.Fatalf("a chat request to %s: %d %v: %.300s", tg.kind, rp.status, rp.err, rp.body)
+		rp := r.fc.SendCtx(context.Background(), "/v1/chat/completions", stack.ChatBody(tg.model, 16, 0, false, ""), "")
+		if rp.Err != nil || rp.Status != http.StatusOK {
+			r.t.Fatalf("a chat request to %s: %d %v: %.300s", tg.kind, rp.Status, rp.Err, rp.Body)
 		}
-		row := r.rowOf(rp.id)
+		row := r.fc.RowOf(rp.ID)
 		p3.attribute("a chat request to "+tg.kind, rp, row, tg.want)
-		first, done := r.startStream(chatBodyFor(tg.model, 16, 0, true), "rehearsal-part3-metrics")
+		first, done := r.fc.StartStream(stack.ChatBody(tg.model, 16, 0, true, ""), "rehearsal-part3-metrics")
 		<-first
 		s := <-done
-		if s.err != nil || s.status != http.StatusOK {
-			r.t.Fatalf("a streamed chat request to %s: %d %v: %.300s", tg.kind, s.status, s.err, s.body)
+		if s.Err != nil || s.Status != http.StatusOK {
+			r.t.Fatalf("a streamed chat request to %s: %d %v: %.300s", tg.kind, s.Status, s.Err, s.Body)
 		}
-		if fin, ok := sseDone(s.body); !fin || !ok {
+		if fin, ok := stack.SSEDone(s.Body); !fin || !ok {
 			r.t.Errorf("the streamed chat request to %s: [DONE] %v, a finish reason %v", tg.kind, fin, ok)
 		}
-		srow := r.rowOf(s.id)
-		p3.attribute("a streamed chat request to "+tg.kind, s.reply, srow, tg.want)
-		tg.rows = []usageRow{row, srow}
+		srow := r.fc.RowOf(s.ID)
+		p3.attribute("a streamed chat request to "+tg.kind, s.Reply, srow, tg.want)
+		tg.rows = []stack.UsageRow{row, srow}
 	}
 	after, err := scrape(url)
 	if err != nil {
@@ -229,7 +230,7 @@ func (p3 *part3) frontMetricsBothKinds(d *depRun) {
 		}
 		r.t.Logf("front metrics, %s: provider %s, model_deployment %s: requests +2, time to first token +%d", tg.kind, prov, dep, firsts)
 	}
-	recs := len(r.usageRows())
+	recs := len(r.fc.UsageRows())
 	if got := sum(find(after, "hpcburst_usage_records_total", nil)); got < float64(recs) {
 		r.t.Errorf("hpcburst_usage_records_total is %v, below the %d records in the usage files", got, recs)
 	}
@@ -355,7 +356,7 @@ func gaugeProblems(ss []sample, v gaugeView) []string {
 // tokens of its usage records.
 func (p3 *part3) servedTokens(uid string) float64 {
 	var n float64
-	for _, row := range p3.usageRows() {
+	for _, row := range p3.fc.UsageRows() {
 		if row.InstanceUID == uid && row.CompletionTokens != nil {
 			n += float64(*row.CompletionTokens)
 		}

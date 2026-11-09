@@ -79,6 +79,8 @@ type rig struct {
 	h   *stack.Host
 	hub *stack.Hub
 	c   client.Client
+	// fc is the front's client side (stack.Client).
+	fc *stack.Client
 	// engineEnv is the served deployment's engine env: the engine double's
 	// modes (direct run only).
 	engineEnv []v1alpha1.EnvVar
@@ -142,6 +144,7 @@ func startRigWith(t *testing.T, s rigSetup) *rig {
 	// The controller lists the checkpoint from the Hub double through
 	// HF_ENDPOINT, which up passes on to it.
 	r.h = stack.StartHost(t, b, dir, dh, stack.CleanEnv("HF_ENDPOINT="+r.hub.URL), s.ports, rehearsalFrontTuning)
+	r.fc = &stack.Client{T: t, H: r.h, Model: stack.Model, MaxRequest: maxRequestDuration}
 	arch := stack.CPUArch(t)
 	r.h.PlaceAgentBuild(arch)
 	r.c = stack.KubeClient(t, r.h.State)
@@ -187,7 +190,7 @@ func (r *rig) assertRealSSH() {
 	if err != nil || serr != nil {
 		r.t.Fatalf("the system ssh (%v) or this binary (%v) is unknown", err, serr)
 	}
-	pid, found := r.statusPID("controller"), false
+	pid, found := r.h.StatusPID("controller"), false
 	for _, c := range stack.ChildrenOf(pid) {
 		switch exe := stack.ProcessExe(c); exe {
 		case want:
@@ -255,7 +258,7 @@ func TestRehearsalDirect(t *testing.T) {
 	in := r.stepStart()
 	done()
 	r.replacementReady(in)
-	key := r.keyFor(in)
+	key := r.fc.KeyFor(in)
 	done = r.stepTimer("b")
 	r.beforeDrain("b", in)
 	r.stepRequests(in, key)
