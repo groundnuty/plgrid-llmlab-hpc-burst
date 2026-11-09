@@ -21,6 +21,9 @@ import (
 	"testing"
 	"time"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
+	"k8s.io/apimachinery/pkg/types"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -53,7 +56,7 @@ func (r *rig) relaysOf(jobID string) map[agentapi.RelayChannel][]relayProc {
 			continue
 		}
 		for _, ch := range agentapi.RelayChannels {
-			if strings.HasSuffix(line, " "+agentapi.RelaySubcommand+" "+string(ch)) {
+			if strings.Contains(line, " "+agentapi.RelaySubcommand+" "+string(ch)+" --dir ") {
 				out[ch] = append(out[ch], relayProc{pid: pid, ch: ch})
 			}
 		}
@@ -98,6 +101,7 @@ func TestRehearsalHostDialed(t *testing.T) {
 	}
 	key := r.fc.KeyFor(in)
 	r.relayKilledMidStream(in, key, relays, seen)
+	r.slowReaderStep(in, key)
 	r.hostDialedControllerRestart(in, key, seen)
 	// No Instance has ended yet; the restarted controller serves the step that
 	// ends them, (g), so the absence check's first read is taken from it
@@ -185,11 +189,16 @@ func (r *rig) relayKilledMidStream(in *v1alpha1.Instance, key string, relays map
 }
 
 // hostDialedControllerRestart stops the controller with TERM; the launcher's
-// supervisor starts it again. The stopping controller stops its relays by
-// PID; the new leader starts both relays of the running Allocation; the agent
-// registers again over the new control relay without being judged
-// unreachable or restarting anything; frpc logs in again over the new
-// serving relay; and a request completes on the Instance.
+// supervisor starts it again. In host-dialed mode a restart cuts the streams
+// in flight: they are counted as cuts and never replayed, and the relays are
+// back within the backoff (owner decision, 9 Nov 2026, "Accept cuts for
+// alpha"; PR #298, comment 6749435073). So a stream sent before the TERM is
+// cut and recorded once, as cut. The stopping controller stops its relays by
+// PID before it releases the Provider's Lease (HBEP-6, Fencing); the new
+// leader starts both relays of the running Allocation; the agent registers
+// again over the new control relay without being judged unreachable or
+// restarting anything; frpc logs in again over the new serving relay; and a
+// request completes on the Instance.
 func (r *rig) hostDialedControllerRestart(in *v1alpha1.Instance, key string, seen map[int]bool) {
 	r.t.Helper()
 	defer r.stepTimer("host-dialed controller restart")()
@@ -200,15 +209,57 @@ func (r *rig) hostDialedControllerRestart(in *v1alpha1.Instance, key string, see
 	}
 	old := r.oneRelayEach("before the controller restart", in.Status.JobID)
 	oldPID := r.h.StatusPID("controller")
+	lease := v1alpha1.ProviderLeaseName(stack.ProviderName)
+	holder := r.holderOf(lease)
+	if holder == "" {
+		r.t.Fatalf("the Provider's Lease %s has no holder before the restart", lease)
+	}
+	first, done := r.fc.StartStream(stack.ChatBody(stack.Model, 1500, 1500, true, ""), key)
+	select {
+	case <-first:
+	case <-time.After(stack.WaitDeadline):
+		r.t.Fatal("the stream across the restart sent no first token")
+	}
 	start := time.Now()
 	if err := syscall.Kill(oldPID, syscall.SIGTERM); err != nil {
 		r.t.Fatalf("TERM the controller %d: %v", oldPID, err)
 	}
+	// The Lease changes hands only after the old copy's relays are gone.
+	stack.WaitFor(r.t, stack.WaitDeadline, "the Provider's Lease released by the old controller", func() bool {
+		if h := r.holderOf(lease); h == holder {
+			return false
+		}
+		for ch, p := range old {
+			if stack.Alive(p.pid) {
+				r.t.Errorf("the Provider's Lease changed hands while the old %s relay %d still ran: relays stop before the Lease is released", ch, p.pid)
+			}
+		}
+		return true
+	})
 	stack.WaitFor(r.t, stack.WaitDeadline, "the old controller to exit", func() bool { return !stack.Alive(oldPID) })
 	for ch, p := range old {
 		if stack.Alive(p.pid) {
 			r.t.Errorf("the %s relay %d outlived its controller %d: relays are stopped by PID", ch, p.pid, oldPID)
 		}
+	}
+	var st stack.Streamed
+	select {
+	case st = <-done:
+	case <-time.After(r.fc.RequestTimeout()):
+		r.t.Fatal("the stream across the restart did not end")
+	}
+	row := r.fc.RowOf(st.ID)
+	if row.Finish == nil || (*row.Finish != "cut" && *row.Finish != "truncated") || row.CutBy == nil {
+		r.t.Errorf("the stream across the restart: finish %s, cut by %s; want it counted as cut (the owner's decision)", strOrNil(row.Finish), strOrNil(row.CutBy))
+	}
+	n := 0
+	for _, u := range r.fc.UsageRows() {
+		if u.RequestID == st.ID {
+			n++
+		}
+	}
+	if n != 1 {
+		r.t.Errorf("the stream across the restart has %d usage records, want 1: a cut request is never replayed", n)
 	}
 	stack.WaitFor(r.t, stack.WaitDeadline, "a new controller that serves", func() bool {
 		p := r.h.StatusPID("controller")
@@ -249,4 +300,92 @@ func (r *rig) hostDialedControllerRestart(in *v1alpha1.Instance, key string, see
 	if len(now.Status.Restarts) != len(before.Status.Restarts) {
 		r.t.Errorf("a restart was recorded across the controller restart: %+v", now.Status.Restarts)
 	}
+}
+
+// holderOf is a Lease's holder in the controllers' namespace, "" when it has
+// none or cannot be read.
+func (r *rig) holderOf(name string) string {
+	var l coordinationv1.Lease
+	ctx, cancel := stack.CallCtx(r.t)
+	defer cancel()
+	if err := r.c.Get(ctx, types.NamespacedName{Namespace: v1alpha1.ControllerNamespace, Name: name}, &l); err != nil || l.Spec.HolderIdentity == nil {
+		return ""
+	}
+	return *l.Spec.HolderIdentity
+}
+
+// slowReaderStep is the nested stack under a slow reader (HBEP-6, Test
+// plan): frpc's tunnel runs inside the serving relay, as one of its streams,
+// and frp multiplexes the Instance's requests inside it. One stream's client
+// reads its reply a few bytes at a time; another stream to the same Instance
+// meanwhile runs to its end, in full, while the slow one is still being
+// read: within frp's window, a slow reader holds back only its own stream.
+func (r *rig) slowReaderStep(in *v1alpha1.Instance, key string) {
+	r.t.Helper()
+	defer r.stepTimer("host-dialed slow reader")()
+	r.beforeDrain("host-dialed slow reader", in)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	slowDone := make(chan error, 1)
+	slowStarted := make(chan struct{})
+	go func() {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+r.ports.ClientAddr+"/v1/chat/completions",
+			strings.NewReader(stack.ChatBody(stack.Model, 1500, 1500, true, "")))
+		if err != nil {
+			slowDone <- err
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+r.h.ClientKey)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Session-Id", key)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			slowDone <- err
+			return
+		}
+		defer resp.Body.Close()
+		close(slowStarted)
+		b := make([]byte, 32)
+		for {
+			if _, err := resp.Body.Read(b); err != nil {
+				slowDone <- err
+				return
+			}
+			select {
+			case <-ctx.Done():
+				slowDone <- ctx.Err()
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+	}()
+	select {
+	case <-slowStarted:
+	case err := <-slowDone:
+		r.t.Fatalf("the slow reader's stream: %v", err)
+	case <-time.After(stack.WaitDeadline):
+		r.t.Fatal("the slow reader's stream did not start")
+	}
+	const tokens = 200
+	_, done := r.fc.StartStream(stack.ChatBody(stack.Model, tokens, tokens, true, ""), key)
+	var st stack.Streamed
+	select {
+	case st = <-done:
+	case <-time.After(r.fc.RequestTimeout()):
+		r.t.Fatal("the other stream did not end while one was read slowly")
+	}
+	select {
+	case err := <-slowDone:
+		r.t.Errorf("the slow reader's stream ended (%v) before the other stream did: the step shows nothing", err)
+	default:
+	}
+	row := r.fc.RowOf(st.ID)
+	if st.Err != nil || row.Finish == nil || *row.Finish != "length" || row.CutBy != nil || len(st.Ticks) < tokens/2 {
+		r.t.Errorf("the other stream: err %v, finish %s, cut by %s, %d token events; want all its tokens, uncut", st.Err, strOrNil(row.Finish), strOrNil(row.CutBy), len(st.Ticks))
+	}
+	var gap time.Duration
+	for i := 1; i < len(st.Ticks); i++ {
+		gap = max(gap, st.Ticks[i].Sub(st.Ticks[i-1]))
+	}
+	r.t.Logf("the other stream ran %s beside the slow reader, its longest gap between tokens %s", st.EndAt.Sub(st.FirstAt).Round(100*time.Millisecond), gap.Round(time.Millisecond))
 }
