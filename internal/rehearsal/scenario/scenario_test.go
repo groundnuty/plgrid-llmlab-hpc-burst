@@ -18,6 +18,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 // rehearsalTiming: a 7 min lease whose drain window is 90 s + 30 s (the
@@ -30,8 +31,14 @@ import (
 // whose time limit, here the 7 min leaseLimit, is not longer than the lead,
 // the drain window plus handoverMargin plus health.startTimeout, so the lead
 // is 2 min + 0 s + 4 min = 6 min. An Instance of the rehearsal is ready in
-// under a minute.
-var rehearsalTiming = timing{lease: "7m", maxRequest: "90s", drainMargin: "30s", drainWindow: "10m", stopGrace: "5s", agentTimeout: "20s", startTimeout: "4m"}
+// under a minute. The profile sets drainWindow explicitly, longer than the
+// sum, so the test computes the drain start from the spec alone (drainStartOf)
+// rather than with the helper the controller and the front share.
+var rehearsalTiming = stack.Timing{Lease: "7m", MaxRequest: "90s", DrainMargin: "30s", DrainWindow: "10m", StopGrace: "5s", AgentTimeout: "20s", StartTimeout: "4m"}
+
+// rehearsalFrontTuning is the front's scaled probe and pause times (step d): a
+// 2 s probe, and a 10 s pause after HBEP-5's three Instance-emitted 5xx in a row.
+const rehearsalFrontTuning = `"probeInterval":"2s","pauseAfterFailures":3,"pauseDuration":"10s",`
 
 // rehearsalAgentTimeout is rehearsalTiming's agentTimeout: how long a
 // controller waits for a silent agent before it judges it unreachable.
@@ -67,21 +74,23 @@ func drainStartOf(in *v1alpha1.Instance) (time.Time, bool) {
 // rig is one running rehearsal: the fake cluster, the host and the API.
 type rig struct {
 	t   *testing.T
-	b   binaries
-	cl  *cluster
-	h   *host
-	hub *hub
+	b   stack.Binaries
+	cl  *rigCluster
+	h   *stack.Host
+	hub *stack.Hub
 	c   client.Client
+	// fc is the front's client side (stack.Client).
+	fc *stack.Client
 	// engineEnv is the served deployment's engine env: the engine double's
 	// modes (direct run only).
 	engineEnv []v1alpha1.EnvVar
-	// watch records every Instance version the API sends (startWatch).
-	watch *recorder
+	// watch records every Instance version the API sends.
+	watch *stack.Recorder
 	// proxyEnds is when frps was first seen to list each ended Instance's
 	// proxy offline (proxyEnded), for the TunnelOrphaned window.
 	proxyEnds map[types.UID]time.Time
-	// ports are the stack's fixed listeners (stackPorts).
-	ports stackPorts
+	// ports are the stack's fixed listeners.
+	ports stack.Ports
 	// tokenDelay is the engine double's token-delay mode of the served
 	// deployment: each generated token takes this long.
 	tokenDelay time.Duration
@@ -102,8 +111,11 @@ type rig struct {
 // and, when it needs them, the fake cluster's QOSes and its own objects.
 type rigSetup struct {
 	mode  string // "direct" or "ssh"
-	ports stackPorts
-	shape clusterShape
+	ports stack.Ports
+	shape stack.ClusterShape
+	// engineGate puts the engine gate (enginegate_test.go) in front of the
+	// jobs' apptainer; it holds nothing until armed.
+	engineGate bool
 	// objects returns the PlatformProfiles and Providers to create once the
 	// stack is up, given the rig, the host's CPU architecture and the batch
 	// Provider's credentials file; nil creates #146's profile and Provider.
@@ -118,39 +130,53 @@ func startRig(t *testing.T, mode string) *rig {
 func startRigWith(t *testing.T, s rigSetup) *rig {
 	t.Helper()
 	b := requireRehearsal(t)
-	dir := shortDir(t)
-	r := &rig{t: t, b: b, hub: startHub(t), ports: s.ports, tokenDelay: tokenDelay, dir: dir}
+	dir := stack.ShortDir(t)
+	r := &rig{t: t, b: b, hub: stack.StartHub(t), ports: s.ports, tokenDelay: tokenDelay, dir: dir}
 	// The job's environment has no HF_ENDPOINT: the agent learns the Hub
 	// from agent.json, which the controller writes from its own (ruling of 1
 	// Nov 2026 on #156; step (a) checks the downloads reached the double).
-	r.cl = startCluster(t, dir, nil, s.shape)
+	r.cl = startRigCluster(t, dir, s.shape, s.engineGate)
 	creds := filepath.Join(dir, "provider-ssh")
-	if err := r.cl.login.WriteCredentials(creds); err != nil {
+	if err := r.cl.Login.WriteCredentials(creds); err != nil {
 		t.Fatal(err)
 	}
-	dh := dialHome{mode: "direct", addr: s.ports.dialHome}
+	dh := stack.DialHome{Mode: "direct", Addr: s.ports.DialHomeListen}
 	if s.mode == "ssh" {
 		dh = r.startGateway(dir)
 	}
 	// The controller lists the checkpoint from the Hub double through
 	// HF_ENDPOINT, which up passes on to it.
-	r.h = startHost(t, b, dir, s.ports, dh, cleanEnv("HF_ENDPOINT="+r.hub.url))
-	arch := cpuArch(t)
-	r.h.placeAgentBuild(arch)
-	r.c = kubeClient(t, r.h.state)
-	objs := []client.Object{batchProfile(arch, rehearsalTiming), batchProvider(creds)}
+	r.h = startRigHost(t, b, dir, dh, stack.CleanEnv("HF_ENDPOINT="+r.hub.URL), s.ports)
+	r.fc = rigClient(t, r.h)
+	arch := stack.CPUArch(t)
+	r.h.PlaceAgentBuild(arch)
+	r.c = stack.KubeClient(t, r.h.State)
+	objs := []client.Object{stack.BatchProfile(arch, rehearsalTiming), stack.BatchProvider(creds)}
 	if s.objects != nil {
 		objs = s.objects(r, arch, creds)
 	}
-	create(t, r.c, objs...)
+	stack.Create(t, r.c, objs...)
 	// Before the deployment exists, so the watch sees every Instance and
 	// Allocation from its first version.
-	r.startWatch()
+	r.watch = stack.StartWatch(r.t, r.h.State, stack.Namespace, nil)
 	return r
 }
 
+// startRigHost is the stack's hpcburst up with the rehearsal's own choices: its
+// front tuning, and a down past its bound that says so.
+func startRigHost(t *testing.T, b stack.Binaries, dir string, dh stack.DialHome, env []string, ports stack.Ports) *stack.Host {
+	t.Helper()
+	return stack.StartHost(t, b, dir, dh, env, ports, rehearsalFrontTuning, stack.NameDownBound)
+}
+
+// rigClient is the rig's client of the front. The rehearsal reads no send times,
+// so no request of its waits for the transport's write hook.
+func rigClient(t *testing.T, h *stack.Host) *stack.Client {
+	return &stack.Client{T: t, H: h, Model: stack.Model, MaxRequest: maxRequestDuration, NoWriteWait: true}
+}
+
 func (r *rig) get(obj client.Object, name, ns string) bool {
-	ctx, cancel := callCtx(r.t)
+	ctx, cancel := stack.CallCtx(r.t)
 	defer cancel()
 	return r.c.Get(ctx, client.ObjectKey{Name: name, Namespace: ns}, obj) == nil
 }
@@ -160,8 +186,8 @@ func (r *rig) get(obj client.Object, name, ns string) bool {
 func (r *rig) providerReady() {
 	r.t.Helper()
 	var p v1alpha1.Provider
-	waitFor(r.t, waitDeadline, "the Provider to be Ready over the login node", func() bool {
-		return r.get(&p, providerName, "") && v1alpha1.ProviderReady(&p, time.Now())
+	stack.WaitFor(r.t, stack.WaitDeadline, "the Provider to be Ready over the login node", func() bool {
+		return r.get(&p, stack.ProviderName, "") && v1alpha1.ProviderReady(&p, time.Now())
 	})
 	r.assertRealSSH()
 }
@@ -180,9 +206,9 @@ func (r *rig) assertRealSSH() {
 	if err != nil || serr != nil {
 		r.t.Fatalf("the system ssh (%v) or this binary (%v) is unknown", err, serr)
 	}
-	pid, found := r.statusPID("controller"), false
-	for _, c := range childrenOf(pid) {
-		switch exe := processExe(c); exe {
+	pid, found := r.h.StatusPID("controller"), false
+	for _, c := range stack.ChildrenOf(pid) {
+		switch exe := stack.ProcessExe(c); exe {
 		case want:
 			found = true
 		case self:
@@ -197,9 +223,9 @@ func (r *rig) assertRealSSH() {
 // allocations lists the deployment's Allocations.
 func (r *rig) allocations() []v1alpha1.Allocation {
 	var l v1alpha1.AllocationList
-	ctx, cancel := callCtx(r.t)
+	ctx, cancel := stack.CallCtx(r.t)
 	defer cancel()
-	if err := r.c.List(ctx, &l, client.InNamespace(namespace)); err != nil {
+	if err := r.c.List(ctx, &l, client.InNamespace(stack.Namespace)); err != nil {
 		r.t.Fatalf("list allocations: %v", err)
 	}
 	return l.Items
@@ -207,9 +233,9 @@ func (r *rig) allocations() []v1alpha1.Allocation {
 
 func (r *rig) instances() []v1alpha1.Instance {
 	var l v1alpha1.InstanceList
-	ctx, cancel := callCtx(r.t)
+	ctx, cancel := stack.CallCtx(r.t)
 	defer cancel()
-	if err := r.c.List(ctx, &l, client.InNamespace(namespace)); err != nil {
+	if err := r.c.List(ctx, &l, client.InNamespace(stack.Namespace)); err != nil {
 		r.t.Fatalf("list instances: %v", err)
 	}
 	return l.Items
@@ -220,7 +246,7 @@ func (r *rig) instances() []v1alpha1.Instance {
 func (r *rig) describe() string {
 	var md v1alpha1.ModelDeployment
 	s := ""
-	if r.get(&md, mdName, namespace) {
+	if r.get(&md, stack.MDName, stack.Namespace) {
 		for _, c := range md.Status.Conditions {
 			s += fmt.Sprintf(" md:%s=%s(%s: %.160s)", c.Type, c.Status, c.Reason, c.Message)
 		}
@@ -248,7 +274,7 @@ func TestRehearsalDirect(t *testing.T) {
 	in := r.stepStart()
 	done()
 	r.replacementReady(in)
-	key := r.keyFor(in)
+	key := r.fc.KeyFor(in)
 	done = r.stepTimer("b")
 	r.beforeDrain("b", in)
 	r.stepRequests(in, key)
@@ -269,13 +295,13 @@ func TestRehearsalDirect(t *testing.T) {
 // HBEP-6's restricted key for the agent endpoint (base+3) and the front's
 // dial-home listener (base+7), and puts the key and known_hosts where the
 // agent looks, the cluster user's ~/.hpcburst/dial-home.
-func (r *rig) startGateway(dir string) dialHome {
+func (r *rig) startGateway(dir string) stack.DialHome {
 	r.t.Helper()
 	gwDir := filepath.Join(dir, "gw")
 	if err := os.Mkdir(gwDir, 0o700); err != nil {
 		r.t.Fatal(err)
 	}
-	gw, err := rehearsal.StartGateway(rehearsal.GatewayConfig{Dir: gwDir, AgentPort: r.ports.base + 3, DialHomePort: r.ports.base + 7})
+	gw, err := rehearsal.StartGateway(rehearsal.GatewayConfig{Dir: gwDir, AgentPort: r.ports.Base + 3, DialHomePort: r.ports.Base + 7})
 	if err != nil {
 		r.t.Fatalf("the dial-home gateway: %v", err)
 	}
@@ -284,14 +310,14 @@ func (r *rig) startGateway(dir string) dialHome {
 			r.t.Errorf("the gateway's Close: %v", err)
 		}
 	})
-	dhDir := filepath.Join(r.cl.home, ".hpcburst", "dial-home")
+	dhDir := filepath.Join(r.cl.Home, ".hpcburst", "dial-home")
 	if err := os.MkdirAll(filepath.Dir(dhDir), 0o700); err != nil {
 		r.t.Fatal(err)
 	}
 	if err := gw.WriteDialHome(dhDir); err != nil {
 		r.t.Fatalf("the dial-home files: %v", err)
 	}
-	return dialHome{mode: "ssh", addr: gw.Addr(), keyPath: filepath.Join(dhDir, "key")}
+	return stack.DialHome{Mode: "ssh", Addr: gw.Addr(), KeyPath: filepath.Join(dhDir, "key")}
 }
 
 // jobSSHForwards lists the agent's ssh processes in its job: the system ssh
@@ -301,14 +327,14 @@ func (r *rig) jobSSHForwards(jobID int) []int {
 	r.t.Helper()
 	want, _ := exec.LookPath("ssh")
 	want, _ = filepath.EvalSymlinks(want)
-	pids, err := r.cl.plat.Processes(jobID)
+	pids, err := r.cl.Plat.Processes(jobID)
 	if err != nil {
 		r.t.Fatalf("job %d's processes: %v", jobID, err)
 	}
 	var out []int
 	for _, p := range pids {
 		args, _ := os.ReadFile("/proc/" + strconv.Itoa(p) + "/cmdline")
-		if processExe(p) == want && strings.Contains(string(args), "-L\x00") {
+		if stack.ProcessExe(p) == want && strings.Contains(string(args), "-L\x00") {
 			out = append(out, p)
 		}
 	}
@@ -331,7 +357,7 @@ func TestRehearsalSSH(t *testing.T) {
 	}
 	r.stepScaleToZero("g")
 	for _, p := range fwd {
-		if alive(p) {
+		if stack.Alive(p) {
 			t.Errorf("the agent's ssh forward %d outlived its job (HBEP-6: no ssh process behind)", p)
 		}
 	}

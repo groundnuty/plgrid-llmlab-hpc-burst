@@ -139,8 +139,8 @@ func startStep(spec stepSpec) (*srunStep, error) {
 	cmd.Args = append([]string{spec.argv0}, spec.args...)
 	cmd.Dir, cmd.Env = spec.dir, spec.env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = inR, outW, errW // files: exec starts no copying goroutine
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	startErr := cmd.Start()
+	cmd.SysProcAttr = sessionAttr()
+	startErr := startProc(cmd)
 	_ = errors.Join(inR.Close(), outW.Close(), errW.Close()) // the child has its own copies
 	if startErr != nil {
 		return nil, errors.Join(startErr, inW.Close(), outR.Close(), errR.Close())

@@ -32,6 +32,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/managed/llmlabtest"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
@@ -41,7 +42,7 @@ import (
 // 29693 and 29694. The LLMLab double binds the first free port of
 // 29695-29699 (llmlabtest takes a range, not a kernel-chosen port).
 // Everything else is kernel-chosen.
-var ports193 = stackPorts{base: 29680, client: "127.0.0.1:29693", dialHome: "127.0.0.1:29694"}
+var ports193 = stack.Ports{Base: 29680, ClientAddr: "127.0.0.1:29693", DialHomeListen: "127.0.0.1:29694"}
 
 const llmlabPortLo, llmlabPortHi = 29695, 29699
 
@@ -66,16 +67,16 @@ const partQOS = "example-part"
 // dep is one served deployment of the test and its Provider, partition and
 // QOS.
 type dep struct {
-	served
+	stack.Served
 	partition, qos string
 	oneSlot        bool
 }
 
 var (
-	queuedDep = dep{served: served{name: "rehearsal-queued", model: "example-org/queued-model", provider: "rehearsal-queued",
-		maxModelLen: part3MaxModelLen}, partition: "rehearsal-queued", qos: "example-now"}
-	oneSlotDep = dep{served: served{name: "rehearsal-oneslot", model: "example-org/oneslot-model", provider: "rehearsal-oneslot",
-		maxModelLen: part3MaxModelLen}, partition: "rehearsal-oneslot", qos: "example-one", oneSlot: true}
+	queuedDep = dep{Served: stack.Served{Name: "rehearsal-queued", Model: "example-org/queued-model", Provider: "rehearsal-queued",
+		MaxModelLen: part3MaxModelLen}, partition: "rehearsal-queued", qos: "example-now"}
+	oneSlotDep = dep{Served: stack.Served{Name: "rehearsal-oneslot", Model: "example-org/oneslot-model", Provider: "rehearsal-oneslot",
+		MaxModelLen: part3MaxModelLen}, partition: "rehearsal-oneslot", qos: "example-one", oneSlot: true}
 )
 
 // The managed target: a Provider of a managed platform whose gateway is the
@@ -91,42 +92,39 @@ const (
 	managedKey         = "example-llmlab-key-0123456789abcdef"
 )
 
-func part3Shape() clusterShape {
-	return clusterShape{
-		partitions: []fakeslurm.Partition{
+func part3Shape() stack.ClusterShape {
+	return stack.ClusterShape{
+		Partitions: []fakeslurm.Partition{
 			{Name: queuedDep.partition, GPUOnly: true, QOS: partQOS},
 			{Name: oneSlotDep.partition, GPUOnly: true},
 		},
-		qos: []fakeslurm.QOS{
+		QOS: []fakeslurm.QOS{
 			{Name: partQOS, MaxSubmitPerUser: fakeslurm.Cap(2000)},
 			{Name: queuedDep.qos, MaxSubmitPerUser: fakeslurm.Cap(1), MaxGPUsPerUser: fakeslurm.Cap(1)},
 			{Name: oneSlotDep.qos, MaxSubmitPerUser: fakeslurm.Cap(1), MaxGPUsPerUser: fakeslurm.Cap(1)},
 		},
-		// The no-overlap phase holds each successor at its engine's start
-		// until its gap has been probed (waitSuccessors).
-		engineGate: true,
 	}
 }
 
 // part3Profile is #146's batch profile with the two partitions and the QOS
 // limits the plan reads, matching the fake cluster's.
 func part3Profile(arch string) *v1alpha1.PlatformProfile {
-	p := batchProfile(arch, rehearsalTiming)
+	p := stack.BatchProfile(arch, rehearsalTiming)
 	q, o := p.Spec.Partitions[0], p.Spec.Partitions[0]
 	q.Name, q.QOS = queuedDep.partition, partQOS
 	o.Name = oneSlotDep.partition
 	p.Spec.Partitions = []v1alpha1.PartitionProfile{q, o}
 	p.Spec.QOS = []v1alpha1.QOSProfile{
-		{Name: partQOS, MaxSubmitPerUser: ptr(int32(2000))},
-		{Name: queuedDep.qos, MaxSubmitPerUser: ptr(int32(1)), MaxGPUsPerUser: ptr(int32(1))},
-		{Name: oneSlotDep.qos, MaxSubmitPerUser: ptr(int32(1)), MaxGPUsPerUser: ptr(int32(1))},
+		{Name: partQOS, MaxSubmitPerUser: stack.Ptr(int32(2000))},
+		{Name: queuedDep.qos, MaxSubmitPerUser: stack.Ptr(int32(1)), MaxGPUsPerUser: stack.Ptr(int32(1))},
+		{Name: oneSlotDep.qos, MaxSubmitPerUser: stack.Ptr(int32(1)), MaxGPUsPerUser: stack.Ptr(int32(1))},
 	}
 	return p
 }
 
 func part3Provider(d dep, creds string) *v1alpha1.Provider {
-	p := batchProvider(creds)
-	p.Name = d.provider
+	p := stack.BatchProvider(creds)
+	p.Name = d.Provider
 	p.Spec.AllowedPartitions = []string{d.partition}
 	p.Spec.QOS = d.qos
 	return p
@@ -179,7 +177,7 @@ func (p3 *part3) objects(r *rig, arch, creds string) []client.Object {
 
 func managedDeployment() *v1alpha1.ModelDeployment {
 	return &v1alpha1.ModelDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: managedMD, Namespace: namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: managedMD, Namespace: stack.Namespace},
 		Spec: v1alpha1.ModelDeploymentSpec{
 			Model:     managedModel,
 			Source:    v1alpha1.ModelSource{Managed: &v1alpha1.ManagedCatalogEntry{Platform: managedPlatform, CatalogName: managedEntry}},
@@ -202,7 +200,9 @@ var part3EngineModes = "token-delay=" + part3TokenDelay.String() + ",no-prefix-c
 //livecheck:rehearsal-part3
 func TestRehearsalPart3(t *testing.T) {
 	p3 := &part3{}
-	r := startRigWith(t, rigSetup{mode: "direct", ports: ports193, shape: part3Shape(), objects: p3.objects})
+	// The engine gate: the no-overlap phase holds each successor at its engine's
+	// start until its gap has been probed (waitSuccessors).
+	r := startRigWith(t, rigSetup{mode: "direct", ports: ports193, shape: part3Shape(), engineGate: true, objects: p3.objects})
 	p3.rig = r
 	r.tokenDelay = part3TokenDelay
 	r.engineEnv = []v1alpha1.EnvVar{{Name: "HB_ENGINE_DOUBLE", Value: part3EngineModes}}
@@ -261,16 +261,16 @@ func (p3 *part3) queued() *depRun {
 func (p3 *part3) start() {
 	r := p3.rig
 	r.t.Helper()
-	for _, name := range []string{queuedDep.provider, oneSlotDep.provider} {
+	for _, name := range []string{queuedDep.Provider, oneSlotDep.Provider} {
 		var pv v1alpha1.Provider
-		waitFor(r.t, waitDeadline, "Provider "+name+" to be Ready over the login node", func() bool {
+		stack.WaitFor(r.t, stack.WaitDeadline, "Provider "+name+" to be Ready over the login node", func() bool {
 			return r.get(&pv, name, "") && v1alpha1.ProviderReady(&pv, time.Now())
 		})
 	}
 	r.assertRealSSH()
-	create(r.t, r.c, managedDeployment())
+	stack.Create(r.t, r.c, managedDeployment())
 	for _, d := range []dep{queuedDep, oneSlotDep} {
-		create(r.t, r.c, servedDeploymentAs(d.served, rehearsalTiming, r.engineEnv...))
+		stack.Create(r.t, r.c, stack.ServedDeploymentAs(d.Served, rehearsalTiming, r.engineEnv...))
 		p3.deps = append(p3.deps, &depRun{dep: d})
 	}
 	p3.waitManaged()
@@ -284,10 +284,10 @@ func (p3 *part3) start() {
 func (p3 *part3) waitManaged() {
 	r := p3.rig
 	r.t.Helper()
-	waitFor(r.t, waitDeadline, "the managed deployment to be Ready on the LLMLab double's catalog", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "the managed deployment to be Ready on the LLMLab double's catalog", func() bool {
 		var pv v1alpha1.Provider
 		var md v1alpha1.ModelDeployment
-		if !r.get(&pv, managedProvider, "") || !r.get(&md, managedMD, namespace) {
+		if !r.get(&pv, managedProvider, "") || !r.get(&md, managedMD, stack.Namespace) {
 			return false
 		}
 		for _, e := range pv.Status.Catalog {
@@ -327,12 +327,12 @@ func (p3 *part3) instancesOf(md string) []v1alpha1.Instance {
 func (p3 *part3) waitPrimary(d *depRun) {
 	r := p3.rig
 	r.t.Helper()
-	waitState(r.t, waitDeadline, "the primary of "+d.name+" to be ready and registered at the front", func() (bool, string) {
-		for _, in := range p3.instancesOf(d.name) {
+	stack.WaitState(r.t, stack.WaitDeadline, "the primary of "+d.Name+" to be ready and registered at the front", func() (bool, string) {
+		for _, in := range p3.instancesOf(d.Name) {
 			if in.Annotations[v1alpha1.AnnotationPredecessor] != "" || in.Status.Phase != v1alpha1.InstanceReady {
 				continue
 			}
-			if reg, known := r.registered(&in); known && reg {
+			if reg, known := stack.Registered(r.ports, &in); known && reg {
 				in := in
 				d.primary = &in
 				return true, ""
@@ -347,7 +347,7 @@ func (p3 *part3) waitPrimary(d *depRun) {
 		r.t.Fatalf("the primary %s has no lease end", d.primary.Name)
 	}
 	d.ds = ds
-	r.t.Logf("%s: primary %s ready on job %d; its drain start is %s, %s from now", d.name, d.primary.Name, d.primaryJob,
+	r.t.Logf("%s: primary %s ready on job %d; its drain start is %s, %s from now", d.Name, d.primary.Name, d.primaryJob,
 		ds.UTC().Format(time.RFC3339), time.Until(ds).Round(time.Second))
 }
 
@@ -360,9 +360,9 @@ func (p3 *part3) atLeastBefore(d *depRun, what string, lead time.Duration) {
 	left := time.Until(d.ds)
 	if left < lead {
 		p3.t.Fatalf("%s would start %s before %s's drain start %s, under the %s it needs; the run is too slow for the 7 min lease",
-			what, left.Round(time.Second), d.name, d.ds.UTC().Format(time.RFC3339), lead)
+			what, left.Round(time.Second), d.Name, d.ds.UTC().Format(time.RFC3339), lead)
 	}
-	p3.t.Logf("HEADROOM %s: %s before %s's drain start, %s needed, %s to spare", what, left.Round(time.Second), d.name, lead, (left - lead).Round(time.Second))
+	p3.t.Logf("HEADROOM %s: %s before %s's drain start, %s needed, %s to spare", what, left.Round(time.Second), d.Name, lead, (left - lead).Round(time.Second))
 }
 
 // longStreamAcrossRestart is items 1 and 4: the Test plan's 7,000-token
@@ -372,7 +372,7 @@ func (p3 *part3) longStreamAcrossRestart(d *depRun) {
 	p3.t.Helper()
 	p3.atLeastBefore(d, "the 7,000-token stream", 2*time.Minute+streamLead)
 	sc := p3.startRestartScraper(string(d.primary.UID))
-	s, row := p3.controllerRestart(d.primary, "rehearsal-part3-long", chatBodyFor(d.model, longTokens, longTokens, true), longTokens)
+	s, row := p3.controllerRestart(d.primary, "rehearsal-part3-long", stack.ChatBody(d.Model, longTokens, longTokens, true, ""), longTokens)
 	reads := sc.end()
 	problems, stale, fresh, unserved := restartReadProblems(reads, string(d.primary.UID))
 	for _, p := range problems {
@@ -393,7 +393,7 @@ func (p3 *part3) longStreamAcrossRestart(d *depRun) {
 			"the leader's passes fill): HBEP-8 gives every Instance not ended its info series, and after a controller restart each engine metric "+
 			"unknown with reason stale until the agent's next report (Test plan); a share-of-unknown query reads 0/0 there", unserved)
 	}
-	p3.attribute("the 7,000-token stream", s.reply, row, wantInstance(d, d.primary))
+	p3.attribute("the 7,000-token stream", s.Reply, row, wantInstance(d, d.primary))
 	p3.t.Logf("the 7,000-token stream: %d tokens in %d ms through the front, finish %v, across the controller restart", deref(row.CompletionTokens), row.DurationMs, derefS(row.Finish))
 }
 

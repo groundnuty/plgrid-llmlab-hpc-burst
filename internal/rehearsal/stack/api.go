@@ -1,8 +1,7 @@
 package stack
 
 // The API side: clients from up's kubeconfig, creating objects, and reading
-// events. Copied from internal/rehearsal/scenario's objects_test.go (issue
-// #251 moves the scenario onto it).
+// events.
 
 import (
 	"path/filepath"

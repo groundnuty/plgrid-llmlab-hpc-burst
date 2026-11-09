@@ -8,6 +8,7 @@ package scenario_test
 
 import (
 	"bytes"
+	"context"
 	"io/fs"
 	"maps"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -30,7 +32,7 @@ import (
 func (r *rig) stagedFrpc() string {
 	r.t.Helper()
 	var found []string
-	_ = filepath.WalkDir(r.cl.scratch, func(p string, d fs.DirEntry, err error) error {
+	_ = filepath.WalkDir(r.cl.Scratch, func(p string, d fs.DirEntry, err error) error {
 		if err == nil && d.Type().IsRegular() && d.Name() == agentapi.FrpcBinaryName &&
 			filepath.Base(filepath.Dir(filepath.Dir(p))) == "frpc" {
 			found = append(found, p)
@@ -38,7 +40,7 @@ func (r *rig) stagedFrpc() string {
 		return nil
 	})
 	if len(found) != 1 {
-		r.t.Fatalf("step (e): %d staged frpc files under %s (%v), want 1", len(found), r.cl.scratch, found)
+		r.t.Fatalf("step (e): %d staged frpc files under %s (%v), want 1", len(found), r.cl.Scratch, found)
 	}
 	p, err := filepath.EvalSymlinks(found[0])
 	if err != nil {
@@ -51,13 +53,13 @@ func (r *rig) stagedFrpc() string {
 // staged frpc.
 func (r *rig) frpcProcesses(jobID int, staged string) []int {
 	r.t.Helper()
-	pids, err := r.cl.plat.Processes(jobID)
+	pids, err := r.cl.Plat.Processes(jobID)
 	if err != nil {
 		r.t.Fatalf("job %d's processes: %v", jobID, err)
 	}
 	var out []int
 	for _, p := range pids {
-		if processExe(p) == staged && alive(p) {
+		if stack.ProcessExe(p) == staged && stack.Alive(p) {
 			out = append(out, p)
 		}
 	}
@@ -88,7 +90,7 @@ func (r *rig) stepTunnelLoss(in *v1alpha1.Instance, key string) {
 	defer r.stepTimer("e")()
 	r.beforeDrain("e", in)
 	before, ok := r.instance(in.Name)
-	if reg, known := r.registered(in); !ok || before.Status.Phase != v1alpha1.InstanceReady ||
+	if reg, known := stack.Registered(r.ports, in); !ok || before.Status.Phase != v1alpha1.InstanceReady ||
 		!conditionTrue(before.Status.Conditions, v1alpha1.ConditionTunnelConnected) || !known || !reg {
 		r.t.Fatalf("step (e) needs a ready, connected and registered Instance %s: %+v, registered %v (known %v)", in.Name, before.Status, reg, known)
 	}
@@ -102,11 +104,11 @@ func (r *rig) stepTunnelLoss(in *v1alpha1.Instance, key string) {
 	start := time.Now()
 	killed := map[int]bool{}
 	var falseAt, goneAt time.Time
-	waitFor(r.t, waitDeadline, "TunnelConnected False and the front's registration dropped", func() bool {
-		if o, ok := r.watch.first(in.UID, start, func(o observation) bool { return o.tunnel == metav1.ConditionFalse }); ok && falseAt.IsZero() {
-			falseAt = o.at
+	stack.WaitFor(r.t, stack.WaitDeadline, "TunnelConnected False and the front's registration dropped", func() bool {
+		if o, ok := r.watch.First(in.UID, start, func(o stack.Observation) bool { return o.Tunnel == metav1.ConditionFalse }); ok && falseAt.IsZero() {
+			falseAt = o.At
 		}
-		if reg, known := r.registered(in); known && !reg && goneAt.IsZero() {
+		if reg, known := stack.Registered(r.ports, in); known && !reg && goneAt.IsZero() {
 			goneAt = time.Now()
 		}
 		if !falseAt.IsZero() && !goneAt.IsZero() {
@@ -145,28 +147,28 @@ func (r *rig) requestDuringLoss(in *v1alpha1.Instance, key string, jobID int, st
 				return
 			case <-time.After(5 * time.Millisecond):
 			}
-			pids, err := r.cl.plat.Processes(jobID)
+			pids, err := r.cl.Plat.Processes(jobID)
 			if err != nil {
 				continue
 			}
 			for _, p := range pids {
-				if !seen[p] && processExe(p) == staged && syscall.Kill(p, syscall.SIGKILL) == nil {
+				if !seen[p] && stack.ProcessExe(p) == staged && syscall.Kill(p, syscall.SIGKILL) == nil {
 					seen[p] = true
 					more = append(more, p)
 				}
 			}
 		}
 	}()
-	rp := r.send("/v1/chat/completions", chatBody(4, 0, false), key)
-	reg, known := r.registered(in)
+	rp := r.fc.SendCtx(context.Background(), "/v1/chat/completions", stack.ChatBody(stack.Model, 4, 0, false, ""), key)
+	reg, known := stack.Registered(r.ports, in)
 	close(stop)
 	for _, p := range <-done {
 		killed[p] = true
 	}
-	if rp.err != nil || rp.status != http.StatusOK {
-		r.t.Fatalf("step (e): a request with the primary's key during the loss: %d %v: %.300s", rp.status, rp.err, rp.body)
+	if rp.Err != nil || rp.Status != http.StatusOK {
+		r.t.Fatalf("step (e): a request with the primary's key during the loss: %d %v: %.300s", rp.Status, rp.Err, rp.Body)
 	}
-	row := r.rowOf(rp.id)
+	row := r.fc.RowOf(rp.ID)
 	if row.Emitter != "instance" || row.InstanceUID == "" || row.InstanceUID == string(in.UID) {
 		r.t.Errorf("step (e): the primary's key during the loss went to %s (%s, emitter %s), not to another Instance; the primary registered %v (known %v) after it",
 			row.Instance, row.InstanceUID, row.Emitter, reg, known)
@@ -181,7 +183,7 @@ func (r *rig) requestDuringLoss(in *v1alpha1.Instance, key string, jobID int, st
 func (r *rig) checkTunnelBack(in *v1alpha1.Instance, key string, jobID int, staged string, killed map[int]bool, parent int, start time.Time) {
 	r.t.Helper()
 	fresh := 0
-	waitFor(r.t, waitDeadline, "the agent to start frpc again", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "the agent to start frpc again", func() bool {
 		for _, p := range r.frpcProcesses(jobID, staged) {
 			if !killed[p] {
 				fresh = p
@@ -194,26 +196,26 @@ func (r *rig) checkTunnelBack(in *v1alpha1.Instance, key string, jobID int, stag
 		r.t.Errorf("step (e): the new frpc %d has parent %d; the killed one had %d, the agent", fresh, pp, parent)
 	}
 	lost := time.Now()
-	waitFor(r.t, waitDeadline, "TunnelConnected True and the front's registration back", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "TunnelConnected True and the front's registration back", func() bool {
 		now, ok := r.instance(in.Name)
-		reg, known := r.registered(in)
+		reg, known := stack.Registered(r.ports, in)
 		return ok && conditionTrue(now.Status.Conditions, v1alpha1.ConditionTunnelConnected) && known && reg
 	})
 	r.t.Logf("step (e): the tunnel and the registration came back %s after the agent's new frpc was seen", time.Since(lost).Round(100*time.Millisecond))
-	rp := r.send("/v1/chat/completions", chatBody(4, 0, false), key)
-	if rp.err != nil || rp.status != 200 {
-		r.t.Fatalf("step (e): a request after the tunnel came back: %d %v: %.300s", rp.status, rp.err, rp.body)
+	rp := r.fc.SendCtx(context.Background(), "/v1/chat/completions", stack.ChatBody(stack.Model, 4, 0, false, ""), key)
+	if rp.Err != nil || rp.Status != 200 {
+		r.t.Fatalf("step (e): a request after the tunnel came back: %d %v: %.300s", rp.Status, rp.Err, rp.Body)
 	}
-	if row := r.rowOf(rp.id); row.InstanceUID != string(in.UID) {
+	if row := r.fc.RowOf(rp.ID); row.InstanceUID != string(in.UID) {
 		r.t.Errorf("step (e): the key's request after the tunnel came back went to %s, not %s", row.Instance, in.Name)
 	}
 	phases := map[v1alpha1.InstancePhase]bool{}
-	for _, o := range r.watch.between(in.UID, start, time.Now()) {
-		phases[o.phase] = true
-		if o.unreachable {
-			r.t.Errorf("step (e): Instance %s was judged AgentUnreachable at %s: the agent's reports do not use frpc", in.Name, o.at.Format(time.RFC3339Nano))
+	for _, o := range r.watch.Between(in.UID, start, time.Now()) {
+		phases[o.Phase] = true
+		if o.Unreachable {
+			r.t.Errorf("step (e): Instance %s was judged AgentUnreachable at %s: the agent's reports do not use frpc", in.Name, o.At.Format(time.RFC3339Nano))
 		}
 	}
 	r.t.Logf("step (e): the Instance's phases during the loss: %v", phases)
-	r.checkNoGap(r.usageRows())
+	r.checkNoGap(r.fc.UsageRows())
 }

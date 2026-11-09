@@ -22,7 +22,8 @@ const waitDeadline = 60 * time.Second
 // helperEnv makes the test binary a helper process instead of running tests:
 // "setpgid-sleep <file>" moves itself into a process group of its own, as
 // hb-agent starts its engine, writes "<pid> <pgid>" to the file and sleeps
-// for at most two minutes.
+// for at most two minutes. "die-with-jobs <root> <file> <how>" is a host of
+// a run-mode platform that dies without Close (procstart_test.go).
 const helperEnv = "FAKESLURM_TEST_HELPER"
 
 func TestMain(m *testing.M) {
@@ -31,6 +32,8 @@ func TestMain(m *testing.M) {
 		os.Exit(setpgidSleep(os.Args[1]))
 	case "setpgid-term":
 		os.Exit(setpgidTerm(os.Args[1], os.Args[2]))
+	case "die-with-jobs":
+		os.Exit(dieWithJobs(os.Args[1], os.Args[2], os.Args[3]))
 	}
 	os.Exit(m.Run())
 }

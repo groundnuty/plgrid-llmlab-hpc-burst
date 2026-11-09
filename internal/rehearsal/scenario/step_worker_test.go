@@ -10,6 +10,7 @@ package scenario_test
 
 import (
 	"bytes"
+	"context"
 	"maps"
 	"net/http"
 	"os"
@@ -19,9 +20,10 @@ import (
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
-// pauseAfterFailures is the front config's pauseAfterFailures (startHost):
+// pauseAfterFailures is the front config's pauseAfterFailures (rehearsalFrontTuning):
 // HBEP-5's three Instance-emitted 5xx in a row.
 const pauseAfterFailures = 3
 
@@ -30,7 +32,7 @@ const pauseAfterFailures = 3
 // engine it starts (the engine double's doc, The executables). Never by name.
 func (r *rig) engineProcesses(jobID int) []int {
 	r.t.Helper()
-	pids, err := r.cl.plat.Processes(jobID)
+	pids, err := r.cl.Plat.Processes(jobID)
 	if err != nil {
 		r.t.Fatalf("job %d's processes: %v", jobID, err)
 	}
@@ -51,8 +53,8 @@ func (r *rig) engineProcesses(jobID int) []int {
 
 // outcome is one request sent during the outage, its reply and its record.
 type outcome struct {
-	rp  reply
-	row usageRow
+	rp  stack.Reply
+	row stack.UsageRow
 }
 
 func (r *rig) allocationNames() map[string]bool {
@@ -75,7 +77,7 @@ func countReason(evs []string, reason string) int {
 
 func (r *rig) eventReasons(name string) []string {
 	var out []string
-	for _, e := range eventsFor(r.t, r.c, name) {
+	for _, e := range stack.EventsFor(r.t, r.c, name) {
 		out = append(out, e.Reason)
 	}
 	return out
@@ -106,7 +108,7 @@ func (r *rig) stepWorkerRestart(in *v1alpha1.Instance, key string) {
 		r.t.Fatalf("step (d) needs a ready Instance %s: %+v", in.Name, before.Status)
 	}
 	jobID, _ := strconv.Atoi(before.Status.JobID)
-	job, _ := r.cl.plat.Job(jobID)
+	job, _ := r.cl.Plat.Job(jobID)
 	allocs := r.allocationNames()
 	restartEvents := countReason(r.eventReasons(in.Name), v1alpha1.ReasonWorkerRestart)
 	engines := r.engineProcesses(jobID)
@@ -136,43 +138,43 @@ func (r *rig) stepWorkerRestart(in *v1alpha1.Instance, key string) {
 	}
 	killAt := time.Now()
 	sent := 0
-	send := func() reply {
-		rp := r.send("/v1/chat/completions", chatBody(4, 0, false), key)
-		if rp.err != nil {
-			r.t.Fatalf("step (d): request %d after the engine's kill got no answer within %s: %v (a hang)", sent, requestTimeout, rp.err)
+	send := func() stack.Reply {
+		rp := r.fc.SendCtx(context.Background(), "/v1/chat/completions", stack.ChatBody(stack.Model, 4, 0, false, ""), key)
+		if rp.Err != nil {
+			r.t.Fatalf("step (d): request %d after the engine's kill got no answer within %s: %v (a hang)", sent, r.fc.RequestTimeout(), rp.Err)
 		}
 		sent++
 		return rp
 	}
 	// Back to back, records read after.
-	var burst []reply
+	var burst []stack.Reply
 	for i := 0; i <= pauseAfterFailures; i++ {
 		burst = append(burst, send())
 	}
 	pausesAfter, _ := r.frontCounter("hpcburst_front_pauses_total")
-	reg, known := r.registered(in)
+	reg, known := stack.Registered(r.ports, in)
 	still, _ := r.instance(in.Name)
-	moved, left := r.watch.first(in.UID, killAt, func(o observation) bool { return o.phase != v1alpha1.InstanceReady })
+	moved, left := r.watch.First(in.UID, killAt, func(o stack.Observation) bool { return o.Phase != v1alpha1.InstanceReady })
 	resume()
 	var outs []outcome
 	for _, rp := range burst {
-		outs = append(outs, outcome{rp: rp, row: r.rowOf(rp.id)})
+		outs = append(outs, outcome{rp: rp, row: r.fc.RowOf(rp.ID)})
 	}
 	r.checkPause(in, outs, pauses, pausesAfter)
 	switch {
 	case !known || !reg:
 		r.t.Errorf("step (d): after the burst the front's probe no longer held Instance %s registered (known %v): the probe, not the pause, may have moved its key", in.Name, known)
-	case still.Status.Phase != v1alpha1.InstanceReady || left && !moved.at.After(parseRecordTime(outs[pauseAfterFailures].row.StartTime)):
+	case still.Status.Phase != v1alpha1.InstanceReady || left && !moved.At.After(parseRecordTime(outs[pauseAfterFailures].row.StartTime)):
 		r.t.Errorf("step (d): Instance %s left ready (%s; first seen %s at %s) before the request after the 5xx: the controller, not the pause, may have moved its key",
-			in.Name, still.Status.Phase, moved.phase, moved.at.Format(time.RFC3339Nano))
+			in.Name, still.Status.Phase, moved.Phase, moved.At.Format(time.RFC3339Nano))
 	}
-	waitFor(r.t, waitDeadline, "the primary to serve again after a worker restart", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "the primary to serve again after a worker restart", func() bool {
 		rp := send()
-		o := outcome{rp: rp, row: r.rowOf(rp.id)}
+		o := outcome{rp: rp, row: r.fc.RowOf(rp.ID)}
 		outs = append(outs, o)
 		now, ok := r.instance(in.Name)
 		return ok && now.Status.Phase == v1alpha1.InstanceReady && len(now.Status.Restarts) > len(before.Status.Restarts) &&
-			o.rp.status == http.StatusOK && o.row.InstanceUID == string(in.UID)
+			o.rp.Status == http.StatusOK && o.row.InstanceUID == string(in.UID)
 	})
 	r.t.Logf("step (d): %d requests; the primary served again %s after the engine's kill", len(outs), time.Since(killAt).Round(100*time.Millisecond))
 	r.checkOutage(in, outs)
@@ -184,10 +186,10 @@ func (r *rig) stepWorkerRestart(in *v1alpha1.Instance, key string) {
 func (r *rig) workerLeader(jobID, engine int) int {
 	r.t.Helper()
 	leader := parentOf(engine)
-	pids, err := r.cl.plat.Processes(jobID)
+	pids, err := r.cl.Plat.Processes(jobID)
 	self, serr := os.Executable()
-	if err != nil || serr != nil || leader == 0 || !slices.Contains(pids, leader) || processExe(leader) != self {
-		r.t.Fatalf("step (d): the engine %d's parent %d (%s) is not the fake Apptainer of job %d (%v, %v)", engine, leader, processExe(leader), jobID, err, serr)
+	if err != nil || serr != nil || leader == 0 || !slices.Contains(pids, leader) || stack.ProcessExe(leader) != self {
+		r.t.Fatalf("step (d): the engine %d's parent %d (%s) is not the fake Apptainer of job %d (%v, %v)", engine, leader, stack.ProcessExe(leader), jobID, err, serr)
 	}
 	return leader
 }
@@ -199,13 +201,13 @@ func (r *rig) checkPause(in *v1alpha1.Instance, burst []outcome, pausesBefore, p
 	r.t.Helper()
 	for i, o := range burst[:pauseAfterFailures] {
 		if o.row.Emitter != "instance" || o.row.InstanceUID != string(in.UID) || o.row.Status < 500 {
-			r.t.Errorf("step (d) burst request %d: record %+v, want the primary's own 5xx: %.300s", i, o.row, o.rp.body)
+			r.t.Errorf("step (d) burst request %d: record %+v, want the primary's own 5xx: %.300s", i, o.row, o.rp.Body)
 		}
 	}
 	next := burst[pauseAfterFailures]
-	if next.rp.status != http.StatusOK || next.row.Emitter != "instance" || next.row.InstanceUID == "" || next.row.InstanceUID == string(in.UID) {
+	if next.rp.Status != http.StatusOK || next.row.Emitter != "instance" || next.row.InstanceUID == "" || next.row.InstanceUID == string(in.UID) {
 		r.t.Errorf("step (d): the request after %d of the primary's 5xx in a row: %d, record %+v; want another Instance's 200 (HBEP-5, Pauses): %.300s",
-			pauseAfterFailures, next.rp.status, next.row, next.rp.body)
+			pauseAfterFailures, next.rp.Status, next.row, next.rp.Body)
 	}
 	if pausesAfter <= pausesBefore {
 		r.t.Errorf("step (d): hpcburst_front_pauses_total stayed %v across %d of the primary's 5xx in a row", pausesAfter, pauseAfterFailures)
@@ -237,7 +239,7 @@ func (r *rig) checkOutage(in *v1alpha1.Instance, outs []outcome) {
 		case row.Emitter == "instance" && row.Status == http.StatusOK:
 			other++
 		default:
-			r.t.Errorf("step (d) request %d: record %+v, want the primary's 5xx or an Instance's 200 (a front row is no_ready_target, for a sole Instance): %.300s", i, row, o.rp.body)
+			r.t.Errorf("step (d) request %d: record %+v, want the primary's 5xx or an Instance's 200 (a front row is no_ready_target, for a sole Instance): %.300s", i, row, o.rp.Body)
 		}
 		run = 0
 	}
@@ -245,7 +247,7 @@ func (r *rig) checkOutage(in *v1alpha1.Instance, outs []outcome) {
 	if longest > pauseAfterFailures {
 		r.t.Errorf("step (d): %d of the primary's 5xx came in a row; the front pauses after %d (HBEP-5, Pauses)", longest, pauseAfterFailures)
 	}
-	r.checkNoGap(r.usageRows())
+	r.checkNoGap(r.fc.UsageRows())
 }
 
 // checkWorkerRestart: the controller raised WorkerRestart (its event and a
@@ -265,7 +267,7 @@ func (r *rig) checkWorkerRestart(in *v1alpha1.Instance, before v1alpha1.Instance
 	if n := countReason(r.eventReasons(in.Name), v1alpha1.ReasonWorkerRestart); n <= events {
 		r.t.Errorf("step (d): %d WorkerRestart events on Instance %s, %d before the kill", n, in.Name, events)
 	}
-	if _, ok := r.watch.first(in.UID, killAt, func(o observation) bool { return o.phase != v1alpha1.InstanceReady }); !ok {
+	if _, ok := r.watch.First(in.UID, killAt, func(o stack.Observation) bool { return o.Phase != v1alpha1.InstanceReady }); !ok {
 		r.t.Errorf("step (d): Instance %s was never seen out of ready after the kill: no reverification", in.Name)
 	}
 	if now.Spec.AllocationRef.Name != before.Spec.AllocationRef.Name {
@@ -275,7 +277,7 @@ func (r *rig) checkWorkerRestart(in *v1alpha1.Instance, before v1alpha1.Instance
 		r.t.Errorf("step (d): Allocations %v after the restart, %v before: a new Allocation", after, allocs)
 	}
 	jobID, _ := strconv.Atoi(now.Status.JobID)
-	if j, _ := r.cl.plat.Job(jobID); j.PID != jobPID || j.State != "RUNNING" {
+	if j, _ := r.cl.Plat.Job(jobID); j.PID != jobPID || j.State != "RUNNING" {
 		r.t.Errorf("step (d): job %d is %s with PID %d, was RUNNING with %d", jobID, j.State, j.PID, jobPID)
 	}
 	if e := r.engineProcesses(jobID); len(e) != 1 || e[0] == killed {

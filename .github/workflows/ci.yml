@@ -11,6 +11,22 @@
 # The go and crd jobs also provide OpenSSH's sshd (HPCBURST_SSHD) for the ssh-mode tunnel tests,
 # which fail under HPCBURST_REQUIRE_FRP=1 without it; the runner's sshd service is never started.
 #
+# The pinned binaries are cached between runs (issue #290), so that an outage of GitHub's release
+# downloads does not fail every job. A job that fetches restores its binaries from actions/cache,
+# runs the same fetch scripts as before, and saves what they installed when the cache had no entry.
+# The scripts check every file against its pin on every run, restored or not, and download what does
+# not match, so the cache only decides whether a download is needed, never what runs. Each cache has
+# one exact key: the runner's OS and architecture, a hash of the files that name the pins (the
+# scripts hold the frp and Kubernetes pins, internal/launcher/k3s-pins.txt holds k3s's), and, for k3s,
+# the versions the job fetches. No restore-keys, so an old entry is never used for a new pin.
+#
+# GitHub scopes a cache to the branch that saved it: a run reads its own branch's caches and the
+# default branch's, and a pull request's own cache is visible to no other pull request. So what
+# serves every pull request is the entry saved by a run on main: the push to main after each merge
+# (this workflow's push trigger), or a run started by hand (workflow_dispatch, on main) when entries
+# have been evicted (GitHub drops one that was not read for 7 days). The save step runs right after
+# the fetch steps, not at the end of the job, so a test that fails later does not leave main unseeded.
+#
 # The workflow reads no secret and pushes nothing. Every action is pinned by commit SHA.
 #
 # crd and launcher-k3s call scripts from hack/. A missing script fails the job: a job that
@@ -24,6 +40,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Seeds the binary cache from main by hand; see above.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -67,6 +85,21 @@ jobs:
       - name: Go version
         run: go version
 
+      # The pinned binaries come from the cache when it has them (see the top of this file): frp,
+      # and the Kubernetes binaries that hack/test-binaries.sh keeps under HPCBURST_TOOLS_CACHE.
+      # The go and crd jobs share one entry. The path lines of the restore and the save must match.
+      - name: Choose where the Kubernetes test binaries are cached
+        run: echo "HPCBURST_TOOLS_CACHE=$RUNNER_TEMP/hpcburst-tools" >> "$GITHUB_ENV"
+
+      - name: Restore the cached pinned binaries
+        id: binaries
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/frp
+            ${{ runner.temp }}/hpcburst-tools
+          key: binaries-tests-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-frp.sh', 'hack/test-binaries.sh') }}
+
       # The tunnel tests of HBEP-6 start frps and frpc. HPCBURST_REQUIRE_FRP=1 makes
       # internal/testenv.FrpBinaries fail, instead of skip, when they are missing; the script
       # checks the release's sha256 before it extracts anything.
@@ -77,6 +110,20 @@ jobs:
             echo "HPCBURST_FRP_DIR=$RUNNER_TEMP/frp"
             echo "HPCBURST_REQUIRE_FRP=1"
           } >> "$GITHUB_ENV"
+
+      # The Kubernetes binaries are fetched here, not inside go test, so that they are verified and
+      # saved before any test runs, and a log shows whether this run downloaded them.
+      - name: Fetch the pinned Kubernetes binaries
+        run: bash hack/test-binaries.sh
+
+      - name: Save the pinned binaries to the cache
+        if: steps.binaries.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/frp
+            ${{ runner.temp }}/hpcburst-tools
+          key: ${{ steps.binaries.outputs.cache-primary-key }}
 
       # The ssh-mode tunnel tests (internal/agent) run OpenSSH's sshd as this user, in inetd
       # mode, with no service and no root. With HPCBURST_REQUIRE_FRP=1 a missing sshd fails them.
@@ -190,6 +237,21 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      # The pinned binaries come from the cache when it has them (see the top of this file): frp,
+      # and the Kubernetes binaries that hack/test-binaries.sh keeps under HPCBURST_TOOLS_CACHE.
+      # The go and crd jobs share one entry. The path lines of the restore and the save must match.
+      - name: Choose where the Kubernetes test binaries are cached
+        run: echo "HPCBURST_TOOLS_CACHE=$RUNNER_TEMP/hpcburst-tools" >> "$GITHUB_ENV"
+
+      - name: Restore the cached pinned binaries
+        id: binaries
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/frp
+            ${{ runner.temp }}/hpcburst-tools
+          key: binaries-tests-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-frp.sh', 'hack/test-binaries.sh') }}
+
       # The tunnel tests of HBEP-6 start frps and frpc. HPCBURST_REQUIRE_FRP=1 makes
       # internal/testenv.FrpBinaries fail, instead of skip, when they are missing; the script
       # checks the release's sha256 before it extracts anything.
@@ -200,6 +262,20 @@ jobs:
             echo "HPCBURST_FRP_DIR=$RUNNER_TEMP/frp"
             echo "HPCBURST_REQUIRE_FRP=1"
           } >> "$GITHUB_ENV"
+
+      # The Kubernetes binaries are fetched here, not inside go test, so that they are verified and
+      # saved before any test runs, and a log shows whether this run downloaded them.
+      - name: Fetch the pinned Kubernetes binaries
+        run: bash hack/test-binaries.sh
+
+      - name: Save the pinned binaries to the cache
+        if: steps.binaries.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/frp
+            ${{ runner.temp }}/hpcburst-tools
+          key: ${{ steps.binaries.outputs.cache-primary-key }}
 
       # The ssh-mode tunnel tests (internal/agent) run OpenSSH's sshd as this user, in inetd
       # mode, with no service and no root. With HPCBURST_REQUIRE_FRP=1 a missing sshd fails them.
@@ -247,6 +323,11 @@ jobs:
     # other, so 60 minutes of tests plus checkout, the k3s download and compiling. The job must
     # outlive that, so that go test's own timeout (which stops the k3s it started) fires first.
     timeout-minutes: 80
+    env:
+      # The k3s versions this job fetches. The cache key and the fetch step both read this one list,
+      # so a version cannot be added to one and not the other. It is a JSON list because an
+      # expression can then join it with a dash for the key and with a space for the command.
+      K3S_VERSIONS: '["1.35.9", "1.36.5"]'
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -255,6 +336,17 @@ jobs:
 
       - name: Choose where the k3s binaries go
         run: echo "HPCBURST_BIN_DIR=$RUNNER_TEMP/k3s-bin" >> "$GITHUB_ENV"
+
+      # The pinned binaries come from the cache when it has them (see the top of this file). The
+      # path lines of the restore and the save must match.
+      - name: Restore the cached pinned binaries
+        id: binaries
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/k3s-bin
+            ${{ runner.temp }}/frp
+          key: binaries-launcher-k3s-${{ join(fromJSON(env.K3S_VERSIONS), '-') }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-frp.sh', 'hack/fetch-k3s.sh', 'internal/launcher/k3s-pins.txt') }}
 
       - name: Set up Go from go.mod
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -265,7 +357,7 @@ jobs:
       # Downloads the two pinned k3s releases the tests start (1.35.9, then upgraded to 1.36.5) and
       # checks their sha256 against internal/launcher/k3s-pins.txt.
       - name: Fetch the pinned k3s binaries
-        run: bash hack/fetch-k3s.sh "$HPCBURST_BIN_DIR" 1.35.9 1.36.5
+        run: bash hack/fetch-k3s.sh "$HPCBURST_BIN_DIR" ${{ join(fromJSON(env.K3S_VERSIONS), ' ') }}
 
       # The tunnel tests of HBEP-6 start frps and frpc. HPCBURST_REQUIRE_FRP=1 makes
       # internal/testenv.FrpBinaries fail, instead of skip, when they are missing; the script
@@ -277,6 +369,15 @@ jobs:
             echo "HPCBURST_FRP_DIR=$RUNNER_TEMP/frp"
             echo "HPCBURST_REQUIRE_FRP=1"
           } >> "$GITHUB_ENV"
+
+      - name: Save the pinned binaries to the cache
+        if: steps.binaries.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/k3s-bin
+            ${{ runner.temp }}/frp
+          key: ${{ steps.binaries.outputs.cache-primary-key }}
 
       # k3s runs as the invoking user (server --rootless --disable-agent), which needs no user
       # namespace, so AppArmor's restriction on them does not matter to it. The size-limited
@@ -418,6 +519,10 @@ jobs:
     # minutes (hack/rehearsal.sh; the target is under 15). The job must outlive that, so that the
     # test's own waits give up and its clean-up runs before the job is cancelled.
     timeout-minutes: 45
+    env:
+      # The k3s versions this job fetches; the cache key and the fetch step both read this list (see
+      # launcher-k3s).
+      K3S_VERSIONS: '["1.36.5"]'
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -430,16 +535,36 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      # The pinned binaries come from the cache when it has them (see the top of this file). The
+      # two rehearsal jobs share one entry. The path lines of the restore and the save must match.
+      - name: Restore the cached pinned binaries
+        id: binaries
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/k3s-bin
+            ${{ runner.temp }}/frp
+          key: binaries-rehearsal-k3s-${{ join(fromJSON(env.K3S_VERSIONS), '-') }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-frp.sh', 'hack/fetch-k3s.sh', 'internal/launcher/k3s-pins.txt') }}
+
       # The rehearsal's hpcburst up starts k3s 1.36.5 only.
       - name: Fetch the pinned k3s binary
         run: |
           echo "HPCBURST_BIN_DIR=$RUNNER_TEMP/k3s-bin" >> "$GITHUB_ENV"
-          bash hack/fetch-k3s.sh "$RUNNER_TEMP/k3s-bin" 1.36.5
+          bash hack/fetch-k3s.sh "$RUNNER_TEMP/k3s-bin" ${{ join(fromJSON(env.K3S_VERSIONS), ' ') }}
 
       - name: Fetch the pinned frp binaries
         run: |
           bash hack/fetch-frp.sh "$RUNNER_TEMP/frp"
           echo "HPCBURST_FRP_DIR=$RUNNER_TEMP/frp" >> "$GITHUB_ENV"
+
+      - name: Save the pinned binaries to the cache
+        if: steps.binaries.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/k3s-bin
+            ${{ runner.temp }}/frp
+          key: ${{ steps.binaries.outputs.cache-primary-key }}
 
       # The fake login node and the ssh dial-home run OpenSSH's sshd as this user, in inetd mode,
       # with no service and no root, as for the go job's tunnel tests.
@@ -488,6 +613,10 @@ jobs:
     # -test.timeout is 25 minutes, so that the test's own waits give up and its clean-up runs
     # before the job is cancelled.
     timeout-minutes: 40
+    env:
+      # The k3s versions this job fetches; the cache key and the fetch step both read this list (see
+      # launcher-k3s).
+      K3S_VERSIONS: '["1.36.5"]'
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -500,16 +629,36 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      # The pinned binaries come from the cache when it has them (see the top of this file). The
+      # two rehearsal jobs share one entry. The path lines of the restore and the save must match.
+      - name: Restore the cached pinned binaries
+        id: binaries
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/k3s-bin
+            ${{ runner.temp }}/frp
+          key: binaries-rehearsal-k3s-${{ join(fromJSON(env.K3S_VERSIONS), '-') }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-frp.sh', 'hack/fetch-k3s.sh', 'internal/launcher/k3s-pins.txt') }}
+
       # The rehearsal's hpcburst up starts k3s 1.36.5 only.
       - name: Fetch the pinned k3s binary
         run: |
           echo "HPCBURST_BIN_DIR=$RUNNER_TEMP/k3s-bin" >> "$GITHUB_ENV"
-          bash hack/fetch-k3s.sh "$RUNNER_TEMP/k3s-bin" 1.36.5
+          bash hack/fetch-k3s.sh "$RUNNER_TEMP/k3s-bin" ${{ join(fromJSON(env.K3S_VERSIONS), ' ') }}
 
       - name: Fetch the pinned frp binaries
         run: |
           bash hack/fetch-frp.sh "$RUNNER_TEMP/frp"
           echo "HPCBURST_FRP_DIR=$RUNNER_TEMP/frp" >> "$GITHUB_ENV"
+
+      - name: Save the pinned binaries to the cache
+        if: steps.binaries.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/k3s-bin
+            ${{ runner.temp }}/frp
+          key: ${{ steps.binaries.outputs.cache-primary-key }}
 
       # The fake login node and the ssh dial-home run OpenSSH's sshd as this user, in inetd mode,
       # with no service and no root, as for the go job's tunnel tests.

@@ -4,74 +4,16 @@ package scenario_test
 // client listener, its usage records and its health. Step (b) of issue #146.
 
 import (
-	"bufio"
-	"bytes"
-	"encoding/json"
+	"context"
 	"net/http"
-	"os"
-	"path/filepath"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
-// usageRow is the part of a usage record (internal/front/usage, Record) the
-// rehearsal reads.
-type usageRow struct {
-	Counter        uint64 `json:"counter"`
-	RequestID      string `json:"requestID"`
-	StartTime      string `json:"startTime"`
-	EndTime        string `json:"endTime"`
-	Path           string `json:"path"`
-	RequestedModel string `json:"requestedModel"`
-	Provider       string `json:"provider"`
-	// ModelDeployment and DeploymentID name the target's deployment and its
-	// full deployment ID (a managed entry's managed ID).
-	ModelDeployment string  `json:"modelDeployment"`
-	DeploymentID    string  `json:"deploymentID"`
-	Instance        string  `json:"instance"`
-	InstanceUID     string  `json:"instanceUID"`
-	Emitter         string  `json:"emitter"`
-	Status          int     `json:"status"`
-	Stream          bool    `json:"stream"`
-	Finish          *string `json:"finish"`
-	CutBy           *string `json:"cutBy"`
-	ErrorCode       *string `json:"errorCode"`
-	// CompletionTokens and DurationMs: the reply's tokens and the request's
-	// time at the front.
-	CompletionTokens *int64 `json:"completionTokens"`
-	DurationMs       int64  `json:"durationMs"`
-	FirstTokenMs     *int64 `json:"firstTokenMs"`
-}
-
-// usageRows reads every usage record so far, by counter.
-func (r *rig) usageRows() []usageRow {
-	r.t.Helper()
-	files, _ := filepath.Glob(filepath.Join(r.h.usageDir, "usage*.jsonl"))
-	var rows []usageRow
-	for _, f := range files {
-		b, err := os.ReadFile(f)
-		if err != nil {
-			r.t.Fatalf("usage file %s: %v", f, err)
-		}
-		sc := bufio.NewScanner(bytes.NewReader(b))
-		sc.Buffer(make([]byte, 1<<20), 1<<20)
-		for sc.Scan() {
-			var row usageRow
-			if err := json.Unmarshal(sc.Bytes(), &row); err != nil {
-				r.t.Fatalf("usage record in %s: %v: %s", f, err, sc.Bytes())
-			}
-			rows = append(rows, row)
-		}
-	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].Counter < rows[j].Counter })
-	return rows
-}
-
 // checkNoGap fails unless the counters run without a gap.
-func (r *rig) checkNoGap(rows []usageRow) {
+func (r *rig) checkNoGap(rows []stack.UsageRow) {
 	r.t.Helper()
 	for i := 1; i < len(rows); i++ {
 		if rows[i].Counter != rows[i-1].Counter+1 {
@@ -80,50 +22,33 @@ func (r *rig) checkNoGap(rows []usageRow) {
 	}
 }
 
-// sseDone reports whether a streamed body ends with "data: [DONE]" and has a
-// chunk with a finish reason.
-func sseDone(body []byte) (done, finished bool) {
-	var last string
-	for _, l := range strings.Split(strings.TrimSpace(string(body)), "\n") {
-		l = strings.TrimSpace(l)
-		if !strings.HasPrefix(l, "data:") {
-			continue
-		}
-		last = strings.TrimSpace(strings.TrimPrefix(l, "data:"))
-		if strings.Contains(last, `"finish_reason":"`) {
-			finished = true
-		}
-	}
-	return last == "[DONE]", finished
-}
-
 // stepRequests is step (b): chat, streamed chat and completions through the
 // front by the plain model name, with a conversation key the ring maps to the
-// primary (keyFor), since its replacement is routable too. Each is served by
+// primary (stack.Client.KeyFor), since its replacement is routable too. Each is served by
 // the primary, and its usage record names it; the counters have no gap. The
 // front's record names an Instance by its inventory key, namespace/name
 // (internal/front/inventory/build.go), and its UID.
 func (r *rig) stepRequests(in *v1alpha1.Instance, key string) {
 	r.t.Helper()
 	reqs := []struct{ path, body string }{
-		{"/v1/chat/completions", chatBody(16, 0, false)},
-		{"/v1/chat/completions", chatBody(16, 0, true)},
-		{"/v1/completions", `{"model":"` + model + `","prompt":"hello","max_tokens":16}`},
+		{"/v1/chat/completions", stack.ChatBody(stack.Model, 16, 0, false, "")},
+		{"/v1/chat/completions", stack.ChatBody(stack.Model, 16, 0, true, "")},
+		{"/v1/completions", `{"model":"` + stack.Model + `","prompt":"hello","max_tokens":16}`},
 	}
 	for i, q := range reqs {
-		rp := r.send(q.path, q.body, key)
-		if rp.err != nil || rp.status != http.StatusOK {
-			r.t.Fatalf("step (b) request %d (%s): %d %v: %.300s", i, q.path, rp.status, rp.err, rp.body)
+		rp := r.fc.SendCtx(context.Background(), q.path, q.body, key)
+		if rp.Err != nil || rp.Status != http.StatusOK {
+			r.t.Fatalf("step (b) request %d (%s): %d %v: %.300s", i, q.path, rp.Status, rp.Err, rp.Body)
 		}
 		if i == 1 {
-			if done, finished := sseDone(rp.body); !done || !finished {
-				r.t.Errorf("step (b) streamed chat: [DONE] %v, a finish reason %v: %.300s", done, finished, rp.body)
+			if done, finished := stack.SSEDone(rp.Body); !done || !finished {
+				r.t.Errorf("step (b) streamed chat: [DONE] %v, a finish reason %v: %.300s", done, finished, rp.Body)
 			}
 		}
-		row := r.rowOf(rp.id)
+		row := r.fc.RowOf(rp.ID)
 		switch {
-		case row.Path != q.path || row.RequestedModel != model || row.Status != http.StatusOK:
-			r.t.Errorf("step (b) record %d: %+v, want %s, %s, 200", i, row, q.path, model)
+		case row.Path != q.path || row.RequestedModel != stack.Model || row.Status != http.StatusOK:
+			r.t.Errorf("step (b) record %d: %+v, want %s, %s, 200", i, row, q.path, stack.Model)
 		case row.InstanceUID != string(in.UID) || row.Instance != in.Namespace+"/"+in.Name || row.Emitter != "instance":
 			r.t.Errorf("step (b) record %d names Instance %s (%s), emitter %s; want %s/%s (%s), instance", i, row.Instance, row.InstanceUID, row.Emitter, in.Namespace, in.Name, in.UID)
 		case row.Finish == nil || *row.Finish == "stream_cut" || row.CutBy != nil:
@@ -136,5 +61,5 @@ func (r *rig) stepRequests(in *v1alpha1.Instance, key string) {
 			r.t.Errorf("step (b) record %d: %v tokens in %d ms, below %s a token: the engine double's token-delay mode did not reach the engine", i, row.CompletionTokens, row.DurationMs, r.tokenDelay)
 		}
 	}
-	r.checkNoGap(r.usageRows())
+	r.checkNoGap(r.fc.UsageRows())
 }

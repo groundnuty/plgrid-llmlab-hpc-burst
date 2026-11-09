@@ -18,6 +18,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 // witnessName is the tunnel witness: an Instance no ModelDeployment owns.
@@ -65,7 +66,7 @@ func (r *rig) assertNoOrphans(steps string) {
 	if len(base.orphanable) > 0 {
 		unmet = append(unmet, fmt.Sprintf("condition 1: at the first read frps listed proxies online for ended or gone Instances %v", base.orphanable))
 	}
-	unmet = append(unmet, orphanFirstReadProblems(r.proxyEnds, base.live, r.watch.createdAt, base.first)...)
+	unmet = append(unmet, orphanFirstReadProblems(r.proxyEnds, base.live, r.createdAt, base.first)...)
 	for uid, end := range r.proxyEnds {
 		if !end.After(base.change) {
 			unmet = append(unmet, fmt.Sprintf("condition 1: the proxy %s was seen offline at %s, not after the first read at %s", uid, ts(end), ts(base.change)))
@@ -93,7 +94,7 @@ func (r *rig) assertNoOrphans(steps string) {
 			r.t.Errorf("frps lists the proxy %s online again after it was seen offline", uid)
 		}
 	}
-	waitFor(r.t, waitDeadline, "the time any TunnelOrphaned would have been due, "+ts(due), func() bool { return time.Now().After(due) })
+	stack.WaitFor(r.t, stack.WaitDeadline, "the time any TunnelOrphaned would have been due, "+ts(due), func() bool { return time.Now().After(due) })
 	w, created, cond, seen := r.tunnelWitness()
 	barrier := witnessBarrier(w.Name, created, cond, seen, due)
 	r.t.Logf("TunnelOrphaned check (%s): the last of %d proxies seen offline at %s, due by %s; the witness %s created %s and given TunnelConnected %s by a read by %s",
@@ -109,7 +110,7 @@ func (r *rig) assertNoOrphans(steps string) {
 func (r *rig) logOrphanEvents(steps string) {
 	r.t.Helper()
 	var l eventsv1.EventList
-	ctx, cancel := callCtx(r.t)
+	ctx, cancel := stack.CallCtx(r.t)
 	defer cancel()
 	if err := r.c.List(ctx, &l); err != nil {
 		r.t.Logf("list events for the TunnelOrphaned finding: %v", err)
@@ -194,17 +195,15 @@ func conditionString(c *metav1.Condition) string {
 // written its TunnelConnected condition from a successful read of frps. It
 // returns the witness, when it was created, the last condition seen, and when
 // a successful read's condition was first seen: zero when none came within
-// waitDeadline, which makes the check inconclusive (witnessBarrier).
+// stack.WaitDeadline, which makes the check inconclusive (witnessBarrier).
 func (r *rig) tunnelWitness() (*v1alpha1.Instance, time.Time, *metav1.Condition, time.Time) {
 	r.t.Helper()
-	r.watch.mu.Lock()
-	spec := r.watch.firstSpec
-	r.watch.mu.Unlock()
+	spec := r.firstSpec()
 	if spec == nil {
 		r.t.Fatal("the watch saw no Instance: the tunnel witness has no spec to copy")
 	}
-	w := &v1alpha1.Instance{ObjectMeta: metav1.ObjectMeta{Name: witnessName, Namespace: namespace}, Spec: *spec.DeepCopy()}
-	ctx, cancel := callCtx(r.t)
+	w := &v1alpha1.Instance{ObjectMeta: metav1.ObjectMeta{Name: witnessName, Namespace: stack.Namespace}, Spec: *spec.DeepCopy()}
+	ctx, cancel := stack.CallCtx(r.t)
 	err := r.c.Create(ctx, w)
 	cancel()
 	if err != nil {
@@ -213,17 +212,17 @@ func (r *rig) tunnelWitness() (*v1alpha1.Instance, time.Time, *metav1.Condition,
 	created := time.Now()
 	// A test that fails before the check deletes it while the API serves.
 	r.t.Cleanup(func() {
-		if !r.h.downed {
+		if !r.h.Downed() {
 			r.deleteWitness(w)
 		}
 	})
 	// A failed read's Unknown is written once and stays until a successful
 	// read changes it, so the wait goes on past it.
-	deadline, cut := boundedDeadline(r.t, waitDeadline)
+	deadline, cut := stack.BoundedDeadline(r.t, stack.WaitDeadline)
 	var last *metav1.Condition
 	for {
 		var cur v1alpha1.Instance
-		if r.get(&cur, w.Name, namespace) {
+		if r.get(&cur, w.Name, stack.Namespace) {
 			if c := meta.FindStatusCondition(cur.Status.Conditions, v1alpha1.ConditionTunnelConnected); c != nil {
 				last = c.DeepCopy()
 				if fromSuccessfulRead(c) {
@@ -233,9 +232,9 @@ func (r *rig) tunnelWitness() (*v1alpha1.Instance, time.Time, *metav1.Condition,
 		}
 		if time.Now().After(deadline) {
 			if cut {
-				r.t.Fatalf("gave up waiting for a successful read's TunnelConnected on the witness %s %s before the test's deadline, so that its clean-up runs", w.Name, cleanupMargin)
+				r.t.Fatalf("gave up waiting for a successful read's TunnelConnected on the witness %s %s before the test's deadline, so that its clean-up runs", w.Name, stack.CleanupMargin)
 			}
-			r.t.Logf("no successful read of frps wrote TunnelConnected on the witness %s within %s (last %s)", w.Name, waitDeadline, conditionString(last))
+			r.t.Logf("no successful read of frps wrote TunnelConnected on the witness %s within %s (last %s)", w.Name, stack.WaitDeadline, conditionString(last))
 			return w, created, last, time.Time{}
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -246,15 +245,15 @@ func (r *rig) tunnelWitness() (*v1alpha1.Instance, time.Time, *metav1.Condition,
 // already gone is no error.
 func (r *rig) deleteWitness(w *v1alpha1.Instance) {
 	r.t.Helper()
-	ctx, cancel := callCtx(r.t)
-	err := r.c.Delete(ctx, &v1alpha1.Instance{ObjectMeta: metav1.ObjectMeta{Name: w.Name, Namespace: namespace}})
+	ctx, cancel := stack.CallCtx(r.t)
+	err := r.c.Delete(ctx, &v1alpha1.Instance{ObjectMeta: metav1.ObjectMeta{Name: w.Name, Namespace: stack.Namespace}})
 	cancel()
 	if err != nil && !apierrors.IsNotFound(err) {
 		r.t.Errorf("delete the tunnel witness: %v", err)
 		return
 	}
-	waitFor(r.t, waitDeadline, "the tunnel witness to be gone", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "the tunnel witness to be gone", func() bool {
 		var cur v1alpha1.Instance
-		return !r.get(&cur, w.Name, namespace)
+		return !r.get(&cur, w.Name, stack.Namespace)
 	})
 }

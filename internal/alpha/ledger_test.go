@@ -92,6 +92,7 @@ func startStandIn(t *testing.T) *standIn {
 		if err := s.plat.Close(); err != nil {
 			t.Errorf("the fake cluster's Close: %v", err)
 		}
+		noJobShellsLeft(t, s.dir) // #274: a stand-in cluster's job shells too
 	})
 	login, err := rehearsal.StartLoginNode(rehearsal.LoginConfig{
 		Dir: filepath.Join(s.dir, "ln"), Platform: s.plat,

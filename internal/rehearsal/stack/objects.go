@@ -4,8 +4,6 @@ package stack
 // fake cluster's, one Provider over the login node, and one served
 // ModelDeployment. The engine double's modes travel as the engine's env, the
 // way the real controller writes a launch (internal/lifecycle/desired.go).
-// Copied from internal/rehearsal/scenario's objects_test.go (issue #251 moves
-// the scenario onto it).
 
 import (
 	"runtime"
@@ -50,8 +48,8 @@ type Timing struct {
 }
 
 // CPUArch is this host's architecture as a profile names it. A host whose
-// architecture no profile names fails the test at once, as the scenario's
-// cpuArch does: a stand-in must not go on into its setup with an empty class.
+// architecture no profile names fails the test at once: a stand-in must not go
+// on into its setup with an empty class.
 func CPUArch(t T) string {
 	t.Helper()
 	switch runtime.GOARCH {
@@ -104,19 +102,30 @@ func BatchProvider(creds string) *v1alpha1.Provider {
 // ServedDeployment is the stand-in's served ModelDeployment of the engine
 // double, on ProviderName, with the timing given.
 func ServedDeployment(tm Timing, engineEnv ...v1alpha1.EnvVar) *v1alpha1.ModelDeployment {
+	return ServedDeploymentAs(Served{Name: MDName, Model: Model, Provider: ProviderName, MaxModelLen: "4096"}, tm, engineEnv...)
+}
+
+// Served names one served ModelDeployment: its name, the model clients ask for,
+// its one Provider and the engine's max-model-len.
+type Served struct {
+	Name, Model, Provider, MaxModelLen string
+}
+
+// ServedDeploymentAs is ServedDeployment under the names given.
+func ServedDeploymentAs(d Served, tm Timing, engineEnv ...v1alpha1.EnvVar) *v1alpha1.ModelDeployment {
 	return &v1alpha1.ModelDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: MDName, Namespace: Namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: d.Name, Namespace: Namespace},
 		Spec: v1alpha1.ModelDeploymentSpec{
-			Model: Model,
+			Model: d.Model,
 			Source: v1alpha1.ModelSource{Served: &v1alpha1.ServingSpec{
 				Checkpoint: v1alpha1.CheckpointSpec{Repository: CheckpointRepo, Revision: CheckpointRev},
 				Engine: v1alpha1.EngineSpec{Name: "vllm", Version: "0.32.0", ImageDigest: EngineDigest,
 					Image: "docker.io/vllm/vllm-openai"},
-				Flags: []v1alpha1.EngineFlag{{Name: "max-model-len", Value: "4096"}},
+				Flags: []v1alpha1.EngineFlag{{Name: "max-model-len", Value: d.MaxModelLen}},
 				Env:   engineEnv,
 			}},
 			Instances:  1,
-			Providers:  v1alpha1.ProviderSelection{Names: []string{ProviderName}},
+			Providers:  v1alpha1.ProviderSelection{Names: []string{d.Provider}},
 			LeaseLimit: Dur(tm.Lease),
 			// The Allocations end at scale 0: the default, Keep, would hold a
 			// warm Allocation until its hard end. 10 s is the scaled idle limit.

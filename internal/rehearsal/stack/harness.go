@@ -1,10 +1,8 @@
 package stack
 
 // The host side: bounded waits and commands, the root k3s guard, process
-// helpers, and one hpcburst up. Copied from internal/rehearsal/scenario's
-// harness_test.go and steps_test.go (statusPID); the rehearsal's fixed ports
-// are Ports here, and its front tuning FrontTuning (issue #251 moves the
-// scenario onto these).
+// helpers, and one hpcburst up. The ports and the front's tuning are the
+// caller's.
 
 import (
 	"bytes"
@@ -185,18 +183,30 @@ const (
 // 10 s after that, in case a process it started kept the pipe open.
 func Run(t T, timeout time.Duration, env []string, name string, args ...string) (string, error) {
 	t.Helper()
+	out, over, err := runBounded(timeout, env, name, args...)
+	if over {
+		err = errors.Join(err, pastBound(name, timeout))
+	}
+	return out, err
+}
+
+// runBounded is Run without its word on the deadline: the command's output and
+// error as they are, and whether the deadline passed.
+func runBounded(timeout time.Duration, env []string, name string, args ...string) (out string, over bool, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = env
 	cmd.WaitDelay = 10 * time.Second
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	err := cmd.Run()
-	if ctx.Err() != nil {
-		err = errors.Join(err, fmt.Errorf("%s did not end within %s", filepath.Base(name), timeout))
-	}
-	return out.String(), err
+	var buf bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &buf, &buf
+	err = cmd.Run()
+	return buf.String(), ctx.Err() != nil, err
+}
+
+// pastBound is what a command that passed its deadline adds to its error.
+func pastBound(name string, timeout time.Duration) error {
+	return fmt.Errorf("%s did not end within %s", filepath.Base(name), timeout)
 }
 
 // Within is d, or less when WaitCap comes first: a command the test body runs
@@ -293,11 +303,31 @@ type Binaries struct {
 	Repo                               string
 }
 
-// Missing lists the binaries that are not executable files.
+// builds are the binaries a run needs whatever testenv.FrpBinaries finds.
+func (b Binaries) builds() []string {
+	return []string{b.HPCBurst, b.Controller, b.Front, b.Agent, filepath.Join(b.K3sDir, "k3s-1.36.5", "k3s")}
+}
+
+// Missing lists the binaries that are not executable files. The alpha rows call
+// it once testenv.FrpBinaries has found frps and frpc.
 func (b Binaries) Missing() []string {
 	var missing []string
-	for _, p := range []string{b.HPCBurst, b.Controller, b.Front, b.Agent, filepath.Join(b.K3sDir, "k3s-1.36.5", "k3s"), b.Frps, b.Frpc} {
+	for _, p := range append(b.builds(), b.Frps, b.Frpc) {
 		if fi, err := os.Stat(p); err != nil || fi.Mode()&0o111 == 0 || fi.IsDir() {
+			missing = append(missing, p)
+		}
+	}
+	return missing
+}
+
+// MissingBuilds is the rehearsal's check, made before testenv.FrpBinaries, which
+// may skip the test: a missing build must not turn into a skip. It lists the
+// builds without an executable bit, so a directory in a binary's place passes
+// here, and fails when it is run: without frp, that run still skips.
+func (b Binaries) MissingBuilds() []string {
+	var missing []string
+	for _, p := range b.builds() {
+		if fi, err := os.Stat(p); err != nil || fi.Mode()&0o111 == 0 {
 			missing = append(missing, p)
 		}
 	}
@@ -311,6 +341,28 @@ type Ports struct {
 	Base           int
 	ClientAddr     string
 	DialHomeListen string
+}
+
+// URL is http://127.0.0.1:<base+off><path>, one of up's listeners.
+func (p Ports) URL(off int, path string) string {
+	return fmt.Sprintf("http://127.0.0.1:%d%s", p.Base+off, path)
+}
+
+// All lists the stack's listening ports: the front's client and dial-home
+// listeners, those that are set, and up's block from Base (13 ports).
+func (p Ports) All() []int {
+	var out []int
+	for _, a := range []string{p.ClientAddr, p.DialHomeListen} {
+		if i := strings.LastIndexByte(a, ':'); i >= 0 {
+			if n, err := strconv.Atoi(a[i+1:]); err == nil {
+				out = append(out, n)
+			}
+		}
+	}
+	for n := p.Base; n <= p.Base+12; n++ {
+		out = append(out, n)
+	}
+	return out
 }
 
 // DialHome is how jobs reach this host: direct, to the front's dial-home
@@ -330,16 +382,34 @@ type Host struct {
 	UsageDir  string
 	ClientKey string
 	Ports     Ports
-	downed    bool // hpcburst down has run
+	// DownBound bounds hpcburst down; zero is DownTimeout. A test of a down that
+	// never ends sets it.
+	DownBound     time.Duration
+	downed        bool // hpcburst down has run
+	nameDownBound bool // NameDownBound
 }
+
+// HostOption is a behaviour of StartHost's Host where a caller differs from the
+// default, the alpha rows'. It takes effect before StartHost registers the
+// clean-up, so it also holds for a stack whose start fails.
+type HostOption func(*Host)
+
+// NameDownBound makes a hpcburst down past its bound say so in its error, as Run
+// does for the other commands: the rehearsal's choice. Without it the error is
+// the command's own, and a down that ended well just as the bound passed is no
+// error.
+func NameDownBound(h *Host) { h.nameDownBound = true }
 
 // StartHost runs hpcburst up in the given dial-home mode, with the front and
 // its client and dial-home listeners, and registers hpcburst down. frontTuning
 // is extra members of the front's configuration, a JSON fragment ending in a
 // comma ("" for the defaults): the rehearsal's scaled probe and pause times.
-func StartHost(t T, b Binaries, dir string, dh DialHome, env []string, ports Ports, frontTuning string) *Host {
+func StartHost(t T, b Binaries, dir string, dh DialHome, env []string, ports Ports, frontTuning string, opts ...HostOption) *Host {
 	t.Helper()
 	h := &Host{T: t, B: b, State: filepath.Join(dir, "st"), Env: env, UsageDir: filepath.Join(dir, "usage"), ClientKey: strings.Repeat("c1", 32), Ports: ports}
+	for _, o := range opts {
+		o(h)
+	}
 	keys := filepath.Join(dir, "client-keys.json")
 	if err := os.WriteFile(keys, []byte(`{"keys":[{"id":"rehearsal","key":"`+h.ClientKey+`"}]}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -375,7 +445,7 @@ func StartHost(t T, b Binaries, dir string, dh DialHome, env []string, ports Por
 		t.Fatalf("hpcburst up: %v\n%s", err, out)
 	}
 	WaitFor(t, WaitDeadline, "the controller's /readyz", func() bool {
-		return HTTPStatus(fmt.Sprintf("http://127.0.0.1:%d/readyz", ports.Base+6)) == http.StatusOK
+		return HTTPStatus(ports.URL(6, "/readyz")) == http.StatusOK
 	})
 	return h
 }
@@ -396,17 +466,23 @@ func (h *Host) DownErr() error {
 		return nil
 	}
 	h.downed = true
-	ctx, cancel := context.WithTimeout(context.Background(), DownTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, h.B.HPCBurst, "down", "--state-dir", h.State)
-	cmd.Env, cmd.WaitDelay = h.Env, 10*time.Second
-	out, err := cmd.CombinedOutput()
+	bound := h.DownBound
+	if bound == 0 {
+		bound = DownTimeout
+	}
+	out, over, err := runBounded(bound, h.Env, h.B.HPCBurst, "down", "--state-dir", h.State)
+	if over && h.nameDownBound {
+		err = errors.Join(err, pastBound(h.B.HPCBurst, bound))
+	}
 	h.T.Logf("memory peak of the run's cgroup (the whole stack): %s", MemoryPeak())
 	if err != nil {
 		return fmt.Errorf("hpcburst down: %v\n%s", err, out)
 	}
 	return nil
 }
+
+// Downed reports whether hpcburst down has run: the API no longer serves.
+func (h *Host) Downed() bool { return h.downed }
 
 // PlaceAgentBuild puts the hb-agent build and the pinned frpc where the
 // controller reads them, as an operator does (HBEP-4:

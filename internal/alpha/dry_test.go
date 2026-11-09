@@ -116,6 +116,7 @@ func newDrySteps(t *testing.T, cfg Config, family string) *drySteps {
 		if err := plat.Close(); err != nil {
 			t.Errorf("the fake cluster did not close cleanly: %v", err)
 		}
+		noJobShellsLeft(t, root) // every case, every fault: none ends with a job's shell alive (#274)
 	})
 	return d
 }
@@ -193,7 +194,23 @@ func (d *drySteps) submit(tag, partition, qos string) (n int, id string) {
 	if _, err := strconv.Atoi(id); err != nil {
 		d.t.Fatalf("sbatch printed %q", res.Stdout)
 	}
+	holdForKill(n)
 	return n, id
+}
+
+// holdEnv makes a dry run hold right after its n-th submission, n being the
+// variable's value, with the file held-at-job written in the temp directory,
+// until the process is killed: the child of TestADryRunKilledMidJobLeavesNoJobShell
+// (leak_test.go) is the one run that sets it. The job has started by then, since
+// the fake starts a job within the sbatch that made it eligible. Unset, it does nothing.
+const holdEnv = "ALPHA_DRY_HOLD_AT_JOB"
+
+func holdForKill(n int) {
+	if os.Getenv(holdEnv) != strconv.Itoa(n) {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(os.TempDir(), "held-at-job"), nil, 0o600)
+	time.Sleep(time.Hour)
 }
 
 // submitHeld is a second submission under a tag that already names a job, held so that it never runs: the
