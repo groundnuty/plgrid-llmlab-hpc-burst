@@ -78,6 +78,61 @@ func TestEveryMissingSettingIsReportedAtOnce(t *testing.T) {
 	}
 }
 
+// TestHostDialedModeHasNoAddress: in host-dialed mode the host dials the jobs through the login node, so
+// the mode needs no address and no key, and an address that is set is refused, so a row cannot read as
+// if it had one (HBEP-6, Dial-home modes). Direct and ssh are judged as before: each needs its address, and
+// ssh its key.
+func TestHostDialedModeHasNoAddress(t *testing.T) {
+	const row = "tunnel-hour-athena"
+	run := func(edit func(map[string]string)) (Config, error) {
+		m := liveSettings(row)
+		edit(m)
+		cfg, skip, err := ConfigFromEnv(env(m), row)
+		if skip != "" {
+			t.Fatalf("skip %q", skip)
+		}
+		return cfg, err
+	}
+	cfg, err := run(func(m map[string]string) { m[envMode] = "host-dialed"; delete(m, envAddr) })
+	if err != nil || cfg.DialHomeMode != "host-dialed" || cfg.DialHomeAddr != "" || cfg.DialHomeKey != "" {
+		t.Errorf("host-dialed with no address: cfg mode %q addr %q key %q, err %v; want the mode, no address, no key, no error",
+			cfg.DialHomeMode, cfg.DialHomeAddr, cfg.DialHomeKey, err)
+	}
+	// A key is not read in this mode, as direct mode does not read one.
+	cfg, err = run(func(m map[string]string) { m[envMode] = "host-dialed"; delete(m, envAddr); m[envKey] = "/private/key" })
+	if err != nil || cfg.DialHomeKey != "" {
+		t.Errorf("host-dialed with a key set: key %q, err %v; want it ignored", cfg.DialHomeKey, err)
+	}
+	// An address that is set is refused, and the error names the setting, never its value.
+	_, err = run(func(m map[string]string) { m[envMode] = "host-dialed" })
+	if err == nil || !strings.Contains(err.Error(), envAddr+" must not be set in host-dialed mode") || strings.Contains(err.Error(), "gateway.example") {
+		t.Errorf("host-dialed with an address: %v; want a refusal naming %s and not its value", err, envAddr)
+	}
+	// The others are unchanged.
+	cfg, err = run(func(m map[string]string) {})
+	if err != nil || cfg.DialHomeMode != "direct" || cfg.DialHomeAddr != "gateway.example:29227" {
+		t.Errorf("direct with an address: %+v, %v", cfg, err)
+	}
+	if _, err = run(func(m map[string]string) { delete(m, envAddr) }); err == nil || !strings.Contains(err.Error(), envAddr+" is not set") {
+		t.Errorf("direct with no address: %v; want %s is not set", err, envAddr)
+	}
+	if _, err = run(func(m map[string]string) { m[envMode] = "ssh"; delete(m, envAddr); m[envKey] = "/private/key" }); err == nil || !strings.Contains(err.Error(), envAddr+" is not set") {
+		t.Errorf("ssh with no address: %v; want %s is not set", err, envAddr)
+	}
+	if _, err = run(func(m map[string]string) { m[envMode] = "ssh" }); err == nil || !strings.Contains(err.Error(), envKey+" is not set") {
+		t.Errorf("ssh with no key: %v; want %s is not set", err, envKey)
+	}
+	cfg, err = run(func(m map[string]string) { m[envMode] = "ssh"; m[envKey] = "/private/key" })
+	if err != nil || cfg.DialHomeAddr != "gateway.example:29227" || cfg.DialHomeKey != "/private/key" {
+		t.Errorf("ssh with an address and a key: %+v, %v", cfg, err)
+	}
+	// An unknown mode is refused, and the error names the three there are.
+	_, err = run(func(m map[string]string) { m[envMode] = "tcp" })
+	if err == nil || !strings.Contains(err.Error(), "direct, ssh or host-dialed") {
+		t.Errorf("an unknown mode: %v; want the three modes named", err)
+	}
+}
+
 func TestSettingsThatContradictTheRowAreAnError(t *testing.T) {
 	for name, edit := range map[string]func(map[string]string){
 		"partition":                 func(m map[string]string) { m[envPartition] = "plgrid" },

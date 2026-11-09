@@ -209,10 +209,12 @@ func (c Config) Validate() error {
 // in the configuration, it is used as given. Unset, it defaults in ssh mode
 // to host.DialHomeAddr(), 127.0.0.1 at the launcher's port base plus
 // agentapi.DialHomePortOffset, where the restricted key's forward arrives
-// (@hpc-burst-science-agent, 31 Oct 2026). In direct mode it is refused,
-// because compute nodes must reach it and only the operator knows that
-// address. With no dial-home mode recorded, the ssh default applies, since no
-// job is submitted until a front is configured.
+// (@hpc-burst-science-agent, 31 Oct 2026); in host-dialed mode it defaults the
+// same way, since the relay's host side dials that loopback port (HBEP-6,
+// Dial-home modes). In direct mode it is refused, because compute nodes must
+// reach it and only the operator knows that address. With no dial-home mode
+// recorded, the loopback default applies, since no job is submitted until a
+// front is configured.
 func (c Config) DialHomeAddr(mode string, host agentapi.Host) (string, error) {
 	if c.DialHomeListen != "" {
 		return c.DialHomeListen, nil

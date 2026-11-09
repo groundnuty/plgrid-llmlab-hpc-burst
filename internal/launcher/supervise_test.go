@@ -272,6 +272,10 @@ func TestSupervisedSetCommandLine(t *testing.T) {
 		{"ssh front", Front{Mode: "ssh", Addr: "front.example.test:22", KeyPath: "/ignored"},
 			[]string{"--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226",
 				"--front-mode", "ssh", "--front-addr", "front.example.test:22"}},
+		// Host-dialed has no address: the mode is passed and --front-addr is not (HBEP-6, Dial-home modes).
+		{"host-dialed front", Front{Mode: "host-dialed"},
+			[]string{"--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226",
+				"--front-mode", "host-dialed"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			st := &State{
@@ -309,6 +313,8 @@ func TestSuperviseCommandLine(t *testing.T) {
 		{"no front", Front{}, nil},
 		{"front", Front{Mode: "direct", Addr: "front.example.test:8443"}, []string{"--front-mode", "direct", "--front-addr", "front.example.test:8443"}},
 		{"ssh front", Front{Mode: "ssh", Addr: "front.example.test:22", KeyPath: "/ignored"}, []string{"--front-mode", "ssh", "--front-addr", "front.example.test:22"}},
+		// The fake controller refuses a --front-addr with host-dialed, as the real one does.
+		{"host-dialed front", Front{Mode: "host-dialed"}, []string{"--front-mode", "host-dialed"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

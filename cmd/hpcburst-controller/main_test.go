@@ -19,8 +19,15 @@ func TestParse(t *testing.T) {
 	}{
 		{"minimal", base, ""},
 		{"with a front", append(append([]string{}, base...), "--front-mode", "ssh", "--front-addr", "front.example:22"), ""},
+		{"with a direct front", append(append([]string{}, base...), "--front-mode", "direct", "--front-addr", "front.example:29443"), ""},
 		{"front mode alone", append(append([]string{}, base...), "--front-mode", "direct"), "go together"},
-		{"unknown front mode", append(append([]string{}, base...), "--front-mode", "x", "--front-addr", "a:1"), "want direct or ssh"},
+		{"ssh without an address", append(append([]string{}, base...), "--front-mode", "ssh"), "go together"},
+		{"an address without a mode", append(append([]string{}, base...), "--front-addr", "front.example:22"), "go together"},
+		{"unknown front mode", append(append([]string{}, base...), "--front-mode", "x", "--front-addr", "a:1"), "want direct, ssh or host-dialed"},
+		// Host-dialed has no address: the host dials the jobs (HBEP-6, Dial-home modes).
+		{"host-dialed without an address", append(append([]string{}, base...), "--front-mode", "host-dialed"), ""},
+		{"host-dialed with an address", append(append([]string{}, base...), "--front-mode", "host-dialed", "--front-addr", "front.example:22"), "takes no --front-addr"},
+		{"host-dialed with an empty address", append(append([]string{}, base...), "--front-mode", "host-dialed", "--front-addr", ""), ""},
 		{"no state directory", base[2:], "--state-dir is required"},
 		{"port base out of range", []string{"--state-dir", "/s", "--port-base", "80", "--health-addr", "127.0.0.1:29226"}, "out of range"},
 		// The block reaches base+12, the controller's metrics (HBEP-8): 65524
@@ -49,6 +56,32 @@ func TestParse(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
 				t.Fatalf("parse error %v, want one containing %q", err, c.wantErr)
+			}
+		})
+	}
+}
+
+// What parse keeps of the front flags: direct and ssh keep the mode and the address, and host-dialed
+// keeps the mode alone, since the host dials the jobs and there is no address (HBEP-6, Dial-home modes).
+func TestParseKeepsTheFrontFlags(t *testing.T) {
+	base := []string{"--state-dir", "/state", "--port-base", "29220", "--health-addr", "127.0.0.1:29226"}
+	for _, c := range []struct {
+		name       string
+		extra      []string
+		mode, addr string
+	}{
+		{"none", nil, "", ""},
+		{"direct", []string{"--front-mode", "direct", "--front-addr", "front.example:29443"}, "direct", "front.example:29443"},
+		{"ssh", []string{"--front-mode", "ssh", "--front-addr", "front.example:22"}, "ssh", "front.example:22"},
+		{"host-dialed", []string{"--front-mode", "host-dialed"}, "host-dialed", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f, err := parse(append(append([]string{}, base...), c.extra...), io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if f.frontMode != c.mode || f.frontAddr != c.addr {
+				t.Errorf("front mode %q, address %q; want %q, %q", f.frontMode, f.frontAddr, c.mode, c.addr)
 			}
 		})
 	}

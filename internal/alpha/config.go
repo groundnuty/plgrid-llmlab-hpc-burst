@@ -59,7 +59,9 @@ type Config struct {
 	// The live run's settings.
 	Account, Credentials, HostLock, ControlDir string
 	BinDir, BuildDir                           string
-	DialHomeMode, DialHomeAddr, DialHomeKey    string
+	// DialHomeMode is direct, ssh or host-dialed. DialHomeAddr is empty in host-dialed mode, which has
+	// none because the host dials the jobs (HBEP-6, Dial-home modes). DialHomeKey is ssh's alone.
+	DialHomeMode, DialHomeAddr, DialHomeKey string
 	// DialHomeListen is the front's local dial-home listener in direct mode,
 	// host:port, where the owner's route arrives on this host.
 	DialHomeListen string
@@ -157,14 +159,22 @@ func ConfigFromEnv(getenv func(string) string, mine ...string) (cfg Config, skip
 	cfg.Account, cfg.Credentials = need(envAccount), need(envCreds)
 	cfg.HostLock, cfg.ControlDir = need(envHostLock), need(envControlDir)
 	cfg.BinDir, cfg.BuildDir = need(envBinDir), need(envBuildDir)
-	cfg.DialHomeMode, cfg.DialHomeAddr = need(envMode), need(envAddr)
+	cfg.DialHomeMode = need(envMode)
 	cfg.DialHomeListen, cfg.Profile = getenv(envListen), need(envProfile)
 	switch cfg.DialHomeMode {
+	case "host-dialed":
+		// The host dials the jobs through the login node, so the mode has no address and needs no key
+		// (HBEP-6, Dial-home modes; HBEP-11, open question 8, amended 9 Nov 2026). An address that is
+		// set is refused, so a row cannot read as if it had one; the key, as in direct mode, is not read.
+		if getenv(envAddr) != "" {
+			bad = append(bad, envAddr+" must not be set in host-dialed mode: the host dials the jobs, so the mode has no address")
+		}
 	case "", "direct":
+		cfg.DialHomeAddr = need(envAddr)
 	case "ssh":
-		cfg.DialHomeKey = need(envKey)
+		cfg.DialHomeAddr, cfg.DialHomeKey = need(envAddr), need(envKey)
 	default:
-		bad = append(bad, envMode+" must be direct or ssh")
+		bad = append(bad, envMode+" must be direct, ssh or host-dialed")
 	}
 	// The script's shape and this package's row are one fact; a mismatch is a drift, not a setting.
 	if p := need(envPartition); p != "" && p != row.Partition {

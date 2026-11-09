@@ -140,10 +140,10 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&sd, "state-dir", "", stateDirUsage)
 	fs.StringVar(&bd, "bin-dir", "", binDirUsage)
 	fs.StringVar(&o.Version, "version", "", "k3s release to start (must be pinned): default the release that last wrote the store, or "+launcher.DefaultVersion+" for a new one; another release than the store's is refused (use upgrade or restore)")
-	fs.IntVar(&o.PortBase, "port-base", launcher.DefaultPortBase, "first of a block of 13 loopback ports, base to base+12, shared with the controller, the front and frps, all of which must be free before a start: base (apiserver), +1 (https), +2 (controller manager), +3 (the agent endpoint, the controller's server), +4 (the front's /healthz), +5 (reserved, never bound), +6 (the lifecycle controller's /healthz), +7 (the front's ssh-mode dial-home listener), +8 (the frps server plugin, the controller's), +9 to +11 (frps's bind, tcpmux and web ports), +12 (the lifecycle controller's /metrics); the restricted VM keys forward to +3 and +7, so another base needs new keys")
-	fs.StringVar(&o.Front.Mode, "front-mode", "", "how compute nodes reach the front: direct, or ssh (restricted key)")
-	fs.StringVar(&o.Front.Addr, "front-addr", "", "the front's address, host:port (ssh: host or host:port; the port defaults to 22)")
-	fs.StringVar(&o.Front.KeyPath, "front-key", "", "ssh mode: path of the restricted key (recorded, never read)")
+	fs.IntVar(&o.PortBase, "port-base", launcher.DefaultPortBase, "first of a block of 13 loopback ports, base to base+12, shared with the controller, the front and frps, all of which must be free before a start: base (apiserver), +1 (https), +2 (controller manager), +3 (the agent endpoint, the controller's server), +4 (the front's /healthz), +5 (reserved, never bound), +6 (the lifecycle controller's /healthz), +7 (the front's dial-home listener in ssh and host-dialed modes), +8 (the frps server plugin, the controller's), +9 to +11 (frps's bind, tcpmux and web ports), +12 (the lifecycle controller's /metrics); the restricted VM keys forward to +3 and +7, so another base needs new keys")
+	fs.StringVar(&o.Front.Mode, "front-mode", "", "how the jobs and this host reach each other: direct, ssh (restricted key), or host-dialed (this host dials the jobs through the login node, for a host that compute nodes cannot reach: it takes no --front-addr and no --front-key)")
+	fs.StringVar(&o.Front.Addr, "front-addr", "", "the front's address, host:port (ssh: host or host:port; the port defaults to 22); required for direct and ssh, and refused for host-dialed, which has no address because the host dials the jobs")
+	fs.StringVar(&o.Front.KeyPath, "front-key", "", "ssh mode: path of the restricted key (recorded, never read); refused for the other modes")
 	fs.IntVar(&o.Nice, "nice", 0, "run k3s under nice(1) with this value (0: leave the priority alone)")
 	fs.StringVar(&o.ManifestsDir, "manifests", "", "directory of YAML manifests to apply once the host is ready, CRDs first")
 	fs.DurationVar(&o.ReadyTimeout, "ready-timeout", launcher.DefaultReadyTimeout, "how long to wait for readiness")
@@ -186,7 +186,7 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "kubeconfig: %s\n", rep.Kubeconfig)
 	fmt.Fprintf(stdout, "ports: apiserver %d, https %d, controller manager %d (loopback)\n", rep.Ports.API, rep.Ports.HTTPS, rep.Ports.KCM)
 	if rep.Front.Set() {
-		fmt.Fprintf(stdout, "front: %s %s\n", rep.Front.Mode, rep.Front.Addr)
+		fmt.Fprintf(stdout, "front: %s\n", frontText(rep.Front))
 	}
 	if rep.SupervisorPID != 0 {
 		fmt.Fprintf(stdout, "controllers: supervisor pid %d runs %s, health on %s\n", rep.SupervisorPID, rep.ControllerBin, rep.ControllerHealth)
@@ -336,15 +336,26 @@ func printStatus(w io.Writer, r *launcher.StatusReport) {
 	// One "front:" line. The address is where Instances dial home; the front itself is the process
 	// the supervisor runs. A host with no front process says so, with the address when one is recorded.
 	switch addr := r.Front != nil && r.Front.Set(); {
+	case r.FrontAbsent && addr && r.Front.Addr == "" && r.Front.Mode == "host-dialed":
+		fmt.Fprintln(w, "front: absent (no front runs here; the recorded mode is host-dialed, which has no address because the host dials the jobs)")
 	case r.FrontAbsent && addr:
-		fmt.Fprintf(w, "front: absent (no front runs here; the recorded address is %s %s)\n", r.Front.Mode, r.Front.Addr)
+		fmt.Fprintf(w, "front: absent (no front runs here; the recorded address is %s)\n", frontText(*r.Front))
 	case r.FrontAbsent:
 		fmt.Fprintln(w, "front: absent")
 	case addr:
-		fmt.Fprintf(w, "front: %s %s\n", r.Front.Mode, r.Front.Addr)
+		fmt.Fprintf(w, "front: %s\n", frontText(*r.Front))
 	case r.Version != "":
 		fmt.Fprintln(w, "front: not recorded")
 	}
+}
+
+// frontText is the recorded front as one status phrase: the mode and its address. Host-dialed mode
+// has no address, because the host dials the jobs (HBEP-6, Dial-home modes), so it says so.
+func frontText(f launcher.Front) string {
+	if f.Mode == "host-dialed" && f.Addr == "" {
+		return f.Mode + " (no address: the host dials the jobs)"
+	}
+	return f.Mode + " " + f.Addr
 }
 
 // printCRDGuard prints one line about the CRD deletion guard. Absent is a state, not a fault, but

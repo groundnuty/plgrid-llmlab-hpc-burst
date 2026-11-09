@@ -2,7 +2,7 @@
 // endpoint a user points their client at. hpcburst up starts and supervises
 // it on the single-user host (HBEP-11).
 //
-//	hpcburst-front --config FILE --state-dir DIR --port-base N [--mode direct|ssh] [--health-addr HOST:PORT] [--kubeconfig FILE]
+//	hpcburst-front --config FILE --state-dir DIR --port-base N [--mode direct|ssh|host-dialed] [--health-addr HOST:PORT] [--kubeconfig FILE]
 //
 // Its settings are in the configuration file (HBEP-5, Parameters). Keys are
 // read from mode-600 files at run time and never appear on its command line.
@@ -46,7 +46,7 @@ func run(args []string) error {
 	cfgPath := fs.String("config", "", "the front's configuration file (required)")
 	stateDir := fs.String("state-dir", "", "the launcher's state directory (required)")
 	portBase := fs.Int("port-base", 0, "the launcher's port base (required)")
-	mode := fs.String("mode", "", "the dial-home mode the launcher recorded: direct or ssh")
+	mode := fs.String("mode", "", "the dial-home mode the launcher recorded: direct, ssh or host-dialed (the last has no front address: the host dials the jobs)")
 	health := fs.String("health-addr", "", "loopback host:port for GET /healthz")
 	kubeconfig := fs.String("kubeconfig", "", "the control plane's kubeconfig (default: <state-dir>/kubeconfig)")
 	if err := fs.Parse(args); err != nil {
@@ -55,8 +55,8 @@ func run(args []string) error {
 	switch {
 	case *cfgPath == "" || *stateDir == "" || *portBase <= 0:
 		return usageError{errors.New("--config, --state-dir and --port-base are required")}
-	case *mode != "" && *mode != front.ModeDirect && *mode != front.ModeSSH:
-		return usageError{fmt.Errorf("--mode %q: want direct or ssh", *mode)}
+	case *mode != "" && !front.ValidMode(*mode):
+		return usageError{fmt.Errorf("--mode %q: want %s, %s or %s", *mode, front.ModeDirect, front.ModeSSH, front.ModeHostDialed)}
 	}
 	cfg, err := front.LoadConfig(*cfgPath)
 	if err != nil {

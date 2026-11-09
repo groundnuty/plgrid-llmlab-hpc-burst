@@ -336,7 +336,7 @@ func (b Binaries) MissingBuilds() []string {
 
 // Ports are one stack's loopback ports: hpcburst up's block (base..base+12),
 // the front's client listener and, in direct dial-home mode, its dial-home
-// listener (in ssh mode it takes its default, 127.0.0.1:base+7).
+// listener (in ssh and host-dialed modes it takes its default, 127.0.0.1:base+7).
 type Ports struct {
 	Base           int
 	ClientAddr     string
@@ -365,12 +365,38 @@ func (p Ports) All() []int {
 	return out
 }
 
-// DialHome is how jobs reach this host: direct, to the front's dial-home
-// listener, or ssh, through the gateway's sshd with the restricted key.
+// DialHome is how jobs and this host reach each other: direct, to the front's
+// dial-home listener; ssh, through the gateway's sshd with the restricted key;
+// or host-dialed, where this host dials the jobs through the login node and
+// there is no address and no key (HBEP-6, Dial-home modes; HBEP-11, open
+// question 8, amended 9 Nov 2026).
 type DialHome struct {
-	Mode    string // "direct" or "ssh"
-	Addr    string // --front-addr: the listener as the nodes see it (direct) or the gateway (ssh)
+	Mode    string // "direct", "ssh" or "host-dialed"
+	Addr    string // --front-addr: the listener as the nodes see it (direct) or the gateway (ssh); empty for host-dialed, which has none because the host dials the jobs
 	KeyPath string // --front-key, ssh only: recorded, never read
+}
+
+// upFlags are hpcburst up's flags for this dial-home mode: --front-mode always, --front-addr only when
+// there is an address (host-dialed mode has none, because the host dials the jobs), and --front-key only
+// for ssh.
+func (dh DialHome) upFlags() []string {
+	flags := []string{"--front-mode", dh.Mode}
+	if dh.Addr != "" {
+		flags = append(flags, "--front-addr", dh.Addr)
+	}
+	if dh.KeyPath != "" {
+		flags = append(flags, "--front-key", dh.KeyPath)
+	}
+	return flags
+}
+
+// frontConfigMember is the front's dialHomeListen member (a JSON fragment ending in a comma) in direct
+// mode, and nothing in ssh and host-dialed modes, where the listener takes its default, 127.0.0.1:base+7.
+func (dh DialHome) frontConfigMember(ports Ports) string {
+	if dh.Mode == "direct" {
+		return `"dialHomeListen":"` + ports.DialHomeListen + `",`
+	}
+	return ""
 }
 
 // Host is one hpcburst up on this machine.
@@ -415,10 +441,7 @@ func StartHost(t T, b Binaries, dir string, dh DialHome, env []string, ports Por
 		t.Fatal(err)
 	}
 	cfg := filepath.Join(dir, "front.json")
-	listen := ""
-	if dh.Mode == "direct" {
-		listen = `"dialHomeListen":"` + ports.DialHomeListen + `",`
-	}
+	listen := dh.frontConfigMember(ports)
 	front := `{` + listen + frontTuning + `"clientListen":"` + ports.ClientAddr + `","clientKeysFile":"` + keys + `","usageDir":"` + h.UsageDir + `"}`
 	if err := os.WriteFile(cfg, []byte(front), 0o600); err != nil {
 		t.Fatal(err)
@@ -436,10 +459,8 @@ func StartHost(t T, b Binaries, dir string, dh DialHome, env []string, ports Por
 	})
 	args := []string{"up", "--state-dir", h.State, "--bin-dir", b.K3sDir, "--port-base", strconv.Itoa(ports.Base), "--nice", "10",
 		"--manifests", filepath.Join(b.Repo, "config", "crd"), "--controller-bin", b.Controller,
-		"--front-config", cfg, "--front-bin", b.Front, "--frps-bin", b.Frps, "--front-mode", dh.Mode, "--front-addr", dh.Addr}
-	if dh.KeyPath != "" {
-		args = append(args, "--front-key", dh.KeyPath)
-	}
+		"--front-config", cfg, "--front-bin", b.Front, "--frps-bin", b.Frps}
+	args = append(args, dh.upFlags()...)
 	t.Cleanup(h.Down)
 	if out, err := Run(t, Within(t, UpTimeout), env, b.HPCBurst, args...); err != nil {
 		t.Fatalf("hpcburst up: %v\n%s", err, out)

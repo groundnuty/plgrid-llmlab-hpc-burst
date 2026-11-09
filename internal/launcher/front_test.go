@@ -24,6 +24,8 @@ func TestFrontNormalize(t *testing.T) {
 		// The owner routes a cluster through a port forward on the gateway at its own port.
 		{"ssh on another port", Front{Mode: "ssh", Addr: "gateway.example.test:2222", KeyPath: key}, Front{Mode: "ssh", Addr: "gateway.example.test:2222", KeyPath: key}},
 		{"ssh on the highest port", Front{Mode: "ssh", Addr: "gateway.example.test:65535", KeyPath: key}, Front{Mode: "ssh", Addr: "gateway.example.test:65535", KeyPath: key}},
+		// Host-dialed has no address and no key: the host dials the jobs (HBEP-6, Dial-home modes).
+		{"host-dialed with nothing else", Front{Mode: "host-dialed"}, Front{Mode: "host-dialed"}},
 	}
 	for _, c := range ok {
 		t.Run(c.name, func(t *testing.T) {
@@ -39,8 +41,13 @@ func TestFrontNormalize(t *testing.T) {
 		message string
 	}{
 		{"address without a mode", Front{Addr: "x:1"}, "mode"},
-		{"unknown mode", Front{Mode: "tunnel", Addr: "x:1"}, "direct or ssh"},
+		{"unknown mode", Front{Mode: "tunnel", Addr: "x:1"}, "direct, ssh or host-dialed"},
 		{"mode without an address", Front{Mode: "direct"}, "--front-addr"},
+		{"ssh without an address", Front{Mode: "ssh", KeyPath: key}, "--front-addr"},
+		{"host-dialed with an address", Front{Mode: "host-dialed", Addr: "front.example.test:22"}, "takes no --front-addr"},
+		{"host-dialed with a port-less address", Front{Mode: "host-dialed", Addr: "front.example.test"}, "takes no --front-addr"},
+		{"host-dialed with a key", Front{Mode: "host-dialed", KeyPath: key}, "takes no key"},
+		{"host-dialed with an address and a key", Front{Mode: "host-dialed", Addr: "x:22", KeyPath: key}, "takes no --front-addr"},
 		{"direct without a port", Front{Mode: "direct", Addr: "front.example.test"}, "host:port"},
 		{"port out of range", Front{Mode: "direct", Addr: "x:99999"}, "not a port"},
 		{"ssh with port 0", Front{Mode: "ssh", Addr: "x:0", KeyPath: key}, "not a port"},
@@ -60,7 +67,28 @@ func TestFrontNormalize(t *testing.T) {
 			}
 		})
 	}
-	if (Front{}).Set() || !(Front{Mode: "direct"}).Set() {
+	if (Front{}).Set() || !(Front{Mode: "direct"}).Set() || !(Front{Mode: "host-dialed"}).Set() {
 		t.Error("Set() is wrong")
+	}
+}
+
+// TestFrontModeErrorsNameAllThreeModes: an operator who mistypes the mode, or who names none, is
+// told every mode there is (HBEP-6, Dial-home modes), and the no-front warning does too.
+func TestFrontModeErrorsNameAllThreeModes(t *testing.T) {
+	for _, f := range []Front{{Mode: "tunnel", Addr: "x:1"}, {Addr: "x:1"}} {
+		_, err := f.Normalize()
+		if err == nil {
+			t.Fatalf("%+v: no error", f)
+		}
+		for _, m := range []string{"direct", "ssh", "host-dialed"} {
+			if !strings.Contains(err.Error(), m) {
+				t.Errorf("%+v: the error %q does not name %s", f, err, m)
+			}
+		}
+	}
+	for _, m := range []string{"direct", "ssh", "host-dialed"} {
+		if !strings.Contains(frontWarning, m) {
+			t.Errorf("the no-front warning does not name %s", m)
+		}
 	}
 }

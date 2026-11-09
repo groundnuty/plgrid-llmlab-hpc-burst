@@ -18,7 +18,8 @@ import (
 )
 
 // TestRunTunnelInBothDialHomeModes is HBEP-6's wiring test for the front, in
-// direct and in ssh mode: Run builds its own Tunnel and probe. An Instance's
+// direct, in ssh and in host-dialed mode (the name is older than the third mode): Run builds its own
+// Tunnel and probe. An Instance's
 // frpc dials the front's dial-home listener over wss, which terminates TLS
 // with the listener's certificate and passes GET /~!frp to frps, and frps
 // lists the proxy online. The probe registers the transport, and a client's
@@ -26,7 +27,7 @@ import (
 // the front stops it cuts the tunnels it passed through, and frps drops the
 // proxy.
 func TestRunTunnelInBothDialHomeModes(t *testing.T) {
-	for _, mode := range []string{ModeDirect, ModeSSH} {
+	for _, mode := range []string{ModeDirect, ModeSSH, ModeHostDialed} {
 		t.Run(mode, func(t *testing.T) {
 			rig := newFrpRig(t)
 			h := newHarnessReal(t, nil)
@@ -125,7 +126,7 @@ func TestRunTunnelInBothDialHomeModes(t *testing.T) {
 // port base, or it does not start. With no mode recorded no job dials home,
 // and it starts without them (TestRunNamesTheUsageFileByItsClock runs so).
 func TestRunNeedsFrpsAddressesWhenJobsDialHome(t *testing.T) {
-	for _, mode := range []string{ModeDirect, ModeSSH} {
+	for _, mode := range []string{ModeDirect, ModeSSH, ModeHostDialed} {
 		host := agentapi.Host{StateDir: t.TempDir()}
 		writeDialHomeCert(t, host)
 		o := runOptions(t, mode, host, "127.0.0.1:0")
