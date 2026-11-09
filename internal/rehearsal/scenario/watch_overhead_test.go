@@ -12,9 +12,10 @@ package scenario_test
 //
 //	HPCBURST_WATCH_OVERHEAD=60 REHEARSAL_RUN='^TestWatchOverhead$' hack/rehearsal.sh
 //
-// For a CPU-constrained host, wrap it in taskset -c 0,1. It asserts that the arms did
-// what they say, by their counts of Watch calls; it sets no limit on the cost, which
-// is for the reader of its OVERHEAD lines.
+// For a CPU-constrained host, put taskset -c 0 before hack/rehearsal.sh: the first
+// OVERHEAD line names the CPUs k3s may use. The test asserts that the arms did what they
+// say, by their counts of Watch calls; it sets no limit on the cost, which is for the
+// reader of its OVERHEAD lines.
 
 import (
 	"context"
@@ -68,7 +69,7 @@ func TestWatchOverhead(t *testing.T) {
 	}
 	r := startRigWith(t, rigSetup{mode: "direct", ports: ports146, noWatch: true})
 	pid := ownK3s(t, r)
-	t.Logf("OVERHEAD measuring this stack's k3s, %d rounds of %d s an arm", overheadRounds, window)
+	t.Logf("OVERHEAD measuring this stack's k3s, on CPUs %s, %d rounds of %d s an arm", allowedCPUs(t, pid), overheadRounds, window)
 	arms := []overheadArm{{"none", 0}, {"long", 3600}, {"short", 3}}
 	runs := map[string][]armRun{}
 	for round := range overheadRounds {
@@ -114,6 +115,22 @@ func ownK3s(t *testing.T, r *rig) int {
 	}
 	t.Fatalf("hpcburst status names no k3s of this stack: %.300s", out)
 	return 0
+}
+
+// allowedCPUs is the CPUs the process may run on (proc(5): Cpus_allowed_list).
+func allowedCPUs(t *testing.T, pid int) string {
+	t.Helper()
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		t.Fatalf("the k3s process: %v", err)
+	}
+	for line := range strings.Lines(string(b)) {
+		if v, ok := strings.CutPrefix(line, "Cpus_allowed_list:"); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	t.Fatalf("the k3s process's status names no CPUs")
+	return ""
 }
 
 // measureArm starts the arm's streams, lets them settle, runs the load over the window
