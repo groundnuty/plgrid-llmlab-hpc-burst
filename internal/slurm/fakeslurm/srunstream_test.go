@@ -715,3 +715,47 @@ func TestRunAcceptsDashU(t *testing.T) {
 		t.Errorf("Run with -u and an unknown option: stderr %q, exit %d; want it refused", errOut, code)
 	}
 }
+
+// The step-limit knob: past the limit, srun refuses a step with Slurm's
+// step-limit words and runs nothing, on both srun paths; lifting it lets the
+// next one run.
+func TestStepLimitRefusesTheNextStep(t *testing.T) {
+	r := newRunRig(t, RunMode{})
+	id := r.holdJob(r.s, r.root+"/release")
+	if err := r.p.SetStepLimit(id, 1); err != nil {
+		t.Fatal(err)
+	}
+	line := "srun --overlap --jobid=" + itoa(id) + " --ntasks=1 true"
+	if res, err := r.s.Run(context.Background(), slurm.Command{Line: line}); err != nil || res.ExitCode != 0 {
+		t.Fatalf("the first step: %v, %+v", err, res)
+	}
+	res, err := r.s.Run(context.Background(), slurm.Command{Line: line})
+	if err != nil || res.ExitCode != 1 || !strings.Contains(string(res.Stderr), "Step limit reached for this job") {
+		t.Fatalf("the second step under a limit of 1: %v, exit %d, stderr %q", err, res.ExitCode, res.Stderr)
+	}
+	var stderr strings.Builder
+	code, err := r.s.Stream(context.Background(), streamLine(id, true, "true"), strings.NewReader(""), io.Discard, &stderr)
+	if err != nil || code != 1 || !strings.Contains(stderr.String(), "Step limit reached for this job") {
+		t.Fatalf("a streamed step under the limit: exit %d, %v, stderr %q", code, err, stderr.String())
+	}
+	if err := r.p.SetStepLimit(id, 0); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := r.s.Run(context.Background(), slurm.Command{Line: line}); err != nil || res.ExitCode != 0 {
+		t.Fatalf("a step with the limit lifted: %v, %+v", err, res)
+	}
+}
+
+// The step-env knob: a step's TMPDIR is RunMode.StepEnv's, not the job's,
+// and the job's other variables stay.
+func TestStepEnvReplacesTheJobsVariable(t *testing.T) {
+	r := newRunRig(t, RunMode{StepEnv: map[string]string{"TMPDIR": "/step-tmp-example"}})
+	id := r.holdJob(r.s, r.root+"/release")
+	res, err := r.s.Run(context.Background(), slurm.Command{Line: "srun --overlap --jobid=" + itoa(id) + " --ntasks=1 printenv TMPDIR SLURM_JOB_ID"})
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("the step: %v, %+v", err, res)
+	}
+	if got := string(res.Stdout); got != "/step-tmp-example\n"+itoa(id)+"\n" {
+		t.Errorf("the step's TMPDIR and SLURM_JOB_ID are %q, want the step's own TMPDIR and the job's ID", got)
+	}
+}

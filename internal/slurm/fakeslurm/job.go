@@ -55,6 +55,10 @@ type execution struct {
 
 // job is one submitted job, guarded by Platform.mu.
 type job struct {
+	// stepLimit is the most srun steps the job takes (SetStepLimit); 0 is
+	// none. steps counts the steps srun started in it.
+	stepLimit, steps int
+
 	id         int
 	name, user string
 	partition  string

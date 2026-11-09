@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -117,6 +119,12 @@ func (sh *shell) planStep(args []string) (pl stepPlan, code int, ok bool) {
 	if msg != "" {
 		return pl, sh.fail(1, "srun: error: Unable to confirm allocation for job %d: %s", a.jobID, msg), false
 	}
+	if j := r.j; j.stepLimit > 0 && j.steps >= j.stepLimit {
+		// Slurm's ESLURM_STEP_LIMIT (slurm_errno.c, 24.11: "Step limit
+		// reached for this job"); the line around it is the fake's own.
+		return pl, sh.fail(1, "srun: error: Unable to create step for job %d: Step limit reached for this job", a.jobID), false
+	}
+	r.j.steps++
 	prog, err := lookPath(a.program, envValue(r.env, "PATH"), r.submitDir)
 	if err != nil {
 		code := 127 // the shell's codes: not found, found but not executable
@@ -131,7 +139,7 @@ func (sh *shell) planStep(args []string) (pl stepPlan, code int, ok bool) {
 // spec is the step's start, read from the job under mu.
 func (pl stepPlan) spec(p *Platform) stepSpec {
 	return stepSpec{
-		path: pl.prog, argv0: pl.a.program, args: pl.a.args, dir: pl.r.submitDir, env: append([]string(nil), pl.r.env...),
+		path: pl.prog, argv0: pl.a.program, args: pl.a.args, dir: pl.r.submitDir, env: stepEnv(pl.r.env, p.run.StepEnv),
 		proc: p.knobs.proc, sweepLimit: p.knobs.sweepLimit, sweepInterval: p.knobs.sweepInterval,
 	}
 }
@@ -292,4 +300,22 @@ func errnoText(err error) string {
 		return "No such file or directory"
 	}
 	return err.Error()
+}
+
+// stepEnv is a step's environment: the job's, with each of over set in place
+// of the job's value or added.
+func stepEnv(job []string, over map[string]string) []string {
+	out := make([]string, 0, len(job)+len(over))
+	for _, kv := range job {
+		if k, _, ok := strings.Cut(kv, "="); ok {
+			if _, replaced := over[k]; replaced {
+				continue
+			}
+		}
+		out = append(out, kv)
+	}
+	for _, k := range slices.Sorted(maps.Keys(over)) {
+		out = append(out, k+"="+over[k])
+	}
+	return out
 }
