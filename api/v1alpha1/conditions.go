@@ -464,6 +464,14 @@ const (
 	// time of the last success, not its age, so it does not change from one
 	// pass to the next.
 	ReasonReadsFailing = "ReadsFailing"
+	// ReasonLoginHostInUse: Ready is False; the Provider is in host-dialed
+	// mode, and another host-dialed Provider already holds its login host, as
+	// `ssh -G` resolves HostName through each Provider's own ssh config. The
+	// message names the login host and the Provider holding it. The planner
+	// treats the Provider as unusable (ReasonProviderUnavailable), so no
+	// Allocation is created to wait on it (HBEP-6, Dial-home modes,
+	// host-dialed, as PR #298 amends it).
+	ReasonLoginHostInUse = "LoginHostInUse"
 )
 
 // Reasons of the read-back (HBEP-4, The Slurm dialect, Read-back). The
