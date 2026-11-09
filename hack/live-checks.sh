@@ -56,7 +56,11 @@
 #     the queue of the first's lease end on no-overlap ("the first job ran and the second never started ..."). A failure of
 #     the part of the run that did happen still wins: that row fails.
 # NOT RUN means the job affirmatively never started (review of PR 284): a read at the bound must show it waiting. A job
-# that started, a job a read does not list, and a read that fails are failures that name what they found, exit 1.
+# that started, a job a read does not list, and a read that fails are failures that name what they found, exit 1. That read
+# is not the last word: a job can start between it and the cancel, so every row reads the job's history once it is cancelled.
+# real-engine does too (#297): after the cleanup has cancelled its job it asks sacct --json, and only the form of the real GH200
+# reply for a job never started (a bare 4294967294 start, state CANCELLED) is NOT RUN; a start time is a FAIL that names it, and a
+# history it cannot read is a FAIL that says so.
 # A test that finds a job still not started at the bound cancels what it submitted by the tags it wrote down,
 # writes the line it wants to report to not-run.txt in its record directory, and SKIPS at the top level (t.Skip).
 # Nothing else: it fails nothing and exits 0. The script reads that, and only that, as NOT RUN (not_run_verdict):
@@ -70,8 +74,8 @@
 # The rule for the one-job slots (the science agent, 2 Nov 2026, #222): a row in a one-job slot (the cluster table's
 # slot column), on either cluster, must have a start wait of 10 min or less or a wait in the queue of 30 min or less
 # (pending_max), and it passes the slot guard (check_slot) before it runs. real-engine, which runs no test of ours to
-# skip, has the 30 min as its wait in the queue too: the cleanup cancels the job by its tag, nothing is posted, and
-# the exit is 3. hack/livechecks reads the table and fails, naming the row, for a slot row that has neither bound, so a
+# skip, has the 30 min as its wait in the queue too: the cleanup cancels the job by its tag, its history is read
+# (settle_real_engine_not_run), nothing is posted, and the exit is 3 if the job never started. hack/livechecks reads the table and fails, naming the row, for a slot row that has neither bound, so a
 # new row cannot miss it.
 #
 # The settings file is named by HPCBURST_LIVE_SETTINGS: KEY=VALUE lines, mode
