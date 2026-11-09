@@ -35,8 +35,10 @@ func newFrpCacheFixture(t *testing.T) frpCacheFixture {
 	f := frpCacheFixture{
 		r:    r,
 		dest: filepath.Join(t.TempDir(), "frp"),
-		live: r.env(),
-		dead: []string{"FRP_RELEASE_BASE=file://" + filepath.Join(r.base, "gone"), "FRP_PINS_FILE=" + r.pins},
+		// FRP_TARBALL= in both: the script prefers a tarball named there to any release site, and a
+		// developer's shell may have one, whose digest is not the fake one.
+		live: append(r.env(), "FRP_TARBALL="),
+		dead: []string{"FRP_RELEASE_BASE=file://" + filepath.Join(r.base, "gone"), "FRP_PINS_FILE=" + r.pins, "FRP_TARBALL="},
 	}
 	out, code := runAgentBuilds(t, []string{f.dest}, f.live...)
 	if code != 0 || !strings.Contains(out, "verified frp 0.71.1") {
