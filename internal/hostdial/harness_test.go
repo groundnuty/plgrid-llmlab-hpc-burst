@@ -384,8 +384,13 @@ func (w *world) owner(o hostdial.OwnerOptions) (*hostdial.Owner, context.CancelF
 		w.t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- own.Start(ctx) }()
+	done := make(chan error) // closed once Start returns, so the test and the clean-up may both wait
+	go func() {
+		if err := own.Start(ctx); err != nil {
+			w.t.Errorf("the relay owner: %v", err)
+		}
+		close(done)
+	}()
 	w.t.Cleanup(func() {
 		cancel()
 		select {

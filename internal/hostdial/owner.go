@@ -391,14 +391,18 @@ func (r *relay) once(ctx context.Context) (time.Duration, bool) {
 	sctx, cancel := context.WithCancel(ctx)
 	served := make(chan error, 1)
 	go func() { served <- Serve(sctx, p, r.target, o.Logger, &r.stats) }()
+	serveEnded := false
 	select {
 	case <-p.done:
 	case <-served:
+		serveEnded = true
 	case <-ctx.Done():
 	}
 	p.stop(o.StopGrace)
 	cancel()
-	<-served
+	if !serveEnded {
+		<-served
+	}
 	up := time.Since(start)
 	r.mu.Lock()
 	r.pid = 0

@@ -47,9 +47,6 @@ func TestHostDialedChannelsStayApart(t *testing.T) {
 	if up[control].PID == up[serving].PID {
 		t.Fatalf("both channels run in one process %d: the two must never share a connection", up[control].PID)
 	}
-	if n := len(w.sruns(j.id)); n != 2 {
-		t.Errorf("the fake ran %d srun steps for job %s, want 2, one per channel: %q", n, j.id, w.sruns(j.id))
-	}
 	roundTrip(t, j, control, "control", payload(100_000))
 	roundTrip(t, j, serving, "serving", payload(300_000))
 	roundTrip(t, j, control, "control", []byte("GET /agent/v1/desired HTTP/1.1\r\n\r\n"))
@@ -61,6 +58,9 @@ func TestHostDialedChannelsStayApart(t *testing.T) {
 	}
 	if got := w.targets[serving].received(); len(got) != 1 || !bytes.Equal(got[0], payload(300_000)) {
 		t.Errorf("the serving target did not receive exactly the serving bytes")
+	}
+	if n := len(w.sruns(j.id)); n != 2 {
+		t.Errorf("the fake ran %d srun steps for job %s, want 2, one per channel: %q", n, j.id, w.sruns(j.id))
 	}
 	for _, line := range w.sruns(j.id) {
 		if !strings.HasPrefix(line, "srun -u --overlap --jobid="+j.id+" --ntasks=1 ") {
