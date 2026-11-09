@@ -250,7 +250,7 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
   - **`relay` exits** when its standard input closes or its socket closes.
 - **The control-plane side:**
   - **When relays start and stop:** the controller starts both relays once the Allocation's job runs. It keeps them level-triggered: a dropped relay is started again, and a controller that takes the lead starts the relays of every running Allocation. It stops them by PID when the job ends or the Allocation is deleted. `srun` ends a step with its job, so no relay outlives the job.
-  - **Capacity:** in host-dialed mode a Provider has at most 2 Allocations, pending or running. That's a submit limit (`SubmitLimitReached`, HBEP-4), so the planner counts it, and the handover pair fits.
+  - **Capacity:** in host-dialed mode a Provider has at most 2 Allocations, pending or running. That's a submit limit (`SubmitLimitReached`, HBEP-4), so the planner counts it, and the handover pair fits. The Provider's controller counts again, from a fresh read, just before it submits, and refuses a third with `SubmitLimitReached`; the race that remains is two Provider leaders in an unfenced hand-over (HBEP-11's accepted overlap), whose extra Allocation is brief and the planner's to release as surplus.
     - Each running Allocation's pair of relays is reserved together and held through a relay's backoff. So the 4 relays per login node that the probe held without refusal are never exceeded by one copy, and no Allocation is left with half a pair.
     - **Only one Provider per login host runs in host-dialed mode.** The login host is its `HostName` as `ssh -G` resolves it through the Provider's own `-F` file. The Provider's controller refuses a second Provider on that host: it submits nothing, and sets the Provider's `Ready` condition to False with reason `LoginHostInUse`, naming the login host and the Provider holding it. The planner then treats that Provider as unusable (`ProviderUnavailable`, HBEP-7), so no Allocation waits on it. A per-platform budget stays HBEP-4's open question 17.
   - **What ends a relay:**
@@ -262,7 +262,7 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
       - `superseded`;
       - the job listed as ended or completing, or `srun`'s refusal that it doesn't exist or is completing;
       - `srun`'s step-limit refusal;
-      - more than 120 restarts of one channel within an hour.
+      - more than 120 restarts of one channel within an hour, counting only restarts whose session came up and then dropped. Failures before a session comes up (the login node down for maintenance, ssh refused, "agent not ready", a missing preamble) are never capped: they keep retrying at the 30 s backoff cap, bounded by the step count below and by the job's end. A final end stays final.
 
       A final end other than `superseded` or the job's end raises a Warning event, reason `RelayFailed`, regarding the Allocation, naming the channel and the cause (untyped, like every Provider-controller event in alpha; HBEP-8, open question 14). The code adds the reason to HBEP-8's table, since a new reason isn't an amendment.
     - **Steps:** at the 30 s cap two relays make at most about 240 `srun` steps an hour, about 11,500 in 48 h, below the 40,000 `MaxStepCount` that both profiles record.
@@ -610,5 +610,7 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
   - **The owner's two decisions:** relays run without asking Cyfronet first, and a controller restart cuts host-dialed streams in alpha, with a relay keeper deferred to beta (open question 13).
 - **2026-11-09: erratum:** `RelayFailed` is an untyped Warning, not a `failing` event (#301).
 - **2026-11-09: erratum:** a job missing from the listing is retried, not a final end (#301).
+- **2026-11-09: erratum:** the Provider's controller checks the 2-Allocation cap again before it submits, and two Provider leaders in an unfenced hand-over remain the one race, its extra Allocation released as surplus (#301).
+- **2026-11-09: erratum:** the restart cap counts only restarts whose session came up and then dropped; failures before a session comes up are never capped (#301).
 
   Before, a host that compute nodes could not reach was out of alpha, and alpha waited for the gateway's forward.
