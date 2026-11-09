@@ -250,7 +250,7 @@ hack/live-checks.sh --run tunnel-hour --yes
 2. Run `gpu-accounting` first: short, no route needed, and fully wired. `reach` is as short and needs the owner's word that the forwarded port is up; the stack rows in `host-dialed` mode do not need that port.
 3. Set `LIVE_PENDING_MAX_SECONDS` from the estimate before a queued run.
 4. Post each result where the row says, with its slot use. The text of `posts.md` is private until you copy it; it holds counts, durations and fixed labels, never a host, account or job ID.
-5. Every row that runs the stack posts `watch resets over the run`, a measured count. A reset fails the test as "not known", on any kind, and the failure says whether any read's window crossed it. If a live row ever fails on a reset that no read crossed, the rule is refined before that row is re-run.
+5. Every row that runs the stack posts `watch resets over the run`, a measured count. A reset fails the test as "not known", on any kind, and the failure says whether any read's window crossed it. If a live row ever fails on a reset that no read crossed, the rule is refined before that row is re-run. A reset that only catch-ups crossed counts as one that no data read crossed (`@hpc-burst-science-agent`, 9 Nov 2026): a catch-up crosses any reset it finds, which is the coarse rule's own conservatism, and a verdict rests on the data reads. The failure tells the two apart, since a catch-up reads there as "the catch-up for ...", so a row that fails where only catch-ups crossed gets the same refinement before it is re-run.
 
 ## What the dry runs show, and what they cannot
 

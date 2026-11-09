@@ -621,6 +621,15 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'hack/live-checks.sh@@unset HPCBURST_ALPHA_QOS HPCBURST_ALPHA_DIALHOME_ADDR HPCBURST_ALPHA_DIALHOME_KEY@@unset HPCBURST_ALPHA_QOS HPCBURST_ALPHA_DIALHOME_KEY'
   'hack/live-checks.sh@@[ "${S[LIVE_DIALHOME_MODE]}" = host-dialed ] || export HPCBURST_ALPHA_DIALHOME_ADDR@@[ "${S[LIVE_DIALHOME_MODE]}" = host-dialedX ] || export HPCBURST_ALPHA_DIALHOME_ADDR'
   'hack/live-checks.sh@@export HPCBURST_ALPHA_DIALHOME_MODE=${S[LIVE_DIALHOME_MODE]}@@export HPCBURST_ALPHA_DIALHOME_MODE=direct'
+  # #285 (the ruling on PR 292): the live steps report their watch's real resets. A stand-in run has none, and compared the post with the same call.
+  'steps_live_test.go@@func (r *liveRun) WatchResets() int { return r.watch.ResetCount() }@@func (r *liveRun) WatchResets() int { return 0 }'
+  # #285, PR 302's review: the same method, as a constant that is not 0 and as another run's Recorder (the previous run's), which a test whose cases
+  # all expect one count cannot tell from the right one (it holds the previous call's count method, bound to that run's Recorder, not the Recorder
+  # itself: a copy of the watch field is a use TestWatchInventory cannot class, and would be the kill instead of the behaviour); and Run's count read at
+  # its start, which loses every reset that comes after (resetsAtStart is the type in watch_resets_test.go that holds the count read then).
+  'steps_live_test.go@@func (r *liveRun) WatchResets() int { return r.watch.ResetCount() }@@func (r *liveRun) WatchResets() int { return 3 }'
+  'steps_live_test.go@@func (r *liveRun) WatchResets() int { return r.watch.ResetCount() }@@var prevCount func() int; func (r *liveRun) WatchResets() int { c := prevCount; prevCount = r.watch.ResetCount; if c == nil { c = r.watch.ResetCount }; return c() }'
+  'run.go@@plan := Plan{Row: cfg.Row, Rec: rec, PendingMax: cfg.PendingMax, Logf: logf}@@st = resetsAtStart{st, st.WatchResets()}; plan := Plan{Row: cfg.Row, Rec: rec, PendingMax: cfg.PendingMax, Logf: logf}'
 )
 # The mutants of a test of this script: a file with one mutant per line, in place of the list above.
 [ -z "${MUTATE_ALPHA_MUTANTS:-}" ] || mapfile -t mutants < "$MUTATE_ALPHA_MUTANTS"
