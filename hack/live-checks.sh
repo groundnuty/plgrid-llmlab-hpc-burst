@@ -56,7 +56,12 @@
 #     the queue of the first's lease end on no-overlap ("the first job ran and the second never started ..."). A failure of
 #     the part of the run that did happen still wins: that row fails.
 # NOT RUN means the job affirmatively never started (review of PR 284): a read at the bound must show it waiting. A job
-# that started, a job a read does not list, and a read that fails are failures that name what they found, exit 1.
+# that started, a job a read does not list, and a read that fails are failures that name what they found, exit 1. That read
+# is not the last word: a job can start between it and the cancel, so every row reads the job's history once it is cancelled.
+# real-engine does too (#297): after the cleanup has cancelled its job it asks sacct --json, and only the form of the real GH200
+# reply for a job never started (a bare 4294967294 start, state CANCELLED, one plain record, restart count 0) is NOT RUN; a start time
+# is a FAIL that names it, and a history it cannot read is a FAIL that says so. python3 decodes the reply: the host needs it, and
+# prepare_real_engine fails the row before it builds or submits anything when it is missing (LIVE_PYTHON names another interpreter).
 # A test that finds a job still not started at the bound cancels what it submitted by the tags it wrote down,
 # writes the line it wants to report to not-run.txt in its record directory, and SKIPS at the top level (t.Skip).
 # Nothing else: it fails nothing and exits 0. The script reads that, and only that, as NOT RUN (not_run_verdict):
@@ -70,8 +75,8 @@
 # The rule for the one-job slots (the science agent, 2 Nov 2026, #222): a row in a one-job slot (the cluster table's
 # slot column), on either cluster, must have a start wait of 10 min or less or a wait in the queue of 30 min or less
 # (pending_max), and it passes the slot guard (check_slot) before it runs. real-engine, which runs no test of ours to
-# skip, has the 30 min as its wait in the queue too: the cleanup cancels the job by its tag, nothing is posted, and
-# the exit is 3. hack/livechecks reads the table and fails, naming the row, for a slot row that has neither bound, so a
+# skip, has the 30 min as its wait in the queue too: the cleanup cancels the job by its tag, its history is read
+# (settle_real_engine_not_run), nothing is posted, and the exit is 3 if the job never started. hack/livechecks reads the table and fails, naming the row, for a slot row that has neither bound, so a
 # new row cannot miss it.
 #
 # The settings file is named by HPCBURST_LIVE_SETTINGS: KEY=VALUE lines, mode
@@ -850,6 +855,7 @@ unresolved_tags() {
 # read; the failed verification is reported apart, and the EXIT trap tries once more. Idempotent; sets
 # CLEAN_LEFT.
 CLEAN_LEFT=0
+CLEAN_SEEN=0       # 1 when the last listing showed an owned job; CLEAN_LEFT is also 1 when the queue could not be read at all (#300)
 CLEAN_TRIES=0
 TEST_STOPPED=0     # 1 when a test binary was stopped (timeout, signal, panic) instead of finishing
 clean_cluster() {
@@ -899,7 +905,7 @@ clean_cluster() {
   [ -z "$unres" ] || say "cleanup: waited for $(printf '%s\n' "$unres" | wc -l) unresolved submission(s) the test could not settle"
   [ "$stopped" != 1 ] || say "cleanup: the test was stopped before it finished, so a submission in flight may still register; waited for it"
   say "cleanup: left behind $left (cancelled $cancelled)"
-  [ "$left" -eq 0 ] || CLEAN_LEFT=1
+  [ "$left" -eq 0 ] || { CLEAN_LEFT=1; CLEAN_SEEN=1; }
   ACTIVE_HOST=""
   return 0
 }
@@ -1267,13 +1273,15 @@ run_cluster() {
       [[ $RUN_ID =~ ^[0-9a-f]{10}$ ]] || { release_run_lock; say "$n: FAIL (no run ID could be drawn)"; return 1; }
       OWN_PREFIX="hb-alpha-$RUN_ID-" ;;
   esac
-  JOBID=""; CLEAN_TRIES=0; NOT_RUN=0; TEST_STOPPED=0
+  JOBID=""; CLEAN_TRIES=0; NOT_RUN=0; TEST_STOPPED=0; RE_PENDING_JOB=""; RE_PENDING_BOUND=0
   ACTIVE_HOST=$host
   t0=$(date +%s)
   execute_cluster "$n" || { [ "$NOT_RUN" = 1 ] || verdict=1; }
   clean_cluster || true
   t1=$(date +%s)
   slot_report "$n" "$t0" "$t1"
+  # real-engine's job pending at its bound: the cleanup has cancelled it, and its history now says what the run ends as (#297).
+  if [ "$n" = real-engine ] && [ "$NOT_RUN" = 1 ]; then settle_real_engine_not_run "$n" "$host" || verdict=1; fi
   [ "$CLEAN_LEFT" -eq 0 ] || verdict=1
   release_run_lock
   # Not run, with nothing left behind: exit 3, below a failure.
@@ -1302,11 +1310,16 @@ now_epoch() { if [ -n "${LIVE_FAKE_CLOCK:-}" ]; then cat "$LIVE_FAKE_CLOCK"; els
 
 RE_DIR=""
 RE_TAG=""
+RE_PENDING_JOB=""     # the real-engine job still pending at its bound, whose history settle_real_engine_not_run reads
+RE_PENDING_BOUND=0    # the wait in the queue it was given, in seconds
 
 # prepare_real_engine <name>: build the arm64 agent and its test binary, write the plan, stage all of it.
 # Nothing here holds the slot.
 prepare_real_engine() {
   local n=$1 host=${HOST[$1]} w tag sha
+  # The history read after a pending bound is decoded by python3 (#300): without it the run would wait out the queue and only then fail.
+  command -v "${LIVE_PYTHON:-python3}" >/dev/null 2>&1 ||
+    { say "$n: FAIL (python3 is not on this host, and the read of a pending job's history needs it)"; return 1; }
   sha=$(git -C "$ROOT" rev-parse --short=9 HEAD 2>/dev/null || echo unknown)
   tag="live-$(date -u +%Y%m%d%H%M%S)-$sha"
   [[ $tag =~ ^live-[0-9]{14}-[0-9a-f]{7,12}$ ]] || { say "$n: FAIL (no commit to name the run by)"; return 1; }
@@ -1363,13 +1376,12 @@ EOS
     if [ "$state" != PENDING ] && [ "$state" != error ] && [ -z "$run_t" ]; then run_t=$now; fi
     # Only a read that says PENDING can end the wait in the queue: the job can have started since the last good read, so a
     # failed read at the bound tells nothing about a start, and the three-error guard above decides it (review of PR 284, B4).
-    # The limit: a job that starts in the seconds between this read and the cleanup's cancel still reads NOT RUN. A read of
-    # sacct's text could close it, whose form for a job never started cannot be checked here without a live run.
     if [ "$state" = PENDING ] && [ -z "$run_t" ] && [ $((now - submit_t)) -gt "$pend_max" ]; then
-      # The job never started: not a failure (issue #222). The cleanup after this cancels it by its tag, and the run's exit is 3
-      # unless that leaves a job behind, which is a failure.
-      NOT_RUN=1
-      say "$n: NOT RUN (a job was still pending after $(fmt_pending "$pend_max") in the queue and was cancelled by its tag; not a failure)"; return 3
+      # The read says the job waits, but it can start in the seconds before the cleanup's cancel (#297). So this ends the wait and
+      # nothing more: the cleanup cancels the job by its tag, and settle_real_engine_not_run then reads its history, and only
+      # that says NOT RUN (a job that never started, issue #222: exit 3), a FAIL for a start, or a FAIL for a history it cannot read.
+      NOT_RUN=1; RE_PENDING_BOUND=$pend_max; RE_PENDING_JOB=$JOBID
+      say "$n: the job was still pending after $(fmt_pending "$pend_max") in the queue: cancelling it, then reading its history"; return 3
     fi
     if [ -n "$run_t" ] && [ $((now - run_t)) -gt $((limit_s + margin)) ]; then
       say "$n: FAIL (the job ran past its time limit plus $((margin/60)) minutes; cancelling it)"; return 1
@@ -1389,6 +1401,172 @@ EOS
 }
 
 slurm_seconds() { local h m s; IFS=: read -r h m s <<<"$1"; echo $(( 10#$h * 3600 + 10#$m * 60 + 10#${s:-0} )); }
+
+# ---------------------------------------------------------------- the pending job's history (#297)
+
+# The sacct start of a job that never started is the bare number 4294967294 (Slurm's NO_VAL, 0xfffffffe, in a field the data parser dumps
+# as a plain timestamp), as the real GH200 reply showed (#267, #269; internal/slurm/testdata/v0.0.42/sacct-never-started.json,
+# and internal/slurm/parse.go says why). Only that form is read as "never started", and only on a job that is CANCELLED, since a job the
+# cancel has not reached yet shows the same start, and with a restart count that is known to be 0, since a requeued job can show only its last execution. A start that is a real time is a job that started. Everything else is a history this
+# check cannot read: the same rule as the other rows' (internal/providerctl/conformance, notRun: a read that fails, a job with no record and
+# a job that started are each a FAIL), so a form nobody has seen is a FAIL that says so, never a NOT RUN.
+NO_VAL_START=4294967294
+
+# The reply is decoded by python3 (-I: no site or user code), which the script did not need before: the host that runs real-engine must have it
+# (prepare_real_engine says so before it submits; LIVE_PYTHON names another interpreter, for the tests). A decode, not a regular expression
+# over the text (review of PR 300, B2): it takes the reply as ONE JSON document (no repeated key, no NaN or Infinity, nothing after it)
+# and wants the errors list empty, exactly one job record, that record the job asked about (its own number, a plain whole number),
+# and neither an array nor a heterogeneous job (array.job_id and het.job_id both present and 0: a record that only carries the asked
+# number in one of them is another job's), no steps listed, and a time.start that is a whole number. It answers one line:
+# "rec <start> <end or -> <CANCELLED or other> <restart count or ->" or "unclear <words>"; the words are this program's own, and the only
+# things of the reply that reach the screen are digits (a number is taken only when it is exactly an int: not a boolean, a float, a
+# string or a triple). Everything else, the meaning of the start, the end, the state and the restart count, is read below.
+IFS= read -r -d '' HISTORY_DECODER <<'PY' || true
+import json, sys
+def stop(why):
+    print("unclear " + why)
+    sys.exit(0)
+def whole(x):
+    return type(x) is int
+def keys_once(pairs):
+    d = {}
+    for k, v in pairs:
+        if k in d:
+            raise ValueError("a key is there twice")
+        d[k] = v
+    return d
+def no_constant(c):
+    raise ValueError("not a number of JSON")
+job = int(sys.argv[1])
+try:
+    doc = json.loads(sys.stdin.read(), object_pairs_hook=keys_once, parse_constant=no_constant)
+except Exception:
+    stop("the reply is not one JSON document")
+errs = doc.get("errors") if type(doc) is dict else None
+if type(errs) is not list or len(errs) != 0:
+    stop("the reply carries no empty errors list")
+jobs = doc.get("jobs")
+if type(jobs) is not list or len([j for j in jobs if type(j) is dict and whole(j.get("job_id")) and j["job_id"] == job]) != 1:
+    stop("the reply does not list this job exactly once")
+if len(jobs) != 1:
+    stop("the reply lists more than this job")
+rec = jobs[0]
+for part in ("array", "het"):
+    p = rec.get(part)
+    if type(p) is not dict or not whole(p.get("job_id")) or p["job_id"] != 0:
+        stop("the record does not show that it is neither an array nor a heterogeneous job")
+if rec.get("steps", []) != []:
+    stop("the record lists steps")
+tm = rec.get("time")
+start = tm.get("start") if type(tm) is dict else None
+if not whole(start):
+    stop("its start is not a plain number")
+if not 0 <= start < 2 ** 64:
+    stop("its start is a marker of a form not known")
+end = tm.get("end")
+if not whole(end) or not 0 <= end < 2 ** 64:
+    end = "-"
+rc = rec.get("restart_cnt")
+if not whole(rc) or not 0 <= rc < 2 ** 32:
+    rc = "-"
+st = rec.get("state")
+cur = st.get("current") if type(st) is dict else None
+print("rec", start, end, "CANCELLED" if cur == ["CANCELLED"] else "other", rc)
+PY
+
+# What the decoder may answer: its own words, or four fields of fixed form. Anything else is not understood.
+HISTORY_UNCLEAR_RE='^unclear [A-Za-z ]{1,100}$'
+HISTORY_REC_RE='^rec ([0-9]{1,20}) ([0-9]{1,20}|-) (CANCELLED|other) ([0-9]{1,10}|-)$'
+
+# history_verdict <job> <sacct --json reply>: one line, "never", "started <epoch>" or "unclear <what>".
+history_verdict() {
+  local job=$1 out start end state restart
+  case $job in ''|*[!0-9]*) echo "unclear the job number is not a plain number"; return ;; esac
+  out=$("${LIVE_PYTHON:-python3}" -I -c "$HISTORY_DECODER" "$job" <<<"$2" 2>/dev/null) || { echo "unclear the reply could not be decoded (python3 did not run it)"; return; }
+  if [[ $out =~ $HISTORY_UNCLEAR_RE ]]; then echo "$out"; return; fi
+  if [[ $out =~ $HISTORY_REC_RE ]]; then
+    start=${BASH_REMATCH[1]}; end=${BASH_REMATCH[2]}; state=${BASH_REMATCH[3]}; restart=${BASH_REMATCH[4]}
+  else
+    echo "unclear the decoder's answer was not understood"; return
+  fi
+  if [ "$start" = "$NO_VAL_START" ]; then
+    if [ "$state" != CANCELLED ]; then echo "unclear its start is not set but its state is not CANCELLED yet"; return; fi
+    # Never started needs affirmative evidence: a job that ran between two polls and was requeued can show, in accounting, only its
+    # latest execution, cancelled before it started. Only a restart count that is known, and 0, rules that out (review of PR 300, B1).
+    if [ "$restart" != 0 ]; then echo "unclear its restart count is not a known zero"; return; fi
+    echo never; return
+  fi
+  # A time: 1 to 4294967293, ten digits at most. 0 and every marker other than the one above are forms nobody has seen here.
+  if [ "${#start}" -gt 10 ] || [ "$((10#$start))" -lt 1 ] || [ "$((10#$start))" -ge "$NO_VAL_START" ]; then echo "unclear its start is a marker of a form not known"; return; fi
+  # alpha.JobStarted counts a start that is not before the end as no start; here that is a record this check cannot read either way.
+  # An end of 0 is a job still running (sacct has none yet), and the markers are no end either: those are a start and no end.
+  if [ "$end" != - ] && [ "${#end}" -le 10 ] && [ "$((10#$end))" -ge 1 ] && [ "$((10#$end))" -lt "$NO_VAL_START" ] && [ "$((10#$end))" -le "$((10#$start))" ]; then
+    echo "unclear its end is not after its start"; return
+  fi
+  echo "started $((10#$start))"
+}
+
+# job_history <host> <job>: the job's accounting record, as sacct --json (-X: the job, not its steps; -D: every execution, as the real
+# capture was read) with the status of the command on a line of its own before it, so that a login banner or a failed command cannot pass
+# for a reply.
+job_history() {
+  { preamble JOB "$2"; cat <<'EOS'
+out=$(sacct -j "$JOB" --json -X -D 2>/dev/null); rc=$?
+echo "sacct_rc=$rc"
+echo "---SACCT---"
+printf '%s\n' "$out"
+EOS
+  } | remote "$1"
+}
+
+# real_engine_history_verdict <host> <job>: history_verdict of what sacct says now, asked up to five times a few seconds apart (LIVE_SACCT_GAP,
+# as fetch_real_engine does): accounting can lag the job's leaving the queue by a moment. A "never" or a "started" ends it at once. A read that
+# fails, an empty reply and every other "unclear" are asked again, and the last one stands.
+real_engine_history_verdict() {
+  local host=$1 job=$2 i reply rc body v="unclear sacct was not asked"
+  for i in 1 2 3 4 5; do
+    [ -z "$INTERRUPTED" ] || { echo "unclear the run was interrupted"; return; }
+    if ! reply=$(job_history "$host" "$job"); then
+      v="unclear the read did not complete"
+    else
+      rc=$(printf '%s\n' "$reply" | sed -n -E 's/^sacct_rc=([0-9]+)$/\1/p' | head -1)
+      body=$(printf '%s\n' "$reply" | sed -n '/^---SACCT---$/,$p' | tail -n +2)
+      if [ "$rc" != 0 ]; then v="unclear sacct failed"
+      elif [ -z "$(printf '%s' "$body" | tr -d ' \t\r\n')" ]; then v="unclear sacct returned nothing"
+      else v=$(history_verdict "$job" "$body"); fi
+    fi
+    case $v in never|started\ *) break ;; esac
+    [ "$i" = 5 ] || sleep "${LIVE_SACCT_GAP:-2}"
+  done
+  printf '%s\n' "$v"
+}
+
+# settle_real_engine_not_run <name> <host>: what the pending bound ends as, once the cleanup has cancelled the job. Returns 0 for a NOT RUN
+# (the history says it never started) and 1 for a FAIL, which also takes the NOT RUN back: a job that started, a history that cannot be read,
+# a job the cleanup saw left in the queue, and a queue the cleanup could not read (neither has the history of a cancelled job, and each is
+# said apart: the one is what was seen, the other what could not be checked). The wait it adds is the sacct reads of
+# real_engine_history_verdict (five at most, LIVE_SACCT_GAP apart), after the pending bound and never inside the run's own clock.
+settle_real_engine_not_run() {
+  local n=$1 host=$2 v
+  if [ "$CLEAN_LEFT" -ne 0 ]; then
+    NOT_RUN=0
+    if [ "$CLEAN_SEEN" -ne 0 ]; then
+      say "$n: FAIL (the cleanup left the job in the queue, so its history cannot show that it never started)"
+    else
+      say "$n: FAIL (the cleanup could not read the queue, so it cannot confirm that the job was cancelled, and its history cannot show that it never started)"
+    fi
+    return 1
+  fi
+  v=$(real_engine_history_verdict "$host" "$RE_PENDING_JOB")
+  case $v in
+    never)
+      say "$n: NOT RUN (a job was still pending after $(fmt_pending "$RE_PENDING_BOUND") in the queue and was cancelled by its tag; not a failure)"; return 0 ;;
+    started\ *)
+      NOT_RUN=0; say "$n: FAIL (the job had started by its cancel, with a start time of ${v#started } as sacct gives it: a started job is never NOT RUN)"; return 1 ;;
+    *)
+      NOT_RUN=0; say "$n: FAIL (the job's history could not be read after its cancel, so it cannot be called a job that never started: ${v#unclear })"; return 1 ;;
+  esac
+}
 
 # fetch_real_engine <name> <tag> <job> <dir>: the job's log, its final state, and the run's record.
 fetch_real_engine() {

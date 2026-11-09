@@ -203,8 +203,9 @@ func TestRealEngineJobPendingPastTheBoundIsNotRunNotFailed(t *testing.T) {
 	}
 }
 
-// A NOT RUN whose cleanup leaves the job behind is a failure, as for every row: the job was still pending past the bound and
-// the cancel did nothing, so the slot is still held.
+// A job the cleanup leaves behind is a failure, as for every row: the job was still pending past the bound and the cancel did
+// nothing, so the slot is still held. It is no longer printed as NOT RUN first (#297): its history is not that of a cancelled job,
+// so nothing can say it never started (realengine_history_test.go has the case with its own checks).
 func TestRealEngineNotRunStaysAFailureWhenTheCleanupLeavesTheJob(t *testing.T) {
 	w := newWorld(t)
 	w.useStubGo()
@@ -212,7 +213,10 @@ func TestRealEngineNotRunStaysAFailureWhenTheCleanupLeavesTheJob(t *testing.T) {
 	if res.code != 1 {
 		t.Fatalf("exit %d, want 1:\n%s", res.code, res.out)
 	}
-	w.contains(res, "real-engine: NOT RUN", "cleanup: left behind 1", "a job was left behind")
+	w.contains(res, "real-engine: FAIL", "cleanup: left behind 1", "a job was left behind")
+	if strings.Contains(res.out, "real-engine: NOT RUN") {
+		t.Errorf("a run that left its job behind was reported NOT RUN:\n%s", res.out)
+	}
 }
 
 func TestRealEngineJobRunningPastItsLimitIsCancelled(t *testing.T) {
