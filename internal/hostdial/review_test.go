@@ -1,16 +1,19 @@
 package hostdial_test
 
-// The review of PR 301's tests, each through the real path
-// (harness_test.go), each failing without its fix: the pair of slots (F2),
-// rotated credentials (F1), a squatted relay name (F5), the job-is-ours read
-// before every start (N2), the hand-over's flapping ending with the old owner
-// (N6), and a named failure for a relay that finds no agent (N7).
+// HBEP-6's host-dialed Test plan items that PR 298's final text (b12aa9f)
+// and PR 301's review round add, each through the real path
+// (harness_test.go), each failing without its rule: the pair of slots,
+// rotated credentials, the rendezvous (different TMPDIRs, a stale
+// relay-socket), the job-is-ours read before every start, fencing, and what
+// ends a relay (a step-limit refusal, the job's end, too many restarts, a
+// missing preamble).
 
 import (
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -20,10 +23,32 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
-// F2: a relay that drops never gives its slot to another Allocation. A and B
-// hold the login node's four slots and C waits; A's serving relay is killed
-// and starts again, and C still waits, with no process and no byte crossing.
-// Once B's relays stop, C gets both.
+// failures records the targets' OnFailed calls: the controller's RelayFailed.
+type failures struct {
+	mu  sync.Mutex
+	got []string
+}
+
+func (f *failures) hook(t *hostdial.Target) {
+	t.OnFailed = func(ch agentapi.RelayChannel, cause string) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.got = append(f.got, string(ch)+": "+cause)
+	}
+}
+
+func (f *failures) list() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.got...)
+}
+
+// A relay that drops never gives its slot to another Allocation (HBEP-6,
+// Capacity: "a pair is reserved whole, and neither relay of a running
+// Allocation's pair is ever missing while the other runs"). A and B hold the
+// login node's four slots and C waits; A's serving relay is killed and starts
+// again, and C still waits, with no process and no byte crossing. Once B's
+// relays stop, C gets both.
 func TestHostDialedABlipNeverGivesASlotToAnotherAllocation(t *testing.T) {
 	w := newWorld(t)
 	a := w.submit("hb-relay-pra-0123456789ab", 3*time.Second)
@@ -65,11 +90,11 @@ func TestHostDialedABlipNeverGivesASlotToAnotherAllocation(t *testing.T) {
 	roundTrip(t, c, serving, "serving", payload(2000))
 }
 
-// F1: rotated credentials reach running relays. The relays run on a key at
-// one path; the key moves to another (the old one is removed, as a revoked
-// key would be) and the target names the new credentials' generation: both
-// relays start again on the new configuration, carry bytes, and the old
-// configuration file is gone and is never written again.
+// Rotated credentials reach running relays (PR 301's review, F1): the relays
+// run on a key at one path; the key moves to another (the old one removed, as
+// a revoked key would be) and the target names the new credentials'
+// generation; both relays start again on the new configuration and carry
+// bytes, and the old configuration file is gone and never written again.
 func TestHostDialedRotatedCredentialsReachRunningRelays(t *testing.T) {
 	w := newWorld(t)
 	j := w.submit("hb-relay-rot-0123456789ab", 30*time.Second)
@@ -97,8 +122,6 @@ func TestHostDialedRotatedCredentialsReachRunningRelays(t *testing.T) {
 	own.Want(tg)
 	before := waitUp(t, own, j.tag)
 	roundTrip(t, j, serving, "serving", payload(1000))
-	// The rotation, as the Provider controller makes it: a new Relay for the
-	// new credentials, the old one closed, the old key gone.
 	nu := relayOn(filepath.Join(w.base, "key-2"))
 	if err := old.Close(); err != nil {
 		t.Fatal(err)
@@ -116,7 +139,7 @@ func TestHostDialedRotatedCredentialsReachRunningRelays(t *testing.T) {
 		})
 		args, err := os.ReadFile("/proc/" + strconv.Itoa(r.PID) + "/cmdline")
 		if err != nil || !strings.Contains(string(args), nu.Config()+"\x00") {
-			t.Errorf("the %s relay %d does not run on the new configuration %s: %q", ch, r.PID, nu.Config(), args)
+			t.Errorf("the %s relay %d does not run on the new configuration %s", ch, r.PID, nu.Config())
 		}
 		if alive(before[ch].PID) {
 			t.Errorf("the %s relay %d on the old credentials still runs", ch, before[ch].PID)
@@ -132,27 +155,20 @@ func TestHostDialedRotatedCredentialsReachRunningRelays(t *testing.T) {
 	}
 }
 
-// F5: a squatted relay name does not stop the agent. Before the job starts,
-// the names a predictable scheme would give its relay directory are taken
-// (the plain name as a link to elsewhere, which the agent refuses as another
-// user's directory, and the first random-looking one as a file); the agent
-// makes its own unpredictable directory and both channels carry bytes.
-func TestHostDialedASquattedRelayNameDoesNotStopTheAgent(t *testing.T) {
-	w := newWorld(t)
-	id := strconv.Itoa(w.firstID)
-	squatted := filepath.Join(w.relays, "hb-relay-"+id)
-	if err := os.Symlink("/nonexistent", squatted); err != nil {
+// The rendezvous: a batch step and a relay step with different TMPDIR values
+// still meet through relay-socket (HBEP-6, Test plan). The relay steps get a
+// TMPDIR of their own (fakeslurm.RunMode.StepEnv), as a step srun starts from
+// the login node may; the agent's socket is under the batch step's TMPDIR.
+func TestHostDialedRendezvousAcrossDifferentTMPDIRs(t *testing.T) {
+	stepTmp, err := os.MkdirTemp("", "hs")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(squatted+"-0", nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	j := w.submit("hb-relay-sqt-0123456789ab", 30*time.Second)
-	if j.id != id {
-		t.Fatalf("the job is %s, not the squatted ID %s", j.id, id)
-	}
-	if j.ports.Dir == squatted || !strings.HasPrefix(filepath.Base(j.ports.Dir), "hb-relay-"+id+"-") {
-		t.Fatalf("the job's relay directory is %s, want an unpredictable one beside %s", j.ports.Dir, squatted)
+	t.Cleanup(func() { _ = os.RemoveAll(stepTmp) })
+	w := newWorld(t, func(c *worldConfig) { c.stepEnv = map[string]string{"TMPDIR": stepTmp} })
+	j := w.submit("hb-relay-tmp-0123456789ab", 30*time.Second)
+	if strings.HasPrefix(j.ports.Socket, stepTmp) {
+		t.Fatalf("the agent's socket %s is under the steps' TMPDIR %s: the two do not differ", j.ports.Socket, stepTmp)
 	}
 	own, _, _ := w.owner(hostdial.OwnerOptions{})
 	own.Want(w.target(j))
@@ -161,90 +177,218 @@ func TestHostDialedASquattedRelayNameDoesNotStopTheAgent(t *testing.T) {
 	roundTrip(t, j, serving, "serving", payload(1000))
 }
 
-// N2: the job-is-ours read happens before every start, not only the first.
-// Once the relays run, the job is listed under another name; the serving
-// relay is killed, and its next start is refused: no srun runs again.
+// A stale relay-socket (its socket has no listener) ends the relay as "agent
+// not ready", which is retried, never final.
+func TestHostDialedAStaleRendezvousIsAgentNotReady(t *testing.T) {
+	w := newWorld(t)
+	j := w.allocation("hb-relay-stl-0123456789ab")
+	stale := filepath.Join(w.base, "gone.sock")
+	if err := os.WriteFile(agentapi.RelaySocketFile(j.allocDir), []byte(stale+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	j.id = w.sbatch(j.tag, "exec sleep 600")
+	waitRunning(t, w, j)
+	own, _, _ := w.owner(hostdial.OwnerOptions{MinBackoff: 100 * time.Millisecond, MaxBackoff: 200 * time.Millisecond})
+	own.Want(w.target(j))
+	for _, ch := range agentapi.RelayChannels {
+		waitFor(t, time.Minute, "the "+string(ch)+" relay retried after agent not ready", func() bool {
+			r := relayOf(own, j.tag, ch)
+			return r.Starts >= 2 && strings.Contains(r.LastEnd, "agent not ready")
+		})
+		if r := relayOf(own, j.tag, ch); r.Final {
+			t.Errorf("the %s relay ended for good (%s) on agent not ready, which is retried", ch, r.FinalCause)
+		}
+	}
+}
+
+// The job-is-ours read happens before every start, not only the first
+// (review N2), from the Provider's listing: once the relays run, the job is
+// listed under another name; the serving relay is killed, and its next start
+// ends the relay for good as the job's end, with no srun and no RelayFailed.
 func TestHostDialedEveryStartReadsTheJobAgain(t *testing.T) {
 	w := newWorld(t)
 	j := w.submit("hb-relay-rea-0123456789ab", 30*time.Second)
 	own, _, _ := w.owner(hostdial.OwnerOptions{})
-	own.Want(w.target(j))
+	var f failures
+	tg := w.target(j)
+	f.hook(&tg)
+	own.Want(tg)
 	up := waitUp(t, own, j.tag)
 	roundTrip(t, j, serving, "serving", payload(1000))
 	waitFor(t, time.Minute, "both relays' srun steps logged", func() bool { return len(w.sruns(j.id)) == 2 })
 	if err := w.plat.RenameListed(atoi(t, j.id), "hb-relay-oth-0123456789ab"); err != nil {
 		t.Fatal(err)
 	}
+	waitFor(t, time.Minute, "the Provider's listing to show the job under another name", func() bool {
+		jobs, err := w.jobs.ListByTag(t.Context(), j.tag)
+		return err == nil && len(jobs) == 0
+	})
 	if err := syscall.Kill(up[serving].PID, syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, time.Minute, "the serving relay's next start refused", func() bool {
-		return strings.Contains(relayOf(own, j.tag, serving).LastRefusal, "not listed under tag")
-	})
-	if r := relayOf(own, j.tag, serving); r.PID != 0 || r.Starts != 1 {
-		t.Errorf("the serving relay %+v started again on a job no longer under its tag", r)
+	waitFor(t, time.Minute, "the serving relay ended for good", func() bool { return relayOf(own, j.tag, serving).Final })
+	if r := relayOf(own, j.tag, serving); !strings.Contains(r.FinalCause, "not listed under tag") || r.Starts != 1 {
+		t.Errorf("the serving relay %+v: want a final end, not listed under its tag, after its one start", r)
 	}
 	if n := len(w.sruns(j.id)); n != 2 {
 		t.Errorf("the fake ran %d srun steps in the job, want the first 2 only: %q", n, w.sruns(j.id))
 	}
+	if got := f.list(); len(got) != 0 {
+		t.Errorf("the job's end raised RelayFailed: %q", got)
+	}
 }
 
-// N6: an unfenced hand-over flaps, and the flapping ends with the old owner.
-// Two owners keep relays for one Allocation, and the agent keeps the newer
-// session each time, so each owner's relays are closed and started again in
-// turn. Once the old owner stops (its Provider manager lost its Lease, as it
-// does within the Lease's duration), the other's relays stay up and carry
-// bytes.
-func TestHostDialedAStoppedOldOwnerEndsTheFlapping(t *testing.T) {
+// Fencing (HBEP-6): an old copy's relay that arrives after the new copy's,
+// with a lower epoch, is refused as superseded and is not started again; the
+// new copy's relays stay and carry bytes, and no RelayFailed is raised.
+func TestHostDialedALowerEpochIsSuperseded(t *testing.T) {
 	w := newWorld(t)
-	j := w.submit("hb-relay-flp-0123456789ab", 30*time.Second)
-	opts := hostdial.OwnerOptions{MinBackoff: 200 * time.Millisecond, MaxBackoff: 400 * time.Millisecond}
-	older, stopOlder, olderDone := w.owner(opts)
-	newer, _, _ := w.owner(opts)
-	older.Want(w.target(j))
-	newer.Want(w.target(j))
-	waitFor(t, 2*time.Minute, "both owners' serving relays started at least twice: the flapping", func() bool {
-		return relayOf(older, j.tag, serving).Starts >= 2 && relayOf(newer, j.tag, serving).Starts >= 2
-	})
-	stopOlder()
-	select {
-	case <-olderDone:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the old owner did not stop")
-	}
-	up := waitUp(t, newer, j.tag)
-	starts := map[agentapi.RelayChannel]int{}
-	for ch, r := range up {
-		starts[ch] = r.Starts
-	}
-	for range 3 {
-		roundTrip(t, j, control, "control", payload(2000))
-		roundTrip(t, j, serving, "serving", payload(2000))
-	}
+	j := w.submit("hb-relay-fen-0123456789ab", 30*time.Second)
+	nu, _, _ := w.owner(hostdial.OwnerOptions{Epoch: epoch(7)})
+	nu.Want(w.target(j))
+	up := waitUp(t, nu, j.tag)
+	roundTrip(t, j, control, "control", payload(1000))
+	old, _, _ := w.owner(hostdial.OwnerOptions{Epoch: epoch(6)})
+	var f failures
+	tg := w.target(j)
+	f.hook(&tg)
+	old.Want(tg)
 	for _, ch := range agentapi.RelayChannels {
-		if r := relayOf(newer, j.tag, ch); r.PID != up[ch].PID || r.Starts != starts[ch] {
-			t.Errorf("the %s relay was replaced after the old owner stopped (%+v, was %+v)", ch, r, up[ch])
+		waitFor(t, time.Minute, "the old copy's "+string(ch)+" relay superseded", func() bool { return relayOf(old, j.tag, ch).Final })
+		r := relayOf(old, j.tag, ch)
+		if !strings.HasPrefix(r.FinalCause, "superseded") || r.Starts != 1 || r.Epoch != 6 {
+			t.Errorf("the old copy's %s relay %+v: want superseded after one start, epoch 6", ch, r)
 		}
 	}
+	for range 3 {
+		roundTrip(t, j, control, "control", payload(1000))
+		roundTrip(t, j, serving, "serving", payload(1000))
+	}
+	for _, ch := range agentapi.RelayChannels {
+		if r := relayOf(nu, j.tag, ch); r.PID != up[ch].PID || r.Starts != 1 || r.Epoch != 7 {
+			t.Errorf("the new copy's %s relay %+v was disturbed by the old copy's", ch, r)
+		}
+	}
+	if got := f.list(); len(got) != 0 {
+		t.Errorf("a superseded relay raised RelayFailed: %q", got)
+	}
 }
 
-// N7: a relay that finds no agent says so by name. The job runs no agent, so
-// no pointer is published: each relay step exits with hostdial.RelayMessage's
-// line, which the owner records as the relay's failure through Classify.
-func TestHostDialedARelayWithNoAgentIsNamed(t *testing.T) {
+// What ends a relay: srun's step-limit refusal ends it for good, with
+// RelayFailed naming the channel and the cause.
+func TestHostDialedAStepLimitRefusalEndsTheRelayWithRelayFailed(t *testing.T) {
 	w := newWorld(t)
-	j := job{tag: "hb-relay-noa-0123456789ab"}
-	j.id = w.sbatch(j.tag, "exec sleep 600")
-	waitFor(t, time.Minute, "the job running", func() bool {
+	j := w.submit("hb-relay-lim-0123456789ab", 30*time.Second)
+	own, _, _ := w.owner(hostdial.OwnerOptions{MinBackoff: 100 * time.Millisecond, MaxBackoff: 200 * time.Millisecond})
+	var f failures
+	tg := w.target(j)
+	f.hook(&tg)
+	own.Want(tg)
+	up := waitUp(t, own, j.tag)
+	waitFor(t, time.Minute, "both relays' srun steps logged", func() bool { return len(w.sruns(j.id)) == 2 })
+	if err := w.plat.SetStepLimit(atoi(t, j.id), 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(up[serving].PID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, time.Minute, "the serving relay ended for good", func() bool { return relayOf(own, j.tag, serving).Final })
+	if r := relayOf(own, j.tag, serving); !strings.Contains(r.FinalCause, "step limit") {
+		t.Errorf("the serving relay ended %q, want srun's step-limit refusal", r.FinalCause)
+	}
+	waitFor(t, time.Minute, "RelayFailed raised", func() bool { return len(f.list()) == 1 })
+	if got := f.list()[0]; !strings.HasPrefix(got, "serving: ") || !strings.Contains(got, "step limit") {
+		t.Errorf("RelayFailed %q: want the serving channel and the step limit", got)
+	}
+	if r := relayOf(own, j.tag, control); r.Final || r.PID != up[control].PID {
+		t.Errorf("the control relay %+v was disturbed by the serving relay's end", r)
+	}
+}
+
+// What ends a relay: more restarts of one channel than the limit within the
+// window (120 an hour; 3 here) ends it for good, with RelayFailed.
+func TestHostDialedTooManyRestartsEndTheRelayWithRelayFailed(t *testing.T) {
+	w := newWorld(t)
+	j := w.submit("hb-relay-res-0123456789ab", 30*time.Second)
+	own, _, _ := w.owner(hostdial.OwnerOptions{MinBackoff: 50 * time.Millisecond, MaxBackoff: 100 * time.Millisecond, RestartLimit: 3})
+	var f failures
+	tg := w.target(j)
+	f.hook(&tg)
+	own.Want(tg)
+	killed := map[int]bool{}
+	waitFor(t, 2*time.Minute, "the serving relay ended for good after repeated kills", func() bool {
+		r := relayOf(own, j.tag, serving)
+		if r.Final {
+			return true
+		}
+		if r.PID != 0 && !killed[r.PID] {
+			_ = syscall.Kill(r.PID, syscall.SIGKILL)
+			killed[r.PID] = true
+		}
+		return false
+	})
+	r := relayOf(own, j.tag, serving)
+	// More than 3 restarts is the fourth restart: the fifth start.
+	if !strings.Contains(r.FinalCause, "more than 3 restarts") || r.Starts != 5 {
+		t.Errorf("the serving relay %+v: want a final end after 5 starts, more than 3 restarts", r)
+	}
+	if got := f.list(); len(got) != 1 || !strings.Contains(got[0], "more than 3 restarts") {
+		t.Errorf("RelayFailed %q: want one, naming the restarts", got)
+	}
+}
+
+// What ends a relay: a missing preamble or unexpected output first is
+// refused, counted and retried, never final (HBEP-6, The wire).
+func TestHostDialedUnexpectedOutputIsRetried(t *testing.T) {
+	w := newWorld(t, func(c *worldConfig) { c.stepEnv = map[string]string{"HB_TEST_RELAY_GARBAGE": "1"} })
+	j := w.submit("hb-relay-gar-0123456789ab", 3*time.Second)
+	own, _, _ := w.owner(hostdial.OwnerOptions{MinBackoff: 100 * time.Millisecond, MaxBackoff: 200 * time.Millisecond})
+	own.Want(w.target(j))
+	for _, ch := range agentapi.RelayChannels {
+		waitFor(t, time.Minute, "the "+string(ch)+" relay refused for its output and retried", func() bool {
+			r := relayOf(own, j.tag, ch)
+			return r.Starts >= 2 && strings.Contains(r.LastEnd, "unexpected output before the preamble")
+		})
+		if r := relayOf(own, j.tag, ch); r.Final || r.Joined != 0 {
+			t.Errorf("the %s relay %+v: unexpected output must be retried, and no stream joined", ch, r)
+		}
+	}
+	if c, err := dial(j, serving, 10*time.Second); err == nil {
+		c.close()
+		t.Error("a byte crossed a relay whose output was refused")
+	}
+}
+
+// What ends a relay: the job ending while a relay starts ends it for good as
+// the job's end, with no RelayFailed.
+func TestHostDialedTheJobsEndEndsTheRelayWithoutRelayFailed(t *testing.T) {
+	w := newWorld(t)
+	j := w.submit("hb-relay-end-0123456789ab", 30*time.Second)
+	own, _, _ := w.owner(hostdial.OwnerOptions{MinBackoff: 100 * time.Millisecond, MaxBackoff: 200 * time.Millisecond})
+	var f failures
+	tg := w.target(j)
+	f.hook(&tg)
+	own.Want(tg)
+	waitUp(t, own, j.tag)
+	if err := w.plat.End(atoi(t, j.id), "CANCELLED"); err != nil {
+		t.Fatal(err)
+	}
+	for _, ch := range agentapi.RelayChannels {
+		waitFor(t, time.Minute, "the "+string(ch)+" relay ended for good with the job", func() bool { return relayOf(own, j.tag, ch).Final })
+		if r := relayOf(own, j.tag, ch); !strings.HasPrefix(r.FinalCause, "the job's end") {
+			t.Errorf("the %s relay ended %q, want the job's end", ch, r.FinalCause)
+		}
+	}
+	if got := f.list(); len(got) != 0 {
+		t.Errorf("the job's end raised RelayFailed: %q", got)
+	}
+}
+
+// waitRunning waits until a job's state is RUNNING.
+func waitRunning(t *testing.T, w *world, j job) {
+	t.Helper()
+	waitFor(t, time.Minute, "job "+j.id+" running", func() bool {
 		s, ok := w.plat.Job(atoi(t, j.id))
 		return ok && s.State == "RUNNING"
 	})
-	own, _, _ := w.owner(hostdial.OwnerOptions{})
-	own.Want(w.target(j))
-	want := "hb-relay: no relay pointer for job " + j.id + ":"
-	for _, ch := range agentapi.RelayChannels {
-		waitFor(t, time.Minute, "the "+string(ch)+" relay's failure named", func() bool {
-			return strings.HasPrefix(relayOf(own, j.tag, ch).LastFailure, want)
-		})
-	}
 }

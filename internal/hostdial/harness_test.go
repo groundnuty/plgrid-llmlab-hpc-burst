@@ -67,29 +67,23 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// relayMain is "relay <channel>" as cmd/hb-agent runs it: the staging
-// directory from this binary's staged path, the relay directory from the
-// job's pointer there (SLURM_JOB_ID), then hostdial.Pipe on the step's
-// streams, and hostdial.RelayMessage's line on a failure.
+// relayMain is "relay <channel> ..." as cmd/hb-agent runs it: the arguments,
+// then hostdial.Relay on the step's streams, and hostdial.RelayMessage's line
+// and exit code on a failure. With HB_TEST_RELAY_GARBAGE set in its
+// environment it first writes a line that is not the preamble, as a login
+// shell that prints to standard output would.
 func relayMain(args []string) int {
-	if len(args) != 1 {
+	a, err := agentapi.ParseRelayArgs(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "relay:", err)
 		return 2
 	}
-	ch, err := agentapi.ParseRelayChannel(args[0])
-	if err != nil {
-		return 2
+	if os.Getenv("HB_TEST_RELAY_GARBAGE") != "" {
+		fmt.Fprintln(os.Stdout, "Welcome to login.example")
 	}
-	jobID := os.Getenv("SLURM_JOB_ID")
-	staging, err := agentapi.StagingDirOfAgent(os.Args[0])
-	if err == nil {
-		var dir string
-		if dir, err = hostdial.FindRelayDir(staging, agentapi.RelayRoot(os.Getenv), jobID); err == nil {
-			err = hostdial.Pipe(dir, ch, os.Stdin, os.Stdout)
-		}
-	}
-	if err != nil {
-		fmt.Fprintln(os.Stderr, hostdial.RelayMessage(jobID, err))
-		return 1
+	if err := hostdial.Relay(a, os.Stdin, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, hostdial.RelayMessage(a, err))
+		return hostdial.ExitCode(err)
 	}
 	return 0
 }
@@ -97,48 +91,31 @@ func relayMain(args []string) int {
 // jobPorts is what a job writes once its listeners are bound.
 type jobPorts struct {
 	Control, Serving int
-	Dir              string
+	Socket           string
 	PID              int
 }
 
-// jobMain is "hostdial-job <ports file> <wait>": the agent's job side, with
+// jobMain is "hostdial-job <ports file> <wait> <Allocation directory> <UID>":
+// the agent's job side as cmd/hb-agent starts it, with the job's TMPDIR and
 // the given wait for a session, until TERM. It writes its ports to the file
 // by a rename, so a reader never sees half of it.
 func jobMain(args []string) int {
-	if len(args) != 2 {
+	if len(args) != 4 {
 		return 2
 	}
 	wait, err := time.ParseDuration(args[1])
 	if err != nil {
 		return 2
 	}
-	jobID := os.Getenv("SLURM_JOB_ID")
-	staging, err := agentapi.StagingDirOfAgent(os.Args[0])
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "job:", err)
-		return 1
-	}
-	// As the agent's host-dialed transport does it (cmd/hb-agent).
-	dir, err := hostdial.MakeRelayDir(agentapi.RelayRoot(os.Getenv), jobID)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "job:", err)
-		return 1
-	}
 	term := make(chan os.Signal, 1)
 	signal.Notify(term, syscall.SIGTERM, syscall.SIGINT)
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	j, err := hostdial.StartJob(hostdial.JobOptions{Dir: dir, Wait: wait, Logger: log})
+	j, err := hostdial.StartJob(hostdial.JobOptions{TmpDir: os.Getenv("TMPDIR"), AllocDir: args[2], Allocation: args[3], Wait: wait, Logger: log})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "job:", err)
 		return 1
 	}
-	unpublish, err := hostdial.PublishRelayDir(staging, jobID, dir)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "job:", err)
-		return 1
-	}
-	defer unpublish()
-	b, _ := json.Marshal(jobPorts{Control: j.Port(agentapi.RelayControl), Serving: j.Port(agentapi.RelayServing), Dir: dir, PID: os.Getpid()})
+	b, _ := json.Marshal(jobPorts{Control: j.Port(agentapi.RelayControl), Serving: j.Port(agentapi.RelayServing), Socket: j.Socket(), PID: os.Getpid()})
 	tmp := args[0] + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil || os.Rename(tmp, args[0]) != nil {
 		fmt.Fprintln(os.Stderr, "job: the ports file:", err)
@@ -146,7 +123,6 @@ func jobMain(args []string) int {
 	}
 	<-term
 	_ = j.Close()
-	_ = os.Remove(dir)
 	return 0
 }
 
@@ -232,8 +208,7 @@ type world struct {
 	node    *rehearsal.LoginNode
 	creds   slurm.SSHConfig
 	agent   string // the "agent binary" on the cluster: this test binary, linked into the fake's file system
-	staging string // its staging directory
-	relays  string // the node's relay root
+	staging string // its staging directory, which holds the Allocations' directories
 	firstID int    // the fake's first job ID
 	jobs    *slurm.Batch
 	relay   *sshrun.Relay
@@ -247,8 +222,19 @@ const clusterUser = "example-user"
 // worldSeq numbers this process's worlds, so their job IDs differ.
 var worldSeq atomic.Int64
 
-func newWorld(t *testing.T) *world {
+// worldConfig changes a world's fake cluster.
+type worldConfig struct {
+	// stepEnv is added to every srun step's environment (fakeslurm.RunMode's
+	// StepEnv).
+	stepEnv map[string]string
+}
+
+func newWorld(t *testing.T, mods ...func(*worldConfig)) *world {
 	t.Helper()
+	var cfg worldConfig
+	for _, m := range mods {
+		m(&cfg)
+	}
 	rehearsal.RequireTools(t)
 	base, err := os.MkdirTemp("", "hd")
 	if err != nil {
@@ -258,17 +244,16 @@ func newWorld(t *testing.T) *world {
 	w := &world{t: t, base: base}
 	root := filepath.Join(base, "r")
 	home := filepath.Join(root, "home", clusterUser)
-	for _, d := range []string{home, filepath.Join(base, "c"), filepath.Join(base, "n"), filepath.Join(base, "x")} {
+	for _, d := range []string{home, filepath.Join(base, "c"), filepath.Join(base, "n")} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// Job IDs of this world's own: the relay steps are found by SLURM_JOB_ID.
 	w.firstID = 30_000_000 + (os.Getpid()%10_000)*1_000 + int(worldSeq.Add(1))*20
-	w.relays = filepath.Join(base, "x")
 	w.plat = fakeslurm.New(fake.NewClock(time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)), fakeslurm.Config{
 		FirstJobID: w.firstID,
-		Run:        &fakeslurm.RunMode{Root: root, JobDir: filepath.Join(base, "j"), KillWait: 2 * time.Second},
+		Run:        &fakeslurm.RunMode{Root: root, JobDir: filepath.Join(base, "j"), KillWait: 2 * time.Second, StepEnv: cfg.stepEnv},
 	})
 	t.Cleanup(func() {
 		if err := w.plat.Close(); err != nil {
@@ -277,7 +262,7 @@ func newWorld(t *testing.T) *world {
 	})
 	w.node, err = rehearsal.StartLoginNode(rehearsal.LoginConfig{
 		Dir: filepath.Join(base, "n"), Platform: w.plat,
-		Login: fakeslurm.Login{User: clusterUser, Env: map[string]string{"HOME": home, agentapi.EnvRelayRoot: w.relays}},
+		Login: fakeslurm.Login{User: clusterUser, Env: map[string]string{"HOME": home}},
 	})
 	if err != nil {
 		t.Fatalf("StartLoginNode: %v", err)
@@ -319,7 +304,9 @@ func newWorld(t *testing.T) *world {
 	}
 	t.Cleanup(func() { _ = tr.Close() })
 	w.jobs = slurm.NewBatch(tr, provider.Profile{Name: "example", Spec: v1alpha1.PlatformProfileSpec{JSONDataParser: "v0.0.42", StagingDir: root}},
-		provider.Settings{Provider: "example"}, slurm.Options{})
+		// The Provider's own listing is what a relay's start reads (HBEP-6);
+		// a short poll interval keeps it fresh within a test.
+		provider.Settings{Provider: "example"}, slurm.Options{PollInterval: 200 * time.Millisecond, BusyInterval: 200 * time.Millisecond})
 	if w.relay, err = sshrun.NewRelay(sshrun.RelayOptions{Name: "hostdial", Config: w.creds, ControlDir: filepath.Join(base, "c")}); err != nil {
 		t.Fatal(err)
 	}
@@ -346,9 +333,10 @@ func (w *world) ports() map[agentapi.RelayChannel]int {
 
 // job is one running job whose batch process is the agent's job side.
 type job struct {
-	tag   string
-	id    string
-	ports jobPorts
+	tag, id  string
+	allocDir string // the Allocation's directory, which holds relay-socket
+	uid      string // the Allocation's UID
+	ports    jobPorts
 }
 
 // submit starts a job tagged tag whose job side waits wait for a session, and
@@ -356,7 +344,8 @@ type job struct {
 func (w *world) submit(tag string, wait time.Duration) job {
 	w.t.Helper()
 	portsFile := filepath.Join(w.base, "ports-"+strconv.FormatInt(w.n.Add(1), 10))
-	j := job{tag: tag, id: w.sbatch(tag, "exec "+w.agent+" "+jobRole+" "+portsFile+" "+wait.String())}
+	j := w.allocation(tag)
+	j.id = w.sbatch(tag, "exec "+w.agent+" "+jobRole+" "+portsFile+" "+wait.String()+" "+j.allocDir+" "+j.uid)
 	id := j.id
 	waitFor(w.t, time.Minute, "job "+id+"'s listeners", func() bool {
 		b, err := os.ReadFile(portsFile)
@@ -365,6 +354,16 @@ func (w *world) submit(tag string, wait time.Duration) job {
 		}
 		return json.Unmarshal(b, &j.ports) == nil && j.ports.Control != 0
 	})
+	return j
+}
+
+// allocation is an Allocation's directory, mode 700, and UID for tag.
+func (w *world) allocation(tag string) job {
+	w.t.Helper()
+	j := job{tag: tag, allocDir: filepath.Join(w.staging, agentapi.AllocationDir(tag)), uid: "0a1b2c3d-0000-4000-8000-" + fmt.Sprintf("%012d", w.n.Add(1))}
+	if err := os.MkdirAll(j.allocDir, 0o700); err != nil {
+		w.t.Fatal(err)
+	}
 	return j
 }
 
@@ -385,8 +384,8 @@ func (w *world) sbatch(tag, wrap string) string {
 
 // target is the relay target of a job for an Owner.
 func (w *world) target(j job) hostdial.Target {
-	return hostdial.Target{Tag: j.tag, JobID: j.id, AgentPath: w.agent, Login: w.relay.Login(), Jobs: w.jobs, Command: w.relay.Command,
-		Describe: sshrun.Classify, Gen: "1"}
+	return hostdial.Target{Tag: j.tag, JobID: j.id, AgentPath: w.agent, AllocDir: j.allocDir, UID: j.uid, Login: w.relay.Login(),
+		Jobs: w.jobs, Command: w.relay.Command, Stderr: sshrun.Stderr, Describe: sshrun.Classify, Gen: "1"}
 }
 
 // owner starts an Owner with test timings; it is stopped at the test's end.
@@ -394,6 +393,9 @@ func (w *world) owner(o hostdial.OwnerOptions) (*hostdial.Owner, context.CancelF
 	w.t.Helper()
 	if o.Ports == nil {
 		o.Ports = w.ports()
+	}
+	if o.Epoch == nil {
+		o.Epoch = epoch(1)
 	}
 	if o.Slots == nil {
 		o.Slots = hostdial.NewSlots(0)
@@ -431,6 +433,11 @@ func (w *world) owner(o hostdial.OwnerOptions) (*hostdial.Owner, context.CancelF
 		}
 	})
 	return own, cancel, done
+}
+
+// epoch is a fixed fence epoch E for an Owner.
+func epoch(e int64) func(context.Context) (int64, error) {
+	return func(context.Context) (int64, error) { return e, nil }
 }
 
 // testWriter logs to the test.
@@ -576,7 +583,7 @@ func stepPIDs(t *testing.T, jobID string, ch agentapi.RelayChannel) []int {
 			continue
 		}
 		a := strings.Split(strings.TrimRight(string(args), "\x00"), "\x00")
-		if len(a) != 3 || a[1] != agentapi.RelaySubcommand || a[2] != string(ch) {
+		if len(a) < 3 || a[1] != agentapi.RelaySubcommand || a[2] != string(ch) {
 			continue
 		}
 		env, err := os.ReadFile("/proc/" + e.Name() + "/environ")

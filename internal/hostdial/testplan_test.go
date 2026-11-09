@@ -127,10 +127,10 @@ func TestHostDialedRelayKilledMidStream(t *testing.T) {
 	if err := c.echo(payload(64<<10), 30*time.Second); err != nil {
 		t.Fatalf("the stream before the kill: %v", err)
 	}
+	killed := time.Now() // before the kill: the relay may record its end before Kill returns
 	if err := syscall.Kill(first.PID, syscall.SIGKILL); err != nil {
 		t.Fatalf("kill the serving relay's ssh %d: %v", first.PID, err)
 	}
-	killed := time.Now()
 	// The stream in flight is cut: an echo cannot complete.
 	cut := false
 	for range 50 {
@@ -200,7 +200,8 @@ func TestHostDialedControllerRestart(t *testing.T) {
 			t.Fatalf("job %s is %v, not running: the stop must be the owner's, not the job's end", j.id, s.State)
 		}
 	}
-	nu, _, _ := w.owner(hostdial.OwnerOptions{})
+	// The new leader's epoch is higher: its Lease changed hands.
+	nu, _, _ := w.owner(hostdial.OwnerOptions{Epoch: epoch(2)})
 	for _, j := range jobs {
 		nu.Want(w.target(j))
 	}
@@ -256,24 +257,30 @@ func TestHostDialedDropStopsAFrozenRelayByPID(t *testing.T) {
 	}
 }
 
-// Two relays for one channel: the agent keeps the newer. Two owners stand for
-// an unfenced hand-over of the Provider's controller; the first's backoff is
-// long, so it does not come back during the test. Once the second's relays
-// connect, the first's are closed by the agent (their ssh ends by itself) and
-// new connections cross the second's.
+// Two relays for one channel: the agent keeps the newer, the one with the
+// higher (E, N). Two owners stand for an unfenced hand-over of the
+// Provider's controller, the newer copy with the higher epoch. Once its
+// relays connect, the older copy's are closed by the agent, and the older
+// copy's next start is refused as superseded and never made again, so the
+// two do not take turns (HBEP-6, Fencing); new connections cross the newer
+// copy's relays.
 func TestHostDialedNewerRelayReplacesOlder(t *testing.T) {
 	w := newWorld(t)
 	j := w.submit("hb-relay-new-0123456789ab", 30*time.Second)
-	older, _, _ := w.owner(hostdial.OwnerOptions{MinBackoff: time.Hour, MaxBackoff: time.Hour})
+	older, _, _ := w.owner(hostdial.OwnerOptions{Epoch: epoch(1), MinBackoff: 100 * time.Millisecond, MaxBackoff: 200 * time.Millisecond})
 	older.Want(w.target(j))
 	a := waitUp(t, older, j.tag)
 	roundTrip(t, j, control, "control", payload(1000))
 	roundTrip(t, j, serving, "serving", payload(1000))
-	newer, _, _ := w.owner(hostdial.OwnerOptions{})
+	newer, _, _ := w.owner(hostdial.OwnerOptions{Epoch: epoch(2)})
 	newer.Want(w.target(j))
 	b := waitUp(t, newer, j.tag)
 	for _, ch := range agentapi.RelayChannels {
 		waitFor(t, time.Minute, "the older "+string(ch)+" relay closed by the agent", func() bool { return !alive(a[ch].PID) })
+		waitFor(t, time.Minute, "the older "+string(ch)+" relay superseded", func() bool { return relayOf(older, j.tag, ch).Final })
+		if r := relayOf(older, j.tag, ch); !strings.HasPrefix(r.FinalCause, "superseded") {
+			t.Errorf("the older %s relay ended %q, want superseded", ch, r.FinalCause)
+		}
 	}
 	for _, ch := range agentapi.RelayChannels {
 		before := relayOf(older, j.tag, ch).Joined
@@ -284,8 +291,8 @@ func TestHostDialedNewerRelayReplacesOlder(t *testing.T) {
 		if got := relayOf(older, j.tag, ch).Joined; got != before {
 			t.Errorf("the older %s relay joined a stream after the newer one connected", ch)
 		}
-		if r := relayOf(newer, j.tag, ch); r.PID != b[ch].PID {
-			t.Errorf("the newer %s relay was replaced (%d, then %d)", ch, b[ch].PID, r.PID)
+		if r := relayOf(newer, j.tag, ch); r.PID != b[ch].PID || r.Starts != 1 {
+			t.Errorf("the newer %s relay was replaced (%+v, was %d)", ch, r, b[ch].PID)
 		}
 	}
 }
@@ -375,9 +382,9 @@ func TestHostDialedRelayStartsOnlyOnTheAllocationsJob(t *testing.T) {
 	wrong := w.target(mine)
 	wrong.JobID = other.id // the Allocation's record names a job that is not under its tag
 	own.Want(wrong)
-	waitFor(t, time.Minute, "both relays refused", func() bool {
+	waitFor(t, time.Minute, "both relays ended for good", func() bool {
 		for _, ch := range agentapi.RelayChannels {
-			if relayOf(own, mine.tag, ch).LastRefusal == "" {
+			if !relayOf(own, mine.tag, ch).Final {
 				return false
 			}
 		}
@@ -388,8 +395,8 @@ func TestHostDialedRelayStartsOnlyOnTheAllocationsJob(t *testing.T) {
 		if r.Starts != 0 || r.PID != 0 {
 			t.Errorf("the %s relay started (%d starts) on a job not listed under its tag", ch, r.Starts)
 		}
-		if !strings.Contains(r.LastRefusal, "not listed under tag") {
-			t.Errorf("the %s relay's refusal %q does not say the job is not under the tag", ch, r.LastRefusal)
+		if !strings.Contains(r.FinalCause, "not listed under tag") {
+			t.Errorf("the %s relay's end %q does not say the job is not under the tag", ch, r.FinalCause)
 		}
 		if c, err := dial(other, ch, 15*time.Second); err == nil {
 			c.close()
