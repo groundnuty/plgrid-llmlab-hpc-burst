@@ -66,10 +66,17 @@ type Target struct {
 	// command, without repeating its output (sshrun.Classify); the owner logs
 	// it with the exit code.
 	Describe func(cmd *exec.Cmd) string
+	// Gen names the credentials and the transport that Jobs and Command use:
+	// a change (a rotated key, another known-hosts file, a new transport)
+	// is another Target, so the running relays are stopped and started again
+	// with the new ones, never left on the old.
+	Gen string
 }
 
+// same reports whether u needs no change of t's relays: the same job, agent,
+// login node and credentials.
 func (t Target) same(u Target) bool {
-	return t.Tag == u.Tag && t.JobID == u.JobID && t.AgentPath == u.AgentPath && t.Login == u.Login
+	return t.Tag == u.Tag && t.JobID == u.JobID && t.AgentPath == u.AgentPath && t.Login == u.Login && t.Gen == u.Gen
 }
 
 // OwnerOptions configure an Owner.
@@ -156,7 +163,8 @@ func (*Owner) NeedLeaderElection() bool { return true }
 
 // Want records that t's Allocation is running, and starts its two relays when
 // the Owner runs and they are not already kept for the same job. A Want for
-// the same tag with another job, agent or login stops the old relays first.
+// the same tag with another job, agent, login or credentials (Gen) stops the
+// old relays and starts new ones.
 func (o *Owner) Want(t Target) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -233,6 +241,18 @@ type RelayState struct {
 	Since time.Time
 	// LastRefusal says why the last start did not happen ("" when none).
 	LastRefusal string
+	// LastFailure is the kind of the last process's failure (Target.Describe),
+	// "" when it exited 0 or none ended.
+	LastFailure string
+	// Waiting is true while the Allocation waits for its pair of slots on the
+	// login node; no relay of it has started then.
+	Waiting bool
+	// Gen is the Target's credentials generation.
+	Gen string
+	// LastEnded is when the last process ended, and LastWait the backoff the
+	// relay waited after it before its next attempt.
+	LastEnded time.Time
+	LastWait  time.Duration
 	// Streams and Joined count the streams the job opened over this relay
 	// and those joined to the channel's port, over all its processes.
 	Streams, Joined uint64
@@ -243,8 +263,11 @@ func (o *Owner) Relays() []RelayState {
 	o.mu.Lock()
 	var out []RelayState
 	for _, a := range o.allocs {
+		w := a.isWaiting()
 		for _, r := range a.relays {
-			out = append(out, r.state())
+			st := r.state()
+			st.Waiting = w
+			out = append(out, st)
 		}
 	}
 	o.mu.Unlock()
@@ -257,11 +280,20 @@ func (o *Owner) Relays() []RelayState {
 	return out
 }
 
-// allocRelays are one Allocation's two relays.
+// allocRelays are one Allocation's two relays, and its pair of slots.
 type allocRelays struct {
 	cancel context.CancelFunc
 	relays []*relay
 	done   chan struct{}
+
+	mu      sync.Mutex
+	waiting bool
+}
+
+func (a *allocRelays) isWaiting() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.waiting
 }
 
 func (a *allocRelays) stop() {
@@ -277,17 +309,32 @@ func (o *Owner) stopLocked(a *allocRelays) {
 	go func() { defer o.wg.Done(); a.stop() }()
 }
 
+// startLocked starts an Allocation's relays: it takes the pair of slots on
+// the login node first, waiting while the node has no two free, and holds
+// them until both relays have stopped, through every restart and backoff.
 func (o *Owner) startLocked(t Target) *allocRelays {
 	ctx, cancel := context.WithCancel(o.ctx)
-	a := &allocRelays{cancel: cancel, done: make(chan struct{})}
-	var wg sync.WaitGroup
+	a := &allocRelays{cancel: cancel, done: make(chan struct{}), waiting: true}
 	for _, ch := range agentapi.RelayChannels {
-		r := &relay{o: o, t: t, ch: ch, target: agentapi.RelayTargetAddr(o.o.Ports[ch])}
-		a.relays = append(a.relays, r)
-		wg.Add(1)
-		go func() { defer wg.Done(); r.loop(ctx) }()
+		a.relays = append(a.relays, &relay{o: o, t: t, ch: ch, target: agentapi.RelayTargetAddr(o.o.Ports[ch])})
 	}
-	go func() { wg.Wait(); close(a.done) }()
+	go func() {
+		defer close(a.done)
+		release, err := o.o.Slots.Acquire(ctx, t.Login, len(a.relays))
+		if err != nil {
+			return
+		}
+		defer release()
+		a.mu.Lock()
+		a.waiting = false
+		a.mu.Unlock()
+		var wg sync.WaitGroup
+		for _, r := range a.relays {
+			wg.Add(1)
+			go func() { defer wg.Done(); r.loop(ctx) }()
+		}
+		wg.Wait()
+	}()
 	return a
 }
 
@@ -298,18 +345,22 @@ type relay struct {
 	ch     agentapi.RelayChannel
 	target string
 
-	mu      sync.Mutex
-	pid     int
-	starts  int
-	since   time.Time
-	refusal string
-	stats   ServeStats
+	mu        sync.Mutex
+	pid       int
+	starts    int
+	since     time.Time
+	refusal   string
+	failure   string
+	lastEnded time.Time
+	lastWait  time.Duration
+	stats     ServeStats
 }
 
 func (r *relay) state() RelayState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return RelayState{Tag: r.t.Tag, Channel: r.ch, JobID: r.t.JobID, PID: r.pid, Starts: r.starts, Since: r.since, LastRefusal: r.refusal,
+		LastFailure: r.failure, Gen: r.t.Gen, LastEnded: r.lastEnded, LastWait: r.lastWait,
 		Streams: r.stats.Streams.Load(), Joined: r.stats.Joined.Load()}
 }
 
@@ -320,10 +371,10 @@ func (r *relay) refuse(why string) {
 	r.o.o.Logger.Info("a relay did not start", "tag", r.t.Tag, "channel", r.ch, "why", why)
 }
 
-// loop keeps the relay up until ctx ends: take a slot on the login node,
-// check that the job is still the Allocation's and running, start the ssh,
-// serve the session until it drops, stop the process by PID, give the slot
-// back, wait the backoff, and again.
+// loop keeps the relay up until ctx ends: check that the job is still the
+// Allocation's and running, start the ssh, serve the session until it drops,
+// stop the process by PID, wait the backoff, and again. The Allocation's
+// slots stay taken throughout.
 func (r *relay) loop(ctx context.Context) {
 	o := r.o.o
 	backoff := o.MinBackoff
@@ -336,6 +387,9 @@ func (r *relay) loop(ctx context.Context) {
 			backoff = o.MinBackoff
 		}
 		wait := jitter(backoff)
+		r.mu.Lock()
+		r.lastWait = wait
+		r.mu.Unlock()
 		select {
 		case <-ctx.Done():
 			return
@@ -358,11 +412,6 @@ func jitter(d time.Duration) time.Duration {
 // its process started at all.
 func (r *relay) once(ctx context.Context) (time.Duration, bool) {
 	o := r.o.o
-	release, err := o.Slots.Acquire(ctx, r.t.Login)
-	if err != nil {
-		return 0, false
-	}
-	defer release()
 	id, why := r.jobIsOurs(ctx)
 	if why != "" {
 		r.refuse(why)
@@ -390,7 +439,7 @@ func (r *relay) once(ctx context.Context) (time.Duration, bool) {
 	o.Logger.Info("relay started", "tag", r.t.Tag, "channel", r.ch, "job", id, "pid", p.pid)
 	sctx, cancel := context.WithCancel(ctx)
 	served := make(chan error, 1)
-	go func() { served <- Serve(sctx, p, r.target, o.Logger, &r.stats) }()
+	go func() { served <- Serve(sctx, p, r.target, r.ch, o.Logger, &r.stats) }()
 	serveEnded := false
 	select {
 	case <-p.done:
@@ -404,9 +453,6 @@ func (r *relay) once(ctx context.Context) (time.Duration, bool) {
 		<-served
 	}
 	up := time.Since(start)
-	r.mu.Lock()
-	r.pid = 0
-	r.mu.Unlock()
 	exit, kind := -1, ""
 	if ps := p.cmd.ProcessState; ps != nil {
 		exit = ps.ExitCode()
@@ -414,6 +460,9 @@ func (r *relay) once(ctx context.Context) (time.Duration, bool) {
 	if exit != 0 && r.t.Describe != nil {
 		kind = r.t.Describe(p.cmd)
 	}
+	r.mu.Lock()
+	r.pid, r.lastEnded, r.failure = 0, time.Now(), kind
+	r.mu.Unlock()
 	o.Logger.Info("relay ended", "tag", r.t.Tag, "channel", r.ch, "job", id, "up", up.Round(time.Millisecond), "exit", exit, "failure", kind)
 	return up, true
 }

@@ -58,9 +58,9 @@ const maxSocketPath = 107
 
 // JobOptions configure the job side.
 type JobOptions struct {
-	// Dir is the job's relay directory, agentapi.RelayDir. It is created
-	// with mode 700 when missing; one that exists must be a directory of this
-	// user (it is then set to mode 700). Its parent must exist.
+	// Dir is the job's relay directory, as MakeRelayDir makes it. It is
+	// created with mode 700 when missing; one that exists must be a directory
+	// of this user (it is then set to mode 700). Its parent must exist.
 	Dir string
 	// Wait is how long a connection waits for a session; zero means
 	// DefaultWait.

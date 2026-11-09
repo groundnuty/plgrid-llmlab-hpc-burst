@@ -1,6 +1,7 @@
 package hostdial
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/hashicorp/yamux"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // targetDialTimeout bounds each dial of the channel's loopback port.
@@ -25,19 +28,35 @@ type ServeStats struct {
 
 // Serve runs the control-plane end of one relay's session over rwc, the relay
 // process's standard output (read) and input (write), until the session ends
-// or ctx does. Each stream the job opens is joined to a new connection to
-// target, the channel's loopback address (agentapi.RelayTargetAddr), and
-// nothing else is ever dialed: a stream carries no address of its own. Serve
-// opens no stream. It closes rwc and every joined connection before it
-// returns.
-func Serve(ctx context.Context, rwc io.ReadWriteCloser, target string, log *slog.Logger, stats *ServeStats) error {
+// or ctx does. It first reads the relay's preamble for ch (readPreamble),
+// dropping whatever came before it, and refuses a relay that sends none or
+// names another channel. Each stream the job opens is then joined to a new
+// connection to target, the channel's loopback address
+// (agentapi.RelayTargetAddr), and nothing else is ever dialed: a stream
+// carries no address of its own. Serve opens no stream. It closes rwc and
+// every joined connection before it returns.
+func Serve(ctx context.Context, rwc io.ReadWriteCloser, target string, ch agentapi.RelayChannel, log *slog.Logger, stats *ServeStats) error {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
 	if stats == nil {
 		stats = &ServeStats{}
 	}
-	sess, err := yamux.Server(rwc, sessionConfig(log, "host"))
+	unblock := context.AfterFunc(ctx, func() { _ = rwc.Close() })
+	br := bufio.NewReader(rwc)
+	skipped, err := readPreamble(br, ch)
+	unblock()
+	if err != nil {
+		_ = rwc.Close()
+		if ctx.Err() != nil {
+			return nil
+		}
+		return err
+	}
+	if skipped > 0 {
+		log.Warn("the relay's output had bytes before its preamble; they were dropped", "channel", ch, "bytes", skipped)
+	}
+	sess, err := yamux.Server(afterPreamble{r: br, WriteCloser: rwc}, sessionConfig(log, "host"))
 	if err != nil {
 		_ = rwc.Close()
 		return err

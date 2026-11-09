@@ -29,3 +29,22 @@ func TestRelayArgs(t *testing.T) {
 		t.Errorf("the relay's ssh does not end with -T, the host, -- and the line: %s", joined)
 	}
 }
+
+// Classify passes on the relay step's own fixed line and nothing else of
+// standard error; ssh's own failures are named by kind.
+func TestClassifyARelayLine(t *testing.T) {
+	cmd, err := (&Relay{o: RelayOptions{Binary: "ssh"}, config: "/nonexistent"}).command("x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := cmd.Stderr.(*limited)
+	l.w.WriteString("srun: warning: example\nhb-relay: no agent socket for job 7 on this node\nhb-agent relay control: /scratch/example/x\n")
+	if got := Classify(cmd); got != "hb-relay: no agent socket for job 7 on this node" {
+		t.Errorf("Classify = %q", got)
+	}
+	l.w.Reset()
+	l.w.WriteString("example@login.example: Permission denied (publickey).\n")
+	if got := Classify(cmd); got != "authentication was refused" {
+		t.Errorf("Classify = %q, want the kind only", got)
+	}
+}

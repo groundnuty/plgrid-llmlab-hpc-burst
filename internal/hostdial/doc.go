@@ -22,7 +22,10 @@
 //     a stream on its channel's current session and copies bytes. A
 //     connection that finds no session waits for one up to Wait (30 s), then
 //     is closed; frpc and the control client retry. Each channel also has a
-//     Unix socket in the job's relay directory (agentapi.RelayDir, mode 700);
+//     Unix socket in the job's relay directory (MakeRelayDir: an unpredictable
+//     name under the node's relay root, mode 700, which the agent publishes in
+//     the user's staging directory, PublishRelayDir, for the relay to find,
+//     FindRelayDir);
 //     a relay that connects there becomes the channel's session, and a newer
 //     one replaces the older, which is closed. So an unfenced hand-over of the
 //     Provider's controller leaves one session per channel.

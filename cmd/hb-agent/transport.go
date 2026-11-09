@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -123,15 +122,23 @@ func startTransport(job agent.Job, runDir, aid string, getenv func(string) strin
 // kernel's, taken once, kept for the Allocation's life, and never change when
 // a relay restarts, so frpc is never restarted for a relay.
 func (t *transport) startHostDialed(job agent.Job, co *agent.ClientOptions, getenv func(string) string, log *slog.Logger) error {
-	dir, err := agentapi.RelayDir(agentapi.RelayRoot(getenv), job.JobID)
-	if err != nil {
-		return fmt.Errorf("the relay directory: %w", err)
-	}
-	j, err := hostdial.StartJob(hostdial.JobOptions{Dir: dir, Logger: log})
+	dir, err := hostdial.MakeRelayDir(agentapi.RelayRoot(getenv), job.JobID)
 	if err != nil {
 		return err
 	}
+	j, err := hostdial.StartJob(hostdial.JobOptions{Dir: dir, Logger: log})
+	if err != nil {
+		_ = os.Remove(dir)
+		return err
+	}
+	unpublish, err := hostdial.PublishRelayDir(job.Config.StagingDir, job.JobID, dir)
+	if err != nil {
+		_ = j.Close()
+		_ = os.Remove(dir)
+		return err
+	}
 	t.stops = append(t.stops, func() {
+		unpublish()
 		_ = j.Close()
 		_ = os.Remove(dir)
 	})

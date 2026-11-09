@@ -4,11 +4,14 @@ package hostdial
 // which goes through srun's standard streams (testplan_test.go).
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,21 +21,24 @@ import (
 )
 
 func TestSlotsCapEachLoginNodeApart(t *testing.T) {
-	s := NewSlots(2)
+	s := NewSlots(4)
 	ctx := context.Background()
-	r1, _ := s.Acquire(ctx, "login-a:22")
-	_, _ = s.Acquire(ctx, "login-a:22")
-	if _, err := s.Acquire(ctx, "login-b:22"); err != nil {
-		t.Fatalf("another login node's slot: %v", err)
+	r1, _ := s.Acquire(ctx, "login-a:22", 2)
+	_, _ = s.Acquire(ctx, "login-a:22", 2)
+	if _, err := s.Acquire(ctx, "login-b:22", 2); err != nil {
+		t.Fatalf("another login node's pair: %v", err)
 	}
 	short, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel()
-	if _, err := s.Acquire(short, "login-a:22"); err == nil {
-		t.Fatal("a third slot on a node capped at 2 was given")
+	if _, err := s.Acquire(short, "login-a:22", 2); err == nil {
+		t.Fatal("a third pair on a node capped at 4 was given")
+	}
+	if _, err := s.Acquire(short, "login-a:22", 1); err == nil {
+		t.Fatal("a fifth slot on a node capped at 4 was given")
 	}
 	got := make(chan struct{})
 	go func() {
-		if _, err := s.Acquire(ctx, "login-a:22"); err == nil {
+		if _, err := s.Acquire(ctx, "login-a:22", 2); err == nil {
 			close(got)
 		}
 	}()
@@ -41,10 +47,36 @@ func TestSlotsCapEachLoginNodeApart(t *testing.T) {
 	select {
 	case <-got:
 	case <-time.After(10 * time.Second):
-		t.Fatal("a waiting relay did not get the freed slot")
+		t.Fatal("a waiting Allocation did not get the freed pair")
 	}
-	if n := s.InUse("login-a:22"); n != 2 {
-		t.Errorf("InUse = %d, want 2", n)
+	if n := s.InUse("login-a:22"); n != 4 {
+		t.Errorf("InUse = %d, want 4", n)
+	}
+	if _, err := s.Acquire(ctx, "login-a:22", 5); err == nil {
+		t.Error("more slots than the cap were asked and not refused")
+	}
+}
+
+// The preamble: bytes before it are dropped, a relay with none within the
+// bound or naming the other channel is refused by name.
+func TestPreamble(t *testing.T) {
+	read := func(in string, ch agentapi.RelayChannel) (int, string, error) {
+		br := bufio.NewReader(strings.NewReader(in))
+		n, err := readPreamble(br, ch)
+		rest, _ := io.ReadAll(br)
+		return n, string(rest), err
+	}
+	if n, rest, err := read("Welcome to login.example\n"+Preamble(agentapi.RelayServing)+"SESSION", agentapi.RelayServing); err != nil || n != 25 || rest != "SESSION" {
+		t.Errorf("a banner before the preamble: skipped %d, rest %q, %v", n, rest, err)
+	}
+	if _, _, err := read(Preamble(agentapi.RelayControl)+"x", agentapi.RelayServing); !errors.Is(err, ErrWrongChannel) {
+		t.Errorf("the other channel's preamble: %v, want ErrWrongChannel", err)
+	}
+	if _, _, err := read(strings.Repeat("x", MaxPreambleScan+10)+Preamble(agentapi.RelayServing), agentapi.RelayServing); !errors.Is(err, ErrNoPreamble) {
+		t.Errorf("a preamble past the bound: %v, want ErrNoPreamble", err)
+	}
+	if _, _, err := read("no preamble here", agentapi.RelayServing); !errors.Is(err, ErrNoPreamble) {
+		t.Errorf("an output with none: %v, want ErrNoPreamble", err)
 	}
 }
 
@@ -126,7 +158,12 @@ func TestServeReturnsWhenItsSessionEndsUnderASilentTarget(t *testing.T) {
 	}()
 	jobEnd, hostEnd := net.Pipe()
 	served := make(chan error, 1)
-	go func() { served <- Serve(context.Background(), hostEnd, ln.Addr().String(), nil, nil) }()
+	go func() {
+		served <- Serve(context.Background(), hostEnd, ln.Addr().String(), agentapi.RelayControl, nil, nil)
+	}()
+	if _, err := io.WriteString(jobEnd, Preamble(agentapi.RelayControl)); err != nil {
+		t.Fatal(err)
+	}
 	sess, err := yamux.Client(jobEnd, sessionConfig(nil, "job"))
 	if err != nil {
 		t.Fatal(err)

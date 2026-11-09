@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 )
@@ -41,6 +42,9 @@ type RelayOptions struct {
 type Relay struct {
 	o      RelayOptions
 	config string
+
+	mu     sync.Mutex
+	closed bool
 }
 
 // NewRelay writes the relays' configuration file and returns the maker. Close
@@ -105,28 +109,59 @@ func RelayArgs(config, line string) []string {
 
 // Command returns the ssh client that runs line on the login node. Its
 // standard error is kept, up to 4 KiB, for Classify; the caller sets the
-// other streams and starts it.
+// other streams and starts it. After Close it fails: a relay of credentials
+// that were replaced never starts again on them, and never writes their file
+// again (review of PR 301, F1).
 func (r *Relay) Command(line string) (*exec.Cmd, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return nil, errors.New("sshrun: the relay's credentials were replaced")
+	}
 	if _, err := os.Stat(r.config); err != nil {
 		// Something removed it: write it again rather than fail every start.
 		if err := writeConfigFile(r.o.ControlDir, r.config, r.o.Config); err != nil {
 			return nil, err
 		}
 	}
+	return r.command(line)
+}
+
+func (r *Relay) command(line string) (*exec.Cmd, error) {
 	cmd := exec.Command(r.o.Binary, RelayArgs(r.config, line)...)
 	cmd.Env = r.o.Env
 	cmd.Stderr = &limited{w: &bytes.Buffer{}, n: 4096}
 	return cmd, nil
 }
 
-// Classify names the kind of a relay's ssh failure from its kept standard
-// error, without repeating any of it.
+// Config is the relays' configuration file, for a check that a relay runs on
+// these credentials.
+func (r *Relay) Config() string { return r.config }
+
+// Classify names the kind of a relay's failure from its kept standard error.
+// A line that the relay step wrote itself, starting "hb-relay: " (its fixed
+// messages, which name no path, host or user: hostdial.RelayMessage), is
+// returned as it is, cut to 200 bytes; otherwise the kind of the ssh failure
+// is named without repeating any of it.
 func Classify(cmd *exec.Cmd) string {
-	if l, ok := cmd.Stderr.(*limited); ok {
-		return classify(l.w.String())
+	l, ok := cmd.Stderr.(*limited)
+	if !ok {
+		return "ssh failed"
 	}
-	return "ssh failed"
+	for _, line := range strings.Split(l.w.String(), "\n") {
+		if i := strings.Index(line, relayLinePrefix); i >= 0 {
+			line = line[i:]
+			if len(line) > 200 {
+				line = line[:200]
+			}
+			return line
+		}
+	}
+	return classify(l.w.String())
 }
+
+// relayLinePrefix starts the relay step's own messages on its standard error.
+const relayLinePrefix = "hb-relay: "
 
 // Login is the login node as the per-login-node cap names it: host:port, the
 // port 22 when the credentials name none.
@@ -141,8 +176,11 @@ func LoginOf(c slurm.SSHConfig) string {
 	return net.JoinHostPort(c.HostName, strconv.Itoa(port))
 }
 
-// Close removes the configuration file.
+// Close removes the configuration file; later Commands fail.
 func (r *Relay) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.closed = true
 	if err := os.Remove(r.config); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("sshrun: remove the relays' configuration file: %w", err)
 	}

@@ -5,7 +5,10 @@ package providerctl
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os/exec"
 	"path"
@@ -108,15 +111,26 @@ func (r *relayState) close() {
 	}
 }
 
-// freshJobs reads the listing fresh: *slurm.Batch does; any other Platform
-// (the tests' fakes) has no cached listing to skip.
+// freshJobs reads the listing fresh (*slurm.Batch's ListByTagFresh). A
+// Platform that cannot is refused, never read from a cache: a relay starts
+// only on a fresh read of its job (review of PR 301, N3).
 type freshJobs struct{ p Platform }
 
 func (f freshJobs) ListByTagFresh(ctx context.Context, tag string) ([]provider.Job, error) {
 	if b, ok := f.p.(hostdial.JobReader); ok {
 		return b.ListByTagFresh(ctx, tag)
 	}
-	return f.p.ListByTag(ctx, tag)
+	return nil, fmt.Errorf("the platform %T reads no fresh listing; no relay starts on a cached one", f.p)
+}
+
+// credentialsGen names the Provider's ssh credentials: a change of any of
+// them, the user, the key, the known hosts or the login node, is a new
+// generation, so the relay owner stops the relays on the old ones and starts
+// them on the new (review of PR 301, F1). The holder makes a new transport on
+// the same change, so the generation also names the listing reader.
+func credentialsGen(c slurm.SSHConfig) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%#v", c)))
+	return hex.EncodeToString(sum[:8])
 }
 
 // syncRelays tells the relay owner what this observation found (HBEP-6,
@@ -149,6 +163,7 @@ func (e *external) syncRelays(ctx context.Context, a *v1alpha1.Allocation, tag s
 		Tag: tag, JobID: o.JobID,
 		AgentPath: path.Join(paths.Staging, agentapi.StagedAgentPath(a.Spec.ForProvider.Batch.AgentDigest)),
 		Login:     sshrun.LoginOf(e.v.SSH), Jobs: freshJobs{e.p}, Command: cmd, Describe: sshrun.Classify,
+		Gen:       credentialsGen(e.v.SSH),
 	})
 }
 

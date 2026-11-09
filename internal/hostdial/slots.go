@@ -2,6 +2,7 @@ package hostdial
 
 import (
 	"context"
+	"fmt"
 	"sync"
 )
 
@@ -14,9 +15,13 @@ const DefaultRelaysPerLogin = 4
 
 // Slots caps the relays on each login node across the whole process: every
 // Provider's controller that reaches the same login node takes its slots from
-// the same Slots, so two Providers on one cluster cannot hold 8. A relay holds
-// its slot from just before its ssh starts until its process is gone. A fifth
-// relay on one login node waits for a slot.
+// the same Slots, so two Providers on one cluster cannot hold 8. An
+// Allocation takes the slots of both its relays together, before either
+// starts, and holds them while it is wanted, through its relays' restarts and
+// backoffs: "at most 4 relays per login node in alpha, that is, 2
+// Allocations" (HBEP-6). So a relay that drops never gives its slot to
+// another Allocation, which would leave both with half a pair. A third
+// Allocation on one login node waits for a pair of slots.
 type Slots struct {
 	max int
 
@@ -38,16 +43,20 @@ func NewSlots(max int) *Slots {
 // Provider's relay owner.
 var SharedSlots = NewSlots(DefaultRelaysPerLogin)
 
-// Acquire takes a slot on login, waiting while all are taken, until ctx ends.
-// The returned release gives it back; it may be called once.
-func (s *Slots) Acquire(ctx context.Context, login string) (release func(), err error) {
+// Acquire takes n slots on login together, waiting while fewer are free,
+// until ctx ends. The returned release gives them all back; it may be called
+// once.
+func (s *Slots) Acquire(ctx context.Context, login string, n int) (release func(), err error) {
+	if n < 1 || n > s.max {
+		return nil, fmt.Errorf("hostdial: %d slots asked of a login node capped at %d", n, s.max)
+	}
 	for {
 		s.mu.Lock()
-		if s.used[login] < s.max {
-			s.used[login]++
+		if s.used[login]+n <= s.max {
+			s.used[login] += n
 			s.mu.Unlock()
 			var once sync.Once
-			return func() { once.Do(func() { s.release(login) }) }, nil
+			return func() { once.Do(func() { s.release(login, n) }) }, nil
 		}
 		wake := s.wake
 		s.mu.Unlock()
@@ -59,10 +68,10 @@ func (s *Slots) Acquire(ctx context.Context, login string) (release func(), err 
 	}
 }
 
-func (s *Slots) release(login string) {
+func (s *Slots) release(login string, n int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.used[login]--; s.used[login] <= 0 {
+	if s.used[login] -= n; s.used[login] <= 0 {
 		delete(s.used, login)
 	}
 	close(s.wake)

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 // RelayChannel is one of host-dialed mode's two channels. Each has its own
@@ -76,7 +77,7 @@ func RelayLine(jobID, agentPath string, ch RelayChannel) (string, error) {
 }
 
 // DefaultRelayRoot is the node-local directory that holds each job's relay
-// directory. It is not TMPDIR: a step that srun starts from the login node
+// directory (RelayDirPrefix). It is not TMPDIR: a step that srun starts from the login node
 // gets the login session's environment, not the batch script's TMPDIR (which
 // a partition's tmpDir may set to a per-job memory file system), so a path
 // from TMPDIR could differ between the agent and its relay. Both run on the
@@ -103,22 +104,73 @@ func RelayRoot(getenv func(string) string) string {
 	return DefaultRelayRoot
 }
 
-// RelayDir is the job's relay directory: <root>/hb-relay-<job ID>. The agent
-// creates it, mode 700, and both its sockets are in it (RelaySocket). It is
-// computed from the job's ID alone, which every step of the job has in
-// SLURM_JOB_ID, so the relay finds it without being told.
-func RelayDir(root, jobID string) (string, error) {
-	switch {
-	case !jobIDForm.MatchString(jobID):
+// RelayDirPrefix is the start of a job's relay directory's name under the
+// relay root: hb-relay-<job ID>-. The agent makes the directory with a random
+// rest (os.MkdirTemp), mode 700, so another user on the node cannot create it
+// first and stop the agent (review of PR 301, F5); it publishes the name in
+// the user's staging directory (RelayPointerPath), where the relay reads it.
+func RelayDirPrefix(jobID string) (string, error) {
+	if !jobIDForm.MatchString(jobID) {
 		return "", fmt.Errorf("job ID %q is not a Slurm job ID", jobID)
-	case !safePath.MatchString(root) || filepath.Clean(root) != root:
-		return "", fmt.Errorf("relay root %q: want a clean absolute path of letters, digits and ._:=,/-", root)
 	}
-	dir := filepath.Join(root, "hb-relay-"+jobID)
+	return "hb-relay-" + jobID + "-", nil
+}
+
+// CheckRelayDir refuses a relay directory that is not one the agent of job
+// would make under root: <root>/hb-relay-<job ID>-<letters and digits>, clean,
+// and short enough for its sockets.
+func CheckRelayDir(root, jobID, dir string) error {
+	prefix, err := RelayDirPrefix(jobID)
+	if err != nil {
+		return err
+	}
+	if !safePath.MatchString(root) || filepath.Clean(root) != root {
+		return fmt.Errorf("relay root %q: want a clean absolute path of letters, digits and ._:=,/-", root)
+	}
+	rest, ok := strings.CutPrefix(filepath.Base(dir), prefix)
+	if filepath.Clean(dir) != dir || filepath.Dir(dir) != root || !ok || rest == "" || !relayRest.MatchString(rest) {
+		return fmt.Errorf("relay directory %q is not %s/%s<random> for job %s", dir, root, prefix, jobID)
+	}
 	if longest := RelaySocket(dir, RelayControl); len(longest) > maxRelaySocketPath {
-		return "", fmt.Errorf("relay socket %q is %d bytes, above the %d a Unix socket path allows: use a shorter relay root", longest, len(longest), maxRelaySocketPath)
+		return fmt.Errorf("relay socket %q is %d bytes, above the %d a Unix socket path allows: use a shorter relay root", longest, len(longest), maxRelaySocketPath)
 	}
-	return dir, nil
+	return nil
+}
+
+// relayRest is the random part os.MkdirTemp appends: decimal digits.
+var relayRest = regexp.MustCompile(`^[0-9A-Za-z]{1,20}$`)
+
+// RelayPointerDirName is the directory in the user's staging directory that
+// holds each running job's relay pointer, mode 700.
+const RelayPointerDirName = "relay"
+
+// RelayPointerPath is where the agent of job publishes its relay directory:
+// <stagingDir>/relay/<job ID>, a file of the user's own, mode 600, holding the
+// directory's path. The staging directory is on the cluster's shared file
+// system and the user's, so no other user can place a pointer there; the
+// sockets themselves stay on the node, under the relay root, since Unix
+// sockets on a shared file system are not reliable.
+func RelayPointerPath(stagingDir, jobID string) (string, error) {
+	if !jobIDForm.MatchString(jobID) {
+		return "", fmt.Errorf("job ID %q is not a Slurm job ID", jobID)
+	}
+	if !safePath.MatchString(stagingDir) || filepath.Clean(stagingDir) != stagingDir {
+		return "", fmt.Errorf("staging directory %q: want a clean absolute path of letters, digits and ._:=,/-", stagingDir)
+	}
+	return filepath.Join(stagingDir, RelayPointerDirName, jobID), nil
+}
+
+// StagingDirOfAgent is the staging directory a staged agent binary runs from:
+// the relay step's program is <stagingDir>/agent/<digest>/hb-agent
+// (StagedAgentPath), so the relay finds its job's pointer without being told.
+func StagingDirOfAgent(agentPath string) (string, error) {
+	digestDir := filepath.Dir(agentPath)
+	agentDir := filepath.Dir(digestDir)
+	if filepath.Clean(agentPath) != agentPath || !filepath.IsAbs(agentPath) || filepath.Base(agentPath) != AgentBinaryName ||
+		!pinForm.MatchString(filepath.Base(digestDir)) || filepath.Base(agentDir) != "agent" {
+		return "", fmt.Errorf("%q is not a staged agent, <stagingDir>/agent/<digest>/%s", agentPath, AgentBinaryName)
+	}
+	return filepath.Dir(agentDir), nil
 }
 
 // RelaySocket is the agent's Unix socket for a channel in the relay

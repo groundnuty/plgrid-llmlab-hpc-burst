@@ -77,10 +77,31 @@ func TestDialHomeAddrDefaultsToLoopbackExceptInDirectMode(t *testing.T) {
 		t.Errorf("host-dialed mode with no listener and no port base must be refused, got %v", err)
 	}
 	c.DialHomeListen = "0.0.0.0:7443"
-	for _, mode := range []string{ModeDirect, ModeSSH, ModeHostDialed, ""} {
+	for _, mode := range []string{ModeDirect, ModeSSH, ""} {
 		if got, _ := c.DialHomeAddr(mode, host); got != "0.0.0.0:7443" {
 			t.Errorf("mode %q: an explicit dialHomeListen is used as given, got %q", mode, got)
 		}
+	}
+}
+
+// TestHostDialedRefusesAnotherDialHomeListener: in host-dialed mode the serving
+// relays dial only 127.0.0.1:<base+7> (HBEP-6, Dial-home modes), so a listener
+// anywhere else is refused, naming the address it must be; that address
+// itself, given explicitly, is accepted (review of PR 301, F4).
+func TestHostDialedRefusesAnotherDialHomeListener(t *testing.T) {
+	host := agentapi.Host{PortBase: 29220}
+	for _, listen := range []string{"0.0.0.0:7443", "127.0.0.1:7443", "0.0.0.0:29227", "127.0.0.2:29227", "localhost:29227"} {
+		c := Config{DialHomeListen: listen}
+		if got, err := c.DialHomeAddr(ModeHostDialed, host); err == nil || !strings.Contains(err.Error(), "127.0.0.1:29227") {
+			t.Errorf("host-dialed with dialHomeListen %q: %q, %v; want a refusal naming 127.0.0.1:29227", listen, got, err)
+		}
+	}
+	c := Config{DialHomeListen: "127.0.0.1:29227"}
+	if got, err := c.DialHomeAddr(ModeHostDialed, host); err != nil || got != "127.0.0.1:29227" {
+		t.Errorf("host-dialed with the relays' own address: %q, %v", got, err)
+	}
+	if _, err := (Config{DialHomeListen: "127.0.0.1:29227"}).DialHomeAddr(ModeHostDialed, agentapi.Host{}); err == nil {
+		t.Error("host-dialed with a listener and no port base to check it against was accepted")
 	}
 }
 

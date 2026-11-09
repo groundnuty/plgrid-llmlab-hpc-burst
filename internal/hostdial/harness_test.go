@@ -67,8 +67,10 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// relayMain is "relay <channel>" as cmd/hb-agent runs it: the relay
-// directory from SLURM_JOB_ID, then hostdial.Pipe on the step's streams.
+// relayMain is "relay <channel>" as cmd/hb-agent runs it: the staging
+// directory from this binary's staged path, the relay directory from the
+// job's pointer there (SLURM_JOB_ID), then hostdial.Pipe on the step's
+// streams, and hostdial.RelayMessage's line on a failure.
 func relayMain(args []string) int {
 	if len(args) != 1 {
 		return 2
@@ -77,13 +79,16 @@ func relayMain(args []string) int {
 	if err != nil {
 		return 2
 	}
-	dir, err := agentapi.RelayDir(agentapi.RelayRoot(os.Getenv), os.Getenv("SLURM_JOB_ID"))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "relay:", err)
-		return 1
+	jobID := os.Getenv("SLURM_JOB_ID")
+	staging, err := agentapi.StagingDirOfAgent(os.Args[0])
+	if err == nil {
+		var dir string
+		if dir, err = hostdial.FindRelayDir(staging, agentapi.RelayRoot(os.Getenv), jobID); err == nil {
+			err = hostdial.Pipe(dir, ch, os.Stdin, os.Stdout)
+		}
 	}
-	if err := hostdial.Pipe(dir, ch, os.Stdin, os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, "relay:", err)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, hostdial.RelayMessage(jobID, err))
 		return 1
 	}
 	return 0
@@ -107,7 +112,14 @@ func jobMain(args []string) int {
 	if err != nil {
 		return 2
 	}
-	dir, err := agentapi.RelayDir(agentapi.RelayRoot(os.Getenv), os.Getenv("SLURM_JOB_ID"))
+	jobID := os.Getenv("SLURM_JOB_ID")
+	staging, err := agentapi.StagingDirOfAgent(os.Args[0])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "job:", err)
+		return 1
+	}
+	// As the agent's host-dialed transport does it (cmd/hb-agent).
+	dir, err := hostdial.MakeRelayDir(agentapi.RelayRoot(os.Getenv), jobID)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "job:", err)
 		return 1
@@ -120,6 +132,12 @@ func jobMain(args []string) int {
 		fmt.Fprintln(os.Stderr, "job:", err)
 		return 1
 	}
+	unpublish, err := hostdial.PublishRelayDir(staging, jobID, dir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "job:", err)
+		return 1
+	}
+	defer unpublish()
 	b, _ := json.Marshal(jobPorts{Control: j.Port(agentapi.RelayControl), Serving: j.Port(agentapi.RelayServing), Dir: dir, PID: os.Getpid()})
 	tmp := args[0] + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil || os.Rename(tmp, args[0]) != nil {
@@ -214,6 +232,9 @@ type world struct {
 	node    *rehearsal.LoginNode
 	creds   slurm.SSHConfig
 	agent   string // the "agent binary" on the cluster: this test binary, linked into the fake's file system
+	staging string // its staging directory
+	relays  string // the node's relay root
+	firstID int    // the fake's first job ID
 	jobs    *slurm.Batch
 	relay   *sshrun.Relay
 	targets map[agentapi.RelayChannel]*target
@@ -242,9 +263,11 @@ func newWorld(t *testing.T) *world {
 			t.Fatal(err)
 		}
 	}
+	// Job IDs of this world's own: the relay steps are found by SLURM_JOB_ID.
+	w.firstID = 30_000_000 + (os.Getpid()%10_000)*1_000 + int(worldSeq.Add(1))*20
+	w.relays = filepath.Join(base, "x")
 	w.plat = fakeslurm.New(fake.NewClock(time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)), fakeslurm.Config{
-		// Job IDs of this world's own: the relay steps are found by SLURM_JOB_ID.
-		FirstJobID: 30_000_000 + (os.Getpid()%10_000)*1_000 + int(worldSeq.Add(1))*20,
+		FirstJobID: w.firstID,
 		Run:        &fakeslurm.RunMode{Root: root, JobDir: filepath.Join(base, "j"), KillWait: 2 * time.Second},
 	})
 	t.Cleanup(func() {
@@ -254,7 +277,7 @@ func newWorld(t *testing.T) *world {
 	})
 	w.node, err = rehearsal.StartLoginNode(rehearsal.LoginConfig{
 		Dir: filepath.Join(base, "n"), Platform: w.plat,
-		Login: fakeslurm.Login{User: clusterUser, Env: map[string]string{"HOME": home, agentapi.EnvRelayRoot: filepath.Join(base, "x")}},
+		Login: fakeslurm.Login{User: clusterUser, Env: map[string]string{"HOME": home, agentapi.EnvRelayRoot: w.relays}},
 	})
 	if err != nil {
 		t.Fatalf("StartLoginNode: %v", err)
@@ -276,8 +299,10 @@ func newWorld(t *testing.T) *world {
 		t.Fatal(err)
 	}
 	// The relay step's program and the job's batch process are this binary,
-	// linked into the cluster's file system as a staged agent would be.
-	w.agent = filepath.Join(root, "stage", "hb-agent")
+	// linked into the cluster's file system as a staged agent is,
+	// <stagingDir>/agent/<digest>/hb-agent.
+	w.staging = filepath.Join(root, "stage")
+	w.agent = filepath.Join(w.staging, agentapi.StagedAgentPath(strings.Repeat("e", 64)))
 	if err := os.MkdirAll(filepath.Dir(w.agent), 0o700); err != nil {
 		t.Fatal(err)
 	}

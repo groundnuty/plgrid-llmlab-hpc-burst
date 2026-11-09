@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -29,13 +30,19 @@ func Pipe(dir string, ch agentapi.RelayChannel, stdin io.Reader, stdout io.Write
 		return err
 	}
 	if err := privateDir(dir, false); err != nil {
-		return err
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: %v", ErrNoSocket, err)
+		}
+		return fmt.Errorf("%w: %v", ErrNotPrivate, err)
 	}
 	conn, err := net.DialTimeout("unix", agentapi.RelaySocket(dir, ch), pipeDialTimeout)
 	if err != nil {
-		return fmt.Errorf("the agent's %s socket: %w", ch, err)
+		return fmt.Errorf("%w: the %s channel's: %v", ErrNoSocket, ch, err)
 	}
 	defer conn.Close()
+	if _, err := io.WriteString(stdout, Preamble(ch)); err != nil {
+		return fmt.Errorf("the relay's preamble: %w", err)
+	}
 	in := make(chan error, 1)
 	go func() {
 		_, err := io.Copy(conn, stdin)

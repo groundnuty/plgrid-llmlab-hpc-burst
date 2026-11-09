@@ -37,9 +37,18 @@ func (p relayPipes) Close() error { return p.WriteCloser.Close() }
 // keepRelay runs "relay <ch>" processes, one at a time, each serving its
 // session to target, and starts another 100 ms after one ends (the first ones
 // end at once, before the agent has made its sockets), until ctx ends.
-func keepRelay(t *testing.T, ctx context.Context, ch agentapi.RelayChannel, relayRoot, target string, wg *sync.WaitGroup) {
-	self, err := os.Executable()
+func keepRelay(t *testing.T, ctx context.Context, ch agentapi.RelayChannel, stagingDir, relayRoot, target string, wg *sync.WaitGroup) {
+	exe, err := os.Executable()
 	if err != nil {
+		t.Fatal(err)
+	}
+	// The relay finds its pointer from its own path, the staged agent's
+	// (<stagingDir>/agent/<digest>/hb-agent): this binary, linked there.
+	self := filepath.Join(stagingDir, agentapi.StagedAgentPath(strings.Repeat("e", 64)))
+	if err := os.MkdirAll(filepath.Dir(self), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(exe, self); err != nil {
 		t.Fatal(err)
 	}
 	wg.Add(1)
@@ -56,7 +65,7 @@ func keepRelay(t *testing.T, ctx context.Context, ch agentapi.RelayChannel, rela
 			}
 			sctx, cancel := context.WithCancel(ctx)
 			served := make(chan struct{})
-			go func() { _ = hostdial.Serve(sctx, relayPipes{out, in}, target, nil, nil); close(served) }()
+			go func() { _ = hostdial.Serve(sctx, relayPipes{out, in}, target, ch, nil, nil); close(served) }()
 			waited := make(chan struct{})
 			go func() { _ = cmd.Wait(); close(waited) }()
 			select {
@@ -91,14 +100,17 @@ func TestAgentEndToEndHostDialed(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	defer func() { cancel(); wg.Wait() }()
-	keepRelay(t, ctx, agentapi.RelayControl, relayRoot, ep.addr, &wg)
+	keepRelay(t, ctx, agentapi.RelayControl, j.stagingDir, relayRoot, ep.addr, &wg)
 	out := exercise(t, ep, j)
 	if !strings.Contains(out, "relay session up") {
 		t.Errorf("the agent logged no relay session:\n%s", out)
 	}
-	dir, _ := agentapi.RelayDir(relayRoot, eJobID)
-	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("the relay directory %s is left after the agent stopped: %v", dir, err)
+	if left, _ := filepath.Glob(filepath.Join(relayRoot, "hb-relay-*")); len(left) != 0 {
+		t.Errorf("relay directories %v are left after the agent stopped", left)
+	}
+	ptr, _ := agentapi.RelayPointerPath(j.stagingDir, eJobID)
+	if _, err := os.Stat(ptr); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the relay pointer %s is left after the agent stopped: %v", ptr, err)
 	}
 }
 
@@ -124,7 +136,7 @@ func TestRelayUsage(t *testing.T) {
 	} {
 		out.Reset()
 		errs.Reset()
-		if got := relay(c.args, c.env, strings.NewReader(""), &out, &errs); got != c.want {
+		if got := relay("/s/agent/"+strings.Repeat("e", 64)+"/hb-agent", c.args, c.env, strings.NewReader(""), &out, &errs); got != c.want {
 			t.Errorf("%s: relay exited %d, want %d (stderr %q)", name, got, c.want, errs.String())
 		}
 		if out.Len() != 0 {

@@ -84,25 +84,49 @@ func TestRelayLineRefuses(t *testing.T) {
 	}
 }
 
-func TestRelayDir(t *testing.T) {
-	dir, err := RelayDir("/tmp", "4242")
-	if err != nil {
-		t.Fatal(err)
+func TestRelayDirPrefixAndCheck(t *testing.T) {
+	p, err := RelayDirPrefix("4242")
+	if err != nil || p != "hb-relay-4242-" {
+		t.Fatalf("RelayDirPrefix = %q, %v", p, err)
 	}
-	if dir != "/tmp/hb-relay-4242" {
-		t.Errorf("RelayDir = %q, want /tmp/hb-relay-4242", dir)
+	if err := CheckRelayDir("/tmp", "4242", "/tmp/hb-relay-4242-918273645"); err != nil {
+		t.Errorf("a directory the agent makes: %v", err)
 	}
-	if s := RelaySocket(dir, RelayServing); s != "/tmp/hb-relay-4242/serving.sock" {
+	if s := RelaySocket("/tmp/hb-relay-4242-9", RelayServing); s != "/tmp/hb-relay-4242-9/serving.sock" {
 		t.Errorf("RelaySocket = %q", s)
 	}
-	for name, c := range map[string][2]string{
-		"no job":         {"/tmp", ""},
-		"a relative one": {"tmp", "1"},
-		"an unclean one": {"/tmp/", "1"},
-		"too long":       {"/" + strings.Repeat("r", 90), "1"},
+	for name, dir := range map[string]string{
+		"the predictable name": "/tmp/hb-relay-4242",
+		"another job's":        "/tmp/hb-relay-4243-1",
+		"another root":         "/var/tmp/hb-relay-4242-1",
+		"a dot-dot":            "/tmp/x/../hb-relay-4242-1",
+		"a nested one":         "/tmp/a/hb-relay-4242-1",
+		"a slash in the rest":  "/tmp/hb-relay-4242-1/x",
+		"too long":             "/tmp/hb-relay-4242-" + strings.Repeat("9", 90),
 	} {
-		if d, err := RelayDir(c[0], c[1]); err == nil {
-			t.Errorf("%s: RelayDir = %q, want an error", name, d)
+		if err := CheckRelayDir("/tmp", "4242", dir); err == nil {
+			t.Errorf("%s: CheckRelayDir accepted %q", name, dir)
+		}
+	}
+	if _, err := RelayDirPrefix("12a"); err == nil {
+		t.Error("a job ID of text was accepted")
+	}
+}
+
+func TestRelayPointerPathAndStagingDir(t *testing.T) {
+	if p, err := RelayPointerPath("/scratch/example/stage", "4242"); err != nil || p != "/scratch/example/stage/relay/4242" {
+		t.Errorf("RelayPointerPath = %q, %v", p, err)
+	}
+	if _, err := RelayPointerPath("stage", "4242"); err == nil {
+		t.Error("a relative staging directory was accepted")
+	}
+	agent := "/scratch/example/stage/agent/" + strings.Repeat("a", 64) + "/hb-agent"
+	if s, err := StagingDirOfAgent(agent); err != nil || s != "/scratch/example/stage" {
+		t.Errorf("StagingDirOfAgent = %q, %v", s, err)
+	}
+	for _, bad := range []string{"/usr/bin/hb-agent", "/s/agent/abc/hb-agent", "/s/agent/" + strings.Repeat("a", 64) + "/other", "hb-agent"} {
+		if s, err := StagingDirOfAgent(bad); err == nil {
+			t.Errorf("StagingDirOfAgent(%q) = %q, want an error", bad, s)
 		}
 	}
 }
