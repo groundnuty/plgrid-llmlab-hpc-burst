@@ -19,15 +19,28 @@ import (
 const (
 	ModeDirect = "direct"
 	ModeSSH    = "ssh"
+	// ModeHostDialed is the mode with no front address: the control-plane host dials
+	// each job through the login node, and the job's connections run back over it
+	// (HBEP-6, Dial-home modes; HBEP-11, open question 8, amended 9 Nov 2026). The
+	// front behaves as in ssh mode: its dial-home listener runs on loopback at the
+	// launcher's port base plus 7, with TLS, and /agent/v1/ there answers 404,
+	// because the agent reaches the agent endpoint through a relay.
+	ModeHostDialed = "host-dialed"
 )
+
+// ValidMode reports whether mode is one of the three dial-home modes the launcher records.
+func ValidMode(mode string) bool {
+	return mode == ModeDirect || mode == ModeSSH || mode == ModeHostDialed
+}
 
 // DialHome is the dial-home listener's handler (HBEP-5, Listeners). In direct
 // mode it passes every request under /agent/v1/ through, unchanged, to the
 // lifecycle controller's loopback agent endpoint and streams the answer back,
 // long polls included; the controller authenticates the agent and the front
 // adds nothing. In ssh mode the agent reaches that endpoint through its
-// forward, and the passthrough is unused. Every other path goes to tunnel,
-// HBEP-6's /~!frp passthrough to frps in both modes, which answers 404 to
+// forward, and in host-dialed mode through a relay, so the passthrough is
+// unused in both and /agent/v1/ answers 404. Every other path goes to tunnel,
+// HBEP-6's /~!frp passthrough to frps in every mode, which answers 404 to
 // anything but frpc's websocket upgrade.
 type DialHome struct {
 	mode   string
@@ -65,7 +78,7 @@ func NewDialHome(mode string, host agentapi.Host, tunnel http.Handler) (*DialHom
 func (d *DialHome) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/agent/v1/") {
 		if d.agent == nil {
-			http.NotFound(w, r) // ssh mode: the agent uses its forward
+			http.NotFound(w, r) // ssh mode: the agent uses its forward; host-dialed: a relay
 			return
 		}
 		d.agent.ServeHTTP(w, r)
@@ -98,13 +111,15 @@ func certPin(path string) (string, error) {
 // dialHomeTLS is the dial-home listener's TLS configuration: it terminates
 // TLS with the launcher's certificate for the agent endpoint
 // (Host.AgentCertFile), so the agent's pin holds on both paths (HBEP-5,
-// Listeners; @hpc-burst-science-agent, 31 Oct 2026). It is required in both
-// dial-home modes; with no mode recorded, no job dials home, and the listener
-// is plain when the certificate is absent.
+// Listeners; @hpc-burst-science-agent, 31 Oct 2026). It is required in all
+// three dial-home modes, host-dialed included, whose jobs reach it through a
+// relay and verify it as frpc does elsewhere (HBEP-6, Dial-home modes); with no
+// mode recorded, no job dials home, and the listener is plain when the
+// certificate is absent.
 func dialHomeTLS(mode string, host agentapi.Host) (*tls.Config, error) {
 	cert, err := tls.LoadX509KeyPair(host.AgentCertFile(), host.AgentKeyFile())
 	if err != nil {
-		if mode == ModeDirect || mode == ModeSSH {
+		if ValidMode(mode) {
 			return nil, fmt.Errorf("the dial-home listener needs the agent endpoint's certificate and key: %w", err)
 		}
 		return nil, nil

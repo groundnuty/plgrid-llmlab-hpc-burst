@@ -26,7 +26,7 @@ import (
 type Options struct {
 	Config  Config
 	Host    agentapi.Host
-	Mode    string // ModeDirect, ModeSSH, or "" when the launcher recorded no front
+	Mode    string // ModeDirect, ModeSSH, ModeHostDialed, or "" when the launcher recorded no front
 	Clock   clock.Clock
 	Dynamic dynamic.Interface
 	// Kube, when set, is the client for the front's heartbeat Lease. Nil: the
@@ -92,7 +92,7 @@ func Run(ctx context.Context, o Options) error {
 	// may be unknown; then no Instance can be reached and nothing is passed
 	// to frps, as dialHomeTLS allows a plain listener then.
 	frpsBind, frpsMux, ferr := cfg.FrpsAddrs(o.Host)
-	if ferr != nil && (o.Mode == ModeDirect || o.Mode == ModeSSH) {
+	if ferr != nil && ValidMode(o.Mode) {
 		return ferr
 	}
 	var tunnel *Tunnel

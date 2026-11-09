@@ -199,7 +199,9 @@ func checkScheme(s *runtime.Scheme) error {
 // the frp release the launcher runs (HBEP-4, Submission: Files first), for
 // x86_64 and aarch64 (Helios GH200) alike; in ssh mode the user is the one who
 // runs this binary, and the two forwarded ports are the Host's
-// (agentapi.Host). The settings are checked as agent.json takes them
+// (agentapi.Host); in host-dialed mode there is no endpoint and no ssh setting,
+// because the host dials the jobs (HBEP-6, Dial-home modes; HBEP-11, open
+// question 8, amended 9 Nov 2026), and parse refused an address for it. The settings are checked as agent.json takes them
 // (checkFront), so a value every submission would fail on stops the binary
 // here, before anything listens.
 func frontSettings(f flags, d deps) (*providerctl.FrontSettings, error) {

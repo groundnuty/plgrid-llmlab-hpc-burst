@@ -214,7 +214,7 @@ func TestFrpPassthroughAnswers502WithoutFrps(t *testing.T) {
 // one write, one TLS record, so the server reads the bytes ahead with the
 // headers.
 func TestRunPassesReadAheadBytesOverTLS(t *testing.T) {
-	for _, mode := range []string{ModeDirect, ModeSSH} {
+	for _, mode := range []string{ModeDirect, ModeSSH, ModeHostDialed} {
 		t.Run(mode, func(t *testing.T) {
 			up := startRawUpstream(t, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
 			host := agentapi.Host{StateDir: t.TempDir()}

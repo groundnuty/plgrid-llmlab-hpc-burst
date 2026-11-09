@@ -1,6 +1,7 @@
 // Command fakecontroller stands in for hpcburst-controller in the launcher's tests. It accepts
 // exactly the flags of the controller's command line (--state-dir, --port-base and --health-addr,
-// all required, and optionally --front-mode and --front-addr), so a launcher that passes another
+// all required, and optionally --front-mode with --front-addr, or --front-mode host-dialed alone, as
+// the real controller takes them), so a launcher that passes another
 // one, such as the earlier --kubeconfig, --credentials-dir or --agent-builds-dir, fails its start; records its argv and environment; serves GET /healthz on --health-addr; and exits on
 // SIGTERM. Its behaviour is steered through files in the directory $FAKECTRL_DIR (default: the
 // directory of this binary), so a test changes it while it runs:
@@ -79,7 +80,7 @@ func main() {
 	stateDir := fs.String("state-dir", "", "")
 	portBase := fs.Int("port-base", 0, "")
 	health := fs.String("health-addr", "", "")
-	if err := fs.Parse(os.Args[1:]); err != nil || fs.NArg() > 0 || *stateDir == "" || *portBase <= 0 || *health == "" || (asFront && *config == "") {
+	if err := fs.Parse(os.Args[1:]); err != nil || fs.NArg() > 0 || *stateDir == "" || *portBase <= 0 || *health == "" || (asFront && *config == "") || !frontFlagsOK(fs) {
 		fmt.Fprintln(os.Stderr, "fakecontroller: bad command line:", os.Args[1:])
 		os.Exit(2)
 	}
@@ -171,6 +172,28 @@ func main() {
 			}
 		}
 	}
+}
+
+// frontFlagsOK is the real controller's rule for its front flags (cmd/hpcburst-controller): none,
+// or --front-mode direct|ssh with --front-addr, or --front-mode host-dialed alone, because the host
+// dials the jobs and there is no address (HBEP-6, Dial-home modes). The front's role has neither flag.
+func frontFlagsOK(fs *flag.FlagSet) bool {
+	value := func(name string) string {
+		if f := fs.Lookup(name); f != nil {
+			return f.Value.String()
+		}
+		return ""
+	}
+	mode, addr := value("front-mode"), value("front-addr")
+	switch mode {
+	case "":
+		return addr == ""
+	case "host-dialed":
+		return addr == ""
+	case "direct", "ssh":
+		return addr != ""
+	}
+	return false
 }
 
 // readyzHandler is the lifecycle controller's /readyz: controller-runtime's own healthz.Handler

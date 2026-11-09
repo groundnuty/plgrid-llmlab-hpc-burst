@@ -30,7 +30,8 @@ type Ports struct {
 	Agent      int `json:"agent,omitempty"`
 	// FrontHealth is the front's loopback /healthz (issue #64, HBEP-5). DialHome is the front's
 	// dial-home listener in ssh mode, 127.0.0.1:base+7, where each platform's restricted key
-	// forwards (@hpc-burst-science-agent, 31 Oct 2026): reserved, never bound by the launcher. The
+	// forwards (@hpc-burst-science-agent, 31 Oct 2026), and in host-dialed mode, where the host's
+	// relay dials it (HBEP-6, Dial-home modes): reserved, never bound by the launcher. The
 	// front's client listener, and its dial-home listener in direct mode, are set in its own
 	// configuration file, not taken from this block.
 	FrontHealth int `json:"front_health,omitempty"`
@@ -51,7 +52,7 @@ const controllerPortOffset = 6
 // allocation of the block's free port, 31 Oct 2026).
 const frontHealthPortOffset = 4
 
-// dialHomePortOffset is the front's ssh-mode dial-home listener, relative to the base:
+// dialHomePortOffset is the front's dial-home listener in ssh and host-dialed modes, relative to the base:
 // agentapi.DialHomePortOffset (7). Each platform's restricted VM key permits forwards to exactly
 // 127.0.0.1:base+3 (the agent endpoint) and 127.0.0.1:base+7, so a launcher started with another
 // base needs new restricted keys (docs/development.md, The launcher, Ports).
@@ -69,8 +70,8 @@ const blockLastOffset = agentapi.ControllerMetricsPortOffset
 // PortsFromBase lays the first four ports out as spike S3 did (base, base+1, base+2 and base+5)
 // and adds the controllers' two: the agent endpoint at agentapi.AgentEndpointPortOffset (base+3,
 // shared with the controller through agentapi.Host) and the controller's /healthz at base+6.
-// base+4 is the front's /healthz (frontHealthPortOffset), and base+7 the front's ssh-mode
-// dial-home listener (dialHomePortOffset). The rest of the shared block belongs to the other
+// base+4 is the front's /healthz (frontHealthPortOffset), and base+7 the front's
+// dial-home listener in ssh and host-dialed modes (dialHomePortOffset). The rest of the shared block belongs to the other
 // components: base+8, the frps server plugin the controller binds, and base+9 to base+11, frps's
 // own (HBEP-6); and base+12, the controller's /metrics (issue #111). The whole block,
 // base..base+12, must fit below 65536.
