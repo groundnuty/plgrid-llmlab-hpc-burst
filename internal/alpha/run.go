@@ -134,6 +134,10 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 	default:
 		return nil, fmt.Errorf("row %q is not one this package runs", cfg.Row.Name)
 	}
+	// Every row's text to post ends with the count of the run's watch resets, whatever its row.
+	resets := st.WatchResets()
+	rowSummary := summary
+	summary = func(f []string, j []provider.Job) string { return rowSummary(f, j) + watchResetsLine(resets) }
 	var missing []string
 	for _, t := range tags {
 		if !rec.Tagged(t) {
@@ -155,7 +159,7 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 	}
 	if serr := rec.SaveJSON(RecordFile, map[string]any{
 		"row": cfg.Row.Name, "mode": cfg.Mode(), "frontLabel": cfg.FrontLabel, "verdict": verdict, "failures": failures,
-		"observation": obs, "jobs": jobs, "finished": time.Now().UTC().Format(time.RFC3339),
+		"observation": obs, "jobs": jobs, "watchResets": resets, "finished": time.Now().UTC().Format(time.RFC3339),
 	}); serr != nil {
 		return failures, fmt.Errorf("the record could not be written: %w", serr)
 	}

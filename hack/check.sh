@@ -34,7 +34,7 @@ echo "== go test" >&2
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT
 set +e
-go test -count=1 -v ./... 2>&1 | tee "$log" | grep -E '^(ok|FAIL|---\s+FAIL|panic|\?)' >&2
+bash hack/go-test.sh all 2>&1 | tee "$log" | grep -E '^(ok|FAIL|---\s+FAIL|panic|\?)' >&2
 status=${PIPESTATUS[0]}
 set -e
 if [ "$status" -ne 0 ]; then

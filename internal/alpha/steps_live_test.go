@@ -171,6 +171,7 @@ func (f failedSteps) TunnelHour(context.Context, Plan) (TunnelHourObs, error) {
 }
 func (f failedSteps) Ledger() Ledger              { return &BatchLedger{} }
 func (f failedSteps) Close(context.Context) error { return nil }
+func (f failedSteps) WatchResets() int            { return 0 }
 
 // liveRun is one run of the live steps in a world.
 type liveRun struct {
@@ -337,6 +338,9 @@ func (r *liveRun) Ledger() Ledger {
 	}
 	return &BatchLedger{Finder: r.batch, Since: r.since.Add(-AccountingSlack)}
 }
+
+// WatchResets counts the resets of the run's watch.
+func (r *liveRun) WatchResets() int { return r.watch.ResetCount() }
 
 // start brings the stack up, creates the Provider, makes the run's own
 // transport, and creates the row's deployment with the end that keeps it to
@@ -717,6 +721,18 @@ func (r *liveRun) successorOf(pred string, d time.Duration, stop func() bool) (v
 		time.Sleep(time.Second)
 	}
 	return v1alpha1.Instance{}, false
+}
+
+// syncWatch makes the watch catch up with the API on the kinds before a read of
+// it that follows something the API showed (stack.Recorder.CatchUp): the API
+// leads the watch, so such a read can precede an event that is only late
+// (issue #281). what names the read. The error says that an event was lost, or
+// that it could not be told whether the watch had caught up. ctx is the row's:
+// the catch-up stops at its deadline, and takes at most stack.CatchUpWorstCase
+// of the row's time.
+func (r *liveRun) syncWatch(ctx context.Context, kinds stack.Kinds, what string) error {
+	r.t.Helper()
+	return r.watch.CatchUp(ctx, r.t, r.c, r.w.md.Namespace, kinds, what).Err(what)
 }
 
 // tagOf is the job tag of an Instance's Allocation.

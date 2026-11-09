@@ -20,6 +20,9 @@ func verdictLine(row Row, failures []string) string {
 	return fmt.Sprintf("%s: FAIL (posts to %s)\n- failed checks: %s", row.Name, row.PostsTo, Summary(failures))
 }
 
+// watchResetsLine is the count of the run's watch resets, on every row that runs the stack.
+func watchResetsLine(n int) string { return fmt.Sprintf("- watch resets over the run: %d\n", n) }
+
 func deploymentLine(d DeploymentSpec) string {
 	var on []string
 	for _, p := range d.Providers {

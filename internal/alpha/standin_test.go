@@ -239,6 +239,9 @@ func runStandIn(t *testing.T, name string) {
 	}
 	post, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
 	t.Logf("%s's text to post:\n%s", row.Name, post)
+	if want := watchResetsLine(st.WatchResets()); !strings.Contains(string(post), want) {
+		t.Errorf("the text to post lacks %q", want)
+	}
 	if len(failures) > 0 {
 		t.Fatalf("%s failed its verdict over the stand-in: %s", row.Name, Summary(failures))
 	}

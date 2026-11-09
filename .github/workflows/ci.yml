@@ -1,7 +1,7 @@
 # Continuous integration for the root Go module (issue #54).
 #
 # It runs the repository's own checks on every pull request and on every push to main:
-#   go           gofmt, go vet, go test
+#   go           gofmt, go vet, go test (through hack/go-test.sh)
 #   tidy         go mod tidy -diff, in a job of its own that restores no module cache
 #   crd          hack/check.sh: generated-CRD drift, envtest with the pinned binaries, sha256 checks
 #   launcher-k3s hack/test-launcher.sh against the pinned k3s binaries, run as an ordinary user
@@ -165,7 +165,7 @@ jobs:
         run: |
           log="$RUNNER_TEMP/go-test.log"
           rc=0
-          go test -count=1 -v ./... 2>&1 | tee "$log" || rc=$?
+          bash hack/go-test.sh packages 2>&1 | tee "$log" || rc=$?
           # A skipped test reports as success, so list every one in the job summary.
           skips=$(grep -c -E '^\s*--- SKIP' "$log" || true)
           {
@@ -182,6 +182,14 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
+
+      # One test of internal/lifecycle runs on its own, under its own timeout, so that the package
+      # stays clear of go test's 10-minute one, which keeps catching a real hang (issue #282). The step
+      # fails unless the test really ran and passed. It runs even if the packages failed. hack/check.sh
+      # runs the same two parts, so the crd job runs this test too.
+      - name: go test, one test on its own timeout
+        if: ${{ !cancelled() }}
+        run: bash hack/go-test.sh own
 
   tidy:
     name: tidy
