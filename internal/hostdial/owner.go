@@ -589,6 +589,14 @@ func (r *relay) once(ctx context.Context) (time.Duration, bool, EndKind, string)
 	case <-p.done:
 	case serveErr = <-served:
 		serveEnded = true
+		// The relay's output ended first: give its process the stop grace
+		// to exit by itself, so its exit code (ExitSuperseded, ExitNotReady)
+		// is read, not lost to the TERM below.
+		select {
+		case <-p.done:
+		case <-time.After(o.StopGrace):
+		case <-ctx.Done():
+		}
 	case <-ctx.Done():
 	}
 	p.stop(o.StopGrace)

@@ -57,12 +57,12 @@ func classifyEnd(exit int, stderr string) (EndKind, string) {
 	kind, cause := ClassifyEnd(stderr)
 	switch exit {
 	case ExitSuperseded:
-		return EndSuperseded, "superseded: the agent keeps a newer relay"
+		return EndSuperseded, "superseded (exit 5): the agent keeps a newer relay"
 	case ExitNotReady:
 		if kind != EndRetried || cause == "" {
 			cause = "agent not ready"
 		}
-		return EndRetried, cause
+		return EndRetried, cause + " (exit 4)"
 	}
 	return kind, cause
 }

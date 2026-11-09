@@ -193,7 +193,8 @@ func TestHostDialedAStaleRendezvousIsAgentNotReady(t *testing.T) {
 	for _, ch := range agentapi.RelayChannels {
 		waitFor(t, time.Minute, "the "+string(ch)+" relay retried after agent not ready", func() bool {
 			r := relayOf(own, j.tag, ch)
-			return r.Starts >= 2 && strings.Contains(r.LastEnd, "agent not ready")
+			// "(exit 4)": read from the relay's exit code (N2).
+			return r.Starts >= 2 && strings.Contains(r.LastEnd, "agent not ready") && strings.Contains(r.LastEnd, "(exit 4)")
 		})
 		if r := relayOf(own, j.tag, ch); r.Final {
 			t.Errorf("the %s relay ended for good (%s) on agent not ready, which is retried", ch, r.FinalCause)
@@ -272,8 +273,10 @@ func TestHostDialedALowerEpochIsSuperseded(t *testing.T) {
 	for _, ch := range agentapi.RelayChannels {
 		waitFor(t, time.Minute, "the old copy's "+string(ch)+" relay superseded", func() bool { return relayOf(old, j.tag, ch).Final })
 		r := relayOf(old, j.tag, ch)
-		if !strings.HasPrefix(r.FinalCause, "superseded") || r.Starts != 1 || r.Epoch != 6 {
-			t.Errorf("the old copy's %s relay %+v: want superseded after one start, epoch 6", ch, r)
+		// "(exit 5)": the end was read from the relay's exit code, which the
+		// ssh client passes on, not from its standard error (N2).
+		if !strings.HasPrefix(r.FinalCause, "superseded: superseded (exit 5)") || r.Starts != 1 || r.Epoch != 6 {
+			t.Errorf("the old copy's %s relay %+v: want superseded by its exit code after one start, epoch 6", ch, r)
 		}
 	}
 	for range 3 {

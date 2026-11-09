@@ -375,8 +375,11 @@ func TestAnEndIsReadFromTheRelaysExitCodeFirst(t *testing.T) {
 	if k, _ := classifyEnd(ExitSuperseded, noise); k != EndSuperseded {
 		t.Errorf("exit %d with noise: %s, want superseded", ExitSuperseded, k)
 	}
-	if k, c := classifyEnd(ExitNotReady, noise); k != EndRetried || c != "agent not ready" {
-		t.Errorf("exit %d with noise: %s %q, want retried, agent not ready", ExitNotReady, k, c)
+	if k, c := classifyEnd(ExitNotReady, noise); k != EndRetried || c != "agent not ready (exit 4)" {
+		t.Errorf("exit %d with noise: %s %q, want retried, agent not ready (exit 4)", ExitNotReady, k, c)
+	}
+	if _, c := classifyEnd(ExitSuperseded, noise); !strings.Contains(c, "(exit 5)") {
+		t.Errorf("exit %d: cause %q does not say it was read from the exit code", ExitSuperseded, c)
 	}
 	if k, _ := classifyEnd(1, noise); k != EndRetried {
 		t.Errorf("exit 1 with noise: %s, want retried", k)
