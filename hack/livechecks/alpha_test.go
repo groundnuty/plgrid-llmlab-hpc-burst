@@ -266,7 +266,7 @@ func TestAlphaRowsRefuseWithoutTheirSettings(t *testing.T) {
 			m["LIVE_DIALHOME_MODE"] = "ssh"
 			m["LIVE_DIALHOME_KEY"] = "/etc/hostname"
 		}, []string{"LIVE_DIALHOME_KEY names a file that is not mode 600"}},
-		{"a mode that is neither", "alpha-athena-handover", func(m map[string]string) { m["LIVE_DIALHOME_MODE"] = "tcp" }, []string{"LIVE_DIALHOME_MODE must be direct or ssh"}},
+		{"a mode that is none of the three", "alpha-athena-handover", func(m map[string]string) { m["LIVE_DIALHOME_MODE"] = "tcp" }, []string{"LIVE_DIALHOME_MODE must be direct, ssh or host-dialed"}},
 		{"an address with no port", "alpha-athena-handover", func(m map[string]string) { m["LIVE_DIALHOME_ADDR"] = "gateway-seed.example" }, []string{"LIVE_DIALHOME_ADDR must be host:port"}},
 		{"a binary directory that is not one", "tunnel-hour-athena", func(m map[string]string) { m["LIVE_BIN_DIR"] = "/no/such/dir" }, []string{"LIVE_BIN_DIR is not a directory"}},
 		{"a relative binary directory", "tunnel-hour-athena", func(m map[string]string) { m["LIVE_BIN_DIR"] = "bin" }, []string{"LIVE_BIN_DIR must be an absolute path"}},
@@ -742,6 +742,96 @@ func TestTheDialHomeKeyReachesTheTestInSSHModeOnly(t *testing.T) {
 	}
 	if env := w2.stateFile("test-env-TestTunnelHour"); strings.Contains(env, "DIALHOME_KEY") {
 		t.Errorf("a key reached a direct-mode run:\n%s", env)
+	}
+}
+
+// Host-dialed mode (HBEP-6, Dial-home modes; HBEP-11, open question 8, amended 9 Nov 2026) has no address and
+// no key: the host dials the jobs through the login node. The row runs with neither setting, and the test gets
+// the mode and no address, whatever the caller's environment holds. Direct and ssh still pass their address
+// (and ssh its key), as they did.
+func TestHostDialedModeNeedsNoAddressAndPassesNone(t *testing.T) {
+	const staleAddr = "stale-callers-env.example:1"
+	staleEnv := []string{"HPCBURST_ALPHA_DIALHOME_ADDR=" + staleAddr, "HPCBURST_ALPHA_DIALHOME_KEY=/stale/key"}
+	w := newAlphaWorld(t)
+	w.alphaSettings(func(m map[string]string) {
+		m["LIVE_DIALHOME_MODE"] = "host-dialed"
+		delete(m, "LIVE_DIALHOME_ADDR")
+		// A key left in the settings from an ssh run is not needed and is not passed.
+		m["LIVE_DIALHOME_KEY"] = filepath.Join(w.dir, "dialhome-key")
+	})
+	if res := w.run(staleEnv, "--run", "tunnel-hour-athena", "--yes"); res.code != 0 {
+		t.Fatalf("host-dialed with no address: exit %d, want 0:\n%s", res.code, res.out)
+	}
+	got := lines(w.stateFile("test-env-TestTunnelHour"))
+	if !containsString(got, "HPCBURST_ALPHA_DIALHOME_MODE=host-dialed") {
+		t.Errorf("the test did not get the mode host-dialed:\n%s", strings.Join(got, "\n"))
+	}
+	for _, banned := range []string{"DIALHOME_ADDR", "DIALHOME_KEY", staleAddr} {
+		for _, l := range got {
+			if strings.Contains(l, banned) {
+				t.Errorf("host-dialed mode passed %q to the test:\n%s", l, strings.Join(got, "\n"))
+			}
+		}
+	}
+	// The others are unchanged: direct passes its address and no key; ssh its address and its key.
+	for _, mode := range []string{"direct", "ssh"} {
+		w2 := newAlphaWorld(t)
+		key := filepath.Join(w2.dir, "dialhome-key")
+		w2.alphaSettings(func(m map[string]string) {
+			m["LIVE_DIALHOME_MODE"] = mode
+			m["LIVE_DIALHOME_KEY"] = key
+		})
+		if res := w2.run(nil, "--run", "tunnel-hour-athena", "--yes"); res.code != 0 {
+			t.Fatalf("%s: exit %d, want 0:\n%s", mode, res.code, res.out)
+		}
+		got := lines(w2.stateFile("test-env-TestTunnelHour"))
+		want := []string{"HPCBURST_ALPHA_DIALHOME_MODE=" + mode, "HPCBURST_ALPHA_DIALHOME_ADDR=gateway-seed.example:29999"}
+		if mode == "ssh" {
+			want = append(want, "HPCBURST_ALPHA_DIALHOME_KEY="+key)
+		}
+		for _, l := range want {
+			if !containsString(got, l) {
+				t.Errorf("%s mode: the test did not get %s:\n%s", mode, l, strings.Join(got, "\n"))
+			}
+		}
+		if hasKey := slices.ContainsFunc(got, func(l string) bool { return strings.Contains(l, "DIALHOME_KEY") }); hasKey != (mode == "ssh") {
+			t.Errorf("%s mode: a key reached the test: %v, want %v", mode, hasKey, mode == "ssh")
+		}
+	}
+}
+
+// What host-dialed mode refuses, and what direct mode still needs (HBEP-6, Dial-home modes): an address set
+// with host-dialed is refused, so a row cannot read as if it had one; a mode that is none of the three is
+// refused with the three named; and direct still needs its address, host:port. Each is refused before anything
+// is built or called (exit 3).
+func TestHostDialedModeSettingsAreRefusedWhenWrong(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		mutate func(map[string]string)
+		want   string
+	}{
+		{"host-dialed with an address", func(m map[string]string) { m["LIVE_DIALHOME_MODE"] = "host-dialed" }, "LIVE_DIALHOME_ADDR must not be set in host-dialed mode"},
+		{"a mode that is none of the three", func(m map[string]string) { m["LIVE_DIALHOME_MODE"] = "tcp" }, "LIVE_DIALHOME_MODE must be direct, ssh or host-dialed"},
+		{"direct with no address", func(m map[string]string) { delete(m, "LIVE_DIALHOME_ADDR") }, "setting LIVE_DIALHOME_ADDR is missing"},
+		{"direct with an address with no port", func(m map[string]string) { m["LIVE_DIALHOME_ADDR"] = "gateway-seed.example" }, "LIVE_DIALHOME_ADDR must be host:port"},
+		{"ssh with no address", func(m map[string]string) {
+			m["LIVE_DIALHOME_MODE"] = "ssh"
+			m["LIVE_DIALHOME_KEY"] = filepath.Join(filepath.Dir(m["LIVE_BIN_DIR"]), "dialhome-key")
+			delete(m, "LIVE_DIALHOME_ADDR")
+		}, "setting LIVE_DIALHOME_ADDR is missing"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newAlphaWorld(t)
+			w.alphaSettings(c.mutate)
+			res := w.run(nil, "--run", "tunnel-hour-athena", "--yes")
+			if res.code != 3 {
+				t.Fatalf("exit %d, want 3:\n%s", res.code, res.out)
+			}
+			w.contains(res, c.want)
+			if g := w.stateFile("go-argv"); g != "" || w.stateFile("sbatch-argv") != "" {
+				t.Errorf("a refused run built or called the cluster: %s %s", g, w.stateFile("sbatch-argv"))
+			}
+		})
 	}
 }
 

@@ -430,3 +430,33 @@ func TestRootK3sGuard(t *testing.T) {
 		}
 	}
 }
+
+// TestDialHomeFlagsPerMode: what StartHost gives hpcburst up and the front's configuration for each
+// dial-home mode. Host-dialed has no address and no key, because the host dials the jobs through the login
+// node (HBEP-6, Dial-home modes), so up gets the mode alone and no --front-addr; direct and ssh pass the
+// address as before, ssh with its key. Only direct names the dial-home listener in the front's
+// configuration; ssh and host-dialed take the default, 127.0.0.1:base+7.
+func TestDialHomeFlagsPerMode(t *testing.T) {
+	ports := Ports{Base: 29700, ClientAddr: "127.0.0.1:29713", DialHomeListen: "127.0.0.1:29714"}
+	for _, c := range []struct {
+		name   string
+		dh     DialHome
+		flags  []string
+		member string
+	}{
+		{"direct", DialHome{Mode: "direct", Addr: "front.example.test:8443"},
+			[]string{"--front-mode", "direct", "--front-addr", "front.example.test:8443"}, `"dialHomeListen":"127.0.0.1:29714",`},
+		{"ssh", DialHome{Mode: "ssh", Addr: "gateway.example.test:22", KeyPath: "/example/key"},
+			[]string{"--front-mode", "ssh", "--front-addr", "gateway.example.test:22", "--front-key", "/example/key"}, ""},
+		{"host-dialed", DialHome{Mode: "host-dialed"}, []string{"--front-mode", "host-dialed"}, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.dh.upFlags(); !slices.Equal(got, c.flags) {
+				t.Errorf("up flags %q, want %q", got, c.flags)
+			}
+			if got := c.dh.frontConfigMember(ports); got != c.member {
+				t.Errorf("front configuration member %q, want %q", got, c.member)
+			}
+		})
+	}
+}
