@@ -139,7 +139,7 @@ func LatestReady(lease time.Duration) time.Duration {
 // WithTunnelLease is the row with another lease, for the owner's choice. Only a
 // tunnel row takes one, in whole minutes, from MinLease (the lead plus a minute) to
 // MaxTunnelLease; the row's slot hold and run budget follow the lease, the budget as
-// the script's timeout does (a quarter of an hour over it).
+// the script's timeout does (TunnelRunOver).
 func WithTunnelLease(r Row, lease time.Duration) (Row, error) {
 	if !strings.HasPrefix(r.Name, "tunnel-hour-") {
 		return r, fmt.Errorf("only a tunnel row takes a lease of its own")
@@ -148,7 +148,7 @@ func WithTunnelLease(r Row, lease time.Duration) (Row, error) {
 		return r, fmt.Errorf("a tunnel lease is whole minutes from %s to %s", MinLease(), MaxTunnelLease)
 	}
 	r.Lease = lease
-	r.Budget = lease + 15*time.Minute
+	r.Budget = lease + TunnelRunOver
 	if r.SlotHold > 0 {
 		r.SlotHold = lease
 	}
@@ -313,8 +313,8 @@ var rows = []Row{
 	{Name: "alpha-athena-handover", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: MinLease(), Budget: 150 * time.Minute, MostJobs: 2, PostsTo: "#145 and #93"},
 	// The predecessor, and the successor pending beside it in QOS now.
 	{Name: "alpha-helios-nooverlap", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: MinLease(), Budget: 200 * time.Minute, SlotHold: MinLease() + 45*time.Minute, MostJobs: 2, PostsTo: "#145 and #94"},
-	{Name: "tunnel-hour-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: DefaultTunnelLease(), Budget: 150 * time.Minute, SlotHold: DefaultTunnelLease(), MostJobs: 1, PostsTo: "#145"},
-	{Name: "tunnel-hour-athena", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: DefaultTunnelLease(), Budget: 150 * time.Minute, MostJobs: 1, PostsTo: "#145"},
+	{Name: "tunnel-hour-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: DefaultTunnelLease(), Budget: DefaultTunnelLease() + TunnelRunOver, SlotHold: DefaultTunnelLease(), MostJobs: 1, PostsTo: "#145"},
+	{Name: "tunnel-hour-athena", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: DefaultTunnelLease(), Budget: DefaultTunnelLease() + TunnelRunOver, MostJobs: 1, PostsTo: "#145"},
 }
 
 // accountingRows are the rows of the accounting check, which runs in

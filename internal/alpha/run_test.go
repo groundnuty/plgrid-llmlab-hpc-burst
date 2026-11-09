@@ -531,6 +531,14 @@ func TestASecondJobThatNeverStartedIsNotRunUnlessAnEarlierFailureStands(t *testi
 					if !strings.Contains(string(post), "the first job ran and the second never started") {
 						t.Errorf("the text to post does not say the second job never started:\n%s", post)
 					}
+					// What was read of ReplacementLate stays on a failure too: information, whichever way the run ends.
+					wantLate := LateNotRaised
+					if strings.Contains(c.fault, "-late") {
+						wantLate = LateRaised
+					}
+					if want := "ReplacementLate for its deployment: " + wantLate + " (information, not a check)"; !strings.Contains(string(post), want) {
+						t.Errorf("the text to post lacks %q:\n%s", want, post)
+					}
 				}
 				// The cluster agrees: the first job ran, and the second was cancelled and never started.
 				var ran, never int

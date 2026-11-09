@@ -3,8 +3,9 @@ package conformance
 // Each row's timeout against its worst case, computed from the code (review of PR 284, B6). The figures used to be typed
 // by hand beside the rows, and they drifted: the job name's round trip has two loops of 36 polls 5 seconds apart, 6
 // minutes, where the sum said 3, so that the rows' timeouts of 85 and 45 minutes were below the 87 and 47 their tests
-// can take. So the test reads the source of each row's test and adds up every bounded wait it holds. A new wait of a
+// can take. So the test reads the source of each row's test and adds up the bounded waits it holds. A new wait of a
 // known kind changes the sum by itself; a length it cannot read, a literal or a constant it was not told of, fails it.
+// What it cannot see is said at waitReader.of.
 
 import (
 	"go/ast"
@@ -30,8 +31,8 @@ type waitSum struct {
 // waitReader adds up the bounded waits of the package's functions, from their source.
 type waitReader struct {
 	t       *testing.T
-	funcs   map[string]*ast.FuncDecl // the package's functions
-	methods map[string]*ast.FuncDecl // the world's methods
+	funcs   map[string]*ast.FuncDecl   // the package's functions
+	methods map[string][]*ast.FuncDecl // the package's methods, by name
 }
 
 func newWaitReader(t *testing.T) *waitReader {
@@ -40,7 +41,7 @@ func newWaitReader(t *testing.T) *waitReader {
 	if err != nil || len(files) == 0 {
 		t.Fatalf("the package's source: %v, %d files", err, len(files))
 	}
-	r := &waitReader{t: t, funcs: map[string]*ast.FuncDecl{}, methods: map[string]*ast.FuncDecl{}}
+	r := &waitReader{t: t, funcs: map[string]*ast.FuncDecl{}, methods: map[string][]*ast.FuncDecl{}}
 	fset := token.NewFileSet()
 	for _, name := range files {
 		f, err := parser.ParseFile(fset, name, nil, 0)
@@ -54,11 +55,7 @@ func newWaitReader(t *testing.T) *waitReader {
 			case fn.Recv == nil:
 				r.funcs[fn.Name.Name] = fn
 			default:
-				if star, ok := fn.Recv.List[0].Type.(*ast.StarExpr); ok {
-					if id, ok := star.X.(*ast.Ident); ok && id.Name == "world" {
-						r.methods[fn.Name.Name] = fn
-					}
-				}
+				r.methods[fn.Name.Name] = append(r.methods[fn.Name.Name], fn)
 			}
 		}
 	}
@@ -129,52 +126,114 @@ func (r *waitReader) pollLoops() int {
 	return loops
 }
 
-// of adds up fn's waits, and those of the world's methods it calls. A wait is a start wait (untilRuns), a call with a length
-// (until, endedInAccounting, settleDuplicates), a deadline it makes itself, or the job name's round trip.
-func (r *waitReader) of(fn *ast.FuncDecl, seen map[string]bool) waitSum {
+// of adds up fn's waits, and those of what it calls: a function of the package, or a method whose name one type alone has. A wait is a
+// start wait (untilRuns), a call with a length (until, endedInAccounting, settleDuplicates, time.Sleep, time.After, time.NewTimer,
+// context.WithTimeout), a deadline it makes itself (time.Now().Add), or the job name's round trip. A call made twice counts twice, and a
+// time.Sleep inside a loop is that loop's pacing, under a deadline listed here.
+//
+// What it cannot see, and does not claim to (the delta review of PR 284, T2; this is no proof): a wait inside another package, a method
+// whose name several types have, a function called through a variable, and a loop that sleeps a fixed number of times.
+func (r *waitReader) of(fn *ast.FuncDecl, onPath map[*ast.FuncDecl]bool) waitSum {
 	r.t.Helper()
 	var sum waitSum
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		switch x := n.(type) {
-		case *ast.AssignStmt:
-			if id, ok := x.Lhs[0].(*ast.Ident); ok && id.Name == "deadline" {
-				if c, ok := x.Rhs[0].(*ast.CallExpr); ok && len(c.Args) == 1 {
-					sum.rest += r.length(c.Args[0])
+	if onPath[fn] {
+		return sum
+	}
+	onPath[fn] = true
+	defer delete(onPath, fn)
+	add := func(s waitSum) { sum.startWaits, sum.rest = sum.startWaits+s.startWaits, sum.rest+s.rest }
+	var walk func(n ast.Node, inLoop bool)
+	walk = func(n ast.Node, inLoop bool) {
+		ast.Inspect(n, func(x ast.Node) bool {
+			switch v := x.(type) {
+			case *ast.ForStmt:
+				if v.Init != nil {
+					walk(v.Init, inLoop)
+				}
+				walk(v.Body, true)
+				return false
+			case *ast.RangeStmt:
+				walk(v.Body, true)
+				return false
+			case *ast.AssignStmt:
+				if len(v.Rhs) == 1 && isNowAdd(v.Rhs[0]) {
+					sum.rest += r.length(v.Rhs[0].(*ast.CallExpr).Args[0])
+				}
+			case *ast.CallExpr:
+				add(r.ofCall(v, inLoop, onPath))
+				// The round trip's pause is counted with its polls, not again on its own.
+				if id, ok := v.Fun.(*ast.Ident); ok && id.Name == "roundTripJobName" {
+					return false
 				}
 			}
-		case *ast.CallExpr:
-			switch f := x.Fun.(type) {
-			case *ast.Ident:
-				if f.Name == "roundTripJobName" {
-					polls, err := strconv.Atoi(x.Args[3].(*ast.BasicLit).Value)
-					if err != nil {
-						r.t.Fatal(err)
-					}
-					sum.rest += time.Duration(r.pollLoops()*polls) * r.sleepIn(x.Args[4])
-				}
-			case *ast.SelectorExpr:
-				if id, ok := f.X.(*ast.Ident); !ok || id.Name != "w" {
-					return true
-				}
-				switch f.Sel.Name {
-				case "untilRuns":
-					sum.startWaits++
-				case "until":
-					sum.rest += r.length(x.Args[2])
-				case "endedInAccounting", "settleDuplicates":
-					sum.rest += r.length(x.Args[1])
-				default:
-					if m := r.methods[f.Sel.Name]; m != nil && !seen[f.Sel.Name] {
-						seen[f.Sel.Name] = true
-						s := r.of(m, seen)
-						sum.startWaits, sum.rest = sum.startWaits+s.startWaits, sum.rest+s.rest
-					}
-				}
-			}
-		}
-		return true
-	})
+			return true
+		})
+	}
+	walk(fn.Body, false)
 	return sum
+}
+
+// isNowAdd is time.Now().Add(...).
+func isNowAdd(e ast.Expr) bool {
+	c, ok := e.(*ast.CallExpr)
+	if !ok || len(c.Args) != 1 {
+		return false
+	}
+	sel, ok := c.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Add" {
+		return false
+	}
+	now, ok := sel.X.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	nowSel, ok := now.Fun.(*ast.SelectorExpr)
+	if !ok || nowSel.Sel.Name != "Now" {
+		return false
+	}
+	pkg, ok := nowSel.X.(*ast.Ident)
+	return ok && pkg.Name == "time"
+}
+
+// ofCall is what one call waits for.
+func (r *waitReader) ofCall(c *ast.CallExpr, inLoop bool, onPath map[*ast.FuncDecl]bool) waitSum {
+	r.t.Helper()
+	switch f := c.Fun.(type) {
+	case *ast.Ident:
+		if f.Name == "roundTripJobName" {
+			polls, err := strconv.Atoi(c.Args[3].(*ast.BasicLit).Value)
+			if err != nil {
+				r.t.Fatal(err)
+			}
+			return waitSum{rest: time.Duration(r.pollLoops()*polls) * r.sleepIn(c.Args[4])}
+		}
+		if fn := r.funcs[f.Name]; fn != nil {
+			return r.of(fn, onPath)
+		}
+	case *ast.SelectorExpr:
+		id, plain := f.X.(*ast.Ident)
+		switch {
+		case plain && id.Name == "time" && f.Sel.Name == "Sleep":
+			if inLoop {
+				return waitSum{}
+			}
+			return waitSum{rest: r.length(c.Args[0])}
+		case plain && id.Name == "time" && (f.Sel.Name == "After" || f.Sel.Name == "NewTimer"):
+			return waitSum{rest: r.length(c.Args[0])}
+		case plain && id.Name == "context" && f.Sel.Name == "WithTimeout":
+			return waitSum{rest: r.length(c.Args[1])}
+		case f.Sel.Name == "untilRuns":
+			return waitSum{startWaits: 1}
+		case f.Sel.Name == "until":
+			return waitSum{rest: r.length(c.Args[2])}
+		case f.Sel.Name == "endedInAccounting", f.Sel.Name == "settleDuplicates":
+			return waitSum{rest: r.length(c.Args[1])}
+		}
+		if ms := r.methods[f.Sel.Name]; len(ms) == 1 {
+			return r.of(ms[0], onPath)
+		}
+	}
+	return waitSum{}
 }
 
 // Every conformance, accounting and reach row: its timeout is above the worst case derived from the row's own bounds in
@@ -208,7 +267,7 @@ func TestEveryRowsTimeoutIsAboveTheWorstCaseItsSourceAddsUpTo(t *testing.T) {
 			if fn == nil {
 				t.Fatalf("no %s in the package", body)
 			}
-			waits := reader.of(fn, map[string]bool{})
+			waits := reader.of(fn, map[*ast.FuncDecl]bool{})
 			if waits.startWaits != wantStartWaits {
 				t.Errorf("%s has %d waits for a job to start, want %d", body, waits.startWaits, wantStartWaits)
 			}

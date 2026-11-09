@@ -260,6 +260,9 @@ func (g *TwoJobGuard) Next(l Look) (end time.Time, final bool, err error) {
 
 // jobStarted reports whether a listed job has started: it has a start time,
 // and it did not end at that very time, as a job cancelled while pending does.
-func jobStarted(j provider.Job) bool {
+func jobStarted(j provider.Job) bool { return JobStarted(j) }
+
+// JobStarted is jobStarted, for the rows of other packages.
+func JobStarted(j provider.Job) bool {
 	return j.StartTime != nil && (j.EndTime == nil || j.EndTime.After(*j.StartTime))
 }

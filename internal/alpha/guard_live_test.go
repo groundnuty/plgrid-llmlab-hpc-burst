@@ -214,6 +214,7 @@ func (r *liveRun) secondNeverFinal() error {
 	if waiting == 0 {
 		return errors.New("the queue lists no second job of the run: the successor was never accepted")
 	}
+	r.claimed, r.claimedPred = true, r.guard.pred
 	return &SecondNotStartedError{ReplacementLate: r.replacementLate()}
 }
 
@@ -241,11 +242,33 @@ func (r *liveRun) lookNow() (Look, error) {
 	return look(ctx)
 }
 
-// secondStarted is whether the guard has seen the run's second job start.
-func (r *liveRun) secondStarted() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.guardFinal
+// secondPastItsBound is a no-overlap successor's own bound, for successorOf: the wait in the queue from its predecessor's lease end. A
+// look made now decides it, on the scheduler's own clock and its own record, since the guard's last look can be old and this host's
+// clock is not the scheduler's (the delta review of PR 284, L2). This host's clock only saves looks before the bound, and a host behind
+// the scheduler stops that much later, which harms nothing. A look that fails decides nothing, and the guard counts those. Once a
+// second job has started it waits for readiness, and never looks again. The limit: a job that starts after the look that stopped
+// the wait is past its bound, and reads as a failure that names it (secondNeverFinal).
+func (r *liveRun) secondPastItsBound(predTag string, startBy time.Time) func() bool {
+	var next time.Time
+	started := false
+	return func() bool {
+		now := time.Now()
+		if started || now.Before(startBy) || now.Before(next) {
+			return false
+		}
+		next = now.Add(r.every())
+		l, err := r.lookNow()
+		if err != nil || l.Clock.Before(startBy) {
+			return false
+		}
+		for _, j := range l.Jobs {
+			if j.Name != predTag && jobStarted(j) {
+				started = true
+				return false
+			}
+		}
+		return true
+	}
 }
 
 // waitFor is stack.WaitFor that fails the step at once when the guard has

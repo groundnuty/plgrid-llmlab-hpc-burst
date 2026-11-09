@@ -1,15 +1,23 @@
 package alpha
 
 import (
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/printer"
+	"go/token"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 // Each stack row's worst case, added up by hand from the review of PR 284 (B5), not by the code it checks: a no-overlap
 // row at a wait of 2 h is 120 for the predecessor to start, 106 for its lease, 120 for the successor to start (346, the
-// figure in the review), 60 and 5 for it to become ready, 1 for the guard's last looks and 5 to close. The tunnel rows'
+// figure in the review), 60 and 5 for it to become ready, 1 for the guard's last looks and 5 to close, and before all of it
+// 11 for the stack to start: 5 for hpcburst up, then 3 each for the controller and the Provider to be ready. The tunnel rows'
 // first wait stops a minute before the first end, the lease less the 15-minute drain window.
 func TestEachStackRowsWorstCaseIsItsWaitsAddedUp(t *testing.T) {
 	long, err := WithTunnelLease(rowOf("tunnel-hour-athena"), 240*time.Minute)
@@ -22,14 +30,14 @@ func TestEachStackRowsWorstCaseIsItsWaitsAddedUp(t *testing.T) {
 		// pending and want are in minutes.
 		pending, want, wantDeadline int
 	}{
-		{"handover, 30", rowOf("alpha-athena-handover"), 30, 30 + 91 + 5 + 15 + 5 + 1 + 5, 2*30 + 150},
-		{"handover, 2 h", rowOf("alpha-athena-handover"), 120, 120 + 91 + 5 + 15 + 5 + 1 + 5, 2*120 + 150},
-		{"no-overlap, 30", rowOf("alpha-helios-nooverlap"), 30, 30 + 106 + 30 + 60 + 5 + 1 + 5, 2*30 + 200},
-		{"no-overlap, 2 h", rowOf("alpha-helios-nooverlap"), 120, 120 + 106 + 120 + 60 + 5 + 1 + 5, 2*120 + 200},
-		{"the hour on Helios, 30", rowOf("tunnel-hour-helios"), 30, 30 + 122 + 15 + 5 + 5, 30 + 150},
-		{"the hour on Athena, 2 h", rowOf("tunnel-hour-athena"), 120, 120 + 122 + 15 + 5 + 5, 120 + 150},
-		{"the hour on Athena, its wait capped a minute before the first end", rowOf("tunnel-hour-athena"), 180, 121 + 122 + 15 + 5 + 5, 180 + 150},
-		{"the hour at the longest lease", long, 120, 120 + 225 + 15 + 5 + 5, 120 + 255},
+		{"handover, 30", rowOf("alpha-athena-handover"), 30, 11 + 30 + 91 + 5 + 15 + 5 + 1 + 5, 2*30 + 150},
+		{"handover, 2 h", rowOf("alpha-athena-handover"), 120, 11 + 120 + 91 + 5 + 15 + 5 + 1 + 5, 2*120 + 150},
+		{"no-overlap, 30", rowOf("alpha-helios-nooverlap"), 30, 11 + 30 + 106 + 30 + 60 + 5 + 1 + 5, 2*30 + 200},
+		{"no-overlap, 2 h", rowOf("alpha-helios-nooverlap"), 120, 11 + 120 + 106 + 120 + 60 + 5 + 1 + 5, 2*120 + 200},
+		{"the hour on Helios, 30", rowOf("tunnel-hour-helios"), 30, 11 + 30 + 122 + 15 + 5 + 5, 30 + 162},
+		{"the hour on Athena, 2 h", rowOf("tunnel-hour-athena"), 120, 11 + 120 + 122 + 15 + 5 + 5, 120 + 162},
+		{"the hour on Athena, its wait capped a minute before the first end", rowOf("tunnel-hour-athena"), 180, 11 + 121 + 122 + 15 + 5 + 5, 180 + 162},
+		{"the hour at the longest lease", long, 120, 11 + 120 + 225 + 15 + 5 + 5, 120 + 265},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			p := time.Duration(c.pending) * time.Minute
@@ -48,19 +56,121 @@ func TestEachStackRowsWorstCaseIsItsWaitsAddedUp(t *testing.T) {
 	}
 }
 
-// The sums above are only as good as the steps' use of what they add up. These calls are the live steps', which no dry
-// run reaches (only the stand-in proof, HPCBURST_ALPHA_STANDIN), so their words are pinned here: a step that waits on a
-// length of its own, past a bound of its own or under a deadline of its own, fails this rather than a live run.
+// The stack's start is what the stack itself allows: hpcburst up, then two waits on state, for the controller and the Provider.
+func TestTheStartupInTheWorstCaseIsTheStacksOwn(t *testing.T) {
+	if want := stack.UpTimeout + 2*stack.WaitDeadline; StartupWait != want {
+		t.Errorf("StartupWait = %s, and stack.UpTimeout and two of stack.WaitDeadline are %s", StartupWait, want)
+	}
+}
+
+// liveWaits are every bounded wait in the live steps, which no dry run reaches, in full, each with what covers it in Row.WorstCase: the
+// delta review of PR 284, T1. A wait added, or one whose length changes, fails here even with all the others in place, so that it
+// is added to the sum or said to be covered. Covered by, in turn: "startup"; a "term" of the sum by name; "the lease" (a step before the
+// drain start, which ends the run in failure when it has passed, or ends with the job's hard end); "pacing" (a loop's own
+// sleep, under a deadline listed here); "a call" (one read's own bound, inside the wait that makes it); "a goroutine" (the guard's, the
+// sampler's and the prober's own, which no step waits on past what is listed).
+var liveWaits = map[string]string{
+	"Close: context.WithTimeout(CloseTimeout)":                                           "term: CloseTimeout",
+	"start: r.waitFor(stack.WaitDeadline)":                                               "startup",
+	"endAt: context.WithTimeout(stack.APICallTimeout)":                                   "a call",
+	"firstJobStarted: time.Sleep(time.Second)":                                           "pacing",
+	"firstReady: r.waitFor(stack.WaitDeadline)":                                          "the lease",
+	"firstReady: r.waitFor(r.readyWait())":                                               "the lease",
+	"successorOf: time.Sleep(time.Second)":                                               "pacing",
+	"replacementLate: context.WithTimeout(stack.APICallTimeout)":                         "a call",
+	"guardResult: context.WithTimeout(stack.APICallTimeout)":                             "a call",
+	"guardResult: time.Sleep(time.Second)":                                               "pacing",
+	"lookNow: context.WithTimeout(time.Minute)":                                          "a call",
+	"startGuard: time.After(r.every())":                                                  "a goroutine",
+	"startGuard: context.WithTimeout(time.Minute)":                                       "a goroutine",
+	"waitFor: stack.WaitFor(d)":                                                          "the waits that call it, listed here",
+	"workerRestart: r.waitFor(r.tm.StartTimeout + 5*time.Minute)":                        "the lease",
+	"untilBefore: r.waitFor(time.Until(at) + time.Minute)":                               "the lease",
+	"Handover: r.successorOf(time.Until(ds) - lead - lead/2)":                            "the lease",
+	"Handover: r.untilBefore(lead)":                                                      "the lease",
+	"Handover: r.successorOf(time.Until(ds))":                                            "the lease",
+	"Handover: r.waitFor(r.dw + EndMargin)":                                              "term: the drain window and EndMargin",
+	"NoOverlap: r.untilBefore(lead)":                                                     "the lease",
+	"NoOverlap: r.successorOf(time.Until(leaseEnd) + SuccessorWait(r.tm, p.PendingMax))": "term: SuccessorWait",
+	"endDeployment: r.waitFor(r.dw + EndMargin)":                                         "term: the drain window and EndMargin",
+	"wait: time.After(r.fc.RequestTimeout() + time.Minute)":                              "term: the streams' MaxRequestDuration; a stream past it fails the run",
+	"startSampler: time.After(every)":                                                    "a goroutine",
+	"startSampler: context.WithTimeout(10 * time.Second)":                                "a call",
+	"startProber: time.After(time.Until(from))":                                          "a goroutine",
+	"startProber: time.After(time.Second)":                                               "a goroutine",
+	"largeRequests: time.Sleep(tm.UploadPause)":                                          "pacing",
+	"TunnelHour: time.After(rateAsked + r.fc.RequestTimeout() + 2*time.Minute)":          "the lease",
+	"TunnelHour: r.waitFor(tm.MinIdleGap + time.Minute)":                                 "the lease",
+}
+
+// waitOf is how a call reads in liveWaits, or "" when it is not a wait.
+func waitOf(fset *token.FileSet, fn string, call *ast.CallExpr) string {
+	text := func(e ast.Expr) string {
+		var b strings.Builder
+		if err := printer.Fprint(&b, fset, e); err != nil {
+			return "?"
+		}
+		return b.String()
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return ""
+	}
+	recv := text(sel.X)
+	arg := -1
+	switch recv + "." + sel.Sel.Name {
+	case "r.waitFor", "time.After", "time.Sleep":
+		arg = 0
+	case "r.successorOf", "r.untilBefore", "context.WithTimeout", "stack.WaitFor":
+		arg = 1
+	}
+	if arg < 0 || arg >= len(call.Args) {
+		return ""
+	}
+	return fmt.Sprintf("%s: %s.%s(%s)", fn, recv, sel.Sel.Name, text(call.Args[arg]))
+}
+
+// The live steps' whole list of waits against liveWaits, and the few calls that make up a term of the sum. It reads every function of
+// the three files that hold them. What it cannot see: a wait inside a function of another package, past the ones the stack's start
+// allows, and a wait written some other way than the calls waitOf knows.
 func TestTheLiveStepsWaitOnWhatTheSumsCount(t *testing.T) {
+	fset := token.NewFileSet()
+	found := map[string]int{}
+	for _, file := range []string{"steps_live_test.go", "live_flows_test.go", "guard_live_test.go"} {
+		f, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok {
+					if w := waitOf(fset, fn.Name.Name, call); w != "" {
+						found[w]++
+					}
+				}
+				return true
+			})
+		}
+	}
+	for w, n := range found {
+		if _, ok := liveWaits[w]; !ok {
+			t.Errorf("a wait in the live steps that the worst case does not cover (%d times): %q. Add it to Row.WorstCase (budget.go) and to liveWaits, or say in liveWaits what covers it", n, w)
+		} else if n != 1 {
+			t.Errorf("%q is made %d times, and the worst case counts it once", w, n)
+		}
+	}
+	for w := range liveWaits {
+		if found[w] == 0 {
+			t.Errorf("liveWaits lists %q, which the live steps no longer make", w)
+		}
+	}
 	for file, calls := range map[string][]string{
 		"alpha_live_test.go": {"context.WithTimeout(context.Background(), cfg.Row.RunDeadline(cfg.PendingMax))"},
-		"live_flows_test.go": {
-			"r.successorOf(pre.Name, time.Until(leaseEnd)+SuccessorWait(r.tm, p.PendingMax), leaseEnd.Add(p.PendingMax))",
-			"r.successorOf(pre.Name, time.Until(ds), time.Time{})",
-			"r.waitFor(r.dw+EndMargin, \"the primary to end\"",
-			"r.waitFor(r.dw+EndMargin, \"every job of the run to end in the cluster's record\"",
-		},
-		"steps_live_test.go": {"context.WithTimeout(context.WithoutCancel(ctx), CloseTimeout)", "return r.tm.StartTimeout + ReadyMargin"},
+		"steps_live_test.go": {"return r.tm.StartTimeout + ReadyMargin"},
 		"guard_live_test.go": {"wait = GuardResultLooks * r.every()", "return GuardEvery"},
 	} {
 		src, err := os.ReadFile(file)

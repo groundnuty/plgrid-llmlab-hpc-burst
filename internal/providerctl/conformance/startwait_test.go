@@ -123,9 +123,17 @@ func (w *world) untilRuns(step, name, what string, since time.Time, acceptedID s
 		if why := w.whyNotWaiting(last, acceptedID); why != "" {
 			w.t.Fatalf("%s: %s of %s ran out, but the job cannot be called one that never started: %s", step, boundName, bound, why)
 		}
-		w.notRun(step)
+		w.notRun(step, jobOf(last, acceptedID))
 	}
 	return nil
+}
+
+// jobOf is the ID of the job a step waits for: the one accepted before the wait, else its Allocation's.
+func jobOf(a *v1alpha1.Allocation, acceptedID string) string {
+	if acceptedID != "" {
+		return acceptedID
+	}
+	return a.Annotations[v1alpha1.AnnotationJobID]
 }
 
 // whyNotWaiting says why a job at the bound cannot be called one that never started, and "" when it can. An
@@ -143,11 +151,7 @@ func (w *world) whyNotWaiting(a *v1alpha1.Allocation, acceptedID string) string 
 	if w.batch == nil {
 		return "there is no platform to read it on"
 	}
-	id := acceptedID
-	if id == "" {
-		id = a.Annotations[v1alpha1.AnnotationJobID]
-	}
-	j, listed, err := w.batch.QueueJob(context.Background(), id)
+	j, listed, err := w.batch.QueueJob(context.Background(), jobOf(a, acceptedID))
 	switch {
 	case err != nil:
 		return fmt.Sprintf("its state could not be read: %v", err)
@@ -162,13 +166,28 @@ func (w *world) whyNotWaiting(a *v1alpha1.Allocation, acceptedID string) string 
 // notRun ends the run as NOT RUN: it cancels every job this run tagged, by its
 // tag, checks that none is left live, writes the marker and skips the test. A
 // cancel that fails, or a job left live, is a failure instead, because a job
-// would be left on the platform. The marker and the skip say which bound ran out.
-func (w *world) notRun(step string) {
+// would be left on the platform. So is a job that started after the read at the
+// bound, which the job's record shows once it is cancelled, and a record that
+// cannot be read. The marker and the skip say which bound ran out.
+func (w *world) notRun(step, id string) {
 	w.t.Helper()
 	bound, boundName := w.firstClock()
 	ctx := context.Background()
 	if err := w.cancelByTag(ctx); err != nil {
 		w.t.Fatalf("%s: the job did not start within %s of %s, and cancelling this run's jobs by tag failed: %v", step, boundName, bound, err)
+	}
+	// Past the cached listing, then accounting for a job the queue has dropped.
+	j, found, err := w.batch.QueueJob(ctx, id)
+	if err == nil && !found {
+		j, found, err = w.batch.ReadAccounting(ctx, id)
+	}
+	switch {
+	case err != nil:
+		w.t.Fatalf("%s: %s of %s ran out, and the job's record could not be read after its cancel: %v", step, boundName, bound, err)
+	case !found:
+		w.t.Fatalf("%s: %s of %s ran out, and the job has no record after its cancel", step, boundName, bound)
+	case alpha.JobStarted(j):
+		w.t.Fatalf("%s: %s of %s ran out, and the job had started by its cancel: this is no NOT RUN", step, boundName, bound)
 	}
 	note := fmt.Sprintf("%s: a job did not start within the start-wait bound of %s; this run's jobs were cancelled by tag\n", step, bound)
 	skip := fmt.Sprintf("NOT RUN: %s: a job did not start within %s of its acceptance; it was cancelled by its tag", step, bound)

@@ -224,8 +224,8 @@ conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4
 real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|75|-C memfs
 alpha-athena-handover|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|01:46:00|150|-
 alpha-helios-nooverlap|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|200|-C memfs
-tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|02:17:00|152|-C memfs
-tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|152|-
+tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|02:17:00|162|-C memfs
+tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|162|-
 gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|30|-|10
 gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|25|-
 reach-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:02:00|20|-C memfs|10
@@ -325,7 +325,7 @@ apply_tunnel_lease() {
     case $name in
       tunnel-hour-*)
         TLIMIT[$name]=$(printf '%02d:%02d:00' $((v / 60)) $((v % 60)))
-        TMIN[$name]=$((v + 15))
+        TMIN[$name]=$((v + 25))
         [ -z "${OGSET[$name]:-}" ] || OGMIN[$name]=$(((v + 9) / 10 * 10)) ;;
     esac
   done
@@ -1352,6 +1352,8 @@ EOS
     if [ "$state" != PENDING ] && [ "$state" != error ] && [ -z "$run_t" ]; then run_t=$now; fi
     # Only a read that says PENDING can end the wait in the queue: the job can have started since the last good read, so a
     # failed read at the bound tells nothing about a start, and the three-error guard above decides it (review of PR 284, B4).
+    # The limit: a job that starts in the seconds between this read and the cleanup's cancel still reads NOT RUN. A read of
+    # sacct's text could close it, whose form for a job never started cannot be checked here without a live run.
     if [ "$state" = PENDING ] && [ -z "$run_t" ] && [ $((now - submit_t)) -gt "$pend_max" ]; then
       # The job never started: not a failure (issue #222). The cleanup after this cancels it by its tag, and the run's exit is 3
       # unless that leaves a job behind, which is a failure.

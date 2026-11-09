@@ -148,18 +148,31 @@ type held struct {
 	dir             string
 	cancelFails     *bool
 	queueFails      *bool
+	// jobReadFails fails the read of one job past the cached listing, and beforeCancel, when set, runs just before the first scancel:
+	// what can happen after the read at the bound.
+	jobReadFails *bool
+	beforeCancel *func()
 }
 
 type cancelFault struct {
 	slurm.Runner
-	fail, queueFail *bool
+	fail, queueFail, jobReadFail *bool
+	before                       *func()
 }
 
 func (c cancelFault) Run(ctx context.Context, cmd slurm.Command) (slurm.Result, error) {
+	if strings.HasPrefix(cmd.Line, "scancel") && *c.before != nil {
+		before := *c.before
+		*c.before = nil
+		before()
+	}
 	if *c.fail && strings.HasPrefix(cmd.Line, "scancel") {
 		return slurm.Result{}, fmt.Errorf("scancel: connection reset")
 	}
 	if *c.queueFail && strings.HasPrefix(cmd.Line, "squeue") {
+		return slurm.Result{}, fmt.Errorf("squeue: connection reset")
+	}
+	if *c.jobReadFail && strings.HasPrefix(cmd.Line, "squeue") && strings.Contains(cmd.Line, "--jobs=") {
 		return slurm.Result{}, fmt.Errorf("squeue: connection reset")
 	}
 	return c.Runner.Run(ctx, cmd)
@@ -174,8 +187,8 @@ func newHeld(t *testing.T) *held {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fail, queueFail := new(bool), new(bool)
-	b := slurm.NewBatch(cancelFault{session, fail, queueFail}, provider.Profile{Name: pp.Name, Spec: pp.Spec, Partition: part},
+	fail, queueFail, jobReadFail, before := new(bool), new(bool), new(bool), new(func())
+	b := slurm.NewBatch(cancelFault{session, fail, queueFail, jobReadFail, before}, provider.Profile{Name: pp.Name, Spec: pp.Spec, Partition: part},
 		provider.Settings{Provider: "example", Account: "example-account", Partition: "plgrid"}, slurm.Options{Clock: ft.c})
 	dir := t.TempDir()
 	rec := &stopRecorder{TB: t}
@@ -183,7 +196,7 @@ func newHeld(t *testing.T) *held {
 	w.s.account, w.s.startWait = "example-account", 10*time.Minute
 	digest := sha256.Sum256([]byte("example agent"))
 	params := v1alpha1.BatchParameters{Partition: "plgrid", TimeLimit: "5m", CPUsPerTask: 1, Memory: resource.MustParse("1Gi"), Nodes: 1, AgentDigest: hex.EncodeToString(digest[:])}
-	h := &held{w: w, rec: rec, sl: sl, ft: ft, dir: dir, cancelFails: fail, queueFails: queueFail}
+	h := &held{w: w, rec: rec, sl: sl, ft: ft, dir: dir, cancelFails: fail, queueFails: queueFail, jobReadFails: jobReadFail, beforeCancel: before}
 	submit := func(name, uid string, ours bool) (string, string) {
 		tag := v1alpha1.JobTag("conformance", name, types.UID("uid-"+uid))
 		if ours {
@@ -522,6 +535,37 @@ func TestAJobThatStartedOrCannotBeReadAtTheBoundIsNeverNotRun(t *testing.T) {
 				}
 			} else if waited := h.ft.since(began); waited < 10*time.Minute {
 				t.Errorf("the wait lasted %s, want the bound of 10m: the status may be read again until then", waited)
+			}
+		})
+	}
+}
+
+// The delta review of PR 284, L3: the read at the bound is not the last word. A job can start between it and the cancel, so once the job is
+// cancelled its record is read, and a job that had started by then is a failure, and so is a record that cannot be read. Nothing is written.
+func TestAJobThatStartedBeforeItsCancelIsNeverNotRun(t *testing.T) {
+	for _, c := range []struct {
+		name, want string
+		before     func(t *testing.T, h *held)
+	}{
+		{"it started", "the job had started by its cancel", func(t *testing.T, h *held) {
+			if err := h.sl.Start(jobNumber(t, h.ours)); err != nil {
+				t.Fatal(err)
+			}
+			h.ft.c.Advance(time.Minute)
+		}},
+		{"its record cannot be read", "the job's record could not be read after its cancel", func(t *testing.T, h *held) { *h.jobReadFails = true }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHeld(t)
+			h.lifted(t)
+			h.w.poll = h.pending("step")
+			*h.beforeCancel = func() { c.before(t, h) }
+			ends(func() { h.w.untilRuns("step 1", "step", "the job runs", h.w.at(), "", running) })
+			if h.rec.skipped != "" || !strings.Contains(h.rec.failed, c.want) {
+				t.Errorf("failed %q, skipped %q; want a failure that says %q", h.rec.failed, h.rec.skipped, c.want)
+			}
+			if _, err := os.Stat(filepath.Join(h.dir, notRunFile)); err == nil {
+				t.Error("a marker was written for a job that cannot be called one that never started")
 			}
 		})
 	}

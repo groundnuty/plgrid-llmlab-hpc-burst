@@ -645,19 +645,19 @@ func TestTheTimeoutIsTheRunTimePlusTheWaitInTheQueue(t *testing.T) {
 // slot); an explicit LIVE_PENDING_MAX_SECONDS overrides either, longer or shorter. The bound reaches the test as its
 // first clock and the script's timeout is the row's run time (the shape's timeout column) plus the bound for each of the
 // row's jobs (review of PR 284, B5), plus one. The values are worked out by hand from the issue and the shapes:
-// 200 + 2 * 30 + 1 = 261, 152 + 30 + 1 = 183, 150 + 2 * 120 + 1 = 391, 152 + 120 + 1 = 273, 200 + 2 * 10 + 1 = 221,
-// 152 + 90 + 1 = 243, 152 + 10 + 1 = 163. They are not read from the script's table or its constants.
+// 200 + 2 * 30 + 1 = 261, 162 + 30 + 1 = 193, 150 + 2 * 120 + 1 = 391, 162 + 120 + 1 = 283, 200 + 2 * 10 + 1 = 221,
+// 162 + 90 + 1 = 253, 162 + 10 + 1 = 173. They are not read from the script's table or its constants.
 func TestThePendingBoundDefaultsAndOverrides(t *testing.T) {
 	for _, c := range []struct {
 		name, row, test, setting, wantEnv, wantTimeout string
 	}{
 		{"no-overlap, default", "alpha-helios-nooverlap", "TestAlphaHeliosNoOverlap", "", "HPCBURST_ALPHA_PENDING_MAX_SECONDS=1800", "261m"},
-		{"the hour on Helios, default", "tunnel-hour-helios", "TestTunnelHour", "", "HPCBURST_ALPHA_PENDING_MAX_SECONDS=1800", "183m"},
+		{"the hour on Helios, default", "tunnel-hour-helios", "TestTunnelHour", "", "HPCBURST_ALPHA_PENDING_MAX_SECONDS=1800", "193m"},
 		{"the handover, default", "alpha-athena-handover", "TestAlphaAthenaHandover", "", "HPCBURST_ALPHA_PENDING_MAX_SECONDS=7200", "391m"},
-		{"the hour on Athena, default", "tunnel-hour-athena", "TestTunnelHour", "", "HPCBURST_ALPHA_PENDING_MAX_SECONDS=7200", "273m"},
+		{"the hour on Athena, default", "tunnel-hour-athena", "TestTunnelHour", "", "HPCBURST_ALPHA_PENDING_MAX_SECONDS=7200", "283m"},
 		{"no-overlap, a shorter wait asked for", "alpha-helios-nooverlap", "TestAlphaHeliosNoOverlap", "600", "HPCBURST_ALPHA_PENDING_MAX_SECONDS=600", "221m"},
-		{"the hour on Helios, a longer wait asked for", "tunnel-hour-helios", "TestTunnelHour", "5400", "HPCBURST_ALPHA_PENDING_MAX_SECONDS=5400", "243m"},
-		{"the hour on Athena, a shorter wait asked for", "tunnel-hour-athena", "TestTunnelHour", "600", "HPCBURST_ALPHA_PENDING_MAX_SECONDS=600", "163m"},
+		{"the hour on Helios, a longer wait asked for", "tunnel-hour-helios", "TestTunnelHour", "5400", "HPCBURST_ALPHA_PENDING_MAX_SECONDS=5400", "253m"},
+		{"the hour on Athena, a shorter wait asked for", "tunnel-hour-athena", "TestTunnelHour", "600", "HPCBURST_ALPHA_PENDING_MAX_SECONDS=600", "173m"},
 		// A part of a minute rounds each wait up, so a wait never eats the run's time: 200 + 2 * 1 + 1 = 203, 200 + 2 * 2 + 1 = 205.
 		{"no-overlap, 59 seconds asked for", "alpha-helios-nooverlap", "TestAlphaHeliosNoOverlap", "59", "HPCBURST_ALPHA_PENDING_MAX_SECONDS=59", "203m"},
 		{"no-overlap, 90 seconds asked for", "alpha-helios-nooverlap", "TestAlphaHeliosNoOverlap", "90", "HPCBURST_ALPHA_PENDING_MAX_SECONDS=90", "205m"},
@@ -928,15 +928,15 @@ func TestTheScriptsMostJobsAreThePackagesRows(t *testing.T) {
 // The tunnel rows' lease is the owner's choice, given with the go: LIVE_TUNNEL_LEASE_MINUTES, 106 (the lead an
 // Instance needs plus a minute) to 240. The shape, the hold note, the timeout and the test's environment follow
 // it. The expected values are by hand: 106 minutes is 01:46:00, a hold of 1 h 50 min once rounded up to ten
-// minutes, and a timeout of 106 + 15 + the 30 minutes of the queue wait on QOS now (issue #222) + 1 = 152; the default
-// 137 minutes is 02:17:00, 2 h 20 min and 137 + 15 + 30 + 1 = 183; the longest, 240 + 15 + 30 + 1 = 286.
+// minutes, and a timeout of 106 + 25 + the 30 minutes of the queue wait on QOS now (issue #222) + 1 = 162; the default
+// 137 minutes is 02:17:00, 2 h 20 min and 137 + 25 + 30 + 1 = 193; the longest, 240 + 25 + 30 + 1 = 296.
 func TestTheTunnelLeaseIsTheOwnersChoice(t *testing.T) {
 	for _, c := range []struct {
 		name, setting, limit, hold, timeout, env string
 	}{
-		{"the default", "", "02:17:00", "2 h 20 min", "183m", "HPCBURST_ALPHA_LEASE_MINUTES=137"},
-		{"the short lease", "106", "01:46:00", "1 h 50 min", "152m", "HPCBURST_ALPHA_LEASE_MINUTES=106"},
-		{"the longest", "240", "04:00:00", "4 h 00 min", "286m", "HPCBURST_ALPHA_LEASE_MINUTES=240"},
+		{"the default", "", "02:17:00", "2 h 20 min", "193m", "HPCBURST_ALPHA_LEASE_MINUTES=137"},
+		{"the short lease", "106", "01:46:00", "1 h 50 min", "162m", "HPCBURST_ALPHA_LEASE_MINUTES=106"},
+		{"the longest", "240", "04:00:00", "4 h 00 min", "296m", "HPCBURST_ALPHA_LEASE_MINUTES=240"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			w := newAlphaWorld(t)

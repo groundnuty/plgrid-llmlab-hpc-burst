@@ -291,13 +291,13 @@ func (r *liveRun) Handover(ctx context.Context, p Plan) (HandoverObs, error) {
 	if !ok {
 		r.t.Fatal("the primary has no lease end")
 	}
-	// HBEP-7, Handover: the replacement is created at its planned time and is ready before the drain start.
-	succ, ok := r.successorOf(pre.Name, time.Until(ds), time.Time{})
-	if !ok {
-		p.Logf("%s: no replacement was ready by the drain start", p.Row.Name)
-	}
-	key = r.fc.KeyFor(&pre) // the ring as it is now, with both Instances
+	// HBEP-7, Handover: the replacement is created at its planned time and is ready before the drain start. The
+	// predecessor's streams open whether or not it is ready by then: they are the first job's part of the run, which stands
+	// if the second never starts (the delta review of PR 284, L1). So this wait stops in time to open them, half the lead
+	// before they open, and the rest of the replacement's time runs with them in flight.
 	lead := r.streamLead()
+	succ, ok := r.successorOf(pre.Name, time.Until(ds)-lead-lead/2, nil)
+	key = r.fc.KeyFor(&pre) // the ring as it is now: with both Instances, once the replacement is ready
 	n, err := r.tokensFor(2*lead, rate)
 	if err != nil {
 		return HandoverObs{}, err
@@ -306,6 +306,11 @@ func (r *liveRun) Handover(ctx context.Context, p Plan) (HandoverObs, error) {
 	s1 := r.openStream(n, key, "")
 	<-s1.first
 	s2 := r.openStream(n, key, "")
+	if !ok {
+		if succ, ok = r.successorOf(pre.Name, time.Until(ds), nil); !ok {
+			p.Logf("%s: no replacement was ready by the drain start", p.Row.Name)
+		}
+	}
 	streams := []Stream{r.finish(s1), r.finish(s2)}
 	r.waitFor(r.dw+EndMargin, "the primary to end", func() bool {
 		_, ended := r.watch.First(pre.UID, time.Time{}, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceEnded })
@@ -327,9 +332,19 @@ func (r *liveRun) Handover(ctx context.Context, p Plan) (HandoverObs, error) {
 		Tags: tags, Streams: streams,
 		Instances:  []InstanceSpan{SpanOf(&preLast, r.tagOf(pre)), SpanOf(&succLast, r.tagOf(succ))},
 		Deployment: r.observedDeployment(), DrainStart: ds,
-		Handovers:      Handovers(stack.Events(r.t, r.c), []v1alpha1.Instance{preLast}),
+		Handovers:      r.handoversOf(second, preLast),
 		WorkerRestarts: WorkerRestarts(r.watch.Last()), Responses: responses, Attributed: attributed, WorkerRestart: times,
 	}, second
+}
+
+// handoversOf counts the handovers that completed. A run whose second job never started reads no events for it: that is not judged
+// on such a run, and stack.Events fails the test when its list fails, which would decide the run's end on a read nothing needs
+// (the delta review of PR 284, L4).
+func (r *liveRun) handoversOf(second error, pre v1alpha1.Instance) int {
+	if second != nil {
+		return 0
+	}
+	return Handovers(stack.Events(r.t, r.c), []v1alpha1.Instance{pre})
 }
 
 // NoOverlap is alpha-helios-nooverlap: a worker-rung restart on the primary;
@@ -362,7 +377,7 @@ func (r *liveRun) NoOverlap(ctx context.Context, p Plan) (NoOverlapObs, error) {
 	// The successor starts once the predecessor's job ends and frees the GPU, then becomes ready. Its bound is the wait
 	// in the queue from that end; only a job that started needs the rest of the wait.
 	leaseEnd := pre.Status.LeaseEnd.Time
-	succ, ok := r.successorOf(pre.Name, time.Until(leaseEnd)+SuccessorWait(r.tm, p.PendingMax), leaseEnd.Add(p.PendingMax))
+	succ, ok := r.successorOf(pre.Name, time.Until(leaseEnd)+SuccessorWait(r.tm, p.PendingMax), r.secondPastItsBound(r.tagOf(pre), leaseEnd.Add(p.PendingMax)))
 	noReady := pr.end()
 	p.Logf("%s: the gap prober's replies by status and code: %v", p.Row.Name, pr.replies)
 	streams := []Stream{r.finish(s)}

@@ -36,12 +36,7 @@ func neverStarted(err error) bool {
 // that bound in its line (the wait in the queue otherwise); any other gives pendingMax.
 func NotRunNote(row Row, pendingMax time.Duration, err error) string {
 	if errors.Is(err, ErrSecondNotStarted) {
-		late := LateUnknown
-		var s *SecondNotStartedError
-		if errors.As(err, &s) {
-			late = s.ReplacementLate
-		}
-		return fmt.Sprintf("%s: %s; ReplacementLate for its deployment: %s; this run's jobs were cancelled by tag\n", row.Name, secondNotStartedWords, late)
+		return fmt.Sprintf("%s: %s; ReplacementLate for its deployment: %s; this run's jobs were cancelled by tag\n", row.Name, secondNotStartedWords, lateOf(err))
 	}
 	var ns *NotStartedError
 	if errors.As(err, &ns) {
@@ -51,6 +46,15 @@ func NotRunNote(row Row, pendingMax time.Duration, err error) string {
 		pendingMax = ns.Bound
 	}
 	return fmt.Sprintf("%s: a job was still pending after %s; this run's jobs were cancelled by tag\n", row.Name, pendingMax)
+}
+
+// lateOf is what a second job's error says was read of ReplacementLate.
+func lateOf(err error) string {
+	var s *SecondNotStartedError
+	if errors.As(err, &s) {
+		return s.ReplacementLate
+	}
+	return LateUnknown
 }
 
 // stopsTheRun is whether a scenario's error leaves nothing to judge. ErrSecondNotStarted leaves the first job's part.
@@ -157,7 +161,7 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 	}
 	post := summary(failures, jobs)
 	if second != nil {
-		post += "- " + secondNotStartedWords + "; the failed checks are the first job's\n"
+		post += "- " + secondNotStartedWords + "; the failed checks are the first job's\n- ReplacementLate for its deployment: " + lateOf(second) + " (information, not a check)\n"
 	}
 	if serr := rec.SaveText(PostsFile, InsertFrontLine(post, cfg.FrontLabel)); serr != nil {
 		return failures, fmt.Errorf("the text to post could not be written: %w", serr)

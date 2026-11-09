@@ -18,6 +18,7 @@ package alpha
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,6 +120,13 @@ func standInBinaries(t *testing.T) stack.Binaries {
 // standInWorld is the stand-in cluster and the stack's objects for a row.
 func standInWorld(t *testing.T, row Row) world {
 	t.Helper()
+	w, _ := standInWorldShaped(t, row, nil)
+	return w
+}
+
+// standInWorldShaped is standInWorld with a change to the cluster's shape, and the cluster.
+func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)) (world, *stack.Cluster) {
+	t.Helper()
 	b := standInBinaries(t)
 	rehearsal.RequireTools(t)
 	dir := stack.ShortDir(t)
@@ -139,6 +147,9 @@ func standInWorld(t *testing.T, row Row) world {
 		prof.Spec.QOS = []v1alpha1.QOSProfile{{Name: standInPartQOS, MaxSubmitPerUser: stack.Ptr(int32(2000))},
 			{Name: row.QOS, MaxSubmitPerUser: stack.Ptr(int32(1)), MaxGPUsPerUser: stack.Ptr(int32(1))}}
 		prov.Spec.QOS = row.QOS
+	}
+	if reshape != nil {
+		reshape(&shape)
 	}
 	cl := stack.StartCluster(t, dir, shape, enginedouble.Install, nil)
 	creds := filepath.Join(dir, "provider-ssh")
@@ -167,7 +178,7 @@ func standInWorld(t *testing.T, row Row) world {
 		env:     stack.CleanEnv("HF_ENDPOINT=" + hub.URL),
 		objects: []client.Object{prof, prov}, provider: stack.ProviderName, cluster: row.Cluster, qos: row.QOS, md: md, profile: prof.Spec,
 		controlDir: ctl, hostLock: filepath.Join(dir, "host.lock"), matchEngine: standInEngineMatch(t),
-	}
+	}, cl
 }
 
 // standInEngineMatch tells the stand-in's engine among the job's processes: the fake Apptainer runs the engine
@@ -235,6 +246,110 @@ func runStandIn(t *testing.T, name string) {
 	if err != nil || !strings.Contains(string(record), "STAND-IN RUN") || strings.Contains(string(record), "LIVE RUN") {
 		t.Errorf("the record does not say the run was a stand-in one (%v)", err)
 	}
+}
+
+// holdSecondJob puts the run's second job on an admin hold as soon as the cluster shows it pending, until stop closes, so that it never
+// starts: not when its predecessor's job ends either. The hold is what the scheduler can do to a job any day, and it is the one thing
+// faked: everything else is the live steps over the real stack.
+func holdSecondJob(t *testing.T, plat *fakeslurm.Platform, prefix string, stop <-chan struct{}) {
+	t.Helper()
+	done := make(chan struct{})
+	t.Cleanup(func() { <-done })
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(200 * time.Millisecond):
+			}
+			var ours []fakeslurm.Job
+			for _, j := range plat.Jobs() {
+				if strings.HasPrefix(j.Name, prefix) {
+					ours = append(ours, j)
+				}
+			}
+			if len(ours) >= 2 && ours[1].State == fakeslurm.Pending {
+				if err := plat.HoldAdmin(ours[1].ID); err != nil {
+					t.Errorf("holding the second job: %v", err)
+				}
+				return
+			}
+		}
+	}()
+}
+
+// runStandInSecondHeld runs a two-job row's LIVE steps over the stand-in with its second job held in the queue (the delta review of
+// PR 284, L1, L2 and L3): the first job runs through the real stack, the second never starts, and the row must end NOT RUN, with
+// its line saying what was read of ReplacementLate, no record and no text to post.
+func runStandInSecondHeld(t *testing.T, name, wantLate string, reshape func(*stack.ClusterShape)) {
+	if os.Getenv(envStandIn) != "1" {
+		t.Skipf("the stand-in proof of the live steps runs only with %s=1 (internal/alpha, standin_test.go)", envStandIn)
+	}
+	row := standInRow(t, name)
+	id, err := NewRunID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Row: row, StandIn: true, Out: filepath.Join(t.TempDir(), "out"), PendingMax: 2 * time.Minute, RunID: id, FrontLabel: standInFrontLabel}
+	t.Logf("%s: %s, its second job held in the queue", row.Name, cfg.Mode())
+	rec, err := NewRecorder(cfg.Out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, cl := standInWorldShaped(t, row, reshape)
+	stop := make(chan struct{})
+	holdSecondJob(t, cl.Plat, TagPrefix(id), stop)
+	defer close(stop)
+	var st Steps = newLiveRun(t, cfg, w)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.PendingMax+20*time.Minute)
+	defer cancel()
+	failures, err := Run(ctx, cfg, st, rec, t.Logf)
+	if len(failures) != 0 || !errors.Is(err, ErrSecondNotStarted) || !NotRun(row, err) {
+		t.Fatalf("failures %v, err %v; want the NOT RUN of a second job that never started", failures, err)
+	}
+	note := NotRunNote(row, cfg.PendingMax, err)
+	t.Logf("the marker would say: %s", strings.TrimSpace(note))
+	if want := "ReplacementLate for its deployment: " + wantLate + ";"; !strings.Contains(note, want) {
+		t.Errorf("note %q lacks %q", note, want)
+	}
+	for _, f := range []string{PostsFile, RecordFile} {
+		if _, err := os.Stat(filepath.Join(cfg.Out, f)); err == nil {
+			t.Errorf("a NOT RUN wrote %s", f)
+		}
+	}
+	var ran, never int
+	for _, j := range cl.Plat.Jobs() {
+		if !strings.HasPrefix(j.Name, TagPrefix(id)) {
+			continue
+		}
+		if j.Start.IsZero() {
+			never++
+		} else {
+			ran++
+		}
+	}
+	if ran != 1 || never != 1 {
+		t.Errorf("%d jobs of the run ran and %d never started, want one of each", ran, never)
+	}
+}
+
+// TestStandInHandoverSecondHeld is alpha-athena-handover's live steps with its successor held in the queue, behind the one slot its
+// predecessor takes: the predecessor's streams still open, across its drain start, and the controller raises ReplacementLate.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInHandoverSecondHeld(t *testing.T) {
+	runStandInSecondHeld(t, "alpha-athena-handover", LateRaised, func(s *stack.ClusterShape) {
+		s.Partitions = []fakeslurm.Partition{{Name: stack.Partition, GPUOnly: true, Slots: 1}}
+	})
+}
+
+// TestStandInNoOverlapSecondHeld is alpha-helios-nooverlap's live steps with its successor held in the queue, past its bound from the
+// predecessor's lease end. In no-overlap mode the gap is planned, so the controller does not raise ReplacementLate.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInNoOverlapSecondHeld(t *testing.T) {
+	runStandInSecondHeld(t, "alpha-helios-nooverlap", LateNotRaised, nil)
 }
 
 // TestStandInHandover is alpha-athena-handover's live steps over the stand-in.
