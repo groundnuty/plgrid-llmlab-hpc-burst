@@ -138,3 +138,47 @@ func TestFetchFrpMissWithADeadSiteFailsNamingTheFile(t *testing.T) {
 		t.Errorf("the directory holds %v, want it empty", got)
 	}
 }
+
+// The agent-builds mode (one frpc per pinned architecture, placed as frpc-<cpuArch>) treats its
+// directory the same way: a planted frpc that is not the pinned one is not an ok file. With the site
+// dead the run fails and names that architecture's tarball; with the site up the file is replaced by
+// the verified frpc of its own tarball, and the other architecture's file is left alone. Each of the
+// two architectures is planted in turn.
+func TestFetchFrpAgentBuildsDownloadsAgainAPlantedFrpc(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("hack/fetch-frp.sh needs a GNU userland")
+	}
+	for arch, cpu := range map[string]string{"amd64": "x86_64", "arm64": "aarch64"} {
+		t.Run(arch, func(t *testing.T) {
+			r := newFakeRelease(t, "amd64", "arm64")
+			dest := t.TempDir()
+			live := append(r.env(), "FRP_TARBALL=")
+			dead := []string{"FRP_RELEASE_BASE=file://" + filepath.Join(r.base, "gone"), "FRP_PINS_FILE=" + r.pins, "FRP_TARBALL="}
+			if out, code := runAgentBuilds(t, []string{"--agent-builds", dest}, live...); code != 0 {
+				t.Fatalf("filling the directory: exit %d:\n%s", code, out)
+			}
+			planted := filepath.Join(dest, "frpc-"+cpu)
+			flip(t, planted)
+			planted0, err := os.ReadFile(planted)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			out, code := runAgentBuilds(t, []string{"--agent-builds", dest}, dead...)
+			if code == 0 || strings.Contains(out, "ok       frpc-"+cpu) || !strings.Contains(out, "frp_0.71.1_linux_"+arch+".tar.gz") || !strings.Contains(out, "failed") {
+				t.Fatalf("a planted frpc-%s with the site dead: exit %d, want a failure naming the %s tarball and no ok line for it:\n%s", cpu, code, arch, out)
+			}
+
+			out, code = runAgentBuilds(t, []string{"--agent-builds", dest}, live...)
+			if code != 0 || !strings.Contains(out, "verified frpc-"+cpu) {
+				t.Fatalf("a planted frpc-%s with the site up: exit %d, want it verified again:\n%s", cpu, code, out)
+			}
+			for a, c := range map[string]string{"amd64": "x86_64", "arm64": "aarch64"} {
+				got, err := os.ReadFile(filepath.Join(dest, "frpc-"+c))
+				if err != nil || !bytes.Equal(got, r.frpc[a]) {
+					t.Errorf("frpc-%s holds %q (%v), want the frpc of the %s tarball %q (the planted file held %q)", c, got, err, a, r.frpc[a], planted0)
+				}
+			}
+		})
+	}
+}

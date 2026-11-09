@@ -323,6 +323,11 @@ jobs:
     # other, so 60 minutes of tests plus checkout, the k3s download and compiling. The job must
     # outlive that, so that go test's own timeout (which stops the k3s it started) fires first.
     timeout-minutes: 80
+    env:
+      # The k3s versions this job fetches. The cache key and the fetch step both read this one list,
+      # so a version cannot be added to one and not the other. It is a JSON list because an
+      # expression can then join it with a dash for the key and with a space for the command.
+      K3S_VERSIONS: '["1.35.9", "1.36.5"]'
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -333,8 +338,7 @@ jobs:
         run: echo "HPCBURST_BIN_DIR=$RUNNER_TEMP/k3s-bin" >> "$GITHUB_ENV"
 
       # The pinned binaries come from the cache when it has them (see the top of this file). The
-      # versions in the key are the ones fetched below: change both together. The path lines of the
-      # restore and the save must match.
+      # path lines of the restore and the save must match.
       - name: Restore the cached pinned binaries
         id: binaries
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -342,7 +346,7 @@ jobs:
           path: |
             ${{ runner.temp }}/k3s-bin
             ${{ runner.temp }}/frp
-          key: binaries-launcher-k3s-1.35.9-1.36.5-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-frp.sh', 'hack/fetch-k3s.sh', 'internal/launcher/k3s-pins.txt') }}
+          key: binaries-launcher-k3s-${{ join(fromJSON(env.K3S_VERSIONS), '-') }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-frp.sh', 'hack/fetch-k3s.sh', 'internal/launcher/k3s-pins.txt') }}
 
       - name: Set up Go from go.mod
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -353,7 +357,7 @@ jobs:
       # Downloads the two pinned k3s releases the tests start (1.35.9, then upgraded to 1.36.5) and
       # checks their sha256 against internal/launcher/k3s-pins.txt.
       - name: Fetch the pinned k3s binaries
-        run: bash hack/fetch-k3s.sh "$HPCBURST_BIN_DIR" 1.35.9 1.36.5
+        run: bash hack/fetch-k3s.sh "$HPCBURST_BIN_DIR" ${{ join(fromJSON(env.K3S_VERSIONS), ' ') }}
 
       # The tunnel tests of HBEP-6 start frps and frpc. HPCBURST_REQUIRE_FRP=1 makes
       # internal/testenv.FrpBinaries fail, instead of skip, when they are missing; the script
@@ -515,6 +519,10 @@ jobs:
     # minutes (hack/rehearsal.sh; the target is under 15). The job must outlive that, so that the
     # test's own waits give up and its clean-up runs before the job is cancelled.
     timeout-minutes: 45
+    env:
+      # The k3s versions this job fetches; the cache key and the fetch step both read this list (see
+      # launcher-k3s).
+      K3S_VERSIONS: '["1.36.5"]'
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -528,8 +536,7 @@ jobs:
           cache: false
 
       # The pinned binaries come from the cache when it has them (see the top of this file). The
-      # versions in the key are the ones fetched below: change both together. The two rehearsal jobs
-      # share one entry. The path lines of the restore and the save must match.
+      # two rehearsal jobs share one entry. The path lines of the restore and the save must match.
       - name: Restore the cached pinned binaries
         id: binaries
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -537,13 +544,13 @@ jobs:
           path: |
             ${{ runner.temp }}/k3s-bin
             ${{ runner.temp }}/frp
-          key: binaries-rehearsal-k3s-1.36.5-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-frp.sh', 'hack/fetch-k3s.sh', 'internal/launcher/k3s-pins.txt') }}
+          key: binaries-rehearsal-k3s-${{ join(fromJSON(env.K3S_VERSIONS), '-') }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-frp.sh', 'hack/fetch-k3s.sh', 'internal/launcher/k3s-pins.txt') }}
 
       # The rehearsal's hpcburst up starts k3s 1.36.5 only.
       - name: Fetch the pinned k3s binary
         run: |
           echo "HPCBURST_BIN_DIR=$RUNNER_TEMP/k3s-bin" >> "$GITHUB_ENV"
-          bash hack/fetch-k3s.sh "$RUNNER_TEMP/k3s-bin" 1.36.5
+          bash hack/fetch-k3s.sh "$RUNNER_TEMP/k3s-bin" ${{ join(fromJSON(env.K3S_VERSIONS), ' ') }}
 
       - name: Fetch the pinned frp binaries
         run: |
@@ -606,6 +613,10 @@ jobs:
     # -test.timeout is 25 minutes, so that the test's own waits give up and its clean-up runs
     # before the job is cancelled.
     timeout-minutes: 40
+    env:
+      # The k3s versions this job fetches; the cache key and the fetch step both read this list (see
+      # launcher-k3s).
+      K3S_VERSIONS: '["1.36.5"]'
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -619,8 +630,7 @@ jobs:
           cache: false
 
       # The pinned binaries come from the cache when it has them (see the top of this file). The
-      # versions in the key are the ones fetched below: change both together. The two rehearsal jobs
-      # share one entry. The path lines of the restore and the save must match.
+      # two rehearsal jobs share one entry. The path lines of the restore and the save must match.
       - name: Restore the cached pinned binaries
         id: binaries
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -628,13 +638,13 @@ jobs:
           path: |
             ${{ runner.temp }}/k3s-bin
             ${{ runner.temp }}/frp
-          key: binaries-rehearsal-k3s-1.36.5-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-frp.sh', 'hack/fetch-k3s.sh', 'internal/launcher/k3s-pins.txt') }}
+          key: binaries-rehearsal-k3s-${{ join(fromJSON(env.K3S_VERSIONS), '-') }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-frp.sh', 'hack/fetch-k3s.sh', 'internal/launcher/k3s-pins.txt') }}
 
       # The rehearsal's hpcburst up starts k3s 1.36.5 only.
       - name: Fetch the pinned k3s binary
         run: |
           echo "HPCBURST_BIN_DIR=$RUNNER_TEMP/k3s-bin" >> "$GITHUB_ENV"
-          bash hack/fetch-k3s.sh "$RUNNER_TEMP/k3s-bin" 1.36.5
+          bash hack/fetch-k3s.sh "$RUNNER_TEMP/k3s-bin" ${{ join(fromJSON(env.K3S_VERSIONS), ' ') }}
 
       - name: Fetch the pinned frp binaries
         run: |
