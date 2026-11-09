@@ -290,7 +290,7 @@ func reachBody(t testing.TB, w *world, rowName string, target probeTarget) {
 	// it (or past the wait in the queue, for a run with none) the job is cancelled by its tag and the run is NOT RUN,
 	// with no text to post (startwait_test.go).
 	started := func(a *v1alpha1.Allocation) bool { return accountingStarted(t, a) }
-	w.untilRuns("the job", name, "the job runs", w.at(), false, started)
+	w.untilRuns("the job", name, "the job runs", w.at(), "", started)
 	w.until(name, "the job ends", reachEndWait, func(a *v1alpha1.Allocation) bool {
 		accountingNotFailed(t, a)
 		return a.Status.AtProvider.Phase == v1alpha1.AllocationEnded

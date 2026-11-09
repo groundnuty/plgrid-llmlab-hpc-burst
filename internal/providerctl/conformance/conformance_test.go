@@ -514,7 +514,7 @@ func TestConformance(t *testing.T) {
 	if len(tag) != v1alpha1.JobTagLength {
 		t.Fatalf("the tag has %d characters, want %d", len(tag), v1alpha1.JobTagLength)
 	}
-	a = w.untilRuns("step 1", name, "the job runs", w.at(), false, func(a *v1alpha1.Allocation) bool {
+	a = w.untilRuns("step 1", name, "the job runs", w.at(), "", func(a *v1alpha1.Allocation) bool {
 		return a.Status.AtProvider.Phase == v1alpha1.AllocationRunning
 	})
 	words := w.callWords()
@@ -620,7 +620,7 @@ func TestConformance(t *testing.T) {
 	accepted2 := w.at()
 	w.jobIDs[id2] = true
 	w.p.log("lost-record job %s submitted held", id2)
-	b = w.untilRuns("step 3", lostName, "the lost-record job is adopted and runs", accepted2, true, func(a *v1alpha1.Allocation) bool {
+	b = w.untilRuns("step 3", lostName, "the lost-record job is adopted and runs", accepted2, id2, func(a *v1alpha1.Allocation) bool {
 		return a.Annotations[v1alpha1.AnnotationJobID] == id2 && a.Status.AtProvider.Phase == v1alpha1.AllocationRunning
 	})
 	words = w.callWords()

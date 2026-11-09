@@ -147,16 +147,20 @@ type held struct {
 	ourTag, foreTag string
 	dir             string
 	cancelFails     *bool
+	queueFails      *bool
 }
 
 type cancelFault struct {
 	slurm.Runner
-	fail *bool
+	fail, queueFail *bool
 }
 
 func (c cancelFault) Run(ctx context.Context, cmd slurm.Command) (slurm.Result, error) {
 	if *c.fail && strings.HasPrefix(cmd.Line, "scancel") {
 		return slurm.Result{}, fmt.Errorf("scancel: connection reset")
+	}
+	if *c.queueFail && strings.HasPrefix(cmd.Line, "squeue") {
+		return slurm.Result{}, fmt.Errorf("squeue: connection reset")
 	}
 	return c.Runner.Run(ctx, cmd)
 }
@@ -170,8 +174,8 @@ func newHeld(t *testing.T) *held {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fail := new(bool)
-	b := slurm.NewBatch(cancelFault{session, fail}, provider.Profile{Name: pp.Name, Spec: pp.Spec, Partition: part},
+	fail, queueFail := new(bool), new(bool)
+	b := slurm.NewBatch(cancelFault{session, fail, queueFail}, provider.Profile{Name: pp.Name, Spec: pp.Spec, Partition: part},
 		provider.Settings{Provider: "example", Account: "example-account", Partition: "plgrid"}, slurm.Options{Clock: ft.c})
 	dir := t.TempDir()
 	rec := &stopRecorder{TB: t}
@@ -179,7 +183,7 @@ func newHeld(t *testing.T) *held {
 	w.s.account, w.s.startWait = "example-account", 10*time.Minute
 	digest := sha256.Sum256([]byte("example agent"))
 	params := v1alpha1.BatchParameters{Partition: "plgrid", TimeLimit: "5m", CPUsPerTask: 1, Memory: resource.MustParse("1Gi"), Nodes: 1, AgentDigest: hex.EncodeToString(digest[:])}
-	h := &held{w: w, rec: rec, sl: sl, ft: ft, dir: dir, cancelFails: fail}
+	h := &held{w: w, rec: rec, sl: sl, ft: ft, dir: dir, cancelFails: fail, queueFails: queueFail}
 	submit := func(name, uid string, ours bool) (string, string) {
 		tag := v1alpha1.JobTag("conformance", name, types.UID("uid-"+uid))
 		if ours {
@@ -225,7 +229,7 @@ func TestAJobHeldPastTheBoundIsCancelledByItsTagAndTheRunIsNotRun(t *testing.T) 
 	h := newHeld(t)
 	h.w.poll = h.pending("step")
 	began := h.ft.now()
-	ends(func() { h.w.untilRuns("step 1", "step", "the job runs", h.w.at(), false, running) })
+	ends(func() { h.w.untilRuns("step 1", "step", "the job runs", h.w.at(), "", running) })
 
 	if h.rec.failed != "" {
 		t.Fatalf("the run failed: %s", h.rec.failed)
@@ -270,7 +274,7 @@ func TestAJobHeldPastTheWaitInTheQueueIsCancelledByItsTagAndTheRunIsNotRun(t *te
 	h.w.s.startWait, h.w.s.pendingMax = 0, 20*time.Minute
 	h.w.poll = h.pending("step")
 	began := h.ft.now()
-	ends(func() { h.w.untilRuns("step 1", "step", "the job runs", h.w.at(), false, running) })
+	ends(func() { h.w.untilRuns("step 1", "step", "the job runs", h.w.at(), "", running) })
 
 	if h.rec.failed != "" {
 		t.Fatalf("the run failed: %s", h.rec.failed)
@@ -301,7 +305,7 @@ func TestAJobHeldPastTheWaitInTheQueueIsCancelledByItsTagAndTheRunIsNotRun(t *te
 		h.w.poll = func(name string) *v1alpha1.Allocation {
 			return &v1alpha1.Allocation{ObjectMeta: metav1.ObjectMeta{Name: name}}
 		}
-		ends(func() { h.w.untilRuns("step 1", "step", "the job runs", h.w.at(), false, running) })
+		ends(func() { h.w.untilRuns("step 1", "step", "the job runs", h.w.at(), "", running) })
 		if !strings.Contains(h.rec.failed, "step 1: no job was accepted within the wait in the queue of 20m0s") || h.rec.skipped != "" {
 			t.Errorf("failed %q, skipped %q; want a failure for a job never accepted", h.rec.failed, h.rec.skipped)
 		}
@@ -311,7 +315,7 @@ func TestAJobHeldPastTheWaitInTheQueueIsCancelledByItsTagAndTheRunIsNotRun(t *te
 		h.w.s.startWait, h.w.s.pendingMax = 0, 20*time.Minute
 		*h.cancelFails = true
 		h.w.poll = h.pending("step")
-		ends(func() { h.w.untilRuns("step 1", "step", "the job runs", h.w.at(), false, running) })
+		ends(func() { h.w.untilRuns("step 1", "step", "the job runs", h.w.at(), "", running) })
 		if !strings.Contains(h.rec.failed, "cancelling this run's jobs by tag failed") || h.rec.skipped != "" {
 			t.Errorf("failed %q, skipped %q; want a failure naming the cancel", h.rec.failed, h.rec.skipped)
 		}
@@ -337,7 +341,7 @@ func TestAJobThatStartsInTimeOrWasNeverAcceptedIsNotANotRun(t *testing.T) {
 			return a
 		}
 		var got *v1alpha1.Allocation
-		ends(func() { got = h.w.untilRuns("step 1", "step", "the job runs", h.w.at(), false, running) })
+		ends(func() { got = h.w.untilRuns("step 1", "step", "the job runs", h.w.at(), "", running) })
 		if h.rec.failed != "" || h.rec.skipped != "" || got == nil || !running(got) {
 			t.Fatalf("failed %q, skipped %q, allocation %v; want a plain start", h.rec.failed, h.rec.skipped, got)
 		}
@@ -353,7 +357,7 @@ func TestAJobThatStartsInTimeOrWasNeverAcceptedIsNotANotRun(t *testing.T) {
 		h.w.poll = func(name string) *v1alpha1.Allocation {
 			return &v1alpha1.Allocation{ObjectMeta: metav1.ObjectMeta{Name: name}}
 		}
-		ends(func() { h.w.untilRuns("step 1", "step", "the job runs", h.w.at(), false, running) })
+		ends(func() { h.w.untilRuns("step 1", "step", "the job runs", h.w.at(), "", running) })
 		if !strings.Contains(h.rec.failed, "step 1: no job was accepted within the start-wait bound of 10m0s") || h.rec.skipped != "" {
 			t.Errorf("failed %q, skipped %q; want a failure for a job never accepted", h.rec.failed, h.rec.skipped)
 		}
@@ -369,12 +373,196 @@ func TestAFailedCancelIsAFailureNotANotRun(t *testing.T) {
 	h := newHeld(t)
 	*h.cancelFails = true
 	h.w.poll = h.pending("step")
-	ends(func() { h.w.untilRuns("step 3", "step", "the job runs", h.w.at(), true, running) })
+	ends(func() { h.w.untilRuns("step 3", "step", "the job runs", h.w.at(), h.ours, running) })
 	if !strings.Contains(h.rec.failed, "cancelling this run's jobs by tag failed") || h.rec.skipped != "" {
 		t.Errorf("failed %q, skipped %q; want a failure naming the cancel", h.rec.failed, h.rec.skipped)
 	}
 	if _, err := os.Stat(filepath.Join(h.dir, notRunFile)); err == nil {
 		t.Error("a marker was written although a job may be live")
+	}
+}
+
+// jobNumber is the fake's number for a job ID.
+func jobNumber(t *testing.T, id string) int {
+	t.Helper()
+	n, err := strconv.Atoi(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// lifted lifts the hold of the run's job, so that the fake can start it, and returns its number.
+func (h *held) lifted(t *testing.T) int {
+	t.Helper()
+	if err := h.w.batch.LiftHold(context.Background(), h.ours); err != nil {
+		t.Fatal(err)
+	}
+	return jobNumber(t, h.ours)
+}
+
+// startedOnTheFake lifts the hold and starts the run's job on the fake, and returns its number.
+func (h *held) startedOnTheFake(t *testing.T) int {
+	t.Helper()
+	n := h.lifted(t)
+	if err := h.sl.Start(n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// allocationIn is the Allocation of the run's job as a poll reads it, in a phase, with a change to it.
+func (h *held) allocationIn(phase v1alpha1.AllocationPhase, change func(*v1alpha1.Allocation)) func(string) *v1alpha1.Allocation {
+	return func(name string) *v1alpha1.Allocation {
+		a := &v1alpha1.Allocation{ObjectMeta: metav1.ObjectMeta{Name: name, Annotations: map[string]string{v1alpha1.AnnotationJobID: h.ours}},
+			Status: v1alpha1.AllocationStatus{AtProvider: v1alpha1.AllocationObservation{Phase: phase, Reason: "the reason"}}}
+		if change != nil {
+			change(a)
+		}
+		return a
+	}
+}
+
+// B1 of the review of PR 284: NOT RUN means the job affirmatively never started (the ruling of 8 Nov 2026, #272). At the
+// bound the run reads the scheduler, past the cached listing and the Allocation's status, which a logged reconcile error
+// leaves stale. A job that started is a failure, and so is a job the read cannot tell about: missing evidence is
+// neither "never started" nor a pass. Every case goes through the real waiter, with the fake Slurm behind it, and each
+// must fail, name what it found, write no marker and cancel nothing by a NOT RUN.
+func TestAJobThatStartedOrCannotBeReadAtTheBoundIsNeverNotRun(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		// arrange sets the world up before the wait; the acceptedID it returns is the waiter's.
+		arrange func(t *testing.T, h *held) string
+		want    string
+		// atOnce is a phase from which no job starts: the wait ends there, not at the bound.
+		atOnce bool
+	}{
+		{"it started and failed between two polls", func(t *testing.T, h *held) string {
+			h.w.poll = h.allocationIn(v1alpha1.AllocationFailed, nil)
+			return ""
+		}, "the Allocation is Failed", true},
+		{"it was refused", func(t *testing.T, h *held) string {
+			h.w.poll = h.allocationIn(v1alpha1.AllocationRefused, nil)
+			return ""
+		}, "the Allocation is Refused", true},
+		{"it was lost", func(t *testing.T, h *held) string {
+			h.w.poll = h.allocationIn(v1alpha1.AllocationLost, nil)
+			return ""
+		}, "the Allocation is Lost", true},
+		{"the status is a stale Pending and the scheduler says it runs", func(t *testing.T, h *held) string {
+			h.startedOnTheFake(t)
+			h.w.poll = h.pending("step")
+			return ""
+		}, "the scheduler shows it Running", false},
+		{"the status is a stale Pending and the job ran, ended and has left the queue", func(t *testing.T, h *held) string {
+			if err := h.sl.End(h.startedOnTheFake(t), string(fakeslurm.Failed)); err != nil {
+				t.Fatal(err)
+			}
+			h.w.poll = h.pending("step")
+			return ""
+		}, "the queue does not list it", false},
+		{"the status is a stale Pending and the job was requeued, so it is pending again after it ran", func(t *testing.T, h *held) string {
+			if err := h.sl.Requeue(h.startedOnTheFake(t)); err != nil {
+				t.Fatal(err)
+			}
+			h.w.poll = h.pending("step")
+			return ""
+		}, "the scheduler shows it Failed", false},
+		{"the queue cannot be read at the bound", func(t *testing.T, h *held) string {
+			*h.queueFails = true
+			h.w.poll = h.pending("step")
+			return ""
+		}, "its state could not be read", false},
+		{"the scheduler no longer lists the job", func(t *testing.T, h *held) string {
+			h.w.poll = h.allocationIn(v1alpha1.AllocationPending, func(a *v1alpha1.Allocation) { a.Annotations[v1alpha1.AnnotationJobID] = "999999" })
+			return ""
+		}, "the queue does not list it", false},
+		{"the Allocation cannot be read", func(t *testing.T, h *held) string {
+			h.w.poll = func(string) *v1alpha1.Allocation { return nil }
+			return h.ours
+		}, "its Allocation could not be read", false},
+		{"the status says the job runs, but not the one the step waits for", func(t *testing.T, h *held) string {
+			h.w.poll = h.allocationIn(v1alpha1.AllocationRunning, nil)
+			return ""
+		}, "its Allocation is Running", false},
+		{"the status says the job ended", func(t *testing.T, h *held) string {
+			h.w.poll = h.allocationIn(v1alpha1.AllocationEnded, nil)
+			return ""
+		}, "its Allocation is Ended", false},
+		{"the status has a start time, whatever its phase", func(t *testing.T, h *held) string {
+			now := metav1.NewTime(h.ft.now())
+			h.w.poll = h.allocationIn(v1alpha1.AllocationPending, func(a *v1alpha1.Allocation) { a.Status.AtProvider.StartTime = &now })
+			return ""
+		}, "with a start time", false},
+		{"there is no platform to read", func(t *testing.T, h *held) string {
+			h.w.batch = nil
+			h.w.poll = h.pending("step")
+			return ""
+		}, "no platform to read it on", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHeld(t)
+			accepted := c.arrange(t, h)
+			began := h.ft.now()
+			// The condition never holds, as for step 3 when the job that runs is not the one the step waits for.
+			never := func(*v1alpha1.Allocation) bool { return false }
+			ends(func() { h.w.untilRuns("step 1", "step", "the job runs", h.w.at(), accepted, never) })
+			if h.rec.skipped != "" {
+				t.Errorf("the run ended NOT RUN: %s", h.rec.skipped)
+			}
+			if !strings.Contains(h.rec.failed, c.want) {
+				t.Errorf("failed = %q, want a failure that says %q", h.rec.failed, c.want)
+			}
+			if _, err := os.Stat(filepath.Join(h.dir, notRunFile)); err == nil {
+				t.Error("a marker was written for a job that cannot be called one that never started")
+			}
+			if c.atOnce {
+				if waited := h.ft.since(began); waited >= 10*time.Minute {
+					t.Errorf("the wait lasted %s: a job in this phase will not start, so the wait must end there", waited)
+				}
+			} else if waited := h.ft.since(began); waited < 10*time.Minute {
+				t.Errorf("the wait lasted %s, want the bound of 10m: the status may be read again until then", waited)
+			}
+		})
+	}
+}
+
+// The other side of the same read: what the scheduler affirmatively shows waiting stays NOT RUN, held or merely
+// pending, with a status that says so, and with no status yet for a job accepted before the wait (step 3's direct
+// sbatch, not yet adopted, whose ID only the step knows). Without these the test above would pass on a run that
+// never reports NOT RUN at all.
+func TestAJobTheSchedulerShowsWaitingAtTheBoundIsNotRun(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		arrange func(t *testing.T, h *held) string
+	}{
+		{"held", func(t *testing.T, h *held) string {
+			h.w.poll = h.allocationIn(v1alpha1.AllocationHeld, nil)
+			return ""
+		}},
+		{"pending", func(t *testing.T, h *held) string {
+			h.lifted(t)
+			h.w.poll = h.pending("step")
+			return ""
+		}},
+		{"accepted before the wait and not yet adopted", func(t *testing.T, h *held) string {
+			h.w.poll = func(name string) *v1alpha1.Allocation {
+				return &v1alpha1.Allocation{ObjectMeta: metav1.ObjectMeta{Name: name}}
+			}
+			return h.ours
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHeld(t)
+			accepted := c.arrange(t, h)
+			ends(func() { h.w.untilRuns("step 3", "step", "the job runs", h.w.at(), accepted, running) })
+			if h.rec.failed != "" || !strings.HasPrefix(h.rec.skipped, "NOT RUN: step 3:") {
+				t.Errorf("failed %q, skipped %q; want a NOT RUN", h.rec.failed, h.rec.skipped)
+			}
+			if _, err := os.Stat(filepath.Join(h.dir, notRunFile)); err != nil {
+				t.Errorf("no marker: %v", err)
+			}
+		})
 	}
 }
 

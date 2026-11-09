@@ -314,7 +314,7 @@ func gpuAccountingBody(t testing.TB, w *world, rowName string) {
 	// and the run is NOT RUN, with no record (issues #194 and #272; startwait_test.go).
 	notFailed := func(a *v1alpha1.Allocation) { accountingNotFailed(t, a) }
 	startedOrEnded := func(a *v1alpha1.Allocation) bool { return accountingStarted(t, a) }
-	w.untilRuns("the job", name, "the job runs", w.at(), false, startedOrEnded)
+	w.untilRuns("the job", name, "the job runs", w.at(), "", startedOrEnded)
 	w.until(name, "the job ends", accountingEndWait, func(a *v1alpha1.Allocation) bool {
 		notFailed(a)
 		return a.Status.AtProvider.Phase == v1alpha1.AllocationEnded

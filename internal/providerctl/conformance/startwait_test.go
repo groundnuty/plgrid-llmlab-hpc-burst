@@ -8,7 +8,8 @@ package conformance
 // on every row and whichever bound it was (the science agent's ruling of 8 Nov 2026, #272: a queue wait tests
 // nothing, so it is never a FAIL). The bound is the row's start wait (HPCBURST_CONF_START_WAIT) when it has one,
 // else the wait in the queue (HPCBURST_CONF_PENDING_MAX_SECONDS, 30 minutes when unset). A job that was never
-// accepted is a failure.
+// accepted is a failure. So is a job that started, and a job a read cannot tell about (B1 of the review of PR 284):
+// NOT RUN means the scheduler's own read, at the bound, shows the job still waiting (whyNotWaiting).
 
 import (
 	"context"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/alpha"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -98,15 +100,18 @@ func (w *world) firstClock() (bound time.Duration, name string) {
 }
 
 // untilRuns waits until cond holds for the Allocation, within the first clock (see the top of this file). since is
-// when the wait began, accepted says the job was accepted before it did (step 3's direct sbatch), step names the
+// when the wait began, acceptedID is the job accepted before it did (step 3's direct sbatch; else ""), step names the
 // step in the output.
-func (w *world) untilRuns(step, name, what string, since time.Time, accepted bool, cond func(*v1alpha1.Allocation) bool) *v1alpha1.Allocation {
+func (w *world) untilRuns(step, name, what string, since time.Time, acceptedID string, cond func(*v1alpha1.Allocation) bool) *v1alpha1.Allocation {
 	w.t.Helper()
 	bound, boundName := w.firstClock()
 	var last *v1alpha1.Allocation
 	probe := func() (bool, bool) {
 		last = w.pollAllocation(name)
-		return last != nil && cond(last), accepted || (last != nil && last.Annotations[v1alpha1.AnnotationJobID] != "")
+		if last != nil {
+			accountingNotFailed(w.t, last) // no job starts from these phases: the wait ends here, not at the bound
+		}
+		return last != nil && cond(last), acceptedID != "" || (last != nil && last.Annotations[v1alpha1.AnnotationJobID] != "")
 	}
 	now, sleep := w.clock()
 	switch waitStart(now, sleep, since, bound, 3*time.Second, probe) {
@@ -115,9 +120,43 @@ func (w *world) untilRuns(step, name, what string, since time.Time, accepted boo
 	case jobNotAccepted:
 		w.t.Fatalf("%s: no job was accepted within %s of %s", step, boundName, bound)
 	default:
+		if why := w.whyNotWaiting(last, acceptedID); why != "" {
+			w.t.Fatalf("%s: %s of %s ran out, but the job cannot be called one that never started: %s", step, boundName, bound, why)
+		}
 		w.notRun(step)
 	}
 	return nil
+}
+
+// whyNotWaiting says why a job at the bound cannot be called one that never started, and "" when it can. An
+// Allocation's status can only rule that out: a logged reconcile error leaves an old Pending in it. So what rules
+// it in is the scheduler's own read, by the job's ID, past the cached listing (QueueJob), made now: a job listed
+// and waiting. A read that fails, and a job it does not list, tell nothing, and neither is "never started".
+func (w *world) whyNotWaiting(a *v1alpha1.Allocation, acceptedID string) string {
+	if a == nil {
+		return "its Allocation could not be read"
+	}
+	o := a.Status.AtProvider
+	if o.StartTime != nil || o.Phase == v1alpha1.AllocationRunning || o.Phase == v1alpha1.AllocationEnded {
+		return fmt.Sprintf("its Allocation is %s, with a start time: %t", o.Phase, o.StartTime != nil)
+	}
+	if w.batch == nil {
+		return "there is no platform to read it on"
+	}
+	id := acceptedID
+	if id == "" {
+		id = a.Annotations[v1alpha1.AnnotationJobID]
+	}
+	j, listed, err := w.batch.QueueJob(context.Background(), id)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("its state could not be read: %v", err)
+	case !listed:
+		return "the queue does not list it"
+	case !alpha.WaitingToStart(j):
+		return fmt.Sprintf("the scheduler shows it %s (reason %q)", j.Phase, j.Reason)
+	}
+	return ""
 }
 
 // notRun ends the run as NOT RUN: it cancels every job this run tagged, by its
