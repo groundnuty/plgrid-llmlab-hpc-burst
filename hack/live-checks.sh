@@ -51,7 +51,12 @@
 #     have (the time limit less the drain window after its creation), so that the controller plans the job no
 #     replacement (the science agent's ruling on PR 255). Its first clock is therefore also at most a minute before
 #     that end, whatever LIVE_PENDING_MAX_SECONDS allows ("a job was still pending a minute before its deployment's
-#     first end"; docs/alpha-runbook.md gives each lease's cap).
+#     first end"; docs/alpha-runbook.md gives each lease's cap);
+#   - a two-job row's second job, once its first has run: by the first's drain start on the handover, and within the wait in
+#     the queue of the first's lease end on no-overlap ("the first job ran and the second never started ..."). A failure of
+#     the part of the run that did happen still wins: that row fails.
+# NOT RUN means the job affirmatively never started (review of PR 284): a read at the bound must show it waiting. A job
+# that started, a job a read does not list, and a read that fails are failures that name what they found, exit 1.
 # A test that finds a job still not started at the bound cancels what it submitted by the tags it wrote down,
 # writes the line it wants to report to not-run.txt in its record directory, and SKIPS at the top level (t.Skip).
 # Nothing else: it fails nothing and exits 0. The script reads that, and only that, as NOT RUN (not_run_verdict):
@@ -925,18 +930,34 @@ wait_child() {
 # skipped once at the top level with no failure, exit status 0 and the marker, a regular file (not a link) in this
 # run's record directory. Anything else is not a NOT RUN: a local row has no queue to wait in, and a skip with no
 # marker, a marker beside a failure or a skipped subtest, and a marker that is a link are all failures. So is a marker
-# that names a deployment's first end on a row that has none: only a tunnel row has that bound.
+# that names a deployment's first end on a row that has none (only a tunnel row has that bound), and one that names a
+# second job on a row of one.
 not_run_verdict() {
   local n=$1 rc=$2 failed=$3 skipped=$4 named=$5
   [ "$named" = SKIP ] && [ "$rc" = 0 ] && [ "$failed" = 0 ] && [ "$skipped" = 1 ] || return 1
   [ -n "$REC_DIR" ] && [ -f "$REC_DIR/not-run.txt" ] && [ ! -L "$REC_DIR/not-run.txt" ] || return 1
   [ -n "${HOST[$n]:-}" ] || return 1
+  ! second_job_marker || [ "${MOSTJOBS[$n]:-1}" -ge 2 ] || return 1
   ! first_end_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac
 }
 
 # first_end_marker: the run's NOT RUN marker says its job was still pending a minute before its deployment's first
 # end (internal/alpha, NotRunNote): the bound a tunnel row has beside the wait in the queue, which judge names.
 first_end_marker() { grep -q "a minute before the deployment's first end" "$REC_DIR/not-run.txt" 2>/dev/null; }
+
+# second_job_marker: the run's NOT RUN marker says its first job ran and its second never started (internal/alpha,
+# NotRunNote): the bound a row of two jobs has for its second.
+second_job_marker() { grep -q "the first job ran and the second never started" "$REC_DIR/not-run.txt" 2>/dev/null; }
+
+# second_job_bound <name>: the bound of a two-job row's second job, as judge names it. A handover's successor must start by
+# its predecessor's drain start; a no-overlap successor pends until its predecessor's lease end frees the GPU, then has the
+# row's wait in the queue.
+second_job_bound() {
+  case $1 in
+    alpha-helios-nooverlap) printf "within %s of the first's lease end" "$(fmt_pending "$(pending_max "$1")")" ;;
+    *) printf "by the first's drain start" ;;
+  esac
+}
 
 # judge <name> <log> <rc>: the verdict from the test's verbose log and exit status. A skip is not a pass, at
 # any level. Only counts and fixed labels reach the screen: a subtest's name can hold anything.
@@ -951,7 +972,9 @@ judge() {
   if [ "$rc" = 124 ]; then say "$n: FAIL (timed out)"; return 1; fi
   if not_run_verdict "$n" "$rc" "${fail:-0}" "${skip:-0}" "$named"; then
     NOT_RUN=1
-    if [ "${SWAIT[$n]:--}" != - ]; then
+    if second_job_marker; then
+      say "$n: NOT RUN (the first job ran and the second never started $(second_job_bound "$n"), and was cancelled by its tag; not a failure)"
+    elif [ "${SWAIT[$n]:--}" != - ]; then
       say "$n: NOT RUN (a job did not start within ${SWAIT[$n]} min of its acceptance and was cancelled by its tag; not a failure)"
     elif first_end_marker; then
       say "$n: NOT RUN (a job was still pending a minute before its deployment's first end and was cancelled by its tag; not a failure)"
@@ -1173,9 +1196,11 @@ execute_cluster() {
   case $n in
     real-engine) execute_real_engine "$n" ;;
     alpha-*|tunnel-hour-*)
-      # The test owns the two clocks of a queued run (HPCBURST_ALPHA_PENDING_MAX_SECONDS, then the row's run
-      # budget); this timeout is their sum, so a long wait in the queue does not eat the run's time.
-      run_binary "$n" "$OUT/$n.test" "$(( ${TMIN[$n]} + ($(pending_max "$n") + 59) / 60 ))" env_alpha
+      # The test owns the clocks of a queued run (HPCBURST_ALPHA_PENDING_MAX_SECONDS, then the row's run budget); this timeout
+      # is the budget plus one wait in the queue for each of the row's jobs, so that no wait eats the run's time and the
+      # bound fires first: a no-overlap successor waits on top of its predecessor (review of PR 284, B5; internal/alpha,
+      # Row.WorstCase and Row.RunDeadline; a handover's second wait is inside its lease, which leaves it room).
+      run_binary "$n" "$OUT/$n.test" "$(( ${TMIN[$n]} + ${MOSTJOBS[$n]:-1} * (($(pending_max "$n") + 59) / 60) ))" env_alpha
       judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
     gpu-accounting-*|reach-*)
       # A row with a start wait has the bound as its first clock; one without has the operator's wait in the queue.
@@ -1243,9 +1268,10 @@ run_cluster() {
   return $verdict
 }
 
-# job_state <host> <id>: the job's squeue state, "gone" once it has left the queue, "error" if unreadable.
+# job_state <host> <id>: the job's squeue state, "gone" once it has left the queue, "error" if unreadable: a read that
+# failed, and a reply that holds no state, are the same to the caller.
 job_state() {
-  local reply
+  local reply state
   reply=$({ preamble JOB "$2"; cat <<'EOS'
 out=$(squeue -j "$JOB" -h -o %T 2>&1); rc=$?
 if [ $rc -eq 0 ] && [ -z "$out" ]; then echo "state=gone"
@@ -1254,7 +1280,8 @@ elif printf '%s' "$out" | grep -q -i 'invalid job id'; then echo "state=gone"
 else echo "state=error"; fi
 EOS
   } | remote "$1") || { echo error; return; }
-  printf '%s\n' "$reply" | sed -n -E 's/^state=([A-Z_]{1,24}|gone|error)$/\1/p' | head -1
+  state=$(printf '%s\n' "$reply" | sed -n -E 's/^state=([A-Z_]{1,24}|gone|error)$/\1/p' | head -1)
+  printf '%s\n' "${state:-error}"
 }
 
 # now_epoch: the clock for the job's budgets. LIVE_FAKE_CLOCK is a test seam: a file holding the epoch seconds.
@@ -1321,7 +1348,9 @@ EOS
     [ -z "$INTERRUPTED" ] || { say "$n: FAIL (interrupted)"; return 1; }
     now=$(now_epoch)
     if [ "$state" != PENDING ] && [ "$state" != error ] && [ -z "$run_t" ]; then run_t=$now; fi
-    if [ -z "$run_t" ] && [ $((now - submit_t)) -gt "$pend_max" ]; then
+    # Only a read that says PENDING can end the wait in the queue: the job can have started since the last good read, so a
+    # failed read at the bound tells nothing about a start, and the three-error guard above decides it (review of PR 284, B4).
+    if [ "$state" = PENDING ] && [ -z "$run_t" ] && [ $((now - submit_t)) -gt "$pend_max" ]; then
       # The job never started: not a failure (issue #222). The cleanup after this cancels it by its tag, and the run's exit is 3
       # unless that leaves a job behind, which is a failure.
       NOT_RUN=1

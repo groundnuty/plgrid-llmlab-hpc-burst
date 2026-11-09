@@ -103,6 +103,39 @@ func TestRealEngineRunCancelsItsJobWhenInterrupted(t *testing.T) {
 	}
 }
 
+// B4 of the review of PR 284. The wait in the queue applies only when the latest read positively says PENDING: a job can
+// start after the last good read, so a failed read at the bound tells nothing about a start, and is not NOT RUN. These go
+// through the real poll loop, on a clock the stub moves 15 minutes at each read, so the third read is past the row's 30.
+func TestRealEngineNotRunOnlyOnAReadThatSaysPending(t *testing.T) {
+	const notRun = "real-engine: NOT RUN (a job was still pending after 30 min in the queue and was cancelled by its tag; not a failure)"
+	const unreadable = "real-engine: FAIL (the queue could not be read three times in a row)"
+	for _, c := range []struct {
+		name, states string
+		code         int
+		want, wantNo string
+	}{
+		{"a read fails past the bound and the job then shows running: it started", "STUB_JOB_STATES=PENDING PENDING UNREADABLE RUNNING", 0, "job state: RUNNING", "NOT RUN"},
+		{"three reads fail past the bound", "STUB_JOB_STATES=PENDING PENDING UNREADABLE UNREADABLE UNREADABLE", 1, unreadable, "NOT RUN"},
+		{"a read fails, and the next past the bound says pending", "STUB_JOB_STATES=PENDING UNREADABLE PENDING PENDING", 3, notRun, "real-engine: FAIL"},
+		{"a read that says something unparsable tells nothing either", "STUB_JOB_FOREVER=not-a-state", 1, unreadable, "NOT RUN"},
+		{"a job that ran and is pending again was not waiting to start", "STUB_JOB_STATES=RUNNING PENDING PENDING PENDING", 0, "job state: RUNNING", "NOT RUN"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			w := newWorld(t)
+			w.useStubGo()
+			res := w.run(append(w.fakeClock(), "STUB_CLOCK_STEP=900", c.states), "--run", "real-engine", "--yes")
+			if res.code != c.code {
+				t.Fatalf("exit %d, want %d:\n%s", res.code, c.code, res.out)
+			}
+			w.contains(res, c.want, "cleanup: left behind 0")
+			if strings.Contains(res.out, c.wantNo) {
+				t.Errorf("the run says %q:\n%s", c.wantNo, res.out)
+			}
+		})
+	}
+}
+
 func (w *world) fakeClock() []string {
 	write(w.t, filepath.Join(w.state, "clock"), "1000000", 0o644)
 	return []string{"LIVE_FAKE_CLOCK=" + filepath.Join(w.state, "clock")}

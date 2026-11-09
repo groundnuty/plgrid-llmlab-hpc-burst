@@ -2,6 +2,7 @@ package livechecks
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -153,5 +154,122 @@ func TestAMarkerAnEarlierRowLeftIsNeverALocalRowsNotRun(t *testing.T) {
 	}
 	if res.code != 1 {
 		t.Errorf("exit %d, want 1 (a failure is above a NOT RUN):\n%s", res.code, res.out)
+	}
+}
+
+// B3 of the review of PR 284: on a two-job row whose first job ran and whose second never started, the row's own test,
+// the real one in dry mode, ends NOT RUN, exit 3, and the line says so and names the bound. The lines are written out from
+// the ruling, not read from the script: a handover's successor must start by its predecessor's drain start, and a
+// no-overlap successor within the wait in the queue from its predecessor's lease end. The failure beside it (an earlier
+// failure wins) is in TestEveryAlphaRowPassesItsDryRunAndEveryFaultFailsIt, as the faults second-never-started-*.
+func TestASecondJobThatNeverStartedIsNotRunOnTheTwoJobRows(t *testing.T) {
+	real := realTestBinary(t, "HPCBURST_LIVECHECKS_ALPHA_TEST", alphaPkg)
+	realDir := filepath.Join(repoRoot(t), alphaPkg)
+	for _, c := range []struct {
+		row, setting, want string
+	}{
+		{"alpha-athena-handover", "", "NOT RUN (the first job ran and the second never started by the first's drain start, and was cancelled by its tag; not a failure)"},
+		{"alpha-helios-nooverlap", "", "NOT RUN (the first job ran and the second never started within 30 min of the first's lease end, and was cancelled by its tag; not a failure)"},
+		{"alpha-helios-nooverlap", "LIVE_PENDING_MAX_SECONDS=90", "NOT RUN (the first job ran and the second never started within 1 min 30 s of the first's lease end, and was cancelled by its tag; not a failure)"},
+	} {
+		t.Run(c.row+"/"+c.setting, func(t *testing.T) {
+			t.Parallel()
+			w := newAlphaWorld(t)
+			w.installDry(dryWrapper, real, realDir)
+			env := []string{"STUB_DRY_FAULT=second-never-started"}
+			if c.setting != "" {
+				env = append(env, c.setting)
+			}
+			res := w.run(env, "--run", c.row, "--yes")
+			if res.code != 3 {
+				t.Fatalf("exit %d, want 3:\n%s", res.code, res.out)
+			}
+			w.contains(res, c.row+": tests: 0 passed, 0 failed, 1 skipped", c.row+": "+c.want, "cleanup: left behind 0")
+			if strings.Contains(res.out, c.row+": FAIL") || strings.Contains(res.out, c.row+": PASS") {
+				t.Errorf("a NOT RUN run was also reported as a pass or a failure:\n%s", res.out)
+			}
+			if posts, _ := filepath.Glob(filepath.Join(w.out(), c.row+"-*", "posts.md")); len(posts) != 0 {
+				t.Errorf("a NOT RUN left a text to post: %v", posts)
+			}
+		})
+	}
+}
+
+// Only a row of two jobs has a second job: the marker that says one never started, on a row of one, is a failure.
+func TestAMarkerOfASecondJobThatNeverStartedOnARowOfOneIsAFailure(t *testing.T) {
+	for _, row := range []string{"tunnel-hour-athena", "tunnel-hour-helios", "gpu-accounting-athena", "reach-helios"} {
+		t.Run(row, func(t *testing.T) {
+			t.Parallel()
+			w := slotWorld(t, row)
+			res := w.run([]string{"STUB_ALPHA_MODE=not-run-second"}, "--run", row, "--yes")
+			if res.code != 1 || strings.Contains(res.out, row+": NOT RUN") || !strings.Contains(res.out, row+": FAIL") {
+				t.Errorf("exit %d, want 1 and a FAIL and no NOT RUN:\n%s", res.code, res.out)
+			}
+		})
+	}
+}
+
+// Every row's other side of the ruling (review of PR 284): a run that cannot call its job one that never started is a
+// failure, exit 1, with its cleanup verified, and never NOT RUN. Each test's own read is tested in its package
+// (internal/alpha, internal/providerctl/conformance), which fails the test; here each row's failing test, or real-engine's own
+// poll, must end as that failure. The lines are written out, and a row with no case fails, as in the table above.
+var cannotTellLine = map[string]string{
+	"conformance-helios":       "FAIL (exit status 1)",
+	"conformance-helios-gh200": "FAIL (exit status 1)",
+	"conformance-athena":       "FAIL (exit status 1)",
+	"real-engine":              "FAIL (the queue could not be read three times in a row)",
+	"alpha-athena-handover":    "FAIL (exit status 1)",
+	"alpha-helios-nooverlap":   "FAIL (exit status 1)",
+	"tunnel-hour-helios":       "FAIL (exit status 1)",
+	"tunnel-hour-athena":       "FAIL (exit status 1)",
+	"gpu-accounting-helios":    "FAIL (exit status 1)",
+	"gpu-accounting-athena":    "FAIL (exit status 1)",
+	"reach-helios":             "FAIL (exit status 1)",
+	"reach-athena":             "FAIL (exit status 1)",
+}
+
+func TestEveryRowThatCannotCallItsJobNeverStartedEndsAFailure(t *testing.T) {
+	b, err := os.ReadFile(scriptPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, l := range block(t, string(b), "CLUSTER SHAPES") {
+		name := strings.Split(l, "|")[0]
+		seen[name] = true
+		want, ok := cannotTellLine[name]
+		if !ok {
+			t.Errorf("%s is a row of the cluster table with no case here", name)
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			w := slotWorld(t, name)
+			var extra []string
+			switch {
+			case name == "real-engine":
+				extra = append(w.fakeClock(), "STUB_CLOCK_STEP=900", "STUB_JOB_STATES=PENDING PENDING UNREADABLE UNREADABLE UNREADABLE")
+			case strings.HasPrefix(name, "conformance-"):
+				extra = []string{"STUB_TEST_MODE=fail"}
+			default:
+				extra = []string{"STUB_ALPHA_MODE=fail"}
+			}
+			res := w.run(extra, "--run", name, "--yes")
+			if res.code != 1 {
+				t.Fatalf("exit %d, want 1:\n%s", res.code, res.out)
+			}
+			w.contains(res, name+": "+want)
+			if !cleanupLeftNone.MatchString(res.out) {
+				t.Errorf("the cleanup was not verified:\n%s", res.out)
+			}
+			if strings.Contains(res.out, name+": NOT RUN") {
+				t.Errorf("a run that cannot tell was reported NOT RUN:\n%s", res.out)
+			}
+		})
+	}
+	for name := range cannotTellLine {
+		if !seen[name] {
+			t.Errorf("%s has a case here but is no row of the cluster table", name)
+		}
 	}
 }
