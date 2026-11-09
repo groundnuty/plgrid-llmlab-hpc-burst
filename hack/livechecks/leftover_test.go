@@ -288,9 +288,7 @@ func TestAKilledTestBinaryLeavesNothing(t *testing.T) {
 		_, err := os.Stat(ready)
 		return err == nil
 	})
-	if n := len(markedPIDs(mark)); n < 5 {
-		t.Fatalf("%d processes carry the mark, want at least the runner, the reaper, the script and two sleeps: the setup did not run, so this test proves nothing", n)
-	}
+	waitForMarked(t, mark, 5, "the runner, the reaper, the script and two sleeps")
 	if err := runner.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
@@ -298,15 +296,76 @@ func TestAKilledTestBinaryLeavesNothing(t *testing.T) {
 	waitUntil(t, "every process of the killed test to go", func() bool { return len(markedPIDs(mark)) == 0 })
 }
 
-// waitUntil waits, at most 30 s, for cond to hold: a wait on state, not a window.
-func waitUntil(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+// waitDeadline is how long a leftover test waits for a state before it gives up.
+const waitDeadline = 30 * time.Second
+
+// pollUntil polls cond every 10 ms and reports whether it held within d.
+func pollUntil(d time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(d)
 	for !cond() {
 		if time.Now().After(deadline) {
-			t.Fatalf("gave up waiting for %s", what)
+			return false
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	return true
+}
+
+// waitUntil waits, at most waitDeadline, for cond to hold: a wait on state, not a window.
+func waitUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	if !pollUntil(waitDeadline, cond) {
+		t.Fatalf("gave up waiting for %s", what)
+	}
+}
+
+// awaitCount polls count until it reaches want, for at most d. It returns the last count it read
+// and whether that reached want.
+func awaitCount(d time.Duration, want int, count func() int) (int, bool) {
+	var n int
+	ok := pollUntil(d, func() bool { n = count(); return n >= want })
+	return n, ok
+}
+
+// waitForMarked waits, at most waitDeadline, until at least want live processes carry mark, then
+// returns. The ready file is written while the setup is still starting: a process that has just
+// been forked, or is in the middle of its exec, has no environment to read yet, and one that the
+// script has not started yet is not there at all. So the count is a state to wait for, not a
+// number to read once after the ready file (issue #287). A setup that really does not come up
+// fails at the deadline, naming the last count; who names the processes that were wanted.
+func waitForMarked(t *testing.T, mark string, want int, who string) {
+	t.Helper()
+	if n, ok := awaitCount(waitDeadline, want, func() int { return len(markedPIDs(mark)) }); !ok {
+		t.Fatalf("%d processes carry the mark after %v, want at least %d (%s): the setup did not run, so this test proves nothing", n, waitDeadline, want, who)
+	}
+}
+
+// The count of the leftover tests is waited for, not read once: a count that is short at the first
+// read and right at the fourth passes. The counter is a fake that is short on its first reads, so
+// the order is certain and no window decides it. A single read stops at the first call and fails.
+func TestAwaitCountWaitsForALateCount(t *testing.T) {
+	reads := []int{1, 1, 2, 3}
+	calls := 0
+	n, ok := awaitCount(waitDeadline, 3, func() int {
+		v := reads[min(calls, len(reads)-1)]
+		calls++
+		return v
+	})
+	if !ok || n != 3 || calls != len(reads) {
+		t.Errorf("awaitCount = %d, %v after %d reads; want 3, true after %d", n, ok, calls, len(reads))
+	}
+}
+
+// A count that never gets there fails at the deadline, and the last count read is what the failure
+// names. A deadline that is never reached, or a count that is not kept, would not.
+func TestAwaitCountGivesUpAtTheDeadlineWithTheLastCount(t *testing.T) {
+	calls := 0
+	n, ok := awaitCount(50*time.Millisecond, 3, func() int {
+		calls++
+		return min(calls, 2) // 1, then 2 for ever
+	})
+	if ok || n != 2 {
+		t.Errorf("awaitCount = %d, %v; want 2, false: it should give up with the last count it read", n, ok)
 	}
 }
 
@@ -332,9 +391,7 @@ sleep 600`
 			_, err := os.Stat(ready)
 			return err == nil
 		})
-		if n := len(markedPIDs(mark)); n < 3 {
-			t.Fatalf("%d processes carry the mark, want at least the reaper, the script and a sleep: the setup did not run", n)
-		}
+		waitForMarked(t, mark, 3, "the reaper, the script and a sleep")
 		// The subtest ends here, with the run going.
 	})
 	waitUntil(t, "every process of the ended run to go", func() bool { return len(markedPIDs(mark)) == 0 })
