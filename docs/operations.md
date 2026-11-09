@@ -10,7 +10,7 @@ BIN=${HPCBURST_BIN_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/hpcburst/k3s}
 alias hbk='KUBECONFIG="$STATE/kubeconfig" "$BIN/k3s-1.36.5/k3s" kubectl'
 ```
 
-`<name>` stands for a ModelDeployment, `<instance>`, `<allocation>` and `<provider>` for the objects of those kinds, and `<front-host>` for your dial-home address. The examples live in the `default` namespace, so the commands give none. Commands in blocks marked `cluster` run on a cluster's login node; the rest run on the control-plane host.
+`<name>` stands for a ModelDeployment, `<instance>`, `<allocation>` and `<provider>` for the objects of those kinds, and `<front-host>` for your dial-home address (`host-dialed` mode has none). The examples live in the `default` namespace, so the commands give none. Commands in blocks marked `cluster` run on a cluster's login node; the rest run on the control-plane host.
 
 ## Where to look
 
@@ -78,7 +78,7 @@ The first line is the verdict: `healthy`, `unhealthy` or `stopped`. Below it, on
 | `supervised controller:`, `supervised front:`, `supervised frps:` | one line per supervised process: whether it runs, its PID, its state (`starting`, `running`, `backoff` after an exit, `stopped`), its restart count, its `/healthz`, the controller's readiness, and its last exit with code and time |
 | `agent builds (<dir>):` | one line per CPU architecture that an applied PlatformProfile's partitions have, with the agent and frpc builds (below) |
 | `CRD deletion guard:` | `present (hpcburst-protect-crds)` when the admission policy exists and a binding names it with a denying action, or `ABSENT (<what is missing>)` with the warning that nothing then stops a delete of a framework CRD, which would delete every resource of its kind. Absent is a state, not a fault: the host stays healthy, as with an absent front, and the next `hpcburst up` installs the guard, so a host that an earlier release started shows it absent until then. `status` asks only a host that every other check found healthy, so `hpcburst status --no-api` and an unhealthy host print no such line; a failure to ask adds a reason and makes the host unhealthy. `hpcburst status --json` has it as `crd_guard` ([What never to do](#what-never-to-do) says how to remove the guard) |
-| `front:` | the recorded dial-home mode and address (`ssh <front-host>`), `absent` when the host was started without `hpcburst up --front-config`, or `not recorded` |
+| `front:` | the recorded dial-home mode and address (`ssh <front-host>`; `host-dialed (no address: the host dials the jobs)` in host-dialed mode), `absent` when the host was started without `hpcburst up --front-config`, or `not recorded` |
 
 `controllers: none (no controller binary was found when the host started)` replaces the supervisor's lines when `up` found no `hpcburst-controller` beside itself. That host runs k3s only.
 
@@ -104,7 +104,7 @@ hbk get lease lifecycle -n hpcburst-system -o yaml
 
 `supervised front:` adds `degraded: usage writes failing` while the front's `/healthz` states its usage sink as failing: usage records are being lost, and `logs/front.log` says why. It adds `usage state unknown` when the `/healthz` body has no usage member, or one with a state HBEP-8 does not name (`internal/launcher/status_controllers.go`); that says nothing about whether records are written. Neither makes the host unhealthy: the front keeps serving, and `status` still exits 0 ([HBEP-8](../hbep/0008-observability-and-events/README.md), Usage records).
 
-The last line, `front:`, is about the dial-home address, not the process. `front: absent` means no front runs under this host, which is a state, not a fault. A front that was configured and is not running is listed as a supervised process that does not run, and makes the host unhealthy.
+The last line, `front:`, is about the dial-home mode and address, not the process. `front: absent` means no front runs under this host, which is a state, not a fault. A front that was configured and is not running is listed as a supervised process that does not run, and makes the host unhealthy.
 
 ### Store-full hints
 
@@ -153,9 +153,9 @@ A ModelDeployment with a managed source (an entry LLMLab serves) gets none of th
 
 ### `FrontNotConfigured`
 
-- **Means:** `hpcburst up` was given no `--front-mode` and `--front-addr`, so the jobs would have no route home.
+- **Means:** `hpcburst up` was given no `--front-mode` (and, in `direct` and `ssh` modes, no `--front-addr`), so the jobs would have no route home.
 - **The controller** submits no Allocation for any deployment.
-- **You:** stop the host and start it again with the dial-home flags, as in the quickstart's step 4. `up` does not remember them across `down` (Down and up across an upgrade) ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), Single-user host).
+- **You:** stop the host and start it again with the dial-home flags of your mode, as in the quickstart's step 4. `--front-mode host-dialed` alone is enough in host-dialed mode. `up` does not remember them across `down` (Down and up across an upgrade) ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), Single-user host).
 
 ### `VerificationFailed`
 
@@ -377,7 +377,7 @@ The deployment shows `SubmitLimitReached`. Either Slurm refused a submission, an
 
 ### A tunnel that won't connect
 
-Jobs reach the host over the dial-home route you chose at `up`, and each Instance's traffic runs through an frp tunnel to the host's frps ([HBEP-6](../hbep/0006-instance-reachability/README.md)). A broken route shows in one of three ways:
+Jobs reach the host over the dial-home route you chose at `up` (in `host-dialed` mode the host reaches the jobs, through relays: [Host-dialed relays](#host-dialed-relays)), and each Instance's traffic runs through an frp tunnel to the host's frps ([HBEP-6](../hbep/0006-instance-reachability/README.md)). A broken route shows in one of three ways:
 
 - the Instance ends with `RegistrationTimeout`, and its Provider has `DialHomeUnreachable` true: the agent never reached the host;
 - the Instance ends with `TunnelNotConnected`: the agent registered, but its proxy never came online in frps;
@@ -385,16 +385,38 @@ Jobs reach the host over the dial-home route you chose at `up`, and each Instanc
 
 Check, in this order:
 
-1. `hpcburst status`: the `front:` line shows the mode and address the record holds, `supervised frps:` must run and hold its ports, and the controller must be `ready`, since its process admits frpc's logins. While it is down, a reconnecting frpc is refused and retries.
+1. `hpcburst status`: the `front:` line shows the mode and address the record holds (host-dialed mode records none), `supervised frps:` must run and hold its ports, and the controller must be `ready`, since its process admits frpc's logins. While it is down, a reconnecting frpc is refused and retries.
 2. `TunnelConnected` with `ProxyListUnreadable` means the controller could not read frps's proxy list, which it reads from frps's web port: check the `supervised frps:` line and `logs/frps.log`.
 3. In `ssh` mode, the Provider's `DialHomeKeyMissing` (`hbk describe provider <provider>`): the key files must be in `~/.hpcburst/dial-home` on the cluster. The restricted key's lines name the launcher's port block, so a host started with another `hpcburst up --port-base` needs new keys ([quickstart, Alpha's limits](quickstart.md#alphas-limits)).
 4. In `direct` mode, `dialHomeListen` in the front's configuration must be reachable from the compute nodes, not only from your machine.
+5. In `host-dialed` mode there is no route to check from the compute nodes, and `DialHomeKeyMissing` does not apply, since the mode uses no dial-home key. Look at the relays, which carry both the agent's control traffic and the tunnel: [Host-dialed relays](#host-dialed-relays).
+
+### Host-dialed relays
+
+In `host-dialed` mode no job dials your host. The host dials each job, and the job's two connections run back over what it opened ([HBEP-6](../hbep/0006-instance-reachability/README.md), Dial-home modes). The controller keeps two relays for every running Allocation, one per channel, so control and tokens never share a connection: `control` carries the agent's control traffic and ends at the agent endpoint, `serving` carries frpc's tunnel and ends at the front's dial-home listener. Each relay is an `ssh` process of the controller, started on a connection of its own to the Provider's login node (never the Provider's shared master), that runs an `srun` step inside the job. The step is the staged agent binary itself, started as `relay control` or `relay serving`; it hands its input and output to the agent, which runs a multiplexed session over them. Model weights and images never cross a relay. On the login node each relay is an ssh session and an `srun` client that compute nothing ([HBEP-4](../hbep/0004-provider-interface/README.md), open question 14). What a relay costs is in [A controller restart](#a-controller-restart).
+
+- **See them.** The relays are children of the controller process. Take its PID from the `supervised controller:` line of `hpcburst status` and list its children with `pgrep -a -P <pid>`. A running Allocation shows two, whose command lines end in `relay control` and `relay serving`, with the job's ID in the `srun` part before them. On the node, the agent keeps its two sockets, `control.sock` and `serving.sock`, in `/tmp/hb-relay-<job ID>` (mode 700), a directory that the relay finds from the job's ID alone. Listing it takes an `srun` step in the job, with the overlap option as the relays use; the line is in [development.md](development.md#runtime-conventions).
+- **Read the log.** `logs/controller.log` has one line when a relay starts (`relay started`, with the Allocation's tag, the channel, the job and the ssh process's PID), one when it ends (`relay ended`, with how long it was up in `up`) and one for each start that is refused (`a relay did not start`, with the reason in `why`). It does not carry the ssh or `srun` error text of a relay that cannot start or ends at once, so those relays leave only these lines. The agent's own line, `host-dialed: listening for the relays`, is in the job's `job.err`, in the Allocation's directory `alloc/<tag>` on the cluster.
+- **A relay that drops** is started again by the controller after a backoff of 1 s, doubling to 30 s, with jitter; the backoff starts over once a relay has stayed up for 60 s. The streams on a dropped relay are cut: a token stream in flight ends, the front records it as cut, and frpc logs in again once the relay is back. A relay that has no job to land on does not start (next entry).
+- **`a relay did not start`.** The reason is in `why`. Before each start the controller reads the queue again, under the Allocation's tag, and starts a relay only for the job the Allocation recorded, listed as running, so a relay never lands on another job.
+  - `job <id> is not listed under tag <tag>`: the queue shows no job of that ID under that name.
+  - `job <id> is <phase>, not running`: the job is listed, but not running yet or not any more.
+  - `the listing under the tag could not be read: ...`: the read through ssh failed; the next start reads again.
+
+  A single refusal near the job's start or end needs nothing. The relay tries again after its backoff, and the controller stops the relays of an Allocation whose job is no longer running. If one repeats while the job runs, the queue and the Allocation disagree: compare the queue with the job ID and tag that `hbk describe allocation <allocation>` shows, and do not edit the Allocation's annotations ([What never to do](#what-never-to-do)).
+
+  ```cluster
+  squeue --me
+  ```
+
+- **A relay waits for a slot.** A login node carries at most 4 relays in alpha, which is 2 Allocations, the handover pair. The login node is the host and port that the Provider's credentials name, and the count is shared by every Provider of the controller that uses it. A fifth relay waits until a slot frees, and logs nothing while it waits: the sign is an Allocation with fewer than two relays in `pgrep -a -P <pid>` while four others run on the same login node. A slot frees when a relay's ssh process ends, so a relay in its backoff holds none. Until its relays run, that job's agent cannot reach the host, and an Instance still unregistered at its registration deadline ends with `RegistrationTimeout`, with `DialHomeUnreachable` on its Provider, as for any broken route above. End an Allocation you no longer need ([Stopping a deployment](#stopping-a-deployment)) or wait for one to end. The cap is fixed in alpha; a per-platform budget is HBEP-4's open question 17.
+- **A relay cannot find the agent's socket yet.** The relay step looks for the agent's sockets in `/tmp/hb-relay-<job ID>`, from the job's ID. One that starts before the agent has bound them finds nothing and exits, and the controller starts it again after its backoff. So the first seconds of a job can show a `relay started` and `relay ended` pair, with a short `up`, a few times, and nothing needs doing. If the pairs go on after the agent has started, the agent is not running in that job or has died: read `job.err`, where `host-dialed: listening for the relays` shows that it bound its sockets.
 
 ### A controller restart
 
 The supervisor restarts the controller when it exits, so a restart needs nothing from you. `hpcburst status` counts it on the `supervised controller:` line, with the last exit's detail, code and time. While it starts, its readiness reads `starting`, then `not leading` until it is elected leader of the `lifecycle` `Lease`, which can take a `Lease` duration after the old process's last renewal, then `ready`.
 
-The restarted controller re-lists every object and continues from what it observes; nothing it needs is held only in memory ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), Operational readiness 2). On taking its `Lease` it emits one `degraded` event `ObservationGap`, regarding the `Lease`, whose message names when the gap began; transitions missed meanwhile are not replayed, and the conditions are the truth ([HBEP-8](../hbep/0008-observability-and-events/README.md), Gaps after a restart). The agents register again within a poll, and no `AgentUnreachable` is judged until then. Established tunnels stay up. Events that repeat at most once an hour, such as `HeartbeatMissed`, fire once more.
+The restarted controller re-lists every object and continues from what it observes; nothing it needs is held only in memory ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), Operational readiness 2). On taking its `Lease` it emits one `degraded` event `ObservationGap`, regarding the `Lease`, whose message names when the gap began; transitions missed meanwhile are not replayed, and the conditions are the truth ([HBEP-8](../hbep/0008-observability-and-events/README.md), Gaps after a restart). The agents register again within a poll (in `host-dialed` mode, once their control relay is back), and no `AgentUnreachable` is judged until then. In `direct` and `ssh` modes established tunnels stay up and no stream is cut. In `host-dialed` mode they do not: the controller owns the relays, so a restart, or a loss of its `Lease`, stops them by PID, and the token streams in flight on them are cut. The front records each as cut, and frpc logs in again once the new leader has started both relays of every running Allocation ([Host-dialed relays](#host-dialed-relays)). Events that repeat at most once an hour, such as `HeartbeatMissed`, fire once more.
 
 ```
 hbk get leases -n hpcburst-system
@@ -406,7 +428,7 @@ A `restarts` count that keeps rising is a crash loop: `logs/controller.log` in t
 
 `hpcburst down` stops the supervisor, which stops the controllers, the front and frps, then k3s, and confirms that nothing of theirs still listens. It removes the host's record and kubeconfigs, and keeps the data directory, the record of the k3s release that wrote the store, and the agent endpoint's certificate, whose pin the running agents hold. It does not call the clusters: jobs keep running to their hard ends. While the host is down no front serves requests, and the tunnels drop until frps returns.
 
-To run a new build of the framework, stop the host, rebuild, and start it with **the same flags as before**, since `down` forgot them. Without `hpcburst up --front-mode` and `--front-addr` every deployment shows `FrontNotConfigured`; with another `--port-base` the agents' restricted keys and recorded ports no longer match. `--manifests config/crd` applies the CRDs again with server-side apply, which is safe to repeat. `up` also installs the CRD deletion guard on every start, whatever `--manifests` names, so a restart never leaves the host without it ([What never to do](#what-never-to-do)).
+To run a new build of the framework, stop the host, rebuild, and start it with **the same flags as before**, since `down` forgot them. Without `hpcburst up --front-mode` (and `--front-addr`, in `direct` and `ssh` modes) every deployment shows `FrontNotConfigured`; in `host-dialed` mode the flags are `--front-mode host-dialed` alone, with no `--front-addr` and no `--front-key`, and the jobs' connections stay down after `up` until the controller has started the relays again; with another `--port-base` the agents' restricted keys and recorded ports no longer match. `--manifests config/crd` applies the CRDs again with server-side apply, which is safe to repeat. `up` also installs the CRD deletion guard on every start, whatever `--manifests` names, so a restart never leaves the host without it ([What never to do](#what-never-to-do)).
 
 ```
 bin/hpcburst down --state-dir "$STATE"
