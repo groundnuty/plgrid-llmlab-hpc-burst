@@ -67,6 +67,8 @@ type relayState struct {
 	provider string
 	hosts    *hostdial.Hosts
 
+	reader client.Reader // the Provider's age, for the login host's register
+
 	mu     sync.Mutex
 	cfg    slurm.SSHConfig
 	ssh    *sshrun.Relay
@@ -142,7 +144,17 @@ var errRelaysClosed = errors.New("the Provider's relays have stopped")
 // host-dialed Provider per login host (HBEP-6, Capacity).
 func (r *relayState) claimLogin(cfg slurm.SSHConfig) (login, inUse string, err error) {
 	if !r.hosts.Enrolled(r.provider) {
-		return "", "", fmt.Errorf("Provider %s has not enrolled for a login host yet", r.provider)
+		// The manager's start enrolls it (enrollRunnable); a first claim that
+		// comes sooner enrolls it here, rather than reading as a host in use.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := r.enroll(ctx, r.reader)
+		cancel()
+		if err != nil {
+			return "", "", err
+		}
+		if !r.hosts.Enrolled(r.provider) {
+			return "", "", errRelaysClosed
+		}
 	}
 	rel, err := r.relay(cfg)
 	if err != nil {

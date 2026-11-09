@@ -110,5 +110,31 @@ type fencedManager struct {
 
 func (m fencedManager) RelayFence() *RelayFence { return m.fence }
 
+// Unwrap is the manager under the fence.
+func (m fencedManager) Unwrap() manager.Manager { return m.Manager }
+
 // relayFenced is a manager that carries a RelayFence (NewProviderManager's).
 type relayFenced interface{ RelayFence() *RelayFence }
+
+// wireRelayFence gives the controller's relays the fence of mgr: the epoch of
+// this copy's own acquisition, and the relays' stop by PID before any release
+// of the Lease. A host-dialed controller needs one, unless its settings bring
+// their own epoch reader (a test of the controller alone).
+func wireRelayFence(mgr manager.Manager, c *Controller) error {
+	r := c.shared.relays
+	if r == nil {
+		return nil
+	}
+	f, ok := mgr.(relayFenced)
+	if !ok {
+		if r.settings.Epoch == nil {
+			return errors.New("providerctl: host-dialed mode needs the Provider manager's relay fence (NewProviderManager)")
+		}
+		return nil
+	}
+	if r.settings.Epoch == nil {
+		r.settings.Epoch = f.RelayFence().Epoch
+	}
+	f.RelayFence().BeforeRelease(c.StopRelays)
+	return nil
+}

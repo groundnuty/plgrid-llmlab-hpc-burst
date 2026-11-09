@@ -2,7 +2,6 @@ package providerctl
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
@@ -72,6 +71,9 @@ func New(kube client.Client, reader client.Reader, scheme *runtime.Scheme, o Opt
 	relays, err := newRelayState(o)
 	if err != nil {
 		return nil, err
+	}
+	if relays != nil {
+		relays.reader = reader
 	}
 	s := &shared{o: o, kube: kube, reader: reader, builds: &buildCache{}, relays: relays}
 	s.h = &holder{o: &s.o}
@@ -146,13 +148,8 @@ func Setup(mgr manager.Manager, o Options) error {
 		// The epoch is this copy's own acquisition's, and the relays stop by
 		// PID before any release of the Provider's Lease (HBEP-6, Fencing):
 		// the fence on the manager's own lock gives both.
-		if f, ok := mgr.(relayFenced); ok {
-			if r.settings.Epoch == nil {
-				r.settings.Epoch = f.RelayFence().Epoch
-			}
-			f.RelayFence().BeforeRelease(c.StopRelays)
-		} else if r.settings.Epoch == nil {
-			return errors.New("providerctl: host-dialed mode needs the Provider manager's relay fence (NewProviderManager)")
+		if err := wireRelayFence(mgr, c); err != nil {
+			return err
 		}
 		// Leader-only: only the leader's relays run.
 		if err := mgr.Add(relayRunnable{c}); err != nil {

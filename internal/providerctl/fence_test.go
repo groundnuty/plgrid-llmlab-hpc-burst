@@ -16,6 +16,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/hostdial"
 )
 
 // memLock is a Lease in memory that several copies' locks share.
@@ -31,6 +33,8 @@ type memLease struct {
 	rec *resourcelock.LeaderElectionRecord
 	// log is every write, in order, with the holder it named.
 	log []string
+	// onRelease, when set, is told of a release write as it lands.
+	onRelease func()
 }
 
 func (l *memLock) Get(context.Context) (*resourcelock.LeaderElectionRecord, []byte, error) {
@@ -60,6 +64,9 @@ func (l *memLock) Update(_ context.Context, ler resourcelock.LeaderElectionRecor
 	defer l.store.mu.Unlock()
 	if l.failRenew && ler.HolderIdentity != "" {
 		return errors.New("the API server does not answer")
+	}
+	if ler.HolderIdentity == "" && l.store.onRelease != nil {
+		l.store.onRelease()
 	}
 	l.store.rec = &ler
 	l.store.log = append(l.store.log, "write:"+ler.HolderIdentity)
@@ -119,6 +126,7 @@ func TestTheRelaysStopBeforeTheLeaseIsReleasedOnARenewalFailure(t *testing.T) {
 	var mu sync.Mutex
 	var order []string
 	note := func(s string) { mu.Lock(); order = append(order, s); mu.Unlock() }
+	lease.onRelease = func() { note("lease released") }
 	fence.BeforeRelease(func() {
 		time.Sleep(200 * time.Millisecond) // a stop that takes a while: the release must wait for it
 		note("relays stopped")
@@ -158,9 +166,42 @@ func TestTheRelaysStopBeforeTheLeaseIsReleasedOnARenewalFailure(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(order) != 2 || order[0] != "relays stopped" || order[1] != "stopped leading" {
+	if len(order) != 3 || order[0] != "relays stopped" || order[1] != "lease released" || order[2] != "stopped leading" {
 		t.Errorf("the order was %q; want the relays stopped, then the release, then OnStoppedLeading", order)
 	}
 }
 
 func metaTime(t time.Time) metav1.Time { return metav1.NewTime(t) }
+
+// The wiring of the fence (D2): the Provider manager's fence gets the
+// controller's relay stop as its release hook and gives the controller its
+// epoch, so a release of the Lease finds the controller's relays stopped.
+func TestTheFenceStopsTheControllersRelaysBeforeARelease(t *testing.T) {
+	e := newEnv(t, func(e *env) { hostDialedWith(e, hostdial.NewHosts(), 1000); e.opts.Relays.Epoch = nil })
+	lease := &memLease{}
+	fence := NewRelayFence(&memLock{id: "copy-a", store: lease})
+	if err := wireRelayFence(fencedManager{fence: fence}, e.ctl); err != nil {
+		t.Fatal(err)
+	}
+	if err := fence.Create(context.Background(), resourcelock.LeaderElectionRecord{HolderIdentity: "copy-a", LeaderTransitions: 2, LeaseDurationSeconds: 15}); err != nil {
+		t.Fatal(err)
+	}
+	runRelays(e)
+	e.newAlloc("alloc-a")
+	e.run("alloc-a", 4)
+	tag := tagOf(e.get("alloc-a"))
+	waitRelays(t, "both relays kept, with the fence's epoch", func() bool {
+		rs := relaysOf(e, tag)
+		return len(rs) == 2 && rs[0].Epoch == 2 && rs[1].Epoch == 2
+	})
+	if err := fence.Update(context.Background(), resourcelock.LeaderElectionRecord{LeaderTransitions: 2, LeaseDurationSeconds: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if rs := relaysOf(e, tag); len(rs) != 0 {
+		t.Errorf("the controller keeps %d relays after the Lease's release", len(rs))
+	}
+	e.run("alloc-a", 1)
+	if rs := relaysOf(e, tag); len(rs) != 0 {
+		t.Errorf("a relay started after the Lease's release: %+v", rs)
+	}
+}

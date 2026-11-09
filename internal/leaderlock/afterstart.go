@@ -55,6 +55,9 @@ func ReleaseAfterStart(mgr manager.Manager, lock *Renewals, log logr.Logger) man
 // ReleasesAfterStart reports whether mgr is from ReleaseAfterStart, for the
 // tests of the code that builds the managers.
 func ReleasesAfterStart(mgr manager.Manager) bool {
+	if u, ok := mgr.(interface{ Unwrap() manager.Manager }); ok {
+		mgr = u.Unwrap()
+	}
 	_, ok := mgr.(*releasingManager)
 	return ok
 }
