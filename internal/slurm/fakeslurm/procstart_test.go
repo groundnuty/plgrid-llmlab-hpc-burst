@@ -169,7 +169,14 @@ func TestProcessesEndWhenTheirHostDiesWithoutClose(t *testing.T) {
 			case <-time.After(waitDeadline):
 				t.Fatalf("the helper host did not die (%s)", how)
 			}
-			waitFor(t, "the batch shell and the step's program to end with their host", func() bool { return procGone(pids[0]) && procGone(pids[1]) })
+			// The kernel ends them when the host's last thread does: milliseconds. The deadline is only generous.
+			deadline := time.Now().Add(20 * time.Second)
+			for !(procGone(pids[0]) && procGone(pids[1])) {
+				if time.Now().After(deadline) {
+					t.Fatalf("after the host died (%s): shell %d is %s, step program %d is %s", how, pids[0], procState(pids[0]), pids[1], procState(pids[1]))
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
 		})
 	}
 }
