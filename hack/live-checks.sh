@@ -59,8 +59,9 @@
 # that started, a job a read does not list, and a read that fails are failures that name what they found, exit 1. That read
 # is not the last word: a job can start between it and the cancel, so every row reads the job's history once it is cancelled.
 # real-engine does too (#297): after the cleanup has cancelled its job it asks sacct --json, and only the form of the real GH200
-# reply for a job never started (a bare 4294967294 start, state CANCELLED) is NOT RUN; a start time is a FAIL that names it, and a
-# history it cannot read is a FAIL that says so.
+# reply for a job never started (a bare 4294967294 start, state CANCELLED, one plain record, restart count 0) is NOT RUN; a start time
+# is a FAIL that names it, and a history it cannot read is a FAIL that says so. python3 decodes the reply: the host needs it, and
+# prepare_real_engine fails the row before it builds or submits anything when it is missing (LIVE_PYTHON names another interpreter).
 # A test that finds a job still not started at the bound cancels what it submitted by the tags it wrote down,
 # writes the line it wants to report to not-run.txt in its record directory, and SKIPS at the top level (t.Skip).
 # Nothing else: it fails nothing and exits 0. The script reads that, and only that, as NOT RUN (not_run_verdict):
