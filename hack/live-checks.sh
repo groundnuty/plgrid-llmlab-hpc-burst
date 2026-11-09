@@ -181,8 +181,7 @@ TABLE
 # should have one, so that a busy queue does not hold the slot for hours.
 # conformance-helios (no slot) has one of 30 min, the 30 minutes its steps always waited and then failed on: a queue
 # wait tests nothing, so past it the job is cancelled by its tag and the row is NOT RUN, not a FAIL (the science
-# agent's ruling of 8 Nov 2026, #272). Its timeout of 85 min is the test's own deadlines with that wait, two start
-# waits of 30 min and 24 min for the jobs that already run (qos_test.go compares them), and a margin of 1 min.
+# agent's ruling of 8 Nov 2026, #272). Its timeout is below, with every other row's worst case.
 # The conformance time limit is the harness's own (allocTimeLimit "5m", conformance_test.go;
 # TestConformanceRowsPassTheRequestCheck compares them); the real-engine one is the documented
 # run's (spikes/s94/README.md).
@@ -199,28 +198,41 @@ TABLE
 # scheduler's acceptance of 1 CPU and 1Gi is not recorded (the conformance run used 4 CPUs and 32Gi): the estimate below,
 # sbatch --test-only, is the first check, and a rejected shape ends the row as not run (exit 3). The job runs for seconds and
 # has its own time limit of 2 min (reachTimeLimit in reach_run_test.go, not the harness's 5 min: a stalled job holds the one-job
-# slot that long at most); the timeout of 20 min is the start wait, the job's end (2 min and a minute) and a margin
-# (reachEndWait and reachCleanupWait there; qos_test.go compares them). The Helios row asks for -C memfs, as the Helios profile does for
+# slot that long at most). The Helios row asks for -C memfs, as the Helios profile does for
 # every job.
 # gpu-accounting-helios (issue #194) has the same two guards as conformance-helios-gh200: it starts only when squeue --me shows
-# no job in QOS now, and its one job must start within 10 min of its acceptance (else cancelled by its tag, NOT RUN, exit 3).
-# Its timeout of 30 min is that wait, the job's few minutes, the deletion that writes the kept record, and a margin. The
+# no job in QOS now, and its one job must start within 10 min of its acceptance (else cancelled by its tag, NOT RUN, exit 3). The
 # row's other guard, the wait of LIVE_PENDING_MAX_SECONDS, applies to gpu-accounting-athena only, which has no slot.
 # conformance-helios-gh200: it starts only when squeue --me shows no job in QOS now, pending or running, whoever's (exit 3,
 # "skipped: the now slot is in use"), and each of its two jobs (step 1, step 3) must start within 10
-# min of its acceptance. Its worst case is then about 25 min: two start waits of 10 min and about
-# 5 min of running. Its timeout of 45 min is the test's own deadlines (10+5+3+10+8+3+3, the 22 min
-# after the start waits being for jobs that already run, plus 2 min for the end-of-run check for a
-# late duplicate, 44 in all) and a margin of 1 min, so a slow cleanup fails in the test, with its
-# message, before this cap does.
+# min of its acceptance. A run that goes well takes about 25 min: two start waits of 10 min and about 5 min of running.
 # conformance-athena, in Athena's one-job slot (the partition plgrid-now), has the same guard, the same start wait and so the
 # same timeout (the science agent's rule of 2 Nov 2026: every slot row has a bound; see the header).
+#
+# Each row's worst case: every wait its test has, each to its end, added up from the code, so that the timeout lets the row's
+# bound fire first and a slow cleanup fails in the test, with its message. The timeout column is that and a margin of at
+# least 3 min, for the calls each poll makes and the run's own cleanup. "the wait" is the row's wait in the queue, which the
+# script adds to the column (execute_cluster), one for each of a row's jobs. The figures are checked against the code:
+# internal/providerctl/conformance (budget_test.go) adds up each test's own source; hack/livechecks (budget_test.go) has
+# the stack rows' from internal/alpha, Row.WorstCase, and fails a row with no figure.
+# worst case of conformance-helios: 87 min (two start waits of 30, then 5 to delete, 3 for accounting, 8 for the second job, 3 for accounting, 6 for the job name's two loops of 36 polls 5 s apart, 2 for a late duplicate)
+# worst case of conformance-helios-gh200: 47 min (two start waits of 10, then the same 27)
+# worst case of conformance-athena: 47 min (the same)
+# worst case of real-engine: the wait + 72 min (its time limit of 57 and the margin of 15; no timeout wraps it, its own two clocks end it)
+# worst case of alpha-athena-handover: the wait + 122 min (91 to the drain start, 5 for the streams across it, 15 and 5 for the primary to end, 1 for the guard's last looks, 5 to close; its successor must start by the drain start)
+# worst case of alpha-helios-nooverlap: 2 waits + 177 min (the wait, 106 for the predecessor's lease, the wait, 60 and 5 for the successor to be ready, 1 for the guard's last looks, 5 to close)
+# worst case of tunnel-hour-helios: the wait + 147 min (at the default lease of 137: 122 to the drain start, 15 and 5 for the job to end, 5 to close)
+# worst case of tunnel-hour-athena: the wait + 147 min (the same)
+# worst case of gpu-accounting-helios: 25 min (a start wait of 10, then 10 for the job to end and 5 for the deletion)
+# worst case of gpu-accounting-athena: the wait + 15 min (the same, with the wait for the start wait)
+# worst case of reach-helios: 13 min (a start wait of 10, then 3 for the job to end)
+# worst case of reach-athena: 13 min (the same)
 cluster_table() {
   cat <<'TABLE'
 # BEGIN CLUSTER SHAPES
-conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|85|-|30
-conformance-helios-gh200|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|45|-C memfs|10
-conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|45|-|10
+conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|90|-|30
+conformance-helios-gh200|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|50|-C memfs|10
+conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|50|-|10
 real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|75|-C memfs
 alpha-athena-handover|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|01:46:00|150|-
 alpha-helios-nooverlap|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|200|-C memfs

@@ -2,8 +2,10 @@ package livechecks
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,6 +72,71 @@ func TestEveryStackRowsTimeoutIsAboveItsWorstCase(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+// statedWorstCase is what the script's comment states for a row: the waits in the queue, and the minutes beside them.
+var statedWorstCase = regexp.MustCompile(`(?m)^# worst case of ([a-z0-9-]+): (the wait \+ |2 waits \+ )?(\d+) min`)
+
+// Every row of the cluster table states its worst case, and its timeout column is above it by the margin of 3 minutes. A row
+// added later fails here until it does. A stated figure proves nothing by itself, so each is recomputed where the code
+// is: the stack rows' below, from the steps' waits; conformance, accounting and reach from their test's source
+// (internal/providerctl/conformance, TestEveryRowsTimeoutIsAboveTheWorstCaseItsSourceAddsUpTo); real-engine's from its
+// time limit and the margin of its own poll in the script, since no timeout wraps it.
+func TestEveryRowsTimeoutIsAboveItsStatedWorstCase(t *testing.T) {
+	raw, err := os.ReadFile(scriptPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	type figure struct{ waits, minutes int }
+	stated := map[string]figure{}
+	for _, m := range statedWorstCase.FindAllStringSubmatch(string(raw), -1) {
+		n, _ := strconv.Atoi(m[3])
+		stated[m[1]] = figure{map[string]int{"": 0, "the wait + ": 1, "2 waits + ": 2}[m[2]], n}
+	}
+	seen := map[string]bool{}
+	for _, l := range block(t, string(raw), "CLUSTER SHAPES") {
+		f := strings.Split(l, "|")
+		name := f[0]
+		seen[name] = true
+		fig, ok := stated[name]
+		if !ok {
+			t.Errorf("%s states no worst case in the script's comment", name)
+			continue
+		}
+		timeout, err := strconv.Atoi(f[11])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if timeout < fig.minutes+3 {
+			t.Errorf("%s: its timeout of %d min is not above its worst case of %d min by the margin of 3", name, timeout, fig.minutes)
+		}
+		if name == "real-engine" {
+			margin := regexp.MustCompile(`margin=\$\{LIVE_RUN_MARGIN_SECONDS:-(\d+)\}`).FindStringSubmatch(string(raw))
+			if margin == nil {
+				t.Fatal("real-engine's margin is not in the script")
+			}
+			limit, err := time.ParseDuration(strings.Replace(strings.Replace(f[10], ":", "h", 1), ":", "m", 1) + "s")
+			if err != nil {
+				t.Fatal(err)
+			}
+			seconds, _ := strconv.Atoi(margin[1])
+			if want := int(limit/time.Minute) + seconds/60; fig.minutes != want || fig.waits != 1 {
+				t.Errorf("real-engine states %+v, and its time limit and its poll's margin add up to the wait and %d", fig, want)
+			}
+		}
+		if row, ok := alpha.RowByName(name); ok && (strings.HasPrefix(name, "alpha-") || strings.HasPrefix(name, "tunnel-hour-")) {
+			// WorstCase is linear in the wait up to a tunnel row's cap: two waits under it give the figure's two numbers.
+			a, b := row.WorstCase(30*time.Minute), row.WorstCase(60*time.Minute)
+			if waits := int((b - a) / (30 * time.Minute)); waits != fig.waits || a != time.Duration(fig.waits*30+fig.minutes)*time.Minute {
+				t.Errorf("%s states %+v, and its steps' waits give %s at a wait of 30 min and %s at 60", name, fig, a, b)
+			}
+		}
+	}
+	for name := range stated {
+		if !seen[name] {
+			t.Errorf("the script's comment states a worst case for %s, which is no row of the cluster table", name)
 		}
 	}
 }

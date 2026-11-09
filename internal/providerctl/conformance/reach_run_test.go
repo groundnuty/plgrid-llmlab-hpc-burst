@@ -52,12 +52,8 @@ const (
 const reachTimeLimit = "2m"
 
 // reachEndWait is how long the job may take after it has started: its time limit and a minute for the scheduler to
-// close it. hack/live-checks.sh's timeout for the rows covers the start wait and this (qos_test.go compares them).
+// close it. hack/live-checks.sh's timeout for the rows covers the start wait and this (budget_test.go adds them up).
 const reachEndWait = 3 * time.Minute
-
-// reachCleanupWait is what the script's timeout leaves after the job's end for the read-back and the end-of-run
-// cleanup (cancel by tag, removal of the staging directory); qos_test.go compares it with the rows' timeouts.
-const reachCleanupWait = 3 * time.Minute
 
 // reachFile is the file in the Allocation's directory (agentapi.AllocationDir) that holds the result.
 const reachFile = "reach"

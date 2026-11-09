@@ -55,7 +55,7 @@ var dryGPUAgent = []byte("#!/bin/sh\nprintf 'cvd=%s smi=%s\\n' \"$FAKE_NODE_CVD\
 
 // The accounting row's own deadlines, after its start wait: the job ends (it runs 20 s), and the deleted
 // Allocation lets go of its finalizer once the kept record is written. hack/live-checks.sh's timeout for the
-// row covers the start wait and these (qos_test.go compares them).
+// row covers the start wait and these (budget_test.go adds them up).
 const (
 	accountingEndWait    = 10 * time.Minute
 	accountingDeleteWait = 5 * time.Minute

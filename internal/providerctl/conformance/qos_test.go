@@ -267,8 +267,8 @@ func TestGH200RowIsCheckedUnderQOSNow(t *testing.T) {
 		t.Fatal("hack/live-checks.sh has no conformance-helios-gh200 row")
 	}
 	if row.host != "helios" || row.profile != "helios" || row.partition != "plgrid-gpu-gh200" || row.qos != "now" || row.slot != "now" ||
-		row.acctKey != "ACCOUNT_HELIOS_GH200" || row.gpus != "1" || row.startWait != "10" || row.timeout != "45" {
-		t.Errorf("row = %+v, want Helios, profile helios, plgrid-gpu-gh200, qos now, slot now, ACCOUNT_HELIOS_GH200, 1 GPU, a start wait of 10 min and a timeout of 45 min (the test reaches the timeout command: TestTheRowsTimeoutReachesTheTestBinary)", *row)
+		row.acctKey != "ACCOUNT_HELIOS_GH200" || row.gpus != "1" || row.startWait != "10" || row.timeout != "50" {
+		t.Errorf("row = %+v, want Helios, profile helios, plgrid-gpu-gh200, qos now, slot now, ACCOUNT_HELIOS_GH200, 1 GPU, a start wait of 10 min and a timeout of 50 min (the test reaches the timeout command: TestTheRowsTimeoutReachesTheTestBinary)", *row)
 	}
 	s, v := row.validated(t)
 	good := row.request(t, s)
@@ -446,13 +446,9 @@ func TestBothAmbiguousSubmissionsAreWrittenDown(t *testing.T) {
 
 // The row's start wait (the science agent's ruling, 2 Nov 2026: each step's job
 // must start within 10 minutes of its acceptance) reaches the run as
-// HPCBURST_CONF_START_WAIT, and the row's timeout is not below what the test
-// can take with it: two start waits, and the test's other deadlines on jobs that
-// already run (5 min to delete, 3 for accounting, 8 for the second job, 3 for
-// accounting, 3 for the name round trip), and the end-of-run wait for a late
-// duplicate: 44 min for the GH200 row, under its 45.
-func TestTheGH200RowsStartWaitReachesTheRunAndItsTimeoutCoversTheTest(t *testing.T) {
-	otherDeadlines := 5 + 3 + 8 + 3 + 3 + int(duplicateWait/time.Minute)
+// HPCBURST_CONF_START_WAIT. Whether its timeout covers what the test can take with
+// it is TestEveryRowsTimeoutIsAboveTheWorstCaseItsSourceAddsUpTo's.
+func TestTheGH200RowsStartWaitReachesTheRun(t *testing.T) {
 	seen := 0
 	for _, r := range readShapeRows(t) {
 		if r.profile == "-" || r.startWait == "-" || notAConformanceRun(r.name) {
@@ -467,23 +463,6 @@ func TestTheGH200RowsStartWaitReachesTheRunAndItsTimeoutCoversTheTest(t *testing
 			s, _ := r.validated(t)
 			if s.startWait != time.Duration(n)*time.Minute {
 				t.Errorf("the run's startWait = %v, the row says %d min", s.startWait, n)
-			}
-			timeout, err := strconv.Atoi(r.timeout)
-			if err != nil {
-				t.Fatal(err)
-			}
-			want := 2*n + otherDeadlines
-			if strings.HasPrefix(r.name, "gpu-accounting-") {
-				// The accounting row has one job: its start wait, then its end wait and the deletion (gpuacct_test.go).
-				want = n + int((accountingEndWait+accountingDeleteWait)/time.Minute)
-			}
-			if strings.HasPrefix(r.name, "reach-") {
-				// The reach row has one job: its start wait, then its end wait, and the read-back and the cleanup after it
-				// (reach_run_test.go).
-				want = n + int((reachEndWait+reachCleanupWait)/time.Minute)
-			}
-			if timeout < want {
-				t.Errorf("timeout %d min is below the test's own deadlines with this start wait, %d min", timeout, want)
 			}
 		})
 	}
