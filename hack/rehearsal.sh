@@ -7,7 +7,8 @@
 #
 # Optional:
 #   HPCBURST_SSHD           sshd for the fake login node and the gateway (default /usr/sbin/sshd)
-#   REHEARSAL_RUN           a -test.run pattern (default '^TestRehearsal(Direct|SSH)$', issue #146's two;
+#   REHEARSAL_RUN           a -test.run pattern (default '^TestRehearsal(Direct|SSH|HostDialed)$', issue #146's two
+#                           and #298's host-dialed mode;
 #                           '^TestRehearsalPart3$' runs issue #193's third part, about 8 minutes more)
 #   REHEARSAL_OUT           where the binaries go (default a new temporary directory)
 #   REHEARSAL_PREBUILT=1    run the binaries already in REHEARSAL_OUT instead of building them,
@@ -18,7 +19,8 @@
 #   HPCBURST_TEST_ROOT_K3S=1  a system k3s runs here: the test fails unless it listens on 6443,
 #                           6444 and 10250. Without it, the test records whichever of them listen
 #                           and fails if that changes.
-# It binds 127.0.0.1 only, on ports 29500-29539 (issue #146's tests), 29680-29699 (issue #193's)
+# It binds 127.0.0.1 only, on ports 29500-29539 (issue #146's tests), 29780-29799 (#298's host-dialed
+# mode), 29680-29699 (issue #193's)
 # and kernel-chosen ones, and never touches a system k3s.
 #
 # The test starts k3s, the supervisor, the fake jobs and the sshds in sessions of their own, and
@@ -106,7 +108,7 @@ cd internal/rehearsal/scenario
 HPCBURST_REHEARSAL=1 HPCBURST_REHEARSAL_BIN="$out" HPCBURST_REQUIRE_FRP=1 HPCBURST_REQUIRE_SSHD=1 \
 	systemd-run --user --scope --collect -q --unit="$unit" \
 	-p MemoryMax="${REHEARSAL_MEMORY_MAX:-4G}" -p MemorySwapMax=0 \
-	"$out/rehearsal.test" -test.v -test.timeout "${REHEARSAL_TIMEOUT:-30m}" -test.run "${REHEARSAL_RUN:-^TestRehearsal(Direct|SSH)\$}" &
+	"$out/rehearsal.test" -test.v -test.timeout "${REHEARSAL_TIMEOUT:-30m}" -test.run "${REHEARSAL_RUN:-^TestRehearsal(Direct|SSH|HostDialed)\$}" &
 child=$!
 rc=0
 wait "$child" || rc=$?
