@@ -78,7 +78,8 @@ func TestWatchOverhead(t *testing.T) {
 			got := measureArm(t, r, pid, arm, time.Duration(window)*time.Second)
 			runs[arm.name] = append(runs[arm.name], got)
 			load, _ := os.ReadFile("/proc/loadavg")
-			t.Logf("OVERHEAD round %d %-5s: k3s CPU %6.2f%% of a core; watch calls %3d; cycles %d; resets %d; load %s", round+1, arm.name, got.cpuPct, got.calls, got.cycles, got.resets, strings.Join(strings.Fields(string(load))[:1], ""))
+			t.Logf("OVERHEAD round %d %-5s: k3s CPU %6.2f%% of a core; watch calls %3d; cycles %d; resets %d; load %s; create p50 %s p99 %s; list p50 %s p99 %s; delete p50 %s p99 %s", round+1, arm.name, got.cpuPct, got.calls, got.cycles, got.resets, strings.Join(strings.Fields(string(load))[:1], ""),
+				latency(got.create, .5), latency(got.create, .99), latency(got.list, .5), latency(got.list, .99), latency(got.delete, .5), latency(got.delete, .99))
 			switch {
 			case arm.seconds == 3600 && got.calls != 0:
 				t.Errorf("the long arm made %d Watch calls in its window: it did not hold one connection", got.calls)
@@ -230,15 +231,17 @@ func processCPU(t *testing.T, pid int) time.Duration {
 	return time.Duration(utime+stime) * time.Second / userHZ
 }
 
+// latency is the q-quantile of the times.
+func latency(d []time.Duration, q float64) time.Duration {
+	d = slices.Sorted(slices.Values(d))
+	return d[int(float64(len(d)-1)*q)].Round(10 * time.Microsecond)
+}
+
 // reportOverhead logs each arm's median CPU and pooled latencies, and each round's
 // difference from the long arm. The spread of the rounds is the noise a difference
 // must clear.
 func reportOverhead(t *testing.T, arms []overheadArm, runs map[string][]armRun) {
 	t.Helper()
-	pct := func(d []time.Duration, q float64) time.Duration {
-		d = slices.Sorted(slices.Values(d))
-		return d[int(float64(len(d)-1)*q)].Round(10 * time.Microsecond)
-	}
 	for _, arm := range arms {
 		var cpu []float64
 		var create, list, del []time.Duration
@@ -250,7 +253,7 @@ func reportOverhead(t *testing.T, arms []overheadArm, runs map[string][]armRun) 
 		}
 		slices.Sort(cpu)
 		t.Logf("OVERHEAD %-5s: k3s CPU %% of a core, by round %.2f; %d cycles; create p50 %s p99 %s; list p50 %s p99 %s; delete p50 %s p99 %s",
-			arm.name, cpu, cycles, pct(create, .5), pct(create, .99), pct(list, .5), pct(list, .99), pct(del, .5), pct(del, .99))
+			arm.name, cpu, cycles, latency(create, .5), latency(create, .99), latency(list, .5), latency(list, .99), latency(del, .5), latency(del, .99))
 	}
 	for _, other := range []string{"none", "short"} {
 		var diffs []string
