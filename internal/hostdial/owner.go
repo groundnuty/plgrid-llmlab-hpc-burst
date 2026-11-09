@@ -399,7 +399,11 @@ func (r *relay) once(ctx context.Context) (time.Duration, bool) {
 	r.mu.Lock()
 	r.pid = 0
 	r.mu.Unlock()
-	o.Logger.Info("relay ended", "tag", r.t.Tag, "channel", r.ch, "job", id, "up", up.Round(time.Millisecond))
+	exit := -1
+	if ps := p.cmd.ProcessState; ps != nil {
+		exit = ps.ExitCode()
+	}
+	o.Logger.Info("relay ended", "tag", r.t.Tag, "channel", r.ch, "job", id, "up", up.Round(time.Millisecond), "exit", exit)
 	return up, true
 }
 
