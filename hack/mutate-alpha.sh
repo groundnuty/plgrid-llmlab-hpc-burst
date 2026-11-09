@@ -9,9 +9,9 @@
 #
 # Before the first mutant of each kind the tests of that kind run with no mutant, under the same command: if they fail, or do
 # not compile, the run stops (exit 2), since a test that already fails would count every mutant as killed (#285).
-# A mutant ends as KILLED (a test fails and passes with no mutant, and the line names it, or names the timeout or the panic that
-# ended a run with no failing test), SURVIVED (every test passes) or BROKEN: its text does not occur exactly once, the Go file it
-# changes no longer compiles, or the only tests that failed also fail with no mutant when run again, which is no kill. A mutant that
+# A mutant ends as KILLED (a test fails and passes with no mutant, and the line names it; or a run ended with no failing test, by what
+# the line names, and the same command passes with no mutant), SURVIVED (every test passes) or BROKEN: its text does not occur exactly
+# once, the Go file it changes no longer compiles, or what ended the run also does so with no mutant, which is no kill. A mutant that
 # does not compile fails to build the tests, and that is not a test failing, so it is reported as BROKEN, never as killed; the
 # run fails for a survivor and for a broken mutant alike. The run ends with how many kills each failing test made, so a shared cause shows. The
 # compile is its own step, to one fixed test-binary path per package, and the binary then runs: so MUTATE_ALPHA_BUILD_LOCK,
@@ -27,7 +27,9 @@
 #                                               test binaries to spare it two builds per mutant.
 #
 # It edits files in the working tree and restores each from a copy it makes first, also on any exit, so run it
-# on a checkout with no uncommitted change to them. Run it under a memory cap (docs/development.md).
+# on a checkout with no uncommitted change to them. Run it under a memory cap (docs/development.md). Each run has an external bound
+# (MUTATE_ALPHA_RUN_BOUND, seconds), and what it leaves in its process group is killed before the next. A TERM stops it at once,
+# except during a compile, which it lets finish.
 set -u -o pipefail
 cd "${MUTATE_ALPHA_ROOT:-$(dirname "$0")/..}" || exit 2   # the tree to mutate; the tests of this script point it at a throwaway module
 pkg=internal/alpha
@@ -575,17 +577,18 @@ compile_of() {
 }
 # The tests of the script's kind.
 script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot'
-# tests_of <path> [<names>]: the command that judges a mutant of path, in the array tests. With names (a regexp), the command that
-# runs those tests alone, to the end, with no mutant: from the binaries kept at the baseline, the tree being as it was. The
+# tests_of <path> [control|<names>]: the command that judges a mutant of path, in the array tests. With control, the same command with
+# no mutant: from the binaries kept at the baseline, the tree being as it was. With names (a regexp), that, for those tests alone, to
+# the end. The
 # package's run has -test.timeout 300s, not less: internal/rehearsal/stack gives up its waits two minutes before the test's deadline
 # (CleanupMargin), so at 120s every wait on state failed at once and the unmutated tests failed, which counted every mutant
 # of the package as killed (#285).
 tests_of() {
   local names=${2:-} pkgbin=$tmp/pkg.test confbin=$tmp/conf.test
   local bin=(-test.count=1 -test.timeout 300s -test.failfast) sel=(-failfast -run "$script_tests") dry=PendingPastTheBound
-  if [ -n "$names" ]; then
-    pkgbin=$tmp/base-pkg.test confbin=$tmp/base-conf.test dry=$names
-    bin=(-test.count=1 -test.timeout 300s -test.run "$names") sel=(-run "$names")
+  if [ -n "$names" ]; then pkgbin=$tmp/base-pkg.test confbin=$tmp/base-conf.test; fi
+  if [ -n "$names" ] && [ "$names" != control ]; then
+    dry=$names bin=(-test.count=1 -test.timeout 300s -test.run "$names") sel=(-run "$names")
   fi
   case $1 in
     hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 "${sel[@]}" ./hack/livechecks) ;;
@@ -599,11 +602,34 @@ tests_of() {
 failing_tests() { sed -n -E 's/^--- FAIL: ([^ ]+).*/\1/p' "$1" | head -n 3 | paste -s -d ' ' -; }
 # no_test_failed <log> <exit status>: what ended a failed run that names no failing test.
 no_test_failed() {
-  if grep -q '^panic: test timed out' "$1"; then printf 'a timeout, no test named as failed'
+  if [ "$2" = 124 ] || [ "$2" = 137 ]; then printf 'the bound of %s s, no test named as failed' "$run_bound"
+  elif grep -q '^panic: test timed out' "$1"; then printf 'a timeout, no test named as failed'
   elif grep -q '^panic: ' "$1"; then printf 'a panic, no test named as failed'
   elif grep -q -E 'build failed|setup failed' "$1"; then printf 'a compile error, no test ran'
   else printf 'exit %s, no test named as failed' "$2"; fi
 }
+# bounded <log>: runs the array tests with an external bound, in a process group of their own (timeout makes one), its output in the
+# log, and sets rc. Go's own -test.timeout cannot reach a hang before the test binary's main, and its panic skips the tests' cleanup, so
+# what a run leaves in its group is killed before the next one starts. It waits in the background, so that a signal to this script
+# is acted on at once (on_signal). The limit: a process that left the group is not seen (#274 ends the fake Slurm's jobs with their host).
+run_bound=${MUTATE_ALPHA_RUN_BOUND:-720}   # above every kind's own deadlines, so that those fire first
+child=""
+bounded() {
+  rc=0
+  timeout -k 10 "$run_bound" "${tests[@]}" >"$1" 2>&1 &
+  child=$!
+  wait "$child" || rc=$?
+  kill -KILL -- "-$child" 2>/dev/null
+  child=""
+}
+# on_signal: the run stops now; the EXIT trap then restores the file, which no hung command can hold up.
+on_signal() {
+  if [ -n "$child" ]; then kill -TERM "$child" 2>/dev/null; kill -KILL -- "-$child" 2>/dev/null; fi
+  exit 143
+}
+trap on_signal TERM INT
+# now_epoch: the clock of the green cache. MUTATE_ALPHA_CLOCK is a test seam: a file holding the epoch seconds.
+now_epoch() { if [ -n "${MUTATE_ALPHA_CLOCK:-}" ]; then cat "$MUTATE_ALPHA_CLOCK"; else date +%s; fi; }
 # kind_of <path>: the name of the kind of mutant, by the tests that judge it.
 kind_of() {
   case $1 in
@@ -618,7 +644,7 @@ kind_of() {
 # with no mutant tried, --only or not. The binaries are kept, for red_with_no_mutant.
 declare -A based=()
 baseline() {
-  local kind rc=0
+  local kind
   kind=$(kind_of "$1")
   [ -z "${based[$kind]:-}" ] || return 0
   based[$kind]=1
@@ -628,7 +654,7 @@ baseline() {
     *.go) cp "$tmp/pkg.test" "$tmp/base-pkg.test" ;;
   esac
   tests_of "$1"
-  "${tests[@]}" >"$tmp/baseline.log" 2>&1 || rc=$?
+  bounded "$tmp/baseline.log"
   [ "$rc" -eq 0 ] || {
     by=$(failing_tests "$tmp/baseline.log")
     echo "mutate-alpha: $kind tests fail with no mutant, so every mutant would count as killed: ${by:-$(no_test_failed "$tmp/baseline.log" "$rc")}" >&2; exit 2; }
@@ -637,22 +663,24 @@ baseline() {
 # shell, not a subshell, since it keeps green_at): the tree must be as it was.
 # A test that goes red after the baseline (a flake, a date, a port) would kill every mutant it meets, so a kill it alone made is
 # not one (the science agent, on PR 284): the caller reads that as BROKEN, with the test named. A test seen green in the last
-# ten minutes is not run again: the script's tests take minutes, and a kill costs one look, not one run per mutant.
+# ten minutes is not run again: the script's tests take minutes, and a kill costs one look, not one run per mutant. Only a test that
+# ran gets a new time. The limits that stay: within the ten minutes a cached green is not proof that the test still passes, and a
+# flake that passes on its look reads as a kill.
 declare -A green_at=()
 red_with_no_mutant() {
-  local path=$1 kind now name todo="" rc=0 failed
+  local path=$1 kind now name todo="" failed
   red=""
-  kind=$(kind_of "$path"); now=$(date +%s)
+  kind=$(kind_of "$path"); now=$(now_epoch)
   for name in $2; do
     [ $((now - ${green_at[$kind|$name]:-0})) -lt 600 ] || todo="$todo${todo:+|}$name"
   done
   [ -n "$todo" ] || return 0
   tests_of "$path" "^($todo)\$"
-  "${tests[@]}" >"$tmp/again.log" 2>&1 || rc=$?
+  bounded "$tmp/again.log"
   failed=" $(failing_tests "$tmp/again.log") "
   # The failure can leave no test named (a panic, a timeout): every test asked about is then red, by what ended the run.
   [ "$rc" -eq 0 ] || [ "$failed" != "  " ] || failed=" ${todo//|/ } "
-  for name in $2; do
+  for name in ${todo//|/ }; do
     case "$failed" in *" $name "*) red="$red${red:+ }$name" ;; *) green_at[$kind|$name]=$now ;; esac
   done
 }
@@ -680,17 +708,27 @@ PY
       compile_of "$path" || { echo "BROKEN   $file: $from  ->  $to: the mutant does not compile: $cerr"; broken=$((broken+1)); cp "${saved[$path]}" "$path"; continue; } ;;
   esac
   tests_of "$path"
-  rc=0
-  "${tests[@]}" >"$tmp/mutant.log" 2>&1 || rc=$?
+  bounded "$tmp/mutant.log"
   cp "${saved[$path]}" "$path"
   if [ "$rc" -eq 0 ]; then
     echo "SURVIVED $file: $from  ->  $to"; survived=$((survived+1)); continue
   fi
   by=$(failing_tests "$tmp/mutant.log")
   if [ -z "$by" ]; then
-    # Nothing to look at again: what ended the run is the mutant's, and the line says what it was (#285).
+    # Naming what ended the run does not show the mutant did it. A compile error after a green baseline never does; anything else
+    # gets a control run, the same command with no mutant (the delta review, H1). The limit: a timeout from load, or a kill from
+    # outside, that does not recur in the control reads as a kill, by what it was.
     by=$(no_test_failed "$tmp/mutant.log" "$rc")
-    killed=$((killed+1)); echo "KILLED   $file: $from  ->  $to: by $by"; printf '%s\n' "$by" >>"$tmp/kills"
+    case $by in
+      "a compile error"*) echo "BROKEN   $file: $from  ->  $to: $by"; broken=$((broken+1)); continue ;;
+    esac
+    tests_of "$path" control
+    bounded "$tmp/control.log"
+    if [ "$rc" -eq 0 ]; then
+      killed=$((killed+1)); echo "KILLED   $file: $from  ->  $to: by $by"; printf '%s\n' "$by" >>"$tmp/kills"
+    else
+      echo "BROKEN   $file: $from  ->  $to: ended by $by, and the same command fails with no mutant too"; broken=$((broken+1))
+    fi
     continue
   fi
   # With the tree as it was. A kill needs a test that fails under the mutant and passes with no mutant.

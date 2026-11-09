@@ -1,11 +1,15 @@
 package livechecks
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // A mutant that does not compile is not a mutant that a test killed (PR 244, B3): the build of the tests fails, and no test
@@ -391,4 +395,278 @@ func TestMutateAlphaReportsAMutantThatDoesNotCompileAsBrokenNotKilled(t *testing
 			}
 		})
 	}
+}
+
+// A kill with no failing test named gets a control run, the same command with no mutant (the delta review of PR 284, H1). Naming
+// what ended a run does not show the mutant did it: here the package panics from the second run on, with or without a mutant,
+// so it reads BROKEN. A panic the control does not repeat is a kill, by what it was
+// (TestMutateAlphaSaysWhatAKillWithNoFailingTestWas). A compile error can reach the tests only in the script's kind, whose go
+// test builds them itself; a symlink makes the script part of the package, so that the mutant breaks the build.
+func TestMutateAlphaControlsAKillWithNoFailingTest(t *testing.T) {
+	const redAfterBaseline = `package alpha
+
+import (
+	"os"
+	"testing"
+)
+
+func init() {
+	if _, err := os.Stat("ran-once"); err == nil {
+		panic("red from the second run on, with or without a mutant")
+	}
+}
+
+func TestMarksTheFirstRun(t *testing.T) {
+	if err := os.WriteFile("ran-once", nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+`
+	code, out := runMutateFixture(t, map[string]string{"internal/alpha/fx.go": mutateFixture, "internal/alpha/fx_test.go": redAfterBaseline, "mutants.txt": "fx.go@@return v@@return v + 1\n"})
+	if code != 1 {
+		t.Errorf("exit %d, want 1:\n%s", code, out)
+	}
+	for _, want := range []string{"BROKEN   fx.go: return v  ->  return v + 1: ended by a panic, no test named as failed, and the same command fails with no mutant too", "mutants: 1, killed 0, survived 0, broken 1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the output lacks %q:\n%s", want, out)
+		}
+	}
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "go.mod"), "module example.test/fx\n\ngo 1.26\n", 0o644)
+	write(t, filepath.Join(dir, "hack/live-checks.sh"), "package livechecks\n", 0o644)
+	write(t, filepath.Join(dir, "hack/livechecks/k_test.go"), "package livechecks\n\nimport \"testing\"\n\nfunc TestNeverStartedKind(t *testing.T) {}\n", 0o644)
+	if err := os.Symlink("../live-checks.sh", filepath.Join(dir, "hack/livechecks/script_test.go")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "mutants.txt"), "hack/live-checks.sh@@package livechecks@@package nonsense\n", 0o644)
+	cmd := exec.Command("bash", filepath.Join(repoRoot(t), "hack", "mutate-alpha.sh"))
+	cmd.Env = append(os.Environ(), "MUTATE_ALPHA_ROOT="+dir, "MUTATE_ALPHA_MUTANTS="+filepath.Join(dir, "mutants.txt"))
+	b, err := cmd.CombinedOutput()
+	if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() != 1 {
+		t.Errorf("%v, want exit 1:\n%s", err, b)
+	}
+	for _, want := range []string{"BROKEN   hack/live-checks.sh: package livechecks  ->  package nonsense: a compile error, no test ran", "mutants: 1, killed 0, survived 0, broken 1"} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("the output lacks %q:\n%s", want, b)
+		}
+	}
+}
+
+// The green cache refreshes only what ran (the delta review, H2). Each test failing under a mutant moves the harness's clock 400 s. So
+// A is seen green at 1400; at 1800 only B needs a look, which must not make A's 1400 any newer; at 2200 A is 800 s old, past the ten
+// minutes, and is run again. Refreshed along with B, it would read as 400 s old, and never be run again. A's runs are counted:
+// the baseline, three mutants, and the two looks. The limit that stays: within the ten minutes, a cached green is not proof.
+func TestMutateAlphaRefreshesOnlyTheGreensItRan(t *testing.T) {
+	const fx = "package alpha\n\nconst failA, failB = false, false\n"
+	const tests = `package alpha
+
+import (
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+func TestA(t *testing.T) {
+	t.Parallel()
+	f, err := os.OpenFile("runs", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString("run\n"); err != nil {
+		t.Fatal(err)
+	}
+	if failA {
+		clock := os.Getenv("MUTATE_ALPHA_CLOCK")
+		b, err := os.ReadFile(clock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		now, err := strconv.Atoi(strings.TrimSpace(string(b)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(clock, []byte(strconv.Itoa(now+400)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Fatal("under the mutant")
+	}
+}
+
+func TestB(t *testing.T) {
+	t.Parallel()
+	if failB {
+		t.Fatal("under the mutant")
+	}
+}
+`
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "go.mod"), "module example.test/fx\n\ngo 1.26\n", 0o644)
+	write(t, filepath.Join(dir, "internal/alpha/fx.go"), fx, 0o644)
+	write(t, filepath.Join(dir, "internal/alpha/fx_test.go"), tests, 0o644)
+	write(t, filepath.Join(dir, "clock"), "1000", 0o644)
+	const from = "fx.go@@const failA, failB = false, false@@const failA, failB = "
+	write(t, filepath.Join(dir, "mutants.txt"), from+"true, false\n"+from+"true, true\n"+from+"true, false \n", 0o644)
+	cmd := exec.Command("bash", filepath.Join(repoRoot(t), "hack", "mutate-alpha.sh"))
+	cmd.Env = append(os.Environ(), "MUTATE_ALPHA_ROOT="+dir, "MUTATE_ALPHA_MUTANTS="+filepath.Join(dir, "mutants.txt"), "MUTATE_ALPHA_CLOCK="+filepath.Join(dir, "clock"))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v:\n%s", err, out)
+	}
+	runs, err := os.ReadFile(filepath.Join(dir, "internal/alpha/runs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(runs), "run\n"); n != 6 {
+		t.Errorf("TestA ran %d times, want 6: the baseline, three mutants, and its looks at 1400 and at 2200\n%s", n, out)
+	}
+}
+
+// hangFixture is a package whose mutant hangs before the test binary's main, where Go's own -test.timeout cannot reach it, and leaves
+// the process's ID in a file first.
+const hangFixture = `package alpha
+
+import (
+	"os"
+	"strconv"
+	"time"
+)
+
+const hangs = false
+
+func init() {
+	if hangs {
+		_ = os.WriteFile("hanging", []byte(strconv.Itoa(os.Getpid())), 0o644)
+		time.Sleep(time.Hour)
+	}
+}
+`
+
+// waitGone waits for the process named in a file to be gone, on that state, with a generous deadline.
+func waitGone(t *testing.T, pidFile string) {
+	t.Helper()
+	b, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("the process's ID: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 1 {
+		t.Fatalf("a process ID of %q: %v", b, err)
+	}
+	for deadline := time.Now().Add(30 * time.Second); syscall.Kill(pid, 0) == nil; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("process %d is still there", pid)
+		}
+	}
+}
+
+// The delta review of PR 284, H3: each run has an external bound. A mutant that hangs before the test binary's main ends at the bound, as a
+// kill by that bound, with the control run saying the same command passes with no mutant; its process is gone and the file restored.
+func TestMutateAlphaEndsAHangAtItsBoundAndRestoresTheFile(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "go.mod"), "module example.test/fx\n\ngo 1.26\n", 0o644)
+	write(t, filepath.Join(dir, "internal/alpha/fx.go"), hangFixture, 0o644)
+	write(t, filepath.Join(dir, "internal/alpha/fx_test.go"), "package alpha\n\nimport \"testing\"\n\nfunc TestPasses(t *testing.T) {}\n", 0o644)
+	write(t, filepath.Join(dir, "mutants.txt"), "fx.go@@const hangs = false@@const hangs = true\n", 0o644)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", filepath.Join(repoRoot(t), "hack", "mutate-alpha.sh"))
+	cmd.Env = append(os.Environ(), "MUTATE_ALPHA_ROOT="+dir, "MUTATE_ALPHA_MUTANTS="+filepath.Join(dir, "mutants.txt"), "MUTATE_ALPHA_RUN_BOUND=15")
+	cmd.WaitDelay = 5 * time.Second
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Errorf("%v:\n%s", err, out)
+	}
+	if want := "by the bound of 15 s, no test named as failed"; !strings.Contains(string(out), want) || !strings.Contains(string(out), "mutants: 1, killed 1, survived 0, broken 0") {
+		t.Errorf("the output lacks %q and one kill:\n%s", want, out)
+	}
+	waitGone(t, filepath.Join(dir, "internal/alpha/hanging"))
+	if got, _ := os.ReadFile(filepath.Join(dir, "internal/alpha/fx.go")); string(got) != hangFixture {
+		t.Errorf("the mutated file was not restored:\n%s", got)
+	}
+}
+
+// A TERM to the harness stops what it runs and restores the file at once, without waiting for a hung command to end. What it waits
+// on is the hang's own file, then the harness's exit, with no window of its own.
+func TestMutateAlphaRestoresTheFileOnATermDuringAHang(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "go.mod"), "module example.test/fx\n\ngo 1.26\n", 0o644)
+	write(t, filepath.Join(dir, "internal/alpha/fx.go"), hangFixture, 0o644)
+	write(t, filepath.Join(dir, "internal/alpha/fx_test.go"), "package alpha\n\nimport \"testing\"\n\nfunc TestPasses(t *testing.T) {}\n", 0o644)
+	write(t, filepath.Join(dir, "mutants.txt"), "fx.go@@const hangs = false@@const hangs = true\n", 0o644)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", filepath.Join(repoRoot(t), "hack", "mutate-alpha.sh"))
+	cmd.Env = append(os.Environ(), "MUTATE_ALPHA_ROOT="+dir, "MUTATE_ALPHA_MUTANTS="+filepath.Join(dir, "mutants.txt"))
+	cmd.WaitDelay = 5 * time.Second
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pidFile := filepath.Join(dir, "internal/alpha/hanging")
+	for {
+		b, err := os.ReadFile(pidFile)
+		if err == nil && len(b) > 0 {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatal("the mutant never started to hang")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); ctx.Err() != nil {
+		t.Fatalf("the harness did not end on its TERM while the mutant hung: %v", err)
+	}
+	waitGone(t, pidFile)
+	if got, _ := os.ReadFile(filepath.Join(dir, "internal/alpha/fx.go")); string(got) != hangFixture {
+		t.Errorf("the mutated file was not restored:\n%s", got)
+	}
+}
+
+// What a failed run leaves in its process group is ended before the next mutant, so it cannot contaminate one. A test starts a process,
+// names it in a file, and fails. A process that leaves the group (setsid) is the limit of this: #274 ends the fake Slurm's jobs with their host.
+func TestMutateAlphaEndsWhatARunLeftBehind(t *testing.T) {
+	const fx = "package alpha\n\nconst failNow = false\n"
+	const tests = `package alpha
+
+import (
+	"os"
+	"os/exec"
+	"strconv"
+	"testing"
+)
+
+func TestLeavesAProcess(t *testing.T) {
+	if !failNow {
+		return
+	}
+	c := exec.Command("sleep", "3600")
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("left", []byte(strconv.Itoa(c.Process.Pid)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Fatal("under the mutant, with a process left running")
+}
+`
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "go.mod"), "module example.test/fx\n\ngo 1.26\n", 0o644)
+	write(t, filepath.Join(dir, "internal/alpha/fx.go"), fx, 0o644)
+	write(t, filepath.Join(dir, "internal/alpha/fx_test.go"), tests, 0o644)
+	write(t, filepath.Join(dir, "mutants.txt"), "fx.go@@const failNow = false@@const failNow = true\n", 0o644)
+	cmd := exec.Command("bash", filepath.Join(repoRoot(t), "hack", "mutate-alpha.sh"))
+	cmd.Env = append(os.Environ(), "MUTATE_ALPHA_ROOT="+dir, "MUTATE_ALPHA_MUTANTS="+filepath.Join(dir, "mutants.txt"))
+	cmd.WaitDelay = 5 * time.Second
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Errorf("%v:\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "by TestLeavesAProcess") {
+		t.Errorf("want a kill by the test:\n%s", out)
+	}
+	waitGone(t, filepath.Join(dir, "internal/alpha/left"))
 }
