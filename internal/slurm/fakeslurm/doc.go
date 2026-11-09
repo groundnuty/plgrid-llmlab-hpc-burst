@@ -287,7 +287,14 @@
 //     escapes, and one that holds the step's output open is waited for two
 //     seconds, then left. A sweep that cannot tell that the processes are gone
 //     makes Run return an error that wraps slurm.ErrTransport.
-//   - The fake has no Pdeathsig: in Go it fires when the forking thread
-//     exits, not the process. A process that ends without Close leaves its
-//     jobs running, as a Slurm job outlives the login session.
+//   - A host that dies without Close (SIGKILL, SIGTERM, a -test.timeout panic,
+//     an out-of-memory kill) takes each job's batch shell and each step's
+//     program with it: they are started with a parent-death signal of KILL,
+//     from one goroutine that keeps its thread for good, because in Go the
+//     signal fires when the forking thread exits, not the process (issue
+//     #274; before it, such a shell looped for days). What the shell started
+//     is not reached: a descendant it left running outlives a host that died
+//     without Close, and only Close's sweep ends it. Real Slurm would keep the
+//     job, which outlives the login session; the fake does not, since its
+//     host is a test.
 package fakeslurm
