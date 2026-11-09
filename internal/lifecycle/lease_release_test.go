@@ -115,19 +115,25 @@ func stopRound(t *testing.T, ctx context.Context, cl client.Client, round int, f
 			}
 		}
 	}()
-	elected := mgr.Elected()
-	eventually(t, time.Minute, fmt.Sprintf("round %d: the manager leads and holds the lifecycle Lease", round), func() (bool, string) {
-		select {
-		case <-elected:
-		default:
-			return false, "not elected"
-		}
+	select {
+	case <-mgr.Elected():
+	case <-time.After(time.Minute):
+		t.Fatalf("round %d: the manager did not lead within a minute", round)
+	}
+	eventually(t, time.Minute, fmt.Sprintf("round %d: the manager holds the lifecycle Lease", round), func() (bool, string) {
 		holder, err := leaseHolderOf(ctx, cl)
 		if err != nil {
 			return false, err.Error()
 		}
 		return holder != "", "no holder"
 	})
+	if stopsSynced(round) {
+		synced, cancelSync := context.WithTimeout(mctx, time.Minute)
+		defer cancelSync()
+		if !mgr.GetCache().WaitForCacheSync(synced) {
+			t.Fatalf("round %d: the manager's caches did not sync within a minute", round)
+		}
+	}
 	stop()
 	stopped = true
 	select {
@@ -156,6 +162,15 @@ func stopRound(t *testing.T, ctx context.Context, cl client.Client, round int, f
 		t.Fatalf("round %d: %d requests for the Lease came after the elector's release read; want the release after Start's read and write", round, n)
 	}
 }
+
+// stopsSynced says which rounds stop a manager whose caches have synced; the
+// others stop it as soon as it leads, while its controllers are still starting.
+// A round used to wait out eventually's 200 ms pause whichever came first, 40 s of
+// the test's 50 s (#282), and its stop fell between the two: the manager leads
+// within tens of milliseconds, and 25 of 200 rounds had synced by then. Two of
+// every eight rounds wait for the sync, one faulted and one not, so both states
+// are reached with and without the fault, by waiting on them.
+func stopsSynced(round int) bool { return round%8 < 2 }
 
 // leaseHolderOf reads the lifecycle Lease's holderIdentity, "" when it names
 // none.
