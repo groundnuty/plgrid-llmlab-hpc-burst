@@ -23,9 +23,14 @@
 # Both files are staged inside DIR under a name of their own and renamed into place, so two runs
 # that start at once never write the same file and a reader never sees a half-written binary.
 #
+# DIR may be a restored CI cache (the workflow saves it between runs, so that a GitHub outage does
+# not fail every job). It is never trusted: frps and frpc are checked against their pins on every
+# run. When both match, nothing is downloaded; when one does not, the tarball is downloaded again.
+#
 # FRP_TARBALL names an already downloaded tarball to use instead of the download. It is copied
 # and verified exactly like a download, and the original is never touched. FRP_RELEASE_BASE
-# overrides the download site, for mirrors.
+# overrides the download site, for mirrors. For tests, FRP_PINS_FILE also replaces the three sums
+# above with those of its linux amd64 line for this version (columns 4, 5 and 6, as below).
 #
 # agent-builds mode (--agent-builds DIR) reads frp-pins.txt itself, so it holds no copy of an
 # architecture's sums that could drift. For each of the pinned release's lines it fetches the
@@ -46,6 +51,13 @@ FRP_VERSION=0.71.1
 FRP_TARBALL_SHA=1d9875210972a5d1a62b2dc4c48df45ab0af05d3ca1b5e494a014428259df803
 FRPS_SHA=2322762939e66e66850bbc9103b6d73fec39e83bd8ad6c71ebeeb120d56d6ab3
 FRPC_SHA=35c6054d4549bbcf2f02875543895fd9e44c2aae2925f61cd8ff5a693703c28b
+
+if [ -n "${FRP_PINS_FILE:-}" ] && [ "${1:-}" != "--agent-builds" ]; then
+  [ -f "$FRP_PINS_FILE" ] || { echo "fetch-frp.sh: the pins file $FRP_PINS_FILE is not a file" >&2; exit 1; }
+  read -r FRP_TARBALL_SHA FRPS_SHA FRPC_SHA < <(awk -v v="$FRP_VERSION" '$1 !~ /^#/ && NF && $1 == v && $2 == "amd64" { print $4, $5, $6 }' "$FRP_PINS_FILE") || true
+  [[ ${FRP_TARBALL_SHA:-} =~ ^[0-9a-f]{64}$ && ${FRPS_SHA:-} =~ ^[0-9a-f]{64}$ && ${FRPC_SHA:-} =~ ^[0-9a-f]{64}$ ]] ||
+    { echo "fetch-frp.sh: $FRP_PINS_FILE has no amd64 line for frp $FRP_VERSION with three sha256 sums" >&2; exit 1; }
+fi
 
 base=${FRP_RELEASE_BASE:-https://github.com/fatedier/frp/releases/download}
 name=frp_${FRP_VERSION}_linux_amd64
