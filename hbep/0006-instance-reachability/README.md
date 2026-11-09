@@ -223,7 +223,7 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
 - **A Unix socket that the batch step created** is reachable from an `--overlap` step under `/dev/shm`, under the batch step's `$TMPDIR` (the step's is the same), and under `$HOME`, on Athena.
 - **No preamble:** nothing appeared on standard output before the bridge's own first line.
 
-- **The mode's value** is `host-dialed`: a launcher setting, per host in alpha, written into `agent.json` as `dialHomeMode`. In this mode `agent.json` carries no `endpoint` and no `ssh`; the certificate pin and the server name are as today. The dial-home listener binds loopback at base+7, as in ssh mode (HBEP-5), and no address that compute nodes reach is needed (HBEP-11, open question 8).
+- **The mode's value** is `host-dialed`: a launcher setting, per host in alpha, written into `agent.json`'s `mode` key, as for direct and ssh. In this mode `agent.json` carries no `endpoint` and no `ssh`; the certificate pin and the server name are as today. The dial-home listener binds loopback at base+7, as in ssh mode (HBEP-5), and no address that compute nodes reach is needed (HBEP-11, open question 8).
 - **Two relays per running Allocation,** one per channel, so control and the token tunnel still never share a connection (Risks):
   - `control` ends at the agent endpoint's loopback port (base+3);
   - `serving` ends at the dial-home listener's (base+7).
@@ -252,7 +252,7 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
   - **When relays start and stop:** the controller starts both relays once the Allocation's job runs. It keeps them level-triggered: a dropped relay is started again, and a controller that takes the lead starts the relays of every running Allocation. It stops them by PID when the job ends or the Allocation is deleted. `srun` ends a step with its job, so no relay outlives the job.
   - **Capacity:** in host-dialed mode a Provider has at most 2 Allocations, pending or running. That's a submit limit (`SubmitLimitReached`, HBEP-4), so the planner counts it, and the handover pair fits.
     - Each running Allocation's pair of relays is reserved together and held through a relay's backoff. So the 4 relays per login node that the probe held without refusal are never exceeded by one copy, and no Allocation is left with half a pair.
-    - Only one Provider per login host (as `ssh -G` resolves its `HostName`) runs in host-dialed mode; the launcher refuses a second. A per-platform budget stays HBEP-4's open question 17.
+    - **Only one Provider per login host runs in host-dialed mode.** The login host is its `HostName` as `ssh -G` resolves it through the Provider's own `-F` file. The Provider's controller refuses a second Provider on that host: it submits nothing, and sets the Provider's `Ready` condition to False with reason `LoginHostInUse`, naming the login host and the Provider holding it. The planner then treats that Provider as unusable (`ProviderUnavailable`, HBEP-7), so no Allocation waits on it. A per-platform budget stays HBEP-4's open question 17.
   - **What ends a relay:**
     - **Retried**, with a backoff of 1 s doubling to 30 s with jitter (first starts jittered too, since all relays start together after a restart), reset once a relay has stayed up for 60 s:
       - ssh dropping, or the login node killing it;
