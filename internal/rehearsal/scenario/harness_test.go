@@ -78,99 +78,34 @@ func requireRehearsal(t *testing.T) stack.Binaries {
 	return b
 }
 
-// cluster is the fake Slurm in run mode and its login node.
-type cluster struct {
-	plat    *fakeslurm.Platform
-	login   *rehearsal.LoginNode
-	root    string // RunMode.Root: the cluster's shared file system
-	home    string // the cluster user's HOME
-	scratch string
-	fakes   string // the engine double's fake apptainer
+// rigCluster is the stack's fake cluster with the rehearsal's own fixtures.
+type rigCluster struct {
+	*stack.Cluster
 	// cmds records every command the controller ran on the cluster, with
 	// the slot holders just before it (cmdlog_test.go).
 	cmds *cmdLog
-	// gate holds engine starts while armed; nil unless the shape asks for
-	// it (enginegate_test.go).
+	// gate holds engine starts while armed; nil unless the rig asks for it
+	// (enginegate_test.go).
 	gate *engineGate
 }
 
-// clusterUser is the fake cluster's own user, never this host's.
-const clusterUser = "example-user"
-
-// clusterShape is the fake cluster's partitions and QOSes; the zero value is
-// #146's: one GPU partition, no QOS.
-type clusterShape struct {
-	partitions []fakeslurm.Partition
-	qos        []fakeslurm.QOS
-	// engineGate puts the engine gate (enginegate_test.go) in front of the
-	// jobs' apptainer; it holds nothing until armed.
-	engineGate bool
-}
-
-func (s clusterShape) partitionsOrDefault() []fakeslurm.Partition {
-	if len(s.partitions) > 0 {
-		return s.partitions
-	}
-	return []fakeslurm.Partition{{Name: stack.Partition, GPUOnly: true}}
-}
-
-func startCluster(t *testing.T, dir string, jobEnv map[string]string, shape clusterShape) *cluster {
+// startRigCluster starts the stack's fake cluster with the login node's command
+// record and, when gated, the engine gate in front of the jobs' apptainer; the
+// gate holds nothing until armed.
+func startRigCluster(t *testing.T, dir string, shape stack.ClusterShape, gated bool) *rigCluster {
 	t.Helper()
-	c := &cluster{root: filepath.Join(dir, "c"), fakes: filepath.Join(dir, "fk")}
-	c.home, c.scratch = filepath.Join(c.root, "home", clusterUser), filepath.Join(c.root, "scratch", clusterUser)
-	for _, d := range []string{c.home, c.scratch, c.fakes} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			t.Fatal(err)
+	c := &rigCluster{}
+	shape.Around = func(plat *fakeslurm.Platform) func(string, func() (slurm.Result, error)) (slurm.Result, error) {
+		c.cmds = &cmdLog{plat: plat}
+		return c.cmds.around
+	}
+	if gated {
+		shape.WrapApptainer = func(fakes string) string {
+			var wrapper string
+			c.gate, wrapper = installEngineGate(t, dir, fakes)
+			return wrapper
 		}
 	}
-	// The login node's directory holds the relay socket, which runs commands
-	// on the fake cluster: mode 700.
-	if err := os.Mkdir(filepath.Join(dir, "ln"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := enginedouble.Install(c.fakes); err != nil {
-		t.Fatal(err)
-	}
-	env := map[string]string{
-		"HPCBURST_APPTAINER": filepath.Join(c.fakes, "apptainer"),
-		// No GPU on this host: the agent's GPU probe only warns without one.
-		"HPCBURST_NVIDIA_SMI": filepath.Join(c.fakes, "no-nvidia-smi"),
-	}
-	if shape.engineGate {
-		var wrapper string
-		c.gate, wrapper = installEngineGate(t, dir, c.fakes)
-		env["HPCBURST_APPTAINER"] = wrapper
-	}
-	for k, v := range jobEnv {
-		env[k] = v
-	}
-	c.plat = fakeslurm.New(slurm.RealClock, fakeslurm.Config{
-		Partitions: shape.partitionsOrDefault(), QOS: shape.qos,
-		// KillWait 20 s: longer than the agent's own shutdown (the profile's
-		// 5 s stopGrace, its 10 s margin and a 5 s last report), shorter than
-		// Slurm's 30 s default, which several scancels would spend from the
-		// 15 min budget. Slots stay unlimited, so no ended job's slot goes to
-		// a phantom job.
-		Run: &fakeslurm.RunMode{Root: c.root, JobDir: filepath.Join(dir, "j"), Env: env, KillWait: 20 * time.Second},
-	})
-	t.Cleanup(func() {
-		if err := c.plat.Close(); err != nil {
-			t.Errorf("the fake cluster's Close: %v", err)
-		}
-	})
-	c.cmds = &cmdLog{plat: c.plat}
-	login, err := rehearsal.StartLoginNode(rehearsal.LoginConfig{
-		Dir: filepath.Join(dir, "ln"), Platform: c.plat, Around: c.cmds.around,
-		Login: fakeslurm.Login{User: clusterUser, Env: map[string]string{"HOME": c.home, "SCRATCH": c.scratch}},
-	})
-	if err != nil {
-		t.Fatalf("the login node: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := login.Close(); err != nil {
-			t.Errorf("the login node's Close: %v", err)
-		}
-	})
-	c.login = login
+	c.Cluster = stack.StartCluster(t, dir, shape, enginedouble.Install, nil)
 	return c
 }

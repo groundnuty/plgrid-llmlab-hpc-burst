@@ -146,7 +146,7 @@ func (p3 *part3) noOverlap() {
 	}
 	gate := r.cl.gate
 	if gate == nil {
-		r.t.Fatal("the no-overlap phase needs the engine gate (clusterShape.engineGate)")
+		r.t.Fatal("the no-overlap phase needs the engine gate (rigSetup.engineGate)")
 	}
 	if err := gate.arm(); err != nil {
 		r.t.Fatalf("arm the engine gate: %v", err)
@@ -231,7 +231,7 @@ func (p3 *part3) releaseGate(d *depRun, replies []probe) string {
 	}
 	job := 0
 	for _, id := range held {
-		if j, ok := r.cl.plat.Job(id); ok && id != d.primaryJob && j.Partition == d.partition {
+		if j, ok := r.cl.Plat.Job(id); ok && id != d.primaryJob && j.Partition == d.partition {
 			job = id
 		}
 	}
@@ -351,8 +351,8 @@ func (p3 *part3) checkGap(d *depRun) {
 	}
 	o, _ := r.watch.first(d.primary.UID, time.Time{}, func(o observation) bool { return o.drainBegan != "" })
 	began, _ := time.Parse(time.RFC3339, o.drainBegan)
-	pj, _ := r.cl.plat.Job(d.primaryJob)
-	sj, _ := r.cl.plat.Job(d.succJob)
+	pj, _ := r.cl.Plat.Job(d.primaryJob)
+	sj, _ := r.cl.Plat.Job(d.succJob)
 	since := func(t time.Time) string {
 		if t.IsZero() {
 			return "never"
@@ -545,8 +545,8 @@ func noOverlapSlotProblems(obs []mdObservation, drainStart, succReady time.Time)
 func (p3 *part3) checkQueuedHandover(d *depRun) {
 	r := p3.rig
 	r.t.Helper()
-	pj, _ := r.cl.plat.Job(d.primaryJob)
-	sj, _ := r.cl.plat.Job(d.succJob)
+	pj, _ := r.cl.Plat.Job(d.primaryJob)
+	sj, _ := r.cl.Plat.Job(d.succJob)
 	if sj.Start.Before(pj.End) || pj.End.IsZero() {
 		r.t.Errorf("%s: the successor's job %d started %s, before the predecessor's job %d ended (%s): it ran beside it", d.Name, d.succJob, ts(sj.Start), d.primaryJob, ts(pj.End))
 	}
@@ -570,7 +570,7 @@ func (p3 *part3) checkOneSlot(d *depRun) {
 	r.t.Helper()
 	atts := r.cl.cmds.submissions(d.partition)
 	lastLive, cmds := r.cl.cmds.lastHeld(d.partition, d.primaryJob)
-	for _, p := range oneSlotProblems(r.cl.plat.Calls(), r.cl.plat.Jobs(), atts, d.partition, d.succJob, lastLive) {
+	for _, p := range oneSlotProblems(r.cl.Plat.Calls(), r.cl.Plat.Jobs(), atts, d.partition, d.succJob, lastLive) {
 		r.t.Errorf("%s: %s", d.Name, p)
 	}
 	var a v1alpha1.Allocation

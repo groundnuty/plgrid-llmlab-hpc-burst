@@ -92,20 +92,17 @@ const (
 	managedKey         = "example-llmlab-key-0123456789abcdef"
 )
 
-func part3Shape() clusterShape {
-	return clusterShape{
-		partitions: []fakeslurm.Partition{
+func part3Shape() stack.ClusterShape {
+	return stack.ClusterShape{
+		Partitions: []fakeslurm.Partition{
 			{Name: queuedDep.partition, GPUOnly: true, QOS: partQOS},
 			{Name: oneSlotDep.partition, GPUOnly: true},
 		},
-		qos: []fakeslurm.QOS{
+		QOS: []fakeslurm.QOS{
 			{Name: partQOS, MaxSubmitPerUser: fakeslurm.Cap(2000)},
 			{Name: queuedDep.qos, MaxSubmitPerUser: fakeslurm.Cap(1), MaxGPUsPerUser: fakeslurm.Cap(1)},
 			{Name: oneSlotDep.qos, MaxSubmitPerUser: fakeslurm.Cap(1), MaxGPUsPerUser: fakeslurm.Cap(1)},
 		},
-		// The no-overlap phase holds each successor at its engine's start
-		// until its gap has been probed (waitSuccessors).
-		engineGate: true,
 	}
 }
 
@@ -203,7 +200,9 @@ var part3EngineModes = "token-delay=" + part3TokenDelay.String() + ",no-prefix-c
 //livecheck:rehearsal-part3
 func TestRehearsalPart3(t *testing.T) {
 	p3 := &part3{}
-	r := startRigWith(t, rigSetup{mode: "direct", ports: ports193, shape: part3Shape(), objects: p3.objects})
+	// The engine gate: the no-overlap phase holds each successor at its engine's
+	// start until its gap has been probed (waitSuccessors).
+	r := startRigWith(t, rigSetup{mode: "direct", ports: ports193, shape: part3Shape(), engineGate: true, objects: p3.objects})
 	p3.rig = r
 	r.tokenDelay = part3TokenDelay
 	r.engineEnv = []v1alpha1.EnvVar{{Name: "HB_ENGINE_DOUBLE", Value: part3EngineModes}}

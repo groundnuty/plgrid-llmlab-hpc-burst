@@ -32,7 +32,7 @@ import (
 func (r *rig) stagedFrpc() string {
 	r.t.Helper()
 	var found []string
-	_ = filepath.WalkDir(r.cl.scratch, func(p string, d fs.DirEntry, err error) error {
+	_ = filepath.WalkDir(r.cl.Scratch, func(p string, d fs.DirEntry, err error) error {
 		if err == nil && d.Type().IsRegular() && d.Name() == agentapi.FrpcBinaryName &&
 			filepath.Base(filepath.Dir(filepath.Dir(p))) == "frpc" {
 			found = append(found, p)
@@ -40,7 +40,7 @@ func (r *rig) stagedFrpc() string {
 		return nil
 	})
 	if len(found) != 1 {
-		r.t.Fatalf("step (e): %d staged frpc files under %s (%v), want 1", len(found), r.cl.scratch, found)
+		r.t.Fatalf("step (e): %d staged frpc files under %s (%v), want 1", len(found), r.cl.Scratch, found)
 	}
 	p, err := filepath.EvalSymlinks(found[0])
 	if err != nil {
@@ -53,7 +53,7 @@ func (r *rig) stagedFrpc() string {
 // staged frpc.
 func (r *rig) frpcProcesses(jobID int, staged string) []int {
 	r.t.Helper()
-	pids, err := r.cl.plat.Processes(jobID)
+	pids, err := r.cl.Plat.Processes(jobID)
 	if err != nil {
 		r.t.Fatalf("job %d's processes: %v", jobID, err)
 	}
@@ -147,7 +147,7 @@ func (r *rig) requestDuringLoss(in *v1alpha1.Instance, key string, jobID int, st
 				return
 			case <-time.After(5 * time.Millisecond):
 			}
-			pids, err := r.cl.plat.Processes(jobID)
+			pids, err := r.cl.Plat.Processes(jobID)
 			if err != nil {
 				continue
 			}

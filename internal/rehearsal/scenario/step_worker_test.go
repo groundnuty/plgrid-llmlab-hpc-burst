@@ -32,7 +32,7 @@ const pauseAfterFailures = 3
 // engine it starts (the engine double's doc, The executables). Never by name.
 func (r *rig) engineProcesses(jobID int) []int {
 	r.t.Helper()
-	pids, err := r.cl.plat.Processes(jobID)
+	pids, err := r.cl.Plat.Processes(jobID)
 	if err != nil {
 		r.t.Fatalf("job %d's processes: %v", jobID, err)
 	}
@@ -108,7 +108,7 @@ func (r *rig) stepWorkerRestart(in *v1alpha1.Instance, key string) {
 		r.t.Fatalf("step (d) needs a ready Instance %s: %+v", in.Name, before.Status)
 	}
 	jobID, _ := strconv.Atoi(before.Status.JobID)
-	job, _ := r.cl.plat.Job(jobID)
+	job, _ := r.cl.Plat.Job(jobID)
 	allocs := r.allocationNames()
 	restartEvents := countReason(r.eventReasons(in.Name), v1alpha1.ReasonWorkerRestart)
 	engines := r.engineProcesses(jobID)
@@ -186,7 +186,7 @@ func (r *rig) stepWorkerRestart(in *v1alpha1.Instance, key string) {
 func (r *rig) workerLeader(jobID, engine int) int {
 	r.t.Helper()
 	leader := parentOf(engine)
-	pids, err := r.cl.plat.Processes(jobID)
+	pids, err := r.cl.Plat.Processes(jobID)
 	self, serr := os.Executable()
 	if err != nil || serr != nil || leader == 0 || !slices.Contains(pids, leader) || stack.ProcessExe(leader) != self {
 		r.t.Fatalf("step (d): the engine %d's parent %d (%s) is not the fake Apptainer of job %d (%v, %v)", engine, leader, stack.ProcessExe(leader), jobID, err, serr)
@@ -277,7 +277,7 @@ func (r *rig) checkWorkerRestart(in *v1alpha1.Instance, before v1alpha1.Instance
 		r.t.Errorf("step (d): Allocations %v after the restart, %v before: a new Allocation", after, allocs)
 	}
 	jobID, _ := strconv.Atoi(now.Status.JobID)
-	if j, _ := r.cl.plat.Job(jobID); j.PID != jobPID || j.State != "RUNNING" {
+	if j, _ := r.cl.Plat.Job(jobID); j.PID != jobPID || j.State != "RUNNING" {
 		r.t.Errorf("step (d): job %d is %s with PID %d, was RUNNING with %d", jobID, j.State, j.PID, jobPID)
 	}
 	if e := r.engineProcesses(jobID); len(e) != 1 || e[0] == killed {

@@ -51,7 +51,7 @@ func (r *rig) stepStart() *v1alpha1.Instance {
 		r.t.Fatalf("job ID %q: %v", alloc.Status.AtProvider.JobID, err)
 	}
 	stack.WaitFor(r.t, stack.WaitDeadline, "the job to start in the fake cluster", func() bool {
-		j, ok := r.cl.plat.Job(id)
+		j, ok := r.cl.Plat.Job(id)
 		return ok && j.PID > 0
 	})
 	r.checkReleased(id)
@@ -80,10 +80,10 @@ func (r *rig) stepStart() *v1alpha1.Instance {
 // scontrol release of its own ID (the fake cluster's call log).
 func (r *rig) checkReleased(id int) {
 	r.t.Helper()
-	j, _ := r.cl.plat.Job(id)
+	j, _ := r.cl.Plat.Job(id)
 	want := strconv.Itoa(id)
 	var seen []string
-	for _, c := range r.cl.plat.Calls() {
+	for _, c := range r.cl.Plat.Calls() {
 		if len(c.Words) == 0 || c.Words[0] != "scontrol" {
 			continue
 		}
@@ -157,7 +157,7 @@ func (r *rig) holdTunnel(allocName string, jobID int) types.UID {
 // jobAgent is the PID of the job's agent, the staged hb-agent
 // (agentapi.StagedAgentPath), 0 while none runs.
 func (r *rig) jobAgent(jobID int) int {
-	pids, err := r.cl.plat.Processes(jobID)
+	pids, err := r.cl.Plat.Processes(jobID)
 	if err != nil {
 		return 0
 	}

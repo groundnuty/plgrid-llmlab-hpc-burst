@@ -66,7 +66,7 @@ func (r *rig) controllerRestart(in *v1alpha1.Instance, key, body string, tokens 
 		r.t.Fatalf("step (f) needs a ready, registered Instance %s: %+v", in.Name, before.Status)
 	}
 	jobID, _ := strconv.Atoi(before.Status.JobID)
-	job, _ := r.cl.plat.Job(jobID)
+	job, _ := r.cl.Plat.Job(jobID)
 	allocs := len(r.allocations())
 	online := r.frpsProxies()
 	if !online[string(in.UID)] {
@@ -110,7 +110,7 @@ func (r *rig) controllerRestart(in *v1alpha1.Instance, key, body string, tokens 
 		case now.Status.Agent == nil || now.Status.Agent.AgentInstanceID != before.Status.Agent.AgentInstanceID:
 			r.t.Fatalf("step (f): the agent registration changed: %+v, was %+v", now.Status.Agent, before.Status.Agent)
 		}
-		if j, _ := r.cl.plat.Job(jobID); j.PID != job.PID || j.State != "RUNNING" {
+		if j, _ := r.cl.Plat.Job(jobID); j.PID != job.PID || j.State != "RUNNING" {
 			r.t.Fatalf("step (f): job %d is %s with PID %d, was RUNNING with %d", jobID, j.State, j.PID, job.PID)
 		}
 		for name := range online {

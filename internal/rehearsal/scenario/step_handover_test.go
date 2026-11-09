@@ -193,7 +193,7 @@ func (r *rig) checkDrained(pred, repl *v1alpha1.Instance, ds, streamEnd time.Tim
 		o, ended := r.watch.first(pred.UID, time.Time{}, func(o observation) bool { return o.phase == v1alpha1.InstanceEnded })
 		var a v1alpha1.Allocation
 		gone := !r.get(&a, alloc.Name, stack.Namespace)
-		j, _ := r.cl.plat.Job(jobID)
+		j, _ := r.cl.Plat.Job(jobID)
 		state := fmt.Sprintf("Instance %s seen ended %v (reason %q); Allocation gone %v phase %s; job %d %s finished %v",
 			pred.Name, ended, o.endReason, gone, a.Status.AtProvider.Phase, jobID, j.State, j.Finished)
 		return ended && o.endReason == v1alpha1.ReasonDrained &&

@@ -217,10 +217,10 @@ func (r *rig) waitRecords(uids map[types.UID]string) {
 // waitJobsGone waits until no job of the fake cluster has a process left.
 func (r *rig) waitJobsGone() {
 	r.t.Helper()
-	for _, j := range r.cl.plat.Jobs() {
+	for _, j := range r.cl.Plat.Jobs() {
 		id := j.ID
 		stack.WaitFor(r.t, stack.WaitDeadline, fmt.Sprintf("job %d's processes to be gone", id), func() bool {
-			pids, err := r.cl.plat.Processes(id)
+			pids, err := r.cl.Plat.Processes(id)
 			return err == nil && len(pids) == 0
 		})
 	}

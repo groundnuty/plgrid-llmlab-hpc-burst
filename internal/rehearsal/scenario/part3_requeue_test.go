@@ -57,7 +57,7 @@ func (p3 *part3) checkIdentity(d *depRun, in *v1alpha1.Instance) {
 	if err != nil {
 		r.t.Fatalf("%s: Allocation %s's job ID %q: %v", d.Name, a.Name, a.Status.AtProvider.JobID, err)
 	}
-	j, ok := r.cl.plat.Job(id)
+	j, ok := r.cl.Plat.Job(id)
 	switch {
 	case !ok:
 		r.t.Errorf("%s: the fake cluster has no job %d for Allocation %s", d.Name, id, a.Name)
@@ -102,7 +102,7 @@ func (p3 *part3) checkQueuedSuccessor(d *depRun) {
 				return false, "the successor " + in.Name + "'s Allocation has no job yet"
 			}
 			jobID, _ = strconv.Atoi(a.Status.AtProvider.JobID)
-			j, ok := r.cl.plat.Job(jobID)
+			j, ok := r.cl.Plat.Job(jobID)
 			if !ok || j.Held {
 				return false, fmt.Sprintf("the successor's job %d is held or unknown", jobID)
 			}
@@ -111,8 +111,8 @@ func (p3 *part3) checkQueuedSuccessor(d *depRun) {
 		}
 		return false, "no successor of " + d.primary.Name + " yet: " + r.describe()
 	})
-	pj, _ := r.cl.plat.Job(d.primaryJob)
-	sj, _ := r.cl.plat.Job(jobID)
+	pj, _ := r.cl.Plat.Job(d.primaryJob)
+	sj, _ := r.cl.Plat.Job(jobID)
 	if pj.State != "RUNNING" || sj.State != "PENDING" || sj.Held || !sj.Start.IsZero() {
 		r.t.Errorf("%s: the predecessor's job %d is %s and the successor's job %d is %s (held %v, started %s); want RUNNING and pending on the GPU cap",
 			d.Name, d.primaryJob, pj.State, jobID, sj.State, sj.Held, ts(sj.Start))
@@ -161,14 +161,14 @@ func (p3 *part3) requeue(d *depRun) {
 		known[o.uid] = true
 	}
 	at := time.Now()
-	if err := r.cl.plat.RequeueHold(d.succJob); err != nil {
+	if err := r.cl.Plat.RequeueHold(d.succJob); err != nil {
 		r.t.Fatalf("%s: requeue job %d: %v", d.Name, d.succJob, err)
 	}
 	var repl v1alpha1.Allocation
 	stack.WaitState(r.t, stack.WaitDeadline, "the requeued Instance to fail, its Allocation to go and a new one to take its place", func() (bool, string) {
 		o, ended := r.watch.first(in.UID, at, func(o observation) bool { return o.phase == v1alpha1.InstanceEnded })
 		gone := slices.ContainsFunc(r.watch.allocations(), func(o allocObservation) bool { return o.uid == a.UID && o.deleted })
-		j, _ := r.cl.plat.Job(d.succJob)
+		j, _ := r.cl.Plat.Job(d.succJob)
 		var fresh *v1alpha1.Allocation
 		for _, x := range p3.allocationsOf(d.Name) {
 			if !known[x.UID] && x.Status.AtProvider.JobID != "" {
@@ -186,12 +186,12 @@ func (p3 *part3) requeue(d *depRun) {
 	if o.endReason != v1alpha1.ReasonRequeued {
 		r.t.Errorf("%s: the requeued Instance %s ended %q, want %s (HBEP-3, open question 13)", d.Name, in.Name, o.endReason, v1alpha1.ReasonRequeued)
 	}
-	j, _ := r.cl.plat.Job(d.succJob)
+	j, _ := r.cl.Plat.Job(d.succJob)
 	if j.RestartCount < 1 || j.Executions < 2 {
 		r.t.Errorf("%s: job %d has restart count %d and %d executions after the requeue", d.Name, d.succJob, j.RestartCount, j.Executions)
 	}
 	want := strconv.Itoa(d.succJob)
-	for _, c := range r.cl.plat.Calls() {
+	for _, c := range r.cl.Plat.Calls() {
 		if c.Time.Before(at) || len(c.Words) == 0 || !slices.Contains(c.Words, want) {
 			continue
 		}
@@ -211,7 +211,7 @@ func (p3 *part3) requeue(d *depRun) {
 			deletedSeen = o.at
 		}
 	}
-	for _, p := range finalizerCancelProblems(r.cl.plat.Calls(), d.succJob, at, deletion, deletedSeen) {
+	for _, p := range finalizerCancelProblems(r.cl.Plat.Calls(), d.succJob, at, deletion, deletedSeen) {
 		r.t.Errorf("%s: %s", d.Name, p)
 	}
 	var ri v1alpha1.Instance

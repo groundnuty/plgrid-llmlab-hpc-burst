@@ -75,7 +75,7 @@ func drainStartOf(in *v1alpha1.Instance) (time.Time, bool) {
 type rig struct {
 	t   *testing.T
 	b   stack.Binaries
-	cl  *cluster
+	cl  *rigCluster
 	h   *stack.Host
 	hub *stack.Hub
 	c   client.Client
@@ -112,7 +112,10 @@ type rig struct {
 type rigSetup struct {
 	mode  string // "direct" or "ssh"
 	ports stack.Ports
-	shape clusterShape
+	shape stack.ClusterShape
+	// engineGate puts the engine gate (enginegate_test.go) in front of the
+	// jobs' apptainer; it holds nothing until armed.
+	engineGate bool
 	// objects returns the PlatformProfiles and Providers to create once the
 	// stack is up, given the rig, the host's CPU architecture and the batch
 	// Provider's credentials file; nil creates #146's profile and Provider.
@@ -132,9 +135,9 @@ func startRigWith(t *testing.T, s rigSetup) *rig {
 	// The job's environment has no HF_ENDPOINT: the agent learns the Hub
 	// from agent.json, which the controller writes from its own (ruling of 1
 	// Nov 2026 on #156; step (a) checks the downloads reached the double).
-	r.cl = startCluster(t, dir, nil, s.shape)
+	r.cl = startRigCluster(t, dir, s.shape, s.engineGate)
 	creds := filepath.Join(dir, "provider-ssh")
-	if err := r.cl.login.WriteCredentials(creds); err != nil {
+	if err := r.cl.Login.WriteCredentials(creds); err != nil {
 		t.Fatal(err)
 	}
 	dh := stack.DialHome{Mode: "direct", Addr: s.ports.DialHomeListen}
@@ -294,7 +297,7 @@ func (r *rig) startGateway(dir string) stack.DialHome {
 			r.t.Errorf("the gateway's Close: %v", err)
 		}
 	})
-	dhDir := filepath.Join(r.cl.home, ".hpcburst", "dial-home")
+	dhDir := filepath.Join(r.cl.Home, ".hpcburst", "dial-home")
 	if err := os.MkdirAll(filepath.Dir(dhDir), 0o700); err != nil {
 		r.t.Fatal(err)
 	}
@@ -311,7 +314,7 @@ func (r *rig) jobSSHForwards(jobID int) []int {
 	r.t.Helper()
 	want, _ := exec.LookPath("ssh")
 	want, _ = filepath.EvalSymlinks(want)
-	pids, err := r.cl.plat.Processes(jobID)
+	pids, err := r.cl.Plat.Processes(jobID)
 	if err != nil {
 		r.t.Fatalf("job %d's processes: %v", jobID, err)
 	}
