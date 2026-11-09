@@ -111,6 +111,10 @@ type Options struct {
 	// Front is the front and agent-endpoint settings; nil means no front is
 	// configured, and nothing is submitted.
 	Front *FrontSettings
+	// Relays is host-dialed mode's relay settings: required exactly when
+	// Front's mode is agentapi.DialHomeHostDialed (HBEP-6, Dial-home modes,
+	// host-dialed mode), nil otherwise.
+	Relays *RelaySettings
 	// HubEndpoint is the Hugging Face Hub origin written into each
 	// Allocation's agent.json, the controller's HF_ENDPOINT; "" writes none,
 	// and the agent then uses its own HF_ENDPOINT or the public Hub. A job

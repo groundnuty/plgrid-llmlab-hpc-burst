@@ -41,6 +41,8 @@ type shared struct {
 	// a new leader emits it once more, which is "when it starts" for that
 	// process (HBEP-8, Repeating conditions).
 	limitEvents sync.Map
+	// relays is host-dialed mode's relay owner; nil in the other modes.
+	relays *relayState
 }
 
 // connector implements managed.ExternalConnector.
@@ -176,7 +178,9 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	}
 	now := e.now()
 	if meta.WasDeleted(a) {
-		return e.observeDeleting(ctx, a, rec, name, now)
+		obs, err := e.observeDeleting(ctx, a, rec, name, now)
+		e.syncRelays(ctx, a, name)
+		return obs, err
 	}
 	// Refused is kept once set, and a Refused Allocation with no job submits
 	// nothing.
@@ -189,7 +193,9 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 			return obs, err
 		}
 	}
-	return e.observeRecorded(ctx, a, &rec, name, now)
+	obs, err := e.observeRecorded(ctx, a, &rec, name, now)
+	e.syncRelays(ctx, a, name)
+	return obs, err
 }
 
 // choose picks the job to adopt when none is recorded (HBEP-7, open question

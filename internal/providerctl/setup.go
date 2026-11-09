@@ -68,7 +68,11 @@ func New(kube client.Client, reader client.Reader, scheme *runtime.Scheme, o Opt
 		return nil, err
 	}
 	kube = client.WithFieldOwner(kube, v1alpha1.FieldManagerProvider)
-	s := &shared{o: o, kube: kube, reader: reader, builds: &buildCache{}}
+	relays, err := newRelayState(o)
+	if err != nil {
+		return nil, err
+	}
+	s := &shared{o: o, kube: kube, reader: reader, builds: &buildCache{}, relays: relays}
 	s.h = &holder{o: &s.o}
 	opts := []managed.ReconcilerOption{
 		managed.WithExternalConnector(&connector{s: s}),
@@ -136,6 +140,13 @@ func Setup(mgr manager.Manager, o Options) error {
 		Complete(c.Reconciler)
 	if err != nil {
 		return err
+	}
+	if c.shared.relays != nil {
+		// Leader-only: only the leader's relays run, and they stop by PID when
+		// it stops or loses the lead (HBEP-6, Dial-home modes, host-dialed mode).
+		if err := mgr.Add(relayRunnable{c}); err != nil {
+			return err
+		}
 	}
 	return mgr.Add(c.status)
 }
