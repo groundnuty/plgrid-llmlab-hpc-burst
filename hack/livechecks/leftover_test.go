@@ -357,15 +357,23 @@ func TestAwaitCountWaitsForALateCount(t *testing.T) {
 }
 
 // A count that never gets there fails at the deadline, and the last count read is what the failure
-// names. A deadline that is never reached, or a count that is not kept, would not.
+// names. A deadline that is never reached, or a count that is not kept, would not. The fake
+// records what it returned last, and the test compares with that, so no number of reads inside
+// the 50 ms is assumed: a slow scheduler changes how many reads there are, not the verdict.
 func TestAwaitCountGivesUpAtTheDeadlineWithTheLastCount(t *testing.T) {
-	calls := 0
-	n, ok := awaitCount(50*time.Millisecond, 3, func() int {
+	const d = 50 * time.Millisecond
+	calls, last := 0, 0
+	start := time.Now()
+	n, ok := awaitCount(d, 3, func() int {
 		calls++
-		return min(calls, 2) // 1, then 2 for ever
+		last = min(calls, 2) // 1, then 2 for ever
+		return last
 	})
-	if ok || n != 2 {
-		t.Errorf("awaitCount = %d, %v; want 2, false: it should give up with the last count it read", n, ok)
+	if ok || n != last || calls == 0 {
+		t.Errorf("awaitCount = %d, %v after %d reads (the last read gave %d); want the last count read, and false", n, ok, calls, last)
+	}
+	if got := time.Since(start); got < d {
+		t.Errorf("awaitCount gave up after %v, before its %v deadline", got, d)
 	}
 }
 
