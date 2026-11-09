@@ -331,7 +331,7 @@ func (r *liveRun) Handover(ctx context.Context, p Plan) (HandoverObs, error) {
 	// The result is read from the watch, straight after the API showed the
 	// primary ended (issue #281).
 	if err := r.syncWatch(ctx, stack.KindInstances|stack.KindAllocations, "the handover's result"); err != nil {
-		return HandoverObs{}, err
+		return HandoverObs{}, notKnownBeside(err, second)
 	}
 	tags, err := r.runTags()
 	if err != nil {
@@ -402,7 +402,7 @@ func (r *liveRun) NoOverlap(ctx context.Context, p Plan) (NoOverlapObs, error) {
 		return NoOverlapObs{}, second
 	}
 	if err := r.syncWatch(ctx, stack.KindInstances|stack.KindAllocations|stack.KindDeployments, "the no-overlap row's result"); err != nil {
-		return NoOverlapObs{}, err
+		return NoOverlapObs{}, notKnownBeside(err, second)
 	}
 	tags, err := r.runTags()
 	if err != nil {

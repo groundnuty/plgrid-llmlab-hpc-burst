@@ -203,6 +203,38 @@ func TestASecondJobThatNeverStartedIsNotRunOnTheTwoJobRows(t *testing.T) {
 	}
 }
 
+// A catch-up that cannot tell whether the watch has caught up (#292), on a two-job row whose second job never started, is a failure, exit 1, and no
+// NOT RUN: the first job's part is judged from the watch, so a NOT RUN would hide what may be a failure of it (the science agent, on PR 284).
+// The real test binary, through the script. It ends before any verdict, so there is no text to post, and the log says both.
+func TestACatchUpThatCannotTellIsAFailureOnATwoJobRow(t *testing.T) {
+	real := realTestBinary(t, "HPCBURST_LIVECHECKS_ALPHA_TEST", alphaPkg)
+	realDir := filepath.Join(repoRoot(t), alphaPkg)
+	for _, row := range []string{"alpha-athena-handover", "alpha-helios-nooverlap"} {
+		t.Run(row, func(t *testing.T) {
+			t.Parallel()
+			w := newAlphaWorld(t)
+			w.installDry(dryWrapper, real, realDir)
+			res := w.run([]string{"STUB_DRY_FAULT=second-never-started-not-known"}, "--run", row, "--yes")
+			if res.code != 1 {
+				t.Fatalf("exit %d, want 1:\n%s", res.code, res.out)
+			}
+			w.contains(res, row+": FAIL", "cleanup: left behind 0")
+			if strings.Contains(res.out, row+": NOT RUN") || strings.Contains(res.out, "ReplacementLate for its deployment") {
+				t.Errorf("a run that cannot tell was reported NOT RUN:\n%s", res.out)
+			}
+			if markers, _ := filepath.Glob(filepath.Join(w.out(), row+"-*", "not-run.txt")); len(markers) != 0 {
+				t.Errorf("a marker was written: %v", markers)
+			}
+			log, _ := os.ReadFile(filepath.Join(w.out(), row+".log"))
+			for _, want := range []string{"is not known", "the second never started", "ReplacementLate for its deployment: not raised"} {
+				if !strings.Contains(string(log), want) {
+					t.Errorf("the log lacks %q:\n%s", want, log)
+				}
+			}
+		})
+	}
+}
+
 // Only a row of two jobs has a second job: the marker that says one never started, on a row of one, is a failure.
 func TestAMarkerOfASecondJobThatNeverStartedOnARowOfOneIsAFailure(t *testing.T) {
 	for _, row := range []string{"tunnel-hour-athena", "tunnel-hour-helios", "gpu-accounting-athena", "reach-helios"} {

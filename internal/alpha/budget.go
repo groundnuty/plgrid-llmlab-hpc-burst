@@ -10,9 +10,8 @@ import (
 // row's worst case is added up from them: the steps use these, and hack/livechecks checks the script's timeout against
 // the sum (review of PR 284, B5 and B6), so a longer wait that outgrows a row's timeout fails a test rather than a run.
 //
-// A wait of the stack's is named from the stack, never copied, so that a change there flows through. When #292 and this meet, the
-// second to merge adds stack.CatchUpWorstCase by name to WorstCase below, once for each catch-up a row's flow makes, and to
-// liveWaits (budget_test.go).
+// A wait of the stack's is named from the stack, never copied, so that a change there flows through: stack.CatchUpWorstCase, once for
+// each catch-up on a row's path (liveWaits in budget_test.go lists them, so a new one fails until it is counted here).
 const (
 	// StartupWait is the stack's start, before the first clock runs: hpcburst up, then the controller's and the Provider's readiness.
 	StartupWait = stack.UpTimeout + 2*stack.WaitDeadline
@@ -25,7 +24,7 @@ const (
 	// TunnelRunOver is what a tunnel row's run budget, and the script's timeout for it, keep over its lease: what follows the
 	// lease in the worst case, with the factor (TestEachStackRowsWorstCaseIsItsWaitsAddedUp), and the two minutes before
 	// the test's deadline at which its waits give up.
-	TunnelRunOver = 28 * time.Minute
+	TunnelRunOver = 29 * time.Minute
 	// CloseTimeout bounds Close: hpcburst down and the cancel of the run's jobs.
 	CloseTimeout = 5 * time.Minute
 	// ReadyMargin is what a job that started has beyond health.startTimeout to become ready.
@@ -55,11 +54,13 @@ func (r Row) RunDeadline(pendingMax time.Duration) time.Duration {
 // steps' own waits: the stack's start, the first job's wait in the queue (FirstClock), its lease, then what comes after, Close included.
 // The script's timeout for the row must be above it, or the timeout fires before the row's bound can.
 //
-//   - A tunnel row: the job's drain start, a drain window and EndMargin for the job to end, Close.
+//   - A tunnel row: the job's drain start, a drain window and EndMargin for the job to end, one catch-up, Close.
 //   - The handover: the drain start, a request's deadline for the streams that cross it, a drain window and EndMargin
-//     for the primary to end, the guard's last looks, Close. Its successor must be ready by the drain start, so its
-//     second job has no wait of its own.
-//   - The no-overlap row: the predecessor's lease end, SuccessorWait, the guard's last looks, Close.
+//     for the primary to end, the guard's last looks, two catch-ups (the worker restart's and the result's), Close. Its
+//     successor must be ready by the drain start, so its second job has no wait of its own.
+//   - The no-overlap row: the predecessor's lease end, SuccessorWait, the guard's last looks, two catch-ups, Close.
+//
+// A catch-up on a path that then fails the row (whyGone) is not counted: nothing follows it.
 func (r Row) WorstCase(pendingMax time.Duration) time.Duration {
 	tm := r.Clock()
 	dw := DrainWindow(tm.MaxRequestDuration, tm.DrainMargin, 0)
@@ -67,11 +68,11 @@ func (r Row) WorstCase(pendingMax time.Duration) time.Duration {
 	lastLooks := GuardResultLooks * GuardEvery
 	switch r.Name {
 	case "alpha-athena-handover":
-		return StartupWait + first + (r.Lease - dw) + tm.MaxRequestDuration + dw + EndMargin + lastLooks + CloseTimeout
+		return StartupWait + first + (r.Lease - dw) + tm.MaxRequestDuration + dw + EndMargin + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout
 	case "alpha-helios-nooverlap":
-		return StartupWait + first + r.Lease + SuccessorWait(tm, pendingMax) + lastLooks + CloseTimeout
+		return StartupWait + first + r.Lease + SuccessorWait(tm, pendingMax) + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout
 	}
-	return StartupWait + first + (r.Lease - dw) + dw + EndMargin + CloseTimeout
+	return StartupWait + first + (r.Lease - dw) + dw + EndMargin + stack.CatchUpWorstCase + CloseTimeout
 }
 
 // Scaled is the waits the code adds past a row's bounds, with the margin (BudgetFactorPercent).

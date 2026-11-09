@@ -14,6 +14,7 @@ package alpha
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,8 +41,8 @@ const (
 // dryFaults lists every fault the stand-in knows, per row family. An unknown
 // name stops the run: a typo must not pass as "no fault".
 var dryFaults = map[string][]string{
-	"handover":  {"cut", "no-stream", "two-restarts", "no-restart", "no-handover", "late-successor", "wrong-partition", "untagged", "unattributed", "adds-helios", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "no-responses", "pend-past-bound", "second-never-started", "second-never-started-late", "second-never-started-unknown", "second-never-started-cut", "second-never-started-late-cut", "second-never-started-no-restart"},
-	"nooverlap": {"nocap", "nogap", "noslot", "cut", "no-stream", "late-submit", "untagged", "wrong-partition", "adds-athena", "default-lease", "short-lease", "no-release-when-idle", "duplicate-tag", "extra-allocation", "two-restarts", "no-restart", "pend-past-bound", "second-never-started", "second-never-started-late", "second-never-started-unknown", "second-never-started-cut", "second-never-started-late-cut", "second-never-started-no-restart"},
+	"handover":  {"cut", "no-stream", "two-restarts", "no-restart", "no-handover", "late-successor", "wrong-partition", "untagged", "unattributed", "adds-helios", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "no-responses", "pend-past-bound", "second-never-started", "second-never-started-late", "second-never-started-unknown", "second-never-started-cut", "second-never-started-late-cut", "second-never-started-no-restart", "second-never-started-not-known"},
+	"nooverlap": {"nocap", "nogap", "noslot", "cut", "no-stream", "late-submit", "untagged", "wrong-partition", "adds-athena", "default-lease", "short-lease", "no-release-when-idle", "duplicate-tag", "extra-allocation", "two-restarts", "no-restart", "pend-past-bound", "second-never-started", "second-never-started-late", "second-never-started-unknown", "second-never-started-cut", "second-never-started-late-cut", "second-never-started-no-restart", "second-never-started-not-known"},
 	"tunnel":    {"short", "cut", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition", "adds-other-cluster", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "past-deadline", "past-drain", "no-drain-start", "stream-cut-error", "reconnect", "disconnected", "sparse-samples", "late-first-sample", "no-concurrency", "slow-streams", "no-idle-gap", "no-long-stream", "no-back-to-back", "no-load-rate", "slow-start", "no-large", "large-apart", "response-overlap", "no-upload-rate", "no-download-rate", "upload-not-under-load", "pend-past-bound"},
 }
 
@@ -356,7 +357,8 @@ func (d *drySteps) cancelTag(tag string) error {
 
 // secondNeverStarts is whether the fault is one of a first job that ran and a second that never started. On its own
 // the row ends NOT RUN, whatever -late and -unknown say was read of ReplacementLate, which is information and no check;
-// -cut and -no-restart add a failure of the first job's part, which then wins (review of PR 284, B3).
+// -cut and -no-restart add a failure of the first job's part, which then wins (review of PR 284, B3); and -not-known a catch-up that cannot
+// tell, which fails a run that judges what it read, whichever job started.
 func (d *drySteps) secondNeverStarts() bool {
 	return strings.HasPrefix(d.cfg.DryFault, "second-never-started")
 }
@@ -380,6 +382,9 @@ func (d *drySteps) firstRanSecondPends(p Plan, qos string) (tags []string, opene
 	return []string{tag0, tag1}, opened, ended, drain, d.cancelTag(tag1)
 }
 
+// errDryNotKnown is what the live flows' catch-up says when it cannot tell (stack.CatchUpResult.Err).
+var errDryNotKnown = errors.New("the run's result: whether the watch has caught up with the API is not known")
+
 // secondNotStarted is the error of a second job that never started, with what the fault says was read of ReplacementLate.
 func (d *drySteps) secondNotStarted() error {
 	switch {
@@ -400,6 +405,9 @@ func (d *drySteps) handoverSecondNeverStarts(p Plan) (HandoverObs, error) {
 	if strings.HasSuffix(d.cfg.DryFault, "-cut") {
 		streams[0].Complete, streams[0].CutBy = false, "tunnel"
 	}
+	if d.fault("second-never-started-not-known") {
+		return HandoverObs{}, notKnownBeside(errDryNotKnown, d.secondNotStarted())
+	}
 	obs := HandoverObs{Tags: tags, Streams: streams, DrainStart: drain, WorkerRestarts: 1, Responses: 20, Attributed: 20,
 		Instances: []InstanceSpan{{Tag: tags[0], ReadyAt: opened, EndedAt: ended}, {Tag: tags[1]}}, Deployment: d.deployment()}
 	if d.fault("second-never-started-no-restart") {
@@ -416,6 +424,9 @@ func (d *drySteps) noOverlapSecondNeverStarts(p Plan) (NoOverlapObs, error) {
 	streams := []Stream{{ID: "s1", Opened: opened, Ended: drain.Add(time.Minute), Complete: true}}
 	if strings.HasSuffix(d.cfg.DryFault, "-cut") {
 		streams[0].Complete, streams[0].CutBy = false, "tunnel"
+	}
+	if d.fault("second-never-started-not-known") {
+		return NoOverlapObs{}, notKnownBeside(errDryNotKnown, d.secondNotStarted())
 	}
 	obs := NoOverlapObs{Tags: tags, Streams: streams, DrainStart: drain, NoOverlapSlotSeen: true, WorkerRestarts: 1, Deployment: d.deployment()}
 	if d.fault("second-never-started-no-restart") {

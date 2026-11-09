@@ -124,6 +124,25 @@ func (rec *Recorder) resetsLocked(kinds Kinds) string {
 	return strings.Join(parts, "; ")
 }
 
+// ResetsDecideNothing says the test's outcome rests on nothing read from the watch, so that a reset, past or to come, cannot make it
+// unknown, and the end of the test logs one rather than fails. A run says so only when it judges nothing from the watch: a first job
+// that never started, on the scheduler's own read (internal/alpha). A nil Recorder takes it.
+func (rec *Recorder) ResetsDecideNothing() {
+	if rec == nil {
+		return
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	rec.resetsDecideNothing = true
+}
+
+// decidesNothing is whether the test said ResetsDecideNothing.
+func (rec *Recorder) decidesNothing() bool {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	return rec.resetsDecideNothing
+}
+
 // ResetCount is how many times the Recorder's streams started again from the
 // current versions: a measured fact, for a row's post. It reads no version, so it
 // is no read of the watch (inventory.go). None for no watch.

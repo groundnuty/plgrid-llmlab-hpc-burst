@@ -618,6 +618,7 @@ func (r *liveRun) firstJobStarted(p Plan) error {
 				return fmt.Errorf("the first clock of %s ran out, and the run's first job cannot be called one that never started: %w", bound, err)
 			}
 			r.claimed = true
+			r.watch.ResetsDecideNothing() // this run ends on the scheduler's read, and judges nothing from the watch
 			p.Logf("%s: the run's first job was still pending %s after the deployment's creation; the run ends and its jobs are cancelled", p.Row.Name, time.Since(r.created).Round(time.Second))
 			return &NotStartedError{Bound: bound, PastEnd: pastEnd}
 		}
@@ -737,7 +738,7 @@ func (r *liveRun) syncWatch(ctx context.Context, kinds stack.Kinds, what string)
 
 // tagOf is the job tag of an Instance's Allocation.
 func (r *liveRun) tagOf(in v1alpha1.Instance) string {
-	for _, o := range r.allocations() {
+	for _, o := range r.watch.Allocations() {
 		if o.Name == in.Spec.AllocationRef.Name {
 			return v1alpha1.JobTag(o.Allocation.Namespace, o.Allocation.Name, o.Allocation.UID)
 		}

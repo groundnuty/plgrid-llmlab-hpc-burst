@@ -530,6 +530,7 @@ func TestASecondJobThatNeverStartedIsNotRunUnlessAnEarlierFailureStands(t *testi
 			{"second-never-started-cut", "a stream was cut"},
 			{"second-never-started-late-cut", "a stream was cut"},
 			{"second-never-started-no-restart", "0 restarts at the worker rung, want 1"},
+			{"second-never-started-not-known", ""},
 		} {
 			t.Run(row+"/"+c.fault, func(t *testing.T) {
 				cfg := Config{Row: rowOf(row), Dry: true, DryFault: c.fault, Out: filepath.Join(t.TempDir(), "out"), PendingMax: 10 * time.Minute, FrontLabel: testFrontLabel}
@@ -541,7 +542,18 @@ func TestASecondJobThatNeverStartedIsNotRunUnlessAnEarlierFailureStands(t *testi
 				failures, err := Run(context.Background(), cfg, st, rec, t.Logf)
 				_, postErr := os.Stat(filepath.Join(cfg.Out, PostsFile))
 				_, recErr := os.Stat(filepath.Join(cfg.Out, RecordFile))
-				if c.wantFailure == "" {
+				if c.fault == "second-never-started-not-known" {
+					// A catch-up that cannot tell: the run judges what it read, so it is a failure naming that, and what was read
+					// of the second job is beside it.
+					if err == nil || NotRun(cfg.Row, err) || errors.Is(err, ErrSecondNotStarted) || len(failures) != 0 {
+						t.Fatalf("failures %v, err %v; want the catch-up's failure, which is no NOT RUN", failures, err)
+					}
+					for _, want := range []string{"is not known", "the second never started", "ReplacementLate for its deployment: not raised"} {
+						if !strings.Contains(err.Error(), want) {
+							t.Errorf("err = %v, which lacks %q", err, want)
+						}
+					}
+				} else if c.wantFailure == "" {
 					if !errors.Is(err, ErrSecondNotStarted) || !NotRun(cfg.Row, err) || len(failures) != 0 {
 						t.Fatalf("failures %v, err %v; want the NOT RUN of a second job that never started", failures, err)
 					}

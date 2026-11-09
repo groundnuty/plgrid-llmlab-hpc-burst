@@ -45,6 +45,17 @@ func (e *SecondNotStartedError) Error() string {
 // Is makes the error ErrSecondNotStarted, whatever it read.
 func (e *SecondNotStartedError) Is(target error) bool { return target == ErrSecondNotStarted }
 
+// notKnownBeside is a catch-up's failure on a two-job run. A run whose second job never started still judges its first job's part from
+// the watch, so a catch-up that cannot tell fails it as on any run, and it is no NOT RUN: that would hide what may be a failure of the
+// part that did happen (the science agent, on PR 284: a NOT RUN and #292's "not known" must not mask each other). What the run read of
+// the second job stays in the message, as text: this error is not ErrSecondNotStarted.
+func notKnownBeside(err, second error) error {
+	if second == nil {
+		return err
+	}
+	return fmt.Errorf("%w; %v", err, second)
+}
+
 // Plan is what a scenario is given.
 type Plan struct {
 	Row Row

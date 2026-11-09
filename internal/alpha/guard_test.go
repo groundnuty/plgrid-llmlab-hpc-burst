@@ -674,3 +674,24 @@ func TestAHandoverWhoseSecondJobNeverStartedReadsNoEvents(t *testing.T) {
 		t.Errorf("%d handovers on a run with none, want 0", n)
 	}
 }
+
+// A run whose second job never started still judges its first job's part from the watch, so a catch-up that cannot tell is a failure naming that
+// (the science agent, on PR 284), with what was read of the second job beside it. It is no NOT RUN: as text, the second job's read cannot
+// make it one. The other direction, a run whose first job never started, makes no catch-up and judges nothing from the watch, so a reset
+// there decides nothing (TestTheLiveStepsWaitOnWhatTheSumsCount pins the call; stack, TestWhatAResetAtTheEndOfTheTestCountsFor).
+func TestACatchUpThatCannotTellFailsARunWhoseSecondJobNeverStarted(t *testing.T) {
+	row := rowOf("alpha-athena-handover")
+	notKnown := errors.New("the handover's result: whether the watch has caught up with the API is not known")
+	err := notKnownBeside(notKnown, &SecondNotStartedError{ReplacementLate: LateRaised})
+	if errors.Is(err, ErrSecondNotStarted) || NotRun(row, err) || !errors.Is(err, notKnown) {
+		t.Errorf("err = %v; want the catch-up's failure, which is no NOT RUN", err)
+	}
+	for _, want := range []string{"is not known", "the second never started", "ReplacementLate for its deployment: raised"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, which lacks %q", err, want)
+		}
+	}
+	if err := notKnownBeside(notKnown, nil); err != notKnown {
+		t.Errorf("err = %v with no second job to speak of, want the catch-up's own", err)
+	}
+}

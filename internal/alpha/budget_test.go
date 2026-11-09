@@ -15,7 +15,8 @@ import (
 // Each stack row's worst case, added up by hand from the review of PR 284 (B5), not by the code it checks: a no-overlap
 // row at a wait of 2 h is 120 for the predecessor to start, 106 for its lease, 120 for the successor to start (346, the
 // figure in the review), 60 and 5 for it to become ready, 1 for the guard's last looks and 5 to close, and before all of it
-// 11 for the stack to start: 5 for hpcburst up, then 3 each for the controller and the Provider to be ready. The tunnel rows'
+// 11 for the stack to start: 5 for hpcburst up, then 3 each for the controller and the Provider to be ready, and a minute for each of the
+// watch's catch-ups on its path: 2 on the handover and on no-overlap, 1 on a tunnel row (stack.CatchUpWorstCase). The tunnel rows'
 // first wait stops a minute before the first end, the lease less the 15-minute drain window.
 func TestEachStackRowsWorstCaseIsItsWaitsAddedUp(t *testing.T) {
 	long, err := WithTunnelLease(rowOf("tunnel-hour-athena"), 240*time.Minute)
@@ -28,14 +29,14 @@ func TestEachStackRowsWorstCaseIsItsWaitsAddedUp(t *testing.T) {
 		// pending and want are in minutes, and wantRest the waits past its bounds, which count 1.25 times (MinTimeout).
 		pending, want, wantDeadline, wantRest int
 	}{
-		{"handover, 30", rowOf("alpha-athena-handover"), 30, 11 + 30 + 91 + 5 + 15 + 5 + 1 + 5, 2*30 + 150, 11 + 5 + 5 + 1 + 5},
-		{"handover, 2 h", rowOf("alpha-athena-handover"), 120, 11 + 120 + 91 + 5 + 15 + 5 + 1 + 5, 2*120 + 150, 11 + 5 + 5 + 1 + 5},
-		{"no-overlap, 30", rowOf("alpha-helios-nooverlap"), 30, 11 + 30 + 106 + 30 + 60 + 5 + 1 + 5, 2*30 + 210, 11 + 60 + 5 + 1 + 5},
-		{"no-overlap, 2 h", rowOf("alpha-helios-nooverlap"), 120, 11 + 120 + 106 + 120 + 60 + 5 + 1 + 5, 2*120 + 210, 11 + 60 + 5 + 1 + 5},
-		{"the hour on Helios, 30", rowOf("tunnel-hour-helios"), 30, 11 + 30 + 122 + 15 + 5 + 5, 30 + 165, 11 + 5 + 5},
-		{"the hour on Athena, 2 h", rowOf("tunnel-hour-athena"), 120, 11 + 120 + 122 + 15 + 5 + 5, 120 + 165, 11 + 5 + 5},
-		{"the hour on Athena, its wait capped a minute before the first end", rowOf("tunnel-hour-athena"), 180, 11 + 121 + 122 + 15 + 5 + 5, 180 + 165, 11 + 5 + 5},
-		{"the hour at the longest lease", long, 120, 11 + 120 + 225 + 15 + 5 + 5, 120 + 268, 11 + 5 + 5},
+		{"handover, 30", rowOf("alpha-athena-handover"), 30, 11 + 30 + 91 + 5 + 15 + 5 + 1 + 2 + 5, 2*30 + 150, 11 + 5 + 5 + 1 + 2 + 5},
+		{"handover, 2 h", rowOf("alpha-athena-handover"), 120, 11 + 120 + 91 + 5 + 15 + 5 + 1 + 2 + 5, 2*120 + 150, 11 + 5 + 5 + 1 + 2 + 5},
+		{"no-overlap, 30", rowOf("alpha-helios-nooverlap"), 30, 11 + 30 + 106 + 30 + 60 + 5 + 1 + 2 + 5, 2*30 + 213, 11 + 60 + 5 + 1 + 2 + 5},
+		{"no-overlap, 2 h", rowOf("alpha-helios-nooverlap"), 120, 11 + 120 + 106 + 120 + 60 + 5 + 1 + 2 + 5, 2*120 + 213, 11 + 60 + 5 + 1 + 2 + 5},
+		{"the hour on Helios, 30", rowOf("tunnel-hour-helios"), 30, 11 + 30 + 122 + 15 + 5 + 1 + 5, 30 + 166, 11 + 5 + 1 + 5},
+		{"the hour on Athena, 2 h", rowOf("tunnel-hour-athena"), 120, 11 + 120 + 122 + 15 + 5 + 1 + 5, 120 + 166, 11 + 5 + 1 + 5},
+		{"the hour on Athena, its wait capped a minute before the first end", rowOf("tunnel-hour-athena"), 180, 11 + 121 + 122 + 15 + 5 + 1 + 5, 180 + 166, 11 + 5 + 1 + 5},
+		{"the hour at the longest lease", long, 120, 11 + 120 + 225 + 15 + 5 + 1 + 5, 120 + 269, 11 + 5 + 1 + 5},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			p := time.Duration(c.pending) * time.Minute
@@ -72,37 +73,42 @@ func TestTheStartupInTheWorstCaseIsTheStacksOwn(t *testing.T) {
 // sleep, under a deadline listed here); "a call" (one read's own bound, inside the wait that makes it); "a goroutine" (the guard's, the
 // sampler's and the prober's own, which no step waits on past what is listed).
 var liveWaits = map[string]string{
-	"Close: context.WithTimeout(CloseTimeout)":                                           "term: CloseTimeout",
-	"start: r.waitFor(stack.WaitDeadline)":                                               "startup",
-	"endAt: context.WithTimeout(stack.APICallTimeout)":                                   "a call",
-	"firstJobStarted: time.Sleep(time.Second)":                                           "pacing",
-	"firstReady: r.waitFor(stack.WaitDeadline)":                                          "the lease",
-	"firstReady: r.waitFor(r.readyWait())":                                               "the lease",
-	"successorOf: time.Sleep(time.Second)":                                               "pacing",
-	"replacementLate: context.WithTimeout(stack.APICallTimeout)":                         "a call",
-	"guardResult: context.WithTimeout(stack.APICallTimeout)":                             "a call",
-	"guardResult: time.Sleep(time.Second)":                                               "pacing",
-	"lookNow: context.WithTimeout(time.Minute)":                                          "a call",
-	"startGuard: time.After(r.every())":                                                  "a goroutine",
-	"startGuard: context.WithTimeout(time.Minute)":                                       "a goroutine",
-	"waitFor: stack.WaitFor(d)":                                                          "the waits that call it, listed here",
-	"workerRestart: r.waitFor(r.tm.StartTimeout + 5*time.Minute)":                        "the lease",
-	"untilBefore: r.waitFor(time.Until(at) + time.Minute)":                               "the lease",
-	"Handover: r.successorOf(time.Until(ds) - lead - lead/2)":                            "the lease",
-	"Handover: r.untilBefore(lead)":                                                      "the lease",
-	"Handover: r.successorOf(time.Until(ds))":                                            "the lease",
-	"Handover: r.waitFor(r.dw + EndMargin)":                                              "term: the drain window and EndMargin",
-	"NoOverlap: r.untilBefore(lead)":                                                     "the lease",
-	"NoOverlap: r.successorOf(time.Until(leaseEnd) + SuccessorWait(r.tm, p.PendingMax))": "term: SuccessorWait",
-	"endDeployment: r.waitFor(r.dw + EndMargin)":                                         "term: the drain window and EndMargin",
-	"wait: time.After(r.fc.RequestTimeout() + time.Minute)":                              "term: the streams' MaxRequestDuration; a stream past it fails the run",
-	"startSampler: time.After(every)":                                                    "a goroutine",
-	"startSampler: context.WithTimeout(10 * time.Second)":                                "a call",
-	"startProber: time.After(time.Until(from))":                                          "a goroutine",
-	"startProber: time.After(time.Second)":                                               "a goroutine",
-	"largeRequests: time.Sleep(tm.UploadPause)":                                          "pacing",
-	"TunnelHour: time.After(rateAsked + r.fc.RequestTimeout() + 2*time.Minute)":          "the lease",
-	"TunnelHour: r.waitFor(tm.MinIdleGap + time.Minute)":                                 "the lease",
+	"Close: context.WithTimeout(CloseTimeout)":                                                    "term: CloseTimeout",
+	"start: r.waitFor(stack.WaitDeadline)":                                                        "startup",
+	"endAt: context.WithTimeout(stack.APICallTimeout)":                                            "a call",
+	"firstJobStarted: time.Sleep(time.Second)":                                                    "pacing",
+	"firstReady: r.waitFor(stack.WaitDeadline)":                                                   "the lease",
+	"firstReady: r.waitFor(r.readyWait())":                                                        "the lease",
+	"successorOf: time.Sleep(time.Second)":                                                        "pacing",
+	"replacementLate: context.WithTimeout(stack.APICallTimeout)":                                  "a call",
+	"guardResult: context.WithTimeout(stack.APICallTimeout)":                                      "a call",
+	"guardResult: time.Sleep(time.Second)":                                                        "pacing",
+	"lookNow: context.WithTimeout(time.Minute)":                                                   "a call",
+	"startGuard: time.After(r.every())":                                                           "a goroutine",
+	"startGuard: context.WithTimeout(time.Minute)":                                                "a goroutine",
+	"waitFor: stack.WaitFor(d)":                                                                   "the waits that call it, listed here",
+	"workerRestart: r.waitFor(r.tm.StartTimeout + 5*time.Minute)":                                 "the lease",
+	"untilBefore: r.waitFor(time.Until(at) + time.Minute)":                                        "the lease",
+	"Handover: r.successorOf(time.Until(ds) - lead - lead/2)":                                     "the lease",
+	"Handover: r.untilBefore(lead)":                                                               "the lease",
+	"Handover: r.successorOf(time.Until(ds))":                                                     "the lease",
+	"Handover: r.waitFor(r.dw + EndMargin)":                                                       "term: the drain window and EndMargin",
+	"NoOverlap: r.untilBefore(lead)":                                                              "the lease",
+	"NoOverlap: r.successorOf(time.Until(leaseEnd) + SuccessorWait(r.tm, p.PendingMax))":          "term: SuccessorWait",
+	"whyGone: r.syncWatch(stack.KindInstances | stack.KindDeployments)":                           "a path that fails the run: nothing follows it",
+	"workerRestart: r.syncWatch(stack.KindInstances)":                                             "term: stack.CatchUpWorstCase",
+	"Handover: r.syncWatch(stack.KindInstances | stack.KindAllocations)":                          "term: stack.CatchUpWorstCase",
+	"NoOverlap: r.syncWatch(stack.KindInstances | stack.KindAllocations | stack.KindDeployments)": "term: stack.CatchUpWorstCase",
+	"endDeployment: r.syncWatch(stack.KindAllocations)":                                           "term: stack.CatchUpWorstCase",
+	"endDeployment: r.waitFor(r.dw + EndMargin)":                                                  "term: the drain window and EndMargin",
+	"wait: time.After(r.fc.RequestTimeout() + time.Minute)":                                       "term: the streams' MaxRequestDuration; a stream past it fails the run",
+	"startSampler: time.After(every)":                                                             "a goroutine",
+	"startSampler: context.WithTimeout(10 * time.Second)":                                         "a call",
+	"startProber: time.After(time.Until(from))":                                                   "a goroutine",
+	"startProber: time.After(time.Second)":                                                        "a goroutine",
+	"largeRequests: time.Sleep(tm.UploadPause)":                                                   "pacing",
+	"TunnelHour: time.After(rateAsked + r.fc.RequestTimeout() + 2*time.Minute)":                   "the lease",
+	"TunnelHour: r.waitFor(tm.MinIdleGap + time.Minute)":                                          "the lease",
 }
 
 // waitOf is how a call reads in liveWaits, or "" when it is not a wait.
@@ -123,7 +129,7 @@ func waitOf(fset *token.FileSet, fn string, call *ast.CallExpr) string {
 	switch recv + "." + sel.Sel.Name {
 	case "r.waitFor", "time.After", "time.Sleep":
 		arg = 0
-	case "r.successorOf", "r.untilBefore", "context.WithTimeout", "stack.WaitFor":
+	case "r.successorOf", "r.untilBefore", "context.WithTimeout", "stack.WaitFor", "r.syncWatch":
 		arg = 1
 	}
 	if arg < 0 || arg >= len(call.Args) {
@@ -172,8 +178,13 @@ func TestTheLiveStepsWaitOnWhatTheSumsCount(t *testing.T) {
 	}
 	for file, calls := range map[string][]string{
 		"alpha_live_test.go": {"context.WithTimeout(context.Background(), cfg.Row.RunDeadline(cfg.PendingMax))"},
-		"steps_live_test.go": {"return r.tm.StartTimeout + ReadyMargin"},
+		"steps_live_test.go": {"return r.tm.StartTimeout + ReadyMargin", "r.watch.ResetsDecideNothing()"},
 		"guard_live_test.go": {"wait = GuardResultLooks * r.every()", "return GuardEvery"},
+		// A catch-up that cannot tell ends a run that judges what it read, whichever job started.
+		"live_flows_test.go": {
+			"r.syncWatch(ctx, stack.KindInstances|stack.KindAllocations, \"the handover's result\"); err != nil {\n\t\treturn HandoverObs{}, notKnownBeside(err, second)",
+			"r.syncWatch(ctx, stack.KindInstances|stack.KindAllocations|stack.KindDeployments, \"the no-overlap row's result\"); err != nil {\n\t\treturn NoOverlapObs{}, notKnownBeside(err, second)",
+		},
 	} {
 		src, err := os.ReadFile(file)
 		if err != nil {
