@@ -133,6 +133,11 @@ type runKnobs struct {
 	beforeReap                    func(r *jobRun)
 	limitFired                    func(r *jobRun)
 	limitDecided                  func(r *jobRun, ended bool)
+	// streamRead is called by a streamed step's copy of its standard output
+	// (fd 1) or error (fd 2) after it has handled one read of n bytes: sent
+	// them on, or held them back. A test waits on it to know that a chunk has
+	// been seen (srunstream.go).
+	streamRead func(fd, n int)
 }
 
 func hostKnobs() runKnobs {

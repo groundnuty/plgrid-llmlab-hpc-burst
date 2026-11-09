@@ -1,8 +1,9 @@
 package fakeslurm
 
-// New. "srun --overlap --jobid=<id> [--ntasks=1] [--time=<t>] <program>
+// New. "srun [-u] --overlap --jobid=<id> [--ntasks=1] [--time=<t>] <program>
 // [args...]": a step in the session user's own running job, run as a host
-// process (run mode only). The step's process lives in srunstep.go.
+// process (run mode only). The step's process lives in srunstep.go; Stream,
+// the streaming form of the same command, in srunstream.go.
 
 import (
 	"errors"
@@ -24,16 +25,17 @@ import (
 // srunArgs is a parsed srun command line.
 type srunArgs struct {
 	jobID   int
-	minutes int // --time in minutes, rounded up; 0 for none
+	minutes int  // --time in minutes, rounded up; 0 for none
+	unbuf   bool // -u: standard output is not held back until a newline (Stream)
 	program string
 	args    []string
 }
 
 // parseSrun reads the options before the program and takes the rest as the
 // program's own words. It returns the message of the first problem, or "".
-// Only --overlap, --jobid=<digits>, --ntasks=1 and --time=<t> are known, in
-// any order; any other option is refused, so one the plugin should never send
-// cannot pass silently. The program's own options (bash -s) follow its name
+// Only -u, --overlap, --jobid=<digits>, --ntasks=1 and --time=<t> are known,
+// in any order; any other option is refused, so one the plugin should never
+// send cannot pass silently. The program's own options (bash -s) follow its name
 // and are not read.
 func parseSrun(args []string) (srunArgs, string) {
 	var a srunArgs
@@ -42,6 +44,8 @@ func parseSrun(args []string) (srunArgs, string) {
 	for ; i < len(args) && strings.HasPrefix(args[i], "-"); i++ {
 		name, val, hasVal := strings.Cut(args[i], "=")
 		switch {
+		case name == "-u" && !hasVal:
+			a.unbuf = true
 		case name == "--overlap" && !hasVal:
 			overlap = true
 		case name == "--jobid" && hasVal:
@@ -61,7 +65,7 @@ func parseSrun(args []string) (srunArgs, string) {
 			}
 			a.minutes = m
 		default:
-			return a, fmt.Sprintf("the fake takes only --overlap, --jobid=<id>, --ntasks=1 and --time=<t> before the program, not %q", args[i])
+			return a, fmt.Sprintf("the fake takes only -u, --overlap, --jobid=<id>, --ntasks=1 and --time=<t> before the program, not %q", args[i])
 		}
 	}
 	switch {
@@ -88,24 +92,30 @@ func allDigits(s string) bool {
 	return true
 }
 
-// srun runs a step in the user's own running job. It needs run mode, and
-// refuses every job that is not the calling user's or not RUNNING with a live
-// process, running nothing. The step is a host process of its own (its own
-// session, apart from the job's), so it is not among the job's Processes and
-// changes nothing of the job's state or accounting; what the program does to
-// the job's processes is its own doing. mu is let go of while it runs.
-func (sh *shell) srun(args []string) int {
+// stepPlan is a checked srun line: the options, the job's execution and the
+// program's path.
+type stepPlan struct {
+	a    srunArgs
+	r    *jobRun
+	prog string
+}
+
+// planStep reads an srun line's words and runs srun's checks in order: the
+// options, run mode, the job and the program. On a refusal it has written the
+// message to standard error and returns its exit code with ok false, and
+// nothing has started. The caller holds mu.
+func (sh *shell) planStep(args []string) (pl stepPlan, code int, ok bool) {
 	a, msg := parseSrun(args)
 	if msg != "" {
-		return sh.fail(1, "srun: error: %s", msg)
+		return pl, sh.fail(1, "srun: error: %s", msg), false
 	}
 	p := sh.p
 	if p.run == nil {
-		return sh.fail(1, "srun: error: the fake runs a step only in run mode (Config.Run): outside it there is no process to run in")
+		return pl, sh.fail(1, "srun: error: the fake runs a step only in run mode (Config.Run): outside it there is no process to run in"), false
 	}
 	r, msg := sh.stepJob(a.jobID)
 	if msg != "" {
-		return sh.fail(1, "srun: error: Unable to confirm allocation for job %d: %s", a.jobID, msg)
+		return pl, sh.fail(1, "srun: error: Unable to confirm allocation for job %d: %s", a.jobID, msg), false
 	}
 	prog, err := lookPath(a.program, envValue(r.env, "PATH"), r.submitDir)
 	if err != nil {
@@ -113,16 +123,38 @@ func (sh *shell) srun(args []string) int {
 		if errors.Is(err, fs.ErrPermission) {
 			code = 126
 		}
-		return sh.fail(code, "srun: error: execve(): %s: %s", a.program, errnoText(err))
+		return pl, sh.fail(code, "srun: error: execve(): %s: %s", a.program, errnoText(err)), false
 	}
+	return stepPlan{a: a, r: r, prog: prog}, 0, true
+}
+
+// spec is the step's start, read from the job under mu.
+func (pl stepPlan) spec(p *Platform) stepSpec {
+	return stepSpec{
+		path: pl.prog, argv0: pl.a.program, args: pl.a.args, dir: pl.r.submitDir, env: append([]string(nil), pl.r.env...),
+		proc: p.knobs.proc, sweepLimit: p.knobs.sweepLimit, sweepInterval: p.knobs.sweepInterval,
+	}
+}
+
+// srun runs a step in the user's own running job. It needs run mode, and
+// refuses every job that is not the calling user's or not RUNNING with a live
+// process, running nothing. The step is a host process of its own (its own
+// session, apart from the job's), so it is not among the job's Processes and
+// changes nothing of the job's state or accounting; what the program does to
+// the job's processes is its own doing. mu is let go of while it runs.
+func (sh *shell) srun(args []string) int {
+	pl, code, ok := sh.planStep(args)
+	if !ok {
+		return code
+	}
+	p := sh.p
 	timeout := sh.timeout
 	if timeout <= 0 {
 		timeout = provider.CommandTimeout // as the transport's default
 	}
-	st, err := startStep(stepSpec{
-		path: prog, argv0: a.program, args: a.args, dir: r.submitDir, env: append([]string(nil), r.env...),
-		stdin: sh.stdin, proc: p.knobs.proc, sweepLimit: p.knobs.sweepLimit, sweepInterval: p.knobs.sweepInterval,
-	})
+	spec := pl.spec(p)
+	spec.stdin = sh.stdin
+	st, err := startStep(spec)
 	if err != nil {
 		return sh.fail(1, "srun: error: the step could not start: %v", err)
 	}
@@ -130,7 +162,7 @@ func (sh *shell) srun(args []string) int {
 	func() {
 		p.mu.Unlock() // the step may run for the whole timeout; nothing else waits for it
 		defer p.mu.Lock()
-		out = st.finish(sh.ctx, timeout, time.Duration(a.minutes)*p.minute(), r.exited)
+		out = st.finish(sh.ctx, timeout, time.Duration(pl.a.minutes)*p.minute(), pl.r.exited)
 	}()
 	sh.now = p.clock.Now()
 	return sh.stepResult(out, timeout)
