@@ -62,6 +62,10 @@ type Target struct {
 	// connection of its own (sshrun.Relay's Command). The owner sets its
 	// standard streams and process group and starts it.
 	Command func(line string) (*exec.Cmd, error)
+	// Describe, when set, names the kind of an ended relay's failure from its
+	// command, without repeating its output (sshrun.Classify); the owner logs
+	// it with the exit code.
+	Describe func(cmd *exec.Cmd) string
 }
 
 func (t Target) same(u Target) bool {
@@ -399,11 +403,14 @@ func (r *relay) once(ctx context.Context) (time.Duration, bool) {
 	r.mu.Lock()
 	r.pid = 0
 	r.mu.Unlock()
-	exit := -1
+	exit, kind := -1, ""
 	if ps := p.cmd.ProcessState; ps != nil {
 		exit = ps.ExitCode()
 	}
-	o.Logger.Info("relay ended", "tag", r.t.Tag, "channel", r.ch, "job", id, "up", up.Round(time.Millisecond), "exit", exit)
+	if exit != 0 && r.t.Describe != nil {
+		kind = r.t.Describe(p.cmd)
+	}
+	o.Logger.Info("relay ended", "tag", r.t.Tag, "channel", r.ch, "job", id, "up", up.Round(time.Millisecond), "exit", exit, "failure", kind)
 	return up, true
 }
 

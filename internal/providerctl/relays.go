@@ -148,7 +148,7 @@ func (e *external) syncRelays(ctx context.Context, a *v1alpha1.Allocation, tag s
 	r.owner.Want(hostdial.Target{
 		Tag: tag, JobID: o.JobID,
 		AgentPath: path.Join(paths.Staging, agentapi.StagedAgentPath(a.Spec.ForProvider.Batch.AgentDigest)),
-		Login:     sshrun.LoginOf(e.v.SSH), Jobs: freshJobs{e.p}, Command: cmd,
+		Login:     sshrun.LoginOf(e.v.SSH), Jobs: freshJobs{e.p}, Command: cmd, Describe: sshrun.Classify,
 	})
 }
 
