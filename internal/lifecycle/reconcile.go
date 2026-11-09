@@ -27,6 +27,10 @@ type Config struct {
 	// ModelDeployment is Degraded with reason FrontNotConfigured (HBEP-11,
 	// Single-user host).
 	FrontConfigured bool
+	// HostDialed says the host-wide dial-home mode is host-dialed. Each batch
+	// Provider's submit limit is then at most HostDialedMaxAllocations
+	// (hostdialed.go; HBEP-6, Host-dialed mode, Capacity).
+	HostDialed bool
 	// AgentDigest returns the SHA-256, 64 lowercase hex, of the allocation
 	// agent's build for a CPU architecture (HBEP-7, Provisioning).
 	AgentDigest func(cpuArch string) (string, error)
