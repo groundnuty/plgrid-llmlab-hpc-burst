@@ -631,11 +631,7 @@ func (r *liveRun) successorOf(pred string, d time.Duration) (v1alpha1.Instance, 
 // of the row's time.
 func (r *liveRun) syncWatch(ctx context.Context, kinds stack.Kinds, what string) error {
 	r.t.Helper()
-	res := r.watch.CatchUp(ctx, r.t, r.c, r.w.md.Namespace, kinds, what)
-	if p := res.Problem(); p != "" {
-		return fmt.Errorf("%s: %s", what, p)
-	}
-	return nil
+	return r.watch.CatchUp(ctx, r.t, r.c, r.w.md.Namespace, kinds, what).Err(what)
 }
 
 // tagOf is the job tag of an Instance's Allocation.

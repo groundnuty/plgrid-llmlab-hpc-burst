@@ -162,6 +162,34 @@ func TestCatchUpWhenTheStreamDoesNotReachTheListIsNotKnown(t *testing.T) {
 	}
 }
 
+// A reset during the wait: the versions after it reach the LIST, and say nothing
+// of those before.
+func TestCatchUpWithAResetDuringTheWaitIsNotKnown(t *testing.T) {
+	rec := &Recorder{}
+	reach(rec, KindAllocations, "100")
+	pause, calls := pausing(func(n int) {
+		if n == 1 {
+			rec.stream(KindAllocations, nil).Reset("the watch could not resume from version 100")
+			reach(rec, KindAllocations, "200")
+		}
+	})
+	res := catchUp(bg, noDeadlineT{t}, rec, listOf(map[Kinds]string{KindAllocations: "200"}), KindAllocations, "a read", WaitDeadline, pause)
+	if res.OK() || *calls != 1 || !strings.Contains(res.Unknown, "was reset") || !strings.Contains(res.Unknown, "version 100") {
+		t.Errorf("result %+v after %d pauses; want not known, naming the reset", res, *calls)
+	}
+}
+
+// A reset of a stream the catch-up does not cover is no matter for it.
+func TestCatchUpIgnoresAResetOfAStreamNotCovered(t *testing.T) {
+	rec := &Recorder{}
+	reach(rec, KindAllocations, "200")
+	rec.stream(KindInstances, nil).Reset("not this one")
+	res := catchUp(bg, noDeadlineT{t}, rec, listOf(map[Kinds]string{KindAllocations: "200"}), KindAllocations, "a read", WaitDeadline, func() {})
+	if !res.OK() {
+		t.Errorf("result %+v; want OK", res)
+	}
+}
+
 // A stream at the LIST's version with a listed object still missing has lost that
 // object's event; the catch-up names the object rather than taking the stream's
 // word for it.
@@ -284,6 +312,16 @@ func TestCatchUpReportsALostEventOnceAndKeepsItLost(t *testing.T) {
 	onlyAllocs := catchUp(bg, noDeadlineT{t}, rec, listOf(map[Kinds]string{KindAllocations: "200"}), KindAllocations, "one kind", time.Minute, func() {})
 	if !onlyAllocs.Lost("a1") || onlyAllocs.Lost("i1") {
 		t.Errorf("a catch-up of the Allocations: %+v; want a1 lost and the Instance not named", onlyAllocs)
+	}
+	// A caller that reports a result read from the record cannot hide the loss.
+	if err := again.Err("the result"); err == nil || !strings.Contains(err.Error(), "the result: an earlier catch-up found an event lost") || !strings.Contains(err.Error(), "alloc-a") {
+		t.Errorf("Err of a later catch-up: %v; want the earlier loss named", err)
+	}
+	if err := res.Err("the first"); err == nil || !strings.Contains(err.Error(), "the first: the watch delivered nothing newer") {
+		t.Errorf("Err of the catch-up that found it: %v; want the problem", err)
+	}
+	if err := (CatchUpResult{}).Err("nothing"); err != nil {
+		t.Errorf("Err of a clean catch-up: %v", err)
 	}
 }
 

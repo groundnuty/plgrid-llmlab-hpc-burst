@@ -83,3 +83,20 @@ func (r CatchUpResult) Problem() string {
 	}
 	return lost
 }
+
+// Err is the catch-up's outcome for a caller that reports a result of its own
+// from the record: what Problem says, or that an earlier catch-up found an event
+// of the record lost, which a result read from it cannot hide. nil when OK.
+func (r CatchUpResult) Err(what string) error {
+	if p := r.Problem(); p != "" {
+		return fmt.Errorf("%s: %s", what, p)
+	}
+	if len(r.EarlierLost) == 0 {
+		return nil
+	}
+	var parts []string
+	for _, b := range r.EarlierLost {
+		parts = append(parts, b.Explain())
+	}
+	return fmt.Errorf("%s: an earlier catch-up found an event lost: %s", what, strings.Join(parts, "; "))
+}

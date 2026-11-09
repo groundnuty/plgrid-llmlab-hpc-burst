@@ -163,7 +163,9 @@ func (g lag) caughtUp() bool { return len(g.behind) == 0 && len(g.trailing) == 0
 
 // behindOn compares what the Recorder holds with the listing, for the kinds.
 func (rec *Recorder) behindOn(kinds Kinds, l listing) lag {
-	var g lag
+	// A reset first, also one that comes during the wait: the versions after it
+	// are current, and say nothing of those before.
+	g := lag{unknown: rec.resets(kinds)}
 	rec.mu.Lock()
 	lost := map[types.UID]Behind{}
 	for uid, b := range rec.lost {
@@ -267,20 +269,15 @@ func catchUp(ctx context.Context, t T, rec *Recorder, list func() (listing, erro
 	start := time.Now()
 	deadline, cut := waitDeadline(ctx, t, wait)
 	g := rec.behindOn(kinds, l)
-	res := CatchUpResult{EarlierLost: g.earlier}
-	if why := rec.resets(kinds); why != "" {
-		res.Unknown = why
-		return res
-	}
 	waited := !g.caughtUp()
 	for g.unknown == "" && !g.caughtUp() && ctx.Err() == nil && time.Now().Before(deadline) {
 		pause()
 		g = rec.behindOn(kinds, l)
 	}
+	res := CatchUpResult{EarlierLost: g.earlier}
 	if waited {
 		res.Waited = time.Since(start)
 	}
-	res.EarlierLost = g.earlier
 	cutShort := ctx.Err() != nil || (cut && res.Waited < wait)
 	switch {
 	case g.unknown != "":
