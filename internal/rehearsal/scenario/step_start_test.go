@@ -272,12 +272,10 @@ func (r *rig) checkStartRecords(in *v1alpha1.Instance) {
 // LFS file's SHA-256 from the listing, so only the agent fetches the weights.
 func (r *rig) checkAgentStaged() {
 	r.t.Helper()
-	for _, p := range r.hub.resolved() {
-		for _, f := range hubFiles {
-			if f.lfs && f.path == p {
-				return
-			}
+	for _, p := range r.hub.Resolved() {
+		if stack.HubFileIsLFS(p) {
+			return
 		}
 	}
-	r.t.Errorf("the agent never downloaded the LFS weights from the Hub double (downloads %v): agent.json's hubEndpoint did not reach it", r.hub.resolved())
+	r.t.Errorf("the agent never downloaded the LFS weights from the Hub double (downloads %v): agent.json's hubEndpoint did not reach it", r.hub.Resolved())
 }

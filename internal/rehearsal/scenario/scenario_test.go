@@ -73,7 +73,7 @@ type rig struct {
 	b   binaries
 	cl  *cluster
 	h   *host
-	hub *hub
+	hub *stack.Hub
 	c   client.Client
 	// engineEnv is the served deployment's engine env: the engine double's
 	// modes (direct run only).
@@ -122,7 +122,7 @@ func startRigWith(t *testing.T, s rigSetup) *rig {
 	t.Helper()
 	b := requireRehearsal(t)
 	dir := stack.ShortDir(t)
-	r := &rig{t: t, b: b, hub: startHub(t), ports: s.ports, tokenDelay: tokenDelay, dir: dir}
+	r := &rig{t: t, b: b, hub: stack.StartHub(t), ports: s.ports, tokenDelay: tokenDelay, dir: dir}
 	// The job's environment has no HF_ENDPOINT: the agent learns the Hub
 	// from agent.json, which the controller writes from its own (ruling of 1
 	// Nov 2026 on #156; step (a) checks the downloads reached the double).
@@ -137,7 +137,7 @@ func startRigWith(t *testing.T, s rigSetup) *rig {
 	}
 	// The controller lists the checkpoint from the Hub double through
 	// HF_ENDPOINT, which up passes on to it.
-	r.h = startHost(t, b, dir, s.ports, dh, stack.CleanEnv("HF_ENDPOINT="+r.hub.url))
+	r.h = startHost(t, b, dir, s.ports, dh, stack.CleanEnv("HF_ENDPOINT="+r.hub.URL))
 	arch := stack.CPUArch(t)
 	r.h.placeAgentBuild(arch)
 	r.c = stack.KubeClient(t, r.h.state)
