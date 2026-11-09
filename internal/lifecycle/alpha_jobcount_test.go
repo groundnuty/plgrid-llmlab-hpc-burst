@@ -12,6 +12,16 @@ package lifecycle
 // once the successor has a lease end, the run's lastJob of 0baf5a7), which
 // must create a third Allocation: the case reaches the race, so the guard's
 // pass is not one that a short wait would give anyway.
+//
+// Both tests, and every case in them, run in parallel (#282): they are the
+// package's slowest CPU-bound tests, walking hours of the manual clock in 10 s
+// rounds, and the package stands close to go test's 10-minute timeout. Each
+// case's rig has its own fake client, clock, fake Slurm and temporary directory;
+// a rig opens no port, starts no process and sets no environment variable. Go
+// resumes a top-level parallel test only once every sequential test has ended,
+// so the package's control planes, and the tests that swap newLeaseLock, are
+// gone by then. These are the package's only parallel tests: one that joins them
+// must keep all of this true.
 
 import (
 	"context"
@@ -255,6 +265,7 @@ func runGuarded(t *testing.T, c guardCase, untilThird bool, guard func(rg *rig) 
 }
 
 func TestTheTwoJobGuardKeepsALongWaitToTwoAllocations(t *testing.T) {
+	t.Parallel()
 	dw, limit := 15*time.Minute, 106*time.Minute
 	for _, c := range []guardCase{
 		{name: "no-overlap, a 90 min first wait", row: "alpha-helios-nooverlap", firstWait: 90 * time.Minute, noOverlapQueue: true},
@@ -263,6 +274,7 @@ func TestTheTwoJobGuardKeepsALongWaitToTwoAllocations(t *testing.T) {
 		{name: "handover, a 61 min first wait, the successor starting after the drain start", row: "alpha-athena-handover", firstWait: 61 * time.Minute, succWait: 95 * time.Minute},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			var tg *alpha.TwoJobGuard
 			r := runGuarded(t, c, false, func(rg *rig) endGuard {
 				tg = &alpha.TwoJobGuard{TimeLimit: limit, DrainWindow: dw}
@@ -293,6 +305,7 @@ func TestTheTwoJobGuardKeepsALongWaitToTwoAllocations(t *testing.T) {
 // after the end, and it ends every job of the run (the row itself fails: hack/livechecks shows the script's
 // FAIL and its cleanup by the run's prefix).
 func TestADeadStepLeavesTheDeploymentAtItsLastEnd(t *testing.T) {
+	t.Parallel()
 	dw, limit := 15*time.Minute, 106*time.Minute
 	started := func(rg *rig) int {
 		n := 0
@@ -318,6 +331,7 @@ func TestADeadStepLeavesTheDeploymentAtItsLastEnd(t *testing.T) {
 			func(rg *rig) bool { return len(rg.allocations(alphaGuardMD)) == 2 && started(rg) == 1 }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			var sg *stoppingGuard
 			r := runGuarded(t, c.gc, false, func(rg *rig) endGuard {
 				sg = &stoppingGuard{inner: &twoJobGuard{t: t, g: &alpha.TwoJobGuard{TimeLimit: limit, DrainWindow: dw}}, when: c.when}
