@@ -9,6 +9,8 @@ package hostdial_test
 
 import (
 	"bytes"
+	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -218,9 +220,10 @@ func TestHostDialedControllerRestart(t *testing.T) {
 	}
 }
 
-// Drop stops a relay by its PID even when the far end is frozen, so the ssh
-// would never end by itself: the step's program is stopped (SIGSTOP), and the
-// relay's ssh is still gone within the stop grace.
+// Drop stops a relay by its PID even when its ssh is wedged: the relay's ssh
+// process is stopped (SIGSTOP), so neither its pipes' closing nor a TERM can
+// end it, and only the KILL that the stop sends after its grace does. Drop
+// returns once the process is gone; the job runs on.
 func TestHostDialedDropStopsAFrozenRelayByPID(t *testing.T) {
 	w := newWorld(t)
 	j := w.submit("hb-relay-frz-0123456789ab", 30*time.Second)
@@ -228,15 +231,12 @@ func TestHostDialedDropStopsAFrozenRelayByPID(t *testing.T) {
 	own.Want(w.target(j))
 	up := waitUp(t, own, j.tag)
 	roundTrip(t, j, serving, "serving", payload(1000))
-	var steps []int
-	waitFor(t, 30*time.Second, "the serving relay's step", func() bool {
-		steps = stepPIDs(t, j.id, serving)
-		return len(steps) == 1
-	})
-	t.Cleanup(func() { _ = syscall.Kill(steps[0], syscall.SIGKILL) })
-	if err := syscall.Kill(steps[0], syscall.SIGSTOP); err != nil {
+	ssh := up[serving].PID
+	t.Cleanup(func() { _ = syscall.Kill(ssh, syscall.SIGKILL) })
+	if err := syscall.Kill(ssh, syscall.SIGSTOP); err != nil {
 		t.Fatal(err)
 	}
+	waitFor(t, 30*time.Second, "the serving relay's ssh stopped", func() bool { return procState(ssh) == "T" })
 	dropped := make(chan struct{})
 	go func() { own.Drop(j.tag); close(dropped) }()
 	select {
@@ -245,7 +245,7 @@ func TestHostDialedDropStopsAFrozenRelayByPID(t *testing.T) {
 		for _, r := range up {
 			_ = syscall.Kill(r.PID, syscall.SIGKILL)
 		}
-		t.Fatal("Drop did not return within 30 s with the relay's far end frozen: the relay was not stopped by its PID")
+		t.Fatal("Drop did not return within 30 s with the relay's ssh stopped: the relay was not stopped by its PID")
 	}
 	for ch, r := range up {
 		if alive(r.PID) {
@@ -255,6 +255,20 @@ func TestHostDialedDropStopsAFrozenRelayByPID(t *testing.T) {
 	if s, ok := w.plat.Job(atoi(t, j.id)); !ok || s.State != "RUNNING" {
 		t.Errorf("job %s is %v: Drop must stop the relays, not the job", j.id, s.State)
 	}
+}
+
+// procState is a process's state letter from /proc ("" when it is gone).
+func procState(pid int) string {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return ""
+	}
+	s := string(b)
+	i := strings.LastIndexByte(s, ')')
+	if i < 0 || i+2 >= len(s) {
+		return ""
+	}
+	return s[i+2 : i+3]
 }
 
 // Two relays for one channel: the agent keeps the newer, the one with the
