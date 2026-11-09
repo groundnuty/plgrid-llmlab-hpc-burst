@@ -194,17 +194,35 @@ func TestAJobSurvivesTheThreadThatSubmittedIt(t *testing.T) {
 	ping, pong := filepath.Join(r.root, "ping"), filepath.Join(r.root, "pong")
 	answer := "while :; do if [ -e " + ping + " ]; then : > " + pong + "; rm -f " + ping + "; fi; sleep 0.02; done"
 	type sent struct {
-		tid int
-		res slurm.Result
-		err error
+		tid  int
+		main bool // the goroutine ran on the process's first thread
+		res  slurm.Result
+		err  error
 	}
 	got := make(chan sent, 1)
-	go func() {
-		runtime.LockOSThread() // never unlocked: this thread ends when the goroutine returns
-		res, err := r.s.Run(context.Background(), slurm.Command{Line: "sbatch --parsable '--wrap=" + answer + "'"})
-		got <- sent{syscall.Gettid(), res, err}
-	}()
-	s := <-got
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	var s sent
+	for { // until a goroutine runs on a thread that can end
+		go func() {
+			runtime.LockOSThread() // never unlocked, but for the first thread: this thread ends when the goroutine returns
+			tid := syscall.Gettid()
+			if tid == os.Getpid() {
+				// The runtime never ends the process's first thread (it parks it), so a goroutine that returns
+				// from it kills no thread. Hold this one here, still on it, so the next goroutine runs elsewhere.
+				got <- sent{tid: tid, main: true}
+				<-release
+				runtime.UnlockOSThread()
+				return
+			}
+			res, err := r.s.Run(context.Background(), slurm.Command{Line: "sbatch --parsable '--wrap=" + answer + "'"})
+			got <- sent{tid: tid, res: res, err: err}
+		}()
+		if s = <-got; !s.main {
+			break
+		}
+		t.Log("a goroutine ran on the process's first thread; trying another")
+	}
 	if s.err != nil || s.res.ExitCode != 0 {
 		t.Fatalf("sbatch: %v exit %d %s", s.err, s.res.ExitCode, s.res.Stderr)
 	}
