@@ -356,18 +356,8 @@ type job struct {
 func (w *world) submit(tag string, wait time.Duration) job {
 	w.t.Helper()
 	portsFile := filepath.Join(w.base, "ports-"+strconv.FormatInt(w.n.Add(1), 10))
-	line, err := slurm.Line("sbatch", "--parsable", "--job-name="+tag,
-		"--wrap=exec "+w.agent+" "+jobRole+" "+portsFile+" "+wait.String())
-	if err != nil {
-		w.t.Fatal(err)
-	}
-	sess := w.node.Session()
-	res, err := sess.Run(w.t.Context(), slurm.Command{Line: line})
-	if err != nil || res.ExitCode != 0 {
-		w.t.Fatalf("sbatch: %v, %+v", err, res)
-	}
-	id := strings.TrimSpace(string(res.Stdout))
-	j := job{tag: tag, id: id}
+	j := job{tag: tag, id: w.sbatch(tag, "exec "+w.agent+" "+jobRole+" "+portsFile+" "+wait.String())}
+	id := j.id
 	waitFor(w.t, time.Minute, "job "+id+"'s listeners", func() bool {
 		b, err := os.ReadFile(portsFile)
 		if err != nil {
@@ -378,9 +368,25 @@ func (w *world) submit(tag string, wait time.Duration) job {
 	return j
 }
 
+// sbatch submits a running job tagged tag whose batch script is wrap, and
+// returns its ID.
+func (w *world) sbatch(tag, wrap string) string {
+	w.t.Helper()
+	line, err := slurm.Line("sbatch", "--parsable", "--job-name="+tag, "--wrap="+wrap)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	res, err := w.node.Session().Run(w.t.Context(), slurm.Command{Line: line})
+	if err != nil || res.ExitCode != 0 {
+		w.t.Fatalf("sbatch: %v, %+v", err, res)
+	}
+	return strings.TrimSpace(string(res.Stdout))
+}
+
 // target is the relay target of a job for an Owner.
 func (w *world) target(j job) hostdial.Target {
-	return hostdial.Target{Tag: j.tag, JobID: j.id, AgentPath: w.agent, Login: w.relay.Login(), Jobs: w.jobs, Command: w.relay.Command}
+	return hostdial.Target{Tag: j.tag, JobID: j.id, AgentPath: w.agent, Login: w.relay.Login(), Jobs: w.jobs, Command: w.relay.Command,
+		Describe: sshrun.Classify, Gen: "1"}
 }
 
 // owner starts an Owner with test timings; it is stopped at the test's end.

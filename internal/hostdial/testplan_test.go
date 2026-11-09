@@ -150,10 +150,14 @@ func TestHostDialedRelayKilledMidStream(t *testing.T) {
 	if again.Starts != first.Starts+1 {
 		t.Errorf("the serving relay has %d starts after the kill, want %d", again.Starts, first.Starts+1)
 	}
-	// Within the backoff: the wait (at most MaxBackoff) and one ssh and srun
-	// set-up, which the probe measured at 0.4-7.7 s.
-	if d := again.Since.Sub(killed); d > maxBackoff+15*time.Second {
-		t.Errorf("the relay started again %s after the kill, beyond its backoff (%s) and a set-up", d, maxBackoff)
+	// Within the backoff: the wait the relay chose after the end is at most
+	// MaxBackoff, and the new start came after the end and that wait (the
+	// owner's own records, not a window measured from outside).
+	if again.LastWait <= 0 || again.LastWait > maxBackoff {
+		t.Errorf("the relay waited %s after the kill, want within its backoff, (0, %s]", again.LastWait, maxBackoff)
+	}
+	if again.LastEnded.Before(killed) || again.Since.Before(again.LastEnded.Add(again.LastWait)) {
+		t.Errorf("the relay ended at %s and started again at %s, before its wait of %s had passed", again.LastEnded, again.Since, again.LastWait)
 	}
 	if c := relayOf(own, j.tag, control); c.PID != ups[control].PID || c.Starts != 1 {
 		t.Errorf("the control relay restarted (%d starts) when only the serving relay was killed", c.Starts)
