@@ -19,6 +19,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // rehearsalTiming: a 7 min lease whose drain window is 90 s + 30 s (the
@@ -110,7 +111,7 @@ type rig struct {
 // the zero value but for the mode; another issue's test names its own ports
 // and, when it needs them, the fake cluster's QOSes and its own objects.
 type rigSetup struct {
-	mode  string // "direct" or "ssh"
+	mode  string // "direct", "ssh" or "host-dialed"
 	ports stack.Ports
 	shape stack.ClusterShape
 	// engineGate puts the engine gate (enginegate_test.go) in front of the
@@ -144,8 +145,13 @@ func startRigWith(t *testing.T, s rigSetup) *rig {
 		t.Fatal(err)
 	}
 	dh := stack.DialHome{Mode: "direct", Addr: s.ports.DialHomeListen}
-	if s.mode == "ssh" {
+	switch s.mode {
+	case "ssh":
 		dh = r.startGateway(dir)
+	case string(agentapi.DialHomeHostDialed):
+		// No address and no key: this host dials the jobs (HBEP-6, Dial-home
+		// modes, host-dialed mode).
+		dh = stack.DialHome{Mode: s.mode}
 	}
 	// The controller lists the checkpoint from the Hub double through
 	// HF_ENDPOINT, which up passes on to it.
