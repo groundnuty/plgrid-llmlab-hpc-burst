@@ -246,7 +246,7 @@ const hubEndpointEnv = "HF_ENDPOINT"
 func managerOptions(f flags, cfg *rest.Config, getenv func(string) string) lifecycle.Options {
 	return lifecycle.Options{
 		Config: cfg, CredentialsDir: f.host.CredentialsDir(), AgentBuildsDir: f.host.AgentBuildsDir(),
-		FrontConfigured: f.frontMode != "", HealthAddr: f.healthAddr, MetricsAddr: f.host.ControllerMetricsAddr(),
+		FrontConfigured: f.frontMode != "", HostDialed: f.frontMode == string(agentapi.DialHomeHostDialed), HealthAddr: f.healthAddr, MetricsAddr: f.host.ControllerMetricsAddr(),
 		LeaderElection: f.leaderElect, Workers: f.workers, HubEndpoint: getenv(hubEndpointEnv),
 	}
 }

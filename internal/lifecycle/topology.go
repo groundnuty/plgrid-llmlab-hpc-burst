@@ -147,6 +147,9 @@ func (r *Reconciler) loadProviders(ctx context.Context, md *v1alpha1.ModelDeploy
 			continue
 		}
 		pv.limits = limits
+		if r.Config.HostDialed {
+			pv.limits = hostDialedLimits(limits)
+		}
 		if !v1alpha1.ProviderReady(p, r.Clock.Now()) {
 			pv.problem = fmt.Sprintf("Provider %s is not Ready", n)
 			continue
