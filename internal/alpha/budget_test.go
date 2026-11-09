@@ -6,7 +6,10 @@ import (
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -195,5 +198,54 @@ func TestTheLiveStepsWaitOnWhatTheSumsCount(t *testing.T) {
 				t.Errorf("%s no longer has, once, %q: the worst case (budget.go) adds up what it waits for", file, call)
 			}
 		}
+	}
+}
+
+// stack.Recorder.ResetsDecideNothing changes #292's rule for one claim: the coarse rule stands, except where a run judged nothing from the watch
+// (the delta review of PR 284). So it has one caller, firstJobStarted. A second, on a run that judges what it read, would turn a reset into a
+// NOT RUN or a pass that hides what may be a failure. This reads every Go file of the repository but the forks and the stack's own tests.
+func TestOnlyAFirstJobThatNeverStartedSaysResetsDecideNothing(t *testing.T) {
+	root := filepath.Join("..", "..")
+	var calls []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if n := d.Name(); n == ".git" || n == "third_party" || n == "testdata" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if !strings.HasSuffix(rel, ".go") || (strings.HasPrefix(rel, filepath.Join("internal", "rehearsal", "stack")) && strings.HasSuffix(rel, "_test.go")) {
+			return nil
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			return err
+		}
+		for _, decl := range f.Decls {
+			where := "a declaration outside a function"
+			if fn, ok := decl.(*ast.FuncDecl); ok {
+				where = fn.Name.Name
+			}
+			ast.Inspect(decl, func(n ast.Node) bool {
+				if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "ResetsDecideNothing" {
+					calls = append(calls, filepath.ToSlash(rel)+": "+where)
+				}
+				return true
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"internal/alpha/steps_live_test.go: firstJobStarted"}; !slices.Equal(calls, want) {
+		t.Errorf("ResetsDecideNothing is said at %q, want only %q: a run that judges anything it read from the watch must not say it", calls, want)
 	}
 }

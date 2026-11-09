@@ -124,9 +124,11 @@ func (rec *Recorder) resetsLocked(kinds Kinds) string {
 	return strings.Join(parts, "; ")
 }
 
-// ResetsDecideNothing says the test's outcome rests on nothing read from the watch, so that a reset, past or to come, cannot make it
-// unknown, and the end of the test logs one rather than fails. A run says so only when it judges nothing from the watch: a first job
-// that never started, on the scheduler's own read (internal/alpha). A nil Recorder takes it.
+// ResetsDecideNothing is the one exception to the rule that a reset fails the test at its end: the coarse rule stands, except where a run
+// judged nothing from the watch. It says the test's outcome rests on nothing read from it, so that a reset, past or to come, cannot make that
+// unknown, and the end of the test logs one rather than fails. It has one caller, internal/alpha's firstJobStarted, for a first job that
+// never started, on the scheduler's own read; a test there keeps it so. A run that judges anything it read from the watch, a partial run
+// among them, must not say this: it would hide what may be a real failure. A nil Recorder takes it.
 func (rec *Recorder) ResetsDecideNothing() {
 	if rec == nil {
 		return
