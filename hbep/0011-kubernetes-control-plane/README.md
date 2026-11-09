@@ -107,6 +107,7 @@ Deployment options:
 8. **The front's place and reachability.** HBEP-2 (open question 3), HBEP-5 (open question 11) and HBEP-6 (open question 8, and its TLS-terminating front) leave parts of these to this HBEP. Decided for alpha: alpha has one user and one front, on the alpha host. That host must have an address that compute nodes reach, in one of two ways:
    - directly, on the dial-home port;
    - through ssh on the configured ssh port, 22 by default, with a restricted key, over two forwards: one for the agent's control traffic and one for the dial-home tunnel (HBEP-6, Dial-home modes). This is HBEP-6's development path, option B of spike S1 (issue #18).
+   - **Amended, 9 Nov 2026:** or by none. A host that compute nodes can't reach runs in HBEP-6's host-dialed mode: it dials each job through the login node. The alpha host runs that way (owner, 9 Nov 2026: "just dial whatever you want from this host").
 
    A host reachable by neither is out of alpha. The launcher checks this (Single-user host). Whether several users share a front is HBEP-2's question, and is not decided here.
 
@@ -415,6 +416,7 @@ The control plane replaces the files and scripts that held www-2027's state: per
 - 2026-11-01: `/readyz`'s `caches` check covers the informers of the kinds the lifecycle controller watches, which start before the election (ruled for #147).
 - 2026-11-01: a completing job keeps the Allocation's finalizer, the `acct-` record waits until its flag clears, and the Allocation's status gains `jobCompleting` (HBEP-4's amendment of the same day, for #198).
 - 2026-11-01: the Allocation's `queued-successor` mark, written once by the lifecycle controller in the create request and read by the Provider's controller (HBEP-7's and HBEP-4's amendments of the same day, for #195).
+- 2026-11-09: open question 8 adds HBEP-6's host-dialed mode for a host that compute nodes can't reach.
 
 ## Amendments
 
@@ -469,3 +471,4 @@ The control plane replaces the files and scripts that held www-2027's state: per
 - **2026-11-01: what `caches` waits for** (science-agent ruling for #147). The `caches` check passes only once the informers of every kind the lifecycle controller watches (ModelDeployment, Allocation, Instance, Provider, PlatformProfile and ControllerRevision) exist and have synced, checked kind by kind. The Provider managers' informers are not part of it, since those managers run only in the leader's process. They start before the election, so a standby copy shows "not leading" and a take-over finds its caches warm; a standby watches those kinds in the meantime. Before, the text did not say which caches, and controller-runtime's lazy informers would have let `caches` pass with nothing synced.
 - **2026-11-01: a completing job is live** (API; Ownership, records and deletion: the Allocation's finalizer, Accounting records). Made with HBEP-4's amendment of the same day, for #198, from PR #200's review round. A job whose `job_state` list still carries `COMPLETING` keeps the Allocation's finalizer, and the Allocation's accounting record is written only once the flag clears. The Allocation's status gains `jobCompleting` (proposed in HBEP-4). Before, the finalizer's list of live states ended at suspended, and "has ended" read as the base state alone.
 - **2026-11-01: the queued-successor mark** (Ownership, records and deletion, The Allocation's record). Made with HBEP-7's and HBEP-4's amendments of the same day, from the science agent's rulings for #195, settled in PR #205's review; the name is proposed. The Allocation's annotations gain `hpcburst.groundnuty.github.io/queued-successor`. The lifecycle controller writes it once, in the create request, and never changes it; the Provider's controller only reads it, and adds no queue wait for a marked Allocation. Before, no annotation of the record was set at creation.
+- **2026-11-09: a host compute nodes can't reach** (Open questions 8). An amendment with HBEP-6's host-dialed mode. The alpha host dials its jobs through the login node, so it needs no address that compute nodes reach. Before, such a host was out of alpha.
