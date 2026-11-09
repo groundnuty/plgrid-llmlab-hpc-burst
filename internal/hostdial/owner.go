@@ -229,6 +229,9 @@ type RelayState struct {
 	Since time.Time
 	// LastRefusal says why the last start did not happen ("" when none).
 	LastRefusal string
+	// Streams and Joined count the streams the job opened over this relay
+	// and those joined to the channel's port, over all its processes.
+	Streams, Joined uint64
 }
 
 // Relays lists the relays the Owner keeps, by tag then channel.
@@ -302,7 +305,8 @@ type relay struct {
 func (r *relay) state() RelayState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return RelayState{Tag: r.t.Tag, Channel: r.ch, JobID: r.t.JobID, PID: r.pid, Starts: r.starts, Since: r.since, LastRefusal: r.refusal}
+	return RelayState{Tag: r.t.Tag, Channel: r.ch, JobID: r.t.JobID, PID: r.pid, Starts: r.starts, Since: r.since, LastRefusal: r.refusal,
+		Streams: r.stats.Streams.Load(), Joined: r.stats.Joined.Load()}
 }
 
 func (r *relay) refuse(why string) {

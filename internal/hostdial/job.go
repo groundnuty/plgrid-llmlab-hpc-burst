@@ -53,6 +53,9 @@ func (w logWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// maxSocketPath is the longest Unix socket path: 108 bytes with the NUL.
+const maxSocketPath = 107
+
 // JobOptions configure the job side.
 type JobOptions struct {
 	// Dir is the job's relay directory, agentapi.RelayDir. It is created
@@ -99,6 +102,9 @@ func StartJob(o JobOptions) (*Job, error) {
 	}
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.DiscardHandler)
+	}
+	if s := agentapi.RelaySocket(o.Dir, agentapi.RelayControl); len(s) > maxSocketPath {
+		return nil, fmt.Errorf("the relay socket %s is %d bytes, above the %d a Unix socket path allows", s, len(s), maxSocketPath)
 	}
 	if err := privateDir(o.Dir, true); err != nil {
 		return nil, err
