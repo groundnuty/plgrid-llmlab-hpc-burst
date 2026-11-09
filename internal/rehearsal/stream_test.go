@@ -192,8 +192,9 @@ func readPID(t *testing.T, file string) int {
 
 // An srun line streams both ways before any end of input: through the real
 // sshd and ssh, what the test writes comes back from the step while ssh still
-// runs, and the end of input then ends the step with exit 0 (half-close: the
-// output kept coming after the input had no more).
+// runs, and the end of input then ends the step with exit 0. Half-close (the
+// output going on after the input has ended) is
+// TestSrunOutputGoesOnAfterTheEndOfInput.
 func TestSrunStreamsBothWaysBeforeTheEndOfInput(t *testing.T) {
 	r, s := newRig(t)
 	id := holdJob(t, r, s)
@@ -296,29 +297,63 @@ func TestSrunStepEndsWhenTheSSHClientIsKilled(t *testing.T) {
 	}
 }
 
-// The controller's own transport ends a step the same way: a command that runs
-// past its Timeout is cut by the ssh client's kill, which is what ends the
-// step now that the stream has no Timeout of its own.
-func TestSrunStepEndsWhenTheControllersCommandTimesOut(t *testing.T) {
+// The controller's own transport ends a step the same way: when the command's
+// context ends, sshrun kills its ssh client, which is what ends the step now
+// that the stream has no Timeout of its own (a Timeout is the same context's
+// deadline). The cancel comes after the step has written its PID, so no window
+// of time is in the test.
+func TestSrunStepEndsWhenTheControllersCommandIsCancelled(t *testing.T) {
 	r, s := newRig(t)
 	id := holdJob(t, r, s)
 	pidFile := filepath.Join(r.root, "step.pid")
 	line := "srun --overlap --jobid=" + strconv.Itoa(id) + " --ntasks=1 sh -c 'echo $$ > " + pidFile + "; exec sleep 300'"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	errc := make(chan error, 1)
 	go func() {
-		_, err := s.Run(context.Background(), slurm.Command{Line: line, Timeout: 3 * time.Second})
+		_, err := s.Run(ctx, slurm.Command{Line: line})
 		errc <- err
 	}()
 	pid := readPID(t, pidFile)
+	if !alive(pid) {
+		t.Fatalf("the step %d is not alive before the cancel; the check after it would prove nothing", pid)
+	}
+	cancel()
 	select {
 	case err := <-errc:
-		if !errors.Is(err, slurm.ErrTimeout) {
-			t.Errorf("the command that ran past its Timeout returned %v, want slurm.ErrTimeout", err)
+		if !errors.Is(err, slurm.ErrTransport) {
+			t.Errorf("the cancelled command returned %v, want slurm.ErrTransport", err)
 		}
 	case <-time.After(waitDeadline):
 		t.Fatalf("the command did not return within %s", waitDeadline)
 	}
 	waitFor(t, "the step to be gone", func() bool { return !alive(pid) })
+}
+
+// Half-close through the real sshd: the step has seen its input end (it says
+// so in a file) and only then writes its output, which still arrives, and the
+// exit is the step's own. A forced command that took the end of input for the
+// session going away would kill the step before it wrote, and this fails.
+func TestSrunOutputGoesOnAfterTheEndOfInput(t *testing.T) {
+	r, s := newRig(t)
+	id := holdJob(t, r, s)
+	seen, goFile := filepath.Join(r.root, "eof.seen"), filepath.Join(r.root, "go")
+	script := "cat > /dev/null; echo eof > " + seen + "; " + waitLoop(goFile) + "; printf after; printf warn >&2; exit 4"
+	st := r.startSSH(t, srunUnbuffered(id, "sh -c '"+script+"'"), nil)
+	st.send(t, "input\n")
+	if err := st.in.Close(); err != nil { // the end of input
+		t.Fatal(err)
+	}
+	waitFor(t, "the step to see the end of its input", func() bool { _, err := os.Stat(seen); return err == nil })
+	if st.exited() || st.out.String() != "" {
+		t.Fatalf("after the end of input: ssh ended %v, stdout %q; the step has written nothing yet", st.exited(), st.out.String())
+	}
+	if err := os.WriteFile(goFile, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code := st.exitCode(t); code != 4 || st.out.String() != "after" || st.errOut.String() != "warn" {
+		t.Errorf("exit %d, stdout %q, stderr %q; want 4, %q, %q", code, st.out.String(), st.errOut.String(), "after", "warn")
+	}
 }
 
 // The Provider's use of srun, through the controller's transport, is as it

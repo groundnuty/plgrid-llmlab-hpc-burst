@@ -381,7 +381,9 @@ func TestStreamEndsWithItsJob(t *testing.T) {
 
 // --time bounds a stream as it does a buffered step.
 func TestStreamHonoursItsTimeLimit(t *testing.T) {
-	r := newRunRig(t, RunMode{Minute: 500 * time.Millisecond})
+	// The step must write both its PIDs before its minute passes, as in
+	// TestSrunHonoursItsTimeLimit, which takes the same room.
+	r := newRunRig(t, RunMode{Minute: 3 * time.Second})
 	id := r.holdJob(r.s, r.root+"/release")
 	pids := r.root + "/pids"
 	sr := startStream(t, r.s, streamLine(id, true, "--time=1 "+treeStep(pids)))
