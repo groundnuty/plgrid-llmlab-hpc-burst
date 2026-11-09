@@ -154,6 +154,7 @@ func (r *rig) stepWorkerRestart(in *v1alpha1.Instance, key string) {
 	pausesAfter, _ := r.frontCounter("hpcburst_front_pauses_total")
 	reg, known := stack.Registered(r.ports, in)
 	still, _ := r.instance(in.Name)
+	r.syncWatch(stack.KindInstances, "step (d): the Instance's phases after the kill")
 	moved, left := r.watch.First(in.UID, killAt, func(o stack.Observation) bool { return o.Phase != v1alpha1.InstanceReady })
 	resume()
 	var outs []outcome
@@ -267,6 +268,7 @@ func (r *rig) checkWorkerRestart(in *v1alpha1.Instance, before v1alpha1.Instance
 	if n := countReason(r.eventReasons(in.Name), v1alpha1.ReasonWorkerRestart); n <= events {
 		r.t.Errorf("step (d): %d WorkerRestart events on Instance %s, %d before the kill", n, in.Name, events)
 	}
+	r.syncWatch(stack.KindInstances, "step (d): the Instance's phases after the restart")
 	if _, ok := r.watch.First(in.UID, killAt, func(o stack.Observation) bool { return o.Phase != v1alpha1.InstanceReady }); !ok {
 		r.t.Errorf("step (d): Instance %s was never seen out of ready after the kill: no reverification", in.Name)
 	}

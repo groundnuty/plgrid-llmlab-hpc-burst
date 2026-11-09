@@ -149,45 +149,12 @@ func (r *rig) checkShutdown(insts []types.UID, patchAt time.Time) {
 // (pkg/provider/phase.go); a released Allocation is deleted
 // (internal/lifecycle/retention.go), in the rehearsal while still Running.
 // failedOK names the Allocations a step failed on purpose (#193's requeue).
+// The API's LIST that waitAllEnded ends on leads the watch, so the check first
+// makes the watch catch up (syncWatch, issue #281).
 func (r *rig) checkAllocations(atZero map[types.UID]string, failedOK map[types.UID]bool) {
 	r.t.Helper()
-	type seen struct {
-		name    string
-		phases  []v1alpha1.AllocationPhase
-		deleted bool
-	}
-	all := map[types.UID]*seen{}
-	var order []types.UID
-	for _, a := range r.watch.Allocations() {
-		s := all[a.UID]
-		if s == nil {
-			s = &seen{name: a.Name}
-			all[a.UID] = s
-			order = append(order, a.UID)
-		}
-		if n := len(s.phases); n == 0 || s.phases[n-1] != a.Phase {
-			s.phases = append(s.phases, a.Phase)
-		}
-		s.deleted = s.deleted || a.Deleted
-		switch a.Phase {
-		case v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:
-			if !failedOK[a.UID] {
-				r.t.Errorf("Allocation %s was seen %s at %s", a.Name, a.Phase, a.At.Format(time.RFC3339Nano))
-			}
-		}
-	}
-	for uid, name := range atZero {
-		s := all[uid]
-		switch {
-		case s == nil:
-			r.t.Errorf("step (g): the watch never saw Allocation %s", name)
-		case !s.deleted && s.phases[len(s.phases)-1] != v1alpha1.AllocationEnded:
-			r.t.Errorf("step (g): Allocation %s was last seen %s, neither Ended nor deleted", name, s.phases[len(s.phases)-1])
-		}
-	}
-	for _, uid := range order {
-		r.t.Logf("Allocation %s: phases %v, deleted %v", all[uid].name, all[uid].phases, all[uid].deleted)
-	}
+	res := r.syncWatch(stack.KindAllocations, "step (g): the Allocations")
+	checkAllocationEvents(r.t, r.watch.Allocations, res, atZero, failedOK)
 }
 
 // waitRecords waits for the acct-<UID> record of every Allocation.

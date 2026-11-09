@@ -200,6 +200,7 @@ hack/live-checks.sh --run tunnel-hour --yes
 2. Run `gpu-accounting` first: short, no route needed, and fully wired. `reach` is as short and needs the owner's word that the forwarded port is up.
 3. Set `LIVE_PENDING_MAX_SECONDS` from the estimate before a queued run.
 4. Post each result where the row says, with its slot use. The text of `posts.md` is private until you copy it; it holds counts, durations and fixed labels, never a host, account or job ID.
+5. Every row that runs the stack posts `watch resets over the run`, a measured count. A reset fails the test as "not known", on any kind, and the failure says whether any read's window crossed it. If a live row ever fails on a reset that no read crossed, the rule is refined before that row is re-run.
 
 ## What the dry runs show, and what they cannot
 

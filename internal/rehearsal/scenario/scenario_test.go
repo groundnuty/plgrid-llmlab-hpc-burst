@@ -120,6 +120,9 @@ type rigSetup struct {
 	// stack is up, given the rig, the host's CPU architecture and the batch
 	// Provider's credentials file; nil creates #146's profile and Provider.
 	objects func(r *rig, arch, creds string) []client.Object
+	// noWatch starts no watch: the measurement of what a watch costs starts its
+	// own (TestWatchOverhead).
+	noWatch bool
 }
 
 func startRig(t *testing.T, mode string) *rig {
@@ -156,6 +159,9 @@ func startRigWith(t *testing.T, s rigSetup) *rig {
 		objs = s.objects(r, arch, creds)
 	}
 	stack.Create(t, r.c, objs...)
+	if s.noWatch {
+		return r
+	}
 	// Before the deployment exists, so the watch sees every Instance and
 	// Allocation from its first version.
 	r.watch = stack.StartWatch(r.t, r.h.State, stack.Namespace, nil)

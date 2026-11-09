@@ -203,6 +203,37 @@ func TestHealthyRunsPostTheirMeasurements(t *testing.T) {
 	}
 }
 
+// Every row reports the count of its watch resets as a measured fact (the science
+// agent's A2 on PR 292), in the text to post and the record, and the verdict does not
+// judge it: the watch's own rule fails a test that had a reset, at its end.
+func TestEveryRowReportsItsWatchResets(t *testing.T) {
+	for _, name := range []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-athena"} {
+		for _, resets := range []int{0, 2} {
+			t.Run(fmt.Sprintf("%s/%d", name, resets), func(t *testing.T) {
+				row, _ := RowByName(name)
+				cfg := Config{Row: row, Dry: true, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
+				rec, err := NewRecorder(cfg.Out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				st := newDrySteps(t, cfg, familyOf(name))
+				st.watchResets = resets
+				if f, err := Run(context.Background(), cfg, st, rec, t.Logf); err != nil || len(f) != 0 {
+					t.Fatalf("failures %v, err %v; the count is not judged", f, err)
+				}
+				posts, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
+				if want := fmt.Sprintf("- watch resets over the run: %d\n", resets); !strings.Contains(string(posts), want) {
+					t.Errorf("the text to post lacks %q:\n%s", want, posts)
+				}
+				record, _ := os.ReadFile(filepath.Join(cfg.Out, RecordFile))
+				if want := fmt.Sprintf(`"watchResets": %d`, resets); !strings.Contains(string(record), want) {
+					t.Errorf("the record lacks %q:\n%s", want, record)
+				}
+			})
+		}
+	}
+}
+
 // A scenario that returns an error is a failed run, not a pass with no verdict,
 // and the steps are closed either way.
 func TestAScenarioErrorFailsTheRunAndClosesTheSteps(t *testing.T) {

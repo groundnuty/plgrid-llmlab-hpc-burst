@@ -331,6 +331,7 @@ func (p3 *part3) checkGap(d *depRun) {
 	if d.succ.Status.ReadyTime != nil {
 		in.succReady = d.succ.Status.ReadyTime.Time
 	}
+	r.syncWatch(stack.KindInstances, d.Name+": the successor's ready version")
 	if o, ok := r.watch.First(d.succ.UID, time.Time{}, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceReady }); ok {
 		in.succReadySeen = o.At
 	}
@@ -349,7 +350,7 @@ func (p3 *part3) checkGap(d *depRun) {
 	for _, p := range problems {
 		r.t.Errorf("%s: %s", d.Name, p)
 	}
-	o, _ := r.watch.First(d.primary.UID, time.Time{}, func(o stack.Observation) bool { return o.DrainBegan != "" })
+	o, _ := r.watch.First(d.primary.UID, time.Time{}, func(o stack.Observation) bool { return o.DrainBegan != "" }) // covered by the sync above
 	began, _ := time.Parse(time.RFC3339, o.DrainBegan)
 	pj, _ := r.cl.Plat.Job(d.primaryJob)
 	sj, _ := r.cl.Plat.Job(d.succJob)
@@ -486,6 +487,7 @@ func ts(t time.Time) string { return t.UTC().Format("15:04:05.000") }
 func (p3 *part3) checkNoOverlapSlot(d *depRun) {
 	r := p3.rig
 	r.t.Helper()
+	r.syncWatch(stack.KindInstances|stack.KindDeployments, d.Name+": the successor's ready version and the deployment's conditions")
 	o, _ := r.watch.First(d.succ.UID, time.Time{}, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceReady })
 	for _, p := range noOverlapSlotProblems(r.deploymentObservations(d.Name), d.ds, o.At) {
 		r.t.Errorf("%s: %s", d.Name, p)
@@ -577,6 +579,7 @@ func (p3 *part3) checkOneSlot(d *depRun) {
 	if r.get(&a, d.succAlloc, stack.Namespace) && a.Annotations[v1alpha1.AnnotationQueuedSuccessor] != "" {
 		r.t.Errorf("%s: the one-slot successor's Allocation %s carries the queued-successor mark %q", d.Name, d.succAlloc, a.Annotations[v1alpha1.AnnotationQueuedSuccessor])
 	}
+	r.syncWatch(stack.KindAllocations, d.Name+": the successor's Allocation")
 	if aw, ok := p3.allocFirstSeen(d.succAlloc); ok && !aw.After(lastLive) {
 		r.t.Errorf("%s: the successor's Allocation %s was first seen at %s, while the predecessor's job %d still held the slot (at the command of %s)", d.Name, d.succAlloc, ts(aw), d.primaryJob, ts(lastLive))
 	}

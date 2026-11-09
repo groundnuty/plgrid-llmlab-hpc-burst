@@ -67,14 +67,26 @@ type Recorder struct {
 	obs    []Observation
 	allocs []AllocObservation
 	mds    []DeploymentObservation
+	// lost holds the objects a catch-up found an event lost on, each as it was
+	// reported: later catch-ups do not wait for them or report them again, and
+	// say they are lost (catchup.go).
+	lost map[types.UID]Behind
+	// streams holds how far each kind's stream has come (catchup.go).
+	streams map[Kinds]*streamState
+	// afterLook is a test's: it runs right after a catch-up looks at the
+	// Recorder, so that the test orders the stream and the look. nil otherwise.
+	afterLook func()
 }
 
 // StartWatch records every version of the namespace's Instances, Allocations
-// and ModelDeployments until the test ends. A watch the server closes is
-// opened again from the last resourceVersion it delivered, so no version in
-// between is lost; only when that version has expired does it start again from
-// the current versions. onAlloc, when not nil, is called with every Allocation
-// version, in the watch's goroutine, before the version is recorded.
+// and ModelDeployments until the test ends, those that exist already as well. A
+// connection that ends is opened again from the last resourceVersion its stream
+// reached, so no version in between is lost; only when that version has expired
+// does it start again from the current versions, and then what came between can
+// be gone for good: the Recorder keeps that as a reset, a catch-up on the kind
+// reports it as not known, and the test fails at its end. onAlloc, when not nil,
+// is called with every Allocation version, in the watch's goroutine, before the
+// version is recorded.
 func StartWatch(t T, state, namespace string, onAlloc func(*v1alpha1.Allocation)) *Recorder {
 	t.Helper()
 	// No client timeout here: a watch is long, and its context ends it.
@@ -82,75 +94,53 @@ func StartWatch(t T, state, namespace string, onAlloc func(*v1alpha1.Allocation)
 	if err != nil {
 		t.Fatalf("a watching client: %v", err)
 	}
+	return startWatch(t, wc, namespace, onAlloc)
+}
+
+// startWatch is StartWatch with its client given.
+func startWatch(t T, wc client.WithWatch, namespace string, onAlloc func(*v1alpha1.Allocation)) *Recorder {
+	t.Helper()
 	rec := &Recorder{}
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
-	t.Cleanup(func() { cancel(); wg.Wait() })
+	t.Cleanup(func() {
+		cancel()
+		wg.Wait()
+		// Every read of the watch assumes an unbroken stream, those a catch-up
+		// does not cover as well.
+		if why := rec.resets(KindInstances | KindAllocations | KindDeployments); why != "" {
+			t.Errorf("what the test read from the watch is not known to be complete: %s", why)
+		}
+	})
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		Follow(ctx, wc, namespace, &v1alpha1.InstanceList{}, func(t watch.EventType, o client.Object) {
+		Follow(ctx, wc, namespace, &v1alpha1.InstanceList{}, rec.stream(KindInstances, func(t watch.EventType, o client.Object) {
 			if in, ok := o.(*v1alpha1.Instance); ok {
 				rec.add(in, t == watch.Deleted)
 			}
-		})
+		}))
 	}()
 	go func() {
 		defer wg.Done()
-		Follow(ctx, wc, namespace, &v1alpha1.AllocationList{}, func(t watch.EventType, o client.Object) {
+		Follow(ctx, wc, namespace, &v1alpha1.AllocationList{}, rec.stream(KindAllocations, func(t watch.EventType, o client.Object) {
 			if a, ok := o.(*v1alpha1.Allocation); ok {
 				if onAlloc != nil {
 					onAlloc(a)
 				}
 				rec.addAlloc(a, t == watch.Deleted)
 			}
-		})
+		}))
 	}()
 	go func() {
 		defer wg.Done()
-		Follow(ctx, wc, namespace, &v1alpha1.ModelDeploymentList{}, func(_ watch.EventType, o client.Object) {
+		Follow(ctx, wc, namespace, &v1alpha1.ModelDeploymentList{}, rec.stream(KindDeployments, func(_ watch.EventType, o client.Object) {
 			if md, ok := o.(*v1alpha1.ModelDeployment); ok {
 				rec.addDeployment(md)
 			}
-		})
+		}))
 	}()
 	return rec
-}
-
-// Follow watches list in namespace until ctx ends, passing on every added,
-// modified and deleted object.
-func Follow(ctx context.Context, wc client.WithWatch, namespace string, list client.ObjectList, add func(watch.EventType, client.Object)) {
-	rv := ""
-	for ctx.Err() == nil {
-		opts := []client.ListOption{client.InNamespace(namespace)}
-		if rv != "" {
-			opts = append(opts, &client.ListOptions{Raw: &metav1.ListOptions{ResourceVersion: rv, AllowWatchBookmarks: true}})
-		}
-		w, err := wc.Watch(ctx, list, opts...)
-		if err != nil {
-			select {
-			case <-ctx.Done():
-			case <-time.After(time.Second):
-			}
-			continue
-		}
-		for ev := range w.ResultChan() {
-			switch ev.Type {
-			case watch.Error:
-				rv = "" // the version expired (410): start from the current versions
-			case watch.Bookmark:
-				if o, ok := ev.Object.(client.Object); ok {
-					rv = o.GetResourceVersion()
-				}
-			default:
-				if o, ok := ev.Object.(client.Object); ok {
-					rv = o.GetResourceVersion()
-					add(ev.Type, o)
-				}
-			}
-		}
-		w.Stop()
-	}
 }
 
 func (rec *Recorder) add(in *v1alpha1.Instance, deleted bool) {
@@ -189,6 +179,7 @@ func (rec *Recorder) addDeployment(md *v1alpha1.ModelDeployment) {
 func (rec *Recorder) First(uid types.UID, since time.Time, match func(Observation) bool) (Observation, bool) {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
+	rec.noteRead(KindInstances, "First", since, time.Time{})
 	for _, o := range rec.obs {
 		if o.UID == uid && !o.At.Before(since) && match(o) {
 			return o, true
@@ -201,6 +192,7 @@ func (rec *Recorder) First(uid types.UID, since time.Time, match func(Observatio
 func (rec *Recorder) Of(uid types.UID) []Observation {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
+	rec.noteRead(KindInstances, "Of", time.Time{}, time.Time{})
 	var out []Observation
 	for _, o := range rec.obs {
 		if o.UID == uid {
@@ -226,6 +218,7 @@ func (rec *Recorder) Last() []v1alpha1.Instance {
 func (rec *Recorder) OnAllocation(alloc string) (types.UID, bool) {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
+	rec.noteRead(KindInstances, "OnAllocation", time.Time{}, time.Time{})
 	for _, o := range rec.obs {
 		if o.Alloc == alloc {
 			return o.UID, true
@@ -242,6 +235,7 @@ func (rec *Recorder) UIDs() []types.UID {
 	}
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
+	rec.noteRead(KindInstances, "UIDs", time.Time{}, time.Time{})
 	seen := map[types.UID]bool{}
 	var out []types.UID
 	for _, o := range rec.obs {
@@ -257,6 +251,7 @@ func (rec *Recorder) UIDs() []types.UID {
 func (rec *Recorder) Allocations() []AllocObservation {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
+	rec.noteRead(KindAllocations, "Allocations", time.Time{}, time.Time{})
 	return append([]AllocObservation(nil), rec.allocs...)
 }
 
@@ -273,6 +268,7 @@ func (rec *Recorder) Deployments() []*v1alpha1.ModelDeployment {
 func (rec *Recorder) DeploymentVersions() []DeploymentObservation {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
+	rec.noteRead(KindDeployments, "DeploymentVersions", time.Time{}, time.Time{})
 	return append([]DeploymentObservation(nil), rec.mds...)
 }
 
@@ -280,6 +276,7 @@ func (rec *Recorder) DeploymentVersions() []DeploymentObservation {
 func (rec *Recorder) Between(uid types.UID, from, to time.Time) []Observation {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
+	rec.noteRead(KindInstances, "Between", from, to)
 	var out []Observation
 	for _, o := range rec.obs {
 		if o.UID == uid && !o.At.Before(from) && !o.At.After(to) {

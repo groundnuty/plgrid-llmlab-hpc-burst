@@ -157,6 +157,7 @@ func (p3 *part3) requeue(d *depRun) {
 	}
 	p3.requeued = requeueResult{alloc: a.Name, uid: a.UID, inst: in.Name, instUID: in.UID, job: d.succJob}
 	known := map[types.UID]bool{}
+	r.syncWatch(stack.KindAllocations, d.Name+": the Allocations that exist before the requeue")
 	for _, o := range r.watch.Allocations() {
 		known[o.UID] = true
 	}
