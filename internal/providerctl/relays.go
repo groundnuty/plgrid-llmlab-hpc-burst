@@ -1,7 +1,7 @@
 package providerctl
 
-// New for HBEP-6's host-dialed mode (PR 298): the Provider's controller owns
-// the relays of its running Allocations.
+// New for HBEP-6's host-dialed mode (PR 298, final text at b12aa9f): the
+// Provider controller owns the relays of its running Allocations.
 
 import (
 	"context"
@@ -10,21 +10,23 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os/exec"
 	"path"
 	"reflect"
 	"sync"
 	"time"
 
+	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	coordinationv1client "k8s.io/client-go/kubernetes/typed/coordination/v1"
+	"k8s.io/client-go/rest"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/hostdial"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/sshrun"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
 // RelaySettings are host-dialed mode's relay settings (HBEP-6, Dial-home
@@ -38,15 +40,24 @@ type RelaySettings struct {
 	// Slots caps relays per login node across every Provider of the process;
 	// nil means hostdial.SharedSlots.
 	Slots *hostdial.Slots
+	// Hosts is the process's one-Provider-per-login-host register; nil means
+	// hostdial.SharedHosts.
+	Hosts *hostdial.Hosts
 	// ControlDir holds the relays' private ssh configuration file: the
 	// transport's control directory does.
 	ControlDir string
 	// SSHBinary is the ssh client; "" means ssh on PATH.
 	SSHBinary string
-	// MinBackoff, MaxBackoff, ResetAfter and StopGrace are the owner's
-	// timings; zero means hostdial's defaults (1 s, 30 s, 60 s, 5 s). Tests
-	// shorten them.
+	// Epoch reads the fence's epoch when the relays start, the Provider
+	// Lease's leaseTransitions; Setup fills it from the manager's
+	// configuration when it is nil.
+	Epoch func(ctx context.Context) (int64, error)
+	// MinBackoff, MaxBackoff, ResetAfter, StopGrace, RestartLimit and
+	// RestartWindow are the owner's; zero means hostdial's defaults (1 s,
+	// 30 s, 60 s, 5 s, 120 in an hour). Tests shorten them.
 	MinBackoff, MaxBackoff, ResetAfter, StopGrace time.Duration
+	RestartLimit                                  int
+	RestartWindow                                 time.Duration
 }
 
 // relayState is one controller's relay owner and the ssh client maker for
@@ -54,6 +65,8 @@ type RelaySettings struct {
 type relayState struct {
 	settings RelaySettings
 	owner    *hostdial.Owner
+	provider string
+	hosts    *hostdial.Hosts
 
 	mu  sync.Mutex
 	cfg slurm.SSHConfig
@@ -74,23 +87,55 @@ func newRelayState(o Options) (*relayState, error) {
 	if s.ControlDir == "" {
 		return nil, errors.New("providerctl: host-dialed mode needs a control directory for the relays' ssh")
 	}
+	if s.Hosts == nil {
+		s.Hosts = hostdial.SharedHosts
+	}
+	r := &relayState{settings: s, provider: o.Provider, hosts: s.Hosts}
+	epoch := func(ctx context.Context) (int64, error) {
+		if r.settings.Epoch == nil {
+			return 0, errors.New("no epoch reader is set")
+		}
+		return r.settings.Epoch(ctx)
+	}
 	owner, err := hostdial.NewOwner(hostdial.OwnerOptions{
-		Ports: s.Ports, Slots: s.Slots, MinBackoff: s.MinBackoff, MaxBackoff: s.MaxBackoff,
-		ResetAfter: s.ResetAfter, StopGrace: s.StopGrace, Logger: slogOf(o.Log),
+		Ports: s.Ports, Epoch: epoch, Slots: s.Slots, MinBackoff: s.MinBackoff, MaxBackoff: s.MaxBackoff,
+		ResetAfter: s.ResetAfter, StopGrace: s.StopGrace, RestartLimit: s.RestartLimit, RestartWindow: s.RestartWindow,
+		Logger: slogOf(o.Log),
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &relayState{settings: s, owner: owner}, nil
+	r.owner = owner
+	return r, nil
 }
 
-// command returns the ssh client maker for the Provider's credentials, made
+// leaseEpoch reads the provider-<name> Lease's leaseTransitions (HBEP-6,
+// Fencing: "the leaseTransitions of the provider-<name> Lease when its
+// controller took the lead"), once the manager leads.
+func leaseEpoch(cfg *rest.Config, provider string) func(ctx context.Context) (int64, error) {
+	return func(ctx context.Context) (int64, error) {
+		c, err := coordinationv1client.NewForConfig(cfg)
+		if err != nil {
+			return 0, err
+		}
+		l, err := c.Leases(v1alpha1.ControllerNamespace).Get(ctx, v1alpha1.ProviderLeaseName(provider), metav1.GetOptions{})
+		if err != nil {
+			return 0, fmt.Errorf("the Provider's Lease: %w", err)
+		}
+		if l.Spec.LeaseTransitions == nil {
+			return 0, nil
+		}
+		return int64(*l.Spec.LeaseTransitions), nil
+	}
+}
+
+// relay returns the ssh client maker for the Provider's credentials, made
 // again when they change.
-func (r *relayState) command(provider string, cfg slurm.SSHConfig) (func(string) (*exec.Cmd, error), error) {
+func (r *relayState) relay(cfg slurm.SSHConfig) (*sshrun.Relay, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.ssh == nil || !reflect.DeepEqual(r.cfg, cfg) {
-		rel, err := sshrun.NewRelay(sshrun.RelayOptions{Name: provider, Config: cfg, ControlDir: r.settings.ControlDir, Binary: r.settings.SSHBinary})
+		rel, err := sshrun.NewRelay(sshrun.RelayOptions{Name: r.provider, Config: cfg, ControlDir: r.settings.ControlDir, Binary: r.settings.SSHBinary})
 		if err != nil {
 			return nil, err
 		}
@@ -99,7 +144,7 @@ func (r *relayState) command(provider string, cfg slurm.SSHConfig) (func(string)
 		}
 		r.ssh, r.cfg = rel, cfg
 	}
-	return r.ssh.Command, nil
+	return r.ssh, nil
 }
 
 func (r *relayState) close() {
@@ -109,18 +154,7 @@ func (r *relayState) close() {
 		_ = r.ssh.Close()
 		r.ssh = nil
 	}
-}
-
-// freshJobs reads the listing fresh (*slurm.Batch's ListByTagFresh). A
-// Platform that cannot is refused, never read from a cache: a relay starts
-// only on a fresh read of its job (review of PR 301, N3).
-type freshJobs struct{ p Platform }
-
-func (f freshJobs) ListByTagFresh(ctx context.Context, tag string) ([]provider.Job, error) {
-	if b, ok := f.p.(hostdial.JobReader); ok {
-		return b.ListByTagFresh(ctx, tag)
-	}
-	return nil, fmt.Errorf("the platform %T reads no fresh listing; no relay starts on a cached one", f.p)
+	r.hosts.Release(r.provider)
 }
 
 // credentialsGen names the Provider's ssh credentials: a change of any of
@@ -138,7 +172,9 @@ func credentialsGen(c slurm.SSHConfig) string {
 // keeps both relays, and one that is being deleted, refused, or whose job is
 // not running (pending, held, completing, ended, lost) has them stopped by
 // PID. A failed read leaves the observed phase as it was, so the relays stay
-// as they were. It is a no-op outside host-dialed mode.
+// as they were. A second Provider on a login host that another host-dialed
+// Provider of this process already serves gets no relays (HBEP-6, Capacity).
+// It is a no-op outside host-dialed mode.
 func (e *external) syncRelays(ctx context.Context, a *v1alpha1.Allocation, tag string) {
 	r := e.s.relays
 	if r == nil {
@@ -154,15 +190,29 @@ func (e *external) syncRelays(ctx context.Context, a *v1alpha1.Allocation, tag s
 		e.s.o.Log.Info("the relays wait for the login node's paths", "tag", tag, "error", err)
 		return
 	}
-	cmd, err := r.command(e.s.o.Provider, e.v.SSH)
+	rel, err := r.relay(e.v.SSH)
 	if err != nil {
 		e.s.o.Log.Info("the relays' ssh client cannot be made", "tag", tag, "error", err)
 		return
 	}
+	login := rel.Login()
+	if holder, ok := r.hosts.Claim(login, r.provider); !ok {
+		r.owner.Drop(tag)
+		msg := fmt.Sprintf("Provider %s already runs host-dialed relays on login host %s: one host-dialed Provider per login host (HBEP-6, Capacity)", holder, login)
+		e.s.o.Log.Info("no relays for this Provider", "tag", tag, "why", msg)
+		e.event(a, event.Warning(v1alpha1.EventReasonRelayFailed, errors.New(msg)))
+		return
+	}
+	ref := a.DeepCopy()
 	r.owner.Want(hostdial.Target{
 		Tag: tag, JobID: o.JobID,
 		AgentPath: path.Join(paths.Staging, agentapi.StagedAgentPath(a.Spec.ForProvider.Batch.AgentDigest)),
-		Login:     sshrun.LoginOf(e.v.SSH), Jobs: freshJobs{e.p}, Command: cmd, Describe: sshrun.Classify,
+		AllocDir:  path.Join(paths.Staging, agentapi.AllocationDir(tag)),
+		UID:       string(a.UID),
+		Login:     login, Jobs: e.p, Command: rel.Command, Stderr: sshrun.Stderr, Describe: sshrun.Classify,
+		OnFailed: func(ch agentapi.RelayChannel, cause string) {
+			e.s.o.Recorder.Event(ref, event.Warning(v1alpha1.EventReasonRelayFailed, fmt.Errorf("the %s relay ended for good: %s", ch, cause)))
+		},
 		Gen: credentialsGen(e.v.SSH),
 	})
 }
@@ -177,8 +227,9 @@ func (c *Controller) Relays() []hostdial.RelayState {
 }
 
 // RunRelays runs the relay owner until ctx ends, then stops every relay by
-// PID; Setup adds it to the manager as a leader-only runnable. Outside
-// host-dialed mode it waits for ctx and returns.
+// PID; Setup adds it to the manager as a leader-only runnable, which
+// controller-runtime stops before it releases the Lease. Outside host-dialed
+// mode it waits for ctx and returns.
 func (c *Controller) RunRelays(ctx context.Context) error {
 	if c.shared.relays == nil {
 		<-ctx.Done()

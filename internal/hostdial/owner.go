@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"os/exec"
+	"runtime"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -18,65 +20,80 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
-// The relay owner's timings (HBEP-6, Dial-home modes, host-dialed mode:
-// "Restart backoff: 1 s, doubling to 30 s, with jitter, and reset once a
-// relay has stayed up for 60 s").
+// The relay owner's timings (HBEP-6, What ends a relay: "a backoff of 1 s
+// doubling to 30 s with jitter (first starts jittered too ...), reset once a
+// relay has stayed up for 60 s"; "more than 120 restarts of one channel
+// within an hour" is final).
 const (
-	DefaultMinBackoff = time.Second
-	DefaultMaxBackoff = 30 * time.Second
-	DefaultResetAfter = 60 * time.Second
+	DefaultMinBackoff    = time.Second
+	DefaultMaxBackoff    = 30 * time.Second
+	DefaultResetAfter    = 60 * time.Second
+	DefaultRestartLimit  = 120
+	DefaultRestartWindow = time.Hour
 	// DefaultStopGrace is how long a stopped relay's ssh has after TERM
 	// before KILL.
 	DefaultStopGrace = 5 * time.Second
-	// DefaultCheckTimeout bounds the job-is-ours read before each start.
-	DefaultCheckTimeout = time.Minute
 )
 
 // RelayStartWorstCase is the longest from the moment a relay is due until its
-// ssh runs, once a slot is free: the job-is-ours read's bound and the longest
-// backoff. A live run's derived timeouts count it by this name.
-const RelayStartWorstCase = DefaultCheckTimeout + DefaultMaxBackoff
+// ssh runs, once its pair of slots is held and the listing shows the job: the
+// longest backoff. A live run's derived timeouts count it by this name.
+const RelayStartWorstCase = DefaultMaxBackoff
 
-// JobReader reads the queue listing fresh, under an Allocation's tag: squeue
-// --me, never a cached listing. *slurm.Batch implements it.
+// JobReader is the Provider's latest queue listing (one read per poll
+// interval, HBEP-4), under an Allocation's tag; *slurm.Batch implements it.
+// The relay reads no listing of its own (HBEP-6: "the Provider's latest queue
+// listing ... must show the recorded job ID RUNNING").
 type JobReader interface {
-	ListByTagFresh(ctx context.Context, tag string) ([]provider.Job, error)
+	ListByTag(ctx context.Context, tag string) ([]provider.Job, error)
 }
 
 // Target is what the relays of one running Allocation need.
 type Target struct {
 	// Tag is the Allocation's job tag; it names the relays.
 	Tag string
-	// JobID is the Allocation's recorded job. A relay starts only when a fresh
-	// listing under Tag shows this job running (the job-is-ours check).
+	// JobID is the Allocation's recorded job: a relay starts only when the
+	// listing shows this job RUNNING with the tag as its name.
 	JobID string
 	// AgentPath is the staged agent binary's absolute path on the cluster,
 	// the relay step's program.
 	AgentPath string
-	// Login names the login node for the per-login-node cap: its host and
-	// port as the Provider's credentials give them.
+	// AllocDir is the Allocation's directory on the cluster, where the agent
+	// publishes its socket (--dir).
+	AllocDir string
+	// UID is the Allocation's UID (--allocation), which the agent's greeting
+	// and the relay's preamble name.
+	UID string
+	// Login names the login node for the slots: as ssh -G resolves its host
+	// name (sshrun.Relay.LoginHost).
 	Login string
-	// Jobs reads the listing for the job-is-ours check.
+	// Jobs is the Provider's listing.
 	Jobs JobReader
 	// Command returns the ssh client that runs line on the login node, on a
 	// connection of its own (sshrun.Relay's Command). The owner sets its
 	// standard streams and process group and starts it.
 	Command func(line string) (*exec.Cmd, error)
-	// Describe, when set, names the kind of an ended relay's failure from its
-	// command, without repeating its output (sshrun.Classify); the owner logs
-	// it with the exit code.
+	// Stderr returns what an ended relay's command kept of its standard
+	// error (sshrun.Stderr), which ClassifyEnd reads; it is never logged.
+	Stderr func(cmd *exec.Cmd) string
+	// Describe, when set, names an ssh failure's kind without repeating its
+	// output (sshrun.Classify), for the log.
 	Describe func(cmd *exec.Cmd) string
+	// OnFailed, when set, is told each final end of a channel that is
+	// neither superseded nor the job's end, with its cause: the controller
+	// raises RelayFailed (HBEP-6, What ends a relay).
+	OnFailed func(ch agentapi.RelayChannel, cause string)
 	// Gen names the credentials and the transport that Jobs and Command use:
-	// a change (a rotated key, another known-hosts file, a new transport)
-	// is another Target, so the running relays are stopped and started again
+	// a change (a rotated key, another known-hosts file, a new transport) is
+	// another Target, so the running relays are stopped and started again
 	// with the new ones, never left on the old.
 	Gen string
 }
 
-// same reports whether u needs no change of t's relays: the same job, agent,
-// login node and credentials.
+// same reports whether u needs no change of t's relays.
 func (t Target) same(u Target) bool {
-	return t.Tag == u.Tag && t.JobID == u.JobID && t.AgentPath == u.AgentPath && t.Login == u.Login && t.Gen == u.Gen
+	return t.Tag == u.Tag && t.JobID == u.JobID && t.AgentPath == u.AgentPath && t.AllocDir == u.AllocDir &&
+		t.UID == u.UID && t.Login == u.Login && t.Gen == u.Gen
 }
 
 // OwnerOptions configure an Owner.
@@ -84,20 +101,30 @@ type OwnerOptions struct {
 	// Ports are each channel's loopback port on this host, the only port its
 	// relays dial: agentapi.Host.RelayChannelPorts.
 	Ports map[agentapi.RelayChannel]int
+	// Epoch reads the fence's epoch E when the Owner starts: the
+	// provider-<name> Lease's leaseTransitions now that this copy leads
+	// (HBEP-6, Fencing). Required.
+	Epoch func(ctx context.Context) (int64, error)
 	// Slots caps relays per login node; nil means SharedSlots.
 	Slots *Slots
 	// MinBackoff, MaxBackoff and ResetAfter are the restart backoff; zero
 	// means the defaults.
 	MinBackoff, MaxBackoff, ResetAfter time.Duration
+	// RestartLimit and RestartWindow: more restarts of one channel than the
+	// limit within the window is a final end; zero means 120 an hour.
+	RestartLimit  int
+	RestartWindow time.Duration
 	// StopGrace is how long a stopped relay has after TERM; zero means
 	// DefaultStopGrace.
 	StopGrace time.Duration
-	// CheckTimeout bounds the job-is-ours read; zero means
-	// DefaultCheckTimeout.
-	CheckTimeout time.Duration
 	// Logger reports starts, stops and refusals; nil means none.
 	Logger *slog.Logger
 }
+
+// seqs numbers every relay start of the process: each channel's N is the next
+// value, so a later relay of one epoch always has a higher (E, N), across
+// owners, restarts of a Provider's manager and Providers alike.
+var seqs atomic.Int64
 
 // Owner is the batch Provider's controller's relay owner (HBEP-6, Dial-home
 // modes, host-dialed mode: the control-plane side). It keeps two relays, one
@@ -105,12 +132,13 @@ type OwnerOptions struct {
 // them by PID when told it is not (Drop) or when its own run ends.
 //
 // It is level-triggered: each relay is supervised in its own loop, started
-// again after the backoff when it drops, and the controller calls Want for
-// every running Allocation on every observation, so a controller that starts
-// or takes the lead starts the relays of every running Allocation. It is a
-// leader-only runnable (Start, NeedLeaderElection): only the leader's relays
-// run, and when the leader stops or loses the lead, Start stops every relay
-// by PID before it returns. An Owner runs once; a new leader builds a new one.
+// again after the backoff when its end is a retried one, and the controller
+// calls Want for every running Allocation on every observation, so a
+// controller that takes the lead starts the relays of every running
+// Allocation. It is a leader-only runnable (Start, NeedLeaderElection), which
+// controller-runtime stops before it releases the Lease, so a copy that stops
+// leading stops its relays by PID first. An Owner runs once; a new leader
+// builds a new one, with a higher epoch.
 type Owner struct {
 	o OwnerOptions
 
@@ -118,6 +146,7 @@ type Owner struct {
 	want    map[string]Target
 	allocs  map[string]*allocRelays
 	ctx     context.Context // set by Start
+	epoch   int64
 	running bool
 	done    bool
 	wg      sync.WaitGroup
@@ -133,6 +162,9 @@ func NewOwner(o OwnerOptions) (*Owner, error) {
 	if len(o.Ports) != len(agentapi.RelayChannels) {
 		return nil, errors.New("hostdial: a port for a channel that does not exist")
 	}
+	if o.Epoch == nil {
+		return nil, errors.New("hostdial: the relay owner needs the Lease's epoch (OwnerOptions.Epoch)")
+	}
 	if o.Slots == nil {
 		o.Slots = SharedSlots
 	}
@@ -145,11 +177,14 @@ func NewOwner(o OwnerOptions) (*Owner, error) {
 	if o.ResetAfter <= 0 {
 		o.ResetAfter = DefaultResetAfter
 	}
+	if o.RestartLimit <= 0 {
+		o.RestartLimit = DefaultRestartLimit
+	}
+	if o.RestartWindow <= 0 {
+		o.RestartWindow = DefaultRestartWindow
+	}
 	if o.StopGrace <= 0 {
 		o.StopGrace = DefaultStopGrace
-	}
-	if o.CheckTimeout <= 0 {
-		o.CheckTimeout = DefaultCheckTimeout
 	}
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.DiscardHandler)
@@ -163,8 +198,8 @@ func (*Owner) NeedLeaderElection() bool { return true }
 
 // Want records that t's Allocation is running, and starts its two relays when
 // the Owner runs and they are not already kept for the same job. A Want for
-// the same tag with another job, agent, login or credentials (Gen) stops the
-// old relays and starts new ones.
+// the same tag with another job, agent, directory, UID, login or credentials
+// (Gen) stops the old relays and starts new ones.
 func (o *Owner) Want(t Target) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -199,19 +234,39 @@ func (o *Owner) Drop(tag string) {
 	}
 }
 
-// Start runs the relays of every wanted Allocation until ctx ends, then stops
-// each by PID and returns once every relay's process is gone.
+// Start reads the epoch, then runs the relays of every wanted Allocation
+// until ctx ends, then stops each by PID and returns once every relay's
+// process is gone. An epoch that cannot be read is read again every few
+// seconds, and no relay starts meanwhile.
 func (o *Owner) Start(ctx context.Context) error {
+	var epoch int64
+	for {
+		e, err := o.o.Epoch(ctx)
+		if err == nil {
+			epoch = e
+			break
+		}
+		o.o.Logger.Info("the relays wait for the Lease's epoch", "err", err)
+		select {
+		case <-ctx.Done():
+			o.mu.Lock()
+			o.done = true
+			o.mu.Unlock()
+			return nil
+		case <-time.After(2 * time.Second):
+		}
+	}
 	o.mu.Lock()
 	if o.running || o.done {
 		o.mu.Unlock()
 		return errors.New("hostdial: the relay owner runs once")
 	}
-	o.ctx, o.running = ctx, true
+	o.ctx, o.epoch, o.running = ctx, epoch, true
 	for tag, t := range o.want {
 		o.allocs[tag] = o.startLocked(t)
 	}
 	o.mu.Unlock()
+	o.o.Logger.Info("relays running", "epoch", epoch)
 	<-ctx.Done()
 	o.mu.Lock()
 	o.done, o.running = true, false
@@ -239,18 +294,23 @@ type RelayState struct {
 	Starts int
 	// Since is when the current process started.
 	Since time.Time
+	// Epoch and Seq are the current or last process's fence.
+	Epoch, Seq int64
 	// LastRefusal says why the last start did not happen ("" when none).
 	LastRefusal string
-	// LastFailure is the kind of the last process's failure (Target.Describe),
-	// "" when it exited 0 or none ended.
-	LastFailure string
+	// LastEnd is how the last process ended ("" when none ended), and
+	// LastFailure its ssh failure's kind, if any.
+	LastEnd, LastFailure string
+	// Final is set once the relay ended for good; FinalCause says how.
+	Final      bool
+	FinalCause string
 	// Waiting is true while the Allocation waits for its pair of slots on the
 	// login node; no relay of it has started then.
 	Waiting bool
 	// Gen is the Target's credentials generation.
 	Gen string
 	// LastEnded is when the last process ended, and LastWait the backoff the
-	// relay waited after it before its next attempt.
+	// relay waited before its latest attempt.
 	LastEnded time.Time
 	LastWait  time.Duration
 	// Streams and Joined count the streams the job opened over this relay
@@ -302,9 +362,8 @@ func (a *allocRelays) stop() {
 }
 
 func (o *Owner) stopLocked(a *allocRelays) {
-	// Stopping waits for processes; it runs outside the lock's holder's path
-	// by a goroutine, and Want's caller does not wait for it. The new relays
-	// may start meanwhile: the agent keeps the newer session.
+	// Stopping waits for processes; Want's caller does not wait for it. The
+	// new relays may start meanwhile: theirs is the higher (E, N).
 	o.wg.Add(1)
 	go func() { defer o.wg.Done(); a.stop() }()
 }
@@ -316,7 +375,7 @@ func (o *Owner) startLocked(t Target) *allocRelays {
 	ctx, cancel := context.WithCancel(o.ctx)
 	a := &allocRelays{cancel: cancel, done: make(chan struct{}), waiting: true}
 	for _, ch := range agentapi.RelayChannels {
-		a.relays = append(a.relays, &relay{o: o, t: t, ch: ch, target: agentapi.RelayTargetAddr(o.o.Ports[ch])})
+		a.relays = append(a.relays, &relay{o: o, t: t, ch: ch, epoch: o.epoch, target: agentapi.RelayTargetAddr(o.o.Ports[ch])})
 	}
 	go func() {
 		defer close(a.done)
@@ -343,24 +402,31 @@ type relay struct {
 	o      *Owner
 	t      Target
 	ch     agentapi.RelayChannel
+	epoch  int64
 	target string
 
-	mu        sync.Mutex
-	pid       int
-	starts    int
-	since     time.Time
-	refusal   string
-	failure   string
-	lastEnded time.Time
-	lastWait  time.Duration
-	stats     ServeStats
+	mu         sync.Mutex
+	pid        int
+	starts     int
+	since      time.Time
+	seq        int64
+	refusal    string
+	lastEnd    string
+	failure    string
+	final      bool
+	finalCause string
+	lastEnded  time.Time
+	lastWait   time.Duration
+	restarts   []time.Time // the starts within the restart window
+	stats      ServeStats
 }
 
 func (r *relay) state() RelayState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return RelayState{Tag: r.t.Tag, Channel: r.ch, JobID: r.t.JobID, PID: r.pid, Starts: r.starts, Since: r.since, LastRefusal: r.refusal,
-		LastFailure: r.failure, Gen: r.t.Gen, LastEnded: r.lastEnded, LastWait: r.lastWait,
+	return RelayState{Tag: r.t.Tag, Channel: r.ch, JobID: r.t.JobID, PID: r.pid, Starts: r.starts, Since: r.since,
+		Epoch: r.epoch, Seq: r.seq, LastRefusal: r.refusal, LastEnd: r.lastEnd, LastFailure: r.failure,
+		Final: r.final, FinalCause: r.finalCause, Gen: r.t.Gen, LastEnded: r.lastEnded, LastWait: r.lastWait,
 		Streams: r.stats.Streams.Load(), Joined: r.stats.Joined.Load()}
 }
 
@@ -371,22 +437,27 @@ func (r *relay) refuse(why string) {
 	r.o.o.Logger.Info("a relay did not start", "tag", r.t.Tag, "channel", r.ch, "why", why)
 }
 
-// loop keeps the relay up until ctx ends: check that the job is still the
-// Allocation's and running, start the ssh, serve the session until it drops,
-// stop the process by PID, wait the backoff, and again. The Allocation's
-// slots stay taken throughout.
+// end makes the relay's end final, and tells OnFailed of an EndFailed one.
+func (r *relay) end(kind EndKind, cause string) {
+	r.mu.Lock()
+	r.final, r.finalCause = true, kind.String()+": "+cause
+	r.mu.Unlock()
+	r.o.o.Logger.Info("a relay ended for good", "tag", r.t.Tag, "channel", r.ch, "end", kind.String(), "cause", cause)
+	if kind == EndFailed && r.t.OnFailed != nil {
+		r.t.OnFailed(r.ch, cause)
+	}
+}
+
+// loop keeps the relay up until ctx ends or its end is final: a jittered wait
+// (the first included, since every relay starts together after a restart),
+// the job-is-ours read of the listing, the ssh start, the session until it
+// drops, the stop by PID, and again. The Allocation's slots stay taken
+// throughout.
 func (r *relay) loop(ctx context.Context) {
 	o := r.o.o
 	backoff := o.MinBackoff
-	for ctx.Err() == nil {
-		up, started := r.once(ctx)
-		if ctx.Err() != nil {
-			return
-		}
-		if started && up >= o.ResetAfter {
-			backoff = o.MinBackoff
-		}
-		wait := jitter(backoff)
+	wait := time.Duration(rand.Int64N(int64(o.MinBackoff) + 1))
+	for {
 		r.mu.Lock()
 		r.lastWait = wait
 		r.mu.Unlock()
@@ -395,8 +466,41 @@ func (r *relay) loop(ctx context.Context) {
 			return
 		case <-time.After(wait):
 		}
+		up, started, kind, cause := r.once(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		if kind.Final() {
+			r.end(kind, cause)
+			return
+		}
+		if started {
+			if up >= o.ResetAfter {
+				backoff = o.MinBackoff
+			}
+			if r.restartsInWindow(time.Now()) > o.RestartLimit {
+				r.end(EndFailed, fmt.Sprintf("more than %d restarts of the %s channel within %s", o.RestartLimit, r.ch, o.RestartWindow))
+				return
+			}
+		}
+		wait = jitter(backoff)
 		backoff = min(2*backoff, o.MaxBackoff)
 	}
+}
+
+// restartsInWindow records a start at now and counts the restarts within the
+// restart window.
+func (r *relay) restartsInWindow(now time.Time) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	keep := r.restarts[:0]
+	for _, t := range r.restarts {
+		if now.Sub(t) < r.o.o.RestartWindow {
+			keep = append(keep, t)
+		}
+	}
+	r.restarts = append(keep, now)
+	return len(r.restarts) - 1 // the first start is no restart
 }
 
 // jitter is d less a random part of up to half of it, so restarts of many
@@ -408,87 +512,102 @@ func jitter(d time.Duration) time.Duration {
 	return d - time.Duration(rand.Int64N(int64(d/2)+1))
 }
 
-// once makes one attempt: it returns how long the relay was up, and whether
-// its process started at all.
-func (r *relay) once(ctx context.Context) (time.Duration, bool) {
+// once makes one attempt: it returns how long the relay was up, whether its
+// process started, and what its end means.
+func (r *relay) once(ctx context.Context) (time.Duration, bool, EndKind, string) {
 	o := r.o.o
-	id, why := r.jobIsOurs(ctx)
+	id, kind, why := r.jobIsOurs(ctx)
 	if why != "" {
 		r.refuse(why)
-		return 0, false
+		return 0, false, kind, why
 	}
-	line, err := agentapi.RelayLine(id, r.t.AgentPath, r.ch)
+	seq := seqs.Add(1)
+	line, err := agentapi.RelayLine(id, r.t.AgentPath, agentapi.RelayArgs{Channel: r.ch, Dir: r.t.AllocDir, Allocation: r.t.UID, Epoch: r.epoch, Seq: seq})
 	if err != nil {
 		r.refuse(err.Error())
-		return 0, false
+		return 0, false, EndFailed, "the relay line: " + err.Error()
 	}
 	cmd, err := r.t.Command(line)
 	if err != nil {
 		r.refuse("the ssh client: " + err.Error())
-		return 0, false
+		return 0, false, EndRetried, ""
 	}
 	p, err := startProcess(cmd)
 	if err != nil {
 		r.refuse("the ssh client could not be started: " + err.Error())
-		return 0, false
+		return 0, false, EndRetried, ""
 	}
 	start := time.Now()
 	r.mu.Lock()
-	r.pid, r.starts, r.since, r.refusal = p.pid, r.starts+1, start, ""
+	r.pid, r.starts, r.since, r.seq, r.refusal = p.pid, r.starts+1, start, seq, ""
 	r.mu.Unlock()
-	o.Logger.Info("relay started", "tag", r.t.Tag, "channel", r.ch, "job", id, "pid", p.pid)
+	o.Logger.Info("relay started", "tag", r.t.Tag, "channel", r.ch, "job", id, "pid", p.pid, "epoch", r.epoch, "seq", seq)
 	sctx, cancel := context.WithCancel(ctx)
 	served := make(chan error, 1)
-	go func() { served <- Serve(sctx, p, r.target, r.ch, o.Logger, &r.stats) }()
+	go func() { served <- Serve(sctx, p, r.target, r.t.UID, o.Logger, &r.stats) }()
+	var serveErr error
 	serveEnded := false
 	select {
 	case <-p.done:
-	case <-served:
+	case serveErr = <-served:
 		serveEnded = true
 	case <-ctx.Done():
 	}
 	p.stop(o.StopGrace)
 	cancel()
 	if !serveEnded {
-		<-served
+		serveErr = <-served
 	}
 	up := time.Since(start)
-	exit, kind := -1, ""
+	exit := -1
 	if ps := p.cmd.ProcessState; ps != nil {
 		exit = ps.ExitCode()
 	}
-	if exit != 0 && r.t.Describe != nil {
-		kind = r.t.Describe(p.cmd)
+	var stderr, failure string
+	if r.t.Stderr != nil {
+		stderr = r.t.Stderr(p.cmd)
+	}
+	kind, cause := ClassifyEnd(stderr)
+	switch {
+	case errors.Is(serveErr, ErrUnexpectedOutput), errors.Is(serveErr, ErrNoPreamble):
+		kind, cause = EndRetried, serveErr.Error()
+	case kind == EndRetried && cause == "" && exit != 0 && r.t.Describe != nil:
+		failure = r.t.Describe(p.cmd)
+		cause = failure
 	}
 	r.mu.Lock()
-	r.pid, r.lastEnded, r.failure = 0, time.Now(), kind
+	r.pid, r.lastEnded, r.failure, r.lastEnd = 0, time.Now(), failure, kind.String()+": "+cause
 	r.mu.Unlock()
-	o.Logger.Info("relay ended", "tag", r.t.Tag, "channel", r.ch, "job", id, "up", up.Round(time.Millisecond), "exit", exit, "failure", kind)
-	return up, true
+	o.Logger.Info("relay ended", "tag", r.t.Tag, "channel", r.ch, "job", id, "up", up.Round(time.Millisecond), "exit", exit, "end", kind.String(), "cause", cause)
+	return up, true, kind, cause
 }
 
-// jobIsOurs reads the listing under the Allocation's tag again and returns
-// the job ID to start on: the recorded job, listed running. Otherwise it
-// returns why not, and the relay does not start (HBEP-6: "Before each start,
-// the job ID is read again from squeue --me under the Allocation's tag", so a
-// relay never lands on another job).
-func (r *relay) jobIsOurs(ctx context.Context) (string, string) {
-	ctx, cancel := context.WithTimeout(ctx, r.o.o.CheckTimeout)
-	defer cancel()
-	jobs, err := r.t.Jobs.ListByTagFresh(ctx, r.t.Tag)
+// jobIsOurs reads the Provider's latest listing under the Allocation's tag
+// and returns the job ID to start on: the recorded job, listed RUNNING with
+// the tag as its name. A job listed pending or held is waited for; one not
+// listed, ended or completing is the job's end (HBEP-6: "Before each start,
+// the Provider's latest queue listing ... must show the recorded job ID
+// RUNNING, with its name equal to the Allocation's tag").
+func (r *relay) jobIsOurs(ctx context.Context) (string, EndKind, string) {
+	jobs, err := r.t.Jobs.ListByTag(ctx, r.t.Tag)
 	if err != nil {
-		return "", "the listing under the tag could not be read: " + err.Error()
+		return "", EndRetried, "the listing under the tag could not be read: " + err.Error()
 	}
 	for _, j := range jobs {
 		if j.ID != r.t.JobID || j.Name != r.t.Tag {
 			continue
 		}
-		if j.Phase != v1alpha1.AllocationRunning || j.Completing {
-			return "", fmt.Sprintf("job %s is %s, not running", j.ID, j.Phase)
+		switch {
+		case j.Completing:
+			return "", EndJobGone, fmt.Sprintf("job %s is completing", j.ID)
+		case j.Phase == v1alpha1.AllocationRunning:
+			return j.ID, EndRetried, ""
+		case j.Phase == v1alpha1.AllocationPending || j.Phase == v1alpha1.AllocationHeld:
+			return "", EndRetried, fmt.Sprintf("job %s is %s, not running yet", j.ID, j.Phase)
 		}
-		return j.ID, ""
+		return "", EndJobGone, fmt.Sprintf("job %s is %s, not running", j.ID, j.Phase)
 	}
-	return "", fmt.Sprintf("job %s is not listed under tag %s", r.t.JobID, r.t.Tag)
+	return "", EndJobGone, fmt.Sprintf("job %s is not listed under tag %s", r.t.JobID, r.t.Tag)
 }
 
 // process is a started relay ssh: its pipes are the session's transport.
@@ -501,8 +620,8 @@ type process struct {
 }
 
 // startProcess starts cmd in a process group of its own, with pipes for its
-// standard input and output; its standard error is left as cmd has it. A
-// TERM reaches it if this process dies first.
+// standard input and output, and a KILL when this process dies
+// (startLockedThread).
 func startProcess(cmd *exec.Cmd) (*process, error) {
 	in, err := cmd.StdinPipe()
 	if err != nil {
@@ -512,13 +631,45 @@ func startProcess(cmd *exec.Cmd) (*process, error) {
 	if err != nil {
 		return nil, err
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGTERM}
-	if err := cmd.Start(); err != nil {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	if err := startLockedThread(cmd); err != nil {
 		return nil, err
 	}
 	p := &process{cmd: cmd, pid: cmd.Process.Pid, in: in, out: out, done: make(chan struct{})}
 	go func() { _ = cmd.Wait(); close(p.done) }()
 	return p, nil
+}
+
+// The starter: every relay is created on one goroutine that locks its thread
+// for good (HBEP-6, The ssh process: "started from a thread that stays locked
+// for good, with Pdeathsig=SIGKILL ... so it dies with the controller
+// process"). A parent-death signal is sent when the thread that created the
+// process exits, not when the process does (go.dev/issue/27505); this thread
+// exits only with the process. The pattern is the fake Slurm's (startProc,
+// #274).
+var (
+	starterOnce sync.Once
+	starterReqs chan startReq
+)
+
+type startReq struct {
+	cmd  *exec.Cmd
+	done chan error
+}
+
+func startLockedThread(cmd *exec.Cmd) error {
+	starterOnce.Do(func() {
+		starterReqs = make(chan startReq)
+		go func() {
+			runtime.LockOSThread() // never unlocked: see startLockedThread
+			for q := range starterReqs {
+				q.done <- q.cmd.Start()
+			}
+		}()
+	})
+	done := make(chan error, 1)
+	starterReqs <- startReq{cmd: cmd, done: done}
+	return <-done
 }
 
 func (p *process) Read(b []byte) (int, error)  { return p.out.Read(b) }

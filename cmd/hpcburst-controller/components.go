@@ -240,6 +240,7 @@ var (
 	sampleTag      = v1alpha1.JobTag("example", "example", "00000000-0000-0000-0000-000000000000")
 	sampleStaging  = "/scratch/example/stage"
 	sampleDialHome = filepath.Join("/home/example", agentapi.DialHomeDir)
+	sampleUID      = "00000000-0000-0000-0000-000000000000"
 )
 
 // checkFront encodes, for each cpuArch, the agent.json a Create would write,
@@ -264,8 +265,11 @@ func checkFront(fs *providerctl.FrontSettings) error {
 			ProtocolVersion: agentapi.ProtocolVersion, Tag: sampleTag, Mode: fs.Mode, Endpoint: fs.Endpoint,
 			CertSPKISHA256: fs.CertPin, FrpcDigest: fs.FrpcDigests[arch], StagingDir: sampleStaging, DialHomeDir: sampleDialHome,
 		}
-		if fs.Mode == agentapi.DialHomeSSH {
+		switch fs.Mode {
+		case agentapi.DialHomeSSH:
 			c.SSH = &agentapi.SSHForward{User: fs.SSHUser, AgentPort: fs.AgentPort, DialHomePort: fs.DialHomePort}
+		case agentapi.DialHomeHostDialed:
+			c.Allocation = sampleUID
 		}
 		if _, err := c.Encode(); err != nil {
 			errs = append(errs, fmt.Errorf("agent.json for cpuArch %s: %w", arch, err))

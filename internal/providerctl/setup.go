@@ -142,8 +142,12 @@ func Setup(mgr manager.Manager, o Options) error {
 		return err
 	}
 	if c.shared.relays != nil {
+		if c.shared.relays.settings.Epoch == nil {
+			c.shared.relays.settings.Epoch = leaseEpoch(mgr.GetConfig(), name)
+		}
 		// Leader-only: only the leader's relays run, and they stop by PID when
-		// it stops or loses the lead (HBEP-6, Dial-home modes, host-dialed mode).
+		// it stops or loses the lead, before the Lease is released (HBEP-6,
+		// Fencing).
 		if err := mgr.Add(relayRunnable{c}); err != nil {
 			return err
 		}

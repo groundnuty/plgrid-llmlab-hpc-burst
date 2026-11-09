@@ -6,10 +6,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -45,6 +43,7 @@ type Relay struct {
 
 	mu     sync.Mutex
 	closed bool
+	login  string
 }
 
 // NewRelay writes the relays' configuration file and returns the maker. Close
@@ -163,17 +162,38 @@ func Classify(cmd *exec.Cmd) string {
 // relayLinePrefix starts the relay step's own messages on its standard error.
 const relayLinePrefix = "hb-relay: "
 
-// Login is the login node as the per-login-node cap names it: host:port, the
-// port 22 when the credentials name none.
-func (r *Relay) Login() string { return LoginOf(r.o.Config) }
-
-// LoginOf is a Provider's login node as host:port.
-func LoginOf(c slurm.SSHConfig) string {
-	port := c.Port
-	if port == 0 {
-		port = 22
+// Stderr is what an ended relay's command kept of its standard error, up to
+// 4 KiB. It may name the host and the user, so it is for classifying the end
+// (hostdial.ClassifyEnd), never for a log.
+func Stderr(cmd *exec.Cmd) string {
+	if l, ok := cmd.Stderr.(*limited); ok {
+		return l.w.String()
 	}
-	return net.JoinHostPort(c.HostName, strconv.Itoa(port))
+	return ""
+}
+
+// Login is the login node as the slots and the one-Provider-per-host rule
+// name it: the host name as ssh -G resolves it through the relays' own
+// configuration file (HBEP-6, Capacity), so an alias and a full name of one
+// node are one host. When ssh -G fails, it is the configured HostName.
+func (r *Relay) Login() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.login != "" {
+		return r.login
+	}
+	r.login = r.o.Config.HostName
+	cmd := exec.Command(r.o.Binary, "-G", "-F", r.config, alias)
+	cmd.Env = r.o.Env
+	if out, err := cmd.Output(); err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			if h, ok := strings.CutPrefix(line, "hostname "); ok && strings.TrimSpace(h) != "" {
+				r.login = strings.TrimSpace(h)
+				break
+			}
+		}
+	}
+	return r.login
 }
 
 // Close removes the configuration file; later Commands fail.

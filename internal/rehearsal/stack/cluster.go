@@ -21,7 +21,6 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // ClusterUser is the fake cluster's own user, never this host's.
@@ -83,15 +82,6 @@ func StartCluster(t T, dir string, shape ClusterShape, install func(dir string) 
 		t.Fatal(err)
 	}
 	env := clusterJobEnv(c.Fakes, shape.WrapApptainer, jobEnv)
-	// Host-dialed mode's relay root (agentapi.EnvRelayRoot): the job's agent
-	// and its relay steps, which share the job's environment on this fake,
-	// find their sockets under this test's directory rather than /tmp. The
-	// other modes do not read it.
-	relayRoot := filepath.Join(dir, "rr")
-	if err := os.Mkdir(relayRoot, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	env[agentapi.EnvRelayRoot] = relayRoot
 	if len(shape.Partitions) == 0 {
 		shape.Partitions = []fakeslurm.Partition{{Name: Partition, GPUOnly: true}}
 	}

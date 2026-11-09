@@ -6,6 +6,7 @@ require (
 	github.com/cespare/xxhash v1.1.0
 	github.com/crossplane/crossplane-runtime/v2 v2.4.3
 	github.com/crossplane/crossplane/apis/v2 v2.3.4
+	github.com/fatedier/yamux v0.2.0
 	github.com/go-logr/logr v1.4.4
 	github.com/groundnuty/plgrid-llmlab-hpc-burst/third_party/forked/kubeai v0.0.0
 	github.com/hanwen/go-fuse/v2 v2.12.1

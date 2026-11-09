@@ -77,7 +77,7 @@ func startTransport(job agent.Job, runDir, aid string, getenv func(string) strin
 	var control *agent.SSHForward
 	switch job.Config.Mode {
 	case agentapi.DialHomeHostDialed:
-		if err := t.startHostDialed(job, &co, getenv, log); err != nil {
+		if err := t.startHostDialed(job, &co, log); err != nil {
 			return t, err
 		}
 	case agentapi.DialHomeSSH:
@@ -116,32 +116,18 @@ func startTransport(job agent.Job, runDir, aid string, getenv func(string) strin
 	return t, nil
 }
 
-// startHostDialed binds the agent's two loopback listeners and the relay
-// sockets for the job, and points the control client and frpc at the
-// listeners (HBEP-6, Dial-home modes, host-dialed mode). Both ports are the
-// kernel's, taken once, kept for the Allocation's life, and never change when
-// a relay restarts, so frpc is never restarted for a relay.
-func (t *transport) startHostDialed(job agent.Job, co *agent.ClientOptions, getenv func(string) string, log *slog.Logger) error {
-	dir, err := hostdial.MakeRelayDir(agentapi.RelayRoot(getenv), job.JobID)
+// startHostDialed binds the agent's two loopback listeners and its relay
+// socket, publishes the socket in the Allocation's directory, and points the
+// control client and frpc at the listeners (HBEP-6, Dial-home modes,
+// host-dialed mode). Both ports are the kernel's, taken once, kept for the
+// Allocation's life, and never change when a relay restarts, so frpc is
+// never restarted for a relay.
+func (t *transport) startHostDialed(job agent.Job, co *agent.ClientOptions, log *slog.Logger) error {
+	j, err := hostdial.StartJob(hostdial.JobOptions{TmpDir: job.TmpDir, AllocDir: job.AllocDir, Allocation: job.Config.Allocation, Logger: log})
 	if err != nil {
 		return err
 	}
-	j, err := hostdial.StartJob(hostdial.JobOptions{Dir: dir, Logger: log})
-	if err != nil {
-		_ = os.Remove(dir)
-		return err
-	}
-	unpublish, err := hostdial.PublishRelayDir(job.Config.StagingDir, job.JobID, dir)
-	if err != nil {
-		_ = j.Close()
-		_ = os.Remove(dir)
-		return err
-	}
-	t.stops = append(t.stops, func() {
-		unpublish()
-		_ = j.Close()
-		_ = os.Remove(dir)
-	})
+	t.stops = append(t.stops, func() { _ = j.Close() })
 	control := j.Addr(agentapi.RelayControl)
 	co.Dial = func(ctx context.Context) (net.Conn, error) {
 		d := net.Dialer{Timeout: 10 * time.Second}
@@ -151,6 +137,6 @@ func (t *transport) startHostDialed(job agent.Job, co *agent.ClientOptions, gete
 	t.frpc.Server = func() (agent.FrpcTarget, <-chan struct{}) {
 		return agent.FrpcTarget{Host: "127.0.0.1", Port: port, Ready: true}, nil
 	}
-	log.Info("host-dialed: listening for the relays", "control", control, "serving", port, "relayDir", dir)
+	log.Info("host-dialed: listening for the relays", "control", control, "serving", port, "socket", j.Socket())
 	return nil
 }

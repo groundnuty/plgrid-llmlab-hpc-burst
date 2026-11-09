@@ -5,22 +5,21 @@ import (
 	"testing"
 )
 
+var exampleRelay = RelayArgs{Channel: RelayServing, Dir: "/scratch/example/stage/alloc/hb-example-0123456789ab",
+	Allocation: "0a1b2c3d-0000-4000-8000-000000000001", Epoch: 3, Seq: 7}
+
 // TestRelayLineIsTheHBEPsLine pins the line to HBEP-6's text (Dial-home modes,
-// host-dialed mode): "srun -u --overlap --jobid=<job> --ntasks=1 <the job's
-// agent binary> relay <channel>". The expected strings are written out here
-// from the HBEP, not built with RelayLine's own parts.
+// host-dialed mode, at b12aa9f): "srun -u --overlap --jobid=<job> --ntasks=1
+// <the job's agent binary> relay <channel> --dir <Allocation directory>
+// --allocation <UID> --epoch <E> --seq <N>". The expected string is written
+// out here from the HBEP, not built with RelayLine's own parts.
 func TestRelayLineIsTheHBEPsLine(t *testing.T) {
-	for ch, want := range map[RelayChannel]string{
-		RelayControl: "srun -u --overlap --jobid=4242 --ntasks=1 /scratch/example/stage/agent/" + strings.Repeat("a", 64) + "/hb-agent relay control",
-		RelayServing: "srun -u --overlap --jobid=4242 --ntasks=1 /scratch/example/stage/agent/" + strings.Repeat("a", 64) + "/hb-agent relay serving",
-	} {
-		got, err := RelayLine("4242", "/scratch/example/stage/agent/"+strings.Repeat("a", 64)+"/hb-agent", ch)
-		if err != nil {
-			t.Fatalf("RelayLine(%s): %v", ch, err)
-		}
-		if got != want {
-			t.Errorf("RelayLine(%s) = %q, want %q", ch, got, want)
-		}
+	agent := "/scratch/example/stage/agent/" + strings.Repeat("a", 64) + "/hb-agent"
+	want := "srun -u --overlap --jobid=4242 --ntasks=1 " + agent + " relay serving --dir /scratch/example/stage/alloc/hb-example-0123456789ab" +
+		" --allocation 0a1b2c3d-0000-4000-8000-000000000001 --epoch 3 --seq 7"
+	got, err := RelayLine("4242", agent, exampleRelay)
+	if err != nil || got != want {
+		t.Errorf("RelayLine = %q, %v\nwant %q", got, err, want)
 	}
 }
 
@@ -29,7 +28,7 @@ func TestRelayLineIsTheHBEPsLine(t *testing.T) {
 // line that dropped -u, or moved it after the program where srun would not
 // read it, fails here.
 func TestRelayLineWithoutUnbufferedFails(t *testing.T) {
-	line, err := RelayLine("4242", "/scratch/example/hb-agent", RelayServing)
+	line, err := RelayLine("4242", "/scratch/example/hb-agent", exampleRelay)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,88 +58,68 @@ func TestRelayLineWithoutUnbufferedFails(t *testing.T) {
 			t.Errorf("the relay line %q lacks srun's %s before the program (HBEP-6: -u is required, or srun holds output that ends without a newline)", line, need)
 		}
 	}
-	if got := strings.Join(words[prog:], " "); got != "/scratch/example/hb-agent relay serving" {
-		t.Errorf("the relay line's program is %q, want the agent binary, relay and the channel", got)
+	if words[prog] != "/scratch/example/hb-agent" || words[prog+1] != "relay" {
+		t.Errorf("the relay line's program is %q, want the agent binary and relay", words[prog:])
+	}
+	back, err := ParseRelayArgs(words[prog+2:])
+	if err != nil || back != exampleRelay {
+		t.Errorf("the relay's own parse of its arguments = %+v, %v; want %+v", back, err, exampleRelay)
 	}
 }
 
-func TestRelayLineRefuses(t *testing.T) {
+func TestRelayLineAndArgsRefuse(t *testing.T) {
 	for name, c := range map[string]struct {
 		job, agent string
-		ch         RelayChannel
+		mod        func(*RelayArgs)
 	}{
-		"no job":             {"", "/x/hb-agent", RelayControl},
-		"a job that is text": {"12a", "/x/hb-agent", RelayControl},
-		"a leading zero":     {"0123", "/x/hb-agent", RelayControl},
-		"a relative agent":   {"12", "x/hb-agent", RelayControl},
-		"a space":            {"12", "/x y/hb-agent", RelayControl},
-		"a dot-dot":          {"12", "/x/../hb-agent", RelayControl},
-		"a shell word":       {"12", "/x/hb-agent;rm", RelayControl},
-		"another channel":    {"12", "/x/hb-agent", "plugin"},
+		"no job":             {"", "/x/hb-agent", nil},
+		"a job that is text": {"12a", "/x/hb-agent", nil},
+		"a relative agent":   {"12", "x/hb-agent", nil},
+		"a shell word":       {"12", "/x/hb-agent;rm", nil},
+		"another channel":    {"12", "/x/hb-agent", func(a *RelayArgs) { a.Channel = "plugin" }},
+		"a relative dir":     {"12", "/x/hb-agent", func(a *RelayArgs) { a.Dir = "alloc/x" }},
+		"a dot-dot dir":      {"12", "/x/hb-agent", func(a *RelayArgs) { a.Dir = "/s/../x" }},
+		"a UID with a space": {"12", "/x/hb-agent", func(a *RelayArgs) { a.Allocation = "a b" }},
+		"no UID":             {"12", "/x/hb-agent", func(a *RelayArgs) { a.Allocation = "" }},
+		"a negative epoch":   {"12", "/x/hb-agent", func(a *RelayArgs) { a.Epoch = -1 }},
+		"a zero sequence":    {"12", "/x/hb-agent", func(a *RelayArgs) { a.Seq = 0 }},
 	} {
-		if line, err := RelayLine(c.job, c.agent, c.ch); err == nil {
+		a := exampleRelay
+		if c.mod != nil {
+			c.mod(&a)
+		}
+		if line, err := RelayLine(c.job, c.agent, a); err == nil {
 			t.Errorf("%s: RelayLine = %q, want an error", name, line)
 		}
 	}
-}
-
-func TestRelayDirPrefixAndCheck(t *testing.T) {
-	p, err := RelayDirPrefix("4242")
-	if err != nil || p != "hb-relay-4242-" {
-		t.Fatalf("RelayDirPrefix = %q, %v", p, err)
-	}
-	if err := CheckRelayDir("/tmp", "4242", "/tmp/hb-relay-4242-918273645"); err != nil {
-		t.Errorf("a directory the agent makes: %v", err)
-	}
-	if s := RelaySocket("/tmp/hb-relay-4242-9", RelayServing); s != "/tmp/hb-relay-4242-9/serving.sock" {
-		t.Errorf("RelaySocket = %q", s)
-	}
-	for name, dir := range map[string]string{
-		"the predictable name": "/tmp/hb-relay-4242",
-		"another job's":        "/tmp/hb-relay-4243-1",
-		"another root":         "/var/tmp/hb-relay-4242-1",
-		"a dot-dot":            "/tmp/x/../hb-relay-4242-1",
-		"a nested one":         "/tmp/a/hb-relay-4242-1",
-		"a slash in the rest":  "/tmp/hb-relay-4242-1/x",
-		"too long":             "/tmp/hb-relay-4242-" + strings.Repeat("9", 90),
+	for name, args := range map[string][]string{
+		"nothing":         nil,
+		"no flags":        {"control"},
+		"no seq":          {"control", "--dir", "/d", "--allocation", "u", "--epoch", "1"},
+		"an extra word":   {"control", "--dir", "/d", "--allocation", "u", "--epoch", "1", "--seq", "1", "x"},
+		"an unknown flag": {"control", "--dir", "/d", "--allocation", "u", "--epoch", "1", "--seq", "1", "--port", "9"},
 	} {
-		if err := CheckRelayDir("/tmp", "4242", dir); err == nil {
-			t.Errorf("%s: CheckRelayDir accepted %q", name, dir)
-		}
-	}
-	if _, err := RelayDirPrefix("12a"); err == nil {
-		t.Error("a job ID of text was accepted")
-	}
-}
-
-func TestRelayPointerPathAndStagingDir(t *testing.T) {
-	if p, err := RelayPointerPath("/scratch/example/stage", "4242"); err != nil || p != "/scratch/example/stage/relay/4242" {
-		t.Errorf("RelayPointerPath = %q, %v", p, err)
-	}
-	if _, err := RelayPointerPath("stage", "4242"); err == nil {
-		t.Error("a relative staging directory was accepted")
-	}
-	agent := "/scratch/example/stage/agent/" + strings.Repeat("a", 64) + "/hb-agent"
-	if s, err := StagingDirOfAgent(agent); err != nil || s != "/scratch/example/stage" {
-		t.Errorf("StagingDirOfAgent = %q, %v", s, err)
-	}
-	for _, bad := range []string{"/usr/bin/hb-agent", "/s/agent/abc/hb-agent", "/s/agent/" + strings.Repeat("a", 64) + "/other", "hb-agent"} {
-		if s, err := StagingDirOfAgent(bad); err == nil {
-			t.Errorf("StagingDirOfAgent(%q) = %q, want an error", bad, s)
+		if a, err := ParseRelayArgs(args); err == nil {
+			t.Errorf("%s: ParseRelayArgs = %+v, want an error", name, a)
 		}
 	}
 }
 
-// TestRelayRootIsNotTMPDIR: the root never follows TMPDIR, which a step that
-// srun starts from the login node does not share with the batch script.
-func TestRelayRootIsNotTMPDIR(t *testing.T) {
-	env := map[string]string{"TMPDIR": "/dev/shm/job-1"}
-	if r := RelayRoot(func(k string) string { return env[k] }); r != DefaultRelayRoot {
-		t.Errorf("RelayRoot = %q with only TMPDIR set, want %q", r, DefaultRelayRoot)
+func TestRelayExchangeLines(t *testing.T) {
+	if got := RelayPreamble("u-1"); got != "hpcburst-relay/1 u-1" {
+		t.Errorf("RelayPreamble = %q, want HBEP-6's \"hpcburst-relay/1 <Allocation UID>\"", got)
 	}
-	env[EnvRelayRoot] = "/home/example/t/r"
-	if r := RelayRoot(func(k string) string { return env[k] }); r != "/home/example/t/r" {
-		t.Errorf("RelayRoot = %q, want the override", r)
+	if got := RelaySocketFile("/s/alloc/hb-x"); got != "/s/alloc/hb-x/relay-socket" {
+		t.Errorf("RelaySocketFile = %q", got)
+	}
+	ch, e, n, err := ParseRelayHello(RelayHello(exampleRelay))
+	if err != nil || ch != RelayServing || e != 3 || n != 7 {
+		t.Errorf("the hello's round trip: %s %d %d %v", ch, e, n, err)
+	}
+	for _, bad := range []string{"", "relay/1 serving 3", "relay/2 serving 3 7", "relay/1 plugin 3 7", "relay/1 serving x 7", "relay/1 serving 3 0"} {
+		if _, _, _, err := ParseRelayHello(bad); err == nil {
+			t.Errorf("ParseRelayHello(%q) was accepted", bad)
+		}
 	}
 }
 
@@ -157,9 +136,15 @@ func TestHostDialedConfig(t *testing.T) {
 		ProtocolVersion: ProtocolVersion, Tag: "hb-example-0123456789ab", Mode: DialHomeHostDialed,
 		CertSPKISHA256: strings.Repeat("b", 64), FrpcDigest: strings.Repeat("c", 64),
 		StagingDir: "/scratch/example/stage", DialHomeDir: "/home/example/.hpcburst/dial-home",
+		Allocation: "0a1b2c3d-0000-4000-8000-000000000001",
 	}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("a host-dialed agent.json: %v", err)
+	}
+	noUID := c
+	noUID.Allocation = ""
+	if err := noUID.Validate(); err == nil {
+		t.Error("a host-dialed agent.json without the Allocation's UID was accepted: the agent's greeting needs it")
 	}
 	withEndpoint := c
 	withEndpoint.Endpoint = "front.example:8443"
@@ -180,6 +165,10 @@ func TestHostDialedConfig(t *testing.T) {
 	direct.Mode = DialHomeDirect
 	if err := direct.Validate(); err == nil {
 		t.Error("direct mode with no endpoint was accepted")
+	}
+	direct.Endpoint = "front.example:8443"
+	if err := direct.Validate(); err == nil || !strings.Contains(err.Error(), "allocation") {
+		t.Errorf("an Allocation UID in direct mode: %v, want a refusal", err)
 	}
 	if !ValidDialHomeMode(DialHomeHostDialed) || ValidDialHomeMode("host") {
 		t.Error("ValidDialHomeMode")

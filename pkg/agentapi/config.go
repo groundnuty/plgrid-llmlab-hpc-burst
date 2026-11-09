@@ -78,6 +78,11 @@ type AgentConfig struct {
 	// SSH is set exactly in ssh mode.
 	SSH *SSHForward `json:"ssh,omitempty"`
 
+	// Allocation is the Allocation's UID, set exactly in host-dialed mode:
+	// the agent's greeting on its relay socket names it, and a relay checks
+	// it against its --allocation (HBEP-6, The rendezvous).
+	Allocation string `json:"allocation,omitempty"`
+
 	// CertSPKISHA256 is the pin of the agent endpoint's certificate (PinOf).
 	CertSPKISHA256 string `json:"certSPKISHA256"`
 
@@ -236,8 +241,14 @@ func (c AgentConfig) Validate() error {
 		if c.SSH != nil {
 			bad("ssh is set in host-dialed mode")
 		}
+		if !uidForm.MatchString(c.Allocation) {
+			bad("allocation %q: host-dialed mode needs the Allocation's UID, which the agent's greeting names", c.Allocation)
+		}
 	default:
 		bad("mode %q: want %q, %q or %q", c.Mode, DialHomeDirect, DialHomeSSH, DialHomeHostDialed)
+	}
+	if c.Mode != DialHomeHostDialed && c.Allocation != "" {
+		bad("allocation is set outside host-dialed mode")
 	}
 	if !pinForm.MatchString(c.CertSPKISHA256) {
 		bad("certSPKISHA256: want 64 lowercase hex characters")

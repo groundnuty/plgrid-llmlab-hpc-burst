@@ -5,65 +5,57 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
+	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
-// The relay's preamble: before the session, "relay <channel>" writes one line,
-// "\x00hpcburst-relay/1 <channel>\n", to its standard output, and the
-// control-plane end reads up to MaxPreambleScan bytes for it before it starts
-// the session. Anything before it (a login node's shell init that prints to
-// standard output for a non-interactive ssh, a banner) is dropped and counted,
-// so it cannot corrupt the session; a relay that sends none within the bound,
-// or names another channel, is refused by name. The NUL keeps it from
-// matching ordinary text.
+// The relay's preamble (HBEP-6, The wire): "relay <channel>" first writes one
+// line, "hpcburst-relay/1 <Allocation UID>", to its standard output, then the
+// session follows. The host side requires it within PreambleTimeout of the
+// start; anything else first is refused as unexpected output, and the relay
+// is started again.
 const (
-	preambleMagic = "\x00hpcburst-relay/1 "
-	// MaxPreambleScan bounds what the control-plane end reads for the
-	// preamble.
-	MaxPreambleScan = 64 << 10
+	// PreambleTimeout is how long the host side waits for the preamble.
+	PreambleTimeout = 30 * time.Second
+	// maxPreambleLine bounds the first line the host side reads.
+	maxPreambleLine = 256
 )
 
-// Preamble is the line a relay for ch writes first.
-func Preamble(ch agentapi.RelayChannel) string { return preambleMagic + string(ch) + "\n" }
+// ErrUnexpectedOutput is a relay whose first output was not its preamble
+// ("unexpected output before the preamble"): for example a login shell that
+// prints to standard output for a non-interactive ssh.
+var ErrUnexpectedOutput = errors.New("unexpected output before the preamble")
 
-// ErrNoPreamble is a relay whose output did not start with a preamble within
-// MaxPreambleScan bytes.
-var ErrNoPreamble = errors.New("no relay preamble")
+// ErrNoPreamble is a relay that sent nothing within PreambleTimeout.
+var ErrNoPreamble = errors.New("no preamble")
 
-// ErrWrongChannel is a relay whose preamble names another channel than the
-// one the control-plane end serves.
-var ErrWrongChannel = errors.New("the relay serves another channel")
-
-// readPreamble reads r up to its preamble and returns how many bytes came
-// before it. r is left just after the preamble's newline.
-func readPreamble(r *bufio.Reader, want agentapi.RelayChannel) (int, error) {
-	skipped := 0
-	window := make([]byte, 0, len(preambleMagic))
-	for skipped+len(window) < MaxPreambleScan {
+// readPreamble reads r's first line and checks it is uid's preamble. An r
+// that ends before a line is returned as io.EOF, so the caller judges the
+// relay by its process. r is left just after the preamble's newline.
+func readPreamble(r *bufio.Reader, uid string) error {
+	line := make([]byte, 0, len(agentapi.RelayPreamble(uid))+1)
+	for {
 		b, err := r.ReadByte()
 		if err != nil {
-			return skipped, fmt.Errorf("%w: the relay's output ended after %d bytes: %v", ErrNoPreamble, skipped+len(window), err)
+			if len(line) == 0 {
+				return io.EOF
+			}
+			return fmt.Errorf("%w: %d bytes and then the end", ErrUnexpectedOutput, len(line))
 		}
-		if len(window) == len(preambleMagic) {
-			window = append(window[:0], window[1:]...)
-			skipped++
+		if b == '\n' {
+			break
 		}
-		window = append(window, b)
-		if string(window) != preambleMagic {
-			continue
+		line = append(line, b)
+		if len(line) > maxPreambleLine {
+			return fmt.Errorf("%w: a first line longer than %d bytes", ErrUnexpectedOutput, maxPreambleLine)
 		}
-		line, err := r.ReadString('\n')
-		if err != nil || len(line) > 64 {
-			return skipped, fmt.Errorf("%w: a preamble with no channel", ErrNoPreamble)
-		}
-		if got := strings.TrimSuffix(line, "\n"); got != string(want) {
-			return skipped, fmt.Errorf("%w: it announced %q, this end serves %q", ErrWrongChannel, got, want)
-		}
-		return skipped, nil
 	}
-	return skipped, fmt.Errorf("%w within %d bytes: the login node may print to standard output for a non-interactive ssh", ErrNoPreamble, MaxPreambleScan)
+	if string(line) != agentapi.RelayPreamble(uid) {
+		// The line is not repeated: a login node's output can name the host.
+		return fmt.Errorf("%w: a first line of %d bytes", ErrUnexpectedOutput, len(line))
+	}
+	return nil
 }
 
 // afterPreamble is the relay's process as the session's transport once the

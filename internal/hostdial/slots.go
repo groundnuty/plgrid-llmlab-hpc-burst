@@ -84,3 +84,48 @@ func (s *Slots) InUse(login string) int {
 	defer s.mu.Unlock()
 	return s.used[login]
 }
+
+// Hosts is the process's register of which host-dialed Provider runs relays
+// on each login host (HBEP-6, Capacity: "Only one Provider per login host (as
+// ssh -G resolves its HostName) runs in host-dialed mode"). The first Provider
+// to claim a host keeps it until it releases it; a second is refused.
+type Hosts struct {
+	mu sync.Mutex
+	by map[string]string // login host → Provider
+}
+
+// NewHosts returns an empty register.
+func NewHosts() *Hosts { return &Hosts{by: map[string]string{}} }
+
+// SharedHosts is the process's register, which the controller binary gives
+// every Provider.
+var SharedHosts = NewHosts()
+
+// Claim claims login for provider, and gives up any other host provider held
+// (its credentials moved). It returns the holder and false when another
+// Provider holds login.
+func (h *Hosts) Claim(login, provider string) (string, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if p, ok := h.by[login]; ok && p != provider {
+		return p, false
+	}
+	for l, p := range h.by {
+		if p == provider && l != login {
+			delete(h.by, l)
+		}
+	}
+	h.by[login] = provider
+	return provider, true
+}
+
+// Release gives up every host provider holds.
+func (h *Hosts) Release(provider string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for l, p := range h.by {
+		if p == provider {
+			delete(h.by, l)
+		}
+	}
+}

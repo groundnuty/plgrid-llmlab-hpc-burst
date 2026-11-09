@@ -1,6 +1,7 @@
 package hostdial
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -8,11 +9,13 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/hashicorp/yamux"
+	"github.com/fatedier/yamux"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
@@ -22,14 +25,21 @@ import (
 // to 30 s for one, then is closed").
 const DefaultWait = 30 * time.Second
 
-// Session settings, the same on both ends. A keepalive every 10 s, as ssh's
-// ServerAliveInterval on the relay; a write that blocks, or a keepalive with
-// no answer, for 30 s ends the session, so a frozen path is noticed within
-// 40 s, and the controller starts the relay again.
+// Session settings, the same on both ends (HBEP-6, The wire: "a 10 s
+// keepalive and a 10 s write timeout"). A keepalive with no answer, or a write
+// that blocks, for 10 s ends the session, and the controller starts the relay
+// again.
 const (
 	keepAliveInterval = 10 * time.Second
-	writeTimeout      = 30 * time.Second
+	writeTimeout      = 10 * time.Second
 )
+
+// exchangeTimeout bounds each line of the rendezvous's exchange: the greeting,
+// the hello and the answer. Both ends are on the job's node.
+const exchangeTimeout = 10 * time.Second
+
+// maxLine bounds a line of the exchange.
+const maxLine = 256
 
 func sessionConfig(l *slog.Logger, side string) *yamux.Config {
 	c := yamux.DefaultConfig()
@@ -53,49 +63,69 @@ func (w logWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// maxSocketPath is the longest Unix socket path: 108 bytes with the NUL.
-const maxSocketPath = 107
+// DevShm is the socket directory's second choice, when the job's TMPDIR is
+// unset or too long for a socket path.
+const DevShm = "/dev/shm"
+
+// socketName is the agent's socket in its random directory.
+const socketName = "relay.sock"
 
 // JobOptions configure the job side.
 type JobOptions struct {
-	// Dir is the job's relay directory, as MakeRelayDir makes it. It is
-	// created with mode 700 when missing; one that exists must be a directory
-	// of this user (it is then set to mode 700). Its parent must exist.
-	Dir string
+	// TmpDir is the job's TMPDIR, under which the socket's random directory
+	// goes; DevShm when it is empty or the socket's path there would pass
+	// agentapi.MaxRelaySocketPath.
+	TmpDir string
+	// AllocDir is the Allocation's directory, where the rendezvous file goes
+	// (agentapi.RelaySocketFile).
+	AllocDir string
+	// Allocation is the Allocation's UID, which the agent's greeting names.
+	Allocation string
 	// Wait is how long a connection waits for a session; zero means
 	// DefaultWait.
 	Wait time.Duration
-	// Logger reports sessions and refused connections; nil means none.
+	// Logger reports sessions and refused relays; nil means none.
 	Logger *slog.Logger
 }
 
-// Job is the job side of host-dialed mode: one loopback listener and one
-// Unix socket per channel, and each channel's current session.
+// Job is the job side of host-dialed mode (HBEP-6, The job side): one
+// loopback listener per channel, one Unix socket for the relays in a
+// directory with a random name, mode 700, whose path is published in the
+// Allocation's directory, and each channel's current session with its fence.
 type Job struct {
-	o     JobOptions
-	chans map[agentapi.RelayChannel]*channel
-	wg    sync.WaitGroup
+	o      JobOptions
+	dir    string // the socket's directory
+	sock   string // the socket's path
+	relays net.Listener
+	chans  map[agentapi.RelayChannel]*channel
+	wg     sync.WaitGroup
 
 	closeOnce sync.Once
 	closed    chan struct{}
 }
 
-// channel is one channel's listeners and session.
+// channel is one channel's listener, session and fence.
 type channel struct {
-	name  agentapi.RelayChannel
-	tcp   net.Listener
-	relay net.Listener
-	j     *Job
+	name agentapi.RelayChannel
+	tcp  net.Listener
+	j    *Job
 
 	mu      sync.Mutex
 	cur     *yamux.Session
 	changed chan struct{} // closed when cur changes
 	starts  uint64
-	conns   map[net.Conn]struct{}
+	// fenced is set once a relay was accepted; epoch and seq are its (E, N),
+	// the highest seen on this channel.
+	fenced     bool
+	epoch, seq int64
+	refused    uint64
+	conns      map[net.Conn]struct{}
 }
 
-// StartJob makes the relay directory and binds both channels' listeners. The
-// caller closes the Job, which also removes the directory's sockets.
+// StartJob makes the socket's directory and the socket, binds both
+// channels' loopback listeners, and publishes the socket's path in the
+// Allocation's directory. The caller closes the Job, which also removes the
+// directory and the rendezvous file.
 func StartJob(o JobOptions) (*Job, error) {
 	if o.Wait <= 0 {
 		o.Wait = DefaultWait
@@ -103,53 +133,94 @@ func StartJob(o JobOptions) (*Job, error) {
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.DiscardHandler)
 	}
-	if s := agentapi.RelaySocket(o.Dir, agentapi.RelayControl); len(s) > maxSocketPath {
-		return nil, fmt.Errorf("the relay socket %s is %d bytes, above the %d a Unix socket path allows", s, len(s), maxSocketPath)
+	if o.AllocDir == "" || o.Allocation == "" {
+		return nil, errors.New("hostdial: the job side needs the Allocation's directory and UID")
 	}
-	if err := privateDir(o.Dir, true); err != nil {
+	dir, err := socketDir(o.TmpDir)
+	if err != nil {
 		return nil, err
 	}
-	j := &Job{o: o, chans: map[agentapi.RelayChannel]*channel{}, closed: make(chan struct{})}
-	for _, name := range agentapi.RelayChannels {
-		c, err := j.bind(name)
-		if err != nil {
-			_ = j.Close()
-			return nil, err
-		}
-		j.chans[name] = c
+	j := &Job{o: o, dir: dir, sock: filepath.Join(dir, socketName), chans: map[agentapi.RelayChannel]*channel{}, closed: make(chan struct{})}
+	fail := func(err error) (*Job, error) {
+		_ = j.Close()
+		return nil, err
 	}
+	if j.relays, err = net.Listen("unix", j.sock); err != nil {
+		return fail(fmt.Errorf("the relay socket: %w", err))
+	}
+	if err := os.Chmod(j.sock, 0o600); err != nil {
+		return fail(fmt.Errorf("the relay socket: %w", err))
+	}
+	for _, name := range agentapi.RelayChannels {
+		tcp, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			return fail(fmt.Errorf("the %s channel's loopback listener: %w", name, err))
+		}
+		j.chans[name] = &channel{name: name, tcp: tcp, j: j, changed: make(chan struct{}), conns: map[net.Conn]struct{}{}}
+	}
+	if err := publish(o.AllocDir, j.sock); err != nil {
+		return fail(err)
+	}
+	j.wg.Add(1)
+	go j.acceptRelays()
 	for _, c := range j.chans {
-		j.wg.Add(2)
-		go c.acceptRelays()
+		j.wg.Add(1)
 		go c.acceptConns()
 	}
 	return j, nil
 }
 
-// bind binds a channel's loopback listener, on a port the kernel chooses,
-// and its Unix socket, mode 600, in the relay directory. A socket left there
-// by an earlier agent of the same job is removed first.
-func (j *Job) bind(name agentapi.RelayChannel) (*channel, error) {
-	tcp, err := net.Listen("tcp4", "127.0.0.1:0")
+// socketDir makes the socket's directory, with a random name and mode 700,
+// under tmp, or under DevShm when tmp is empty or the socket's path there
+// would be too long.
+func socketDir(tmp string) (string, error) {
+	var errs []error
+	for _, root := range []string{tmp, DevShm} {
+		if root == "" || !filepath.IsAbs(root) {
+			continue
+		}
+		// os.MkdirTemp appends up to 10 digits.
+		if len(filepath.Join(root, "hb-relay-0123456789", socketName)) > agentapi.MaxRelaySocketPath {
+			errs = append(errs, fmt.Errorf("the socket under %s would pass %d bytes", root, agentapi.MaxRelaySocketPath))
+			continue
+		}
+		dir, err := os.MkdirTemp(root, "hb-relay-")
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := privateDir(dir, true); err != nil {
+			_ = os.Remove(dir)
+			errs = append(errs, err)
+			continue
+		}
+		return dir, nil
+	}
+	return "", fmt.Errorf("hostdial: no directory for the relay socket: %w", errors.Join(errs...))
+}
+
+// publish writes the socket's path to the rendezvous file, mode 600, by a
+// temporary file in the same directory and a rename.
+func publish(allocDir, sock string) error {
+	f, err := os.CreateTemp(allocDir, ".relay-socket-*")
 	if err != nil {
-		return nil, fmt.Errorf("the %s channel's loopback listener: %w", name, err)
+		return fmt.Errorf("the rendezvous file: %w", err)
 	}
-	sock := agentapi.RelaySocket(j.o.Dir, name)
-	if err := os.Remove(sock); err != nil && !errors.Is(err, os.ErrNotExist) {
-		_ = tcp.Close()
-		return nil, fmt.Errorf("the %s channel's old socket: %w", name, err)
+	_, werr := f.WriteString(sock + "\n")
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
 	}
-	relay, err := net.Listen("unix", sock)
-	if err != nil {
-		_ = tcp.Close()
-		return nil, fmt.Errorf("the %s channel's relay socket: %w", name, err)
+	if werr == nil {
+		werr = os.Chmod(f.Name(), 0o600)
 	}
-	if err := os.Chmod(sock, 0o600); err != nil {
-		_ = tcp.Close()
-		_ = relay.Close()
-		return nil, fmt.Errorf("the %s channel's relay socket: %w", name, err)
+	if werr == nil {
+		werr = os.Rename(f.Name(), agentapi.RelaySocketFile(allocDir))
 	}
-	return &channel{name: name, tcp: tcp, relay: relay, j: j, changed: make(chan struct{}), conns: map[net.Conn]struct{}{}}, nil
+	if werr != nil {
+		_ = os.Remove(f.Name())
+		return fmt.Errorf("the rendezvous file: %w", werr)
+	}
+	return nil
 }
 
 // Addr is a channel's loopback listener, 127.0.0.1:<port>: the control
@@ -160,12 +231,23 @@ func (j *Job) Addr(ch agentapi.RelayChannel) string { return j.chans[ch].tcp.Add
 // Port is a channel's loopback port.
 func (j *Job) Port(ch agentapi.RelayChannel) int { return j.chans[ch].tcp.Addr().(*net.TCPAddr).Port }
 
-// Sessions is how many sessions a channel has had: each relay that connected.
+// Socket is the relay socket's path, as the rendezvous file names it.
+func (j *Job) Socket() string { return j.sock }
+
+// Sessions is how many sessions a channel has had: each relay it accepted.
 func (j *Job) Sessions(ch agentapi.RelayChannel) uint64 {
 	c := j.chans[ch]
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.starts
+}
+
+// Refused is how many relays a channel refused as superseded.
+func (j *Job) Refused(ch agentapi.RelayChannel) uint64 {
+	c := j.chans[ch]
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.refused
 }
 
 // Connected reports whether a channel has a live session now.
@@ -177,13 +259,16 @@ func (j *Job) Connected(ch agentapi.RelayChannel) bool {
 }
 
 // Close stops both channels: the listeners, every session and every
-// connection, and removes the sockets. It waits for the goroutines.
+// connection, and removes the rendezvous file while it still names this
+// socket, and the socket's directory. It waits for the goroutines.
 func (j *Job) Close() error {
 	j.closeOnce.Do(func() {
 		close(j.closed)
+		if j.relays != nil {
+			_ = j.relays.Close() // removes the socket file
+		}
 		for _, c := range j.chans {
 			_ = c.tcp.Close()
-			_ = c.relay.Close() // removes the socket file
 			c.mu.Lock()
 			if c.cur != nil {
 				_ = c.cur.Close()
@@ -193,61 +278,103 @@ func (j *Job) Close() error {
 			}
 			c.mu.Unlock()
 		}
+		if b, err := os.ReadFile(agentapi.RelaySocketFile(j.o.AllocDir)); err == nil && strings.TrimSpace(string(b)) == j.sock {
+			_ = os.Remove(agentapi.RelaySocketFile(j.o.AllocDir))
+		}
+		_ = os.RemoveAll(j.dir)
 	})
 	j.wg.Wait()
 	return nil
 }
 
-// acceptRelays takes each relay that connects to the channel's socket as the
-// channel's session, replacing the older one, which it closes (HBEP-6: "A
-// newer relay for a channel replaces the older, which the agent closes").
-func (c *channel) acceptRelays() {
-	defer c.j.wg.Done()
+// acceptRelays takes each relay that connects to the socket through the
+// exchange (handshake), each on its own goroutine.
+func (j *Job) acceptRelays() {
+	defer j.wg.Done()
 	for {
-		conn, err := c.relay.Accept()
+		conn, err := j.relays.Accept()
 		if err != nil {
 			return
 		}
-		if err := peerIsUs(conn); err != nil {
-			c.j.o.Logger.Warn("a relay connection was refused", "channel", c.name, "err", err)
-			_ = conn.Close()
-			continue
-		}
-		sess, err := yamux.Client(conn, sessionConfig(c.j.o.Logger, "job"))
-		if err != nil {
-			_ = conn.Close()
-			continue
-		}
-		c.mu.Lock()
-		select {
-		case <-c.j.closed:
-			c.mu.Unlock()
-			_ = sess.Close()
-			return
-		default:
-		}
-		old := c.cur
-		c.cur = sess
-		c.starts++
-		close(c.changed)
-		c.changed = make(chan struct{})
-		n := c.starts
-		c.mu.Unlock()
-		if old != nil {
-			_ = old.Close()
-		}
-		c.j.o.Logger.Info("relay session up", "channel", c.name, "session", n, "replaced", old != nil)
-		c.j.wg.Add(1)
-		go c.watch(sess, n)
+		j.wg.Add(1)
+		go func() {
+			defer j.wg.Done()
+			j.handshake(conn)
+		}()
 	}
 }
 
-// watch forgets a session once it closes, so a connection waits for the next.
-func (c *channel) watch(sess *yamux.Session, n uint64) {
-	defer c.j.wg.Done()
+// handshake is the agent's side of the exchange: it refuses another user's
+// peer (SO_PEERCRED), greets with the Allocation's UID, reads the relay's
+// hello, and answers RelaySuperseded to a relay whose (E, N) is not above the
+// channel's highest, or RelayAccepted to one that is, whose session then
+// replaces the channel's older one, which is closed (HBEP-6, Fencing).
+func (j *Job) handshake(conn net.Conn) {
+	log := j.o.Logger
+	if err := peerIsUs(conn); err != nil {
+		log.Warn("a relay connection was refused", "err", err)
+		_ = conn.Close()
+		return
+	}
+	_ = conn.SetDeadline(time.Now().Add(exchangeTimeout))
+	if _, err := io.WriteString(conn, agentapi.RelayGreeting(j.o.Allocation)+"\n"); err != nil {
+		_ = conn.Close()
+		return
+	}
+	line, err := readLine(conn)
+	if err != nil {
+		_ = conn.Close()
+		return
+	}
+	ch, epoch, seq, err := agentapi.ParseRelayHello(line)
+	if err != nil {
+		log.Warn("a relay's hello was refused", "err", err)
+		_ = conn.Close()
+		return
+	}
+	c := j.chans[ch]
+	c.mu.Lock()
+	select {
+	case <-j.closed:
+		c.mu.Unlock()
+		_ = conn.Close()
+		return
+	default:
+	}
+	if c.fenced && (epoch < c.epoch || epoch == c.epoch && seq <= c.seq) {
+		c.refused++
+		c.mu.Unlock()
+		log.Info("a relay was refused as superseded", "channel", ch, "epoch", epoch, "seq", seq, "kept", fmt.Sprintf("%d/%d", c.epoch, c.seq))
+		_, _ = io.WriteString(conn, agentapi.RelaySuperseded+"\n")
+		_ = conn.Close()
+		return
+	}
+	if _, err := io.WriteString(conn, agentapi.RelayAccepted+"\n"); err != nil {
+		c.mu.Unlock()
+		_ = conn.Close()
+		return
+	}
+	_ = conn.SetDeadline(time.Time{})
+	sess, err := yamux.Client(conn, sessionConfig(log, "job"))
+	if err != nil {
+		c.mu.Unlock()
+		_ = conn.Close()
+		return
+	}
+	old := c.cur
+	c.cur, c.fenced, c.epoch, c.seq = sess, true, epoch, seq
+	c.starts++
+	close(c.changed)
+	c.changed = make(chan struct{})
+	n := c.starts
+	c.mu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
+	log.Info("relay session up", "channel", ch, "session", n, "epoch", epoch, "seq", seq, "replaced", old != nil)
 	select {
 	case <-sess.CloseChan():
-	case <-c.j.closed:
+	case <-j.closed:
 		return
 	}
 	c.mu.Lock()
@@ -257,7 +384,24 @@ func (c *channel) watch(sess *yamux.Session, n uint64) {
 		c.changed = make(chan struct{})
 	}
 	c.mu.Unlock()
-	c.j.o.Logger.Info("relay session ended", "channel", c.name, "session", n)
+	log.Info("relay session ended", "channel", ch, "session", n)
+}
+
+// readLine reads one line, without its newline, a byte at a time, so nothing
+// after it is taken from conn.
+func readLine(conn net.Conn) (string, error) {
+	var b bytes.Buffer
+	one := make([]byte, 1)
+	for b.Len() < maxLine {
+		if _, err := io.ReadFull(conn, one); err != nil {
+			return "", err
+		}
+		if one[0] == '\n' {
+			return b.String(), nil
+		}
+		b.WriteByte(one[0])
+	}
+	return "", fmt.Errorf("a line longer than %d bytes", maxLine)
 }
 
 // acceptConns serves each connection the channel's loopback listener takes.
@@ -387,29 +531,38 @@ func privateDir(dir string, create bool) error {
 	return nil
 }
 
-// peerIsUs refuses a Unix connection from another user. The directory's mode
-// already keeps them out; this holds if it is ever loosened.
-func peerIsUs(conn net.Conn) error {
+// peerUID reads a Unix connection's peer's user; a test replaces it to show
+// that another user's peer is refused.
+var peerUID = func(conn net.Conn) (int, error) {
 	uc, ok := conn.(*net.UnixConn)
 	if !ok {
-		return nil
+		return os.Geteuid(), nil
 	}
 	raw, err := uc.SyscallConn()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	var cred *syscall.Ucred
 	var cerr error
 	if err := raw.Control(func(fd uintptr) {
 		cred, cerr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
 	}); err != nil {
-		return err
+		return 0, err
 	}
 	if cerr != nil {
-		return cerr
+		return 0, cerr
 	}
-	if int(cred.Uid) != os.Geteuid() {
-		return fmt.Errorf("the peer is user %d, not this user", cred.Uid)
+	return int(cred.Uid), nil
+}
+
+// peerIsUs refuses a Unix connection from another user (SO_PEERCRED).
+func peerIsUs(conn net.Conn) error {
+	uid, err := peerUID(conn)
+	if err != nil {
+		return err
+	}
+	if uid != os.Geteuid() {
+		return fmt.Errorf("the peer is user %d, not this user", uid)
 	}
 	return nil
 }

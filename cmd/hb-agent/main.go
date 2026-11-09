@@ -4,7 +4,7 @@
 // (HBEP-4, Submission):
 //
 //	hb-agent <allocation directory>
-//	hb-agent relay <channel>
+//	hb-agent relay <channel> --dir <dir> --allocation <UID> --epoch <E> --seq <N>
 //	hb-agent -version
 //
 // It reads agent.json and the credential from that directory and the job's ID
@@ -23,12 +23,10 @@
 // In host-dialed mode (HBEP-6, Dial-home modes, host-dialed mode) the same
 // binary is also each relay's program, in an srun step that the batch
 // Provider's controller starts from the login node: "hb-agent relay
-// <channel>" connects to the agent's socket for the channel (control or
-// serving) in the job's relay directory, which it finds through the pointer
-// the agent publishes in the staging directory under SLURM_JOB_ID
-// (hostdial.FindRelayDir), and hands the step's standard input and output
-// over. It writes nothing else to standard output, which carries the
-// channel's multiplexed session.
+// <channel> ..." reads the agent's socket from the Allocation directory's
+// relay-socket, which the agent wrote, and hands the step's standard input
+// and output over. It writes nothing else to standard output, which carries
+// the preamble and then the channel's multiplexed session.
 //
 // Exit codes: 0 when it stopped on instruction or on a signal (a relay: when
 // its session ended), 1 when it could not start, 2 on a usage error.
@@ -58,44 +56,29 @@ var version = "dev"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == agentapi.RelaySubcommand {
-		os.Exit(relay(os.Args[0], os.Args[2:], os.Getenv, os.Stdin, os.Stdout, os.Stderr))
+		os.Exit(relay(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
 	}
 	os.Exit(run(os.Args[1:], os.Getenv, os.Stderr))
 }
 
-// relay is "hb-agent relay <channel>" (HBEP-6, Dial-home modes, host-dialed
-// mode): a pipe between the step's standard streams and the agent's socket
-// for the channel. exe is the binary's path as srun ran it, the staged agent
-// <stagingDir>/agent/<digest>/hb-agent, from which it finds the job's relay
-// pointer. Everything it says goes to stderr, its first line one of
-// hostdial.RelayMessage's, which names no path: stdout is the session.
-func relay(exe string, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if len(args) != 1 {
-		fmt.Fprintln(stderr, "usage: hb-agent relay control|serving")
+// relay is "hb-agent relay <channel> --dir <dir> --allocation <UID> --epoch
+// <E> --seq <N>" (HBEP-6, Dial-home modes, host-dialed mode): it reads the
+// agent's socket from <dir>/relay-socket, checks the agent's greeting, says
+// its channel and fence, and on acceptance writes the preamble and pipes the
+// step's standard streams to the socket. Everything it says goes to stderr,
+// its first line hostdial.RelayMessage's, which names no path; its exit code
+// says superseded or agent not ready (hostdial.ExitCode). stdout is the
+// session.
+func relay(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	a, err := agentapi.ParseRelayArgs(args)
+	if err != nil {
+		fmt.Fprintln(stderr, "usage: hb-agent relay control|serving --dir <Allocation directory> --allocation <UID> --epoch <E> --seq <N>:", err)
 		return 2
 	}
-	ch, err := agentapi.ParseRelayChannel(args[0])
-	if err != nil {
-		fmt.Fprintln(stderr, "hb-agent relay:", err)
-		return 2
-	}
-	jobID := getenv("SLURM_JOB_ID")
-	if !filepath.IsAbs(exe) {
-		if e, err := os.Executable(); err == nil {
-			exe = e
-		}
-	}
-	staging, err := agentapi.StagingDirOfAgent(exe)
-	if err == nil {
-		var dir string
-		if dir, err = hostdial.FindRelayDir(staging, agentapi.RelayRoot(getenv), jobID); err == nil {
-			err = hostdial.Pipe(dir, ch, stdin, stdout)
-		}
-	}
-	if err != nil {
-		fmt.Fprintln(stderr, hostdial.RelayMessage(jobID, err))
-		fmt.Fprintln(stderr, "hb-agent relay "+string(ch)+":", err)
-		return 1
+	if err := hostdial.Relay(a, stdin, stdout); err != nil {
+		fmt.Fprintln(stderr, hostdial.RelayMessage(a, err))
+		fmt.Fprintln(stderr, "hb-agent relay "+string(a.Channel)+":", err)
+		return hostdial.ExitCode(err)
 	}
 	return 0
 }

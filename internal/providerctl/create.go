@@ -438,8 +438,12 @@ func (e *external) files(a *v1alpha1.Allocation, tag string, paths slurm.Paths) 
 		CertSPKISHA256: f.CertPin, FrpcDigest: frpcSum, StagingDir: paths.Staging, DialHomeDir: paths.DialHomeDir(),
 		HubEndpoint: e.s.o.HubEndpoint,
 	}
-	if f.Mode == agentapi.DialHomeSSH {
+	switch f.Mode {
+	case agentapi.DialHomeSSH:
 		cfg.SSH = &agentapi.SSHForward{User: f.SSHUser, AgentPort: f.AgentPort, DialHomePort: f.DialHomePort}
+	case agentapi.DialHomeHostDialed:
+		// The agent greets its relays with it (HBEP-6, The rendezvous).
+		cfg.Allocation = string(a.UID)
 	}
 	js, err := cfg.Encode()
 	if err != nil {
