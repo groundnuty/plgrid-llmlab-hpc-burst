@@ -32,46 +32,47 @@
 # timed out; 2 usage error, an unreadable range or a table of this script
 # that loads no rows; 3 refused or NOT RUN (a
 # setting is missing, a file is not mode 600, the one-job slot is in use; or a
-# job of a row with a start-wait bound did not start within it and was cancelled
-# by its tag, or a row in a one-job slot with no start wait (the stack rows that hold QOS now's GPU for hours, and
-# real-engine) was still pending after its wait in the queue (below) and was cancelled by its tag, or a tunnel row's job was
-# still pending a minute before its deployment's first end and was cancelled by its tag: not a failure, try again later; or the scheduler rejected the
-# row's shape in the dry-run estimate, with or without --yes); 4 a cluster test
+# job that never started within its bound was cancelled by its tag, on any row: not a failure, try again later; or
+# the scheduler rejected the row's shape in the dry-run estimate, with or without --yes); 4 a cluster test
 # was not run because --yes was not given.
 #
-# NOT RUN (one protocol for every row that can be kept waiting by a long queue). A row whose cluster-table line
-# has a start wait (its last, optional column, in minutes) tells its test the bound in HPCBURST_CONF_START_WAIT.
+# NOT RUN (one protocol for every cluster row; the science agent's ruling of 8 Nov 2026, #272): a job that never
+# started within its bound ends the row as NOT RUN, exit 3, whichever bound ran out and whether the row has a
+# one-job slot or not. A FAIL means the property the row tests was absent, and a queue wait tests nothing. The
+# bounds, and the sentence that names each:
+#   - a start wait: a row whose cluster-table line has one (its last, optional column, in minutes) tells its test the
+#     bound in HPCBURST_CONF_START_WAIT; a job not started that long after its acceptance
+#     ("a job did not start within N min of its acceptance");
+#   - the wait in the queue (HPCBURST_ALPHA_PENDING_MAX_SECONDS, HPCBURST_CONF_PENDING_MAX_SECONDS and, for
+#     real-engine, the script's own poll): 2 h on a row with no slot, 30 min on a row in a one-job slot (issue #222), or
+#     LIVE_PENDING_MAX_SECONDS when set ("a job was still pending after T in the queue"). A row with a start wait
+#     has the start wait as its first clock and takes no other;
+#   - a tunnel row's deployment end: its deployment is created ending at the earliest drain start its one job can
+#     have (the time limit less the drain window after its creation), so that the controller plans the job no
+#     replacement (the science agent's ruling on PR 255). Its first clock is therefore also at most a minute before
+#     that end, whatever LIVE_PENDING_MAX_SECONDS allows ("a job was still pending a minute before its deployment's
+#     first end"; docs/alpha-runbook.md gives each lease's cap);
+#   - a two-job row's second job, once its first has run: by the first's drain start on the handover, and within the wait in
+#     the queue of the first's lease end on no-overlap ("the first job ran and the second never started ..."). A failure of
+#     the part of the run that did happen still wins: that row fails.
+# NOT RUN means the job affirmatively never started (review of PR 284): a read at the bound must show it waiting. A job
+# that started, a job a read does not list, and a read that fails are failures that name what they found, exit 1.
 # A test that finds a job still not started at the bound cancels what it submitted by the tags it wrote down,
-# writes the line it wants to report to not-run.txt in HPCBURST_CONF_OUT (its private record directory), and
-# SKIPS at the top level (t.Skip). Nothing else: it fails nothing and exits 0. The script reads that, and only
-# that, as NOT RUN (not_run_verdict): exactly one top-level skip, no failure, no subtest skipped, exit status 0,
-# the marker a regular file in this run's own record directory, and a row with a start wait. It then runs the
-# same cleanup as for any run, prints "<row>: NOT RUN (...)" apart from PASS and FAIL, and exits 3 (below a
-# failure, above a pass), like a busy one-job slot: the run could not be done now, try again later. Every other
-# skip stays a failure, and so does a NOT RUN whose cleanup leaves a job behind. A new row opts in by giving
-# its start wait and having its test follow the protocol; no row-specific code is needed.
+# writes the line it wants to report to not-run.txt in its record directory, and SKIPS at the top level (t.Skip).
+# Nothing else: it fails nothing and exits 0. The script reads that, and only that, as NOT RUN (not_run_verdict):
+# a cluster row, exactly one top-level skip, no failure, no subtest skipped, exit status 0, and the marker a regular
+# file in this run's own record directory. It then runs the same cleanup as for any run, prints "<row>: NOT RUN (...)"
+# apart from PASS and FAIL, and exits 3 (below a failure, above a pass), like a busy one-job slot: the run could not
+# be done now, try again later. Every other skip stays a failure, and so does a NOT RUN whose cleanup leaves a job
+# behind (exit 1). A new row opts in by having its test follow the protocol; no row-specific code is needed, and
+# hack/livechecks runs every row of the cluster table through it.
 #
-# The other NOT RUN: a row that holds QOS now's GPU for hours (the owner-go table) has the same protocol with a
-# different bound. Its first clock, the wait in the queue (HPCBURST_ALPHA_PENDING_MAX_SECONDS), defaults to 30 min,
-# not the 2 h of the other rows, because a job of ours that pends in the owner's one-job slot is in the owner's way
-# (issue #222); an explicit LIVE_PENDING_MAX_SECONDS overrides it. A job still pending at the bound is cancelled by its
-# tag, the test writes not-run.txt and skips, and the script reports "<row>: NOT RUN" and exits 3. On a row that holds no
-# such slot the same overrun is a failure.
-#
-# A third NOT RUN: a tunnel row's deployment is created ending at the earliest drain start its one job can have (the time
-# limit less the drain window after its creation), so that the controller plans the job no replacement (the science
-# agent's ruling on PR 255). Its first clock is therefore also at most a minute before that end, whatever
-# LIVE_PENDING_MAX_SECONDS allows: a job still pending then is cancelled by its tag, the test writes not-run.txt saying
-# so and skips, and the script reports "<row>: NOT RUN" and exits 3, on either cluster (docs/alpha-runbook.md gives
-# each lease's cap).
-#
-# The rule behind both: a row in a one-job slot (the cluster table's slot column), on either cluster, must have a start
-# wait of 10 min or less or a wait in the queue of 30 min or less (pending_max), and it passes the slot guard
-# (check_slot) before it runs. real-engine, which runs no test of ours to skip, has the 30 min as its wait in the queue
-# too, and a job still pending at the bound is NOT RUN with the same consequence (issue #222): the cleanup cancels the
-# job by its tag, nothing is posted, and the exit is 3, since a job that never started is not a failure. On a row with no
-# slot the same overrun is a failure. hack/livechecks reads the table and fails, naming the row, for a slot row that has
-# neither bound, so a new row cannot miss it.
+# The rule for the one-job slots (the science agent, 2 Nov 2026, #222): a row in a one-job slot (the cluster table's
+# slot column), on either cluster, must have a start wait of 10 min or less or a wait in the queue of 30 min or less
+# (pending_max), and it passes the slot guard (check_slot) before it runs. real-engine, which runs no test of ours to
+# skip, has the 30 min as its wait in the queue too: the cleanup cancels the job by its tag, nothing is posted, and
+# the exit is 3. hack/livechecks reads the table and fails, naming the row, for a slot row that has neither bound, so a
+# new row cannot miss it.
 #
 # The settings file is named by HPCBURST_LIVE_SETTINGS: KEY=VALUE lines, mode
 # 600, owned by you. Keys (none is ever printed):
@@ -178,6 +179,9 @@ TABLE
 # the test cancels its jobs by their tags and the row ends as NOT RUN (exit 3), not as a failure
 # (HPCBURST_CONF_START_WAIT, conformance_test.go). A row with a one-job slot and a long queue
 # should have one, so that a busy queue does not hold the slot for hours.
+# conformance-helios (no slot) has one of 30 min, the 30 minutes its steps always waited and then failed on: a queue
+# wait tests nothing, so past it the job is cancelled by its tag and the row is NOT RUN, not a FAIL (the science
+# agent's ruling of 8 Nov 2026, #272). Its timeout is below, with every other row's worst case.
 # The conformance time limit is the harness's own (allocTimeLimit "5m", conformance_test.go;
 # TestConformanceRowsPassTheRequestCheck compares them); the real-engine one is the documented
 # run's (spikes/s94/README.md).
@@ -194,34 +198,36 @@ TABLE
 # scheduler's acceptance of 1 CPU and 1Gi is not recorded (the conformance run used 4 CPUs and 32Gi): the estimate below,
 # sbatch --test-only, is the first check, and a rejected shape ends the row as not run (exit 3). The job runs for seconds and
 # has its own time limit of 2 min (reachTimeLimit in reach_run_test.go, not the harness's 5 min: a stalled job holds the one-job
-# slot that long at most); the timeout of 20 min is the start wait, the job's end (2 min and a minute) and a margin
-# (reachEndWait and reachCleanupWait there; qos_test.go compares them). The Helios row asks for -C memfs, as the Helios profile does for
+# slot that long at most). The Helios row asks for -C memfs, as the Helios profile does for
 # every job.
 # gpu-accounting-helios (issue #194) has the same two guards as conformance-helios-gh200: it starts only when squeue --me shows
-# no job in QOS now, and its one job must start within 10 min of its acceptance (else cancelled by its tag, NOT RUN, exit 3).
-# Its timeout of 30 min is that wait, the job's few minutes, the deletion that writes the kept record, and a margin. The
+# no job in QOS now, and its one job must start within 10 min of its acceptance (else cancelled by its tag, NOT RUN, exit 3). The
 # row's other guard, the wait of LIVE_PENDING_MAX_SECONDS, applies to gpu-accounting-athena only, which has no slot.
 # conformance-helios-gh200: it starts only when squeue --me shows no job in QOS now, pending or running, whoever's (exit 3,
 # "skipped: the now slot is in use"), and each of its two jobs (step 1, step 3) must start within 10
-# min of its acceptance. Its worst case is then about 25 min: two start waits of 10 min and about
-# 5 min of running. Its timeout of 45 min is the test's own deadlines (10+5+3+10+8+3+3, the 22 min
-# after the start waits being for jobs that already run, plus 2 min for the end-of-run check for a
-# late duplicate, 44 in all) and a margin of 1 min, so a slow cleanup fails in the test, with its
-# message, before this cap does.
+# min of its acceptance. A run that goes well takes about 25 min: two start waits of 10 min and about 5 min of running.
 # conformance-athena, in Athena's one-job slot (the partition plgrid-now), has the same guard, the same start wait and so the
 # same timeout (the science agent's rule of 2 Nov 2026: every slot row has a bound; see the header).
+#
+# Each row's timeout must let its bound fire first, and a slow cleanup fail in the test, with its message: it is at least the
+# row's own bounds in this table, every other wait its test has, each to its end, a quarter more for what a scan can miss
+# (internal/alpha, BudgetFactorPercent; a timeout that fires late costs only time), and a margin of 3 min for the calls each poll makes
+# and the run's own cleanup. The wait in the queue is on top of the column, one for each of a row's jobs (execute_cluster).
+# Tests derive that from this table's bounds and the real waits, and fail when a timeout can fire first: internal/providerctl/conformance
+# (budget_test.go) adds up each test's own source, and hack/livechecks (budget_test.go) has the stack rows' from
+# internal/alpha, Row.WorstCase, and real-engine's from its time limit and its poll's margin (no timeout wraps it).
 cluster_table() {
   cat <<'TABLE'
 # BEGIN CLUSTER SHAPES
-conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|80|-
-conformance-helios-gh200|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|45|-C memfs|10
-conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|45|-|10
-real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|75|-C memfs
+conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|97|-|30
+conformance-helios-gh200|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|57|-C memfs|10
+conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|57|-|10
+real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|79|-C memfs
 alpha-athena-handover|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|01:46:00|150|-
-alpha-helios-nooverlap|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|200|-C memfs
-tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|02:17:00|152|-C memfs
-tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|152|-
-gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|30|-|10
+alpha-helios-nooverlap|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|213|-C memfs
+tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|02:17:00|166|-C memfs
+tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|166|-
+gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|32|-|10
 gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|25|-
 reach-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:02:00|20|-C memfs|10
 reach-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|1|1Gi|00:02:00|20|-|10
@@ -320,7 +326,7 @@ apply_tunnel_lease() {
     case $name in
       tunnel-hour-*)
         TLIMIT[$name]=$(printf '%02d:%02d:00' $((v / 60)) $((v % 60)))
-        TMIN[$name]=$((v + 15))
+        TMIN[$name]=$((v + 29))
         [ -z "${OGSET[$name]:-}" ] || OGMIN[$name]=$(((v + 9) / 10 * 10)) ;;
     esac
   done
@@ -920,26 +926,44 @@ wait_child() {
 # ---------------------------------------------------------------- results
 
 # not_run_verdict <name> <rc> <failed> <skipped> <named result>: the NOT RUN protocol (see the header). True only for
-# a row with a start wait, or a row of the owner-go table (a bound on its wait in the queue), or a tunnel row whose
-# marker says its job was still pending a minute before its deployment's first end (the science agent's ruling on PR
-# 255; first_end_marker), whose test skipped once at the top level with no failure, exit status 0 and the marker, a
-# regular file (not a link) in this run's record directory. Anything else is not a NOT RUN.
+# a cluster row (every one submits jobs, so a queue can keep any of them waiting, whichever bound it has: a start wait,
+# a wait in the queue, or a tunnel row's deployment end; the science agent's ruling of 8 Nov 2026, #272) whose test
+# skipped once at the top level with no failure, exit status 0 and the marker, a regular file (not a link) in this
+# run's record directory. Anything else is not a NOT RUN: a local row has no queue to wait in, and a skip with no
+# marker, a marker beside a failure or a skipped subtest, and a marker that is a link are all failures. So is a marker
+# that names a deployment's first end on a row that has none (only a tunnel row has that bound), and one that names a
+# second job on a row of one.
 not_run_verdict() {
   local n=$1 rc=$2 failed=$3 skipped=$4 named=$5
   [ "$named" = SKIP ] && [ "$rc" = 0 ] && [ "$failed" = 0 ] && [ "$skipped" = 1 ] || return 1
   [ -n "$REC_DIR" ] && [ -f "$REC_DIR/not-run.txt" ] && [ ! -L "$REC_DIR/not-run.txt" ] || return 1
-  [ "${SWAIT[$n]:--}" != - ] || [ -n "${OGSET[$n]:-}" ] && return 0
-  case $n in tunnel-hour-*) first_end_marker ;; *) return 1 ;; esac
+  [ -n "${HOST[$n]:-}" ] || return 1
+  ! second_job_marker || [ "${MOSTJOBS[$n]:-1}" -ge 2 ] || return 1
+  ! first_end_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac
 }
 
 # first_end_marker: the run's NOT RUN marker says its job was still pending a minute before its deployment's first
-# end (internal/alpha, NotRunNote), the one NOT RUN of a tunnel row that has no other bound.
+# end (internal/alpha, NotRunNote): the bound a tunnel row has beside the wait in the queue, which judge names.
 first_end_marker() { grep -q "a minute before the deployment's first end" "$REC_DIR/not-run.txt" 2>/dev/null; }
+
+# second_job_marker: the run's NOT RUN marker says its first job ran and its second never started (internal/alpha,
+# NotRunNote): the bound a row of two jobs has for its second.
+second_job_marker() { grep -q "the first job ran and the second never started" "$REC_DIR/not-run.txt" 2>/dev/null; }
+
+# second_job_bound <name>: the bound of a two-job row's second job, as judge names it. A handover's successor must start by
+# its predecessor's drain start; a no-overlap successor pends until its predecessor's lease end frees the GPU, then has the
+# row's wait in the queue.
+second_job_bound() {
+  case $1 in
+    alpha-helios-nooverlap) printf "within %s of the first's lease end" "$(fmt_pending "$(pending_max "$1")")" ;;
+    *) printf "by the first's drain start" ;;
+  esac
+}
 
 # judge <name> <log> <rc>: the verdict from the test's verbose log and exit status. A skip is not a pass, at
 # any level. Only counts and fixed labels reach the screen: a subtest's name can hold anything.
 judge() {
-  local n=$1 log=$2 rc=$3 test pass fail skip named
+  local n=$1 log=$2 rc=$3 test pass fail skip named late
   test=${TEST[$n]#^}; test=${test%\$}
   pass=$(grep -c -E '^--- PASS: ' "$log" 2>/dev/null); fail=$(grep -c -E '^ *--- FAIL: ' "$log" 2>/dev/null)
   skip=$(grep -c -E '^ *--- SKIP: ' "$log" 2>/dev/null)
@@ -949,7 +973,11 @@ judge() {
   if [ "$rc" = 124 ]; then say "$n: FAIL (timed out)"; return 1; fi
   if not_run_verdict "$n" "$rc" "${fail:-0}" "${skip:-0}" "$named"; then
     NOT_RUN=1
-    if [ "${SWAIT[$n]:--}" != - ]; then
+    if second_job_marker; then
+      say "$n: NOT RUN (the first job ran and the second never started $(second_job_bound "$n"), and was cancelled by its tag; not a failure)"
+      late=$(sed -n -E 's/.*ReplacementLate for its deployment: (raised|not raised|unknown);.*/\1/p' "$REC_DIR/not-run.txt" 2>/dev/null | head -1)
+      [ -z "$late" ] || say "$n: ReplacementLate for its deployment: $late (information, not a check)"
+    elif [ "${SWAIT[$n]:--}" != - ]; then
       say "$n: NOT RUN (a job did not start within ${SWAIT[$n]} min of its acceptance and was cancelled by its tag; not a failure)"
     elif first_end_marker; then
       say "$n: NOT RUN (a job was still pending a minute before its deployment's first end and was cancelled by its tag; not a failure)"
@@ -1171,9 +1199,11 @@ execute_cluster() {
   case $n in
     real-engine) execute_real_engine "$n" ;;
     alpha-*|tunnel-hour-*)
-      # The test owns the two clocks of a queued run (HPCBURST_ALPHA_PENDING_MAX_SECONDS, then the row's run
-      # budget); this timeout is their sum, so a long wait in the queue does not eat the run's time.
-      run_binary "$n" "$OUT/$n.test" "$(( ${TMIN[$n]} + ($(pending_max "$n") + 59) / 60 ))" env_alpha
+      # The test owns the clocks of a queued run (HPCBURST_ALPHA_PENDING_MAX_SECONDS, then the row's run budget); this timeout
+      # is the budget plus one wait in the queue for each of the row's jobs, so that no wait eats the run's time and the
+      # bound fires first: a no-overlap successor waits on top of its predecessor (review of PR 284, B5; internal/alpha,
+      # Row.WorstCase and Row.RunDeadline; a handover's second wait is inside its lease, which leaves it room).
+      run_binary "$n" "$OUT/$n.test" "$(( ${TMIN[$n]} + ${MOSTJOBS[$n]:-1} * (($(pending_max "$n") + 59) / 60) ))" env_alpha
       judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
     gpu-accounting-*|reach-*)
       # A row with a start wait has the bound as its first clock; one without has the operator's wait in the queue.
@@ -1241,9 +1271,10 @@ run_cluster() {
   return $verdict
 }
 
-# job_state <host> <id>: the job's squeue state, "gone" once it has left the queue, "error" if unreadable.
+# job_state <host> <id>: the job's squeue state, "gone" once it has left the queue, "error" if unreadable: a read that
+# failed, and a reply that holds no state, are the same to the caller.
 job_state() {
-  local reply
+  local reply state
   reply=$({ preamble JOB "$2"; cat <<'EOS'
 out=$(squeue -j "$JOB" -h -o %T 2>&1); rc=$?
 if [ $rc -eq 0 ] && [ -z "$out" ]; then echo "state=gone"
@@ -1252,7 +1283,8 @@ elif printf '%s' "$out" | grep -q -i 'invalid job id'; then echo "state=gone"
 else echo "state=error"; fi
 EOS
   } | remote "$1") || { echo error; return; }
-  printf '%s\n' "$reply" | sed -n -E 's/^state=([A-Z_]{1,24}|gone|error)$/\1/p' | head -1
+  state=$(printf '%s\n' "$reply" | sed -n -E 's/^state=([A-Z_]{1,24}|gone|error)$/\1/p' | head -1)
+  printf '%s\n' "${state:-error}"
 }
 
 # now_epoch: the clock for the job's budgets. LIVE_FAKE_CLOCK is a test seam: a file holding the epoch seconds.
@@ -1319,7 +1351,11 @@ EOS
     [ -z "$INTERRUPTED" ] || { say "$n: FAIL (interrupted)"; return 1; }
     now=$(now_epoch)
     if [ "$state" != PENDING ] && [ "$state" != error ] && [ -z "$run_t" ]; then run_t=$now; fi
-    if [ -z "$run_t" ] && [ $((now - submit_t)) -gt "$pend_max" ]; then
+    # Only a read that says PENDING can end the wait in the queue: the job can have started since the last good read, so a
+    # failed read at the bound tells nothing about a start, and the three-error guard above decides it (review of PR 284, B4).
+    # The limit: a job that starts in the seconds between this read and the cleanup's cancel still reads NOT RUN. A read of
+    # sacct's text could close it, whose form for a job never started cannot be checked here without a live run.
+    if [ "$state" = PENDING ] && [ -z "$run_t" ] && [ $((now - submit_t)) -gt "$pend_max" ]; then
       # The job never started: not a failure (issue #222). The cleanup after this cancels it by its tag, and the run's exit is 3
       # unless that leaves a job behind, which is a failure.
       NOT_RUN=1

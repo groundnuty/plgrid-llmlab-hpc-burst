@@ -206,7 +206,7 @@ type liveRun struct {
 	oneEnd time.Time
 
 	// The two-job guard (TwoJobGuard), run from its own goroutine every
-	// guardEvery (default guardEveryLive). lookFn, setEndFn and fatalf are
+	// guardEvery (default GuardEvery). lookFn, setEndFn and fatalf are
 	// look, endAt and t.Fatalf unless a test sets them.
 	guard      *TwoJobGuard
 	guardEvery time.Duration
@@ -216,6 +216,15 @@ type liveRun struct {
 	lookFn     func(context.Context) (Look, error)
 	setEndFn   func(time.Time) (time.Time, error)
 	fatalf     func(format string, args ...any)
+	// claimed says the run has read a job as one that never started, which Close checks through the cancel; claimedPred is the first
+	// job of a run that read its second so, which has started and may.
+	claimed     bool
+	claimedPred string
+	// endEvery is how often Close looks for the run's jobs to have ended; 0 is five seconds. A test sets it.
+	endEvery time.Duration
+	// allocsFn is the watch's Allocation versions, and boundedFn stack.BoundedDeadline, unless a test sets them.
+	allocsFn   func() []stack.AllocObservation
+	boundedFn  func(time.Duration) (time.Time, bool)
 	guardQuit  chan struct{}
 	guardDone  chan struct{}
 	guardFail  chan struct{}
@@ -250,9 +259,6 @@ func newLiveRun(t *testing.T, cfg Config, w world) *liveRun {
 	return &liveRun{t: t, cfg: cfg, w: w, tm: cfg.Row.Clock(), prefix: TagPrefix(cfg.RunID), guardFail: make(chan struct{})}
 }
 
-// closeTimeout bounds Close: hpcburst down and the cancel of the run's jobs.
-const closeTimeout = 5 * time.Minute
-
 // Close stops the guard and the stack, then ends the run's jobs, found by the
 // run's tag prefix and its written tags in the queue, and checks none is left
 // alive, then stops the run's ssh master. It runs on every exit of Run, a
@@ -260,7 +266,7 @@ const closeTimeout = 5 * time.Minute
 // included, so it takes a time of its own rather than the run's, which may be
 // over.
 func (r *liveRun) Close(ctx context.Context) error {
-	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), CloseTimeout)
 	defer cancel()
 	r.stopGuard()
 	var errs []error
@@ -269,16 +275,60 @@ func (r *liveRun) Close(ctx context.Context) error {
 		errs = append(errs, r.h.DownErr())
 	}
 	if r.batch != nil {
-		if err := EndJobs(cctx, r.batch, RunOwned(r.prefix, r.tags), 5*time.Second); err != nil {
+		every := r.endEvery
+		if every == 0 {
+			every = 5 * time.Second
+		}
+		if err := EndJobs(cctx, r.batch, RunOwned(r.prefix, r.tags), every); err != nil {
 			errs = append(errs, fmt.Errorf("the run's jobs: %w", err))
-		} else if r.cfg.Row.Name != "" {
-			r.t.Logf("%s: the run's jobs are ended: none of its prefix or its tags is alive in the queue", r.cfg.Row.Name)
+		} else {
+			if r.cfg.Row.Name != "" {
+				r.t.Logf("%s: the run's jobs are ended: none of its prefix or its tags is alive in the queue", r.cfg.Row.Name)
+			}
+			if r.claimed {
+				errs = append(errs, r.noStartThroughTheCancel(cctx))
+			}
 		}
 	}
 	if r.tr != nil {
 		errs = append(errs, r.tr.Close())
 	}
 	return errors.Join(errs...)
+}
+
+// noStartThroughTheCancel is the last word on a job the run read as one that never started (the delta review of PR 284, L3). A job can
+// start after that read: the stack takes up to stack.DownTimeout to stop before the cancel comes. So once every job of the run has
+// ended, it reads their history from the cluster, and a job that started, past the predecessor a two-job run already knows of, is a
+// failure naming that, never NOT RUN. A read that fails tells nothing, and is a failure too.
+func (r *liveRun) noStartThroughTheCancel(ctx context.Context) error {
+	listed, err := r.batch.Queue(ctx)
+	if err != nil {
+		return fmt.Errorf("the run read a job as one that never started, and the queue could not be read after its cancel: %w", err)
+	}
+	owned := RunOwned(r.prefix, r.tags)
+	names := map[string]bool{}
+	for _, tag := range r.tags.Tags() {
+		names[tag] = true
+	}
+	for _, j := range listed {
+		if owned(j.Name) {
+			names[j.Name] = true
+		}
+	}
+	tags := make([]string, 0, len(names))
+	for tag := range names {
+		tags = append(tags, tag)
+	}
+	jobs, err := r.Ledger().Jobs(ctx, tags)
+	if err != nil {
+		return fmt.Errorf("the run read a job as one that never started, and its history could not be read after its cancel: %w", err)
+	}
+	for _, j := range jobs {
+		if j.ID != r.claimedPred && jobStarted(j) {
+			return errors.New("the run read a job as one that never started, and it had started by its cancel: this is no NOT RUN")
+		}
+	}
+	return nil
 }
 
 // Ledger reads the cluster's record over the run's own ssh transport.
@@ -540,7 +590,11 @@ func (r *liveRun) instances() []v1alpha1.Instance {
 // Allocation's job must start within it of the deployment's creation. Past it
 // the run ends with a NotStartedError, and Close stops the stack and cancels
 // the run's jobs by their prefix and tags, and checks that none is left; on a
-// one-job slot that was the owner's GPU waiting.
+// one-job slot that was the owner's GPU waiting. That is for a job a read at the
+// bound shows waiting, and for nothing else (review of PR 284, B2): a version of
+// an Allocation with no start time and a phase past waiting ends the wait at once,
+// and a read that cannot call the job waiting (firstJobWaiting) ends it at the
+// bound; both are failures that name what they found, never NOT RUN.
 func (r *liveRun) firstJobStarted(p Plan) error {
 	bound, pastEnd := FirstClock(p.Row, p.PendingMax, r.limit, r.dw)
 	if pastEnd {
@@ -549,12 +603,22 @@ func (r *liveRun) firstJobStarted(p Plan) error {
 	deadline := r.created.Add(bound)
 	for {
 		r.checkGuard()
-		for _, o := range r.watch.Allocations() {
-			if o.Allocation.Status.AtProvider.StartTime != nil {
+		for _, o := range r.allocations() {
+			st := o.Allocation.Status.AtProvider
+			if st.StartTime != nil {
 				return nil
+			}
+			switch st.Phase {
+			case v1alpha1.AllocationRunning, v1alpha1.AllocationEnded, v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:
+				return fmt.Errorf("a job of the run is %s (reason %q) with no start time to read, so it cannot be called one that never started", st.Phase, st.Reason)
 			}
 		}
 		if !time.Now().Before(deadline) {
+			if err := r.firstJobWaiting(); err != nil {
+				return fmt.Errorf("the first clock of %s ran out, and the run's first job cannot be called one that never started: %w", bound, err)
+			}
+			r.claimed = true
+			r.watch.ResetsDecideNothing() // this run ends on the scheduler's read, and judges nothing from the watch
 			p.Logf("%s: the run's first job was still pending %s after the deployment's creation; the run ends and its jobs are cancelled", p.Row.Name, time.Since(r.created).Round(time.Second))
 			return &NotStartedError{Bound: bound, PastEnd: pastEnd}
 		}
@@ -562,10 +626,36 @@ func (r *liveRun) firstJobStarted(p Plan) error {
 	}
 }
 
+// firstJobWaiting is the read at the first clock's end: the run's jobs in a look made now, every one of them waiting.
+// nil is the one way to NOT RUN. A look that fails, and a queue with no job of the run in it, tell nothing about a start.
+func (r *liveRun) firstJobWaiting() error {
+	l, err := r.lookNow()
+	if err != nil {
+		return fmt.Errorf("the queue could not be read: %w", err)
+	}
+	if len(l.Jobs) == 0 {
+		return errors.New("the queue lists no job of the run")
+	}
+	for _, j := range l.Jobs {
+		if !WaitingToStart(j) {
+			return fmt.Errorf("a job of the run is %s (reason %q)", j.Phase, j.Reason)
+		}
+	}
+	return nil
+}
+
+// allocations are the Allocation versions the watch saw.
+func (r *liveRun) allocations() []stack.AllocObservation {
+	if r.allocsFn != nil {
+		return r.allocsFn()
+	}
+	return r.watch.Allocations()
+}
+
 // readyWait is how long the run waits, once its first job runs, for the
 // Instance to become ready: health.startTimeout, and a margin.
 func (r *liveRun) readyWait() time.Duration {
-	return r.tm.StartTimeout + 5*time.Minute
+	return r.tm.StartTimeout + ReadyMargin
 }
 
 // firstReady waits for the first job to start, then for the deployment's
@@ -606,11 +696,19 @@ func (r *liveRun) firstReady(p Plan) (v1alpha1.Instance, error) {
 }
 
 // successorOf waits, within d, for the replacement of pred to be ready and
-// registered at the front; ok is false when it was not.
-func (r *liveRun) successorOf(pred string, d time.Duration) (v1alpha1.Instance, bool) {
-	deadline, _ := stack.BoundedDeadline(r.t, d)
+// registered at the front; ok is false when it was not. stop, when set, ends the
+// wait early: the successor job's own bound (secondPastItsBound).
+func (r *liveRun) successorOf(pred string, d time.Duration, stop func() bool) (v1alpha1.Instance, bool) {
+	bounded := r.boundedFn
+	if bounded == nil {
+		bounded = func(d time.Duration) (time.Time, bool) { return stack.BoundedDeadline(r.t, d) }
+	}
+	deadline, _ := bounded(d)
 	for time.Now().Before(deadline) {
 		r.checkGuard()
+		if stop != nil && stop() {
+			return v1alpha1.Instance{}, false
+		}
 		for _, x := range r.instances() {
 			if x.Annotations[v1alpha1.AnnotationPredecessor] != pred {
 				continue

@@ -73,6 +73,8 @@ type Recorder struct {
 	lost map[types.UID]Behind
 	// streams holds how far each kind's stream has come (catchup.go).
 	streams map[Kinds]*streamState
+	// resetsDecideNothing: see ResetsDecideNothing.
+	resetsDecideNothing bool
 	// afterLook is a test's: it runs right after a catch-up looks at the
 	// Recorder, so that the test orders the stream and the look. nil otherwise.
 	afterLook func()
@@ -108,7 +110,12 @@ func startWatch(t T, wc client.WithWatch, namespace string, onAlloc func(*v1alph
 		wg.Wait()
 		// Every read of the watch assumes an unbroken stream, those a catch-up
 		// does not cover as well.
-		if why := rec.resets(KindInstances | KindAllocations | KindDeployments); why != "" {
+		why := rec.resets(KindInstances | KindAllocations | KindDeployments)
+		switch {
+		case why == "":
+		case rec.decidesNothing():
+			t.Logf("the watch was reset, which decided nothing this test ended on: %s", why)
+		default:
 			t.Errorf("what the test read from the watch is not known to be complete: %s", why)
 		}
 	})

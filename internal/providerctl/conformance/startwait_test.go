@@ -1,13 +1,15 @@
 package conformance
 
-// The start-wait bound (HPCBURST_CONF_START_WAIT). A job under a one-job QOS
-// can queue for a long time, and the run holds the slot while it waits. With
-// the bound set, a step whose job has not started within it, counted from the
-// moment the wait began (the Allocation is created and reconciled at once, or
-// the direct sbatch has just returned), stops the whole run: the job is
-// cancelled by its tag, and the run ends as NOT RUN, which hack/live-checks.sh
-// reports apart from a failure. A job that was never accepted is a failure.
-// Unset, the steps keep their own deadline of 30 minutes.
+// The first clock of a job: the bound within which it must start. A job under a one-job QOS can queue for a long
+// time, and the run holds the slot while it waits; a job in a long queue holds nothing but is no use to wait for
+// without end. A job that has not started when the bound passes, counted from the moment the wait began (the
+// Allocation is created and reconciled at once, or the direct sbatch has just returned), stops the whole run: the
+// job is cancelled by its tag, and the run ends as NOT RUN, which hack/live-checks.sh reports apart from a failure,
+// on every row and whichever bound it was (the science agent's ruling of 8 Nov 2026, #272: a queue wait tests
+// nothing, so it is never a FAIL). The bound is the row's start wait (HPCBURST_CONF_START_WAIT) when it has one,
+// else the wait in the queue (HPCBURST_CONF_PENDING_MAX_SECONDS, 30 minutes when unset). A job that was never
+// accepted is a failure. So is a job that started, and a job a read cannot tell about (B1 of the review of PR 284):
+// NOT RUN means the scheduler's own read, at the bound, shows the job still waiting (whyNotWaiting).
 
 import (
 	"context"
@@ -17,15 +19,12 @@ import (
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/alpha"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
-// maxStartWait is the longest bound HPCBURST_CONF_START_WAIT can name: the
-// steps' own deadline, above which the bound would never be the one that fires.
+// maxStartWait is the longest bound HPCBURST_CONF_START_WAIT can name, the default of the wait in the queue.
 const maxStartWait = 30 * time.Minute
-
-// stepDeadline is the deadline of a step's wait when no bound is set.
-const stepDeadline = 30 * time.Minute
 
 // notRunFile is the marker, in the private output directory, that tells
 // hack/live-checks.sh the run stopped on the bound. It holds the step and the
@@ -91,48 +90,115 @@ func (w *world) at() time.Time {
 	return now()
 }
 
-// untilRuns waits until cond holds for the Allocation, as until does with its
-// 30 minutes, unless the run has a start-wait bound: then the wait is bounded
-// by it (see the top of this file). since is when the wait began, accepted says
-// the job was accepted before it did (step 3's direct sbatch), step names the
-// step in the output.
-func (w *world) untilRuns(step, name, what string, since time.Time, accepted bool, cond func(*v1alpha1.Allocation) bool) *v1alpha1.Allocation {
-	w.t.Helper()
-	if w.s.startWait == 0 {
-		return w.until(name, what, stepDeadline, cond)
+// firstClock is the bound a job's start is waited for, and what a message calls it: the row's start wait when it has
+// one, else the wait in the queue.
+func (w *world) firstClock() (bound time.Duration, name string) {
+	if w.s.startWait > 0 {
+		return w.s.startWait, "the start-wait bound"
 	}
+	return w.s.pendingMax, "the wait in the queue"
+}
+
+// untilRuns waits until cond holds for the Allocation, within the first clock (see the top of this file). since is
+// when the wait began, acceptedID is the job accepted before it did (step 3's direct sbatch; else ""), step names the
+// step in the output.
+func (w *world) untilRuns(step, name, what string, since time.Time, acceptedID string, cond func(*v1alpha1.Allocation) bool) *v1alpha1.Allocation {
+	w.t.Helper()
+	bound, boundName := w.firstClock()
 	var last *v1alpha1.Allocation
 	probe := func() (bool, bool) {
 		last = w.pollAllocation(name)
-		return last != nil && cond(last), accepted || (last != nil && last.Annotations[v1alpha1.AnnotationJobID] != "")
+		if last != nil {
+			accountingNotFailed(w.t, last) // no job starts from these phases: the wait ends here, not at the bound
+		}
+		return last != nil && cond(last), acceptedID != "" || (last != nil && last.Annotations[v1alpha1.AnnotationJobID] != "")
 	}
 	now, sleep := w.clock()
-	switch waitStart(now, sleep, since, w.s.startWait, 3*time.Second, probe) {
+	switch waitStart(now, sleep, since, bound, 3*time.Second, probe) {
 	case jobStarted:
 		return last
 	case jobNotAccepted:
-		w.t.Fatalf("%s: no job was accepted within the start-wait bound of %s", step, w.s.startWait)
+		w.t.Fatalf("%s: no job was accepted within %s of %s", step, boundName, bound)
 	default:
-		w.notRun(step)
+		if why := w.whyNotWaiting(last, acceptedID); why != "" {
+			w.t.Fatalf("%s: %s of %s ran out, but the job cannot be called one that never started: %s", step, boundName, bound, why)
+		}
+		w.notRun(step, jobOf(last, acceptedID))
 	}
 	return nil
+}
+
+// jobOf is the ID of the job a step waits for: the one accepted before the wait, else its Allocation's.
+func jobOf(a *v1alpha1.Allocation, acceptedID string) string {
+	if acceptedID != "" {
+		return acceptedID
+	}
+	return a.Annotations[v1alpha1.AnnotationJobID]
+}
+
+// whyNotWaiting says why a job at the bound cannot be called one that never started, and "" when it can. An
+// Allocation's status can only rule that out: a logged reconcile error leaves an old Pending in it. So what rules
+// it in is the scheduler's own read, by the job's ID, past the cached listing (QueueJob), made now: a job listed
+// and waiting. A read that fails, and a job it does not list, tell nothing, and neither is "never started".
+func (w *world) whyNotWaiting(a *v1alpha1.Allocation, acceptedID string) string {
+	if a == nil {
+		return "its Allocation could not be read"
+	}
+	o := a.Status.AtProvider
+	if o.StartTime != nil || o.Phase == v1alpha1.AllocationRunning || o.Phase == v1alpha1.AllocationEnded {
+		return fmt.Sprintf("its Allocation is %s, with a start time: %t", o.Phase, o.StartTime != nil)
+	}
+	if w.batch == nil {
+		return "there is no platform to read it on"
+	}
+	j, listed, err := w.batch.QueueJob(context.Background(), jobOf(a, acceptedID))
+	switch {
+	case err != nil:
+		return fmt.Sprintf("its state could not be read: %v", err)
+	case !listed:
+		return "the queue does not list it"
+	case !alpha.WaitingToStart(j):
+		return fmt.Sprintf("the scheduler shows it %s (reason %q)", j.Phase, j.Reason)
+	}
+	return ""
 }
 
 // notRun ends the run as NOT RUN: it cancels every job this run tagged, by its
 // tag, checks that none is left live, writes the marker and skips the test. A
 // cancel that fails, or a job left live, is a failure instead, because a job
-// would be left on the platform.
-func (w *world) notRun(step string) {
+// would be left on the platform. So is a job that started after the read at the
+// bound, which the job's record shows once it is cancelled, and a record that
+// cannot be read. The marker and the skip say which bound ran out.
+func (w *world) notRun(step, id string) {
 	w.t.Helper()
+	bound, boundName := w.firstClock()
 	ctx := context.Background()
 	if err := w.cancelByTag(ctx); err != nil {
-		w.t.Fatalf("%s: the job did not start within %s, and cancelling this run's jobs by tag failed: %v", step, w.s.startWait, err)
+		w.t.Fatalf("%s: the job did not start within %s of %s, and cancelling this run's jobs by tag failed: %v", step, boundName, bound, err)
 	}
-	note := fmt.Sprintf("%s: a job did not start within the start-wait bound of %s; this run's jobs were cancelled by tag\n", step, w.s.startWait)
+	// Past the cached listing, then accounting for a job the queue has dropped.
+	j, found, err := w.batch.QueueJob(ctx, id)
+	if err == nil && !found {
+		j, found, err = w.batch.ReadAccounting(ctx, id)
+	}
+	switch {
+	case err != nil:
+		w.t.Fatalf("%s: %s of %s ran out, and the job's record could not be read after its cancel: %v", step, boundName, bound, err)
+	case !found:
+		w.t.Fatalf("%s: %s of %s ran out, and the job has no record after its cancel", step, boundName, bound)
+	case alpha.JobStarted(j):
+		w.t.Fatalf("%s: %s of %s ran out, and the job had started by its cancel: this is no NOT RUN", step, boundName, bound)
+	}
+	note := fmt.Sprintf("%s: a job did not start within the start-wait bound of %s; this run's jobs were cancelled by tag\n", step, bound)
+	skip := fmt.Sprintf("NOT RUN: %s: a job did not start within %s of its acceptance; it was cancelled by its tag", step, bound)
+	if w.s.startWait == 0 {
+		note = fmt.Sprintf("%s: a job was still pending after %s in the queue; this run's jobs were cancelled by tag\n", step, bound)
+		skip = fmt.Sprintf("NOT RUN: %s: a job was still pending after %s in the queue (the wait in the queue); it was cancelled by its tag", step, bound)
+	}
 	if err := os.WriteFile(filepath.Join(w.p.dir, notRunFile), []byte(note), 0o600); err != nil {
-		w.t.Fatalf("%s: the job did not start within %s, but the not-run marker could not be written: %v", step, w.s.startWait, err)
+		w.t.Fatalf("%s: the job did not start within %s of %s, but the not-run marker could not be written: %v", step, boundName, bound, err)
 	}
-	w.t.Skipf("NOT RUN: %s: a job did not start within %s of its acceptance; it was cancelled by its tag", step, w.s.startWait)
+	w.t.Skipf("%s", skip)
 }
 
 // cancelByTag cancels every live job whose name is one of the tags this run

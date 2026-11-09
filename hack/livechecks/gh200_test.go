@@ -140,6 +140,7 @@ func TestGH200ConformanceGivesTheTestItsQOSAndNoOtherRowDoes(t *testing.T) {
 		}
 	}
 
+	// conformance-helios has a start wait of its own, 30 minutes (#272): the test gets that and never the caller's 10m.
 	for _, row := range []string{"conformance-helios"} {
 		t.Run(row, func(t *testing.T) {
 			w := newWorld(t)
@@ -149,8 +150,8 @@ func TestGH200ConformanceGivesTheTestItsQOSAndNoOtherRowDoes(t *testing.T) {
 				t.Fatalf("exit %d:\n%s", res.code, res.out)
 			}
 			env := w.stateFile("test-env-TestConformance")
-			if !strings.Contains(env, "HPCBURST_CONF_PROFILE=") || strings.Contains(env, "HPCBURST_CONF_QOS") || strings.Contains(env, "HPCBURST_CONF_START_WAIT") {
-				t.Errorf("the test got the caller's HPCBURST_CONF_QOS or HPCBURST_CONF_START_WAIT, or no environment was recorded:\n%s", env)
+			if !strings.Contains(env, "HPCBURST_CONF_PROFILE=") || strings.Contains(env, "HPCBURST_CONF_QOS") || !strings.Contains(env, "HPCBURST_CONF_START_WAIT=30m\n") || strings.Contains(env, "=10m") {
+				t.Errorf("the test got the caller's HPCBURST_CONF_QOS or HPCBURST_CONF_START_WAIT, or not the row's own 30m, or no environment was recorded:\n%s", env)
 			}
 		})
 	}
@@ -195,9 +196,10 @@ func TestNotRunStillCleansUpWhatTheTestLeftBehind(t *testing.T) {
 	}
 }
 
-// What is not a NOT RUN stays a failure: a failure beside the marker, a skipped subtest, a skip with no marker,
-// and a marker from a test whose row has no bound.
-func TestOnlyAMarkedCleanSkipOfARowWithABoundIsNotRun(t *testing.T) {
+// What is not a NOT RUN stays a failure: a failure beside the marker, a skipped subtest, a marker that is a link, a
+// nonzero exit, and a skip with no marker. Every cluster row takes the protocol (#272); a local row has no queue to
+// wait in, and takes none (TestAMarkerAnEarlierRowLeftIsNeverALocalRowsNotRun).
+func TestOnlyAMarkedCleanSkipOfAClusterRowIsNotRun(t *testing.T) {
 	for _, tc := range []struct {
 		name, row, mode string
 	}{
@@ -207,8 +209,9 @@ func TestOnlyAMarkedCleanSkipOfARowWithABoundIsNotRun(t *testing.T) {
 		{"a nonzero exit beside the marker", "conformance-helios-gh200", "not-run-rc"},
 		{"a failed subtest beside the marker", "conformance-helios-gh200", "not-run-subfail"},
 		{"a skip with no marker", "conformance-helios-gh200", "skip"},
-		{"a marker from a row with no bound", "conformance-helios", "not-run"},
-		{"a marker from another row with no bound", "gpu-accounting-athena", "not-run"},
+		{"a skip with no marker on a row with no slot", "conformance-helios", "skip"},
+		{"a failure beside the marker on a row with no slot", "conformance-helios", "not-run-fail"},
+		{"a skip with no marker on the other row with no slot", "gpu-accounting-athena", "skip"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := newWorld(t)

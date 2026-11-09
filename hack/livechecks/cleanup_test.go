@@ -183,7 +183,7 @@ func TestAnEstimateThatIsMerelyUnavailableDoesNotStopTheRun(t *testing.T) {
 // The row's timeout reaches the test: the binary gets -test.timeout one minute above it (the script
 // wraps the binary in timeout for the row's minutes as well).
 func TestTheRowsTimeoutReachesTheTestBinary(t *testing.T) {
-	for row, want := range map[string]string{"conformance-helios-gh200": "-test.timeout 46m", "conformance-helios": "-test.timeout 81m", "conformance-athena": "-test.timeout 46m"} {
+	for row, want := range map[string]string{"conformance-helios-gh200": "-test.timeout 58m", "conformance-helios": "-test.timeout 98m", "conformance-athena": "-test.timeout 58m"} {
 		w := newWorld(t)
 		w.useStubGo()
 		if res := w.run(nil, "--run", row, "--yes"); res.code != 0 {

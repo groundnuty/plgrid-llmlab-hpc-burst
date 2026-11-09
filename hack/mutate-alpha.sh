@@ -7,9 +7,13 @@
 #   hack/mutate-alpha.sh --only <regexp>  # only the mutants whose line matches (egrep), to try a new one; exit 2, and
 #                                         # nothing run, for an expression that is not valid or matches no mutant
 #
-# A mutant ends as KILLED (a test fails), SURVIVED (every test passes) or BROKEN: its text does not occur exactly once, or
-# the Go file it changes no longer compiles. A mutant that does not compile fails to build the tests, and that is not a test
-# failing, so it is reported as BROKEN, never as killed; the run fails for a survivor and for a broken mutant alike. The
+# Before the first mutant of each kind the tests of that kind run with no mutant, under the same command: if they fail, or do
+# not compile, the run stops (exit 2), since a test that already fails would count every mutant as killed (#285).
+# A mutant ends as KILLED (a test fails and passes with no mutant, and the line names it; or a run ended with no failing test, by what
+# the line names, and the same command passes with no mutant), SURVIVED (every test passes) or BROKEN: its text does not occur exactly
+# once, the Go file it changes no longer compiles, or what ended the run also does so with no mutant, which is no kill. A mutant that
+# does not compile fails to build the tests, and that is not a test failing, so it is reported as BROKEN, never as killed; the
+# run fails for a survivor and for a broken mutant alike. The run ends with how many kills each failing test made, so a shared cause shows. The
 # compile is its own step, to one fixed test-binary path per package, and the binary then runs: so MUTATE_ALPHA_BUILD_LOCK,
 # a lock file, is taken (flock -o) around each compile only, never around a test run.
 #
@@ -23,7 +27,9 @@
 #                                               test binaries to spare it two builds per mutant.
 #
 # It edits files in the working tree and restores each from a copy it makes first, also on any exit, so run it
-# on a checkout with no uncommitted change to them. Run it under a memory cap (docs/development.md).
+# on a checkout with no uncommitted change to them. Run it under a memory cap (docs/development.md). Each run has an external bound
+# (MUTATE_ALPHA_RUN_BOUND, seconds), and what it leaves in its process group is killed before the next. A TERM stops it at once,
+# except during a compile, which it lets finish.
 set -u -o pipefail
 cd "${MUTATE_ALPHA_ROOT:-$(dirname "$0")/..}" || exit 2   # the tree to mutate; the tests of this script point it at a throwaway module
 pkg=internal/alpha
@@ -236,7 +242,7 @@ mutants=(
   'frontlabel.go@@(?:[,;]? @@(?:[,;]?'
   'frontlabel.go@@return first + "\n" + FrontLine(label) + "\n" + rest@@return first + "\n" + rest'
   'run.go@@if lerr := ValidFrontLabel(cfg.FrontLabel); lerr != nil {@@if lerr := ValidFrontLabel(cfg.FrontLabel); false && lerr != nil {'
-  'run.go@@InsertFrontLine(summary(failures, jobs), cfg.FrontLabel)@@summary(failures, jobs)'
+  'run.go@@InsertFrontLine(post, cfg.FrontLabel)@@post'
   'run.go@@"frontLabel": cfg.FrontLabel, @@'
   'config.go@@bad = append(bad, EnvFrontLabel+": "+err.Error())@@_ = err'
   'config.go@@cfg.FrontLabel = getenv(EnvFrontLabel)@@cfg.FrontLabel = ""'
@@ -278,7 +284,7 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'rows.go@@lease < MinLease() || lease > MaxTunnelLease@@lease < MinLease() || lease >= MaxTunnelLease'
   'rows.go@@lease%time.Minute != 0@@false'
   'rows.go@@r.SlotHold = lease@@r.SlotHold = r.SlotHold'
-  'config.go@@(strings.HasPrefix(row.Name, "tunnel-hour-") && getenv(envDry) != "1")@@false'  'hack/live-checks.sh@@gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|30|-|10@@gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|30|-'
+  'config.go@@(strings.HasPrefix(row.Name, "tunnel-hour-") && getenv(envDry) != "1")@@false'  'hack/live-checks.sh@@gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|32|-|10@@gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|32|-'
   'hack/live-checks.sh@@gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|@@gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|-|'
   'hack/live-checks.sh@@      [ "${SWAIT[$n]:--}" = - ] || wait=0@@      true'
   'hack/live-checks.sh@@    gpu-accounting-*|reach-*) [ "${SWAIT[$n]:--}" != - ] || export HPCBURST_CONF_PENDING_MAX_SECONDS@@    gpu-accounting-*|reach-*) export HPCBURST_CONF_PENDING_MAX_SECONDS'
@@ -287,7 +293,7 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'hack/live-checks.sh@@    reach-*) export HPCBURST_CONF_PROBE_HOST=${S[LIVE_PROBE_HOST]}@@    reach-*) export HPCBURST_CONF_PROBE_HOST=${S[LIVE_PROBE_HOST]%%.*}'
   'hack/live-checks.sh@@  lc=${label,,}; hc=${host,,}; hc=${hc%.}@@  lc=$label; hc=$host'
   'hack/live-checks.sh@@[[ $flat_l == *"$flat_h"* ]]@@false'
-  'internal/providerctl/conformance/gpuacct_test.go@@	if w.s.startWait > 0 {@@	if false {'
+  'internal/providerctl/conformance/startwait_test.go@@	if w.s.startWait > 0 {@@	if false {'
   'internal/providerctl/conformance/gpuacct_test.go@@			cfg.QOS = append(cfg.QOS, fakeslurm.QOS{Name: q, MaxGPUsPerUser: fakeslurm.Cap(1)})@@			cfg.QOS = nil'
   'internal/providerctl/conformance/gpuacct_test.go@@		vars["HPCBURST_CONF_START_WAIT"] = r.StartWait.String()@@		vars["HPCBURST_CONF_PENDING_MAX_SECONDS"] = "60"'
   'internal/providerctl/conformance/gpuacct_test.go@@	return ph == v1alpha1.AllocationRunning || ph == v1alpha1.AllocationEnded@@	return ph == v1alpha1.AllocationEnded'
@@ -397,28 +403,177 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'guard_live_test.go@@				_, err = setEnd(end)@@				_ = end'
   'guard_live_test.go@@	stack.WaitFor(r.t, d, what, guarded)@@	stack.WaitFor(r.t, d, what, cond); _ = guarded'
   'guard_live_test.go@@			if md.Spec.EndTime == nil || !md.Spec.EndTime.Time.Equal(end) {@@			if false {'
-  'guard_live_test.go@@			return errors.New("the successor never started, so the run'"'"'s deployment never ended at its drain start")@@			return nil'
   # B7: the first clock, and a tunnel row's NOT RUN at its first end.
   'jobcount.go@@		if c := timeLimit - drainWindow - time.Minute; c < pendingMax {@@		if c := timeLimit - drainWindow; c < pendingMax {'
   'jobcount.go@@		if c := timeLimit - drainWindow - time.Minute; c < pendingMax {@@		if c := timeLimit - drainWindow - time.Minute; c <= pendingMax {'
-  'run.go@@ || (row.MostJobs == 1 && errors.Is(err, ErrQueueWaitPastEnd))@@'
   'run.go@@		if ns.PastEnd {@@		if false {'
-  'hack/live-checks.sh@@  case $n in tunnel-hour-*) first_end_marker ;; *) return 1 ;; esac@@  return 1'
-  'hack/live-checks.sh@@  case $n in tunnel-hour-*) first_end_marker ;; *) return 1 ;; esac@@  case $n in tunnel-hour-*) true ;; *) return 1 ;; esac'
-  'hack/live-checks.sh@@  [ "${SWAIT[$n]:--}" != - ] || [ -n "${OGSET[$n]:-}" ] && return 0@@  [ "${SWAIT[$n]:--}" != - ] && return 0'
   'hack/live-checks.sh@@    elif first_end_marker; then@@    elif false; then'
+  # #272: a job that never started within its bound is NOT RUN on every row. One mutant per bound sends it to FAIL (exit 1);
+  # each is killed by a row with no slot as well as by the slot rows, since the no-slot rows are what the ruling changed.
+  # The wait in the queue (the first clock), then a tunnel row's deployment end (both the sentinel and the error that
+  # carries it), then a start wait (the conformance tests), then the rule by row that #230 had, which comes back:
+  'run.go@@	return errors.Is(err, ErrNotStarted) || errors.Is(err, ErrQueueWaitPastEnd)@@	return errors.Is(err, ErrQueueWaitPastEnd)'
+  'run.go@@	return errors.Is(err, ErrNotStarted) || errors.Is(err, ErrQueueWaitPastEnd)@@	return errors.Is(err, ErrNotStarted)'
+  'run.go@@func NotRun(_ Row, err error) bool { return neverStarted(err) }@@func NotRun(row Row, err error) bool { return row.SlotHold > 0 && neverStarted(err) }'
+  'run.go@@func NotRun(_ Row, err error) bool { return neverStarted(err) }@@func NotRun(row Row, err error) bool { return row.MostJobs == 1 && neverStarted(err) }'
+  'jobcount.go@@	return target == ErrNotStarted || (e.PastEnd && target == ErrQueueWaitPastEnd)@@	return (target == ErrNotStarted && !e.PastEnd) || (e.PastEnd && target == ErrQueueWaitPastEnd && false)'
+  'internal/providerctl/conformance/startwait_test.go@@	w.t.Skipf("%s", skip)@@	if w.s.startWait > 0 { w.t.Fatalf("%s", skip) }; w.t.Skipf("%s", skip)'
+  'internal/providerctl/conformance/startwait_test.go@@	w.t.Skipf("%s", skip)@@	if w.s.startWait == 0 { w.t.Fatalf("%s", skip) }; w.t.Skipf("%s", skip)'
+  'internal/providerctl/conformance/startwait_test.go@@	return w.s.pendingMax, "the wait in the queue"@@	return maxStartWait, "the wait in the queue"'
+  'hack/live-checks.sh@@  [ -n "${HOST[$n]:-}" ] || return 1@@  [ "${SLOT[$n]:--}" != - ] || return 1'
+  'hack/live-checks.sh@@  [ -n "${HOST[$n]:-}" ] || return 1@@  [ "${SWAIT[$n]:--}" != - ] || return 1'
+  'hack/live-checks.sh@@  [ -n "${HOST[$n]:-}" ] || return 1@@  [ "${SWAIT[$n]:--}" = - ] || [ "${SLOT[$n]:--}" != - ] || return 1'
+  'hack/live-checks.sh@@  [ -n "${HOST[$n]:-}" ] || return 1@@  [ "${SWAIT[$n]:--}" = - ] || return 1'
+  'hack/live-checks.sh@@  [ -n "${HOST[$n]:-}" ] || return 1@@  true'
+  'hack/live-checks.sh@@  ! first_end_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac@@  ! first_end_marker || case $n in tunnel-hour-*) false ;; *) false ;; esac'
+  'hack/live-checks.sh@@  ! first_end_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac@@  true'
+  'hack/live-checks.sh@@  [ "$CLEAN_LEFT" -eq 0 ] || verdict=1@@  [ "$CLEAN_LEFT" -eq 0 ] || [ "$NOT_RUN" = 1 ] || verdict=1'
+  'hack/live-checks.sh@@  [ "$verdict" -ne 0 ] || [ "$NOT_RUN" != 1 ] || verdict=3@@  [ "$verdict" -ne 0 ] || [ "$NOT_RUN" != 1 ] || verdict=1'
+  'hack/live-checks.sh@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|97|-|30@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|97|-'
+  'hack/live-checks.sh@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|97|-|30@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|97|-|20'
+  'hack/live-checks.sh@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|97|-|30@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|90|-|30'
+  # The review of PR 284. B1, B2 and B4: a job that started, or that a read cannot tell about, is never NOT RUN.
+  'internal/providerctl/conformance/startwait_test.go@@			accountingNotFailed(w.t, last) // no job starts@@			_ = last // no job starts'
+  'internal/providerctl/conformance/startwait_test.go@@		if why := w.whyNotWaiting(last, acceptedID); why != "" {@@		if why := ""; why != "" {'
+  'internal/providerctl/conformance/startwait_test.go@@	if o.StartTime != nil || o.Phase == v1alpha1.AllocationRunning || o.Phase == v1alpha1.AllocationEnded {@@	if false {'
+  'internal/providerctl/conformance/startwait_test.go@@	if o.StartTime != nil || o.Phase == v1alpha1.AllocationRunning || o.Phase == v1alpha1.AllocationEnded {@@	if o.Phase == v1alpha1.AllocationRunning || o.Phase == v1alpha1.AllocationEnded {'
+  'internal/providerctl/conformance/startwait_test.go@@	if o.StartTime != nil || o.Phase == v1alpha1.AllocationRunning || o.Phase == v1alpha1.AllocationEnded {@@	if o.StartTime != nil || o.Phase == v1alpha1.AllocationEnded {'
+  'internal/providerctl/conformance/startwait_test.go@@	if o.StartTime != nil || o.Phase == v1alpha1.AllocationRunning || o.Phase == v1alpha1.AllocationEnded {@@	if o.StartTime != nil || o.Phase == v1alpha1.AllocationRunning {'
+  'internal/providerctl/conformance/startwait_test.go@@		return fmt.Sprintf("its state could not be read: %v", err)@@		return ""'
+  'internal/providerctl/conformance/startwait_test.go@@		return "the queue does not list it"@@		return ""'
+  'internal/providerctl/conformance/startwait_test.go@@	case !alpha.WaitingToStart(j):@@	case !alpha.WaitingToStart(j) && false:'
+  'internal/providerctl/conformance/startwait_test.go@@		return "its Allocation could not be read"@@		return ""'
+  'internal/providerctl/conformance/startwait_test.go@@		return "there is no platform to read it on"@@		return ""'
+  'internal/providerctl/conformance/startwait_test.go@@	return a.Annotations[v1alpha1.AnnotationJobID]@@	return acceptedID'
+  'internal/providerctl/conformance/startwait_test.go@@	if acceptedID != "" {@@	if false {'
+  'jobcount.go@@	return j.StartTime == nil && j.EndTime == nil && !j.Requeued && (j.Phase == v1alpha1.AllocationPending || j.Phase == v1alpha1.AllocationHeld)@@	return j.EndTime == nil && !j.Requeued && (j.Phase == v1alpha1.AllocationPending || j.Phase == v1alpha1.AllocationHeld)'
+  'jobcount.go@@	return j.StartTime == nil && j.EndTime == nil && !j.Requeued && (j.Phase == v1alpha1.AllocationPending || j.Phase == v1alpha1.AllocationHeld)@@	return j.StartTime == nil && !j.Requeued && (j.Phase == v1alpha1.AllocationPending || j.Phase == v1alpha1.AllocationHeld)'
+  'jobcount.go@@	return j.StartTime == nil && j.EndTime == nil && !j.Requeued && (j.Phase == v1alpha1.AllocationPending || j.Phase == v1alpha1.AllocationHeld)@@	return j.StartTime == nil && j.EndTime == nil && (j.Phase == v1alpha1.AllocationPending || j.Phase == v1alpha1.AllocationHeld)'
+  'jobcount.go@@	return j.StartTime == nil && j.EndTime == nil && !j.Requeued && (j.Phase == v1alpha1.AllocationPending || j.Phase == v1alpha1.AllocationHeld)@@	return j.StartTime == nil && j.EndTime == nil && !j.Requeued && (j.Phase == v1alpha1.AllocationPending || j.Phase == v1alpha1.AllocationHeld || true)'
+  'jobcount.go@@	return j.StartTime == nil && j.EndTime == nil && !j.Requeued && (j.Phase == v1alpha1.AllocationPending || j.Phase == v1alpha1.AllocationHeld)@@	return j.StartTime == nil && j.EndTime == nil && !j.Requeued && j.Phase == v1alpha1.AllocationPending'
+  'jobcount.go@@	return j.StartTime == nil && j.EndTime == nil && !j.Requeued && (j.Phase == v1alpha1.AllocationPending || j.Phase == v1alpha1.AllocationHeld)@@	return j.StartTime == nil && j.EndTime == nil && !j.Requeued && j.Phase == v1alpha1.AllocationHeld'
+  'steps_live_test.go@@			if st.StartTime != nil {@@			if false {'
+  'steps_live_test.go@@			case v1alpha1.AllocationRunning, v1alpha1.AllocationEnded, v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:@@			case v1alpha1.AllocationEnded, v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:'
+  'steps_live_test.go@@			case v1alpha1.AllocationRunning, v1alpha1.AllocationEnded, v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:@@			case v1alpha1.AllocationRunning, v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:'
+  'steps_live_test.go@@			case v1alpha1.AllocationRunning, v1alpha1.AllocationEnded, v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:@@			case v1alpha1.AllocationRunning, v1alpha1.AllocationEnded, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:'
+  'steps_live_test.go@@			case v1alpha1.AllocationRunning, v1alpha1.AllocationEnded, v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:@@			case v1alpha1.AllocationRunning, v1alpha1.AllocationEnded, v1alpha1.AllocationFailed, v1alpha1.AllocationRefused:'
+  'steps_live_test.go@@			case v1alpha1.AllocationRunning, v1alpha1.AllocationEnded, v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:@@			case v1alpha1.AllocationRunning, v1alpha1.AllocationEnded, v1alpha1.AllocationFailed, v1alpha1.AllocationLost:'
+  'steps_live_test.go@@			if err := r.firstJobWaiting(); err != nil {@@			if err := error(nil); err != nil {'
+  'steps_live_test.go@@		return fmt.Errorf("the queue could not be read: %w", err)@@		return nil'
+  'steps_live_test.go@@		return errors.New("the queue lists no job of the run")@@		return nil'
+  'steps_live_test.go@@		if !WaitingToStart(j) {@@		if false {'
+  'hack/live-checks.sh@@    if [ "$state" = PENDING ] && [ -z "$run_t" ] && [ $((now - submit_t)) -gt "$pend_max" ]; then@@    if [ -z "$run_t" ] && [ $((now - submit_t)) -gt "$pend_max" ]; then'
+  'hack/live-checks.sh@@    if [ "$state" = PENDING ] && [ -z "$run_t" ] && [ $((now - submit_t)) -gt "$pend_max" ]; then@@    if [ "$state" = PENDING ] && [ $((now - submit_t)) -gt "$pend_max" ]; then'
+  'hack/live-checks.sh@@  printf '"'"'%s\n'"'"' "${state:-error}"@@  printf '"'"'%s\n'"'"' "$state"'
+  # B3: the first job ran and the second never started is NOT RUN unless an earlier failure stands; its own bound.
+  'hack/live-checks.sh@@    if second_job_marker; then@@    if false; then'
+  'hack/live-checks.sh@@  ! second_job_marker || [ "${MOSTJOBS[$n]:-1}" -ge 2 ] || return 1@@  true'
+  'hack/live-checks.sh@@second_job_marker() { grep -q "the first job ran and the second never started"@@second_job_marker() { grep -q "the second job ran and the first never started"'
+  'hack/live-checks.sh@@    alpha-helios-nooverlap) printf "within %s of the first'"'"'s lease end" "$(fmt_pending "$(pending_max "$1")")" ;;@@    alpha-helios-nooverlap) printf "within 30 min of the first'"'"'s lease end" ;;'
+  'hack/live-checks.sh@@    *) printf "by the first'"'"'s drain start" ;;@@    *) printf "within its bound" ;;'
+  'guard_live_test.go@@			return r.secondNeverFinal()@@			return ErrSecondNotStarted'
+  'guard_live_test.go@@		return fmt.Errorf("the successor'"'"'s state could not be read: %w", err)@@		return ErrSecondNotStarted'
+  'guard_live_test.go@@	_, final, err := r.guard.Next(l)@@	_, final, _ := r.guard.Next(l)'
+  'guard_live_test.go@@		return errors.New("the successor has started, but only after the wait for it, so the run'"'"'s deployment never ended at its drain start in time")@@		return ErrSecondNotStarted'
+  'guard_live_test.go@@	if r.guard.pred == "" {@@	if false {'
+  'guard_live_test.go@@		if !WaitingToStart(j) {@@		if false {'
+  'guard_live_test.go@@	if waiting == 0 {@@	if false {'
+  'run.go@@	if second != nil && len(failures) == 0 {@@	if second != nil {'
+  'run.go@@	if second != nil && len(failures) == 0 {@@	if false {'
+  'run.go@@func stopsTheRun(err error) bool { return err != nil && !errors.Is(err, ErrSecondNotStarted) }@@func stopsTheRun(err error) bool { return err != nil }'
+  'run.go@@				return handoverFirstJobChecks(cfg.Row, o, j)@@				return VerifyHandover(cfg.Row, o, j)'
+  'run.go@@				return noOverlapFirstJobChecks(cfg.Row, o, j)@@				return VerifyNoOverlap(cfg.Row, o, j)'
+  'run.go@@ || errors.Is(err, ErrSecondNotStarted)@@'
+  'run.go@@	if errors.Is(err, ErrSecondNotStarted) {@@	if false {'
+  'liveobs.go@@		if e.Reason == v1alpha1.ReasonReplacementLate && e.Regarding.Name == deployment {@@		if e.Reason == v1alpha1.ReasonReplacementLate {'
+  'liveobs.go@@		if e.Reason == v1alpha1.ReasonReplacementLate && e.Regarding.Name == deployment {@@		if e.Regarding.Name == deployment {'
+  'guard_live_test.go@@		return LateUnknown@@		return LateNotRaised'
+  'hack/live-checks.sh@@      [ -z "$late" ] || say "$n: ReplacementLate for its deployment: $late (information, not a check)"@@      :'
+  'steps.go@@func (e *SecondNotStartedError) Is(target error) bool { return target == ErrSecondNotStarted }@@func (e *SecondNotStartedError) Is(target error) bool { return target == ErrSecondNotStarted && e.ReplacementLate != LateRaised }'
+  # The delta review of PR 284. L2: the successor's bound, from a fresh read of the scheduler.
+  'guard_live_test.go@@		if err != nil || l.Clock.Before(startBy) {@@		if err != nil {'
+  'guard_live_test.go@@			if j.Name != predTag && jobStarted(j) {@@			if false && j.Name != predTag && jobStarted(j) {'
+  'guard_live_test.go@@			if j.Name != predTag && jobStarted(j) {@@			if jobStarted(j) {'
+  'guard_live_test.go@@				started = true@@				_ = started'
+  'guard_live_test.go@@		if started || now.Before(startBy) || now.Before(next) {@@		if started || now.Before(next) {'
+  'steps_live_test.go@@		if stop != nil && stop() {@@		if false {'
+  # L3: a job read as waiting that had started by its cancel is a failure.
+  'steps_live_test.go@@			r.claimed = true@@			_ = r.claimed'
+  'guard_live_test.go@@	r.claimed, r.claimedPred = true, r.guard.pred@@	_ = r.claimed'
+  'guard_live_test.go@@	r.claimed, r.claimedPred = true, r.guard.pred@@	r.claimed = true'
+  'steps_live_test.go@@		if j.ID != r.claimedPred && jobStarted(j) {@@		if false && j.ID != r.claimedPred && jobStarted(j) {'
+  'steps_live_test.go@@			if r.claimed {@@			if true {'
+  'steps_live_test.go@@		return fmt.Errorf("the run read a job as one that never started, and its history could not be read after its cancel: %w", err)@@		return nil'
+  'internal/providerctl/conformance/startwait_test.go@@	case alpha.JobStarted(j):@@	case false && alpha.JobStarted(j):'
+  'internal/providerctl/conformance/startwait_test.go@@		w.t.Fatalf("%s: %s of %s ran out, and the job'"'"'s record could not be read after its cancel: %v", step, boundName, bound, err)@@		_ = err'
+  # L4: ReplacementLate stays information, on a failure too, and no read of what is not judged can fail the run.
+  'run.go@@		return s.ReplacementLate@@		return LateUnknown'
+  'run.go@@ the first job'"'"'s\n- ReplacementLate for its deployment: " + lateOf(second) + " (information, not a check)\n"@@ the first job'"'"'s\n"'
+  'live_flows_test.go@@	if second != nil {@@	if false {'
+  # T1: the stack's start is in the sum; a new wait in the live steps fails, even with the old ones in place.
+  'budget.go@@	StartupWait = stack.UpTimeout + 2*stack.WaitDeadline@@	StartupWait = stack.UpTimeout + stack.WaitDeadline'
+  'budget.go@@	BudgetFactorPercent = 125@@	BudgetFactorPercent = 100'
+  'budget.go@@	return b + Scaled(r.WorstCase(pendingMax)-b)@@	return b + r.WorstCase(pendingMax) - b'
+  'budget.go@@		first += pendingMax@@		_ = first'
+  'hack/live-checks.sh@@alpha-helios-nooverlap|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|213|-C memfs@@alpha-helios-nooverlap|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|210|-C memfs'
+  'hack/live-checks.sh@@gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|32|-|10@@gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|30|-|10'
+  'budget.go@@	TunnelRunOver = 29 * time.Minute@@	TunnelRunOver = 28 * time.Minute'
+  'budget.go@@		return StartupWait + first + (r.Lease - dw) + tm.MaxRequestDuration + dw + EndMargin + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout@@		return first + (r.Lease - dw) + tm.MaxRequestDuration + dw + EndMargin + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout'
+  'budget.go@@		return StartupWait + first + (r.Lease - dw) + tm.MaxRequestDuration + dw + EndMargin + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout@@		return StartupWait + first + (r.Lease - dw) + tm.MaxRequestDuration + dw + EndMargin + lastLooks + CloseTimeout'
+  'budget.go@@		return StartupWait + first + r.Lease + SuccessorWait(tm, pendingMax) + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout@@		return first + r.Lease + SuccessorWait(tm, pendingMax) + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout'
+  'budget.go@@		return StartupWait + first + r.Lease + SuccessorWait(tm, pendingMax) + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout@@		return StartupWait + first + r.Lease + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout'
+  'budget.go@@	return StartupWait + first + (r.Lease - dw) + dw + EndMargin + stack.CatchUpWorstCase + CloseTimeout@@	return first + (r.Lease - dw) + dw + EndMargin + stack.CatchUpWorstCase + CloseTimeout'
+  'budget.go@@	return StartupWait + first + (r.Lease - dw) + dw + EndMargin + stack.CatchUpWorstCase + CloseTimeout@@	return StartupWait + first + (r.Lease - dw) + dw + EndMargin + CloseTimeout'
+  'budget.go@@		return StartupWait + first + r.Lease + SuccessorWait(tm, pendingMax) + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout@@		return StartupWait + first + r.Lease + SuccessorWait(tm, pendingMax) + lastLooks + CloseTimeout'
+  'live_flows_test.go@@	if err := r.syncWatch(ctx, stack.KindAllocations, "the run'"'"'s Allocations"); err != nil {@@	if err := r.syncWatch(ctx, stack.KindAllocations, "the run'"'"'s Allocations"); err != nil { _ = err; }; if err := r.syncWatch(ctx, stack.KindAllocations, "the run'"'"'s Allocations"); err != nil {'
+  'steps_live_test.go@@			r.watch.ResetsDecideNothing() // this run ends@@			// this run ends'
+  'guard_live_test.go@@	r.claimed, r.claimedPred = true, r.guard.pred@@	r.watch.ResetsDecideNothing(); r.claimed, r.claimedPred = true, r.guard.pred'
+  'steps.go@@	return fmt.Errorf("%w; %v", err, second)@@	return fmt.Errorf("%w; %w", err, second)'
+  'steps.go@@	return fmt.Errorf("%w; %v", err, second)@@	return err'
+  'steps.go@@	if second == nil {@@	if second != nil {'
+  'live_flows_test.go@@"the handover'"'"'s result"); err != nil {@@"the handover'"'"'s result"); err != nil && second == nil {'
+  'live_flows_test.go@@"the no-overlap row'"'"'s result"); err != nil {@@"the no-overlap row'"'"'s result"); err != nil && second == nil {'
+  'rows.go@@	r.Budget = lease + TunnelRunOver@@	_ = r.Budget'
+  'live_flows_test.go@@	r.untilBefore(ds, lead, "the stream across the drain start")@@	r.waitFor(time.Hour, "a wait no sum holds", func() bool { return true }); r.untilBefore(ds, lead, "the stream across the drain start")'
+  'live_flows_test.go@@r.successorOf(pre.Name, time.Until(ds)-lead-lead/2, nil)@@r.successorOf(pre.Name, time.Until(ds), nil)'
+  'hack/live-checks.sh@@        TMIN[$name]=$((v + 29))@@        TMIN[$name]=$((v + 28))'
+  'hack/live-checks.sh@@tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|02:17:00|166|-C memfs@@tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|02:17:00|165|-C memfs'
+  'hack/live-checks.sh@@tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|166|-@@tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|165|-'
+  # T2: the source-derived sum sees a plain sleep and a repeated call.
+  'internal/providerctl/conformance/conformance_test.go@@	name := "conformance-held-submit-and-cancel-on-delete"@@	time.Sleep(10 * time.Minute); name := "conformance-held-submit-and-cancel-on-delete"'
+  'internal/providerctl/conformance/conformance_test.go@@	w.jobNameRoundTrip()@@	w.jobNameRoundTrip(); w.jobNameRoundTrip()'
+  # B5 and B6: the sums. Each is compared with a figure worked out by hand, so a longer wait fails a test, not a run.
+  'internal/providerctl/conformance/jobname_test.go@@w.batch, req, 36, func()@@w.batch, req, 72, func()'
+  'internal/providerctl/conformance/conformance_test.go@@w.until(lostName, "the adopted job ends", 8*time.Minute,@@w.until(lostName, "the adopted job ends", 9*time.Minute,'
+  'internal/providerctl/conformance/conformance_test.go@@	deadline := time.Now().Add(5 * time.Minute)@@	deadline := time.Now().Add(6 * time.Minute)'
+  'internal/providerctl/conformance/conformance_test.go@@	w.endedInAccounting(id2, 3*time.Minute)@@	w.endedInAccounting(id2, 4*time.Minute)'
+  'internal/providerctl/conformance/startwait_test.go@@const duplicateWait = 2 * time.Minute@@const duplicateWait = 3 * time.Minute'
+  'internal/providerctl/conformance/gpuacct_test.go@@	accountingEndWait    = 10 * time.Minute@@	accountingEndWait    = 20 * time.Minute'
+  'internal/providerctl/conformance/gpuacct_test.go@@	accountingDeleteWait = 5 * time.Minute@@	accountingDeleteWait = 15 * time.Minute'
+  'internal/providerctl/conformance/reach_run_test.go@@const reachEndWait = 3 * time.Minute@@const reachEndWait = 10 * time.Minute'
+  'hack/live-checks.sh@@local submit_t run_t="" now limit_s pend_max margin=${LIVE_RUN_MARGIN_SECONDS:-900}@@local submit_t run_t="" now limit_s pend_max margin=${LIVE_RUN_MARGIN_SECONDS:-1200}'
+  'hack/live-checks.sh@@real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|79|-C memfs@@real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|75|-C memfs'
+  'hack/live-checks.sh@@conformance-helios-gh200|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|57|-C memfs|10@@conformance-helios-gh200|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|50|-C memfs|10'
+  'hack/live-checks.sh@@conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|57|-|10@@conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|50|-|10'
+  'budget.go@@	CloseTimeout = 5 * time.Minute@@	CloseTimeout = 4 * time.Minute'
+  'budget.go@@	ReadyMargin = 5 * time.Minute@@	ReadyMargin = 4 * time.Minute'
+  'budget.go@@	EndMargin = 5 * time.Minute@@	EndMargin = 4 * time.Minute'
+  'budget.go@@	GuardEvery       = 10 * time.Second@@	GuardEvery       = 5 * time.Second'
+  'budget.go@@	GuardResultLooks = 6@@	GuardResultLooks = 3'
+  'budget.go@@	return pendingMax + tm.StartTimeout + ReadyMargin@@	return tm.StartTimeout + ReadyMargin'
+  'budget.go@@	return time.Duration(r.MostJobs)*pendingMax + r.Budget@@	return pendingMax + r.Budget'
+  'budget.go@@	first, _ := FirstClock(r, pendingMax, r.Lease, dw)@@	first := pendingMax'
   'dry_test.go@@	d.tick(bound - time.Second)@@	d.tick(bound - time.Minute)'
-  'run.go@@	return (row.SlotHold > 0 && errors.Is(err, ErrNotStarted)) ||@@	return errors.Is(err, ErrNotStarted) ||'
-  'run.go@@	return (row.SlotHold > 0 && errors.Is(err, ErrNotStarted)) ||@@	return (row.SlotHold > 0) ||'
   'alpha_live_test.go@@		if merr := rec.SaveText(NotRunFile, note); merr != nil {@@		if merr := error(nil); merr != nil {'
-  'run.go@@			if errors.Is(err, ErrNotStarted) {@@			if false {'
+  'run.go@@			if neverStarted(err) {@@			if false {'
   'alpha_live_test.go@@	if NotRun(cfg.Row, err) {@@	if false {'
   'hack/live-checks.sh@@PENDING_MAX_NOW=1800@@PENDING_MAX_NOW=7200'
   'hack/live-checks.sh@@  elif [ "${SLOT[$1]:--}" != - ]; then printf '"'"'%s'"'"' "$PENDING_MAX_NOW"@@  elif false; then printf '"'"'%s'"'"' "$PENDING_MAX_NOW"'
   'hack/live-checks.sh@@  if [ -n "${LIVE_PENDING_MAX_SECONDS:-}" ]; then printf '"'"'%s'"'"' "$LIVE_PENDING_MAX_SECONDS"@@  if false; then printf '"'"'%s'"'"' "$LIVE_PENDING_MAX_SECONDS"'
   'hack/live-checks.sh@@  export HPCBURST_ALPHA_PENDING_MAX_SECONDS=$(pending_max "$n")@@  export HPCBURST_ALPHA_PENDING_MAX_SECONDS=${LIVE_PENDING_MAX_SECONDS:-7200}'
-  'hack/live-checks.sh@@"$(( ${TMIN[$n]} + ($(pending_max "$n") + 59) / 60 ))" env_alpha@@"$(( ${TMIN[$n]} + ${LIVE_PENDING_MAX_SECONDS:-7200} / 60 ))" env_alpha'
-  'hack/live-checks.sh@@"$(( ${TMIN[$n]} + ($(pending_max "$n") + 59) / 60 ))" env_alpha@@"$(( ${TMIN[$n]} + $(pending_max "$n") / 60 ))" env_alpha'
+  'hack/live-checks.sh@@"$(( ${TMIN[$n]} + ${MOSTJOBS[$n]:-1} * (($(pending_max "$n") + 59) / 60) ))" env_alpha@@"$(( ${TMIN[$n]} + ${MOSTJOBS[$n]:-1} * ${LIVE_PENDING_MAX_SECONDS:-7200} / 60 ))" env_alpha'
+  'hack/live-checks.sh@@"$(( ${TMIN[$n]} + ${MOSTJOBS[$n]:-1} * (($(pending_max "$n") + 59) / 60) ))" env_alpha@@"$(( ${TMIN[$n]} + ${MOSTJOBS[$n]:-1} * ($(pending_max "$n") / 60) ))" env_alpha'
+  'hack/live-checks.sh@@"$(( ${TMIN[$n]} + ${MOSTJOBS[$n]:-1} * (($(pending_max "$n") + 59) / 60) ))" env_alpha@@"$(( ${TMIN[$n]} + (($(pending_max "$n") + 59) / 60) ))" env_alpha'
   'hack/live-checks.sh@@may pend up to $(fmt_pending "$(pending_max "$1")") in the queue@@may pend up to $((7200 / 60)) min in the queue'
   'hack/live-checks.sh@@was still pending after $(fmt_pending "$(pending_max "$n")") in the queue@@was still pending after 30 min in the queue'
   'hack/live-checks.sh@@  say "$1: may pend up to $(fmt_pending "$(pending_max "$1")") in the queue (then it is cancelled by its tag and the run is NOT RUN), then holds QOS@@  say "$1: holds QOS'
@@ -430,7 +585,7 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'hack/live-checks.sh@@      NOT_RUN=1@@      :'
   'hack/live-checks.sh@@a job was still pending after $(fmt_pending "$pend_max") in the queue@@a job was still pending after 30 min in the queue'
   'hack/live-checks.sh@@gpu-accounting-*|reach-*) [ "${SWAIT[$n]:--}" != - ] || export HPCBURST_CONF_PENDING_MAX_SECONDS=$(pending_max "$n")@@gpu-accounting-*|reach-*) [ "${SWAIT[$n]:--}" != - ] || export HPCBURST_CONF_PENDING_MAX_SECONDS=7200'
-  'hack/live-checks.sh@@conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|45|-|10@@conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|45|-'
+  'hack/live-checks.sh@@conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|57|-|10@@conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|57|-'
   'hack/live-checks.sh@@reach-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|1|1Gi|00:02:00|20|-|10@@reach-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|1|1Gi|00:02:00|20|-|15'
   'config.go@@cfg.PendingMax = time.Minute@@cfg.PendingMax = 2 * time.Minute'
   'config.go@@if v := getenv(envPending); v != "" {@@if v := getenv(envPending); v == "x" {'
@@ -453,6 +608,123 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
 # The mutants of a test of this script: a file with one mutant per line, in place of the list above.
 [ -z "${MUTATE_ALPHA_MUTANTS:-}" ] || mapfile -t mutants < "$MUTATE_ALPHA_MUTANTS"
 here=$PWD
+# compile_of <path>: the test binaries that judge a mutant of path, from the tree as it is now; on failure $cerr says why.
+compile_of() {
+  cerr=""
+  case $1 in
+    internal/providerctl/*) compile_tests internal/providerctl/conformance "$tmp/conf.test" && compile_tests "$pkg" "$tmp/pkg.test" ;;
+    *.go) compile_tests "$pkg" "$tmp/pkg.test" ;;
+  esac
+}
+# The tests of the script's kind.
+script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot'
+# tests_of <path> [control|<names>]: the command that judges a mutant of path, in the array tests. With control, the same command with
+# no mutant: from the binaries kept at the baseline, the tree being as it was. With names (a regexp), that, for those tests alone, to
+# the end. The
+# package's run has -test.timeout 300s, not less: internal/rehearsal/stack gives up its waits two minutes before the test's deadline
+# (CleanupMargin), so at 120s every wait on state failed at once and the unmutated tests failed, which counted every mutant
+# of the package as killed (#285).
+tests_of() {
+  local names=${2:-} pkgbin=$tmp/pkg.test confbin=$tmp/conf.test
+  local bin=(-test.count=1 -test.timeout 300s -test.failfast) sel=(-failfast -run "$script_tests") dry=PendingPastTheBound
+  if [ -n "$names" ]; then pkgbin=$tmp/base-pkg.test confbin=$tmp/base-conf.test; fi
+  if [ -n "$names" ] && [ "$names" != control ]; then
+    dry=$names bin=(-test.count=1 -test.timeout 300s -test.run "$names") sel=(-run "$names")
+  fi
+  case $1 in
+    hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 "${sel[@]}" ./hack/livechecks) ;;
+    # The dry runs of the script run the alpha test binary: the one compiled above, from the mutated file.
+    "$pkg"/alpha_live_test.go) tests=(env HPCBURST_LIVECHECKS_ALPHA_TEST="$pkgbin" go test -count=1 -timeout 9m -run "$dry" ./hack/livechecks) ;;
+    internal/providerctl/*) tests=(bash -c 'cd "$1/internal/providerctl/conformance" && "$2" "${@:5}" && cd "$1/$3" && "$4" "${@:5}"' _ "$here" "$confbin" "$pkg" "$pkgbin" "${bin[@]}") ;;
+    *) tests=(bash -c 'cd "$1/$2" && "$3" "${@:4}"' _ "$here" "$pkg" "$pkgbin" "${bin[@]}") ;;
+  esac
+}
+# failing_tests <log>: the top-level tests a run's log says failed, at most three.
+failing_tests() { sed -n -E 's/^--- FAIL: ([^ ]+).*/\1/p' "$1" | head -n 3 | paste -s -d ' ' -; }
+# no_test_failed <log> <exit status>: what ended a failed run that names no failing test.
+no_test_failed() {
+  if [ "$2" = 124 ] || [ "$2" = 137 ]; then printf 'the bound of %s s, no test named as failed' "$run_bound"
+  elif grep -q '^panic: test timed out' "$1"; then printf 'a timeout, no test named as failed'
+  elif grep -q '^panic: ' "$1"; then printf 'a panic, no test named as failed'
+  elif grep -q -E 'build failed|setup failed' "$1"; then printf 'a compile error, no test ran'
+  else printf 'exit %s, no test named as failed' "$2"; fi
+}
+# bounded <log>: runs the array tests with an external bound, in a process group of their own (timeout makes one), its output in the
+# log, and sets rc. Go's own -test.timeout cannot reach a hang before the test binary's main, and its panic skips the tests' cleanup, so
+# what a run leaves in its group is killed before the next one starts. It waits in the background, so that a signal to this script
+# is acted on at once (on_signal). The limit: a process that left the group is not seen (#274 ends the fake Slurm's jobs with their host).
+run_bound=${MUTATE_ALPHA_RUN_BOUND:-720}   # above every kind's own deadlines, so that those fire first
+child=""
+bounded() {
+  rc=0
+  timeout -k 10 "$run_bound" "${tests[@]}" >"$1" 2>&1 &
+  child=$!
+  wait "$child" || rc=$?
+  kill -KILL -- "-$child" 2>/dev/null
+  child=""
+}
+# on_signal: the run stops now; the EXIT trap then restores the file, which no hung command can hold up.
+on_signal() {
+  if [ -n "$child" ]; then kill -TERM "$child" 2>/dev/null; kill -KILL -- "-$child" 2>/dev/null; fi
+  exit 143
+}
+trap on_signal TERM INT
+# now_epoch: the clock of the green cache. MUTATE_ALPHA_CLOCK is a test seam: a file holding the epoch seconds.
+now_epoch() { if [ -n "${MUTATE_ALPHA_CLOCK:-}" ]; then cat "$MUTATE_ALPHA_CLOCK"; else date +%s; fi; }
+# kind_of <path>: the name of the kind of mutant, by the tests that judge it.
+kind_of() {
+  case $1 in
+    hack/live-checks.sh) printf "the script's" ;;
+    "$pkg"/alpha_live_test.go) printf "the dry runs'" ;;
+    internal/providerctl/*) printf "the conformance package's" ;;
+    *) printf "the package's" ;;
+  esac
+}
+# baseline <path>: the tests that judge a mutant of path must pass with no mutant, once per kind, under that kind's own command, or a
+# failing test would count every mutant as killed and "0 survived" would say nothing. A tree they fail on stops the run (exit 2),
+# with no mutant tried, --only or not. The binaries are kept, for red_with_no_mutant.
+declare -A based=()
+baseline() {
+  local kind
+  kind=$(kind_of "$1")
+  [ -z "${based[$kind]:-}" ] || return 0
+  based[$kind]=1
+  compile_of "$1" || { echo "mutate-alpha: $kind tests do not compile with no mutant, so nothing can be checked: $cerr" >&2; exit 2; }
+  case $1 in
+    internal/providerctl/*) cp "$tmp/conf.test" "$tmp/base-conf.test"; cp "$tmp/pkg.test" "$tmp/base-pkg.test" ;;
+    *.go) cp "$tmp/pkg.test" "$tmp/base-pkg.test" ;;
+  esac
+  tests_of "$1"
+  bounded "$tmp/baseline.log"
+  [ "$rc" -eq 0 ] || {
+    by=$(failing_tests "$tmp/baseline.log")
+    echo "mutate-alpha: $kind tests fail with no mutant, so every mutant would count as killed: ${by:-$(no_test_failed "$tmp/baseline.log" "$rc")}" >&2; exit 2; }
+}
+# red_with_no_mutant <path> <names>: sets red to those of the tests that failed under a mutant that fail with no mutant too (in this
+# shell, not a subshell, since it keeps green_at): the tree must be as it was.
+# A test that goes red after the baseline (a flake, a date, a port) would kill every mutant it meets, so a kill it alone made is
+# not one (the science agent, on PR 284): the caller reads that as BROKEN, with the test named. A test seen green in the last
+# ten minutes is not run again: the script's tests take minutes, and a kill costs one look, not one run per mutant. Only a test that
+# ran gets a new time. The limits that stay: within the ten minutes a cached green is not proof that the test still passes, and a
+# flake that passes on its look reads as a kill.
+declare -A green_at=()
+red_with_no_mutant() {
+  local path=$1 kind now name todo="" failed
+  red=""
+  kind=$(kind_of "$path"); now=$(now_epoch)
+  for name in $2; do
+    [ $((now - ${green_at[$kind|$name]:-0})) -lt 600 ] || todo="$todo${todo:+|}$name"
+  done
+  [ -n "$todo" ] || return 0
+  tests_of "$path" "^($todo)\$"
+  bounded "$tmp/again.log"
+  failed=" $(failing_tests "$tmp/again.log") "
+  # The failure can leave no test named (a panic, a timeout): every test asked about is then red, by what ended the run.
+  [ "$rc" -eq 0 ] || [ "$failed" != "  " ] || failed=" ${todo//|/ } "
+  for name in ${todo//|/ }; do
+    case "$failed" in *" $name "*) red="$red${red:+ }$name" ;; *) green_at[$kind|$name]=$now ;; esac
+  done
+}
 killed=0 survived=0 broken=0 total=0
 for m in "${mutants[@]}"; do
   [ -z "$only" ] || printf '%s\n' "$m" | grep -q -E -e "$only" || continue
@@ -462,6 +734,7 @@ for m in "${mutants[@]}"; do
   total=$((total+1))
   keep "$path"
   cp "${saved[$path]}" "$path"
+  baseline "$path"
   if ! python3 - "$path" "$from" "$to" <<'PY'
 import sys
 p, a, b = sys.argv[1:4]
@@ -473,27 +746,43 @@ PY
   then echo "BROKEN   $file: the text '$from' does not occur exactly once"; broken=$((broken+1)); continue; fi
   case $path in
     *.go|internal/providerctl/*)
-      cerr=""
-      case $path in
-        internal/providerctl/*) compile_tests internal/providerctl/conformance "$tmp/conf.test" && compile_tests "$pkg" "$tmp/pkg.test" ;;
-        *) compile_tests "$pkg" "$tmp/pkg.test" ;;
-      esac || { echo "BROKEN   $file: $from  ->  $to: the mutant does not compile: $cerr"; broken=$((broken+1)); cp "${saved[$path]}" "$path"; continue; } ;;
+      compile_of "$path" || { echo "BROKEN   $file: $from  ->  $to: the mutant does not compile: $cerr"; broken=$((broken+1)); cp "${saved[$path]}" "$path"; continue; } ;;
   esac
-  case $path in
-    hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 -failfast -run 'AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat' ./hack/livechecks) ;;
-    "$pkg"/alpha_live_test.go)
-      # The dry runs of the script run the alpha test binary: the one compiled above, from the mutated file.
-      tests=(env HPCBURST_LIVECHECKS_ALPHA_TEST="$tmp/pkg.test" go test -count=1 -timeout 9m -run PendingPastTheBound ./hack/livechecks) ;;
-    internal/providerctl/*) tests=(bash -c 'cd "$1/internal/providerctl/conformance" && "$2" -test.count=1 -test.timeout 300s && cd "$1/$3" && "$4" -test.count=1 -test.timeout 300s' _ "$here" "$tmp/conf.test" "$pkg" "$tmp/pkg.test") ;;
-    *) tests=(bash -c 'cd "$1/$2" && "$3" -test.count=1 -test.timeout 120s' _ "$here" "$pkg" "$tmp/pkg.test") ;;
-  esac
-  if "${tests[@]}" >/dev/null 2>&1; then
-    echo "SURVIVED $file: $from  ->  $to"; survived=$((survived+1))
-  else
-    killed=$((killed+1))
-  fi
+  tests_of "$path"
+  bounded "$tmp/mutant.log"
   cp "${saved[$path]}" "$path"
+  if [ "$rc" -eq 0 ]; then
+    echo "SURVIVED $file: $from  ->  $to"; survived=$((survived+1)); continue
+  fi
+  by=$(failing_tests "$tmp/mutant.log")
+  if [ -z "$by" ]; then
+    # Naming what ended the run does not show the mutant did it. A compile error after a green baseline never does; anything else
+    # gets a control run, the same command with no mutant (the delta review, H1). The limit: a timeout from load, or a kill from
+    # outside, that does not recur in the control reads as a kill, by what it was.
+    by=$(no_test_failed "$tmp/mutant.log" "$rc")
+    case $by in
+      "a compile error"*) echo "BROKEN   $file: $from  ->  $to: $by"; broken=$((broken+1)); continue ;;
+    esac
+    tests_of "$path" control
+    bounded "$tmp/control.log"
+    if [ "$rc" -eq 0 ]; then
+      killed=$((killed+1)); echo "KILLED   $file: $from  ->  $to: by $by"; printf '%s\n' "$by" >>"$tmp/kills"
+    else
+      echo "BROKEN   $file: $from  ->  $to: ended by $by, and the same command fails with no mutant too"; broken=$((broken+1))
+    fi
+    continue
+  fi
+  # With the tree as it was. A kill needs a test that fails under the mutant and passes with no mutant.
+  red_with_no_mutant "$path" "$by"
+  real=""
+  for name in $by; do case " $red " in *" $name "*) ;; *) real="$real${real:+ }$name" ;; esac; done
+  if [ -z "$real" ]; then
+    echo "BROKEN   $file: $from  ->  $to: killed only by $red, which also fails with no mutant"; broken=$((broken+1))
+  else
+    killed=$((killed+1)); echo "KILLED   $file: $from  ->  $to: by $real"; printf '%s\n' "$real" >>"$tmp/kills"
+  fi
 done
 [ -z "$only" ] || [ "$total" -gt 0 ] || { echo "mutate-alpha: --only $only selected no mutant, so nothing was checked" >&2; exit 2; }
+[ ! -s "$tmp/kills" ] || { echo "kills by what failed:"; sort "$tmp/kills" | uniq -c | sort -rn | sed 's/^/  /'; }
 echo "mutants: $total, killed $killed, survived $survived, broken $broken"
 [ "$survived" -eq 0 ] && [ "$broken" -eq 0 ]

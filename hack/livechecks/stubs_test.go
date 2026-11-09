@@ -50,7 +50,11 @@ if [ -n "$id" ]; then
   if [ -n "${LIVE_FAKE_CLOCK:-}" ] && [ -n "${STUB_CLOCK_STEP:-}" ]; then echo $(( $(cat "$LIVE_FAKE_CLOCK") + STUB_CLOCK_STEP )) > "$LIVE_FAKE_CLOCK"; fi
   if [ -e "$STUB_STATE/forever-$id" ]; then cat "$STUB_STATE/forever-$id"; exit 0; fi
   f="$STUB_STATE/jobstates-$id"
-  if [ -s "$f" ]; then head -1 "$f"; sed -i 1d "$f"; exit 0; fi
+  if [ -s "$f" ]; then
+    s=$(head -1 "$f"); sed -i 1d "$f"
+    [ "$s" != UNREADABLE ] || { echo "squeue: error: unable to contact slurm controller seedhost01" >&2; exit 1; }
+    echo "$s"; exit 0
+  fi
   sed -i "/^$id|/d" "$Q"
   echo "slurm_load_jobs error: Invalid job id specified" >&2; exit 1
 fi
@@ -71,7 +75,7 @@ esac
 
 // stubSbatch: --test-only answers with a seeded line on stderr, as sbatch does. A
 // submit queues job 7001 and writes the log and record a finished job leaves.
-// STUB_JOB_STATES is the list of states squeue shows; STUB_JOB_FOREVER=<state>
+// STUB_JOB_STATES is the list of states squeue shows (UNREADABLE: that read fails); STUB_JOB_FOREVER=<state>
 // keeps the job in one state; STUB_FOREIGN=1 queues another hb- job in another partition.
 const stubSbatch = `#!/bin/bash
 printf '%s\n' "$*" >> "$STUB_STATE/sbatch-argv"

@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -100,6 +101,16 @@ func (e *NotStartedError) Error() string {
 // deployment's first end was the bound.
 func (e *NotStartedError) Is(target error) bool {
 	return target == ErrNotStarted || (e.PastEnd && target == ErrQueueWaitPastEnd)
+}
+
+// WaitingToStart is what makes a job one that never started, in a read made at a
+// bound (the science agent's ruling of 8 Nov 2026 on #272): the scheduler lists it
+// held or pending, with no start and no end. A requeued job is pending again after
+// it ran, so it is not. Everything else is not a job that never started, and a read
+// that failed, or that does not list the job, is no evidence of it either: the run
+// then ends as a failure that names what it found, never as NOT RUN.
+func WaitingToStart(j provider.Job) bool {
+	return j.StartTime == nil && j.EndTime == nil && !j.Requeued && (j.Phase == v1alpha1.AllocationPending || j.Phase == v1alpha1.AllocationHeld)
 }
 
 // The run's own names (review of PR 255, B3). hack/live-checks.sh draws a run
@@ -249,6 +260,9 @@ func (g *TwoJobGuard) Next(l Look) (end time.Time, final bool, err error) {
 
 // jobStarted reports whether a listed job has started: it has a start time,
 // and it did not end at that very time, as a job cancelled while pending does.
-func jobStarted(j provider.Job) bool {
+func jobStarted(j provider.Job) bool { return JobStarted(j) }
+
+// JobStarted is jobStarted, for the rows of other packages.
+func JobStarted(j provider.Job) bool {
 	return j.StartTime != nil && (j.EndTime == nil || j.EndTime.After(*j.StartTime))
 }

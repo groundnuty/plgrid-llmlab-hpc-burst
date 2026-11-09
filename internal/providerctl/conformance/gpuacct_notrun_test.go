@@ -4,7 +4,9 @@ package conformance
 // conformance-helios-gh200 (issue #194; the science agent, 2 Nov 2026): when
 // the owner's other job holds the one GPU, this run's job pends, and at the
 // bound of 10 minutes it is cancelled by its tag and the run is NOT RUN, with
-// no kept accounting record. The row's Athena twin has no slot and no bound.
+// no kept accounting record. The row's Athena twin has no slot: its first clock is the wait in the queue
+// (HPCBURST_CONF_PENDING_MAX_SECONDS), and past that its job is cancelled by its tag and the run is NOT RUN too
+// (the science agent's ruling of 8 Nov 2026, #272: a queue wait tests nothing, so it is never a FAIL).
 
 import (
 	"os"
@@ -20,26 +22,42 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 )
 
+// Both rows, one bound each: the slot row's start wait of 10 minutes, and the no-slot row's wait in the queue, set
+// to a minute by the dry world. Expected values are written out, not read from the rows. Neither run may be
+// reported as a failure, and a job that never started is cancelled by its tag with the owner's job left alone.
 func TestTheAccountingRowIsNotRunWhenTheOwnersJobHoldsTheSlot(t *testing.T) {
+	for _, c := range []struct {
+		row, fault, wantSkip string
+		bound                time.Duration
+	}{
+		{"gpu-accounting-helios", "slot-held", "NOT RUN: the job: a job did not start within 10m0s of its acceptance", 10 * time.Minute},
+		{"gpu-accounting-athena", "queue-held", "NOT RUN: the job: a job was still pending after 1m0s in the queue", time.Minute},
+	} {
+		t.Run(c.row, func(t *testing.T) { accountingNotRun(t, c.row, c.fault, c.wantSkip, c.bound) })
+	}
+}
+
+func accountingNotRun(t *testing.T, row, fault, wantSkip string, bound time.Duration) {
+	t.Helper()
 	out := filepath.Join(t.TempDir(), "out")
 	if err := os.Mkdir(out, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	w, plat := dryAccountingWorld(t, "gpu-accounting-helios", "slot-held", out)
+	w, plat := dryAccountingWorld(t, row, fault, out)
 	rec := &stopRecorder{TB: t}
 	w.t = rec
 	began := w.at()
-	ends(func() { gpuAccountingBody(rec, w, "gpu-accounting-helios") })
+	ends(func() { gpuAccountingBody(rec, w, row) })
 
 	if rec.failed != "" {
 		t.Fatalf("the run failed: %s", rec.failed)
 	}
-	if !strings.HasPrefix(rec.skipped, "NOT RUN: the job: a job did not start within 10m0s of its acceptance") {
-		t.Fatalf("skipped = %q, want a NOT RUN with the bound", rec.skipped)
+	if !strings.HasPrefix(rec.skipped, wantSkip) {
+		t.Fatalf("skipped = %q, want a NOT RUN beginning %q", rec.skipped, wantSkip)
 	}
-	// The bound, on the fake clock: 10 minutes and no more than the cancel's few seconds.
-	if waited := w.at().Sub(began); waited < 10*time.Minute || waited > 11*time.Minute {
-		t.Errorf("the wait lasted %s, want the bound of 10m", waited)
+	// The bound, on the fake clock: as long as the bound and no more than the cancel's few seconds.
+	if waited := w.at().Sub(began); waited < bound || waited > bound+time.Minute {
+		t.Errorf("the wait lasted %s, want the bound of %s", waited, bound)
 	}
 	// This run's job was cancelled and never started; the owner's was not touched.
 	var ours, owners int

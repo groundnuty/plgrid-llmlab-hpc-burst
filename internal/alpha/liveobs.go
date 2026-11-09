@@ -489,6 +489,16 @@ func Handovers(evs []eventsv1.Event, ended []v1alpha1.Instance) int {
 	return n
 }
 
+// ReplacementLateOf says whether the events hold a ReplacementLate regarding the deployment: LateRaised or LateNotRaised.
+func ReplacementLateOf(evs []eventsv1.Event, deployment string) string {
+	for _, e := range evs {
+		if e.Reason == v1alpha1.ReasonReplacementLate && e.Regarding.Name == deployment {
+			return LateRaised
+		}
+	}
+	return LateNotRaised
+}
+
 // SlotSeen reports whether a version of the deployment carried a condition
 // with reason NoOverlapSlot (HBEP-7, No-overlap mode).
 func SlotSeen(versions []*v1alpha1.ModelDeployment) bool {

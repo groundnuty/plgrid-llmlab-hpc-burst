@@ -11,27 +11,24 @@ import (
 	"fmt"
 	"time"
 
+	eventsv1 "k8s.io/api/events/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
-// guardEveryLive is how often the two-job guard looks at the cluster, and
-// guardLookFails how many looks in a row may fail before it stops the run: an
-// end it cannot move on is still a bound, but one that stops moving is reached
-// in the time limit less the drain window.
-const (
-	guardEveryLive = 10 * time.Second
-	guardLookFails = 3
-)
+// guardLookFails is how many looks at the cluster in a row may fail before the
+// two-job guard stops the run: an end it cannot move on is still a bound, but one
+// that stops moving is reached in the time limit less the drain window.
+const guardLookFails = 3
 
 // every is the guard's interval.
 func (r *liveRun) every() time.Duration {
 	if r.guardEvery > 0 {
 		return r.guardEvery
 	}
-	return guardEveryLive
+	return GuardEvery
 }
 
 // look is one look at the cluster for the guard: the cluster's clock, then a
@@ -147,7 +144,7 @@ func (r *liveRun) checkGuard() {
 func (r *liveRun) guardResult() error {
 	wait := r.resultWait
 	if wait == 0 {
-		wait = 6 * r.every()
+		wait = GuardResultLooks * r.every()
 	}
 	deadline := time.Now().Add(wait)
 	for {
@@ -178,9 +175,99 @@ func (r *liveRun) guardResult() error {
 		}
 		if time.Now().After(deadline) {
 			r.stopGuard()
-			return errors.New("the successor never started, so the run's deployment never ended at its drain start")
+			return r.secondNeverFinal()
 		}
 		time.Sleep(time.Second)
+	}
+}
+
+// secondNeverFinal is the end of a run whose guard never saw its second job start (review of PR 284, B3). A look made
+// now decides, with the guard stopped: the first job known to have started and a second one the scheduler shows
+// waiting is ErrSecondNotStarted, NOT RUN unless the first job's part failed (Run). A look that fails, and a second
+// job that started, went away or never was, are failures that name what they found: a job the controller never made
+// is a property of the row that was absent, not a queue wait.
+func (r *liveRun) secondNeverFinal() error {
+	l, err := r.lookNow()
+	if err != nil {
+		return fmt.Errorf("the successor's state could not be read: %w", err)
+	}
+	_, final, err := r.guard.Next(l)
+	if err != nil {
+		return fmt.Errorf("the job-count guard stopped the run: %w", err)
+	}
+	if final {
+		return errors.New("the successor has started, but only after the wait for it, so the run's deployment never ended at its drain start in time")
+	}
+	if r.guard.pred == "" {
+		return errors.New("no first job of the run is known to have started")
+	}
+	waiting := 0
+	for _, j := range l.Jobs {
+		if j.ID == r.guard.pred {
+			continue
+		}
+		if !WaitingToStart(j) {
+			return fmt.Errorf("a second job of the run is %s (reason %q), so it cannot be called one that never started", j.Phase, j.Reason)
+		}
+		waiting++
+	}
+	if waiting == 0 {
+		return errors.New("the queue lists no second job of the run: the successor was never accepted")
+	}
+	r.claimed, r.claimedPred = true, r.guard.pred
+	return &SecondNotStartedError{ReplacementLate: r.replacementLate()}
+}
+
+// replacementLate reads, for the NOT RUN's line alone, whether the controller raised ReplacementLate for the run's
+// deployment. It is its own read, not stack.Events, which fails the test when the list fails: a read that fails here
+// says so, and changes nothing about how the run ends.
+func (r *liveRun) replacementLate() string {
+	var l eventsv1.EventList
+	ctx, cancel := context.WithTimeout(context.Background(), stack.APICallTimeout)
+	defer cancel()
+	if err := r.c.List(ctx, &l); err != nil {
+		return LateUnknown
+	}
+	return ReplacementLateOf(l.Items, r.w.md.Name)
+}
+
+// lookNow is one look at the cluster, as the guard takes it, for a step's read at a bound.
+func (r *liveRun) lookNow() (Look, error) {
+	look := r.lookFn
+	if look == nil {
+		look = r.look
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	return look(ctx)
+}
+
+// secondPastItsBound is a no-overlap successor's own bound, for successorOf: the wait in the queue from its predecessor's lease end. A
+// look made now decides it, on the scheduler's own clock and its own record, since the guard's last look can be old and this host's
+// clock is not the scheduler's (the delta review of PR 284, L2). This host's clock only saves looks before the bound, and a host behind
+// the scheduler stops that much later, which harms nothing. A look that fails decides nothing, and the guard counts those. Once a
+// second job has started it waits for readiness, and never looks again. The limit: a job that starts after the look that stopped
+// the wait is past its bound, and reads as a failure that names it (secondNeverFinal).
+func (r *liveRun) secondPastItsBound(predTag string, startBy time.Time) func() bool {
+	var next time.Time
+	started := false
+	return func() bool {
+		now := time.Now()
+		if started || now.Before(startBy) || now.Before(next) {
+			return false
+		}
+		next = now.Add(r.every())
+		l, err := r.lookNow()
+		if err != nil || l.Clock.Before(startBy) {
+			return false
+		}
+		for _, j := range l.Jobs {
+			if j.Name != predTag && jobStarted(j) {
+				started = true
+				return false
+			}
+		}
+		return true
 	}
 }
 

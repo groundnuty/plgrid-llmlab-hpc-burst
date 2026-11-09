@@ -52,12 +52,8 @@ const (
 const reachTimeLimit = "2m"
 
 // reachEndWait is how long the job may take after it has started: its time limit and a minute for the scheduler to
-// close it. hack/live-checks.sh's timeout for the rows covers the start wait and this (qos_test.go compares them).
+// close it. hack/live-checks.sh's timeout for the rows covers the start wait and this (budget_test.go adds them up).
 const reachEndWait = 3 * time.Minute
-
-// reachCleanupWait is what the script's timeout leaves after the job's end for the read-back and the end-of-run
-// cleanup (cancel by tag, removal of the staging directory); qos_test.go compares it with the rows' timeouts.
-const reachCleanupWait = 3 * time.Minute
 
 // reachFile is the file in the Allocation's directory (agentapi.AllocationDir) that holds the result.
 const reachFile = "reach"
@@ -287,13 +283,10 @@ func reachBody(t testing.TB, w *world, rowName string, target probeTarget) {
 	a := w.newAlloc(name)
 	tag := v1alpha1.JobTag(a.Namespace, a.Name, a.UID)
 	// The job waits in the queue (the first clock), runs, and ends by itself. The rows have a start-wait bound: past
-	// it the job is cancelled by its tag and the run is NOT RUN, with no text to post (startwait_test.go).
+	// it (or past the wait in the queue, for a run with none) the job is cancelled by its tag and the run is NOT RUN,
+	// with no text to post (startwait_test.go).
 	started := func(a *v1alpha1.Allocation) bool { return accountingStarted(t, a) }
-	if w.s.startWait > 0 {
-		w.untilRuns("the job", name, "the job runs", w.at(), false, started)
-	} else {
-		w.until(name, "the job starts", w.s.pendingMax, started)
-	}
+	w.untilRuns("the job", name, "the job runs", w.at(), "", started)
 	w.until(name, "the job ends", reachEndWait, func(a *v1alpha1.Allocation) bool {
 		accountingNotFailed(t, a)
 		return a.Status.AtProvider.Phase == v1alpha1.AllocationEnded

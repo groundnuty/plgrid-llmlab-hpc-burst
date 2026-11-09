@@ -225,10 +225,8 @@ func tagCountChecks(row Row, tags []string, label string) []string {
 //	hbep/0007-lifecycle-controller/README.md:637: "on each alpha platform, Helios `plgrid-gpu-gh200` and Athena `plgrid-gpu-a100`, one restart at the worker rung;"
 //	hbep/0005-llmlab-compatible-front/README.md:450: "on Athena `plgrid-gpu-a100`, through the front, one handover cuts no request (with HBEP-7)."
 func VerifyHandover(row Row, o HandoverObs, jobs []provider.Job) []string {
-	f := append(deploymentChecks(row, o.Deployment), streamChecks(o.Streams, o.DrainStart)...)
+	f := handoverFirstJobChecks(row, o, jobs)
 	f = append(f, tagCountChecks(row, o.Tags, "a handover makes exactly two Allocations: a predecessor and a successor")...)
-	lf, _ := ledgerChecks(row, o.Tags, jobs)
-	f = append(f, lf...)
 	if o.Handovers != 1 {
 		f = append(f, fmt.Sprintf("%d handovers completed, want 1", o.Handovers))
 	}
@@ -238,6 +236,18 @@ func VerifyHandover(row Row, o HandoverObs, jobs []provider.Job) []string {
 		// A handover is make-before-break: the successor is ready before the predecessor ends.
 		f = append(f, "the successor was not ready before the predecessor ended")
 	}
+	return dedupe(f)
+}
+
+// handoverFirstJobChecks are the handover row's checks that hold whether or not the successor ever started, so they
+// are what a run judges when its first job ran and its second never started (ErrSecondNotStarted; review of PR 284,
+// B3): the deployment, the streams across the drain start, the worker-rung restart, the attribution of every response,
+// and the cluster's record of the jobs. A failure here is a failure of a part of the run that did happen, and it
+// outranks the NOT RUN. The handover itself and the successor's readiness were never put to the test.
+func handoverFirstJobChecks(row Row, o HandoverObs, jobs []provider.Job) []string {
+	f := append(deploymentChecks(row, o.Deployment), streamChecks(o.Streams, o.DrainStart)...)
+	lf, _ := ledgerChecks(row, o.Tags, jobs)
+	f = append(f, lf...)
 	f = append(f, restartChecks(o.WorkerRestarts)...)
 	// Attribution on every response (HBEP-5): no response recorded is no evidence of it.
 	if o.Responses <= 0 {
@@ -245,7 +255,7 @@ func VerifyHandover(row Row, o HandoverObs, jobs []provider.Job) []string {
 	} else if o.Attributed != o.Responses {
 		f = append(f, "a response lacked its attribution headers")
 	}
-	return dedupe(f)
+	return f
 }
 
 // VerifyNoOverlap judges alpha-helios-nooverlap.
@@ -254,12 +264,9 @@ func VerifyHandover(row Row, o HandoverObs, jobs []provider.Job) []string {
 //	hbep/0007-lifecycle-controller/README.md:608: "The replacement is created at its planned time, accepted, and pends on the fake's GPU cap while the predecessor runs; it never starts before the predecessor's job ends ... A fixture without a GPU cap proves nothing here, since its replacement would start beside the predecessor."
 //	hbep/0007-lifecycle-controller/README.md:471: "the gap is the time from the primary's drain start until its successor is `ready`."
 func VerifyNoOverlap(row Row, o NoOverlapObs, jobs []provider.Job) []string {
-	f := append(deploymentChecks(row, o.Deployment), streamChecks(o.Streams, o.DrainStart)...)
+	f := noOverlapFirstJobChecks(row, o, jobs)
 	f = append(f, tagCountChecks(row, o.Tags, "a no-overlap run makes exactly two Allocations: a predecessor and a successor")...)
-	// One restart at the worker rung on each alpha platform (hbep/0007-lifecycle-controller/README.md:637), Helios's included.
-	f = append(f, restartChecks(o.WorkerRestarts)...)
-	lf, by := ledgerChecks(row, o.Tags, jobs)
-	f = append(f, lf...)
+	_, by := ledgerChecks(row, o.Tags, jobs)
 	if o.Gap() <= 0 {
 		f = append(f, "the gap was not measured: the drain start and the successor's ready are not both seen, in that order")
 	}
@@ -274,6 +281,18 @@ func VerifyNoOverlap(row Row, o NoOverlapObs, jobs []provider.Job) []string {
 		}
 	}
 	return dedupe(f)
+}
+
+// noOverlapFirstJobChecks are the no-overlap row's checks that hold whether or not the successor ever started, as
+// handoverFirstJobChecks are the handover's: the deployment, the stream across the drain start, the worker-rung
+// restart and the cluster's record of the jobs. The gap, NoOverlapSlot and the successor's place in the queue were
+// never put to the test.
+func noOverlapFirstJobChecks(row Row, o NoOverlapObs, jobs []provider.Job) []string {
+	f := append(deploymentChecks(row, o.Deployment), streamChecks(o.Streams, o.DrainStart)...)
+	// One restart at the worker rung on each alpha platform (hbep/0007-lifecycle-controller/README.md:637), Helios's included.
+	f = append(f, restartChecks(o.WorkerRestarts)...)
+	lf, _ := ledgerChecks(row, o.Tags, jobs)
+	return append(f, lf...)
 }
 
 // queuedAheadChecks judges, from the cluster's own times, that the successor was

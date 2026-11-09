@@ -297,13 +297,13 @@ func (r *liveRun) Handover(ctx context.Context, p Plan) (HandoverObs, error) {
 	if !ok {
 		r.t.Fatal("the primary has no lease end")
 	}
-	// HBEP-7, Handover: the replacement is created at its planned time and is ready before the drain start.
-	succ, ok := r.successorOf(pre.Name, time.Until(ds))
-	if !ok {
-		p.Logf("%s: no replacement was ready by the drain start", p.Row.Name)
-	}
-	key = r.fc.KeyFor(&pre) // the ring as it is now, with both Instances
+	// HBEP-7, Handover: the replacement is created at its planned time and is ready before the drain start. The
+	// predecessor's streams open whether or not it is ready by then: they are the first job's part of the run, which stands
+	// if the second never starts (the delta review of PR 284, L1). So this wait stops in time to open them, half the lead
+	// before they open, and the rest of the replacement's time runs with them in flight.
 	lead := r.streamLead()
+	succ, ok := r.successorOf(pre.Name, time.Until(ds)-lead-lead/2, nil)
+	key = r.fc.KeyFor(&pre) // the ring as it is now: with both Instances, once the replacement is ready
 	n, err := r.tokensFor(2*lead, rate)
 	if err != nil {
 		return HandoverObs{}, err
@@ -312,19 +312,26 @@ func (r *liveRun) Handover(ctx context.Context, p Plan) (HandoverObs, error) {
 	s1 := r.openStream(n, key, "")
 	<-s1.first
 	s2 := r.openStream(n, key, "")
+	if !ok {
+		if succ, ok = r.successorOf(pre.Name, time.Until(ds), nil); !ok {
+			p.Logf("%s: no replacement was ready by the drain start", p.Row.Name)
+		}
+	}
 	streams := []Stream{r.finish(s1), r.finish(s2)}
-	r.waitFor(r.dw+5*time.Minute, "the primary to end", func() bool {
+	r.waitFor(r.dw+EndMargin, "the primary to end", func() bool {
 		_, ended := r.watch.First(pre.UID, time.Time{}, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceEnded })
 		return ended
 	})
-	// The successor's drain start must be the end the API holds (review of PR 255, B6).
-	if err := r.guardResult(); err != nil {
-		return HandoverObs{}, err
+	// The successor's drain start must be the end the API holds (review of PR 255, B6). A second job that never
+	// started leaves the first job's part to judge (Run).
+	second := r.guardResult()
+	if second != nil && !errors.Is(second, ErrSecondNotStarted) {
+		return HandoverObs{}, second
 	}
 	// The result is read from the watch, straight after the API showed the
 	// primary ended (issue #281).
 	if err := r.syncWatch(ctx, stack.KindInstances|stack.KindAllocations, "the handover's result"); err != nil {
-		return HandoverObs{}, err
+		return HandoverObs{}, notKnownBeside(err, second)
 	}
 	tags, err := r.runTags()
 	if err != nil {
@@ -336,9 +343,19 @@ func (r *liveRun) Handover(ctx context.Context, p Plan) (HandoverObs, error) {
 		Tags: tags, Streams: streams,
 		Instances:  []InstanceSpan{SpanOf(&preLast, r.tagOf(pre)), SpanOf(&succLast, r.tagOf(succ))},
 		Deployment: r.observedDeployment(), DrainStart: ds,
-		Handovers:      Handovers(stack.Events(r.t, r.c), []v1alpha1.Instance{preLast}),
+		Handovers:      r.handoversOf(second, preLast),
 		WorkerRestarts: WorkerRestarts(r.watch.Last()), Responses: responses, Attributed: attributed, WorkerRestart: times,
-	}, nil
+	}, second
+}
+
+// handoversOf counts the handovers that completed. A run whose second job never started reads no events for it: that is not judged
+// on such a run, and stack.Events fails the test when its list fails, which would decide the run's end on a read nothing needs
+// (the delta review of PR 284, L4).
+func (r *liveRun) handoversOf(second error, pre v1alpha1.Instance) int {
+	if second != nil {
+		return 0
+	}
+	return Handovers(stack.Events(r.t, r.c), []v1alpha1.Instance{pre})
 }
 
 // NoOverlap is alpha-helios-nooverlap: a worker-rung restart on the primary;
@@ -368,20 +385,24 @@ func (r *liveRun) NoOverlap(ctx context.Context, p Plan) (NoOverlapObs, error) {
 	s := r.openStream(n, key, "")
 	<-s.first
 	pr := r.startProber(ds)
-	// The successor starts once the predecessor's job ends and frees the GPU, then becomes ready.
-	succ, ok := r.successorOf(pre.Name, time.Until(pre.Status.LeaseEnd.Time)+p.PendingMax+r.tm.StartTimeout+5*time.Minute)
+	// The successor starts once the predecessor's job ends and frees the GPU, then becomes ready. Its bound is the wait
+	// in the queue from that end; only a job that started needs the rest of the wait.
+	leaseEnd := pre.Status.LeaseEnd.Time
+	succ, ok := r.successorOf(pre.Name, time.Until(leaseEnd)+SuccessorWait(r.tm, p.PendingMax), r.secondPastItsBound(r.tagOf(pre), leaseEnd.Add(p.PendingMax)))
 	noReady := pr.end()
 	p.Logf("%s: the gap prober's replies by status and code: %v", p.Row.Name, pr.replies)
 	streams := []Stream{r.finish(s)}
 	if !ok {
 		p.Logf("%s: the successor was not ready in time", p.Row.Name)
 	}
-	// The successor's drain start must be the end the API holds (review of PR 255, B6).
-	if err := r.guardResult(); err != nil {
-		return NoOverlapObs{}, err
+	// The successor's drain start must be the end the API holds (review of PR 255, B6). A second job that never
+	// started leaves the first job's part to judge (Run).
+	second := r.guardResult()
+	if second != nil && !errors.Is(second, ErrSecondNotStarted) {
+		return NoOverlapObs{}, second
 	}
 	if err := r.syncWatch(ctx, stack.KindInstances|stack.KindAllocations|stack.KindDeployments, "the no-overlap row's result"); err != nil {
-		return NoOverlapObs{}, err
+		return NoOverlapObs{}, notKnownBeside(err, second)
 	}
 	tags, err := r.runTags()
 	if err != nil {
@@ -392,7 +413,7 @@ func (r *liveRun) NoOverlap(ctx context.Context, p Plan) (NoOverlapObs, error) {
 	if ok && succ.Status.ReadyTime != nil {
 		o.SuccessorReady = succ.Status.ReadyTime.Time
 	}
-	return o, nil
+	return o, second
 }
 
 // prober sends one short request a second from a time on, and counts the
@@ -613,7 +634,7 @@ func (r *liveRun) endDeployment(ctx context.Context, p Plan) {
 	if err := r.syncWatch(ctx, stack.KindAllocations, "the run's Allocations"); err != nil {
 		t.Errorf("%v", err)
 	}
-	r.waitFor(r.dw+5*time.Minute, "every job of the run to end in the cluster's record", func() bool {
+	r.waitFor(r.dw+EndMargin, "every job of the run to end in the cluster's record", func() bool {
 		tags, _ := r.runTags()
 		jobs, err := led.Jobs(ctx, tags)
 		if err != nil || len(jobs) == 0 {

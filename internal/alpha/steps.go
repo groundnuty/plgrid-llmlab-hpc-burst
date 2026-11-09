@@ -3,6 +3,7 @@ package alpha
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
@@ -10,10 +11,50 @@ import (
 
 // ErrNotStarted is what a scenario returns when a job of the run was still
 // pending when the first clock (Plan.PendingMax) ran out, after it cancelled the
-// run's jobs by their tags. For a row that holds QOS now's one-job slot
-// (Row.SlotHold) that ends the run as NOT RUN (NotRun): the owner's slot was busy,
-// try again later. For any other row it is a failure.
+// run's jobs by their tags. That ends the run as NOT RUN (NotRun) on every row
+// (the science agent's ruling of 8 Nov 2026, #272): the job never started, so
+// the property the row tests was never put to the test; try again later.
 var ErrNotStarted = errors.New("a job of the run was still pending when the wait in the queue ran out, and was cancelled by its tag")
+
+// ErrSecondNotStarted is what a scenario of two jobs returns when its first job
+// ran and its second never started within its bound, a job the scheduler still
+// shows waiting. The first job's part of the run stands: Run judges it, and an
+// earlier failure there wins. With none, the run is NOT RUN (NotRun, the ruling of
+// 8 Nov 2026 on #272, review of PR 284, B3): the second job never started, so the
+// property the row tests was never put to the test. The scenario returns what it
+// saw beside it.
+var ErrSecondNotStarted = errors.New("the first job of the run ran and the second never started, and was cancelled by its tag")
+
+// What a run read of ReplacementLate for its deployment, in a second job's NOT RUN.
+const (
+	LateRaised    = "raised"
+	LateNotRaised = "not raised"
+	LateUnknown   = "unknown"
+)
+
+// SecondNotStartedError is ErrSecondNotStarted with whether the controller raised ReplacementLate for the run's
+// deployment (the science agent, on PR 284). That is information for whoever reads the line, and no check: nothing
+// decides on it, and an event that could not be read says so. In no-overlap mode the gap is planned, and the controller
+// does not raise it (internal/lifecycle/handover.go), so "not raised" is what that row expects.
+type SecondNotStartedError struct{ ReplacementLate string }
+
+func (e *SecondNotStartedError) Error() string {
+	return fmt.Sprintf("%v; ReplacementLate for its deployment: %s", ErrSecondNotStarted, e.ReplacementLate)
+}
+
+// Is makes the error ErrSecondNotStarted, whatever it read.
+func (e *SecondNotStartedError) Is(target error) bool { return target == ErrSecondNotStarted }
+
+// notKnownBeside is a catch-up's failure on a two-job run. A run whose second job never started still judges its first job's part from
+// the watch, so a catch-up that cannot tell fails it as on any run, and it is no NOT RUN: that would hide what may be a failure of the
+// part that did happen (the science agent, on PR 284: a NOT RUN and #292's "not known" must not mask each other). What the run read of
+// the second job stays in the message, as text: this error is not ErrSecondNotStarted.
+func notKnownBeside(err, second error) error {
+	if second == nil {
+		return err
+	}
+	return fmt.Errorf("%w; %v", err, second)
+}
 
 // Plan is what a scenario is given.
 type Plan struct {

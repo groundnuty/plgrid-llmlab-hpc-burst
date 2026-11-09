@@ -40,7 +40,7 @@ func runRow(t *testing.T, family string, rows ...string) {
 	} else {
 		st = liveSteps(t, cfg)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.PendingMax+cfg.Row.Budget)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Row.RunDeadline(cfg.PendingMax))
 	defer cancel()
 	failures, err := Run(ctx, cfg, st, rec, t.Logf)
 	if NotRun(cfg.Row, err) {
