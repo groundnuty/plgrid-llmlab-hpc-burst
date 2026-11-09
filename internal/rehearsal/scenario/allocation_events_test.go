@@ -99,7 +99,7 @@ func checkAllocationEvents(t stack.T, read func() []stack.AllocObservation, api 
 	atZero map[types.UID]string, failedOK map[types.UID]bool, wait time.Duration) {
 	t.Helper()
 	start := time.Now()
-	deadline, _ := stack.BoundedDeadline(t, wait)
+	deadline, cut := stack.BoundedDeadline(t, wait)
 	obs := read()
 	views, order := viewsOf(obs)
 	behind := undelivered(views, atZero) // the watch trailed the API on these
@@ -110,6 +110,7 @@ func checkAllocationEvents(t stack.T, read func() []stack.AllocObservation, api 
 		left = undelivered(views, atZero)
 	}
 	waited := time.Since(start)
+	short := cut && waited < wait // the test's deadline ended the wait early
 	if len(behind) == 0 {
 		t.Logf("step (g): the watch had already delivered the end or deletion of all %d Allocations the API listed Ended or gone", len(atZero))
 	}
@@ -132,7 +133,7 @@ func checkAllocationEvents(t stack.T, read func() []stack.AllocObservation, api 
 			t.Errorf("step (g): the watch never saw Allocation %s", name)
 			continue
 		}
-		t.Errorf("%s", undeliveredProblem(name, s.phases[len(s.phases)-1], api(name, uid), waited))
+		t.Errorf("%s", undeliveredProblem(name, s.phases[len(s.phases)-1], api(name, uid), waited, short))
 	}
 	for _, uid := range order {
 		t.Logf("Allocation %s: phases %v, deleted %v", views[uid].name, views[uid].phases, views[uid].deleted)
@@ -142,13 +143,17 @@ func checkAllocationEvents(t stack.T, read func() []stack.AllocObservation, api 
 // undeliveredProblem is what step (g) reports of an Allocation whose end or
 // deletion the watch had not delivered after waited: seen is the last phase it
 // delivered, and now what the API says. The API tells the cases apart, the
-// watch cannot.
-func undeliveredProblem(name string, seen v1alpha1.AllocationPhase, now allocAPI, waited time.Duration) string {
+// watch cannot. short says the wait was cut short of the time it was given, by
+// the test's deadline: an event that has not come then is not known to be lost.
+func undeliveredProblem(name string, seen v1alpha1.AllocationPhase, now allocAPI, waited time.Duration, short bool) string {
 	waited = waited.Round(time.Millisecond)
 	switch {
 	case now.err != nil:
 		return fmt.Sprintf("step (g): Allocation %s: the watch delivered neither its end nor its deletion in %s (the last version it delivered is %s), and the API could not say what became of it (%v): whether the event was lost is not known",
 			name, waited, seen, now.err)
+	case short && (!now.exists || now.phase == v1alpha1.AllocationEnded):
+		return fmt.Sprintf("step (g): Allocation %s: the watch delivered neither its end nor its deletion in %s, a wait cut short by the test's deadline (the last version it delivered is %s; the API says it is %s): whether the event was lost is not known",
+			name, waited, seen, apiState(now))
 	case !now.exists:
 		return fmt.Sprintf("step (g): Allocation %s: the API says it is deleted, and the watch delivered neither its end nor its deletion in %s (the last version it delivered is %s): the event was lost",
 			name, waited, seen)
@@ -157,6 +162,14 @@ func undeliveredProblem(name string, seen v1alpha1.AllocationPhase, now allocAPI
 			name, waited, seen)
 	}
 	return fmt.Sprintf("step (g): Allocation %s was last seen %s, neither Ended nor deleted", name, seen)
+}
+
+// apiState names what the API says of an Allocation that is Ended or gone.
+func apiState(a allocAPI) string {
+	if !a.exists {
+		return "deleted"
+	}
+	return string(a.phase)
 }
 
 // apiAllocation is what the API says now of the Allocation with this name and

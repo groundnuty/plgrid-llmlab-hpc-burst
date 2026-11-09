@@ -24,6 +24,7 @@ import (
 type recordT struct {
 	stack.T
 	errs, logs []string
+	deadline   time.Time // the test's deadline; none when zero
 }
 
 func (r *recordT) Errorf(format string, args ...any) {
@@ -33,9 +34,10 @@ func (r *recordT) Logf(format string, args ...any) {
 	r.logs = append(r.logs, fmt.Sprintf(format, args...))
 }
 
-// Deadline reports none, so that a small -timeout of the test binary does not
-// cut a wait (stack.WaitCap) that these tests size themselves.
-func (r *recordT) Deadline() (time.Time, bool) { return time.Time{}, false }
+// Deadline reports none unless a test sets one, so that a small -timeout of the
+// test binary does not cut a wait (stack.WaitCap) that these tests size
+// themselves.
+func (r *recordT) Deadline() (time.Time, bool) { return r.deadline, !r.deadline.IsZero() }
 
 func version(uid types.UID, name string, phase v1alpha1.AllocationPhase, deleted bool) stack.AllocObservation {
 	return stack.AllocObservation{At: time.Now(), Name: name, UID: uid, Phase: phase, Deleted: deleted}
@@ -180,5 +182,46 @@ func TestAllocationEventsJudgeTheWatchAfterTheWait(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("the log does not say %q:\n%s", want, joined)
 		}
+	}
+}
+
+// A wait that the test's deadline cuts short is not a lost event: the watch had
+// no time to deliver it, so the check says it is not known, whatever the API
+// says of an Allocation that is Ended or gone. One the API still lists as
+// Running keeps its message.
+func TestAllocationEventsReportACutWaitAsUnknown(t *testing.T) {
+	const uid = types.UID("uid-a")
+	running := []stack.AllocObservation{version(uid, "rehearsal-a", v1alpha1.AllocationRunning, false)}
+	for name, c := range map[string]struct {
+		api  allocAPI
+		want string
+	}{
+		"deleted in the API": {allocAPI{}, "the API says it is deleted"},
+		"Ended in the API":   {allocAPI{exists: true, phase: v1alpha1.AllocationEnded}, "the API says it is Ended"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			read, _ := watchAfter(running, running)
+			// stack.WaitCap is two minutes before the deadline: the wait is cut to nothing.
+			rt := &recordT{T: t, deadline: time.Now().Add(stack.CleanupMargin / 2)}
+			checkAllocationEvents(rt, read, apiSays(c.api), map[types.UID]string{uid: "rehearsal-a"}, nil, stack.WaitDeadline)
+			if len(rt.errs) != 1 {
+				t.Fatalf("%d problems %q, want exactly one", len(rt.errs), rt.errs)
+			}
+			for _, w := range []string{"a wait cut short by the test's deadline", c.want, "not known"} {
+				if !strings.Contains(rt.errs[0], w) {
+					t.Errorf("the problem %q does not say %q", rt.errs[0], w)
+				}
+			}
+			if strings.HasSuffix(rt.errs[0], ": the event was lost") {
+				t.Errorf("the problem %q calls a cut wait a lost event", rt.errs[0])
+			}
+		})
+	}
+	read, _ := watchAfter(running, running)
+	rt := &recordT{T: t, deadline: time.Now().Add(stack.CleanupMargin / 2)}
+	checkAllocationEvents(rt, read, apiSays(allocAPI{exists: true, phase: v1alpha1.AllocationRunning}), map[types.UID]string{uid: "rehearsal-a"}, nil, stack.WaitDeadline)
+	want := "step (g): Allocation rehearsal-a was last seen Running, neither Ended nor deleted"
+	if len(rt.errs) != 1 || rt.errs[0] != want {
+		t.Errorf("a cut wait on an Allocation the API lists Running: reported %q, want exactly [%q]", rt.errs, want)
 	}
 }
