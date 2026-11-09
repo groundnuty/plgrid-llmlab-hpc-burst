@@ -44,7 +44,18 @@ func listed(kind Kinds, uid, name, rv string) listedObject {
 // pausing returns a pause that counts its calls and runs step on each.
 func pausing(step func(n int)) (pause func(), calls *int) {
 	n := 0
-	return func() { n++; step(n) }, &n
+	return func() {
+		n++
+		step(n)
+		time.Sleep(time.Millisecond) // a catch-up that waits too long fails on its count, without spinning
+	}, &n
+}
+
+// noWait is what a catch-up that must not wait is given: a pause that counts, and
+// a short wait, so that one that does wait fails on the count.
+func noWait() (pause func(), calls *int, wait time.Duration) {
+	pause, calls = pausing(func(int) {})
+	return pause, calls, 20 * time.Millisecond
 }
 
 // reach moves the kind's stream to the version, as Follow does on an event or a
@@ -184,7 +195,8 @@ func TestCatchUpIgnoresAResetOfAStreamNotCovered(t *testing.T) {
 	rec := &Recorder{}
 	reach(rec, KindAllocations, "200")
 	rec.stream(KindInstances, nil).Reset("not this one")
-	res := catchUp(bg, noDeadlineT{t}, rec, listOf(map[Kinds]string{KindAllocations: "200"}), KindAllocations, "a read", WaitDeadline, func() {})
+	pause, _, wait := noWait()
+	res := catchUp(bg, noDeadlineT{t}, rec, listOf(map[Kinds]string{KindAllocations: "200"}), KindAllocations, "a read", wait, pause)
 	if !res.OK() {
 		t.Errorf("result %+v; want OK", res)
 	}
@@ -230,10 +242,10 @@ func TestCatchUpDoesNotTakeANewerObjectForADeletion(t *testing.T) {
 	rec := &Recorder{}
 	rec.add(inst("i1", "inst-new", "210"), false)
 	reach(rec, KindInstances, "210")
-	pause, calls := pausing(func(int) { t.Error("the catch-up waited for an object created after its LIST") })
-	res := catchUp(bg, noDeadlineT{t}, rec, listOf(map[Kinds]string{KindInstances: "200"}), KindInstances, "a newer object", WaitDeadline, pause)
+	pause, calls, wait := noWait()
+	res := catchUp(bg, noDeadlineT{t}, rec, listOf(map[Kinds]string{KindInstances: "200"}), KindInstances, "a newer object", wait, pause)
 	if !res.OK() || *calls != 0 {
-		t.Errorf("result %+v after %d pauses; want OK with none", res, *calls)
+		t.Errorf("result %+v after %d pauses; want OK with none: the catch-up waited for an object created after its LIST", res, *calls)
 	}
 }
 
@@ -248,8 +260,8 @@ func TestCatchUpIgnoresWhatIsAheadDeletedOrNotCovered(t *testing.T) {
 	reach(rec, KindAllocations, "50")
 	l := listOf(map[Kinds]string{KindInstances: "200", KindAllocations: "200"},
 		listed(KindInstances, "i1", "inst-a", "250"), listed(KindAllocations, "a1", "alloc-behind", "60"))
-	pause, calls := pausing(func(int) {})
-	if res := catchUp(bg, noDeadlineT{t}, rec, l, KindInstances, "covered", time.Minute, pause); !res.OK() || *calls != 0 {
+	pause, calls, wait := noWait()
+	if res := catchUp(bg, noDeadlineT{t}, rec, l, KindInstances, "covered", wait, pause); !res.OK() || *calls != 0 {
 		t.Errorf("the Instances: result %+v after %d pauses; want OK with none", res, *calls)
 	}
 }
@@ -298,8 +310,8 @@ func TestCatchUpReportsALostEventOnceAndKeepsItLost(t *testing.T) {
 	if !res.Lost("a1") || !res.Lost("i1") || res.Lost("other") {
 		t.Errorf("Lost() of the reported objects: %v %v %v", res.Lost("a1"), res.Lost("i1"), res.Lost("other"))
 	}
-	pause2, calls := pausing(func(int) {})
-	again := catchUp(bg, noDeadlineT{t}, rec, l, KindInstances|KindAllocations, "the next site", time.Minute, pause2)
+	pause2, calls, wait := noWait()
+	again := catchUp(bg, noDeadlineT{t}, rec, l, KindInstances|KindAllocations, "the next site", wait, pause2)
 	if *calls != 0 {
 		t.Errorf("the next catch-up waited: %d pauses, want none", *calls)
 	}
@@ -309,7 +321,8 @@ func TestCatchUpReportsALostEventOnceAndKeepsItLost(t *testing.T) {
 	if again.OK() || !again.Lost("a1") || !again.Lost("i1") {
 		t.Errorf("the next catch-up: %+v; want the objects still lost, and not OK", again)
 	}
-	onlyAllocs := catchUp(bg, noDeadlineT{t}, rec, listOf(map[Kinds]string{KindAllocations: "200"}), KindAllocations, "one kind", time.Minute, func() {})
+	pause3, _, wait3 := noWait()
+	onlyAllocs := catchUp(bg, noDeadlineT{t}, rec, listOf(map[Kinds]string{KindAllocations: "200"}), KindAllocations, "one kind", wait3, pause3)
 	if !onlyAllocs.Lost("a1") || onlyAllocs.Lost("i1") {
 		t.Errorf("a catch-up of the Allocations: %+v; want a1 lost and the Instance not named", onlyAllocs)
 	}
@@ -350,7 +363,8 @@ func TestCatchUpCutByTheTestDeadlineIsNotKnown(t *testing.T) {
 		t.Errorf("the problem %q; want not known", p)
 	}
 	rec.add(inst("i1", "inst-a", "105"), false)
-	if later := catchUp(bg, noDeadlineT{t}, rec, l, KindInstances, "later", time.Minute, func() {}); !later.OK() {
+	pauseLater, _, waitLater := noWait()
+	if later := catchUp(bg, noDeadlineT{t}, rec, l, KindInstances, "later", waitLater, pauseLater); !later.OK() {
 		t.Errorf("a later catch-up: %+v; want OK once the watch has it", later)
 	}
 }
@@ -367,7 +381,7 @@ func TestCatchUpStopsAtItsContext(t *testing.T) {
 			cancel()
 		}
 	})
-	res := catchUp(ctx, noDeadlineT{t}, rec, listOf(map[Kinds]string{KindAllocations: "200"}), KindAllocations, "a row's end", WaitDeadline, pause)
+	res := catchUp(ctx, noDeadlineT{t}, rec, listOf(map[Kinds]string{KindAllocations: "200"}), KindAllocations, "a row's end", 5*time.Second, pause)
 	if *calls != 2 || res.OK() || len(res.Missing) != 0 || !strings.Contains(res.Unknown, "cut short by a deadline") {
 		t.Errorf("result %+v after %d pauses; want it cut short at the second, nothing lost", res, *calls)
 	}
@@ -413,9 +427,10 @@ func TestCatchUpWhenItCannotTell(t *testing.T) {
 	rec.add(inst("i1", "inst-a", "not-a-number"), false)
 	reach(rec, KindInstances, "100")
 	failing := func() (listing, error) { return listing{}, errors.New("connection refused") }
-	res := catchUp(bg, noDeadlineT{t}, rec, failing, KindInstances, "a failing LIST", time.Minute, func() { t.Error("waited on a LIST that failed") })
-	if res.OK() || !strings.Contains(res.Unknown, "could not be listed") || !strings.Contains(res.Unknown, "connection refused") || len(res.Missing) != 0 {
-		t.Errorf("a failing LIST: %+v", res)
+	pause, calls, wait := noWait()
+	res := catchUp(bg, noDeadlineT{t}, rec, failing, KindInstances, "a failing LIST", wait, pause)
+	if res.OK() || !strings.Contains(res.Unknown, "could not be listed") || !strings.Contains(res.Unknown, "connection refused") || len(res.Missing) != 0 || *calls != 0 {
+		t.Errorf("a failing LIST: %+v after %d pauses; want not known, with no wait", res, *calls)
 	}
 	for name, c := range map[string]struct {
 		rec  *Recorder
@@ -427,9 +442,10 @@ func TestCatchUpWhenItCannotTell(t *testing.T) {
 		"the collection's version, with nothing listed":           {&Recorder{}, listOf(map[Kinds]string{KindInstances: "abc"}), "abc"},
 		"no collection version":                                   {&Recorder{}, listOf(nil), "collection"},
 	} {
-		res := catchUp(bg, noDeadlineT{t}, c.rec, c.l, KindInstances, name, time.Minute, func() { t.Errorf("%s: waited on a version that does not parse", name) })
-		if res.OK() || !strings.Contains(res.Unknown, c.says) || len(res.Missing) != 0 {
-			t.Errorf("%s: %+v; want not known, saying %q, nothing lost", name, res, c.says)
+		pause, calls, wait := noWait()
+		res := catchUp(bg, noDeadlineT{t}, c.rec, c.l, KindInstances, name, wait, pause)
+		if res.OK() || !strings.Contains(res.Unknown, c.says) || len(res.Missing) != 0 || *calls != 0 {
+			t.Errorf("%s: %+v after %d pauses; want not known at once, saying %q, nothing lost", name, res, *calls, c.says)
 		}
 	}
 }
