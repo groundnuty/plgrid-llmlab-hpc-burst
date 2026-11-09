@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -28,11 +29,18 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/fake"
 )
 
+// newlineName is a command name with a newline in it: /proc/<pid>/stat then
+// spans two lines, and a reader that takes the first line sees half a record.
+const newlineName = "line\nbreak"
+
 // dieWithLoop is the helper host: a run-mode platform with one batch job whose
 // script starts a loop in the background and waits for it. It writes
 // "<shell pid> <loop pid>" to readyFile once both run, and is killed by
-// SIGKILL when the file readyFile.go exists, with no Close and no cleanup.
-func dieWithLoop(root, readyFile string) int {
+// SIGKILL when the file readyFile.go exists, with no Close and no cleanup. With
+// named set the loop runs under a command name with a newline in it: the shell
+// itself, started through a symlink of that name, so the kernel's name for the
+// process is the link's.
+func dieWithLoop(root, readyFile string, named bool) int {
 	home := filepath.Join(root, "home", "example-user")
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		return 2
@@ -41,6 +49,14 @@ func dieWithLoop(root, readyFile string) int {
 	s := p.Login(Login{User: "example-user", Env: map[string]string{"HOME": home}})
 	loopFile := filepath.Join(root, "loop-pid")
 	wrap := foreverLoop + " & echo $! > " + loopFile + "; wait"
+	if named {
+		link := filepath.Join(root, newlineName)
+		if err := os.Symlink(jobShell, link); err != nil {
+			return 2
+		}
+		// printf makes the newline, so the wrap holds none and no single quote.
+		wrap = `n=$(printf "line\nbreak"); "` + root + `/$n" -c "` + foreverLoop + `" & echo $! > ` + loopFile + "; wait"
+	}
 	res, err := s.Run(context.Background(), slurm.Command{Line: "sbatch --parsable '--wrap=" + wrap + "'"})
 	if err != nil || res.ExitCode != 0 {
 		return 2
@@ -109,10 +125,26 @@ func procsUnder(root string) []int {
 // left, found by its directory. The loop, the shell and the loop's child were
 // all alive before the death.
 func TestABackgroundChildOfAJobEndsWhenItsHostIsKilled(t *testing.T) {
+	hostKilledLeavesNothing(t, "die-with-loop", "")
+}
+
+// The same with a loop whose command name holds a newline, which a keeper that
+// reads one line of /proc/<pid>/stat does not recognise as the job's: such a
+// process is an ordinary member of the session and must end with it.
+func TestABackgroundChildNamedWithANewlineEndsWhenItsHostIsKilled(t *testing.T) {
+	hostKilledLeavesNothing(t, "die-with-named-loop", newlineName+"\n")
+}
+
+// hostKilledLeavesNothing runs the helper host, kills it by SIGKILL once its
+// job's shell and loop run, and waits for nothing of the run to be left. A
+// non-empty comm is the kernel's name for the loop (with its newline), which
+// it checks before the death.
+func hostKilledLeavesNothing(t *testing.T, mode, comm string) {
+	t.Helper()
 	root := t.TempDir()
 	ready := filepath.Join(root, "ready")
 	cmd := exec.Command(os.Args[0], root, ready)
-	cmd.Env = append(os.Environ(), helperEnv+"=die-with-loop")
+	cmd.Env = append(os.Environ(), helperEnv+"="+mode)
 	var log strings.Builder
 	cmd.Stdout, cmd.Stderr = &log, &log
 	if err := cmd.Start(); err != nil {
@@ -146,6 +178,11 @@ func TestABackgroundChildOfAJobEndsWhenItsHostIsKilled(t *testing.T) {
 	// case the parent-death signal does not reach.
 	if shell == loop || statField(t, loop, 4) != shell || statField(t, loop, 6) != shell {
 		t.Fatalf("loop %d is not a background child of the batch shell %d in its session", loop, shell)
+	}
+	if comm != "" {
+		if got, err := os.ReadFile("/proc/" + strconv.Itoa(loop) + "/comm"); err != nil || string(got) != comm {
+			t.Fatalf("the loop %d is named %q (%v), want %q: the test would not cover a newline in the name", loop, got, err, comm)
+		}
 	}
 	// Both were alive, and the scan by directory finds them: a scan that found
 	// nothing would also report "none left" after the death.
@@ -213,5 +250,88 @@ func TestAJobsKeeperEndsWithTheJob(t *testing.T) {
 	}
 	if left := procsUnder(r.root); len(left) != 0 {
 		t.Fatalf("Close returned, and processes of the run are left under %s: %v", r.root, left)
+	}
+}
+
+// reapSeen is what the beforeReap hook saw of one job: the state letters of
+// /proc/<pid>/stat for its keeper and its batch shell, "" for a PID that names
+// nothing (a keeper that was stopped is reaped, so it names nothing).
+type reapSeen struct {
+	keeper, shell string
+}
+
+// watchReaps sets the hook of the moment before a batch shell is reaped. It
+// records the keeper's and the shell's state there, and the run, so a test can
+// wait for the run to settle. The keeper's session-ID kills stay safe only if
+// it is already gone at that moment: the reap frees the shell's PID, which is
+// the session ID the keeper kills by.
+func watchReaps(r *runRig) (seen func() []reapSeen, run func() *jobRun) {
+	var mu sync.Mutex
+	var got []reapSeen
+	var jr *jobRun
+	r.p.knobs.beforeReap = func(x *jobRun) {
+		s := reapSeen{keeper: procState(x.keeper.cmd.Process.Pid), shell: procState(x.pid)}
+		mu.Lock()
+		got, jr = append(got, s), x
+		mu.Unlock()
+	}
+	return func() []reapSeen { mu.Lock(); defer mu.Unlock(); return append([]reapSeen(nil), got...) },
+		func() *jobRun { mu.Lock(); defer mu.Unlock(); return jr }
+}
+
+// A job that ends in order has its keeper stopped, and reaped, before its
+// batch shell is reaped. While the shell is a zombie it holds its PID, the
+// session ID; after the reap the ID is free for an unrelated session, and a
+// keeper that still ran then would kill that session if the host died at that
+// moment. The test does not reuse an ID: it looks at the moment before the
+// reap, where the keeper must already be gone and the shell must still be there.
+func TestAJobsKeeperIsStoppedBeforeItsShellIsReaped(t *testing.T) {
+	r := newRunRig(t, RunMode{})
+	seen, _ := watchReaps(r)
+	id := r.submit("exit 0")
+	r.waitFinished(id)
+	got := seen()
+	if len(got) != 1 {
+		t.Fatalf("the shell was reaped %d times, want 1: %v", len(got), got)
+	}
+	if got[0].keeper != "" || got[0].shell != "Z" {
+		t.Fatalf("just before the shell was reaped, its keeper was in state %q (want %q: stopped and reaped) and the shell in state %q (want %q: a zombie, still holding its session ID)",
+			got[0].keeper, "", got[0].shell, "Z")
+	}
+}
+
+// The same on the path of a job whose exit status cannot be read (waitFailed):
+// the shell is killed, the keeper stopped, and only then is the shell reaped.
+// The real waitid does not fail on a child, so the test makes the read of the
+// status fail through the exitStatus seam. Close reports that error and ends
+// the keeper all the same.
+func TestAFailedWaitStopsTheKeeperBeforeItReapsTheShell(t *testing.T) {
+	mode := RunMode{}
+	r := newRunRigCfg(t, Config{Run: &mode, NotListed: NotListedAthena}, false)
+	proc := *r.p.knobs.proc
+	proc.exitStatus = func(int) (syscall.WaitStatus, error) { return 0, errors.New("injected: status unreadable") }
+	r.p.knobs.proc = &proc
+	seen, run := watchReaps(r)
+	r.submit("exit 0")
+	var jr *jobRun
+	waitFor(t, "the failed wait to reach the reap", func() bool { jr = run(); return jr != nil })
+	select {
+	case <-jr.settled:
+	case <-time.After(waitDeadline):
+		t.Fatalf("the run did not settle")
+	}
+	got := seen()
+	if len(got) != 1 {
+		t.Fatalf("the shell was reaped %d times, want 1: %v", len(got), got)
+	}
+	if got[0].keeper != "" || got[0].shell == "" {
+		t.Fatalf("just before the shell was reaped, its keeper was in state %q (want %q: stopped and reaped) and the shell in state %q (want a process that is not yet reaped)",
+			got[0].keeper, "", got[0].shell)
+	}
+	if err := r.p.Close(); err == nil || !strings.Contains(err.Error(), "injected: status unreadable") {
+		t.Fatalf("Close: %v, want the injected error", err)
+	}
+	if left := procsUnder(r.root); len(left) != 0 {
+		t.Fatalf("processes of the run are left under %s: %v", r.root, left)
 	}
 }

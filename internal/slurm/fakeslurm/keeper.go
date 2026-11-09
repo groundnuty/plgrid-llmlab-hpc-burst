@@ -18,7 +18,9 @@ package fakeslurm
 // keeper exits. End of input before the second line means the host died.
 // Close, scancel, the time limit and a job that ends by itself all go through
 // wait (runwait.go), which sends the second line and reaps the keeper before
-// the execution is marked done, so a Close that returns leaves no keeper.
+// it reaps the batch shell, so a Close that returns leaves no keeper. The order
+// matters: the keeper kills by session ID, the shell's reap frees that ID, and
+// a keeper still armed then could kill an unrelated session that took it.
 //
 // Limits: a process that called setsid leaves the job's session and is not
 // found; the keeper finds the job's processes by session ID alone, as the
@@ -41,8 +43,9 @@ import (
 
 // keeperScript is the keeper: POSIX sh, builtins only but sleep. Fields 1 to 4
 // of what follows the command name in /proc/<pid>/stat are state, parent,
-// process group and session; the command name may hold spaces and
-// parentheses, so it is cut at its last ") ". A zombie (Z) or a dead process
+// process group and session; the command name may hold spaces, parentheses
+// and newlines, so the whole record is read (a single read would stop at the
+// name's newline) and cut at its last ") ". A zombie (Z) or a dead process
 // (X) is not counted, since KILL cannot end it and its parent reaps it. The
 // pass count bounds the loop: two quiet passes in a row end it, 400 passes
 // (about 20 s) end it anyway.
@@ -53,7 +56,9 @@ quiet=0 pass=0
 while [ "$quiet" -lt 2 ] && [ "$pass" -lt 400 ]; do
 	pass=$((pass + 1)) hit=
 	for st in /proc/[0-9]*/stat; do
-		read -r line < "$st" || continue
+		line=
+		while IFS= read -r l; do line="$line $l"; done < "$st"
+		[ -n "$line" ] || continue
 		set -- ${line##*) }
 		if [ "$4" = "$sid" ] && [ "$1" != Z ] && [ "$1" != X ]; then
 			pid=${st#/proc/}

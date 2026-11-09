@@ -25,7 +25,8 @@ const waitDeadline = 60 * time.Second
 // for at most two minutes. "die-with-jobs <root> <file> <how>" is a host of
 // a run-mode platform that dies without Close (procstart_test.go).
 // "die-with-loop <root> <file>" is one whose job starts a loop in the
-// background, killed by SIGKILL (keeper_test.go).
+// background, killed by SIGKILL (keeper_test.go); "die-with-named-loop" is the
+// same with a command name that holds a newline.
 const helperEnv = "FAKESLURM_TEST_HELPER"
 
 func TestMain(m *testing.M) {
@@ -37,7 +38,9 @@ func TestMain(m *testing.M) {
 	case "die-with-jobs":
 		os.Exit(dieWithJobs(os.Args[1], os.Args[2], os.Args[3]))
 	case "die-with-loop":
-		os.Exit(dieWithLoop(os.Args[1], os.Args[2]))
+		os.Exit(dieWithLoop(os.Args[1], os.Args[2], false))
+	case "die-with-named-loop":
+		os.Exit(dieWithLoop(os.Args[1], os.Args[2], true))
 	}
 	os.Exit(m.Run())
 }

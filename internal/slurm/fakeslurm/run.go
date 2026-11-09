@@ -128,8 +128,9 @@ type runKnobs struct {
 	// Hooks, called with no lock held: terminateEnter when a terminator
 	// goroutine starts and terminateDone when it ends, limitFired when a time
 	// limit timer's callback starts and limitDecided when it has decided
-	// whether the job ended.
+	// whether the job ended, beforeReap just before the batch shell is reaped.
 	terminateEnter, terminateDone func(r *jobRun)
+	beforeReap                    func(r *jobRun)
 	limitFired                    func(r *jobRun)
 	limitDecided                  func(r *jobRun, ended bool)
 }
