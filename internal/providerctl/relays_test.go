@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -236,11 +237,16 @@ func TestCredentialsGen(t *testing.T) {
 }
 
 // The emit site of RelayFailed (HBEP-6, What ends a relay; HBEP-8): a relay
-// that ends for good for a reason other than superseded or the job's end, here
-// more restarts than the limit, raises RelayFailed regarding its Allocation,
-// naming the channel and the cause.
+// that ends for good for a reason other than superseded or the job's end,
+// here srun's step-limit refusal, raises RelayFailed regarding its
+// Allocation, naming the channel and the cause. The relays' ssh is a stub
+// that prints srun's refusal, as srun prints it, and exits 1.
 func TestARelayThatEndsForGoodRaisesRelayFailed(t *testing.T) {
-	e := newEnv(t, hostDialedOn(hostdial.NewHosts(), 2))
+	stub := filepath.Join(t.TempDir(), "ssh")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\necho 'srun: error: Unable to create step for job 1: Step limit reached for this job' >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	e := newEnv(t, func(e *env) { hostDialedWith(e, hostdial.NewHosts(), 1000); e.opts.Relays.SSHBinary = stub })
 	runRelays(e)
 	e.newAlloc("alloc-a")
 	e.run("alloc-a", 4)
@@ -251,8 +257,8 @@ func TestARelayThatEndsForGoodRaisesRelayFailed(t *testing.T) {
 		return len(rs) == 2 && rs[0].Final && rs[1].Final
 	})
 	for _, r := range relaysOf(e, tag) {
-		if !strings.Contains(r.FinalCause, "more than 2 restarts") {
-			t.Errorf("relay %s ended %q, want more than 2 restarts", r.Channel, r.FinalCause)
+		if !strings.Contains(r.FinalCause, "step limit") {
+			t.Errorf("relay %s ended %q, want srun's step-limit refusal", r.Channel, r.FinalCause)
 		}
 	}
 }

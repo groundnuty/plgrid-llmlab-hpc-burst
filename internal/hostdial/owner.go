@@ -24,7 +24,8 @@ import (
 // The relay owner's timings (HBEP-6, What ends a relay: "a backoff of 1 s
 // doubling to 30 s with jitter (first starts jittered too ...), reset once a
 // relay has stayed up for 60 s"; "more than 120 restarts of one channel
-// within an hour" is final).
+// within an hour" is final, counting only restarts whose session came up and
+// then dropped: the science agent's ruling on #301, 9 Nov 2026).
 const (
 	DefaultMinBackoff    = time.Second
 	DefaultMaxBackoff    = 30 * time.Second
@@ -114,7 +115,11 @@ type OwnerOptions struct {
 	// means the defaults.
 	MinBackoff, MaxBackoff, ResetAfter time.Duration
 	// RestartLimit and RestartWindow: more restarts of one channel than the
-	// limit within the window is a final end; zero means 120 an hour.
+	// limit within the window, counting only those after a session that came
+	// up and dropped, is a final end; zero means 120 an hour. A relay that
+	// fails before its session comes up (the login node down, ssh refused,
+	// agent not ready, no preamble) is never capped: it retries at the
+	// backoff's cap, bounded by the job's steps and by its end.
 	RestartLimit  int
 	RestartWindow time.Duration
 	// StopGrace is how long a stopped relay has after TERM; zero means
@@ -337,8 +342,9 @@ type RelayState struct {
 	LastEnded time.Time
 	LastWait  time.Duration
 	// Streams and Joined count the streams the job opened over this relay
-	// and those joined to the channel's port, over all its processes.
-	Streams, Joined uint64
+	// and those joined to the channel's port, and Sessions the sessions that
+	// came up, over all its processes.
+	Streams, Joined, Sessions uint64
 }
 
 // Relays lists the relays the Owner keeps, by tag then channel.
@@ -440,7 +446,7 @@ type relay struct {
 	finalCause string
 	lastEnded  time.Time
 	lastWait   time.Duration
-	restarts   []time.Time // the starts within the restart window
+	restarts   []time.Time // the drops of sessions that came up, within the restart window
 	stats      ServeStats
 }
 
@@ -450,7 +456,7 @@ func (r *relay) state() RelayState {
 	return RelayState{Tag: r.t.Tag, Channel: r.ch, JobID: r.t.JobID, PID: r.pid, Starts: r.starts, Since: r.since,
 		Epoch: r.epoch, Seq: r.seq, LastRefusal: r.refusal, LastEnd: r.lastEnd, LastFailure: r.failure,
 		Final: r.final, FinalCause: r.finalCause, Gen: r.t.Gen, LastEnded: r.lastEnded, LastWait: r.lastWait,
-		Streams: r.stats.Streams.Load(), Joined: r.stats.Joined.Load()}
+		Streams: r.stats.Streams.Load(), Joined: r.stats.Joined.Load(), Sessions: r.stats.Sessions.Load()}
 }
 
 func (r *relay) refuse(why string) {
@@ -489,7 +495,9 @@ func (r *relay) loop(ctx context.Context) {
 			return
 		case <-time.After(wait):
 		}
+		before := r.stats.Sessions.Load()
 		up, started, kind, cause := r.once(ctx)
+		cameUp := r.stats.Sessions.Load() > before
 		if ctx.Err() != nil {
 			return
 		}
@@ -501,11 +509,14 @@ func (r *relay) loop(ctx context.Context) {
 			if up >= o.ResetAfter {
 				backoff = o.MinBackoff
 			}
-			if r.restartsInWindow(time.Now()) > o.RestartLimit {
+			// Only a session that came up and dropped counts (the science
+			// agent's ruling on #301): a relay that never comes up retries
+			// at the backoff's cap for as long as the job runs.
+			if cameUp && r.restartsInWindow(time.Now()) > o.RestartLimit {
 				r.mu.Lock()
 				last := r.lastEnd
 				r.mu.Unlock()
-				r.end(EndFailed, fmt.Sprintf("more than %d restarts of the %s channel within %s; the last end: %s", o.RestartLimit, r.ch, o.RestartWindow, last))
+				r.end(EndFailed, fmt.Sprintf("more than %d restarts of the %s channel within %s after sessions that came up; the last end: %s", o.RestartLimit, r.ch, o.RestartWindow, last))
 				return
 			}
 		}
@@ -514,8 +525,9 @@ func (r *relay) loop(ctx context.Context) {
 	}
 }
 
-// restartsInWindow records a start at now and counts the restarts within the
-// restart window.
+// restartsInWindow records, at now, the drop of a session that came up, which
+// a restart follows, and counts those within the restart window: the 121st
+// in an hour, at the default limit of 120, is final.
 func (r *relay) restartsInWindow(now time.Time) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -526,7 +538,7 @@ func (r *relay) restartsInWindow(now time.Time) int {
 		}
 	}
 	r.restarts = append(keep, now)
-	return len(r.restarts) - 1 // the first start is no restart
+	return len(r.restarts)
 }
 
 // jitter is d less a random part of up to half of it, so restarts of many

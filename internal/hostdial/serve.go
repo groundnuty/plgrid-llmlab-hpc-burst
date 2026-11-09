@@ -23,6 +23,9 @@ type ServeStats struct {
 	// Streams counts the streams the job opened; Joined those whose target
 	// dial succeeded.
 	Streams, Joined atomic.Uint64
+	// Sessions counts the sessions that came up: the preamble read and the
+	// multiplexed session started.
+	Sessions atomic.Uint64
 }
 
 // Serve runs the control-plane end of one relay's session over rwc, the relay
@@ -69,6 +72,7 @@ func Serve(ctx context.Context, rwc io.ReadWriteCloser, target, uid string, log 
 		_ = rwc.Close()
 		return err
 	}
+	stats.Sessions.Add(1)
 	stop := context.AfterFunc(ctx, func() { _ = sess.Close() })
 	defer stop()
 	var wg sync.WaitGroup

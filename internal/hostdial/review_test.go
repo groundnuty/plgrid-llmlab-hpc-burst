@@ -321,8 +321,11 @@ func TestHostDialedAStepLimitRefusalEndsTheRelayWithRelayFailed(t *testing.T) {
 	}
 }
 
-// What ends a relay: more restarts of one channel than the limit within the
-// window (120 an hour; 3 here) ends it for good, with RelayFailed.
+// What ends a relay: more restarts than the limit within the window (120 an
+// hour; 3 here) of sessions that came up and then dropped end it for good,
+// with RelayFailed naming the last end's cause (the science agent's ruling on
+// #301). Each kill comes once the relay's session is up, so each counts: the
+// fourth is final.
 func TestHostDialedTooManyRestartsEndTheRelayWithRelayFailed(t *testing.T) {
 	w := newWorld(t)
 	j := w.submit("hb-relay-res-0123456789ab", 30*time.Second)
@@ -331,25 +334,51 @@ func TestHostDialedTooManyRestartsEndTheRelayWithRelayFailed(t *testing.T) {
 	tg := w.target(j)
 	f.hook(&tg)
 	own.Want(tg)
-	killed := map[int]bool{}
-	waitFor(t, 2*time.Minute, "the serving relay ended for good after repeated kills", func() bool {
+	var killed uint64
+	waitFor(t, 2*time.Minute, "the serving relay ended for good after repeated drops of its sessions", func() bool {
 		r := relayOf(own, j.tag, serving)
 		if r.Final {
 			return true
 		}
-		if r.PID != 0 && !killed[r.PID] {
+		if r.PID != 0 && r.Sessions > killed {
 			_ = syscall.Kill(r.PID, syscall.SIGKILL)
-			killed[r.PID] = true
+			killed = r.Sessions
 		}
 		return false
 	})
 	r := relayOf(own, j.tag, serving)
-	// More than 3 restarts is the fourth restart: the fifth start.
-	if !strings.Contains(r.FinalCause, "more than 3 restarts") || r.Starts != 5 {
-		t.Errorf("the serving relay %+v: want a final end after 5 starts, more than 3 restarts", r)
+	if !strings.Contains(r.FinalCause, "more than 3 restarts") || r.Sessions != 4 {
+		t.Errorf("the serving relay %+v: want a final end after 4 sessions that came up and dropped", r)
 	}
 	if got := f.list(); len(got) != 1 || !strings.Contains(got[0], "more than 3 restarts") || !strings.Contains(got[0], "the last end: retried") {
 		t.Errorf("RelayFailed %q: want one, naming the restarts and the last end's cause (N3)", got)
+	}
+}
+
+// Failures before a session comes up are never capped (the science agent's
+// ruling on #301): a relay whose agent is not ready restarts far past the
+// limit of 3 and keeps retrying, with no final end and no RelayFailed; the
+// job's steps and its end bound it.
+func TestHostDialedPreSessionFailuresAreNeverCapped(t *testing.T) {
+	w := newWorld(t)
+	j := w.allocation("hb-relay-pre-0123456789ab")
+	if err := os.WriteFile(agentapi.RelaySocketFile(j.allocDir), []byte(filepath.Join(w.base, "gone.sock")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	j.id = w.sbatch(j.tag, "exec sleep 600")
+	waitRunning(t, w, j)
+	own, _, _ := w.owner(hostdial.OwnerOptions{MinBackoff: 20 * time.Millisecond, MaxBackoff: 40 * time.Millisecond, RestartLimit: 3})
+	var f failures
+	tg := w.target(j)
+	f.hook(&tg)
+	own.Want(tg)
+	waitFor(t, 2*time.Minute, "the serving relay restarted far past the limit", func() bool { return relayOf(own, j.tag, serving).Starts >= 12 })
+	r := relayOf(own, j.tag, serving)
+	if r.Final || r.Sessions != 0 || !strings.Contains(r.LastEnd, "agent not ready") {
+		t.Errorf("the serving relay %+v: want retried, never final, no session up, agent not ready", r)
+	}
+	if got := f.list(); len(got) != 0 {
+		t.Errorf("pre-session failures raised RelayFailed: %q", got)
 	}
 }
 
