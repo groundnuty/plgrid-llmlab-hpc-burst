@@ -72,15 +72,19 @@ func TestTheAccountingRowOnHeliosStartsOnlyWithNoJobInQOSNow(t *testing.T) {
 }
 
 // The NOT RUN protocol: the row's test skipped once at the top level, wrote the marker, and exited 0; the script
-// reports NOT RUN apart from PASS and FAIL and exits 3, after the same cleanup. It is for the rows with a bound on
-// their wait: the Helios accounting row (its start wait, 10 minutes) and the two rows that hold QOS now's GPU for
-// hours (their wait in the queue, 30 minutes, issue #222). A row with neither (the Athena twin, the handover) does
-// not take the protocol: the same skip is a failure there.
-func TestTheRowsWithAWaitBoundCanBeNotRunAndNoOtherRowCan(t *testing.T) {
+// reports NOT RUN apart from PASS and FAIL and exits 3, after the same cleanup. It is for every cluster row, whichever
+// bound it has (#272; the table over all of them is neverstarted_test.go): the Helios accounting row (its start wait,
+// 10 minutes), the two rows that hold QOS now's GPU for hours (their wait in the queue, 30 minutes, issue #222) and,
+// since the ruling of 8 Nov 2026, the rows with no slot, whose wait in the queue is 2 hours: the Athena twin, the
+// handover and the tunnel hour on Athena. A queue wait tests nothing, so it is never a FAIL.
+func TestEveryRowCanBeNotRunWhateverItsBound(t *testing.T) {
 	for _, c := range []struct{ row, line string }{
 		{"gpu-accounting-helios", "NOT RUN (a job did not start within 10 min of its acceptance and was cancelled by its tag; not a failure)"},
 		{"alpha-helios-nooverlap", "NOT RUN (a job was still pending after 30 min in the queue and was cancelled by its tag; not a failure)"},
 		{"tunnel-hour-helios", "NOT RUN (a job was still pending after 30 min in the queue and was cancelled by its tag; not a failure)"},
+		{"gpu-accounting-athena", "NOT RUN (a job was still pending after 120 min in the queue and was cancelled by its tag; not a failure)"},
+		{"alpha-athena-handover", "NOT RUN (a job was still pending after 120 min in the queue and was cancelled by its tag; not a failure)"},
+		{"tunnel-hour-athena", "NOT RUN (a job was still pending after 120 min in the queue and was cancelled by its tag; not a failure)"},
 	} {
 		t.Run(c.row, func(t *testing.T) {
 			w := newAlphaWorld(t)
@@ -91,19 +95,6 @@ func TestTheRowsWithAWaitBoundCanBeNotRunAndNoOtherRowCan(t *testing.T) {
 			w.contains(res, c.row+": "+c.line, "cleanup: left behind 0")
 			if strings.Contains(res.out, c.row+": FAIL") || strings.Contains(res.out, c.row+": PASS") {
 				t.Errorf("a NOT RUN run was also a failure or a pass:\n%s", res.out)
-			}
-		})
-	}
-	for _, row := range []string{"gpu-accounting-athena", "alpha-athena-handover", "tunnel-hour-athena"} {
-		t.Run(row, func(t *testing.T) {
-			w := newAlphaWorld(t)
-			res := w.run([]string{"STUB_ALPHA_MODE=not-run"}, "--run", row, "--yes")
-			if res.code != 1 {
-				t.Fatalf("exit %d, want 1: a skip is a failure for a row with no bound on its wait:\n%s", res.code, res.out)
-			}
-			w.contains(res, row+": FAIL")
-			if strings.Contains(res.out, "NOT RUN") {
-				t.Errorf("a row with no bound on its wait was reported NOT RUN:\n%s", res.out)
 			}
 		})
 	}

@@ -307,6 +307,7 @@ func TestAJobPendingPastTheBoundIsCancelledByItsTag(t *testing.T) {
 		wantNotRun, ownerJob   bool
 	}{
 		{"alpha-helios-nooverlap", 10 * time.Minute, "9m59s", "10m1s", true, true},
+		{"alpha-athena-handover", 10 * time.Minute, "9m59s", "10m1s", true, false},
 		{"tunnel-hour-helios", 30 * time.Minute, "29m59s", "30m1s", true, true},
 		{"tunnel-hour-athena", time.Minute, "59s", "1m1s", true, false},
 	} {

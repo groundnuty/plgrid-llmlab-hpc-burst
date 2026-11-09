@@ -40,7 +40,7 @@ const (
 // dryFaults lists every fault the stand-in knows, per row family. An unknown
 // name stops the run: a typo must not pass as "no fault".
 var dryFaults = map[string][]string{
-	"handover":  {"cut", "no-stream", "two-restarts", "no-restart", "no-handover", "late-successor", "wrong-partition", "untagged", "unattributed", "adds-helios", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "no-responses"},
+	"handover":  {"cut", "no-stream", "two-restarts", "no-restart", "no-handover", "late-successor", "wrong-partition", "untagged", "unattributed", "adds-helios", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "no-responses", "pend-past-bound"},
 	"nooverlap": {"nocap", "nogap", "noslot", "cut", "no-stream", "late-submit", "untagged", "wrong-partition", "adds-athena", "default-lease", "short-lease", "no-release-when-idle", "duplicate-tag", "extra-allocation", "two-restarts", "no-restart", "pend-past-bound"},
 	"tunnel":    {"short", "cut", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition", "adds-other-cluster", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "past-deadline", "past-drain", "no-drain-start", "stream-cut-error", "reconnect", "disconnected", "sparse-samples", "late-first-sample", "no-concurrency", "slow-streams", "no-idle-gap", "no-long-stream", "no-back-to-back", "no-load-rate", "slow-start", "no-large", "large-apart", "response-overlap", "no-upload-rate", "no-download-rate", "upload-not-under-load", "pend-past-bound"},
 }
@@ -359,6 +359,9 @@ func (d *drySteps) partitionFor(second bool) string {
 
 func (d *drySteps) Handover(_ context.Context, p Plan) (HandoverObs, error) {
 	t := d.t
+	if d.fault("pend-past-bound") {
+		return HandoverObs{}, d.pendPastBound(p)
+	}
 	tag0 := d.tag(p, "pre")
 	n0, id0 := d.submit(tag0, d.partitionFor(false), "")
 	j0 := d.running(id0)

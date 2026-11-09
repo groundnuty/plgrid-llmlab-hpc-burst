@@ -211,35 +211,48 @@ func TestEveryAlphaRowPassesItsDryRunAndEveryFaultFailsIt(t *testing.T) {
 	}
 }
 
-// A job of a row that holds QOS now's GPU for hours that is still pending when the wait in the queue runs out is
-// cancelled by its tag and the row is NOT RUN, exit 3 (issue #222, using #210's protocol): the owner's slot was busy,
-// try again later. The row's own test is the real one, in dry mode, with the owner's job holding the one GPU of the
-// fake QOS; the owner's job is left alone. The same overrun on a row with no such slot is a failure, exit 1, with no
-// marker: NOT RUN is for the slot rows only. The default bound is the issue's 30 minutes, written out here, not read
-// from the script; a wait the operator asks for is the one named. The dry run keeps the bound the script gives it
-// (PR 230, B1), and the test judges it by the states on the dry run's manual clock: the job still pending one second
-// before the bound, cancelled one second after it (the stand-in's two logged readings, written out per case), so a
-// bound a minute out in either direction fails the case, whatever the script announced.
-func TestAJobPendingPastTheBoundIsNotRunOnTheNowRowsAndAFailureElsewhere(t *testing.T) {
+// A job that is still pending when the wait in the queue runs out is cancelled by its tag and the row is NOT RUN,
+// exit 3, on EVERY row (the science agent's ruling of 8 Nov 2026, #272, replacing #230's failure for a row with no
+// slot; a queue wait tests nothing). The row's own test is the real one, in dry mode, with the owner's job holding the
+// one GPU of the fake QOS on the Helios rows (the owner's slot was busy: try again later), which is left alone, and the
+// job simply held on the Athena rows, which have no slot. The default bounds are written out here, not read from the
+// script: 30 minutes in the slot (issue #222) and 2 hours without; a wait the operator asks for is the one named. The
+// dry run keeps the bound the script gives it (PR 230, B1), and the test judges it by the states on the dry run's
+// manual clock: the job still pending one second before the bound, cancelled one second after it (the stand-in's two
+// logged readings, written out per case), so a bound a minute out in either direction fails the case, whatever the
+// script announced. Rows on both sides of the slot are in the table: one with only slot rows would prove nothing, since
+// those were NOT RUN before the ruling.
+func TestAJobPendingPastTheBoundIsNotRunOnEveryRow(t *testing.T) {
 	real := realTestBinary(t, "HPCBURST_LIVECHECKS_ALPHA_TEST", alphaPkg)
 	realDir := filepath.Join(repoRoot(t), alphaPkg)
+	const (
+		pending30 = "NOT RUN (a job was still pending after 30 min in the queue and was cancelled by its tag; not a failure)"
+		pending2h = "NOT RUN (a job was still pending after 120 min in the queue and was cancelled by its tag; not a failure)"
+		firstEnd  = "NOT RUN (a job was still pending a minute before its deployment's first end and was cancelled by its tag; not a failure)"
+	)
 	for _, c := range []struct {
 		row, setting string
-		code         int
-		wantLine     string // "" for a failure
+		wantLine     string
 		still, gone  string // the stand-in's readings of the manual clock, since the job's submission
+		marker       string // a fragment of the marker's text, which names the bound for the script
 	}{
-		{"alpha-helios-nooverlap", "", 3, "NOT RUN (a job was still pending after 30 min in the queue and was cancelled by its tag; not a failure)", "29m59s", "30m1s"},
-		{"tunnel-hour-helios", "", 3, "NOT RUN (a job was still pending after 30 min in the queue and was cancelled by its tag; not a failure)", "29m59s", "30m1s"},
-		{"tunnel-hour-helios", "LIVE_PENDING_MAX_SECONDS=600", 3, "NOT RUN (a job was still pending after 10 min in the queue and was cancelled by its tag; not a failure)", "9m59s", "10m1s"},
-		{"alpha-helios-nooverlap", "LIVE_PENDING_MAX_SECONDS=90", 3, "NOT RUN (a job was still pending after 1 min 30 s in the queue and was cancelled by its tag; not a failure)", "1m29s", "1m31s"},
-		{"tunnel-hour-athena", "", 1, "", "1h59m59s", "2h0m1s"},
+		// The wait in the queue, in the one-job slot.
+		{"alpha-helios-nooverlap", "", pending30, "29m59s", "30m1s", "still pending after 30m0s;"},
+		{"tunnel-hour-helios", "", pending30, "29m59s", "30m1s", "still pending after 30m0s;"},
+		{"tunnel-hour-helios", "LIVE_PENDING_MAX_SECONDS=600", "NOT RUN (a job was still pending after 10 min in the queue and was cancelled by its tag; not a failure)", "9m59s", "10m1s", "still pending after 10m0s;"},
+		{"alpha-helios-nooverlap", "LIVE_PENDING_MAX_SECONDS=90", "NOT RUN (a job was still pending after 1 min 30 s in the queue and was cancelled by its tag; not a failure)", "1m29s", "1m31s", "still pending after 1m30s;"},
+		// The wait in the queue, with no slot: the 2 hours of the default, and what the operator asks for.
+		{"tunnel-hour-athena", "", pending2h, "1h59m59s", "2h0m1s", "still pending after 2h0m0s;"},
+		{"alpha-athena-handover", "", pending2h, "1h59m59s", "2h0m1s", "still pending after 2h0m0s;"},
+		{"alpha-athena-handover", "LIVE_PENDING_MAX_SECONDS=600", "NOT RUN (a job was still pending after 10 min in the queue and was cancelled by its tag; not a failure)", "9m59s", "10m1s", "still pending after 10m0s;"},
+		{"tunnel-hour-athena", "LIVE_PENDING_MAX_SECONDS=90", "NOT RUN (a job was still pending after 1 min 30 s in the queue and was cancelled by its tag; not a failure)", "1m29s", "1m31s", "still pending after 1m30s;"},
 		// A tunnel row's first clock stops a minute before its deployment's first end (the science agent's ruling on
 		// PR 255): at the default lease, 2 h 17 min, less the 15 min drain window and the minute, 2 h 1 min; at the
 		// longest, 4 h, 3 h 44 min. A job still pending then is NOT RUN on both clusters, whatever wait was asked.
-		{"tunnel-hour-athena", "LIVE_PENDING_MAX_SECONDS=10800", 3, "NOT RUN (a job was still pending a minute before its deployment's first end and was cancelled by its tag; not a failure)", "2h0m59s", "2h1m1s"},
-		{"tunnel-hour-helios", "LIVE_PENDING_MAX_SECONDS=10800", 3, "NOT RUN (a job was still pending a minute before its deployment's first end and was cancelled by its tag; not a failure)", "2h0m59s", "2h1m1s"},
-		{"tunnel-hour-athena", "LIVE_PENDING_MAX_SECONDS=86400 LIVE_TUNNEL_LEASE_MINUTES=240", 3, "NOT RUN (a job was still pending a minute before its deployment's first end and was cancelled by its tag; not a failure)", "3h43m59s", "3h44m1s"},
+		{"tunnel-hour-athena", "LIVE_PENDING_MAX_SECONDS=10800", firstEnd, "2h0m59s", "2h1m1s", "a minute before the deployment's first end"},
+		{"tunnel-hour-helios", "LIVE_PENDING_MAX_SECONDS=10800", firstEnd, "2h0m59s", "2h1m1s", "a minute before the deployment's first end"},
+		{"tunnel-hour-athena", "LIVE_PENDING_MAX_SECONDS=86400 LIVE_TUNNEL_LEASE_MINUTES=240", firstEnd, "3h43m59s", "3h44m1s", "a minute before the deployment's first end"},
+		{"tunnel-hour-helios", "LIVE_PENDING_MAX_SECONDS=86400 LIVE_TUNNEL_LEASE_MINUTES=240", firstEnd, "3h43m59s", "3h44m1s", "a minute before the deployment's first end"},
 	} {
 		t.Run(c.row+"/"+c.setting, func(t *testing.T) {
 			t.Parallel()
@@ -255,8 +268,8 @@ func TestAJobPendingPastTheBoundIsNotRunOnTheNowRowsAndAFailureElsewhere(t *test
 				env = append(env, kv)
 			}
 			res := w.run(env, "--run", c.row, "--yes")
-			if res.code != c.code {
-				t.Fatalf("exit %d, want %d:\n%s", res.code, c.code, res.out)
+			if res.code != 3 {
+				t.Fatalf("exit %d, want 3 (a job that never started is NOT RUN on every row):\n%s", res.code, res.out)
 			}
 			log, _ := os.ReadFile(filepath.Join(w.out(), c.row+".log"))
 			for _, want := range []string{
@@ -271,17 +284,6 @@ func TestAJobPendingPastTheBoundIsNotRunOnTheNowRowsAndAFailureElsewhere(t *test
 			if posts, _ := filepath.Glob(filepath.Join(w.out(), c.row+"-*", "posts.md")); len(posts) != 0 {
 				t.Errorf("a run that ended on the first clock left a text to post: %v", posts)
 			}
-			if c.wantLine == "" {
-				w.contains(res, c.row+": FAIL", "cleanup: left behind 0")
-				if strings.Contains(res.out, "NOT RUN") || len(markers) != 0 {
-					t.Errorf("a row with no slot ended as NOT RUN (markers %v):\n%s", markers, res.out)
-				}
-				// It failed for the overrun, not for something else.
-				if !strings.Contains(string(log), "was still pending when the wait in the queue ran out") {
-					t.Errorf("the test's log does not give the overrun as the reason:\n%s", log)
-				}
-				return
-			}
 			w.contains(res, c.row+": tests: 0 passed, 0 failed, 1 skipped", c.row+": "+c.wantLine, "cleanup: left behind 0")
 			if strings.Contains(res.out, c.row+": FAIL") || strings.Contains(res.out, c.row+": PASS") {
 				t.Errorf("a NOT RUN run was also reported as a pass or a failure:\n%s", res.out)
@@ -292,10 +294,45 @@ func TestAJobPendingPastTheBoundIsNotRunOnTheNowRowsAndAFailureElsewhere(t *test
 			if fi, err := os.Stat(markers[0]); err != nil || fi.Mode().Perm() != 0o600 {
 				t.Errorf("the marker: %v mode %v, want a file of mode 600", err, fi)
 			}
-			if b, _ := os.ReadFile(markers[0]); strings.Contains(string(b), "hb-") {
+			b, _ := os.ReadFile(markers[0])
+			if strings.Contains(string(b), "hb-") {
 				t.Errorf("the marker names a tag: %s", b)
 			}
+			// The marker names the bound that ran out, which the script's line then names.
+			if !strings.Contains(string(b), c.marker) {
+				t.Errorf("the marker %q does not say %q", b, c.marker)
+			}
 		})
+	}
+}
+
+// The accounting row with no slot: its wait in the queue is its first clock, and a job still pending past it is
+// cancelled by its tag and the row is NOT RUN too (#272), with no kept record and nothing to post. The real
+// conformance test, in dry mode: another job of the owner's fills a cap on the fake partition (queue-held), on a
+// clock that moves only when the wait sleeps. The dry world sets the row's wait to a minute, so the test's own text
+// says 1m0s; the script's line is the wait it announced, 2 h by default, written out here.
+func TestAnAccountingRowWithNoSlotThatPendedPastItsWaitIsNotRun(t *testing.T) {
+	real := realTestBinary(t, "HPCBURST_LIVECHECKS_CONF_TEST", confPkg)
+	w := newAlphaWorld(t)
+	w.installDry(dryWrapper, real, filepath.Join(repoRoot(t), confPkg))
+	res := w.run([]string{"STUB_DRY_FAULT=queue-held"}, "--run", "gpu-accounting-athena", "--yes")
+	if res.code != 3 {
+		t.Fatalf("exit %d, want 3:\n%s", res.code, res.out)
+	}
+	w.contains(res, "gpu-accounting-athena: tests: 0 passed, 0 failed, 1 skipped",
+		"gpu-accounting-athena: NOT RUN (a job was still pending after 120 min in the queue and was cancelled by its tag; not a failure)", "cleanup: left behind 0")
+	log, _ := os.ReadFile(filepath.Join(w.out(), "gpu-accounting-athena.log"))
+	if !strings.Contains(string(log), "NOT RUN: the job: a job was still pending after 1m0s in the queue") {
+		t.Errorf("the test's own text does not name the wait in the queue:\n%s", log)
+	}
+	markers, _ := filepath.Glob(filepath.Join(w.out(), "gpu-accounting-athena-*", "not-run.txt"))
+	if len(markers) != 1 {
+		t.Fatalf("want one not-run marker, found %v", markers)
+	}
+	for _, f := range []string{"posts.md", "record.json"} {
+		if m, _ := filepath.Glob(filepath.Join(w.out(), "gpu-accounting-athena-*", f)); len(m) != 0 {
+			t.Errorf("a NOT RUN run wrote %v", m)
+		}
 	}
 }
 
