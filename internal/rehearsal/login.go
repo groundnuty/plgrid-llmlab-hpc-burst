@@ -35,8 +35,11 @@
 // the ssh session goes away (the forced command finds its output pipes
 // without a reader, or the connection closes) the step's context ends and the
 // fake kills the step, as real srun cancels its step on SIGHUP; Close ends
-// every live stream the same way. Bytes cross exact, in order and unchanged:
-// no line translation, none added or dropped. Every other line keeps the
+// every live stream the same way. The server watches the connection for the
+// client's hang-up apart from reading it (hangup.go), so the step ends even
+// while its input is backed up and the frame reader waits to queue a frame.
+// Bytes cross exact, in order and unchanged: no line translation, none added
+// or dropped. Every other line keeps the
 // request and reply format, byte for byte, and Command.Timeout is not part of a
 // stream: the controller's own ssh client ends a command that runs past it,
 // which ends the session.

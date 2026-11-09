@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -127,21 +128,28 @@ func watchSession(conn net.Conn) {
 
 // handleStream runs an srun line for one client. The step lives as long as
 // the connection: when the client's side closes (ssh went away), the step's
-// context ends and the fake kills it. close() ends it the same way.
+// context ends and the fake kills it. close() ends it the same way. The
+// hang-up is watched for apart from the frame reader (watchHangup), which
+// cannot see it while the step has stopped taking its input and the reader
+// waits to queue a frame.
 func (r *relayServer) handleStream(c net.Conn, line string) {
 	ctx, cancel := context.WithCancel(r.ctx)
 	defer cancel()
-	in, inW := io.Pipe()
-	go readClientFrames(ctx, c, inW, cancel)
 	fw := &frameWriter{w: c}
+	stopWatch, err := watchHangup(c, cancel)
+	if err != nil {
+		// Without the watch a step could outlive its session: refuse the line.
+		sendStreamEnd(fw, toReply(slurm.Result{}, fmt.Errorf("watch the connection for a hang-up: %w", err)))
+		return
+	}
+	defer stopWatch()
+	in, inW := io.Pipe()
+	go readClientFrames(ctx, c, inW, cancel, r.backpressureHook())
 	run := func() (slurm.Result, error) {
 		code, err := r.sess.Stream(ctx, line, in, fw.data(frameStdout), fw.data(frameStderr))
 		return slurm.Result{ExitCode: code}, err
 	}
-	var (
-		res slurm.Result
-		err error
-	)
+	var res slurm.Result
 	if r.around != nil {
 		res, err = r.around(line, run)
 	} else {
@@ -151,7 +159,13 @@ func (r *relayServer) handleStream(c net.Conn, line string) {
 	if ctx.Err() != nil {
 		return // the client is gone or the server closes: there is nobody to answer
 	}
-	rep := toReply(res, err)
+	sendStreamEnd(fw, toReply(res, err))
+}
+
+// sendStreamEnd sends what the step left on standard output and error, then
+// the exit frame, the last frame of a stream. A write that fails ends it: the
+// client is gone.
+func sendStreamEnd(fw *frameWriter, rep reply) {
 	for _, f := range []struct {
 		kind byte
 		p    []byte
@@ -173,8 +187,11 @@ func (r *relayServer) handleStream(c net.Conn, line string) {
 // one after the end frame ends the stream. The input is queued to a goroutine
 // of its own, so a step that stops reading its input does not keep this one
 // from seeing the connection close; once the queue is full it waits, which is
-// the backpressure.
-func readClientFrames(ctx context.Context, c net.Conn, inW *io.PipeWriter, cancel context.CancelFunc) {
+// the backpressure. A reader that waits does not read the end of file either,
+// so a hang-up then is watchHangup's to find: it ends ctx, which frees the
+// wait. onFull, when set, is called when the queue is full and the reader is
+// about to wait (a test's way to know that it does).
+func readClientFrames(ctx context.Context, c net.Conn, inW *io.PipeWriter, cancel context.CancelFunc, onFull func()) {
 	queue := make(chan []byte, 64)
 	go func() {
 		failed := false
@@ -204,8 +221,15 @@ func readClientFrames(ctx context.Context, c net.Conn, inW *io.PipeWriter, cance
 		case kind == frameStdin && !queueClosed:
 			select {
 			case queue <- p:
-			case <-ctx.Done():
-				return
+			default: // full: wait for room, or for the end of the stream
+				if onFull != nil {
+					onFull()
+				}
+				select {
+				case queue <- p:
+				case <-ctx.Done():
+					return
+				}
 			}
 		case kind == frameStdinEOF && !queueClosed:
 			queueClosed = true

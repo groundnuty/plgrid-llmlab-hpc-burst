@@ -107,6 +107,24 @@ type relayServer struct {
 	conns  map[net.Conn]struct{}
 	closed bool
 	wg     sync.WaitGroup
+	// onBackpressure is a test's hook (setBackpressureHook), under mu.
+	onBackpressure func()
+}
+
+// setBackpressureHook sets f to be called, from a stream's frame reader, each
+// time the reader finds the step's input queue full and is about to wait. A
+// test uses it to know that the backpressure is on, without guessing how much
+// the buffers between its writer and the queue hold.
+func (r *relayServer) setBackpressureHook(f func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onBackpressure = f
+}
+
+func (r *relayServer) backpressureHook() func() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.onBackpressure
 }
 
 // readTimeout bounds how long the server waits for a request that a client

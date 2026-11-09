@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -292,6 +293,69 @@ func TestSrunStepEndsWhenTheSSHClientIsKilled(t *testing.T) {
 		t.Errorf("the killed ssh client ended with exit %d, want a signal", code)
 	}
 	waitFor(t, "the step to be gone", func() bool { return !alive(pid) })
+	if j, _ := r.plat.Job(id); j.State != "RUNNING" || j.Finished {
+		t.Errorf("the job is %s (finished %v) after its step was cancelled, want RUNNING", j.State, j.Finished)
+	}
+}
+
+// procState is the state letter of /proc/<pid>/stat ("T" for stopped), or ""
+// when the process is gone.
+func procState(pid int) string {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return ""
+	}
+	s := string(b)
+	i := strings.LastIndexByte(s, ')')
+	if i < 0 || len(s) < i+3 {
+		return ""
+	}
+	return s[i+2 : i+3]
+}
+
+// The step is killed when the ssh client dies even while the input to the step
+// is backed up. The step is frozen (SIGSTOP) and would read its input if it
+// were not, so what the client writes piles up behind it until the relay
+// server's frame reader holds a frame it cannot queue (the server's hook says
+// so: the buffers between ssh and the queue have no size the test could count
+// on). The reader then does not read the client's end of file, and the step
+// must still end, which only the server's own watch for the client's hang-up
+// can bring about. Without it the step outlives the client until Close.
+func TestSrunStepEndsWhenTheSSHClientIsKilledUnderInputBackpressure(t *testing.T) {
+	r, s := newRig(t)
+	full := make(chan struct{})
+	var once sync.Once
+	r.node.relay.setBackpressureHook(func() { once.Do(func() { close(full) }) })
+	id := holdJob(t, r, s)
+	pidFile := filepath.Join(r.root, "step.pid")
+	st := r.startSSH(t, srunUnbuffered(id, "sh -c 'echo $$ > "+pidFile+"; exec cat > /dev/null'"), nil)
+	pid := readPID(t, pidFile)
+	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the step to be stopped", func() bool { return procState(pid) == "T" })
+	writerDone := make(chan struct{})
+	go func() { // writes until ssh is gone: it blocks when everything is full
+		defer close(writerDone)
+		chunk := make([]byte, maxFrame)
+		for i := 0; i < 1<<10; i++ { // 64 MiB, far more than the buffers hold
+			if _, err := st.in.Write(chunk); err != nil {
+				return
+			}
+		}
+	}()
+	await(t, "the frame reader to find the input queue full", full)
+	if procState(pid) != "T" || st.exited() {
+		t.Fatalf("before the kill: step %d in state %q, ssh ended %v; the check after it would prove nothing", pid, procState(pid), st.exited())
+	}
+	if err := st.cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if code := st.exitCode(t); code != -1 {
+		t.Errorf("the killed ssh client ended with exit %d, want a signal", code)
+	}
+	waitFor(t, "the stopped step to be gone", func() bool { return !alive(pid) })
+	await(t, "the writer to end", writerDone)
 	if j, _ := r.plat.Job(id); j.State != "RUNNING" || j.Finished {
 		t.Errorf("the job is %s (finished %v) after its step was cancelled, want RUNNING", j.State, j.Finished)
 	}
