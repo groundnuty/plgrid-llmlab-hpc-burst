@@ -226,3 +226,11 @@ func (h Host) RelayChannelPorts() map[RelayChannel]int {
 // RelayTargetAddr is a channel's loopback target on the control-plane host:
 // 127.0.0.1:<port>.
 func RelayTargetAddr(port int) string { return "127.0.0.1:" + strconv.Itoa(port) }
+
+// HostDialedMaxAllocations is the most Allocations a batch Provider has in
+// host-dialed mode (HBEP-6, Capacity: "in host-dialed mode a Provider has at
+// most 2 Allocations, pending or running. That's a submit limit"): the
+// handover pair, whose two pairs of relays are the login node's 4. The
+// lifecycle controller plans within it, and the Provider's controller checks
+// it again from a fresh read before it submits.
+const HostDialedMaxAllocations = 2

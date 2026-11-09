@@ -446,3 +446,32 @@ func TestHostDialedAKilledJobSidesDirectoryGoesWithItsJob(t *testing.T) {
 		t.Errorf("the fallback directory holds %v: the job side fell back from TMPDIR", left)
 	}
 }
+
+// Owner.Stop, the Provider Lease's release hook, stops every relay by PID and
+// returns only once their processes are gone, and nothing starts afterwards:
+// a release of the Lease that waits for it finds no relay running (HBEP-6,
+// Fencing; the delta review of PR 301, D2).
+func TestHostDialedOwnerStopStopsRelaysByPIDBeforeItReturns(t *testing.T) {
+	w := newWorld(t)
+	a := w.submit("hb-relay-sta-0123456789ab", 30*time.Second)
+	b := w.submit("hb-relay-stb-0123456789ab", 30*time.Second)
+	own, _, _ := w.owner(hostdial.OwnerOptions{MinBackoff: 100 * time.Millisecond, MaxBackoff: 200 * time.Millisecond})
+	own.Want(w.target(a))
+	own.Want(w.target(b))
+	var pids []int
+	for _, j := range []job{a, b} {
+		for _, r := range waitUp(t, own, j.tag) {
+			pids = append(pids, r.PID)
+		}
+	}
+	own.Stop()
+	for _, p := range pids {
+		if alive(p) {
+			t.Errorf("relay %d still runs after Stop returned", p)
+		}
+	}
+	own.Want(w.target(a))
+	if rs := own.Relays(); len(rs) != 0 {
+		t.Errorf("the owner keeps %d relays after Stop: %+v", len(rs), rs)
+	}
+}

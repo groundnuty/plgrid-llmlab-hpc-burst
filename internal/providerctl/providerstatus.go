@@ -96,9 +96,13 @@ func (l *statusLoop) sync(ctx context.Context) error {
 	// makes it unready, so the planner gives it no Allocation (HBEP-6,
 	// Capacity).
 	var inUse string
-	if r := l.s.relays; r != nil && cfgErr == nil {
-		if login, holder, err := r.claimLogin(v.SSH); err == nil && holder != "" {
-			inUse = loginHostInUse(login, holder)
+	if r := l.s.relays; r != nil {
+		if cfgErr != nil {
+			r.reportNoLogin()
+		} else if _, why, err := r.claimLogin(v.SSH); err != nil {
+			inUse = "the login host's claim: " + err.Error()
+		} else {
+			inUse = why
 		}
 	}
 	l.mu.Lock()

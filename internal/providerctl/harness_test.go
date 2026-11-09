@@ -256,7 +256,8 @@ func newEnv(t *testing.T, mods ...envOption) *env {
 	if err := os.WriteFile(filepath.Join(e.buildDir, agentapi.AgentBuildName(testArch)), agent, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	prov := &v1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: testProvider, Generation: 1}}
+	// The Provider's age orders host-dialed Providers on one login host.
+	prov := &v1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: testProvider, Generation: 1, CreationTimestamp: metav1.NewTime(at(11, 0, 0))}}
 	e.c = clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(prov).
 		WithStatusSubresource(&v1alpha1.Allocation{}, &v1alpha1.Provider{}).WithReturnManagedFields().Build()
 	e.opts = Options{

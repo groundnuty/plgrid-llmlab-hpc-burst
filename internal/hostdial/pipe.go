@@ -26,7 +26,16 @@ var (
 	// ErrSuperseded: the agent keeps a relay with a higher (E, N) on the
 	// channel; the controller does not start this one again.
 	ErrSuperseded = errors.New("superseded")
+
+	// errWrongAllocation: the socket's agent greets for another Allocation.
+	errWrongAllocation = errors.New("the socket's agent greets for another Allocation")
+	// errNotOurs: the socket, or its directory, is another user's.
+	errNotOurs = errors.New("the socket or its directory is another user's")
 )
+
+// relayPeerUID reads the user of the agent's end of the relay's connection; a
+// test replaces it to show that another user's socket is refused.
+var relayPeerUID = func(conn net.Conn) (int, error) { return peerUID(conn) }
 
 // Exit codes of "relay <channel>".
 const (
@@ -46,6 +55,10 @@ func RelayMessage(a agentapi.RelayArgs, err error) string {
 	switch {
 	case errors.Is(err, ErrSuperseded):
 		return relayLinePrefix + "superseded: the agent of Allocation " + a.Allocation + " keeps a newer " + string(a.Channel) + " relay"
+	case errors.Is(err, errWrongAllocation):
+		return relayLinePrefix + "agent not ready: the agent on Allocation " + a.Allocation + "'s socket greets for another Allocation"
+	case errors.Is(err, errNotOurs):
+		return relayLinePrefix + "agent not ready: the socket named for Allocation " + a.Allocation + ", or its directory, is another user's"
 	case errors.Is(err, ErrNotReady):
 		return relayLinePrefix + "agent not ready: Allocation " + a.Allocation + "'s agent has published no socket that answers on this node"
 	}
@@ -79,18 +92,30 @@ func Relay(a agentapi.RelayArgs, stdin io.Reader, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// The socket's directory and its peer must be this user's: the greeting
+	// alone proves nothing, since the Allocation's UID is on this relay's own
+	// command line (the delta review of PR 301, N1).
+	if err := privateDir(filepath.Dir(sock), false); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: the socket's directory is gone: %v", ErrNotReady, err)
+		}
+		return fmt.Errorf("%w: %w: %v", ErrNotReady, errNotOurs, err)
+	}
 	conn, err := net.DialTimeout("unix", sock, exchangeTimeout)
 	if err != nil {
 		return fmt.Errorf("%w: the socket does not answer: %v", ErrNotReady, err)
 	}
 	defer conn.Close()
+	if uid, err := relayPeerUID(conn); err != nil || uid != os.Geteuid() {
+		return fmt.Errorf("%w: %w: the peer is user %d (%v)", ErrNotReady, errNotOurs, uid, err)
+	}
 	_ = conn.SetDeadline(time.Now().Add(exchangeTimeout))
 	greeting, err := readLine(conn)
 	if err != nil {
 		return fmt.Errorf("%w: no greeting: %v", ErrNotReady, err)
 	}
 	if greeting != agentapi.RelayGreeting(a.Allocation) {
-		return fmt.Errorf("%w: the agent greeted %q, not Allocation %s", ErrNotReady, greeting, a.Allocation)
+		return fmt.Errorf("%w: %w: %q, not Allocation %s", ErrNotReady, errWrongAllocation, greeting, a.Allocation)
 	}
 	if _, err := io.WriteString(conn, agentapi.RelayHello(a)+"\n"); err != nil {
 		return fmt.Errorf("%w: the hello: %v", ErrNotReady, err)

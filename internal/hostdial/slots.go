@@ -3,7 +3,9 @@ package hostdial
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
+	"time"
 )
 
 // DefaultRelaysPerLogin is alpha's cap on relays per login node: 4, that is 2
@@ -87,45 +89,87 @@ func (s *Slots) InUse(login string) int {
 
 // Hosts is the process's register of which host-dialed Provider runs relays
 // on each login host (HBEP-6, Capacity: "Only one Provider per login host (as
-// ssh -G resolves its HostName) runs in host-dialed mode"). The first Provider
-// to claim a host keeps it until it releases it; a second is refused.
+// ssh -G resolves its HostName) runs in host-dialed mode"). The winner is
+// fixed, not first come: the oldest Provider by creationTimestamp, then by
+// name, among those that use the host, so a restart cannot hand the host to
+// another Provider (the delta review of PR 301, D4). A Provider enrolls, with
+// its age, when its manager starts; until an older enrolled Provider has said
+// which login host it uses, a younger one is not admitted to any, so it cannot
+// take a host in the moment before the older one asks for it.
 type Hosts struct {
 	mu sync.Mutex
-	by map[string]string // login host → Provider
+	by map[string]*hostEntry // Provider → its entry
+}
+
+type hostEntry struct {
+	created  time.Time
+	login    string // lower case; "" when it uses none
+	reported bool
 }
 
 // NewHosts returns an empty register.
-func NewHosts() *Hosts { return &Hosts{by: map[string]string{}} }
+func NewHosts() *Hosts { return &Hosts{by: map[string]*hostEntry{}} }
 
 // SharedHosts is the process's register, which the controller binary gives
 // every Provider.
 var SharedHosts = NewHosts()
 
-// Claim claims login for provider, and gives up any other host provider held
-// (its credentials moved). It returns the holder and false when another
-// Provider holds login.
-func (h *Hosts) Claim(login, provider string) (string, bool) {
+// Enroll records that provider, created at created, runs in this process and
+// has not said which login host it uses yet.
+func (h *Hosts) Enroll(provider string, created time.Time) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if p, ok := h.by[login]; ok && p != provider {
-		return p, false
+	if e, ok := h.by[provider]; ok {
+		e.created = created
+		return
 	}
-	for l, p := range h.by {
-		if p == provider && l != login {
-			delete(h.by, l)
-		}
-	}
-	h.by[login] = provider
-	return provider, true
+	h.by[provider] = &hostEntry{created: created}
 }
 
-// Release gives up every host provider holds.
+// Enrolled reports whether provider is enrolled.
+func (h *Hosts) Enrolled(provider string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, ok := h.by[provider]
+	return ok
+}
+
+// Claim records that provider uses login (any case; "" for none) and reports
+// whether it is the host's Provider. When it is not, holder is the Provider
+// that is, or the older one that has not said which host it uses yet
+// (pending). An unenrolled provider is never admitted.
+func (h *Hosts) Claim(login, provider string) (holder string, pending, ok bool) {
+	login = strings.ToLower(login)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	me, enrolled := h.by[provider]
+	if !enrolled {
+		return "", false, false
+	}
+	me.login, me.reported = login, true
+	if login == "" {
+		return "", false, false
+	}
+	for name, e := range h.by {
+		if name == provider || (e.reported && e.login != login) {
+			continue
+		}
+		if e.created.Before(me.created) || (e.created.Equal(me.created) && name < provider) {
+			if holder == "" || olderThan(e, name, h.by[holder], holder) {
+				holder, pending = name, !e.reported
+			}
+		}
+	}
+	return holder, pending, holder == ""
+}
+
+func olderThan(a *hostEntry, an string, b *hostEntry, bn string) bool {
+	return a.created.Before(b.created) || (a.created.Equal(b.created) && an < bn)
+}
+
+// Release forgets provider: its manager has stopped.
 func (h *Hosts) Release(provider string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for l, p := range h.by {
-		if p == provider {
-			delete(h.by, l)
-		}
-	}
+	delete(h.by, provider)
 }

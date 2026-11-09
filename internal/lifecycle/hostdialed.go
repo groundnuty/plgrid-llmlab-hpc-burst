@@ -1,6 +1,9 @@
 package lifecycle
 
-import "github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+import (
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
+)
 
 // HostDialedMaxAllocations is the most Allocations, pending or running, a
 // batch Provider has in host-dialed mode: the control-plane host holds a pair
@@ -10,7 +13,7 @@ import "github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 // most 2 Allocations, pending or running. That's a submit limit
 // (`SubmitLimitReached`, HBEP-4), so the planner counts it, and the handover
 // pair fits."
-const HostDialedMaxAllocations int32 = 2
+const HostDialedMaxAllocations int32 = agentapi.HostDialedMaxAllocations
 
 // hostDialedLimitSource is what QOSLimits.From names as the source of a submit
 // limit that the host-dialed cap sets, in place of a QOS. submitLimitText

@@ -12,15 +12,14 @@ import (
 	"log/slog"
 	"path"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	coordinationv1client "k8s.io/client-go/kubernetes/typed/coordination/v1"
-	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/hostdial"
@@ -68,9 +67,10 @@ type relayState struct {
 	provider string
 	hosts    *hostdial.Hosts
 
-	mu  sync.Mutex
-	cfg slurm.SSHConfig
-	ssh *sshrun.Relay
+	mu     sync.Mutex
+	cfg    slurm.SSHConfig
+	ssh    *sshrun.Relay
+	closed bool // after RunRelays: no claim and no relay is made any more
 }
 
 func newRelayState(o Options) (*relayState, error) {
@@ -109,31 +109,14 @@ func newRelayState(o Options) (*relayState, error) {
 	return r, nil
 }
 
-// leaseEpoch reads the provider-<name> Lease's leaseTransitions (HBEP-6,
-// Fencing: "the leaseTransitions of the provider-<name> Lease when its
-// controller took the lead"), once the manager leads.
-func leaseEpoch(cfg *rest.Config, provider string) func(ctx context.Context) (int64, error) {
-	return func(ctx context.Context) (int64, error) {
-		c, err := coordinationv1client.NewForConfig(cfg)
-		if err != nil {
-			return 0, err
-		}
-		l, err := c.Leases(v1alpha1.ControllerNamespace).Get(ctx, v1alpha1.ProviderLeaseName(provider), metav1.GetOptions{})
-		if err != nil {
-			return 0, fmt.Errorf("the Provider's Lease: %w", err)
-		}
-		if l.Spec.LeaseTransitions == nil {
-			return 0, nil
-		}
-		return int64(*l.Spec.LeaseTransitions), nil
-	}
-}
-
 // relay returns the ssh client maker for the Provider's credentials, made
 // again when they change.
 func (r *relayState) relay(cfg slurm.SSHConfig) (*sshrun.Relay, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closed {
+		return nil, errRelaysClosed
+	}
 	if r.ssh == nil || !reflect.DeepEqual(r.cfg, cfg) {
 		rel, err := sshrun.NewRelay(sshrun.RelayOptions{Name: r.provider, Config: cfg, ControlDir: r.settings.ControlDir, Binary: r.settings.SSHBinary})
 		if err != nil {
@@ -147,30 +130,67 @@ func (r *relayState) relay(cfg slurm.SSHConfig) (*sshrun.Relay, error) {
 	return r.ssh, nil
 }
 
+// errRelaysClosed: the Provider's manager is stopping; no claim and no relay
+// is made any more, so nothing claims a host after the release.
+var errRelaysClosed = errors.New("the Provider's relays have stopped")
+
 // claimLogin claims the Provider's login host, as ssh -G resolves its
-// HostName through the relays' own -F file, for this Provider's relays. It
-// returns the host, and the other Provider that holds it when the claim is
-// refused: one host-dialed Provider per login host (HBEP-6, Capacity).
-func (r *relayState) claimLogin(cfg slurm.SSHConfig) (login, holder string, err error) {
+// HostName through the relays' own -F file, in lower case, for this
+// Provider's relays. It returns the host, and when the claim is refused the
+// Provider that holds it, the oldest that uses it (pending: one that has not
+// said which host it uses yet), and the refusal's text in inUse: one
+// host-dialed Provider per login host (HBEP-6, Capacity).
+func (r *relayState) claimLogin(cfg slurm.SSHConfig) (login, inUse string, err error) {
+	if !r.hosts.Enrolled(r.provider) {
+		return "", "", fmt.Errorf("Provider %s has not enrolled for a login host yet", r.provider)
+	}
 	rel, err := r.relay(cfg)
 	if err != nil {
 		return "", "", err
 	}
-	login = rel.Login()
-	if h, ok := r.hosts.Claim(login, r.provider); !ok {
-		return login, h, nil
+	login = strings.ToLower(rel.Login())
+	if holder, pending, ok := r.hosts.Claim(login, r.provider); !ok {
+		return login, loginHostInUse(login, holder, pending), nil
 	}
 	return login, "", nil
 }
 
 // loginHostInUse is the refusal's text, naming the host and its holder.
-func loginHostInUse(login, holder string) string {
+func loginHostInUse(login, holder string, pending bool) string {
+	if pending {
+		return fmt.Sprintf("login host %s may be in use by older host-dialed Provider %s, which has not said which login host it uses yet: one host-dialed Provider per login host (HBEP-6, Capacity)", login, holder)
+	}
 	return fmt.Sprintf("login host %s is in use by host-dialed Provider %s: one host-dialed Provider per login host (HBEP-6, Capacity)", login, holder)
+}
+
+// enroll records the Provider's age in the login-host register, from its
+// object's creationTimestamp.
+func (r *relayState) enroll(ctx context.Context, reader client.Reader) error {
+	var prov v1alpha1.Provider
+	if err := reader.Get(ctx, client.ObjectKey{Name: r.provider}, &prov); err != nil {
+		return fmt.Errorf("the Provider's age for its login host: %w", err)
+	}
+	r.mu.Lock()
+	closed := r.closed
+	r.mu.Unlock()
+	if !closed {
+		r.hosts.Enroll(r.provider, prov.CreationTimestamp.Time)
+	}
+	return nil
+}
+
+// reportNoLogin records that the Provider uses no login host now: its
+// profile cannot be read, so it does not hold back a younger Provider.
+func (r *relayState) reportNoLogin() {
+	if r.hosts.Enrolled(r.provider) {
+		r.hosts.Claim("", r.provider)
+	}
 }
 
 func (r *relayState) close() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.closed = true
 	if r.ssh != nil {
 		_ = r.ssh.Close()
 		r.ssh = nil
@@ -217,14 +237,14 @@ func (e *external) syncRelays(ctx context.Context, a *v1alpha1.Allocation, tag s
 		e.s.o.Log.Info("the relays' ssh client cannot be made", "tag", tag, "error", err)
 		return
 	}
-	login, holder, err := r.claimLogin(e.v.SSH)
+	login, inUse, err := r.claimLogin(e.v.SSH)
 	if err != nil {
-		e.s.o.Log.Info("the relays' ssh client cannot be made", "tag", tag, "error", err)
+		e.s.o.Log.Info("the relays wait for the login host's claim", "tag", tag, "error", err)
 		return
 	}
-	if holder != "" {
+	if inUse != "" {
 		r.owner.Drop(tag)
-		e.s.o.Log.Info("no relays for this Provider", "tag", tag, "why", loginHostInUse(login, holder))
+		e.s.o.Log.Info("no relays for this Provider", "tag", tag, "why", inUse)
 		return
 	}
 	ref := a.DeepCopy()
@@ -262,6 +282,42 @@ func (c *Controller) RunRelays(ctx context.Context) error {
 	defer c.shared.relays.close()
 	return c.shared.relays.owner.Start(ctx)
 }
+
+// StopRelays stops every relay of this controller by PID and returns once
+// their processes are gone (the Lease's release hook, RelayFence).
+func (c *Controller) StopRelays() {
+	if c.shared.relays != nil {
+		c.shared.relays.owner.Stop()
+	}
+}
+
+// enrollRunnable enrolls the Provider for a login host when its manager
+// starts, leading or not, and forgets it when the manager stops, so a younger
+// Provider is not admitted to a host before this one has said which it uses,
+// and an older one that stopped holds back none (HBEP-6, Capacity; the delta
+// review of PR 301, D4).
+type enrollRunnable struct{ c *Controller }
+
+func (r enrollRunnable) Start(ctx context.Context) error {
+	rs := r.c.shared.relays
+	for {
+		if err := rs.enroll(ctx, r.c.shared.reader); err == nil {
+			break
+		} else {
+			r.c.shared.o.Log.Info("cannot enroll the Provider for its login host yet", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(2 * time.Second):
+		}
+	}
+	<-ctx.Done()
+	rs.hosts.Release(rs.provider)
+	return nil
+}
+
+func (enrollRunnable) NeedLeaderElection() bool { return false }
 
 // relayRunnable is the owner as a manager's runnable: leader-only, so only
 // the leader's relays run, and stopped with the manager.

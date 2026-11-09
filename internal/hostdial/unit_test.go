@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -72,29 +73,50 @@ func TestSlotsCapEachLoginNodeApart(t *testing.T) {
 	}
 }
 
-// One host-dialed Provider per login host (HBEP-6, Capacity): a second is
-// refused and named; a Provider whose credentials move to another host gives
-// up the first.
-func TestHostsOneProviderPerLoginHost(t *testing.T) {
+// One host-dialed Provider per login host (HBEP-6, Capacity), the oldest by
+// creationTimestamp, then by name (the delta review of PR 301, D4): whoever
+// claims first, the older keeps the host; an older Provider that has enrolled
+// but not said which host it uses holds back a younger one; a Provider that
+// uses no host, or that leaves, holds back none; the host's case does not
+// matter.
+func TestHostsTheOldestProviderKeepsTheLoginHost(t *testing.T) {
+	t0 := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
 	h := NewHosts()
-	if _, ok := h.Claim("login.example", "helios-a"); !ok {
-		t.Fatal("the first claim was refused")
+	if _, _, ok := h.Claim("login.example", "helios-a"); ok {
+		t.Fatal("an unenrolled Provider was admitted")
 	}
-	if holder, ok := h.Claim("login.example", "helios-b"); ok || holder != "helios-a" {
-		t.Errorf("a second Provider's claim: %q, %v; want a refusal naming helios-a", holder, ok)
+	h.Enroll("helios-a", t0)
+	h.Enroll("helios-b", t0.Add(time.Hour))
+	// After a restart B asks first: A has enrolled but not said, so B waits.
+	if holder, pending, ok := h.Claim("login.example", "helios-b"); ok || holder != "helios-a" || !pending {
+		t.Errorf("B before A has said: %q, pending %v, ok %v; want held back by helios-a, pending", holder, pending, ok)
 	}
-	if _, ok := h.Claim("login.example", "helios-a"); !ok {
-		t.Error("the holder's own claim again was refused")
+	if _, _, ok := h.Claim("LOGIN.Example", "helios-a"); !ok {
+		t.Fatal("the older Provider was not admitted")
 	}
-	if _, ok := h.Claim("login2.example", "helios-a"); !ok {
-		t.Fatal("a move to another host was refused")
+	if holder, pending, ok := h.Claim("login.example", "helios-b"); ok || holder != "helios-a" || pending {
+		t.Errorf("B after A: %q, pending %v, ok %v; want refused, held by helios-a", holder, pending, ok)
 	}
-	if _, ok := h.Claim("login.example", "helios-b"); !ok {
-		t.Error("the host a Provider moved away from is still held")
+	// Another host for B: admitted; the same age breaks by name.
+	if _, _, ok := h.Claim("login2.example", "helios-b"); !ok {
+		t.Error("B on another host was refused")
 	}
-	h.Release("helios-b")
-	if _, ok := h.Claim("login.example", "helios-c"); !ok {
-		t.Error("a released host is still held")
+	h.Enroll("helios-c", t0)
+	if holder, _, ok := h.Claim("login.example", "helios-c"); ok || holder != "helios-a" {
+		t.Errorf("C, as old as A, on A's host: %q, %v; want refused by name, helios-a", holder, ok)
+	}
+	// A broken older Provider says it uses no host and holds back none.
+	h.Enroll("helios-0", t0.Add(-time.Hour))
+	if _, _, ok := h.Claim("login2.example", "helios-b"); ok {
+		t.Error("B was admitted while an older Provider had not said which host it uses")
+	}
+	h.Claim("", "helios-0")
+	if _, _, ok := h.Claim("login2.example", "helios-b"); !ok {
+		t.Error("a Provider that uses no host still held B back")
+	}
+	h.Release("helios-a")
+	if _, _, ok := h.Claim("login.example", "helios-c"); !ok {
+		t.Error("the host of a Provider that left is still held")
 	}
 }
 
@@ -342,5 +364,60 @@ func TestServeReturnsWhenItsSessionEndsUnderASilentTarget(t *testing.T) {
 	case <-served:
 	case <-time.After(30 * time.Second):
 		t.Fatal("Serve did not return after its session ended, with a silent target joined")
+	}
+}
+
+// The relay's exit code decides superseded and agent not ready before its
+// standard error, which the ssh client keeps only in part (the delta review
+// of PR 301, N2).
+func TestAnEndIsReadFromTheRelaysExitCodeFirst(t *testing.T) {
+	noise := strings.Repeat("a login shell's line\n", 300) // past the 4 KiB kept
+	if k, _ := classifyEnd(ExitSuperseded, noise); k != EndSuperseded {
+		t.Errorf("exit %d with noise: %s, want superseded", ExitSuperseded, k)
+	}
+	if k, c := classifyEnd(ExitNotReady, noise); k != EndRetried || c != "agent not ready" {
+		t.Errorf("exit %d with noise: %s %q, want retried, agent not ready", ExitNotReady, k, c)
+	}
+	if k, _ := classifyEnd(1, noise); k != EndRetried {
+		t.Errorf("exit 1 with noise: %s, want retried", k)
+	}
+}
+
+// A greeting for another Allocation and a socket of another user each have
+// their own fixed line (N4, N1), and both are agent not ready.
+func TestTheRelaysRefusalsHaveTheirOwnLines(t *testing.T) {
+	a := agentapi.RelayArgs{Channel: agentapi.RelayControl, Allocation: "u-2"}
+	wrong := RelayMessage(a, fmt.Errorf("%w: %w", ErrNotReady, errWrongAllocation))
+	other := RelayMessage(a, fmt.Errorf("%w: %w", ErrNotReady, errNotOurs))
+	plain := RelayMessage(a, ErrNotReady)
+	if wrong == plain || other == plain || wrong == other || !strings.Contains(wrong, "another Allocation") || !strings.Contains(other, "another user") {
+		t.Errorf("the lines are not their own:\n%s\n%s\n%s", wrong, other, plain)
+	}
+	for _, l := range []string{wrong, other} {
+		if k, _ := ClassifyEnd(l); k != EndRetried || !strings.HasPrefix(l, "hb-relay: agent not ready") {
+			t.Errorf("%q is not read as agent not ready", l)
+		}
+	}
+}
+
+// The relay refuses a socket whose peer is another user, and a socket
+// directory that is not this user's own mode 700, before it trusts any
+// greeting (N1). Another user's socket needs a second account, so the peer's
+// user is injected on the relay's side only; the agent's side is untouched.
+func TestTheRelayRefusesAnotherUsersSocket(t *testing.T) {
+	j, alloc := startTestJob(t, time.Second)
+	a := agentapi.RelayArgs{Channel: agentapi.RelayControl, Dir: alloc, Allocation: "u-1", Epoch: 1, Seq: 1}
+	old := relayPeerUID
+	relayPeerUID = func(net.Conn) (int, error) { return os.Geteuid() + 1, nil }
+	err := Relay(a, strings.NewReader(""), io.Discard)
+	relayPeerUID = old
+	if !errors.Is(err, errNotOurs) || !errors.Is(err, ErrNotReady) {
+		t.Errorf("another user's peer: %v, want agent not ready, not ours", err)
+	}
+	if err := os.Chmod(filepath.Dir(j.Socket()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Relay(a, strings.NewReader(""), io.Discard); !errors.Is(err, errNotOurs) {
+		t.Errorf("a socket directory of mode 755: %v, want not ours", err)
 	}
 }

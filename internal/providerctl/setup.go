@@ -2,6 +2,7 @@ package providerctl
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
@@ -141,14 +142,25 @@ func Setup(mgr manager.Manager, o Options) error {
 	if err != nil {
 		return err
 	}
-	if c.shared.relays != nil {
-		if c.shared.relays.settings.Epoch == nil {
-			c.shared.relays.settings.Epoch = leaseEpoch(mgr.GetConfig(), name)
+	if r := c.shared.relays; r != nil {
+		// The epoch is this copy's own acquisition's, and the relays stop by
+		// PID before any release of the Provider's Lease (HBEP-6, Fencing):
+		// the fence on the manager's own lock gives both.
+		if f, ok := mgr.(relayFenced); ok {
+			if r.settings.Epoch == nil {
+				r.settings.Epoch = f.RelayFence().Epoch
+			}
+			f.RelayFence().BeforeRelease(c.StopRelays)
+		} else if r.settings.Epoch == nil {
+			return errors.New("providerctl: host-dialed mode needs the Provider manager's relay fence (NewProviderManager)")
 		}
-		// Leader-only: only the leader's relays run, and they stop by PID when
-		// it stops or loses the lead, before the Lease is released (HBEP-6,
-		// Fencing).
+		// Leader-only: only the leader's relays run.
 		if err := mgr.Add(relayRunnable{c}); err != nil {
+			return err
+		}
+		// Not leader-only: the Provider enrolls for its login host when its
+		// manager starts, and leaves when it stops (HBEP-6, Capacity).
+		if err := mgr.Add(enrollRunnable{c}); err != nil {
 			return err
 		}
 	}

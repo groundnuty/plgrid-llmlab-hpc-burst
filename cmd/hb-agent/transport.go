@@ -77,7 +77,7 @@ func startTransport(job agent.Job, runDir, aid string, getenv func(string) strin
 	var control *agent.SSHForward
 	switch job.Config.Mode {
 	case agentapi.DialHomeHostDialed:
-		if err := t.startHostDialed(job, &co, log); err != nil {
+		if err := t.startHostDialed(job, getenv("TMPDIR"), &co, log); err != nil {
 			return t, err
 		}
 	case agentapi.DialHomeSSH:
@@ -121,9 +121,12 @@ func startTransport(job agent.Job, runDir, aid string, getenv func(string) strin
 // control client and frpc at the listeners (HBEP-6, Dial-home modes,
 // host-dialed mode). Both ports are the kernel's, taken once, kept for the
 // Allocation's life, and never change when a relay restarts, so frpc is
-// never restarted for a relay.
-func (t *transport) startHostDialed(job agent.Job, co *agent.ClientOptions, log *slog.Logger) error {
-	j, err := hostdial.StartJob(hostdial.JobOptions{TmpDir: job.TmpDir, AllocDir: job.AllocDir, Allocation: job.Config.Allocation, Logger: log})
+// never restarted for a relay. tmp is the job's TMPDIR as set, not the
+// agent's /tmp default: an unset one is the bootstrap's misconfiguration,
+// and the socket has no place (hostdial.ErrNoSocketDir), so the agent stops
+// at once instead of holding the job's GPU until its registration deadline.
+func (t *transport) startHostDialed(job agent.Job, tmp string, co *agent.ClientOptions, log *slog.Logger) error {
+	j, err := hostdial.StartJob(hostdial.JobOptions{TmpDir: tmp, AllocDir: job.AllocDir, Allocation: job.Config.Allocation, Logger: log})
 	if err != nil {
 		return err
 	}

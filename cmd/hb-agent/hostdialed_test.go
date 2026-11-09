@@ -143,3 +143,32 @@ func TestRelayUsage(t *testing.T) {
 		}
 	}
 }
+
+// Host-dialed mode with no TMPDIR fails fast (science-agent ruling on #301):
+// the relay socket has no place (hostdial.ErrNoSocketDir), and the agent
+// cannot register without a relay, so it stops at once with the named error
+// on its output and a non-zero exit, rather than holding the job's GPU until
+// its registration deadline.
+func TestAgentHostDialedWithNoTMPDIRFailsFast(t *testing.T) {
+	root := shortRoot(t)
+	ep := startEndpoint(t, root)
+	j := newJob(t, root, agentapi.AgentConfig{
+		ProtocolVersion: agentapi.ProtocolVersion, Tag: eTag, Mode: agentapi.DialHomeHostDialed,
+		CertSPKISHA256: ep.pin, FrpcDigest: strings.Repeat("d", 64), Allocation: eUIDHostDialed,
+	})
+	j.extraEnv = append(j.extraEnv, "TMPDIR=")
+	cmd, out := j.start(t)
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if code := cmd.ProcessState.ExitCode(); err == nil || code == 0 {
+			t.Errorf("the agent exited %d (%v), want a non-zero exit", code, err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatalf("the agent still runs 30 s after it started with no TMPDIR in host-dialed mode:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "no directory for the relay socket") {
+		t.Errorf("the agent's output does not name the missing socket directory:\n%s", out.String())
+	}
+}

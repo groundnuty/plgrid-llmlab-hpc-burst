@@ -50,9 +50,14 @@ func hostDialedWith(e *env, hosts *hostdial.Hosts, restartLimit int) {
 	}
 }
 
-// runRelays runs the controller's relay owner until the test ends.
+// runRelays enrolls the Provider for its login host, as its manager's start
+// does (enrollRunnable), and runs the controller's relay owner until the test
+// ends.
 func runRelays(e *env) {
 	e.t.Helper()
+	if err := e.ctl.shared.relays.enroll(e.ctx, e.c); err != nil {
+		e.t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { _ = e.ctl.RunRelays(ctx); close(done) }()
@@ -260,7 +265,8 @@ func TestARelayThatEndsForGoodRaisesRelayFailed(t *testing.T) {
 // unready Provider no Allocation (ProviderUnavailable, internal/lifecycle).
 func TestASecondHostDialedProviderOnOneLoginHostIsRefused(t *testing.T) {
 	hosts := hostdial.NewHosts()
-	if _, ok := hosts.Claim("login.example.org", "another-provider"); !ok {
+	hosts.Enroll("another-provider", at(10, 0, 0)) // older than the env's Provider, made at 11:00
+	if _, _, ok := hosts.Claim("login.example.org", "another-provider"); !ok {
 		t.Fatal(err0)
 	}
 	e := newEnv(t, hostDialedOn(hosts, 1000))
@@ -342,4 +348,68 @@ func TestAJobMissingFromTheListingForAWhileKeepsItsRelays(t *testing.T) {
 		rs := relaysOf(e, tag)
 		return len(rs) == 2 && rs[0].Starts > starts[rs[0].Channel] && rs[1].Starts > starts[rs[1].Channel]
 	})
+}
+
+// After a restart the older Provider keeps its login host, whichever asks
+// first (the delta review of PR 301, D4): a younger Provider, made at 12:00,
+// claims the host before the env's Provider, made at 11:00, has enrolled; once
+// it has, the older one is admitted and keeps its relays, and the younger is
+// refused, naming it.
+func TestAnOlderProviderKeepsItsLoginHostAfterARestart(t *testing.T) {
+	hosts := hostdial.NewHosts()
+	hosts.Enroll("helios-b", at(12, 0, 0))
+	if _, _, ok := hosts.Claim("login.example.org", "helios-b"); !ok {
+		t.Fatal("the younger Provider, alone, was refused")
+	}
+	e := newEnv(t, hostDialedOn(hosts, 1000))
+	runRelays(e)
+	if err := e.ctl.SyncStatus(e.ctx); err != nil {
+		t.Fatal(err)
+	}
+	var prov v1alpha1.Provider
+	if err := e.c.Get(e.ctx, client.ObjectKey{Name: testProvider}, &prov); err != nil {
+		t.Fatal(err)
+	}
+	if c := apimeta.FindStatusCondition(prov.Status.Conditions, v1alpha1.ConditionProviderReady); c == nil || c.Reason == v1alpha1.ReasonLoginHostInUse {
+		t.Fatalf("the older Provider's Ready is %+v; it must keep the login host", c)
+	}
+	e.newAlloc("alloc-a")
+	e.run("alloc-a", 4)
+	if n := e.count("sbatch"); n != 1 {
+		t.Errorf("%d sbatch calls for the older Provider, want 1", n)
+	}
+	waitRelays(t, "the older Provider's relays", func() bool { return len(relaysOf(e, tagOf(e.get("alloc-a")))) == 2 })
+	if holder, _, ok := hosts.Claim("login.example.org", "helios-b"); ok || holder != testProvider {
+		t.Errorf("the younger Provider's claim after the older one's: %q, %v; want refused, naming %s", holder, ok, testProvider)
+	}
+}
+
+// The cap of 2 Allocations is checked again in Create, from a fresh read,
+// before it submits (the delta review of PR 301, D3): two Allocations that
+// two leaders' planners each made past the other's count, beside one already
+// submitted, are three, and the third's submission is refused with
+// SubmitLimitReached; nothing is submitted for it.
+func TestCreateRefusesAThirdAllocationOfAHostDialedProvider(t *testing.T) {
+	e := newEnv(t, hostDialed)
+	runRelays(e)
+	for _, n := range []string{"alloc-a", "alloc-b"} {
+		e.newAlloc(n)
+		e.run(n, 4)
+	}
+	if n := e.count("sbatch"); n != 2 {
+		t.Fatalf("%d sbatch calls for two Allocations, want 2", n)
+	}
+	e.newAlloc("alloc-c")
+	e.run("alloc-c", 4)
+	if n := e.count("sbatch"); n != 2 {
+		t.Errorf("%d sbatch calls with a third Allocation, want still 2", n)
+	}
+	rec, err := readRecord(e.get("alloc-c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.sub == nil || rec.sub.State != v1alpha1.SubmissionRejected || rec.sub.Code != v1alpha1.ReasonSubmitLimitReached ||
+		!strings.Contains(rec.sub.Reason, "at most 2 in host-dialed mode") {
+		t.Errorf("the third Allocation's record %+v: want Rejected, SubmitLimitReached, naming host-dialed mode's 2", rec.sub)
+	}
 }

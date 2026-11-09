@@ -286,6 +286,26 @@ func (o *Owner) Start(ctx context.Context) error {
 	return nil
 }
 
+// Stop stops every relay by PID and returns once their processes are gone;
+// no relay starts afterwards, and a later Want or Start does nothing. It is
+// the Provider's Lease's release hook (providerctl.RelayFence): the relays
+// stop before the Lease is released, on a renewal that failed as on a
+// requested stop (HBEP-6, Fencing).
+func (o *Owner) Stop() {
+	o.mu.Lock()
+	o.done = true
+	all := o.allocs
+	o.allocs = map[string]*allocRelays{}
+	o.mu.Unlock()
+	var wg sync.WaitGroup
+	for _, a := range all {
+		wg.Add(1)
+		go func() { defer wg.Done(); a.stop() }()
+	}
+	wg.Wait()
+	o.wg.Wait()
+}
+
 // RelayState is one relay as the Owner keeps it.
 type RelayState struct {
 	Tag     string
@@ -482,7 +502,10 @@ func (r *relay) loop(ctx context.Context) {
 				backoff = o.MinBackoff
 			}
 			if r.restartsInWindow(time.Now()) > o.RestartLimit {
-				r.end(EndFailed, fmt.Sprintf("more than %d restarts of the %s channel within %s", o.RestartLimit, r.ch, o.RestartWindow))
+				r.mu.Lock()
+				last := r.lastEnd
+				r.mu.Unlock()
+				r.end(EndFailed, fmt.Sprintf("more than %d restarts of the %s channel within %s; the last end: %s", o.RestartLimit, r.ch, o.RestartWindow, last))
 				return
 			}
 		}
@@ -570,7 +593,7 @@ func (r *relay) once(ctx context.Context) (time.Duration, bool, EndKind, string)
 	if r.t.Stderr != nil {
 		stderr = r.t.Stderr(p.cmd)
 	}
-	kind, cause := ClassifyEnd(stderr)
+	kind, cause := classifyEnd(exit, stderr)
 	switch {
 	case errors.Is(serveErr, ErrUnexpectedOutput), errors.Is(serveErr, ErrNoPreamble):
 		kind, cause = EndRetried, serveErr.Error()
