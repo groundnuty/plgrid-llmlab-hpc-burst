@@ -95,7 +95,7 @@ func providerControllerEvents() []Entry {
 	var out []Entry
 	for _, r := range []string{
 		"DuplicateJob", "HeldDuplicateCancelled", "HoldLifted", "JobAdopted", "JobCancelled", "JobLost",
-		"JobNameRewritten", "JobReappeared", "JobSubmitted", "SubmissionAbandoned", "SubmissionRejected",
+		"JobNameRewritten", "JobReappeared", "JobSubmitted", "RelayFailed", "SubmissionAbandoned", "SubmissionRejected",
 		"SubmissionUnknown", "SubmissionUnresolved", "SubmittedAsOther",
 	} {
 		out = append(out, Entry{
