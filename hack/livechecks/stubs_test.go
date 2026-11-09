@@ -58,6 +58,9 @@ if [ -n "$id" ]; then
   sed -i "/^$id|/d" "$Q"
   echo "slurm_load_jobs error: Invalid job id specified" >&2; exit 1
 fi
+# STUB_SQUEUE_LIST_FAILS_AFTER_POLL=1: the listing (squeue --me, the cleanup's read) fails once the job has been polled by its number, so
+# the poll loop reaches its bound and only the cleanup's own read of the queue breaks (#300 review, nit 1).
+[ -z "${STUB_SQUEUE_LIST_FAILS_AFTER_POLL:-}" ] || [ ! -e "$STUB_STATE/polled" ] || { echo "squeue: error: unable to contact slurm controller seedhost01" >&2; exit 1; }
 # A late registration, counted in reads of the listing after the test binary ran: STUB_HIDE_READS hides the
 # late job from the first reads (it is in the queue but not yet shown), and STUB_LATE_JOB is added to the
 # queue at read STUB_LATE_AFTER (a job that registers after the first snapshot).
@@ -111,7 +114,32 @@ echo "$id;seedcluster"
 
 // stubSacct is empty for its first STUB_SACCT_EMPTY calls, as sacct can be
 // right after a job leaves squeue.
+//
+// With --json it answers the history read of #297 (hack/live-checks.sh, settle_real_engine_not_run) from a file: the real
+// GH200 reply of a job cancelled before it started (installStubs puts it in the state directory) unless STUB_SACCT_JSON
+// names another file. Only the job number in it is the queried job's (the stub's jobs are 7001 and the like, the capture's
+// 4311), which is what the real reply holds for whatever job was asked. STUB_SACCT_JSON_EMPTY=N: nothing for the first N
+// of these reads; STUB_SACCT_JSON_RC=N: the command fails with that status and says so on stderr; STUB_SACCT_JSON_SHOWS=
+// <state>: the first STUB_SACCT_JSON_LAG reads (default 1) show the job's state as that one, as accounting does before it has the cancel.
+// Every read is an event ("sacct json", with the number of the read), so that a test can say what it came after.
 const stubSacct = `#!/bin/bash
+case " $* " in
+  *" --json "*)
+    j=""; prev=""
+    for a in "$@"; do [ "$prev" = -j ] && j=$a; prev=$a; done
+    k=$(( $(cat "$STUB_STATE/sacct-json-calls" 2>/dev/null || echo 0) + 1 )); echo $k > "$STUB_STATE/sacct-json-calls"
+    echo "sacct json $k" >> "$STUB_STATE/events"
+    printf '%s\n' "$*" >> "$STUB_STATE/sacct-json-argv"
+    [ "$k" -gt "${STUB_SACCT_JSON_EMPTY:-0}" ] || exit 0
+    if [ -n "${STUB_SACCT_JSON_RC:-}" ]; then echo "sacct: error: slurmdbd is not answering" >&2; exit "$STUB_SACCT_JSON_RC"; fi
+    doc=${STUB_SACCT_JSON:-$STUB_STATE/sacct-never-started.json}
+    if [ -n "${STUB_SACCT_JSON_SHOWS:-}" ] && [ "$k" -le "${STUB_SACCT_JSON_LAG:-1}" ]; then
+      sed -e "s/\"job_id\": 4311,/\"job_id\": $j,/" -e "s/\"current\": \[\"CANCELLED\"\]/\"current\": [\"$STUB_SACCT_JSON_SHOWS\"]/" "$doc"
+    else
+      sed -e "s/\"job_id\": 4311,/\"job_id\": $j,/" "$doc"
+    fi
+    exit 0 ;;
+esac
 n=$(cat "$STUB_STATE/sacct-calls" 2>/dev/null || echo 0)
 echo $((n+1)) > "$STUB_STATE/sacct-calls"
 [ "$n" -ge "${STUB_SACCT_EMPTY:-0}" ] || exit 0
@@ -120,6 +148,7 @@ echo "COMPLETED|0:0"
 
 const stubScancel = `#!/bin/bash
 echo "$1" >> "$STUB_STATE/cancelled"
+echo "scancel $1" >> "$STUB_STATE/events"
 [ -z "${STUB_SCANCEL_KEEP:-}" ] || exit 0
 sed -i "/^$1|/d" "$STUB_STATE/queue"
 `

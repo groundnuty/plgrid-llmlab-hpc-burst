@@ -103,7 +103,7 @@ func git(t *testing.T, dir string, args ...string) string {
 // commands, a stub cluster state and a settings file that is complete.
 func newWorld(t *testing.T) *world {
 	t.Helper()
-	for _, tool := range []string{"git", "go", "flock", "timeout", "tar", "bash"} {
+	for _, tool := range []string{"git", "go", "flock", "timeout", "tar", "bash", "python3"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Fatalf("the script tests need %s on PATH: %v", tool, err)
 		}
@@ -348,6 +348,13 @@ func (w *world) installStubs() {
 	}
 	write(w.t, filepath.Join(w.state, "testbin.sh"), stubTestBinary, 0o755)
 	write(w.t, filepath.Join(w.state, "queue"), "", 0o644)
+	// The history of a job that never started, as sacct --json really answers: the real GH200 reply (issue #267, PR #269), read from
+	// the tree each time, never copied here, so that the dry runs cannot drift from the form the parser's own tests use.
+	real, err := os.ReadFile(filepath.Join(repoRoot(w.t), neverStartedReplyPath))
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	write(w.t, filepath.Join(w.state, "sacct-never-started.json"), string(real), 0o644)
 }
 
 // useStubGo puts the stub go command first on PATH, for the tests of --run. --plan needs the real one.
