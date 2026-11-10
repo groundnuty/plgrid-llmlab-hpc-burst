@@ -3,9 +3,9 @@ package stack
 // What is left of a stack after hpcburst down: its processes as hpcburst
 // status reported them before down, and its ports. Lifted from the rehearsal's
 // step (g) (internal/rehearsal/scenario, step_zero_test.go: procStart, gone,
-// stackProcesses and downAndCheck's checks), so that a caller outside that
-// package can check a stop the same way (PR #317's review: a test that expects
-// its scenario to fail must still see the stack stop).
+// stackProcesses and downAndCheck's checks, which now use these), so that a
+// caller outside that package can check a stop the same way (PR #317's review:
+// a test that expects its scenario to fail must still see the stack stop).
 
 import (
 	"encoding/json"
@@ -16,15 +16,17 @@ import (
 	"time"
 )
 
-// Proc is one process of the stack, with its start time, so that another
-// process under the same PID is not taken for it.
+// Proc is one process of the stack, with its start time (/proc/<pid>/stat
+// field 22, clock ticks since boot), so that a PID the kernel has since given
+// to another process does not count as the same one. Recorded says it is one of
+// the launcher's recorded processes (k3s), not the supervisor or a supervised
+// entry.
 type Proc struct {
-	Name  string
-	PID   int
-	start uint64
+	Name     string
+	PID      int
+	Recorded bool
+	start    uint64
 }
-
-func (p Proc) String() string { return p.Name + "=" + strconv.Itoa(p.PID) }
 
 // procStart is a live process's start time (field 22 of /proc/<pid>/stat),
 // false when there is none.
@@ -81,7 +83,7 @@ func (h *Host) Processes() ([]Proc, error) {
 	}
 	var procs []Proc
 	var errs []string
-	add := func(name string, pid int) {
+	add := func(name string, pid int, recorded bool) {
 		for _, p := range procs {
 			if p.PID == pid {
 				return // the supervisor is both a recorded process and the supervisor
@@ -92,19 +94,19 @@ func (h *Host) Processes() ([]Proc, error) {
 			errs = append(errs, fmt.Sprintf("%s=%d does not run", name, pid))
 			return
 		}
-		procs = append(procs, Proc{Name: name, PID: pid, start: start})
+		procs = append(procs, Proc{Name: name, PID: pid, Recorded: recorded, start: start})
 	}
 	for _, p := range st.Processes {
 		if p.Verdict == "ours" && p.PID > 0 {
-			add(p.Name, p.PID)
+			add(p.Name, p.PID, true)
 		}
 	}
 	if st.Supervisor != nil && st.Supervisor.Running && st.Supervisor.PID > 0 {
-		add("supervisor", st.Supervisor.PID)
+		add("supervisor", st.Supervisor.PID, false)
 	}
 	for _, c := range st.Controllers {
 		if c.Running && c.PID > 0 {
-			add(c.Name, c.PID)
+			add(c.Name, c.PID, false)
 		}
 	}
 	if len(errs) > 0 {
@@ -124,7 +126,7 @@ func Left(procs []Proc, ports []int, wait time.Duration) []string {
 		running = running[:0]
 		for _, p := range procs {
 			if !p.Gone() {
-				running = append(running, p.String())
+				running = append(running, p.Name+"="+strconv.Itoa(p.PID))
 			}
 		}
 		if len(running) == 0 || !time.Now().Before(deadline) {

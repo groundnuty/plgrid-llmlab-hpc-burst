@@ -61,7 +61,11 @@ func (s *stackStop) after(t *testing.T, h *stack.Host, downErr error) {
 	}
 	s.ran, s.downErr = h.Downed(), downErr
 	s.left = stack.Left(s.procs, h.Ports.All(), wait)
-	t.Logf("the stack's stop: %d of its processes before down %v; down ran %t, its error %v; left after it %q", len(s.procs), s.procs, s.ran, downErr, s.left)
+	names := make([]string, 0, len(s.procs))
+	for _, p := range s.procs {
+		names = append(names, p.Name+"="+strconv.Itoa(p.PID))
+	}
+	t.Logf("the stack's stop: %d of its processes before down %v; down ran %t, its error %v; left after it %q", len(s.procs), names, s.ran, downErr, s.left)
 }
 
 // problem is what kept the stop from being clean, nil when it was: the stack's processes read before down, down run without an error of

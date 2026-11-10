@@ -10,8 +10,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // statusDouble is an hpcburst that answers status --state-dir <state> --json --no-api with out and exit code rc, and nothing else.
@@ -49,6 +51,49 @@ func sleeper(t *testing.T) *exec.Cmd {
 	return c
 }
 
+// procsOf is each Proc as name=pid, with a + for one the launcher records.
+func procsOf(procs []Proc) string {
+	var b strings.Builder
+	for _, p := range procs {
+		b.WriteString(" " + p.Name + "=" + strconv.Itoa(p.PID))
+		if p.Recorded {
+			b.WriteString("+")
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// Gone tells a live process from one that ended, by its PID and start time, on a child this test starts and stops by its PID (the
+// rehearsal's TestProcIDGone, moved here with the helper it tests, issue #251).
+func TestProcGone(t *testing.T) {
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() }) // ended already when the test got that far
+	pid := cmd.Process.Pid
+	start, ok := procStart(pid)
+	if !ok {
+		t.Fatalf("procStart(%d) of a running child: not found", pid)
+	}
+	p := Proc{Name: "sleep", PID: pid, start: start}
+	if p.Gone() {
+		t.Fatalf("a running child %d counts as gone", pid)
+	}
+	if (Proc{Name: "sleep", PID: pid, start: start + 1}).Gone() == false {
+		t.Errorf("a process under the same PID with another start time counts as the same one")
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	// A zombie until reaped, which holds nothing: the kill is delivered asynchronously, so this waits on the process's state.
+	WaitFor(t, 30*time.Second, "the killed, unreaped child to count as gone", p.Gone)
+	_ = cmd.Wait()
+	if !p.Gone() {
+		t.Errorf("a reaped child %d does not count as gone", pid)
+	}
+}
+
 func TestProcessesAndLeft(t *testing.T) {
 	sa, sb := sleeper(t), sleeper(t)
 	a, b := sa.Process.Pid, sb.Process.Pid
@@ -61,7 +106,7 @@ func TestProcessesAndLeft(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := fmt.Sprint(procs), fmt.Sprintf("[k3s=%d front=%d]", a, b); got != want {
+	if got, want := procsOf(procs), fmt.Sprintf("k3s=%d+ front=%d", a, b); got != want {
 		t.Fatalf("Processes = %s, want %s", got, want)
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:29893")
@@ -76,7 +121,7 @@ func TestProcessesAndLeft(t *testing.T) {
 	}
 	// Another process under the PID is not the one status named.
 	if other := (Proc{Name: "k3s", PID: a, start: procs[0].start + 1}); !other.Gone() {
-		t.Errorf("%s with another start time is not gone", other)
+		t.Errorf("k3s=%d with another start time is not gone", a)
 	}
 	// Once both end and the listener closes, nothing is left: Left waits for the processes' end, on their state.
 	if err := ln.Close(); err != nil {

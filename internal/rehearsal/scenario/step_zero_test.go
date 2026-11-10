@@ -5,12 +5,8 @@ package scenario_test
 // launcher's own status, never from log lines.
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"slices"
-	"strconv"
-	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -208,103 +204,34 @@ func (r *rig) checkProxiesOffline(insts []types.UID) {
 	}
 }
 
-// procID is a process by its PID and its start time (/proc/<pid>/stat field
-// 22, clock ticks since boot), so that a PID the kernel has since given to
-// another process does not count as the same one.
-type procID struct {
-	name  string
-	pid   int
-	start uint64
-}
-
-// procStart is a live process's start time, false when there is none.
-func procStart(pid int) (uint64, bool) {
-	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
-	if err != nil {
-		return 0, false
-	}
-	i := strings.LastIndexByte(string(b), ')')
-	if i < 0 {
-		return 0, false
-	}
-	f := strings.Fields(string(b[i+1:])) // f[0] is field 3, the state
-	if len(f) < 20 {
-		return 0, false
-	}
-	n, err := strconv.ParseUint(f[19], 10, 64)
-	return n, err == nil
-}
-
-// gone reports whether the process has ended: no such PID, another process
-// under it, or a zombie, which holds nothing.
-func (p procID) gone() bool {
-	st, ok := procStart(p.pid)
-	return !ok || st != p.start || !stack.Alive(p.pid)
-}
-
-// stackProcesses lists every process hpcburst status reports for the host:
-// the recorded processes it judges ours (k3s), the supervisor, and each
-// supervised entry that runs (the controller, the front, frps).
-func (r *rig) stackProcesses() []procID {
+// stackProcesses lists every process hpcburst status reports for the host
+// (stack.Host.Processes, issue #251's one implementation): the recorded
+// processes it judges ours (k3s), the supervisor, and each supervised entry
+// that runs (the controller, the front, frps).
+func (r *rig) stackProcesses() []stack.Proc {
 	r.t.Helper()
-	out, err := stack.Run(r.t, stack.Within(r.t, stack.StatusTimeout), r.h.Env, r.b.HPCBurst, "status", "--state-dir", r.h.State, "--json", "--no-api")
-	var st struct {
-		Processes []struct {
-			Name    string `json:"name"`
-			PID     int    `json:"pid"`
-			Verdict string `json:"verdict"`
-		} `json:"processes"`
-		Supervisor *struct {
-			Running bool `json:"running"`
-			PID     int  `json:"pid"`
-		} `json:"supervisor"`
-		Controllers []struct {
-			Name    string `json:"name"`
-			Running bool   `json:"running"`
-			PID     int    `json:"pid"`
-		} `json:"controllers"`
+	procs, err := r.h.Processes()
+	switch {
+	case err != nil && procs == nil:
+		r.t.Fatalf("step (g): %v", err)
+	case err != nil:
+		r.t.Errorf("step (g): %v", err)
 	}
-	if jerr := json.Unmarshal([]byte(out), &st); jerr != nil {
-		r.t.Fatalf("hpcburst status --json (%v): %v: %.500s", err, jerr, out)
-	}
-	var procs []procID
-	add := func(name string, pid int) {
-		if slices.ContainsFunc(procs, func(p procID) bool { return p.pid == pid }) {
-			return // the supervisor is both a recorded process and the supervisor
-		}
-		start, ok := procStart(pid)
-		if !ok {
-			r.t.Errorf("hpcburst status reports %s as pid %d, which does not run", name, pid)
-			return
-		}
-		procs = append(procs, procID{name: name, pid: pid, start: start})
-	}
+	var names []string
 	recorded := 0
-	for _, p := range st.Processes {
-		if p.Verdict == "ours" && p.PID > 0 {
-			add(p.Name, p.PID)
+	for _, p := range procs {
+		names = append(names, fmt.Sprintf("%s=%d", p.Name, p.PID))
+		if p.Recorded {
 			recorded++
 		}
 	}
-	if st.Supervisor != nil && st.Supervisor.Running && st.Supervisor.PID > 0 {
-		add("supervisor", st.Supervisor.PID)
-	}
-	for _, c := range st.Controllers {
-		if c.Running && c.PID > 0 {
-			add(c.Name, c.PID)
-		}
-	}
-	var names []string
-	for _, p := range procs {
-		names = append(names, fmt.Sprintf("%s=%d", p.name, p.pid))
-	}
 	for _, want := range []string{"supervisor", "controller", "front", "frps"} {
-		if !slices.ContainsFunc(procs, func(p procID) bool { return p.name == want }) {
+		if !slices.ContainsFunc(procs, func(p stack.Proc) bool { return p.Name == want }) {
 			r.t.Errorf("step (g): hpcburst status reports no running %s before down (it reports %v)", want, names)
 		}
 	}
 	if recorded == 0 {
-		r.t.Errorf("step (g): hpcburst status reports no recorded process of ours (k3s) before down: %.500s", out)
+		r.t.Errorf("step (g): hpcburst status reports no recorded process of ours (k3s) before down (it reports %v)", names)
 	}
 	r.t.Logf("step (g): the stack before down: %v", names)
 	return procs
@@ -326,8 +253,8 @@ func (r *rig) downAndCheck() {
 	stack.WaitState(r.t, 30*time.Second, "every process of the stack to be gone after down", func() (bool, string) {
 		var left []string
 		for _, p := range procs {
-			if !p.gone() {
-				left = append(left, fmt.Sprintf("%s=%d", p.name, p.pid))
+			if !p.Gone() {
+				left = append(left, fmt.Sprintf("%s=%d", p.Name, p.PID))
 			}
 		}
 		return len(left) == 0, fmt.Sprintf("still running: %v", left)
