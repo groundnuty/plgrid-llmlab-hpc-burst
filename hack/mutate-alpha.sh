@@ -736,8 +736,11 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'internal/rehearsal/signal.go@@case !plive:@@case false && !plive:'
   'internal/rehearsal/signal.go@@case perr != nil:@@case false:'
   'internal/rehearsal/signal.go@@if o.self.ticks > child.ticks {@@if false {'
-  # The leak report and its count, the stop's order, its kill of its own sshds, its bound and its report of survivors.
-  'internal/rehearsal/signal.go@@o.api.leaks.Add(1)@@o.api.leaks.Add(0)'
+  # The leak report: what is found outside the tree is split out, judged at the stop's last deadline (one that has exited by then was
+  # dying) and counted; then the stop's order, its kill of its own sshds, its bound and its report of survivors.
+  'internal/rehearsal/pool.go@@if errors.As(e, &l) {@@if false && errors.As(e, &l) {'
+  'internal/rehearsal/pool.go@@if now, live, err := s.api.row(l.row.pid); err != nil || (live && now.ticks == l.row.ticks) {@@if now, live, err := s.api.row(l.row.pid); true || err != nil || (live && now.ticks == l.row.ticks) {'
+  'internal/rehearsal/pool.go@@s.api.leaks.Add(1)@@s.api.leaks.Add(0)'
   'internal/rehearsal/signal.go@@if n > 0 {@@if false {'
   'internal/rehearsal/pool.go@@if c := cmp.Compare(depth[b.pid], depth[a.pid]); c != 0 {@@if c := cmp.Compare(depth[a.pid], depth[b.pid]); c != 0 {'
   'internal/rehearsal/pool.go@@if err := s.api.kill(p.cmd.Process); err != nil {@@if err := error(nil); err != nil {'
@@ -763,7 +766,7 @@ compile_of() {
 # The tests of the rehearsal kind: the sweep guards' (internal/rehearsal: procs_test.go, signal_test.go, pool_test.go), which start no
 # sshd and send no signal; their stand-ins (true, sh, cat, this binary as a forced command) end on their own, the last by the kernel's
 # parent-death SIGKILL, which it asks for.
-rehearsal_tests='ExitedSSHD|ZeroRowSignalsNothing|BelowWalksNothing|Guard2Alone|SignalProcs|RefusalIsTheErrorOfClose|WithRelayEnvSelectsNothing|ReportLeaks|CloseReturnsWhen|BeforeItsParent|LeftTheTree|StillAliveAtItsDeadline|RelayGuard|ForcedCommandDies'
+rehearsal_tests='ExitedSSHD|ZeroRowSignalsNothing|BelowWalksNothing|Guard2Alone|SignalProcs|RefusalIsTheErrorOfClose|WithRelayEnvSelectsNothing|ReportLeaks|CloseReturnsWhen|BeforeItsParent|LeftTheTree|StillAliveAtItsDeadline|StillOutsideTheTree|RelayGuard|ForcedCommandDies'
 # The tests of the script's kind.
 script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot|HostDialedMode'
 # tests_of <path> [control|<names>]: the command that judges a mutant of path, in the array tests. With control, the same command with
