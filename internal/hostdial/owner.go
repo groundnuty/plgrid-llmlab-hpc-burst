@@ -111,6 +111,26 @@ type Target struct {
 	// the keeper's count of restarts, which outlives a Drop (HBEP-8,
 	// hpcburst_relay_restarts_total; issue #343). Nil is alpha's.
 	OnStart func(ch agentapi.RelayChannel)
+	// BeforeStart, when set, is asked right before each ssh start, with the
+	// (E, N) the start would carry, after the listing, the relay line and the
+	// ssh command, and after N was taken: a false answer starts nothing, and
+	// the attempt is retried after the backoff. The relay keeper decides
+	// there, under its own lock, whether the start may go ahead, so a
+	// replacement it accepted in the meantime keeps the old start from
+	// launching (HBEP-6, The relay keeper; issue #343). Nil is alpha's.
+	BeforeStart func(ch agentapi.RelayChannel, epoch, seq int64) bool
+	// OnStartFailed, when set, is told when an ssh start that BeforeStart
+	// allowed, or that was made with no BeforeStart, fails to start a
+	// process; OnStart is told when it does. So every start is resolved by
+	// exactly one of the two (issue #343). Nil is alpha's.
+	OnStartFailed func(ch agentapi.RelayChannel)
+	// OnExit, when set, is told once a started ssh process has exited and
+	// been reaped, after OnStart was told of its start, so its holder knows
+	// when none of a stopped relay's processes runs any more (issue #343).
+	// Nil is alpha's.
+	OnExit func(ch agentapi.RelayChannel)
+	//
+	// BeforeStart, OnStartFailed and OnExit are hooks too, as below.
 	//
 	// The hooks (OnFailed, OnFinal and OnStart) run on the relay's own
 	// goroutine, which its Allocation's stop waits for. So a hook that calls
@@ -637,9 +657,16 @@ func (r *relay) once(ctx context.Context) (time.Duration, bool, EndKind, string)
 	if o.Pidfd {
 		startProcess = func(cmd *exec.Cmd) (*process, error) { return startPidfdProcess(cmd, o.Logger) }
 	}
+	if r.t.BeforeStart != nil && !r.t.BeforeStart(r.ch, r.epoch, seq) {
+		r.refuse("the start was not allowed (Target.BeforeStart)")
+		return 0, false, EndRetried, ""
+	}
 	p, err := startProcess(cmd)
 	if err != nil {
 		r.refuse("the ssh client could not be started: " + err.Error())
+		if r.t.OnStartFailed != nil {
+			r.t.OnStartFailed(r.ch)
+		}
 		return 0, false, EndRetried, ""
 	}
 	start := time.Now()
@@ -695,6 +722,9 @@ func (r *relay) once(ctx context.Context) (time.Duration, bool, EndKind, string)
 	r.pid, r.lastEnded, r.failure, r.lastEnd = 0, time.Now(), failure, kind.String()+": "+cause
 	r.mu.Unlock()
 	o.Logger.Info("relay ended", "tag", r.t.Tag, "channel", r.ch, "job", id, "up", up.Round(time.Millisecond), "exit", exit, "end", kind.String(), "cause", cause)
+	if r.t.OnExit != nil {
+		r.t.OnExit(r.ch)
+	}
 	return up, true, kind, cause
 }
 
