@@ -142,23 +142,32 @@ func (r *rig) baseline(what string, keys ...eventcount.Key) *absenceBase {
 			b.orphanable = append(b.orphanable, uid)
 		}
 	}
+	b.startToReady = r.startToReadySnapshot("the first read's start-to-ready times")
+	for k, rd := range b.reads {
+		r.t.Logf("ABSENCE first read %s (%s): %g at %s", k, what, rd.Count, ts(rd.Answered))
+	}
+	return b
+}
+
+// startToReadySnapshot reads each ModelDeployment's per-class start-to-ready
+// times from the API, by name, as their status records them: the first read's
+// snapshot (baseline) and the wait before it (part3.armFirstRead).
+func (r *rig) startToReadySnapshot(what string) map[string]map[v1alpha1.AcceleratorClass]time.Duration {
+	r.t.Helper()
 	var mds v1alpha1.ModelDeploymentList
 	ctx, cancel := stack.CallCtx(r.t)
 	err := r.c.List(ctx, &mds)
 	cancel()
 	if err != nil {
-		r.t.Fatalf("list ModelDeployments for the first read's start-to-ready times: %v", err)
+		r.t.Fatalf("list ModelDeployments for %s: %v", what, err)
 	}
-	b.startToReady = map[string]map[v1alpha1.AcceleratorClass]time.Duration{}
+	out := map[string]map[v1alpha1.AcceleratorClass]time.Duration{}
 	for i := range mds.Items {
 		if mds.Items[i].Namespace == stack.Namespace {
-			b.startToReady[mds.Items[i].Name] = classStartToReady(&mds.Items[i])
+			out[mds.Items[i].Name] = classStartToReady(&mds.Items[i])
 		}
 	}
-	for k, rd := range b.reads {
-		r.t.Logf("ABSENCE first read %s (%s): %g at %s", k, what, rd.Count, ts(rd.Answered))
-	}
-	return b
+	return out
 }
 
 // judgeAbsence takes the second read and applies the four conditions. A

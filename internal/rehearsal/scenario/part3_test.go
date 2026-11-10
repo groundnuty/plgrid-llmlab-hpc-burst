@@ -148,6 +148,10 @@ type part3 struct {
 	// taken as soon as the controller restarted in longStreamAcrossRestart
 	// serves (part3_absence_test.go, orphans_test.go).
 	base *absenceBase
+	// s2rMiss, when set, is called by armFirstRead after each read that
+	// found a class's start-to-ready time unrecorded (a test's hook; nil in
+	// the rehearsal).
+	s2rMiss func(missing []string)
 }
 
 // objects starts the LLMLab double, writes the managed Provider's
@@ -223,9 +227,10 @@ func TestRehearsalPart3(t *testing.T) {
 	done = r.stepTimer("7,000-token stream across a controller restart")
 	// The absence checks cover the restarted controller, from its first
 	// moment of serving: no Instance has ended and no drain start has passed.
-	r.onLed = func() {
-		p3.base = r.baseline("as part 3's restarted controller serves", keyTunnelOrphaned, keyReplacementLate, keyHandedOver)
-		r.orphanBase = p3.base
+	// The first read is armed once each class's start-to-ready time is
+	// recorded (issue #321).
+	if err := p3.armFirstRead(); err != nil {
+		r.t.Fatal(err)
 	}
 	p3.longStreamAcrossRestart(q)
 	r.onLed = nil
@@ -370,7 +375,7 @@ func (p3 *part3) atLeastBefore(d *depRun, what string, lead time.Duration) {
 // controller restart, ends with its finish reason and [DONE], uncut.
 func (p3 *part3) longStreamAcrossRestart(d *depRun) {
 	p3.t.Helper()
-	p3.atLeastBefore(d, "the 7,000-token stream", 2*time.Minute+streamLead)
+	p3.atLeastBefore(d, "the 7,000-token stream", longStreamLead)
 	sc := p3.startRestartScraper(string(d.primary.UID))
 	s, row := p3.controllerRestart(d.primary, "rehearsal-part3-long", stack.ChatBody(d.Model, longTokens, longTokens, true, ""), longTokens)
 	reads := sc.end()

@@ -7,9 +7,20 @@ package scenario_test
 // taken as soon as the controller restarted in longStreamAcrossRestart serves
 // (part3.base), before the no-overlap handovers; the second after a reconcile
 // pass of every ModelDeployment that began at or after the drain starts.
+//
+// The first read is armed only once every served deployment's status records
+// its primary's class's start-to-ready time (issue #321, armFirstRead). An
+// Instance's ready write and its deployment's status write, which records the
+// class's start-to-ready time, are two writes of one pass (internal/lifecycle,
+// verify.go: becomeReady; status.go: writeStatus), so the primary can be seen
+// ready before the time is recorded, and step (f)'s kill can come between
+// them. The restarted controller then records it in its first pass, after the
+// first read: with no entry at the first read, ReplacementLate's condition 1
+// counts back the 30-minute default and the check is inconclusive.
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -90,6 +101,110 @@ func ownedBy(in *v1alpha1.Instance, md string) bool {
 	return false
 }
 
+// lateChange is the earliest moment ReplacementLate could be raised for the
+// deployment, condition 1's change: its primary's drain start counted back by
+// lateStartToReady, from the first read's snapshot (atFirst) and md's status
+// now. ok is false, with why, when the primary's class cannot be read.
+func (r *rig) lateChange(d *depRun, atFirst map[v1alpha1.AcceleratorClass]time.Duration, md *v1alpha1.ModelDeployment) (time.Time, string, bool) {
+	r.t.Helper()
+	class, why, ok := r.primaryClass(d.primary)
+	if !ok {
+		return time.Time{}, fmt.Sprintf("condition 1: %s: %s, so the class whose start-to-ready time ReplacementLate counts by is unknown", d.Name, why), false
+	}
+	now := classStartToReady(md)
+	s2r := lateStartToReady(class, atFirst, now)
+	r.t.Logf("%s: ReplacementLate counts back %s from the drain start %s (class %v; at the first read %v, now %v)",
+		d.Name, s2r, ts(d.ds), class, atFirst, now)
+	return d.ds.Add(-s2r), "", true
+}
+
+// longStreamLead is how long before the drain start the 7,000-token stream
+// across step (f)'s restart must start (longStreamAcrossRestart).
+const longStreamLead = 2*time.Minute + streamLead
+
+// s2rPoll is how often unrecordedStartToReady reads the deployments again.
+const s2rPoll = 200 * time.Millisecond
+
+// unrecordedStartToReady reads the deployments until each one's status
+// records the start-to-ready time of its primary's class, or until the bound
+// passes (or WaitCap, when that comes first). It returns nil once all are
+// recorded; at the bound, one problem per deployment still without its class,
+// naming the deployment, its primary and the class. miss, when set, is called
+// after each read that found one missing.
+func (r *rig) unrecordedStartToReady(deps []*depRun, until time.Time, miss func([]string)) []string {
+	r.t.Helper()
+	if c, ok := stack.WaitCap(r.t); ok && c.Before(until) {
+		until = c
+	}
+	for {
+		snap := r.startToReadySnapshot("the start-to-ready times the first read waits for")
+		var missing []string
+		for _, d := range deps {
+			class, why, ok := r.primaryClass(d.primary)
+			if !ok {
+				missing = append(missing, d.Name+": "+why)
+			} else if _, ok := snap[d.Name][class]; !ok {
+				missing = append(missing, fmt.Sprintf("%s: its status records no start-to-ready time for class %v, its primary %s's", d.Name, class, d.primary.Name))
+			}
+		}
+		if len(missing) == 0 {
+			return nil
+		}
+		if miss != nil {
+			miss(missing)
+		}
+		if !time.Now().Before(until) {
+			return missing
+		}
+		time.Sleep(s2rPoll)
+	}
+}
+
+// armFirstRead arms the forbidden events' first read (r.onLed, taken as soon
+// as the controller step (f) restarts serves) once every served deployment's
+// status records its primary's class's start-to-ready time: the value
+// ReplacementLate's condition 1 counts back by (issue #321, the science
+// agent's ruling of 10 Nov 2026). The bound is the row's own: the earliest
+// drain start minus longStreamLead, past which the stream across the restart
+// cannot start in time either. A class still unrecorded then is a FAIL, never
+// NOT RUN and never a pass: the primary is ready (waitPrimary), so the
+// measurement HBEP-7 records at an Allocation's first ready Instance is
+// missing, and the check could only be inconclusive. The error names each
+// deployment and class; nothing is armed then.
+func (p3 *part3) armFirstRead() error {
+	r := p3.rig
+	r.t.Helper()
+	var first *depRun
+	for _, d := range p3.deps {
+		if first == nil || d.ds.Before(first.ds) {
+			first = d
+		}
+	}
+	if first == nil {
+		return fmt.Errorf("FAIL (#321): no served deployment to wait for")
+	}
+	until := first.ds.Add(-longStreamLead)
+	began, misses := time.Now(), 0
+	missing := r.unrecordedStartToReady(p3.deps, until, func(m []string) {
+		misses++
+		if p3.s2rMiss != nil {
+			p3.s2rMiss(m)
+		}
+	})
+	if len(missing) > 0 {
+		return fmt.Errorf("FAIL (#321): by %s, %s before %s's drain start %s (the stream across the restart needs %s), %s; with no start-to-ready time "+
+			"at the first read ReplacementLate's condition 1 counts back %s, so its absence check could only be inconclusive",
+			ts(time.Now()), time.Until(first.ds).Round(time.Second), first.Name, ts(first.ds), longStreamLead, strings.Join(missing, "; "), defaultStartToReady)
+	}
+	r.t.Logf("HEADROOM start-to-ready: every served deployment's status records its primary's class %s after the wait began (%d reads without), %s before %s's drain start",
+		time.Since(began).Round(100*time.Millisecond), misses, time.Until(first.ds).Round(time.Second), first.Name)
+	r.onLed = func() {
+		p3.base = r.baseline("as part 3's restarted controller serves", keyTunnelOrphaned, keyReplacementLate, keyHandedOver)
+		r.orphanBase = p3.base
+	}
+	return nil
+}
+
 // checkForbidden proves the two absences, each with one barrier per
 // ModelDeployment: a pass of its reconcile, serialized per deployment, whose
 // status.lastReconcileTime (the pass's start, stored to the second, so never
@@ -113,15 +228,10 @@ func (p3 *part3) checkForbidden() {
 		if changeHanded.IsZero() || d.ds.Before(changeHanded) {
 			changeHanded = d.ds
 		}
-		if class, why, ok := r.primaryClass(d.primary); !ok {
-			unmetLate = append(unmetLate, fmt.Sprintf("condition 1: %s: %s, so the class whose start-to-ready time ReplacementLate counts by is unknown", d.Name, why))
-		} else {
-			s2r := lateStartToReady(class, base.startToReady[d.Name], classStartToReady(&md))
-			r.t.Logf("%s: ReplacementLate counts back %s from the drain start %s (class %v; at the first read %v, now %v)",
-				d.Name, s2r, ts(d.ds), class, base.startToReady[d.Name], classStartToReady(&md))
-			if late := d.ds.Add(-s2r); changeLate.IsZero() || late.Before(changeLate) {
-				changeLate = late
-			}
+		if late, why, ok := r.lateChange(d, base.startToReady[d.Name], &md); !ok {
+			unmetLate = append(unmetLate, why)
+		} else if changeLate.IsZero() || late.Before(changeLate) {
+			changeLate = late
 		}
 		due := d.ds
 		for _, in := range r.instances() {
