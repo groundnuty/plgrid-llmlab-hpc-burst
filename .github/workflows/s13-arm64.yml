@@ -1,0 +1,72 @@
+# One-off, never merged: spike S13's Envoy arm on aarch64 (issue #312, PR #324). Helios's Instances run on
+# GH200 nodes, which are aarch64, and the Instance router runs in the job. The development VM is x86_64,
+# so this runs the harness on a GitHub-hosted arm64 runner, bare (no Apptainer).
+#
+# It fetches Envoy 1.40.2's linux-aarch_64 release binary and checks its sha256, the value in the
+# release's signed checksums.txt.asc. It then builds the harness from the PR's head and runs the
+# control (every case straight to the recorder) and the Envoy ring_hash arm, the same 440 variants as
+# on x86_64. The job fails unless both report every variant arriving as its exact bytes. The results go
+# up as an artifact. No secrets; the harness binds 127.0.0.1:29900-29903 only.
+name: s13-arm64
+
+on:
+  pull_request:
+    paths: ['.github/workflows/s13-arm64.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  envoy-arm64:
+    name: s13 envoy arm64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Go from the spike's go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: spikes/s13/go.mod
+          cache: false
+
+      - name: Fetch Envoy 1.40.2 linux-aarch_64 and check its sha256
+        run: |
+          uname -m
+          curl -sSfL -o "$RUNNER_TEMP/envoy" https://github.com/envoyproxy/envoy/releases/download/v1.40.2/envoy-1.40.2-linux-aarch_64
+          echo "b9d6d1e06dd5838a3506de9f4deebad3de9a2ce6cadb87cd76222ca286213baf  $RUNNER_TEMP/envoy" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/envoy"
+          "$RUNNER_TEMP/envoy" --version
+
+      - name: Build and test the harness
+        working-directory: spikes/s13
+        run: |
+          git rev-parse HEAD | sed 's/^/harness from /'
+          go vet ./...
+          go test -count=1 ./...
+          go build -o "$RUNNER_TEMP/s13fields" ./cmd/s13fields
+
+      - name: The control and the Envoy ring_hash arm
+        working-directory: spikes/s13
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/s13fields" -out "$RUNNER_TEMP/results/direct-control" | tee "$RUNNER_TEMP/control.txt"
+          "$RUNNER_TEMP/s13fields" -out "$RUNNER_TEMP/results/envoy-1.40.2-aarch64-ring_hash" -work "$RUNNER_TEMP/work" \
+            -label "Envoy 1.40.2 linux-aarch_64, ring_hash on x-session-id" \
+            -exec -- "$PWD/scripts/stack.sh" ring-hash "$RUNNER_TEMP/envoy" | tee "$RUNNER_TEMP/envoy.txt"
+          sed -n 1,8p "$RUNNER_TEMP/results/envoy-1.40.2-aarch64-ring_hash/fields.md"
+          grep -q '^direct to the recorder (control): 440 variants; 440 arrived as their exact bytes;' "$RUNNER_TEMP/control.txt"
+          grep -q '^Envoy 1.40.2 linux-aarch_64, ring_hash on x-session-id: 440 variants; 440 arrived as their exact bytes;' "$RUNNER_TEMP/envoy.txt"
+          echo "aarch64: control and Envoy arm, 440 of 440 as their exact bytes"
+
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: s13-arm64-results
+          path: ${{ runner.temp }}/results
+          retention-days: 14
