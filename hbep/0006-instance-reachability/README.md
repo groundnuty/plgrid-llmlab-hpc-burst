@@ -739,7 +739,7 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - 2026-11-10: open question 11 partly answered by spike S14 (steady state).
 - 2026-11-10: the relay keeper's names, set fields, expiry, completeness and claim rules, from the code agent's plan (#343).
 - 2026-11-10: open question 12 answered for one transfer at a time by spike S15.
-- 2026-11-10: two errata to the relay keeper's interface, from its build (#354).
+- 2026-11-10: two amendments to the relay keeper's interface, from its build (#354).
 
 ## Amendments
 
@@ -812,5 +812,9 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
   - **Settled in this PR's review** (Astra and a fresh Opus): the scope, admission on the second frps, the heartbeat scoping, the contract listed as open rather than implied, and the corrected figures.
 
   Before, open question 12 was open with two untested options.
-- **2026-11-10: erratum:** once a final end needing the mark is held for an Allocation, neither of its relays starts again, on a new generation too, since the keeper's listing is per Allocation, not per channel (#354). Before, only the channel that ended stayed down.
-- **2026-11-10: erratum:** a `superseded` end of a relay the keeper itself replaced, identified by the `(E, N)` it issued, isn't recorded, since the replacement's own session superseded it (#354). Before, every `superseded` end in beta was marked.
+- **2026-11-10: a held final end stops its Allocation** (Dial-home modes, The relay keeper). An amendment from the science agent's ruling on PR #354's review, from the keeper's build: once a final end needing the mark is held for an Allocation, neither of its relays starts again, on a new generation too, since the keeper's listing is per Allocation, not per channel.
+
+  Before, only the channel that ended stayed down.
+- **2026-11-10: the keeper's own replacement isn't marked** (Dial-home modes, The relay keeper). An amendment from the science agent's ruling on PR #354's review, from the keeper's build: a `superseded` end of a relay the keeper itself replaced, identified by the `(E, N)` it issued, isn't recorded, since the replacement's own session superseded it. A stated limit comes with it: the job side names no superseder, so a stray ranked between a replaced relay and its replacement goes unrecorded; it is superseded by the replacement.
+
+  Before, every `superseded` end in beta was marked.

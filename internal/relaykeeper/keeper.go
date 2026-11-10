@@ -31,7 +31,7 @@
 //     started or restarted, on a new generation too (#347).
 //   - One Provider per login host (Q2): see claims.go.
 //
-// HBEP-6's stated limits (#347, and this PR's errata): the restart cap's
+// HBEP-6's stated limits (#347, and this PR's amendments): the restart cap's
 // hour (hostdial's) is kept in memory, so it starts again at a keeper
 // restart. The job side names no superseder, so a stray ranked between a
 // replaced relay and its replacement goes unrecorded; it is superseded by

@@ -70,11 +70,14 @@ type Want struct {
 	// 354). The Runner reads Jobs once per channel per attempt, right before
 	// the process starts, and resolves each authorization with exactly one
 	// call: OnStart once the process has started, or StartFailed when it does
-	// not start. An authorization never resolved holds its host until the
-	// keeper stops. The holds are counted per relay of an Allocation on a
-	// host, not per channel, since a listing names no channel: a second
-	// resolution of one start is taken for the other channel's, which is why
-	// each is resolved exactly once. The Runner's three duties (PR 3):
+	// not start. The hold is fail-closed by design, with no deadline: an
+	// authorization never resolved holds its host until the keeper stops,
+	// past the authorizing set's expiry, the claim's lapse, a Drop, a move
+	// or a replacement. A deadline would be unsafe, since once a hold expired
+	// another Provider could claim the host while the authorized start,
+	// suspended, could still launch there
+	// (TestAnUnresolvedStartHoldsItsHostPastEveryLapse pins this). The
+	// Runner's four duties (PR 3):
 	//  1. It calls StartFailed on every path between the listing and the
 	//     process start where the process does not start: a relay line, an
 	//     ssh command or a process start that fails, and a stop or Drop that
@@ -84,12 +87,26 @@ type Want struct {
 	//     OnStart, so the host is never unheld between the hold's release and
 	//     the process's counting (hostdial sets the relay's PID before it
 	//     calls OnStart).
-	//  3. It cancels an in-flight start of a REPLACED generation before its
-	//     process launches, and resolves it with StartFailed. Otherwise a
-	//     late process of the old generation gets a higher N than the current
-	//     relay's and supersedes it, and the keeper, whose record holds the
-	//     current generation's (E, N) only (OnStart), then marks the
-	//     Allocation: that fails closed, but releases a healthy Allocation.
+	//  3. It PREVENTS the launch of an in-flight start of a REPLACED
+	//     generation, and resolves it with StartFailed. Cancelling the
+	//     relay's context is not enough with today's hostdial start path
+	//     (owner.go, relay.once): once its listing passes, it goes on to the
+	//     relay line, the ssh command and the process start without checking
+	//     the context, and its command and start failures return with no
+	//     callback. So PR 3's hook checks for a replacement right before the
+	//     process start, and resolves there. Otherwise a late process of the
+	//     old generation gets a higher N than the current relay's and
+	//     supersedes it, and the keeper, whose record holds the current
+	//     generation's (E, N) only (OnStart), then marks the Allocation: that
+	//     fails closed, but releases a healthy Allocation.
+	//  4. It resolves each authorization exactly once, per channel. The holds
+	//     are counted per relay of an Allocation on a host, not per channel,
+	//     since a listing names no channel, so the keeper cannot tell one
+	//     channel's resolution from the other's: a duplicate resolution of
+	//     the control channel's start while the serving channel's is still in
+	//     flight would consume serving's hold, and let another Provider take
+	//     the host early. A resolution with none in flight is logged and
+	//     changes nothing.
 	Jobs hostdial.JobReader
 	// OnFinal is told of each final end, with the ended process's epoch and
 	// sequence (hostdial.Target.OnFinal).
@@ -98,10 +115,12 @@ type Want struct {
 	// (E, N) the relay started with: the keeper's record of what it issued.
 	// It resolves that start's authorization (Jobs): the started process
 	// holds the host from then on, as a relay up in Relays, which the Runner
-	// shows before it calls OnStart (duty 2).
+	// shows before it calls OnStart (duty 2), once per authorization (duty 4).
 	OnStart func(ch agentapi.RelayChannel, epoch, seq int64)
 	// StartFailed resolves an authorization (Jobs) whose process did not
-	// start, on every such path, a replaced generation's cancelled start
-	// included (duties 1 and 3); it releases the host the start held.
+	// start, on every such path, a replaced generation's prevented start
+	// included, once per authorization (duties 1, 3 and 4); it releases the
+	// host the start held, through this Want's own Provider UID and host,
+	// whatever the keeper's current set says.
 	StartFailed func(ch agentapi.RelayChannel)
 }

@@ -286,3 +286,52 @@ func TestAStartInFlightHoldsOnlyItsOwnHost(t *testing.T) {
 	accepted(t, k, set("example-c", 1, true, "login-1.example", entry(3)))
 	fr.launchFails(in, agentapi.RelayControl)
 }
+
+// The hold is fail-closed by design, and this pins the Runner's duty to
+// resolve every authorization (the focused delta of PR 354, its option b): a
+// deadline would be unsafe, since once a hold expired another Provider could
+// claim the host, and the authorized start, suspended, could still launch
+// there. So an authorization left unresolved holds its host past the
+// authorizing set's expiry and the claim's lapse, through each path that
+// takes the relay away from it, and only its resolution, through the Want
+// it was given, with that Want's Provider UID and host, frees the host:
+//   - the Allocation dropped by its Provider's complete set (the Runner's
+//     Drop cancels the attempt);
+//   - the Provider moved to another host, the Allocation replaced there by a
+//     new generation;
+//   - the Provider re-created under another UID, which wants the Allocation
+//     on another host.
+func TestAnUnresolvedStartHoldsItsHostPastEveryLapse(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		away func(t *testing.T, k *Keeper, e wire.Entry)
+	}{
+		{"the Allocation dropped", func(t *testing.T, k *Keeper, e wire.Entry) {
+			accepted(t, k, set("example-a", 1, true, "login-1.example"))
+		}},
+		{"the Provider moved, the Allocation replaced", func(t *testing.T, k *Keeper, e wire.Entry) {
+			accepted(t, k, set("example-a", 1, true, "login-2.example", newGen(e)))
+		}},
+		{"the Provider re-created under another UID", func(t *testing.T, k *Keeper, e wire.Entry) {
+			accepted(t, k, recreated(set("example-a", 2, true, "login-2.example", e)))
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRig(t)
+			k, fr := r.open()
+			e := entry(1)
+			accepted(t, k, set("example-a", 1, true, "login-1.example", e))
+			in := fr.authorize("example-a", e.Tag)
+			if in == nil {
+				t.Fatal("the start on login-1 was refused")
+			}
+			c.away(t, k, e)
+			r.clock.advance(40*time.Second + DefaultClaimLapse + time.Hour) // past the set's expiry and the claim's lapse
+			if got := refused(t, k, wire.KindSet, set("example-c", 1, true, "login-1.example", entry(3))); got.Holder != "example-a" {
+				t.Fatalf("C an hour past every lapse, with A's start unresolved: %+v, want refused naming example-a", got)
+			}
+			fr.launchFails(in, agentapi.RelayControl) // the cancelled attempt, resolved through its own Want
+			accepted(t, k, set("example-c", 1, true, "login-1.example", entry(3)))
+		})
+	}
+}
