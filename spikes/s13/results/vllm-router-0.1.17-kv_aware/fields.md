@@ -2,9 +2,9 @@
 
 - Router: `venv-0.1.17/bin/vllm-router`, `--policy kv_aware`, two workers.
 - Router listeners: 127.0.0.1:29903, 127.0.0.1:29902. Stop: exited after TERM: <nil>.
-- Started 2026-11-10T12:49:44Z.
+- Started 2026-11-10T13:04:40Z.
 - vllm-router 0.1.17, kv_aware: 440 variants; 142 arrived as their exact bytes; 0 differ only in member order and insignificant whitespace; 0 differ only in re-encoded values or keys; 288 lost or changed a value; 10 did not reach a worker.
-- Requests the router made to the workers besides the cases: GET /get_server_info (case none) x2; GET /health (case none) x4; GET /kv_event_sources (case none) x2; POST /tokenize (case none) x656; POST /v1/chat/completions (case warm-up) x1; POST /v1/chat/completions/render (case none) x514; POST /v1/completions/render (case none) x272.
+- Requests the router made to the workers besides the cases: GET /get_server_info (case none) x2; GET /health (case none) x4; GET /kv_event_sources (case none) x2; POST /tokenize (case none) x664; POST /v1/chat/completions (case warm-up) x1; POST /v1/chat/completions/render (case none) x522; POST /v1/completions/render (case none) x276.
 
 ## Fields
 
@@ -349,7 +349,7 @@ One row per field a case covers; `plain` and `stream` are the verdicts without a
 | chat/enc/top_p-exponent | ext:top_p in exponent form | `top_p` | `9e-1` | `0.9` | kept, re-encoded | kept, re-encoded |
 | chat/enc/temperature-20-digits | ext:a float beyond float64 precision | `temperature` | `0.12345678901234567890` | `0.12345679` | changed | changed |
 | chat/enc/repetition_penalty-1.0 | ext:a float with a zero fraction | `repetition_penalty` | `1.0` | `1.0` | kept | kept |
-| chat/enc/kwargs-numbers | ext:numbers inside a dict[str, Any] | `chat_template_kwargs` | `{"big":123456789012345678901234567890,"u64":18446744073709551615,"i":1…` | `{"i":1,"u64":18446744073709551615,"f":1.0,"big":1.2345678901234568e+29…` | changed | changed |
+| chat/enc/kwargs-numbers | ext:numbers inside a dict[str, Any] | `chat_template_kwargs` | `{"big":123456789012345678901234567890,"u64":18446744073709551615,"i":1…` | `{"neg":-0.0,"f":1.0,"i":1,"u64":18446744073709551615,"big":1.234567890…` | changed | changed |
 | chat/enc/explicit-nulls | ext:max_tokens: null | `max_tokens` | `null` | — | dropped | dropped |
 | chat/enc/explicit-nulls | ext:temperature: null | `temperature` | `null` | — | dropped | dropped |
 | chat/enc/explicit-nulls | ext:stop: null | `stop` | `null` | — | dropped | dropped |
@@ -403,6 +403,19 @@ Diffs outside every covered field and not injected.
 | chat/ext/tool_calls-function-x_ext#plain | `messages[1].content` | dropped | `null` | — |
 | chat/ext/tool_calls-function-x_ext#stream | `messages[1].content` | dropped | `null` | — |
 | chat/real/agent-turn#stream | `messages[2].content` | dropped | `null` | — |
+
+## Transport
+
+Chunked request bodies (no Content-Length), and streams the worker holds after their first text chunk until the client has read it (at most 10 s).
+
+| check | key | status | arrivals | as its bytes | worker Content-Length | worker Content-Type | streamed through | held | hold timed out | error |
+|---|---|---|---|---|---|---|---|---|---|---|
+| chunked request body | transport/chunked/chat/minimal#plain | 200 | 1 | false | 302 | `application/json` | false | false | false | — |
+| chunked request body | transport/chunked/completions/minimal#plain | 200 | 1 | true | 38 | `application/json` | false | false | false | — |
+| chunked request body | transport/chunked/chat/tools-function-strict#stream | 200 | 1 | false | 485 | `application/json` | false | false | false | — |
+| chunked request body | transport/chunked/chat/real/agent-turn#stream | 200 | 1 | false | 969 | `application/json` | false | false | false | — |
+| stream held after its first chunk | transport/held-stream/chat | 200 | 1 | false | 0 | — | true | true | false | — |
+| stream held after its first chunk | transport/held-stream/completions | 200 | 1 | false | 0 | — | true | true | false | — |
 
 ## Not delivered
 

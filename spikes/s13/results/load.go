@@ -15,18 +15,21 @@ import (
 
 // Variant is one line of results.jsonl.
 type Variant struct {
-	Key       string `json:"key"`
-	Case      string `json:"case"`
-	Endpoint  string `json:"endpoint"`
-	Stream    bool   `json:"stream"`
-	Status    int    `json:"status"`
-	Arrivals  int    `json:"arrivals"`
-	Worker    string `json:"worker"`
-	Invalid   string `json:"invalid_for_vllm"`
-	Response  string `json:"router_response"`
-	Sent      string `json:"sent"`
-	Received  string `json:"received"` // empty when the bytes were the bytes sent
-	Identical bool   `json:"identical_bytes"`
+	Key      string `json:"key"`
+	Case     string `json:"case"`
+	Endpoint string `json:"endpoint"`
+	Stream   bool   `json:"stream"`
+	Status   int    `json:"status"`
+	Arrivals int    `json:"arrivals"`
+	Worker   string `json:"worker"`
+	// WorkerContentType is the Content-Type the worker received.
+	WorkerContentType string `json:"worker_content_type"`
+	Invalid           string `json:"invalid_for_vllm"`
+	Response          string `json:"router_response"`
+	Sent              string `json:"sent"`
+	Received          string `json:"received"`
+	// Identical is recomputed by Load from Sent and Received; the record's own flag must agree.
+	Identical bool `json:"identical_bytes"`
 	Diffs     []rawjson.Diff
 }
 
@@ -43,9 +46,28 @@ type Field struct {
 // Injection is a value present at a worker and absent from the body sent.
 type Injection struct{ Endpoint, Path, Value string }
 
+// Transport is one transport check of a run (cmd/s13fields/transport.go). For a chunked check,
+// Identical is recomputed from Sent and Received.
+type Transport struct {
+	Name                string `json:"name"`
+	Key                 string `json:"key"`
+	Status              int    `json:"status"`
+	Arrivals            int    `json:"arrivals"`
+	Identical           bool   `json:"identical_bytes"`
+	WorkerContentLength int64  `json:"worker_content_length"`
+	WorkerContentType   string `json:"worker_content_type"`
+	Sent                string `json:"sent"`
+	Received            string `json:"received"`
+	StreamedThrough     bool   `json:"streamed_through"`
+	Held                bool   `json:"held"`
+	TimedOut            bool   `json:"timed_out"`
+	Error               string `json:"error"`
+}
+
 // Run is a loaded run with its recomputed verdicts.
 type Run struct {
 	Label      string
+	Transport  []Transport
 	Variants   map[string]*Variant
 	Fields     map[FieldKey]map[bool]Field // by stream
 	FieldOrder []FieldKey
@@ -72,12 +94,22 @@ func Load(path string) (*Run, error) {
 		return nil, fmt.Errorf("%s: empty", path)
 	}
 	var head struct {
-		Label string `json:"label"`
+		Label     string      `json:"label"`
+		Transport []Transport `json:"transport"`
 	}
 	if err := json.Unmarshal(sc.Bytes(), &head); err != nil {
 		return nil, fmt.Errorf("%s: header: %v", path, err)
 	}
-	run := &Run{Label: head.Label, Variants: map[string]*Variant{}, Fields: map[FieldKey]map[bool]Field{},
+	for i, t := range head.Transport {
+		if t.Name == "chunked request body" {
+			got := t.Arrivals > 0 && t.Received == t.Sent
+			if got != t.Identical {
+				return nil, fmt.Errorf("%s: %s: the record says identical_bytes %v, its bytes say %v", path, t.Key, t.Identical, got)
+			}
+			head.Transport[i].Identical = got
+		}
+	}
+	run := &Run{Label: head.Label, Transport: head.Transport, Variants: map[string]*Variant{}, Fields: map[FieldKey]map[bool]Field{},
 		Injected: map[Injection]int{}, Delivered: map[string]int{}}
 	for sc.Scan() {
 		v := &Variant{}
@@ -112,14 +144,15 @@ func (run *Run) add(c *cases.Case, cv cases.Variant, v *Variant) error {
 		return err
 	}
 	var recv *rawjson.Node
+	recorded := v.Identical
+	v.Identical = v.Arrivals > 0 && v.Received == v.Sent
+	if recorded != v.Identical {
+		return fmt.Errorf("the record says identical_bytes %v, its bytes say %v", recorded, v.Identical)
+	}
 	if v.Arrivals > 0 {
 		run.Delivered[v.Endpoint]++
-		got := v.Received
-		if v.Identical {
-			got = v.Sent
-		}
-		if recv, err = rawjson.Parse([]byte(got)); err != nil {
-			return err
+		if recv, err = rawjson.Parse([]byte(v.Received)); err != nil {
+			return fmt.Errorf("received bytes: %v", err)
 		}
 		v.Diffs = rawjson.Compare(sent, recv)
 		for _, d := range v.Diffs {

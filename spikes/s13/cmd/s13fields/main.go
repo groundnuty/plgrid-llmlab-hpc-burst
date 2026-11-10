@@ -140,6 +140,7 @@ func runMain() int {
 			run.Results = append(run.Results, send(client, target, rec, v))
 		}
 	}
+	run.Transport = transportChecks(client, target, rec)
 	stopRouter()
 	run.Probes = probes(rec)
 	if err := writeResults(*out, run); err != nil {
