@@ -116,6 +116,7 @@ func TestJudgeHostDialedFailsEachCheckOnItsOwnFact(t *testing.T) {
 		{"the socket under the fallback", func(o *hostDialedObs) { o.Probe.Fallback = 1 }, []string{checkRendezvous}},
 		{"no listening line", func(o *hostDialedObs) { o.Probe.Listening = 0 }, []string{checkRendezvous}},
 		{"a socket in a predictable directory", func(o *hostDialedObs) { o.Probe.Socket = "/tmp/job/relay/relay.sock" }, []string{checkRendezvous}},
+		{"a socket in an hb-relay- directory with no random part", func(o *hostDialedObs) { o.Probe.Socket = "/tmp/job/hb-relay-x/relay.sock" }, []string{checkRendezvous}},
 		{"a socket of another name", func(o *hostDialedObs) { o.Probe.Socket = "/tmp/job/hb-relay-123/other.sock" }, []string{checkRendezvous}},
 		{"no socket", func(o *hostDialedObs) { o.Probe.Socket = "" }, []string{checkRendezvous}},
 		{"no probe", func(o *hostDialedObs) { o.Probe = nil }, []string{checkBytes, checkRendezvous}},
@@ -369,8 +370,7 @@ func TestTheServingResponderChecksEachByteInItsPlace(t *testing.T) {
 // and the agent's wait for a session after; the probe's from the agent's wait for a session and the probe's read; the
 // stale relay's from its ssh connect and the agent's answer.
 func TestHostDialedWaitsCoverWhatTheyWaitFor(t *testing.T) {
-	const worldPoll = 10 * time.Second // buildWorld's poll interval, a live run's
-	if need := worldPoll + hostdial.RelayStartWorstCase + hostdial.DefaultWait; hostDialedSessionWait < need {
+	if need := worldPollInterval + hostdial.RelayStartWorstCase + hostdial.DefaultWait; hostDialedSessionWait < need {
 		t.Errorf("hostDialedSessionWait %s is below the listing's poll, hostdial.RelayStartWorstCase and hostdial.DefaultWait: %s", hostDialedSessionWait, need)
 	}
 	if need := hostdial.DefaultWait + probeReadSeconds*time.Second; hostDialedProbeWait < need {

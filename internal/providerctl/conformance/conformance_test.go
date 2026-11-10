@@ -301,9 +301,13 @@ type worldKit struct {
 	// endpoint, and its relay settings are the rig's (the reach-host-dialed rows,
 	// hostdialed_run_test.go). The agent is then the real one.
 	hostDialed *hostDialedRig
-	// poll is the controller's and the listing's poll interval; zero is 10 s.
+	// poll is the controller's and the listing's poll interval; zero is worldPollInterval.
 	poll time.Duration
 }
+
+// worldPollInterval is a live world's poll interval, the controller's and the Provider's listing's: a running job is
+// seen at the next poll, and the host-dialed rows' relays start after it (hostDialedSessionWait's test).
+const worldPollInterval = 10 * time.Second
 
 // conformanceAgent is TestConformance's agent stand-in, run by the bootstrap
 // after its digest check, with the Allocation's directory as its argument: the
@@ -352,7 +356,7 @@ func buildWorld(t *testing.T, s settings, kit worldKit) *world {
 
 	poll := kit.poll
 	if poll <= 0 {
-		poll = 10 * time.Second
+		poll = worldPollInterval
 	}
 	front := &providerctl.FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "127.0.0.1:29261", CertPin: certPin, CertPEM: certPEM,
 		FrpcDigests: map[string]string{s.part.CPUArch: frpcDigest}}
