@@ -289,7 +289,7 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
       - `srun`'s step-limit refusal;
       - more than 120 restarts of one channel within an hour, counting only restarts whose session came up and then dropped. Failures before a session comes up (the login node down for maintenance, ssh refused, "agent not ready", a missing preamble) are never capped: they keep retrying at the 30 s backoff cap, bounded by the step count below and by the job's end. A final end stays final.
 
-      A final end other than `superseded` or the job's end raises a Warning event, reason `RelayFailed`, regarding the Allocation, naming the channel and the cause (untyped, like every Provider-controller event in alpha; HBEP-8, open question 14). The code adds the reason to HBEP-8's table, since a new reason isn't an amendment. Before it raises the event, the Provider's controller writes the Allocation's condition `RelayEndedForGood` True, reason `RelayFailed`, with the event's message (#304). The rules for that mark:
+      A final end other than the job's end, or in alpha `superseded` (in beta `superseded` counts too, The relay keeper), raises a Warning event, reason `RelayFailed`, regarding the Allocation, naming the channel and the cause (untyped, like every Provider-controller event in alpha; HBEP-8, open question 14). The code adds the reason to HBEP-8's table, since a new reason isn't an amendment. Before it raises the event, the Provider's controller writes the Allocation's condition `RelayEndedForGood` True, reason `RelayFailed`, with the event's message (#304). The rules for that mark:
       - **When it's written:** only on an Allocation that still runs the relay's job (the same UID and job, `Running`, not completing and not being deleted), and only while this copy leads. A copy that loses the lead during the write raises no event.
       - **It's never cleared.**
       - **When the write fails,** the same process's next observation of the running Allocation sets it. In alpha a controller restart or hand-over before then forgets the failure (in beta the keeper keeps it, The relay keeper), and the new leader starts the relays again, so a lasting cause ends them for good once more.
@@ -300,7 +300,7 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
     - relay restarts don't reset its start deadline;
     - a `ready` Instance whose path is down takes no new requests (the front's probe), and `AgentUnreachable` follows its own timeout.
 
-    The exception is a relay that ends for good, other than `superseded` or by its job's end: one channel never returns, so the Instance can't serve, and its Allocation is released (What ends a relay). Retried ends and `superseded` restart no engine.
+    The exception is a relay that ends for good, other than by its job's end or, in alpha, `superseded`: one channel never returns, so the Instance can't serve, and its Allocation is released (What ends a relay). Retried ends, and in alpha `superseded`, restart no engine.
 - **What a drop costs:** the streams on that session reset. A token stream in flight is cut and counted as cut, and a request already written is never replayed (HBEP-5). frpc logs in again once the relay is back.
 - **A controller restart, in alpha, cuts the relays** (owner decision, 9 Nov 2026: "Accept cuts for alpha"). The relays are children of the controller process, so a restart cuts every stream in flight, counted as cuts and never replayed, and the new leader starts both relays of every running Allocation within the backoff.
 - **The relay keeper (beta)** (open question 13). One process per control-plane host, `relaykeeper`, holds every host-dialed relay of that host, so the relays outlive a controller restart or a hand-over. Every controller copy that drives host-dialed relays runs on that host.
@@ -325,24 +325,38 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
     - **A copy that loses the lead** stops sending sets and acknowledgements before it releases the `Lease`. A copy holds no relays, so a new leader **adopts** the keeper's relays and replaces none.
     - **In beta a `superseded` end is unexpected,** since no newer owner of a channel exists, so the keeper reports it as a final end needing the mark, like `RelayFailed`. The mark's message says "superseded, which is unexpected in beta", and `RelayFailed` is raised once.
   - **The interface:** a Unix socket at a short path the launcher chooses, its length checked against the 107-byte limit, mode 0600 and owned by the host's user. Over it:
-    - **the leading controller of each Provider sends desired sets,** level-triggered. A set names the running Allocations, each with its UID, tag, job, Allocation directory, credentials generation and whether a channel has ended for good. For the Provider it gives its UID and creation time, the login host as configured (`HostName`, which the keeper resolves with `ssh -G`), `User` and `Port`, the paths of its key and known-hosts file, and the staged agent binary's path. It never carries a secret.
+    - **the leading controller of each Provider sends desired sets,** level-triggered. A set names the running Allocations, each with:
+      - its UID, tag, job and Allocation directory;
+      - the staged agent binary's path, which is per Allocation, since running Allocations keep their own agent build across an upgrade (HBEP-7);
+      - its credentials generation;
+      - `endedForGood`, true when the Allocation carries `RelayEndedForGood`. The keeper then starts and restarts neither of its relays, on a new generation too. The API is the second source of finality, beside the keeper's own records: it covers an alpha final end from before a switch.
+
+      For the Provider a set gives:
+      - its UID and creation time. A claim made under another UID of the same name belongs to another Provider, which the creation time orders;
+      - the login host as configured (`HostName`, which the keeper resolves with `ssh -G`), `User` and `Port`;
+      - the paths of its key and known-hosts file.
+
+      It never carries a secret.
     - **A set is marked complete** once every Allocation of the Provider that's `Running` with a job ID has had an observation under this lead that reached a decision, keep or drop. Unresolved login-node paths, or a login-host claim not yet answered, is not a decision. Only a complete set stops a relay by leaving its Allocation out, so a new leader whose master connection hasn't resolved its paths yet (HBEP-4) can't cut relays.
     - **Each set carries the age at sending of the Provider's queue listing it rests on, and its validity** (the poll interval in force plus the renew deadline). The keeper computes the expiry on its own monotonic clock at receipt, and refuses a validity above 2 min. That's beta's form of the check before each start (above): the keeper starts or restarts a relay only under an unexpired set that shows its job `RUNNING` under its tag, and a retry counts as a start. Sets aren't persisted: after its own restart, the keeper starts nothing until a fresh set arrives.
     - **The keeper writes its own private `-F` file for each Provider,** under a stable name, from the paths in the set, with the hardening of HBEP-4 (Transport). A relay's identity is its Allocation UID, job, channel and credentials generation, never a file path. A new generation restarts the relay, as in alpha (PR #301), except a channel that has ended for good, which stays down. A new leader sending the same generation replaces nothing.
     - **The keeper reports** each relay's state, and each final end with its kind: an actionable failure, which needs `RelayEndedForGood`, or `superseded` in beta, likewise.
-    - **The leader acknowledges a final end once it's decided:** the mark written, or the write refused with its reason (the Allocation ended, is being deleted, or has another UID or job). The keeper drops a decided end.
-    - **The keeper never restarts a channel whose final end it holds,** decided or not, until that Allocation leaves a complete set. `RelayFailed` is raised once, when the mark is newly written. So in beta a failed write raises nothing until a write succeeds, whereas alpha raises the event after any attempt.
+    - **The leader acknowledges a final end once it's decided:** the mark written, or the write refused with its reason (the Allocation ended, is being deleted, or has another UID or job). The keeper records the end as decided, durably, and stops reporting it; it keeps the record until its Allocation leaves a complete set (The keeper's state file).
+    - **The keeper never restarts a channel whose final end it holds,** decided or not, until that Allocation leaves a complete set. `RelayFailed` is raised once, when the mark is newly written. So in beta a failed write raises nothing until a write succeeds, whereas alpha raises the event after any attempt made while it leads.
 
     This closes alpha's limit, where a restart before the mark was written forgot the failure (What ends a relay).
   - **No leader:** with no unexpired set for a Provider, the keeper keeps that Provider's relays, which end with their jobs through `srun` at the latest, and starts and restarts none. An Allocation deleted while no controller leads keeps its relays until its job ends, a stated limit. The keeper respawns nothing on its own (L-15.1).
   - **Capacity and the login host:** the keeper is the single owner of HBEP-4's 4-relays-per-login-host count and of the one-host-dialed-Provider-per-login-host rule, across leadership generations.
-    - **A Provider's claim on a login host** lasts while the keeper holds any of its relays there, and survives a keeper restart. It lapses when its holder sends a complete set with no Allocation on that host, or names another host. It also lapses when the holder has held no relay there and sent no unexpired set for 5 min.
+    - **A Provider's claim on a login host** lasts until it lapses, and survives a keeper restart. It lapses:
+      - when its holder sends a complete set with no Allocation on that host;
+      - when its holder names another host;
+      - when the holder has held no relay there and sent no unexpired set for 5 min, timed on the keeper's monotonic clock from the later of its own start and the holder's last unexpired set.
     - **A set from a second Provider for a held host** is refused with the holder's name, and that Provider's controller sets `Ready` False with `LoginHostInUse`.
-    - **With no relays held,** the deterministic rule decides: the oldest Provider, then by name.
+    - **For an unclaimed host,** the deterministic rule decides among the Providers whose unexpired sets name it: the oldest Provider, then by name.
     - The 2-Allocations-per-Provider submit limit is unchanged.
   - **Stated limits:**
     - the restart cap's hour (What ends a relay) is kept in memory, so it starts again at a keeper restart;
-    - a `Lease` deleted by hand, or a store rebuilt from scratch with the keeper's state file kept, lowers `leaseTransitions` below the keeper's fence. The keeper's refusal names the Provider and its highest epoch, and the runbook clears that fence as `restore` does. No tool does it.
+    - a `Lease` deleted by hand, or a store rebuilt from scratch with the keeper's state file kept, lowers `leaseTransitions` below the keeper's fence. The keeper's refusal names the Provider and its highest epoch. To recover, an operator stops the keeper, which cuts every host-dialed stream, clears that Provider's fence in the state file, and starts it again. No tool besides `restore` does this.
   - **A keeper restart** cuts every host-dialed stream on the host, as an frps restart cuts every tunnel. The new keeper takes a higher `E`, and starts relays only under fresh sets (Risks).
   - **Signals:** the keeper signals only its own recorded children, each through a pidfd, as the 10 Nov incident's fix requires of the test harness (#308). Alpha's signal to a relay's process group is dropped, since a relay's `ssh` starts no children.
 - **The login node:** each relay keeps an ssh session and an `srun` client there for its Allocation's life. They relay bytes and compute nothing (HBEP-4, open question 14, as amended the same day, with the owner's go). Model weights and images never cross a relay; staging stays in the job (HBEP-7).
@@ -486,7 +500,7 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
   - **The rendezvous:** a batch step and a relay step with different `$TMPDIR` values still meet through `relay-socket`; a stale `relay-socket` (no listener) ends the relay as "agent not ready"; a peer of another user is refused.
   - **Capacity:** a third Allocation of a host-dialed Provider waits at submission (`SubmitLimitReached`); a pair is reserved whole, and neither relay of a running Allocation's pair is ever missing while the other runs.
   - **What ends a relay:**
-    - a missing preamble, ssh drops and "agent not ready" are retried, and so are login-side kills up to the cap. A retried end, and a `superseded` one, keeps the Instance and its Allocation.
+    - a missing preamble, ssh drops and "agent not ready" are retried, and so are login-side kills up to the cap. A retried end keeps the Instance and its Allocation, and so does a `superseded` one in alpha; in beta a `superseded` end is marked, as a final failure (The relay keeper).
     - a final end other than `superseded` or the job's end (a step-limit refusal, more than 120 session drops in an hour) writes `RelayEndedForGood`, raises `RelayFailed`, ends the Instance with reason `RelayEndedForGood` and a `failing` event, and deletes the Allocation, whose job is cancelled. An empty Allocation kept warm is released too.
     - the job ending while a relay starts ends the relay with no mark, since the job's end releases nothing new.
     - the mark is refused on another UID or job, and on an Allocation that isn't running.
@@ -501,9 +515,15 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
     - a new leader's incomplete set stops no relay;
     - an expired set starts and restarts nothing. That holds after a keeper restart, during a leader outage, and for an Allocation deleted during that outage;
     - a final end survives a controller restart, and the next leader writes `RelayEndedForGood` and acknowledges it;
-    - a final end whose Allocation was deleted before the replay is acknowledged as refused, and dropped;
+    - a final end whose Allocation was deleted before the replay is acknowledged as refused, and no longer reported;
     - a crash after the mark but before the acknowledgement raises `RelayFailed` once;
-    - a final-ended channel isn't restarted after a keeper restart;
+    - a final-ended channel whose end was acknowledged isn't restarted after a keeper restart, nor on a new credentials generation;
+    - an Allocation with `endedForGood` gets no relay;
+    - after a keeper restart, the holder's persisted claim refuses an older Provider's set for that host, and lapses by each of its three rules;
+    - a validity above 2 min is refused;
+    - a `superseded` end in beta is marked once and raises `RelayFailed` once;
+    - after `down`, `up` without `--relay-keeper` refuses while host-dialed Allocations run, and `--relay-keeper` without `--front-mode host-dialed` is refused;
+    - the keeper answers the health `ping` within 1 s, and `hpcburst_collector_success{collector="relays"}` reads 0 on a failed read;
     - a keeper restart's relays carry a higher `E`;
     - `down` leaves no keeper and no relay `ssh` behind, and keeps the state file;
     - a second Provider's set for a held login host is refused, and its `Ready` is `LoginHostInUse`;
@@ -534,7 +554,7 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
 - **frps and frpc move together.** Both are pinned to one frp version in `internal/launcher/frp-pins.txt`. New Allocations get the current frpc. An frps upgrade waits until no running Allocation has another frpc version, or until that pair is tested.
 - **The agent protocol** (`/agent/v1/`) is unchanged; frpc's tunnel is separate from it.
 - **Stored state:** none of this HBEP's own, except the Allocation condition `RelayEndedForGood`, which is durable and never cleared (Dial-home modes, What ends a relay), and in beta the relay keeper's state file (The relay keeper). Path state is soft, rebuilt from frps's list; frps's state lives in memory and is rebuilt by reconnects.
-- **From alpha's relays to the keeper (beta):** a host can switch with Allocations running. The keeper's `E` starts above every alpha epoch, so its relays supersede the controller's, and each running Allocation's streams are cut once at the switch. The reverse, back to in-controller relays, needs every host-dialed Allocation of the host drained first, since alpha's lower epochs would be refused as `superseded`. So `up` without `--relay-keeper` refuses while the launcher's record says the keeper ran and host-dialed Allocations are running.
+- **From alpha's relays to the keeper (beta):** a host can switch with Allocations running. The keeper's `E` starts above every alpha epoch, so its relays supersede the controller's, and each running Allocation's streams are cut once at the switch. The reverse, back to in-controller relays, needs every host-dialed Allocation of the host drained first, since alpha's lower epochs would be refused as `superseded`. So `up` without `--relay-keeper` refuses while the keeper's state file exists and host-dialed Allocations are running. The launcher's own record doesn't survive `down`, but that file does. `up` checks once k3s is ready, before it starts the controllers.
 - **Downgrade:** start the earlier frps with the earlier frpc pin, under the same rule.
 
 ### Security
@@ -758,4 +778,4 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
   - **The switch back:** `up` refuses it while host-dialed Allocations run.
   - **Two stated limits.**
 
-  Before, PR #339 left these unspecified.
+  Before, PR #339 named neither the keeper's binary nor its opt-in, kept only undecided ends, held a claim only while relays were held, and had sets carry their listing's time. Settled in this PR's review (Astra and a fresh Opus): the agent path per Allocation, `endedForGood` from the API, decided ends kept and not reported, the claim's arbitration for unclaimed hosts only, the switch-back guard read from the state file, `superseded` scoped by stage, and tests that can fail for each rule.
