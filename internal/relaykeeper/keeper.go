@@ -392,6 +392,7 @@ func (k *Keeper) handleSet(s wire.DesiredSet) (wire.Kind, any) {
 		k.runner.Want(p, s.SSH, Want{Entry: e, ProviderUID: s.ProviderUID, Finals: k.finalsOf(p, e),
 			Jobs:    jobs{k: k, provider: p, uid: s.ProviderUID, host: host, entry: e},
 			OnFinal: k.onFinal(p, e), OnStart: k.onStart(p, s.ProviderUID, host, e),
+			BeforeStart: k.beforeStart(p, s.ProviderUID, host, e),
 			StartFailed: k.startFailed(p, s.ProviderUID, host, e)})
 	}
 	return wire.KindReport, k.report(p, host, false)
@@ -665,33 +666,62 @@ func (j jobs) ListByTag(_ context.Context, tag string) ([]provider.Job, error) {
 	k := j.k
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	ok, err := j.authorized(tag)
+	if err != nil || !ok {
+		return nil, err
+	}
+	// One start authorized: its host is held until it resolves
+	// (Want.OnStart, Want.StartFailed).
+	k.inflight[holdKey{j.provider, j.uid, j.host, tag}]++
+	return []provider.Job{{ID: j.entry.JobID, Name: tag, Phase: v1alpha1.AllocationRunning}}, nil
+}
+
+// authorized reports whether a start of the Want's relay may go ahead now:
+// the listing's conditions (jobs). The caller holds the lock.
+func (j jobs) authorized(tag string) (bool, error) {
+	k := j.k
 	hs := k.sets[j.provider]
 	switch {
 	case hs == nil:
-		return nil, fmt.Errorf("no desired set from Provider %s's leader since the keeper started", j.provider)
+		return false, fmt.Errorf("no desired set from Provider %s's leader since the keeper started", j.provider)
 	case !k.o.Now().Before(hs.expires):
-		return nil, fmt.Errorf("Provider %s's desired set has expired: no leader's listing is fresh", j.provider)
+		return false, fmt.Errorf("Provider %s's desired set has expired: no leader's listing is fresh", j.provider)
 	}
 	if tag != j.entry.Tag || hs.set.ProviderUID != j.uid || hs.host != j.host {
-		return nil, nil
+		return false, nil
 	}
 	if c, ok := k.st.Claims[j.host]; !ok || c.Provider != j.provider || c.ProviderUID != j.uid {
-		return nil, nil
+		return false, nil
 	}
 	if w, ok := k.wanted[j.provider][tag]; !ok || w.entry != j.entry || w.uid != j.uid || w.host != j.host {
-		return nil, nil
+		return false, nil
 	}
 	for _, e := range hs.set.Allocations {
 		// The set's entry must be the Want's own, which is never marked, so an
 		// Allocation the set marks RelayEndedForGood is hidden here.
 		if e.Tag == tag && e == j.entry && len(k.endsOf(j.provider, e)) == 0 {
-			// One start authorized: its host is held until it resolves
-			// (Want.OnStart, Want.StartFailed).
-			k.inflight[holdKey{j.provider, j.uid, j.host, tag}]++
-			return []provider.Job{{ID: e.JobID, Name: tag, Phase: v1alpha1.AllocationRunning}}, nil
+			return true, nil
 		}
 	}
-	return nil, nil
+	return false, nil
+}
+
+// beforeStart is the Want's gate (Want.BeforeStart), asked right before each
+// ssh start: under the lock, the start goes ahead only while the listing's
+// conditions still hold, so a replacement, a move, a Drop or an end the
+// keeper took since the listing keeps the start from launching (the
+// Runner's duty 3). A refused start resolves the listing's authorization.
+func (k *Keeper) beforeStart(p, uid, host string, e wire.Entry) func(agentapi.RelayChannel, int64, int64) bool {
+	j := jobs{k: k, provider: p, uid: uid, host: host, entry: e}
+	return func(ch agentapi.RelayChannel, _, _ int64) bool {
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		if ok, _ := j.authorized(e.Tag); ok {
+			return true
+		}
+		k.release(holdKey{p, uid, host, e.Tag}, ch)
+		return false
+	}
 }
 
 func keysOf[V any](m map[string]V) map[string]bool {

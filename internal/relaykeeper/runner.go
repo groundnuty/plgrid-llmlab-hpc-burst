@@ -117,6 +117,10 @@ type Want struct {
 	// holds the host from then on, as a relay up in Relays, which the Runner
 	// shows before it calls OnStart (duty 2), once per authorization (duty 4).
 	OnStart func(ch agentapi.RelayChannel, epoch, seq int64)
+	// BeforeStart is asked right before each ssh start, with the (E, N) the
+	// start would carry (hostdial.Target.BeforeStart): the keeper decides
+	// there, under its lock, whether the start may go ahead.
+	BeforeStart func(ch agentapi.RelayChannel, epoch, seq int64) bool
 	// StartFailed resolves an authorization (Jobs) whose process did not
 	// start, on every such path, a replaced generation's prevented start
 	// included, once per authorization (duties 1, 3 and 4); it releases the
