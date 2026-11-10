@@ -1,8 +1,9 @@
 package lifecycle
 
-// Issue #332: warm placement passes over an Allocation that carries a mark
-// under which step 5 (allocationFailed) ends any Instance placed on it,
-// RelayEndedForGood (issue #304) or SubmittedAsOther (HBEP-4, Read-back).
+// Issue #332: warm placement passes over an Allocation marked RelayEndedForGood
+// (issue #304). SubmittedAsOther (HBEP-4, Read-back) is the other mark under
+// which step 5 (allocationFailed) ends an Instance placed on an Allocation, but
+// it is not skipped, because nothing releases an empty one (see relayEnded).
 //
 // The pass runs step 7 (placement) before step 9 (retention, which releases
 // an empty Allocation marked RelayEndedForGood), so without the skip one pass
@@ -12,9 +13,13 @@ package lifecycle
 // and reconcile): a call of warmAllocation on a hand-built list proves
 // nothing, because it never runs the pass whose step order is the defect.
 //
-// Each case first runs the same steps with no mark, and the Instance goes onto
-// the empty Allocation: a marked case that is passed over only means something
-// when the unmarked one is picked.
+// The skip test first has a control that runs the same steps with no mark, and
+// the Instance goes onto the empty Allocation: a marked case that is passed
+// over only means something when the unmarked one is picked.
+//
+// The outcome test (a Provider at its submit limit) holds for every mark,
+// whichever way the Allocation is dealt with, and fails for a skip that is not
+// matched by a release.
 
 import (
 	"testing"
@@ -25,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	pfake "github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/fake"
 )
 
 const (
@@ -50,15 +56,16 @@ func readBackMark(t *testing.T, rg *rig, name string) {
 }
 
 // warmMarkCase is one mark: how it is written and the reason a failed Instance
-// would carry.
+// would carry. skipped is true for a mark that warm placement passes over.
 type warmMarkCase struct {
-	cond string
-	mark func(*testing.T, *rig, string)
-	opts []rigOption
+	cond    string
+	mark    func(*testing.T, *rig, string)
+	opts    []rigOption
+	skipped bool
 }
 
 var warmMarkCases = []warmMarkCase{
-	{cond: relayCond, mark: relayMark, opts: []rigOption{withHostDialed()}},
+	{cond: relayCond, mark: relayMark, opts: []rigOption{withHostDialed()}, skipped: true},
 	{cond: submittedAsOtherCond, mark: readBackMark},
 }
 
@@ -114,6 +121,9 @@ func TestWarmPlacementTakesAnUnmarkedEmptyAllocation(t *testing.T) {
 // failure that counts toward RestartLoop.
 func TestWarmPlacementSkipsAMarkedEmptyAllocation(t *testing.T) {
 	for _, tc := range warmMarkCases {
+		if !tc.skipped {
+			continue
+		}
 		t.Run(tc.cond, func(t *testing.T) {
 			rg := newRig(t, tc.opts...)
 			a, scaledAt := warmEmptyThenScaleUp(t, rg, tc.mark)
@@ -143,6 +153,41 @@ func TestWarmPlacementSkipsAMarkedEmptyAllocation(t *testing.T) {
 			}
 			if got := rg.submissions(); got != 2 {
 				t.Errorf("sbatch calls = %d, want 2 (the first job and one for the new Instance)", got)
+			}
+		})
+	}
+}
+
+// A marked, empty Allocation never leaves a deployment without capacity. The
+// Provider's QOS allows one submission per user, so the Allocation holds the
+// only slot (slots.go counts every Allocation that has not ended); the
+// deployment is scaled from zero to one Instance, and within ten minutes one
+// Instance serves, on another Allocation, with the marked one released. This
+// holds for every mark, and whichever way the Allocation is dealt with: a
+// release (RelayEndedForGood, step 9) or a placement that fails and releases it
+// (SubmittedAsOther, step 5). It fails for a skip that nothing releases: the
+// deployment then waits on a slot that is held until the Allocation's retention
+// date. Only the outcome is asserted, so it holds if SubmittedAsOther gets the
+// release too (issue #332).
+func TestAMarkedEmptyAllocationDoesNotStarveAProviderAtItsSubmitLimit(t *testing.T) {
+	for _, tc := range warmMarkCases {
+		t.Run(tc.cond, func(t *testing.T) {
+			qos := []v1alpha1.QOSProfile{{Name: "example-s1", MaxSubmitPerUser: i32(1)}}
+			opts := append(qosOpts(qos, "", "example-s1"), tc.opts...)
+			opts = append(opts, withBatchConfig(func(c *pfake.Config) { c.MaxSubmitPerUser = 1 }))
+			rg := newRig(t, opts...)
+			a, _ := warmEmptyThenScaleUp(t, rg, tc.mark)
+			if rg.submissions() != 1 {
+				t.Fatalf("sbatch calls = %d after the first pass; want 1 (the first job)", rg.submissions())
+			}
+			rg.until(10*time.Minute, 10*time.Second, "one ready Instance", func() bool { return rg.readyCount("md") == 1 })
+			rg.run(5*time.Minute, 10*time.Second)
+			live := rg.liveInstances("md")
+			if len(live) != 1 || live[0].Status.Phase != v1alpha1.InstanceReady || live[0].Spec.AllocationRef.Name == a.Name {
+				t.Fatalf("live Instances %d: %+v; want one ready Instance on an Allocation other than %s", len(live), live, a.Name)
+			}
+			if !allocReleased(rg, a.Name) {
+				t.Errorf("the Allocation marked %s was not released", tc.cond)
 			}
 		})
 	}
