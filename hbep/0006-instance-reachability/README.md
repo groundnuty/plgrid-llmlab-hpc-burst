@@ -65,7 +65,7 @@ Problems:
   - the tunnel carries every request HBEP-5 routes to an Instance: its listed endpoints and its passthrough of every other JSON `POST` under `/v1/` (HBEP-5, Contract), so any large non-streamed reply can stall the streams of its Instance. An Instance serves one model, and vLLM v0.32.0 serves `/v1/embeddings` only for a pooling model and the chat and completions routes only for a generative one: a server's tasks come from its one runner type (`vllm/v1/worker/gpu_model_runner.py:3158-3164`), the generation routes need `generate` (`vllm/entrypoints/launchers/api_server/routers.py:49-54`), and the embeddings route needs `embed` (`vllm/entrypoints/pooling/factories.py:132-135`; `pooling/embed/api_router.py:28-29`). So embeddings and token streams never share an Instance's tunnel. The risk that remains is any large non-streamed reply of a generative model, from a listed endpoint or the passthrough, which can stall its Instance's streams for seconds on a slow path. The path rate is measured in S1's one-hour runs (Graduation criteria);
   - after alpha, a bulk endpoint gets its own frpc proxy with `transport.bandwidthLimit`, or a separate frpc with `transport.tcpMux = false` (open question 12).
 - **A short heartbeat timeout drops a healthy tunnel.** With a 6 s timeout, a slow reader queued more than 6 s of data in S1c, a heartbeat timed out, and all 16 streams were cut, in both passes. S1's set survived every run. Heartbeat timeouts are budgeted from the queueing delay (Heartbeats). yamux's ping timeout is fixed at 10 s, so on a slow path a queue of more than 10 s drops the tunnel at any setting.
-- **The tunnel drops while the instance is healthy.** frpc and the ssh forwards reconnect on their own. Meanwhile the front holds the Instance as not eligible, not dead (HBEP-5), and the controller restarts nothing on that basis (HBEP-7).
+- **The tunnel drops while the instance is healthy.** frpc and the ssh forwards reconnect on their own. Meanwhile the front holds the Instance as not eligible, not dead (HBEP-5), and the controller restarts nothing on that basis (HBEP-7). A host-dialed relay that ends for good is the exception: its Allocation is released (Dial-home modes, What ends a relay).
 - **Requests hang in a dead tunnel before frps notices.** frps answers the front's `CONNECT` before it takes a work connection (frp facts), so a silent path still accepts requests. frps then closes each of them itself, after the front's write and before any response byte: a request that waits for a work connection at `userConnTimeout` (10 s), and the one that drew the spare work connection when the session is torn down (12–20 s at S1's settings, over 15 s at frp's defaults in S1c). The front returns that as 502 `upstream_closed` (HBEP-5, Errors), does not resend it, and its probe takes the Instance out of rotation (The front's half).
 - **A lifecycle-controller outage blocks new logins.** The plugin handles `Login`, `NewProxy` and `CloseProxy` only, so frps consults it only when a session logs in or registers a proxy, and established tunnels survive a controller restart, except in host-dialed mode, where the relays are the controller's children (Dial-home modes). While the plugin is down, frps refuses every login and proxy (frp facts), so an frpc that reconnects meanwhile cannot log in. It keeps retrying (`loginFailExit = false`) and returns when the plugin is back. `Ping` is not subscribed (science-agent decision, 31 Oct 2026): frps would turn a failed `Ping` call into an error answer, on which frpc closes its session (frp facts), so a controller outage would cut every tunnel.
 - **A slow plugin stalls a tunnel.** frps's plugin client has no timeout, and `NewProxy` runs on the session's read loop (frp facts). A plugin that waits holds that tunnel's control messages, and past 25 s frps drops it. So the plugin answers from in-memory state within 1 s, and refuses rather than waiting on the API server (Admission).
@@ -264,12 +264,18 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
       - `srun`'s step-limit refusal;
       - more than 120 restarts of one channel within an hour, counting only restarts whose session came up and then dropped. Failures before a session comes up (the login node down for maintenance, ssh refused, "agent not ready", a missing preamble) are never capped: they keep retrying at the 30 s backoff cap, bounded by the step count below and by the job's end. A final end stays final.
 
-      A final end other than `superseded` or the job's end raises a Warning event, reason `RelayFailed`, regarding the Allocation, naming the channel and the cause (untyped, like every Provider-controller event in alpha; HBEP-8, open question 14). The code adds the reason to HBEP-8's table, since a new reason isn't an amendment.
+      A final end other than `superseded` or the job's end raises a Warning event, reason `RelayFailed`, regarding the Allocation, naming the channel and the cause (untyped, like every Provider-controller event in alpha; HBEP-8, open question 14). The code adds the reason to HBEP-8's table, since a new reason isn't an amendment. Before it raises the event, the Provider's controller writes the Allocation's condition `RelayEndedForGood` True, reason `RelayFailed`, with the event's message (#304). The rules for that mark:
+      - **When it's written:** only on an Allocation that still runs the relay's job (the same UID and job, `Running`, not completing and not being deleted), and only while this copy leads. A copy that loses the lead during the write raises no event.
+      - **It's never cleared.**
+      - **When the write fails,** the same process's next observation of the running Allocation sets it. A controller restart or hand-over before then forgets the failure, and the new leader starts the relays again, so a lasting cause ends them for good once more.
+      - **What follows:** the lifecycle controller ends the Allocation's Instances with reason `RelayEndedForGood` and a `failing` event, and releases the Allocation, whatever its retention policy (HBEP-7, step 5 and Retention). So its job and GPU are freed and the planner replaces the Instance. The release counts toward the class's `RestartLoop`, so a cause that keeps recurring pauses provisioning.
     - **Steps:** at the 30 s cap two relays make at most about 240 `srun` steps an hour, about 11,500 in 48 h, below the 40,000 `MaxStepCount` that both profiles record.
-  - **A path that fails never restarts a healthy engine.** HBEP-7's rules apply unchanged:
+  - **A path that fails never restarts a healthy engine.** HBEP-7's rules apply, with one exception below:
     - an Instance first becomes `ready` only with `TunnelConnected` True, from frps;
     - relay restarts don't reset its start deadline;
     - a `ready` Instance whose path is down takes no new requests (the front's probe), and `AgentUnreachable` follows its own timeout.
+
+    The exception is a relay that ends for good, other than `superseded` or by its job's end: one channel never returns, so the Instance can't serve, and its Allocation is released (What ends a relay). Retried ends and `superseded` restart no engine.
 - **What a drop costs:** the streams on that session reset. A token stream in flight is cut and counted as cut, and a request already written is never replayed (HBEP-5). frpc logs in again once the relay is back.
 - **A controller restart cuts the relays** (owner decision, 9 Nov 2026: "Accept cuts for alpha"). The relays are children of the controller process, so a restart cuts every stream in flight, counted as cuts and never replayed, and the new leader starts both relays of every running Allocation within the backoff. A relay keeper, a separate process the launcher supervises that would keep relays across restarts, moves to beta (open question 13).
 - **The login node:** each relay keeps an ssh session and an `srun` client there for its Allocation's life. They relay bytes and compute nothing (HBEP-4, open question 14, as amended the same day, with the owner's go). Model weights and images never cross a relay; staging stays in the job (HBEP-7).
@@ -412,7 +418,12 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
   - **Fencing:** an old copy's relay that arrives after the new copy's, with a lower epoch, is refused as `superseded`, and isn't started again. A copy that loses the lead stops its relays before it releases the `Lease`.
   - **The rendezvous:** a batch step and a relay step with different `$TMPDIR` values still meet through `relay-socket`; a stale `relay-socket` (no listener) ends the relay as "agent not ready"; a peer of another user is refused.
   - **Capacity:** a third Allocation of a host-dialed Provider waits at submission (`SubmitLimitReached`); a pair is reserved whole, and neither relay of a running Allocation's pair is ever missing while the other runs.
-  - **What ends a relay:** a step-limit refusal, the job ending while a relay starts, repeated login-side kills (more than 120 an hour), and a missing preamble each end as specified, with `RelayFailed` where specified, and never restart the engine.
+  - **What ends a relay:**
+    - a missing preamble, ssh drops and "agent not ready" are retried, and so are login-side kills up to the cap. A retried end, and a `superseded` one, keeps the Instance and its Allocation.
+    - a final end other than `superseded` or the job's end (a step-limit refusal, more than 120 session drops in an hour) writes `RelayEndedForGood`, raises `RelayFailed`, ends the Instance with reason `RelayEndedForGood` and a `failing` event, and deletes the Allocation, whose job is cancelled. An empty Allocation kept warm is released too.
+    - the job ending while a relay starts ends the relay with no mark, since the job's end releases nothing new.
+    - the mark is refused on another UID or job, and on an Allocation that isn't running.
+    - **Proves nothing here:** a test that calls the release directly, without a relay ending through the real relay owner.
   - **The nested stack under slow readers:** frpc's tunnel inside the serving relay, with a slow token reader, keeps the other streams moving within frp's window.
   - **The real platforms, at the first live run:** all 256 byte values cross each way, an `--overlap` step reaches the agent's socket, and the step lands on the batch host. The fake uses pipes, so none of this is shown by the fake.
   - **None of these proves anything here:** a relay test with both ends in one process and no `srun` standard input and output between them, or a count of relays with no byte crossing.
@@ -439,7 +450,7 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
 - Clients see only the front, so a path change is invisible to them.
 - **frps and frpc move together.** Both are pinned to one frp version in `internal/launcher/frp-pins.txt`. New Allocations get the current frpc. An frps upgrade waits until no running Allocation has another frpc version, or until that pair is tested.
 - **The agent protocol** (`/agent/v1/`) is unchanged; frpc's tunnel is separate from it.
-- **Stored state:** none of this HBEP's own. Path state is soft, rebuilt from frps's list; frps's state lives in memory and is rebuilt by reconnects.
+- **Stored state:** none of this HBEP's own, except the Allocation condition `RelayEndedForGood`, which is durable and never cleared (Dial-home modes, What ends a relay). Path state is soft, rebuilt from frps's list; frps's state lives in memory and is rebuilt by reconnects.
 - **Downgrade:** start the earlier frps with the earlier frpc pin, under the same rule.
 
 ### Security
@@ -589,6 +600,7 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - 2026-11-01: an orphan proxy must be listed so for `TunnelOrphanGrace` (2 min), a failed read skipped, so a normal teardown raises no event; a restart before the first `ready` is still gated, its deadline from its latest restart (ruled for #167, settled in PR #186).
 - 2026-11-02: erratum: `PathProbeFailing` is no longer marked proposed, since the front emits it (PR #248).
 - 2026-11-09: host-dialed mode. The control-plane host dials each job through the login node, with two `srun -u --overlap` relays per Allocation carrying multiplexed sessions, because compute nodes can't reach the alpha host and the gateway's forward isn't awaited (owner, 9 Nov 2026; the probe of that day).
+- 2026-11-10: a relay that ends for good releases its Allocation (#304, PR #319).
 
 ## Amendments
 
@@ -608,9 +620,9 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
   - **Capacity:** a Provider limit of 2 Allocations, with relays reserved in whole pairs.
   - **What ends a relay:** retried or final, with `RelayFailed`, and never an engine restart.
   - **The owner's two decisions:** relays run without asking Cyfronet first, and a controller restart cuts host-dialed streams in alpha, with a relay keeper deferred to beta (open question 13).
+  Before, a host that compute nodes could not reach was out of alpha, and alpha waited for the gateway's forward.
 - **2026-11-09: erratum:** `RelayFailed` is an untyped Warning, not a `failing` event (#301).
 - **2026-11-09: erratum:** a job missing from the listing is retried, not a final end (#301).
 - **2026-11-09: erratum:** the Provider's controller checks the 2-Allocation cap again before it submits, and two Provider leaders in an unfenced hand-over remain the one race, its extra Allocation released as surplus (#301).
 - **2026-11-09: erratum:** the restart cap counts only restarts whose session came up and then dropped; failures before a session comes up are never capped (#301).
-
-  Before, a host that compute nodes could not reach was out of alpha, and alpha waited for the gateway's forward.
+- **2026-11-10: a relay that ends for good releases its Allocation** (Risks; Dial-home modes, What ends a relay and the no-restart rule; Test plan; Operational readiness). An amendment, the code built ahead of the text (#304, PR #319), settled in this PR's review (Astra and a fresh Opus). The Provider's controller marks the Allocation `RelayEndedForGood` before it raises `RelayFailed`, and the lifecycle controller ends its Instances with that reason and releases it, whatever its retention policy (owner's go for warm Allocations, 10 Nov 2026). Before, only the event was raised, and a ready Instance kept its job until its lease ended.

@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/rand"
 	"os"
 	"os/user"
@@ -317,5 +318,34 @@ func TestCloseEndsACommandInFlight(t *testing.T) {
 	}
 	if err := r.node.Close(); err != nil {
 		t.Errorf("a second Close: %v", err)
+	}
+}
+
+// The forced command execs the binary through env, so no login shell stays
+// behind as its parent, which the relay guard would refuse (issue #308).
+func TestTheForcedCommandExecsTheBinary(t *testing.T) {
+	got := forcedCommand("/example/n/relay.sock", "/example/bin/rehearsal.test")
+	if want := "exec env HB_REHEARSAL_ROLE=slurm-relay HB_REHEARSAL_RELAY=/example/n/relay.sock /example/bin/rehearsal.test"; got != want {
+		t.Errorf("the forced command is %q, want %q", got, want)
+	}
+}
+
+// The real launch line: the login node's authorized_keys forces that command,
+// and a command runs through it, past the relay guard.
+func TestTheLoginNodesKeyForcesTheExecLine(t *testing.T) {
+	r, s := newRig(t)
+	if q := decodeSqueue(t, []byte(must(t, s, "squeue --me --json"))); len(q.Jobs) != 0 {
+		t.Errorf("squeue through the forced command: %d jobs, want none", len(q.Jobs))
+	}
+	b, err := os.ReadFile(r.node.files.authorized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("command=%q", forcedCommand(r.node.sock, exe)); !strings.Contains(string(b), want) || !strings.Contains(want, "exec env ") {
+		t.Errorf("authorized_keys is %q, want it to hold %s", b, want)
 	}
 }

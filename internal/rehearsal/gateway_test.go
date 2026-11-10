@@ -251,7 +251,7 @@ func TestCloseLeavesNoProcess(t *testing.T) {
 	}
 	f.waitState("the forward's ssh to see the gateway go", func(s agent.ForwardState) bool { return !s.Listening })
 	f.stop()
-	for _, p := range below(os.Getpid()) {
+	for _, p := range below(ownRow()) {
 		if b, _ := os.ReadFile("/proc/" + strconv.Itoa(p.pid) + "/comm"); strings.HasPrefix(string(b), "ssh") {
 			t.Errorf("process %d (%s) is left below the test after Close and the forward's stop", p.pid, strings.TrimSpace(string(b)))
 		}
@@ -329,7 +329,9 @@ func TestStartGatewayRefusesBadConfig(t *testing.T) {
 	} {
 		g, err := StartGateway(c.cfg)
 		if err == nil {
-			g.Close()
+			if cerr := g.Close(); cerr != nil {
+				t.Errorf("%s: Close: %v", c.name, cerr)
+			}
 			t.Errorf("%s: StartGateway succeeded", c.name)
 		} else if !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: error %q, want it to say %q", c.name, err, c.want)

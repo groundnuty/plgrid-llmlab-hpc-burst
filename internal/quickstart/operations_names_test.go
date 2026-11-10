@@ -101,6 +101,7 @@ var guideNames = map[string]string{
 	"AdminHold":          string(v1alpha1.ConditionAdminHold),
 	"SubmittedAsOther":   string(v1alpha1.ConditionSubmittedAsOther),
 	"ReadBackMismatch":   string(v1alpha1.ReasonReadBackMismatch),
+	"RelayEndedForGood":  string(v1alpha1.ConditionRelayEndedForGood),
 	"SubmissionResolved": string(v1alpha1.ConditionSubmissionResolved),
 	"NeedsOperator":      string(v1alpha1.ReasonNeedsOperator),
 	"Resolved":           string(v1alpha1.ReasonResolved),

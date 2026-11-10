@@ -125,9 +125,18 @@ func Listening(t T, ports []int) []int {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	have, err := listening(ctx, ports)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return have
+}
+
+// listening is Listening within ctx, returning its failure, for a caller that must not stop the test (Left).
+func listening(ctx context.Context, ports []int) ([]int, error) {
 	out, err := exec.CommandContext(ctx, "ss", "-ltnH").Output()
 	if err != nil {
-		t.Fatalf("ss -ltnH: %v", err)
+		return nil, fmt.Errorf("ss -ltnH: %v", err)
 	}
 	var have []int
 	for _, p := range ports {
@@ -138,7 +147,7 @@ func Listening(t T, ports []int) []int {
 			}
 		}
 	}
-	return have
+	return have, nil
 }
 
 // RootK3sListening is which of the system k3s's ports listen, "6443,6444,10250"
