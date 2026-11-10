@@ -39,8 +39,8 @@ type group struct {
 
 var groups = []group{
 	{"lease", "./internal/lifecycle", "150s", []string{ownTestName}},
-	{"livechecks-hostdialed", "./hack/livechecks", "5m", hostDialedDry},
-	{"livechecks-dry", "./hack/livechecks", "8m", otherDry},
+	{"livechecks-hostdialed", "./hack/livechecks", "150s", hostDialedDry},
+	{"livechecks-dry", "./hack/livechecks", "270s", otherDry},
 }
 
 func anchored(names []string) string { return "^(" + strings.Join(names, "|") + ")$" }
