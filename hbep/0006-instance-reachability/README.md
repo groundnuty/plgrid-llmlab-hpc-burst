@@ -92,20 +92,24 @@ Problems:
 8. **A front behind NAT,** as in a single-user setup. **Decided for alpha** by HBEP-11 (its open question 8): no rendezvous relay. The alpha host is reached directly on the dial-home port, or through ssh on the configured ssh port, 22 by default, with a restricted key. Source: S1's step 0, where the development VM's address, behind a NAT, answered the compute nodes on port 22 and nothing else. That sshd was a gateway's, as its host key showed (L-17.7). The route is a port forward on the gateway to the VM's sshd, reached at the gateway's address and port (owner decision, 31 Oct 2026, issue #18). **Amended, 9 Nov 2026:** the gateway's forward is not awaited. The alpha host runs in host-dialed mode (Dial-home modes; open question 3).
 9. **Center consent.** **Decided** (owner, 31 Oct 2026): "The outbound tunnels are acceptable use, yes."
 10. **Compute-node reachability.** **Decided for alpha's partitions** by S1's step 0 and probe 2 (issue #18): outbound 443 works on Helios CPU, Helios GH200 and Athena A100, and the home directory, which holds the ssh-mode key, is readable from their compute nodes (HBEP-4, open question 16). Inbound reachability is not needed, since Instances dial home. **Not needed for alpha:** Sano, which is not an alpha platform (HBEP-4).
-11. **Many tunnels on one front.** **Partly answered: steady state only** (spike S14, issue #313). Setup: loopback through S1c's emulator with no impairment, on three 4-CPU hosted runners, with 1 to 300 frpc tunnels at 1 and 8 streams of 20 tokens/s, in direct and host-dialed mode.
-   - **No steady-state tunnel-count knee through 300 tunnels under these conditions.** The measured stack's CPU follows `a × (tokens/s ÷ 1000) + b × tunnels + c`, with coefficients that depend on the runner's CPU:
-     - direct mode (frps plus the dial-home listener): a = 0.05–0.08, b = 0.0004–0.0006 (fitted), c = 0.016–0.022 cores. S1c's 7.9–8.7% at one tunnel agrees.
+11. **Many tunnels on one front.** **Partly answered: steady state only; the rest blocks beta** (spike S14, issue #313, PR #328; 10 Nov 2026). Setup: loopback through S1c's emulator with no impairment, on three 4-CPU hosted runners, with 1 to 300 frpc tunnels at 1 and 8 streams of 20 tokens/s, in direct and host-dialed mode.
+   - **No steady-state tunnel-count knee through 300 tunnels under these conditions.** The measured stack's CPU follows `a × (tokens/s ÷ 1000) + b × tunnels + c`. The coefficients vary by runner: up to 44% on one CPU model in S14's first run, whose direct `a` reached 0.109 and whose data weren't kept. So the rates below carry that spread. From the 90 runs with committed data:
+     - direct mode (frps plus the dial-home listener): a = 0.05–0.08, b = 0.0004–0.0006 (fitted), c = 0.016–0.022 cores. S1c's 7.9–8.7% at one tunnel agrees on the AMD runners; the Intel runner's `a` of 0.049 is lower.
      - host-dialed mode (plus the relay owner and its ssh processes, without ssh's encryption): a = 0.08–0.13, b = 0.0008–0.0016, c = 0.026–0.044.
      - The measured idle cost per tunnel is lower: 0.0002 cores in direct mode and 0.0003–0.0005 in host-dialed mode.
-   - **Memory and descriptors are not limits at this scale.** At 300 tunnels × 8 streams, frps held about 250 MB and 2,700 descriptors (one per tunnel plus one per stream in flight), and the listener 60 MB and 2 descriptors per tunnel. Host-dialed mode adds 9 descriptors in the controller and two ssh processes per Allocation.
-   - **No tunnel dropped in steady state.** In 180 runs there was no frps drop, no frpc re-login, no relay restart and no failed probe, including runs where tokens queued for seconds on a saturated host. All 300 tunnels registered within 3 s of a fresh start.
+   - **Memory and descriptors are not limits at this scale.** At 300 tunnels × 8 streams, frps held about 250 MB and 2,700 descriptors (one per tunnel plus one per stream in flight), and the listener 60 MB and 2 descriptors per tunnel. Host-dialed mode adds 9 descriptors and two ssh processes per Allocation in the relays' host side: the controller in alpha, the relay keeper in beta.
+   - **No tunnel dropped in steady state.** In the 90 runs with committed data, and in the first run's 90, whose data weren't kept, there was no frps drop, no frpc re-login, no relay restart and no failed probe, including runs where tokens queued for seconds on a saturated host. All 300 tunnels registered within 3 s of a fresh start.
    - **Latency bends with the host's CPU, not the tunnel count.** Tunnels add a few ms to the time to first token while the host has headroom; the tails grow once its CPUs near saturation.
-   - **The steady-state per-front budget**, with `q = tokens/s ÷ 1000`, keeps `a × q + b × tunnels + c + R_front + R_ssh` under 70% of the front's cores, both reserves growing with the rate:
+   - **The steady-state per-front budget**, with `q = tokens/s ÷ 1000`, keeps `a × q + b × tunnels + c + R_front + R_ssh` under 70% of the cores left to these processes on the front's host (the alpha host also runs k3s and the controllers), both reserves growing with the rate:
      - R_front = s × a × q is the front's own proxy and control work, unmeasured: a chosen budgeting floor, with s = 0.45 in direct mode and 0.25 in host-dialed mode (the listener's measured share, rounded up);
      - R_ssh = 0.045 × q is ssh's encryption in host-dialed mode: a provisional assumption to validate, since S1c's lightly loaded sample gave about 0.14 × q and its cipher was not recorded.
-     - That is an estimated 4,000–9,000 tokens/s per front core in direct mode at 100–300 tunnels, and 1,000–4,000 in host-dialed mode (700–2,400 with R_ssh = 0.14 × q), for 60-token streams with a new connection per request.
-     - The link still bounds the same rate at payload bytes/s ÷ about 305 bytes per token (operational-readiness item 5). The front's open-files hard limit must cover frps's tunnels plus streams in flight, and the listener's two per tunnel.
-   - **Until the open items are measured, keep a front at or below 300 tunnels.**
+     - That is an estimated 4,000–9,000 tokens/s per front core in direct mode at 100–300 tunnels, and about 3,200–3,900 at the first run's highest `a` (computed in this PR's review from S14's formula, not by S14). In host-dialed mode it's 1,000–4,000 (700–2,400 with R_ssh = 0.14 × q), measured with one Allocation per tunnel, more than HBEP-6's host-dialed capacity allows today. All of these are for 60-token streams with a new connection per request.
+     - The link still bounds the same rate at payload bytes/s ÷ about 300 bytes per token (Operational readiness 5); in host-dialed mode ssh's framing adds to that.
+     - **Open-files hard limits are per process,** each above its count plus a baseline:
+       - frps needs one descriptor per tunnel plus one per stream in flight;
+       - the front's process, which holds both the client listener and the dial-home listener, needs two per tunnel plus two per stream in flight, for the client's connection and the upstream one. That's about 5,400 at 300 tunnels × 8 streams, above a common 4,096;
+       - the relays' host side needs 9 per host-dialed Allocation.
+   - **Until the open items are measured, keep a front at or below 300 tunnels.** It's an operating limit; no code enforces it.
    - **Still open, and each could bound tunnels where steady state does not:**
      - a mass re-login of hundreds of frpc through the admission plugin after a front or frps restart;
      - many tunnels sharing a capped link, where heartbeats could starve while CPU is spare;
@@ -575,13 +579,13 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
    - frps listening off loopback: the launcher's check of its ports;
    - a record left after its allocation ended: the inventory compared with frps's list and the provider's job list.
 4. **Provider limits:** outbound 443 per partition (S1's step 0); in ssh mode, the configured ssh port to the control-plane host's sshd, 22 by default; loopback shared with other users' jobs on a node; lease ends, which end the tunnel. In host-dialed mode: the login node's process policy and sshd throttle, its availability (an outage or maintenance there cuts every path on that cluster at once), and each job's `MaxStepCount`.
-5. **Capacity:** S1c's figures, from one tunnel at up to 256 streams on loopback.
+5. **Capacity:** for budgeting a front, open question 11 is authoritative (S14). Below are S1c's figures, from one tunnel at up to 256 streams on loopback, with no reserves.
    - **Front CPU:** 7.9–8.7% of a core per 1,000 tokens/s over wss (frps plus the TLS terminator), 6.6–6.9% over frp's plain tcp, and 7.5–7.8% for the ssh path (frps plus sshd). The cost per token was higher at 64 streams (8.8–16%).
-   - **Per front core:** about 580–630 wss streams at 20 tokens/s (11,500–12,600 tokens/s), or 720–760 over tcp. This is extrapolated linearly from 36–39% of a core at 256 streams; the front near full CPU was not measured.
+   - **Per front core, one tunnel, no reserves:** about 580–630 wss streams at 20 tokens/s (11,500–12,600 tokens/s), or 720–760 over tcp. This is extrapolated linearly from 36–39% of a core at 256 streams; the front near full CPU was not measured. S14's budget with reserves is lower (open question 11).
    - **Memory:** about 50 MB for frps at 256 streams, and 70 MB for frpc on the instance side.
    - **The link is the more likely limit:** about payload bytes/s ÷ (300 × tokens/s per stream) streams, since each 222-byte token chunk took 290–335 bytes of TCP payload. That is about 85 streams of 20 tokens/s at 512 kB/s.
    - **Overload:** every stream on the tunnel slows evenly, and time to first token grows to seconds; in S1c no stream failed.
-   - **Not measured:** many tunnels on one front (open question 11), which blocks beta.
+   - **Many tunnels on one front:** S14's steady-state budget (open question 11). Its five open items block beta.
 6. **Idle cost:**
    - per Instance: one frpc process, one `wss` connection, a yamux ping and an application heartbeat every 10 s, and one probe every 10 s;
    - per Allocation in ssh mode: two ssh connections with their keepalives;
@@ -633,6 +637,7 @@ Dial home replaces www-2027's central relays and forward watchdogs, which kept h
 | A per-host process that holds connections across restarts of its controller, fenced by the controller's lease epoch | New in this HBEP, after frps's supervision by the launcher (HBEP-11) and the alpha relays' epoch fencing (PR #301) | The relay keeper (beta), Dial-home modes |
 | An SSH relay behind a forced-command key, with measured overhead | GWDG SAIA ([gwdg/saia-hpc](https://github.com/gwdg/saia-hpc)) | The restricted key of ssh mode; open question 3 |
 | Dial home from jobs over outbound-only connections | OpenTela with libp2p ([eth-easl/opentela](https://github.com/eth-easl/opentela)); interLink's mesh ([interlink-hq/interLink](https://github.com/interlink-hq/interLink)) | Dial home, and its alternatives |
+| Many tunnels on one front, in steady state | spike S14 (issue #313, PR #328) | Open question 11; Operational readiness 5 |
 | frp's tunnel through a TLS terminator on 443, its heartbeat settings, capacity and head-of-line figures | spike S1 (issue #18) and spike S1c (PR #78), this project | Open questions 1 and 6, Heartbeats, Risks, Operational readiness 5 |
 | An end-to-end probe that keeps a flapping path out of the pool and lets it back in | www-2027's forward watchdogs | The front's probe |
 
@@ -728,8 +733,14 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
     - the upgrade limit is stated.
 
   Alpha's in-controller relays are unchanged. Before, open question 13 was open, and a controller restart cut host-dialed streams in every stage.
-- **2026-11-10: many tunnels on one front, steady state** (Open questions 11; Graduation criteria). An amendment from spike S14 (issue #313, PR #328), its proposed text as written.
-  - **What S14 found:** no tunnel-count knee in steady state through 300 tunnels. The front's CPU is linear in tokens per second, with small per-tunnel terms, in direct and host-dialed mode.
+- **2026-11-10: many tunnels on one front, steady state** (Open questions 11; Graduation criteria; Operational readiness 5; Prior art). An amendment from spike S14 (issue #313, PR #328), its proposed text as written.
+  - **What S14 found:** no tunnel-count knee in steady state through 300 tunnels. The measured stack's CPU is linear in tokens per second, with small per-tunnel terms, in direct and host-dialed mode: frps and the dial-home listener, plus the relays' host side in host-dialed mode.
+  - **Settled in this PR's review** (Astra and a fresh Opus):
+    - per-process descriptor budgets, the front's process included;
+    - the runner spread and the unkept first run;
+    - the relays' host side named for alpha and beta;
+    - the cores defined;
+    - Operational readiness 5 deferring to open question 11.
   - **The budget:** a per-front budget in CPU per token, with reserves.
   - **Until five open items are measured,** a front stays at or below 300 tunnels.
 
