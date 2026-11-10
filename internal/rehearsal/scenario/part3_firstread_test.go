@@ -60,7 +60,7 @@ func firstReadFixture(t *testing.T, ds time.Time) (*part3, client.Client) {
 	c := clientfake.NewClientBuilder().WithScheme(stack.APIScheme(t)).WithObjects(objs...).
 		WithStatusSubresource(&v1alpha1.ModelDeployment{}).Build()
 	p3.c = c
-	if err := recordStartToReady(c, queuedDep.Name, queuedDep.Name+"-primary", queuedStartToReady); err != nil {
+	if err := recordStartToReady(c, queuedDep.Name, queuedDep.Name+"-primary", firstReadClass, queuedStartToReady); err != nil {
 		t.Fatal(err)
 	}
 	return p3, c
@@ -71,7 +71,7 @@ func firstReadFixture(t *testing.T, ds time.Time) (*part3, client.Client) {
 // subresource, in writeStatus's form (internal/lifecycle, status.go:
 // measuredStartToReady): the class, the duration as Go prints it, the Instance
 // it was measured on and its ready time.
-func recordStartToReady(c client.Client, md, instance string, d time.Duration) error {
+func recordStartToReady(c client.Client, md, instance string, class v1alpha1.AcceleratorClass, d time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), stack.APICallTimeout)
 	defer cancel()
 	var obj v1alpha1.ModelDeployment
@@ -79,7 +79,7 @@ func recordStartToReady(c client.Client, md, instance string, d time.Duration) e
 		return fmt.Errorf("get ModelDeployment %s: %w", md, err)
 	}
 	obj.Status.StartToReady = append(obj.Status.StartToReady, v1alpha1.ClassStartToReady{
-		AcceleratorClass: firstReadClass, Duration: v1alpha1.Duration(d.String()), Instance: instance,
+		AcceleratorClass: class, Duration: v1alpha1.Duration(d.String()), Instance: instance,
 		MeasuredTime: metav1.NewTime(time.Now().Truncate(time.Second)),
 	})
 	if err := c.Status().Update(ctx, &obj); err != nil {
@@ -158,7 +158,7 @@ func TestFirstReadWaitsForTheStartToReadyTimes(t *testing.T) {
 	p3.s2rMiss = func(m []string) {
 		misses = append(misses, strings.Join(m, "; "))
 		if len(misses) == recordAt {
-			wrote = recordStartToReady(c, oneSlotDep.Name, oneSlotDep.Name+"-primary", queuedStartToReady)
+			wrote = recordStartToReady(c, oneSlotDep.Name, oneSlotDep.Name+"-primary", firstReadClass, queuedStartToReady)
 		}
 	}
 	if err := p3.armFirstRead(); err != nil {
@@ -173,7 +173,7 @@ func TestFirstReadWaitsForTheStartToReadyTimes(t *testing.T) {
 	firstAt := time.Now() // the first read is taken once the restarted controller serves, after armFirstRead
 	atFirst := p3.startToReadySnapshot("the first read's start-to-ready times")
 	if len(misses) != recordAt {
-		t.Errorf("the wait read the status without the one-slot class's time %d times, want %d (recorded at the %dth): %q", len(misses), recordAt, recordAt, misses)
+		t.Errorf("the wait read the status without the one-slot class's time %d times, want %d (recorded at read %d): %q", len(misses), recordAt, recordAt, misses)
 	}
 	for i, m := range misses {
 		if !strings.Contains(m, oneSlotDep.Name) || strings.Contains(m, queuedDep.Name+":") {
@@ -200,9 +200,15 @@ func TestFirstReadWaitsForTheStartToReadyTimes(t *testing.T) {
 // the class, once the bound passes, and arms nothing. The bound is the row's
 // own, the drain start minus longStreamLead, here a second away; nothing
 // records the time, so the result does not depend on how fast the wait runs.
+// The one-slot deployment holds another class's entry, which condition 1 does
+// not count by (lateStartToReady), so a wait on any entry fails here too.
 func TestFirstReadFailsWhenAClassIsNeverRecorded(t *testing.T) {
 	ds := time.Now().Add(longStreamLead + time.Second)
-	p3, _ := firstReadFixture(t, ds)
+	p3, c := firstReadFixture(t, ds)
+	other := v1alpha1.AcceleratorClass{GPUModel: "example-other-gpu", CPUArch: "aarch64"}
+	if err := recordStartToReady(c, oneSlotDep.Name, oneSlotDep.Name+"-earlier", other, time.Minute); err != nil {
+		t.Fatal(err)
+	}
 	misses := 0
 	p3.s2rMiss = func([]string) { misses++ }
 	err := p3.armFirstRead()
