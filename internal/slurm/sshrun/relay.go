@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +33,14 @@ type RelayOptions struct {
 	// Env is the child's environment; nil means PATH and HOME of this
 	// process only. It must not carry SSH_AUTH_SOCK.
 	Env []string
+	// ConfigFile, when set, is the configuration file's path: a stable name
+	// directly in ControlDir, ending ".conf", for the relay keeper's own file
+	// per Provider and credentials generation (HBEP-6, The relay keeper: "its
+	// own private -F file for each Provider, under a stable name"; issue
+	// #343), so a keeper that restarts writes the same file again. Close
+	// removes it, as it removes a derived one. "" is alpha's: a name derived
+	// from the credentials with a random part.
+	ConfigFile string
 }
 
 // Relay makes the ssh clients of host-dialed mode's relays (HBEP-6,
@@ -71,6 +81,19 @@ func NewRelay(o RelayOptions) (*Relay, error) {
 	if err := privateDir(o.ControlDir); err != nil {
 		return nil, err
 	}
+	if o.ConfigFile != "" {
+		// A stable name is a regular file of its own: controlPaths' derived
+		// names, and the bound on the control socket's path they check, are
+		// not used.
+		if err := checkConfigFile(o.ControlDir, o.ConfigFile); err != nil {
+			return nil, err
+		}
+		r := &Relay{o: o, config: o.ConfigFile}
+		if err := writeConfigFile(o.ControlDir, r.config, o.Config); err != nil {
+			return nil, err
+		}
+		return r, nil
+	}
 	_, conf, err := controlPaths(Options{Name: o.Name + "-relay", Config: o.Config, ControlDir: o.ControlDir})
 	if err != nil {
 		return nil, err
@@ -80,6 +103,22 @@ func NewRelay(o RelayOptions) (*Relay, error) {
 		return nil, err
 	}
 	return r, nil
+}
+
+// configFileName is a stable configuration file's name (RelayOptions.ConfigFile):
+// letters, digits, '.', '_' and '-', not starting with '.', as the temporary
+// files of writeConfigFile do, and ending ".conf".
+var configFileName = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]*\.conf$`)
+
+// checkConfigFile refuses a stable configuration file's path that is not a
+// clean, absolute name directly in the control directory dir, so the file is
+// as private as the directory, whose mode NewRelay checks. Errors name no
+// path.
+func checkConfigFile(dir, file string) error {
+	if !filepath.IsAbs(file) || filepath.Clean(file) != file || filepath.Dir(file) != filepath.Clean(dir) || !configFileName.MatchString(filepath.Base(file)) {
+		return errors.New("sshrun: the relays' configuration file must be a clean name ending .conf directly in the control directory")
+	}
+	return nil
 }
 
 // RelayArgs are a relay's ssh arguments for line, with the configuration file
