@@ -69,16 +69,27 @@ type Want struct {
 	// takes it, while the start is in flight (the last delta review of PR
 	// 354). The Runner reads Jobs once per channel per attempt, right before
 	// the process starts, and resolves each authorization with exactly one
-	// call, on every path: OnStart once the process has started, or
-	// StartFailed when it does not start, whatever the reason (a relay line,
-	// an ssh command or a process start that fails, a stop or Drop that comes
-	// first). An authorization never resolved holds its host until the keeper
-	// stops. The holds are counted per relay of an Allocation on a host, not
-	// per channel, since a listing names no channel: a second resolution of
-	// one start is taken for the other channel's, so the Runner resolves each
-	// exactly once. hostdial calls no hook on its paths between the listing and the
-	// process start, so PR 3's Runner adds one to hostdial.Target (add-only)
-	// and calls StartFailed from it.
+	// call: OnStart once the process has started, or StartFailed when it does
+	// not start. An authorization never resolved holds its host until the
+	// keeper stops. The holds are counted per relay of an Allocation on a
+	// host, not per channel, since a listing names no channel: a second
+	// resolution of one start is taken for the other channel's, which is why
+	// each is resolved exactly once. The Runner's three duties (PR 3):
+	//  1. It calls StartFailed on every path between the listing and the
+	//     process start where the process does not start: a relay line, an
+	//     ssh command or a process start that fails, and a stop or Drop that
+	//     comes first. hostdial calls no hook on those paths, so PR 3 adds
+	//     one to hostdial.Target, add-only, and calls StartFailed from it.
+	//  2. It shows a started process as up in Relays BEFORE it calls
+	//     OnStart, so the host is never unheld between the hold's release and
+	//     the process's counting (hostdial sets the relay's PID before it
+	//     calls OnStart).
+	//  3. It cancels an in-flight start of a REPLACED generation before its
+	//     process launches, and resolves it with StartFailed. Otherwise a
+	//     late process of the old generation gets a higher N than the current
+	//     relay's and supersedes it, and the keeper, whose record holds the
+	//     current generation's (E, N) only (OnStart), then marks the
+	//     Allocation: that fails closed, but releases a healthy Allocation.
 	Jobs hostdial.JobReader
 	// OnFinal is told of each final end, with the ended process's epoch and
 	// sequence (hostdial.Target.OnFinal).
@@ -86,9 +97,11 @@ type Want struct {
 	// OnStart is told of each ssh start (hostdial.Target.OnStart), with the
 	// (E, N) the relay started with: the keeper's record of what it issued.
 	// It resolves that start's authorization (Jobs): the started process
-	// holds the host from then on, as a relay up in Relays.
+	// holds the host from then on, as a relay up in Relays, which the Runner
+	// shows before it calls OnStart (duty 2).
 	OnStart func(ch agentapi.RelayChannel, epoch, seq int64)
 	// StartFailed resolves an authorization (Jobs) whose process did not
-	// start, on every such path; it releases the host the start held.
+	// start, on every such path, a replaced generation's cancelled start
+	// included (duties 1 and 3); it releases the host the start held.
 	StartFailed func(ch agentapi.RelayChannel)
 }
