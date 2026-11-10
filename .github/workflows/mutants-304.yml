@@ -1,0 +1,181 @@
+# One-off, never merged: issue #304's mutants (PR for feat/304-release-on-relayfailed), on GitHub-hosted
+# runners. internal/lifecycle links internal/rehearsal, so until #308 merges its tests run on hosted runners
+# only (science agent, 10 Nov 2026); the providerctl and frpsplugin mutants run here too, for one record.
+#
+# The script below holds one mutant per rule of #304 (a final end releases; superseded, the job's end and a
+# retried end release nothing), plus the lifecycle's step 5, retention and the frps plugin. Each is an exact
+# edit that must occur once (BROKEN otherwise). Every named test first runs unmutated and must pass (the
+# baseline; exit 2 otherwise). A mutant is KILLED only when its named test, or subtest, is the one that fails,
+# and for the three "releases nothing" mutants only when the other two subtests still pass. The job fails
+# unless every mutant is killed. Nothing here starts an sshd: the relays' ssh is a stub script.
+name: mutants-304
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/mutants-304.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  mutants:
+    name: mutants 304
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          # The PR's own head, whose parent is #304's branch head, not the merge with main.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: The new lifecycle tests with no mutant, ten times
+        run: |
+          git rev-parse HEAD^ | sed 's/^/tests from /'
+          go test -count=10 -v -timeout 900s -run '^TestARelayEndedForGood' ./internal/lifecycle > "$RUNNER_TEMP/lc.txt" 2>&1 || { tail -60 "$RUNNER_TEMP/lc.txt"; exit 1; }
+          grep -E -- '^(--- |ok|FAIL)' "$RUNNER_TEMP/lc.txt" | sort | uniq -c
+
+      - name: The mutants
+        run: |
+          cat > "$RUNNER_TEMP/mutants.py" <<'PYEOF'
+          #!/usr/bin/env python3
+          """Issue #304's mutants: one per rule, each an exact edit that must occur once,
+          run against its named test. A baseline run of every named test, unmutated, must
+          pass first; a mutant is KILLED only when its named test is the one that fails.
+          Usage: mutants.py [--hosted] [--only id,id] [--build 'cmd ...'] [--prefix 'cmd ...']; run from the
+          repo root. Without --hosted the mutants whose tests link internal/rehearsal are skipped."""
+          import os, subprocess, sys, shlex
+
+          M = [
+              dict(id="final-releases", rule="a final end marks the Allocation",
+                   file="internal/providerctl/relayfailed.go",
+                   old="\t\tr.recordFailure(tag, relayFailure{uid: uid, jobID: job, msg: msg, at: e.now()})\n",
+                   new="\t\t_, _ = r, relayFailure{uid: uid, jobID: job, msg: msg, at: e.now()}\n",
+                   pkg="./internal/providerctl", run="^TestARelayEndedForGood(MarksItsAllocationOnTheNextObservation|ReleasesTheAllocationThroughTheLifecycle)$",
+                   kill=["--- FAIL: TestARelayEndedForGoodMarksItsAllocationOnTheNextObservation", "--- FAIL: TestARelayEndedForGoodReleasesTheAllocationThroughTheLifecycle"]),
+              dict(id="final-releases-lifecycle", rule="the lifecycle releases a marked Allocation (step 5)",
+                   file="internal/lifecycle/instances.go",
+                   old='if c := alloc.GetCondition(v1alpha1.ConditionRelayEndedForGood); reason == "" && c.Status == "True" {',
+                   new='if c := alloc.GetCondition(v1alpha1.ConditionRelayEndedForGood); false && reason == "" && c.Status == "True" {',
+                   pkg="./internal/providerctl", run="^TestARelayEndedForGoodReleasesTheAllocationThroughTheLifecycle$",
+                   kill=["--- FAIL: TestARelayEndedForGoodReleasesTheAllocationThroughTheLifecycle"],
+                   lifecycle_run="^TestARelayEndedForGoodEndsAReadyInstanceAndIsReplaced$",
+                   lifecycle_kill=["--- FAIL: TestARelayEndedForGoodEndsAReadyInstanceAndIsReplaced"]),
+              dict(id="final-releases-retention", rule="retention releases a marked empty Allocation",
+                   file="internal/lifecycle/retention.go",
+                   old='if c := a.GetCondition(v1alpha1.ConditionRelayEndedForGood); c.Status == "True" {',
+                   new='if c := a.GetCondition(v1alpha1.ConditionRelayEndedForGood); false && c.Status == "True" {',
+                   pkg="./internal/lifecycle", run="^TestARelayEndedForGoodReleasesAKeptEmptyAllocation$",
+                   kill=["--- FAIL: TestARelayEndedForGoodReleasesAKeptEmptyAllocation"], hosted=True),
+              dict(id="final-plugin", rule="the frps plugin admits no login for a marked Allocation",
+                   file="internal/frpsplugin/snapshot.go",
+                   old="if a.GetCondition(v1alpha1.ConditionRelayEndedForGood).Status == corev1.ConditionTrue {",
+                   new="if false && a.GetCondition(v1alpha1.ConditionRelayEndedForGood).Status == corev1.ConditionTrue {",
+                   pkg="./internal/frpsplugin", run="^TestBuildSnapshotRules$",
+                   kill=["--- FAIL: TestBuildSnapshotRules/an_Allocation_with_RelayEndedForGood_True_is_absent_although_its_phase_is_Running"]),
+              dict(id="superseded-releases-nothing", rule="superseded releases nothing",
+                   file="internal/hostdial/owner.go",
+                   old="\tif kind == EndFailed && r.t.OnFailed != nil {", new="\tif (kind == EndFailed || kind == EndSuperseded) && r.t.OnFailed != nil {",
+                   pkg="./internal/providerctl", run="^TestRelayEndsThatReleaseNothingLeaveTheAllocationUnmarked$",
+                   kill=["--- FAIL: TestRelayEndsThatReleaseNothingLeaveTheAllocationUnmarked/superseded"],
+                   survive=["--- PASS: TestRelayEndsThatReleaseNothingLeaveTheAllocationUnmarked/the_job's_end", "--- PASS: TestRelayEndsThatReleaseNothingLeaveTheAllocationUnmarked/retried"]),
+              dict(id="jobs-end-releases-nothing", rule="the job's end releases nothing",
+                   file="internal/hostdial/owner.go",
+                   old="\tif kind == EndFailed && r.t.OnFailed != nil {", new="\tif (kind == EndFailed || kind == EndJobGone) && r.t.OnFailed != nil {",
+                   pkg="./internal/providerctl", run="^TestRelayEndsThatReleaseNothingLeaveTheAllocationUnmarked$",
+                   kill=["--- FAIL: TestRelayEndsThatReleaseNothingLeaveTheAllocationUnmarked/the_job's_end"],
+                   survive=["--- PASS: TestRelayEndsThatReleaseNothingLeaveTheAllocationUnmarked/superseded", "--- PASS: TestRelayEndsThatReleaseNothingLeaveTheAllocationUnmarked/retried"]),
+              dict(id="retried-releases-nothing", rule="a retried end releases nothing",
+                   file="internal/hostdial/owner.go",
+                   old="\t\tif started {\n\t\t\tif up >= o.ResetAfter {",
+                   new="\t\tif started && r.t.OnFailed != nil {\n\t\t\tr.t.OnFailed(r.ch, \"retried: \"+cause)\n\t\t}\n\t\tif started {\n\t\t\tif up >= o.ResetAfter {",
+                   pkg="./internal/providerctl", run="^TestRelayEndsThatReleaseNothingLeaveTheAllocationUnmarked$",
+                   kill=["--- FAIL: TestRelayEndsThatReleaseNothingLeaveTheAllocationUnmarked/retried"],
+                   survive=["--- PASS: TestRelayEndsThatReleaseNothingLeaveTheAllocationUnmarked/superseded", "--- PASS: TestRelayEndsThatReleaseNothingLeaveTheAllocationUnmarked/the_job's_end"]),
+          ]
+
+          def main():
+              args = sys.argv[1:]
+              only, prefix, build, hosted = None, [], [], False
+              while args:
+                  a = args.pop(0)
+                  if a == "--only": only = set(args.pop(0).split(","))
+                  elif a == "--prefix": prefix = shlex.split(args.pop(0))
+                  elif a == "--build": build = shlex.split(args.pop(0))
+                  elif a == "--hosted": hosted = True
+                  else: sys.exit("unknown argument " + a)
+              sel = [m for m in M if (only is None or m["id"] in only) and (hosted or not m.get("hosted"))]
+              runs = []  # (pkg, run, kill lines, survive lines) per mutant, plus the lifecycle half when hosted
+              for m in sel:
+                  r = [(m["pkg"], m["run"], m["kill"], m.get("survive", []))]
+                  if hosted and m.get("lifecycle_run"):
+                      r.append(("./internal/lifecycle", m["lifecycle_run"], m["lifecycle_kill"], []))
+                  runs.append((m, r))
+              bindir = os.environ.get("MUT_BIN_DIR") or os.environ.get("RUNNER_TEMP") or "/tmp"
+              def go_test(pkg, run):
+                  # Compile under the build prefix, then run the binary in its package's
+                  # directory under the run prefix: one binary path per package.
+                  binp = os.path.join(bindir, pkg.strip("./").replace("/", "_") + ".test")
+                  c = subprocess.run(build + ["go", "test", "-c", "-o", binp, pkg], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                  if c.returncode != 0:
+                      return c.returncode, c.stdout + "\n[build failed]"
+                  cmd = prefix + [binp, "-test.count=1", "-test.v", "-test.timeout", "600s", "-test.run", run]
+                  p = subprocess.run(cmd, cwd=pkg, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                  return p.returncode, p.stdout
+              # Baseline: every named test, unmutated, passes.
+              seen = set()
+              for m, rs in runs:
+                  for pkg, run, _, _ in rs:
+                      if (pkg, run) in seen: continue
+                      seen.add((pkg, run))
+                      rc, out = go_test(pkg, run)
+                      passes = [l for l in out.splitlines() if l.startswith("--- PASS")]
+                      print(f"BASELINE {pkg} -run {run}: exit {rc}; " + "; ".join(passes))
+                      if rc != 0 or not passes:
+                          print(out[-3000:]); sys.exit(2)
+              killed = 0
+              total = 0
+              for m, rs in runs:
+                  src = open(m["file"]).read()
+                  if src.count(m["old"]) != 1:
+                      print(f"BROKEN {m['id']}: the edit's text occurs {src.count(m['old'])} times in {m['file']}"); total += len(rs); continue
+                  open(m["file"], "w").write(src.replace(m["old"], m["new"]))
+                  try:
+                      for pkg, run, kill, survive in rs:
+                          total += 1
+                          rc, out = go_test(pkg, run)
+                          lines = out.splitlines()
+                          if "[build failed]" in out or "[setup failed]" in out:
+                              print(f"BROKEN {m['id']} ({pkg}): does not build"); print(out[-2000:]); continue
+                          fails = [l for l in lines if l.startswith("--- FAIL") or l.startswith("    --- FAIL")]
+                          got = [k for k in kill if any(l.strip().startswith(k) for l in lines)]
+                          kept = [s for s in survive if any(l.strip().startswith(s) for l in lines)]
+                          if rc != 0 and len(got) == len(kill) and len(kept) == len(survive):
+                              killed += 1
+                              print(f"KILLED {m['id']} ({m['rule']}) in {pkg} by: " + "; ".join(x.split(': ',1)[1] for x in got))
+                          else:
+                              print(f"SURVIVED {m['id']} ({m['rule']}) in {pkg}: exit {rc}; fails: {fails}; still passing: {kept}")
+                              print(out[-2000:])
+                  finally:
+                      open(m["file"], "w").write(src)
+              print(f"killed {killed} of {total}")
+              sys.exit(0 if killed == total else 1)
+
+          main()
+          PYEOF
+          set +e
+          python3 -I "$RUNNER_TEMP/mutants.py" --hosted > "$RUNNER_TEMP/mutants.txt" 2>&1
+          rc=$?
+          set -e
+          grep -E '^(BASELINE|KILLED|SURVIVED|BROKEN|killed)' "$RUNNER_TEMP/mutants.txt"
+          echo "mutants.py exit $rc"
+          [ "$rc" -eq 0 ] || { cat "$RUNNER_TEMP/mutants.txt" | tail -80; exit 1; }
