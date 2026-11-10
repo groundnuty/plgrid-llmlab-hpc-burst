@@ -2,7 +2,8 @@
 #
 # It runs the repository's own checks on every pull request and on every push to main:
 #   go           gofmt, go vet, go test (through hack/go-test.sh)
-#   tidy         go mod tidy -diff, in a job of its own that restores no module cache
+#   tidy         go mod tidy -diff, in a job of its own that restores no module cache (its Go tarball
+#                is the only thing it restores)
 #   crd          hack/check.sh: generated-CRD drift, envtest with the pinned binaries, sha256 checks
 #   launcher-k3s hack/test-launcher.sh against the pinned k3s binaries, run as an ordinary user
 #
@@ -27,6 +28,18 @@
 # have been evicted (GitHub drops one that was not read for 7 days). The save step runs right after
 # the fetch steps, not at the end of the job, so a test that fails later does not leave main unseeded.
 #
+# Go itself comes from a pinned tarball, not from actions/setup-go (issue #294). That action downloads
+# the toolchain from GitHub's release assets in every job, checks no digest of it, and caches no
+# toolchain between runs. Every job runs the same five steps in its place. hack/fetch-go.sh reads go.mod's
+# version, checks the tarball against hack/go-pins.txt (the sha256 go.dev lists), extracts it anew into
+# $RUNNER_TEMP/go-toolchain every run, and checks go/bin/go against its own pin; the workflow puts that
+# directory first on PATH, and the last step shows that the go on PATH is the pinned one. What the cache
+# holds is the tarball only, never the tree, under one exact key (the Go version, the OS and
+# architecture, and a hash of the script and its pins; no restore-keys). The script checks the tarball on
+# every run, restored or not: one that does not match is deleted and downloaded again from go.dev, and a
+# download that does not match fails the job. The Go save step runs only on a push and on
+# workflow_dispatch, so a pull request never writes a Go entry of its own.
+#
 # The workflow reads no secret and pushes nothing. Every action is pinned by commit SHA.
 #
 # crd and launcher-k3s call scripts from hack/. A missing script fails the job: a job that
@@ -40,7 +53,7 @@ on:
   pull_request:
   push:
     branches: [main]
-  # Seeds the binary cache from main by hand; see above.
+  # Seeds the caches from main by hand; see above.
   workflow_dispatch:
 
 permissions:
@@ -54,8 +67,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # setup-go installs the version go.mod names. A go.mod that asks for something newer must fail
-  # the job, not make the go command download a toolchain on its own.
+  # hack/fetch-go.sh installs the version go.mod names. A go.mod that asks for something newer must
+  # fail the job, not make the go command download a toolchain on its own.
   GOTOOLCHAIN: local
 
 defaults:
@@ -76,11 +89,36 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Go from go.mod
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      # Go comes from a pinned tarball, not from actions/setup-go (see the top of this file).
+      - name: Read the Go version from go.mod
+        id: goversion
+        run: |
+          # A failing script must fail this step: "echo ...$(cmd)" would hide its exit status.
+          version=$(bash hack/fetch-go.sh --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the cached Go archive
+        id: goarchive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          go-version-file: go.mod
-          cache: false
+          path: ${{ runner.temp }}/go-download
+          key: go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}
+
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "::add-matcher::$GITHUB_WORKSPACE/.github/go-problem-matcher.json"
+
+      - name: Save the Go archive to the cache
+        if: steps.goarchive.outputs.cache-hit != 'true' && github.event_name != 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: ${{ steps.goarchive.outputs.cache-primary-key }}
+
+      - name: Check the Go on PATH is the pinned toolchain
+        run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
 
       - name: Go version
         run: go version
@@ -212,13 +250,38 @@ jobs:
         with:
           persist-credentials: false
 
-      # cache: false, so that no module cache is restored. A cache could make an untidy go.mod
-      # look tidy.
-      - name: Set up Go from go.mod
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      # Go comes from a pinned tarball (see the top of this file). The only thing restored is that
+      # tarball, never a module cache, which could make an untidy go.mod look tidy; the next step
+      # asserts the module cache is empty.
+      - name: Read the Go version from go.mod
+        id: goversion
+        run: |
+          # A failing script must fail this step: "echo ...$(cmd)" would hide its exit status.
+          version=$(bash hack/fetch-go.sh --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the cached Go archive
+        id: goarchive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          go-version-file: go.mod
-          cache: false
+          path: ${{ runner.temp }}/go-download
+          key: go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}
+
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "::add-matcher::$GITHUB_WORKSPACE/.github/go-problem-matcher.json"
+
+      - name: Save the Go archive to the cache
+        if: steps.goarchive.outputs.cache-hit != 'true' && github.event_name != 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: ${{ steps.goarchive.outputs.cache-primary-key }}
+
+      - name: Check the Go on PATH is the pinned toolchain
+        run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
 
       - name: Assert that the module cache is empty
         run: |
@@ -249,12 +312,37 @@ jobs:
         with:
           persist-credentials: false
 
-      # cache: false here too, because hack/check.sh runs go mod tidy -diff itself.
-      - name: Set up Go from go.mod
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      # Go comes from a pinned tarball (see the top of this file), and no module cache is restored here
+      # either, because hack/check.sh runs go mod tidy -diff itself.
+      - name: Read the Go version from go.mod
+        id: goversion
+        run: |
+          # A failing script must fail this step: "echo ...$(cmd)" would hide its exit status.
+          version=$(bash hack/fetch-go.sh --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the cached Go archive
+        id: goarchive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          go-version-file: go.mod
-          cache: false
+          path: ${{ runner.temp }}/go-download
+          key: go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}
+
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "::add-matcher::$GITHUB_WORKSPACE/.github/go-problem-matcher.json"
+
+      - name: Save the Go archive to the cache
+        if: steps.goarchive.outputs.cache-hit != 'true' && github.event_name != 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: ${{ steps.goarchive.outputs.cache-primary-key }}
+
+      - name: Check the Go on PATH is the pinned toolchain
+        run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
 
       # The pinned binaries come from the cache when it has them (see the top of this file): frp,
       # and the Kubernetes binaries that hack/test-binaries.sh keeps under HPCBURST_TOOLS_CACHE.
@@ -367,11 +455,35 @@ jobs:
             ${{ runner.temp }}/frp
           key: binaries-launcher-k3s-${{ join(fromJSON(env.K3S_VERSIONS), '-') }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-frp.sh', 'hack/fetch-k3s.sh', 'internal/launcher/k3s-pins.txt') }}
 
-      - name: Set up Go from go.mod
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - name: Read the Go version from go.mod
+        id: goversion
+        run: |
+          # A failing script must fail this step: "echo ...$(cmd)" would hide its exit status.
+          version=$(bash hack/fetch-go.sh --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the cached Go archive
+        id: goarchive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          go-version-file: go.mod
-          cache: false
+          path: ${{ runner.temp }}/go-download
+          key: go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}
+
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "::add-matcher::$GITHUB_WORKSPACE/.github/go-problem-matcher.json"
+
+      - name: Save the Go archive to the cache
+        if: steps.goarchive.outputs.cache-hit != 'true' && github.event_name != 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: ${{ steps.goarchive.outputs.cache-primary-key }}
+
+      - name: Check the Go on PATH is the pinned toolchain
+        run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
 
       # Downloads the two pinned k3s releases the tests start (1.35.9, then upgraded to 1.36.5) and
       # checks their sha256 against internal/launcher/k3s-pins.txt.
@@ -548,11 +660,35 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Go from go.mod
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - name: Read the Go version from go.mod
+        id: goversion
+        run: |
+          # A failing script must fail this step: "echo ...$(cmd)" would hide its exit status.
+          version=$(bash hack/fetch-go.sh --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the cached Go archive
+        id: goarchive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          go-version-file: go.mod
-          cache: false
+          path: ${{ runner.temp }}/go-download
+          key: go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}
+
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "::add-matcher::$GITHUB_WORKSPACE/.github/go-problem-matcher.json"
+
+      - name: Save the Go archive to the cache
+        if: steps.goarchive.outputs.cache-hit != 'true' && github.event_name != 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: ${{ steps.goarchive.outputs.cache-primary-key }}
+
+      - name: Check the Go on PATH is the pinned toolchain
+        run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
 
       # The pinned binaries come from the cache when it has them (see the top of this file). The
       # two rehearsal jobs share one entry. The path lines of the restore and the save must match.
@@ -642,11 +778,35 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Go from go.mod
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - name: Read the Go version from go.mod
+        id: goversion
+        run: |
+          # A failing script must fail this step: "echo ...$(cmd)" would hide its exit status.
+          version=$(bash hack/fetch-go.sh --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the cached Go archive
+        id: goarchive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          go-version-file: go.mod
-          cache: false
+          path: ${{ runner.temp }}/go-download
+          key: go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}
+
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "::add-matcher::$GITHUB_WORKSPACE/.github/go-problem-matcher.json"
+
+      - name: Save the Go archive to the cache
+        if: steps.goarchive.outputs.cache-hit != 'true' && github.event_name != 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: ${{ steps.goarchive.outputs.cache-primary-key }}
+
+      - name: Check the Go on PATH is the pinned toolchain
+        run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
 
       # The pinned binaries come from the cache when it has them (see the top of this file). The
       # two rehearsal jobs share one entry. The path lines of the restore and the save must match.
