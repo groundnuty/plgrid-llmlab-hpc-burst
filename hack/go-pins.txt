@@ -1,0 +1,19 @@
+# Pinned Go toolchain releases (project: golang/go, https://go.dev/dl/, BSD-3-Clause).
+#
+# One source of truth for the toolchain CI runs: hack/fetch-go.sh reads this file, installs the
+# release whose version is go.mod's go line, and stops when that version has no line here. CI no
+# longer uses actions/setup-go, which verifies no digest of what it downloads (issue #294). To move
+# go.mod to another Go release, add its line here first, in the same change.
+#
+# Columns:
+#   version        exactly go.mod's go line, three numbers (1.26.0), never a range
+#   arch           only amd64 is pinned: CI's runners are linux_amd64
+#   tarball        the file name under https://go.dev/dl/
+#   tarball-sha256 the "sha256" of that file in go.dev's download listing
+#                  (https://go.dev/dl/?mode=json&include=all, read 10 Nov 2026), which is also the
+#                  sha256sum of a download made the same day
+#   go-sha256      the sha256 of go/bin/go as extracted from that verified tarball: the script checks
+#                  the installed binary against it, and so does the CI step that follows
+#
+# version  arch   tarball                       tarball-sha256                                                    go-sha256
+1.26.0     amd64  go1.26.0.linux-amd64.tar.gz   aac1b08a0fb0c4e0a7c1555beb7b59180b05dfc5a3d62e40e9de90cd42f88235  61e7455a40a2fdfcdab99e881cd30ba10e216e3d0f32ab5f8e59d10cac4ecf57
