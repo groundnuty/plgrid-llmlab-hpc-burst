@@ -51,6 +51,8 @@
 //
 //	keeper-listen-tcp  a host:port: the keeper also listens there (TCP), which no keeper does
 //	keeper-no-answer   the keeper runs nothing that answers: it waits for SIGTERM, then exits 0
+//	keeper-delay       milliseconds: the keeper waits that long before it starts, so it answers late
+//	keeper-silent      the keeper holds a listening socket at its path and answers nothing on it
 package main
 
 import (
@@ -345,6 +347,33 @@ func keeperMain(args []string) int {
 	if _, err := os.Stat(filepath.Join(dir, "keeper-no-answer")); err == nil {
 		<-ctx.Done()
 		return 0
+	}
+	if _, err := os.Stat(filepath.Join(dir, "keeper-silent")); err == nil {
+		ln, err := net.Listen("unix", agentapi.Host{StateDir: *stateDir}.RelayKeeperSocket())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "fakecontroller relaykeeper: keeper-silent:", err)
+			return 1
+		}
+		defer ln.Close()
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				defer c.Close() // held open, never answered
+			}
+		}()
+		<-ctx.Done()
+		return 0
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "keeper-delay")); err == nil {
+		ms, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+		select {
+		case <-time.After(time.Duration(ms) * time.Millisecond):
+		case <-ctx.Done():
+			return 0
+		}
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if err := relaykeeper.Run(ctx, relaykeeper.ProcessConfig{StateDir: *stateDir, Ports: agentapi.Host{StateDir: *stateDir, PortBase: *portBase}.RelayChannelPorts(), Logger: logger}); err != nil {

@@ -363,7 +363,11 @@ func TestTheFirstAAttemptIsRefusedAfterAToBToA(t *testing.T) {
 			if coalesced {
 				hold.Store(true)
 				accepted(t, rg.k, rg.set(rkProv, true, a)) // a re-sent A: the worker is held inside its op
-				<-stalling
+				select {
+				case <-stalling:
+				case <-time.After(time.Minute):
+					t.Fatal("the worker did not take the re-sent A within a minute")
+				}
 				accepted(t, rg.k, rg.set(rkProv, true, w.entry(j, genTwo)))
 				accepted(t, rg.k, rg.set(rkProv, true, a))
 				if n := p.queue.pending(); n != 1 {

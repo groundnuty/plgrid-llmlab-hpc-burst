@@ -76,17 +76,19 @@ func (h *host) runningAllocation(name string) {
 	}
 }
 
-// up --relay-keeper in host-dialed mode runs the keeper, which status shows with its E; down stops
-// it and keeps its state file. Then, with an Allocation Running, up without --relay-keeper refuses,
-// naming it, and leaves no host running; up with it starts again, the keeper at the next E.
+// up --relay-keeper in host-dialed mode runs the keeper, which status shows with its E. An
+// upgrade brings the host back with the keeper, at the next E, the controller given its socket
+// (the review of PR 361: it had come back as alpha). down stops the keeper and keeps its state
+// file. Then, with an Allocation Running, up without --relay-keeper refuses, naming it, and leaves
+// no host running; up with it starts again, the keeper at the next E.
 func TestRelayKeeperUpStatusDownAndTheSwitchBack(t *testing.T) {
 	const base = 30020
 	h := newHost(t)
-	bin, _ := fakeController(t)
+	bin, ctlDir := fakeController(t)
 	up := func(extra ...string) cliResult {
 		return cli(t, h.upArgs(base, append(append(frpsArgs(t), "--json", "--controller-bin", bin, "--manifests", "../../config/crd", "--front-mode", "host-dialed"), extra...)...)...)
 	}
-	r := up("--relay-keeper")
+	r := up("--relay-keeper", "--version", "1.35.9")
 	if r.code != exitOK {
 		t.Fatalf("up --relay-keeper exited %d: %s", r.code, r.err)
 	}
@@ -107,6 +109,33 @@ func TestRelayKeeperUpStatusDownAndTheSwitchBack(t *testing.T) {
 		t.Fatalf("the keeper's entry in supervisor.json: %+v", keeper)
 	}
 
+	// The upgrade keeps the keeper.
+	if u := cli(t, h.args("upgrade", "--bin-dir", h.binDir, "--to", "1.36.5")...); u.code != exitOK {
+		t.Fatalf("upgrade exited %d: %s", u.code, u.err)
+	}
+	if st := cli(t, "status", "--state-dir", h.dir); st.code != exitOK || !strings.Contains(st.out, "supervised relaykeeper: running=true") || !strings.Contains(st.out, "E "+strconv.FormatInt(firstE+1, 10)) {
+		t.Fatalf("status after the upgrade exited %d; want the keeper at E %d:\n%s\n%s", st.code, firstE+1, st.out, st.err)
+	}
+	var rec struct {
+		RelayKeeper bool `json:"relay_keeper"`
+	}
+	parseJSON(t, fileOf(filepath.Join(h.dir, "state.json")), &rec)
+	if !rec.RelayKeeper {
+		t.Error("state.json after the upgrade does not say relay_keeper")
+	}
+	r2, ok := readSupervisorRecordN(t, h.dir, 3) // the controller, frps and the keeper
+	if !ok || r2.Entries[0].Proc == nil {
+		t.Fatalf("supervisor.json after the upgrade: %+v", r2)
+	}
+	var argv []string
+	parseJSON(t, fileOf(filepath.Join(ctlDir, "argv-"+strconv.Itoa(r2.Entries[0].Proc.PID)+".json")), &argv)
+	if len(argv) < 2 || argv[len(argv)-2] != "--relay-keeper-socket" || argv[len(argv)-1] != filepath.Join(h.dir, "relaykeeper.sock") {
+		t.Errorf("the upgraded controller's command line %q: want --relay-keeper-socket %s at its end", argv, filepath.Join(h.dir, "relaykeeper.sock"))
+	}
+	if keeper = keeperEntry(t, h.dir); keeper == nil || !running(keeper.PID) {
+		t.Fatalf("the keeper's entry after the upgrade: %+v", keeper)
+	}
+
 	h.runningAllocation("example-alloc")
 	if d := cli(t, "down", "--state-dir", h.dir); d.code != exitOK {
 		t.Fatalf("down exited %d: %s", d.code, d.err)
@@ -115,8 +144,8 @@ func TestRelayKeeperUpStatusDownAndTheSwitchBack(t *testing.T) {
 		t.Errorf("the keeper pid %d still runs after down", keeper.PID)
 	}
 	ks, err := relaykeeper.LoadState(relaykeeper.StatePath(h.dir))
-	if err != nil || ks.Starts != 1 {
-		t.Fatalf("the keeper's state file after down: %+v, %v; want it kept, one start", ks, err)
+	if err != nil || ks.Starts != 2 {
+		t.Fatalf("the keeper's state file after down: %+v, %v; want it kept, with two starts", ks, err)
 	}
 
 	r = up()
@@ -126,14 +155,14 @@ func TestRelayKeeperUpStatusDownAndTheSwitchBack(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(h.dir, "state.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the launcher's record after the refused up: %v, want the host stopped again", err)
 	}
-	if ks, _ := relaykeeper.LoadState(relaykeeper.StatePath(h.dir)); ks == nil || ks.Starts != 1 {
+	if ks, _ := relaykeeper.LoadState(relaykeeper.StatePath(h.dir)); ks == nil || ks.Starts != 2 {
 		t.Errorf("the keeper started during the refused up: %+v", ks)
 	}
 
 	if r = up("--relay-keeper"); r.code != exitOK {
 		t.Fatalf("up --relay-keeper again exited %d: %s", r.code, r.err)
 	}
-	if st = cli(t, "status", "--state-dir", h.dir); st.code != exitOK || !strings.Contains(st.out, "E "+strconv.FormatInt(firstE+1, 10)) {
+	if st = cli(t, "status", "--state-dir", h.dir); st.code != exitOK || !strings.Contains(st.out, "E "+strconv.FormatInt(firstE+2, 10)) {
 		t.Errorf("status after the second up exited %d:\n%s", st.code, st.out)
 	}
 }

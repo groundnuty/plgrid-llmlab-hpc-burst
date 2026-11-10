@@ -7,6 +7,7 @@ package relaykeeper
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -149,6 +150,11 @@ func TestACoalescedAToBToAReplacesTheFirstAsRelays(t *testing.T) {
 	stalling := make(chan struct{}, 1)
 	var ops atomic.Int64
 	r := identityRunner(t, &ops)
+	// Registered after the Runner's Stop, so it runs first: a failure before the test lets the
+	// worker go ends its stall, and Stop does not wait on it for good.
+	var release sync.Once
+	letGo := func() { release.Do(func() { close(stall) }) }
+	t.Cleanup(letGo)
 	r.o.beforeOp = func(string, string) {
 		if ops.Add(1) > 1 {
 			select {
@@ -171,7 +177,11 @@ func TestACoalescedAToBToAReplacesTheFirstAsRelays(t *testing.T) {
 	})
 	// A re-sent A stalls the worker; B and the restored A then coalesce.
 	r.Want("example-a", ssh, a)
-	<-stalling
+	select {
+	case <-stalling:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the worker did not take the re-sent A within 30 s")
+	}
 	b := identityWant(newGen(e))
 	b.Incarnation = 2
 	r.Want("example-a", ssh, b)
@@ -182,7 +192,7 @@ func TestACoalescedAToBToAReplacesTheFirstAsRelays(t *testing.T) {
 	if n := p.queue.pending(); n != 1 {
 		t.Fatalf("pending Wants of the tag with the worker stalled: %d, want 1, the restored A", n)
 	}
-	close(stall)
+	letGo()
 	eventuallyQ(t, 30*time.Second, "the restored A's relays replacing the first A's", func() bool {
 		p.mu.Lock()
 		in := p.cur[e.Tag]

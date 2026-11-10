@@ -8,6 +8,7 @@ package launcher
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -86,8 +87,10 @@ func guardLayout(t *testing.T) layout {
 }
 
 // The guard refuses only when the keeper ran here, up is without --relay-keeper, and an Allocation
-// is Running, naming it; every other case passes. A keeper state file the keeper would refuse to
-// load refuses too: it cannot show that the keeper never ran.
+// is Running, naming it and the way out; every other case passes. It lists the Allocations first:
+// a keeper state file that does not load refuses only while Allocations run (it cannot show the
+// keeper never ran), and with none Running up goes on, saying it ignored the file (the review of
+// PR 361).
 func TestTheSwitchBackGuard(t *testing.T) {
 	for _, c := range []struct {
 		name        string
@@ -95,15 +98,19 @@ func TestTheSwitchBackGuard(t *testing.T) {
 		corrupt     bool
 		relayKeeper bool
 		phases      []string
-		refuse      string // "" passes
-		lists       bool   // the guard lists the Allocations
+		refuse      []string // nil passes
+		warn        string   // a warning up logs
+		lists       bool     // the guard lists the Allocations
 	}{
-		{"no keeper ever ran", false, false, false, []string{"Running"}, "", false},
-		{"the keeper is asked for", true, false, true, []string{"Running"}, "", false},
-		{"the keeper ran, nothing runs", true, false, false, []string{"Pending", "Ended", "Failed"}, "", true},
-		{"the keeper ran, no Allocation CRD", true, false, false, nil, "", true},
-		{"the keeper ran, Allocations run", true, false, false, []string{"Ended", "Running", "Running"}, "example/alloc-1 example/alloc-2", true},
-		{"a keeper state file that does not load", true, true, false, []string{}, "cannot be read", false},
+		{"no keeper ever ran", false, false, false, []string{"Running"}, nil, "", false},
+		{"the keeper is asked for", true, false, true, []string{"Running"}, nil, "", false},
+		{"the keeper ran, nothing runs", true, false, false, []string{"Pending", "Ended", "Failed"}, nil, "", true},
+		{"the keeper ran, no Allocation CRD", true, false, false, nil, nil, "", true},
+		{"the keeper ran, Allocations run", true, false, false, []string{"Ended", "Running", "Running"},
+			[]string{"example/alloc-1 example/alloc-2", "Run up with --relay-keeper, or release those Allocations first"}, "", true},
+		{"an unreadable state file, nothing runs", true, true, false, []string{"Ended"}, nil, "cannot be read", true},
+		{"an unreadable state file, Allocations run", true, true, false, []string{"Running"},
+			[]string{"cannot be read", "example/alloc-0", "Release those Allocations first"}, "", true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			l := guardLayout(t)
@@ -116,12 +123,22 @@ func TestTheSwitchBackGuard(t *testing.T) {
 				}
 			}
 			cfg, lists := allocationsServer(t, c.phases, "AllocationList")
-			err := checkKeeperSwitchBack(context.Background(), cfg, l, c.relayKeeper)
+			var log strings.Builder
+			err := checkKeeperSwitchBack(context.Background(), cfg, l, c.relayKeeper, &log)
 			switch {
-			case c.refuse == "" && err != nil:
+			case c.refuse == nil && err != nil:
 				t.Errorf("refused: %v; want it to pass", err)
-			case c.refuse != "" && (err == nil || !strings.Contains(err.Error(), c.refuse)):
-				t.Errorf("got %v; want a refusal naming %q", err, c.refuse)
+			case c.refuse != nil && err == nil:
+				t.Errorf("passed; want a refusal naming %q", c.refuse)
+			case c.refuse != nil:
+				for _, want := range c.refuse {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("refusal %q does not name %q", err, want)
+					}
+				}
+			}
+			if c.warn != "" && !strings.Contains(log.String(), c.warn) {
+				t.Errorf("up's log %q does not say %q", log.String(), c.warn)
 			}
 			if got := lists.Load() > 0; got != c.lists {
 				t.Errorf("listed the Allocations: %v, want %v", got, c.lists)
@@ -135,7 +152,7 @@ func TestTheSwitchBackGuardRefusesAListThatIsNotAllocations(t *testing.T) {
 	l := guardLayout(t)
 	keeperRan(t, l)
 	cfg, _ := allocationsServer(t, []string{}, "PlatformProfileList")
-	if err := checkKeeperSwitchBack(context.Background(), cfg, l, false); err == nil || !strings.Contains(err.Error(), "not an AllocationList") {
+	if err := checkKeeperSwitchBack(context.Background(), cfg, l, false, io.Discard); err == nil || !strings.Contains(err.Error(), "not an AllocationList") {
 		t.Errorf("got %v; want refused", err)
 	}
 }

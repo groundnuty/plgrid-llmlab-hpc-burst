@@ -178,19 +178,37 @@ func TestTheSupervisorRunsTheKeeperBesideTheController(t *testing.T) {
 	}
 }
 
-// The keeper's health check fails a keeper that does not answer, and one that binds a port: the
-// positive controls of the check above. The fake's relaykeeper role, steered, runs no keeper that
-// answers (keeper-no-answer), or listens on a TCP port beside the real keeper (keeper-listen-tcp).
+// The keeper's health check fails a keeper that holds no socket, one that holds it and never
+// answers, and one that binds a port: the positive controls of the check above. The fake's
+// relaykeeper role, steered, runs nothing (keeper-no-answer), holds a silent listener at the
+// socket (keeper-silent), or listens on a TCP port beside the real keeper (keeper-listen-tcp).
 func TestTheKeepersHealthFailsANoAnswerAndAPort(t *testing.T) {
-	t.Run("no answer", func(t *testing.T) {
+	t.Run("no answer, no socket", func(t *testing.T) {
 		f := keeperFixture(t)
 		f.steer("keeper-no-answer", "")
 		f.supervise(SuperviseOptions{})
 		k := f.keeperUp()
 		sup := f.supervisorHandle()
 		eh, problems := checkEntry(sup, sup.rec.PID, k)
+		if !eh.Running || eh.PingOK == nil || *eh.PingOK || !strings.Contains(strings.Join(problems, "; "), "does not hold the listening socket") {
+			t.Errorf("a keeper that holds no socket: %+v, problems %v; want it running, unhealthy, its socket missing", eh, problems)
+		}
+	})
+	t.Run("a socket that never answers", func(t *testing.T) {
+		f := keeperFixture(t)
+		f.steer("keeper-silent", "")
+		f.supervise(SuperviseOptions{})
+		k := f.keeperUp()
+		sup := f.supervisorHandle()
+		var eh EntryHealth
+		var problems []string
+		for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+			if eh, problems = checkEntry(sup, sup.rec.PID, k); strings.Contains(strings.Join(problems, "; "), "ping on ") {
+				break
+			}
+		}
 		if !eh.Running || eh.PingOK == nil || *eh.PingOK || !strings.Contains(strings.Join(problems, "; "), "ping on ") {
-			t.Errorf("a keeper that does not answer: %+v, problems %v; want it running, its ping failed", eh, problems)
+			t.Errorf("a keeper that holds its socket and never answers: %+v, problems %v; want it running, its ping failed", eh, problems)
 		}
 	})
 	t.Run("a port", func(t *testing.T) {
@@ -213,16 +231,41 @@ func TestTheKeepersHealthFailsANoAnswerAndAPort(t *testing.T) {
 	})
 }
 
-// up's start waits for the keeper as for every child that must be ready: the supervisor's start
-// fails while the keeper does not answer (entriesNotReady), and passes once it does.
+// up's start waits for the keeper as for every child that must be ready (entriesNotReady): a keeper
+// that has not answered yet is not ready, and the same keeper is ready once it answers. Here the
+// keeper starts late (keeper-delay); a keeper that never answers stays not ready.
 func TestTheStartWaitsForTheKeepersAnswer(t *testing.T) {
-	f := keeperFixture(t)
-	f.steer("keeper-no-answer", "")
-	f.supervise(SuperviseOptions{})
-	f.keeperUp()
-	sup := f.supervisorHandle()
-	why, err := entriesNotReady(f.l, sup, map[string]bool{keeperEntryName: true})
-	if err != nil || !strings.HasPrefix(why, keeperEntryName+": ") {
-		t.Errorf("the start with a keeper that does not answer: %q, %v; want it not ready", why, err)
-	}
+	t.Run("ready once it answers", func(t *testing.T) {
+		f := keeperFixture(t)
+		f.steer("keeper-delay", "3000")
+		f.supervise(SuperviseOptions{})
+		f.keeperUp()
+		sup := f.supervisorHandle()
+		want := map[string]bool{keeperEntryName: true}
+		why, err := entriesNotReady(f.l, sup, want)
+		if err != nil || !strings.HasPrefix(why, keeperEntryName+": ") {
+			t.Fatalf("the start while the keeper has not answered: %q, %v; want it not ready", why, err)
+		}
+		deadline := time.Now().Add(20 * time.Second)
+		for why != "" && time.Now().Before(deadline) {
+			time.Sleep(50 * time.Millisecond)
+			if why, err = entriesNotReady(f.l, sup, want); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if why != "" {
+			t.Errorf("the start after the keeper's delay: %q; want it ready once the keeper answers", why)
+		}
+	})
+	t.Run("not ready while it never answers", func(t *testing.T) {
+		f := keeperFixture(t)
+		f.steer("keeper-no-answer", "")
+		f.supervise(SuperviseOptions{})
+		f.keeperUp()
+		sup := f.supervisorHandle()
+		why, err := entriesNotReady(f.l, sup, map[string]bool{keeperEntryName: true})
+		if err != nil || !strings.HasPrefix(why, keeperEntryName+": ") {
+			t.Errorf("the start with a keeper that does not answer: %q, %v; want it not ready", why, err)
+		}
+	})
 }
