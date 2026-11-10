@@ -93,6 +93,8 @@ func (l *statusLoop) sync(ctx context.Context) error {
 	} else if p, _ := l.s.h.current(); p != nil {
 		health = p.Health()
 	}
+	// Keeper mode: what this pass reads of the keeper, for its wake-up.
+	l.s.keeperObserve()
 	// In host-dialed mode the Provider claims its login host; a refused claim
 	// makes it unready, so the planner gives it no Allocation (HBEP-6,
 	// Capacity).

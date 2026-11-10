@@ -6,6 +6,7 @@ package providerctl
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -190,10 +191,22 @@ func TestKeeperRecoveryWithALoginHostRefusalNeverAdmits(t *testing.T) {
 		}
 	}()
 	k.start()
-	waitRelays(t, "Ready False with LoginHostInUse once the keeper is back and refuses", func() bool {
+	keeper := e.ctl.shared.relays.keeper
+	end := time.Now().Add(30 * time.Second)
+	for {
 		r := providerReady(t, e)
-		return r.Status == "False" && r.Reason == v1alpha1.ReasonLoginHostInUse
-	})
+		if r.Status == "False" && r.Reason == v1alpha1.ReasonLoginHostInUse {
+			break
+		}
+		if time.Now().After(end) {
+			keeper.mu.Lock()
+			state := fmt.Sprintf("unavailable %q, answered %v, inUse %q, okAt %v, now %v, seen %q",
+				keeper.unavailableLocked(keeper.now()), keeper.answered, keeper.inUse, keeper.okAt, keeper.now(), keeper.seen)
+			keeper.mu.Unlock()
+			t.Fatalf("Ready False with LoginHostInUse once the keeper is back and refuses: not within 30 s; Ready %+v; keeper %s; Ready writes %v", r, state, rec.writes()[from:])
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	close(stopCreating)
 	<-creating
 	for _, w := range rec.writes()[from:] {

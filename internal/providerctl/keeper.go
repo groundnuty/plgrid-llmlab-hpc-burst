@@ -103,14 +103,15 @@ type keeperState struct {
 	lastErr string
 	// okGen is the lead under which an exchange last succeeded, at okAt by
 	// now, the controller's clock; validity is the last set's (the poll
-	// interval in force plus the renew deadline). told is what the status
-	// loop was last told; status wakes it when that changes.
+	// interval in force plus the renew deadline). seen is what the status
+	// loop's latest pass read of the keeper (observe); status wakes it while
+	// that differs from the keeper's state now.
 	now      func() time.Time
 	okGen    int
 	okAt     time.Time
 	validity time.Duration
 	renew    time.Duration
-	told     string
+	seen     string
 	status   chan struct{}
 	// deadline wakes the status loop at okAt plus the validity, when the
 	// keeper turns unreachable with no exchange to show it; off once the
@@ -447,19 +448,41 @@ func (k *keeperState) unavailableLocked(now time.Time) string {
 	return ""
 }
 
-// noteStatus wakes the status loop when what it reads of the keeper changed
-// since it was last told, whether the keeper is reachable and how the claim
-// stands, so Ready follows at once, not at the next poll: on the first answer
-// above all (the review of PR 360).
+// noteStatus wakes the status loop while what it reads of the keeper differs
+// from what its latest pass read: whether the keeper is reachable and how the
+// claim stands, so Ready follows at once, not at the next poll, on the first
+// answer above all (the review of PR 360). It compares with what the pass
+// read, not with what an earlier call computed: a pass that ran after the
+// keeper turned unreachable by time alone has read that, even when no call
+// computed it, so the keeper's return still wakes the loop.
 func (k *keeperState) noteStatus() {
 	k.mu.Lock()
-	avail := k.unavailableLocked(k.now()) == ""
-	key := fmt.Sprintf("%t|%t|%s|%s", avail, k.answered, k.inUse, k.replaced)
-	changed := key != k.told
-	k.told = key
+	differs := k.keyLocked(k.now()) != k.seen
 	k.mu.Unlock()
-	if changed {
+	if differs {
 		wake(k.status)
+	}
+}
+
+// keyLocked is what the status loop reads of the keeper at now; the caller
+// holds mu.
+func (k *keeperState) keyLocked(now time.Time) string {
+	return fmt.Sprintf("%t|%t|%s|%s", k.unavailableLocked(now) == "", k.answered, k.inUse, k.replaced)
+}
+
+// observe records what a status pass is about to read of the keeper. A
+// change after it makes noteStatus wake the loop again.
+func (k *keeperState) observe(now time.Time) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.seen = k.keyLocked(now)
+}
+
+// keeperObserve is observe for the status loop's pass; nothing outside keeper
+// mode.
+func (s *shared) keeperObserve() {
+	if r := s.relays; r != nil && r.keeper != nil {
+		r.keeper.observe(s.o.Clock.Now())
 	}
 }
 
