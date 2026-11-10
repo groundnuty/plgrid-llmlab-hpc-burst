@@ -214,7 +214,9 @@ const stopWait = 5 * time.Second
 // then KILL, by pidfd and start time, take what does not, each process before
 // its parent (extra first, then each sshd's recorded rows deepest first, then
 // the sshd). The processes signalProcs refused are not waited for, and every
-// refusal and leak is the error.
+// refusal is the error. A process found outside the test's tree is never
+// signalled; it is waited for, and is a leak only if it is still alive at the
+// last deadline (leaks).
 //
 // It always returns, within twice s.wait and the time its reads take. The
 // pool's own sshds are known for certain through cmd.Process, which holds a
@@ -238,17 +240,69 @@ func (s *sshdPool) stop(extra []procRow) error {
 	}
 	var errs []error
 	kept, err := s.signal(s.api, s.name, all, syscall.SIGTERM)
+	outside, err := splitLeaks(err)
 	errs = append(errs, err)
 	deadline := time.Now().Add(s.wait)
-	for anyLive(kept) && time.Now().Before(deadline) {
+	for (anyLive(kept) || anyLive(rowsOf(outside))) && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	kept, err = s.signal(s.api, s.name, kept, syscall.SIGKILL)
+	more, err := splitLeaks(err)
+	outside = append(outside, more...)
 	errs = append(errs, err, s.killOwn(procs), s.waitIdle(deadline.Add(s.wait)))
-	for time.Now().Before(deadline.Add(s.wait)) && anyLive(kept) {
+	for time.Now().Before(deadline.Add(s.wait)) && (anyLive(kept) || anyLive(rowsOf(outside))) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	errs = append(errs, s.survivors(kept))
+	errs = append(errs, s.survivors(kept), s.leaks(outside))
+	return errors.Join(errs...)
+}
+
+// splitLeaks takes the processes found outside the test's tree out of a
+// signal pass's error, and returns them and the rest.
+func splitLeaks(err error) ([]*leakError, error) {
+	if err == nil {
+		return nil, nil
+	}
+	list := []error{err}
+	if j, ok := err.(interface{ Unwrap() []error }); ok {
+		list = j.Unwrap()
+	}
+	var leaks []*leakError
+	var rest []error
+	for _, e := range list {
+		var l *leakError
+		if errors.As(e, &l) {
+			leaks = append(leaks, l)
+		} else {
+			rest = append(rest, e)
+		}
+	}
+	return leaks, errors.Join(rest...)
+}
+
+func rowsOf(leaks []*leakError) []procRow {
+	rows := make([]procRow, 0, len(leaks))
+	for _, l := range leaks {
+		rows = append(rows, l.row)
+	}
+	return rows
+}
+
+// leaks is the error for the processes found outside the test's tree that are
+// still alive at the stop's last deadline, or whose row cannot be read there,
+// and counts them. One that has exited by then was dying when it was found, as
+// a forced command is between its reparenting and its parent-death SIGKILL.
+// None of them was signalled.
+func (s *sshdPool) leaks(outside []*leakError) error {
+	var errs []error
+	for _, l := range outside {
+		if now, live, err := s.api.row(l.row.pid); err != nil || (live && now.ticks == l.row.ticks) {
+			if s.api.leaks != nil {
+				s.api.leaks.Add(1)
+			}
+			errs = append(errs, l)
+		}
+	}
 	return errors.Join(errs...)
 }
 

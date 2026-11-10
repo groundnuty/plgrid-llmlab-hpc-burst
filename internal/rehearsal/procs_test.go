@@ -298,8 +298,10 @@ func TestGuard2AloneWalksNothingFromAZeroOrAStaleRoot(t *testing.T) {
 	for _, self := range []procRow{{}, pid1, stale} {
 		pool.procs = append(pool.procs, &sshdProc{self: self, done: make(chan struct{}), below: map[int]procRow{}})
 	}
-	if err := pool.stop(nil); err != nil {
-		t.Errorf("stop: %v, want nil", err)
+	// The stand-in "signals" PID 1's stored row without ending it, so the stop
+	// names PID 1 as still alive, and nothing else.
+	if err := pool.stop(nil); err != nil && (!strings.Contains(err.Error(), "still alive") || strings.Count(err.Error(), "started at tick") != 1 || !strings.Contains(err.Error(), ": 1 (")) {
+		t.Errorf("stop: %v, want nil or PID 1 alone still alive", err)
 	}
 	for _, p := range pool.procs {
 		if rows := p.seen(); len(rows) != 0 {

@@ -18,8 +18,8 @@ package rehearsal
 //  3. signalProcs (signal.go) signals only a process strictly below the test
 //     process now, by a walk whose every parent started no later than its
 //     child; it refuses PID 1 and below, the test and its ancestors, and a
-//     recorded process outside the test's tree is a leak, reported, never
-//     signalled;
+//     recorded process outside the test's tree is never signalled, and is a
+//     reported leak if it is still alive at the stop's last deadline;
 //  4. a forced command dies with its sshd (relayguard.go), so it never
 //     leaves the test's tree, and a passing run reports no leak.
 //

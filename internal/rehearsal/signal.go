@@ -8,10 +8,12 @@ package rehearsal
 // Each hop is checked against PID reuse by start-time order: a parent started
 // no later than its child, so a "parent" that started later is a reused PID.
 // A process that is not below the test any more, such as one whose parent
-// exited and left it to PID 1 or the user manager, is never signalled: it is
-// a leak, counted and reported with its command name, start time and node.
-// The forced commands cannot become one (relay.go: a parent-death signal), so
-// a passing run reports none.
+// exited and left it to PID 1 or the user manager, is never signalled. The
+// stop judges it at its last deadline: one still alive then is a leak,
+// counted and reported with its command name, start time and node. A forced
+// command found outside the tree is dying, since the kernel reparents it and
+// then sends the parent-death SIGKILL it asked for (relayguard.go), so it is
+// gone by then, and a passing run reports none.
 //
 // The residual: start times have the clock tick's resolution (10 ms), so a
 // parent that exited, gave up its PID, and had it reused within the tick its
@@ -55,8 +57,8 @@ type procAPI struct {
 	// started, when set, is called with each sshd's PID after it starts and
 	// before its row is read (tests).
 	started func(pid int)
-	// leaks counts the processes left outside the test's tree: the process's
-	// total for the host's, a test's own otherwise.
+	// leaks counts the processes the stop found left outside the test's tree:
+	// the process's total for the host's, a test's own otherwise.
 	leaks *atomic.Int64
 }
 
@@ -162,6 +164,19 @@ func (o *owner) walk(t procRow) (below bool, why string, err error) {
 	return false, fmt.Sprintf("its ancestry is deeper than %d", maxDepth), nil
 }
 
+// leakError is a recorded process that was not below the test when it was
+// checked. It was not signalled; the stop reports it if it is still alive at
+// its last deadline (sshdPool.leaks).
+type leakError struct {
+	row             procRow
+	node, comm, why string
+}
+
+func (e *leakError) Error() string {
+	return fmt.Sprintf("rehearsal: the %s left process %d (%s, started at tick %d) outside the test's tree: %s; it was not signalled (issue #308)",
+		e.node, e.row.pid, e.comm, e.row.ticks, e.why)
+}
+
 // refusal is the error for a process signalProcs will not signal.
 func refusal(r procRow, sig syscall.Signal, why string) error {
 	return fmt.Errorf("rehearsal: refused to send %v to process %d: %s (issue #308)", sig, r.pid, why)
@@ -172,11 +187,11 @@ func refusal(r procRow, sig syscall.Signal, why string) error {
 // and checked after that: a PID that now names a process with another start
 // time was recycled and is left alone, and the signal goes through the pidfd,
 // never to a PID. It refuses PID 1 and below, a row with no start time, the
-// process itself and its ancestors. A process that is not below the test is a
-// leak: never signalled, counted, and reported. Every refusal and leak, and a
-// process that cannot be pinned, read or signalled, is an error, and the
-// others are still signalled. It returns the rows it neither refused nor
-// failed on. node names the node in a report.
+// process itself and its ancestors. A process that is not below the test is
+// never signalled: its error is a *leakError, for the stop to judge. Every
+// refusal, and a process that cannot be pinned, read or signalled, is an
+// error, and the others are still signalled. It returns the rows it neither
+// refused nor failed on. node names the node in a report.
 func signalProcs(api *procAPI, node string, rows []procRow, sig syscall.Signal) ([]procRow, error) {
 	o, err := ownerOf(api, node)
 	if err != nil {
@@ -236,9 +251,7 @@ func (o *owner) signalOne(r procRow, sig syscall.Signal) error {
 		return refusal(r, sig, "its ancestry cannot be read: "+err.Error())
 	}
 	if !below {
-		o.api.leaks.Add(1)
-		return fmt.Errorf("rehearsal: the %s left process %d (%s, started at tick %d) outside the test's tree: %s; it was not signalled (issue #308)",
-			o.node, r.pid, o.api.comm(r.pid), r.ticks, why)
+		return &leakError{row: r, node: o.node, comm: o.api.comm(r.pid), why: why}
 	}
 	if err := o.api.send(fd, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return fmt.Errorf("rehearsal: send %v to process %d: %w", sig, r.pid, err)

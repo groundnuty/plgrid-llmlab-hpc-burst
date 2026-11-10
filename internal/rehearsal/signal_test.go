@@ -21,16 +21,25 @@ type fakeHost struct {
 	rows    map[int]procRow
 	rowErr  map[int]error // a row that cannot be read
 	openErr map[int]error // a pidfd that cannot be taken
+	// dieAfter is how many reads of a PID's row find it live; it is gone
+	// after them.
+	dieAfter map[int]int
+	reads    map[int]int // guarded by the sink's mu
 }
 
 func (h *fakeHost) api(self int, rec *sink) *procAPI {
 	api := rec.fake(&procAPI{self: self})
+	h.reads = map[int]int{}
 	api.row = func(pid int) (procRow, bool, error) {
 		rec.mu.Lock()
 		defer rec.mu.Unlock()
 		rec.events = append(rec.events, "row "+strconv.Itoa(pid))
 		if err := h.rowErr[pid]; err != nil {
 			return procRow{}, false, err
+		}
+		h.reads[pid]++
+		if n, ok := h.dieAfter[pid]; ok && h.reads[pid] > n {
+			return procRow{}, false, nil
 		}
 		r, ok := h.rows[pid]
 		return r, ok, nil
@@ -72,7 +81,8 @@ func refusedFor(err error, pid int) string {
 // leak, never signalled, each process that is not strictly below the test: a
 // stranger, a sibling (another child of go test), a process whose "parent"
 // started after it (a reused PID whose new owner is below the test), one whose
-// parent has exited, and one below the test that started before it. A parent
+// parent or grandparent has exited, and one below the test that started
+// before it. A parent
 // that cannot be read, and a pidfd that cannot be taken (ENOSYS, EPERM), are
 // errors. It signals the test's child and grandchild, leaves a recycled PID
 // and a gone one alone, and pins each process before it checks it.
@@ -97,6 +107,8 @@ func TestSignalProcsRefusesWhatIsNotTheTests(t *testing.T) {
 			6900: row(6900, 6910, 69), // its parent 6910 cannot be read
 			7000: row(7000, 7010, 70), // its parent 7010 has exited
 			7100: row(7100, self, 40), // below the test, but started before it
+			7200: row(7200, 7210, 72), // its grandparent 7220 has exited: its parent 7210 left the tree with it
+			7210: row(7210, 7220, 71),
 		},
 		rowErr:  map[int]error{6910: syscall.EACCES},
 		openErr: map[int]error{6700: syscall.ENOSYS, 6710: syscall.EPERM},
@@ -106,7 +118,7 @@ func TestSignalProcsRefusesWhatIsNotTheTests(t *testing.T) {
 		{pid: 0}, {pid: -1}, {pid: 1, ticks: 1}, {pid: self, ticks: 50}, {pid: 4000, ticks: 40}, {pid: 6000, ticks: 60},
 		{pid: 6100, ticks: 61}, {pid: 6110, ticks: 62}, {pid: 6300, ticks: 64}, {pid: 6400, ticks: 65},
 		{pid: 6500, ticks: 65}, {pid: 6600, ticks: 0}, {pid: 6700, ticks: 67}, {pid: 6710, ticks: 67}, {pid: 6800, ticks: 68},
-		{pid: 6900, ticks: 69}, {pid: 7000, ticks: 70}, {pid: 7100, ticks: 40},
+		{pid: 6900, ticks: 69}, {pid: 7000, ticks: 70}, {pid: 7100, ticks: 40}, {pid: 7200, ticks: 72},
 	}
 	kept, err := signalProcs(h.api(self, &rec), "login node", listed, syscall.SIGTERM)
 	sent, killed := rec.snapshot()
@@ -129,6 +141,7 @@ func TestSignalProcsRefusesWhatIsNotTheTests(t *testing.T) {
 		6800: {leak, "a reused PID"},
 		7000: {leak, "ancestor 7010 has exited"},
 		7100: {leak, "started before the test process"},
+		7200: {leak, "ancestor 7220 has exited"},
 		6700: {"function not implemented"}, 6710: {"operation not permitted"},
 		6900: {"its ancestry cannot be read"},
 	} {
@@ -139,8 +152,8 @@ func TestSignalProcsRefusesWhatIsNotTheTests(t *testing.T) {
 			}
 		}
 	}
-	if n := rec.leaks.Load(); n != 5 {
-		t.Errorf("counted %d leaks, want 5: 6000, 6500, 6800, 7000 and 7100", n)
+	if n := len(leakErrors(err)); n != 6 {
+		t.Errorf("%d processes outside the test's tree, want 6: 6000, 6500, 6800, 7000, 7100 and 7200", n)
 	}
 	var keptPIDs []int
 	for _, r := range kept {
@@ -159,6 +172,50 @@ func TestSignalProcsRefusesWhatIsNotTheTests(t *testing.T) {
 		r := slices.Index(rec.events, "row "+strconv.Itoa(pid))
 		if o < 0 || r < o {
 			t.Errorf("process %d: pinned at event %d, its row read at event %d; want the pin first", pid, o, r)
+		}
+	}
+}
+
+// leakErrors are the processes outside the test's tree in a signal pass's
+// error.
+func leakErrors(err error) []*leakError {
+	leaks, _ := splitLeaks(err)
+	return leaks
+}
+
+// A process found outside the test's tree is judged at the stop's last
+// deadline: one that has exited by then, as a forced command does between its
+// reparenting and its parent-death SIGKILL, is not a leak, and one still alive
+// is. The start times are far above any real process's.
+func TestStopReportsOnlyWhatIsStillOutsideTheTreeAtItsDeadline(t *testing.T) {
+	const far = uint64(1) << 50
+	for _, c := range []struct {
+		name  string
+		dies  bool
+		leaks int64
+	}{{"dying", true, 0}, {"still alive", false, 1}} {
+		h := &fakeHost{rows: map[int]procRow{
+			5000: row(5000, 1, far),
+			6100: row(6100, 5000, far+1), // the sshd
+			7000: row(7000, 7010, far+2), // its forced command, reparented: 7010 is gone
+		}}
+		if c.dies {
+			h.dieAfter = map[int]int{7000: 1} // live when it is checked, gone by the deadline
+		}
+		var rec sink
+		pool := &sshdPool{name: "login node", api: h.api(5000, &rec), wait: 100 * time.Millisecond}
+		done := make(chan struct{})
+		close(done)
+		pool.procs = []*sshdProc{{self: h.rows[6100], done: done, below: map[int]procRow{7000: h.rows[7000]}}}
+		err := pool.stop(nil)
+		if n := rec.leaks.Load(); n != c.leaks {
+			t.Errorf("%s: counted %d leaks, want %d", c.name, n, c.leaks)
+		}
+		if got := refusedFor(err, 7000) != ""; got != !c.dies {
+			t.Errorf("%s: stop: %v; want process 7000 reported %v", c.name, err, !c.dies)
+		}
+		if sent, _ := rec.snapshot(); slices.Contains(sent, 7000) {
+			t.Errorf("%s: signalled process 7000, which is outside the test's tree", c.name)
 		}
 	}
 }
