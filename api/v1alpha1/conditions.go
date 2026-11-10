@@ -494,6 +494,15 @@ const (
 	// Allocation is created to wait on it (HBEP-6, Dial-home modes,
 	// host-dialed, as PR #298 amends it).
 	ReasonLoginHostInUse = "LoginHostInUse"
+	// ReasonRelayKeeperUnavailable: Ready is False; the Provider is in
+	// host-dialed mode with the relay keeper (beta), and no exchange with the
+	// keeper has succeeded under the controller's current lead, or none has
+	// succeeded for longer than a desired set's validity. The controller
+	// admits no new Allocation meanwhile and leaves running ones as they are,
+	// since the keeper holds their relays, and sets Ready True again at the
+	// next successful exchange (HBEP-6, Dial-home modes, The relay keeper, as
+	// PR #360 amends it).
+	ReasonRelayKeeperUnavailable = "RelayKeeperUnavailable"
 )
 
 // Reasons of the read-back (HBEP-4, The Slurm dialect, Read-back). The
