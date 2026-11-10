@@ -260,6 +260,7 @@ const (
 	logAcquiring     = "Attempting to acquire leader lease"
 	logStopLeaderRun = "Stopping and waiting for leader election runnables"
 	logStopCaches    = "Stopping and waiting for caches"
+	logWorkersDone   = "All workers finished"
 )
 
 // waitLog waits until the controller has logged a line holding s.

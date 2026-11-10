@@ -60,8 +60,11 @@ type tapReq struct {
 	acked     *wire.Acked
 	refused   *wire.Refused
 	err       string
-	answered  time.Time
-	done      bool
+	// replying is when the tap began to write the reply back: its sender
+	// cannot have read it sooner.
+	replying time.Time
+	answered time.Time
+	done     bool
 
 	conn    *net.UnixConn
 	release chan tapAction
@@ -282,6 +285,9 @@ func (p *tap) forward(r *tapReq) {
 		r.refused = &wire.Refused{}
 		_ = json.Unmarshal(env.Body, r.refused)
 	}
+	p.mu.Unlock()
+	p.mu.Lock()
+	r.replying = time.Now()
 	p.mu.Unlock()
 	_ = r.conn.SetWriteDeadline(time.Now().Add(wire.ExchangeTimeout))
 	if _, err := r.conn.Write(reply); err != nil {
