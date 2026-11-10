@@ -297,14 +297,16 @@ No client key ID is a label: per-key usage is in the records.
   - The controller process's counts are on the lifecycle controller's `/metrics`, the Provider managers' included, since they bind no metrics port. Only the serving copy exports them, like the other `hpcburst_` series (Unknown samples); every controller that raises events in that process runs only on the copy that leads `lifecycle`.
   - The front's counts are on the front's own `/metrics`, which also gains the process collector's `process_start_time_seconds`.
   - **The relay keeper (beta, HBEP-6)** exports no metrics of its own and binds no port. The serving copy of the lifecycle controller reads the keeper's relay states and ends over its socket, and exports them through its serving collector, so a non-serving copy still exports no `hpcburst_` series:
-    - `hpcburst_relays{provider, channel, state}`, a gauge of relays by state (`up`, `retrying`, `final`);
+    - `hpcburst_relays{provider, channel, state}`, a gauge of relays by state (`up`, `retrying`, `final`); a relay waiting for its pair of slots counts as `retrying`;
     - `hpcburst_relay_restarts_total{provider, channel}`, a counter of relay starts after the first;
     - `hpcburst_relay_sets_refused_total{provider, reason}`, a counter of desired sets and acknowledgements the keeper refused (`epoch`, `login_host`).
+    - `hpcburst_relay_keeper_epoch`, a gauge of the keeper's `E`, so that a reset of the keeper's counters shows;
+    - `hpcburst_collector_success{collector="relays"}`, in keeper mode only, so that a failed read of the keeper shows as 0 and not as no relays.
 
     A final end re-reported after a restart raises no second `RelayFailed`: the event is raised once, when the mark is newly written.
 - **Proving that an event was not raised** takes all four of these. Otherwise the result is inconclusive, never a pass:
   1. **The first read comes before the change** that could raise the event.
-  2. **Both reads come from the same process while it serves:** `process_start_time_seconds` is unchanged, and on the lifecycle controller both `hpcburst_collector_success` series are present. A restart or a hand-over between the reads makes the check inconclusive.
+  2. **Both reads come from the same process while it serves:** `process_start_time_seconds` is unchanged, and on the lifecycle controller every `hpcburst_collector_success` series is present (two, or three in beta's keeper mode). A restart or a hand-over between the reads makes the check inconclusive.
   3. **Between the reads, a pass of the emitting loop, for the same subject, observed the change and finished emitting,** and that pass started after the time the event would have been due (for example, `tunnelOrphanGrace` for `TunnelOrphaned`). The barrier per loop:
      - **the lifecycle reconciler:** a later `status.lastReconcileTime` write of the same ModelDeployment. It runs several workers, serialized per key only, so a pass of another ModelDeployment proves nothing;
      - **the tunnel-state reader:** a condition write of a later pass;
@@ -567,6 +569,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-06: the `instances` collector gets a success gauge, since its inventory is now read from the cache, and only the serving copy exports state-derived series, accounting included (rulings for #249; PR #258, from PR #254's open points).
 - 2026-11-08: a raised-events counter, so a test or an operator can prove that an event was not raised (ruling for #256). Code that differs records the serving gate as done in PR #254, where "leading" needs a renew within the renew deadline.
 - 2026-11-10: the relay keeper's state is exported by the serving controller (HBEP-6).
+- 2026-11-10: the relay keeper's epoch and read-success series.
 
 ## Amendments
 
@@ -601,3 +604,4 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
   Code that differs also records the serving gate as done in PR #254, where "leading" needs a renew of the `lifecycle` `Lease` within the renew deadline. Before, HBEP-8 had no metric for events.
 - **2026-11-10: erratum** (Open questions 14; Controller metrics, the Provider controller's events): `RelayEndedForGood` is among the Allocation outcomes, and `RelayFailed`'s emit site is `onRelayFailed` (`internal/providerctl/relayfailed.go`), after the mark (#304, PR #319). Before, the list and the emit site predated #319.
 - **2026-11-10: the relay keeper's metrics** (Metrics). An amendment with HBEP-6's of the same day. The relay keeper has no `/metrics`; the serving controller exports its relays' states through the serving collector. Before, relays had no exported state beyond `RelayFailed`.
+- **2026-11-10: the relay keeper's epoch and read success** (Metrics; Raised events, condition 2). An amendment with HBEP-6's of the same day. It adds `hpcburst_relay_keeper_epoch` and `hpcburst_collector_success{collector="relays"}`, which exists in keeper mode only, and counts a relay waiting for its slot pair as `retrying`. The absence proof's condition 2 asks for every success series. Before, there were two success series and no keeper epoch.
