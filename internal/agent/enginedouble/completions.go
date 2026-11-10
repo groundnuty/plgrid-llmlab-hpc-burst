@@ -88,6 +88,11 @@ func (h *handler) completion(w http.ResponseWriter, r *http.Request) {
 	}
 	_, promptIDs := tokenize(prompt)
 	rec.PromptTokens = len(promptIDs)
+	// A limit over the window is refused before the prompt is read, an empty
+	// one included (maxTokensOf).
+	if !h.windowFits(w, req.MaxTokens, nil) {
+		return
+	}
 	if len(promptIDs) == 0 {
 		// vLLM refuses a prompt of no tokens (v1/engine/input_processor.py,
 		// _validate_prompt_len). Chat cannot meet this: its template adds tokens.
