@@ -166,3 +166,41 @@ func TestRestoreWithoutAKeeperMakesNoKeeperFile(t *testing.T) {
 		t.Errorf("the keeper's directory after restore: %v, want none made", err)
 	}
 }
+
+// down's removal of the launcher's own record (clearRecord) keeps the keeper's directory, its
+// state file and its lock: the switch-back guard reads that file after down (HBEP-6, Compatibility
+// and upgrades: "The launcher's own record doesn't survive down, but that file does").
+func TestDownsRecordRemovalKeepsTheKeepersStateFile(t *testing.T) {
+	l, err := newLayout(filepath.Join(shortDir(t), "st"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(l.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.saveState(&State{Version: "v1.36.5+k3s1", RelayKeeper: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := relaykeeper.OpenState(relaykeeper.StatePath(l.dir)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(relaykeeper.LockPath(l.dir), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(relaykeeper.StatePath(l.dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.clearRecord(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(l.stateFile()); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the launcher's record after clearRecord: %v, want it removed", err)
+	}
+	if after, err := os.ReadFile(relaykeeper.StatePath(l.dir)); err != nil || string(after) != string(before) {
+		t.Errorf("the keeper's state file after clearRecord: %v, %q; want it kept as it was", err, after)
+	}
+	if _, err := os.Stat(relaykeeper.LockPath(l.dir)); err != nil {
+		t.Errorf("the keeper's lock file after clearRecord: %v, want it kept", err)
+	}
+}

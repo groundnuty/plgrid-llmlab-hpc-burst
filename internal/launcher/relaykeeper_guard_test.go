@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -41,11 +43,20 @@ func allocationsServer(t *testing.T, phases []string, kind string) (*rest.Config
 			_, _ = w.Write([]byte(`{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}`))
 			return
 		}
+		// The items come from the API type, as the server encodes it: the phase is the observed
+		// one, status.atProvider.phase (a hand-written status.phase made this test pass while the
+		// guard read a field no Allocation has; the real k3s test caught it).
 		items := []map[string]any{}
 		for i, p := range phases {
-			items = append(items, map[string]any{"apiVersion": v1alpha1.GroupVersion.String(), "kind": "Allocation",
-				"metadata": map[string]any{"name": "alloc-" + string(rune('0'+i)), "namespace": "example"},
-				"status":   map[string]any{"phase": p}})
+			a := v1alpha1.Allocation{ObjectMeta: metav1.ObjectMeta{Name: "alloc-" + string(rune('0'+i)), Namespace: "example"}}
+			a.APIVersion, a.Kind = v1alpha1.GroupVersion.String(), "Allocation"
+			a.Status.AtProvider.Phase = v1alpha1.AllocationPhase(p)
+			obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&a)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			items = append(items, obj)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"apiVersion": v1alpha1.GroupVersion.String(), "kind": kind, "metadata": map[string]any{}, "items": items})
