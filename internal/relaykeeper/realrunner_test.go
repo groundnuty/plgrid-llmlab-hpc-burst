@@ -271,10 +271,10 @@ func (rg *realRig) doubleResolutions() int {
 func (rg *realRig) freeAfter() {
 	rg.t.Helper()
 	accepted(rg.t, rg.k, rg.set(rkProv, true))
-	rkWaitFor(rg.t, time.Minute, "rkProv's relays gone", func() bool { return len(rg.upOf(rkProv)) == 0 })
-	if n := rg.holds(); n != 0 {
-		rg.t.Errorf("%d starts in flight once every relay is gone, want 0", n)
-	}
+	// A start of a relay the set drops may still be in flight until the
+	// Drop lands; one that never resolves keeps the count above 0, and fails
+	// the wait.
+	rkWaitFor(rg.t, time.Minute, "rkProv's relays gone and no start in flight", func() bool { return len(rg.upOf(rkProv)) == 0 && rg.holds() == 0 })
 	if !rg.probeAccepted() {
 		rg.t.Error("another Provider's set for the host was refused with no relay up and no start in flight there: the host was not freed")
 	}

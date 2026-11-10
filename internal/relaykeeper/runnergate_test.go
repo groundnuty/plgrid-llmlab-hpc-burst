@@ -218,9 +218,13 @@ func TestAGateRefusalIsNoStartOnTheRealPath(t *testing.T) {
 	if n := len(relaySSHs(t, a.id, b.id, c.id)); n != 4 {
 		t.Errorf("%d relay ssh clients run, want 4", n)
 	}
-	if n := rg.holds(); n != 0 {
-		t.Errorf("the keeper holds %d starts after refused ones, want 0", n)
+	rg.k.mu.Lock()
+	for key := range rg.k.inflight {
+		if key.tag == c.tag {
+			t.Errorf("the keeper holds a start of the refused Allocation: %+v", key)
+		}
 	}
+	rg.k.mu.Unlock()
 	rg.noEnds()
 	accepted(t, rg.k, rg.set(rkProv, true, eb, ec))
 	rg.waitPair(rkProv, c.tag)

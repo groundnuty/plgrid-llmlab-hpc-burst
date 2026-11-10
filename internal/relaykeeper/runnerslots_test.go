@@ -119,6 +119,9 @@ func TestANewGenerationsPairWaitsUntilTheOldPairsProcessesAreGone(t *testing.T) 
 	w.lingerAll(true)
 	accepted(t, rg.k, rg.set(rkProv, true, w.entry(a, genOne)))
 	old := rg.waitPair(rkProv, a.tag)
+	for ch, r := range old {
+		rkWaitFor(t, time.Minute, "the old "+string(ch)+" relay taking the lingering path", func() bool { return w.lingering(r.PID) })
+	}
 	w.lingerAll(false)
 	accepted(t, rg.k, rg.set(rkProv, true, w.entry(a, genOne), w.entry(b, genOne)))
 	upB := rg.waitPair(rkProv, b.tag)

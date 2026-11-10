@@ -40,6 +40,7 @@ func (w *rkWorld) lingeringSSH() string {
 		"case \" $* \" in *\" srun -u --overlap \"*) ;; *) exec " + ssh + " \"$@\";; esac\n" +
 		"if [ -e " + dir + "/trap-all ]; then\n" +
 		"  trap '' TERM\n" +
+		"  : > " + dir + "/lingering-$$\n" +
 		"  " + ssh + " \"$@\"\n" +
 		"  rc=$?\n" +
 		"  while [ ! -e " + dir + "/release ]; do sleep 0.02; done\n" +
@@ -77,6 +78,13 @@ func (w *rkWorld) lingerSeq(n int64) {
 // (lingerSeq).
 func (w *rkWorld) trapped(n int64) bool {
 	_, err := os.Stat(filepath.Join(w.base, "b", "trapped-"+strconv.FormatInt(n, 10)))
+	return err == nil
+}
+
+// lingering reports whether the relay process pid took lingerAll's path:
+// it ignores TERM and will wait for release once its ssh has ended.
+func (w *rkWorld) lingering(pid int) bool {
+	_, err := os.Stat(filepath.Join(w.base, "b", "lingering-"+strconv.Itoa(pid)))
 	return err == nil
 }
 
