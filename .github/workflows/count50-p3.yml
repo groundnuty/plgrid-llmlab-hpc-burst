@@ -188,6 +188,31 @@ jobs:
             from: 'in != nil && in.want.Entry == e && in.host == host'
             to: 'in != nil && false && in.want.Entry == e && in.host == host'
             tests: TestAWantOfTheSameIdentityKeepsEachRelayListedOnce
+          # PR 356's review round: the incarnation fence and the process lock.
+          - id: gate-by-entry-not-incarnation
+            pkg: internal/relaykeeper
+            file: internal/relaykeeper/keeper.go
+            from: '!ok || w.inc != j.inc || w.entry != j.entry'
+            to: '!ok || w.entry != j.entry'
+            tests: TestAnOldIncarnationsStartIsRefusedThoughItsEntryIsCurrent
+          - id: no-current-instance-check
+            pkg: internal/relaykeeper
+            file: internal/relaykeeper/ownerrunner.go
+            from: 'if p.cur[e.Tag] != in {'
+            to: 'if false {'
+            tests: TestTheRunnerStartsOnlyTheTagsCurrentInstance
+          - id: identity-without-incarnation
+            pkg: internal/relaykeeper
+            file: internal/relaykeeper/ownerrunner.go
+            from: 'strconv.FormatUint(w.Incarnation, 10)'
+            to: 'strconv.FormatUint(0*w.Incarnation, 10)'
+            tests: TestTheRunnerStartsOnlyTheTagsCurrentInstance TestTheFirstAAttemptIsRefusedAfterAToBToA
+          - id: no-process-lock
+            pkg: internal/relaykeeper
+            file: internal/relaykeeper/process.go
+            from: 'lock, err := lockProcess(c.StateDir)'
+            to: 'lock, err := os.CreateTemp("", "nolock")'
+            tests: TestASecondRunOnALiveKeepersStateDirChangesNothing
           - id: no-pdeathsig
             file: internal/hostdial/pidfd.go
             from: 'Pdeathsig: syscall.SIGKILL, PidFD: fd'
