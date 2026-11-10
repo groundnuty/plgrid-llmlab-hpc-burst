@@ -92,6 +92,24 @@ type Target struct {
 	// another Target, so the running relays are stopped and started again
 	// with the new ones, never left on the old.
 	Gen string
+	// OnFinal, when set, is told each final end of a channel, of every kind
+	// (superseded, the job's end, failed), with its cause, after OnFailed. The
+	// relay keeper records an end before its relay's loop returns, and in beta
+	// a superseded end needs the mark too (HBEP-6, The relay keeper; issue
+	// #343). Nil is alpha's.
+	OnFinal func(ch agentapi.RelayChannel, kind EndKind, cause string)
+	// Final, when set, names channels that already ended for good, each with
+	// the cause as RelayState.FinalCause showed it: their relays are kept as
+	// ended and never started, while the Allocation's pair of slots is held
+	// as before. The relay keeper seeds it from the ends it holds, so a
+	// final-ended channel is never restarted after a keeper restart or on a
+	// new Gen (HBEP-6, The relay keeper; issue #343). same ignores it, so
+	// seeding it restarts no relay. Nil is alpha's.
+	Final map[agentapi.RelayChannel]string
+	// OnStart, when set, is told of each ssh start of a channel's relay, for
+	// the keeper's count of restarts, which outlives a Drop (HBEP-8,
+	// hpcburst_relay_restarts_total; issue #343). Nil is alpha's.
+	OnStart func(ch agentapi.RelayChannel)
 }
 
 // same reports whether u needs no change of t's relays.
@@ -127,6 +145,13 @@ type OwnerOptions struct {
 	StopGrace time.Duration
 	// Logger reports starts, stops and refusals; nil means none.
 	Logger *slog.Logger
+	// Pidfd, for the relay keeper (beta; issue #343), starts each relay's ssh
+	// with a pidfd of its own and no process group of its own, and signals it
+	// only through that pidfd, after a check of its recorded start time
+	// (HBEP-6, The relay keeper, Signals). NewOwner fails when this kernel
+	// gives no pidfd, so nothing falls back to signalling a PID. False is
+	// alpha's: a process group of its own, signalled by its number.
+	Pidfd bool
 }
 
 // seqs numbers every relay start of the process: each channel's N is the next
@@ -196,6 +221,11 @@ func NewOwner(o OwnerOptions) (*Owner, error) {
 	}
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.DiscardHandler)
+	}
+	if o.Pidfd {
+		if err := checkPidfd(); err != nil {
+			return nil, err
+		}
 	}
 	return &Owner{o: o, want: map[string]Target{}, allocs: map[string]*allocRelays{}}, nil
 }
@@ -475,6 +505,18 @@ func (r *relay) end(kind EndKind, cause string) {
 	if kind == EndFailed && r.t.OnFailed != nil {
 		r.t.OnFailed(r.ch, cause)
 	}
+	if r.t.OnFinal != nil {
+		r.t.OnFinal(r.ch, kind, cause)
+	}
+}
+
+// seedFinal keeps the relay as ended for good with cause (Target.Final),
+// telling neither OnFailed nor OnFinal: its end was told when it happened.
+func (r *relay) seedFinal(cause string) {
+	r.mu.Lock()
+	r.final, r.finalCause = true, cause
+	r.mu.Unlock()
+	r.o.o.Logger.Info("a relay that ended for good is not started", "tag", r.t.Tag, "channel", r.ch, "cause", cause)
 }
 
 // loop keeps the relay up until ctx ends or its end is final: a jittered wait
@@ -483,6 +525,10 @@ func (r *relay) end(kind EndKind, cause string) {
 // drops, the stop by PID, and again. The Allocation's slots stay taken
 // throughout.
 func (r *relay) loop(ctx context.Context) {
+	if cause, ok := r.t.Final[r.ch]; ok {
+		r.seedFinal(cause)
+		return
+	}
 	o := r.o.o
 	backoff := o.MinBackoff
 	wait := time.Duration(rand.Int64N(int64(o.MinBackoff) + 1))
@@ -570,6 +616,12 @@ func (r *relay) once(ctx context.Context) (time.Duration, bool, EndKind, string)
 		r.refuse("the ssh client: " + err.Error())
 		return 0, false, EndRetried, ""
 	}
+	// The relay keeper's start (OwnerOptions.Pidfd) in place of alpha's,
+	// which is startProcess, unchanged.
+	startProcess := startProcess
+	if o.Pidfd {
+		startProcess = func(cmd *exec.Cmd) (*process, error) { return startPidfdProcess(cmd, o.Logger) }
+	}
 	p, err := startProcess(cmd)
 	if err != nil {
 		r.refuse("the ssh client could not be started: " + err.Error())
@@ -580,6 +632,9 @@ func (r *relay) once(ctx context.Context) (time.Duration, bool, EndKind, string)
 	r.pid, r.starts, r.since, r.seq, r.refusal = p.pid, r.starts+1, start, seq, ""
 	r.mu.Unlock()
 	o.Logger.Info("relay started", "tag", r.t.Tag, "channel", r.ch, "job", id, "pid", p.pid, "epoch", r.epoch, "seq", seq)
+	if r.t.OnStart != nil {
+		r.t.OnStart(r.ch)
+	}
 	sctx, cancel := context.WithCancel(ctx)
 	served := make(chan error, 1)
 	go func() { served <- Serve(sctx, p, r.target, r.t.UID, o.Logger, &r.stats) }()
@@ -670,6 +725,9 @@ type process struct {
 	in   io.WriteCloser
 	out  io.ReadCloser
 	done chan struct{}
+	// pf is the relay keeper's pidfd for the process (startPidfdProcess);
+	// nil for alpha's.
+	pf *pidfdHold
 }
 
 // startProcess starts cmd in a process group of its own, with pipes for its
@@ -737,6 +795,10 @@ func (p *process) Close() error {
 // grace, and returns once it is reaped. A relay that already exited is only
 // waited for.
 func (p *process) stop(grace time.Duration) {
+	if p.pf != nil {
+		p.pf.stop(p, grace)
+		return
+	}
 	select {
 	case <-p.done:
 		return
