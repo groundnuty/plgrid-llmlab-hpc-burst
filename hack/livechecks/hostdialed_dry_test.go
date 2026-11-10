@@ -101,6 +101,7 @@ var hostDialedOKLines = []string{
 }
 
 func TestEveryHostDialedRowPassesThroughTheScriptOverTheFake(t *testing.T) {
+	t.Parallel() // beside the package's other tests: each run is its own world, on ports the kernel chooses
 	for _, s := range hostDialedShapes {
 		t.Run(s.row, func(t *testing.T) {
 			t.Parallel()
@@ -127,6 +128,7 @@ func TestEveryHostDialedRowPassesThroughTheScriptOverTheFake(t *testing.T) {
 
 // Each fault fails the row through the script, exit 1, and the text to post says FAIL on the check it stands for.
 func TestEachHostDialedFaultFailsTheRowThroughTheScript(t *testing.T) {
+	t.Parallel() // beside the package's other tests: each run is its own world, on ports the kernel chooses
 	for fault, line := range hostDialedFaultLines {
 		t.Run(fault, func(t *testing.T) {
 			t.Parallel()
@@ -151,6 +153,7 @@ func TestEachHostDialedFaultFailsTheRowThroughTheScript(t *testing.T) {
 // The owner's other job holds the slot, so this run's job pends past its start wait: NOT RUN, exit 3, the line, the job
 // cancelled by its tag, and no text to post. Under QOS now on Helios, under the partition's own QOS on Athena.
 func TestAHostDialedRowWhoseSlotIsHeldIsNotRunThroughTheScript(t *testing.T) {
+	t.Parallel() // beside the package's other tests: each run is its own world, on ports the kernel chooses
 	for _, s := range hostDialedShapes {
 		t.Run(s.row, func(t *testing.T) {
 			t.Parallel()
@@ -169,6 +172,7 @@ func TestAHostDialedRowWhoseSlotIsHeldIsNotRunThroughTheScript(t *testing.T) {
 
 // A dry binary refuses live settings, so a dry pass can never stand for a live one.
 func TestADryHostDialedBinaryRefusesLiveSettings(t *testing.T) {
+	t.Parallel() // beside the package's other tests: each run is its own world, on ports the kernel chooses
 	w, env := hostDialedDryWorld(t)
 	w.installDry(dryWrapperKeepsLive, realTestBinary(t, "HPCBURST_LIVECHECKS_CONF_TEST", confPkg), filepath.Join(repoRoot(t), confPkg))
 	res := w.run(env, "--run", "reach-host-dialed-athena", "--yes")

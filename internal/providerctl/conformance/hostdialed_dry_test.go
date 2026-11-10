@@ -204,7 +204,8 @@ func dryHostDialedWorld(t *testing.T, row, fault, out string) (*world, *hostDial
 	w.pace, w.probeRead = 200*time.Millisecond, 5
 	limit := 20 * time.Second
 	if fault != "" {
-		limit = 10 * time.Second
+		// A fault fails the check it stands for whether or not the rest comes up in time, so its bounds can be short.
+		limit = 5 * time.Second
 	}
 	w.shorten = func(d time.Duration) time.Duration { return min(d, limit) }
 	g.startHostSide(t, w)
