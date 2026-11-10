@@ -369,8 +369,8 @@ func TestCompletionRefusals(t *testing.T) {
 		{"an empty prompt", map[string]any{"model": "m", "prompt": ""}, 400, "BadRequestError", "The decoder prompt cannot be empty"},
 		{"a prompt of white space", map[string]any{"model": "m", "prompt": " \t\n"}, 400, "BadRequestError", "The decoder prompt cannot be empty"},
 		{"another model", completionBody(2, map[string]any{"model": "other"}), 404, "NotFoundError", "`other` does not exist"},
-		{"min_tokens above max_tokens", completionBody(2, map[string]any{"max_tokens": 10, "min_tokens": 11}), 400, "BadRequestError", "min_tokens must be"},
-		{"a negative min_tokens", completionBody(2, map[string]any{"max_tokens": 10, "min_tokens": -1}), 400, "BadRequestError", "min_tokens must be"},
+		{"min_tokens above max_tokens", completionBody(2, map[string]any{"max_tokens": 10, "min_tokens": 11}), 400, "BadRequestError", "min_tokens must be less than or equal to max_tokens=10, got 11."},
+		{"a negative min_tokens", completionBody(2, map[string]any{"max_tokens": 10, "min_tokens": -1}), 400, "BadRequestError", "min_tokens must be greater than or equal to 0, got -1."},
 		// Issue 353: a prompt of 60 words with a limit of 41 (101 in all) was a 400
 		// here. vLLM v0.32.0 clamps it to min(100-60, 41) = 40 and serves it
 		// (serve/utils/api_utils.py:196-205), so it moved out of this table, to

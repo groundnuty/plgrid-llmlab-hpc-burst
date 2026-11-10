@@ -332,6 +332,57 @@ func TestMinTokensIsCheckedAgainstTheClampedLimit(t *testing.T) {
 	}
 }
 
+// A negative min_tokens is refused with its own message, not the upper bound's
+// (sampling_params.py:694-697: "min_tokens must be greater than or equal to 0,
+// got {N}." and then :698-702 for the upper bound). It is checked after
+// max_tokens under 1 (:688-693) and before the upper bound, and on the clamped
+// limit's side of nothing: with a context of 100, a prompt of 85 and a limit of
+// 50 (clamped to 15), min_tokens -1 and -7 are refused by the lower bound
+// whatever the clamp is. A limit under 1 with a negative min_tokens is the
+// limit's refusal, as it comes first in _verify_args.
+func TestNegativeMinTokensIsRefusedByItsOwnMessage(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		body map[string]any
+		want string
+	}{
+		{"completions: 85 tokens, limit 50 (clamped to 15), min_tokens -1", "/v1/completions",
+			completionBody(85, map[string]any{"max_tokens": 50, "min_tokens": -1}), "min_tokens must be greater than or equal to 0, got -1."},
+		{"completions: min_tokens -7", "/v1/completions",
+			completionBody(85, map[string]any{"max_tokens": 50, "min_tokens": -7}), "min_tokens must be greater than or equal to 0, got -7."},
+		{"completions: no limit (the default 16), min_tokens -1", "/v1/completions",
+			completionBody(85, map[string]any{"min_tokens": -1}), "min_tokens must be greater than or equal to 0, got -1."},
+		{"chat: 85 tokens (76 words + 9), max_tokens 50, min_tokens -1", "/v1/chat/completions",
+			chatBody(76, map[string]any{"max_tokens": 50, "min_tokens": -1}), "min_tokens must be greater than or equal to 0, got -1."},
+		{"chat: max_completion_tokens 50, min_tokens -7", "/v1/chat/completions",
+			chatBody(76, map[string]any{"max_completion_tokens": 50, "min_tokens": -7}), "min_tokens must be greater than or equal to 0, got -7."},
+		{"chat: no limit, min_tokens -1", "/v1/chat/completions",
+			chatBody(76, map[string]any{"min_tokens": -1}), "min_tokens must be greater than or equal to 0, got -1."},
+		// max_tokens under 1 is checked first (sampling_params.py:688-693).
+		{"completions: a limit of 0 and min_tokens -1: the limit's refusal", "/v1/completions",
+			completionBody(70, map[string]any{"max_tokens": 0, "min_tokens": -1}), "max_tokens must be at least 1, got 0."},
+		{"chat: a prompt of exactly 100 and min_tokens -1: the limit's refusal", "/v1/chat/completions",
+			chatBody(91, map[string]any{"min_tokens": -1}), "max_tokens must be at least 1, got 0."},
+	}
+	s := serve(t, lengthCfg())
+	for _, c := range cases {
+		r := s.post(c.path, c.body)
+		var e errorBody
+		r.json(t, &e)
+		if r.status != 400 || e.Error.Type != "BadRequestError" || e.Error.Code != 400 || e.Error.Message != c.want {
+			t.Errorf("%s: HTTP %d, error %+v; want 400, BadRequestError and %q", c.name, r.status, e.Error, c.want)
+		}
+	}
+	// A refused request's record carries the limit that resolved (here the
+	// clamped 15), as a min_tokens-over-the-limit refusal's does.
+	post, events := engineRecord(t, lengthCfg())
+	post("/v1/completions", completionBody(85, map[string]any{"max_tokens": 50, "min_tokens": -1}))
+	if got := requestEvents(events()); len(got) != 1 || got[0].Outcome != "refused" || got[0].MaxTokens != 15 {
+		t.Errorf("record %+v, want one refused request with limit 15", got)
+	}
+}
+
 // A request refused for its length is in the engine's log as refused, with the
 // prompt it carried; its limit is 0 when it did not resolve. The record of a
 // min_tokens refusal carries the clamped limit it resolved.

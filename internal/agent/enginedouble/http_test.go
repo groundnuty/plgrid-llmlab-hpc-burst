@@ -242,17 +242,25 @@ func TestEarlyStop(t *testing.T) {
 	}
 }
 
-// vLLM refuses min_tokens above max_tokens (SamplingParams._verify_args,
-// sampling_params.py:694-701), and so does the double.
+// vLLM refuses min_tokens above max_tokens and a negative min_tokens, each with
+// its own message (SamplingParams._verify_args, sampling_params.py:694-697 and
+// :698-702), and so does the double. The negative row once passed on the
+// upper bound's message, which vLLM does not give it: the literals below are
+// the source's.
 func TestMinTokensAboveMaxTokensIs400(t *testing.T) {
 	s := serve(t, cfgFor())
-	for name, extra := range map[string]map[string]any{
-		"min above max": {"max_tokens": 10, "min_tokens": 11},
-		"negative min":  {"max_tokens": 10, "min_tokens": -1},
+	for name, c := range map[string]struct {
+		extra map[string]any
+		want  string
+	}{
+		"min above max": {map[string]any{"max_tokens": 10, "min_tokens": 11}, "min_tokens must be less than or equal to max_tokens=10, got 11."},
+		"negative min":  {map[string]any{"max_tokens": 10, "min_tokens": -1}, "min_tokens must be greater than or equal to 0, got -1."},
 	} {
-		r := s.post("/v1/chat/completions", chatBody(3, extra))
-		if r.status != 400 || !strings.Contains(string(r.body), "min_tokens must be") {
-			t.Errorf("%s: HTTP %d %s, want 400 saying min_tokens must be less than or equal to max_tokens", name, r.status, r.body)
+		r := s.post("/v1/chat/completions", chatBody(3, c.extra))
+		var e errorBody
+		r.json(t, &e)
+		if r.status != 400 || e.Error.Message != c.want {
+			t.Errorf("%s: HTTP %d %q, want 400 and %q", name, r.status, e.Error.Message, c.want)
 		}
 	}
 	if r := s.post("/v1/chat/completions", chatBody(3, map[string]any{"max_tokens": 10, "min_tokens": 10})); r.status != 200 {

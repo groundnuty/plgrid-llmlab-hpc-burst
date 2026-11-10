@@ -283,8 +283,9 @@ func (h *handler) windowFits(w http.ResponseWriter, maxTokens, maxCompletionToke
 }
 
 // limitFor resolves a tokenized request's output limit (maxTokensOf: the
-// prompt refusal, the clamp, a limit under 1) and checks min_tokens against
-// the CLAMPED limit, as SamplingParams does after get_max_tokens, answering
+// prompt refusal, the clamp, a limit under 1) and checks min_tokens, a
+// negative one first and then one over the CLAMPED limit, as SamplingParams
+// does after get_max_tokens, answering
 // 400 and returning false on a bad request. Both generation endpoints share
 // it, after windowFits. The limit it returns is the resolved one whenever it
 // resolved, a min_tokens refusal included, so the record of a refused request
@@ -295,8 +296,14 @@ func (h *handler) limitFor(w http.ResponseWriter, sp sampling, promptLen int, ma
 		writeError(w, http.StatusBadRequest, "BadRequestError", err.Error())
 		return 0, false
 	}
-	if sp.MinTokens < 0 || sp.MinTokens > max {
-		// SamplingParams._verify_args, vllm/sampling_params.py:694-701.
+	// SamplingParams._verify_args checks, in this order, max_tokens under 1
+	// (maxTokensOf, :688-693), a negative min_tokens (:694-697) and min_tokens
+	// over the clamped max_tokens (:698-702), each with its own message.
+	if sp.MinTokens < 0 {
+		writeError(w, http.StatusBadRequest, "BadRequestError", fmt.Sprintf("min_tokens must be greater than or equal to 0, got %d.", sp.MinTokens))
+		return max, false
+	}
+	if sp.MinTokens > max {
 		writeError(w, http.StatusBadRequest, "BadRequestError", fmt.Sprintf("min_tokens must be less than or equal to max_tokens=%d, got %d.", max, sp.MinTokens))
 		return max, false
 	}
