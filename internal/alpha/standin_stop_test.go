@@ -233,7 +233,8 @@ func TestAStandInWhoseStackDidNotStopFails(t *testing.T) {
 		want        []string // what the verdict's error says; none for the control
 	}{
 		{"down fails", "", "", "echo went wrong; exit 3", 0, false, []string{"the stack's own shutdown failed: hpcburst down: exit status 3\nwent wrong"}},
-		// The controller never ends, so one look is all it takes (the port read's time), and there is no window to race.
+		// The double's down returns once what it stopped has ended, and the controller never ends: so one look is all it takes (the port
+		// read's time), and there is no window to race.
 		{"down leaves a process", "", "controller", "exit 0", stack.LeftPortRead, false, []string{"left after hpcburst down: controller=", " still runs"}},
 		{"status omits the controller, which down leaves running", "controller", "controller", "exit 0", 0, false, []string{"hpcburst status before down reported no running controller"}},
 		{"no time left for the look", "", "controller", "exit 0", 0, true, []string{"what is left after hpcburst down was not checked: no time left"}},
@@ -257,7 +258,20 @@ func TestAStandInWhoseStackDidNotStopFails(t *testing.T) {
 				t.Fatal(err)
 			}
 			bin := filepath.Join(dir, "hpcburst")
-			script := "#!/bin/sh\ncase \"$1\" in\nstatus) cat \"$HB_TEST_STATUS\" ;;\ndown) kill $HB_TEST_KILL; " + c.exit + " ;;\n*) exit 2 ;;\nesac\n"
+			// As hpcburst down does, the double's down returns only once each process it stopped has ended: a zombie (this test reaps it)
+			// or gone. It is bounded by down's own bound (stack.DownTimeout).
+			script := `#!/bin/sh
+case "$1" in
+status) cat "$HB_TEST_STATUS" ;;
+down)
+	kill $HB_TEST_KILL
+	for p in $HB_TEST_KILL; do
+		while st=$(cut -d' ' -f3 "/proc/$p/stat" 2>/dev/null) && [ "$st" != Z ]; do sleep 0.05; done
+	done
+	` + c.exit + ` ;;
+*) exit 2 ;;
+esac
+`
 			if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 				t.Fatal(err)
 			}
