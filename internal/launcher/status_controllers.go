@@ -26,6 +26,12 @@ type EntryHealth struct {
 	LastExit  *ExitRecord `json:"last_exit,omitempty"`
 	Health    string      `json:"health_addr"`
 	HealthzOK *bool       `json:"healthz_ok,omitempty"` // nil: not asked
+	// HealthSocket, PingOK and KeeperEpoch are the relay keeper's health (relaykeeper.go): its
+	// socket, whether a ping was answered with pong within 1 s, and the E it answered. PingOK is
+	// nil when not asked, which is every process but the keeper.
+	HealthSocket string `json:"health_socket,omitempty"`
+	PingOK       *bool  `json:"ping_ok,omitempty"`
+	KeeperEpoch  int64  `json:"keeper_epoch,omitempty"`
 	// ReadyzOK is whether the lifecycle controller is ready (HBEP-8, Observers), read from its
 	// /readyz checks by status code (readyz.go): false for any answer but 200, or none. nil: not
 	// asked, which is every process but the controller, and a controller whose /healthz did not
@@ -122,7 +128,7 @@ func checkSupervision(l layout, st *State, sup *procHandle, rep *StatusReport, b
 // a /proc read (the parent, the sockets) is confirmed against the handle before it is blamed on
 // the process, and a handle that is no longer the recorded process is reported as not running.
 func checkEntry(sup *procHandle, supPID int, e EntryRecord) (EntryHealth, []string) {
-	eh := EntryHealth{Name: e.Name, State: e.State, Restarts: e.Restarts, LastExit: e.LastExit, Health: e.Health}
+	eh := EntryHealth{Name: e.Name, State: e.State, Restarts: e.Restarts, LastExit: e.LastExit, Health: e.Health, HealthSocket: e.HealthSocket}
 	var problems []string
 	add := func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) }
 	if e.Proc == nil {
@@ -162,6 +168,13 @@ func checkEntry(sup *procHandle, supPID int, e EntryRecord) (EntryHealth, []stri
 		return eh, problems
 	}
 	eh.Running = true
+	if e.HealthSocket != "" {
+		// The relay keeper: no port, and a ping answered on its socket (relaykeeper.go). A
+		// process that exited since is not running, as at every other look.
+		checkKeeperHealth(h, e, &eh, add)
+		lost()
+		return eh, problems
+	}
 	if _, err := parsePort(e.Health); err != nil {
 		add("health address %q: %v", e.Health, err)
 		return eh, problems

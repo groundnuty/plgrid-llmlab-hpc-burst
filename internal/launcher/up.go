@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	"io"
 	"os"
 	"time"
@@ -37,6 +38,11 @@ type UpOptions struct {
 	// and a missing default starts no frps, with a warning. frps runs under the controllers'
 	// supervisor, so a given FrpsBin needs a controller binary too.
 	FrpsBin string
+	// RelayKeeper is up --relay-keeper (beta): the supervisor runs the relay keeper, and the
+	// controller hands it its host-dialed relays. Valid only with Front.Mode host-dialed and a
+	// controller binary. Without it, up refuses while the keeper's state file shows it ran and
+	// Allocations are running (relaykeeper.go).
+	RelayKeeper bool
 
 	// supervisorArgv, set by tests only, replaces the supervisor's command line.
 	supervisorArgv []string
@@ -69,6 +75,8 @@ type UpReport struct {
 	FrontHealth string `json:"front_health,omitempty"`
 	// FrpsPorts are frps's bind, tcpmux and web ports when frps runs.
 	FrpsPorts []int `json:"frps_ports,omitempty"`
+	// RelayKeeperSocket is the relay keeper's socket when up ran it (--relay-keeper).
+	RelayKeeperSocket string `json:"relay_keeper_socket,omitempty"`
 	// AgentBuilds is the check of the builds the PlatformProfiles' partitions need (#158), made
 	// once the controllers run. When it finds a problem, Up returns this report together with an
 	// *AgentBuildsError, and the host keeps running.
@@ -189,6 +197,12 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 	frontRun, err := resolveFrontRun(o.FrontConfig, o.FrontBin)
 	if err != nil {
 		return nil, err
+	}
+	if o.RelayKeeper && front.Mode != string(agentapi.DialHomeHostDialed) {
+		return nil, errRelayKeeperMode
+	}
+	if o.RelayKeeper && ctrlBin == "" {
+		return nil, errors.New("the relay keeper was asked for (--relay-keeper), but no controller binary was found: the keeper is the controller binary's relaykeeper subcommand")
 	}
 	if frontRun != nil && ctrlBin == "" {
 		return nil, errors.New("a front was asked for (--front-config), but no controller binary was found: the front runs under the controllers' supervisor")
@@ -311,6 +325,13 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 		return abort("CRD deletion guard", err)
 	}
 	rep.CRDGuard = true
+	// The relay keeper's switch back, with k3s ready and before the controllers start (HBEP-6,
+	// Compatibility and upgrades).
+	if cfg, err := restConfig(l.kubeconfig(), ports, 30*time.Second); err != nil {
+		return abort("relay keeper", err)
+	} else if err := checkKeeperSwitchBack(ctx, cfg, l, o.RelayKeeper); err != nil {
+		return abort("relay keeper", err)
+	}
 	if ctrlBin == "" {
 		rep.Warnings = append(rep.Warnings, noControllerWarning)
 		logf(o.Log, "%s", noControllerWarning)
@@ -330,7 +351,7 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 			}
 		}
 		st.Controllers = &ControllerConfig{Binary: ctrlBin}
-		st.FrontRun, st.Frps = frontRun, frpsRun
+		st.FrontRun, st.Frps, st.RelayKeeper = frontRun, frpsRun, o.RelayKeeper
 		if frpsRun != nil {
 			// frps's web password and configuration, both mode 600 (HBEP-6), before the supervisor
 			// that starts frps; a password that exists is kept, so the controller's copy stays valid.
@@ -351,6 +372,9 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 		if frpsRun != nil {
 			h := l.host(ports)
 			rep.FrpsPorts = []int{h.FrpsBindPort(), h.FrpsTCPMuxPort(), h.FrpsWebPort()}
+		}
+		if o.RelayKeeper {
+			rep.RelayKeeperSocket = l.host(ports).RelayKeeperSocket()
 		}
 	}
 	if !front.Set() {

@@ -124,6 +124,12 @@ type supervised struct {
 	Ports []int
 	// Env, when set, is the process's whole environment instead of the supervisor's (childEnv).
 	Env []string
+	// HealthSocket, when set, is the Unix socket the process answers a ping on, in place of a
+	// host:port /healthz: the relay keeper's (relaykeeper.go). Health is then empty.
+	HealthSocket string
+	// Setsid starts the process in a session of its own: the relay keeper, so no signal to the
+	// supervisor's process group reaches it or the relays it starts.
+	Setsid bool
 	// Open, when set, is called before each start. Its files are passed to the process from
 	// descriptor 3 on (exec.Cmd.ExtraFiles) and closed after the start: frps's verified binary, a
 	// sealed copy, which Path names as /proc/self/fd/3, so the bytes run are the bytes checked
@@ -162,6 +168,12 @@ func (s *State) supervisedSet(l layout) ([]supervised, error) {
 	}
 	if frps := s.frpsEntry(l); frps != nil {
 		set = append(set, *frps)
+	}
+	if keeper := s.keeperEntry(l); keeper != nil {
+		// The controller hands its host-dialed relays to the keeper (HBEP-6, The relay keeper); with
+		// no keeper, its command line is as before, byte for byte.
+		set[0].Args = append(set[0].Args, "--relay-keeper-socket", keeper.HealthSocket)
+		set = append(set, *keeper)
 	}
 	return set, nil
 }
@@ -213,6 +225,9 @@ type EntryRecord struct {
 	// Ports are exactly the ports the process must listen on (supervised.Ports); none means only
 	// the health port is checked.
 	Ports []int `json:"ports,omitempty"`
+	// HealthSocket is the Unix socket of a process whose health is a ping (supervised.HealthSocket):
+	// the relay keeper. Such a process must listen on no port.
+	HealthSocket string `json:"health_socket,omitempty"`
 }
 
 // ExitRecord is how the previous child ended.
@@ -355,7 +370,7 @@ func Supervise(ctx context.Context, o SuperviseOptions) error {
 	}
 	rep := &reporter{l: l, log: o.Log, f: SupervisorFile{Schema: supervisorSchema, Supervisor: self}}
 	for _, sp := range specs {
-		rep.f.Entries = append(rep.f.Entries, EntryRecord{Name: sp.Name, Health: sp.Health, State: entryStarting, Ports: sp.Ports})
+		rep.f.Entries = append(rep.f.Entries, EntryRecord{Name: sp.Name, Health: sp.Health, State: entryStarting, Ports: sp.Ports, HealthSocket: sp.HealthSocket})
 	}
 	rep.mu.Lock()
 	rep.writeLocked()
@@ -414,7 +429,7 @@ func (r *runner) start() (*procHandle, *exec.Cmd, error) {
 		}()
 		cmd.ExtraFiles = files
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL, Setsid: r.spec.Setsid}
 	h, err := startProc(r.spec.Name, cmd)
 	return h, cmd, err
 }
