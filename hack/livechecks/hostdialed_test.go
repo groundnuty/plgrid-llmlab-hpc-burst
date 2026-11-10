@@ -134,7 +134,8 @@ func TestAReachHostDialedRunBuildsTheAgentAndGivesTheTestItsEnvironment(t *testi
 	for _, s := range hostDialedShapes {
 		t.Run(s.row, func(t *testing.T) {
 			w := hostDialedWorld(t)
-			res := w.run([]string{"HPCBURST_ALPHA_DRY=1", "HPCBURST_ALPHA_AGENT_BIN=/caller/agent", "HPCBURST_CONF_PROBE_HOST=caller-host", "HPCBURST_CONF_AGENT_BUILDS=/caller/builds"}, "--run", s.row, "--yes")
+			// The operator's wait in the queue is set: a row with a start wait takes no second clock and no pending override.
+			res := w.run([]string{"HPCBURST_ALPHA_DRY=1", "HPCBURST_ALPHA_AGENT_BIN=/caller/agent", "HPCBURST_CONF_PROBE_HOST=caller-host", "HPCBURST_CONF_AGENT_BUILDS=/caller/builds", "LIVE_PENDING_MAX_SECONDS=7200"}, "--run", s.row, "--yes")
 			if res.code != 0 {
 				t.Fatalf("exit %d:\n%s", res.code, res.out)
 			}
