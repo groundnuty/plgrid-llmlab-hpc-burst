@@ -196,7 +196,7 @@ func TestALateStartOfAReplacedGenerationKeepsTheReplacementsIssue(t *testing.T) 
 	k, fr := r.open()
 	e := entry(1)
 	accepted(t, k, set("example-a", 1, true, "login.example", e))
-	old := fr.authorize("example-a", e.Tag) // the old generation's control start, in flight
+	old := fr.authorize("example-a", e.Tag, agentapi.RelayControl) // the old generation's control start, in flight
 	if old == nil {
 		t.Fatal("the old generation's start was refused")
 	}

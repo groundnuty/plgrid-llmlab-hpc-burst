@@ -40,8 +40,9 @@ func (h *hookLog) list() []string {
 	return slices.Clone(h.calls)
 }
 
-// hooked sets the three hooks and OnStart on tg, recording each call; allow
-// answers BeforeStart. OnStart also records what own's Relays showed then.
+// hooked sets the three hooks, OnStart, OnFinal and OnFailed on tg,
+// recording each call; allow answers BeforeStart. OnStart also records what
+// own's Relays showed then.
 func hooked(tg hostdial.Target, own func() *hostdial.Owner, h *hookLog, allow func() bool) hostdial.Target {
 	tg.BeforeStart = func(ch agentapi.RelayChannel, epoch, seq int64) bool {
 		h.mu.Lock()
@@ -66,6 +67,10 @@ func hooked(tg hostdial.Target, own func() *hostdial.Owner, h *hookLog, allow fu
 	}
 	tg.OnStartFailed = func(ch agentapi.RelayChannel) { h.add("failed " + string(ch)) }
 	tg.OnExit = func(ch agentapi.RelayChannel) { h.add("exit " + string(ch)) }
+	tg.OnFinal = func(ch agentapi.RelayChannel, kind hostdial.EndKind, _ string) {
+		h.add("final " + string(ch) + " " + kind.String())
+	}
+	tg.OnFailed = func(ch agentapi.RelayChannel, _ string) { h.add("failed-end " + string(ch)) }
 	return tg
 }
 
@@ -81,8 +86,9 @@ func count(calls []string, want string) int {
 }
 
 // A BeforeStart that answers false starts no process: the relay never runs
-// its "ssh", and shows the refusal; OnStart, OnStartFailed and OnExit are
-// never told. The positive control answers true: the relay starts, and
+// its "ssh", counts no start, never becomes final, and OnStart,
+// OnStartFailed, OnExit, OnFinal and OnFailed are never told; it is simply
+// retried. The positive control answers true: the relay starts, and
 // OnStart is told after BeforeStart, with the relay up, its PID set and its
 // Seq the one BeforeStart was asked about, by then (the keeper's duty 2).
 func TestBeforeStartDecidesTheStart(t *testing.T) {
@@ -102,14 +108,20 @@ func TestBeforeStartDecidesTheStart(t *testing.T) {
 					c := h.list()
 					return count(c, "before control 1 false") >= 2 && count(c, "before serving 1 false") >= 2
 				})
+				for _, ch := range agentapi.RelayChannels {
+					// A refusal is no start: no process, no start counted
+					// toward the restart cap, and nothing final, so no end
+					// that could be marked. Read while the relay is kept.
+					r := relayOf(own, tg.Tag, ch)
+					if r.Tag != tg.Tag || r.PID != 0 || r.Starts != 0 || r.Final || r.LastRefusal == "" {
+						t.Errorf("the %s relay after refused starts: %+v, want it kept, refused, with no process, no start and not final", ch, r)
+					}
+				}
 				own.Drop(tg.Tag)
 				for _, c := range h.list() {
 					if c[:6] != "before" {
 						t.Errorf("a hook other than BeforeStart was told with every start refused: %q", c)
 					}
-				}
-				if r := relayOf(own, tg.Tag, control); r.PID != 0 {
-					t.Errorf("a refused start left a process: %+v", r)
 				}
 				if _, err := exec.Command("test", "-e", marker).Output(); err == nil {
 					t.Error("a refused start ran the relay's ssh")

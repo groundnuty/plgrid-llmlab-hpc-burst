@@ -102,7 +102,7 @@ type Keeper struct {
 	wishes   map[provKey]wish                                      // Provider → its latest unexpired set past the fence, accepted or not
 	wanted   map[string]map[string]wanted                          // Provider's name → tag → the Allocation kept
 	issued   map[string]map[string]map[agentapi.RelayChannel]issue // Provider's name → tag → channel → the (E, N) last issued
-	inflight map[holdKey]int                                       // starts authorized and not resolved yet (Want.Jobs)
+	inflight map[holdKey]bool                                      // starts the gate allowed and not resolved yet (Want.BeforeStart)
 	starts   map[string]map[string]int                             // Provider's name → UID/channel → ssh starts
 	restarts map[string]map[agentapi.RelayChannel]uint64
 	refused  map[string]map[string]uint64
@@ -136,9 +136,15 @@ type wanted struct {
 	host  string
 }
 
-// holdKey is the relay of one Allocation of one Provider (name and UID) on
-// one login host: its starts in flight hold that host (Want.Jobs).
-type holdKey struct{ name, uid, host, tag string }
+// holdKey is one channel's relay of one generation of one Allocation of one
+// Provider (name and UID) on one login host: its start in flight holds that
+// host (Want.BeforeStart). A channel's relay makes one attempt at a time, so
+// it has at most one start in flight; a replaced generation's and its
+// replacement's may be in flight together.
+type holdKey struct {
+	name, uid, host, tag, gen string
+	ch                        agentapi.RelayChannel
+}
 
 // issue is the (E, N) a relay of an Allocation's channel started with, and
 // the entry, so the generation, it was started for: the keeper's own record
@@ -173,7 +179,7 @@ func Open(o Options) (*Keeper, error) {
 	}
 	return &Keeper{o: o, runner: r, epoch: st.Epoch(), started: o.Now(), st: st, synced: true,
 		sets: map[string]*heldSet{}, wishes: map[provKey]wish{}, wanted: map[string]map[string]wanted{},
-		issued: map[string]map[string]map[agentapi.RelayChannel]issue{}, inflight: map[holdKey]int{}, starts: map[string]map[string]int{},
+		issued: map[string]map[string]map[agentapi.RelayChannel]issue{}, inflight: map[holdKey]bool{}, starts: map[string]map[string]int{},
 		restarts: map[string]map[agentapi.RelayChannel]uint64{}, refused: map[string]map[string]uint64{}}, nil
 }
 
@@ -535,7 +541,7 @@ func (k *Keeper) onStart(p, uid, host string, e wire.Entry) func(agentapi.RelayC
 	return func(ch agentapi.RelayChannel, epoch, seq int64) {
 		k.mu.Lock()
 		defer k.mu.Unlock()
-		k.release(holdKey{p, uid, host, e.Tag}, ch)
+		k.release(holdKey{p, uid, host, e.Tag, e.Gen, ch})
 		if w, ok := k.wanted[p][e.Tag]; ok && w.entry == e {
 			if k.issued[p] == nil {
 				k.issued[p] = map[string]map[agentapi.RelayChannel]issue{}
@@ -564,22 +570,20 @@ func (k *Keeper) startFailed(p, uid, host string, e wire.Entry) func(agentapi.Re
 	return func(ch agentapi.RelayChannel) {
 		k.mu.Lock()
 		defer k.mu.Unlock()
-		k.release(holdKey{p, uid, host, e.Tag}, ch)
+		k.release(holdKey{p, uid, host, e.Tag, e.Gen, ch})
 	}
 }
 
-// release ends one start in flight of key's relay. One with none in flight
-// is logged and changes nothing: the Runner resolved a start twice, or one
-// it never had authorized. The caller holds the lock.
-func (k *Keeper) release(key holdKey, ch agentapi.RelayChannel) {
-	if k.inflight[key] == 0 {
-		k.o.Logger.Warn("a start was resolved with none in flight", "provider", key.name, "tag", key.tag, "channel", ch)
+// release ends the start in flight of key's channel. One with none in
+// flight is logged and changes nothing: the Runner resolved a start twice,
+// or one the gate never allowed; it cannot touch another channel's hold. The
+// caller holds the lock.
+func (k *Keeper) release(key holdKey) {
+	if !k.inflight[key] {
+		k.o.Logger.Warn("a start was resolved with none in flight", "provider", key.name, "tag", key.tag, "channel", key.ch)
 		return
 	}
-	k.inflight[key]--
-	if k.inflight[key] == 0 {
-		delete(k.inflight, key)
-	}
+	delete(k.inflight, key)
 }
 
 func (k *Keeper) handleAck(a wire.Ack) (wire.Kind, any) {
@@ -670,9 +674,7 @@ func (j jobs) ListByTag(_ context.Context, tag string) ([]provider.Job, error) {
 	if err != nil || !ok {
 		return nil, err
 	}
-	// One start authorized: its host is held until it resolves
-	// (Want.OnStart, Want.StartFailed).
-	k.inflight[holdKey{j.provider, j.uid, j.host, tag}]++
+	// No hold here: the gate takes it (Keeper.beforeStart).
 	return []provider.Job{{ID: j.entry.JobID, Name: tag, Phase: v1alpha1.AllocationRunning}}, nil
 }
 
@@ -706,22 +708,68 @@ func (j jobs) authorized(tag string) (bool, error) {
 	return false, nil
 }
 
-// beforeStart is the Want's gate (Want.BeforeStart), asked right before each
-// ssh start: under the lock, the start goes ahead only while the listing's
-// conditions still hold, so a replacement, a move, a Drop or an end the
-// keeper took since the listing keeps the start from launching (the
-// Runner's duty 3). A refused start resolves the listing's authorization.
+// beforeStart is the Want's gate (Want.BeforeStart, hostdial's
+// Target.BeforeStart), asked right before each ssh start, after the relay's
+// N was taken. In ONE critical section under the lock it re-checks the
+// listing's conditions (an unexpired set of the Provider, under its UID,
+// naming the Want's host and showing the job running under its tag; the Want
+// current; no final end held for the Allocation, on disk or pending; the
+// login-host claim the Provider's) and HBEP-4's 4 relays per login host, and
+// only then takes the start's hold on its host, per channel (the science
+// agent's ruling B for PR 3: "checking authorization at launch time is
+// better than holding from the listing"). So a replacement, a move, a Drop or
+// an end the keeper took since the listing keeps the start from launching
+// (the Runner's duty 3): an attempt that passes the gate before its
+// replacement is accepted carries a lower N than any of the replacement's,
+// so the replacement supersedes it, and its end is the keeper's own
+// replacement's. A refused start is no start: no process, nothing to
+// resolve; hostdial retries it after the backoff.
 func (k *Keeper) beforeStart(p, uid, host string, e wire.Entry) func(agentapi.RelayChannel, int64, int64) bool {
 	j := jobs{k: k, provider: p, uid: uid, host: host, entry: e}
 	return func(ch agentapi.RelayChannel, _, _ int64) bool {
 		k.mu.Lock()
 		defer k.mu.Unlock()
-		if ok, _ := j.authorized(e.Tag); ok {
-			return true
+		if ok, _ := j.authorized(e.Tag); !ok {
+			return false
 		}
-		k.release(holdKey{p, uid, host, e.Tag}, ch)
-		return false
+		key := holdKey{p, uid, host, e.Tag, e.Gen, ch}
+		if k.inflight[key] {
+			k.o.Logger.Warn("a start was allowed with one already in flight on its channel: refused", "provider", p, "tag", e.Tag, "channel", ch)
+			return false
+		}
+		if n := k.hostLoad(host); n >= hostdial.DefaultRelaysPerLogin {
+			k.o.Logger.Info("a start would pass the login host's relays: refused, and retried", "provider", p, "tag", e.Tag, "channel", ch, "relays", n)
+			return false
+		}
+		k.inflight[key] = true
+		return true
 	}
+}
+
+// hostLoad is how many relays run on host or are starting there: every
+// Provider's relays up there (Runner.Relays), and every start in flight
+// there. The caller holds the lock.
+func (k *Keeper) hostLoad(host string) int {
+	n := 0
+	for key := range k.inflight {
+		if key.host == host {
+			n++
+		}
+	}
+	names := map[string]bool{}
+	for _, m := range []map[string]bool{keysOf(k.sets), keysOf(k.wanted)} {
+		for p := range m {
+			names[p] = true
+		}
+	}
+	for p := range names {
+		for _, r := range k.runner.Relays(p) {
+			if r.State == wire.StateUp && r.LoginHost == host {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 func keysOf[V any](m map[string]V) map[string]bool {

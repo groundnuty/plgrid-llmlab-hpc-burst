@@ -134,7 +134,6 @@ func TestAWantsJobsRefuseEachUnheldGuard(t *testing.T) {
 			if jobs, _ := w.Jobs.ListByTag(context.Background(), entry(1).Tag); len(jobs) != 1 {
 				t.Fatalf("the unperturbed Want's listing: %+v, want its job", jobs)
 			}
-			w.StartFailed(agentapi.RelayControl) // the authorization, resolved
 			k.mu.Lock()
 			perturb(k)
 			k.mu.Unlock()
@@ -200,10 +199,10 @@ func TestPingAndStatusSurfaceAStateFileThatDoesNotSync(t *testing.T) {
 	}
 }
 
-// An authorized start holds its host until it resolves (the last delta
-// review of PR 354), in Astra's interleaving: A's relay on login-1 retries
-// with no process, and its next start is authorized; before the process
-// starts, A's move to login-2 is accepted, and C asks for login-1. C is
+// A start the gate allowed holds its host until it resolves (the last
+// delta review of PR 354, with the hold at the gate since PR 3), in Astra's
+// interleaving: A's relay on login-1 retries with no process, and its next
+// start passes the gate; before the process starts, A's move to login-2 is accepted, and C asks for login-1. C is
 // refused while A's start is in flight. When the start fails, the host is
 // released, and C claims it. When it succeeds instead, A's process runs on
 // login-1, so C is still refused until that process is gone.
@@ -220,7 +219,7 @@ func TestAnAuthorizedStartHoldsItsHostUntilItResolves(t *testing.T) {
 			accepted(t, k, set("example-a", 1, true, "login-1.example", e))
 			fr.mustStart(t, "example-a", e.Tag)
 			fr.stop("example-a", e.Tag) // it retries, with no process
-			in := fr.authorize("example-a", e.Tag)
+			in := fr.authorize("example-a", e.Tag, agentapi.RelayControl)
 			if in == nil {
 				t.Fatal("the retry on login-1 was refused its start")
 			}
@@ -243,28 +242,29 @@ func TestAnAuthorizedStartHoldsItsHostUntilItResolves(t *testing.T) {
 	}
 }
 
-// The holds count: with both channels' starts in flight, one resolved still
-// holds the host, and the host is free once both are. A resolution with
-// none in flight (a start resolved twice, or one never authorized) changes
-// nothing; a count cannot tell which start a second resolution meant, which
-// is why the Runner resolves each exactly once (Want.Jobs).
-func TestTheHoldsCountEachStartInFlight(t *testing.T) {
+// The holds are per channel: with both channels' starts in flight, one
+// resolved still holds the host, and the host is free once both are. A
+// second resolution of the control channel's start, while the serving
+// channel's is in flight, changes nothing: it cannot take serving's hold, so
+// the host stays held until serving resolves (the Runner's duty 2; under
+// PR 2's count per relay it freed the host early).
+func TestTheHoldsArePerChannel(t *testing.T) {
 	r := newRig(t)
 	k, fr := r.open()
 	e := entry(1)
 	accepted(t, k, set("example-a", 1, true, "login-1.example", e))
-	control := fr.authorize("example-a", e.Tag)
-	serving := fr.authorize("example-a", e.Tag)
+	control := fr.authorize("example-a", e.Tag, agentapi.RelayControl)
+	serving := fr.authorize("example-a", e.Tag, agentapi.RelayServing)
 	if control == nil || serving == nil {
 		t.Fatal("a start was refused")
 	}
 	accepted(t, k, set("example-a", 1, true, "login-2.example", e))
 	fr.launchFails(control, agentapi.RelayControl)
+	fr.launchFails(control, agentapi.RelayControl) // a duplicate: serving's hold stays
 	if got := refused(t, k, wire.KindSet, set("example-c", 1, true, "login-1.example", entry(3))); got.Holder != "example-a" {
-		t.Errorf("C while A's serving start is in flight: %+v, want refused naming example-a", got)
+		t.Errorf("C while A's serving start is in flight, after a duplicate control resolution: %+v, want refused naming example-a", got)
 	}
 	fr.launchFails(serving, agentapi.RelayServing)
-	fr.launchFails(serving, agentapi.RelayServing) // none in flight: no effect
 	accepted(t, k, set("example-c", 1, true, "login-1.example", entry(3)))
 }
 
@@ -279,7 +279,7 @@ func TestAStartInFlightHoldsOnlyItsOwnHost(t *testing.T) {
 	fr.stop("example-a", e.Tag)
 	fr.land("example-a", e.Tag)
 	accepted(t, k, set("example-a", 1, true, "login-2.example", e))
-	in := fr.authorize("example-a", e.Tag)
+	in := fr.authorize("example-a", e.Tag, agentapi.RelayControl)
 	if in == nil {
 		t.Fatal("the start on login-2 was refused")
 	}
@@ -321,7 +321,7 @@ func TestAnUnresolvedStartHoldsItsHostPastEveryLapse(t *testing.T) {
 			k, fr := r.open()
 			e := entry(1)
 			accepted(t, k, set("example-a", 1, true, "login-1.example", e))
-			in := fr.authorize("example-a", e.Tag)
+			in := fr.authorize("example-a", e.Tag, agentapi.RelayControl)
 			if in == nil {
 				t.Fatal("the start on login-1 was refused")
 			}
