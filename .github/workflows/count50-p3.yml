@@ -180,6 +180,14 @@ jobs:
             from: 'in != nil && in.want.Entry == e && in.host == host'
             to: 'in != nil && false && in.want.Entry == e && in.host == host'
             tests: TestAHandOverAfterAKilledLeaderCutsNoStream
+          # The same mutant, named by the Runner's own test, in the other
+          # package: each package's test binary is built and run apart.
+          - id: adopt-replaces-runner
+            pkg: internal/relaykeeper
+            file: internal/relaykeeper/ownerrunner.go
+            from: 'in != nil && in.want.Entry == e && in.host == host'
+            to: 'in != nil && false && in.want.Entry == e && in.host == host'
+            tests: TestAWantOfTheSameIdentityKeepsEachRelayListedOnce
           - id: no-pdeathsig
             file: internal/hostdial/pidfd.go
             from: 'Pdeathsig: syscall.SIGKILL, PidFD: fd'
@@ -271,16 +279,17 @@ jobs:
           echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
 
       - name: Baseline, then the mutant, under the same flags
-        working-directory: internal/relaykeeper/keeperproc
+        working-directory: ${{ matrix.pkg || 'internal/relaykeeper/keeperproc' }}
         env:
           MUT_FILE: ${{ matrix.file }}
           MUT_FROM: ${{ matrix.from }}
           MUT_TO: ${{ matrix.to }}
           MUT_TESTS: ${{ matrix.tests }}
+          MUT_PKG: ${{ matrix.pkg || 'internal/relaykeeper/keeperproc' }}
         run: |
           root=$(git rev-parse --show-toplevel)
           run="^($(echo "$MUT_TESTS" | tr ' ' '|'))\$"
-          build() { (cd "$root" && go test -c -o "$RUNNER_TEMP/kp.test" ./internal/relaykeeper/keeperproc/); }
+          build() { (cd "$root" && go test -c -o "$RUNNER_TEMP/kp.test" "./$MUT_PKG/"); }
           runit() { rc=0; "$RUNNER_TEMP/kp.test" -test.run "$run" -test.count 1 -test.v -test.timeout 30m > "$1" 2>&1 || rc=$?; echo "$rc"; }
           build
           base=$(runit "$RUNNER_TEMP/base.log")
