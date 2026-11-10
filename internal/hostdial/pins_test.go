@@ -59,30 +59,53 @@ func pin(t *testing.T, pid int, parents ...int) (*pinned, error) {
 }
 
 func (p *pinned) check(parents []int) error {
-	chain := append([]int{p.pid}, parents...)
-	self := os.Getpid()
-	for i, q := range chain {
-		want := self
-		if i+1 < len(chain) {
-			want = chain[i+1]
-		}
-		ppid, ticks, err := statOf(q)
-		if err != nil {
-			return err
-		}
-		if ppid != want {
-			return fmt.Errorf("process %d's parent is %d, not %d", q, ppid, want)
-		}
-		_, wantTicks, err := statOf(want)
-		if err != nil {
-			return err
-		}
-		if wantTicks > ticks {
-			return fmt.Errorf("process %d started before its parent %d: a reused PID", q, want)
-		}
+	return checkChain(readProcRow, os.Getpid(), p.pid, parents, p.exited)
+}
+
+// procRow is one read of a process's /proc row: its parent and its start
+// time, in clock ticks since boot.
+type procRow struct {
+	pid, ppid int
+	ticks     uint64
+}
+
+// readProcRow reads one process's row (statOf); a test replaces it with a
+// script of rows.
+var readProcRow = func(pid int) (procRow, error) {
+	ppid, ticks, err := statOf(pid)
+	return procRow{pid: pid, ppid: ppid, ticks: ticks}, err
+}
+
+// checkChain walks up from pid to self along parents, as internal/rehearsal's
+// walk does (signal.go, PR #309): each hop's row is read ONCE, and that same
+// row gives both the hop's start time, which must be no earlier than its
+// parent's, and its own parent, which must be the next hop. So no check
+// mixes two processes' rows under one PID: a parent whose PID was reused
+// between reads cannot lend its successor's parentage to its own start time
+// (Astra's delta of #349). Last, exited, the pidfd's view, must show the
+// pinned process alive, so its own row was its own.
+func checkChain(read func(int) (procRow, error), self, pid int, parents []int, exited func() bool) error {
+	chain := append(append([]int{pid}, parents...), self)
+	child, err := read(pid)
+	if err != nil {
+		return err
 	}
-	if p.exited() {
-		return fmt.Errorf("process %d exited during the check", p.pid)
+	for i := 1; i < len(chain); i++ {
+		want := chain[i]
+		if child.ppid != want {
+			return fmt.Errorf("process %d's parent is %d, not %d", child.pid, child.ppid, want)
+		}
+		parent, err := read(want)
+		if err != nil {
+			return err
+		}
+		if parent.ticks > child.ticks {
+			return fmt.Errorf("process %d started before its parent %d: a reused PID", child.pid, want)
+		}
+		child = parent
+	}
+	if exited() {
+		return fmt.Errorf("process %d exited during the check", pid)
 	}
 	return nil
 }
@@ -203,6 +226,59 @@ func TestAPinThatFailsItsCheckSignalsNothing(t *testing.T) {
 				t.Errorf("the process behind an unverified pin ended %v, want exit 0: no signal", cmd.ProcessState)
 			case !wrong && !(ws.Signaled() && ws.Signal() == syscall.SIGTERM):
 				t.Errorf("the process behind a verified pin ended %v, want its TERM", cmd.ProcessState)
+			}
+		})
+	}
+}
+
+// The pin's check reads each hop's row once, and carries it to the next hop
+// (Astra's delta of #349). The rows are scripted: in the first case the
+// relay's PID is reused between two reads, so its first row, the parent the
+// pinned process started under, names a parent that is not the chain's, and
+// a second read would show its successor, a child of this test process. A
+// check that read the relay again for its parentage would take the
+// successor's row with the first row's start time and pass, signalling an
+// unrelated process. This check refuses, and reads every row once. The other
+// cases: a parent that started after its child is refused, and consistent
+// rows, the positive control, pass.
+func TestAPinsCheckReadsEachHopOnce(t *testing.T) {
+	const self, relay, child = 100, 200, 300
+	for _, c := range []struct {
+		name  string
+		relay []procRow // the relay's rows, one per read; a further read sees the last
+		ok    bool
+	}{
+		{"the relay's PID reused between reads", []procRow{{pid: relay, ppid: 999, ticks: 20}, {pid: relay, ppid: self, ticks: 20}}, false},
+		{"a parent that started after its child", []procRow{{pid: relay, ppid: self, ticks: 31}}, false},
+		{"consistent rows", []procRow{{pid: relay, ppid: self, ticks: 20}}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rows := map[int][]procRow{
+				child: {{pid: child, ppid: relay, ticks: 30}},
+				relay: c.relay,
+				self:  {{pid: self, ppid: 1, ticks: 10}},
+			}
+			reads := map[int]int{}
+			read := func(pid int) (procRow, error) {
+				r, ok := rows[pid]
+				if !ok {
+					return procRow{}, fmt.Errorf("no process %d", pid)
+				}
+				n := min(reads[pid], len(r)-1)
+				reads[pid]++
+				return r[n], nil
+			}
+			err := checkChain(read, self, child, []int{relay}, func() bool { return false })
+			if c.ok && err != nil {
+				t.Errorf("the check refused consistent rows: %v", err)
+			}
+			if !c.ok && err == nil {
+				t.Error("the check passed: the pin would be signalled")
+			}
+			for pid, n := range reads {
+				if n > 1 {
+					t.Errorf("process %d's row was read %d times, want once: two reads can be two processes", pid, n)
+				}
 			}
 		})
 	}
