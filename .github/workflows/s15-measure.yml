@@ -1,6 +1,7 @@
 # One-off, never merged: spike S15's measurements (issue #336, HBEP-6 open question 12) on GitHub-hosted
 # runners: one bulk transfer beside 8 token streams in one Instance's tunnel, in layouts (a), (b) at three
-# caps and (c), in direct and host-dialed mode. Each repetition is its own job on a fresh runner; each
+# caps and (c), in direct and host-dialed mode, and (d), a relay of its own for the bulk frpc, in host-dialed
+# mode only. Each repetition is its own job on a fresh runner; each
 # records the runner's CPU model and count with its results and uploads its runs.csv, samples, host
 # counters and raw files as an artifact. The jobs use no secret and write nothing to the repository.
 name: s15-measure
@@ -39,7 +40,8 @@ jobs:
 
       - name: The runner
         run: |
-          git rev-parse HEAD^ | sed 's/^/spike head /'
+          # This branch merges the spike head into the one-off workflow's commit: the merge's parents.
+          git log -1 --format='%P' | sed 's/^/parents /'
           python3 spikes/s15/s15.py host
           nproc
           lscpu | grep -E '^(Model name|CPU\(s\)|Thread|Core|Socket)'
