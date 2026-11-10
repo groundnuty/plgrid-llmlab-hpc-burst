@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -137,10 +138,11 @@ type relayInstance struct {
 	ident string
 
 	mu      sync.Mutex
-	pending map[agentapi.RelayChannel]bool     // a start allowed, not resolved
-	up      map[agentapi.RelayChannel]bool     // a process runs
-	pid     map[agentapi.RelayChannel]int      // the running process's PID
-	fence   map[agentapi.RelayChannel][2]int64 // the last start's (E, N)
+	pending map[agentapi.RelayChannel]bool      // a start at or past the gate, not resolved
+	up      map[agentapi.RelayChannel]bool      // a process runs
+	pid     map[agentapi.RelayChannel]int       // the running process's PID
+	fence   map[agentapi.RelayChannel][2]int64  // the last start's (E, N)
+	cmd     map[agentapi.RelayChannel]*exec.Cmd // the last ssh command made, whose process the start launches
 }
 
 func (in *relayInstance) busy() bool {
@@ -349,7 +351,7 @@ func (p *provRunner) want(s wire.SSH, w Want) {
 	}
 	in := &relayInstance{want: w, host: host, ident: ident,
 		pending: map[agentapi.RelayChannel]bool{}, up: map[agentapi.RelayChannel]bool{},
-		pid: map[agentapi.RelayChannel]int{}, fence: map[agentapi.RelayChannel][2]int64{}}
+		pid: map[agentapi.RelayChannel]int{}, fence: map[agentapi.RelayChannel][2]int64{}, cmd: map[agentapi.RelayChannel]*exec.Cmd{}}
 	if old := p.cur[e.Tag]; old != nil {
 		p.stopping = append(p.stopping, old)
 	}
@@ -357,20 +359,45 @@ func (p *provRunner) want(s wire.SSH, w Want) {
 	p.mu.Unlock()
 	p.own.Want(hostdial.Target{
 		Tag: e.Tag, JobID: e.JobID, AgentPath: e.AgentPath, AllocDir: e.AllocDir, UID: e.UID, Login: host,
-		Jobs: w.Jobs, Command: rl.Command, Stderr: sshrun.Stderr, Describe: sshrun.Classify, Gen: ident,
+		Jobs: w.Jobs, Stderr: sshrun.Stderr, Describe: sshrun.Classify, Gen: ident,
 		Final: w.Finals(),
+		// The command is kept per channel, so the started process's PID is
+		// known at OnStart even for a replaced instance, which hostdial no
+		// longer lists.
+		Command: func(line string) (*exec.Cmd, error) {
+			cmd, err := rl.Command(line)
+			if ch, ok := relayChannelOf(line); ok && err == nil {
+				in.mu.Lock()
+				in.cmd[ch] = cmd
+				in.mu.Unlock()
+			}
+			return cmd, err
+		},
+		// The start is marked pending BEFORE the keeper's gate is asked, and
+		// cleared on its refusal, so the instance is never reaped while a
+		// start of it is at or past the gate (duty 4).
 		BeforeStart: func(ch agentapi.RelayChannel, epoch, seq int64) bool {
+			in.mu.Lock()
+			in.pending[ch] = true
+			in.mu.Unlock()
 			if w.BeforeStart != nil && !w.BeforeStart(ch, epoch, seq) {
+				in.mu.Lock()
+				in.pending[ch] = false
+				in.mu.Unlock()
+				p.reap()
 				return false
 			}
 			in.mu.Lock()
-			in.pending[ch], in.fence[ch] = true, [2]int64{epoch, seq}
+			in.fence[ch] = [2]int64{epoch, seq}
 			in.mu.Unlock()
 			return true
 		},
 		OnStart: func(ch agentapi.RelayChannel) {
-			pid := p.pidOf(e.Tag, ident, ch)
 			in.mu.Lock()
+			pid := 0
+			if c := in.cmd[ch]; c != nil && c.Process != nil {
+				pid = c.Process.Pid
+			}
 			in.pending[ch], in.up[ch], in.pid[ch] = false, true, pid
 			f := in.fence[ch]
 			in.mu.Unlock()
@@ -398,15 +425,20 @@ func (p *provRunner) want(s wire.SSH, w Want) {
 	})
 }
 
-// pidOf is the running process's PID of the tag's relay on ch, as the Owner
-// shows it once the process started (it sets the PID before OnStart).
-func (p *provRunner) pidOf(tag, ident string, ch agentapi.RelayChannel) int {
-	for _, r := range p.own.Relays() {
-		if r.Tag == tag && r.Gen == ident && r.Channel == ch {
-			return r.PID
+// relayChannelOf is the channel a relay line starts ("... relay <channel>
+// ...", agentapi.RelayLine).
+func relayChannelOf(line string) (agentapi.RelayChannel, bool) {
+	f := strings.Fields(line)
+	for i := 0; i+1 < len(f); i++ {
+		if f[i] == agentapi.RelaySubcommand {
+			for _, ch := range agentapi.RelayChannels {
+				if f[i+1] == string(ch) {
+					return ch, true
+				}
+			}
 		}
 	}
-	return 0
+	return "", false
 }
 
 // drop is a Drop on the worker: the instance is kept as stopping, and the
