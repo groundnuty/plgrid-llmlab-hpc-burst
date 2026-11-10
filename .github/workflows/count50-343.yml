@@ -55,8 +55,8 @@ jobs:
           go test -c -o "$RUNNER_TEMP/hostdial.test" ./internal/hostdial
           go test -c -o "$RUNNER_TEMP/sshrun.test" ./internal/slurm/sshrun
           for i in 1 2; do timeout 50m nice -n 19 sh -c 'while :; do :; done' & done
-          new_hd='^(TestAPidfdStopSignalsNoProcessWhoseStartTimeDiffers|TestAPidfdOwnerRefusesAKernelWithNoPidfd|TestAlphasRelayLeadsItsOwnGroupAndItsStopSignalsIt|TestAPidfdRelayLeadsNoGroupAndItsStopReachesOnlyIt|TestOnFailedIsToldOnlyOfAFailedEnd|TestOnFinalIsToldOfEveryFinalEndAndOnFailedStaysAsItWas|TestAPidfdOwnersRelaysCarryBytesAndStopThroughTheirPidfds|TestASeededFinalChannelIsNeverStarted|TestANewGenRestartsTheLiveChannelAndKeepsASeededFinalOneDown|TestOnStartIsToldOfEveryStart|TestOnFinalIsToldOfASupersededEndOverTheRealPath)$'
-          new_ssh='^(TestTheRelaysDerivedConfigFileNameHasARandomPart|TestAStableConfigFileIsTheGivenName|TestAStableConfigFileOutsideItsDirectoryIsRefused)$'
+          new_hd='^(TestAPidfdStopSignalsNoProcessWhoseStartTimeDiffers|TestAPidfdOwnerRefusesAKernelWithNoPidfd|TestAlphasRelayLeadsItsOwnGroupAndItsStopSignalsIt|TestAPidfdRelayLeadsNoGroupAndItsStopReachesOnlyIt|TestOnFailedIsToldOnlyOfAFailedEnd|TestOnFinalIsToldOfEveryFinalEndAndOnFailedStaysAsItWas|TestAPidfdOwnersRelaysCarryBytesAndStopThroughTheirPidfds|TestASeededFinalChannelIsNeverStarted|TestANewGenRestartsTheLiveChannelAndKeepsASeededFinalOneDown|TestOnStartIsToldOfEveryStart|TestOnFinalIsToldOfASupersededEndOverTheRealPath|TestAPinThatFailsItsCheckSignalsNothing|TestAPidfdOwnerStopsAFrozenRelayWithAKILLAfterItsGrace|TestASeededChannelReadsFinalWhileItsPairWaitsForSlots|TestAStartWithNoClonePidfdIsRefusedAndNothingIsSignalled)$'
+          new_ssh='^(TestTheRelaysDerivedConfigFileNameHasARandomPart|TestAStableConfigFileIsTheGivenName|TestAStableConfigFileOutsideItsDirectoryIsRefused|TestAStableConfigFileNeedsNoShortControlDirectory)$'
           set +e
           (cd internal/hostdial && "$RUNNER_TEMP/hostdial.test" -test.count=50 -test.v -test.timeout 45m -test.run "$new_hd") > "$RUNNER_TEMP/hd.txt" 2>&1
           hd=$?
@@ -71,7 +71,7 @@ jobs:
             grep -E '^--- (PASS|FAIL|SKIP)' "$RUNNER_TEMP/$f.txt" | awk '{print $2, $3}' | sort | uniq -c
             if grep -qE '^\s*--- (FAIL|SKIP)' "$RUNNER_TEMP/$f.txt"; then fail=1; grep -E -B5 -A20 '^\s*--- FAIL' "$RUNNER_TEMP/$f.txt" | grep -v 'level=INFO' | head -120; fi
           done
-          # Each top-level new test passes exactly 50 times: 11 in hostdial, 3 in sshrun.
-          [ "$(grep -cE '^--- PASS' "$RUNNER_TEMP/hd.txt")" -eq 550 ] || fail=1
-          [ "$(grep -cE '^--- PASS' "$RUNNER_TEMP/ssh.txt")" -eq 150 ] || fail=1
+          # Each top-level new test passes exactly 50 times: 15 in hostdial, 4 in sshrun (with #349's round).
+          [ "$(grep -cE '^--- PASS' "$RUNNER_TEMP/hd.txt")" -eq 750 ] || fail=1
+          [ "$(grep -cE '^--- PASS' "$RUNNER_TEMP/ssh.txt")" -eq 200 ] || fail=1
           [ "$hd" -eq 0 ] && [ "$ssh" -eq 0 ] && [ "$fail" -eq 0 ]
