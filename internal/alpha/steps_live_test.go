@@ -222,6 +222,13 @@ type liveRun struct {
 	claimedPred string
 	// endEvery is how often Close looks for the run's jobs to have ended; 0 is five seconds. A test sets it.
 	endEvery time.Duration
+	// wrapAPI, when a test sets it, wraps the run's API client as start makes it: a stand-in whose catch-up fails on demand (#303).
+	wrapAPI func(client.Client) client.Client
+	// stop, when a test sets it, is filled in by Close with the stack's own stop, apart from the run's error (PR #317's review): the
+	// stand-ins whose scenario is meant to fail check it first. Only they set it, so its read of the stack before down and its look at
+	// what is left after it (standin_stop_test.go) are no part of a live row's Close. That look ends in time for the cancel of the jobs
+	// and the clean-ups after it (stopBy, stopReserve), or does not happen, which the stand-ins fail.
+	stop *stackStop
 	// allocsFn is the watch's Allocation versions, and boundedFn stack.BoundedDeadline, unless a test sets them.
 	allocsFn   func() []stack.AllocObservation
 	boundedFn  func(time.Duration) (time.Time, bool)
@@ -271,8 +278,11 @@ func (r *liveRun) Close(ctx context.Context) error {
 	r.stopGuard()
 	var errs []error
 	if r.h != nil {
+		r.stop.before(r.h)
 		// First, so that no controller submits a job after the cancel.
-		errs = append(errs, r.h.DownErr())
+		derr := r.h.DownErr()
+		errs = append(errs, derr)
+		r.stop.after(r.t, r.h, derr)
 	}
 	if r.batch != nil {
 		every := r.endEvery
@@ -355,6 +365,9 @@ func (r *liveRun) start(p Plan) {
 	r.h = stack.StartHost(t, r.w.bins, stack.ShortDir(t), r.w.dh, r.w.env, r.w.ports, r.w.frontTuning)
 	r.w.place(r.h)
 	r.c = stack.KubeClient(t, r.h.State)
+	if r.wrapAPI != nil {
+		r.c = r.wrapAPI(r.c)
+	}
 	stack.Create(t, r.c, r.w.objects...)
 	// Before the deployment exists, so the watch sees every Allocation from its first version.
 	r.watch = stack.StartWatch(t, r.h.State, r.w.md.Namespace, r.tag)

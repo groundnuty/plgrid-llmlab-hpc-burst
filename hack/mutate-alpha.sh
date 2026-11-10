@@ -529,6 +529,11 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'budget.go@@		return StartupWait + first + r.Lease + SuccessorWait(tm, pendingMax) + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout@@		return StartupWait + first + r.Lease + SuccessorWait(tm, pendingMax) + lastLooks + CloseTimeout'
   'live_flows_test.go@@	if err := r.syncWatch(ctx, stack.KindAllocations, "the run'"'"'s Allocations"); err != nil {@@	if err := r.syncWatch(ctx, stack.KindAllocations, "the run'"'"'s Allocations"); err != nil { _ = err; }; if err := r.syncWatch(ctx, stack.KindAllocations, "the run'"'"'s Allocations"); err != nil {'
   'steps_live_test.go@@			r.watch.ResetsDecideNothing() // this run ends@@			// this run ends'
+  # PR #317's delta review: the stand-ins' stop check accepts a snapshot of the stack that lacks a component, and its look at what is
+  # left after down ignores the time the clean-ups after it keep. TestAStandInWhoseStackDidNotStopFails kills both (a status that omits
+  # the controller; no time left before the deadline), and TestTheStopCheckKeepsTheCleanupsReserve the second.
+  'standin_stop_test.go@@if missing := stack.MissingComponents(s.procs); len(missing) > 0 {@@if missing := stack.MissingComponents(s.procs); false && len(missing) > 0 {'
+  'standin_stop_test.go@@if last := deadline.Add(-stopReserve); hasDeadline && last.Before(by) {@@if last := deadline.Add(-stopReserve); false && hasDeadline && last.Before(by) {'
   'guard_live_test.go@@	r.claimed, r.claimedPred = true, r.guard.pred@@	r.watch.ResetsDecideNothing(); r.claimed, r.claimedPred = true, r.guard.pred'
   'steps.go@@	return fmt.Errorf("%w; %v", err, second)@@	return fmt.Errorf("%w; %w", err, second)'
   'steps.go@@	return fmt.Errorf("%w; %v", err, second)@@	return err'
