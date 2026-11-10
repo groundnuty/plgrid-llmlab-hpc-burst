@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
 	"os/exec"
 	"os/signal"
 	"sync"
@@ -93,8 +94,10 @@ func runOwner(args []string) error {
 			Stderr: errs.take,
 		})
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
+	term := make(chan os.Signal, 1)
+	signal.Notify(term, syscall.SIGTERM, syscall.SIGINT)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	ran := make(chan error, 1)
 	go func() { ran <- o.Start(ctx) }()
 	tick := time.NewTicker(2 * time.Second)
@@ -105,13 +108,18 @@ func runOwner(args []string) error {
 			if err := writeJSONFile(*statePath, o.Relays()); err != nil {
 				log.Warn("the state file", "err", err)
 			}
-		case err := <-ran:
-			// Start stopped every relay by PID; the last state counts every
-			// start and session of the run.
-			if werr := writeJSONFile(*statePath, o.Relays()); werr != nil && err == nil {
-				err = werr
+		case <-term:
+			// The last state, taken while the relays are still kept: it counts
+			// every start and session of the run. Start then stops each relay
+			// by PID and forgets them.
+			err := writeJSONFile(*statePath, o.Relays())
+			cancel()
+			if serr := <-ran; err == nil {
+				err = serr
 			}
 			return err
+		case err := <-ran:
+			return fmt.Errorf("the relay owner stopped by itself: %v", err)
 		}
 	}
 }
