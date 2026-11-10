@@ -369,9 +369,16 @@ func TestCompletionRefusals(t *testing.T) {
 		{"an empty prompt", map[string]any{"model": "m", "prompt": ""}, 400, "BadRequestError", "The decoder prompt cannot be empty"},
 		{"a prompt of white space", map[string]any{"model": "m", "prompt": " \t\n"}, 400, "BadRequestError", "The decoder prompt cannot be empty"},
 		{"another model", completionBody(2, map[string]any{"model": "other"}), 404, "NotFoundError", "`other` does not exist"},
-		{"min_tokens above max_tokens", completionBody(2, map[string]any{"max_tokens": 10, "min_tokens": 11}), 400, "BadRequestError", "min_tokens must be"},
-		{"a negative min_tokens", completionBody(2, map[string]any{"max_tokens": 10, "min_tokens": -1}), 400, "BadRequestError", "min_tokens must be"},
-		{"one token over the context", completionBody(60, map[string]any{"max_tokens": 41}), 400, "BadRequestError", "maximum context length is 100"},
+		{"min_tokens above max_tokens", completionBody(2, map[string]any{"max_tokens": 10, "min_tokens": 11}), 400, "BadRequestError", "min_tokens must be less than or equal to max_tokens=10, got 11."},
+		{"a negative min_tokens", completionBody(2, map[string]any{"max_tokens": 10, "min_tokens": -1}), 400, "BadRequestError", "min_tokens must be greater than or equal to 0, got -1."},
+		// Issue 353: a prompt of 60 words with a limit of 41 (101 in all) was a 400
+		// here. vLLM v0.32.0 clamps it to min(100-60, 41) = 40 and serves it
+		// (serve/utils/api_utils.py:196-205), so it moved out of this table, to
+		// the served cases below and length_test.go. What it refuses is a prompt
+		// over the context (renderers/params.py:515-535) and a limit over the
+		// window (params.py:256-268), with vLLM's messages.
+		{"a prompt one token over the context", completionBody(101, map[string]any{"max_tokens": 1}), 400, "BadRequestError", "your prompt contains at least 101 input tokens, which exceeds this limit even without any output tokens"},
+		{"a limit one token over the window", completionBody(2, map[string]any{"max_tokens": 101}), 400, "BadRequestError", "max_tokens=101 cannot be greater than max_model_len=100"},
 		{"not an object", "just a string", 400, "BadRequestError", "JSON decode error"},
 	}
 	for _, tc := range cases {
@@ -395,6 +402,10 @@ func TestCompletionRefusals(t *testing.T) {
 	// the limit itself is fine: 59 prompt words + 41 = 100
 	if r := s.post("/v1/completions", completionBody(59, map[string]any{"max_tokens": 41})); r.status != 200 {
 		t.Errorf("a request that fits exactly: HTTP %d: %s", r.status, r.body)
+	}
+	// and one over is served, clamped to 40 (60 + min(100-60, 41) = 100): the old 400
+	if r := s.post("/v1/completions", completionBody(60, map[string]any{"max_tokens": 41})); r.status != 200 {
+		t.Errorf("a limit one over the rest of the context: HTTP %d, want 200 (clamped to 40): %s", r.status, r.body)
 	}
 	if r := s.get("/v1/completions"); r.status != 405 {
 		t.Errorf("GET /v1/completions: HTTP %d, want 405", r.status)

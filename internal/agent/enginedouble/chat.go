@@ -151,33 +151,85 @@ func lastUserText(msgs []message) string {
 	return ""
 }
 
-// maxTokensOf resolves max_tokens as vLLM does: max_completion_tokens when
-// set (a chat request's; nil for a completions request), else max_tokens
-// (chat_completion/serving.py:343-347), else what remains of the context after
-// the prompt (get_max_tokens, serve/utils/api_utils.py:188-205). A completions
-// request always has a max_tokens here: its null is the default 16
-// (completions.go). The error message is the double's own wording of a
-// context-length overflow: the v0.32.0 source of vLLM's text was not read.
+// requestedLimit is the output limit a request names, and the name of the
+// field it is in: max_completion_tokens when it is set (a chat request's; nil
+// for a completions request), else max_tokens. vLLM picks the field the same
+// way in both places that read it: the window check (ChatCompletionRequest.
+// build_tok_params, chat_completion/protocol.py:658-663) and the caller of
+// get_max_tokens (chat_completion/serving.py:343-347). A completions request's
+// limit is always max_tokens (completion/serving.py:157-164), and has a value
+// by the time it gets here: its null is the default 16 (completions.go). nil
+// is no limit named.
+func requestedLimit(maxTokens, maxCompletionTokens *int) (limit *int, field string) {
+	if maxCompletionTokens != nil {
+		return maxCompletionTokens, "max_completion_tokens"
+	}
+	return maxTokens, "max_tokens"
+}
+
+// overWindow is the refusal of a limit over the whole context window, "" when
+// the request has none. vLLM makes it first, before it reads the prompt: the
+// limit goes into TokenizeParams (build_tok_params, chat_completion/protocol.py:
+// 657-675 and completion/protocol.py:289-300, with max_total_tokens_param
+// "max_model_len" and max_output_tokens_param the field the limit is in), and
+// its __post_init__ raises when max_output_tokens > max_total_tokens
+// (renderers/params.py:256-268). A limit equal to the window passes it, and
+// so does no limit (max_output_tokens is "or 0").
+func (h *handler) overWindow(maxTokens, maxCompletionTokens *int) string {
+	limit, field := requestedLimit(maxTokens, maxCompletionTokens)
+	if limit == nil || *limit <= h.cfg.MaxModelLen {
+		return ""
+	}
+	return fmt.Sprintf("%s=%d cannot be greater than max_model_len=%d. Please request fewer output tokens.", field, *limit, h.cfg.MaxModelLen)
+}
+
+// maxTokensOf resolves the output limit of a request whose limit fits the
+// window (overWindow), as vLLM v0.32.0 does, and refuses what vLLM refuses:
 //
-// Known difference, not changed by issue 326: when the prompt and the limit
-// each fit the context but not together, vLLM serves the request with the limit
-// clamped to what remains (get_max_tokens, api_utils.py:196-205), and refuses
-// only a prompt over the context (renderers/params.py:515-535) or a limit over
-// the whole context (params.py:256-268). The double refuses the sum, as
-// TestOverlongPromptIs400 pins.
+//   - A prompt over the context is refused (TokenizeParams._token_len_check,
+//     renderers/params.py:515-535) with a message that says "at least": the
+//     tokenizer is asked for no more than max_model_len+1 tokens
+//     (get_encode_kwargs, params.py:351-376, truncation at max_input_tokens+1),
+//     so the count the message states is always max_model_len+1 and never the
+//     prompt's own. Chat reaches the same check (render_chat tokenizes its
+//     rendered text with the same parameters, renderers/base.py:1312, as
+//     render_cmpl does, :1249). A prompt of exactly max_model_len tokens
+//     passes this check and is refused below.
+//   - The limit is clamped, not refused, when it fits the window but not the
+//     rest of the context: get_max_tokens returns the smallest of the rest
+//     (max_model_len less the prompt) and the limit (serve/utils/api_utils.py:
+//     188-205), so a prompt of 85 tokens in a context of 100 serves a limit of
+//     50 as 15. With no limit it is the rest, and a completions request, whose
+//     null is 16 here, gets min(rest, 16).
+//   - A result under 1 is refused by SamplingParams (sampling_params.py:556-600
+//     calls _verify_args, whose check is :688-693): "max_tokens must be at
+//     least 1, got N." with the CLAMPED value. That is how a prompt that fills
+//     the context exactly (rest 0), a limit of 0 and a negative limit are
+//     refused.
+//
+// Assumed, as the double is one model with no generation config: the
+// platform's output cap is sys.maxsize (platforms/interface.py:224-225) and
+// override_max_tokens and the generation config's default max_tokens are
+// None, so none of them lowers the result (api_utils.py:189-203). The
+// ValueError at api_utils.py:183-187 (a prompt over the context) cannot be
+// reached after the refusal above, so it is not modelled. Not modelled
+// either: the character-count pre-check on a very long text
+// (_text_len_check, params.py:378-404), which depends on the real tokenizer's
+// longest token. min_tokens is checked against the clamped limit by limitFor.
+// The returned limit is 0 when the request is refused.
 func (h *handler) maxTokensOf(promptLen int, maxTokens, maxCompletionTokens *int) (int, error) {
-	max := h.cfg.MaxModelLen - promptLen
-	switch {
-	case maxCompletionTokens != nil:
-		max = *maxCompletionTokens
-	case maxTokens != nil:
-		max = *maxTokens
+	window := h.cfg.MaxModelLen
+	if promptLen > window {
+		return 0, fmt.Errorf("This model's maximum context length is %d tokens. However, your prompt contains at least %d input tokens, which exceeds this limit even without any output tokens. Please reduce the length of the input prompt.", window, window+1)
 	}
-	if max < 1 || promptLen+max > h.cfg.MaxModelLen {
-		return 0, fmt.Errorf("This model's maximum context length is %d tokens. However, you requested %d output tokens and your prompt contains at least %d input tokens, for a total of %d tokens. Please reduce the length of the input prompt or the number of requested output tokens.",
-			h.cfg.MaxModelLen, max, promptLen, promptLen+max)
+	limit := window - promptLen // the rest of the context
+	if named, _ := requestedLimit(maxTokens, maxCompletionTokens); named != nil {
+		limit = min(limit, *named)
 	}
-	return max, nil
+	if limit < 1 {
+		return 0, fmt.Errorf("max_tokens must be at least 1, got %d.", limit)
+	}
+	return limit, nil
 }
 
 // requestRecord is the "request" LogEvent of a generation request of either
@@ -218,19 +270,40 @@ func (h *handler) modelExists(w http.ResponseWriter, model string) bool {
 	return true
 }
 
-// limitFor resolves a tokenized request's output limit and checks min_tokens
-// against it, answering 400 and returning false on a bad request. Both
-// generation endpoints share it. The limit it returns is the resolved one
-// whenever it resolved, a min_tokens refusal included, so the record of a
-// refused request carries it; it is 0 when the limit did not resolve.
+// windowFits answers 400 and returns false when the request's limit is over
+// the whole context window (overWindow). Both generation endpoints call it
+// first, as vLLM refuses before anything else about the prompt, so a prompt
+// over the context with a limit over the window gets the window's message.
+func (h *handler) windowFits(w http.ResponseWriter, maxTokens, maxCompletionTokens *int) bool {
+	if msg := h.overWindow(maxTokens, maxCompletionTokens); msg != "" {
+		writeError(w, http.StatusBadRequest, "BadRequestError", msg)
+		return false
+	}
+	return true
+}
+
+// limitFor resolves a tokenized request's output limit (maxTokensOf: the
+// prompt refusal, the clamp, a limit under 1) and checks min_tokens, a
+// negative one first and then one over the CLAMPED limit, as SamplingParams
+// does after get_max_tokens, answering
+// 400 and returning false on a bad request. Both generation endpoints share
+// it, after windowFits. The limit it returns is the resolved one whenever it
+// resolved, a min_tokens refusal included, so the record of a refused request
+// carries it; it is 0 when the limit did not resolve.
 func (h *handler) limitFor(w http.ResponseWriter, sp sampling, promptLen int, maxTokens, maxCompletionTokens *int) (int, bool) {
 	max, err := h.maxTokensOf(promptLen, maxTokens, maxCompletionTokens)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "BadRequestError", err.Error())
 		return 0, false
 	}
-	if sp.MinTokens < 0 || sp.MinTokens > max {
-		// SamplingParams._verify_args, vllm/sampling_params.py:694-701.
+	// SamplingParams._verify_args checks, in this order, max_tokens under 1
+	// (maxTokensOf, :688-693), a negative min_tokens (:694-697) and min_tokens
+	// over the clamped max_tokens (:698-702), each with its own message.
+	if sp.MinTokens < 0 {
+		writeError(w, http.StatusBadRequest, "BadRequestError", fmt.Sprintf("min_tokens must be greater than or equal to 0, got %d.", sp.MinTokens))
+		return max, false
+	}
+	if sp.MinTokens > max {
 		writeError(w, http.StatusBadRequest, "BadRequestError", fmt.Sprintf("min_tokens must be less than or equal to max_tokens=%d, got %d.", max, sp.MinTokens))
 		return max, false
 	}
@@ -261,6 +334,9 @@ func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
 	}
 	_, promptIDs := tokenize(renderChat(req.Messages, true, h.cfg.TemplateOverhead))
 	rec.PromptTokens = len(promptIDs)
+	if !h.windowFits(w, req.MaxTokens, req.MaxCompletionTokens) {
+		return
+	}
 	max, ok := h.limitFor(w, req.sampling, len(promptIDs), req.MaxTokens, req.MaxCompletionTokens)
 	rec.MaxTokens = max
 	if !ok {

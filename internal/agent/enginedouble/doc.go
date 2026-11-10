@@ -37,11 +37,32 @@
 // first. ignore_eos does not change that: vLLM merges the server's default
 // stop-token ids into every request, so only min_tokens guarantees a length
 // (the early-stop mode sets NaturalLen). min_tokens above max_tokens is a 400,
-// as in vLLM (sampling_params.py:694-701). The double does not simulate
+// as in vLLM (sampling_params.py:694-701), and the max_tokens it is compared to
+// is the clamped one (below). The double does not simulate
 // preemption or a prefill phase: a request waits TokenDelay before each token, so
 // vllm:num_preemptions_total stays 0 and the time-per-output-token histogram
 // observes, for each finished request, TokenDelay if it generated more than one
 // token and 0 otherwise (the mean vLLM computes, exactly, not measured).
+//
+// # Length
+//
+// Both generation endpoints handle length as vLLM v0.32.0 does, in its order,
+// each rule quoted at the code that implements it (maxTokensOf, overWindow).
+// A limit over the whole context window is a 400 first, before the prompt is
+// read: "max_tokens=N cannot be greater than max_model_len=M. Please request
+// fewer output tokens." (renderers/params.py:256-268), where a chat request
+// that sets max_completion_tokens is named by it, which also wins over
+// max_tokens. A prompt over the context is a 400 whose message says "at least
+// M+1 input tokens", never the prompt's own count (params.py:515-535, with the
+// tokenizer stopped at M+1, :351-376). A limit that fits the window but not the
+// rest of the context is clamped to the rest, not refused: min(M - prompt,
+// limit), or the rest with no limit (api_utils.py:196-205). A result under 1,
+// which a prompt of exactly M tokens gives, is a 400, "max_tokens must be at
+// least 1, got N." with the clamped N (sampling_params.py:688-693). min_tokens
+// is checked against the clamped limit. The double does not model the
+// character-count pre-check of a very long text (params.py:378-404), which
+// depends on the real tokenizer, and it assumes a model with no generation
+// config (no default or override of max_tokens).
 //
 // # Completions
 //
