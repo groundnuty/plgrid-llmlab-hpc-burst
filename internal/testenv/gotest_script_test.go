@@ -18,12 +18,20 @@ import (
 	"testing"
 )
 
-// The groups as this test expects them: the lease test (#291), and hack/livechecks' dry runs through the
-// script (PR #306), host-dialed and the rest.
+// The groups as this test expects them: the lease test (#291), internal/lifecycle's other control-plane
+// tests in three groups and cmd/hpcburst-controller's failover tests (#295), and hack/livechecks' dry
+// runs through the script (PR #306), host-dialed and the rest.
 const ownTestName = "TestLifecycleManagerReleasesItsLeaseOnEveryStop"
 
 var (
-	hostDialedDry = []string{"TestEachHostDialedFaultFailsTheRowThroughTheScript", "TestEveryHostDialedRowPassesThroughTheScriptOverTheFake",
+	lifecycleCaches = []string{"TestCachesNeedsEveryWatchedInformer", "TestCachesRecoverFromAStalledDiscovery",
+		"TestCachesStopDuringAStalledDiscovery", "TestCachesListIsWhatTheControllerWatches"}
+	lifecycleCopies = []string{"TestMetricsStandbyOnTwoManagers", "TestMetricsLostLeaseStopsBeforeANewCopyLeads",
+		"TestMetricsCopiesStartAgainOnALostPort", "TestRaisedEventsOnTwoManagers"}
+	lifecycleControlPlane = []string{"TestManagerOnControlPlane", "TestVerificationRecordRoundTripsThroughTheAPIServer",
+		"TestLifecycleLeaseReleaseUnderLatency", "TestStartLifecycleLeaderOfAManagerThatLeadsBeforeTheLeaseIsRead"}
+	controllerFailover = []string{"TestControllerProcessesFailOverMidSubmit", "TestControllerProcessesFailOverBeforeSubmit"}
+	hostDialedDry      = []string{"TestEachHostDialedFaultFailsTheRowThroughTheScript", "TestEveryHostDialedRowPassesThroughTheScriptOverTheFake",
 		"TestAHostDialedRowWhoseSlotIsHeldIsNotRunThroughTheScript", "TestADryHostDialedBinaryRefusesLiveSettings"}
 	otherDry = []string{"TestEveryAlphaRowPassesItsDryRunAndEveryFaultFailsIt", "TestADryBinaryRefusesLiveSettings", "TestAJobPendingPastTheBoundIsNotRunOnEveryRow",
 		"TestALiveRunWithNoListenerFailsLoudlyAndUsesNoCluster", "TestAnAccountingRowWithNoSlotThatPendedPastItsWaitIsNotRun",
@@ -39,6 +47,10 @@ type group struct {
 
 var groups = []group{
 	{"lease", "./internal/lifecycle", "150s", []string{ownTestName}},
+	{"lifecycle-caches", "./internal/lifecycle", "180s", lifecycleCaches},
+	{"lifecycle-copies", "./internal/lifecycle", "190s", lifecycleCopies},
+	{"lifecycle-control-plane", "./internal/lifecycle", "170s", lifecycleControlPlane},
+	{"controller-failover", "./cmd/hpcburst-controller", "460s", controllerFailover},
 	{"livechecks-hostdialed", "./hack/livechecks", "150s", hostDialedDry},
 	{"livechecks-dry", "./hack/livechecks", "270s", otherDry},
 }
