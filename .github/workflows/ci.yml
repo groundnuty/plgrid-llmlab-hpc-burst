@@ -186,10 +186,21 @@ jobs:
       # One test of internal/lifecycle runs on its own, under its own timeout, so that the package
       # stays clear of go test's 10-minute one, which keeps catching a real hang (issue #282). The step
       # fails unless the test really ran and passed. It runs even if the packages failed. hack/check.sh
-      # runs the same two parts, so the crd job runs this test too.
+      # runs the same parts, so the crd job runs this test too.
       - name: go test, one test on its own timeout
         if: ${{ !cancelled() }}
-        run: bash hack/go-test.sh own
+        run: bash hack/go-test.sh own lease
+
+      # hack/livechecks' dry runs through hack/live-checks.sh, which build and run the real test
+      # binaries and agent, run in two groups of their own for the same reason (PR #306): each step
+      # fails unless every one of its tests ran and passed, with nothing skipped.
+      - name: go test, hack/livechecks' host-dialed dry runs on their own timeout
+        if: ${{ !cancelled() }}
+        run: bash hack/go-test.sh own livechecks-hostdialed
+
+      - name: go test, hack/livechecks' other dry runs on their own timeout
+        if: ${{ !cancelled() }}
+        run: bash hack/go-test.sh own livechecks-dry
 
   tidy:
     name: tidy
