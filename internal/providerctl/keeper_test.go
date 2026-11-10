@@ -379,7 +379,8 @@ func TestKeeperSetMarksEndedForGoodAndWaitsOnTheListing(t *testing.T) {
 }
 
 // The listing's age and the validity (#343's Q5): the age at sending, from
-// the Provider's latest listing by the controller's clock, and the validity,
+// the Provider's latest listing by the controller's clock, with the
+// exchange's own bound added, and the validity,
 // the poll interval in force plus the renew deadline (10 s): 30 s + 10 s,
 // or 5 s + 10 s while the short interval is in force.
 func TestKeeperSetCarriesTheListingAgeAndTheValidity(t *testing.T) {
@@ -405,8 +406,10 @@ func TestKeeperSetCarriesTheListingAgeAndTheValidity(t *testing.T) {
 			e.clock.Advance(7 * time.Second)
 			runKeeperClient(e)
 			s := k.waitSet(t, "a set", 0, func(wire.DesiredSet) bool { return true })
-			if s.ListingAgeMS != 7000 {
-				t.Errorf("listing age %d ms, want 7000 (the test's 7 s)", s.ListingAgeMS)
+			// The test's 7 s, plus the exchange's 5 s bound, counted so the
+			// keeper's expiry can only come earlier.
+			if s.ListingAgeMS != 12000 {
+				t.Errorf("listing age %d ms, want 12000 (the test's 7 s and the exchange's 5 s bound)", s.ListingAgeMS)
 			}
 			if s.ValidForMS != c.want {
 				t.Errorf("validity %d ms, want %d", s.ValidForMS, c.want)
@@ -796,8 +799,9 @@ func TestKeeperAPendingClaimAdmitsNothing(t *testing.T) {
 // carries its listing's age when it is sent, the wait included, never when it
 // was built. The keeper holds the ack until the test releases it; a set is
 // built while it waits; the test then moves the controller's clock on 3 s and
-// releases the ack: the set sent next is 3000 ms old, the listing being read
-// at the test's start and the clock moving only by the test's hand.
+// releases the ack: the set sent next is 3000 ms old, plus the exchange's 5 s
+// bound, the listing being read at the test's start and the clock moving only
+// by the test's hand.
 func TestKeeperListingAgeCountsTheWaitBehindAnAck(t *testing.T) {
 	k := startFakeKeeper(t)
 	release, ackIn := make(chan struct{}), make(chan struct{}, 1)
@@ -816,13 +820,16 @@ func TestKeeperListingAgeCountsTheWaitBehindAnAck(t *testing.T) {
 		}
 	})
 	e := newEnv(t, keeperMode(k, 5))
-	keeperUp(e)
-	a := e.running("alloc-a")
+	// Every set is counted from the first: each one built is then received
+	// by the keeper, so while the ack holds the exchange a set is waiting
+	// exactly when more were built than received.
 	keeper := e.ctl.shared.relays.keeper
 	var built atomic.Int64
 	keeper.mu.Lock()
 	keeper.built = func() { built.Add(1) }
 	keeper.mu.Unlock()
+	keeperUp(e)
+	a := e.running("alloc-a")
 
 	end := wire.FinalEnd{UID: string(a.UID), Tag: tagOf(a), JobID: a.Status.AtProvider.JobID, Channel: agentapi.RelayServing,
 		Kind: wire.EndFailed, Cause: "the step limit is reached", At: time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC), Epoch: 1<<31 + 1, Seq: 3}
@@ -832,14 +839,14 @@ func TestKeeperListingAgeCountsTheWaitBehindAnAck(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("no acknowledgement reached the keeper")
 	}
-	b0 := built.Load()
-	waitRelays(t, "a set built while the ack holds the exchange", func() bool { return built.Load() > b0 })
+	// A set built before or after the ack took the exchange waits behind it.
+	waitRelays(t, "a set waiting behind the ack", func() bool { return built.Load() > int64(k.setCount()) })
 	n := k.setCount() // no set can be sent while the ack is held
 	e.clock.Advance(3 * time.Second)
 	close(release)
 	s := k.waitSet(t, "the set sent once the ack was answered", n, func(wire.DesiredSet) bool { return true })
-	if s.ListingAgeMS != 3000 {
-		t.Errorf("the set's listing age is %d ms; want 3000, its age when sent, after the 3 s wait", s.ListingAgeMS)
+	if s.ListingAgeMS != 8000 {
+		t.Errorf("the set's listing age is %d ms; want 8000, its age when sent, after the 3 s wait, with the exchange's 5 s bound", s.ListingAgeMS)
 	}
 }
 

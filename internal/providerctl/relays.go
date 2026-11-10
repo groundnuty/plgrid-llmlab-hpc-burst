@@ -66,6 +66,11 @@ type RelaySettings struct {
 	// no observation changed it; zero means keeperSendInterval. Tests
 	// shorten it.
 	KeeperSendInterval time.Duration
+	// RenewDeadline is the Provider manager's renew deadline, which a desired
+	// set's validity adds to the poll interval in force (#343's Q5); zero
+	// means controller-runtime's 10 s, which the controller binary uses.
+	// Tests shorten it.
+	RenewDeadline time.Duration
 }
 
 // relayState is one controller's relay owner and the ssh client maker for

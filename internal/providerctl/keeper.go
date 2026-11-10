@@ -109,8 +109,14 @@ type keeperState struct {
 	okGen    int
 	okAt     time.Time
 	validity time.Duration
+	renew    time.Duration
 	told     string
 	status   chan struct{}
+	// deadline wakes the status loop at okAt plus the validity, when the
+	// keeper turns unreachable with no exchange to show it; off once the
+	// lead's goroutines have returned.
+	deadline    *time.Timer
+	deadlineOff bool
 	// provUID and provCreated are the Provider's, as this controller first
 	// read them; replaced says why it stops, once a read shows another UID
 	// under the same name (keeperProvider).
@@ -148,10 +154,13 @@ func newKeeperRelayState(o Options, s RelaySettings) (*relayState, error) {
 	if s.KeeperSendInterval <= 0 {
 		s.KeeperSendInterval = keeperSendInterval
 	}
+	if s.RenewDeadline <= 0 {
+		s.RenewDeadline = defaultRenewDeadline
+	}
 	s.Hosts = hostdial.NewHosts()
 	k := &keeperState{socket: s.KeeperSocket, interval: s.KeeperSendInterval, decisions: map[string]keeperDecision{},
 		ends: map[wire.FinalEnd]bool{}, acks: make(chan struct{}, 1), kick: make(chan struct{}, 1),
-		now: o.Clock.Now, validity: o.PollInterval + defaultRenewDeadline, status: make(chan struct{}, 1)}
+		now: o.Clock.Now, validity: o.PollInterval + s.RenewDeadline, renew: s.RenewDeadline, status: make(chan struct{}, 1)}
 	return &relayState{settings: s, provider: o.Provider, hosts: s.Hosts, keeper: k}, nil
 }
 
@@ -242,6 +251,7 @@ func (c *Controller) runKeeper(ctx context.Context) error {
 	r.startLead(ctx)
 	lead := r.leadContext()
 	k.ending.Store(false)
+	k.deadlineOff = false
 	k.gen++
 	k.answered, k.login, k.inUse = false, "", ""
 	done := make(chan struct{})
@@ -265,6 +275,7 @@ func (c *Controller) runKeeper(ctx context.Context) error {
 	}
 	k.endLeadAfterSends(r)
 	<-done
+	k.stopDeadline()
 	if replaced != nil {
 		// The Provider was deleted and created again under its name: this
 		// controller stops, so its manager is started again, afresh, by the
@@ -292,12 +303,22 @@ func (k *keeperState) endLeadAfterSends(r *relayState) {
 func (k *keeperState) exchange(lead context.Context, kind wire.Kind, body, reply any) error {
 	k.sending.Lock()
 	defer k.sending.Unlock()
-	if k.ending.Load() || lead.Err() != nil {
+	if k.fenced(lead) {
 		return errLeadEnded
 	}
-	err := wire.Exchange(context.WithoutCancel(lead), k.socket, kind, body, reply)
-	k.exchanged(err)
-	return err
+	return wire.Exchange(context.WithoutCancel(lead), k.socket, kind, body, reply)
+}
+
+// fenced reports whether no exchange may begin: the lead has ended or its
+// end has begun, or the Provider was found replaced. The caller holds
+// sending.
+func (k *keeperState) fenced(lead context.Context) bool {
+	if k.ending.Load() || lead.Err() != nil {
+		return true
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.replaced != ""
 }
 
 // exchangeSet is exchange for a set built from the listing read at listed:
@@ -307,39 +328,102 @@ func (k *keeperState) exchange(lead context.Context, kind wire.Kind, body, reply
 func (k *keeperState) exchangeSet(lead context.Context, set wire.DesiredSet, listed time.Time, rep *wire.Report) error {
 	k.sending.Lock()
 	defer k.sending.Unlock()
-	if k.ending.Load() || lead.Err() != nil {
+	if k.fenced(lead) {
 		return errLeadEnded
 	}
+	// The exchange's own bound is added, so the time the set then takes to
+	// validate, dial, cross and be read is counted too: the keeper's expiry
+	// can only come earlier than the listing's (the delta review of PR 360).
 	age := k.now().Sub(listed)
 	if age < 0 {
 		age = 0
 	}
-	set.ListingAgeMS = age.Milliseconds()
+	set.ListingAgeMS = (age + wire.ExchangeTimeout).Milliseconds()
 	if err := set.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", errMalformedSet, err)
 	}
-	err := wire.Exchange(context.WithoutCancel(lead), k.socket, wire.KindSet, set, rep)
-	k.exchanged(err)
-	return err
+	return wire.Exchange(context.WithoutCancel(lead), k.socket, wire.KindSet, set, rep)
 }
 
 // errMalformedSet: a set this controller built fails the wire's own checks,
 // a bug; it is not sent.
 var errMalformedSet = errors.New("the desired set for the relay keeper is malformed")
 
-// exchanged records whether an exchange succeeded: the keeper answered with
-// the reply, or refused a set for its login host or its epoch, which it
-// decided on. A transport failure, and a refusal for its own state file, the
-// protocol's version or a malformed request, is no success.
-func (k *keeperState) exchanged(err error) {
+// decided reports whether a set's exchange succeeded: the keeper answered
+// with its report, or refused the set for its login host or its epoch, which
+// it decided on. A transport failure, and a refusal for its own state file,
+// the protocol's version or a malformed request, is no success. Only a set's
+// exchange counts: its reply carries the claim's decision, so the keeper's
+// reachability and the claim change together (received); an ack's carries
+// none, so an ack that reaches a keeper after an outage reopens nothing (the
+// delta review of PR 360).
+func decided(err error) bool {
 	var refused *wire.RefusedError
-	ok := err == nil || (errors.As(err, &refused) && (refused.Refused.Reason == wire.RefusedLoginHost || refused.Refused.Reason == wire.RefusedEpoch))
+	return err == nil || (errors.As(err, &refused) && (refused.Refused.Reason == wire.RefusedLoginHost || refused.Refused.Reason == wire.RefusedEpoch))
+}
+
+// admission says why no new Allocation may be submitted now, or "": the
+// keeper unreachable, or the claim not granted, read as one state (the delta
+// review of PR 360).
+func (k *keeperState) admission(now time.Time) string {
 	k.mu.Lock()
-	if ok {
-		k.okGen, k.okAt = k.gen, k.now()
+	defer k.mu.Unlock()
+	if why := k.unavailableLocked(now); why != "" {
+		return why
 	}
-	k.mu.Unlock()
+	switch {
+	case k.inUse != "":
+		return k.inUse
+	case !k.answered:
+		return claimPending
+	}
+	return ""
+}
+
+// keeperAdmission is admission outside keeper mode too: always "" there.
+func (s *shared) keeperAdmission(now time.Time) string {
+	if r := s.relays; r != nil && r.keeper != nil {
+		return r.keeper.admission(now)
+	}
+	return ""
+}
+
+// armDeadlineLocked sets the timer for okAt plus the validity, by the
+// controller's clock; the caller holds mu.
+func (k *keeperState) armDeadlineLocked() {
+	if k.deadline != nil {
+		k.deadline.Stop()
+	}
+	if k.deadlineOff {
+		return
+	}
+	d := k.okAt.Add(k.validity).Sub(k.now())
+	if d < 0 {
+		d = 0
+	}
+	k.deadline = time.AfterFunc(d+time.Millisecond, k.atDeadline)
+}
+
+// atDeadline wakes the status loop when the keeper has turned unreachable by
+// the passing of time alone, and waits again while it has not, which only a
+// clock that the timer does not follow (a test's) leaves.
+func (k *keeperState) atDeadline() {
 	k.noteStatus()
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if !k.deadlineOff && k.unavailableLocked(k.now()) == "" {
+		k.armDeadlineLocked()
+	}
+}
+
+// stopDeadline turns the timer off once the lead's goroutines have returned.
+func (k *keeperState) stopDeadline() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.deadlineOff = true
+	if k.deadline != nil {
+		k.deadline.Stop()
+	}
 }
 
 // unavailable says why the keeper counts as unreachable now, or "": no
@@ -477,6 +561,7 @@ func (s *shared) sendSet(lead context.Context) error {
 		return nil
 	}
 	k.received(gen, rep, err, s)
+	k.noteStatus()
 	if err == nil {
 		k.queueEnds(rep.Ends)
 	}
@@ -497,11 +582,22 @@ func (k *keeperState) received(gen int, rep wire.Report, err error, s *shared) {
 	}
 	repeated := text == k.lastErr
 	k.lastErr = text
+	if decided(err) {
+		// Reachability and the claim's decision change in this one critical
+		// section, and the status loop is woken only after (sendSet), so no
+		// reader sees the keeper back with an old claim (the delta review of
+		// PR 360).
+		k.okGen, k.okAt = k.gen, k.now()
+		k.armDeadlineLocked()
+	}
 	switch {
 	case err == nil:
 		k.login = rep.LoginHost
+		// An expired set moved the fence and changed nothing else: the
+		// keeper did not decide the claim, so it is pending again.
+		k.answered = !rep.Expired
 		if !rep.Expired {
-			k.answered, k.inUse = true, ""
+			k.inUse = ""
 		}
 	case errors.As(err, &refused) && refused.Refused.Reason == wire.RefusedLoginHost:
 		k.answered = false
@@ -595,7 +691,7 @@ func (s *shared) desiredSet(ctx context.Context, gen int) (wire.DesiredSet, time
 		entries, complete = entries[:wire.MaxAllocations], false
 	}
 	// The age is stamped when the set is sent (exchangeSet).
-	validity := listingMaxAge(p, s.o.PollInterval) + defaultRenewDeadline
+	validity := listingMaxAge(p, s.o.PollInterval) + k.renew
 	k.mu.Lock()
 	k.validity = validity
 	k.mu.Unlock()
@@ -673,6 +769,9 @@ func (s *shared) keeperProvider(ctx context.Context) (string, time.Time, error) 
 	case k.provUID == "":
 		k.provUID, k.provCreated = uid, created
 	case k.provUID != uid || !k.provCreated.Equal(created):
+		// The fence first, in the same critical section as the detection:
+		// no exchange begins from here (the delta review of PR 360).
+		k.ending.Store(true)
 		k.replaced = fmt.Sprintf("Provider %s was deleted and created again (UID %s, was %s): its controller stops, and the next one starts afresh", s.o.Provider, uid, k.provUID)
 		return "", time.Time{}, errProviderReplaced
 	}

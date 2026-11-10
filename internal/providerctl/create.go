@@ -132,6 +132,14 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 			return managed.ExternalCreation{}, e.rejectedWith(wctx, a, claim, why, true)
 		}
 	}
+	// Keeper mode: admission read again, as one state, right before the
+	// submission, since the keeper may have become unreachable or refused the
+	// claim while the files were staged (the delta review of PR 360).
+	if why := e.s.keeperAdmission(e.now()); why != "" {
+		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		return managed.ExternalCreation{}, e.rejectedWith(wctx, a, claim, "refusing to submit: "+why, false)
+	}
 	e.p.SetBusy(name, true)
 	id, outcome, serr := e.p.Submit(ctx, req)
 	// The outcome is written with a fresh context: the reconcile's may have
