@@ -17,8 +17,12 @@
 // Usage (hpcburst up passes the first three and the front it recorded):
 //
 //	hpcburst-controller --state-dir DIR --port-base PORT --health-addr 127.0.0.1:PORT
-//	    [--front-mode direct|ssh --front-addr HOST:PORT]
+//	    [--front-mode direct|ssh --front-addr HOST:PORT | --front-mode host-dialed]
 //	    [--kubeconfig FILE] [--leader-elect=true] [--workers 4]
+//
+// --front-mode host-dialed takes no --front-addr, and --front-addr is refused with it: the host
+// dials the jobs through the login node, so agent.json names no endpoint (HBEP-6, Dial-home
+// modes; HBEP-11, open question 8, amended 9 Nov 2026). Direct and ssh need an address.
 //
 // The state directory and the port base fill an agentapi.Host, which names
 // the shared paths and ports (docs/development.md, Runtime conventions): the
@@ -83,8 +87,8 @@ func parse(args []string, stderr io.Writer) (flags, error) {
 	fs.IntVar(&f.host.PortBase, "port-base", 0, "the launcher's loopback port base (required)")
 	fs.StringVar(&f.kubeconfig, "kubeconfig", "", "the control plane's kubeconfig (default <state-dir>/kubeconfig)")
 	fs.StringVar(&f.healthAddr, "health-addr", "", "loopback host:port of /healthz and /readyz (required)")
-	fs.StringVar(&f.frontMode, "front-mode", "", "the recorded dial-home mode: direct or ssh")
-	fs.StringVar(&f.frontAddr, "front-addr", "", "the recorded front address")
+	fs.StringVar(&f.frontMode, "front-mode", "", "the recorded dial-home mode: direct, ssh or host-dialed")
+	fs.StringVar(&f.frontAddr, "front-addr", "", "the recorded front address; direct and ssh need it, host-dialed takes none because the host dials the jobs")
 	fs.BoolVar(&f.leaderElect, "leader-elect", true, "take the lifecycle Lease, a guard against a stale second copy")
 	fs.IntVar(&f.workers, "workers", lifecycle.DefaultWorkers, "work queue workers")
 	if err := fs.Parse(args); err != nil {
@@ -100,10 +104,16 @@ func parse(args []string, stderr io.Writer) (flags, error) {
 		return flags{}, fmt.Errorf("--port-base %d is out of range", f.host.PortBase)
 	case f.healthAddr == "":
 		return flags{}, errors.New("--health-addr is required")
-	case (f.frontMode == "") != (f.frontAddr == ""):
+	case f.frontMode == "" && f.frontAddr != "":
 		return flags{}, errors.New("--front-mode and --front-addr go together")
-	case f.frontMode != "" && f.frontMode != "direct" && f.frontMode != "ssh":
-		return flags{}, fmt.Errorf("--front-mode %q: want direct or ssh", f.frontMode)
+	case f.frontMode != "" && !agentapi.ValidDialHomeMode(agentapi.DialHomeMode(f.frontMode)):
+		return flags{}, fmt.Errorf("--front-mode %q: want %s, %s or %s", f.frontMode, agentapi.DialHomeDirect, agentapi.DialHomeSSH, agentapi.DialHomeHostDialed)
+	// Host-dialed mode has no address, because the host dials the jobs (HBEP-6, Dial-home
+	// modes; HBEP-11, open question 8, amended 9 Nov 2026); direct and ssh need one.
+	case f.frontMode == string(agentapi.DialHomeHostDialed) && f.frontAddr != "":
+		return flags{}, fmt.Errorf("--front-mode %s takes no --front-addr: the host dials the jobs", f.frontMode)
+	case f.frontMode != "" && f.frontMode != string(agentapi.DialHomeHostDialed) && f.frontAddr == "":
+		return flags{}, errors.New("--front-mode and --front-addr go together")
 	case f.workers < 1:
 		return flags{}, errors.New("--workers must be at least 1")
 	}
@@ -236,7 +246,7 @@ const hubEndpointEnv = "HF_ENDPOINT"
 func managerOptions(f flags, cfg *rest.Config, getenv func(string) string) lifecycle.Options {
 	return lifecycle.Options{
 		Config: cfg, CredentialsDir: f.host.CredentialsDir(), AgentBuildsDir: f.host.AgentBuildsDir(),
-		FrontConfigured: f.frontMode != "", HealthAddr: f.healthAddr, MetricsAddr: f.host.ControllerMetricsAddr(),
+		FrontConfigured: f.frontMode != "", HostDialed: f.frontMode == string(agentapi.DialHomeHostDialed), HealthAddr: f.healthAddr, MetricsAddr: f.host.ControllerMetricsAddr(),
 		LeaderElection: f.leaderElect, Workers: f.workers, HubEndpoint: getenv(hubEndpointEnv),
 	}
 }

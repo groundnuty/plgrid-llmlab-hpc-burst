@@ -153,6 +153,8 @@ type rig struct {
 	// extra are the Providers a test added beside the rig's own
 	// (addProvider), each with its fake Slurm and Provider controller.
 	extra []*rigExtra
+	// hostDialed is the controller's Config.HostDialed, kept across a restart.
+	hostDialed bool
 	// noTunnels: syncAgents does not play the path-state writer
 	// (syncTunnels), so a test sets TunnelConnected itself, or leaves it
 	// absent.
@@ -166,6 +168,7 @@ type rigConfig struct {
 	maxTime      time.Duration
 	holdRelease  bool
 	front        bool
+	hostDialed   bool
 	interceptors *interceptor.Funcs
 	// partition edits the rig partition's profile entry; providerQOS is the
 	// rig Provider's spec.qos; batch edits the fake Slurm's configuration.
@@ -192,6 +195,9 @@ func withProviderQOS(q string) rigOption { return func(c *rigConfig) { c.provide
 func withBatchConfig(f func(*pfake.Config)) rigOption {
 	return func(c *rigConfig) { c.batch = f }
 }
+
+// withHostDialed runs the controller as in host-dialed mode (Config.HostDialed).
+func withHostDialed() rigOption { return func(c *rigConfig) { c.hostDialed = true } }
 
 func ptrTo[T any](v T) *T { return &v }
 
@@ -273,7 +279,7 @@ func newRig(t *testing.T, opts ...rigOption) *rig {
 		t: t, ctx: context.Background(), clock: clock, batch: batch, c: c,
 		prov:   &pfake.Controller{Client: c, Provider: rigProvider, Batch: batch, Clock: clock, HoldRelease: cfg.holdRelease},
 		source: &stubSource{}, rec: &MemoryRecorder{}, creds: t.TempDir(),
-		agents: map[string]*rigAgent{}, sw: &switchBackend{},
+		agents: map[string]*rigAgent{}, sw: &switchBackend{}, hostDialed: cfg.hostDialed,
 	}
 	rg.events = eventcount.New()
 	rg.memEvents = newMemoryEvents(rg.rec, rg.events)
@@ -293,7 +299,7 @@ func (rg *rig) startController(front bool) {
 	rg.r = &Reconciler{
 		Client: rg.c, Reader: rg.c, Clock: rg.clock, Backend: rg.backend, Checkpoints: rg.source,
 		Recorder: KubeRecorder{R: eventcount.Events(rg.memEvents, rg.events, eventcount.ControllerLifecycle)},
-		Config: Config{CredentialsDir: rg.creds, FrontConfigured: front,
+		Config: Config{CredentialsDir: rg.creds, FrontConfigured: front, HostDialed: rg.hostDialed,
 			AgentDigest: func(string) (string, error) { return rigAgentDigest, nil }},
 	}
 	rg.sw.set(rg.backend)

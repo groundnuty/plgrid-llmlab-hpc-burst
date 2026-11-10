@@ -54,6 +54,10 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	if os.Getenv("HB_TEST_ROLE") == roleAgent {
+		if len(os.Args) > 1 && os.Args[1] == agentapi.RelaySubcommand {
+			// As main does: the agent binary as a relay step's program.
+			os.Exit(relay(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+		}
 		os.Exit(run(os.Args[1:], os.Getenv, os.Stderr))
 	}
 	if os.Getenv("HB_TEST_ROLE") == roleLocalTime {
@@ -191,6 +195,7 @@ type job struct {
 	frpcLog                                                 string // the stub frpc's starts
 	extraEnv                                                []string
 	ssh                                                     bool // agent.json's mode is ssh
+	hostDialed                                              bool // agent.json's mode is host-dialed
 	cfg                                                     agentapi.AgentConfig
 }
 
@@ -329,6 +334,14 @@ func assertFrpcWired(t *testing.T, j job, out string) {
 	want := j.cfg.Endpoint
 	if j.ssh {
 		want = "127.0.0.1:" + forwardPort(t, j, j.cfg.SSH.DialHomePort)
+	}
+	if j.hostDialed {
+		// The serving listener's port, which the agent logs once it binds it.
+		p := regexp.MustCompile(`host-dialed: listening for the relays.* serving=([0-9]+)`).FindStringSubmatch(out)
+		if p == nil {
+			t.Fatalf("the agent did not log its serving listener:\n%s", out)
+		}
+		want = "127.0.0.1:" + p[1]
 	}
 	if got := m[1] + ":" + m[2]; got != want {
 		t.Errorf("frpc dials %s, want %s", got, want)

@@ -44,6 +44,18 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 	if e.refused != nil {
 		return managed.ExternalCreation{}, e.refused
 	}
+	if r := e.s.relays; r != nil {
+		// A refused Provider submits nothing (HBEP-6, Capacity): its jobs could
+		// never be reached. The planner sees Ready False and creates no
+		// Allocation for it; this holds for one made before Ready said so.
+		_, inUse, err := r.claimLogin(e.v.SSH)
+		if err != nil {
+			return managed.ExternalCreation{}, fmt.Errorf("refusing to submit: the login host's claim: %w", err)
+		}
+		if inUse != "" {
+			return managed.ExternalCreation{}, errors.New("refusing to submit: " + inUse)
+		}
+	}
 	name := meta.GetExternalName(a)
 	if tag := v1alpha1.JobTag(a.Namespace, a.Name, a.UID); name != tag {
 		return managed.ExternalCreation{}, fmt.Errorf("refusing to submit: the external name is not this Allocation's job tag %s", tag)
@@ -101,6 +113,19 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 	claim := v1alpha1.SubmissionRecord{Attempt: n, Token: newToken(), State: v1alpha1.SubmissionInFlight, Writer: e.s.o.Identity, Time: mt(now)}
 	if err := write(ctx, e.s.kube, a, map[string]string{v1alpha1.AnnotationSubmission: recordValue(claim)}); err != nil {
 		return managed.ExternalCreation{}, fmt.Errorf("could not claim submission attempt %d, nothing submitted: %w", n, err)
+	}
+	if e.s.relays != nil {
+		// The cap of 2 Allocations, read fresh after this attempt's claim, so
+		// that two leaders' planners that each reserved the last slot do not
+		// both submit (HBEP-6, Capacity; the delta review of PR 301, D3).
+		if why, err := e.hostDialedCapFull(ctx, a); err != nil || why != "" {
+			wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+			if err != nil {
+				why = "the Provider's Allocations could not be read to check host-dialed mode's cap: " + err.Error()
+			}
+			return managed.ExternalCreation{}, e.rejectedWith(wctx, a, claim, why, true)
+		}
 	}
 	e.p.SetBusy(name, true)
 	id, outcome, serr := e.p.Submit(ctx, req)
@@ -160,10 +185,48 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 // error is returned, as for any Rejected outcome. Any other refusal keeps
 // returning an error, so crossplane backs off.
 func (e *external) rejected(ctx context.Context, a *v1alpha1.Allocation, claim v1alpha1.SubmissionRecord, serr error) error {
-	r := claim
-	r.State, r.Time, r.Reason = v1alpha1.SubmissionRejected, mt(e.now()), truncate(errText(serr))
 	var pr *provider.PolicyRefusal
-	limit := errors.As(serr, &pr) && pr.SubmitLimit()
+	return e.rejectedWith(ctx, a, claim, errText(serr), errors.As(serr, &pr) && pr.SubmitLimit())
+}
+
+// hostDialedCapFull returns why the Provider has no free slot in host-dialed
+// mode, "" when it has one: its other Allocations whose job is submitted or
+// being submitted, from a fresh API list, number HostDialedMaxAllocations.
+func (e *external) hostDialedCapFull(ctx context.Context, self *v1alpha1.Allocation) (string, error) {
+	var list v1alpha1.AllocationList
+	if err := e.s.reader.List(ctx, &list); err != nil {
+		return "", err
+	}
+	n := 0
+	for i := range list.Items {
+		o := &list.Items[i]
+		if o.UID == self.UID || o.Spec.ProviderConfigReference == nil || o.Spec.ProviderConfigReference.Name != e.s.o.Provider {
+			continue
+		}
+		rec, err := readRecord(o)
+		if err != nil {
+			n++ // unreadable: counted, never risked
+			continue
+		}
+		st := o.Status.AtProvider
+		ended := st.Phase == v1alpha1.AllocationEnded || st.Phase == v1alpha1.AllocationFailed ||
+			st.Phase == v1alpha1.AllocationLost || st.Phase == v1alpha1.AllocationRefused
+		if needsResolution(rec) || (rec.jobID != "" && (!ended || st.JobCompleting)) {
+			n++
+		}
+	}
+	if n < agentapi.HostDialedMaxAllocations {
+		return "", nil
+	}
+	return fmt.Sprintf("Provider %s already has %d Allocations submitted or being submitted, at most %d in host-dialed mode (HBEP-6, Capacity)",
+		e.s.o.Provider, n, agentapi.HostDialedMaxAllocations), nil
+}
+
+// rejectedWith records attempt claim as Rejected with reason, a full submit
+// limit when limit is set (SubmitLimitReached).
+func (e *external) rejectedWith(ctx context.Context, a *v1alpha1.Allocation, claim v1alpha1.SubmissionRecord, reason string, limit bool) error {
+	r := claim
+	r.State, r.Time, r.Reason = v1alpha1.SubmissionRejected, mt(e.now()), truncate(reason)
 	if limit {
 		r.Code = v1alpha1.ReasonSubmitLimitReached
 	}
@@ -438,8 +501,12 @@ func (e *external) files(a *v1alpha1.Allocation, tag string, paths slurm.Paths) 
 		CertSPKISHA256: f.CertPin, FrpcDigest: frpcSum, StagingDir: paths.Staging, DialHomeDir: paths.DialHomeDir(),
 		HubEndpoint: e.s.o.HubEndpoint,
 	}
-	if f.Mode == agentapi.DialHomeSSH {
+	switch f.Mode {
+	case agentapi.DialHomeSSH:
 		cfg.SSH = &agentapi.SSHForward{User: f.SSHUser, AgentPort: f.AgentPort, DialHomePort: f.DialHomePort}
+	case agentapi.DialHomeHostDialed:
+		// The agent greets its relays with it (HBEP-6, The rendezvous).
+		cfg.Allocation = string(a.UID)
 	}
 	js, err := cfg.Encode()
 	if err != nil {

@@ -141,6 +141,9 @@ func isRelease(ler resourcelock.LeaderElectionRecord) bool {
 	return ler.HolderIdentity == "" && ler.LeaseDurationSeconds == 1
 }
 
+// IsRelease is isRelease, for a lock wrapper of another package.
+func IsRelease(ler resourcelock.LeaderElectionRecord) bool { return isRelease(ler) }
+
 // Update implements resourcelock.Interface.
 func (l *retriedRelease) Update(ctx context.Context, ler resourcelock.LeaderElectionRecord) error {
 	if !isRelease(ler) {

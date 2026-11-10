@@ -21,6 +21,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/leaderlock"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/lifecycle"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -171,6 +172,24 @@ func TestFrontSettings(t *testing.T) {
 	if fs.Mode != agentapi.DialHomeSSH || fs.SSHUser != "ExampleUser" || fs.AgentPort != 29303 || fs.DialHomePort != 29307 {
 		t.Fatalf("ssh: %+v; want user ExampleUser and ports 29303, 29307", fs)
 	}
+	// Host-dialed mode has no address and no ssh setting: the host dials the jobs, so agent.json names
+	// no endpoint (HBEP-6, Dial-home modes). Its user is never looked up, and the settings pass checkFront.
+	f, err = parse(append(append([]string{}, base...), "--front-mode", "host-dialed"), os.Stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noUser := deps{
+		frpcDigests: d.frpcDigests,
+		username:    func() (string, error) { t.Error("host-dialed mode looked up the ssh user"); return "", nil },
+	}
+	fs, err = frontSettings(f, noUser)
+	if err != nil {
+		t.Fatalf("host-dialed: %v", err)
+	}
+	if fs.Mode != agentapi.DialHomeHostDialed || fs.Endpoint != "" || fs.SSHUser != "" || fs.AgentPort != 0 || fs.DialHomePort != 0 ||
+		fs.CertPin != agentapi.PinOf(cert) || !maps.Equal(fs.FrpcDigests, shared) || len(fs.CertPEM) == 0 {
+		t.Fatalf("host-dialed: %+v; want the mode, no endpoint, no ssh setting, the pin and the digests", fs)
+	}
 	// Without a seam, the user is the one who runs the test.
 	u, err := user.Current()
 	if err != nil {
@@ -185,6 +204,33 @@ func TestFrontSettings(t *testing.T) {
 	}
 	if _, err := frontSettings(f, d); err == nil || !strings.Contains(err.Error(), "agent endpoint certificate") {
 		t.Fatalf("no certificate: %v, want an error naming the agent endpoint certificate", err)
+	}
+}
+
+// checkFront encodes the agent.json a Create would write, through agentapi's own validation. For
+// host-dialed mode (HBEP-6, Dial-home modes) it passes with no endpoint and no ssh setting, and it
+// refuses an endpoint, as agentapi does, so a mode that passed everything would not pass this.
+func TestCheckFrontHostDialed(t *testing.T) {
+	cert := writeEndpointCert(t, agentapi.Host{StateDir: t.TempDir(), PortBase: 29300})
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
+	settings := func(mode agentapi.DialHomeMode, endpoint string) *providerctl.FrontSettings {
+		return &providerctl.FrontSettings{
+			Mode: mode, Endpoint: endpoint, CertPin: agentapi.PinOf(cert), CertPEM: pemBytes,
+			FrpcDigests: map[string]string{"x86_64": strings.Repeat("a", 64)},
+		}
+	}
+	if err := checkFront(settings(agentapi.DialHomeHostDialed, "")); err != nil {
+		t.Errorf("host-dialed with no endpoint: %v, want none", err)
+	}
+	if err := checkFront(settings(agentapi.DialHomeHostDialed, "front.example.org:22")); err == nil || !strings.Contains(err.Error(), "host-dialed mode") {
+		t.Errorf("host-dialed with an endpoint: %v, want agent.json's refusal naming host-dialed mode", err)
+	}
+	// Direct and ssh still need an endpoint, and are judged as before.
+	if err := checkFront(settings(agentapi.DialHomeDirect, "")); err == nil || !strings.Contains(err.Error(), "endpoint") {
+		t.Errorf("direct with no endpoint: %v, want a refusal naming the endpoint", err)
+	}
+	if err := checkFront(settings(agentapi.DialHomeDirect, "front.example.org:29443")); err != nil {
+		t.Errorf("direct with an endpoint: %v, want none", err)
 	}
 }
 

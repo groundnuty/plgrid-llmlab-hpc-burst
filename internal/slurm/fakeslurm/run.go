@@ -30,6 +30,12 @@ type RunMode struct {
 	JobDir string
 	// Env is added to every job's environment, after the login's own.
 	Env map[string]string
+	// StepEnv is added to every srun step's environment, after the job's
+	// own, replacing a variable of the same name: a step that srun starts
+	// from the login node gets the login session's environment, not the
+	// batch script's, so a test can give its steps another TMPDIR than the
+	// job's, as a cluster may (HBEP-6, The rendezvous).
+	StepEnv map[string]string
 	// JobVars are the job variables the cluster sets inside jobs (HBEP-4,
 	// Submission: tmpDir), such as Helios's MEMFS for a job that requests -C
 	// memfs.
@@ -133,6 +139,11 @@ type runKnobs struct {
 	beforeReap                    func(r *jobRun)
 	limitFired                    func(r *jobRun)
 	limitDecided                  func(r *jobRun, ended bool)
+	// streamRead is called by a streamed step's copy of its standard output
+	// (fd 1) or error (fd 2) after it has handled one read of n bytes: sent
+	// them on, or held them back. A test waits on it to know that a chunk has
+	// been seen (srunstream.go).
+	streamRead func(fd, n int)
 }
 
 func hostKnobs() runKnobs {

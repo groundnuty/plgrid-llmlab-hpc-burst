@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -19,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	"time"
 )
 
@@ -427,6 +430,68 @@ func TestRootK3sGuard(t *testing.T) {
 	} {
 		if err := RootK3sAfter(c.before, c.after); (err == nil) != c.ok {
 			t.Errorf("RootK3sAfter(%q, %q) = %v, want ok %v", c.before, c.after, err, c.ok)
+		}
+	}
+}
+
+// TestDialHomeFlagsPerMode: what StartHost gives hpcburst up and the front's configuration for each
+// dial-home mode. Host-dialed has no address and no key, because the host dials the jobs through the login
+// node (HBEP-6, Dial-home modes), so up gets the mode alone and no --front-addr; direct and ssh pass the
+// address as before, ssh with its key. Only direct names the dial-home listener in the front's
+// configuration; ssh and host-dialed take the default, 127.0.0.1:base+7.
+func TestDialHomeFlagsPerMode(t *testing.T) {
+	ports := Ports{Base: 29700, ClientAddr: "127.0.0.1:29713", DialHomeListen: "127.0.0.1:29714"}
+	for _, c := range []struct {
+		name   string
+		dh     DialHome
+		flags  []string
+		member string
+	}{
+		{"direct", DialHome{Mode: "direct", Addr: "front.example.test:8443"},
+			[]string{"--front-mode", "direct", "--front-addr", "front.example.test:8443"}, `"dialHomeListen":"127.0.0.1:29714",`},
+		{"ssh", DialHome{Mode: "ssh", Addr: "gateway.example.test:22", KeyPath: "/example/key"},
+			[]string{"--front-mode", "ssh", "--front-addr", "gateway.example.test:22", "--front-key", "/example/key"}, ""},
+		{"host-dialed", DialHome{Mode: "host-dialed"}, []string{"--front-mode", "host-dialed"}, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.dh.upFlags(); !slices.Equal(got, c.flags) {
+				t.Errorf("up flags %q, want %q", got, c.flags)
+			}
+			if got := c.dh.frontConfigMember(ports); got != c.member {
+				t.Errorf("front configuration member %q, want %q", got, c.member)
+			}
+		})
+	}
+}
+
+// RemoveRecordedRelayDirs removes a killed agent's relay socket directory by
+// the agent's rendezvous file, and nothing its record does not name: a
+// directory that is not hb-relay-*, and a hb-relay-* directory no file names.
+func TestRemoveRecordedRelayDirs(t *testing.T) {
+	root, elsewhere := t.TempDir(), t.TempDir()
+	mk := func(name string) string {
+		d := filepath.Join(elsewhere, name)
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	named, other, unnamed := mk("hb-relay-1234"), mk("not-a-relay"), mk("hb-relay-5678")
+	for i, d := range []string{named, other} {
+		alloc := filepath.Join(root, "stage", "alloc", fmt.Sprintf("hb-x-%d", i))
+		if err := os.MkdirAll(alloc, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(alloc, agentapi.RelaySocketFileName), []byte(filepath.Join(d, "relay.sock")+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := RemoveRecordedRelayDirs(root); len(got) != 1 || got[0] != named {
+		t.Errorf("removed %v, want only %s", got, named)
+	}
+	for _, d := range []string{other, unnamed} {
+		if _, err := os.Stat(d); err != nil {
+			t.Errorf("%s was removed: %v", d, err)
 		}
 	}
 }

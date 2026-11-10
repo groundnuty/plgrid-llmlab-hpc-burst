@@ -71,6 +71,9 @@ func NewProviderManager(cfg *rest.Config, scheme *runtime.Scheme, provider strin
 		return nil, fmt.Errorf("provider %s: the leader Lease's lock: %w", provider, err)
 	}
 	lock := leaderlock.TrackRenewals(inner)
+	// The relays' fence: the epoch of this copy's own acquisition, and the
+	// relays stopped before any release (HBEP-6, Fencing).
+	fence := NewRelayFence(lock)
 	skip := true
 	mo := manager.Options{
 		Scheme:                              scheme,
@@ -81,7 +84,7 @@ func NewProviderManager(cfg *rest.Config, scheme *runtime.Scheme, provider strin
 		LeaderElectionID:                    name,
 		LeaderElectionNamespace:             v1alpha1.ControllerNamespace,
 		LeaderElectionResourceLock:          resourcelock.LeasesResourceLock,
-		LeaderElectionResourceLockInterface: lock,
+		LeaderElectionResourceLockInterface: fence,
 		LeaderElectionReleaseOnCancel:       true,
 		Controller:                          config.Controller{SkipNameValidation: &skip},
 	}
@@ -101,7 +104,7 @@ func NewProviderManager(cfg *rest.Config, scheme *runtime.Scheme, provider strin
 	if err != nil {
 		return nil, err
 	}
-	return leaderlock.ReleaseAfterStart(mgr, lock, ctrl.Log), nil
+	return fencedManager{Manager: leaderlock.ReleaseAfterStart(mgr, lock, ctrl.Log), fence: fence}, nil
 }
 
 // Supervisor runs one manager per Provider of one kind, batch by default

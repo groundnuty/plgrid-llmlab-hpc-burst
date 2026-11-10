@@ -49,6 +49,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agentserver"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/hostdial"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/managed"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl"
@@ -199,7 +200,9 @@ func checkScheme(s *runtime.Scheme) error {
 // the frp release the launcher runs (HBEP-4, Submission: Files first), for
 // x86_64 and aarch64 (Helios GH200) alike; in ssh mode the user is the one who
 // runs this binary, and the two forwarded ports are the Host's
-// (agentapi.Host). The settings are checked as agent.json takes them
+// (agentapi.Host); in host-dialed mode there is no endpoint and no ssh setting,
+// because the host dials the jobs (HBEP-6, Dial-home modes; HBEP-11, open
+// question 8, amended 9 Nov 2026), and parse refused an address for it. The settings are checked as agent.json takes them
 // (checkFront), so a value every submission would fail on stops the binary
 // here, before anything listens.
 func frontSettings(f flags, d deps) (*providerctl.FrontSettings, error) {
@@ -237,6 +240,7 @@ var (
 	sampleTag      = v1alpha1.JobTag("example", "example", "00000000-0000-0000-0000-000000000000")
 	sampleStaging  = "/scratch/example/stage"
 	sampleDialHome = filepath.Join("/home/example", agentapi.DialHomeDir)
+	sampleUID      = "00000000-0000-0000-0000-000000000000"
 )
 
 // checkFront encodes, for each cpuArch, the agent.json a Create would write,
@@ -261,8 +265,11 @@ func checkFront(fs *providerctl.FrontSettings) error {
 			ProtocolVersion: agentapi.ProtocolVersion, Tag: sampleTag, Mode: fs.Mode, Endpoint: fs.Endpoint,
 			CertSPKISHA256: fs.CertPin, FrpcDigest: fs.FrpcDigests[arch], StagingDir: sampleStaging, DialHomeDir: sampleDialHome,
 		}
-		if fs.Mode == agentapi.DialHomeSSH {
+		switch fs.Mode {
+		case agentapi.DialHomeSSH:
 			c.SSH = &agentapi.SSHForward{User: fs.SSHUser, AgentPort: fs.AgentPort, DialHomePort: fs.DialHomePort}
+		case agentapi.DialHomeHostDialed:
+			c.Allocation = sampleUID
 		}
 		if _, err := c.Encode(); err != nil {
 			errs = append(errs, fmt.Errorf("agent.json for cpuArch %s: %w", arch, err))
@@ -383,10 +390,25 @@ func (w wiring) setupBatch(pm manager.Manager, provider string) error {
 		CredentialsDir: w.host.CredentialsDir(),
 		AgentBuildsDir: w.host.AgentBuildsDir(),
 		Front:          w.front,
+		Relays:         w.relaySettings(),
 		HubEndpoint:    w.hubEndpoint,
 		Log:            logging.NewLogrLogger(pm.GetLogger().WithName("provider").WithValues("provider", provider)),
 		Recorder:       event.NewAPIRecorder(eventcount.Legacy(pm.GetEventRecorderFor(v1alpha1.FieldManagerProvider), w.events, eventcount.ControllerProvider(provider))),
 	})
+}
+
+// relaySettings are host-dialed mode's relay settings for every batch
+// Provider (HBEP-6, Dial-home modes, host-dialed mode), nil in the other
+// modes: control relays dial the agent endpoint (base+3), serving relays the
+// dial-home listener (base+7); every Provider of this process takes its
+// relays' slots from one hostdial.SharedSlots, so the cap of 4 per login node
+// holds across Providers on one cluster; and the relays' ssh configuration
+// file is kept beside the ssh masters' sockets.
+func (w wiring) relaySettings() *providerctl.RelaySettings {
+	if w.front == nil || w.front.Mode != agentapi.DialHomeHostDialed {
+		return nil
+	}
+	return &providerctl.RelaySettings{Ports: w.host.RelayChannelPorts(), Slots: hostdial.SharedSlots, ControlDir: sshControlDir(w.host)}
 }
 
 // component is one part of the binary in the lifecycle controller's manager.

@@ -4,6 +4,7 @@
 // (HBEP-4, Submission):
 //
 //	hb-agent <allocation directory>
+//	hb-agent relay <channel> --dir <dir> --allocation <UID> --epoch <E> --seq <N>
 //	hb-agent -version
 //
 // It reads agent.json and the credential from that directory and the job's ID
@@ -19,8 +20,18 @@
 //
 // It is built statically, with CGO_ENABLED=0, for amd64 and arm64.
 //
-// Exit codes: 0 when it stopped on instruction or on a signal, 1 when it could
-// not start, 2 on a usage error.
+// In host-dialed mode (HBEP-6, Dial-home modes, host-dialed mode) the same
+// binary is also each relay's program, in an srun step that the batch
+// Provider's controller starts from the login node: "hb-agent relay
+// <channel> ..." reads the agent's socket from the Allocation directory's
+// relay-socket, which the agent wrote, and hands the step's standard input
+// and output over. It writes nothing else to standard output, which carries
+// the preamble and then the channel's multiplexed session.
+//
+// Exit codes: 0 when it stopped on instruction or on a signal (a relay: when
+// its session ended), 1 when it could not start, 2 on a usage error; a relay
+// also exits 4 when the agent is not ready (hostdial.ExitNotReady) and 5 when
+// the agent keeps a newer relay (hostdial.ExitSuperseded).
 package main
 
 import (
@@ -38,6 +49,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/engine"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/stage"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/hostdial"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -45,7 +57,32 @@ import (
 var version = "dev"
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == agentapi.RelaySubcommand {
+		os.Exit(relay(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+	}
 	os.Exit(run(os.Args[1:], os.Getenv, os.Stderr))
+}
+
+// relay is "hb-agent relay <channel> --dir <dir> --allocation <UID> --epoch
+// <E> --seq <N>" (HBEP-6, Dial-home modes, host-dialed mode): it reads the
+// agent's socket from <dir>/relay-socket, checks the agent's greeting, says
+// its channel and fence, and on acceptance writes the preamble and pipes the
+// step's standard streams to the socket. Everything it says goes to stderr,
+// its first line hostdial.RelayMessage's, which names no path; its exit code
+// says superseded or agent not ready (hostdial.ExitCode). stdout is the
+// session.
+func relay(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	a, err := agentapi.ParseRelayArgs(args)
+	if err != nil {
+		fmt.Fprintln(stderr, "usage: hb-agent relay control|serving --dir <Allocation directory> --allocation <UID> --epoch <E> --seq <N>:", err)
+		return 2
+	}
+	if err := hostdial.Relay(a, stdin, stdout); err != nil {
+		fmt.Fprintln(stderr, hostdial.RelayMessage(a, err))
+		fmt.Fprintln(stderr, "hb-agent relay "+string(a.Channel)+":", err)
+		return hostdial.ExitCode(err)
+	}
+	return 0
 }
 
 func run(args []string, getenv func(string) string, stderr io.Writer) int {

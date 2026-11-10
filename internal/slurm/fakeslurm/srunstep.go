@@ -46,7 +46,10 @@ type stepSpec struct {
 	args        []string
 	dir         string
 	env         []string
-	stdin       []byte
+	// stdin is the step's whole standard input, for a buffered step; stream,
+	// when set, replaces it and the output caps (srunstream.go).
+	stdin  []byte
+	stream *stepStream
 
 	proc                      *procAPI
 	sweepLimit, sweepInterval time.Duration
@@ -117,6 +120,11 @@ type srunStep struct {
 	overOnce                 sync.Once
 	over                     chan struct{} // closed when a stream passes the cap
 	inDone, outDone, errDone chan struct{}
+
+	// A streamed step (srunstream.go): spec.stream is set, outCap and errCap
+	// stay empty, and over never closes.
+	stream *stepStream
+	sx     streamState
 }
 
 // startStep starts the program in a session of its own, with the given
@@ -149,6 +157,13 @@ func startStep(spec stepSpec) (*srunStep, error) {
 		spec: spec, cmd: cmd, pid: cmd.Process.Pid, stdin: inW, outR: outR, errR: errR,
 		over:   make(chan struct{}),
 		inDone: make(chan struct{}), outDone: make(chan struct{}), errDone: make(chan struct{}),
+		stream: spec.stream,
+	}
+	if st.stream != nil {
+		go st.pumpIn(inW, st.stream.in)
+		go st.pumpOut(outR, st.stream.out, !st.stream.unbuf, 1, st.outDone)
+		go st.pumpOut(errR, st.stream.err, false, 2, st.errDone)
+		return st, nil
 	}
 	onOver := func() { st.overOnce.Do(func() { close(st.over) }) }
 	go func() { // a program that never reads its input leaves this blocked until finish closes the pipe
@@ -163,12 +178,19 @@ func startStep(spec stepSpec) (*srunStep, error) {
 
 // finish follows the step to its end and cleans up, and returns what it left.
 // It is called with mu released. The step ends when its program exits, when
-// ctx or timeout ends the Run call, when limit (--time, 0 for none) passes,
-// when jobGone is closed (the job's batch shell exited: a Slurm step does not
-// outlive its job) or when it passes the output cap. Whatever the reason, no
-// process of the step is left when it returns, unless out.err says so.
+// ctx or timeout (0 for none, a streamed step's) ends the call, when limit
+// (--time, 0 for none) passes, when jobGone is closed (the job's batch shell
+// exited: a Slurm step does not outlive its job) or when it passes the output
+// cap. Whatever the reason, no process of the step is left when it returns,
+// unless out.err says so.
 func (st *srunStep) finish(parent context.Context, timeout, limit time.Duration, jobGone <-chan struct{}) stepOutcome {
-	ctx, cancel := context.WithTimeout(parent, timeout)
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(parent, timeout)
+	} else {
+		ctx, cancel = context.WithCancel(parent)
+	}
 	defer cancel()
 	exited := make(chan error, 1)
 	go func() { exited <- waitExit(st.pid) }()
@@ -237,6 +259,10 @@ func (st *srunStep) abandon(out stepOutcome, cause error) stepOutcome {
 // goroutines on them, and waits for those goroutines, after a short grace for
 // the streams to run dry when the step's processes have all exited.
 func (st *srunStep) closeAll() {
+	if st.stream != nil {
+		st.closeStream()
+		return
+	}
 	dry := make(chan struct{})
 	go func() {
 		<-st.outDone

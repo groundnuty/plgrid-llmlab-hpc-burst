@@ -106,7 +106,9 @@ type Call struct {
 	// ["cat", ">", "f"].
 	Words []string
 	// StdinLen is the length of the standard input of a cat command or an
-	// srun step, the two that read it; the content is never stored.
+	// srun step, the two that read it; the content is never stored. For a
+	// streamed srun (Stream) it is the bytes the step's input has got, final
+	// when Stream returns.
 	StdinLen int
 	Time     time.Time
 }

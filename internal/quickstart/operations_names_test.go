@@ -109,6 +109,8 @@ var guideNames = map[string]string{
 
 	// Provider conditions and reasons (HBEP-4; HBEP-11, Credentials).
 	"ReadsFailing":        v1alpha1.ReasonReadsFailing,
+	"LoginHostInUse":      v1alpha1.ReasonLoginHostInUse,
+	"RelayFailed":         v1alpha1.EventReasonRelayFailed,
 	"CredentialsInvalid":  v1alpha1.ConditionCredentialsInvalid,
 	"PathUnresolved":      v1alpha1.ConditionPathUnresolved,
 	"DialectMismatch":     v1alpha1.ConditionDialectMismatch,

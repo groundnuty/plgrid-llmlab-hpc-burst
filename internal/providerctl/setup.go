@@ -68,7 +68,14 @@ func New(kube client.Client, reader client.Reader, scheme *runtime.Scheme, o Opt
 		return nil, err
 	}
 	kube = client.WithFieldOwner(kube, v1alpha1.FieldManagerProvider)
-	s := &shared{o: o, kube: kube, reader: reader, builds: &buildCache{}}
+	relays, err := newRelayState(o)
+	if err != nil {
+		return nil, err
+	}
+	if relays != nil {
+		relays.reader = reader
+	}
+	s := &shared{o: o, kube: kube, reader: reader, builds: &buildCache{}, relays: relays}
 	s.h = &holder{o: &s.o}
 	opts := []managed.ReconcilerOption{
 		managed.WithExternalConnector(&connector{s: s}),
@@ -136,6 +143,23 @@ func Setup(mgr manager.Manager, o Options) error {
 		Complete(c.Reconciler)
 	if err != nil {
 		return err
+	}
+	if r := c.shared.relays; r != nil {
+		// The epoch is this copy's own acquisition's, and the relays stop by
+		// PID before any release of the Provider's Lease (HBEP-6, Fencing):
+		// the fence on the manager's own lock gives both.
+		if err := wireRelayFence(mgr, c); err != nil {
+			return err
+		}
+		// Leader-only: only the leader's relays run.
+		if err := mgr.Add(relayRunnable{c}); err != nil {
+			return err
+		}
+		// Not leader-only: the Provider enrolls for its login host when its
+		// manager starts, and leaves when it stops (HBEP-6, Capacity).
+		if err := mgr.Add(enrollRunnable{c}); err != nil {
+			return err
+		}
 	}
 	return mgr.Add(c.status)
 }

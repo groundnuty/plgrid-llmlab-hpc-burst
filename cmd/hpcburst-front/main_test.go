@@ -1,8 +1,11 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"log/slog"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -32,5 +35,32 @@ func TestOptionsSendThePathEventsToTheAPIServer(t *testing.T) {
 	}
 	if o.Recorder != front.Recorder(rec) || o.Kube != cs {
 		t.Errorf("Recorder %v, Kube %v: want the command's recorder and API client", o.Recorder, o.Kube)
+	}
+}
+
+// TestModeFlagTakesTheThreeDialHomeModes: --mode direct, ssh and host-dialed (HBEP-6, Dial-home
+// modes) pass the flag check, so run goes on to read the configuration, which is absent here and
+// fails as an ordinary error, never as a usage error; another value is a usage error that names
+// all three.
+func TestModeFlagTakesTheThreeDialHomeModes(t *testing.T) {
+	args := func(mode string) []string {
+		return []string{"--config", filepath.Join(t.TempDir(), "absent.json"), "--state-dir", t.TempDir(), "--port-base", "29440", "--mode", mode}
+	}
+	for _, mode := range []string{"direct", "ssh", "host-dialed"} {
+		err := run(args(mode))
+		var ue usageError
+		if err == nil || errors.As(err, &ue) {
+			t.Errorf("--mode %s: run = %v, want an error from reading the absent configuration, not a usage error", mode, err)
+		}
+	}
+	err := run(args("tunnel"))
+	var ue usageError
+	if !errors.As(err, &ue) {
+		t.Fatalf("--mode tunnel: run = %v, want a usage error", err)
+	}
+	for _, mode := range []string{"direct", "ssh", "host-dialed"} {
+		if !strings.Contains(err.Error(), mode) {
+			t.Errorf("--mode tunnel: the error %q does not name %s", err, mode)
+		}
 	}
 }

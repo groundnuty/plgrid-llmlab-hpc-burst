@@ -54,6 +54,25 @@ func TestUpAcceptsTheTopPortBase(t *testing.T) {
 	}
 }
 
+// TestUpAcceptsHostDialedWithoutAnAddress: --front-mode host-dialed alone passes the front's checks
+// (it has no address and no key, HBEP-6, Dial-home modes), so up goes on to the k3s binary, which an
+// empty --bin-dir lacks: the error is that one, before anything starts or binds.
+func TestUpAcceptsHostDialedWithoutAnAddress(t *testing.T) {
+	state := filepath.Join(shortTmp(t, false), "st")
+	r := cli(t, "up", "--state-dir", state, "--bin-dir", t.TempDir(), "--front-mode", "host-dialed")
+	if r.code != exitFail || strings.Contains(r.err, "front") || !strings.Contains(r.err, "k3s") {
+		t.Fatalf("exit %d, stderr %q; want the front accepted and the start stopped at the missing k3s binary", r.code, r.err)
+	}
+	// Direct still needs an address, and is refused before the binary is looked up.
+	r = cli(t, "up", "--state-dir", state, "--bin-dir", t.TempDir(), "--front-mode", "direct")
+	if r.code != exitFail || !strings.Contains(r.err, "--front-addr") {
+		t.Fatalf("direct without an address: exit %d, stderr %q; want a refusal naming --front-addr", r.code, r.err)
+	}
+	if _, err := os.Stat(filepath.Join(state, "state.json")); err == nil {
+		t.Error("a record was written")
+	}
+}
+
 // TestUpRejectsBadInputBeforeStarting: bad flags are refused at the boundary, with a message that
 // names what was wrong, before any binary is looked up or any process started.
 func TestUpRejectsBadInputBeforeStarting(t *testing.T) {
@@ -62,9 +81,13 @@ func TestUpRejectsBadInputBeforeStarting(t *testing.T) {
 		args []string
 		msg  string
 	}{
-		"front address without a mode":                 {[]string{"--front-addr", "front.example.test:8443"}, "front mode"},
-		"ssh without a key":                            {[]string{"--front-mode", "ssh", "--front-addr", "front.example.test"}, "--front-key"},
-		"ssh on port 99999":                            {[]string{"--front-mode", "ssh", "--front-addr", "front.example.test:99999", "--front-key", "/dev/null"}, "not a port"},
+		"front address without a mode": {[]string{"--front-addr", "front.example.test:8443"}, "front mode"},
+		"ssh without a key":            {[]string{"--front-mode", "ssh", "--front-addr", "front.example.test"}, "--front-key"},
+		"ssh on port 99999":            {[]string{"--front-mode", "ssh", "--front-addr", "front.example.test:99999", "--front-key", "/dev/null"}, "not a port"},
+		// Host-dialed has no address and no key: the host dials the jobs (HBEP-6, Dial-home modes).
+		"host-dialed with an address":                  {[]string{"--front-mode", "host-dialed", "--front-addr", "front.example.test:22"}, "takes no --front-addr"},
+		"host-dialed with a key":                       {[]string{"--front-mode", "host-dialed", "--front-key", "/dev/null"}, "takes no key"},
+		"an unknown mode names the three":              {[]string{"--front-mode", "tunnel", "--front-addr", "front.example.test:22"}, "direct, ssh or host-dialed"},
 		"port base too low":                            {[]string{"--port-base", "80"}, "out of range"},
 		"port base leaves no room for the controllers": {[]string{"--port-base", "65530"}, "out of range"},
 		// The block of 13 ends at base+12, the controller's metrics: 65524 would put it at 65536.

@@ -4,17 +4,22 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/hostdial"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // transport is the agent's dial-home transport (HBEP-6, Dial-home modes): the
 // control client, and frpc, which serves the Instance the agent is told to
 // serve. In ssh mode two forwards carry them, each in its own reconnect loop:
-// connection 1 the control client's traffic, connection 2 frpc's.
+// connection 1 the control client's traffic, connection 2 frpc's. In
+// host-dialed mode the agent's two loopback listeners carry them, over the
+// relays the batch Provider's controller starts (hostdial.Job).
 type transport struct {
 	client *agent.Client
 	frpc   *agent.Frpc
@@ -56,7 +61,7 @@ func startTransport(job agent.Job, runDir, aid string, getenv func(string) strin
 		JobID:           job.JobID,
 		AgentInstanceID: aid,
 	}
-	// frpc runs in both modes, staged by digest, with the launcher's
+	// frpc runs in every mode, staged by digest, with the launcher's
 	// certificate in the Allocation's directory (HBEP-6, frpc in the job).
 	t.frpc = &agent.Frpc{
 		Binary:         job.Config.FrpcPath(),
@@ -70,7 +75,12 @@ func startTransport(job agent.Job, runDir, aid string, getenv func(string) strin
 		Logger:         log,
 	}
 	var control *agent.SSHForward
-	if job.Config.Mode == agentapi.DialHomeSSH {
+	switch job.Config.Mode {
+	case agentapi.DialHomeHostDialed:
+		if err := t.startHostDialed(job, getenv("TMPDIR"), &co, log); err != nil {
+			return t, err
+		}
+	case agentapi.DialHomeSSH:
 		sshBin, err := lookTool(getenv("HPCBURST_SSH"), "ssh")
 		if err != nil {
 			return t, err
@@ -84,7 +94,7 @@ func startTransport(job agent.Job, runDir, aid string, getenv func(string) strin
 		t.start(log, "the tunnel forward", tunnel.Run)
 		co.Dial = control.Dial
 		t.frpc.Server = agent.ForwardServer(tunnel)
-	} else {
+	default:
 		server, err := agent.DirectServer(job.Config.Endpoint)
 		if err != nil {
 			return t, err
@@ -104,4 +114,32 @@ func startTransport(job agent.Job, runDir, aid string, getenv func(string) strin
 	// and the controller ends it with TunnelNotConnected (HBEP-6, Path state).
 	t.start(log, "frpc (the Instance cannot be reached, and ends with TunnelNotConnected)", t.frpc.Run)
 	return t, nil
+}
+
+// startHostDialed binds the agent's two loopback listeners and its relay
+// socket, publishes the socket in the Allocation's directory, and points the
+// control client and frpc at the listeners (HBEP-6, Dial-home modes,
+// host-dialed mode). Both ports are the kernel's, taken once, kept for the
+// Allocation's life, and never change when a relay restarts, so frpc is
+// never restarted for a relay. tmp is the job's TMPDIR as set, not the
+// agent's /tmp default: an unset one is the bootstrap's misconfiguration,
+// and the socket has no place (hostdial.ErrNoSocketDir), so the agent stops
+// at once instead of holding the job's GPU until its registration deadline.
+func (t *transport) startHostDialed(job agent.Job, tmp string, co *agent.ClientOptions, log *slog.Logger) error {
+	j, err := hostdial.StartJob(hostdial.JobOptions{TmpDir: tmp, AllocDir: job.AllocDir, Allocation: job.Config.Allocation, Logger: log})
+	if err != nil {
+		return err
+	}
+	t.stops = append(t.stops, func() { _ = j.Close() })
+	control := j.Addr(agentapi.RelayControl)
+	co.Dial = func(ctx context.Context) (net.Conn, error) {
+		d := net.Dialer{Timeout: 10 * time.Second}
+		return d.DialContext(ctx, "tcp4", control)
+	}
+	port := j.Port(agentapi.RelayServing)
+	t.frpc.Server = func() (agent.FrpcTarget, <-chan struct{}) {
+		return agent.FrpcTarget{Host: "127.0.0.1", Port: port, Ready: true}, nil
+	}
+	log.Info("host-dialed: listening for the relays", "control", control, "serving", port, "socket", j.Socket())
+	return nil
 }

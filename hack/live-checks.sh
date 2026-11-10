@@ -92,8 +92,9 @@
 #                                the grant account of each job kind
 #   The alpha rows (issue #194; docs/alpha-runbook.md) also read, for the rows that run the stack
 #   (alpha-*, tunnel-hour-*):
-#   LIVE_DIALHOME_MODE           direct or ssh: how the jobs reach the host (HBEP-6)
-#   LIVE_DIALHOME_ADDR           host:port of the dial-home route, as the compute nodes see it
+#   LIVE_DIALHOME_MODE           direct, ssh or host-dialed: how the jobs and the host reach each other (HBEP-6)
+#   LIVE_DIALHOME_ADDR           host:port of the dial-home route, as the compute nodes see it; direct and ssh need it,
+#                                host-dialed has none because the host dials the jobs, and refuses one that is set
 #   LIVE_DIALHOME_KEY            ssh mode only: the restricted dial-home key file, mode 600
 #   LIVE_DIALHOME_LISTEN         direct mode: host:port of the front's dial-home listener on this host, where the
 #                                owner's route arrives; a direct run without it fails at its first step, naming it
@@ -653,17 +654,24 @@ check_reach_settings() {
 # is reported. #174 (no-overlap queue-wait growth) needs no setting: it is on main (#208), and so in every
 # checkout that has these rows.
 check_alpha_settings() {
-  local name=$1 bad=0 mode
+  local name=$1 bad=0 mode host_dialed=0
   alpha_need() { [ -n "${S[$1]:-}" ] || { say "live-checks: setting $1 is missing"; bad=1; return 1; }; }
   if alpha_need LIVE_DIALHOME_MODE; then
     mode=${S[LIVE_DIALHOME_MODE]}
     case $mode in
       direct) ;;
       ssh) alpha_need LIVE_DIALHOME_KEY && { private_file LIVE_DIALHOME_KEY "${S[LIVE_DIALHOME_KEY]}" || bad=1; } ;;
-      *) say "live-checks: LIVE_DIALHOME_MODE must be direct or ssh"; bad=1 ;;
+      host-dialed) host_dialed=1 ;;
+      *) say "live-checks: LIVE_DIALHOME_MODE must be direct, ssh or host-dialed"; bad=1 ;;
     esac
   fi
-  alpha_need LIVE_DIALHOME_ADDR && { [[ ${S[LIVE_DIALHOME_ADDR]} =~ ^[A-Za-z0-9._-]+:[0-9]{1,5}$ ]] || { say "live-checks: LIVE_DIALHOME_ADDR must be host:port"; bad=1; }; }
+  if [ "$host_dialed" = 1 ]; then
+    # No address and no key: the host dials the jobs through the login node (HBEP-6, Dial-home modes). An
+    # address that is set is refused, so a row cannot read as if it had one.
+    [ -z "${S[LIVE_DIALHOME_ADDR]:-}" ] || { say "live-checks: LIVE_DIALHOME_ADDR must not be set in host-dialed mode: the host dials the jobs, so the mode has no address"; bad=1; }
+  else
+    alpha_need LIVE_DIALHOME_ADDR && { [[ ${S[LIVE_DIALHOME_ADDR]} =~ ^[A-Za-z0-9._-]+:[0-9]{1,5}$ ]] || { say "live-checks: LIVE_DIALHOME_ADDR must be host:port"; bad=1; }; }
+  fi
   if alpha_need LIVE_BIN_DIR; then
     case ${S[LIVE_BIN_DIR]} in /*) [ -d "${S[LIVE_BIN_DIR]}" ] || { say "live-checks: LIVE_BIN_DIR is not a directory"; bad=1; } ;; *) say "live-checks: LIVE_BIN_DIR must be an absolute path"; bad=1 ;; esac
   fi
@@ -1081,15 +1089,17 @@ env_alpha() {
   export HPCBURST_ALPHA_ACCOUNT=${S[${ACCTKEY[$n]}]} HPCBURST_ALPHA_CREDENTIALS=${S[LIVE_CONF_CREDENTIALS_$up]}
   export HPCBURST_ALPHA_HOST_LOCK=${S[LIVE_LOCK_DIR]}/$host.lock HPCBURST_ALPHA_CONTROL_DIR=$CONTROL_DIR
   export HPCBURST_ALPHA_OUT=$REC_DIR HPCBURST_ALPHA_BIN_DIR=${S[LIVE_BIN_DIR]} HPCBURST_ALPHA_BUILD_DIR=${ALPHA_BUILD_DIR:-}
-  export HPCBURST_ALPHA_DIALHOME_MODE=${S[LIVE_DIALHOME_MODE]} HPCBURST_ALPHA_DIALHOME_ADDR=${S[LIVE_DIALHOME_ADDR]}
+  export HPCBURST_ALPHA_DIALHOME_MODE=${S[LIVE_DIALHOME_MODE]}
   export HPCBURST_ALPHA_PENDING_MAX_SECONDS=$(pending_max "$n") HPCBURST_ALPHA_RUN_ID=$RUN_ID
   export_front_label "$n"
   # A tunnel row's lease, in minutes, as the shape holds it (after LIVE_TUNNEL_LEASE_MINUTES): the test judges that value.
   case $n in
     tunnel-hour-*) local lh lm; IFS=: read -r lh lm _ <<<"${TLIMIT[$n]}"; export HPCBURST_ALPHA_LEASE_MINUTES=$((10#$lh * 60 + 10#$lm)) ;;
   esac
-  unset HPCBURST_ALPHA_QOS HPCBURST_ALPHA_DIALHOME_KEY HPCBURST_ALPHA_DIALHOME_LISTEN
+  unset HPCBURST_ALPHA_QOS HPCBURST_ALPHA_DIALHOME_ADDR HPCBURST_ALPHA_DIALHOME_KEY HPCBURST_ALPHA_DIALHOME_LISTEN
   [ "${QOS[$n]}" = - ] || export HPCBURST_ALPHA_QOS=${QOS[$n]}
+  # Host-dialed mode has no address: the host dials the jobs, so none is passed.
+  [ "${S[LIVE_DIALHOME_MODE]}" = host-dialed ] || export HPCBURST_ALPHA_DIALHOME_ADDR=${S[LIVE_DIALHOME_ADDR]}
   [ -z "${S[LIVE_DIALHOME_LISTEN]:-}" ] || export HPCBURST_ALPHA_DIALHOME_LISTEN=${S[LIVE_DIALHOME_LISTEN]}
   [ "${S[LIVE_DIALHOME_MODE]}" != ssh ] || export HPCBURST_ALPHA_DIALHOME_KEY=${S[LIVE_DIALHOME_KEY]}
 }

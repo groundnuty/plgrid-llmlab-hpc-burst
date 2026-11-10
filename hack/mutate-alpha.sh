@@ -632,6 +632,23 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'internal/providerctl/conformance/reach_run_test.go@@			if !bytes.Equal(b, payload) && holds(b) {@@			if false && holds(b) {'
   'internal/providerctl/conformance/reach_run_test.go@@	if plat != nil {@@	if false {'
   'internal/providerctl/conformance/testdata/reach-probe.sh@@  SSH-) echo ssh; exit 0 ;;@@  SSX-) echo ssh; exit 0 ;;'
+  'config.go@@if getenv(envAddr) != "" {@@if getenv(envAddr) == "x" {'
+  'config.go@@case "host-dialed":@@case "host-dialedX":'
+  'config.go@@cfg.DialHomeAddr, cfg.DialHomeKey = need(envAddr), need(envKey)@@cfg.DialHomeAddr, cfg.DialHomeKey = "", need(envKey)'
+  'config.go@@cfg.DialHomeAddr, cfg.DialHomeKey = need(envAddr), need(envKey)@@cfg.DialHomeAddr, cfg.DialHomeKey = need(envAddr), getenv(envKey)'
+  'config.go@@case "", "direct":@@case "direct":'
+  'config.go@@cfg.DialHomeAddr = need(envAddr)@@cfg.DialHomeAddr = getenv(envAddr)'
+  'config.go@@bad = append(bad, envMode+" must be direct, ssh or host-dialed")@@bad = append(bad, envMode+" must be direct or ssh")'
+  'hack/live-checks.sh@@host-dialed) host_dialed=1 ;;@@host-dialed) ;;'
+  'hack/live-checks.sh@@LIVE_DIALHOME_MODE must be direct, ssh or host-dialed"; bad=1 ;;@@LIVE_DIALHOME_MODE must be direct or ssh"; bad=1 ;;'
+  'hack/live-checks.sh@@LIVE_DIALHOME_MODE must be direct, ssh or host-dialed"; bad=1 ;;@@LIVE_DIALHOME_MODE must be direct, ssh or host-dialed" ;;'
+  'hack/live-checks.sh@@[ -z "${S[LIVE_DIALHOME_ADDR]:-}" ] || {@@true || {'
+  'hack/live-checks.sh@@so the mode has no address"; bad=1; }@@so the mode has no address"; }'
+  'hack/live-checks.sh@@if [ "$host_dialed" = 1 ]; then@@if false; then'
+  'hack/live-checks.sh@@if [ "$host_dialed" = 1 ]; then@@if true; then'
+  'hack/live-checks.sh@@unset HPCBURST_ALPHA_QOS HPCBURST_ALPHA_DIALHOME_ADDR HPCBURST_ALPHA_DIALHOME_KEY@@unset HPCBURST_ALPHA_QOS HPCBURST_ALPHA_DIALHOME_KEY'
+  'hack/live-checks.sh@@[ "${S[LIVE_DIALHOME_MODE]}" = host-dialed ] || export HPCBURST_ALPHA_DIALHOME_ADDR@@[ "${S[LIVE_DIALHOME_MODE]}" = host-dialedX ] || export HPCBURST_ALPHA_DIALHOME_ADDR'
+  'hack/live-checks.sh@@export HPCBURST_ALPHA_DIALHOME_MODE=${S[LIVE_DIALHOME_MODE]}@@export HPCBURST_ALPHA_DIALHOME_MODE=direct'
   # #285 (the ruling on PR 292): the live steps report their watch's real resets. A stand-in run has none, and compared the post with the same call.
   'steps_live_test.go@@func (r *liveRun) WatchResets() int { return r.watch.ResetCount() }@@func (r *liveRun) WatchResets() int { return 0 }'
   # #285, PR 302's review: the same method, as a constant that is not 0 and as another run's Recorder (the previous run's), which a test whose cases
@@ -654,7 +671,7 @@ compile_of() {
   esac
 }
 # The tests of the script's kind.
-script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot'
+script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot|HostDialedMode'
 # tests_of <path> [control|<names>]: the command that judges a mutant of path, in the array tests. With control, the same command with
 # no mutant: from the binaries kept at the baseline, the tree being as it was. With names (a regexp), that, for those tests alone, to
 # the end. The

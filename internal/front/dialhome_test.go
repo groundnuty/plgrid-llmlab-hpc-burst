@@ -9,7 +9,10 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,21 +58,50 @@ func writeAgentCert(t *testing.T, host agentapi.Host) *x509.Certificate {
 	return c
 }
 
-func TestDialHomeAddrDefaultsInSSHModeOnly(t *testing.T) {
+// TestDialHomeAddrDefaultsToLoopbackExceptInDirectMode: ssh and host-dialed mode default to
+// 127.0.0.1:<base+7>, where the ssh key's forward or the host's relay arrives (HBEP-5, Listeners;
+// HBEP-6, Dial-home modes); direct mode has no default.
+func TestDialHomeAddrDefaultsToLoopbackExceptInDirectMode(t *testing.T) {
 	c := Config{}
 	host := agentapi.Host{PortBase: 29220}
 	// The ruling: 127.0.0.1:<base+7>, 29227 at the launcher's default base 29220.
-	if got, err := c.DialHomeAddr(ModeSSH, host); err != nil || got != "127.0.0.1:29227" {
-		t.Errorf("ssh default = %q, %v; want 127.0.0.1:29227", got, err)
+	for _, mode := range []string{ModeSSH, ModeHostDialed} {
+		if got, err := c.DialHomeAddr(mode, host); err != nil || got != "127.0.0.1:29227" {
+			t.Errorf("%s default = %q, %v; want 127.0.0.1:29227", mode, got, err)
+		}
 	}
 	if _, err := c.DialHomeAddr(ModeDirect, host); err == nil || !strings.Contains(err.Error(), "dialHomeListen") {
 		t.Errorf("direct mode with no dialHomeListen must be refused, got %v", err)
+	}
+	if _, err := c.DialHomeAddr(ModeHostDialed, agentapi.Host{}); err == nil || !strings.Contains(err.Error(), "port base") {
+		t.Errorf("host-dialed mode with no listener and no port base must be refused, got %v", err)
 	}
 	c.DialHomeListen = "0.0.0.0:7443"
 	for _, mode := range []string{ModeDirect, ModeSSH, ""} {
 		if got, _ := c.DialHomeAddr(mode, host); got != "0.0.0.0:7443" {
 			t.Errorf("mode %q: an explicit dialHomeListen is used as given, got %q", mode, got)
 		}
+	}
+}
+
+// TestHostDialedRefusesAnotherDialHomeListener: in host-dialed mode the serving
+// relays dial only 127.0.0.1:<base+7> (HBEP-6, Dial-home modes), so a listener
+// anywhere else is refused, naming the address it must be; that address
+// itself, given explicitly, is accepted (review of PR 301, F4).
+func TestHostDialedRefusesAnotherDialHomeListener(t *testing.T) {
+	host := agentapi.Host{PortBase: 29220}
+	for _, listen := range []string{"0.0.0.0:7443", "127.0.0.1:7443", "0.0.0.0:29227", "127.0.0.2:29227", "localhost:29227"} {
+		c := Config{DialHomeListen: listen}
+		if got, err := c.DialHomeAddr(ModeHostDialed, host); err == nil || !strings.Contains(err.Error(), "127.0.0.1:29227") {
+			t.Errorf("host-dialed with dialHomeListen %q: %q, %v; want a refusal naming 127.0.0.1:29227", listen, got, err)
+		}
+	}
+	c := Config{DialHomeListen: "127.0.0.1:29227"}
+	if got, err := c.DialHomeAddr(ModeHostDialed, host); err != nil || got != "127.0.0.1:29227" {
+		t.Errorf("host-dialed with the relays' own address: %q, %v", got, err)
+	}
+	if _, err := (Config{DialHomeListen: "127.0.0.1:29227"}).DialHomeAddr(ModeHostDialed, agentapi.Host{}); err == nil {
+		t.Error("host-dialed with a listener and no port base to check it against was accepted")
 	}
 }
 
@@ -138,9 +170,78 @@ func TestRunListensOnTheSSHDefault(t *testing.T) {
 	conn.Close()
 }
 
-func TestDialHomeTLSIsRequiredInBothModes(t *testing.T) {
+// kernelPortBase is a launcher port base whose dial-home port, base+7, the kernel just gave out
+// and nothing holds now, so a test of the default listener needs no fixed port.
+func kernelPortBase(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port - agentapi.DialHomePortOffset
+}
+
+// TestRunDialHomeListenerOfSSHAndHostDialedMode: in ssh mode and in host-dialed mode (HBEP-6,
+// Dial-home modes) with no dialHomeListen, the dial-home listener is 127.0.0.1:<base+7>, terminates
+// TLS with the agent endpoint's certificate, and answers 404 under /agent/v1/, because the agent
+// reaches the agent endpoint through its forward or through a relay and never through this
+// listener. The expected address is the base plus 7, written out from the HBEP, with a base the
+// kernel's free port gives.
+func TestRunDialHomeListenerOfSSHAndHostDialedMode(t *testing.T) {
+	for _, mode := range []string{ModeSSH, ModeHostDialed} {
+		t.Run(mode, func(t *testing.T) {
+			base := kernelPortBase(t)
+			want := fmt.Sprintf("127.0.0.1:%d", base+7)
+			host := agentapi.Host{StateDir: t.TempDir(), PortBase: base}
+			cert := writeAgentCert(t, host)
+			ctx, cancel := context.WithCancel(context.Background())
+			ready := make(chan *Front, 1)
+			o := runOptions(t, mode, host, "")
+			o.Ready = func(f *Front) { ready <- f }
+			done := make(chan error, 1)
+			go func() { done <- Run(ctx, o) }()
+			var f *Front
+			select {
+			case f = <-ready:
+			case err := <-done:
+				t.Fatalf("Run returned early: %v", err)
+			case <-time.After(10 * time.Second):
+				t.Fatal("the front did not start")
+			}
+			defer func() { cancel(); <-done }()
+			if got := f.Dial.String(); got != want {
+				t.Fatalf("dial-home listener on %s, want %s", got, want)
+			}
+			client := &http.Client{Transport: &http.Transport{TLSClientConfig: agentapi.ClientTLSConfig(agentapi.PinOf(cert))}, Timeout: 10 * time.Second}
+			defer client.CloseIdleConnections()
+			for _, path := range []string{"/agent/v1/desired", "/agent/v1/register"} {
+				resp, err := client.Get("https://" + want + path)
+				if err != nil {
+					t.Fatalf("GET %s over TLS pinned to the agent endpoint's certificate: %v", path, err)
+				}
+				resp.Body.Close()
+				if resp.StatusCode != http.StatusNotFound {
+					t.Errorf("GET %s answered %d, want 404: the agent endpoint is not passed through in %s mode", path, resp.StatusCode, mode)
+				}
+			}
+			// Plain HTTP to the TLS listener is not an answer from the handler: TLS is required.
+			plain, err := http.Get("http://" + want + "/agent/v1/desired")
+			if err == nil {
+				plain.Body.Close()
+				if plain.StatusCode == http.StatusNotFound {
+					t.Errorf("a plain HTTP request was answered by the handler: the listener is not TLS in %s mode", mode)
+				}
+			}
+		})
+	}
+}
+
+// TestDialHomeTLSIsRequiredInEveryMode: all three recorded modes need the agent endpoint's certificate
+// (HBEP-6, Dial-home modes); with no mode recorded the listener is plain.
+func TestDialHomeTLSIsRequiredInEveryMode(t *testing.T) {
 	host := agentapi.Host{StateDir: t.TempDir(), PortBase: 29220}
-	for _, mode := range []string{ModeDirect, ModeSSH} {
+	for _, mode := range []string{ModeDirect, ModeSSH, ModeHostDialed} {
 		if _, err := dialHomeTLS(mode, host); err == nil {
 			t.Errorf("mode %s with no certificate: accepted", mode)
 		}

@@ -271,9 +271,14 @@ func (r *Reconciler) slots() *slotTable {
 	return r.slotTab
 }
 
-// submitLimitText names a Provider's submit limit and the QOS that set it.
+// submitLimitText names a Provider's submit limit and what set it: the QOS, or
+// the host-dialed cap (hostDialedLimits).
 func submitLimitText(pv *providerView) string {
-	return fmt.Sprintf("%s %d of QOS %s", v1alpha1.LimitMaxSubmitPerUser, *pv.limits.MaxSubmitPerUser, pv.limits.From[v1alpha1.LimitMaxSubmitPerUser])
+	limit, from := *pv.limits.MaxSubmitPerUser, pv.limits.From[v1alpha1.LimitMaxSubmitPerUser]
+	if from == hostDialedLimitSource {
+		return fmt.Sprintf("%s %d (%s)", v1alpha1.LimitMaxSubmitPerUser, limit, from)
+	}
+	return fmt.Sprintf("%s %d of QOS %s", v1alpha1.LimitMaxSubmitPerUser, limit, from)
 }
 
 // reserveSlot reserves a slot on the Provider for the Allocation name in the

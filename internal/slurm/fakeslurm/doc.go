@@ -42,15 +42,18 @@
 //     sha256sum, umask, mkdir -p, chmod, mv -f and mv -fT, rm -f, rm -rf and test -f.
 //     Anything else is exit 127, "command not found". Options the plugin never
 //     sends are refused (exit 1), so an unexpected flag cannot pass silently;
-//   - srun is "srun --overlap --jobid=<digits> [--ntasks=1] [--time=<t>]
-//     <program> [args...]", the options in any order, each in the one form
-//     shown (--jobid=<id>, never "--jobid <id>"). The program and its words
-//     follow the first word that is not an option and are not read, so
+//   - srun is "srun [-u] --overlap --jobid=<digits> [--ntasks=1]
+//     [--time=<t>] <program> [args...]", the options in any order, each in the
+//     one form shown (--jobid=<id>, never "--jobid <id>"). The program and its
+//     words follow the first word that is not an option and are not read, so
 //     "bash -s" is the program's own. --overlap and --jobid are required,
-//     --ntasks takes only 1, and any other option is refused with exit 1. The
-//     program's standard input is the Command's Stdin (a script for "bash
-//     -s"), and the call log keeps its length. See "srun" under Run mode: it
-//     runs a host process, so it needs run mode.
+//     --ntasks takes only 1, and any other option is refused with exit 1. -u
+//     (unbuffered) is accepted and recorded; it changes nothing for Run, whose
+//     output comes back whole, and decides whether Stream line-buffers the
+//     step's standard output. The program's standard input is the Command's
+//     Stdin (a script for "bash -s"), and the call log keeps its length. See
+//     "srun" under Run mode: it runs a host process, so it needs run mode.
+//     Session.Stream runs the same line as a duplex stream (see Run mode).
 //
 // Job IDs count up from 1001, or from Config.FirstJobID when it is set. Fakes
 // of different tests that run at once on one machine set it apart, so that a
@@ -60,10 +63,12 @@
 //
 // One rule: a simple command is logged when it actually begins to run on the
 // login node, after any gate has released it. A command that a fault refused
-// (FailNext), that failed to parse, or whose context ended while it waited at a
-// gate is not in Calls; refused ones are in Faulted. Count and CountFor count
-// calls by their first word. Standard input is never stored: a Call keeps only
-// its length. Tests count sbatch from this log, never from return values.
+// (FailNext), that failed to parse, that Stream refused as not one srun
+// command, or whose context ended while it waited at a gate is not in Calls;
+// refused ones are in Faulted. Count and CountFor count calls by their first
+// word. Standard input is never stored: a Call keeps only its length (a
+// streamed srun's is the bytes its step's input got). Tests count sbatch from
+// this log, never from return values.
 //
 // # Concurrency
 //
@@ -287,6 +292,35 @@
 //     escapes, and one that holds the step's output open is waited for two
 //     seconds, then left. A sweep that cannot tell that the processes are gone
 //     makes Run return an error that wraps slurm.ErrTransport.
+//   - Session.Stream runs one srun line as a duplex stream, for HBEP-6's
+//     host-dialed relay (issue #298): "srun -u --overlap --jobid=<id>
+//     --ntasks=1 <agent> relay <channel>" with one multiplexed session over
+//     the step's standard input and output for the job's whole life. The line
+//     must be exactly one simple command whose first word is srun, with no "
+//     && " and no redirection: a line that does not parse is exit 2, anything
+//     else that is not one srun command exit 1, each with a message on
+//     standard error and nothing run, and not in the call log. Faults, gates
+//     and srun's own checks apply as for Run. The step is the same host
+//     process, in a session of its own, with the job's environment; what
+//     differs is its input, its output and its end. Its standard input is fed
+//     from an io.Reader as bytes arrive, and the end of the reader closes the
+//     step's input while its output goes on (half-close). Its standard output
+//     and error are written to io.Writers as they arrive, with no cap on the
+//     total and nothing buffered beyond one read. Without -u, standard output
+//     is line-buffered as real srun's is: the bytes after the last newline
+//     are held until a newline arrives or the step's standard output ends
+//     (the probe of 9 Nov 2026: without -u, srun held output that ends
+//     without a newline until the stream closed); with -u nothing is held.
+//     Standard error always passes through. There is no Command.Timeout and no
+//     time bound but --time: the call ends when the program exits (its exit
+//     status, 128 plus the signal for a signal), when the context ends (the
+//     step's session is killed and the error is the context's, as for Run),
+//     when the job's batch shell exits (exit 1, "Job step aborted") or when
+//     --time passes. It returns only when no process of the step is left,
+//     with the limit of a job's, and both output copies have finished; a
+//     consumer that stopped reading is let go two seconds after the context
+//     ended. mu is not held while it streams. The call's StdinLen is the
+//     number of bytes the step's input got, final when Stream returns.
 //   - A host that dies without Close (SIGKILL, SIGTERM, a -test.timeout panic,
 //     an out-of-memory kill) takes each job's batch shell and each step's
 //     program with it: they are started with a parent-death signal of KILL,

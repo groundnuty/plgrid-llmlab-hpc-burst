@@ -39,6 +39,7 @@ func TestPrintStatusFrontAndController(t *testing.T) {
 		return b.String()
 	}
 	addr := &launcher.Front{Mode: "direct", Addr: "front.example.test:8443"}
+	hostDialed := &launcher.Front{Mode: "host-dialed"}
 	frontLines := func(out string) []string {
 		var got []string
 		for _, l := range strings.Split(out, "\n") {
@@ -58,6 +59,11 @@ func TestPrintStatusFrontAndController(t *testing.T) {
 			[]string{"front: absent (no front runs here; the recorded address is direct front.example.test:8443)"}},
 		{"a front and an address", &launcher.StatusReport{Health: launcher.Healthy, Version: "v1", Front: addr}, []string{"front: direct front.example.test:8443"}},
 		{"a front, no address", &launcher.StatusReport{Health: launcher.Healthy, Version: "v1", Front: &launcher.Front{}}, []string{"front: not recorded"}},
+		// Host-dialed has no address, because the host dials the jobs (HBEP-6, Dial-home modes).
+		{"a host-dialed front", &launcher.StatusReport{Health: launcher.Healthy, Version: "v1", Front: hostDialed},
+			[]string{"front: host-dialed (no address: the host dials the jobs)"}},
+		{"no front, host-dialed", &launcher.StatusReport{Health: launcher.Healthy, Version: "v1", FrontAbsent: true, Front: hostDialed},
+			[]string{"front: absent (no front runs here; the recorded mode is host-dialed, which has no address because the host dials the jobs)"}},
 		{"a stopped host", &launcher.StatusReport{Health: launcher.Stopped}, nil},
 	} {
 		if got := frontLines(text(c.r)); !slices.Equal(got, c.want) {
@@ -91,6 +97,23 @@ func TestPrintStatusFrontAndController(t *testing.T) {
 		out := text(&launcher.StatusReport{Health: launcher.Healthy, Version: "v1", Supervisor: sup, Controllers: []launcher.EntryHealth{c.entry}})
 		if !strings.Contains(out, c.want) {
 			t.Errorf("%s: the status text is\n%s\nwant the line %q", c.name, out, c.want)
+		}
+	}
+}
+
+// TestFrontText: the recorded front as the status and up lines print it. Direct and ssh print the
+// mode and the address, as before; host-dialed has no address and says so.
+func TestFrontText(t *testing.T) {
+	for _, c := range []struct {
+		f    launcher.Front
+		want string
+	}{
+		{launcher.Front{Mode: "direct", Addr: "front.example.test:8443"}, "direct front.example.test:8443"},
+		{launcher.Front{Mode: "ssh", Addr: "front.example.test:22", KeyPath: "/k"}, "ssh front.example.test:22"},
+		{launcher.Front{Mode: "host-dialed"}, "host-dialed (no address: the host dials the jobs)"},
+	} {
+		if got := frontText(c.f); got != c.want {
+			t.Errorf("frontText(%+v) = %q, want %q", c.f, got, c.want)
 		}
 	}
 }

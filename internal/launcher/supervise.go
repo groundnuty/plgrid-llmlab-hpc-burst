@@ -146,7 +146,11 @@ func (s *State) supervisedSet(l layout) ([]supervised, error) {
 	health := s.Ports.ControllerAddr()
 	args := []string{"--state-dir", l.dir, "--port-base", strconv.Itoa(s.Ports.Base()), "--health-addr", health}
 	if s.Front.Set() {
-		args = append(args, "--front-mode", s.Front.Mode, "--front-addr", s.Front.Addr)
+		args = append(args, "--front-mode", s.Front.Mode)
+		// Host-dialed mode records no address: the host dials the jobs (HBEP-6, Dial-home modes).
+		if s.Front.Addr != "" {
+			args = append(args, "--front-addr", s.Front.Addr)
+		}
 	}
 	set := []supervised{{Name: controllerEntryName, Path: s.Controllers.Binary, Args: args, Health: health, TermGrace: controllerTermGrace}}
 	front, err := s.frontEntry(l)

@@ -300,3 +300,13 @@ func (p *Platform) Jobs() []Job {
 	}
 	return out
 }
+
+// SetStepLimit makes srun refuse every step of job id past the first n with
+// Slurm's step-limit refusal, "Step limit reached for this job"; 0 lifts the
+// limit. Steps already counted count.
+func (p *Platform) SetStepLimit(id, n int) error {
+	return p.withJob(id, func(j *job, _ time.Time) error {
+		j.stepLimit = n
+		return nil
+	})
+}

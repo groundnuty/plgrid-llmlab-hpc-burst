@@ -348,6 +348,15 @@ const EventReasonTunnelOrphaned = "TunnelOrphaned"
 // ruling of 2 Nov 2026, for #239.
 const EventReasonHandedOver = "HandedOver"
 
+// EventReasonRelayFailed is the failing event the batch Provider's controller
+// raises, regarding the Allocation, when a host-dialed relay ends for good for
+// a reason other than being superseded or its job ending: a step-limit refusal,
+// more than 120 restarts in an hour, or another final end. It names the channel
+// and the cause (HBEP-6, Dial-home modes, host-dialed, as amended by PR #298;
+// HBEP-8, Reasons in alpha). It is a Go constant only: no condition or CRD field
+// carries it.
+const EventReasonRelayFailed = "RelayFailed"
+
 // EventReasonNoReplacementReady is the ending-soon event the lifecycle
 // controller raises on a ready Instance whose drain start is less than an hour
 // away while no replacement is ready (HBEP-7, Events and conditions; HBEP-8,
@@ -455,6 +464,14 @@ const (
 	// time of the last success, not its age, so it does not change from one
 	// pass to the next.
 	ReasonReadsFailing = "ReadsFailing"
+	// ReasonLoginHostInUse: Ready is False; the Provider is in host-dialed
+	// mode, and another host-dialed Provider already holds its login host, as
+	// `ssh -G` resolves HostName through each Provider's own ssh config. The
+	// message names the login host and the Provider holding it. The planner
+	// treats the Provider as unusable (ReasonProviderUnavailable), so no
+	// Allocation is created to wait on it (HBEP-6, Dial-home modes,
+	// host-dialed, as PR #298 amends it).
+	ReasonLoginHostInUse = "LoginHostInUse"
 )
 
 // Reasons of the read-back (HBEP-4, The Slurm dialect, Read-back). The

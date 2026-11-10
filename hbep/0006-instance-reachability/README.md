@@ -232,7 +232,7 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
   - **It runs** `srun -u --overlap --jobid=<job> --ntasks=1 <the job's agent binary> relay <channel> --dir <Allocation directory> --allocation <UID> --epoch <E> --seq <N>`.
     - `-u` is required: without it `srun` holds output that ends without a newline until the stream closes, and with it the task's stdout is a pty with `OPOST` cleared (Slurm 24.11.5 and 23.11.7, `src/slurmd/slurmstepd/io.c`), which carried all 256 byte values unchanged.
     - Alpha's Instances are single-node, so the step lands on the job's one node.
-  - **Before each start,** the Provider's latest queue listing (one per poll interval, HBEP-4) must show the recorded job ID RUNNING, with its name equal to the Allocation's tag. Otherwise the relay isn't started. An `srun` refusal that the job doesn't exist or is completing ends the relay for good.
+  - **Before each start,** the Provider's latest queue listing (one per poll interval, HBEP-4) must show the recorded job ID RUNNING, with its name equal to the Allocation's tag; otherwise the relay waits for the next listing (HBEP-4's absence grace), starting no `srun`. An `srun` refusal that the job doesn't exist or is completing ends the relay for good.
 - **The wire:** `relay` first writes one preamble line, `hpcburst-relay/1 <Allocation UID>`. After it comes one multiplexed session: `fatedier/yamux` v0.2.0, the same version frp v0.71.1 pins, with a 10 s keepalive and a 10 s write timeout.
   - The host side requires the preamble within 30 s of the start. Anything else first is refused as named output ("unexpected output before the preamble"), counted and retried.
   - The host side dials only its channel's loopback port for each stream the job side opens, so a job can't reach any other port, the plugin endpoint included.
@@ -250,7 +250,7 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
   - **`relay` exits** when its standard input closes or its socket closes.
 - **The control-plane side:**
   - **When relays start and stop:** the controller starts both relays once the Allocation's job runs. It keeps them level-triggered: a dropped relay is started again, and a controller that takes the lead starts the relays of every running Allocation. It stops them by PID when the job ends or the Allocation is deleted. `srun` ends a step with its job, so no relay outlives the job.
-  - **Capacity:** in host-dialed mode a Provider has at most 2 Allocations, pending or running. That's a submit limit (`SubmitLimitReached`, HBEP-4), so the planner counts it, and the handover pair fits.
+  - **Capacity:** in host-dialed mode a Provider has at most 2 Allocations, pending or running. That's a submit limit (`SubmitLimitReached`, HBEP-4), so the planner counts it, and the handover pair fits. The Provider's controller counts again, from a fresh read, just before it submits, and refuses a third with `SubmitLimitReached`; the race that remains is two Provider leaders in an unfenced hand-over (HBEP-11's accepted overlap), whose extra Allocation is brief and the planner's to release as surplus.
     - Each running Allocation's pair of relays is reserved together and held through a relay's backoff. So the 4 relays per login node that the probe held without refusal are never exceeded by one copy, and no Allocation is left with half a pair.
     - **Only one Provider per login host runs in host-dialed mode.** The login host is its `HostName` as `ssh -G` resolves it through the Provider's own `-F` file. The Provider's controller refuses a second Provider on that host: it submits nothing, and sets the Provider's `Ready` condition to False with reason `LoginHostInUse`, naming the login host and the Provider holding it. The planner then treats that Provider as unusable (`ProviderUnavailable`, HBEP-7), so no Allocation waits on it. A per-platform budget stays HBEP-4's open question 17.
   - **What ends a relay:**
@@ -260,11 +260,11 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
       - "agent not ready".
     - **Final, with no restart:**
       - `superseded`;
-      - the job not listed, ended or completing;
+      - the job listed as ended or completing, or `srun`'s refusal that it doesn't exist or is completing;
       - `srun`'s step-limit refusal;
-      - more than 120 restarts of one channel within an hour.
+      - more than 120 restarts of one channel within an hour, counting only restarts whose session came up and then dropped. Failures before a session comes up (the login node down for maintenance, ssh refused, "agent not ready", a missing preamble) are never capped: they keep retrying at the 30 s backoff cap, bounded by the step count below and by the job's end. A final end stays final.
 
-      A final end other than `superseded` or the job's end raises a `failing` event, reason `RelayFailed`, regarding the Allocation, naming the channel and the cause. The code adds the reason to HBEP-8's table, since a new reason isn't an amendment.
+      A final end other than `superseded` or the job's end raises a Warning event, reason `RelayFailed`, regarding the Allocation, naming the channel and the cause (untyped, like every Provider-controller event in alpha; HBEP-8, open question 14). The code adds the reason to HBEP-8's table, since a new reason isn't an amendment.
     - **Steps:** at the 30 s cap two relays make at most about 240 `srun` steps an hour, about 11,500 in 48 h, below the 40,000 `MaxStepCount` that both profiles record.
   - **A path that fails never restarts a healthy engine.** HBEP-7's rules apply unchanged:
     - an Instance first becomes `ready` only with `TunnelConnected` True, from frps;
@@ -608,5 +608,9 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
   - **Capacity:** a Provider limit of 2 Allocations, with relays reserved in whole pairs.
   - **What ends a relay:** retried or final, with `RelayFailed`, and never an engine restart.
   - **The owner's two decisions:** relays run without asking Cyfronet first, and a controller restart cuts host-dialed streams in alpha, with a relay keeper deferred to beta (open question 13).
+- **2026-11-09: erratum:** `RelayFailed` is an untyped Warning, not a `failing` event (#301).
+- **2026-11-09: erratum:** a job missing from the listing is retried, not a final end (#301).
+- **2026-11-09: erratum:** the Provider's controller checks the 2-Allocation cap again before it submits, and two Provider leaders in an unfenced hand-over remain the one race, its extra Allocation released as surplus (#301).
+- **2026-11-09: erratum:** the restart cap counts only restarts whose session came up and then dropped; failures before a session comes up are never capped (#301).
 
   Before, a host that compute nodes could not reach was out of alpha, and alpha waited for the gateway's forward.

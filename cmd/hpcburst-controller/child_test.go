@@ -85,7 +85,10 @@ func remotePlatforms(r slurm.Runner) providerctl.PlatformFactory {
 func childArgs(f flags) []string {
 	args := []string{"--state-dir", f.host.StateDir, "--port-base", strconv.Itoa(f.host.PortBase), "--health-addr", f.healthAddr}
 	if f.frontMode != "" {
-		args = append(args, "--front-mode", f.frontMode, "--front-addr", f.frontAddr)
+		args = append(args, "--front-mode", f.frontMode)
+		if f.frontAddr != "" { // host-dialed mode has none
+			args = append(args, "--front-addr", f.frontAddr)
+		}
 	}
 	if !f.leaderElect {
 		args = append(args, "--leader-elect=false")
