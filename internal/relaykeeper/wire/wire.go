@@ -266,6 +266,9 @@ const (
 	RefusedLoginHost = "login_host"
 	RefusedVersion   = "version"
 	RefusedMalformed = "malformed"
+	// RefusedState is a keeper that could not write and sync its state file,
+	// so the request took no effect; the sender tries again on its next round.
+	RefusedState = "state"
 )
 
 // Refused is the keeper's answer to a request it refuses.
