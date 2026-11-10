@@ -106,14 +106,25 @@ func walkObject(path string, s, r *Node, out *[]Diff) {
 		if rv := r.Get(m.Key); rv != nil {
 			p := join(path, m.Key)
 			sm, rm := members(s, m.Key), members(r, m.Key)
-			if sk, rk := string(sm[len(sm)-1].KeyRaw), string(rm[len(rm)-1].KeyRaw); sk != rk {
-				*out = append(*out, Diff{Path: p, Verdict: KeyReencoded, Sent: sk, Received: rk})
-			}
 			switch {
 			case len(rm) < len(sm):
 				*out = append(*out, Diff{Path: p, Verdict: DuplicateRemoved, Sent: memberText(sm), Received: memberText(rm)})
 			case len(rm) > len(sm):
 				*out = append(*out, Diff{Path: p, Verdict: DuplicateAdded, Sent: memberText(sm), Received: memberText(rm)})
+			default:
+				// As many occurrences on both sides: every earlier one is compared too, its key and
+				// its value, at the path with its index ("a[#0]" for the first of two).
+				for i := 0; i < len(sm)-1; i++ {
+					q := p + "[#" + strconv.Itoa(i) + "]"
+					if sk, rk := string(sm[i].KeyRaw), string(rm[i].KeyRaw); sk != rk {
+						*out = append(*out, Diff{Path: q, Verdict: KeyReencoded, Sent: sk, Received: rk})
+					}
+					walk(q, sm[i].Value, rm[i].Value, out)
+				}
+			}
+			// The last occurrence, the one Python's json module keeps, at the plain path.
+			if sk, rk := string(sm[len(sm)-1].KeyRaw), string(rm[len(rm)-1].KeyRaw); sk != rk {
+				*out = append(*out, Diff{Path: p, Verdict: KeyReencoded, Sent: sk, Received: rk})
 			}
 			walk(p, m.Value, rv, out)
 		} else {

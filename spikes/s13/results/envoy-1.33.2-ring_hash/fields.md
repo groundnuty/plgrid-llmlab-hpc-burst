@@ -2,7 +2,7 @@
 
 - Router: `s13/scripts/stack.sh ring-hash s2/bin/envoy-1.33.2`, two workers.
 - Router listeners: 127.0.0.1:29902, 127.0.0.1:29902. Stop: exited after TERM: <nil>.
-- Started 2026-11-10T12:49:46Z.
+- Started 2026-11-10T13:04:42Z.
 - Envoy 1.33.2, ring_hash on x-session-id: 440 variants; 440 arrived as their exact bytes; 0 differ only in member order and insignificant whitespace; 0 differ only in re-encoded values or keys; 0 lost or changed a value; 0 did not reach a worker.
 - Requests the router made to the workers besides the cases: POST /v1/chat/completions (case warm-up) x1.
 
@@ -382,6 +382,19 @@ Diffs outside every covered field and not injected.
 
 | variant | path | verdict | sent | received |
 |---|---|---|---|---|
+
+## Transport
+
+Chunked request bodies (no Content-Length), and streams the worker holds after their first text chunk until the client has read it (at most 10 s).
+
+| check | key | status | arrivals | as its bytes | worker Content-Length | worker Content-Type | streamed through | held | hold timed out | error |
+|---|---|---|---|---|---|---|---|---|---|---|
+| chunked request body | transport/chunked/chat/minimal#plain | 200 | 1 | true | -1 | `application/json` | false | false | false | — |
+| chunked request body | transport/chunked/completions/minimal#plain | 200 | 1 | true | -1 | `application/json` | false | false | false | — |
+| chunked request body | transport/chunked/chat/tools-function-strict#stream | 200 | 1 | true | -1 | `application/json` | false | false | false | — |
+| chunked request body | transport/chunked/chat/real/agent-turn#stream | 200 | 1 | true | -1 | `application/json` | false | false | false | — |
+| stream held after its first chunk | transport/held-stream/chat | 200 | 1 | false | 0 | — | true | true | false | — |
+| stream held after its first chunk | transport/held-stream/completions | 200 | 1 | false | 0 | — | true | true | false | — |
 
 ## Not delivered
 

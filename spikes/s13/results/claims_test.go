@@ -1,7 +1,10 @@
 package results
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -246,22 +249,28 @@ func TestEnvoyRingHashDeliversEveryBodyAsItsBytes(t *testing.T) {
 
 func TestLlmdForwardsWhatItAcceptsAsBytes(t *testing.T) {
 	r := load(t, "llm-d-epp-envoy-1.33.2")
-	refused := map[string]bool{}
+	var refused []string
+	delivered := 0
 	for key, x := range r.Variants {
 		switch {
 		case x.Arrivals == 0:
 			if x.Status != 400 || !strings.Contains(x.Response, "must have valid messages field") {
 				t.Errorf("%s: status %d, %q", key, x.Status, x.Response)
 			}
-			refused[x.Case] = true
-		case !x.Identical:
-			t.Errorf("%s: delivered, but not as its bytes", key)
+			refused = append(refused, key)
+		case x.Arrivals != 1 || !x.Identical:
+			t.Errorf("%s: arrivals %d, identical %v", key, x.Arrivals, x.Identical)
+		default:
+			delivered++
 		}
 	}
-	want := map[string]bool{"chat/msg/user-part-simple-image": true, "chat/msg/user-part-simple-audio": true,
-		"chat/msg/user-part-simple-video": true, "chat/msg/user-part-bare-string": true}
-	if !reflect.DeepEqual(refused, want) {
-		t.Errorf("refused %v, want %v", refused, want)
+	sort.Strings(refused)
+	var want []string
+	for _, c := range []string{"chat/msg/user-part-bare-string", "chat/msg/user-part-simple-audio", "chat/msg/user-part-simple-image", "chat/msg/user-part-simple-video"} {
+		want = append(want, c+"#plain", c+"#stream")
+	}
+	if !reflect.DeepEqual(refused, want) || delivered != 432 {
+		t.Errorf("refused %v, delivered %d; want %v and 432", refused, delivered, want)
 	}
 }
 
@@ -287,5 +296,78 @@ func TestOnlyTheMarkedCaseIsInvalid(t *testing.T) {
 		if (x.Invalid != "") != strings.HasPrefix(key, "chat/enc/message-name-null#") {
 			t.Errorf("%s: invalid %q", key, x.Invalid)
 		}
+	}
+}
+
+var allRuns = []string{"direct-control", "vllm-router-0.1.16-consistent_hash", "vllm-router-0.1.16-round_robin",
+	"vllm-router-0.1.17-consistent_hash", "vllm-router-0.1.17-round_robin", "vllm-router-0.1.17-kv_aware",
+	"envoy-1.40.2-ring_hash", "envoy-1.33.2-ring_hash", "llm-d-epp-envoy-1.33.2"}
+
+// Every delivered variant reached a worker once (no retry), as application/json: vLLM refuses a
+// body of another type, which the recorder would accept.
+func TestOneArrivalAsJSON(t *testing.T) {
+	for _, name := range allRuns {
+		for key, x := range load(t, name).Variants {
+			if x.Arrivals > 0 && (x.Arrivals != 1 || x.WorkerContentType != "application/json") {
+				t.Errorf("%s %s: arrivals %d, Content-Type %q", name, key, x.Arrivals, x.WorkerContentType)
+			}
+		}
+	}
+}
+
+// The transport checks: chunked request bodies, and streams held after their first text chunk.
+func TestTransport(t *testing.T) {
+	for _, name := range allRuns {
+		r := load(t, name)
+		passThrough := !strings.HasPrefix(name, "vllm-router")
+		chunked, heldStreams := 0, 0
+		for _, c := range r.Transport {
+			if c.Status != 200 || c.Arrivals != 1 || c.Error != "" || c.WorkerContentType != "application/json" && c.Name == "chunked request body" {
+				t.Errorf("%s %s: status %d, arrivals %d, error %q, Content-Type %q", name, c.Key, c.Status, c.Arrivals, c.Error, c.WorkerContentType)
+			}
+			switch c.Name {
+			case "chunked request body":
+				chunked++
+				// Envoy, the EPP and the control forward the client's chunked bytes as they came.
+				if passThrough && (!c.Identical || c.WorkerContentLength != -1) {
+					t.Errorf("%s %s: identical %v, worker Content-Length %d", name, c.Key, c.Identical, c.WorkerContentLength)
+				}
+			case "stream held after its first chunk":
+				heldStreams++
+				// Every router passes a stream through: the client read the first chunk during the hold.
+				if !c.StreamedThrough || !c.Held || c.TimedOut {
+					t.Errorf("%s %s: streamed through %v, held %v, timed out %v", name, c.Key, c.StreamedThrough, c.Held, c.TimedOut)
+				}
+			}
+		}
+		if chunked != 4 || heldStreams != 2 {
+			t.Errorf("%s: %d chunked and %d held checks, want 4 and 2", name, chunked, heldStreams)
+		}
+	}
+}
+
+// A record whose identical_bytes flag disagrees with its bytes is refused, so no claim rests on the flag.
+func TestLoadRejectsAFlagTheBytesContradict(t *testing.T) {
+	raw, err := os.ReadFile("envoy-1.40.2-ring_hash/results.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(lines[1]), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec["identical_bytes"] != true {
+		t.Fatalf("the first record is not identical: %v", rec["identical_bytes"])
+	}
+	rec["received"] = rec["received"].(string) + " " // other bytes, flag left true
+	b, _ := json.Marshal(rec)
+	lines[1] = string(b)
+	path := filepath.Join(t.TempDir(), "results.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "identical_bytes") {
+		t.Fatalf("Load accepted a contradicted flag: %v", err)
 	}
 }

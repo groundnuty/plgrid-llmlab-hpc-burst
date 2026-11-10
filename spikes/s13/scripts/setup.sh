@@ -74,13 +74,23 @@ python3 -I "$HERE/enumerate_fields.py" --vllm "$S13_HOME/src/vllm-0.32.0" --open
   --harmony "$S13_HOME/src/oss_harmony-0.0.11" > "$S13_HOME/fields.tsv"
 cmp "$S13_HOME/fields.tsv" "$HERE/../fields/vllm-v0.32.0.tsv" || { echo "the enumeration differs from fields/vllm-v0.32.0.tsv" >&2; exit 1; }
 
-# Envoy 1.40.2, the latest release on 10 Nov 2026, for the ring_hash arm. The sha256 is the one in the
-# release's signed checksums.txt.asc and GitHub's asset digest.
-fetch https://github.com/envoyproxy/envoy/releases/download/v1.40.2/envoy-1.40.2-linux-x86_64 \
-  1d64506e25c1844f146162ddb2ece7010fa4e784faddb40a079021491f1f03cc "$S13_HOME/bin/envoy-1.40.2"
+# Envoy 1.40.2, the latest release on 10 Nov 2026, for the ring_hash arm, for this host's architecture.
+# Each sha256 is the one in the release's signed checksums.txt.asc and GitHub's asset digest. The
+# aarch64 binary is the one GH200 nodes would run; the arm64 run of this arm is in the README.
+case $(uname -m) in
+x86_64) envoy_asset=envoy-1.40.2-linux-x86_64 envoy_sha=1d64506e25c1844f146162ddb2ece7010fa4e784faddb40a079021491f1f03cc ;;
+aarch64) envoy_asset=envoy-1.40.2-linux-aarch_64 envoy_sha=b9d6d1e06dd5838a3506de9f4deebad3de9a2ce6cadb87cd76222ca286213baf ;;
+*) echo "no Envoy pin for $(uname -m)" >&2; exit 1 ;;
+esac
+fetch "https://github.com/envoyproxy/envoy/releases/download/v1.40.2/$envoy_asset" "$envoy_sha" "$S13_HOME/bin/envoy-1.40.2"
 chmod +x "$S13_HOME/bin/envoy-1.40.2"
 # The llm-d arm: S2's pinned llm-d (v1.0.0), its loopback-patched EPP and Envoy 1.33.2, by S2's own setup.
 S2_HOME=$S13_HOME/s2 "$HERE/../../s2/scripts/setup.sh" sources patched envoy
+# S2's setup skips the hash check when the binary is already there, so check it every time, against S2's
+# own pin, so that nothing else runs under the 1.33.2 label.
+envoy133_sha=$(sed -n 's/^ENVOY_SHA=//p' "$HERE/../../s2/scripts/setup.sh")
+[[ ${#envoy133_sha} -eq 64 ]] || { echo "no ENVOY_SHA in spikes/s2/scripts/setup.sh" >&2; exit 1; }
+echo "$envoy133_sha  $S13_HOME/s2/bin/envoy-1.33.2" | sha256sum -c --quiet - || { echo "envoy-1.33.2: sha256 is not S2's pin" >&2; exit 1; }
 
 (cd "$HERE/.." && go build -o "$S13_HOME/bin/s13fields" ./cmd/s13fields)
 echo "setup ok: vllm-router 0.1.16 and 0.1.17, Envoy 1.40.2, S2's llm-d stack, sources pinned, enumeration matches, harness built"

@@ -171,7 +171,10 @@ are parsed into trees that keep every value's literal bytes, and walked path by 
   between integer and fraction (`1` and `1.0`, which Python reads as int and float), is `retyped`.
   Another value of the same type is `changed`. A member whose key arrived spelled otherwise (an
   escape written raw) is `key re-escaped`. A key that arrived fewer, or more, times than it was written
-  is `duplicate removed` or `duplicate added`; the value compared at it is its last occurrence. A value
+  is `duplicate removed` or `duplicate added`, and its last occurrence is compared. A key that arrived
+  as many times is compared occurrence by occurrence, key spelling and value, the earlier ones at
+  `<path>[#i]` (`a[#0]` for the first of two): `{"a":1,"a":2}` arriving as `{"a":9,"a":2}` is
+  `changed` at `a[#0]`. A value
   missing at the worker is `dropped`; one present only at the worker is `injected`; a value dropped
   under one key and injected under a sibling is `renamed`. A variant that reached no worker is
   `refused`, with the router's status.
@@ -187,9 +190,14 @@ are parsed into trees that keep every value's literal bytes, and walked path by 
   verdicts in `rawjson`'s tests are written by hand, not produced by the code under test.
 - **On the real routers:** `tools[].function.strict` comes out `dropped` on 0.1.16, as the source
   predicts (`spec.rs:1839`).
-- **The README's claims** are tests. `results/claims_test.go` recomputes every verdict from the
-  committed bytes and fails if a claim here does not hold. For example, flipping the `strict` claim to
-  `kept` fails both releases.
+- **The README's claims** are tests. Every record keeps the bytes sent and received. `results/`
+  recomputes byte equality and every verdict from them, and refuses a record whose own
+  `identical_bytes` flag disagrees with its bytes (`TestLoadRejectsAFlagTheBytesContradict`).
+  `results/claims_test.go` then fails if a claim here does not hold. For example, flipping the
+  `strict` claim to `kept` fails both releases. The claims include:
+  - every delivered variant reached a worker exactly once, with `Content-Type: application/json`, the
+    only type vLLM's JSON endpoints take (the recorder would take any);
+  - the EPP's eight refused variant keys, and its 432 deliveries.
 
 **Verifications that would prove nothing, and why they are not used.** One would be to compare the
 router's output with a body rebuilt from the same parsed model. Here the expected value is always the
@@ -200,7 +208,7 @@ parse, `TestStoresTheExactBytes` checks that, and the 440-of-440 control could n
 **Environment.** One 6-core VM shared with other work; every run at `nice -n 19` under a 4 GB memory
 cap. Every router's listeners were checked from `ss` after start, all on 127.0.0.1: vllm-router
 :29902-29903, Envoy :29902, the llm-d stack :29902-29906. Runs on
-10 Nov 2026 from 12:34Z.
+10 Nov 2026 from 13:04Z.
 
 ## Results
 
@@ -249,7 +257,7 @@ The tables below are vllm-router's.
 
 | case | field | sent | vllm-router 0.1.16, consistent_hash: received | verdict | vllm-router 0.1.17, consistent_hash: received | verdict |
 |---|---|---|---|---|---|---|
-| chat/logit_bias | logit_bias | `{"50256":-100,"198":2.5}` | `{"50256":-100.0,"198":2.5}` | retyped | `{"198":2.5,"50256":-100.0}` | retyped |
+| chat/logit_bias | logit_bias | `{"50256":-100,"198":2.5}` | `{"198":2.5,"50256":-100.0}` | retyped | `{"198":2.5,"50256":-100.0}` | retyped |
 | chat/stream_options | stream_options | `{"include_usage":true,"continuous_usage_stats":true}` | `{"include_usage":true}` | dropped (stream only) | `{"include_usage":true}` | dropped (stream only) |
 | chat/stream_options | stream_options.continuous_usage_stats | `true` | — | dropped (stream only) | — | dropped (stream only) |
 | chat/response_format-json_schema | response_format.json_schema | `{"name":"s13_schema","description":"A schema","schema":{"typ…` | `{"name":"s13_schema","schema":{"type":"object","properties":…` | dropped | `{"name":"s13_schema","schema":{"type":"object","properties":…` | dropped |
@@ -314,7 +322,7 @@ The tables below are vllm-router's.
 | chat/msg/assistant-tool_calls-custom | messages[](assistant).tool_calls[](custom).custom.name | `"run"` | — | dropped | — | dropped |
 | chat/msg/assistant-tool_calls-custom | messages[](assistant).tool_calls[](custom).custom.input | `"ls"` | — | dropped | — | dropped |
 | chat/msg/user-task | messages[](custom).task | `"s13-task"` | — | dropped | — | dropped |
-| completions/logit_bias | logit_bias | `{"50256":-100,"198":2.5}` | `{"198":2.5,"50256":-100.0}` | retyped | `{"50256":-100.0,"198":2.5}` | retyped |
+| completions/logit_bias | logit_bias | `{"50256":-100,"198":2.5}` | `{"50256":-100.0,"198":2.5}` | retyped | `{"50256":-100.0,"198":2.5}` | retyped |
 | completions/stream_options | stream_options | `{"include_usage":true,"continuous_usage_stats":true}` | `{"include_usage":true}` | dropped (stream only) | `{"include_usage":true}` | dropped (stream only) |
 | completions/stream_options | stream_options.continuous_usage_stats | `true` | — | dropped (stream only) | — | dropped (stream only) |
 | completions/max_tokens-null | max_tokens | `null` | — | dropped | — | dropped |
@@ -342,7 +350,7 @@ The tables below are vllm-router's.
 | completions/enc/temperature-integer | ext:temperature as an integer literal | `1` | `1.0` | retyped | `1.0` | retyped |
 | chat/enc/top_p-exponent | ext:top_p in exponent form | `9e-1` | `0.9` | kept, re-encoded | `0.9` | kept, re-encoded |
 | chat/enc/temperature-20-digits | ext:a float beyond float64 precision | `0.12345678901234567890` | `0.12345679` | changed | `0.12345679` | changed |
-| chat/enc/kwargs-numbers | ext:numbers inside a dict[str, Any] | `{"big":123456789012345678901234567890,"u64":1844674407370955…` | `{"f":1.0,"big":1.2345678901234568e+29,"i":1,"u64":1844674407…` | changed | `{"f":1.0,"neg":-0.0,"big":1.2345678901234568e+29,"u64":18446…` | changed |
+| chat/enc/kwargs-numbers | ext:numbers inside a dict[str, Any] | `{"big":123456789012345678901234567890,"u64":1844674407370955…` | `{"u64":18446744073709551615,"neg":-0.0,"i":1,"big":1.2345678…` | changed | `{"f":1.0,"big":1.2345678901234568e+29,"u64":1844674407370955…` | changed |
 | chat/enc/explicit-nulls | ext:max_tokens: null | `null` | — | dropped | — | dropped |
 | chat/enc/explicit-nulls | ext:temperature: null | `null` | — | dropped | — | dropped |
 | chat/enc/explicit-nulls | ext:stop: null | `null` | — | dropped | — | dropped |
@@ -389,6 +397,24 @@ The full tables, one row per covered field per run, with the bytes sent and rece
 
 **Streaming** changes nothing: every case sent both ways has the same verdict for each of its fields,
 streamed and not.
+
+**Transport.** Every case is sent with a known `Content-Length`, and a stream read to its end cannot
+show a router that buffers it. So each run also makes two checks (`cmd/s13fields/transport.go`, the
+`## Transport` table of each `fields.md`):
+- **Chunked request bodies:** four variants (the two minimal requests, the strict-tool case streamed,
+  the agent turn) are sent again with no `Content-Length`, as `Transfer-Encoding: chunked`.
+  - The control, both Envoys and the EPP deliver all four as their exact bytes, still chunked (the
+    worker sees no length).
+  - vllm-router delivers all four, re-serialised: 0.1.16 chunked, 0.1.17 with a `Content-Length`.
+    Under `kv_aware` it delivers the completions one as its bytes.
+- **A held stream:** the recorder holds a stream after its first text chunk until the client has
+  read that chunk, for at most 10 s. A hop that passes the stream through lets the client read the
+  chunk during the hold; one that buffers the whole stream makes the hold run out. This is decided by
+  that state, not by timing a window. The recorder's own test shows both outcomes: direct, and
+  through a buffering hop (`TestGateTellsStreamingFromBuffering`, 50 of 50 under load). Every router
+  streamed both a chat and a completions stream through.
+- **Not covered:** HTTP/2 to the router, bodies above a router's size limit, backpressure from a slow
+  client, and long streams. S2 phase A carried 2 h streams through vllm-router and Envoy.
 
 ## Why
 
@@ -577,7 +603,8 @@ go test ./...                             # comparator, recorder, case coverage,
 | oss-harmony | https://github.com/oss-harmony/harmony, PyPI `oss-harmony` (a fork of openai-harmony) | Apache-2.0 | 0.0.11 sdist, sha256 `ccad467b71d61490df1f2204b7a064990833338615ac135536c5b3a8e2d03a15`, the floor vLLM v0.32.0 sets (`requirements/common.txt:52`); source read only, for the Harmony message fields |
 | vllm-router `main` | same as above | Apache-2.0 | commit 394a63e0a3add03b9a78d4582b769375800c1b56 (10 Nov 2026); read only, to date the "no release fixes it" finding |
 | Envoy 1.40.2 | https://github.com/envoyproxy/envoy, release asset `envoy-1.40.2-linux-x86_64` | Apache-2.0 | sha256 `1d64506e25c1844f146162ddb2ece7010fa4e784faddb40a079021491f1f03cc`, the value in the release's signed `checksums.txt.asc` and GitHub's asset digest; `--version` reports build b2d89e0ae53916f28770771fbdd49c5c99c5c5a2 |
-| Envoy 1.33.2 | same | Apache-2.0 | S2's pin, sha256 `bd2ff87c5efc95fd7880d710915f573c1aab4d9c55d8da886dcd91df43fad741` (`spikes/s2/scripts/setup.sh`); build 2135e1a42f002a939d60581096291acb6abce695 |
+| Envoy 1.40.2, aarch64 | same, release asset `envoy-1.40.2-linux-aarch_64` | Apache-2.0 | sha256 `b9d6d1e06dd5838a3506de9f4deebad3de9a2ce6cadb87cd76222ca286213baf`, the value in the same signed `checksums.txt.asc` and GitHub's asset digest; the binary a GH200 node runs |
+| Envoy 1.33.2 | same | Apache-2.0 | S2's pin, sha256 `bd2ff87c5efc95fd7880d710915f573c1aab4d9c55d8da886dcd91df43fad741` (`spikes/s2/scripts/setup.sh`), which S13's `setup.sh` checks every time, since S2's skips the check for a binary it already has; build 2135e1a42f002a939d60581096291acb6abce695 |
 | llm-d EPP | https://github.com/llm-d/llm-d-router | Apache-2.0 | v1.0.0, commit b9393d1, built from source by S2's `setup.sh` with S2's loopback patch (`third_party/forked/llm-d-router/`) |
 | llm-d guide files | https://github.com/llm-d/llm-d, `guides/no-kubernetes-deployment` | Apache-2.0 | v1.0.0, commit 378b42d; read at run time by S2's `genconf.py`, not copied |
 | S2's `setup.sh`, `genconf.py` and the EPP's flags | this repository, `spikes/s2` | this repository's | reused unchanged |
