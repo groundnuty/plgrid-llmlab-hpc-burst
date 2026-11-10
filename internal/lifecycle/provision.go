@@ -194,9 +194,10 @@ func (p *pass) releasePending(a *v1alpha1.Allocation) bool {
 // leave it holding its submit slot until its retention date or hard end, and a
 // deployment at its Provider's limit would then starve, where now the failed
 // placement releases it and the replacement serves
-// (TestAMarkedEmptyAllocationDoesNotStarveAProviderAtItsSubmitLimit). Skipping
-// it and releasing it empty belong together, and that is a ruling for the
-// science agent (issue #332).
+// (TestAMarkedEmptyAllocationDoesNotStarveAProviderAtItsSubmitLimit). Releasing
+// it empty would release capacity that retention keeps, which HBEP-7 open
+// question 8 (Approvals) reserves for the owner, whose "Yes, release it" (#331)
+// covered RelayEndedForGood only (`@hpc-burst-science-agent`, 10 Nov 2026).
 func relayEnded(a *v1alpha1.Allocation) bool {
 	return a.GetCondition(v1alpha1.ConditionRelayEndedForGood).Status == "True"
 }
