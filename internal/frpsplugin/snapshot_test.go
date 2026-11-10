@@ -65,6 +65,9 @@ func TestBuildSnapshotRules(t *testing.T) {
 	allocAsOther.SetConditions(xpv2.Condition{Type: "SubmittedAsOther", Status: corev1.ConditionTrue, Reason: "ReadBackMismatch"})
 	allocNotOther := testAlloc(ns, "al-notother", "uid-notother", running)
 	allocNotOther.SetConditions(xpv2.Condition{Type: "SubmittedAsOther", Status: corev1.ConditionFalse, Reason: "ReadBackMismatch"})
+	// Issue #304: RelayEndedForGood True ends them too.
+	allocRelayEnded := testAlloc(ns, "al-relay", "uid-relay", running)
+	allocRelayEnded.SetConditions(xpv2.Condition{Type: "RelayEndedForGood", Status: corev1.ConditionTrue, Reason: "RelayFailed"})
 
 	cases := []struct {
 		name      string
@@ -120,6 +123,12 @@ func TestBuildSnapshotRules(t *testing.T) {
 			allocs: []v1alpha1.Allocation{allocAsOther},
 			insts:  []v1alpha1.Instance{testInst(ns, "in-1", "in-uid-1", "al-other", v1alpha1.InstanceReady)},
 			files:  credFiles{"uid-other": tokA},
+		},
+		{
+			name:   "an Allocation with RelayEndedForGood True is absent although its phase is Running",
+			allocs: []v1alpha1.Allocation{allocRelayEnded},
+			insts:  []v1alpha1.Instance{testInst(ns, "in-1", "in-uid-1", "al-relay", v1alpha1.InstanceReady)},
+			files:  credFiles{"uid-relay": tokA},
 		},
 		{
 			name:   "an Allocation with SubmittedAsOther False stays listed",

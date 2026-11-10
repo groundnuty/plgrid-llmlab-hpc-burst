@@ -39,13 +39,16 @@ const (
 // Allocation that exists and has not ended"): its deletion has begun, or its phase is one of the
 // four on which the lifecycle controller ends its Instances (internal/lifecycle/instances.go,
 // allocationFailed: Failed, Lost and Refused fail the Instances, Ended drains them), or it has the
-// condition SubmittedAsOther True, which ends its Instances too (HBEP-7, Reconcile loop, step 5,
-// "Failed Allocations").
+// condition SubmittedAsOther or RelayEndedForGood True, either of which ends its Instances too
+// (HBEP-7, Reconcile loop, step 5, "Failed Allocations"; issue #304).
 func allocationEnded(a *v1alpha1.Allocation) bool {
 	if !a.DeletionTimestamp.IsZero() {
 		return true
 	}
 	if a.GetCondition(v1alpha1.ConditionSubmittedAsOther).Status == corev1.ConditionTrue {
+		return true
+	}
+	if a.GetCondition(v1alpha1.ConditionRelayEndedForGood).Status == corev1.ConditionTrue {
 		return true
 	}
 	switch a.Status.AtProvider.Phase {
