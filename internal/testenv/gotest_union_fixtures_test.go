@@ -46,36 +46,108 @@ func TestUnionProblemsFindsADroppedOrDuplicatedTest(t *testing.T) {
 }
 
 func TestCIProblemsFindsAPartTheGoJobDoesNotRunOnce(t *testing.T) {
-	good := map[string][]string{
-		"go":  {"go vet ./...", "log=x\nbash hack/go-test.sh packages 2>&1 | tee \"$log\" || rc=$?", "bash hack/go-test.sh own g1", "bash hack/go-test.sh own g2"},
-		"crd": {"bash hack/check.sh 2>&1 | tee \"$log\" || rc=$?"},
+	gated := func(run string) ciStep { return ciStep{Run: run, If: verifiedGate} }
+	goSteps := []ciStep{{Run: "go vet ./..."}, {Run: "log=x\nbash hack/go-test.sh packages 2>&1 | tee \"$log\" || rc=$?"},
+		gated("bash hack/go-test.sh own g1"), gated("bash hack/go-test.sh own g2")}
+	crdSteps := []ciStep{{Run: "bash hack/check.sh 2>&1 | tee \"$log\" || rc=$?"}}
+	jobs := func(goS, crdS []ciStep) map[string]ciJob {
+		return map[string]ciJob{"go": {Steps: goS}, "crd": {Steps: crdS}}
 	}
-	edit := func(job string, steps ...string) map[string][]string {
-		m := map[string][]string{"go": good["go"], "crd": good["crd"]}
-		m[job] = steps
-		return m
+	// with returns the go job's steps with step i changed by f.
+	with := func(i int, f func(*ciStep)) []ciStep {
+		s := append([]ciStep{}, goSteps...)
+		f(&s[i])
+		return s
 	}
 	for _, c := range []struct {
 		name string
-		runs map[string][]string
+		jobs map[string]ciJob
 		want []string
 	}{
-		{"every part once", good, nil},
-		{"a group has no step", edit("go", good["go"][1], good["go"][2]), []string{`CI's go job runs "bash hack/go-test.sh own g2" in 0 steps, want 1`}},
-		{"a group has two", edit("go", append(append([]string{}, good["go"]...), "bash hack/go-test.sh own g1")...),
+		{"every part once", jobs(goSteps, crdSteps), nil},
+		{"a group has no step", jobs(goSteps[:3], crdSteps), []string{`CI's go job runs "bash hack/go-test.sh own g2" in 0 steps, want 1`}},
+		{"a group has two", jobs(append(append([]ciStep{}, goSteps...), gated("bash hack/go-test.sh own g1")), crdSteps),
 			[]string{`CI's go job runs "bash hack/go-test.sh own g1" in 2 steps, want 1`}},
 		// A step named for another group, "own g10", is not g1's.
-		{"only a longer name", edit("go", good["go"][1], "bash hack/go-test.sh own g10", good["go"][3]), []string{`CI's go job runs "bash hack/go-test.sh own g1" in 0 steps, want 1`}},
-		{"the go job runs every group again", edit("go", append(append([]string{}, good["go"]...), "bash hack/go-test.sh own")...),
+		{"only a longer name", jobs(with(2, func(s *ciStep) { s.Run = "bash hack/go-test.sh own g10" }), crdSteps),
+			[]string{`CI's go job runs "bash hack/go-test.sh own g1" in 0 steps, want 1`}},
+		{"the go job runs every group again", jobs(append(append([]ciStep{}, goSteps...), gated("bash hack/go-test.sh own")), crdSteps),
 			[]string{`CI's go job runs "bash hack/go-test.sh own", which runs the groups again`}},
-		{"no packages' run", edit("go", good["go"][2], good["go"][3]), []string{`CI's go job runs "bash hack/go-test.sh packages" in 0 steps, want 1`}},
-		{"the crd job does not run check.sh", edit("crd", "go test ./..."), []string{"CI's crd job runs hack/check.sh in 0 steps, want 1 (it runs every part through all)"}},
+		{"no packages' run", jobs(append([]ciStep{goSteps[0]}, goSteps[2:]...), crdSteps), []string{`CI's go job runs "bash hack/go-test.sh packages" in 0 steps, want 1`}},
+		{"the crd job does not run check.sh", jobs(goSteps, []ciStep{{Run: "go test ./..."}}), []string{`CI's crd job runs "bash hack/check.sh" in 0 steps, want 1`}},
+		// Steps and jobs that can be skipped, or pass when they fail.
+		{"a group step under if: false", jobs(with(3, func(s *ciStep) { s.If = false }), crdSteps),
+			[]string{`CI's go job runs "bash hack/go-test.sh own g2" under if: false, which can skip it; want no if: or ` + verifiedGate}},
+		{"a group step only on pushes", jobs(with(2, func(s *ciStep) { s.If = "github.event_name == 'push'" }), crdSteps),
+			[]string{`CI's go job runs "bash hack/go-test.sh own g1" under if: github.event_name == 'push', which can skip it; want no if: or ` + verifiedGate}},
+		{"a group step that continues on error", jobs(with(2, func(s *ciStep) { s.ContinueOnError = true }), crdSteps),
+			[]string{`CI's go job runs "bash hack/go-test.sh own g1" with continue-on-error: true, which passes the job when it fails`}},
+		{"a group step that continues on an expression", jobs(with(3, func(s *ciStep) { s.ContinueOnError = "${{ github.event_name == 'pull_request' }}" }), crdSteps),
+			[]string{`CI's go job runs "bash hack/go-test.sh own g2" with continue-on-error: ${{ github.event_name == 'pull_request' }}, which passes the job when it fails`}},
+		{"the packages' step continues on error", jobs(with(1, func(s *ciStep) { s.ContinueOnError = true }), crdSteps),
+			[]string{`CI's go job runs "bash hack/go-test.sh packages" with continue-on-error: true, which passes the job when it fails`}},
+		{"check.sh under an if:", jobs(goSteps, []ciStep{{Run: crdSteps[0].Run, If: "github.ref == 'refs/heads/main'"}}),
+			[]string{`CI's crd job runs "bash hack/check.sh" under if: github.ref == 'refs/heads/main', which can skip it; want no if: or ` + verifiedGate}},
+		{"the go job under an if:", map[string]ciJob{"go": {If: "false", Steps: goSteps}, "crd": {Steps: crdSteps}},
+			[]string{"CI's go job has if: false, which can skip it, and a skipped job passes its required check"}},
+		{"the crd job continues on error", map[string]ciJob{"go": {Steps: goSteps}, "crd": {ContinueOnError: true, Steps: crdSteps}},
+			[]string{"CI's crd job has continue-on-error: true, which passes it when a part fails"}},
+		// An explicit continue-on-error: false is the default, and allowed.
+		{"continue-on-error: false", jobs(with(2, func(s *ciStep) { s.ContinueOnError = false }), crdSteps), nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if got := ciProblems(c.runs, []string{"g1", "g2"}); !reflect.DeepEqual(got, c.want) {
+			if got := ciProblems(c.jobs, []string{"g1", "g2"}); !reflect.DeepEqual(got, c.want) {
 				t.Errorf("problems %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// GOFLAGS' build tags reach the reading of the module, as they reach go test's builds: a test behind a
+// tag counts only when the tag is set.
+func TestModuleTestsReadsTheActiveBuildTags(t *testing.T) {
+	for _, c := range []struct {
+		goflags string
+		want    []string
+	}{
+		{"", nil},
+		{"-p=2", nil},
+		{"-p=2 -tags=realtime", []string{"realtime"}},
+		{"-tags=a,b -count=1", []string{"a", "b"}},
+		{"--tags=x", []string{"x"}},
+		{"-tags=a -tags=b", []string{"b"}},
+	} {
+		if got := tagsFromGOFLAGS(c.goflags); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("tagsFromGOFLAGS(%q) = %q, want %q", c.goflags, got, c.want)
+		}
+	}
+	stand := t.TempDir()
+	for rel, content := range map[string]string{
+		"a/a_test.go":      "package a\n\nimport \"testing\"\n\nfunc TestA1(t *testing.T) {}\n",
+		"a/tagged_test.go": "//go:build realtime\n\npackage a\n\nimport \"testing\"\n\nfunc TestTagged(t *testing.T) {}\n",
+	} {
+		p := filepath.Join(stand, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct {
+		tags []string
+		want map[string][]string
+	}{
+		{nil, map[string][]string{"./a": {"TestA1"}}},
+		{[]string{"realtime"}, map[string][]string{"./a": {"TestA1", "TestTagged"}}},
+	} {
+		got, err := moduleTests(stand, c.tags)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("tags %q: read %v, want %v", c.tags, got, c.want)
+		}
 	}
 }
 
@@ -119,7 +191,7 @@ func TestGoTestScriptUnionCatchesAMistakeInTheScriptsTable(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			tests, err := moduleTests(stand)
+			tests, err := moduleTests(stand, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

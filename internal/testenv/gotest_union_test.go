@@ -19,6 +19,7 @@ import (
 	"go/token"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -26,8 +27,6 @@ import (
 	"testing"
 	"unicode"
 	"unicode/utf8"
-
-	"sigs.k8s.io/yaml"
 )
 
 // part is one go test run of the script: the packages' run (pkg "./...", with skip) or a group's (one
@@ -82,10 +81,13 @@ func sortedKeys(m map[string][]string) []string {
 }
 
 // moduleTests returns the top-level test functions of every package of the module at root, by package
-// ("./internal/lifecycle"), as go test would build them on this machine: the test and external test
-// files that build.Default's constraints keep. It walks what ./... walks: no directory whose name starts
-// with . or _, no testdata, and no nested module (spikes/ and third_party/forked/ have their own).
-func moduleTests(root string) (map[string][]string, error) {
+// ("./internal/lifecycle"), as go test would build them on this machine with the build tags given: the
+// test and external test files that build.Default's constraints keep, with those tags. It walks what
+// ./... walks: no directory whose name starts with . or _, no testdata, and no nested module (spikes/ and
+// third_party/forked/ have their own).
+func moduleTests(root string, tags []string) (map[string][]string, error) {
+	ctx := build.Default
+	ctx.BuildTags = tags
 	tests := map[string][]string{}
 	err := filepath.WalkDir(root, func(path string, e fs.DirEntry, err error) error {
 		if err != nil || !e.IsDir() {
@@ -99,7 +101,7 @@ func moduleTests(root string) (map[string][]string, error) {
 				return fs.SkipDir
 			}
 		}
-		bp, err := build.Default.ImportDir(path, 0)
+		bp, err := ctx.ImportDir(path, 0)
 		var noGo *build.NoGoError
 		if errors.As(err, &noGo) {
 			return nil
@@ -125,6 +127,42 @@ func moduleTests(root string) (map[string][]string, error) {
 		return nil
 	})
 	return tests, err
+}
+
+// tagsFromGOFLAGS returns the build tags a GOFLAGS value sets: the last -tags=a,b (or --tags), as the go
+// command reads it. GOFLAGS is a space-separated list of -flag=value settings.
+func tagsFromGOFLAGS(goflags string) []string {
+	var tags []string
+	for _, f := range strings.Fields(goflags) {
+		v, ok := strings.CutPrefix(f, "-tags=")
+		if !ok {
+			v, ok = strings.CutPrefix(f, "--tags=")
+		}
+		if !ok {
+			continue
+		}
+		tags = nil
+		for _, t := range strings.Split(v, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				tags = append(tags, t)
+			}
+		}
+	}
+	return tags
+}
+
+// activeTags returns the build tags the go command in this environment adds to every build, from go env
+// GOFLAGS (the environment variable or go env -w). hack/go-test.sh passes no -tags of its own
+// (TestGoTestScriptPassesTheExactFlags pins its flags), so these are the tags its go test runs build with,
+// in whatever job runs this test: CI's go job sets none today, but a GOFLAGS=-tags=... added there, or
+// set locally, then changes what the count reads instead of leaving tagged tests out of it.
+func activeTags(t *testing.T) []string {
+	t.Helper()
+	out, err := exec.Command("go", "env", "GOFLAGS").Output()
+	if err != nil {
+		t.Fatalf("go env GOFLAGS: %v", err)
+	}
+	return tagsFromGOFLAGS(string(out))
 }
 
 // testFuncs returns the file's top-level test functions, by cmd/go's rule (load/test.go): a function with
@@ -256,7 +294,7 @@ func partFromCall(t *testing.T, name, call string) part {
 // every part, as the crd job does through hack/check.sh's "all".
 func TestGoTestScriptRunsEveryTestExactlyOnce(t *testing.T) {
 	root := realRoot(t)
-	tests, err := moduleTests(root)
+	tests, err := moduleTests(root, activeTags(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,79 +325,7 @@ func TestGoTestScriptRunsEveryTestExactlyOnce(t *testing.T) {
 	for _, p := range parts[1:] {
 		groups = append(groups, p.name)
 	}
-	for _, p := range ciProblems(goJobRuns(t, root), groups) {
+	for _, p := range ciProblems(ciJobs(t, root), groups) {
 		t.Error(p)
 	}
-}
-
-// ciProblems returns one line for each part that CI's go job does not run in exactly one step, and for a
-// crd job that does not run hack/check.sh, whose "all" runs every part (TestGoTestScriptIsWhatCIAndCheckRun
-// checks that it does).
-func ciProblems(runs map[string][]string, groups []string) []string {
-	var problems []string
-	want := []string{"bash hack/go-test.sh packages"}
-	for _, g := range groups {
-		want = append(want, "bash hack/go-test.sh own "+g)
-	}
-	// "own" alone or "all" in the go job would run the groups a second time.
-	for _, extra := range []string{"bash hack/go-test.sh own", "bash hack/go-test.sh all"} {
-		for _, r := range runs["go"] {
-			for _, line := range strings.Split(r, "\n") {
-				if strings.TrimSpace(line) == extra {
-					problems = append(problems, fmt.Sprintf("CI's go job runs %q, which runs the groups again", extra))
-				}
-			}
-		}
-	}
-	for _, w := range want {
-		if n := countRuns(runs["go"], w); n != 1 {
-			problems = append(problems, fmt.Sprintf("CI's go job runs %q in %d steps, want 1", w, n))
-		}
-	}
-	if n := countRuns(runs["crd"], "bash hack/check.sh"); n != 1 {
-		problems = append(problems, fmt.Sprintf("CI's crd job runs hack/check.sh in %d steps, want 1 (it runs every part through all)", n))
-	}
-	return problems
-}
-
-// goJobRuns returns each job's steps' run scripts, by job id, from ci.yml read as YAML.
-func goJobRuns(t *testing.T, root string) map[string][]string {
-	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var doc struct {
-		Jobs map[string]struct {
-			Steps []struct {
-				Run string `json:"run"`
-			} `json:"steps"`
-		} `json:"jobs"`
-	}
-	if err := yaml.Unmarshal(raw, &doc); err != nil {
-		t.Fatalf("ci.yml: %v", err)
-	}
-	runs := map[string][]string{}
-	for id, j := range doc.Jobs {
-		for _, s := range j.Steps {
-			runs[id] = append(runs[id], s.Run)
-		}
-	}
-	return runs
-}
-
-// countRuns counts the steps whose run script has a line that is exactly cmd, or that runs cmd and
-// pipes or redirects it (bash hack/go-test.sh packages 2>&1 | tee ...).
-func countRuns(runs []string, cmd string) int {
-	n := 0
-	for _, r := range runs {
-		for _, line := range strings.Split(r, "\n") {
-			line = strings.TrimSpace(line)
-			if line == cmd || strings.HasPrefix(line, cmd+" ") {
-				n++
-				break
-			}
-		}
-	}
-	return n
 }
