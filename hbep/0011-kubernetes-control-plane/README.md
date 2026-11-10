@@ -222,6 +222,7 @@ Decided for alpha (amended 2026-10-30, after S3's fix, PR #36):
 - issues one kubeconfig per identity: the user, each controller, and each agent identity (HBEP-10), with RBAC enabled;
 - creates the certificate of the lifecycle controller's agent endpoint, which listens on loopback; `agent.json` carries its pin, and in direct mode the front passes `/agent/v1/` through to it on the dial-home port (HBEP-7). The certificate is self-signed and carries a fixed synthetic DNS name, proposed as `dial-home.hpcburst.invalid`, which frpc names as its `serverName` when it verifies the dial-home listener with this certificate as its trusted file (HBEP-6). It is public, and is staged with each Allocation (HBEP-4);
 - starts frps, the dial-home tunnel's server (HBEP-6), as it starts the host: it verifies the pinned binary's checksum from `internal/launcher/frp-pins.txt`, writes its configuration file (mode 600, with the password of frps's loopback web server), records it by process ID plus start time, judges its health through a pidfd, its three loopback ports and its `/healthz`, and restarts it when it exits. frps binds loopback only, at offsets of the launcher's port block (HBEP-6, Components);
+- in beta's host-dialed mode, starts the relay keeper (HBEP-6, The relay keeper) under the controllers' supervisor beside frps, as a sibling of the controller processes. It records the keeper by process ID plus start time, judges its health through a pidfd and its Unix socket (a new check: the supervisor's checks today are a `host:port` `/healthz`), restarts it when it exits, and `down` stops it by that record and keeps its state file. `restore` clears the keeper's accepted `Lease` epochs. The keeper binds no port;
 - installs the CRDs and the admission policy, then starts the controllers and restarts any that exit;
 - checks the front's reachability (open question 8). In host-dialed mode it needs no front address. It binds the dial-home listener on loopback and leaves the relays' end-to-end check to the reach rows (#225). Otherwise it warns when no front address and dial-home mode (direct, or ssh on the configured ssh port, 22 by default) are configured, and checks that a configured address answers on that port. While none is configured, the lifecycle controller submits no Allocation, and each ModelDeployment carries `Degraded` with reason `FrontNotConfigured` (decided while building the launcher, PR #49; the name in PR #71). The first Instance on each Provider then confirms reachability from a compute node by registering over its dial-home path. An Instance that cannot register fails at start, and the lifecycle controller sets the condition `DialHomeUnreachable` on its Provider (HBEP-4, open question 16);
 - has the API server write its audit log at the Metadata level, with no request bodies, so a Secret's content is never logged;
@@ -329,7 +330,7 @@ S3 exercised validation, watches, conflicts, cascades and finalizers. Leases, Ev
    - Either way, controllers submit nothing new, because no submission starts without a recorded attempt (S4). Running jobs keep running to their hard ends.
    - The launcher's health reports the write failures on k3s, or the alarm on etcd. The host's disk is its own (Placement).
 6. **Idle cost:** one small host, or about 0.36 GiB of memory on k3s (S3). No grant hours and no provider connections when nothing is deployed.
-7. **Rollback:** stopping the control plane leaves provider jobs running until their hard ends, and the front serving from its last table. Established tunnels stay up in direct and ssh modes, since HBEP-6's frps plugin is consulted only at logins and proxy registrations (in host-dialed mode the relays stop with the control plane, and their streams are cut); a tunnel that reconnects meanwhile waits for the lifecycle controller to return (HBEP-6, Risks). Removing the framework needs releasing every Allocation first, with approval, and then removing the CRD-deletion policy.
+7. **Rollback:** stopping the control plane leaves provider jobs running until their hard ends, and the front serving from its last table. Established tunnels stay up in direct and ssh modes, since HBEP-6's frps plugin is consulted only at logins and proxy registrations (in host-dialed mode the relays stop with the control plane, and their streams are cut; in beta the relay keeper is part of the control plane and stops with it too); a tunnel that reconnects meanwhile waits for the lifecycle controller to return (HBEP-6, Risks). Removing the framework needs releasing every Allocation first, with approval, and then removing the CRD-deletion policy.
 
 ## Drawbacks
 
@@ -417,6 +418,7 @@ The control plane replaces the files and scripts that held www-2027's state: per
 - 2026-11-01: a completing job keeps the Allocation's finalizer, the `acct-` record waits until its flag clears, and the Allocation's status gains `jobCompleting` (HBEP-4's amendment of the same day, for #198).
 - 2026-11-01: the Allocation's `queued-successor` mark, written once by the lifecycle controller in the create request and read by the Provider's controller (HBEP-7's and HBEP-4's amendments of the same day, for #195).
 - 2026-11-09: open question 8 adds HBEP-6's host-dialed mode for a host that compute nodes can't reach.
+- 2026-11-10: in beta's host-dialed mode the launcher supervises the relay keeper (HBEP-6).
 
 ## Amendments
 
@@ -476,3 +478,4 @@ The control plane replaces the files and scripts that held www-2027's state: per
   - **Restarts:** stopping the control plane cuts host-dialed streams.
 
   Before, such a host was out of alpha.
+- **2026-11-10: the relay keeper** (Single-user host; Operational readiness 7). An amendment with HBEP-6's of the same day. In beta's host-dialed mode the launcher starts, records, health-checks and restarts the relay keeper beside frps, and `down` stops it by its record. Before, the launcher supervised no relay process.
