@@ -107,6 +107,8 @@ func TestJudgeHostDialedFailsEachCheckOnItsOwnFact(t *testing.T) {
 		}, []string{checkPreamble}},
 		{"no exchange reached the serving port", func(o *hostDialedObs) { o.Exchanges = nil }, []string{checkBytes, checkServing}},
 		{"a line without -u", func(o *hostDialedObs) { o.Lines[1] = strings.Replace(o.Lines[1], "srun -u ", "srun ", 1) }, []string{checkSrunU}},
+		// Another option in -u's place: -l would prefix every line of the step's output with its task number.
+		{"a line with -l for -u", func(o *hostDialedObs) { o.Lines[1] = strings.Replace(o.Lines[1], "srun -u ", "srun -l ", 1) }, []string{checkSrunU}},
 		{"a line without --overlap", func(o *hostDialedObs) { o.Lines[0] = strings.Replace(o.Lines[0], " --overlap", "", 1) }, []string{checkSrunU}},
 		{"a line on another job", func(o *hostDialedObs) { o.Lines[0] = strings.Replace(o.Lines[0], "--jobid=4242", "--jobid=4243", 1) }, []string{checkSrunU}},
 		{"a line of another agent", func(o *hostDialedObs) { o.Lines[0] = strings.Replace(o.Lines[0], goodAgent, "/tmp/hb-agent", 1) }, []string{checkSrunU}},
