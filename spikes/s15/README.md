@@ -20,9 +20,9 @@ The answer to open question 12: carry bulk paths on a separate frpc with `tcpMux
   - In direct mode its transfers took their own connections on the link: 9 connections over a run, 6 of them carrying more than 1 MiB, against 2 and 1 in layout (a).
   - In host-dialed mode its connections are streams of the one serving relay, whose yamux window is 256 KiB, not 6 MiB. That bounds the bulk stream's queue to 256 KiB over 34 MB/s, about 7.7 ms. The link carried only the 2 relays.
 - **A relay of its own (layout (d), host-dialed only) gains about 3 ms over (c):** gap p99 52 ms, max 53. It costs a third relay per Allocation.
-- **The front host's CPU is not what decides.** During the transfers the front used at most 0.13 cores in any layout, against 0.01–0.03 with no transfer. Layout (c)'s second frps adds a process, not CPU.
+- **The front host's CPU is not what decides.** During the transfers themselves the front used 0.05–0.35 cores in any layout, and 0.03–0.13 averaged over the transfers' phase (which includes the 4 s pauses between them), against 0.01–0.03 with no transfer. Layout (c)'s second frps adds a process, not CPU.
 - **No tunnel was lost** in 105 runs: 0 drops, 0 frpc re-logins, 0 relay restarts, 0 heartbeat timeouts.
-- **For #273:** the node read an upload's last byte 0.14–0.34 s after the client's last write without a cap, and up to 0.92 s with one. A front-side timing that stops at the front's last write misses that tail.
+- **For #273:** the node read an upload's last byte 0.14–0.42 s after the client's last write without a binding cap (every transfer; each configuration's median 0.14–0.34 s), and up to 1.32 s with one. A front-side timing that stops at the front's last write misses that tail.
 
 ## Question
 
@@ -63,7 +63,7 @@ host-dialed  frpc --> job side --yamux stream--> relay step --TCP--> link --> ss
 ```
 
 - **The link** is S1c's shared-rate shaper (`spikes/s1c/cmd/s1cbench/shaper.go`) with three additions, in `cmd/s15link`:
-  - a one-way delay per direction (1.15 ms: a 2.3 ms round trip, S1's probe);
+  - a one-way delay per direction (1.15 ms set, so a 2.3 ms round trip, after S1's probe; the round trip was configured, not measured);
   - a bounded receive buffer of its own (`SO_RCVBUF` 256 KiB), so a sender's queue builds in its own socket buffer, as before a real bottleneck;
   - per-connection counts.
 
@@ -92,7 +92,18 @@ host-dialed  frpc --> job side --yamux stream--> relay step --TCP--> link --> ss
 
 ## Results
 
-All tables come from `results/rep{1,2,3}/`, rendered by `python3 summarize.py tables`. The gaps are recomputed from every token's committed arrival (`streams.csv`), the transfers from `transfers.csv`, and the CPU from `samples.csv`. Every run finished (status `ok`), and on every runner nothing was left running and no listener stayed in 29980–29999 (`s15.py leftovers`, in each job's log).
+All tables come from `results/rep{1,2,3}/`, rendered by `python3 summarize.py tables`.
+- **The tables recompute** the gaps from every token's committed arrival (`streams.csv.xz`) and the front CPU during transfers from the committed samples.
+- **`python3 summarize.py verify` recomputes from the committed files every other value the tables take from `runs.csv`:**
+  - 1,710 CPU figures, from `samples.csv.xz`, within 0.00005 cores;
+  - 105 transfer summaries (rates, times, the first second's bytes, the rate after it, upload tails), from `transfers.csv`;
+  - 99 validity verdicts and 99 gap summaries, from `streams.csv.xz` and `transfers.csv`;
+  - 105 link connection counts, from `links.csv`;
+  - 132 connection maxima per frpc, from `conns.csv.xz`.
+
+  It finds no mismatch, and it exits 1 on one: a changed rate or count in `runs.csv` is reported, checked by hand.
+
+Every run finished (status `ok`), and on every runner nothing was left running and no listener stayed in 29980–29999 (`s15.py leftovers`, in each job's log). Every run finished (status `ok`), and on every runner nothing was left running and no listener stayed in 29980–29999 (`s15.py leftovers`, in each job's log).
 
 ### Path rate (calibration)
 
@@ -185,61 +196,61 @@ Median over the repetitions (range in brackets). The rate is bytes over the rece
 
 ### Uploads: when the receiver had the last byte
 
-How long after the client's last write the node read the upload's last byte: the part of an upload a front-side timing does not see (#273).
+How long after the client's last write the node read the upload's last byte: the part of an upload a front-side timing does not see (#273). The first column is the median over the repetitions of each run's median transfer (range in brackets); the second is every single transfer's, minimum to maximum.
 
-| mode | layout | receiver's last byte after the client's last write, ms |
-|---|---|---:|
-| direct | a | 143 (142–144) |
-| direct | b25 | 618 (613–878) |
-| direct | b50 | 301 (301–304) |
-| direct | b75 | 144 (138–148) |
-| direct | c | 225 (221–256) |
-| host-dialed | a | 194 (170–199) |
-| host-dialed | b25 | 921 (859–1247) |
-| host-dialed | b50 | 455 (434–610) |
-| host-dialed | b75 | 193 (189–195) |
-| host-dialed | c | 342 (340–359) |
-| host-dialed | d | 344 (320–388) |
+| mode | layout | median of each run's median, ms | every transfer, min–max, ms |
+|---|---|---:|---:|
+| direct | a | 143 (142–144) | 137–148 |
+| direct | b25 | 618 (613–878) | 612–880 |
+| direct | b50 | 301 (301–304) | 294–438 |
+| direct | b75 | 144 (138–148) | 137–209 |
+| direct | c | 225 (221–256) | 189–281 |
+| host-dialed | a | 194 (170–199) | 153–283 |
+| host-dialed | b25 | 921 (859–1247) | 857–1316 |
+| host-dialed | b50 | 455 (434–610) | 422–655 |
+| host-dialed | b75 | 193 (189–195) | 142–227 |
+| host-dialed | c | 342 (340–359) | 270–398 |
+| host-dialed | d | 344 (320–388) | 276–422 |
 
 ### Connections and the front's CPU
 
-The link's connections over the run (the emulator's per-connection counts), those that carried more than 1 MiB, and the bulk frpc's established connections at their most. Front CPU is frps (+ the second frps) + listener (+ owner + ssh stand-ins), in cores, over the reference window and over the transfers' phase.
+The link's connections over the run (the emulator's per-connection counts), those that carried more than 1 MiB, and the bulk frpc's established connections at their most. Front CPU is frps (+ the second frps) + listener (+ owner + ssh stand-ins), in cores: over the reference window; over the transfers' phase, first transfer's start to last's end, which includes the 4 s pauses between them; and over the transfers' own spans only, from the samples (every 0.5 s) inside each span, which leaves the pauses out.
 
-| mode | transfer | layout | link connections | over 1 MiB | bulk frpc connections | front cores, reference | front cores, transfers | host busy, transfers |
-|---|---|---|---:|---:|---:|---:|---:|---:|
-| direct | download | a | 2 | 1 | - | 0.015 (0.013–0.027) | 0.094 (0.090–0.117) | 0.05 (0.05–0.07) |
-| direct | download | b25 | 2 | 1 | - | 0.013 (0.013–0.026) | 0.075 (0.075–0.095) | 0.06 (0.05–0.07) |
-| direct | download | b50 | 2 | 1 | - | 0.015 (0.013–0.027) | 0.092 (0.089–0.100) | 0.06 (0.05–0.06) |
-| direct | download | b75 | 2 | 1 | - | 0.014 (0.013–0.015) | 0.092 (0.091–0.093) | 0.05 |
-| direct | download | c | 9 | 6 | 3 | 0.015 (0.012–0.017) | 0.080 (0.077–0.085) | 0.05 |
-| direct | embeddings | a | 2 | 1 | - | 0.015 (0.013–0.025) | 0.050 (0.049–0.067) | 0.04 (0.03–0.05) |
-| direct | embeddings | b25 | 2 | 1 | - | 0.015 (0.013–0.023) | 0.054 (0.050–0.060) | 0.04 (0.03–0.04) |
-| direct | embeddings | b50 | 2 | 1 | - | 0.013 | 0.047 (0.044–0.049) | 0.03 |
-| direct | embeddings | b75 | 2 | 1 | - | 0.015 (0.012–0.017) | 0.049 (0.049–0.050) | 0.03 |
-| direct | embeddings | c | 9 | 6 | 3 | 0.015 (0.014–0.015) | 0.042 (0.041–0.047) | 0.03 |
-| direct | upload | a | 2 | 1 | - | 0.013 (0.013–0.014) | 0.060 (0.059–0.061) | 0.04 |
-| direct | upload | b25 | 2 | 1 | - | 0.014 (0.013–0.029) | 0.037 (0.037–0.047) | 0.04 (0.04–0.05) |
-| direct | upload | b50 | 2 | 1 | - | 0.015 (0.013–0.021) | 0.059 (0.056–0.065) | 0.04 (0.04–0.05) |
-| direct | upload | b75 | 2 | 1 | - | 0.012 (0.012–0.013) | 0.055 (0.055–0.058) | 0.04 |
-| direct | upload | c | 9 | 6 | 3 | 0.013 (0.012–0.017) | 0.029 (0.027–0.032) | 0.04 |
-| host-dialed | download | a | 2 | 1 | - | 0.028 (0.025–0.031) | 0.110 (0.103–0.112) | 0.06 |
-| host-dialed | download | b25 | 2 | 1 | - | 0.027 (0.025–0.031) | 0.109 (0.105–0.111) | 0.07 (0.06–0.07) |
-| host-dialed | download | b50 | 2 | 1 | - | 0.030 (0.025–0.032) | 0.127 (0.125–0.132) | 0.08 (0.07–0.08) |
-| host-dialed | download | b75 | 2 | 1 | - | 0.029 (0.025–0.031) | 0.108 (0.107–0.119) | 0.06 (0.06–0.07) |
-| host-dialed | download | c | 2 | 1 | 3 | 0.027 (0.026–0.028) | 0.103 (0.101–0.104) | 0.06 |
-| host-dialed | download | d | 4 | 2 | 3 | 0.026 (0.024–0.028) | 0.099 (0.097–0.101) | 0.06 |
-| host-dialed | embeddings | a | 2 | 1 | - | 0.028 (0.022–0.029) | 0.068 (0.061–0.071) | 0.04 |
-| host-dialed | embeddings | b25 | 2 | 1 | - | 0.028 (0.026–0.028) | 0.075 (0.074–0.083) | 0.05 |
-| host-dialed | embeddings | b50 | 2 | 1 | - | 0.028 (0.025–0.029) | 0.066 (0.065–0.067) | 0.04 |
-| host-dialed | embeddings | b75 | 2 | 1 | - | 0.028 (0.028–0.029) | 0.070 (0.068–0.073) | 0.04 (0.04–0.05) |
-| host-dialed | embeddings | c | 2 | 1 | 3 | 0.029 (0.027–0.029) | 0.064 (0.056–0.066) | 0.04 (0.03–0.04) |
-| host-dialed | embeddings | d | 4 | 2 | 3 | 0.025 (0.023–0.025) | 0.056 (0.056–0.063) | 0.04 |
-| host-dialed | upload | a | 2 | 1 | - | 0.029 (0.025–0.031) | 0.086 (0.086–0.096) | 0.06 (0.05–0.06) |
-| host-dialed | upload | b25 | 2 | 1 | - | 0.026 (0.022–0.027) | 0.053 (0.049–0.053) | 0.04 |
-| host-dialed | upload | b50 | 2 | 1 | - | 0.028 (0.025–0.029) | 0.080 (0.074–0.082) | 0.05 (0.05–0.06) |
-| host-dialed | upload | b75 | 2 | 1 | - | 0.027 (0.025–0.030) | 0.092 (0.085–0.097) | 0.06 (0.05–0.06) |
-| host-dialed | upload | c | 2 | 1 | 3 | 0.025 (0.023–0.030) | 0.064 (0.058–0.067) | 0.05 (0.04–0.05) |
-| host-dialed | upload | d | 4 | 2 | 3 | 0.028 (0.026–0.028) | 0.059 (0.059–0.061) | 0.04 (0.04–0.05) |
+| mode | transfer | layout | link connections | over 1 MiB | bulk frpc connections | front cores, reference | front cores, transfers' phase (with pauses) | front cores, during transfers only | host busy, transfers' phase |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| direct | download | a | 2 | 1 | - | 0.015 (0.013–0.027) | 0.094 (0.090–0.117) | 0.276 (0.270–0.350) | 0.05 (0.05–0.07) |
+| direct | download | b25 | 2 | 1 | - | 0.013 (0.013–0.026) | 0.075 (0.075–0.095) | 0.110 (0.107–0.137) | 0.06 (0.05–0.07) |
+| direct | download | b50 | 2 | 1 | - | 0.015 (0.013–0.027) | 0.092 (0.089–0.100) | 0.242 (0.233–0.256) | 0.06 (0.05–0.06) |
+| direct | download | b75 | 2 | 1 | - | 0.014 (0.013–0.015) | 0.092 (0.091–0.093) | 0.290 (0.263–0.298) | 0.05 |
+| direct | download | c | 9 | 6 | 3 | 0.015 (0.012–0.017) | 0.080 (0.077–0.085) | 0.241 (0.239–0.257) | 0.05 |
+| direct | embeddings | a | 2 | 1 | - | 0.015 (0.013–0.025) | 0.050 (0.049–0.067) | - | 0.04 (0.03–0.05) |
+| direct | embeddings | b25 | 2 | 1 | - | 0.015 (0.013–0.023) | 0.054 (0.050–0.060) | 0.145 (0.126–0.165) | 0.04 (0.03–0.04) |
+| direct | embeddings | b50 | 2 | 1 | - | 0.013 | 0.047 (0.044–0.049) | 0.236 | 0.03 |
+| direct | embeddings | b75 | 2 | 1 | - | 0.015 (0.012–0.017) | 0.049 (0.049–0.050) | - | 0.03 |
+| direct | embeddings | c | 9 | 6 | 3 | 0.015 (0.014–0.015) | 0.042 (0.041–0.047) | - | 0.03 |
+| direct | upload | a | 2 | 1 | - | 0.013 (0.013–0.014) | 0.060 (0.059–0.061) | 0.174 (0.172–0.181) | 0.04 |
+| direct | upload | b25 | 2 | 1 | - | 0.014 (0.013–0.029) | 0.037 (0.037–0.047) | 0.049 (0.049–0.059) | 0.04 (0.04–0.05) |
+| direct | upload | b50 | 2 | 1 | - | 0.015 (0.013–0.021) | 0.059 (0.056–0.065) | 0.145 (0.140–0.155) | 0.04 (0.04–0.05) |
+| direct | upload | b75 | 2 | 1 | - | 0.012 (0.012–0.013) | 0.055 (0.055–0.058) | 0.157 (0.148–0.165) | 0.04 |
+| direct | upload | c | 9 | 6 | 3 | 0.013 (0.012–0.017) | 0.029 (0.027–0.032) | 0.065 (0.063–0.074) | 0.04 |
+| host-dialed | download | a | 2 | 1 | - | 0.028 (0.025–0.031) | 0.110 (0.103–0.112) | 0.271 (0.259–0.273) | 0.06 |
+| host-dialed | download | b25 | 2 | 1 | - | 0.027 (0.025–0.031) | 0.109 (0.105–0.111) | 0.150 (0.139–0.150) | 0.07 (0.06–0.07) |
+| host-dialed | download | b50 | 2 | 1 | - | 0.030 (0.025–0.032) | 0.127 (0.125–0.132) | 0.249 (0.239–0.251) | 0.08 (0.07–0.08) |
+| host-dialed | download | b75 | 2 | 1 | - | 0.029 (0.025–0.031) | 0.108 (0.107–0.119) | 0.258 (0.252–0.289) | 0.06 (0.06–0.07) |
+| host-dialed | download | c | 2 | 1 | 3 | 0.027 (0.026–0.028) | 0.103 (0.101–0.104) | 0.246 (0.243–0.251) | 0.06 |
+| host-dialed | download | d | 4 | 2 | 3 | 0.026 (0.024–0.028) | 0.099 (0.097–0.101) | 0.232 (0.229–0.250) | 0.06 |
+| host-dialed | embeddings | a | 2 | 1 | - | 0.028 (0.022–0.029) | 0.068 (0.061–0.071) | 0.281 (0.261–0.293) | 0.04 |
+| host-dialed | embeddings | b25 | 2 | 1 | - | 0.028 (0.026–0.028) | 0.075 (0.074–0.083) | 0.151 (0.151–0.155) | 0.05 |
+| host-dialed | embeddings | b50 | 2 | 1 | - | 0.028 (0.025–0.029) | 0.066 (0.065–0.067) | 0.274 (0.244–0.287) | 0.04 |
+| host-dialed | embeddings | b75 | 2 | 1 | - | 0.028 (0.028–0.029) | 0.070 (0.068–0.073) | 0.284 (0.280–0.303) | 0.04 (0.04–0.05) |
+| host-dialed | embeddings | c | 2 | 1 | 3 | 0.029 (0.027–0.029) | 0.064 (0.056–0.066) | 0.250 (0.225–0.274) | 0.04 (0.03–0.04) |
+| host-dialed | embeddings | d | 4 | 2 | 3 | 0.025 (0.023–0.025) | 0.056 (0.056–0.063) | 0.239 (0.235–0.247) | 0.04 |
+| host-dialed | upload | a | 2 | 1 | - | 0.029 (0.025–0.031) | 0.086 (0.086–0.096) | 0.203 (0.202–0.220) | 0.06 (0.05–0.06) |
+| host-dialed | upload | b25 | 2 | 1 | - | 0.026 (0.022–0.027) | 0.053 (0.049–0.053) | 0.067 (0.059–0.067) | 0.04 |
+| host-dialed | upload | b50 | 2 | 1 | - | 0.028 (0.025–0.029) | 0.080 (0.074–0.082) | 0.143 (0.129–0.149) | 0.05 (0.05–0.06) |
+| host-dialed | upload | b75 | 2 | 1 | - | 0.027 (0.025–0.030) | 0.092 (0.085–0.097) | 0.211 (0.209–0.215) | 0.06 (0.05–0.06) |
+| host-dialed | upload | c | 2 | 1 | 3 | 0.025 (0.023–0.030) | 0.064 (0.058–0.067) | 0.132 (0.127–0.141) | 0.05 (0.04–0.05) |
+| host-dialed | upload | d | 4 | 2 | 3 | 0.028 (0.026–0.028) | 0.059 (0.059–0.061) | 0.133 (0.120–0.134) | 0.04 (0.04–0.05) |
 
 ### Tunnel losses
 
@@ -263,8 +274,9 @@ Summed over all 105 runs: frps's lists (a proxy not online or registered again),
 
   The repetitions agree.
 - **The gap p50 below 50 ms** in host-dialed (a) and (b75) is tokens released together after a stall, not faster tokens.
+- **Front CPU during transfers only** is missing where a transfer is shorter than two samples (every 0.5 s): the direct-mode embeddings replies of about 0.5 s. The phase average includes the 4 s pauses between transfers, so it understates the front's demand while a transfer runs.
 - **Caps** are in frp's MB (1,048,576 bytes) and shown in MB/s of 10^6 bytes. "Binds" compares the rate after the first second with the cap. "Done in the first second" means the transfer was smaller than the burst.
-- **Host-dialed mode's path rate** was 31.7–33.9 MB/s against the link's 48 MB/s: the relay chain (the stand-in, the owner and the relay step, each a process copying bytes) on a 4-CPU runner. Its caps were set from that rate.
+- **Host-dialed mode's path rate** was 31.7–33.9 MB/s in calibration, and 32–36 MB/s in the runs, against the link's set 48 MB/s; direct mode reached 47.2–48.0 MB/s. Why host-dialed falls short was not isolated: the relay chain's processes (the stand-in, the owner and the relay step) are where it differs, untested. Its caps were set from its own calibrated rate.
 
 ## Verdict
 
@@ -282,9 +294,19 @@ Summed over all 105 runs: frps's lists (a proxy not online or registered again),
   - **a new TLS connection per bulk request** through the listener (mux off: one work connection per request). That is one handshake per request, a few round trips on the path;
   - **in host-dialed mode, nothing more:** the second frpc reaches the job side's serving listener like the first.
 - **One constraint follows:** the host-dialed relay's per-stream window must stay small. `internal/hostdial` uses yamux's default of 256 KiB. Raised to frp's 6 MiB, the serving relay would stall the token streams behind (c)'s bulk streams again.
-  - **Its price:** a 256 KiB window caps every relay stream's rate at 256 KiB ÷ round trip: about 114 MB/s at 2.3 ms, and about 26 MB/s at 10 ms.
+  - **Its price:** a 256 KiB window caps every relay stream's rate at 256 KiB ÷ round trip: about 114 MB/s at the configured 2.3 ms, and about 26 MB/s at 10 ms.
   - In host-dialed mode that bounds the bulk path's own rate on a longer round trip, since (c) rides the same relay.
-  - Only 2.3 ms was measured here; a longer path would trade a lower bulk rate for the same low token latency, or need the window sized to the path.
+  - Only the configured 2.3 ms was run here; a longer path would trade a lower bulk rate for the same low token latency, or need the window sized to the path.
+- **What a larger relay window would cost** (derived from the mechanism measured here, not measured at other windows):
+  - **Memory.** In fatedier/yamux v0.2.0 a stream's receiver buffers its unread bytes up to the window (`stream.go:506-525`), and the window refills to its maximum as they are read (`:278-305`). So a window W holds up to W per stream at the receiving end, and the sender may have W in flight: for a relay, its streams times W at each end when a reader lags.
+    - At 256 KiB that is 1 MiB for a relay of 4 streams (the token frpc's connection and (c)'s bulk work connections).
+    - At frp's 6 MiB it is 24 MiB, held in the owner (the controller's process) and in the agent.
+  - **Head-of-line.** A relay stream can queue W ahead of the others, so the stall is about W ÷ path rate:
+    - 7.7 ms at 256 KiB and 34 MB/s, the window measured here;
+    - 31 ms at 1 MiB;
+    - 185 ms at 6 MiB, which is layout (a)'s stall, measured.
+  - **Rate.** A stream's rate tops out at about W ÷ round trip: 114 MB/s (256 KiB), 456 MB/s (1 MiB) and 2.7 GB/s (6 MiB) at 2.3 ms; 26, 105 and 629 MB/s at 10 ms.
+  - **Sizing.** A window of about the path's rate times its round trip keeps both bounds near the path: the stall is about one round trip and the rate about the path's. For example, 85 MB/s at 10 ms is about 850 KB, so a 1 MiB window gives a 12 ms stall. Raising the window above yamux's 256 KiB is worth it only for paths whose rate times round trip exceeds that, and should be sized to them, not to frp's 6 MiB.
 - **Not layout (b).** frp's limiter starts with a full one-second burst, so it never meets a transfer smaller than one second's cap. When it binds, the stall at the start remains (p99 87–203 ms), and every transfer is 1.3–3.5 times slower. One limiter also caps both directions of the proxy.
   - **Why no cap could help much.** On frp's session the bulk stream can queue at most the smaller of the burst and frp's 6 MiB window, so the stall is about min(burst, 6 MiB) ÷ path rate.
   - Every cap #336 named sets a burst above 6 MiB: at 25% of 47 MB/s the burst is 11.8 MB. So all of them leave (a)'s stall, as measured.
@@ -292,14 +314,14 @@ Summed over all 105 runs: frps's lists (a proxy not online or registered again),
 - **Not layout (d).** A relay of its own gains about 3 ms at p99 over (c) in host-dialed mode. Its cost is 3 relays per Allocation (4 in this stand-in, Method). Under HBEP-4's count of 4 relays per login host, only one Allocation then fits, which breaks the handover pair unless the count is raised from a measurement.
 - **Uploads need nothing.** They flow against the token streams and stalled nothing in any layout; on the separate frpc they are equally fine.
 - **What the verdict rests on, and what it does not:**
-  - one bulk transfer at a time, on loopback at 48 MB/s with a 2.3 ms round trip, and a link that queues per connection;
+  - one bulk transfer at a time, on loopback with the link set to 48 MB/s and a 2.3 ms round trip (achieved 47–48 MB/s direct, 32–36 MB/s host-dialed), and a link that queues per connection;
   - behind a FIFO bottleneck, direct mode's (c) would keep the bulk bytes off frp's 6 MiB window but share the bottleneck's queue. Host-dialed mode's (c) does not depend on that, since the relay is one connection either way (Unknowns).
 
 ## Proposed HBEP-6 text for open question 12
 
 For the science agent to amend. It replaces the item's current text.
 
-> 12. **Bulk endpoints off the token tunnel.** **Answered for one transfer at a time** (spike S15, issue #336): on loopback at 48 MB/s with a 2.3 ms round trip, 8 token streams of 20 tokens/s ran beside a 64 MiB upload, a 64 MiB download or a 2,000-input embeddings reply, in direct and host-dialed mode.
+> 12. **Bulk endpoints off the token tunnel.** **Answered for one transfer at a time** (spike S15, issue #336): on loopback, with the link set to 48 MB/s and a 2.3 ms round trip (47–48 MB/s achieved in direct mode, 32–36 MB/s in host-dialed mode), 8 token streams of 20 tokens/s ran beside a 64 MiB upload, a 64 MiB download or a 2,000-input embeddings reply, in direct and host-dialed mode.
 >     - **On one frp session a download or a large reply stalls the token streams** for about frp's stream window, a fixed 6 MiB, over the path rate. Gap p99 was 137 ms in direct mode and 206 ms in host-dialed mode, against 52 ms. Uploads, which flow the other way, stall nothing.
 >     - **`transport.bandwidthLimit` is not adopted.** frp's limiter starts with a full burst of one second's bytes, so transfers below one second's cap never meet it. When it binds, the burst's stall stays (p99 87–203 ms) and the transfer slows 1.3–3.5 times. The stall is about min(burst, 6 MiB) ÷ path rate, so a cap helps only below about 6 MB/s, where a 64 MiB transfer takes about 11 s; the 25–75% caps tested were all above that.
 >     - **Bulk paths go to a separate frpc with `transport.tcpMux = false`,** with its own tcpmux proxy for the Instance. This removed the stall at the full path rate: p99 53 ms in direct mode, 55 ms in host-dialed mode. It needs:
@@ -308,14 +330,14 @@ For the science agent to amend. It replaces the item's current text.
 >       - a second `CONNECT` target in the front's transport, for embeddings, file transfers and large non-streamed replies;
 >       - a second frpc per Instance, staged and supervised like the first;
 >       - a TLS connection per bulk request.
->     - **In host-dialed mode the separate frpc shares the serving relay.** Its connections are streams of the relay's yamux session, whose 256 KiB per-stream window bounds the stall to a few ms. That window must stay at yamux's default. Its price is a per-stream rate ceiling of 256 KiB ÷ round trip: about 114 MB/s at the 2.3 ms measured, about 26 MB/s at 10 ms, which bounds the bulk path's rate on a longer path.
+>     - **In host-dialed mode the separate frpc shares the serving relay.** Its connections are streams of the relay's yamux session, whose 256 KiB per-stream window bounds the stall to a few ms. That window must stay at yamux's default. Its price is a per-stream rate ceiling of 256 KiB ÷ round trip: about 114 MB/s at the 2.3 ms configured here, about 26 MB/s at 10 ms, which bounds the bulk path's rate on a longer path.
 >     - **A third relay channel for bulk paths is not adopted:** it gained about 3 ms and costs a third relay per Allocation, which under HBEP-4's 4 per login host breaks the handover pair.
 >     - **Still open:** a FIFO bottleneck shared by the two frpc's connections in direct mode; real ssh and srun buffers on the relay; several bulk transfers at once.
 
 ## A note on #273
 
 **Front-side per-request upload timing is not worth building.**
-- The node read an upload's last byte 0.14–0.34 s after the client's last write, without a cap. That is 10–18% of a 64 MiB upload's 1.4–2 s, and up to 0.92 s under a cap. The tail is the bytes buffered between the front and the receiver: frp's 6 MiB window, the socket buffers and, in host-dialed mode, the relay.
+- The node read an upload's last byte 0.14–0.42 s after the client's last write, without a binding cap (every transfer; each configuration's median 0.14–0.34 s). That is 10–21% of a 64 MiB upload's 1.4–2 s, and up to 1.32 s under a binding cap. The tail is the bytes buffered between the front and the receiver: frp's 6 MiB window, the socket buffers and, in host-dialed mode, the relay.
 - So a timing that stops at the front's last write overstates the rate by that much, and for an upload below about 6 MiB it times only the front's loopback write.
 - The front already sees a better bound: a non-streamed upload's response headers follow the receiver's last byte, so the time to the response covers the whole upload.
 - If an upload rate is wanted per request, it should come from the receiver (the agent or the engine), as this spike measured it.
@@ -343,11 +365,12 @@ The relay's per-stream window in host-dialed mode is yamux's default of 256 KiB 
 
 - **The run:** workflow run 42836566161 on draft PR #341, whose head merges the spike's commit `099c983c` with a one-off workflow. It took 10 Nov 2026, 14:41–15:10 UTC, 29 min per job.
   - The commits after `099c983c` change only `README.md` and `results/`, so the harness in this directory is the one that ran.
-  - The raw files stay in the run's artifacts until 24 Nov 2026; the committed `streams.csv`, `transfers.csv`, `links.csv`, `samples.csv` and `host.csv` keep every measured value.
+  - The raw files stay in the run's artifacts until 24 Nov 2026. The committed `streams.csv.xz`, `transfers.csv`, `links.csv`, `conns.csv.xz`, `samples.csv.xz` and `host.csv.xz` keep every measured value.
+  - **The large files are committed xz-compressed:** every sample and every token's arrival, 15.6 MB as CSV and 3.1 MB compressed (`summarize.py compress`, preset 6, each file checked to read back byte for byte). `summarize.py` reads them as they are, and the tables rebuild from them byte for byte; `xz -dc <file>.csv.xz` gives the CSV.
 - **Runners:** three fresh GitHub-hosted `ubuntu-24.04` runners, each an AMD EPYC 9V45 96-Core Processor with 4 CPUs, 15,983 MB and Linux 7.0.0-1017-azure. They had Go from `go.mod`, Python 3.12.3, and open files raised to the hard limit.
 - **The link:** 48,000,000 B/s each way, 1.15 ms each way, a 256 KiB receive buffer, 16 KiB chunks and 2 ms of catch-up slack (Method).
-  - Direct mode measured 47.2–47.5 MB/s at the receiver.
-  - Host-dialed mode measured 31.7–33.9 MB/s, held by the relay chain's copying on 4 CPUs.
+  - Direct mode measured 47.2–47.5 MB/s at the receiver in calibration (up to 48.0 MB/s in the runs).
+  - Host-dialed mode measured 31.7–33.9 MB/s in calibration (32–36 MB/s in the runs). Why it falls short of the link's set rate was not isolated.
 - **Priority:** frps, the second frps, the listener, the owner (and the stand-ins it starts), the link and the client ran at nice 0; frpc and the node at nice 10. During transfers the runner was at most 8% busy.
 - **The development VM** ran only builds and smoke runs at nice 19 under `systemd-run --user --scope -p MemoryMax=4G`, with transfers of 8 and 32 MiB and the 1-minute load at most 3.04. Every smoke configuration was valid, with 0 drops and nothing left running. Nothing that links `internal/rehearsal` was built into this spike (`go list -deps -test` counts 0 for all four packages).
 
@@ -379,7 +402,7 @@ The relay's per-stream window in host-dialed mode is yamux's default of 256 KiB 
 
   The front has none of these today; the Verdict prices them.
 - **Layout (d) was added by the science agent** (host-dialed mode only), and is built as a stand-in (Method): 4 relays where a real third channel makes 3.
-- **The link runs at one rate,** 48 MB/s each way, the low end of S1's probes, with a 2.3 ms round trip. 85 MB/s was not run: at a higher rate the same transfer queues for less time, so 48 MB/s is the case where blocking is worst.
+- **The link runs at one rate,** set to 48 MB/s each way, the low end of S1's probes, with a 2.3 ms round trip set (1.15 ms each way). 85 MB/s was not run: at a higher rate the same transfer queues for less time, so 48 MB/s is the case where blocking is worst.
 - **Fair queueing.** The link shares its rate with per-connection queues, as S1c's shaper does. That flatters layouts with separate connections against a FIFO bottleneck (Unknowns).
 - **The embeddings reply** is 2,000 embeddings of 1,024 floats as JSON. The double computes nothing, so the reply goes at once; a real engine would compute first, which changes when the transfer starts, not what it does to the streams.
 - **New connection per transfer,** as in S1c and S14.
@@ -389,7 +412,7 @@ The relay's per-stream window in host-dialed mode is yamux's default of 256 KiB 
 
 - **A FIFO bottleneck.** With one shared queue instead of per-connection queues, a separate connection's bulk bytes would still sit ahead of the token connection's in the queue; layouts (c) and (d) would gain less than measured here.
 - **Real ssh and srun.** The stand-in copies bytes in the clear over one TCP hop. ssh's and srun's own buffers, which S1c found add to head-of-line queues, are not modelled; nor is ssh's encryption cost.
-- **Higher path rates and other round trips.** At 85 MB/s a transfer queues for less time; at a longer round trip, the relay's 256 KiB yamux window would limit a relay stream's rate (256 KiB ÷ round trip: about 114 MB/s at 2.3 ms).
+- **Higher path rates and other round trips.** At 85 MB/s a transfer queues for less time; at a longer round trip, the relay's 256 KiB yamux window would limit a relay stream's rate (256 KiB ÷ round trip: about 114 MB/s at the configured 2.3 ms).
 - **Several bulk transfers at once,** and bulk transfers on several Instances behind one link.
 - **The front's own HTTP proxy,** which would carry the bulk bytes once more, and its upload path (#273).
 - **The cost of (c)'s connections at scale.** With `tcpMux = false`, the bulk frpc opens a new TLS connection through the listener for every work connection: a handshake per bulk request, for the listener and the second frps. The admission plugin's operations (Login, NewProxy, CloseProxy) are not called per work connection. This spike ran one Instance.
@@ -405,8 +428,8 @@ The relay's per-stream window in host-dialed mode is yamux's default of 256 KiB 
 | `node/` | the node side (engine doubles, bulk paths, job sides, relay steps), a test binary, with tests |
 | `s15.py` | the driver: `run`, `host`, `leftovers` |
 | `analysis.py`, `tests/` | the result rules and the sample writer, with their tests |
-| `summarize.py` | `extract` (raw files to `streams.csv`, `transfers.csv`, `links.csv`), `tables` |
-| `results/rep{1,2,3}/` | `runs.csv`, `samples.csv`, `host.csv` (the driver's), `streams.csv` (every token's arrival), `transfers.csv`, `links.csv` |
+| `summarize.py` | `extract` (raw files to `streams.csv`, `transfers.csv`, `links.csv`, `conns.csv`), `compress` (the large CSVs to `.csv.xz`), `tables`, `verify` (the CPU figures from the samples) |
+| `results/rep{1,2,3}/` | `runs.csv`, `samples.csv.xz`, `host.csv.xz` (the driver's), `streams.csv.xz` (every token's arrival), `transfers.csv`, `links.csv`, `conns.csv.xz` (each frpc's established connections, every 0.5 s) |
 
 ```sh
 export S15_BIN=<dir> S15_WORK=<scratch> S15_RESULTS=<dir>
@@ -415,7 +438,8 @@ bash fetch.sh
 python3 s15.py run --rep 1            # every configuration, about 40 min on a 4-CPU runner
 python3 s15.py leftovers
 python3 summarize.py extract $S15_RESULTS/raw results/rep1 && cp $S15_RESULTS/{runs,samples,host}.csv results/rep1/
-python3 summarize.py tables
+python3 summarize.py compress     # the large CSVs to .csv.xz, as committed
+python3 summarize.py tables; python3 summarize.py verify
 ```
 
 Ports, all on 127.0.0.1, in #336's block: 29980–29982 frps (bind, tcpmux, web), 29983 the dial-home listener, 29984 the link, 29985 the node's relay acceptor, 29986 the control channel's port (nothing listens), 29987–29989 the second frps. The job sides' listeners are kernel-chosen. Every run checks with `ss` that every listener its processes hold is on 127.0.0.1, and that nothing is left in 29980–29999 afterwards.
