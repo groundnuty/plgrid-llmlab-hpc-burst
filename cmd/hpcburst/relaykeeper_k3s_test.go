@@ -76,11 +76,37 @@ func (h *host) runningAllocation(name string) {
 	}
 }
 
+// setAllocationPhase sets an Allocation's observed phase, through the API type.
+func (h *host) setAllocationPhase(name string, phase v1alpha1.AllocationPhase) {
+	h.t.Helper()
+	res := h.clients().dyn.Resource(v1alpha1.GroupVersion.WithResource("allocations")).Namespace("default")
+	got, err := res.Get(h.t.Context(), name, metav1.GetOptions{})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	var a v1alpha1.Allocation
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(got.Object, &a); err != nil {
+		h.t.Fatal(err)
+	}
+	a.Status.AtProvider.Phase = phase
+	obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&a)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	if _, err := res.UpdateStatus(h.t.Context(), &unstructured.Unstructured{Object: obj}, metav1.UpdateOptions{}); err != nil {
+		h.t.Fatalf("set the Allocation %s: %v", phase, err)
+	}
+}
+
 // up --relay-keeper in host-dialed mode runs the keeper, which status shows with its E. An
 // upgrade brings the host back with the keeper, at the next E, the controller given its socket
 // (the review of PR 361: it had come back as alpha). down stops the keeper and keeps its state
 // file. Then, with an Allocation Running, up without --relay-keeper refuses, naming it, and leaves
-// no host running; up with it starts again, the keeper at the next E.
+// no host running; up with it starts again, the keeper at the next E. Last, the keeper retired
+// marker (HBEP-6, Compatibility and upgrades, as amended 10 Nov 2026): with the Allocation drained,
+// up without the flag retires the keeper and writes the marker; with the marker, a later alpha up
+// passes with an alpha Allocation running; and up --relay-keeper removes it, the keeper resuming
+// at the next E.
 func TestRelayKeeperUpStatusDownAndTheSwitchBack(t *testing.T) {
 	const base = 30020
 	h := newHost(t)
@@ -164,6 +190,44 @@ func TestRelayKeeperUpStatusDownAndTheSwitchBack(t *testing.T) {
 	}
 	if st = cli(t, "status", "--state-dir", h.dir); st.code != exitOK || !strings.Contains(st.out, "E "+strconv.FormatInt(firstE+2, 10)) {
 		t.Errorf("status after the second up exited %d:\n%s", st.code, st.out)
+	}
+
+	// The keeper retired marker.
+	marker := filepath.Join(h.dir, "relaykeeper", "retired")
+	h.setAllocationPhase("example-alloc", v1alpha1.AllocationEnded)
+	if d := cli(t, "down", "--state-dir", h.dir); d.code != exitOK {
+		t.Fatalf("down exited %d: %s", d.code, d.err)
+	}
+	if r = up(); r.code != exitOK || !strings.Contains(r.err, "the relay keeper is retired") {
+		t.Fatalf("up without --relay-keeper after the drain exited %d; want it to pass and retire the keeper:\n%s", r.code, r.err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("the retired marker after the drained switch back: %v", err)
+	}
+	if st = cli(t, "status", "--state-dir", h.dir); strings.Contains(st.out, "supervised relaykeeper") {
+		t.Errorf("status of the alpha host shows a keeper:\n%s", st.out)
+	}
+	h.runningAllocation("alpha-alloc")
+	if d := cli(t, "down", "--state-dir", h.dir); d.code != exitOK {
+		t.Fatalf("down exited %d: %s", d.code, d.err)
+	}
+	if r = up(); r.code != exitOK || !strings.Contains(r.err, "the relay keeper was retired here") {
+		t.Fatalf("an alpha up with the marker and an alpha Allocation running exited %d; want it to pass:\n%s", r.code, r.err)
+	}
+	if d := cli(t, "down", "--state-dir", h.dir); d.code != exitOK {
+		t.Fatalf("down exited %d: %s", d.code, d.err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("the retired marker after down: %v, want it kept", err)
+	}
+	if r = up("--relay-keeper"); r.code != exitOK || !strings.Contains(r.err, "removed the relay keeper's retired marker") {
+		t.Fatalf("up --relay-keeper with the marker exited %d; want it to remove the marker:\n%s", r.code, r.err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the retired marker after up --relay-keeper: %v, want it removed", err)
+	}
+	if st = cli(t, "status", "--state-dir", h.dir); st.code != exitOK || !strings.Contains(st.out, "E "+strconv.FormatInt(firstE+3, 10)) {
+		t.Errorf("status after the keeper resumed exited %d; want E %d:\n%s", st.code, firstE+3, st.out)
 	}
 }
 

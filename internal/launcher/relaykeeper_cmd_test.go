@@ -203,4 +203,13 @@ func TestDownsRecordRemovalKeepsTheKeepersStateFile(t *testing.T) {
 	if _, err := os.Stat(relaykeeper.LockPath(l.dir)); err != nil {
 		t.Errorf("the keeper's lock file after clearRecord: %v, want it kept", err)
 	}
+	if err := writeRetiredMarker(l, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.clearRecord(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(retiredMarker(l)); err != nil {
+		t.Errorf("the keeper retired marker after clearRecord: %v, want it kept", err)
+	}
 }
