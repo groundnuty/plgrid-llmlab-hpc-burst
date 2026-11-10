@@ -1,0 +1,89 @@
+# One-off, never merged: spike S15's measurements (issue #336, HBEP-6 open question 12) on GitHub-hosted
+# runners: one bulk transfer beside 8 token streams in one Instance's tunnel, in layouts (a), (b) at three
+# caps and (c), in direct and host-dialed mode. Each repetition is its own job on a fresh runner; each
+# records the runner's CPU model and count with its results and uploads its runs.csv, samples, host
+# counters and raw files as an artifact. The jobs use no secret and write nothing to the repository.
+name: s15-measure
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/s15-measure.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    name: s15 rep ${{ matrix.rep }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        rep: [1, 2, 3]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          # The PR's own head, whose parent is the spike branch's head, not the merge with main.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: The runner
+        run: |
+          git rev-parse HEAD^ | sed 's/^/spike head /'
+          python3 spikes/s15/s15.py host
+          nproc
+          lscpu | grep -E '^(Model name|CPU\(s\)|Thread|Core|Socket)'
+          free -m
+          ulimit -n; ulimit -Hn
+          sysctl net.ipv4.tcp_wmem net.ipv4.tcp_rmem net.core.rmem_max net.ipv4.tcp_tw_reuse
+          python3 --version
+
+      - name: Fetch the pinned binaries and build the harness
+        env:
+          S15_BIN: ${{ runner.temp }}/s15bin
+        run: bash spikes/s15/fetch.sh
+
+      - name: The harness's unit tests
+        working-directory: spikes/s15
+        run: |
+          go vet ./...
+          go test -count=1 ./...
+          python3 -m unittest discover -s tests -v
+
+      - name: The measurements
+        env:
+          S15_BIN: ${{ runner.temp }}/s15bin
+          S15_WORK: ${{ runner.temp }}/s15w
+          S15_RESULTS: ${{ runner.temp }}/s15results/rep${{ matrix.rep }}
+        run: |
+          python3 spikes/s15/s15.py run --rep ${{ matrix.rep }}
+          python3 spikes/s15/s15.py leftovers
+          python3 - <<'PY'
+          import csv, os
+          path = os.path.join(os.environ["S15_RESULTS"], "runs.csv")
+          keys = ["mode", "layout", "kind", "status", "valid", "path_rate", "cap", "recv_rate_median", "gap_ref_p99_ms",
+                  "gap_bulk_p50_ms", "gap_bulk_p99_ms", "gap_bulk_max_ms", "cpu_ref_front", "cpu_bulk_front",
+                  "link_conns", "link_conns_over_1mib", "conns_max_frpc-bulk", "drops_api", "frpc_relogins"]
+          print("\t".join(keys))
+          for r in csv.DictReader(open(path)):
+              print("\t".join(str(r.get(k, "")) for k in keys))
+          PY
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: s15-rep${{ matrix.rep }}
+          path: ${{ runner.temp }}/s15results/rep${{ matrix.rep }}
+          retention-days: 14
+          if-no-files-found: error
