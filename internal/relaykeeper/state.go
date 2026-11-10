@@ -259,6 +259,26 @@ func ClearLeaseEpochs(path string) error {
 		return err
 	}
 	defer lock.Close()
+	return ClearLeaseEpochsHeld(path)
+}
+
+// LockState takes the keeper's process lock on the launcher's state directory, as a keeper does
+// for its life, so no keeper runs while the caller holds it; release gives it back. A caller that
+// must check that no keeper runs before it changes anything takes it first (the launcher's
+// restore), then clears with ClearLeaseEpochsHeld.
+func LockState(stateDir string) (release func(), err error) {
+	f, err := lockProcess(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	return func() { _ = f.Close() }, nil
+}
+
+// ClearLeaseEpochsHeld is ClearLeaseEpochs for a caller that holds the keeper's lock (LockState).
+func ClearLeaseEpochsHeld(path string) error {
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
 	s, err := LoadState(path)
 	if err != nil {
 		return err

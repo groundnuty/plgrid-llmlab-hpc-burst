@@ -5,10 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	"io"
 	"os"
 	"time"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // DefaultReadyTimeout bounds the wait for readiness. A cold start of k3s unpacks its embedded
@@ -118,6 +119,7 @@ func startAndWait(ctx context.Context, spec launchSpec, front Front, timeout tim
 	defer h.Close()
 	rec := h.rec
 	st := newRecord(spec, rec, front, t0)
+	st.RelayKeeper = spec.relayKeeper
 	// Record before waiting: an interrupted or crashed start is then still cleaned up by down.
 	if err := spec.l.saveState(st); err != nil {
 		_, _ = stopRecorded(context.Background(), st, 10*time.Second, log)
@@ -204,6 +206,11 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 	if o.RelayKeeper && ctrlBin == "" {
 		return nil, errors.New("the relay keeper was asked for (--relay-keeper), but no controller binary was found: the keeper is the controller binary's relaykeeper subcommand")
 	}
+	if o.RelayKeeper {
+		if err := pidfdProbe(); err != nil {
+			return nil, fmt.Errorf("the relay keeper (--relay-keeper) needs pidfds (Linux 5.3 or later), and pidfd_open failed: %w", err)
+		}
+	}
 	if frontRun != nil && ctrlBin == "" {
 		return nil, errors.New("a front was asked for (--front-config), but no controller binary was found: the front runs under the controllers' supervisor")
 	}
@@ -277,6 +284,7 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 	spec := launchSpec{l: l, bin: bin, ports: ports, nice: o.Nice, eventTTL: o.eventTTL, omitEventTTL: o.omitEventTTL}
 	if ctrlBin != "" {
 		spec.controllers, spec.frontRun, spec.frps = &ControllerConfig{Binary: ctrlBin}, frontRun, frpsRun
+		spec.relayKeeper = o.RelayKeeper
 	}
 	st, readyzAt, readyAt, err := startAndWait(ctx, spec, front, o.ReadyTimeout, o.Log)
 	if err != nil {
@@ -329,7 +337,7 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 	// Compatibility and upgrades).
 	if cfg, err := restConfig(l.kubeconfig(), ports, 30*time.Second); err != nil {
 		return abort("relay keeper", err)
-	} else if err := checkKeeperSwitchBack(ctx, cfg, l, o.RelayKeeper); err != nil {
+	} else if err := checkKeeperSwitchBack(ctx, cfg, l, o.RelayKeeper, o.Log); err != nil {
 		return abort("relay keeper", err)
 	}
 	if ctrlBin == "" {
@@ -352,7 +360,6 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 		}
 		st.Controllers = &ControllerConfig{Binary: ctrlBin}
 		st.FrontRun, st.Frps = frontRun, frpsRun
-		st.RelayKeeper = o.RelayKeeper
 		if frpsRun != nil {
 			// frps's web password and configuration, both mode 600 (HBEP-6), before the supervisor
 			// that starts frps; a password that exists is kept, so the controller's copy stays valid.

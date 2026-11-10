@@ -53,6 +53,19 @@ func Restore(o RestoreOptions) (*RestoreReport, error) {
 		return nil, err
 	}
 	defer unlock()
+	// The relay keeper's lock first, when it ever ran here: a keeper that runs (one started by
+	// hand) refuses the restore before anything changes, a stale launcher record included (the
+	// review of PR 361). Held to the end, so none starts meanwhile.
+	keeperState := relaykeeper.StatePath(l.dir)
+	var releaseKeeper func()
+	if _, err := os.Stat(keeperState); err == nil {
+		if releaseKeeper, err = relaykeeper.LockState(l.dir); err != nil {
+			return nil, fmt.Errorf("nothing was restored or cleared: %w (a host may be running here; stop it with hpcburst down)", err)
+		}
+		defer releaseKeeper()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("the relay keeper's state file %s: %w", keeperState, err)
+	}
 	st, err := l.loadState()
 	if err != nil {
 		return nil, err
@@ -80,17 +93,13 @@ func Restore(o RestoreOptions) (*RestoreReport, error) {
 	rep := &RestoreReport{Version: info.Version, Backup: src}
 	// A restored store rolls the Providers' Leases back, so the relay keeper's accepted Lease
 	// epochs are cleared, or it would refuse the real leaders' lower epochs (HBEP-6, The relay
-	// keeper). First, under the keeper's own lock: a keeper that runs refuses it, and then nothing
-	// of the store has changed. A host that never ran a keeper has no file, and nothing to clear.
-	keeperState := relaykeeper.StatePath(l.dir)
-	if _, err := os.Stat(keeperState); err == nil {
-		if err := relaykeeper.ClearLeaseEpochs(keeperState); err != nil {
-			return nil, fmt.Errorf("nothing was restored: the relay keeper's accepted Lease epochs could not be cleared: %w", err)
+	// keeper). Under the keeper's lock, taken before anything else changed.
+	if releaseKeeper != nil {
+		if err := relaykeeper.ClearLeaseEpochsHeld(keeperState); err != nil {
+			return nil, fmt.Errorf("nothing of the store was restored: the relay keeper's accepted Lease epochs could not be cleared: %w", err)
 		}
 		rep.KeeperFencesCleared = true
 		logf(o.Log, "cleared the relay keeper's accepted Lease epochs in %s", keeperState)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("the relay keeper's state file %s: %w", keeperState, err)
 	}
 	server := filepath.Dir(l.sqliteDir())
 	if err := os.MkdirAll(server, 0o700); err != nil {

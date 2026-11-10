@@ -22,10 +22,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -33,6 +35,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/relaykeeper"
@@ -86,42 +90,141 @@ func pingKeeper(socket string, timeout time.Duration) (int64, error) {
 	return pong.KeeperEpoch, nil
 }
 
-// checkKeeperHealth is checkEntry's part for the keeper, an entry with a socket for its health: it
-// listens on no port, TCP or UDP, on any address, and answers a ping with pong{E} within 1 s. It
-// returns whether the ping was answered; eh.KeeperEpoch is the E it answered.
+// checkKeeperHealth is checkEntry's part for the keeper, an entry with a socket for its health
+// (the review of PR 361 made each of these strict):
+//   - the keeper's own descriptors are read, and any failure to read them makes it unhealthy:
+//     an unreadable /proc/<pid>/fd is unknown, never "no port";
+//   - the keeper process itself listens on no port, TCP or UDP, on any address. Its relays' ssh
+//     children are left out: they are ssh clients, whose sockets the keeper's checks do not own;
+//   - the listening socket at its health path is the keeper's own, before and after the ping,
+//     as a /healthz entry must hold its address (checkEntry), so no other process's answer at
+//     that path counts;
+//   - a ping there is answered with pong{E} within 1 s.
+//
+// It returns whether the ping was answered by the keeper; eh.KeeperEpoch is the E it answered.
 func checkKeeperHealth(h *procHandle, e EntryRecord, eh *EntryHealth, add func(string, ...any)) bool {
-	owned, others, err := treeBound(h)
-	if err != nil {
-		add("cannot list the sockets of pid %d: %v", e.Proc.PID, err)
-		return false
-	}
-	if probs := verifyExactListeners(nil, owned, others); len(probs) > 0 {
-		for _, p := range probs {
-			add("pid %d binds a port, which the relay keeper never does: %s", e.Proc.PID, p)
+	pid := e.Proc.PID
+	owns := func(when string) bool {
+		inodes, err := keeperFdInodes(pid)
+		if err != nil {
+			add("cannot read the descriptors of the relay keeper pid %d, so its sockets are unknown: %v", pid, err)
+			return false
 		}
+		if v, d := h.verify(); v != Ours {
+			add("pid %d changed while its descriptors were read: %s", pid, d)
+			return false
+		}
+		if when == "before" {
+			all, err := boundSockets()
+			if err != nil {
+				add("cannot list the host's sockets: %v", err)
+				return false
+			}
+			var bound []string
+			for _, s := range all {
+				if inodes[s.inode] {
+					bound = append(bound, s.key())
+				}
+			}
+			if len(bound) > 0 {
+				sort.Strings(bound)
+				add("pid %d binds a port, which the relay keeper never does: %v", pid, bound)
+				return false
+			}
+		}
+		listeners, err := unixListenerInodes(e.HealthSocket)
+		if err != nil {
+			add("cannot list the host's Unix sockets: %v", err)
+			return false
+		}
+		for ino := range listeners {
+			if inodes[ino] {
+				return true
+			}
+		}
+		add("the relay keeper pid %d does not hold the listening socket %s (%s the ping)", pid, e.HealthSocket, when)
 		return false
 	}
-	ok := true
+	ok := false
+	eh.PingOK = &ok
+	if !owns("before") {
+		return false
+	}
 	epoch, err := pingKeeper(e.HealthSocket, keeperPingTimeout)
 	if err != nil {
-		ok = false
 		add("ping on %s within %s: %v", e.HealthSocket, keeperPingTimeout, err)
-	} else {
-		eh.KeeperEpoch = epoch
+		return false
 	}
-	eh.PingOK = &ok
-	return ok
+	if !owns("after") {
+		return false
+	}
+	ok = true
+	eh.KeeperEpoch = epoch
+	return true
+}
+
+// keeperFdInodes reads the socket inodes the process pid itself holds, from /proc/<pid>/fd. A
+// directory that cannot be read, or a descriptor link that fails for any reason but having
+// closed since the directory was read, is an error, never an empty answer (the review of PR 361:
+// fdSocketInodes, alpha's, drops them). A variable, so a test can make it fail.
+var keeperFdInodes = func(pid int) (map[string]bool, error) {
+	fds, err := os.ReadDir(procPath(pid, "fd"))
+	if err != nil {
+		return nil, err
+	}
+	inodes := map[string]bool{}
+	for _, fd := range fds {
+		l, err := os.Readlink(procPath(pid, "fd/"+fd.Name()))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // closed since the directory was read
+		}
+		if err != nil {
+			return nil, err
+		}
+		if ino, ok := strings.CutPrefix(l, "socket:["); ok {
+			inodes[strings.TrimSuffix(ino, "]")] = true
+		}
+	}
+	return inodes, nil
+}
+
+// unixListenerInodes are the inodes of the listening Unix sockets bound to path, from
+// /proc/net/unix, whose columns are Num, RefCount, Protocol, Flags, Type, St, Inode and Path:
+// a listener's Flags carry __SO_ACCEPTCON (0x10000).
+func unixListenerInodes(path string) (map[string]bool, error) {
+	b, err := os.ReadFile(procRoot + "/net/unix")
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for i, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if i == 0 || len(f) < 8 || strings.Join(f[7:], " ") != path {
+			continue
+		}
+		flags, err := strconv.ParseUint(f[3], 16, 32)
+		if err != nil {
+			return nil, fmt.Errorf("/proc/net/unix line %d: flags %q: %w", i+1, f[3], err)
+		}
+		if flags&0x10000 != 0 {
+			out[f[6]] = true
+		}
+	}
+	return out, nil
 }
 
 // allocations is the resource of the framework's Allocations.
 var allocations = v1alpha1.GroupVersion.WithResource("allocations")
 
 // checkKeeperSwitchBack is up's switch-back guard. With the keeper asked for, or with no keeper
-// state file, it passes. A state file the keeper itself would refuse to load refuses too, as the
-// keeper does: it cannot show the keeper did not run. Otherwise the keeper ran on this host, and
-// up refuses while any Allocation is Running, naming them. Host-dialed mode is the host's, not an
-// Allocation's (api/v1alpha1 has no per-Allocation mode), so every running Allocation counts.
-func checkKeeperSwitchBack(ctx context.Context, cfg *rest.Config, l layout, relayKeeper bool) error {
+// state file, it passes. Otherwise it lists the Allocations first: with none Running nothing can be
+// handed back, and it passes, saying so when it ignored a state file that does not load (the
+// review of PR 361: such a file had blocked every up, with the keeper's too, for no Allocation).
+// With Allocations Running, it refuses, naming them and the way out; a state file the keeper
+// itself would refuse to load refuses too, since it cannot show the keeper never ran. Host-dialed
+// mode is the launcher's, not an Allocation's (api/v1alpha1 has no per-Allocation mode), so every
+// Running Allocation of the host counts: conservative, it refuses more, never less.
+func checkKeeperSwitchBack(ctx context.Context, cfg *rest.Config, l layout, relayKeeper bool, log io.Writer) error {
 	if relayKeeper {
 		return nil
 	}
@@ -131,21 +234,36 @@ func checkKeeperSwitchBack(ctx context.Context, cfg *rest.Config, l layout, rela
 	} else if err != nil {
 		return fmt.Errorf("the relay keeper's state file %s: %w", path, err)
 	}
-	ks, err := relaykeeper.LoadState(path)
-	if err != nil {
-		return fmt.Errorf("the relay keeper's state file %s cannot be read, so it cannot show the keeper never ran: %w", path, err)
-	}
 	running, err := runningAllocations(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("list the running Allocations for the relay keeper's switch back: %w", err)
 	}
+	ks, loadErr := relaykeeper.LoadState(path)
 	if len(running) == 0 {
+		if loadErr != nil {
+			logf(log, "warning: the relay keeper's state file %s cannot be read (%v); no Allocation runs, so nothing is handed back from the keeper, and up goes on", path, loadErr)
+		}
 		return nil
+	}
+	if loadErr != nil {
+		return fmt.Errorf("the relay keeper's state file %s cannot be read, so it cannot show the keeper never ran (%v), and %d Allocation(s) are running: %v. "+
+			"Release those Allocations first; with none running, up goes on and ignores the file", path, loadErr, len(running), running)
 	}
 	return fmt.Errorf("the relay keeper ran on this host (%s, %d start(s)) and %d Allocation(s) are running: %v. "+
 		"Starting without --relay-keeper would hand their relays back to the controller, whose lower epochs "+
 		"their jobs refuse as superseded (HBEP-6, Compatibility and upgrades). Run up with --relay-keeper, "+
 		"or release those Allocations first", path, ks.Starts, len(running), running)
+}
+
+// pidfdProbe checks that the kernel has pidfd_open, as hostdial's NewOwner does: up --relay-keeper
+// refuses without it, so the keeper never starts where a start could get no pidfd (the launcher's
+// own spawn would then stop it by number; the review of PR 361). A variable, so a test can fail it.
+var pidfdProbe = func() error {
+	fd, err := unix.PidfdOpen(os.Getpid(), 0)
+	if err != nil {
+		return err
+	}
+	return unix.Close(fd)
 }
 
 // runningAllocations names every Allocation in phase Running, as namespace/name, sorted. A server
