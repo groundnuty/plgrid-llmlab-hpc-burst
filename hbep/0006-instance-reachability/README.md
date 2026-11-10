@@ -264,12 +264,14 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
       - `srun`'s step-limit refusal;
       - more than 120 restarts of one channel within an hour, counting only restarts whose session came up and then dropped. Failures before a session comes up (the login node down for maintenance, ssh refused, "agent not ready", a missing preamble) are never capped: they keep retrying at the 30 s backoff cap, bounded by the step count below and by the job's end. A final end stays final.
 
-      A final end other than `superseded` or the job's end raises a Warning event, reason `RelayFailed`, regarding the Allocation, naming the channel and the cause (untyped, like every Provider-controller event in alpha; HBEP-8, open question 14). The code adds the reason to HBEP-8's table, since a new reason isn't an amendment.
+      A final end other than `superseded` or the job's end raises a Warning event, reason `RelayFailed`, regarding the Allocation, naming the channel and the cause (untyped, like every Provider-controller event in alpha; HBEP-8, open question 14). The code adds the reason to HBEP-8's table, since a new reason isn't an amendment. With the event, the Provider's controller writes the Allocation's condition `RelayEndedForGood` True, reason `RelayFailed`, with the event's message, and never clears it; when that write fails, its next observation of the running Allocation sets it. The lifecycle controller then ends the Allocation's Instances with that reason and releases it (HBEP-7, step 5), so its job and GPU are freed and the planner replaces the Instance (#304).
     - **Steps:** at the 30 s cap two relays make at most about 240 `srun` steps an hour, about 11,500 in 48 h, below the 40,000 `MaxStepCount` that both profiles record.
   - **A path that fails never restarts a healthy engine.** HBEP-7's rules apply unchanged:
     - an Instance first becomes `ready` only with `TunnelConnected` True, from frps;
     - relay restarts don't reset its start deadline;
     - a `ready` Instance whose path is down takes no new requests (the front's probe), and `AgentUnreachable` follows its own timeout.
+
+    A relay that ends for good is not a path that fails: nothing reaches the Instance again, so its Allocation is released (What ends a relay). Retried ends restart nothing.
 - **What a drop costs:** the streams on that session reset. A token stream in flight is cut and counted as cut, and a request already written is never replayed (HBEP-5). frpc logs in again once the relay is back.
 - **A controller restart cuts the relays** (owner decision, 9 Nov 2026: "Accept cuts for alpha"). The relays are children of the controller process, so a restart cuts every stream in flight, counted as cuts and never replayed, and the new leader starts both relays of every running Allocation within the backoff. A relay keeper, a separate process the launcher supervises that would keep relays across restarts, moves to beta (open question 13).
 - **The login node:** each relay keeps an ssh session and an `srun` client there for its Allocation's life. They relay bytes and compute nothing (HBEP-4, open question 14, as amended the same day, with the owner's go). Model weights and images never cross a relay; staging stays in the job (HBEP-7).
@@ -614,3 +616,4 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - **2026-11-09: erratum:** the restart cap counts only restarts whose session came up and then dropped; failures before a session comes up are never capped (#301).
 
   Before, a host that compute nodes could not reach was out of alpha, and alpha waited for the gateway's forward.
+- **2026-11-10: erratum:** a relay that ends for good releases its Allocation through `RelayEndedForGood` (What ends a relay); before, only the event was raised, and a ready Instance kept its job until its lease ended (#304, PR #319).
