@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -307,10 +308,20 @@ func holdSecondJob(t *testing.T, plat *fakeslurm.Platform, prefix string, stop <
 	}()
 }
 
-// runStandInSecondHeld runs a two-job row's LIVE steps over the stand-in with its second job held in the queue (the delta review of
-// PR 284, L1, L2 and L3): the first job runs through the real stack, the second never starts, and the row must end NOT RUN, with
-// its line saying what was read of ReplacementLate, no record and no text to post.
-func runStandInSecondHeld(t *testing.T, name, wantLate string, reshape func(*stack.ClusterShape)) {
+// secondHeldRun is what one run of a two-job row's LIVE steps over the stand-in, its second job held in the queue, ended with.
+type secondHeldRun struct {
+	row      Row
+	cfg      Config
+	cl       *stack.Cluster
+	prefix   string
+	failures []string
+	err      error
+}
+
+// standInSecondHeld runs a two-job row's LIVE steps over the stand-in with its second job held in the queue: the first job runs through
+// the real stack, the second never starts. wrapAPI, when not nil, wraps the run's API client (liveRun.wrapAPI).
+func standInSecondHeld(t *testing.T, name, what string, reshape func(*stack.ClusterShape), wrapAPI func(client.Client) client.Client) secondHeldRun {
+	t.Helper()
 	if os.Getenv(envStandIn) != "1" {
 		t.Skipf("the stand-in proof of the live steps runs only with %s=1 (internal/alpha, standin_test.go)", envStandIn)
 	}
@@ -320,7 +331,7 @@ func runStandInSecondHeld(t *testing.T, name, wantLate string, reshape func(*sta
 		t.Fatal(err)
 	}
 	cfg := Config{Row: row, StandIn: true, Out: filepath.Join(t.TempDir(), "out"), PendingMax: 2 * time.Minute, RunID: id, FrontLabel: standInFrontLabel}
-	t.Logf("%s: %s, its second job held in the queue", row.Name, cfg.Mode())
+	t.Logf("%s: %s, its second job held in the queue%s", row.Name, cfg.Mode(), what)
 	rec, err := NewRecorder(cfg.Out)
 	if err != nil {
 		t.Fatal(err)
@@ -329,26 +340,21 @@ func runStandInSecondHeld(t *testing.T, name, wantLate string, reshape func(*sta
 	stop := make(chan struct{})
 	holdSecondJob(t, cl.Plat, TagPrefix(id), stop)
 	defer close(stop)
-	var st Steps = newLiveRun(t, cfg, w)
+	lr := newLiveRun(t, cfg, w)
+	lr.wrapAPI = wrapAPI
+	var st Steps = lr
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.PendingMax+20*time.Minute)
 	defer cancel()
 	failures, err := Run(ctx, cfg, st, rec, t.Logf)
-	if len(failures) != 0 || !errors.Is(err, ErrSecondNotStarted) || !NotRun(row, err) {
-		t.Fatalf("failures %v, err %v; want the NOT RUN of a second job that never started", failures, err)
-	}
-	note := NotRunNote(row, cfg.PendingMax, err)
-	t.Logf("the marker would say: %s", strings.TrimSpace(note))
-	if want := "ReplacementLate for its deployment: " + wantLate + ";"; !strings.Contains(note, want) {
-		t.Errorf("note %q lacks %q", note, want)
-	}
-	for _, f := range []string{PostsFile, RecordFile} {
-		if _, err := os.Stat(filepath.Join(cfg.Out, f)); err == nil {
-			t.Errorf("a NOT RUN wrote %s", f)
-		}
-	}
+	return secondHeldRun{row: row, cfg: cfg, cl: cl, prefix: TagPrefix(id), failures: failures, err: err}
+}
+
+// oneRanOneNever checks that one job of the run ran and one never started.
+func (s secondHeldRun) oneRanOneNever(t *testing.T) {
+	t.Helper()
 	var ran, never int
-	for _, j := range cl.Plat.Jobs() {
-		if !strings.HasPrefix(j.Name, TagPrefix(id)) {
+	for _, j := range s.cl.Plat.Jobs() {
+		if !strings.HasPrefix(j.Name, s.prefix) {
 			continue
 		}
 		if j.Start.IsZero() {
@@ -360,6 +366,76 @@ func runStandInSecondHeld(t *testing.T, name, wantLate string, reshape func(*sta
 	if ran != 1 || never != 1 {
 		t.Errorf("%d jobs of the run ran and %d never started, want one of each", ran, never)
 	}
+}
+
+// wroteNothing checks that the run wrote no record and no text to post.
+func (s secondHeldRun) wroteNothing(t *testing.T, why string) {
+	t.Helper()
+	for _, f := range []string{PostsFile, RecordFile} {
+		if _, err := os.Stat(filepath.Join(s.cfg.Out, f)); err == nil {
+			t.Errorf("%s wrote %s", why, f)
+		}
+	}
+}
+
+// runStandInSecondHeld runs a two-job row's LIVE steps over the stand-in with its second job held in the queue (the delta review of
+// PR 284, L1, L2 and L3): the first job runs through the real stack, the second never starts, and the row must end NOT RUN, with
+// its line saying what was read of ReplacementLate, no record and no text to post.
+func runStandInSecondHeld(t *testing.T, name, wantLate string, reshape func(*stack.ClusterShape)) {
+	s := standInSecondHeld(t, name, "", reshape, nil)
+	if len(s.failures) != 0 || !errors.Is(s.err, ErrSecondNotStarted) || !NotRun(s.row, s.err) {
+		t.Fatalf("failures %v, err %v; want the NOT RUN of a second job that never started", s.failures, s.err)
+	}
+	note := NotRunNote(s.row, s.cfg.PendingMax, s.err)
+	t.Logf("the marker would say: %s", strings.TrimSpace(note))
+	if want := "ReplacementLate for its deployment: " + wantLate + ";"; !strings.Contains(note, want) {
+		t.Errorf("note %q lacks %q", note, want)
+	}
+	s.wroteNothing(t, "a NOT RUN")
+	s.oneRanOneNever(t)
+}
+
+// errAllocationList is the failure allocationListFails gives every LIST of Allocations.
+var errAllocationList = errors.New("the API server is unavailable (the stand-in's injected failure of a LIST of Allocations)")
+
+// allocationListFails is the run's API client with every LIST of Allocations failing, as a call to the API can fail. On the two-job rows'
+// path only their result catch-ups list Allocations (stack.Recorder.CatchUp): the watch has a client of its own, the worker restart's
+// catch-up covers the Instances alone, and the rest are reads of one object, of Instances or of events. Everything else passes through.
+type allocationListFails struct {
+	client.Client
+	failed *atomic.Int32
+}
+
+func (c allocationListFails) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*v1alpha1.AllocationList); ok {
+		c.failed.Add(1)
+		return errAllocationList
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
+// runStandInSecondHeldCatchUpFails is runStandInSecondHeld with the row's result catch-up failing, on demand, in the real waiter
+// (issue #303): its LIST of Allocations fails, so it cannot tell whether the watch caught up. A run whose second job never started still
+// judges its first job's part from the watch, so that is a failure of the run naming the catch-up, with what was read of the second job
+// beside it, and never NOT RUN (the science agent, on PR 284). Run ends it before any record or text to post.
+func runStandInSecondHeldCatchUpFails(t *testing.T, name string, reshape func(*stack.ClusterShape)) {
+	failed := new(atomic.Int32)
+	s := standInSecondHeld(t, name, ", and its result catch-up's LIST of Allocations failing", reshape, func(c client.Client) client.Client {
+		return allocationListFails{Client: c, failed: failed}
+	})
+	if failed.Load() == 0 {
+		t.Fatalf("no LIST of Allocations was made, so no catch-up failed (failures %v, err %v)", s.failures, s.err)
+	}
+	if got := rowOutcome(s.row, s.failures, s.err, nil); got != "FAIL" || len(s.failures) != 0 || s.err == nil {
+		t.Fatalf("the row ends %s (failures %v, err %v); want a FAIL of the run itself, from its result catch-up", got, s.failures, s.err)
+	}
+	for _, want := range []string{"result: whether the watch has caught up with the API is not known", "the API could not be listed", errAllocationList.Error(), ErrSecondNotStarted.Error()} {
+		if !strings.Contains(s.err.Error(), want) {
+			t.Errorf("err = %v, which lacks %q", s.err, want)
+		}
+	}
+	s.wroteNothing(t, "a run that failed its catch-up")
+	s.oneRanOneNever(t)
 }
 
 // TestStandInHandoverSecondHeld is alpha-athena-handover's live steps with its successor held in the queue, behind the one slot its
@@ -378,6 +454,24 @@ func TestStandInHandoverSecondHeld(t *testing.T) {
 //livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
 func TestStandInNoOverlapSecondHeld(t *testing.T) {
 	runStandInSecondHeld(t, "alpha-helios-nooverlap", LateNotRaised, nil)
+}
+
+// TestStandInHandoverSecondHeldCatchUpFails is TestStandInHandoverSecondHeld with the handover's result catch-up failing: a FAIL of the
+// run, where the same run with the catch-up working is NOT RUN (issue #303).
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInHandoverSecondHeldCatchUpFails(t *testing.T) {
+	runStandInSecondHeldCatchUpFails(t, "alpha-athena-handover", func(s *stack.ClusterShape) {
+		s.Partitions = []fakeslurm.Partition{{Name: stack.Partition, GPUOnly: true, Slots: 1}}
+	})
+}
+
+// TestStandInNoOverlapSecondHeldCatchUpFails is TestStandInNoOverlapSecondHeld with the no-overlap row's result catch-up failing: a FAIL
+// of the run, where the same run with the catch-up working is NOT RUN (issue #303).
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInNoOverlapSecondHeldCatchUpFails(t *testing.T) {
+	runStandInSecondHeldCatchUpFails(t, "alpha-helios-nooverlap", nil)
 }
 
 // TestStandInHandover is alpha-athena-handover's live steps over the stand-in.

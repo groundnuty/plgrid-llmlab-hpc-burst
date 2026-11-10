@@ -222,6 +222,8 @@ type liveRun struct {
 	claimedPred string
 	// endEvery is how often Close looks for the run's jobs to have ended; 0 is five seconds. A test sets it.
 	endEvery time.Duration
+	// wrapAPI, when a test sets it, wraps the run's API client as start makes it: a stand-in whose catch-up fails on demand (#303).
+	wrapAPI func(client.Client) client.Client
 	// allocsFn is the watch's Allocation versions, and boundedFn stack.BoundedDeadline, unless a test sets them.
 	allocsFn   func() []stack.AllocObservation
 	boundedFn  func(time.Duration) (time.Time, bool)
@@ -355,6 +357,9 @@ func (r *liveRun) start(p Plan) {
 	r.h = stack.StartHost(t, r.w.bins, stack.ShortDir(t), r.w.dh, r.w.env, r.w.ports, r.w.frontTuning)
 	r.w.place(r.h)
 	r.c = stack.KubeClient(t, r.h.State)
+	if r.wrapAPI != nil {
+		r.c = r.wrapAPI(r.c)
+	}
 	stack.Create(t, r.c, r.w.objects...)
 	// Before the deployment exists, so the watch sees every Allocation from its first version.
 	r.watch = stack.StartWatch(t, r.h.State, r.w.md.Namespace, r.tag)
