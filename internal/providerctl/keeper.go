@@ -45,6 +45,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
@@ -80,6 +81,9 @@ type keeperState struct {
 	// exchange starts once the lead has ended, and none is in flight when
 	// the end returns.
 	sending sync.Mutex
+	// ending is set before the lead's end takes sending, so an exchange
+	// queued behind one in flight does not begin (the review of PR 360).
+	ending atomic.Bool
 
 	mu sync.Mutex
 	// gen numbers this controller's leads (runKeeper): a decision counts for
@@ -99,17 +103,23 @@ type keeperState struct {
 	lastErr string
 	// okGen is the lead under which an exchange last succeeded, at okAt by
 	// now, the controller's clock; validity is the last set's (the poll
-	// interval in force plus the renew deadline). available is what the
-	// status loop was last told; status wakes it when that changes.
-	now       func() time.Time
-	okGen     int
-	okAt      time.Time
-	validity  time.Duration
-	available bool
-	status    chan struct{}
-	// provUID and provCreated are the Provider's, read once.
+	// interval in force plus the renew deadline). told is what the status
+	// loop was last told; status wakes it when that changes.
+	now      func() time.Time
+	okGen    int
+	okAt     time.Time
+	validity time.Duration
+	told     string
+	status   chan struct{}
+	// provUID and provCreated are the Provider's, as this controller first
+	// read them; replaced says why it stops, once a read shows another UID
+	// under the same name (keeperProvider).
 	provUID     string
 	provCreated time.Time
+	replaced    string
+	// built, when set (by a test), is told each time a set is built, before
+	// it waits to be sent.
+	built func()
 	// ends are the final ends reported and not handled yet, by their
 	// identity; acks wakes their worker.
 	ends map[wire.FinalEnd]bool
@@ -146,12 +156,27 @@ func newKeeperRelayState(o Options, s RelaySettings) (*relayState, error) {
 }
 
 // claim is claimLogin in keeper mode: the login host the keeper last named,
-// and its refusal when another Provider holds that host.
+// and a refusal while the claim is not this Provider's: another Provider
+// holds the host, or the keeper has not accepted a set of this lead yet,
+// the pending case alpha's claimLogin also refuses, so Create submits nothing
+// meanwhile (the review of PR 360).
 func (k *keeperState) claim() (login, inUse string, err error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	return k.login, k.inUse, nil
+	switch {
+	case k.replaced != "":
+		return k.login, k.replaced, nil
+	case k.inUse != "":
+		return k.login, k.inUse, nil
+	case !k.answered:
+		return k.login, claimPending, nil
+	}
+	return k.login, "", nil
 }
+
+// claimPending is the refusal while the keeper has not accepted a set of this
+// lead.
+const claimPending = "the relay keeper has not accepted this Provider's login-host claim under this copy's lead yet: one host-dialed Provider per login host (HBEP-6, Capacity)"
 
 // decide records an observation's decision for tag: want is the entry to
 // keep, nil a drop. A change wakes the sender.
@@ -216,14 +241,22 @@ func (c *Controller) runKeeper(ctx context.Context) error {
 	}
 	r.startLead(ctx)
 	lead := r.leadContext()
+	k.ending.Store(false)
 	k.gen++
 	k.answered, k.login, k.inUse = false, "", ""
 	done := make(chan struct{})
 	k.done = done
 	k.mu.Unlock()
 	var wg sync.WaitGroup
+	var replaced error
 	wg.Add(2)
-	go func() { defer wg.Done(); c.shared.sendSets(lead) }()
+	go func() {
+		defer wg.Done()
+		if err := c.shared.sendSets(lead); err != nil {
+			replaced = err
+			k.endLeadAfterSends(r)
+		}
+	}()
 	go func() { defer wg.Done(); c.shared.ackEnds(lead) }()
 	go func() { wg.Wait(); close(done) }()
 	select {
@@ -232,6 +265,12 @@ func (c *Controller) runKeeper(ctx context.Context) error {
 	}
 	k.endLeadAfterSends(r)
 	<-done
+	if replaced != nil {
+		// The Provider was deleted and created again under its name: this
+		// controller stops, so its manager is started again, afresh, by the
+		// supervisor (keeper mode only; the review of PR 360).
+		return replaced
+	}
 	<-ctx.Done()
 	return nil
 }
@@ -241,6 +280,7 @@ func (c *Controller) runKeeper(ctx context.Context) error {
 // wire.ExchangeTimeout, so what this copy sent has reached the keeper and been
 // answered before the Lease is released; none begins after.
 func (k *keeperState) endLeadAfterSends(r *relayState) {
+	k.ending.Store(true)
 	k.sending.Lock()
 	defer k.sending.Unlock()
 	r.endLead()
@@ -252,13 +292,40 @@ func (k *keeperState) endLeadAfterSends(r *relayState) {
 func (k *keeperState) exchange(lead context.Context, kind wire.Kind, body, reply any) error {
 	k.sending.Lock()
 	defer k.sending.Unlock()
-	if lead.Err() != nil {
+	if k.ending.Load() || lead.Err() != nil {
 		return errLeadEnded
 	}
 	err := wire.Exchange(context.WithoutCancel(lead), k.socket, kind, body, reply)
 	k.exchanged(err)
 	return err
 }
+
+// exchangeSet is exchange for a set built from the listing read at listed:
+// its age is stamped once sending is held, right before it is sent, so a
+// wait behind another exchange is counted in it and never extends the set's
+// expiry (#343's Q5; the review of PR 360).
+func (k *keeperState) exchangeSet(lead context.Context, set wire.DesiredSet, listed time.Time, rep *wire.Report) error {
+	k.sending.Lock()
+	defer k.sending.Unlock()
+	if k.ending.Load() || lead.Err() != nil {
+		return errLeadEnded
+	}
+	age := k.now().Sub(listed)
+	if age < 0 {
+		age = 0
+	}
+	set.ListingAgeMS = age.Milliseconds()
+	if err := set.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", errMalformedSet, err)
+	}
+	err := wire.Exchange(context.WithoutCancel(lead), k.socket, wire.KindSet, set, rep)
+	k.exchanged(err)
+	return err
+}
+
+// errMalformedSet: a set this controller built fails the wire's own checks,
+// a bug; it is not sent.
+var errMalformedSet = errors.New("the desired set for the relay keeper is malformed")
 
 // exchanged records whether an exchange succeeded: the keeper answered with
 // the reply, or refused a set for its login host or its epoch, which it
@@ -272,7 +339,7 @@ func (k *keeperState) exchanged(err error) {
 		k.okGen, k.okAt = k.gen, k.now()
 	}
 	k.mu.Unlock()
-	k.noteAvailability()
+	k.noteStatus()
 }
 
 // unavailable says why the keeper counts as unreachable now, or "": no
@@ -286,6 +353,8 @@ func (k *keeperState) unavailable(now time.Time) string {
 
 func (k *keeperState) unavailableLocked(now time.Time) string {
 	switch {
+	case k.replaced != "":
+		return k.replaced
 	case k.gen == 0 || k.okGen != k.gen:
 		return "no exchange with the relay keeper has succeeded under this copy's lead of the Provider"
 	case now.Sub(k.okAt) > k.validity:
@@ -294,14 +363,16 @@ func (k *keeperState) unavailableLocked(now time.Time) string {
 	return ""
 }
 
-// noteAvailability wakes the status loop when the keeper's availability
-// changed since it was last told, so Ready follows at once, not at the next
-// poll.
-func (k *keeperState) noteAvailability() {
+// noteStatus wakes the status loop when what it reads of the keeper changed
+// since it was last told, whether the keeper is reachable and how the claim
+// stands, so Ready follows at once, not at the next poll: on the first answer
+// above all (the review of PR 360).
+func (k *keeperState) noteStatus() {
 	k.mu.Lock()
 	avail := k.unavailableLocked(k.now()) == ""
-	changed := avail != k.available
-	k.available = avail
+	key := fmt.Sprintf("%t|%t|%s|%s", avail, k.answered, k.inUse, k.replaced)
+	changed := key != k.told
+	k.told = key
 	k.mu.Unlock()
 	if changed {
 		wake(k.status)
@@ -349,17 +420,21 @@ func (c *Controller) stopKeeper() {
 }
 
 // sendSets sends the Provider's set at once, then on every change and every
-// interval, while lead lasts.
-func (s *shared) sendSets(lead context.Context) {
+// interval, while lead lasts. It returns errProviderReplaced once the
+// Provider is found created again under its name.
+func (s *shared) sendSets(lead context.Context) error {
 	k := s.relays.keeper
 	t := time.NewTicker(k.interval)
 	defer t.Stop()
 	for {
-		s.sendSet(lead)
-		k.noteAvailability()
+		if err := s.sendSet(lead); errors.Is(err, errProviderReplaced) {
+			k.noteStatus()
+			return err
+		}
+		k.noteStatus()
 		select {
 		case <-lead.Done():
-			return
+			return nil
 		case <-t.C:
 		case <-k.kick:
 		}
@@ -368,36 +443,44 @@ func (s *shared) sendSets(lead context.Context) {
 
 // sendSet builds the Provider's set and sends it, while lead lasts, and
 // keeps what the keeper answers.
-func (s *shared) sendSet(lead context.Context) {
+func (s *shared) sendSet(lead context.Context) error {
 	if lead.Err() != nil {
-		return
+		return nil
 	}
 	k := s.relays.keeper
 	k.mu.Lock()
-	gen := k.gen
+	gen, built := k.gen, k.built
 	k.mu.Unlock()
-	set, err := s.desiredSet(lead, gen)
+	set, listed, err := s.desiredSet(lead, gen)
+	if errors.Is(err, errProviderReplaced) {
+		s.o.Log.Info("the Provider was created again under its name: this controller stops, and sends nothing more", "error", err)
+		return err
+	}
 	if err != nil {
 		if lead.Err() == nil {
 			s.o.Log.Debug("no desired set is sent to the relay keeper yet", "error", err)
 		}
-		return
+		return nil
 	}
-	if err := set.Validate(); err != nil {
-		// A set this controller built that the keeper would refuse as
-		// malformed is a bug: it is loud here, never sent.
-		s.o.Log.Info("the desired set for the relay keeper is malformed; it is not sent", "error", err)
-		return
+	if built != nil {
+		built()
 	}
 	var rep wire.Report
-	err = k.exchange(lead, wire.KindSet, set, &rep)
-	if errors.Is(err, errLeadEnded) {
-		return
+	err = k.exchangeSet(lead, set, listed, &rep)
+	switch {
+	case errors.Is(err, errLeadEnded):
+		return nil
+	case errors.Is(err, errMalformedSet):
+		// A set this controller built that the keeper would refuse as
+		// malformed is a bug: it is loud here, never sent.
+		s.o.Log.Info("the desired set for the relay keeper is not sent", "error", err)
+		return nil
 	}
 	k.received(gen, rep, err, s)
 	if err == nil {
 		k.queueEnds(rep.Ends)
 	}
+	return nil
 }
 
 // received keeps the keeper's answer to a set of lead gen.
@@ -433,33 +516,33 @@ func (k *keeperState) received(gen int, rep wire.Report, err error, s *shared) {
 
 // desiredSet is the Provider's set for lead gen (HBEP-6, The interface; #343's
 // Q4, Q5 and Q6).
-func (s *shared) desiredSet(ctx context.Context, gen int) (wire.DesiredSet, error) {
+func (s *shared) desiredSet(ctx context.Context, gen int) (wire.DesiredSet, time.Time, error) {
 	k := s.relays.keeper
 	if s.relays.settings.Epoch == nil {
-		return wire.DesiredSet{}, errors.New("no epoch reader is set")
+		return wire.DesiredSet{}, time.Time{}, errors.New("no epoch reader is set")
 	}
 	epoch, err := s.relays.settings.Epoch(ctx)
 	if err != nil {
-		return wire.DesiredSet{}, err
+		return wire.DesiredSet{}, time.Time{}, err
 	}
 	uid, created, err := s.keeperProvider(ctx)
 	if err != nil {
-		return wire.DesiredSet{}, err
+		return wire.DesiredSet{}, time.Time{}, err
 	}
 	p, _ := s.h.current()
 	cfg, ok := s.h.ssh()
 	if p == nil || !ok {
-		return wire.DesiredSet{}, errors.New("the Provider's platform is not made yet")
+		return wire.DesiredSet{}, time.Time{}, errors.New("the Provider's platform is not made yet")
 	}
 	// The listing's time is read before the entries are checked against
 	// the listing, so the age sent is never below the listing's they rest on.
 	listed := p.Health().LastListing
 	if listed.IsZero() {
-		return wire.DesiredSet{}, errors.New("no queue listing has been read yet")
+		return wire.DesiredSet{}, time.Time{}, errors.New("no queue listing has been read yet")
 	}
 	var list v1alpha1.AllocationList
 	if err := s.reader.List(ctx, &list); err != nil {
-		return wire.DesiredSet{}, fmt.Errorf("list the Allocations: %w", err)
+		return wire.DesiredSet{}, time.Time{}, fmt.Errorf("list the Allocations: %w", err)
 	}
 	k.mu.Lock()
 	decisions := make(map[string]keeperDecision, len(k.decisions))
@@ -511,22 +594,19 @@ func (s *shared) desiredSet(ctx context.Context, gen int) (wire.DesiredSet, erro
 	if len(entries) > wire.MaxAllocations {
 		entries, complete = entries[:wire.MaxAllocations], false
 	}
-	age := s.o.Clock.Now().Sub(listed)
-	if age < 0 {
-		age = 0
-	}
+	// The age is stamped when the set is sent (exchangeSet).
 	validity := listingMaxAge(p, s.o.PollInterval) + defaultRenewDeadline
 	k.mu.Lock()
 	k.validity = validity
 	k.mu.Unlock()
 	return wire.DesiredSet{
 		Provider: s.o.Provider, ProviderUID: uid, ProviderCreated: created, LeaseEpoch: epoch,
-		Complete: complete, ListedAt: listed.UTC(), ListingAgeMS: age.Milliseconds(),
+		Complete: complete, ListedAt: listed.UTC(),
 		ValidForMS: validity.Milliseconds(),
 		SSH: wire.SSH{HostName: cfg.HostName, User: cfg.User, Port: cfg.Port,
 			IdentityFile: cfg.IdentityFile, KnownHostsFile: cfg.UserKnownHostsFile},
 		Allocations: entries,
-	}, nil
+	}, listed, nil
 }
 
 // prune forgets the decisions of Allocations that are gone.
@@ -567,27 +647,41 @@ func listingMaxAge(p Platform, poll time.Duration) time.Duration {
 	return poll
 }
 
-// keeperProvider is the Provider's UID and creationTimestamp, read once.
+// keeperProvider is the Provider's UID and creationTimestamp, read from the
+// API server for every set. The supervisor runs a Provider's manager by name,
+// so a Provider deleted and created again between its polls keeps this
+// controller: a UID or creationTimestamp other than the one it first read is
+// errProviderReplaced, and this controller stops rather than send the old
+// identity, or the new one under the old one's state (the review of PR 360;
+// HBEP-6, The interface: a claim made under another UID belongs to another
+// Provider). Alpha's controllers are unchanged.
 func (s *shared) keeperProvider(ctx context.Context) (string, time.Time, error) {
-	k := s.relays.keeper
-	k.mu.Lock()
-	uid, created := k.provUID, k.provCreated
-	k.mu.Unlock()
-	if uid != "" {
-		return uid, created, nil
-	}
 	var prov v1alpha1.Provider
 	if err := s.reader.Get(ctx, client.ObjectKey{Name: s.o.Provider}, &prov); err != nil {
 		return "", time.Time{}, fmt.Errorf("the Provider's UID: %w", err)
 	}
-	if prov.UID == "" || prov.CreationTimestamp.IsZero() {
+	uid, created := string(prov.UID), prov.CreationTimestamp.Time
+	if uid == "" || created.IsZero() {
 		return "", time.Time{}, errors.New("the Provider has no UID or creationTimestamp yet")
 	}
+	k := s.relays.keeper
 	k.mu.Lock()
-	k.provUID, k.provCreated = string(prov.UID), prov.CreationTimestamp.Time
-	k.mu.Unlock()
-	return string(prov.UID), prov.CreationTimestamp.Time, nil
+	defer k.mu.Unlock()
+	switch {
+	case k.replaced != "":
+		return "", time.Time{}, errProviderReplaced
+	case k.provUID == "":
+		k.provUID, k.provCreated = uid, created
+	case k.provUID != uid || !k.provCreated.Equal(created):
+		k.replaced = fmt.Sprintf("Provider %s was deleted and created again (UID %s, was %s): its controller stops, and the next one starts afresh", s.o.Provider, uid, k.provUID)
+		return "", time.Time{}, errProviderReplaced
+	}
+	return uid, created, nil
 }
+
+// errProviderReplaced: the Provider of this controller's name has another UID
+// now.
+var errProviderReplaced = errors.New("the Provider was deleted and created again under its name")
 
 // ssh is the Provider's current ssh settings, and whether any were read.
 func (h *holder) ssh() (slurm.SSHConfig, bool) {

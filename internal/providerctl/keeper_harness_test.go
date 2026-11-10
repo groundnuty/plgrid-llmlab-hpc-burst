@@ -272,9 +272,9 @@ func runKeeperClient(e *env) (stop func()) {
 }
 
 // keeperUp reads the Provider's status once, so its platform and listing
-// exist, starts e's keeper client and waits until an exchange with the keeper
-// has succeeded under its lead, so the Provider admits Allocations again
-// (RelayKeeperUnavailable).
+// exist, starts e's keeper client and waits until the keeper has accepted a
+// set of its lead, so the Provider admits Allocations (RelayKeeperUnavailable,
+// and the claim no longer pending).
 func keeperUp(e *env) (stop func()) {
 	e.t.Helper()
 	if err := e.ctl.SyncStatus(e.ctx); err != nil {
@@ -282,7 +282,10 @@ func keeperUp(e *env) (stop func()) {
 	}
 	stop = runKeeperClient(e)
 	k := e.ctl.shared.relays.keeper
-	waitRelays(e.t, "an exchange with the keeper succeeded under the lead", func() bool { return k.unavailable(e.clock.Now()) == "" })
+	waitRelays(e.t, "the keeper accepted a set of the lead", func() bool {
+		_, pending, _ := k.claim()
+		return k.unavailable(e.clock.Now()) == "" && pending == ""
+	})
 	return stop
 }
 

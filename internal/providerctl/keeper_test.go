@@ -16,6 +16,7 @@ import (
 	"time"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -152,7 +153,10 @@ func TestKeeperSetsAndAcksCarryTheLeaseEpochAndStopBeforeTheRelease(t *testing.T
 	}
 	// The Provider admits Allocations once an exchange succeeded under the lead.
 	keeper := e.ctl.shared.relays.keeper
-	waitRelays(t, "an exchange with the keeper succeeded under the lead", func() bool { return keeper.unavailable(e.clock.Now()) == "" })
+	waitRelays(t, "the keeper accepted a set of the lead", func() bool {
+		_, pending, _ := keeper.claim()
+		return keeper.unavailable(e.clock.Now()) == "" && pending == ""
+	})
 	a := e.running("alloc-a")
 	end := wire.FinalEnd{UID: string(a.UID), Tag: tagOf(a), JobID: a.Status.AtProvider.JobID, Channel: agentapi.RelayServing,
 		Kind: wire.EndFailed, Cause: "the step limit is reached", At: time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC), Epoch: 1<<31 + 1, Seq: 3}
@@ -268,7 +272,8 @@ func TestKeeperSetIsCompleteOnlyOnceEveryRunningAllocationIsDecided(t *testing.T
 	e.platform.mu.Unlock()
 	e.run("alloc-b", 1)
 	n = k.setCount()
-	s = k.waitSet(t, "a set after alloc-b's unresolved observation", n, func(wire.DesiredSet) bool { return true })
+	// n+1: a set built before the observation may arrive after the count.
+	s = k.waitSet(t, "a set after alloc-b's unresolved observation", n+1, func(wire.DesiredSet) bool { return true })
 	if s.Complete {
 		t.Error("the set is complete although alloc-b's observation could not resolve the paths")
 	}
@@ -706,6 +711,15 @@ func TestKeeperUnreachableMakesTheProviderUnreadyAndAdmitsNothing(t *testing.T) 
 	// controller's clock): Ready False again, nothing submitted, and the
 	// running Allocation is left as it is.
 	k.stop()
+	// A set in flight at the stop may still record its success: the clock
+	// moves only once a send has failed after the stop, which the sender
+	// makes after that success (one exchange at a time).
+	keeper := e.ctl.shared.relays.keeper
+	waitRelays(t, "a send failed after the keeper went", func() bool {
+		keeper.mu.Lock()
+		defer keeper.mu.Unlock()
+		return keeper.lastErr != ""
+	})
 	e.clock.Advance(41 * time.Second)
 	waitRelays(t, "Ready False once no exchange succeeded for longer than the validity", func() bool {
 		r := providerReady(t, e)
@@ -724,4 +738,201 @@ func TestKeeperUnreachableMakesTheProviderUnreadyAndAdmitsNothing(t *testing.T) 
 
 	k.start()
 	waitRelays(t, "Ready again once the keeper answers", func() bool { return providerReady(t, e).Status == "True" })
+}
+
+// A pending claim (the review of PR 360): a keeper that answers but has
+// accepted no set of this lead (here it refuses every set for its epoch,
+// which it decided on, so the keeper counts as reachable) leaves the claim
+// pending, as alpha's pending case does: Create submits nothing and Ready is
+// False. The positive control: once it accepts a set, Ready is True and Create
+// submits.
+func TestKeeperAPendingClaimAdmitsNothing(t *testing.T) {
+	k := startFakeKeeper(t)
+	var accepting atomic.Bool
+	k.script(func(k *fakeKeeper) {
+		k.onSet = func(s wire.DesiredSet) (wire.Kind, any) {
+			if !accepting.Load() {
+				return wire.KindRefused, wire.Refused{Reason: wire.RefusedEpoch, HighestEpoch: 9, Message: "lower"}
+			}
+			return wire.KindReport, wire.Report{Provider: s.Provider, KeeperEpoch: 1<<31 + 1, LoginHost: fakeLoginHost}
+		}
+	})
+	e := newEnv(t, keeperMode(k, 5))
+	if err := e.ctl.SyncStatus(e.ctx); err != nil {
+		t.Fatal(err)
+	}
+	runKeeperClient(e)
+	keeper := e.ctl.shared.relays.keeper
+	waitRelays(t, "an exchange the keeper decided on (an epoch refusal)", func() bool { return keeper.unavailable(e.clock.Now()) == "" })
+	submits := e.count("sbatch")
+	e.newAlloc("alloc-a")
+	e.run("alloc-a", 3)
+	if got := e.count("sbatch"); got != submits {
+		t.Errorf("%d jobs were submitted while the keeper had accepted no set of the lead", got-submits)
+	}
+	if err := e.ctl.SyncStatus(e.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if r := providerReady(t, e); r.Status != "False" || !strings.Contains(r.Message, "has not accepted") {
+		t.Errorf("with the claim pending, Ready is %+v; want False, naming the pending claim", r)
+	}
+
+	accepting.Store(true)
+	waitRelays(t, "the claim answered", func() bool { _, pending, _ := keeper.claim(); return pending == "" })
+	if err := e.ctl.SyncStatus(e.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if r := providerReady(t, e); r.Status != "True" {
+		t.Errorf("once the keeper accepted a set, Ready is %+v; want True", r)
+	}
+	e.run("alloc-a", 3)
+	if got := e.count("sbatch"); got == submits {
+		t.Error("no job was submitted once the keeper accepted a set")
+	}
+}
+
+// The listing's age at sending (#343's Q5; the review of PR 360): a set that
+// waits to be sent behind an acknowledgement the keeper is slow to answer
+// carries its listing's age when it is sent, the wait included, never when it
+// was built. The keeper holds the ack until the test releases it; a set is
+// built while it waits; the test then moves the controller's clock on 3 s and
+// releases the ack: the set sent next is 3000 ms old, the listing being read
+// at the test's start and the clock moving only by the test's hand.
+func TestKeeperListingAgeCountsTheWaitBehindAnAck(t *testing.T) {
+	k := startFakeKeeper(t)
+	release, ackIn := make(chan struct{}), make(chan struct{}, 1)
+	k.script(func(k *fakeKeeper) {
+		k.onAck = func(a wire.Ack) (wire.Kind, any) {
+			wake(ackIn)
+			<-release
+			return wire.KindAcked, wire.Acked{Provider: a.Provider, Decided: true}
+		}
+	})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	e := newEnv(t, keeperMode(k, 5))
+	keeperUp(e)
+	a := e.running("alloc-a")
+	keeper := e.ctl.shared.relays.keeper
+	var built atomic.Int64
+	keeper.mu.Lock()
+	keeper.built = func() { built.Add(1) }
+	keeper.mu.Unlock()
+
+	end := wire.FinalEnd{UID: string(a.UID), Tag: tagOf(a), JobID: a.Status.AtProvider.JobID, Channel: agentapi.RelayServing,
+		Kind: wire.EndFailed, Cause: "the step limit is reached", At: time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC), Epoch: 1<<31 + 1, Seq: 3}
+	k.script(func(k *fakeKeeper) { k.ends = []wire.FinalEnd{end} })
+	select {
+	case <-ackIn:
+	case <-time.After(30 * time.Second):
+		t.Fatal("no acknowledgement reached the keeper")
+	}
+	b0 := built.Load()
+	waitRelays(t, "a set built while the ack holds the exchange", func() bool { return built.Load() > b0 })
+	n := k.setCount() // no set can be sent while the ack is held
+	e.clock.Advance(3 * time.Second)
+	close(release)
+	s := k.waitSet(t, "the set sent once the ack was answered", n, func(wire.DesiredSet) bool { return true })
+	if s.ListingAgeMS != 3000 {
+		t.Errorf("the set's listing age is %d ms; want 3000, its age when sent, after the 3 s wait", s.ListingAgeMS)
+	}
+}
+
+// A Provider deleted and created again under its name (the review of PR 360):
+// the supervisor keeps a Provider's manager by name, so the old controller
+// sees the new UID; it sends no set from then on, with either UID, admits
+// nothing, and its relay runnable returns errProviderReplaced, which stops its
+// manager. The next controller, a new one, sends the new UID and
+// creationTimestamp, its claim pending until the keeper accepts one of its
+// sets, so nothing of the old Provider's state is carried over.
+func TestKeeperAProviderCreatedAgainStopsItsController(t *testing.T) {
+	k := startFakeKeeper(t)
+	e := newEnv(t, keeperMode(k, 5))
+	if err := e.ctl.SyncStatus(e.ctx); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	ran := make(chan error, 1)
+	go func() { ran <- e.ctl.RunRelays(ctx) }()
+	k.waitSet(t, "a set of the first Provider", 0, func(s wire.DesiredSet) bool { return s.ProviderUID == exampleProviderUID })
+
+	var prov v1alpha1.Provider
+	if err := e.c.Get(e.ctx, client.ObjectKey{Name: testProvider}, &prov); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.c.Delete(e.ctx, &prov); err != nil {
+		t.Fatal(err)
+	}
+	created := at(11, 30, 0)
+	again := &v1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: testProvider, UID: "uid-example-provider-again", CreationTimestamp: metav1.NewTime(created)}}
+	if err := e.c.Create(e.ctx, again); err != nil {
+		t.Fatal(err)
+	}
+	var got v1alpha1.Provider
+	if err := e.c.Get(e.ctx, client.ObjectKey{Name: testProvider}, &got); err != nil || string(got.UID) != "uid-example-provider-again" {
+		t.Fatalf("the re-created Provider reads back with UID %q (%v); the test needs the one it wrote", got.UID, err)
+	}
+	select {
+	case err := <-ran:
+		if !errors.Is(err, errProviderReplaced) {
+			t.Fatalf("the old controller's relay runnable returned %v; want errProviderReplaced", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the old controller's relay runnable did not return after its Provider was created again")
+	}
+	k.mu.Lock()
+	for _, s := range k.sets {
+		if s.ProviderUID != exampleProviderUID {
+			t.Errorf("the old controller sent a set with UID %q", s.ProviderUID)
+		}
+	}
+	k.mu.Unlock()
+	if _, inUse, _ := e.ctl.shared.relays.claimLogin(e.profiles.v.SSH); inUse == "" {
+		t.Error("the old controller still grants the claim after its Provider was created again")
+	}
+
+	// The next controller, as the supervisor starts it again.
+	from := k.setCount()
+	e.build()
+	keeperUp(e)
+	s := k.waitSet(t, "a set of the new controller", from, func(wire.DesiredSet) bool { return true })
+	if s.ProviderUID != "uid-example-provider-again" || !s.ProviderCreated.Equal(created) {
+		t.Errorf("the new controller's set names UID %q created %v; want the re-created Provider's", s.ProviderUID, s.ProviderCreated)
+	}
+}
+
+// The lead's end flags itself before it takes the exchange lock (the review of
+// PR 360), so an exchange queued behind one in flight does not begin: with the
+// flag set and the lead not yet ended, an exchange sends nothing. The positive
+// control: with the flag clear, the same exchange is sent.
+func TestKeeperAnExchangeQueuedBehindTheLeadsEndDoesNotBegin(t *testing.T) {
+	k := startFakeKeeper(t)
+	e := newEnv(t, keeperMode(k, 5))
+	keeperUp(e)
+	r := e.ctl.shared.relays
+	lead := r.leadContext()
+	ack := wire.Ack{Provider: testProvider, LeaseEpoch: 5, UID: "uid-gone", JobID: "1", Channel: agentapi.RelayControl,
+		Seq: 1, Outcome: wire.OutcomeRefused, Reason: wire.AckDeleted}
+	var acked wire.Acked
+	before := len(k.ackList())
+	if err := r.keeper.exchange(lead, wire.KindAck, ack, &acked); err != nil || len(k.ackList()) != before+1 {
+		t.Fatalf("the positive control: an exchange under the lead returned %v and sent %d acks, want 1", err, len(k.ackList())-before)
+	}
+	r.keeper.ending.Store(true)
+	if lead.Err() != nil {
+		t.Fatal("the lead ended; the test needs it live with the end flagged")
+	}
+	before = len(k.ackList())
+	if err := r.keeper.exchange(lead, wire.KindAck, ack, &acked); !errors.Is(err, errLeadEnded) {
+		t.Errorf("with the lead's end flagged, the exchange returned %v; want errLeadEnded", err)
+	}
+	if got := len(k.ackList()); got != before {
+		t.Errorf("with the lead's end flagged, %d acks were sent", got-before)
+	}
 }
