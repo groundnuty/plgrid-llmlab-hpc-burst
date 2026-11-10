@@ -254,6 +254,22 @@ func (g *rig) adopted(a *v1alpha1.Allocation, j job) {
 	})
 }
 
+// firstLease reads the Provider's Lease while its first leader, alone, holds
+// it, and checks its anchor: the leader's elector created it, and client-go
+// writes a created record with leaseTransitions 0, so the first leader's
+// epoch is 0, and each later holder's is one up on its holder change.
+func (g *rig) firstLease(provider string) leaseRecord {
+	g.t.Helper()
+	l := g.api.lease(g.t, provider)
+	if !l.found || l.holder == "" {
+		g.t.Fatalf("Provider %s's Lease %+v has no holder while its first leader leads", provider, l)
+	}
+	if l.transitions != 0 {
+		g.t.Fatalf("Provider %s's Lease has leaseTransitions %d under its first leader, want 0: client-go creates the record with 0", provider, l.transitions)
+	}
+	return l
+}
+
 // ownSbatches checks that every sbatch call in the fake's log is the test's
 // own, n of them: the controllers adopted the jobs and submitted none.
 func (g *rig) ownSbatches(n int) {

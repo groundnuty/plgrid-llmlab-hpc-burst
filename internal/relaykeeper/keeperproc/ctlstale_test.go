@@ -67,7 +67,7 @@ func TestAStaleRealControllersAcknowledgementAndSetAreRefusedForTheirEpoch(t *te
 	_, up2 := g.leads(ca, p, j2)
 	g.adopted(a1, j1)
 	g.adopted(a2, j2)
-	before := g.api.lease(t, p.name)
+	before := g.firstLease(p.name)
 	pins1 := g.k.pins(up1)
 	pins2 := g.k.pins(up2)
 	s := g.w.openStream(j2, serving)
@@ -234,10 +234,7 @@ func TestARealLeaderStopsSendingBeforeItReleasesTheLease(t *testing.T) {
 	pins := g.k.pins(up)
 	s := g.w.openStream(j, serving)
 	s.mustEcho(64<<10, "before the stop")
-	idA := g.api.lease(t, p.name).holder
-	if idA == "" {
-		t.Fatal("the Lease has no holder while A leads")
-	}
+	idA := g.firstLease(p.name).holder
 	var armed atomic.Bool
 	armed.Store(true)
 	apid := a.pid()

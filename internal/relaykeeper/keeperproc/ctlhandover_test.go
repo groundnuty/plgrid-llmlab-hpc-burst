@@ -6,8 +6,9 @@ package keeperproc
 // doesn't change". Two real controllers of one Provider (ctlrole_test.go)
 // and a keeper process; the controllers reach the keeper through the tap,
 // which reads each set's Lease epoch off the wire. The expected epochs come
-// from the Provider's Lease as the API server holds it, read before and
-// after, and client-go's rule: leaseTransitions goes up by one when the
+// from client-go's rule, checked against the Provider's Lease as the API
+// server holds it, read before and after: the first leader's elector creates
+// the record with leaseTransitions 0, the count goes up by one when the
 // holder changes, and a copy's epoch is the count at its own acquisition.
 
 import (
@@ -34,10 +35,7 @@ func realHandOver(t *testing.T, kill bool) {
 	a := g.startController("a", p.name, g.tap.path)
 	setA, up := g.leads(a, p, j)
 	g.adopted(al, j)
-	before := g.api.lease(t, p.name)
-	if !before.found || before.holder == "" {
-		t.Fatalf("Provider %s's Lease %+v has no holder while A leads", p.name, before)
-	}
+	before := g.firstLease(p.name)
 	if setA.set.LeaseEpoch != before.transitions {
 		t.Errorf("A's set carries Lease epoch %d; the Lease as written while A alone holds it has leaseTransitions %d", setA.set.LeaseEpoch, before.transitions)
 	}

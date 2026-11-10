@@ -371,7 +371,7 @@ func (p *tap) snapshot(r *tapReq) tapReq {
 // from is a request from the process pid.
 func from(pid int) func(r *tapReq) bool { return func(r *tapReq) bool { return r.pid == pid } }
 
-// setFrom is a set from pid that the keeper answered with a report.
+// reportedSetFrom is a set from pid that the keeper answered with a report.
 func reportedSetFrom(pid int) func(r *tapReq) bool {
 	return func(r *tapReq) bool { return r.pid == pid && r.set != nil && r.report != nil }
 }

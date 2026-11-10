@@ -295,24 +295,3 @@ func (r *realCtl) waitClean() {
 
 // kill sends SIGKILL through the controller's pidfd and waits for its exit.
 func (r *realCtl) kill() { r.c.kill(r.t) }
-
-// identity is the Lease's holder while this controller, and only it, holds
-// it: the test reads it from the API server once the controller's first set
-// went through the tap, so no other copy's could be there.
-func (g *rig) identityOf(r *realCtl, provider string) string {
-	g.t.Helper()
-	l := g.api.lease(g.t, provider)
-	if !l.found || l.holder == "" {
-		g.t.Fatalf("Provider %s's Lease has no holder while controller %s leads", provider, r.name)
-	}
-	return l.holder
-}
-
-// noLine checks that the controller's log has no line holding every one of
-// parts.
-func (r *realCtl) noLine(what string, parts ...string) {
-	r.t.Helper()
-	if got := r.log.since(0, parts...); len(got) != 0 {
-		r.t.Errorf("controller %s logged %s: %q", r.name, what, got)
-	}
-}

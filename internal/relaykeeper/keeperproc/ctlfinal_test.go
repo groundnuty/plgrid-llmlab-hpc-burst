@@ -59,7 +59,7 @@ func startFinal(t *testing.T, name string, rule func(a *realCtl) func(r *tapReq)
 	}
 	_, f.up = g.leads(f.ca, f.p, f.j)
 	g.adopted(f.a, f.j)
-	f.before = g.api.lease(t, f.p.name)
+	f.before = g.firstLease(f.p.name)
 	f.pins = g.k.pins(f.up)
 	f.s = g.w.openStream(f.j, serving)
 	f.s.mustEcho(64<<10, "before the final end")
