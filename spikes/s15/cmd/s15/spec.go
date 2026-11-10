@@ -24,6 +24,9 @@ type Tunnel struct {
 	Job    string `json:"job"`    // its Slurm-shaped job ID (host-dialed)
 	Dir    string `json:"dir"`    // the Allocation's directory, where the job side publishes relay-socket
 	Socket string `json:"socket"` // the engine double's Unix socket
+	// RelayOnly marks layout (d)'s stand-in for a third relay channel: an
+	// Allocation entry whose serving relay carries only the bulk frpc.
+	RelayOnly bool `json:"relay_only,omitempty"`
 }
 
 // Modes of a configuration.

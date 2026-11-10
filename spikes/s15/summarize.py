@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import analysis  # noqa: E402
 
 MODES = ("direct", "host-dialed")
-LAYOUTS = ("a", "b25", "b50", "b75", "c")
+LAYOUTS = ("a", "b25", "b50", "b75", "c", "d")
 KINDS = ("download", "embeddings", "upload")
 TR_FIELDS = ["kind", "start_ns", "sent_ns", "resp_ns", "recv_first_ns", "recv_last_ns", "end_ns", "bytes", "status", "err"]
 
