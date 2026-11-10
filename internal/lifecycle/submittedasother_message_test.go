@@ -101,14 +101,20 @@ func TestASubmittedAsOtherFailureCarriesTheReadBackMessage(t *testing.T) {
 		t.Errorf("the Instance that ended is on Allocation %s, want %s", first.Spec.AllocationRef.Name, allocName)
 	}
 	healthy := apimeta.FindStatusCondition(first.Status.Conditions, "Healthy")
+	// The exact text is the Allocation's name, a colon and the condition's own
+	// message, written out here as the issue states it (not by a lifecycle
+	// formatter). Substrings alone would also accept the generic text with the
+	// message appended after it.
+	wantMsg := "Allocation " + allocName + ": " + cm
 	for _, c := range []struct{ what, got string }{{"the failing event", ev[0].Message}, {"the Instance's Healthy condition", healthyMessage(healthy)}} {
-		for _, want := range []string{allocName, "was established with other settings than requested", "timeLimit: requested ", ", got 11h0m0s", cm} {
+		if c.got != wantMsg {
+			t.Errorf("%s message is %q; want exactly %q", c.what, c.got, wantMsg)
+		}
+		// The Provider's shape, as literals.
+		for _, want := range []string{allocName, "was established with other settings than requested", "timeLimit: requested ", ", got 11h0m0s"} {
 			if !strings.Contains(c.got, want) {
 				t.Errorf("%s message %q does not contain %q", c.what, c.got, want)
 			}
-		}
-		if strings.HasSuffix(c.got, ": None") {
-			t.Errorf("%s message %q ends with the observed reason of a running job, which says nothing", c.what, c.got)
 		}
 	}
 	if got := rg.submissions(); got != 2 {
