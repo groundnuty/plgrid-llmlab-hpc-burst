@@ -145,6 +145,10 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 // The Allocation must fit the launch: the same partition (so the same class)
 // and GPU count, and at least the CPUs and memory a new Allocation would
 // request (review of PR 88: a spec edit can change the GPUs an Instance needs).
+// One marked RelayEndedForGood is passed over (relayEnded): step 7, which
+// places, runs before step 9, which releases an empty one, so one pass would
+// otherwise place an Instance on it and the next would fail that Instance,
+// which counts toward RestartLoop (issue #332).
 // One whose agent has not registered again yet, during the grace after the
 // controller's own restart, is waited for rather than passed over: deferUntil
 // says until when.
@@ -154,7 +158,7 @@ func (p *pass) warmAllocation(pv *providerView, params v1alpha1.BatchParameters)
 		obs := a.Status.AtProvider
 		if a.Labels[v1alpha1.LabelProvider] != pv.name || !a.DeletionTimestamp.IsZero() ||
 			obs.Phase != v1alpha1.AllocationRunning || obs.HardEnd == nil || len(p.liveOn(a.Name)) > 0 ||
-			obs.HardEnd.Sub(p.now) <= need || !fits(a, params) || p.releasePending(a) {
+			obs.HardEnd.Sub(p.now) <= need || !fits(a, params) || p.releasePending(a) || relayEnded(a) {
 			continue
 		}
 		if len(p.r.Backend.registrations(a.UID)) > 0 {
@@ -177,6 +181,25 @@ func (p *pass) releasePending(a *v1alpha1.Allocation) bool {
 		}
 	}
 	return false
+}
+
+// relayEnded reports whether a host-dialed relay of the Allocation's job ended
+// for good (RelayEndedForGood, issue #304, set once and never cleared): nothing
+// placed on it can be reached, step 5 ends any Instance placed on it, and step
+// 9 releases it once it is empty, so it is never warm capacity.
+//
+// SubmittedAsOther is left out on purpose, though step 5 ends an Instance
+// placed on such an Allocation too. Nothing releases an empty one
+// (releaseEmpty reads RelayEndedForGood only), so skipping it here alone would
+// leave it holding its submit slot until its retention date or hard end, and a
+// deployment at its Provider's limit would then starve, where now the failed
+// placement releases it and the replacement serves
+// (TestAMarkedEmptyAllocationDoesNotStarveAProviderAtItsSubmitLimit). Releasing
+// it empty would release capacity that retention keeps, which HBEP-7 open
+// question 8 (Approvals) reserves for the owner, whose "Yes, release it" (#331)
+// covered RelayEndedForGood only (`@hpc-burst-science-agent`, 10 Nov 2026).
+func relayEnded(a *v1alpha1.Allocation) bool {
+	return a.GetCondition(v1alpha1.ConditionRelayEndedForGood).Status == "True"
 }
 
 // fits reports whether an Allocation's submission parameters hold an Instance

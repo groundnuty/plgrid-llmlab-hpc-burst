@@ -71,7 +71,8 @@ func (p *pass) copyLeaseEnd(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) e
 }
 
 // allocationFailed applies step 5: an Allocation that is Failed (a requeue
-// included), Lost or Refused, or that was submitted as another, ends its
+// included), Lost or Refused, that was submitted as another, or one of whose
+// host-dialed relays ended for good (RelayEndedForGood, issue #304), ends its
 // Instance with that reason and is released; one that ended early ends its
 // Instance with AllocationEndedEarly and a failing event. An Allocation that
 // reached its hard end ends its Instance as drained, with no event.
@@ -91,6 +92,13 @@ func (p *pass) allocationFailed(in *v1alpha1.Instance, alloc *v1alpha1.Allocatio
 	}
 	if c := alloc.GetCondition(v1alpha1.ConditionSubmittedAsOther); reason == "" && c.Status == "True" {
 		reason = string(v1alpha1.ConditionSubmittedAsOther)
+	}
+	if c := alloc.GetCondition(v1alpha1.ConditionRelayEndedForGood); reason == "" && c.Status == "True" {
+		// The job still runs, but nothing reaches it: the Provider's
+		// controller starts no relay of that channel again (HBEP-6, What
+		// ends a relay), so the Instance cannot serve, and the Allocation
+		// is released at once, as for any failed Instance (HBEP-7, Release).
+		return true, p.fail(in, alloc, string(v1alpha1.ConditionRelayEndedForGood), fmt.Sprintf("Allocation %s: %s", alloc.Name, c.Message))
 	}
 	if reason != "" {
 		msg := fmt.Sprintf("Allocation %s is %s", alloc.Name, obs.Phase)

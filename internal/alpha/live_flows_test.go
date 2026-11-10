@@ -277,6 +277,8 @@ func (r *liveRun) untilBefore(t time.Time, lead time.Duration, what string) {
 	if time.Now().After(at) {
 		r.t.Fatalf("%s: the time to open the streams, %s before the drain start, has passed: the steps before it took too long for the lease", what, lead)
 	}
+	// What the steps before it left to spare (the review of PR 317: on a handover whose successor is late, half the lead at most).
+	r.t.Logf("%s: %s to spare before the time to open the streams", what, time.Until(at).Round(time.Millisecond))
 	r.waitFor(time.Until(at)+time.Minute, what, func() bool { return !time.Now().Before(at) })
 }
 

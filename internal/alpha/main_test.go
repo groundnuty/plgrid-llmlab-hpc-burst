@@ -14,5 +14,5 @@ import (
 func TestMain(m *testing.M) {
 	enginedouble.Dispatch()
 	rehearsal.Dispatch()
-	os.Exit(m.Run())
+	os.Exit(rehearsal.ReportLeaks(m.Run()))
 }

@@ -11,7 +11,8 @@ import (
 // Reconcile loop, step 9; Retention). An Allocation is empty when it hosts no
 // live Instance:
 //   - one that has not started is cancelled: nothing waits for it;
-//   - one that ended, or failed, is released;
+//   - one that ended, or failed, is released, as is a running one one of
+//     whose host-dialed relays ended for good (RelayEndedForGood);
 //   - a running one is kept as warm capacity until its policy's date (the
 //     deployment's end time by default, or at once once the deployment is
 //     gone), or released after its idle limit under release-when-idle; the
@@ -55,6 +56,12 @@ func (p *pass) releaseEmpty(a *v1alpha1.Allocation) (bool, string, error) {
 	switch obs.Phase {
 	case v1alpha1.AllocationEnded, v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:
 		return true, fmt.Sprintf("its job is %s", obs.Phase), nil
+	}
+	if c := a.GetCondition(v1alpha1.ConditionRelayEndedForGood); c.Status == "True" {
+		// Kept capacity that nothing can reach: no Instance placed on it
+		// could serve, and its job would hold its GPU until the policy's
+		// date (issue #304).
+		return true, "a relay ended for good: " + c.Message, nil
 	}
 	if obs.StartTime == nil {
 		// An Instance is created before its Allocation, so an unstarted

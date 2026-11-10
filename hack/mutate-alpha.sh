@@ -17,7 +17,7 @@
 # compile is its own step, to one fixed test-binary path per package, and the binary then runs: so MUTATE_ALPHA_BUILD_LOCK,
 # a lock file, is taken (flock -o) around each compile only, never around a test run.
 #
-# Four kinds, by the file they change:
+# Five kinds, by the file they change:
 #   internal/alpha (a bare file name)           go test ./internal/alpha
 #   internal/alpha/alpha_live_test.go           the row's test as the script runs it: an alpha test binary is built from
 #                                               the mutated package, and the dry runs of hack/livechecks run that binary
@@ -25,6 +25,8 @@
 #   hack/live-checks.sh                         go test of hack/livechecks, the alpha script tests only. Set
 #                                               HPCBURST_LIVECHECKS_ALPHA_TEST and HPCBURST_LIVECHECKS_CONF_TEST to prebuilt
 #                                               test binaries to spare it two builds per mutant.
+#   internal/rehearsal/...                      go test of internal/rehearsal, the sshd sweep's guard tests only (issue #308):
+#                                               they start no sshd and send no signal, every send going to a sink that records it
 #
 # It edits files in the working tree and restores each from a copy it makes first, also on any exit, so run it
 # on a checkout with no uncommitted change to them. Run it under a memory cap (docs/development.md). Each run has an external bound
@@ -527,6 +529,11 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'budget.go@@		return StartupWait + first + r.Lease + SuccessorWait(tm, pendingMax) + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout@@		return StartupWait + first + r.Lease + SuccessorWait(tm, pendingMax) + lastLooks + CloseTimeout'
   'live_flows_test.go@@	if err := r.syncWatch(ctx, stack.KindAllocations, "the run'"'"'s Allocations"); err != nil {@@	if err := r.syncWatch(ctx, stack.KindAllocations, "the run'"'"'s Allocations"); err != nil { _ = err; }; if err := r.syncWatch(ctx, stack.KindAllocations, "the run'"'"'s Allocations"); err != nil {'
   'steps_live_test.go@@			r.watch.ResetsDecideNothing() // this run ends@@			// this run ends'
+  # PR #317's delta review: the stand-ins' stop check accepts a snapshot of the stack that lacks a component, and its look at what is
+  # left after down ignores the time the clean-ups after it keep. TestAStandInWhoseStackDidNotStopFails kills both (a status that omits
+  # the controller; no time left before the deadline), and TestTheStopCheckKeepsTheCleanupsReserve the second.
+  'standin_stop_test.go@@if missing := stack.MissingComponents(s.procs); len(missing) > 0 {@@if missing := stack.MissingComponents(s.procs); false && len(missing) > 0 {'
+  'standin_stop_test.go@@if last := deadline.Add(-stopReserve); hasDeadline && last.Before(by) {@@if last := deadline.Add(-stopReserve); false && hasDeadline && last.Before(by) {'
   'guard_live_test.go@@	r.claimed, r.claimedPred = true, r.guard.pred@@	r.watch.ResetsDecideNothing(); r.claimed, r.claimedPred = true, r.guard.pred'
   'steps.go@@	return fmt.Errorf("%w; %v", err, second)@@	return fmt.Errorf("%w; %w", err, second)'
   'steps.go@@	return fmt.Errorf("%w; %v", err, second)@@	return err'
@@ -716,6 +723,45 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'internal/providerctl/conformance/hostdialed_verdict_test.go@@	for _, v := range privateParts(o) {@@	for _, v := range privateParts(hostDialedObs{}) {'
   'internal/providerctl/conformance/hostdialed_verdict_test.go@@		if short, _, ok := strings.Cut(v, "."); ok {@@		if short, _, ok := strings.Cut(v, "."); false && ok {'
   'internal/providerctl/conformance/hostdialed_verdict_test.go@@	return "set, another"@@	return "set, the same"'
+  # #308: what stands between the rehearsal's sshd sweep and a process the test did not start, one mutant per branch. Guard 1 (pool.go's
+  # spawn) stores no exited, unreadable or timeless sshd; guard 2 (below) walks nothing from PID 1 or less, a timeless or a recycled root;
+  # guard 3 (signalProcs) never signals an unrelated process: each target is pinned by a pidfd and verified a descendant of the test at
+  # check time, by a start-time-ordered walk; a target that left the tree after the check can still receive the signal, which reaches only
+  # that pinned process. A target found outside the tree is not signalled, and is a leak if still alive at the stop's deadline. The forced
+  # command (relayguard.go) asks for SIGKILL at its sshd's exit. Each holds for its own class only: guard 1 does not cover a PID recycled
+  # between record's check and its walk (guard 2 does), and guard 3 does not tell the tests of one binary apart.
+  'internal/rehearsal/pool.go@@if err != nil || !live || self.pid != pid || self.ticks == 0 {@@if false {'
+  'internal/rehearsal/procs.go@@if root.pid <= 1 {@@if root.pid < 0 {'
+  'internal/rehearsal/procs.go@@if root.ticks == 0 {@@if false {'
+  'internal/rehearsal/procs.go@@if !found {@@if !found && false {'
+  'internal/rehearsal/signal.go@@case r.pid <= 1:@@case r.pid < 0:'
+  'internal/rehearsal/signal.go@@case r.pid == o.self.pid:@@case false:'
+  'internal/rehearsal/signal.go@@case r.ticks == 0:@@case false:'
+  'internal/rehearsal/signal.go@@case o.ancestors[r.pid]:@@case false:'
+  'internal/rehearsal/signal.go@@if !below {@@if !below && false {'
+  'internal/rehearsal/signal.go@@case p.ticks > child.ticks:@@case false:'
+  'internal/rehearsal/signal.go@@case !plive:@@case false && !plive:'
+  'internal/rehearsal/signal.go@@case perr != nil:@@case false:'
+  'internal/rehearsal/signal.go@@if o.self.ticks > child.ticks {@@if false {'
+  # The leak report: what is found outside the tree is split out, judged at the stop's last deadline (one that has exited by then was
+  # dying) and counted; then the stop's order, its kill of its own sshds, its bound and its report of survivors.
+  'internal/rehearsal/pool.go@@if errors.As(e, &l) {@@if false && errors.As(e, &l) {'
+  'internal/rehearsal/pool.go@@if now, live, err := s.api.row(l.row.pid); err != nil || (live && now.ticks == l.row.ticks) {@@if now, live, err := s.api.row(l.row.pid); true || err != nil || (live && now.ticks == l.row.ticks) {'
+  'internal/rehearsal/pool.go@@s.api.leaks.Add(1)@@s.api.leaks.Add(0)'
+  'internal/rehearsal/signal.go@@if n > 0 {@@if false {'
+  'internal/rehearsal/pool.go@@if c := cmp.Compare(depth[b.pid], depth[a.pid]); c != 0 {@@if c := cmp.Compare(depth[a.pid], depth[b.pid]); c != 0 {'
+  'internal/rehearsal/pool.go@@if listed[k] {@@if false {'
+  'internal/rehearsal/pool.go@@if err := s.api.kill(p.cmd.Process); err != nil {@@if err := error(nil); err != nil {'
+  'internal/rehearsal/pool.go@@case <-time.After(time.Until(deadline)):@@case <-make(chan time.Time):'
+  'internal/rehearsal/pool.go@@if now, ok := readProcRow(r.pid); ok && now.ticks == r.ticks {@@if now, ok := readProcRow(r.pid); false && ok && now.ticks == r.ticks {'
+  # The forced command's parent-death signal, its parent check, and the role that runs them.
+  'internal/rehearsal/relayguard.go@@if err := deathSignal(); err != nil {@@if err := error(nil); err != nil {'
+  'internal/rehearsal/relayguard.go@@if c := comm(ppid); !strings.HasPrefix(c, "sshd") {@@if c := comm(ppid); false && !strings.HasPrefix(c, "sshd") {'
+  'internal/rehearsal/relayguard.go@@if os.Getenv(EnvRole) != RoleRelay {@@if true {'
+  'internal/rehearsal/relayguard.go@@if ppid <= 1 {@@if false {'
+  'internal/rehearsal/relayguard.go@@first, second := ask, check@@first, second := check, ask'
+  'internal/rehearsal/relayguard.go@@os.O_WRONLY|os.O_APPEND, 0); ferr == nil {@@os.O_WRONLY|os.O_APPEND, 0); false && ferr == nil {'
+  'internal/rehearsal/login.go@@return fmt.Sprintf("exec env %s=%s %s=%s %s", EnvRole, RoleRelay, EnvRelay, sock, exe)@@return fmt.Sprintf("%s=%s %s=%s %s", EnvRole, RoleRelay, EnvRelay, sock, exe)'
 )
 # The mutants of a test of this script: a file with one mutant per line, in place of the list above.
 [ -z "${MUTATE_ALPHA_MUTANTS:-}" ] || mapfile -t mutants < "$MUTATE_ALPHA_MUTANTS"
@@ -725,9 +771,14 @@ compile_of() {
   cerr=""
   case $1 in
     internal/providerctl/*) compile_tests internal/providerctl/conformance "$tmp/conf.test" && compile_tests "$pkg" "$tmp/pkg.test" ;;
+    internal/rehearsal/*) compile_tests internal/rehearsal "$tmp/reh.test" ;;
     *.go) compile_tests "$pkg" "$tmp/pkg.test" ;;
   esac
 }
+# The tests of the rehearsal kind: the sweep guards' (internal/rehearsal: procs_test.go, signal_test.go, pool_test.go), which start no
+# sshd and send no signal; their stand-ins (true, sh, cat, this binary as a forced command) end on their own, the last by the kernel's
+# parent-death SIGKILL, which it asks for.
+rehearsal_tests='ExitedSSHD|ZeroRowSignalsNothing|BelowWalksNothing|Guard2Alone|SignalProcs|RefusalIsTheErrorOfClose|WithRelayEnvSelectsNothing|ReportLeaks|CloseReturnsWhen|BeforeItsParent|LeftTheTree|StillAliveAtItsDeadline|StillOutsideTheTree|RelayGuard|ForcedCommandDies|ForcedCommandExecs|GuardFailureIsLogged'
 # The tests of the script's kind.
 script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot|HostDialedMode'
 # tests_of <path> [control|<names>]: the command that judges a mutant of path, in the array tests. With control, the same command with
@@ -737,17 +788,20 @@ script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlpha
 # (CleanupMargin), so at 120s every wait on state failed at once and the unmutated tests failed, which counted every mutant
 # of the package as killed (#285).
 tests_of() {
-  local names=${2:-} pkgbin=$tmp/pkg.test confbin=$tmp/conf.test
+  local names=${2:-} pkgbin=$tmp/pkg.test confbin=$tmp/conf.test rehbin=$tmp/reh.test
   local bin=(-test.count=1 -test.timeout 300s -test.failfast) sel=(-failfast -run "$script_tests") dry=PendingPastTheBound
-  if [ -n "$names" ]; then pkgbin=$tmp/base-pkg.test confbin=$tmp/base-conf.test; fi
+  local rbin=(-test.count=1 -test.timeout 300s -test.failfast -test.run "$rehearsal_tests")
+  if [ -n "$names" ]; then pkgbin=$tmp/base-pkg.test confbin=$tmp/base-conf.test rehbin=$tmp/base-reh.test; fi
   if [ -n "$names" ] && [ "$names" != control ]; then
     dry=$names bin=(-test.count=1 -test.timeout 300s -test.run "$names") sel=(-run "$names")
+    rbin=(-test.count=1 -test.timeout 300s -test.run "$names")
   fi
   case $1 in
     hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 "${sel[@]}" ./hack/livechecks) ;;
     # The dry runs of the script run the alpha test binary: the one compiled above, from the mutated file.
     "$pkg"/alpha_live_test.go) tests=(env HPCBURST_LIVECHECKS_ALPHA_TEST="$pkgbin" go test -count=1 -timeout 9m -run "$dry" ./hack/livechecks) ;;
     internal/providerctl/*) tests=(bash -c 'cd "$1/internal/providerctl/conformance" && "$2" "${@:5}" && cd "$1/$3" && "$4" "${@:5}"' _ "$here" "$confbin" "$pkg" "$pkgbin" "${bin[@]}") ;;
+    internal/rehearsal/*) tests=(bash -c 'cd "$1/internal/rehearsal" && "$2" "${@:3}"' _ "$here" "$rehbin" "${rbin[@]}") ;;
     *) tests=(bash -c 'cd "$1/$2" && "$3" "${@:4}"' _ "$here" "$pkg" "$pkgbin" "${bin[@]}") ;;
   esac
 }
@@ -789,6 +843,7 @@ kind_of() {
     hack/live-checks.sh) printf "the script's" ;;
     "$pkg"/alpha_live_test.go) printf "the dry runs'" ;;
     internal/providerctl/*) printf "the conformance package's" ;;
+    internal/rehearsal/*) printf "the rehearsal package's" ;;
     *) printf "the package's" ;;
   esac
 }
@@ -804,6 +859,7 @@ baseline() {
   compile_of "$1" || { echo "mutate-alpha: $kind tests do not compile with no mutant, so nothing can be checked: $cerr" >&2; exit 2; }
   case $1 in
     internal/providerctl/*) cp "$tmp/conf.test" "$tmp/base-conf.test"; cp "$tmp/pkg.test" "$tmp/base-pkg.test" ;;
+    internal/rehearsal/*) cp "$tmp/reh.test" "$tmp/base-reh.test" ;;
     *.go) cp "$tmp/pkg.test" "$tmp/base-pkg.test" ;;
   esac
   tests_of "$1"

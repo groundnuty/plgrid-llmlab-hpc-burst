@@ -50,7 +50,8 @@ API_POLL_S = 10.0       # frps's proxy lists, read as often as the lifecycle con
 MEM_FLOOR_KB = 700_000
 FRONT_ROLES = ("frps", "frps2", "listener", "owner", "bridges")
 ALL_ROLES = FRONT_ROLES + ("frpc", "frpc-bulk", "node", "client", "link", "driver")
-LAYOUTS = ("a", "b25", "b50", "b75", "c")
+LAYOUTS = ("a", "b25", "b50", "b75", "c", "d")
+HOST_DIALED_ONLY = ("d",)  # a third relay channel exists only in host-dialed mode
 KINDS = ("upload", "download", "embeddings")
 MIB = 1 << 20
 
@@ -506,9 +507,17 @@ def run_config(env, mode, layout, kind, rep, args, path_rate=None, calibrate=Fal
     bulk_uid = uid + "-bulk"
     tunnel = {"index": 0, "uid": uid, "tag": "s15-000", "job": "1000", "dir": os.path.join(run, "alloc", "000"),
               "socket": os.path.join(run, "e", "000.sock")}
+    tunnels = [tunnel]
+    if layout == "d":
+        # Layout (d)'s stand-in for a third relay channel "bulk": a second job side with no engine, and a
+        # second Target of the same Owner, whose serving relay carries only the bulk frpc. hostdial has two
+        # channels and Serve dials only base+7, so this is a second Allocation's pair: its control relay
+        # idles, 4 relays where a real third channel would make 3.
+        tunnels.append({"index": 1, "uid": uid + "-relay", "tag": "s15-001", "job": "1001",
+                        "dir": os.path.join(run, "alloc", "001"), "socket": tunnel["socket"], "relay_only": True})
     spec = os.path.join(run, "spec.json")
     with open(spec, "w") as fh:
-        json.dump({"mode": mode, "layout": layout, "tunnels": [tunnel]}, fh)
+        json.dump({"mode": mode, "layout": layout, "tunnels": tunnels}, fh)
     P = Procs(run)
     pw, pw2 = secrets.token_hex(16), secrets.token_hex(16)
     row = {"run_id": run_id, "mode": mode, "layout": tag, "kind": kind, "rep": rep, "status": "ok",
@@ -532,7 +541,7 @@ def run_config(env, mode, layout, kind, rep, args, path_rate=None, calibrate=Fal
         listener = [env.b("s15"), "listener", "-listen", "127.0.0.1:%d" % PORTS["dialhome"],
                     "-frps", "127.0.0.1:%d" % PORTS["frps"], "-cert", os.path.join(run, "cert.pem"),
                     "-key", os.path.join(run, "key.pem"), "-log", os.path.join(run, "logs", "listener.log")]
-        if layout == "c":
+        if layout in ("c", "d"):
             P.start("frps2", [env.b("frps"), "-c", render_frps(run, "frps2", pw2, PORTS["frps2"], PORTS["mux2"], PORTS["web2"], FRPS2_HB)])
             apis["frps2"] = frps_api(PORTS["web2"], pw2)
             listener += ["-frps-bulk", "127.0.0.1:%d" % PORTS["frps2"]]
@@ -563,8 +572,9 @@ def run_config(env, mode, layout, kind, rep, args, path_rate=None, calibrate=Fal
         P.start("frpc", [env.b("frpc"), "-c", render_frpc(run, "frpc", server_port, cert, SERVER_NAME, proxies)],
                 nice=env.nice_node, env=frpc_env)
         want = {"frps": [uid] + ([bulk_uid] if cap else [])}
-        if layout == "c":
-            P.start("frpc-bulk", [env.b("frpc"), "-c", render_frpc(run, "frpc-bulk", server_port, cert, BULK_SERVER_NAME,
+        if layout in ("c", "d"):
+            bulk_port = ready["serving_ports"][1] if layout == "d" else server_port
+            P.start("frpc-bulk", [env.b("frpc"), "-c", render_frpc(run, "frpc-bulk", bulk_port, cert, BULK_SERVER_NAME,
                                                                    [(bulk_uid, tunnel["socket"], {})], tcpmux=False)],
                     nice=env.nice_node, env=frpc_env)
             want["frps2"] = [bulk_uid]
@@ -600,7 +610,7 @@ def run_config(env, mode, layout, kind, rep, args, path_rate=None, calibrate=Fal
         sampler.start()
         time.sleep(1.0)
         load_out = os.path.join(run, "load.json")
-        bulk_mux = PORTS["mux2"] if layout == "c" else PORTS["mux"]
+        bulk_mux = PORTS["mux2"] if layout in ("c", "d") else PORTS["mux"]
         bulk_host = uid if layout == "a" else bulk_uid
         streams = 0 if calibrate else args.streams
         argv = [env.b("s15"), "load", "-spec", spec, "-mux", "127.0.0.1:%d" % PORTS["mux"],
@@ -635,7 +645,7 @@ def run_config(env, mode, layout, kind, rep, args, path_rate=None, calibrate=Fal
             P.stop(name)
         row["leftovers"] = len(P.leftovers())
         row["leftover_ports"] = len(listeners_in_range())
-    count_losses(row, run, mode, sampler, t_ready, {"frps": [uid] + ([bulk_uid] if cap else []), "frps2": [bulk_uid] if layout == "c" else []})
+    count_losses(row, run, mode, sampler, t_ready, {"frps": [uid] + ([bulk_uid] if cap else []), "frps2": [bulk_uid] if layout in ("c", "d") else []})
     link = read_json(os.path.join(run, "link.json")) or []
     row["link_conns"] = len(link)
     row["link_conns_over_1mib"] = sum(1 for c in link if c["bytes_up"] + c["bytes_down"] > MIB)
@@ -739,6 +749,8 @@ def cmd_run(args):
             continue
         rate = calibrate(env, mode, args.rep, args)
         for layout in args.layouts:
+            if layout in HOST_DIALED_ONLY and mode != "host-dialed":
+                continue
             for kind in args.kinds:
                 la = loadavg()[0]
                 if args.max_load and la > args.max_load:

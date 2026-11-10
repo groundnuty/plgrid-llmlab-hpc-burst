@@ -126,6 +126,7 @@ type LoginNode struct {
 	relay *relayServer
 
 	closeOnce sync.Once
+	closeErr  error
 }
 
 // StartLoginNode starts the sshd listener and the relay. It fails, rather
@@ -156,17 +157,24 @@ func StartLoginNode(cfg LoginConfig) (*LoginNode, error) {
 	if n.relay, err = startRelay(n.sock, n.sess, cfg.Around); err != nil {
 		return nil, err
 	}
-	forced := fmt.Sprintf("%s=%s %s=%s %s", EnvRole, RoleRelay, EnvRelay, n.sock, exe)
-	spec := sshdSpec{user: n.user, options: fmt.Sprintf("restrict,command=%q", forced), conf: loginConf}
-	if n.srv, err = startSSHD(cfg.SSHD, n.files, spec); err != nil {
+	spec := sshdSpec{user: n.user, options: fmt.Sprintf("restrict,command=%q", forcedCommand(n.sock, exe)), conf: loginConf}
+	if n.srv, err = startSSHD("login node", cfg.SSHD, n.files, spec); err != nil {
 		n.relay.close()
 		return nil, err
 	}
 	if _, err := slurm.ParseSSHConfig([]byte(n.SSHConfig()), ""); err != nil {
-		_ = n.Close()
-		return nil, fmt.Errorf("rehearsal: the controller's parser refuses the login node's credentials: %w", err)
+		return nil, errors.Join(fmt.Errorf("rehearsal: the controller's parser refuses the login node's credentials: %w", err), n.Close())
 	}
 	return n, nil
+}
+
+// forcedCommand is the login node's forced command: this binary as the relay
+// for sock. The shell execs env, and env execs the binary, so the binary's
+// parent is sshd's session process whatever the login shell's startup files
+// do (an EXIT trap keeps bash from replacing itself with a last command): the
+// relay guard (relayguard.go) requires that parent.
+func forcedCommand(sock, exe string) string {
+	return fmt.Sprintf("exec env %s=%s %s=%s %s", EnvRole, RoleRelay, EnvRelay, sock, exe)
 }
 
 // loginConf is sshd_config for the login node: commands only (the key's
@@ -222,13 +230,15 @@ func (n *LoginNode) WriteCredentials(path string) error {
 
 // Close stops the listener, the relay and every sshd child with the
 // processes below them, and waits until they are gone. It never closes the
-// Platform. It is safe to call twice.
+// Platform. It is safe to call twice, and each call returns the first one's
+// error: a process the stop refused to signal, since it was not the test's
+// (issue #308).
 func (n *LoginNode) Close() error {
 	n.closeOnce.Do(func() {
 		n.srv.stopListening()
 		n.relay.close()
-		n.srv.stop(withRelayEnv(n.sock))
+		n.closeErr = n.srv.stop(withRelayEnv(n.sock))
 		_ = os.Remove(n.sock)
 	})
-	return nil
+	return n.closeErr
 }

@@ -13,6 +13,8 @@
 //     agent's two loopback listeners and its relay socket, published in the
 //     Allocation's directory), frpc's serverPort being the serving
 //     listener's port;
+//   - in host-dialed mode, a job side with no engine for a tunnel marked
+//     relay_only: layout (d)'s stand-in for a third relay channel, "bulk";
 //   - in host-dialed mode, one TCP acceptor standing in for "the login node's
 //     sshd, then srun, then the relay step": for each connection it reads the
 //     relay line the owner built and runs hostdial.Relay with the
@@ -68,6 +70,10 @@ type spec struct {
 		UID    string `json:"uid"`
 		Dir    string `json:"dir"`
 		Socket string `json:"socket"`
+		// RelayOnly is layout (d)'s stand-in for a third relay channel: a job
+		// side with no engine of its own, whose serving channel carries the bulk
+		// frpc's connections over a relay of their own.
+		RelayOnly bool `json:"relay_only,omitempty"`
 	} `json:"tunnels"`
 }
 
@@ -129,6 +135,9 @@ func runNode(args []string) error {
 		}
 	}()
 	for _, t := range sp.Tunnels {
+		if t.RelayOnly {
+			continue
+		}
 		cfg := enginedouble.DefaultConfig()
 		cfg.TokenDelay = TokenDelay
 		_ = os.Remove(t.Socket)
