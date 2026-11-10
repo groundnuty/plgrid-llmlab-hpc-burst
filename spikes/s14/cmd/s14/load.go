@@ -74,7 +74,7 @@ func runLoad(args []string) error {
 	fs := flag.NewFlagSet("load", flag.ContinueOnError)
 	specPath := fs.String("spec", "", "the configuration's spec (JSON)")
 	mux := fs.String("mux", "127.0.0.1:29921", "frps's tcpmux CONNECT port")
-	streams := fs.Int("streams", 1, "concurrent streams per tunnel")
+	streams := fs.Int("streams", 1, "concurrent streams per tunnel (0: the probes alone, for the idle cost)")
 	ramp := fs.Duration("ramp", 5*time.Second, "worker j starts at ramp*j/(tunnels*streams)")
 	window := fs.Duration("window", 30*time.Second, "measurement window, after the ramp")
 	bucket := fs.Duration("bucket", time.Second, "the per-tunnel token buckets' width")
@@ -94,8 +94,8 @@ func runLoad(args []string) error {
 	if err := requireLoopback(*mux); err != nil {
 		return err
 	}
-	if *streams < 1 || *maxTokens < 2 || *window < *bucket || *bucket <= 0 {
-		return fmt.Errorf("-streams must be >= 1, -max-tokens >= 2, and -window at least one -bucket")
+	if *streams < 0 || *maxTokens < 2 || *window < *bucket || *bucket <= 0 {
+		return fmt.Errorf("-streams must be >= 0, -max-tokens >= 2, and -window at least one -bucket")
 	}
 	sockets := map[string]string{}
 	for _, t := range spec.Tunnels {

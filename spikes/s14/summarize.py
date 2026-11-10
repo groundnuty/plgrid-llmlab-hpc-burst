@@ -107,6 +107,12 @@ def groups(runs):
     return g
 
 
+def idle_front(r):
+    vals = [num(r.get("idle_cpu_" + k)) for k in FRONT]
+    vals = [v for v in vals if v is not None]
+    return sum(vals) if vals else None
+
+
 def front_cores(r):
     vals = [num(r.get("cpu_" + k)) for k in FRONT]
     vals = [v for v in vals if v is not None]
@@ -174,6 +180,24 @@ def tables(root):
         p("| %d | %d | %s | %s | %s | %s | %s | %s | %s |" % (k[1], k[2], k[0], pooled, f(pooled_pct(th, 50)), f(pooled_pct(th, 99)),
                                                       f(pooled_pct(gh, 50)), f(pooled_pct(gh, 99)),
                                                       rng([num(r.get("probe_p99_ms")) for r in ok], "{:.0f}")))
+    p("\n### Idle cost\n")
+    p("Every tunnel registered and no stream running, for 30 s before the load at 1 stream per tunnel: the tunnels' "
+      "keepalives and heartbeats, the front's probe of each tunnel every 10 s and the controller's list read every 10 s. "
+      "Median over the repetitions (range when they differ), in thousandths of a core.\n")
+    p("| mode | tunnels | frps | listener | owner | stand-ins | front | front per tunnel | probes failed | tokens |")
+    p("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    for k in keys:
+        if k[0] == "baseline" or k[2] != 1:
+            continue
+        ok = [r for r in g[k] if r["status"] == "ok" and r.get("idle_cpu_frps") not in (None, "")]
+        if not ok:
+            continue
+        mc = lambda c: rng([1000 * num(r.get(c)) if num(r.get(c)) is not None else None for r in ok], "{:.1f}")  # noqa: E731
+        front = [1000 * idle_front(r) for r in ok]
+        p("| %s | %d | %s | %s | %s | %s | %s | %s | %d | %d |" % (
+            k[0], k[1], mc("idle_cpu_frps"), mc("idle_cpu_listener"), mc("idle_cpu_owner"), mc("idle_cpu_bridges"),
+            rng(front, "{:.1f}"), rng([f / k[1] for f in front], "{:.2f}"),
+            sum(int(r.get("idle_probes_failed") or 0) for r in ok), sum(int(r.get("idle_tokens") or 0) for r in ok)))
     p("\n### Heartbeat loss\n")
     p("Summed over the repetitions. A drop is a tunnel frps's proxy list showed not online, or registered again, after "
       "readiness (read every 10 s); a re-login is an frpc login beyond its first; a relay restart a relay session beyond "
@@ -244,6 +268,16 @@ def fits(root):
             print("%-11s %-8s %2d runs: front cores = %.5f per tunnel + %.4f per 1k tok/s + %.4f; "
                   "one core at 70%%: %.0f tok/s at 100 tunnels, %.0f at 300" % (mode, label, len(rs), per_t, per_k, base,
                                                                               core(100), core(300)))
+            idle = [r for r in rs0 if r["mode"] == mode and r["status"] == "ok" and idle_front(r) is not None]
+            if idle:
+                # Idle: cores = b * tunnels + c, a one-variable least squares.
+                xs = [int(r["tunnels"]) for r in idle]
+                ys = [idle_front(r) for r in idle]
+                n, mx, my = len(xs), sum(xs) / len(xs), sum(ys) / len(ys)
+                sxx = sum((x - mx) ** 2 for x in xs)
+                if sxx > 0:
+                    b = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx
+                    print("%-11s %-8s %2d idle runs: idle front cores = %.5f per tunnel + %.4f" % (mode, label, n, b, my - b * mx))
             if label != "all reps":
                 continue
             rss = fit([(int(r["tunnels"]), int(r["tunnels"]) * int(r["streams"]) / 1000,

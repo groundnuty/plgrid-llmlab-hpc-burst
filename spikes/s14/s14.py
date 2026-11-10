@@ -470,20 +470,21 @@ def run_config(env, mode, n, streams, rep, args):
         sampler = Sampler(roles, api)
         sampler.start()
         time.sleep(SAMPLE_S)  # an idle sample after readiness, before the load
+        row["ready_s"] = round(t_ready, 3)
+        # The idle cost: every tunnel registered, no stream, only the front's probe every 10 s, the
+        # controller's list read, and the tunnels' own keepalives and heartbeats. Measured once per
+        # tunnel count (at 1 stream), since streams change nothing while none runs.
+        if args.idle > 0 and streams == 1 and mode != "baseline":
+            idle_out = os.path.join(run, "idle.json")
+            run_client(P, "idle-client", [env.b("s14"), "load", "-spec", spec, "-mux", "127.0.0.1:%d" % PORTS["mux"],
+                                          "-streams", "0", "-ramp", "0s", "-window", "%ds" % args.idle, "-out", idle_out],
+                       args.idle + 60, sampler)
+            summarize_idle(row, read_json(idle_out), sampler)
         load_out = os.path.join(run, "load.json")
-        P.start("client", [env.b("s14"), "load", "-spec", spec, "-mux", "127.0.0.1:%d" % PORTS["mux"],
-                           "-streams", str(streams), "-ramp", "%ds" % args.ramp, "-window", "%ds" % args.window,
-                           "-max-tokens", str(args.max_tokens), "-out", load_out])
-        p_client = P.procs["client"][0]
-        deadline = time.time() + args.ramp + args.window + 240
-        while p_client.poll() is None:
-            if sampler.low_memory is not None:
-                raise RuntimeError("the host's available memory fell to %d MB" % (sampler.low_memory // 1024))
-            if time.time() > deadline:
-                raise RuntimeError("the load client did not finish")
-            time.sleep(0.5)
-        if p_client.returncode != 0:
-            raise RuntimeError("the load client exited %d" % p_client.returncode)
+        run_client(P, "client", [env.b("s14"), "load", "-spec", spec, "-mux", "127.0.0.1:%d" % PORTS["mux"],
+                                 "-streams", str(streams), "-ramp", "%ds" % args.ramp, "-window", "%ds" % args.window,
+                                 "-max-tokens", str(args.max_tokens), "-out", load_out],
+                   args.ramp + args.window + 240, sampler)
         time.sleep(SAMPLE_S)
         sampler.stop()
         load = read_json(load_out)
@@ -503,18 +504,75 @@ def run_config(env, mode, n, streams, rep, args):
         row["leftover_ports"] = len(listeners_in_range())
     # Counted after every process stopped: the owner and the node write their last state on exit.
     count_drops(row, run, tunnels, mode, sampler, t_ready)
-    raw = {"row": row, "load": read_json(os.path.join(run, "load.json")),
+    samples = sampler.samples if sampler else []
+    raw = {"row": row, "load": read_json(os.path.join(run, "load.json")), "idle": read_json(os.path.join(run, "idle.json")),
            "owner": read_json(os.path.join(run, "owner-state.json")), "node": read_json(os.path.join(run, "node-state.json")),
-           "polls": sampler.polls if sampler else [], "uids": [t["uid"] for t in tunnels]}
+           "polls": sampler.polls if sampler else [], "uids": [t["uid"] for t in tunnels], "samples": samples}
     with open(os.path.join(env.results, "raw", run_id + ".json"), "w") as fh:
         json.dump(raw, fh)
+    write_samples(env.results, run_id, samples)
     return row
+
+
+def run_client(P, name, argv, timeout, sampler):
+    """Starts the load client, waits for it, and fails the run if it fails or the host runs short of memory."""
+    P.start(name, argv)
+    p = P.procs[name][0]
+    deadline = time.time() + timeout
+    while p.poll() is None:
+        if sampler.low_memory is not None:
+            raise RuntimeError("the host's available memory fell to %d MB" % (sampler.low_memory // 1024))
+        if time.time() > deadline:
+            raise RuntimeError("the %s did not finish" % name)
+        time.sleep(0.5)
+    if p.returncode != 0:
+        raise RuntimeError("the %s exited %d" % (name, p.returncode))
+
+
+SAMPLE_FIELDS = ["run_id", "t", "role", "pids", "ticks", "rss_kb", "hwm_kb", "fds"]
+HOST_FIELDS = ["run_id", "t", "user", "nice", "system", "idle", "iowait", "irq", "softirq", "steal", "mem_avail_kb",
+               "load1", "load5"]
+
+
+def write_samples(results, run_id, samples):
+    """Appends the run's /proc samples to samples.csv (per role: PIDs seen, summed ticks, RSS, peak RSS,
+    descriptors) and host.csv (the host's /proc/stat counters, available memory, load), so the committed
+    results keep what every CPU, memory and descriptor figure was computed from."""
+    sp, hp = os.path.join(results, "samples.csv"), os.path.join(results, "host.csv")
+    new_s, new_h = not os.path.exists(sp), not os.path.exists(hp)
+    with open(sp, "a", newline="") as fs, open(hp, "a", newline="") as fh:
+        ws, wh = csv.writer(fs), csv.writer(fh)
+        if new_s:
+            ws.writerow(SAMPLE_FIELDS)
+        if new_h:
+            wh.writerow(HOST_FIELDS)
+        for s in samples:
+            t = "%.3f" % s["t"]
+            for role in sorted(s["ticks"]):
+                ticks = s["ticks"][role]
+                ws.writerow([run_id, t, role, len(ticks), sum(ticks.values()), s["rss_kb"].get(role, ""),
+                             s["hwm_kb"].get(role, ""), s["fds"].get(role, "")])
+            st = (s["stat"] + [0] * 8)[:8]
+            wh.writerow([run_id, t] + st + [s["mem_avail_kb"], s["load"][0], s["load"][1]])
+
+
+def summarize_idle(row, idle, sampler):
+    """The idle phase's CPU per role, from the samples inside its window, and its probes."""
+    ws, we = idle["window_start_unix_ns"] / 1e9, idle["window_end_unix_ns"] / 1e9
+    win = analysis.window_samples(sampler.samples, ws, we)
+    row["idle_start_s"], row["idle_end_s"], row["idle_samples"] = round(ws, 3), round(we, 3), len(win)
+    for role in ALL_ROLES:
+        c = analysis.cores(win, role, CLK)
+        row["idle_cpu_" + role] = round(c, 5) if c is not None else ""
+    row["idle_probes_ok"], row["idle_probes_failed"] = idle["probes_ok"], idle["probes_failed"]
+    row["idle_probes_min_per_tunnel"] = min(t["probes_ok"] for t in idle["per_tunnel"])
+    row["idle_tokens"] = sum(t["tokens"] for t in idle["per_tunnel"])
 
 
 def summarize_run(row, load, sampler, tunnels, t_ready, run, mode):
     ws, we = load["window_start_unix_ns"] / 1e9, load["window_end_unix_ns"] / 1e9
     win = analysis.window_samples(sampler.samples, ws, we)
-    row["window_samples"] = len(win)
+    row["window_start_s"], row["window_end_s"], row["window_samples"] = round(ws, 3), round(we, 3), len(win)
     for role in ALL_ROLES:
         c = analysis.cores(win, role, CLK)
         row["cpu_" + role] = round(c, 4) if c is not None else ""
@@ -659,6 +717,7 @@ def main():
     r.add_argument("--ramp", type=int, default=5)
     r.add_argument("--window", type=int, default=30)
     r.add_argument("--max-tokens", type=int, default=60)
+    r.add_argument("--idle", type=int, default=30, help="seconds of the idle phase at 1 stream per tunnel (0: none)")
     r.add_argument("--ready-timeout", type=float, default=180.0)
     r.add_argument("--max-load", type=float, default=0.0, help="skip a configuration while the 1-min load is above this (0: never)")
     sub.add_parser("host")
