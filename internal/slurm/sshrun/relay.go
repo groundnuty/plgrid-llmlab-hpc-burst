@@ -81,15 +81,22 @@ func NewRelay(o RelayOptions) (*Relay, error) {
 	if err := privateDir(o.ControlDir); err != nil {
 		return nil, err
 	}
-	_, conf, err := controlPaths(Options{Name: o.Name + "-relay", Config: o.Config, ControlDir: o.ControlDir})
-	if err != nil {
-		return nil, err
-	}
 	if o.ConfigFile != "" {
+		// A stable name is a regular file of its own: controlPaths' derived
+		// names, and the bound on the control socket's path they check, are
+		// not used.
 		if err := checkConfigFile(o.ControlDir, o.ConfigFile); err != nil {
 			return nil, err
 		}
-		conf = o.ConfigFile
+		r := &Relay{o: o, config: o.ConfigFile}
+		if err := writeConfigFile(o.ControlDir, r.config, o.Config); err != nil {
+			return nil, err
+		}
+		return r, nil
+	}
+	_, conf, err := controlPaths(Options{Name: o.Name + "-relay", Config: o.Config, ControlDir: o.ControlDir})
+	if err != nil {
+		return nil, err
 	}
 	r := &Relay{o: o, config: conf}
 	if err := writeConfigFile(o.ControlDir, r.config, o.Config); err != nil {

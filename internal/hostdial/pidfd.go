@@ -62,9 +62,30 @@ type pidfdHold struct {
 	closed bool // after the process was reaped: fd is not ours any more
 }
 
+// pidfdAttr is the keeper's relays' process attributes: a pidfd from clone,
+// stored at fd, a KILL when this process dies, and no process group of their
+// own. A test replaces it to fake a clone that gave no pidfd.
+var pidfdAttr = func(fd *int) *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL, PidFD: fd}
+}
+
+// unpinnedReaped is told of a process that started without a pidfd, once it
+// has ended by itself and been reaped; a test replaces it.
+var unpinnedReaped = func(*exec.Cmd) {}
+
 // startPidfdProcess starts cmd with pipes for its standard input and output,
 // a pidfd from clone, no process group of its own, and a KILL when this
 // process dies, from the thread locked for good (startLockedThread).
+//
+// A start that gets no pidfd from clone is refused, loudly, and nothing is
+// signalled by its number (the science agent's rule for PR 349's round, 10
+// Nov 2026: no signal ever goes to a numeric PID). It cannot happen on a
+// kernel that passed checkPidfd, since pidfd_open (Linux 5.3) came after
+// clone's CLONE_PIDFD (5.2), and Go's start fails when clone refuses the
+// flag. Should it happen, the process's pipes are closed, so a relay's ssh
+// ends by itself (its relay step ends when its standard input closes,
+// HBEP-6); its parent-death signal ends it with this process at the latest;
+// and it is reaped in the background.
 func startPidfdProcess(cmd *exec.Cmd, log *slog.Logger) (*process, error) {
 	in, err := cmd.StdinPipe()
 	if err != nil {
@@ -75,15 +96,20 @@ func startPidfdProcess(cmd *exec.Cmd, log *slog.Logger) (*process, error) {
 		return nil, err
 	}
 	fd := -1
-	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL, PidFD: &fd}
+	cmd.SysProcAttr = pidfdAttr(&fd)
 	if err := startLockedThread(cmd); err != nil {
 		return nil, err
 	}
 	pid := cmd.Process.Pid
 	if fd < 0 {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return nil, fmt.Errorf("hostdial: the relay's ssh %d started without a pidfd", pid)
+		_ = in.Close()
+		_ = out.Close()
+		go func() {
+			_ = cmd.Wait()
+			unpinnedReaped(cmd)
+		}()
+		log.Error("a relay's ssh started without a pidfd from clone: refused; it is not signalled, its pipes are closed, and it ends by itself", "pid", pid)
+		return nil, fmt.Errorf("hostdial: the relay's ssh %d started without a pidfd from clone: refused, and not signalled", pid)
 	}
 	// Nothing waits for the process yet, so its PID is its own: read its
 	// start time now.

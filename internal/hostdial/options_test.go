@@ -58,7 +58,9 @@ func shellOwner(t *testing.T, o hostdial.OwnerOptions) *hostdial.Owner {
 	t.Helper()
 	o.Ports = map[agentapi.RelayChannel]int{control: 30000, serving: 30001}
 	o.Epoch = epoch(1)
-	o.Slots = hostdial.NewSlots(0)
+	if o.Slots == nil {
+		o.Slots = hostdial.NewSlots(0)
+	}
 	o.MinBackoff, o.MaxBackoff, o.StopGrace = 50*time.Millisecond, 200*time.Millisecond, 5*time.Second
 	o.Logger = slog.New(slog.NewTextHandler(testWriter{t}, nil))
 	own, err := hostdial.NewOwner(o)
@@ -138,27 +140,47 @@ while [ "$i" -lt 600 ]; do sleep 0.1; i=$((i + 1)); done
 // groupSeen is what the group probe saw of one channel's relay.
 type groupSeen struct {
 	relay, pgid int
+	// attr is the process attributes the Owner gave the relay's command.
+	setpgid   bool
+	pdeathsig syscall.Signal
+	pidfd     bool
 	// lines is what the relay's child recorded.
 	lines string
 }
 
 // groupProbe starts one Allocation's relays under an Owner with o. Each
-// relay's double forks a child, which the test pins with a pidfd. The probe
-// records each relay's process group, then Drops the Allocation, which
-// returns once the relays are gone. Then it sends each child WINCH through
-// its pidfd and reads what the child recorded once it has exited. WINCH is
-// numbered above TERM, so a TERM the stop sent before it is handled first and
-// its line comes first: the order is the evidence, not a wait.
+// relay's double forks a child, which the test pins with a pidfd, verified as
+// the relay's child, the relay being this test process's (pin). The probe
+// records each relay's process group and the attributes its command was
+// started with, then Drops the Allocation, which returns once the relays are
+// gone. Then it sends each child WINCH through its verified pin and reads
+// what the child recorded once it has exited. WINCH is numbered above TERM,
+// so a TERM the stop sent before it is handled first and its line comes
+// first: the order is the evidence, not a wait.
 func groupProbe(t *testing.T, o hostdial.OwnerOptions) map[agentapi.RelayChannel]groupSeen {
 	t.Helper()
 	dir := t.TempDir()
 	writeScript(t, dir, "child.sh", groupChildSh)
 	jobs := shellJobs{}
 	tg := shellTarget(1, "hb-relay-grp-0123456789ab", writeScript(t, dir, "relay.sh", groupRelaySh), dir, "", jobs)
+	var cmdMu sync.Mutex
+	cmds := map[agentapi.RelayChannel]*exec.Cmd{}
+	command := tg.Command
+	tg.Command = func(line string) (*exec.Cmd, error) {
+		cmd, err := command(line)
+		ch := control
+		if strings.Contains(line, " "+agentapi.RelaySubcommand+" "+string(serving)+" ") {
+			ch = serving
+		}
+		cmdMu.Lock()
+		cmds[ch] = cmd
+		cmdMu.Unlock()
+		return cmd, err
+	}
 	own := shellOwner(t, o)
 	own.Want(tg)
 	seen := map[agentapi.RelayChannel]groupSeen{}
-	children := map[agentapi.RelayChannel]int{} // the children's pidfds
+	children := map[agentapi.RelayChannel]*pinned{}
 	for _, ch := range agentapi.RelayChannels {
 		var relay, child int
 		waitFor(t, time.Minute, "the "+string(ch)+" relay's child ready", func() bool {
@@ -171,34 +193,30 @@ func groupProbe(t *testing.T, o hostdial.OwnerOptions) map[agentapi.RelayChannel
 			l, lerr := os.ReadFile(filepath.Join(dir, string(ch)+".log"))
 			return err == nil && lerr == nil && strings.HasPrefix(string(l), "ready\n")
 		})
-		fd, err := unix.PidfdOpen(child, 0)
+		c, err := pin(t, child, relay)
 		if err != nil {
 			t.Fatalf("pin the %s relay's child %d: %v", ch, child, err)
-		}
-		t.Cleanup(func() {
-			_ = unix.PidfdSendSignal(fd, syscall.SIGKILL, nil, 0)
-			_ = unix.Close(fd)
-		})
-		// The pinned process is the relay's child, not a reused PID.
-		if ppid := parentOf(t, child); ppid != relay {
-			t.Fatalf("process %d's parent is %d, not the %s relay %d", child, ppid, ch, relay)
 		}
 		pgid, err := syscall.Getpgid(relay)
 		if err != nil {
 			t.Fatal(err)
 		}
-		seen[ch] = groupSeen{relay: relay, pgid: pgid}
-		children[ch] = fd
+		// The relay's PID was read after its start, which set the attributes.
+		cmdMu.Lock()
+		a := cmds[ch].SysProcAttr
+		cmdMu.Unlock()
+		seen[ch] = groupSeen{relay: relay, pgid: pgid, setpgid: a.Setpgid, pdeathsig: a.Pdeathsig, pidfd: a.PidFD != nil}
+		children[ch] = c
 	}
 	own.Drop(tg.Tag)
-	for ch, fd := range children {
+	for ch, c := range children {
 		if alive(seen[ch].relay) {
 			t.Errorf("the %s relay %d outlived Drop", ch, seen[ch].relay)
 		}
-		if err := unix.PidfdSendSignal(fd, syscall.SIGWINCH, nil, 0); err != nil {
+		if err := c.signal(syscall.SIGWINCH); err != nil {
 			t.Fatalf("WINCH to the %s relay's child: %v", ch, err)
 		}
-		waitPidfdExit(t, fd, 30*time.Second, "the "+string(ch)+" relay's child")
+		c.waitExit(t, 30*time.Second, "the "+string(ch)+" relay's child")
 		b, err := os.ReadFile(filepath.Join(dir, string(ch)+".log"))
 		if err != nil {
 			t.Fatal(err)
@@ -208,22 +226,6 @@ func groupProbe(t *testing.T, o hostdial.OwnerOptions) map[agentapi.RelayChannel
 		seen[ch] = s
 	}
 	return seen
-}
-
-// parentOf reads a process's parent from /proc/<pid>/stat.
-func parentOf(t *testing.T, pid int) int {
-	t.Helper()
-	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(b)
-	f := strings.Fields(s[strings.LastIndexByte(s, ')')+1:])
-	ppid, err := strconv.Atoi(f[1])
-	if err != nil {
-		t.Fatal(err)
-	}
-	return ppid
 }
 
 // waitPidfdExit waits until the pidfd's process has exited.
@@ -246,11 +248,14 @@ func waitPidfdExit(t *testing.T, fd int, d time.Duration, what string) {
 }
 
 // Pin: alpha's relay process (no option set) leads a process group of its
-// own, and its stop signals that group, so a child its ssh forked gets the
-// TERM too (PR #301). The positive control is
-// TestAPidfdRelayLeadsNoGroupAndItsStopReachesOnlyIt.
+// own, with a KILL when this process dies (Pdeathsig), and its stop signals
+// that group, so a child its ssh forked gets the TERM too (PR #301). The
+// positive control is TestAPidfdRelayLeadsNoGroupAndItsStopReachesOnlyIt.
 func TestAlphasRelayLeadsItsOwnGroupAndItsStopSignalsIt(t *testing.T) {
 	for ch, s := range groupProbe(t, hostdial.OwnerOptions{}) {
+		if !s.setpgid || s.pdeathsig != syscall.SIGKILL || s.pidfd {
+			t.Errorf("alpha's %s relay started with Setpgid %v, Pdeathsig %v and a clone pidfd %v; want a group of its own, SIGKILL and none", ch, s.setpgid, s.pdeathsig, s.pidfd)
+		}
 		if s.pgid != s.relay {
 			t.Errorf("alpha's %s relay %d is in process group %d, want a group of its own", ch, s.relay, s.pgid)
 		}
@@ -261,10 +266,14 @@ func TestAlphasRelayLeadsItsOwnGroupAndItsStopSignalsIt(t *testing.T) {
 }
 
 // The relay keeper's relay process (OwnerOptions.Pidfd) leads no process
-// group of its own, and its stop, through its pidfd, reaches it alone: its
-// child never gets a TERM (HBEP-6, The relay keeper, Signals).
+// group of its own, starts with a pidfd from clone and a KILL when this
+// process dies, and its stop, through its pidfd, reaches it alone: its child
+// never gets a TERM (HBEP-6, The relay keeper, Signals).
 func TestAPidfdRelayLeadsNoGroupAndItsStopReachesOnlyIt(t *testing.T) {
 	for ch, s := range groupProbe(t, hostdial.OwnerOptions{Pidfd: true}) {
+		if s.setpgid || s.pdeathsig != syscall.SIGKILL || !s.pidfd {
+			t.Errorf("the keeper's %s relay started with Setpgid %v, Pdeathsig %v and a clone pidfd %v; want no group, SIGKILL and a pidfd", ch, s.setpgid, s.pdeathsig, s.pidfd)
+		}
 		if s.pgid == s.relay || s.pgid != syscall.Getpgrp() {
 			t.Errorf("the keeper's %s relay %d is in process group %d, want the test's %d", ch, s.relay, s.pgid, syscall.Getpgrp())
 		}
@@ -319,8 +328,10 @@ func (e *toldEnds) lists() (failed, finals []string) {
 
 // endsProbe runs three Allocations whose relays end failed, superseded and
 // with the job's end, and returns what OnFailed (and, with onFinal, OnFinal)
-// were told once all six relays ended for good, with each relay's final
-// cause as the Owner shows it.
+// were told once all six relays ended for good and their hooks returned,
+// with each relay's final cause as the Owner shows it. A relay shows Final
+// before its hooks run, so the probe then Drops each Allocation: Drop returns
+// once its relays' loops have, and the hooks run inside the loop.
 func endsProbe(t *testing.T, onFinal bool) (failed, finals []string, causes map[string]string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -350,6 +361,9 @@ func endsProbe(t *testing.T, onFinal bool) (failed, finals []string, causes map[
 		}
 		return true
 	})
+	for _, tg := range tgs {
+		own.Drop(tg.Tag)
+	}
 	failed, finals = told.lists()
 	return failed, finals, causes
 }
@@ -552,7 +566,11 @@ func TestOnStartIsToldOfEveryStart(t *testing.T) {
 		return relayOf(own, j.tag, control).Sessions == 1 && relayOf(own, j.tag, serving).Sessions == 1 &&
 			w.srunsOn(j.id, control) == 1 && w.srunsOn(j.id, serving) == 1
 	})
-	if err := syscall.Kill(up[serving].PID, syscall.SIGKILL); err != nil {
+	ssh, err := pin(t, up[serving].PID)
+	if err != nil {
+		t.Fatalf("pin the serving relay's ssh: %v", err)
+	}
+	if err := ssh.signal(syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, time.Minute, "the serving relay started again", func() bool {
@@ -595,6 +613,7 @@ func TestOnFinalIsToldOfASupersededEndOverTheRealPath(t *testing.T) {
 		waitFor(t, time.Minute, "the old copy's "+string(ch)+" relay superseded", func() bool { return relayOf(old, j.tag, ch).Final })
 	}
 	roundTrip(t, j, serving, "serving", payload(1000))
+	old.Drop(j.tag) // once its relays' loops, and so their hooks, have returned
 	failed, finals := told.lists()
 	want := []string{
 		j.tag + " control superseded: superseded (exit 5): the agent keeps a newer relay",
@@ -602,5 +621,77 @@ func TestOnFinalIsToldOfASupersededEndOverTheRealPath(t *testing.T) {
 	}
 	if !slices.Equal(finals, want) || len(failed) != 0 {
 		t.Errorf("OnFinal %q and OnFailed %q, want OnFinal %q and no OnFailed", finals, failed, want)
+	}
+}
+
+// The pidfd stop's grace, then its KILL: a keeper relay's ssh that is wedged
+// (stopped, through its verified pin, so neither its pipes' closing nor a
+// TERM ends it) is ended by the KILL the stop sends through its pidfd after
+// StopGrace, and Drop returns. Without that KILL, Drop and Stop would never
+// return. This is TestHostDialedDropStopsAFrozenRelayByPID with Pidfd set
+// (#349's review round).
+func TestAPidfdOwnerStopsAFrozenRelayWithAKILLAfterItsGrace(t *testing.T) {
+	w := newWorld(t)
+	j := w.submit("hb-relay-pfz-0123456789ab", 30*time.Second)
+	own, _, _ := w.owner(hostdial.OwnerOptions{Pidfd: true, StopGrace: time.Second})
+	own.Want(w.target(j))
+	up := waitUp(t, own, j.tag)
+	roundTrip(t, j, serving, "serving", payload(1000))
+	ssh, err := pin(t, up[serving].PID)
+	if err != nil {
+		t.Fatalf("pin the serving relay's ssh: %v", err)
+	}
+	if err := ssh.signal(syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 30*time.Second, "the serving relay's ssh stopped", func() bool { return procState(up[serving].PID) == "T" })
+	dropped := make(chan struct{})
+	go func() { own.Drop(j.tag); close(dropped) }()
+	select {
+	case <-dropped:
+	case <-time.After(30 * time.Second):
+		_ = ssh.signal(syscall.SIGKILL)
+		t.Fatal("Drop did not return within 30 s with the keeper relay's ssh stopped: the stop sent no KILL after its grace")
+	}
+	if !ssh.exited() {
+		t.Errorf("the serving relay's ssh %d is alive after Drop", up[serving].PID)
+	}
+	if alive(up[control].PID) {
+		t.Errorf("the control relay's ssh %d is alive after Drop", up[control].PID)
+	}
+	if s, ok := w.plat.Job(atoi(t, j.id)); !ok || s.State != "RUNNING" {
+		t.Errorf("job %s is %v: Drop must stop the relays, not the job", j.id, s.State)
+	}
+}
+
+// A seeded channel reads as final from the Want on, while its Allocation
+// still waits for a pair of slots on its login node; the other channel waits
+// with no process. Once the slots free, the other channel starts, and the
+// seeded one never does.
+func TestASeededChannelReadsFinalWhileItsPairWaitsForSlots(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, "relay.sh", "read x\n") // holds until its stop
+	jobs := shellJobs{}
+	held := shellTarget(1, "hb-relay-hld-0123456789ab", script, dir, "", jobs)
+	seeded := shellTarget(2, "hb-relay-sed-0123456789ab", script, dir, "", jobs)
+	seeded.Login = held.Login
+	const cause = "failed: srun refused the step: step limit reached for this job"
+	seeded.Final = map[agentapi.RelayChannel]string{serving: cause}
+	own := shellOwner(t, hostdial.OwnerOptions{Slots: hostdial.NewSlots(2)})
+	own.Want(held)
+	waitFor(t, time.Minute, "the first Allocation's relays up", func() bool {
+		return relayOf(own, held.Tag, control).PID != 0 && relayOf(own, held.Tag, serving).PID != 0
+	})
+	own.Want(seeded)
+	if r := relayOf(own, seeded.Tag, serving); !r.Final || r.FinalCause != cause || !r.Waiting || r.Starts != 0 {
+		t.Errorf("the seeded serving relay while its pair waits for slots: %+v, want final with the seeded cause, waiting, never started", r)
+	}
+	if r := relayOf(own, seeded.Tag, control); r.Final || !r.Waiting || r.PID != 0 {
+		t.Errorf("the other channel while its pair waits for slots: %+v, want waiting with no process", r)
+	}
+	own.Drop(held.Tag)
+	waitFor(t, time.Minute, "the other channel started once the slots freed", func() bool { return relayOf(own, seeded.Tag, control).PID != 0 })
+	if r := relayOf(own, seeded.Tag, serving); !r.Final || r.Starts != 0 || r.PID != 0 {
+		t.Errorf("the seeded serving relay after the slots freed: %+v, want final, never started", r)
 	}
 }
