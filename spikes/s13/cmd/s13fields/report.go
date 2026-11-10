@@ -22,14 +22,15 @@ const (
 
 // Run is one pass of every case through one path.
 type Run struct {
-	Label      string   `json:"label"`
-	Router     string   `json:"router,omitempty"`
-	Policy     string   `json:"policy,omitempty"`
-	Started    string   `json:"started"`
-	Listeners  []string `json:"listeners,omitempty"`
-	RouterExit string   `json:"router_exit,omitempty"`
-	Probes     []string `json:"worker_probes"`
-	Results    []Result `json:"results"`
+	Label      string           `json:"label"`
+	Router     string           `json:"router,omitempty"`
+	Policy     string           `json:"policy,omitempty"`
+	Started    string           `json:"started"`
+	Listeners  []string         `json:"listeners,omitempty"`
+	RouterExit string           `json:"router_exit,omitempty"`
+	Probes     []string         `json:"worker_probes"`
+	Transport  []TransportCheck `json:"transport"`
+	Results    []Result         `json:"results"`
 }
 
 // Result is one variant: what was sent, what arrived, and each covered field's verdict.
@@ -176,8 +177,7 @@ func summaryLine(run *Run) string {
 }
 
 // writeResults writes results.jsonl, the run's header on its first line and then one line per
-// variant with the bytes sent and received (received is left out when it is the bytes sent), and
-// fields.md, the tables.
+// variant with the bytes sent and received, and fields.md, the tables.
 func writeResults(dir string, run *Run) error {
 	head := *run
 	head.Results = nil
@@ -188,9 +188,6 @@ func writeResults(dir string, run *Run) error {
 	}
 	buf = append(append(buf, line...), '\n')
 	for _, r := range run.Results {
-		if r.Identical {
-			r.Received = "" // the same bytes as Sent
-		}
 		line, err := json.Marshal(r)
 		if err != nil {
 			return err
@@ -308,6 +305,11 @@ func markdown(run *Run) string {
 		}
 	}
 
+	b.WriteString("\n## Transport\n\nChunked request bodies (no Content-Length), and streams the worker holds after their first text chunk until the client has read it (at most 10 s).\n\n| check | key | status | arrivals | as its bytes | worker Content-Length | worker Content-Type | streamed through | held | hold timed out | error |\n|---|---|---|---|---|---|---|---|---|---|---|\n")
+	for _, t := range run.Transport {
+		fmt.Fprintf(&b, "| %s | %s | %d | %d | %v | %d | %s | %v | %v | %v | %s |\n", t.Name, t.Key, t.Status, t.Arrivals, t.Identical,
+			t.WorkerContentLength, cell(t.WorkerContentType, 40), t.StreamedThrough, t.Held, t.TimedOut, cell(t.Error, 80))
+	}
 	b.WriteString("\n## Not delivered\n\n| variant | status | the router's reply |\n|---|---|---|\n")
 	for _, r := range run.Results {
 		if r.Arrivals == 0 {

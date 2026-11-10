@@ -2,7 +2,7 @@
 
 - Router: `venv-0.1.16/bin/vllm-router`, `--policy consistent_hash`, two workers.
 - Router listeners: 127.0.0.1:29903, 127.0.0.1:29902. Stop: exited after TERM: <nil>.
-- Started 2026-11-10T12:49:37Z.
+- Started 2026-11-10T13:04:35Z.
 - vllm-router 0.1.16, consistent_hash: 440 variants; 0 arrived as their exact bytes; 0 differ only in member order and insignificant whitespace; 0 differ only in re-encoded values or keys; 430 lost or changed a value; 10 did not reach a worker.
 - Requests the router made to the workers besides the cases: GET /health (case none) x4; POST /v1/chat/completions (case warm-up) x1.
 
@@ -22,7 +22,7 @@ One row per field a case covers; `plain` and `stream` are the verdicts without a
 | completions/prompt-token-ids | prompt | `prompt` | `[1,2,3]` | `[1,2,3]` | kept | kept |
 | completions/prompt-token-id-lists | prompt | `prompt` | `[[1,2],[3,4]]` | `[[1,2],[3,4]]` | kept | kept |
 | chat/frequency_penalty | frequency_penalty | `frequency_penalty` | `0.1` | `0.1` | kept | kept |
-| chat/logit_bias | logit_bias | `logit_bias` | `{"50256":-100,"198":2.5}` | `{"50256":-100.0,"198":2.5}` | retyped | retyped |
+| chat/logit_bias | logit_bias | `logit_bias` | `{"50256":-100,"198":2.5}` | `{"198":2.5,"50256":-100.0}` | retyped | retyped |
 | chat/max_tokens | max_tokens | `max_tokens` | `32` | `32` | kept | kept |
 | chat/n | n | `n` | `2` | `2` | kept | kept |
 | chat/presence_penalty | presence_penalty | `presence_penalty` | `-0.3` | `-0.3` | kept | kept |
@@ -129,7 +129,7 @@ One row per field a case covers; `plain` and `stream` are the verdicts without a
 | chat/parallel_tool_calls | parallel_tool_calls | `parallel_tool_calls` | `false` | `false` | kept | kept |
 | chat/documents | documents | `documents` | `[{"title":"Doc","text":"Body."}]` | `[{"title":"Doc","text":"Body."}]` | kept | kept |
 | chat/chat_template | chat_template | `chat_template` | `"{% for m in messages %}{{ m.content }}{% endfor %}"` | `"{% for m in messages %}{{ m.content }}{% endfor %}"` | kept | kept |
-| chat/chat_template_kwargs | chat_template_kwargs | `chat_template_kwargs` | `{"enable_thinking":false,"depth":2}` | `{"depth":2,"enable_thinking":false}` | kept | kept |
+| chat/chat_template_kwargs | chat_template_kwargs | `chat_template_kwargs` | `{"enable_thinking":false,"depth":2}` | `{"enable_thinking":false,"depth":2}` | kept | kept |
 | chat/media_io_kwargs | media_io_kwargs | `media_io_kwargs` | `{"video":{"num_frames":8}}` | `{"video":{"num_frames":8}}` | kept | kept |
 | chat/mm_processor_kwargs | mm_processor_kwargs | `mm_processor_kwargs` | `{"fps":2}` | `{"fps":2}` | kept | kept |
 | chat/return_prompt_text | return_prompt_text | `return_prompt_text` | `true` | `true` | kept | kept |
@@ -227,7 +227,7 @@ One row per field a case covers; `plain` and `stream` are the verdicts without a
 | chat/msg/user-task | messages[](custom).task | `messages[0].task` | `"s13-task"` | — | dropped | dropped |
 | chat/msg/user-content-array-for-custom | messages[](custom).content | `messages[0].content` | `[{"type":"text","text":"A note."}]` | `[{"type":"text","text":"A note."}]` | kept | kept |
 | completions/frequency_penalty | frequency_penalty | `frequency_penalty` | `0.1` | `0.1` | kept | kept |
-| completions/logit_bias | logit_bias | `logit_bias` | `{"50256":-100,"198":2.5}` | `{"198":2.5,"50256":-100.0}` | retyped | retyped |
+| completions/logit_bias | logit_bias | `logit_bias` | `{"50256":-100,"198":2.5}` | `{"50256":-100.0,"198":2.5}` | retyped | retyped |
 | completions/max_tokens | max_tokens | `max_tokens` | `32` | `32` | kept | kept |
 | completions/n | n | `n` | `2` | `2` | kept | kept |
 | completions/presence_penalty | presence_penalty | `presence_penalty` | `-0.3` | `-0.3` | kept | kept |
@@ -349,7 +349,7 @@ One row per field a case covers; `plain` and `stream` are the verdicts without a
 | chat/enc/top_p-exponent | ext:top_p in exponent form | `top_p` | `9e-1` | `0.9` | kept, re-encoded | kept, re-encoded |
 | chat/enc/temperature-20-digits | ext:a float beyond float64 precision | `temperature` | `0.12345678901234567890` | `0.12345679` | changed | changed |
 | chat/enc/repetition_penalty-1.0 | ext:a float with a zero fraction | `repetition_penalty` | `1.0` | `1.0` | kept | kept |
-| chat/enc/kwargs-numbers | ext:numbers inside a dict[str, Any] | `chat_template_kwargs` | `{"big":123456789012345678901234567890,"u64":18446744073709551615,"i":1…` | `{"f":1.0,"big":1.2345678901234568e+29,"i":1,"u64":18446744073709551615…` | changed | changed |
+| chat/enc/kwargs-numbers | ext:numbers inside a dict[str, Any] | `chat_template_kwargs` | `{"big":123456789012345678901234567890,"u64":18446744073709551615,"i":1…` | `{"u64":18446744073709551615,"neg":-0.0,"i":1,"big":1.2345678901234568e…` | changed | changed |
 | chat/enc/explicit-nulls | ext:max_tokens: null | `max_tokens` | `null` | — | dropped | dropped |
 | chat/enc/explicit-nulls | ext:temperature: null | `temperature` | `null` | — | dropped | dropped |
 | chat/enc/explicit-nulls | ext:stop: null | `stop` | `null` | — | dropped | dropped |
@@ -404,6 +404,19 @@ Diffs outside every covered field and not injected.
 | chat/ext/tool_calls-function-x_ext#plain | `messages[1].content` | dropped | `null` | — |
 | chat/ext/tool_calls-function-x_ext#stream | `messages[1].content` | dropped | `null` | — |
 | chat/real/agent-turn#stream | `messages[2].content` | dropped | `null` | — |
+
+## Transport
+
+Chunked request bodies (no Content-Length), and streams the worker holds after their first text chunk until the client has read it (at most 10 s).
+
+| check | key | status | arrivals | as its bytes | worker Content-Length | worker Content-Type | streamed through | held | hold timed out | error |
+|---|---|---|---|---|---|---|---|---|---|---|
+| chunked request body | transport/chunked/chat/minimal#plain | 200 | 1 | false | -1 | `application/json` | false | false | false | — |
+| chunked request body | transport/chunked/completions/minimal#plain | 200 | 1 | false | -1 | `application/json` | false | false | false | — |
+| chunked request body | transport/chunked/chat/tools-function-strict#stream | 200 | 1 | false | -1 | `application/json` | false | false | false | — |
+| chunked request body | transport/chunked/chat/real/agent-turn#stream | 200 | 1 | false | -1 | `application/json` | false | false | false | — |
+| stream held after its first chunk | transport/held-stream/chat | 200 | 1 | false | 0 | — | true | true | false | — |
+| stream held after its first chunk | transport/held-stream/completions | 200 | 1 | false | 0 | — | true | true | false | — |
 
 ## Not delivered
 

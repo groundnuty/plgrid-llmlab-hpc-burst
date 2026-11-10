@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"time"
 )
 
 // CaseHeader names the request header that carries a case's key. The router copies request
@@ -41,6 +42,7 @@ type Arrival struct {
 
 // Recorder holds every arrival, generation requests and the router's probes alike.
 type Recorder struct {
+	gates    map[string]*Gate
 	mu       sync.Mutex
 	arrivals []Arrival
 }
@@ -64,7 +66,7 @@ func (r *Recorder) Handler(name string) http.Handler {
 			Case: req.Header.Get(CaseHeader), Header: req.Header.Clone(), ContentLength: req.ContentLength, Body: stored,
 		})
 		r.mu.Unlock()
-		respond(w, req, raw)
+		respond(w, req, raw, r.gate(req.Header.Get(CaseHeader)))
 	})
 }
 
@@ -95,7 +97,7 @@ func writeJSON(w http.ResponseWriter, v string) {
 
 // respond answers like vLLM v0.32.0 for the paths a router uses. body is the connection's bytes;
 // the stream flag is read from them here only to choose the response's shape.
-func respond(w http.ResponseWriter, req *http.Request, body []byte) {
+func respond(w http.ResponseWriter, req *http.Request, body []byte, g *Gate) {
 	switch {
 	case req.Method == http.MethodGet && (req.URL.Path == "/health" || req.URL.Path == "/ping"):
 		w.WriteHeader(http.StatusOK)
@@ -123,7 +125,7 @@ func respond(w http.ResponseWriter, req *http.Request, body []byte) {
 		chat := req.URL.Path == "/v1/chat/completions"
 		if shape.Stream != nil && *shape.Stream {
 			usage := shape.StreamOptions != nil && shape.StreamOptions.IncludeUsage != nil && *shape.StreamOptions.IncludeUsage
-			stream(w, chat, usage)
+			stream(w, chat, usage, g)
 			return
 		}
 		if chat {
@@ -150,7 +152,7 @@ vllm:kv_cache_usage_perc{engine="0",model_name="` + Model + `"} 0.0
 vllm:cache_config_info{block_size="16",engine="0",num_gpu_blocks="4096"} 1.0
 `
 
-func stream(w http.ResponseWriter, chat, usage bool) {
+func stream(w http.ResponseWriter, chat, usage bool, g *Gate) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	var chunks []string
@@ -172,10 +174,71 @@ func stream(w http.ResponseWriter, chat, usage bool) {
 		}
 	}
 	fl, _ := w.(http.Flusher)
-	for _, c := range append(chunks, "[DONE]") {
+	// The first chunk that carries text: chat's content chunk after its role chunk, completions' only one.
+	held := 1
+	if !chat {
+		held = 0
+	}
+	for i, c := range append(chunks, "[DONE]") {
 		_, _ = io.WriteString(w, "data: "+c+"\n\n")
 		if fl != nil {
 			fl.Flush()
 		}
+		if g != nil && i == held {
+			g.wait()
+		}
 	}
+}
+
+// Gate holds a stream after its first text chunk until the client says it has read that chunk, or
+// its timeout passes. A router that passes a stream through lets the client read the chunk while the
+// rest is held back; one that buffers the whole stream makes the hold time out.
+type Gate struct {
+	release  chan struct{}
+	timeout  time.Duration
+	once     sync.Once
+	mu       sync.Mutex
+	held     bool
+	timedOut bool
+}
+
+func (g *Gate) wait() {
+	g.mu.Lock()
+	g.held = true
+	g.mu.Unlock()
+	select {
+	case <-g.release:
+	case <-time.After(g.timeout):
+		g.mu.Lock()
+		g.timedOut = true
+		g.mu.Unlock()
+	}
+}
+
+// Release lets the held stream go on; the client calls it when it has read the first text chunk.
+func (g *Gate) Release() { g.once.Do(func() { close(g.release) }) }
+
+// Outcome reports whether the stream was held, and whether the hold ran out before a release.
+func (g *Gate) Outcome() (held, timedOut bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.held, g.timedOut
+}
+
+// Hold registers a gate for the requests that carry key, held for at most timeout.
+func (r *Recorder) Hold(key string, timeout time.Duration) *Gate {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.gates == nil {
+		r.gates = map[string]*Gate{}
+	}
+	g := &Gate{release: make(chan struct{}), timeout: timeout}
+	r.gates[key] = g
+	return g
+}
+
+func (r *Recorder) gate(key string) *Gate {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.gates[key]
 }

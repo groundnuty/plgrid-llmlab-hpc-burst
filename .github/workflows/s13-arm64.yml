@@ -5,8 +5,9 @@
 # It fetches Envoy 1.40.2's linux-aarch_64 release binary and checks its sha256, the value in the
 # release's signed checksums.txt.asc. It then builds the harness from the PR's head and runs the
 # control (every case straight to the recorder) and the Envoy ring_hash arm, the same 440 variants as
-# on x86_64. The job fails unless both report every variant arriving as its exact bytes. The results go
-# up as an artifact. No secrets; the harness binds 127.0.0.1:29900-29903 only.
+# on x86_64. The job fails unless both report every variant arriving as its exact bytes, and both pass
+# the transport checks (four chunked bodies as their bytes, two held streams passed through). The
+# results go up as an artifact. No secrets; the harness binds 127.0.0.1:29900-29903 only.
 name: s13-arm64
 
 on:
@@ -61,7 +62,12 @@ jobs:
           sed -n 1,8p "$RUNNER_TEMP/results/envoy-1.40.2-aarch64-ring_hash/fields.md"
           grep -q '^direct to the recorder (control): 440 variants; 440 arrived as their exact bytes;' "$RUNNER_TEMP/control.txt"
           grep -q '^Envoy 1.40.2 linux-aarch_64, ring_hash on x-session-id: 440 variants; 440 arrived as their exact bytes;' "$RUNNER_TEMP/envoy.txt"
-          echo "aarch64: control and Envoy arm, 440 of 440 as their exact bytes"
+          for run in direct-control envoy-1.40.2-aarch64-ring_hash; do
+            head -1 "$RUNNER_TEMP/results/$run/results.jsonl" | jq -e '
+              ([.transport[] | select(.name == "chunked request body") | select(.identical_bytes == true and .worker_content_length == -1)] | length == 4) and
+              ([.transport[] | select(.name == "stream held after its first chunk") | select(.streamed_through == true and .held == true and (.timed_out | not))] | length == 2)'
+          done
+          echo "aarch64: control and Envoy arm, 440 of 440 as their exact bytes; transport checks pass"
 
       - name: Keep the results
         if: always()

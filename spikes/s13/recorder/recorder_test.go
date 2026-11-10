@@ -1,12 +1,14 @@
 package recorder
 
 import (
+	"bufio"
 	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 var bs = string(rune(92)) // one backslash; see rawjson's tests
@@ -96,5 +98,69 @@ func TestServesTheGaugesARouterScrapes(t *testing.T) {
 		if !strings.Contains(string(b), name) {
 			t.Errorf("/metrics lacks %s", name)
 		}
+	}
+}
+
+// readGated streams a chat request through url, releasing the gate when the first text chunk arrives.
+func readGated(t *testing.T, url string, g *Gate) (sawBeforeRelease bool, body string) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, url+"/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[],"stream":true}`))
+	req.Header.Set(CaseHeader, "gated")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var b strings.Builder
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		line := sc.Text()
+		b.WriteString(line + "\n")
+		if strings.Contains(line, `"content":"ok"`) && !sawBeforeRelease {
+			// Through a pass-through hop the chunk arrives while the hold is still on (or before it
+			// starts); through a buffering one only after the hold has run out.
+			_, timedOut := g.Outcome()
+			sawBeforeRelease = !timedOut
+			g.Release()
+		}
+	}
+	return sawBeforeRelease, b.String()
+}
+
+// The gate tells a pass-through from a buffering hop by state: whether the client read the first text
+// chunk while the recorder still held the rest.
+func TestGateTellsStreamingFromBuffering(t *testing.T) {
+	r := &Recorder{}
+	srv := httptest.NewServer(r.Handler("a"))
+	defer srv.Close()
+
+	g := r.Hold("gated", 10*time.Second)
+	saw, body := readGated(t, srv.URL, g)
+	if held, timedOut := g.Outcome(); !saw || !held || timedOut || !strings.Contains(body, "[DONE]") {
+		t.Fatalf("direct: saw %v, held %v, timed out %v, body %q", saw, held, timedOut, body)
+	}
+
+	// A hop that reads the whole upstream response before it answers.
+	buffering := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		up, err := http.NewRequest(req.Method, srv.URL+req.URL.Path, req.Body)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		up.Header = req.Header.Clone()
+		resp, err := http.DefaultClient.Do(up)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		all, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		_, _ = w.Write(all)
+	}))
+	defer buffering.Close()
+	g = r.Hold("gated", 200*time.Millisecond)
+	saw, body = readGated(t, buffering.URL, g)
+	if held, timedOut := g.Outcome(); saw || !held || !timedOut || !strings.Contains(body, "[DONE]") {
+		t.Fatalf("buffering: saw %v, held %v, timed out %v, body %q", saw, held, timedOut, body)
 	}
 }
