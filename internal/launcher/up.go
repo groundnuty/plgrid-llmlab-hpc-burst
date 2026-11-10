@@ -351,7 +351,8 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 			}
 		}
 		st.Controllers = &ControllerConfig{Binary: ctrlBin}
-		st.FrontRun, st.Frps, st.RelayKeeper = frontRun, frpsRun, o.RelayKeeper
+		st.FrontRun, st.Frps = frontRun, frpsRun
+		st.RelayKeeper = o.RelayKeeper
 		if frpsRun != nil {
 			// frps's web password and configuration, both mode 600 (HBEP-6), before the supervisor
 			// that starts frps; a password that exists is kept, so the controller's copy stays valid.

@@ -128,7 +128,8 @@ func checkSupervision(l layout, st *State, sup *procHandle, rep *StatusReport, b
 // a /proc read (the parent, the sockets) is confirmed against the handle before it is blamed on
 // the process, and a handle that is no longer the recorded process is reported as not running.
 func checkEntry(sup *procHandle, supPID int, e EntryRecord) (EntryHealth, []string) {
-	eh := EntryHealth{Name: e.Name, State: e.State, Restarts: e.Restarts, LastExit: e.LastExit, Health: e.Health, HealthSocket: e.HealthSocket}
+	eh := EntryHealth{Name: e.Name, State: e.State, Restarts: e.Restarts, LastExit: e.LastExit, Health: e.Health}
+	eh.HealthSocket = e.HealthSocket
 	var problems []string
 	add := func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) }
 	if e.Proc == nil {

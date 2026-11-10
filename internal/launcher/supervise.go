@@ -370,7 +370,8 @@ func Supervise(ctx context.Context, o SuperviseOptions) error {
 	}
 	rep := &reporter{l: l, log: o.Log, f: SupervisorFile{Schema: supervisorSchema, Supervisor: self}}
 	for _, sp := range specs {
-		rep.f.Entries = append(rep.f.Entries, EntryRecord{Name: sp.Name, Health: sp.Health, State: entryStarting, Ports: sp.Ports, HealthSocket: sp.HealthSocket})
+		rep.f.Entries = append(rep.f.Entries, EntryRecord{Name: sp.Name, Health: sp.Health, State: entryStarting, Ports: sp.Ports})
+		rep.f.Entries[len(rep.f.Entries)-1].HealthSocket = sp.HealthSocket
 	}
 	rep.mu.Lock()
 	rep.writeLocked()
@@ -429,7 +430,11 @@ func (r *runner) start() (*procHandle, *exec.Cmd, error) {
 		}()
 		cmd.ExtraFiles = files
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL, Setsid: r.spec.Setsid}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	if r.spec.Setsid {
+		// The relay keeper only (supervised.Setsid): a session of its own.
+		cmd.SysProcAttr.Setsid = true
+	}
 	h, err := startProc(r.spec.Name, cmd)
 	return h, cmd, err
 }

@@ -30,6 +30,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 
@@ -166,33 +167,16 @@ func runningAllocations(ctx context.Context, cfg *rest.Config) ([]string, error)
 	}
 	var running []string
 	for _, item := range list.Items {
-		phase, _, err := unstructuredString(item.Object, "status", "phase")
-		if err != nil {
+		// Read through the API type, whose fields the CRD is generated from: the phase is the
+		// observed one, status.atProvider.phase.
+		var a v1alpha1.Allocation
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(item.Object, &a); err != nil {
 			return nil, fmt.Errorf("Allocation %s/%s: %w", item.GetNamespace(), item.GetName(), err)
 		}
-		if phase == string(v1alpha1.AllocationRunning) {
+		if a.Status.AtProvider.Phase == v1alpha1.AllocationRunning {
 			running = append(running, item.GetNamespace()+"/"+item.GetName())
 		}
 	}
 	sort.Strings(running)
 	return running, nil
-}
-
-// unstructuredString reads a string field of an unstructured object; a missing one is "".
-func unstructuredString(obj map[string]any, fields ...string) (string, bool, error) {
-	cur := any(obj)
-	for i, f := range fields {
-		m, ok := cur.(map[string]any)
-		if !ok {
-			return "", false, fmt.Errorf("%v is not an object", fields[:i])
-		}
-		if cur, ok = m[f]; !ok {
-			return "", false, nil
-		}
-	}
-	s, ok := cur.(string)
-	if !ok {
-		return "", false, fmt.Errorf("%v is not a string", fields)
-	}
-	return s, true, nil
 }
