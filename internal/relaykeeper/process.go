@@ -54,6 +54,10 @@ type ProcessConfig struct {
 	ClaimLapse time.Duration
 	// SettleEvery is DefaultSettleEvery when zero.
 	SettleEvery time.Duration
+	// Now is the keeper's clock (Options.Now); nil means time.Now. A test of
+	// the keeper process sets it, so it can move the keeper's clock past a
+	// set's validity and wait on that, rather than on a window.
+	Now func() time.Time
 	// Logger, nil for none.
 	Logger *slog.Logger
 	// Ready, when set, is told once the socket serves, with E and the
@@ -74,7 +78,7 @@ func Run(ctx context.Context, c ProcessConfig) error {
 		c.SettleEvery = DefaultSettleEvery
 	}
 	var runner *OwnerRunner
-	k, err := Open(Options{State: StatePath(c.StateDir), ClaimLapse: c.ClaimLapse, Logger: c.Logger,
+	k, err := Open(Options{State: StatePath(c.StateDir), ClaimLapse: c.ClaimLapse, Logger: c.Logger, Now: c.Now,
 		Runner: func(epoch int64) (Runner, error) {
 			r, err := NewOwnerRunner(context.Background(), OwnerRunnerOptions{Epoch: epoch, Ports: c.Ports, Slots: hostdial.NewSlots(0),
 				SSHDir: SSHDir(c.StateDir), SSHBinary: c.SSHBinary, SSHEnv: c.SSHEnv,
