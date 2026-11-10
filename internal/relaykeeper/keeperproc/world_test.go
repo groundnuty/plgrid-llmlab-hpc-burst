@@ -372,15 +372,10 @@ func (w *world) set(p prov, epoch int64, complete bool, entries ...wire.Entry) w
 		ListedAt: time.Now().UTC(), ListingAgeMS: 0, ValidForMS: validFor, SSH: w.ssh(), Allocations: entries}
 }
 
-// aged is s resting on a listing 5 ms short of its validity: accepted, it
-// expires 5 ms after the keeper receives it. So a leader's last set before an
-// outage is expired well before any relay's next start, which hostdial makes
-// at least half its minimum backoff (here 100 ms) after a relay ends; the
-// expiry is then read from the keeper's refusal, never from a wait.
-func aged(s wire.DesiredSet) wire.DesiredSet {
-	s.ListingAgeMS = s.ValidForMS - 5
-	return s
-}
+// pastValidity is how far a test moves the keeper's clock to expire a fresh
+// set: past its validity by a second, and well under the claims' 5 min lapse
+// (relaykeeper.DefaultClaimLapse), so no claim lapses with it.
+const pastValidity = validFor*time.Millisecond + time.Second
 
 // expired is s resting on a listing as old as its validity: expired on
 // arrival, it moves the fence and changes nothing else.

@@ -189,15 +189,20 @@ func relayLog(msg, tag string, ch agentapi.RelayChannel) []string {
 	return []string{msg, "tag=" + tag, "channel=" + string(ch)}
 }
 
-// keeper is a relay keeper process, its state directory and its log.
+// keeper is a relay keeper process, its state directory and its log, and
+// the read end of its standard output, where it acknowledges the advances of
+// its clock.
 type keeper struct {
-	t     *testing.T
-	w     *world
-	dir   string
-	c     *child
-	log   *lineLog
-	epoch int64
-	sock  string
+	t        *testing.T
+	w        *world
+	dir      string
+	c        *child
+	log      *lineLog
+	epoch    int64
+	sock     string
+	out      *os.File
+	r        *bufio.Reader
+	advances int
 }
 
 // startKeeper starts a keeper on the state directory dir, a new one when dir
@@ -234,18 +239,24 @@ func (w *world) startKeeper(dir string) *keeper {
 	if err != nil {
 		t.Fatal(err)
 	}
-	k := &keeper{t: t, w: w, dir: dir, log: &lineLog{}}
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := &keeper{t: t, w: w, dir: dir, log: &lineLog{}, out: outR, r: bufio.NewReader(outR)}
 	// The keeper's log is shown when the test fails, and with
 	// HB_TEST_KEEPER_LOG=1 when it passes too.
 	t.Cleanup(func() {
+		_ = outR.Close()
 		if t.Failed() || os.Getenv("HB_TEST_KEEPER_LOG") == "1" {
 			t.Logf("the keeper's log:\n%s", tail(k.log.all(), 300))
 		}
 	})
 	cmd := exec.Command(exe, keeperRole, cfgPath)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = inR, k.log, k.log
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = inR, outW, k.log
 	k.c = startChild(t, "keeper", cmd, inW)
 	_ = inR.Close()
+	_ = outW.Close()
 	var r keeperReady
 	waitFor(t, time.Minute, "the keeper's socket", func() bool {
 		select {
@@ -275,6 +286,26 @@ func (k *keeper) stop() {
 	}
 	if code := k.c.cmd.ProcessState.ExitCode(); code != 0 {
 		k.t.Fatalf("the keeper exited %d at its stop, want 0", code)
+	}
+}
+
+// advance moves the keeper's clock d ahead, and returns once the keeper has
+// acknowledged it: from then on every expiry and lapse it computes reads the
+// moved clock.
+func (k *keeper) advance(d time.Duration) {
+	k.t.Helper()
+	k.advances++
+	_ = k.c.in.SetWriteDeadline(time.Now().Add(30 * time.Second))
+	if _, err := fmt.Fprintf(k.c.in, "advance %d %s\n", k.advances, d); err != nil {
+		k.t.Fatalf("advance the keeper's clock: %v", err)
+	}
+	_ = k.out.SetReadDeadline(time.Now().Add(time.Minute))
+	line, err := k.r.ReadString('\n')
+	if err != nil {
+		k.t.Fatalf("the keeper's acknowledgement of its clock's advance: %v", err)
+	}
+	if want := fmt.Sprintf("advanced %d ", k.advances); !strings.HasPrefix(line, want) {
+		k.t.Fatalf("the keeper answered %q to its clock's advance, want %q...", line, want)
 	}
 }
 

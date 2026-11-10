@@ -82,15 +82,11 @@ func TestANewLeadersIncompleteSetStopsNoRelay(t *testing.T) {
 // within the job's wait, and no srun line for the job reaches the login
 // node; the leader's set that has expired on arrival changes none of that.
 // A fresh set then starts both relays, at the restarted keeper's E, and a
-// stream crosses them. When that set expires (the leader's last set rests on
-// a listing that expires at once), the control relay's ssh, ended through
-// its verified pin, is refused its restart for the expiry, with no srun line,
-// while the stream runs on; a fresh set restarts it.
-//
-// The expiring set is always one the relays already run under: a relay's
-// first start after a new Want comes within a jitter of [0, 200 ms], which
-// can beat a 5 ms expiry, but a restart after a session's drop waits at
-// least 100 ms.
+// stream crosses them. The leader sends its last set, fresh, and no more; the
+// keeper's clock is moved past that set's validity (pastValidity), and only
+// once the keeper has acknowledged it is the control relay's ssh ended
+// through its verified pin. Its restart is refused for the expiry, with no
+// srun line, while the stream runs on; a fresh set restarts it.
 //
 // Mutant (keeper.go, jobs.authorized): the expiry's case, "case
 // !k.o.Now().Before(hs.expires):", dropped, so the control relay is
@@ -135,7 +131,8 @@ func TestAfterAKeeperRestartOnlyAFreshSetStartsRelays(t *testing.T) {
 	}
 	s2 := w.openStream(j, serving)
 	s2.mustEcho(64<<10, "under the fresh set")
-	mustReport(t, lead.set(aged(fresh)), "the leader's last set")
+	mustReport(t, lead.set(fresh), "the leader's last set")
+	k2.advance(pastValidity)
 	m := k2.log.mark()
 	runsC := w.srunsOn(j.id, control)
 	k2.pins(map[agentapi.RelayChannel]wire.RelayState{control: up[control]})[control].kill(t, "the control relay's ssh under the expired set")
@@ -160,8 +157,11 @@ func TestAfterAKeeperRestartOnlyAFreshSetStartsRelays(t *testing.T) {
 // During a leader outage an expired set restarts nothing. Two Allocations
 // run, a serving stream on each. The positive control first: under a fresh
 // set, the first's control relay's ssh, ended through its verified pin, is
-// restarted. Then the outage: the leader's last set expires at once (aged),
-// and the leader sends no more.
+// restarted. Then the outage: the leader sends its last set, fresh, and no
+// more, and the keeper's clock is moved past that set's validity
+// (pastValidity); every end below comes only once the keeper has
+// acknowledged the move. One Provider holds the login host throughout, and
+// the move is under the claims' lapse, so no claim is at stake.
 //   - The first's control relay's ssh ends again: its restart is refused for
 //     the expiry, and no srun line follows, while its serving stream runs on.
 //   - The second Allocation is deleted during the outage. The keeper cannot
@@ -198,7 +198,8 @@ func TestDuringALeaderOutageAnExpiredSetRestartsNothing(t *testing.T) {
 	})
 	w.roundTrip(j1, control, 16<<10)
 	// The outage.
-	mustReport(t, lead.set(aged(w.set(provA, 1, true, w.entry(j1, gen1), w.entry(j2, gen1)))), "the leader's last set")
+	mustReport(t, lead.set(w.set(provA, 1, true, w.entry(j1, gen1), w.entry(j2, gen1))), "the leader's last set")
+	k.advance(pastValidity)
 	m := k.log.mark()
 	runs1 := w.srunsOn(j1.id, control)
 	k.pins(map[agentapi.RelayChannel]wire.RelayState{control: again})[control].kill(t, "the first control relay's ssh during the outage")

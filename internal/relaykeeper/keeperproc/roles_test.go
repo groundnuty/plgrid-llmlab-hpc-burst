@@ -18,12 +18,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -171,6 +173,14 @@ type keeperReady struct {
 // launcher's down stops it in effect, when its standard input ends: the test
 // closes it, or the test process is gone. So no test needs a signal to stop a
 // keeper, and none outlives the test process.
+//
+// Its clock (ProcessConfig.Now) is time.Now plus an offset, which starts at
+// zero; time.Now().Add keeps the monotonic reading the keeper's expiries are
+// computed on. Each line "advance <n> <duration>" on its standard input adds
+// the duration to the offset, and only then is acknowledged by the line
+// "advanced <n> <offset>" on its standard output. So a test moves the
+// keeper's clock past a set's validity and waits on the acknowledgement, not
+// on a window.
 func keeperMain(args []string) int {
 	if len(args) != 1 {
 		return 2
@@ -188,12 +198,33 @@ func keeperMain(args []string) int {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	var offset atomic.Int64 // nanoseconds
 	go func() {
-		_, _ = io.Copy(io.Discard, os.Stdin)
-		cancel()
+		defer cancel()
+		in := bufio.NewScanner(os.Stdin)
+		for in.Scan() {
+			var n int64
+			var d time.Duration
+			f := strings.Fields(in.Text())
+			if len(f) != 3 || f[0] != "advance" {
+				fmt.Fprintf(os.Stdout, "error: %q is not a command\n", in.Text())
+				continue
+			}
+			var err error
+			if n, err = strconv.ParseInt(f[1], 10, 64); err == nil {
+				d, err = time.ParseDuration(f[2])
+			}
+			if err != nil || d < 0 {
+				fmt.Fprintf(os.Stdout, "error: %q: %v\n", in.Text(), err)
+				continue
+			}
+			total := time.Duration(offset.Add(int64(d)))
+			fmt.Fprintf(os.Stdout, "advanced %d %s\n", n, total)
+		}
 	}()
 	var readyErr error
 	err = relaykeeper.Run(ctx, relaykeeper.ProcessConfig{
+		Now:        func() time.Time { return time.Now().Add(time.Duration(offset.Load())) },
 		StateDir:   c.StateDir,
 		Ports:      map[agentapi.RelayChannel]int{agentapi.RelayControl: c.Control, agentapi.RelayServing: c.Serving},
 		MinBackoff: time.Duration(c.MinBackoffMS) * time.Millisecond, MaxBackoff: time.Duration(c.MaxBackoffMS) * time.Millisecond,
