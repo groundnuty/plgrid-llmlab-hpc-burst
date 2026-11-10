@@ -32,12 +32,16 @@
 # the toolchain from GitHub's release assets in every job, checks no digest of it, and caches no
 # toolchain between runs. Every job runs the same five steps in its place. hack/fetch-go.sh reads go.mod's
 # version, checks the tarball against hack/go-pins.txt (the sha256 go.dev lists), extracts it anew into
-# $RUNNER_TEMP/go-toolchain every run, and checks go/bin/go against its own pin; the workflow puts that
-# directory first on PATH, and the last step shows that the go on PATH is the pinned one. What the cache
-# holds is the tarball only, never the tree, under one exact key (the Go version, the OS and
-# architecture, and a hash of the script and its pins; no restore-keys). The script checks the tarball on
-# every run, restored or not: one that does not match is deleted and downloaded again from go.dev, and a
-# download that does not match fails the job. The Go save step runs only on a push and on
+# $RUNNER_TEMP/go-toolchain every run, and checks go/bin/go against its own pin. The workflow puts that
+# directory first on PATH and exports GOROOT as that tree. The last step (id gocheck) shows that the go
+# on PATH is the pinned one and that `go env GOROOT` is that tree. A later step that runs even when an
+# earlier one failed (!cancelled()) must also require steps.gocheck.outcome == 'success', so that
+# nothing runs on a Go that was not verified.
+#
+# What the cache holds is the tarball only, never the tree, under one exact key (the Go version, the OS
+# and architecture, and a hash of the script and its pins; no restore-keys). The script checks the
+# tarball on every run, restored or not: one that does not match is deleted and downloaded again from
+# go.dev, and a download that does not match fails the job. The Go save step runs only on a push and on
 # workflow_dispatch, so a pull request never writes a Go entry of its own.
 #
 # The workflow reads no secret and pushes nothing. Every action is pinned by commit SHA.
@@ -108,6 +112,7 @@ jobs:
         run: |
           bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
           echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
           echo "::add-matcher::$GITHUB_WORKSPACE/.github/go-problem-matcher.json"
 
       - name: Save the Go archive to the cache
@@ -118,6 +123,7 @@ jobs:
           key: ${{ steps.goarchive.outputs.cache-primary-key }}
 
       - name: Check the Go on PATH is the pinned toolchain
+        id: gocheck
         run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
 
       - name: Go version
@@ -221,23 +227,27 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
+      # The steps below run even when an earlier one failed (!cancelled()), but never on a Go that
+      # was not verified: without steps.gocheck.outcome a failed install or check would leave PATH
+      # without the pinned Go, and hack/go-test.sh would run the runner image's own, unchecked one.
+      #
       # One test of internal/lifecycle runs on its own, under its own timeout, so that the package
       # stays clear of go test's 10-minute one, which keeps catching a real hang (issue #282). The step
       # fails unless the test really ran and passed. It runs even if the packages failed. hack/check.sh
       # runs the same parts, so the crd job runs this test too.
       - name: go test, one test on its own timeout
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
         run: bash hack/go-test.sh own lease
 
       # hack/livechecks' dry runs through hack/live-checks.sh, which build and run the real test
       # binaries and agent, run in two groups of their own for the same reason (PR #306): each step
       # fails unless every one of its tests ran and passed, with nothing skipped.
       - name: go test, hack/livechecks' host-dialed dry runs on their own timeout
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
         run: bash hack/go-test.sh own livechecks-hostdialed
 
       - name: go test, hack/livechecks' other dry runs on their own timeout
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
         run: bash hack/go-test.sh own livechecks-dry
 
   tidy:
@@ -271,6 +281,7 @@ jobs:
         run: |
           bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
           echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
           echo "::add-matcher::$GITHUB_WORKSPACE/.github/go-problem-matcher.json"
 
       - name: Save the Go archive to the cache
@@ -281,6 +292,7 @@ jobs:
           key: ${{ steps.goarchive.outputs.cache-primary-key }}
 
       - name: Check the Go on PATH is the pinned toolchain
+        id: gocheck
         run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
 
       - name: Assert that the module cache is empty
@@ -332,6 +344,7 @@ jobs:
         run: |
           bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
           echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
           echo "::add-matcher::$GITHUB_WORKSPACE/.github/go-problem-matcher.json"
 
       - name: Save the Go archive to the cache
@@ -342,6 +355,7 @@ jobs:
           key: ${{ steps.goarchive.outputs.cache-primary-key }}
 
       - name: Check the Go on PATH is the pinned toolchain
+        id: gocheck
         run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
 
       # The pinned binaries come from the cache when it has them (see the top of this file): frp,
@@ -473,6 +487,7 @@ jobs:
         run: |
           bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
           echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
           echo "::add-matcher::$GITHUB_WORKSPACE/.github/go-problem-matcher.json"
 
       - name: Save the Go archive to the cache
@@ -483,6 +498,7 @@ jobs:
           key: ${{ steps.goarchive.outputs.cache-primary-key }}
 
       - name: Check the Go on PATH is the pinned toolchain
+        id: gocheck
         run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
 
       # Downloads the two pinned k3s releases the tests start (1.35.9, then upgraded to 1.36.5) and
@@ -678,6 +694,7 @@ jobs:
         run: |
           bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
           echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
           echo "::add-matcher::$GITHUB_WORKSPACE/.github/go-problem-matcher.json"
 
       - name: Save the Go archive to the cache
@@ -688,6 +705,7 @@ jobs:
           key: ${{ steps.goarchive.outputs.cache-primary-key }}
 
       - name: Check the Go on PATH is the pinned toolchain
+        id: gocheck
         run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
 
       # The pinned binaries come from the cache when it has them (see the top of this file). The
@@ -796,6 +814,7 @@ jobs:
         run: |
           bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
           echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
           echo "::add-matcher::$GITHUB_WORKSPACE/.github/go-problem-matcher.json"
 
       - name: Save the Go archive to the cache
@@ -806,6 +825,7 @@ jobs:
           key: ${{ steps.goarchive.outputs.cache-primary-key }}
 
       - name: Check the Go on PATH is the pinned toolchain
+        id: gocheck
         run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
 
       # The pinned binaries come from the cache when it has them (see the top of this file). The

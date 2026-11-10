@@ -96,6 +96,8 @@ const (
 	wantRestoreKey = "go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}"
 	wantArchive    = "${{ runner.temp }}/go-download"
 	wantSaveIf     = "steps.goarchive.outputs.cache-hit != 'true' && github.event_name != 'pull_request'"
+	checkID        = "gocheck"
+	wantVerified   = "steps.gocheck.outcome == 'success'"
 )
 
 // Every job installs Go through the script, and no job still uses actions/setup-go.
@@ -139,6 +141,7 @@ func TestCIEveryJobRunsTheSameFivePinnedGoSteps(t *testing.T) {
 		for _, want := range []string{
 			`bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"`,
 			`echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"`,
+			`echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"`,
 			`.github/go-problem-matcher.json`,
 		} {
 			if !strings.Contains(run, want) {
@@ -156,6 +159,9 @@ func TestCIEveryJobRunsTheSameFivePinnedGoSteps(t *testing.T) {
 		}
 		if k, _ := save.with("key"); k != "${{ steps.goarchive.outputs.cache-primary-key }}" {
 			t.Errorf("job %s: the save key is %q, want the restore's primary key", j.id, k)
+		}
+		if check.str("id") != checkID {
+			t.Errorf("job %s: the check step's id is %q, want %q (later steps name it)", j.id, check.str("id"), checkID)
 		}
 		if check.str("run") != `bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"` {
 			t.Errorf("job %s: the check step runs %q", j.id, check.str("run"))
@@ -243,5 +249,46 @@ func TestCIProblemMatcherIsAValidGoMatcher(t *testing.T) {
 	sub := re.FindStringSubmatch("internal/foo/bar.go:12:5: undefined: x")
 	if sub == nil || sub[m.ProblemMatcher[0].Pattern[0].File] != "internal/foo/bar.go" || sub[m.ProblemMatcher[0].Pattern[0].Line] != "12" {
 		t.Errorf("the matcher does not read a compiler error: %v", sub)
+	}
+}
+
+// A step that runs even when an earlier one failed (!cancelled(), always(), failure()) would, after a
+// failed or skipped toolchain check, run on whatever go the runner image has: the install exits before
+// it puts the pinned Go on PATH. So every such step after the check must also require the check's
+// success. (A step with no status function, or one that has only an unrelated condition, gets
+// GitHub's implicit success() and is skipped after a failure, so it needs nothing.) The steps are
+// read from the YAML, so a new one is covered too.
+func TestCIEveryStepThatRunsAfterAFailureRequiresTheVerifiedToolchain(t *testing.T) {
+	status := regexp.MustCompile(`\b(always|cancelled|failure)\(\)`)
+	guarded := 0
+	for _, j := range loadJobs(t) {
+		check := -1
+		for i, s := range j.steps {
+			if s.str("name") == goSteps[4] {
+				check = i
+			}
+		}
+		if check < 0 {
+			t.Fatalf("job %s has no %q step", j.id, goSteps[4])
+		}
+		for _, s := range j.steps[check+1:] {
+			cond := s.str("if")
+			if !status.MatchString(cond) {
+				continue
+			}
+			guarded++
+			if !strings.Contains(cond, wantVerified) {
+				t.Errorf("job %s: step %q runs after a failure (if: %q) without requiring %q, so it can run on an unverified Go", j.id, s.str("name"), cond, wantVerified)
+			}
+		}
+		// The steps before the check have no pinned Go on PATH yet, so none of them may run go.
+		for _, s := range j.steps[:check] {
+			if cond := s.str("if"); status.MatchString(cond) {
+				t.Errorf("job %s: step %q before the Go check runs after a failure (if: %q)", j.id, s.str("name"), cond)
+			}
+		}
+	}
+	if guarded == 0 {
+		t.Error("found no step that runs after a failure; this test would check nothing (the go job has three)")
 	}
 }
