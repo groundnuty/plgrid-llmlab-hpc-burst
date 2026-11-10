@@ -57,8 +57,8 @@ func goodObs() hostDialedObs {
 			agentapi.RelayServing: {Channel: agentapi.RelayServing, Starts: 1, Epoch: 6, Seq: 4, Final: true, FinalCause: "superseded: hb-relay: superseded"},
 		},
 		Registered: 1,
-		Probe: &probeReport{TmpDirSet: true, TmpDir: "/tmp/job", Socket: "/tmp/job/hb-relay-123/relay.sock", SocketDirMode: "700",
-			AgentLogOK: true, AgentTmpDir: "/tmp/job", PortFound: true, Connected: true, GotBytes: 256, GotSHA256: "cd6816b77f68d70001fc3eaa4d42bdd67cb5973b3151cc5292ecc02a3daac6ab"},
+		Probe: &probeReport{TmpDirSet: true, TmpDir: "/tmp/jx42", Socket: "/tmp/jx42/hb-relay-123/relay.sock", SocketDirMode: "700",
+			AgentLogOK: true, AgentTmpDir: "/tmp/jx42", PortFound: true, Connected: true, GotBytes: 256, GotSHA256: "cd6816b77f68d70001fc3eaa4d42bdd67cb5973b3151cc5292ecc02a3daac6ab"},
 		Exchanges:  []servingConn{{Received: ascending(), InPlace: true, Wrote: 256, Closed: true}},
 		StopServed: true, StopAcked: true, EndState: "COMPLETED",
 		AgentTail: "time=2026-11-10T00:00:00Z level=INFO msg=\"allocation agent exiting\"\n",
@@ -129,14 +129,14 @@ func TestJudgeHostDialedFailsEachCheckOnItsOwnFact(t *testing.T) {
 		{"no line at all", func(o *hostDialedObs) { o.Lines = nil }, []string{checkSrunU}},
 		{"the socket's directory is mode 755", func(o *hostDialedObs) { o.Probe.SocketDirMode = "755" }, []string{checkRendezvous}},
 		{"the socket under /dev/shm, not the agent's TMPDIR", func(o *hostDialedObs) { o.Probe.Socket = "/dev/shm/hb-relay-9/relay.sock" }, []string{checkRendezvous}},
-		{"the socket a level below the agent's TMPDIR", func(o *hostDialedObs) { o.Probe.Socket = "/tmp/job/x/hb-relay-9/relay.sock" }, []string{checkRendezvous}},
+		{"the socket a level below the agent's TMPDIR", func(o *hostDialedObs) { o.Probe.Socket = "/tmp/jx42/x/hb-relay-9/relay.sock" }, []string{checkRendezvous}},
 		{"another TMPDIR in the agent's line", func(o *hostDialedObs) { o.Probe.AgentTmpDir = "/scratch/job" }, []string{checkRendezvous}},
 		{"no TMPDIR in the agent's line", func(o *hostDialedObs) { o.Probe.AgentTmpDir = "" }, []string{checkRendezvous}},
 		{"a relative TMPDIR in the agent's line", func(o *hostDialedObs) { o.Probe.AgentTmpDir = "tmp/job" }, []string{checkRendezvous}},
 		{"the agent's output unreadable", func(o *hostDialedObs) { o.Probe.AgentLogOK = false }, []string{checkRendezvous}},
-		{"a socket in a predictable directory", func(o *hostDialedObs) { o.Probe.Socket = "/tmp/job/relay/relay.sock" }, []string{checkRendezvous}},
-		{"a socket in an hb-relay- directory with no random part", func(o *hostDialedObs) { o.Probe.Socket = "/tmp/job/hb-relay-x/relay.sock" }, []string{checkRendezvous}},
-		{"a socket of another name", func(o *hostDialedObs) { o.Probe.Socket = "/tmp/job/hb-relay-123/other.sock" }, []string{checkRendezvous}},
+		{"a socket in a predictable directory", func(o *hostDialedObs) { o.Probe.Socket = "/tmp/jx42/relay/relay.sock" }, []string{checkRendezvous}},
+		{"a socket in an hb-relay- directory with no random part", func(o *hostDialedObs) { o.Probe.Socket = "/tmp/jx42/hb-relay-x/relay.sock" }, []string{checkRendezvous}},
+		{"a socket of another name", func(o *hostDialedObs) { o.Probe.Socket = "/tmp/jx42/hb-relay-123/other.sock" }, []string{checkRendezvous}},
 		{"no socket", func(o *hostDialedObs) { o.Probe.Socket = "" }, []string{checkRendezvous}},
 		{"no probe", func(o *hostDialedObs) { o.Probe = nil }, []string{checkBytes, checkRendezvous}},
 		{"a relay of another epoch", func(o *hostDialedObs) { o.Lines[1] = goodLine("serving", 6, 2) }, []string{checkEpoch}},
@@ -224,14 +224,14 @@ func TestHostDialedPostsNameEveryCheckAndNoPath(t *testing.T) {
 		"- the epoch: ok: both relays carried epoch 7; a relay pair of epoch 6, each with a higher sequence than the kept relay's, was refused as superseded on both channels",
 		"- the control session: ok: up: the agent registered over the control relay (1 registration(s), the recorded job); the stop was served to its poll over the same session, it sent its last report, and the job ended COMPLETED",
 		"- the 256-byte check (HBEP-4, open question 16): ok: all 256 byte values crossed the serving session intact both ways",
-		"right under the job's $TMPDIR (under /tmp), as the rendezvous file and the agent's own line agree", "an --overlap step's $TMPDIR: set, the same",
+		"- the rendezvous: ok: socket under $TMPDIR: yes; fallback to /dev/shm: no; its path is 33 bytes (at most 107); its directory mode 700; an --overlap step's $TMPDIR: set, the same; both relays, --overlap steps, reached it\n",
 		"- frps and frpc: not run: ", "time limit 5 min, with no requeue\n",
 	} {
 		if !strings.Contains(posts, want) {
 			t.Errorf("the text to post lacks %q:\n%s", want, posts)
 		}
 	}
-	for _, private := range []string{"/tmp/job", "hb-relay-123", "4242", "u-1", goodAgent} {
+	for _, private := range []string{"/tmp/jx42", "hb-relay-123", "4242", "u-1", goodAgent} {
 		if strings.Contains(posts, private) {
 			t.Errorf("the text to post holds %q:\n%s", private, posts)
 		}
@@ -274,34 +274,103 @@ func TestAFailedPostNamesNoJobPathOrHostFromTheOwnersWords(t *testing.T) {
 	}
 }
 
-func TestTopDirNamesOnlyAGenericTop(t *testing.T) {
-	for in, want := range map[string]string{
-		"/tmp/slurm-4242":         "under /tmp",
-		"/dev/shm":                "under /dev/shm",
-		"/dev/shm/user/4242":      "under /dev/shm",
-		"/scratch/local/4242":     "under /scratch",
-		"/net/ascratch/user/4242": "under /net",
-		"/Scratch/x":              "under a top directory this row does not print",
-		"/node0042/tmp":           "under a top directory this row does not print",
-		"/averyveryverylongname/": "under a top directory this row does not print",
-	} {
-		if got := topDir(in); got != want {
-			t.Errorf("topDir(%q) = %q, want %q", in, got, want)
-		}
-	}
-	p := &probeReport{TmpDirSet: true, TmpDir: "/tmp/job/"}
-	if got := stepTmpDir(p, "/tmp/job"); got != "set, the same" {
+// How an --overlap step's TMPDIR compares with the agent's, in words only.
+func TestStepTmpDirSaysOnlyHowItCompares(t *testing.T) {
+	if got := stepTmpDir(&probeReport{TmpDirSet: true, TmpDir: "/tmp/jx42/"}, "/tmp/jx42"); got != "set, the same" {
 		t.Errorf("the same TMPDIR reads %q", got)
 	}
-	if got := stepTmpDir(&probeReport{TmpDirSet: true, TmpDir: "/scratch/j"}, "/dev/shm/x"); got != "set, another (under /scratch)" {
+	if got := stepTmpDir(&probeReport{TmpDirSet: true, TmpDir: "/scratch/j"}, "/tmp/jx42"); got != "set, another" {
 		t.Errorf("another TMPDIR reads %q", got)
 	}
-	if got := stepTmpDir(&probeReport{}, "/tmp/job"); got != "unset" {
+	if got := stepTmpDir(&probeReport{}, "/tmp/jx42"); got != "unset" {
 		t.Errorf("an unset TMPDIR reads %q", got)
 	}
 }
 
-const goodReport = "probe=1\ntmpdir-step=set\ntmpdir=/tmp/job\nsocket=/tmp/job/hb-relay-1/relay.sock\nsocket-dir-mode=700\nagent-log=ok\nagent-tmpdir=/tmp/job\n" +
+// The science agent's ruling on PR 306: on a cluster $TMPDIR and the socket's path hold the user's login and the job's
+// ID, so the text to post holds no part of either, whatever the run came to. The paths are shaped like a cluster's: a
+// login-like and a job-ID-like component, under a scratch tree, and an --overlap step's TMPDIR under another root. The
+// rendezvous line says yes or no, and lengths. /dev/shm's two components are the one exception: the ruling's own words
+// name the fallback.
+func TestAHostDialedPostHoldsNoPartOfAClusterPath(t *testing.T) {
+	const (
+		tmp     = "/net/ascratch/people/exlogin42/job-4242424"
+		step    = "/scratch/exlogin42/slurm-4242424-step"
+		sock    = tmp + "/hb-relay-8123456/relay.sock"
+		longTmp = tmp + "/a-node-local-directory-of-the-job-with-a-long-name"
+		shmSock = "/dev/shm/hb-relay-8123456/relay.sock"
+		login   = "exlogin42"
+		host    = "login01.cluster.example"
+	)
+	cluster := func() hostDialedObs {
+		o := goodObs()
+		o.JobID = "4242424"
+		for i := range o.Lines {
+			o.Lines[i] = strings.Replace(o.Lines[i], "--jobid=4242 ", "--jobid=4242424 ", 1)
+		}
+		o.Probe.TmpDir, o.Probe.AgentTmpDir, o.Probe.Socket = step, tmp, sock
+		o.Private = []string{login, host}
+		return o
+	}
+	pathError := `time=2026-11-10T00:00:01Z level=ERROR msg="no apptainer on this node (HBEP-4, open question 15)" err="exec: \"apptainer\": not in PATH ` + tmp + `/bin:/usr/bin of ` + login + `@login01"`
+	for _, c := range []struct {
+		name, line string
+		ok         bool
+		mod        func(o *hostDialedObs)
+		scrubbed   bool // a quoted text held private values, which the post shows were taken out
+	}{
+		{"a pass", "- the rendezvous: ok: socket under $TMPDIR: yes; fallback to /dev/shm: no; its path is 70 bytes (at most 107); its directory mode 700; an --overlap step's $TMPDIR: set, another", true, func(*hostDialedObs) {}, false},
+		{"the fallback", "- the rendezvous: FAIL: socket under $TMPDIR: no; fallback to /dev/shm: yes, since a socket under $TMPDIR could be 124 bytes, over the 107 a socket's path may have; its path is 36 bytes (at most 107)", false,
+			func(o *hostDialedObs) { o.Probe.AgentTmpDir, o.Probe.Socket = longTmp, shmSock }, false},
+		{"no agent line", "- the rendezvous: FAIL: socket under $TMPDIR: not shown (the agent's output does not name its $TMPDIR)", false,
+			func(o *hostDialedObs) { o.Probe.AgentTmpDir = "" }, false},
+		{"an agent that stops at its start", "- the control session: FAIL: did not come up: the job ended FAILED before the agent registered", false, func(o *hostDialedObs) {
+			o.Registered, o.JobEnded, o.EndState, o.AgentTail = 0, true, "FAILED", pathError+"\n"
+		}, true},
+		{"the owner's words", "- the control session: FAIL: did not come up: no registration", false, func(o *hostDialedObs) {
+			o.Registered = 0
+			ctl := o.Relays[agentapi.RelayControl]
+			ctl.LastEnd = "retried: ssh: " + login + "@login01: Connection closed by " + host + " port 22 in " + tmp
+			o.Relays[agentapi.RelayControl] = ctl
+		}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			o := cluster()
+			c.mod(&o)
+			posts := hostDialedPosts(o, judgeHostDialed(o), "plgrid-now (the partition's own; none requested)", 1, 1, "1Gi")
+			if !strings.Contains(posts, c.line) {
+				t.Errorf("the text to post lacks %q:\n%s", c.line, posts)
+			}
+			if pass := strings.HasPrefix(posts, "reach-host-dialed-athena: PASS "); pass != c.ok {
+				t.Errorf("the post passes %v, want %v:\n%s", pass, c.ok, posts)
+			}
+			if c.scrubbed && !strings.Contains(posts, "<private>") && !strings.Contains(posts, "<a path>") {
+				t.Errorf("the quoted text's private values were not taken out where they stood:\n%s", posts)
+			}
+			// Every component of every path the run read, and the login's user and host: the observation holds each
+			// (so the search means something), and the post none.
+			var parts []string
+			for _, p := range []string{o.Probe.TmpDir, o.Probe.AgentTmpDir, o.Probe.Socket, tmp, step, sock} {
+				for _, part := range strings.Split(p, "/") {
+					if part != "" && !(strings.HasPrefix(p, "/dev/shm/") && (part == "dev" || part == "shm")) {
+						parts = append(parts, part)
+					}
+				}
+			}
+			parts = append(parts, login, host, "login01", "4242424")
+			if len(parts) < 12 {
+				t.Fatalf("%d private values to look for; the search would mean nothing", len(parts))
+			}
+			for _, part := range parts {
+				if strings.Contains(posts, part) {
+					t.Errorf("the text to post holds %q, a part of a private path or name:\n%s", part, posts)
+				}
+			}
+		})
+	}
+}
+
+const goodReport = "probe=1\ntmpdir-step=set\ntmpdir=/tmp/jx42\nsocket=/tmp/jx42/hb-relay-1/relay.sock\nsocket-dir-mode=700\nagent-log=ok\nagent-tmpdir=/tmp/jx42\n" +
 	"serving-port=found\nconnect=ok\ngot-bytes=256\ngot-sha256=cd6816b77f68d70001fc3eaa4d42bdd67cb5973b3151cc5292ecc02a3daac6ab\ndone=1\n"
 
 func TestParseProbeReadsOnlyItsOwnForm(t *testing.T) {
@@ -309,7 +378,7 @@ func TestParseProbeReadsOnlyItsOwnForm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !p.TmpDirSet || p.TmpDir != "/tmp/job" || p.Socket != "/tmp/job/hb-relay-1/relay.sock" || p.SocketDirMode != "700" || !p.AgentLogOK || p.AgentTmpDir != "/tmp/job" ||
+	if !p.TmpDirSet || p.TmpDir != "/tmp/jx42" || p.Socket != "/tmp/jx42/hb-relay-1/relay.sock" || p.SocketDirMode != "700" || !p.AgentLogOK || p.AgentTmpDir != "/tmp/jx42" ||
 		!p.PortFound || !p.Connected || p.GotBytes != 256 || p.GotSHA256 != descendingSHA256 {
 		t.Errorf("the report read as %+v", p)
 	}
@@ -325,8 +394,8 @@ func TestParseProbeReadsOnlyItsOwnForm(t *testing.T) {
 		"an unknown answer":    strings.Replace(goodReport, "connect=ok", "connect=maybe", 1),
 		"a digest that is not": strings.Replace(goodReport, "got-sha256=cd", "got-sha256=xx", 1),
 		"a mode that is not":   strings.Replace(goodReport, "socket-dir-mode=700", "socket-dir-mode=rwx", 1),
-		"a TMPDIR not given":   strings.Replace(goodReport, "tmpdir=/tmp/job\n", "", 1),
-		"lines out of order":   strings.Replace(goodReport, "agent-log=ok\nagent-tmpdir=/tmp/job", "agent-tmpdir=/tmp/job\nagent-log=ok", 1),
+		"a TMPDIR not given":   strings.Replace(goodReport, "tmpdir=/tmp/jx42\n", "", 1),
+		"lines out of order":   strings.Replace(goodReport, "agent-log=ok\nagent-tmpdir=/tmp/jx42", "agent-tmpdir=/tmp/jx42\nagent-log=ok", 1),
 		"another probe":        strings.Replace(goodReport, "probe=1", "probe=2", 1),
 		"nothing":              "",
 	} {

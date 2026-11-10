@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -50,6 +51,9 @@ type hostDialedObs struct {
 	// AgentTail is the last bytes of the agent's output, job.err (private: the post takes its last error through
 	// postSafe).
 	AgentTail string
+	// Private are the run's other private values, the login's user and host: postSafe takes them out of any text
+	// the post quotes.
+	Private []string
 }
 
 // hostDialedCheck is one line of the text to post: its name, whether it held, and what was found.
@@ -160,36 +164,15 @@ func judgeHostDialed(o hostDialedObs) []hostDialedCheck {
 		add(checkSrunU, true, "every relay ran srun -u --overlap --jobid=<the job> --ntasks=1 <the staged agent> relay <channel> (%d line(s)), so the step's output is not held for a newline, which the sessions' binary frames lack", len(o.Lines))
 	}
 
-	// The rendezvous: the agent's socket in a mode-700 hb-relay-<random> directory under the job's TMPDIR.
+	// The rendezvous: the agent's socket in a mode-700 directory of its own right under the job's TMPDIR. The line holds
+	// no path, nor any part of one: on a cluster TMPDIR and the socket's path hold the user's login and the job's ID (the
+	// science agent's ruling on PR 306). It says yes or no, and lengths.
 	switch p := o.Probe; {
 	case p == nil:
 		add(checkRendezvous, false, "not read: the serving probe did not run")
 	default:
-		// Affirmative, from two records the agent made: the socket's path in the rendezvous file and the TMPDIR its own
-		// line names. A record that is missing or unreadable is a failure, never a pass (the review of PR 306, B4).
-		sockDir := path.Dir(p.Socket)
-		agentTmp := p.AgentTmpDir
-		var why []string
-		switch {
-		case !p.AgentLogOK:
-			why = append(why, "the agent's output, job.err, could not be read")
-		case agentTmp == "" || !path.IsAbs(agentTmp):
-			why = append(why, "the agent's output does not name the TMPDIR it listens under")
-		}
-		if !path.IsAbs(p.Socket) || path.Base(p.Socket) != "relay.sock" || !regexp.MustCompile(`^hb-relay-[0-9]+$`).MatchString(path.Base(sockDir)) {
-			why = append(why, "the rendezvous file did not name a relay.sock in an hb-relay-<random> directory")
-		} else if len(why) == 0 && path.Dir(sockDir) != path.Clean(agentTmp) {
-			why = append(why, "the socket's directory is "+topDir(path.Dir(sockDir))+", not right under the job's $TMPDIR ("+topDir(path.Clean(agentTmp))+")")
-		}
-		if p.SocketDirMode != "700" {
-			why = append(why, "the socket's directory is mode "+p.SocketDirMode+", not 700")
-		}
-		if len(why) > 0 {
-			add(checkRendezvous, false, "%s", strings.Join(why, "; "))
-			break
-		}
-		add(checkRendezvous, true, "the agent's socket was in a mode-700 hb-relay-<random> directory right under the job's $TMPDIR (%s), as the rendezvous file and the agent's own line agree, and both relays, --overlap steps, reached it; an --overlap step's $TMPDIR: %s",
-			topDir(path.Clean(agentTmp)), stepTmpDir(p, path.Clean(agentTmp)))
+		ok, text := rendezvousFacts(p)
+		add(checkRendezvous, ok, "%s", text)
 	}
 
 	// The preamble: a session counts only once its relay's first line was hpcburst-relay/1 <UID> (hostdial.Serve).
@@ -267,14 +250,26 @@ var (
 // become placeholders, then any other path, dotted name or number of five digits or more does too; what is left is held to
 // printable ASCII and 160 bytes. The text as it was goes to the private log, never here.
 func postSafe(s string, o hostDialedObs) string {
-	for _, r := range []struct{ v, with string }{{o.AgentPath, "<the agent>"}, {o.Tag, "<the tag>"}, {o.UID, "<the UID>"}, {o.JobID, "<the job>"}} {
+	// The run's own values become markers no later rule can match (bytes that are not printable), and their
+	// placeholders only at the end.
+	named := []struct{ v, with string }{{o.AgentPath, "<the agent>"}, {o.Tag, "<the tag>"}, {o.UID, "<the UID>"}, {o.JobID, "<the job>"}}
+	for i, r := range named {
 		if r.v != "" {
-			s = strings.ReplaceAll(s, r.v, r.with)
+			s = strings.ReplaceAll(s, r.v, "\x01"+string(rune('a'+i))+"\x02")
 		}
+	}
+	// The run's own private values, before any rule of shape: a login or a host quoted without its slash or dot passes
+	// those (exlogin42@login01).
+	for _, v := range privateParts(o) {
+		s = strings.ReplaceAll(s, v, "\x01p\x02")
 	}
 	s = pathWord.ReplaceAllString(s, "<a path>")
 	s = dottedName.ReplaceAllString(s, "<a name>")
 	s = longNumber.ReplaceAllString(s, "<a number>")
+	for i, r := range named {
+		s = strings.ReplaceAll(s, "\x01"+string(rune('a'+i))+"\x02", r.with)
+	}
+	s = strings.ReplaceAll(s, "\x01p\x02", "<private>")
 	b := make([]byte, 0, len(s))
 	for i := 0; i < len(s) && len(b) < 160; i++ {
 		if c := s[i]; c >= 0x20 && c <= 0x7e {
@@ -282,6 +277,47 @@ func postSafe(s string, o hostDialedObs) string {
 		}
 	}
 	return string(b)
+}
+
+// privateParts are the run's own private values that a text to post must never hold, longest first: every component, of
+// 3 bytes or more, of the paths the probe read (the step's TMPDIR, the agent's, the socket's), and the login's user and
+// host. /dev/shm's two components are left: they are a fixed system path that the post names.
+func privateParts(o hostDialedObs) []string {
+	seen := map[string]bool{}
+	var out []string
+	keep := func(v string) {
+		if len(v) >= 3 && !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	if p := o.Probe; p != nil {
+		for _, s := range []string{p.TmpDir, p.AgentTmpDir, p.Socket} {
+			for _, c := range pathComponents(s) {
+				keep(c)
+			}
+		}
+	}
+	for _, v := range o.Private {
+		keep(v)
+		// A host's short name too: an ssh error names login01 as often as login01.cluster.example.
+		if short, _, ok := strings.Cut(v, "."); ok {
+			keep(short)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
+	return out
+}
+
+// pathComponents are a path's components, less /dev/shm's (hostdial.DevShm), which the post names.
+func pathComponents(p string) []string {
+	var out []string
+	for _, c := range strings.Split(strings.TrimPrefix(path.Clean(p), hostdial.DevShm+"/"), "/") {
+		if c != "" && c != "." {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // endStateText words the job's end state for a failed line: "FAILED", or "in a state that was not read".
@@ -359,21 +395,65 @@ func missingChannels(ctl, srv hostdial.RelayState) string {
 	return strings.Join(m, " and ")
 }
 
-// topDir names where a path is, for the text to post, without the path: /dev/shm, or its first directory when that is a
-// short word of lower-case letters (/tmp, /scratch); else a phrase. A job's TMPDIR can hold the job's ID and the user's
-// name, which are never posted; the path itself is in the private record.
-func topDir(p string) string {
-	if p == "/dev/shm" || strings.HasPrefix(p, "/dev/shm/") {
-		return "under /dev/shm"
+// rendezvousFacts judges the rendezvous from two records the agent made, the socket's path in the rendezvous file and the
+// TMPDIR its own line names (the review of PR 306, B4): a record that is missing or unreadable is a failure, never a pass.
+// The text states facts in fixed words and lengths only.
+func rendezvousFacts(p *probeReport) (bool, string) {
+	agentTmp := path.Clean(p.AgentTmpDir)
+	sockDir := path.Dir(p.Socket)
+	var facts []string
+	ok := true
+	named := path.IsAbs(p.Socket) && path.Base(p.Socket) == hostdial.SocketName && regexp.MustCompile(`^hb-relay-[0-9]+$`).MatchString(path.Base(sockDir))
+	readable := p.AgentLogOK && p.AgentTmpDir != "" && path.IsAbs(p.AgentTmpDir)
+	switch {
+	case !p.AgentLogOK:
+		ok = false
+		facts = append(facts, "socket under $TMPDIR: not shown (the agent's output, job.err, could not be read)")
+	case !readable:
+		ok = false
+		facts = append(facts, "socket under $TMPDIR: not shown (the agent's output does not name its $TMPDIR)")
+	case !named:
+		ok = false
+		facts = append(facts, "socket under $TMPDIR: not shown (the rendezvous file does not name a socket in a directory of the agent's own)")
+	case path.Dir(sockDir) == agentTmp:
+		facts = append(facts, "socket under $TMPDIR: yes", "fallback to /dev/shm: no")
+	case path.Dir(sockDir) == hostdial.DevShm:
+		ok = false
+		facts = append(facts, "socket under $TMPDIR: no")
+		if would := hostdial.SocketPathUnder(agentTmp); would > agentapi.MaxRelaySocketPath {
+			facts = append(facts, fmt.Sprintf("fallback to /dev/shm: yes, since a socket under $TMPDIR could be %d bytes, over the %d a socket's path may have", would, agentapi.MaxRelaySocketPath))
+		} else {
+			facts = append(facts, fmt.Sprintf("fallback to /dev/shm: yes, for a reason not shown (a socket under $TMPDIR would be at most %d bytes, within %d)", would, agentapi.MaxRelaySocketPath))
+		}
+	default:
+		ok = false
+		facts = append(facts, "socket under $TMPDIR: no", "fallback to /dev/shm: no (its directory is elsewhere)")
 	}
-	first, _, _ := strings.Cut(strings.TrimPrefix(p, "/"), "/")
-	if regexp.MustCompile(`^[a-z]{1,16}$`).MatchString(first) {
-		return "under /" + first
+	if named {
+		facts = append(facts, fmt.Sprintf("its path is %d bytes (at most %d)", len(p.Socket), agentapi.MaxRelaySocketPath))
 	}
-	return "under a top directory this row does not print"
+	if p.SocketDirMode == "700" {
+		facts = append(facts, "its directory mode 700")
+	} else {
+		ok = false
+		facts = append(facts, "its directory mode "+modeText(p.SocketDirMode)+", not 700")
+	}
+	facts = append(facts, "an --overlap step's $TMPDIR: "+stepTmpDir(p, agentTmp))
+	if ok {
+		facts = append(facts, "both relays, --overlap steps, reached it")
+	}
+	return ok, strings.Join(facts, "; ")
 }
 
-// stepTmpDir says how an --overlap step's TMPDIR compares with the agent's (the socket directory's parent).
+// modeText is a directory's mode as the probe read it, if it is an octal mode; else "unknown".
+func modeText(m string) string {
+	if regexp.MustCompile(`^[0-7]{3,4}$`).MatchString(m) {
+		return m
+	}
+	return "unknown"
+}
+
+// stepTmpDir says how an --overlap step's TMPDIR compares with the agent's, in words only.
 func stepTmpDir(p *probeReport, agentTmp string) string {
 	switch {
 	case !p.TmpDirSet:
@@ -381,7 +461,7 @@ func stepTmpDir(p *probeReport, agentTmp string) string {
 	case path.Clean(p.TmpDir) == agentTmp:
 		return "set, the same"
 	}
-	return "set, another (" + topDir(path.Clean(p.TmpDir)) + ")"
+	return "set, another"
 }
 
 // hostDialedPosts is the text to post: the verdict, a line per check, what was not run and the job's shape.

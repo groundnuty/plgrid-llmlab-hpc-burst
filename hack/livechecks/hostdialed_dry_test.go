@@ -80,7 +80,7 @@ func hostDialedDryWorld(t *testing.T) (*world, []string) {
 var hostDialedFaultLines = map[string]string{
 	"epoch-blind":        "- the epoch: FAIL: the control relay of epoch 6, with the higher sequence, was not refused as superseded",
 	"crash-at-stop":      "- the control session: FAIL: ",
-	"shm-fallback-quiet": "- the rendezvous: FAIL: the socket's directory is under /dev/shm, not right under the job's $TMPDIR",
+	"shm-fallback-quiet": "- the rendezvous: FAIL: socket under $TMPDIR: no; fallback to /dev/shm: yes, since a socket under $TMPDIR could be 108 bytes, over the 107 a socket's path may have",
 	"no-apptainer":       "- the control session: FAIL: did not come up: the job ended FAILED before the agent registered, so the agent stopped at its start; the agent's last error: no apptainer on this node",
 	"no-u":               "- srun -u: FAIL: ",
 	"banner":             "- the preamble: FAIL: ",
@@ -89,7 +89,7 @@ var hostDialedFaultLines = map[string]string{
 	"serving-down":       "- the serving session: FAIL: ",
 	"bytes-to-host":      "- the 256-byte check (HBEP-4, open question 16): FAIL: node to host",
 	"bytes-to-node":      "- the 256-byte check (HBEP-4, open question 16): FAIL: host to node",
-	"socket-mode":        "- the rendezvous: FAIL: the socket's directory is mode 755, not 700",
+	"socket-mode":        "; its directory mode 755, not 700; ",
 	"unreadable":         "- the run's state: FAIL: the serving probe's report could not be read",
 }
 
@@ -97,7 +97,7 @@ var hostDialedOKLines = []string{
 	"- the control session: ok: up: the agent registered over the control relay (1 registration(s), the recorded job); the stop was served to its poll over the same session, it sent its last report, and the job ended COMPLETED",
 	"- the serving session: ok: up: a stream the job opened crossed it to the serving port",
 	"- srun -u: ok: every relay ran srun -u --overlap --jobid=<the job> --ntasks=1 <the staged agent> relay <channel>",
-	"- the rendezvous: ok: the agent's socket was in a mode-700 hb-relay-<random> directory right under the job's $TMPDIR",
+	"- the rendezvous: ok: socket under $TMPDIR: yes; fallback to /dev/shm: no; its path is ",
 	"- the preamble: ok: each relay's first line was hpcburst-relay/1 <the Allocation's UID>",
 	"- the epoch: ok: both relays carried epoch 7; a relay pair of epoch 6, each with a higher sequence than the kept relay's, was refused as superseded on both channels",
 	"- the 256-byte check (HBEP-4, open question 16): ok: all 256 byte values crossed the serving session intact both ways",
@@ -121,7 +121,7 @@ func TestEveryHostDialedRowPassesThroughTheScriptOverTheFake(t *testing.T) {
 					t.Errorf("the text to post lacks %q:\n%s", want, posts)
 				}
 			}
-			postsAreHostDialedClean(t, posts)
+			postsAreHostDialedClean(t, w, s.row, posts)
 			log, _ := os.ReadFile(filepath.Join(w.out(), s.row+".log"))
 			if !strings.Contains(string(log), "DRY RUN") {
 				t.Errorf("the test's log does not say it was a dry run:\n%s", log)
@@ -149,7 +149,7 @@ func TestEachHostDialedFaultFailsTheRowThroughTheScript(t *testing.T) {
 					t.Errorf("the text to post lacks %q:\n%s", want, posts)
 				}
 			}
-			postsAreHostDialedClean(t, posts)
+			postsAreHostDialedClean(t, w, row, posts)
 		})
 	}
 }
@@ -189,8 +189,12 @@ func TestADryHostDialedBinaryRefusesLiveSettings(t *testing.T) {
 	}
 }
 
-// postsAreHostDialedClean fails when the text to post holds anything but printable ASCII and line ends, or a path or a job ID.
-func postsAreHostDialedClean(t *testing.T, posts string) {
+// postsAreHostDialedClean fails when the text to post holds anything but printable ASCII and line ends, a job ID, or
+// any part of the run's paths (the science agent's ruling on PR 306): every component of 3 bytes or more of the paths in
+// the run's record (the step's TMPDIR, the agent's, the socket's) and of this machine's TMPDIR. A component of one or two
+// letters is in any English text; /dev/shm's two are the post's own words. The conformance package checks every
+// component of a cluster-shaped path (TestAHostDialedPostHoldsNoPartOfAClusterPath).
+func postsAreHostDialedClean(t *testing.T, w *world, row, posts string) {
 	t.Helper()
 	for i := 0; i < len(posts); i++ {
 		if c := posts[i]; c != '\n' && (c < 0x20 || c > 0x7e) {
@@ -198,9 +202,29 @@ func postsAreHostDialedClean(t *testing.T, posts string) {
 			break
 		}
 	}
-	for _, bad := range []string{os.TempDir() + "/", "conf-", "/stage/"} {
-		if strings.Contains(posts, bad) {
-			t.Errorf("the text to post holds %q:\n%s", bad, posts)
+	private := []string{os.TempDir(), "conf-", "/stage/"}
+	paths := []string{os.TempDir()}
+	if m, _ := filepath.Glob(filepath.Join(w.out(), row+"-*", "record.json")); len(m) == 1 {
+		rec, _ := os.ReadFile(m[0])
+		for _, field := range []string{"tmpdir", "socket", "agentTmpdir"} {
+			if v := regexp.MustCompile(`"` + field + `": "([^"]+)"`).FindSubmatch(rec); v != nil {
+				private = append(private, string(v[1]))
+				paths = append(paths, string(v[1]))
+			}
+		}
+	} else {
+		t.Errorf("want one record.json for %s, found %v", row, m)
+	}
+	for _, p := range paths {
+		for _, c := range strings.Split(strings.TrimPrefix(p, "/dev/shm/"), "/") {
+			if len(c) >= 3 {
+				private = append(private, c)
+			}
+		}
+	}
+	for _, p := range private {
+		if strings.Contains(posts, p) {
+			t.Errorf("the text to post holds %q, a part of the run's paths", p)
 		}
 	}
 	if m := regexp.MustCompile(`hb-relay-[0-9]|jobid=[0-9]|job [0-9]`).FindString(posts); m != "" {

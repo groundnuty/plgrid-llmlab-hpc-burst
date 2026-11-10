@@ -251,7 +251,7 @@ func hostDialedBody(t testing.TB, w *world, g *hostDialedRig, rowName string) {
 	}
 	w.failedIsStart = true
 	a = w.untilRuns("the job", name, "the job runs", w.at(), "", started)
-	o := hostDialedObs{Row: row, Epoch: hostDialedEpoch, JobID: a.Status.AtProvider.JobID, UID: uid, Tag: tag}
+	o := hostDialedObs{Row: row, Epoch: hostDialedEpoch, JobID: a.Status.AtProvider.JobID, UID: uid, Tag: tag, Private: []string{w.sshConfig.User, w.sshConfig.HostName}}
 	paths, err := w.batch.Paths(ctx)
 	if err != nil {
 		t.Fatalf("the staging directory could not be resolved: %v", err)

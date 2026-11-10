@@ -73,9 +73,10 @@ func hostDialedPostsAreClean(t *testing.T, posts, out string, healthy bool) {
 	}
 	var private []string
 	rec, _ := os.ReadFile(filepath.Join(out, alpha.RecordFile))
-	for _, field := range []string{"tmpdir", "socket"} {
+	for _, field := range []string{"tmpdir", "socket", "agentTmpdir"} {
 		if m := regexp.MustCompile(`"` + field + `": "([^"]+)"`).FindSubmatch(rec); m != nil {
 			private = append(private, string(m[1]))
+			private = append(private, postComponents(string(m[1]))...)
 		}
 	}
 	tags, _ := os.ReadFile(filepath.Join(out, jobTagsFile))
@@ -86,14 +87,29 @@ func hostDialedPostsAreClean(t *testing.T, posts, out string, healthy bool) {
 		t.Errorf("the record holds %d private value(s) to look for; the search would mean nothing", len(private))
 	}
 	private = append(private, "conf-", os.TempDir())
+	private = append(private, postComponents(os.TempDir())...)
 	for _, p := range private {
 		if strings.Contains(posts, p) {
-			t.Errorf("the text to post holds a private value (%d bytes long)", len(p))
+			t.Errorf("the text to post holds a private value (%d bytes long): %q", len(p), p)
 		}
 	}
 	if regexp.MustCompile(`jobid=[0-9]|job [0-9]`).MatchString(posts) {
 		t.Error("the text to post holds a job ID")
 	}
+}
+
+// postComponents are the components of a path that a text to post must not hold (the science agent's ruling on PR 306):
+// each of 3 bytes or more, since a component of one or two letters (this machine's t, the fake's j) is in any English
+// text; and less /dev/shm's two, which the post names. TestAHostDialedPostHoldsNoPartOfAClusterPath checks every component
+// of a cluster-shaped path, whatever its length.
+func postComponents(p string) []string {
+	var out []string
+	for _, c := range strings.Split(strings.TrimPrefix(p, "/dev/shm/"), "/") {
+		if len(c) >= 3 {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // hostDialedFaultChecks are the dry faults and the check each must fail: the one it stands for. A fault may fail others

@@ -230,6 +230,36 @@ func TestTheRendezvousFile(t *testing.T) {
 // #301), and under /dev/shm only when the socket's path under TMPDIR would
 // pass 107 bytes, which is logged; an unset TMPDIR, an unusable one, or one
 // too long with /dev/shm too long too fails by name.
+// SocketPathUnder is the root and 31 bytes: "/hb-relay-" with 10 digits, "/relay.sock" (worked out by hand). A TMPDIR of
+// 76 bytes keeps the socket at 107, the limit; one of 77 passes it, and the socket falls back.
+func TestSocketPathUnderIsTheLongestPathTheSocketCanHave(t *testing.T) {
+	for root, want := range map[string]int{"/tmp": 35, "/dev/shm": 39, "/" + strings.Repeat("t", 75): 107, "/" + strings.Repeat("t", 76): 108} {
+		if got := SocketPathUnder(root); got != want {
+			t.Errorf("SocketPathUnder(%d bytes) = %d, want %d", len(root), got, want)
+		}
+	}
+	alloc := filepath.Join(shortDir(t), "a")
+	if err := os.Mkdir(alloc, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	shm, base := shortDir(t), shortDir(t)
+	for _, n := range []int{76, 77} {
+		tmp := filepath.Join(base, strings.Repeat("p", n-len(base)-1))
+		if err := os.Mkdir(tmp, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		j, err := StartJob(JobOptions{ShmDir: shm, TmpDir: tmp, AllocDir: alloc, Allocation: "u-1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		under := strings.HasPrefix(j.Socket(), tmp+"/")
+		_ = j.Close()
+		if under != (n == 76) {
+			t.Errorf("a TMPDIR of %d bytes: the socket is under it %v, want %v", n, under, n == 76)
+		}
+	}
+}
+
 func TestTheSocketDirectoryIsTMPDIRThenDevShm(t *testing.T) {
 	alloc := filepath.Join(shortDir(t), "a")
 	if err := os.Mkdir(alloc, 0o700); err != nil {
