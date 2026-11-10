@@ -139,6 +139,13 @@ var toolDiagnostics = []diagnostic{
 	// the file name; the file is the path after it.
 	{`vet: tbuild/d_test.go:6:12: undefined: Missing`, "tbuild/d_test.go", "6", "12", "undefined: Missing"},
 	{`vet: compile/a.go:7:9: undefined: Foo`, "compile/a.go", "7", "9", "undefined: Foo"},
+	// A package-loading error names the file and no line or column, and go build, go vet and go test all
+	// print it (found in the review of PR #345). The old pattern annotated these, so the line and
+	// column stay optional. What keeps such a line apart from a log line is that it begins with the
+	// file name: an ABSENCE log line begins with the test's own file and line.
+	{`x.go: multiple //go:build comments`, "x.go", "", "", "multiple //go:build comments"},
+	{`y.go: parsing //go:build line: unexpected end of expression`, "y.go", "", "", "parsing //go:build line: unexpected end of expression"},
+	{`mixbuild/z.go:2:1: +build lines do not match //go:build condition`, "mixbuild/z.go", "2", "1", "+build lines do not match //go:build condition"},
 }
 
 // Lines of the same shape that no fixture happens to hold: the forms the issue and the compiler's
@@ -152,13 +159,13 @@ var shapeDiagnostics = []diagnostic{
 }
 
 // Lines that are not errors but mention a Go file: a test's log line, which has a line number and no
-// column; the ABSENCE line of the issue and a shorter one of the same shape; a file name with a
-// message and no line; a diagnostic quoted inside a log line; and the stack frame of a panic.
+// column; the ABSENCE line of the issue and a shorter one of the same shape; a log line with a file
+// and a message in its text; a diagnostic quoted inside a log line; and the stack frame of a panic.
 var notDiagnostics = []string{
 	`    file_test.go:110: message`,
 	`    hostdialed_test.go:110: ABSENCE not raised (first read after the controller restart): hpcburst_events_raised_total{...}: not raised, tunnel_state.go: readOnce, then reportOrphans`,
 	`    x_test.go:9: see tunnel_state.go: readOnce`,
-	`tunnel_state.go: readOnce, then reportOrphans`,
+	`    x_test.go:9: x.go: multiple //go:build comments`,
 	`    x_test.go:5: y.go:12:3: undefined: Foo`,
 	`see hack/x.go:12:3: undefined: Foo for the error`,
 	"\t/home/runner/work/repo/repo/panics/p_test.go:6 +0x25",

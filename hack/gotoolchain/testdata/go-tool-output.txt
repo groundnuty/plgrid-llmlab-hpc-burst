@@ -41,6 +41,24 @@ vetp/c.go:12:25: fmt.Sprintf format %s reads arg #2, but call has 1 arg
 FAIL	example.com/fx/vetp [build failed]
 FAIL
 ### exit 1
+### $ go build ./dupbuild/
+x.go: multiple //go:build comments
+### exit 1
+### $ go vet ./dupbuild/
+x.go: multiple //go:build comments
+### exit 1
+### $ go test -count=1 ./dupbuild/
+# example.com/fx/dupbuild
+x.go: multiple //go:build comments
+FAIL	example.com/fx/dupbuild [setup failed]
+FAIL
+### exit 1
+### $ go build ./badbuild/
+y.go: parsing //go:build line: unexpected end of expression
+### exit 1
+### $ go vet ./mixbuild/
+mixbuild/z.go:2:1: +build lines do not match //go:build condition
+### exit 1
 ### $ go test -count=1 -v ./logs/
 === RUN   TestAbsenceLogPasses
     l_test.go:6: ABSENCE not raised (first read after the controller restart): hpcburst_events_raised_total{controller="lifecycle"}: not raised: 0 at both reads; quiet: TunnelOrphaned has one source, the tunnel-state reader (cmd/hpcburst-controller, tunnel_state.go: readOnce, then reportOrphans)
@@ -64,12 +82,12 @@ testing.tRunner.func1()
 	/home/runner/work/_temp/go-toolchain/go/src/testing/testing.go:1977 +0x349
 panic({0x550f80?, 0x594430?})
 	/home/runner/work/_temp/go-toolchain/go/src/runtime/panic.go:860 +0x13a
-example.com/fx/panics.TestPanics(0x2510f81dc248?)
+example.com/fx/panics.TestPanics(0xc03c4d5c248?)
 	/home/runner/work/repo/repo/panics/p_test.go:6 +0x25
-testing.tRunner(0x2510f81dc248, 0x592ce8)
+testing.tRunner(0xc03c4d5c248, 0x592ce8)
 	/home/runner/work/_temp/go-toolchain/go/src/testing/testing.go:2036 +0xea
 created by testing.(*T).Run in goroutine 1
 	/home/runner/work/_temp/go-toolchain/go/src/testing/testing.go:2101 +0x4c5
-FAIL	example.com/fx/panics	0.005s
+FAIL	example.com/fx/panics	0.007s
 FAIL
 ### exit 1

@@ -19,7 +19,7 @@ export GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on
 work=${1:?usage: capture-go-output.sh WORKDIR > go-tool-output.txt}
 mod="$(mkdir -p "$work" && cd "$work" && pwd)/repo"
 mkdir "$mod" # fails when WORKDIR already holds a run, so one run never overwrites another
-mkdir "$mod"/{compile,syntax,vetp,tbuild,logs,panics}
+mkdir "$mod"/{compile,syntax,vetp,tbuild,dupbuild,badbuild,mixbuild,logs,panics}
 cd "$mod"
 
 printf 'module example.com/fx\n\ngo 1.26.0\n' > go.mod
@@ -79,6 +79,27 @@ func TestD(t *testing.T) {
 }
 EOF
 
+# Build constraints. Two //go:build lines, and one that does not parse, are package-loading errors
+# that name the file and no line. +build lines that disagree with the //go:build line are a vet error
+# with a line and column.
+cat > dupbuild/x.go <<'EOF'
+//go:build linux
+//go:build amd64
+
+package dupbuild
+EOF
+cat > badbuild/y.go <<'EOF'
+//go:build linux &&
+
+package badbuild
+EOF
+cat > mixbuild/z.go <<'EOF'
+//go:build linux
+// +build darwin
+
+package mixbuild
+EOF
+
 # Test log lines: one that cites a source file later in its text, as the rehearsal's ABSENCE lines do,
 # and one that fails.
 cat > logs/l_test.go <<'EOF'
@@ -132,6 +153,11 @@ in_dir() {
 	run go vet ./compile/
 	run go test -count=1 ./tbuild/
 	run go test -count=1 ./vetp/
+	run go build ./dupbuild/
+	run go vet ./dupbuild/
+	run go test -count=1 ./dupbuild/
+	run go build ./badbuild/
+	run go vet ./mixbuild/
 	run go test -count=1 -v ./logs/
 	run go test -count=1 ./panics/
 } | sed -e "s#$mod#/home/runner/work/repo/repo#g" -e "s#$(go env GOROOT)#/home/runner/work/_temp/go-toolchain/go#g"
