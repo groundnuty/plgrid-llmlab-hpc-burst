@@ -157,17 +157,21 @@ def tables(root):
             col("rss_mb_listener", "{:.0f}"), col("rss_mb_owner", "{:.0f}"), col("rss_mb_bridges", "{:.0f}"),
             col("fds_frps", "{:.0f}"), col("fds_listener", "{:.0f}"), col("fds_owner", "{:.0f}"), col("host_busy", "{:.2f}")))
     p("\n### Latency\n")
-    p("Pooled over the repetitions at 1 ms resolution (each value is a 1 ms bin's middle). TTFT runs from before the "
-      "client's connect, CONNECT included, to the first content token; the engine double waits 50 ms before each "
-      "token. The baseline dials each engine's socket directly, on the same host under the same load.\n")
-    p("| tunnels | streams | mode | TTFT p50 ms | TTFT p99 ms | gap p50 ms | gap p99 ms | probe p99 ms |")
-    p("|---:|---:|---|---:|---:|---:|---:|---:|")
+    p("Pooled at 1 ms resolution (each value is a 1 ms bin's middle) over the repetitions whose host was not CPU-bound; "
+      "where every repetition was host-bound, over all of them, marked \"(host-bound)\": those rows measure the runner. "
+      "TTFT runs from before the client's connect, CONNECT included, to the first content token; the engine double waits "
+      "50 ms before each token. The baseline dials each engine's socket directly, on the same host under the same load.\n")
+    p("| tunnels | streams | mode | reps pooled | TTFT p50 ms | TTFT p99 ms | gap p50 ms | gap p99 ms | probe p99 ms |")
+    p("|---:|---:|---|---|---:|---:|---:|---:|---:|")
     for k in keys:
         ok = [r for r in g[k] if r["status"] == "ok"]
+        free = [r for r in ok if r.get("host_bound") != "True"]
+        pooled = ",".join(r["rep"] for r in (free or ok)) + ("" if free else " (host-bound)")
+        ok = free or ok
         th = [hists[r["run_id"]]["ttft"] for r in ok if r["run_id"] in hists]
         gh = [hists[r["run_id"]]["gap"] for r in ok if r["run_id"] in hists]
         f = lambda x: "-" if x is None else "%.1f" % x  # noqa: E731
-        p("| %d | %d | %s | %s | %s | %s | %s | %s |" % (k[1], k[2], k[0], f(pooled_pct(th, 50)), f(pooled_pct(th, 99)),
+        p("| %d | %d | %s | %s | %s | %s | %s | %s | %s |" % (k[1], k[2], k[0], pooled, f(pooled_pct(th, 50)), f(pooled_pct(th, 99)),
                                                       f(pooled_pct(gh, 50)), f(pooled_pct(gh, 99)),
                                                       rng([num(r.get("probe_p99_ms")) for r in ok], "{:.0f}")))
     p("\n### Heartbeat loss\n")
@@ -224,26 +228,32 @@ def fit(points):
 
 
 def fits(root):
-    """Front cost per tunnel and per 1,000 tokens/s, fitted over the valid runs that were not host-bound."""
+    """Front cost per tunnel and per 1,000 tokens/s, fitted over the valid runs that were not host-bound,
+    for all repetitions and for each alone, with the token rate one front core carries at 70% busy."""
     runs, _, _ = load_results(root)
+    reps = sorted({r["rep"] for r in runs})
     for mode in ("direct", "host-dialed"):
-        rs = [r for r in runs if r["mode"] == mode and r["status"] == "ok" and r.get("valid") == "True"
-              and r.get("host_bound") != "True"]
-        pts = [(int(r["tunnels"]), num(r["tokens_per_s"]) / 1000, front_cores(r)) for r in rs if front_cores(r) is not None]
-        f = fit(pts)
-        rss = [(int(r["tunnels"]), int(r["tunnels"]) * int(r["streams"]) / 1000,
-                sum(num(r.get("rss_mb_" + k)) or 0 for k in FRONT)) for r in rs]
-        fr = fit(rss)
-        fds = [(int(r["tunnels"]), int(r["tunnels"]) * int(r["streams"]) / 1000,
-                sum(num(r.get("fds_" + k)) or 0 for k in FRONT)) for r in rs]
-        ff = fit(fds)
-        print("%s: %d runs" % (mode, len(rs)))
-        if f:
-            print("  front cores = %.5f per tunnel + %.4f per 1k tok/s + %.4f" % f)
-        if fr:
-            print("  front RSS MB = %.3f per tunnel + %.2f per 1k streams + %.1f" % fr)
-        if ff:
-            print("  front fds = %.2f per tunnel + %.1f per 1k streams + %.1f" % ff)
+        for label, rs0 in [("all reps", runs)] + [("rep " + x, [r for r in runs if r["rep"] == x]) for x in reps]:
+            rs = [r for r in rs0 if r["mode"] == mode and r["status"] == "ok" and r.get("valid") == "True"
+                  and r.get("host_bound") != "True"]
+            f = fit([(int(r["tunnels"]), num(r["tokens_per_s"]) / 1000, front_cores(r)) for r in rs])
+            if not f:
+                continue
+            per_t, per_k, base = f
+            core = lambda t: 1000 * (0.7 - base - per_t * t) / per_k  # noqa: E731
+            print("%-11s %-8s %2d runs: front cores = %.5f per tunnel + %.4f per 1k tok/s + %.4f; "
+                  "one core at 70%%: %.0f tok/s at 100 tunnels, %.0f at 300" % (mode, label, len(rs), per_t, per_k, base,
+                                                                              core(100), core(300)))
+            if label != "all reps":
+                continue
+            rss = fit([(int(r["tunnels"]), int(r["tunnels"]) * int(r["streams"]) / 1000,
+                        sum(num(r.get("rss_mb_" + k)) or 0 for k in FRONT)) for r in rs])
+            fds = fit([(int(r["tunnels"]), int(r["tunnels"]) * int(r["streams"]) / 1000,
+                        sum(num(r.get("fds_" + k)) or 0 for k in FRONT)) for r in rs])
+            if rss:
+                print("%-11s %-8s front RSS MB = %.3f per tunnel + %.2f per 1k streams + %.1f" % ((mode, label) + rss))
+            if fds:
+                print("%-11s %-8s front fds = %.2f per tunnel + %.1f per 1k streams + %.1f" % ((mode, label) + fds))
 
 
 if __name__ == "__main__":

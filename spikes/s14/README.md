@@ -7,14 +7,15 @@ Issue #313. One front host, one frps and the front's dial-home listener, with 1 
 The answer to open question 11: on one front, CPU per token is the limit, not the number of tunnels. Up to 300 tunnels, the front's cost grew linearly with the token rate, plus a small cost per tunnel, and no tunnel dropped. Every number below is from three 4-CPU hosted runners (Environment); "valid" means every tunnel received a token in every second of the 30 s window.
 
 - **The front's CPU is linear, with no bend through 300 tunnels while the host had CPU to spare.** Fitted over the valid runs whose host was not CPU-bound (`summarize.py fits`):
-  - **direct mode** (frps plus the dial-home listener): 0.088 cores per 1,000 tokens/s, plus 0.68 thousandths of a core per tunnel, plus 0.014 (24 runs). At 50 tunnels × 8 streams that is 8.4% of a core per 1,000 tokens/s (8.1–11.6% over the repetitions), in line with S1c's 7.9–8.7% for one tunnel.
-  - **host-dialed mode** (plus the relay owner and the ssh stand-ins): 0.124 cores per 1,000 tokens/s, plus 1.5 thousandths of a core per tunnel, plus 0.041 (22 runs). That is 1.4 times direct per token and 2.2 times per tunnel, without ssh's encryption, which the stand-in does not do.
+  - **direct mode** (frps plus the dial-home listener): 0.076–0.109 cores per 1,000 tokens/s, plus 0.6–0.8 thousandths of a core per tunnel, fitted per repetition (0.088 and 0.68 over all three; 24 runs). At 50 tunnels × 8 streams that is 8.4% of a core per 1,000 tokens/s (8.1–11.6% over the repetitions), in line with S1c's 7.9–8.7% for one tunnel.
+  - **host-dialed mode** (plus the relay owner and the ssh stand-ins): 0.126–0.187 cores per 1,000 tokens/s, plus 1.4–2.2 thousandths of a core per tunnel (0.124 and 1.5 over all three; 22 runs). That is about 1.4–1.7 times direct per token and 2.2–2.7 times per tunnel, without ssh's encryption, which the stand-in does not do.
+  - **The ranges are the runners'.** Repetition 3 took 9–44% more CPU than reps 1 and 2 on every cell that was not host-bound, and its fit gives the high end of each range (Results).
 - **Memory and descriptors are not limits at this scale.**
   - frps held 94 MB at 300 tunnels × 1 stream and 242 MB at 300 × 8. The listener held 54–57 MB.
   - Descriptors: frps holds one per tunnel plus one per stream in flight (2,730 at 300 × 8); the listener two per tunnel (608 at 300); the relay owner 9 per Allocation (2,707 at 300); each ssh stand-in 9 descriptors and 3 MB.
 - **Latency: the tunnel adds little while the host has headroom.** Through 300 tunnels at 1 stream, and 50 tunnels at 8 streams:
   - direct mode added 1–3 ms to the median TTFT and at most 8 ms to its p99 over the no-tunnel baseline on the same host, and at most 3 ms to the gap's p99;
-  - host-dialed mode added up to 16 ms at p99 at 50 × 8.
+  - host-dialed mode added up to 12 ms at p99 at 50 × 8, and 39 ms at 300 × 1, where its hosts were already 76–80% busy.
 - **The bend came from the runner, not the front.** The runners carried both ends on 4 CPUs.
   - At 100 tunnels × 8 streams (15,800 tokens/s offered), the hosts were 94–99% busy. TTFT p99 rose to 124 ms in direct mode and 236 ms in host-dialed mode, and throughput fell 2–22% short.
   - At 300 × 8 (47,000 tokens/s offered), the tunnels delivered 11,800–20,600 tokens/s, and 5 of 6 tunnel runs failed the validity rule.
@@ -166,40 +167,40 @@ Median over the repetitions (range in brackets when they differ). CPU is cores a
 
 ### Latency
 
-Pooled over the repetitions at 1 ms resolution (each value is a 1 ms bin's middle). TTFT runs from before the client's connect, CONNECT included, to the first content token; the engine double waits 50 ms before each token. The baseline dials each engine's socket directly, on the same host under the same load.
+Pooled at 1 ms resolution (each value is a 1 ms bin's middle) over the repetitions whose host was not CPU-bound; where every repetition was host-bound, over all of them, marked "(host-bound)": those rows measure the runner. TTFT runs from before the client's connect, CONNECT included, to the first content token; the engine double waits 50 ms before each token. The baseline dials each engine's socket directly, on the same host under the same load.
 
-| tunnels | streams | mode | TTFT p50 ms | TTFT p99 ms | gap p50 ms | gap p99 ms | probe p99 ms |
-|---:|---:|---|---:|---:|---:|---:|---:|
-| 1 | 1 | baseline | 50.5 | 51.5 | 50.5 | 50.5 | 1 (0–1) |
-| 1 | 1 | direct | 51.5 | 52.5 | 50.5 | 50.5 | 1 (1–2) |
-| 1 | 1 | host-dialed | 52.5 | 52.5 | 50.5 | 51.5 | 2 |
-| 10 | 1 | baseline | 50.5 | 51.5 | 50.5 | 51.5 | 1 (0–1) |
-| 10 | 1 | direct | 51.5 | 53.5 | 50.5 | 51.5 | 2 |
-| 10 | 1 | host-dialed | 52.5 | 53.5 | 50.5 | 51.5 | 3 (2–5) |
-| 50 | 1 | baseline | 50.5 | 51.5 | 50.5 | 51.5 | 1 (0–1) |
-| 50 | 1 | direct | 52.5 | 54.5 | 50.5 | 52.5 | 3 |
-| 50 | 1 | host-dialed | 52.5 | 54.5 | 50.5 | 52.5 | 4 (3–7) |
-| 100 | 1 | baseline | 50.5 | 51.5 | 50.5 | 51.5 | 0 (0–1) |
-| 100 | 1 | direct | 52.5 | 55.5 | 50.5 | 52.5 | 3 (3–4) |
-| 100 | 1 | host-dialed | 53.5 | 58.5 | 50.5 | 53.5 | 6 (6–8) |
-| 300 | 1 | baseline | 50.5 | 52.5 | 50.5 | 51.5 | 1 |
-| 300 | 1 | direct | 53.5 | 60.5 | 50.5 | 54.5 | 8 (6–13) |
-| 300 | 1 | host-dialed | 56.5 | 145.5 | 50.5 | 73.5 | 59 (27–172) |
-| 1 | 8 | baseline | 51.5 | 51.5 | 50.5 | 51.5 | 0 (0–1) |
-| 1 | 8 | direct | 51.5 | 52.5 | 50.5 | 51.5 | 1 (1–2) |
-| 1 | 8 | host-dialed | 52.5 | 53.5 | 50.5 | 51.5 | 2 |
-| 10 | 8 | baseline | 50.5 | 51.5 | 50.5 | 51.5 | 0 (0–1) |
-| 10 | 8 | direct | 52.5 | 55.5 | 50.5 | 52.5 | 2 (2–4) |
-| 10 | 8 | host-dialed | 52.5 | 54.5 | 50.5 | 52.5 | 5 (3–5) |
-| 50 | 8 | baseline | 50.5 | 52.5 | 50.5 | 51.5 | 1 (1–2) |
-| 50 | 8 | direct | 52.5 | 59.5 | 50.5 | 53.5 | 7 (5–8) |
-| 50 | 8 | host-dialed | 55.5 | 68.5 | 50.5 | 57.5 | 13 (11–26) |
-| 100 | 8 | baseline | 50.5 | 53.5 | 50.5 | 52.5 | 2 (1–2) |
-| 100 | 8 | direct | 61.5 | 123.5 | 51.5 | 81.5 | 42 (30–82) |
-| 100 | 8 | host-dialed | 104.5 | 235.5 | 55.5 | 115.5 | 117 (80–209) |
-| 300 | 8 | baseline | 51.5 | 62.5 | 50.5 | 59.5 | 4 (3–21) |
-| 300 | 8 | direct | 485.5 | 2623.5 | 84.5 | 916.5 | 2322 (2005–2898) |
-| 300 | 8 | host-dialed | 1533.5 | 3589.5 | 0.5 | 923.5 | 2723 (2433–4248) |
+| tunnels | streams | mode | reps pooled | TTFT p50 ms | TTFT p99 ms | gap p50 ms | gap p99 ms | probe p99 ms |
+|---:|---:|---|---|---:|---:|---:|---:|---:|
+| 1 | 1 | baseline | 1,2,3 | 50.5 | 51.5 | 50.5 | 50.5 | 1 (0–1) |
+| 1 | 1 | direct | 1,2,3 | 51.5 | 52.5 | 50.5 | 50.5 | 1 (1–2) |
+| 1 | 1 | host-dialed | 1,2,3 | 52.5 | 52.5 | 50.5 | 51.5 | 2 |
+| 10 | 1 | baseline | 1,2,3 | 50.5 | 51.5 | 50.5 | 51.5 | 1 (0–1) |
+| 10 | 1 | direct | 1,2,3 | 51.5 | 53.5 | 50.5 | 51.5 | 2 |
+| 10 | 1 | host-dialed | 1,2,3 | 52.5 | 53.5 | 50.5 | 51.5 | 3 (2–5) |
+| 50 | 1 | baseline | 1,2,3 | 50.5 | 51.5 | 50.5 | 51.5 | 1 (0–1) |
+| 50 | 1 | direct | 1,2,3 | 52.5 | 54.5 | 50.5 | 52.5 | 3 |
+| 50 | 1 | host-dialed | 1,2,3 | 52.5 | 54.5 | 50.5 | 52.5 | 4 (3–7) |
+| 100 | 1 | baseline | 1,2,3 | 50.5 | 51.5 | 50.5 | 51.5 | 0 (0–1) |
+| 100 | 1 | direct | 1,2,3 | 52.5 | 55.5 | 50.5 | 52.5 | 3 (3–4) |
+| 100 | 1 | host-dialed | 1,2,3 | 53.5 | 58.5 | 50.5 | 53.5 | 6 (6–8) |
+| 300 | 1 | baseline | 1,2,3 | 50.5 | 52.5 | 50.5 | 51.5 | 1 |
+| 300 | 1 | direct | 1,2,3 | 53.5 | 60.5 | 50.5 | 54.5 | 8 (6–13) |
+| 300 | 1 | host-dialed | 1,2 | 55.5 | 91.5 | 50.5 | 61.5 | 43 (27–59) |
+| 1 | 8 | baseline | 1,2,3 | 51.5 | 51.5 | 50.5 | 51.5 | 0 (0–1) |
+| 1 | 8 | direct | 1,2,3 | 51.5 | 52.5 | 50.5 | 51.5 | 1 (1–2) |
+| 1 | 8 | host-dialed | 1,2,3 | 52.5 | 53.5 | 50.5 | 51.5 | 2 |
+| 10 | 8 | baseline | 1,2,3 | 50.5 | 51.5 | 50.5 | 51.5 | 0 (0–1) |
+| 10 | 8 | direct | 1,2,3 | 52.5 | 55.5 | 50.5 | 52.5 | 2 (2–4) |
+| 10 | 8 | host-dialed | 1,2,3 | 52.5 | 54.5 | 50.5 | 52.5 | 5 (3–5) |
+| 50 | 8 | baseline | 1,2,3 | 50.5 | 52.5 | 50.5 | 51.5 | 1 (1–2) |
+| 50 | 8 | direct | 1,2,3 | 52.5 | 59.5 | 50.5 | 53.5 | 7 (5–8) |
+| 50 | 8 | host-dialed | 1,2 | 55.5 | 64.5 | 50.5 | 55.5 | 12 (11–13) |
+| 100 | 8 | baseline | 1,2,3 | 50.5 | 53.5 | 50.5 | 52.5 | 2 (1–2) |
+| 100 | 8 | direct | 1,2,3 (host-bound) | 61.5 | 123.5 | 51.5 | 81.5 | 42 (30–82) |
+| 100 | 8 | host-dialed | 1,2,3 (host-bound) | 104.5 | 235.5 | 55.5 | 115.5 | 117 (80–209) |
+| 300 | 8 | baseline | 1,2,3 | 51.5 | 62.5 | 50.5 | 59.5 | 4 (3–21) |
+| 300 | 8 | direct | 1,2,3 (host-bound) | 485.5 | 2623.5 | 84.5 | 916.5 | 2322 (2005–2898) |
+| 300 | 8 | host-dialed | 1,2,3 (host-bound) | 1533.5 | 3589.5 | 0.5 | 923.5 | 2723 (2433–4248) |
 
 ### Heartbeat loss
 
@@ -239,17 +240,19 @@ Summed over the repetitions. A drop is a tunnel frps's proxy list showed not onl
   - In those, every tunnel received 13–19 tokens in its emptiest second at 1 stream, and 90–157 at 8 streams. Each started 9–10 requests (1 stream) or 56–80 (8 streams) in the window.
   - 300 × 8 is invalid in 5 of its 6 tunnel runs (4 to 275 tunnels had an empty second), and its runs delivered 12–40 requests per tunnel instead of 72–80. It is excluded from the fits and the verdict: those runs measure a saturated runner.
 - **Host-bound runs.** The rule (all CPUs at least 85% busy) flagged both modes at 100 × 8 and 300 × 8 in every repetition, plus host-dialed 50 × 8 and 300 × 1 in repetition 3. Their latency is the runner's. The fits leave them out.
-- **Repetition 3 ran hotter.** On all 16 cells that were not host-bound, the front took 9–44% more CPU on repetition 3 than the mean of reps 1 and 2, although reps 2 and 3 had the same CPU model. On the 4 host-bound cells it took the same (0.98–1.00 of that mean). The ranges in the cost table show this, and the fits include all three repetitions, so the fitted costs lean toward the hotter runner.
+- **Repetition 3 ran hotter.** On all 16 cells that were not host-bound, the front took 9–44% more CPU on repetition 3 than the mean of reps 1 and 2, although reps 2 and 3 had the same CPU model. On the 4 host-bound cells it took the same (0.98–1.00 of that mean). The ranges in the cost table show this, and the fits are given per repetition, rep 3's at the high end.
 - **Host-dialed 300 × 1, per repetition:** TTFT p99 109 / 75 / 198 ms and gap p99 67 / 58 / 84 ms, at host busy 0.76 / 0.80 / 0.96. Direct mode at the same size: 60 / 58 / 62 ms TTFT p99, at 0.54 / 0.55 / 0.76 busy.
 
 ## Verdict
 
 **Where cost bends.** It does not, through 300 tunnels, as far as the hosted runners could show it.
-- The front's CPU follows `cores ≈ a × (tokens/s ÷ 1000) + b × tunnels + c`:
-  - direct mode: a = 0.088, b = 0.00068, c = 0.014;
-  - host-dialed mode: a = 0.124, b = 0.0015, c = 0.041.
-- The per-tunnel term is the steady cost of an idle tunnel: two yamux keepalives and an application heartbeat every 10 s, the probe every 10 s, and the controller's list read. 300 tunnels cost about 0.2 cores in direct mode and 0.45 in host-dialed mode before any token flows.
-- The per-token term dominates as soon as streams run. At 20 tokens/s a stream costs about 1.8 thousandths of a core in direct mode, and 2.5 thousandths in host-dialed mode.
+- The front's CPU follows `cores ≈ a × (tokens/s ÷ 1000) + b × tunnels + c`, fitted per repetition (`summarize.py fits`):
+  - direct mode: a = 0.076–0.109, b = 0.0006–0.0008, c = 0.011–0.017;
+  - host-dialed mode: a = 0.126–0.187, b = 0.0014–0.0022, c = 0.017–0.024.
+
+  The low ends are reps 1 and 2, the high ends rep 3, the hotter runner.
+- The per-tunnel term is the steady cost of an idle tunnel: two yamux keepalives and an application heartbeat every 10 s, the probe every 10 s, and the controller's list read. 300 tunnels cost 0.18–0.25 cores in direct mode and 0.4–0.66 in host-dialed mode before any token flows.
+- The per-token term dominates as soon as streams run. At 20 tokens/s a stream costs 1.5–2.2 thousandths of a core in direct mode, and 2.5–3.7 thousandths in host-dialed mode.
 - **The cost per token falls with streams per tunnel.** It was 11.1% of a core per 1,000 tokens/s at 300 × 1 (5,900 tokens/s over 300 tunnels) and 8.4% at 50 × 8 (7,900 tokens/s over 50). Busier tunnels amortise their fixed cost.
 - **Memory grows linearly and stays small.** For the front's processes together, the fit is 0.22 MB per tunnel plus 0.09 MB per stream in flight, plus 54 MB, in direct mode. Host-dialed mode adds about 6.3 MB per tunnel, nearly all of it the two ssh stand-ins per Allocation. A real OpenSSH client is likely heavier than the 3 MB stand-in.
 
@@ -260,8 +263,8 @@ Summed over the repetitions. A drop is a tunnel frps's proxy list showed not onl
 
 **What it implies for a per-front limit.**
 1. **Size the front by token rate per front core, not by tunnels.** To keep the front's processes under 70% of C dedicated cores, the offered rate must satisfy `tokens/s ≤ 1000 × (0.7 C − c − b × tunnels) ÷ a`. On one front core:
-   - direct mode: about 7,000 tokens/s at 100 tunnels and 5,400 at 300, that is 270–350 streams of 20 tokens/s;
-   - host-dialed mode: about 4,100 tokens/s at 100 tunnels, before ssh's encryption.
+   - direct mode: 5,500–8,200 tokens/s at 100 tunnels and 4,000–6,700 at 300, that is 200–410 streams of 20 tokens/s;
+   - host-dialed mode: 2,500–4,300 tokens/s at 100 tunnels, before ssh's encryption. At 300 tunnels the per-tunnel term alone takes 0.4–0.66 of the core.
 
    This is a linear extrapolation beyond the 1.1 cores measured in direct mode. S1c's link rule still applies on top: payload bytes/s ÷ about 305 bytes per token.
 2. **No tunnel-count cap is needed for hundreds of tunnels.** No tunnel dropped and none was slow to register, even on a saturated host. A count cap would only stand in for the CPU budget above.
@@ -273,11 +276,11 @@ Summed over the repetitions. A drop is a tunnel frps's proxy list showed not onl
 For the science agent to amend. It replaces the item's current text.
 
 > 11. **Many tunnels on one front.** **Answered for beta's sizing** (spike S14, issue #313): on loopback through S1c's emulator, on three 4-CPU hosted runners, with 1 to 300 frpc tunnels at 1 and 8 streams of 20 tokens/s each, in direct and host-dialed mode:
->     - **CPU is linear in the token rate, with a small term per tunnel, and does not bend up to 300 tunnels.** In direct mode, frps plus the dial-home listener take about 0.09 cores per 1,000 tokens/s plus 0.0007 cores per tunnel. S1c's 7.9–8.7% at one tunnel agrees. In host-dialed mode, the relay owner and its ssh processes raise that to about 0.12 cores per 1,000 tokens/s plus 0.0015 per tunnel, not counting ssh's encryption.
+>     - **CPU is linear in the token rate, with a small term per tunnel, and does not bend up to 300 tunnels.** In direct mode, frps plus the dial-home listener take 0.08–0.11 cores per 1,000 tokens/s plus 0.0006–0.0008 cores per tunnel; the range is the runners'. S1c's 7.9–8.7% at one tunnel agrees. In host-dialed mode, the relay owner and its ssh processes raise that to 0.13–0.19 cores per 1,000 tokens/s plus 0.0014–0.0022 per tunnel, not counting ssh's encryption.
 >     - **Memory and descriptors are not limits at this scale.** At 300 tunnels × 8 streams, frps held about 250 MB and 2,700 descriptors (one per tunnel plus one per stream in flight), and the listener 57 MB and 2 descriptors per tunnel. Host-dialed mode adds 9 descriptors in the controller and two ssh processes per Allocation.
 >     - **No tunnel dropped.** In 90 runs there was no frps drop, no frpc re-login, no relay restart and no failed probe, including runs where tokens queued for seconds on a saturated host. All 300 tunnels registered within 3 s.
 >     - **Latency bends only with the host's CPU.** Tunnels add 1–3 ms to the median time to first token while the host has headroom; the p99 grows once its CPUs near saturation.
->     - **The per-front limit is a token rate per front core, not a tunnel count.** Keep `0.09 × (tokens/s ÷ 1000) + 0.0007 × tunnels` (direct mode; `0.125` and `0.0015` in host-dialed mode, plus ssh) under 70% of the front's cores: about 5,000–7,000 tokens/s per core, 250–350 streams of 20 tokens/s, at 100–300 tunnels. The link still bounds the same rate at payload bytes/s ÷ about 305 bytes per token (operational-readiness item 5). The front's open-files hard limit must cover frps's tunnels plus streams in flight, and the listener's two per tunnel.
+>     - **The per-front limit is a token rate per front core, not a tunnel count.** Keep `0.11 × (tokens/s ÷ 1000) + 0.0008 × tunnels` (direct mode, at the high end of the range; `0.19` and `0.0022` in host-dialed mode, plus ssh) under 70% of the front's cores. That is at least 4,000–5,500 tokens/s per core, 200–275 streams of 20 tokens/s, at 100–300 tunnels in direct mode, and up to 8,200 on the faster runners. The link still bounds the same rate at payload bytes/s ÷ about 305 bytes per token (operational-readiness item 5). The front's open-files hard limit must cover frps's tunnels plus streams in flight, and the listener's two per tunnel.
 >     - **Still open:** the front near full CPU on a host that does not also carry the instances, since S14's runners saturated first; many tunnels sharing a capped link; ssh's encryption cost per relay; and the plugin endpoint under a mass re-login of hundreds of frpc at once.
 
 ## Environment
@@ -290,6 +293,7 @@ For the science agent to amend. It replaces the item's current text.
 | 2 | AMD EPYC 9V74 80-Core Processor | 4 | 15,983 MB | 7.0.0-1017-azure |
 | 3 | AMD EPYC 9V74 80-Core Processor | 4 | 15,983 MB | 7.0.0-1017-azure |
 
+- **The run:** workflow run 42814868491 on draft PR #323, whose head is the spike's commit `e2b33f79` plus the one-off workflow (each job logs `spike head e2b33f79…`). The commit that added these results changed only `README.md`, `results/` and `summarize.py`, so the harness in this directory is the one that ran. The raw files stay in the run's artifacts, kept until 24 Nov 2026.
 - **Runs:** each job took 23–24 min, 10 Nov 2026, 12:20–12:44 UTC. Each runner had Go 1.26.0 (from `go.mod`), Python 3.12.3, open files 65,536 (soft raised to the hard limit), `tcp_tw_reuse` 2 and ports 32768–60999.
 - **Downloads:** each runner downloaded the frp and toxiproxy tarballs and checked them against the pins. The extracted toxiproxy-server matched the sum recorded from S1c's extraction, so `TOXI_SERVER_SHA` was checked independently.
 - **Priority:** frps, the listener, the owner (and the stand-ins it starts), toxiproxy and the client ran at nice 0; frpc and the node (engines, job sides, relay steps) at nice 10. The front's processes got CPU first, as on a front host that does not carry the instances. Under saturation the instance side starved first, so the latency there is the instance side's as much as the front's.
