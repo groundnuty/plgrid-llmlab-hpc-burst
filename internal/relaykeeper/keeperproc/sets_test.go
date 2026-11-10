@@ -74,26 +74,36 @@ func TestANewLeadersIncompleteSetStopsNoRelay(t *testing.T) {
 	w.roundTrip(j1, serving, 16<<10)
 }
 
-// After a keeper restart, with no set yet, nothing starts: the stream across
-// the restart is cut (a keeper restart cuts every host-dialed stream), and
-// the restarted keeper shows no relay. The leader's set that has expired on
-// arrival changes nothing: no relay is wanted. Its set that is accepted but
-// expires at once (aged) makes the relays wanted, and each start is refused
-// for the expiry, in the keeper's log: a new serving connection gets no
-// session within the job's wait, and no srun line reaches the login node.
-// Then a fresh set starts both relays, at the restarted keeper's E, and a new
-// stream crosses them, whole.
+// After a keeper restart nothing starts until a fresh set comes (HBEP-6:
+// "Sets aren't persisted: after its own restart, the keeper starts nothing
+// until a fresh set arrives"). The stream across the restart is cut, as a
+// keeper restart cuts every host-dialed stream. With no set yet, the
+// restarted keeper shows no relay, a new serving connection gets no session
+// within the job's wait, and no srun line for the job reaches the login
+// node; the leader's set that has expired on arrival changes none of that.
+// A fresh set then starts both relays, at the restarted keeper's E, and a
+// stream crosses them. When that set expires (the leader's last set rests on
+// a listing that expires at once), the control relay's ssh, ended through
+// its verified pin, is refused its restart for the expiry, with no srun line,
+// while the stream runs on; a fresh set restarts it.
+//
+// The expiring set is always one the relays already run under: a relay's
+// first start after a new Want comes within a jitter of [0, 200 ms], which
+// can beat a 5 ms expiry, but a restart after a session's drop waits at
+// least 100 ms.
 //
 // Mutant (keeper.go, jobs.authorized): the expiry's case, "case
-// !k.o.Now().Before(hs.expires):", dropped, so the aged set starts the
-// relays.
+// !k.o.Now().Before(hs.expires):", dropped, so the control relay is
+// restarted under the expired set. (A keeper that kept its sets across a
+// restart would fail the no-set checks; no single line of today's code does
+// that.)
 func TestAfterAKeeperRestartOnlyAFreshSetStartsRelays(t *testing.T) {
 	w := newWorld(t)
 	j := w.submit("hb-kp-rsex-0123456789ab", 5*time.Second)
 	k := w.startKeeper("")
 	lead := w.startDouble("leader", k.sock)
-	full := w.set(provA, 1, true, w.entry(j, gen1))
-	mustReport(t, lead.lead(full), "the leader's set")
+	fresh := w.set(provA, 1, true, w.entry(j, gen1))
+	mustReport(t, lead.lead(fresh), "the leader's set")
 	k.waitUp(provA, j)
 	s := w.openStream(j, serving)
 	s.mustEcho(64<<10, "before the keeper's restart")
@@ -103,30 +113,20 @@ func TestAfterAKeeperRestartOnlyAFreshSetStartsRelays(t *testing.T) {
 		t.Error("the serving stream still echoes across the keeper's restart")
 	}
 	runs := len(w.sruns(j.id))
-	m := k2.log.mark()
 	if rs := k2.relaysOf(provA, j.tag); len(rs) != 0 {
 		t.Errorf("the restarted keeper shows relays before any set: %+v", rs)
 	}
-	if r := mustReport(t, lead.set(expired(w.set(provA, 1, true, w.entry(j, gen1)))), "the expired set"); !r.Expired || len(r.Relays) != 0 {
+	w.noSession(j, serving, "with no set after the keeper's restart")
+	if r := mustReport(t, lead.set(expired(fresh)), "the expired set"); !r.Expired || len(r.Relays) != 0 {
 		t.Errorf("the report of a set expired on arrival: expired %v, relays %+v; want expired and none", r.Expired, r.Relays)
 	}
 	if rs := k2.relaysOf(provA, j.tag); len(rs) != 0 {
 		t.Errorf("a set expired on arrival made relays: %+v", rs)
 	}
-	if r := mustReport(t, lead.set(aged(w.set(provA, 1, true, w.entry(j, gen1)))), "the aged set"); r.Expired {
-		t.Error("the aged set was expired on arrival: it must be accepted, and expire after")
-	}
-	for _, ch := range agentapi.RelayChannels {
-		k2.log.waitLine(t, m, "the "+string(ch)+" relay's start refused for the expiry", append(relayLog(logNotStarted, j.tag, ch), whyExpired)...)
-	}
-	w.noSession(j, serving, "under an expired set after the keeper's restart")
 	if n := len(w.sruns(j.id)); n != runs {
-		t.Errorf("%d srun lines for the job reached the login node under an expired set, want none", n-runs)
+		t.Errorf("%d srun lines for the job reached the login node after the keeper's restart with no fresh set, want none", n-runs)
 	}
-	if got := k2.log.since(m, logStarted, "tag="+j.tag); len(got) != 0 {
-		t.Errorf("a relay started under an expired set: %q", got)
-	}
-	mustReport(t, lead.lead(w.set(provA, 1, true, w.entry(j, gen1))), "the fresh set")
+	mustReport(t, lead.lead(fresh), "the fresh set")
 	up := k2.waitUp(provA, j)
 	for _, ch := range agentapi.RelayChannels {
 		if up[ch].Epoch != firstE+1 {
@@ -135,6 +135,25 @@ func TestAfterAKeeperRestartOnlyAFreshSetStartsRelays(t *testing.T) {
 	}
 	s2 := w.openStream(j, serving)
 	s2.mustEcho(64<<10, "under the fresh set")
+	mustReport(t, lead.set(aged(fresh)), "the leader's last set")
+	m := k2.log.mark()
+	runsC := w.srunsOn(j.id, control)
+	k2.pins(map[agentapi.RelayChannel]wire.RelayState{control: up[control]})[control].kill(t, "the control relay's ssh under the expired set")
+	k2.log.waitLine(t, m, "the control relay's restart refused for the expiry", append(relayLog(logNotStarted, j.tag, control), whyExpired)...)
+	s2.mustEcho(32<<10, "under the expired set")
+	if r, ok := k2.upOf(provA, j.tag, control); ok {
+		t.Errorf("the control relay %+v runs under the expired set", r)
+	}
+	if n := w.srunsOn(j.id, control); n != runsC {
+		t.Errorf("%d srun lines for the control relay under the expired set, want none", n-runsC)
+	}
+	mustReport(t, lead.lead(fresh), "the fresh set after the expiry")
+	waitFor(t, time.Minute, "the control relay restarted under the fresh set", func() bool {
+		r, ok := k2.upOf(provA, j.tag, control)
+		return ok && r.PID != up[control].PID && j.status(t)[control].Connected
+	})
+	w.roundTrip(j, control, 16<<10)
+	s2.mustEcho(32<<10, "after the fresh set")
 	s2.whole()
 }
 
