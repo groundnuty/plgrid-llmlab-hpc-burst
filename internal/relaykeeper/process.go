@@ -13,8 +13,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/hostdial"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/relaykeeper/wire"
@@ -30,6 +33,35 @@ func SocketPath(stateDir string) string { return filepath.Join(stateDir, "relayk
 // SSHDir is the keeper's directory of -F files under the launcher's state
 // directory, mode 700.
 func SSHDir(stateDir string) string { return filepath.Join(stateDir, "relaykeeper", "ssh") }
+
+// LockPath is the keeper's process lock under the launcher's state directory.
+func LockPath(stateDir string) string { return filepath.Join(stateDir, "relaykeeper", "lock") }
+
+// lockProcess takes the keeper's exclusive process lock (flock LOCK_EX |
+// LOCK_NB on LockPath), held by the returned file for the process's life,
+// BEFORE the state file is read or written: a second keeper on the same
+// state directory fails at once, naming the lock, and changes nothing (the
+// review of PR 356: Open's OpenState bumps the start count and writes the
+// state file before Listen could find a live keeper, so a second keeper
+// could overwrite a fence or a final end the live one had just synced).
+func lockProcess(stateDir string) (*os.File, error) {
+	path := LockPath(stateDir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("relaykeeper: the state directory: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("relaykeeper: the process lock: %w", err)
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return nil, fmt.Errorf("relaykeeper: another relay keeper holds %s: this one changes nothing", path)
+		}
+		return nil, fmt.Errorf("relaykeeper: the process lock %s: %w", path, err)
+	}
+	return f, nil
+}
 
 // DefaultSettleEvery is how often a pending end is written again with no
 // request (Keeper.Settle).
@@ -77,6 +109,11 @@ func Run(ctx context.Context, c ProcessConfig) error {
 	if c.SettleEvery <= 0 {
 		c.SettleEvery = DefaultSettleEvery
 	}
+	lock, err := lockProcess(c.StateDir)
+	if err != nil {
+		return err
+	}
+	defer lock.Close() // the lock goes with the file, at the process's end
 	var runner *OwnerRunner
 	k, err := Open(Options{State: StatePath(c.StateDir), ClaimLapse: c.ClaimLapse, Logger: c.Logger, Now: c.Now,
 		Runner: func(epoch int64) (Runner, error) {

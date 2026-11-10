@@ -122,7 +122,11 @@ type Target struct {
 	// OnStartFailed, when set, is told when an ssh start that BeforeStart
 	// allowed, or that was made with no BeforeStart, fails to start a
 	// process; OnStart is told when it does. So every start is resolved by
-	// exactly one of the two (issue #343). Nil is alpha's.
+	// exactly one of the two (issue #343). Nil is alpha's. One failed start
+	// may leave a process: with OwnerOptions.Pidfd, a start that clone gave
+	// no pidfd is refused though its process started (startPidfdProcess); its
+	// pipes are closed, so it normally ends by itself, unlisted meanwhile, and
+	// NewOwner's probe of pidfd_open makes it unlikely.
 	OnStartFailed func(ch agentapi.RelayChannel)
 	// OnExit, when set, is told once a started ssh process has exited and
 	// been reaped, after OnStart was told of its start, so its holder knows

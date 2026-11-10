@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -269,7 +270,11 @@ func (q *opQueue) pending() int {
 }
 
 // relay is the Provider's relay maker for s, its -F file written under a
-// stable name; the caller holds p.mu.
+// stable name; the caller holds p.mu. A stated limit (the review of PR 356):
+// the makers of a Provider's earlier ssh settings, and their -F files, are
+// kept until the keeper stops, one per settings the Provider has used, and
+// the files stay in the keeper's ssh directory after it stops; a restarted
+// keeper writes the same names again.
 func (p *provRunner) relay(s wire.SSH) (*sshrun.Relay, error) {
 	b, _ := json.Marshal(s)
 	sum := sha256.Sum256(b)
@@ -341,9 +346,11 @@ func (p *provRunner) want(s wire.SSH, w Want) {
 	}
 	host := strings.ToLower(rl.Login())
 	e := w.Entry
-	// The Provider's UID is part of the relays' identity, so a re-created
-	// Provider's Want starts its own relays.
-	ident := e.Gen + "/" + w.ProviderUID
+	// The Want's incarnation is the relays' identity (Want.Incarnation): a
+	// re-created Provider, a new generation, a move, and a Drop followed by
+	// the same entry wanted again each start their own relays, and only a
+	// re-sent Want of the same incarnation is the same.
+	ident := e.Gen + "/" + w.ProviderUID + "/" + strconv.FormatUint(w.Incarnation, 10)
 	p.mu.Lock()
 	if in := p.cur[e.Tag]; in != nil && in.want.Entry == e && in.host == host && in.ident == ident {
 		p.mu.Unlock()
@@ -377,9 +384,20 @@ func (p *provRunner) want(s wire.SSH, w Want) {
 		// cleared on its refusal, so the instance is never reaped while a
 		// start of it is at or past the gate (duty 4).
 		BeforeStart: func(ch agentapi.RelayChannel, epoch, seq int64) bool {
+			// Only the tag's current instance may start: a stopping or
+			// forgotten one, whose attempt was already past its listing when
+			// it was replaced or dropped, never launches (the review of PR
+			// 356). Checked and marked pending under p.mu together, so reap
+			// cannot forget the instance in between.
+			p.mu.Lock()
+			if p.cur[e.Tag] != in {
+				p.mu.Unlock()
+				return false
+			}
 			in.mu.Lock()
 			in.pending[ch] = true
 			in.mu.Unlock()
+			p.mu.Unlock()
 			if w.BeforeStart != nil && !w.BeforeStart(ch, epoch, seq) {
 				in.mu.Lock()
 				in.pending[ch] = false
