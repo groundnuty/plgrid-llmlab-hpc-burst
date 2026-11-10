@@ -1,0 +1,111 @@
+# One-off, never merged: the changed tests of issue #311 (the frps retry tests of cmd/hpcburst-controller)
+# at -count=50 under two spinners, on GitHub-hosted runners, as the timing-test rule asks for a changed test.
+# The tests of this package use envtest and real frps and frpc, so the job fetches the pinned binaries as
+# CI's go job does. Two busy loops at nice 19 load the runner for the whole run; they stop when the step ends.
+# A -count run does not contend the port table (spinners load the CPU, not the ports), so it is not what proves
+# the fix: the tests' own strangers make the collisions. It is the load the rule asks for.
+#
+# Each group is a job of its own: one run of a test takes 13 to 24 s on the development VM (it starts an API
+# server and real frps and frpc), so 50 runs of every changed test together would not fit one job. A group ends
+# with the count of its tests' top-level PASS lines, which must be 50 for each test, and fails on any FAIL or SKIP.
+name: count-311
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/count-311.yml']
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  count:
+    name: count 311 ${{ matrix.group }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: restart-one-stranger
+            run: '^TestFrpsRetryRestartsTheRunningBinaryOnTheFreshBlock$'
+            top: 1
+          - group: restart-two-strangers
+            run: '^TestFrpsRetryRestartsTheRunningBinaryWhenTheFreshBlockIsTakenToo$'
+            top: 1
+          - group: first-block
+            run: '^TestFrpsStartIsRepeatedOnAFreshBlockWhenAStrangerHoldsAPort$'
+            top: 1
+          - group: bound
+            run: '^TestFrpsStartEndsAtTheBoundWhenEveryBlockIsTaken$'
+            top: 1
+          - group: other-failure-and-checks
+            run: '^(TestFrpsStartIsNotRepeatedForAnyOtherFailure|TestStartWithRetriesRepeatsOnlyAPortTaken|TestFrpsAttemptProblems|TestFrpsExitErrorIsAPortTakenOnlyForABindLineAndExitStatusOne)$'
+            top: 4
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The throwaway branch's own head: the PR's change and this file.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Choose where the Kubernetes test binaries are cached
+        run: echo "HPCBURST_TOOLS_CACHE=$RUNNER_TEMP/hpcburst-tools" >> "$GITHUB_ENV"
+
+      - name: Restore the cached pinned binaries
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/frp
+            ${{ runner.temp }}/hpcburst-tools
+          key: binaries-tests-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-frp.sh', 'hack/test-binaries.sh') }}
+
+      - name: Fetch the pinned frp binaries
+        run: |
+          bash hack/fetch-frp.sh "$RUNNER_TEMP/frp"
+          {
+            echo "HPCBURST_FRP_DIR=$RUNNER_TEMP/frp"
+            echo "HPCBURST_REQUIRE_FRP=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Fetch the pinned Kubernetes binaries
+        run: bash hack/test-binaries.sh
+
+      - name: Build the package's test binary
+        run: go test -c -o "$RUNNER_TEMP/ctrl.test" ./cmd/hpcburst-controller
+
+      - name: The group's tests, -count=50, under two spinners
+        working-directory: cmd/hpcburst-controller
+        run: |
+          nproc
+          for i in 1 2; do nice -n 19 sh -c 'while :; do :; done' & done
+          spinners=$(jobs -p | tr '\n' ' ')
+          echo "spinners: $spinners"
+          set +e
+          date -u +'start %H:%M:%SZ'
+          timeout 40m "$RUNNER_TEMP/ctrl.test" -test.run '${{ matrix.run }}' -test.count=50 -test.v -test.timeout=39m > "$RUNNER_TEMP/count.txt" 2>&1
+          rc=$?
+          date -u +'end %H:%M:%SZ'
+          set -e
+          # shellcheck disable=SC2086
+          kill $spinners
+          { grep -E -- '^(--- FAIL|FAIL|panic|ok|PASS)' "$RUNNER_TEMP/count.txt" || true; } | sort | uniq -c
+          [ "$rc" -eq 0 ] || { tail -60 "$RUNNER_TEMP/count.txt"; exit 1; }
+          pass=$(grep -c '^--- PASS' "$RUNNER_TEMP/count.txt")
+          skip=$(grep -c -- '--- SKIP' "$RUNNER_TEMP/count.txt" || true)
+          echo "top-level PASS lines: $pass, want $((50 * ${{ matrix.top }})); skipped: $skip"
+          [ "$pass" -eq $((50 * ${{ matrix.top }})) ] && [ "$skip" -eq 0 ]
