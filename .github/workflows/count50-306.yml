@@ -1,0 +1,98 @@
+# One-off, never merged: the seven -count=50 groups of PR #306's merge condition that had not run,
+# on GitHub-hosted runners. On 10 Nov 2026 a run of these tests on the shared development VM coincided
+# with a SIGTERM to that host's systemd user manager, which took down every session on it. Until that
+# is explained, these tests do not run there; the owner chose a hosted runner, an isolated VM per job,
+# and the science agent accepted it as a venue. Groups A and B1 passed on the VM before the outage.
+#
+# Each group runs as its own job, under two spinners at nice 19 (the load the VM runs used), with the
+# same -test.run patterns and counts as the VM's runner. A group passes only when the test binary exits
+# 0, no test fails, and the number of top-level passes equals the count times the tests it selects.
+name: count50-306
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/count50-306.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  group:
+    name: count50 ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: B2, bin: conformance, dir: internal/providerctl/conformance, count: 25, tests: 1, run: '^TestEachHostDialedFaultFailsTheCheckItStandsFor$'}
+          - {name: S1, bin: conformance, dir: internal/providerctl/conformance, count: 25, tests: 1, run: '^TestAStaleRelayDiesWithItsTest$'}
+          - {name: S2, bin: conformance, dir: internal/providerctl/conformance, count: 25, tests: 1, run: '^TestAStaleRelayDiesWithItsTest$'}
+          - {name: C, bin: livechecks, dir: hack/livechecks, count: 50, tests: 3, run: '^(TestEveryHostDialedRowPassesThroughTheScriptOverTheFake|TestAHostDialedRowWhoseSlotIsHeldIsNotRunThroughTheScript|TestADryHostDialedBinaryRefusesLiveSettings)$'}
+          - {name: D1, bin: livechecks, dir: hack/livechecks, count: 17, tests: 1, run: '^TestEachHostDialedFaultFailsTheRowThroughTheScript$'}
+          - {name: D2, bin: livechecks, dir: hack/livechecks, count: 17, tests: 1, run: '^TestEachHostDialedFaultFailsTheRowThroughTheScript$'}
+          - {name: D3, bin: livechecks, dir: hack/livechecks, count: 16, tests: 1, run: '^TestEachHostDialedFaultFailsTheRowThroughTheScript$'}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The PR's own head, whose parent is #306's approved head, not the merge with main.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # As in ci.yml's go job: sshd for the tests that run it as this user, with no service started.
+      - name: Provide OpenSSH's sshd
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+            sudo chmod 755 /usr/sbin/policy-rc.d
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+            sudo rm -f /usr/sbin/policy-rc.d
+          fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
+          /usr/sbin/sshd -V 2>&1 | head -1
+          echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
+
+      - name: Build the test binaries and the agent
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          go test -c -o "$RUNNER_TEMP/bin/conformance.test" ./internal/providerctl/conformance
+          go test -c -o "$RUNNER_TEMP/bin/livechecks.test" ./hack/livechecks
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/bin/hb-agent" ./cmd/hb-agent
+          git rev-parse HEAD^ | sed 's/^/tests from /'
+
+      - name: Run the group under two spinners
+        env:
+          RUN: ${{ matrix.run }}
+          COUNT: ${{ matrix.count }}
+          TESTS: ${{ matrix.tests }}
+          BIN: ${{ matrix.bin }}
+          DIR: ${{ matrix.dir }}
+          NAME: ${{ matrix.name }}
+        run: |
+          WANT=$((COUNT * TESTS))
+          for i in 1 2; do timeout 50m nice -n 19 bash -c 'while :; do :; done' & done
+          echo "load at start: $(cut -d' ' -f1-3 /proc/loadavg)"
+          cd "$DIR"
+          set +e
+          HPCBURST_LIVECHECKS_CONF_TEST="$RUNNER_TEMP/bin/conformance.test" \
+          HPCBURST_LIVECHECKS_AGENT_BIN="$RUNNER_TEMP/bin/hb-agent" \
+            timeout 50m "$RUNNER_TEMP/bin/$BIN.test" -test.run "$RUN" -test.count="$COUNT" -test.v -test.timeout 50m \
+            > "$RUNNER_TEMP/out.txt" 2>&1
+          rc=$?
+          set -e
+          kill $(jobs -p) 2> /dev/null || true
+          pass=$(grep -c '^--- PASS' "$RUNNER_TEMP/out.txt" || true)
+          fail=$(grep -c -- '--- FAIL' "$RUNNER_TEMP/out.txt" || true)
+          echo "$NAME: top-level PASS $pass of $WANT, FAIL $fail, test exit $rc"
+          grep -E -- '--- FAIL|^panic' "$RUNNER_TEMP/out.txt" | head -40 || true
+          tail -3 "$RUNNER_TEMP/out.txt"
+          [ "$rc" -eq 0 ] && [ "$fail" -eq 0 ] && [ "$pass" -eq "$WANT" ]
