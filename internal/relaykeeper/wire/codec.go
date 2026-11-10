@@ -43,10 +43,12 @@ func Write(w io.Writer, kind Kind, body any) error {
 }
 
 // Read reads one message from r, a reader from NewReader. A line longer than
-// MaxMessage is ErrTooLong, one that is not an envelope of a known kind with
-// no other field is ErrMalformed, and an envelope of another version is
-// returned with a *VersionError, so its sender can be told which versions
-// are served.
+// MaxMessage is ErrTooLong. An object whose "v" names another version is
+// returned with a *VersionError whatever else it holds, so its sender can be
+// told which versions are served, even when its envelope has fields this
+// version does not know. Anything else that is not an envelope of this
+// version and a known kind, with no other field and nothing after it,
+// ErrMalformed, an envelope with no version included.
 func Read(r *bufio.Reader) (Envelope, error) {
 	line, err := r.ReadSlice('\n')
 	switch {
@@ -55,12 +57,19 @@ func Read(r *bufio.Reader) (Envelope, error) {
 	case err != nil:
 		return Envelope{}, err
 	}
+	var head struct {
+		V    *int `json:"v"`
+		Kind Kind `json:"kind"`
+	}
+	if json.Unmarshal(line, &head) == nil && head.V != nil && *head.V != Version {
+		return Envelope{V: *head.V, Kind: head.Kind}, &VersionError{Got: *head.V}
+	}
 	var e Envelope
 	if err := strict(line, &e); err != nil {
 		return Envelope{}, fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
-	if e.V != Version {
-		return e, &VersionError{Got: e.V}
+	if head.V == nil || e.V != Version {
+		return Envelope{}, fmt.Errorf("%w: no protocol version", ErrMalformed)
 	}
 	if !known(e.Kind) {
 		return Envelope{}, fmt.Errorf("%w: kind %q", ErrMalformed, e.Kind)
@@ -89,8 +98,11 @@ func strict(b []byte, v any) error {
 	if err := d.Decode(v); err != nil {
 		return err
 	}
-	if d.More() {
-		return errors.New("more than one value")
+	// Only white space may follow: Decoder.More is false before a '}' or a
+	// ']', so it would let one through (found by the package's tests).
+	var after json.RawMessage
+	if err := d.Decode(&after); !errors.Is(err, io.EOF) {
+		return errors.New("something after the value")
 	}
 	return nil
 }
