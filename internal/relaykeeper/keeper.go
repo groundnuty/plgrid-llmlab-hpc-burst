@@ -31,8 +31,11 @@
 //     started or restarted, on a new generation too (#347).
 //   - One Provider per login host (Q2): see claims.go.
 //
-// HBEP-6's stated limits (#347): the restart cap's hour (hostdial's) is kept
-// in memory, so it starts again at a keeper restart. A Lease deleted by hand,
+// HBEP-6's stated limits (#347, and this PR's errata): the restart cap's
+// hour (hostdial's) is kept in memory, so it starts again at a keeper
+// restart. The job side names no superseder, so a stray ranked between a
+// replaced relay and its replacement goes unrecorded; it is superseded by
+// the replacement. A Lease deleted by hand,
 // or a store rebuilt from scratch with this state file kept, lowers
 // leaseTransitions below the fence: the refusal names the Provider and its
 // highest epoch, and an operator stops the keeper, which cuts every
