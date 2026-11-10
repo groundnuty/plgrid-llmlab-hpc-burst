@@ -123,17 +123,17 @@ var RootK3sPorts = []int{6443, 6444, 10250}
 // ss(8), in the order given.
 func Listening(t T, ports []int) []int {
 	t.Helper()
-	have, err := listening(ports)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	have, err := listening(ctx, ports)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return have
 }
 
-// listening is Listening returning its failure, for a caller that must not stop the test (Left).
-func listening(ports []int) ([]int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+// listening is Listening within ctx, returning its failure, for a caller that must not stop the test (Left).
+func listening(ctx context.Context, ports []int) ([]int, error) {
 	out, err := exec.CommandContext(ctx, "ss", "-ltnH").Output()
 	if err != nil {
 		return nil, fmt.Errorf("ss -ltnH: %v", err)

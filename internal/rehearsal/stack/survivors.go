@@ -8,9 +8,11 @@ package stack
 // a test that expects its scenario to fail must still see the stack stop).
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -115,12 +117,48 @@ func (h *Host) Processes() ([]Proc, error) {
 	return procs, nil
 }
 
+// stackEntries are the supervised entries every stack runs, which status must
+// report running before down.
+var stackEntries = []string{"supervisor", "controller", "front", "frps"}
+
+// MissingComponents lists what procs, the stack's processes read before down,
+// lack of its whole set: the supervisor, the controller, the front and frps,
+// each running, and at least one recorded process of ours (k3s). A check of
+// what is left after down proves nothing of a component it never saw, so a
+// caller fails on any of these (the rehearsal's step (g), and the alpha
+// stand-ins: PR #317's delta review). The words fit after "no".
+func MissingComponents(procs []Proc) []string {
+	var missing []string
+	for _, want := range stackEntries {
+		if !slices.ContainsFunc(procs, func(p Proc) bool { return p.Name == want }) {
+			missing = append(missing, "running "+want)
+		}
+	}
+	if !slices.ContainsFunc(procs, func(p Proc) bool { return p.Recorded }) {
+		missing = append(missing, "recorded process of ours (k3s)")
+	}
+	return missing
+}
+
+// LeftPortRead is the end of Left's time that it keeps for its read of the
+// listening ports, after its wait for the processes; ss answers in
+// milliseconds.
+const LeftPortRead = 5 * time.Second
+
 // Left lists what is left of the stack after down: each of procs still
-// running once wait has passed, and each of ports with a listener. It never
-// stops the test, so that a caller's clean-up goes on after it; a port list it
-// cannot read is in the list too.
-func Left(procs []Proc, ports []int, wait time.Duration) []string {
-	deadline := time.Now().Add(wait)
+// running when its wait for them ends, LeftPortRead before by, and each of
+// ports with a listener. It returns by by, so that a caller can keep time for
+// what comes after it, and never stops the test; a port list it cannot read in
+// that time is in the list too.
+//
+// What it cannot see: a child a process of the stack forked after both
+// snapshots, status's before down and down's own of its process trees, can
+// outlive its parent without holding a port checked here, and Left reports
+// nothing of it. Proving that nothing of the stack is left would take tracking
+// what it owns beyond the saved PIDs (a cgroup of its own, say); the
+// rehearsal's step (g) had the same limit.
+func Left(procs []Proc, ports []int, by time.Time) []string {
+	waitEnd := by.Add(-LeftPortRead)
 	var running []string
 	for {
 		running = running[:0]
@@ -129,16 +167,19 @@ func Left(procs []Proc, ports []int, wait time.Duration) []string {
 				running = append(running, p.Name+"="+strconv.Itoa(p.PID))
 			}
 		}
-		if len(running) == 0 || !time.Now().Before(deadline) {
+		rest := time.Until(waitEnd)
+		if len(running) == 0 || rest <= 0 {
 			break
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(min(200*time.Millisecond, rest))
 	}
 	left := make([]string, 0, len(running))
 	for _, r := range running {
 		left = append(left, r+" still runs")
 	}
-	l, err := listening(ports)
+	ctx, cancel := context.WithDeadline(context.Background(), by)
+	defer cancel()
+	l, err := listening(ctx, ports)
 	if err != nil {
 		return append(left, err.Error())
 	}

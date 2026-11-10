@@ -114,9 +114,9 @@ func TestProcessesAndLeft(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	// While both run and the port listens, all three are left, after one look (no wait).
+	// While both run and the port listens, all three are left, after one look (no wait, only the port read's time).
 	want := []string{fmt.Sprintf("k3s=%d still runs", a), fmt.Sprintf("front=%d still runs", b), "port 29893 still listens"}
-	if left := Left(procs, []int{29893}, 0); !slices.Equal(left, want) {
+	if left := Left(procs, []int{29893}, time.Now().Add(LeftPortRead)); !slices.Equal(left, want) {
 		t.Errorf("Left = %q, want %q", left, want)
 	}
 	// Another process under the PID is not the one status named.
@@ -132,7 +132,7 @@ func TestProcessesAndLeft(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if left := Left(procs, []int{29893}, WaitDeadline); len(left) != 0 {
+	if left := Left(procs, []int{29893}, time.Now().Add(WaitDeadline)); len(left) != 0 {
 		t.Errorf("Left = %q after both ended, want nothing", left)
 	}
 }
@@ -154,5 +154,46 @@ func TestProcessesFailsOnWhatItCannotRead(t *testing.T) {
 		if _, err := h.Processes(); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: %v, want an error with %q", name, err, c.want)
 		}
+	}
+}
+
+// Left returns by the time it is given, with a process that never ends, so that its caller's time for what follows (alpha's Close: the
+// cancel of the run's jobs and the clean-ups) is kept: the process is left, and the port read still happens within that time. The bound
+// is checked on the clock, with a second's slack for one pause of the wait and the scheduler, since Left's sleeps end at its time.
+func TestLeftEndsByItsTime(t *testing.T) {
+	c := sleeper(t)
+	start, ok := procStart(c.Process.Pid)
+	if !ok {
+		t.Fatal("the sleeper does not run")
+	}
+	procs := []Proc{{Name: "k3s", PID: c.Process.Pid, Recorded: true, start: start}}
+	by := time.Now().Add(LeftPortRead + 500*time.Millisecond)
+	left := Left(procs, []int{29893}, by)
+	if over := time.Since(by); over > time.Second {
+		t.Errorf("Left returned %s after its time", over)
+	}
+	if want := []string{fmt.Sprintf("k3s=%d still runs", c.Process.Pid)}; !slices.Equal(left, want) {
+		t.Errorf("Left = %q, want %q: the process, and a port read that succeeded", left, want)
+	}
+}
+
+// MissingComponents names each part of the stack a list of its processes lacks: the four supervised entries and a recorded process.
+func TestMissingComponents(t *testing.T) {
+	whole := []Proc{{Name: "k3s", Recorded: true}, {Name: "supervisor"}, {Name: "controller"}, {Name: "front"}, {Name: "frps"}}
+	if m := MissingComponents(whole); len(m) != 0 {
+		t.Errorf("the whole stack lacks %q", m)
+	}
+	for i, p := range whole {
+		part := slices.Delete(slices.Clone(whole), i, i+1)
+		want := "running " + p.Name
+		if p.Recorded {
+			want = "recorded process of ours (k3s)"
+		}
+		if m := MissingComponents(part); !slices.Equal(m, []string{want}) {
+			t.Errorf("without %s: %q, want %q", p.Name, m, want)
+		}
+	}
+	if m := MissingComponents(nil); len(m) != 5 {
+		t.Errorf("no process at all lacks %q, want all five", m)
 	}
 }

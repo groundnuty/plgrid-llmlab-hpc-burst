@@ -218,20 +218,12 @@ func (r *rig) stackProcesses() []stack.Proc {
 		r.t.Errorf("step (g): %v", err)
 	}
 	var names []string
-	recorded := 0
 	for _, p := range procs {
 		names = append(names, fmt.Sprintf("%s=%d", p.Name, p.PID))
-		if p.Recorded {
-			recorded++
-		}
 	}
-	for _, want := range []string{"supervisor", "controller", "front", "frps"} {
-		if !slices.ContainsFunc(procs, func(p stack.Proc) bool { return p.Name == want }) {
-			r.t.Errorf("step (g): hpcburst status reports no running %s before down (it reports %v)", want, names)
-		}
-	}
-	if recorded == 0 {
-		r.t.Errorf("step (g): hpcburst status reports no recorded process of ours (k3s) before down (it reports %v)", names)
+	// The whole set, as stack names it for every check of a stop (the alpha stand-ins' too).
+	for _, m := range stack.MissingComponents(procs) {
+		r.t.Errorf("step (g): hpcburst status reports no %s before down (it reports %v)", m, names)
 	}
 	r.t.Logf("step (g): the stack before down: %v", names)
 	return procs
