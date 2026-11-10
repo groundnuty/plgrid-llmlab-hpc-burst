@@ -1,9 +1,11 @@
 package rehearsal
 
-// New. Issue #308: the three guards between the sshd sweep and a process the
-// test did not start, each tested alone. No test here sends a real signal:
-// every send and kill goes to a sink that records it, through the procAPI
-// fields the pool and signalProcs call in production.
+// New. Issue #308: the guards between the sshd sweep and a process the test
+// did not start, each tested alone. No test here sends a real signal: every
+// send and kill goes to a sink that records it, through the procAPI fields
+// the pool and signalProcs call in production. Each guard is also shown alone
+// at the pool, with the other two replaced through the pool's seams (walk and
+// signal) by stand-ins that do no checking.
 
 import (
 	"errors"
@@ -35,10 +37,14 @@ func ownRow() procRow {
 // PID plus fdBase, so a send names the process it would have reached.
 type sink struct {
 	mu     sync.Mutex
-	sent   []int // PIDs, through send
+	sent   []int // PIDs, through send or unchecked
 	killed []int // PIDs, through kill
 	// events are "open <pid>" and, from a fakeHost, "row <pid>", in order.
 	events []string
+	// check, when set, is called with each PID sent, and an error it returns
+	// is kept in bad.
+	check func(pid int) error
+	bad   []error
 }
 
 const fdBase = 1 << 24
@@ -49,7 +55,13 @@ func (s *sink) fake(api *procAPI) *procAPI {
 	api.send = func(fd int, sig syscall.Signal) error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		s.sent = append(s.sent, fd-fdBase)
+		pid := fd - fdBase
+		s.sent = append(s.sent, pid)
+		if s.check != nil {
+			if err := s.check(pid); err != nil {
+				s.bad = append(s.bad, err)
+			}
+		}
 		return nil
 	}
 	api.kill = func(p *os.Process) error {
@@ -69,17 +81,34 @@ func (s *sink) fake(api *procAPI) *procAPI {
 	return api
 }
 
+// unchecked stands in for signalProcs with guard 3 gone: every row it is
+// given counts as signalled.
+func (s *sink) unchecked(_ *procAPI, rows []procRow, _ syscall.Signal) ([]procRow, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range rows {
+		s.sent = append(s.sent, r.pid)
+	}
+	return rows, nil
+}
+
+// hostWide stands in for below with guard 2 gone: the walk from any root
+// lists every live process, as the walk from PID 0 did.
+func hostWide(procRow) []procRow { return liveProcs() }
+
 func (s *sink) snapshot() (sent, killed []int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return slices.Clone(s.sent), slices.Clone(s.killed)
 }
 
-// Guard 1. An sshd that has exited when its row is read (a client gone before
-// auth) is killed through its os.Process and reaped, and never stored, so no
-// walk can start from its empty row. A child that exits at once stands in for
-// sshd, and the test waits until it is a zombie before its row is read: the
-// state the issue names, exited and unreaped, built for real.
+// Guard 1 alone. An sshd that has exited when its row is read (a client gone
+// before auth) is killed through its os.Process and reaped, and never stored,
+// so no walk can start from its empty row. Guards 2 and 3 are replaced by
+// stand-ins that walk the whole host and signal whatever they are given, so
+// nothing but guard 1 stands in the way. A child that exits at once stands in
+// for sshd, and the test waits until it is a zombie before its row is read:
+// the state the issue names, exited and unreaped, built for real.
 func TestAnExitedSSHDIsKilledThroughItsProcessAndNeverRecorded(t *testing.T) {
 	bin, err := exec.LookPath("true")
 	if err != nil {
@@ -116,7 +145,7 @@ func TestAnExitedSSHDIsKilledThroughItsProcessAndNeverRecorded(t *testing.T) {
 		pid, zombie = p, hookErr == nil
 		mu.Unlock()
 	}
-	pool := &sshdPool{bin: bin, conf: os.DevNull, log: log, api: api}
+	pool := &sshdPool{bin: bin, conf: os.DevNull, log: log, api: api, walk: hostWide, signal: rec.unchecked, wait: 100 * time.Millisecond}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -161,7 +190,7 @@ func TestAnExitedSSHDIsKilledThroughItsProcessAndNeverRecorded(t *testing.T) {
 		t.Errorf("killed through os.Process: %v, want the exited sshd %d alone", killed, pid)
 	}
 	if len(sent) != 0 {
-		t.Errorf("signals sent: %v, want none", sent)
+		t.Errorf("with guards 2 and 3 gone, the stop signalled %d processes; want none", len(sent))
 	}
 	if stopErr != nil {
 		t.Errorf("stop: %v, want nil", stopErr)
@@ -177,13 +206,13 @@ func TestAnExitedSSHDIsKilledThroughItsProcessAndNeverRecorded(t *testing.T) {
 	}
 }
 
-// The issue's case end to end: a stored zero row (what spawn stored before
-// guard 1) and the stop of the pool signal nothing, over the host's real
-// /proc. Guards 2 and 3 each stop it, so this test kills no mutant of one
-// guard alone; the tests of each guard do.
+// The issue's case end to end, with every guard in place: a stored zero row
+// (what spawn stored before guard 1) and the stop of the pool signal nothing,
+// over the host's real /proc. Guards 2 and 3 each stop it, so this test kills
+// no mutant of one guard; the tests of each guard alone do.
 func TestAZeroRowSignalsNothing(t *testing.T) {
 	var rec sink
-	pool := &sshdPool{api: rec.fake(hostProcs())}
+	pool := &sshdPool{api: rec.fake(hostProcs()), wait: 100 * time.Millisecond}
 	p := &sshdProc{done: make(chan struct{}), below: map[int]procRow{}}
 	pool.procs = []*sshdProc{p}
 	if err := pool.stop(nil); err != nil {
@@ -197,13 +226,13 @@ func TestAZeroRowSignalsNothing(t *testing.T) {
 	}
 }
 
-// Guard 2. below walks nothing from PID 1 or less, nor from a root whose
-// start time no longer matches. The listing is a host's shape: PID 1 and
-// kthreadd with parent 0, everything else below them.
+// Guard 2. below walks nothing from PID 1 or less, from a row with no start
+// time, nor from a root whose start time no longer matches. The listing is a
+// host's shape: PID 1 and kthreadd with parent 0, everything else below them.
 func TestBelowWalksNothingFromPID1OrLessOrFromAnotherProcess(t *testing.T) {
 	host := []procRow{
 		{pid: 1, ppid: 0, ticks: 10}, {pid: 2, ppid: 0, ticks: 10},
-		{pid: 40, ppid: 2, ticks: 11}, {pid: 300, ppid: 1, ticks: 20},
+		{pid: 40, ppid: 2, ticks: 0}, {pid: 41, ppid: 40, ticks: 12}, {pid: 300, ppid: 1, ticks: 20},
 		{pid: 700, ppid: 300, ticks: 40}, {pid: 701, ppid: 700, ticks: 41}, {pid: 702, ppid: 701, ticks: 42},
 	}
 	pids := func(rows []procRow) []int {
@@ -227,6 +256,7 @@ func TestBelowWalksNothingFromPID1OrLessOrFromAnotherProcess(t *testing.T) {
 		{"PID 0 with a start time", procRow{pid: 0, ticks: 10}},
 		{"PID 1 as listed", procRow{pid: 1, ppid: 0, ticks: 10}},
 		{"a negative PID", procRow{pid: -1}},
+		{"a row with no start time, as listed", procRow{pid: 40, ppid: 2, ticks: 0}},
 		{"a root whose PID names another process now", procRow{pid: 700, ppid: 300, ticks: 39}},
 		{"a root that is gone", procRow{pid: 999, ppid: 1, ticks: 50}},
 	} {
@@ -246,152 +276,35 @@ func TestBelowWalksNothingFromPID1OrLessOrFromAnotherProcess(t *testing.T) {
 	}
 }
 
-// fakeHost is a process table for signalProcs: rows by PID and cgroups by PID.
-type fakeHost struct {
-	rows    map[int]procRow
-	cgroups map[int]string
-}
-
-func (h fakeHost) api(self int, rec *sink) *procAPI {
-	api := rec.fake(&procAPI{self: self})
-	api.row = func(pid int) (procRow, bool, error) {
-		rec.mu.Lock()
-		rec.events = append(rec.events, "row "+strconv.Itoa(pid))
-		rec.mu.Unlock()
-		r, ok := h.rows[pid]
-		return r, ok, nil
+// Guard 2 alone, at the pool: guard 1 is passed by storing the rows it would
+// refuse, and guard 3 is replaced by a stand-in that signals whatever it is
+// given. A zero row, PID 1's row and a stale root (this test's own PID with
+// another start time) record nothing below them, so the stop passes on the
+// stored rows themselves and nothing else.
+func TestGuard2AloneWalksNothingFromAZeroOrAStaleRoot(t *testing.T) {
+	pid1, ok := readProcRow(1)
+	if !ok {
+		t.Fatal("PID 1's row cannot be read")
 	}
-	api.cgroup = func(pid int) (string, error) {
-		if cg, ok := h.cgroups[pid]; ok {
-			return cg, nil
-		}
-		return "", os.ErrNotExist
-	}
-	open := api.open
-	api.open = func(pid int) (int, error) {
-		if pid <= 0 {
-			return 0, syscall.EINVAL // as pidfd_open answers
-		}
-		if _, ok := h.rows[pid]; !ok {
-			return 0, syscall.ESRCH
-		}
-		return open(pid)
-	}
-	return api
-}
-
-// Guard 3. signalProcs refuses PID 1 and below, the process itself, its
-// ancestors, and a process neither below it nor in its cgroup, and says so in
-// its error, while what is the test's is still signalled. The table puts each
-// refused process where only its own check refuses it: PID 1 and the ancestor
-// in the test's cgroup (a container, a systemd-run scope that also holds
-// timeout and go test), the stranger in another cgroup and outside the tree.
-func TestSignalProcsRefusesWhatIsNotTheTests(t *testing.T) {
-	const (
-		self      = 5000
-		testCg    = "0::/user.slice/example.slice/run-example.scope\n"
-		managerCg = "0::/user.slice/example.slice/user@1000.service/init.scope\n"
-	)
-	h := fakeHost{
-		rows: map[int]procRow{
-			1:    {pid: 1, ppid: 0, ticks: 1},
-			3000: {pid: 3000, ppid: 1, ticks: 30},    // go test
-			4000: {pid: 4000, ppid: 3000, ticks: 40}, // timeout
-			self: {pid: self, ppid: 4000, ticks: 50},
-			6000: {pid: 6000, ppid: 1, ticks: 60},    // the user manager
-			6100: {pid: 6100, ppid: self, ticks: 61}, // an sshd, below the test
-			6110: {pid: 6110, ppid: 6100, ticks: 62}, // its session, in another cgroup
-			6200: {pid: 6200, ppid: 6000, ticks: 63}, // a forced command reparented to the manager
-			6300: {pid: 6300, ppid: self, ticks: 99}, // listed with 64: recycled since
-		},
-		cgroups: map[int]string{
-			1: testCg, 3000: testCg, 4000: testCg, self: testCg,
-			6000: managerCg, 6100: testCg, 6110: "0::/elsewhere.scope\n", 6200: testCg, 6300: testCg,
-		},
-	}
+	stale := ownRow()
+	stale.ticks++
 	var rec sink
-	listed := []procRow{
-		{pid: 0}, {pid: -1}, {pid: 1, ticks: 1}, {pid: self, ticks: 50}, {pid: 4000, ticks: 40}, {pid: 6000, ticks: 60},
-		{pid: 6100, ticks: 61}, {pid: 6110, ticks: 62}, {pid: 6200, ticks: 63}, {pid: 6300, ticks: 64}, {pid: 6400, ticks: 65},
+	pool := &sshdPool{api: rec.fake(hostProcs()), walk: below, signal: rec.unchecked, wait: 100 * time.Millisecond}
+	for _, self := range []procRow{{}, pid1, stale} {
+		pool.procs = append(pool.procs, &sshdProc{self: self, done: make(chan struct{}), below: map[int]procRow{}})
 	}
-	kept, err := signalProcs(h.api(self, &rec), listed, syscall.SIGTERM)
-	sent, killed := rec.snapshot()
+	if err := pool.stop(nil); err != nil {
+		t.Errorf("stop: %v, want nil", err)
+	}
+	for _, p := range pool.procs {
+		if rows := p.seen(); len(rows) != 0 {
+			t.Errorf("recorded %d processes below the root %+v; want none", len(rows), p.self)
+		}
+	}
+	sent, _ := rec.snapshot()
 	slices.Sort(sent)
-	if !slices.Equal(sent, []int{6100, 6110, 6200}) {
-		t.Errorf("signalled %v, want [6100 6110 6200]: the sshd, its session and the reparented forced command", sent)
-	}
-	if len(killed) != 0 {
-		t.Errorf("killed through os.Process: %v, want none", killed)
-	}
-	if err == nil {
-		t.Fatal("no error for the refusals")
-	}
-	for pid, why := range map[int]string{
-		0: "PID 1 and below", -1: "PID 1 and below", 1: "PID 1 and below", self: "the process that sends it",
-		4000: "an ancestor", 6000: "neither below",
-	} {
-		if want := "process " + strconv.Itoa(pid) + ": "; !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), why) {
-			t.Errorf("the error does not refuse process %d (%s): %v", pid, why, err)
-		}
-	}
-	var keptPIDs []int
-	for _, r := range kept {
-		keptPIDs = append(keptPIDs, r.pid)
-	}
-	slices.Sort(keptPIDs)
-	if !slices.Equal(keptPIDs, []int{6100, 6110, 6200, 6300, 6400}) {
-		t.Errorf("kept %v, want the signalled, the recycled and the gone ones", keptPIDs)
-	}
-	// Each process is pinned with a pidfd before its row is checked: none of
-	// these is read in the walk up the test's ancestry, so the first read of
-	// its row is its check, and it comes after its open.
-	rec.mu.Lock()
-	defer rec.mu.Unlock()
-	for _, pid := range []int{6100, 6110, 6200, 6300} {
-		o := slices.Index(rec.events, "open "+strconv.Itoa(pid))
-		r := slices.Index(rec.events, "row "+strconv.Itoa(pid))
-		if o < 0 || r < o {
-			t.Errorf("process %d: pinned at event %d, its row read at event %d; want the pin first (%v)", pid, o, r, rec.events)
-		}
-	}
-}
-
-// A refusal costs no wait and is not retried with SIGKILL, and a check that
-// cannot be made refuses: an ancestry that cannot be read refuses everything.
-func TestSignalProcsRefusesEverythingWhenItsAncestryCannotBeRead(t *testing.T) {
-	var rec sink
-	api := fakeHost{rows: map[int]procRow{6100: {pid: 6100, ppid: 5000, ticks: 61}}}.api(5000, &rec)
-	kept, err := signalProcs(api, []procRow{{pid: 6100, ticks: 61}}, syscall.SIGTERM)
-	if err == nil || !strings.Contains(err.Error(), "the ancestry of process 5000") {
-		t.Errorf("error %v, want the unreadable ancestry", err)
-	}
-	if sent, _ := rec.snapshot(); len(sent)+len(kept) != 0 {
-		t.Errorf("signalled %v and kept %v with no ancestry; want neither", sent, kept)
-	}
-}
-
-// Guard 3 over this host's real /proc, as the walk from PID 0 listed it:
-// every live process. PID 1, the test process and its parent are never
-// signalled, and the refusals are an error.
-func TestSignalProcsOverTheWholeHostSparesInitItselfAndItsParent(t *testing.T) {
-	var rec sink
-	api := rec.fake(hostProcs())
-	all := liveProcs()
-	if len(all) < 3 {
-		t.Fatalf("listed %d processes; want the host's", len(all))
-	}
-	_, err := signalProcs(api, all, syscall.SIGTERM)
-	sent, killed := rec.snapshot()
-	for _, pid := range []int{1, os.Getpid(), os.Getppid()} {
-		if slices.Contains(sent, pid) {
-			t.Errorf("signalled process %d", pid)
-		}
-	}
-	if len(killed) != 0 {
-		t.Errorf("killed through os.Process: %v, want none", killed)
-	}
-	if err == nil || !strings.Contains(err.Error(), "process 1: ") {
-		t.Errorf("error %v, want PID 1 refused", err)
+	if want := []int{1, stale.pid}; !slices.Equal(sent, want) {
+		t.Errorf("passed on %v, want the stored rows alone %v", sent, want)
 	}
 }
 
@@ -406,7 +319,7 @@ func TestARefusalIsTheErrorOfClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pool := &sshdPool{log: log, api: rec.fake(hostProcs())}
+	pool := &sshdPool{log: log, api: rec.fake(hostProcs()), wait: 100 * time.Millisecond}
 	// A row spawn can no longer store: PID 1, as if it had been read for an sshd.
 	pid1, ok := readProcRow(1)
 	if !ok {

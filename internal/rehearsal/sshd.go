@@ -17,9 +17,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"sync"
-	"syscall"
-	"time"
 )
 
 // safeText is what a path may hold to go into authorized_keys' command="..."
@@ -178,7 +175,7 @@ func startSSHD(bin string, f sshdFiles, spec sshdSpec) (*sshdServer, error) {
 		ln.Close()
 		return nil, err
 	}
-	s := &sshdServer{ln: ln, log: log, pool: &sshdPool{bin: bin, conf: f.conf, log: log, api: hostProcs()}}
+	s := &sshdServer{ln: ln, log: log, pool: newPool(bin, f.conf, log)}
 	s.pool.wg.Add(1)
 	go s.pool.serve(ln)
 	return s, nil
@@ -196,163 +193,4 @@ func (s *sshdServer) stop(extra []procRow) error {
 	err := s.pool.stop(extra)
 	s.log.Close()
 	return err
-}
-
-// sshdProc is one sshd the node started.
-type sshdProc struct {
-	cmd  *exec.Cmd
-	self procRow
-	done chan struct{}
-	// below are the processes seen under it while it lived; mu guards them.
-	mu    sync.Mutex
-	below map[int]procRow
-}
-
-// record adds the processes below the sshd now. Once the sshd is reaped its
-// PID may name another process, so nothing is walked from it (issue #308);
-// below also refuses a root whose start time no longer matches.
-func (p *sshdProc) record() {
-	select {
-	case <-p.done:
-		return
-	default:
-	}
-	rows := below(p.self)
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, r := range rows {
-		p.below[r.pid] = r
-	}
-}
-
-func (p *sshdProc) seen() []procRow {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	rows := make([]procRow, 0, len(p.below))
-	for _, r := range p.below {
-		rows = append(rows, r)
-	}
-	return rows
-}
-
-// sshdPool starts an sshd per accepted connection and stops them all.
-type sshdPool struct {
-	bin, conf string
-	log       *os.File
-	// api reads /proc and sends every signal of the pool.
-	api *procAPI
-
-	mu     sync.Mutex
-	procs  []*sshdProc
-	closed bool
-	wg     sync.WaitGroup
-}
-
-// serve hands each connection the listener accepts to a new sshd, until the
-// listener closes.
-func (s *sshdPool) serve(ln net.Listener) {
-	defer s.wg.Done()
-	for {
-		c, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		s.spawn(c.(*net.TCPConn))
-	}
-}
-
-// recordEvery is how often a live sshd's descendants are recorded. It is a
-// sampling interval, not a wait: Close also records them once more.
-const recordEvery = 50 * time.Millisecond
-
-func (s *sshdPool) spawn(c *net.TCPConn) {
-	defer c.Close()
-	f, err := c.File()
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	cmd := exec.Command(s.bin, "-i", "-e", "-f", s.conf)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = f, f, s.log
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return
-	}
-	if err := cmd.Start(); err != nil {
-		s.mu.Unlock()
-		return
-	}
-	pid := cmd.Process.Pid
-	if s.api.started != nil {
-		s.api.started(pid)
-	}
-	// The sshd is this process's child and unreaped, so its PID is still its
-	// own. An sshd that has already exited (a client gone before auth) has no
-	// live row: a zero or unreadable row is never stored, and nothing is ever
-	// walked from it (issue #308). It is ended through its os.Process, which
-	// holds a pidfd, and reaped here.
-	self, live, err := s.api.row(pid)
-	if err != nil || !live || self.pid != pid {
-		s.mu.Unlock()
-		fmt.Fprintf(s.log, "rehearsal: sshd %d had no live row when it was read (live %v, error %v): killed and reaped, not recorded\n", pid, live, err)
-		if kerr := s.api.kill(cmd.Process); kerr != nil {
-			fmt.Fprintf(s.log, "rehearsal: kill sshd %d: %v\n", pid, kerr)
-		}
-		_ = cmd.Wait()
-		return
-	}
-	p := &sshdProc{cmd: cmd, self: self, done: make(chan struct{}), below: map[int]procRow{}}
-	s.procs = append(s.procs, p)
-	s.wg.Add(2)
-	s.mu.Unlock()
-	go func() { defer s.wg.Done(); _ = cmd.Wait(); close(p.done) }()
-	go func() {
-		defer s.wg.Done()
-		tick := time.NewTicker(recordEvery)
-		defer tick.Stop()
-		for {
-			p.record()
-			select {
-			case <-p.done:
-				return
-			case <-tick.C:
-			}
-		}
-	}()
-}
-
-// stopWait is how long the TERM phase lasts before the KILL.
-const stopWait = 5 * time.Second
-
-// stop ends every sshd and everything seen under it. The caller has stopped
-// the listener and the relay, so the forced commands end on their own; TERM
-// then KILL, by pidfd and start time, take what does not. The processes
-// signalProcs refused are not waited for, and the refusals are the error.
-func (s *sshdPool) stop(extra []procRow) error {
-	s.mu.Lock()
-	s.closed = true
-	procs := append([]*sshdProc(nil), s.procs...)
-	s.mu.Unlock()
-	var all []procRow
-	for _, p := range procs {
-		p.record()
-		if p.self.pid != 0 {
-			all = append(all, p.self)
-		}
-		all = append(all, p.seen()...)
-	}
-	all = append(all, extra...)
-	kept, termErr := signalProcs(s.api, all, syscall.SIGTERM)
-	deadline := time.Now().Add(stopWait)
-	for anyLive(kept) && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-	}
-	kept, killErr := signalProcs(s.api, kept, syscall.SIGKILL)
-	s.wg.Wait()
-	for time.Now().Before(deadline.Add(stopWait)) && anyLive(kept) {
-		time.Sleep(20 * time.Millisecond)
-	}
-	return errors.Join(termErr, killErr)
 }

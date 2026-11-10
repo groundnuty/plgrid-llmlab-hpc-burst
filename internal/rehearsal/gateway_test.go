@@ -329,7 +329,9 @@ func TestStartGatewayRefusesBadConfig(t *testing.T) {
 	} {
 		g, err := StartGateway(c.cfg)
 		if err == nil {
-			g.Close()
+			if cerr := g.Close(); cerr != nil {
+				t.Errorf("%s: Close: %v", c.name, cerr)
+			}
 			t.Errorf("%s: StartGateway succeeded", c.name)
 		} else if !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: error %q, want it to say %q", c.name, err, c.want)

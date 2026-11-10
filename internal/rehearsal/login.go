@@ -139,6 +139,11 @@ func StartLoginNode(cfg LoginConfig) (*LoginNode, error) {
 	if cfg.SSHD == "" {
 		cfg.SSHD = SSHDPath()
 	}
+	// Before the node's first process: an orphan of what it starts must stay
+	// below this process (signal.go).
+	if err := ensureSubreaper(); err != nil {
+		return nil, err
+	}
 	if err := CheckTools(cfg.SSHD); err != nil {
 		return nil, err
 	}
@@ -164,8 +169,7 @@ func StartLoginNode(cfg LoginConfig) (*LoginNode, error) {
 		return nil, err
 	}
 	if _, err := slurm.ParseSSHConfig([]byte(n.SSHConfig()), ""); err != nil {
-		_ = n.Close()
-		return nil, fmt.Errorf("rehearsal: the controller's parser refuses the login node's credentials: %w", err)
+		return nil, errors.Join(fmt.Errorf("rehearsal: the controller's parser refuses the login node's credentials: %w", err), n.Close())
 	}
 	return n, nil
 }

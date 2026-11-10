@@ -70,6 +70,11 @@ func StartGateway(cfg GatewayConfig) (*Gateway, error) {
 	if cfg.SSHD == "" {
 		cfg.SSHD = SSHDPath()
 	}
+	// Before the gateway's first process: an orphan of what it starts must
+	// stay below this process (signal.go).
+	if err := ensureSubreaper(); err != nil {
+		return nil, err
+	}
 	if err := CheckTools(cfg.SSHD); err != nil {
 		return nil, err
 	}
