@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -78,86 +79,109 @@ func (s *State) keeperEntry(l layout) *supervised {
 	}
 }
 
-// pingKeeper asks the keeper at socket for its E, within timeout.
-func pingKeeper(socket string, timeout time.Duration) (int64, error) {
+// pingKeeper asks the keeper at socket for its E, within timeout, and returns the PID of the
+// process that answered: the peer of the connection, from SO_PEERCRED, the process that bound the
+// listener. A pathname alone names no process, since /proc/net/unix keeps an unlinked listener's
+// path, so the caller checks that PID against the recorded keeper (the delta review of PR 361).
+func pingKeeper(socket string, timeout time.Duration) (epoch int64, peer int, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	var d net.Dialer
+	c, err := d.DialContext(ctx, "unix", socket)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer c.Close()
+	uc, ok := c.(*net.UnixConn)
+	if !ok {
+		return 0, 0, fmt.Errorf("the connection to %s is not a Unix socket", socket)
+	}
+	raw, err := uc.SyscallConn()
+	if err != nil {
+		return 0, 0, err
+	}
+	var cred *unix.Ucred
+	var credErr error
+	if err := raw.Control(func(fd uintptr) { cred, credErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED) }); err != nil {
+		return 0, 0, err
+	}
+	if credErr != nil {
+		return 0, 0, fmt.Errorf("the peer of %s: %w", socket, credErr)
+	}
+	if dl, ok := ctx.Deadline(); ok {
+		_ = c.SetDeadline(dl)
+	}
+	if err := wire.Write(c, wire.KindPing, struct{}{}); err != nil {
+		return 0, int(cred.Pid), err
+	}
+	env, err := wire.Read(wire.NewReader(c))
+	if err != nil {
+		return 0, int(cred.Pid), fmt.Errorf("the reply to the ping: %w", err)
+	}
+	if env.Kind != wire.KindPong {
+		return 0, int(cred.Pid), fmt.Errorf("the reply to the ping is %s, not pong", env.Kind)
+	}
 	var pong wire.Pong
-	if err := wire.Exchange(ctx, socket, wire.KindPing, struct{}{}, &pong); err != nil {
-		return 0, err
+	if err := env.Decode(&pong); err != nil {
+		return 0, int(cred.Pid), err
 	}
 	if pong.KeeperEpoch < relaykeeper.EpochBase {
-		return 0, fmt.Errorf("the keeper answered E %d, below 2^31: not a keeper's epoch", pong.KeeperEpoch)
+		return 0, int(cred.Pid), fmt.Errorf("the keeper answered E %d, below 2^31: not a keeper's epoch", pong.KeeperEpoch)
 	}
-	return pong.KeeperEpoch, nil
+	return pong.KeeperEpoch, int(cred.Pid), nil
 }
 
 // checkKeeperHealth is checkEntry's part for the keeper, an entry with a socket for its health
-// (the review of PR 361 made each of these strict):
+// (the review of PR 361 and its delta made each of these strict):
 //   - the keeper's own descriptors are read, and any failure to read them makes it unhealthy:
 //     an unreadable /proc/<pid>/fd is unknown, never "no port";
 //   - the keeper process itself listens on no port, TCP or UDP, on any address. Its relays' ssh
 //     children are left out: they are ssh clients, whose sockets the keeper's checks do not own;
-//   - the listening socket at its health path is the keeper's own, before and after the ping,
-//     as a /healthz entry must hold its address (checkEntry), so no other process's answer at
-//     that path counts;
-//   - a ping there is answered with pong{E} within 1 s.
+//   - a ping on its health socket is answered with pong{E} within 1 s, by the keeper itself: the
+//     connection's peer (SO_PEERCRED) is the recorded keeper's PID, and the pidfd still names that
+//     process after the answer, so no other process bound at that path counts;
 //
 // It returns whether the ping was answered by the keeper; eh.KeeperEpoch is the E it answered.
 func checkKeeperHealth(h *procHandle, e EntryRecord, eh *EntryHealth, add func(string, ...any)) bool {
 	pid := e.Proc.PID
-	owns := func(when string) bool {
-		inodes, err := keeperFdInodes(pid)
-		if err != nil {
-			add("cannot read the descriptors of the relay keeper pid %d, so its sockets are unknown: %v", pid, err)
-			return false
-		}
-		if v, d := h.verify(); v != Ours {
-			add("pid %d changed while its descriptors were read: %s", pid, d)
-			return false
-		}
-		if when == "before" {
-			all, err := boundSockets()
-			if err != nil {
-				add("cannot list the host's sockets: %v", err)
-				return false
-			}
-			var bound []string
-			for _, s := range all {
-				if inodes[s.inode] {
-					bound = append(bound, s.key())
-				}
-			}
-			if len(bound) > 0 {
-				sort.Strings(bound)
-				add("pid %d binds a port, which the relay keeper never does: %v", pid, bound)
-				return false
-			}
-		}
-		listeners, err := unixListenerInodes(e.HealthSocket)
-		if err != nil {
-			add("cannot list the host's Unix sockets: %v", err)
-			return false
-		}
-		for ino := range listeners {
-			if inodes[ino] {
-				return true
-			}
-		}
-		add("the relay keeper pid %d does not hold the listening socket %s (%s the ping)", pid, e.HealthSocket, when)
-		return false
-	}
 	ok := false
 	eh.PingOK = &ok
-	if !owns("before") {
+	inodes, err := keeperFdInodes(pid)
+	if err != nil {
+		add("cannot read the descriptors of the relay keeper pid %d, so its sockets are unknown: %v", pid, err)
 		return false
 	}
-	epoch, err := pingKeeper(e.HealthSocket, keeperPingTimeout)
+	if v, d := h.verify(); v != Ours {
+		add("pid %d changed while its descriptors were read: %s", pid, d)
+		return false
+	}
+	all, err := boundSockets()
+	if err != nil {
+		add("cannot list the host's sockets: %v", err)
+		return false
+	}
+	var bound []string
+	for _, s := range all {
+		if inodes[s.inode] {
+			bound = append(bound, s.key())
+		}
+	}
+	if len(bound) > 0 {
+		sort.Strings(bound)
+		add("pid %d binds a port, which the relay keeper never does: %v", pid, bound)
+		return false
+	}
+	epoch, peer, err := pingKeeper(e.HealthSocket, keeperPingTimeout)
 	if err != nil {
 		add("ping on %s within %s: %v", e.HealthSocket, keeperPingTimeout, err)
 		return false
 	}
-	if !owns("after") {
+	if peer != pid {
+		add("the ping on %s was answered by pid %d, not the relay keeper pid %d", e.HealthSocket, peer, pid)
+		return false
+	}
+	if v, d := h.verify(); v != Ours {
+		add("the relay keeper pid %d changed during its ping: %s", pid, d)
 		return false
 	}
 	ok = true
@@ -166,19 +190,38 @@ func checkKeeperHealth(h *procHandle, e EntryRecord, eh *EntryHealth, add func(s
 }
 
 // keeperFdInodes reads the socket inodes the process pid itself holds, from /proc/<pid>/fd. A
-// directory that cannot be read, or a descriptor link that fails for any reason but having
-// closed since the directory was read, is an error, never an empty answer (the review of PR 361:
-// fdSocketInodes, alpha's, drops them). A variable, so a test can make it fail.
+// directory that cannot be read, or a descriptor link that fails, is an error, never an empty
+// answer (the review of PR 361: fdSocketInodes, alpha's, drops them). A descriptor that closes
+// between the directory's read and its link's could hide a listener duplicated into a new one, so
+// the whole snapshot is read again once, and a second such change is an error too (its delta). A
+// variable, so a test can make it fail.
 var keeperFdInodes = func(pid int) (map[string]bool, error) {
+	inodes, err := fdInodesOnce(pid)
+	if errors.Is(err, errFdClosed) {
+		if inodes, err = fdInodesOnce(pid); errors.Is(err, errFdClosed) {
+			return nil, fmt.Errorf("the descriptors of pid %d changed while they were read, twice: %w", pid, err)
+		}
+	}
+	return inodes, err
+}
+
+// fdReadlink is os.Readlink; a test replaces it, to close a descriptor mid-snapshot.
+var fdReadlink = os.Readlink
+
+// errFdClosed is a descriptor that closed between /proc/<pid>/fd's read and its link's.
+var errFdClosed = errors.New("a descriptor closed while the snapshot was read")
+
+// fdInodesOnce is one snapshot of keeperFdInodes.
+func fdInodesOnce(pid int) (map[string]bool, error) {
 	fds, err := os.ReadDir(procPath(pid, "fd"))
 	if err != nil {
 		return nil, err
 	}
 	inodes := map[string]bool{}
 	for _, fd := range fds {
-		l, err := os.Readlink(procPath(pid, "fd/"+fd.Name()))
+		l, err := fdReadlink(procPath(pid, "fd/"+fd.Name()))
 		if errors.Is(err, fs.ErrNotExist) {
-			continue // closed since the directory was read
+			return nil, fmt.Errorf("fd %s: %w", fd.Name(), errFdClosed)
 		}
 		if err != nil {
 			return nil, err
@@ -188,31 +231,6 @@ var keeperFdInodes = func(pid int) (map[string]bool, error) {
 		}
 	}
 	return inodes, nil
-}
-
-// unixListenerInodes are the inodes of the listening Unix sockets bound to path, from
-// /proc/net/unix, whose columns are Num, RefCount, Protocol, Flags, Type, St, Inode and Path:
-// a listener's Flags carry __SO_ACCEPTCON (0x10000).
-func unixListenerInodes(path string) (map[string]bool, error) {
-	b, err := os.ReadFile(procRoot + "/net/unix")
-	if err != nil {
-		return nil, err
-	}
-	out := map[string]bool{}
-	for i, line := range strings.Split(string(b), "\n") {
-		f := strings.Fields(line)
-		if i == 0 || len(f) < 8 || strings.Join(f[7:], " ") != path {
-			continue
-		}
-		flags, err := strconv.ParseUint(f[3], 16, 32)
-		if err != nil {
-			return nil, fmt.Errorf("/proc/net/unix line %d: flags %q: %w", i+1, f[3], err)
-		}
-		if flags&0x10000 != 0 {
-			out[f[6]] = true
-		}
-	}
-	return out, nil
 }
 
 // allocations is the resource of the framework's Allocations.
@@ -330,34 +348,45 @@ var pidfdProbe = func() error {
 	return unix.Close(fd)
 }
 
-// runningAllocations names every Allocation in phase Running, as namespace/name, sorted. A server
-// without the Allocation CRD has none.
+// runningAllocations names every Allocation in phase Running, as namespace/name, sorted, from a
+// COMPLETE list: every page, following each continue token. Anything else is an error, a server
+// that does not serve Allocations (404) included, so neither the guard nor the keeper retired
+// marker ever reads "none Running" from a list that could not show it (the delta review of PR
+// 361: a 404 had read as none, and a first page as the whole list).
 func runningAllocations(ctx context.Context, cfg *rest.Config) ([]string, error) {
 	dyn, err := dynamic.NewForConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
-	list, err := dyn.Resource(allocations).List(ctx, metav1.ListOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if want := v1alpha1.GroupVersion.String(); list.GetAPIVersion() != want || list.GetKind() != "AllocationList" {
-		return nil, fmt.Errorf("the API server answered the list of Allocations with kind %q of %q, not an AllocationList of %s", list.GetKind(), list.GetAPIVersion(), want)
-	}
+	want := v1alpha1.GroupVersion.String()
 	var running []string
-	for _, item := range list.Items {
-		// Read through the API type, whose fields the CRD is generated from: the phase is the
-		// observed one, status.atProvider.phase.
-		var a v1alpha1.Allocation
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(item.Object, &a); err != nil {
-			return nil, fmt.Errorf("Allocation %s/%s: %w", item.GetNamespace(), item.GetName(), err)
+	opts := metav1.ListOptions{Limit: 500}
+	for page := 1; ; page++ {
+		list, err := dyn.Resource(allocations).List(ctx, opts)
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("the API server does not serve Allocations (%w); apply the framework's CRDs (up --manifests) or stop the keeper's switch back", err)
 		}
-		if a.Status.AtProvider.Phase == v1alpha1.AllocationRunning {
-			running = append(running, item.GetNamespace()+"/"+item.GetName())
+		if err != nil {
+			return nil, err
 		}
+		if list.GetAPIVersion() != want || list.GetKind() != "AllocationList" {
+			return nil, fmt.Errorf("the API server answered page %d of the list of Allocations with kind %q of %q, not an AllocationList of %s", page, list.GetKind(), list.GetAPIVersion(), want)
+		}
+		for _, item := range list.Items {
+			// Read through the API type, whose fields the CRD is generated from: the phase is the
+			// observed one, status.atProvider.phase.
+			var a v1alpha1.Allocation
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(item.Object, &a); err != nil {
+				return nil, fmt.Errorf("Allocation %s/%s: %w", item.GetNamespace(), item.GetName(), err)
+			}
+			if a.Status.AtProvider.Phase == v1alpha1.AllocationRunning {
+				running = append(running, item.GetNamespace()+"/"+item.GetName())
+			}
+		}
+		if list.GetContinue() == "" {
+			break
+		}
+		opts.Continue = list.GetContinue()
 	}
 	sort.Strings(running)
 	return running, nil

@@ -105,7 +105,7 @@ func TestTheSwitchBackGuard(t *testing.T) {
 		{"no keeper ever ran", false, false, false, []string{"Running"}, nil, "", false},
 		{"the keeper is asked for", true, false, true, []string{"Running"}, nil, "", false},
 		{"the keeper ran, nothing runs", true, false, false, []string{"Pending", "Ended", "Failed"}, nil, "", true},
-		{"the keeper ran, no Allocation CRD", true, false, false, nil, nil, "", true},
+		{"the keeper ran, no Allocation CRD", true, false, false, nil, []string{"does not serve Allocations"}, "", true},
 		{"the keeper ran, Allocations run", true, false, false, []string{"Ended", "Running", "Running"},
 			[]string{"example/alloc-1 example/alloc-2", "Run up with --relay-keeper, or release those Allocations first"}, "", true},
 		{"an unreadable state file, nothing runs", true, true, false, []string{"Ended"}, nil, "cannot be read", true},

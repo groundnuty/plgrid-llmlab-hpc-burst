@@ -190,8 +190,8 @@ func TestTheKeepersHealthFailsANoAnswerAndAPort(t *testing.T) {
 		k := f.keeperUp()
 		sup := f.supervisorHandle()
 		eh, problems := checkEntry(sup, sup.rec.PID, k)
-		if !eh.Running || eh.PingOK == nil || *eh.PingOK || !strings.Contains(strings.Join(problems, "; "), "does not hold the listening socket") {
-			t.Errorf("a keeper that holds no socket: %+v, problems %v; want it running, unhealthy, its socket missing", eh, problems)
+		if !eh.Running || eh.PingOK == nil || *eh.PingOK || !strings.Contains(strings.Join(problems, "; "), "ping on ") {
+			t.Errorf("a keeper that holds no socket: %+v, problems %v; want it running, unhealthy, its ping failed", eh, problems)
 		}
 	})
 	t.Run("a socket that never answers", func(t *testing.T) {

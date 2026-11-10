@@ -8,10 +8,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -25,9 +27,10 @@ import (
 )
 
 // An upgrade of a keeper host starts the new host with the keeper (blocking item 1 of the
-// review): the launch spec replaceHost passes carries RelayKeeper, the record a start makes from it
-// says so, and that record's supervised set runs the keeper and gives the controller its socket. A
-// host without the keeper is the control: no keeper after its upgrade either.
+// review): the launch spec replaceHost passes the new host's start carries relayKeeper, and a host
+// without the keeper is the control. This shows replaceHost's part only: the start's own record
+// (startAndWait, which needs a real k3s) is pinned by the real-k3s CLI test, which upgrades a keeper
+// host and reads relay_keeper from state.json; with startAndWait's assignment removed it fails.
 func TestAnUpgradeKeepsTheRelayKeeper(t *testing.T) {
 	for _, keeper := range []bool{true, false} {
 		t.Run(map[bool]string{true: "a keeper host", false: "an alpha host"}[keeper], func(t *testing.T) {
@@ -48,17 +51,6 @@ func TestAnUpgradeKeepsTheRelayKeeper(t *testing.T) {
 			}
 			if ops.spec.relayKeeper != keeper {
 				t.Fatalf("the new host's launch spec carries relayKeeper %v, want %v", ops.spec.relayKeeper, keeper)
-			}
-			// The record the new host's start writes, as startAndWait makes it.
-			nst := newRecord(ops.spec, ProcRec{Name: "k3s", PID: os.Getpid()}, st.Front, time.Now())
-			nst.RelayKeeper = ops.spec.relayKeeper
-			set, err := nst.supervisedSet(l)
-			if err != nil {
-				t.Fatal(err)
-			}
-			hasKeeper := len(set) == 2 && set[1].Name == keeperEntryName && set[0].Args[len(set[0].Args)-2] == "--relay-keeper-socket"
-			if hasKeeper != keeper {
-				t.Errorf("the upgraded host's supervised set %+v: keeper %v, want %v", set, hasKeeper, keeper)
 			}
 		})
 	}
@@ -98,16 +90,20 @@ func TestKeeperFdInodesReturnsAnUnreadableDirectory(t *testing.T) {
 	}
 }
 
-// Only the keeper's own answer counts (the ping nit): a keeper that answers nothing, while another
-// process, this test, listens at the keeper's socket path and answers pings, is unhealthy, since
-// the keeper does not hold the listening socket.
+// Only the keeper's own answer counts (the ping nit, made strict by the delta review): the real
+// keeper runs and listens; its socket's path is unlinked, and an impostor, this test, binds a new
+// listener there and answers pings. /proc/net/unix still shows the keeper's listener at that path,
+// so only the connection's peer tells them apart: the check refuses, naming the impostor's PID. The
+// keeper answering on its own socket, before the swap, is the positive control.
 func TestTheKeepersPingMustBeTheKeepersOwn(t *testing.T) {
 	f := keeperFixture(t)
-	f.steer("keeper-no-answer", "")
 	f.supervise(SuperviseOptions{})
 	k := f.keeperUp()
+	if eh, problems := f.keeperHealth(k); len(problems) != 0 || eh.PingOK == nil || !*eh.PingOK {
+		t.Fatalf("the keeper on its own socket: %+v, problems %v; want healthy", eh, problems)
+	}
 	sock := f.l.host(f.ports).RelayKeeperSocket()
-	if err := os.MkdirAll(filepath.Dir(sock), 0o700); err != nil {
+	if err := os.Remove(sock); err != nil {
 		t.Fatal(err)
 	}
 	ln, err := wire.Listen(sock)
@@ -122,13 +118,39 @@ func TestTheKeepersPingMustBeTheKeepersOwn(t *testing.T) {
 		}, slog.New(slog.DiscardHandler))
 	}()
 	t.Cleanup(func() { cancel(); <-served })
-	if e, err := pingKeeper(sock, keeperPingTimeout); err != nil || e != firstKeeperE {
-		t.Fatalf("the impostor's answer: %d, %v; want it to answer", e, err)
+	if e, peer, err := pingKeeper(sock, keeperPingTimeout); err != nil || e != firstKeeperE || peer != os.Getpid() {
+		t.Fatalf("the impostor's answer: E %d, peer %d, %v; want it to answer, as this process", e, peer, err)
 	}
 	sup := f.supervisorHandle()
 	eh, problems := checkEntry(sup, sup.rec.PID, k)
-	if eh.PingOK == nil || *eh.PingOK || !strings.Contains(strings.Join(problems, "; "), "does not hold the listening socket") {
-		t.Errorf("a keeper whose socket path another process answers: %+v, problems %v; want unhealthy", eh, problems)
+	if eh.PingOK == nil || *eh.PingOK || !strings.Contains(strings.Join(problems, "; "), "answered by pid "+strconv.Itoa(os.Getpid())) {
+		t.Errorf("a keeper whose socket path an impostor took: %+v, problems %v; want unhealthy, naming the impostor's PID", eh, problems)
+	}
+}
+
+// keeperFdInodes reads the snapshot again once when a descriptor closes in the middle of it, and
+// refuses when that happens again: a closing descriptor could hide a listener duplicated into a
+// new one (the delta review of PR 361).
+func TestKeeperFdInodesRetriesAClosedDescriptorOnce(t *testing.T) {
+	// Another process's descriptors: reading this process's own would meet the directory
+	// descriptor ReadDir itself opened, closed by the time its link is read.
+	other := startBystander(t, "sleep", "300").Process.Pid
+	read := fdReadlink
+	t.Cleanup(func() { fdReadlink = read })
+	calls := 0
+	fdReadlink = func(p string) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", fs.ErrNotExist
+		}
+		return read(p)
+	}
+	if _, err := keeperFdInodes(other); err != nil {
+		t.Errorf("a descriptor that closed once: %v; want the snapshot read again, and passing", err)
+	}
+	fdReadlink = func(string) (string, error) { return "", fs.ErrNotExist }
+	if _, err := keeperFdInodes(other); err == nil || !strings.Contains(err.Error(), "changed while they were read, twice") {
+		t.Errorf("descriptors closing twice: %v; want refused", err)
 	}
 }
 
