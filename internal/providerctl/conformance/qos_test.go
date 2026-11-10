@@ -93,6 +93,9 @@ type shapeRow struct {
 
 // allocLimit is the time limit of the row's Allocation: the harness's, or the reach rows' own, shorter one.
 func (r shapeRow) allocLimit() string {
+	if strings.HasPrefix(r.name, "reach-host-dialed-") {
+		return hostDialedTimeLimit
+	}
 	if strings.HasPrefix(r.name, "reach-") {
 		return reachTimeLimit
 	}
