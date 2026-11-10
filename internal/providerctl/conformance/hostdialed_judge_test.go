@@ -322,6 +322,10 @@ func TestAHostDialedPostHoldsNoPartOfAClusterPath(t *testing.T) {
 		{"a pass", "- the rendezvous: ok: socket under $TMPDIR: yes; fallback to /dev/shm: no; its path is 70 bytes (at most 107); its directory mode 700; an --overlap step's $TMPDIR: set, another", true, func(*hostDialedObs) {}, false},
 		{"the fallback", "- the rendezvous: FAIL: socket under $TMPDIR: no; fallback to /dev/shm: yes, since a socket under $TMPDIR could be 124 bytes, over the 107 a socket's path may have; its path is 36 bytes (at most 107)", false,
 			func(o *hostDialedObs) { o.Probe.AgentTmpDir, o.Probe.Socket = longTmp, shmSock }, false},
+		{"a fallback for no reason shown", "- the rendezvous: FAIL: socket under $TMPDIR: no; fallback to /dev/shm: yes, for a reason not shown (a socket under $TMPDIR would be at most 73 bytes, within 107)", false,
+			func(o *hostDialedObs) { o.Probe.Socket = shmSock }, false},
+		{"a socket elsewhere", "- the rendezvous: FAIL: socket under $TMPDIR: no; fallback to /dev/shm: no (its directory is elsewhere)", false,
+			func(o *hostDialedObs) { o.Probe.Socket = step + "/hb-relay-8123456/relay.sock" }, false},
 		{"no agent line", "- the rendezvous: FAIL: socket under $TMPDIR: not shown (the agent's output does not name its $TMPDIR)", false,
 			func(o *hostDialedObs) { o.Probe.AgentTmpDir = "" }, false},
 		{"an agent that stops at its start", "- the control session: FAIL: did not come up: the job ended FAILED before the agent registered", false, func(o *hostDialedObs) {
