@@ -105,14 +105,15 @@ func socketWithNoListener(t *testing.T) string {
 }
 
 // relayCollectors are the collectors NewManager registers, as it builds them
-// (metricsCollectorsWithKeeper), over a store with one Instance and one
+// (metricsCollectors, then keeperCollectors), over a store with one Instance and one
 // Allocation whose accounting is known, so that the instances and accounting
 // reads have series and the keeper's reads can be told from them. socket is
 // Options.RelayKeeperSocket.
 func relayCollectors(t *testing.T, socket string, serving func() bool) []prometheus.Collector {
 	t.Helper()
 	started := time.Now()
-	return metricsCollectorsWithKeeper(gateStore(t), &Backend{}, SystemClock{}, func() time.Time { return started }, serving, eventcount.New(), socket)
+	cs := metricsCollectors(gateStore(t), &Backend{}, SystemClock{}, func() time.Time { return started }, serving, eventcount.New())
+	return append(cs, keeperCollectors(socket, serving)...)
 }
 
 // scrapeRelays serves a copy that serves, with the keeper at socket, as
@@ -516,10 +517,15 @@ func TestRelaysACopyThatDoesNotServeExportsNoRelaySeries(t *testing.T) {
 	}
 }
 
-// TestRelaysACopyThatStopsServingDuringTheReadExportsNothing: serving is read
-// again after the reads, so a copy that lost its Lease while the keeper
-// answered exports none of that scrape. The control is the same scrape with
-// serving left on.
+// TestRelaysACopyThatStopsServingDuringTheReadExportsNothing: keeperCollector
+// reads serving again after the keeper's read, so a copy that lost its Lease
+// while the keeper answered exports none of that read: no relay series and no
+// hpcburst_collector_success{collector="relays"}. The state collector is
+// registered on its own and keeps its own gate (alpha's), and the registry
+// gathers the two at once, so its series may or may not be in that scrape; a
+// scrape that lacks one of the three success series is the absence proof's
+// inconclusive read (HBEP-8, Raised events, condition 2: every success series).
+// The control is the same scrape with serving left on.
 func TestRelaysACopyThatStopsServingDuringTheReadExportsNothing(t *testing.T) {
 	var serving, flip atomic.Bool
 	k := startFakeKeeper(t, func(int) (wire.Kind, any) {
@@ -538,8 +544,10 @@ func TestRelaysACopyThatStopsServingDuringTheReadExportsNothing(t *testing.T) {
 
 	flip.Store(true)
 	serving.Store(true)
-	if got := hpcburstSamples(scrapeCollectors(t, cs...)); len(got) != 0 {
-		t.Errorf("a copy that stopped serving during the read exported %d hpcburst_ samples, want none: %v", len(got), got)
+	ex = scrapeCollectors(t, cs...)
+	noRelaySeries(t, "a copy that stopped serving during the keeper's read", ex)
+	if got := ex.find("hpcburst_collector_success", map[string]string{"collector": collectorRelays}); len(got) != 0 {
+		t.Errorf("a copy that stopped serving during the keeper's read exported success{relays}: %v", got)
 	}
 }
 

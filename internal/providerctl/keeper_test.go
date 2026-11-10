@@ -363,8 +363,11 @@ func TestKeeperSetMarksEndedForGoodAndWaitsOnTheListing(t *testing.T) {
 	// The job leaves the listing: the entry is not sent, and the set is
 	// incomplete, so nothing is dropped, until an observation decides.
 	e.batch.Vanish(a.Status.AtProvider.JobID)
+	// One set may be built before the job vanished and arrive after this
+	// count; the sender sends one at a time, so the next one after it was
+	// built once the job had vanished.
 	n := k.setCount()
-	s = k.waitSet(t, "a set whose listing does not show the job", n, func(wire.DesiredSet) bool { return true })
+	s = k.waitSet(t, "a set whose listing does not show the job", n+1, func(wire.DesiredSet) bool { return true })
 	if _, ok := entryOf(s, tagOf(a)); ok || s.Complete {
 		t.Errorf("with the job not listed the set names alloc-a (%v) or is complete (%v)", ok, s.Complete)
 	}

@@ -3,13 +3,10 @@ package lifecycle
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/relaykeeper/wire"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
@@ -17,10 +14,10 @@ import (
 // The relay keeper's series (HBEP-8, Metrics, The relay keeper; beta, issue
 // #343). The keeper exports no metrics of its own and binds no port: the
 // serving copy of the lifecycle controller reads its status over its socket
-// and exports it through stateCollector, so a copy that does not serve
-// exports none of it. The series exist in keeper mode only
-// (Options.RelayKeeperSocket set); in alpha stateCollector has no
-// relaysCollector and exports none of them, nor
+// and exports it through keeperCollector, under the same serving gate as
+// stateCollector, so a copy that does not serve exports none of it. The
+// series exist in keeper mode only (Options.RelayKeeperSocket set): in alpha
+// NewManager registers no keeperCollector, so none of them is exported, nor
 // hpcburst_collector_success{collector="relays"}.
 
 var (
@@ -61,9 +58,8 @@ func relayMetricState(s string) string {
 }
 
 // relaysCollector builds the relay keeper's series at scrape time, from one
-// `status` exchange with the keeper per scrape. It is one of stateCollector's
-// reads, not a collector registered on its own: stateCollector describes and
-// exports its series, and owns hpcburst_collector_success.
+// `status` exchange with the keeper per scrape. keeperCollector registers and
+// gates it; stateCollector describes hpcburst_collector_success.
 type relaysCollector struct {
 	// socket is the keeper's socket path (Options.RelayKeeperSocket).
 	socket string
@@ -181,14 +177,43 @@ func (b *seriesBuilder) add(d *prometheus.Desc, t prometheus.ValueType, v float6
 	b.out = append(b.out, m)
 }
 
-// metricsCollectorsWithKeeper is metricsCollectors for a copy that may run
-// with the relay keeper (beta): the one stateCollector, which reads the
-// keeper's status over the socket at relayKeeperSocket, Options.RelayKeeperSocket.
-// "" is alpha: no keeper, the collector as metricsCollectors builds it.
-func metricsCollectorsWithKeeper(cache client.Reader, backend *Backend, clock Clock, started func() time.Time, serving func() bool, events *eventcount.Counter, relayKeeperSocket string) []prometheus.Collector {
-	c := newStateCollector(cache, backend, clock, started, serving, events)
-	if relayKeeperSocket != "" {
-		c.relays = &relaysCollector{socket: relayKeeperSocket}
+// keeperCollector is the relay keeper's own registered collector, beside
+// stateCollector, in beta's keeper mode only (keeperCollectors), so alpha's
+// registration is the same call as before. It exports the four relay series
+// and hpcburst_collector_success{collector="relays"}, only while the copy
+// serves: serving is read before the read and again after it, as
+// stateCollector does, so a scrape that began while the copy served exports
+// nothing once it has stopped. It describes the four relay descriptors only:
+// stateCollector describes the shared success gauge, which client_golang lets
+// one collector describe and any registered collector export.
+type keeperCollector struct {
+	serving func() bool
+	relays  *relaysCollector
+}
+
+// Describe implements prometheus.Collector.
+func (c *keeperCollector) Describe(ch chan<- *prometheus.Desc) { c.relays.describe(ch) }
+
+// Collect implements prometheus.Collector.
+func (c *keeperCollector) Collect(ch chan<- prometheus.Metric) {
+	if !c.serving() {
+		return
 	}
-	return []prometheus.Collector{c}
+	out := c.relays.collect(nil)
+	if !c.serving() {
+		return
+	}
+	for _, m := range out {
+		ch <- m
+	}
+}
+
+// keeperCollectors are the collectors NewManager registers beside
+// metricsCollectors' for the relay keeper at socket, Options.RelayKeeperSocket:
+// none for "", alpha.
+func keeperCollectors(socket string, serving func() bool) []prometheus.Collector {
+	if socket == "" {
+		return nil
+	}
+	return []prometheus.Collector{&keeperCollector{serving: serving, relays: &relaysCollector{socket: socket}}}
 }

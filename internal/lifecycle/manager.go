@@ -348,9 +348,16 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	if reg == nil {
 		reg = ctrlmetrics.Registry
 	}
-	if err := mgr.Add(&collectorRegistration{reg: reg, cs: metricsCollectorsWithKeeper(mgr.GetClient(), backend, clock,
-		func() time.Time { return r.memory().started }, ready.serving, counted, o.RelayKeeperSocket)}); err != nil {
+	if err := mgr.Add(&collectorRegistration{reg: reg, cs: metricsCollectors(mgr.GetClient(), backend, clock,
+		func() time.Time { return r.memory().started }, ready.serving, counted)}); err != nil {
 		return nil, nil, err
+	}
+	// Beta's keeper mode only: the relay keeper's series, beside the state
+	// collector and under the same serving gate (HBEP-8, Metrics; #343).
+	if cs := keeperCollectors(o.RelayKeeperSocket, ready.serving); cs != nil {
+		if err := mgr.Add(&collectorRegistration{reg: reg, cs: cs}); err != nil {
+			return nil, nil, err
+		}
 	}
 	workers := o.Workers
 	if workers <= 0 {

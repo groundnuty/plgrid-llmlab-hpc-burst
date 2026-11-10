@@ -13,12 +13,12 @@ import (
 // (HBEP-8, Unknown samples): 1 after a successful read, 0 after a failed one,
 // in which case the collector exposes none of its series. It tells "none" from
 // "could not read". In alpha two reads have one: accounting, the Allocation
-// list, and instances, the Instance inventory. In beta's keeper mode a third
-// has it: relays, the relay keeper's status (HBEP-8, 10 Nov 2026). One
-// registered collector, stateCollector, describes it: client_golang's
-// Registry.Register refuses a second collector that describes the same
-// descriptor, so two would keep the manager from starting
-// (`@hpc-burst-science-agent`, 6 Nov 2026, for #249).
+// list, and instances, the Instance inventory. One registered collector,
+// stateCollector, describes it: client_golang's Registry.Register refuses a
+// second collector that describes the same descriptor, so two would keep the
+// manager from starting (`@hpc-burst-science-agent`, 6 Nov 2026, for #249).
+// In beta's keeper mode a third read has it, relays, the relay keeper's status
+// (HBEP-8, 10 Nov 2026), which keeperCollector exports and does not describe.
 var descCollectorSuccess = prometheus.NewDesc("hpcburst_collector_success",
 	"1 if the collector's last read succeeded, 0 if it failed, in which case none of its series are exposed. collector names the read: accounting (the Allocation list), instances (the Instance inventory) or relays (the relay keeper's status, in keeper mode only).",
 	[]string{"collector"}, nil)
@@ -39,8 +39,7 @@ func successSample(collector string, ok bool) prometheus.Metric {
 // stateCollector is the lifecycle controller's one registered collector of
 // hpcburst_ series: the series derived from the cluster's state, the
 // Instances' (instanceCollector) and the accounting gauges
-// (accountingCollector), each read with its hpcburst_collector_success, and
-// in beta's keeper mode the relay keeper's (relaysCollector, nil in alpha).
+// (accountingCollector), each read with its hpcburst_collector_success.
 //
 // A copy exports them only while it serves: its readiness checks "leading"
 // and "caches" pass (readiness.serving). Otherwise it exports no hpcburst_
@@ -61,9 +60,6 @@ type stateCollector struct {
 	instances  *instanceCollector
 	accounting *accountingCollector
 	events     *eventcount.Counter
-	// relays reads the relay keeper's status: nil in alpha, set in beta's
-	// keeper mode (Options.RelayKeeperSocket).
-	relays *relaysCollector
 }
 
 // Describe implements prometheus.Collector.
@@ -71,9 +67,6 @@ func (c *stateCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descCollectorSuccess
 	c.instances.describe(ch)
 	c.accounting.describe(ch)
-	if c.relays != nil {
-		c.relays.describe(ch)
-	}
 	c.events.Describe(ch)
 }
 
@@ -84,9 +77,6 @@ func (c *stateCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	out := c.instances.collect(nil)
 	out = c.accounting.collect(out)
-	if c.relays != nil {
-		out = c.relays.collect(out)
-	}
 	out = collectEvents(out, c.events)
 	if !c.serving() {
 		return
