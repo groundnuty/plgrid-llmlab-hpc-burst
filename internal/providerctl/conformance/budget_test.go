@@ -69,11 +69,17 @@ func newWaitReader(t *testing.T) *waitReader {
 // sum cannot see, which fails the test, so that it is taught the new form rather than leaving the wait out.
 func (r *waitReader) length(e ast.Expr) time.Duration {
 	r.t.Helper()
-	known := map[string]time.Duration{"duplicateWait": duplicateWait, "accountingEndWait": accountingEndWait, "accountingDeleteWait": accountingDeleteWait, "reachEndWait": reachEndWait}
+	known := map[string]time.Duration{"duplicateWait": duplicateWait, "accountingEndWait": accountingEndWait, "accountingDeleteWait": accountingDeleteWait, "reachEndWait": reachEndWait,
+		"hostDialedSessionWait": hostDialedSessionWait, "hostDialedProbeWait": hostDialedProbeWait, "hostDialedFenceWait": hostDialedFenceWait, "hostDialedEndWait": hostDialedEndWait}
 	switch x := e.(type) {
 	case *ast.Ident:
 		if d, ok := known[x.Name]; ok {
 			return d
+		}
+	case *ast.CallExpr:
+		// w.bound(d): the live bound d, which only a dry run shortens.
+		if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "bound" && len(x.Args) == 1 {
+			return r.length(x.Args[0])
 		}
 	case *ast.BinaryExpr:
 		lit, isLit := x.X.(*ast.BasicLit)
@@ -130,8 +136,9 @@ func (r *waitReader) pollLoops() int {
 }
 
 // of adds up fn's waits, and those of what it calls: a function of the package, or a method whose name one type alone has. A wait is a
-// start wait (untilRuns), a call with a length (until, endedInAccounting, settleDuplicates, time.Sleep, time.After, time.NewTimer,
-// context.WithTimeout), a deadline it makes itself (time.Now().Add), or the job name's round trip. A call made twice counts twice, and a
+// start wait (untilRuns), a call with a length (until, untilOr, endedInAccounting, settleDuplicates, time.Sleep, time.After,
+// time.NewTimer, context.WithTimeout), a deadline it makes itself (time.Now().Add), or the job name's round trip. A length may be
+// w.bound(d), which is d. A call made twice counts twice, and a
 // time.Sleep inside a loop is that loop's pacing, under a deadline listed here.
 //
 // What it cannot see, and does not claim to (the delta review of PR 284, T2; this is no proof): a wait inside another package, a method
@@ -227,7 +234,7 @@ func (r *waitReader) ofCall(c *ast.CallExpr, inLoop bool, onPath map[*ast.FuncDe
 			return waitSum{rest: r.length(c.Args[1])}
 		case f.Sel.Name == "untilRuns":
 			return waitSum{startWaits: 1}
-		case f.Sel.Name == "until":
+		case f.Sel.Name == "until", f.Sel.Name == "untilOr":
 			return waitSum{rest: r.length(c.Args[2])}
 		case f.Sel.Name == "endedInAccounting", f.Sel.Name == "settleDuplicates":
 			return waitSum{rest: r.length(c.Args[1])}
@@ -257,6 +264,8 @@ func TestEveryRowsTimeoutIsAboveTheWorstCaseItsSourceAddsUpTo(t *testing.T) {
 			body, wantStartWaits = "TestConformance", 2
 		case strings.HasPrefix(row.name, "gpu-accounting-"):
 			body, wantStartWaits = "gpuAccountingBody", 1
+		case strings.HasPrefix(row.name, "reach-host-dialed-"):
+			body, wantStartWaits = "hostDialedBody", 1
 		case strings.HasPrefix(row.name, "reach-"):
 			body, wantStartWaits = "reachBody", 1
 		default:
