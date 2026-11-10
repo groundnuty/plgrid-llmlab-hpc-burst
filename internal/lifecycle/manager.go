@@ -94,6 +94,12 @@ type Options struct {
 	// Provider managers count into too; nil means a new one for this manager.
 	// Never share one between copies.
 	Events *eventcount.Counter
+	// RelayKeeperSocket is the relay keeper's Unix socket (beta, HBEP-6, The
+	// relay keeper). Set, the serving collector reads the keeper's status over
+	// it at each scrape and exports the relays' series and
+	// hpcburst_collector_success{collector="relays"}; "" is alpha: no keeper
+	// read, no relay series (HBEP-8, Metrics).
+	RelayKeeperSocket string
 
 	// newCache, when set, builds the manager's cache: a test holds the
 	// caches' sync with it.
@@ -342,8 +348,8 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	if reg == nil {
 		reg = ctrlmetrics.Registry
 	}
-	if err := mgr.Add(&collectorRegistration{reg: reg, cs: metricsCollectors(mgr.GetClient(), backend, clock,
-		func() time.Time { return r.memory().started }, ready.serving, counted)}); err != nil {
+	if err := mgr.Add(&collectorRegistration{reg: reg, cs: metricsCollectorsWithKeeper(mgr.GetClient(), backend, clock,
+		func() time.Time { return r.memory().started }, ready.serving, counted, o.RelayKeeperSocket)}); err != nil {
 		return nil, nil, err
 	}
 	workers := o.Workers
