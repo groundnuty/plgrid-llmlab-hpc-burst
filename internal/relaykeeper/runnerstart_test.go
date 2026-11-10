@@ -76,8 +76,8 @@ func TestAStartIsShownUpBeforeOnStartAndResolvedOncePerChannel(t *testing.T) {
 		}
 	}
 	for _, ch := range agentapi.RelayChannels {
-		if seen[ch] != 1 || hw.count(func() int { return hw.failed[ch] }) != 0 {
-			t.Errorf("the %s channel was resolved by %d OnStarts and %d StartFaileds, want exactly one OnStart", ch, seen[ch], hw.failed[ch])
+		if failed := hw.count(func() int { return hw.failed[ch] }); seen[ch] != 1 || failed != 0 {
+			t.Errorf("the %s channel was resolved by %d OnStarts and %d StartFaileds, want exactly one OnStart", ch, seen[ch], failed)
 		}
 	}
 	if n := rg.doubleResolutions(); n != 0 {

@@ -62,8 +62,11 @@ func (rg *realRig) startedPIDs() map[string]int {
 //   - The old attempt connects first: the Runner's worker is held in
 //     generation two's read of the seeds, so the old relays are not stopped
 //     yet; they launch, connect and carry bytes. Then the worker goes on:
-//     generation two's relays start with higher N, connect, and the job side
-//     replaces the old sessions with them.
+//     generation two's relays start with higher N and connect. The Runner's
+//     stop of the old relays comes first (Owner.Want) and closes their
+//     sessions (hostdial.Serve ends with the relay's context), so the job
+//     side finds the channels empty rather than superseding a live old
+//     session: this order shows no live supersession, which the test logs.
 //   - The replacement connects first: generation two's relays start, connect
 //     and carry bytes; then the old attempts launch, with their lower N, and
 //     the job side refuses them as superseded.
@@ -127,11 +130,18 @@ func TestTheOldAttemptAndItsReplacementInBothConnectOrders(t *testing.T) {
 				nu = rg.waitPairWhere(rkProv, j.tag, newer)
 				for ch, r := range nu {
 					// The job side keeps the higher (E, N): the replacement's
-					// session is up, whether the old one was still there to be
-					// replaced or the Runner's stop had already closed it.
+					// session is up. The Runner's stop of the old relay, which
+					// comes before the replacement's start (Owner.Want), closes
+					// the old session (hostdial.Serve ends with the relay's
+					// context), so the job side usually finds the channel empty
+					// (replaced=false) rather than superseding a live old
+					// session (replaced=true); the log says which it saw.
+					replaced := false
 					rkWaitFor(t, time.Minute, "the replacement's "+string(ch)+" session up", func() bool {
-						return w.jobLogHas(j.id, sessionUp(ch, E, r.Seq, true)...) || w.jobLogHas(j.id, sessionUp(ch, E, r.Seq, false)...)
+						replaced = w.jobLogHas(j.id, sessionUp(ch, E, r.Seq, true)...)
+						return replaced || w.jobLogHas(j.id, sessionUp(ch, E, r.Seq, false)...)
 					})
+					t.Logf("the replacement's %s session (N %d) came up with replaced=%v", ch, r.Seq, replaced)
 				}
 			} else {
 				nu = rg.waitPairWhere(rkProv, j.tag, newer)
