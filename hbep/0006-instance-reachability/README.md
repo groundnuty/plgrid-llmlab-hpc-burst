@@ -575,7 +575,7 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
 - **frps and frpc move together.** Both are pinned to one frp version in `internal/launcher/frp-pins.txt`. New Allocations get the current frpc. An frps upgrade waits until no running Allocation has another frpc version, or until that pair is tested.
 - **The agent protocol** (`/agent/v1/`) is unchanged; frpc's tunnel is separate from it.
 - **Stored state:** none of this HBEP's own, except the Allocation condition `RelayEndedForGood`, which is durable and never cleared (Dial-home modes, What ends a relay), and in beta the relay keeper's state file (The relay keeper). Path state is soft, rebuilt from frps's list; frps's state lives in memory and is rebuilt by reconnects.
-- **From alpha's relays to the keeper (beta):** a host can switch with Allocations running. The keeper's `E` starts above every alpha epoch, so its relays supersede the controller's, and each running Allocation's streams are cut once at the switch. The reverse, back to in-controller relays, needs every host-dialed Allocation of the host drained first, since alpha's lower epochs would be refused as `superseded`. So `up` without `--relay-keeper` refuses while the keeper's state file exists and host-dialed Allocations are running. The launcher's own record doesn't survive `down`, but that file does. `up` checks once k3s is ready, before it starts the controllers.
+- **From alpha's relays to the keeper (beta):** a host can switch with Allocations running. The keeper's `E` starts above every alpha epoch, so its relays supersede the controller's, and each running Allocation's streams are cut once at the switch. The reverse, back to in-controller relays, needs every host-dialed Allocation of the host drained first, since alpha's lower epochs would be refused as `superseded`. So `up` without `--relay-keeper` refuses while the keeper's state file exists and host-dialed Allocations are running. The launcher's own record doesn't survive `down`, but that file does. `up` checks once k3s is ready, before it starts the controllers. A switch back that finds no host-dialed Allocation running writes a 'keeper retired' marker beside the keeper's state file; while it exists the guard passes, and `up --relay-keeper` removes it. A failed read writes nothing and refuses.
 - **Downgrade:** start the earlier frps with the earlier frpc pin, under the same rule.
 
 ### Security
@@ -740,6 +740,7 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - 2026-11-10: the relay keeper's names, set fields, expiry, completeness and claim rules, from the code agent's plan (#343).
 - 2026-11-10: open question 12 answered for one transfer at a time by spike S15.
 - 2026-11-10: two amendments to the relay keeper's interface, from its build (#354).
+- 2026-11-10: the keeper retired marker, from the review of the launcher's keeper (#361).
 
 ## Amendments
 
@@ -818,3 +819,6 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - **2026-11-10: the keeper's own replacement isn't marked** (Dial-home modes, The relay keeper). An amendment from the science agent's ruling on PR #354's review, from the keeper's build: a `superseded` end of a relay the keeper itself replaced, identified by the `(E, N)` it issued, isn't recorded, since the replacement's own session superseded it. A stated limit comes with it: the job side names no superseder, so a stray ranked between a replaced relay and its replacement goes unrecorded; it is superseded by the replacement.
 
   Before, every `superseded` end in beta was marked.
+- **2026-11-10: the keeper retired marker** (Compatibility and upgrades). An amendment from the science agent's ruling on PR #361's review: A switch back that finds no host-dialed Allocation running writes a 'keeper retired' marker beside the keeper's state file; while it exists the guard passes, and `up --relay-keeper` removes it. A failed read writes nothing and refuses.
+
+  Before, a drained switch back left only the keeper's state file, so every later `up` without `--relay-keeper` refused while any Allocation ran, even one started under alpha after the drain.

@@ -20,11 +20,13 @@ package launcher
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -216,16 +218,33 @@ func unixListenerInodes(path string) (map[string]bool, error) {
 // allocations is the resource of the framework's Allocations.
 var allocations = v1alpha1.GroupVersion.WithResource("allocations")
 
-// checkKeeperSwitchBack is up's switch-back guard. With the keeper asked for, or with no keeper
-// state file, it passes. Otherwise it lists the Allocations first: with none Running nothing can be
-// handed back, and it passes, saying so when it ignored a state file that does not load (the
-// review of PR 361: such a file had blocked every up, with the keeper's too, for no Allocation).
-// With Allocations Running, it refuses, naming them and the way out; a state file the keeper
-// itself would refuse to load refuses too, since it cannot show the keeper never ran. Host-dialed
-// mode is the launcher's, not an Allocation's (api/v1alpha1 has no per-Allocation mode), so every
-// Running Allocation of the host counts: conservative, it refuses more, never less.
+// checkKeeperSwitchBack is up's switch-back guard (HBEP-6, Compatibility and upgrades, as amended
+// 10 Nov 2026 with the keeper retired marker).
+//   - With the keeper asked for (up --relay-keeper), it removes the retired marker, synced, BEFORE
+//     the keeper starts, and refuses when it cannot: the keeper's E then continues above its last
+//     run's, from its state file.
+//   - With no keeper state file, the keeper never ran here, and it passes.
+//   - While the retired marker exists, it passes whatever runs: all of it started under alpha,
+//     after a drain the marker recorded.
+//   - Otherwise it reads the Allocations. A failed read refuses and writes nothing (fail closed).
+//     With none Running, it writes the marker atomically beside the keeper's state file and
+//     passes, saying so, and saying when it ignored a state file that does not load. With
+//     Allocations Running, it refuses, naming them and the way out; a state file the keeper would
+//     refuse to load refuses too, since it cannot show the keeper never ran.
+//
+// Host-dialed mode is the launcher's, not an Allocation's (api/v1alpha1 has no per-Allocation
+// mode), so every Running Allocation of the host counts: conservative, it refuses more, never
+// less, and the marker is written only on a read that saw none.
 func checkKeeperSwitchBack(ctx context.Context, cfg *rest.Config, l layout, relayKeeper bool, log io.Writer) error {
+	marker := retiredMarker(l)
 	if relayKeeper {
+		removed, err := removeRetiredMarker(l)
+		if err != nil {
+			return fmt.Errorf("the relay keeper's retired marker %s could not be removed, so the keeper is not started: %w", marker, err)
+		}
+		if removed {
+			logf(log, "removed the relay keeper's retired marker %s: the keeper runs again", marker)
+		}
 		return nil
 	}
 	path := relaykeeper.StatePath(l.dir)
@@ -234,25 +253,70 @@ func checkKeeperSwitchBack(ctx context.Context, cfg *rest.Config, l layout, rela
 	} else if err != nil {
 		return fmt.Errorf("the relay keeper's state file %s: %w", path, err)
 	}
+	if _, err := os.Stat(marker); err == nil {
+		logf(log, "the relay keeper was retired here (%s): its switch back is done, and up goes on", marker)
+		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("the relay keeper's retired marker %s: %w", marker, err)
+	}
 	running, err := runningAllocations(ctx, cfg)
 	if err != nil {
-		return fmt.Errorf("list the running Allocations for the relay keeper's switch back: %w", err)
+		return fmt.Errorf("list the running Allocations for the relay keeper's switch back (nothing was recorded; up refuses until a read succeeds): %w", err)
 	}
 	ks, loadErr := relaykeeper.LoadState(path)
 	if len(running) == 0 {
 		if loadErr != nil {
-			logf(log, "warning: the relay keeper's state file %s cannot be read (%v); no Allocation runs, so nothing is handed back from the keeper, and up goes on", path, loadErr)
+			logf(log, "warning: the relay keeper's state file %s cannot be read (%v); no Allocation runs, so nothing is handed back from the keeper", path, loadErr)
 		}
+		if err := writeRetiredMarker(l, time.Now()); err != nil {
+			return fmt.Errorf("no Allocation runs, but the relay keeper's retired marker %s could not be written: %w", marker, err)
+		}
+		logf(log, "no Allocation runs: the relay keeper is retired (%s); until up --relay-keeper removes the marker, this guard passes", marker)
 		return nil
 	}
 	if loadErr != nil {
 		return fmt.Errorf("the relay keeper's state file %s cannot be read, so it cannot show the keeper never ran (%v), and %d Allocation(s) are running: %v. "+
-			"Release those Allocations first; with none running, up goes on and ignores the file", path, loadErr, len(running), running)
+			"Release those Allocations first; with none running, up goes on and retires the keeper", path, loadErr, len(running), running)
 	}
 	return fmt.Errorf("the relay keeper ran on this host (%s, %d start(s)) and %d Allocation(s) are running: %v. "+
 		"Starting without --relay-keeper would hand their relays back to the controller, whose lower epochs "+
 		"their jobs refuse as superseded (HBEP-6, Compatibility and upgrades). Run up with --relay-keeper, "+
 		"or release those Allocations first", path, ks.Starts, len(running), running)
+}
+
+// retiredMarker is the keeper retired marker, beside the keeper's state file (HBEP-6,
+// Compatibility and upgrades). down keeps it, with the keeper's state file.
+func retiredMarker(l layout) string {
+	return filepath.Join(agentapi.Host{StateDir: l.dir}.RelayKeeperDir(), "retired")
+}
+
+// writeRetiredMarker writes the marker atomically: a temporary file, written and synced, renamed
+// into place, and the directory synced, so it either exists whole or not at all after a crash.
+func writeRetiredMarker(l layout, at time.Time) error {
+	path := retiredMarker(l)
+	b, err := json.Marshal(struct {
+		RetiredAt time.Time `json:"retired_at"`
+		Why       string    `json:"why"`
+	}{at.UTC(), "a switch back found no host-dialed Allocation running"})
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(path, append(b, '\n'), 0o600); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+// removeRetiredMarker removes the marker, and syncs its directory; removed says whether there was
+// one.
+func removeRetiredMarker(l layout) (removed bool, err error) {
+	path := retiredMarker(l)
+	if err := os.Remove(path); errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	return true, syncDir(filepath.Dir(path))
 }
 
 // pidfdProbe checks that the kernel has pidfd_open, as hostdial's NewOwner does: up --relay-keeper
