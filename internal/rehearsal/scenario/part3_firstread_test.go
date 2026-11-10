@@ -4,15 +4,25 @@ package scenario_test
 // inconclusive when the one-slot class's start-to-ready time was not yet
 // recorded at the first read (CI run 42809336252: "at the first read map[]").
 // These tests take the harness's own path, on an API (controller-runtime's
-// fake client, with the status subresource) instead of the stack: the
-// deployments' status read by startToReadySnapshot, the snapshot baseline
-// takes just after the first read, and by armFirstRead's wait; condition 1's
-// change from lateChange, as checkForbidden counts it; the verdict from
-// eventcount.Absence. The controller's own recording of the time
-// (internal/lifecycle, status.go: writeStatus) is tested in internal/lifecycle
-// (ready_time_test.go, review_drain_test.go); here a stand-in writes the entry
-// through the status subresource, in the form writeStatus writes it, and only
-// after the wait has read the status without it.
+// fake client, with the status subresource) and a controller double instead
+// of the stack:
+//   - the deployments' status, read by startToReadySnapshot and by
+//     armFirstRead's wait;
+//   - step (f)'s two hooks as armFirstRead arms them: r.beforeKill, which
+//     reads the old process's counters just before the kill, and r.onLed,
+//     the restarted process's first read (baseline: /metrics, the Instances,
+//     frps's proxy list, the snapshot), which judges the read before the kill;
+//   - condition 1's change from lateChange, as checkForbidden counts it, and
+//     the verdict from eventcount.Absence.
+//
+// The controller's own recording of the time (internal/lifecycle, status.go:
+// writeStatus) is tested in internal/lifecycle (ready_time_test.go,
+// review_drain_test.go); here a stand-in writes the entry through the status
+// subresource, in the form writeStatus writes it, and only after the wait has
+// read the status without it. The controller double serves what a serving
+// lifecycle controller exports (process_start_time_seconds, both
+// hpcburst_collector_success series, the counter's series created at 0); a
+// restart is a new process start with every count at 0.
 
 import (
 	"context"
@@ -23,6 +33,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -53,7 +64,7 @@ func firstReadFixture(t *testing.T, ds time.Time) (*part3, client.Client) {
 	p3 := &part3{rig: &rig{t: t}}
 	for _, d := range []dep{queuedDep, oneSlotDep} {
 		in := &v1alpha1.Instance{ObjectMeta: metav1.ObjectMeta{Name: d.Name + "-primary", Namespace: stack.Namespace,
-			Labels: map[string]string{v1alpha1.LabelProvider: d.Provider}}}
+			UID: types.UID(d.Name + "-primary-uid"), Labels: map[string]string{v1alpha1.LabelProvider: d.Provider}}}
 		objs = append(objs, stack.ServedDeploymentAs(d.Served, rehearsalTiming), in)
 		p3.deps = append(p3.deps, &depRun{dep: d, primary: in, ds: ds})
 	}
@@ -86,6 +97,26 @@ func recordStartToReady(c client.Client, md, instance string, class v1alpha1.Acc
 		return fmt.Errorf("update ModelDeployment %s status: %w", md, err)
 	}
 	return nil
+}
+
+// stepF plays step (f) around the hooks armFirstRead armed, in
+// controllerRestart's order: r.beforeKill just before the kill, then the kill
+// and the restart, then r.onLed once the new process leads.
+func stepF(t *testing.T, p3 *part3, ctl *controllerDouble) {
+	t.Helper()
+	if p3.beforeKill == nil || p3.onLed == nil {
+		t.Fatalf("armFirstRead armed no hooks: beforeKill %v, onLed %v", p3.beforeKill != nil, p3.onLed != nil)
+	}
+	p3.beforeKill()
+	ctl.restart()
+	p3.onLed()
+}
+
+// collectProblems makes p3's hooks hand their failures to the returned list.
+func collectProblems(p3 *part3) *[]string {
+	var out []string
+	p3.problem = func(s string) { out = append(out, s) }
+	return &out
 }
 
 // earliestLate is checkForbidden's condition-1 change for ReplacementLate:
@@ -136,12 +167,16 @@ func judgeLate(first, change, ds time.Time) (eventcount.Verdict, string) {
 // as in CI. With armFirstRead, the first read is armed only after the
 // one-slot class's time is recorded: the stand-in records it at the wait's
 // third read without it, so a wait that returns before reading the entry
-// leaves the snapshot empty and fails here. The check is then conclusive: not
-// raised.
+// leaves the snapshot empty and fails here. Step (f) then runs the real hooks:
+// the read before the kill finds nothing raised, the restarted process's
+// first read (r.onLed) sets part 3's base and the TunnelOrphaned base with the
+// recorded time, and the check is conclusive: not raised.
 func TestFirstReadWaitsForTheStartToReadyTimes(t *testing.T) {
 	// CI's run: both drain starts 4m45s after the primaries were seen ready.
 	ds := time.Now().Add(4*time.Minute + 45*time.Second)
 	p3, c := firstReadFixture(t, ds)
+	ctl := startControllerDouble(t, p3)
+	problems := collectProblems(p3)
 
 	beforeAt := time.Now()
 	before := p3.startToReadySnapshot("the first read with no wait")
@@ -167,11 +202,6 @@ func TestFirstReadWaitsForTheStartToReadyTimes(t *testing.T) {
 	if wrote != nil {
 		t.Fatal(wrote)
 	}
-	if p3.onLed == nil {
-		t.Fatal("armFirstRead returned nil without arming the first read")
-	}
-	firstAt := time.Now() // the first read is taken once the restarted controller serves, after armFirstRead
-	atFirst := p3.startToReadySnapshot("the first read's start-to-ready times")
 	if len(misses) != recordAt {
 		t.Errorf("the wait read the status without the one-slot class's time %d times, want %d (recorded at read %d): %q", len(misses), recordAt, recordAt, misses)
 	}
@@ -181,6 +211,36 @@ func TestFirstReadWaitsForTheStartToReadyTimes(t *testing.T) {
 		}
 	}
 
+	oldStart := ctl.processStart()
+	stepF(t, p3, ctl)
+	if len(*problems) != 0 {
+		t.Errorf("step (f) with nothing raised: %q, want no problem", *problems)
+	}
+	if p3.preKill == nil || p3.preKill.why != "" || p3.preKill.reads[keyReplacementLate].ProcessStart != oldStart {
+		t.Errorf("the read before the kill %+v, want the old process's (start %g)", p3.preKill, oldStart)
+	}
+	base := p3.base
+	if base == nil {
+		t.Fatal("r.onLed set no part 3 base")
+	}
+	if p3.orphanBase != base {
+		t.Error("r.onLed did not make part 3's base the TunnelOrphaned check's base")
+	}
+	if len(base.reads) != len(part3Forbidden) {
+		t.Errorf("the first read has %d series, want %d", len(base.reads), len(part3Forbidden))
+	}
+	for _, k := range part3Forbidden {
+		if rd := base.reads[k]; !rd.HasCount || rd.Count != 0 || rd.ProcessStart != ctl.processStart() {
+			t.Errorf("the first read of %s: %+v, want 0 from the restarted process (start %g)", k, rd, ctl.processStart())
+		}
+	}
+	if got := base.startToReady[oneSlotDep.Name][firstReadClass]; got != queuedStartToReady {
+		t.Errorf("the first read's snapshot has %v for the one-slot deployment, want %v: %s", base.startToReady[oneSlotDep.Name], firstReadClass, queuedStartToReady)
+	}
+	if len(base.live) != len(p3.deps) || len(base.orphanable) != 0 {
+		t.Errorf("the first read's live Instances %v and orphanable proxies %v, want both primaries live and none orphanable", base.live, base.orphanable)
+	}
+
 	// Each verdict counts the status now, as checkForbidden does after the
 	// handovers: the one-slot entry is there now in both, as in CI's "now".
 	vBefore, why := judgeLate(beforeAt, earliestLate(t, p3, before), ds)
@@ -188,10 +248,110 @@ func TestFirstReadWaitsForTheStartToReadyTimes(t *testing.T) {
 	if vBefore != eventcount.Inconclusive || !strings.Contains(why, "condition 1") {
 		t.Errorf("with no wait: %s (%s), want inconclusive on condition 1, as CI's run", vBefore, why)
 	}
-	vAfter, why := judgeLate(firstAt, earliestLate(t, p3, atFirst), ds)
+	vAfter, why := judgeLate(base.first, earliestLate(t, p3, base.startToReady), ds)
 	t.Logf("with armFirstRead: %s: %s", vAfter, why)
 	if vAfter != eventcount.NotRaised {
 		t.Errorf("with armFirstRead: %s (%s), want not raised: the first read precedes the drain start counted back by the measured %s", vAfter, why, queuedStartToReady)
+	}
+}
+
+// The escape Astra's review of PR #334 found: the wait keeps the old
+// controller serving longer, and a regression raises ReplacementLate in it
+// while the one-slot class's time is missing, then records the time, with no
+// condition left behind. The kill discards that process's counter, so the
+// restarted process's reads both show 0, and the four conditions over them
+// alone would pass. The read before the kill shows the 1, and the row fails
+// with a FINDING that names the event.
+func TestARaiseBeforeTheKillFailsTheRow(t *testing.T) {
+	ds := time.Now().Add(4*time.Minute + 45*time.Second)
+	p3, c := firstReadFixture(t, ds)
+	ctl := startControllerDouble(t, p3)
+	problems := collectProblems(p3)
+	misses := 0
+	var wrote error
+	p3.s2rMiss = func([]string) {
+		misses++
+		switch misses {
+		case 1:
+			ctl.raise(keyReplacementLate)
+		case 2:
+			wrote = recordStartToReady(c, oneSlotDep.Name, oneSlotDep.Name+"-primary", firstReadClass, queuedStartToReady)
+		}
+	}
+	if err := p3.armFirstRead(); err != nil {
+		t.Fatalf("armFirstRead: %v", err)
+	}
+	if wrote != nil {
+		t.Fatal(wrote)
+	}
+	stepF(t, p3, ctl)
+
+	// What the four conditions see: the restarted process's reads.
+	second, why := p3.readCountsOnce(keyReplacementLate)
+	if why != "" {
+		t.Fatalf("a second read of the restarted process: %s", why)
+	}
+	if p3.base == nil || p3.base.reads[keyReplacementLate].Count != 0 || second[keyReplacementLate].Count != 0 ||
+		p3.base.reads[keyReplacementLate].ProcessStart != second[keyReplacementLate].ProcessStart {
+		t.Fatalf("the restarted process's reads %+v, then %+v: want 0 at both from one process, the escape", p3.base, second)
+	}
+	t.Logf("the restarted process's reads: %g, then %g, from one process", p3.base.reads[keyReplacementLate].Count, second[keyReplacementLate].Count)
+
+	if len(*problems) != 1 {
+		t.Fatalf("step (f) with ReplacementLate raised before the kill: %d problems %q, want one FINDING", len(*problems), *problems)
+	}
+	p := (*problems)[0]
+	t.Logf("the row's failure: %s", p)
+	for _, want := range []string{"FINDING", keyReplacementLate.String(), "raised 1 times", "before the kill"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("the failure %q does not say %q", p, want)
+		}
+	}
+}
+
+// Without a read of the old process that shows its counts, the row is never
+// a pass: a read that fails, one never taken, and one from the same process
+// as the first read (no restart between them) are each inconclusive.
+func TestTheReadBeforeTheKillIsNeverAPassWithoutIt(t *testing.T) {
+	for _, tc := range []struct {
+		name                         string
+		fail, noReadBeforeKill, same bool
+		want                         string
+	}{
+		{name: "the read fails", fail: true, want: "just before the kill: 5 reads failed"},
+		{name: "no read before the kill", noReadBeforeKill: true, want: "no read of the controller step (f) killed"},
+		{name: "no restart between the reads", same: true, want: "come from one process"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ds := time.Now().Add(4*time.Minute + 45*time.Second)
+			p3, c := firstReadFixture(t, ds)
+			ctl := startControllerDouble(t, p3)
+			problems := collectProblems(p3)
+			if err := recordStartToReady(c, oneSlotDep.Name, oneSlotDep.Name+"-primary", firstReadClass, queuedStartToReady); err != nil {
+				t.Fatal(err)
+			}
+			if err := p3.armFirstRead(); err != nil {
+				t.Fatalf("armFirstRead: %v", err)
+			}
+			ctl.setFail(tc.fail)
+			if !tc.noReadBeforeKill {
+				p3.beforeKill()
+			}
+			ctl.setFail(false)
+			if !tc.same {
+				ctl.restart()
+			}
+			p3.onLed()
+			if len(*problems) == 0 {
+				t.Fatalf("no problem, want inconclusive (%q)", tc.want)
+			}
+			for _, p := range *problems {
+				t.Logf("the row's failure: %s", p)
+				if !strings.Contains(p, "inconclusive, never a pass") || !strings.Contains(p, tc.want) {
+					t.Errorf("the failure %q, want inconclusive and %q", p, tc.want)
+				}
+			}
+		})
 	}
 }
 
@@ -225,8 +385,8 @@ func TestFirstReadFailsWhenAClassIsNeverRecorded(t *testing.T) {
 	if strings.Contains(msg, queuedDep.Name+":") {
 		t.Errorf("the error %q names the queued deployment, whose class is recorded", msg)
 	}
-	if p3.onLed != nil {
-		t.Error("armFirstRead armed the first read although a class's start-to-ready time is unrecorded")
+	if p3.onLed != nil || p3.beforeKill != nil {
+		t.Error("armFirstRead armed step (f)'s hooks although a class's start-to-ready time is unrecorded")
 	}
 	if misses == 0 {
 		t.Error("armFirstRead failed without reading the status")

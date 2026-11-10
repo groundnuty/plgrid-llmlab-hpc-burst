@@ -78,6 +78,9 @@ func (r *rig) controllerRestart(in *v1alpha1.Instance, key, body string, tokens 
 	}
 	first, done := r.fc.StartStream(body, key)
 	<-first
+	if r.beforeKill != nil {
+		r.beforeKill()
+	}
 	if err := syscall.Kill(oldPID, syscall.SIGKILL); err != nil {
 		r.t.Fatalf("kill the controller %d: %v", oldPID, err)
 	}

@@ -152,6 +152,13 @@ type part3 struct {
 	// found a class's start-to-ready time unrecorded (a test's hook; nil in
 	// the rehearsal).
 	s2rMiss func(missing []string)
+	// preKill is the forbidden events' read of the controller step (f)
+	// kills, taken just before the kill (armFirstRead's r.beforeKill); nil
+	// until then.
+	preKill *preKillRead
+	// problem, when set, receives the failures armFirstRead's hooks find (a
+	// test's hook); nil reports them with t.Errorf.
+	problem func(string)
 }
 
 // objects starts the LLMLab double, writes the managed Provider's
@@ -228,12 +235,14 @@ func TestRehearsalPart3(t *testing.T) {
 	// The absence checks cover the restarted controller, from its first
 	// moment of serving: no Instance has ended and no drain start has passed.
 	// The first read is armed once each class's start-to-ready time is
-	// recorded (issue #321).
+	// recorded (issue #321), and the old controller's counters of the same
+	// events are read just before the kill: what it raised meanwhile dies
+	// with it.
 	if err := p3.armFirstRead(); err != nil {
 		r.t.Fatal(err)
 	}
 	p3.longStreamAcrossRestart(q)
-	r.onLed = nil
+	r.onLed, r.beforeKill = nil, nil
 	done()
 	p3.gauges(q, "after the restart")
 	done = r.stepTimer("no-overlap handovers")

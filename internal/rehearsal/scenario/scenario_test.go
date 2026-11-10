@@ -103,6 +103,11 @@ type rig struct {
 	// leads and answers /readyz: the earliest point the new process serves,
 	// where a check takes its first read.
 	onLed func()
+	// beforeKill, when set, runs in a controller restart just before the
+	// kill, with the stream in flight: the last point the old process
+	// serves, where a check reads what that process's counters hold before
+	// they die with it.
+	beforeKill func()
 	// dir is the test's short scratch directory.
 	dir string
 }
