@@ -1,0 +1,117 @@
+# One-off workflow for a throwaway draft PR (issue #343, PR 5), never merged.
+# The science agent's ask on #356: show that TestTheFirstAAttemptIsRefusedAfterAToBToA
+# cannot flake on the unmutated code whether or not the Runner's queue coalesces B and
+# the restored A. The test forces and logs both paths every run ("path: coalesced=true"
+# and "path: coalesced=false"); this runs it 50 times under two CPU spinners and
+# requires 50 passes of each subtest and 50 of each path line. It runs the coalesced
+# case's own test, TestACoalescedAToBToAReplacesTheFirstAsRelays, 50 times too.
+# HPCBURST_REQUIRE_SSHD=1, so a missing sshd fails instead of skipping.
+#
+# The Go and sshd steps are ci.yml's go job's, with the Go archive's cache restored
+# only, never saved. No secret is read, nothing is pushed.
+name: count50-p5
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/count50-p5.yml
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+  HPCBURST_REQUIRE_SSHD: "1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  relaykeeper:
+    name: relaykeeper ${{ matrix.test }} -count=50
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - TestTheFirstAAttemptIsRefusedAfterAToBToA
+          - TestACoalescedAToBToAReplacesTheFirstAsRelays
+    steps:
+      - name: Check out the PR's head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Read the Go version from go.mod
+        id: goversion
+        run: |
+          version=$(bash hack/fetch-go.sh --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the cached Go archive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}
+
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
+
+      - name: Check the Go on PATH is the pinned toolchain
+        run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
+
+      - name: Provide OpenSSH's sshd for the rehearsal login node
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+            sudo chmod 755 /usr/sbin/policy-rc.d
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+            sudo rm -f /usr/sbin/policy-rc.d
+          fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
+          /usr/sbin/sshd -V 2>&1 | head -1
+          echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
+
+      - name: Build the test binary
+        run: go test -c -o "$RUNNER_TEMP/rk.test" ./internal/relaykeeper/
+
+      - name: Run it 50 times under two CPU spinners
+        working-directory: internal/relaykeeper
+        env:
+          TEST: ${{ matrix.test }}
+        run: |
+          # Two spinners at the lowest priority, each bounded by timeout, so they
+          # end by themselves; the runner ends what is left at the job's end.
+          for i in 1 2; do timeout 100m nice -n 19 sh -c 'while :; do :; done' & done
+          log="$RUNNER_TEMP/count50.log"
+          rc=0
+          "$RUNNER_TEMP/rk.test" -test.run "^${TEST}\$" -test.count 50 -test.v -test.timeout 100m > "$log" 2>&1 || rc=$?
+          passes=$(grep -c -E "^--- PASS: ${TEST} " "$log" || true)
+          fails=$(grep -c -E "^\s*--- FAIL" "$log" || true)
+          skips=$(grep -c -E "^\s*--- SKIP" "$log" || true)
+          leaks=$(grep -E '^rehearsal: [0-9]+ leaked' "$log" || echo "no leak line")
+          ok=1
+          test "$rc" = 0 && test "$passes" = 50 && test "$fails" = 0 && test "$skips" = 0 || ok=0
+          {
+            echo "### ${TEST}"
+            echo "passes: $passes of 50; fails: $fails; skips: $skips; $leaks; exit $rc"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$TEST" = TestTheFirstAAttemptIsRefusedAfterAToBToA ]; then
+            # Both queue paths, each forced and logged, in every one of the 50 runs.
+            coal=$(grep -c -E "^    --- PASS: ${TEST}/B_and_the_restored_A_coalesced " "$log" || true)
+            turn=$(grep -c -E "^    --- PASS: ${TEST}/B_taken_in_turn " "$log" || true)
+            ptrue=$(grep -c -E ': path: coalesced=true ' "$log" || true)
+            pfalse=$(grep -c -E ': path: coalesced=false ' "$log" || true)
+            echo "coalesced subtest passes: $coal of 50; in-turn subtest passes: $turn of 50; path lines coalesced=true: $ptrue, coalesced=false: $pfalse (50 each)" | tee -a "$GITHUB_STEP_SUMMARY"
+            test "$coal" = 50 && test "$turn" = 50 && test "$ptrue" = 50 && test "$pfalse" = 50 || ok=0
+          fi
+          grep -E '^(\s*--- FAIL|    [a-z_]+_test\.go:[0-9]+:)' "$log" | grep -v ': path: coalesced=' | head -200 || true
+          tail -3 "$log"
+          test "$ok" = 1 && { ! grep -q '^rehearsal:' "$log" || grep -q '^rehearsal: 0 leaked' "$log"; }
