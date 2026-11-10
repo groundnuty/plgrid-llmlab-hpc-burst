@@ -4,12 +4,15 @@ import (
 	"bufio"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -197,5 +200,34 @@ func TestDialHomePassesTheUpgradeAndRefusesTheRest(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("frps saw no connection for the upgrade")
+	}
+}
+
+// The client ends no earlier than its window, even when nothing runs in it:
+// the driver reads CPU samples up to the window's end, so a client that ends
+// first would leave its phase's CPU taken over a shorter window.
+func TestLoadEndsNoEarlierThanItsWindow(t *testing.T) {
+	dir := t.TempDir()
+	spec := filepath.Join(dir, "spec.json")
+	if err := os.WriteFile(spec, []byte(`{"mode":"direct","tunnels":[{"index":0,"uid":"example-uid-0","socket":"/nonexistent/e.sock"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "load.json")
+	// No stream and no probe: nothing runs, so only the wait keeps the client
+	// to its window.
+	if err := runLoad([]string{"-spec", spec, "-mux", "127.0.0.1:9", "-streams", "0", "-probe-interval", "0",
+		"-ramp", "0s", "-window", "400ms", "-bucket", "100ms", "-out", out}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s loadOut
+	if err := json.Unmarshal(b, &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.EndNs < s.WindowEndNs {
+		t.Fatalf("the client ended %v before its window's end", time.Duration(s.WindowEndNs-s.EndNs))
 	}
 }

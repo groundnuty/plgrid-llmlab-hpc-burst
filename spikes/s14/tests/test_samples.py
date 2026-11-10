@@ -30,13 +30,36 @@ class Samples(unittest.TestCase):
             with open(os.path.join(d, "host.csv")) as fh:
                 host = list(csv.DictReader(fh))
         self.assertEqual(len(rows), 6)
-        first = [r for r in rows if r["run_id"] == "run-a" and r["t"] == "10.000" and r["role"] == "frpc"][0]
+        first = [r for r in rows if r["run_id"] == "run-a" and r["t"] == "10.000000" and r["role"] == "frpc"][0]
         self.assertEqual((first["pids"], first["ticks"], first["rss_kb"], first["fds"]), ("2", "12", "2000", "16"))
-        second = [r for r in rows if r["run_id"] == "run-a" and r["t"] == "12.000" and r["role"] == "frpc"][0]
+        second = [r for r in rows if r["run_id"] == "run-a" and r["t"] == "12.000000" and r["role"] == "frpc"][0]
         self.assertEqual((second["pids"], second["ticks"]), ("1", "9"))
         self.assertEqual(len(host), 3)
         self.assertEqual((host[1]["user"], host[1]["idle"], host[1]["steal"], host[1]["mem_avail_kb"], host[1]["load1"]),
                          ("2", "6", "8", "120", "0.6"))
+
+
+class Idle(unittest.TestCase):
+    def test_the_idle_window_ends_where_the_client_ended_if_that_came_first(self):
+        # The client ended at t=20 of a nominal 0-30 window, and the load started then: the samples
+        # after 20 are the load's, not idle.
+        def sample(t, ticks):
+            return {"t": t, "ticks": {"frps": {7: ticks}}}
+        samples = [sample(0, 0), sample(10, 10), sample(20, 20), sample(25, 500), sample(30, 1000)]
+        idle = {"window_start_unix_ns": 0, "window_end_unix_ns": 30_000_000_000, "end_unix_ns": 20_000_000_000,
+                "probes_ok": 2, "probes_failed": 0, "per_tunnel": [{"probes_ok": 2, "tokens": 0}]}
+        row = {}
+        s14.summarize_idle(row, idle, type("S", (), {"samples": samples})())
+        self.assertEqual(row["idle_end_s"], 20.0)
+        self.assertAlmostEqual(row["idle_cpu_frps"], 0.01)  # 20 ticks at 100 per second over 20 s
+
+    def test_a_client_that_waited_out_its_window_keeps_the_whole_window(self):
+        samples = [{"t": t, "ticks": {"frps": {7: t}}} for t in (0, 10, 20, 30)]
+        idle = {"window_start_unix_ns": 0, "window_end_unix_ns": 30_000_000_000, "end_unix_ns": 30_000_500_000,
+                "probes_ok": 3, "probes_failed": 0, "per_tunnel": [{"probes_ok": 3, "tokens": 0}]}
+        row = {}
+        s14.summarize_idle(row, idle, type("S", (), {"samples": samples})())
+        self.assertEqual((row["idle_end_s"], row["idle_samples"]), (30.0, 4))
 
 
 if __name__ == "__main__":

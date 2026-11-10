@@ -105,7 +105,7 @@ baseline     client --unix--> engine double (no tunnel; the host-load control)
 
 ## Results
 
-All tables come from `results/rep{1,2,3}/`, rendered by `python3 summarize.py tables`, and every CPU, memory and descriptor figure can be recomputed from `samples.csv` and `host.csv` beside them. 30 configurations ran per repetition, 90 in all, and every run finished (status `ok`). On every runner nothing was left running afterwards, and no listener stayed in 29920–29939 (`s14.py leftovers`, in each job's log).
+All tables come from `results/rep{1,2,3}/`, rendered by `python3 summarize.py tables`, and every CPU, memory and descriptor figure can be recomputed from `samples.csv` and `host.csv` beside them. Recomputed from those files alone, the 570 load-window CPU figures agree with `runs.csv` within 0.00005 cores, and the 210 idle ones within 0.000005. 30 configurations ran per repetition, 90 in all, and every run finished (status `ok`). On every runner nothing was left running afterwards, and no listener stayed in 29920–29939 (`s14.py leftovers`, in each job's log).
 
 ### Validity and load
 
@@ -264,7 +264,12 @@ Summed over the repetitions. A drop is a tunnel frps's proxy list showed not onl
   - 300 × 8 is valid only on the Intel runner, and over all three runners 18–56 requests per tunnel ran instead of 72–80. Those runs are host-bound, and are excluded from the fits and the latency claims.
 - **Host-bound runs.** The rule (all CPUs at least 85% busy) flagged both modes at 300 × 8 in every repetition, host-dialed mode at 100 × 8 in every repetition, and direct mode at 100 × 8 on the two AMD runners. Their latency is the runner's. The fits leave them out.
 - **The runners differ by CPU model.** The Intel runner (rep 3) took about 40% less CPU per token than the two AMD runners, which agree with each other within 5%. So the coefficients are given per runner, never pooled. In the first run, three AMD runners differed by up to 44% on the same CPU model: a runner's CPU cost is an estimate with that spread.
-- **The idle phase** ran only at 1 stream per tunnel: streams change nothing while none runs. Its 30 s held 11–15 samples per run. The stand-ins' idle CPU was below one tick per process (0.36 thousandths of a core over 28 s).
+- **The idle phase** ran only at 1 stream per tunnel: streams change nothing while none runs. It held 11–15 samples per run. The stand-ins' idle CPU was below one tick per process (0.36 thousandths of a core over 28 s).
+- **Its length.** At 10–300 tunnels the idle phase covered 28.9–30.0 s; at 1 tunnel only 22.8–26.9 s.
+  - The cause: in the harness that ran (`b802edd5`), the probes-only client exited once its tunnel's last probe was done, and the load began at once.
+  - The fix: the client now waits out its window (`cmd/s14/load.go`, tested by `TestLoadEndsNoEarlierThanItsWindow`). The driver ends an idle window at the earlier of its nominal end and the client's end, and summarises the idle phase only after sampling stops, so `idle_start_s` and `idle_end_s` bound exactly the samples each idle figure uses.
+  - The committed window bounds, idle columns and samples were rebuilt from the run's raw files with `summarize.py refresh`, over the time that was actually idle, and with times kept to the microsecond: an idle phase starts within a millisecond of a sample, and millisecond times let a recompute take in one sample the driver had not.
+  - No idle CPU value changed, only `idle_end_s` at 1 tunnel and the times' precision. The 1-tunnel idle rows rest on 23–27 s instead of 30 s.
 
 ## Verdict
 
@@ -282,14 +287,23 @@ Summed over the repetitions. A drop is a tunnel frps's proxy list showed not onl
 **What it implies for a per-front limit.** The figures below are estimates for this workload: 60-token streams at 20 tokens/s, a new tcpmux connection per request, on loopback. They are not guarantees, and the front's own work and ssh are budgeted as named reserves until they are measured.
 1. **Budget the front's CPU, including c and the reserves:**
 
-   `a × (tokens/s ÷ 1000) + b × tunnels + c + R_front + R_ssh ≤ 0.7 × C`, for C front cores, where:
-   - **a, b and c** are this spike's per-runner coefficients for the measured stack, b being the fitted per-tunnel term, not the idle cost;
-   - **R_front** is the front's own work, which this spike did not run: the client-facing proxy (client TLS, HTTP streaming, usage records), its probe's own requests and, in direct mode, the `/agent/v1/` passthrough. Until it is measured, reserve the listener's share of the stack's per-token cost (39–44% here; use 0.45 × a). The front copies every token once more over TLS to the client, as the listener does for the tunnel, so this is a floor, not a measurement;
-   - **R_ssh** is ssh's encryption on the front's relays, in host-dialed mode only. Until it is measured, reserve 0.045 cores per 1,000 tokens/s. That is S1c's ssh arm at its upper bound: ssh plus sshd took 20–21% of a core at about 4,500 tokens/s, and sshd alone added about 1% per 1,000 tokens/s on the front.
+   With `q = tokens/s ÷ 1000` and C front cores:
+
+   `a × q + b × tunnels + c + R_front + R_ssh ≤ 0.7 × C`, where both reserves grow with the rate:
+   - **a, b and c** are this spike's per-runner coefficients for the measured stack in the mode at hand, b being the fitted per-tunnel term, not the idle cost;
+   - **R_front = s × a × q** is the front's own work, which this spike did not run: the client-facing proxy (client TLS, HTTP streaming, usage records), its probe's own requests and, in direct mode, the `/agent/v1/` passthrough.
+     - s is the listener's measured share of the stack in that mode, rounded up: 0.45 in direct mode (measured 0.39–0.44) and 0.25 in host-dialed mode (0.20–0.24).
+     - In both modes, s × a is about the listener's own cost per token, since the front copies every token once more over TLS to the client, as the listener does for the tunnel.
+     - This is a chosen budgeting floor until the proxy is measured, not a measured lower bound on it;
+   - **R_ssh = 0.045 × q** is ssh's encryption on the front's relays, in host-dialed mode only. It is a provisional assumption that needs validation:
+     - S1c's clean 256-stream samples give 0.044–0.047 cores per 1,000 tokens/s for ssh plus sshd together, but its 16-stream sample gives about 0.14;
+     - S1c neither pinned nor recorded the negotiated cipher, and its TCP-forward path differs from these relays;
+     - so many lightly loaded relays, or another cipher, can exceed it.
 2. **On one front core, under that rule:**
    - direct mode: 5,100–9,000 tokens/s at 100 tunnels and 4,100–7,900 at 300 (200–450 streams of 20 tokens/s); the low end is the AMD runners, the high end the Intel one;
-   - host-dialed mode: 2,400–3,900 tokens/s at 100 tunnels and 1,000–2,800 at 300.
-   - The stack alone, with no reserves, would carry 7,500–13,000 and 5,900–11,400 tokens/s in direct mode.
+   - host-dialed mode: 2,500–4,000 tokens/s at 100 tunnels and 1,000–2,900 at 300, with host-dialed mode's own a and s. With R_ssh = 0.14 × q instead, it is 1,700–2,400 and 700–1,700;
+   - the stack alone, with no reserves, would carry 7,500–13,000 and 5,900–11,400 tokens/s in direct mode;
+   - `python3 summarize.py budget` computes each figure from the committed results.
    - All are linear extrapolations beyond the 1.1 cores measured. S1c's link rule bounds the same rate on top: payload bytes/s ÷ about 305 bytes per token.
 3. **No tunnel-count cap follows from the steady-state cost.** Nothing in steady state needed one through 300 tunnels. Two things were not exercised and might:
    - a mass re-login through the admission plugin after a front or frps restart;
@@ -313,10 +327,10 @@ For the science agent to amend. It replaces the item's current text.
 >     - **Memory and descriptors are not limits at this scale.** At 300 tunnels × 8 streams, frps held about 250 MB and 2,700 descriptors (one per tunnel plus one per stream in flight), and the listener 60 MB and 2 descriptors per tunnel. Host-dialed mode adds 9 descriptors in the controller and two ssh processes per Allocation.
 >     - **No tunnel dropped in steady state.** In 180 runs there was no frps drop, no frpc re-login, no relay restart and no failed probe, including runs where tokens queued for seconds on a saturated host. All 300 tunnels registered within 3 s of a fresh start.
 >     - **Latency bends with the host's CPU, not the tunnel count.** Tunnels add a few ms to the time to first token while the host has headroom; the tails grow once its CPUs near saturation.
->     - **The steady-state per-front budget** keeps `a × (tokens/s ÷ 1000) + b × tunnels + c + R_front + R_ssh` under 70% of the front's cores.
->       - R_front is the front's own proxy and control work, unmeasured; reserve 0.45 × a until it is measured.
->       - R_ssh is ssh's encryption in host-dialed mode, unmeasured; reserve 0.045 cores per 1,000 tokens/s until it is measured.
->       - That is an estimated 4,000–9,000 tokens/s per front core in direct mode at 100–300 tunnels, and 1,000–3,900 in host-dialed mode, for 60-token streams with a new connection per request.
+>     - **The steady-state per-front budget**, with `q = tokens/s ÷ 1000`, keeps `a × q + b × tunnels + c + R_front + R_ssh` under 70% of the front's cores, both reserves growing with the rate:
+>       - R_front = s × a × q is the front's own proxy and control work, unmeasured: a chosen budgeting floor, with s = 0.45 in direct mode and 0.25 in host-dialed mode (the listener's measured share, rounded up);
+>       - R_ssh = 0.045 × q is ssh's encryption in host-dialed mode: a provisional assumption to validate, since S1c's lightly loaded sample gave about 0.14 × q and its cipher was not recorded.
+>       - That is an estimated 4,000–9,000 tokens/s per front core in direct mode at 100–300 tunnels, and 1,000–4,000 in host-dialed mode (700–2,400 with R_ssh = 0.14 × q), for 60-token streams with a new connection per request.
 >       - The link still bounds the same rate at payload bytes/s ÷ about 305 bytes per token (operational-readiness item 5). The front's open-files hard limit must cover frps's tunnels plus streams in flight, and the listener's two per tunnel.
 >     - **Until the open items are measured, keep a front at or below 300 tunnels.**
 >     - **Still open, and each could bound tunnels where steady state does not:**
@@ -329,7 +343,7 @@ For the science agent to amend. It replaces the item's current text.
 ## Environment
 
 - **The run:** workflow run 42822586816 on draft PR #329, whose head is the spike's commit `b802edd5` plus a one-off workflow (each job logs `spike head b802edd5…`). It took 10 Nov 2026, 13:13–13:42 UTC, 28 min per job.
-  - The commit that added these results changed only `README.md` and `results/`, so the harness in this directory is the one that ran.
+  - Since then the harness changed in four ways, none of which changes what was measured: the client waits out its window, the driver summarises the idle phase after sampling stops, times are kept to the microsecond, and `summarize.py refresh` was added. The results were rebuilt from the run's raw files with the fixed code (How to read the tables).
   - The raw files, with every PID's ticks, stay in the run's artifacts until 24 Nov 2026.
   - The committed `samples.csv` and `host.csv` keep, per sample, each role's PID count, ticks, memory and descriptors, and the host's counters.
 - **The first run:** run 42814868491 on draft #323 (head `e2b33f79`, three AMD runners) measured the same matrix without the idle phase. Its findings agree: 0 drops in 90 runs; direct mode a = 0.076–0.109; the same bend at 100 × 8. Its tables were replaced by these, from data that is kept.
@@ -380,8 +394,8 @@ For the science agent to amend. It replaces the item's current text.
 ## Unknowns
 
 - **The front near full CPU.** The runners saturated first, with the front at 1.1 cores (direct mode) or 1.3 (host-dialed). The per-front rate in the Verdict is a linear extrapolation. A front host that does not carry the instances, or a larger runner, would show where frps itself bends.
-- **ssh's encryption and memory per relay.** The stand-in copies bytes in the clear. The Verdict's reserve R_ssh (0.045 cores per 1,000 tokens/s) rests on S1c's ssh arm: frps plus sshd took 7.5–7.8% of a core per 1,000 tokens/s against 6.6–6.9% for frps alone, and ssh plus sshd together 20–21% of a core at about 4,500 tokens/s.
-- **The front's own proxy and control work.** The client-facing proxy, its usage records and the agent passthrough were not run. The Verdict's reserve R_front (0.45 × a, the listener's share) is a floor, not a measurement.
+- **ssh's encryption and memory per relay.** The stand-in copies bytes in the clear. The Verdict's reserve R_ssh = 0.045 × q is a provisional assumption. It comes from S1c's ssh arm: its clean 256-stream samples gave 0.044–0.047 cores per 1,000 tokens/s for ssh plus sshd together, but its 16-stream sample gave about 0.14, and its cipher was neither pinned nor recorded. Measuring OpenSSH on this relay path, at the per-relay rates host-dialed mode runs at, would replace it.
+- **The front's own proxy and control work.** The client-facing proxy, its usage records and the agent passthrough were not run. The Verdict's reserve R_front = s × a × q (s the listener's share: 0.45 direct, 0.25 host-dialed) is a chosen budgeting floor, not a measurement.
 - **A capped link shared by many tunnels.** Fairness between tunnels, and heartbeats behind a binding shared cap, are untested. S1c's rule for one tunnel (throughput = cap ÷ bytes per token) is expected to hold for the sum.
 - **The plugin endpoint under a mass re-login.** After an frps or front restart, 300 frpc log in within about 3 s. Each Login and NewProxy is a call to the lifecycle controller's plugin endpoint, which was not in the path.
 - **The agent's control traffic** per Allocation, through the listener (direct mode) or the control relay (host-dialed mode).
@@ -398,7 +412,7 @@ For the science agent to amend. It replaces the item's current text.
 | `node/` | the node side, a test binary (`go test -c`), with unit tests |
 | `s14.py` | the driver: `run`, `host`, `leftovers` |
 | `analysis.py`, `tests/` | the result rules and the sample writer, with their tests |
-| `summarize.py` | `extract` (raw files to `tunnels.csv` and `hists.json`), `tables`, `fits` |
+| `summarize.py` | `extract` (raw files to `tunnels.csv` and `hists.json`), `tables`, `fits`, `budget` (the per-front rates of the Verdict), `refresh` (window bounds, idle columns and samples again, from the raw files) |
 | `results/rep{1,2,3}/` | `runs.csv` (one row per configuration), `tunnels.csv`, `hists.json`, `samples.csv`, `host.csv` |
 
 ```sh
@@ -408,7 +422,7 @@ bash fetch.sh
 python3 s14.py run --rep 1            # every configuration, about 40 min on a 4-CPU runner
 python3 s14.py leftovers
 python3 summarize.py extract $S14_RESULTS/raw results/rep1 && cp $S14_RESULTS/{runs,samples,host}.csv results/rep1/
-python3 summarize.py tables; python3 summarize.py fits
+python3 summarize.py tables; python3 summarize.py fits; python3 summarize.py budget
 ```
 
 Ports: 29920 frps bind, 29921 frps tcpmux, 29922 frps web, 29923 the dial-home listener, 29924 toxiproxy's API, 29925 the link, 29926 the node's relay acceptor, 29927 the control channel's port (nothing listens; nothing dials it). The job sides' listeners are kernel-chosen. Every run checks, with `ss`, that every listener its processes hold is on 127.0.0.1, and that nothing is left in 29920–29939 afterwards.

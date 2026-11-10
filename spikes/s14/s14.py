@@ -479,7 +479,6 @@ def run_config(env, mode, n, streams, rep, args):
             run_client(P, "idle-client", [env.b("s14"), "load", "-spec", spec, "-mux", "127.0.0.1:%d" % PORTS["mux"],
                                           "-streams", "0", "-ramp", "0s", "-window", "%ds" % args.idle, "-out", idle_out],
                        args.idle + 60, sampler)
-            summarize_idle(row, read_json(idle_out), sampler)
         load_out = os.path.join(run, "load.json")
         run_client(P, "client", [env.b("s14"), "load", "-spec", spec, "-mux", "127.0.0.1:%d" % PORTS["mux"],
                                  "-streams", str(streams), "-ramp", "%ds" % args.ramp, "-window", "%ds" % args.window,
@@ -489,6 +488,10 @@ def run_config(env, mode, n, streams, rep, args):
         sampler.stop()
         load = read_json(load_out)
         summarize_run(row, load, sampler, tunnels, t_ready, run, mode)
+        # Summarised once the sampler has stopped, so its window's every sample is in.
+        idle = read_json(os.path.join(run, "idle.json"))
+        if idle:
+            summarize_idle(row, idle, sampler)
     except Exception as e:
         row["status"] = "failed: " + str(e)[:300]
         log("%s: %s" % (run_id, row["status"]))
@@ -547,7 +550,7 @@ def write_samples(results, run_id, samples):
         if new_h:
             wh.writerow(HOST_FIELDS)
         for s in samples:
-            t = "%.3f" % s["t"]
+            t = "%.6f" % s["t"]
             for role in sorted(s["ticks"]):
                 ticks = s["ticks"][role]
                 ws.writerow([run_id, t, role, len(ticks), sum(ticks.values()), s["rss_kb"].get(role, ""),
@@ -557,10 +560,13 @@ def write_samples(results, run_id, samples):
 
 
 def summarize_idle(row, idle, sampler):
-    """The idle phase's CPU per role, from the samples inside its window, and its probes."""
-    ws, we = idle["window_start_unix_ns"] / 1e9, idle["window_end_unix_ns"] / 1e9
+    """The idle phase's CPU per role, from the samples inside its window, and its probes. The window
+    ends at the client's own end when that came first: the next phase starts then, and its samples
+    are not idle. (The client now waits out its window, so this binds only for runs made before.)"""
+    ws = idle["window_start_unix_ns"] / 1e9
+    we = min(idle["window_end_unix_ns"], idle["end_unix_ns"]) / 1e9
     win = analysis.window_samples(sampler.samples, ws, we)
-    row["idle_start_s"], row["idle_end_s"], row["idle_samples"] = round(ws, 3), round(we, 3), len(win)
+    row["idle_start_s"], row["idle_end_s"], row["idle_samples"] = round(ws, 6), round(we, 6), len(win)
     for role in ALL_ROLES:
         c = analysis.cores(win, role, CLK)
         row["idle_cpu_" + role] = round(c, 5) if c is not None else ""
@@ -572,7 +578,7 @@ def summarize_idle(row, idle, sampler):
 def summarize_run(row, load, sampler, tunnels, t_ready, run, mode):
     ws, we = load["window_start_unix_ns"] / 1e9, load["window_end_unix_ns"] / 1e9
     win = analysis.window_samples(sampler.samples, ws, we)
-    row["window_start_s"], row["window_end_s"], row["window_samples"] = round(ws, 3), round(we, 3), len(win)
+    row["window_start_s"], row["window_end_s"], row["window_samples"] = round(ws, 6), round(we, 6), len(win)
     for role in ALL_ROLES:
         c = analysis.cores(win, role, CLK)
         row["cpu_" + role] = round(c, 4) if c is not None else ""

@@ -150,6 +150,11 @@ func runLoad(args []string) error {
 		}
 	}
 	wg.Wait()
+	// The driver reads the CPU samples over [window start, window end]: the
+	// client ends no earlier, even when its last request or probe finished
+	// first (a probes-only idle phase otherwise ended up to a probe interval
+	// early, and its CPU was taken over a shorter window).
+	time.Sleep(time.Until(wEnd))
 	s := summarizeLoad(results, probes, n, wStart, wEnd, *bucket)
 	s.Mode, s.Tunnels, s.Streams, s.MaxTokens = spec.Mode, n, *streams, *maxTokens
 	s.RampS, s.WindowS, s.BucketS = ramp.Seconds(), window.Seconds(), bucket.Seconds()
