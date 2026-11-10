@@ -159,13 +159,15 @@ func lcInstances(t *testing.T, e *env) []v1alpha1.Instance {
 
 // The issue's acceptance: a final RelayFailed on a running Allocation leads to
 // its release within a bounded time, through the lifecycle's release path,
-// and the Instance's replacement follows the planner's usual rules. The bound
-// is counted in passes: the Provider's next observation after the end marks
-// the Allocation (at most one poll interval, 30 s by default), and the
-// lifecycle controller's next pass after the mark releases it.
+// and the Instance's replacement follows the planner's usual rules. Here the
+// Provider's controller is restarted after the relays end for good and before
+// it observes the Allocation again, so its memory of the failure is gone: the
+// mark the failure path wrote is in the store, and the lifecycle controller's
+// next pass releases the Allocation.
 func TestARelayEndedForGoodReleasesTheAllocationThroughTheLifecycle(t *testing.T) {
-	e := newEnv(t, stubbedRelays(relayStub(t, stubStepLimit)), withLifecycleStore)
-	runRelays(e)
+	g := newRelayGate(t)
+	e := newEnv(t, stubbedRelays(g.stub), withLifecycleStore)
+	stop := runRelaysStoppable(e)
 	lc, lcRec := lifecycleOf(e)
 	if err := e.ctl.SyncStatus(e.ctx); err != nil {
 		t.Fatal(err)
@@ -192,13 +194,18 @@ func TestARelayEndedForGoodReleasesTheAllocationThroughTheLifecycle(t *testing.T
 	if a.Status.AtProvider.Phase != v1alpha1.AllocationRunning || job == "" {
 		t.Fatalf("the Allocation is %s with job %q, want Running", a.Status.AtProvider.Phase, job)
 	}
-	waitRelays(t, "RelayFailed raised", func() bool { return len(e.rec.relayFailedMessages()) > 0 })
+	waitRelays(t, "both relays' ssh running", func() bool {
+		rs := relaysOf(e, tag)
+		return len(rs) == 2 && rs[0].PID != 0 && rs[1].PID != 0
+	})
+	g.open(t)
+	waitRelays(t, "both channels' RelayFailed raised", func() bool { return len(e.rec.relayFailedMessages()) >= 2 })
 
-	// The Provider's next observation marks the Allocation; the lifecycle's
-	// next pass releases it.
-	e.run(old.Name, 1)
+	// A restart before any observation; the lifecycle's next pass releases
+	// the Allocation from the mark in the store.
+	restartController(e, stop)
 	if st, _, _ := relayCondition(e.get(old.Name)); st != "True" {
-		t.Fatalf("the Provider's next observation left the condition %q, want True", st)
+		t.Fatalf("after the restart, before any observation, the condition is %q, want True", st)
 	}
 	lcPass(t, e, lc)
 	a = e.get(old.Name)

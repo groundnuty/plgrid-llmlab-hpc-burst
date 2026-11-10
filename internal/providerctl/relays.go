@@ -73,7 +73,9 @@ type relayState struct {
 	ssh    *sshrun.Relay
 	closed bool // after RunRelays: no claim and no relay is made any more
 	// failures are the final failures of running Allocations' relays, by
-	// tag, until the next observation marks the Allocation (relayfailed.go).
+	// tag, kept until the relays are dropped: the failure path writes the
+	// mark, and an observation writes it from here when that write failed
+	// (relayfailed.go).
 	failures map[string]relayFailure
 }
 
