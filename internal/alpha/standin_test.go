@@ -316,10 +316,13 @@ type secondHeldRun struct {
 	prefix   string
 	failures []string
 	err      error
+	// stop is what the run's Close saw of the stack's own stop (standin_stop_test.go), apart from err.
+	stop stackStop
 }
 
 // standInSecondHeld runs a two-job row's LIVE steps over the stand-in with its second job held in the queue: the first job runs through
-// the real stack, the second never starts. wrapAPI, when not nil, wraps the run's API client (liveRun.wrapAPI).
+// the real stack, the second never starts. wrapAPI, when not nil, wraps the run's API client (liveRun.wrapAPI). The run's Close keeps
+// the stack's own stop apart from the run's error, for the caller to check before anything the scenario said (PR #317's review).
 func standInSecondHeld(t *testing.T, name, what string, reshape func(*stack.ClusterShape), wrapAPI func(client.Client) client.Client) secondHeldRun {
 	t.Helper()
 	if os.Getenv(envStandIn) != "1" {
@@ -341,12 +344,12 @@ func standInSecondHeld(t *testing.T, name, what string, reshape func(*stack.Clus
 	holdSecondJob(t, cl.Plat, TagPrefix(id), stop)
 	defer close(stop)
 	lr := newLiveRun(t, cfg, w)
-	lr.wrapAPI = wrapAPI
+	lr.wrapAPI, lr.stop = wrapAPI, &stackStop{}
 	var st Steps = lr
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.PendingMax+20*time.Minute)
 	defer cancel()
 	failures, err := Run(ctx, cfg, st, rec, t.Logf)
-	return secondHeldRun{row: row, cfg: cfg, cl: cl, prefix: TagPrefix(id), failures: failures, err: err}
+	return secondHeldRun{row: row, cfg: cfg, cl: cl, prefix: TagPrefix(id), failures: failures, err: err, stop: *lr.stop}
 }
 
 // oneRanOneNever checks that one job of the run ran and one never started.
@@ -380,9 +383,13 @@ func (s secondHeldRun) wroteNothing(t *testing.T, why string) {
 
 // runStandInSecondHeld runs a two-job row's LIVE steps over the stand-in with its second job held in the queue (the delta review of
 // PR 284, L1, L2 and L3): the first job runs through the real stack, the second never starts, and the row must end NOT RUN, with
-// its line saying what was read of ReplacementLate, no record and no text to post.
+// its line saying what was read of ReplacementLate, no record and no text to post. The stack's own stop is checked first: a failed
+// close already turns this run's error into no NOT RUN (Run), and a stack left running must fail it too.
 func runStandInSecondHeld(t *testing.T, name, wantLate string, reshape func(*stack.ClusterShape)) {
 	s := standInSecondHeld(t, name, "", reshape, nil)
+	if err := s.stop.problem(); err != nil {
+		t.Fatalf("the stack did not stop cleanly, whatever the run ended with: %v", err)
+	}
 	if len(s.failures) != 0 || !errors.Is(s.err, ErrSecondNotStarted) || !NotRun(s.row, s.err) {
 		t.Fatalf("failures %v, err %v; want the NOT RUN of a second job that never started", s.failures, s.err)
 	}
@@ -417,22 +424,15 @@ func (c allocationListFails) List(ctx context.Context, list client.ObjectList, o
 // runStandInSecondHeldCatchUpFails is runStandInSecondHeld with the row's result catch-up failing, on demand, in the real waiter
 // (issue #303): its LIST of Allocations fails, so it cannot tell whether the watch caught up. A run whose second job never started still
 // judges its first job's part from the watch, so that is a failure of the run naming the catch-up, with what was read of the second job
-// beside it, and never NOT RUN (the science agent, on PR 284). Run ends it before any record or text to post.
+// beside it, and never NOT RUN (the science agent, on PR 284). Run ends it before any record or text to post. The verdict
+// (catchUpFailed) checks the stack's own stop first, so that a failed stop cannot pass inside the error the run is meant to give.
 func runStandInSecondHeldCatchUpFails(t *testing.T, name string, reshape func(*stack.ClusterShape)) {
 	failed := new(atomic.Int32)
 	s := standInSecondHeld(t, name, ", and its result catch-up's LIST of Allocations failing", reshape, func(c client.Client) client.Client {
 		return allocationListFails{Client: c, failed: failed}
 	})
-	if failed.Load() == 0 {
-		t.Fatalf("no LIST of Allocations was made, so no catch-up failed (failures %v, err %v)", s.failures, s.err)
-	}
-	if got := rowOutcome(s.row, s.failures, s.err, nil); got != "FAIL" || len(s.failures) != 0 || s.err == nil {
-		t.Fatalf("the row ends %s (failures %v, err %v); want a FAIL of the run itself, from its result catch-up", got, s.failures, s.err)
-	}
-	for _, want := range []string{"result: whether the watch has caught up with the API is not known", "the API could not be listed", errAllocationList.Error(), ErrSecondNotStarted.Error()} {
-		if !strings.Contains(s.err.Error(), want) {
-			t.Errorf("err = %v, which lacks %q", s.err, want)
-		}
+	if err := s.catchUpFailed(failed.Load()); err != nil {
+		t.Fatal(err)
 	}
 	s.wroteNothing(t, "a run that failed its catch-up")
 	s.oneRanOneNever(t)

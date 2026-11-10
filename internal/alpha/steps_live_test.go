@@ -224,6 +224,10 @@ type liveRun struct {
 	endEvery time.Duration
 	// wrapAPI, when a test sets it, wraps the run's API client as start makes it: a stand-in whose catch-up fails on demand (#303).
 	wrapAPI func(client.Client) client.Client
+	// stop, when a test sets it, is filled in by Close with the stack's own stop, apart from the run's error (PR #317's review): the
+	// stand-ins whose scenario is meant to fail check it first. Only they set it, so its read of the stack before down and its wait for
+	// what is left after it (standin_stop_test.go) are no part of a live row's Close.
+	stop *stackStop
 	// allocsFn is the watch's Allocation versions, and boundedFn stack.BoundedDeadline, unless a test sets them.
 	allocsFn   func() []stack.AllocObservation
 	boundedFn  func(time.Duration) (time.Time, bool)
@@ -273,8 +277,11 @@ func (r *liveRun) Close(ctx context.Context) error {
 	r.stopGuard()
 	var errs []error
 	if r.h != nil {
+		r.stop.before(r.h)
 		// First, so that no controller submits a job after the cancel.
-		errs = append(errs, r.h.DownErr())
+		derr := r.h.DownErr()
+		errs = append(errs, derr)
+		r.stop.after(r.t, r.h, derr)
 	}
 	if r.batch != nil {
 		every := r.endEvery
