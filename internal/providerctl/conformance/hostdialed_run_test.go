@@ -140,7 +140,12 @@ func (w *world) runProbe(ctx context.Context, jobID, allocDir string) (*probeRep
 	script := strings.ReplaceAll(servingProbeScript, "@READ_SECONDS@", strconv.Itoa(read))
 	res, err := w.cap.Run(ctx, slurm.Command{Line: line, Stdin: []byte(script), Timeout: hostDialedProbeWait})
 	if err != nil || res.ExitCode != 0 {
-		return nil, fmt.Sprintf("the probe's step did not end well (exit %d, err %v)", res.ExitCode, err)
+		// The error and the step's standard error can name the host and paths: they go to the private log only.
+		w.p.log("probe: exit %d, err %v, stderr %q", res.ExitCode, err, res.Stderr)
+		if err != nil {
+			return nil, "the probe's step did not run to its end (a transport error; the private log says which)"
+		}
+		return nil, fmt.Sprintf("the probe's step exited %d", res.ExitCode)
 	}
 	p, err := parseProbe(res.Stdout)
 	if err != nil {
@@ -221,7 +226,7 @@ func hostDialedBody(t testing.TB, w *world, g *hostDialedRig, rowName string) {
 	// The first clock: the row's start wait, past which the job is cancelled by its tag and the row is NOT RUN.
 	started := func(a *v1alpha1.Allocation) bool { return accountingStarted(t, a) }
 	a = w.untilRuns("the job", name, "the job runs", w.at(), "", started)
-	o := hostDialedObs{Row: row, Epoch: hostDialedEpoch, JobID: a.Status.AtProvider.JobID, UID: uid}
+	o := hostDialedObs{Row: row, Epoch: hostDialedEpoch, JobID: a.Status.AtProvider.JobID, UID: uid, Tag: tag}
 	paths, err := w.batch.Paths(ctx)
 	if err != nil {
 		t.Fatalf("the staging directory could not be resolved: %v", err)
@@ -247,6 +252,9 @@ func hostDialedBody(t testing.TB, w *world, g *hostDialedRig, rowName string) {
 		o.Stale = w.runStale(ctx, g.settings.ControlDir, o.JobID, o.AgentPath, allocDir, uid)
 	}
 	o.Relays = w.relaysOf(tag)
+	for ch, r := range o.Relays {
+		w.p.log("relay %s: starts %d sessions %d streams %d joined %d pid %d last end %q refusal %q final %v %q", ch, r.Starts, r.Sessions, r.Streams, r.Joined, r.PID, r.LastEnd, r.LastRefusal, r.Final, r.FinalCause)
+	}
 	o.Registered = g.registered(uid, o.JobID)
 	o.JobEnded = !alive()
 	o.Exchanges = g.serving.exchanges()
@@ -257,7 +265,8 @@ func hostDialedBody(t testing.TB, w *world, g *hostDialedRig, rowName string) {
 		o.Stopped = w.untilOr(name, "the job ends once the agent is told to stop", w.bound(hostDialedEndWait), ended)
 	}
 	if lines, err := relayLines(g.record); err != nil {
-		o.LinesErr = err.Error()
+		w.p.log("the relays' record: %v", err)
+		o.LinesErr = "the wrapper's record of them is there but unreadable"
 	} else {
 		o.Lines = lines
 	}

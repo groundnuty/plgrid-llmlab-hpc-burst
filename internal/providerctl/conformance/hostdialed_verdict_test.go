@@ -33,6 +33,7 @@ type hostDialedObs struct {
 	Epoch     int64
 	JobID     string
 	UID       string
+	Tag       string
 	AgentPath string
 	// JobEnded is set when the job ended before the checks did: the agent exited, or the job was cancelled.
 	JobEnded bool
@@ -119,7 +120,7 @@ func judgeHostDialed(o hostDialedObs) []hostDialedCheck {
 	case o.Registered < 1 && o.JobEnded:
 		add(checkControl, false, "did not come up: the job ended before the agent registered, so the agent stopped at its start (a job with no TMPDIR, a node with no Apptainer: HBEP-4, open questions 15 and 16)")
 	case o.Registered < 1:
-		add(checkControl, false, "did not come up: no registration of the agent reached the agent API over it (%d relay start(s), the last end: %s)", ctl.Starts, endText(ctl))
+		add(checkControl, false, "did not come up: no registration of the agent reached the agent API over it (%d relay start(s), the last end: %s)", ctl.Starts, postSafe(endText(ctl), o))
 	case !o.Stopped:
 		add(checkControl, false, "came up and the agent registered, but the agent was not seen to stop when told to over it")
 	default:
@@ -133,7 +134,7 @@ func judgeHostDialed(o hostDialedObs) []hostDialedCheck {
 		if srv.Sessions >= 1 {
 			why = "a session came up but no stream from the job reached the serving port"
 		}
-		add(checkServing, false, "did not come up: %s (%d relay start(s), the last end: %s)", why, srv.Starts, endText(srv))
+		add(checkServing, false, "did not come up: %s (%d relay start(s), the last end: %s)", why, srv.Starts, postSafe(endText(srv), o))
 	default:
 		add(checkServing, true, "up: a stream the job opened crossed it to the serving port (%d stream(s))", srv.Joined)
 	}
@@ -148,7 +149,7 @@ func judgeHostDialed(o hostDialedObs) []hostDialedCheck {
 	for _, l := range o.Lines {
 		w := lineWords(l)
 		if len(w) < 7 || w[0] != "srun" || w[1] != "-u" || w[2] != "--overlap" || w[3] != "--jobid="+o.JobID || w[4] != "--ntasks=1" || w[5] != o.AgentPath || w[6] != agentapi.RelaySubcommand {
-			bad = append(bad, "a "+channelOf(w)+" relay ran a line that is not srun -u --overlap --jobid=<the job> --ntasks=1 <the agent> relay")
+			bad = append(bad, "a "+postSafe(channelOf(w), o)+" relay ran a line that is not srun -u --overlap --jobid=<the job> --ntasks=1 <the agent> relay")
 			break
 		}
 	}
@@ -187,7 +188,7 @@ func judgeHostDialed(o hostDialedObs) []hostDialedCheck {
 
 	// The preamble: a session counts only once its relay's first line was hpcburst-relay/1 <UID> (hostdial.Serve).
 	if ctl.Sessions < 1 || srv.Sessions < 1 {
-		add(checkPreamble, false, "no relay's first line was its preamble on %s (the last ends: control %s; serving %s)", missingChannels(ctl, srv), endText(ctl), endText(srv))
+		add(checkPreamble, false, "no relay's first line was its preamble on %s (the last ends: control %s; serving %s)", missingChannels(ctl, srv), postSafe(endText(ctl), o), postSafe(endText(srv), o))
 	} else {
 		add(checkPreamble, true, "each relay's first line was hpcburst-relay/1 <the Allocation's UID>, with nothing before it (control %d session(s) of %d start(s), serving %d of %d)", ctl.Sessions, ctl.Starts, srv.Sessions, srv.Starts)
 	}
@@ -196,7 +197,7 @@ func judgeHostDialed(o hostDialedObs) []hostDialedCheck {
 	var ep []string
 	for _, l := range o.Lines {
 		if lineArg(lineWords(l), "--epoch") != strconv.FormatInt(o.Epoch, 10) {
-			ep = append(ep, "a relay ran with --epoch "+lineArg(lineWords(l), "--epoch")+", not the Lease's "+strconv.FormatInt(o.Epoch, 10))
+			ep = append(ep, "a relay ran with --epoch "+postSafe(lineArg(lineWords(l), "--epoch"), o)+", not the Lease's "+strconv.FormatInt(o.Epoch, 10))
 			break
 		}
 	}
@@ -204,7 +205,7 @@ func judgeHostDialed(o hostDialedObs) []hostDialedCheck {
 	case !o.Stale.Ran:
 		ep = append(ep, "the relay of the lower epoch was not run")
 	case o.Stale.Exit != hostdial.ExitSuperseded || o.Stale.Stdout != 0:
-		ep = append(ep, fmt.Sprintf("the relay of epoch %d was not refused as superseded (exit %d, %d byte(s) on its output: %s)", o.Epoch-1, o.Stale.Exit, o.Stale.Stdout, o.Stale.Classify))
+		ep = append(ep, fmt.Sprintf("the relay of epoch %d was not refused as superseded (exit %d, %d byte(s) on its output: %s)", o.Epoch-1, o.Stale.Exit, o.Stale.Stdout, postSafe(o.Stale.Classify, o)))
 	case ctl.PID == 0 || ctl.PID != o.KeptPID || ctl.Starts != o.KeptStarts:
 		ep = append(ep, "the kept control relay did not stay up across the refusal")
 	}
@@ -239,7 +240,36 @@ func judgeHostDialed(o hostDialedObs) []hostDialedCheck {
 	return out
 }
 
-// endText is how a relay last ended, in the owner's words, or "none".
+var (
+	pathWord   = regexp.MustCompile(`/[^\s"'),;]+`)
+	dottedName = regexp.MustCompile(`[A-Za-z0-9-]+(\.[A-Za-z0-9-]+){2,}`)
+	longNumber = regexp.MustCompile(`[0-9]{5,}`)
+)
+
+// postSafe is a text of the relay owner's, the relay's or a tool's, made fit for the text to post, which never holds a job
+// ID, a host, a path or a user's name (the runbook): the run's own job ID, Allocation UID and tag and the agent's path
+// become placeholders, then any other path, dotted name or number of five digits or more does too; what is left is held to
+// printable ASCII and 160 bytes. The text as it was goes to the private log, never here.
+func postSafe(s string, o hostDialedObs) string {
+	for _, r := range []struct{ v, with string }{{o.AgentPath, "<the agent>"}, {o.Tag, "<the tag>"}, {o.UID, "<the UID>"}, {o.JobID, "<the job>"}} {
+		if r.v != "" {
+			s = strings.ReplaceAll(s, r.v, r.with)
+		}
+	}
+	s = pathWord.ReplaceAllString(s, "<a path>")
+	s = dottedName.ReplaceAllString(s, "<a name>")
+	s = longNumber.ReplaceAllString(s, "<a number>")
+	b := make([]byte, 0, len(s))
+	for i := 0; i < len(s) && len(b) < 160; i++ {
+		if c := s[i]; c >= 0x20 && c <= 0x7e {
+			b = append(b, c)
+		}
+	}
+	return string(b)
+}
+
+// endText is how a relay last ended, in the owner's words, or "none". It can name the job and paths: the text to post
+// takes it through postSafe.
 func endText(r hostdial.RelayState) string {
 	switch {
 	case r.Final:

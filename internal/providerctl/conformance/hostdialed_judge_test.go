@@ -42,7 +42,7 @@ func goodLine(ch string, epoch, seq int) string {
 func goodObs() hostDialedObs {
 	row, _ := alpha.RowByName("reach-host-dialed-athena")
 	return hostDialedObs{
-		Row: row, Epoch: 7, JobID: "4242", UID: "u-1", AgentPath: goodAgent,
+		Row: row, Epoch: 7, JobID: "4242", UID: "u-1", Tag: "hb-x", AgentPath: goodAgent,
 		Lines: []string{goodLine("control", 7, 1), goodLine("serving", 7, 2)},
 		Relays: map[agentapi.RelayChannel]hostdial.RelayState{
 			agentapi.RelayControl: {Channel: agentapi.RelayControl, PID: 100, Starts: 1, Sessions: 1, Streams: 3, Joined: 3},
@@ -178,6 +178,36 @@ func TestHostDialedPostsNameEveryCheckAndNoPath(t *testing.T) {
 	o.Registered = 0
 	if posts := hostDialedPosts(o, judgeHostDialed(o), "x", 1, 1, "1Gi"); !strings.HasPrefix(posts, "reach-host-dialed-athena: FAIL ") || !strings.Contains(posts, "- the control session: FAIL: ") {
 		t.Errorf("a failed check does not fail the post:\n%s", posts)
+	}
+}
+
+// What the relay owner, the relay or a tool says goes into a failed line, and can name the job, the tag, paths and hosts:
+// none of it reaches the text to post, which says where each stood.
+func TestAFailedPostNamesNoJobPathOrHostFromTheOwnersWords(t *testing.T) {
+	o := goodObs()
+	o.Registered = 0
+	ctl := o.Relays[agentapi.RelayControl]
+	ctl.Sessions, ctl.LastEnd = 0, "retried: job 4242 is PENDING at /scratch/user/x on login01.cluster.example.org, job 1234567 too"
+	o.Relays[agentapi.RelayControl] = ctl
+	srv := o.Relays[agentapi.RelayServing]
+	srv.Sessions, srv.Joined, srv.LastEnd, srv.LastRefusal = 0, 0, "", "job 4242 is not listed under tag hb-x"
+	o.Relays[agentapi.RelayServing] = srv
+	o.Stale = staleResult{Ran: true, Exit: 0, Stdout: 30, Classify: "hb-relay: the agent of Allocation u-1 accepted it\x1b[0m"}
+	o.Lines[0] = strings.Replace(o.Lines[0], "--epoch 7", "--epoch /etc/passwd", 1)
+	o.Lines[1] = strings.Replace(o.Lines[1], "relay serving", "relay /tmp/x", 1)
+	posts := hostDialedPosts(o, judgeHostDialed(o), "x", 1, 1, "1Gi")
+	for _, private := range []string{"4242", "1234567", "/scratch", "login01", "example.org", "hb-x", "u-1", "/etc/passwd", "/tmp/x", goodAgent, "\x1b"} {
+		if strings.Contains(posts, private) {
+			t.Errorf("the text to post holds %q:\n%s", private, posts)
+		}
+	}
+	for _, want := range []string{"retried: job <the job> is PENDING at <a path> on <a name>, job <a number> too", "not started: job <the job> is not listed under tag <the tag>", "--epoch <a path>", "the agent of Allocation <the UID> accepted it"} {
+		if !strings.Contains(posts, want) {
+			t.Errorf("the text to post lacks %q:\n%s", want, posts)
+		}
+	}
+	if long := postSafe(strings.Repeat("x", 500), o); len(long) != 160 {
+		t.Errorf("postSafe kept %d bytes of 500, want 160", len(long))
 	}
 }
 

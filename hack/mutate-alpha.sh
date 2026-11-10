@@ -702,6 +702,8 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'hack/live-checks.sh@@reach-host-dialed-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|25|-C memfs|10@@reach-host-dialed-helios|helios|helios|plgrid-gpu-gh200|now|-|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|25|-C memfs|10'
   'hack/live-checks.sh@@reach-host-dialed|reach-host-dialed-helios,reach-host-dialed-athena@@reach-host-dialed|reach-host-dialed-athena'
   'hack/live-checks.sh@@reach-host-dialed-athena|cmd/hb-agent@@reach-host-dialed-athena|internal/slurm'
+  'internal/providerctl/conformance/hostdialed_verdict_test.go@@{o.JobID, "<the job>"}@@{"", "<the job>"}'
+  'internal/providerctl/conformance/hostdialed_verdict_test.go@@	s = pathWord.ReplaceAllString(s, "<a path>")@@	s = pathWord.ReplaceAllString(s, "$0")'
 )
 # The mutants of a test of this script: a file with one mutant per line, in place of the list above.
 [ -z "${MUTATE_ALPHA_MUTANTS:-}" ] || mapfile -t mutants < "$MUTATE_ALPHA_MUTANTS"
