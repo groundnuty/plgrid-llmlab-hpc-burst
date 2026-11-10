@@ -145,6 +145,11 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 // The Allocation must fit the launch: the same partition (so the same class)
 // and GPU count, and at least the CPUs and memory a new Allocation would
 // request (review of PR 88: a spec edit can change the GPUs an Instance needs).
+// One that carries a mark under which step 5 ends any Instance placed on it
+// (failsAnyInstance) is passed over: step 7, which places, runs before step 9,
+// which releases such an Allocation, so one pass would otherwise place an
+// Instance on it and the next would fail that Instance, which counts toward
+// RestartLoop (issue #332).
 // One whose agent has not registered again yet, during the grace after the
 // controller's own restart, is waited for rather than passed over: deferUntil
 // says until when.
@@ -154,7 +159,7 @@ func (p *pass) warmAllocation(pv *providerView, params v1alpha1.BatchParameters)
 		obs := a.Status.AtProvider
 		if a.Labels[v1alpha1.LabelProvider] != pv.name || !a.DeletionTimestamp.IsZero() ||
 			obs.Phase != v1alpha1.AllocationRunning || obs.HardEnd == nil || len(p.liveOn(a.Name)) > 0 ||
-			obs.HardEnd.Sub(p.now) <= need || !fits(a, params) || p.releasePending(a) {
+			obs.HardEnd.Sub(p.now) <= need || !fits(a, params) || p.releasePending(a) || failsAnyInstance(a) {
 			continue
 		}
 		if len(p.r.Backend.registrations(a.UID)) > 0 {
@@ -177,6 +182,23 @@ func (p *pass) releasePending(a *v1alpha1.Allocation) bool {
 		}
 	}
 	return false
+}
+
+// failsAnyInstance reports whether the Allocation carries a condition under
+// which step 5 (allocationFailed) ends an Instance placed on it, so it is never
+// warm capacity:
+//   - SubmittedAsOther: the job was established with other settings than the
+//     Allocation requested (HBEP-4, Read-back), so it is not known to fit what
+//     fits() compares, which is the request;
+//   - RelayEndedForGood: a host-dialed relay of its job ended for good, so
+//     nothing placed on it can be reached (issue #304).
+//
+// Both are set once and never cleared.
+func failsAnyInstance(a *v1alpha1.Allocation) bool {
+	if a.GetCondition(v1alpha1.ConditionSubmittedAsOther).Status == "True" {
+		return true
+	}
+	return a.GetCondition(v1alpha1.ConditionRelayEndedForGood).Status == "True"
 }
 
 // fits reports whether an Allocation's submission parameters hold an Instance
