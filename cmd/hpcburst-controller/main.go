@@ -77,6 +77,11 @@ type flags struct {
 	frontAddr   string
 	leaderElect bool
 	workers     int
+	// relayKeeperSocket is the relay keeper's socket (beta; HBEP-6, The
+	// relay keeper; #343): set, host-dialed relays are the keeper's, and the
+	// controller sends it desired sets; "" is alpha, the relays the
+	// controller's own. The launcher passes the path; none is computed here.
+	relayKeeperSocket string
 }
 
 func parse(args []string, stderr io.Writer) (flags, error) {
@@ -91,6 +96,7 @@ func parse(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.frontAddr, "front-addr", "", "the recorded front address; direct and ssh need it, host-dialed takes none because the host dials the jobs")
 	fs.BoolVar(&f.leaderElect, "leader-elect", true, "take the lifecycle Lease, a guard against a stale second copy")
 	fs.IntVar(&f.workers, "workers", lifecycle.DefaultWorkers, "work queue workers")
+	fs.StringVar(&f.relayKeeperSocket, "relay-keeper-socket", "", "the relay keeper's Unix socket, in host-dialed mode only (beta): the keeper holds the relays; unset, the controller does (alpha)")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
@@ -116,6 +122,12 @@ func parse(args []string, stderr io.Writer) (flags, error) {
 		return flags{}, errors.New("--front-mode and --front-addr go together")
 	case f.workers < 1:
 		return flags{}, errors.New("--workers must be at least 1")
+	// The keeper holds host-dialed relays only (HBEP-6, The relay keeper), at
+	// a path the agent API's 107-byte socket limit allows.
+	case f.relayKeeperSocket != "" && f.frontMode != string(agentapi.DialHomeHostDialed):
+		return flags{}, fmt.Errorf("--relay-keeper-socket is for --front-mode %s only", agentapi.DialHomeHostDialed)
+	case f.relayKeeperSocket != "" && (!filepath.IsAbs(f.relayKeeperSocket) || len(f.relayKeeperSocket) > agentapi.MaxRelaySocketPath):
+		return flags{}, fmt.Errorf("--relay-keeper-socket must be an absolute path of at most %d bytes", agentapi.MaxRelaySocketPath)
 	}
 	if f.kubeconfig == "" {
 		f.kubeconfig = filepath.Join(f.host.StateDir, "kubeconfig")
@@ -187,6 +199,7 @@ func run(ctx context.Context, f flags, d deps) error {
 	}
 	opts := managerOptions(f, cfg, os.Getenv)
 	opts.Registry = d.registry
+	opts.RelayKeeperSocket = f.relayKeeperSocket
 	// One raised-events counter for this copy: the lifecycle controller, its
 	// tunnel-state reader and the Provider managers count into it, and the
 	// lifecycle controller's serving collector exports it (HBEP-8, Raised
@@ -203,6 +216,7 @@ func run(ctx context.Context, f flags, d deps) error {
 		return err
 	}
 	w := wiring{cfg: cfg, host: f.host, scheme: scheme, front: front, hubEndpoint: opts.HubEndpoint, newPlatform: d.newPlatform, listen: ls.Listen, events: events, log: ctrl.Log.WithName("hpcburst-controller").WithValues("portBase", f.host.PortBase)}
+	w.keeperSocket = f.relayKeeperSocket
 	if err := mount(mgr, w, backend); err != nil {
 		return err
 	}
