@@ -1,0 +1,331 @@
+# One-off, never merged: issue #303's behaviour tests and the five mutants they are for, on GitHub-hosted runners. internal/alpha
+# links internal/rehearsal, so none of its tests runs on the shared development VM until #308 merges (PR #309).
+#
+# The five, from hack/mutate-alpha.sh's list (each selected below by an expression that matches it alone):
+#   m1  live_flows_test.go: the handover's result catch-up error ignored when the second job never started
+#   m2  live_flows_test.go: the same on the no-overlap row
+#   m3  live_flows_test.go: the handover's first wait for the successor lengthened to the drain start
+#   m4  steps_live_test.go: firstJobStarted no longer says the run's resets decide nothing
+#   m5  guard_live_test.go: secondNeverFinal says it too
+#
+# PR #317's fix round adds: the stand-ins whose run is meant to fail check the stack's own stop first (internal/alpha,
+# standin_stop_test.go; internal/rehearsal/stack, survivors.go). Its tests of that check (STOP_TESTS) run -v and -count=50 under two
+# spinners in job package; the two catch-up stand-ins run three more times each in job standin, and every stand-in prints its stop
+# and the handover's slack before the streams open.
+#
+# Job package (m4, m5: the package's own fast tests kill them):
+#   0. the stop tests with no mutant, -v; then -count=50 under two spinners at nice 19;
+#   1. the two new tests with no mutant, -v; then -count=50 under two spinners at nice 19;
+#   2. hack/mutate-alpha.sh --only on all five, as it is: its baseline (the whole package, no mutant, under its own command), and
+#      each kill with the test it names. Under -test.failfast the source-reading tests run first and are named;
+#   3. the same five, each applied from the harness's own list with its exact-once replace, the package's test binary run with
+#      the three tests that read the source skipped, so that the log names what else kills it; with no mutant first, under the same
+#      command. m1, m2 and m3 survive this one: only a stand-in runs their path (job standin).
+# Job standin (m1, m2, m3: the real stack on this runner, as CI's rehearsal job sets it up): each entry runs one gated stand-in test,
+#   with no mutant (it must pass) or with one (it must fail). The harness cannot run these: its package run has -test.timeout 300s and
+#   no environment, and a stand-in takes 6 to 10 minutes.
+# It reads no secret and pushes nothing.
+name: mutants-303
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/mutants-303.yml']
+
+permissions:
+  contents: read
+
+env:
+  M1: 'handover.s result"\); err != nil \{@@'
+  M2: 'no-overlap row.s result"\); err != nil \{@@'
+  M3: 'time\.Until\(ds\)-lead-lead/2, nil\)@@'
+  M4: 'ResetsDecideNothing\(\) // this run ends@@'
+  M5: 'ResetsDecideNothing\(\); r\.claimed'
+  # The tests of internal/alpha that read the source (go/parser, or the package's files as text).
+  SOURCE_READERS: '^(TestTheLiveStepsWaitOnWhatTheSumsCount|TestOnlyAFirstJobThatNeverStartedSaysResetsDecideNothing|TestWatchInventory)$'
+  NEW_TESTS: '^(TestAResetLeavesARunWhoseFirstJobNeverStartedNotRun|TestAResetFailsARunWhoseSecondJobNeverStarted)$'
+  # PR #317's round: the stand-ins' stop verdict (internal/alpha) and the survivor check it uses (internal/rehearsal/stack).
+  STOP_TESTS: '^(TestAStandInWhoseStackDidNotStopFails|TestProcessesAndLeft|TestProcessesFailsOnWhatItCannotRead)$'
+
+jobs:
+  package:
+    name: mutants 303, package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          # The PR's own head, whose parent is the head under test, not the merge with main.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: The stop tests with no mutant
+        run: |
+          git rev-parse HEAD^ | sed 's/^/tests from /'
+          set +e
+          go test -count=1 -v -timeout 300s -run "$STOP_TESTS" ./internal/alpha ./internal/rehearsal/stack > "$RUNNER_TEMP/stop.txt" 2>&1
+          rc=$?
+          set -e
+          grep -E -- '^( *--- |ok|FAIL|panic)' "$RUNNER_TEMP/stop.txt"
+          grep -E -- "the stack's stop:" "$RUNNER_TEMP/stop.txt" || true
+          [ "$rc" -eq 0 ] || { tail -60 "$RUNNER_TEMP/stop.txt"; exit 1; }
+          top=$(grep -c '^--- PASS' "$RUNNER_TEMP/stop.txt"); sub=$(grep -c '^    --- PASS' "$RUNNER_TEMP/stop.txt")
+          echo "top-level PASS: $top, want 3; subtests PASS: $sub, want 3"
+          [ "$top" -eq 3 ] && [ "$sub" -eq 3 ]
+
+      - name: The stop tests, -count=50 under two spinners
+        run: |
+          nproc; uptime
+          spin=()
+          for i in 1 2; do timeout 20m nice -n 19 sh -c 'while :; do :; done' & spin+=($!); done
+          set +e
+          go test -count=50 -v -timeout 20m -run "$STOP_TESTS" ./internal/alpha ./internal/rehearsal/stack > "$RUNNER_TEMP/stop50.txt" 2>&1
+          rc=$?
+          set -e
+          uptime
+          kill "${spin[@]}" 2> /dev/null || true
+          wait 2> /dev/null || true
+          left=$(pgrep -f "while :; do :; done" | wc -l)
+          sleeps=$(pgrep -x sleep -a | grep -c ' 600$' || true)
+          pass=$(grep -c '^--- PASS' "$RUNNER_TEMP/stop50.txt"); fail=$(grep -c -- '--- FAIL' "$RUNNER_TEMP/stop50.txt" || true)
+          echo "go test exit $rc; top-level PASS: $pass, want 150; FAIL lines: $fail; spinners left: $left; test processes left: $sleeps"
+          [ "$rc" -eq 0 ] || { grep -E -B2 -A8 -- '--- FAIL' "$RUNNER_TEMP/stop50.txt" | head -80; exit 1; }
+          [ "$pass" -eq 150 ] && [ "$fail" -eq 0 ] && [ "$left" -eq 0 ] && [ "$sleeps" -eq 0 ]
+
+      - name: The new tests with no mutant
+        run: |
+          git rev-parse HEAD^ | sed 's/^/tests from /'
+          set +e
+          go test -count=1 -v -timeout 300s -run "$NEW_TESTS" ./internal/alpha > "$RUNNER_TEMP/new.txt" 2>&1
+          rc=$?
+          set -e
+          grep -E -- '^( *--- |ok|FAIL|panic)' "$RUNNER_TEMP/new.txt"
+          [ "$rc" -eq 0 ] || { tail -60 "$RUNNER_TEMP/new.txt"; exit 1; }
+          top=$(grep -c '^--- PASS' "$RUNNER_TEMP/new.txt"); sub=$(grep -c '^    --- PASS' "$RUNNER_TEMP/new.txt")
+          echo "top-level PASS: $top, want 2; subtests PASS: $sub, want 5"
+          [ "$top" -eq 2 ] && [ "$sub" -eq 5 ]
+
+      - name: The new tests, -count=50 under two spinners
+        run: |
+          nproc; uptime
+          spin=()
+          for i in 1 2; do timeout 20m nice -n 19 sh -c 'while :; do :; done' & spin+=($!); done
+          set +e
+          go test -count=50 -v -timeout 20m -run "$NEW_TESTS" ./internal/alpha > "$RUNNER_TEMP/count50.txt" 2>&1
+          rc=$?
+          set -e
+          uptime
+          kill "${spin[@]}" 2> /dev/null || true
+          wait 2> /dev/null || true
+          left=$(pgrep -f "while :; do :; done" | wc -l)
+          pass=$(grep -c '^--- PASS' "$RUNNER_TEMP/count50.txt"); fail=$(grep -c -- '--- FAIL' "$RUNNER_TEMP/count50.txt" || true)
+          echo "go test exit $rc; top-level PASS: $pass, want 100; FAIL lines: $fail; spinners left: $left"
+          [ "$rc" -eq 0 ] || { grep -E -B2 -A8 -- '--- FAIL' "$RUNNER_TEMP/count50.txt" | head -80; exit 1; }
+          [ "$pass" -eq 100 ] && [ "$fail" -eq 0 ] && [ "$left" -eq 0 ]
+
+      - name: hack/mutate-alpha.sh on the five, as it is
+        run: |
+          only="$M1|$M2|$M3|$M4|$M5"
+          set +e
+          bash hack/mutate-alpha.sh --only "$only" > "$RUNNER_TEMP/harness.txt" 2>&1
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/harness.txt"
+          echo "mutate-alpha exit $rc"
+          killed=$(grep -c '^KILLED' "$RUNNER_TEMP/harness.txt" || true)
+          echo "killed $killed of 5"
+          [ "$rc" -eq 0 ] && [ "$killed" -eq 5 ]
+
+      - name: The five with the tests that read the source skipped
+        run: |
+          eval "$(sed -n '/^mutants=(/,/^)/p' hack/mutate-alpha.sh)"
+          # apply <expression>: the one mutant of the list it selects, applied as the harness applies it (its text exactly once).
+          apply() {
+            local sel=() m file rest from to
+            for m in "${mutants[@]}"; do grep -q -E -e "$1" <<< "$m" && sel+=("$m"); done
+            [ "${#sel[@]}" -eq 1 ] || { echo "the expression selects ${#sel[@]} mutants, want 1: $1"; return 1; }
+            m=${sel[0]}; file=${m%%@@*}; rest=${m#*@@}; from=${rest%%@@*}; to=${rest#*@@}
+            python3 - "internal/alpha/$file" "$from" "$to" <<'PY'
+          import sys
+          p, a, b = sys.argv[1:4]
+          s = open(p).read()
+          if s.count(a) != 1:
+              sys.exit(1)
+          open(p, 'w').write(s.replace(a, b, 1))
+          PY
+            echo "applied $file: $from  ->  $to"
+          }
+          bin="$RUNNER_TEMP/alpha.test"
+          # run <label>: the package's tests as the harness runs them, but with the source readers skipped and no failfast.
+          run() {
+            go test -c -o "$bin" ./internal/alpha
+            set +e
+            (cd internal/alpha && "$bin" -test.count=1 -test.timeout 300s -test.skip "$SOURCE_READERS") > "$RUNNER_TEMP/run.txt" 2>&1
+            rc=$?
+            set -e
+            failing=$(sed -n -E 's/^--- FAIL: ([^ ]+).*/\1/p' "$RUNNER_TEMP/run.txt" | paste -s -d ' ' -)
+            echo "$1: exit $rc; failing: ${failing:-none}"
+            grep -E -A4 -- '^ +--- FAIL' "$RUNNER_TEMP/run.txt" | head -40 || true
+          }
+          run "no mutant"
+          [ "$rc" -eq 0 ] || { tail -60 "$RUNNER_TEMP/run.txt"; exit 1; }
+          # m4 and m5 must be killed by their new tests; m1, m2 and m3 are reported, whatever kills them here (their path is the stand-ins').
+          declare -A want=([M4]="TestAResetLeavesARunWhoseFirstJobNeverStartedNotRun" [M5]="TestAResetFailsARunWhoseSecondJobNeverStarted")
+          bad=0
+          for k in M1 M2 M3 M4 M5; do
+            git checkout -- internal/alpha
+            apply "${!k}"
+            run "$k"
+            git checkout -- internal/alpha
+            if [ -n "${want[$k]:-}" ]; then
+              case " $failing " in *" ${want[$k]} "*) ;; *) echo "$k: want ${want[$k]} among the failing tests"; bad=1 ;; esac
+            fi
+          done
+          [ "$bad" -eq 0 ]
+
+  standin:
+    name: mutants 303, ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      K3S_VERSIONS: '["1.36.5"]'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: "handover held, no mutant", test: TestStandInHandoverSecondHeld, mutant: "", expect: pass}
+          - {name: "no-overlap held, no mutant", test: TestStandInNoOverlapSecondHeld, mutant: "", expect: pass}
+          - {name: "handover catch-up fails, no mutant", test: TestStandInHandoverSecondHeldCatchUpFails, mutant: "", expect: pass}
+          - {name: "no-overlap catch-up fails, no mutant", test: TestStandInNoOverlapSecondHeldCatchUpFails, mutant: "", expect: pass}
+          - {name: "m1", test: TestStandInHandoverSecondHeldCatchUpFails, mutant: M1, expect: fail}
+          - {name: "m2", test: TestStandInNoOverlapSecondHeldCatchUpFails, mutant: M2, expect: fail}
+          - {name: "m3", test: TestStandInHandoverSecondHeld, mutant: M3, expect: fail}
+          - {name: "handover catch-up fails, repeat 1", test: TestStandInHandoverSecondHeldCatchUpFails, mutant: "", expect: pass}
+          - {name: "handover catch-up fails, repeat 2", test: TestStandInHandoverSecondHeldCatchUpFails, mutant: "", expect: pass}
+          - {name: "handover catch-up fails, repeat 3", test: TestStandInHandoverSecondHeldCatchUpFails, mutant: "", expect: pass}
+          - {name: "no-overlap catch-up fails, repeat 1", test: TestStandInNoOverlapSecondHeldCatchUpFails, mutant: "", expect: pass}
+          - {name: "no-overlap catch-up fails, repeat 2", test: TestStandInNoOverlapSecondHeldCatchUpFails, mutant: "", expect: pass}
+          - {name: "no-overlap catch-up fails, repeat 3", test: TestStandInNoOverlapSecondHeldCatchUpFails, mutant: "", expect: pass}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # Read only: the rehearsal jobs' entry, saved by main's runs. The fetch scripts check every file against its pin either way.
+      - name: Restore the cached pinned binaries
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/k3s-bin
+            ${{ runner.temp }}/frp
+          key: binaries-rehearsal-k3s-${{ join(fromJSON(env.K3S_VERSIONS), '-') }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-frp.sh', 'hack/fetch-k3s.sh', 'internal/launcher/k3s-pins.txt') }}
+
+      - name: Fetch the pinned k3s and frp binaries
+        run: |
+          bash hack/fetch-k3s.sh "$RUNNER_TEMP/k3s-bin" 1.36.5
+          bash hack/fetch-frp.sh "$RUNNER_TEMP/frp"
+          echo "HPCBURST_BIN_DIR=$RUNNER_TEMP/k3s-bin" >> "$GITHUB_ENV"
+          echo "HPCBURST_FRP_DIR=$RUNNER_TEMP/frp" >> "$GITHUB_ENV"
+
+      - name: Provide OpenSSH's sshd for the login node
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+            sudo chmod 755 /usr/sbin/policy-rc.d
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+            sudo rm -f /usr/sbin/policy-rc.d
+          fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
+          /usr/sbin/sshd -V 2>&1 | head -1
+          echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
+
+      # The stand-in runs in a transient systemd user scope, as hack/rehearsal.sh runs the rehearsal, so that nothing it starts
+      # outlives it.
+      - name: Start a systemd user manager for this user
+        run: |
+          if ! dpkg -s dbus-user-session > /dev/null 2>&1; then
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q dbus-user-session
+          fi
+          sudo loginctl enable-linger "$(id -un)"
+          rt="/run/user/$(id -u)"
+          timeout 60 sh -c "until test -S '$rt/systemd/private' && test -S '$rt/bus'; do sleep 1; done"
+          echo "XDG_RUNTIME_DIR=$rt" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$rt/bus" >> "$GITHUB_ENV"
+          XDG_RUNTIME_DIR="$rt" DBUS_SESSION_BUS_ADDRESS="unix:path=$rt/bus" systemd-run --user --scope -q true
+
+      - name: Build the four binaries and the alpha test binary
+        env:
+          MUTANT: ${{ matrix.mutant }}
+        run: |
+          git rev-parse HEAD^ | sed 's/^/tests from /'
+          out="$RUNNER_TEMP/bin"
+          mkdir -p "$out"
+          go build -o "$out/" ./cmd/hpcburst ./cmd/hpcburst-controller ./cmd/hpcburst-front ./cmd/hb-agent
+          if [ -n "$MUTANT" ]; then
+            eval "$(sed -n '/^mutants=(/,/^)/p' hack/mutate-alpha.sh)"
+            expr=${!MUTANT}
+            sel=()
+            for m in "${mutants[@]}"; do grep -q -E -e "$expr" <<< "$m" && sel+=("$m"); done
+            [ "${#sel[@]}" -eq 1 ] || { echo "the expression selects ${#sel[@]} mutants, want 1: $expr"; exit 1; }
+            m=${sel[0]}; file=${m%%@@*}; rest=${m#*@@}; from=${rest%%@@*}; to=${rest#*@@}
+            python3 - "internal/alpha/$file" "$from" "$to" <<'PY'
+          import sys
+          p, a, b = sys.argv[1:4]
+          s = open(p).read()
+          if s.count(a) != 1:
+              sys.exit(1)
+          open(p, 'w').write(s.replace(a, b, 1))
+          PY
+            echo "applied $MUTANT, $file: $from  ->  $to"
+            git diff --stat
+          fi
+          go test -c -o "$out/alpha.test" ./internal/alpha
+          echo "HPCBURST_REHEARSAL_BIN=$out" >> "$GITHUB_ENV"
+
+      - name: The stand-in, ${{ matrix.test }}
+        env:
+          TEST: ${{ matrix.test }}
+          EXPECT: ${{ matrix.expect }}
+        run: |
+          unit="mutants-303-$GITHUB_RUN_ID-$$"
+          cd internal/alpha
+          set +e
+          HPCBURST_ALPHA_STANDIN=1 HPCBURST_REQUIRE_FRP=1 HPCBURST_REQUIRE_SSHD=1 \
+            systemd-run --user --scope --collect -q --unit="$unit" -p MemoryMax=6G -p MemorySwapMax=0 \
+            "$HPCBURST_REHEARSAL_BIN/alpha.test" -test.v -test.count=1 -test.timeout 45m -test.run "^${TEST}\$" > "$RUNNER_TEMP/standin.txt" 2>&1
+          rc=$?
+          set -e
+          systemctl --user kill --signal=SIGKILL "$unit.scope" 2> /dev/null || true
+          systemctl --user stop "$unit.scope" 2> /dev/null || true
+          grep -E -- '^( *--- |PASS|FAIL|ok|panic)' "$RUNNER_TEMP/standin.txt" || true
+          echo "---- the test's own lines that name a failure or the row's end"
+          grep -E -- '(standin_test|standin_stop_test|live_flows_test|steps_live_test|guard_live_test)\.go:[0-9]+: ' "$RUNNER_TEMP/standin.txt" | grep -E -i 'fail|not run|want|passed|has passed|marker|catch-up' | head -40 || true
+          echo "---- the stack's stop, and the slack before the streams open"
+          grep -E -- "the stack's stop:|to spare before the time to open the streams" "$RUNNER_TEMP/standin.txt" || true
+          echo "---- the last 40 lines"
+          tail -40 "$RUNNER_TEMP/standin.txt"
+          echo "stand-in exit $rc, expected: $EXPECT"
+          case $EXPECT in
+            pass) [ "$rc" -eq 0 ] && grep -q "^--- PASS: $TEST " "$RUNNER_TEMP/standin.txt" ;;
+            fail) [ "$rc" -ne 0 ] && grep -q "^--- FAIL: $TEST " "$RUNNER_TEMP/standin.txt" ;;
+            *) exit 1 ;;
+          esac
