@@ -83,9 +83,10 @@ var unpinnedReaped = func(*exec.Cmd) {}
 // kernel that passed checkPidfd, since pidfd_open (Linux 5.3) came after
 // clone's CLONE_PIDFD (5.2), and Go's start fails when clone refuses the
 // flag. Should it happen, the process's pipes are closed, so a relay's ssh
-// ends by itself (its relay step ends when its standard input closes,
-// HBEP-6); its parent-death signal ends it with this process at the latest;
-// and it is reaped in the background.
+// normally ends by itself (its relay step ends when its standard input
+// closes, HBEP-6), and it is reaped in the background. The limit: a process
+// that ignores the end of its input, or is stopped, outlives every Drop and
+// Stop, and ends only with this process, by its parent-death signal.
 func startPidfdProcess(cmd *exec.Cmd, log *slog.Logger) (*process, error) {
 	in, err := cmd.StdinPipe()
 	if err != nil {
@@ -108,7 +109,7 @@ func startPidfdProcess(cmd *exec.Cmd, log *slog.Logger) (*process, error) {
 			_ = cmd.Wait()
 			unpinnedReaped(cmd)
 		}()
-		log.Error("a relay's ssh started without a pidfd from clone: refused; it is not signalled, its pipes are closed, and it ends by itself", "pid", pid)
+		log.Error("a relay's ssh started without a pidfd from clone: refused, and never signalled; its pipes are closed, so it normally ends by itself, but one that ignores the end of its input, or is stopped, outlives Drop and Stop and ends only with this process (its parent-death signal)", "pid", pid)
 		return nil, fmt.Errorf("hostdial: the relay's ssh %d started without a pidfd from clone: refused, and not signalled", pid)
 	}
 	// Nothing waits for the process yet, so its PID is its own: read its
