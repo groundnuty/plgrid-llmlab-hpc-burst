@@ -22,8 +22,10 @@
 //     set that has expired on arrival moves the fence and nothing else.
 //   - Only a complete set (Q6) stops a relay, by leaving its Allocation out.
 //   - A final end that needs the mark (failed, or superseded) is written and
-//     synced, and reported in each of the Provider's reports until the leader
-//     acknowledges it. A decided end stays recorded until its Allocation
+//     synced, and only then reported, in each of the Provider's reports until
+//     the leader acknowledges it. One whose write fails is pending: never
+//     reported, its Allocation started and restarted no more, and written
+//     before anything else takes effect (Keeper.settle). A decided end stays recorded until its Allocation
 //     leaves a complete set (Q1), and its channel is never restarted. An
 //     Allocation that carries RelayEndedForGood gets neither of its relays
 //     started or restarted, on a new generation too (#347).
@@ -61,12 +63,13 @@ type Options struct {
 	State string
 	// Runner makes the Runner for the keeper's epoch E, once E is on disk.
 	Runner func(epoch int64) (Runner, error)
-	// Now is the clock; nil means time.Now. The expiry is computed from it,
-	// so a real clock's monotonic reading makes it immune to steps of the
-	// wall clock.
+	// Now is the clock; nil means time.Now. Every expiry and lapse is
+	// computed from its readings as they are, never through UTC or Round, so
+	// a real clock's monotonic reading makes them immune to steps of the wall
+	// clock (#343's Q5).
 	Now func() time.Time
-	// ClaimLapse is how long a claim on a login host lasts with no relay held
-	// there and no unexpired set from its holder; zero means
+	// ClaimLapse is how long a claim on a login host lasts with no relay
+	// running there and no unexpired set from its holder; zero means
 	// DefaultClaimLapse.
 	ClaimLapse time.Duration
 	// Logger reports refusals and the state file's failures; nil means none.
@@ -81,15 +84,29 @@ type Keeper struct {
 	epoch   int64
 	started time.Time
 
-	mu       sync.Mutex
-	st       *State
-	sets     map[string]*heldSet              // Provider → its latest accepted set; not persisted
-	wishes   map[string]wish                  // Provider → its latest unexpired set past the fence, accepted or not
-	wanted   map[string]map[string]wire.Entry // Provider → tag → the Allocation kept
-	starts   map[string]map[string]int        // Provider → UID/channel → ssh starts
+	mu sync.Mutex
+	// st is the state as the file holds it: memory is never below the file,
+	// so a later write cannot lower a fence (Keeper.commit).
+	st *State
+	// synced is false while the file's last write may not have reached the
+	// disk (its directory's sync failed after the rename): then nothing takes
+	// effect, and nothing is reported, until a write syncs (settle).
+	synced bool
+	// pending are final ends whose write failed: they are not in st, never
+	// reported, and written by settle before anything else takes effect.
+	pending  []EndRecord
+	sets     map[string]*heldSet          // Provider's name → its latest accepted set; not persisted
+	wishes   map[provKey]wish             // Provider → its latest unexpired set past the fence, accepted or not
+	wanted   map[string]map[string]wanted // Provider's name → tag → the Allocation kept
+	tagUID   map[string]map[string]string // Provider's name → tag → the UID of the Provider that wanted it, kept after a Drop
+	starts   map[string]map[string]int    // Provider's name → UID/channel → ssh starts
 	restarts map[string]map[agentapi.RelayChannel]uint64
 	refused  map[string]map[string]uint64
 }
+
+// provKey is a Provider: its name and its UID. A Provider re-created under
+// the same name is another Provider (#347).
+type provKey struct{ name, uid string }
 
 // heldSet is a Provider's latest accepted set, with its expiry and login host.
 type heldSet struct {
@@ -99,12 +116,19 @@ type heldSet struct {
 }
 
 // wish is what a Provider's latest set past the fence asked of a login host,
-// accepted or refused: the claims' "oldest Provider" is chosen among them.
+// accepted or refused: the claims' "oldest Provider" is chosen among them,
+// and a claim's lapse counts from its holder's.
 type wish struct {
 	host    string
-	uid     string
 	created time.Time
 	expires time.Time
+}
+
+// wanted is an Allocation the keeper keeps, with the UID of the Provider
+// whose set asked for it.
+type wanted struct {
+	entry wire.Entry
+	uid   string
 }
 
 // Open is the keeper's start: it counts the start on disk (OpenState), so E
@@ -130,8 +154,9 @@ func Open(o Options) (*Keeper, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Keeper{o: o, runner: r, epoch: st.Epoch(), started: o.Now(), st: st,
-		sets: map[string]*heldSet{}, wishes: map[string]wish{}, wanted: map[string]map[string]wire.Entry{}, starts: map[string]map[string]int{},
+	return &Keeper{o: o, runner: r, epoch: st.Epoch(), started: o.Now(), st: st, synced: true,
+		sets: map[string]*heldSet{}, wishes: map[provKey]wish{}, wanted: map[string]map[string]wanted{},
+		tagUID: map[string]map[string]string{}, starts: map[string]map[string]int{},
 		restarts: map[string]map[agentapi.RelayChannel]uint64{}, refused: map[string]map[string]uint64{}}, nil
 }
 
@@ -141,9 +166,14 @@ func (k *Keeper) Epoch() int64 { return k.epoch }
 // Handle answers one request: it is the keeper's wire.Handler.
 func (k *Keeper) Handle(_ context.Context, req wire.Envelope) (wire.Kind, any) {
 	switch req.Kind {
-	case wire.KindPing:
-		return wire.KindPong, wire.Pong{KeeperEpoch: k.epoch}
-	case wire.KindStatus:
+	case wire.KindPing, wire.KindStatus:
+		var empty struct{}
+		if err := req.Decode(&empty); err != nil {
+			return refuse(wire.RefusedMalformed, err.Error())
+		}
+		if req.Kind == wire.KindPing {
+			return wire.KindPong, wire.Pong{KeeperEpoch: k.epoch}
+		}
 		return wire.KindStatusReport, k.status()
 	case wire.KindSet:
 		var s wire.DesiredSet
@@ -198,47 +228,85 @@ func (k *Keeper) count(provider, reason string) {
 	k.refused[provider][reason]++
 }
 
-// commit writes next and makes it the state; a write that fails leaves the
-// state as it was, and the request is refused (wire.RefusedState).
-func (k *Keeper) commit(next *State) error {
-	if err := SaveState(k.o.State, next); err != nil {
-		k.o.Logger.Error("the state file could not be written: the request took no effect", "err", err)
-		return err
+// commit writes next. Once the rename is made, next is the state, even when
+// the directory's sync then fails: memory then matches the file, so a later
+// write cannot lower a fence below it (the review of PR 354). Until a write
+// syncs, nothing takes effect (settle). A write that fails before the rename
+// leaves the state as it was. Either failure refuses the request
+// (wire.RefusedState).
+func (k *Keeper) commit(next *State) (renamed bool, err error) {
+	renamed, err = saveState(k.o.State, next)
+	if renamed {
+		k.st = next
 	}
-	k.st = next
-	return nil
+	if err != nil {
+		k.synced = false
+		k.o.Logger.Error("the state file could not be written and synced: the request takes no effect until a write syncs", "renamed", renamed, "err", err)
+		return renamed, err
+	}
+	k.synced = true
+	return renamed, nil
+}
+
+// settle writes the pending ends, and a state whose last write did not sync,
+// before anything else takes effect: every change is written and synced
+// before it takes effect or is reported (HBEP-6). The caller holds the lock.
+func (k *Keeper) settle() error {
+	if k.synced && len(k.pending) == 0 {
+		return nil
+	}
+	next := k.st.clone()
+	next.Ends = append(next.Ends, k.pending...)
+	renamed, err := k.commit(next)
+	if renamed {
+		k.pending = nil
+	}
+	return err
+}
+
+// Settle is settle for the keeper process's timer, so a pending end reaches
+// the disk with no request too.
+func (k *Keeper) Settle() error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.settle()
 }
 
 func (k *Keeper) handleSet(s wire.DesiredSet) (wire.Kind, any) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	now := k.o.Now()
+	if err := k.settle(); err != nil {
+		return refuse(wire.RefusedState, err.Error())
+	}
+	now := k.o.Now() // as it is: its monotonic reading is the expiry's clock
 	p := s.Provider
 	next := k.st.clone()
 	raised, refused := k.fence(next, p, s.LeaseEpoch)
 	if refused != nil {
 		return wire.KindRefused, *refused
 	}
-	expires := now.Add(time.Duration(s.ValidForMS-s.ListingAgeMS) * time.Millisecond)
 	host := k.runner.LoginHost(p, s.SSH)
-	if !now.Before(expires) {
+	// The age is compared with the validity before anything is converted,
+	// so no arithmetic overflows (the review of PR 354); both are bounded
+	// (wire.MaxListingAge, wire.MaxValidFor).
+	if s.ListingAgeMS >= s.ValidForMS {
 		// Expired on arrival: it moves the fence, and changes nothing else.
 		if raised {
-			if err := k.commit(next); err != nil {
+			if _, err := k.commit(next); err != nil {
 				return refuse(wire.RefusedState, err.Error())
 			}
 		}
 		return wire.KindReport, k.report(p, host, true)
 	}
-	k.wishes[p] = wish{host: host, uid: s.ProviderUID, created: s.ProviderCreated, expires: expires}
+	expires := now.Add(time.Duration(s.ValidForMS-s.ListingAgeMS) * time.Millisecond)
+	k.wishes[provKey{p, s.ProviderUID}] = wish{host: host, created: s.ProviderCreated, expires: expires}
 	holder, claimsChanged := k.claim(next, s, host, now)
 	if holder != "" {
 		if claimsChanged {
-			// A release of this Provider's claim on another host stands: its
-			// set names this host now. A refused set moves no fence.
+			// A lapsed claim it found is dropped; a refused set moves no fence.
 			n := k.st.clone()
 			n.Claims = next.Claims
-			if err := k.commit(n); err != nil {
+			if _, err := k.commit(n); err != nil {
 				return refuse(wire.RefusedState, err.Error())
 			}
 		}
@@ -266,13 +334,16 @@ func (k *Keeper) handleSet(s wire.DesiredSet) (wire.Kind, any) {
 		next.Ends = kept
 	}
 	if raised || claimsChanged || endsChanged {
-		if err := k.commit(next); err != nil {
+		if _, err := k.commit(next); err != nil {
 			return refuse(wire.RefusedState, err.Error())
 		}
 	}
 	k.sets[p] = &heldSet{set: s, expires: expires, host: host}
 	if k.wanted[p] == nil {
-		k.wanted[p] = map[string]wire.Entry{}
+		k.wanted[p] = map[string]wanted{}
+	}
+	if k.tagUID[p] == nil {
+		k.tagUID[p] = map[string]string{}
 	}
 	for _, e := range s.Allocations {
 		if e.EndedForGood {
@@ -280,8 +351,9 @@ func (k *Keeper) handleSet(s wire.DesiredSet) (wire.Kind, any) {
 			// run are kept as they are.
 			continue
 		}
-		k.wanted[p][e.Tag] = e
-		k.runner.Want(p, s.SSH, Want{Entry: e, Final: k.finals(p, e), Jobs: jobs{k: k, provider: p},
+		k.wanted[p][e.Tag] = wanted{entry: e, uid: s.ProviderUID}
+		k.tagUID[p][e.Tag] = s.ProviderUID
+		k.runner.Want(p, s.SSH, Want{Entry: e, Finals: k.finalsOf(p, e), Jobs: jobs{k: k, provider: p},
 			OnFinal: k.onFinal(p, e), OnStart: k.onStart(p, e)})
 	}
 	if s.Complete {
@@ -295,7 +367,8 @@ func (k *Keeper) handleSet(s wire.DesiredSet) (wire.Kind, any) {
 	return wire.KindReport, k.report(p, host, false)
 }
 
-// report is the Provider's report; the caller holds the lock.
+// report is the Provider's report: only the ends on disk, synced, that are
+// not decided yet. The caller holds the lock, and has settled.
 func (k *Keeper) report(p, host string, expired bool) wire.Report {
 	r := wire.Report{Provider: p, KeeperEpoch: k.epoch, LoginHost: host, Expired: expired, Relays: k.runner.Relays(p)}
 	for _, e := range k.st.Ends {
@@ -306,24 +379,45 @@ func (k *Keeper) report(p, host string, expired bool) wire.Report {
 	return r
 }
 
-// finals are the channels of e's Allocation whose final ends the keeper
-// holds, decided or not; the caller holds the lock.
-func (k *Keeper) finals(p string, e wire.Entry) map[agentapi.RelayChannel]string {
-	var out map[agentapi.RelayChannel]string
-	for _, r := range k.st.Ends {
-		if r.Provider == p && r.End.UID == e.UID && r.End.JobID == e.JobID {
-			if out == nil {
-				out = map[agentapi.RelayChannel]string{}
+// endsOf are the ends the keeper holds for e's Allocation, on disk or
+// pending; the caller holds the lock.
+func (k *Keeper) endsOf(p string, e wire.Entry) []EndRecord {
+	var out []EndRecord
+	for _, recs := range [][]EndRecord{k.st.Ends, k.pending} {
+		for _, r := range recs {
+			if r.Provider == p && r.End.UID == e.UID && r.End.JobID == e.JobID {
+				out = append(out, r)
 			}
-			out[r.End.Channel] = r.End.Kind + ": " + r.End.Cause
 		}
 	}
 	return out
 }
 
+// finalsOf is the Want's Finals: the channels of e's Allocation whose final
+// ends the keeper holds, decided, undecided or pending, read when the Runner
+// starts the relays, not when the Want was made, so an end that comes in
+// between keeps its channel down (the review of PR 354).
+func (k *Keeper) finalsOf(p string, e wire.Entry) func() map[agentapi.RelayChannel]string {
+	return func() map[agentapi.RelayChannel]string {
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		var out map[agentapi.RelayChannel]string
+		for _, r := range k.endsOf(p, e) {
+			if out == nil {
+				out = map[agentapi.RelayChannel]string{}
+			}
+			out[r.End.Channel] = r.End.Kind + ": " + r.End.Cause
+		}
+		return out
+	}
+}
+
 // onFinal records a final end that needs the mark, written and synced before
 // it is reported. A job's end needs none and is not recorded; an end the
-// keeper holds already is not recorded again.
+// keeper holds already is not recorded again. A superseded end of a
+// generation the keeper has replaced since is that replacement's doing, not
+// a failure, and is not recorded either. When the write fails, the end is
+// pending (settle).
 func (k *Keeper) onFinal(p string, e wire.Entry) func(agentapi.RelayChannel, hostdial.EndKind, string, int64, int64) {
 	return func(ch agentapi.RelayChannel, kind hostdial.EndKind, cause string, epoch, seq int64) {
 		var wk string
@@ -337,18 +431,23 @@ func (k *Keeper) onFinal(p string, e wire.Entry) func(agentapi.RelayChannel, hos
 		}
 		k.mu.Lock()
 		defer k.mu.Unlock()
-		for _, r := range k.st.Ends {
-			if r.Provider == p && r.End.UID == e.UID && r.End.JobID == e.JobID && r.End.Channel == ch {
+		if cur, ok := k.wanted[p][e.Tag]; ok && kind == hostdial.EndSuperseded && cur.entry != e {
+			k.o.Logger.Info("a superseded end of a replaced generation is not a failure", "provider", p, "tag", e.Tag, "channel", ch)
+			return
+		}
+		for _, r := range k.endsOf(p, e) {
+			if r.End.Channel == ch {
 				return
 			}
 		}
+		rec := EndRecord{Provider: p, End: wire.FinalEnd{UID: e.UID, Tag: e.Tag, JobID: e.JobID, Channel: ch,
+			Kind: wk, Cause: cause, At: k.o.Now().UTC(), Epoch: epoch, Seq: seq}}
 		next := k.st.clone()
-		next.Ends = append(next.Ends, EndRecord{Provider: p, End: wire.FinalEnd{UID: e.UID, Tag: e.Tag, JobID: e.JobID, Channel: ch,
-			Kind: wk, Cause: cause, At: k.o.Now().UTC(), Epoch: epoch, Seq: seq}})
-		if err := k.commit(next); err != nil {
-			// The relay is final in its Runner all the same; the record is
-			// kept in memory and written with the next change.
-			k.st = next
+		next.Ends = append(append(next.Ends, k.pending...), rec)
+		if renamed, err := k.commit(next); renamed {
+			k.pending = nil
+		} else if err != nil {
+			k.pending = append(k.pending, rec)
 		}
 	}
 }
@@ -376,6 +475,9 @@ func (k *Keeper) onStart(p string, e wire.Entry) func(agentapi.RelayChannel) {
 func (k *Keeper) handleAck(a wire.Ack) (wire.Kind, any) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if err := k.settle(); err != nil {
+		return refuse(wire.RefusedState, err.Error())
+	}
 	next := k.st.clone()
 	raised, refused := k.fence(next, a.Provider, a.LeaseEpoch)
 	if refused != nil {
@@ -394,7 +496,7 @@ func (k *Keeper) handleAck(a wire.Ack) (wire.Kind, any) {
 		}
 	}
 	if changed {
-		if err := k.commit(next); err != nil {
+		if _, err := k.commit(next); err != nil {
 			return refuse(wire.RefusedState, err.Error())
 		}
 	}
@@ -426,11 +528,17 @@ func (k *Keeper) status() wire.StatusReport {
 
 // jobs is a Provider's latest set as hostdial's listing (hostdial.JobReader):
 // while the set is unexpired, it shows each of its Allocations' jobs RUNNING
-// under its tag, except an Allocation that carries RelayEndedForGood, which
-// gets no relay; once it has expired, or before any set since the keeper
-// started, it is an error, so hostdial starts and restarts nothing (HBEP-6:
-// "the keeper starts or restarts a relay only under an unexpired set that
-// shows its job RUNNING under its tag, and a retry counts as a start").
+// under its tag, except an Allocation that carries RelayEndedForGood or whose
+// final end the keeper holds (on disk or pending), which gets no relay
+// started or restarted. It is read at each start, so an end or a mark that
+// comes after a Want was made still holds that Want's starts (the review of
+// PR 354). hostdial's listing is by tag, not channel, so once an end that
+// needs the mark is held, neither of its Allocation's relays starts again,
+// as for the mark that follows. Once the set has expired, or before any set
+// since the keeper started, it is an error, so hostdial starts and restarts
+// nothing (HBEP-6: "the keeper starts or restarts a relay only under an
+// unexpired set that shows its job RUNNING under its tag, and a retry counts
+// as a start").
 type jobs struct {
 	k        *Keeper
 	provider string
@@ -448,7 +556,7 @@ func (j jobs) ListByTag(_ context.Context, tag string) ([]provider.Job, error) {
 		return nil, fmt.Errorf("Provider %s's desired set has expired: no leader's listing is fresh", j.provider)
 	}
 	for _, e := range hs.set.Allocations {
-		if e.Tag == tag && !e.EndedForGood {
+		if e.Tag == tag && !e.EndedForGood && len(k.endsOf(j.provider, e)) == 0 {
 			return []provider.Job{{ID: e.JobID, Name: tag, Phase: v1alpha1.AllocationRunning}}, nil
 		}
 	}

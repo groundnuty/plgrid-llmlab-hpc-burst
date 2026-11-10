@@ -51,8 +51,8 @@ func (s DesiredSet) Validate() error {
 	if s.LeaseEpoch < 0 || s.LeaseEpoch > math.MaxInt32 {
 		bad("leaseEpoch", "a Lease's leaseTransitions, 0 to 2^31-1")
 	}
-	if s.ListingAgeMS < 0 {
-		bad("listingAgeMs", "0 or more")
+	if s.ListingAgeMS < 0 || s.ListingAgeMS > MaxListingAge.Milliseconds() {
+		bad("listingAgeMs", fmt.Sprintf("0 to %d", MaxListingAge.Milliseconds()))
 	}
 	if s.ValidForMS < 1 || s.ValidForMS > MaxValidFor.Milliseconds() {
 		bad("validForMs", fmt.Sprintf("1 to %d", MaxValidFor.Milliseconds()))

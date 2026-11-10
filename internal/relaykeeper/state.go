@@ -1,18 +1,20 @@
 package relaykeeper
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/relaykeeper/wire"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // StateSchema is the state file's schema.
@@ -83,10 +85,16 @@ func (s *State) clone() *State {
 }
 
 // LoadState reads the state file at path. A missing file is a first start: a
-// fresh state. A file that cannot be read or parsed, or of another schema, is
-// an error, never a fresh state: a fresh state would lower E below the
-// relays of the run before (HBEP-6, Operational readiness 7: "its state file
-// must be kept, or a new keeper's epochs could fall below its old relays'").
+// fresh state. Anything else that is not a whole, valid state file is an
+// error, never a fresh state, and the file is left as it is: a fresh state
+// would lower E below the relays of the run before (HBEP-6, Operational
+// readiness 7: "its state file must be kept, or a new keeper's epochs could
+// fall below its old relays'"). Valid means: the codec's strict decoding
+// (one JSON value and nothing after it, every key spelled exactly, none
+// twice; wire.DecodeStrict), the schema and the start count present, and
+// every field of the right form (State.validate). HBEP-6's recovery from a
+// lowered Lease is an operator's edit of this file, so it is read as
+// strictly as a message.
 func LoadState(path string) (*State, error) {
 	b, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -96,32 +104,86 @@ func LoadState(path string) (*State, error) {
 		return nil, fmt.Errorf("relaykeeper: read the state file: %w", err)
 	}
 	var s State
-	d := json.NewDecoder(bytes.NewReader(b))
-	d.DisallowUnknownFields()
-	if err := d.Decode(&s); err != nil {
+	if err := wire.DecodeStrict(b, &s); err != nil {
 		return nil, fmt.Errorf("relaykeeper: the state file cannot be parsed, and is not replaced: %w", err)
 	}
-	if s.Schema != StateSchema {
-		return nil, fmt.Errorf("relaykeeper: the state file has schema %d, want %d, and is not replaced", s.Schema, StateSchema)
+	var present struct {
+		Schema *int   `json:"schema"`
+		Starts *int64 `json:"starts"`
 	}
-	if s.Starts < 0 {
-		return nil, errors.New("relaykeeper: the state file has a negative start count, and is not replaced")
+	if err := json.Unmarshal(b, &present); err != nil || present.Schema == nil || present.Starts == nil {
+		return nil, errors.New("relaykeeper: the state file has no schema or no start count, and is not replaced")
+	}
+	if err := s.validate(); err != nil {
+		return nil, fmt.Errorf("relaykeeper: the state file is not valid, and is not replaced: %w", err)
 	}
 	return &s, nil
 }
+
+// validate checks every field of s, as LoadState requires before anything
+// rewrites the file.
+func (s *State) validate() error {
+	var errs []error
+	if s.Schema != StateSchema {
+		errs = append(errs, fmt.Errorf("schema %d, want %d", s.Schema, StateSchema))
+	}
+	if s.Starts < 0 || s.Starts > MaxStarts {
+		errs = append(errs, fmt.Errorf("a start count outside 0 to %d", MaxStarts))
+	}
+	for name, f := range s.Providers {
+		if !providerName.MatchString(name) || f.HighestEpoch < 0 || f.HighestEpoch > math.MaxInt32 {
+			errs = append(errs, errors.New("a Provider's fence: want a Provider's name and a Lease epoch of 0 to 2^31-1"))
+		}
+	}
+	for _, r := range s.Ends {
+		e := r.End
+		_, cherr := agentapi.ParseRelayChannel(string(e.Channel))
+		okKind := e.Kind == wire.EndFailed || e.Kind == wire.EndSuperseded
+		okOutcome := !r.Decided && r.Outcome == "" && r.Reason == "" ||
+			r.Decided && (r.Outcome == wire.OutcomeMarked && r.Reason == "" || r.Outcome == wire.OutcomeRefused && r.Reason != "")
+		if !providerName.MatchString(r.Provider) || e.UID == "" || e.JobID == "" || cherr != nil || !okKind || e.Seq < 1 || e.Epoch < 0 || !okOutcome {
+			errs = append(errs, errors.New("an end: want a Provider, an Allocation's UID and job, a channel, a kind of failed or superseded, a relay's epoch and sequence, and a decision of marked, or refused with a reason"))
+		}
+	}
+	for host, c := range s.Claims {
+		if host == "" || !providerName.MatchString(c.Provider) || c.ProviderUID == "" || c.Created.IsZero() {
+			errs = append(errs, errors.New("a claim: want a login host, a Provider's name and UID, and its creation time"))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// providerName is a Provider's name, as wire checks it.
+var providerName = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$`)
+
+// fsops are the state file's syncs; a test replaces them to fail one, or to
+// count them.
+var fsops = struct {
+	syncFile func(*os.File) error
+	syncDir  func(*os.File) error
+}{syncFile: (*os.File).Sync, syncDir: (*os.File).Sync}
 
 // SaveState writes s to path, mode 600: a temporary file in the same
 // directory, written and synced, renamed over path, and the directory synced,
 // so a crash leaves the old file or the new one, never a part of either.
 func SaveState(path string, s *State) error {
+	_, err := saveState(path, s)
+	return err
+}
+
+// saveState is SaveState, and reports whether the rename was made, after
+// which the file is the new state even when the directory's sync then
+// failed: the keeper's memory is then the new state too, never below the
+// file (Keeper.commit).
+func saveState(path string, s *State) (renamed bool, err error) {
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
-		return err
+		return false, err
 	}
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, ".state-*")
 	if err != nil {
-		return fmt.Errorf("relaykeeper: write the state file: %w", err)
+		return false, fmt.Errorf("relaykeeper: write the state file: %w", err)
 	}
 	tmp := f.Name()
 	werr := f.Chmod(0o600)
@@ -129,7 +191,7 @@ func SaveState(path string, s *State) error {
 		_, werr = f.Write(append(b, '\n'))
 	}
 	if werr == nil {
-		werr = f.Sync()
+		werr = fsops.syncFile(f)
 	}
 	if cerr := f.Close(); werr == nil {
 		werr = cerr
@@ -139,18 +201,22 @@ func SaveState(path string, s *State) error {
 	}
 	if werr != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("relaykeeper: write the state file: %w", werr)
+		return false, fmt.Errorf("relaykeeper: write the state file: %w", werr)
 	}
 	d, err := os.Open(dir)
 	if err != nil {
-		return fmt.Errorf("relaykeeper: sync the state file's directory: %w", err)
+		return true, fmt.Errorf("relaykeeper: sync the state file's directory: %w", err)
 	}
 	defer d.Close()
-	if err := d.Sync(); err != nil {
-		return fmt.Errorf("relaykeeper: sync the state file's directory: %w", err)
+	if err := fsops.syncDir(d); err != nil {
+		return true, fmt.Errorf("relaykeeper: sync the state file's directory: %w", err)
 	}
-	return nil
+	return true, nil
 }
+
+// MaxStarts is the most starts a state file may count: E, EpochBase plus the
+// count, must stay an int64.
+const MaxStarts = math.MaxInt64 - EpochBase
 
 // OpenState is a keeper's start: it makes the state file's directory (mode
 // 700) when it is missing, reads the state, counts this start, and writes
@@ -164,6 +230,10 @@ func OpenState(path string) (*State, error) {
 	s, err := LoadState(path)
 	if err != nil {
 		return nil, err
+	}
+	if s.Starts >= MaxStarts {
+		// Refused before the file changes: one more start would overflow E.
+		return nil, fmt.Errorf("relaykeeper: the state file's start count is %d, the most there can be: E would overflow; the file is not changed", s.Starts)
 	}
 	s.Starts++
 	if err := SaveState(path, s); err != nil {

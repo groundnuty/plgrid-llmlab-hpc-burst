@@ -52,6 +52,11 @@ const MaxAllocations = 8
 // the renew deadline (10 s) fits well within it (#343's Q5).
 const MaxValidFor = 2 * time.Minute
 
+// MaxListingAge bounds a set's listing age. A listing older than its
+// validity only makes the set expired; the bound keeps the arithmetic far
+// from any overflow (the review of PR 354).
+const MaxListingAge = 24 * time.Hour
+
 // Kind names a message.
 type Kind string
 
@@ -185,7 +190,8 @@ type RelayState struct {
 	Tag     string                `json:"tag"`
 	JobID   string                `json:"job"`
 	Channel agentapi.RelayChannel `json:"channel"`
-	State   string                `json:"state"`
+	// State is up only while a process of the relay runs.
+	State string `json:"state"`
 	// PID is the relay's ssh process, 0 while none runs.
 	PID int `json:"pid"`
 	// Epoch and Seq are the current or last process's fence.
@@ -196,6 +202,9 @@ type RelayState struct {
 	// LastEnd is how the last process ended, in hostdial's own fixed words,
 	// never srun's or ssh's output.
 	LastEnd string `json:"lastEnd"`
+	// LoginHost is the login host the relay runs through, as the Runner
+	// resolved it: the claims ask which relays run on a host.
+	LoginHost string `json:"loginHost"`
 }
 
 // The final ends that need the RelayEndedForGood mark.

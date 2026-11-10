@@ -15,18 +15,26 @@ const DefaultClaimLapse = 5 * time.Minute
 // one-host-dialed-Provider-per-login-host rule, across leadership
 // generations, and its claims are in the state file, so they survive a
 // keeper restart. A Provider is its name and its UID: a claim made under
-// another UID of the same name belongs to another Provider.
+// another UID of the same name belongs to another Provider, and every part
+// of a claim's lapse is that Provider's own.
 //   - A Provider claims an unclaimed host when a set of its with Allocations
 //     names that host and it wins the host's rule: the oldest Provider, then
 //     by name, among the Providers whose latest unexpired sets name the host,
 //     refused sets and sets with no Allocation included.
 //   - A set from another Provider for a claimed host is refused, naming the
-//     holder, until the claim lapses. It lapses when its holder sends a
-//     complete set with no Allocation on that host, when its holder names
-//     another host, or when its holder has held no relay there and sent no
-//     unexpired set for ClaimLapse, timed on the keeper's monotonic clock
-//     from the later of the keeper's start and the holder's last unexpired
-//     set. So the Provider that held a host before a keeper restart keeps it.
+//     holder, while a relay of the holder runs there (a process, not a Want:
+//     a relay that waits or retries holds nothing), and until the claim
+//     lapses.
+//   - A claim lapses, once no relay of its holder runs there, when its
+//     holder's latest accepted set is complete with no Allocation, or names
+//     another host, or when its holder has sent no unexpired set for
+//     ClaimLapse, timed on the keeper's monotonic clock from the later of the
+//     keeper's start and the holder's last unexpired set. So the Provider
+//     that held a host before a keeper restart keeps it, and a holder's set
+//     that is refused for another host releases nothing: its relays here run
+//     on (the review of PR 354).
+//   - A claim is released when another Provider's set finds it lapsed, never
+//     while its holder's relays run there.
 //   - A set with no Allocation claims nothing.
 
 // claim decides the claim for s, whose login host is host, on next. It
@@ -34,31 +42,20 @@ const DefaultClaimLapse = 5 * time.Minute
 // claims changed. The caller holds the lock, and has recorded s's wish.
 func (k *Keeper) claim(next *State, s wire.DesiredSet, host string, now time.Time) (holder string, changed bool) {
 	p := s.Provider
-	mine := func(c Claim) bool { return c.Provider == p && c.ProviderUID == s.ProviderUID }
-	wants := len(s.Allocations) > 0
-	for h, c := range next.Claims {
-		if mine(c) && h != host {
-			delete(next.Claims, h)
-			changed = true
-		}
-	}
-	if c, held := next.Claims[host]; held && !mine(c) {
-		if k.holds(c, host) || !k.lapsed(c, now) {
-			return c.Provider, changed
+	me := provKey{p, s.ProviderUID}
+	if c, held := next.Claims[host]; held && (provKey{c.Provider, c.ProviderUID}) != me {
+		if k.holdsRunning(c, host) || !k.lapsed(c, host, now) {
+			return c.Provider, false
 		}
 		delete(next.Claims, host)
 		changed = true
 	} else if held {
-		if s.Complete && !wants {
-			delete(next.Claims, host)
-			changed = true
-		}
-		return "", changed
+		return "", false
 	}
-	if w := k.oldestWanting(s, host, now); w != p {
+	if w := k.oldestWanting(me, s.ProviderCreated, host, now); w != p {
 		return w, changed
 	}
-	if !wants {
+	if len(s.Allocations) == 0 {
 		return "", changed
 	}
 	if next.Claims == nil {
@@ -68,36 +65,51 @@ func (k *Keeper) claim(next *State, s wire.DesiredSet, host string, now time.Tim
 	return "", true
 }
 
-// holds reports whether the keeper keeps any relay of c's Provider, under its
-// UID, on host.
-func (k *Keeper) holds(c Claim, host string) bool {
-	hs := k.sets[c.Provider]
-	return len(k.wanted[c.Provider]) > 0 && hs != nil && hs.host == host && hs.set.ProviderUID == c.ProviderUID
+// holdsRunning reports whether a relay of c's Provider runs on host: the
+// Runner shows it up, a process of it alive, on that login host, and it was
+// wanted under c's UID, or by no Provider the keeper still knows of.
+func (k *Keeper) holdsRunning(c Claim, host string) bool {
+	for _, r := range k.runner.Relays(c.Provider) {
+		if r.State != wire.StateUp || r.LoginHost != host {
+			continue
+		}
+		if uid, known := k.tagUID[c.Provider][r.Tag]; !known || uid == c.ProviderUID {
+			return true
+		}
+	}
+	return false
 }
 
-// lapsed reports whether c has outlived its holder's relays and sets by the
-// lapse: the holder's latest set, under its UID, expired (or the keeper
-// started, when it has sent none since) at least ClaimLapse ago.
-func (k *Keeper) lapsed(c Claim, now time.Time) bool {
+// lapsed reports whether c has lapsed by one of its rules, given that no
+// relay of its holder runs on host: the holder's latest accepted set, under
+// its UID, is complete with no Allocation or names another host; or the
+// holder's latest set, under its UID, expired (or the keeper started, when
+// it has sent none since) at least ClaimLapse ago.
+func (k *Keeper) lapsed(c Claim, host string, now time.Time) bool {
+	if hs := k.sets[c.Provider]; hs != nil && hs.set.ProviderUID == c.ProviderUID {
+		if hs.host != host || (hs.set.Complete && len(hs.set.Allocations) == 0) {
+			return true
+		}
+	}
 	last := k.started
-	if w, ok := k.wishes[c.Provider]; ok && w.uid == c.ProviderUID && w.expires.After(last) {
+	if w, ok := k.wishes[provKey{c.Provider, c.ProviderUID}]; ok && w.expires.After(last) {
 		last = w.expires
 	}
 	return now.Sub(last) >= k.o.ClaimLapse
 }
 
-// oldestWanting is the oldest Provider, then by name, among s's and those
+// oldestWanting is the oldest Provider, then by name, among me and those
 // whose latest unexpired sets name host, refused ones and ones with no
 // Allocation included: a Provider refused while another held the host keeps
 // its place.
-func (k *Keeper) oldestWanting(s wire.DesiredSet, host string, now time.Time) string {
-	best, bestCreated := s.Provider, s.ProviderCreated
+func (k *Keeper) oldestWanting(me provKey, created time.Time, host string, now time.Time) string {
+	best, bestCreated := me.name, created
 	for q, w := range k.wishes {
-		if q == s.Provider || w.host != host || !now.Before(w.expires) {
+		if q == me || w.host != host || !now.Before(w.expires) {
 			continue
 		}
-		if w.created.Before(bestCreated) || (w.created.Equal(bestCreated) && q < best) {
-			best, bestCreated = q, w.created
+		if w.created.Before(bestCreated) || (w.created.Equal(bestCreated) && q.name < best) {
+			best, bestCreated = q.name, w.created
 		}
 	}
 	return best
