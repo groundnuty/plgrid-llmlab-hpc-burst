@@ -100,8 +100,9 @@ type Target struct {
 	OnFinal func(ch agentapi.RelayChannel, kind EndKind, cause string)
 	// Final, when set, names channels that already ended for good, each with
 	// the cause as RelayState.FinalCause showed it: their relays are kept as
-	// ended and never started, while the Allocation's pair of slots is held
-	// as before. The relay keeper seeds it from the ends it holds, so a
+	// ended, read as final from the Want on, slots or no slots, and are never
+	// started, while the Allocation's pair of slots is taken and held as
+	// before. The relay keeper seeds it from the ends it holds, so a
 	// final-ended channel is never restarted after a keeper restart or on a
 	// new Gen (HBEP-6, The relay keeper; issue #343). same ignores it, so
 	// seeding it restarts no relay. Nil is alpha's.
@@ -110,6 +111,14 @@ type Target struct {
 	// the keeper's count of restarts, which outlives a Drop (HBEP-8,
 	// hpcburst_relay_restarts_total; issue #343). Nil is alpha's.
 	OnStart func(ch agentapi.RelayChannel)
+	//
+	// The hooks (OnFailed, OnFinal and OnStart) run on the relay's own
+	// goroutine, which its Allocation's stop waits for. So a hook that calls
+	// Drop or Stop for its own Allocation, or waits on a lock that is held
+	// around such a call, deadlocks. A final end that comes while the relay
+	// is being stopped, by a Drop or by a Want of another Gen, is not told:
+	// the stop's cancellation wins, and a new Gen's relay starts that channel
+	// again unless Final names it.
 }
 
 // same reports whether u needs no change of t's relays.
@@ -436,6 +445,13 @@ func (o *Owner) startLocked(t Target) *allocRelays {
 	for _, ch := range agentapi.RelayChannels {
 		a.relays = append(a.relays, &relay{o: o, t: t, ch: ch, epoch: o.epoch, target: agentapi.RelayTargetAddr(o.o.Ports[ch])})
 	}
+	// A seeded channel reads as final at once, not only once its pair of
+	// slots is taken (Target.Final).
+	for _, r := range a.relays {
+		if cause, ok := t.Final[r.ch]; ok {
+			r.seedFinal(cause)
+		}
+	}
 	go func() {
 		defer close(a.done)
 		release, err := o.o.Slots.Acquire(ctx, t.Login, len(a.relays))
@@ -525,9 +541,8 @@ func (r *relay) seedFinal(cause string) {
 // drops, the stop by PID, and again. The Allocation's slots stay taken
 // throughout.
 func (r *relay) loop(ctx context.Context) {
-	if cause, ok := r.t.Final[r.ch]; ok {
-		r.seedFinal(cause)
-		return
+	if _, ok := r.t.Final[r.ch]; ok {
+		return // seeded final by startLocked
 	}
 	o := r.o.o
 	backoff := o.MinBackoff
