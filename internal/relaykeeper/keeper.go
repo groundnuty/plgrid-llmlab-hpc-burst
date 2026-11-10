@@ -25,8 +25,17 @@
 //     synced, and reported in each of the Provider's reports until the leader
 //     acknowledges it. A decided end stays recorded until its Allocation
 //     leaves a complete set (Q1), and its channel is never restarted. An
-//     Allocation that carries RelayEndedForGood gets no new relay.
+//     Allocation that carries RelayEndedForGood gets neither of its relays
+//     started or restarted, on a new generation too (#347).
 //   - One Provider per login host (Q2): see claims.go.
+//
+// HBEP-6's stated limits (#347): the restart cap's hour (hostdial's) is kept
+// in memory, so it starts again at a keeper restart. A Lease deleted by hand,
+// or a store rebuilt from scratch with this state file kept, lowers
+// leaseTransitions below the fence: the refusal names the Provider and its
+// highest epoch, and an operator stops the keeper, which cuts every
+// host-dialed stream, clears that Provider's fence, and starts it again. No
+// tool besides the launcher's restore (ClearLeaseEpochs) does this.
 //
 // Provenance: new package, for #343.
 package relaykeeper
@@ -93,9 +102,9 @@ type heldSet struct {
 // accepted or refused: the claims' "oldest Provider" is chosen among them.
 type wish struct {
 	host    string
+	uid     string
 	created time.Time
 	expires time.Time
-	entries int
 }
 
 // Open is the keeper's start: it counts the start on disk (OpenState), so E
@@ -221,7 +230,7 @@ func (k *Keeper) handleSet(s wire.DesiredSet) (wire.Kind, any) {
 		}
 		return wire.KindReport, k.report(p, host, true)
 	}
-	k.wishes[p] = wish{host: host, created: s.ProviderCreated, expires: expires, entries: len(s.Allocations)}
+	k.wishes[p] = wish{host: host, uid: s.ProviderUID, created: s.ProviderCreated, expires: expires}
 	holder, claimsChanged := k.claim(next, s, host, now)
 	if holder != "" {
 		if claimsChanged {

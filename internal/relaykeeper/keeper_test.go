@@ -524,3 +524,27 @@ func TestAWantCarriesTheEntryWhole(t *testing.T) {
 		t.Errorf("the Want's entry %+v, want %+v", w.Entry, e)
 	}
 }
+
+// A new credentials generation's Want keeps the seeds of the ends the keeper
+// holds, so a final-ended channel stays down on a new generation (#347), and
+// a marked Allocation gets no Want on one either.
+func TestANewGenerationsWantKeepsTheSeeds(t *testing.T) {
+	r := newRig(t)
+	k, fr := r.open()
+	e := entry(1)
+	accepted(t, k, set("example-a", 1, true, "login.example", e, entry(2)))
+	w, _ := fr.want("example-a", e.Tag)
+	w.OnFinal(agentapi.RelayControl, hostdial.EndSuperseded, "superseded (exit 5): the agent keeps a newer relay", k.Epoch(), 3)
+	e.Gen = "2b3c4d5e6f7a8b9c"
+	marked := entry(2)
+	marked.Gen, marked.EndedForGood = "2b3c4d5e6f7a8b9c", true
+	fr.log()
+	accepted(t, k, set("example-a", 1, true, "login.example", e, marked))
+	w2, _ := fr.want("example-a", e.Tag)
+	if w2.Entry.Gen != e.Gen || w2.Final[agentapi.RelayControl] != "superseded: superseded (exit 5): the agent keeps a newer relay" {
+		t.Errorf("the new generation's Want: %+v with seeds %q, want generation 2 with the control channel seeded", w2.Entry, w2.Final)
+	}
+	if calls := fr.log(); slices.Contains(calls, "want example-a "+marked.Tag) {
+		t.Errorf("a marked Allocation got a Want on a new generation: %q", calls)
+	}
+}
