@@ -148,24 +148,31 @@ func TestAnUnexpectedSupersededEndIsRecorded(t *testing.T) {
 	}
 }
 
-// The supersede check reads only the keeper's issue to the new generation,
-// of its own epoch: an issue of the replaced generation, or one of another
-// epoch, explains nothing, though its pair outranks the ended relay's. Each
-// case isolates one guard: the issued pair outranks the ended one in both,
-// so only the generation's guard, or only the epoch's, records the end. The
-// keeper's own starts never leave these guards unmet, so the issue is set by
-// hand (they survived as mutant B5 until this test).
+// The supersede check reads only the keeper's issue to the current Want,
+// of its own epoch: an issue of the replaced Want, or one of another epoch,
+// explains nothing, though its pair outranks the ended relay's. Each case
+// isolates one guard: the issued pair outranks the ended one in both, the
+// first issue carries the replaced Want's incarnation and the keeper's own
+// epoch, and the second the current Want's incarnation and another epoch,
+// so only the incarnation's guard, or only the epoch's, records the end (the
+// delta review of PR 356). The keeper's own starts never leave these guards
+// unmet, so the issue is set by hand (they survived as mutant B5 until this
+// test).
 func TestTheSupersedeCheckReadsOnlyTheNewGenerationsOwnIssue(t *testing.T) {
 	for _, c := range []struct {
 		name             string
-		issue            func(k *Keeper, e wire.Entry) issue
+		issue            func(k *Keeper, e wire.Entry, replaced uint64) issue
 		endEpoch, endSeq func(k *Keeper) int64
 	}{
 		{"the replaced generation's issue",
-			func(k *Keeper, e wire.Entry) issue { return issue{entry: e, epoch: k.Epoch(), seq: 99} },
+			func(k *Keeper, e wire.Entry, replaced uint64) issue {
+				return issue{entry: e, inc: replaced, epoch: k.Epoch(), seq: 99}
+			},
 			func(k *Keeper) int64 { return k.Epoch() }, func(*Keeper) int64 { return 1 }},
 		{"another epoch's issue",
-			func(k *Keeper, e wire.Entry) issue { return issue{entry: newGen(e), epoch: k.Epoch() - 1, seq: 99} },
+			func(k *Keeper, e wire.Entry, _ uint64) issue {
+				return issue{entry: newGen(e), inc: k.wanted["example-a"][e.Tag].inc, epoch: k.Epoch() - 1, seq: 99}
+			},
 			func(k *Keeper) int64 { return k.Epoch() - 1 }, func(*Keeper) int64 { return 1 }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -177,7 +184,7 @@ func TestTheSupersedeCheckReadsOnlyTheNewGenerationsOwnIssue(t *testing.T) {
 			w1, _ := fr.want("example-a", e.Tag)
 			accepted(t, k, set("example-a", 1, true, "login.example", newGen(e)))
 			k.mu.Lock()
-			k.issued["example-a"][e.Tag][agentapi.RelayControl] = c.issue(k, e)
+			k.issued["example-a"][e.Tag][agentapi.RelayControl] = c.issue(k, e, w1.Incarnation)
 			k.mu.Unlock()
 			w1.OnFinal(agentapi.RelayControl, hostdial.EndSuperseded, supersededCause, c.endEpoch(k), c.endSeq(k))
 			if ends := r.disk().Ends; len(ends) != 1 {

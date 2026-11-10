@@ -116,7 +116,16 @@ func TestTheRunnerStartsOnlyTheTagsCurrentInstance(t *testing.T) {
 	second.Incarnation = 2
 	second.OnStart = func(agentapi.RelayChannel, int64, int64) { newStarts.Add(1) }
 	r.Want("example-a", ssh, second)
-	eventuallyQ(t, 30*time.Second, "the worker took the second Want", func() bool { return ops.Load() >= 2 })
+	// The worker counts an op before it runs it, so wait until the second
+	// Want is installed, not only taken, before the paused attempts go: until
+	// then they are the current instance's, and may start rightly.
+	p := r.prov("example-a")
+	eventuallyQ(t, 30*time.Second, "the second Want installed as the tag's current instance", func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		in := p.cur[e.Tag]
+		return in != nil && in.want.Incarnation == 2
+	})
 	close(gate)
 	eventuallyQ(t, 30*time.Second, "the new instance's relays up", func() bool {
 		up, n := upRelays(r)
