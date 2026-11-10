@@ -579,7 +579,7 @@ Against the fake Slurm of spike S4, through the Slurm plugin (HBEP-4). The fake 
 
   A fixture that sends its reports in order, one at a time, proves nothing here: it passes with or without the rule, and it can't show a compare-and-store race.
 - A requeued job lands on the same node, with no reboot: its agent registers with a new `agentInstanceID` and a higher `restartCount`, and the Instance fails as a second execution. A fixture that changes the boot ID proves nothing here, since the controller never reads it.
-- The controller restarts while agents serve: each agent registers again on its next poll with the same `agentInstanceID`. No established tunnel drops and no stream through it is cut (HBEP-6), except in host-dialed mode, where the relays are the controller's children and its restart cuts the streams in flight (HBEP-6; owner, 9 Nov 2026). No Instance fails, no restart generation rises, and no registration timeout or `AgentUnreachable` is judged before a long poll and a report interval have passed.
+- The controller restarts while agents serve: each agent registers again on its next poll with the same `agentInstanceID`. No established tunnel drops and no stream through it is cut (HBEP-6), except in alpha's host-dialed mode, where the relays are the controller's children and its restart cuts the streams in flight (HBEP-6; owner, 9 Nov 2026). In beta the relay keeper holds them, so only control streams end, and the agent re-registers over the same relay (HBEP-6, The relay keeper). No Instance fails, no restart generation rises, and no registration timeout or `AgentUnreachable` is judged before a long poll and a report interval have passed.
 - A hedge across two accelerator classes, once hedging is on: the winner's Instance carries its class's current ID.
 - A job ends and leaves the queue listing seconds later: the controller reads it as ended, from accounting, and submits nothing again for it.
 - No instance gets traffic before it is ready.
@@ -803,6 +803,7 @@ The controller applies by policy what www-2027 operators did per job: holder bat
 - 2026-11-02: the causes of `CapacityDropped`, `ProviderUnavailable` and `SpecUnsupported` as built, the ranking sentence brought up to date, and the current agent instance defined by its restart count with the code's tie-breaks (from #239, #241 and #232; PR #248).
 - 2026-11-09: the agent's side of HBEP-6's host-dialed mode.
 - 2026-11-10: `RelayEndedForGood` fails and releases an Allocation, whatever its retention policy (#304, PR #319).
+- 2026-11-10: in beta a controller restart cuts no host-dialed serving stream (HBEP-6's relay keeper).
 
 ## Amendments
 
@@ -900,3 +901,4 @@ The controller applies by policy what www-2027 operators did per job: holder bat
 
   Before, the agent's tunnel ran only in direct or ssh mode, and nothing was launched from a login node.
 - **2026-11-10: a relay that ends for good releases its Allocation** (Open questions 8; Processing order, step 5; Release; Retention; Test plan). An amendment, the code built ahead of the text (#304, PR #319), settled in PR #331's review. Step 5 fails an Allocation with `RelayEndedForGood`, and an empty one with it is released whatever its retention policy, with the owner's go of 10 Nov 2026 (open question 8). Before, only `SubmittedAsOther` and the provider phases failed an Allocation, and a kept one was never released early without approval.
+- **2026-11-10: the relay keeper** (Test plan, controller restart). An amendment with HBEP-6's of the same day. In beta's host-dialed mode a controller restart cuts no serving stream, since the relay keeper holds the relays. Before, it cut them in every stage.

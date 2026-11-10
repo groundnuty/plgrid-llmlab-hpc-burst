@@ -259,7 +259,7 @@ For a managed provider:
 - **Paths are resolved once per connection.** After each new master connection, the plugin reads `HOME` on the login node with `printenv HOME`, and, when `stagingDir` starts with an environment variable, that variable with `printenv <VAR>`. Each result must be an absolute path that matches the safe pattern. An unset or empty variable, or a result that fails the check, sets the Provider condition `PathUnresolved`, and no call that needs the path is made. Commands, the bootstrap and `agent.json` hold only the resolved absolute paths, never a variable or `~`. The one exception is a partition's `tmpDir` variable, which exists only inside the job, so the bootstrap expands it there (Submission).
 - **Time-outs:** 60 s for `sbatch`, 30 s for every other command. A time-out on `sbatch` is Unknown; on a read it is an error, so the state is unknown.
 - **Concurrency:** at most four commands at once on one connection (a code default; open question 17).
-- **Relays, in HBEP-6's host-dialed mode** (9 Nov 2026), aren't commands. They don't count against the four-command budget, and they have no 30 s time-out.
+- **Relays, in HBEP-6's host-dialed mode** (9 Nov 2026), aren't commands. In alpha the batch Provider's controller runs them; in beta the relay keeper does, on the controller's desired set (HBEP-6, The relay keeper), and the keeper owns the per-login-host count. They don't count against the four-command budget, and they have no 30 s time-out.
   - **The connection:** each relay is its own ssh process, never on the master. It uses the Provider's private `-F` configuration and hardening, plus `ControlMaster=no`, `ControlPath=none` and `-T`, because OpenSSH reuses a master even under `ControlMaster=no` unless `ControlPath` is `none`.
   - **The command:** `srun -u --overlap --jobid=<job> --ntasks=1 <the job's agent binary> relay ...`.
   - **Setup is bounded:** its preamble line must arrive within 30 s.
@@ -644,6 +644,7 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
 - 2026-11-02: on an Allocation being deleted, `jobCompleting` is also true while another tagged job is completing, so its slot stays counted; an amendment, built in #217 ahead of the text (settled in PR #228's review).
 - 2026-11-09: open question 14 allows HBEP-6's host-dialed relays on the login node.
 - 2026-11-09: relays as a long-lived operation outside the command interface, the host-dialed submit limit, and the per-partition host-dialed preconditions (PR #298's review).
+- 2026-11-10: in beta the relay keeper runs host-dialed relays (HBEP-6).
 
 ## Amendments
 
@@ -721,3 +722,4 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
   - **Preconditions:** each alpha partition must show, before its first host-dialed run, that a relay carries every byte value, that an `--overlap` step reaches the batch step's socket, and that the step lands on the batch host.
 
   Before, no framework process ran on a login node.
+- **2026-11-10: the relay keeper** (Transport, relays). An amendment with HBEP-6's of the same day. In beta's host-dialed mode the relay keeper runs the relays on the batch Provider controller's desired set and owns the per-login-host count; the rules for each relay's connection are unchanged. Before, only the controller ran relays.
