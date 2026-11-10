@@ -27,53 +27,111 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
-// fakeRunner keeps the Wants it is given and records every call.
+// fakeRunner keeps the Wants it is given and records every call. Its relays
+// are as a real Runner's would be, not "every wanted channel up": a relay
+// shows up, with a process, only once the test starts it (start), which reads
+// the Want's Finals as a real start does; until then it retries, with no
+// process; a seeded channel is final; and a Drop forgets it.
 type fakeRunner struct {
 	epoch int64
 
-	mu    sync.Mutex
-	wants map[string]map[string]Want // Provider → tag → the latest Want
-	calls []string
+	mu      sync.Mutex
+	wants   map[string]map[string]Want // Provider → tag → the latest Want
+	hosts   map[string]map[string]string
+	running map[string]map[string]map[agentapi.RelayChannel]string // Provider → tag → channel → "" up, or a seed's cause
+	calls   []string
 	// onWant, when set, is called at each Want, before it is recorded.
 	onWant func(provider string, w Want)
+	// linger, when set, makes a Drop's relays stop in the background, as a
+	// real Runner's do: they stay listed, and up if they ran, until reap.
+	linger bool
 }
 
 func (f *fakeRunner) LoginHost(_ string, s wire.SSH) string { return strings.ToLower(s.HostName) }
 
-func (f *fakeRunner) Want(p string, _ wire.SSH, w Want) {
+func (f *fakeRunner) Want(p string, s wire.SSH, w Want) {
 	if f.onWant != nil {
 		f.onWant(p, w)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.wants[p] == nil {
-		f.wants[p] = map[string]Want{}
+		f.wants[p], f.hosts[p] = map[string]Want{}, map[string]string{}
+	}
+	if old, ok := f.wants[p][w.Entry.Tag]; !ok || old.Entry != w.Entry || f.hosts[p][w.Entry.Tag] != strings.ToLower(s.HostName) {
+		delete(f.running[p], w.Entry.Tag) // another identity: replaced, not started yet
 	}
 	f.wants[p][w.Entry.Tag] = w
+	f.hosts[p][w.Entry.Tag] = strings.ToLower(s.HostName)
 	f.calls = append(f.calls, "want "+p+" "+w.Entry.Tag)
 }
 
 func (f *fakeRunner) Drop(p, tag string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.wants[p], tag)
 	f.calls = append(f.calls, "drop "+p+" "+tag)
+	if f.linger {
+		return
+	}
+	delete(f.wants[p], tag)
+	delete(f.running[p], tag)
 }
 
-// Relays shows two relays per kept Allocation: final for a seeded channel,
-// up otherwise.
+// reap ends a lingering Drop: the relays are gone.
+func (f *fakeRunner) reap(p, tag string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.wants[p], tag)
+	delete(f.running[p], tag)
+}
+
+// start starts the relays of the Allocation tagged tag, as a Runner's start
+// does: it reads the Want's Finals then, and each channel not seeded final
+// runs. It is called with none of the keeper's locks held.
+func (f *fakeRunner) start(p, tag string) {
+	f.mu.Lock()
+	w, ok := f.wants[p][tag]
+	f.mu.Unlock()
+	if !ok {
+		panic("start of a relay that is not wanted: " + tag)
+	}
+	seeds := w.Finals()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.running[p] == nil {
+		f.running[p] = map[string]map[agentapi.RelayChannel]string{}
+	}
+	f.running[p][tag] = map[agentapi.RelayChannel]string{}
+	for _, ch := range agentapi.RelayChannels {
+		f.running[p][tag][ch] = seeds[ch]
+	}
+}
+
+// stop ends the processes of the Allocation tagged tag, as a job's end or a
+// lost leader's relay that retries: the relays stay wanted, with none up.
+func (f *fakeRunner) stop(p, tag string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.running[p], tag)
+}
+
 func (f *fakeRunner) Relays(p string) []wire.RelayState {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []wire.RelayState
 	for _, tag := range sortedKeys(f.wants[p]) {
 		w := f.wants[p][tag]
-		for _, ch := range agentapi.RelayChannels {
-			st := wire.StateUp
-			if _, ok := w.Final[ch]; ok {
-				st = wire.StateFinal
+		run, started := f.running[p][tag]
+		for i, ch := range agentapi.RelayChannels {
+			r := wire.RelayState{UID: w.Entry.UID, Tag: tag, JobID: w.Entry.JobID, Channel: ch, State: wire.StateRetrying,
+				Epoch: f.epoch, LoginHost: f.hosts[p][tag]}
+			switch {
+			case started && run[ch] != "":
+				r.State, r.LastEnd = wire.StateFinal, run[ch]
+			case started:
+				r.State, r.PID = wire.StateUp, 10_000+i
 			}
-			out = append(out, wire.RelayState{UID: w.Entry.UID, Tag: tag, JobID: w.Entry.JobID, Channel: ch, State: st, Epoch: f.epoch})
+			out = append(out, r)
 		}
 	}
 	return out
@@ -134,7 +192,8 @@ func (r *rig) open(mods ...func(*Options)) (*Keeper, *fakeRunner) {
 	r.t.Helper()
 	var fr *fakeRunner
 	o := Options{State: r.path, Now: r.clock.Now, Runner: func(e int64) (Runner, error) {
-		fr = &fakeRunner{epoch: e, wants: map[string]map[string]Want{}}
+		fr = &fakeRunner{epoch: e, wants: map[string]map[string]Want{}, hosts: map[string]map[string]string{},
+			running: map[string]map[string]map[agentapi.RelayChannel]string{}}
 		return fr, nil
 	}}
 	for _, m := range mods {

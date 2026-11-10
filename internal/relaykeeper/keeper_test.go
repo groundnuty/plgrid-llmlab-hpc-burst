@@ -314,11 +314,11 @@ func TestADecidedEndStaysUntilItsAllocationLeavesACompleteSet(t *testing.T) {
 	k2, fr2 := r.open()
 	accepted(t, k2, set("example-a", 1, false, "login.example", entry(1), entry(2)))
 	w2, _ := fr2.want("example-a", entry(1).Tag)
-	if w2.Final[agentapi.RelayServing] != "failed: "+cause || len(w2.Final) != 1 {
-		t.Errorf("after a keeper restart the Want's seeds are %q, want the serving channel final", w2.Final)
+	if w2.Finals()[agentapi.RelayServing] != "failed: "+cause || len(w2.Finals()) != 1 {
+		t.Errorf("after a keeper restart the Want's seeds are %q, want the serving channel final", w2.Finals())
 	}
-	if w3, _ := fr2.want("example-a", entry(2).Tag); len(w3.Final) != 0 {
-		t.Errorf("another Allocation was seeded %q", w3.Final)
+	if w3, _ := fr2.want("example-a", entry(2).Tag); len(w3.Finals()) != 0 {
+		t.Errorf("another Allocation was seeded %q", w3.Finals())
 	}
 	accepted(t, k2, set("example-a", 1, true, "login.example", entry(2)))
 	if ends := r.disk().Ends; len(ends) != 0 {
@@ -541,8 +541,8 @@ func TestANewGenerationsWantKeepsTheSeeds(t *testing.T) {
 	fr.log()
 	accepted(t, k, set("example-a", 1, true, "login.example", e, marked))
 	w2, _ := fr.want("example-a", e.Tag)
-	if w2.Entry.Gen != e.Gen || w2.Final[agentapi.RelayControl] != "superseded: superseded (exit 5): the agent keeps a newer relay" {
-		t.Errorf("the new generation's Want: %+v with seeds %q, want generation 2 with the control channel seeded", w2.Entry, w2.Final)
+	if w2.Entry.Gen != e.Gen || w2.Finals()[agentapi.RelayControl] != "superseded: superseded (exit 5): the agent keeps a newer relay" {
+		t.Errorf("the new generation's Want: %+v with seeds %q, want generation 2 with the control channel seeded", w2.Entry, w2.Finals())
 	}
 	if calls := fr.log(); slices.Contains(calls, "want example-a "+marked.Tag) {
 		t.Errorf("a marked Allocation got a Want on a new generation: %q", calls)
