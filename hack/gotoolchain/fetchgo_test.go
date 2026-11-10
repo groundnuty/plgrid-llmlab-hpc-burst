@@ -172,7 +172,7 @@ func TestFetchGoRefusesAVerifiedTarballOfAnotherRelease(t *testing.T) {
 	}{
 		{"go/VERSION", func(f map[string][]byte) { f["go/VERSION"] = []byte("go1.98.0\n") }, "go/VERSION"},
 		{"go reports another release", func(f map[string][]byte) {
-			f["go/bin/go"] = []byte("#!/bin/sh\necho 'go version go1.98.0 linux/amd64'\n")
+			f["go/bin/go"] = []byte(fakeGo("1.98.0"))
 		}, "reports"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -278,18 +278,33 @@ func TestFetchGoCheckAcceptsOnlyThePinnedGoFirstOnPath(t *testing.T) {
 		t.Fatalf("the pinned go first on PATH: exit %d, want 0:\n%s", code, out)
 	}
 
-	// Another go first on PATH, one that reports the right version.
+	// Another go first on PATH, one that reports the right version and the verified GOROOT, so that
+	// nothing but its identity is wrong.
 	other := t.TempDir()
-	write(t, filepath.Join(other, "go"), r.files["go/bin/go"], 0o755)
+	write(t, filepath.Join(other, "go"), []byte("#!/bin/sh\n"+
+		"if [ \"$1\" = env ] && [ \"$2\" = GOROOT ]; then echo '"+filepath.Join(d.inst, "go")+"'; exit 0; fi\n"+
+		"echo 'go version go"+fakeVersion+" linux/amd64'\n"), 0o755)
 	out, code = run(t, append(r.live(), "PATH="+other+":"+bin+":"+system), "--check", d.inst)
-	if code != 1 || !strings.Contains(out, "not the pinned") {
-		t.Errorf("another go first on PATH: exit %d, want 1 saying it is not the pinned one:\n%s", code, out)
+	if code != 1 || !strings.Contains(out, "the go on PATH is "+filepath.Join(other, "go")) {
+		t.Errorf("another go first on PATH: exit %d, want 1 saying the go on PATH is not the pinned one:\n%s", code, out)
 	}
 
 	// No go on PATH at all: a directory of links to the tools the script uses, and nothing else.
 	out, code = run(t, append(r.live(), "PATH="+toolsOnly(t, "awk", "uname", "readlink", "sha256sum", "env", "dirname")), "--check", d.inst)
 	if code != 1 || !strings.Contains(out, "no go on PATH") {
 		t.Errorf("no go on PATH: exit %d, want 1 saying there is no go:\n%s", code, out)
+	}
+
+	// The workflow exports the verified root, and the check accepts it. An inherited GOROOT that points
+	// anywhere else fails it, though the pinned go is first on PATH and every digest is right: the go
+	// command would build with that other tree's compiler and standard library.
+	out, code = run(t, append(r.live(), "PATH="+bin+":"+system, "GOROOT="+filepath.Join(d.inst, "go")), "--check", d.inst)
+	if code != 0 {
+		t.Errorf("the verified GOROOT exported: exit %d, want 0:\n%s", code, out)
+	}
+	out, code = run(t, append(r.live(), "PATH="+bin+":"+system, "GOROOT="+other), "--check", d.inst)
+	if code != 1 || !strings.Contains(out, "go env GOROOT is "+other) {
+		t.Errorf("an inherited GOROOT elsewhere: exit %d, want 1 naming it:\n%s", code, out)
 	}
 
 	// The pinned binary changed after the install: still first on PATH, no longer the pinned bytes.

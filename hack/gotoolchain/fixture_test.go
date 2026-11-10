@@ -39,12 +39,22 @@ func sum(b []byte) string {
 	return hex.EncodeToString(s[:])
 }
 
+// fakeGo is a go command that, like the real one, says which release it is and answers "go env GOROOT"
+// with $GOROOT when that is set and with the root of the tree it sits in when it is not.
+func fakeGo(version string) string {
+	return "#!/bin/sh\n" +
+		"if [ \"$1\" = env ] && [ \"$2\" = GOROOT ]; then\n" +
+		"  if [ -n \"${GOROOT:-}\" ]; then echo \"$GOROOT\"; else cd \"$(dirname \"$0\")/..\" && pwd; fi\n" +
+		"  exit 0\nfi\n" +
+		"echo 'go version go" + version + " linux/amd64'\n"
+}
+
 // fakeTree is what the fake tarball holds, by path inside it. go/bin/go is a script that reports the
 // fake release, which is all the script and the check ask of it.
 func fakeTree() (names []string, files map[string][]byte) {
 	files = map[string][]byte{
 		"go/VERSION":                      []byte("go" + fakeVersion + "\ntime 2026-01-01T00:00:00Z\n"),
-		"go/bin/go":                       []byte("#!/bin/sh\necho 'go version go" + fakeVersion + " linux/amd64'\n"),
+		"go/bin/go":                       []byte(fakeGo(fakeVersion)),
 		"go/pkg/tool/linux_amd64/compile": []byte("fake compile, which the pin on go/bin/go does not cover\n"),
 		"go/src/fmt/print.go":             []byte("package fmt\n"),
 	}
@@ -175,13 +185,14 @@ func write(t *testing.T, path string, b []byte, mode os.FileMode) {
 }
 
 // live is the environment of a run against the mirror, dead of one whose site does not exist. The
-// script's own variables are always set, so a developer's shell cannot reach the test.
+// script's own variables are always set, and GOROOT is empty (the go command reads that as unset), so a
+// developer's shell cannot reach the test.
 func (r release) live() []string {
-	return []string{"GO_RELEASE_BASE=file://" + r.mirror, "GO_PINS_FILE=" + r.pins, "GO_MOD_FILE=" + r.gomod}
+	return []string{"GO_RELEASE_BASE=file://" + r.mirror, "GO_PINS_FILE=" + r.pins, "GO_MOD_FILE=" + r.gomod, "GOROOT="}
 }
 
 func (r release) dead() []string {
-	return []string{"GO_RELEASE_BASE=file://" + filepath.Join(r.mirror, "gone"), "GO_PINS_FILE=" + r.pins, "GO_MOD_FILE=" + r.gomod}
+	return []string{"GO_RELEASE_BASE=file://" + filepath.Join(r.mirror, "gone"), "GO_PINS_FILE=" + r.pins, "GO_MOD_FILE=" + r.gomod, "GOROOT="}
 }
 
 // run runs hack/fetch-go.sh with the arguments and returns its output and exit code.

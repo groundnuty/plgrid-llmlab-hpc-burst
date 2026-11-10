@@ -29,9 +29,13 @@
 #      that runs comes from the verified tarball of this run, not only the binary the pin names. The
 #      installed go is then run once, and must report this release for linux/amd64.
 #
-# --check INSTALL_DIR is the step after the workflow has put INSTALL_DIR/go/bin on PATH: the go that
-# PATH finds must be INSTALL_DIR/go/bin/go (the runner image has other Gos), its sha256 must be the
-# pin, and it must report this release. It is what shows that the job runs the pinned toolchain.
+# --check INSTALL_DIR is the step after the workflow has put INSTALL_DIR/go/bin on PATH and exported
+# GOROOT=INSTALL_DIR/go: the go that PATH finds must be INSTALL_DIR/go/bin/go (the runner image has
+# other Gos), its sha256 must be the pin, it must report this release, and the root that `go env GOROOT`
+# gives, in the environment as the job has it, must be INSTALL_DIR/go. That last check is what an
+# inherited GOROOT would fail: the go command would then build with the compiler and standard library of
+# another tree, whatever binary runs it. The step is what shows that the job runs the pinned toolchain,
+# and the workflow runs every later step that uses go only if it succeeded.
 #
 # For tests: GO_RELEASE_BASE can be a file:// mirror (a dead mirror is a file:// path that does not
 # exist), GO_PINS_FILE names another pins file, and GO_MOD_FILE another go.mod.
@@ -87,6 +91,10 @@ if [ "${1:-}" = "--check" ]; then
   [ "$(readlink -f "$onpath")" = "$(readlink -f "$want")" ] || die "the go on PATH is $onpath, not the pinned $want"
   sha_ok "$want" "$bsha" || die "$want does not have the pinned sha256 $bsha"
   installed_go_reports "$onpath"
+  # The effective root: GOROOT is not cleared here, so an inherited one is seen as the go command sees it.
+  root=$(GOTOOLCHAIN=local "$onpath" env GOROOT 2>&1) || die "$onpath env GOROOT failed: $root"
+  [ "$(readlink -f "$root")" = "$(readlink -f "$2/go")" ] ||
+    die "go env GOROOT is $root, not the pinned $2/go: the go command would build with another tree's compiler and standard library"
   echo "ok       go $gover on PATH ($onpath)"
   exit 0
 fi
