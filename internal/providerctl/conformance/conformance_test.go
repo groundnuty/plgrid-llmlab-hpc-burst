@@ -243,6 +243,20 @@ type world struct {
 	// artefacts are the directories a dry run leaves its files in (the agent builds, the credentials, the fake
 	// cluster's file system), which targetLeaks searches.
 	artefacts []string
+	// sshConfig is the Provider's ssh credentials as the controller read them, for a relay the row starts itself.
+	sshConfig slurm.SSHConfig
+	// shorten, when set, replaces each bounded wait of the host-dialed rows' body (bound), so that a dry run whose
+	// session never comes up ends in seconds; nil keeps the bounds a live run has.
+	shorten func(time.Duration) time.Duration
+	// pace is the pause between the reconciles of untilOr; zero is 3 s.
+	pace time.Duration
+	// probeRead is the serving probe's read of the host's answer, in seconds; zero is probeReadSeconds.
+	probeRead int
+	// beforeStop, when set, runs just before the host-dialed rows' agent is told to stop (a dry fault's moment).
+	beforeStop func(jobID string)
+	// failedIsStart makes untilRuns take a Failed Allocation as a job that started (the host-dialed rows: an agent that
+	// stops at its start ends its job Failed, which their verdict names).
+	failedIsStart bool
 }
 
 // limit is the time limit of the Allocations newAlloc makes.
@@ -287,7 +301,18 @@ type dialer func(v slurm.Validated) (slurm.Runner, io.Closer, error)
 type worldKit struct {
 	dial  dialer
 	agent []byte
+	// hostDialed, when set, makes the Provider's controller host-dialed (HBEP-6,
+	// Dial-home modes): its front settings carry this rig's certificate and no
+	// endpoint, and its relay settings are the rig's (the reach-host-dialed rows,
+	// hostdialed_run_test.go). The agent is then the real one.
+	hostDialed *hostDialedRig
+	// poll is the controller's and the listing's poll interval; zero is worldPollInterval.
+	poll time.Duration
 }
+
+// worldPollInterval is a live world's poll interval, the controller's and the Provider's listing's: a running job is
+// seen at the next poll, and the host-dialed rows' relays start after it (hostDialedSessionWait's test).
+const worldPollInterval = 10 * time.Second
 
 // conformanceAgent is TestConformance's agent stand-in, run by the bootstrap
 // after its digest check, with the Allocation's directory as its argument: the
@@ -334,6 +359,18 @@ func buildWorld(t *testing.T, s settings, kit worldKit) *world {
 	w.credDir = t.TempDir()
 	w.artefacts = append(w.artefacts, w.credDir)
 
+	poll := kit.poll
+	if poll <= 0 {
+		poll = worldPollInterval
+	}
+	front := &providerctl.FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "127.0.0.1:29261", CertPin: certPin, CertPEM: certPEM,
+		FrpcDigests: map[string]string{s.part.CPUArch: frpcDigest}}
+	var relays *providerctl.RelaySettings
+	if g := kit.hostDialed; g != nil {
+		front.Mode, front.Endpoint, front.CertPEM, front.CertPin = agentapi.DialHomeHostDialed, "", g.certPEM, g.pin
+		rs := g.settings
+		relays = &rs
+	}
 	ctl, err := providerctl.New(w.c, w.c, scheme, providerctl.Options{
 		Provider: prov.Name,
 		Profiles: &slurm.ProfileReader{Reader: w.c},
@@ -345,14 +382,14 @@ func buildWorld(t *testing.T, s settings, kit worldKit) *world {
 			if ssh, ok := r.(*sshrun.SSH); ok {
 				w.ssh = ssh
 			}
+			w.sshConfig = v.SSH
 			w.cap = &capture{Runner: r, p: w.p, submitted: func(id string) { w.jobIDs[id] = true }}
-			w.batch = slurm.NewBatch(w.cap, v.Profile, v.Settings, slurm.Options{PollInterval: 10 * time.Second, BusyInterval: 3 * time.Second})
+			w.batch = slurm.NewBatch(w.cap, v.Profile, v.Settings, slurm.Options{PollInterval: poll, BusyInterval: min(poll, 3*time.Second)})
 			return w.batch, closer, nil
 		},
 		CredentialsDir: w.credDir, AgentBuildsDir: builds,
-		Front: &providerctl.FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "127.0.0.1:29261", CertPin: certPin, CertPEM: certPEM,
-			FrpcDigests: map[string]string{s.part.CPUArch: frpcDigest}},
-		PollInterval: 10 * time.Second, BusyInterval: 3 * time.Second, CreationGracePeriod: -1,
+		Front: front, Relays: relays,
+		PollInterval: poll, BusyInterval: min(poll, 3*time.Second), CreationGracePeriod: -1,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -109,6 +109,12 @@ func TestAgentEndToEndHostDialed(t *testing.T) {
 	if m == nil {
 		t.Fatalf("the agent logged no relay socket:\n%s", out)
 	}
+	// The line names the TMPDIR the socket's directory is right under.
+	if tm := regexp.MustCompile(`host-dialed: listening for the relays.* tmpdir=(\S+)`).FindStringSubmatch(out); tm == nil {
+		t.Errorf("the agent's line names no tmpdir:\n%s", out)
+	} else if got, want := strings.Trim(tm[1], `"`), filepath.Dir(filepath.Dir(strings.Trim(m[1], `"`))); got != want {
+		t.Errorf("the agent's line names tmpdir %s, but its socket is under %s", got, want)
+	}
 	if dir := filepath.Dir(strings.Trim(m[1], `"`)); !strings.HasPrefix(filepath.Base(dir), "hb-relay-") {
 		t.Errorf("the relay socket %s is not in a hb-relay-<random> directory", m[1])
 	} else if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {

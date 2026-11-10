@@ -140,6 +140,8 @@ func (t *transport) startHostDialed(job agent.Job, tmp string, co *agent.ClientO
 	t.frpc.Server = func() (agent.FrpcTarget, <-chan struct{}) {
 		return agent.FrpcTarget{Host: "127.0.0.1", Port: port, Ready: true}, nil
 	}
-	log.Info("host-dialed: listening for the relays", "control", control, "serving", port, "socket", j.Socket())
+	// The TMPDIR the socket's directory is under, unless the path was too long for a socket (hostdial.DevShm): the
+	// reach-host-dialed rows compare the two (internal/providerctl/conformance, testdata/serving-probe.sh).
+	log.Info("host-dialed: listening for the relays", "control", control, "serving", port, "socket", j.Socket(), "tmpdir", tmp)
 	return nil
 }

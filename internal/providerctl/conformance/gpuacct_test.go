@@ -157,11 +157,20 @@ func dryAccountingWorld(t *testing.T, row, fault, out string) (*world, *fakeslur
 // dryShape is the CPUs and memory the dry run's Provider asks for, as the row's shape in the script does.
 type dryShape struct{ cpus, memory string }
 
+// dryExtra changes a dry world for a row that needs more of the fake cluster (the reach-host-dialed rows): run changes
+// the run mode before the platform is made; login, once the platform is made, may start a login node on it and write
+// that node's credentials over the run's (the controller reads them at each reconcile); kit changes the world's kit.
+type dryExtra struct {
+	run   func(*fakeslurm.RunMode)
+	login func(plat *fakeslurm.Platform, creds, home string)
+	kit   func(*worldKit)
+}
+
 // dryWorld is the world of a dry run over a fake Slurm in run mode: the agent stand-in is run by the fake, on this
 // machine, with jobEnv added to its environment. A dry run refuses to start when a live setting is present. The fault
 // slot-held is for a row under a one-job slot, a QOS of the job or of the partition (the profile's own for the
 // partition): the owner's other job holds it, so this run's job pends.
-func dryWorld(t *testing.T, r alpha.Row, fault, out string, shape dryShape, agent []byte, jobEnv map[string]string) (*world, *fakeslurm.Platform) {
+func dryWorld(t *testing.T, r alpha.Row, fault, out string, shape dryShape, agent []byte, jobEnv map[string]string, extras ...dryExtra) (*world, *fakeslurm.Platform) {
 	t.Helper()
 	row := r.Name
 	for _, k := range os.Environ() {
@@ -212,6 +221,11 @@ func dryWorld(t *testing.T, r alpha.Row, fault, out string, shape dryShape, agen
 		// The shipped Helios profile makes the job's temporary directory $MEMFS (tmpDir), which
 		// a job gets by asking for the feature memfs.
 		run.JobVars = []fakeslurm.JobVar{{Name: "MEMFS", Feature: "memfs"}}
+	}
+	for _, x := range extras {
+		if x.run != nil {
+			x.run(run)
+		}
 	}
 	// A row with no QOS of its own is on a partition whose own QOS is the slot (Athena's plgrid-now): the profile names it.
 	partQOS := ""
@@ -281,9 +295,18 @@ func dryWorld(t *testing.T, r alpha.Row, fault, out string, shape dryShape, agen
 		// Registered after the fake's own cleanup, so it runs first: the sleeping job ends before Close.
 		t.Cleanup(func() { _ = plat.End(id, string(fakeslurm.Cancelled)) })
 	}
-	w := buildWorld(t, s, worldKit{agent: agent, dial: func(slurm.Validated) (slurm.Runner, io.Closer, error) {
+	kit := worldKit{agent: agent, dial: func(slurm.Validated) (slurm.Runner, io.Closer, error) {
 		return session, io.NopCloser(nil), nil
-	}})
+	}}
+	for _, x := range extras {
+		if x.login != nil {
+			x.login(plat, creds, home)
+		}
+		if x.kit != nil {
+			x.kit(&kit)
+		}
+	}
+	w := buildWorld(t, s, kit)
 	// The fake cluster's file system, the credentials and the key are where a dry run leaves its files.
 	w.artefacts = append(w.artefacts, dir)
 	if fault == "slot-held" || fault == "queue-held" {

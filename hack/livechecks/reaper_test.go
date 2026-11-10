@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -61,7 +62,16 @@ func TestMain(m *testing.M) {
 	case os.Getenv(runnerEnv) == "1":
 		os.Exit(runnerMain(os.Args[1:]))
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	// The agent the host-dialed dry runs built (hostdialed_dry_test.go) and the packages' test binaries (realTestBinary),
+	// each in a directory of this process's own.
+	if dryAgentBuild.path != "" {
+		_ = os.RemoveAll(filepath.Dir(dryAgentBuild.path))
+	}
+	if testBuilds.dir != "" {
+		_ = os.RemoveAll(testBuilds.dir)
+	}
+	os.Exit(code)
 }
 
 // procInfo is what the reaper reads about a process from /proc.

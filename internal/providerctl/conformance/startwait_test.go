@@ -108,8 +108,10 @@ func (w *world) untilRuns(step, name, what string, since time.Time, acceptedID s
 	var last *v1alpha1.Allocation
 	probe := func() (bool, bool) {
 		last = w.pollAllocation(name)
-		if last != nil {
-			accountingNotFailed(w.t, last) // no job starts from these phases: the wait ends here, not at the bound
+		// No job starts from these phases: the wait ends here, not at the bound. A row whose job can end Failed after it
+		// started, its program stopping at its start, takes that phase as a start and judges it (failedIsStart).
+		if last != nil && !(w.failedIsStart && last.Status.AtProvider.Phase == v1alpha1.AllocationFailed) {
+			accountingNotFailed(w.t, last)
 		}
 		return last != nil && cond(last), acceptedID != "" || (last != nil && last.Annotations[v1alpha1.AnnotationJobID] != "")
 	}

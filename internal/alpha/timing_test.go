@@ -30,7 +30,7 @@ func TestLiveRowsKeepTheLiveTiming(t *testing.T) {
 	if LiveTiming() != liveTimingByHand {
 		t.Errorf("LiveTiming() = %+v, want %+v", LiveTiming(), liveTimingByHand)
 	}
-	all := slices.Concat(Rows(), AccountingRows(), ReachRows())
+	all := slices.Concat(Rows(), AccountingRows(), ReachRows(), HostDialedRows())
 	for _, r := range all {
 		if r.Timing != (Timing{}) {
 			t.Errorf("row %s has a Timing of its own, %+v: a live row keeps the zero Timing", r.Name, r.Timing)
