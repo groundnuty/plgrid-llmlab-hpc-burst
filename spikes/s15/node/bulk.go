@@ -37,6 +37,8 @@ type UploadReceipt struct {
 	HeadersNs int64 `json:"headers_unix_ns"`    // the handler started: the request's headers had arrived
 	FirstNs   int64 `json:"first_byte_unix_ns"` // the body's first byte was read
 	LastNs    int64 `json:"last_byte_unix_ns"`  // its last byte was read
+	// Steps are the bytes received by each 100 ms after the first byte.
+	Steps []int64 `json:"steps_bytes"`
 }
 
 // withBulk serves the bulk paths and passes every other request to engine.
@@ -62,12 +64,22 @@ func upload(w http.ResponseWriter, r *http.Request, log *slog.Logger) {
 	for {
 		n, err := r.Body.Read(buf)
 		if n > 0 {
-			now := time.Now().UnixNano()
+			t := time.Now()
+			now := t.UnixNano()
 			if rc.Bytes == 0 {
 				rc.FirstNs = now
 			}
 			rc.Bytes += int64(n)
 			rc.LastNs = now
+			i := int(t.Sub(time.Unix(0, rc.FirstNs)) / (100 * time.Millisecond))
+			for len(rc.Steps) <= i {
+				prev := int64(0)
+				if len(rc.Steps) > 0 {
+					prev = rc.Steps[len(rc.Steps)-1]
+				}
+				rc.Steps = append(rc.Steps, prev)
+			}
+			rc.Steps[i] = rc.Bytes
 		}
 		if err == io.EOF {
 			break

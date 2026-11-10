@@ -61,8 +61,11 @@ type transfer struct {
 	RecvLastNs  int64  `json:"recv_last_ns"`
 	EndNs       int64  `json:"end_ns"` // the client had the whole reply
 	Bytes       int64  `json:"bytes"`  // payload at the receiver
-	Status      int    `json:"status"`
-	Err         string `json:"err,omitempty"`
+	// Steps are the bytes received by each StepMs after the first byte, at
+	// the receiver: they show a rate cap's burst and its steady rate.
+	Steps  []int64 `json:"steps_bytes"`
+	Status int     `json:"status"`
+	Err    string  `json:"err,omitempty"`
 }
 
 // runLoad runs the configuration's schedule: the streams start over -ramp,
@@ -215,16 +218,17 @@ func doUpload(c *http.Client, base string, size int64, rel func(time.Time) int64
 	defer resp.Body.Close()
 	tr.RespNs, tr.Status = rel(time.Now()), resp.StatusCode
 	var rc struct {
-		Bytes   int64 `json:"bytes"`
-		FirstNs int64 `json:"first_byte_unix_ns"`
-		LastNs  int64 `json:"last_byte_unix_ns"`
+		Bytes   int64   `json:"bytes"`
+		FirstNs int64   `json:"first_byte_unix_ns"`
+		LastNs  int64   `json:"last_byte_unix_ns"`
+		Steps   []int64 `json:"steps_bytes"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&rc); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&rc); err != nil {
 		tr.Err = "the receipt: " + err.Error()
 		return tr
 	}
 	tr.EndNs = rel(time.Now())
-	tr.Bytes = rc.Bytes
+	tr.Bytes, tr.Steps = rc.Bytes, rc.Steps
 	// The node's clock is this host's: the receipt's wall-clock times are on
 	// the same timeline as the client's.
 	tr.RecvFirstNs = rel(time.Unix(0, rc.FirstNs))
@@ -235,25 +239,54 @@ func doUpload(c *http.Client, base string, size int64, rel func(time.Time) int64
 	return tr
 }
 
+// StepMs is the width of a transfer's received-bytes steps.
+const StepMs = 100
+
+// stepper records the bytes received by each StepMs after the first byte.
+type stepper struct {
+	first time.Time
+	steps []int64
+	n     int64
+}
+
+func (s *stepper) add(now time.Time, k int64) {
+	if s.n == 0 {
+		s.first = now
+	}
+	s.n += k
+	i := int(now.Sub(s.first) / (StepMs * time.Millisecond))
+	for len(s.steps) <= i {
+		prev := int64(0)
+		if len(s.steps) > 0 {
+			prev = s.steps[len(s.steps)-1]
+		}
+		s.steps = append(s.steps, prev)
+	}
+	s.steps[i] = s.n
+}
+
 // readBody reads a reply's body to its end, counting, and returns when its
-// first and last bytes arrived.
-func readBody(r io.Reader, rel func(time.Time) int64) (n, first, last int64, err error) {
+// first and last bytes arrived, and its received-bytes steps.
+func readBody(r io.Reader, rel func(time.Time) int64) (n, first, last int64, steps []int64, err error) {
 	buf := make([]byte, 64*1024)
+	var st stepper
 	for {
 		k, rerr := r.Read(buf)
 		if k > 0 {
-			now := rel(time.Now())
+			t := time.Now()
+			now := rel(t)
 			if n == 0 {
 				first = now
 			}
 			n += int64(k)
 			last = now
+			st.add(t, int64(k))
 		}
 		if rerr == io.EOF {
-			return n, first, last, nil
+			return n, first, last, st.steps, nil
 		}
 		if rerr != nil {
-			return n, first, last, rerr
+			return n, first, last, st.steps, rerr
 		}
 	}
 }
@@ -267,8 +300,8 @@ func doDownload(c *http.Client, base string, size int64, rel func(time.Time) int
 	}
 	defer resp.Body.Close()
 	tr.RespNs, tr.Status = rel(time.Now()), resp.StatusCode
-	n, first, last, err := readBody(resp.Body, rel)
-	tr.Bytes, tr.RecvFirstNs, tr.RecvLastNs, tr.EndNs = n, first, last, rel(time.Now())
+	n, first, last, steps, err := readBody(resp.Body, rel)
+	tr.Bytes, tr.RecvFirstNs, tr.RecvLastNs, tr.Steps, tr.EndNs = n, first, last, steps, rel(time.Now())
 	switch {
 	case err != nil:
 		tr.Err = err.Error()
@@ -297,8 +330,8 @@ func doEmbeddings(c *http.Client, base string, body []byte, rel func(time.Time) 
 	}
 	defer resp.Body.Close()
 	tr.RespNs, tr.Status = rel(time.Now()), resp.StatusCode
-	n, first, last, err := readBody(resp.Body, rel)
-	tr.Bytes, tr.RecvFirstNs, tr.RecvLastNs, tr.EndNs = n, first, last, rel(time.Now())
+	n, first, last, steps, err := readBody(resp.Body, rel)
+	tr.Bytes, tr.RecvFirstNs, tr.RecvLastNs, tr.Steps, tr.EndNs = n, first, last, steps, rel(time.Now())
 	switch {
 	case err != nil:
 		tr.Err = err.Error()

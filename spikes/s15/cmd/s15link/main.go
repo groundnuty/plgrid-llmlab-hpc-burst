@@ -39,7 +39,16 @@ type bucket struct {
 	mu   sync.Mutex
 	rate float64 // bytes per second; 0 = unlimited
 	next time.Time
+	// slack is how far the link's schedule may lag behind the clock: a sender
+	// that slept past its chunk's time (a sleep's overshoot, about a
+	// millisecond on a loaded host) catches up by that much instead of losing
+	// it, so the link keeps its rate; after an idle stretch, at most slack's
+	// worth of bytes goes at once.
+	slack time.Duration
 }
+
+// defaultSlack bounds a catch-up: 2 ms is about 96 kB at 48 MB/s.
+const defaultSlack = 2 * time.Millisecond
 
 // reserve books n bytes on the link at now and returns when they have been
 // sent: after any chunk already booked, n/rate later.
@@ -49,8 +58,8 @@ func (b *bucket) reserve(now time.Time, n int) time.Time {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.next.Before(now) {
-		b.next = now
+	if earliest := now.Add(-b.slack); b.next.Before(earliest) {
+		b.next = earliest
 	}
 	b.next = b.next.Add(time.Duration(float64(n) / b.rate * float64(time.Second)))
 	return b.next
@@ -133,7 +142,7 @@ func run(maps []string, upRate, downRate float64, delay time.Duration, chunk, rc
 }
 
 func newLink(upRate, downRate float64, delay time.Duration, chunk, rcvbuf int) *link {
-	return &link{up: &bucket{rate: upRate}, down: &bucket{rate: downRate}, delay: delay, chunk: chunk, rcvbuf: rcvbuf}
+	return &link{up: &bucket{rate: upRate, slack: defaultSlack}, down: &bucket{rate: downRate, slack: defaultSlack}, delay: delay, chunk: chunk, rcvbuf: rcvbuf}
 }
 
 // listen serves one map: each connection to listen is carried to upstream
@@ -228,8 +237,14 @@ func (l *link) pipe(dst, src net.Conn, b *bucket, count *atomic.Int64) {
 	for {
 		n, err := src.Read(buf)
 		if n > 0 {
-			sent := b.reserve(time.Now(), n)
+			read := time.Now()
+			sent := b.reserve(read, n)
 			time.Sleep(time.Until(sent))
+			// A chunk sent on a schedule that lags the clock (catching up) still
+			// arrives no sooner than delay after it was read.
+			if sent.Before(read) {
+				sent = read
+			}
 			line <- piece{b: append([]byte(nil), buf[:n]...), at: sent.Add(l.delay)}
 			count.Add(int64(n))
 		}

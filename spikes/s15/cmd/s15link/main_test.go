@@ -23,6 +23,22 @@ func TestReserveSharesOneRateInTurn(t *testing.T) {
 	if got := b.reserve(t0.Add(3*time.Second), 100); !got.Equal(t0.Add(3100 * time.Millisecond)) {
 		t.Fatalf("after idle: sent at %v, want t0+3.1s", got.Sub(t0))
 	}
+	// With slack, the schedule may lag the clock by up to slack: after idle,
+	// up to slack's worth goes at once; a sender that overslept catches up
+	// instead of losing the time; beyond slack the time is lost.
+	sl := &bucket{rate: 1000, slack: 200 * time.Millisecond}
+	if got := sl.reserve(t0, 100); !got.Equal(t0.Add(-100 * time.Millisecond)) {
+		t.Fatalf("from idle: done at %v, want t0-100ms (within slack, at once)", got.Sub(t0))
+	}
+	if got := sl.reserve(t0, 300); !got.Equal(t0.Add(200 * time.Millisecond)) {
+		t.Fatalf("booked behind it: done at %v, want t0+200ms", got.Sub(t0))
+	}
+	if got := sl.reserve(t0.Add(350*time.Millisecond), 100); !got.Equal(t0.Add(300 * time.Millisecond)) {
+		t.Fatalf("an oversleep of 150 ms: done at %v, want t0+300ms (caught up)", got.Sub(t0))
+	}
+	if got := sl.reserve(t0.Add(time.Second), 100); !got.Equal(t0.Add(900 * time.Millisecond)) {
+		t.Fatalf("beyond slack: done at %v, want t0+900ms (now - slack + 100 ms)", got.Sub(t0))
+	}
 	if got := (&bucket{}).reserve(t0, 1<<20); !got.Equal(t0) {
 		t.Fatal("rate 0 is unlimited")
 	}

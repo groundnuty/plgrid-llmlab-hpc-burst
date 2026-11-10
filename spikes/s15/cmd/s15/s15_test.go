@@ -150,3 +150,20 @@ func TestCountingBodyGivesExactlyItsSizeAndSaysWhenDone(t *testing.T) {
 		t.Fatalf("read %d (%v), done called %d times; want 100001 and once", n, err, calls)
 	}
 }
+
+func TestStepperRecordsCumulativeBytesPerStep(t *testing.T) {
+	var s stepper
+	t0 := time.Unix(10, 0)
+	s.add(t0, 100)
+	s.add(t0.Add(50*time.Millisecond), 50)
+	s.add(t0.Add(350*time.Millisecond), 10) // steps 1 and 2 carry the total so far
+	want := []int64{150, 150, 150, 160}
+	if len(s.steps) != len(want) {
+		t.Fatalf("steps %v, want %v", s.steps, want)
+	}
+	for i := range want {
+		if s.steps[i] != want[i] {
+			t.Fatalf("steps %v, want %v", s.steps, want)
+		}
+	}
+}
