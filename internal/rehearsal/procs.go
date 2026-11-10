@@ -9,22 +9,28 @@ package rehearsal
 // Issue #308. An sshd that had exited before its row was read left a row of
 // PID 0, the walk from PID 0 returned every process on the host (PID 1 and the
 // kernel's threads have parent 0), and the stop sent SIGTERM to all of them:
-// the likely cause of the development VM's outage of 10 Nov 2026. Three
-// guards now stand between a sweep and a process the test did not start:
-//  1. spawn (sshd.go) stores no sshd whose row it cannot read: it kills that
-//     one through its os.Process, which holds a pidfd, and reaps it;
+// the likely cause of the development VM's outage of 10 Nov 2026. Now:
+//  1. spawn (pool.go) stores no sshd whose row it cannot read, or that has
+//     no start time: it kills that one through its os.Process, which holds a
+//     pidfd, and reaps it;
 //  2. below walks nothing from a root of PID 1 or less, from a row with no
 //     start time, nor from a root whose start time no longer matches;
 //  3. signalProcs (signal.go) signals only a process strictly below the test
-//     process now, never PID 1 or below, the test process or its ancestors,
-//     and returns every refusal as an error.
+//     process now, by a walk whose every parent started no later than its
+//     child; it refuses PID 1 and below, the test and its ancestors, and a
+//     recorded process outside the test's tree is a leak, reported, never
+//     signalled;
+//  4. a forced command dies with its sshd (relayguard.go), so it never
+//     leaves the test's tree, and a passing run reports no leak.
 //
-// Guards 1 and 2 each close the bad-root class alone: a zero, exited or
-// recycled root walks nothing. Guard 3 alone bounds a row from any source,
-// withRelayEnv's included, to the test binary's own process tree, and the
-// test process is a child subreaper (signal.go), so that tree keeps
-// everything the nodes started. Guard 3 alone does not tell one test's
-// processes from another's in the same binary.
+// What each guarantees alone. Guard 1: no row of an exited, unreadable or
+// timeless sshd is stored; it does not cover a PID recycled between record's
+// check that the sshd lives and its walk, which guard 2 does. Guard 2: no walk
+// starts from a zero, timeless, exited or recycled root; the stored roots
+// themselves still reach the stop. Guard 3: whatever a row's source,
+// withRelayEnv's included, only a process strictly below the test binary now
+// is signalled, never PID 1, the test or its ancestors; it does not tell one
+// test's processes from another's in the same binary.
 
 import (
 	"errors"

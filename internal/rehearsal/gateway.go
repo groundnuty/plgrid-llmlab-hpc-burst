@@ -70,11 +70,6 @@ func StartGateway(cfg GatewayConfig) (*Gateway, error) {
 	if cfg.SSHD == "" {
 		cfg.SSHD = SSHDPath()
 	}
-	// Before the gateway's first process: an orphan of what it starts must
-	// stay below this process (signal.go).
-	if err := ensureSubreaper(); err != nil {
-		return nil, err
-	}
 	if err := CheckTools(cfg.SSHD); err != nil {
 		return nil, err
 	}
@@ -98,7 +93,7 @@ func StartGateway(cfg GatewayConfig) (*Gateway, error) {
 	}
 	g := &Gateway{cfg: cfg, files: filesIn(cfg.Dir), user: u}
 	spec := sshdSpec{user: u, options: dialHomeKeyOptions(cfg.AgentPort, cfg.DialHomePort), conf: gatewayConf}
-	if g.srv, err = startSSHD(cfg.SSHD, g.files, spec); err != nil {
+	if g.srv, err = startSSHD("gateway", cfg.SSHD, g.files, spec); err != nil {
 		return nil, err
 	}
 	return g, nil

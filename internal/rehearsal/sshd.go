@@ -161,7 +161,7 @@ type sshdServer struct {
 
 // startSSHD writes the files and starts serving. A client can connect as
 // soon as it returns.
-func startSSHD(bin string, f sshdFiles, spec sshdSpec) (*sshdServer, error) {
+func startSSHD(name, bin string, f sshdFiles, spec sshdSpec) (*sshdServer, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("rehearsal: listen: %w", err)
@@ -175,7 +175,7 @@ func startSSHD(bin string, f sshdFiles, spec sshdSpec) (*sshdServer, error) {
 		ln.Close()
 		return nil, err
 	}
-	s := &sshdServer{ln: ln, log: log, pool: newPool(bin, f.conf, log)}
+	s := &sshdServer{ln: ln, log: log, pool: newPool(name, bin, f.conf, log)}
 	s.pool.wg.Add(1)
 	go s.pool.serve(ln)
 	return s, nil

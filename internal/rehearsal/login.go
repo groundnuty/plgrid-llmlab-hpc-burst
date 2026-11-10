@@ -139,11 +139,6 @@ func StartLoginNode(cfg LoginConfig) (*LoginNode, error) {
 	if cfg.SSHD == "" {
 		cfg.SSHD = SSHDPath()
 	}
-	// Before the node's first process: an orphan of what it starts must stay
-	// below this process (signal.go).
-	if err := ensureSubreaper(); err != nil {
-		return nil, err
-	}
 	if err := CheckTools(cfg.SSHD); err != nil {
 		return nil, err
 	}
@@ -164,7 +159,7 @@ func StartLoginNode(cfg LoginConfig) (*LoginNode, error) {
 	}
 	forced := fmt.Sprintf("%s=%s %s=%s %s", EnvRole, RoleRelay, EnvRelay, n.sock, exe)
 	spec := sshdSpec{user: n.user, options: fmt.Sprintf("restrict,command=%q", forced), conf: loginConf}
-	if n.srv, err = startSSHD(cfg.SSHD, n.files, spec); err != nil {
+	if n.srv, err = startSSHD("login node", cfg.SSHD, n.files, spec); err != nil {
 		n.relay.close()
 		return nil, err
 	}

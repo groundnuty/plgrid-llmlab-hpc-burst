@@ -22,7 +22,7 @@ import (
 
 func TestMain(m *testing.M) {
 	Dispatch()
-	os.Exit(m.Run())
+	os.Exit(ReportLeaks(m.Run()))
 }
 
 // waitDeadline bounds every wait: generous, since the VM may be loaded.

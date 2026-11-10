@@ -16,5 +16,5 @@ func TestMain(m *testing.M) {
 	if dryAgent.dir != "" {
 		_ = os.RemoveAll(dryAgent.dir)
 	}
-	os.Exit(code)
+	os.Exit(rehearsal.ReportLeaks(code))
 }

@@ -3,29 +3,27 @@ package rehearsal
 // New, after internal/slurm/fakeslurm/procsweep.go (signalOne): what the nodes
 // signal, and how (issue #308, guard 3 in procs.go's header).
 //
-// Ownership is by construction. The test process is a child subreaper, so an
-// orphan of anything it started is reparented to it, never to PID 1 or the
-// user manager: every process a node started stays below the test process
-// for as long as it lives. signalProcs signals a process only when a walk up
-// its parents, made while the process is pinned with a pidfd, reaches the test
-// process, and only through that pidfd.
+// A process is signalled only when a walk up its parents, made while it is
+// pinned with a pidfd, reaches the test process, and only through that pidfd.
+// Each hop is checked against PID reuse by start-time order: a parent started
+// no later than its child, so a "parent" that started later is a reused PID.
+// A process that is not below the test any more, such as one whose parent
+// exited and left it to PID 1 or the user manager, is never signalled: it is
+// a leak, counted and reported with its command name, start time and node.
+// The forced commands cannot become one (relay.go: a parent-death signal), so
+// a passing run reports none.
 //
-// Each hop of the walk is checked against PID reuse by start-time order: a
-// parent started no later than its child, so a "parent" that started later is
-// a reused PID, and the process is refused. A hop that has exited, or started
-// later, can also mean the walk raced a reparenting, as when an sshd ends
-// while its session child is read. The pinned process is then read again, and
-// only a parent that changed earns another walk. A row that cannot be read
-// refuses at once. The residual: start times have the clock tick's resolution
-// (10 ms), so a parent that exited, gave up its PID, and had it reused within
-// the tick its child started in would pass. That takes a wrap of the PID space
-// in 10 ms.
+// The residual: start times have the clock tick's resolution (10 ms), so a
+// parent that exited, gave up its PID, and had it reused within the tick its
+// child started in would pass. That takes a wrap of the PID space in 10 ms.
 
 import (
 	"errors"
 	"fmt"
 	"os"
-	"sync"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -41,6 +39,8 @@ type procAPI struct {
 	// row reads one process: live is false for one that has exited, a zombie
 	// included, and err is set for one whose row exists but cannot be read.
 	row func(pid int) (r procRow, live bool, err error)
+	// comm is a process's command name, for a report.
+	comm func(pid int) string
 	// open pins a process with a pidfd; ESRCH when it is gone, and EINVAL
 	// for one that is mid-exit on some kernels (fakeslurm, issue #211).
 	open func(pid int) (fd int, err error)
@@ -52,12 +52,12 @@ type procAPI struct {
 	// kill ends an sshd the pool started, through its os.Process (a pidfd
 	// since go 1.23), never by its number.
 	kill func(p *os.Process) error
-	// reap collects one zombie child of this process by its PID, without
-	// waiting (waitid P_PID, WNOHANG); never any other PID.
-	reap func(pid int) error
 	// started, when set, is called with each sshd's PID after it starts and
 	// before its row is read (tests).
 	started func(pid int)
+	// leaks counts the processes left outside the test's tree: the process's
+	// total for the host's, a test's own otherwise.
+	leaks *atomic.Int64
 }
 
 // hostProcs is the kernel's own /proc.
@@ -65,6 +65,7 @@ func hostProcs() *procAPI {
 	return &procAPI{
 		self:    os.Getpid(),
 		row:     statRow,
+		comm:    readComm,
 		open:    func(pid int) (int, error) { return unix.PidfdOpen(pid, 0) },
 		probe:   func(pid int) error { return syscall.Kill(pid, 0) },
 		send:    func(fd int, sig syscall.Signal) error { return unix.PidfdSendSignal(fd, sig, nil, 0) },
@@ -75,44 +76,31 @@ func hostProcs() *procAPI {
 			}
 			return nil
 		},
-		reap: func(pid int) error {
-			var info unix.Siginfo
-			return unix.Waitid(unix.P_PID, pid, &info, unix.WEXITED|unix.WNOHANG, nil)
-		},
+		leaks: &leaked,
 	}
 }
 
-var subreaper struct {
-	once sync.Once
-	err  error
+func readComm(pid int) string {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/comm")
+	if err != nil {
+		return "?"
+	}
+	return strings.TrimSpace(string(b))
 }
 
-// ensureSubreaper makes this process a child subreaper, once: every orphan of
-// what it starts is then reparented to it, so what a node started stays below
-// it after its sshd has gone. The attribute is the whole process's and stays
-// for its life, so the later tests of a binary that started a node run under
-// it too (the audit of issue #308's fix lists what that changes). Each node
-// calls it before it starts its first process.
-func ensureSubreaper() error {
-	subreaper.once.Do(func() {
-		if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
-			subreaper.err = fmt.Errorf("rehearsal: make this process a child subreaper: %w", err)
-		}
-	})
-	return subreaper.err
-}
+// leaked counts the processes the nodes of this process left outside the
+// test's tree; ReportLeaks prints it.
+var leaked atomic.Int64
 
 // maxDepth bounds a walk up the parents, which a listing that changes while
 // it is read must not make endless.
 const maxDepth = 4096
 
-// maxWalks bounds the walks of one process whose parent changed during them.
-const maxWalks = 3
-
 // owner is who the signals are for: the process the nodes run in, with its
 // start time, and its ancestors.
 type owner struct {
 	api       *procAPI
+	node      string
 	self      procRow
 	ancestors map[int]bool
 }
@@ -120,8 +108,8 @@ type owner struct {
 // ownerOf reads the process's row and its ancestors, up to and excluding PID
 // 1. An ancestry that cannot be read is an error: an ancestor that is not
 // known could be signalled, so every signal is refused.
-func ownerOf(api *procAPI) (*owner, error) {
-	o := &owner{api: api, ancestors: map[int]bool{}}
+func ownerOf(api *procAPI, node string) (*owner, error) {
+	o := &owner{api: api, node: node, ancestors: map[int]bool{}}
 	pid := api.self
 	for depth := 0; ; depth++ {
 		r, live, err := api.row(pid)
@@ -145,50 +133,33 @@ func ownerOf(api *procAPI) (*owner, error) {
 }
 
 // walk goes up from a live process to the test process. Each parent must have
-// started no later than its child. moved reports a hop that has exited or
-// started later than its child, which a reparenting during the walk can also
-// explain; a hop that cannot be read is an error.
-func (o *owner) walk(t procRow) (below, moved bool, err error) {
+// started no later than its child. why says, when the process is not below
+// the test, where the walk left the test's tree; a hop that cannot be read is
+// an error.
+func (o *owner) walk(t procRow) (below bool, why string, err error) {
 	child := t
 	for depth := 0; depth < maxDepth; depth++ {
 		if child.ppid == o.self.pid {
-			return o.self.ticks <= child.ticks, false, nil
+			if o.self.ticks > child.ticks {
+				return false, fmt.Sprintf("process %d started before the test process", child.pid), nil
+			}
+			return true, "", nil
 		}
 		if child.ppid <= 1 {
-			return false, false, nil
+			return false, fmt.Sprintf("its ancestry reaches PID %d without the test process", child.ppid), nil
 		}
-		p, live, perr := o.api.row(child.ppid)
+		p, plive, perr := o.api.row(child.ppid)
 		switch {
 		case perr != nil:
-			return false, false, fmt.Errorf("its ancestor %d: %w", child.ppid, perr)
-		case !live || p.ticks > child.ticks:
-			return false, true, nil
+			return false, "", fmt.Errorf("its ancestor %d: %w", child.ppid, perr)
+		case !plive:
+			return false, fmt.Sprintf("its ancestor %d has exited", child.ppid), nil
+		case p.ticks > child.ticks:
+			return false, fmt.Sprintf("its ancestor %d started after process %d: a reused PID", child.ppid, child.pid), nil
 		}
 		child = p
 	}
-	return false, false, nil
-}
-
-// isBelow reports whether a pinned, live process is below the test process. A
-// walk that moved reads the process again, and walks again only when its
-// parent changed. gone reports that it ended meanwhile.
-func (o *owner) isBelow(t procRow) (below, gone bool, err error) {
-	for walks := 1; ; walks++ {
-		below, moved, err := o.walk(t)
-		if err != nil || below || !moved || walks >= maxWalks {
-			return below, false, err
-		}
-		again, live, err := o.api.row(t.pid)
-		switch {
-		case err != nil:
-			return false, false, err
-		case !live || again.ticks != t.ticks:
-			return false, true, nil
-		case again.ppid == t.ppid:
-			return false, false, nil
-		}
-		t = again
-	}
+	return false, fmt.Sprintf("its ancestry is deeper than %d", maxDepth), nil
 }
 
 // refusal is the error for a process signalProcs will not signal.
@@ -201,12 +172,13 @@ func refusal(r procRow, sig syscall.Signal, why string) error {
 // and checked after that: a PID that now names a process with another start
 // time was recycled and is left alone, and the signal goes through the pidfd,
 // never to a PID. It refuses PID 1 and below, a row with no start time, the
-// process itself, its ancestors, and a process that is not below it. A
-// refusal, and a process that cannot be pinned, read or signalled, is an
-// error, and the others are still signalled. It returns the rows it neither
-// refused nor failed on.
-func signalProcs(api *procAPI, rows []procRow, sig syscall.Signal) ([]procRow, error) {
-	o, err := ownerOf(api)
+// process itself and its ancestors. A process that is not below the test is a
+// leak: never signalled, counted, and reported. Every refusal and leak, and a
+// process that cannot be pinned, read or signalled, is an error, and the
+// others are still signalled. It returns the rows it neither refused nor
+// failed on. node names the node in a report.
+func signalProcs(api *procAPI, node string, rows []procRow, sig syscall.Signal) ([]procRow, error) {
+	o, err := ownerOf(api, node)
 	if err != nil {
 		return nil, fmt.Errorf("rehearsal: refused to send %v to %d processes: %w (issue #308)", sig, len(rows), err)
 	}
@@ -259,15 +231,14 @@ func (o *owner) signalOne(r procRow, sig syscall.Signal) error {
 	case o.ancestors[r.pid]:
 		return refusal(r, sig, "it is an ancestor of the process that sends it")
 	}
-	below, gone, err := o.isBelow(now)
-	switch {
-	case err != nil:
+	below, why, err := o.walk(now)
+	if err != nil {
 		return refusal(r, sig, "its ancestry cannot be read: "+err.Error())
-	case gone:
-		return nil
 	}
 	if !below {
-		return refusal(r, sig, "it is not below the process that sends it")
+		o.api.leaks.Add(1)
+		return fmt.Errorf("rehearsal: the %s left process %d (%s, started at tick %d) outside the test's tree: %s; it was not signalled (issue #308)",
+			o.node, r.pid, o.api.comm(r.pid), r.ticks, why)
 	}
 	if err := o.api.send(fd, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return fmt.Errorf("rehearsal: send %v to process %d: %w", sig, r.pid, err)
@@ -293,27 +264,16 @@ func (o *owner) endedSince(pid int) (bool, error) {
 	return !live, nil
 }
 
-// reapAdopted reaps the zombies among rows that this process adopted as a
-// subreaper. A row qualifies only when it was recorded with another parent, so
-// this process never forked it and no exec.Cmd waits for it, and it is now
-// this process's zombie child with the start time it was recorded with. It
-// reaps by that PID alone, never -1, so no exec.Cmd loses its status. The rest
-// stay zombies until this process exits, holding a PID and nothing else: a
-// row already adopted when it was listed (its parent this process, as an
-// exec.Cmd's is), and a process the nodes started that no sample recorded.
-func reapAdopted(api *procAPI, rows []procRow) error {
-	var errs []error
-	for _, r := range rows {
-		if r.ppid == api.self || r.ppid <= 0 || r.ticks == 0 {
-			continue
-		}
-		state, now, gone, err := readStat(r.pid)
-		if err != nil || gone || state != "Z" || now.ppid != api.self || now.ticks != r.ticks {
-			continue
-		}
-		if err := api.reap(r.pid); err != nil && !errors.Is(err, syscall.ECHILD) {
-			errs = append(errs, fmt.Errorf("rehearsal: reap adopted process %d: %w", r.pid, err))
-		}
+// ReportLeaks is for the TestMain of a package whose tests start a node,
+// after m.Run: it prints how many processes the nodes left outside the test's
+// tree, and returns the exit code, 1 in place of 0 when there was any. Each
+// leak has failed its node's Close already; this is the run's total, which a
+// passing run shows as 0.
+func ReportLeaks(code int) int {
+	n := leaked.Load()
+	fmt.Printf("rehearsal: %d leaked (processes the nodes left outside the test's tree, never signalled)\n", n)
+	if n > 0 {
+		return max(code, 1)
 	}
-	return errors.Join(errs...)
+	return code
 }

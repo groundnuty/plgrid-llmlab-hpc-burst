@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -45,6 +46,9 @@ type sink struct {
 	// is kept in bad.
 	check func(pid int) error
 	bad   []error
+	// leaks counts what signalProcs left outside the test's tree, in place of
+	// the process's total, which ReportLeaks prints for the real nodes.
+	leaks atomic.Int64
 }
 
 const fdBase = 1 << 24
@@ -78,12 +82,13 @@ func (s *sink) fake(api *procAPI) *procAPI {
 		return pid + fdBase, nil
 	}
 	api.closeFd = func(int) {}
+	api.leaks = &s.leaks
 	return api
 }
 
 // unchecked stands in for signalProcs with guard 3 gone: every row it is
 // given counts as signalled.
-func (s *sink) unchecked(_ *procAPI, rows []procRow, _ syscall.Signal) ([]procRow, error) {
+func (s *sink) unchecked(_ *procAPI, _ string, rows []procRow, _ syscall.Signal) ([]procRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, r := range rows {
@@ -301,9 +306,10 @@ func TestGuard2AloneWalksNothingFromAZeroOrAStaleRoot(t *testing.T) {
 			t.Errorf("recorded %d processes below the root %+v; want none", len(rows), p.self)
 		}
 	}
+	// Each row is passed on twice, by the TERM and the KILL pass.
 	sent, _ := rec.snapshot()
 	slices.Sort(sent)
-	if want := []int{1, stale.pid}; !slices.Equal(sent, want) {
+	if want := []int{1, stale.pid}; !slices.Equal(slices.Compact(sent), want) {
 		t.Errorf("passed on %v, want the stored rows alone %v", sent, want)
 	}
 }
