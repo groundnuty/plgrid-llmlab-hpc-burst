@@ -95,8 +95,10 @@ func committedMatcher(t *testing.T) matcher {
 		t.Fatalf("the pattern must number its file, line, column and message groups: %+v", p)
 	}
 	m := newMatcher(t, p.Regexp, *p.File, *p.Line, *p.Column, *p.Message)
+	// Fatal, as the runner's own validation is: a group number past the pattern's groups is a config it
+	// refuses to load, and match would index past the end of the submatches.
 	if m.file != 1 || m.line != 2 || m.column != 3 || m.message != 4 || m.re.NumSubexp() != 4 {
-		t.Errorf("want groups file=1 line=2 column=3 message=4 of 4 groups, got %d %d %d %d of %d",
+		t.Fatalf("want groups file=1 line=2 column=3 message=4 of 4 groups, got %d %d %d %d of %d",
 			m.file, m.line, m.column, m.message, m.re.NumSubexp())
 	}
 	return m
