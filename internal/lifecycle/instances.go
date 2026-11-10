@@ -73,9 +73,11 @@ func (p *pass) copyLeaseEnd(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) e
 // allocationFailed applies step 5: an Allocation that is Failed (a requeue
 // included), Lost or Refused, that was submitted as another, or one of whose
 // host-dialed relays ended for good (RelayEndedForGood, issue #304), ends its
-// Instance with that reason and is released; one that ended early ends its
-// Instance with AllocationEndedEarly and a failing event. An Allocation that
-// reached its hard end ends its Instance as drained, with no event.
+// Instance with that reason and is released. The failure message of the two
+// marks is the condition's own, which names what differed or ended (for
+// SubmittedAsOther only when it has one, issue #338); one that ended early ends
+// its Instance with AllocationEndedEarly and a failing event. An Allocation
+// that reached its hard end ends its Instance as drained, with no event.
 func (p *pass) allocationFailed(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) (bool, error) {
 	obs := alloc.Status.AtProvider
 	reason := ""
@@ -91,6 +93,12 @@ func (p *pass) allocationFailed(in *v1alpha1.Instance, alloc *v1alpha1.Allocatio
 		reason = v1alpha1.ReasonAllocationRefused
 	}
 	if c := alloc.GetCondition(v1alpha1.ConditionSubmittedAsOther); reason == "" && c.Status == "True" {
+		if c.Message != "" {
+			// The Provider's controller wrote what differed (HBEP-4, Read-back:
+			// each field with both values), which the generic text below, built
+			// from the job's phase and observed reason, cannot say (issue #338).
+			return true, p.fail(in, alloc, string(v1alpha1.ConditionSubmittedAsOther), fmt.Sprintf("Allocation %s: %s", alloc.Name, c.Message))
+		}
 		reason = string(v1alpha1.ConditionSubmittedAsOther)
 	}
 	if c := alloc.GetCondition(v1alpha1.ConditionRelayEndedForGood); reason == "" && c.Status == "True" {
