@@ -1,0 +1,606 @@
+package hostdial_test
+
+// New for issue #343 (PR 1): the relay keeper's options of hostdial.Owner and
+// hostdial.Target (HBEP-6, The relay keeper), and pins of the defaults, which
+// are alpha's and which the options must not move. A pin runs alpha's Owner
+// as the batch Provider's controller does, with no option set. Each pin has a
+// positive control, the same run with the option set, which shows the other
+// behaviour, so a pin that could not fail does not pass for one.
+//
+// Two kinds of test:
+//   - The process tests (shellOwner) run a shell double as the relay's ssh.
+//     They check what the Owner does to the process it starts, its group and
+//     its signals, and how it tells an end, which a double shows exactly. No
+//     byte crosses them, and none claims to: HBEP-6 says a count of relays
+//     with no byte crossing proves nothing about a relay.
+//   - The path tests run harness_test.go's real path: ssh to the rehearsal's
+//     login node, an srun -u --overlap step of this binary as "relay
+//     <channel>", and the job side, with bytes crossing each relay.
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/hostdial"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
+)
+
+// shellJobs is the process tests' listing: each tag's job is running.
+type shellJobs map[string]string
+
+func (s shellJobs) ListByTag(_ context.Context, tag string) ([]provider.Job, error) {
+	if id, ok := s[tag]; ok {
+		return []provider.Job{{ID: id, Name: tag, Phase: v1alpha1.AllocationRunning}}, nil
+	}
+	return nil, nil
+}
+
+// shellOwner starts an Owner for the process tests, stopped at the test's
+// end. Its relays' doubles never write a preamble, so its ports, in issue
+// #343's block, are never dialed.
+func shellOwner(t *testing.T, o hostdial.OwnerOptions) *hostdial.Owner {
+	t.Helper()
+	o.Ports = map[agentapi.RelayChannel]int{control: 30000, serving: 30001}
+	o.Epoch = epoch(1)
+	o.Slots = hostdial.NewSlots(0)
+	o.MinBackoff, o.MaxBackoff, o.StopGrace = 50*time.Millisecond, 200*time.Millisecond, 5*time.Second
+	o.Logger = slog.New(slog.NewTextHandler(testWriter{t}, nil))
+	own, err := hostdial.NewOwner(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := own.Start(ctx); err != nil {
+			t.Errorf("the relay owner: %v", err)
+		}
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Error("the relay owner did not stop within 30 s")
+		}
+	})
+	return own
+}
+
+// shellTarget is the n-th process test target: its relays' "ssh" is sh
+// running script with the channel, dir and arg as its arguments, and its
+// standard error is kept for the end's reading, as sshrun.Stderr keeps it.
+// Its job is added to jobs, running.
+func shellTarget(n int, tag, script, dir, arg string, jobs shellJobs) hostdial.Target {
+	id := strconv.Itoa(40_000 + n)
+	jobs[tag] = id
+	return hostdial.Target{Tag: tag, JobID: id, AgentPath: "/stage/agent/e/hb-agent", AllocDir: "/stage/alloc/" + tag,
+		UID: fmt.Sprintf("0a1b2c3d-0000-4000-8000-%012d", n), Login: "login-" + strconv.Itoa(n) + ".example", Jobs: jobs, Gen: "1",
+		Command: func(line string) (*exec.Cmd, error) {
+			ch := control
+			if strings.Contains(line, " "+agentapi.RelaySubcommand+" "+string(serving)+" ") {
+				ch = serving
+			}
+			cmd := exec.Command("/bin/sh", script, string(ch), dir, arg)
+			cmd.Stderr = &bytes.Buffer{}
+			return cmd, nil
+		},
+		Stderr: func(cmd *exec.Cmd) string { return cmd.Stderr.(*bytes.Buffer).String() },
+	}
+}
+
+func writeScript(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// The group probe's relay double starts a child that records the signals it
+// gets, then waits. The child records "ready" once its traps are set, each
+// TERM as "term", and ends on WINCH with "winch"; it ends by itself after
+// about a minute, so a failed test leaves no process behind for long. It
+// holds none of the relay's standard streams: exec.Cmd.Wait waits for a
+// stream that a child still holds, so the relay's stop would wait for the
+// child.
+const (
+	groupRelaySh = `sh "$2/child.sh" "$2/$1.log" </dev/null >/dev/null 2>&1 &
+echo $! > "$2/$1.pid.tmp" && mv "$2/$1.pid.tmp" "$2/$1.pid"
+wait
+`
+	groupChildSh = `trap 'echo term >> "$1"' TERM
+trap 'echo winch >> "$1"; exit 0' WINCH
+echo ready >> "$1"
+i=0
+while [ "$i" -lt 600 ]; do sleep 0.1; i=$((i + 1)); done
+`
+)
+
+// groupSeen is what the group probe saw of one channel's relay.
+type groupSeen struct {
+	relay, pgid int
+	// lines is what the relay's child recorded.
+	lines string
+}
+
+// groupProbe starts one Allocation's relays under an Owner with o. Each
+// relay's double forks a child, which the test pins with a pidfd. The probe
+// records each relay's process group, then Drops the Allocation, which
+// returns once the relays are gone. Then it sends each child WINCH through
+// its pidfd and reads what the child recorded once it has exited. WINCH is
+// numbered above TERM, so a TERM the stop sent before it is handled first and
+// its line comes first: the order is the evidence, not a wait.
+func groupProbe(t *testing.T, o hostdial.OwnerOptions) map[agentapi.RelayChannel]groupSeen {
+	t.Helper()
+	dir := t.TempDir()
+	writeScript(t, dir, "child.sh", groupChildSh)
+	jobs := shellJobs{}
+	tg := shellTarget(1, "hb-relay-grp-0123456789ab", writeScript(t, dir, "relay.sh", groupRelaySh), dir, "", jobs)
+	own := shellOwner(t, o)
+	own.Want(tg)
+	seen := map[agentapi.RelayChannel]groupSeen{}
+	children := map[agentapi.RelayChannel]int{} // the children's pidfds
+	for _, ch := range agentapi.RelayChannels {
+		var relay, child int
+		waitFor(t, time.Minute, "the "+string(ch)+" relay's child ready", func() bool {
+			relay = relayOf(own, tg.Tag, ch).PID
+			b, err := os.ReadFile(filepath.Join(dir, string(ch)+".pid"))
+			if relay == 0 || err != nil {
+				return false
+			}
+			child, err = strconv.Atoi(strings.TrimSpace(string(b)))
+			l, lerr := os.ReadFile(filepath.Join(dir, string(ch)+".log"))
+			return err == nil && lerr == nil && strings.HasPrefix(string(l), "ready\n")
+		})
+		fd, err := unix.PidfdOpen(child, 0)
+		if err != nil {
+			t.Fatalf("pin the %s relay's child %d: %v", ch, child, err)
+		}
+		t.Cleanup(func() {
+			_ = unix.PidfdSendSignal(fd, syscall.SIGKILL, nil, 0)
+			_ = unix.Close(fd)
+		})
+		// The pinned process is the relay's child, not a reused PID.
+		if ppid := parentOf(t, child); ppid != relay {
+			t.Fatalf("process %d's parent is %d, not the %s relay %d", child, ppid, ch, relay)
+		}
+		pgid, err := syscall.Getpgid(relay)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen[ch] = groupSeen{relay: relay, pgid: pgid}
+		children[ch] = fd
+	}
+	own.Drop(tg.Tag)
+	for ch, fd := range children {
+		if alive(seen[ch].relay) {
+			t.Errorf("the %s relay %d outlived Drop", ch, seen[ch].relay)
+		}
+		if err := unix.PidfdSendSignal(fd, syscall.SIGWINCH, nil, 0); err != nil {
+			t.Fatalf("WINCH to the %s relay's child: %v", ch, err)
+		}
+		waitPidfdExit(t, fd, 30*time.Second, "the "+string(ch)+" relay's child")
+		b, err := os.ReadFile(filepath.Join(dir, string(ch)+".log"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := seen[ch]
+		s.lines = string(b)
+		seen[ch] = s
+	}
+	return seen
+}
+
+// parentOf reads a process's parent from /proc/<pid>/stat.
+func parentOf(t *testing.T, pid int) int {
+	t.Helper()
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	f := strings.Fields(s[strings.LastIndexByte(s, ')')+1:])
+	ppid, err := strconv.Atoi(f[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ppid
+}
+
+// waitPidfdExit waits until the pidfd's process has exited.
+func waitPidfdExit(t *testing.T, fd int, d time.Duration, what string) {
+	t.Helper()
+	end := time.Now().Add(d)
+	for {
+		pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		n, err := unix.Poll(pfd, 100)
+		if err != nil && err != unix.EINTR {
+			t.Fatalf("poll %s's pidfd: %v", what, err)
+		}
+		if n > 0 && pfd[0].Revents&(unix.POLLIN|unix.POLLHUP) != 0 {
+			return
+		}
+		if time.Now().After(end) {
+			t.Fatalf("%s did not exit within %s", what, d)
+		}
+	}
+}
+
+// Pin: alpha's relay process (no option set) leads a process group of its
+// own, and its stop signals that group, so a child its ssh forked gets the
+// TERM too (PR #301). The positive control is
+// TestAPidfdRelayLeadsNoGroupAndItsStopReachesOnlyIt.
+func TestAlphasRelayLeadsItsOwnGroupAndItsStopSignalsIt(t *testing.T) {
+	for ch, s := range groupProbe(t, hostdial.OwnerOptions{}) {
+		if s.pgid != s.relay {
+			t.Errorf("alpha's %s relay %d is in process group %d, want a group of its own", ch, s.relay, s.pgid)
+		}
+		if s.lines != "ready\nterm\nwinch\n" {
+			t.Errorf("alpha's %s relay's child recorded %q, want the stop's TERM before the test's WINCH", ch, s.lines)
+		}
+	}
+}
+
+// The relay keeper's relay process (OwnerOptions.Pidfd) leads no process
+// group of its own, and its stop, through its pidfd, reaches it alone: its
+// child never gets a TERM (HBEP-6, The relay keeper, Signals).
+func TestAPidfdRelayLeadsNoGroupAndItsStopReachesOnlyIt(t *testing.T) {
+	for ch, s := range groupProbe(t, hostdial.OwnerOptions{Pidfd: true}) {
+		if s.pgid == s.relay || s.pgid != syscall.Getpgrp() {
+			t.Errorf("the keeper's %s relay %d is in process group %d, want the test's %d", ch, s.relay, s.pgid, syscall.Getpgrp())
+		}
+		if s.lines != "ready\nwinch\n" {
+			t.Errorf("the keeper's %s relay's child recorded %q, want no TERM, only the test's WINCH", ch, s.lines)
+		}
+	}
+}
+
+// The end probe's relay double ends its relay as $3 says, as ssh passes on
+// what srun and the relay step said: srun's step-limit refusal (failed), the
+// relay's superseded exit code 5, or srun's refusal that the job does not
+// exist (the job's end).
+const endsRelaySh = `case "$3" in
+failed) echo "srun: error: Unable to create step for job 40000: Step limit reached for this job" >&2; exit 1 ;;
+superseded) exit 5 ;;
+gone) echo "srun: error: Unable to create step for job 40000: Invalid job id specified" >&2; exit 1 ;;
+esac
+exit 2
+`
+
+// toldEnds records what OnFailed and OnFinal were told.
+type toldEnds struct {
+	mu             sync.Mutex
+	failed, finals []string
+}
+
+func (e *toldEnds) hook(tg *hostdial.Target, onFinal bool) {
+	tag := tg.Tag
+	tg.OnFailed = func(ch agentapi.RelayChannel, cause string) {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		e.failed = append(e.failed, tag+" "+string(ch)+": "+cause)
+	}
+	if onFinal {
+		tg.OnFinal = func(ch agentapi.RelayChannel, kind hostdial.EndKind, cause string) {
+			e.mu.Lock()
+			defer e.mu.Unlock()
+			e.finals = append(e.finals, tag+" "+string(ch)+" "+kind.String()+": "+cause)
+		}
+	}
+}
+
+func (e *toldEnds) lists() (failed, finals []string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	failed, finals = slices.Clone(e.failed), slices.Clone(e.finals)
+	slices.Sort(failed)
+	slices.Sort(finals)
+	return failed, finals
+}
+
+// endsProbe runs three Allocations whose relays end failed, superseded and
+// with the job's end, and returns what OnFailed (and, with onFinal, OnFinal)
+// were told once all six relays ended for good, with each relay's final
+// cause as the Owner shows it.
+func endsProbe(t *testing.T, onFinal bool) (failed, finals []string, causes map[string]string) {
+	t.Helper()
+	dir := t.TempDir()
+	script := writeScript(t, dir, "relay.sh", endsRelaySh)
+	jobs := shellJobs{}
+	var told toldEnds
+	var tgs []hostdial.Target
+	for i, how := range []string{"failed", "superseded", "gone"} {
+		tg := shellTarget(i+1, "hb-relay-end-"+how, script, dir, how, jobs)
+		told.hook(&tg, onFinal)
+		tgs = append(tgs, tg)
+	}
+	own := shellOwner(t, hostdial.OwnerOptions{})
+	for _, tg := range tgs {
+		own.Want(tg)
+	}
+	causes = map[string]string{}
+	waitFor(t, time.Minute, "all six relays ended for good", func() bool {
+		for _, tg := range tgs {
+			for _, ch := range agentapi.RelayChannels {
+				r := relayOf(own, tg.Tag, ch)
+				if !r.Final {
+					return false
+				}
+				causes[tg.Tag+" "+string(ch)] = r.FinalCause
+			}
+		}
+		return true
+	})
+	failed, finals = told.lists()
+	return failed, finals, causes
+}
+
+// checkEndCauses checks that the probe's relays ended as their doubles said,
+// so a callback that was not told of an end is not mistaken for an end that
+// never happened.
+func checkEndCauses(t *testing.T, causes map[string]string) {
+	t.Helper()
+	want := map[string]string{
+		"hb-relay-end-failed":     "failed: srun refused the step: step limit reached for this job",
+		"hb-relay-end-superseded": "superseded: superseded (exit 5)",
+		"hb-relay-end-gone":       "the job's end: srun refused the step: the job is not running",
+	}
+	for tag, prefix := range want {
+		for _, ch := range agentapi.RelayChannels {
+			if got := causes[tag+" "+string(ch)]; !strings.HasPrefix(got, prefix) {
+				t.Errorf("%s's %s relay ended %q, want %q", tag, ch, got, prefix)
+			}
+		}
+	}
+}
+
+// Pin: alpha's OnFailed is told only of a failed end, never of a superseded
+// one or of the job's end, which also ended their relays for good here
+// (HBEP-6, What ends a relay: "A final end other than superseded or the job's
+// end raises a Warning event, reason RelayFailed"). The positive control is
+// TestOnFinalIsToldOfEveryFinalEndAndOnFailedStaysAsItWas.
+func TestOnFailedIsToldOnlyOfAFailedEnd(t *testing.T) {
+	failed, finals, causes := endsProbe(t, false)
+	checkEndCauses(t, causes)
+	want := []string{
+		"hb-relay-end-failed control: srun refused the step: step limit reached for this job",
+		"hb-relay-end-failed serving: srun refused the step: step limit reached for this job",
+	}
+	if !slices.Equal(failed, want) {
+		t.Errorf("OnFailed was told %q, want only the failed Allocation's two ends %q", failed, want)
+	}
+	if len(finals) != 0 {
+		t.Errorf("OnFinal, unset, was told %q", finals)
+	}
+}
+
+// The relay keeper's OnFinal is told of every final end, of each kind, while
+// OnFailed is told exactly what it is told without it.
+func TestOnFinalIsToldOfEveryFinalEndAndOnFailedStaysAsItWas(t *testing.T) {
+	failed, finals, causes := endsProbe(t, true)
+	checkEndCauses(t, causes)
+	if want := []string{
+		"hb-relay-end-failed control: srun refused the step: step limit reached for this job",
+		"hb-relay-end-failed serving: srun refused the step: step limit reached for this job",
+	}; !slices.Equal(failed, want) {
+		t.Errorf("OnFailed, beside OnFinal, was told %q, want %q", failed, want)
+	}
+	want := []string{
+		"hb-relay-end-failed control failed: srun refused the step: step limit reached for this job",
+		"hb-relay-end-failed serving failed: srun refused the step: step limit reached for this job",
+		"hb-relay-end-gone control the job's end: srun refused the step: the job is not running",
+		"hb-relay-end-gone serving the job's end: srun refused the step: the job is not running",
+		"hb-relay-end-superseded control superseded: superseded (exit 5): the agent keeps a newer relay",
+		"hb-relay-end-superseded serving superseded: superseded (exit 5): the agent keeps a newer relay",
+	}
+	if !slices.Equal(finals, want) {
+		t.Errorf("OnFinal was told %q, want %q", finals, want)
+	}
+}
+
+// srunsOn counts the srun lines the fake ran for a job's channel.
+func (w *world) srunsOn(jobID string, ch agentapi.RelayChannel) int {
+	n := 0
+	for _, l := range w.sruns(jobID) {
+		if strings.Contains(l, " "+agentapi.RelaySubcommand+" "+string(ch)+" ") {
+			n++
+		}
+	}
+	return n
+}
+
+// The keeper's relays (OwnerOptions.Pidfd) carry bytes over the real path,
+// lead no process group of their own, and are stopped by Drop through their
+// pidfds: the ssh processes and their relay steps end, and the job runs on.
+func TestAPidfdOwnersRelaysCarryBytesAndStopThroughTheirPidfds(t *testing.T) {
+	w := newWorld(t)
+	j := w.submit("hb-relay-pfd-0123456789ab", 30*time.Second)
+	own, _, _ := w.owner(hostdial.OwnerOptions{Pidfd: true})
+	own.Want(w.target(j))
+	up := waitUp(t, own, j.tag)
+	roundTrip(t, j, control, "control", payload(10_000))
+	roundTrip(t, j, serving, "serving", payload(10_000))
+	for ch, r := range up {
+		if pgid, err := syscall.Getpgid(r.PID); err != nil || pgid == r.PID || pgid != syscall.Getpgrp() {
+			t.Errorf("the keeper's %s relay %d is in process group %d (%v), want the test's %d", ch, r.PID, pgid, err, syscall.Getpgrp())
+		}
+	}
+	own.Drop(j.tag)
+	for ch, r := range up {
+		if alive(r.PID) {
+			t.Errorf("the keeper's %s relay %d outlived Drop", ch, r.PID)
+		}
+		waitFor(t, time.Minute, "the "+string(ch)+" relay step ended with its ssh", func() bool { return len(stepPIDs(t, j.id, ch)) == 0 })
+	}
+	if s, ok := w.plat.Job(atoi(t, j.id)); !ok || s.State != "RUNNING" {
+		t.Errorf("job %s is %v after Drop, want it running: the stop is the relays', not the job's end", j.id, s.State)
+	}
+}
+
+// A channel seeded as ended for good (Target.Final) is never started: no srun
+// line for it reaches the login node, the Owner shows it final with the
+// seeded cause, and neither OnFailed nor OnFinal is told of it again. The
+// other channel starts and carries bytes. The positive control: the same
+// Allocation wanted with no seed starts that channel, which carries bytes.
+func TestASeededFinalChannelIsNeverStarted(t *testing.T) {
+	w := newWorld(t)
+	j := w.submit("hb-relay-sfn-0123456789ab", 30*time.Second)
+	own, _, _ := w.owner(hostdial.OwnerOptions{})
+	const cause = "failed: srun refused the step: step limit reached for this job"
+	tg := w.target(j)
+	tg.Final = map[agentapi.RelayChannel]string{serving: cause}
+	var told toldEnds
+	told.hook(&tg, true)
+	own.Want(tg)
+	waitFor(t, time.Minute, "the control relay up and the serving relay final", func() bool {
+		return relayOf(own, j.tag, control).PID != 0 && relayOf(own, j.tag, serving).Final
+	})
+	roundTrip(t, j, control, "control", payload(10_000))
+	if r := relayOf(own, j.tag, serving); r.FinalCause != cause || r.Starts != 0 || r.PID != 0 {
+		t.Errorf("the seeded serving relay %+v: want final with the seeded cause, never started", r)
+	}
+	if n := w.srunsOn(j.id, serving); n != 0 {
+		t.Errorf("%d srun lines for the seeded serving channel reached the login node, want none", n)
+	}
+	if failed, finals := told.lists(); len(failed) != 0 || len(finals) != 0 {
+		t.Errorf("a seeded end was told again: OnFailed %q, OnFinal %q", failed, finals)
+	}
+	own.Drop(j.tag)
+	own.Want(w.target(j))
+	waitUp(t, own, j.tag)
+	roundTrip(t, j, serving, "serving", payload(10_000))
+}
+
+// A new credentials generation restarts the live channel on the new Gen and
+// keeps a seeded final channel down (the science agent's ruling on #343's
+// Q7, 10 Nov 2026). A Want that changes only the seed restarts nothing,
+// since same ignores Final: seeding the live channel later neither stops nor
+// ends it.
+func TestANewGenRestartsTheLiveChannelAndKeepsASeededFinalOneDown(t *testing.T) {
+	w := newWorld(t)
+	j := w.submit("hb-relay-gen-0123456789ab", 30*time.Second)
+	own, _, _ := w.owner(hostdial.OwnerOptions{})
+	const cause = "superseded: superseded (exit 5): the agent keeps a newer relay"
+	tg := w.target(j)
+	tg.Final = map[agentapi.RelayChannel]string{serving: cause}
+	own.Want(tg)
+	waitFor(t, time.Minute, "the control relay up", func() bool { return relayOf(own, j.tag, control).PID != 0 })
+	first := relayOf(own, j.tag, control)
+	roundTrip(t, j, control, "control", payload(1000))
+	tg.Gen = "2"
+	own.Want(tg)
+	waitFor(t, time.Minute, "the control relay up again on generation 2", func() bool {
+		r := relayOf(own, j.tag, control)
+		return r.PID != 0 && r.PID != first.PID && r.Gen == "2"
+	})
+	roundTrip(t, j, control, "control", payload(1000))
+	if r := relayOf(own, j.tag, serving); !r.Final || r.FinalCause != cause || r.Starts != 0 || r.Gen != "2" {
+		t.Errorf("the seeded serving relay on generation 2 %+v: want final with the seeded cause, never started", r)
+	}
+	if n := w.srunsOn(j.id, serving); n != 0 {
+		t.Errorf("%d srun lines for the seeded serving channel reached the login node, want none", n)
+	}
+	second := relayOf(own, j.tag, control)
+	tg.Final = map[agentapi.RelayChannel]string{serving: cause, control: cause}
+	own.Want(tg)
+	roundTrip(t, j, control, "control", payload(1000))
+	if r := relayOf(own, j.tag, control); r.PID != second.PID || r.Final || r.Starts != second.Starts {
+		t.Errorf("a Want that changed only the seed moved the live control relay: %+v, was %+v", r, second)
+	}
+}
+
+// OnStart is told of each ssh start of a channel's relay: once per channel at
+// the start, and once more for a relay started again after its ssh was
+// killed. The fake's own log of srun lines, one per start that reached the
+// login node, is the independent count; it lags the relay's session, so the
+// test waits for it.
+func TestOnStartIsToldOfEveryStart(t *testing.T) {
+	w := newWorld(t)
+	j := w.submit("hb-relay-ost-0123456789ab", 30*time.Second)
+	own, _, _ := w.owner(hostdial.OwnerOptions{})
+	var mu sync.Mutex
+	starts := map[agentapi.RelayChannel]int{}
+	tg := w.target(j)
+	tg.OnStart = func(ch agentapi.RelayChannel) {
+		mu.Lock()
+		defer mu.Unlock()
+		starts[ch]++
+	}
+	own.Want(tg)
+	up := waitUp(t, own, j.tag)
+	// Killed only once its session is up, so its start reached the login node.
+	waitFor(t, time.Minute, "both sessions up and both starts logged", func() bool {
+		return relayOf(own, j.tag, control).Sessions == 1 && relayOf(own, j.tag, serving).Sessions == 1 &&
+			w.srunsOn(j.id, control) == 1 && w.srunsOn(j.id, serving) == 1
+	})
+	if err := syscall.Kill(up[serving].PID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, time.Minute, "the serving relay started again", func() bool {
+		r := relayOf(own, j.tag, serving)
+		return r.PID != 0 && r.PID != up[serving].PID
+	})
+	roundTrip(t, j, serving, "serving", payload(1000))
+	roundTrip(t, j, control, "control", payload(1000))
+	waitFor(t, time.Minute, "the login node's log of the three starts", func() bool {
+		return w.srunsOn(j.id, control) == 1 && w.srunsOn(j.id, serving) == 2
+	})
+	mu.Lock()
+	got := map[agentapi.RelayChannel]int{control: starts[control], serving: starts[serving]}
+	mu.Unlock()
+	for ch, want := range map[agentapi.RelayChannel]int{control: 1, serving: 2} {
+		if got[ch] != want || w.srunsOn(j.id, ch) != want {
+			t.Errorf("the %s channel: OnStart told %d times, %d srun lines on the login node, want %d of each", ch, got[ch], w.srunsOn(j.id, ch), want)
+		}
+	}
+}
+
+// Over the real path, an old copy's relays that a newer one supersedes end
+// for good, and OnFinal is told of each as superseded, with no OnFailed: the
+// end the keeper reports for the mark in beta (HBEP-6, The relay keeper: "In
+// beta a superseded end is unexpected ... so the keeper reports it as a final
+// end needing the mark").
+func TestOnFinalIsToldOfASupersededEndOverTheRealPath(t *testing.T) {
+	w := newWorld(t)
+	j := w.submit("hb-relay-sup-0123456789ab", 30*time.Second)
+	nu, _, _ := w.owner(hostdial.OwnerOptions{Epoch: epoch(7)})
+	nu.Want(w.target(j))
+	waitUp(t, nu, j.tag)
+	roundTrip(t, j, serving, "serving", payload(1000))
+	old, _, _ := w.owner(hostdial.OwnerOptions{Epoch: epoch(6)})
+	var told toldEnds
+	tg := w.target(j)
+	told.hook(&tg, true)
+	old.Want(tg)
+	for _, ch := range agentapi.RelayChannels {
+		waitFor(t, time.Minute, "the old copy's "+string(ch)+" relay superseded", func() bool { return relayOf(old, j.tag, ch).Final })
+	}
+	roundTrip(t, j, serving, "serving", payload(1000))
+	failed, finals := told.lists()
+	want := []string{
+		j.tag + " control superseded: superseded (exit 5): the agent keeps a newer relay",
+		j.tag + " serving superseded: superseded (exit 5): the agent keeps a newer relay",
+	}
+	if !slices.Equal(finals, want) || len(failed) != 0 {
+		t.Errorf("OnFinal %q and OnFailed %q, want OnFinal %q and no OnFailed", finals, failed, want)
+	}
+}
