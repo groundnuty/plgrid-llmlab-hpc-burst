@@ -486,6 +486,13 @@ func (k *Keeper) onFinal(p string, e wire.Entry) func(agentapi.RelayChannel, hos
 		}
 		k.mu.Lock()
 		defer k.mu.Unlock()
+		if epoch < 1 || seq < 1 {
+			// A relay that never started a process (its relay line failed)
+			// has no (E, N) of its own: its end carries the keeper's E and N
+			// 1, the lowest the state file takes, so the record loads again
+			// and an acknowledgement can name it.
+			epoch, seq = k.epoch, 1
+		}
 		if kind == hostdial.EndSuperseded && k.supersededByOwnReplacement(p, e, ch, epoch, seq) {
 			k.o.Logger.Info("a superseded end of a relay the keeper itself replaced is not a failure", "provider", p, "tag", e.Tag, "channel", ch, "epoch", epoch, "seq", seq)
 			return

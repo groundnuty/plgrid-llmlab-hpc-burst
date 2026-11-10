@@ -55,16 +55,25 @@ func startLeading(t *testing.T, tag string) *leading {
 // pidfd, possibly mid-exchange), and a second double of the same Provider,
 // with a higher Lease epoch, sends its incomplete set (no Allocation observed
 // yet), then its complete one, while the serving stream runs. The stream is
-// not cut, and the new leader adopts the relays: their ssh PIDs, E and N are
-// unchanged in the keeper's status, the job side accepted no new session and
-// refused none, and the keeper's log shows no start of the Allocation's
-// relays during the hand-over, nor any start refused at its gate.
+// not cut, and the new leader adopts the relays:
+//   - the very same ssh processes run, read through the pidfds the test holds
+//     on them, verified at the start (a pidfd names one process, so no reused
+//     PID can pass), with their PIDs, E, N and one start each unchanged in
+//     the keeper's status;
+//   - the keeper lists each of the Allocation's relays exactly once;
+//   - the job side accepted no new session and refused none;
+//   - the keeper's log shows no start of the Allocation's relays during the
+//     hand-over, nor any start refused at its gate.
 //
-// Mutant (ownerrunner.go, want): the identity check "if in := p.cur[e.Tag];
-// in != nil && in.want.Entry == e && ..." made false, so a new leader's Want
-// replaces the relays: their PIDs and N change and the stream is cut.
+// Mutant (ownerrunner.go, want): the Runner's identity check "if in :=
+// p.cur[e.Tag]; in != nil && in.want.Entry == e && ..." made false. hostdial's
+// own Want ignores an equal target, so the relays are NOT replaced and their
+// PIDs, E and N stay the same (#359's mutant run: it survived those checks);
+// the Runner files them under a new instance and keeps the old as stopping,
+// so the keeper lists each relay twice, which the once-each check catches.
 func TestAHandOverAfterAKilledLeaderCutsNoStream(t *testing.T) {
 	l := startLeading(t, "hb-kp-hand-0123456789ab")
+	held := l.k.pins(l.up) // the relays' ssh, held through pidfds across the hand-over
 	before := l.j.status(t)
 	m := l.k.log.mark()
 	l.lead.kill()
@@ -79,7 +88,17 @@ func TestAHandOverAfterAKilledLeaderCutsNoStream(t *testing.T) {
 	for range 4 {
 		l.s.mustEcho(32<<10, "after the new leader's complete set")
 	}
+	listed := map[agentapi.RelayChannel]int{}
+	for _, r := range l.k.relaysOf(provA, l.j.tag) {
+		listed[r.Channel]++
+	}
 	for _, ch := range agentapi.RelayChannels {
+		if listed[ch] != 1 {
+			t.Errorf("the keeper lists the %s relay %d times after the hand-over, want once", ch, listed[ch])
+		}
+		if held[ch].exited() {
+			t.Errorf("the %s relay's ssh, held through its pidfd, exited during the hand-over: it was replaced", ch)
+		}
 		r, ok := l.k.upOf(provA, l.j.tag, ch)
 		switch {
 		case !ok:

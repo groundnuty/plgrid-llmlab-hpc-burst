@@ -44,6 +44,22 @@
 # go.dev, and a download that does not match fails the job. The Go save step runs only on a push and on
 # workflow_dispatch, so a pull request never writes a Go entry of its own.
 #
+# Go modules are not cached between runs, on purpose (issue #290: an untidy go.mod must never hide
+# behind a cache), so every job downloads them, and one transient error from proxy.golang.org, an
+# HTTP/2 stream reset on a zip, failed a job before any test ran (issue #346, PR #344). Two layers keep
+# that from failing a job, and neither stores a module anywhere:
+#   - The env below sets GOPROXY=https://proxy.golang.org|direct. The go command (Go 1.26.0,
+#     cmd/go/internal/modfetch/proxy.go) falls through to the next entry after any error when the
+#     separator is a pipe, and only after a 404 or 410 when it is a comma, which is the default; so a
+#     500 or a reset stream is now answered by the module's own origin (git over https, which the
+#     runners have). Every download is checked against go.sum whichever source answered, and
+#     GOFLAGS, GONOSUMDB, GOSUMDB and the other module settings stay as they were. It reaches every go
+#     command of every job, tidy's go mod tidy -diff included.
+#   - Each job that builds has a step right after the Go check that runs hack/go-mod-download.sh: go mod
+#     download, retried up to three times, then go mod verify. tidy has none: it must start from an empty
+#     module cache and its go mod tidy -diff must not be retried, since it exits 1 for "untidy" and for
+#     "a download failed" alike, so it relies on the pipe alone.
+#
 # The workflow reads no secret and pushes nothing. Every action is pinned by commit SHA.
 #
 # crd and launcher-k3s call scripts from hack/. A missing script fails the job: a job that
@@ -74,6 +90,11 @@ env:
   # hack/fetch-go.sh installs the version go.mod names. A go.mod that asks for something newer must
   # fail the job, not make the go command download a toolchain on its own.
   GOTOOLCHAIN: local
+  # The proxy first, and the module's own origin when the proxy fails in any way, not only on a 404 or
+  # 410 (see the top of this file, issue #346). It must stay a pipe: with a comma, a 500 or a reset
+  # stream fails the download. hack/gotoolchain's tests read this value and run the real go command
+  # against stand-ins that fail.
+  GOPROXY: "https://proxy.golang.org|direct"
 
 defaults:
   run:
@@ -125,6 +146,11 @@ jobs:
       - name: Check the Go on PATH is the pinned toolchain
         id: gocheck
         run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
+
+      # The modules are downloaded here, before anything builds: go mod download, tried again when it
+      # fails, then go mod verify (hack/go-mod-download.sh, issue #346). Nothing is cached between runs.
+      - name: Download and verify the Go modules
+        run: bash hack/go-mod-download.sh
 
       - name: Go version
         run: go version
@@ -379,6 +405,11 @@ jobs:
         id: gocheck
         run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
 
+      # The modules are downloaded here, before anything builds: go mod download, tried again when it
+      # fails, then go mod verify (hack/go-mod-download.sh, issue #346). Nothing is cached between runs.
+      - name: Download and verify the Go modules
+        run: bash hack/go-mod-download.sh
+
       # The pinned binaries come from the cache when it has them (see the top of this file): frp,
       # and the Kubernetes binaries that hack/test-binaries.sh keeps under HPCBURST_TOOLS_CACHE.
       # The go and crd jobs share one entry. The path lines of the restore and the save must match.
@@ -521,6 +552,11 @@ jobs:
       - name: Check the Go on PATH is the pinned toolchain
         id: gocheck
         run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
+
+      # The modules are downloaded here, before anything builds: go mod download, tried again when it
+      # fails, then go mod verify (hack/go-mod-download.sh, issue #346). Nothing is cached between runs.
+      - name: Download and verify the Go modules
+        run: bash hack/go-mod-download.sh
 
       # Downloads the two pinned k3s releases the tests start (1.35.9, then upgraded to 1.36.5) and
       # checks their sha256 against internal/launcher/k3s-pins.txt.
@@ -729,6 +765,11 @@ jobs:
         id: gocheck
         run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
 
+      # The modules are downloaded here, before anything builds: go mod download, tried again when it
+      # fails, then go mod verify (hack/go-mod-download.sh, issue #346). Nothing is cached between runs.
+      - name: Download and verify the Go modules
+        run: bash hack/go-mod-download.sh
+
       # The pinned binaries come from the cache when it has them (see the top of this file). The
       # two rehearsal jobs share one entry. The path lines of the restore and the save must match.
       - name: Restore the cached pinned binaries
@@ -848,6 +889,11 @@ jobs:
       - name: Check the Go on PATH is the pinned toolchain
         id: gocheck
         run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
+
+      # The modules are downloaded here, before anything builds: go mod download, tried again when it
+      # fails, then go mod verify (hack/go-mod-download.sh, issue #346). Nothing is cached between runs.
+      - name: Download and verify the Go modules
+        run: bash hack/go-mod-download.sh
 
       # The pinned binaries come from the cache when it has them (see the top of this file). The
       # two rehearsal jobs share one entry. The path lines of the restore and the save must match.

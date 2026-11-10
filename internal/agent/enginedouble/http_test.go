@@ -242,17 +242,25 @@ func TestEarlyStop(t *testing.T) {
 	}
 }
 
-// vLLM refuses min_tokens above max_tokens (SamplingParams._verify_args,
-// sampling_params.py:694-701), and so does the double.
+// vLLM refuses min_tokens above max_tokens and a negative min_tokens, each with
+// its own message (SamplingParams._verify_args, sampling_params.py:694-697 and
+// :698-702), and so does the double. The negative row once passed on the
+// upper bound's message, which vLLM does not give it: the literals below are
+// the source's.
 func TestMinTokensAboveMaxTokensIs400(t *testing.T) {
 	s := serve(t, cfgFor())
-	for name, extra := range map[string]map[string]any{
-		"min above max": {"max_tokens": 10, "min_tokens": 11},
-		"negative min":  {"max_tokens": 10, "min_tokens": -1},
+	for name, c := range map[string]struct {
+		extra map[string]any
+		want  string
+	}{
+		"min above max": {map[string]any{"max_tokens": 10, "min_tokens": 11}, "min_tokens must be less than or equal to max_tokens=10, got 11."},
+		"negative min":  {map[string]any{"max_tokens": 10, "min_tokens": -1}, "min_tokens must be greater than or equal to 0, got -1."},
 	} {
-		r := s.post("/v1/chat/completions", chatBody(3, extra))
-		if r.status != 400 || !strings.Contains(string(r.body), "min_tokens must be") {
-			t.Errorf("%s: HTTP %d %s, want 400 saying min_tokens must be less than or equal to max_tokens", name, r.status, r.body)
+		r := s.post("/v1/chat/completions", chatBody(3, c.extra))
+		var e errorBody
+		r.json(t, &e)
+		if r.status != 400 || e.Error.Message != c.want {
+			t.Errorf("%s: HTTP %d %q, want 400 and %q", name, r.status, e.Error.Message, c.want)
 		}
 	}
 	if r := s.post("/v1/chat/completions", chatBody(3, map[string]any{"max_tokens": 10, "min_tokens": 10})); r.status != 200 {
@@ -268,6 +276,16 @@ func TestNaturalLenIsConfigurable(t *testing.T) {
 	}
 }
 
+// A prompt over the context is a 400, with vLLM's message, and a prompt and a
+// limit that each fit are served. Issue 353 changed this test: it pinned a 400
+// for a prompt of 59 tokens with a limit of 42 in a context of 100 ("one token
+// over"), but vLLM v0.32.0 does not refuse that request. get_max_tokens clamps
+// it to min(100-59, 42) = 41 and serves it (serve/utils/api_utils.py:196-205);
+// only a prompt over the context (renderers/params.py:515-535) or a limit over
+// the whole window (params.py:256-268) is refused. That row is now a 200 here,
+// and the clamp has its own tests (length_test.go). The refusal's message
+// changed from the double's own wording to vLLM's, quoted in length_test.go.
+// This test still pins the chat template's 9 tokens: 50 words are 59 tokens.
 func TestOverlongPromptIs400(t *testing.T) {
 	cfg := cfgFor()
 	cfg.MaxModelLen = 100
@@ -279,8 +297,8 @@ func TestOverlongPromptIs400(t *testing.T) {
 		status int
 	}{
 		{"fits exactly: 59 prompt tokens + 41", 50, 41, 200},
-		{"one token over", 50, 42, 400},
-		{"the prompt alone over", 95, 1, 400},
+		{"one token over: clamped to min(100-59, 42) = 41, not refused (issue 353)", 50, 42, 200},
+		{"the prompt alone over: 95 words are 104 tokens", 95, 1, 400},
 		{"no max_tokens: the rest of the context", 50, 0, 200},
 	}
 	for _, tc := range cases {
@@ -298,8 +316,8 @@ func TestOverlongPromptIs400(t *testing.T) {
 				Error map[string]any `json:"error"`
 			}
 			r.json(t, &e)
-			if e.Error["type"] != "BadRequestError" || e.Error["code"] != float64(400) || e.Error["message"] == "" {
-				t.Errorf("%s: error = %v, want type BadRequestError, code 400 and a message", tc.name, e.Error)
+			if e.Error["type"] != "BadRequestError" || e.Error["code"] != float64(400) || e.Error["message"] != promptRefusal {
+				t.Errorf("%s: error = %v, want type BadRequestError, code 400 and %q", tc.name, e.Error, promptRefusal)
 			}
 		}
 	}
@@ -316,7 +334,8 @@ func TestOverlongPromptIs400(t *testing.T) {
 // either field, returns max_model_len - input_length
 // (serve/utils/api_utils.py:188-205). The expected limits are literals: the
 // 50-word prompt is 59 tokens (TestOverlongPromptIs400 pins the template's 9),
-// so with a context of 100 tokens 41 are left.
+// so with a context of 100 tokens 41 are left (min(100-59, 42) and the other
+// clamps are in length_test.go).
 func TestChatNullMaxTokensIsTheRestOfTheContext(t *testing.T) {
 	cfg := cfgFor()
 	cfg.MaxModelLen = 100
