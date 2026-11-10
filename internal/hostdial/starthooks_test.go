@@ -247,3 +247,43 @@ func TestOnExitIsToldOnceAStartedProcessIsGone(t *testing.T) {
 		}
 	}
 }
+
+// Pin: with BeforeStart, OnStartFailed and OnExit nil (alpha's targets), a
+// relay's starts, ends, restarts and failed starts are as before the hooks
+// existed: a relay whose "ssh" exits at once is started again and again, and
+// one whose "ssh" is missing records the failed start and is retried. The
+// positive controls are the tests above, with each hook set. hostdial's whole
+// package, which sets none of them, is the rest of the pin.
+func TestTheStartHooksNilRunAlphasPath(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run("missing "+strconv.FormatBool(missing), func(t *testing.T) {
+			dir := t.TempDir()
+			script := writeScript(t, dir, "relay.sh", "exit 0\n")
+			jobs := shellJobs{}
+			tg := shellTarget(1, "hb-relay-nil-0123456789ab", script, dir, "", jobs)
+			if missing {
+				tg.Command = func(string) (*exec.Cmd, error) { return exec.Command(filepath.Join(dir, "no-such-ssh")), nil }
+			}
+			if tg.BeforeStart != nil || tg.OnStartFailed != nil || tg.OnExit != nil {
+				t.Fatal("the target sets a start hook")
+			}
+			own := shellOwner(t, hostdial.OwnerOptions{})
+			own.Want(tg)
+			waitFor(t, time.Minute, "the relays retried", func() bool {
+				for _, ch := range agentapi.RelayChannels {
+					r := relayOf(own, tg.Tag, ch)
+					if missing && r.LastRefusal == "" || !missing && r.Starts < 2 {
+						return false
+					}
+				}
+				return true
+			})
+			for _, ch := range agentapi.RelayChannels {
+				if r := relayOf(own, tg.Tag, ch); r.Final || (missing && r.Starts != 0) {
+					t.Errorf("the %s relay with the hooks nil: %+v, want it retried, not final, and no start counted for a missing ssh", ch, r)
+				}
+			}
+			own.Drop(tg.Tag)
+		})
+	}
+}

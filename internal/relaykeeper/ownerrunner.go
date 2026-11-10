@@ -12,7 +12,10 @@ package relaykeeper
 // lock, and a Want's seeds (Want.Finals) take it too. So neither call reaches
 // hostdial at once: each is queued for the Provider, and one worker per
 // Provider, holding no keeper lock, reads the seeds, builds the Target and
-// calls the Owner, in the order the keeper called.
+// calls the Owner. The queue coalesces: it keeps only the latest pending
+// Want or Drop per tag, level-triggered, latest wins, so a worker stalled in
+// a blocking Drop while sets keep arriving holds at most one entry per
+// Allocation, and the keeper never blocks on it.
 
 import (
 	"context"
@@ -60,6 +63,9 @@ type OwnerRunnerOptions struct {
 	Logger *slog.Logger
 	// newOwner makes an Owner; a test replaces it. Nil is hostdial.NewOwner.
 	newOwner func(hostdial.OwnerOptions) (*hostdial.Owner, error)
+	// beforeOp, when set, is called by a Provider's worker before each queued
+	// Want or Drop, with its tag; a test stalls the worker with it.
+	beforeOp func(provider, tag string)
 }
 
 // OwnerRunner is the real Runner. Start it before the keeper takes sets; Stop
@@ -110,12 +116,8 @@ type provRunner struct {
 	r    *OwnerRunner
 	name string
 	own  *hostdial.Owner
-	// queue is the work for the worker, in order. It never blocks the
-	// keeper, which enqueues with its lock held while the worker may wait for
-	// that lock (Want.Finals): a slice, not a bounded channel.
-	qmu   sync.Mutex
-	queue []func()
-	wake  chan struct{}
+	// queue is the worker's pending work, coalesced per tag.
+	queue opQueue
 
 	mu sync.Mutex
 	// relays are the Provider's ssh settings' relay makers, by settings.
@@ -161,7 +163,7 @@ func (r *OwnerRunner) prov(name string) *provRunner {
 	if p := r.provs[name]; p != nil {
 		return p
 	}
-	p := &provRunner{r: r, name: name, wake: make(chan struct{}, 1), relays: map[string]*sshrun.Relay{}, cur: map[string]*relayInstance{}}
+	p := &provRunner{r: r, name: name, queue: newOpQueue(), relays: map[string]*sshrun.Relay{}, cur: map[string]*relayInstance{}}
 	r.provs[name] = p
 	epochRead := make(chan struct{})
 	var once sync.Once
@@ -196,11 +198,14 @@ func (r *OwnerRunner) prov(name string) *provRunner {
 			return
 		}
 		for {
-			for _, f := range p.take() {
-				f()
+			for _, op := range p.queue.take() {
+				if r.o.beforeOp != nil {
+					r.o.beforeOp(name, op.tag)
+				}
+				op.do()
 			}
 			select {
-			case <-p.wake:
+			case <-p.queue.wake:
 			case <-r.ctx.Done():
 				return
 			}
@@ -209,13 +214,56 @@ func (r *OwnerRunner) prov(name string) *provRunner {
 	return p
 }
 
-// take is the queued work, in order, emptying the queue.
-func (p *provRunner) take() []func() {
-	p.qmu.Lock()
-	defer p.qmu.Unlock()
-	q := p.queue
-	p.queue = nil
-	return q
+// opQueue is a Provider's pending Wants and Drops, coalesced: one entry per
+// tag, the latest put. It never blocks.
+type opQueue struct {
+	mu    sync.Mutex
+	order []string
+	ops   map[string]func()
+	wake  chan struct{}
+}
+
+type queuedOp struct {
+	tag string
+	do  func()
+}
+
+func newOpQueue() opQueue {
+	return opQueue{ops: map[string]func(){}, wake: make(chan struct{}, 1)}
+}
+
+// put makes f the tag's pending work, replacing any not yet taken.
+func (q *opQueue) put(tag string, f func()) {
+	q.mu.Lock()
+	if _, ok := q.ops[tag]; !ok {
+		q.order = append(q.order, tag)
+	}
+	q.ops[tag] = f
+	q.mu.Unlock()
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+}
+
+// take is the pending work, one per tag in the order the tags were first
+// put, emptying the queue.
+func (q *opQueue) take() []queuedOp {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	out := make([]queuedOp, 0, len(q.order))
+	for _, tag := range q.order {
+		out = append(out, queuedOp{tag: tag, do: q.ops[tag]})
+	}
+	q.order, q.ops = nil, map[string]func(){}
+	return out
+}
+
+// pending is how many tags have work pending.
+func (q *opQueue) pending() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.order)
 }
 
 // relay is the Provider's relay maker for s, its -F file written under a
@@ -254,29 +302,25 @@ func (r *OwnerRunner) LoginHost(provider string, s wire.SSH) string {
 	return strings.ToLower(rl.Login())
 }
 
-// Want queues w's Allocation's relays for the Provider's worker.
+// Want queues w's Allocation's relays for the Provider's worker, replacing
+// the tag's pending Want or Drop.
 func (r *OwnerRunner) Want(provider string, s wire.SSH, w Want) {
 	p := r.prov(provider)
-	p.enqueue(func() { p.want(s, w) })
+	p.enqueue(w.Entry.Tag, func() { p.want(s, w) })
 }
 
-// Drop queues the stop of the Allocation's relays for the Provider's worker.
+// Drop queues the stop of the Allocation's relays for the Provider's worker,
+// replacing the tag's pending Want or Drop.
 func (r *OwnerRunner) Drop(provider, tag string) {
 	p := r.prov(provider)
-	p.enqueue(func() { p.drop(tag) })
+	p.enqueue(tag, func() { p.drop(tag) })
 }
 
-func (p *provRunner) enqueue(f func()) {
+func (p *provRunner) enqueue(tag string, f func()) {
 	if p.own == nil {
 		return // no Owner: nothing would run it
 	}
-	p.qmu.Lock()
-	p.queue = append(p.queue, f)
-	p.qmu.Unlock()
-	select {
-	case p.wake <- struct{}{}:
-	default:
-	}
+	p.queue.put(tag, f)
 }
 
 // want is a Want on the worker: the seeds read now, with no keeper lock
