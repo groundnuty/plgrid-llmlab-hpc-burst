@@ -322,7 +322,7 @@ func (p *sshProc) wait(what string) int {
 // names the gateway's directory.
 func (r *gwRig) gwProcs() []string {
 	var left []string
-	for _, p := range below(os.Getpid()) {
+	for _, p := range below(ownRow()) {
 		if b, _ := os.ReadFile("/proc/" + strconv.Itoa(p.pid) + "/comm"); strings.HasPrefix(string(b), "sshd") {
 			left = append(left, strconv.Itoa(p.pid)+" sshd")
 		}

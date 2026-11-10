@@ -17,9 +17,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"sync"
-	"syscall"
-	"time"
 )
 
 // safeText is what a path may hold to go into authorized_keys' command="..."
@@ -164,7 +161,7 @@ type sshdServer struct {
 
 // startSSHD writes the files and starts serving. A client can connect as
 // soon as it returns.
-func startSSHD(bin string, f sshdFiles, spec sshdSpec) (*sshdServer, error) {
+func startSSHD(name, bin string, f sshdFiles, spec sshdSpec) (*sshdServer, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("rehearsal: listen: %w", err)
@@ -178,7 +175,7 @@ func startSSHD(bin string, f sshdFiles, spec sshdSpec) (*sshdServer, error) {
 		ln.Close()
 		return nil, err
 	}
-	s := &sshdServer{ln: ln, log: log, pool: &sshdPool{bin: bin, conf: f.conf, log: log}}
+	s := &sshdServer{ln: ln, log: log, pool: newPool(name, bin, f.conf, log)}
 	s.pool.wg.Add(1)
 	go s.pool.serve(ln)
 	return s, nil
@@ -190,137 +187,10 @@ func (s *sshdServer) port() int { return s.ln.Addr().(*net.TCPAddr).Port }
 func (s *sshdServer) stopListening() { s.ln.Close() }
 
 // stop ends every sshd and everything seen under it, with extra, and waits
-// until they are gone (sshdPool.stop). The listener must be closed first.
-func (s *sshdServer) stop(extra []procRow) {
-	s.pool.stop(extra)
+// until they are gone (sshdPool.stop). The listener must be closed first. A
+// process it refused to signal is an error (signalProcs).
+func (s *sshdServer) stop(extra []procRow) error {
+	err := s.pool.stop(extra)
 	s.log.Close()
-}
-
-// sshdProc is one sshd the node started.
-type sshdProc struct {
-	cmd  *exec.Cmd
-	self procRow
-	done chan struct{}
-	// below are the processes seen under it while it lived; mu guards them.
-	mu    sync.Mutex
-	below map[int]procRow
-}
-
-func (p *sshdProc) record() {
-	rows := below(p.self.pid)
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, r := range rows {
-		p.below[r.pid] = r
-	}
-}
-
-func (p *sshdProc) seen() []procRow {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	rows := make([]procRow, 0, len(p.below))
-	for _, r := range p.below {
-		rows = append(rows, r)
-	}
-	return rows
-}
-
-// sshdPool starts an sshd per accepted connection and stops them all.
-type sshdPool struct {
-	bin, conf string
-	log       *os.File
-
-	mu     sync.Mutex
-	procs  []*sshdProc
-	closed bool
-	wg     sync.WaitGroup
-}
-
-// serve hands each connection the listener accepts to a new sshd, until the
-// listener closes.
-func (s *sshdPool) serve(ln net.Listener) {
-	defer s.wg.Done()
-	for {
-		c, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		s.spawn(c.(*net.TCPConn))
-	}
-}
-
-// recordEvery is how often a live sshd's descendants are recorded. It is a
-// sampling interval, not a wait: Close also records them once more.
-const recordEvery = 50 * time.Millisecond
-
-func (s *sshdPool) spawn(c *net.TCPConn) {
-	defer c.Close()
-	f, err := c.File()
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	cmd := exec.Command(s.bin, "-i", "-e", "-f", s.conf)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = f, f, s.log
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return
-	}
-	if err := cmd.Start(); err != nil {
-		s.mu.Unlock()
-		return
-	}
-	self, _ := readProcRow(cmd.Process.Pid)
-	p := &sshdProc{cmd: cmd, self: self, done: make(chan struct{}), below: map[int]procRow{}}
-	s.procs = append(s.procs, p)
-	s.wg.Add(2)
-	s.mu.Unlock()
-	go func() { defer s.wg.Done(); _ = cmd.Wait(); close(p.done) }()
-	go func() {
-		defer s.wg.Done()
-		tick := time.NewTicker(recordEvery)
-		defer tick.Stop()
-		for {
-			p.record()
-			select {
-			case <-p.done:
-				return
-			case <-tick.C:
-			}
-		}
-	}()
-}
-
-// stopWait is how long the TERM phase lasts before the KILL.
-const stopWait = 5 * time.Second
-
-// stop ends every sshd and everything seen under it. The caller has stopped
-// the listener and the relay, so the forced commands end on their own; TERM
-// then KILL, by PID and start time, take what does not.
-func (s *sshdPool) stop(extra []procRow) {
-	s.mu.Lock()
-	s.closed = true
-	procs := append([]*sshdProc(nil), s.procs...)
-	s.mu.Unlock()
-	var all []procRow
-	for _, p := range procs {
-		p.record()
-		if p.self.pid != 0 {
-			all = append(all, p.self)
-		}
-		all = append(all, p.seen()...)
-	}
-	all = append(all, extra...)
-	signalProcs(all, syscall.SIGTERM)
-	deadline := time.Now().Add(stopWait)
-	for anyLive(all) && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-	}
-	signalProcs(all, syscall.SIGKILL)
-	s.wg.Wait()
-	for time.Now().Before(deadline.Add(stopWait)) && anyLive(all) {
-		time.Sleep(20 * time.Millisecond)
-	}
+	return err
 }

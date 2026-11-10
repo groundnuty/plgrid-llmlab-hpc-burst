@@ -64,7 +64,7 @@ func TestMain(m *testing.M) {
 			os.Exit(jobMain(os.Args[2:]))
 		}
 	}
-	os.Exit(m.Run())
+	os.Exit(rehearsal.ReportLeaks(m.Run()))
 }
 
 // relayMain is "relay <channel> ..." as cmd/hb-agent runs it: the arguments,

@@ -41,7 +41,7 @@ func TestMain(m *testing.M) {
 			fmt.Printf("FINDING: the rehearsal took %s, above issue #146's target of %s\n", took, rehearsalTarget)
 		}
 	}
-	os.Exit(code)
+	os.Exit(rehearsal.ReportLeaks(code))
 }
 
 // rehearsalTarget is issue #146's time for the whole rehearsal.
