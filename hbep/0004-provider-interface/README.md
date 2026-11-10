@@ -265,7 +265,7 @@ For a managed provider:
   - **Setup is bounded:** its preamble line must arrive within 30 s.
   - **Identity:** each relay is tracked by its PID and stopped by it.
   - **A job ended or not listed** ends the relay (HBEP-6, Dial-home modes).
-  - **The check before each start** reads the Provider's one queue listing per poll interval, never a listing of its own.
+  - **The check before each start** reads the Provider's one queue listing per poll interval, never a listing of its own. In beta the relay keeper starts a relay only under the controller's unexpired desired set, which carries that listing's time (HBEP-6, The relay keeper).
   - **Capacity:** in host-dialed mode a Provider has at most 2 Allocations, pending or running, a submit limit that the planner counts (`SubmitLimitReached`). Only one Provider per login host runs in this mode. The Provider's controller refuses a second, with `Ready` False and reason `LoginHostInUse` (HBEP-6).
 - **Reconnects:** when the master fails, the plugin closes it and reconnects with exponential backoff from 1 s to 1 min. Calls in flight report transport errors.
 - **Poll rate:** the queue listing is read once per poll interval for the whole Provider (`squeue --me --json`) and cached. Every Allocation's Observe reads that cache, after a forced refresh after any write. Accounting is read only for jobs the listing does not show, and once for each execution of a recorded job after it is first seen started, for its allocated CPUs and GPUs (HBEP-8, Provider accounting). The interval is 30 s, and 5 s while any of the Provider's attempts is unresolved or a job is held.

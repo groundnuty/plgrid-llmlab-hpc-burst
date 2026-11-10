@@ -296,7 +296,12 @@ No client key ID is a label: per-key usage is in the records.
 - **Export:**
   - The controller process's counts are on the lifecycle controller's `/metrics`, the Provider managers' included, since they bind no metrics port. Only the serving copy exports them, like the other `hpcburst_` series (Unknown samples); every controller that raises events in that process runs only on the copy that leads `lifecycle`.
   - The front's counts are on the front's own `/metrics`, which also gains the process collector's `process_start_time_seconds`.
-  - **The relay keeper (beta, HBEP-6)** exports no metrics of its own and binds no port. The serving copy of the lifecycle controller reads the keeper's relay states and ends over its socket, and exports them through its serving collector, so a non-serving copy still exports no `hpcburst_` series.
+  - **The relay keeper (beta, HBEP-6)** exports no metrics of its own and binds no port. The serving copy of the lifecycle controller reads the keeper's relay states and ends over its socket, and exports them through its serving collector, so a non-serving copy still exports no `hpcburst_` series:
+    - `hpcburst_relays{provider, channel, state}`, a gauge of relays by state (`up`, `retrying`, `final`);
+    - `hpcburst_relay_restarts_total{provider, channel}`, a counter of relay starts after the first;
+    - `hpcburst_relay_sets_refused_total{provider, reason}`, a counter of desired sets and acknowledgements the keeper refused (`epoch`, `login_host`).
+
+    A final end re-reported after a restart raises no second `RelayFailed`: the event is raised once, when the mark is newly written.
 - **Proving that an event was not raised** takes all four of these. Otherwise the result is inconclusive, never a pass:
   1. **The first read comes before the change** that could raise the event.
   2. **Both reads come from the same process while it serves:** `process_start_time_seconds` is unchanged, and on the lifecycle controller both `hpcburst_collector_success` series are present. A restart or a hand-over between the reads makes the check inconclusive.

@@ -24,7 +24,7 @@ Problems:
 - The front reaches every instance by its instance identity. No client or operator computes a host, address or port.
 - Each path has exactly one owner, and the path ends when its owner ends.
 - Path liveness is checked end to end, through the path to the engine.
-- Teardown leaves nothing behind. Every process the framework starts outside an allocation is in the inventory, and is removed by record, never by pattern. Host-dialed relays are in the controller's own records, and stopped by PID.
+- Teardown leaves nothing behind. Every process the framework starts outside an allocation is in the inventory, and is removed by record, never by pattern. Host-dialed relays are in the controller's own records in alpha, and in the relay keeper's in beta, and stopped by PID.
 - Only the path carries traffic from outside an allocation. Engine HTTP listeners bind to loopback or a Unix socket and are reached through the tunnel agent.
 
 ### Non-goals
@@ -73,11 +73,11 @@ Problems:
 - **The tunnel's ping succeeds while the engine is dead.** The front's probe goes through the path to the engine.
 - **An engine API key is taken for isolation.** A vLLM API key covers only part of the engine's HTTP API (vLLM's security documentation), and traffic between an engine's ranks is unauthenticated by default. So engine HTTP listeners bind to a Unix socket or loopback and are reached through frpc. A multi-node instance's rank traffic still crosses the cluster network unauthenticated. That is a known limitation, recorded in each platform profile (HBEP-4).
 - **Engine internals listen off loopback.** In spike S2 phase B each vLLM worker had its API port on the IPv4 loopback address and six more TCP listeners on the node's cluster address, although `--host` and `VLLM_HOST_IP` were both set to that loopback address (HBEP-5, Risks). The serving path needs the Instance's key. The other listeners are engine internals, which no key covers, so an Instance on a shared cluster network exposes them unless the provider's network isolates it.
-- **Beta: a relay-keeper restart cuts every host-dialed stream** on its host (Dial-home modes, The relay keeper). Mitigation: the keeper is a small process with no network listener and a stable interface, so it restarts only with an upgrade or a crash, and the launcher restarts it at once.
+- **Beta: a relay-keeper restart cuts every host-dialed stream** on its host (Dial-home modes, The relay keeper), and so does the launcher's `upgrade`, which stops the whole supervisor group. Mitigation: the keeper is a small process with no network listener and a stable interface, so it restarts only with an upgrade or a crash, and the launcher restarts it at once. A controller-only restart that keeps the keeper is open for beta's upgrades.
 - **Loopback is shared.** Other users' jobs on a shared compute node can reach the ssh forwards' local ports, and in host-dialed mode the agent's two listeners, and other local users on the control-plane host can reach frps and the plugin endpoint (L-7.5). The forwards lead only to endpoints that check the Allocation's credential or the Instance's key. The alpha host is single-user. Recorded as a known limit.
 - **No end-to-end encryption from front to engine.** TLS ends at the front's dial-home listener; from frps to frpc's socket the bytes are plain inside the TLS hop (open question 2). Security is not the main concern for alpha (owner), so this is a recorded limit.
 - **Paths outlive their owner.** frpc ends with its Instance and at the latest with the job. Owner references and garbage collection (HBEP-11) remove the front-side records.
-- **Teardown kills the wrong process.** The launcher stops frps by its recorded process ID plus start time (HBEP-11). The agent stops frpc and its ssh forwards as its own children. No respawners outside the controller and the launcher.
+- **Teardown kills the wrong process.** The launcher stops frps by its recorded process ID plus start time (HBEP-11). The agent stops frpc and its ssh forwards as its own children. No respawners outside the controller, the launcher and, in beta, the relay keeper, which starts relays only under a leader's unexpired set.
 - **The front's address changes.** frpc and the agent reach the front by DNS name in direct mode, never by a stored address.
 
 ### Open questions
@@ -251,7 +251,7 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
     So an unfenced hand-over (HBEP-11) can't make two copies take turns cutting each other. In beta the keeper issues `E` and `N`, and a hand-over replaces no relay (The relay keeper).
   - **`relay` exits** when its standard input closes or its socket closes.
 - **The control-plane side:**
-  - **When relays start and stop:** the controller starts both relays once the Allocation's job runs. It keeps them level-triggered: a dropped relay is started again, and a controller that takes the lead starts the relays of every running Allocation. It stops them by PID when the job ends or the Allocation is deleted. `srun` ends a step with its job, so no relay outlives the job.
+  - **When relays start and stop:** the controller (in beta, the keeper, on the controller's desired set) starts both relays once the Allocation's job runs. It keeps them level-triggered: a dropped relay is started again, and a controller that takes the lead starts the relays of every running Allocation. It stops them by PID when the job ends or the Allocation is deleted. `srun` ends a step with its job, so no relay outlives the job.
   - **Capacity:** in host-dialed mode a Provider has at most 2 Allocations, pending or running. That's a submit limit (`SubmitLimitReached`, HBEP-4), so the planner counts it, and the handover pair fits. The Provider's controller counts again, from a fresh read, just before it submits, and refuses a third with `SubmitLimitReached`; the race that remains is two Provider leaders in an unfenced hand-over (HBEP-11's accepted overlap), whose extra Allocation is brief and the planner's to release as surplus.
     - Each running Allocation's pair of relays is reserved together and held through a relay's backoff. So the 4 relays per login node that the probe held without refusal are never exceeded by one copy, and no Allocation is left with half a pair.
     - **Only one Provider per login host runs in host-dialed mode.** The login host is its `HostName` as `ssh -G` resolves it through the Provider's own `-F` file. The Provider's controller refuses a second Provider on that host: it submits nothing, and sets the Provider's `Ready` condition to False with reason `LoginHostInUse`, naming the login host and the Provider holding it. The planner then treats that Provider as unusable (`ProviderUnavailable`, HBEP-7), so no Allocation waits on it. A per-platform budget stays HBEP-4's open question 17.
@@ -269,7 +269,7 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
       A final end other than `superseded` or the job's end raises a Warning event, reason `RelayFailed`, regarding the Allocation, naming the channel and the cause (untyped, like every Provider-controller event in alpha; HBEP-8, open question 14). The code adds the reason to HBEP-8's table, since a new reason isn't an amendment. Before it raises the event, the Provider's controller writes the Allocation's condition `RelayEndedForGood` True, reason `RelayFailed`, with the event's message (#304). The rules for that mark:
       - **When it's written:** only on an Allocation that still runs the relay's job (the same UID and job, `Running`, not completing and not being deleted), and only while this copy leads. A copy that loses the lead during the write raises no event.
       - **It's never cleared.**
-      - **When the write fails,** the same process's next observation of the running Allocation sets it. A controller restart or hand-over before then forgets the failure, and the new leader starts the relays again, so a lasting cause ends them for good once more.
+      - **When the write fails,** the same process's next observation of the running Allocation sets it. In alpha a controller restart or hand-over before then forgets the failure (in beta the keeper keeps it, The relay keeper), and the new leader starts the relays again, so a lasting cause ends them for good once more.
       - **What follows:** the lifecycle controller ends the Allocation's Instances with reason `RelayEndedForGood` and a `failing` event, and releases the Allocation, whatever its retention policy (HBEP-7, step 5 and Retention). So its job and GPU are freed and the planner replaces the Instance. The release counts toward the class's `RestartLoop`, so a cause that keeps recurring pauses provisioning.
     - **Steps:** at the 30 s cap two relays make at most about 240 `srun` steps an hour, about 11,500 in 48 h, below the 40,000 `MaxStepCount` that both profiles record.
   - **A path that fails never restarts a healthy engine.** HBEP-7's rules apply, with one exception below:
@@ -280,26 +280,44 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
     The exception is a relay that ends for good, other than `superseded` or by its job's end: one channel never returns, so the Instance can't serve, and its Allocation is released (What ends a relay). Retried ends and `superseded` restart no engine.
 - **What a drop costs:** the streams on that session reset. A token stream in flight is cut and counted as cut, and a request already written is never replayed (HBEP-5). frpc logs in again once the relay is back.
 - **A controller restart, in alpha, cuts the relays** (owner decision, 9 Nov 2026: "Accept cuts for alpha"). The relays are children of the controller process, so a restart cuts every stream in flight, counted as cuts and never replayed, and the new leader starts both relays of every running Allocation within the backoff.
-- **The relay keeper (beta)** (open question 13). One process per control-plane host, `relaykeeper`, holds every host-dialed relay of that host, so the relays outlive a controller restart or a hand-over.
+- **The relay keeper (beta)** (open question 13). One process per control-plane host, `relaykeeper`, holds every host-dialed relay of that host, so the relays outlive a controller restart or a hand-over. Every controller copy that drives host-dialed relays runs on that host.
   - **Supervised like frps:** the launcher starts it under the controllers' supervisor, as a sibling of the controller processes and not a child, records it by process ID and start time, and `down` stops it by that record (HBEP-11). Its relays' `ssh` processes are its own children, started from a thread locked for good with `Pdeathsig=SIGKILL`, so they die with the keeper and never with a controller.
   - **What a controller restart then leaves standing:**
     - each relay's `ssh` process and its yamux session, held by the keeper;
     - every **serving** stream, whose host end is the front's dial-home listener at base+7, and which goes through frps; neither restarts with the controller.
-    - **What still ends:** the **control** streams, whose host end is the agent endpoint at base+3, in the controller's process. The agent re-registers on its next poll with the same `agentInstanceID`, as in direct and ssh mode (HBEP-7, registration is soft state).
-  - **Fencing moves to the keeper.**
-    - The keeper issues each relay's `E` and `N`. `E` is the keeper's own count of its starts, persisted beside its record, and `N` is per channel, as before. The job side (`relay --epoch --seq`, the agent keeping the highest `(E, N)`) is unchanged, so a keeper that restarts supersedes the relays of its former run.
-    - A controller fences its commands to the keeper instead: each desired set carries the sender's `provider-<name>` `Lease` epoch (`leaseTransitions` at its own acquisition write), and the keeper refuses a set from an epoch lower than the highest it has seen for that Provider.
-    - A new leader **adopts** the keeper's relays and replaces none. "A copy that loses the lead stops its relays before it releases the `Lease`" doesn't apply in beta, since a copy holds no relays.
-  - **The interface:** a Unix socket in the launcher's run directory, mode 0600, owned by the host's user. Over it:
-    - the leading controller of each Provider sends its full desired set, level-triggered: the running Allocations, each with its job, login host, the Provider's ssh configuration file and the agent binary's path, never a secret;
-    - the keeper reports each relay's state and how it ended;
-    - the leader acknowledges each final end once it has written `RelayEndedForGood`.
+    - **What still ends:** the **control** streams, whose host end is the agent endpoint at base+3, in the controller's process. A refused dial closes only that stream, never the session, and the agent re-registers on its next poll with the same `agentInstanceID` (HBEP-7, registration is soft state).
+    - **The limit:** this covers a controller that exits or loses its lead. The launcher's `upgrade` stops the whole supervisor group, keeper included, so a planned upgrade still cuts every host-dialed stream (Risks).
+  - **The keeper's state file** lives in the launcher's state directory, mode 600, and `down` keeps it. It holds:
+    - the keeper's epoch base;
+    - each Provider's highest accepted `Lease` epoch;
+    - the final ends not yet decided;
+    - the login-host claims (below).
 
-    The keeper keeps an unacknowledged final end, persisted beside its record, until a leader acknowledges it. That closes alpha's limit, where a restart before the mark was written forgot the failure (What ends a relay).
-  - **No leader:** the keeper keeps the relays it has, which end with their jobs through `srun` at the latest, and starts none. An Allocation deleted while no controller leads keeps its relays until its job ends, a stated limit.
-  - **Capacity:** one keeper per host is the single owner of HBEP-4's 4-relays-per-login-host count, across Providers and leadership generations. The 2-Allocations-per-Provider submit limit and `LoginHostInUse` stay as they are.
-  - **A keeper restart** cuts every host-dialed stream on the host, as an frps restart cuts every tunnel. The new keeper starts the relays of its last desired sets with a higher `E`. It's a new risk, recorded under Risks.
-  - **Signals:** the keeper signals only its own recorded children, through a pidfd, as the 10 Nov incident's fix requires of the test harness (#308).
+    Every change is written and synced before it takes effect. The launcher's `restore` clears the accepted `Lease` epochs, since a restored store rolls `leaseTransitions` back.
+  - **Fencing moves to the keeper.**
+    - **The keeper issues each relay's `E` and `N`.** `E` is 2³¹ plus the keeper's start count, written and synced before any relay of that run starts. A Kubernetes `Lease`'s `leaseTransitions` is an `int32` and the job side's epoch an `int64`, so every keeper relay outranks every alpha relay, and a restarted keeper's relays outrank its former run's.
+    - **The job side is unchanged:** `relay --epoch --seq`, and the agent keeping the highest `(E, N)` on each channel.
+    - **A controller fences what it sends instead:** each desired set and each acknowledgement carries the sender's `provider-<name>` `Lease` epoch (`leaseTransitions` at its own acquisition write), and the keeper refuses one from an epoch lower than that Provider's highest accepted.
+    - **A copy that loses the lead** stops sending sets and acknowledgements before it releases the `Lease`. A copy holds no relays, so a new leader **adopts** the keeper's relays and replaces none.
+    - **In beta a `superseded` end is unexpected,** since no newer owner of a channel exists, so the keeper reports it as a final end needing the mark, like `RelayFailed`.
+  - **The interface:** a Unix socket at a short path the launcher chooses, its length checked against the 107-byte limit, mode 0600 and owned by the host's user. Over it:
+    - **the leading controller of each Provider sends desired sets,** level-triggered. A set names the running Allocations, each with its UID, job, Allocation directory and credentials generation, and the login host and the paths of the Provider's key and known-hosts file. It never carries a secret.
+    - **A set is marked complete** once every running Allocation has been observed under this lead. Only a complete set stops a relay by leaving its Allocation out, so a new leader whose master connection hasn't resolved its paths yet (HBEP-4) can't cut relays.
+    - **Each set carries the time of the Provider's queue listing it rests on, and expires** after one poll interval plus the renew deadline. That's beta's form of the check before each start (above): the keeper starts or restarts a relay only under an unexpired set that shows its job `RUNNING` under its tag, and a retry counts as a start. Sets aren't persisted: after its own restart, the keeper starts nothing until a fresh set arrives.
+    - **The keeper writes its own private `-F` file for each Provider,** under a stable name, from the paths in the set, with the hardening of HBEP-4 (Transport). A relay's identity is its Allocation UID, job, channel and credentials generation, never a file path. A new generation restarts the relay, as in alpha (PR #301), and a new leader sending the same generation replaces nothing.
+    - **The keeper reports** each relay's state, and each final end with its kind: an actionable failure, which needs `RelayEndedForGood`, or `superseded` in beta, likewise.
+    - **The leader acknowledges a final end once it's decided:** the mark written, or the write refused with its reason (the Allocation ended, is being deleted, or has another UID or job). The keeper drops a decided end.
+    - **The keeper never restarts a channel whose final end it holds,** decided or not, until that Allocation leaves a complete set. `RelayFailed` is raised once, when the mark is newly written.
+
+    This closes alpha's limit, where a restart before the mark was written forgot the failure (What ends a relay).
+  - **No leader:** with no unexpired set for a Provider, the keeper keeps that Provider's relays, which end with their jobs through `srun` at the latest, and starts and restarts none. An Allocation deleted while no controller leads keeps its relays until its job ends, a stated limit. The keeper respawns nothing on its own (L-15.1).
+  - **Capacity and the login host:** the keeper is the single owner of HBEP-4's 4-relays-per-login-host count and of the one-host-dialed-Provider-per-login-host rule, across leadership generations.
+    - **A Provider's claim on a login host** lasts while the keeper holds any of its relays there.
+    - **A set from a second Provider for a held host** is refused with the holder's name, and that Provider's controller sets `Ready` False with `LoginHostInUse`.
+    - **With no relays held,** the deterministic rule decides: the oldest Provider, then by name.
+    - The 2-Allocations-per-Provider submit limit is unchanged.
+  - **A keeper restart** cuts every host-dialed stream on the host, as an frps restart cuts every tunnel. The new keeper takes a higher `E`, and starts relays only under fresh sets (Risks).
+  - **Signals:** the keeper signals only its own recorded children, each through a pidfd, as the 10 Nov incident's fix requires of the test harness (#308). Alpha's signal to a relay's process group is dropped, since a relay's `ssh` starts no children.
 - **The login node:** each relay keeps an ssh session and an `srun` client there for its Allocation's life. They relay bytes and compute nothing (HBEP-4, open question 14, as amended the same day, with the owner's go). Model weights and images never cross a relay; staging stays in the job (HBEP-7).
 
 **The dial-home listener's paths** (HBEP-5) in every mode: `/agent/v1/` goes to the agent endpoint. A `GET /~!frp` websocket upgrade goes to frps's bind port on loopback. frps matches the exact bytes `GET /~!frp` (frp facts), so the listener forwards the request line unchanged, never re-encoded. Every other path gets 404.
@@ -432,12 +450,12 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
   - **Channels stay apart:** frpc logs in and serves through the serving relay, and the agent's control traffic uses only the control relay.
   - **A relay killed mid-stream:** the stream is cut and counted, the relay starts again within the backoff, frpc logs in again, and the next request completes.
   - **A stream on either relay can reach only its channel's port.**
-  - **A restart of the Provider's controller:** its relays are stopped by PID, and the new leader starts both relays of every running Allocation.
+  - **A restart of the Provider's controller,** in alpha: its relays are stopped by PID, and the new leader starts both relays of every running Allocation. In beta the relay keeper's relays stay, and the new leader adopts them (the keeper's tests below).
   - **Two relays for one channel:** the agent keeps the newer.
   - **A fifth relay on one login node** waits.
   - **An `srun` command line without `-u`** fails a test of the argument list.
   - **The fake Slurm gains a streaming `srun -u` mode** (incremental standard input and output both ways, no output cap, no command time-out for a relay step), since today's fake returns output at exit.
-  - **Fencing:** an old copy's relay that arrives after the new copy's, with a lower epoch, is refused as `superseded`, and isn't started again. A copy that loses the lead stops its relays before it releases the `Lease`.
+  - **Fencing:** an old copy's relay that arrives after the new copy's, with a lower epoch, is refused as `superseded`, and isn't started again. In alpha, a copy that loses the lead stops its relays before it releases the `Lease`; in beta it stops sending sets and acknowledgements first.
   - **The rendezvous:** a batch step and a relay step with different `$TMPDIR` values still meet through `relay-socket`; a stale `relay-socket` (no listener) ends the relay as "agent not ready"; a peer of another user is refused.
   - **Capacity:** a third Allocation of a host-dialed Provider waits at submission (`SubmitLimitReached`); a pair is reserved whole, and neither relay of a running Allocation's pair is ever missing while the other runs.
   - **What ends a relay:**
@@ -450,11 +468,19 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
   - **The real platforms, at the first live run:** all 256 byte values cross each way, an `--overlap` step reaches the agent's socket, and the step lands on the batch host. The fake uses pipes, so none of this is shown by the fake.
   - **The relay keeper (beta):**
     - a controller restart and a leadership hand-over while streams run cut no serving stream, and the relays' `E` doesn't change;
-    - a desired set from a lower `Lease` epoch is refused;
-    - a final end the controller hasn't acknowledged survives a controller restart, and the next leader writes `RelayEndedForGood`;
-    - a keeper restart supersedes its old relays, and its new relays carry a higher `E`;
-    - `down` leaves no keeper and no relay `ssh` behind;
-    - the fifth relay on one login host waits, across two Providers.
+    - an agent fenced at an alpha epoch accepts the keeper's first relays, at 2³¹ plus the start count;
+    - a set or an acknowledgement from a lower `Lease` epoch is refused, including a stale controller that reconnects first after a keeper restart;
+    - after `restore`, the real leader's lower epoch is accepted;
+    - a new leader's incomplete set stops no relay;
+    - an expired set starts and restarts nothing. That holds after a keeper restart, during a leader outage, and for an Allocation deleted during that outage;
+    - a final end survives a controller restart, and the next leader writes `RelayEndedForGood` and acknowledges it;
+    - a final end whose Allocation was deleted before the replay is acknowledged as refused, and dropped;
+    - a crash after the mark but before the acknowledgement raises `RelayFailed` once;
+    - a final-ended channel isn't restarted after a keeper restart;
+    - a keeper restart's relays carry a higher `E`;
+    - `down` leaves no keeper and no relay `ssh` behind, and keeps the state file;
+    - a second Provider's set for a held login host is refused, and its `Ready` is `LoginHostInUse`;
+    - the surplus third Allocation of a Provider-leader overlap waits for its relays under the 4-relay count.
     - **Proves nothing here:** a restart test with no stream running, or a keeper and a controller in one process.
   - **None of these proves anything here:** a relay test with both ends in one process and no `srun` standard input and output between them, or a count of relays with no byte crossing.
 - **Loopback only.** frps holds exactly its three loopback ports, and `ss` shows no frps listener on another address. A positive control: started without `bindAddr`, frps listens on every interface, so the check can fail.
@@ -480,7 +506,8 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
 - Clients see only the front, so a path change is invisible to them.
 - **frps and frpc move together.** Both are pinned to one frp version in `internal/launcher/frp-pins.txt`. New Allocations get the current frpc. An frps upgrade waits until no running Allocation has another frpc version, or until that pair is tested.
 - **The agent protocol** (`/agent/v1/`) is unchanged; frpc's tunnel is separate from it.
-- **Stored state:** none of this HBEP's own, except the Allocation condition `RelayEndedForGood`, which is durable and never cleared (Dial-home modes, What ends a relay). Path state is soft, rebuilt from frps's list; frps's state lives in memory and is rebuilt by reconnects.
+- **Stored state:** none of this HBEP's own, except the Allocation condition `RelayEndedForGood`, which is durable and never cleared (Dial-home modes, What ends a relay), and in beta the relay keeper's state file (The relay keeper). Path state is soft, rebuilt from frps's list; frps's state lives in memory and is rebuilt by reconnects.
+- **From alpha's relays to the keeper (beta):** a host can switch with Allocations running. The keeper's `E` starts above every alpha epoch, so its relays supersede the controller's, and each running Allocation's streams are cut once at the switch. The reverse, back to in-controller relays, needs every host-dialed Allocation of the host drained first, since alpha's lower epochs would be refused as `superseded`.
 - **Downgrade:** start the earlier frps with the earlier frpc pin, under the same rule.
 
 ### Security
@@ -513,10 +540,11 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
    - component health: the launcher's check of frps (its process, its three loopback ports, `/healthz`), the plugin endpoint answering within 1 s, and each Instance's `TunnelConnected` condition with frps's last start and close times;
    - end to end: the front's probe through each tunnel to the engine;
    - not working: a probe that fails on a connected tunnel (the `degraded` event), or a condition that is False or Unknown for a running Instance.
+   - in beta, the relay keeper: its pidfd and socket for the launcher; and as silent-failure signals, the serving controller's relay series (HBEP-8), refused sets, and `superseded` ends.
 2. **Restart:**
    - frps: every tunnel drops and frpc logs in again on its own. Streams through it are cut. The controller's next list read shows the new state.
-   - The lifecycle controller: established tunnels stay up in direct and ssh modes; in host-dialed mode, in alpha, its relays, and the streams on them, are cut and restarted within the backoff, and in beta the keeper keeps them, and only control streams end.
-   - The relay keeper (beta): every host-dialed stream on the host is cut, and the new keeper starts the relays again with a higher `E`. While its plugin endpoint is down, logins and new proxies are refused, so an frpc that reconnects meanwhile retries until the plugin is back (Risks). After the restart the controller rebuilds path state from frps's list.
+   - The lifecycle controller: established tunnels stay up in direct and ssh modes; in host-dialed mode, in alpha, its relays, and the streams on them, are cut and restarted within the backoff, and in beta the keeper keeps them, and only control streams end. While its plugin endpoint is down, logins and new proxies are refused, so an frpc that reconnects meanwhile retries until the plugin is back (Risks). After the restart the controller rebuilds path state from frps's list.
+   - The relay keeper (beta): every host-dialed stream on the host is cut. The new keeper takes a higher `E` and starts relays once fresh sets arrive. The launcher's `upgrade` stops the whole supervisor group, so it cuts them too.
    - The front: its dial-home listener carries frpc's connections, so every tunnel drops and reconnects. Its probe state starts empty, and each Instance is eligible again at its first passing probe.
    - frpc or an ssh forward: the agent restarts it with backoff.
 3. **Silent failure:**
@@ -541,7 +569,7 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
    - per Allocation in host-dialed mode: two ssh connections, two `srun` clients on the login node and two `srun` steps in the job;
    - on the control-plane host: frps and the plugin endpoint, and in beta's host-dialed mode the relay keeper;
    - no grant hours beyond the Allocation's own, and nothing while the job waits in the queue.
-7. **Rollback:** stop frps, or stop the Instances' frpc. Instances keep running but take no traffic until a path returns, and streams in flight are cut. frps keeps no stored state, so nothing needs cleaning beyond the launcher's record.
+7. **Rollback:** stop frps, or stop the Instances' frpc. Instances keep running but take no traffic until a path returns, and streams in flight are cut. frps keeps no stored state, so nothing needs cleaning beyond the launcher's record. In beta, stopping the relay keeper cuts every host-dialed stream; its state file must be kept, or a new keeper's epochs could fall below its old relays'.
 
 ## Drawbacks
 
@@ -583,6 +611,7 @@ Dial home replaces www-2027's central relays and forward watchdogs, which kept h
 
 | Idea | Origin (project, paper or document) | Where it lands here |
 |---|---|---|
+| A per-host process that holds connections across restarts of its controller, fenced by the controller's lease epoch | New in this HBEP, after frps's supervision by the launcher (HBEP-11) and the alpha relays' epoch fencing (PR #301) | The relay keeper (beta), Dial-home modes |
 | An SSH relay behind a forced-command key, with measured overhead | GWDG SAIA ([gwdg/saia-hpc](https://github.com/gwdg/saia-hpc)) | The restricted key of ssh mode; open question 3 |
 | Dial home from jobs over outbound-only connections | OpenTela with libp2p ([eth-easl/opentela](https://github.com/eth-easl/opentela)); interLink's mesh ([interlink-hq/interLink](https://github.com/interlink-hq/interLink)) | Dial home, and its alternatives |
 | frp's tunnel through a TLS terminator on 443, its heartbeat settings, capacity and head-of-line figures | spike S1 (issue #18) and spike S1c (PR #78), this project | Open questions 1 and 6, Heartbeats, Risks, Operational readiness 5 |
@@ -611,7 +640,7 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 | An ssh banner was read as proof that the clusters reached the VM; the host key was a gateway's. | L-17.7 | In ssh mode the forwards use a pinned host key (HBEP-7, The allocation agent), and S1's kit checks the target's own key, not a banner, before any forward. |
 | Checks that cannot see what they check passed while wrong. | L-10.6 | The probe goes through the tunnel to the engine; frpc never runs without its certificate; the condition is Unknown when frps's list cannot be read. |
 | Keyword sweeps missed many tunnels at the end. | L-15.2 | frps is in the launcher's record, and every tunnel is in frps's list. |
-| A scheduled respawner revived killed relays. | L-15.1 | No respawners outside the controller and the launcher. |
+| A scheduled respawner revived killed relays. | L-15.1 | No respawners outside the controller and the launcher; in beta the relay keeper starts relays only under a leader's unexpired set. |
 | Kill by pattern hit the wrong processes. | L-11.2 | frps is stopped by its recorded process ID plus start time. |
 | Recorded process IDs pointed at the wrong process. | L-11.3 | The start time is checked together with the process ID. |
 
@@ -667,5 +696,15 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
   - **Fencing:** the keeper issues the relays' epochs, and the `Lease` epoch fences the controllers' desired sets instead. A new leader adopts relays and never replaces them.
   - **Durable failures:** the keeper keeps unacknowledged final ends, which closes alpha's lost-failure limit.
   - **Capacity:** it owns the per-login-host relay count.
+
+  - **Settled in this PR's review** (Astra and a fresh Opus):
+    - the keeper's epochs start at 2³¹, above alpha's;
+    - its state file is synced and survives `down`, and `restore` clears its fence;
+    - sets are complete-or-not, carry their listing time and expire, and the keeper starts nothing without an unexpired one;
+    - the keeper writes its own ssh configuration, and a relay's identity is its credentials generation;
+    - acknowledgements are fenced, and a decided end may also be a refused write;
+    - final-ended channels are never restarted;
+    - the login-host claim lasts while relays are held;
+    - the upgrade limit is stated.
 
   Alpha's in-controller relays are unchanged. Before, open question 13 was open, and a controller restart cut host-dialed streams in every stage.
