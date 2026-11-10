@@ -19,8 +19,9 @@
 #      and tries again, a bounded number of times, when the download fails. A blip is then answered by
 #      the proxy again within seconds, not by a slower walk to each origin, and every later go command
 #      reads the module cache of this run. It then runs go mod verify on what was downloaded, which no
-#      other step of CI did: a file whose bytes differ from go.sum's pin fails the job here, and is never
-#      retried, since a second download cannot make a corrupt file honest.
+#      other step of CI did: it compares the cache with the hash recorded when each module was downloaded
+#      (and checked against go.sum then), so a file that changed since, a missing record or an unreadable
+#      cache fails the job here. A failed verify is never retried: a second download does not change it.
 #
 # A failure that is no network error (go.sum lacks an entry, go.mod is unreadable) fails every attempt
 # and is retried too, because the go command's exit status cannot tell the two apart: it costs the pauses
@@ -60,7 +61,7 @@ while ! go mod download; do
 done
 
 if ! go mod verify; then
-  echo "go-mod-download.sh: go mod verify failed: a downloaded module differs from go.sum, and a retry cannot fix that" >&2
+  echo "go-mod-download.sh: go mod verify failed (its own message is above); a retry does not change that" >&2
   exit 1
 fi
 echo "go-mod-download.sh: downloaded and verified on attempt $attempt of $attempts"

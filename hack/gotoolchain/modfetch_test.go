@@ -12,7 +12,14 @@ package gotoolchain
 //     serves the module, as each test says;
 //   - "direct" is the go command's own: the module path is a github.com one, so it runs git against
 //     https://github.com/..., and a git config in the environment (url.<base>.insteadOf) sends that to a
-//     repository on disk, or to a directory that does not exist when a test needs direct to be dead.
+//     repository on disk, or, when a test needs direct to fail, to a repository that holds no such tag
+//     (git then lists its refs and the go command finds no v1.0.0; a repository that git cannot read at
+//     all would make the go command ask https://github.com itself, which no git setting can redirect).
+// Nothing can leave the machine even by mistake, and a test that tried would fail: the go command's own
+// HTTP client is given a tripwire as its proxy (it never proxies loopback, so the stand-ins are
+// unaffected), which answers 502 to anything and records the host it was asked for. Every run asserts
+// that it recorded none. The go command ignores the error of that fallback request, so the output alone
+// would not show it.
 // The fixture's go.sum comes from a run through direct, and the stand-in's zip is built by archive/zip
 // from the same files, so a proxy-served download passes only if the two independent constructions agree
 // on the module's hash. GOSUMDB stays at its default: go.sum holds every hash, so no lookup is made.
@@ -179,6 +186,35 @@ func moduleFiles(t *testing.T, source string) map[string][]byte {
 	}
 }
 
+// tripwire is the proxy that the go command's HTTP client is given for every host but loopback. It
+// answers 502 to every request, and records what the request asked for (a CONNECT's host and port, or a
+// plain request's method and URL).
+type tripwire struct {
+	srv *httptest.Server
+	mu  sync.Mutex
+	got []string
+}
+
+func newTripwire(t *testing.T) *tripwire {
+	t.Helper()
+	w := &tripwire{}
+	w.srv = httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		w.mu.Lock()
+		w.got = append(w.got, r.Method+" "+r.Host)
+		w.mu.Unlock()
+		http.Error(rw, "tripwire: nothing in these tests may leave the machine", http.StatusBadGateway)
+	}))
+	t.Cleanup(w.srv.Close)
+	return w
+}
+
+// reached is what the tripwire was asked for since the rig was made: nothing, in a good run.
+func (w *tripwire) reached() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]string(nil), w.got...)
+}
+
 const (
 	modPath = "/" + fixMod + "/@v/" + fixVersion + ".mod"
 	zipPath = "/" + fixMod + "/@v/" + fixVersion + ".zip"
@@ -192,6 +228,8 @@ type modRig struct {
 	origin   string // what https://github.com/ becomes for git: <origin>/example-owner/fixture.git
 	goBin    string
 	cacheN   int
+	otherTag string // noVersionOrigin's path, once made
+	trip     *tripwire
 }
 
 func newModRig(t *testing.T) *modRig {
@@ -203,7 +241,7 @@ func newModRig(t *testing.T) *modRig {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Fatalf("git is not on PATH, and the go command's direct mode needs it: %v", err)
 	}
-	r := &modRig{t: t, root: t.TempDir(), goBin: goBin}
+	r := &modRig{t: t, root: t.TempDir(), goBin: goBin, trip: newTripwire(t)}
 	r.origin = r.makeOrigin("origin", fixSource)
 	r.consumer = filepath.Join(r.root, "consumer")
 	if err := os.MkdirAll(r.consumer, 0o755); err != nil {
@@ -219,6 +257,9 @@ func newModRig(t *testing.T) *modRig {
 	cmd.Env = env
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("seeding go.sum: %v\n%s", err, out)
+	}
+	if got := r.trip.reached(); len(got) > 0 {
+		t.Fatalf("seeding go.sum tried to reach beyond loopback: %q", got)
 	}
 	sums := string(mustRead(t, filepath.Join(r.consumer, "go.sum")))
 	for _, want := range []string{fixMod + " " + fixVersion + " h1:", fixMod + " " + fixVersion + "/go.mod h1:"} {
@@ -251,6 +292,12 @@ func (r *modRig) git(dir string, args ...string) {
 // fixture with this source, and returns <name>'s path.
 func (r *modRig) makeOrigin(name, source string) string {
 	r.t.Helper()
+	return r.makeOriginTagged(name, source, fixVersion)
+}
+
+// makeOriginTagged is makeOrigin with the tag it makes, which may be another than the one go.sum names.
+func (r *modRig) makeOriginTagged(name, source, tag string) string {
+	r.t.Helper()
 	base := filepath.Join(r.root, name)
 	work := filepath.Join(r.root, "work-"+name)
 	for _, d := range []string{work, filepath.Join(base, "example-owner")} {
@@ -263,15 +310,16 @@ func (r *modRig) makeOrigin(name, source string) string {
 	write(r.t, filepath.Join(work, "fixture.go"), []byte(source), 0o644)
 	r.git(work, "add", "-A")
 	r.git(work, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "fixture")
-	r.git(work, "tag", fixVersion)
+	r.git(work, "tag", tag)
 	r.git(work, "clone", "-q", "--bare", work, filepath.Join(base, "example-owner", "fixture.git"))
 	return base
 }
 
 // env is the environment of one go command (or of the script): its own caches under dir, the GOPROXY it
-// is given, and git sent to origin for every https://github.com/ URL. An origin that is not a directory
-// makes direct dead. GOFLAGS is only -modcacherw (CI sets none), so the temp dirs can be removed; the
-// checksum variables are not set unless extra does.
+// is given, and git sent to origin for every https://github.com/ URL. GOFLAGS is only -modcacherw (CI
+// sets none), so the temp dirs can be removed; the checksum variables are not set unless extra does.
+// The proxy variables point at the rig's tripwire: the go command's HTTP client uses them for every host
+// but loopback, so a request to anywhere else goes there, fails with a 502, and is recorded.
 func (r *modRig) env(dir, goproxy, origin string, extra ...string) []string {
 	r.t.Helper()
 	r.cacheN++
@@ -296,6 +344,7 @@ func (r *modRig) env(dir, goproxy, origin string, extra ...string) []string {
 		"GOPATH="+filepath.Join(dir, "gopath"), "GOMODCACHE="+filepath.Join(dir, "mod"), "GOCACHE="+filepath.Join(dir, "cache"),
 		"TMPDIR="+filepath.Join(dir, "tmp"),
 		"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=url.file://"+origin+"/.insteadOf", "GIT_CONFIG_VALUE_0=https://github.com/",
+		"HTTP_PROXY="+r.trip.srv.URL, "HTTPS_PROXY="+r.trip.srv.URL, "http_proxy="+r.trip.srv.URL, "https_proxy="+r.trip.srv.URL, "NO_PROXY=", "no_proxy=",
 	)
 	if gr := os.Getenv("GOROOT"); gr != "" {
 		env = append(env, "GOROOT="+gr)
@@ -326,6 +375,9 @@ func (r *modRig) runScript(env []string, extra ...string) (string, int) {
 	cmd := exec.CommandContext(ctx, "bash", filepath.Join("..", "go-mod-download.sh"))
 	cmd.Env = append(append(env, "GO_MOD_DIR="+r.consumer, "GO_MOD_DOWNLOAD_PAUSE=0"), extra...)
 	out, err := cmd.CombinedOutput()
+	if got := r.trip.reached(); len(got) > 0 {
+		r.t.Errorf("the run tried to reach beyond loopback: %q\n%s", got, out)
+	}
 	var ee *exec.ExitError
 	switch {
 	case err == nil:
@@ -338,16 +390,27 @@ func (r *modRig) runScript(env []string, extra ...string) (string, int) {
 	}
 }
 
-// deadOrigin is a directory that does not exist, so git finds no repository for any github.com URL.
-func (r *modRig) deadOrigin() string { return filepath.Join(r.root, "no-such-origin") }
+// noVersionOrigin is a repository git can read, whose only tag is not the one go.sum names: git lists
+// its refs, and the go command then finds no v1.0.0 in it. It is made once per rig.
+func (r *modRig) noVersionOrigin() string {
+	r.t.Helper()
+	if r.otherTag == "" {
+		r.otherTag = r.makeOriginTagged("other-tag-origin", fixSource, "v0.0.1")
+	}
+	return r.otherTag
+}
 
 func (r *modRig) liveEnv(goproxy string, extra ...string) []string {
 	return r.env(r.root, goproxy, r.origin, extra...)
 }
 
-func (r *modRig) deadEnv(goproxy string, extra ...string) []string {
-	return r.env(r.root, goproxy, r.deadOrigin(), extra...)
+// noVersionEnv is the environment of a run whose direct fails: its repository has no v1.0.0.
+func (r *modRig) noVersionEnv(goproxy string, extra ...string) []string {
+	return r.env(r.root, goproxy, r.noVersionOrigin(), extra...)
 }
+
+// unknownRevision is what the go command says when direct's repository has no such version.
+const unknownRevision = "unknown revision " + fixVersion
 
 func always(b behaviour) func(string, int) behaviour {
 	return func(string, int) behaviour { return b }
@@ -453,15 +516,18 @@ func TestModFetchWithACommaDoesNotFallBackOnA500OrAReset(t *testing.T) {
 	}
 }
 
-// The retry on its own: direct is dead, so only the proxy can serve, and it fails the zip once. The first
-// attempt fails, the second succeeds, and the stand-in saw the zip asked for twice.
-func TestModFetchRetriesAZipThatFailedOnceWhenDirectIsDead(t *testing.T) {
+// The retry on its own: direct cannot serve the version, so only the proxy can, and it fails the zip once.
+// The first attempt fails, the second succeeds, and the stand-in saw the zip asked for twice.
+func TestModFetchRetriesAZipThatFailedOnceWhenDirectCannotServeTheVersion(t *testing.T) {
 	r := newModRig(t)
 	p := newProxy(t, true, moduleFiles(t, fixSource), zipFailsOnce)
-	env := r.deadEnv(ciGoproxy(t, p.srv.URL), "SSL_CERT_FILE="+p.cert)
+	env := r.noVersionEnv(ciGoproxy(t, p.srv.URL), "SSL_CERT_FILE="+p.cert)
 	out, code := r.runScript(env, "GO_MOD_DOWNLOAD_ATTEMPTS=3")
 	if code != 0 {
 		t.Fatalf("exit %d, want 0: the second attempt should have succeeded:\n%s", code, out)
+	}
+	if !strings.Contains(out, unknownRevision) {
+		t.Errorf("the first attempt's failure does not show that direct was tried and had no %s:\n%s", fixVersion, out)
 	}
 	if !strings.Contains(out, "downloaded and verified on attempt 2 of 3") {
 		t.Errorf("want success on attempt 2 of 3:\n%s", out)
@@ -474,21 +540,24 @@ func TestModFetchRetriesAZipThatFailedOnceWhenDirectIsDead(t *testing.T) {
 	}
 }
 
-// Every path fails: the proxy answers 500 and direct is dead. The script must fail, after exactly as
-// many attempts as it was allowed, counted by the requests the proxy saw (a module whose .mod fails is
+// Every path fails: the proxy answers 500 and direct's repository has no such version. The script must
+// fail, after exactly as many attempts as it was allowed, counted by the requests the proxy saw (a module whose .mod fails is
 // asked for once per attempt), never by time.
 func TestModFetchFailsAfterExactlyTheAllowedAttemptsWhenEveryPathFails(t *testing.T) {
 	for _, attempts := range []int{1, 3} {
 		t.Run(strconv.Itoa(attempts), func(t *testing.T) {
 			r := newModRig(t)
 			p := newProxy(t, false, moduleFiles(t, fixSource), always(answer500))
-			env := r.deadEnv(ciGoproxy(t, p.srv.URL))
+			env := r.noVersionEnv(ciGoproxy(t, p.srv.URL))
 			out, code := r.runScript(env, "GO_MOD_DOWNLOAD_ATTEMPTS="+strconv.Itoa(attempts))
 			if code != 1 {
 				t.Fatalf("exit %d, want 1: no path works, and the job must fail:\n%s", code, out)
 			}
 			if !strings.Contains(out, "giving up") {
 				t.Errorf("the output does not say it gave up:\n%s", out)
+			}
+			if !strings.Contains(out, unknownRevision) {
+				t.Errorf("the failure is not direct's %q, so direct may not have been tried as meant:\n%s", unknownRevision, out)
 			}
 			if strings.Contains(out, "downloaded and verified") {
 				t.Errorf("the output claims success:\n%s", out)
