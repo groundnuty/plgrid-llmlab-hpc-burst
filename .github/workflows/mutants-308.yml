@@ -1,0 +1,129 @@
+# One-off, never merged: the mutants of issue #308's guards (PR #309), and -count runs of the tests that start the
+# rehearsal's sshd, on GitHub-hosted runners. Until #308 merges, no test that starts internal/rehearsal's sshd runs on the
+# shared development VM, and the science agent ruled that its tests and mutants run on hosted runners only.
+#
+# The mutants job runs the rehearsal kind's 17 tests with no mutant, -v, so each test's own PASS line is in the log, then
+# hack/mutate-alpha.sh --only with the kind's 24 mutants. Before the first one it runs the same tests under its own
+# command, with no mutant (its baseline), and stops with exit 2 if they fail, so every kill comes with a passing
+# baseline. The job fails unless all 24 are killed. The tests start no sshd and send no signal: every send goes to a
+# sink, and their stand-ins end on their own.
+#
+# The counts job runs each group's tests -count times. Its test binary's TestMain prints, last, how many processes the
+# nodes left outside the test's tree ("rehearsal: N leaked"); a group passes only with its tests passing and "0 leaked".
+name: mutants-308
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/mutants-308.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  mutants:
+    name: mutants 308
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          # The PR's own head, whose first parent is #309's head, not the merge with main.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: The rehearsal kind's tests with no mutant
+        run: |
+          git rev-parse HEAD^ | sed 's/^/tests from /'
+          sel=$(sed -n "s/^rehearsal_tests='\(.*\)'\$/\1/p" hack/mutate-alpha.sh)
+          [ -n "$sel" ] || { echo "no rehearsal_tests in hack/mutate-alpha.sh"; exit 1; }
+          echo "selection: $sel"
+          set +e
+          go test -count=1 -v -timeout 300s -run "$sel" ./internal/rehearsal > "$RUNNER_TEMP/baseline.txt" 2>&1
+          rc=$?
+          set -e
+          grep -E -- '^(--- |ok|FAIL|panic)' "$RUNNER_TEMP/baseline.txt"
+          [ "$rc" -eq 0 ] || { tail -40 "$RUNNER_TEMP/baseline.txt"; exit 1; }
+          pass=$(grep -c '^--- PASS' "$RUNNER_TEMP/baseline.txt")
+          echo "top-level PASS: $pass, want 17"
+          [ "$pass" -eq 17 ]
+
+      - name: The rehearsal kind's mutants
+        run: |
+          set +e
+          bash hack/mutate-alpha.sh --only '^internal/rehearsal/' > "$RUNNER_TEMP/mutants.txt" 2>&1
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/mutants.txt"
+          echo "mutate-alpha exit $rc"
+          killed=$(grep -c '^KILLED' "$RUNNER_TEMP/mutants.txt" || true)
+          echo "killed $killed of 24"
+          [ "$rc" -eq 0 ] && [ "$killed" -eq 24 ]
+
+  counts:
+    name: count ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: rehearsal, dir: internal/rehearsal, count: 20, run: '.'}
+          - {name: hostdial, dir: internal/hostdial, count: 5, run: '.'}
+          - {name: conformance B2, dir: internal/providerctl/conformance, count: 10, run: '^TestEachHostDialedFaultFailsTheCheckItStandsFor$'}
+          - {name: conformance S1, dir: internal/providerctl/conformance, count: 10, run: '^TestAStaleRelayDiesWithItsTest$'}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # As in ci.yml's go job: sshd for the tests that run it as this user, with no service started.
+      - name: Provide OpenSSH's sshd
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+            sudo chmod 755 /usr/sbin/policy-rc.d
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+            sudo rm -f /usr/sbin/policy-rc.d
+          fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
+          /usr/sbin/sshd -V 2>&1 | head -1
+          echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
+
+      - name: Run the group
+        env:
+          RUN: ${{ matrix.run }}
+          COUNT: ${{ matrix.count }}
+          DIR: ${{ matrix.dir }}
+          NAME: ${{ matrix.name }}
+        run: |
+          git rev-parse HEAD^ | sed 's/^/tests from /'
+          set +e
+          timeout 50m go test -count="$COUNT" -v -timeout 50m -run "$RUN" "./$DIR" > "$RUNNER_TEMP/out.txt" 2>&1
+          rc=$?
+          set -e
+          pass=$(grep -c '^--- PASS' "$RUNNER_TEMP/out.txt" || true)
+          fail=$(grep -c -- '--- FAIL' "$RUNNER_TEMP/out.txt" || true)
+          grep -E -- '--- FAIL|^panic|refused to send|left process|still alive' "$RUNNER_TEMP/out.txt" | head -40 || true
+          leaks=$(grep -E '^rehearsal: [0-9]+ leaked' "$RUNNER_TEMP/out.txt" | tail -1)
+          echo "$NAME: count $COUNT, top-level PASS $pass, FAIL $fail, test exit $rc; last line: ${leaks:-none}"
+          tail -3 "$RUNNER_TEMP/out.txt"
+          [ "$rc" -eq 0 ] && [ "$fail" -eq 0 ] && [ "${leaks%% (*}" = "rehearsal: 0 leaked" ]
