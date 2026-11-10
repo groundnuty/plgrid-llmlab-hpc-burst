@@ -330,9 +330,13 @@ func TestTheForcedCommandExecsTheBinary(t *testing.T) {
 	}
 }
 
-// The real launch line: the login node's authorized_keys forces that command.
+// The real launch line: the login node's authorized_keys forces that command,
+// and a command runs through it, past the relay guard.
 func TestTheLoginNodesKeyForcesTheExecLine(t *testing.T) {
-	r, _ := newRig(t)
+	r, s := newRig(t)
+	if q := decodeSqueue(t, []byte(must(t, s, "squeue --me --json"))); len(q.Jobs) != 0 {
+		t.Errorf("squeue through the forced command: %d jobs, want none", len(q.Jobs))
+	}
 	b, err := os.ReadFile(r.node.files.authorized)
 	if err != nil {
 		t.Fatal(err)
