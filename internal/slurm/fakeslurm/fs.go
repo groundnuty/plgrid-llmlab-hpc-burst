@@ -30,6 +30,9 @@ type fileSystem interface {
 	// but a file; err is why a file's sum could not be taken (run mode: it
 	// is over the size limit).
 	sum(p string) (sum [sha256.Size]byte, found bool, err error)
+	// tail is at most the last n bytes of a file's content. found is false
+	// for anything but a file.
+	tail(p string, n int64) (content []byte, found bool, err error)
 	// write replaces a file's content and keeps its mode and owner, or
 	// creates the file with mode and owner.
 	write(p string, content []byte, mode fs.FileMode, owner string) error
@@ -68,6 +71,18 @@ func (f *fsState) sum(p string) ([sha256.Size]byte, bool, error) {
 		return [sha256.Size]byte{}, false, nil
 	}
 	return sha256.Sum256(file.Content), true, nil
+}
+
+func (f *fsState) tail(p string, n int64) ([]byte, bool, error) {
+	file := f.files[p]
+	if file == nil {
+		return nil, false, nil
+	}
+	c := file.Content
+	if int64(len(c)) > n {
+		c = c[int64(len(c))-n:]
+	}
+	return append([]byte(nil), c...), true, nil
 }
 
 func (f *fsState) write(p string, content []byte, mode fs.FileMode, owner string) error {

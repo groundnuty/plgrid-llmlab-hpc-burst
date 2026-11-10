@@ -74,6 +74,30 @@ func (sh *shell) sha256sum(args []string) int {
 	return 0
 }
 
+// maxTailBytes bounds tail -c: a diagnostic's tail, never a file's content.
+const maxTailBytes = 64 << 10
+
+// tail is "tail -c <n> <path>": the file's last n bytes, as they are, n from 1
+// to 64 KiB.
+func (sh *shell) tail(args []string) int {
+	if len(args) != 3 || args[0] != "-c" {
+		return sh.fail(2, "tail: the fake supports only: tail -c <bytes> <path>")
+	}
+	n, err := strconv.ParseInt(args[1], 10, 64)
+	if err != nil || n < 1 || n > maxTailBytes || strconv.FormatInt(n, 10) != args[1] {
+		return sh.fail(1, "tail: invalid number of bytes: %q (the fake takes 1 to %d)", args[1], maxTailBytes)
+	}
+	b, ok, err := sh.p.fs.tail(sh.path(args[2]), n)
+	switch {
+	case !ok:
+		return sh.fail(1, "tail: cannot open %q for reading: No such file or directory", args[2])
+	case err != nil:
+		return sh.fail(1, "tail: %s: %v", args[2], err)
+	}
+	sh.stdout.Write(b)
+	return 0
+}
+
 // setUmask is "umask <octal>": it holds for the rest of the line.
 func (sh *shell) setUmask(args []string) int {
 	if len(args) != 1 {

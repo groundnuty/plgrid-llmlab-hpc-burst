@@ -403,7 +403,8 @@ func TestAJobAReachTestLeftBehindIsCancelledByItsTag(t *testing.T) {
 // A conformance change selects the reach rows with the other rows of that package, and so does a change to the
 // probe script, which the package embeds in its tests. The run sets are written out from the fixture's wiring.
 func TestPlanNamesTheReachRowsWithTheirPackage(t *testing.T) {
-	conformanceRows := []string{"conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-helios", "reach-athena", "reach-helios"}
+	conformanceRows := []string{"conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-helios", "reach-athena", "reach-helios",
+		"reach-host-dialed-athena", "reach-host-dialed-helios"}
 	for _, c := range []struct{ name, path, content string }{
 		{"the probe script", "internal/providerctl/conformance/testdata/reach-probe.sh", "#!/bin/bash\n# changed\n"},
 		{"a test of the package", "internal/providerctl/conformance/c_test.go", "package conformance\n\nimport (\n\t\"testing\"\n\n\t_ \"example.test/fx/internal/providerctl\"\n)\n\nfunc TestConformance(t *testing.T) { _ = 1 }\n"},

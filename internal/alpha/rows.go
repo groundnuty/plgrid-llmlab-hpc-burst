@@ -337,8 +337,22 @@ var reachRows = []Row{
 	{Name: "reach-athena", Cluster: "athena", Partition: "plgrid-now", GPUs: 1, Lease: 2 * time.Minute, Budget: 20 * time.Minute, SlotHold: 13 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#225 and #145"},
 }
 
+// hostDialedRows are the rows of the host-dialed relay check (issue #305), which runs in
+// internal/providerctl/conformance: one short job of the real agent in host-dialed mode with no
+// Instance, and the two relays the Provider's controller starts to it through the login node
+// (HBEP-6, Dial-home modes). Lease and Budget are the job's: a time limit of five minutes, which a run
+// that goes well ends in about one. Each is under its one-job slot with a start wait of 10 minutes, as
+// the reach rows are, so the slot hold is the start wait, the lease and a minute for the end.
+var hostDialedRows = []Row{
+	{Name: "reach-host-dialed-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: 5 * time.Minute, Budget: 25 * time.Minute, SlotHold: 16 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#305 and #145"},
+	{Name: "reach-host-dialed-athena", Cluster: "athena", Partition: "plgrid-now", GPUs: 1, Lease: 5 * time.Minute, Budget: 25 * time.Minute, SlotHold: 16 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#305 and #145"},
+}
+
 // Rows returns a copy of the stack rows: the ones this package runs.
 func Rows() []Row { return append([]Row(nil), rows...) }
+
+// HostDialedRows returns a copy of the host-dialed relay rows.
+func HostDialedRows() []Row { return append([]Row(nil), hostDialedRows...) }
 
 // AccountingRows returns a copy of the accounting rows.
 func AccountingRows() []Row { return append([]Row(nil), accountingRows...) }
@@ -348,7 +362,7 @@ func ReachRows() []Row { return append([]Row(nil), reachRows...) }
 
 // RowByName finds a row, of any kind.
 func RowByName(name string) (Row, bool) {
-	for _, r := range append(append(append([]Row(nil), rows...), accountingRows...), reachRows...) {
+	for _, r := range append(append(append(append([]Row(nil), rows...), accountingRows...), reachRows...), hostDialedRows...) {
 		if r.Name == name {
 			return r, true
 		}

@@ -9,7 +9,7 @@ hack/live-checks.sh --run <row>...            # shape and queue estimate, then "
 hack/live-checks.sh --run <row>... --yes      # the run
 ```
 
-`tunnel-hour`, `gpu-accounting` and `reach` are aliases: each stands for its `-helios` and `-athena` rows, run one after the other. A skipped row counts as a failure, and so does a test that cannot start for lack of a setting.
+`tunnel-hour`, `gpu-accounting`, `reach` and `reach-host-dialed` are aliases: each stands for its `-helios` and `-athena` rows, run one after the other. A skipped row counts as a failure, and so does a test that cannot start for lack of a setting.
 
 ## What a run ends as
 
@@ -32,7 +32,7 @@ The script's exit code and the word on the screen, for every row:
 | Row | Its bound | The line when its job never starts |
 |---|---|---|
 | `conformance-helios` | start wait, 30 min | `a job did not start within 30 min of its acceptance and was cancelled by its tag` |
-| `conformance-helios-gh200`, `conformance-athena`, `gpu-accounting-helios`, `reach-helios`, `reach-athena` | start wait, 10 min | `a job did not start within 10 min of its acceptance and was cancelled by its tag` |
+| `conformance-helios-gh200`, `conformance-athena`, `gpu-accounting-helios`, `reach-helios`, `reach-athena`, `reach-host-dialed-helios`, `reach-host-dialed-athena` | start wait, 10 min | `a job did not start within 10 min of its acceptance and was cancelled by its tag` |
 | `real-engine`, `alpha-helios-nooverlap`, `tunnel-hour-helios` | wait in the queue, 30 min (their slot's) | `a job was still pending after 30 min in the queue and was cancelled by its tag` |
 | `alpha-athena-handover`, `tunnel-hour-athena`, `gpu-accounting-athena` | wait in the queue, 2 h (no slot) | `a job was still pending after 120 min in the queue and was cancelled by its tag` |
 | `tunnel-hour-helios`, `tunnel-hour-athena` | and the `endTime` cap, whichever comes first | `a job was still pending a minute before its deployment's first end and was cancelled by its tag` |
@@ -46,7 +46,8 @@ An explicit `LIVE_PENDING_MAX_SECONDS` sets the wait in the queue of the rows th
 | Row | State |
 |---|---|
 | `gpu-accounting-helios`, `gpu-accounting-athena` | Complete. Runs through the Provider's controller; needs no dial-home route. |
-| `reach-helios`, `reach-athena` | Complete (issue #225). Runs through the Provider's controller; needs the gateway's forwarded port (`LIVE_PROBE_*`, below) and runs only when the owner says that port is up. |
+| `reach-helios`, `reach-athena` | Complete (issue #225). Runs through the Provider's controller; needs the gateway's forwarded port (`LIVE_PROBE_*`, below) and runs only when the owner says that port is up. In `host-dialed` mode (`LIVE_DIALHOME_MODE=host-dialed`) each is `NOT RUN`, exit 3, before anything is built or asked of a cluster: the compute nodes never dial the host there (issue #305). |
+| `reach-host-dialed-helios`, `reach-host-dialed-athena` | Wired (issue #305). Runs through the Provider's controller in host-dialed mode, with the real agent as the job; proved by dry runs over the fake Slurm behind a real sshd, not yet by a cluster. |
 | `alpha-athena-handover`, `alpha-helios-nooverlap`, `tunnel-hour-helios`, `tunnel-hour-athena` | Wired (issue #245). The live steps start the whole stack on this host with `hpcburst up`, create the row's Provider and deployment, and drive them through the front, with the worker-rung fault over `srun --overlap` in the run's own job. They are proved by a stand-in run against the fake Slurm in run mode behind a real sshd (below), not yet by a cluster. A direct-mode run needs `LIVE_DIALHOME_LISTEN`; without it the run fails at its first step, naming the setting, having used no cluster. A host-dialed run sets `LIVE_DIALHOME_MODE=host-dialed` and no address, key or listener: a set `LIVE_DIALHOME_ADDR` is refused. The large request bodies and the upload direction's rate of `tunnel-hour-*` come with issue #224 (PR #244). |
 | `alpha-helios-nooverlap` | Needs #174 (no-overlap queue-wait growth), which is on main (#208), so in every checkout that has this row. It needs no setting for it; it needs the owner's go (below). |
 
@@ -111,6 +112,8 @@ Helios QOS `now` and Athena `plgrid-now` allow one job per user, and the owner s
 | `gpu-accounting-athena` | 1 | `plgrid-gpu-a100`, no slot |
 | `reach-helios` | 1, for about 13 minutes at most (the 10-minute start wait and a job of seconds, with a 2-minute limit) | QOS `now`, the shared slot |
 | `reach-athena` | 1, for about 13 minutes at most | `plgrid-now`, the one-job partition, the shared slot |
+| `reach-host-dialed-helios` | 1, for about 16 minutes at most (the 10-minute start wait and a job of about a minute, with a 5-minute limit) | QOS `now`, the shared slot |
+| `reach-host-dialed-athena` | 1, for about 16 minutes at most | `plgrid-now`, the one-job partition, the shared slot |
 
 On Helios the replacement of `alpha-helios-nooverlap` is created at its planned time and pends until the predecessor's job ends and frees the GPU (the partition's QOS allows 2,000 submitted jobs, QOS `now` one GPU: `hbep/0007-lifecycle-controller/README.md:463`, `:608`). So the pending replacement sits in the owner's shared slot only for the planned gap, from its planned submission to the predecessor's end, and the run never queues a third job. Under `ReleaseWhenIdle` with a 2-minute `idleLimit` the predecessor's job is released that long after its Instance ends, so it does not hold the GPU to its hard end (`:471`; the default `Keep` would).
 
@@ -183,6 +186,29 @@ Issue #225. Alpha's live runs stay on the development host, and the owner sets u
 - **Pass criteria:** `reachable`, with any answer. `refused`, `timeout`, `unresolved`, `unreachable` and `error` fail the row (exit 1) and still write `posts.md`, because each is a finding that the owner needs: refused is an open network with nothing listening, timeout a filtered or dropped path, unresolved a name the node cannot resolve, unreachable an ICMP "no route". An answer proves only that something answers there, not that it is the gateway: on 31 Oct an SSH banner was taken for the VM's sshd while the host key was a gateway's (lesson L-17.7), and the post says so.
 - **Posts:** the run's `posts.md` (the verdict, the label, the outcome and what answered, the partition and QOS used, the shape) and the slot use. To #225 and #145. It carries the label and never the host or the port.
 
+### `reach-host-dialed-helios`, `reach-host-dialed-athena`
+
+```
+hack/live-checks.sh --run reach-host-dialed-athena --yes
+```
+
+Issue #305. The first relay on a real cluster in a short row: the real agent in host-dialed mode with no Instance, in one job, and the two relays the batch Provider's controller starts to it from this host through the login node (HBEP-6, Dial-home modes). The tunnel rows hold a lease of 106 minutes at least, and `plgrid-now` hosts no Instance, so without this row the first relay would wait for the A100 queue or GH200.
+
+- **Settings:** the account, the credentials file, `LIVE_OUT_DIR` and `LIVE_LOCK_DIR`. No probe setting and no dial-home setting: the mode is the row's own, whatever `LIVE_DIALHOME_MODE` says.
+- **Where and shape:** the reach rows' partitions, QOS, slot guard and start wait of 10 minutes; one job of 1 GPU, 1 CPU and 1Gi with `--no-requeue`, a time limit of 5 minutes (a run that goes well ends in about one), and `-C memfs` on Helios. The script builds the test binary and the agent builds (`hack/build-agents.sh`) before it takes the slot.
+- **What runs:** the Provider's controller with its relay owner (`internal/hostdial`), the real agent API server on the control port, and a responder on the serving port, all on this host; on the node the agent, its two loopback listeners and its socket, and each relay an `srun -u --overlap` step of the agent's own `relay <channel>`. The relays' ssh is a wrapper that writes down the remote line it is given, then execs ssh, so the line checked is what ssh got. A short `--overlap` step of the job (`testdata/serving-probe.sh`) stands where frpc would, which the agent starts only for an Instance: it reads the rendezvous, then sends the 256 byte values over the serving session and reads the host's 256 back. Then a second relay owner starts the relay pair of the epoch below, the agent is told to stop over the control session, and the job ends.
+- **The text to post, a line each** (a run passes only if every line is `ok`):
+  - `the control session`: the agent registered over the control relay, with the recorded job; the stop was served to the agent's own poll over the same session, the agent sent its last report after it, and the job ended `COMPLETED` (exit 0). A crash, a cancel or a time-out after the registration is a `FAIL` that names the end state. A job whose agent stops at its start (no `TMPDIR`, no Apptainer) is judged, not aborted: the line `FAIL`s with the agent's last error, read from `job.err`'s last 4 KiB, which the private record keeps (`job-err-tail.txt`);
+  - `the serving session`: a stream the job opened crossed it to the serving port;
+  - `srun -u`: every relay's remote line was `srun -u --overlap --jobid=<the job> --ntasks=1 <the staged agent> relay <channel>`, so the step's output is not held for a newline;
+  - `the rendezvous`: the agent's socket was in a mode-700 directory of its own right under the job's `$TMPDIR`, shown by two records the agent made, the socket's path in the rendezvous file and the `TMPDIR` its own `listening for the relays` line names; a record that is missing or unreadable is a `FAIL`, never a pass, and both relays, `--overlap` steps, reached it. The line holds no path and no part of one: on a cluster `$TMPDIR` and the socket's path hold the user's login and the job's ID (the science agent's ruling on PR #306). It says `socket under $TMPDIR: yes|no`, `fallback to /dev/shm: yes|no` with the reason (a socket under `$TMPDIR` could pass 107 bytes), the socket path's length in bytes, the directory's mode, and whether an `--overlap` step's `$TMPDIR` is set and the same, which is runbook item 6 below. The paths themselves are in the private record only;
+  - `the preamble`: each relay's first line was `hpcburst-relay/1 <the Allocation's UID>`, with nothing before it;
+  - `the epoch`: both relays carried the epoch the controller read (7, fixed for the row, which has no Lease), and a relay pair of epoch 6, run by a second relay owner of hostdial's own (as an old leader would after an unfenced hand-over), each with a higher sequence than the kept relay's, so that only the epoch can refuse it, was refused as `superseded` on both channels before any preamble, while the kept sessions stayed up;
+  - `the 256-byte check (HBEP-4, open question 16)`: node to host, each value in its place; host to node, the values in descending order, by their sha256, which the test holds as a literal;
+  - `frps and frpc: not run`, and the job's shape. A check that cannot be read (the probe's report, the wrapper's record) is a failed line of its own, `the run's state`.
+- **Ends:** `PASS`, exit 0; a failed line, `FAIL`, exit 1, with the text to post; a job that never started within the start wait, `NOT RUN`, exit 3, cancelled by its tag, with no text to post.
+- **Posts:** to #305 and #145, with the slot use.
+
 ### `alpha-athena-handover`
 
 ```
@@ -251,7 +277,7 @@ hack/live-checks.sh --run tunnel-hour --yes
 3. Set `LIVE_PENDING_MAX_SECONDS` from the estimate before a queued run.
 4. Post each result where the row says, with its slot use. The text of `posts.md` is private until you copy it; it holds counts, durations and fixed labels, never a host, account or job ID.
 5. Every row that runs the stack posts `watch resets over the run`, a measured count. A reset fails the test as "not known", on any kind, and the failure says whether any read's window crossed it. If a live row ever fails on a reset that no read crossed, the rule is refined before that row is re-run. A reset that only catch-ups crossed counts as one that no data read crossed (`@hpc-burst-science-agent`, 9 Nov 2026): a catch-up crosses any reset it finds, which is the coarse rule's own conservatism, and a verdict rests on the data reads. The failure tells the two apart, since a catch-up reads there as "the catch-up for ...", so a row that fails where only catch-ups crossed gets the same refinement before it is re-run.
-6. On the first Athena run in host-dialed mode, confirm that the scheduler sets `TMPDIR` in the job and in an `--overlap` step: it is the relays' rendezvous precondition (HBEP-4, open question 16), measured on Athena on 9 Nov 2026, and Athena's profile sets no `tmpDir` of its own (the science agent's ruling, 9 Nov 2026: no profile change, since pinning one would also move the engine's temporary files). A miss shows within seconds: the agent exits with `ErrNoSocketDir`, `no directory for the relay socket under TMPDIR`, on its output in the job's `job.err`.
+6. On the first Athena run in host-dialed mode, confirm that the scheduler sets `TMPDIR` in the job and in an `--overlap` step (`reach-host-dialed-athena`'s rendezvous line says both): it is the relays' rendezvous precondition (HBEP-4, open question 16), measured on Athena on 9 Nov 2026, and Athena's profile sets no `tmpDir` of its own (the science agent's ruling, 9 Nov 2026: no profile change, since pinning one would also move the engine's temporary files). A miss shows within seconds: the agent exits with `ErrNoSocketDir`, `no directory for the relay socket under TMPDIR`, on its output in the job's `job.err`.
 
 ## What the dry runs show, and what they cannot
 

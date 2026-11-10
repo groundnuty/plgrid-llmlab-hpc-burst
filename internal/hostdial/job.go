@@ -79,6 +79,9 @@ var ErrNoSocketDir = errors.New("no directory for the relay socket under TMPDIR,
 // socketName is the agent's socket in its random directory.
 const socketName = "relay.sock"
 
+// SocketName is the relay socket's name in its directory, which the rendezvous file names (reach-host-dialed's check).
+const SocketName = socketName
+
 // JobOptions configure the job side.
 type JobOptions struct {
 	// TmpDir is the job's TMPDIR, under which the socket's random directory
@@ -188,6 +191,14 @@ func StartJob(o JobOptions) (*Job, error) {
 	return j, nil
 }
 
+// SocketPathUnder is the length in bytes of the longest socket path the job
+// side can make under root, its directory's random name at its longest (os.MkdirTemp
+// appends up to 10 digits): above agentapi.MaxRelaySocketPath, the socket goes
+// under the fallback instead (socketDir).
+func SocketPathUnder(root string) int {
+	return len(filepath.Join(root, "hb-relay-0123456789", socketName))
+}
+
 // socketDir makes the socket's directory, with a random name and mode 700,
 // under tmp, the job's TMPDIR, or under shm when the socket's path under tmp
 // would pass agentapi.MaxRelaySocketPath; fellBack then says why. A TMPDIR
@@ -196,10 +207,7 @@ func socketDir(tmp, shm string) (dir, fellBack string, err error) {
 	if tmp == "" || !filepath.IsAbs(tmp) {
 		return "", "", fmt.Errorf("hostdial: %w: TMPDIR %q is not an absolute directory", ErrNoSocketDir, tmp)
 	}
-	// os.MkdirTemp appends up to 10 digits.
-	tooLong := func(root string) bool {
-		return len(filepath.Join(root, "hb-relay-0123456789", socketName)) > agentapi.MaxRelaySocketPath
-	}
+	tooLong := func(root string) bool { return SocketPathUnder(root) > agentapi.MaxRelaySocketPath }
 	root := tmp
 	if tooLong(tmp) {
 		if shm == "" || tooLong(shm) {
