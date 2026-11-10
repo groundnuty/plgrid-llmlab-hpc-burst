@@ -17,15 +17,6 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
-// staleResult is how the relay of the epoch below the Lease's ended (HBEP-6, Fencing: the agent refuses a lower (E, N)
-// with the reason superseded).
-type staleResult struct {
-	Ran      bool
-	Exit     int
-	Stdout   int    // bytes on its standard output: none, since only an accepted relay writes its preamble
-	Classify string // its end in sshrun.Classify's words: the relay's own line, or the kind of ssh failure
-}
-
 // hostDialedObs is what one run saw: the facts the verdict is made of, read from the relay owner, the backend, the
 // responder, the wrappers' record and the probe. Paths and the job ID are private, kept for the record only.
 type hostDialedObs struct {
@@ -49,13 +40,16 @@ type hostDialedObs struct {
 	ProbeErr string
 	// Exchanges are the serving responder's connections.
 	Exchanges []servingConn
-	// Stale is the stale relay's end; KeptPID and KeptStarts are the control relay's process and starts before it, to
-	// compare with Relays after it.
-	Stale      staleResult
-	KeptPID    int
-	KeptStarts int
-	// Stopped is set when the job ended after the agent was told to stop.
-	Stopped bool
+	// Kept are the owner's relays just before the stale pair ran, and Stale the stale pair's relays as they ended, by
+	// channel (staleRelays); nil when the pair did not run.
+	Kept, Stale map[agentapi.RelayChannel]hostdial.RelayState
+	// StopServed is set when the agent's own poll was served the stop, and StopAcked when the agent reported after it
+	// (stopWatch); EndState is the job's end state as the scheduler records it ("" when it was not read).
+	StopServed, StopAcked bool
+	EndState              string
+	// AgentTail is the last bytes of the agent's output, job.err (private: the post takes its last error through
+	// postSafe).
+	AgentTail string
 }
 
 // hostDialedCheck is one line of the text to post: its name, whether it held, and what was found.
@@ -118,13 +112,20 @@ func judgeHostDialed(o hostDialedObs) []hostDialedCheck {
 	// The control session: the agent's registration and its stop crossed it.
 	switch {
 	case o.Registered < 1 && o.JobEnded:
-		add(checkControl, false, "did not come up: the job ended before the agent registered, so the agent stopped at its start (a job with no TMPDIR, a node with no Apptainer: HBEP-4, open questions 15 and 16)")
+		add(checkControl, false, "did not come up: the job ended %s before the agent registered, so the agent stopped at its start; the agent's last error: %s",
+			endStateText(o.EndState), postSafe(lastAgentError(o.AgentTail), o))
 	case o.Registered < 1:
 		add(checkControl, false, "did not come up: no registration of the agent reached the agent API over it (%d relay start(s), the last end: %s)", ctl.Starts, postSafe(endText(ctl), o))
-	case !o.Stopped:
-		add(checkControl, false, "came up and the agent registered, but the agent was not seen to stop when told to over it")
+	case o.JobEnded:
+		add(checkControl, false, "came up and the agent registered, but the job ended %s before it was told to stop", endStateText(o.EndState))
+	case !o.StopServed:
+		add(checkControl, false, "came up and the agent registered, but the stop was never served to the agent's poll over it")
+	case !o.StopAcked:
+		add(checkControl, false, "the stop was served to the agent's poll over it, but the agent sent no report after it (the job ended %s)", endStateText(o.EndState))
+	case o.EndState != "COMPLETED":
+		add(checkControl, false, "the agent took the stop over it and reported, but the job ended %s, not COMPLETED with exit 0", endStateText(o.EndState))
 	default:
-		add(checkControl, true, "up: the agent registered over the control relay (%d registration(s), the recorded job) and stopped when told to, over the same session", o.Registered)
+		add(checkControl, true, "up: the agent registered over the control relay (%d registration(s), the recorded job); the stop was served to its poll over the same session, it sent its last report, and the job ended COMPLETED", o.Registered)
 	}
 
 	// The serving session: the probe's exchange crossed it.
@@ -164,26 +165,31 @@ func judgeHostDialed(o hostDialedObs) []hostDialedCheck {
 	case p == nil:
 		add(checkRendezvous, false, "not read: the serving probe did not run")
 	default:
+		// Affirmative, from two records the agent made: the socket's path in the rendezvous file and the TMPDIR its own
+		// line names. A record that is missing or unreadable is a failure, never a pass (the review of PR 306, B4).
 		sockDir := path.Dir(p.Socket)
+		agentTmp := p.AgentTmpDir
 		var why []string
+		switch {
+		case !p.AgentLogOK:
+			why = append(why, "the agent's output, job.err, could not be read")
+		case agentTmp == "" || !path.IsAbs(agentTmp):
+			why = append(why, "the agent's output does not name the TMPDIR it listens under")
+		}
 		if !path.IsAbs(p.Socket) || path.Base(p.Socket) != "relay.sock" || !regexp.MustCompile(`^hb-relay-[0-9]+$`).MatchString(path.Base(sockDir)) {
 			why = append(why, "the rendezvous file did not name a relay.sock in an hb-relay-<random> directory")
+		} else if len(why) == 0 && path.Dir(sockDir) != path.Clean(agentTmp) {
+			why = append(why, "the socket's directory is "+topDir(path.Dir(sockDir))+", not right under the job's $TMPDIR ("+topDir(path.Clean(agentTmp))+")")
 		}
 		if p.SocketDirMode != "700" {
 			why = append(why, "the socket's directory is mode "+p.SocketDirMode+", not 700")
-		}
-		if p.Fallback != 0 {
-			why = append(why, "the agent put it under the /dev/shm fallback, not under TMPDIR")
-		}
-		if p.Listening < 1 {
-			why = append(why, "the agent's output does not say it listens for the relays")
 		}
 		if len(why) > 0 {
 			add(checkRendezvous, false, "%s", strings.Join(why, "; "))
 			break
 		}
-		add(checkRendezvous, true, "the agent's socket was in a mode-700 hb-relay-<random> directory under the job's $TMPDIR (%s), not the /dev/shm fallback, and both relays, --overlap steps, reached it; an --overlap step's $TMPDIR: %s",
-			topDir(path.Dir(sockDir)), stepTmpDir(p, path.Dir(sockDir)))
+		add(checkRendezvous, true, "the agent's socket was in a mode-700 hb-relay-<random> directory right under the job's $TMPDIR (%s), as the rendezvous file and the agent's own line agree, and both relays, --overlap steps, reached it; an --overlap step's $TMPDIR: %s",
+			topDir(path.Clean(agentTmp)), stepTmpDir(p, path.Clean(agentTmp)))
 	}
 
 	// The preamble: a session counts only once its relay's first line was hpcburst-relay/1 <UID> (hostdial.Serve).
@@ -201,18 +207,28 @@ func judgeHostDialed(o hostDialedObs) []hostDialedCheck {
 			break
 		}
 	}
-	switch {
-	case !o.Stale.Ran:
-		ep = append(ep, "the relay of the lower epoch was not run")
-	case o.Stale.Exit != hostdial.ExitSuperseded || o.Stale.Stdout != 0:
-		ep = append(ep, fmt.Sprintf("the relay of epoch %d was not refused as superseded (exit %d, %d byte(s) on its output: %s)", o.Epoch-1, o.Stale.Exit, o.Stale.Stdout, postSafe(o.Stale.Classify, o)))
-	case ctl.PID == 0 || ctl.PID != o.KeptPID || ctl.Starts != o.KeptStarts:
+	// The stale pair: epoch E-1, each sequence above its kept relay's, so that only the epoch can refuse it (B1).
+	for _, ch := range agentapi.RelayChannels {
+		st, ok := o.Stale[ch]
+		kept := o.Kept[ch]
+		switch {
+		case !ok:
+			ep = append(ep, "the "+string(ch)+" relay of epoch "+strconv.FormatInt(o.Epoch-1, 10)+" was not run")
+		case st.Epoch != o.Epoch-1:
+			ep = append(ep, fmt.Sprintf("the stale %s relay carried epoch %d, not %d", ch, st.Epoch, o.Epoch-1))
+		case st.Seq <= kept.Seq:
+			ep = append(ep, fmt.Sprintf("the stale %s relay's sequence was not above the kept one's, so the epoch was not all that could refuse it", ch))
+		case !st.Final || !strings.HasPrefix(st.FinalCause, "superseded") || st.Sessions != 0:
+			ep = append(ep, fmt.Sprintf("the %s relay of epoch %d, with the higher sequence, was not refused as superseded before its preamble (%d session(s), its end: %s)", ch, o.Epoch-1, st.Sessions, postSafe(endText(st), o)))
+		}
+	}
+	if keptCtl := o.Kept[agentapi.RelayControl]; o.Stale != nil && (ctl.PID == 0 || ctl.PID != keptCtl.PID || ctl.Starts != keptCtl.Starts) {
 		ep = append(ep, "the kept control relay did not stay up across the refusal")
 	}
 	if len(ep) > 0 {
 		add(checkEpoch, false, "%s", strings.Join(ep, "; "))
 	} else {
-		add(checkEpoch, true, "both relays carried epoch %d; a control relay of epoch %d was refused as superseded, wrote nothing, and the kept session stayed up", o.Epoch, o.Epoch-1)
+		add(checkEpoch, true, "both relays carried epoch %d; a relay pair of epoch %d, each with a higher sequence than the kept relay's, was refused as superseded on both channels before any preamble, and the kept sessions stayed up", o.Epoch, o.Epoch-1)
 	}
 
 	// The 256 byte values, each way, over the serving session.
@@ -266,6 +282,56 @@ func postSafe(s string, o hostDialedObs) string {
 		}
 	}
 	return string(b)
+}
+
+// endStateText words the job's end state for a failed line: "FAILED", or "in a state that was not read".
+func endStateText(state string) string {
+	if !regexp.MustCompile(`^[A-Z_]{1,24}$`).MatchString(state) {
+		return "in a state that was not read"
+	}
+	return state
+}
+
+// lastAgentError is the agent's last error in the tail of its output: the msg and the err of its last ERROR line
+// (slog's text form), or the last line when it logged none, or "none read".
+func lastAgentError(tail string) string {
+	lines := strings.Split(strings.TrimRight(tail, "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		l := lines[i]
+		if !strings.Contains(l, "level=ERROR") {
+			continue
+		}
+		msg, err := slogField(l, "msg"), slogField(l, "err")
+		if err != "" {
+			return msg + ": " + err
+		}
+		return msg
+	}
+	if last := strings.TrimSpace(lines[len(lines)-1]); last != "" {
+		return last
+	}
+	return "none read"
+}
+
+// slogField is the value of key in a line of slog's text form, unquoted, or "".
+func slogField(line, key string) string {
+	i := strings.Index(line, " "+key+"=")
+	if i < 0 {
+		return ""
+	}
+	v := line[i+len(key)+2:]
+	if strings.HasPrefix(v, `"`) {
+		if u, err := strconv.QuotedPrefix(v); err == nil {
+			if s, err := strconv.Unquote(u); err == nil {
+				return s
+			}
+		}
+		return ""
+	}
+	if j := strings.IndexByte(v, ' '); j >= 0 {
+		v = v[:j]
+	}
+	return v
 }
 
 // endText is how a relay last ended, in the owner's words, or "none". It can name the job and paths: the text to post

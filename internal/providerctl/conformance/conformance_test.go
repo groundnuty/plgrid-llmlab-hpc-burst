@@ -252,6 +252,11 @@ type world struct {
 	pace time.Duration
 	// probeRead is the serving probe's read of the host's answer, in seconds; zero is probeReadSeconds.
 	probeRead int
+	// beforeStop, when set, runs just before the host-dialed rows' agent is told to stop (a dry fault's moment).
+	beforeStop func(jobID string)
+	// failedIsStart makes untilRuns take a Failed Allocation as a job that started (the host-dialed rows: an agent that
+	// stops at its start ends its job Failed, which their verdict names).
+	failedIsStart bool
 }
 
 // limit is the time limit of the Allocations newAlloc makes.

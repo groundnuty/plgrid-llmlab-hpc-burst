@@ -19,15 +19,13 @@ package conformance
 // the text to post; frps and frpc are not run (see hostDialedPosts).
 
 import (
-	"bytes"
 	"context"
 	_ "embed"
 	"fmt"
-	"os/exec"
+	"log/slog"
 	"path"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -151,66 +149,86 @@ func (w *world) runProbe(ctx context.Context, jobID, allocDir string) (*probeRep
 	if err != nil {
 		return nil, err.Error()
 	}
-	w.p.log("probe: tmpdir-step %v tmpdir %q socket %q mode %s listening %d fallback %d port %v connected %v got %d %s",
-		p.TmpDirSet, p.TmpDir, p.Socket, p.SocketDirMode, p.Listening, p.Fallback, p.PortFound, p.Connected, p.GotBytes, p.GotSHA256)
+	w.p.log("probe: tmpdir-step %v tmpdir %q socket %q mode %s agent log %v agent tmpdir %q port %v connected %v got %d %s",
+		p.TmpDirSet, p.TmpDir, p.Socket, p.SocketDirMode, p.AgentLogOK, p.AgentTmpDir, p.PortFound, p.Connected, p.GotBytes, p.GotSHA256)
 	return &p, ""
 }
 
-// runStale runs one control relay of the epoch below the Lease's (HBEP-6, Fencing) on its own ssh connection, the way
-// the owner runs one (sshrun.Relay's Command), with its standard input held open, and returns how it ended. The agent
-// keeps the relay with the highest (E, N) on each channel, so it must refuse this one as superseded before any preamble.
-func (w *world) runStale(ctx context.Context, controlDir, jobID, agentPath, allocDir, uid string) staleResult {
-	rel, err := sshrun.NewRelay(sshrun.RelayOptions{Name: "conformance-stale", Config: w.sshConfig, ControlDir: controlDir})
+// staleRelays runs the relay pair of the epoch below the Lease's, E-1, as the old leader would after an unfenced
+// hand-over (HBEP-6, Fencing), and returns each channel's relay once both have ended, or at the bound. It is hostdial's own
+// Owner, the production lifecycle: each relay's ssh is started from the owner's locked thread with a parent-death signal,
+// so it dies with this process whatever stops it, and is stopped by its PID (the review of PR 306, B3). hostdial numbers
+// every relay start of the process, so the pair's sequences come after the kept relays': only the epoch can make the agent
+// refuse it (B1). The ssh is the rig's stale wrapper, which writes down the remote lines apart from the kept relays'.
+func (w *world) staleRelays(ctx context.Context, g *hostDialedRig, target hostdial.Target) map[agentapi.RelayChannel]hostdial.RelayState {
+	rel, err := sshrun.NewRelay(sshrun.RelayOptions{Name: "conformance-stale", Config: w.sshConfig, ControlDir: g.settings.ControlDir, Binary: g.staleWrapper})
 	if err != nil {
-		w.p.log("stale relay: %v", err)
-		return staleResult{}
+		w.p.log("stale relays: %v", err)
+		return nil
 	}
 	defer rel.Close()
-	line, err := agentapi.RelayLine(jobID, agentPath, agentapi.RelayArgs{Channel: agentapi.RelayControl, Dir: allocDir, Allocation: uid, Epoch: hostDialedEpoch - 1, Seq: 1})
+	owner, err := hostdial.NewOwner(hostdial.OwnerOptions{
+		Ports: g.settings.Ports, Epoch: func(context.Context) (int64, error) { return hostDialedEpoch - 1, nil },
+		Slots: hostdial.NewSlots(0), MinBackoff: g.settings.MinBackoff, MaxBackoff: g.settings.MaxBackoff, StopGrace: g.settings.StopGrace,
+		Logger: slog.New(slog.NewTextHandler(w.p.f, nil)),
+	})
 	if err != nil {
-		w.p.log("stale relay: %v", err)
-		return staleResult{}
+		w.p.log("stale relays: %v", err)
+		return nil
 	}
-	cmd, err := rel.Command(line)
-	if err != nil {
-		w.p.log("stale relay: %v", err)
-		return staleResult{}
-	}
-	in, err := cmd.StdinPipe()
-	if err != nil {
-		return staleResult{}
-	}
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		w.p.log("stale relay: %v", err)
-		return staleResult{}
-	}
-	done := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(done) }()
-	ctx, cancel := context.WithTimeout(ctx, w.bound(hostDialedFenceWait))
+	target.Login, target.Command, target.Gen = rel.Login(), rel.Command, "stale"
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	select {
-	case <-done:
-	case <-ctx.Done():
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		<-done
+	done := make(chan struct{})
+	go func() { _ = owner.Start(ctx); close(done) }()
+	owner.Want(target)
+	both := func() map[agentapi.RelayChannel]hostdial.RelayState {
+		out := map[agentapi.RelayChannel]hostdial.RelayState{}
+		for _, r := range owner.Relays() {
+			out[r.Channel] = r
+		}
+		return out
 	}
-	_ = in.Close()
-	r := staleResult{Ran: true, Exit: exitOf(cmd), Stdout: out.Len(), Classify: sshrun.Classify(cmd)}
-	w.p.log("stale relay: exit %d, %d byte(s) out, %s", r.Exit, r.Stdout, r.Classify)
-	return r
+	// The wait has a deadline of its own, apart from the owner's run: the last read of the pair comes before the owner
+	// stops, which forgets its relays.
+	deadline := time.Now().Add(w.bound(hostDialedFenceWait))
+	var last map[agentapi.RelayChannel]hostdial.RelayState
+	for {
+		last = both()
+		if (last[agentapi.RelayControl].Final && last[agentapi.RelayServing].Final) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	cancel()
+	<-done // the owner stops every relay of its own by PID
+	for ch, r := range last {
+		w.p.log("stale relay %s: epoch %d seq %d starts %d sessions %d final %v %q last end %q refusal %q", ch, r.Epoch, r.Seq, r.Starts, r.Sessions, r.Final, r.FinalCause, r.LastEnd, r.LastRefusal)
+	}
+	return last
 }
 
-func exitOf(cmd *exec.Cmd) int {
-	if cmd.ProcessState == nil {
-		return -1
+// agentTail reads the last bytes of the agent's output, job.err in the Allocation's directory, keeps them in the private
+// record, and returns them; "" when they cannot be read. It is read whatever the run came to, before the clean-up removes
+// the staging: a job whose agent stopped at its start leaves nothing else (the review of PR 306, B5).
+func (w *world) agentTail(ctx context.Context, allocDir string) string {
+	line, err := slurm.Line("tail", "-c", strconv.Itoa(agentTailBytes), path.Join(allocDir, agentapi.JobErrorName))
+	if err != nil {
+		return ""
 	}
-	return cmd.ProcessState.ExitCode()
+	res, err := w.cap.Run(ctx, slurm.Command{Line: line})
+	if err != nil || res.ExitCode != 0 {
+		w.p.log("the agent's output: exit %d, err %v", res.ExitCode, err)
+		return ""
+	}
+	w.p.save("job-err-tail.txt", res.Stdout)
+	return string(res.Stdout)
 }
 
-// hostDialedBody is the run, live or dry: the job, its two sessions, the probe, the stale relay, the stop, the verdict.
+// agentTailBytes is how much of job.err the row keeps: the agent's last lines, not its whole output.
+const agentTailBytes = 4096
+
+// hostDialedBody is the run, live or dry: the job, its two sessions, the probe, the stale relays, the stop, the verdict.
 func hostDialedBody(t testing.TB, w *world, g *hostDialedRig, rowName string) {
 	t.Helper()
 	ctx := context.Background()
@@ -223,8 +241,15 @@ func hostDialedBody(t testing.TB, w *world, g *hostDialedRig, rowName string) {
 	a := w.newAlloc(name)
 	tag := v1alpha1.JobTag(a.Namespace, a.Name, a.UID)
 	uid := string(a.UID)
-	// The first clock: the row's start wait, past which the job is cancelled by its tag and the row is NOT RUN.
-	started := func(a *v1alpha1.Allocation) bool { return accountingStarted(t, a) }
+	// The first clock: the row's start wait, past which the job is cancelled by its tag and the row is NOT RUN. A job that
+	// ended Failed has started: its agent stopped at its start, which the verdict names, with the agent's last error (B5).
+	started := func(a *v1alpha1.Allocation) bool {
+		if a.Status.AtProvider.Phase == v1alpha1.AllocationFailed {
+			return true
+		}
+		return accountingStarted(t, a)
+	}
+	w.failedIsStart = true
 	a = w.untilRuns("the job", name, "the job runs", w.at(), "", started)
 	o := hostDialedObs{Row: row, Epoch: hostDialedEpoch, JobID: a.Status.AtProvider.JobID, UID: uid, Tag: tag}
 	paths, err := w.batch.Paths(ctx)
@@ -246,24 +271,32 @@ func hostDialedBody(t testing.TB, w *world, g *hostDialedRig, rowName string) {
 	if alive() {
 		o.Probe, o.ProbeErr = w.runProbe(ctx, o.JobID, allocDir)
 	}
-	if alive() && w.relaysOf(tag)[agentapi.RelayControl].Sessions >= 1 {
-		kept := w.relaysOf(tag)[agentapi.RelayControl]
-		o.KeptPID, o.KeptStarts = kept.PID, kept.Starts
-		o.Stale = w.runStale(ctx, g.settings.ControlDir, o.JobID, o.AgentPath, allocDir, uid)
+	if kept := w.relaysOf(tag); alive() && kept[agentapi.RelayControl].Sessions >= 1 {
+		o.Kept = kept
+		o.Stale = w.staleRelays(ctx, g, hostdial.Target{Tag: tag, JobID: o.JobID, AgentPath: o.AgentPath, AllocDir: allocDir, UID: uid,
+			Jobs: w.batch, Stderr: sshrun.Stderr, Describe: sshrun.Classify})
 	}
 	o.Relays = w.relaysOf(tag)
 	for ch, r := range o.Relays {
-		w.p.log("relay %s: starts %d sessions %d streams %d joined %d pid %d last end %q refusal %q final %v %q", ch, r.Starts, r.Sessions, r.Streams, r.Joined, r.PID, r.LastEnd, r.LastRefusal, r.Final, r.FinalCause)
+		w.p.log("relay %s: epoch %d seq %d starts %d sessions %d streams %d joined %d pid %d last end %q refusal %q final %v %q", ch, r.Epoch, r.Seq, r.Starts, r.Sessions, r.Streams, r.Joined, r.PID, r.LastEnd, r.LastRefusal, r.Final, r.FinalCause)
 	}
 	o.Registered = g.registered(uid, o.JobID)
 	o.JobEnded = !alive()
 	o.Exchanges = g.serving.exchanges()
 
-	// The stop, over the control session: the agent exits, and with it the job.
+	// The stop, over the control session: the agent API serves it to the agent's own poll, the agent sends its last
+	// report, exits 0, and the job ends COMPLETED (B2). Each is read, never taken from the job's end alone.
 	if !o.JobEnded {
+		if w.beforeStop != nil {
+			w.beforeStop(o.JobID)
+		}
+		g.stop.arm(uid)
 		g.backend.SetDesired(uid, agentapi.DesiredState{Action: agentapi.ActionStop})
-		o.Stopped = w.untilOr(name, "the job ends once the agent is told to stop", w.bound(hostDialedEndWait), ended)
+		w.untilOr(name, "the job ends once the agent is told to stop", w.bound(hostDialedEndWait), ended)
+		o.StopServed, o.StopAcked = g.stop.seen()
 	}
+	o.EndState = w.endState(ctx, o.JobID)
+	o.AgentTail = w.agentTail(ctx, allocDir)
 	if lines, err := relayLines(g.record); err != nil {
 		w.p.log("the relays' record: %v", err)
 		o.LinesErr = "the wrapper's record of them is there but unreadable"
@@ -283,12 +316,34 @@ func hostDialedBody(t testing.TB, w *world, g *hostDialedRig, rowName string) {
 	if len(failed) > 0 {
 		verdict = "FAIL"
 	}
-	w.p.save(alpha.RecordFile, []byte(fmt.Sprintf("{\"row\": %q, \"verdict\": %q, \"failed\": %q, \"partition\": %q, \"qos\": %q, \"tmpdir\": %q, \"socket\": %q}\n",
-		row.Name, verdict, strings.Join(failed, "; "), row.Partition, qos, probeField(o.Probe, true), probeField(o.Probe, false))))
+	w.p.save(alpha.RecordFile, []byte(fmt.Sprintf("{\"row\": %q, \"verdict\": %q, \"failed\": %q, \"partition\": %q, \"qos\": %q, \"tmpdir\": %q, \"socket\": %q, \"agentTmpdir\": %q, \"endState\": %q}\n",
+		row.Name, verdict, strings.Join(failed, "; "), row.Partition, qos, probeField(o.Probe, true), probeField(o.Probe, false), agentTmpField(o.Probe), o.EndState)))
 	if len(failed) > 0 {
 		t.Fatalf("%s failed: %s", row.Name, strings.Join(failed, "; "))
 	}
 	t.Logf("%s passed; the text to post is in %s", row.Name, alpha.PostsFile)
+}
+
+// endState is the job's end state as the scheduler records it (COMPLETED for an exit 0), "" when it cannot be read or
+// the job has none yet.
+func (w *world) endState(ctx context.Context, jobID string) string {
+	if jobID == "" {
+		return ""
+	}
+	j, found, err := w.batch.Observe(ctx, jobID)
+	if err != nil || !found || len(j.State) == 0 || j.EndTime == nil {
+		w.p.log("the job's end state: found %v, err %v, state %v", found, err, j.State)
+		return ""
+	}
+	return j.State[0]
+}
+
+// agentTmpField is the agent's TMPDIR as the probe read it, for the private record.
+func agentTmpField(p *probeReport) string {
+	if p == nil {
+		return ""
+	}
+	return p.AgentTmpDir
 }
 
 // probeField is the probe's step TMPDIR (tmp) or socket path for the private record, or "".

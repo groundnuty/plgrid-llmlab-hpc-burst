@@ -63,9 +63,13 @@ func TestMain(m *testing.M) {
 		os.Exit(runnerMain(os.Args[1:]))
 	}
 	code := m.Run()
-	// The agent the host-dialed dry runs built (hostdialed_dry_test.go), in a directory of this process's own.
+	// The agent the host-dialed dry runs built (hostdialed_dry_test.go) and the packages' test binaries (realTestBinary),
+	// each in a directory of this process's own.
 	if dryAgentBuild.path != "" {
 		_ = os.RemoveAll(filepath.Dir(dryAgentBuild.path))
+	}
+	if testBuilds.dir != "" {
+		_ = os.RemoveAll(testBuilds.dir)
 	}
 	os.Exit(code)
 }

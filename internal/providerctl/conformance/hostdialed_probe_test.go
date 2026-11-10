@@ -16,8 +16,8 @@ type probeReport struct {
 	TmpDir        string // private
 	Socket        string // private
 	SocketDirMode string
-	Listening     int
-	Fallback      int
+	AgentLogOK    bool
+	AgentTmpDir   string // private; "" when the agent's line names none
 	PortFound     bool
 	Connected     bool
 	GotBytes      int
@@ -90,12 +90,16 @@ func parseProbe(out []byte) (probeReport, error) {
 	if r.SocketDirMode != "unknown" && !octalMode.MatchString(r.SocketDirMode) {
 		return r, fmt.Errorf("the probe's socket-dir-mode is not a mode")
 	}
-	if r.Listening, err = count("listening"); err != nil {
+	agentLog, err := oneOf("agent-log", "ok", "unreadable")
+	if err != nil {
 		return r, err
 	}
-	if r.Fallback, err = count("fallback"); err != nil {
+	r.AgentLogOK = agentLog == "ok"
+	if r.AgentTmpDir, err = next("agent-tmpdir"); err != nil {
 		return r, err
 	}
+	// The agent's log quotes a value that holds a space or a quote; the path is held to its own form by the verdict.
+	r.AgentTmpDir = strings.Trim(r.AgentTmpDir, `"`)
 	port, err := oneOf("serving-port", "found", "missing")
 	if err != nil {
 		return r, err

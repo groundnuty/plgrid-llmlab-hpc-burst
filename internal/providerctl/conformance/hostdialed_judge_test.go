@@ -45,15 +45,23 @@ func goodObs() hostDialedObs {
 		Row: row, Epoch: 7, JobID: "4242", UID: "u-1", Tag: "hb-x", AgentPath: goodAgent,
 		Lines: []string{goodLine("control", 7, 1), goodLine("serving", 7, 2)},
 		Relays: map[agentapi.RelayChannel]hostdial.RelayState{
-			agentapi.RelayControl: {Channel: agentapi.RelayControl, PID: 100, Starts: 1, Sessions: 1, Streams: 3, Joined: 3},
-			agentapi.RelayServing: {Channel: agentapi.RelayServing, PID: 101, Starts: 1, Sessions: 1, Streams: 1, Joined: 1},
+			agentapi.RelayControl: {Channel: agentapi.RelayControl, PID: 100, Starts: 1, Epoch: 7, Seq: 1, Sessions: 1, Streams: 3, Joined: 3},
+			agentapi.RelayServing: {Channel: agentapi.RelayServing, PID: 101, Starts: 1, Epoch: 7, Seq: 2, Sessions: 1, Streams: 1, Joined: 1},
+		},
+		Kept: map[agentapi.RelayChannel]hostdial.RelayState{
+			agentapi.RelayControl: {Channel: agentapi.RelayControl, PID: 100, Starts: 1, Epoch: 7, Seq: 1, Sessions: 1},
+			agentapi.RelayServing: {Channel: agentapi.RelayServing, PID: 101, Starts: 1, Epoch: 7, Seq: 2, Sessions: 1},
+		},
+		Stale: map[agentapi.RelayChannel]hostdial.RelayState{
+			agentapi.RelayControl: {Channel: agentapi.RelayControl, Starts: 1, Epoch: 6, Seq: 3, Final: true, FinalCause: "superseded: hb-relay: superseded"},
+			agentapi.RelayServing: {Channel: agentapi.RelayServing, Starts: 1, Epoch: 6, Seq: 4, Final: true, FinalCause: "superseded: hb-relay: superseded"},
 		},
 		Registered: 1,
 		Probe: &probeReport{TmpDirSet: true, TmpDir: "/tmp/job", Socket: "/tmp/job/hb-relay-123/relay.sock", SocketDirMode: "700",
-			Listening: 1, PortFound: true, Connected: true, GotBytes: 256, GotSHA256: "cd6816b77f68d70001fc3eaa4d42bdd67cb5973b3151cc5292ecc02a3daac6ab"},
-		Exchanges: []servingConn{{Received: ascending(), InPlace: true, Wrote: 256, Closed: true}},
-		Stale:     staleResult{Ran: true, Exit: 5, Classify: "hb-relay: superseded"},
-		KeptPID:   100, KeptStarts: 1, Stopped: true,
+			AgentLogOK: true, AgentTmpDir: "/tmp/job", PortFound: true, Connected: true, GotBytes: 256, GotSHA256: "cd6816b77f68d70001fc3eaa4d42bdd67cb5973b3151cc5292ecc02a3daac6ab"},
+		Exchanges:  []servingConn{{Received: ascending(), InPlace: true, Wrote: 256, Closed: true}},
+		StopServed: true, StopAcked: true, EndState: "COMPLETED",
+		AgentTail: "time=2026-11-10T00:00:00Z level=INFO msg=\"allocation agent exiting\"\n",
 	}
 }
 
@@ -88,8 +96,13 @@ func TestJudgeHostDialedFailsEachCheckOnItsOwnFact(t *testing.T) {
 		want []string
 	}{
 		{"no registration", func(o *hostDialedObs) { o.Registered = 0 }, []string{checkControl}},
-		{"no registration and the job ended", func(o *hostDialedObs) { o.Registered, o.JobEnded = 0, true }, []string{checkControl}},
-		{"not stopped when told", func(o *hostDialedObs) { o.Stopped = false }, []string{checkControl}},
+		{"no registration and the job ended", func(o *hostDialedObs) { o.Registered, o.JobEnded, o.EndState = 0, true, "FAILED" }, []string{checkControl}},
+		{"the job ended before the stop", func(o *hostDialedObs) { o.JobEnded, o.EndState = true, "FAILED" }, []string{checkControl}},
+		{"the stop never served", func(o *hostDialedObs) { o.StopServed, o.StopAcked = false, false }, []string{checkControl}},
+		{"no report after the stop", func(o *hostDialedObs) { o.StopAcked = false }, []string{checkControl}},
+		{"the job FAILED after the stop", func(o *hostDialedObs) { o.EndState = "FAILED" }, []string{checkControl}},
+		{"the job CANCELLED after the stop", func(o *hostDialedObs) { o.EndState = "CANCELLED" }, []string{checkControl}},
+		{"the job's end state unread", func(o *hostDialedObs) { o.EndState = "" }, []string{checkControl}},
 		{"the serving session never joined a stream", func(o *hostDialedObs) {
 			s := o.Relays[agentapi.RelayServing]
 			s.Joined = 0
@@ -115,25 +128,69 @@ func TestJudgeHostDialedFailsEachCheckOnItsOwnFact(t *testing.T) {
 		{"no serving line", func(o *hostDialedObs) { o.Lines = o.Lines[:1] }, []string{checkSrunU}},
 		{"no line at all", func(o *hostDialedObs) { o.Lines = nil }, []string{checkSrunU}},
 		{"the socket's directory is mode 755", func(o *hostDialedObs) { o.Probe.SocketDirMode = "755" }, []string{checkRendezvous}},
-		{"the socket under the fallback", func(o *hostDialedObs) { o.Probe.Fallback = 1 }, []string{checkRendezvous}},
-		{"no listening line", func(o *hostDialedObs) { o.Probe.Listening = 0 }, []string{checkRendezvous}},
+		{"the socket under /dev/shm, not the agent's TMPDIR", func(o *hostDialedObs) { o.Probe.Socket = "/dev/shm/hb-relay-9/relay.sock" }, []string{checkRendezvous}},
+		{"the socket a level below the agent's TMPDIR", func(o *hostDialedObs) { o.Probe.Socket = "/tmp/job/x/hb-relay-9/relay.sock" }, []string{checkRendezvous}},
+		{"another TMPDIR in the agent's line", func(o *hostDialedObs) { o.Probe.AgentTmpDir = "/scratch/job" }, []string{checkRendezvous}},
+		{"no TMPDIR in the agent's line", func(o *hostDialedObs) { o.Probe.AgentTmpDir = "" }, []string{checkRendezvous}},
+		{"a relative TMPDIR in the agent's line", func(o *hostDialedObs) { o.Probe.AgentTmpDir = "tmp/job" }, []string{checkRendezvous}},
+		{"the agent's output unreadable", func(o *hostDialedObs) { o.Probe.AgentLogOK = false }, []string{checkRendezvous}},
 		{"a socket in a predictable directory", func(o *hostDialedObs) { o.Probe.Socket = "/tmp/job/relay/relay.sock" }, []string{checkRendezvous}},
 		{"a socket in an hb-relay- directory with no random part", func(o *hostDialedObs) { o.Probe.Socket = "/tmp/job/hb-relay-x/relay.sock" }, []string{checkRendezvous}},
 		{"a socket of another name", func(o *hostDialedObs) { o.Probe.Socket = "/tmp/job/hb-relay-123/other.sock" }, []string{checkRendezvous}},
 		{"no socket", func(o *hostDialedObs) { o.Probe.Socket = "" }, []string{checkRendezvous}},
 		{"no probe", func(o *hostDialedObs) { o.Probe = nil }, []string{checkBytes, checkRendezvous}},
 		{"a relay of another epoch", func(o *hostDialedObs) { o.Lines[1] = goodLine("serving", 6, 2) }, []string{checkEpoch}},
-		{"the stale relay not run", func(o *hostDialedObs) { o.Stale = staleResult{} }, []string{checkEpoch}},
-		{"the stale relay accepted", func(o *hostDialedObs) { o.Stale.Exit = 0 }, []string{checkEpoch}},
-		{"the stale relay not ready", func(o *hostDialedObs) { o.Stale.Exit = hostdial.ExitNotReady }, []string{checkEpoch}},
-		{"the stale relay wrote its preamble", func(o *hostDialedObs) { o.Stale.Stdout = 40 }, []string{checkEpoch}},
-		{"the kept relay was restarted", func(o *hostDialedObs) { o.KeptPID = 99 }, []string{checkEpoch}},
-		{"the kept relay started again", func(o *hostDialedObs) { o.KeptStarts = 0 }, []string{checkEpoch}},
+		{"the stale pair not run", func(o *hostDialedObs) { o.Stale = nil }, []string{checkEpoch}},
+		{"the stale serving relay not run", func(o *hostDialedObs) { delete(o.Stale, agentapi.RelayServing) }, []string{checkEpoch}},
+		{"the stale control relay accepted", func(o *hostDialedObs) {
+			st := o.Stale[agentapi.RelayControl]
+			st.Final, st.FinalCause, st.Sessions = false, "", 1
+			o.Stale[agentapi.RelayControl] = st
+		}, []string{checkEpoch}},
+		{"the stale serving relay ended for another reason", func(o *hostDialedObs) {
+			st := o.Stale[agentapi.RelayServing]
+			st.FinalCause = "failed: srun refused the step"
+			o.Stale[agentapi.RelayServing] = st
+		}, []string{checkEpoch}},
+		{"a stale relay that wrote its preamble", func(o *hostDialedObs) {
+			st := o.Stale[agentapi.RelayControl]
+			st.Sessions = 1
+			o.Stale[agentapi.RelayControl] = st
+		}, []string{checkEpoch}},
+		{"a stale relay of the kept epoch", func(o *hostDialedObs) {
+			st := o.Stale[agentapi.RelayControl]
+			st.Epoch = 7
+			o.Stale[agentapi.RelayControl] = st
+		}, []string{checkEpoch}},
+		// The regression the review named: a stale relay whose sequence is the kept one's or below would be refused by an
+		// agent that compares sequences only, epoch or not.
+		{"a stale sequence equal to the kept one's", func(o *hostDialedObs) {
+			st := o.Stale[agentapi.RelayControl]
+			st.Seq = o.Kept[agentapi.RelayControl].Seq
+			o.Stale[agentapi.RelayControl] = st
+		}, []string{checkEpoch}},
+		{"a stale serving sequence below the kept one's", func(o *hostDialedObs) {
+			st := o.Stale[agentapi.RelayServing]
+			st.Seq = 1
+			o.Stale[agentapi.RelayServing] = st
+		}, []string{checkEpoch}},
+		{"the kept relay was restarted", func(o *hostDialedObs) {
+			s := o.Relays[agentapi.RelayControl]
+			s.PID = 99
+			o.Relays[agentapi.RelayControl] = s
+		}, []string{checkEpoch}},
+		{"the kept relay started again", func(o *hostDialedObs) {
+			s := o.Relays[agentapi.RelayControl]
+			s.Starts = 2
+			o.Relays[agentapi.RelayControl] = s
+		}, []string{checkEpoch}},
 		{"no control relay runs", func(o *hostDialedObs) {
 			s := o.Relays[agentapi.RelayControl]
 			s.PID = 0
 			o.Relays[agentapi.RelayControl] = s
-			o.KeptPID = 0
+			k := o.Kept[agentapi.RelayControl]
+			k.PID = 0
+			o.Kept[agentapi.RelayControl] = k
 		}, []string{checkEpoch}},
 		{"a byte out of place to the host", func(o *hostDialedObs) { o.Exchanges[0].InPlace = false }, []string{checkBytes}},
 		{"a byte changed to the host", func(o *hostDialedObs) { o.Exchanges[0].Received = append(ascending()[:255], 0) }, []string{checkBytes}},
@@ -164,9 +221,10 @@ func TestHostDialedPostsNameEveryCheckAndNoPath(t *testing.T) {
 	for _, want := range []string{
 		"reach-host-dialed-athena: PASS (posts to #305 and #145)\n",
 		"- the control session: ok: ", "- the serving session: ok: ", "- srun -u: ok: ", "- the rendezvous: ok: ", "- the preamble: ok: ",
-		"- the epoch: ok: both relays carried epoch 7; a control relay of epoch 6 was refused as superseded",
+		"- the epoch: ok: both relays carried epoch 7; a relay pair of epoch 6, each with a higher sequence than the kept relay's, was refused as superseded on both channels",
+		"- the control session: ok: up: the agent registered over the control relay (1 registration(s), the recorded job); the stop was served to its poll over the same session, it sent its last report, and the job ended COMPLETED",
 		"- the 256-byte check (HBEP-4, open question 16): ok: all 256 byte values crossed the serving session intact both ways",
-		"under the job's $TMPDIR (under /tmp)", "an --overlap step's $TMPDIR: set, the same",
+		"right under the job's $TMPDIR (under /tmp), as the rendezvous file and the agent's own line agree", "an --overlap step's $TMPDIR: set, the same",
 		"- frps and frpc: not run: ", "time limit 5 min, with no requeue\n",
 	} {
 		if !strings.Contains(posts, want) {
@@ -195,7 +253,9 @@ func TestAFailedPostNamesNoJobPathOrHostFromTheOwnersWords(t *testing.T) {
 	srv := o.Relays[agentapi.RelayServing]
 	srv.Sessions, srv.Joined, srv.LastEnd, srv.LastRefusal = 0, 0, "", "job 4242 is not listed under tag hb-x"
 	o.Relays[agentapi.RelayServing] = srv
-	o.Stale = staleResult{Ran: true, Exit: 0, Stdout: 30, Classify: "hb-relay: the agent of Allocation u-1 accepted it\x1b[0m"}
+	st := o.Stale[agentapi.RelayControl]
+	st.FinalCause = "failed: hb-relay: the agent of Allocation u-1 accepted it\x1b[0m"
+	o.Stale[agentapi.RelayControl] = st
 	o.Lines[0] = strings.Replace(o.Lines[0], "--epoch 7", "--epoch /etc/passwd", 1)
 	o.Lines[1] = strings.Replace(o.Lines[1], "relay serving", "relay /tmp/x", 1)
 	posts := hostDialedPosts(o, judgeHostDialed(o), "x", 1, 1, "1Gi")
@@ -241,7 +301,7 @@ func TestTopDirNamesOnlyAGenericTop(t *testing.T) {
 	}
 }
 
-const goodReport = "probe=1\ntmpdir-step=set\ntmpdir=/tmp/job\nsocket=/tmp/job/hb-relay-1/relay.sock\nsocket-dir-mode=700\nlistening=1\nfallback=0\n" +
+const goodReport = "probe=1\ntmpdir-step=set\ntmpdir=/tmp/job\nsocket=/tmp/job/hb-relay-1/relay.sock\nsocket-dir-mode=700\nagent-log=ok\nagent-tmpdir=/tmp/job\n" +
 	"serving-port=found\nconnect=ok\ngot-bytes=256\ngot-sha256=cd6816b77f68d70001fc3eaa4d42bdd67cb5973b3151cc5292ecc02a3daac6ab\ndone=1\n"
 
 func TestParseProbeReadsOnlyItsOwnForm(t *testing.T) {
@@ -249,23 +309,24 @@ func TestParseProbeReadsOnlyItsOwnForm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !p.TmpDirSet || p.TmpDir != "/tmp/job" || p.Socket != "/tmp/job/hb-relay-1/relay.sock" || p.SocketDirMode != "700" || p.Listening != 1 || p.Fallback != 0 ||
+	if !p.TmpDirSet || p.TmpDir != "/tmp/job" || p.Socket != "/tmp/job/hb-relay-1/relay.sock" || p.SocketDirMode != "700" || !p.AgentLogOK || p.AgentTmpDir != "/tmp/job" ||
 		!p.PortFound || !p.Connected || p.GotBytes != 256 || p.GotSHA256 != descendingSHA256 {
 		t.Errorf("the report read as %+v", p)
 	}
-	if p, err := parseProbe([]byte("probe=1\ntmpdir-step=unset\nsocket=\nsocket-dir-mode=unknown\nlistening=0\nfallback=0\nserving-port=missing\ndone=1\n")); err != nil || p.PortFound || p.TmpDirSet {
+	if p, err := parseProbe([]byte("probe=1\ntmpdir-step=unset\nsocket=\nsocket-dir-mode=unknown\nagent-log=unreadable\nagent-tmpdir=\nserving-port=missing\ndone=1\n")); err != nil || p.PortFound || p.TmpDirSet || p.AgentLogOK || p.AgentTmpDir != "" {
 		t.Errorf("a report with no port: %+v, %v", p, err)
 	}
 	for name, bad := range map[string]string{
 		"no end":               strings.TrimSuffix(goodReport, "done=1\n"),
 		"a line after its end": goodReport + "extra=1\n",
-		"a count with a zero":  strings.Replace(goodReport, "listening=1", "listening=01", 1),
-		"a negative count":     strings.Replace(goodReport, "fallback=0", "fallback=-1", 1),
+		"a count with a zero":  strings.Replace(goodReport, "got-bytes=256", "got-bytes=0256", 1),
+		"a negative count":     strings.Replace(goodReport, "got-bytes=256", "got-bytes=-256", 1),
+		"another agent-log":    strings.Replace(goodReport, "agent-log=ok", "agent-log=maybe", 1),
 		"an unknown answer":    strings.Replace(goodReport, "connect=ok", "connect=maybe", 1),
 		"a digest that is not": strings.Replace(goodReport, "got-sha256=cd", "got-sha256=xx", 1),
 		"a mode that is not":   strings.Replace(goodReport, "socket-dir-mode=700", "socket-dir-mode=rwx", 1),
 		"a TMPDIR not given":   strings.Replace(goodReport, "tmpdir=/tmp/job\n", "", 1),
-		"lines out of order":   strings.Replace(goodReport, "listening=1\nfallback=0", "fallback=0\nlistening=1", 1),
+		"lines out of order":   strings.Replace(goodReport, "agent-log=ok\nagent-tmpdir=/tmp/job", "agent-tmpdir=/tmp/job\nagent-log=ok", 1),
 		"another probe":        strings.Replace(goodReport, "probe=1", "probe=2", 1),
 		"nothing":              "",
 	} {
@@ -288,7 +349,7 @@ func TestTheServingProbeRunsItsExchangeAndReportsIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	jobErr := `time=2026-11-10T00:00:00Z level=INFO msg="host-dialed: listening for the relays" tag=hb-x job=1 agentInstanceID=a control=127.0.0.1:1 serving=` +
-		strconv.Itoa(r.port()) + " socket=" + filepath.Join(sockDir, "relay.sock") + "\n"
+		strconv.Itoa(r.port()) + " socket=" + filepath.Join(sockDir, "relay.sock") + " tmpdir=" + dir + "\n"
 	if err := os.WriteFile(filepath.Join(dir, agentapi.JobErrorName), []byte(jobErr), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +369,7 @@ func TestTheServingProbeRunsItsExchangeAndReportsIt(t *testing.T) {
 		return p
 	}
 	p := run("TMPDIR=" + dir)
-	if !p.TmpDirSet || p.TmpDir != dir || p.Socket != filepath.Join(sockDir, "relay.sock") || p.SocketDirMode != "700" || p.Listening != 1 || p.Fallback != 0 {
+	if !p.TmpDirSet || p.TmpDir != dir || p.Socket != filepath.Join(sockDir, "relay.sock") || p.SocketDirMode != "700" || !p.AgentLogOK || p.AgentTmpDir != dir {
 		t.Errorf("the rendezvous read as %+v", p)
 	}
 	if !p.PortFound || !p.Connected || p.GotBytes != 256 || p.GotSHA256 != descendingSHA256 {
@@ -323,11 +384,33 @@ func TestTheServingProbeRunsItsExchangeAndReportsIt(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, agentapi.JobErrorName), []byte("level=ERROR msg=\"cannot start\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if p := run("TMPDIR="); p.TmpDirSet || p.PortFound || p.Listening != 0 {
+	if p := run("TMPDIR="); p.TmpDirSet || p.PortFound || !p.AgentLogOK || p.AgentTmpDir != "" {
 		t.Errorf("with no TMPDIR and no listening line the report read as %+v", p)
+	}
+	// An agent's output that cannot be read is said to be, and names no TMPDIR: never a zero count read as a pass.
+	if err := os.Chmod(filepath.Join(dir, agentapi.JobErrorName), 0); err != nil {
+		t.Fatal(err)
+	}
+	if p := run("TMPDIR=" + dir); p.AgentLogOK || p.AgentTmpDir != "" || p.PortFound {
+		t.Errorf("with job.err unreadable the report read as %+v", p)
 	}
 	if n := len(r.exchanges()); n != 1 {
 		t.Errorf("the responder has %d exchange(s), want the first one only", n)
+	}
+}
+
+// The agent's last error, from the tail of its output: the msg and err of its last ERROR line.
+func TestLastAgentErrorReadsTheAgentsLastErrorLine(t *testing.T) {
+	tail := "time=2026-11-10T00:00:00Z level=INFO msg=\"allocation agent starting\" mode=host-dialed\n" +
+		"time=2026-11-10T00:00:01Z level=ERROR msg=\"no apptainer on this node (HBEP-4, open question 15)\" tag=hb-x job=4242 err=\"exec: \\\"apptainer\\\": executable file not found in $PATH\"\n"
+	if got, want := lastAgentError(tail), `no apptainer on this node (HBEP-4, open question 15): exec: "apptainer": executable file not found in $PATH`; got != want {
+		t.Errorf("lastAgentError = %q, want %q", got, want)
+	}
+	if got := lastAgentError("time=x level=INFO msg=\"allocation agent exiting\"\n"); got != `time=x level=INFO msg="allocation agent exiting"` {
+		t.Errorf("with no ERROR line lastAgentError = %q, want the last line", got)
+	}
+	if got := lastAgentError(""); got != "none read" {
+		t.Errorf("with nothing read lastAgentError = %q", got)
 	}
 }
 

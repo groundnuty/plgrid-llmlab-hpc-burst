@@ -32,7 +32,7 @@ func TestReachHostDialed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := newHostDialedRig(t, s.control, "", nil)
+	g := newHostDialedRig(t, s.control, "", "", nil)
 	w := buildWorld(t, s, worldKit{agent: agent, hostDialed: g, dial: func(v slurm.Validated) (slurm.Runner, io.Closer, error) {
 		ssh, err := sshrunNew(s, v)
 		return ssh, ssh, err

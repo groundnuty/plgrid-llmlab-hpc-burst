@@ -99,15 +99,25 @@ func hostDialedPostsAreClean(t *testing.T, posts, out string, healthy bool) {
 // hostDialedFaultChecks are the dry faults and the check each must fail: the one it stands for. A fault may fail others
 // too (a channel that never comes up fails the preamble, and what needs it), which the test allows.
 var hostDialedFaultChecks = map[string]string{
-	"no-u":          checkSrunU,
-	"banner":        checkPreamble,
-	"epoch":         checkEpoch,
-	"control-down":  checkControl,
-	"serving-down":  checkServing,
-	"bytes-to-host": checkBytes,
-	"bytes-to-node": checkBytes,
-	"socket-mode":   checkRendezvous,
-	"unreadable":    checkReadable,
+	"epoch-blind":        checkEpoch,
+	"crash-at-stop":      checkControl,
+	"shm-fallback-quiet": checkRendezvous,
+	"no-apptainer":       checkControl,
+	"no-u":               checkSrunU,
+	"banner":             checkPreamble,
+	"epoch":              checkEpoch,
+	"control-down":       checkControl,
+	"serving-down":       checkServing,
+	"bytes-to-host":      checkBytes,
+	"bytes-to-node":      checkBytes,
+	"socket-mode":        checkRendezvous,
+	"unreadable":         checkReadable,
+}
+
+// hostDialedFaultPosts is what else a fault's text to post must say: the agent's own last error, kept from its job.err
+// when it stops at its start.
+var hostDialedFaultPosts = map[string][]string{
+	"no-apptainer": {"the agent's last error: ", "no apptainer on this node"},
 }
 
 // Each fault fails the row, exit by t.Fatal with the check it stands for named, and the text to post says FAIL on that
@@ -123,6 +133,16 @@ func TestEachHostDialedFaultFailsTheCheckItStandsFor(t *testing.T) {
 			t.Errorf("the node fault %s has no check here", fault)
 		}
 	}
+	for fault := range dryJobFaults {
+		if _, ok := hostDialedFaultChecks[fault]; !ok {
+			t.Errorf("the job fault %s has no check here", fault)
+		}
+	}
+	for fault := range dryStaleFaults {
+		if _, ok := hostDialedFaultChecks[fault]; !ok && fault != "stale-stall" { // TestAStaleRelayDiesWithItsTest
+			t.Errorf("the stale relays' fault %s has no check here", fault)
+		}
+	}
 	for fault, check := range hostDialedFaultChecks {
 		t.Run(fault, func(t *testing.T) {
 			t.Parallel()
@@ -134,7 +154,7 @@ func TestEachHostDialedFaultFailsTheCheckItStandsFor(t *testing.T) {
 			if !strings.HasPrefix(rec.failed, row+" failed: ") || !strings.Contains(rec.failed, check) {
 				t.Fatalf("the run ended %q, want a failure naming %q:\n%s", rec.failed, check, posts)
 			}
-			for _, want := range []string{row + ": FAIL (posts to #305 and #145)", "- " + check + ": FAIL: "} {
+			for _, want := range append([]string{row + ": FAIL (posts to #305 and #145)", "- " + check + ": FAIL: "}, hostDialedFaultPosts[fault]...) {
 				if !strings.Contains(posts, want) {
 					t.Errorf("the text to post lacks %q:\n%s", want, posts)
 				}

@@ -11,9 +11,9 @@
 #   socket=<path>                   the first line of the Allocation directory's relay-socket, which the agent wrote
 #                                   (empty when the file is missing; private, as tmpdir)
 #   socket-dir-mode=<octal> | unknown   the mode of the socket's directory
-#   listening=<n>                   how many of the agent's "host-dialed: listening for the relays" lines job.err holds
-#   fallback=<n>                    how many lines job.err holds of the agent's warning that the socket's directory is
-#                                   under the /dev/shm fallback, not under TMPDIR
+#   agent-log=ok | unreadable       whether the Allocation directory's job.err, the agent's output, could be read
+#   agent-tmpdir=<path>             the TMPDIR the agent's "host-dialed: listening for the relays" line names, the one its
+#                                   socket's directory is under (empty when no such line names one; private, as tmpdir)
 #   serving-port=found | missing    whether the agent's line names its serving listener's port
 #   connect=ok | failed             (only with a port) whether the exchange below ran to its end
 #   got-bytes=<n>                   (only with a port) how many bytes came back from the host
@@ -28,7 +28,7 @@
 # and the reading are cat and head, so that a dry run can stand a node's corruption in for them; nothing else of the node
 # is replaced.
 #
-# Every tool is in a compute node's base system: bash (for /dev/tcp), cat, head, timeout, sha256sum, cut, grep, sed, stat,
+# Every tool is in a compute node's base system: bash (for /dev/tcp), cat, head, timeout, sha256sum, cut, sed, stat,
 # mktemp, dirname, wc. Its own files go in a directory of its own under TMPDIR (or /tmp), removed when it ends.
 set -u
 dir=${1:?the Allocation directory}
@@ -45,11 +45,17 @@ echo "socket=$sock"
 mode=""
 if [ -n "$sock" ]; then mode=$(stat -c %a "$(dirname "$sock")" 2>/dev/null); fi
 echo "socket-dir-mode=${mode:-unknown}"
-listening=$(grep -c -F 'host-dialed: listening for the relays' "$dir/job.err" 2>/dev/null)
-echo "listening=${listening:-0}"
-fallback=$(grep -c -F 'is under the fallback, not TMPDIR' "$dir/job.err" 2>/dev/null)
-echo "fallback=${fallback:-0}"
-port=$(sed -n 's/.*host-dialed: listening for the relays.* serving=\([0-9][0-9]*\).*/\1/p' "$dir/job.err" 2>/dev/null | tail -n 1)
+# The agent's own line, read affirmatively: a job.err that cannot be read says so, and a line that is not there leaves the
+# TMPDIR empty, which the test reads as not shown, never as a pass.
+line=""
+if [ -r "$dir/job.err" ]; then
+  echo "agent-log=ok"
+  line=$(sed -n '/host-dialed: listening for the relays/p' "$dir/job.err" | tail -n 1)
+else
+  echo "agent-log=unreadable"
+fi
+echo "agent-tmpdir=$(printf '%s\n' "$line" | sed -n 's/.* tmpdir=\([^ ]*\).*/\1/p')"
+port=$(printf '%s\n' "$line" | sed -n 's/.* serving=\([0-9][0-9]*\).*/\1/p')
 if [ -z "$port" ]; then
   echo "serving-port=missing"
   echo "done=1"

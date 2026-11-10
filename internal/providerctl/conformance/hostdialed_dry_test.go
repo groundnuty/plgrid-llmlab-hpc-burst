@@ -17,6 +17,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -39,6 +41,21 @@ var dryRelayFaults = map[string]string{
 	"serving-down": `case $last in *" relay serving "*) exit 255 ;; esac`,
 }
 
+// dryStaleFaults are the faults of the stale relays' own ssh, a snippet of their wrapper as above. epoch-blind gives the
+// agent the stale relays with the kept relays' epoch, which an agent that compares only sequences sees too: the epoch check
+// must then fail. stale-stall holds the stale relay's ssh as if it hung connecting, its process named after the wrapper
+// (in the test's own directory), for TestAStaleRelayDiesWithItsTest.
+var dryStaleFaults = map[string]string{
+	"epoch-blind": fmt.Sprintf(`last=${last/ --epoch %d / --epoch %d }`, hostDialedEpoch-1, hostDialedEpoch),
+	"stale-stall": `case $last in "srun "*) : > "$0.stalled"; exec -a "$0.stale" sleep 600 ;; esac`,
+}
+
+// The faults of the job and the run around it: the agent ends its job FAILED just before it is told to stop, as a node
+// failure would (crash-at-stop); the job's TMPDIR is too long for a socket, so the agent puts it under /dev/shm, and the
+// node's grep does not find the agent's warning of it, as a changed wording would not (shm-fallback-quiet); the node has no
+// Apptainer, so the agent stops at its start (no-apptainer).
+var dryJobFaults = map[string]bool{"crash-at-stop": true, "shm-fallback-quiet": true, "no-apptainer": true}
+
 // dryNodeFaults are the faults of the node's tools: commands put first on the steps' PATH, so that the serving probe,
 // and nothing else, runs them. Each takes the real tool's arguments.
 var dryNodeFaults = map[string]map[string]string{
@@ -48,13 +65,16 @@ var dryNodeFaults = map[string]map[string]string{
 	"bytes-to-node": {"head": "#!/bin/sh\n@HEAD@ \"$@\" | tr '\\000' '\\001'\n"},
 	"socket-mode":   {"stat": "#!/bin/sh\necho 755\n"},
 	"unreadable":    {"sha256sum": "#!/bin/sh\necho not-a-digest\n"},
+	// The node's grep finds no fallback warning (with shm-fallback-quiet's long TMPDIR).
+	"shm-fallback-quiet": {"grep": "#!/bin/sh\ncase \"$*\" in *\"is under the fallback\"*) echo 0; exit 1 ;; esac\nexec @GREP@ \"$@\"\n"},
 }
 
 // dryHostDialedFault reports whether fault is one of the rows' dry faults ("" is the healthy run).
 func dryHostDialedFault(fault string) bool {
 	_, relay := dryRelayFaults[fault]
 	_, node := dryNodeFaults[fault]
-	return fault == "" || fault == "slot-held" || relay || node
+	_, stale := dryStaleFaults[fault]
+	return fault == "" || fault == "slot-held" || relay || node || stale || dryJobFaults[fault]
 }
 
 // dryAgent is the agent binary of the dry runs: HPCBURST_ALPHA_AGENT_BIN when set (hack/livechecks builds it, since its
@@ -149,14 +169,18 @@ func dryHostDialedWorld(t *testing.T, row, fault, out string) (*world, *hostDial
 		if err != nil {
 			t.Fatal(err)
 		}
+		grep, err := exec.LookPath("grep")
+		if err != nil {
+			t.Fatal(err)
+		}
 		for name, body := range tools {
-			if err := os.WriteFile(filepath.Join(stubs, name), []byte(strings.ReplaceAll(body, "@HEAD@", head)), 0o700); err != nil {
+			if err := os.WriteFile(filepath.Join(stubs, name), []byte(strings.NewReplacer("@HEAD@", head, "@GREP@", grep).Replace(body)), 0o700); err != nil {
 				t.Fatal(err)
 			}
 		}
 		stepPath = stubs + ":" + stepPath
 	}
-	g := newHostDialedRig(t, ctlDir, dryRelayFaults[fault], func(s *providerctl.RelaySettings) {
+	g := newHostDialedRig(t, ctlDir, dryRelayFaults[fault], dryStaleFaults[fault], func(s *providerctl.RelaySettings) {
 		// A register and slots of the world's own, so that parallel worlds on one login host do not refuse each other.
 		s.Hosts, s.Slots = hostdial.NewHosts(), hostdial.NewSlots(0)
 		s.MinBackoff, s.MaxBackoff, s.StopGrace = 50*time.Millisecond, 500*time.Millisecond, 2*time.Second
@@ -166,6 +190,33 @@ func dryHostDialedWorld(t *testing.T, row, fault, out string) (*world, *hostDial
 		// never run.
 		"HPCBURST_APPTAINER": "/nonexistent/apptainer",
 		"PATH":               os.Getenv("PATH"),
+	}
+	if fault == "no-apptainer" {
+		// No setting and none on the job's PATH, whatever this machine has.
+		delete(jobEnv, "HPCBURST_APPTAINER")
+		var keep []string
+		for _, d := range filepath.SplitList(os.Getenv("PATH")) {
+			if _, err := os.Stat(filepath.Join(d, "apptainer")); err != nil {
+				keep = append(keep, d)
+			}
+		}
+		jobEnv["PATH"] = strings.Join(keep, string(filepath.ListSeparator))
+	}
+	jobDir := filepath.Join(base, "j")
+	if fault == "shm-fallback-quiet" {
+		// A TMPDIR of 77 bytes, <JobDir>/1001/tmp (the fake's first job): the relay socket's path under it would pass 107
+		// bytes (hostdial's socketDir), so the agent falls back to /dev/shm, this machine's; its run directory's longest
+		// socket still fits (internal/agent, MakeRunDir), so it runs on. The directory under /dev/shm is the agent's own and
+		// goes when it stops; the clean-up below removes one a killed agent left.
+		pad := 68 - len(base) - 1
+		if pad < 1 {
+			t.Fatalf("TMPDIR is too long for this fault's job directory (%d bytes)", len(base))
+		}
+		jobDir = filepath.Join(base, strings.Repeat("l", pad))
+		if n := len(jobDir + "/1001/tmp"); n != 77 {
+			t.Fatalf("the job's TMPDIR would be %d bytes, not 77", n)
+		}
+		t.Cleanup(func() { removeShmSocketDir(t, out) })
 	}
 	login := func(plat *fakeslurm.Platform, creds, home string) {
 		dir := filepath.Join(base, "n")
@@ -188,9 +239,9 @@ func dryHostDialedWorld(t *testing.T, row, fault, out string) (*world, *hostDial
 			t.Fatal(err)
 		}
 	}
-	w, _ := dryWorld(t, r, fault, out, dryShape{cpus: "1", memory: "1Gi"}, agent, jobEnv, dryExtra{
+	w, plat := dryWorld(t, r, fault, out, dryShape{cpus: "1", memory: "1Gi"}, agent, jobEnv, dryExtra{
 		run: func(m *fakeslurm.RunMode) {
-			m.JobDir = filepath.Join(base, "j")
+			m.JobDir = jobDir
 			m.KillWait = 2 * time.Second
 			m.StepEnv = map[string]string{"PATH": stepPath}
 		},
@@ -208,6 +259,34 @@ func dryHostDialedWorld(t *testing.T, row, fault, out string) (*world, *hostDial
 		limit = 5 * time.Second
 	}
 	w.shorten = func(d time.Duration) time.Duration { return min(d, limit) }
+	if fault == "crash-at-stop" {
+		w.beforeStop = func(jobID string) {
+			id, err := strconv.Atoi(jobID)
+			if err != nil {
+				t.Fatalf("job ID %q", jobID)
+			}
+			if err := plat.End(id, string(fakeslurm.Failed)); err != nil {
+				t.Errorf("the fake did not end the job: %v", err)
+			}
+		}
+	}
 	g.startHostSide(t, w)
 	return w, g
+}
+
+// removeShmSocketDir removes the agent's socket directory under /dev/shm that the run's record names, when an agent that
+// was killed left it: a directory of this run's own, named in its record, never one found by a pattern.
+func removeShmSocketDir(t *testing.T, out string) {
+	b, err := os.ReadFile(filepath.Join(out, alpha.RecordFile))
+	if err != nil {
+		return
+	}
+	m := regexp.MustCompile(`"socket": "(/dev/shm/hb-relay-[0-9]+)/relay\.sock"`).FindSubmatch(b)
+	if m == nil {
+		return
+	}
+	if _, err := os.Stat(string(m[1])); err == nil {
+		t.Logf("the agent left its socket's directory under /dev/shm; removing it")
+		_ = os.RemoveAll(string(m[1]))
+	}
 }

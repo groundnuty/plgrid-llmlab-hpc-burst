@@ -78,24 +78,28 @@ func hostDialedDryWorld(t *testing.T) (*world, []string) {
 // The checks of the text to post, by the fault that stands for each (the issue's list: both sessions, srun -u, the
 // rendezvous, the preamble, the epoch and the 256-byte check; and a state that cannot be read).
 var hostDialedFaultLines = map[string]string{
-	"no-u":          "- srun -u: FAIL: ",
-	"banner":        "- the preamble: FAIL: ",
-	"epoch":         "- the epoch: FAIL: ",
-	"control-down":  "- the control session: FAIL: ",
-	"serving-down":  "- the serving session: FAIL: ",
-	"bytes-to-host": "- the 256-byte check (HBEP-4, open question 16): FAIL: node to host",
-	"bytes-to-node": "- the 256-byte check (HBEP-4, open question 16): FAIL: host to node",
-	"socket-mode":   "- the rendezvous: FAIL: the socket's directory is mode 755, not 700",
-	"unreadable":    "- the run's state: FAIL: the serving probe's report could not be read",
+	"epoch-blind":        "- the epoch: FAIL: the control relay of epoch 6, with the higher sequence, was not refused as superseded",
+	"crash-at-stop":      "- the control session: FAIL: ",
+	"shm-fallback-quiet": "- the rendezvous: FAIL: the socket's directory is under /dev/shm, not right under the job's $TMPDIR",
+	"no-apptainer":       "- the control session: FAIL: did not come up: the job ended FAILED before the agent registered, so the agent stopped at its start; the agent's last error: no apptainer on this node",
+	"no-u":               "- srun -u: FAIL: ",
+	"banner":             "- the preamble: FAIL: ",
+	"epoch":              "- the epoch: FAIL: ",
+	"control-down":       "- the control session: FAIL: ",
+	"serving-down":       "- the serving session: FAIL: ",
+	"bytes-to-host":      "- the 256-byte check (HBEP-4, open question 16): FAIL: node to host",
+	"bytes-to-node":      "- the 256-byte check (HBEP-4, open question 16): FAIL: host to node",
+	"socket-mode":        "- the rendezvous: FAIL: the socket's directory is mode 755, not 700",
+	"unreadable":         "- the run's state: FAIL: the serving probe's report could not be read",
 }
 
 var hostDialedOKLines = []string{
-	"- the control session: ok: up: the agent registered over the control relay",
+	"- the control session: ok: up: the agent registered over the control relay (1 registration(s), the recorded job); the stop was served to its poll over the same session, it sent its last report, and the job ended COMPLETED",
 	"- the serving session: ok: up: a stream the job opened crossed it to the serving port",
 	"- srun -u: ok: every relay ran srun -u --overlap --jobid=<the job> --ntasks=1 <the staged agent> relay <channel>",
-	"- the rendezvous: ok: the agent's socket was in a mode-700 hb-relay-<random> directory under the job's $TMPDIR",
+	"- the rendezvous: ok: the agent's socket was in a mode-700 hb-relay-<random> directory right under the job's $TMPDIR",
 	"- the preamble: ok: each relay's first line was hpcburst-relay/1 <the Allocation's UID>",
-	"- the epoch: ok: both relays carried epoch 7; a control relay of epoch 6 was refused as superseded",
+	"- the epoch: ok: both relays carried epoch 7; a relay pair of epoch 6, each with a higher sequence than the kept relay's, was refused as superseded on both channels",
 	"- the 256-byte check (HBEP-4, open question 16): ok: all 256 byte values crossed the serving session intact both ways",
 	"- frps and frpc: not run: ",
 }

@@ -254,12 +254,63 @@ type hostDialedRig struct {
 	wrapper  string
 	record   string
 	settings providerctl.RelaySettings
+	// staleWrapper and staleRecord are the stale relays' own ssh and record, apart from the Owner's.
+	staleWrapper, staleRecord string
+	// stop is the backend the agent API serves, which records the stop's way to the agent.
+	stop *stopWatch
+}
+
+// stopWatch is the agent API's backend as the row reads the stop (the review of PR 306, B2): the fake Backend, recording,
+// once armed for the Allocation, whether the agent's own poll was served the stop, which then crossed the control session
+// to the agent, and whether the agent reported after that: the last report it sends once it has stopped on the
+// instruction (internal/agent, sendLastReport). A job that merely ended shows neither.
+type stopWatch struct {
+	*fake.Backend
+	mu            sync.Mutex
+	uid           string
+	served, acked bool
+}
+
+func (s *stopWatch) arm(uid string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.uid, s.served, s.acked = uid, false, false
+}
+
+func (s *stopWatch) seen() (served, acked bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.served, s.acked
+}
+
+func (s *stopWatch) Desired(ctx context.Context, c agentapi.Caller) (agentapi.DesiredState, error) {
+	d, err := s.Backend.Desired(ctx, c)
+	if err == nil && d.Action == agentapi.ActionStop {
+		s.mu.Lock()
+		if s.uid != "" && c.AllocationUID == s.uid {
+			s.served = true
+		}
+		s.mu.Unlock()
+	}
+	return d, err
+}
+
+func (s *stopWatch) Report(ctx context.Context, c agentapi.Caller, r agentapi.Report) error {
+	err := s.Backend.Report(ctx, c, r)
+	if err == nil {
+		s.mu.Lock()
+		if s.served && c.AllocationUID == s.uid {
+			s.acked = true
+		}
+		s.mu.Unlock()
+	}
+	return err
 }
 
 // newHostDialedRig makes the rig: the certificate, the control port's listener (served by startHostSide once the world
 // has its credentials directory), the serving responder and the relays' ssh wrapper with the fault (empty live). The relay
 // settings name both ports, the control directory and the fixed epoch; tune shortens a dry run's timings.
-func newHostDialedRig(t testing.TB, controlDir, fault string, tune func(*providerctl.RelaySettings)) *hostDialedRig {
+func newHostDialedRig(t testing.TB, controlDir, fault, staleFault string, tune func(*providerctl.RelaySettings)) *hostDialedRig {
 	t.Helper()
 	state, err := os.MkdirTemp("", "hds")
 	if err != nil {
@@ -267,12 +318,14 @@ func newHostDialedRig(t testing.TB, controlDir, fault string, tune func(*provide
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(state) })
 	g := &hostDialedRig{host: agentapi.Host{StateDir: state}, backend: fake.NewBackend()}
+	g.stop = &stopWatch{Backend: g.backend}
 	g.certPEM, g.pin = writeEndpointCert(t, g.host)
 	if g.control, err = net.Listen("tcp4", "127.0.0.1:0"); err != nil {
 		t.Fatal(err)
 	}
 	g.serving = startServingResponder(t)
 	g.wrapper, g.record = relayWrapper(t, fault)
+	g.staleWrapper, g.staleRecord = relayWrapper(t, staleFault)
 	g.settings = providerctl.RelaySettings{
 		Ports: map[agentapi.RelayChannel]int{
 			agentapi.RelayControl: g.control.Addr().(*net.TCPAddr).Port,
@@ -293,7 +346,7 @@ func newHostDialedRig(t testing.TB, controlDir, fault string, tune func(*provide
 func (g *hostDialedRig) startHostSide(t testing.TB, w *world) {
 	t.Helper()
 	srv, err := agentserver.New(agentserver.Config{
-		Lookup: agentserver.NewClientLookup(w.c), CredentialsDir: w.credDir, Backend: g.backend, Host: g.host,
+		Lookup: agentserver.NewClientLookup(w.c), CredentialsDir: w.credDir, Backend: g.stop, Host: g.host,
 		Logger: slog.New(slog.DiscardHandler), PollInterval: time.Second,
 	})
 	if err != nil {

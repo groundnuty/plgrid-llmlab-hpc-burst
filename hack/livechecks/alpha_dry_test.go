@@ -19,10 +19,12 @@ package livechecks
 // shared build lock); CI leaves them unset and the test builds them.
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -74,8 +76,9 @@ cd "@REALDIR@" || exit 3
 exec "@REAL@" "$@"
 `
 
-// realTestBinary returns the compiled test of a package: the prebuilt one when its variable is set, else a
-// build into the calling test's own temporary directory, which the testing package removes.
+// realTestBinary returns the compiled test of a package: the prebuilt one when its variable is set, else one build per
+// package for the whole process, into a directory of the process's own that TestMain removes (the review of PR 306: every
+// dry case built the same package again). No test changes the binary.
 func realTestBinary(t *testing.T, envName, pkg string) string {
 	t.Helper()
 	if p := os.Getenv(envName); p != "" {
@@ -84,13 +87,46 @@ func realTestBinary(t *testing.T, envName, pkg string) string {
 		}
 		return p
 	}
-	out := filepath.Join(t.TempDir(), filepath.Base(pkg)+".test")
-	cmd := exec.Command("go", "test", "-c", "-o", out, "./"+pkg)
-	cmd.Dir = repoRoot(t)
-	if b, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("go test -c ./%s: %v\n%s", pkg, err, b)
+	testBuilds.mu.Lock()
+	defer testBuilds.mu.Unlock()
+	if b, ok := testBuilds.done[pkg]; ok {
+		if b.err != nil {
+			t.Fatal(b.err)
+		}
+		return b.path
 	}
-	return out
+	var b testBuild
+	if testBuilds.dir == "" {
+		testBuilds.dir, b.err = os.MkdirTemp("", "lct")
+	}
+	if b.err == nil {
+		b.path = filepath.Join(testBuilds.dir, strings.ReplaceAll(pkg, "/", "_")+".test")
+		cmd := exec.Command("go", "test", "-c", "-o", b.path, "./"+pkg)
+		cmd.Dir = repoRoot(t)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			b.err = fmt.Errorf("go test -c ./%s: %v\n%s", pkg, err, out)
+		}
+	}
+	if testBuilds.done == nil {
+		testBuilds.done = map[string]testBuild{}
+	}
+	testBuilds.done[pkg] = b
+	if b.err != nil {
+		t.Fatal(b.err)
+	}
+	return b.path
+}
+
+// testBuilds are the packages' test binaries this process built, one each.
+var testBuilds struct {
+	mu   sync.Mutex
+	dir  string
+	done map[string]testBuild
+}
+
+type testBuild struct {
+	path string
+	err  error
 }
 
 func (w *world) installDry(template, real, realDir string) {
