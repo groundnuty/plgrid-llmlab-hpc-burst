@@ -292,3 +292,147 @@ func TestCIEveryStepThatRunsAfterAFailureRequiresTheVerifiedToolchain(t *testing
 		t.Error("found no step that runs after a failure; this test would check nothing (the go job has three)")
 	}
 }
+
+// Issue #346: CI caches no Go modules (issue #290), so a transient error from proxy.golang.org used to
+// fail a job. The workflow's GOPROXY falls through to the module's origin on any error, and a step in
+// each job that builds downloads and verifies the modules, with a bounded retry. The expected values
+// are written here, not read from the workflow.
+
+const (
+	wantDownloadName = "Download and verify the Go modules"
+	wantDownloadRun  = "bash hack/go-mod-download.sh"
+)
+
+// moduleVars are the settings that decide where a module comes from and how its bytes are checked.
+// GOPROXY is the one the workflow sets, at its top level; every other one stays as it was, which is not
+// set at all, so that checksums are still verified against go.sum and sum.golang.org.
+var moduleVars = []string{"GOPROXY", "GOFLAGS", "GONOSUMDB", "GONOSUMCHECK", "GOSUMDB", "GONOPROXY", "GOPRIVATE", "GOINSECURE", "GOMODCACHE", "GOENV"}
+
+func TestCIGoproxyIsAPipeToDirectAndNothingElseChangesWhereModulesComeFrom(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Env  map[string]any `json:"env"`
+		Jobs map[string]struct {
+			Env   map[string]any `json:"env"`
+			Steps []struct {
+				Name string         `json:"name"`
+				Run  string         `json:"run"`
+				Env  map[string]any `json:"env"`
+			} `json:"steps"`
+		} `json:"jobs"`
+	}
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		t.Fatalf("ci.yml is not valid YAML: %v", err)
+	}
+	if got := doc.Env["GOPROXY"]; got != wantGoproxy {
+		t.Errorf("the workflow's GOPROXY is %q, want %q: the pipe is what lets any proxy error fall through to direct (a comma only does for a 404 or 410)", got, wantGoproxy)
+	}
+	for _, v := range moduleVars {
+		if _, ok := doc.Env[v]; ok && v != "GOPROXY" {
+			t.Errorf("the workflow sets %s, which must stay unset", v)
+		}
+	}
+	assigns := regexp.MustCompile(`\b(` + strings.Join(moduleVars, "|") + `)=`)
+	for id, j := range doc.Jobs {
+		for _, v := range moduleVars {
+			if _, ok := j.Env[v]; ok {
+				t.Errorf("job %s sets %s, which only the workflow's top-level env may set (GOPROXY) or nobody (the rest)", id, v)
+			}
+		}
+		for _, s := range j.Steps {
+			for _, v := range moduleVars {
+				if _, ok := s.Env[v]; ok {
+					t.Errorf("job %s step %q sets %s", id, s.Name, v)
+				}
+			}
+			// A script can set one too, for itself or for the steps after it ($GITHUB_ENV).
+			if m := assigns.FindString(s.Run); m != "" {
+				t.Errorf("job %s step %q assigns %s in its script", id, s.Name, m)
+			}
+			if strings.Contains(s.Run, "go env -w") {
+				t.Errorf("job %s step %q runs go env -w, which persists a module setting for the steps after it", id, s.Name)
+			}
+		}
+	}
+}
+
+// Every job that builds downloads and verifies the modules in the step right after the Go check, before
+// any build; tidy has no such step, since it must start from an empty module cache and its go mod tidy
+// -diff exits 1 both for an untidy module and for a failed download, so a retry would hide the first
+// kind (it relies on the GOPROXY pipe alone).
+func TestCIEveryBuildingJobDownloadsAndVerifiesModulesRightAfterTheGoCheck(t *testing.T) {
+	building := map[string]bool{"go": false, "crd and envtest": false, "launcher-k3s": false, "rehearsal": false, "rehearsal part 3": false}
+	for _, j := range loadJobs(t) {
+		check := -1
+		for i, s := range j.steps {
+			if s.str("name") == goSteps[4] {
+				check = i
+			}
+		}
+		if check < 0 {
+			t.Fatalf("job %s has no %q step", j.id, goSteps[4])
+		}
+		if j.name == "tidy" {
+			for _, s := range j.steps {
+				if strings.Contains(s.str("run"), "go-mod-download") {
+					t.Errorf("tidy has a step %q that runs the download script: its module cache must start empty, and its tidy check must not be retried", s.str("name"))
+				}
+			}
+			continue
+		}
+		if _, ok := building[j.name]; ok {
+			building[j.name] = true
+		}
+		if check+1 >= len(j.steps) {
+			t.Errorf("job %s has no step after the Go check", j.id)
+			continue
+		}
+		s := j.steps[check+1]
+		if s.str("name") != wantDownloadName || s.str("run") != wantDownloadRun {
+			t.Errorf("job %s: the step after the Go check is %q running %q, want %q running %q", j.id, s.str("name"), s.str("run"), wantDownloadName, wantDownloadRun)
+		}
+		for _, key := range []string{"if", "continue-on-error", "env", "working-directory", "timeout-minutes", "shell"} {
+			if _, ok := s[key]; ok {
+				t.Errorf("job %s: the download step has %q, which could skip it or change what it runs", j.id, key)
+			}
+		}
+	}
+	for name, seen := range building {
+		if !seen {
+			t.Errorf("no job named %q was checked, so this test no longer covers it", name)
+		}
+	}
+}
+
+// tidy's empty-cache assertion runs before any go command, since a download before it would fail it, and
+// before go mod tidy -diff, which is what the assertion protects.
+func TestCITidyAssertsTheEmptyCacheBeforeTheFirstGoCommand(t *testing.T) {
+	for _, j := range loadJobs(t) {
+		if j.name != "tidy" {
+			continue
+		}
+		assert, tidy := -1, -1
+		for i, s := range j.steps {
+			switch {
+			case s.str("name") == "Assert that the module cache is empty":
+				assert = i
+			case strings.Contains(s.str("run"), "go mod tidy -diff"):
+				tidy = i
+			}
+		}
+		if assert < 0 || tidy < 0 || assert > tidy {
+			t.Fatalf("tidy's steps: the empty-cache assertion is at %d and go mod tidy -diff at %d", assert, tidy)
+		}
+		goCmd := regexp.MustCompile(`(^|[\s;&|(])go\s`)
+		for _, s := range j.steps[:assert] {
+			if goCmd.MatchString(s.str("run")) && !strings.Contains(s.str("run"), "fetch-go.sh") {
+				t.Errorf("tidy's step %q runs go before the module cache is asserted empty:\n%s", s.str("name"), s.str("run"))
+			}
+		}
+		return
+	}
+	t.Fatal("no job named tidy")
+}
