@@ -24,7 +24,12 @@ package providerctl
 //   - a refusal for a login host another Provider holds makes the Provider's
 //     Ready False with LoginHostInUse (claim, read by the status loop);
 //   - a copy that loses the lead stops sending sets and acknowledgements
-//     before it releases the Lease (stopKeeper, the fence's release hook).
+//     before it releases the Lease (stopKeeper, the fence's release hook);
+//   - while no exchange with the keeper has succeeded under the current lead,
+//     or none has for longer than a set's validity, the Provider is Ready
+//     False with RelayKeeperUnavailable and admits no new Allocation, and
+//     running ones are left as they are; the next successful exchange makes
+//     it Ready again (HBEP-6, The relay keeper, as #360 amends it).
 // No message carries a secret: the set names the paths of the Provider's key
 // and known-hosts file and of each Allocation's staged agent, never their
 // content.
@@ -92,6 +97,16 @@ type keeperState struct {
 	// lastErr is the last failed exchange's text, so a keeper that stays
 	// unreachable is logged once, not at every send.
 	lastErr string
+	// okGen is the lead under which an exchange last succeeded, at okAt by
+	// now, the controller's clock; validity is the last set's (the poll
+	// interval in force plus the renew deadline). available is what the
+	// status loop was last told; status wakes it when that changes.
+	now       func() time.Time
+	okGen     int
+	okAt      time.Time
+	validity  time.Duration
+	available bool
+	status    chan struct{}
 	// provUID and provCreated are the Provider's, read once.
 	provUID     string
 	provCreated time.Time
@@ -125,7 +140,8 @@ func newKeeperRelayState(o Options, s RelaySettings) (*relayState, error) {
 	}
 	s.Hosts = hostdial.NewHosts()
 	k := &keeperState{socket: s.KeeperSocket, interval: s.KeeperSendInterval, decisions: map[string]keeperDecision{},
-		ends: map[wire.FinalEnd]bool{}, acks: make(chan struct{}, 1), kick: make(chan struct{}, 1)}
+		ends: map[wire.FinalEnd]bool{}, acks: make(chan struct{}, 1), kick: make(chan struct{}, 1),
+		now: o.Clock.Now, validity: o.PollInterval + defaultRenewDeadline, status: make(chan struct{}, 1)}
 	return &relayState{settings: s, provider: o.Provider, hosts: s.Hosts, keeper: k}, nil
 }
 
@@ -239,7 +255,75 @@ func (k *keeperState) exchange(lead context.Context, kind wire.Kind, body, reply
 	if lead.Err() != nil {
 		return errLeadEnded
 	}
-	return wire.Exchange(context.WithoutCancel(lead), k.socket, kind, body, reply)
+	err := wire.Exchange(context.WithoutCancel(lead), k.socket, kind, body, reply)
+	k.exchanged(err)
+	return err
+}
+
+// exchanged records whether an exchange succeeded: the keeper answered with
+// the reply, or refused a set for its login host or its epoch, which it
+// decided on. A transport failure, and a refusal for its own state file, the
+// protocol's version or a malformed request, is no success.
+func (k *keeperState) exchanged(err error) {
+	var refused *wire.RefusedError
+	ok := err == nil || (errors.As(err, &refused) && (refused.Refused.Reason == wire.RefusedLoginHost || refused.Refused.Reason == wire.RefusedEpoch))
+	k.mu.Lock()
+	if ok {
+		k.okGen, k.okAt = k.gen, k.now()
+	}
+	k.mu.Unlock()
+	k.noteAvailability()
+}
+
+// unavailable says why the keeper counts as unreachable now, or "": no
+// exchange has succeeded under this lead, or none for longer than a set's
+// validity.
+func (k *keeperState) unavailable(now time.Time) string {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.unavailableLocked(now)
+}
+
+func (k *keeperState) unavailableLocked(now time.Time) string {
+	switch {
+	case k.gen == 0 || k.okGen != k.gen:
+		return "no exchange with the relay keeper has succeeded under this copy's lead of the Provider"
+	case now.Sub(k.okAt) > k.validity:
+		return fmt.Sprintf("no exchange with the relay keeper has succeeded since %s, longer than a desired set's validity (%s)", k.okAt.UTC().Format(time.RFC3339), k.validity)
+	}
+	return ""
+}
+
+// noteAvailability wakes the status loop when the keeper's availability
+// changed since it was last told, so Ready follows at once, not at the next
+// poll.
+func (k *keeperState) noteAvailability() {
+	k.mu.Lock()
+	avail := k.unavailableLocked(k.now()) == ""
+	changed := avail != k.available
+	k.available = avail
+	k.mu.Unlock()
+	if changed {
+		wake(k.status)
+	}
+}
+
+// keeperStatus is the status loop's wake-up in keeper mode; nil, which
+// never fires, otherwise.
+func (l *statusLoop) keeperStatus() <-chan struct{} {
+	if r := l.s.relays; r != nil && r.keeper != nil {
+		return r.keeper.status
+	}
+	return nil
+}
+
+// keeperUnavailable is why the Provider is Ready False with
+// RelayKeeperUnavailable now, or "": always "" outside keeper mode.
+func (s *shared) keeperUnavailable(now time.Time) string {
+	if r := s.relays; r != nil && r.keeper != nil {
+		return r.keeper.unavailable(now)
+	}
+	return ""
 }
 
 // errLeadEnded: this copy's lead has ended, so nothing is sent.
@@ -272,6 +356,7 @@ func (s *shared) sendSets(lead context.Context) {
 	defer t.Stop()
 	for {
 		s.sendSet(lead)
+		k.noteAvailability()
 		select {
 		case <-lead.Done():
 			return
@@ -430,10 +515,14 @@ func (s *shared) desiredSet(ctx context.Context, gen int) (wire.DesiredSet, erro
 	if age < 0 {
 		age = 0
 	}
+	validity := listingMaxAge(p, s.o.PollInterval) + defaultRenewDeadline
+	k.mu.Lock()
+	k.validity = validity
+	k.mu.Unlock()
 	return wire.DesiredSet{
 		Provider: s.o.Provider, ProviderUID: uid, ProviderCreated: created, LeaseEpoch: epoch,
 		Complete: complete, ListedAt: listed.UTC(), ListingAgeMS: age.Milliseconds(),
-		ValidForMS: (listingMaxAge(p, s.o.PollInterval) + defaultRenewDeadline).Milliseconds(),
+		ValidForMS: validity.Milliseconds(),
 		SSH: wire.SSH{HostName: cfg.HostName, User: cfg.User, Port: cfg.Port,
 			IdentityFile: cfg.IdentityFile, KnownHostsFile: cfg.UserKnownHostsFile},
 		Allocations: entries,

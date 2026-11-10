@@ -103,7 +103,6 @@ func TestKeeperModeRefusesABadSocketPath(t *testing.T) {
 func TestKeeperSetsAndAcksCarryTheLeaseEpochAndStopBeforeTheRelease(t *testing.T) {
 	k := startFakeKeeper(t)
 	e := newEnv(t, keeperMode(k, 0), func(e *env) { e.opts.Relays.Epoch = nil })
-	a := e.running("alloc-a")
 	if err := e.ctl.SyncStatus(e.ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -128,10 +127,6 @@ func TestKeeperSetsAndAcksCarryTheLeaseEpochAndStopBeforeTheRelease(t *testing.T
 		default:
 		}
 	}
-	end := wire.FinalEnd{UID: string(a.UID), Tag: tagOf(a), JobID: a.Status.AtProvider.JobID, Channel: agentapi.RelayServing,
-		Kind: wire.EndFailed, Cause: "the step limit is reached", At: time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC), Epoch: 1<<31 + 1, Seq: 3}
-	k.script(func(k *fakeKeeper) { k.ends = []wire.FinalEnd{end} })
-
 	runDone := make(chan struct{})
 	leading, stopped := make(chan struct{}), make(chan struct{})
 	le, err := leaderelection.NewLeaderElector(leaderelection.LeaderElectionConfig{
@@ -155,7 +150,13 @@ func TestKeeperSetsAndAcksCarryTheLeaseEpochAndStopBeforeTheRelease(t *testing.T
 	case <-time.After(30 * time.Second):
 		t.Fatal("the elector did not lead")
 	}
-	e.run("alloc-a", 1)
+	// The Provider admits Allocations once an exchange succeeded under the lead.
+	keeper := e.ctl.shared.relays.keeper
+	waitRelays(t, "an exchange with the keeper succeeded under the lead", func() bool { return keeper.unavailable(e.clock.Now()) == "" })
+	a := e.running("alloc-a")
+	end := wire.FinalEnd{UID: string(a.UID), Tag: tagOf(a), JobID: a.Status.AtProvider.JobID, Channel: agentapi.RelayServing,
+		Kind: wire.EndFailed, Cause: "the step limit is reached", At: time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC), Epoch: 1<<31 + 1, Seq: 3}
+	k.script(func(k *fakeKeeper) { k.ends = []wire.FinalEnd{end} })
 	set := k.waitSet(t, "a set naming alloc-a", 0, func(s wire.DesiredSet) bool { _, ok := entryOf(s, tagOf(a)); return ok })
 	if set.LeaseEpoch != 42 {
 		t.Errorf("the set's Lease epoch is %d, want 42: the test's 41, raised by one at the take-over", set.LeaseEpoch)
@@ -197,12 +198,8 @@ func TestKeeperSetsAndAcksCarryTheLeaseEpochAndStopBeforeTheRelease(t *testing.T
 func TestKeeperSendsNothingOnceItsLeadEnds(t *testing.T) {
 	k := startFakeKeeper(t)
 	e := newEnv(t, keeperMode(k, 5))
+	keeperUp(e)
 	a := e.running("alloc-a")
-	if err := e.ctl.SyncStatus(e.ctx); err != nil {
-		t.Fatal(err)
-	}
-	runKeeperClient(e)
-	e.run("alloc-a", 1)
 	k.waitSet(t, "a set while it leads", 0, func(wire.DesiredSet) bool { return true })
 	end := wire.FinalEnd{UID: "uid-gone", Tag: tagOf(a), JobID: a.Status.AtProvider.JobID, Channel: agentapi.RelayControl,
 		Kind: wire.EndFailed, Cause: "the step limit is reached", At: time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC), Epoch: 1<<31 + 1, Seq: 1}
@@ -232,20 +229,25 @@ func TestKeeperSendsNothingOnceItsLeadEnds(t *testing.T) {
 // Completeness (#343's Q6): a set is complete only once every Allocation of
 // the Provider that is Running with a job ID has had an observation under
 // this lead that reached a decision, and the keeper has answered the
-// login-host claim. Observations from before the lead don't count; an
-// unobserved Allocation, and one whose paths could not be resolved, make the
-// set incomplete.
+// login-host claim. A new leader, as after a hand-over, has observed nothing
+// under its lead: an unobserved Allocation, and one whose paths could not be
+// resolved, make the set incomplete.
 func TestKeeperSetIsCompleteOnlyOnceEveryRunningAllocationIsDecided(t *testing.T) {
 	k := startFakeKeeper(t)
 	e := newEnv(t, keeperMode(k, 5))
+	stopOld := keeperUp(e)
 	a, b := e.running("alloc-a"), e.running("alloc-b")
+	// The new leader: a controller with nothing in memory, whose lead begins
+	// with both Allocations Running.
+	stopOld()
+	e.build()
 	if err := e.ctl.SyncStatus(e.ctx); err != nil {
 		t.Fatal(err)
 	}
+	from := k.setCount()
 	runKeeperClient(e)
-	// The first sets: claim unanswered, and the observations above came
-	// before the lead.
-	first := k.waitSet(t, "the first set", 0, func(wire.DesiredSet) bool { return true })
+	// The first sets: claim unanswered, and no observation under this lead.
+	first := k.waitSet(t, "the new leader's first set", from, func(wire.DesiredSet) bool { return true })
 	if first.Complete {
 		t.Error("the first set of the lead is complete, before any observation under it and before the keeper answered the claim")
 	}
@@ -309,7 +311,6 @@ func TestKeeperSetIsCompleteOnlyOnceEveryRunningAllocationIsDecided(t *testing.T
 func TestKeeperSetIsIncompleteUntilTheKeeperAnswersTheClaim(t *testing.T) {
 	k := startFakeKeeper(t)
 	refusing := atomic.Bool{}
-	refusing.Store(true)
 	k.script(func(k *fakeKeeper) {
 		k.onSet = func(s wire.DesiredSet) (wire.Kind, any) {
 			if refusing.Load() {
@@ -319,14 +320,14 @@ func TestKeeperSetIsIncompleteUntilTheKeeperAnswersTheClaim(t *testing.T) {
 		}
 	})
 	e := newEnv(t, keeperMode(k, 5))
+	keeperUp(e)
 	e.running("alloc-a")
-	if err := e.ctl.SyncStatus(e.ctx); err != nil {
-		t.Fatal(err)
-	}
-	runKeeperClient(e)
-	e.run("alloc-a", 1)
+	refusing.Store(true)
 	n := k.setCount()
-	if s := k.waitSet(t, "a set after the observation", n, func(wire.DesiredSet) bool { return true }); s.Complete {
+	k.waitSet(t, "a set the keeper refuses", n, func(wire.DesiredSet) bool { return true })
+	e.run("alloc-a", 1)
+	n = k.setCount()
+	if s := k.waitSet(t, "a set after the observation", n+1, func(wire.DesiredSet) bool { return true }); s.Complete {
 		t.Error("a set is complete while the keeper refuses the claim")
 	}
 	refusing.Store(false)
@@ -343,22 +344,21 @@ func TestKeeperSetIsIncompleteUntilTheKeeperAnswersTheClaim(t *testing.T) {
 func TestKeeperSetMarksEndedForGoodAndWaitsOnTheListing(t *testing.T) {
 	k := startFakeKeeper(t)
 	e := newEnv(t, keeperMode(k, 5))
+	keeperUp(e)
 	a := e.running("alloc-a")
-	if err := e.ctl.SyncStatus(e.ctx); err != nil {
-		t.Fatal(err)
-	}
 	if !setRelayEndedForGood(a, relayFailure{msg: "the serving relay ended for good: the step limit is reached", at: at(12, 0, 0)}) {
 		t.Fatal("the test could not set the mark")
 	}
 	if err := e.c.Status().Update(e.ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	runKeeperClient(e)
 	e.run("alloc-a", 1)
-	s := k.waitSet(t, "a complete set naming alloc-a", 0, func(s wire.DesiredSet) bool { _, ok := entryOf(s, tagOf(a)); return ok && s.Complete })
-	if en, _ := entryOf(s, tagOf(a)); !en.EndedForGood {
-		t.Error("an Allocation that carries RelayEndedForGood is sent without endedForGood")
-	}
+	// Sets from before the mark name alloc-a without it; one built after it
+	// must carry it.
+	k.waitSet(t, "a complete set naming alloc-a with endedForGood", 0, func(s wire.DesiredSet) bool {
+		en, ok := entryOf(s, tagOf(a))
+		return ok && s.Complete && en.EndedForGood
+	})
 
 	// The job leaves the listing: the entry is not sent, and the set is
 	// incomplete, so nothing is dropped, until an observation decides.
@@ -367,7 +367,7 @@ func TestKeeperSetMarksEndedForGoodAndWaitsOnTheListing(t *testing.T) {
 	// count; the sender sends one at a time, so the next one after it was
 	// built once the job had vanished.
 	n := k.setCount()
-	s = k.waitSet(t, "a set whose listing does not show the job", n+1, func(wire.DesiredSet) bool { return true })
+	s := k.waitSet(t, "a set whose listing does not show the job", n+1, func(wire.DesiredSet) bool { return true })
 	if _, ok := entryOf(s, tagOf(a)); ok || s.Complete {
 		t.Errorf("with the job not listed the set names alloc-a (%v) or is complete (%v)", ok, s.Complete)
 	}
@@ -393,7 +393,6 @@ func TestKeeperSetCarriesTheListingAgeAndTheValidity(t *testing.T) {
 					}
 				}
 			})
-			e.running("alloc-a")
 			listed := e.clock.Now()
 			if err := e.ctl.SyncStatus(e.ctx); err != nil {
 				t.Fatal(err)
@@ -430,14 +429,11 @@ func TestKeeperFinalEndsAreMarkedAcknowledgedAndRaisedOnce(t *testing.T) {
 		t.Run(c.kind, func(t *testing.T) {
 			k := startFakeKeeper(t)
 			e := newEnv(t, keeperMode(k, 9))
+			keeperUp(e)
 			a := e.running("alloc-a")
-			if err := e.ctl.SyncStatus(e.ctx); err != nil {
-				t.Fatal(err)
-			}
 			end := wire.FinalEnd{UID: string(a.UID), Tag: tagOf(a), JobID: a.Status.AtProvider.JobID, Channel: agentapi.RelayServing,
 				Kind: c.kind, Cause: c.cause, At: time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC), Epoch: 1<<31 + 2, Seq: 7}
 			k.script(func(k *fakeKeeper) { k.ends, k.keepAcked = []wire.FinalEnd{end}, true })
-			runKeeperClient(e)
 			acks := k.waitAcks(t, "the end acknowledged twice (reported again after the first)", func(as []wire.Ack) bool { return len(as) >= 2 })
 			want := wire.Ack{Provider: testProvider, LeaseEpoch: 9, UID: end.UID, JobID: end.JobID, Channel: end.Channel,
 				Epoch: end.Epoch, Seq: end.Seq, Outcome: wire.OutcomeMarked}
@@ -463,11 +459,9 @@ func TestKeeperFinalEndsAreMarkedAcknowledgedAndRaisedOnce(t *testing.T) {
 func TestKeeperRefusedMarksAreAcknowledgedWithTheirReason(t *testing.T) {
 	k := startFakeKeeper(t)
 	e := newEnv(t, keeperMode(k, 9))
+	keeperUp(e)
 	a := e.running("alloc-a")
 	b := e.running("alloc-b")
-	if err := e.ctl.SyncStatus(e.ctx); err != nil {
-		t.Fatal(err)
-	}
 	b.Status.AtProvider.Phase = v1alpha1.AllocationEnded
 	if err := e.c.Status().Update(e.ctx, b); err != nil {
 		t.Fatal(err)
@@ -479,7 +473,6 @@ func TestKeeperRefusedMarksAreAcknowledgedWithTheirReason(t *testing.T) {
 		{UID: string(b.UID), Tag: tagOf(b), JobID: b.Status.AtProvider.JobID, Channel: agentapi.RelayServing, Kind: wire.EndFailed, Cause: "x", At: at0, Epoch: 1<<31 + 1, Seq: 3},
 	}
 	k.script(func(k *fakeKeeper) { k.ends = ends })
-	runKeeperClient(e)
 	acks := k.waitAcks(t, "an ack for each of the three ends", func(as []wire.Ack) bool {
 		seqs := map[int64]bool{}
 		for _, ak := range as {
@@ -514,18 +507,16 @@ func TestKeeperFailedMarkWriteRaisesNothingUntilAWriteSucceeds(t *testing.T) {
 	k := startFakeKeeper(t)
 	var failing atomic.Bool
 	var attempts atomic.Int32
-	failing.Store(true)
 	e := newEnv(t, keeperMode(k, 9), func(e *env) {
 		e.c = &failingStatusClient{Client: e.c, failing: &failing, attempts: &attempts}
 	})
+	keeperUp(e)
 	a := e.running("alloc-a")
-	if err := e.ctl.SyncStatus(e.ctx); err != nil {
-		t.Fatal(err)
-	}
+	failing.Store(true)
+	attempts.Store(0)
 	end := wire.FinalEnd{UID: string(a.UID), Tag: tagOf(a), JobID: a.Status.AtProvider.JobID, Channel: agentapi.RelayControl,
 		Kind: wire.EndFailed, Cause: "the step limit is reached", At: time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC), Epoch: 1<<31 + 1, Seq: 2}
 	k.script(func(k *fakeKeeper) { k.ends = []wire.FinalEnd{end} })
-	runKeeperClient(e)
 	waitRelays(t, "two failed writes of the mark", func() bool { return attempts.Load() >= 2 })
 	// The second attempt comes from a later report, so the first one's
 	// handling has returned: an ack or an event it made would show now.
@@ -555,7 +546,6 @@ func TestKeeperFailedMarkWriteRaisesNothingUntilAWriteSucceeds(t *testing.T) {
 func TestKeeperLoginHostRefusalMakesTheProviderUnready(t *testing.T) {
 	k := startFakeKeeper(t)
 	var refusing atomic.Bool
-	refusing.Store(true)
 	k.script(func(k *fakeKeeper) {
 		k.onSet = func(s wire.DesiredSet) (wire.Kind, any) {
 			if refusing.Load() {
@@ -565,11 +555,9 @@ func TestKeeperLoginHostRefusalMakesTheProviderUnready(t *testing.T) {
 		}
 	})
 	e := newEnv(t, keeperMode(k, 5))
+	keeperUp(e)
 	e.running("alloc-a")
-	if err := e.ctl.SyncStatus(e.ctx); err != nil {
-		t.Fatal(err)
-	}
-	runKeeperClient(e)
+	refusing.Store(true)
 	n := k.setCount()
 	k.waitSet(t, "a refused set", n, func(wire.DesiredSet) bool { return true })
 	waitRelays(t, "the refusal kept", func() bool { _, inUse, _ := e.ctl.shared.relays.claimLogin(e.profiles.v.SSH); return inUse != "" })
@@ -659,3 +647,81 @@ type maxAgePlatform struct {
 }
 
 func (p maxAgePlatform) ListingMaxAge() time.Duration { return p.maxAge }
+
+// The keeper unreachable (HBEP-6, The relay keeper, as #360 amends it): with
+// the keeper's socket missing, the Provider is Ready False with
+// RelayKeeperUnavailable, while no exchange has succeeded under the lead, and
+// later once none has for longer than a set's validity; no new Allocation is
+// submitted meanwhile; at the first successful exchange the status loop, woken
+// at once, makes it Ready again; and a running Allocation is left as it is
+// throughout (its relays are the keeper's: Stage B shows them untouched).
+func TestKeeperUnreachableMakesTheProviderUnreadyAndAdmitsNothing(t *testing.T) {
+	k := newFakeKeeper(t) // its socket is missing until start
+	// The status loop's ticker is the poll interval, 10 min here, so within
+	// the test only the keeper's wake-up makes it write; the listing's
+	// interval in force, which the validity uses, is 30 s.
+	e := newEnv(t, keeperMode(k, 5), func(e *env) {
+		e.opts.PollInterval = 10 * time.Minute
+		p := e.platform
+		e.opts.NewPlatform = func(slurm.Validated) (Platform, io.Closer, error) {
+			return maxAgePlatform{fakePlatform: p, maxAge: 30 * time.Second}, io.NopCloser(nil), nil
+		}
+	})
+	if err := e.ctl.SyncStatus(e.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if r := providerReady(t, e); r.Status != "False" || r.Reason != v1alpha1.ReasonRelayKeeperUnavailable {
+		t.Fatalf("before any exchange under a lead, Ready is %+v; want False/RelayKeeperUnavailable", r)
+	}
+	statusCtx, stopStatus := context.WithCancel(context.Background())
+	statusDone := make(chan struct{})
+	go func() { _ = e.ctl.status.Start(statusCtx); close(statusDone) }()
+	t.Cleanup(func() { stopStatus(); <-statusDone })
+	runKeeperClient(e)
+
+	submits := e.count("sbatch")
+	e.newAlloc("alloc-b")
+	e.run("alloc-b", 3)
+	if got := e.count("sbatch"); got != submits {
+		t.Errorf("%d jobs were submitted while the keeper's socket is missing", got-submits)
+	}
+	if r := providerReady(t, e); r.Reason != v1alpha1.ReasonRelayKeeperUnavailable {
+		t.Errorf("with the keeper's socket missing under the lead, Ready is %+v; want RelayKeeperUnavailable", r)
+	}
+
+	// The keeper comes: the first successful exchange wakes the status loop,
+	// whose ticker is the poll interval, so Ready follows at once.
+	k.start()
+	waitRelays(t, "Ready again at the first successful exchange", func() bool {
+		r := providerReady(t, e)
+		return r.Status == "True"
+	})
+	e.run("alloc-b", 3)
+	if got := e.count("sbatch"); got == submits {
+		t.Error("no job was submitted once the keeper answered")
+	}
+	a := e.running("alloc-a")
+
+	// The keeper goes, and stays gone past a set's validity (40 s by the
+	// controller's clock): Ready False again, nothing submitted, and the
+	// running Allocation is left as it is.
+	k.stop()
+	e.clock.Advance(41 * time.Second)
+	waitRelays(t, "Ready False once no exchange succeeded for longer than the validity", func() bool {
+		r := providerReady(t, e)
+		return r.Status == "False" && r.Reason == v1alpha1.ReasonRelayKeeperUnavailable
+	})
+	submits = e.count("sbatch")
+	e.newAlloc("alloc-c")
+	e.run("alloc-c", 3)
+	if got := e.count("sbatch"); got != submits {
+		t.Errorf("%d jobs were submitted after the keeper went", got-submits)
+	}
+	e.run("alloc-a", 2)
+	if got := e.get("alloc-a"); got.Status.AtProvider.Phase != v1alpha1.AllocationRunning || got.Status.AtProvider.JobID != a.Status.AtProvider.JobID || marked(got) {
+		t.Errorf("the running Allocation changed while the keeper was gone: %s, job %s, marked %v", got.Status.AtProvider.Phase, got.Status.AtProvider.JobID, marked(got))
+	}
+
+	k.start()
+	waitRelays(t, "Ready again once the keeper answers", func() bool { return providerReady(t, e).Status == "True" })
+}

@@ -75,6 +75,7 @@ func (l *statusLoop) Start(ctx context.Context) error {
 			l.s.h.close()
 			return nil
 		case <-t.C:
+		case <-l.keeperStatus():
 		}
 	}
 }
@@ -177,6 +178,11 @@ func (l *statusLoop) compute(prov *v1alpha1.Provider, h slurm.Health, cfgErr, po
 	}
 	if inUse != "" {
 		set(v1alpha1.ConditionProviderReady, metav1.ConditionFalse, v1alpha1.ReasonLoginHostInUse, inUse)
+	}
+	// Keeper mode: a keeper that no exchange reached lately makes the
+	// Provider unready (HBEP-6, The relay keeper, as #360 amends it).
+	if why := l.s.keeperUnavailable(now); why != "" {
+		set(v1alpha1.ConditionProviderReady, metav1.ConditionFalse, v1alpha1.ReasonRelayKeeperUnavailable, why)
 	}
 	l.conditions(st, set, h, cfgErr)
 

@@ -366,6 +366,7 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
 
     This closes alpha's limit, where a restart before the mark was written forgot the failure (What ends a relay).
   - **No leader:** with no unexpired set for a Provider, the keeper keeps that Provider's relays, which end with their jobs through `srun` at the latest, and starts and restarts none. An Allocation deleted while no controller leads keeps its relays until its job ends, a stated limit. The keeper respawns nothing on its own (L-15.1).
+  - **The keeper unreachable:** in keeper mode, the Provider's controller sets `Ready` False with reason `RelayKeeperUnavailable` while no exchange with the keeper has succeeded under its current lead, or none has succeeded for longer than a set's validity. Meanwhile it admits no new Allocation, and leaves running ones as they are, since the keeper holds their relays. It sets `Ready` True again at the next successful exchange.
   - **Capacity and the login host:** the keeper is the single owner of HBEP-4's 4-relays-per-login-host count and of the one-host-dialed-Provider-per-login-host rule, across leadership generations.
     - **A Provider's claim on a login host** lasts until it lapses, and survives a keeper restart. It lapses:
       - when its holder sends a complete set with no Allocation on that host;
@@ -549,6 +550,7 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
     - `down` leaves no keeper and no relay `ssh` behind, and keeps the state file;
     - a second Provider's set for a held login host is refused, and its `Ready` is `LoginHostInUse`;
     - the surplus third Allocation of a Provider-leader overlap waits for its relays under the 4-relay count.
+    - with the keeper's socket missing, the Provider is `Ready` False with `RelayKeeperUnavailable` and no Allocation is created; at the first successful exchange it's `Ready` again; a running Allocation's relays are untouched throughout.
     - **Proves nothing here:** a restart test with no stream running, or a keeper and a controller in one process.
   - **None of these proves anything here:** a relay test with both ends in one process and no `srun` standard input and output between them, or a count of relays with no byte crossing.
 - **Loopback only.** frps holds exactly its three loopback ports, and `ss` shows no frps listener on another address. A positive control: started without `bindAddr`, frps listens on every interface, so the check can fail.
@@ -740,6 +742,7 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - 2026-11-10: the relay keeper's names, set fields, expiry, completeness and claim rules, from the code agent's plan (#343).
 - 2026-11-10: open question 12 answered for one transfer at a time by spike S15.
 - 2026-11-10: two amendments to the relay keeper's interface, from its build (#354).
+- 2026-11-10: an unreachable relay keeper makes the Provider unready, from the keeper's build (#360).
 
 ## Amendments
 
@@ -818,3 +821,6 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - **2026-11-10: the keeper's own replacement isn't marked** (Dial-home modes, The relay keeper). An amendment from the science agent's ruling on PR #354's review, from the keeper's build: a `superseded` end of a relay the keeper itself replaced, identified by the `(E, N)` it issued, isn't recorded, since the replacement's own session superseded it. A stated limit comes with it: the job side names no superseder, so a stray ranked between a replaced relay and its replacement goes unrecorded; it is superseded by the replacement.
 
   Before, every `superseded` end in beta was marked.
+- **2026-11-10: an unreachable keeper makes the Provider unready** (Dial-home modes, The relay keeper), from the keeper's build (#360), approved by the science agent's objective check. In keeper mode the Provider's controller sets `Ready` False with reason `RelayKeeperUnavailable` while no exchange with the keeper has succeeded under its current lead, or none has for longer than a set's validity. It admits no new Allocation meanwhile, leaves running ones as they are, and sets `Ready` True again at the next successful exchange.
+
+  Before, an unreachable keeper left the Provider `Ready`.

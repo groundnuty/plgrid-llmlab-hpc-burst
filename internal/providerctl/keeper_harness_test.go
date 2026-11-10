@@ -44,6 +44,7 @@ type fakeKeeper struct {
 	// keeper whose acknowledgement was lost would.
 	ends      []wire.FinalEnd
 	keepAcked bool
+	stopServe func()
 }
 
 // fakeLoginHost is the login host the fake names.
@@ -51,21 +52,53 @@ const fakeLoginHost = "login.example.org"
 
 func startFakeKeeper(t *testing.T) *fakeKeeper {
 	t.Helper()
+	k := newFakeKeeper(t)
+	k.start()
+	return k
+}
+
+// newFakeKeeper is a fake keeper whose socket's path is chosen and not
+// listened on yet: a keeper that is not there.
+func newFakeKeeper(t *testing.T) *fakeKeeper {
+	t.Helper()
 	dir, err := os.MkdirTemp("", "pk")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	k := &fakeKeeper{t: t, path: filepath.Join(dir, "k.sock")}
+	return &fakeKeeper{t: t, path: filepath.Join(dir, "k.sock")}
+}
+
+// start listens on the fake's socket and serves it until stop or the test's
+// end.
+func (k *fakeKeeper) start() {
+	k.t.Helper()
 	ln, err := wire.Listen(k.path)
 	if err != nil {
-		t.Fatal(err)
+		k.t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { _ = wire.Serve(ctx, ln, k.handle, nil); close(done) }()
-	t.Cleanup(func() { cancel(); <-done })
-	return k
+	var once sync.Once
+	stop := func() { once.Do(func() { cancel(); <-done }) }
+	k.mu.Lock()
+	k.stopServe = stop
+	k.mu.Unlock()
+	k.t.Cleanup(stop)
+}
+
+// stop closes the fake's socket, which removes it: the keeper is gone.
+func (k *fakeKeeper) stop() {
+	k.mu.Lock()
+	stop := k.stopServe
+	k.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+	if _, err := os.Stat(k.path); err == nil {
+		k.t.Fatalf("the fake keeper's socket is still at its path after the stop")
+	}
 }
 
 func (k *fakeKeeper) handle(_ context.Context, req wire.Envelope) (wire.Kind, any) {
@@ -235,6 +268,21 @@ func runKeeperClient(e *env) (stop func()) {
 		})
 	}
 	e.t.Cleanup(stop)
+	return stop
+}
+
+// keeperUp reads the Provider's status once, so its platform and listing
+// exist, starts e's keeper client and waits until an exchange with the keeper
+// has succeeded under its lead, so the Provider admits Allocations again
+// (RelayKeeperUnavailable).
+func keeperUp(e *env) (stop func()) {
+	e.t.Helper()
+	if err := e.ctl.SyncStatus(e.ctx); err != nil {
+		e.t.Fatal(err)
+	}
+	stop = runKeeperClient(e)
+	k := e.ctl.shared.relays.keeper
+	waitRelays(e.t, "an exchange with the keeper succeeded under the lead", func() bool { return k.unavailable(e.clock.Now()) == "" })
 	return stop
 }
 
