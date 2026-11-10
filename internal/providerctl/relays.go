@@ -72,6 +72,9 @@ type relayState struct {
 	cfg    slurm.SSHConfig
 	ssh    *sshrun.Relay
 	closed bool // after RunRelays: no claim and no relay is made any more
+	// lead is done when this copy does not lead (relayfailed.go, startLead).
+	lead   context.Context
+	unlead context.CancelFunc
 	// failures are the final failures of running Allocations' relays, by
 	// tag, kept until the relays are dropped: the failure path writes the
 	// mark, and an observation writes it from here when that write failed
@@ -204,6 +207,7 @@ func (r *relayState) reportNoLogin() {
 }
 
 func (r *relayState) close() {
+	r.endLead()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.closed = true
@@ -298,13 +302,17 @@ func (c *Controller) RunRelays(ctx context.Context) error {
 		return nil
 	}
 	defer c.shared.relays.close()
+	c.shared.relays.startLead(ctx)
+	defer c.shared.relays.endLead()
 	return c.shared.relays.owner.Start(ctx)
 }
 
-// StopRelays stops every relay of this controller by PID and returns once
-// their processes are gone (the Lease's release hook, RelayFence).
+// StopRelays ends this copy's lead for the relays' failure path, then stops
+// every relay of this controller by PID and returns once their processes are
+// gone (the Lease's release hook, RelayFence).
 func (c *Controller) StopRelays() {
 	if c.shared.relays != nil {
+		c.shared.relays.endLead()
 		c.shared.relays.owner.Stop()
 	}
 }

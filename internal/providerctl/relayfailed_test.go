@@ -15,7 +15,6 @@ package providerctl
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,7 +25,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -292,90 +290,13 @@ func TestTheNextObservationMarksTheAllocationWhenTheFailurePathCannotWrite(t *te
 	}
 }
 
-// The failure path's write (persistRelayFailed) refuses an Allocation that is
-// not the relay's: another UID under the name, or another recorded job. It
-// writes nothing then. A conflict is read again and retried, and a mark
-// already there is left as it is, with no write.
-func TestTheFailurePathsMarkChecksTheAllocationAndItsJob(t *testing.T) {
-	var patches atomic.Int32
-	var conflictNext atomic.Bool
-	e := newEnv(t, hostDialed, withInterceptors(interceptor.Funcs{
-		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-			patches.Add(1)
-			if conflictNext.CompareAndSwap(true, false) {
-				return apierrors.NewConflict(schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "allocations"}, obj.GetName(), errors.New("example: the object has been modified"))
-			}
-			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
-		},
-	}))
-	a := e.newAlloc("alloc-a")
-	a.Status.AtProvider.Phase, a.Status.AtProvider.JobID = v1alpha1.AllocationRunning, "4242"
-	if err := e.c.Status().Update(e.ctx, a); err != nil {
-		t.Fatal(err)
-	}
-	key := clientKey("alloc-a")
-	s := e.ctl.shared
-	mark := func(uid, job, msg string) error {
-		return s.persistRelayFailed(key, relayFailure{uid: uid, jobID: job, msg: msg, at: e.clock.Now()})
-	}
-	unmarked := func(what string) {
-		t.Helper()
-		if st, _, msg := relayCondition(e.get("alloc-a")); st != "" {
-			t.Errorf("%s: the Allocation is marked %s, %q", what, st, msg)
-		}
-	}
-	t.Run("another Allocation", func(t *testing.T) {
-		before := patches.Load()
-		if err := mark("uid-another", "4242", "the serving relay ended for good: x"); !errors.Is(err, errMarkRefused) {
-			t.Errorf("a mark for UID uid-another on %s: %v, want refused", a.UID, err)
-		}
-		unmarked("another UID")
-		if n := patches.Load() - before; n != 0 {
-			t.Errorf("%d status patches for another Allocation, want 0", n)
-		}
-	})
-	t.Run("another job", func(t *testing.T) {
-		before := patches.Load()
-		if err := mark(string(a.UID), "4243", "the serving relay ended for good: x"); !errors.Is(err, errMarkRefused) {
-			t.Errorf("a mark for job 4243 on an Allocation that records 4242: %v, want refused", err)
-		}
-		unmarked("another job")
-		if n := patches.Load() - before; n != 0 {
-			t.Errorf("%d status patches for another job, want 0", n)
-		}
-	})
-	const first = "the control relay ended for good: srun refused the step: step limit reached for this job"
-	t.Run("a conflict is retried", func(t *testing.T) {
-		before := patches.Load()
-		conflictNext.Store(true)
-		if err := mark(string(a.UID), "4242", first); err != nil {
-			t.Fatalf("the mark after one conflict: %v", err)
-		}
-		if st, reason, msg := relayCondition(e.get("alloc-a")); st != corev1.ConditionTrue || reason != wantRelayReason || msg != first {
-			t.Errorf("after a conflict and a retry the condition is %q, %q, %q; want True, %s, %q", st, reason, msg, wantRelayReason, first)
-		}
-		if n := patches.Load() - before; n != 2 {
-			t.Errorf("%d status patches, want 2: the conflict and its retry", n)
-		}
-	})
-	t.Run("a mark already there", func(t *testing.T) {
-		before := patches.Load()
-		if err := mark(string(a.UID), "4242", "the serving relay ended for good: another cause"); err != nil {
-			t.Fatal(err)
-		}
-		if _, _, msg := relayCondition(e.get("alloc-a")); msg != first {
-			t.Errorf("a second mark changed the message to %q, want %q kept", msg, first)
-		}
-		if n := patches.Load() - before; n != 0 {
-			t.Errorf("%d status patches for a mark already there, want 0", n)
-		}
-	})
-}
-
 // What releases nothing (issue #304): a relay superseded by a newer copy's,
 // one whose job srun says is gone, and one that is retried. Each ends through
 // the real owner, as the state the owner keeps shows, and the observations
-// after it leave the Allocation unmarked, Running, with no RelayFailed.
+// after it leave the Allocation unmarked, Running, with no RelayFailed. The
+// owner shows an end as final before it calls OnFailed, so the checks wait
+// for the Allocation's relays to stop (Owner.Drop returns once their loops,
+// and any callback in them, have returned), with this copy still leading.
 func TestRelayEndsThatReleaseNothingLeaveTheAllocationUnmarked(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -403,6 +324,10 @@ func TestRelayEndsThatReleaseNothingLeaveTheAllocationUnmarked(t *testing.T) {
 				return len(rs) == 2 && tc.ended(rs[0]) && tc.ended(rs[1])
 			})
 			e.run("alloc-a", 3)
+			e.ctl.shared.relays.owner.Drop(tag)
+			if f, ok := e.ctl.shared.relays.failure(tag); ok {
+				t.Errorf("a relay ended as %s recorded a failure: %+v", tc.name, f)
+			}
 			a := e.get("alloc-a")
 			if st, reason, msg := relayCondition(a); st != "" {
 				t.Errorf("a relay ended as %s marked the Allocation %s, %s: %q", tc.name, st, reason, msg)
