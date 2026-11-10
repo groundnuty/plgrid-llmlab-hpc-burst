@@ -239,6 +239,27 @@ jobs:
         if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
         run: bash hack/go-test.sh own lease
 
+      # internal/lifecycle's other tests that start a control plane, in three groups, and
+      # cmd/hpcburst-controller's two failover tests run on their own for the same reason (issue #295):
+      # with them, each package was within 1.5x of the 10 minutes on main's slow runs. Each step fails
+      # unless every one of its tests ran and passed, with nothing skipped, and hack/check.sh runs the
+      # same groups, so the crd job runs these tests too.
+      - name: go test, internal/lifecycle's caches tests on their own timeout
+        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
+        run: bash hack/go-test.sh own lifecycle-caches
+
+      - name: go test, internal/lifecycle's two-copy tests on their own timeout
+        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
+        run: bash hack/go-test.sh own lifecycle-copies
+
+      - name: go test, internal/lifecycle's other control-plane tests on their own timeout
+        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
+        run: bash hack/go-test.sh own lifecycle-control-plane
+
+      - name: go test, cmd/hpcburst-controller's failover tests on their own timeout
+        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
+        run: bash hack/go-test.sh own controller-failover
+
       # hack/livechecks' dry runs through hack/live-checks.sh, which build and run the real test
       # binaries and agent, run in two groups of their own for the same reason (PR #306): each step
       # fails unless every one of its tests ran and passed, with nothing skipped.

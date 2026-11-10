@@ -6,6 +6,12 @@
 # its own, and the packages' run leaves them out by their exact names:
 #   - lease: internal/lifecycle's one test that takes about 46 s, because each of its 200 rounds stops a
 #     manager in the state a 200 ms poll leaves it in, which is part of what it proves (PR #291);
+#   - lifecycle-caches, lifecycle-copies and lifecycle-control-plane: internal/lifecycle's other tests that
+#     start a control plane (envtest), about 170 s of the package's 435-447 s on main's slow runs, which
+#     took it below a 1.5x margin (issue #295). Their time is real work and waits on observable state (a
+#     manager's start and stop, Lease expiry, informer syncs), not a fixed sleep;
+#   - controller-failover: cmd/hpcburst-controller's two HBEP-11 failover tests, 150 s of its 400 s, whose
+#     takeover waits for two of controller-runtime's 15 s Leases to expire after a SIGKILL (issue #295);
 #   - livechecks-hostdialed and livechecks-dry: hack/livechecks' dry runs through hack/live-checks.sh, the
 #     tests that build and run the real conformance and alpha test binaries and a real agent, which took
 #     that package to the 10 minutes in the crd and envtest job (the science agent's ruling on PR #306).
@@ -23,9 +29,16 @@ cd "$root" || exit 1
 # group | package | its tests, by exact name | its timeout. A timeout is about 3x the group's worst run on
 # CI (PR #291's rule): lease's 48.8 s on main's healthy runs (the science agent, 9 Nov 2026);
 # livechecks-hostdialed's 45.1 s and livechecks-dry's 88.2 s, both in the crd and envtest job of PR #306's
-# run on a25f9438 (42.8 s and 82.0 s in its go job).
+# run on a25f9438 (42.8 s and 82.0 s in its go job). Issue #295's groups take the sum of each test's worst
+# in the go job of main's five healthy runs of 10 Nov 2026 (42844202426 to 42849291185), a bound on the
+# group's worst: lifecycle-caches 58.8 s, lifecycle-copies 62.1 s, lifecycle-control-plane 56.2 s and
+# controller-failover 150.5 s.
 groups=(
   "lease|./internal/lifecycle|TestLifecycleManagerReleasesItsLeaseOnEveryStop|150s"
+  "lifecycle-caches|./internal/lifecycle|TestCachesNeedsEveryWatchedInformer TestCachesRecoverFromAStalledDiscovery TestCachesStopDuringAStalledDiscovery TestCachesListIsWhatTheControllerWatches|180s"
+  "lifecycle-copies|./internal/lifecycle|TestMetricsStandbyOnTwoManagers TestMetricsLostLeaseStopsBeforeANewCopyLeads TestMetricsCopiesStartAgainOnALostPort TestRaisedEventsOnTwoManagers|190s"
+  "lifecycle-control-plane|./internal/lifecycle|TestManagerOnControlPlane TestVerificationRecordRoundTripsThroughTheAPIServer TestLifecycleLeaseReleaseUnderLatency TestStartLifecycleLeaderOfAManagerThatLeadsBeforeTheLeaseIsRead|170s"
+  "controller-failover|./cmd/hpcburst-controller|TestControllerProcessesFailOverMidSubmit TestControllerProcessesFailOverBeforeSubmit|460s"
   "livechecks-hostdialed|./hack/livechecks|TestEachHostDialedFaultFailsTheRowThroughTheScript TestEveryHostDialedRowPassesThroughTheScriptOverTheFake TestAHostDialedRowWhoseSlotIsHeldIsNotRunThroughTheScript TestADryHostDialedBinaryRefusesLiveSettings|150s"
   "livechecks-dry|./hack/livechecks|TestEveryAlphaRowPassesItsDryRunAndEveryFaultFailsIt TestADryBinaryRefusesLiveSettings TestAJobPendingPastTheBoundIsNotRunOnEveryRow TestALiveRunWithNoListenerFailsLoudlyAndUsesNoCluster TestAnAccountingRowWithNoSlotThatPendedPastItsWaitIsNotRun TestEveryRowThatPostsNamesWhereTheFrontRanAndRefusesWithoutIt TestACatchUpThatCannotTellIsAFailureOnATwoJobRow TestASecondJobThatNeverStartedIsNotRunOnTheTwoJobRows TestEveryReachRowReportsEachOutcomeThroughTheScript TestADryReachBinaryRefusesLiveSettingsAndARealGateway TestAReachRowWhoseSlotIsHeldIsNotRun|270s"
 )
