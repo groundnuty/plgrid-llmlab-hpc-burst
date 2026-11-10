@@ -718,16 +718,29 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'internal/providerctl/conformance/hostdialed_verdict_test.go@@	for _, v := range privateParts(o) {@@	for _, v := range privateParts(hostDialedObs{}) {'
   'internal/providerctl/conformance/hostdialed_verdict_test.go@@		if short, _, ok := strings.Cut(v, "."); ok {@@		if short, _, ok := strings.Cut(v, "."); false && ok {'
   'internal/providerctl/conformance/hostdialed_verdict_test.go@@	return "set, another"@@	return "set, the same"'
-  # #308: the guards between the rehearsal's sshd sweep and a process the test did not start. They are independent, so no one of these
-  # brings the host-wide signal back: guard 1 (sshd.go) stores no sshd whose row it cannot read, guard 2 (below) walks nothing from PID 1
-  # or less or from a recycled root, and guard 3 (signalProcs) refuses what is not the test's; each of the other two still holds.
-  'internal/rehearsal/sshd.go@@if err != nil || !live || self.pid != pid {@@if false {'
+  # #308: the guards between the rehearsal's sshd sweep and a process the test did not start. Guard 1 (pool.go's spawn) stores no sshd
+  # whose row it cannot read, and guard 2 (below) walks nothing from PID 1 or less, a row with no start time or a recycled root: each
+  # alone closes the bad-root class. Guard 3 (signalProcs) alone bounds a row from any source to what is strictly below the test, a child
+  # subreaper, by a walk whose every parent started no later than its child. One mutant per branch; the ones left out are equivalent at the
+  # refusal (the walk's parent <= 1 stop, the unchanged-parent stop of a re-walk) or span lines (record's skip of a reaped sshd).
+  'internal/rehearsal/pool.go@@if err != nil || !live || self.pid != pid || self.ticks == 0 {@@if false {'
   'internal/rehearsal/procs.go@@if root.pid <= 1 {@@if root.pid < 0 {'
+  'internal/rehearsal/procs.go@@if root.ticks == 0 {@@if false {'
   'internal/rehearsal/procs.go@@if !found {@@if !found && false {'
-  'internal/rehearsal/procs.go@@case r.pid <= 1:@@case r.pid < 0:'
-  'internal/rehearsal/procs.go@@case r.pid == o.api.self:@@case false:'
-  'internal/rehearsal/procs.go@@case o.ancestors[r.pid]:@@case false:'
-  'internal/rehearsal/procs.go@@case !o.owns(now):@@case false:'
+  'internal/rehearsal/signal.go@@case r.pid <= 1:@@case r.pid < 0:'
+  'internal/rehearsal/signal.go@@case r.pid == o.self.pid:@@case false:'
+  'internal/rehearsal/signal.go@@case r.ticks == 0:@@case false:'
+  'internal/rehearsal/signal.go@@case o.ancestors[r.pid]:@@case false:'
+  'internal/rehearsal/signal.go@@if !below {@@if !below && false {'
+  'internal/rehearsal/signal.go@@case !live || p.ticks > child.ticks:@@case !live:'
+  'internal/rehearsal/signal.go@@case !live || p.ticks > child.ticks:@@case (!live && false) || p.ticks > child.ticks:'
+  'internal/rehearsal/signal.go@@if err != nil || below || !moved || walks >= maxWalks {@@if true || !moved {'
+  'internal/rehearsal/signal.go@@case perr != nil:@@case false:'
+  'internal/rehearsal/signal.go@@return o.self.ticks <= child.ticks, false, nil@@return true, false, nil'
+  # The stop always returns (it ends the pool's own sshds through cmd.Process, and its wait is bounded), and it reaps what it adopted.
+  'internal/rehearsal/pool.go@@if err := s.api.kill(p.cmd.Process); err != nil {@@if err := error(nil); err != nil {'
+  'internal/rehearsal/pool.go@@case <-time.After(time.Until(deadline)):@@case <-make(chan time.Time):'
+  'internal/rehearsal/signal.go@@if err := api.reap(r.pid); err != nil && !errors.Is(err, syscall.ECHILD) {@@if err := error(nil); err != nil {'
 )
 # The mutants of a test of this script: a file with one mutant per line, in place of the list above.
 [ -z "${MUTATE_ALPHA_MUTANTS:-}" ] || mapfile -t mutants < "$MUTATE_ALPHA_MUTANTS"
@@ -741,8 +754,9 @@ compile_of() {
     *.go) compile_tests "$pkg" "$tmp/pkg.test" ;;
   esac
 }
-# The tests of the rehearsal kind: the sweep guards' (internal/rehearsal/procs_test.go), which start no sshd.
-rehearsal_tests='ExitedSSHD|ZeroRowSignalsNothing|BelowWalksNothing|SignalProcs|RefusalIsTheErrorOfClose|WithRelayEnvSelectsNothing'
+# The tests of the rehearsal kind: the sweep guards' (internal/rehearsal: procs_test.go, signal_test.go, pool_test.go), which start no
+# sshd and send no signal; their stand-ins (true, sh, cat) end on their own.
+rehearsal_tests='ExitedSSHD|ZeroRowSignalsNothing|BelowWalksNothing|Guard2Alone|SignalProcs|RefusalIsTheErrorOfClose|WithRelayEnvSelectsNothing|CloseReturnsWhen|OrphanOfTheNode'
 # The tests of the script's kind.
 script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot|HostDialedMode'
 # tests_of <path> [control|<names>]: the command that judges a mutant of path, in the array tests. With control, the same command with
