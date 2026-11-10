@@ -133,15 +133,19 @@ func TestTheOldAttemptAndItsReplacementInBothConnectOrders(t *testing.T) {
 					// session is up. The Runner's stop of the old relay, which
 					// comes before the replacement's start (Owner.Want), closes
 					// the old session (hostdial.Serve ends with the relay's
-					// context), so the job side usually finds the channel empty
-					// (replaced=false) rather than superseding a live old
-					// session (replaced=true); the log says which it saw.
+					// context) before the replacement connects, so the job side
+					// finds the channel empty (replaced=false): order (i) shows
+					// the replacement taking over, never a live supersession of
+					// the old session, and the test asserts that observed
+					// outcome (the review of PR 356).
 					replaced := false
 					rkWaitFor(t, time.Minute, "the replacement's "+string(ch)+" session up", func() bool {
 						replaced = w.jobLogHas(j.id, sessionUp(ch, E, r.Seq, true)...)
 						return replaced || w.jobLogHas(j.id, sessionUp(ch, E, r.Seq, false)...)
 					})
-					t.Logf("the replacement's %s session (N %d) came up with replaced=%v", ch, r.Seq, replaced)
+					if replaced {
+						t.Errorf("the replacement's %s session (N %d) superseded a live old session: in order (i) the old session is closed before the replacement connects", ch, r.Seq)
+					}
 				}
 			} else {
 				nu = rg.waitPairWhere(rkProv, j.tag, newer)
