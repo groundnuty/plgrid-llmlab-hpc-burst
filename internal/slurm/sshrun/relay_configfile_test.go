@@ -121,7 +121,7 @@ func TestAStableConfigFileIsTheGivenName(t *testing.T) {
 // the control directory, so the file is as private as the directory; nothing
 // is written for a refused one, and the error names no path.
 func TestAStableConfigFileOutsideItsDirectoryIsRefused(t *testing.T) {
-	dir := relayControlDir(t)
+	dir := nestedControlDir(t, "c")
 	for _, f := range []string{
 		"example.conf",
 		filepath.Join(dir, "sub", "example.conf"),
@@ -145,5 +145,49 @@ func TestAStableConfigFileOutsideItsDirectoryIsRefused(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(dir), "example.conf")); !os.IsNotExist(err) {
 		t.Errorf("a refused name outside the directory was written: %v", err)
+	}
+}
+
+// nestedControlDir is a control directory, mode 700, named name inside the
+// test's own temporary directory, which nothing else writes to.
+func nestedControlDir(t *testing.T, name string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), name)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// A stable name is a regular file of its own, so it needs no control socket
+// and no bound on that socket's path: it is written in a control directory
+// too long for alpha's derived names, which the positive control shows
+// refused in the same directory (controlPaths' 90-byte bound).
+func TestAStableConfigFileNeedsNoShortControlDirectory(t *testing.T) {
+	dir := nestedControlDir(t, strings.Repeat("d", 60))
+	if len(dir) <= maxSocketPath {
+		t.Fatalf("the control directory is %d bytes, want more than %d", len(dir), maxSocketPath)
+	}
+	if _, err := NewRelay(RelayOptions{Name: "example", Config: exampleRelayCreds, ControlDir: dir}); err == nil {
+		t.Error("a derived name in a control directory past the socket path's bound was accepted: the control is void")
+	}
+	file := filepath.Join(dir, "example-1a2b3c4d.conf")
+	r, err := NewRelay(RelayOptions{Name: "example", Config: exampleRelayCreds, ControlDir: dir, ConfigFile: file})
+	if err != nil {
+		t.Fatalf("a stable name in a long control directory: %v", err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	if r.Config() != file {
+		t.Errorf("the configuration file is %s, want %s", r.Config(), file)
+	}
+	mustBeWritten(t, file)
+}
+
+// mustBeWritten checks that a configuration file exists, mode 600.
+func mustBeWritten(t *testing.T, path string) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("the configuration file: %v, want it written, mode 600", err)
 	}
 }

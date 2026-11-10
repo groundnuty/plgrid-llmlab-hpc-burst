@@ -8,7 +8,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -127,5 +129,48 @@ func TestAPidfdOwnerRefusesAKernelWithNoPidfd(t *testing.T) {
 	o.Pidfd = true
 	if _, err := NewOwner(o); !errors.Is(err, unix.ENOSYS) {
 		t.Errorf("a pidfd Owner on a kernel with no pidfd: %v, want a refusal naming ENOSYS", err)
+	}
+}
+
+// A start that gets no pidfd from clone is refused and reported, and nothing
+// signals its process: no signal ever goes to a numeric PID (the science
+// agent's rule for #349's round). Here pidfdAttr asks clone for no pidfd. The
+// process traps every signal it can trap into a log, and ends by itself, with
+// exit 0, once its input closes, which the refusal does. So the log stays
+// empty and the exit is 0. The other tests here are the positive control:
+// with the pidfd clone gives, the stop's TERM ends the same process.
+func TestAStartWithNoClonePidfdIsRefusedAndNothingIsSignalled(t *testing.T) {
+	savedAttr, savedReaped := pidfdAttr, unpinnedReaped
+	pidfdAttr = func(*int) *syscall.SysProcAttr { return &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL} }
+	reaped := make(chan *os.ProcessState, 1)
+	unpinnedReaped = func(c *exec.Cmd) { reaped <- c.ProcessState }
+	t.Cleanup(func() { pidfdAttr, unpinnedReaped = savedAttr, savedReaped })
+	trapLog := filepath.Join(t.TempDir(), "signals")
+	script := `for s in HUP INT QUIT USR1 USR2 PIPE ALRM TERM; do trap "echo $s >> $1" $s; done; read x; exit 0`
+	l := newLogged()
+	cmd := exec.Command("/bin/sh", "-c", script, "sh", trapLog)
+	p, err := startPidfdProcess(cmd, slog.New(l))
+	if p != nil || err == nil || !strings.Contains(err.Error(), "without a pidfd from clone: refused, and not signalled") {
+		t.Fatalf("a start with no clone pidfd: %v, %v; want a refusal naming the missing pidfd", p, err)
+	}
+	select {
+	case m := <-l.msgs:
+		if !strings.Contains(m, "refused") {
+			t.Errorf("the refusal was logged as %q", m)
+		}
+	default:
+		t.Error("the refusal was not logged")
+	}
+	select {
+	case ps := <-reaped:
+		ws := ps.Sys().(syscall.WaitStatus)
+		if !ws.Exited() || ws.ExitStatus() != 0 {
+			t.Errorf("the refused process ended %v, want exit 0 by itself: no signal", ps)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the refused process did not end within 30 s of its input closing")
+	}
+	if b, err := os.ReadFile(trapLog); err == nil && len(b) != 0 {
+		t.Errorf("the refused process got signals %q, want none", b)
 	}
 }
