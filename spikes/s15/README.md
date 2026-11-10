@@ -282,7 +282,13 @@ Summed over all 105 runs: frps's lists (a proxy not online or registered again),
   - **a new TLS connection per bulk request** through the listener (mux off: one work connection per request). That is one handshake per request, a few round trips on the path;
   - **in host-dialed mode, nothing more:** the second frpc reaches the job side's serving listener like the first.
 - **One constraint follows:** the host-dialed relay's per-stream window must stay small. `internal/hostdial` uses yamux's default of 256 KiB. Raised to frp's 6 MiB, the serving relay would stall the token streams behind (c)'s bulk streams again.
+  - **Its price:** a 256 KiB window caps every relay stream's rate at 256 KiB ÷ round trip: about 114 MB/s at 2.3 ms, and about 26 MB/s at 10 ms.
+  - In host-dialed mode that bounds the bulk path's own rate on a longer round trip, since (c) rides the same relay.
+  - Only 2.3 ms was measured here; a longer path would trade a lower bulk rate for the same low token latency, or need the window sized to the path.
 - **Not layout (b).** frp's limiter starts with a full one-second burst, so it never meets a transfer smaller than one second's cap. When it binds, the stall at the start remains (p99 87–203 ms), and every transfer is 1.3–3.5 times slower. One limiter also caps both directions of the proxy.
+  - **Why no cap could help much.** On frp's session the bulk stream can queue at most the smaller of the burst and frp's 6 MiB window, so the stall is about min(burst, 6 MiB) ÷ path rate.
+  - Every cap #336 named sets a burst above 6 MiB: at 25% of 47 MB/s the burst is 11.8 MB. So all of them leave (a)'s stall, as measured.
+  - A cap shrinks the stall below (a)'s only when one second of it is under 6 MiB: below about 6.3 MB/s, 13% of the direct path and 19% of host-dialed. That cap was not run. It would stretch a 64 MiB transfer to about 11 s, and the stall would still be the burst over the path rate.
 - **Not layout (d).** A relay of its own gains about 3 ms at p99 over (c) in host-dialed mode. Its cost is 3 relays per Allocation (4 in this stand-in, Method). Under HBEP-4's count of 4 relays per login host, only one Allocation then fits, which breaks the handover pair unless the count is raised from a measurement.
 - **Uploads need nothing.** They flow against the token streams and stalled nothing in any layout; on the separate frpc they are equally fine.
 - **What the verdict rests on, and what it does not:**
@@ -295,14 +301,14 @@ For the science agent to amend. It replaces the item's current text.
 
 > 12. **Bulk endpoints off the token tunnel.** **Answered for one transfer at a time** (spike S15, issue #336): on loopback at 48 MB/s with a 2.3 ms round trip, 8 token streams of 20 tokens/s ran beside a 64 MiB upload, a 64 MiB download or a 2,000-input embeddings reply, in direct and host-dialed mode.
 >     - **On one frp session a download or a large reply stalls the token streams** for about frp's stream window, a fixed 6 MiB, over the path rate. Gap p99 was 137 ms in direct mode and 206 ms in host-dialed mode, against 52 ms. Uploads, which flow the other way, stall nothing.
->     - **`transport.bandwidthLimit` is not adopted.** frp's limiter starts with a full burst of one second's bytes, so transfers below one second's cap never meet it. When it binds, the burst's stall stays (p99 87–203 ms) and the transfer slows 1.3–3.5 times.
+>     - **`transport.bandwidthLimit` is not adopted.** frp's limiter starts with a full burst of one second's bytes, so transfers below one second's cap never meet it. When it binds, the burst's stall stays (p99 87–203 ms) and the transfer slows 1.3–3.5 times. The stall is about min(burst, 6 MiB) ÷ path rate, so a cap helps only below about 6 MB/s, where a 64 MiB transfer takes about 11 s; the 25–75% caps tested were all above that.
 >     - **Bulk paths go to a separate frpc with `transport.tcpMux = false`,** with its own tcpmux proxy for the Instance. This removed the stall at the full path rate: p99 53 ms in direct mode, 55 ms in host-dialed mode. It needs:
 >       - a second frps with `tcpMux = false`, since frps with tcpMux on wraps every connection in a multiplexed session (frp v0.71.1, `server/service.go:746-772`), with S1's heartbeat set explicit;
 >       - the dial-home listener routing that frpc's websocket to it by TLS server name;
 >       - a second `CONNECT` target in the front's transport, for embeddings, file transfers and large non-streamed replies;
 >       - a second frpc per Instance, staged and supervised like the first;
 >       - a TLS connection per bulk request.
->     - **In host-dialed mode the separate frpc shares the serving relay.** Its connections are streams of the relay's yamux session, whose 256 KiB per-stream window bounds the stall to a few ms. That window must stay at yamux's default.
+>     - **In host-dialed mode the separate frpc shares the serving relay.** Its connections are streams of the relay's yamux session, whose 256 KiB per-stream window bounds the stall to a few ms. That window must stay at yamux's default. Its price is a per-stream rate ceiling of 256 KiB ÷ round trip: about 114 MB/s at the 2.3 ms measured, about 26 MB/s at 10 ms, which bounds the bulk path's rate on a longer path.
 >     - **A third relay channel for bulk paths is not adopted:** it gained about 3 ms and costs a third relay per Allocation, which under HBEP-4's 4 per login host breaks the handover pair.
 >     - **Still open:** a FIFO bottleneck shared by the two frpc's connections in direct mode; real ssh and srun buffers on the relay; several bulk transfers at once.
 
