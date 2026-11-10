@@ -348,13 +348,15 @@ const EventReasonTunnelOrphaned = "TunnelOrphaned"
 // ruling of 2 Nov 2026, for #239.
 const EventReasonHandedOver = "HandedOver"
 
-// EventReasonRelayFailed is the failing event the batch Provider's controller
-// raises, regarding the Allocation, when a host-dialed relay ends for good for
-// a reason other than being superseded or its job ending: a step-limit refusal,
-// more than 120 restarts in an hour, or another final end. It names the channel
-// and the cause (HBEP-6, Dial-home modes, host-dialed, as amended by PR #298;
-// HBEP-8, Reasons in alpha). It is a Go constant only: no condition or CRD field
-// carries it.
+// EventReasonRelayFailed is the untyped Warning event the batch Provider's
+// controller raises, regarding the Allocation, when a host-dialed relay ends
+// for good for a reason other than being superseded or its job ending: a
+// step-limit refusal, more than 120 restarts in an hour of sessions that came
+// up and then dropped, or another final end. It names the channel and the cause
+// (HBEP-6, Dial-home modes, host-dialed, as amended by PRs #298 and #301;
+// HBEP-8, open question 14). No CRD field carries it. The Allocation condition
+// ConditionRelayEndedForGood follows it, with reason ReasonRelayFailed, the same
+// word.
 const EventReasonRelayFailed = "RelayFailed"
 
 // EventReasonNoReplacementReady is the ending-soon event the lifecycle
@@ -436,6 +438,26 @@ const (
 	// when, in fallback mode, an attempt is still Unknown after the profile's
 	// unknownBound (HBEP-7, open question 11; spike S4's names).
 	ConditionSubmissionResolved xpv2.ConditionType = "SubmissionResolved"
+	// ConditionRelayEndedForGood is True once a host-dialed relay of the
+	// Allocation ended for good for a reason other than being superseded or
+	// its job ending: a step-limit refusal, more than 120 restarts in an hour
+	// of sessions that came up and then dropped, or another final end. The
+	// Provider's controller sets it on the Observe after the end, with reason
+	// ReasonRelayFailed and the RelayFailed event's message, "the <channel>
+	// relay ended for good: <cause>", and never clears it. The lifecycle
+	// controller then ends the Allocation's Instances and releases it (HBEP-6,
+	// What ends a relay; HBEP-7, Reconcile loop, step 5; issue #304; proposed).
+	// Its name differs from the event's reason on purpose: the event stays an
+	// untyped Warning, and this condition is what the lifecycle acts on.
+	ConditionRelayEndedForGood xpv2.ConditionType = "RelayEndedForGood"
+)
+
+// Reasons of an Allocation's RelayEndedForGood condition.
+const (
+	// ReasonRelayFailed: the condition is True; a relay ended for good. It is
+	// the same word as the Provider controller's RelayFailed event, which it
+	// follows (EventReasonRelayFailed).
+	ReasonRelayFailed xpv2.ConditionReason = "RelayFailed"
 )
 
 // Reasons of an Allocation's JobCompleting condition.

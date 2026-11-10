@@ -170,7 +170,7 @@ The API refuses a new event without `action` or `reason`, with either over 128 c
 | `degraded` | `PathProbeFailing` | Instance | front |
 | `degraded` | `TunnelOrphaned` | the Allocation whose credential admitted the tunnel, else the `lifecycle` `Lease` | lifecycle controller |
 | `degraded` | `ObservationGap` | the emitter's own `Lease` | the lifecycle controller and the front, at start |
-| `failing` | `WorkerRestart`, `InstanceRestart`, `RestartLoop`, `RegistrationTimeout`, `StartTimeout`, `TunnelNotConnected`, `QualificationFailed`, `VerificationFailed`, `AllocationFailed`, `AllocationLost`, `AllocationRefused`, `Requeued`, `SubmittedAsOther`, `AllocationEndedEarly` | Instance | lifecycle controller |
+| `failing` | `WorkerRestart`, `InstanceRestart`, `RestartLoop`, `RegistrationTimeout`, `StartTimeout`, `TunnelNotConnected`, `QualificationFailed`, `VerificationFailed`, `AllocationFailed`, `AllocationLost`, `AllocationRefused`, `Requeued`, `SubmittedAsOther`, `RelayEndedForGood`, `AllocationEndedEarly` | Instance | lifecycle controller |
 | `failing` | `HeartbeatMissed` | the stale observer's resource (Observers) | the component that judges it |
 | `failing` | `UsageWriteFailed` | the front's `Lease` | front |
 | `replaced` | `HandedOver` | Instance | lifecycle controller |

@@ -16,7 +16,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -73,6 +72,14 @@ type relayState struct {
 	cfg    slurm.SSHConfig
 	ssh    *sshrun.Relay
 	closed bool // after RunRelays: no claim and no relay is made any more
+	// lead is done when this copy does not lead (relayfailed.go, startLead).
+	lead   context.Context
+	unlead context.CancelFunc
+	// failures are the final failures of running Allocations' relays, by
+	// tag, kept until the relays are dropped: the failure path writes the
+	// mark, and an observation writes it from here when that write failed
+	// (relayfailed.go).
+	failures map[string]relayFailure
 }
 
 func newRelayState(o Options) (*relayState, error) {
@@ -200,6 +207,7 @@ func (r *relayState) reportNoLogin() {
 }
 
 func (r *relayState) close() {
+	r.endLead()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.closed = true
@@ -224,11 +232,13 @@ func credentialsGen(c slurm.SSHConfig) string {
 // Dial-home modes, host-dialed mode): an Allocation whose recorded job runs
 // keeps both relays, and one that is being deleted, refused, or whose job is
 // not running (pending, held, completing, ended, lost) has them stopped by
-// PID. A failed read leaves the observed phase as it was, so the relays stay
-// as they were. A Provider whose login host another host-dialed Provider of
-// this process holds gets no relays; its Ready condition says so
-// (LoginHostInUse, statusLoop), so no event is raised here. It is a no-op
-// outside host-dialed mode.
+// PID. A running Allocation one of whose relays ended for good, other than
+// superseded or by its job's end, is marked RelayEndedForGood, which the
+// lifecycle controller releases (issue #304). A failed read leaves the
+// observed phase as it was, so the relays stay as they were. A Provider
+// whose login host another host-dialed Provider of this process holds gets no
+// relays; its Ready condition says so (LoginHostInUse, statusLoop), so no
+// event is raised here. It is a no-op outside host-dialed mode.
 func (e *external) syncRelays(ctx context.Context, a *v1alpha1.Allocation, tag string) {
 	r := e.s.relays
 	if r == nil {
@@ -237,8 +247,10 @@ func (e *external) syncRelays(ctx context.Context, a *v1alpha1.Allocation, tag s
 	o := a.Status.AtProvider
 	if meta.WasDeleted(a) || o.Phase != v1alpha1.AllocationRunning || o.JobID == "" || o.JobCompleting || a.Spec.ForProvider.Batch == nil {
 		r.owner.Drop(tag)
+		r.forgetFailure(tag)
 		return
 	}
+	r.markRelayFailed(a, tag)
 	paths, err := e.p.Paths(ctx)
 	if err != nil {
 		e.s.o.Log.Info("the relays wait for the login node's paths", "tag", tag, "error", err)
@@ -266,10 +278,8 @@ func (e *external) syncRelays(ctx context.Context, a *v1alpha1.Allocation, tag s
 		AllocDir:  path.Join(paths.Staging, agentapi.AllocationDir(tag)),
 		UID:       string(a.UID),
 		Login:     login, Jobs: e.p, Command: rel.Command, Stderr: sshrun.Stderr, Describe: sshrun.Classify,
-		OnFailed: func(ch agentapi.RelayChannel, cause string) {
-			e.s.o.Recorder.Event(ref, event.Warning(v1alpha1.EventReasonRelayFailed, fmt.Errorf("the %s relay ended for good: %s", ch, cause)))
-		},
-		Gen: credentialsGen(e.v.SSH),
+		OnFailed: e.onRelayFailed(ref, tag),
+		Gen:      credentialsGen(e.v.SSH),
 	})
 }
 
@@ -292,13 +302,17 @@ func (c *Controller) RunRelays(ctx context.Context) error {
 		return nil
 	}
 	defer c.shared.relays.close()
+	c.shared.relays.startLead(ctx)
+	defer c.shared.relays.endLead()
 	return c.shared.relays.owner.Start(ctx)
 }
 
-// StopRelays stops every relay of this controller by PID and returns once
-// their processes are gone (the Lease's release hook, RelayFence).
+// StopRelays ends this copy's lead for the relays' failure path, then stops
+// every relay of this controller by PID and returns once their processes are
+// gone (the Lease's release hook, RelayFence).
 func (c *Controller) StopRelays() {
 	if c.shared.relays != nil {
+		c.shared.relays.endLead()
 		c.shared.relays.owner.Stop()
 	}
 }
