@@ -16,6 +16,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -153,6 +154,32 @@ func (d *diskFS) sum(p string) (sum [sha256.Size]byte, found bool, err error) {
 	}
 	h.Sum(sum[:0])
 	return sum, true, nil
+}
+
+// tail reads at most the last n bytes of a regular file: from size-n on, and
+// never more than n bytes, so a file that grows while it is read cannot make
+// it read on.
+func (d *diskFS) tail(p string, n int64) ([]byte, bool, error) {
+	rel, ok := d.rel(p)
+	if !ok || !d.isFile(p) {
+		return nil, false, nil
+	}
+	f, err := d.openRegular(rel, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, false, nil // gone or swapped since the check: not a file
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, true, err
+	}
+	if size := fi.Size(); size > n {
+		if _, err := f.Seek(size-n, io.SeekStart); err != nil {
+			return nil, true, err
+		}
+	}
+	b, err := io.ReadAll(io.LimitReader(f, n))
+	return b, true, err
 }
 
 // write keeps an existing file's mode, as a shell redirection does; a new file
