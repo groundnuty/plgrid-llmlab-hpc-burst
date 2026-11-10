@@ -80,7 +80,8 @@ func (f *fakeRunner) Want(p string, s wire.SSH, w Want) {
 	if in, ok := f.cur[p][tag]; ok && in.w.Entry == w.Entry && in.host == host && in.w.ProviderUID == w.ProviderUID {
 		in.w = w // the same identity: nothing is replaced
 	} else {
-		if ok && in.started {
+		if ok {
+			// Kept, as a stopping instance, with any start still in flight.
 			f.old[p][tag] = append(f.old[p][tag], in)
 		}
 		f.cur[p][tag] = &instance{w: w, host: host}
@@ -93,49 +94,85 @@ func (f *fakeRunner) Drop(p, tag string) {
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "drop "+p+" "+tag)
 	if in, ok := f.cur[p][tag]; ok {
-		if in.started {
-			f.old[p][tag] = append(f.old[p][tag], in)
-		}
+		f.old[p][tag] = append(f.old[p][tag], in)
 		delete(f.cur[p], tag)
 	}
 }
 
-// start starts the relays of the Allocation tagged tag, as a Runner's start
-// does: it reads the Want's Jobs and, when they list the job, its Finals, and
-// each channel not seeded final runs, with a new N, told to OnStart. It
-// reports whether the relays started. It is called with none of the keeper's
-// locks held.
+// start starts the relays of the Allocation tagged tag, as hostdial does:
+// it reads the Want's Finals, then, for each channel not seeded final, reads
+// the Want's Jobs once (the start's authorization, which holds the host) and,
+// when they list the job, launches it: the channel runs, with a new N, told
+// to OnStart, which resolves the authorization. It reports whether any
+// channel started. It is called with none of the keeper's locks held.
 func (f *fakeRunner) start(p, tag string) bool {
-	f.mu.Lock()
-	in, ok := f.cur[p][tag]
-	f.mu.Unlock()
-	if !ok {
-		panic("start of a relay that is not wanted: " + tag)
-	}
-	jobs, err := in.w.Jobs.ListByTag(context.Background(), tag)
-	if err != nil || len(jobs) == 0 {
-		return false
-	}
+	in := f.current(p, tag)
 	seeds := in.w.Finals()
 	f.mu.Lock()
 	in.started, in.seeds = true, seeds
-	if in.seqs == nil {
-		in.seqs, in.up = map[agentapi.RelayChannel]int64{}, map[agentapi.RelayChannel]bool{}
-	}
-	var told []agentapi.RelayChannel
+	f.mu.Unlock()
+	started := false
 	for _, ch := range agentapi.RelayChannels {
 		if _, final := seeds[ch]; final {
 			continue
 		}
-		f.seq++
-		in.seqs[ch], in.up[ch] = f.seq, true
-		told = append(told, ch)
+		if f.authorizes(in) {
+			f.launch(in, ch)
+			started = true
+		}
 	}
+	return started
+}
+
+// current is the Allocation's current instance.
+func (f *fakeRunner) current(p, tag string) *instance {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	in, ok := f.cur[p][tag]
+	if !ok {
+		panic("start of a relay that is not wanted: " + tag)
+	}
+	return in
+}
+
+// authorizes reads in's Jobs, a start's authorization, as hostdial does
+// right before a start.
+func (f *fakeRunner) authorizes(in *instance) bool {
+	jobs, err := in.w.Jobs.ListByTag(context.Background(), in.w.Entry.Tag)
+	return err == nil && len(jobs) > 0
+}
+
+// authorize is the first half of a start with a scripted gap: it reads the
+// current instance's Jobs for one channel and returns the instance, or nil
+// when they refuse. The test then resolves it with launch or launchFails.
+func (f *fakeRunner) authorize(p, tag string) *instance {
+	in := f.current(p, tag)
+	if !f.authorizes(in) {
+		return nil
+	}
+	return in
+}
+
+// launch starts in's channel, authorized before: its process runs, with a
+// new N, told to OnStart. The instance may have been replaced or dropped
+// meanwhile: its process then runs as a stopping one, until land.
+func (f *fakeRunner) launch(in *instance, ch agentapi.RelayChannel) {
+	f.mu.Lock()
+	if in.seqs == nil {
+		in.seqs, in.up = map[agentapi.RelayChannel]int64{}, map[agentapi.RelayChannel]bool{}
+	}
+	in.started = true
+	f.seq++
+	seq := f.seq
+	in.seqs[ch], in.up[ch] = seq, true
 	f.mu.Unlock()
-	for _, ch := range told {
-		in.w.OnStart(ch, f.epoch, in.seqs[ch])
-	}
-	return true
+	in.w.OnStart(ch, f.epoch, seq)
+}
+
+// launchFails resolves in's channel's authorization with a process that did
+// not start.
+func (f *fakeRunner) launchFails(in *instance, ch agentapi.RelayChannel) {
+	in.w.StartFailed(ch)
 }
 
 // mustStart is start, failing the test when the Want's Jobs refuse it.

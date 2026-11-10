@@ -62,11 +62,33 @@ type Want struct {
 	// is this Provider's, and the Want is still the Allocation's. So a
 	// replaced or moved relay's outstanding starts are fenced as soon as the
 	// keeper accepts the set that replaces or moves it.
+	//
+	// A listing that shows the job is one start's authorization, of one
+	// channel's relay, and it holds the Want's login host for its Provider
+	// until it resolves: no other Provider can claim the host, and no lapse
+	// takes it, while the start is in flight (the last delta review of PR
+	// 354). The Runner reads Jobs once per channel per attempt, right before
+	// the process starts, and resolves each authorization with exactly one
+	// call, on every path: OnStart once the process has started, or
+	// StartFailed when it does not start, whatever the reason (a relay line,
+	// an ssh command or a process start that fails, a stop or Drop that comes
+	// first). An authorization never resolved holds its host until the keeper
+	// stops. The holds are counted per relay of an Allocation on a host, not
+	// per channel, since a listing names no channel: a second resolution of
+	// one start is taken for the other channel's, so the Runner resolves each
+	// exactly once. hostdial calls no hook on its paths between the listing and the
+	// process start, so PR 3's Runner adds one to hostdial.Target (add-only)
+	// and calls StartFailed from it.
 	Jobs hostdial.JobReader
 	// OnFinal is told of each final end, with the ended process's epoch and
 	// sequence (hostdial.Target.OnFinal).
 	OnFinal func(ch agentapi.RelayChannel, kind hostdial.EndKind, cause string, epoch, seq int64)
 	// OnStart is told of each ssh start (hostdial.Target.OnStart), with the
 	// (E, N) the relay started with: the keeper's record of what it issued.
+	// It resolves that start's authorization (Jobs): the started process
+	// holds the host from then on, as a relay up in Relays.
 	OnStart func(ch agentapi.RelayChannel, epoch, seq int64)
+	// StartFailed resolves an authorization (Jobs) whose process did not
+	// start, on every such path; it releases the host the start held.
+	StartFailed func(ch agentapi.RelayChannel)
 }

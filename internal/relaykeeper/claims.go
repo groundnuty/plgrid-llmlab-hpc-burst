@@ -23,8 +23,8 @@ const DefaultClaimLapse = 5 * time.Minute
 //     refused sets and sets with no Allocation included.
 //   - A set from another Provider for a claimed host is refused, naming the
 //     holder, while a relay of the holder runs there (a process, not a Want:
-//     a relay that waits or retries holds nothing), and until the claim
-//     lapses.
+//     a relay that waits or retries holds nothing) or a start of one is in
+//     flight there (authorized, not resolved), and until the claim lapses.
 //   - A claim lapses, once no relay of its holder runs there, when its
 //     holder's latest accepted set is complete with no Allocation, or names
 //     another host, or when its holder has sent no unexpired set for
@@ -65,13 +65,22 @@ func (k *Keeper) claim(next *State, s wire.DesiredSet, host string, now time.Tim
 	return "", true
 }
 
-// holdsRunning reports whether a relay of c's Provider runs on host: the
-// Runner shows it up, a process of it alive (one still stopping included),
-// on that login host, started under c's UID. A relay is counted for the
-// Provider UID it started under, never for the latest Want of its tag, so a
-// re-created Provider's Want cannot hide its predecessor's running process
-// (the delta review of PR 354). One that names no UID is counted for any.
+// holdsRunning reports whether a relay of c's Provider runs on host, or is
+// starting there: the Runner shows it up, a process of it alive (one still
+// stopping included), on that login host, started under c's UID; or a start
+// of one of its relays there, under c's UID, was authorized and has not
+// resolved yet (Want.Jobs), so no other Provider can claim the host between
+// a start's authorization and its process (the last delta review of PR
+// 354). A relay is counted for the Provider UID it started under, never for
+// the latest Want of its tag, so a re-created Provider's Want cannot hide its
+// predecessor's running process (the delta review of PR 354). One that names
+// no UID is counted for any.
 func (k *Keeper) holdsRunning(c Claim, host string) bool {
+	for key, n := range k.inflight {
+		if n > 0 && key.name == c.Provider && key.uid == c.ProviderUID && key.host == host {
+			return true
+		}
+	}
 	for _, r := range k.runner.Relays(c.Provider) {
 		if r.State == wire.StateUp && r.LoginHost == host && (r.ProviderUID == "" || r.ProviderUID == c.ProviderUID) {
 			return true

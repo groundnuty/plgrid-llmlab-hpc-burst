@@ -150,29 +150,64 @@ func TestAnUnexpectedSupersededEndIsRecorded(t *testing.T) {
 
 // The supersede check reads only the keeper's issue to the new generation,
 // of its own epoch: an issue of the replaced generation, or one of another
-// epoch, explains nothing, whatever its N (guards that the keeper's own
-// starts never leave unmet, so set here by hand).
+// epoch, explains nothing, though its pair outranks the ended relay's. Each
+// case isolates one guard: the issued pair outranks the ended one in both,
+// so only the generation's guard, or only the epoch's, records the end. The
+// keeper's own starts never leave these guards unmet, so the issue is set by
+// hand (they survived as mutant B5 until this test).
 func TestTheSupersedeCheckReadsOnlyTheNewGenerationsOwnIssue(t *testing.T) {
-	for name, is := range map[string]func(k *Keeper, e wire.Entry) issue{
-		"the replaced generation's issue": func(k *Keeper, e wire.Entry) issue { return issue{entry: e, epoch: k.Epoch(), seq: 99} },
-		"another epoch's issue":           func(k *Keeper, e wire.Entry) issue { return issue{entry: newGen(e), epoch: k.Epoch() - 1, seq: 99} },
+	for _, c := range []struct {
+		name             string
+		issue            func(k *Keeper, e wire.Entry) issue
+		endEpoch, endSeq func(k *Keeper) int64
+	}{
+		{"the replaced generation's issue",
+			func(k *Keeper, e wire.Entry) issue { return issue{entry: e, epoch: k.Epoch(), seq: 99} },
+			func(k *Keeper) int64 { return k.Epoch() }, func(*Keeper) int64 { return 1 }},
+		{"another epoch's issue",
+			func(k *Keeper, e wire.Entry) issue { return issue{entry: newGen(e), epoch: k.Epoch() - 1, seq: 99} },
+			func(k *Keeper) int64 { return k.Epoch() - 1 }, func(*Keeper) int64 { return 1 }},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(c.name, func(t *testing.T) {
 			r := newRig(t)
 			k, fr := r.open()
 			e := entry(1)
 			accepted(t, k, set("example-a", 1, true, "login.example", e))
 			fr.mustStart(t, "example-a", e.Tag)
 			w1, _ := fr.want("example-a", e.Tag)
-			old := fr.seqOf("example-a", e.Tag, agentapi.RelayControl)
 			accepted(t, k, set("example-a", 1, true, "login.example", newGen(e)))
 			k.mu.Lock()
-			k.issued["example-a"][e.Tag][agentapi.RelayControl] = is(k, e)
+			k.issued["example-a"][e.Tag][agentapi.RelayControl] = c.issue(k, e)
 			k.mu.Unlock()
-			w1.OnFinal(agentapi.RelayControl, hostdial.EndSuperseded, supersededCause, k.Epoch(), old)
+			w1.OnFinal(agentapi.RelayControl, hostdial.EndSuperseded, supersededCause, c.endEpoch(k), c.endSeq(k))
 			if ends := r.disk().Ends; len(ends) != 1 {
-				t.Errorf("with %s: ends %+v, want the superseded end recorded", name, ends)
+				t.Errorf("with %s: ends %+v, want the superseded end recorded", c.name, ends)
 			}
 		})
+	}
+}
+
+// A late start of a replaced generation does not overwrite the keeper's
+// record of what it issued the replacement: a start authorized before the
+// replacement's Want lands after the replacement started, and the record
+// still names the replacement's (E, N), which decides its supersedes.
+func TestALateStartOfAReplacedGenerationKeepsTheReplacementsIssue(t *testing.T) {
+	r := newRig(t)
+	k, fr := r.open()
+	e := entry(1)
+	accepted(t, k, set("example-a", 1, true, "login.example", e))
+	old := fr.authorize("example-a", e.Tag) // the old generation's control start, in flight
+	if old == nil {
+		t.Fatal("the old generation's start was refused")
+	}
+	accepted(t, k, set("example-a", 1, true, "login.example", newGen(e)))
+	fr.mustStart(t, "example-a", e.Tag)
+	want := fr.seqOf("example-a", e.Tag, agentapi.RelayControl)
+	fr.launch(old, agentapi.RelayControl) // lands after its replacement started
+	k.mu.Lock()
+	is := k.issued["example-a"][e.Tag][agentapi.RelayControl]
+	k.mu.Unlock()
+	if is.entry != newGen(e) || is.seq != want {
+		t.Errorf("the issue on record after the late start: %+v, want the replacement's, N %d", is, want)
 	}
 }

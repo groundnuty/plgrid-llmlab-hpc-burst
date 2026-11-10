@@ -102,6 +102,7 @@ type Keeper struct {
 	wishes   map[provKey]wish                                      // Provider → its latest unexpired set past the fence, accepted or not
 	wanted   map[string]map[string]wanted                          // Provider's name → tag → the Allocation kept
 	issued   map[string]map[string]map[agentapi.RelayChannel]issue // Provider's name → tag → channel → the (E, N) last issued
+	inflight map[holdKey]int                                       // starts authorized and not resolved yet (Want.Jobs)
 	starts   map[string]map[string]int                             // Provider's name → UID/channel → ssh starts
 	restarts map[string]map[agentapi.RelayChannel]uint64
 	refused  map[string]map[string]uint64
@@ -134,6 +135,10 @@ type wanted struct {
 	uid   string
 	host  string
 }
+
+// holdKey is the relay of one Allocation of one Provider (name and UID) on
+// one login host: its starts in flight hold that host (Want.Jobs).
+type holdKey struct{ name, uid, host, tag string }
 
 // issue is the (E, N) a relay of an Allocation's channel started with, and
 // the entry, so the generation, it was started for: the keeper's own record
@@ -168,7 +173,7 @@ func Open(o Options) (*Keeper, error) {
 	}
 	return &Keeper{o: o, runner: r, epoch: st.Epoch(), started: o.Now(), st: st, synced: true,
 		sets: map[string]*heldSet{}, wishes: map[provKey]wish{}, wanted: map[string]map[string]wanted{},
-		issued: map[string]map[string]map[agentapi.RelayChannel]issue{}, starts: map[string]map[string]int{},
+		issued: map[string]map[string]map[agentapi.RelayChannel]issue{}, inflight: map[holdKey]int{}, starts: map[string]map[string]int{},
 		restarts: map[string]map[agentapi.RelayChannel]uint64{}, refused: map[string]map[string]uint64{}}, nil
 }
 
@@ -386,7 +391,8 @@ func (k *Keeper) handleSet(s wire.DesiredSet) (wire.Kind, any) {
 		k.wanted[p][e.Tag] = wanted{entry: e, uid: s.ProviderUID, host: host}
 		k.runner.Want(p, s.SSH, Want{Entry: e, ProviderUID: s.ProviderUID, Finals: k.finalsOf(p, e),
 			Jobs:    jobs{k: k, provider: p, uid: s.ProviderUID, host: host, entry: e},
-			OnFinal: k.onFinal(p, e), OnStart: k.onStart(p, e)})
+			OnFinal: k.onFinal(p, e), OnStart: k.onStart(p, s.ProviderUID, host, e),
+			StartFailed: k.startFailed(p, s.ProviderUID, host, e)})
 	}
 	return wire.KindReport, k.report(p, host, false)
 }
@@ -518,21 +524,26 @@ func (k *Keeper) supersededByOwnReplacement(p string, e wire.Entry, ch agentapi.
 	return is.epoch > epoch || (is.epoch == epoch && is.seq > seq)
 }
 
-// onStart records the (E, N) a relay of e's Allocation started with, for its
-// generation (supersededByOwnReplacement), and counts the starts: each after
-// the first of a channel of an Allocation is a restart (HBEP-8,
-// hpcburst_relay_restarts_total).
-func (k *Keeper) onStart(p string, e wire.Entry) func(agentapi.RelayChannel, int64, int64) {
+// onStart resolves a start's authorization (release), records the (E, N)
+// the relay started with for its generation, while that generation is still
+// the Allocation's Want, so a late start of a replaced one cannot overwrite
+// its replacement's record (supersededByOwnReplacement), and counts the
+// starts: each after the first of a channel of an Allocation is a restart
+// (HBEP-8, hpcburst_relay_restarts_total).
+func (k *Keeper) onStart(p, uid, host string, e wire.Entry) func(agentapi.RelayChannel, int64, int64) {
 	return func(ch agentapi.RelayChannel, epoch, seq int64) {
 		k.mu.Lock()
 		defer k.mu.Unlock()
-		if k.issued[p] == nil {
-			k.issued[p] = map[string]map[agentapi.RelayChannel]issue{}
+		k.release(holdKey{p, uid, host, e.Tag}, ch)
+		if w, ok := k.wanted[p][e.Tag]; ok && w.entry == e {
+			if k.issued[p] == nil {
+				k.issued[p] = map[string]map[agentapi.RelayChannel]issue{}
+			}
+			if k.issued[p][e.Tag] == nil {
+				k.issued[p][e.Tag] = map[agentapi.RelayChannel]issue{}
+			}
+			k.issued[p][e.Tag][ch] = issue{entry: e, epoch: epoch, seq: seq}
 		}
-		if k.issued[p][e.Tag] == nil {
-			k.issued[p][e.Tag] = map[agentapi.RelayChannel]issue{}
-		}
-		k.issued[p][e.Tag][ch] = issue{entry: e, epoch: epoch, seq: seq}
 		if k.starts[p] == nil {
 			k.starts[p] = map[string]int{}
 		}
@@ -544,6 +555,29 @@ func (k *Keeper) onStart(p string, e wire.Entry) func(agentapi.RelayChannel, int
 			}
 			k.restarts[p][ch]++
 		}
+	}
+}
+
+// startFailed resolves a start's authorization whose process did not start.
+func (k *Keeper) startFailed(p, uid, host string, e wire.Entry) func(agentapi.RelayChannel) {
+	return func(ch agentapi.RelayChannel) {
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		k.release(holdKey{p, uid, host, e.Tag}, ch)
+	}
+}
+
+// release ends one start in flight of key's relay. One with none in flight
+// is logged and changes nothing: the Runner resolved a start twice, or one
+// it never had authorized. The caller holds the lock.
+func (k *Keeper) release(key holdKey, ch agentapi.RelayChannel) {
+	if k.inflight[key] == 0 {
+		k.o.Logger.Warn("a start was resolved with none in flight", "provider", key.name, "tag", key.tag, "channel", ch)
+		return
+	}
+	k.inflight[key]--
+	if k.inflight[key] == 0 {
+		delete(k.inflight, key)
 	}
 }
 
@@ -651,6 +685,9 @@ func (j jobs) ListByTag(_ context.Context, tag string) ([]provider.Job, error) {
 		// The set's entry must be the Want's own, which is never marked, so an
 		// Allocation the set marks RelayEndedForGood is hidden here.
 		if e.Tag == tag && e == j.entry && len(k.endsOf(j.provider, e)) == 0 {
+			// One start authorized: its host is held until it resolves
+			// (Want.OnStart, Want.StartFailed).
+			k.inflight[holdKey{j.provider, j.uid, j.host, tag}]++
 			return []provider.Job{{ID: e.JobID, Name: tag, Phase: v1alpha1.AllocationRunning}}, nil
 		}
 	}
