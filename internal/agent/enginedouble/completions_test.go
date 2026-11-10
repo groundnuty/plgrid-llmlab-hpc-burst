@@ -221,8 +221,9 @@ func TestCompletionPromptTokensAreItsWords(t *testing.T) {
 // The length and finish reason follow doc.go: the model stops after 24 tokens
 // of its own accord ("stop") unless max_tokens comes first or min_tokens asks
 // for more; CompletionRequest.max_tokens defaults to 16 when absent
-// (completion/protocol.py:63) and null means the rest of the context. The
-// usage adds up, and the streamed answer says the same.
+// (completion/protocol.py:63) and so when null (normalize_null_max_tokens,
+// completion/protocol.py:430-436). The usage adds up, and the streamed answer
+// says the same.
 func TestCompletionLengthsAndFinishReasons(t *testing.T) {
 	s := serve(t, cfgFor())
 	cases := []struct {
@@ -232,7 +233,12 @@ func TestCompletionLengthsAndFinishReasons(t *testing.T) {
 		wantFinish string
 	}{
 		{"max_tokens absent: the default 16, below the natural 24", map[string]any{}, 16, "length"},
-		{"max_tokens null: the rest of the context", map[string]any{"max_tokens": nil}, 24, "stop"},
+		// Issue 326: this case once pinned the rest of the context (24, "stop"),
+		// a reading of the field's `int | None` type that missed the
+		// mode="before" validator at completion/protocol.py:430-436, which
+		// turns a null into the default 16. 16 is below the natural 24, so a
+		// null read as the rest of the context fails here.
+		{"max_tokens null: the default 16, as absent", map[string]any{"max_tokens": nil}, 16, "length"},
 		{"max_tokens one", map[string]any{"max_tokens": 1}, 1, "length"},
 		{"max_tokens below the natural length", map[string]any{"max_tokens": 10}, 10, "length"},
 		{"max_tokens at the natural length", map[string]any{"max_tokens": 24}, 24, "length"},
@@ -270,6 +276,44 @@ func TestCompletionLengthsAndFinishReasons(t *testing.T) {
 		}
 		if u := chunks[tc.wantTokens].Usage; u == nil || *u != (usageJSON{5, tc.wantTokens, 5 + tc.wantTokens}) {
 			t.Errorf("%s: streamed usage %+v, want %+v", tc.name, u, usageJSON{5, tc.wantTokens, 5 + tc.wantTokens})
+		}
+	}
+}
+
+// The limit a completions request is run with, as the engine's log records it
+// (the "request" event's MaxTokens), is 16 whether max_tokens is absent or
+// null, and the integer when there is one. The expected values are literals
+// read from vLLM v0.32.0, none of them the double's own constant:
+// CompletionRequest.max_tokens is `int | None = 16`
+// (completion/protocol.py:63), normalize_null_max_tokens rewrites a null to
+// cls.model_fields["max_tokens"].default, that 16 (:430-436), and get_max_tokens
+// (serve/utils/api_utils.py:188-205) takes the least of the context left after
+// the prompt and that value. The 5-word prompt leaves 32763 tokens of the
+// default 32768, so the limit is 16, or the integer.
+func TestCompletionNullMaxTokensIsTheDefault(t *testing.T) {
+	post, events := engineRecord(t, cfgFor())
+	cases := []struct {
+		name string
+		body map[string]any
+		want int
+	}{
+		{"absent", completionBody(5, nil), 16},
+		{"null", completionBody(5, map[string]any{"max_tokens": nil}), 16},
+		{"an integer below the default", completionBody(5, map[string]any{"max_tokens": 7}), 7},
+		{"an integer above the default", completionBody(5, map[string]any{"max_tokens": 30}), 30},
+	}
+	for _, tc := range cases {
+		if r := post("/v1/completions", tc.body); r.Code != http.StatusOK {
+			t.Fatalf("%s: HTTP %d: %s", tc.name, r.Code, r.Body)
+		}
+	}
+	got := requestEvents(events())
+	if len(got) != len(cases) {
+		t.Fatalf("%d request records, want %d", len(got), len(cases))
+	}
+	for i, tc := range cases {
+		if got[i].MaxTokens != tc.want {
+			t.Errorf("%s: limit %d, want %d", tc.name, got[i].MaxTokens, tc.want)
 		}
 	}
 }

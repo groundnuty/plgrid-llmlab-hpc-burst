@@ -16,15 +16,24 @@ import (
 // them.
 type completionRequest struct {
 	sampling
-	Model     string          `json:"model"`
-	Prompt    json.RawMessage `json:"prompt"`
-	MaxTokens *int            `json:"max_tokens"`
+	Model  string          `json:"model"`
+	Prompt json.RawMessage `json:"prompt"`
+	// MaxTokens is nil when the body leaves max_tokens out or sends null, which
+	// the handler turns into defaultCompletionMaxTokens before the limit is
+	// resolved.
+	MaxTokens *int `json:"max_tokens"`
 }
 
-// defaultCompletionMaxTokens is what a completions request that does not name
-// max_tokens gets: CompletionRequest.max_tokens defaults to 16
-// (completion/protocol.py:63). "max_tokens": null is the rest of the context,
-// as in chat.
+// defaultCompletionMaxTokens is what a completions request gets whose
+// max_tokens is absent or null. CompletionRequest.max_tokens is
+// `int | None = 16` (vllm/entrypoints/openai/completion/protocol.py:63, at
+// v0.32.0), and the model validator normalize_null_max_tokens (mode="before",
+// :430-436 of the same class) rewrites a body whose max_tokens is null to the
+// field's default, so an explicit null is the default 16 and never "no limit".
+// This is unlike chat, where both limit fields default to None and the rest of
+// the context applies (chat_completion/protocol.py:229-234, serving.py:343-347,
+// serve/utils/api_utils.py:188-205). Issue 326: an earlier reading of the field
+// alone, without the validator, took a null here for the rest of the context.
 const defaultCompletionMaxTokens = 16
 
 // promptText is the prompt as the double reads it: a JSON string.
@@ -52,9 +61,12 @@ func promptText(raw json.RawMessage) (string, error) {
 // so the reasoning tokens are part of choices[0].text, where chat reports
 // them as message.reasoning.
 func (h *handler) completion(w http.ResponseWriter, r *http.Request) {
-	dflt := defaultCompletionMaxTokens
-	req := completionRequest{MaxTokens: &dflt} // null in the body clears it; an absent field keeps it
+	var req completionRequest
 	decodeErr := decodeBody(r, &req)
+	if req.MaxTokens == nil { // absent, or null: normalize_null_max_tokens (completion/protocol.py:430-436)
+		dflt := defaultCompletionMaxTokens
+		req.MaxTokens = &dflt
+	}
 	prompt, promptErr := promptText(req.Prompt) // "" when the prompt is not a string
 	// The record is the chat path's: a request that decoded is recorded when
 	// it ends, a refused one too, and errors-only answers after the decode.
