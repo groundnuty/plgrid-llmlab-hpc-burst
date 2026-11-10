@@ -185,6 +185,12 @@ func (b *Batch) maxAge() time.Duration {
 	return b.poll
 }
 
+// ListingMaxAge is the poll interval in force: how old the cached queue
+// listing may get before a read refreshes it, the short interval while any
+// tag is busy. The relay keeper's desired sets carry it in their validity
+// (HBEP-6, The relay keeper; #343's Q5).
+func (b *Batch) ListingMaxAge() time.Duration { return b.maxAge() }
+
 // markStale makes the next read refresh the listing: after any write.
 func (b *Batch) markStale() {
 	b.lmu.Lock()
