@@ -78,7 +78,7 @@ func refusedFor(err error, pid int) string {
 
 // Guard 3, over a scripted process table. It refuses PID 1 and below, the
 // test itself, its ancestor and a row with no start time. It reports as a
-// leak, never signalled, each process that is not strictly below the test: a
+// leak, not signalled, each process that is not strictly below the test: a
 // stranger, a sibling (another child of go test), a process whose "parent"
 // started after it (a reused PID whose new owner is below the test), one whose
 // parent or grandparent has exited, and one below the test that started
@@ -311,16 +311,14 @@ func TestSignalProcsAloneOverTheWholeHostSignalsOnlyBelowTheTest(t *testing.T) {
 }
 
 // ReportLeaks fails a passing run that left any process outside the test's
-// tree, keeps a failing run's own code, and passes a run with none.
+// tree, keeps a failing run's own code, and passes a run with none. Its
+// verdict is tested without its line, which only the run's TestMain prints.
 func TestReportLeaksFailsARunThatLeftAProcess(t *testing.T) {
-	saved := leaked.Load()
-	t.Cleanup(func() { leaked.Store(saved) })
 	for _, c := range []struct {
 		leaks      int64
 		code, want int
 	}{{0, 0, 0}, {1, 0, 1}, {2, 3, 3}} {
-		leaked.Store(c.leaks)
-		if got := ReportLeaks(c.code); got != c.want {
+		if got := leakVerdict(c.leaks, c.code); got != c.want {
 			t.Errorf("%d leaks, code %d: %d, want %d", c.leaks, c.code, got, c.want)
 		}
 	}

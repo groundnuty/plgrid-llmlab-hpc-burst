@@ -157,8 +157,7 @@ func StartLoginNode(cfg LoginConfig) (*LoginNode, error) {
 	if n.relay, err = startRelay(n.sock, n.sess, cfg.Around); err != nil {
 		return nil, err
 	}
-	forced := fmt.Sprintf("%s=%s %s=%s %s", EnvRole, RoleRelay, EnvRelay, n.sock, exe)
-	spec := sshdSpec{user: n.user, options: fmt.Sprintf("restrict,command=%q", forced), conf: loginConf}
+	spec := sshdSpec{user: n.user, options: fmt.Sprintf("restrict,command=%q", forcedCommand(n.sock, exe)), conf: loginConf}
 	if n.srv, err = startSSHD("login node", cfg.SSHD, n.files, spec); err != nil {
 		n.relay.close()
 		return nil, err
@@ -167,6 +166,15 @@ func StartLoginNode(cfg LoginConfig) (*LoginNode, error) {
 		return nil, errors.Join(fmt.Errorf("rehearsal: the controller's parser refuses the login node's credentials: %w", err), n.Close())
 	}
 	return n, nil
+}
+
+// forcedCommand is the login node's forced command: this binary as the relay
+// for sock. The shell execs env, and env execs the binary, so the binary's
+// parent is sshd's session process whatever the login shell's startup files
+// do (an EXIT trap keeps bash from replacing itself with a last command): the
+// relay guard (relayguard.go) requires that parent.
+func forcedCommand(sock, exe string) string {
+	return fmt.Sprintf("exec env %s=%s %s=%s %s", EnvRole, RoleRelay, EnvRelay, sock, exe)
 }
 
 // loginConf is sshd_config for the login node: commands only (the key's

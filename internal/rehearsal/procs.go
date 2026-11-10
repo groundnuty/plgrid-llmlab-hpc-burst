@@ -15,22 +15,26 @@ package rehearsal
 //     pidfd, and reaps it;
 //  2. below walks nothing from a root of PID 1 or less, from a row with no
 //     start time, nor from a root whose start time no longer matches;
-//  3. signalProcs (signal.go) signals only a process strictly below the test
-//     process now, by a walk whose every parent started no later than its
-//     child; it refuses PID 1 and below, the test and its ancestors, and a
-//     recorded process outside the test's tree is never signalled, and is a
-//     reported leak if it is still alive at the stop's last deadline;
-//  4. a forced command dies with its sshd (relayguard.go), so it never
-//     leaves the test's tree, and a passing run reports no leak.
+//  3. signalProcs (signal.go) never signals an unrelated process: each
+//     target is pinned by a pidfd and verified a descendant of the test at
+//     check time, by a walk whose every parent started no later than its
+//     child; a target that left the tree after the check can still receive
+//     the signal, which reaches only that pinned process. It refuses PID 1
+//     and below, the test and its ancestors, and a recorded process found
+//     outside the tree is not signalled, and is a reported leak if it is still
+//     alive at the stop's last deadline;
+//  4. a forced command asks for SIGKILL at its parent's exit (relayguard.go),
+//     so it does not outlive its sshd's session process for longer than the
+//     kernel takes to deliver that signal.
 //
 // What each guarantees alone. Guard 1: no row of an exited, unreadable or
 // timeless sshd is stored; it does not cover a PID recycled between record's
 // check that the sshd lives and its walk, which guard 2 does. Guard 2: no walk
 // starts from a zero, timeless, exited or recycled root; the stored roots
 // themselves still reach the stop. Guard 3: whatever a row's source,
-// withRelayEnv's included, only a process strictly below the test binary now
-// is signalled, never PID 1, the test or its ancestors; it does not tell one
-// test's processes from another's in the same binary.
+// withRelayEnv's included, it signals only a pinned process verified below the
+// test binary at check time, never PID 1, the test or its ancestors; it does
+// not tell one test's processes from another's in the same binary.
 
 import (
 	"errors"

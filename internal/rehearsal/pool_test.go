@@ -118,8 +118,9 @@ func TestCloseReturnsWhenAnSSHDCannotBePinned(t *testing.T) {
 
 // The stop signals each recorded process before its parent, and an sshd
 // after everything recorded below it, so it never orphans what it has yet to
-// signal: extra first, then the deepest, then the sshd. The start times are
-// far above any real process's, so no row names one.
+// signal: extra first, then the deepest, then the sshd. A process both in extra
+// and recorded is signalled once. The start times are far above any real
+// process's, so no row names one.
 func TestStopSignalsEachProcessBeforeItsParent(t *testing.T) {
 	const far = uint64(1) << 50
 	var rec sink
@@ -133,11 +134,12 @@ func TestStopSignalsEachProcessBeforeItsParent(t *testing.T) {
 		903: {pid: 903, ppid: 902, ticks: far + 9},  // below it, though it started in an earlier tick
 		904: {pid: 904, ppid: 900, ticks: far + 12}, // another child of the sshd
 	}}}
-	if err := pool.stop([]procRow{{pid: 950, ppid: 1, ticks: far + 20}}); err != nil {
+	// 904 is listed by withRelayEnv too, with its parent as it is now.
+	if err := pool.stop([]procRow{{pid: 950, ppid: 1, ticks: far + 20}, {pid: 904, ppid: 1, ticks: far + 12}}); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	sent, _ := rec.snapshot()
-	want := []int{950, 903, 902, 904, 901, 900}
+	want := []int{950, 904, 903, 902, 901, 900}
 	if len(sent) < len(want) || !slices.Equal(sent[:len(want)], want) {
 		t.Errorf("the TERM pass signalled %v, want %v first: deepest first, the sshd last", sent, want)
 	}
@@ -187,7 +189,7 @@ func orphan(t *testing.T) (procRow, *os.File) {
 }
 
 // D4: a recorded process that has left the test's tree (here a real orphan,
-// reparented to PID 1 or a subreaper outside the test) is never signalled.
+// reparented to PID 1 or a subreaper outside the test) is not signalled.
 // Close returns an error that names it by command, start time and node, and
 // it counts as a leak.
 func TestCloseReportsAProcessThatLeftTheTreeAndDoesNotSignalIt(t *testing.T) {
@@ -252,30 +254,66 @@ func TestStopNamesAProcessStillAliveAtItsDeadline(t *testing.T) {
 	}
 }
 
-// D2: the forced command's guard asks for SIGKILL at its parent's exit, then
-// goes on only under an sshd (sshd, or OpenSSH 9.8's sshd-session).
+// D2: the forced command's guard asks for SIGKILL at its parent's exit, and
+// only then reads its parent, which a parent that exited before the request
+// has turned into a reaper. It goes on only under an sshd (sshd, or OpenSSH
+// 9.8's sshd-session) that is not PID 1, which a container's sshd -D can be.
 func TestTheRelayGuardTiesTheForcedCommandToItsSSHD(t *testing.T) {
 	for _, c := range []struct {
+		ppid   int
 		parent string
 		ask    error
-		want   int
+		ok     bool
+		why    string
 	}{
-		{"sshd", nil, 0},
-		{"sshd-session", nil, 0},
-		{"systemd", nil, failExit},
-		{"bash", nil, failExit},
-		{"sshd", syscall.EINVAL, failExit},
+		{4242, "sshd", nil, true, ""},
+		{4242, "sshd-session", nil, true, ""},
+		{4242, "systemd", nil, false, `"systemd", not an sshd`},
+		{4242, "bash", nil, false, `"bash", not an sshd`},
+		{1, "sshd", nil, false, "the parent is PID 1"},
+		{4242, "sshd", syscall.EINVAL, false, "ask for SIGKILL"},
 	} {
-		asked := false
-		got := relayGuard(func() error { asked = true; return c.ask }, func() int { return 4242 }, func(pid int) string {
-			if pid != 4242 {
-				t.Errorf("the command name of %d was read, want the parent 4242's", pid)
-			}
-			return c.parent
-		})
-		if got != c.want || !asked {
-			t.Errorf("under %q (request: %v): exit %d, asked %v; want %d, asked", c.parent, c.ask, got, asked, c.want)
+		var calls []string
+		err := relayGuard(
+			func() error { calls = append(calls, "ask"); return c.ask },
+			func() int { calls = append(calls, "getppid"); return c.ppid },
+			func(pid int) string {
+				calls = append(calls, "comm")
+				if pid != c.ppid {
+					t.Errorf("the command name of %d was read, want the parent %d's", pid, c.ppid)
+				}
+				return c.parent
+			})
+		if (err == nil) != c.ok || (err != nil && !strings.Contains(err.Error(), c.why)) {
+			t.Errorf("under %d %q (request: %v): %v; want ok %v, saying %q", c.ppid, c.parent, c.ask, err, c.ok, c.why)
 		}
+		if len(calls) == 0 || calls[0] != "ask" {
+			t.Errorf("under %d %q: the calls were %v; want the request first, then the parent", c.ppid, c.parent, calls)
+		}
+	}
+}
+
+// A forced command that will not run says why in the node's sshd.log too,
+// beside its relay socket, where a test that fails prints it; standard error
+// alone would reach the controller as ssh's own failure.
+func TestAGuardFailureIsLoggedBesideTheRelaySocket(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "sshd.log")
+	if err := os.WriteFile(log, []byte("sshd's own line\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := guardFail(filepath.Join(dir, "relay.sock"), errors.New("the parent is PID 1")); code != failExit {
+		t.Errorf("exit %d, want %d", code, failExit)
+	}
+	b, err := os.ReadFile(log)
+	if err != nil || !strings.HasPrefix(string(b), "sshd's own line\n") || !strings.Contains(string(b), "the parent is PID 1") {
+		t.Errorf("sshd.log is %q (%v); want sshd's line, then the guard's", b, err)
+	}
+	if code := guardFail(filepath.Join(dir, "elsewhere", "relay.sock"), errors.New("x")); code != failExit {
+		t.Errorf("with no log: exit %d, want %d", code, failExit)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "elsewhere")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a log was made where there was none: %v", err)
 	}
 }
 

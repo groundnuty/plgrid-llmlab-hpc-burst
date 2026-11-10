@@ -214,7 +214,7 @@ const stopWait = 5 * time.Second
 // then KILL, by pidfd and start time, take what does not, each process before
 // its parent (extra first, then each sshd's recorded rows deepest first, then
 // the sshd). The processes signalProcs refused are not waited for, and every
-// refusal is the error. A process found outside the test's tree is never
+// refusal is the error. A process found outside the test's tree is not
 // signalled; it is waited for, and is a leak only if it is still alive at the
 // last deadline (leaks).
 //
@@ -230,12 +230,27 @@ func (s *sshdPool) stop(extra []procRow) error {
 	s.guards()
 	procs := append([]*sshdProc(nil), s.procs...)
 	s.mu.Unlock()
-	all := append([]procRow(nil), extra...)
+	// A forced command is in extra and in its sshd's records: each process
+	// is listed once, by its PID and start time, so it is signalled once and a
+	// leak is counted once.
+	var all []procRow
+	listed := map[[2]uint64]bool{}
+	add := func(rows ...procRow) {
+		for _, r := range rows {
+			k := [2]uint64{uint64(r.pid), r.ticks}
+			if listed[k] {
+				continue
+			}
+			listed[k] = true
+			all = append(all, r)
+		}
+	}
+	add(extra...)
 	for _, p := range procs {
 		p.record()
-		all = append(all, p.seen()...)
+		add(p.seen()...)
 		if p.self.pid != 0 {
-			all = append(all, p.self)
+			add(p.self)
 		}
 	}
 	var errs []error
@@ -292,7 +307,7 @@ func rowsOf(leaks []*leakError) []procRow {
 // still alive at the stop's last deadline, or whose row cannot be read there,
 // and counts them. One that has exited by then was dying when it was found, as
 // a forced command is between its reparenting and its parent-death SIGKILL.
-// None of them was signalled.
+// None of them was signalled when it was found.
 func (s *sshdPool) leaks(outside []*leakError) error {
 	var errs []error
 	for _, l := range outside {

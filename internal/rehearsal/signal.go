@@ -3,17 +3,21 @@ package rehearsal
 // New, after internal/slurm/fakeslurm/procsweep.go (signalOne): what the nodes
 // signal, and how (issue #308, guard 3 in procs.go's header).
 //
-// A process is signalled only when a walk up its parents, made while it is
-// pinned with a pidfd, reaches the test process, and only through that pidfd.
-// Each hop is checked against PID reuse by start-time order: a parent started
-// no later than its child, so a "parent" that started later is a reused PID.
-// A process that is not below the test any more, such as one whose parent
-// exited and left it to PID 1 or the user manager, is never signalled. The
-// stop judges it at its last deadline: one still alive then is a leak,
-// counted and reported with its command name, start time and node. A forced
-// command found outside the tree is dying, since the kernel reparents it and
-// then sends the parent-death SIGKILL it asked for (relayguard.go), so it is
-// gone by then, and a passing run reports none.
+// signalProcs never signals an unrelated process: each target is pinned by a
+// pidfd and verified a descendant of the test at check time; a target that
+// left the tree after the check can still receive the signal, which reaches
+// only that pinned process.
+// The check is a walk up the target's parents, made while it is pinned,
+// that reaches the test process, and the signal goes through the pidfd. Each
+// hop is checked against PID reuse by start-time order: a parent started no
+// later than its child, so a "parent" that started later is a reused PID.
+//
+// A target found not below the test, such as one whose parent exited and left
+// it to PID 1 or the user manager, is not signalled. The stop judges it at its
+// last deadline: one still alive then is a leak, counted and reported with its
+// command name, start time and node. A forced command found so is usually
+// dying: the kernel reparents it, then delivers the parent-death SIGKILL it
+// asked for (relayguard.go), and it is gone by the deadline.
 //
 // The residual: start times have the clock tick's resolution (10 ms), so a
 // parent that exited, gave up its PID, and had it reused within the tick its
@@ -187,11 +191,16 @@ func refusal(r procRow, sig syscall.Signal, why string) error {
 // and checked after that: a PID that now names a process with another start
 // time was recycled and is left alone, and the signal goes through the pidfd,
 // never to a PID. It refuses PID 1 and below, a row with no start time, the
-// process itself and its ancestors. A process that is not below the test is
-// never signalled: its error is a *leakError, for the stop to judge. Every
+// process itself and its ancestors. A process found not below the test is not
+// signalled: its error is a *leakError, for the stop to judge. Every
 // refusal, and a process that cannot be pinned, read or signalled, is an
 // error, and the others are still signalled. It returns the rows it neither
 // refused nor failed on. node names the node in a report.
+//
+// It never signals an unrelated process: each target is pinned by a pidfd and
+// verified a descendant of the test at check time; a target that left the
+// tree after the check can still receive the signal, which reaches only that
+// pinned process.
 func signalProcs(api *procAPI, node string, rows []procRow, sig syscall.Signal) ([]procRow, error) {
 	o, err := ownerOf(api, node)
 	if err != nil {
@@ -284,7 +293,13 @@ func (o *owner) endedSince(pid int) (bool, error) {
 // passing run shows as 0.
 func ReportLeaks(code int) int {
 	n := leaked.Load()
-	fmt.Printf("rehearsal: %d leaked (processes the nodes left outside the test's tree, never signalled)\n", n)
+	fmt.Printf("rehearsal: %d leaked (processes the nodes left outside the test's tree, alive at the stop's deadline)\n", n)
+	return leakVerdict(n, code)
+}
+
+// leakVerdict is ReportLeaks' exit code for n leaks, without the line, which
+// a test must not print: the line is the run's evidence.
+func leakVerdict(n int64, code int) int {
 	if n > 0 {
 		return max(code, 1)
 	}
