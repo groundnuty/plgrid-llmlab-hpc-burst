@@ -63,7 +63,7 @@ Problems:
 - **Streams on one tunnel block each other (head-of-line blocking).** frp multiplexes every stream of a tunnel over one connection (yamux, with up to 6 MiB of send credit per stream). In S1c this happened in every valid run, on every transport: on a 1 MB/s link, one 4 MiB reply held every other stream's tokens back for 4.47–4.54 s, and one slowly read reply for up to 7.4 s. With separate connections behind the same shared cap the delay stayed under 0.15 s. Mitigations:
   - the agent's control traffic has its own connection, never the token tunnel (Dial-home modes);
   - the tunnel carries every request HBEP-5 routes to an Instance: its listed endpoints and its passthrough of every other JSON `POST` under `/v1/` (HBEP-5, Contract), so any large non-streamed reply can stall the streams of its Instance. An Instance serves one model, and vLLM v0.32.0 serves `/v1/embeddings` only for a pooling model and the chat and completions routes only for a generative one: a server's tasks come from its one runner type (`vllm/v1/worker/gpu_model_runner.py:3158-3164`), the generation routes need `generate` (`vllm/entrypoints/launchers/api_server/routers.py:49-54`), and the embeddings route needs `embed` (`vllm/entrypoints/pooling/factories.py:132-135`; `pooling/embed/api_router.py:28-29`). So embeddings and token streams never share an Instance's tunnel. The risk that remains is any large non-streamed reply of a generative model, from a listed endpoint or the passthrough, which can stall its Instance's streams for seconds on a slow path. The path rate is measured in S1's one-hour runs (Graduation criteria);
-  - after alpha, a bulk endpoint gets its own frpc proxy with `transport.bandwidthLimit`, or a separate frpc with `transport.tcpMux = false` (open question 12).
+  - after alpha, a generative Instance's non-streamed replies go to a separate frpc with `transport.tcpMux = false`, which removed the stall in spike S15; its contract is open (open question 12).
 - **A short heartbeat timeout drops a healthy tunnel.** With a 6 s timeout, a slow reader queued more than 6 s of data in S1c, a heartbeat timed out, and all 16 streams were cut, in both passes. S1's set survived every run. Heartbeat timeouts are budgeted from the queueing delay (Heartbeats). yamux's ping timeout is fixed at 10 s, so on a slow path a queue of more than 10 s drops the tunnel at any setting.
 - **The tunnel drops while the instance is healthy.** frpc and the ssh forwards reconnect on their own. Meanwhile the front holds the Instance as not eligible, not dead (HBEP-5), and the controller restarts nothing on that basis (HBEP-7). A host-dialed relay that ends for good is the exception: its Allocation is released (Dial-home modes, What ends a relay).
 - **Requests hang in a dead tunnel before frps notices.** frps answers the front's `CONNECT` before it takes a work connection (frp facts), so a silent path still accepts requests. frps then closes each of them itself, after the front's write and before any response byte: a request that waits for a work connection at `userConnTimeout` (10 s), and the one that drew the spare work connection when the session is torn down (12–20 s at S1's settings, over 15 s at frp's defaults in S1c). The front returns that as 502 `upstream_closed` (HBEP-5, Errors), does not resend it, and its probe takes the Instance out of rotation (The front's half).
@@ -116,7 +116,27 @@ Problems:
      - a dedicated front host near full CPU, since S14's runners saturated first;
      - ssh's encryption cost per relay;
      - the front's own proxy cost (R_front).
-12. **Bulk endpoints off the token tunnel.** **Open (blocks beta):** embeddings, file transfers and large non-streamed replies get their own frpc proxy with `transport.bandwidthLimit`, or a separate frpc with `transport.tcpMux = false`. S1c tested neither.
+12. **Bulk endpoints off the token tunnel.** **The layout is decided; its contract is open and blocks beta** (science-agent decision, 10 Nov 2026, from spike S15, issue #336, PR #348).
+   - **What S15 measured:** on loopback, with the link set to 48 MB/s and a 2.3 ms round trip (47–48 MB/s achieved in direct mode, 32–36 MB/s in host-dialed mode), 8 token streams of 20 tokens/s ran beside a 64 MiB upload, a 64 MiB download or a 2,000-input embeddings reply, in direct and host-dialed mode. The embeddings reply stood in for any large non-streamed reply.
+   - **On one frp session a download or a large reply stalls the token streams** for about frp's stream window, a fixed 6 MiB, over the path rate. Gap p99 was 137 ms in direct mode and 206 ms in host-dialed mode, against 52 ms. Uploads, which flow the other way, stalled no stream already in flight; a new request sent behind an upload wasn't measured.
+   - **`transport.bandwidthLimit` is not adopted.** frp's limiter starts with a full burst of one second's bytes, so transfers below one second's cap never meet it. When it binds, the burst's stall stays (pooled p99 122–139 ms direct and 93–190 ms host-dialed, in the binding-cap rows) and the transfer slows 1.3–3.7 times. The stall is about min(burst, 6 MiB) ÷ path rate, so a cap helps only below about 6 MB/s, where a 64 MiB transfer takes about 11 s; the 25–75% caps tested were all above that.
+   - **The layout: a separate frpc with `transport.tcpMux = false`,** with its own proxy for the Instance, to a second frps with `tcpMux = false`. frps with tcpMux on wraps every connection in a multiplexed session (frp v0.71.1, `server/service.go:746-772`). This removed the stall at the full path rate: p99 53 ms in direct mode, 55 ms in host-dialed mode.
+   - **Scope:** a generative Instance's non-streamed replies. A pooling Instance serves embeddings and no token streams, so its embeddings never share a tunnel with token streams (Risks), and it gets no second frpc.
+   - **Decided for that contract:**
+     - **the bulk frpc's TLS server name** is `bulk.dial-home.hpcburst.invalid`, a second name on the launcher's certificate (an HBEP-11 amendment);
+     - **admission:** the second frps runs the same plugin, with `Login`, `NewProxy` and `CloseProxy`, and the bulk proxy is named by the Instance's UID, as on the first;
+     - **heartbeats:** S1's heartbeat set is explicit on the second frps and the bulk frpc, since with `tcpMux` off the defaults are 90 s and 30 s / 90 s. S1c's 12–20 s detection, which rests on the multiplexed session, doesn't carry over (Heartbeats).
+   - **In host-dialed mode the separate frpc shares the serving relay.** Its connections are streams of the relay's yamux session, whose 256 KiB per-stream window bounds the stall to a few ms. That window must stay at yamux's default. Its price is a per-stream rate ceiling of 256 KiB ÷ round trip: about 114 MB/s at the 2.3 ms configured here, about 26 MB/s at 10 ms, which bounds the bulk path's rate on a longer path.
+   - **A third relay channel for bulk paths is not adopted:** it gained about 3 ms and costs a third relay per Allocation, which under HBEP-4's 4 per login host breaks the handover pair.
+   - **Open (blocks beta), for the contract:**
+     - **the request-time rule:** which requests go to the bulk proxy, decided before dispatch from the path and the body (`stream` absent or false) and covering the passthrough's paths, priced against a new TLS connection per bulk upstream connection;
+     - **separate connection pools** per Instance and traffic class, so keep-alive can't reuse the wrong tunnel;
+     - **the bulk path's probe, registration and path state:** both frps lists read, inventoried and orphan-checked; what a missing bulk proxy does to routing; and how its failures count toward the Instance's pause;
+     - **a frozen bulk work connection's failure deadline and clean-up,** since with `tcpMux` off frps closes listeners and not assigned work connections;
+     - **the second frps's ports** (bind, tcpmux, web: base+13 to base+15, since base+12 is the controller's metrics), configuration, supervision, health and teardown, with Components, the port table, Operational readiness and Teardown updated;
+     - **the dial-home listener's paths split by server name,** and HBEP-5's Listeners, Parameters and Passthrough;
+     - **HBEP-7 and HBEP-11 amendments,** for the agent's second frpc and the certificate's second name, merged before the code;
+     - **S15's own open items:** a FIFO bottleneck shared by the two frpc's connections in direct mode; real ssh and srun buffers on the relay; several bulk transfers at once; the cost of a handshake per bulk request with many Instances; several Instances behind one link.
 13. **A relay keeper.** **Decided for beta** (science-agent decision, 10 Nov 2026): one `relaykeeper` process per control-plane host, supervised by the launcher beside frps. It holds every host-dialed relay, so a controller restart or hand-over cuts no serving stream (Dial-home modes, The relay keeper). Alpha keeps the relays in the controller's process, with the cuts the owner accepted ("Accept cuts for alpha", 9 Nov 2026).
 
 ## Design details
@@ -261,7 +281,7 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
 - **The wire:** `relay` first writes one preamble line, `hpcburst-relay/1 <Allocation UID>`. After it comes one multiplexed session: `fatedier/yamux` v0.2.0, the same version frp v0.71.1 pins, with a 10 s keepalive and a 10 s write timeout.
   - The host side requires the preamble within 30 s of the start. Anything else first is refused as named output ("unexpected output before the preamble"), counted and retried.
   - The host side dials only its channel's loopback port for each stream the job side opens, so a job can't reach any other port, the plugin endpoint included.
-  - TLS stays end to end: frpc's `wss` to the dial-home listener, and the agent's HTTPS to `/agent/v1/`. Inside the serving relay, frpc's own single multiplexed connection is one stream.
+  - TLS stays end to end: frpc's `wss` to the dial-home listener, and the agent's HTTPS to `/agent/v1/`. Inside the serving relay, frpc's own single multiplexed connection is one stream. In beta the bulk frpc's connections add one stream each (open question 12).
 - **The job side:**
   - **The agent's listeners:** the agent binds two loopback listeners at its start, one per channel, on ports it asks the kernel for, and keeps them for the Allocation's life. Nothing is handed between processes. frpc's `serverPort` is the serving listener's port, and the control client uses the control listener; neither changes when a relay restarts.
   - **The rendezvous:** the agent creates a Unix socket in a directory with a random name (never a predictable path) and mode 0700, under its `$TMPDIR` or `/dev/shm`. The socket's absolute path, at most 107 bytes, goes into `<Allocation directory>/relay-socket`: mode 600, written to a temporary file, then renamed. `relay` reads that file, connects, and checks that the agent's greeting names its `--allocation`. The agent accepts only a peer of its own user (`SO_PEERCRED`). A missing file, or a socket nobody answers, ends that relay as "agent not ready", which is retried.
@@ -426,6 +446,7 @@ S1's set, on both ends (open question 6):
 - **The path rate** from compute node to front is unknown, because S1c ran on loopback. S1's one-hour runs measure it, and alpha graduation needs it.
 - **ssh mode** adds ssh's own liveness, `ServerAliveInterval=10` with `ServerAliveCountMax=3`, which S1c did not test.
 - **Host-dialed mode** adds the same ssh liveness on each relay, and the relay session's yamux keepalive every 10 s with a 10 s write timeout, inside frps's 12–20 s detection of a silent path.
+- **Beta's bulk frpc,** with `tcpMux` off, has no yamux keepalive. It runs S1's application heartbeat set, so frps notices a lost bulk client about `heartbeatTimeout` (25 s) after its last ping, not in S1c's 12–20 s. A frozen work connection isn't covered, which is open (open question 12).
 
 ### Local listeners
 
@@ -577,7 +598,7 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
   - in host-dialed mode, on each alpha platform, a relay works on the partition the Instances use (HBEP-4, open question 16), Helios GH200 included.
 - **Beta:**
   - many tunnels on one front are measured (open question 11): S14 measured steady state, and the five items it leaves open are measured too;
-  - bulk endpoints run off the token tunnel (open question 12);
+  - bulk paths run on a separate frpc and a second frps, with open question 12's contract decided, built and tested;
   - in host-dialed mode, the relay keeper's tests pass, and a controller restart while serving cuts no serving stream (open question 13).
 - **Stable:** an frps and frpc version skew is tested, and end-to-end encryption is decided with HBEP-9.
 
@@ -622,7 +643,7 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
 
 - Every token makes an extra hop through the front's host.
 - The front must be reachable from every center's compute network, except in host-dialed mode, which goes through the login node instead.
-- All streams of an Instance share one connection, so a large reply delays the others (Risks).
+- All streams of an Instance share one connection, so a large reply delays the others (Risks). Beta moves a generative Instance's non-streamed replies to a separate frpc (open question 12); its token streams still share one connection.
 - New tunnels cannot log in while the lifecycle controller is down (Risks).
 
 ## Alternatives
@@ -662,6 +683,7 @@ Dial home replaces www-2027's central relays and forward watchdogs, which kept h
 | An SSH relay behind a forced-command key, with measured overhead | GWDG SAIA ([gwdg/saia-hpc](https://github.com/gwdg/saia-hpc)) | The restricted key of ssh mode; open question 3 |
 | Dial home from jobs over outbound-only connections | OpenTela with libp2p ([eth-easl/opentela](https://github.com/eth-easl/opentela)); interLink's mesh ([interlink-hq/interLink](https://github.com/interlink-hq/interLink)) | Dial home, and its alternatives |
 | Many tunnels on one front, in steady state | spike S14 (issue #313, PR #328) | Open question 11; Operational readiness 5 |
+| Bulk transfers beside token streams, and the layout that removes the stall | spike S15 (issue #336, PR #348) | Open question 12 |
 | frp's tunnel through a TLS terminator on 443, its heartbeat settings, capacity and head-of-line figures | spike S1 (issue #18) and spike S1c (PR #78), this project | Open questions 1 and 6, Heartbeats, Risks, Operational readiness 5 |
 | An end-to-end probe that keeps a flapping path out of the pool and lets it back in | www-2027's forward watchdogs | The front's probe |
 
@@ -716,6 +738,7 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - 2026-11-10: the relay keeper for beta's host-dialed mode (open question 13).
 - 2026-11-10: open question 11 partly answered by spike S14 (steady state).
 - 2026-11-10: the relay keeper's names, set fields, expiry, completeness and claim rules, from the code agent's plan (#343).
+- 2026-11-10: open question 12 answered for one transfer at a time by spike S15.
 
 ## Amendments
 
@@ -779,3 +802,12 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
   - **Two stated limits.**
 
   Before, PR #339 named neither the keeper's binary nor its opt-in, kept only undecided ends, held a claim only while relays were held, and had sets carry their listing's time. Settled in this PR's review (Astra and a fresh Opus): the agent path per Allocation, `endedForGood` from the API, decided ends kept and not reported, the claim's arbitration for unclaimed hosts only, the switch-back guard read from the state file, `superseded` scoped by stage, and tests that can fail for each rule.
+- **2026-11-10: bulk paths on a separate frpc** (Open questions 12; Risks; Dial-home modes, the wire; Graduation criteria; Drawbacks; Prior art). An amendment from spike S15 (issue #336, PR #348), from its proposed text.
+  - **The stall:** a download or a large reply on the token streams' frp session stalls them for about frp's 6 MiB stream window over the path rate.
+  - **What doesn't help:** `bandwidthLimit` doesn't prevent it, and a third relay channel isn't worth its cost.
+  - **What does:** a separate frpc with `tcpMux = false`, to a second frps reached by TLS server name, removes the stall in both modes. It's decided as the layout for a generative Instance's non-streamed replies.
+  - **Decided now:** its server name, its admission and its heartbeats.
+  - **Open, blocking beta:** the rest of its contract (the request-time rule, pools, probe and path state, failure deadlines, ports and lifecycle, listener paths, and HBEP-7 and HBEP-11 amendments).
+  - **Settled in this PR's review** (Astra and a fresh Opus): the scope, admission on the second frps, the heartbeat scoping, the contract listed as open rather than implied, and the corrected figures.
+
+  Before, open question 12 was open with two untested options.
