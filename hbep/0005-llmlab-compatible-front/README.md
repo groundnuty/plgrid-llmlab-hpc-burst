@@ -285,6 +285,8 @@ HBEP-7 runs the Instance's processes; this HBEP sets what the front needs from t
   - **The front's probe through Envoy** carries no `x-session-id`, so it reaches one worker picked at random. Until worker health behind Envoy is settled (open question 2), a passing probe doesn't show that every worker is healthy.
 - llm-d's router is the candidate for multi-node Instances (open question 2).
 
+**Beta: bulk paths on their own tunnel** (HBEP-6, open question 12, from spike S15). Embeddings, file transfers and large non-streamed replies go to the Instance's second `tcpmux` proxy, served by a separate frpc with `tcpMux = false`, through a second frps. The dial-home listener routes that frpc's websocket to the second frps by its TLS server name, and the front's transport gets a second `CONNECT` target for those paths. On the token streams' own tunnel, one 64 MiB reply stalled them by frp's stream window (S15).
+
 ### Draining
 
 Drain rule (the same text in HBEP-3, HBEP-5 and HBEP-7): The framework cannot move a lease end, so an Instance starts draining at the latest at its hard end minus the drain window, whether or not its replacement is ready. Make-before-break is the goal: the controller plans the replacement to be ready before that drain start, and the old Instance never drains before its replacement is ready unless that deadline forces it. If the replacement is late, the old Instance still drains on time, capacity drops, and an event is emitted (HBEP-8).
@@ -598,6 +600,7 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
 - 2026-11-01: amendment from the owner's decision on Helios's queues (#145): the alpha handover with no request cut is shown on Athena `plgrid-gpu-a100` (HBEP-7's amendment of the same day).
 - 2026-11-09: the dial-home listener's loopback default and passthrough in HBEP-6's host-dialed mode.
 - 2026-11-10: the router default for beta: Envoy `ring_hash` as the candidate, the patched vllm-router as the fallback, from spike S13.
+- 2026-11-10: in beta, bulk paths go to a second tunnel (HBEP-6, open question 12).
 
 ## Amendments
 
@@ -640,3 +643,4 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
 - **2026-11-09: host-dialed mode** (Listeners; the configuration table; Passthrough). An amendment with HBEP-6's of the same day, settled in PR #298's review. In host-dialed mode `dialHomeListen` defaults to loopback at base + 7 and must be loopback; control traffic arrives through the control relay at base + 3, and frpc's websocket through the serving relay. Before, the listener's rules named direct and ssh modes only.
 - **2026-11-10: the router must deliver the body as sent** (Risks; Open questions 2; Inside an Instance; Test plan; Graduation criteria; Prior art). An amendment from spike S13 (issue #312, PR #324). vllm-router 0.1.16 and 0.1.17 re-serialise the body, and none of S13's 440 variants reached a worker unchanged. Envoy's `ring_hash` proxy delivered all 440, on x86_64 and aarch64. So Envoy becomes the candidate default and a byte-forwarding vllm-router patch the fallback, with S2c deciding between them, and the beta checks compare bytes. Settled in this PR's review (Astra and a fresh Opus): Envoy's three timeouts and their defaults, its circuit breakers, the front dropping a client's `x-envoy-*` and `X-Forwarded-For`, worker health behind Envoy as open and blocking beta, planned stops apart from recovery, the fallback's conditional guarantee, and each router's HBEP-15 pin row before its code. Before, vllm-router was the provisional default and nested-field preservation was open.
 - **2026-11-10: erratum** (Operational readiness 5): the front's own limits name CPU per token and descriptors beside connections and bandwidth, as HBEP-6's open question 11 now gives them from spike S14 (PR #342). Before, the line named only open connections and bandwidth.
+- **2026-11-10: bulk paths on their own tunnel** (Inside an Instance). An amendment with HBEP-6's of the same day, from spike S15 (issue #336, PR #348). In beta, the front sends bulk paths to the Instance's second proxy, on a separate frpc and a second frps, which the dial-home listener selects by TLS server name. Before, every path shared the Instance's one tunnel.
