@@ -43,6 +43,10 @@
 // failure (a Provider-manager scheme without apps/v1, and front settings that
 // agent.json would refuse, are refused before anything starts), and 2 on a
 // usage error.
+//
+// With "relaykeeper" as its first argument the binary is the relay keeper
+// instead (relaykeeper.go; HBEP-6, The relay keeper), and none of the flags
+// above apply.
 package main
 
 import (
@@ -233,6 +237,10 @@ func run(ctx context.Context, f flags, d deps) error {
 }
 
 func main() {
+	// A subcommand runs before the controller's flags are parsed.
+	if code, ok := runSubcommand(os.Args[1:], os.Stderr); ok {
+		os.Exit(code)
+	}
 	f, err := parse(os.Args[1:], os.Stderr)
 	if errors.Is(err, flag.ErrHelp) {
 		os.Exit(0)

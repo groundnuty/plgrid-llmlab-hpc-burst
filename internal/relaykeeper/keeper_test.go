@@ -196,7 +196,6 @@ func TestAnExpiredSetStartsAndRestartsNothing(t *testing.T) {
 	if err != nil || len(jobs) != 1 || jobs[0].ID != entry(1).JobID || jobs[0].Name != entry(1).Tag || jobs[0].Phase != "Running" {
 		t.Fatalf("the unexpired set's listing: %+v, %v; want job %s running under its tag", jobs, err, entry(1).JobID)
 	}
-	w.StartFailed(agentapi.RelayControl) // the authorization, resolved
 	if jobs, err := w.Jobs.ListByTag(context.Background(), entry(2).Tag); err != nil || len(jobs) != 0 {
 		t.Errorf("the listing of a tag the set does not name: %+v, %v; want none", jobs, err)
 	}
@@ -204,7 +203,6 @@ func TestAnExpiredSetStartsAndRestartsNothing(t *testing.T) {
 	if _, err := w.Jobs.ListByTag(context.Background(), entry(1).Tag); err != nil {
 		t.Errorf("the set 1 ms before its expiry: %v", err)
 	}
-	w.StartFailed(agentapi.RelayControl)
 	r.clock.advance(time.Millisecond)
 	if _, err := w.Jobs.ListByTag(context.Background(), entry(1).Tag); err == nil {
 		t.Error("the expired set's listing still shows the job: a relay would start or restart under it")

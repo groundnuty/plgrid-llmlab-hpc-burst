@@ -48,6 +48,13 @@ type Want struct {
 	// ProviderUID is the UID of the Provider whose set made the Want: the
 	// relays started for it carry it (RelayState.ProviderUID).
 	ProviderUID string
+	// Incarnation is the Want's identity: the keeper issues a new one, never
+	// reused, whenever the entry, the Provider UID or the host changes, or the
+	// tag is dropped and wanted again, and keeps it while the same Want is
+	// re-sent. The Runner replaces an Allocation's relays exactly when it
+	// changes, and its starts pass the gate only while it is the current
+	// one's (the review of PR 356).
+	Incarnation uint64
 	// Finals names the channels that already ended for good, each with its
 	// cause as hostdial shows it ("<kind>: <cause>"), whose relays are never
 	// started (hostdial.Target.Final). The Runner calls it when it actually
@@ -63,63 +70,51 @@ type Want struct {
 	// replaced or moved relay's outstanding starts are fenced as soon as the
 	// keeper accepts the set that replaces or moves it.
 	//
-	// A listing that shows the job is one start's authorization, of one
-	// channel's relay, and it holds the Want's login host for its Provider
-	// until it resolves: no other Provider can claim the host, and no lapse
-	// takes it, while the start is in flight (the last delta review of PR
-	// 354). The Runner reads Jobs once per channel per attempt, right before
-	// the process starts, and resolves each authorization with exactly one
-	// call: OnStart once the process has started, or StartFailed when it does
-	// not start. The hold is fail-closed by design, with no deadline: an
-	// authorization never resolved holds its host until the keeper stops,
-	// past the authorizing set's expiry, the claim's lapse, a Drop, a move
-	// or a replacement. A deadline would be unsafe, since once a hold expired
-	// another Provider could claim the host while the authorized start,
-	// suspended, could still launch there
+	// The listing takes no hold; the gate does (BeforeStart, the science
+	// agent's ruling B for PR 3, which moved the hold there from PR 2's
+	// listing). A start the gate allows holds the Want's login host for its
+	// Provider, per channel, until it resolves: no other Provider can claim
+	// the host, and no lapse takes it, while the start is in flight. The
+	// hold is fail-closed by design, with no deadline: a start allowed and
+	// never resolved holds its host until the keeper stops, past the set's
+	// expiry, the claim's lapse, a Drop, a move or a replacement. A deadline
+	// would be unsafe, since once a hold expired another Provider could claim
+	// the host while the allowed start, suspended, could still launch there
 	// (TestAnUnresolvedStartHoldsItsHostPastEveryLapse pins this). The
 	// Runner's four duties (PR 3):
-	//  1. It calls StartFailed on every path between the listing and the
-	//     process start where the process does not start: a relay line, an
-	//     ssh command or a process start that fails, and a stop or Drop that
-	//     comes first. hostdial calls no hook on those paths, so PR 3 adds
-	//     one to hostdial.Target, add-only, and calls StartFailed from it.
-	//  2. It shows a started process as up in Relays BEFORE it calls
+	//  1. It asks BeforeStart right before each ssh start, after the start's
+	//     N is taken, and starts nothing on a false answer (hostdial's
+	//     Target.BeforeStart). A refused start is no start: no process, no
+	//     hold, nothing to resolve.
+	//  2. It resolves each start BeforeStart allowed exactly once: OnStart
+	//     once the process runs, StartFailed when it does not start
+	//     (hostdial's Target.OnStartFailed). A second resolution of a
+	//     channel's start would release that channel's next start's hold;
+	//     the holds are per channel, so it cannot touch the other channel's.
+	//  3. It shows a started process as up in Relays BEFORE it calls
 	//     OnStart, so the host is never unheld between the hold's release and
 	//     the process's counting (hostdial sets the relay's PID before it
 	//     calls OnStart).
-	//  3. It PREVENTS the launch of an in-flight start of a REPLACED
-	//     generation, and resolves it with StartFailed. Cancelling the
-	//     relay's context is not enough with today's hostdial start path
-	//     (owner.go, relay.once): once its listing passes, it goes on to the
-	//     relay line, the ssh command and the process start without checking
-	//     the context, and its command and start failures return with no
-	//     callback. So PR 3's hook checks for a replacement right before the
-	//     process start, and resolves there. Otherwise a late process of the
-	//     old generation gets a higher N than the current relay's and
-	//     supersedes it, and the keeper, whose record holds the current
-	//     generation's (E, N) only (OnStart), then marks the Allocation: that
-	//     fails closed, but releases a healthy Allocation.
-	//  4. It resolves each authorization exactly once, per channel. The holds
-	//     are counted per relay of an Allocation on a host, not per channel,
-	//     since a listing names no channel, so the keeper cannot tell one
-	//     channel's resolution from the other's: a duplicate resolution of
-	//     the control channel's start while the serving channel's is still in
-	//     flight would consume serving's hold, and let another Provider take
-	//     the host early. A resolution with none in flight is logged and
-	//     changes nothing.
+	//  4. It lists a replaced or dropped relay's process as up until it is
+	//     gone (hostdial's Target.OnExit), and keeps listing a replaced
+	//     relay while a start of its is in flight.
 	Jobs hostdial.JobReader
 	// OnFinal is told of each final end, with the ended process's epoch and
 	// sequence (hostdial.Target.OnFinal).
 	OnFinal func(ch agentapi.RelayChannel, kind hostdial.EndKind, cause string, epoch, seq int64)
 	// OnStart is told of each ssh start (hostdial.Target.OnStart), with the
 	// (E, N) the relay started with: the keeper's record of what it issued.
-	// It resolves that start's authorization (Jobs): the started process
-	// holds the host from then on, as a relay up in Relays, which the Runner
-	// shows before it calls OnStart (duty 2), once per authorization (duty 4).
+	// It resolves that start's hold (BeforeStart): the started process holds
+	// the host from then on, as a relay up in Relays, which the Runner shows
+	// before it calls OnStart (duty 3), once per allowed start (duty 2).
 	OnStart func(ch agentapi.RelayChannel, epoch, seq int64)
-	// StartFailed resolves an authorization (Jobs) whose process did not
-	// start, on every such path, a replaced generation's prevented start
-	// included, once per authorization (duties 1, 3 and 4); it releases the
+	// BeforeStart is the gate, asked right before each ssh start with the
+	// (E, N) the start would carry (hostdial.Target.BeforeStart, duty 1): the
+	// keeper re-checks the start's authorization under its lock and, only
+	// when it holds, takes the start's hold on its host.
+	BeforeStart func(ch agentapi.RelayChannel, epoch, seq int64) bool
+	// StartFailed resolves a start BeforeStart allowed whose process did not
+	// start (hostdial's Target.OnStartFailed), once (duty 2); it releases the
 	// host the start held, through this Want's own Provider UID and host,
 	// whatever the keeper's current set says.
 	StartFailed func(ch agentapi.RelayChannel)

@@ -77,7 +77,7 @@ func (f *fakeRunner) Want(p string, s wire.SSH, w Want) {
 	}
 	host := strings.ToLower(s.HostName)
 	tag := w.Entry.Tag
-	if in, ok := f.cur[p][tag]; ok && in.w.Entry == w.Entry && in.host == host && in.w.ProviderUID == w.ProviderUID {
+	if in, ok := f.cur[p][tag]; ok && in.w.Incarnation == w.Incarnation && in.w.Entry == w.Entry && in.host == host && in.w.ProviderUID == w.ProviderUID {
 		in.w = w // the same identity: nothing is replaced
 	} else {
 		if ok {
@@ -101,10 +101,11 @@ func (f *fakeRunner) Drop(p, tag string) {
 
 // start starts the relays of the Allocation tagged tag, as hostdial does:
 // it reads the Want's Finals, then, for each channel not seeded final, reads
-// the Want's Jobs once (the start's authorization, which holds the host) and,
-// when they list the job, launches it: the channel runs, with a new N, told
-// to OnStart, which resolves the authorization. It reports whether any
-// channel started. It is called with none of the keeper's locks held.
+// the Want's Jobs (the listing, which holds nothing), takes a new N, asks the
+// gate (Want.BeforeStart, which takes the hold) and, when it allows,
+// launches: the channel runs, told to OnStart, which resolves the hold. It
+// reports whether any channel started. It is called with none of the
+// keeper's locks held.
 func (f *fakeRunner) start(p, tag string) bool {
 	in := f.current(p, tag)
 	seeds := in.w.Finals()
@@ -116,7 +117,7 @@ func (f *fakeRunner) start(p, tag string) bool {
 		if _, final := seeds[ch]; final {
 			continue
 		}
-		if f.authorizes(in) {
+		if f.lists(in) && f.gate(in, ch) {
 			f.launch(in, ch)
 			started = true
 		}
@@ -135,42 +136,59 @@ func (f *fakeRunner) current(p, tag string) *instance {
 	return in
 }
 
-// authorizes reads in's Jobs, a start's authorization, as hostdial does
-// right before a start.
-func (f *fakeRunner) authorizes(in *instance) bool {
+// lists reads in's Jobs, as hostdial does before a start.
+func (f *fakeRunner) lists(in *instance) bool {
 	jobs, err := in.w.Jobs.ListByTag(context.Background(), in.w.Entry.Tag)
 	return err == nil && len(jobs) > 0
 }
 
-// authorize is the first half of a start with a scripted gap: it reads the
-// current instance's Jobs for one channel and returns the instance, or nil
-// when they refuse. The test then resolves it with launch or launchFails.
-func (f *fakeRunner) authorize(p, tag string) *instance {
+// gate takes in's channel's next N and asks the gate, as hostdial does right
+// before a start.
+func (f *fakeRunner) gate(in *instance, ch agentapi.RelayChannel) bool {
+	f.mu.Lock()
+	if in.seqs == nil {
+		in.seqs, in.up = map[agentapi.RelayChannel]int64{}, map[agentapi.RelayChannel]bool{}
+	}
+	f.seq++
+	seq := f.seq
+	in.seqs[ch] = seq
+	f.mu.Unlock()
+	return in.w.BeforeStart(ch, f.epoch, seq)
+}
+
+// authorize is the first half of a start of one channel with a scripted
+// gap: the listing and the gate, which takes the hold. It returns the
+// instance, or nil when either refuses. The test then resolves it with
+// launch or launchFails.
+func (f *fakeRunner) authorize(p, tag string, ch agentapi.RelayChannel) *instance {
 	in := f.current(p, tag)
-	if !f.authorizes(in) {
+	if !f.lists(in) || !f.gate(in, ch) {
 		return nil
 	}
 	return in
 }
 
-// launch starts in's channel, authorized before: its process runs, with a
-// new N, told to OnStart. The instance may have been replaced or dropped
-// meanwhile: its process then runs as a stopping one, until land.
+// listedOnly is a start that never reaches the gate: the listing passed, and
+// the attempt ended before the gate (a relay line or an ssh command that
+// failed). It holds nothing.
+func (f *fakeRunner) listedOnly(p, tag string) bool {
+	return f.lists(f.current(p, tag))
+}
+
+// launch starts in's channel, which the gate allowed: its process runs, with
+// the N the gate saw, told to OnStart. The instance may have been replaced or
+// dropped meanwhile: its process then runs as a stopping one, until land.
 func (f *fakeRunner) launch(in *instance, ch agentapi.RelayChannel) {
 	f.mu.Lock()
-	if in.seqs == nil {
-		in.seqs, in.up = map[agentapi.RelayChannel]int64{}, map[agentapi.RelayChannel]bool{}
-	}
 	in.started = true
-	f.seq++
-	seq := f.seq
-	in.seqs[ch], in.up[ch] = seq, true
+	seq := in.seqs[ch]
+	in.up[ch] = true
 	f.mu.Unlock()
 	in.w.OnStart(ch, f.epoch, seq)
 }
 
-// launchFails resolves in's channel's authorization with a process that did
-// not start.
+// launchFails resolves in's channel's hold with a process that did not
+// start.
 func (f *fakeRunner) launchFails(in *instance, ch agentapi.RelayChannel) {
 	in.w.StartFailed(ch)
 }
