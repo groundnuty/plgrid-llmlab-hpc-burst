@@ -305,6 +305,51 @@ func TestOverlongPromptIs400(t *testing.T) {
 	}
 }
 
+// A chat request's null limits are an absent field's, and an absent one is
+// the rest of the context. This is the opposite of a completions request
+// (TestCompletionNullMaxTokensIsTheDefault), as vLLM v0.32.0 has it:
+// ChatCompletionRequest declares max_tokens and max_completion_tokens as
+// `int | None` with a default of None and no validator that rewrites a null
+// (chat_completion/protocol.py:229-234); the serving layer passes
+// max_completion_tokens if it is not None, else max_tokens
+// (chat_completion/serving.py:343-347), and get_max_tokens, with no value from
+// either field, returns max_model_len - input_length
+// (serve/utils/api_utils.py:188-205). The expected limits are literals: the
+// 50-word prompt is 59 tokens (TestOverlongPromptIs400 pins the template's 9),
+// so with a context of 100 tokens 41 are left.
+func TestChatNullMaxTokensIsTheRestOfTheContext(t *testing.T) {
+	cfg := cfgFor()
+	cfg.MaxModelLen = 100
+	post, events := engineRecord(t, cfg)
+	cases := []struct {
+		name  string
+		extra map[string]any
+		want  int
+	}{
+		{"both absent", map[string]any{}, 41},
+		{"max_tokens null", map[string]any{"max_tokens": nil}, 41},
+		{"max_completion_tokens null", map[string]any{"max_completion_tokens": nil}, 41},
+		{"both null", map[string]any{"max_tokens": nil, "max_completion_tokens": nil}, 41},
+		{"max_tokens null, max_completion_tokens 8", map[string]any{"max_tokens": nil, "max_completion_tokens": 8}, 8},
+		{"max_tokens 5, max_completion_tokens null", map[string]any{"max_tokens": 5, "max_completion_tokens": nil}, 5},
+		{"max_tokens 30", map[string]any{"max_tokens": 30}, 30},
+	}
+	for _, tc := range cases {
+		if r := post("/v1/chat/completions", chatBody(50, tc.extra)); r.Code != http.StatusOK {
+			t.Fatalf("%s: HTTP %d: %s", tc.name, r.Code, r.Body)
+		}
+	}
+	got := requestEvents(events())
+	if len(got) != len(cases) {
+		t.Fatalf("%d request records, want %d", len(got), len(cases))
+	}
+	for i, tc := range cases {
+		if got[i].PromptTokens != 59 || got[i].MaxTokens != tc.want {
+			t.Errorf("%s: prompt %d tokens, limit %d; want 59, %d", tc.name, got[i].PromptTokens, got[i].MaxTokens, tc.want)
+		}
+	}
+}
+
 func TestUnknownModelIs404(t *testing.T) {
 	r := serve(t, cfgFor()).post("/v1/chat/completions", chatBody(1, map[string]any{"model": "other"}))
 	if r.status != 404 || !strings.Contains(string(r.body), "NotFoundError") {

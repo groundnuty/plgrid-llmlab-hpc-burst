@@ -153,9 +153,18 @@ func lastUserText(msgs []message) string {
 
 // maxTokensOf resolves max_tokens as vLLM does: max_completion_tokens when
 // set (a chat request's; nil for a completions request), else max_tokens
-// (chat_completion/serving.py), else what remains of the context after the
-// prompt. The error message is the double's own wording of a context-length
-// overflow: the v0.32.0 source of vLLM's text was not read.
+// (chat_completion/serving.py:343-347), else what remains of the context after
+// the prompt (get_max_tokens, serve/utils/api_utils.py:188-205). A completions
+// request always has a max_tokens here: its null is the default 16
+// (completions.go). The error message is the double's own wording of a
+// context-length overflow: the v0.32.0 source of vLLM's text was not read.
+//
+// Known difference, not changed by issue 326: when the prompt and the limit
+// each fit the context but not together, vLLM serves the request with the limit
+// clamped to what remains (get_max_tokens, api_utils.py:196-205), and refuses
+// only a prompt over the context (renderers/params.py:515-535) or a limit over
+// the whole context (params.py:256-268). The double refuses the sum, as
+// TestOverlongPromptIs400 pins.
 func (h *handler) maxTokensOf(promptLen int, maxTokens, maxCompletionTokens *int) (int, error) {
 	max := h.cfg.MaxModelLen - promptLen
 	switch {

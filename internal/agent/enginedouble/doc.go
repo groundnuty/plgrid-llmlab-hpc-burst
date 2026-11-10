@@ -47,8 +47,10 @@
 //
 // POST /v1/completions takes a prompt that is a string (any other form is a
 // 400, and so is a prompt of no tokens, as in vLLM), max_tokens, which is 16
-// when the request does not name it and the rest of the context when it is
-// null (completion/protocol.py:63), stream, stream_options.include_usage,
+// when the request does not name it and 16 when it is null too, since vLLM
+// rewrites a null to the field's default (completion/protocol.py:63 and the
+// validator normalize_null_max_tokens, :430-436; a chat request's null is the
+// rest of the context), stream, stream_options.include_usage,
 // return_token_ids, and the sampling fields of the chat path (temperature,
 // min_tokens, ignore_eos, seed, and top_p, top_k, min_p and the three
 // penalties, which are recorded and not sampled with). The key guard, the
