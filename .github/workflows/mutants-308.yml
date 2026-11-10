@@ -1,0 +1,67 @@
+# One-off, never merged: the mutants of the three guards of issue #308 (PR #309), on GitHub-hosted runners.
+# Until #308 merges, no test that starts internal/rehearsal's sshd runs on the shared development VM, and the
+# science agent ruled that its tests and mutants run on hosted runners only.
+#
+# The first step runs the rehearsal kind's tests with no mutant, -v, so each test's own PASS line is in the log.
+# hack/mutate-alpha.sh --only then takes the rehearsal kind's 17 mutants. Before the first one it runs the same
+# tests under its own command, with no mutant (its baseline), and stops with exit 2 if they fail, so every kill
+# comes with a passing baseline. Each mutant ends KILLED with the test that failed, SURVIVED or BROKEN, and the job
+# fails unless all 17 are killed. The tests start no sshd and send no signal: every send goes to a sink, and
+# their stand-ins (true, sh, cat) end on their own.
+name: mutants-308
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/mutants-308.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  mutants:
+    name: mutants 308
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          # The PR's own head, whose parent is #309's head, not the merge with main.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: The rehearsal kind's tests with no mutant
+        run: |
+          git rev-parse HEAD^ | sed 's/^/tests from /'
+          sel=$(sed -n "s/^rehearsal_tests='\(.*\)'\$/\1/p" hack/mutate-alpha.sh)
+          [ -n "$sel" ] || { echo "no rehearsal_tests in hack/mutate-alpha.sh"; exit 1; }
+          echo "selection: $sel"
+          set +e
+          go test -count=1 -v -timeout 300s -run "$sel" ./internal/rehearsal > "$RUNNER_TEMP/baseline.txt" 2>&1
+          rc=$?
+          set -e
+          grep -E -- '^(--- |ok|FAIL|panic)' "$RUNNER_TEMP/baseline.txt"
+          [ "$rc" -eq 0 ] || { tail -40 "$RUNNER_TEMP/baseline.txt"; exit 1; }
+          pass=$(grep -c '^--- PASS' "$RUNNER_TEMP/baseline.txt")
+          echo "top-level PASS: $pass, want 11"
+          [ "$pass" -eq 11 ]
+
+      - name: The rehearsal kind's mutants
+        run: |
+          set +e
+          bash hack/mutate-alpha.sh --only '^internal/rehearsal/' > "$RUNNER_TEMP/mutants.txt" 2>&1
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/mutants.txt"
+          echo "mutate-alpha exit $rc"
+          killed=$(grep -c '^KILLED' "$RUNNER_TEMP/mutants.txt" || true)
+          echo "killed $killed of 17"
+          [ "$rc" -eq 0 ] && [ "$killed" -eq 17 ]
