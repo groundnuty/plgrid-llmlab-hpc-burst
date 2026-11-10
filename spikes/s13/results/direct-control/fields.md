@@ -1,7 +1,7 @@
 # direct to the recorder (control)
 
-- Started 2026-11-10T12:15:33Z.
-- direct to the recorder (control): 432 variants; 432 arrived as their exact bytes; 0 equal once member order and whitespace are ignored; 0 differ only in re-encoded values; 0 lost or changed a value; 0 did not reach a worker.
+- Started 2026-11-10T12:49:37Z.
+- direct to the recorder (control): 440 variants; 440 arrived as their exact bytes; 0 differ only in member order and insignificant whitespace; 0 differ only in re-encoded values or keys; 0 lost or changed a value; 0 did not reach a worker.
 
 ## Fields
 
@@ -49,8 +49,7 @@ One row per field a case covers; `plain` and `stream` are the verdicts without a
 | chat/spaces_between_special_tokens | spaces_between_special_tokens | `spaces_between_special_tokens` | `false` | `false` | kept | kept |
 | chat/truncate_prompt_tokens | truncate_prompt_tokens | `truncate_prompt_tokens` | `512` | `512` | kept | kept |
 | chat/truncation_side | truncation_side | `truncation_side` | `"left"` | `"left"` | kept | kept |
-| chat/prompt_logprobs | prompt_logprobs | `prompt_logprobs` | `2` | `2` | kept | kept |
-| chat/logprob_token_ids | logprob_token_ids | `logprob_token_ids` | `[11,12]` | `[11,12]` | kept | kept |
+| chat/prompt_logprobs | prompt_logprobs | `prompt_logprobs` | `2` | `2` | kept | — |
 | chat/allowed_token_ids | allowed_token_ids | `allowed_token_ids` | `[1,2,3]` | `[1,2,3]` | kept | kept |
 | chat/bad_words | bad_words | `bad_words` | `["bad"]` | `["bad"]` | kept | kept |
 | chat/echo | echo | `echo` | `true` | `true` | kept | kept |
@@ -102,6 +101,7 @@ One row per field a case covers; `plain` and `stream` are the verdicts without a
 | chat/structured_outputs-structural_tag | structured_outputs.structural_tag | `structured_outputs.structural_tag` | `"{\"type\":\"structural_tag\",\"format\":{\"type\":\"const_string\",\"…` | `"{\"type\":\"structural_tag\",\"format\":{\"type\":\"const_string\",\"…` | kept | kept |
 | chat/logprobs-top_logprobs | logprobs | `logprobs` | `true` | `true` | kept | kept |
 | chat/logprobs-top_logprobs | top_logprobs | `top_logprobs` | `5` | `5` | kept | kept |
+| chat/logprob_token_ids | logprob_token_ids | `logprob_token_ids` | `[11,12]` | `[11,12]` | kept | kept |
 | chat/max_completion_tokens | max_completion_tokens | `max_completion_tokens` | `48` | `48` | kept | kept |
 | chat/tools | tools | `tools` | `[{"type":"function","function":{"name":"get_weather","description":"We…` | `[{"type":"function","function":{"name":"get_weather","description":"We…` | kept | kept |
 | chat/tools | tools[].type | `tools[0].type` | `"function"` | `"function"` | kept | kept |
@@ -254,8 +254,7 @@ One row per field a case covers; `plain` and `stream` are the verdicts without a
 | completions/spaces_between_special_tokens | spaces_between_special_tokens | `spaces_between_special_tokens` | `false` | `false` | kept | kept |
 | completions/truncate_prompt_tokens | truncate_prompt_tokens | `truncate_prompt_tokens` | `512` | `512` | kept | kept |
 | completions/truncation_side | truncation_side | `truncation_side` | `"left"` | `"left"` | kept | kept |
-| completions/prompt_logprobs | prompt_logprobs | `prompt_logprobs` | `2` | `2` | kept | kept |
-| completions/logprob_token_ids | logprob_token_ids | `logprob_token_ids` | `[11,12]` | `[11,12]` | kept | kept |
+| completions/prompt_logprobs | prompt_logprobs | `prompt_logprobs` | `2` | `2` | kept | — |
 | completions/allowed_token_ids | allowed_token_ids | `allowed_token_ids` | `[1,2,3]` | `[1,2,3]` | kept | kept |
 | completions/bad_words | bad_words | `bad_words` | `["bad"]` | `["bad"]` | kept | kept |
 | completions/echo | echo | `echo` | `true` | `true` | kept | kept |
@@ -306,6 +305,7 @@ One row per field a case covers; `plain` and `stream` are the verdicts without a
 | completions/structured_outputs-json_object | structured_outputs.json_object | `structured_outputs.json_object` | `true` | `true` | kept | kept |
 | completions/structured_outputs-structural_tag | structured_outputs.structural_tag | `structured_outputs.structural_tag` | `"{\"type\":\"structural_tag\",\"format\":{\"type\":\"const_string\",\"…` | `"{\"type\":\"structural_tag\",\"format\":{\"type\":\"const_string\",\"…` | kept | kept |
 | completions/logprobs | logprobs | `logprobs` | `3` | `3` | kept | kept |
+| completions/logprob_token_ids | logprob_token_ids | `logprob_token_ids` | `[11,12]` | `[11,12]` | kept | kept |
 | completions/suffix | suffix | `suffix` | `"s13-suffix"` | `"s13-suffix"` | kept | kept |
 | completions/prompt_embeds | prompt_embeds | `prompt_embeds` | `"AAAAAA=="` | `"AAAAAA=="` | kept | kept |
 | completions/max_tokens-null | max_tokens | `max_tokens` | `null` | `null` | kept | kept |
@@ -315,7 +315,13 @@ One row per field a case covers; `plain` and `stream` are the verdicts without a
 | chat/ext/content-part-cache_control | ext:messages[].content[].cache_control | `messages[0].content[0].cache_control` | `{"type":"ephemeral"}` | `{"type":"ephemeral"}` | kept | kept |
 | chat/ext/system-part-cache_control | ext:messages[](system).content[].cache_control | `messages[0].content[0].cache_control` | `{"type":"ephemeral"}` | `{"type":"ephemeral"}` | kept | kept |
 | chat/ext/assistant-reasoning_content | ext:messages[](assistant).reasoning_content | `messages[1].reasoning_content` | `"The user greets."` | `"The user greets."` | kept | kept |
-| chat/ext/harmony-message | ext:messages[](harmony) | `messages[0]` | `{"author":{"role":"user"},"content":[{"type":"text","text":"hello"}]}` | `{"author":{"role":"user"},"content":[{"type":"text","text":"hello"}]}` | kept | kept |
+| chat/msg/harmony | messages[](harmony).author | `messages[0].author` | `{"role":"user","name":"alice"}` | `{"role":"user","name":"alice"}` | kept | kept |
+| chat/msg/harmony | messages[](harmony).author.role | `messages[0].author.role` | `"user"` | `"user"` | kept | kept |
+| chat/msg/harmony | messages[](harmony).author.name | `messages[0].author.name` | `"alice"` | `"alice"` | kept | kept |
+| chat/msg/harmony | messages[](harmony).content | `messages[0].content` | `[{"type":"text","text":"hello"}]` | `[{"type":"text","text":"hello"}]` | kept | kept |
+| chat/msg/harmony | messages[](harmony).channel | `messages[0].channel` | `"final"` | `"final"` | kept | kept |
+| chat/msg/harmony | messages[](harmony).recipient | `messages[0].recipient` | `"all"` | `"all"` | kept | kept |
+| chat/msg/harmony | messages[](harmony).content_type | `messages[0].content_type` | `"text"` | `"text"` | kept | kept |
 | chat/ext/tools-function-x_ext | ext:tools[].function.x_ext | `tools[0].function.x_ext` | `{"a":1}` | `{"a":1}` | kept | kept |
 | chat/ext/tools-x_ext | ext:tools[].x_ext | `tools[0].x_ext` | `{"a":1}` | `{"a":1}` | kept | kept |
 | chat/ext/tool_calls-function-x_ext | ext:messages[].tool_calls[].function.x_ext | `messages[1].tool_calls[0].function.x_ext` | `1` | `1` | kept | kept |
@@ -347,7 +353,12 @@ One row per field a case covers; `plain` and `stream` are the verdicts without a
 | chat/enc/explicit-nulls | ext:user: null | `user` | `null` | `null` | kept | kept |
 | chat/enc/explicit-nulls | ext:seed: null | `seed` | `null` | `null` | kept | kept |
 | chat/enc/explicit-nulls | ext:tools: null | `tools` | `null` | `null` | kept | kept |
-| chat/enc/message-name-null | ext:messages[].name: null | `messages[0].name` | `null` | `null` | kept | kept |
+| chat/enc/message-name-null (invalid for vLLM) | ext:messages[].name: null | `messages[0].name` | `null` | `null` | kept | kept |
+| chat/enc/duplicate-known-field | ext:a field written twice | `temperature` | `0.3` | `0.3` | kept | kept |
+| chat/enc/duplicate-in-dict | ext:a member written twice inside a dict[str, Any] | `chat_template_kwargs` | `{"a":1,"a":2}` | `{"a":1,"a":2}` | kept | kept |
+| chat/enc/duplicate-unknown-top | ext:an unknown top-level member written twice | `x_dup` | `2` | `2` | kept | kept |
+| chat/enc/key-escaped-top | ext:a top-level key written with an escape | `temperature` | `0.3` | `0.3` | kept | kept |
+| chat/enc/key-escaped-nested | ext:a key inside a dict[str, Any] written with an escape | `chat_template_kwargs.a` | `1` | `1` | kept | kept |
 | chat/enc/string-escapes | ext:string escapes (an escaped e-acute, a surrogate pair, an escaped slash, a control character) | `messages[0].content` | `"caf\u00e9 \ud83d\ude00 \/ <&> \u0001 \t"` | `"caf\u00e9 \ud83d\ude00 \/ <&> \u0001 \t"` | kept | kept |
 | completions/enc/string-escapes | ext:string escapes (an escaped e-acute, a surrogate pair, an escaped slash, a control character) | `prompt` | `"caf\u00e9 \ud83d\ude00 \/ <&> \u0001 \t"` | `"caf\u00e9 \ud83d\ude00 \/ <&> \u0001 \t"` | kept | kept |
 | chat/real/agent-turn | ext:agent turn: tools[].function.strict | `tools[0].function.strict` | `true` | `true` | — | kept |

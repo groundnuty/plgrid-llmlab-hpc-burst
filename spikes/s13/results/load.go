@@ -21,6 +21,8 @@ type Variant struct {
 	Stream    bool   `json:"stream"`
 	Status    int    `json:"status"`
 	Arrivals  int    `json:"arrivals"`
+	Worker    string `json:"worker"`
+	Invalid   string `json:"invalid_for_vllm"`
 	Response  string `json:"router_response"`
 	Sent      string `json:"sent"`
 	Received  string `json:"received"` // empty when the bytes were the bytes sent

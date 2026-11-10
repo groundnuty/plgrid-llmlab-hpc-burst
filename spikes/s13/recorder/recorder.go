@@ -101,6 +101,11 @@ func respond(w http.ResponseWriter, req *http.Request, body []byte) {
 		w.WriteHeader(http.StatusOK)
 	case req.Method == http.MethodGet && req.URL.Path == "/v1/models":
 		writeJSON(w, `{"object":"list","data":[{"id":"`+Model+`","object":"model","created":0,"owned_by":"vllm","root":"`+Model+`","parent":null,"max_model_len":8192}]}`)
+	case req.Method == http.MethodGet && req.URL.Path == "/metrics":
+		// The gauges llm-d's EPP scrapes (llm-d-router v1.0.0, pkg/epp/server/options.go), idle and
+		// with room, in vLLM v0.32.0's text format, so that the EPP keeps both workers as candidates.
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		_, _ = io.WriteString(w, metricsText)
 	case req.Method == http.MethodGet && req.URL.Path == "/version":
 		writeJSON(w, `{"version":"0.32.0"}`)
 	case req.Method == http.MethodPost && (req.URL.Path == "/v1/chat/completions" || req.URL.Path == "/v1/completions"):
@@ -130,6 +135,20 @@ func respond(w http.ResponseWriter, req *http.Request, body []byte) {
 		http.NotFound(w, req)
 	}
 }
+
+const metricsText = `# HELP vllm:num_requests_running Number of requests in model execution batches.
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{engine="0",model_name="` + Model + `"} 0.0
+# HELP vllm:num_requests_waiting Number of requests waiting to be processed.
+# TYPE vllm:num_requests_waiting gauge
+vllm:num_requests_waiting{engine="0",model_name="` + Model + `"} 0.0
+# HELP vllm:kv_cache_usage_perc KV-cache usage. 1 means 100 percent usage.
+# TYPE vllm:kv_cache_usage_perc gauge
+vllm:kv_cache_usage_perc{engine="0",model_name="` + Model + `"} 0.0
+# HELP vllm:cache_config_info Information of the LLMEngine CacheConfig
+# TYPE vllm:cache_config_info gauge
+vllm:cache_config_info{block_size="16",engine="0",num_gpu_blocks="4096"} 1.0
+`
 
 func stream(w http.ResponseWriter, chat, usage bool) {
 	w.Header().Set("Content-Type", "text/event-stream")

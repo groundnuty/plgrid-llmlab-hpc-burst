@@ -93,7 +93,17 @@ func TestVerdicts(t *testing.T) {
 			[]Diff{{Path: "m[0].x_ext", Verdict: Dropped, Sent: `{"a":1}`}}},
 		{"dropped array element", `{"stop":["a","b"]}`, `{"stop":["a"]}`,
 			[]Diff{{Path: "stop[1]", Verdict: Dropped, Sent: `"b"`}}},
-		{"duplicate key, last wins", `{"a":1,"a":2}`, `{"a":2}`, nil},
+		{"duplicate removed, last kept", `{"a":1,"a":2}`, `{"a":2}`,
+			[]Diff{{Path: "a", Verdict: DuplicateRemoved, Sent: `"a":1,"a":2`, Received: `"a":2`}}},
+		{"duplicate removed, first kept", `{"a":1,"a":2}`, `{"a":1}`,
+			[]Diff{{Path: "a", Verdict: DuplicateRemoved, Sent: `"a":1,"a":2`, Received: `"a":1`},
+				{Path: "a", Verdict: Changed, Sent: "2", Received: "1"}}},
+		{"duplicate added", `{"a":2}`, `{"a":1,"a":2}`,
+			[]Diff{{Path: "a", Verdict: DuplicateAdded, Sent: `"a":2`, Received: `"a":1,"a":2`}}},
+		{"nested key re-escaped", `{"x":{"` + bs + `u0061":1}}`, `{"x":{"a":1}}`,
+			[]Diff{{Path: "x.a", Verdict: KeyReencoded, Sent: `"` + bs + `u0061"`, Received: `"a"`}}},
+		{"top-level key re-escaped, value kept", `{"` + bs + `u0074emperature":0.3}`, `{"temperature":0.3}`,
+			[]Diff{{Path: "temperature", Verdict: KeyReencoded, Sent: `"` + bs + `u0074emperature"`, Received: `"temperature"`}}},
 	}
 	for _, c := range cases {
 		got := Compare(mustParse(t, c.sent), mustParse(t, c.recv))

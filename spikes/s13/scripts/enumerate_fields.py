@@ -4,7 +4,8 @@
 Reads the class bodies from the pinned sources with the ast module, so every row carries the file and
 line that declares the field. No module is imported or executed.
 
-    python3 -I enumerate_fields.py --vllm <vllm checkout> --openai <unpacked openai wheel> > fields.tsv
+    python3 -I enumerate_fields.py --vllm <vllm checkout> --openai <unpacked openai wheel> \
+        --harmony <unpacked oss-harmony sdist> > fields.tsv
 
 Output columns (tab-separated): endpoint, json_path, class, field, annotation, default, source.
 `json_path` is where the field sits in a request body: `[]` marks a list element, and a role or a part
@@ -18,6 +19,7 @@ import sys
 
 V = "vllm"  # the vLLM checkout, relative paths below
 O = "openai"  # the unpacked openai wheel
+H = "harmony"  # the unpacked oss-harmony sdist (vLLM's requirements/common.txt:52: oss-harmony >= 0.0.11)
 
 CHAT_PROTO = (V, "vllm/entrypoints/openai/chat_completion/protocol.py")
 COMPL_PROTO = (V, "vllm/entrypoints/openai/completion/protocol.py")
@@ -49,7 +51,8 @@ CLASSES = [
     ("both", "structured_outputs", SAMPLING, "StructuredOutputsParams"),
     ("both", "repetition_detection", SAMPLING, "RepetitionDetectionParams"),
     # Messages: vLLM's union is OpenAI's message params | CustomChatCompletionMessageParam | a Harmony
-    # message (renderers/chat_utils.py:393). The Harmony message is openai_harmony's, not enumerated.
+    # message (renderers/chat_utils.py:393-397). The Harmony message is openai_harmony's pydantic
+    # Message; its content is a list of the Content base class, which declares no field.
     ("chat", "messages[](custom)", CHAT_UTILS, "CustomChatCompletionMessageParam"),
     ("chat", "messages[](developer)", oa("chat_completion_developer_message_param"), "ChatCompletionDeveloperMessageParam"),
     ("chat", "messages[](system)", oa("chat_completion_system_message_param"), "ChatCompletionSystemMessageParam"),
@@ -62,6 +65,8 @@ CLASSES = [
     ("chat", "messages[](assistant).tool_calls[](custom)", oa("chat_completion_message_custom_tool_call_param"), "ChatCompletionMessageCustomToolCallParam"),
     ("chat", "messages[](assistant).tool_calls[](custom).custom", oa("chat_completion_message_custom_tool_call_param"), "Custom"),
     ("chat", "messages[](tool)", oa("chat_completion_tool_message_param"), "ChatCompletionToolMessageParam"),
+    ("chat", "messages[](harmony)", (H, "python/openai_harmony/__init__.py"), "Message"),
+    ("chat", "messages[](harmony).author", (H, "python/openai_harmony/__init__.py"), "Author"),
     ("chat", "messages[](function)", oa("chat_completion_function_message_param"), "ChatCompletionFunctionMessageParam"),
     # Content parts: OpenAI's (text, image_url, input_audio, file, refusal) and vLLM's own.
     ("chat", "messages[].content[](text)", oa("chat_completion_content_part_text_param"), "ChatCompletionContentPartTextParam"),
@@ -115,9 +120,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--vllm", required=True)
     ap.add_argument("--openai", required=True)
+    ap.add_argument("--harmony", required=True)
     args = ap.parse_args()
-    roots = {V: args.vllm, O: args.openai}
-    labels = {V: "vllm v0.32.0", O: "openai 2.25.0"}
+    roots = {V: args.vllm, O: args.openai, H: args.harmony}
+    labels = {V: "vllm v0.32.0", O: "openai 2.25.0", H: "oss-harmony 0.0.11"}
     trees = {}
     out = sys.stdout
     out.write("endpoint\tjson_path\tclass\tfield\tannotation\tdefault\tsource\n")

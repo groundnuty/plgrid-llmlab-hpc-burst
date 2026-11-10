@@ -35,6 +35,9 @@ type Case struct {
 	// opening brace), "only" (the body streams already), or "never" (the body sets stream itself).
 	Stream string
 	Note   string
+	// Invalid, when set, says why vLLM v0.32.0 refuses this request: the case is sent on purpose, to
+	// see what a router does with it, and covers no field.
+	Invalid string
 }
 
 // Variant is one body as sent: a case, streamed or not.
@@ -43,6 +46,9 @@ type Variant struct {
 	Stream bool
 	Body   []byte
 }
+
+// Valid reports whether vLLM v0.32.0's request validators accept the variant.
+func (v Variant) Valid() bool { return v.Case.Invalid == "" }
 
 // Key names a variant in the recorder's header and in the results.
 func (v Variant) Key() string {
@@ -136,8 +142,9 @@ var sharedFields = []shared{
 	{"spaces_between_special_tokens", `"spaces_between_special_tokens":false`, top("spaces_between_special_tokens"), ""},
 	{"truncate_prompt_tokens", `"truncate_prompt_tokens":512`, top("truncate_prompt_tokens"), ""},
 	{"truncation_side", `"truncation_side":"left"`, top("truncation_side"), ""},
-	{"prompt_logprobs", `"prompt_logprobs":2`, top("prompt_logprobs"), ""},
-	{"logprob_token_ids", `"logprob_token_ids":[11,12]`, top("logprob_token_ids"), ""},
+	// vLLM refuses prompt_logprobs above 0 with stream (chat_completion/protocol.py:863-867,
+	// completion/protocol.py:553-557), so the case is sent plain only.
+	{"prompt_logprobs", `"prompt_logprobs":2`, top("prompt_logprobs"), "never"},
 	{"allowed_token_ids", `"allowed_token_ids":[1,2,3]`, top("allowed_token_ids"), ""},
 	{"bad_words", `"bad_words":["bad"]`, top("bad_words"), ""},
 	{"echo", `"echo":true`, top("echo"), ""},
@@ -300,6 +307,8 @@ var messages = []msg{
 // chatOnly are chat fields that completions does not have.
 var chatOnly = []shared{
 	{"logprobs-top_logprobs", `"logprobs":true,"top_logprobs":5`, top("logprobs", "top_logprobs"), ""},
+	// logprob_token_ids needs logprobs true (chat_completion/protocol.py:845-849).
+	{"logprob_token_ids", `"logprobs":true,"logprob_token_ids":[11,12]`, top("logprob_token_ids"), ""},
 	{"max_completion_tokens", `"max_completion_tokens":48`, top("max_completion_tokens"), ""},
 	{"tools", `"tools":[` + tool + `]`,
 		at("tools", "tools", "tools[].type", "tools[0].type", "tools[].function", "tools[0].function", "tools[].function.name", "tools[0].function.name",
@@ -332,6 +341,8 @@ var chatOnly = []shared{
 // complOnly are completions fields that chat does not have, and prompt forms.
 var complOnly = []shared{
 	{"logprobs", `"logprobs":3`, top("logprobs"), ""},
+	// logprob_token_ids needs logprobs set (completion/protocol.py:534-538).
+	{"logprob_token_ids", `"logprobs":1,"logprob_token_ids":[11,12]`, top("logprob_token_ids"), ""},
 	{"suffix", `"suffix":"s13-suffix"`, top("suffix"), ""},
 	{"prompt_embeds", `"prompt_embeds":"AAAAAA=="`, top("prompt_embeds"), ""},
 	{"max_tokens-null", `"max_tokens":null`, top("max_tokens"), ""},
@@ -348,8 +359,12 @@ var extensions = []Case{
 		Covers: at("ext:messages[](system).content[].cache_control", "messages[0].content[0].cache_control")},
 	{ID: "ext/assistant-reasoning_content", Endpoint: Chat, Body: msgBody(user + `,{"role":"assistant","content":"Hi.","reasoning_content":"The user greets."},` + user),
 		Covers: at("ext:messages[](assistant).reasoning_content", "messages[1].reasoning_content"), Note: "vLLM's earlier name for reasoning"},
-	{ID: "ext/harmony-message", Endpoint: Chat, Body: msgBody(`{"author":{"role":"user"},"content":[{"type":"text","text":"hello"}]}`),
-		Covers: at("ext:messages[](harmony)", "messages[0]"), Note: "openai_harmony's Message, the third member of vLLM's message union (renderers/chat_utils.py:393-397); it has no role key"},
+	{ID: "msg/harmony", Endpoint: Chat, Body: msgBody(`{"author":{"role":"user","name":"alice"},"content":[{"type":"text","text":"hello"}],"channel":"final","recipient":"all","content_type":"text"}`),
+		Covers: at("messages[](harmony).author", "messages[0].author", "messages[](harmony).author.role", "messages[0].author.role",
+			"messages[](harmony).author.name", "messages[0].author.name", "messages[](harmony).content", "messages[0].content",
+			"messages[](harmony).channel", "messages[0].channel", "messages[](harmony).recipient", "messages[0].recipient",
+			"messages[](harmony).content_type", "messages[0].content_type"),
+		Note: "openai_harmony's Message, the third member of vLLM's message union (renderers/chat_utils.py:393-397); it has no role key"},
 	{ID: "ext/tools-function-x_ext", Endpoint: Chat, Body: chatBody(`"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"},"x_ext":{"a":1}}}]`),
 		Covers: at("ext:tools[].function.x_ext", "tools[0].function.x_ext")},
 	{ID: "ext/tools-x_ext", Endpoint: Chat, Body: chatBody(`"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}},"x_ext":{"a":1}}]`),
@@ -392,7 +407,12 @@ var encodings = []Case{
 		Covers: at("ext:numbers inside a dict[str, Any]", "chat_template_kwargs")},
 	{ID: "enc/explicit-nulls", Endpoint: Chat, Body: chatBody(`"max_tokens":null,"temperature":null,"stop":null,"user":null,"seed":null,"tools":null`),
 		Covers: at("ext:max_tokens: null", "max_tokens", "ext:temperature: null", "temperature", "ext:stop: null", "stop", "ext:user: null", "user", "ext:seed: null", "seed", "ext:tools: null", "tools")},
-	{ID: "enc/message-name-null", Endpoint: Chat, Body: msgBody(`{"role":"user","content":"hello","name":null}`), Covers: at("ext:messages[].name: null", "messages[0].name")},
+	{ID: "enc/message-name-null", Endpoint: Chat, Body: msgBody(`{"role":"user","content":"hello","name":null}`), Covers: at("ext:messages[].name: null", "messages[0].name"),
+		Invalid: "every message type in vLLM's union declares name as a string (fields/vllm-v0.32.0.tsv: messages[](user).name, messages[](custom).name), and a Harmony message needs author"},
+	// Duplicate members: Python's json module, which vLLM reads with, keeps the last.
+	{ID: "enc/duplicate-known-field", Endpoint: Chat, Body: chatBody(`"temperature":0.1,"temperature":0.3`), Covers: at("ext:a field written twice", "temperature")},
+	{ID: "enc/duplicate-in-dict", Endpoint: Chat, Body: chatBody(`"chat_template_kwargs":{"a":1,"a":2}`), Covers: at("ext:a member written twice inside a dict[str, Any]", "chat_template_kwargs")},
+	{ID: "enc/duplicate-unknown-top", Endpoint: Chat, Body: chatBody(`"x_dup":1,"x_dup":2`), Covers: at("ext:an unknown top-level member written twice", "x_dup")},
 }
 
 // escapeCase is built at run time from a backslash, so the source holds no escape sequence an
@@ -401,6 +421,10 @@ func escapeCases() []Case {
 	b := string(rune(92))
 	content := `"caf` + b + `u00e9 ` + b + `ud83d` + b + `ude00 ` + b + `/ <&> ` + b + `u0001 ` + b + `t"`
 	return []Case{
+		{ID: "enc/key-escaped-top", Endpoint: Chat, Body: chatBody(`"` + b + `u0074emperature":0.3`),
+			Covers: at("ext:a top-level key written with an escape", "temperature")},
+		{ID: "enc/key-escaped-nested", Endpoint: Chat, Body: chatBody(`"chat_template_kwargs":{"` + b + `u0061":1}`),
+			Covers: at("ext:a key inside a dict[str, Any] written with an escape", "chat_template_kwargs.a")},
 		{ID: "enc/string-escapes", Endpoint: Chat, Body: msgBody(`{"role":"user","content":` + content + `}`),
 			Covers: at("ext:string escapes (an escaped e-acute, a surrogate pair, an escaped slash, a control character)", "messages[0].content")},
 		{ID: "enc/string-escapes", Endpoint: Completions, Body: `{` + model + `,"prompt":` + content + `}`,
@@ -436,9 +460,15 @@ var minimal = []Case{
 // notes explain the cases whose reason is not their name.
 var notes = map[string]string{
 	"chat/reasoning_effort-max":     "a vLLM value outside OpenAI's set (chat_completion/protocol.py:252-263)",
-	"completions/prompt_embeds":     "bytes, sent as base64 text",
-	"completions/max_tokens-null":   "vLLM: null is the rest of the context, absent is 16 (completion/protocol.py:63)",
+	"completions/prompt_embeds":     "bytes, sent as base64 text; a valid request that vLLM serves only with --enable-prompt-embeds (renderers/base.py:973-975) and a serialised tensor",
+	"completions/max_tokens-null":   "vLLM turns an explicit null into the default, 16 (completion/protocol.py:430-436): dropping it changes the bytes, not the limit",
 	"chat/msg/system-array-content": "upstream vllm-project/router issue 201",
+	"chat/chat_template":            "a valid request that vLLM serves only with --trust-request-chat-template (renderers/online_renderer.py:685-695)",
+	"chat/mm_processor_kwargs":      "a valid request that vLLM serves only when it trusts per-request multimodal kwargs (generate/base/protocol.py:72-95)",
+	"chat/media_io_kwargs":          "a valid request that vLLM serves only when it trusts per-request multimodal kwargs (generate/base/protocol.py:72-95)",
+	"chat/priority":                 "a valid request; a priority other than 0 needs priority scheduling (chat_completion/protocol.py:388-397)",
+	"completions/priority":          "a valid request; a priority other than 0 needs priority scheduling",
+	"completions/suffix":            "a valid request; only models with fill-in-the-middle rendering serve it (completion/serving.py:119)",
 }
 
 // special are chat cases that need more than one message.

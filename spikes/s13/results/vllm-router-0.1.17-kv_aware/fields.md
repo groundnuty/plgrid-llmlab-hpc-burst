@@ -2,9 +2,9 @@
 
 - Router: `venv-0.1.17/bin/vllm-router`, `--policy kv_aware`, two workers.
 - Router listeners: 127.0.0.1:29903, 127.0.0.1:29902. Stop: exited after TERM: <nil>.
-- Started 2026-11-10T12:04:59Z.
-- vllm-router 0.1.17, kv_aware: 432 variants; 143 arrived as their exact bytes; 0 equal once member order and whitespace are ignored; 0 differ only in re-encoded values; 281 lost or changed a value; 8 did not reach a worker.
-- Requests the router made to the workers besides the cases: GET /get_server_info (case none) x2; GET /health (case none) x4; GET /kv_event_sources (case none) x2; POST /tokenize (case none) x644; POST /v1/chat/completions (case warm-up) x1; POST /v1/chat/completions/render (case none) x500; POST /v1/completions/render (case none) x274.
+- Started 2026-11-10T12:49:44Z.
+- vllm-router 0.1.17, kv_aware: 440 variants; 142 arrived as their exact bytes; 0 differ only in member order and insignificant whitespace; 0 differ only in re-encoded values or keys; 288 lost or changed a value; 10 did not reach a worker.
+- Requests the router made to the workers besides the cases: GET /get_server_info (case none) x2; GET /health (case none) x4; GET /kv_event_sources (case none) x2; POST /tokenize (case none) x656; POST /v1/chat/completions (case warm-up) x1; POST /v1/chat/completions/render (case none) x514; POST /v1/completions/render (case none) x272.
 
 ## Fields
 
@@ -52,8 +52,7 @@ One row per field a case covers; `plain` and `stream` are the verdicts without a
 | chat/spaces_between_special_tokens | spaces_between_special_tokens | `spaces_between_special_tokens` | `false` | `false` | kept | kept |
 | chat/truncate_prompt_tokens | truncate_prompt_tokens | `truncate_prompt_tokens` | `512` | `512` | kept | kept |
 | chat/truncation_side | truncation_side | `truncation_side` | `"left"` | `"left"` | kept | kept |
-| chat/prompt_logprobs | prompt_logprobs | `prompt_logprobs` | `2` | `2` | kept | kept |
-| chat/logprob_token_ids | logprob_token_ids | `logprob_token_ids` | `[11,12]` | `[11,12]` | kept | kept |
+| chat/prompt_logprobs | prompt_logprobs | `prompt_logprobs` | `2` | `2` | kept | — |
 | chat/allowed_token_ids | allowed_token_ids | `allowed_token_ids` | `[1,2,3]` | `[1,2,3]` | kept | kept |
 | chat/bad_words | bad_words | `bad_words` | `["bad"]` | `["bad"]` | kept | kept |
 | chat/echo | echo | `echo` | `true` | `true` | kept | kept |
@@ -105,6 +104,7 @@ One row per field a case covers; `plain` and `stream` are the verdicts without a
 | chat/structured_outputs-structural_tag | structured_outputs.structural_tag | `structured_outputs.structural_tag` | `"{\"type\":\"structural_tag\",\"format\":{\"type\":\"const_string\",\"…` | `"{\"type\":\"structural_tag\",\"format\":{\"type\":\"const_string\",\"…` | kept | kept |
 | chat/logprobs-top_logprobs | logprobs | `logprobs` | `true` | `true` | kept | kept |
 | chat/logprobs-top_logprobs | top_logprobs | `top_logprobs` | `5` | `5` | kept | kept |
+| chat/logprob_token_ids | logprob_token_ids | `logprob_token_ids` | `[11,12]` | `[11,12]` | kept | kept |
 | chat/max_completion_tokens | max_completion_tokens | `max_completion_tokens` | `48` | `48` | kept | kept |
 | chat/tools | tools | `tools` | `[{"type":"function","function":{"name":"get_weather","description":"We…` | `[{"type":"function","function":{"name":"get_weather","description":"We…` | kept | kept |
 | chat/tools | tools[].type | `tools[0].type` | `"function"` | `"function"` | kept | kept |
@@ -257,8 +257,7 @@ One row per field a case covers; `plain` and `stream` are the verdicts without a
 | completions/spaces_between_special_tokens | spaces_between_special_tokens | `spaces_between_special_tokens` | `false` | `false` | kept | kept |
 | completions/truncate_prompt_tokens | truncate_prompt_tokens | `truncate_prompt_tokens` | `512` | `512` | kept | kept |
 | completions/truncation_side | truncation_side | `truncation_side` | `"left"` | `"left"` | kept | kept |
-| completions/prompt_logprobs | prompt_logprobs | `prompt_logprobs` | `2` | `2` | kept | kept |
-| completions/logprob_token_ids | logprob_token_ids | `logprob_token_ids` | `[11,12]` | `[11,12]` | kept | kept |
+| completions/prompt_logprobs | prompt_logprobs | `prompt_logprobs` | `2` | `2` | kept | — |
 | completions/allowed_token_ids | allowed_token_ids | `allowed_token_ids` | `[1,2,3]` | `[1,2,3]` | kept | kept |
 | completions/bad_words | bad_words | `bad_words` | `["bad"]` | `["bad"]` | kept | kept |
 | completions/echo | echo | `echo` | `true` | `true` | kept | kept |
@@ -309,6 +308,7 @@ One row per field a case covers; `plain` and `stream` are the verdicts without a
 | completions/structured_outputs-json_object | structured_outputs.json_object | `structured_outputs.json_object` | `true` | `true` | kept | kept |
 | completions/structured_outputs-structural_tag | structured_outputs.structural_tag | `structured_outputs.structural_tag` | `"{\"type\":\"structural_tag\",\"format\":{\"type\":\"const_string\",\"…` | `"{\"type\":\"structural_tag\",\"format\":{\"type\":\"const_string\",\"…` | kept | kept |
 | completions/logprobs | logprobs | `logprobs` | `3` | `3` | kept | kept |
+| completions/logprob_token_ids | logprob_token_ids | `logprob_token_ids` | `[11,12]` | `[11,12]` | kept | kept |
 | completions/suffix | suffix | `suffix` | `"s13-suffix"` | `"s13-suffix"` | kept | kept |
 | completions/prompt_embeds | prompt_embeds | `prompt_embeds` | `"AAAAAA=="` | `"AAAAAA=="` | kept | kept |
 | completions/max_tokens-null | max_tokens | `max_tokens` | `null` | `null` | kept | kept |
@@ -318,7 +318,13 @@ One row per field a case covers; `plain` and `stream` are the verdicts without a
 | chat/ext/content-part-cache_control | ext:messages[].content[].cache_control | `messages[0].content[0].cache_control` | `{"type":"ephemeral"}` | `{"type":"ephemeral"}` | kept | kept |
 | chat/ext/system-part-cache_control | ext:messages[](system).content[].cache_control | `messages[0].content[0].cache_control` | `{"type":"ephemeral"}` | `{"type":"ephemeral"}` | kept | kept |
 | chat/ext/assistant-reasoning_content | ext:messages[](assistant).reasoning_content | `messages[1].reasoning_content` | `"The user greets."` | `messages[1].reasoning: "The user greets."` | renamed | renamed |
-| chat/ext/harmony-message | ext:messages[](harmony) | `messages[0]` | `{"author":{"role":"user"},"content":[{"type":"text","text":"hello"}]}` | — | refused | refused |
+| chat/msg/harmony | messages[](harmony).author | `messages[0].author` | `{"role":"user","name":"alice"}` | — | refused | refused |
+| chat/msg/harmony | messages[](harmony).author.role | `messages[0].author.role` | `"user"` | — | refused | refused |
+| chat/msg/harmony | messages[](harmony).author.name | `messages[0].author.name` | `"alice"` | — | refused | refused |
+| chat/msg/harmony | messages[](harmony).content | `messages[0].content` | `[{"type":"text","text":"hello"}]` | — | refused | refused |
+| chat/msg/harmony | messages[](harmony).channel | `messages[0].channel` | `"final"` | — | refused | refused |
+| chat/msg/harmony | messages[](harmony).recipient | `messages[0].recipient` | `"all"` | — | refused | refused |
+| chat/msg/harmony | messages[](harmony).content_type | `messages[0].content_type` | `"text"` | — | refused | refused |
 | chat/ext/tools-function-x_ext | ext:tools[].function.x_ext | `tools[0].function.x_ext` | `{"a":1}` | — | dropped | dropped |
 | chat/ext/tools-x_ext | ext:tools[].x_ext | `tools[0].x_ext` | `{"a":1}` | — | dropped | dropped |
 | chat/ext/tool_calls-function-x_ext | ext:messages[].tool_calls[].function.x_ext | `messages[1].tool_calls[0].function.x_ext` | `1` | — | dropped | dropped |
@@ -343,14 +349,19 @@ One row per field a case covers; `plain` and `stream` are the verdicts without a
 | chat/enc/top_p-exponent | ext:top_p in exponent form | `top_p` | `9e-1` | `0.9` | kept, re-encoded | kept, re-encoded |
 | chat/enc/temperature-20-digits | ext:a float beyond float64 precision | `temperature` | `0.12345678901234567890` | `0.12345679` | changed | changed |
 | chat/enc/repetition_penalty-1.0 | ext:a float with a zero fraction | `repetition_penalty` | `1.0` | `1.0` | kept | kept |
-| chat/enc/kwargs-numbers | ext:numbers inside a dict[str, Any] | `chat_template_kwargs` | `{"big":123456789012345678901234567890,"u64":18446744073709551615,"i":1…` | `{"f":1.0,"neg":-0.0,"u64":18446744073709551615,"big":1.234567890123456…` | changed | changed |
+| chat/enc/kwargs-numbers | ext:numbers inside a dict[str, Any] | `chat_template_kwargs` | `{"big":123456789012345678901234567890,"u64":18446744073709551615,"i":1…` | `{"i":1,"u64":18446744073709551615,"f":1.0,"big":1.2345678901234568e+29…` | changed | changed |
 | chat/enc/explicit-nulls | ext:max_tokens: null | `max_tokens` | `null` | — | dropped | dropped |
 | chat/enc/explicit-nulls | ext:temperature: null | `temperature` | `null` | — | dropped | dropped |
 | chat/enc/explicit-nulls | ext:stop: null | `stop` | `null` | — | dropped | dropped |
 | chat/enc/explicit-nulls | ext:user: null | `user` | `null` | — | dropped | dropped |
 | chat/enc/explicit-nulls | ext:seed: null | `seed` | `null` | — | dropped | dropped |
 | chat/enc/explicit-nulls | ext:tools: null | `tools` | `null` | — | dropped | dropped |
-| chat/enc/message-name-null | ext:messages[].name: null | `messages[0].name` | `null` | — | dropped | dropped |
+| chat/enc/message-name-null (invalid for vLLM) | ext:messages[].name: null | `messages[0].name` | `null` | — | dropped | dropped |
+| chat/enc/duplicate-known-field | ext:a field written twice | `temperature` | `0.3` | — | refused | refused |
+| chat/enc/duplicate-in-dict | ext:a member written twice inside a dict[str, Any] | `chat_template_kwargs` | `{"a":1,"a":2}` | `{"a":2}` | duplicate removed | duplicate removed |
+| chat/enc/duplicate-unknown-top | ext:an unknown top-level member written twice | `x_dup` | `2` | `2` | duplicate removed | duplicate removed |
+| chat/enc/key-escaped-top | ext:a top-level key written with an escape | `temperature` | `0.3` | `0.3` | key re-escaped | key re-escaped |
+| chat/enc/key-escaped-nested | ext:a key inside a dict[str, Any] written with an escape | `chat_template_kwargs.a` | `1` | `1` | key re-escaped | key re-escaped |
 | chat/enc/string-escapes | ext:string escapes (an escaped e-acute, a surrogate pair, an escaped slash, a control character) | `messages[0].content` | `"caf\u00e9 \ud83d\ude00 \/ <&> \u0001 \t"` | `"café 😀 / <&> \u0001 \t"` | kept, re-encoded | kept, re-encoded |
 | completions/enc/string-escapes | ext:string escapes (an escaped e-acute, a surrogate pair, an escaped slash, a control character) | `prompt` | `"caf\u00e9 \ud83d\ude00 \/ <&> \u0001 \t"` | `"caf\u00e9 \ud83d\ude00 \/ <&> \u0001 \t"` | kept | kept |
 | chat/real/agent-turn | ext:agent turn: tools[].function.strict | `tools[0].function.strict` | `true` | — | — | dropped |
@@ -364,16 +375,16 @@ Values present at the worker and absent from the body sent, by path and value.
 
 | path | value | variants | first case |
 |---|---|---|---|
-| `stream` | `false` | 138 | chat/minimal#plain |
-| `logprobs` | `false` | 279 | chat/minimal#plain |
-| `no_stop_trim` | `false` | 281 | chat/minimal#plain |
-| `ignore_eos` | `false` | 279 | chat/minimal#plain |
-| `continue_final_message` | `false` | 279 | chat/minimal#plain |
-| `skip_special_tokens` | `true` | 279 | chat/minimal#plain |
-| `separate_reasoning` | `true` | 281 | chat/minimal#plain |
-| `stream_reasoning` | `true` | 281 | chat/minimal#plain |
-| `return_hidden_states` | `false` | 281 | chat/minimal#plain |
-| `include_reasoning` | `true` | 279 | chat/minimal#plain |
+| `stream` | `false` | 142 | chat/minimal#plain |
+| `logprobs` | `false` | 284 | chat/minimal#plain |
+| `no_stop_trim` | `false` | 288 | chat/minimal#plain |
+| `ignore_eos` | `false` | 286 | chat/minimal#plain |
+| `continue_final_message` | `false` | 286 | chat/minimal#plain |
+| `skip_special_tokens` | `true` | 286 | chat/minimal#plain |
+| `separate_reasoning` | `true` | 288 | chat/minimal#plain |
+| `stream_reasoning` | `true` | 288 | chat/minimal#plain |
+| `return_hidden_states` | `false` | 288 | chat/minimal#plain |
+| `include_reasoning` | `true` | 286 | chat/minimal#plain |
 
 ## Other differences
 
@@ -403,5 +414,7 @@ Diffs outside every covered field and not injected.
 | chat/response_format-structural_tag-legacy#stream | 422 | `Failed to deserialize the JSON body into the target type: response_format.type: unknown variant 'structural_tag', expected one of 'text', 'json_object', 'json_schema' at line 1 column 124` |
 | chat/tools-no-parameters#plain | 422 | `Failed to deserialize the JSON body into the target type: tools[0].function: missing field 'parameters' at line 1 column 126` |
 | chat/tools-no-parameters#stream | 422 | `Failed to deserialize the JSON body into the target type: tools[0].function: missing field 'parameters' at line 1 column 140` |
-| chat/ext/harmony-message#plain | 422 | `Failed to deserialize the JSON body into the target type: messages[0]: missing role field at line 1 column 103` |
-| chat/ext/harmony-message#stream | 422 | `Failed to deserialize the JSON body into the target type: messages[0]: missing role field at line 1 column 117` |
+| chat/msg/harmony#plain | 422 | `Failed to deserialize the JSON body into the target type: messages[0]: missing role field at line 1 column 176` |
+| chat/msg/harmony#stream | 422 | `Failed to deserialize the JSON body into the target type: messages[0]: missing role field at line 1 column 190` |
+| chat/enc/duplicate-known-field#plain | 422 | `Failed to deserialize the JSON body into the target type: duplicate field 'temperature' at line 1 column 99` |
+| chat/enc/duplicate-known-field#stream | 422 | `Failed to deserialize the JSON body into the target type: duplicate field 'temperature' at line 1 column 113` |

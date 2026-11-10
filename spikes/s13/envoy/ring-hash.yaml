@@ -1,0 +1,59 @@
+# Envoy as the Instance router: a plain HTTP proxy in front of two workers, consistent hashing on
+# x-session-id (HBEP-5 sets it on every request to an Instance), the key vllm-router's consistent_hash
+# uses. No filter reads or rewrites the body. Ports are S13's block (issue #312): the listener on
+# 29902, the workers on 29900 and 29901; all on 127.0.0.1. There is no admin interface: the router
+# needs none, so no other job on a shared node can reach one (HBEP-5's risk L-4.9 for vllm-router).
+# If the agent wants Envoy's stats, an admin on a mode-0600 Unix socket (admin.address.pipe) is the
+# shape to use; Envoy 1.40.2 accepts it (--mode validate).
+#
+# Deadlines follow HBEP-5's beta row for router -> worker (Time-outs and keep-alive): a total of
+# maxRequestDuration + 1 h = 10,800 s, and S2's tuned llm-d stack's 10,800 s stream idle, so a slow
+# first token is not cut (Envoy's default stream idle timeout is 5 min). Idle upstream connections
+# close after 50 s, below the workers' VLLM_HTTP_TIMEOUT_KEEP_ALIVE of 120 s (L-2.5).
+static_resources:
+  listeners:
+    - name: instance
+      address:
+        socket_address: { address: 127.0.0.1, port_value: 29902 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: s13
+                stream_idle_timeout: 10800s
+                route_config:
+                  name: instance
+                  virtual_hosts:
+                    - name: instance
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route:
+                            cluster: workers
+                            timeout: 10800s
+                            idle_timeout: 10800s
+                            hash_policy:
+                              - header: { header_name: x-session-id }
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+  clusters:
+    - name: workers
+      type: STATIC
+      lb_policy: RING_HASH
+      connect_timeout: 5s
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          common_http_protocol_options:
+            idle_timeout: 50s
+          explicit_http_config:
+            http_protocol_options: {}
+      load_assignment:
+        cluster_name: workers
+        endpoints:
+          - lb_endpoints:
+              - endpoint: { address: { socket_address: { address: 127.0.0.1, port_value: 29900 } } }
+              - endpoint: { address: { socket_address: { address: 127.0.0.1, port_value: 29901 } } }

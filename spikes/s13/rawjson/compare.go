@@ -24,6 +24,13 @@ const (
 	Retyped Verdict = "retyped"
 	// Changed: the same JSON type, another value.
 	Changed Verdict = "changed"
+	// KeyReencoded: an object member arrived under the same key spelled otherwise (an escaped
+	// character written raw, or the reverse).
+	KeyReencoded Verdict = "key re-escaped"
+	// DuplicateRemoved and DuplicateAdded: a key that occurs more than once arrived fewer, or more,
+	// times. The value compared at the key is its last occurrence, as Python's json module reads it.
+	DuplicateRemoved Verdict = "duplicate removed"
+	DuplicateAdded   Verdict = "duplicate added"
 	// Dropped: in the sent body, absent from the received one.
 	Dropped Verdict = "dropped"
 	// Injected: absent from the sent body, present in the received one.
@@ -33,7 +40,8 @@ const (
 )
 
 // rank orders verdicts from worst to best, for the verdict of a field that has several diffs.
-var rank = map[Verdict]int{Dropped: 0, Retyped: 1, Changed: 2, Renamed: 3, Injected: 4, Reencoded: 5, Kept: 6}
+var rank = map[Verdict]int{Dropped: 0, Retyped: 1, Changed: 2, DuplicateRemoved: 3, DuplicateAdded: 4, Renamed: 5,
+	Injected: 6, KeyReencoded: 7, Reencoded: 8, Kept: 9}
 
 // Worse reports whether a is a worse outcome than b.
 func Worse(a, b Verdict) bool { return rank[a] < rank[b] }
@@ -49,7 +57,9 @@ type Diff struct {
 }
 
 // Compare walks the sent tree against the received one and returns every value that is not
-// Kept, in the sent body's order, with injected values after the members they follow.
+// Kept, in the sent body's order, with injected values after the members they follow. It ignores
+// object member order and insignificant whitespace, and nothing else: a key spelled otherwise and a
+// duplicate member removed or added are diffs of their own.
 func Compare(sent, recv *Node) []Diff {
 	var out []Diff
 	walk("", sent, recv, &out)
@@ -94,7 +104,18 @@ func walkObject(path string, s, r *Node, out *[]Diff) {
 	var dropped, injected []Member
 	for _, m := range lastByKey(s) {
 		if rv := r.Get(m.Key); rv != nil {
-			walk(join(path, m.Key), m.Value, rv, out)
+			p := join(path, m.Key)
+			sm, rm := members(s, m.Key), members(r, m.Key)
+			if sk, rk := string(sm[len(sm)-1].KeyRaw), string(rm[len(rm)-1].KeyRaw); sk != rk {
+				*out = append(*out, Diff{Path: p, Verdict: KeyReencoded, Sent: sk, Received: rk})
+			}
+			switch {
+			case len(rm) < len(sm):
+				*out = append(*out, Diff{Path: p, Verdict: DuplicateRemoved, Sent: memberText(sm), Received: memberText(rm)})
+			case len(rm) > len(sm):
+				*out = append(*out, Diff{Path: p, Verdict: DuplicateAdded, Sent: memberText(sm), Received: memberText(rm)})
+			}
+			walk(p, m.Value, rv, out)
 		} else {
 			dropped = append(dropped, m)
 		}
@@ -125,6 +146,26 @@ func walkObject(path string, s, r *Node, out *[]Diff) {
 			*out = append(*out, Diff{Path: join(path, in.Key), Verdict: Injected, Received: string(in.Value.Raw)})
 		}
 	}
+}
+
+// members returns every member of n named key, in order.
+func members(n *Node, key string) []Member {
+	var ms []Member
+	for _, m := range n.Members {
+		if m.Key == key {
+			ms = append(ms, m)
+		}
+	}
+	return ms
+}
+
+// memberText writes members as they were written, key and value, comma-separated.
+func memberText(ms []Member) string {
+	var parts []string
+	for _, m := range ms {
+		parts = append(parts, string(m.KeyRaw)+":"+string(m.Value.Raw))
+	}
+	return strings.Join(parts, ",")
 }
 
 // lastByKey returns an object's members with each key once, its last occurrence, in order.

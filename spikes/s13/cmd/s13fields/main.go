@@ -1,11 +1,14 @@
 // Command s13fields sends every case of package cases through a router (or straight to the
 // recorder, the control) and records what reached the workers, byte for byte.
 //
-//	s13fields -out DIR [-router PATH -policy NAME -label TEXT] [-base 29900]
+//	s13fields -out DIR [-router PATH -policy NAME -work DIR -label TEXT] [-base 29900]
+//	s13fields -out DIR -work DIR -label TEXT -exec -- COMMAND [ARG...]
 //
 // Ports: the two recorders listen on base and base+1, the router on base+2, its metrics on
-// base+3, all on 127.0.0.1. Without -router the cases go to the first recorder directly, and the
-// run passes only if every body arrives as the exact bytes sent.
+// base+3, all on 127.0.0.1. Without -router or -exec the cases go to the first recorder directly,
+// and the run passes only if every body arrives as the exact bytes sent. With -exec, COMMAND is a
+// proxy stack (scripts/stack.sh) that serves on base+2 in the foreground; the harness runs it in its
+// own process group, with S13_WORK (the -work directory) and S2_HOME in its environment.
 //
 // Exit codes: 0 a completed run (with -router, losses are findings, not failures); 1 the control
 // saw a body that is not its bytes; 2 the harness could not run (the router did not start, a
@@ -45,7 +48,19 @@ func runMain() int {
 	label := flag.String("label", "", "the run's name in the report")
 	base := flag.Int("base", 29900, "first of four ports, all inside 29900-29919")
 	work := flag.String("work", "", "scratch directory for the router's log and HOME, never committed (created)")
+	execStack := flag.Bool("exec", false, "start the command after -- instead of vllm-router")
 	flag.Parse()
+	var argv []string
+	switch {
+	case *execStack && *routerCmd != "":
+		return errorf(2, "-exec and -router exclude each other")
+	case *execStack:
+		if argv = flag.Args(); len(argv) == 0 || *label == "" {
+			return errorf(2, "-exec needs a command after -- and a -label")
+		}
+	case *routerCmd != "":
+		argv = vllmRouterArgs(*routerCmd, *policy, *base)
+	}
 	if *out == "" {
 		return errorf(2, "-out is required")
 	}
@@ -58,8 +73,8 @@ func runMain() int {
 			*label = filepath.Base(*routerCmd) + " " + *policy
 		}
 	}
-	if *routerCmd != "" && *work == "" {
-		return errorf(2, "-work is required with -router")
+	if argv != nil && *work == "" {
+		return errorf(2, "-work is required with -router or -exec")
 	}
 	for _, d := range []string{*out, *work} {
 		if d == "" {
@@ -89,13 +104,20 @@ func runMain() int {
 
 	target := "http://127.0.0.1:" + strconv.Itoa(*base)
 	stopRouter := func() {}
-	// The router's path names this host's directories, so the record keeps only its last three parts.
-	run := &Run{Label: *label, Router: lastParts(*routerCmd, 3), Started: time.Now().UTC().Format(time.RFC3339)}
-	if *routerCmd != "" {
-		run.Policy = *policy
+	// The command's paths name this host's directories, so the record keeps only their last parts.
+	run := &Run{Label: *label, Started: time.Now().UTC().Format(time.RFC3339)}
+	switch {
+	case *routerCmd != "":
+		run.Router, run.Policy = lastParts(*routerCmd, 3), *policy
+	case argv != nil:
+		var shown []string
+		for _, a := range argv {
+			shown = append(shown, lastParts(a, 3))
+		}
+		run.Router = strings.Join(shown, " ")
 	}
-	if *routerCmd != "" {
-		r, err := startRouter(*routerCmd, *policy, *base, *work)
+	if argv != nil {
+		r, err := startRouter(argv, *work)
 		if err != nil {
 			return errorf(2, "router: %v", err)
 		}
@@ -124,7 +146,7 @@ func runMain() int {
 		return errorf(2, "writing results: %v", err)
 	}
 	fmt.Println(summaryLine(run))
-	if *routerCmd == "" {
+	if argv == nil {
 		for _, r := range run.Results {
 			if !r.Identical {
 				return errorf(1, "control: %s did not arrive as its bytes", r.Key)
@@ -136,7 +158,8 @@ func runMain() int {
 
 // send posts one variant's exact bytes and compares them with what reached a worker.
 func send(client *http.Client, target string, rec *recorder.Recorder, v cases.Variant) Result {
-	res := Result{Key: v.Key(), Case: v.Case.Key(), Endpoint: string(v.Case.Endpoint), Stream: v.Stream, Note: v.Case.Note, Sent: string(v.Body)}
+	res := Result{Key: v.Key(), Case: v.Case.Key(), Endpoint: string(v.Case.Endpoint), Stream: v.Stream, Note: v.Case.Note,
+		Invalid: v.Case.Invalid, Sent: string(v.Body)}
 	req, err := http.NewRequest(http.MethodPost, target+string(v.Case.Endpoint), bytes.NewReader(v.Body))
 	if err != nil {
 		res.Error = err.Error()

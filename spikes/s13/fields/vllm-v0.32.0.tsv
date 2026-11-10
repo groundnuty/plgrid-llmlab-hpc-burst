@@ -201,6 +201,13 @@ chat	messages[](assistant).tool_calls[](custom).custom.name	Custom	name	Required
 chat	messages[](tool).content	ChatCompletionToolMessageParam	content	Required[Union[str, Iterable[ChatCompletionContentPartTextParam]]]		openai 2.25.0 openai/types/chat/chat_completion_tool_message_param.py:14
 chat	messages[](tool).role	ChatCompletionToolMessageParam	role	Required[Literal['tool']]		openai 2.25.0 openai/types/chat/chat_completion_tool_message_param.py:17
 chat	messages[](tool).tool_call_id	ChatCompletionToolMessageParam	tool_call_id	Required[str]		openai 2.25.0 openai/types/chat/chat_completion_tool_message_param.py:20
+chat	messages[](harmony).author	Message	author	Author		oss-harmony 0.0.11 python/openai_harmony/__init__.py:290
+chat	messages[](harmony).content	Message	content	List[Content]	Field(default_factory=list)	oss-harmony 0.0.11 python/openai_harmony/__init__.py:291
+chat	messages[](harmony).channel	Message	channel	Optional[str]	None	oss-harmony 0.0.11 python/openai_harmony/__init__.py:292
+chat	messages[](harmony).recipient	Message	recipient	Optional[str]	None	oss-harmony 0.0.11 python/openai_harmony/__init__.py:293
+chat	messages[](harmony).content_type	Message	content_type	Optional[str]	None	oss-harmony 0.0.11 python/openai_harmony/__init__.py:294
+chat	messages[](harmony).author.role	Author	role	Role		oss-harmony 0.0.11 python/openai_harmony/__init__.py:104
+chat	messages[](harmony).author.name	Author	name	Optional[str]	None	oss-harmony 0.0.11 python/openai_harmony/__init__.py:105
 chat	messages[](function).content	ChatCompletionFunctionMessageParam	content	Required[Optional[str]]		openai 2.25.0 openai/types/chat/chat_completion_function_message_param.py:12
 chat	messages[](function).name	ChatCompletionFunctionMessageParam	name	Required[str]		openai 2.25.0 openai/types/chat/chat_completion_function_message_param.py:15
 chat	messages[](function).role	ChatCompletionFunctionMessageParam	role	Required[Literal['function']]		openai 2.25.0 openai/types/chat/chat_completion_function_message_param.py:18

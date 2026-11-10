@@ -38,6 +38,9 @@ func readFields(t *testing.T) []field {
 func TestEveryEnumeratedFieldIsCovered(t *testing.T) {
 	covered := map[string]map[Endpoint]bool{}
 	for _, c := range All() {
+		if c.Invalid != "" {
+			continue // a request vLLM refuses covers no accepted field
+		}
 		for _, cv := range c.Covers {
 			if covered[cv.Field] == nil {
 				covered[cv.Field] = map[Endpoint]bool{}
@@ -108,6 +111,13 @@ func TestBodiesAndCovers(t *testing.T) {
 		case "never":
 		default:
 			t.Errorf("%s: Stream %q", c.Key(), c.Stream)
+		}
+		if c.Invalid != "" {
+			for _, cv := range c.Covers {
+				if !strings.HasPrefix(cv.Field, "ext:") {
+					t.Errorf("%s: an invalid case covers the enumerated field %s", c.Key(), cv.Field)
+				}
+			}
 		}
 		for _, cv := range c.Covers {
 			if rawjson.Lookup(plain, cv.At) == nil {

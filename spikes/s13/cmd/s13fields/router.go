@@ -24,29 +24,38 @@ type router struct {
 	stopped bool
 }
 
-// startRouter starts the launcher in its own process group, with a clean environment so that no
-// proxy variable can send the router's worker traffic elsewhere.
-func startRouter(path, policy string, base int, out string) (*router, error) {
-	log, err := os.Create(filepath.Join(out, "router.log"))
-	if err != nil {
-		return nil, err
-	}
-	home := filepath.Join(out, "home")
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		return nil, err
-	}
-	args := []string{
+// vllmRouterArgs is the vllm-router command line of HBEP-5's beta Instance, two workers.
+func vllmRouterArgs(path, policy string, base int) []string {
+	return []string{path,
 		"--host", "127.0.0.1", "--port", strconv.Itoa(base + 2),
 		"--worker-urls", "http://127.0.0.1:" + strconv.Itoa(base), "http://127.0.0.1:" + strconv.Itoa(base+1),
 		"--policy", policy,
 		"--request-timeout-secs", "10800", // HBEP-5: maxRequestDuration + 1 h
 		"--prometheus-host", "127.0.0.1", "--prometheus-port", strconv.Itoa(base + 3),
 	}
-	cmd := exec.Command(path, args...)
-	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + home, "LANG=C.UTF-8", "NO_PROXY=127.0.0.1,localhost", "no_proxy=127.0.0.1,localhost"}
+}
+
+// startRouter starts argv in its own process group, with a clean environment so that no proxy
+// variable can send the router's worker traffic elsewhere. Only S2_HOME is passed through, for the
+// llm-d stack, and S13_WORK names the scratch directory.
+func startRouter(argv []string, work string) (*router, error) {
+	log, err := os.Create(filepath.Join(work, "router.log"))
+	if err != nil {
+		return nil, err
+	}
+	home := filepath.Join(work, "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + home, "LANG=C.UTF-8", "NO_PROXY=127.0.0.1,localhost", "no_proxy=127.0.0.1,localhost",
+		"S13_WORK=" + work}
+	if v := os.Getenv("S2_HOME"); v != "" {
+		cmd.Env = append(cmd.Env, "S2_HOME="+v)
+	}
 	cmd.Stdout, cmd.Stderr = log, log
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
-	fmt.Fprintf(log, "# %s %s\n", path, strings.Join(args, " "))
+	fmt.Fprintf(log, "# %s\n", strings.Join(argv, " "))
 	if err := cmd.Start(); err != nil {
 		log.Close()
 		return nil, err
@@ -147,9 +156,17 @@ func (r *router) stop(run *Run) {
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		run.RouterExit = fmt.Sprintf("killed after 15 s: %v", <-r.done)
 	}
-	if err := syscall.Kill(-pgid, 0); !errors.Is(err, syscall.ESRCH) {
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		run.RouterExit += "; a process of the group outlived the router and was killed"
+	// The rest of the group (the EPP of the llm-d stack) had the same TERM; give it 10 s to finish.
+	for i := 0; ; i++ {
+		if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
+			break
+		}
+		if i == 20 {
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			run.RouterExit += "; a process of the group was still running 10 s after TERM and was killed"
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 	r.log.Close()
 }

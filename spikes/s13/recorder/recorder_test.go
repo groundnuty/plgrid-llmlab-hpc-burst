@@ -81,3 +81,20 @@ func TestRefusesWhatItCannotDecodeButRecordsIt(t *testing.T) {
 		t.Fatalf("oversized body: status %d", code)
 	}
 }
+
+func TestServesTheGaugesARouterScrapes(t *testing.T) {
+	r := &Recorder{}
+	srv := httptest.NewServer(r.Handler("a"))
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	for _, name := range []string{"vllm:num_requests_running{", "vllm:num_requests_waiting{", "vllm:kv_cache_usage_perc{", "vllm:cache_config_info{"} {
+		if !strings.Contains(string(b), name) {
+			t.Errorf("/metrics lacks %s", name)
+		}
+	}
+}

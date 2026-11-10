@@ -39,6 +39,7 @@ type Result struct {
 	Endpoint          string `json:"endpoint"`
 	Stream            bool   `json:"stream"`
 	Note              string `json:"note,omitempty"`
+	Invalid           string `json:"invalid_for_vllm,omitempty"`
 	Status            int    `json:"status"`
 	StreamDone        bool   `json:"stream_done,omitempty"`
 	Response          string `json:"router_response,omitempty"`
@@ -153,7 +154,7 @@ func count(run *Run) tally {
 		default:
 			lossy := false
 			for _, d := range r.Diffs {
-				if d.Verdict != rawjson.Reencoded {
+				if d.Verdict != rawjson.Reencoded && d.Verdict != rawjson.KeyReencoded {
 					lossy = true
 				}
 			}
@@ -169,8 +170,8 @@ func count(run *Run) tally {
 
 func summaryLine(run *Run) string {
 	t := count(run)
-	return fmt.Sprintf("%s: %d variants; %d arrived as their exact bytes; %d equal once member order and whitespace are ignored; "+
-		"%d differ only in re-encoded values; %d lost or changed a value; %d did not reach a worker",
+	return fmt.Sprintf("%s: %d variants; %d arrived as their exact bytes; %d differ only in member order and insignificant whitespace; "+
+		"%d differ only in re-encoded values or keys; %d lost or changed a value; %d did not reach a worker",
 		run.Label, t.variants, t.identical, t.noDiff, t.reencodedOnly, t.lossy, t.refused)
 }
 
@@ -214,7 +215,11 @@ func markdown(run *Run) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# %s\n\n", run.Label)
 	if run.Router != "" {
-		fmt.Fprintf(&b, "- Router: `%s`, `--policy %s`, two workers.\n", run.Router, run.Policy)
+		if run.Policy != "" {
+			fmt.Fprintf(&b, "- Router: `%s`, `--policy %s`, two workers.\n", run.Router, run.Policy)
+		} else {
+			fmt.Fprintf(&b, "- Router: `%s`, two workers.\n", run.Router)
+		}
 		fmt.Fprintf(&b, "- Router listeners: %s. Stop: %s.\n", strings.Join(run.Listeners, ", "), run.RouterExit)
 	}
 	fmt.Fprintf(&b, "- Started %s.\n- %s.\n", run.Started, summaryLine(run))
@@ -226,7 +231,11 @@ func markdown(run *Run) string {
 	type key struct{ c, field, at string }
 	var order []key
 	rows := map[key]map[bool]FieldResult{}
+	invalid := map[string]bool{}
 	for _, r := range run.Results {
+		if r.Invalid != "" {
+			invalid[r.Case] = true
+		}
 		for _, f := range r.Fields {
 			k := key{r.Case, f.Field, f.At}
 			if rows[k] == nil {
@@ -252,7 +261,11 @@ func markdown(run *Run) string {
 		if hasS {
 			sv = string(s.Verdict)
 		}
-		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s |\n", k.c, k.field, cell(k.at, 60), cell(show.Sent, 70), cell(show.Received, 70), pv, sv)
+		name := k.c
+		if invalid[k.c] {
+			name += " (invalid for vLLM)"
+		}
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s |\n", name, k.field, cell(k.at, 60), cell(show.Sent, 70), cell(show.Received, 70), pv, sv)
 	}
 
 	b.WriteString("\n## Injected values\n\nValues present at the worker and absent from the body sent, by path and value.\n\n| path | value | variants | first case |\n|---|---|---|---|\n")

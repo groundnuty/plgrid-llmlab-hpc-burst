@@ -39,7 +39,7 @@ func main() {
 // verdict over the plain and streamed variants.
 func countTable(runs []*results.Run) string {
 	var b strings.Builder
-	b.WriteString("| run | covers | kept | kept, re-encoded | dropped | retyped | changed | renamed | refused |\n|---|---|---|---|---|---|---|---|---|\n")
+	b.WriteString("| run | covers | kept | kept, re-encoded | key re-escaped | duplicate removed | dropped | retyped | changed | renamed | refused |\n|---|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, r := range runs {
 		for _, ext := range []bool{false, true} {
 			n := map[rawjson.Verdict]int{}
@@ -61,8 +61,8 @@ func countTable(runs []*results.Run) string {
 			if ext {
 				kind = "extensions and encodings"
 			}
-			fmt.Fprintf(&b, "| %s, %s | %d | %d | %d | %d | %d | %d | %d | %d |\n", r.Label, kind, total, n[rawjson.Kept], n[rawjson.Reencoded],
-				n[rawjson.Dropped], n[rawjson.Retyped], n[rawjson.Changed], n[rawjson.Renamed], n[results.Refused])
+			fmt.Fprintf(&b, "| %s, %s | %d | %d | %d | %d | %d | %d | %d | %d | %d | %d |\n", r.Label, kind, total, n[rawjson.Kept], n[rawjson.Reencoded],
+				n[rawjson.KeyReencoded], n[rawjson.DuplicateRemoved], n[rawjson.Dropped], n[rawjson.Retyped], n[rawjson.Changed], n[rawjson.Renamed], n[results.Refused])
 		}
 	}
 	return b.String() + "\n"

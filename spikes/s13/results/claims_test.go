@@ -24,7 +24,7 @@ func load(t *testing.T, name string) *Run {
 
 func TestControlSawEveryBodyAsItsBytes(t *testing.T) {
 	r := load(t, "direct-control")
-	if len(r.Variants) != 432 {
+	if len(r.Variants) != 440 {
 		t.Fatalf("%d variants", len(r.Variants))
 	}
 	for k, v := range r.Variants {
@@ -78,7 +78,14 @@ var shared = map[[2]string]string{
 	{"chat/ext/top-level-object", "ext:x_top"}:                                                    both(rawjson.Reencoded),
 	{"chat/ext/openai-sdk-fields", "ext:store"}:                                                   both(rawjson.Kept),
 	{"chat/ext/assistant-reasoning_content", "ext:messages[](assistant).reasoning_content"}:       both(rawjson.Renamed),
-	{"chat/ext/harmony-message", "ext:messages[](harmony)"}:                                       both(Refused),
+	{"chat/msg/harmony", "messages[](harmony).author.role"}:                                       both(Refused),
+	{"chat/enc/duplicate-known-field", "ext:a field written twice"}:                               both(Refused),
+	{"chat/enc/duplicate-in-dict", "ext:a member written twice inside a dict[str, Any]"}:          both(rawjson.DuplicateRemoved),
+	{"chat/enc/duplicate-unknown-top", "ext:an unknown top-level member written twice"}:           both(rawjson.DuplicateRemoved),
+	{"chat/enc/key-escaped-top", "ext:a top-level key written with an escape"}:                    both(rawjson.KeyReencoded),
+	{"chat/enc/key-escaped-nested", "ext:a key inside a dict[str, Any] written with an escape"}:   both(rawjson.KeyReencoded),
+	{"chat/logprob_token_ids", "logprob_token_ids"}:                                               both(rawjson.Kept),
+	{"completions/prompt_logprobs", "prompt_logprobs"}:                                            "kept|-",
 	{"chat/enc/temperature-integer", "ext:temperature as an integer literal"}:                     both(rawjson.Retyped),
 	{"chat/enc/temperature-20-digits", "ext:a float beyond float64 precision"}:                    both(rawjson.Changed),
 	{"chat/enc/explicit-nulls", "ext:max_tokens: null"}:                                           both(rawjson.Dropped),
@@ -186,10 +193,10 @@ func TestKvAwareForwardsCompletionsAsBytes(t *testing.T) {
 			t.Errorf("%s: chat under kv_aware differs from consistent_hash", key)
 		}
 	}
-	if n != 143 {
-		t.Errorf("%d completions variants, want 143", n)
+	if n != 142 {
+		t.Errorf("%d completions variants, want 142", n)
 	}
-	if !reflect.DeepEqual(kv.Delivered, map[string]int{"/v1/chat/completions": 281, "/v1/completions": 143}) {
+	if !reflect.DeepEqual(kv.Delivered, map[string]int{"/v1/chat/completions": 288, "/v1/completions": 142}) {
 		t.Errorf("delivered %v", kv.Delivered)
 	}
 }
@@ -211,6 +218,74 @@ func TestStreamingDoesNotChangeAVerdict(t *testing.T) {
 		}
 		if both < 250 {
 			t.Errorf("%s: only %d covers were sent both ways", v, both)
+		}
+	}
+}
+
+func TestEnvoyRingHashDeliversEveryBodyAsItsBytes(t *testing.T) {
+	a, b := load(t, "envoy-1.40.2-ring_hash"), load(t, "envoy-1.33.2-ring_hash")
+	workers := map[string]int{}
+	for key, x := range a.Variants {
+		if x.Arrivals != 1 || !x.Identical {
+			t.Errorf("1.40.2 %s: arrivals %d, identical %v", key, x.Arrivals, x.Identical)
+		}
+		y := b.Variants[key]
+		if y.Arrivals != 1 || !y.Identical {
+			t.Errorf("1.33.2 %s: arrivals %d, identical %v", key, y.Arrivals, y.Identical)
+		}
+		// Placement is a function of the request: both releases put every variant on the same worker.
+		if x.Worker != y.Worker {
+			t.Errorf("%s: worker %s on 1.40.2, %s on 1.33.2", key, x.Worker, y.Worker)
+		}
+		workers[x.Worker]++
+	}
+	if len(a.Variants) != 440 || len(workers) != 2 {
+		t.Errorf("%d variants over workers %v", len(a.Variants), workers)
+	}
+}
+
+func TestLlmdForwardsWhatItAcceptsAsBytes(t *testing.T) {
+	r := load(t, "llm-d-epp-envoy-1.33.2")
+	refused := map[string]bool{}
+	for key, x := range r.Variants {
+		switch {
+		case x.Arrivals == 0:
+			if x.Status != 400 || !strings.Contains(x.Response, "must have valid messages field") {
+				t.Errorf("%s: status %d, %q", key, x.Status, x.Response)
+			}
+			refused[x.Case] = true
+		case !x.Identical:
+			t.Errorf("%s: delivered, but not as its bytes", key)
+		}
+	}
+	want := map[string]bool{"chat/msg/user-part-simple-image": true, "chat/msg/user-part-simple-audio": true,
+		"chat/msg/user-part-simple-video": true, "chat/msg/user-part-bare-string": true}
+	if !reflect.DeepEqual(refused, want) {
+		t.Errorf("refused %v, want %v", refused, want)
+	}
+}
+
+// Envoy and the EPP pass the encodings vllm-router changes: escaped keys and duplicate members.
+func TestProxiesKeepKeysAndDuplicates(t *testing.T) {
+	for _, name := range []string{"envoy-1.40.2-ring_hash", "llm-d-epp-envoy-1.33.2"} {
+		r := load(t, name)
+		for _, c := range []string{"chat/enc/key-escaped-top", "chat/enc/key-escaped-nested", "chat/enc/duplicate-known-field",
+			"chat/enc/duplicate-in-dict", "chat/enc/duplicate-unknown-top", "chat/msg/harmony"} {
+			for _, v := range []string{"#plain", "#stream"} {
+				if x := r.Variants[c+v]; x == nil || !x.Identical {
+					t.Errorf("%s %s%s: not its bytes", name, c, v)
+				}
+			}
+		}
+	}
+}
+
+// The case vLLM refuses on purpose is marked, and no other is.
+func TestOnlyTheMarkedCaseIsInvalid(t *testing.T) {
+	r := load(t, "direct-control")
+	for key, x := range r.Variants {
+		if (x.Invalid != "") != strings.HasPrefix(key, "chat/enc/message-name-null#") {
+			t.Errorf("%s: invalid %q", key, x.Invalid)
 		}
 	}
 }

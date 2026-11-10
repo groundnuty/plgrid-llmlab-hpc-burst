@@ -6,7 +6,8 @@
 #   S13_HOME=<scratch dir> setup.sh
 #
 # Needs: curl, git, sha256sum, python3 with venv (the launcher dependencies are pinned for CPython
-# 3.15 on x86_64, see launcher-deps.txt), go.
+# 3.15 on x86_64, see launcher-deps.txt), go. The llm-d arm's EPP is a Go build of llm-d-router
+# (S2's setup.sh, into $S13_HOME/s2): on a shared host, run this under the build lock.
 set -euo pipefail
 S13_HOME=${S13_HOME:?set S13_HOME to a scratch directory}
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -63,8 +64,23 @@ OA=https://files.pythonhosted.org/packages/5b/e6/ca496976bacdd7f86d4fa69359c2d9b
 fetch "$OA" 7c7c01a0a4b69771a29913e28d06bc1e9cee8781b4d206bb56cb946d8d2fcb23 "$S13_HOME/dl/openai-2.25.0-py3-none-any.whl"
 [[ -d $S13_HOME/src/openai-2.25.0/openai ]] || python3 -I -m zipfile -e "$S13_HOME/dl/openai-2.25.0-py3-none-any.whl" "$S13_HOME/src/openai-2.25.0"
 
-python3 -I "$HERE/enumerate_fields.py" --vllm "$S13_HOME/src/vllm-0.32.0" --openai "$S13_HOME/src/openai-2.25.0" > "$S13_HOME/fields.tsv"
+# oss-harmony 0.0.11, the floor vLLM v0.32.0 sets (requirements/common.txt:52), for its Message model,
+# the third member of vLLM's message union. The sdist holds the Python models.
+HA=https://files.pythonhosted.org/packages/source/o/oss-harmony/oss_harmony-0.0.11.tar.gz
+fetch "$HA" ccad467b71d61490df1f2204b7a064990833338615ac135536c5b3a8e2d03a15 "$S13_HOME/dl/oss_harmony-0.0.11.tar.gz"
+[[ -d $S13_HOME/src/oss_harmony-0.0.11 ]] || tar -xzf "$S13_HOME/dl/oss_harmony-0.0.11.tar.gz" -C "$S13_HOME/src"
+
+python3 -I "$HERE/enumerate_fields.py" --vllm "$S13_HOME/src/vllm-0.32.0" --openai "$S13_HOME/src/openai-2.25.0" \
+  --harmony "$S13_HOME/src/oss_harmony-0.0.11" > "$S13_HOME/fields.tsv"
 cmp "$S13_HOME/fields.tsv" "$HERE/../fields/vllm-v0.32.0.tsv" || { echo "the enumeration differs from fields/vllm-v0.32.0.tsv" >&2; exit 1; }
 
+# Envoy 1.40.2, the latest release on 10 Nov 2026, for the ring_hash arm. The sha256 is the one in the
+# release's signed checksums.txt.asc and GitHub's asset digest.
+fetch https://github.com/envoyproxy/envoy/releases/download/v1.40.2/envoy-1.40.2-linux-x86_64 \
+  1d64506e25c1844f146162ddb2ece7010fa4e784faddb40a079021491f1f03cc "$S13_HOME/bin/envoy-1.40.2"
+chmod +x "$S13_HOME/bin/envoy-1.40.2"
+# The llm-d arm: S2's pinned llm-d (v1.0.0), its loopback-patched EPP and Envoy 1.33.2, by S2's own setup.
+S2_HOME=$S13_HOME/s2 "$HERE/../../s2/scripts/setup.sh" sources patched envoy
+
 (cd "$HERE/.." && go build -o "$S13_HOME/bin/s13fields" ./cmd/s13fields)
-echo "setup ok: vllm-router 0.1.16 and 0.1.17, sources pinned, enumeration matches, harness built"
+echo "setup ok: vllm-router 0.1.16 and 0.1.17, Envoy 1.40.2, S2's llm-d stack, sources pinned, enumeration matches, harness built"
