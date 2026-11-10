@@ -37,7 +37,7 @@ func startedNothing(t *testing.T, rg *realRig, hw *hookedWant) {
 	rg.k.mu.Lock()
 	defer rg.k.mu.Unlock()
 	for key := range rg.k.inflight {
-		if key.tag == hw.w.Entry.Tag && key.gen == hw.w.Entry.Gen && key.host == rg.k.runner.LoginHost(hw.p, rg.w.ssh()) {
+		if key.tag == hw.w.Entry.Tag && key.inc == hw.w.Incarnation && key.host == rg.k.runner.LoginHost(hw.p, rg.w.ssh()) {
 			t.Errorf("the keeper holds a start of the Want's relays: %+v", key)
 		}
 	}
@@ -96,7 +96,10 @@ func TestEachListingRefusalStartsNothingAndHoldsNothing(t *testing.T) {
 			return "not listed under tag", 4
 		}},
 		{"a held final end", func(t *testing.T, x world) (string, int) {
-			x.rg.k.onFinal(rkProv, x.e)(agentapi.RelayServing, hostdial.EndFailed, "an end the test holds", x.rg.k.Epoch(), 1)
+			x.rg.k.mu.Lock()
+			inc := x.rg.k.wanted[rkProv][x.e.Tag].inc
+			x.rg.k.mu.Unlock()
+			x.rg.k.onFinal(rkProv, x.e, inc)(agentapi.RelayServing, hostdial.EndFailed, "an end the test holds", x.rg.k.Epoch(), 1)
 			if n := len(x.rg.ends()); n != 1 {
 				t.Fatalf("the state file holds %d ends after the injected one, want 1", n)
 			}
@@ -187,10 +190,12 @@ func TestAListingWithNoSetSinceTheKeeperStartedStartsNothing(t *testing.T) {
 	s := rg.set(rkProv, true, e)
 	host := rg.host()
 	k := rg.k
-	rg.hr.Want(rkProv, s.SSH, Want{Entry: e, ProviderUID: s.ProviderUID, Finals: k.finalsOf(rkProv, e),
-		Jobs:    jobs{k: k, provider: rkProv, uid: s.ProviderUID, host: host, entry: e},
-		OnFinal: k.onFinal(rkProv, e), OnStart: k.onStart(rkProv, s.ProviderUID, host, e),
-		BeforeStart: k.beforeStart(rkProv, s.ProviderUID, host, e), StartFailed: k.startFailed(rkProv, s.ProviderUID, host, e)})
+	const inc = 1 // no set came, so the keeper issued none: any incarnation is not the current one
+	j0 := jobs{k: k, provider: rkProv, uid: s.ProviderUID, host: host, entry: e, inc: inc}
+	rg.hr.Want(rkProv, s.SSH, Want{Entry: e, ProviderUID: s.ProviderUID, Incarnation: inc, Finals: k.finalsOf(rkProv, e),
+		Jobs:    j0,
+		OnFinal: k.onFinal(rkProv, e, inc), OnStart: k.onStart(rkProv, s.ProviderUID, host, e, inc),
+		BeforeStart: k.beforeStart(j0), StartFailed: k.startFailed(rkProv, s.ProviderUID, host, e, inc)})
 	hw := rg.hooked(j.tag, genOne)
 	rkWaitFor(t, time.Minute, "four refused listings", func() bool { return hw.count(func() int { return hw.refusals }) >= 4 })
 	startedNothing(t, rg, hw)

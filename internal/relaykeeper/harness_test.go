@@ -77,7 +77,7 @@ func (f *fakeRunner) Want(p string, s wire.SSH, w Want) {
 	}
 	host := strings.ToLower(s.HostName)
 	tag := w.Entry.Tag
-	if in, ok := f.cur[p][tag]; ok && in.w.Entry == w.Entry && in.host == host && in.w.ProviderUID == w.ProviderUID {
+	if in, ok := f.cur[p][tag]; ok && in.w.Incarnation == w.Incarnation && in.w.Entry == w.Entry && in.host == host && in.w.ProviderUID == w.ProviderUID {
 		in.w = w // the same identity: nothing is replaced
 	} else {
 		if ok {

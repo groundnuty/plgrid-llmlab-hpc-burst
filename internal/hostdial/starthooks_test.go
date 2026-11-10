@@ -101,7 +101,7 @@ func TestBeforeStartDecidesTheStart(t *testing.T) {
 			var own *hostdial.Owner
 			h := &hookLog{}
 			tg := hooked(shellTarget(1, "hb-relay-bfs-0123456789ab", script, dir, "", jobs), func() *hostdial.Owner { return own }, h, func() bool { return allowed })
-			own = shellOwner(t, hostdial.OwnerOptions{})
+			own = shellOwner(t, hostdial.OwnerOptions{Pidfd: true})
 			own.Want(tg)
 			if !allowed {
 				waitFor(t, time.Minute, "two refusals of each channel", func() bool {
@@ -169,7 +169,7 @@ func TestOnStartFailedIsToldOfAStartThatFails(t *testing.T) {
 				tg.Command = func(string) (*exec.Cmd, error) { return exec.Command(filepath.Join(dir, "no-such-ssh")), nil }
 			}
 			tg = hooked(tg, func() *hostdial.Owner { return own }, h, func() bool { return true })
-			own = shellOwner(t, hostdial.OwnerOptions{})
+			own = shellOwner(t, hostdial.OwnerOptions{Pidfd: true})
 			own.Want(tg)
 			if missing {
 				waitFor(t, time.Minute, "two failed starts of each channel", func() bool {
@@ -217,7 +217,7 @@ func TestOnExitIsToldOnceAStartedProcessIsGone(t *testing.T) {
 		pidAtExit.Store(ch, relayOf(own, tg.Tag, ch).PID)
 		exit(ch)
 	}
-	own = shellOwner(t, hostdial.OwnerOptions{})
+	own = shellOwner(t, hostdial.OwnerOptions{Pidfd: true})
 	own.Want(tg)
 	waitFor(t, time.Minute, "two exits of each channel", func() bool {
 		c := h.list()
@@ -253,7 +253,10 @@ func TestOnExitIsToldOnceAStartedProcessIsGone(t *testing.T) {
 // existed: a relay whose "ssh" exits at once is started again and again, and
 // one whose "ssh" is missing records the failed start and is retried. The
 // positive controls are the tests above, with each hook set. hostdial's whole
-// package, which sets none of them, is the rest of the pin.
+// package, which sets none of them, is the rest of the pin, alpha's signals
+// included. These tests are about the hooks, not the signals, so their
+// Owners signal through pidfds (Pidfd): none of them reaches alpha's group
+// kill (the review of PR 356).
 func TestTheStartHooksNilRunAlphasPath(t *testing.T) {
 	for _, missing := range []bool{false, true} {
 		t.Run("missing "+strconv.FormatBool(missing), func(t *testing.T) {
@@ -267,7 +270,7 @@ func TestTheStartHooksNilRunAlphasPath(t *testing.T) {
 			if tg.BeforeStart != nil || tg.OnStartFailed != nil || tg.OnExit != nil {
 				t.Fatal("the target sets a start hook")
 			}
-			own := shellOwner(t, hostdial.OwnerOptions{})
+			own := shellOwner(t, hostdial.OwnerOptions{Pidfd: true})
 			own.Want(tg)
 			waitFor(t, time.Minute, "the relays retried", func() bool {
 				for _, ch := range agentapi.RelayChannels {

@@ -364,3 +364,50 @@ func TestRelaykeeperProcessStartsServesAndStops(t *testing.T) {
 		}
 	}
 }
+
+// A second keeper process on the state directory of a running one fails at
+// once, exit 1, naming the process lock, and changes nothing: the state file
+// is byte for byte what the running keeper wrote, and the running keeper
+// still answers, with its E (the review of PR 356: the lock is taken before
+// the state file is read or written). Once the first has stopped, a keeper
+// starts there again, with the next E: the lock went with the first's
+// process.
+func TestASecondKeeperOnALiveKeepersStateDirChangesNothing(t *testing.T) {
+	const firstE = int64(2147483649) // 2³¹ + 1
+	stateDir := shortStateDir(t)
+	socket := relaykeeper.SocketPath(stateDir)
+	first := startKeeperProc(t, stateDir)
+	if pong := first.waitPong(t, socket); pong.KeeperEpoch != firstE {
+		t.Fatalf("the first keeper's E is %d, want %d", pong.KeeperEpoch, firstE)
+	}
+	before, err := os.ReadFile(relaykeeper.StatePath(stateDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := startKeeperProc(t, stateDir)
+	select {
+	case <-second.done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the second keeper did not end within 30 s")
+	}
+	if code := second.cmd.ProcessState.ExitCode(); code != 1 || !strings.Contains(second.stderr.String(), "another relay keeper holds") {
+		t.Errorf("the second keeper ended %d, with %q; want 1, naming the process lock", code, second.stderr)
+	}
+	after, err := os.ReadFile(relaykeeper.StatePath(stateDir))
+	if err != nil || !bytes.Equal(after, before) {
+		t.Errorf("the state file after the second keeper: %v, %q; want it unchanged, %q", err, after, before)
+	}
+	if pong := first.waitPong(t, socket); pong.KeeperEpoch != firstE {
+		t.Errorf("the first keeper after the second's attempt: E %d, want %d", pong.KeeperEpoch, firstE)
+	}
+	if code := first.terminate(t); code != 0 {
+		t.Fatalf("the first keeper's exit after SIGTERM: %d; stderr:\n%s", code, first.stderr)
+	}
+	third := startKeeperProc(t, stateDir)
+	if pong := third.waitPong(t, socket); pong.KeeperEpoch != firstE+1 {
+		t.Errorf("a keeper after the first stopped: E %d, want %d", pong.KeeperEpoch, firstE+1)
+	}
+	if code := third.terminate(t); code != 0 {
+		t.Errorf("the third keeper's exit after SIGTERM: %d", code)
+	}
+}

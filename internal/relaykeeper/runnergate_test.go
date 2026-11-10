@@ -20,15 +20,23 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
-// refusedAtTheGate waits until each channel of hw has been answered by the
-// gate, and fails the test unless every answer refused, no process started,
-// and no srun line carries any N the gate saw for hw.
+// refusedAtTheGate waits until each channel of hw has been refused at its
+// start: by the keeper's gate, or, before it, by the Runner's own check that
+// the attempt's instance is still the tag's current one (hostdial then logs
+// the start as not allowed by Target.BeforeStart). It fails the test unless
+// every answer the keeper's gate gave refused, no process started, and no
+// srun line carries any N the gate saw for hw.
 func refusedAtTheGate(t *testing.T, rg *realRig, hw *hookedWant, job rkJob) {
 	t.Helper()
-	rkWaitFor(t, time.Minute, "both channels' gates answered", func() bool {
+	rkWaitFor(t, time.Minute, "both channels' starts refused at the gate", func() bool {
 		seen := map[agentapi.RelayChannel]bool{}
 		for _, g := range hw.gatesOf() {
 			seen[g.ch] = true
+		}
+		for _, r := range rg.logs.records("a relay did not start") {
+			if r["tag"] == hw.w.Entry.Tag && r["why"] == "the start was not allowed (Target.BeforeStart)" {
+				seen[agentapi.RelayChannel(r["channel"])] = true
+			}
 		}
 		return len(seen) == 2
 	})
@@ -278,4 +286,43 @@ func TestAGatePassedStartThatNeverResolvesKeepsHolding(t *testing.T) {
 	if !rg.probeAccepted() {
 		t.Error("another Provider's set was refused once the held starts resolved and their processes were gone")
 	}
+}
+
+// The review of PR 356: entry equality is not an identity. With credentials
+// A, then B, then A again, the first A attempt, paused after its listing and
+// before it takes its N, is let go after A is restored: it takes a HIGHER N
+// than the restored A's would, and its entry equals the current Want's. It is
+// refused all the same, by its incarnation (the keeper's gate) and by its
+// instance no longer being the tag's current one (the Runner): it never
+// launches, nothing is recorded or marked, and the restored A's relays start
+// and carry bytes.
+func TestTheFirstAAttemptIsRefusedAfterAToBToA(t *testing.T) {
+	w := newRKWorld(t)
+	j := w.submit("hb-rk-aba-0123456789ab", 30*time.Second)
+	rg := newRealRig(t, w, rigOptions{})
+	hold := newLatch()
+	rg.plan(func(hw *hookedWant) {
+		if hw.n == 0 {
+			hw.afterList = hold
+		}
+	})
+	a := w.entry(j, genOne)
+	accepted(t, rg.k, rg.set(rkProv, true, a))
+	old := rg.hooked(j.tag, genOne)
+	rkWaitFor(t, time.Minute, "both first A listings passed and waiting", func() bool { return old.count(func() int { return old.afterWait }) == 2 })
+	accepted(t, rg.k, rg.set(rkProv, true, w.entry(j, genTwo)))
+	accepted(t, rg.k, rg.set(rkProv, true, a))
+	rg.k.mu.Lock()
+	cur := rg.k.wanted[rkProv][j.tag]
+	rg.k.mu.Unlock()
+	if cur.entry != a || cur.inc == old.w.Incarnation {
+		t.Fatalf("the restored A's Want %+v: want A's entry under a new incarnation, not %d", cur, old.w.Incarnation)
+	}
+	hold.open()
+	refusedAtTheGate(t, rg, old, j)
+	rg.waitPair(rkProv, j.tag)
+	for _, ch := range agentapi.RelayChannels {
+		rkRoundTrip(t, j, ch, 16<<10)
+	}
+	rg.noEnds()
 }

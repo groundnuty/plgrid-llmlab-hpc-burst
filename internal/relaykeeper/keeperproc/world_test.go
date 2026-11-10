@@ -584,12 +584,15 @@ func (tw testWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// alphaOwner starts an alpha relay owner in the test process, at a fixed
+// alphaOwner starts a relay owner in the test process, at a fixed alpha
 // Lease epoch, as the batch Provider's controller runs one; it is stopped at
-// the test's end.
+// the test's end. What it stands for is alpha's epoch, the agent's fence,
+// not alpha's signals: its relays are signalled through pidfds (Pidfd), so
+// no test here reaches alpha's group kill (the review of PR 356; PR 1 pins
+// that path in hostdial).
 func (w *world) alphaOwner(epoch int64) *hostdial.Owner {
 	w.t.Helper()
-	own, err := hostdial.NewOwner(hostdial.OwnerOptions{Ports: w.ports(), Slots: hostdial.NewSlots(0),
+	own, err := hostdial.NewOwner(hostdial.OwnerOptions{Ports: w.ports(), Slots: hostdial.NewSlots(0), Pidfd: true,
 		Epoch:      func(context.Context) (int64, error) { return epoch, nil },
 		MinBackoff: 200 * time.Millisecond, MaxBackoff: 2 * time.Second, StopGrace: 2 * time.Second,
 		Logger: slog.New(slog.NewTextHandler(testWriter{w.t}, &slog.HandlerOptions{Level: slog.LevelInfo}))})

@@ -48,6 +48,13 @@ type Want struct {
 	// ProviderUID is the UID of the Provider whose set made the Want: the
 	// relays started for it carry it (RelayState.ProviderUID).
 	ProviderUID string
+	// Incarnation is the Want's identity: the keeper issues a new one, never
+	// reused, whenever the entry, the Provider UID or the host changes, or the
+	// tag is dropped and wanted again, and keeps it while the same Want is
+	// re-sent. The Runner replaces an Allocation's relays exactly when it
+	// changes, and its starts pass the gate only while it is the current
+	// one's (the review of PR 356).
+	Incarnation uint64
 	// Finals names the channels that already ended for good, each with its
 	// cause as hostdial shows it ("<kind>: <cause>"), whose relays are never
 	// started (hostdial.Target.Final). The Runner calls it when it actually
