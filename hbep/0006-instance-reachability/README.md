@@ -343,7 +343,7 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
     - **The job side is unchanged:** `relay --epoch --seq`, and the agent keeping the highest `(E, N)` on each channel.
     - **A controller fences what it sends instead:** each desired set and each acknowledgement carries the sender's `provider-<name>` `Lease` epoch (`leaseTransitions` at its own acquisition write), and the keeper refuses one from an epoch lower than that Provider's highest accepted.
     - **A copy that loses the lead** stops sending sets and acknowledgements before it releases the `Lease`. A copy holds no relays, so a new leader **adopts** the keeper's relays and replaces none.
-    - **In beta a `superseded` end is unexpected,** since no newer owner of a channel exists, so the keeper reports it as a final end needing the mark, like `RelayFailed`. The mark's message says "superseded, which is unexpected in beta", and `RelayFailed` is raised once.
+    - **In beta a `superseded` end is unexpected,** since no newer owner of a channel exists, so the keeper reports it as a final end needing the mark, like `RelayFailed`. The mark's message says "superseded, which is unexpected in beta", and `RelayFailed` is raised once. A `superseded` end of a relay the keeper itself replaced, identified by the `(E, N)` it issued, isn't recorded.
   - **The interface:** a Unix socket at a short path the launcher chooses, its length checked against the 107-byte limit, mode 0600 and owned by the host's user. Over it:
     - **the leading controller of each Provider sends desired sets,** level-triggered. A set names the running Allocations, each with:
       - its UID, tag, job and Allocation directory;
@@ -359,7 +359,7 @@ The evidence is two probes from the alpha host on 9 Nov 2026 ([#145, comment 674
       It never carries a secret.
     - **A set is marked complete** once every Allocation of the Provider that's `Running` with a job ID has had an observation under this lead that reached a decision, keep or drop. Unresolved login-node paths, or a login-host claim not yet answered, is not a decision. Only a complete set stops a relay by leaving its Allocation out, so a new leader whose master connection hasn't resolved its paths yet (HBEP-4) can't cut relays.
     - **Each set carries the age at sending of the Provider's queue listing it rests on, and its validity** (the poll interval in force plus the renew deadline). The keeper computes the expiry on its own monotonic clock at receipt, and refuses a validity above 2 min. That's beta's form of the check before each start (above): the keeper starts or restarts a relay only under an unexpired set that shows its job `RUNNING` under its tag, and a retry counts as a start. Sets aren't persisted: after its own restart, the keeper starts nothing until a fresh set arrives.
-    - **The keeper writes its own private `-F` file for each Provider,** under a stable name, from the paths in the set, with the hardening of HBEP-4 (Transport). A relay's identity is its Allocation UID, job, channel and credentials generation, never a file path. A new generation restarts the relay, as in alpha (PR #301), except a channel that has ended for good, which stays down. A new leader sending the same generation replaces nothing.
+    - **The keeper writes its own private `-F` file for each Provider,** under a stable name, from the paths in the set, with the hardening of HBEP-4 (Transport). A relay's identity is its Allocation UID, job, channel and credentials generation, never a file path. A new generation restarts the relay, as in alpha (PR #301), except that once a final end needing the mark is held for an Allocation, neither of its relays starts again. A new leader sending the same generation replaces nothing.
     - **The keeper reports** each relay's state, and each final end with its kind: an actionable failure, which needs `RelayEndedForGood`, or `superseded` in beta, likewise.
     - **The leader acknowledges a final end once it's decided:** the mark written, or the write refused with its reason (the Allocation ended, is being deleted, or has another UID or job). The keeper records the end as decided, durably, and stops reporting it; it keeps the record until its Allocation leaves a complete set (The keeper's state file).
     - **The keeper never restarts a channel whose final end it holds,** decided or not, until that Allocation leaves a complete set. `RelayFailed` is raised once, when the mark is newly written. So in beta a failed write raises nothing until a write succeeds, whereas alpha raises the event after any attempt made while it leads.
@@ -739,6 +739,7 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - 2026-11-10: open question 11 partly answered by spike S14 (steady state).
 - 2026-11-10: the relay keeper's names, set fields, expiry, completeness and claim rules, from the code agent's plan (#343).
 - 2026-11-10: open question 12 answered for one transfer at a time by spike S15.
+- 2026-11-10: two errata to the relay keeper's interface, from its build (#354).
 
 ## Amendments
 
@@ -811,3 +812,5 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
   - **Settled in this PR's review** (Astra and a fresh Opus): the scope, admission on the second frps, the heartbeat scoping, the contract listed as open rather than implied, and the corrected figures.
 
   Before, open question 12 was open with two untested options.
+- **2026-11-10: erratum:** once a final end needing the mark is held for an Allocation, neither of its relays starts again, on a new generation too, since the keeper's listing is per Allocation, not per channel (#354). Before, only the channel that ended stayed down.
+- **2026-11-10: erratum:** a `superseded` end of a relay the keeper itself replaced, identified by the `(E, N)` it issued, isn't recorded, since the replacement's own session superseded it (#354). Before, every `superseded` end in beta was marked.

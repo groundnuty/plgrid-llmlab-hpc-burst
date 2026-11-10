@@ -95,11 +95,11 @@ type Keeper struct {
 	// pending are final ends whose write failed: they are not in st, never
 	// reported, and written by settle before anything else takes effect.
 	pending  []EndRecord
-	sets     map[string]*heldSet          // Provider's name → its latest accepted set; not persisted
-	wishes   map[provKey]wish             // Provider → its latest unexpired set past the fence, accepted or not
-	wanted   map[string]map[string]wanted // Provider's name → tag → the Allocation kept
-	tagUID   map[string]map[string]string // Provider's name → tag → the UID of the Provider that wanted it, kept after a Drop
-	starts   map[string]map[string]int    // Provider's name → UID/channel → ssh starts
+	sets     map[string]*heldSet                                   // Provider's name → its latest accepted set; not persisted
+	wishes   map[provKey]wish                                      // Provider → its latest unexpired set past the fence, accepted or not
+	wanted   map[string]map[string]wanted                          // Provider's name → tag → the Allocation kept
+	issued   map[string]map[string]map[agentapi.RelayChannel]issue // Provider's name → tag → channel → the (E, N) last issued
+	starts   map[string]map[string]int                             // Provider's name → UID/channel → ssh starts
 	restarts map[string]map[agentapi.RelayChannel]uint64
 	refused  map[string]map[string]uint64
 }
@@ -125,10 +125,19 @@ type wish struct {
 }
 
 // wanted is an Allocation the keeper keeps, with the UID of the Provider
-// whose set asked for it.
+// whose set asked for it, and the login host the set named.
 type wanted struct {
 	entry wire.Entry
 	uid   string
+	host  string
+}
+
+// issue is the (E, N) a relay of an Allocation's channel started with, and
+// the entry, so the generation, it was started for: the keeper's own record
+// of what it issued (Want.OnStart).
+type issue struct {
+	entry      wire.Entry
+	epoch, seq int64
 }
 
 // Open is the keeper's start: it counts the start on disk (OpenState), so E
@@ -156,7 +165,7 @@ func Open(o Options) (*Keeper, error) {
 	}
 	return &Keeper{o: o, runner: r, epoch: st.Epoch(), started: o.Now(), st: st, synced: true,
 		sets: map[string]*heldSet{}, wishes: map[provKey]wish{}, wanted: map[string]map[string]wanted{},
-		tagUID: map[string]map[string]string{}, starts: map[string]map[string]int{},
+		issued: map[string]map[string]map[agentapi.RelayChannel]issue{}, starts: map[string]map[string]int{},
 		restarts: map[string]map[agentapi.RelayChannel]uint64{}, refused: map[string]map[string]uint64{}}, nil
 }
 
@@ -170,6 +179,12 @@ func (k *Keeper) Handle(_ context.Context, req wire.Envelope) (wire.Kind, any) {
 		var empty struct{}
 		if err := req.Decode(&empty); err != nil {
 			return refuse(wire.RefusedMalformed, err.Error())
+		}
+		// A keeper whose state file does not sync is unhealthy: ping and
+		// status say so, so the launcher's health check fails (the delta review
+		// of PR 354).
+		if err := k.Settle(); err != nil {
+			return refuse(wire.RefusedState, err.Error())
 		}
 		if req.Kind == wire.KindPing {
 			return wire.KindPong, wire.Pong{KeeperEpoch: k.epoch}
@@ -315,56 +330,79 @@ func (k *Keeper) handleSet(s wire.DesiredSet) (wire.Kind, any) {
 		return wire.KindRefused, wire.Refused{Reason: wire.RefusedLoginHost, LoginHost: host, Holder: holder,
 			Message: fmt.Sprintf("login host %s is in use by host-dialed Provider %s: one host-dialed Provider per login host (HBEP-6, Capacity)", host, holder)}
 	}
+	// The fence and the claims first: written and synced before anything
+	// of the set takes effect.
+	if raised || claimsChanged {
+		if _, err := k.commit(next); err != nil {
+			return refuse(wire.RefusedState, err.Error())
+		}
+	}
 	inSet := map[string]bool{}
 	uids := map[string]bool{}
 	for _, e := range s.Allocations {
 		inSet[e.Tag], uids[e.UID] = true, true
 	}
-	endsChanged := false
-	if s.Complete {
-		// An Allocation that leaves a complete set leaves its ends with it.
-		kept := next.Ends[:0:0]
-		for _, r := range next.Ends {
-			if r.Provider == p && !uids[r.End.UID] {
-				endsChanged = true
-				continue
-			}
-			kept = append(kept, r)
-		}
-		next.Ends = kept
-	}
-	if raised || claimsChanged || endsChanged {
-		if _, err := k.commit(next); err != nil {
-			return refuse(wire.RefusedState, err.Error())
-		}
-	}
-	k.sets[p] = &heldSet{set: s, expires: expires, host: host}
 	if k.wanted[p] == nil {
 		k.wanted[p] = map[string]wanted{}
 	}
-	if k.tagUID[p] == nil {
-		k.tagUID[p] = map[string]string{}
-	}
-	for _, e := range s.Allocations {
-		if e.EndedForGood {
-			// It is being released: no relay of it starts, and the ones that
-			// run are kept as they are.
-			continue
-		}
-		k.wanted[p][e.Tag] = wanted{entry: e, uid: s.ProviderUID}
-		k.tagUID[p][e.Tag] = s.ProviderUID
-		k.runner.Want(p, s.SSH, Want{Entry: e, Finals: k.finalsOf(p, e), Jobs: jobs{k: k, provider: p},
-			OnFinal: k.onFinal(p, e), OnStart: k.onStart(p, e)})
-	}
 	if s.Complete {
+		// A removal of protection takes effect only once it is synced, after
+		// the protection it lifts is replaced (the delta review of PR 354):
+		// first the omitted Allocations' relays are dropped, and their starts
+		// refused (jobs: no longer wanted); then their ends' removal is
+		// written; and only once that is synced is it the keeper's state. A
+		// write that fails leaves the ends in memory, and the drops stand.
 		for _, tag := range sortedKeys(k.wanted[p]) {
 			if !inSet[tag] {
 				delete(k.wanted[p], tag)
 				k.runner.Drop(p, tag)
 			}
 		}
+		removed := k.st.clone()
+		kept := removed.Ends[:0:0]
+		for _, r := range removed.Ends {
+			if r.Provider == p && !uids[r.End.UID] {
+				continue
+			}
+			kept = append(kept, r)
+		}
+		if len(kept) != len(removed.Ends) {
+			removed.Ends = kept
+			if err := k.commitRemoval(removed); err != nil {
+				return refuse(wire.RefusedState, err.Error())
+			}
+		}
+	}
+	k.sets[p] = &heldSet{set: s, expires: expires, host: host}
+	for _, e := range s.Allocations {
+		if e.EndedForGood {
+			// It is being released: no relay of it starts, and the ones that
+			// run are kept as they are.
+			continue
+		}
+		k.wanted[p][e.Tag] = wanted{entry: e, uid: s.ProviderUID, host: host}
+		k.runner.Want(p, s.SSH, Want{Entry: e, ProviderUID: s.ProviderUID, Finals: k.finalsOf(p, e),
+			Jobs:    jobs{k: k, provider: p, uid: s.ProviderUID, host: host, entry: e},
+			OnFinal: k.onFinal(p, e), OnStart: k.onStart(p, e)})
 	}
 	return wire.KindReport, k.report(p, host, false)
+}
+
+// commitRemoval writes a state that removes protection (ends), and makes it
+// the keeper's only once the write has synced: unlike commit, a write whose
+// directory sync fails after the rename leaves memory with the protection,
+// above the file, until a later write syncs (settle writes memory's state,
+// with the protection, again). A fence or a claim never shrinks here, so
+// memory above the file lowers nothing.
+func (k *Keeper) commitRemoval(next *State) error {
+	_, err := saveState(k.o.State, next)
+	if err != nil {
+		k.synced = false
+		k.o.Logger.Error("the state file could not be written and synced: the removal takes no effect until a write syncs", "err", err)
+		return err
+	}
+	k.st, k.synced = next, true
+	return nil
 }
 
 // report is the Provider's report: only the ends on disk, synced, that are
@@ -414,10 +452,11 @@ func (k *Keeper) finalsOf(p string, e wire.Entry) func() map[agentapi.RelayChann
 
 // onFinal records a final end that needs the mark, written and synced before
 // it is reported. A job's end needs none and is not recorded; an end the
-// keeper holds already is not recorded again. A superseded end of a
-// generation the keeper has replaced since is that replacement's doing, not
-// a failure, and is not recorded either. When the write fails, the end is
-// pending (settle).
+// keeper holds already is not recorded again. A superseded end of a relay
+// the keeper itself replaced, identified by the (E, N) it issued, is that
+// replacement's doing, not a failure, and is not recorded either
+// (supersededByOwnReplacement). When the write fails, the end is pending
+// (settle).
 func (k *Keeper) onFinal(p string, e wire.Entry) func(agentapi.RelayChannel, hostdial.EndKind, string, int64, int64) {
 	return func(ch agentapi.RelayChannel, kind hostdial.EndKind, cause string, epoch, seq int64) {
 		var wk string
@@ -431,8 +470,8 @@ func (k *Keeper) onFinal(p string, e wire.Entry) func(agentapi.RelayChannel, hos
 		}
 		k.mu.Lock()
 		defer k.mu.Unlock()
-		if cur, ok := k.wanted[p][e.Tag]; ok && kind == hostdial.EndSuperseded && cur.entry != e {
-			k.o.Logger.Info("a superseded end of a replaced generation is not a failure", "provider", p, "tag", e.Tag, "channel", ch)
+		if kind == hostdial.EndSuperseded && k.supersededByOwnReplacement(p, e, ch, epoch, seq) {
+			k.o.Logger.Info("a superseded end of a relay the keeper itself replaced is not a failure", "provider", p, "tag", e.Tag, "channel", ch, "epoch", epoch, "seq", seq)
 			return
 		}
 		for _, r := range k.endsOf(p, e) {
@@ -452,12 +491,45 @@ func (k *Keeper) onFinal(p string, e wire.Entry) func(agentapi.RelayChannel, hos
 	}
 }
 
-// onStart counts a relay's ssh starts: each after the first of a channel of
-// an Allocation is a restart (HBEP-8, hpcburst_relay_restarts_total).
-func (k *Keeper) onStart(p string, e wire.Entry) func(agentapi.RelayChannel) {
-	return func(ch agentapi.RelayChannel) {
+// supersededByOwnReplacement reports whether the keeper itself replaced the
+// ended relay, by its own record of what it issued: e's Allocation is wanted
+// under another generation now, and the keeper issued that generation, on
+// that channel, an (E, N) of its own epoch above the ended relay's (Want.
+// OnStart). Only then is a superseded end the replacement's doing; any other
+// is unexpected and marked, as #347 states: one with no replacement, one
+// whose replacement is queued but has not started, and one the record does
+// not outrank (the science agent's condition; the delta review of PR 354).
+// The agent's refusal names no (E, N), so this record is all there is: a
+// stray relay that outranks the replacement supersedes the replacement too,
+// whose own end, of the current generation, is then marked. The caller holds
+// the lock.
+func (k *Keeper) supersededByOwnReplacement(p string, e wire.Entry, ch agentapi.RelayChannel, epoch, seq int64) bool {
+	cur, ok := k.wanted[p][e.Tag]
+	if !ok || cur.entry == e {
+		return false
+	}
+	is, ok := k.issued[p][e.Tag][ch]
+	if !ok || is.entry != cur.entry || is.epoch != k.epoch {
+		return false
+	}
+	return is.epoch > epoch || (is.epoch == epoch && is.seq > seq)
+}
+
+// onStart records the (E, N) a relay of e's Allocation started with, for its
+// generation (supersededByOwnReplacement), and counts the starts: each after
+// the first of a channel of an Allocation is a restart (HBEP-8,
+// hpcburst_relay_restarts_total).
+func (k *Keeper) onStart(p string, e wire.Entry) func(agentapi.RelayChannel, int64, int64) {
+	return func(ch agentapi.RelayChannel, epoch, seq int64) {
 		k.mu.Lock()
 		defer k.mu.Unlock()
+		if k.issued[p] == nil {
+			k.issued[p] = map[string]map[agentapi.RelayChannel]issue{}
+		}
+		if k.issued[p][e.Tag] == nil {
+			k.issued[p][e.Tag] = map[agentapi.RelayChannel]issue{}
+		}
+		k.issued[p][e.Tag][ch] = issue{entry: e, epoch: epoch, seq: seq}
 		if k.starts[p] == nil {
 			k.starts[p] = map[string]int{}
 		}
@@ -526,22 +598,30 @@ func (k *Keeper) status() wire.StatusReport {
 	return r
 }
 
-// jobs is a Provider's latest set as hostdial's listing (hostdial.JobReader):
-// while the set is unexpired, it shows each of its Allocations' jobs RUNNING
-// under its tag, except an Allocation that carries RelayEndedForGood or whose
-// final end the keeper holds (on disk or pending), which gets no relay
-// started or restarted. It is read at each start, so an end or a mark that
-// comes after a Want was made still holds that Want's starts (the review of
-// PR 354). hostdial's listing is by tag, not channel, so once an end that
-// needs the mark is held, neither of its Allocation's relays starts again,
-// as for the mark that follows. Once the set has expired, or before any set
-// since the keeper started, it is an error, so hostdial starts and restarts
-// nothing (HBEP-6: "the keeper starts or restarts a relay only under an
-// unexpired set that shows its job RUNNING under its tag, and a retry counts
-// as a start").
+// jobs is one Want's start authorization, as hostdial's listing
+// (hostdial.JobReader), read at each start. It shows the Want's job RUNNING
+// under its tag only while all of these hold:
+//   - the Provider's latest set is unexpired (HBEP-6: "the keeper starts or
+//     restarts a relay only under an unexpired set that shows its job
+//     RUNNING under its tag, and a retry counts as a start"); before any set
+//     since the keeper started, or once it has expired, it is an error, so
+//     hostdial starts and restarts nothing;
+//   - that set is the same Provider's (UID) and names the Want's host, and
+//     the claim on that host is that Provider's: so a relay whose Provider
+//     moved, or whose host another Provider claimed, never starts there again
+//     (the delta review of PR 354);
+//   - the Want is still the Allocation's: the same entry, so a replaced
+//     generation's outstanding starts are fenced, and not dropped;
+//   - the Allocation carries no RelayEndedForGood, and holds no final end,
+//     on disk or pending. hostdial's listing is by tag, not channel, so once
+//     an end that needs the mark is held, neither of its Allocation's relays
+//     starts again, as for the mark that follows (HBEP-6, as this PR amends
+//     it).
 type jobs struct {
-	k        *Keeper
-	provider string
+	k         *Keeper
+	provider  string
+	uid, host string
+	entry     wire.Entry
 }
 
 func (j jobs) ListByTag(_ context.Context, tag string) ([]provider.Job, error) {
@@ -555,8 +635,19 @@ func (j jobs) ListByTag(_ context.Context, tag string) ([]provider.Job, error) {
 	case !k.o.Now().Before(hs.expires):
 		return nil, fmt.Errorf("Provider %s's desired set has expired: no leader's listing is fresh", j.provider)
 	}
+	if tag != j.entry.Tag || hs.set.ProviderUID != j.uid || hs.host != j.host {
+		return nil, nil
+	}
+	if c, ok := k.st.Claims[j.host]; !ok || c.Provider != j.provider || c.ProviderUID != j.uid {
+		return nil, nil
+	}
+	if w, ok := k.wanted[j.provider][tag]; !ok || w.entry != j.entry || w.uid != j.uid || w.host != j.host {
+		return nil, nil
+	}
 	for _, e := range hs.set.Allocations {
-		if e.Tag == tag && !e.EndedForGood && len(k.endsOf(j.provider, e)) == 0 {
+		// The set's entry must be the Want's own, which is never marked, so an
+		// Allocation the set marks RelayEndedForGood is hidden here.
+		if e.Tag == tag && e == j.entry && len(k.endsOf(j.provider, e)) == 0 {
 			return []provider.Job{{ID: e.JobID, Name: tag, Phase: v1alpha1.AllocationRunning}}, nil
 		}
 	}

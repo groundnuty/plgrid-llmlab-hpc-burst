@@ -66,14 +66,14 @@ func (k *Keeper) claim(next *State, s wire.DesiredSet, host string, now time.Tim
 }
 
 // holdsRunning reports whether a relay of c's Provider runs on host: the
-// Runner shows it up, a process of it alive, on that login host, and it was
-// wanted under c's UID, or by no Provider the keeper still knows of.
+// Runner shows it up, a process of it alive (one still stopping included),
+// on that login host, started under c's UID. A relay is counted for the
+// Provider UID it started under, never for the latest Want of its tag, so a
+// re-created Provider's Want cannot hide its predecessor's running process
+// (the delta review of PR 354). One that names no UID is counted for any.
 func (k *Keeper) holdsRunning(c Claim, host string) bool {
 	for _, r := range k.runner.Relays(c.Provider) {
-		if r.State != wire.StateUp || r.LoginHost != host {
-			continue
-		}
-		if uid, known := k.tagUID[c.Provider][r.Tag]; !known || uid == c.ProviderUID {
+		if r.State == wire.StateUp && r.LoginHost == host && (r.ProviderUID == "" || r.ProviderUID == c.ProviderUID) {
 			return true
 		}
 	}

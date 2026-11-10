@@ -42,7 +42,7 @@ func TestASecondProvidersSetForAClaimedHostIsRefused(t *testing.T) {
 	if got := refused(t, k, wire.KindSet, set("example-a", 1, true, "login.example", entry(3))); got.Holder != "example-b" {
 		t.Errorf("the older Provider's set, the holder's relays not started: %+v, want refused naming example-b", got)
 	}
-	fr.start("example-b", entry(1).Tag)
+	fr.mustStart(t, "example-b", entry(1).Tag)
 	if got := refused(t, k, wire.KindSet, set("example-a", 1, true, "login.example", entry(3))); got.Holder != "example-b" {
 		t.Errorf("the older Provider's set, the holder's relays running: %+v, want refused naming example-b", got)
 	}
@@ -88,18 +88,17 @@ func TestTheHoldersCompleteEmptySetMakesItsClaimLapse(t *testing.T) {
 // A claim never lapses while a relay of its holder still runs there, whatever
 // its rules say: here the holder's complete empty set has asked for its
 // relays' stop, which runs in the background, so an older Provider is
-// refused until the relays are gone, then claims the host.
+// refused until the stop lands, then claims the host.
 func TestAClaimIsNotReleasedWhileItsRelaysStillRun(t *testing.T) {
 	r := newRig(t)
 	k, fr := r.open()
 	accepted(t, k, set("example-b", 1, true, "login.example", entry(1)))
-	fr.start("example-b", entry(1).Tag)
-	fr.linger = true
+	fr.mustStart(t, "example-b", entry(1).Tag)
 	accepted(t, k, set("example-b", 1, true, "login.example"))
 	if got := refused(t, k, wire.KindSet, set("example-a", 1, true, "login.example", entry(2))); got.Holder != "example-b" {
 		t.Errorf("while the holder's dropped relays still run: %+v, want refused naming example-b", got)
 	}
-	fr.reap("example-b", entry(1).Tag)
+	fr.land("example-b", entry(1).Tag)
 	accepted(t, k, set("example-a", 1, true, "login.example", entry(2)))
 	if c := r.disk().Claims["login.example"]; c.Provider != "example-a" {
 		t.Errorf("the claim on disk %+v, want example-a's once the relays were gone", c)
@@ -108,17 +107,23 @@ func TestAClaimIsNotReleasedWhileItsRelaysStillRun(t *testing.T) {
 
 // A holder whose accepted set names another host claims that one, and its
 // first claim lapses (rule 2) once its relays there no longer run: the
-// Runner moves them to the new host.
+// Runner moves them to the new host, and the old ones' stop lands.
 func TestAHolderThatMovesLetsItsFirstHostGo(t *testing.T) {
 	r := newRig(t)
 	k, fr := r.open()
 	accepted(t, k, set("example-b", 1, true, "login-1.example", entry(1)))
-	fr.start("example-b", entry(1).Tag)
+	fr.mustStart(t, "example-b", entry(1).Tag)
 	accepted(t, k, set("example-b", 1, true, "login-2.example", entry(1)))
-	fr.start("example-b", entry(1).Tag) // now on login-2.example: they hold that host, not the first
+	fr.mustStart(t, "example-b", entry(1).Tag) // now on login-2.example: they hold that host
 	if c := r.disk().Claims["login-2.example"]; c.Provider != "example-b" {
 		t.Errorf("the claim on login-2.example %+v, want example-b's", c)
 	}
+	// The old relays on login-1.example are still stopping: the host is not
+	// free until their processes are gone.
+	if got := refused(t, k, wire.KindSet, set("example-c", 1, true, "login-1.example", entry(2))); got.Holder != "example-b" {
+		t.Errorf("while example-b's old relays still stop on login-1.example: %+v, want refused naming example-b", got)
+	}
+	fr.land("example-b", entry(1).Tag)
 	accepted(t, k, set("example-c", 1, true, "login-1.example", entry(2)))
 	if c := r.disk().Claims["login-1.example"]; c.Provider != "example-c" {
 		t.Errorf("the claim on login-1.example %+v, want example-c's: example-b moved", c)
@@ -132,9 +137,9 @@ func TestARefusedMoveReleasesNoClaim(t *testing.T) {
 	r := newRig(t)
 	k, fr := r.open()
 	accepted(t, k, set("example-a", 1, true, "login-1.example", entry(1)))
-	fr.start("example-a", entry(1).Tag)
+	fr.mustStart(t, "example-a", entry(1).Tag)
 	accepted(t, k, set("example-b", 1, true, "login-2.example", entry(2)))
-	fr.start("example-b", entry(2).Tag)
+	fr.mustStart(t, "example-b", entry(2).Tag)
 	if got := refused(t, k, wire.KindSet, set("example-a", 1, true, "login-2.example", entry(1))); got.Holder != "example-b" {
 		t.Errorf("example-a's move to example-b's host: %+v, want refused naming example-b", got)
 	}
@@ -291,7 +296,7 @@ func TestAHolderWhoseRelaysRunKeepsTheHostThroughALeaderOutage(t *testing.T) {
 	r := newRig(t)
 	k, fr := r.open()
 	accepted(t, k, set("example-b", 1, true, "login.example", entry(1)))
-	fr.start("example-b", entry(1).Tag)
+	fr.mustStart(t, "example-b", entry(1).Tag)
 	r.clock.advance(time.Hour)
 	if got := refused(t, k, wire.KindSet, set("example-a", 1, true, "login.example", entry(2))); got.Holder != "example-b" {
 		t.Errorf("an hour into the holder's leader outage, with its relays running: %+v, want refused naming example-b", got)
@@ -307,7 +312,7 @@ func TestAHolderWhoseRelaysNoLongerRunLosesTheHost(t *testing.T) {
 	r := newRig(t)
 	k, fr := r.open()
 	accepted(t, k, set("example-b", 1, true, "login.example", entry(1)))
-	fr.start("example-b", entry(1).Tag)
+	fr.mustStart(t, "example-b", entry(1).Tag)
 	fr.stop("example-b", entry(1).Tag)
 	r.clock.advance(40*time.Second + 5*time.Minute - time.Millisecond)
 	if got := refused(t, k, wire.KindSet, set("example-a", 1, true, "login.example", entry(2))); got.Holder != "example-b" {

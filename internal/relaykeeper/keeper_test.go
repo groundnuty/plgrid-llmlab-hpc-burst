@@ -385,13 +385,18 @@ func TestTheStatusCountsRestartsAndRefusals(t *testing.T) {
 	accepted(t, k, set("example-a", 2, true, "login.example", entry(1), entry(2)))
 	w1, _ := fr.want("example-a", entry(1).Tag)
 	w2, _ := fr.want("example-a", entry(2).Tag)
-	for _, f := range []func(agentapi.RelayChannel){w1.OnStart, w2.OnStart} {
-		f(agentapi.RelayControl)
-		f(agentapi.RelayServing)
+	n := int64(0)
+	start := func(f func(agentapi.RelayChannel, int64, int64), ch agentapi.RelayChannel) {
+		n++
+		f(ch, k.Epoch(), n)
 	}
-	w1.OnStart(agentapi.RelayServing)
-	w1.OnStart(agentapi.RelayServing)
-	w2.OnStart(agentapi.RelayControl)
+	for _, f := range []func(agentapi.RelayChannel, int64, int64){w1.OnStart, w2.OnStart} {
+		start(f, agentapi.RelayControl)
+		start(f, agentapi.RelayServing)
+	}
+	start(w1.OnStart, agentapi.RelayServing)
+	start(w1.OnStart, agentapi.RelayServing)
+	start(w2.OnStart, agentapi.RelayControl)
 	refused(t, k, wire.KindSet, set("example-a", 1, true, "login.example"))
 	st := statusOf(t, k, "example-a")
 	if st.Restarts[agentapi.RelayServing] != 2 || st.Restarts[agentapi.RelayControl] != 1 {

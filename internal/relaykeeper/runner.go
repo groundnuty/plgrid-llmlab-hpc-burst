@@ -31,16 +31,23 @@ type Runner interface {
 	Want(provider string, ssh wire.SSH, w Want)
 	// Drop stops the relays of the Allocation tagged tag, in the background.
 	Drop(provider, tag string)
-	// Relays lists the Provider's relays, each with its login host. A relay is
-	// up only while a process of it runs: one that waits, retries or ended is
-	// not, for the claims count only relays that run (HBEP-6's third lapse
-	// rule; the review of PR 354).
+	// Relays lists the Provider's relays, each with its login host and the
+	// Provider UID of the Want it started under. A relay is up only while a
+	// process of it runs: one that waits, retries or ended is not, for the
+	// claims count only relays that run (HBEP-6's third lapse rule; the
+	// review of PR 354). A relay whose process is still stopping, after a
+	// Drop or a replacement by another identity, is listed as up, with its
+	// own host and UID, until the process is gone: a host is not free while
+	// an old process still runs there (the delta review of PR 354).
 	Relays(provider string) []wire.RelayState
 }
 
 // Want is one Allocation's relays as the keeper wants them.
 type Want struct {
 	Entry wire.Entry
+	// ProviderUID is the UID of the Provider whose set made the Want: the
+	// relays started for it carry it (RelayState.ProviderUID).
+	ProviderUID string
 	// Finals names the channels that already ended for good, each with its
 	// cause as hostdial shows it ("<kind>: <cause>"), whose relays are never
 	// started (hostdial.Target.Final). The Runner calls it when it actually
@@ -48,13 +55,18 @@ type Want struct {
 	// so an end that comes between the Want and the start keeps its channel
 	// down (the review of PR 354).
 	Finals func() map[agentapi.RelayChannel]string
-	// Jobs is the Provider's latest set as a listing, while it is unexpired:
-	// a relay starts or restarts only when it shows the job RUNNING under its
-	// tag (hostdial.Target.Jobs).
+	// Jobs is this Want's start authorization, as a listing (hostdial.Target.
+	// Jobs): a relay of it starts or restarts only when it shows the job
+	// RUNNING under its tag, which it does only while the Provider's set is
+	// unexpired, names this Want's host and Provider, the claim on that host
+	// is this Provider's, and the Want is still the Allocation's. So a
+	// replaced or moved relay's outstanding starts are fenced as soon as the
+	// keeper accepts the set that replaces or moves it.
 	Jobs hostdial.JobReader
 	// OnFinal is told of each final end, with the ended process's epoch and
 	// sequence (hostdial.Target.OnFinal).
 	OnFinal func(ch agentapi.RelayChannel, kind hostdial.EndKind, cause string, epoch, seq int64)
-	// OnStart is told of each ssh start (hostdial.Target.OnStart).
-	OnStart func(ch agentapi.RelayChannel)
+	// OnStart is told of each ssh start (hostdial.Target.OnStart), with the
+	// (E, N) the relay started with: the keeper's record of what it issued.
+	OnStart func(ch agentapi.RelayChannel, epoch, seq int64)
 }

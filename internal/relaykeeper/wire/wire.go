@@ -203,8 +203,11 @@ type RelayState struct {
 	// never srun's or ssh's output.
 	LastEnd string `json:"lastEnd"`
 	// LoginHost is the login host the relay runs through, as the Runner
-	// resolved it: the claims ask which relays run on a host.
-	LoginHost string `json:"loginHost"`
+	// resolved it, and ProviderUID the UID of the Provider whose set the
+	// relay was started under: the claims ask which relays of a Provider run
+	// on a host, each relay counted for the Provider it started under.
+	LoginHost   string `json:"loginHost"`
+	ProviderUID string `json:"providerUID"`
 }
 
 // The final ends that need the RelayEndedForGood mark.
