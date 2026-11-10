@@ -13,7 +13,9 @@ package main
 //
 // Every test here makes the collision itself: beforeFrps binds the port at the offset under test
 // after the rig has released it and before frps starts, so frps's bind finds it taken. A run in
-// which no port is taken proves nothing about the retry.
+// which no port is taken proves nothing about the retry. A fresh block can be taken too, on a
+// runner whose ports are contended, so the tests assert what the retry guarantees and not how many
+// starts there were (issue #311); the strangers and those checks are in tunnel_frps_stranger_test.go.
 
 import (
 	"errors"
@@ -30,49 +32,6 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
-
-// frpsStranger is a beforeFrps hook that binds one of frps's ports in the first attempt, and holds
-// it until the test ends: a stranger that takes the port and keeps it, as a client socket of
-// another process does for as long as its connection lives. It records the attempts it saw.
-type frpsStranger struct {
-	offset   int
-	attempts []int
-	addr     string // the address it holds
-}
-
-// installStranger sets beforeFrps to a stranger on the port at the offset, and puts the hook back
-// at the end of the test. It returns the stranger; wrap beforeFrps afterwards to add to it.
-func installStranger(t *testing.T, offset int) *frpsStranger {
-	t.Helper()
-	s := &frpsStranger{offset: offset}
-	old := beforeFrps
-	t.Cleanup(func() { beforeFrps = old })
-	beforeFrps = func(t *testing.T, attempt int, f flags) {
-		s.attempts = append(s.attempts, attempt)
-		if attempt != 0 {
-			return
-		}
-		ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(f.host.PortBase+offset)))
-		if err != nil {
-			t.Fatalf("the stranger cannot bind the port at offset %d: %v", offset, err)
-		}
-		t.Cleanup(func() { _ = ln.Close() })
-		s.addr = ln.Addr().String()
-	}
-	return s
-}
-
-// recordedLog is a logf that keeps what it was given, as well as passing it to the test's log.
-type recordedLog struct {
-	t     *testing.T
-	lines []string
-}
-
-func (l *recordedLog) logf(format string, args ...any) {
-	l.t.Helper()
-	l.lines = append(l.lines, fmt.Sprintf(format, args...))
-	l.t.Logf(format, args...)
-}
 
 // startWithRetries repeats an attempt that found a port taken, and only that: any other failure is
 // returned at once, whatever came before it, and the repeats stop at maxBindRetries. The attempts
@@ -125,8 +84,11 @@ func TestStartWithRetriesRepeatsOnlyAPortTaken(t *testing.T) {
 }
 
 // A stranger on any one of frps's three ports fails its start; the start is repeated on a fresh
-// block and the retry is logged. The stranger still holds the old port afterwards, which shows the
-// first attempt really did lose it, and frps's own log says why.
+// block and each repeat is logged. The stranger still holds the old port afterwards, which shows the
+// first attempt really did lose it, and frps's own log says why. The fresh block may be taken too,
+// on a contended runner, so the test asserts the shape of the retries (st.checkRetries): at least
+// the one repeat the stranger forced, each on a block of its own, and the last start is the one
+// that runs.
 func TestFrpsStartIsRepeatedOnAFreshBlockWhenAStrangerHoldsAPort(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -146,30 +108,28 @@ func TestFrpsStartIsRepeatedOnAFreshBlockWhenAStrangerHoldsAPort(t *testing.T) {
 			if b := r.startFrps(nil); b != nil {
 				t.Fatalf("startFrps returned a binary though none was running")
 			}
-			if !slices.Equal(st.attempts, []int{0, 1}) {
-				t.Fatalf("frps was started in attempts %v, want [0 1]: the first lost its port, the second did not", st.attempts)
-			}
-			if len(rec.lines) != 1 || !strings.Contains(rec.lines[0], fmt.Sprintf("retry 1 of %d", maxBindRetries)) || !strings.Contains(rec.lines[0], "address already in use") {
-				t.Errorf("the retry was logged as %q, want one line naming retry 1 of %d and the cause", rec.lines, maxBindRetries)
-			}
+			st.checkRetries(t, 2) // the stranger's attempt lost; any more were the runner's
+			repeats := len(st.attempts) - 1
+			rec.checkRepeats(repeats)
 			after := r.f.host
+			if last := st.hosts[repeats].PortBase; after.PortBase != last {
+				t.Errorf("the rig is on the block at %d, but the last start was on the block at %d", after.PortBase, last)
+			}
 			if after.PortBase == before.PortBase {
 				t.Errorf("the port base is still %d: the retry did not move to a fresh block", before.PortBase)
 			}
 			if after.StateDir != before.StateDir {
 				t.Errorf("the state directory changed from %s to %s", before.StateDir, after.StateDir)
 			}
-			if !listening(st.addr) || st.addr != net.JoinHostPort("127.0.0.1", strconv.Itoa(before.PortBase+tc.offset)) {
-				t.Errorf("the stranger does not hold %d (the old port at offset %d), so frps's first start was not what lost it", before.PortBase+tc.offset, tc.offset)
+			if want := net.JoinHostPort("127.0.0.1", strconv.Itoa(before.PortBase+tc.offset)); st.addrs[0] != want {
+				t.Errorf("the stranger holds %s, want %s (the old port at offset %d), so frps's first start was not what lost it", st.addrs[0], want, tc.offset)
 			}
 			for _, a := range []string{after.FrpsBindAddr(), after.FrpsTCPMuxAddr(), after.FrpsWebAddr()} {
 				if !listening(a) {
 					t.Errorf("frps does not listen on %s of the fresh block", a)
 				}
 			}
-			if log := logFrom(launcher.FrpsLogFile(after), 0); !strings.Contains(log, "address already in use") {
-				t.Errorf("frps's log has no 'address already in use': the first start failed for another reason\n%s", log)
-			}
+			checkFrpsLog(t, after, repeats)
 		})
 	}
 }
@@ -178,16 +138,34 @@ func TestFrpsStartIsRepeatedOnAFreshBlockWhenAStrangerHoldsAPort(t *testing.T) {
 // means a fresh base for the binary too, since its plugin endpoint and the frps web address it
 // reads are the base plus an offset. The test follows the whole path on the new block: the old
 // binary has returned and its plugin is gone, the new one reads the new frps's list, and an frpc
-// that logs in registers through the new plugin and turns the Instance's condition True.
+// that logs in registers through the new plugin and turns the Instance's condition True. The fresh
+// block may be taken too, on a contended runner: then every binary before the last one has returned
+// and its plugin is gone, and the last start is the one that runs.
 func TestFrpsRetryRestartsTheRunningBinaryOnTheFreshBlock(t *testing.T) {
+	restartOnFreshBlocks(t, 0)
+}
+
+// The same path when a second stranger takes a port of the first fresh block, as a contended runner
+// does by chance: the binary is restarted twice, on three blocks that share no port, and the last
+// start is the one that runs and serves. It passes, where an assertion of exactly one repeat
+// (attempts [0 1]) fails it.
+func TestFrpsRetryRestartsTheRunningBinaryWhenTheFreshBlockIsTakenToo(t *testing.T) {
+	restartOnFreshBlocks(t, 0, 1)
+}
+
+// restartOnFreshBlocks runs the path of TestFrpsRetryRestartsTheRunningBinaryOnTheFreshBlock with a
+// stranger on frps's web port in each of the attempts strangers.
+func restartOnFreshBlocks(t *testing.T, strangers ...int) {
+	t.Helper()
 	setVars(t, &tunnelReadPeriod, 2*time.Second)
 	r := newTunnelRig(t)
+	rec := &recordedLog{t: t}
+	r.logf = rec.logf
 	allocA, credA := r.allocation("al-a", v1alpha1.AllocationRunning)
 	a1 := r.instance("in-a1", allocA.Name, "")
 	b := r.start()
 	r.waitCond(b, a1, statusUnknown, reasonUnreadable) // frps is not running
-	oldPlugin := r.f.host.FrpsPluginAddr()
-	st := installStranger(t, agentapi.FrpsWebPortOffset)
+	st := installStrangers(t, agentapi.FrpsWebPortOffset, strangers...)
 
 	b2 := r.startFrps(b)
 	if b2 == nil || b2 == b {
@@ -201,18 +179,53 @@ func TestFrpsRetryRestartsTheRunningBinaryOnTheFreshBlock(t *testing.T) {
 	default:
 		t.Error("the old binary still runs")
 	}
-	if listening(oldPlugin) {
-		t.Errorf("the old plugin endpoint %s still listens", oldPlugin)
+	st.checkRetries(t, len(strangers)+1) // each stranger's attempt lost; the last start won
+	repeats := len(st.attempts) - 1
+	rec.checkRepeats(repeats)
+	last := st.hosts[repeats]
+	if r.f.host.PortBase != last.PortBase {
+		t.Errorf("the rig is on the block at %d, but the last start was on the block at %d", r.f.host.PortBase, last.PortBase)
 	}
-	if !slices.Equal(st.attempts, []int{0, 1}) {
-		t.Errorf("frps was started in attempts %v, want [0 1]", st.attempts)
+	for _, h := range st.hosts[:repeats] { // every binary before the last one returned
+		if listening(h.FrpsPluginAddr()) {
+			t.Errorf("the plugin endpoint %s of the block at %d, which a retry left, still listens", h.FrpsPluginAddr(), h.PortBase)
+		}
 	}
+	if !listening(last.FrpsPluginAddr()) {
+		t.Errorf("the plugin endpoint %s of the last block does not listen: the binary that serves is not on it", last.FrpsPluginAddr())
+	}
+	checkFrpsLog(t, last, repeats)
 	r.waitCond(b2, a1, statusFalse, reasonOffline) // the new binary reads the new frps's list
 	r.runFrpc(credA, uid(a1))
 	r.waitCond(b2, a1, statusTrue, reasonOnline) // frps posted to the new plugin, which admitted it
 	if err := b2.stop(t); err != nil {
 		t.Fatalf("run returned %v after its context ended, want nil", err)
 	}
+}
+
+// A stranger on a port of every block the retry may use leaves it no start to succeed: it ends at
+// the bound, maxBindRetries repeats and so maxBindRetries + 1 starts, each on a block of its own and
+// each logged, and returns the taken port as its error. A retry that stops early leaves fewer
+// starts than the strangers took, and fails here. The starts are made through startWithRetries, as
+// TestFrpsStartIsNotRepeatedForAnyOtherFailure makes them, since startFrps would end the test at
+// the error.
+func TestFrpsStartEndsAtTheBoundWhenEveryBlockIsTaken(t *testing.T) {
+	r := newTunnelRig(t)
+	rec := &recordedLog{t: t}
+	r.logf = rec.logf
+	var every []int
+	for n := 0; n <= maxBindRetries; n++ {
+		every = append(every, n)
+	}
+	st := installStrangers(t, agentapi.FrpsWebPortOffset, every...)
+
+	err := startWithRetries(r.logf, r.tryFrps, func(int) { r.freshBlock(nil) })
+	if !errors.Is(err, errFrpsPortTaken) || !strings.Contains(err.Error(), fmt.Sprintf("after %d retries", maxBindRetries)) {
+		t.Errorf("the start returned %v, want the taken port, after %d retries", err, maxBindRetries)
+	}
+	st.checkRetries(t, maxBindRetries+1) // each attempt lost its port, so each one was made, and no more
+	rec.checkRepeats(maxBindRetries)
+	checkFrpsLog(t, r.f.host, maxBindRetries+1)
 }
 
 // A start that fails for any other reason is not repeated, even after a repeat that was right. The
