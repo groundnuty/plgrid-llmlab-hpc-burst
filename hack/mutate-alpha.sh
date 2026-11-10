@@ -718,11 +718,11 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'internal/providerctl/conformance/hostdialed_verdict_test.go@@	for _, v := range privateParts(o) {@@	for _, v := range privateParts(hostDialedObs{}) {'
   'internal/providerctl/conformance/hostdialed_verdict_test.go@@		if short, _, ok := strings.Cut(v, "."); ok {@@		if short, _, ok := strings.Cut(v, "."); false && ok {'
   'internal/providerctl/conformance/hostdialed_verdict_test.go@@	return "set, another"@@	return "set, the same"'
-  # #308: the guards between the rehearsal's sshd sweep and a process the test did not start. Guard 1 (pool.go's spawn) stores no sshd
-  # whose row it cannot read, and guard 2 (below) walks nothing from PID 1 or less, a row with no start time or a recycled root: each
-  # alone closes the bad-root class. Guard 3 (signalProcs) alone bounds a row from any source to what is strictly below the test, a child
-  # subreaper, by a walk whose every parent started no later than its child. One mutant per branch; the ones left out are equivalent at the
-  # refusal (the walk's parent <= 1 stop, the unchanged-parent stop of a re-walk) or span lines (record's skip of a reaped sshd).
+  # #308: what stands between the rehearsal's sshd sweep and a process the test did not start, one mutant per branch. Guard 1 (pool.go's
+  # spawn) stores no exited, unreadable or timeless sshd; guard 2 (below) walks nothing from PID 1 or less, a timeless or a recycled root;
+  # guard 3 (signalProcs) signals only what is strictly below the test, by a start-time-ordered walk, and reports the rest as leaks, never
+  # signalled; the forced command (relayguard.go) dies with its sshd. Each holds for its own class only: guard 1 does not cover a PID
+  # recycled between record's check and its walk (guard 2 does), and guard 3 does not tell the tests of one binary apart.
   'internal/rehearsal/pool.go@@if err != nil || !live || self.pid != pid || self.ticks == 0 {@@if false {'
   'internal/rehearsal/procs.go@@if root.pid <= 1 {@@if root.pid < 0 {'
   'internal/rehearsal/procs.go@@if root.ticks == 0 {@@if false {'
@@ -732,15 +732,21 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'internal/rehearsal/signal.go@@case r.ticks == 0:@@case false:'
   'internal/rehearsal/signal.go@@case o.ancestors[r.pid]:@@case false:'
   'internal/rehearsal/signal.go@@if !below {@@if !below && false {'
-  'internal/rehearsal/signal.go@@case !live || p.ticks > child.ticks:@@case !live:'
-  'internal/rehearsal/signal.go@@case !live || p.ticks > child.ticks:@@case (!live && false) || p.ticks > child.ticks:'
-  'internal/rehearsal/signal.go@@if err != nil || below || !moved || walks >= maxWalks {@@if true || !moved {'
+  'internal/rehearsal/signal.go@@case p.ticks > child.ticks:@@case false:'
+  'internal/rehearsal/signal.go@@case !plive:@@case false && !plive:'
   'internal/rehearsal/signal.go@@case perr != nil:@@case false:'
-  'internal/rehearsal/signal.go@@return o.self.ticks <= child.ticks, false, nil@@return true, false, nil'
-  # The stop always returns (it ends the pool's own sshds through cmd.Process, and its wait is bounded), and it reaps what it adopted.
+  'internal/rehearsal/signal.go@@if o.self.ticks > child.ticks {@@if false {'
+  # The leak report and its count, the stop's order, its kill of its own sshds, its bound and its report of survivors.
+  'internal/rehearsal/signal.go@@o.api.leaks.Add(1)@@o.api.leaks.Add(0)'
+  'internal/rehearsal/signal.go@@if n > 0 {@@if false {'
+  'internal/rehearsal/pool.go@@if c := cmp.Compare(depth[b.pid], depth[a.pid]); c != 0 {@@if c := cmp.Compare(depth[a.pid], depth[b.pid]); c != 0 {'
   'internal/rehearsal/pool.go@@if err := s.api.kill(p.cmd.Process); err != nil {@@if err := error(nil); err != nil {'
   'internal/rehearsal/pool.go@@case <-time.After(time.Until(deadline)):@@case <-make(chan time.Time):'
-  'internal/rehearsal/signal.go@@if err := api.reap(r.pid); err != nil && !errors.Is(err, syscall.ECHILD) {@@if err := error(nil); err != nil {'
+  'internal/rehearsal/pool.go@@if now, ok := readProcRow(r.pid); ok && now.ticks == r.ticks {@@if now, ok := readProcRow(r.pid); false && ok && now.ticks == r.ticks {'
+  # The forced command's parent-death signal, its parent check, and the role that runs them.
+  'internal/rehearsal/relayguard.go@@if err := deathSignal(); err != nil {@@if err := error(nil); err != nil {'
+  'internal/rehearsal/relayguard.go@@if c := comm(ppid); !strings.HasPrefix(c, "sshd") {@@if c := comm(ppid); false && !strings.HasPrefix(c, "sshd") {'
+  'internal/rehearsal/relayguard.go@@if os.Getenv(EnvRole) != RoleRelay {@@if true {'
 )
 # The mutants of a test of this script: a file with one mutant per line, in place of the list above.
 [ -z "${MUTATE_ALPHA_MUTANTS:-}" ] || mapfile -t mutants < "$MUTATE_ALPHA_MUTANTS"
@@ -755,8 +761,9 @@ compile_of() {
   esac
 }
 # The tests of the rehearsal kind: the sweep guards' (internal/rehearsal: procs_test.go, signal_test.go, pool_test.go), which start no
-# sshd and send no signal; their stand-ins (true, sh, cat) end on their own.
-rehearsal_tests='ExitedSSHD|ZeroRowSignalsNothing|BelowWalksNothing|Guard2Alone|SignalProcs|RefusalIsTheErrorOfClose|WithRelayEnvSelectsNothing|CloseReturnsWhen|OrphanOfTheNode'
+# sshd and send no signal; their stand-ins (true, sh, cat, this binary as a forced command) end on their own, the last by the kernel's
+# parent-death SIGKILL, which it asks for.
+rehearsal_tests='ExitedSSHD|ZeroRowSignalsNothing|BelowWalksNothing|Guard2Alone|SignalProcs|RefusalIsTheErrorOfClose|WithRelayEnvSelectsNothing|ReportLeaks|CloseReturnsWhen|BeforeItsParent|LeftTheTree|StillAliveAtItsDeadline|RelayGuard|ForcedCommandDies'
 # The tests of the script's kind.
 script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot|HostDialedMode'
 # tests_of <path> [control|<names>]: the command that judges a mutant of path, in the array tests. With control, the same command with
