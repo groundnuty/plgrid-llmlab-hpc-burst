@@ -61,40 +61,52 @@ var (
 // them only while it serves, and creates them at 0.
 func (r *rig) countReads(what string, keys ...eventcount.Key) map[eventcount.Key]eventcount.Read {
 	r.t.Helper()
-	url := r.ports.URL(12, "/metrics")
 	var out map[eventcount.Key]eventcount.Read
 	stack.WaitState(r.t, stack.WaitDeadline, "the controller's /metrics from a serving copy, for "+what, func() (bool, string) {
-		sent := time.Now()
-		resp, err := (&http.Client{Timeout: 10 * time.Second}).Get(url)
-		if err != nil {
-			return false, err.Error()
-		}
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
-		resp.Body.Close()
-		answered := time.Now()
-		if err != nil || resp.StatusCode != http.StatusOK {
-			return false, fmt.Sprintf("status %d, %v", resp.StatusCode, err)
-		}
-		reads := map[eventcount.Key]eventcount.Read{}
-		for _, k := range keys {
-			rd, err := eventcount.ParseRead(body, k)
-			if err != nil {
-				return false, err.Error()
-			}
-			rd.Sent, rd.Answered = sent, answered
-			serving := rd.HasProcessStart
-			for _, c := range eventcount.LifecycleCollectors {
-				serving = serving && rd.Collectors[c]
-			}
-			if !serving || !rd.HasCount {
-				return false, fmt.Sprintf("serving %v, %s present %v", serving, k, rd.HasCount)
-			}
-			reads[k] = rd
+		reads, why := r.readCountsOnce(keys...)
+		if why != "" {
+			return false, why
 		}
 		out = reads
 		return true, ""
 	})
 	return out
+}
+
+// readCountsOnce is one read of countReads: the series keys from one body of
+// the lifecycle controller's /metrics. It returns why, and no reads, unless
+// the body is a serving copy's (both success gauges and the process's start
+// time) and has every series.
+func (r *rig) readCountsOnce(keys ...eventcount.Key) (map[eventcount.Key]eventcount.Read, string) {
+	r.t.Helper()
+	sent := time.Now()
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Get(r.ports.URL(12, "/metrics"))
+	if err != nil {
+		return nil, err.Error()
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	resp.Body.Close()
+	answered := time.Now()
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return nil, fmt.Sprintf("status %d, %v", resp.StatusCode, err)
+	}
+	reads := map[eventcount.Key]eventcount.Read{}
+	for _, k := range keys {
+		rd, err := eventcount.ParseRead(body, k)
+		if err != nil {
+			return nil, err.Error()
+		}
+		rd.Sent, rd.Answered = sent, answered
+		serving := rd.HasProcessStart
+		for _, c := range eventcount.LifecycleCollectors {
+			serving = serving && rd.Collectors[c]
+		}
+		if !serving || !rd.HasCount {
+			return nil, fmt.Sprintf("serving %v, %s present %v", serving, k, rd.HasCount)
+		}
+		reads[k] = rd
+	}
+	return reads, ""
 }
 
 // absenceBase is the first read of the absence checks that cover one serving
@@ -142,23 +154,32 @@ func (r *rig) baseline(what string, keys ...eventcount.Key) *absenceBase {
 			b.orphanable = append(b.orphanable, uid)
 		}
 	}
+	b.startToReady = r.startToReadySnapshot("the first read's start-to-ready times")
+	for k, rd := range b.reads {
+		r.t.Logf("ABSENCE first read %s (%s): %g at %s", k, what, rd.Count, ts(rd.Answered))
+	}
+	return b
+}
+
+// startToReadySnapshot reads each ModelDeployment's per-class start-to-ready
+// times from the API, by name, as their status records them: the first read's
+// snapshot (baseline) and the wait before it (part3.armFirstRead).
+func (r *rig) startToReadySnapshot(what string) map[string]map[v1alpha1.AcceleratorClass]time.Duration {
+	r.t.Helper()
 	var mds v1alpha1.ModelDeploymentList
 	ctx, cancel := stack.CallCtx(r.t)
 	err := r.c.List(ctx, &mds)
 	cancel()
 	if err != nil {
-		r.t.Fatalf("list ModelDeployments for the first read's start-to-ready times: %v", err)
+		r.t.Fatalf("list ModelDeployments for %s: %v", what, err)
 	}
-	b.startToReady = map[string]map[v1alpha1.AcceleratorClass]time.Duration{}
+	out := map[string]map[v1alpha1.AcceleratorClass]time.Duration{}
 	for i := range mds.Items {
 		if mds.Items[i].Namespace == stack.Namespace {
-			b.startToReady[mds.Items[i].Name] = classStartToReady(&mds.Items[i])
+			out[mds.Items[i].Name] = classStartToReady(&mds.Items[i])
 		}
 	}
-	for k, rd := range b.reads {
-		r.t.Logf("ABSENCE first read %s (%s): %g at %s", k, what, rd.Count, ts(rd.Answered))
-	}
-	return b
+	return out
 }
 
 // judgeAbsence takes the second read and applies the four conditions. A
