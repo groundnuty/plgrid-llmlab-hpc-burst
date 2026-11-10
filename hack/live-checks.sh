@@ -92,7 +92,8 @@
 #                                the grant account of each job kind
 #   The alpha rows (issue #194; docs/alpha-runbook.md) also read, for the rows that run the stack
 #   (alpha-*, tunnel-hour-*):
-#   LIVE_DIALHOME_MODE           direct, ssh or host-dialed: how the jobs and the host reach each other (HBEP-6)
+#   LIVE_DIALHOME_MODE           direct, ssh or host-dialed: how the jobs and the host reach each other (HBEP-6); the reach
+#                                rows read it too, and are NOT RUN (exit 3) in host-dialed mode (issue #305)
 #   LIVE_DIALHOME_ADDR           host:port of the dial-home route, as the compute nodes see it; direct and ssh need it,
 #                                host-dialed has none because the host dials the jobs, and refuses one that is set
 #   LIVE_DIALHOME_KEY            ssh mode only: the restricted dial-home key file, mode 600
@@ -113,7 +114,9 @@
 #                                digit in it, no dotted name or address, no colon. At most 120 bytes. A row that needs it
 #                                refuses (exit 3) without a valid one. Example: the development host, outside Cyfronet
 #                                (3.4 ms to the Helios login, behind a gateway)
-#   The reach rows (issue #225) confirm that a compute node reaches the gateway's forwarded port:
+#   The reach rows (issue #225) confirm that a compute node reaches the gateway's forwarded port, in direct and ssh modes only;
+#   in host-dialed mode the host dials the jobs and they are NOT RUN, exit 3, before anything is built or asked of a cluster
+#   (issue #305: the reach-host-dialed rows are that mode's check, and need neither these settings nor LIVE_DIALHOME_MODE):
 #   LIVE_PROBE_HOST, LIVE_PROBE_PORT   the forwarded port as the compute nodes see it; private, read only by the reach rows,
 #                                and never printed, shown on the screen or posted (the host a name or an address, the port 1 to 65535)
 #   LIVE_PROBE_LABEL             the only name of that port in public output (the text to post); letters, digits, dots,
@@ -172,6 +175,8 @@ gpu-accounting-helios|cluster|internal/providerctl/conformance|^TestGPUAccountin
 gpu-accounting-athena|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
 reach-helios|cluster|internal/providerctl/conformance|^TestReach$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
 reach-athena|cluster|internal/providerctl/conformance|^TestReach$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
+reach-host-dialed-helios|cluster|internal/providerctl/conformance|^TestReachHostDialed$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host,linux-arm64|ready
+reach-host-dialed-athena|cluster|internal/providerctl/conformance|^TestReachHostDialed$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
 rehearsal|cluster|-|-|-|-|-|pending
 # END LIVE TESTS
 TABLE
@@ -206,6 +211,11 @@ TABLE
 # has its own time limit of 2 min (reachTimeLimit in reach_run_test.go, not the harness's 5 min: a stalled job holds the one-job
 # slot that long at most). The Helios row asks for -C memfs, as the Helios profile does for
 # every job.
+# reach-host-dialed-helios and reach-host-dialed-athena (issue #305) run the real agent in host-dialed mode with no Instance, in one
+# job of the reach rows' shape and slots, with a start wait of 10 min and a time limit of 5 min (hostDialedTimeLimit in
+# internal/providerctl/conformance; a run that goes well ends in about one); the control-plane host dials the job through the login
+# node, two relays as the Provider's controller starts them (HBEP-6, Dial-home modes). Their timeout is the start wait and the
+# waits their test adds up to (budget_test.go). They take no probe setting and no dial-home setting: the mode is the row's.
 # gpu-accounting-helios (issue #194) has the same two guards as conformance-helios-gh200: it starts only when squeue --me shows
 # no job in QOS now, and its one job must start within 10 min of its acceptance (else cancelled by its tag, NOT RUN, exit 3). The
 # row's other guard, the wait of LIVE_PENDING_MAX_SECONDS, applies to gpu-accounting-athena only, which has no slot.
@@ -237,13 +247,16 @@ gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH20
 gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|25|-
 reach-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:02:00|20|-C memfs|10
 reach-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|1|1Gi|00:02:00|20|-|10
+reach-host-dialed-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|25|-C memfs|10
+reach-host-dialed-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|1|1Gi|00:05:00|25|-|10
 # END CLUSTER SHAPES
 TABLE
 }
 
 # The rows that run the whole stack (the controllers, the front, frps and the agent) take the dependency
 # closure of these packages too, in each of their build contexts, so --plan names them when a stack package
-# changes: the thin test package alone would show none of it. name | packages (comma separated). The
+# changes: the thin test package alone would show none of it. The host-dialed relay rows (issue #305) take the
+# agent's, which their job runs and their test does not import. name | packages (comma separated). The
 # rehearsal row (issue #193) builds exactly these packages and runs the binaries (prepare_rehearsal below;
 # hack/livechecks compares them with the go build line of hack/rehearsal.sh).
 plan_stack_table() {
@@ -254,6 +267,8 @@ alpha-helios-nooverlap|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,c
 tunnel-hour-helios|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 tunnel-hour-athena|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 rehearsal-part3|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
+reach-host-dialed-helios|cmd/hb-agent
+reach-host-dialed-athena|cmd/hb-agent
 # END PLAN STACK
 TABLE
 }
@@ -271,6 +286,8 @@ gpu-accounting-helios|1
 gpu-accounting-athena|1
 reach-helios|1
 reach-athena|1
+reach-host-dialed-helios|1
+reach-host-dialed-athena|1
 # END MOST JOBS
 TABLE
 }
@@ -373,6 +390,7 @@ alias_table() {
 tunnel-hour|tunnel-hour-helios,tunnel-hour-athena
 gpu-accounting|gpu-accounting-helios,gpu-accounting-athena
 reach|reach-helios,reach-athena
+reach-host-dialed|reach-host-dialed-helios,reach-host-dialed-athena
 # END ALIASES
 TABLE
 }
@@ -532,7 +550,10 @@ check_settings() {
         fi
         case $name in
           alpha-*|tunnel-hour-*) check_alpha_settings "$name" || bad=1 ;;
-          reach-*) check_reach_settings || bad=1 ;;
+          # The host-dialed relay rows take no probe setting; a reach row in host-dialed mode is refused when it would run
+          # (run_cluster), so its probe settings are not asked for.
+          reach-host-dialed-*) ;;
+          reach-*) reach_is_host_dialed || check_reach_settings || bad=1 ;;
         esac
         [ -z "${FRONTLABEL[$name]:-}" ] || check_front_label || bad=1
         check_owner_go "$name" || bad=1 ;;
@@ -648,6 +669,11 @@ check_reach_settings() {
   if [ -n "$port" ] && [ -n "$lc" ] && { [[ $lc == *"$port"* ]] || [[ $flat_l == *"$port"* ]]; }; then say "live-checks: LIVE_PROBE_LABEL holds the port; the label is what is posted, so it must not"; bad=1; fi
   return $bad
 }
+
+# reach_is_host_dialed: whether the settings put this host in host-dialed mode (LIVE_DIALHOME_MODE, HBEP-6, Dial-home modes),
+# where the reach rows have nothing to check: the compute nodes never dial the host, so the forwarded port they probe is not
+# the path (issue #305). The host-dialed relay rows are the check there.
+reach_is_host_dialed() { [ "${S[LIVE_DIALHOME_MODE]:-}" = host-dialed ]; }
 
 # check_alpha_settings <name>: what a row that runs the stack needs besides a cluster test's own settings: the
 # dial-home route (the owner provides it, HBEP-6) and the directory with the pinned binaries. Every problem
@@ -1049,6 +1075,7 @@ env_conformance() {
   up=$(printf '%s' "$host" | tr a-z A-Z)
   unset HPCBURST_CONF_GPU_MODEL HPCBURST_CONF_CPU_ARCH HPCBURST_CONF_DATA_PARSER HPCBURST_CONF_QOS HPCBURST_CONF_START_WAIT
   unset HPCBURST_CONF_PROBE_HOST HPCBURST_CONF_PROBE_PORT HPCBURST_CONF_PROBE_LABEL HPCBURST_ALPHA_PROBE_HOST HPCBURST_ALPHA_PROBE_PORT HPCBURST_ALPHA_PROBE_LABEL
+  unset HPCBURST_CONF_AGENT_BUILDS HPCBURST_ALPHA_AGENT_BIN
   export HPCBURST_CONFORMANCE=1 HPCBURST_CONF_PROFILE=${PROFILE[$n]} HPCBURST_CONF_PARTITION=${PARTITION[$n]}
   export HPCBURST_CONF_CREDENTIALS=${S[LIVE_CONF_CREDENTIALS_$up]} HPCBURST_CONF_ACCOUNT=${S[${ACCTKEY[$n]}]}
   export HPCBURST_CONF_GPUS=${GPUS[$n]} HPCBURST_CONF_CPUS=${CPUS[$n]} HPCBURST_CONF_MEMORY=${MEM[$n]}
@@ -1070,6 +1097,8 @@ env_conformance() {
   # The gateway's forwarded port reaches the reach rows only (issue #225); the host and the port are private, the label is
   # what the text to post carries.
   case $n in
+    # The host-dialed relay rows (issue #305) take the agent builds their job runs, and no probe setting.
+    reach-host-dialed-*) export HPCBURST_CONF_AGENT_BUILDS=$HD_BUILD_DIR ;;
     reach-*) export HPCBURST_CONF_PROBE_HOST=${S[LIVE_PROBE_HOST]} HPCBURST_CONF_PROBE_PORT=${S[LIVE_PROBE_PORT]} HPCBURST_CONF_PROBE_LABEL=${S[LIVE_PROBE_LABEL]} ;;
   esac
   # Where the front ran (issue #224): the variable is not HPCBURST_CONF_*, so the accounting rows' dry runs, which drop that
@@ -1188,8 +1217,25 @@ prepare_cluster() {
   case $1 in
     real-engine) prepare_real_engine "$1" ;;
     alpha-*|tunnel-hour-*) prepare_alpha "$1" ;;
+    reach-host-dialed-*) prepare_host_dialed "$1" ;;
     *) build_test_binary "$1" "$OUT/$1.test" ;;
   esac
+}
+
+# prepare_host_dialed <name>: the test binary and the agent builds that the Provider's controller stages for the job
+# (hack/build-agents.sh: the real agent, for each cpuArch), before the slot is taken (issue #305). The test finds them
+# through HPCBURST_CONF_AGENT_BUILDS. Nothing here holds the slot.
+HD_BUILD_DIR=""
+prepare_host_dialed() {
+  local n=$1 w
+  w="$OUT/$n-build-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  mkdir -m 700 "$w" || { say "$n: FAIL (the build directory could not be made)"; return 1; }
+  say "$n: building the test binary and the agent builds"
+  ( cd "$ROOT" &&
+    with_build_lock go test -c -o "$OUT/$n.test" "./${PKG[$n]}" &&
+    with_build_lock hack/build-agents.sh "$w/agent-builds" ) >"$OUT/$n-build.log" 2>&1 ||
+    { say "$n: FAIL (a build step failed; see the build log in the output directory)"; return 1; }
+  HD_BUILD_DIR=$w/agent-builds
 }
 
 # prepare_alpha <name>: the test binary, the three host binaries of the stack, and the agent and frpc builds of
@@ -1237,6 +1283,15 @@ release_run_lock() { [ -z "$RUN_FD" ] || { eval "exec ${RUN_FD}>&-"; RUN_FD=""; 
 # the slot, the run, the cleanup, the report. The slot's use starts after the builds.
 run_cluster() {
   local n=$1 host=${HOST[$1]} t0 t1 verdict=0 est
+  # A reach row in host-dialed mode has no path to probe: it is NOT RUN before anything is built or asked of a cluster.
+  case $n in
+    reach-host-dialed-*) ;; # the host-dialed relay rows run in that mode whatever the setting says
+    reach-*)
+      if reach_is_host_dialed; then
+        say "$n: NOT RUN (the reach check applies only to direct and ssh modes; LIVE_DIALHOME_MODE is host-dialed, where the host dials the jobs: run reach-host-dialed instead; not a failure)"
+        return 3
+      fi ;;
+  esac
   local qos="" sw=""; [ "${QOS[$n]}" = - ] || qos=", qos ${QOS[$n]}"
   [ "${SWAIT[$n]:--}" = - ] || sw=", each job to start within ${SWAIT[$n]} min"
   local jobs="one job"

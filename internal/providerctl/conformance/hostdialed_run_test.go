@@ -131,14 +131,14 @@ func (w *world) runProbe(ctx context.Context, jobID, allocDir string) (*probeRep
 	if err != nil {
 		return nil, err.Error()
 	}
-	ctx, cancel := context.WithTimeout(ctx, w.bound(hostDialedProbeWait))
+	ctx, cancel := context.WithTimeout(ctx, hostDialedProbeWait)
 	defer cancel()
 	read := probeReadSeconds
 	if w.probeRead > 0 {
 		read = w.probeRead
 	}
 	script := strings.ReplaceAll(servingProbeScript, "@READ_SECONDS@", strconv.Itoa(read))
-	res, err := w.cap.Run(ctx, slurm.Command{Line: line, Stdin: []byte(script), Timeout: w.bound(hostDialedProbeWait)})
+	res, err := w.cap.Run(ctx, slurm.Command{Line: line, Stdin: []byte(script), Timeout: hostDialedProbeWait})
 	if err != nil || res.ExitCode != 0 {
 		return nil, fmt.Sprintf("the probe's step did not end well (exit %d, err %v)", res.ExitCode, err)
 	}

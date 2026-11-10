@@ -40,6 +40,12 @@ if [ -n "${HPCBURST_CONFORMANCE:-}" ]; then
     *" -test.run ^TestReach$ "*)
       export HPCBURST_ALPHA_ROW="reach-$HPCBURST_CONF_PROFILE" HPCBURST_ALPHA_PROBE_HOST="$HPCBURST_CONF_PROBE_HOST" \
         HPCBURST_ALPHA_PROBE_PORT="$HPCBURST_CONF_PROBE_PORT" HPCBURST_ALPHA_PROBE_LABEL="$HPCBURST_CONF_PROBE_LABEL" ;;
+    *" -test.run ^TestReachHostDialed$ "*)
+      # The host-dialed relay rows (issue #305): the agent the fake node runs is the one the caller built (the stub go
+      # builds nothing real), the relays' ssh is the real one (the stubs come off PATH), and the run's directories are
+      # a short one of the caller's, since a unix socket's path has at most 107 bytes.
+      export HPCBURST_ALPHA_ROW="reach-host-dialed-$HPCBURST_CONF_PROFILE" HPCBURST_ALPHA_AGENT_BIN="${STUB_AGENT_BIN:-}" TMPDIR="${STUB_SHORT_TMP:-$TMPDIR}"
+      export PATH="${PATH#"${STUB_STATE%/state}/bin:"}" ;;
     *) export HPCBURST_ALPHA_ROW="gpu-accounting-$HPCBURST_CONF_PROFILE" ;;
   esac
   export HPCBURST_ALPHA_OUT="$HPCBURST_CONF_OUT"

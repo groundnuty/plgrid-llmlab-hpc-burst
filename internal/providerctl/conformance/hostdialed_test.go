@@ -26,13 +26,6 @@ func hostDialedDryRun(t *testing.T, row, fault string) (*stopRecorder, string, s
 	w.t = rec
 	ends(func() { hostDialedBody(rec, w, g, row) })
 	posts, _ := os.ReadFile(filepath.Join(out, alpha.PostsFile))
-	if d := os.Getenv("HB_K305_DEBUG"); d != "" {
-		logs, _ := filepath.Glob(filepath.Join(out, "run-*.log"))
-		for _, l := range logs {
-			b, _ := os.ReadFile(l)
-			_ = os.WriteFile(filepath.Join(d, filepath.Base(t.Name())+".log"), b, 0o600)
-		}
-	}
 	return rec, string(posts), out
 }
 

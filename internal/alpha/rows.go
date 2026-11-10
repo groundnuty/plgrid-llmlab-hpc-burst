@@ -344,8 +344,8 @@ var reachRows = []Row{
 // that goes well ends in about one. Each is under its one-job slot with a start wait of 10 minutes, as
 // the reach rows are, so the slot hold is the start wait, the lease and a minute for the end.
 var hostDialedRows = []Row{
-	{Name: "reach-host-dialed-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: 5 * time.Minute, Budget: 27 * time.Minute, SlotHold: 16 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#305 and #145"},
-	{Name: "reach-host-dialed-athena", Cluster: "athena", Partition: "plgrid-now", GPUs: 1, Lease: 5 * time.Minute, Budget: 27 * time.Minute, SlotHold: 16 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#305 and #145"},
+	{Name: "reach-host-dialed-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: 5 * time.Minute, Budget: 25 * time.Minute, SlotHold: 16 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#305 and #145"},
+	{Name: "reach-host-dialed-athena", Cluster: "athena", Partition: "plgrid-now", GPUs: 1, Lease: 5 * time.Minute, Budget: 25 * time.Minute, SlotHold: 16 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#305 and #145"},
 }
 
 // Rows returns a copy of the stack rows: the ones this package runs.

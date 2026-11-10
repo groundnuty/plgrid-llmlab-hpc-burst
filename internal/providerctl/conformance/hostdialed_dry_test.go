@@ -102,6 +102,12 @@ func dryAgentBinary(t testing.TB) []byte {
 // dryReachHostDialed is the dry run of TestReachHostDialed.
 func dryReachHostDialed(t *testing.T) {
 	t.Helper()
+	// Before anything else, as dryWorld does again: a dry pass must never stand for a live one.
+	for _, k := range os.Environ() {
+		if strings.HasPrefix(k, "HPCBURST_CONF") {
+			t.Fatalf("a dry run refuses to start with live settings present (%s)", strings.SplitN(k, "=", 2)[0])
+		}
+	}
 	row := os.Getenv("HPCBURST_ALPHA_ROW")
 	fault := os.Getenv("HPCBURST_ALPHA_DRY_FAULT")
 	w, g := dryHostDialedWorld(t, row, fault, os.Getenv("HPCBURST_ALPHA_OUT"))
@@ -120,16 +126,19 @@ func dryHostDialedWorld(t *testing.T, row, fault, out string) (*world, *hostDial
 	}
 	rehearsal.RequireTools(t)
 	agent := dryAgentBinary(t)
-	// Short paths: the job's TMPDIR holds the agent's socket (at most 107 bytes) and the login node's directory its own.
-	base, err := os.MkdirTemp("", "hdd")
+	// Short paths, each a directory of its own right under TMPDIR: the job's TMPDIR holds the agent's socket (at most 107
+	// bytes), the login node's directory its own sockets, and the relays' control directory a socket path sshrun holds to
+	// 90 bytes. Through the script TMPDIR is a short one of the caller's (dryWrapper).
+	base, err := os.MkdirTemp("", "d")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(base) })
-	ctlDir := filepath.Join(base, "c")
-	if err := os.Mkdir(ctlDir, 0o700); err != nil {
+	ctlDir, err := os.MkdirTemp("", "c")
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(ctlDir) })
 	stepPath := os.Getenv("PATH")
 	if tools, ok := dryNodeFaults[fault]; ok {
 		stubs := filepath.Join(base, "stubs")
@@ -188,15 +197,16 @@ func dryHostDialedWorld(t *testing.T, row, fault, out string) (*world, *hostDial
 		login: login,
 		kit:   func(k *worldKit) { k.hostDialed, k.poll = g, time.Second },
 	})
-	// Short bounds, so a fault whose session never comes up ends in seconds; the probe's still lets a connection with no
-	// session wait out the agent's own wait for one (hostdial.DefaultWait) and then read.
+	// Short bounds, so a fault whose session never comes up ends in seconds: a fault's run waits out its bounds by design
+	// (what it breaks never comes), and a healthy run ends each wait at once. The probe keeps its own bound, which it never
+	// reaches: it ends by itself once a connection with no session has waited out the agent's wait for one
+	// (hostdial.DefaultWait) and its read of 5 s.
 	w.pace, w.probeRead = 200*time.Millisecond, 5
-	w.shorten = func(d time.Duration) time.Duration {
-		if d == hostDialedProbeWait {
-			return hostdial.DefaultWait + time.Duration(w.probeRead)*time.Second + 10*time.Second
-		}
-		return min(d, 20*time.Second)
+	limit := 20 * time.Second
+	if fault != "" {
+		limit = 10 * time.Second
 	}
+	w.shorten = func(d time.Duration) time.Duration { return min(d, limit) }
 	g.startHostSide(t, w)
 	return w, g
 }

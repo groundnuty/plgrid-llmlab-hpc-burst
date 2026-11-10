@@ -117,7 +117,7 @@ func judgeHostDialed(o hostDialedObs) []hostDialedCheck {
 	// The control session: the agent's registration and its stop crossed it.
 	switch {
 	case o.Registered < 1 && o.JobEnded:
-		add(checkControl, false, "did not come up: the job ended before the agent registered (the agent's output is in job.err in the Allocation's directory)")
+		add(checkControl, false, "did not come up: the job ended before the agent registered, so the agent stopped at its start (a job with no TMPDIR, a node with no Apptainer: HBEP-4, open questions 15 and 16)")
 	case o.Registered < 1:
 		add(checkControl, false, "did not come up: no registration of the agent reached the agent API over it (%d relay start(s), the last end: %s)", ctl.Starts, endText(ctl))
 	case !o.Stopped:
