@@ -315,6 +315,18 @@ func (h Host) FrpsWebPasswordFile() string {
 	return filepath.Join(h.StateDir, FrpsDirName, FrpsWebPasswordFileName)
 }
 
+// RelayKeeperDir is <state>/relaykeeper, mode 700: the relay keeper's own
+// directory, which holds its state file, its process lock and its ssh
+// directory (HBEP-6, The relay keeper; #343). The launcher's down keeps it.
+func (h Host) RelayKeeperDir() string { return filepath.Join(h.StateDir, "relaykeeper") }
+
+// RelayKeeperSocket is <state>/relaykeeper.sock, the relay keeper's Unix
+// socket (HBEP-6, The relay keeper; #343): the keeper binds it, and the
+// launcher passes it to the controller as --relay-keeper-socket. The launcher
+// refuses a state directory of 80 bytes or more, so the path stays within
+// MaxRelaySocketPath.
+func (h Host) RelayKeeperSocket() string { return filepath.Join(h.StateDir, "relaykeeper.sock") }
+
 // loopback is "127.0.0.1:<port>".
 func loopback(port int) string { return "127.0.0.1:" + strconv.Itoa(port) }
 

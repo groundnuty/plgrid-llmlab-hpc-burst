@@ -246,12 +246,19 @@ func OpenState(path string) (*State, error) {
 // the state file at path and keeps the rest: the start count, the ends and
 // the claims. It is the launcher's restore's (HBEP-6, The relay keeper: "The
 // launcher's restore clears the accepted Lease epochs, since a restored store
-// rolls leaseTransitions back"), run while no keeper runs. A missing file
-// has nothing to clear.
+// rolls leaseTransitions back"), run while no keeper runs: it takes the
+// keeper's process lock beside the file first, so a keeper that runs (one
+// started by hand, say) refuses it, naming the lock, and nothing changes. A
+// missing file has nothing to clear.
 func ClearLeaseEpochs(path string) error {
 	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
+	lock, err := lockFile(filepath.Join(filepath.Dir(path), "lock"))
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 	s, err := LoadState(path)
 	if err != nil {
 		return err
