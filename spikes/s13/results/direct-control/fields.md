@@ -1,10 +1,7 @@
 # direct to the recorder (control)
 
-- Router: `.`, `--policy consistent_hash`, two workers.
-- Router listeners: . Stop: .
-- Started 2026-11-10T12:04:53Z.
+- Started 2026-11-10T12:15:33Z.
 - direct to the recorder (control): 432 variants; 432 arrived as their exact bytes; 0 equal once member order and whitespace are ignored; 0 differ only in re-encoded values; 0 lost or changed a value; 0 did not reach a worker.
-- Requests the router made to the workers besides the cases: .
 
 ## Fields
 

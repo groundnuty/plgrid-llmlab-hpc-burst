@@ -218,7 +218,10 @@ func markdown(run *Run) string {
 		fmt.Fprintf(&b, "- Router listeners: %s. Stop: %s.\n", strings.Join(run.Listeners, ", "), run.RouterExit)
 	}
 	fmt.Fprintf(&b, "- Started %s.\n- %s.\n", run.Started, summaryLine(run))
-	fmt.Fprintf(&b, "- Requests the router made to the workers besides the cases: %s.\n\n", strings.Join(run.Probes, "; "))
+	if run.Router != "" {
+		fmt.Fprintf(&b, "- Requests the router made to the workers besides the cases: %s.\n", strings.Join(run.Probes, "; "))
+	}
+	b.WriteString("\n")
 
 	type key struct{ c, field, at string }
 	var order []key

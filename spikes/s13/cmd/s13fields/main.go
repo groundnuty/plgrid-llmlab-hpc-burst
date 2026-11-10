@@ -90,7 +90,10 @@ func runMain() int {
 	target := "http://127.0.0.1:" + strconv.Itoa(*base)
 	stopRouter := func() {}
 	// The router's path names this host's directories, so the record keeps only its last three parts.
-	run := &Run{Label: *label, Policy: *policy, Router: lastParts(*routerCmd, 3), Started: time.Now().UTC().Format(time.RFC3339)}
+	run := &Run{Label: *label, Router: lastParts(*routerCmd, 3), Started: time.Now().UTC().Format(time.RFC3339)}
+	if *routerCmd != "" {
+		run.Policy = *policy
+	}
 	if *routerCmd != "" {
 		r, err := startRouter(*routerCmd, *policy, *base, *work)
 		if err != nil {
@@ -174,6 +177,9 @@ func send(client *http.Client, target string, rec *recorder.Recorder, v cases.Va
 
 // lastParts returns the last n elements of a path.
 func lastParts(p string, n int) string {
+	if p == "" {
+		return ""
+	}
 	parts := strings.Split(filepath.Clean(p), string(filepath.Separator))
 	if len(parts) > n {
 		parts = parts[len(parts)-n:]
