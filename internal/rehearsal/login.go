@@ -126,6 +126,7 @@ type LoginNode struct {
 	relay *relayServer
 
 	closeOnce sync.Once
+	closeErr  error
 }
 
 // StartLoginNode starts the sshd listener and the relay. It fails, rather
@@ -222,13 +223,15 @@ func (n *LoginNode) WriteCredentials(path string) error {
 
 // Close stops the listener, the relay and every sshd child with the
 // processes below them, and waits until they are gone. It never closes the
-// Platform. It is safe to call twice.
+// Platform. It is safe to call twice, and each call returns the first one's
+// error: a process the stop refused to signal, since it was not the test's
+// (issue #308).
 func (n *LoginNode) Close() error {
 	n.closeOnce.Do(func() {
 		n.srv.stopListening()
 		n.relay.close()
-		n.srv.stop(withRelayEnv(n.sock))
+		n.closeErr = n.srv.stop(withRelayEnv(n.sock))
 		_ = os.Remove(n.sock)
 	})
-	return nil
+	return n.closeErr
 }

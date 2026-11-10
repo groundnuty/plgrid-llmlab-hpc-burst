@@ -178,7 +178,7 @@ func startSSHD(bin string, f sshdFiles, spec sshdSpec) (*sshdServer, error) {
 		ln.Close()
 		return nil, err
 	}
-	s := &sshdServer{ln: ln, log: log, pool: &sshdPool{bin: bin, conf: f.conf, log: log}}
+	s := &sshdServer{ln: ln, log: log, pool: &sshdPool{bin: bin, conf: f.conf, log: log, api: hostProcs()}}
 	s.pool.wg.Add(1)
 	go s.pool.serve(ln)
 	return s, nil
@@ -190,10 +190,12 @@ func (s *sshdServer) port() int { return s.ln.Addr().(*net.TCPAddr).Port }
 func (s *sshdServer) stopListening() { s.ln.Close() }
 
 // stop ends every sshd and everything seen under it, with extra, and waits
-// until they are gone (sshdPool.stop). The listener must be closed first.
-func (s *sshdServer) stop(extra []procRow) {
-	s.pool.stop(extra)
+// until they are gone (sshdPool.stop). The listener must be closed first. A
+// process it refused to signal is an error (signalProcs).
+func (s *sshdServer) stop(extra []procRow) error {
+	err := s.pool.stop(extra)
 	s.log.Close()
+	return err
 }
 
 // sshdProc is one sshd the node started.
@@ -206,8 +208,16 @@ type sshdProc struct {
 	below map[int]procRow
 }
 
+// record adds the processes below the sshd now. Once the sshd is reaped its
+// PID may name another process, so nothing is walked from it (issue #308);
+// below also refuses a root whose start time no longer matches.
 func (p *sshdProc) record() {
-	rows := below(p.self.pid)
+	select {
+	case <-p.done:
+		return
+	default:
+	}
+	rows := below(p.self)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, r := range rows {
@@ -229,6 +239,8 @@ func (p *sshdProc) seen() []procRow {
 type sshdPool struct {
 	bin, conf string
 	log       *os.File
+	// api reads /proc and sends every signal of the pool.
+	api *procAPI
 
 	mu     sync.Mutex
 	procs  []*sshdProc
@@ -272,7 +284,25 @@ func (s *sshdPool) spawn(c *net.TCPConn) {
 		s.mu.Unlock()
 		return
 	}
-	self, _ := readProcRow(cmd.Process.Pid)
+	pid := cmd.Process.Pid
+	if s.api.started != nil {
+		s.api.started(pid)
+	}
+	// The sshd is this process's child and unreaped, so its PID is still its
+	// own. An sshd that has already exited (a client gone before auth) has no
+	// live row: a zero or unreadable row is never stored, and nothing is ever
+	// walked from it (issue #308). It is ended through its os.Process, which
+	// holds a pidfd, and reaped here.
+	self, live, err := s.api.row(pid)
+	if err != nil || !live || self.pid != pid {
+		s.mu.Unlock()
+		fmt.Fprintf(s.log, "rehearsal: sshd %d had no live row when it was read (live %v, error %v): killed and reaped, not recorded\n", pid, live, err)
+		if kerr := s.api.kill(cmd.Process); kerr != nil {
+			fmt.Fprintf(s.log, "rehearsal: kill sshd %d: %v\n", pid, kerr)
+		}
+		_ = cmd.Wait()
+		return
+	}
 	p := &sshdProc{cmd: cmd, self: self, done: make(chan struct{}), below: map[int]procRow{}}
 	s.procs = append(s.procs, p)
 	s.wg.Add(2)
@@ -298,8 +328,9 @@ const stopWait = 5 * time.Second
 
 // stop ends every sshd and everything seen under it. The caller has stopped
 // the listener and the relay, so the forced commands end on their own; TERM
-// then KILL, by PID and start time, take what does not.
-func (s *sshdPool) stop(extra []procRow) {
+// then KILL, by pidfd and start time, take what does not. The processes
+// signalProcs refused are not waited for, and the refusals are the error.
+func (s *sshdPool) stop(extra []procRow) error {
 	s.mu.Lock()
 	s.closed = true
 	procs := append([]*sshdProc(nil), s.procs...)
@@ -313,14 +344,15 @@ func (s *sshdPool) stop(extra []procRow) {
 		all = append(all, p.seen()...)
 	}
 	all = append(all, extra...)
-	signalProcs(all, syscall.SIGTERM)
+	kept, termErr := signalProcs(s.api, all, syscall.SIGTERM)
 	deadline := time.Now().Add(stopWait)
-	for anyLive(all) && time.Now().Before(deadline) {
+	for anyLive(kept) && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	signalProcs(all, syscall.SIGKILL)
+	kept, killErr := signalProcs(s.api, kept, syscall.SIGKILL)
 	s.wg.Wait()
-	for time.Now().Before(deadline.Add(stopWait)) && anyLive(all) {
+	for time.Now().Before(deadline.Add(stopWait)) && anyLive(kept) {
 		time.Sleep(20 * time.Millisecond)
 	}
+	return errors.Join(termErr, killErr)
 }

@@ -186,7 +186,7 @@ func await(t *testing.T, what string, ch <-chan struct{}) {
 // socket in a forced command's environment).
 func (r *rig) nodeProcs() []string {
 	var left []string
-	for _, p := range below(os.Getpid()) {
+	for _, p := range below(ownRow()) {
 		if b, _ := os.ReadFile("/proc/" + strconv.Itoa(p.pid) + "/comm"); strings.HasPrefix(string(b), "sshd") {
 			left = append(left, strconv.Itoa(p.pid)+" sshd")
 		}
@@ -240,7 +240,7 @@ func startWatch(t *testing.T, base string) *watch {
 }
 
 func (w *watch) sample() {
-	rows := below(os.Getpid())
+	rows := below(ownRow())
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	for _, r := range rows {

@@ -251,7 +251,7 @@ func TestCloseLeavesNoProcess(t *testing.T) {
 	}
 	f.waitState("the forward's ssh to see the gateway go", func(s agent.ForwardState) bool { return !s.Listening })
 	f.stop()
-	for _, p := range below(os.Getpid()) {
+	for _, p := range below(ownRow()) {
 		if b, _ := os.ReadFile("/proc/" + strconv.Itoa(p.pid) + "/comm"); strings.HasPrefix(string(b), "ssh") {
 			t.Errorf("process %d (%s) is left below the test after Close and the forward's stop", p.pid, strings.TrimSpace(string(b)))
 		}

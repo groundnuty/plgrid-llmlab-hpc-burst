@@ -42,6 +42,7 @@ type Gateway struct {
 	srv   *sshdServer
 
 	closeOnce sync.Once
+	closeErr  error
 }
 
 // gatewayConf is sshd_config for the gateway. Forwarding is left at sshd's
@@ -138,11 +139,13 @@ func (g *Gateway) WriteDialHome(dir string) error {
 }
 
 // Close stops the listener and every sshd child with the processes below
-// them, and waits until they are gone. It is safe to call twice.
+// them, and waits until they are gone. It is safe to call twice, and each
+// call returns the first one's error: a process the stop refused to signal,
+// since it was not the test's (issue #308).
 func (g *Gateway) Close() error {
 	g.closeOnce.Do(func() {
 		g.srv.stopListening()
-		g.srv.stop(nil)
+		g.closeErr = g.srv.stop(nil)
 	})
-	return nil
+	return g.closeErr
 }
