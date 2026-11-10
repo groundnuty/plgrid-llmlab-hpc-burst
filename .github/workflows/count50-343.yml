@@ -1,0 +1,77 @@
+# One-off, never merged: -count=50 of the new tests of issue #343's PR 1 (feat/343-hostdial-options),
+# under two CPU spinners, on GitHub-hosted runners (the science agent's rule of 10 Nov 2026: heavy runs go
+# hosted). The branch is the PR's head plus this one file, so the tests are the PR's own.
+#
+# The new tests wait on observable state, never on a window; this is the -count=50 under load that a timing
+# test needs. sshd is required (HPCBURST_REQUIRE_SSHD=1): a missing sshd fails the path tests instead of
+# skipping them. Each new test must pass 50 times and fail none, and nothing may skip.
+name: count50-343
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/count50-343.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  count50:
+    name: count50 343
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      HPCBURST_REQUIRE_SSHD: "1"
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Provide OpenSSH's sshd, with no service
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+            sudo chmod 755 /usr/sbin/policy-rc.d
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+            sudo rm -f /usr/sbin/policy-rc.d
+          fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
+          /usr/sbin/sshd -V 2>&1 | head -1
+          echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
+
+      - name: The new tests, 50 times each, under two spinners
+        run: |
+          git rev-parse HEAD^ | sed 's/^/tests from /'
+          go test -c -o "$RUNNER_TEMP/hostdial.test" ./internal/hostdial
+          go test -c -o "$RUNNER_TEMP/sshrun.test" ./internal/slurm/sshrun
+          for i in 1 2; do timeout 50m nice -n 19 sh -c 'while :; do :; done' & done
+          new_hd='^(TestAPidfdStopSignalsNoProcessWhoseStartTimeDiffers|TestAPidfdOwnerRefusesAKernelWithNoPidfd|TestAlphasRelayLeadsItsOwnGroupAndItsStopSignalsIt|TestAPidfdRelayLeadsNoGroupAndItsStopReachesOnlyIt|TestOnFailedIsToldOnlyOfAFailedEnd|TestOnFinalIsToldOfEveryFinalEndAndOnFailedStaysAsItWas|TestAPidfdOwnersRelaysCarryBytesAndStopThroughTheirPidfds|TestASeededFinalChannelIsNeverStarted|TestANewGenRestartsTheLiveChannelAndKeepsASeededFinalOneDown|TestOnStartIsToldOfEveryStart|TestOnFinalIsToldOfASupersededEndOverTheRealPath)$'
+          new_ssh='^(TestTheRelaysDerivedConfigFileNameHasARandomPart|TestAStableConfigFileIsTheGivenName|TestAStableConfigFileOutsideItsDirectoryIsRefused)$'
+          set +e
+          (cd internal/hostdial && "$RUNNER_TEMP/hostdial.test" -test.count=50 -test.v -test.timeout 45m -test.run "$new_hd") > "$RUNNER_TEMP/hd.txt" 2>&1
+          hd=$?
+          (cd internal/slurm/sshrun && "$RUNNER_TEMP/sshrun.test" -test.count=50 -test.v -test.run "$new_ssh") > "$RUNNER_TEMP/ssh.txt" 2>&1
+          ssh=$?
+          set -e
+          pkill -f 'while :; do :; done' || true
+          echo "hostdial exit $hd, sshrun exit $ssh"
+          grep -E '^rehearsal:' "$RUNNER_TEMP/hd.txt" || true
+          fail=0
+          for f in hd ssh; do
+            grep -E '^--- (PASS|FAIL|SKIP)' "$RUNNER_TEMP/$f.txt" | awk '{print $2, $3}' | sort | uniq -c
+            if grep -qE '^\s*--- (FAIL|SKIP)' "$RUNNER_TEMP/$f.txt"; then fail=1; grep -E -B5 -A20 '^\s*--- FAIL' "$RUNNER_TEMP/$f.txt" | grep -v 'level=INFO' | head -120; fi
+          done
+          # Each top-level new test passes exactly 50 times: 11 in hostdial, 3 in sshrun.
+          [ "$(grep -cE '^--- PASS' "$RUNNER_TEMP/hd.txt")" -eq 550 ] || fail=1
+          [ "$(grep -cE '^--- PASS' "$RUNNER_TEMP/ssh.txt")" -eq 150 ] || fail=1
+          [ "$hd" -eq 0 ] && [ "$ssh" -eq 0 ] && [ "$fail" -eq 0 ]
