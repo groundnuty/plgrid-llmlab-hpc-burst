@@ -173,7 +173,7 @@ Each question below had a proposed answer taken from operating LLM serving on Sl
      - restarting a failing Instance;
      - handovers.
    - Source: owner, 29 Oct 2026 (PR #14), for both.
-   - Releasing an Allocation whose Instance failed follows the spec as well: a failed Instance's Allocation is released (Over-allocation and qualification, HBEP-3).
+   - Releasing an Allocation whose Instance failed follows the spec as well: a failed Instance's Allocation is released (Over-allocation and qualification, HBEP-3). So does releasing an Allocation with `RelayEndedForGood`, whatever its retention policy, since nothing placed on it can be reached (HBEP-6, What ends a relay; #304). Source: owner, 10 Nov 2026, asked whether the controller may release such a kept Allocation without asking: "Yes, release it" (recorded on PR #331).
    - **Why:** irreversible releases needed the owner's own word, and one cancellation relayed second-hand by mistake was caught only because the owner was asked directly. Resource steps that follow agreed rules (restarts, joins, step-downs) ran without asking.
    - In alpha the controller takes no action that needs approval. Every action it takes follows the spec, and the single user changes the spec instead. HBEP-11 adds approval gates after alpha.
    - **Not needed for alpha:** whether a repurpose under an agreed policy needs approval (HBEP-10).
@@ -480,7 +480,7 @@ Drain rule (the same text in HBEP-3, HBEP-5 and HBEP-7): The framework cannot mo
   - **What it gives.** The Provider's waits are no longer inflated by queued-path successors' own cap waits.
   - **The cost.** A marked successor adds no sample, but the unmarked samples stay, the first primary's included. So the no-wait rule, planning from the primary's start (Operational readiness 6), applies only while `queueWaits` is empty. Successors no longer refresh the list, so on a Provider used mostly in this mode it rarely fills. Below 20 waits the largest is used (When the replacement is submitted, above), so an early long wait does not age out, and a normal-mode deployment there can still plan from its primary's start. An unmarked wait can still include a pend behind the same user's cap, held by another primary of ours under the same QOS or by the owner's other jobs. A successor's wait after the GPU frees is not added to the Provider's `queueWaits`; the Helios run measures it from the predecessor's job end and the successor's start; **Alpha's fence:** QOS `now`'s one GPU per user makes a second deployment's primary on the Helios Provider pend behind the first, an unmarked pend that, while fewer than 20 waits are kept, could set the plan for a normal-mode deployment there. So in alpha the Helios Provider serves one deployment, and that deployment allows the Helios Provider alone (the alpha runbook, #194) (science-agent ruling, 1 Nov 2026, from PR #205's review).
 - when the effective submit limit is 1, so no slot is free, the successor is not submitted early. Step 7 creates its Allocation once the predecessor's job has left the slot: its phase is `Ended` with `jobCompleting` false, or its deletion has completed (Provisioning, Per-user limits). No alpha partition that can host an Instance has such a limit, but the path and its test stay;
-- the predecessor's Allocation follows its retention policy once its Instance has ended. Under the default `Keep` its job holds the GPU, or the slot, until its hard end, so the gap takes in the rest of the drain window. A deployment in this mode should set `ReleaseWhenIdle` with a short `idleLimit`, and the alpha run on Helios does (Test plan, on real providers). The controller does not release a kept Allocation early by itself, since that needs approval (open question 8);
+- the predecessor's Allocation follows its retention policy once its Instance has ended. Under the default `Keep` its job holds the GPU, or the slot, until its hard end, so the gap takes in the rest of the drain window. A deployment in this mode should set `ReleaseWhenIdle` with a short `idleLimit`, and the alpha run on Helios does (Test plan, on real providers). The controller does not release a kept Allocation early by itself, since that needs approval (open question 8), unless it has `RelayEndedForGood` (Retention);
 - the gap is the time from the primary's drain start until its successor is `ready`. On Helios it is about the drain itself, then the idle limit, then the successor's start-to-ready time, plus any queue wait once the GPU frees, which the Helios run measures. On the one-slot path the successor's whole queue wait is added. The ModelDeployment's status keeps the start-to-ready time already; the run on Helios records the gap.
 
 ### Release
@@ -492,14 +492,14 @@ Replacement before release (HBEP-3) applies only while the deployment keeps its 
 - Deletion of the ModelDeployment: as shutdown, then the objects are removed (HBEP-11).
 - Approved early termination (HBEP-10): as shutdown, before the end time.
 - Repurposing: as scale-down for the old deployment, which is ending or scaling down. The Allocation then hosts the new deployment's Instance.
-- In every case, an Allocation left with no Instance follows its retention policy (Retention).
+- In every case, an Allocation left with no Instance follows its retention policy (Retention), except one with `RelayEndedForGood`, which is released at once.
 - A lease end is not a release: under the drain rule, an instance whose replacement is late drains and ends with its lease.
 
 Releasing an Allocation means deleting it. Its finalizer cancels every job with its tag (HBEP-4, HBEP-11).
 
 ### Retention
 
-An Allocation that hosts no Instance follows its retention policy:
+An Allocation that hosts no Instance follows its retention policy, unless it has `RelayEndedForGood`. That one is released at once whatever its policy, since nothing placed on it can be reached (HBEP-6, What ends a relay; open question 8):
 - keep it, as warm capacity, until a date, a grant's end or a deadline;
 - or release it when idle, after an idle limit.
 
@@ -562,6 +562,7 @@ Against the fake Slurm of spike S4, through the Slurm plugin (HBEP-4). The fake 
 - An Allocation ends early (a cancel outside the framework) while its Instance serves: the Instance ends with `AllocationEndedEarly`, a `failing` event fires, the Allocation is deleted, and a replacement is provisioned. An Allocation that reaches its hard end with its Instance draining raises no such event.
 - Scale-down, shutdown at the end time and deletion: instances drain and end, no replacement is submitted, and each Allocation follows its retention policy.
 - Retention: an Allocation kept until a date stays, with no Instance, until that date and is then released; one under release-when-idle is released after its idle limit; one on a profile with `maxIdle` is released after it under keep; none outlives its hard end. An Allocation whose ended Instance is deleted, while the Allocation is kept, is still released at `maxIdle` counted from that Instance's `endTime`, read from the `idle-since` annotation after a controller restart; placing an Instance removes the annotation.
+- An Allocation with `RelayEndedForGood`: its Instance ends with that reason and a `failing` event, and it's released, both with an Instance on it and empty under `Keep`. No Instance is placed on it as warm capacity (#304).
 - The controller is killed at each step of a handover: after restart there are no duplicate submissions and no orphan allocations.
 - The reply to a submission is lost: the attempt is Unknown, never Failed, the controller resolves it by tag, and exactly one job with the tag has its hold lifted.
 - Two controllers reconcile one Allocation at once: no Allocation has more than one job whose hold is lifted, held duplicates are cancelled, and no more allocations than desired remain.
@@ -801,6 +802,7 @@ The controller applies by policy what www-2027 operators did per job: holder bat
 - 2026-11-02: agent reports carry the agent instance's count (`seq`); the controller keeps only the newest from the currently registered instance, and an unnumbered report from an older agent is kept as before (ruled for #221, settled in PR #228); #220's wait stated.
 - 2026-11-02: the causes of `CapacityDropped`, `ProviderUnavailable` and `SpecUnsupported` as built, the ranking sentence brought up to date, and the current agent instance defined by its restart count with the code's tie-breaks (from #239, #241 and #232; PR #248).
 - 2026-11-09: the agent's side of HBEP-6's host-dialed mode.
+- 2026-11-10: `RelayEndedForGood` fails and releases an Allocation, whatever its retention policy (#304, PR #319).
 
 ## Amendments
 
@@ -897,4 +899,4 @@ The controller applies by policy what www-2027 operators did per job: holder bat
   - **Restarts:** a controller restart cuts the streams in that mode, which the owner accepted for alpha.
 
   Before, the agent's tunnel ran only in direct or ssh mode, and nothing was launched from a login node.
-- **2026-11-10: erratum:** step 5 also fails an Allocation that has `RelayEndedForGood` (HBEP-6; #304, PR #319).
+- **2026-11-10: a relay that ends for good releases its Allocation** (Open questions 8; Processing order, step 5; Release; Retention; Test plan). An amendment, the code built ahead of the text (#304, PR #319), settled in PR #331's review. Step 5 fails an Allocation with `RelayEndedForGood`, and an empty one with it is released whatever its retention policy, with the owner's go of 10 Nov 2026 (open question 8). Before, only `SubmittedAsOther` and the provider phases failed an Allocation, and a kept one was never released early without approval.
