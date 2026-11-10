@@ -214,6 +214,39 @@ func TestJudgeHostDialedFailsEachCheckOnItsOwnFact(t *testing.T) {
 	}
 }
 
+// A failed line says what was missing, not only that something was: each case is a run that differs from a good one in
+// one fact, and its line names that fact (an earlier case of the same check would fail it too, in other words).
+func TestTheControlAndRendezvousLinesNameWhatWasMissing(t *testing.T) {
+	textOf := func(o hostDialedObs, check string) string {
+		for _, c := range judgeHostDialed(o) {
+			if c.Name == check {
+				return c.Text
+			}
+		}
+		return ""
+	}
+	for _, c := range []struct {
+		name, check, want string
+		mod               func(o *hostDialedObs)
+	}{
+		{"the stop never served", checkControl, "but the stop was never served to the agent's poll over it", func(o *hostDialedObs) { o.StopServed, o.StopAcked = false, false }},
+		{"no report after the stop", checkControl, "but the agent sent no report after it (the job ended COMPLETED)", func(o *hostDialedObs) { o.StopAcked = false }},
+		{"the job FAILED after the stop", checkControl, "but the job ended FAILED, not COMPLETED with exit 0", func(o *hostDialedObs) { o.EndState = "FAILED" }},
+		{"the job ended before the stop", checkControl, "but the job ended FAILED before it was told to stop", func(o *hostDialedObs) { o.JobEnded, o.EndState = true, "FAILED" }},
+		{"the agent's output unreadable", checkRendezvous, "socket under $TMPDIR: not shown (the agent's output, job.err, could not be read)", func(o *hostDialedObs) { o.Probe.AgentLogOK, o.Probe.AgentTmpDir = false, "" }},
+		{"no TMPDIR in the agent's line", checkRendezvous, "socket under $TMPDIR: not shown (the agent's output does not name its $TMPDIR)", func(o *hostDialedObs) { o.Probe.AgentTmpDir = "" }},
+		{"a relative TMPDIR in the agent's line", checkRendezvous, "socket under $TMPDIR: not shown (the agent's output does not name its $TMPDIR)", func(o *hostDialedObs) { o.Probe.AgentTmpDir = "tmp/jx42" }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			o := goodObs()
+			c.mod(&o)
+			if got := textOf(o, c.check); !strings.Contains(got, c.want) {
+				t.Errorf("the %s line reads %q, want it to say %q", c.check, got, c.want)
+			}
+		})
+	}
+}
+
 // The text to post: the verdict, a line per check with ok or FAIL, frps and frpc said not run, the job's shape; no path.
 func TestHostDialedPostsNameEveryCheckAndNoPath(t *testing.T) {
 	o := goodObs()
