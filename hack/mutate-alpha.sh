@@ -17,7 +17,7 @@
 # compile is its own step, to one fixed test-binary path per package, and the binary then runs: so MUTATE_ALPHA_BUILD_LOCK,
 # a lock file, is taken (flock -o) around each compile only, never around a test run.
 #
-# Four kinds, by the file they change:
+# Five kinds, by the file they change:
 #   internal/alpha (a bare file name)           go test ./internal/alpha
 #   internal/alpha/alpha_live_test.go           the row's test as the script runs it: an alpha test binary is built from
 #                                               the mutated package, and the dry runs of hack/livechecks run that binary
@@ -25,6 +25,8 @@
 #   hack/live-checks.sh                         go test of hack/livechecks, the alpha script tests only. Set
 #                                               HPCBURST_LIVECHECKS_ALPHA_TEST and HPCBURST_LIVECHECKS_CONF_TEST to prebuilt
 #                                               test binaries to spare it two builds per mutant.
+#   internal/rehearsal/...                      go test of internal/rehearsal, the sshd sweep's guard tests only (issue #308):
+#                                               they start no sshd and send no signal, every send going to a sink that records it
 #
 # It edits files in the working tree and restores each from a copy it makes first, also on any exit, so run it
 # on a checkout with no uncommitted change to them. Run it under a memory cap (docs/development.md). Each run has an external bound
@@ -658,6 +660,16 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'steps_live_test.go@@func (r *liveRun) WatchResets() int { return r.watch.ResetCount() }@@func (r *liveRun) WatchResets() int { return 3 }'
   'steps_live_test.go@@func (r *liveRun) WatchResets() int { return r.watch.ResetCount() }@@var prevCount func() int; func (r *liveRun) WatchResets() int { c := prevCount; prevCount = r.watch.ResetCount; if c == nil { c = r.watch.ResetCount }; return c() }'
   'run.go@@plan := Plan{Row: cfg.Row, Rec: rec, PendingMax: cfg.PendingMax, Logf: logf}@@st = resetsAtStart{st, st.WatchResets()}; plan := Plan{Row: cfg.Row, Rec: rec, PendingMax: cfg.PendingMax, Logf: logf}'
+  # #308: the guards between the rehearsal's sshd sweep and a process the test did not start. They are independent, so no one of these
+  # brings the host-wide signal back: guard 1 (sshd.go) stores no sshd whose row it cannot read, guard 2 (below) walks nothing from PID 1
+  # or less or from a recycled root, and guard 3 (signalProcs) refuses what is not the test's; each of the other two still holds.
+  'internal/rehearsal/sshd.go@@if err != nil || !live || self.pid != pid {@@if false {'
+  'internal/rehearsal/procs.go@@if root.pid <= 1 {@@if root.pid < 0 {'
+  'internal/rehearsal/procs.go@@if !found {@@if !found && false {'
+  'internal/rehearsal/procs.go@@case r.pid <= 1:@@case r.pid < 0:'
+  'internal/rehearsal/procs.go@@case r.pid == o.api.self:@@case false:'
+  'internal/rehearsal/procs.go@@case o.ancestors[r.pid]:@@case false:'
+  'internal/rehearsal/procs.go@@case !o.owns(now):@@case false:'
 )
 # The mutants of a test of this script: a file with one mutant per line, in place of the list above.
 [ -z "${MUTATE_ALPHA_MUTANTS:-}" ] || mapfile -t mutants < "$MUTATE_ALPHA_MUTANTS"
@@ -667,9 +679,12 @@ compile_of() {
   cerr=""
   case $1 in
     internal/providerctl/*) compile_tests internal/providerctl/conformance "$tmp/conf.test" && compile_tests "$pkg" "$tmp/pkg.test" ;;
+    internal/rehearsal/*) compile_tests internal/rehearsal "$tmp/reh.test" ;;
     *.go) compile_tests "$pkg" "$tmp/pkg.test" ;;
   esac
 }
+# The tests of the rehearsal kind: the sweep guards' (internal/rehearsal/procs_test.go), which start no sshd.
+rehearsal_tests='ExitedSSHD|ZeroRowSignalsNothing|BelowWalksNothing|SignalProcs|RefusalIsTheErrorOfClose|WithRelayEnvSelectsNothing'
 # The tests of the script's kind.
 script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot|HostDialedMode'
 # tests_of <path> [control|<names>]: the command that judges a mutant of path, in the array tests. With control, the same command with
@@ -679,17 +694,20 @@ script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlpha
 # (CleanupMargin), so at 120s every wait on state failed at once and the unmutated tests failed, which counted every mutant
 # of the package as killed (#285).
 tests_of() {
-  local names=${2:-} pkgbin=$tmp/pkg.test confbin=$tmp/conf.test
+  local names=${2:-} pkgbin=$tmp/pkg.test confbin=$tmp/conf.test rehbin=$tmp/reh.test
   local bin=(-test.count=1 -test.timeout 300s -test.failfast) sel=(-failfast -run "$script_tests") dry=PendingPastTheBound
-  if [ -n "$names" ]; then pkgbin=$tmp/base-pkg.test confbin=$tmp/base-conf.test; fi
+  local rbin=(-test.count=1 -test.timeout 300s -test.failfast -test.run "$rehearsal_tests")
+  if [ -n "$names" ]; then pkgbin=$tmp/base-pkg.test confbin=$tmp/base-conf.test rehbin=$tmp/base-reh.test; fi
   if [ -n "$names" ] && [ "$names" != control ]; then
     dry=$names bin=(-test.count=1 -test.timeout 300s -test.run "$names") sel=(-run "$names")
+    rbin=(-test.count=1 -test.timeout 300s -test.run "$names")
   fi
   case $1 in
     hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 "${sel[@]}" ./hack/livechecks) ;;
     # The dry runs of the script run the alpha test binary: the one compiled above, from the mutated file.
     "$pkg"/alpha_live_test.go) tests=(env HPCBURST_LIVECHECKS_ALPHA_TEST="$pkgbin" go test -count=1 -timeout 9m -run "$dry" ./hack/livechecks) ;;
     internal/providerctl/*) tests=(bash -c 'cd "$1/internal/providerctl/conformance" && "$2" "${@:5}" && cd "$1/$3" && "$4" "${@:5}"' _ "$here" "$confbin" "$pkg" "$pkgbin" "${bin[@]}") ;;
+    internal/rehearsal/*) tests=(bash -c 'cd "$1/internal/rehearsal" && "$2" "${@:3}"' _ "$here" "$rehbin" "${rbin[@]}") ;;
     *) tests=(bash -c 'cd "$1/$2" && "$3" "${@:4}"' _ "$here" "$pkg" "$pkgbin" "${bin[@]}") ;;
   esac
 }
@@ -731,6 +749,7 @@ kind_of() {
     hack/live-checks.sh) printf "the script's" ;;
     "$pkg"/alpha_live_test.go) printf "the dry runs'" ;;
     internal/providerctl/*) printf "the conformance package's" ;;
+    internal/rehearsal/*) printf "the rehearsal package's" ;;
     *) printf "the package's" ;;
   esac
 }
@@ -746,6 +765,7 @@ baseline() {
   compile_of "$1" || { echo "mutate-alpha: $kind tests do not compile with no mutant, so nothing can be checked: $cerr" >&2; exit 2; }
   case $1 in
     internal/providerctl/*) cp "$tmp/conf.test" "$tmp/base-conf.test"; cp "$tmp/pkg.test" "$tmp/base-pkg.test" ;;
+    internal/rehearsal/*) cp "$tmp/reh.test" "$tmp/base-reh.test" ;;
     *.go) cp "$tmp/pkg.test" "$tmp/base-pkg.test" ;;
   esac
   tests_of "$1"

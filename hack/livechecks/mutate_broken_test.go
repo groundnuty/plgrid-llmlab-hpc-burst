@@ -125,6 +125,14 @@ func TestMutateAlphaRefusesEachKindsTestsThatFailWithNoMutant(t *testing.T) {
 	pkgFiles := func(body string) map[string]string {
 		return with(alphaFiles(body), map[string]string{"mutants.txt": "fx.go@@V = 1@@V = 2\n"})
 	}
+	// The rehearsal kind runs internal/rehearsal's sweep guard tests, picked by name, and no other test of that package: its
+	// fixture holds a failing test that the kind does not pick, so the passing case passes only if it is left out (#308).
+	rehearsalFiles := func(body string) map[string]string {
+		return map[string]string{"internal/rehearsal/r.go": "package rehearsal\n\nconst V = 1\n",
+			"internal/rehearsal/r_test.go": pkgTest("rehearsal", "TestSignalProcsKind", body),
+			"internal/rehearsal/s_test.go": pkgTest("rehearsal", "TestStartsAnSSHD", fails),
+			"mutants.txt":                  "internal/rehearsal/r.go@@V = 1@@V = 2\n"}
+	}
 	for _, c := range []struct {
 		name, want string
 		failing    map[string]string
@@ -135,6 +143,7 @@ func TestMutateAlphaRefusesEachKindsTestsThatFailWithNoMutant(t *testing.T) {
 		{"the conformance kind's other package", "the conformance package's tests fail with no mutant, so every mutant would count as killed: TestKind", confFiles(fails, passes), confFiles(passes, passes)},
 		{"the dry runs'", "the dry runs' tests fail with no mutant, so every mutant would count as killed: TestPendingPastTheBoundKind", dryFiles(fails), dryFiles(passes)},
 		{"the script's", "the script's tests fail with no mutant, so every mutant would count as killed: TestNeverStartedKind", scriptFiles(fails), scriptFiles(passes)},
+		{"the rehearsal package's", "the rehearsal package's tests fail with no mutant, so every mutant would count as killed: TestSignalProcsKind", rehearsalFiles(fails), rehearsalFiles(passes)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
