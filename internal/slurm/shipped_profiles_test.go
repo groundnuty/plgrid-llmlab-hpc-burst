@@ -29,6 +29,8 @@ func TestShippedProfilesPassReadProfile(t *testing.T) {
 	}{
 		{"helios.yaml", []string{"plgrid", "plgrid-gpu-gh200"}},
 		{"athena.yaml", []string{"plgrid-gpu-a100", "plgrid-now"}},
+		// The profile for short test deployments on plgrid-now (issue #376): that partition only.
+		{"athena-now.yaml", []string{"plgrid-now"}},
 	}
 	for _, sp := range shipped {
 		raw, err := os.ReadFile(filepath.Join("..", "..", "profiles", sp.file))
@@ -195,6 +197,7 @@ func TestShippedProfilesJobNameRules(t *testing.T) {
 	}{
 		{"helios.yaml", 56},
 		{"athena.yaml", 56},
+		{"athena-now.yaml", 56}, // the same measurement, on plgrid-now itself (issue #93)
 	} {
 		raw, err := os.ReadFile(filepath.Join("..", "..", "profiles", tc.file))
 		if err != nil {
@@ -260,6 +263,17 @@ func TestShippedProfilesTypeTheirQOS(t *testing.T) {
 			{"one MiB over the memory", shape{1, 72, "122401Mi", "12h"}, "maxMemPerUser"},
 		}},
 		{"athena.yaml", "plgrid-now", "plgrid-now", shape{1, 16, "125Gi", "1h"}, []struct {
+			name string
+			s    shape
+			want string
+		}{
+			{"an hour and a minute", shape{1, 16, "125Gi", "61m"}, "maxTime"},
+			{"two GPUs of the node's eight", shape{2, 16, "125Gi", "1h"}, "maxGpusPerUser"},
+			{"17 CPUs", shape{1, 17, "125Gi", "1h"}, "maxCpusPerUser"},
+			{"one MiB over 125Gi", shape{1, 16, "128001Mi", "1h"}, "maxMemPerUser"},
+		}},
+		// The profile for short test deployments (issue #376): the same partition and QOS, so the same caps.
+		{"athena-now.yaml", "plgrid-now", "plgrid-now", shape{1, 16, "125Gi", "1h"}, []struct {
 			name string
 			s    shape
 			want string

@@ -109,7 +109,8 @@ func TestShippedProfilesLoadForTheHarness(t *testing.T) {
 		{"helios", "plgrid", "none", "x86_64", "v0.0.42"},
 		{"helios", "plgrid-gpu-gh200", "GH200", "aarch64", "v0.0.42"},
 		{"athena", "plgrid-gpu-a100", "A100", "x86_64", "v0.0.40"},
-		{"athena", "plgrid-now", "A100", "x86_64", "v0.0.40"}, // issue #93, comment 6557245889: listed for conformance runs
+		{"athena", "plgrid-now", "A100", "x86_64", "v0.0.40"},     // issue #93, comment 6557245889: listed for conformance runs
+		{"athena-now", "plgrid-now", "A100", "x86_64", "v0.0.40"}, // issue #376: the profile for short test deployments there
 	} {
 		t.Run(tc.profile+"/"+tc.partition, func(t *testing.T) {
 			pp, part, err := loadProfile(profilesDir(), tc.profile, tc.partition, "$SCRATCH/hpc-burst-conformance")
