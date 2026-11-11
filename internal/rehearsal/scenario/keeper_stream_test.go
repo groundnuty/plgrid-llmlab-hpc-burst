@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/obscheck"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
@@ -314,13 +315,13 @@ func (r *rig) inOrder(s *openStream, ref string) {
 // by cut_by.
 func (r *rig) frontCutsByHop() map[string]float64 {
 	r.t.Helper()
-	ss, err := scrape(r.ports.URL(4, "/metrics"))
+	ss, err := obscheck.Scrape(r.ports.URL(4, "/metrics"))
 	if err != nil {
 		r.t.Fatalf("the front's /metrics: %v", err)
 	}
 	out := map[string]float64{}
-	for _, s := range find(ss, "hpcburst_front_cuts_total", nil) {
-		out[s.labels["cut_by"]] += s.value
+	for _, s := range obscheck.Find(ss, "hpcburst_front_cuts_total", nil) {
+		out[s.Labels["cut_by"]] += s.Value
 	}
 	return out
 }
@@ -376,15 +377,15 @@ func (r *rig) statusJSON() (launcherStatus, string, error) {
 func (r *rig) agentReported(what string, in *v1alpha1.Instance, since time.Time) time.Time {
 	r.t.Helper()
 	stack.WaitState(r.t, stack.WaitDeadline, what+": the new controller holding a report of the agent", func() (bool, string) {
-		ss, err := scrape(r.ports.URL(12, "/metrics"))
+		ss, err := obscheck.Scrape(r.ports.URL(12, "/metrics"))
 		if err != nil {
 			return false, err.Error()
 		}
-		start := find(ss, "process_start_time_seconds", nil)
-		if len(start) != 1 || start[0].value < float64(since.Unix()-1) {
+		start := obscheck.Find(ss, "process_start_time_seconds", nil)
+		if len(start) != 1 || start[0].Value < float64(since.Unix()-1) {
 			return false, fmt.Sprintf("process_start_time_seconds %+v, the event at %d", start, since.Unix())
 		}
-		read := find(ss, "hpcburst_instance_metrics_read_timestamp_seconds", map[string]string{"instance_uid": string(in.UID)})
+		read := obscheck.Find(ss, "hpcburst_instance_metrics_read_timestamp_seconds", map[string]string{"instance_uid": string(in.UID)})
 		return len(read) > 0, fmt.Sprintf("%d read-time series for the Instance", len(read))
 	})
 	return time.Now()
