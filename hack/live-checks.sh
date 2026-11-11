@@ -55,6 +55,10 @@
 #   - a two-job row's second job, once its first has run: by the first's drain start on the handover, and within the wait in
 #     the queue of the first's lease end on no-overlap ("the first job ran and the second never started ..."). A failure of
 #     the part of the run that did happen still wins: that row fails.
+# Row A on plgrid-now (alpha-athena-now-serve, issue #376) has two NOT RUNs of a run that did start, each after its test has
+# judged the rest of the run, whose failure wins: the scheduler's refusal of the requeue of the run's own job (Q5), and a
+# warm start its agent's own log did not show (the ruling 1(b)). Its marker names them in fixed words, which judge prints;
+# its text to post is written too, saying NOT RUN with the reason. Its start wait runs from the deployment's creation.
 # NOT RUN means the job affirmatively never started (review of PR 284): a read at the bound must show it waiting. A job
 # that started, a job a read does not list, and a read that fails are failures that name what they found, exit 1. That read
 # is not the last word: a job can start between it and the cancel, so every row reads the job's history once it is cancelled.
@@ -105,6 +109,11 @@
 #                                choice when giving the go; the shape, the hold note and the test follow it
 #   LIVE_OWNER_GO_HELIOS_NOW     today's UTC date (YYYY-MM-DD), once the owner has said yes to the run: the rows that hold
 #                                QOS now's GPU for hours (alpha-helios-nooverlap, tunnel-hour-helios) refuse without it
+#   LIVE_OWNER_GO_ATHENA_NOW     the same for the deployment rows on Athena's one-job partition plgrid-now under
+#                                profiles/athena-now.yaml (alpha-athena-now-serve; issue #376, Q6, citing the owner's decision
+#                                of 11 Nov 2026 on #145): today's UTC date, checked as LIVE_OWNER_GO_HELIOS_NOW is. The code
+#                                agent's go posted on #145 with its UTC start and end, before each run, is the operator's to
+#                                post, not this script's to check
 #   LIVE_FRONT_HOST_LABEL        where the front ran, in three parts (issue #224): a ROLE from a fixed list (the FRONT ROLES
 #                                table below), a comma and a space, a POSITION that is exactly inside or outside Cyfronet
 #                                (or Cyfronet's network), and an optional NOTE in parentheses. The text to post of every row
@@ -157,10 +166,10 @@ ROOT=$(cd "$(dirname "$SELF")/.." && pwd -P)
 # the real-engine job runs on the cluster. hack/livechecks checks this table against the tree: every test
 # function of a live file carries a //livecheck: directive that names its rows (or says none and why), and
 # every row's test pattern matches exactly the functions that name it.
-# A pending row is planned and not built: --list names it, and --run refuses it (exit 2). rehearsal is one, and so are
-# alpha-athena-now-serve and alpha-athena-now-nooverlap, the deployment rows on plgrid-now that #376's P3 and P4 build
-# (docs/alpha-runbook.md, The plgrid-now rows, planned). The helios rows are beta's since 11 Nov 2026 (#386): ready and
-# runnable by name, in every table below, and in no alias.
+# A pending row is planned and not built: --list names it, and --run refuses it (exit 2). rehearsal is one, and so is
+# alpha-athena-now-nooverlap, row B of the deployment rows on plgrid-now, which #376's P4 builds (docs/alpha-runbook.md,
+# The plgrid-now rows). Row A, alpha-athena-now-serve, is #376's P3, under profiles/athena-now.yaml. The helios rows are
+# beta's since 11 Nov 2026 (#386): ready and runnable by name, in every table below, and in no alias.
 live_table() {
   cat <<'TABLE'
 # BEGIN LIVE TESTS
@@ -175,6 +184,7 @@ alpha-athena-handover|cluster|internal/alpha|^TestAlphaAthenaHandover$|HPCBURST_
 alpha-helios-nooverlap|cluster|internal/alpha|^TestAlphaHeliosNoOverlap$|HPCBURST_ALPHA_ROW|profiles/helios.yaml,examples/provider-helios-gh200.yaml|host,linux-arm64|ready
 tunnel-hour-helios|cluster|internal/alpha|^TestTunnelHour$|HPCBURST_ALPHA_ROW|profiles/helios.yaml|host,linux-arm64|ready
 tunnel-hour-athena|cluster|internal/alpha|^TestTunnelHour$|HPCBURST_ALPHA_ROW|profiles/athena.yaml|host|ready
+alpha-athena-now-serve|cluster|internal/alpha|^TestAlphaAthenaNowServe$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml|host|ready
 gpu-accounting-helios|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
 gpu-accounting-athena|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
 reach-helios|cluster|internal/providerctl/conformance|^TestReach$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
@@ -182,7 +192,6 @@ reach-athena|cluster|internal/providerctl/conformance|^TestReach$|HPCBURST_CONFO
 reach-host-dialed-helios|cluster|internal/providerctl/conformance|^TestReachHostDialed$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host,linux-arm64|ready
 reach-host-dialed-athena|cluster|internal/providerctl/conformance|^TestReachHostDialed$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
 rehearsal|cluster|-|-|-|-|-|pending
-alpha-athena-now-serve|cluster|-|-|-|-|-|pending
 alpha-athena-now-nooverlap|cluster|-|-|-|-|-|pending
 # END LIVE TESTS
 TABLE
@@ -249,6 +258,7 @@ alpha-athena-handover|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16
 alpha-helios-nooverlap|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|213|-C memfs
 tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|02:17:00|166|-C memfs
 tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|166|-
+alpha-athena-now-serve|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
 gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|32|-|10
 gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|25|-
 reach-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:02:00|20|-C memfs|10
@@ -272,6 +282,7 @@ alpha-athena-handover|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cm
 alpha-helios-nooverlap|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 tunnel-hour-helios|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 tunnel-hour-athena|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
+alpha-athena-now-serve|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 rehearsal-part3|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 reach-host-dialed-helios|cmd/hb-agent
 reach-host-dialed-athena|cmd/hb-agent
@@ -288,6 +299,7 @@ alpha-athena-handover|2
 alpha-helios-nooverlap|2
 tunnel-hour-helios|1
 tunnel-hour-athena|1
+alpha-athena-now-serve|1
 gpu-accounting-helios|1
 gpu-accounting-athena|1
 reach-helios|1
@@ -299,14 +311,16 @@ TABLE
 }
 
 # The rows that hold QOS now's one GPU, the owner's shared slot, for hours need the owner's go at run time, on top
-# of --yes (the development rule on #145). The setting must hold today's UTC date, so a go given for an earlier
-# run does not stand for this one. name | setting | minutes the run holds the slot (the package's
-# Row.SlotHold, rounded up to ten minutes; hack/livechecks compares them).
+# of --yes (the development rule on #145), and so do the deployment rows on Athena's one-job partition plgrid-now
+# (issue #376, Q6), which hold that slot for up to the hour. The setting must hold today's UTC date, so a go given for
+# an earlier run does not stand for this one. name | setting | minutes the run holds the slot (the package's
+# Row.SlotHold, rounded up to ten minutes; the setting is the package's Row.OwnerGo; hack/livechecks compares them).
 owner_go_table() {
   cat <<'TABLE'
 # BEGIN OWNER GO
 alpha-helios-nooverlap|LIVE_OWNER_GO_HELIOS_NOW|160
 tunnel-hour-helios|LIVE_OWNER_GO_HELIOS_NOW|140
+alpha-athena-now-serve|LIVE_OWNER_GO_ATHENA_NOW|60
 # END OWNER GO
 TABLE
 }
@@ -370,6 +384,7 @@ alpha-athena-handover
 alpha-helios-nooverlap
 tunnel-hour-helios
 tunnel-hour-athena
+alpha-athena-now-serve
 gpu-accounting-helios
 gpu-accounting-athena
 # END FRONT LABEL
@@ -526,7 +541,7 @@ load_settings() {
     [ "$k" != "$line" ] || continue
     v=${v%\"}; v=${v#\"}; v=${v%\'}; v=${v#\'}
     case $k in
-      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_DIALHOME_LISTEN|LIVE_BIN_DIR|LIVE_OWNER_GO_HELIOS_NOW|LIVE_TUNNEL_LEASE_MINUTES|LIVE_PROBE_HOST|LIVE_PROBE_PORT|LIVE_PROBE_LABEL|LIVE_FRONT_HOST_LABEL)
+      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_DIALHOME_LISTEN|LIVE_BIN_DIR|LIVE_OWNER_GO_HELIOS_NOW|LIVE_OWNER_GO_ATHENA_NOW|LIVE_TUNNEL_LEASE_MINUTES|LIVE_PROBE_HOST|LIVE_PROBE_PORT|LIVE_PROBE_LABEL|LIVE_FRONT_HOST_LABEL)
         S[$k]=$v ;;
     esac
   done 2>/dev/null < "$HPCBURST_LIVE_SETTINGS"
@@ -617,10 +632,15 @@ export_front_label() {
 # fmt_hold <minutes>: "2 h 40 min".
 fmt_hold() { printf '%d h %02d min' $(($1 / 60)) $(($1 % 60)); }
 
-# owner_go_note <name>: what a row that holds QOS now's GPU says before it runs: the wait in the queue it may
-# take first, past which it is cancelled and the run is NOT RUN, and the hold once it runs.
+# owner_go_note <name>: what a row that holds the owner's slot says before it runs: the wait it may take first, past
+# which it is cancelled and the run is NOT RUN (its start wait when it has one, else the wait in the queue), and the hold
+# once it runs, in the slot the cluster table names.
 owner_go_note() {
-  say "$1: may pend up to $(fmt_pending "$(pending_max "$1")") in the queue (then it is cancelled by its tag and the run is NOT RUN), then holds QOS now's GPU for about $(fmt_hold "${OGMIN[$1]}"); the owner's go is needed (the development rule on #145)"
+  local pend what="QOS now's GPU"
+  [ "${SLOT[$1]:--}" = now ] || what="the ${SLOT[$1]} slot"
+  if [ "${SWAIT[$1]:--}" != - ]; then pend="may wait up to ${SWAIT[$1]} min to start"
+  else pend="may pend up to $(fmt_pending "$(pending_max "$1")") in the queue"; fi
+  say "$1: $pend (then it is cancelled by its tag and the run is NOT RUN), then holds $what for about $(fmt_hold "${OGMIN[$1]}"); the owner's go is needed (the development rule on #145)"
 }
 
 # today_utc: the date the owner's go is compared with. LIVE_FAKE_DATE_FILE is a test seam, like LIVE_FAKE_CLOCK: a
@@ -988,8 +1008,19 @@ not_run_verdict() {
   [ -n "$REC_DIR" ] && [ -f "$REC_DIR/not-run.txt" ] && [ ! -L "$REC_DIR/not-run.txt" ] || return 1
   [ -n "${HOST[$n]:-}" ] || return 1
   ! second_job_marker || [ "${MOSTJOBS[$n]:-1}" -ge 2 ] || return 1
+  ! row_a_marker || [ "$n" = alpha-athena-now-serve ] || return 1
   ! first_end_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac
 }
+
+# row_a_marker: the run's NOT RUN marker says row A's requeue was refused or its warm start was not shown by the agent's
+# own log (internal/alpha, NotRunNote; issue #376): NOT RUNs of a run whose other checks passed, only row A has them.
+row_a_marker() { requeue_marker || warm_marker; }
+requeue_marker() { grep -q "the scheduler refused the requeue of the run's own job" "$REC_DIR/not-run.txt" 2>/dev/null; }
+warm_marker() { grep -q "the agent's own log did not show the warm start" "$REC_DIR/not-run.txt" 2>/dev/null; }
+
+# row_a_reason <marker words>: the fixed label in parentheses after the words, as NotRunNote writes it (a label from a fixed
+# list in internal/alpha: no ID, path or name).
+row_a_reason() { sed -n -E "s/.*$1 \(([^()]*)\).*/\1/p" "$REC_DIR/not-run.txt" 2>/dev/null | head -1; }
 
 # first_end_marker: the run's NOT RUN marker says its job was still pending a minute before its deployment's first
 # end (internal/alpha, NotRunNote): the bound a tunnel row has beside the wait in the queue, which judge names.
@@ -1026,6 +1057,11 @@ judge() {
       say "$n: NOT RUN (the first job ran and the second never started $(second_job_bound "$n"), and was cancelled by its tag; not a failure)"
       late=$(sed -n -E 's/.*ReplacementLate for its deployment: (raised|not raised|unknown);.*/\1/p' "$REC_DIR/not-run.txt" 2>/dev/null | head -1)
       [ -z "$late" ] || say "$n: ReplacementLate for its deployment: $late (information, not a check)"
+    elif row_a_marker; then
+      if requeue_marker; then say "$n: NOT RUN (the scheduler refused the requeue of the run's own job: $(row_a_reason "the scheduler refused the requeue of the run's own job"); the run's other checks passed; not a failure)"; fi
+      if warm_marker; then say "$n: NOT RUN (the agent's own log did not show the warm start: $(row_a_reason "the agent's own log did not show the warm start"); the run's other checks passed; not a failure)"; fi
+    elif [ "${SWAIT[$n]:--}" != - ] && case $n in alpha-*) true ;; *) false ;; esac; then
+      say "$n: NOT RUN (a job did not start within ${SWAIT[$n]} min of the deployment's creation, the row's start wait, and was cancelled by its tag; not a failure)"
     elif [ "${SWAIT[$n]:--}" != - ]; then
       say "$n: NOT RUN (a job did not start within ${SWAIT[$n]} min of its acceptance and was cancelled by its tag; not a failure)"
     elif first_end_marker; then
@@ -1274,7 +1310,11 @@ execute_cluster() {
       # is the budget plus one wait in the queue for each of the row's jobs, so that no wait eats the run's time and the
       # bound fires first: a no-overlap successor waits on top of its predecessor (review of PR 284, B5; internal/alpha,
       # Row.WorstCase and Row.RunDeadline; a handover's second wait is inside its lease, which leaves it room).
-      run_binary "$n" "$OUT/$n.test" "$(( ${TMIN[$n]} + ${MOSTJOBS[$n]:-1} * (($(pending_max "$n") + 59) / 60) ))" env_alpha
+      # A row with a start wait has it as its first clock, inside its timeout column (the package's Row.Budget), and takes
+      # no other (internal/alpha, Row.RunDeadline): no wait in the queue is added.
+      wait=$(( ${MOSTJOBS[$n]:-1} * (($(pending_max "$n") + 59) / 60) ))
+      [ "${SWAIT[$n]:--}" = - ] || wait=0
+      run_binary "$n" "$OUT/$n.test" "$(( ${TMIN[$n]} + wait ))" env_alpha
       judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
     gpu-accounting-*|reach-*)
       # A row with a start wait has the bound as its first clock; one without has the operator's wait in the queue.

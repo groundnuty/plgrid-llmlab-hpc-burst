@@ -24,6 +24,8 @@ const (
 	notRunStartWait30 = "NOT RUN (a job did not start within 30 min of its acceptance and was cancelled by its tag; not a failure)"
 	notRunPending30   = "NOT RUN (a job was still pending after 30 min in the queue and was cancelled by its tag; not a failure)"
 	notRunPending2h   = "NOT RUN (a job was still pending after 120 min in the queue and was cancelled by its tag; not a failure)"
+	// Row A on plgrid-now (issue #376): its start wait runs from the deployment's creation, before the job's acceptance.
+	notRunNowStartWait10 = "NOT RUN (a job did not start within 10 min of the deployment's creation, the row's start wait, and was cancelled by its tag; not a failure)"
 )
 
 // neverStartedBound is the sentence each cluster row ends with when its job never starts, and whether the row has a
@@ -46,6 +48,7 @@ var neverStartedBound = map[string]struct {
 	"reach-athena":             {notRunStartWait10, true},
 	"reach-host-dialed-helios": {notRunStartWait10, true},
 	"reach-host-dialed-athena": {notRunStartWait10, true},
+	"alpha-athena-now-serve":   {notRunNowStartWait10, true},
 }
 
 var cleanupLeftNone = regexp.MustCompile(`cleanup: left behind 0 \(cancelled \d+\)`)

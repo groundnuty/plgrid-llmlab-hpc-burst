@@ -21,8 +21,11 @@ import (
 var betaRows = []string{"alpha-helios-nooverlap", "tunnel-hour-helios", "gpu-accounting-helios", "reach-helios", "reach-host-dialed-helios",
 	"conformance-helios", "conformance-helios-gh200", "real-engine"}
 
-// plannedRows are #376's P3 and P4: named, not built.
-var plannedRows = []string{"alpha-athena-now-serve", "alpha-athena-now-nooverlap"}
+// plannedRows are #376's P4: named, not built. Row A, alpha-athena-now-serve, is P3's, built (builtNowRows).
+var plannedRows = []string{"alpha-athena-now-nooverlap"}
+
+// builtNowRows are #376's rows that are built: ready in the script, and so in the runbook's table.
+var builtNowRows = []string{"alpha-athena-now-serve"}
 
 func readAliases(t *testing.T) map[string][]string {
 	t.Helper()
@@ -223,6 +226,20 @@ func TestTheRunbookIsInStepWithTheTables(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("the runbook's table has no line for %s", c.row)
+		}
+	}
+	for _, r := range builtNowRows {
+		found := false
+		for _, l := range strings.Split(section, "\n") {
+			if strings.HasPrefix(l, "|") && strings.Contains(l, "`"+r+"`") {
+				found = true
+				if strings.Contains(l, "not yet built") || !strings.Contains(l, "`ready`") {
+					t.Errorf("the runbook's table line of %s does not say it is built and `ready`: %s", r, l)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("the runbook's table has no line for the built row %s", r)
 		}
 	}
 	for _, want := range []string{"#378", "#380", "#145", "LIVE_OWNER_GO_ATHENA_NOW", "#376"} {
