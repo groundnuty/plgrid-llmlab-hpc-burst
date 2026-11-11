@@ -49,6 +49,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -126,6 +127,13 @@ type SSH struct {
 	life context.Context
 	stop context.CancelFunc
 
+	// The process-group signals (group.go). signalGroup is killGroup; only
+	// tests set it, to record what would be sent. killGrace is how long a
+	// master gets after SIGTERM before SIGKILL. log is slog's default when nil.
+	signalGroup func(pgid int, sig syscall.Signal) error
+	killGrace   time.Duration
+	log         *slog.Logger
+
 	mu       sync.Mutex
 	master   *master
 	gen      uint64
@@ -142,8 +150,17 @@ var (
 
 type master struct {
 	cmd     *exec.Cmd
+	leader  *groupLeader // the master's pinned process group
 	done    chan struct{}
 	started time.Time
+}
+
+// newMaster wraps a started master: done closes once it was reaped, and its
+// pidfd is released only then.
+func newMaster(cmd *exec.Cmd, leader *groupLeader) *master {
+	m := &master{cmd: cmd, leader: leader, done: make(chan struct{}), started: time.Now()}
+	go func() { _ = cmd.Wait(); leader.release(); close(m.done) }()
+	return m
 }
 
 func (m *master) alive() bool {
@@ -192,6 +209,9 @@ func New(o Options) (*SSH, error) {
 	if err := checkConfigValues(o.Config); err != nil {
 		return nil, err
 	}
+	if err := checkPidfd(); err != nil {
+		return nil, err
+	}
 	if err := privateDir(o.ControlDir); err != nil {
 		return nil, err
 	}
@@ -199,7 +219,8 @@ func New(o Options) (*SSH, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &SSH{o: o, socket: socket, config: config, sem: make(chan struct{}, o.MaxConcurrent)}
+	s := &SSH{o: o, socket: socket, config: config, sem: make(chan struct{}, o.MaxConcurrent),
+		signalGroup: killGroup, killGrace: 5 * time.Second}
 	s.life, s.stop = context.WithCancel(context.Background())
 	return s, nil
 }
@@ -374,12 +395,12 @@ func (s *SSH) startMaster(ctx context.Context) (*master, string) {
 	cmd := exec.Command(s.o.Binary, s.masterArgs()...)
 	cmd.Env = s.o.Env
 	cmd.Stderr = &limited{w: &stderr, n: 4096}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGTERM}
-	if err := cmd.Start(); err != nil {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
+	leader := newGroupLeader(s.logger(), s.signalGroup)
+	if err := leader.start(cmd); err != nil { // its own group, pinned (group.go)
 		return nil, "the ssh client could not be started"
 	}
-	m := &master{cmd: cmd, done: make(chan struct{}), started: time.Now()}
-	go func() { _ = cmd.Wait(); close(m.done) }()
+	m := newMaster(cmd, leader)
 	wait, cancel := context.WithTimeout(ctx, s.o.ConnectTimeout)
 	defer cancel()
 	for {
@@ -400,15 +421,29 @@ func (s *SSH) startMaster(ctx context.Context) (*master, string) {
 // check asks the master whether it answers (ssh -O check). It ends with ctx or
 // after CheckTimeout, killing the client's process group: a master that
 // accepts the connection and never answers would otherwise hold it forever.
+// The group is signalled only behind the guards of group.go; when one refuses,
+// exec's WaitDelay ends the client itself through its own handle.
 func (s *SSH) check(ctx context.Context) bool {
 	ctx, cancel := context.WithTimeout(ctx, s.o.CheckTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, s.o.Binary, s.controlArgs("check")...)
 	cmd.Env = s.o.Env
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	leader := newGroupLeader(s.logger(), s.signalGroup)
+	cmd.Cancel = func() error { return leader.signal(syscall.SIGKILL) }
 	cmd.WaitDelay = time.Second
-	return cmd.Run() == nil
+	if err := leader.start(cmd); err != nil { // its own group, pinned (group.go)
+		return false
+	}
+	defer leader.release() // after Wait: the client was reaped
+	return cmd.Wait() == nil
+}
+
+// logger is the transport's logger, slog's default when none was set.
+func (s *SSH) logger() *slog.Logger {
+	if s.log != nil {
+		return s.log
+	}
+	return slog.Default()
 }
 
 // failedClient is called after a client failed with ssh's own error, without
@@ -428,17 +463,28 @@ func (s *SSH) failedClient(m *master) {
 	}
 }
 
+// killMaster stops a master's process group: SIGTERM, then SIGKILL after
+// killGrace. Each signal goes through the master's pinned leader (group.go);
+// one a guard refuses is not sent and not retried another way, and killMaster
+// returns without waiting, since nothing it could still do would end the
+// master. The refusal is in the log. A master left running that way ends with
+// this process (its parent-death signal).
 func (s *SSH) killMaster(m *master) {
-	if m == nil || m.cmd.Process == nil || !m.alive() {
+	if m == nil || m.leader == nil || m.cmd.Process == nil || !m.alive() {
 		return
 	}
-	_ = syscall.Kill(-m.cmd.Process.Pid, syscall.SIGTERM)
+	if err := m.leader.signal(syscall.SIGTERM); err != nil {
+		return
+	}
 	select {
 	case <-m.done:
-	case <-time.After(5 * time.Second):
-		_ = syscall.Kill(-m.cmd.Process.Pid, syscall.SIGKILL)
-		<-m.done
+		return
+	case <-time.After(s.killGrace):
 	}
+	if err := m.leader.signal(syscall.SIGKILL); err != nil {
+		return
+	}
+	<-m.done
 }
 
 // stopMaster stops the current master. The caller holds s.mu.
