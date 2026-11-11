@@ -257,7 +257,7 @@ hack/live-checks.sh --run alpha-athena-handover --yes
 - **Pass criteria:**
   - `hbep/0007-lifecycle-controller/README.md:663`: "on Athena `plgrid-gpu-a100`, one deployment completes one handover end to end through the front with no request cut;"
   - `hbep/0007-lifecycle-controller/README.md:666`: "on each alpha platform, Helios `plgrid-gpu-gh200` and Athena `plgrid-gpu-a100`, one restart at the worker rung;" (its Helios part is beta's since 11 Nov 2026)
-  - `hbep/0005-llmlab-compatible-front/README.md:490`: "on Athena `plgrid-gpu-a100`, through the front, one handover cuts no request (with HBEP-7)."
+  - `hbep/0005-llmlab-compatible-front/README.md:494`: "on Athena `plgrid-gpu-a100`, through the front, one handover cuts no request (with HBEP-7)."
   - Checked: the deployment is as above; at least one stream was in flight at the drain start (`hbep/0007-lifecycle-controller/README.md:639`: "A run with no stream in flight at the drain start proves nothing here."); none was cut or left unfinished; exactly one handover; the successor ready before the predecessor ended; exactly one worker-rung restart; at least one response, and every response attributed (a run that recorded none has shown nothing); exactly two jobs in the cluster's own record, by job ID, none a duplicate under a tag, both on `plgrid-gpu-a100` with the lease as their time limit.
 
 ### `alpha-helios-nooverlap` (beta)
