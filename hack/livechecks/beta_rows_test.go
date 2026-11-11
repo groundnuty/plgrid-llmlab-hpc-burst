@@ -189,8 +189,21 @@ func TestTheRunbookIsInStepWithTheTables(t *testing.T) {
 		if !strings.Contains(section, "`"+r+"`") {
 			t.Errorf("the runbook's section does not name the planned row %s", r)
 		}
+		// Its line of the table says that it is not built, and that the script holds it as pending.
+		found := false
+		for _, l := range strings.Split(section, "\n") {
+			if strings.HasPrefix(l, "|") && strings.Contains(l, "`"+r+"`") {
+				found = true
+				if !strings.Contains(l, "not yet built") || !strings.Contains(l, "`pending`") {
+					t.Errorf("the runbook's table line of %s does not say \"not yet built\" and \"pending\": %s", r, l)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("the runbook's table has no line for the planned row %s", r)
+		}
 	}
-	for _, want := range []string{"not yet built", "#378", "#380", "#145", "LIVE_OWNER_GO_ATHENA_NOW", "#376"} {
+	for _, want := range []string{"#378", "#380", "#145", "LIVE_OWNER_GO_ATHENA_NOW", "#376"} {
 		if !strings.Contains(section, want) {
 			t.Errorf("the runbook's section does not say %q", want)
 		}
