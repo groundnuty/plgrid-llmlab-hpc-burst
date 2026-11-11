@@ -301,11 +301,13 @@ S3 exercised validation, watches, conflicts, cascades and finalizers. Leases, Ev
 ### Graduation criteria
 
 - **Alpha:**
+  - **Alpha's platform** (owner decision, 11 Nov 2026, "Athena alone", recorded on #145 and approved on PR #373): alpha graduates on Athena. Where a criterion below names Helios, or each alpha platform or partition, its Helios part, where not already met, moves to beta, to run when GH200 returns, and its Athena part stays. A row on Athena `plgrid-now` counts for `plgrid-gpu-a100` when it runs one job in total, of one GPU, within `plgrid-now`'s 1 h limit, on the same A100 node type (extending the science-agent ruling of 10 Nov 2026 for #93, which covered conformance). The no-cut handover (HBEP-5, HBEP-7) and S1's one-hour run (HBEP-6) run on `plgrid-gpu-a100`. An Instance on `plgrid-now` uses the shipped test profile `profiles/athena-now.yaml` (HBEP-4, open question 8; HBEP-7, A partition too short).
   - the single-user host (k3s as a plain user) serves the five kinds at `v1alpha1`;
   - the alpha host passes the front-reachability check (open question 8), or, in host-dialed mode, the reach rows show a relay working end to end on each alpha partition, and the alpha platform has `holdRelease` verified, or runs fallback mode;
   - the Test plan passes on it with one batch provider;
   - the host starts within S3's budget on a 2 vCPU, 4 GiB VM.
 - **Beta:**
+  - the Helios parts of alpha's criteria, on GH200 when it returns (owner decision, 11 Nov 2026);
   - the Test plan passes on the team option (k3s) as well as on the single-user host;
   - open questions 3 and 6 are decided;
   - an upgrade with the controllers running is tested.
@@ -420,6 +422,7 @@ The control plane replaces the files and scripts that held www-2027's state: per
 - 2026-11-09: open question 8 adds HBEP-6's host-dialed mode for a host that compute nodes can't reach.
 - 2026-11-10: in beta's host-dialed mode the launcher supervises the relay keeper (HBEP-6).
 - 2026-11-10: the relay keeper's opt-in and health check.
+- 2026-11-11: alpha graduates on Athena alone; Helios's parts move to beta (owner decision).
 
 ## Amendments
 
@@ -481,3 +484,4 @@ The control plane replaces the files and scripts that held www-2027's state: per
   Before, such a host was out of alpha.
 - **2026-11-10: the relay keeper** (Single-user host; Operational readiness 7). An amendment with HBEP-6's of the same day. In beta's host-dialed mode the launcher starts, records, health-checks and restarts the relay keeper beside frps, and `down` stops it by its record. Before, the launcher supervised no relay process.
 - **2026-11-10: the relay keeper's opt-in and health** (Single-user host). An amendment with HBEP-6's of the same day. The keeper starts only with `up --relay-keeper`, as the controller binary's `relaykeeper` subcommand, and its health is a live pidfd plus a `ping` answered within 1 s. Before, PR #339 named neither.
+- **2026-11-11: alpha graduates on Athena alone** (Graduation criteria). An amendment by the owner's decision of 11 Nov 2026 ("Athena alone", recorded on #145 and approved on PR #373), with Helios GH200 down and no return date. Alpha's criteria now bind Athena, and their Helios parts not already met move to beta, to run when GH200 returns. Already met: a relay on Athena `plgrid-now` (10 Nov 2026, #305). A row on `plgrid-now` counts for `plgrid-gpu-a100` when it runs one job of one GPU within 1 h; the no-cut handover and S1's hour stay on `plgrid-gpu-a100`. Before, alpha needed both Helios and Athena.
