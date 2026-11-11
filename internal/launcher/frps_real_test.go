@@ -1,7 +1,6 @@
 package launcher
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -223,37 +222,19 @@ unixPath = %q
 	}
 
 	// base+10 routes a CONNECT for the UID to the engine through the tunnel, and answers 404 for a
-	// UID with no proxy.
-	connect := func(host string) (status string, body string) {
-		c, err := net.DialTimeout("tcp", h.FrpsTCPMuxAddr(), 5*time.Second)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer c.Close()
-		_ = c.SetDeadline(time.Now().Add(10 * time.Second))
-		fmt.Fprintf(c, "CONNECT %s:80 HTTP/1.1\r\nHost: %s:80\r\n\r\n", host, host)
-		rd := bufio.NewReader(c)
-		status, _ = rd.ReadString('\n')
-		if !strings.Contains(status, " 200 ") {
-			return strings.TrimSpace(status), ""
-		}
-		for l, _ := rd.ReadString('\n'); strings.TrimSpace(l) != ""; l, _ = rd.ReadString('\n') {
-		}
-		fmt.Fprintf(c, "GET /health HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", host)
-		resp, err := http.ReadResponse(rd, nil)
-		if err != nil {
-			t.Fatalf("the engine's reply through the tunnel: %v", err)
-		}
-		defer resp.Body.Close()
-		b := make([]byte, 64)
-		n, _ := resp.Body.Read(b)
-		return strings.TrimSpace(status), string(b[:n])
+	// UID with no proxy. frps lists the proxy online, and answers its CONNECT with 200, before frpc
+	// can take a connection for it (#368, frps_route_test.go), so the first reply is awaited as the
+	// front awaits its first passing probe; then every CONNECT crosses at the first try.
+	if n, err := provenRoute(h.FrpsTCPMuxAddr(), uid, "/health", "engine-ok /health", 15*time.Second); err != nil {
+		t.Fatalf("%v\nfrpc log:\n%s\nfrps log:\n%s", err, tailFile(filepath.Join(r.state, "frpc.log")), r.logTail())
+	} else if n > 1 {
+		t.Logf("the first reply crossed at attempt %d: frps listed the proxy online before frpc had started it", n)
 	}
-	if status, body := connect(uid); !strings.Contains(status, " 200 ") || body != "engine-ok /health" {
-		t.Errorf("CONNECT %s: %q, body %q", uid, status, body)
+	if status, code, body, err := tcpmuxGet(h.FrpsTCPMuxAddr(), uid, "/health", time.Now().Add(10*time.Second)); err != nil || !strings.Contains(status, " 200 ") || code != http.StatusOK || body != "engine-ok /health" {
+		t.Errorf("CONNECT %s after the first reply: %q, %d %q, %v", uid, status, code, body, err)
 	}
-	if status, _ := connect("no-such-uid"); !strings.Contains(status, " 404 ") {
-		t.Errorf("CONNECT of an unknown UID: %q, want 404", status)
+	if status, _, _, err := tcpmuxGet(h.FrpsTCPMuxAddr(), "no-such-uid", "/health", time.Now().Add(10*time.Second)); err != nil || !strings.Contains(status, " 404 ") {
+		t.Errorf("CONNECT of an unknown UID: %q, %v, want 404", status, err)
 	}
 
 	// frpc pings every second. Had the plugin subscribed to Ping, the stub would have seen a call
