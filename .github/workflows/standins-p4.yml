@@ -1,0 +1,260 @@
+# One-off workflow for a throwaway draft PR (issue #376, P4), never merged.
+# Row B on plgrid-now, alpha-athena-now-nooverlap: its four stand-ins (internal/alpha, standin_nownooverlap_test.go), each
+# the LIVE steps over the real stack on the runner and a fake Slurm in run mode behind the rehearsal's sshd, in the one-slot
+# shape (a partition QOS of one submitted job and one GPU per user, as athena-now.yaml types plgrid-now), which proves the
+# wiring and not a cluster. Each first runs the real stage helper (the pre-staging row's) so that both jobs start warm.
+#   - TestStandInNowNoOverlap: the predecessor serves a stream across its drain start, ReleaseWhenIdle frees the slot, the
+#     controller creates the successor only then, and the row PASSES; the fake's record shows the two jobs in turn.
+#   - TestStandInNowNoOverlapSlotTaken: the successor's sbatch is held while the owner's own job takes the slot, and goes
+#     only once the run's read has seen it: NOT RUN, the owner's job untouched, no job of the successor's.
+#   - TestStandInNowNoOverlapSuccessorRefused: the same, the held sbatch let go at once, so the scheduler refuses it for the
+#     submit limit: NOT RUN, never a FAIL, the refusal in the record beside the owner's job.
+#   - TestStandInNowNoOverlapSecondHeld: the successor's job registered on an admin hold: NOT RUN past its start wait
+#     (scaled to 2 minutes on the stand-in), no record and no text to post, the held job cancelled by its tag.
+# Each runs -count=10 under two CPU spinners and must pass all 10.
+#
+# The mutants job applies one stand-in mutant each, by exact-string replacement, to the PR's head, and runs its stand-in
+# once: it must FAIL. The baseline is the standins job, the same binary build and command unmutated.
+#   - foreign-read-ignored: the run's read of the slot never counts a job that is not the run's; killed by
+#     TestStandInNowNoOverlapSlotTaken (the successor, held, is never listed, and its start wait ends the run in a FAIL).
+#   - refusal-unread: a submission refused for the submit limit never reads as one; killed by
+#     TestStandInNowNoOverlapSuccessorRefused (the record shows no refusal).
+#   - past-start-wait-not-notrun: the successor's start wait running out reads as a start; killed by
+#     TestStandInNowNoOverlapSecondHeld (the held successor is never ready, and the row FAILS where it must be NOT RUN).
+# Not built: a mutant of the third-job sign (a successor's Instance ended unready, or a third Allocation, ends the
+# deployment at once), since no stand-in has a successor that fails its start.
+#
+# HPCBURST_REQUIRE_SSHD=1, so a missing sshd fails instead of skipping. The Go, k3s, frp and sshd steps are ci.yml's
+# with the caches restored only, never saved. No secret is read, nothing is pushed.
+name: standins-p4
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/standins-p4.yml
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+  HPCBURST_REQUIRE_SSHD: "1"
+
+defaults:
+  run:
+    shell: bash
+
+
+jobs:
+  standins:
+    name: stand-in ${{ matrix.test }} -count=10
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - TestStandInNowNoOverlap
+          - TestStandInNowNoOverlapSlotTaken
+          - TestStandInNowNoOverlapSuccessorRefused
+          - TestStandInNowNoOverlapSecondHeld
+    steps:
+      - name: Check out the PR's head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Read the Go version from go.mod
+        id: goversion
+        run: |
+          version=$(bash hack/fetch-go.sh --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the cached Go archive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}
+
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
+
+      - name: Check the Go on PATH is the pinned toolchain
+        run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
+
+      - name: Download and verify the Go modules
+        run: bash hack/go-mod-download.sh
+
+      # ci.yml's launcher-k3s steps: the pinned k3s the stand-in's hpcburst up starts, and the pinned frp, each checked
+      # against its sha256 by the script before it is used.
+      - name: Fetch the pinned k3s and frp
+        run: |
+          bash hack/fetch-k3s.sh "$RUNNER_TEMP/k3s-bin" 1.36.5
+          bash hack/fetch-frp.sh "$RUNNER_TEMP/frp"
+          {
+            echo "HPCBURST_BIN_DIR=$RUNNER_TEMP/k3s-bin"
+            echo "HPCBURST_FRP_DIR=$RUNNER_TEMP/frp"
+            echo "HPCBURST_REQUIRE_FRP=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Provide OpenSSH's sshd for the rehearsal login node
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+            sudo chmod 755 /usr/sbin/policy-rc.d
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+            sudo rm -f /usr/sbin/policy-rc.d
+          fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
+          /usr/sbin/sshd -V 2>&1 | head -1
+          echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
+
+      - name: Build the stack's binaries and the test binary
+        run: |
+          mkdir -p "$RUNNER_TEMP/rbin"
+          go build -o "$RUNNER_TEMP/rbin/" ./cmd/hpcburst ./cmd/hpcburst-controller ./cmd/hpcburst-front ./cmd/hb-agent
+          go test -c -o "$RUNNER_TEMP/alpha.test" ./internal/alpha/
+          echo "HPCBURST_REHEARSAL_BIN=$RUNNER_TEMP/rbin" >> "$GITHUB_ENV"
+
+      - name: Run it 10 times under two CPU spinners
+        working-directory: internal/alpha
+        env:
+          TEST: ${{ matrix.test }}
+          HPCBURST_ALPHA_STANDIN: "1"
+        run: |
+          # Two spinners at the lowest priority, each bounded by timeout, so they
+          # end by themselves; the runner ends what is left at the job's end.
+          for i in 1 2; do timeout 290m nice -n 19 sh -c 'while :; do :; done' & done
+          log="$RUNNER_TEMP/standin.log"
+          rc=0
+          "$RUNNER_TEMP/alpha.test" -test.run "^${TEST}\$" -test.count 10 -test.v -test.timeout 280m > "$log" 2>&1 || rc=$?
+          passes=$(grep -c -E "^--- PASS: ${TEST} " "$log" || true)
+          fails=$(grep -c -E "^\s*--- FAIL" "$log" || true)
+          skips=$(grep -c -E "^\s*--- SKIP" "$log" || true)
+          leaks=$(grep -E '^rehearsal: [0-9]+ leaked' "$log" || echo "no leak line")
+          {
+            echo "### ${TEST}"
+            echo "passes: $passes of 10; fails: $fails; skips: $skips; $leaks; exit $rc"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -E '^(\s*--- FAIL|    [a-z_]+_test\.go:[0-9]+: alpha-athena-now-nooverlap: (NOT RUN|FAIL))' "$log" | head -100 || true
+          tail -3 "$log"
+          test "$rc" = 0 && test "$passes" = 10 && test "$fails" = 0 && test "$skips" = 0 && grep -q '^rehearsal: 0 leaked' "$log"
+
+  mutants:
+    name: stand-in mutant ${{ matrix.mutant }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mutant: foreign-read-ignored
+            file: internal/alpha/now_nooverlap_flows_test.go
+            old: "\t\t\tif ForeignInSlot(p.Row, js, owned) > 0 {"
+            new: "\t\t\tif false && ForeignInSlot(p.Row, js, owned) > 0 {"
+            test: TestStandInNowNoOverlapSlotTaken
+          - mutant: refusal-unread
+            file: internal/alpha/nownooverlap.go
+            old: "\treturn s != nil && s.State == v1alpha1.SubmissionRejected && s.Code == v1alpha1.ReasonSubmitLimitReached"
+            new: "\treturn false && s != nil"
+            test: TestStandInNowNoOverlapSuccessorRefused
+          - mutant: past-start-wait-not-notrun
+            file: internal/alpha/now_nooverlap_flows_test.go
+            old: "\t\t\treturn succAlloc, r.nowSuccessorPastStartWait(p, succTag)"
+            new: "\t\t\treturn succAlloc, successorOutcome{}"
+            test: TestStandInNowNoOverlapSecondHeld
+    steps:
+      - name: Check out the PR's head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Read the Go version from go.mod
+        id: goversion
+        run: |
+          version=$(bash hack/fetch-go.sh --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the cached Go archive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}
+
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
+
+      - name: Download and verify the Go modules
+        run: bash hack/go-mod-download.sh
+
+      # ci.yml's launcher-k3s steps: the pinned k3s the stand-in's hpcburst up starts, and the pinned frp, each checked
+      # against its sha256 by the script before it is used.
+      - name: Fetch the pinned k3s and frp
+        run: |
+          bash hack/fetch-k3s.sh "$RUNNER_TEMP/k3s-bin" 1.36.5
+          bash hack/fetch-frp.sh "$RUNNER_TEMP/frp"
+          {
+            echo "HPCBURST_BIN_DIR=$RUNNER_TEMP/k3s-bin"
+            echo "HPCBURST_FRP_DIR=$RUNNER_TEMP/frp"
+            echo "HPCBURST_REQUIRE_FRP=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Provide OpenSSH's sshd for the rehearsal login node
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+            sudo chmod 755 /usr/sbin/policy-rc.d
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+            sudo rm -f /usr/sbin/policy-rc.d
+          fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
+          echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
+
+      - name: Apply the mutant by exact-string replacement
+        env:
+          FILE: ${{ matrix.file }}
+          OLD: ${{ matrix.old }}
+          NEW: ${{ matrix.new }}
+        run: |
+          python3 - <<'PY'
+          import os, sys
+          p, old, new = os.environ["FILE"], os.environ["OLD"], os.environ["NEW"]
+          s = open(p).read()
+          if s.count(old) != 1:
+              sys.exit(f"the mutant's text occurs {s.count(old)} times in {p}, want once")
+          open(p, "w").write(s.replace(old, new))
+          PY
+          git diff --stat
+
+      - name: Build the stack's binaries and the mutated test binary
+        run: |
+          mkdir -p "$RUNNER_TEMP/rbin"
+          go build -o "$RUNNER_TEMP/rbin/" ./cmd/hpcburst ./cmd/hpcburst-controller ./cmd/hpcburst-front ./cmd/hb-agent
+          go test -c -o "$RUNNER_TEMP/alpha.test" ./internal/alpha/
+          echo "HPCBURST_REHEARSAL_BIN=$RUNNER_TEMP/rbin" >> "$GITHUB_ENV"
+
+      - name: Run the stand-in once; the mutant must fail it
+        working-directory: internal/alpha
+        env:
+          HPCBURST_ALPHA_STANDIN: "1"
+          MUTANT: ${{ matrix.mutant }}
+          TEST: ${{ matrix.test }}
+        run: |
+          log="$RUNNER_TEMP/mutant.log"
+          rc=0
+          "$RUNNER_TEMP/alpha.test" -test.run "^${TEST}\$" -test.count 1 -test.v -test.timeout 50m > "$log" 2>&1 || rc=$?
+          killed=0
+          grep -q -E "^--- FAIL: ${TEST} " "$log" && killed=1
+          echo "### ${MUTANT}: ${TEST} killed $killed (exit $rc)" | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -E '^    (standin|standin_nownooverlap|now_nooverlap_flows)_test\.go:[0-9]+:' "$log" | tail -20 || true
+          test "$killed" = 1
