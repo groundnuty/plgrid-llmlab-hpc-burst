@@ -46,6 +46,9 @@ type RelaySettings struct {
 	ControlDir string
 	// SSHBinary is the ssh client; "" means ssh on PATH.
 	SSHBinary string
+	// LoginTimeout bounds the ssh -G that names the login host; zero means
+	// sshrun.DefaultLoginTimeout. Tests shorten it.
+	LoginTimeout time.Duration
 	// Epoch reads the fence's epoch when the relays start, the Provider
 	// Lease's leaseTransitions; Setup fills it from the manager's
 	// configuration when it is nil.
@@ -80,6 +83,7 @@ type relayState struct {
 	owner    *hostdial.Owner
 	provider string
 	hosts    *hostdial.Hosts
+	log      *slog.Logger // the controller's log, for the relays' ssh -G (issue 403)
 
 	reader client.Reader // the Provider's age, for the login host's register
 
@@ -120,7 +124,7 @@ func newRelayState(o Options) (*relayState, error) {
 	if s.Hosts == nil {
 		s.Hosts = hostdial.SharedHosts
 	}
-	r := &relayState{settings: s, provider: o.Provider, hosts: s.Hosts}
+	r := &relayState{settings: s, provider: o.Provider, hosts: s.Hosts, log: slogOf(o.Log)}
 	epoch := func(ctx context.Context) (int64, error) {
 		if r.settings.Epoch == nil {
 			return 0, errors.New("no epoch reader is set")
@@ -148,7 +152,8 @@ func (r *relayState) relay(cfg slurm.SSHConfig) (*sshrun.Relay, error) {
 		return nil, errRelaysClosed
 	}
 	if r.ssh == nil || !reflect.DeepEqual(r.cfg, cfg) {
-		rel, err := sshrun.NewRelay(sshrun.RelayOptions{Name: r.provider, Config: cfg, ControlDir: r.settings.ControlDir, Binary: r.settings.SSHBinary})
+		rel, err := sshrun.NewRelay(sshrun.RelayOptions{Name: r.provider, Config: cfg, ControlDir: r.settings.ControlDir, Binary: r.settings.SSHBinary,
+			LoginTimeout: r.settings.LoginTimeout, Logger: r.log})
 		if err != nil {
 			return nil, err
 		}
@@ -194,7 +199,9 @@ func (r *relayState) claimLogin(cfg slurm.SSHConfig) (login, inUse string, err e
 	host, err := rel.Login()
 	if err != nil {
 		// ssh -G timed out (issue 403): no host to claim this pass. The status
-		// says why, and the next pass runs ssh -G again, bounded again.
+		// says only that (the error names no part of the ssh configuration;
+		// the Match exec command is in the log, Relay.Logger), and the next
+		// pass runs ssh -G again, bounded again.
 		return "", "", err
 	}
 	login = strings.ToLower(host)

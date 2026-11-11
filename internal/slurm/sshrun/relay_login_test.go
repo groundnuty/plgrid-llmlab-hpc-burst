@@ -17,11 +17,13 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -109,12 +111,32 @@ func waitNoMarked(t *testing.T, mark string) {
 	}
 }
 
-// loginFake is a Relay whose ssh is the fake, and the directory the fake keeps
-// its records in.
+// syncBuf is a log's destination that the Login goroutine and exec's watcher
+// can both write to.
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// loginFake is a Relay whose ssh is the fake, the directory the fake keeps its
+// records in, and the Relay's log.
 type loginFake struct {
 	r    *Relay
 	dir  string
 	mark string
+	log  *syncBuf
 }
 
 const loginFakeScript = `#!/bin/sh
@@ -157,15 +179,17 @@ func newLoginFake(t *testing.T, bound time.Duration) *loginFake {
 	if err := os.Chmod(conf, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	logBuf := &syncBuf{}
 	r, err := NewRelay(RelayOptions{Name: "login-timeout", Binary: ssh, ControlDir: conf, LoginTimeout: bound,
-		Env: []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"), loginMarkVar + "=" + mark},
+		Logger: slog.New(slog.NewTextHandler(logBuf, nil)),
+		Env:    []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"), loginMarkVar + "=" + mark},
 		Config: slurm.SSHConfig{HostName: "LOGIN01.Example.org", Port: 2222, User: "example-user",
 			IdentityFile: "/nonexistent/key", UserKnownHostsFile: "/nonexistent/known_hosts"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = r.Close() })
-	return &loginFake{r: r, dir: dir, mark: mark}
+	return &loginFake{r: r, dir: dir, mark: mark, log: logBuf}
 }
 
 func (f *loginFake) touch(t *testing.T, name string) {
@@ -213,10 +237,12 @@ func (f *loginFake) requireStarted(t *testing.T) {
 	}
 }
 
-// A stalled ssh -G ends at the bound, with an error that wraps ErrLoginTimeout,
-// names the bound and the last Match exec command ssh's standard error shows,
-// and repeats nothing else of that output. The whole group is ended: the child
-// the fake started is not left running.
+// A stalled ssh -G ends at the bound, with an error that wraps ErrLoginTimeout
+// and says only that ssh -G timed out after the bound. The last Match exec
+// command ssh's standard error shows is in the log and not in the error, which
+// reaches a Provider's status (PR 409's ruling), and no other line of ssh's
+// output is in either. The whole group is ended: the child the fake started is
+// not left running.
 func TestLoginTimesOutAndEndsTheWholeGroup(t *testing.T) {
 	f := newLoginFake(t, loginTestBound)
 	host, err := f.login(t)
@@ -227,13 +253,18 @@ func TestLoginTimesOutAndEndsTheWholeGroup(t *testing.T) {
 		t.Errorf("the host with the error is %q, want the configured HostName", host)
 	}
 	f.requireStarted(t)
-	for _, want := range []string{loginTestBound.String(), `"hang-forever --flag"`} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the error %q lacks %s", err, want)
+	if want := "sshrun: ssh -G timed out after " + loginTestBound.String(); err.Error() != want {
+		t.Errorf("the error is %q, want exactly %q", err, want)
+	}
+	for _, leaked := range []string{"hang-forever", "Match exec", "config-marker"} {
+		if strings.Contains(err.Error(), leaked) {
+			t.Errorf("the error %q carries %q: it reaches a Provider's status", err, leaked)
 		}
 	}
-	if strings.Contains(err.Error(), "config-marker") {
-		t.Errorf("the error repeats ssh's other output: %q", err)
+	if log := f.log.String(); !strings.Contains(log, `match_exec="hang-forever --flag"`) {
+		t.Errorf("the log lacks the Match exec command:\n%s", log)
+	} else if strings.Contains(log, "config-marker") {
+		t.Errorf("the log carries ssh's other output:\n%s", log)
 	}
 	waitNoMarked(t, f.mark)
 }
@@ -250,6 +281,9 @@ func TestLoginTimeoutWithoutAMatchExecLine(t *testing.T) {
 	f.requireStarted(t)
 	if strings.Contains(err.Error(), "Match exec") || strings.Contains(err.Error(), "hang-forever") {
 		t.Errorf("the error names a command ssh never reported: %q", err)
+	}
+	if log := f.log.String(); !strings.Contains(log, "timed out") || strings.Contains(log, "match_exec") {
+		t.Errorf("the log of a timeout with no Match exec line is not the timeout alone:\n%s", log)
 	}
 	waitNoMarked(t, f.mark)
 }
@@ -308,8 +342,8 @@ func TestLoginFailureOtherThanATimeoutIsTheConfiguredHostName(t *testing.T) {
 }
 
 // The real ssh, with a Match exec that hangs in the relays' file: Login ends at
-// the bound, names the command, and the command's own process is gone, not
-// only ssh.
+// the bound, the log (not the error) names the command, and the command's own
+// process is gone, not only ssh.
 func TestLoginTimeoutOfARealSSHWithAHangingMatchExec(t *testing.T) {
 	if _, err := exec.LookPath("ssh"); err != nil {
 		t.Skip("no ssh client on this host")
@@ -334,8 +368,11 @@ func TestLoginTimeoutOfARealSSHWithAHangingMatchExec(t *testing.T) {
 	if _, err := os.Stat(started); err != nil {
 		t.Fatalf("ssh never ran the Match exec command before the bound ended it: nothing was tested")
 	}
-	if !strings.Contains(lerr.Error(), "sleep 600") {
-		t.Errorf("the error does not name the Match exec command: %q", lerr)
+	if strings.Contains(lerr.Error(), "sleep 600") {
+		t.Errorf("the error names the Match exec command, which belongs in the log: %q", lerr)
+	}
+	if log := f.log.String(); !strings.Contains(log, "sleep 600") {
+		t.Errorf("the log does not name the Match exec command:\n%s", log)
 	}
 	waitNoMarked(t, f.mark)
 }

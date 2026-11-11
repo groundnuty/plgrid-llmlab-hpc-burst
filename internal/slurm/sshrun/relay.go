@@ -46,8 +46,9 @@ type RelayOptions struct {
 	ConfigFile string
 	// LoginTimeout bounds Login's ssh -G; 0 means DefaultLoginTimeout.
 	LoginTimeout time.Duration
-	// Logger is for the guarded stop of a timed-out ssh -G (group.go); nil
-	// means slog's default.
+	// Logger is for the guarded stop of a timed-out ssh -G (group.go) and for
+	// the Match exec command a timeout names: that command is in the log and
+	// nowhere else (see Login). nil means slog's default.
 	Logger *slog.Logger
 }
 
@@ -58,7 +59,8 @@ type RelayOptions struct {
 const DefaultLoginTimeout = 10 * time.Second
 
 // ErrLoginTimeout is what Login returns when ssh -G did not answer within its
-// bound; the error wraps it, so errors.Is finds it.
+// bound; the error wraps it, so errors.Is finds it. Its text names the bound
+// and nothing of the ssh configuration: the error reaches a Provider's status.
 var ErrLoginTimeout = errors.New("sshrun: ssh -G timed out")
 
 // Relay makes the ssh clients of host-dialed mode's relays (HBEP-6,
@@ -253,12 +255,14 @@ func Stderr(cmd *exec.Cmd) string {
 // ssh -G runs for at most the bound (RelayOptions.LoginTimeout, default
 // DefaultLoginTimeout) and is then ended with everything it started, a Match
 // exec command included (issue 403). That is the one failure Login reports: an
-// error wrapping ErrLoginTimeout, naming the bound and, when ssh's standard
-// error shows one, the last Match exec command it started (which is the
-// operator's own configuration text, so it is for logs, as Stderr's is), with
-// the configured HostName as the host. A timeout is never kept, and never
-// turns into a quiet fallback later: the next Login runs ssh -G again, bounded
-// again.
+// error wrapping ErrLoginTimeout, whose text says only that ssh -G timed out
+// after the bound, with the configured HostName as the host. The error reaches
+// a Provider's status, read by status, events and dumps, and an operator's ssh
+// configuration can hold host names, paths and user names, so the last Match
+// exec command ssh's standard error shows goes to the Relay's Logger and to
+// nothing else (`@hpc-burst-science-agent`, 11 Nov 2026, PR 409). A timeout is
+// never kept, and never turns into a quiet fallback later: the next Login runs
+// ssh -G again, bounded again.
 //
 // Login holds the Relay's lock while ssh -G runs, so a Command or a Close
 // waits up to the bound behind a stalled one.
@@ -313,7 +317,12 @@ func (r *Relay) resolveLogin() (string, error) {
 	}
 	runErr := leader.reap(cmd) // behind the barrier; releases the pidfd
 	if runErr != nil && ctx.Err() != nil {
-		return "", loginTimeoutError(bound, stderr.w.String())
+		attrs := []any{"bound", bound.String()}
+		if cmdline := lastMatchExec(stderr.w.String()); cmdline != "" {
+			attrs = append(attrs, "match_exec", cmdline)
+		}
+		log.Error("ssh -G timed out: the relays' login host could not be read", attrs...)
+		return "", fmt.Errorf("%w after %s", ErrLoginTimeout, bound)
 	}
 	if runErr != nil {
 		return fallback, nil
@@ -329,23 +338,20 @@ func (r *Relay) resolveLogin() (string, error) {
 // execLinePrefix starts ssh's verbose line for a Match exec command.
 const execLinePrefix = "Executing command: '"
 
-// loginTimeoutError is the timeout's error: the bound, and the last Match exec
-// command ssh's standard error shows, quoted and cut to 200 bytes, never any
-// other line of it (they name the configuration file and the host).
-func loginTimeoutError(bound time.Duration, stderr string) error {
+// lastMatchExec is the last Match exec command ssh's standard error shows, cut
+// to 200 bytes, or "" when it shows none. No other line of it is used: they
+// name the configuration file and the host.
+func lastMatchExec(stderr string) string {
 	last := ""
 	for _, line := range strings.Split(stderr, "\n") {
 		if i := strings.Index(line, execLinePrefix); i >= 0 {
 			last = strings.TrimSuffix(strings.TrimSpace(line[i+len(execLinePrefix):]), "'")
 		}
 	}
-	if last == "" {
-		return fmt.Errorf("%w after %s", ErrLoginTimeout, bound)
-	}
 	if len(last) > 200 {
 		last = last[:200]
 	}
-	return fmt.Errorf("%w after %s (the last Match exec command it started: %q)", ErrLoginTimeout, bound, last)
+	return last
 }
 
 // Close removes the configuration file; later Commands fail.
