@@ -244,8 +244,8 @@ var runs = []struct {
 // ---- ci.yml ------------------------------------------------------------------------------------------
 
 // ci.yml can be called, so that the release workflow runs the required checks rather than a copy of
-// them, and no job is renamed for it: the four required checks of the branch protection keep their
-// names, each under its own job id.
+// them, and no job is renamed for it: the required checks of the branch protection (four, and since
+// issue #295 a fifth, go own-timeout) keep their names, each under its own job id.
 func TestCICanBeCalledAndKeepsItsRequiredCheckNames(t *testing.T) {
 	d := readWorkflow(t, "ci.yml")
 	on := triggers(t, d)
@@ -259,6 +259,7 @@ func TestCICanBeCalledAndKeepsItsRequiredCheckNames(t *testing.T) {
 		"tidy":         "tidy",
 		"crd":          "crd and envtest",
 		"launcher-k3s": "launcher-k3s",
+		"go-own":       "go own-timeout",
 	}
 	jobs := jobsOf(t, d)
 	for id, name := range want {
