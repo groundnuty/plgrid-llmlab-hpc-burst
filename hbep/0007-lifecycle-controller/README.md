@@ -657,13 +657,16 @@ On real providers (owner decision, 1 Nov 2026; Notes):
 ### Graduation criteria
 
 - **Alpha:**
+  - **Alpha's platform** (owner decision, 11 Nov 2026, "Athena alone", recorded on #145): alpha graduates on Athena. Where a criterion below names Helios, or each alpha platform or partition, its Helios part moves to beta, to run when GH200 returns, and its Athena part stays. A row on Athena `plgrid-now` counts for `plgrid-gpu-a100` where it needs only one job, since both are the same A100 nodes under the same Slurm, differing in QOS and time limit (science-agent ruling, 10 Nov 2026, for #93).
   - the Test plan's simulated cases pass, except those marked "once it is on";
   - on Athena `plgrid-gpu-a100`, one deployment completes one handover end to end through the front with no request cut;
   - on Helios `plgrid-gpu-gh200` under QOS `now`, one deployment goes through no-overlap mode end to end through the front with no request cut, and the gap is measured (Handover, No-overlap mode). This replaces a handover with no cut on Helios, by the owner's decision of 1 Nov 2026 ("gap on Helios, handover on Athena", [issue #145, comment 6557452958](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/145#issuecomment-6557452958));
+  - until then, no-overlap mode's alpha proof runs on Athena `plgrid-now`, whose one-job limit is the one-slot path: one deployment goes through no-overlap mode end to end through the front with no request cut, and the gap is measured (owner decision, 11 Nov 2026, allowing rows of up to 1 h there);
   - on each alpha platform, Helios `plgrid-gpu-gh200` and Athena `plgrid-gpu-a100`, one restart at the worker rung;
   - Apptainer on the compute nodes is verified on each alpha partition (HBEP-4, open question 15). Spike S1's probe 2 verified it on both: Helios `plgrid-gpu-gh200` runs a SIF, and Athena `plgrid-gpu-a100` a sandbox directory (`imageFormat`). A partition where it is missing is out of alpha;
   - HBEP-6's dial-home path works for alpha, which needs HBEP-6 to be implementable.
 - **Beta:**
+  - the Helios parts of alpha's criteria, on GH200 when it returns (owner decision, 11 Nov 2026);
   - hedging across two providers at once, with the start-up failure rate measured per platform (open question 1);
   - over-allocation with k = 1 and ranking, against expected performance (open question 12);
   - restart thresholds from fault injection (open question 6);
@@ -804,6 +807,7 @@ The controller applies by policy what www-2027 operators did per job: holder bat
 - 2026-11-09: the agent's side of HBEP-6's host-dialed mode.
 - 2026-11-10: `RelayEndedForGood` fails and releases an Allocation, whatever its retention policy (#304, PR #319).
 - 2026-11-10: in beta a controller restart cuts no host-dialed serving stream (HBEP-6's relay keeper).
+- 2026-11-11: alpha graduates on Athena alone; Helios's parts move to beta (owner decision).
 
 ## Amendments
 
@@ -902,3 +906,4 @@ The controller applies by policy what www-2027 operators did per job: holder bat
   Before, the agent's tunnel ran only in direct or ssh mode, and nothing was launched from a login node.
 - **2026-11-10: a relay that ends for good releases its Allocation** (Open questions 8; Processing order, step 5; Release; Retention; Test plan). An amendment, the code built ahead of the text (#304, PR #319), settled in PR #331's review. Step 5 fails an Allocation with `RelayEndedForGood`, and an empty one with it is released whatever its retention policy, with the owner's go of 10 Nov 2026 (open question 8). Before, only `SubmittedAsOther` and the provider phases failed an Allocation, and a kept one was never released early without approval.
 - **2026-11-10: the relay keeper** (Test plan, controller restart). An amendment with HBEP-6's of the same day. In beta's host-dialed mode a controller restart cuts no serving stream, since the relay keeper holds the relays. Before, it cut them in every stage.
+- **2026-11-11: alpha graduates on Athena alone** (Graduation criteria). An amendment by the owner's decision of 11 Nov 2026 ("Athena alone", recorded on #145 and on this amendment's PR), with Helios GH200 down and no return date. Alpha's criteria now bind Athena; their Helios parts move to beta, to run when GH200 returns. A one-job row on Athena `plgrid-now` counts for `plgrid-gpu-a100`. No-overlap mode's alpha proof moves from Helios to Athena `plgrid-now`'s one-slot path. Before, alpha needed both Helios and Athena.

@@ -515,12 +515,14 @@ The register holds upstream bugs tied to versions. Each entry has one regression
 ### Graduation criteria
 
 - **Alpha:**
+  - **Alpha's platform** (owner decision, 11 Nov 2026, "Athena alone", recorded on #145): alpha graduates on Athena. Where a criterion below names Helios, or each alpha platform or partition, its Helios part moves to beta, to run when GH200 returns, and its Athena part stays. A row on Athena `plgrid-now` counts for `plgrid-gpu-a100` where it needs only one job, since both are the same A100 nodes under the same Slurm, differing in QOS and time limit (science-agent ruling, 10 Nov 2026, for #93).
   - the Slurm plugin passes the Test plan's fake-Slurm suite, the ported S4 scenarios included;
   - on each alpha platform, Helios and Athena, one Allocation is submitted held, its hold lifted once, read back, observed Running with its hard end in UTC, cancelled by deleting it, and then found ended in accounting after it has left the queue listing. When the forced listing after the cancel shows the job completing, `jobCompleting` is true and its files stay until the flag clears; a fast epilog can clear the flag before any listing (spike S7 saw it on GH200 for one 2 s poll only), so a run where no listing shows the flag is not a failure (Core operations, Phases);
   - the `sbatch` latency over ssh is measured on each alpha platform, and each profile's `inflightWindow` exceeds the worst value seen;
   - a 56-character job name comes back unchanged on each alpha partition;
   - the LLMLab provider lists its catalog into its status, with managed IDs that match HBEP-3's managed golden vector.
 - **Beta:**
+  - the Helios parts of alpha's criteria, on GH200 when it returns (owner decision, 11 Nov 2026);
   - hedging across two Slurm platforms at once (HBEP-7);
   - the register's format (open question 6), profile probes (open question 7), the remaining profile schema (open question 3), and a connection budget from measured limits (open question 17);
   - the partition label decided (open question 12).
@@ -645,6 +647,7 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
 - 2026-11-09: open question 14 allows HBEP-6's host-dialed relays on the login node.
 - 2026-11-09: relays as a long-lived operation outside the command interface, the host-dialed submit limit, and the per-partition host-dialed preconditions (PR #298's review).
 - 2026-11-10: in beta the relay keeper runs host-dialed relays (HBEP-6).
+- 2026-11-11: alpha graduates on Athena alone; Helios's parts move to beta (owner decision).
 
 ## Amendments
 
@@ -724,3 +727,4 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
   Before, no framework process ran on a login node.
 - **2026-11-10: the relay keeper** (Transport, relays). An amendment with HBEP-6's of the same day. In beta's host-dialed mode the relay keeper runs the relays on the batch Provider controller's desired set and owns the per-login-host count; the rules for each relay's connection are unchanged. Before, only the controller ran relays.
 - **2026-11-10: erratum** (Transport, relays): the relay keeper's desired set carries its listing's age and validity, as HBEP-6 now says (PR #347). Before, the line said the listing's time.
+- **2026-11-11: alpha graduates on Athena alone** (Graduation criteria). An amendment by the owner's decision of 11 Nov 2026 ("Athena alone", recorded on #145 and on this amendment's PR), with Helios GH200 down and no return date. Alpha's criteria now bind Athena; their Helios parts move to beta, to run when GH200 returns. A one-job row on Athena `plgrid-now` counts for `plgrid-gpu-a100`. Before, alpha needed both Helios and Athena.

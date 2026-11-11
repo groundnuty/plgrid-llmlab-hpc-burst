@@ -592,6 +592,7 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
 ### Graduation criteria
 
 - **Alpha:**
+  - **Alpha's platform** (owner decision, 11 Nov 2026, "Athena alone", recorded on #145): alpha graduates on Athena. Where a criterion below names Helios, or each alpha platform or partition, its Helios part moves to beta, to run when GH200 returns, and its Athena part stays. A row on Athena `plgrid-now` counts for `plgrid-gpu-a100` where it needs only one job, since both are the same A100 nodes under the same Slurm, differing in QOS and time limit (science-agent ruling, 10 Nov 2026, for #93).
   - S1's one-hour runs pass with this wiring on Helios and on Athena, with the path rate from compute node to front measured, in the mode the alpha host uses: host-dialed, since 9 Nov 2026;
   - the plugin's refusals are tested: a wrong token, a domain that is not one of the Allocation's Instances, and a wrong proxy type;
   - a dead engine behind a live tunnel is caught by the probe;
@@ -599,6 +600,7 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
   - a lifecycle-controller restart while serving cuts no established tunnel in direct or ssh mode; in host-dialed mode it cuts the streams in flight, counted and never replayed, and the relays return within the backoff (owner, 9 Nov 2026);
   - in host-dialed mode, on each alpha platform, a relay works on the partition the Instances use (HBEP-4, open question 16), Helios GH200 included.
 - **Beta:**
+  - the Helios parts of alpha's criteria, on GH200 when it returns (owner decision, 11 Nov 2026);
   - many tunnels on one front are measured (open question 11): S14 measured steady state, and the five items it leaves open are measured too;
   - bulk paths run on a separate frpc and a second frps, with open question 12's contract decided, built and tested;
   - in host-dialed mode, the relay keeper's tests pass, and a controller restart while serving cuts no serving stream (open question 13).
@@ -743,6 +745,7 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - 2026-11-10: open question 12 answered for one transfer at a time by spike S15.
 - 2026-11-10: two amendments to the relay keeper's interface, from its build (#354).
 - 2026-11-10: an unreachable relay keeper makes the Provider unready, from the keeper's build (#360).
+- 2026-11-11: alpha graduates on Athena alone; Helios's parts move to beta (owner decision).
 
 ## Amendments
 
@@ -824,3 +827,4 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - **2026-11-10: an unreachable keeper makes the Provider unready** (Dial-home modes, The relay keeper), from the keeper's build (#360), approved by the science agent's objective check. In keeper mode the Provider's controller sets `Ready` False with reason `RelayKeeperUnavailable` while no exchange with the keeper has succeeded under its current lead, or none has for longer than a set's validity. It admits no new Allocation meanwhile, leaves running ones as they are, and sets `Ready` True again at the next successful exchange.
 
   Before, an unreachable keeper left the Provider `Ready`.
+- **2026-11-11: alpha graduates on Athena alone** (Graduation criteria). An amendment by the owner's decision of 11 Nov 2026 ("Athena alone", recorded on #145 and on this amendment's PR), with Helios GH200 down and no return date. Alpha's criteria now bind Athena; their Helios parts move to beta, to run when GH200 returns. A one-job row on Athena `plgrid-now` counts for `plgrid-gpu-a100`. Before, alpha needed both Helios and Athena.
