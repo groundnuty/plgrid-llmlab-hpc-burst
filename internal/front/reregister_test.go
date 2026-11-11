@@ -249,8 +249,8 @@ func TestReprobeDropsAUIDTheFrontDoesNotProbe(t *testing.T) {
 
 // TestFrontPluginTakesTheRouteAwayBeforeFrpsRegisters: the front's frps plugin
 // at FrontFrpsPluginPath. A NewProxy for a UID takes its registration away,
-// moves its epoch and puts it on the re-probe schedule; a CloseProxy takes the
-// registration away without a re-probe; a call it cannot read, or a NewProxy
+// moves its epoch and puts it on the re-probe schedule; so does a CloseProxy,
+// which frps may post after the next NewProxy; a call it cannot read, or a NewProxy
 // whose proxy name is no UID, is refused (failing closed, nothing changes);
 // any other op is answered with no action.
 func TestFrontPluginTakesTheRouteAwayBeforeFrpsRegisters(t *testing.T) {
@@ -297,8 +297,8 @@ func TestFrontPluginTakesTheRouteAwayBeforeFrpsRegisters(t *testing.T) {
 	if tun.Registered(uid) || tun.Epoch(uid) == e {
 		t.Fatalf("after CloseProxy: registered %v, epoch %d (was %d)", tun.Registered(uid), tun.Epoch(uid), e)
 	}
-	if _, ok := p.reprobeAt(); ok {
-		t.Fatal("CloseProxy put a re-probe on the schedule")
+	if _, ok := p.reprobeAt(); !ok {
+		t.Fatal("CloseProxy put no re-probe on the schedule")
 	}
 
 	tun.setRegistered(uid, true)

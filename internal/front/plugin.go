@@ -40,10 +40,13 @@ const pluginBodyLimit = 64 << 10
 // It answers every call with a verdict, as frps expects. It refuses a NewProxy
 // it cannot read, or whose proxy name no frpc could have registered, since it
 // could not stop routing to that UID (failing closed; the controller's plugin
-// refuses those first). A CloseProxy also takes the UID's registration away,
-// with no re-probe, since nothing serves it until the next NewProxy. Any other
-// call is answered with no action: it is how the launcher checks that the
-// plugin answers (Operational readiness).
+// refuses those first). A CloseProxy takes the UID's registration away too,
+// and re-probes it the same way: frps posts CloseProxy from a goroutine of its
+// own after it has dropped the proxy (server/control.go:667-681), so an old
+// session's CloseProxy can come after the new session's NewProxy, and the
+// re-probe gives the new registration back within its backoff. Any other call
+// is answered with no action: it is how the launcher checks that the plugin
+// answers (Operational readiness).
 type frpsPlugin struct {
 	tun    *Tunnel
 	prober *Prober // nil when the front probes nothing
@@ -99,7 +102,10 @@ func (h *frpsPlugin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case req.Op == opCloseProxy:
 		if uid := types.UID(req.Content.ProxyName); checkUID(uid) == nil {
 			h.tun.Bump(uid)
-			h.log.Info("frps closed the Instance's tunnel; it routes nothing to it until it registers again and a probe passes", "uid", string(uid))
+			if h.prober != nil {
+				h.prober.Reregistered(uid)
+			}
+			h.log.Info("frps closed the Instance's tunnel; it routes nothing to it until a probe passes", "uid", string(uid))
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")

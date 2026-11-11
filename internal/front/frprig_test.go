@@ -64,9 +64,22 @@ type frpRig struct {
 	frpc string // the frpc binary
 	cert string // the dial-home certificate, the one frpc trusts
 	n    int    // engines and frpcs started, for unique file names
+	frps string // the frps binary, and the configuration it runs (restartFrps)
+	cfg  string
 }
 
-func newFrpRig(t *testing.T) *frpRig {
+// frpRigOptions changes the rig's frps. frontPlugin, when set, is the address of the front's
+// plugin, which frps then posts each NewProxy and CloseProxy to after the stub's admission
+// (launcher.WriteFrpsConfigWithFront; #371). edit, when set, rewrites the rendered file before
+// frps reads it.
+type frpRigOptions struct {
+	frontPlugin string
+	edit        func(cfg []byte) []byte
+}
+
+func newFrpRig(t *testing.T) *frpRig { t.Helper(); return newFrpRigWith(t, frpRigOptions{}) }
+
+func newFrpRigWith(t *testing.T, o frpRigOptions) *frpRig {
 	t.Helper()
 	frps, frpc := testenv.FrpBinaries(t)
 	checkRootK3s(t)
@@ -78,40 +91,68 @@ func newFrpRig(t *testing.T) *frpRig {
 	}
 	t.Cleanup(func() { frpRigBases <- base }) // runs last: frps is stopped by then
 	dir := shortDir(t)
-	r := &frpRig{t: t, host: agentapi.Host{StateDir: dir, PortBase: base}, dir: dir, frpc: frpc}
+	r := &frpRig{t: t, host: agentapi.Host{StateDir: dir, PortBase: base}, dir: dir, frpc: frpc, frps: frps}
 	r.cert = writeDialHomeCert(t, r.host)
 	startAdmitAllPlugin(t, r.host)
 	var err error
 	if r.pw, _, err = launcher.EnsureFrpsWebPassword(r.host); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := launcher.WriteFrpsConfig(r.host, r.pw)
+	if o.frontPlugin == "" {
+		r.cfg, err = launcher.WriteFrpsConfig(r.host, r.pw)
+	} else {
+		r.cfg, err = launcher.WriteFrpsConfigWithFront(r.host, r.pw, o.frontPlugin)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	bin, err := launcher.ResolveFrpsFile(frps, launcher.DefaultFrpVersion)
-	if err != nil {
-		t.Fatal(err)
+	if o.edit != nil {
+		b, err := os.ReadFile(r.cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeMode600(t, r.cfg, string(o.edit(b)))
 	}
-	t.Cleanup(bin.Close)
-	if r.proc, err = launcher.StartFrps(launcher.FrpsSpec{Bin: bin, Config: cfg, Log: launcher.FrpsLogFile(r.host), Dir: dir}); err != nil {
-		t.Fatal(err)
-	}
+	r.startFrps()
 	t.Cleanup(func() {
 		r.cont() // a test that stopped it may have failed before it went on
 		if _, err := r.proc.Stop(context.Background(), 5*time.Second); err != nil {
 			t.Errorf("stop frps: %v", err)
 		}
 	})
+	return r
+}
+
+// startFrps starts frps from the rig's configuration with the launcher's own code, and waits until
+// its web server answers.
+func (r *frpRig) startFrps() {
+	r.t.Helper()
+	bin, err := launcher.ResolveFrpsFile(r.frps, launcher.DefaultFrpVersion)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	r.t.Cleanup(bin.Close)
+	if r.proc, err = launcher.StartFrps(launcher.FrpsSpec{Bin: bin, Config: r.cfg, Log: launcher.FrpsLogFile(r.host), Dir: r.dir}); err != nil {
+		r.t.Fatal(err)
+	}
 	for end := time.Now().Add(15 * time.Second); ; time.Sleep(50 * time.Millisecond) {
 		if code, _ := r.web("", "/healthz"); code == http.StatusOK {
-			break
+			return
 		}
 		if time.Now().After(end) {
-			t.Fatalf("frps's web server never answered /healthz: %s\n%s", r.proc.ExitStatus(), r.logTail())
+			r.t.Fatalf("frps's web server never answered /healthz: %s\n%s", r.proc.ExitStatus(), r.logTail())
 		}
 	}
-	return r
+}
+
+// restartFrps stops frps the way the launcher does and starts it again on the same ports, as the
+// supervisor restarts one that exited: every frpc session ends, and each frpc logs in again.
+func (r *frpRig) restartFrps() {
+	r.t.Helper()
+	if _, err := r.proc.Stop(context.Background(), 5*time.Second); err != nil {
+		r.t.Fatalf("stop frps: %v", err)
+	}
+	r.startFrps()
 }
 
 // stop and cont freeze and resume frps with SIGSTOP and SIGCONT. A frozen frps
@@ -236,6 +277,12 @@ func (r *frpRig) engineOn(sock, key string) *enginetest.Engine {
 // resume freeze it.
 func (r *frpRig) startFrpc(uid types.UID, sock, dialHome string) *frpcProc {
 	r.t.Helper()
+	return r.startFrpcEdited(uid, sock, dialHome, nil)
+}
+
+// startFrpcEdited is startFrpc with frpc's rendered configuration passed through edit, when not nil.
+func (r *frpRig) startFrpcEdited(uid types.UID, sock, dialHome string, edit func([]byte) []byte) *frpcProc {
+	r.t.Helper()
 	r.n++
 	host, port, err := net.SplitHostPort(dialHome)
 	if err != nil {
@@ -252,6 +299,9 @@ func (r *frpRig) startFrpc(uid types.UID, sock, dialHome string) *frpcProc {
 		CAFile: r.cert, ServerName: agentapi.DialHomeServerName, UID: string(uid), Socket: sock}.Render()
 	if err != nil {
 		r.t.Fatalf("render frpc's configuration: %v", err)
+	}
+	if edit != nil {
+		text = edit(text)
 	}
 	if err := os.WriteFile(cfg, text, 0o600); err != nil {
 		r.t.Fatal(err)
@@ -388,11 +438,24 @@ func startAdmitAllPlugin(t *testing.T, host agentapi.Host) {
 // to the rig's frps. It returns the listener's address and the passthrough.
 func (r *frpRig) serveDialHome(mode string) (string, *frpPassthrough) {
 	r.t.Helper()
+	return r.serveDialHomeVia(mode, r.host.FrpsBindAddr())
+}
+
+// serveDialHomeTo is serveDialHome with frpc's websocket passed to target instead of frps's bind
+// port: a relay in front of frps (testenv.HoldRelay).
+func (r *frpRig) serveDialHomeTo(mode, target string) string {
+	r.t.Helper()
+	addr, _ := r.serveDialHomeVia(mode, target)
+	return addr
+}
+
+func (r *frpRig) serveDialHomeVia(mode, target string) (string, *frpPassthrough) {
+	r.t.Helper()
 	tlsCfg, err := dialHomeTLS(mode, r.host)
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	pass := newFrpPassthrough(r.host.FrpsBindAddr(), DefaultTunnelSetupTimeout, discardLog())
+	pass := newFrpPassthrough(target, DefaultTunnelSetupTimeout, discardLog())
 	dh, err := NewDialHome(mode, r.host, pass)
 	if err != nil {
 		r.t.Fatal(err)
