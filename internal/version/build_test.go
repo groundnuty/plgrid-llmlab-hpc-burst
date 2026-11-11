@@ -1,11 +1,16 @@
 package version
 
 // The three host binaries, built for real: "go build" of each, inside this repository, with VCS
-// stamping on (-buildvcs=true, so a build that cannot stamp fails instead of stamping nothing), as
-// the release workflow builds them (HBEP-15, Releases; CGO_ENABLED=0 and -trimpath). Each one's
-// "version" line is checked against git itself: the commit from "git rev-parse HEAD", the commit's
-// time from git log in UTC, and the tag from the tags that point at HEAD. Nothing here uses this
-// package's formatter or its seam: the binary reads its own build information.
+// stamping on (-buildvcs=true, so a build that cannot stamp fails instead of stamping nothing).
+// Each one's "version" line is checked against git itself: the commit from "git rev-parse HEAD",
+// the commit's time from git log in UTC, and the tag from the tags that point at HEAD. Nothing
+// here uses this package's formatter or its seam: the binary reads its own build information.
+//
+// The builds use the outer toolchain's default flags, not the release workflow's CGO_ENABLED=0 and
+// -trimpath (HBEP-15, Releases): the VCS stamp depends on neither, and a flag that the surrounding
+// "go test ./..." does not use makes every compile action differ from its own, so the nested
+// builds would recompile the module's whole dependency graph from scratch (issue #401, the review
+// of PR 405). With the defaults they find what the outer build compiled in the build cache.
 
 import (
 	"bytes"
@@ -16,6 +21,26 @@ import (
 	"strings"
 	"testing"
 )
+
+// stampedVCS reports whether the Go tool stamped VCS information into the binary, read with "go version -m", which
+// shares no code with this package: a vcs.revision build setting.
+func stampedVCS(t *testing.T, bin string) bool {
+	t.Helper()
+	out, err := exec.Command("go", "version", "-m", bin).CombinedOutput()
+	if err != nil {
+		t.Fatalf("go version -m %s: %v\n%s", bin, err, out)
+	}
+	return strings.Contains(string(out), "\tvcs.revision=")
+}
+
+// isWorktree reports whether root is a linked git worktree (or a submodule): its ".git" is a file, not a
+// directory. The pinned Go, 1.26.0, stamps no VCS information there, whatever -buildvcs says, and builds
+// with the "(devel)" version; a newer Go does stamp it. In a normal clone, as actions/checkout makes, the
+// pinned Go stamps correctly.
+func isWorktree(root string) bool {
+	fi, err := os.Stat(filepath.Join(root, ".git"))
+	return err == nil && !fi.IsDir()
+}
 
 // git runs git in the repository and returns its output, trimmed; ok is false when it cannot.
 func git(t *testing.T, root string, args ...string) (string, bool) {
@@ -60,6 +85,41 @@ func TestThePseudoVersionPatternTakesWhatGoStamps(t *testing.T) {
 	}
 }
 
+func goVersion(t *testing.T) string {
+	t.Helper()
+	out, err := exec.Command("go", "version").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// A binary built with VCS stamping off reports the documented no-VCS line, whatever the checkout and the Go
+// release (it does not need git at all): the tag (devel), and unknown for the commit and the time. This is
+// the case the pinned Go gives in a git worktree too.
+func TestABinaryBuiltWithoutVCSStampingReportsDevelAndUnknown(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(t.TempDir(), "hpcburst")
+	build := exec.Command("go", "build", "-buildvcs=false", "-o", bin, "./cmd/hpcburst")
+	build.Dir = root
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build -buildvcs=false ./cmd/hpcburst: %v\n%s", err, out)
+	}
+	if stampedVCS(t, bin) {
+		t.Fatal("go build -buildvcs=false stamped VCS information")
+	}
+	out, err := exec.Command(bin, "version").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(out), "hpcburst (devel) unknown unknown\n"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
 func TestTheBuiltBinariesReportTheCommitGitSees(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -82,12 +142,15 @@ func TestTheBuiltBinariesReportTheCommitGitSees(t *testing.T) {
 	dir := t.TempDir()
 	names := []string{"hpcburst", "hpcburst-controller", "hpcburst-front"}
 	for _, name := range names {
-		build := exec.Command("go", "build", "-buildvcs=true", "-trimpath", "-o", filepath.Join(dir, name), "./cmd/"+name)
+		build := exec.Command("go", "build", "-buildvcs=true", "-o", filepath.Join(dir, name), "./cmd/"+name)
 		build.Dir = root
-		build.Env = append(os.Environ(), "CGO_ENABLED=0")
 		if out, err := build.CombinedOutput(); err != nil {
 			t.Fatalf("go build ./cmd/%s: %v\n%s", name, err, out)
 		}
+	}
+	stamped := map[string]bool{}
+	for _, name := range names {
+		stamped[name] = stampedVCS(t, filepath.Join(dir, name))
 	}
 	lines := map[string]string{}
 	for _, name := range names {
@@ -108,6 +171,21 @@ func TestTheBuiltBinariesReportTheCommitGitSees(t *testing.T) {
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
 			line := lines[name]
+			if !stamped[name] {
+				// The Go tool put no VCS information in this binary. Only a linked worktree under the pinned Go
+				// does that; in a normal clone it is a failure of the stamping the release depends on.
+				if !isWorktree(root) {
+					t.Fatalf("the Go tool stamped no VCS information into %s, built with -buildvcs=true in a normal clone (.git is a directory)", name)
+				}
+				if want := name + " (devel) unknown unknown\n"; line != want {
+					t.Errorf("an unstamped binary printed %q, want %q", line, want)
+				}
+				// What there is to compare with git is absent: the binary's own no-VCS line was checked above, and the
+				// rest is skipped, with the reason (the pinned Go in a worktree; the tests of the seam and the
+				// -buildvcs=false build cover the line everywhere).
+				t.Skipf("SKIPPED, NOT COMPARED WITH GIT: %s stamped no VCS information into %s in this git worktree (the pinned Go, 1.26.0, stamps none there; a normal clone is stamped); its line is the documented %q", goVersion(t), name, name+" (devel) unknown unknown")
+				return
+			}
 			if !strings.HasSuffix(line, "\n") || strings.Count(line, "\n") != 1 {
 				t.Fatalf("output %q is not one newline-terminated line", line)
 			}

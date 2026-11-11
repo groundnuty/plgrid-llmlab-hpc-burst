@@ -21,9 +21,11 @@
 //     first 12 hex digits, on any other commit: v0.0.0-20261111100000-05cbafcb8ea4 before the
 //     first tag, v0.1.0-alpha.1.0.20261112090000-1a2b3c4d5e6f after a pre-release tag,
 //     v0.1.1-0.20261112090000-1a2b3c4d5e6f after a release tag. "(devel)" is what the tool
-//     stamps when it has no version control to read (-buildvcs=false, or no repository), and the
-//     line then says "unknown" for the commit and the time; "(unknown)" means the binary carries
-//     no build information at all. A "+dirty" suffix the tool adds to the version of a modified
+//     stamps when it has no version control to read (-buildvcs=false, or no repository; and, with
+//     Go 1.26.0, the pinned release, a build in a git worktree, whose .git is a file: it stamps
+//     nothing there, where a normal clone, as actions/checkout makes, is stamped), and the line
+//     then says "unknown" for the commit and the time; "(unknown)" means the binary carries no
+//     build information at all. A "+dirty" suffix the tool adds to the version of a modified
 //     tree is removed: dirtiness is its own field.
 //   - commit: vcs.revision, the full 40-hex commit, or "unknown" when the binary was built outside
 //     a repository or with -buildvcs=false.
