@@ -309,9 +309,19 @@ func (j job) port(ch agentapi.RelayChannel) int {
 	return j.ports.Control
 }
 
+// login is the relays' login host; an ssh -G that times out fails the test.
+func (w *world) login() string {
+	w.t.Helper()
+	host, err := w.relay.Login()
+	if err != nil {
+		w.t.Fatalf("the relays' login host: %v", err)
+	}
+	return host
+}
+
 // target is the relay target of a job for an alpha Owner in the test process.
 func (w *world) target(j job) hostdial.Target {
-	return hostdial.Target{Tag: j.tag, JobID: j.id, AgentPath: w.agent, AllocDir: j.allocDir, UID: j.uid, Login: w.relay.Login(),
+	return hostdial.Target{Tag: j.tag, JobID: j.id, AgentPath: w.agent, AllocDir: j.allocDir, UID: j.uid, Login: w.login(),
 		Jobs: w.jobs, Command: w.relay.Command, Stderr: sshrun.Stderr, Describe: sshrun.Classify, Gen: "1"}
 }
 

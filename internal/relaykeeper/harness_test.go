@@ -64,7 +64,9 @@ func newFakeRunner(e int64) *fakeRunner {
 	return &fakeRunner{epoch: e, cur: map[string]map[string]*instance{}, old: map[string]map[string][]*instance{}}
 }
 
-func (f *fakeRunner) LoginHost(_ string, s wire.SSH) string { return strings.ToLower(s.HostName) }
+func (f *fakeRunner) LoginHost(_ string, s wire.SSH) (string, error) {
+	return strings.ToLower(s.HostName), nil
+}
 
 func (f *fakeRunner) Want(p string, s wire.SSH, w Want) {
 	if f.onWant != nil {
