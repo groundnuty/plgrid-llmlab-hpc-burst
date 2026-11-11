@@ -208,7 +208,7 @@ type Row struct {
 	// ReleaseWhenIdle says the row's deployment releases each job once its Instance has ended, after the live idle
 	// limit (Timing.IdleLimit): the no-overlap rows, whose successor waits on the predecessor's job, on Helios's GPU cap
 	// (alpha-helios-nooverlap) or on plgrid-now's one-job slot (alpha-athena-now-nooverlap, issue #376's row B;
-	// hbep/0007-lifecycle-controller/README.md:482). Row.Plan reads it; no row name does.
+	// hbep/0007-lifecycle-controller/README.md:483). Row.Plan reads it; no row name does.
 	ReleaseWhenIdle bool
 }
 
@@ -332,7 +332,7 @@ type DeploymentSpec struct {
 // Plan is the deployment the row's scenario must apply: the row's Provider alone,
 // the shortest lease, the 5-minute request deadline, and for the no-overlap rows
 // (Row.ReleaseWhenIdle) ReleaseWhenIdle with a short idle limit
-// (hbep/0007-lifecycle-controller/README.md:482).
+// (hbep/0007-lifecycle-controller/README.md:483).
 func (r Row) Plan() DeploymentSpec {
 	tm := r.Clock()
 	d := DeploymentSpec{Providers: []ProviderRef{{Name: r.Cluster, Cluster: r.Cluster}}, LeaseLimit: r.Lease, MaxRequestDuration: tm.MaxRequestDuration}

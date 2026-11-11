@@ -156,6 +156,12 @@ var nowServeFaults = []string{"cut", "short-stream", "past-deadline", "unattribu
 	"extra-allocation", "requeue-refused-cut", "requeue-refused-no-drain", "requeue-not-requeued", "requeue-replacement", "requeue-not-released",
 	"requeue-no-drain", "requeue-not-attempted"}
 
+// nowNoOverlapFaults are row B's failing faults (issue #376; internal/alpha, run_test.go's nowNoOverlapCases); its NOT RUNs
+// are TestRowBsNotRunsThroughTheScript's.
+var nowNoOverlapFaults = []string{"cut", "no-stream", "noslot", "nogap", "early-submit", "created-early", "order-unseen", "marked", "not-ended",
+	"not-ready", "successor-not-ready", "refused-no-owner", "no-pred-tag", "untagged", "wrong-partition", "adds-helios", "default-lease", "short-lease",
+	"no-release-when-idle", "duplicate-tag", "extra-allocation", "second-never-started-cut", "slot-taken-cut"}
+
 // accountingPassing: a cluster that does not confine devices lists the whole node to nvidia-smi, and one that
 // does not set CUDA_VISIBLE_DEVICES leaves nvidia-smi the witness; neither is a false failure.
 var accountingPassing = []string{"smi-whole-node", "cvd-unset"}
@@ -173,6 +179,7 @@ var dryRows = []dryRow{
 	{"gpu-accounting-helios", confPkg, "HPCBURST_LIVECHECKS_CONF_TEST", accountingFaults, accountingPassing, []string{"slot-held"}},
 	{"gpu-accounting-athena", confPkg, "HPCBURST_LIVECHECKS_CONF_TEST", accountingFaults, accountingPassing, nil},
 	{"alpha-athena-now-serve", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", nowServeFaults, nil, nil},
+	{"alpha-athena-now-nooverlap", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", nowNoOverlapFaults, nil, nil},
 }
 
 func containsString(list []string, s string) bool {

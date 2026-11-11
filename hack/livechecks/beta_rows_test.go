@@ -21,11 +21,11 @@ import (
 var betaRows = []string{"alpha-helios-nooverlap", "tunnel-hour-helios", "gpu-accounting-helios", "reach-helios", "reach-host-dialed-helios",
 	"conformance-helios", "conformance-helios-gh200", "real-engine"}
 
-// plannedRows are #376's P4: named, not built. Row A, alpha-athena-now-serve, is P3's, built (builtNowRows).
-var plannedRows = []string{"alpha-athena-now-nooverlap"}
+// plannedRows are #376's rows still named and not built: none, now that row B is P4's. Row A is P3's.
+var plannedRows = []string{}
 
 // builtNowRows are #376's rows that are built: ready in the script, and so in the runbook's table.
-var builtNowRows = []string{"alpha-athena-now-serve"}
+var builtNowRows = []string{"alpha-athena-now-serve", "alpha-athena-now-nooverlap"}
 
 func readAliases(t *testing.T) map[string][]string {
 	t.Helper()
@@ -154,6 +154,10 @@ func TestAnAliasRunNeedsNoHeliosSetting(t *testing.T) {
 func TestThePlannedPlgridNowRowsArePendingAndRefused(t *testing.T) {
 	w := newWorld(t)
 	list := w.run(nil, "--list")
+	// The built ones are ready, with their gate: a row that is no longer planned is no longer pending.
+	for _, r := range builtNowRows {
+		w.contains(list, r+"  cluster  ready  gate HPCBURST_ALPHA_ROW")
+	}
 	for _, r := range plannedRows {
 		w.contains(list, r+"  cluster  pending")
 		res := w.run(nil, "--run", r, "--yes")

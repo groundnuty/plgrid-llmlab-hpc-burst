@@ -3,7 +3,7 @@ package alpha
 // Row B of issue #376, alpha-athena-now-nooverlap: HBEP-7's no-overlap mode on the one-slot path, on Athena's plgrid-now
 // under profiles/athena-now.yaml (the owner's decisions of 11 Nov 2026, and the science agent's rulings Q3 and Q7).
 //
-//	hbep/0007-lifecycle-controller/README.md:480: "when the effective submit limit is 1, so no slot is free, the successor is not submitted early. Step 7 creates its Allocation once the predecessor's job has left the slot: its phase is `Ended` with `jobCompleting` false, or its deletion has completed"
+//	hbep/0007-lifecycle-controller/README.md:482: "when the effective submit limit is 1, so no slot is free, the successor is not submitted early. Step 7 creates its Allocation once the predecessor's job has left the slot: its phase is `Ended` with `jobCompleting` false, or its deletion has completed"
 //	hbep/0007-lifecycle-controller/README.md:484: "the gap is the time from the primary's drain start until its successor is `ready`. ... On the one-slot path the successor's whole queue wait is added."
 //	hbep/0007-lifecycle-controller/README.md:639: "on Athena `plgrid-now` under `profiles/athena-now.yaml` ..., one deployment with `ReleaseWhenIdle`, a short `idleLimit` and a stream in flight at the drain start goes through no-overlap mode on the one-slot path end to end through the front, with no request cut. The successor's Allocation is created only after the predecessor's job has left the slot, and the gap from the drain start to the successor's `ready`, its queue wait included, is measured and recorded. A run with no stream in flight at the drain start proves nothing here;"
 //
@@ -119,7 +119,7 @@ func RefusedForTheSubmitLimit(a *v1alpha1.Allocation) bool {
 }
 
 // LeftTheSlot reports whether an Allocation version shows its job gone from the slot as the lifecycle controller counts
-// it (hbep/0007-lifecycle-controller/README.md:480): its phase Ended with jobCompleting false, or its deletion complete.
+// it (hbep/0007-lifecycle-controller/README.md:482): its phase Ended with jobCompleting false, or its deletion complete.
 func LeftTheSlot(o stack.AllocObservation) bool {
 	if o.Deleted {
 		return true
