@@ -337,6 +337,29 @@ func TestHidePathsHidesEachPathAndKeepsTheError(t *testing.T) {
 			t.Error("the error no longer wraps the operating system's")
 		}
 	})
+	t.Run("a parent directory that starts the path, listed after it", func(t *testing.T) {
+		// os.RemoveAll can name the path, something below it, or, when it
+		// cannot open it, the parent alone. The parent starts the path, so it
+		// is listed after it: the replacements are tried in the order given,
+		// and a parent listed first would take the start of the longer path.
+		dir := "/s/images"
+		p := dir + "/.tmp-x-old"
+		hide := func(err error) string { return hidePaths(err, p, "<temp>", dir, "<images>").Error() }
+		for _, tc := range []struct {
+			name string
+			err  error
+			want string
+		}{
+			{"below the path", &fs.PathError{Op: "unlinkat", Path: p + "/inner", Err: syscall.EACCES}, "unlinkat <temp>/inner: permission denied"},
+			{"the path", &fs.PathError{Op: "remove", Path: p, Err: syscall.EACCES}, "remove <temp>: permission denied"},
+			{"the parent alone", &fs.PathError{Op: "open", Path: dir, Err: syscall.EACCES}, "open <images>: permission denied"},
+			{"the path and, beside it, the parent", &os.LinkError{Op: "rename", Old: p, New: dir + "/y", Err: syscall.EACCES}, "rename <temp> <images>/y: permission denied"},
+		} {
+			if got := hide(tc.err); got != tc.want {
+				t.Errorf("%s: the error says %q, want %q", tc.name, got, tc.want)
+			}
+		}
+	})
 	t.Run("nil stays nil", func(t *testing.T) {
 		if err := hidePaths(nil, "/a", "<a>"); err != nil {
 			t.Errorf("hidePaths(nil) = %v", err)
