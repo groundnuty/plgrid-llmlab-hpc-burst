@@ -31,8 +31,13 @@
 //
 //	outcome=ok image_seconds=N image_built=true|false checkpoint_seconds=N files=N mismatched=N
 //	outcome=error step=image|files|checkpoint|config
+//	outcome=signalled step=image|files|checkpoint|config
 //
 // An error line names the step only; the error itself goes to standard error.
+// A step that failed once SIGTERM or SIGINT had come is the signalled line,
+// never an error line: Slurm sends TERM at the job's time limit, so the
+// signalled line is how a staging cut off by its time limit reads (the
+// pre-staging row's cold-start FAIL), and a step's own error is something else.
 // The line holds no path, host, URL, token, account or job ID. A file that is
 // present and does not match is reported (mismatched), never replaced, as at
 // the agent's first start.

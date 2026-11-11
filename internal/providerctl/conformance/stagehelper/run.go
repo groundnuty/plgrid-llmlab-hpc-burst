@@ -31,6 +31,12 @@ func runInputs(ctx context.Context, in inputs, args []string, getenv func(string
 	}
 	dir := args[0]
 	res := stageAll(ctx, dir, in, getenv, stderr)
+	// A step that failed once the signal had cancelled the staging failed because of it, whatever error the step then
+	// returned (a killed Apptainer's exit status, a cut download): the signalled line, never the step's error line. It is
+	// judged here, once, and not from each step's error, which need not wrap the context's.
+	if res.step != "" && ctx.Err() != nil {
+		res.signalled = true
+	}
 	if err := writeResult(dir, res.line()); err != nil {
 		fmt.Fprintln(stderr, "stagehelper: cannot write the result:", err)
 		return 1

@@ -1046,8 +1046,9 @@ requeue_marker() { grep -q "the scheduler refused the requeue of the run's own j
 warm_marker() { grep -q "the agent's own log did not show the warm start" "$REC_DIR/not-run.txt" 2>/dev/null; }
 slot_marker() { grep -q "held the one-job slot between the row's two jobs" "$REC_DIR/not-run.txt" 2>/dev/null; }
 
-# row_a_reason <marker words>: the fixed label in parentheses after the words, as NotRunNote writes it (a label from a fixed
-# list in internal/alpha: no ID, path or name).
+# row_a_reason <marker words>: the reason in parentheses after the words, as NotRunNote writes it: a refused requeue's is
+# the scheduler's own words with every job ID and path replaced and brackets for its parentheses, a warm start's its
+# counts (internal/alpha, refusalWords and WarmUnshownError: no ID, path or name).
 row_a_reason() { sed -n -E "s/.*$1 \(([^()]*)\).*/\1/p" "$REC_DIR/not-run.txt" 2>/dev/null | head -1; }
 
 # first_end_marker: the run's NOT RUN marker says its job was still pending a minute before its deployment's first
