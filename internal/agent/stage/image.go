@@ -82,6 +82,10 @@ func (s *Stager) Image(ctx context.Context, image, digest string, format agentap
 	ok := agent.ImageResult{Path: final, Verified: true}
 	err := s.verifyImage(ctx, final, digest, format)
 	if err == nil {
+		// Said so that a row can show a warm start from the agent's own log
+		// (issue 392; `@hpc-burst-science-agent`, 11 Nov 2026): the digest and
+		// the reason only, never a path.
+		s.logf("image %s: already staged and verified", digest)
 		return ok, nil
 	}
 	if cerr := ctx.Err(); cerr != nil {
@@ -94,6 +98,7 @@ func (s *Stager) Image(ctx context.Context, image, digest string, format agentap
 	defer lk.release()
 	// Another Allocation may have repaired it while this one waited.
 	if err = s.verifyImage(ctx, final, digest, format); err == nil {
+		s.logf("image %s: staged by another Allocation", digest)
 		return ok, nil
 	}
 	if cerr := ctx.Err(); cerr != nil {
