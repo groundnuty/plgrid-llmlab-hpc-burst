@@ -157,6 +157,10 @@ ROOT=$(cd "$(dirname "$SELF")/.." && pwd -P)
 # the real-engine job runs on the cluster. hack/livechecks checks this table against the tree: every test
 # function of a live file carries a //livecheck: directive that names its rows (or says none and why), and
 # every row's test pattern matches exactly the functions that name it.
+# A pending row is planned and not built: --list names it, and --run refuses it (exit 2). rehearsal is one, and so are
+# alpha-athena-now-serve and alpha-athena-now-nooverlap, the deployment rows on plgrid-now that #376's P3 and P4 build
+# (docs/alpha-runbook.md, The plgrid-now rows, planned). The helios rows are beta's since 11 Nov 2026 (#386): ready and
+# runnable by name, in every table below, and in no alias.
 live_table() {
   cat <<'TABLE'
 # BEGIN LIVE TESTS
@@ -178,6 +182,8 @@ reach-athena|cluster|internal/providerctl/conformance|^TestReach$|HPCBURST_CONFO
 reach-host-dialed-helios|cluster|internal/providerctl/conformance|^TestReachHostDialed$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host,linux-arm64|ready
 reach-host-dialed-athena|cluster|internal/providerctl/conformance|^TestReachHostDialed$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
 rehearsal|cluster|-|-|-|-|-|pending
+alpha-athena-now-serve|cluster|-|-|-|-|-|pending
+alpha-athena-now-nooverlap|cluster|-|-|-|-|-|pending
 # END LIVE TESTS
 TABLE
 }
@@ -382,15 +388,18 @@ a cloud host
 TABLE
 }
 
-# A bare name that stands for several rows, one per cluster, run one after the other (issue #194).
-# name | rows.
+# A bare name that stands for the rows alpha runs, run one after the other (issue #194). Alpha graduates on
+# Athena alone (the owner's decision of 11 Nov 2026, "Athena alone", recorded on #145, and PR #373), so each
+# alias stands for its Athena row. The Helios rows are beta's: they stay in every table and run by their own
+# names, but no alias runs them, so a Helios row that is skipped or lacks its settings cannot fail alpha's run
+# (issue #386; docs/alpha-runbook.md, Alpha rows and beta rows). name | rows.
 alias_table() {
   cat <<'TABLE'
 # BEGIN ALIASES
-tunnel-hour|tunnel-hour-helios,tunnel-hour-athena
-gpu-accounting|gpu-accounting-helios,gpu-accounting-athena
-reach|reach-helios,reach-athena
-reach-host-dialed|reach-host-dialed-helios,reach-host-dialed-athena
+tunnel-hour|tunnel-hour-athena
+gpu-accounting|gpu-accounting-athena
+reach|reach-athena
+reach-host-dialed|reach-host-dialed-athena
 # END ALIASES
 TABLE
 }
@@ -1856,7 +1865,8 @@ esac
 
 # --run
 [ ${#REQUESTED[@]} -gt 0 ] || { say "live-checks: --run needs at least one test name"; exit 2; }
-# A bare name for a row per cluster (tunnel-hour, gpu-accounting) stands for its rows, run one after the other.
+# A bare name for the rows alpha runs (tunnel-hour, gpu-accounting, reach, reach-host-dialed: their Athena rows) stands for
+# them, run one after the other. A Helios row is beta's and runs by its own name.
 declare -a EXPANDED=()
 for name in "${REQUESTED[@]}"; do
   if [ -n "${ALIAS[$name]+x}" ]; then

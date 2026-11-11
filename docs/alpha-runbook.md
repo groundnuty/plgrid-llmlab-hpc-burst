@@ -1,15 +1,40 @@
 # Alpha runbook
 
-The live runs that alpha's graduation criteria still need, each one command (issue #194; the criteria are tracked on #145). Alpha's host runs the stack rows in `host-dialed` mode, which needs no dial-home route from the compute nodes ([Host-dialed mode](#host-dialed-mode)); `direct` and `ssh` modes need the owner's route. Every run is a row of `hack/live-checks.sh`: it prints its queue estimate and runs only with `--yes`, takes the one-job slot only after the builds, cancels its own jobs by tag on every exit, and prints the slot use to post.
+The live runs that alpha's graduation criteria still need, each one command (issue #194; the criteria are tracked on #145). Alpha graduates on Athena alone (the owner's decision of 11 Nov 2026, recorded on #145 and approved on PR #373): the Helios rows are beta's, kept runnable by their own names and in no alias ([Alpha rows and beta rows](#alpha-rows-and-beta-rows)). Alpha's host runs the stack rows in `host-dialed` mode, which needs no dial-home route from the compute nodes ([Host-dialed mode](#host-dialed-mode)); `direct` and `ssh` modes need the owner's route. Every run is a row of `hack/live-checks.sh`: it prints its queue estimate and runs only with `--yes`, takes the one-job slot only after the builds, cancels its own jobs by tag on every exit, and prints the slot use to post.
 
 ```
-hack/live-checks.sh --list                    # every row, and the two aliases below
+hack/live-checks.sh --list                    # every row, and the four aliases below
 hack/live-checks.sh --plan <base>..<head>     # which rows cover what a range changed; runs nothing
 hack/live-checks.sh --run <row>...            # shape and queue estimate, then "not run: pass --yes" (exit 4)
 hack/live-checks.sh --run <row>... --yes      # the run
 ```
 
-`tunnel-hour`, `gpu-accounting`, `reach` and `reach-host-dialed` are aliases: each stands for its `-helios` and `-athena` rows, run one after the other. A skipped row counts as a failure, and so does a test that cannot start for lack of a setting.
+`tunnel-hour`, `gpu-accounting`, `reach` and `reach-host-dialed` are aliases: each stands for its Athena row, the row alpha runs. The Helios row is beta's and runs by its own name, so a Helios row that is skipped or lacks its settings cannot fail alpha's run (issue #386). A skipped row counts as a failure, and so does a test that cannot start for lack of a setting.
+
+## Alpha rows and beta rows
+
+Alpha graduates on Athena alone (the owner's decision of 11 Nov 2026, "Athena alone", recorded on #145 and approved on PR #373; the Graduation criteria of HBEP-4 to HBEP-8 and HBEP-11 say so). Where a criterion named Helios, its Helios part, where not already met, moves to beta, to run when GH200 returns, and its Athena part stays. A row on `plgrid-now` counts for `plgrid-gpu-a100` when it runs one job in total, of one GPU, within `plgrid-now`'s 1 h limit, on the same A100 node type; the no-cut handover (`alpha-athena-handover`) and S1's one-hour run (`tunnel-hour-athena`) stay on `plgrid-gpu-a100`. An Instance on `plgrid-now` uses the shipped test profile `profiles/athena-now.yaml` (HBEP-7, A partition too short).
+
+| Rows | Part of | State |
+|---|---|---|
+| `alpha-athena-handover`, `tunnel-hour-athena`, `gpu-accounting-athena`, `reach-athena`, `reach-host-dialed-athena` | alpha | as in "State of the wiring" |
+| `alpha-athena-now-serve`, `alpha-athena-now-nooverlap` | alpha, planned | **not yet built** (#376's P3 and P4); `pending` in the script's table: `--list` names them and `--run` refuses them (exit 2) |
+| `alpha-helios-nooverlap`, `tunnel-hour-helios`, `gpu-accounting-helios`, `reach-helios`, `reach-host-dialed-helios` | **beta** | kept: `ready` in every table of the script, run by their own names with their own settings, in no alias, and no part of alpha's run |
+| `conformance-helios`, `conformance-helios-gh200`, `real-engine` | unchanged | issue #386 does not move them; no alias ran them |
+
+The aliases stand for Athena rows alone, and a test of `hack/livechecks` (`TestNoAliasStandsForABetaRow`) fails if one gains a beta row:
+- `tunnel-hour` stands for `tunnel-hour-athena`;
+- `gpu-accounting` stands for `gpu-accounting-athena`;
+- `reach` stands for `reach-athena`;
+- `reach-host-dialed` stands for `reach-host-dialed-athena`.
+
+### The `plgrid-now` rows, planned
+
+Issue #376 (the owner's decision 2 of 11 Nov 2026 and the science agent's rulings on it) adds two deployment rows on Athena's `plgrid-now`, under `profiles/athena-now.yaml`, whose margins give a lead of 20 minutes under a 21-minute lease (PR #385). HBEP-7 makes the second one alpha's no-overlap proof. **Neither is built.** Each is a `pending` row of the script's table with no package, shape, most-jobs or owner's-go entry yet; those arrive with the row's code (#376's P3 and P4), and this section is replaced by the row's own then.
+- **`alpha-athena-now-serve`** (row A, P3): one job of 1 GPU and a lease of 48 minutes, a deployment through the front with a 7,000-token stream under a 5-minute deadline, the attribution count, the deployment ID under its tag, HBEP-8's events and engine gauges, the worker-rung restart, and last a `scontrol requeuehold` attempt on the run's own job (a refusal is `NOT RUN`, never a pass). A separate pre-staging row, run before it and outside its hour, builds the sandbox into the Provider's staging directory, so that both rows start warm, within the profile's 12-minute `startTimeout`.
+- **`alpha-athena-now-nooverlap`** (row B, P4): two jobs in turn, each of a 21-minute lease, with `ReleaseWhenIdle` and a 2-minute `idleLimit`, a stream in flight at the drain start, and the successor created only after the predecessor has left the slot. Another job in the slot between its jobs makes it `NOT RUN`, and the owner's job is never touched.
+- **The hour:** the row's whole hold of the slot, start waits included, is at most 1 hour.
+- **The gates, all of them, before any run:** #378 and #380 merged; the code agent's go posted on #145 with its UTC start and end; and a dated `LIVE_OWNER_GO_ATHENA_NOW` in the settings (below), which comes with these rows. After a gap of days the owner's go is confirmed again first (the science agent's rule of 7 Nov 2026).
 
 ## What a run ends as
 
@@ -32,24 +57,25 @@ The script's exit code and the word on the screen, for every row:
 | Row | Its bound | The line when its job never starts |
 |---|---|---|
 | `conformance-helios` | start wait, 30 min | `a job did not start within 30 min of its acceptance and was cancelled by its tag` |
-| `conformance-helios-gh200`, `conformance-athena`, `gpu-accounting-helios`, `reach-helios`, `reach-athena`, `reach-host-dialed-helios`, `reach-host-dialed-athena` | start wait, 10 min | `a job did not start within 10 min of its acceptance and was cancelled by its tag` |
-| `real-engine`, `alpha-helios-nooverlap`, `tunnel-hour-helios` | wait in the queue, 30 min (their slot's) | `a job was still pending after 30 min in the queue and was cancelled by its tag` |
+| `conformance-helios-gh200`, `conformance-athena`, `gpu-accounting-helios` (beta), `reach-helios` (beta), `reach-athena`, `reach-host-dialed-helios` (beta), `reach-host-dialed-athena` | start wait, 10 min | `a job did not start within 10 min of its acceptance and was cancelled by its tag` |
+| `real-engine`, `alpha-helios-nooverlap` (beta), `tunnel-hour-helios` (beta) | wait in the queue, 30 min (their slot's) | `a job was still pending after 30 min in the queue and was cancelled by its tag` |
 | `alpha-athena-handover`, `tunnel-hour-athena`, `gpu-accounting-athena` | wait in the queue, 2 h (no slot) | `a job was still pending after 120 min in the queue and was cancelled by its tag` |
-| `tunnel-hour-helios`, `tunnel-hour-athena` | and the `endTime` cap, whichever comes first | `a job was still pending a minute before its deployment's first end and was cancelled by its tag` |
+| `tunnel-hour-helios` (beta), `tunnel-hour-athena` | and the `endTime` cap, whichever comes first | `a job was still pending a minute before its deployment's first end and was cancelled by its tag` |
 | `alpha-athena-handover` | and its second job, by the first's drain start | `the first job ran and the second never started by the first's drain start, and was cancelled by its tag` |
-| `alpha-helios-nooverlap` | and its second job, the wait in the queue from the first's lease end | `the first job ran and the second never started within 30 min of the first's lease end, and was cancelled by its tag` |
+| `alpha-helios-nooverlap` (beta) | and its second job, the wait in the queue from the first's lease end | `the first job ran and the second never started within 30 min of the first's lease end, and was cancelled by its tag` |
 
-An explicit `LIVE_PENDING_MAX_SECONDS` sets the wait in the queue of the rows that have one, shorter or longer (`1 min 30 s` for 90). Every line above is followed by `not a failure`. `hack/livechecks` reads the script's cluster table and fails, naming the row, for a row that has no case in its table of these lines (`TestEveryRowMapsAJobThatNeverStartedToNotRun`), so a row added later cannot end a never-started job in `FAIL`.
+The Helios rows in this table (`alpha-helios-nooverlap`, `tunnel-hour-helios`, `reach-helios`, `reach-host-dialed-helios`, `gpu-accounting-helios`) are beta's; their bounds are unchanged. An explicit `LIVE_PENDING_MAX_SECONDS` sets the wait in the queue of the rows that have one, shorter or longer (`1 min 30 s` for 90). Every line above is followed by `not a failure`. `hack/livechecks` reads the script's cluster table and fails, naming the row, for a row that has no case in its table of these lines (`TestEveryRowMapsAJobThatNeverStartedToNotRun`), so a row added later cannot end a never-started job in `FAIL`.
 
 ## State of the wiring
 
 | Row | State |
 |---|---|
-| `gpu-accounting-helios`, `gpu-accounting-athena` | Complete. Runs through the Provider's controller; needs no dial-home route. |
-| `reach-helios`, `reach-athena` | Complete (issue #225). Runs through the Provider's controller; needs the gateway's forwarded port (`LIVE_PROBE_*`, below) and runs only when the owner says that port is up. In `host-dialed` mode (`LIVE_DIALHOME_MODE=host-dialed`) each is `NOT RUN`, exit 3, before anything is built or asked of a cluster: the compute nodes never dial the host there (issue #305). |
-| `reach-host-dialed-helios`, `reach-host-dialed-athena` | Wired (issue #305). Runs through the Provider's controller in host-dialed mode, with the real agent as the job; proved by dry runs over the fake Slurm behind a real sshd, not yet by a cluster. |
-| `alpha-athena-handover`, `alpha-helios-nooverlap`, `tunnel-hour-helios`, `tunnel-hour-athena` | Wired (issue #245). The live steps start the whole stack on this host with `hpcburst up`, create the row's Provider and deployment, and drive them through the front, with the worker-rung fault over `srun --overlap` in the run's own job. They are proved by a stand-in run against the fake Slurm in run mode behind a real sshd (below), not yet by a cluster. A direct-mode run needs `LIVE_DIALHOME_LISTEN`; without it the run fails at its first step, naming the setting, having used no cluster. A host-dialed run sets `LIVE_DIALHOME_MODE=host-dialed` and no address, key or listener: a set `LIVE_DIALHOME_ADDR` is refused. The large request bodies and the upload direction's rate of `tunnel-hour-*` come with issue #224 (PR #244). |
-| `alpha-helios-nooverlap` | Needs #174 (no-overlap queue-wait growth), which is on main (#208), so in every checkout that has this row. It needs no setting for it; it needs the owner's go (below). |
+| `gpu-accounting-helios` (beta), `gpu-accounting-athena` | Complete. Runs through the Provider's controller; needs no dial-home route. |
+| `reach-helios` (beta), `reach-athena` | Complete (issue #225). Runs through the Provider's controller; needs the gateway's forwarded port (`LIVE_PROBE_*`, below) and runs only when the owner says that port is up. In `host-dialed` mode (`LIVE_DIALHOME_MODE=host-dialed`) each is `NOT RUN`, exit 3, before anything is built or asked of a cluster: the compute nodes never dial the host there (issue #305). |
+| `reach-host-dialed-helios` (beta), `reach-host-dialed-athena` | Wired (issue #305). Runs through the Provider's controller in host-dialed mode, with the real agent as the job; proved by dry runs over the fake Slurm behind a real sshd, not yet by a cluster. |
+| `alpha-athena-handover`, `alpha-helios-nooverlap` (beta), `tunnel-hour-helios` (beta), `tunnel-hour-athena` | Wired (issue #245). The live steps start the whole stack on this host with `hpcburst up`, create the row's Provider and deployment, and drive them through the front, with the worker-rung fault over `srun --overlap` in the run's own job. They are proved by a stand-in run against the fake Slurm in run mode behind a real sshd (below), not yet by a cluster. A direct-mode run needs `LIVE_DIALHOME_LISTEN`; without it the run fails at its first step, naming the setting, having used no cluster. A host-dialed run sets `LIVE_DIALHOME_MODE=host-dialed` and no address, key or listener: a set `LIVE_DIALHOME_ADDR` is refused. The large request bodies and the upload direction's rate of `tunnel-hour-*` come with issue #224 (PR #244). |
+| `alpha-helios-nooverlap` (beta) | Needs #174 (no-overlap queue-wait growth), which is on main (#208), so in every checkout that has this row. It needs no setting for it; it needs the owner's go (below). |
+| `alpha-athena-now-serve`, `alpha-athena-now-nooverlap` | Planned (#376's P3 and P4), **not yet built**: `pending` in the script's table. See "The `plgrid-now` rows, planned", above. |
 
 ## Settings
 
@@ -61,7 +87,7 @@ The settings file is named by `HPCBURST_LIVE_SETTINGS`: `KEY=VALUE` lines, mode 
 | `LIVE_LOCK_DIR` | every row | the directory with the hosts' lock files |
 | `LIVE_BUILD_LOCK` | optional | the shared build lock; builds take it, test runs never do |
 | `ACCOUNT_ATHENA_A100` | Athena rows | the grant account for `plgrid-gpu-a100` |
-| `ACCOUNT_HELIOS_GH200` | Helios rows | the grant account for `plgrid-gpu-gh200` |
+| `ACCOUNT_HELIOS_GH200` | Helios rows (beta's) | the grant account for `plgrid-gpu-gh200` |
 | `LIVE_CONF_CREDENTIALS_ATHENA`, `LIVE_CONF_CREDENTIALS_HELIOS` | rows on that host | the Provider's ssh credentials file, mode 600 |
 | `LIVE_DIALHOME_MODE` | the four stack rows | `direct`, `ssh` or `host-dialed` (HBEP-6, Dial-home modes). Alpha's host runs `host-dialed` ([below](#host-dialed-mode)) |
 | `LIVE_DIALHOME_ADDR` | the four stack rows, `direct` and `ssh` modes | `host:port` of the route, as the compute nodes see it. **Not set in `host-dialed` mode**: the mode has no address, since the host dials the jobs, and a row with one set is refused, like a missing setting (exit 3) |
@@ -71,7 +97,8 @@ The settings file is named by `HPCBURST_LIVE_SETTINGS`: `KEY=VALUE` lines, mode 
 | `LIVE_TUNNEL_LEASE_MINUTES` | optional, `tunnel-hour-*` | the tunnel rows' lease in minutes, 106 to 240; default 137 (below). The owner's choice when giving the go: the shape, the hold note, the timeout and the test follow it |
 | `LIVE_PROBE_HOST`, `LIVE_PROBE_PORT` | `reach-*` | the gateway's forwarded port as the compute nodes see it: a host name or address (letters, digits, dots, hyphens, underscores) and a port from 1 to 65535. **Private**: they go into the job's script on the cluster and nowhere else, never on the screen, in the test's log, in a record or in a post |
 | `LIVE_PROBE_LABEL` | `reach-*` | the only name of that port in public output (`posts.md`): 1 to 40 letters, digits, dots, underscores or hyphens. It must not hold the host or the port, in any case, with or without the root dot, and with the dots, hyphens and underscores run together or changed (`GATEWAY.PRIVATE.EXAMPLE` holds `gateway.private.example`) |
-| `LIVE_OWNER_GO_HELIOS_NOW` | `alpha-helios-nooverlap`, `tunnel-hour-helios` | today's UTC date (`YYYY-MM-DD`), set only after the owner has said yes to the hold; a missing or older date is refused (exit 3) |
+| `LIVE_OWNER_GO_HELIOS_NOW` | `alpha-helios-nooverlap`, `tunnel-hour-helios` (beta's rows) | today's UTC date (`YYYY-MM-DD`), set only after the owner has said yes to the hold; a missing or older date is refused (exit 3) |
+| `LIVE_OWNER_GO_ATHENA_NOW` | `alpha-athena-now-serve`, `alpha-athena-now-nooverlap`, when #376 builds them | the same kind of go for Athena's one-job partition `plgrid-now`: a dated setting that cites the owner's decision of 11 Nov 2026 on #145 (#376, Q6), on top of the code agent's go posted on #145 with its UTC times. **Not read yet:** no row asks for it, and the script does not check it, until those rows are built |
 | `LIVE_FRONT_HOST_LABEL` | every row that writes a text to post: the handover and no-overlap rows, `tunnel-hour-*`, `gpu-accounting-*` | where the front ran, in three parts: a **role** from a fixed list (`the development host`, `a Cyfronet-network host`, `a cloud host`; a code change adds one, the setting never does), a comma and a space, a **position** that is exactly `inside` or `outside` followed by `Cyfronet` or `Cyfronet's network` (required), and an optional **note** in parentheses. For example "the development host, outside Cyfronet (3.4 ms to the Helios login, behind a gateway)" or "a Cyfronet-network host, inside Cyfronet's network". The note holds words of letters and numbers with a unit (`3.4 ms`, `40 MB/s`, `5%`) and `, ; ' -`; a word with a digit in it (`gw-01`, `node7`), a dotted name or address (`gw.example`, `10.0.0.1`) and a colon are refused, so a host's name cannot pass for a note. At most 120 bytes in all, and case counts (`inside`, not `INSIDE`). It is the first thing after the verdict in `posts.md` (`- front ran on: <label>`), because the host that runs the front decides the path to the login nodes and so the timings. A row without a valid one is refused (exit 3) naming the setting and the part that is wrong, never its value, before anything is built, estimated or submitted. The reach, conformance and real-engine rows take none: they do not measure through the front. Heartbeats and timeouts are not retuned on this basis |
 
 One environment variable, not a setting: `LIVE_PENDING_MAX_SECONDS` is how long a job may wait in the queue before the run cancels it. The default is 7200 (2 hours), except on a row in a one-job slot that has no start wait: `alpha-helios-nooverlap` and `tunnel-hour-helios`, the rows that hold QOS `now`'s GPU for hours, and `real-engine`: there it is 1800 (30 minutes), because a job of ours that pends for two hours stands in the owner's one-job slot (#222, and the science agent's rule of 2 Nov 2026: every row in a one-job slot, on either cluster, has a start wait of 10 minutes or less or a wait in the queue of 30 minutes or less, which `hack/livechecks` reads off the cluster table). An explicit value overrides either default, shorter or longer, and the script states it exactly (`59 s`, `1 min 30 s`, `10 min`). What a job still pending past it ends as is in "What a run ends as", above; `real-engine`'s job the script itself polls and cancels by its tag (#222). Athena's `plgrid-gpu-a100` queue was estimated at a start on 13 Nov for one GPU (#145, 1 Nov 2026): set it from the estimate that `--run` prints, which is the reason it is printed first. The script's timeout for a row is the row's run time plus this wait, once for each of its jobs, except a row with a start wait, whose bound is its first clock and is already in its timeout. Tests derive each row's least timeout from its bounds in the table and the waits in the code, those waits with a quarter more for what a scan can miss, and fail when a timeout can fire first.
@@ -105,21 +132,21 @@ Helios QOS `now` and Athena `plgrid-now` allow one job per user, and the owner s
 | Row | Most jobs at once | Where |
 |---|---|---|
 | `alpha-athena-handover` | 2: the predecessor and its replacement, together for the handover | `plgrid-gpu-a100`. **Not a one-job slot:** that partition has none, so the pair takes no one's slot. |
-| `alpha-helios-nooverlap` | 2: the running predecessor and the pending replacement | QOS `now` on `plgrid-gpu-gh200`, the owner's shared slot |
-| `tunnel-hour-helios` | 1 | QOS `now`, the shared slot |
+| `alpha-helios-nooverlap` (beta) | 2: the running predecessor and the pending replacement | QOS `now` on `plgrid-gpu-gh200`, the owner's shared slot |
+| `tunnel-hour-helios` (beta) | 1 | QOS `now`, the shared slot |
 | `tunnel-hour-athena` | 1 | `plgrid-gpu-a100`, no slot |
-| `gpu-accounting-helios` | 1, for about 15 minutes at most (the 10-minute start wait and the job's few minutes) | QOS `now`, the shared slot |
+| `gpu-accounting-helios` (beta) | 1, for about 15 minutes at most (the 10-minute start wait and the job's few minutes) | QOS `now`, the shared slot |
 | `gpu-accounting-athena` | 1 | `plgrid-gpu-a100`, no slot |
-| `reach-helios` | 1, for about 13 minutes at most (the 10-minute start wait and a job of seconds, with a 2-minute limit) | QOS `now`, the shared slot |
+| `reach-helios` (beta) | 1, for about 13 minutes at most (the 10-minute start wait and a job of seconds, with a 2-minute limit) | QOS `now`, the shared slot |
 | `reach-athena` | 1, for about 13 minutes at most | `plgrid-now`, the one-job partition, the shared slot |
-| `reach-host-dialed-helios` | 1, for about 16 minutes at most (the 10-minute start wait and a job of about a minute, with a 5-minute limit) | QOS `now`, the shared slot |
+| `reach-host-dialed-helios` (beta) | 1, for about 16 minutes at most (the 10-minute start wait and a job of about a minute, with a 5-minute limit) | QOS `now`, the shared slot |
 | `reach-host-dialed-athena` | 1, for about 16 minutes at most | `plgrid-now`, the one-job partition, the shared slot |
 
-On Helios the replacement of `alpha-helios-nooverlap` is created at its planned time and pends until the predecessor's job ends and frees the GPU (the partition's QOS allows 2,000 submitted jobs, QOS `now` one GPU: `hbep/0007-lifecycle-controller/README.md:463`, `:608`). So the pending replacement sits in the owner's shared slot only for the planned gap, from its planned submission to the predecessor's end, and the run never queues a third job. Under `ReleaseWhenIdle` with a 2-minute `idleLimit` the predecessor's job is released that long after its Instance ends, so it does not hold the GPU to its hard end (`:471`; the default `Keep` would).
+On Helios the replacement of `alpha-helios-nooverlap` is created at its planned time and pends until the predecessor's job ends and frees the GPU (the partition's QOS allows 2,000 submitted jobs, QOS `now` one GPU: `hbep/0007-lifecycle-controller/README.md:633`). So the pending replacement sits in the owner's shared slot only for the planned gap, from its planned submission to the predecessor's end, and the run never queues a third job. Under `ReleaseWhenIdle` with a 2-minute `idleLimit` the predecessor's job is released that long after its Instance ends, so it does not hold the GPU to its hard end (`:483`; the default `Keep` would).
 
 **The owner's go.** `alpha-helios-nooverlap` and `tunnel-hour-helios` hold QOS `now`'s one GPU for hours. Each prints, before its estimate, "may pend up to 30 min in the queue (then it is cancelled by its tag and the run is NOT RUN), then holds QOS now's GPU for about 2 h 40 min; the owner's go is needed (the development rule on #145)" (2 h 20 min for the hour's row at the default lease; the note follows `LIVE_TUNNEL_LEASE_MINUTES`, and its 30 minutes follow `LIVE_PENDING_MAX_SECONDS`) and refuses unless `LIVE_OWNER_GO_HELIOS_NOW` holds today's UTC date. Set it only when the owner has said yes for this run; tomorrow's run needs a new go. The script reads the date again just before each protected row, and again after that row's builds, and refuses (exit 3) a row whose go has gone stale, also when an earlier row of the same command ran past UTC midnight. The owner's go covers both: the possible pend, which comes first, and the hold, which starts when the job does. The hold is the lease plus, for no-overlap, 45 minutes for the successor to start and become ready, rounded up to ten minutes. It is a few hours at most, not the 12 h `maxWall` of QOS `now`.
 
-**The Helios Provider serves one deployment, and that deployment allows it alone.** QOS `now`'s one GPU per user makes a second deployment's primary on the Helios Provider pend behind the first, an unmarked pend that, while fewer than 20 waits are kept, could set the plan for a normal-mode deployment there (`hbep/0007-lifecycle-controller/README.md:468`, "Alpha's fence", from PR #205). So `alpha-helios-nooverlap`'s ModelDeployment names the Helios Provider and no other. The verdict fails a deployment that allows any other Provider, or none, and the dry run shows it with a deployment that also allows Athena. The other stack rows are held to their own cluster the same way, because a run that could place its Instance elsewhere measures nothing.
+**The Helios Provider serves one deployment, and that deployment allows it alone.** QOS `now`'s one GPU per user makes a second deployment's primary on the Helios Provider pend behind the first, an unmarked pend that, while fewer than 20 waits are kept, could set the plan for a normal-mode deployment there (`hbep/0007-lifecycle-controller/README.md:892`, "Alpha's fence", from PR #205). So `alpha-helios-nooverlap`'s ModelDeployment names the Helios Provider and no other. The verdict fails a deployment that allows any other Provider, or none, and the dry run shows it with a deployment that also allows Athena. The other stack rows are held to their own cluster the same way, because a run that could place its Instance elsewhere measures nothing.
 
 **The run keeps to those counts with the deployment's `endTime`** (issue #245; the science agent's rulings on PR #255). These rows bound their deployment's life on purpose, so that each stays within the job count above: a row that let the controller go on would plan replacements for ever. The continuous replacement chain is the one-host rehearsal's to show (`hack/rehearsal.sh`, part 3), not these rows'. With no queue wait observed, the lifecycle controller creates a primary's replacement at the primary's start; with a long one it creates a successor's own replacement in the very pass that first sees the successor run (HBEP-7, Handover). A deployment that ends at or before an Instance's drain start gives it no replacement (`internal/lifecycle/handover.go`). Every end is placed on the cluster's own clock, read on the login node (`date -u +%s`) through the run's own ssh, because the controller compares the end with the jobs' times, which the scheduler gives on that clock.
 - **A tunnel row** creates its deployment ending at the earliest drain start its job can have: the cluster's clock read just before the creation, plus the job's time limit (the lease), less the 15-minute drain window. Once the job runs and its lease end is known, the end moves to a minute before the Instance's own drain start. Neither end is after a drain start, so no replacement is ever planned. The Instance drains a minute early, and the run records that as the drain start.
@@ -129,9 +156,9 @@ On Helios the replacement of `alpha-helios-nooverlap` is created at its planned 
   | Row | The wait | At `LIVE_TUNNEL_LEASE_MINUTES=240` |
   |---|---|---|
   | `tunnel-hour-athena` | 2 h (`LIVE_PENDING_MAX_SECONDS`), but never past a minute before the first end: 2 h 1 min (2 h 17 min less the 15 min drain window, less a minute) | the cap is 3 h 44 min (4 h less 15 min, less a minute) |
-  | `tunnel-hour-helios` | 30 min (its slot's), never past 2 h 1 min | 30 min; the cap 3 h 44 min |
+  | `tunnel-hour-helios` (beta) | 30 min (its slot's), never past 2 h 1 min | 30 min; the cap 3 h 44 min |
   | `alpha-athena-handover` | 2 h (`LIVE_PENDING_MAX_SECONDS`); no cap from its end, which moves on while it waits | the row's lease is 1 h 46 min, not the setting |
-  | `alpha-helios-nooverlap` | 30 min (its slot's); no cap from its end | as at the default |
+  | `alpha-helios-nooverlap` (beta) | 30 min (its slot's); no cap from its end | as at the default |
 
   What a job still pending at the wait or at the cap ends as is in "What a run ends as", above. At the default a tunnel row's own wait comes first on Athena (2 h before 2 h 1 min), so the line says the wait in the queue; a wait asked past 2 h 1 min reaches the cap first, and the line says that bound instead. The script's cleanup, and the test's own, find the run's jobs by the run's tag prefix (below) and check that none is left.
 - **The Athena rows run when #145's daily estimate is under their cap:** `tunnel-hour-athena` under 2 h 1 min at the default lease, or under 3 h 44 min at `LIVE_TUNNEL_LEASE_MINUTES=240` with `LIVE_PENDING_MAX_SECONDS` set to the estimate; `alpha-athena-handover` under its `LIVE_PENDING_MAX_SECONDS`, and in practice well under the 1 h 31 min from the predecessor's start to its drain start, since the successor waits in the same queue and must be ready before that drain start for the handover to happen.
@@ -158,6 +185,8 @@ Durations are plans, from the lease each row sets (`internal/alpha/rows.go`); th
 hack/live-checks.sh --run gpu-accounting --yes
 ```
 
+`gpu-accounting` stands for the Athena row. `gpu-accounting-helios` is beta's: run it by its own name.
+
 - **Settings:** the account, the credentials file, `LIVE_OUT_DIR`, `LIVE_LOCK_DIR`, `LIVE_FRONT_HOST_LABEL`. No dial-home route.
 - **Duration and slot:** one GPU job of 5 minutes' limit per cluster, holding its GPU for about 20 seconds; the run is about 10 minutes once the job starts. Helios uses QOS `now`: at most 15 minutes of the slot (below); Athena's `plgrid-gpu-a100` has no slot.
 - **Two guards on Helios** (the science agent's rule of 2 Nov 2026, the same two as `conformance-helios-gh200`, which run the shared functions of `hack/live-checks.sh`):
@@ -166,8 +195,8 @@ hack/live-checks.sh --run gpu-accounting --yes
 - **What it does:** one GPU job goes through the Provider's controller. The job writes the GPUs it was given: the count of its `CUDA_VISIBLE_DEVICES`, which Slurm sets to the GPUs it gave the job (the agent forwards it for that reason, `internal/agent/apptainer.go:110`), and the count `nvidia-smi -L` lists. When the job has ended, the Allocation is deleted, which writes the kept record `acct-<UID>`; the record's `allocatedGPUs` is compared with the job's own count. The record is built from the scheduler's accounting, so it is not compared with the scheduler. `nvidia-smi` is posted and not judged: it lists the whole node where a cluster does not confine devices to the job. A 1-GPU GH200 job registered one GPU through `nvidia-smi` (`spikes/s94/results/r3/summary.json:988`), so Helios confines them; no Athena run shows it, which is why both counts are recorded. Where `CUDA_VISIBLE_DEVICES` is unset the `nvidia-smi` count is the witness, and the post says which was used.
 - **Posts:** the run's `posts.md` (the record's GPU entry, the job's count and which variable gave it, the `nvidia-smi` count, the request) and the slot use. To #145 and #93 (the conformance runs of both clusters).
 - **Pass criteria:**
-  - `hbep/0008-observability-and-events/README.md:444`: "the Test plan passes, and the kept accounting record's GPU entry is checked once on a real GPU job on each alpha partition;"
-  - `hbep/0008-observability-and-events/README.md:331`: the kept record holds "`allocatedGPUs`" and "`basis: allocated`".
+  - `hbep/0008-observability-and-events/README.md:453`: "the Test plan passes, and the kept accounting record's GPU entry is checked once on a real GPU job on each alpha partition;"
+  - `hbep/0008-observability-and-events/README.md:367`: the kept record holds "`allocatedGPUs`" and "`basis: allocated`".
   - Checked: the record's partition is the row's; its basis is `allocated`; the job asked for and saw at least one GPU (a CPU job would agree at 0); the record's GPU entry equals the count the job was given, which equals the request; an unknown entry fails.
 
 ### `reach-helios`, `reach-athena`
@@ -175,6 +204,8 @@ hack/live-checks.sh --run gpu-accounting --yes
 ```
 hack/live-checks.sh --run reach --yes
 ```
+
+`reach` stands for the Athena row. `reach-helios` is beta's: run it by its own name.
 
 Issue #225. Alpha's live runs stay on the development host, and the owner sets up the gateway's forwarded port (#145, 2 Nov 2026). Since 9 Nov 2026 the stack rows do not wait for it, because alpha's host runs in `host-dialed` mode; these rows tell whether `ssh` mode's route works. They confirm that port from the compute nodes: a minimal job on each platform tries a TCP connect to it and writes down what came of it. **Run nothing until the owner says the forwarded port is up.**
 
@@ -191,6 +222,8 @@ Issue #225. Alpha's live runs stay on the development host, and the owner sets u
 ```
 hack/live-checks.sh --run reach-host-dialed-athena --yes
 ```
+
+`reach-host-dialed` stands for the Athena row. `reach-host-dialed-helios` is beta's: run it by its own name.
 
 Issue #305. The first relay on a real cluster in a short row: the real agent in host-dialed mode with no Instance, in one job, and the two relays the batch Provider's controller starts to it from this host through the login node (HBEP-6, Dial-home modes). The tunnel rows hold a lease of 106 minutes at least, and `plgrid-now` hosts no Instance, so without this row the first relay would wait for the A100 queue or GH200.
 
@@ -221,12 +254,14 @@ hack/live-checks.sh --run alpha-athena-handover --yes
 - **What it does:** one deployment through the front and the real tunnel, with streams open across the predecessor's drain start; the successor takes over; one restart at the worker rung.
 - **Posts:** `posts.md` (handovers completed, streams in flight at the drain start and cut, worker-rung restarts, responses with attribution) and the run's lines (no slot). To #145 and #93.
 - **Pass criteria:**
-  - `hbep/0007-lifecycle-controller/README.md:660`: "on Athena `plgrid-gpu-a100`, one deployment completes one handover end to end through the front with no request cut;"
-  - `hbep/0007-lifecycle-controller/README.md:662`: "on each alpha platform, Helios `plgrid-gpu-gh200` and Athena `plgrid-gpu-a100`, one restart at the worker rung;"
-  - `hbep/0005-llmlab-compatible-front/README.md:450`: "on Athena `plgrid-gpu-a100`, through the front, one handover cuts no request (with HBEP-7)."
-  - Checked: the deployment is as above; at least one stream was in flight at the drain start (`hbep/0007-lifecycle-controller/README.md:621`: "A run with no stream in flight at the drain start proves nothing here."); none was cut or left unfinished; exactly one handover; the successor ready before the predecessor ended; exactly one worker-rung restart; at least one response, and every response attributed (a run that recorded none has shown nothing); exactly two jobs in the cluster's own record, by job ID, none a duplicate under a tag, both on `plgrid-gpu-a100` with the lease as their time limit.
+  - `hbep/0007-lifecycle-controller/README.md:663`: "on Athena `plgrid-gpu-a100`, one deployment completes one handover end to end through the front with no request cut;"
+  - `hbep/0007-lifecycle-controller/README.md:666`: "on each alpha platform, Helios `plgrid-gpu-gh200` and Athena `plgrid-gpu-a100`, one restart at the worker rung;" (its Helios part is beta's since 11 Nov 2026)
+  - `hbep/0005-llmlab-compatible-front/README.md:490`: "on Athena `plgrid-gpu-a100`, through the front, one handover cuts no request (with HBEP-7)."
+  - Checked: the deployment is as above; at least one stream was in flight at the drain start (`hbep/0007-lifecycle-controller/README.md:639`: "A run with no stream in flight at the drain start proves nothing here."); none was cut or left unfinished; exactly one handover; the successor ready before the predecessor ended; exactly one worker-rung restart; at least one response, and every response attributed (a run that recorded none has shown nothing); exactly two jobs in the cluster's own record, by job ID, none a duplicate under a tag, both on `plgrid-gpu-a100` with the lease as their time limit.
 
-### `alpha-helios-nooverlap`
+### `alpha-helios-nooverlap` (beta)
+
+Beta's row, run by its own name when GH200 returns. Alpha's no-overlap proof is on Athena `plgrid-now` (`alpha-athena-now-nooverlap`, planned above).
 
 ```
 hack/live-checks.sh --run alpha-helios-nooverlap --yes     # with LIVE_OWNER_GO_HELIOS_NOW set to today's date
@@ -234,14 +269,14 @@ hack/live-checks.sh --run alpha-helios-nooverlap --yes     # with LIVE_OWNER_GO_
 
 - **Settings:** the account, the credentials file, the dial-home and binary settings (`LIVE_DIALHOME_*` and `LIVE_BIN_DIR`; in `host-dialed` mode `LIVE_DIALHOME_MODE` and `LIVE_BIN_DIR` alone), `LIVE_FRONT_HOST_LABEL` and the owner's go, `LIVE_OWNER_GO_HELIOS_NOW`.
 - **Duration, slot and jobs:** two Allocations in turn under QOS `now` on `plgrid-gpu-gh200`, one GPU, a 1 h 46 min lease each at most. The predecessor serves to its drain start, drains, and is released 2 minutes after its Instance ends; the successor starts when the GPU frees and the run ends when it is ready. **May pend up to 30 min in the queue, then holds QOS now's GPU for about 2 h 40 min; the owner's go is needed (the development rule on #145).** What a job still pending at the 30 minutes ends as, the first or the second, is in "What a run ends as", above. At most 2 jobs: the running predecessor and the pending replacement, the replacement only for the planned gap (above).
-- **Its deployment:** the Helios Provider alone, `leaseLimit` 1 h 46 min, `routing.maxRequestDuration` 5 minutes, `ReleaseWhenIdle` with a 2-minute `idleLimit` (`hbep/0007-lifecycle-controller/README.md:614`).
-- **What it does:** a stream in flight at the drain start; the replacement is queued ahead and pends until the predecessor's GPU frees; one restart at the worker rung on Helios (`hbep/0007-lifecycle-controller/README.md:637`, "on each alpha platform").
+- **Its deployment:** the Helios Provider alone, `leaseLimit` 1 h 46 min, `routing.maxRequestDuration` 5 minutes, `ReleaseWhenIdle` with a 2-minute `idleLimit` (`hbep/0007-lifecycle-controller/README.md:640`).
+- **What it does:** a stream in flight at the drain start; the replacement is queued ahead and pends until the predecessor's GPU frees; one restart at the worker rung on Helios (`hbep/0007-lifecycle-controller/README.md:666`, "on each alpha platform").
 - **Posts:** `posts.md` (the gap from the drain start to the successor's `ready`, the successor's queue wait once the GPU freed, streams cut, `NoOverlapSlot` seen, 503 `no_ready_target` answers) and the slot use. To #145 and #94.
 - **Pass criteria:**
-  - `hbep/0007-lifecycle-controller/README.md:661`: "on Helios `plgrid-gpu-gh200` under QOS `now`, one deployment goes through no-overlap mode end to end through the front with no request cut, and the gap is measured (Handover, No-overlap mode)."
-  - `hbep/0007-lifecycle-controller/README.md:638`: "The gap from the drain start to the successor's `ready`, and the successor's queue wait once the GPU frees, are measured and recorded."
+  - `hbep/0007-lifecycle-controller/README.md:664`: "on Helios `plgrid-gpu-gh200` under QOS `now`, one deployment goes through no-overlap mode end to end through the front with no request cut, and the gap is measured (Handover, No-overlap mode)."
+  - `hbep/0007-lifecycle-controller/README.md:640`: "The gap from the drain start to the successor's `ready`, and the successor's queue wait once the GPU frees, are measured and recorded."
   - `hbep/0007-lifecycle-controller/README.md:484`: "the gap is the time from the primary's drain start until its successor is `ready`."
-  - Checked: the deployment is as above, with the Helios Provider alone (a deployment that also allows Athena fails); a stream in flight at the drain start, none cut; exactly two Allocations; a positive gap, with both ends seen in order; `NoOverlapSlot` shown; from the cluster's times, the successor was submitted before the predecessor ended and started after it (`hbep/0007-lifecycle-controller/README.md:632`: "it never starts before the predecessor's job ends"); both jobs on `plgrid-gpu-gh200` with the lease as their time limit; exactly one restart at the worker rung; no third job and no second job under either tag in the cluster's record.
+  - Checked: the deployment is as above, with the Helios Provider alone (a deployment that also allows Athena fails); a stream in flight at the drain start, none cut; exactly two Allocations; a positive gap, with both ends seen in order; `NoOverlapSlot` shown; from the cluster's times, the successor was submitted before the predecessor ended and started after it (`hbep/0007-lifecycle-controller/README.md:633`: "it never starts before the predecessor's job ends"); both jobs on `plgrid-gpu-gh200` with the lease as their time limit; exactly one restart at the worker rung; no third job and no second job under either tag in the cluster's record.
 
 ### `tunnel-hour-helios`, `tunnel-hour-athena`
 
@@ -249,14 +284,16 @@ hack/live-checks.sh --run alpha-helios-nooverlap --yes     # with LIVE_OWNER_GO_
 hack/live-checks.sh --run tunnel-hour --yes
 ```
 
+`tunnel-hour` stands for the Athena row. `tunnel-hour-helios` is beta's: run it by its own name.
+
 - **Settings:** as `alpha-athena-handover` (the label included), for each cluster, and for `tunnel-hour-helios` the owner's go, `LIVE_OWNER_GO_HELIOS_NOW`.
 - **Duration, slot and jobs:** one job per cluster, one GPU, with the 2 h 17 min lease by default (S1's 1 h 25 min limit is under the lead an Instance needs); the run is about 1 h 45 to 2 h 15 once the job starts, the hour running from the Instance's ready. At most 1 job, and no second job of any tag. `tunnel-hour-helios` **may pend up to 30 min in the queue, then holds QOS now's GPU for about 2 h 20 min; the owner's go is needed (the development rule on #145)**; Athena has no slot, and its queue wait is the 2-hour default. On both, the cap is a minute before the deployment's first end (2 h 1 min at the default lease, 3 h 44 min at 240 minutes), whatever wait was asked. "What a run ends as", above, says what a job still pending at any of these ends as.
 - **Its deployment:** the row's Provider alone, `leaseLimit` 2 h 17 min (or the owner's value), `routing.maxRequestDuration` 5 minutes.
 - **What it does:** S1's one-hour run over this wiring (the stack's frps, plugin, agent and front, not the spike's kit), in the dial-home mode set. For 61 minutes the scenario drives the traffic below through the front while a look at the tunnel session is taken every minute, and measures S1's path rate in each direction, upload (front to node) and download (node to front), with the 16 streams open. The traffic includes large requests, bodies of 0.1 to 0.4 MB, sent while the 16 streams are open, so that the shared tunnel's head-of-line pressure is exercised in the upload direction, the one most constrained from outside Cyfronet's network (#224).
 - **Posts:** `posts.md` (the requests and the hour they span, the longest run back to back, the peak of streams at 20 tokens/s, the longest idle stretch, requests cut, the number of distinct frps `lastStartTime` values across the looks, TunnelConnected True in how many, the large requests (how many, the range of their bodies, how many were sent while the 16 streams were open, judged by the upload interval, the body's first byte to its last, since a request's response can stay open long after its body was sent), the path rate of each direction on its own line, upload (front to node) in bytes per second and download (node to front) in bytes and tokens per second, each under load with the seconds behind it, and S1's FLAG line when the download's byte rate is under 629,146 B/s) and the slot use. The line after the verdict names where the front ran (`LIVE_FRONT_HOST_LABEL`). To #145.
 - **Pass criteria:**
-  - `hbep/0006-instance-reachability/README.md:435`: "S1's one-hour runs pass with this wiring on Helios and on Athena, in the mode each uses, with the path rate measured."
-  - `hbep/0006-instance-reachability/README.md:456`: "S1's one-hour runs pass with this wiring on Helios and on Athena, with the path rate from compute node to front measured;"
+  - `hbep/0006-instance-reachability/README.md:572`: "S1's one-hour runs pass with this wiring on Helios and on Athena, in the mode each uses, with the path rate measured."
+  - `hbep/0006-instance-reachability/README.md:596`: "S1's one-hour runs pass with this wiring on Helios and on Athena, with the path rate from compute node to front measured;"
   - S1's verdict (branch `spike/s1-frp-dial-home`, `spikes/s1-frp/README.md:284`, C2, and `:285`, C3): the path stays reachable and no stream is cut over the hour; (`:288`, C6) the path rate in the token direction is "`ok`, at least 30 s asked, at least 29 s timed at the VM's receiver", and moved bytes.
   - Checked, per the ruling:
     1. **One tunnel session for the hour:** frps's `lastStartTime` for the Instance's proxy is the same in every look, from one at or before the first request to one at or after the last, with no look more than 2 minutes after the previous; `TunnelConnected` True in every look. A run in which frpc logged in again mid-hour but every request passed is no pass: the changed `lastStartTime` fails it (dry fault `reconnect`).
