@@ -280,8 +280,9 @@ func (s *Stager) stageImage(ctx context.Context, image, digest string, format ag
 		return fail(err)
 	}
 	if aside != "" {
-		if err := s.removeAside(aside); err != nil {
-			s.logf("image %s: removing the copy moved aside: %v", digest, hidePaths(err, aside, "<aside>"))
+		if err := s.removeImagePath(aside); err != nil {
+			// removeAll can name the parent directory too, when it cannot open it.
+			s.logf("image %s: removing the copy moved aside: %v", digest, hidePaths(err, aside, "<aside>", dir, "<images>"))
 		}
 	}
 	return nil
@@ -328,20 +329,22 @@ func (s *Stager) removeStaleTemps(dir, hex, lockPath string) {
 	temps, _ := filepath.Glob(filepath.Join(dir, ".tmp-"+hex+"-*"))
 	for _, p := range temps {
 		if fi, err := os.Lstat(p); err == nil && time.Since(fi.ModTime()) > staleTempAge {
-			if err := removeAll(p); err != nil {
-				s.logf("image sha256:%s: removing a stale temporary output: %v", hex, hidePaths(err, p, "<temp>"))
+			if err := s.removeImagePath(p); err != nil {
+				s.logf("image sha256:%s: removing a stale temporary output: %v", hex, hidePaths(err, p, "<temp>", dir, "<images>"))
 			}
 		}
 	}
 }
 
-// removeAside removes the copy of an image that was moved aside, once its
-// replacement is in place. hooks.removeAside replaces it in a test: no
-// operating-system state fails that one removal cleanly (removeAll puts back
-// the permissions that would).
-func (s *Stager) removeAside(aside string) error {
-	if s.hooks.removeAside != nil {
-		return s.hooks.removeAside(aside)
+// removeImagePath removes the copy of an image that was moved aside, once its
+// replacement is in place, or a stale temporary output. hooks.removeImagePath
+// replaces it in a test. No operating-system state fails the first cleanly
+// (removeAll puts back the permissions that would, and the removal follows the
+// last rename at once); and a directory that fails removeAll's open of it also
+// fails the Glob that finds a stale output, so the second never gets there.
+func (s *Stager) removeImagePath(p string) error {
+	if s.hooks.removeImagePath != nil {
+		return s.hooks.removeImagePath(p)
 	}
-	return removeAll(aside)
+	return removeAll(p)
 }

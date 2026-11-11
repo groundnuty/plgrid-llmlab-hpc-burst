@@ -43,9 +43,9 @@ type hooks struct {
 	afterRehash func()
 	// flock replaces syscall.Flock.
 	flock func(fd, how int) error
-	// removeAside replaces the removal of an image's copy moved aside once
-	// its replacement is in place (image.go).
-	removeAside func(path string) error
+	// removeImagePath replaces the removal of an image's copy moved aside
+	// and of a stale temporary output (image.go).
+	removeImagePath func(path string) error
 }
 
 // tryLock takes the lock if it is free.

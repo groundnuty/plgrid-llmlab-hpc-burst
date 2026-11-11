@@ -102,8 +102,9 @@ func (s *Stager) runApptainer(ctx context.Context, args []string) (int64, error)
 // review, Opus 5).
 func (s *Stager) removeTree(dir string) {
 	if err := removeAll(dir); err != nil {
-		// The temporary tree's name, never its path.
-		s.logf("removing %s: %v", filepath.Base(dir), hidePaths(err, dir, "<tree>"))
+		// The temporary tree's name, never its path; removeAll can name its parent
+		// directory too, when it cannot open it.
+		s.logf("removing %s: %v", filepath.Base(dir), hidePaths(err, dir, "<tree>", filepath.Dir(dir), "<tmp>"))
 	}
 }
 

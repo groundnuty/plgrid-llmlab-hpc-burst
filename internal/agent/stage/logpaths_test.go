@@ -95,14 +95,14 @@ func TestImagePutBackFailureIsLoggedWithoutPaths(t *testing.T) {
 
 // The copy of an image moved aside cannot be removed once its replacement is
 // in place (no operating-system state fails that one removal, so the test sets
-// hooks.removeAside): the line names the digest and the copy reads <aside>.
+// hooks.removeImagePath): the line names the digest and the copy reads <aside>.
 func TestImageRemoveAsideFailureIsLoggedWithoutPaths(t *testing.T) {
 	s, _, root := newStager(t, nil)
 	l := withLog(s)
 	first := stageImage(t, s, agentapi.ImageFormatSIF)
 	os.Truncate(first.Path, 3)
 	var removed []string
-	s.hooks.removeAside = func(p string) error {
+	s.hooks.removeImagePath = func(p string) error {
 		removed = append(removed, p)
 		return &fs.PathError{Op: "unlinkat", Path: p, Err: syscall.EACCES}
 	}
@@ -342,4 +342,97 @@ func TestHidePathsHidesEachPathAndKeepsTheError(t *testing.T) {
 			t.Errorf("hidePaths(nil) = %v", err)
 		}
 	})
+}
+
+// os.RemoveAll opens the parent directory of what it removes, once its first
+// try has failed, and returns that open's error as it is: the error then names
+// the parent, which is not the path that was removed. The removals map the
+// parent too (review of PR 397, `@hpc-burst-science-agent`'s check). No
+// operating-system state fails the two image removals this way cleanly, so
+// they go through hooks.removeImagePath, with the error os.RemoveAll returns
+// (an open of the parent, refused); the run's tree is below, with a real one.
+func TestImageRemoveParentFailureIsLoggedWithoutPaths(t *testing.T) {
+	const start = "stage: image sha256:2222222222222222222222222222222222222222222222222222222222222222: "
+	t.Run("the copy moved aside", func(t *testing.T) {
+		s, _, root := newStager(t, nil)
+		l := withLog(s)
+		first := stageImage(t, s, agentapi.ImageFormatSIF)
+		os.Truncate(first.Path, 3)
+		var removed []string
+		s.hooks.removeImagePath = func(p string) error {
+			removed = append(removed, p)
+			return &fs.PathError{Op: "open", Path: filepath.Dir(p), Err: syscall.EACCES}
+		}
+		l.reset()
+		stageImage(t, s, agentapi.ImageFormatSIF)
+		if len(removed) != 1 || !strings.Contains(removed[0], ".mismatch-") {
+			t.Fatalf("removed %q, want one path with .mismatch-", removed)
+		}
+		line := oneLine(t, l, "removing the copy moved aside")
+		if want := start + "removing the copy moved aside: open <images>: permission denied"; line != want {
+			t.Errorf("the line is %q, want %q", line, want)
+		}
+		wantNoPath(t, root, []string{line}, "")
+	})
+	t.Run("a stale temporary output", func(t *testing.T) {
+		s, _, root := newStager(t, nil)
+		l := withLog(s)
+		first := stageImage(t, s, agentapi.ImageFormatSIF)
+		stale := filepath.Join(filepath.Dir(first.Path), ".tmp-"+strings.TrimPrefix(digest, "sha256:")+"-old")
+		if err := os.WriteFile(stale, []byte("left by a run that died"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().Add(-2 * time.Hour)
+		if err := os.Chtimes(stale, old, old); err != nil {
+			t.Fatal(err)
+		}
+		var removed []string
+		s.hooks.removeImagePath = func(p string) error {
+			removed = append(removed, p)
+			return &fs.PathError{Op: "open", Path: filepath.Dir(p), Err: syscall.EACCES}
+		}
+		l.reset()
+		stageImage(t, s, agentapi.ImageFormatSIF) // the image is intact: Image goes on
+		if len(removed) != 1 || removed[0] != stale {
+			t.Fatalf("removed %q, want the stale output only", removed)
+		}
+		line := oneLine(t, l, "removing a stale temporary output")
+		if want := start + "removing a stale temporary output: open <images>: permission denied"; line != want {
+			t.Errorf("the line is %q, want %q", line, want)
+		}
+		wantNoPath(t, root, []string{line}, "")
+	})
+}
+
+// A run's temporary trees cannot be removed because TmpDir, their parent, lets
+// the process search it but not read it: the first removal fails, and
+// os.RemoveAll's open of the parent fails after it, so the operating system's
+// error names TmpDir. Each line names the tree by its own name, with TmpDir
+// written <tmp>, and the staging root nowhere.
+func TestRunTreeParentFailureIsLoggedWithoutPaths(t *testing.T) {
+	skipAsRoot(t)
+	s, _, root := newStager(t, nil)
+	l := withLog(s)
+	t.Cleanup(func() { os.Chmod(root, 0o700) })
+	scriptApptainer(t, root, fmt.Sprintf("printf 'fake-sif\\n' > \"$2\" && chmod 100 %s\n", root))
+	_, err := s.Image(context.Background(), vllmImage, digest, agentapi.ImageFormatSIF)
+	if cerr := os.Chmod(root, 0o700); cerr != nil {
+		t.Fatal(cerr)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prefix := range []string{"hb-apptainer-cache-", "hb-apptainer-tmp-"} {
+		var lines []string
+		for _, line := range strings.Split(l.String(), "\n") {
+			if strings.HasPrefix(line, "stage: removing "+prefix) {
+				lines = append(lines, line)
+			}
+		}
+		if len(lines) != 1 {
+			t.Errorf("%d log lines for the %s tree that was left, want 1: %q", len(lines), prefix, l.String())
+			continue
+		}
+		wantLineShape(t, root, lines[0], "stage: removing "+prefix, ": open <tmp>: permission denied", "")
+	}
 }
