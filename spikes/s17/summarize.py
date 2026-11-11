@@ -449,6 +449,38 @@ def tables(root):
                 k[0], {"a": "(a) one frpc", "c": "(c) a separate frpc"}[k[1]], k[2], len(v), len(rows), q3(ref), q3(bulk), len(bulk),
                 rng([num(r.get("recv_time_median_s")) for r in ok], "{:.2f}"), rng([num(r.get("batch_time_median_s")) for r in ok], "{:.2f}"),
                 rng([(num(r.get("batch_rate_median")) or 0) / 1e6 or None for r in ok], "{:.1f}"), rng([num(r.get("overlap_min")) for r in ok], "{:.3f}")))
+    if conc:
+        p("\n#### Stalls at the end of a batch\n")
+        p("A stall of the token streams near a batch's end: at least 6 of the 8 streams with a gap of more than 100 ms inside the batch whose end falls in the batch's last 400 ms. Per row, over the three repetitions: the batches with such a stall of the 15 (5 per run), which batches they were (0 is the first of 5), the bytes the transfers had moved through the relay's one connection by the end of those batches, the stall's gap per stream (smallest–largest) and how long before the batch's end the stall ended. Layout (a)'s own head-of-line stalls (S15: its 6 MiB window) recur through a transfer, so its rows at one transfer at a time, in either mode, trip the rule at any batch and are not the event; the rows that carry the finding are (c)'s, which has no such stall, and (a)'s at four at once, where direct mode shows none.\n")
+        p("| mode | layout | transfers at once | batches with a stall | which batches | bytes moved by then, GiB | gap per stream, ms | ended before the batch's end, ms |")
+        p("|---|---|---:|---:|---|---|---|---|")
+        g = {}
+        for r in conc:
+            g.setdefault((r["mode"], r["layout"], int(r["concurrent"])), []).append(r)
+        for k in sorted(g):
+            ev = [(b, e) for r in g[k] if r["run_id"] in lds for b, e in sorted(analysis.late_batch_stalls(lds[r["run_id"]]).items())]
+            moved = [sum(tr["bytes"] for tr in lds[r["run_id"]]["transfers"]) / (1 << 30) for r in g[k] if r["run_id"] in lds]
+            p("| %s | %s | %d | %d of %d | %s | %s | %s | %s |" % (
+                k[0], {"a": "(a) one frpc", "c": "(c) a separate frpc"}[k[1]], k[2], len(ev), 5 * len(g[k]),
+                ", ".join(sorted({str(b) for b, _ in ev})) or "-", ", ".join(sorted({"%.3f" % e["gib"] for _, e in ev})) or "- (all five batches moved %s GiB in all)" % "/".join(sorted({"%.2f" % m for m in moved})),
+                "%d–%d" % (min(e["min_ms"] for _, e in ev), max(e["max_ms"] for _, e in ev)) if ev else "-",
+                "%d–%d" % (min(e["before_end_ms"] for _, e in ev), max(e["before_end_ms"] for _, e in ev)) if ev else "-"))
+        p("\n#### Time to first byte of concurrent downloads\n")
+        p("A download's time to first byte (from before its dial to its first body byte at the client), by its place in its batch: the median over the three repetitions' batches of the first to answer, the second, and so on, and the p99 of the last to answer. Layout (c)'s transfers each need a work connection from the second frpc: one spare is waiting for the first, and the others wait for a spare that frps asks for after it hands one out.\n")
+        p("| mode | layout | transfers at once | first-byte time of each, in the order they answered, p50, ms | p99 of the last, ms |")
+        p("|---|---|---:|---|---:|")
+        for k in sorted(g):
+            if k[2] == 1:
+                continue
+            pos = {}
+            for r in g[k]:
+                if r["run_id"] in lds:
+                    for b, v in analysis.batch_ttfb(lds[r["run_id"]]["transfers"]).items():
+                        for i, x in enumerate(v):
+                            pos.setdefault(i, []).append(x)
+            if pos:
+                p("| %s | %s | %d | %s | %.1f |" % (k[0], {"a": "(a) one frpc", "c": "(c) a separate frpc"}[k[1]], k[2],
+                                                    " / ".join("%.1f" % statistics.median(pos[i]) for i in sorted(pos)), analysis.pct(pos[max(pos)], 99)))
     many = group("many")
     if many:
         p("\n### Many Instances behind one front (direct mode)\n")

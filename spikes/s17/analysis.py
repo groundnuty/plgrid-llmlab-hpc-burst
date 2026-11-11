@@ -321,3 +321,56 @@ def handshake_rates(stats, t_from, t_to):
         return None
     return {"accepts_per_s": (rows[-1][1] - rows[0][1]) / dt, "hellos_per_s": (rows[-1][2] - rows[0][2]) / dt,
             "accepts": rows[-1][1] - rows[0][1], "hellos": rows[-1][2] - rows[0][2], "seconds": dt}
+
+
+def batch_spans(trs):
+    """Per batch of concurrent transfers: (first start, last end) in ns, where a transfer's end is the later of the
+    client's end and the receiver's last byte (transfer_window)."""
+    by = {}
+    for tr in trs:
+        ws, we = transfer_window(tr)
+        b = tr.get("batch", 0)
+        lo, hi = by.get(b, (ws, we))
+        by[b] = (min(lo, ws), max(hi, we))
+    return by
+
+
+def late_batch_stalls(load, window_ms=400, min_gap_ms=100, min_streams=6):
+    """Stalls of the token streams near the end of a batch of transfers (issue #413's review: every ssh run that
+    moved 1 GiB through the relay's one ssh connection stalled all its streams just before the batch that crossed
+    it ended). For each batch, the streams that have a gap of more than min_gap_ms inside the batch whose end falls
+    in the batch's last window_ms; a batch counts when at least min_streams streams do. Returns {batch: {streams,
+    min_ms, max_ms, before_end_ms, gib}}: the streams' count, the stall's smallest and largest gap, how long before
+    the batch's end the last of those gaps ended, and the bytes the transfers had moved by the batch's end, in GiB."""
+    spans = batch_spans(load["transfers"])
+    out = {}
+    for b, (bs, be) in sorted(spans.items()):
+        found, ends = [], []
+        for rs in load["streams_runs"]:
+            best = None
+            for r in rs:
+                tk = r["tokens_ns"]
+                for a, z in zip(tk, tk[1:]):
+                    g = (z - a) / 1e6
+                    if g > min_gap_ms and a >= bs and be - window_ms * 1_000_000 <= z <= be:
+                        if best is None or g > best[0]:
+                            best = (g, z)
+            if best:
+                found.append(best[0])
+                ends.append(best[1])
+        if len(found) >= min_streams:
+            done = sum(tr["bytes"] for tr in load["transfers"] if tr.get("batch", 0) <= b)
+            out[b] = {"streams": len(found), "min_ms": min(found), "max_ms": max(found),
+                      "before_end_ms": (be - max(ends)) / 1e6, "gib": done / (1 << 30)}
+    return out
+
+
+def batch_ttfb(trs):
+    """Per batch, the transfers' times to first byte (from before the dial to the first byte at the receiver, ms)
+    in increasing order: the first to answer first."""
+    by = {}
+    for tr in trs:
+        if tr.get("err") or tr.get("status") != 200 or not tr.get("recv_first_ns"):
+            continue
+        by.setdefault(tr.get("batch", 0), []).append((tr["recv_first_ns"] - tr["start_ns"]) / 1e6)
+    return {b: sorted(v) for b, v in by.items()}

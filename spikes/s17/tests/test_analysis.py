@@ -212,5 +212,48 @@ class ManyInstances(unittest.TestCase):
         self.assertIsNone(analysis.handshake_rates(rows, 500.0, 600.0))
 
 
+
+class LateBatchStalls(unittest.TestCase):
+    """The per-GiB stall of the real ssh path (the review of PR 416): every stream stalls just before a batch ends."""
+
+    def streams(self, n=8, stall=None):
+        return [[stream(0, 60 * S, stall=stall)] for _ in range(n)]
+
+    def batches(self):
+        # Four batches of four 64 MiB transfers, 10 s each, from 10 s: bytes moved by the end of batch b = (b+1) * 256 MiB.
+        return [btr(10 * S + b * 10 * S, 19 * S + b * 10 * S, b) for b in range(4) for _ in range(4)]
+
+    def test_all_streams_stalled_in_the_last_400_ms_of_a_batch_are_found_with_the_bytes_moved(self):
+        # Batch 3 ends at 49 s; every stream's tokens stop from 48.7 s to 48.85 s: a gap of about 150 ms, ending 150 ms before it.
+        runs = self.streams(stall=(48_650 * MS, 48_850 * MS))
+        found = analysis.late_batch_stalls(load(runs, self.batches()))
+        self.assertEqual(list(found), [3])
+        self.assertEqual(found[3]["streams"], 8)
+        self.assertGreater(found[3]["min_ms"], 150)
+        self.assertLess(found[3]["max_ms"], 260)
+        self.assertAlmostEqual(found[3]["gib"], 4 * 4 * 64 / 1024)
+        self.assertGreater(found[3]["before_end_ms"], 100)
+        self.assertLess(found[3]["before_end_ms"], 200)
+
+    def test_a_stall_not_near_a_batch_end_is_not_found(self):
+        runs = self.streams(stall=(14 * S, 14 * S + 200 * MS))  # in the middle of batch 0
+        self.assertEqual(analysis.late_batch_stalls(load(runs, self.batches())), {})
+
+    def test_a_stall_of_a_few_streams_is_not_found(self):
+        runs = self.streams(stall=(48_650 * MS, 48_850 * MS))
+        for rs in runs[:4]:
+            rs[0] = stream(0, 60 * S)  # four of the eight streams do not stall
+        self.assertEqual(analysis.late_batch_stalls(load(runs, self.batches())), {})
+
+    def test_a_gap_of_100_ms_or_less_is_not_a_stall(self):
+        runs = self.streams(stall=(48_700 * MS, 48_740 * MS))  # the gap is about 90 ms
+        self.assertEqual(analysis.late_batch_stalls(load(runs, self.batches())), {})
+
+    def test_batch_ttfb_is_each_transfers_first_byte_in_increasing_order(self):
+        trs = [btr(10 * S, 12 * S, 0, first=10 * S + 9 * MS), btr(10 * S, 12 * S, 0, first=10 * S + 5 * MS),
+               btr(20 * S, 22 * S, 1, first=20 * S + 7 * MS), btr(20 * S, 22 * S, 1, err="reset")]
+        self.assertEqual(analysis.batch_ttfb(trs), {0: [5.0, 9.0], 1: [7.0]})
+
+
 if __name__ == "__main__":
     unittest.main()
