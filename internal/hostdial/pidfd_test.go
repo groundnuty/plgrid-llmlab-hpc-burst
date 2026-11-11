@@ -113,8 +113,15 @@ func TestAPidfdStopSignalsNoProcessWhoseStartTimeDiffers(t *testing.T) {
 }
 
 // An Owner whose relays are signalled only through a pidfd refuses a kernel
-// that gives none, rather than signal a PID; alpha's Owner, which signals by
-// number, never asks for one, so the same kernel runs it.
+// that gives none, rather than signal a PID. Alpha's NewOwner still succeeds
+// on such a kernel, as asserted below, but its relays no longer start there
+// (issue #370): their group signals are guarded by a pinned pidfd, so the
+// probe of the first default-path start (groupCalls, groupprobe.go) refuses
+// every start, naming the missing call, instead of NewOwner refusing (see
+// TestAStartOnAKernelThatFailsTheProbeIsRefusedAndStartsNothing). Before that
+// change alpha signalled its relays' groups by number and the same kernel ran
+// it. This comment was corrected for issue #370; the assertions are as they
+// were.
 func TestAPidfdOwnerRefusesAKernelWithNoPidfd(t *testing.T) {
 	saved := pidfdOpen
 	pidfdOpen = func(int, int) (int, error) { return -1, unix.ENOSYS }
