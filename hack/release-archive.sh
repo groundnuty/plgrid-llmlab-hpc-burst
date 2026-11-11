@@ -47,7 +47,7 @@
 # unpacked tree, `sha256sum -c SHA256SUMS` checks both.
 set -euo pipefail
 
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 # shellcheck source=hack/cpu-arch.sh
 . "$root/hack/cpu-arch.sh"
 
@@ -70,8 +70,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ $# -eq 1 ] && [ -n "$1" ] || die "usage: hack/release-archive.sh [--tag TAG] [--seed DIR] [--no-fetch] OUT"
-mkdir -p "$1"
-out=$(cd "$1" && pwd)
+# OUT is resolved, not created, until the checkout has been looked at.
+out=$(realpath -m -- "$1")
 [ -z "$seed" ] || { [ -d "$seed" ] && seed=$(cd "$seed" && pwd); } || die "--seed $seed is not a directory"
 
 command -v go > /dev/null || die "go is not on PATH"
@@ -121,6 +121,7 @@ for v in GOPATH GOMODCACHE GOCACHE GOPROXY; do
   export "$v=$val"
 done
 
+mkdir -p "$out"
 work=$(mktemp -d "$out/.release.XXXXXX")
 stage=$work/stage
 mkdir -p "$stage/bin" "$stage/agent-builds"
@@ -183,7 +184,7 @@ for b in "${HOST_BINARIES[@]}"; do
   if [ -n "$tag" ]; then
     [ "$got" = "$tag" ] || die "$b reports $got, and the tag is $tag (Go stamps a tag only on the commit it names, with a major version the module path allows)"
   else
-    [[ $got =~ -[0-9]{14}-${head:0:12}$ ]] || die "$b reports $got, which is not a pseudo-version of this commit ${head:0:12}"
+    [[ $got =~ [-.][0-9]{14}-${head:0:12}$ ]] || die "$b reports $got, which is not a pseudo-version of this commit ${head:0:12}"
   fi
   [ -z "$version" ] || [ "$version" = "$got" ] || die "the host binaries report different versions: $version and $got"
   version=$got
@@ -222,7 +223,7 @@ for f in "${executables[@]}"; do chmod 755 "$stage/$f"; done
 # ---- the archive and its checksums ---------------------------------------------------------------------
 name=hpcburst-$version-linux-amd64.tar.gz
 mtime=$(git log -1 --format=%ct HEAD)
-tar --sort=name --mtime="@$mtime" --owner=0 --group=0 --numeric-owner -C "$stage" -cf - bin agent-builds config profiles |
+LC_ALL=C tar --sort=name --mtime="@$mtime" --owner=0 --group=0 --numeric-owner -C "$stage" -cf - bin agent-builds config profiles |
   gzip -n -9 > "$work/$name"
 {
   ( cd "$work" && sha256sum -- "$name" )
