@@ -82,6 +82,10 @@ func (s *Stager) Image(ctx context.Context, image, digest string, format agentap
 	ok := agent.ImageResult{Path: final, Verified: true}
 	err := s.verifyImage(ctx, final, digest, format)
 	if err == nil {
+		// Said so that a row can show a warm start from the agent's own log
+		// (issue 392; `@hpc-burst-science-agent`, 11 Nov 2026): the digest and
+		// the reason only, never a path.
+		s.logf("image %s: already staged and verified", digest)
 		return ok, nil
 	}
 	if cerr := ctx.Err(); cerr != nil {
@@ -94,13 +98,17 @@ func (s *Stager) Image(ctx context.Context, image, digest string, format agentap
 	defer lk.release()
 	// Another Allocation may have repaired it while this one waited.
 	if err = s.verifyImage(ctx, final, digest, format); err == nil {
+		s.logf("image %s: staged by another Allocation", digest)
 		return ok, nil
 	}
 	if cerr := ctx.Err(); cerr != nil {
 		return agent.ImageResult{}, cerr
 	}
 	if !errors.Is(err, errImageAbsent) {
-		s.logf("staged image %s failed its check (%v): staging it again", final, err)
+		// The digest, not the path, and an error with its paths hidden
+		// (verifyImage): a log reaches places a post never does
+		// (`@hpc-burst-science-agent`, 11 Nov 2026, issue 392).
+		s.logf("image %s: failed its check (%v): staging it again", digest, err)
 	}
 	var peak int64
 	if err := s.stageImage(ctx, image, digest, format, final, hex, &peak); err != nil {
@@ -120,8 +128,32 @@ func recordPath(final string, format agentapi.ImageFormat) string {
 	return final + ".sha256"
 }
 
-// verifyImage checks the staged image against its record.
+// verifyImage checks the staged image against its record. An error it returns
+// has the image's path and its record's path written <image> and <record>, so
+// that the log line which prints it names no path of the staging directory;
+// the error it came from stays reachable by errors.Is and errors.As.
+// errImageAbsent is returned as it is.
 func (s *Stager) verifyImage(ctx context.Context, final, digest string, format agentapi.ImageFormat) error {
+	err := s.checkImage(ctx, final, digest, format)
+	if err == nil || errors.Is(err, errImageAbsent) {
+		return err
+	}
+	// The record first: its path starts with the image's.
+	hide := strings.NewReplacer(recordPath(final, format), "<record>", final, "<image>")
+	return &hiddenPathError{msg: hide.Replace(err.Error()), err: err}
+}
+
+// hiddenPathError is an error whose text has its paths hidden.
+type hiddenPathError struct {
+	msg string
+	err error
+}
+
+func (e *hiddenPathError) Error() string { return e.msg }
+func (e *hiddenPathError) Unwrap() error { return e.err }
+
+// checkImage is verifyImage's check, with the errors as they arise.
+func (s *Stager) checkImage(ctx context.Context, final, digest string, format agentapi.ImageFormat) error {
 	fi, err := os.Lstat(final)
 	if errors.Is(err, os.ErrNotExist) {
 		return errImageAbsent

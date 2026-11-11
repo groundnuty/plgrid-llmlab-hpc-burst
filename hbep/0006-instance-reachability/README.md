@@ -223,7 +223,7 @@ metadatas.token = "<the Allocation's credential>"
 transport.protocol = "wss"
 transport.tls.trustedCaFile = "<the staged launcher certificate>"
 transport.tls.serverName = "dial-home.hpcburst.invalid"
-transport.poolCount = 0
+transport.poolCount = 0   # frp reads 0 as unset and uses 1 (frpc in the job)
 transport.tcpMuxKeepaliveInterval = 10
 transport.heartbeatInterval = 10
 transport.heartbeatTimeout = 25
@@ -245,7 +245,7 @@ unixPath = "<the engine's socket>"
 - **`user` is not set,** so frps sees the proxy name unchanged (frp facts).
 - **Logs.** frpc logs to a file in the job's private temporary directory (`log.to`), and its console output is discarded. frpc logs its run ID, which is enough to attach a work connection to its session (Risks), so the log never reaches the job's output files on shared storage.
 - **The proxy** reaches the engine through frp's `unix_domain_socket` client plugin. A `tcpmux` proxy hands each work connection to its plugin, so no TCP listener serves the Instance on the node (frp facts). In beta, a router that listens on loopback (HBEP-5) is reached through `localIP` and `localPort` instead.
-- **Heartbeats** are S1's set (Heartbeats). `poolCount = 0` is S1's tested value; frps still keeps one spare work connection (frp facts).
+- **Heartbeats** are S1's set (Heartbeats). `poolCount = 0` is S1's tested value, but frp v0.71.1 reads 0 as unset and uses 1 (`pkg/config/v1/client.go:153`). So frpc opens one spare work connection at login, and frps replaces each one it hands out (frp facts).
 
 ### Dial-home modes
 
@@ -513,7 +513,7 @@ Read at frp v0.71.1 (`fatedier/frp`, tag `v0.71.1`, commit `d8cf180`). Paths are
 | The tcpmux `CONNECT` is answered 200 when the domain is routed, before the connection is handed to the proxy; the work connection is taken after that, waiting up to `userConnTimeout` | `pkg/util/vhost/vhost.go:168-224`; `pkg/util/tcpmux/httpconnect.go:73-82`; `server/proxy/proxy.go:147-155`; `server/control.go:595-637` |
 | frps closes a user connection that gets no work connection, at `userConnTimeout`; one that drew a work connection lives as long as that stream | `server/proxy/proxy.go:268-292`, `:147-199`; `server/control.go:619-631` |
 | An unknown domain gets 404 | `pkg/util/vhost/vhost.go:184-188`; `pkg/util/tcpmux/httpconnect.go:99-106` |
-| frps keeps one spare work connection, replacing each one it hands out | `server/control.go:634-635` |
+| frpc's `poolCount` of 0 is read as unset and becomes 1, so one spare work connection exists from the login; frps replaces each one it hands out | `pkg/config/v1/client.go:153`; `client/control_session.go:112`; `server/control.go:446`, `:690-692` (from the login) and `:634-635` (the replacement) |
 | `bindAddr` defaults to every interface, and `proxyBindAddr` follows it; the tcpmux listener binds `proxyBindAddr` | `pkg/config/v1/server.go:110-114`; `server/service.go:199-211` |
 | The web server defaults to loopback; frps keeps proxy statistics only while it runs | `pkg/config/v1/common.go:50-73`; `server/service.go:155-167` |
 | `GET /api/proxy/{type}` lists the proxies of a type, online and offline, with `name`, `status`, `conf`, `lastStartTime` and `lastCloseTime`; the API sits behind the web server's auth, and `/healthz` before it | `server/api_router.go:27-49`; `server/http/controller.go:151-161`, `:234-257`; `server/http/model/types.go:100-115` |
@@ -598,7 +598,7 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
 - **The orphan grace.** A proxy that stays online after its Instance ended raises no `TunnelOrphaned` at 1 min 59 s of listed orphan time and one at 2 min. A successful read that shows it offline or absent restarts the clock. A failed read between two that list it changes neither. An Instance that ends on a kept Allocation, whose agent stops frpc, raises none: the reader is fed frps's real list across the teardown, since a stub that lists an orphan from the start cannot show that a normal teardown raises nothing.
 - **A restart before the first `ready`.** An Instance restarted before it was ever `ready`, whose tunnel is down, ends with `TunnelNotConnected` at `health.startTimeout` from its latest restart.
 - **Teardown** (alpha graduation). End the allocation at its hard limit, and cancel one early: no online proxy for the ended Allocation's Instances in frps's list (offline entries may remain as history), no ssh process in the job's process tree or on the control-plane host, no relay's `srun` client on the login node and no relay step in the job, and no record left. Both cases end with a live node that sends a FIN, so also freeze the path with no FIN, through a relay on the path stopped with SIGSTOP as in S1c: frps drops the proxy within 12–20 s, and the forwards' sshd sessions end within sshd's client-alive window. frps itself is stopped only by its recorded process ID and start time.
-- **One-hour runs** (alpha graduation). S1's one-hour runs pass with this wiring on Helios and on Athena, in the mode each uses, with the path rate measured.
+- **One-hour runs** (alpha graduation on Athena `plgrid-gpu-a100`; Helios's in beta). S1's one-hour runs pass with this wiring on Helios and on Athena, in the mode each uses, with the path rate measured.
 
 ### Compatibility and upgrades
 
@@ -621,13 +621,15 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
 ### Graduation criteria
 
 - **Alpha:**
+  - **Alpha's platform** (owner decision, 11 Nov 2026, "Athena alone", recorded on #145 and approved on PR #373): alpha graduates on Athena. Where a criterion below names Helios, or each alpha platform or partition, its Helios part, where not already met, moves to beta, to run when GH200 returns, and its Athena part stays. A row on Athena `plgrid-now` counts for `plgrid-gpu-a100` when it runs one job in total, of one GPU, within `plgrid-now`'s 1 h limit, on the same A100 node type (extending the science-agent ruling of 10 Nov 2026 for #93, which covered conformance). The no-cut handover (HBEP-5, HBEP-7) and S1's one-hour run (HBEP-6) run on `plgrid-gpu-a100`. An Instance on `plgrid-now` uses the shipped test profile `profiles/athena-now.yaml` (HBEP-4, open question 8; HBEP-7, A partition too short).
   - S1's one-hour runs pass with this wiring on Helios and on Athena, with the path rate from compute node to front measured, in the mode the alpha host uses: host-dialed, since 9 Nov 2026;
   - the plugin's refusals are tested: a wrong token, a domain that is not one of the Allocation's Instances, and a wrong proxy type;
   - a dead engine behind a live tunnel is caught by the probe;
   - teardown leaves no online frps proxy for the ended Allocation's Instances, offline history aside, and no ssh process, relay `srun` client or relay step behind;
   - a lifecycle-controller restart while serving cuts no established tunnel in direct or ssh mode; in host-dialed mode it cuts the streams in flight, counted and never replayed, and the relays return within the backoff (owner, 9 Nov 2026);
-  - in host-dialed mode, on each alpha platform, a relay works on the partition the Instances use (HBEP-4, open question 16), Helios GH200 included.
+  - in host-dialed mode, on each alpha platform, a relay works on each partition the Instances use (HBEP-4, open question 16): on Athena, `plgrid-now` and `plgrid-gpu-a100`.
 - **Beta:**
+  - the Helios parts of alpha's criteria, on GH200 when it returns (owner decision, 11 Nov 2026);
   - many tunnels on one front are measured (open question 11): S14 measured steady state, and the five items it leaves open are measured too;
   - bulk paths run on a separate frpc and a second frps, with open question 12's contract decided, built and tested;
   - in host-dialed mode, the relay keeper's tests pass, and a controller restart while serving cuts no serving stream (open question 13).
@@ -772,6 +774,8 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - 2026-11-10: open question 12 answered for one transfer at a time by spike S15.
 - 2026-11-10: two amendments to the relay keeper's interface, from its build (#354).
 - 2026-11-10: an unreachable relay keeper makes the Provider unready, from the keeper's build (#360).
+- 2026-11-11: alpha graduates on Athena alone; Helios's parts move to beta (owner decision).
+- 2026-11-11: erratum: frp reads `poolCount = 0` as 1, so the spare work connection exists from the login (#368, PR #369).
 - 2026-11-11: the front's plugin, second, and the re-probe after a new registration (#371).
 
 ## Amendments
@@ -854,6 +858,8 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - **2026-11-10: an unreachable keeper makes the Provider unready** (Dial-home modes, The relay keeper), from the keeper's build (#360), approved by the science agent's objective check. In keeper mode the Provider's controller sets `Ready` False with reason `RelayKeeperUnavailable` while no exchange with the keeper has succeeded under its current lead, or none has for longer than a set's validity. It admits no new Allocation meanwhile, leaves running ones as they are, and sets `Ready` True again at the next successful exchange.
 
   Before, an unreachable keeper left the Provider `Ready`.
+- **2026-11-11: alpha graduates on Athena alone** (Graduation criteria; Test plan). An amendment by the owner's decision of 11 Nov 2026 ("Athena alone", recorded on #145 and approved on PR #373), with Helios GH200 down and no return date. Alpha's criteria now bind Athena, and their Helios parts not already met move to beta, to run when GH200 returns. Already met: a relay on Athena `plgrid-now` (10 Nov 2026, #305). A row on `plgrid-now` counts for `plgrid-gpu-a100` when it runs one job of one GPU within 1 h; the no-cut handover and S1's hour stay on `plgrid-gpu-a100`. Before, alpha needed both Helios and Athena.
+- **2026-11-11: erratum** (frpc in the job; frp facts): frp reads `poolCount = 0` as unset and uses 1, so the spare work connection exists from the login, not only after a replacement. Found in #368's investigation (PR #369). Before, the text said frps keeps one spare and implied the configured 0 meant none.
 - **2026-11-11: the front's plugin, second, and a re-probe after every new registration** (Admission; The front's half; Risks; Security; Test plan; Operational readiness 1 and 2; frp facts). An amendment from the code agent's plan for #371, accepted by the science agent on 11 Nov 2026 as a major-tier change. After a quick frpc reconnect, the front kept routing to the UID on a probe that passed before the reconnect, so user traffic could meet frp's spare-work-connection race: frps lists and routes a proxy before frpc has started it (#368, #369).
   - **The front's plugin, second:** frps posts each `NewProxy` and `CloseProxy` that the controller admitted to the front's plugin on base+4, and stops at a plugin that refuses or does not answer. It is rendered only when the launcher runs a front.
   - **The epoch:** the front moves the UID's registration epoch on and takes it out of routing before frps registers the proxy. A route proven in an earlier epoch no longer counts. A pass counts only if the epoch has not moved since the probe began. A dial obtained earlier fails after frps's 200 with nothing written, which HBEP-5 resends once.

@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -189,12 +190,23 @@ func TestJitterStaysWithinTheBackoff(t *testing.T) {
 // startTestJob is a job side with a socket under a short TMPDIR.
 func startTestJob(t *testing.T, wait time.Duration) (*Job, string) {
 	t.Helper()
+	return startTestJobWith(t, wait, nil)
+}
+
+// startTestJobWith is startTestJob with a change to the job's options, made
+// before the server serves.
+func startTestJobWith(t *testing.T, wait time.Duration, mod func(*JobOptions)) (*Job, string) {
+	t.Helper()
 	base := shortDir(t)
 	alloc := filepath.Join(base, "a")
 	if err := os.Mkdir(alloc, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	j, err := StartJob(JobOptions{ShmDir: base, TmpDir: base, AllocDir: alloc, Allocation: "u-1", Wait: wait})
+	o := JobOptions{ShmDir: base, TmpDir: base, AllocDir: alloc, Allocation: "u-1", Wait: wait}
+	if mod != nil {
+		mod(&o)
+	}
+	j, err := StartJob(o)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +340,19 @@ func TestAConnectionWithNoSessionIsClosedAfterTheWait(t *testing.T) {
 // gets no greeting. A second account is needed to make one for real, so the
 // peer's user is injected.
 func TestAnotherUsersPeerIsRefused(t *testing.T) {
-	j, _ := startTestJob(t, time.Second)
+	// The peer's user is injected into the job's options, before the server
+	// serves, and flipped through an atomic: the server's goroutines read it
+	// while the test changes what it answers (issue #379: swapping a package
+	// variable raced with them under -race).
+	var another atomic.Bool
+	j, _ := startTestJobWith(t, time.Second, func(o *JobOptions) {
+		o.peerOf = func(c net.Conn) (int, error) {
+			if another.Load() {
+				return os.Geteuid() + 1, nil
+			}
+			return peerUID(c)
+		}
+	})
 	read := func() (string, error) {
 		c, err := net.Dial("unix", j.Socket())
 		if err != nil {
@@ -341,9 +365,7 @@ func TestAnotherUsersPeerIsRefused(t *testing.T) {
 	if g, err := read(); err != nil || g != agentapi.RelayGreeting("u-1") {
 		t.Fatalf("this user's peer: %q, %v; want the greeting", g, err)
 	}
-	old := peerUID
-	peerUID = func(net.Conn) (int, error) { return os.Geteuid() + 1, nil }
-	defer func() { peerUID = old }()
+	another.Store(true)
 	if g, err := read(); err == nil {
 		t.Errorf("another user's peer got %q", g)
 	}

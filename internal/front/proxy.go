@@ -269,7 +269,9 @@ func (p *Proxy) setTarget(x *exchange, t *target) {
 
 // send writes the request to the target: the model value rewritten, the body
 // framed with its new Content-Length, the client's key replaced by the
-// target's, and toward an Instance the x-session-id set (HBEP-5, Contract).
+// target's, and toward an Instance the x-session-id set and the client's
+// x-envoy-* and X-Forwarded-For headers removed (HBEP-5, Contract and Request
+// headers).
 func (p *Proxy) send(x *exchange, r *http.Request, t *target, body []byte, rb requestBody, key string) (*http.Response, error) {
 	h := r.Header.Clone()
 	stripHop(h)
@@ -295,6 +297,7 @@ func (p *Proxy) send(x *exchange, r *http.Request, t *target, body []byte, rb re
 			return nil, &dialError{err: fmt.Errorf("the Instance key cannot be read: %w", err)}
 		}
 		rt, url, out = tr, "http://instance"+path, rb.rewrite(body, t.dep.ServedName)
+		stripEnvoyControl(h) // only toward an Instance: LLMLab gets the client's headers as before
 		h.Set("Authorization", "Bearer "+k)
 		h.Set("X-Session-Id", key)
 	} else {

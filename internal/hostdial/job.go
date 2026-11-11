@@ -101,6 +101,13 @@ type JobOptions struct {
 	Wait time.Duration
 	// Logger reports sessions and refused relays; nil means none.
 	Logger *slog.Logger
+
+	// peerOf reads the user of a connection's peer; nil means peerUID, the
+	// SO_PEERCRED read. Only a test sets it, to stand in for another user's
+	// peer, which needs a second account to make for real: it is read by the
+	// server's goroutines, so it is set here, before the server serves, and
+	// not swapped while it does (issue #379).
+	peerOf func(net.Conn) (int, error)
 }
 
 // Job is the job side of host-dialed mode (HBEP-6, The job side): one
@@ -338,7 +345,7 @@ func (j *Job) acceptRelays() {
 // replaces the channel's older one, which is closed (HBEP-6, Fencing).
 func (j *Job) handshake(conn net.Conn) {
 	log := j.o.Logger
-	if err := peerIsUs(conn); err != nil {
+	if err := j.peerIsUs(conn); err != nil {
 		log.Warn("a relay connection was refused", "err", err)
 		_ = conn.Close()
 		return
@@ -558,9 +565,8 @@ func privateDir(dir string, create bool) error {
 	return nil
 }
 
-// peerUID reads a Unix connection's peer's user; a test replaces it to show
-// that another user's peer is refused.
-var peerUID = func(conn net.Conn) (int, error) {
+// peerUID reads a Unix connection's peer's user (SO_PEERCRED).
+func peerUID(conn net.Conn) (int, error) {
 	uc, ok := conn.(*net.UnixConn)
 	if !ok {
 		return os.Geteuid(), nil
@@ -583,8 +589,12 @@ var peerUID = func(conn net.Conn) (int, error) {
 }
 
 // peerIsUs refuses a Unix connection from another user (SO_PEERCRED).
-func peerIsUs(conn net.Conn) error {
-	uid, err := peerUID(conn)
+func (j *Job) peerIsUs(conn net.Conn) error {
+	read := j.o.peerOf
+	if read == nil {
+		read = peerUID
+	}
+	uid, err := read(conn)
 	if err != nil {
 		return err
 	}

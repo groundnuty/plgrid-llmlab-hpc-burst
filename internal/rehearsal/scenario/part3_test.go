@@ -32,6 +32,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/managed/llmlabtest"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/obscheck"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
@@ -388,7 +389,7 @@ func (p3 *part3) longStreamAcrossRestart(d *depRun) {
 	sc := p3.startRestartScraper(string(d.primary.UID))
 	s, row := p3.controllerRestart(d.primary, "rehearsal-part3-long", stack.ChatBody(d.Model, longTokens, longTokens, true, ""), longTokens)
 	reads := sc.end()
-	problems, stale, fresh, unserved := restartReadProblems(reads, string(d.primary.UID))
+	problems, stale, fresh, unserved := obscheck.RestartReadProblems(reads, string(d.primary.UID))
 	for _, p := range problems {
 		p3.t.Errorf("the primary's gauges across the controller restart: %s", p)
 	}

@@ -70,7 +70,7 @@ func TestListNamesTheReachRowsAndTheAlias(t *testing.T) {
 	for _, s := range reachShapes {
 		w.contains(res, s.row+"  cluster  ready  gate HPCBURST_CONFORMANCE")
 	}
-	w.contains(res, "reach  alias  runs reach-helios, reach-athena in turn")
+	w.contains(res, "reach  alias  runs reach-athena in turn")
 }
 
 // The script's shapes and the package's reach rows are one fact each; the expected values here are #225's.
@@ -369,21 +369,21 @@ func TestTheProbeSettingsReachNoOtherRow(t *testing.T) {
 	}
 }
 
-func TestTheReachAliasRunsItsRowsOneAfterTheOther(t *testing.T) {
+// The alias stands for reach-athena alone (issue #386: the Helios row is beta's and runs by its own name).
+func TestTheReachAliasRunsItsAthenaRowAlone(t *testing.T) {
 	w := newReachWorld(t)
 	res := w.run(nil, "--run", "reach", "--yes")
 	if res.code != 0 {
 		t.Fatalf("exit %d:\n%s", res.code, res.out)
 	}
-	a, b := strings.Index(res.out, "reach-helios: PASS"), strings.Index(res.out, "reach-athena: PASS")
-	if a < 0 || b < a {
-		t.Fatalf("reach-helios: PASS and reach-athena: PASS are missing or out of order:\n%s", res.out)
+	if !strings.Contains(res.out, "reach-athena: PASS") || strings.Contains(res.out, "reach-helios") {
+		t.Fatalf("want reach-athena: PASS and no reach-helios:\n%s", res.out)
 	}
-	if n := strings.Count(w.stateFile("events"), "testbin "); n != 2 {
-		t.Errorf("%d test runs, want 2", n)
+	if n := strings.Count(w.stateFile("events"), "testbin "); n != 1 {
+		t.Errorf("%d test runs, want 1", n)
 	}
-	if x, y := strings.Index(res.out, "cleanup: left behind 0"), strings.Index(res.out, "reach-athena: shape"); x < 0 || y < 0 || x > y {
-		t.Errorf("the first row's cleanup does not come before the second row starts:\n%s", res.out)
+	if !strings.Contains(res.out, "cleanup: left behind 0") {
+		t.Errorf("no cleanup line:\n%s", res.out)
 	}
 }
 
