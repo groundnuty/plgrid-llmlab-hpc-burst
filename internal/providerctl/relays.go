@@ -56,6 +56,21 @@ type RelaySettings struct {
 	MinBackoff, MaxBackoff, ResetAfter, StopGrace time.Duration
 	RestartLimit                                  int
 	RestartWindow                                 time.Duration
+	// KeeperSocket is the relay keeper's socket (beta; HBEP-6, The relay
+	// keeper; #343). Set, the Provider's leader sends the keeper fenced
+	// desired sets and acknowledges its final ends, and runs no relay of its
+	// own (keeper.go); "" is alpha's relay owner, as before. The launcher
+	// chooses the path, so the controller computes none.
+	KeeperSocket string
+	// KeeperSendInterval is how often the leader sends its desired set when
+	// no observation changed it; zero means keeperSendInterval. Tests
+	// shorten it.
+	KeeperSendInterval time.Duration
+	// RenewDeadline is the Provider manager's renew deadline, which a desired
+	// set's validity adds to the poll interval in force (#343's Q5); zero
+	// means controller-runtime's 10 s, which the controller binary uses.
+	// Tests shorten it.
+	RenewDeadline time.Duration
 }
 
 // relayState is one controller's relay owner and the ssh client maker for
@@ -80,6 +95,9 @@ type relayState struct {
 	// mark, and an observation writes it from here when that write failed
 	// (relayfailed.go).
 	failures map[string]relayFailure
+	// keeper is set in keeper mode (RelaySettings.KeeperSocket): then owner
+	// and ssh stay nil, and the keeper holds the relays (keeper.go).
+	keeper *keeperState
 }
 
 func newRelayState(o Options) (*relayState, error) {
@@ -93,6 +111,9 @@ func newRelayState(o Options) (*relayState, error) {
 		return nil, errors.New("providerctl: host-dialed mode needs the relay settings (Options.Relays)")
 	}
 	s := *o.Relays
+	if s.KeeperSocket != "" {
+		return newKeeperRelayState(o, s)
+	}
 	if s.ControlDir == "" {
 		return nil, errors.New("providerctl: host-dialed mode needs a control directory for the relays' ssh")
 	}
@@ -150,6 +171,9 @@ var errRelaysClosed = errors.New("the Provider's relays have stopped")
 // said which host it uses yet), and the refusal's text in inUse: one
 // host-dialed Provider per login host (HBEP-6, Capacity).
 func (r *relayState) claimLogin(cfg slurm.SSHConfig) (login, inUse string, err error) {
+	if r.keeper != nil {
+		return r.keeper.claim()
+	}
 	if !r.hosts.Enrolled(r.provider) {
 		// The manager's start enrolls it (enrollRunnable); a first claim that
 		// comes sooner enrolls it here, rather than reading as a host in use.
@@ -244,6 +268,10 @@ func (e *external) syncRelays(ctx context.Context, a *v1alpha1.Allocation, tag s
 	if r == nil {
 		return
 	}
+	if r.keeper != nil {
+		e.syncKeeper(ctx, a, tag)
+		return
+	}
 	o := a.Status.AtProvider
 	if meta.WasDeleted(a) || o.Phase != v1alpha1.AllocationRunning || o.JobID == "" || o.JobCompleting || a.Spec.ForProvider.Batch == nil {
 		r.owner.Drop(tag)
@@ -286,6 +314,9 @@ func (e *external) syncRelays(ctx context.Context, a *v1alpha1.Allocation, tag s
 // Relays lists the relays the controller keeps (host-dialed mode only; nil
 // otherwise).
 func (c *Controller) Relays() []hostdial.RelayState {
+	if c.shared.relays != nil && c.shared.relays.keeper != nil {
+		return nil // the keeper holds them (keeper.go)
+	}
 	if c.shared.relays == nil {
 		return nil
 	}
@@ -301,6 +332,9 @@ func (c *Controller) RunRelays(ctx context.Context) error {
 		<-ctx.Done()
 		return nil
 	}
+	if c.shared.relays.keeper != nil {
+		return c.runKeeper(ctx)
+	}
 	defer c.shared.relays.close()
 	c.shared.relays.startLead(ctx)
 	defer c.shared.relays.endLead()
@@ -311,6 +345,10 @@ func (c *Controller) RunRelays(ctx context.Context) error {
 // every relay of this controller by PID and returns once their processes are
 // gone (the Lease's release hook, RelayFence).
 func (c *Controller) StopRelays() {
+	if c.shared.relays != nil && c.shared.relays.keeper != nil {
+		c.stopKeeper()
+		return
+	}
 	if c.shared.relays != nil {
 		c.shared.relays.endLead()
 		c.shared.relays.owner.Stop()

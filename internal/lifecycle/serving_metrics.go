@@ -17,8 +17,10 @@ import (
 // stateCollector, describes it: client_golang's Registry.Register refuses a
 // second collector that describes the same descriptor, so two would keep the
 // manager from starting (`@hpc-burst-science-agent`, 6 Nov 2026, for #249).
+// In beta's keeper mode a third read has it, relays, the relay keeper's status
+// (HBEP-8, 10 Nov 2026), which keeperCollector exports and does not describe.
 var descCollectorSuccess = prometheus.NewDesc("hpcburst_collector_success",
-	"1 if the collector's last read succeeded, 0 if it failed, in which case none of its series are exposed. collector names the read: accounting (the Allocation list) or instances (the Instance inventory).",
+	"1 if the collector's last read succeeded, 0 if it failed, in which case none of its series are exposed. collector names the read: accounting (the Allocation list), instances (the Instance inventory) or relays (the relay keeper's status, in keeper mode only).",
 	[]string{"collector"}, nil)
 
 // collectorAccounting is the collector label of the accounting gauges'

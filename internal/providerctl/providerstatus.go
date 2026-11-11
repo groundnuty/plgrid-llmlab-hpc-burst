@@ -49,6 +49,13 @@ type statusLoop struct {
 	// was written: a pass that sees it changed had a failed read.
 	mu       sync.Mutex
 	failures uint64
+	// keeper is what this pass read of the relay keeper, in one snapshot
+	// (keeper mode only; the zero view elsewhere). keeperRead and
+	// keeperPassed, when set by a test, run right after it is taken and once
+	// the pass has returned.
+	keeper       keeperView
+	keeperRead   func()
+	keeperPassed func()
 }
 
 // statusRefresh is how stale lastSuccessfulStatusRead may get before a pass
@@ -75,6 +82,7 @@ func (l *statusLoop) Start(ctx context.Context) error {
 			l.s.h.close()
 			return nil
 		case <-t.C:
+		case <-l.keeperStatus():
 		}
 	}
 }
@@ -92,6 +100,21 @@ func (l *statusLoop) sync(ctx context.Context) error {
 	} else if p, _ := l.s.h.current(); p != nil {
 		health = p.Health()
 	}
+	// Keeper mode: ONE snapshot of the keeper for this pass, recorded as what
+	// it read, for its wake-up (the delta review of PR 360).
+	l.mu.Lock()
+	hook, passed := l.keeperRead, l.keeperPassed
+	l.mu.Unlock()
+	if passed != nil {
+		defer passed()
+	}
+	snap := l.s.keeperSnapshot()
+	l.mu.Lock()
+	l.keeper = snap
+	l.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	// In host-dialed mode the Provider claims its login host; a refused claim
 	// makes it unready, so the planner gives it no Allocation (HBEP-6,
 	// Capacity).
@@ -104,6 +127,11 @@ func (l *statusLoop) sync(ctx context.Context) error {
 		} else {
 			inUse = why
 		}
+	}
+	// Keeper mode: the claim as the pass's snapshot read it, with its
+	// reachability, not as a later read finds it.
+	if snap.keeper {
+		inUse = snap.refusal
 	}
 	l.mu.Lock()
 	readsFailed := health.ReadFailures != l.failures // != : a new Batch counts from 0
@@ -177,6 +205,15 @@ func (l *statusLoop) compute(prov *v1alpha1.Provider, h slurm.Health, cfgErr, po
 	}
 	if inUse != "" {
 		set(v1alpha1.ConditionProviderReady, metav1.ConditionFalse, v1alpha1.ReasonLoginHostInUse, inUse)
+	}
+	// Keeper mode: a keeper that no exchange reached lately makes the
+	// Provider unready (HBEP-6, The relay keeper, as #360 amends it), as the
+	// pass's one snapshot of the keeper read it.
+	l.mu.Lock()
+	keeper := l.keeper
+	l.mu.Unlock()
+	if keeper.unavailable != "" {
+		set(v1alpha1.ConditionProviderReady, metav1.ConditionFalse, v1alpha1.ReasonRelayKeeperUnavailable, keeper.unavailable)
 	}
 	l.conditions(st, set, h, cfgErr)
 

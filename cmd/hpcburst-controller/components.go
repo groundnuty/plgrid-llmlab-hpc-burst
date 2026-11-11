@@ -322,6 +322,9 @@ type wiring struct {
 	// recorder counts into it under provider-<name> (HBEP-8, Raised events).
 	events *eventcount.Counter
 	log    logr.Logger
+	// keeperSocket is the relay keeper's socket in beta's keeper mode, ""
+	// in alpha (--relay-keeper-socket).
+	keeperSocket string
 }
 
 // providerGrace is each Provider manager's shutdown grace. The Provider
@@ -407,6 +410,11 @@ func (w wiring) setupBatch(pm manager.Manager, provider string) error {
 func (w wiring) relaySettings() *providerctl.RelaySettings {
 	if w.front == nil || w.front.Mode != agentapi.DialHomeHostDialed {
 		return nil
+	}
+	if w.keeperSocket != "" {
+		// Beta's keeper mode: the keeper holds the relays, its own slots and
+		// ssh configuration (HBEP-6, The relay keeper).
+		return &providerctl.RelaySettings{Ports: w.host.RelayChannelPorts(), KeeperSocket: w.keeperSocket}
 	}
 	return &providerctl.RelaySettings{Ports: w.host.RelayChannelPorts(), Slots: hostdial.SharedSlots, ControlDir: sshControlDir(w.host)}
 }

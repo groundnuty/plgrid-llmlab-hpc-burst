@@ -44,6 +44,17 @@ type pluginCall struct {
 type pluginStub struct {
 	mu    sync.Mutex
 	calls []pluginCall
+	// beforeReply, when set (setBeforeReply), runs for each call after it is recorded and before
+	// the stub answers. frps waits for the answer, so a test can act at a known point of frps's
+	// handling of an op: for NewProxy, before frps registers the proxy and answers frpc
+	// (frp v0.71.1, server/control.go:736-769).
+	beforeReply func(op string)
+}
+
+func (s *pluginStub) setBeforeReply(f func(op string)) {
+	s.mu.Lock()
+	s.beforeReply = f
+	s.mu.Unlock()
 }
 
 func startPluginStub(t *testing.T, h agentapi.Host) *pluginStub {
@@ -65,7 +76,11 @@ func startPluginStub(t *testing.T, h agentapi.Host) *pluginStub {
 		}
 		s.mu.Lock()
 		s.calls = append(s.calls, pluginCall{Op: body.Op, QueryOp: r.URL.Query().Get("op"), Path: r.URL.Path, Content: body.Content})
+		before := s.beforeReply
 		s.mu.Unlock()
+		if before != nil {
+			before(body.Op)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"reject":false,"unchange":true}`)
 	})
@@ -129,6 +144,14 @@ func newFrpsRig(t *testing.T, base, nice int) *frpsRig {
 // it to change what the path names.
 func newFrpsRigFrom(t *testing.T, base, nice int, frpsPath string, afterResolve func(bin FrpsBinary)) *frpsRig {
 	t.Helper()
+	return newFrpsRigEdited(t, base, nice, frpsPath, afterResolve, nil)
+}
+
+// newFrpsRigEdited is newFrpsRigFrom with the rendered configuration passed through edit, when
+// edit is not nil, before frps reads it: a test that needs one setting changed starts frps from
+// the launcher's own file with that change, and nothing else.
+func newFrpsRigEdited(t *testing.T, base, nice int, frpsPath string, afterResolve func(bin FrpsBinary), edit func(cfg []byte) []byte) *frpsRig {
+	t.Helper()
 	before := rootK3sListening(t)
 	if os.Getenv("HPCBURST_TEST_ROOT_K3S") == "1" && before != "6443,6444,10250" {
 		t.Fatalf("HPCBURST_TEST_ROOT_K3S=1, but the root k3s listens only on %q", before)
@@ -147,6 +170,15 @@ func newFrpsRigFrom(t *testing.T, base, nice int, frpsPath string, afterResolve 
 	cfg, err := WriteFrpsConfig(r.host, r.pw)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if edit != nil {
+		b, err := os.ReadFile(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(cfg, edit(b), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if r.bin, err = ResolveFrpsFile(frpsPath, DefaultFrpVersion); err != nil {
 		t.Fatal(err)
