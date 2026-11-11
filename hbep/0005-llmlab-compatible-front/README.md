@@ -121,9 +121,14 @@ Routes to LLMLab still pass through LLMLab's own cut and injection. The front ca
      - **circuit-breaker thresholds above the Instance's cap** (not in S13's config). Envoy's defaults of 1,024 connections, pending requests and requests sit below the cap of an 8-worker Instance, `maxNumSeqs` × workers (256 × 8 = 2,048 at a `maxNumSeqs` of 256), and its overflow 503s would count toward the Instance's pause;
      - the workers from its config file.
 
+     **Worker health behind Envoy, decided for beta** (science-agent decision, 11 Nov 2026; Inside an Instance, Worker health):
+     - Envoy health-checks each worker itself, and routes only to workers it holds healthy;
+     - with none healthy, it answers 503, and never routes to a worker it holds unhealthy;
+     - the agent reads each worker's health from Envoy and reports it;
+     - the front's cap and HBEP-7's worker rung act on that report.
+
      **Open (blocks beta):**
      - S2c (issue #62) measures its hit rate, balance across workers and latency on GPUs, beside vllm-router's `consistent_hash`, and names the builds it measures;
-     - **worker health behind Envoy:** active health checks, outlier detection, or the allocation agent probing each worker. With static workers and none of these, a dead worker keeps its arc of the ring, and its sessions get 503s until HBEP-7's worker rung restarts it;
      - membership changes and bounded loads (S13, open points);
      - Envoy under Apptainer in a job, since S13's aarch64 run was bare.
 
@@ -282,7 +287,19 @@ HBEP-7 runs the Instance's processes; this HBEP sets what the front needs from t
   - **A planned stop waits.** The router is stopped only once its Instance is no longer routable and has no request in flight, and KILL then follows the polite stop (L-3.3). For llm-d's EPP, TERM let the open stream finish (150 of 150 tokens) while new requests got HTTP 500, and TERM with KILL after 10 s cut the stream at 40 s.
   - **Recovery from a malfunction doesn't wait** for requests in flight. The Instance is made unroutable first, then HBEP-7's bounded router restart runs, and the cuts are counted.
   - **Not tested under TERM:** vllm-router alone, or Envoy alone, by S2. Envoy closes its listeners at once on shutdown.
-  - **The front's probe through Envoy** carries no `x-session-id`, so it reaches one worker picked at random. Until worker health behind Envoy is settled (open question 2), a passing probe doesn't show that every worker is healthy.
+  - **The front's probe through Envoy** carries no `x-session-id`, so it reaches one worker that Envoy holds healthy. A pass shows Envoy and at least one healthy worker. Each worker's health comes from the agent's report (Worker health, below), not from the probe.
+- **Worker health behind Envoy** (beta; open question 2). Envoy's own checks, in its configuration from the agent:
+  - **active HTTP health checks** of each worker's `/health`: every 5 s, a 2 s time-out, unhealthy after 2 failures, healthy again after 1 pass. `no_traffic_interval` is set to 5 s too, since its default of 60 s applies to a cluster that has had no traffic yet;
+  - **outlier detection:** a worker that answers 3 consecutive 5xx is ejected for 30 s. `max_ejection_percent` is 100, since its default of 10% would keep a failing worker in a small Instance;
+  - **no panic mode:** `healthy_panic_threshold` is 0%. Envoy's default of 50% would route to every worker, the unhealthy ones included, once fewer than half are healthy. With no healthy worker, Envoy answers 503 "no healthy upstream", which counts toward the Instance's pause (Load bound and cap, Pauses);
+  - **only healthy workers on the ring:** `ring_hash` then hashes `x-session-id` over the healthy workers only. A dead worker's sessions move to the others and lose their prefix cache, which is an accepted cost. The streams in flight on it are cut and counted, and none is replayed.
+
+  **The agent reads it** from Envoy's admin interface on a Unix socket of mode 0600 in the job's private temporary directory (`admin.address.pipe`; S13 checked that 1.40.2 accepts it). There's no TCP admin listener. Each report carries each worker's health and its ejections (Envoy's `/clusters`):
+  - **the front's cap** for the Instance is the engine's maximum concurrent sequences times its healthy workers, and an Instance with none isn't eligible;
+  - **HBEP-7's worker rung** restarts a worker that Envoy holds unhealthy for `health.failureThreshold` reports in a row, as for alpha's one worker;
+  - **a worker that rejoins** counts again from its first pass.
+
+  This replaces vllm-router's worker-list check for Envoy, whose workers come from its configuration file.
 - llm-d's router is the candidate for multi-node Instances (open question 2).
 
 **Beta: bulk paths on their own tunnel** (HBEP-6, open question 12, from spike S15). A generative Instance's non-streamed replies go to the Instance's second proxy, on a separate frpc with `tcpMux = false` and a second frps that the dial-home listener selects by the TLS server name `bulk.dial-home.hpcburst.invalid`. On the token streams' own tunnel, one 64 MiB reply stalled them by frp's stream window. The front's part of the contract is open and blocks beta: the request-time rule that picks the proxy, separate connection pools per traffic class, the second `CONNECT` target in Parameters, the bulk path's probe and its effect on the Instance's pause, and the listener's routing by server name in Listeners and Passthrough.
@@ -449,7 +466,12 @@ Against HBEP-4's managed fake, S4's fake Slurm and an engine double, then agains
   - **Restart:** after a router restart, its workers are back before the Instance is routable again.
   - **Bytes:** every valid S13 case reaches the engine through the router as its exact bytes, streamed and not (open question 2).
   - **Headers:** a client's `x-envoy-*` and `X-Forwarded-For` headers don't reach the router, and a worker refuses a request without the Instance key.
-  - **Acceptance:** S2c's measurements, and worker health behind Envoy, are the router's acceptance (open question 2).
+  - **Worker health:** with one worker killed while streams run, Envoy holds it unhealthy within about 10 s.
+    - Its streams in flight are cut and counted, and no new request reaches it.
+    - Its sessions' next requests go to the other workers, the agent's report shows it unhealthy, and the front's cap drops by one worker.
+    - The worker rung restarts it, and it rejoins after one passing check.
+    - With every worker killed, Envoy answers 503 and the Instance pauses, so it doesn't route to an unhealthy worker. A run with no stream in flight on the killed worker proves nothing here.
+  - **Acceptance:** S2c's measurements, the dead-worker run included, are the router's acceptance (open question 2).
 - **Conversation key.** Golden vectors: fixed `messages` arrays with hand-written JCS bytes and their SHA-256 from `sha256sum`, outside our code, for one system message, two system or developer messages, no system message, content as an array of parts, and a user message after an assistant one. The same opening with different later turns gives the same key; a different first user message gives another.
 - **`x-session-id`.** Every request reaching an engine carries it, with the client's header value or the opening key. A request without the header and without `messages` carries an `r-` key.
 - **Concurrency.** S10's hook-forced interleaving, ported: the serialised wrapper holds the bound, and the same scenario on the plain group breaks it, so the test can fail. A timing-based test proves nothing here, since a lucky schedule passes.
@@ -495,7 +517,7 @@ Against HBEP-4's managed fake, S4's fake Slurm and an engine double, then agains
   - against LLMLab: chat and streaming through an attached managed provider, and the inactive-model error without one.
 - **Beta:**
   - the Helios parts of alpha's criteria, on GH200 when it returns (owner decision, 11 Nov 2026);
-  - spike S2c (issue #62, one worker per GPU) decides the router default, Envoy `ring_hash` or the patched vllm-router, from hit rate, balance across workers and latency; the router delivers every valid S13 case as its exact bytes; and Instances with several workers run behind it with its conditions, worker health behind Envoy settled (open question 2; HBEP-7's beta criteria);
+  - spike S2c (issue #62, one worker per GPU) decides the router default, Envoy `ring_hash` or the patched vllm-router, from hit rate, balance across workers and latency; the router delivers every valid S13 case as its exact bytes; and Instances with several workers run behind it with its conditions, worker health behind Envoy passing its Test plan item (open question 2; HBEP-7's beta criteria);
   - retries before the first byte, with a budget and a guard, pass a fault-injection spike (open question 5);
   - LLMLab's overload status is read and matched (open question 6);
   - usage records go to HBEP-8's log;
@@ -511,7 +533,7 @@ Against HBEP-4's managed fake, S4's fake Slurm and an engine double, then agains
    - a cut stream that looks complete: judged by its endpoint's completion rule (Contract), never closed with `[DONE]`;
    - a request answered by a wider level than asked: seen in the headers;
    - counts that drift from the members': the wrapper compares KubeAI's total with its own at each placement and emits a `degraded` event on a difference;
-   - in beta, a router that lost its workers: for vllm-router, the agent's comparison of worker lists; for Envoy, the worker-health mechanism that open question 2 leaves open;
+   - in beta, a router that lost its workers: for vllm-router, the agent's comparison of worker lists; for Envoy, the agent's report of Envoy's per-worker health (Inside an Instance, Worker health);
    - a response without attribution headers: the synthetic request.
 4. **Provider limits:** lease ends (draining), and LLMLab's no-byte cut, stalls, shared capacity and model flapping on routes to LLMLab.
 5. **Capacity:** a full disk fails usage writes loudly, and the front keeps serving (Usage records; HBEP-8 sizes the files). At full membership, requests over every cap wait at the front up to `queueTimeout`, then get 503 with `Retry-After`. Below full membership, nothing holds the engine limit: S10c's peak after an unreplaced drain was 84–96 in flight against 48, and the engine queues the rest. The front's own limits are its CPU per token, its open connections and descriptors, and the path's bandwidth (HBEP-6, open question 11, from spike S14).
@@ -545,7 +567,7 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
 |---|---|---|---|
 | KubeAI CHWBL balancer | [balance_chwbl.go](https://raw.githubusercontent.com/kubeai-project/kubeai/main/internal/loadbalancer/balance_chwbl.go) in [kubeai-project/kubeai](https://github.com/kubeai-project/kubeai), commit `89dfff46` | Apache-2.0 | Copied code, unchanged, under `third_party/forked/kubeai/` (its `ORIGIN.md`), because it sits under Go `internal/`. The front's wrapper around it is ours (S10, S10b, S10c) |
 | xxhash | [cespare/xxhash](https://github.com/cespare/xxhash) v1.1.0 | MIT | Dependency of the copied balancer and of the ring replica |
-| Envoy | [envoyproxy/envoy](https://github.com/envoyproxy/envoy) 1.40.2, pinned release binaries for linux x86_64 and aarch_64, sha256 from its signed checksums | Apache-2.0 | Dependency in beta: the candidate router in front of an Instance's several workers, `ring_hash` on `x-session-id` (S13), until S2c decides |
+| Envoy | [envoyproxy/envoy](https://github.com/envoyproxy/envoy) 1.40.2, with its active health checking, outlier detection and panic threshold (`api/envoy/config/core/v3/health_check.proto`, `config/cluster/v3/outlier_detection.proto`, `config/cluster/v3/cluster.proto` at v1.40.2, read 2026-11-11), pinned release binaries for linux x86_64 and aarch_64, sha256 from its signed checksums | Apache-2.0 | Dependency in beta: the candidate router in front of an Instance's several workers, `ring_hash` on `x-session-id` (S13), until S2c decides |
 | vllm-router | [vllm-project/router](https://github.com/vllm-project/router) 0.1.17, patched code under `third_party/forked/vllm-router/` with an `ORIGIN.md`, its built binary's sha256 in a pins file (HBEP-15, Copied code) | Apache-2.0 | Fallback in beta: `consistent_hash` on `x-session-id` (S2 phases A and B), with a patch that forwards the client's bytes (S13), if S2c rules Envoy out |
 | vLLM | [vllm-project/vllm](https://github.com/vllm-project/vllm) | Apache-2.0 | Dependency (HBEP-9): the engine the front reaches; in beta its `VLLM_HTTP_TIMEOUT_KEEP_ALIVE` is set by the launch |
 | llm-d router endpoint picker + Envoy | [llm-d/llm-d-router](https://github.com/llm-d/llm-d-router); [Envoy](https://github.com/envoyproxy/envoy) | llm-d router Apache-2.0; Envoy Apache-2.0 | Candidate after alpha: the router for multi-node Instances, in file-discovery mode (S2) |
@@ -608,6 +630,7 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
 - 2026-11-10: the router default for beta: Envoy `ring_hash` as the candidate, the patched vllm-router as the fallback, from spike S13.
 - 2026-11-10: in beta, bulk paths go to a second tunnel (HBEP-6, open question 12).
 - 2026-11-11: alpha graduates on Athena alone; Helios's parts move to beta (owner decision).
+- 2026-11-11: worker health behind Envoy, decided for beta.
 
 ## Amendments
 
@@ -653,3 +676,8 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
 - **2026-11-10: bulk paths on their own tunnel** (Inside an Instance). An amendment with HBEP-6's of the same day, from spike S15 (issue #336, PR #348). In beta a generative Instance's non-streamed replies go to a second tunnel, and the front's part of that contract is listed as open, blocking beta. Before, every path shared the Instance's one tunnel.
 - **2026-11-11: alpha graduates on Athena alone** (Graduation criteria). An amendment by the owner's decision of 11 Nov 2026 ("Athena alone", recorded on #145 and approved on PR #373), with Helios GH200 down and no return date. Alpha's criteria now bind Athena, and their Helios parts not already met move to beta, to run when GH200 returns. A row on `plgrid-now` counts for `plgrid-gpu-a100` when it runs one job of one GPU within 1 h; the no-cut handover and S1's hour stay on `plgrid-gpu-a100`. Before, alpha needed both Helios and Athena.
 - **2026-11-11: a new registration takes the route away** (Reachability). An amendment with HBEP-6's of the same day, accepted by the science agent for #371. Each registration of an Instance's proxy starts a new epoch, announced by the front's plugin before frps makes it. A route proven in an earlier epoch no longer counts: the transport counts again only from a probe that passed in the new epoch, and a dial routed before it fails after frps's 200 with nothing written, resent once. A dial aborted because the registration epoch changed doesn't count toward the pause; the Instance takes no traffic until a re-probe passes, and a dial that fails for any other reason counts as before. Before, the transport counted as registered until `probeFailures` probes had failed, across any number of reconnects, and every failed dial counted toward the pause.
+- **2026-11-11: worker health behind Envoy** (Open questions 2; Inside an Instance; Test plan; Graduation criteria; Operational readiness 3; Prior art). An amendment, the science agent's decision for beta.
+  - **Envoy checks the workers itself:** it health-checks each one and ejects outliers, with panic mode off, so it routes only to healthy workers, or answers 503 with none.
+  - **The agent reports it:** it reads per-worker health from Envoy's admin on a private Unix socket, and the front's cap and HBEP-7's worker rung act on the report.
+
+  Before, worker health behind Envoy was open and blocked beta.
