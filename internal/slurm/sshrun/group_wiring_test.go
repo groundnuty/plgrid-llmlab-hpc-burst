@@ -2,9 +2,10 @@ package sshrun
 
 // Tests for how group.go is wired into the transport (issue 363): killMaster's
 // and Cancel's signals reach the sink, a refusal leaves the real master alone,
-// New refuses a kernel without pidfd, and a scan of the sources keeps
-// killGroup the only numeric signal. The guards themselves are in
-// group_test.go, which also has the helpers.
+// and a scan of the sources keeps killGroup the only numeric signal and the
+// barrier the only way to reap. The guards themselves are in group_test.go,
+// which also has the helpers; the stop, start and probe tests are in
+// group_startstop_test.go.
 
 import (
 	"bufio"
@@ -124,53 +125,28 @@ func TestCloseSignalsTheMastersGroupThroughTheSink(t *testing.T) {
 	}
 }
 
-// A guard that refuses the master's group stops killMaster at once: nothing is
-// sent, not another way either, and the master is still running afterwards.
-// The pin is moved one tick, so the start-time guard refuses.
-func TestCloseSendsNothingWhenAGuardRefusesTheMaster(t *testing.T) {
-	r := newRig(t)
-	s := r.transport("prov-a", exampleConfig, nil)
-	log, logs := capturedLog()
-	s.log = log
-	rec := &sinkRecorder{forward: killGroup}
-	s.signalGroup = rec.sink
-	if err := s.Connect(context.Background()); err != nil {
-		t.Fatal(err)
+// runStalledCheck starts s.check with a context that only the test ends, and
+// returns once the stall is OBSERVED (the fake logged "check-hang"): the cut
+// that follows can not come before the client stalled, however slow the
+// machine. cut ends the check's context; the result arrives on the channel.
+func runStalledCheck(t *testing.T, r *rig, s *SSH) (cut func(), result <-chan bool) {
+	t.Helper()
+	s.o.CheckTimeout = time.Minute // only the test's cut ends the check
+	r.hangChecks()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan bool, 1)
+	go func() { done <- s.check(ctx) }()
+	r.waitForLog("check-hang", 30*time.Second)
+	if n := len(fakeLogLines(r.dir, "check-hang")); n < 1 {
+		t.Fatalf("%d stalled checks were logged, want at least one", n)
 	}
-	s.mu.Lock()
-	m := s.master
-	s.mu.Unlock()
-	t.Cleanup(func() { // the guard refused, so end the master by hand, through its pidfd
-		endThroughPidfd(m.leader)
-		<-m.done
-	})
-	pgid := m.cmd.Process.Pid
-	m.leader.ticks++
-
-	closed := make(chan error, 1)
-	go func() { closed <- s.Close() }()
-	if err := within(t, "Close with a refused master", closed, 10*time.Second); err != nil {
-		t.Fatal(err)
-	}
-	if got := rec.got(); len(got) != 0 {
-		t.Errorf("a refused signal reached the sink: %+v", got)
-	}
-	if out := logs.String(); !strings.Contains(out, "guard="+guardStartTime) || !strings.Contains(out, fmt.Sprintf("pgid=%d", pgid)) {
-		t.Errorf("the log does not name the guard and the PGID: %s", out)
-	}
-	select {
-	case <-m.done:
-		t.Error("the master ended, although nothing was sent to it")
-	default:
-	}
-	if exited, err := waitReadable(m.leader.fd, 0); err != nil || exited {
-		t.Errorf("the master's pidfd shows an exit: exited=%v err=%v", exited, err)
-	}
+	return cancel, done
 }
 
-// Cancel's SIGKILL: a stalled "ssh -O check" is cut at CheckTimeout by one
-// group signal to the PGID of that very client (the sink reads its command
-// line, which names the check).
+// Cancel's SIGKILL: a stalled "ssh -O check", cut after its stall was
+// observed, is killed by one group signal to the PGID of that very client (the
+// sink reads its command line, which names the check).
 func TestStalledCheckIsKilledThroughTheSink(t *testing.T) {
 	r := newRig(t)
 	s := r.transport("prov-a", exampleConfig, nil)
@@ -186,20 +162,15 @@ func TestStalledCheckIsKilledThroughTheSink(t *testing.T) {
 	if got := rec.got(); len(got) != 0 {
 		t.Fatalf("the connect's own checks signalled: %+v", got)
 	}
-	// Only now the short bound: the connect above needed the default one on a
-	// slow machine (a race build re-executes a slow fake ssh).
-	s.o.CheckTimeout = time.Second
-	r.hangChecks()
-	done := make(chan error, 1)
-	go func() {
-		if s.check(context.Background()) {
-			done <- errors.New("a stalled check reported success")
-			return
+	cut, result := runStalledCheck(t, r, s)
+	cut()
+	select {
+	case ok := <-result:
+		if ok {
+			t.Fatal("a stalled check reported success")
 		}
-		done <- nil
-	}()
-	if err := within(t, "the stalled check", done, 20*time.Second); err != nil {
-		t.Fatal(err)
+	case <-time.After(20 * time.Second):
+		t.Fatal("the stalled check did not end after it was cut")
 	}
 	got := rec.got()
 	if len(got) != 1 || got[0].sig != syscall.SIGKILL || got[0].pgid <= 1 {
@@ -208,73 +179,87 @@ func TestStalledCheckIsKilledThroughTheSink(t *testing.T) {
 	if !strings.Contains(cmdline, "-O check") {
 		t.Errorf("the signalled group's leader was not the check client: %q", cmdline)
 	}
-	if n := len(fakeLogLines(r.dir, "check-hang")); n > 1 {
-		t.Errorf("%d checks stalled, want at most the one that was killed", n)
-	}
 }
 
-// When the guarded signal fails or is refused, Cancel returns its error and
-// sends nothing, and exec's WaitDelay ends the client through its own handle:
-// the check still returns, instead of waiting for a client that stalls for an
-// hour. No guard-bypassing fallback is involved: the sink is never called.
-func TestStalledCheckStillEndsWhenTheGroupSignalIsRefused(t *testing.T) {
+// A guard that refuses Cancel's group signal: Cancel sends nothing and returns
+// the refusal, and exec's WaitDelay ends the client through its own handle,
+// so the check still returns instead of waiting for a client that stalls for
+// an hour. The refusal is real: the start-time check cannot read /proc.
+func TestStalledCheckStillEndsWhenAGuardRefusesTheGroupSignal(t *testing.T) {
 	r := newRig(t)
 	s := r.transport("prov-a", exampleConfig, nil)
+	log, logs := capturedLog()
+	s.log = log
+	rec := &sinkRecorder{forward: killGroup}
+	s.signalGroup = rec.sink
 	if err := s.Connect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	s.o.CheckTimeout = time.Second // the connect above needed the default one
-	rec := &sinkRecorder{forward: func(int, syscall.Signal) error { return errors.New("example: refused by the sink") }}
-	s.signalGroup = rec.sink
-	s.log, _ = capturedLog()
-	r.hangChecks()
-	done := make(chan error, 1)
-	go func() {
-		if s.check(context.Background()) {
-			done <- errors.New("a stalled check reported success")
-			return
+	cut, result := runStalledCheck(t, r, s)
+	swap(t, &procRead, procFailing) // the stall was observed; now the check client's pin cannot be read
+	cut()
+	select {
+	case ok := <-result:
+		if ok {
+			t.Fatal("a stalled check reported success")
 		}
-		done <- nil
-	}()
-	if err := within(t, "the stalled check whose group signal failed", done, 20*time.Second); err != nil {
+	case <-time.After(30 * time.Second):
+		t.Fatal("the stalled check did not end, with its group signal refused")
+	}
+	if got := rec.got(); len(got) != 0 {
+		t.Errorf("a refused signal reached the sink: %+v", got)
+	}
+	if out := logs.String(); !strings.Contains(out, "guard="+guardCannotTell) {
+		t.Errorf("the refusal is not in the log: %s", out)
+	}
+}
+
+// A group signal that fails in the sink (it returns an error; it is called
+// once): Cancel returns that error, and WaitDelay still ends the client.
+func TestStalledCheckStillEndsWhenTheGroupSignalFails(t *testing.T) {
+	r := newRig(t)
+	s := r.transport("prov-a", exampleConfig, nil)
+	s.log, _ = capturedLog()
+	rec := &sinkRecorder{forward: func(int, syscall.Signal) error { return errors.New("example: failed in the sink") }}
+	s.signalGroup = rec.sink
+	if err := s.Connect(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	cut, result := runStalledCheck(t, r, s)
+	cut()
+	select {
+	case ok := <-result:
+		if ok {
+			t.Fatal("a stalled check reported success")
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the stalled check did not end, with its group signal failing")
 	}
 	if got := rec.got(); len(got) != 1 {
 		t.Errorf("the sink was called %d times, want the one attempt: %+v", len(got), got)
 	}
 }
 
-// A kernel without pidfd gets no transport: nothing could be pinned.
-func TestNewRefusesAKernelWithoutPidfd(t *testing.T) {
-	orig := pidfdOpen
-	pidfdOpen = func(int, int) (int, error) { return -1, syscall.ENOSYS }
-	t.Cleanup(func() { pidfdOpen = orig })
-	r := newRig(t)
-	_, err := New(Options{Name: "prov-a", Config: exampleConfig, ControlDir: r.ctl})
-	if err == nil || !strings.Contains(err.Error(), "pidfd") {
-		t.Errorf("New on a kernel without pidfd: got %v, want an error naming pidfd", err)
-	}
-}
-
 // The package's only numeric signal is killGroup, reached only through the
-// sink New sets, and the only other signal sent at all is the pin failure's,
-// through the leader's pidfd. A new
-// kill(2), a signal through an os.Process, a process lookup by PID or a pidfd
-// signal anywhere else, say an unguarded one beside a guarded call, fails this
-// scan. It reads the
-// package's non-test sources, so it needs no signal to run.
+// sink New sets. The pin failure's kill goes through the leader's own pidfd,
+// and only the barrier (groupLeader.reap), the failed pin's bounded cleanup
+// and the probe reap a child. A new kill(2), a signal through an os.Process, a
+// process lookup by PID, a pidfd signal or a reap anywhere else fails this
+// scan. It reads the package's non-test sources, so it needs no signal to run.
 func TestNoUnguardedSignalsInThePackage(t *testing.T) {
-	allowed := map[string][2]string{ // enclosing function -> the one call (package, name) it may make
-		"killGroup": {"unix", "Kill"},
-		"start":     {"unix", "PidfdSendSignal"},
+	// Where each name may appear: enclosing function -> its count.
+	identUses := map[string]map[string]int{
+		"killGroup":       {"New": 1},
+		"pidfdSendSignal": {"start": 1, "probePidfd": 1, "probeChild": 1},
 	}
+	// Calls named Wait on a command: only these functions reap.
+	waitIn := map[string]bool{"reap": true, "reapBounded": true, "start": true, "probePidfd": true}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	seen := map[string]int{}
-	// killGroup itself is named only where New makes it the default sink.
-	killGroupUses := map[string]int{}
+	uses := map[string]map[string]int{}
+	killCalls := 0
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
 			continue
@@ -289,37 +274,51 @@ func TestNoUnguardedSignalsInThePackage(t *testing.T) {
 				return true
 			}
 			ast.Inspect(fn, func(n ast.Node) bool {
-				if id, ok := n.(*ast.Ident); ok && id.Name == "killGroup" && fn.Name.Name != "killGroup" {
-					killGroupUses[fn.Name.Name]++
+				if id, ok := n.(*ast.Ident); ok {
+					if _, watched := identUses[id.Name]; watched && fn.Name.Name != id.Name {
+						if uses[id.Name] == nil {
+							uses[id.Name] = map[string]int{}
+						}
+						uses[id.Name][fn.Name.Name]++
+					}
 				}
 				sel, ok := n.(*ast.SelectorExpr)
 				if !ok {
 					return true
 				}
 				recv, member := types.ExprString(sel.X), sel.Sel.Name
+				if member == "Wait" && (recv == "cmd" || strings.HasSuffix(recv, ".cmd")) && !waitIn[fn.Name.Name] {
+					t.Errorf("%s: %s.Wait in %s reaps outside the barrier", name, recv, fn.Name.Name)
+				}
 				isSignal := (member == "Kill" || member == "Tgkill" || member == "Tkill" || member == "Killpg" || member == "PidfdSendSignal") && (recv == "syscall" || recv == "unix") ||
 					(member == "Kill" || member == "Signal") && strings.HasSuffix(recv, ".Process") ||
 					member == "FindProcess" && recv == "os"
 				if !isSignal {
 					return true
 				}
-				if allowed[fn.Name.Name] != [2]string{recv, member} {
-					t.Errorf("%s: %s.%s in %s signals outside the guarded function", name, recv, member, fn.Name.Name)
+				if fn.Name.Name == "killGroup" && recv == "unix" && member == "Kill" {
+					killCalls++
+					return true
 				}
-				seen[fn.Name.Name]++
+				t.Errorf("%s: %s.%s in %s signals outside the guarded function", name, recv, member, fn.Name.Name)
 				return true
 			})
 			return false
 		})
 	}
-	for fn, what := range allowed {
-		if seen[fn] != 1 {
-			t.Errorf("%s makes %d signal calls, want exactly the one %s.%s", fn, seen[fn], what[0], what[1])
-		}
+	if killCalls != 1 {
+		t.Errorf("killGroup makes %d kill calls, want exactly the one", killCalls)
 	}
-	for fn, n := range killGroupUses {
-		if fn != "New" || n != 1 {
-			t.Errorf("%s names killGroup %d times: only New may, once, as the default sink", fn, n)
+	for ident, want := range identUses {
+		for fn, n := range uses[ident] {
+			if want[fn] != n {
+				t.Errorf("%s names %s %d times, want %d: it may be named only in %v", fn, ident, n, want[fn], want)
+			}
+		}
+		for fn, n := range want {
+			if uses[ident][fn] != n {
+				t.Errorf("%s names %s %d times, want %d", fn, ident, uses[ident][fn], n)
+			}
 		}
 	}
 }

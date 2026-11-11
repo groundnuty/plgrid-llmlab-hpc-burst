@@ -23,12 +23,23 @@ package sshrun
 // A refused signal is never sent another way: no fallback to an unguarded
 // kill, and none to a signal on the leader alone.
 //
-// What stays open, stated plainly: there is no pidfd group signal, so the
-// last step is kill(-pgid), and the guards and that call are not one atomic
-// step. For the group to be the wrong one in that gap, the leader would have
-// to exit and be reaped, and its number be handed to a new process, all
-// within microseconds. The kernel allocates PIDs cyclically up to pid_max,
-// and keeps a PGID allocated for as long as any member of the group lives.
+// The reap barrier (PR 365 review round, 11 Nov 2026; the pattern of
+// internal/agent/procgroup): there is no pidfd group signal, so the last step
+// is kill(-pgid), and it must not run after the leader was reaped, when its
+// group's number may be handed to another process. Every reap of a pinned
+// leader therefore goes through groupLeader.reap: it waits for the exit
+// WITHOUT reaping (waitid with WNOWAIT, which leaves a zombie, so the number
+// stays ours), then sets reaping under the mutex every signal holds, and only
+// then reaps. A signal that passed its guards holds the mutex through its
+// kill, so a reap waits for it; one that comes after is refused. Whatever
+// signals the group does so while its leader is alive or an unreaped zombie.
+//
+// What stays outside this barrier: a kill by os/exec itself (see
+// group_pidfd.go), which signals one child and never a group; and a group
+// member that is left behind when the leader is gone, which no guard here
+// reaches (the master and the check client start no helper of their own, and
+// the private ssh configuration this transport writes sets no ProxyCommand or
+// ProxyJump).
 //
 // The start time is read as hostdial reads it (internal/hostdial/pidfd.go,
 // procStartTicks, PR 349): copied rather than imported, since hostdial is
@@ -45,6 +56,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -54,22 +66,6 @@ import (
 // after all four guards (TestNoUnguardedSignalsInThePackage keeps it so).
 func killGroup(pgid int, sig syscall.Signal) error {
 	return unix.Kill(-pgid, sig)
-}
-
-// pidfdOpen is the kernel's pidfd_open; a test replaces it to show that New
-// refuses a kernel with none.
-var pidfdOpen = unix.PidfdOpen
-
-// checkPidfd fails when this kernel gives no pidfd: a transport whose process
-// groups are signalled only behind a pinned pidfd refuses to run rather than
-// signal unpinned.
-func checkPidfd() error {
-	fd, err := pidfdOpen(os.Getpid(), 0)
-	if err != nil {
-		return fmt.Errorf("sshrun: the ssh process groups are signalled only behind a pinned pidfd, and this kernel gives none: %w", err)
-	}
-	_ = unix.Close(fd)
-	return nil
 }
 
 // The guards' names, as an error and the log carry them.
@@ -117,8 +113,9 @@ type groupLeader struct {
 	ticks  uint64 // the leader's start time, in clock ticks since boot
 	fd     int    // the leader's pidfd; closed by release, after the reap
 
-	mu     sync.Mutex // held across the checks and the signal, and by release
-	closed bool       // after release: fd is not ours any more
+	mu      sync.Mutex // held across the checks and the signal, and by markReaping and release
+	reaping bool       // set before any reap: no signal after it
+	closed  bool       // after release: fd is not ours any more
 }
 
 func newGroupLeader(log *slog.Logger, sink func(int, syscall.Signal) error) *groupLeader {
@@ -151,11 +148,19 @@ func (g *groupLeader) pin(pid, fd int) error {
 	return nil
 }
 
+// How long the cleanup of a start whose leader could not be pinned may take.
+// pinWaitDelay closes the leader's pipes that long after it ended, so a helper
+// that holds them cannot hold the cleanup; pinReapBound ends the wait itself.
+var (
+	pinWaitDelay = 2 * time.Second
+	pinReapBound = 5 * time.Second
+)
+
 // start starts cmd as the leader of a process group of its own, with a pidfd
 // from clone, and pins it. cmd.SysProcAttr's other fields are kept. A start
 // whose leader cannot be pinned is ended through its pidfd (the leader alone,
 // never a group) and refused, so nothing runs that could not be signalled
-// safely later.
+// safely later; the cleanup is bounded, so it can never hold startup up.
 func (g *groupLeader) start(cmd *exec.Cmd) error {
 	var attr syscall.SysProcAttr
 	if cmd.SysProcAttr != nil {
@@ -170,26 +175,82 @@ func (g *groupLeader) start(cmd *exec.Cmd) error {
 	}
 	pid := cmd.Process.Pid
 	if fd < 0 {
-		// Cannot happen on a kernel that passed checkPidfd: clone's pidfd
-		// (Linux 5.2) predates pidfd_open (5.3), and Go's Start fails when
-		// clone refuses the flag. Should it happen anyway, nothing here can
-		// signal the process safely: it is reaped in the background, and
+		// Cannot happen on a kernel that passed probePidfd: Go's Start fails
+		// when clone refuses the flag. Should it happen anyway, nothing here
+		// can signal the process safely: it is reaped in the background, and
 		// ends by itself or with this process (a master's parent-death
 		// signal).
 		err := fmt.Errorf("sshrun: the ssh process %d started without a pidfd from clone: refused, and never signalled", pid)
 		g.settle(err)
+		g.markReaping()
 		g.log.Error("an ssh process started without a pidfd from clone: refused, and never signalled", "pid", pid)
 		go func() { _ = cmd.Wait() }()
 		return err
 	}
-	if err := g.pin(pid, fd); err != nil {
-		g.log.Error("an ssh process could not be pinned: it is ended through its pidfd and refused", "pid", pid, "err", err)
-		_ = unix.PidfdSendSignal(fd, syscall.SIGKILL, nil, 0)
-		_ = cmd.Wait()
-		_ = unix.Close(fd)
-		return err
+	pinErr := g.pin(pid, fd)
+	if pinErr == nil {
+		return nil
 	}
-	return nil
+	// Not pinned, so no group signal can ever follow (the pin error refuses
+	// them all), and the leader alone is ended through its own pidfd. That
+	// leaves any descendant it started running: the master and the check
+	// client start none.
+	g.markReaping()
+	killErr := pidfdSendSignal(fd, syscall.SIGKILL, nil, 0)
+	ended := reapBounded(cmd)
+	_ = unix.Close(fd)
+	err := pinErr
+	switch {
+	case killErr != nil && !errors.Is(killErr, unix.ESRCH):
+		err = fmt.Errorf("%w; its SIGKILL through the pidfd failed (%v), so the ssh process may still run", pinErr, killErr)
+	case !ended:
+		err = fmt.Errorf("%w; it did not end within %s, so it may still run", pinErr, pinReapBound)
+	}
+	g.log.Error("an ssh process could not be pinned: it was refused", "pid", pid, "ended", ended, "err", err)
+	return err
+}
+
+// reapBounded reaps cmd, waiting at most pinReapBound and closing its pipes
+// pinWaitDelay after the process ended. It is for the leader of a start that
+// could not be pinned, which no group signal can reach. It reports whether
+// the process was reaped in time; the wait goes on in the background when it
+// was not.
+func reapBounded(cmd *exec.Cmd) bool {
+	if cmd.WaitDelay <= 0 || cmd.WaitDelay > pinWaitDelay {
+		cmd.WaitDelay = pinWaitDelay
+	}
+	done := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(done) }()
+	select {
+	case <-done:
+		return true
+	case <-time.After(pinReapBound):
+		return false
+	}
+}
+
+// markReaping is the barrier: it takes the mutex every signal holds, so it
+// waits for a signal that is under way, and sets reaping, which refuses every
+// later one. Every reap of a pinned leader comes after it.
+func (g *groupLeader) markReaping() {
+	g.mu.Lock()
+	g.reaping = true
+	g.mu.Unlock()
+}
+
+// reap is how a pinned leader is reaped: it waits for the exit without
+// reaping, sets reaping under the signal mutex, reaps (cmd.Wait) and releases
+// the pidfd. If the exit cannot be awaited that way, reaping is set all the
+// same and the process is waited for, so its group is not signalled from then
+// on: fail closed.
+func (g *groupLeader) reap(cmd *exec.Cmd) error {
+	if err := awaitExit(g.fd); err != nil {
+		g.log.Error("the exit of an ssh process could not be awaited without reaping it: its group is not signalled from now on", "pid", g.pid, "err", err)
+	}
+	g.markReaping()
+	err := cmd.Wait()
+	g.release()
+	return err
 }
 
 // release closes the pidfd; call it once the leader was reaped (after
@@ -243,12 +304,15 @@ func (g *groupLeader) checked(sig syscall.Signal) error {
 	if g.pinErr != nil {
 		return refuse(guardUnpinned, g.pinErr.Error())
 	}
+	if g.reaping {
+		return refuse(guardLeaderGone, "it is being reaped: its group's number may be handed out again")
+	}
 	if g.closed {
 		return refuse(guardLeaderGone, "its pidfd was closed after it was reaped")
 	}
 	// Guard 3: alive and our child, through the pidfd.
 	fds := []unix.PollFd{{Fd: int32(g.fd), Events: unix.POLLIN}}
-	n, err := retryEINTR(func() (int, error) { return unix.Poll(fds, 0) })
+	n, err := retryEINTR(func() (int, error) { return pidfdPoll(fds, 0) })
 	switch {
 	case err != nil:
 		return refuse(guardCannotTell, "poll on its pidfd failed: "+err.Error())
@@ -260,7 +324,7 @@ func (g *groupLeader) checked(sig syscall.Signal) error {
 	// WNOWAIT: look, do not reap; the process is Go's to wait for. ECHILD is
 	// the answer for a process that is not our child, or was reaped.
 	_, err = retryEINTR(func() (int, error) {
-		return 0, unix.Waitid(unix.P_PIDFD, g.fd, nil, unix.WEXITED|unix.WNOHANG|unix.WNOWAIT, nil)
+		return 0, pidfdWaitid(g.fd, unix.WEXITED|unix.WNOHANG|unix.WNOWAIT)
 	})
 	switch {
 	case errors.Is(err, unix.ECHILD):
@@ -285,15 +349,6 @@ func (g *groupLeader) checked(sig syscall.Signal) error {
 	return nil
 }
 
-func retryEINTR(f func() (int, error)) (int, error) {
-	for {
-		n, err := f()
-		if !errors.Is(err, syscall.EINTR) {
-			return n, err
-		}
-	}
-}
-
 // errProcGone: /proc has no row for the PID.
 var errProcGone = errors.New("no such process")
 
@@ -301,7 +356,7 @@ var errProcGone = errors.New("no such process")
 // from /proc/<pid>/stat: field 22, counted after the command name, which may
 // hold spaces and parentheses, so after its last ')'.
 func procStartTicks(pid int) (uint64, error) {
-	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	b, err := procRead("/proc/" + strconv.Itoa(pid) + "/stat")
 	switch {
 	case errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH):
 		return 0, errProcGone

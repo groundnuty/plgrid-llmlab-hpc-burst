@@ -37,7 +37,11 @@
 //     and the group is signalled only through one guarded function (group.go):
 //     never a PGID of 1 or less or this process's own group, and only while
 //     the leader, pinned by pidfd and start time when it started, is still
-//     alive, still our child, and still shows its start time.
+//     alive, still our child, and still shows its start time. Such a leader
+//     is reaped only after its exit was awaited without reaping it and a
+//     reaping flag was set under the mutex every signal holds, so no signal
+//     runs once its group's number may be handed out again. New refuses a
+//     kernel that lacks any call this needs, named by a probe on a real child.
 //
 // Errors never carry ssh's standard error, which names the host and the user;
 // they say what kind of failure it was.
@@ -134,10 +138,12 @@ type SSH struct {
 
 	// The process-group signals (group.go). signalGroup is killGroup; only
 	// tests set it, to record what would be sent. killGrace is how long a
-	// master gets after SIGTERM before SIGKILL. log is slog's default when nil.
-	signalGroup func(pgid int, sig syscall.Signal) error
-	killGrace   time.Duration
-	log         *slog.Logger
+	// master gets after SIGTERM before SIGKILL, and stopRetryPause how long a
+	// refused stop waits before its one retry. log is slog's default when nil.
+	signalGroup    func(pgid int, sig syscall.Signal) error
+	killGrace      time.Duration
+	stopRetryPause time.Duration
+	log            *slog.Logger
 
 	mu       sync.Mutex
 	master   *master
@@ -158,13 +164,17 @@ type master struct {
 	leader  *groupLeader // the master's pinned process group
 	done    chan struct{}
 	started time.Time
+	// stuck is set (under SSH.mu) when a stop of this live master was refused:
+	// it is still owned, and no second master starts until it is stopped.
+	stuck bool
 }
 
-// newMaster wraps a started master: done closes once it was reaped, and its
-// pidfd is released only then.
+// newMaster wraps a started master: done closes once it was reaped. The reap
+// goes through the leader's barrier (groupLeader.reap), which also releases
+// its pidfd.
 func newMaster(cmd *exec.Cmd, leader *groupLeader) *master {
 	m := &master{cmd: cmd, leader: leader, done: make(chan struct{}), started: time.Now()}
-	go func() { _ = cmd.Wait(); leader.release(); close(m.done) }()
+	go func() { _ = leader.reap(cmd); close(m.done) }()
 	return m
 }
 
@@ -214,7 +224,7 @@ func New(o Options) (*SSH, error) {
 	if err := checkConfigValues(o.Config); err != nil {
 		return nil, err
 	}
-	if err := checkPidfd(); err != nil {
+	if err := probePidfd(); err != nil {
 		return nil, err
 	}
 	if err := privateDir(o.ControlDir); err != nil {
@@ -225,7 +235,7 @@ func New(o Options) (*SSH, error) {
 		return nil, err
 	}
 	s := &SSH{o: o, socket: socket, config: config, sem: make(chan struct{}, o.MaxConcurrent),
-		signalGroup: killGroup, killGrace: 5 * time.Second}
+		signalGroup: killGroup, killGrace: 5 * time.Second, stopRetryPause: 200 * time.Millisecond}
 	s.life, s.stop = context.WithCancel(context.Background())
 	return s, nil
 }
@@ -337,7 +347,14 @@ func (s *SSH) ensureMaster(ctx context.Context) (*master, error) {
 		return nil, fmt.Errorf("%w: the transport is closed", slurm.ErrNotStarted)
 	}
 	if s.master != nil && s.master.alive() {
-		return s.master, nil
+		if !s.master.stuck {
+			return s.master, nil
+		}
+		// A master whose stop was refused is still ours and still running:
+		// try the stop again, and start no second master while it lives.
+		if err := s.stopMaster(); err != nil {
+			return nil, fmt.Errorf("%w: %v", slurm.ErrNotStarted, err)
+		}
 	}
 	s.retireMaster()
 	if time.Now().Before(s.nextTry) {
@@ -384,7 +401,7 @@ func (s *SSH) retireMaster() {
 	} else {
 		s.failures = 0
 	}
-	s.stopMaster()
+	_ = s.stopMaster() // the master is not running: nothing to refuse
 }
 
 // startMaster starts ssh -N and waits until its control socket answers. On
@@ -413,7 +430,12 @@ func (s *SSH) startMaster(ctx context.Context) (*master, string) {
 		case <-m.done:
 			return nil, "the connection failed: " + classify(stderr.String())
 		case <-wait.Done():
-			s.killMaster(m)
+			if err := s.stopStarted(m); err != nil {
+				// Still running, so still ours: ensureMaster stops it before
+				// it starts another.
+				m.stuck, s.master = true, m
+				return nil, "the connection did not come up within " + s.o.ConnectTimeout.String() + ", and its ssh could not be stopped"
+			}
 			return nil, "the connection did not come up within " + s.o.ConnectTimeout.String()
 		case <-time.After(100 * time.Millisecond):
 		}
@@ -439,8 +461,7 @@ func (s *SSH) check(ctx context.Context) bool {
 	if err := leader.start(cmd); err != nil { // its own group, pinned (group.go)
 		return false
 	}
-	defer leader.release() // after Wait: the client was reaped
-	return cmd.Wait() == nil
+	return leader.reap(cmd) == nil // behind the barrier; releases the pidfd
 }
 
 // logger is the transport's logger, slog's default when none was set.
@@ -464,39 +485,84 @@ func (s *SSH) failedClient(m *master) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.master == m && m.alive() {
-		s.stopMaster()
+		if err := s.stopMaster(); err != nil {
+			s.logger().Error("a master that does not answer could not be stopped; it stays owned, and no other starts until it is", "err", err)
+		}
 	}
 }
 
 // killMaster stops a master's process group: SIGTERM, then SIGKILL after
 // killGrace. Each signal goes through the master's pinned leader (group.go);
 // one a guard refuses is not sent and not retried another way, and killMaster
-// returns without waiting, since nothing it could still do would end the
-// master. The refusal is in the log. A master left running that way ends with
-// this process (its parent-death signal).
-func (s *SSH) killMaster(m *master) {
-	if m == nil || m.leader == nil || m.cmd.Process == nil || !m.alive() {
-		return
+// returns that refusal without waiting, since nothing it could still do would
+// end the master. A master whose leader already exited is gone, which is not
+// a failed stop.
+func (s *SSH) killMaster(m *master) error {
+	if m == nil || !m.alive() {
+		return nil
+	}
+	if m.leader == nil || m.cmd.Process == nil {
+		return errors.New("sshrun: the master has no pinned leader, so its group is not signalled")
 	}
 	if err := m.leader.signal(syscall.SIGTERM); err != nil {
-		return
+		return s.gone(m, err)
 	}
 	select {
 	case <-m.done:
-		return
+		return nil
 	case <-time.After(s.killGrace):
 	}
 	if err := m.leader.signal(syscall.SIGKILL); err != nil {
-		return
+		return s.gone(m, err)
 	}
 	<-m.done
+	return nil
 }
 
-// stopMaster stops the current master. The caller holds s.mu.
-func (s *SSH) stopMaster() {
-	s.killMaster(s.master)
+// gone turns a failed group signal into nil when it failed because the
+// master was already gone (its leader exited, or its group is empty), after
+// giving its reap a moment; any other failure is returned, the master may
+// still run.
+func (s *SSH) gone(m *master, err error) error {
+	if !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	select {
+	case <-m.done:
+	case <-time.After(s.killGrace):
+	}
+	return nil
+}
+
+// stopStarted stops a master by killMaster, and once more after
+// stopRetryPause when that was refused (a transient /proc read failure, say).
+// A nil result means it is gone.
+func (s *SSH) stopStarted(m *master) error {
+	err := s.killMaster(m)
+	if err != nil {
+		time.Sleep(s.stopRetryPause)
+		err = s.killMaster(m)
+	}
+	return err
+}
+
+// stopMaster stops the current master. The caller holds s.mu. When the stop is
+// refused twice it keeps the master and its socket, marks the master stuck
+// (ensureMaster tries again before it starts another) and returns an error
+// that names the guard and the PGID; dropping a live master would leave an
+// ssh running that nothing owns.
+func (s *SSH) stopMaster() error {
+	m := s.master
+	if m == nil {
+		return nil
+	}
+	if err := s.stopStarted(m); err != nil {
+		m.stuck = true
+		return fmt.Errorf("sshrun: the ssh master is still running and stays owned by this transport: %w", err)
+	}
 	s.master = nil
 	_ = os.Remove(s.socket)
+	return nil
 }
 
 // Connect implements slurm.Connector: it brings the master up when it is not
@@ -508,15 +574,17 @@ func (s *SSH) Connect(ctx context.Context) error {
 
 // Close stops the master and removes the configuration file. A connect in
 // progress is aborted rather than waited for. Later commands fail with
-// ErrNotStarted.
+// ErrNotStarted. When the master could not be stopped (a guard of group.go
+// refused its signals twice), Close returns an error naming the guard and the
+// PGID, and the master stays owned: calling Close again tries again.
 func (s *SSH) Close() error {
 	s.stop()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
-	s.stopMaster()
+	err := s.stopMaster()
 	_ = os.Remove(s.config)
-	return nil
+	return err
 }
 
 // Run implements slurm.Runner.

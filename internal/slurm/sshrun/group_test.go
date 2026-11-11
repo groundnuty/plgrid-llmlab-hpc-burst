@@ -127,6 +127,27 @@ func (c *child) finish() error {
 	return c.err
 }
 
+// swap replaces *p by v until the test ends, or until the returned function is
+// called. The kernel-call seams are package variables: tests that swap them
+// run one at a time.
+func swap[T any](t *testing.T, p *T, v T) (restore func()) {
+	t.Helper()
+	old := *p
+	*p = v
+	restore = func() { *p = old }
+	t.Cleanup(restore)
+	return restore
+}
+
+// procFailing is a procRead whose reads of /proc/<pid>/stat fail the way
+// descriptor exhaustion does.
+func procFailing(name string) ([]byte, error) {
+	if strings.HasPrefix(name, "/proc/") && strings.HasSuffix(name, "/stat") {
+		return nil, syscall.EMFILE
+	}
+	return os.ReadFile(name)
+}
+
 // refused asserts that signal(sig) on g was refused by the named guard, that
 // the sink saw nothing, and that the log names the guard and the PGID.
 func refused(t *testing.T, g *groupLeader, logs *logBuf, rec *sinkRecorder, guard string) error {
