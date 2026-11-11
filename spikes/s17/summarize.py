@@ -52,7 +52,7 @@ def write_csv(path, rows):
 
 def extract(raw_dir, rep_dir):
     os.makedirs(rep_dir, exist_ok=True)
-    meta, srows, trows, brows, lrows, qrows, crows, hrows = [], [], [], [], [], [], [], []
+    meta, srows, trows, brows, lrows, qrows, crows, hrows, krows = [], [], [], [], [], [], [], [], []
     for path in sorted(glob.glob(os.path.join(raw_dir, "*.json"))):
         with open(path) as fh:
             raw = json.load(fh)
@@ -90,11 +90,23 @@ def extract(raw_dir, rep_dir):
                 crows.append({"run_id": rid, "t": "%.6f" % c["t"], "role": role, "established": n})
         for t_ns, accepts, hellos in raw.get("listener_stats") or []:
             hrows.append({"run_id": rid, "t_ns": t_ns, "accepts": accepts, "hellos": hellos})
+        for k in raw.get("ssh_kex") or []:
+            first = (k.get("kex") or [{}])[0]
+            ins = [r for r in k.get("rekeys", []) if r["dir"] == "in"]
+            krows.append({"run_id": rid, "client": k.get("client", ""), "channel": k.get("channel", ""),
+                          "local_version": k.get("local_version", ""), "remote_version": k.get("remote_version", ""),
+                          "exchanges": k.get("exchanges", 0), "initiators": " ".join(k.get("initiator", [])),
+                          "kex_algorithm": first.get("algorithm", ""), "host_key": first.get("host_key", ""),
+                          "cipher_in": first.get("cipher_in", ""), "mac_in": first.get("mac_in", ""),
+                          "cipher_out": first.get("cipher_out", ""), "mac_out": first.get("mac_out", ""),
+                          "rekey_in_blocks": (k.get("rekey_in") or [""])[0], "rekey_out_blocks": (k.get("rekey_out") or [""])[0],
+                          "rekey_input_bytes": " ".join(str(r["input_bytes"]) for r in ins),
+                          "rekey_output_bytes": " ".join(str(r["output_bytes"]) for r in ins)})
     for name, rows in (("meta.csv", meta), ("streams.csv", srows), ("transfers.csv", trows), ("bulk.csv", brows),
-                       ("links.csv", lrows), ("queues.csv", qrows), ("conns.csv", crows), ("listener.csv", hrows)):
+                       ("links.csv", lrows), ("queues.csv", qrows), ("conns.csv", crows), ("listener.csv", hrows), ("ssh.csv", krows)):
         write_csv(os.path.join(rep_dir, name), rows)
-    print("%s: %d runs, %d stream requests, %d transfers, %d bulk requests, %d link connections, %d connection samples, %d listener rows" % (
-        rep_dir, len(meta), len(srows), len(trows), len(brows), len(lrows), len(crows), len(hrows)))
+    print("%s: %d runs, %d stream requests, %d transfers, %d bulk requests, %d link connections, %d connection samples, %d listener rows, %d ssh clients" % (
+        rep_dir, len(meta), len(srows), len(trows), len(brows), len(lrows), len(crows), len(hrows), len(krows)))
 
 
 # The large files are committed xz-compressed (compress); every reader takes either form.
@@ -221,6 +233,34 @@ def loads(root):
     return runs, out
 
 
+def ssh_clients(root):
+    """The relay clients' parsed debug logs (ssh.csv), by run_id."""
+    out = {}
+    for d in rep_dirs(root):
+        p = os.path.join(d, "ssh.csv")
+        if os.path.exists(p):
+            with open(p, newline="") as fh:
+                for r in csv.DictReader(fh):
+                    out.setdefault(r["run_id"], []).append(r)
+    return out
+
+
+def block_bytes(cipher):
+    """The cipher's block size, which the rekey limit counts in: 8 bytes for chacha20-poly1305, 16 for the AES modes."""
+    return 8 if cipher.startswith("chacha20") else 16
+
+
+def collections_counter(xs):
+    out = {}
+    for x in xs:
+        out[x] = out.get(x, 0) + 1
+    return out
+
+
+def human_bytes(n):
+    return "%d GiB" % (n >> 30) if n % (1 << 30) == 0 else "%d MiB" % (n >> 20) if n % (1 << 20) == 0 else "%d B" % n
+
+
 def pooled_gaps(lds):
     """The gaps of several single-scenario runs pooled: (reference gaps, gaps during a transfer), in ms."""
     ref, bulk = [], []
@@ -258,8 +298,9 @@ def verify(root):
     connection counts (links.csv) and queue statistics (queues.csv) and the frpc's established connections
     (conns.csv)."""
     runs, lds = loads(root)
+    sshc = ssh_clients(root)
     by_id = {r["run_id"]: r for r in runs}
-    bad, checked = [], {"cpu": 0, "transfer": 0, "validity": 0, "gap": 0, "many": 0, "tls": 0, "link": 0, "queue": 0, "conns": 0}
+    bad, checked = [], {"cpu": 0, "transfer": 0, "validity": 0, "gap": 0, "many": 0, "tls": 0, "link": 0, "queue": 0, "conns": 0, "ssh": 0}
     worst_cpu = 0.0
 
     def same(rid, key, got, want, tol=0.0):
@@ -343,6 +384,10 @@ def verify(root):
                     same(rid, "queue_%s_max_bytes" % dname, q["max_occupancy_bytes"], r.get("queue_%s_max_bytes" % dname))
                     same(rid, "queue_%s_seconds_full" % dname, round(float(q["seconds_full"]), 3), r.get("queue_%s_seconds_full" % dname), tol=0.0005)
                     checked["queue"] += 1
+            ks = [k for k in sshc.get(rid, []) if k["channel"] == "serving"]
+            if ks:
+                same(rid, "ssh_key_exchanges", ks[0]["exchanges"], r.get("ssh_key_exchanges"))
+                checked["ssh"] += 1
             for role in ("frpc", "frpc-bulk"):
                 want = r.get("conns_max_" + role)
                 if want not in ("", None):
@@ -502,6 +547,43 @@ def tables(root):
                 len(v), len(rows), rng([num(r.get("cpu_bulk_front")) for r in ok], "{:.3f}"),
                 rng([num(r.get("tls_accepts_per_s")) for r in ok], "{:.2f}"), rng([num(r.get("tls_hellos_per_s")) for r in ok], "{:.2f}"),
                 q3(ttfb), f1(analysis.pct(tot, 50)), f1(analysis.pct(tot, 99)), q3(gaps), rng([num(r.get("host_busy_bulk")) for r in ok], "{:.2f}")))
+    rk = group("rekey")
+    if rk:
+        sc = ssh_clients(root)
+        p("\n### The relay's ssh and its rekeys (layout (c), four downloads at once, through real ssh)\n")
+        p("The review of PR 416 found an all-stream stall at 1 GiB in the ssh runs and read it as OpenSSH's default rekey. These runs log it: each relay client ran with `ssh -v`, and its debug log's key exchanges and negotiated algorithms are parsed (nothing else of the log is kept: it names the host and the user). *default* is the relay's ssh as `sshrun` starts it; *RekeyLimit 256M* adds `-o RekeyLimit=256M`. Downloads of 40 MiB (160 MiB a batch, so the rekey points fall inside batches, not at their ends) or 64 MiB, nine batches of four.\n")
+        p("| run | repetition | OpenSSH (client / server) | key exchange | host key | cipher, MAC (receive / send) | rekey limit | key exchanges on the serving relay | started by | bytes the connection had received at each rekey, MiB |")
+        p("|---|---:|---|---|---|---|---|---:|---|---|")
+        rows = sorted(rk, key=lambda r: (r["variant"], r["rep"]))
+        for r in rows:
+            ks = [k for k in sc.get(r["run_id"], []) if k["channel"] == "serving"]
+            if not ks:
+                p("| %s | %s | (no ssh log) | | | | | | | |" % (r["variant"], r["rep"]))
+                continue
+            k = ks[0]
+            blocks = int(k["rekey_in_blocks"]) if k["rekey_in_blocks"] else 0
+            lim = human_bytes(blocks * block_bytes(k["cipher_in"])) if blocks else "-"
+            ini = collections_counter(k["initiators"].split())
+            p("| %s | %s | %s / %s | %s | %s | %s, %s / %s, %s | %d blocks of %d B = %s | %s | %s | %s |" % (
+                r["variant"], r["rep"], k["local_version"].split()[0], k["remote_version"].split()[0], k["kex_algorithm"], k["host_key"],
+                k["cipher_in"], k["mac_in"], k["cipher_out"], k["mac_out"], blocks, block_bytes(k["cipher_in"]), lim, k["exchanges"],
+                ", ".join("%s %d" % (a, n) for a, n in sorted(ini.items())),
+                ", ".join("%.0f" % (int(x) / (1 << 20)) for x in k["rekey_input_bytes"].split()) or "-"))
+        p("\n### All-stream stalls against the rekeys\n")
+        p("An all-stream stall is a gap of more than 100 ms in at least 6 of the 8 token streams, starting within 0.3 s of one another, while the transfers ran. Its bytes are the transfers' payload at the client when it began (the steps give a range, shown as the midpoint); the rekey's are what the ssh connection had received when its new keys took effect, which runs ahead of the client by what sits in the buffers between (frp's 6 MiB window, the relay's, the sockets'). A stall matches a rekey when its bytes lie from 16 MiB below the rekey's to 2 MiB above (`analysis.match_rekeys`).\n")
+        p("| run | repetition | valid | rekeys | all-stream stalls | rekeys with a stall | stalls with no rekey | rekey at MiB (connection) → stall at MiB (payload), gap per stream ms |")
+        p("|---|---:|---|---:|---:|---:|---:|---|")
+        for r in rows:
+            L = lds.get(r["run_id"])
+            ks = [k for k in sc.get(r["run_id"], []) if k["channel"] == "serving"]
+            if L is None or not ks:
+                continue
+            stalls = analysis.all_stream_stalls(L)
+            rb = [int(x) for x in ks[0]["rekey_input_bytes"].split()]
+            pairs, lonely, free = analysis.match_rekeys(stalls, rb)
+            p("| %s | %s | %s | %d | %d | %d | %d | %s |" % (
+                r["variant"], r["rep"], r.get("valid"), len(rb), len(stalls), len(pairs), len(free),
+                "; ".join("%.0f → %.0f, %d–%d" % (x / (1 << 20), (st["moved_lo"] + st["moved_hi"]) / 2 / (1 << 20), st["min_ms"], st["max_ms"]) for x, st in pairs) or "-"))
     p("\n### Tunnel losses\n")
     p("Summed over all %d runs: frps's lists (a proxy not online or registered again), frpc logins beyond the first (every frpc), relay sessions beyond the first, and heartbeat-timeout lines.\n" % len(runs))
     s = lambda c: sum(int(float(r[c])) for r in runs if r.get(c) not in (None, ""))  # noqa: E731

@@ -9,7 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -48,6 +51,9 @@ func runOwner(args []string) error {
 	sshConfig := fs.String("ssh-config", "", "ssh mode: the ssh configuration for the login node's sshd, through the link (ssh_config form)")
 	nodeReady := fs.String("node-ready", "", "ssh mode: the ssh node's ready file (each Allocation's job, directory and UID, and the agent's path)")
 	sshControl := fs.String("ssh-control-dir", "", "ssh mode: a private directory for the relay clients' configuration file")
+	var sshOpts optList
+	fs.Var(&sshOpts, "ssh-opt", "ssh mode: an extra ssh option for every relay client, as ssh -o takes it (repeatable), e.g. RekeyLimit=256M (issue #413's rekey group)")
+	sshDebug := fs.String("ssh-debug-dir", "", "ssh mode: a private directory where every relay client writes its debug log (ssh -v -E): the negotiated algorithms and each key exchange. Logs name the host and the user: never committed, only parsed")
 	logPath := fs.String("log", "", "log file")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -123,7 +129,7 @@ func runOwner(args []string) error {
 		for _, t := range rd.Tunnels {
 			o.Want(hostdial.Target{
 				Tag: t.Tag, JobID: t.JobID, AgentPath: rd.Agent, AllocDir: t.AllocDir, UID: t.UID, Login: relay.Login(),
-				Jobs: jobs, Gen: "1", Command: relay.Command, Stderr: sshrun.Stderr, Describe: sshrun.Classify,
+				Jobs: jobs, Gen: "1", Command: sshCommand(relay.Command, sshOpts, *sshDebug), Stderr: sshrun.Stderr, Describe: sshrun.Classify,
 			})
 		}
 	} else {
@@ -238,4 +244,34 @@ type sshReady struct {
 		JobID    string `json:"job"`
 		AllocDir string `json:"alloc_dir"`
 	} `json:"tunnels"`
+}
+
+// optList is a repeatable string flag.
+type optList []string
+
+func (o *optList) String() string     { return strings.Join(*o, ",") }
+func (o *optList) Set(v string) error { *o = append(*o, v); return nil }
+
+// sshCommand wraps the relay's command builder: each ssh client it makes gets, right after the program's name
+// and before the relay's own arguments, the debug flags (-v with its log in debugDir, one file per start, which
+// OpenSSH writes with mode 600) and the extra -o options. Options given first win in ssh, so -v takes the log
+// level before the relay's -o LogLevel=ERROR does, and an option here is not overridden by the relay's. The
+// relay's own arguments are not changed.
+func sshCommand(base func(string) (*exec.Cmd, error), opts []string, debugDir string) func(string) (*exec.Cmd, error) {
+	var seq atomic.Int64
+	return func(line string) (*exec.Cmd, error) {
+		cmd, err := base(line)
+		if err != nil || (len(opts) == 0 && debugDir == "") {
+			return cmd, err
+		}
+		var extra []string
+		if debugDir != "" {
+			extra = append(extra, "-v", "-E", filepath.Join(debugDir, fmt.Sprintf("ssh-%03d.log", seq.Add(1))))
+		}
+		for _, o := range opts {
+			extra = append(extra, "-o", o)
+		}
+		cmd.Args = append(append([]string{cmd.Args[0]}, extra...), cmd.Args[1:]...)
+		return cmd, nil
+	}
 }
