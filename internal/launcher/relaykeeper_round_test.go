@@ -131,31 +131,47 @@ func TestTheKeepersPingMustBeTheKeepersOwn(t *testing.T) {
 
 // keeperFdInodes reads the snapshot again once when a descriptor closes in the middle of it, and
 // refuses when that happens again: a closing descriptor could hide a listener duplicated into a
-// new one (the delta review of PR 361).
+// new one (the delta review of PR 361). It runs on a plain bystander, and on one that also holds a
+// descriptor it inherited, as a CI runner leaks some into the test process and so into its
+// children (descriptors 142 and 145 on GitHub's runners, PR 361's CI).
 func TestKeeperFdInodesRetriesAClosedDescriptorOnce(t *testing.T) {
-	// Another process's descriptors: reading this process's own would meet the directory
-	// descriptor ReadDir itself opened, closed by the time its link is read. The bystander is
-	// read only once it has settled: a freshly exec'd sleep runs its dynamic loader first,
-	// which opens and closes descriptor 3 for each library, and a snapshot taken then really
-	// does see a descriptor close (CI, run 43082006242, on PR 361's second main merge).
-	other := startBystander(t, "sleep", "300").Process.Pid
-	settled(t, other)
-	read := fdReadlink
-	t.Cleanup(func() { fdReadlink = read })
-	calls := 0
-	fdReadlink = func(p string) (string, error) {
-		calls++
-		if calls == 1 {
-			return "", fs.ErrNotExist
-		}
-		return read(p)
+	for _, inherited := range []bool{false, true} {
+		t.Run(map[bool]string{false: "plain", true: "with an inherited descriptor"}[inherited], func(t *testing.T) {
+			// Another process's descriptors: reading this process's own would meet the
+			// directory descriptor ReadDir itself opened, closed by the time its link is read.
+			// The bystander is read only once it has settled: a freshly exec'd sleep runs its
+			// locale setup first, which opens and closes a descriptor for each locale file, and
+			// a snapshot taken then really does see a descriptor close (CI, run 43082006242).
+			other := startSleeper(t, inherited)
+			settled(t, other)
+			read := fdReadlink
+			t.Cleanup(func() { fdReadlink = read })
+			calls := 0
+			fdReadlink = func(p string) (string, error) {
+				calls++
+				if calls == 1 {
+					return "", fs.ErrNotExist
+				}
+				return read(p)
+			}
+			if _, err := keeperFdInodes(other); err != nil {
+				t.Errorf("a descriptor that closed once: %v; want the snapshot read again, and passing", err)
+			}
+			fdReadlink = func(string) (string, error) { return "", fs.ErrNotExist }
+			if _, err := keeperFdInodes(other); err == nil || !strings.Contains(err.Error(), "changed while they were read, twice") {
+				t.Errorf("descriptors closing twice: %v; want refused", err)
+			}
+		})
 	}
-	if _, err := keeperFdInodes(other); err != nil {
-		t.Errorf("a descriptor that closed once: %v; want the snapshot read again, and passing", err)
-	}
-	fdReadlink = func(string) (string, error) { return "", fs.ErrNotExist }
-	if _, err := keeperFdInodes(other); err == nil || !strings.Contains(err.Error(), "changed while they were read, twice") {
-		t.Errorf("descriptors closing twice: %v; want refused", err)
+}
+
+// settled holds for a bystander that keeps a descriptor it inherited: it settles on stability,
+// never on a fixed set of descriptors, since the set a child gets is not the test's to choose.
+func TestSettledAcceptsAnInheritedDescriptor(t *testing.T) {
+	pid := startSleeper(t, true)
+	snap := settled(t, pid)
+	if _, ok := snap["3"]; !ok {
+		t.Errorf("the settled bystander's descriptors %v lack the inherited descriptor 3", snap)
 	}
 }
 
@@ -233,41 +249,93 @@ func TestRestoreTakesTheKeepersLockFirst(t *testing.T) {
 	}
 }
 
-// settled waits, within 10 s, until pid is asleep (state S) holding exactly descriptors 0, 1
-// and 2, the state a started sleep keeps for the rest of its life, read twice in a row.
-func settled(t *testing.T, pid int) {
+// startSleeper starts "sleep 300" as a bystander. With inherited set, it also hands the sleep an
+// open descriptor 3 (exec.Cmd.ExtraFiles, not close-on-exec in the child), as a CI runner's leaked
+// descriptors reach every child of the test process.
+func startSleeper(t *testing.T, inherited bool) int {
 	t.Helper()
-	look := func() (string, bool) {
+	if !inherited {
+		return startBystander(t, "sleep", "300").Process.Pid
+	}
+	f, err := os.CreateTemp(t.TempDir(), "inherited")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+	cmd := exec.Command("sleep", "300")
+	cmd.ExtraFiles = []*os.File{f}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(done) }()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill() // this test's own child, through its handle
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	})
+	return cmd.Process.Pid
+}
+
+// settled waits, within 10 s, until pid is asleep (state S) and three snapshots of its
+// descriptors, 20 ms apart, are identical: the same descriptors, linked to the same targets. That
+// is a settled sleep, whatever descriptors it inherited (a CI runner leaks some into its tests).
+// It returns the settled snapshot.
+func settled(t *testing.T, pid int) map[string]string {
+	t.Helper()
+	snapshot := func() (map[string]string, string, bool) {
 		b, err := os.ReadFile(procPath(pid, "stat"))
 		if err != nil {
-			return err.Error(), false
+			return nil, err.Error(), false
 		}
 		st, err := parseStat(string(b))
 		if err != nil {
-			return err.Error(), false
+			return nil, err.Error(), false
 		}
 		fds, err := os.ReadDir(procPath(pid, "fd"))
 		if err != nil {
-			return err.Error(), false
+			return nil, err.Error(), false
 		}
-		var names []string
+		snap := map[string]string{}
 		for _, fd := range fds {
-			names = append(names, fd.Name())
+			l, err := os.Readlink(procPath(pid, "fd/"+fd.Name()))
+			if err != nil {
+				return nil, fmt.Sprintf("fd %s: %v", fd.Name(), err), false
+			}
+			snap[fd.Name()] = l
 		}
-		got := strings.Join(names, ",")
-		return fmt.Sprintf("state %c, descriptors %s", st.State, got), st.State == 'S' && got == "0,1,2"
+		return snap, fmt.Sprintf("state %c, descriptors %v", st.State, snap), st.State == 'S'
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		d1, ok1 := look()
-		if ok1 {
-			if _, ok2 := look(); ok2 {
-				return
+	same := func(a, b map[string]string) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for k, v := range a {
+			if b[k] != v {
+				return false
 			}
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the bystander pid %d did not settle within 10 s: %s", pid, d1)
+		return true
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	var last string
+	for time.Now().Before(deadline) {
+		first, d, ok := snapshot()
+		last = d
+		stable := ok
+		for i := 0; stable && i < 2; i++ {
+			time.Sleep(20 * time.Millisecond)
+			next, d, ok := snapshot()
+			last = d
+			stable = ok && same(first, next)
+		}
+		if stable {
+			return first
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	t.Fatalf("the bystander pid %d did not settle within 10 s: %s", pid, last)
+	return nil
 }
