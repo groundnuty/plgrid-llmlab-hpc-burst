@@ -46,7 +46,7 @@ spec:
     # block, cited on each value below. The per-user limits are typed in qos (plgrid-now), which this
     # partition names: gpusPerNode stays the node's 8, and the most GPUs one Allocation may request is the
     # smaller of that and the QOS's maxGpusPerUser, 1 (HBEP-4, Submission, GPU sizing and QOS limits).
-    # imageFormat is absent as well: probe 2 ran on plgrid-gpu-a100 only.
+    # imageFormat is sandbox, as for plgrid-gpu-a100, the same node type; no engine has run on this partition, so the first run there is the measurement (issue #376). athena-now.yaml is its profile for short test deployments.
     - name: plgrid-now # spec.profile.facts.partitions[name=plgrid-now].name
       gpuModel: A100 # HBEP-4 fixes the string. facts.partitions[name=plgrid-now].gres is "gpu:a100:8", the same node type as plgrid-gpu-a100 (facts.hardware.node_documented.value.accelerator, "8x NVIDIA A100-SXM4-40GB")
       cpuArch: x86_64 # facts.partitions[name=plgrid-now].arch
@@ -54,6 +54,7 @@ spec:
       gpusPerNode: 8 # facts.partitions[name=plgrid-now].gres, "gpu:a100:8": the field is a node fact. The per-user cap of one GPU (facts.slurm.qos.value[name=plgrid-now].max_tres_per_user, "cpu=16,gres/gpu=1,mem=125G") is typed in qos below, maxGpusPerUser, and the most GPUs one Allocation may request is the smaller of the two, 1 (`@hpc-burst-science-agent`, 1 Nov 2026). PartitionTooShort, not the sizing, keeps Instances off this partition (see above)
       cpusPerGpu: 16 # facts.hardware.node_documented.value.proportional_cpus_per_gpu, the same node type as plgrid-gpu-a100
       memPerGpu: 128000Mi # facts.hardware.node_documented.value.proportional_ram_per_gpu_mb, 128000 (the node's 1024000 divided by its 8 GPUs), as for plgrid-gpu-a100
+      imageFormat: sandbox # facts.containers.apptainer_compute_nodes.value.plgrid-gpu-a100 (S1 probe 2: a SIF fails, a sandbox runs), the same node type as plgrid-gpu-a100 (facts.partitions[name=plgrid-now].gres is "gpu:a100:8"). Probe 2 ran on plgrid-gpu-a100 only, so the first run on plgrid-now is the measurement (issue #376, `@hpc-burst-science-agent`, 11 Nov 2026)
       qos: plgrid-now # facts.partitions[name=plgrid-now].qos, "plgrid-now" (scontrol show partition): the QOS Slurm applies to every job on this partition; its limits are typed in qos below
 
   # The QOSes that a partition's qos or a Provider's qos names, with the limits the plan reads (HBEP-4,
