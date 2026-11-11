@@ -232,7 +232,7 @@ func TestSupervisorRefusesAReplacedFrpsAtRestart(t *testing.T) {
 	path := filepath.Join(shortDir(t), "frps")
 	copyFile(t, frps, path, 0o755)
 	f.st.Frps = &FrpsRunConfig{Binary: path, Version: DefaultFrpVersion}
-	if _, err := writeFrpsFiles(f.l.host(f.ports)); err != nil {
+	if _, err := writeFrpsFiles(f.l.host(f.ports), ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.l.saveState(f.st); err != nil {

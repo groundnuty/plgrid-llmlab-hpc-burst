@@ -334,7 +334,13 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 		if frpsRun != nil {
 			// frps's web password and configuration, both mode 600 (HBEP-6), before the supervisor
 			// that starts frps; a password that exists is kept, so the controller's copy stays valid.
-			if _, err := writeFrpsFiles(l.host(ports)); err != nil {
+			// With a front, frps posts each admitted registration to the front's plugin as well, on
+			// the front's health address (HBEP-6, Admission; #371).
+			frontAddr := ""
+			if frontRun != nil {
+				frontAddr = ports.FrontHealthAddr()
+			}
+			if _, err := writeFrpsFiles(l.host(ports), frontAddr); err != nil {
 				return abort("frps", err)
 			}
 		} else {

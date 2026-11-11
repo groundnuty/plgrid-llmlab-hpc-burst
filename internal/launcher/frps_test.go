@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -69,6 +70,83 @@ func TestRenderFrpsConfigHasEverythingTheHBEPFixes(t *testing.T) {
 	for _, absent := range []string{"auth.token", "auth.oidc", "Ping", "NewWorkConn", "NewUserConn"} {
 		if strings.Contains(got, absent) {
 			t.Errorf("the configuration mentions %q", absent)
+		}
+	}
+}
+
+// TestRenderFrpsConfigWithFrontAddsTheFrontsPluginSecond: with a front, frps's configuration is
+// the same block plus a second server plugin, the front's, after the controller's: at the front's
+// health address, on agentapi.FrontFrpsPluginPath, for NewProxy and CloseProxy only (#371; HBEP-6,
+// Admission). frps calls plugins in file order, so the controller's admission comes first. Without
+// a front, nothing of it is written (TestRenderFrpsConfigHasEverythingTheHBEPFixes). An address
+// that is not 127.0.0.1:<port> is refused.
+func TestRenderFrpsConfigWithFrontAddsTheFrontsPluginSecond(t *testing.T) {
+	plain, err := RenderFrpsConfig(frpsTestHost(), testWebPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := RenderFrpsConfigWithFront(frpsTestHost(), testWebPassword, "127.0.0.1:29248")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(got, plain) {
+		t.Fatalf("the front's rendering does not start with the plain one:\n%s", got)
+	}
+	var tail []string
+	for _, l := range strings.Split(strings.TrimPrefix(got, plain), "\n") {
+		if l != "" && !strings.HasPrefix(l, "#") {
+			tail = append(tail, l)
+		}
+	}
+	want := []string{
+		`[[httpPlugins]]`,
+		`name = "hpcburst-front"`,
+		`addr = "127.0.0.1:29248"`,
+		`path = "/frp/v1/front"`,
+		`ops = ["NewProxy", "CloseProxy"]`,
+	}
+	if strings.Join(tail, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("after the controller's plugin:\ngot:\n%s\nwant:\n%s", strings.Join(tail, "\n"), strings.Join(want, "\n"))
+	}
+	if strings.Contains(plain, "hpcburst-front") || strings.Contains(plain, agentapi.FrontFrpsPluginPath) {
+		t.Errorf("the plain rendering names the front's plugin:\n%s", plain)
+	}
+	for _, bad := range []string{"", "localhost:29248", "0.0.0.0:29248", "127.0.0.1", "127.0.0.1:0", "127.0.0.1:70000", "[::1]:29248", `127.0.0.1:2924"8`} {
+		if out, err := RenderFrpsConfigWithFront(frpsTestHost(), testWebPassword, bad); err == nil {
+			t.Errorf("front address %q rendered without an error:\n%s", bad, out)
+		}
+	}
+}
+
+// TestFrpsRealVerifiesTheConfigWithTheFrontsPlugin: the pinned frps's own strict check accepts
+// the file with the front's plugin.
+func TestFrpsRealVerifiesTheConfigWithTheFrontsPlugin(t *testing.T) {
+	frps, _ := testenv.FrpBinaries(t)
+	h := agentapi.Host{StateDir: shortDir(t), PortBase: frpsRigBase}
+	path, err := WriteFrpsConfigWithFront(h, testWebPassword, "127.0.0.1:29248")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(frps, "verify", "-c", path).CombinedOutput(); err != nil {
+		t.Fatalf("frps verify rejects the file with the front's plugin: %v\n%s", err, out)
+	}
+}
+
+// TestWriteFrpsFilesWritesTheFrontsPluginOnlyWithAFront: up's writer of frps's files, with the
+// front's health address and without one.
+func TestWriteFrpsFilesWritesTheFrontsPluginOnlyWithAFront(t *testing.T) {
+	h := agentapi.Host{StateDir: shortDir(t), PortBase: 29244}
+	for _, c := range []struct {
+		front string
+		want  bool
+	}{{"127.0.0.1:29248", true}, {"", false}} {
+		path, err := writeFrpsFiles(h, c.front)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := os.ReadFile(path)
+		if got := strings.Contains(string(b), `name = "hpcburst-front"`) && strings.Contains(string(b), `addr = "`+c.front+`"`); got != c.want {
+			t.Errorf("front %q: the front's plugin is written %v, want %v:\n%s", c.front, got, c.want, b)
 		}
 	}
 }
