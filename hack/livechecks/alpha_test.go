@@ -2,7 +2,8 @@ package livechecks
 
 // The alpha rows of hack/live-checks.sh (issue #194): alpha-athena-handover,
 // alpha-helios-nooverlap, tunnel-hour-helios/-athena and gpu-accounting-helios/
-// -athena, with the aliases tunnel-hour and gpu-accounting. The script's side is
+// -athena, with the aliases tunnel-hour and gpu-accounting, which stand for their Athena rows alone since alpha graduated
+// on Athena (issue #386; beta_rows_test.go). The script's side is
 // tested against the stub cluster, as the other rows are; the rows' own tests are
 // run for real in dry mode (alpha_dry_test.go).
 
@@ -166,7 +167,7 @@ func TestListNamesTheAlphaRowsAndTheAliases(t *testing.T) {
 	for _, s := range alphaShapes {
 		w.contains(res, s.row+"  cluster  ready")
 	}
-	w.contains(res, "tunnel-hour  alias  runs tunnel-hour-helios, tunnel-hour-athena in turn", "gpu-accounting  alias  runs gpu-accounting-helios, gpu-accounting-athena in turn")
+	w.contains(res, "tunnel-hour  alias  runs tunnel-hour-athena in turn", "gpu-accounting  alias  runs gpu-accounting-athena in turn")
 }
 
 // The script's cluster shapes and the package's rows are one fact each: a partition, a QOS and a GPU count
@@ -401,10 +402,13 @@ func TestAnAlphaRunBuildsBeforeTheSlotAndGivesTheTestItsEnvironment(t *testing.T
 
 func (s alphaShape) hasQOS() bool { return s.slot != "" }
 
-func TestTheAliasesRunTheirRowsOneAfterTheOther(t *testing.T) {
-	for alias, rows := range map[string][]string{
-		"tunnel-hour":    {"tunnel-hour-helios", "tunnel-hour-athena"},
-		"gpu-accounting": {"gpu-accounting-helios", "gpu-accounting-athena"},
+// Each alias stands for its Athena row alone (issue #386: alpha graduates on Athena, and the Helios rows are beta's, run by
+// their own names), so one test binary runs, its PASS is the row's, and no Helios row is run or named. The helios row
+// still runs by its name (beta_rows_test.go and the rows' own tests).
+func TestTheAliasesRunTheirAthenaRowAlone(t *testing.T) {
+	for alias, row := range map[string]string{
+		"tunnel-hour":    "tunnel-hour-athena",
+		"gpu-accounting": "gpu-accounting-athena",
 	} {
 		t.Run(alias, func(t *testing.T) {
 			w := newAlphaWorld(t)
@@ -412,21 +416,14 @@ func TestTheAliasesRunTheirRowsOneAfterTheOther(t *testing.T) {
 			if res.code != 0 {
 				t.Fatalf("exit %d:\n%s", res.code, res.out)
 			}
-			at := -1
-			for _, r := range rows {
-				i := strings.Index(res.out, r+": PASS")
-				if i < 0 || i < at {
-					t.Fatalf("%s: PASS is missing or out of order:\n%s", r, res.out)
-				}
-				at = i
+			if !strings.Contains(res.out, row+": PASS") {
+				t.Fatalf("%s: PASS is missing:\n%s", row, res.out)
 			}
-			// One test binary run per row, and only one job in flight at a time: the first row's cleanup is
-			// reported before the second row's shape.
-			if n := strings.Count(w.stateFile("events"), "testbin "); n != 2 {
-				t.Errorf("%d test runs, want 2", n)
+			if strings.Contains(res.out, "helios") {
+				t.Errorf("a Helios row ran, or was named, in an alias run:\n%s", res.out)
 			}
-			if a, b := strings.Index(res.out, "cleanup: left behind 0"), strings.Index(res.out, rows[1]+": shape"); a < 0 || b < 0 || a > b {
-				t.Errorf("the first row's cleanup does not come before the second row starts:\n%s", res.out)
+			if n := strings.Count(w.stateFile("events"), "testbin "); n != 1 {
+				t.Errorf("%d test runs, want 1", n)
 			}
 		})
 	}

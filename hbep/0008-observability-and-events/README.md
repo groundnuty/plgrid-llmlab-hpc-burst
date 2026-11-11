@@ -447,11 +447,13 @@ Tests use the fake Slurm of spike S4, the engine double behind a real agent (`in
 ### Graduation criteria
 
 - **Alpha:**
-  - every event in the Reasons table that alpha's code paths raise exists, with the form above, for Instances and ModelDeployments on one batch provider (Helios or Athena), and the front's events for LLMLab-served requests;
+  - **Alpha's platform** (owner decision, 11 Nov 2026, "Athena alone", recorded on #145 and approved on PR #373): alpha graduates on Athena. Where a criterion below names Helios, or each alpha platform or partition, its Helios part, where not already met, moves to beta, to run when GH200 returns, and its Athena part stays. A row on Athena `plgrid-now` counts for `plgrid-gpu-a100` when it runs one job in total, of one GPU, within `plgrid-now`'s 1 h limit, on the same A100 node type (extending the science-agent ruling of 10 Nov 2026 for #93, which covered conformance). The no-cut handover (HBEP-5, HBEP-7) and S1's one-hour run (HBEP-6) run on `plgrid-gpu-a100`. An Instance on `plgrid-now` uses the shipped test profile `profiles/athena-now.yaml` (HBEP-4, open question 8; HBEP-7, A partition too short).
+  - every event in the Reasons table that alpha's code paths raise exists, with the form above, for Instances and ModelDeployments on one batch provider (Athena), and the front's events for LLMLab-served requests;
   - the engine gauges, with unknowns shown as above, for one deployment on each alpha partition, and the front's metrics for both kinds of target;
   - the Test plan passes, and the kept accounting record's GPU entry is checked once on a real GPU job on each alpha partition;
   - the launcher sets `event-ttl=168h`, and a usage file rotates across a UTC midnight.
 - **Beta:**
+  - the Helios parts of alpha's criteria, on GH200 when it returns (owner decision, 11 Nov 2026);
   - the durable log for events and usage, with HBEP-10's subscriptions (open question 11);
   - typed Allocation events (open question 14);
   - the billing formula and per-grant totals (open questions 15 and 16);
@@ -570,6 +572,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-08: a raised-events counter, so a test or an operator can prove that an event was not raised (ruling for #256). Code that differs records the serving gate as done in PR #254, where "leading" needs a renew within the renew deadline.
 - 2026-11-10: the relay keeper's state is exported by the serving controller (HBEP-6).
 - 2026-11-10: the relay keeper's epoch and read-success series.
+- 2026-11-11: alpha graduates on Athena alone; Helios's parts move to beta (owner decision).
 
 ## Amendments
 
@@ -605,3 +608,4 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - **2026-11-10: erratum** (Open questions 14; Controller metrics, the Provider controller's events): `RelayEndedForGood` is among the Allocation outcomes, and `RelayFailed`'s emit site is `onRelayFailed` (`internal/providerctl/relayfailed.go`), after the mark (#304, PR #319). Before, the list and the emit site predated #319.
 - **2026-11-10: the relay keeper's metrics** (Metrics). An amendment with HBEP-6's of the same day. The relay keeper has no `/metrics`; the serving controller exports its relays' states through the serving collector. Before, relays had no exported state beyond `RelayFailed`.
 - **2026-11-10: the relay keeper's epoch and read success** (Metrics; Raised events, condition 2). An amendment with HBEP-6's of the same day. It adds `hpcburst_relay_keeper_epoch` and `hpcburst_collector_success{collector="relays"}`, which exists in keeper mode only, and counts a relay waiting for its slot pair as `retrying`. The absence proof's condition 2 asks for every success series. Before, there were two success series and no keeper epoch.
+- **2026-11-11: alpha graduates on Athena alone** (Graduation criteria). An amendment by the owner's decision of 11 Nov 2026 ("Athena alone", recorded on #145 and approved on PR #373), with Helios GH200 down and no return date. Alpha's criteria now bind Athena, and their Helios parts not already met move to beta, to run when GH200 returns. A row on `plgrid-now` counts for `plgrid-gpu-a100` when it runs one job of one GPU within 1 h; the no-cut handover and S1's hour stay on `plgrid-gpu-a100`. Before, alpha needed both Helios and Athena.

@@ -71,6 +71,16 @@ func (s *Stager) Checkpoint(ctx context.Context, req agent.CheckpointRequest) (a
 		switch {
 		case present[i] && sums[i] == f.SHA256:
 			r.Outcome = agentapi.FileMatch
+			// A file found present and matching before any repair is a warm
+			// start, and the line says so (issue 392): the checkpoint-relative
+			// name and the reason, never a path. A RehashOnly call, which the
+			// agent makes at every verification after the start, finds the
+			// files its own staging has just downloaded present and matching
+			// too, so it logs nothing: the line would then show a warm start
+			// after a cold one.
+			if !req.RehashOnly {
+				s.logf("checkpoint file %s: present and matching", f.Path)
+			}
 		case present[i] && req.Restage && !req.RehashOnly && !skip[i]:
 			repair = append(repair, i) // rung 2: move the bad copy aside and download it again
 		case present[i]:

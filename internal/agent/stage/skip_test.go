@@ -76,59 +76,67 @@ func TestUnknownLoadFormatSkipsNothing(t *testing.T) {
 	}
 }
 
+// skipCase is one case of the skip rule: with this load format, these listed
+// files give these skipped ones.
+type skipCase struct {
+	name   string
+	format string
+	files  []string
+	skip   []string // the listed files that are skipped
+}
+
+// skipCases are the rule's cases, for the rule itself and for its exported
+// wrapper.
+var skipCases = []skipCase{
+	{"auto prefers safetensors", "auto",
+		[]string{"model.safetensors", "pytorch_model.bin", "x.pt", "tf_model.h5", "config.json"},
+		[]string{"pytorch_model.bin", "x.pt", "tf_model.h5"}},
+	{"empty means auto", "",
+		[]string{"model.safetensors", "pytorch_model.bin"},
+		[]string{"pytorch_model.bin"}},
+	{"auto without safetensors loads bin, not pt", "auto",
+		[]string{"pytorch_model.bin", "quant.pt", "flax_model.msgpack"},
+		[]string{"quant.pt", "flax_model.msgpack"}},
+	{"auto falls back to pt", "auto",
+		[]string{"quant.pt", "config.json"},
+		nil},
+	{"auto with a top-level consolidated file loads only it (mistral)", "auto",
+		[]string{"consolidated.safetensors", "model-00001-of-00002.safetensors", "pytorch_model.bin", "params.json"},
+		[]string{"model-00001-of-00002.safetensors", "pytorch_model.bin"}},
+	{"a nested consolidated file does not switch auto to mistral", "auto",
+		[]string{"model-00001-of-00002.safetensors", "sub/consolidated.safetensors", "pytorch_model.bin"},
+		[]string{"pytorch_model.bin"}},
+	{"safetensors stages consolidated and shards", "safetensors",
+		[]string{"consolidated.safetensors", "model-00001-of-00002.safetensors", "pytorch_model.bin", "x.pt"},
+		[]string{"pytorch_model.bin", "x.pt"}},
+	{"pt stages bin and pt", "pt",
+		[]string{"model.safetensors", "pytorch_model.bin", "x.pt", "model.onnx"},
+		[]string{"model.safetensors", "model.onnx"}},
+	{"the format is case-insensitive", "PT",
+		[]string{"model.safetensors", "pytorch_model.bin"},
+		[]string{"model.safetensors"}},
+	{"original/ is skipped under auto", "auto",
+		[]string{"model.safetensors", "original/params.json", "original/consolidated.00.pth"},
+		[]string{"original/params.json", "original/consolidated.00.pth"}},
+	{"original/ is skipped under safetensors", "safetensors",
+		[]string{"model.safetensors", "original/tokenizer.model"},
+		[]string{"original/tokenizer.model"}},
+	{"another subdirectory is not skipped", "auto",
+		[]string{"model.safetensors", "2_Dense/pytorch_model.bin", "tok/tokenizer.json"},
+		nil},
+	{"mistral skips nothing", "mistral",
+		[]string{"consolidated.safetensors", "model.safetensors", "pytorch_model.bin", "original/params.json"},
+		nil},
+	{"npcache skips nothing", "npcache",
+		[]string{"model.safetensors", "pytorch_model.bin"},
+		nil},
+	{"dummy skips nothing", "dummy",
+		[]string{"model.safetensors", "pytorch_model.bin", "model.onnx"},
+		nil},
+}
+
 func TestSkippedFilesByLoadFormat(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		format string
-		files  []string
-		skip   []string // the listed files that are skipped
-	}{
-		{"auto prefers safetensors", "auto",
-			[]string{"model.safetensors", "pytorch_model.bin", "x.pt", "tf_model.h5", "config.json"},
-			[]string{"pytorch_model.bin", "x.pt", "tf_model.h5"}},
-		{"empty means auto", "",
-			[]string{"model.safetensors", "pytorch_model.bin"},
-			[]string{"pytorch_model.bin"}},
-		{"auto without safetensors loads bin, not pt", "auto",
-			[]string{"pytorch_model.bin", "quant.pt", "flax_model.msgpack"},
-			[]string{"quant.pt", "flax_model.msgpack"}},
-		{"auto falls back to pt", "auto",
-			[]string{"quant.pt", "config.json"},
-			nil},
-		{"auto with a top-level consolidated file loads only it (mistral)", "auto",
-			[]string{"consolidated.safetensors", "model-00001-of-00002.safetensors", "pytorch_model.bin", "params.json"},
-			[]string{"model-00001-of-00002.safetensors", "pytorch_model.bin"}},
-		{"a nested consolidated file does not switch auto to mistral", "auto",
-			[]string{"model-00001-of-00002.safetensors", "sub/consolidated.safetensors", "pytorch_model.bin"},
-			[]string{"pytorch_model.bin"}},
-		{"safetensors stages consolidated and shards", "safetensors",
-			[]string{"consolidated.safetensors", "model-00001-of-00002.safetensors", "pytorch_model.bin", "x.pt"},
-			[]string{"pytorch_model.bin", "x.pt"}},
-		{"pt stages bin and pt", "pt",
-			[]string{"model.safetensors", "pytorch_model.bin", "x.pt", "model.onnx"},
-			[]string{"model.safetensors", "model.onnx"}},
-		{"the format is case-insensitive", "PT",
-			[]string{"model.safetensors", "pytorch_model.bin"},
-			[]string{"model.safetensors"}},
-		{"original/ is skipped under auto", "auto",
-			[]string{"model.safetensors", "original/params.json", "original/consolidated.00.pth"},
-			[]string{"original/params.json", "original/consolidated.00.pth"}},
-		{"original/ is skipped under safetensors", "safetensors",
-			[]string{"model.safetensors", "original/tokenizer.model"},
-			[]string{"original/tokenizer.model"}},
-		{"another subdirectory is not skipped", "auto",
-			[]string{"model.safetensors", "2_Dense/pytorch_model.bin", "tok/tokenizer.json"},
-			nil},
-		{"mistral skips nothing", "mistral",
-			[]string{"consolidated.safetensors", "model.safetensors", "pytorch_model.bin", "original/params.json"},
-			nil},
-		{"npcache skips nothing", "npcache",
-			[]string{"model.safetensors", "pytorch_model.bin"},
-			nil},
-		{"dummy skips nothing", "dummy",
-			[]string{"model.safetensors", "pytorch_model.bin", "model.onnx"},
-			nil},
-	} {
+	for _, tc := range skipCases {
 		t.Run(tc.name, func(t *testing.T) {
 			var files []agentapi.FileDigest
 			for _, p := range tc.files {
@@ -142,6 +150,36 @@ func TestSkippedFilesByLoadFormat(t *testing.T) {
 			}
 			if !slices.Equal(got, tc.skip) {
 				t.Errorf("skipped %q, want %q", got, tc.skip)
+			}
+		})
+	}
+}
+
+// SkippedFiles, the exported rule, answers as skippedFiles does on every case
+// of the rule, and as each case says: the same length, the same marks, and
+// the skipped files the case lists, written out in it.
+func TestSkippedFilesExportedAgreesWithTheRule(t *testing.T) {
+	for _, tc := range skipCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var files []agentapi.FileDigest
+			for _, p := range tc.files {
+				files = append(files, agentapi.FileDigest{Path: p, SHA256: weightsSum})
+			}
+			got, rule := SkippedFiles(files, tc.format), skippedFiles(files, tc.format)
+			if !slices.Equal(got, rule) {
+				t.Errorf("SkippedFiles gives %v, skippedFiles %v", got, rule)
+			}
+			if len(got) != len(files) {
+				t.Fatalf("SkippedFiles marks %d files, %d listed", len(got), len(files))
+			}
+			var names []string
+			for i, sk := range got {
+				if sk {
+					names = append(names, tc.files[i])
+				}
+			}
+			if !slices.Equal(names, tc.skip) {
+				t.Errorf("SkippedFiles skips %q, want %q", names, tc.skip)
 			}
 		})
 	}

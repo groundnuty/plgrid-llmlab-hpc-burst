@@ -48,6 +48,14 @@ func kindOf(p string) weightKind {
 	return notWeight
 }
 
+// SkippedFiles is skippedFiles, exported, with the same signature and result.
+// A warm-start check uses it to compute the files that must log "present and
+// matching" (issue 392): from the identity record's file list and the launch's
+// load format, the listed files that are not skipped, which a start stages.
+func SkippedFiles(files []agentapi.FileDigest, loadFormat string) []bool {
+	return skippedFiles(files, loadFormat)
+}
+
 // skippedFiles marks the listed files the engine does not load when it is
 // launched with loadFormat, so staging does not download them.
 func skippedFiles(files []agentapi.FileDigest, loadFormat string) []bool {

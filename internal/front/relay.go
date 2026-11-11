@@ -38,6 +38,26 @@ func stripHop(h http.Header) {
 	}
 }
 
+// stripEnvoyControl removes the headers a client could use to steer Envoy
+// inside an Instance: every header whose name starts with x-envoy-, and
+// X-Forwarded-For (HBEP-5, Request headers; `@hpc-burst-science-agent`, 11 Nov
+// 2026, issue 374). Envoy obeys x-envoy-* control headers, such as retries
+// and an upstream time-out, on a request it deems internal, and it deems one
+// internal when it comes from loopback, as frpc's do, or carries one private
+// X-Forwarded-For address.
+//
+// Names match without regard to case, and a key is deleted as it stands in the
+// map: Header.Del canonicalizes its argument, so it would miss a key set
+// directly in another case. A request read by net/http arrives canonicalized
+// and never shows that case, but the helper does not rely on it.
+func stripEnvoyControl(h http.Header) {
+	for k := range h {
+		if strings.HasPrefix(strings.ToLower(k), "x-envoy-") || strings.EqualFold(k, "X-Forwarded-For") {
+			delete(h, k)
+		}
+	}
+}
+
 // idleReader resets the idle time-out on every byte from the upstream.
 type idleReader struct {
 	r     io.Reader

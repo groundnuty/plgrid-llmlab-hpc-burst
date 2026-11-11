@@ -223,19 +223,19 @@ unixPath = %q
 
 	// base+10 routes a CONNECT for the UID to the engine through the tunnel, and answers 404 for a
 	// UID with no proxy. frps lists the proxy online, and answers its CONNECT with 200, before frpc
-	// can take a connection for it (#368, frps_route_test.go), so the first reply is awaited as the
-	// front awaits its first passing probe; then every CONNECT crosses at the first try. An early
-	// close that provenRoute retries is not proof of that race: frpc closes the work connection
-	// the same way when its dial of the engine's socket fails.
-	if n, err := provenRoute(h.FrpsTCPMuxAddr(), uid, "/health", "engine-ok /health", 15*time.Second); err != nil {
+	// can take a connection for it (#368, internal/testenv/frproute.go), so the first reply is
+	// awaited as the front awaits its first passing probe; then every CONNECT crosses at the first
+	// try. An early close that ProvenRoute retries is not proof of that race: frpc closes the work
+	// connection the same way when its dial of the engine's socket fails.
+	if n, err := testenv.ProvenRoute(h.FrpsTCPMuxAddr(), uid, "/health", "engine-ok /health", 15*time.Second); err != nil {
 		t.Fatalf("%v\nfrpc log:\n%s\nfrps log:\n%s", err, tailFile(filepath.Join(r.state, "frpc.log")), r.logTail())
 	} else if n > 1 {
 		t.Logf("the first reply crossed at attempt %d, after %d early closes (200, then the end of the connection before any reply byte)", n, n-1)
 	}
-	if status, code, body, err := tcpmuxGet(h.FrpsTCPMuxAddr(), uid, "/health", time.Now().Add(10*time.Second)); err != nil || !strings.Contains(status, " 200 ") || code != http.StatusOK || body != "engine-ok /health" {
+	if status, code, body, err := testenv.TCPMuxGet(h.FrpsTCPMuxAddr(), uid, "/health", time.Now().Add(10*time.Second)); err != nil || !strings.Contains(status, " 200 ") || code != http.StatusOK || body != "engine-ok /health" {
 		t.Errorf("CONNECT %s after the first reply: %q, %d %q, %v", uid, status, code, body, err)
 	}
-	if status, _, _, err := tcpmuxGet(h.FrpsTCPMuxAddr(), "no-such-uid", "/health", time.Now().Add(10*time.Second)); err != nil || !strings.Contains(status, " 404 ") {
+	if status, _, _, err := testenv.TCPMuxGet(h.FrpsTCPMuxAddr(), "no-such-uid", "/health", time.Now().Add(10*time.Second)); err != nil || !strings.Contains(status, " 404 ") {
 		t.Errorf("CONNECT of an unknown UID: %q, %v, want 404", status, err)
 	}
 

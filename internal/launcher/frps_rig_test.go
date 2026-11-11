@@ -235,6 +235,18 @@ func (r *frpsRig) logTail() string {
 	return string(b)
 }
 
+// tailFile returns the last 2000 bytes of the file at path, or why it cannot be read.
+func tailFile(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err.Error()
+	}
+	if len(b) > 2000 {
+		b = b[len(b)-2000:]
+	}
+	return string(b)
+}
+
 // get asks the web server at base+11; an empty user sends no credentials.
 func (r *frpsRig) get(user, pass, path string) (int, string) {
 	r.t.Helper()
