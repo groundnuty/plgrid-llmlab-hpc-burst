@@ -24,18 +24,28 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
+// The keeper's places under the launcher's state directory, all from
+// pkg/agentapi's Host, the one convention the launcher and the controller
+// share (agentapi.Host.RelayKeeperDir, RelayKeeperSocket).
+
 // StatePath is the keeper's state file under the launcher's state directory.
-func StatePath(stateDir string) string { return filepath.Join(stateDir, "relaykeeper", "state.json") }
+func StatePath(stateDir string) string {
+	return filepath.Join(agentapi.Host{StateDir: stateDir}.RelayKeeperDir(), "state.json")
+}
 
 // SocketPath is the keeper's socket under the launcher's state directory.
-func SocketPath(stateDir string) string { return filepath.Join(stateDir, "relaykeeper.sock") }
+func SocketPath(stateDir string) string { return agentapi.Host{StateDir: stateDir}.RelayKeeperSocket() }
 
 // SSHDir is the keeper's directory of -F files under the launcher's state
 // directory, mode 700.
-func SSHDir(stateDir string) string { return filepath.Join(stateDir, "relaykeeper", "ssh") }
+func SSHDir(stateDir string) string {
+	return filepath.Join(agentapi.Host{StateDir: stateDir}.RelayKeeperDir(), "ssh")
+}
 
 // LockPath is the keeper's process lock under the launcher's state directory.
-func LockPath(stateDir string) string { return filepath.Join(stateDir, "relaykeeper", "lock") }
+func LockPath(stateDir string) string {
+	return filepath.Join(agentapi.Host{StateDir: stateDir}.RelayKeeperDir(), "lock")
+}
 
 // lockProcess takes the keeper's exclusive process lock (flock LOCK_EX |
 // LOCK_NB on LockPath), held by the returned file for the process's life,
@@ -44,8 +54,11 @@ func LockPath(stateDir string) string { return filepath.Join(stateDir, "relaykee
 // review of PR 356: Open's OpenState bumps the start count and writes the
 // state file before Listen could find a live keeper, so a second keeper
 // could overwrite a fence or a final end the live one had just synced).
-func lockProcess(stateDir string) (*os.File, error) {
-	path := LockPath(stateDir)
+func lockProcess(stateDir string) (*os.File, error) { return lockFile(LockPath(stateDir)) }
+
+// lockFile takes the exclusive, non-blocking flock on the lock file at path,
+// beside the state file, and returns the file that holds it.
+func lockFile(path string) (*os.File, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("relaykeeper: the state directory: %w", err)
 	}

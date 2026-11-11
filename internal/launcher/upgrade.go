@@ -205,6 +205,9 @@ func replaceHost(ctx context.Context, l layout, st *State, bin Binary, ops hostO
 	// The replacement's first record carries the old host's supervision, so an upgrade interrupted
 	// while the new k3s starts leaves a record that still names the controllers and the front.
 	spec := launchSpec{l: l, bin: bin, ports: st.Ports, nice: st.Nice, controllers: st.Controllers, frontRun: st.FrontRun, frps: st.Frps}
+	// A keeper host comes back as one: the keeper, the controller's socket and the switch back's
+	// premise all ride on this (the review of PR 361).
+	spec.relayKeeper = st.RelayKeeper
 	if st.frpsMissing() {
 		logf(log, "%s", noFrpsUpgradeWarning)
 	}

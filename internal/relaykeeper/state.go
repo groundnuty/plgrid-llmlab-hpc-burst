@@ -246,9 +246,36 @@ func OpenState(path string) (*State, error) {
 // the state file at path and keeps the rest: the start count, the ends and
 // the claims. It is the launcher's restore's (HBEP-6, The relay keeper: "The
 // launcher's restore clears the accepted Lease epochs, since a restored store
-// rolls leaseTransitions back"), run while no keeper runs. A missing file
-// has nothing to clear.
+// rolls leaseTransitions back"), run while no keeper runs: it takes the
+// keeper's process lock beside the file first, so a keeper that runs (one
+// started by hand, say) refuses it, naming the lock, and nothing changes. A
+// missing file has nothing to clear.
 func ClearLeaseEpochs(path string) error {
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	lock, err := lockFile(filepath.Join(filepath.Dir(path), "lock"))
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	return ClearLeaseEpochsHeld(path)
+}
+
+// LockState takes the keeper's process lock on the launcher's state directory, as a keeper does
+// for its life, so no keeper runs while the caller holds it; release gives it back. A caller that
+// must check that no keeper runs before it changes anything takes it first (the launcher's
+// restore), then clears with ClearLeaseEpochsHeld.
+func LockState(stateDir string) (release func(), err error) {
+	f, err := lockProcess(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	return func() { _ = f.Close() }, nil
+}
+
+// ClearLeaseEpochsHeld is ClearLeaseEpochs for a caller that holds the keeper's lock (LockState).
+func ClearLeaseEpochsHeld(path string) error {
 	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}

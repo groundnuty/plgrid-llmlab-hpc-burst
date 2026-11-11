@@ -422,6 +422,9 @@ type Host struct {
 	DownBound     time.Duration
 	downed        bool // hpcburst down has run
 	nameDownBound bool // NameDownBound
+	// upExtra is what the keeper rehearsal's options (keeper.go) append to up's
+	// arguments, and upArgs up's arguments without them, which UpAgain runs.
+	upExtra, upArgs []string
 }
 
 // HostOption is a behaviour of StartHost's Host where a caller differs from the
@@ -470,6 +473,8 @@ func StartHost(t T, b Binaries, dir string, dh DialHome, env []string, ports Por
 		"--manifests", filepath.Join(b.Repo, "config", "crd"), "--controller-bin", b.Controller,
 		"--front-config", cfg, "--front-bin", b.Front, "--frps-bin", b.Frps}
 	args = append(args, dh.upFlags()...)
+	h.upArgs = append([]string(nil), args...)
+	args = append(args, h.upExtra...)
 	t.Cleanup(h.Down)
 	if out, err := Run(t, Within(t, UpTimeout), env, b.HPCBurst, args...); err != nil {
 		t.Fatalf("hpcburst up: %v\n%s", err, out)

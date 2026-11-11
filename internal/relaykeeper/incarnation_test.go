@@ -7,6 +7,7 @@ package relaykeeper
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -134,4 +135,80 @@ func TestTheRunnerStartsOnlyTheTagsCurrentInstance(t *testing.T) {
 	if n := oldStarts.Load(); n != 0 {
 		t.Errorf("the replaced instance's paused attempts started %d processes, want none", n)
 	}
+}
+
+// A, then B, then A again, coalesced in the Runner's queue: the worker,
+// stalled, holds only the latest Want of the tag, the restored A, whose
+// entry, Provider UID and host equal the running first A's. Its incarnation
+// differs, so it is a new Want, and its relays replace the first A's: new
+// processes, the restored A's instance current. Were the Runner's identity
+// the entry alone, it would keep the first A's relays under an incarnation
+// the keeper no longer wants, whose listing refuses every restart (#359's
+// mutant run, review of PR 356).
+func TestACoalescedAToBToAReplacesTheFirstAsRelays(t *testing.T) {
+	stall := make(chan struct{})
+	stalling := make(chan struct{}, 1)
+	var ops atomic.Int64
+	r := identityRunner(t, &ops)
+	// Registered after the Runner's Stop, so it runs first: a failure before the test lets the
+	// worker go ends its stall, and Stop does not wait on it for good.
+	var release sync.Once
+	letGo := func() { release.Do(func() { close(stall) }) }
+	t.Cleanup(letGo)
+	r.o.beforeOp = func(string, string) {
+		if ops.Add(1) > 1 {
+			select {
+			case stalling <- struct{}{}:
+			default:
+			}
+			<-stall
+		}
+	}
+	ssh := wire.SSH{HostName: "login.example", User: "example-user", IdentityFile: "/keys/example"}
+	e := entry(1)
+	a := identityWant(e)
+	a.Incarnation = 1
+	r.Want("example-a", ssh, a)
+	var first map[agentapi.RelayChannel]wire.RelayState
+	eventuallyQ(t, 30*time.Second, "the first A's relays up", func() bool {
+		up, _ := upRelays(r)
+		first = up
+		return len(up) == 2
+	})
+	// A re-sent A stalls the worker; B and the restored A then coalesce.
+	r.Want("example-a", ssh, a)
+	select {
+	case <-stalling:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the worker did not take the re-sent A within 30 s")
+	}
+	b := identityWant(newGen(e))
+	b.Incarnation = 2
+	r.Want("example-a", ssh, b)
+	again := identityWant(e)
+	again.Incarnation = 3
+	r.Want("example-a", ssh, again)
+	p := r.prov("example-a")
+	if n := p.queue.pending(); n != 1 {
+		t.Fatalf("pending Wants of the tag with the worker stalled: %d, want 1, the restored A", n)
+	}
+	letGo()
+	eventuallyQ(t, 30*time.Second, "the restored A's relays replacing the first A's", func() bool {
+		p.mu.Lock()
+		in := p.cur[e.Tag]
+		p.mu.Unlock()
+		if in == nil || in.want.Incarnation != 3 {
+			return false
+		}
+		up, n := upRelays(r)
+		if len(up) != 2 || n != 2 {
+			return false
+		}
+		for ch, s := range up {
+			if s.PID == first[ch].PID {
+				return false
+			}
+		}
+		return true
+	})
 }

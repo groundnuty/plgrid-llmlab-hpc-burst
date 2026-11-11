@@ -120,3 +120,82 @@ func TestSshGRunsOutsideTheKeepersLock(t *testing.T) {
 		t.Fatal("the set did not finish within 30 s of its ssh -G returning")
 	}
 }
+
+// The keeper's places are pkg/agentapi's, unchanged in bytes from PR 3: the
+// launcher and the controller name the same files (#343, PR 5).
+func TestTheKeepersPlacesAreAgentAPIs(t *testing.T) {
+	const dir = "/state/example"
+	h := agentapi.Host{StateDir: dir}
+	for _, c := range []struct{ got, want string }{
+		{SocketPath(dir), "/state/example/relaykeeper.sock"},
+		{SocketPath(dir), h.RelayKeeperSocket()},
+		{StatePath(dir), "/state/example/relaykeeper/state.json"},
+		{SSHDir(dir), "/state/example/relaykeeper/ssh"},
+		{LockPath(dir), "/state/example/relaykeeper/lock"},
+		{h.RelayKeeperDir(), "/state/example/relaykeeper"},
+	} {
+		if c.got != c.want {
+			t.Errorf("%q, want %q", c.got, c.want)
+		}
+	}
+}
+
+// ClearLeaseEpochs, the launcher's restore's, takes the keeper's process
+// lock first: with a keeper running on the state directory it refuses,
+// naming the lock, and the state file is unchanged; once the keeper has
+// stopped it clears the fences and keeps the start count (#343, PR 5).
+func TestClearLeaseEpochsRefusesWhileAKeeperRuns(t *testing.T) {
+	dir, err := os.MkdirTemp("", "rkc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	ports := map[agentapi.RelayChannel]int{agentapi.RelayControl: 30002, agentapi.RelayServing: 30003}
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan int64, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, ProcessConfig{StateDir: dir, Ports: ports, Ready: func(e int64, _ string) { ready <- e }})
+	}()
+	select {
+	case <-ready:
+	case err := <-done:
+		t.Fatalf("the keeper ended: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("the keeper was not ready within 30 s")
+	}
+	// A fence on disk, as a set would leave it, written with the keeper's
+	// lock held by the keeper: SaveState itself takes no lock.
+	s, err := LoadState(StatePath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Providers = map[string]ProviderFence{"example-a": {HighestEpoch: 7}}
+	if err := SaveState(StatePath(dir), s); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(StatePath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ClearLeaseEpochs(StatePath(dir)); err == nil || !strings.Contains(err.Error(), "another relay keeper holds") {
+		t.Errorf("ClearLeaseEpochs with a keeper running: %v, want refused, naming the process lock", err)
+	}
+	if after, _ := os.ReadFile(StatePath(dir)); !bytes.Equal(after, before) {
+		t.Errorf("the state file after the refused clear: %q, want it unchanged", after)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("the keeper: %v", err)
+	}
+	if err := ClearLeaseEpochs(StatePath(dir)); err != nil {
+		t.Fatalf("ClearLeaseEpochs with no keeper: %v", err)
+	}
+	got, err := LoadState(StatePath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Providers) != 0 || got.Starts != 1 {
+		t.Errorf("after the clear: providers %+v, starts %d; want no fence and the one start kept", got.Providers, got.Starts)
+	}
+}

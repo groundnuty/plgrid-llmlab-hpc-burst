@@ -57,6 +57,13 @@ func printSupervision(w io.Writer, r *launcher.StatusReport) {
 		if c.HealthzOK != nil {
 			line += fmt.Sprintf(", GET /healthz on %s: %v", c.Health, *c.HealthzOK)
 		}
+		if c.PingOK != nil {
+			// The relay keeper (HBEP-11): its ping, and the E it answered with.
+			line += fmt.Sprintf(", ping on %s: %v", c.HealthSocket, *c.PingOK)
+			if *c.PingOK {
+				line += fmt.Sprintf(", E %d", c.KeeperEpoch)
+			}
+		}
 		if c.ReadyzOK != nil {
 			// The state is empty when the readiness could not be read at all.
 			line += ", readiness: " + cmp.Or(c.ReadyzState, "not read")

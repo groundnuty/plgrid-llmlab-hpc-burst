@@ -42,6 +42,19 @@
 // plugin-failing exists. A file bind-gate makes it bind its health
 // port late, as the real front does after its first lists: it writes front-waiting (its PID) and
 // waits, at most 30 s, for a file bind-now before it binds; a port taken by then makes it exit 1.
+//
+// The controller's role also takes --relay-keeper-socket under the real controller's rule (#343,
+// PR 4): with --front-mode host-dialed only, an absolute path of at most agentapi.MaxRelaySocketPath
+// bytes. With "relaykeeper" as its first argument the binary is the relay keeper instead, as
+// hpcburst-controller's subcommand is: it runs the real keeper (relaykeeper.Run) with the
+// subcommand's flags, --state-dir and --port-base, so the launcher's tests supervise a real keeper,
+// with its state file, process lock and socket. In that role it records argv-<pid>.json too, and
+// two files in $FAKECTRL_DIR steer it, the positive controls of the launcher's keeper check:
+//
+//	keeper-listen-tcp  a host:port: the keeper also listens there (TCP), which no keeper does
+//	keeper-no-answer   the keeper runs nothing that answers: it waits for SIGTERM, then exits 0
+//	keeper-delay       milliseconds: the keeper waits that long before it starts, so it answers late
+//	keeper-silent      the keeper holds a listening socket at its path and answers nothing on it
 package main
 
 import (
@@ -51,6 +64,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -66,6 +80,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/relaykeeper"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -73,6 +88,9 @@ func main() {
 	// controller-runtime's healthz handler logs each failing check, and without a sink it prints a
 	// notice and a goroutine dump to stderr.
 	log.SetLogger(logr.Discard())
+	if len(os.Args) > 1 && os.Args[1] == "relaykeeper" {
+		os.Exit(keeperMain(os.Args[2:]))
+	}
 	fs := flag.NewFlagSet("fakecontroller", flag.ContinueOnError)
 	asFront := filepath.Base(os.Args[0]) == "hpcburst-front"
 	var config *string
@@ -80,7 +98,7 @@ func main() {
 		config = fs.String("config", "", "")
 		fs.String("mode", "", "")
 	} else {
-		for _, name := range []string{"front-mode", "front-addr"} {
+		for _, name := range []string{"front-mode", "front-addr", "relay-keeper-socket"} {
 			fs.String(name, "", "")
 		}
 	}
@@ -213,6 +231,10 @@ func frontFlagsOK(fs *flag.FlagSet) bool {
 		return ""
 	}
 	mode, addr := value("front-mode"), value("front-addr")
+	// The real controller's rule for the keeper's socket (#343, PR 4).
+	if sock := value("relay-keeper-socket"); sock != "" && (mode != "host-dialed" || !filepath.IsAbs(sock) || len(sock) > agentapi.MaxRelaySocketPath) {
+		return false
+	}
 	switch mode {
 	case "":
 		return addr == ""
@@ -318,4 +340,70 @@ func record(path string, v any) {
 	if os.WriteFile(tmp, b, 0o644) == nil {
 		_ = os.Rename(tmp, path)
 	}
+}
+
+// keeperMain is the relaykeeper role: hpcburst-controller relaykeeper's flags, the real keeper
+// (relaykeeper.Run) until SIGTERM, and the subcommand's exit codes: 0 on a clean stop, 1 on a
+// failure, 2 on a bad command line.
+func keeperMain(args []string) int {
+	fs := flag.NewFlagSet("relaykeeper", flag.ContinueOnError)
+	stateDir := fs.String("state-dir", "", "")
+	portBase := fs.Int("port-base", 0, "")
+	if err := fs.Parse(args); err != nil || fs.NArg() > 0 || *stateDir == "" || *portBase <= 0 {
+		fmt.Fprintln(os.Stderr, "fakecontroller relaykeeper: bad command line:", args)
+		return 2
+	}
+	dir := os.Getenv("FAKECTRL_DIR")
+	if dir == "" {
+		exe, _ := os.Executable()
+		dir = filepath.Dir(exe)
+	}
+	record(filepath.Join(dir, fmt.Sprintf("argv-%d.json", os.Getpid())), append([]string{"relaykeeper"}, args...))
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+	if b, err := os.ReadFile(filepath.Join(dir, "keeper-listen-tcp")); err == nil {
+		ln, err := net.Listen("tcp", strings.TrimSpace(string(b)))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "fakecontroller relaykeeper: keeper-listen-tcp:", err)
+			return 1
+		}
+		defer ln.Close()
+	}
+	if _, err := os.Stat(filepath.Join(dir, "keeper-no-answer")); err == nil {
+		<-ctx.Done()
+		return 0
+	}
+	if _, err := os.Stat(filepath.Join(dir, "keeper-silent")); err == nil {
+		ln, err := net.Listen("unix", agentapi.Host{StateDir: *stateDir}.RelayKeeperSocket())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "fakecontroller relaykeeper: keeper-silent:", err)
+			return 1
+		}
+		defer ln.Close()
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				defer c.Close() // held open, never answered
+			}
+		}()
+		<-ctx.Done()
+		return 0
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "keeper-delay")); err == nil {
+		ms, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+		select {
+		case <-time.After(time.Duration(ms) * time.Millisecond):
+		case <-ctx.Done():
+			return 0
+		}
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	if err := relaykeeper.Run(ctx, relaykeeper.ProcessConfig{StateDir: *stateDir, Ports: agentapi.Host{StateDir: *stateDir, PortBase: *portBase}.RelayChannelPorts(), Logger: logger}); err != nil {
+		fmt.Fprintln(os.Stderr, "fakecontroller relaykeeper:", err)
+		return 1
+	}
+	return 0
 }
