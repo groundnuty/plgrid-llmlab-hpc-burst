@@ -46,7 +46,7 @@ func TestListNamesTheReachHostDialedRowsAndTheAlias(t *testing.T) {
 	for _, s := range hostDialedShapes {
 		w.contains(res, s.row+"  cluster  ready  gate HPCBURST_CONFORMANCE")
 	}
-	w.contains(res, "reach-host-dialed  alias  runs reach-host-dialed-helios, reach-host-dialed-athena in turn")
+	w.contains(res, "reach-host-dialed  alias  runs reach-host-dialed-athena in turn")
 }
 
 // The script's tables and the package's host-dialed rows are one fact each; the expected values are #305's.
@@ -215,18 +215,18 @@ func TestAReachHostDialedRowThatWaitedTooLongIsNotRun(t *testing.T) {
 	w.contains(res, "reach-host-dialed-athena: NOT RUN (a job did not start within 10 min of its acceptance and was cancelled by its tag; not a failure)")
 }
 
-func TestTheReachHostDialedAliasRunsItsRowsOneAfterTheOther(t *testing.T) {
+// The alias stands for reach-host-dialed-athena alone (issue #386: the Helios row is beta's and runs by its own name).
+func TestTheReachHostDialedAliasRunsItsAthenaRowAlone(t *testing.T) {
 	w := hostDialedWorld(t)
 	res := w.run(nil, "--run", "reach-host-dialed", "--yes")
 	if res.code != 0 {
 		t.Fatalf("exit %d:\n%s", res.code, res.out)
 	}
-	a, b := strings.Index(res.out, "reach-host-dialed-helios: PASS"), strings.Index(res.out, "reach-host-dialed-athena: PASS")
-	if a < 0 || b < a {
-		t.Fatalf("the two rows' PASS lines are missing or out of order:\n%s", res.out)
+	if !strings.Contains(res.out, "reach-host-dialed-athena: PASS") || strings.Contains(res.out, "reach-host-dialed-helios") {
+		t.Fatalf("want reach-host-dialed-athena: PASS and no Helios row:\n%s", res.out)
 	}
-	if n := strings.Count(w.stateFile("events"), "testbin "); n != 2 {
-		t.Errorf("%d test runs, want 2", n)
+	if n := strings.Count(w.stateFile("events"), "testbin "); n != 1 {
+		t.Errorf("%d test runs, want 1", n)
 	}
 }
 
@@ -256,7 +256,9 @@ func TestTheReachRowsAreNotRunInHostDialedMode(t *testing.T) {
 			if res.code != 3 {
 				t.Fatalf("exit %d, want 3:\n%s", res.code, res.out)
 			}
-			for _, row := range []string{"reach-helios", "reach-athena"} {
+			// The alias stands for reach-athena alone (issue #386); reach-helios is refused the same way by its own name
+			// (below).
+			for _, row := range []string{"reach-athena"} {
 				w.contains(res, row+": NOT RUN (the reach check applies only to direct and ssh modes; LIVE_DIALHOME_MODE is host-dialed")
 				if strings.Contains(res.out, row+": FAIL") || strings.Contains(res.out, row+": PASS") || strings.Contains(res.out, row+": shape") {
 					t.Errorf("%s was refused and also went on:\n%s", row, res.out)
@@ -270,6 +272,18 @@ func TestTheReachRowsAreNotRunInHostDialedMode(t *testing.T) {
 			}
 		})
 	}
+	t.Run("reach-helios, by its own name, is refused the same way", func(t *testing.T) {
+		w := newAlphaWorld(t)
+		w.alphaSettings(func(m map[string]string) {
+			m["LIVE_DIALHOME_MODE"] = "host-dialed"
+			delete(m, "LIVE_DIALHOME_ADDR")
+		})
+		res := w.run(nil, "--run", "reach-helios", "--yes")
+		if res.code != 3 {
+			t.Fatalf("exit %d, want 3:\n%s", res.code, res.out)
+		}
+		w.contains(res, "reach-helios: NOT RUN (the reach check applies only to direct and ssh modes; LIVE_DIALHOME_MODE is host-dialed")
+	})
 	t.Run("the host-dialed rows run on", func(t *testing.T) {
 		w := newAlphaWorld(t)
 		w.alphaSettings(func(m map[string]string) {
