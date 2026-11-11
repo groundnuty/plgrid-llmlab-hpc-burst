@@ -210,6 +210,8 @@ def cut_time(run):
     For a run with no event, the moment the event would have been."""
     t_ev = run.m.get("t_event")
     kind = run.m.get("event_kind")
+    if t_ev is None:
+        return None
     if kind == "frps":
         st = [e["t_ns"] / 1e9 for e in run.lines("frps-events.jsonl") if e["event"] == "stopped" and e["t_ns"] / 1e9 >= t_ev]
         return min(st) if st else None
