@@ -288,10 +288,9 @@ func TestTheDeploymentIDUnderItsTagIsCheckedAsHBEP3Says(t *testing.T) {
 func TestTheWarmStartIsShownOnlyByTheAgentsOwnLines(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("ab", 32)
 	files := []string{"config.json", "model.safetensors"}
-	imageLine := func(reason, d string) string {
-		return "time=2026-11-11T10:00:00Z level=INFO msg=\"stage: image " + reason + "\" digest=" + d
-	}
-	fileLine := func(f string) string { return "stage: checkpoint file " + f + " " + StagedPresentMatching }
+	// The stager's own form (internal/agent/stage, PR #393; warmpin_test.go pins it).
+	imageLine := func(reason, d string) string { return "stage: image " + d + ": " + reason }
+	fileLine := func(f string) string { return "stage: checkpoint file " + f + ": " + StagedPresentMatching }
 	shown := func(lines ...string) *WarmUnshownError {
 		return warmStartShownByTheAgentsOwnLog(WarmObs{LogRead: true, ImageDigest: digest, Files: files, Lines: ParseAgentStagingLines([]byte(strings.Join(lines, "\n")))})
 	}
@@ -302,8 +301,11 @@ func TestTheWarmStartIsShownOnlyByTheAgentsOwnLines(t *testing.T) {
 		t.Errorf("an image staged by another Allocation is not shown warm: %v", e)
 	}
 	// The digest may stand without its prefix, as a stager line that names the hex alone would.
-	if e := shown("stage: image "+strings.TrimPrefix(digest, "sha256:")+" "+StagedAlreadyVerified, fileLine("config.json"), fileLine("model.safetensors")); e != nil {
+	if e := shown("stage: image "+strings.TrimPrefix(digest, "sha256:")+": "+StagedAlreadyVerified, fileLine("config.json"), fileLine("model.safetensors")); e != nil {
 		t.Errorf("the image named by its hex alone is not shown warm: %v", e)
+	}
+	if e := shown("time=2026-11-11T10:00:00Z level=INFO msg=\"stage: image "+StagedAlreadyVerified+"\" digest="+digest, fileLine("config.json"), fileLine("model.safetensors")); e != nil {
+		t.Errorf("slog's text form of the image line is not read: %v", e)
 	}
 	for name, c := range map[string]struct {
 		lines                 []string
@@ -314,7 +316,8 @@ func TestTheWarmStartIsShownOnlyByTheAgentsOwnLines(t *testing.T) {
 		"one file missing":               {[]string{imageLine(StagedAlreadyVerified, digest), fileLine("config.json")}, true, 1, 2},
 		"another digest":                 {[]string{imageLine(StagedAlreadyVerified, "sha256:"+strings.Repeat("cd", 32)), fileLine("config.json"), fileLine("model.safetensors")}, false, 2, 2},
 		"another file":                   {[]string{imageLine(StagedAlreadyVerified, digest), fileLine("config.json"), fileLine("model.safetensors.index.json")}, true, 1, 2},
-		"the image's digest as a file's": {[]string{"stage: checkpoint file " + digest + " " + StagedPresentMatching, fileLine("config.json"), fileLine("model.safetensors")}, false, 2, 2},
+		"the image's digest as a file's": {[]string{fileLine(digest), fileLine("config.json"), fileLine("model.safetensors")}, false, 2, 2},
+		"slog's form, another digest":    {[]string{"time=2026-11-11T10:00:00Z level=INFO msg=\"stage: image " + StagedAlreadyVerified + "\" digest=sha256:" + strings.Repeat("cd", 32), fileLine("config.json"), fileLine("model.safetensors")}, false, 2, 2},
 		"a build, not a reuse":           {[]string{"time=2026-11-11T10:00:00Z level=INFO msg=\"building image\" digest=" + digest, fileLine("config.json"), fileLine("model.safetensors")}, false, 2, 2},
 	} {
 		e := shown(c.lines...)

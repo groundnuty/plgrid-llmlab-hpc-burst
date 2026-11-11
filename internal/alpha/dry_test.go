@@ -826,8 +826,8 @@ var (
 	dryFiles       = []string{"config.json", "model.safetensors", "tokenizer.json"}
 )
 
-// dryAgentLog is an agent's log of a warm start, written from the reason words (StagedAlreadyVerified and the rest):
-// slog's text form for the image, the stager's plain form for the files, and lines of other work around them. A fault
+// dryAgentLog is an agent's log of a warm start, written from the reason words (StagedAlreadyVerified and the rest) in the
+// stager's own form (warmpin_test.go pins it), between lines of the agent's other work in slog's form. A fault
 // takes one line away or names another digest or file in it.
 func (d *drySteps) dryAgentLog() string {
 	digest := dryImageDigest
@@ -837,7 +837,7 @@ func (d *drySteps) dryAgentLog() string {
 	var b strings.Builder
 	b.WriteString("time=2026-11-02T09:00:01Z level=INFO msg=\"allocation agent starting\" version=dry\n")
 	if !d.fault("warm-no-image") {
-		fmt.Fprintf(&b, "time=2026-11-02T09:00:02Z level=INFO msg=\"stage: image %s\" digest=%s\n", StagedAlreadyVerified, digest)
+		fmt.Fprintf(&b, "stage: image %s: %s\n", digest, StagedAlreadyVerified)
 	}
 	for i, f := range dryFiles {
 		if d.fault("warm-file-missing") && i == 1 {
@@ -846,7 +846,7 @@ func (d *drySteps) dryAgentLog() string {
 		if d.fault("warm-other-file") && i == 1 {
 			f = "model.safetensors.index.json" // another file, with the listed one's name inside it
 		}
-		fmt.Fprintf(&b, "stage: checkpoint file %s %s\n", f, StagedPresentMatching)
+		fmt.Fprintf(&b, "stage: checkpoint file %s: %s\n", f, StagedPresentMatching)
 	}
 	b.WriteString("time=2026-11-02T09:00:05Z level=INFO msg=\"worker started\"\n")
 	return b.String()

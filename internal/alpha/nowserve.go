@@ -461,8 +461,10 @@ const requeueRefusedWords = "the scheduler refused the requeue of the run's own 
 
 // The reason words of the stager's log lines for an artifact found already staged (issue #392; the science agent's
 // ruling of 11 Nov 2026 on #376, relayed by the code agent's builder k343): each line names its image digest or its
-// checkpoint file, and carries no path. These constants are the fixtures' source; a test against #392's own strings
-// comes when #392 is merged into this tree, so that the two cannot drift.
+// checkpoint file, and carries no path. The stager writes them as "stage: image <digest>: <reason>" and "stage:
+// checkpoint file <file>: <reason>" (internal/agent/stage, PR #393), and a verification after the start (RehashOnly)
+// writes none. These constants are the fixtures' source, pinned to the stager's own lines and formats
+// (warmpin_test.go), so that the two cannot drift.
 const (
 	// StagedAlreadyVerified is an image's first check finding it staged and its integrity record matching.
 	StagedAlreadyVerified = "already staged and verified"
