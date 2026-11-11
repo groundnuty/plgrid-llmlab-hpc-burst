@@ -23,6 +23,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/stage"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/obscheck"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
@@ -130,10 +131,9 @@ func identityRecordFiles(raw []byte) ([]agentapi.FileDigest, error) {
 	return d.Canonical.Files, nil
 }
 
-// stageSkipRule is the stage package's rule of the files the engine does not load (nowserve.go, SkipRule). It waits on
-// PR #393's export, stage.SkippedFiles: until that is merged here it is nil, and no file counts as skipped, which can
-// only make a warm start NOT RUN.
-var stageSkipRule SkipRule
+// stageSkipRule is the stage package's own rule of the files the engine does not load (nowserve.go, SkipRule), its
+// export of PR #393: the files staging skips with no line.
+var stageSkipRule SkipRule = stage.SkippedFiles
 
 // warmOf reads the warm start's evidence (the ruling 1(b) on #376): the Instance's image digest, the files that must
 // each show present and matching (ExpectedWarmFiles: the identity record's list less what the stager skips by the

@@ -217,18 +217,25 @@ func TestTheWarmStartsReasonWordsAreInTheStagersFormats(t *testing.T) {
 		})
 	}
 	want := map[string]string{StagedAlreadyVerified: "image %s: " + StagedAlreadyVerified, StagedByAnother: "image %s: " + StagedByAnother,
-		StagedPresentMatching: "checkpoint file %s: " + StagedPresentMatching}
+		StagedPresentMatching: "checkpoint file %s: " + StagedPresentMatching, StagedFailedCheck: "image %s: " + StagedFailedCheck + " (%v): staging it again"}
+	pinned := []string{}
 	for reason, format := range want {
+		pinned = append(pinned, format)
 		if !slices.Contains(formats, format) {
 			t.Errorf("the stager logs no %q (the reason %q); its formats: %q", format, reason, formats)
 		}
 	}
 	for _, f := range formats {
-		for _, loose := range []string{"already staged", "another Allocation", "present and"} {
-			if strings.Contains(f, loose) && !slices.Contains([]string{want[StagedAlreadyVerified], want[StagedByAnother], want[StagedPresentMatching]}, f) {
+		for _, loose := range []string{"already staged", "another Allocation", "present and", "failed its check"} {
+			if strings.Contains(f, loose) && !slices.Contains(pinned, f) {
 				t.Errorf("the stager logs %q, near the reason words and not one of the pinned lines", f)
 			}
 		}
+	}
+	// The parser reads the failed check's line as one, whatever its error says.
+	line := "stage: " + strings.Replace(strings.Replace(want[StagedFailedCheck], "%s", "sha256:"+strings.Repeat("ab", 32), 1), "%v", "the record says "+StagedAlreadyVerified, 1)
+	if got := ParseAgentLog([]byte(line)); len(got) != 1 || got[0].Kind != LineFailedCheck {
+		t.Errorf("the failed check's line %q reads as %+v", line, got)
 	}
 }
 

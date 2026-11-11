@@ -473,6 +473,10 @@ const (
 	StagedByAnother = "staged by another Allocation"
 	// StagedPresentMatching is one checkpoint file found present with its listed SHA-256.
 	StagedPresentMatching = "present and matching"
+	// StagedFailedCheck is an image found staged whose check against its integrity record failed, staged again
+	// ("image <digest>: failed its check (<error>): staging it again"): whatever line follows, the staged image was not
+	// sound, so it is no warm start, and a following StagedByAnother would otherwise read as one.
+	StagedFailedCheck = "failed its check"
 )
 
 // The agent's own messages the warm start's check reads, each the msg of one slog line of the agent (pinned to their
@@ -539,7 +543,7 @@ func (e *WarmUnshownError) counts() string {
 	case e.NotWhole:
 		return "the log read is not the whole of the agent's first start to its first worker"
 	case e.Retried:
-		return "the first staging was built, failed or tried again: not the first attempt's evidence"
+		return "the first staging was built, failed a check or was tried again: not the first attempt's evidence"
 	}
 	return fmt.Sprintf("the image %s: %t; checkpoint files %s: %d of %d", StagedAlreadyVerified, e.ImageShown, StagedPresentMatching, e.FilesShown, e.FilesOf)
 }
@@ -555,6 +559,7 @@ const (
 	LineStageFailed = "staging-failed"
 	LineWorker      = "worker-started"
 	LineImage       = "image"
+	LineFailedCheck = "image-failed-check"
 	LineFile        = "file"
 	LineOther       = "other"
 )
@@ -619,6 +624,9 @@ func parseAgentLine(l string) AgentLogLine {
 		return AgentLogLine{Kind: LineWorker}
 	case msg != "" && strings.Contains(agentPreStartLevel, level) && level != "" && slicesContains(AgentPreStartMsgs, msg):
 		return AgentLogLine{Kind: LinePreStart}
+	}
+	if strings.HasPrefix(strings.TrimSpace(l), "stage: image ") && strings.Contains(l, ": "+StagedFailedCheck+" ") {
+		return AgentLogLine{Kind: LineFailedCheck}
 	}
 	kind, reason := "", ""
 	for _, r := range []string{StagedAlreadyVerified, StagedByAnother, StagedPresentMatching} {
@@ -689,8 +697,8 @@ func ExpectedWarmFiles(files []agentapi.FileDigest, loadFormat string, skip Skip
 //     (AgentPreStartMsgs), and the read reaches the end of the first staging;
 //   - the window is that first execution's first staging: from the start line to the first of a worker's start
 //     (AgentWorkerMsg, which comes only once staging is done) and a second start line (a second execution);
-//   - in it, the first attempt alone: no image build, no failed attempt, and exactly one image line, since a silent
-//     cancel that got past the image check leaves a second one;
+//   - in it, the first attempt alone: no image build, no failed attempt, no failed image check (StagedFailedCheck), and
+//     exactly one image line, since a silent cancel that got past the image check leaves a second one;
 //   - that one image line names the Instance's image digest, and for each expected file (ExpectedWarmFiles) a file
 //     line names it; a line naming another digest or file shows nothing.
 func warmStartShownByTheAgentsOwnLog(w WarmObs) *WarmUnshownError {
@@ -721,7 +729,7 @@ func warmStartShownByTheAgentsOwnLog(w WarmObs) *WarmUnshownError {
 	named := map[string]bool{}
 	for _, l := range w.Log[i+1 : end] {
 		switch l.Kind {
-		case LineBuild, LineStageFailed:
+		case LineBuild, LineStageFailed, LineFailedCheck:
 			e.Retried = true
 		case LineImage:
 			images++
