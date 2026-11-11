@@ -30,8 +30,10 @@ import (
 )
 
 // finalRun is a final-end test's start: one running Allocation adopted by A,
-// which leads, B standing by, both relays up and pinned, and a serving stream
-// across them.
+// which leads, both relays up and pinned, bytes across the control relay and
+// a serving stream across the serving one; B, A's successor, stands by from
+// the start only where its lead cannot race the final end (item 9), and is
+// started otherwise only once the final end is observed (startB).
 type finalRun struct {
 	t      *testing.T
 	g      *rig
@@ -44,9 +46,12 @@ type finalRun struct {
 	s      *stream
 	own    int
 	before leaseRecord
+	// cut is set once the serving stream was cut where a cut is allowed
+	// (replay).
+	cut bool
 }
 
-func startFinal(t *testing.T, name string, rule func(a *realCtl) func(r *tapReq) tapAction) *finalRun {
+func startFinal(t *testing.T, name string, rule func(a *realCtl) func(r *tapReq) tapAction, standby bool) *finalRun {
 	t.Helper()
 	f := &finalRun{t: t, g: newRig(t)}
 	g := f.g
@@ -72,13 +77,23 @@ func startFinal(t *testing.T, name string, rule func(a *realCtl) func(r *tapReq)
 	f.pins = g.k.pins(f.up)
 	f.s = g.w.openStream(f.j, serving)
 	f.s.mustEcho(64<<10, "before the final end")
-	f.cb = g.startController("b", f.p.name, g.tap.path)
-	f.cb.waitLog(logAcquiring)
+	g.w.roundTrip(f.j, control, 16<<10)
+	if standby {
+		f.startB()
+	}
 	waitFor(t, time.Minute, "both relays' srun steps logged", func() bool { return len(g.w.sruns(f.j.id)) == 2 })
 	if err := g.w.plat.SetStepLimit(atoi(t, f.j.id), 2); err != nil {
 		t.Fatal(err)
 	}
 	return f
+}
+
+// startB starts B, A's successor, and waits until it tries to take the
+// Lease.
+func (f *finalRun) startB() {
+	f.t.Helper()
+	f.cb = f.g.startController("b", f.p.name, f.g.tap.path)
+	f.cb.waitLog(logAcquiring)
 }
 
 // endControl ends the control relay's ssh through its verified pin: its
@@ -102,16 +117,18 @@ func (f *finalRun) waitFinal() {
 }
 
 // endWhileLeaderless kills A through its pidfd and then produces the final
-// end, which the keeper records while no controller leads: A is gone, and B
-// has sent nothing and does not hold the Lease.
+// end, which the keeper records while no controller leads: A is gone, B is
+// not started yet, and the Lease is still dead A's. The final end is
+// observed at the keeper before anything else happens, so no successor can
+// lead before it.
 func (f *finalRun) endWhileLeaderless() {
 	f.t.Helper()
+	if f.cb != nil {
+		f.t.Fatal("B was started before the final end: its lead would race it")
+	}
 	f.ca.kill()
 	f.endControl()
 	f.waitFinal()
-	if n := len(f.g.tap.requests(from(f.cb.pid()))); n != 0 {
-		f.t.Fatalf("B sent %d requests before the final end was recorded: it led", n)
-	}
 	if l := f.g.api.lease(f.t, f.p.name); l.holder != f.before.holder {
 		f.t.Fatalf("the Lease %+v changed hands before the final end was recorded, was %+v", l, f.before)
 	}
@@ -133,8 +150,11 @@ func endIn(r *wire.Report, uid string) (wire.FinalEnd, bool) {
 }
 
 // replay waits for B's first set answered with the control relay's final end,
-// checks the end, and returns it.
-func (f *finalRun) replay() wire.FinalEnd {
+// checks the end, and returns it. The serving stream carries bytes
+// meanwhile; with cutOK, a cut of it is allowed (B may cancel the
+// Allocation's job first), and the stream is then left as it is (f.cut),
+// for the caller to check what crossed as a prefix.
+func (f *finalRun) replay(cutOK bool) wire.FinalEnd {
 	f.t.Helper()
 	b := f.cb.pid()
 	end := time.Now().Add(2 * time.Minute)
@@ -148,7 +168,12 @@ func (f *finalRun) replay() wire.FinalEnd {
 		if time.Now().After(end) {
 			f.t.Fatal("no set of B's was answered with the control relay's final end within 2 min")
 		}
-		f.s.mustEcho(8<<10, "while B takes over")
+		switch {
+		case !cutOK:
+			f.s.mustEcho(8<<10, "while B takes over")
+		case !f.cut:
+			f.cut = f.s.echo(8<<10, 10*time.Second) != nil
+		}
 		time.Sleep(200 * time.Millisecond)
 	}
 	e, _ := endIn(r.report, f.j.uid)
@@ -203,14 +228,15 @@ func (f *finalRun) newEpoch() int64 {
 }
 
 // A final end survives a controller restart: the keeper records it while no
-// controller leads (A KILLed, B not leading yet), and replays it to B, the
-// next leader, which writes RelayEndedForGood on the Allocation, raises
+// controller leads (A KILLed; B, its successor, is started only once the
+// keeper's status shows the end), and replays it to B, the next leader, which writes RelayEndedForGood on the Allocation, raises
 // RelayFailed once, and acknowledges the end as marked; the keeper then
 // reports it no more. The serving relay and its stream run on, whole.
 func TestAFinalEndSurvivesARealControllerRestart(t *testing.T) {
-	f := startFinal(t, "kp-fins", nil)
+	f := startFinal(t, "kp-fins", nil, false)
 	f.endWhileLeaderless()
-	e := f.replay()
+	f.startB()
+	e := f.replay(false)
 	epoch := f.newEpoch()
 	ack := f.ackOf(f.cb.pid(), e, "B's acknowledgement of the replayed end")
 	if ack.ack.Outcome != wire.OutcomeMarked || ack.ack.Reason != "" || ack.ack.LeaseEpoch != epoch || ack.acked == nil || !ack.acked.Decided {
@@ -243,12 +269,15 @@ func TestAFinalEndSurvivesARealControllerRestart(t *testing.T) {
 // A final end whose Allocation was deleted before the replay: the end is
 // recorded while no controller leads, and the Allocation is then deleted (its
 // finalizer keeps it, being deleted); meanwhile the keeper keeps its relays
-// and the stream runs on (HBEP-6, No leader). B, the next leader, acknowledges
-// the end as refused, deleted, writes no mark and raises no RelayFailed, and
-// the keeper reports the end no more. B's first reconcile of the deleting
-// Allocation cancels its job, which then cuts the stream.
+// and the stream runs on (HBEP-6, No leader). B is started only once both
+// are observed, the end at the keeper and the deletion in the API server.
+// B, the next leader, acknowledges the end as refused, deleted, writes no
+// mark and raises no RelayFailed, and the keeper reports the end no more.
+// B's first reconcile of the deleting Allocation cancels its job, which cuts
+// the stream, before B's report or after it: either way the bytes that
+// crossed are a whole, in-order prefix of those sent.
 func TestAFinalEndOfADeletedAllocationIsRefusedByTheRealNextLeader(t *testing.T) {
-	f := startFinal(t, "kp-find", nil)
+	f := startFinal(t, "kp-find", nil, false)
 	f.endWhileLeaderless()
 	if err := f.g.api.c.Delete(context.Background(), f.a); err != nil {
 		t.Fatal(err)
@@ -260,7 +289,8 @@ func TestAFinalEndOfADeletedAllocationIsRefusedByTheRealNextLeader(t *testing.T)
 	for range 3 {
 		f.s.mustEcho(32<<10, "after the Allocation's deletion, with no leader")
 	}
-	e := f.replay()
+	f.startB()
+	e := f.replay(true)
 	epoch := f.newEpoch()
 	ack := f.ackOf(f.cb.pid(), e, "B's acknowledgement of the deleted Allocation's end")
 	if ack.ack.Outcome != wire.OutcomeRefused || ack.ack.Reason != wire.AckDeleted || ack.ack.LeaseEpoch != epoch || ack.acked == nil {
@@ -299,7 +329,9 @@ func TestAFinalEndOfADeletedAllocationIsRefusedByTheRealNextLeader(t *testing.T)
 	}
 	f.g.epochsOf("B", f.cb.pid(), epoch)
 	// Then whatever the stream shows: B cancels the deleting Allocation's
-	// job, which ends the relays.
+	// job, which ends the relays; a cut found during the replay is checked
+	// here too (cut's first echo fails at once), as a prefix of the bytes
+	// sent, every echoed one among them.
 	waitFor(t, 2*time.Minute, "the deleted Allocation's job ended", func() bool {
 		jb, ok := f.g.w.plat.Job(atoi(t, f.j.id))
 		return ok && jb.State != "RUNNING"
@@ -330,7 +362,7 @@ func TestACrashAfterTheMarkRaisesRelayFailedOnceWithRealControllers(t *testing.T
 			}
 			return tapPass
 		}
-	})
+	}, true)
 	f.endControl()
 	held := f.g.tap.waitReq(t, time.Minute, "A's acknowledgement held by the tap", func(r *tapReq) bool {
 		return r.pid == f.ca.pid() && r.ack != nil && r.action == tapHold
@@ -350,7 +382,7 @@ func TestACrashAfterTheMarkRaisesRelayFailedOnceWithRealControllers(t *testing.T
 	waitFor(t, time.Minute, "A's RelayFailed Event in the API server", func() bool { return f.g.api.relayFailedEvents(t, allocNS, string(f.a.UID)) >= 1 })
 	f.ca.kill()
 	f.s.mustEcho(32<<10, "after A's KILL")
-	e := f.replay()
+	e := f.replay(false)
 	if e.Epoch != h.ack.Epoch || e.Seq != h.ack.Seq {
 		t.Errorf("the end replayed to B %+v is not the one A acknowledged, %+v", e, *h.ack)
 	}

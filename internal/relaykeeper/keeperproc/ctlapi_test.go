@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -92,10 +93,10 @@ func startAPIServer(t *testing.T) *apiServer {
 			APIServer: &envtest.APIServer{CertDir: certDir},
 		},
 	}
-	cfg, err := env.Start()
-	if err != nil {
-		t.Fatalf("start the API server: %v", err)
-	}
+	// The stop is registered before the start: a start that fails after
+	// etcd or kube-apiserver is up (namespace readiness, the CRDs' install)
+	// still stops them, and the checks below still run. Stopping a server
+	// that never started is a no-op.
 	t.Cleanup(func() {
 		if err := env.Stop(); err != nil {
 			t.Errorf("stop the API server: %v", err)
@@ -109,6 +110,10 @@ func startAPIServer(t *testing.T) *apiServer {
 			t.Errorf("system port check: %v", err)
 		}
 	})
+	cfg, err := env.Start()
+	if err != nil {
+		t.Fatalf("start the API server: %v", err)
+	}
 	if len(env.CRDs) != 5 {
 		t.Fatalf("installed %d CRDs, want the 5 of config/crd", len(env.CRDs))
 	}
@@ -182,6 +187,31 @@ func (a *apiServer) waitLease(t *testing.T, provider, what string, d time.Durati
 		return cond(r)
 	})
 	return r
+}
+
+// releaseUnder writes a release record on the Provider's Lease, as
+// client-go's elector writes one at its release (no holder, leaseTransitions
+// kept, a duration of 1 s, both times now): the Lease is taken from under its
+// holder, and another copy can acquire it at once, one epoch up. The holder
+// must not renew meanwhile (a test pauses it first); a conflict is read
+// again.
+func (a *apiServer) releaseUnder(t *testing.T, provider string) {
+	t.Helper()
+	key := client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: v1alpha1.ProviderLeaseName(provider)}
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var l coordinationv1.Lease
+		if err := a.c.Get(context.Background(), key, &l); err != nil {
+			return err
+		}
+		now := metav1.NewMicroTime(time.Now())
+		none, one := "", int32(1)
+		l.Spec.HolderIdentity, l.Spec.LeaseDurationSeconds = &none, &one
+		l.Spec.AcquireTime, l.Spec.RenewTime = &now, &now
+		return a.c.Update(context.Background(), &l)
+	})
+	if err != nil {
+		t.Fatalf("write a release record on Provider %s's Lease: %v", provider, err)
+	}
 }
 
 // ready is the Provider's Ready condition, and whether it has one.
