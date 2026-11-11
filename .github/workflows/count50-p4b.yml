@@ -43,6 +43,7 @@ jobs:
           - TestARealControllerWithItsKeeperSocketMissingIsUnavailableAndAdmitsNothing
           - TestAStaleRealControllersAcknowledgementAndSetAreRefusedForTheirEpoch
           - TestARealLeaderStopsSendingBeforeItReleasesTheLease
+          - TestARealLeaderWithAnAcknowledgementInFlightStopsSendingBeforeItReleasesTheLease
     steps:
       - name: Check out the PR's head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -150,8 +151,8 @@ jobs:
           # Item 13: Ready is not set to RelayKeeperUnavailable.
           - id: unavailable-not-set
             file: internal/providerctl/providerstatus.go
-            from: "\tif why := l.s.keeperUnavailable(now); why != \"\" {\n"
-            to: "\tif why := l.s.keeperUnavailable(now); false && why != \"\" {\n"
+            from: "\tif keeper.unavailable != \"\" {\n"
+            to: "\tif false && keeper.unavailable != \"\" {\n"
             tests: TestARealControllerWithItsKeeperSocketMissingIsUnavailableAndAdmitsNothing
           # Item 13: a login_host refusal does not reach the claim, so Ready names no holder.
           - id: login-host-refusal-dropped
