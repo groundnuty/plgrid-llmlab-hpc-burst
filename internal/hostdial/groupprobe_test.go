@@ -130,6 +130,12 @@ func TestAStartOnAKernelThatFailsTheProbeIsRefusedAndStartsNothing(t *testing.T)
 	if cmd.Process != nil {
 		t.Error("a relay was started although the probe failed")
 	}
+	// The failure is not remembered: the next start, on the same kernel, is
+	// refused again.
+	cmd2 := exec.Command("cat")
+	if p, err := startGuardedProcess(cmd2, log, killGroup); p != nil || err == nil || cmd2.Process != nil {
+		t.Fatalf("a second start on the same kernel: %v, %v (started %v); want it refused too", p, err, cmd2.Process != nil)
+	}
 	restore()
 	cmd = exec.Command("cat")
 	p, err = startGuardedProcess(cmd, log, killGroup)

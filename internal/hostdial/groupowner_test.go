@@ -8,6 +8,8 @@ package hostdial_test
 // are swapped before the Owner starts and restored after it stopped.
 
 import (
+	"context"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -19,6 +21,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/hostdial"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 type groupCall struct {
@@ -94,7 +97,8 @@ func TestAnOwnersStopThatIsRefusedLeavesTheRelaysRunningAndDropReturns(t *testin
 	dir := t.TempDir()
 	jobs := shellJobs{}
 	tg := shellTarget(2, "hb-relay-refuse-0123456789ab", writeScript(t, dir, "relay.sh", sleepRelaySh), dir, "", jobs)
-	own := shellOwner(t, hostdial.OwnerOptions{})
+	logs := &lockedBuffer{}
+	own := loggedOwner(t, hostdial.OwnerOptions{}, logs)
 	own.Want(tg)
 	up := waitUp(t, own, tg.Tag)
 	for ch, r := range up {
@@ -125,4 +129,64 @@ func TestAnOwnersStopThatIsRefusedLeavesTheRelaysRunningAndDropReturns(t *testin
 		}
 	}
 	failing.Store(false)
+	// Each relay's end is recorded as retried, with the stop's cause, and the
+	// Owner says that the relay may still run.
+	out := logs.String()
+	for _, want := range []string{"a relay's ssh could not be stopped and may still run", "end=retried", "guard=leader-checkable"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the Owner's log lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+// lockedBuffer is a log sink the Owner's goroutines write and the test reads.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// loggedOwner is shellOwner (options_test.go) with the Owner's log going to
+// logs instead of the test's output.
+func loggedOwner(t *testing.T, o hostdial.OwnerOptions, logs *lockedBuffer) *hostdial.Owner {
+	t.Helper()
+	o.Ports = map[agentapi.RelayChannel]int{control: 30000, serving: 30001}
+	o.Epoch = epoch(1)
+	if o.Slots == nil {
+		o.Slots = hostdial.NewSlots(0)
+	}
+	o.MinBackoff, o.MaxBackoff, o.StopGrace = 50*time.Millisecond, 200*time.Millisecond, 5*time.Second
+	o.Logger = slog.New(slog.NewTextHandler(logs, nil))
+	own, err := hostdial.NewOwner(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := own.Start(ctx); err != nil {
+			t.Errorf("the relay owner: %v", err)
+		}
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Error("the relay owner did not stop")
+		}
+	})
+	return own
 }
