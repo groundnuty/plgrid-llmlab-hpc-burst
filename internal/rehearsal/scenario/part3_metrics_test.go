@@ -6,141 +6,22 @@ package scenario_test
 // (Metrics), written here, not read from the code.
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"sort"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/obscheck"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
-// sample is one line of Prometheus's text format.
-type sample struct {
-	name   string
-	labels map[string]string
-	value  float64
-}
-
-// parseExposition reads Prometheus's text format: comments are skipped, and
-// each sample line is name{label="value",...} value.
-func parseExposition(text string) ([]sample, error) {
-	var out []sample
-	sc := bufio.NewScanner(strings.NewReader(text))
-	sc.Buffer(make([]byte, 1<<20), 1<<20)
-	for sc.Scan() {
-		l := strings.TrimSpace(sc.Text())
-		if l == "" || strings.HasPrefix(l, "#") {
-			continue
-		}
-		s := sample{labels: map[string]string{}}
-		rest := l
-		if i := strings.IndexAny(l, "{ "); i >= 0 && l[i] == '{' {
-			s.name = l[:i]
-			rest = l[i+1:]
-			for {
-				if strings.HasPrefix(rest, "}") {
-					rest = rest[1:]
-					break
-				}
-				eq := strings.Index(rest, `="`)
-				if eq < 0 {
-					return nil, fmt.Errorf("a label without a value: %q", l)
-				}
-				key := strings.TrimPrefix(rest[:eq], ",")
-				rest = rest[eq+2:]
-				var v strings.Builder
-				for i := 0; ; i++ {
-					if i >= len(rest) {
-						return nil, fmt.Errorf("an unterminated label value: %q", l)
-					}
-					c := rest[i]
-					if c == '\\' && i+1 < len(rest) {
-						switch rest[i+1] {
-						case 'n':
-							v.WriteByte('\n')
-						default:
-							v.WriteByte(rest[i+1])
-						}
-						i++
-						continue
-					}
-					if c == '"' {
-						rest = rest[i+1:]
-						break
-					}
-					v.WriteByte(c)
-				}
-				s.labels[key] = v.String()
-				rest = strings.TrimPrefix(rest, ",")
-			}
-		} else if i >= 0 {
-			s.name, rest = l[:i], l[i:]
-		} else {
-			return nil, fmt.Errorf("a line with no value: %q", l)
-		}
-		f := strings.Fields(rest)
-		if len(f) == 0 {
-			return nil, fmt.Errorf("a line with no value: %q", l)
-		}
-		v, err := strconv.ParseFloat(f[0], 64)
-		if err != nil {
-			return nil, fmt.Errorf("value of %q: %v", l, err)
-		}
-		s.value = v
-		out = append(out, s)
-	}
-	return out, sc.Err()
-}
-
-// scrape reads and parses one /metrics; ok is false when it could not.
-func scrape(url string) ([]sample, error) {
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status %d", resp.StatusCode)
-	}
-	return parseExposition(string(b))
-}
-
-// find returns the samples named name whose labels include want.
-func find(ss []sample, name string, want map[string]string) []sample {
-	var out []sample
-	for _, s := range ss {
-		if s.name != name {
-			continue
-		}
-		ok := true
-		for k, v := range want {
-			if s.labels[k] != v {
-				ok = false
-				break
-			}
-		}
-		if ok {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
-func sum(ss []sample) float64 {
+func sum(ss []obscheck.Sample) float64 {
 	var t float64
 	for _, s := range ss {
-		t += s.value
+		t += s.Value
 	}
 	return t
 }
@@ -161,7 +42,7 @@ func (p3 *part3) frontMetricsBothKinds(d *depRun) {
 	r := p3.rig
 	r.t.Helper()
 	url := r.ports.URL(4, "/metrics")
-	before, err := scrape(url)
+	before, err := obscheck.Scrape(url)
 	if err != nil {
 		r.t.Fatalf("the front's /metrics: %v", err)
 	}
@@ -194,7 +75,7 @@ func (p3 *part3) frontMetricsBothKinds(d *depRun) {
 		p3.attribute("a streamed chat request to "+tg.kind, s.Reply, srow, tg.want)
 		tg.rows = []stack.UsageRow{row, srow}
 	}
-	after, err := scrape(url)
+	after, err := obscheck.Scrape(url)
 	if err != nil {
 		r.t.Fatalf("the front's /metrics: %v", err)
 	}
@@ -206,7 +87,7 @@ func (p3 *part3) frontMetricsBothKinds(d *depRun) {
 			continue
 		}
 		labels := map[string]string{"code": "200", "endpoint": "chat", "provider": prov, "model_deployment": dep}
-		if got := sum(find(after, "hpcburst_front_requests_total", labels)) - sum(find(before, "hpcburst_front_requests_total", labels)); got != 2 {
+		if got := sum(obscheck.Find(after, "hpcburst_front_requests_total", labels)) - sum(obscheck.Find(before, "hpcburst_front_requests_total", labels)); got != 2 {
 			r.t.Errorf("%s: hpcburst_front_requests_total%v rose by %v across its 2 requests", tg.kind, labels, got)
 		}
 		firsts := 0
@@ -216,140 +97,30 @@ func (p3 *part3) frontMetricsBothKinds(d *depRun) {
 			}
 		}
 		tl := map[string]string{"provider": prov, "model_deployment": dep, "endpoint": "chat"}
-		got := sum(find(after, "hpcburst_front_time_to_first_token_seconds_count", tl)) - sum(find(before, "hpcburst_front_time_to_first_token_seconds_count", tl))
+		got := sum(obscheck.Find(after, "hpcburst_front_time_to_first_token_seconds_count", tl)) - sum(obscheck.Find(before, "hpcburst_front_time_to_first_token_seconds_count", tl))
 		if firsts == 0 || got != float64(firsts) {
 			r.t.Errorf("%s: hpcburst_front_time_to_first_token_seconds_count%v rose by %v; %d of its records have a first token", tg.kind, tl, got, firsts)
 		}
 		for _, c := range frontCuts {
-			if len(find(after, "hpcburst_front_cuts_total", map[string]string{"cut_by": c, "provider": prov, "model_deployment": dep})) != 1 {
+			if len(obscheck.Find(after, "hpcburst_front_cuts_total", map[string]string{"cut_by": c, "provider": prov, "model_deployment": dep})) != 1 {
 				r.t.Errorf("%s: no hpcburst_front_cuts_total series for cut_by %s: a count of the front's own events starts at 0 (HBEP-8)", tg.kind, c)
 			}
 		}
-		if len(find(after, "hpcburst_front_pauses_total", map[string]string{"provider": prov, "model_deployment": dep})) != 1 {
+		if len(obscheck.Find(after, "hpcburst_front_pauses_total", map[string]string{"provider": prov, "model_deployment": dep})) != 1 {
 			r.t.Errorf("%s: no hpcburst_front_pauses_total series", tg.kind)
 		}
 		r.t.Logf("front metrics, %s: provider %s, model_deployment %s: requests +2, time to first token +%d", tg.kind, prov, dep, firsts)
 	}
 	recs := len(r.fc.UsageRows())
-	if got := sum(find(after, "hpcburst_usage_records_total", nil)); got < float64(recs) {
+	if got := sum(obscheck.Find(after, "hpcburst_usage_records_total", nil)); got < float64(recs) {
 		r.t.Errorf("hpcburst_usage_records_total is %v, below the %d records in the usage files", got, recs)
 	}
-	if got := find(after, "hpcburst_usage_write_failures_total", nil); len(got) != 1 || got[0].value != 0 {
+	if got := obscheck.Find(after, "hpcburst_usage_write_failures_total", nil); len(got) != 1 || got[0].Value != 0 {
 		r.t.Errorf("hpcburst_usage_write_failures_total: %v, want one series at 0", got)
 	}
-	if got := find(after, "hpcburst_usage_dir_free_bytes", nil); len(got) != 1 || got[0].value <= 0 {
+	if got := obscheck.Find(after, "hpcburst_usage_dir_free_bytes", nil); len(got) != 1 || got[0].Value <= 0 {
 		r.t.Errorf("hpcburst_usage_dir_free_bytes: %v, want one positive series", got)
 	}
-}
-
-// The engine gauges of HBEP-8's table (Metrics, Engine gauges per Instance):
-// the metric label of an unknown sample names them (Unknown samples).
-const (
-	gRunning   = "hpcburst_instance_running_requests"
-	gWaiting   = "hpcburst_instance_waiting_requests"
-	gTPOT      = "hpcburst_instance_time_per_output_token_seconds"
-	gPreempt   = "hpcburst_instance_preemptions_total"
-	gPrefixQ   = "hpcburst_instance_prefix_cache_queried_tokens_total"
-	gPrefixHit = "hpcburst_instance_prefix_cache_hit_tokens_total"
-	gKV        = "hpcburst_instance_kv_cache_usage_ratio"
-	gGenerated = "hpcburst_instance_generation_tokens_total"
-)
-
-var engineGauges = []string{gRunning, gWaiting, gTPOT, gPreempt, gPrefixQ, gPrefixHit, gKV, gGenerated}
-
-// notReported are the gauges the served engines do not export: the engine
-// double's no-prefix-cache-metrics mode (part3EngineModes).
-var notReported = map[string]bool{gPrefixQ: true, gPrefixHit: true}
-
-// seriesNames are a gauge's series in the exposition: a summary's _sum and
-// _count (HBEP-8: no quantiles), else its own name.
-func seriesNames(g string) []string {
-	if g == gTPOT {
-		return []string{g + "_sum", g + "_count"}
-	}
-	return []string{g}
-}
-
-// gaugeView is what the gauge check expects of one Instance.
-type gaugeView struct {
-	uid, namespace, name, deployment, provider, gpuModel string
-	// reported: the agent has reported fresh metrics, so each gauge is
-	// either present or unknown not_reported; otherwise each is unknown
-	// with staleReason.
-	reported    bool
-	staleReason string
-	// minGenerated is a lower bound on generation_tokens_total: the tokens
-	// the front saw the Instance generate.
-	minGenerated float64
-}
-
-// gaugeProblems holds one Instance's series to HBEP-8 (Unknown samples;
-// Which Instances have series): its info series with its descriptive labels;
-// for worker-0, each engine gauge either present, with the instance_uid,
-// worker, generation and worker_generation labels, or absent with one
-// hpcburst_instance_metrics_unknown naming it and its reason, never both and
-// never neither; not_reported for the gauges the engine does not export,
-// stale (or another given reason) for an Instance with no report; the read
-// time while it has one; and generation_tokens_total no lower than what was
-// generated.
-func gaugeProblems(ss []sample, v gaugeView) []string {
-	var out []string
-	info := find(ss, "hpcburst_instance_info", map[string]string{"instance_uid": v.uid})
-	if len(info) != 1 || info[0].value != 1 {
-		out = append(out, fmt.Sprintf("%d hpcburst_instance_info series for %s, want one at 1", len(info), v.uid))
-	} else {
-		for k, want := range map[string]string{"namespace": v.namespace, "instance": v.name, "model_deployment": v.deployment, "provider": v.provider, "gpu_model": v.gpuModel} {
-			if got := info[0].labels[k]; got != want {
-				out = append(out, fmt.Sprintf("hpcburst_instance_info's %s is %q, want %q", k, got, want))
-			}
-		}
-	}
-	w := map[string]string{"instance_uid": v.uid, "worker": "worker-0"}
-	for _, g := range engineGauges {
-		var present []sample
-		for _, n := range seriesNames(g) {
-			present = append(present, find(ss, n, w)...)
-		}
-		unknown := find(ss, "hpcburst_instance_metrics_unknown", map[string]string{"instance_uid": v.uid, "worker": "worker-0", "metric": g})
-		wantReason := ""
-		switch {
-		case !v.reported:
-			wantReason = v.staleReason
-		case notReported[g]:
-			wantReason = "not_reported"
-		}
-		if wantReason == "" {
-			if len(present) != len(seriesNames(g)) || len(unknown) != 0 {
-				out = append(out, fmt.Sprintf("%s: %d series and %d unknown samples, want it known", g, len(present), len(unknown)))
-				continue
-			}
-			for _, s := range present {
-				for _, k := range []string{"generation", "worker_generation"} {
-					if s.labels[k] == "" {
-						out = append(out, fmt.Sprintf("%s has no %s label: %v", s.name, k, s.labels))
-					}
-				}
-			}
-			continue
-		}
-		if len(present) != 0 || len(unknown) != 1 || unknown[0].labels["reason"] != wantReason || unknown[0].value != 1 {
-			reasons := []string{}
-			for _, u := range unknown {
-				reasons = append(reasons, u.labels["reason"])
-			}
-			out = append(out, fmt.Sprintf("%s: %d series and unknown samples with reasons %v, want it absent and unknown %s", g, len(present), reasons, wantReason))
-		}
-	}
-	if readAt := find(ss, "hpcburst_instance_metrics_read_timestamp_seconds", w); v.reported && len(readAt) != 1 {
-		out = append(out, fmt.Sprintf("%d read-time series for a worker with a fresh read", len(readAt)))
-	}
-	if v.reported {
-		gen := find(ss, gGenerated, w)
-		if len(gen) == 1 && gen[0].value < v.minGenerated {
-			out = append(out, fmt.Sprintf("%s is %v, below the %v tokens the front saw the Instance generate", gGenerated, gen[0].value, v.minGenerated))
-		}
-	}
-	return out
 }
 
 // served tokens is what the front saw an Instance generate: the completion
@@ -377,19 +148,19 @@ func (p3 *part3) gauges(d *depRun, when string) {
 	if min <= 0 {
 		r.t.Fatalf("gauges %s: the front saw Instance %s generate nothing yet: a read now would prove nothing", when, in.Name)
 	}
-	var ss []sample
+	var ss []obscheck.Sample
 	stack.WaitState(r.t, stack.WaitDeadline, "the controller's gauges to show the tokens the primary generated", func() (bool, string) {
 		var err error
-		ss, err = scrape(url)
+		ss, err = obscheck.Scrape(url)
 		if err != nil {
 			return false, err.Error()
 		}
-		g := find(ss, gGenerated, map[string]string{"instance_uid": string(in.UID), "worker": "worker-0"})
-		return len(g) == 1 && g[0].value >= min, fmt.Sprintf("%s: %v, want at least %v", gGenerated, g, min)
+		g := obscheck.Find(ss, obscheck.GaugeGenerated, map[string]string{"instance_uid": string(in.UID), "worker": "worker-0"})
+		return len(g) == 1 && g[0].Value >= min, fmt.Sprintf("%s: %v, want at least %v", obscheck.GaugeGenerated, g, min)
 	})
-	view := gaugeView{uid: string(in.UID), namespace: in.Namespace, name: in.Name, deployment: d.Name, provider: d.Provider,
-		gpuModel: "example-gpu", reported: true, minGenerated: min}
-	for _, p := range gaugeProblems(ss, view) {
+	view := obscheck.GaugeView{UID: string(in.UID), Namespace: in.Namespace, Name: in.Name, Deployment: d.Name, Provider: d.Provider,
+		GPUModel: "example-gpu", Reported: true, MinGenerated: min}
+	for _, p := range obscheck.GaugeProblems(ss, view) {
 		r.t.Errorf("gauges %s, primary %s: %s", when, in.Name, p)
 	}
 	var pending []string
@@ -398,9 +169,9 @@ func (p3 *part3) gauges(d *depRun, when string) {
 			continue
 		}
 		pending = append(pending, x.Name)
-		pv := gaugeView{uid: string(x.UID), namespace: x.Namespace, name: x.Name, deployment: d.Name, provider: d.Provider,
-			gpuModel: "example-gpu", staleReason: "stale"}
-		problems, none := pendingGaugeProblems(ss, pv)
+		pv := obscheck.GaugeView{UID: string(x.UID), Namespace: x.Namespace, Name: x.Name, Deployment: d.Name, Provider: d.Provider,
+			GPUModel: "example-gpu", StaleReason: "stale"}
+		problems, none := obscheck.PendingGaugeProblems(ss, pv)
 		for _, p := range problems {
 			r.t.Errorf("gauges %s, pending successor %s: %s", when, x.Name, p)
 		}
@@ -415,38 +186,7 @@ func (p3 *part3) gauges(d *depRun, when string) {
 	if !d.oneSlot && len(pending) == 0 {
 		r.t.Errorf("gauges %s: the queued path has no pending successor", when)
 	}
-	r.t.Logf("gauges %s: primary %s fresh (%s at least %v, prefix-cache not_reported); pending %v", when, in.Name, gGenerated, min, pending)
-}
-
-// pendingGaugeProblems holds an Instance whose agent has not registered to
-// HBEP-8: its info series; no engine series, since nothing was read; and,
-// when it has unknown samples, one for each engine metric, each stale. none
-// reports that it has no unknown sample at all (a FINDING, not a failure: see
-// gauges).
-func pendingGaugeProblems(ss []sample, v gaugeView) (problems []string, none bool) {
-	for _, p := range gaugeProblems(ss, v) {
-		if strings.Contains(p, "hpcburst_instance_info") {
-			problems = append(problems, p)
-		}
-	}
-	unknown := 0
-	for _, g := range engineGauges {
-		for _, n := range seriesNames(g) {
-			if s := find(ss, n, map[string]string{"instance_uid": v.uid}); len(s) > 0 {
-				problems = append(problems, fmt.Sprintf("%s has %d series, with no read of its engine", n, len(s)))
-			}
-		}
-		unknown += len(find(ss, "hpcburst_instance_metrics_unknown", map[string]string{"instance_uid": v.uid, "metric": g}))
-	}
-	if unknown == 0 {
-		return problems, true
-	}
-	for _, p := range gaugeProblems(ss, v) {
-		if !strings.Contains(p, "hpcburst_instance_info") {
-			problems = append(problems, p)
-		}
-	}
-	return problems, false
+	r.t.Logf("gauges %s: primary %s fresh (%s at least %v, prefix-cache not_reported); pending %v", when, in.Name, obscheck.GaugeGenerated, min, pending)
 }
 
 // restartScraper reads the controller's /metrics every 250 ms across step
@@ -454,7 +194,7 @@ func pendingGaugeProblems(ss []sample, v gaugeView) (problems []string, none boo
 type restartScraper struct {
 	stop, done chan struct{}
 	once       sync.Once
-	reads      [][]sample
+	reads      [][]obscheck.Sample
 }
 
 // startRestartScraper starts the scraper; the test's clean-up stops it, so a
@@ -466,10 +206,10 @@ func (p3 *part3) startRestartScraper(uid string) *restartScraper {
 	go func() {
 		defer close(s.done)
 		for {
-			if ss, err := scrape(url); err == nil {
-				var mine []sample
+			if ss, err := obscheck.Scrape(url); err == nil {
+				var mine []obscheck.Sample
 				for _, x := range ss {
-					if x.labels["instance_uid"] == uid {
+					if x.Labels["instance_uid"] == uid {
 						mine = append(mine, x)
 					}
 				}
@@ -493,70 +233,7 @@ func (s *restartScraper) halt() {
 	})
 }
 
-func (s *restartScraper) end() [][]sample {
+func (s *restartScraper) end() [][]obscheck.Sample {
 	s.halt()
 	return s.reads
-}
-
-// restartReadProblems holds every read of an Instance's gauges across a
-// controller restart to HBEP-8: in a read that has the Instance's info series,
-// each engine gauge of worker-0 is either known or absent with exactly one
-// unknown sample, never both and never neither, whatever the controller knows
-// at that read; a gauge the engine does not export is never known. An unknown
-// sample carries stale (no report yet since the restart), or not_reported on
-// a gauge the engine does not export; any other reason is a problem, and
-// agent_unreachable never fits here, since step (f) fails when the agent is
-// judged unreachable (HBEP-8, Unknown samples; Test plan). It counts
-// the reads that showed the gauges stale (no report yet, as after a restart)
-// and fresh, and the reads with no series of the Instance at all (unserved:
-// a controller that does not know the Instance yet), which hold no gauge
-// sample either.
-func restartReadProblems(reads [][]sample, uid string) (problems []string, stale, fresh, unserved int) {
-	w := map[string]string{"instance_uid": uid, "worker": "worker-0"}
-	for i, ss := range reads {
-		if len(find(ss, "hpcburst_instance_info", map[string]string{"instance_uid": uid})) == 0 {
-			unserved++
-			if len(ss) != 0 {
-				problems = append(problems, fmt.Sprintf("read %d: %d samples of the Instance with no info series", i, len(ss)))
-			}
-			continue
-		}
-		allStale, allKnown := true, true
-		for _, g := range engineGauges {
-			var present []sample
-			for _, n := range seriesNames(g) {
-				present = append(present, find(ss, n, w)...)
-			}
-			unknown := find(ss, "hpcburst_instance_metrics_unknown", map[string]string{"instance_uid": uid, "worker": "worker-0", "metric": g})
-			switch {
-			case len(unknown) == 1 && len(present) == 0:
-				reason := unknown[0].labels["reason"]
-				if reason != "stale" && (reason != "not_reported" || !notReported[g]) {
-					want := "stale"
-					if notReported[g] {
-						want = "stale or not_reported"
-					}
-					problems = append(problems, fmt.Sprintf("read %d: %s is unknown with reason %q, want %s", i, g, reason, want))
-				}
-				if reason != "not_reported" || !notReported[g] {
-					allKnown = false
-				}
-				if reason != "stale" {
-					allStale = false
-				}
-			case len(unknown) == 0 && len(present) == len(seriesNames(g)) && !notReported[g]:
-				allStale = false
-			default:
-				problems = append(problems, fmt.Sprintf("read %d: %s has %d series and %d unknown samples", i, g, len(present), len(unknown)))
-				allStale, allKnown = false, false
-			}
-		}
-		if allStale {
-			stale++
-		}
-		if allKnown {
-			fresh++
-		}
-	}
-	return problems, stale, fresh, unserved
 }
