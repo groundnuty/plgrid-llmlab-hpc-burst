@@ -22,7 +22,8 @@
 #   config/crd/, profiles/                  from the commit, as git archive gives them
 #
 # What it refuses (each before an archive is written):
-#   - a dirty checkout, or OUT inside it;
+#   - a dirty checkout, one whose .git is a file (a worktree: Go 1.26 stamps nothing there), or OUT inside
+#     the checkout;
 #   - a Go other than the pinned one;
 #   - with --tag, a tag that is missing, or that does not name this commit, or whose notes file
 #     docs/releases/TAG.md is missing or empty;
@@ -81,6 +82,9 @@ cd "$root"
 case $out/ in
   "$root"/*) die "OUT $out is inside the checkout $root: a file there would make the tree dirty, and every binary would report +dirty" ;;
 esac
+# Go 1.26 stamps no version, and no VCS information at all, in a git worktree or a submodule, where .git is
+# a file: the binaries would say (devel). A clone, as actions/checkout makes, has a .git directory.
+[ -d "$root/.git" ] || die "$root/.git is not a directory (a git worktree or a submodule?): Go 1.26 stamps no version in one, so its binaries would report (devel); build in a clone"
 [ -z "$(git status --porcelain)" ] || die "the checkout is not clean, so its binaries would report +dirty:
 $(git status --porcelain | head -5)"
 head=$(git rev-parse HEAD)
@@ -174,7 +178,7 @@ for b in "${HOST_BINARIES[@]}"; do
   got=$(awk '$1 == "mod" { print $3; exit }' <<< "$info")
   modified=$(awk '$1 == "build" && $2 ~ /^vcs\.modified=/ { sub(/^vcs\.modified=/, "", $2); print $2; exit }' <<< "$info")
   [ -n "$got" ] || die "$b has no main module version in its build information"
-  [ "$modified" = false ] || die "$b reports vcs.modified=${modified:-<missing>} ($got): the tree was not clean, or VCS stamping was off"
+  [ "$modified" = false ] || die "$b reports vcs.modified=${modified:-<missing>} ($got): the tree was not clean, or Go stamped no VCS information"
   [[ $got != *+dirty ]] || die "$b reports $got"
   if [ -n "$tag" ]; then
     [ "$got" = "$tag" ] || die "$b reports $got, and the tag is $tag (Go stamps a tag only on the commit it names, with a major version the module path allows)"
