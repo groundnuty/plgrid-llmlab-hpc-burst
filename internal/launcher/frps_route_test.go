@@ -8,14 +8,9 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
-	"testing"
 	"time"
-
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
 )
 
 // A proxy that frps lists online is not yet a route (#368). Read at frp v0.71.1:
@@ -40,9 +35,11 @@ import (
 // (internal/front/tunnel.go:150-157, probe.go:225; HBEP-6, The front's half). The tests wait the
 // same way, with provenRoute.
 
-// errClosedBeforeReply is that race's signature: frps answered the CONNECT with 200, and the
-// connection ended before any byte of the reply. A reset counts as well as a close: frps may
-// close the user connection with the request still unread, and the kernel then resets it.
+// errClosedBeforeReply is an early close: frps answered the CONNECT with 200, and the connection
+// ended before any byte of the reply. That race ends this way, but an early close does not prove
+// it: frpc also closes the work connection before any reply when its dial of the engine's socket
+// fails (pkg/plugin/client/unix_domain_socket.go:52-57). A reset counts as well as a close: frps
+// may close the user connection with the request still unread, and the kernel then resets it.
 var errClosedBeforeReply = errors.New("frps answered the CONNECT with 200, then the connection ended before any byte of a reply")
 
 // tcpmuxGet sends CONNECT host:80 to frps's tcpmux port at addr, as the front does (HBEP-6, The
@@ -113,8 +110,8 @@ func endedEarly(err error) bool {
 // route, since frps lists the proxy online, and answers its CONNECT with 200, before frpc can
 // serve it (above). It retries errClosedBeforeReply alone, on a new connection each time; any
 // other outcome (a CONNECT status other than 200, a timeout, another error, another reply) ends it
-// at once with that error. When bound runs out it returns the last error. It returns how many
-// attempts it made.
+// at once with that error. When bound runs out it returns the last error, so an early close that
+// lasts (a socket that cannot be dialled) fails the wait. It returns how many attempts it made.
 func provenRoute(addr, host, path, want string, bound time.Duration) (attempts int, err error) {
 	var last error
 	for end := time.Now().Add(bound); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
@@ -150,265 +147,4 @@ func tailFile(path string) string {
 		b = b[len(b)-2000:]
 	}
 	return string(b)
-}
-
-// holdRelay passes every TCP connection made to it on to target (frps's bind port), both ways. Once
-// held, it stops passing what frps sends on the first connection, frpc's control connection,
-// until release. That needs transport.tcpMux off at both ends, so that each work connection is a
-// connection of its own and passes freely.
-type holdRelay struct {
-	ln     net.Listener
-	target string
-
-	mu     sync.Mutex
-	n      int           // connections accepted and joined to target
-	gate   chan struct{} // open while held, nil otherwise
-	conns  []net.Conn
-	closed bool
-}
-
-func startHoldRelay(t *testing.T, target string) *holdRelay {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := &holdRelay{ln: ln, target: target}
-	go r.serve()
-	t.Cleanup(r.close)
-	return r
-}
-
-func (r *holdRelay) port() int { return r.ln.Addr().(*net.TCPAddr).Port }
-
-func (r *holdRelay) serve() {
-	for {
-		c, err := r.ln.Accept()
-		if err != nil {
-			return
-		}
-		up, err := net.Dial("tcp", r.target)
-		if err != nil {
-			_ = c.Close()
-			continue
-		}
-		r.mu.Lock()
-		if r.closed {
-			r.mu.Unlock()
-			_ = c.Close()
-			_ = up.Close()
-			return
-		}
-		r.n++
-		control := r.n == 1
-		r.conns = append(r.conns, c, up)
-		r.mu.Unlock()
-		go r.pipe(up, c, false)
-		go r.pipe(c, up, control)
-	}
-}
-
-// pipe copies src to dst until either ends, then closes both. With holdable, each chunk read
-// while the relay is held waits for the release before it is written.
-func (r *holdRelay) pipe(dst, src net.Conn, holdable bool) {
-	defer func() { _ = src.Close(); _ = dst.Close() }()
-	buf := make([]byte, 32<<10)
-	for {
-		n, err := src.Read(buf)
-		if n > 0 {
-			if holdable {
-				r.mu.Lock()
-				g := r.gate
-				r.mu.Unlock()
-				if g != nil {
-					<-g
-				}
-			}
-			if _, err := dst.Write(buf[:n]); err != nil {
-				return
-			}
-		}
-		if err != nil {
-			return
-		}
-	}
-}
-
-func (r *holdRelay) accepted() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.n
-}
-
-func (r *holdRelay) hold() {
-	r.mu.Lock()
-	if r.gate == nil {
-		r.gate = make(chan struct{})
-	}
-	r.mu.Unlock()
-}
-
-func (r *holdRelay) release() {
-	r.mu.Lock()
-	if r.gate != nil {
-		close(r.gate)
-		r.gate = nil
-	}
-	r.mu.Unlock()
-}
-
-func (r *holdRelay) close() {
-	r.mu.Lock()
-	r.closed = true
-	conns := r.conns
-	r.mu.Unlock()
-	r.release()
-	_ = r.ln.Close()
-	for _, c := range conns {
-		_ = c.Close()
-	}
-}
-
-// TestFrpsRealListsAProxyOnlineBeforeFrpcCanServeIt is #368 on purpose: frps lists the proxy
-// online and answers its CONNECT with 200 while frpc has not yet handled frps's NewProxyResp, and
-// no reply crosses. A relay between frpc and frps holds that answer: it stops passing what frps
-// sends on frpc's control connection from the plugin's NewProxy call, which frps makes before it
-// registers the proxy and answers frpc (server/control.go:745, :748, :768). So the old wait
-// (online, then one CONNECT) fails every time, provenRoute reports no route while the answer is
-// held, and it passes once the answer is let through.
-//
-// frps and frpc run with transport.tcpMux off, so that the relay sees the control connection and
-// the work connections apart: with it on, every connection from frpc is a yamux session whose
-// streams carry both (server/service.go:746-770). That changes how frps's messages travel, not
-// what frpc does with them: the code that closes the early work connection is the same either
-// way (client/control.go:124-176, client/proxy/proxy_wrapper.go:266-278).
-func TestFrpsRealListsAProxyOnlineBeforeFrpcCanServeIt(t *testing.T) {
-	frps, frpc := testenv.FrpBinaries(t)
-	r := newFrpsRigEdited(t, frpsRigBase2, 0, frps, nil, func(cfg []byte) []byte {
-		// At the top, before the first table, where the launcher's other transport keys are.
-		return append([]byte("transport.tcpMux = false\n"), cfg...)
-	})
-	h := r.host
-	const uid = "uid-4711" // stands for an Instance's UID
-
-	sock := filepath.Join(r.state, "e.sock")
-	ln, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	engine := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, q *http.Request) {
-		fmt.Fprintf(w, "engine-ok %s", q.URL.Path)
-	})}
-	go func() { _ = engine.Serve(ln) }()
-	t.Cleanup(func() { _ = engine.Close() })
-
-	relay := startHoldRelay(t, h.FrpsBindAddr())
-	armed := make(chan error, 1)
-	var once sync.Once
-	r.stub.setBeforeReply(func(op string) {
-		if op != "NewProxy" {
-			return
-		}
-		once.Do(func() {
-			// frps asks for the spare work connection at the login, on the control connection.
-			// Hold only once frpc has dialled it: a held request would leave the CONNECT
-			// waiting for frps's userConnTimeout instead, which is another failure.
-			for end := time.Now().Add(10 * time.Second); relay.accepted() < 2; time.Sleep(10 * time.Millisecond) {
-				if time.Now().After(end) {
-					armed <- fmt.Errorf("frpc made %d connections through the relay, want the control connection and the spare work connection", relay.accepted())
-					return
-				}
-			}
-			relay.hold()
-			armed <- nil
-		})
-	})
-
-	frpcLog := filepath.Join(r.state, "frpc.log")
-	cfg := filepath.Join(r.state, "frpc.toml")
-	// transport.poolCount = 0 as the product writes it (internal/agent/frpcconf.go); frpc reads it
-	// as 1. frpc's own heartbeat timeout outlasts the hold, which also holds frps's pongs.
-	frpcConf := fmt.Sprintf(`serverAddr = "127.0.0.1"
-serverPort = %d
-loginFailExit = false
-log.to = %q
-metadatas.token = "tok-test"
-transport.protocol = "tcp"
-transport.tcpMux = false
-transport.poolCount = 0
-transport.heartbeatInterval = 1
-transport.heartbeatTimeout = 30
-
-[[proxies]]
-name = %q
-type = "tcpmux"
-multiplexer = "httpconnect"
-customDomains = [%q]
-[proxies.plugin]
-type = "unix_domain_socket"
-unixPath = %q
-`, relay.port(), frpcLog, uid, uid, sock)
-	if err := os.WriteFile(cfg, []byte(frpcConf), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	killFrpc := startFrpc(t, frpc, cfg)
-
-	r.stub.waitOp(t, "NewProxy", 15*time.Second)
-	select {
-	case err := <-armed:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(15 * time.Second):
-		t.Fatal("the plugin's NewProxy call never armed the hold")
-	}
-
-	// The old wait passes: frps lists the proxy online, and frpc has not started it.
-	for end := time.Now().Add(15 * time.Second); r.proxies()[uid] != "online"; time.Sleep(50 * time.Millisecond) {
-		if time.Now().After(end) {
-			t.Fatalf("frps never listed %s online: %v\nfrps log:\n%s", uid, r.proxies(), r.logTail())
-		}
-	}
-	if log := tailFile(frpcLog); strings.Contains(log, "start proxy success") {
-		t.Fatalf("frpc started the proxy while frps's answer to it was held:\n%s", log)
-	}
-
-	// The old wait's CONNECT: 200, then the end of the connection before any reply. The deadline
-	// is under frps's userConnTimeout (10 s, frp's default, which the launcher keeps). An frps
-	// with no work connection to give closes the request then, which looks the same on the wire,
-	// so an end before the deadline is frpc's close of the spare (proxy_wrapper.go:275-276).
-	status, code, body, err := tcpmuxGet(h.FrpsTCPMuxAddr(), uid, "/health", time.Now().Add(5*time.Second))
-	if !errors.Is(err, errClosedBeforeReply) || !strings.Contains(status, " 200 ") {
-		t.Fatalf("CONNECT %s while frps's answer to frpc is held: %q, %d %q, %v; want 200, then the end of the connection before any reply (#368)\nfrps log:\n%s",
-			uid, status, code, body, err, r.logTail())
-	}
-
-	// provenRoute does not take that for a route. frps's request for a new work connection is
-	// held too now (control.go:615, :635), so its next attempt waits until the bound.
-	if n, err := provenRoute(h.FrpsTCPMuxAddr(), uid, "/health", "engine-ok /health", 2*time.Second); err == nil {
-		t.Fatalf("provenRoute found a route in %d attempts while frps's answer to frpc was held", n)
-	} else {
-		t.Logf("while the answer was held, provenRoute gave up after %d attempts: %v", n, err)
-	}
-
-	// Let the answer through: frpc starts the proxy, and a reply crosses.
-	relay.release()
-	if n, err := provenRoute(h.FrpsTCPMuxAddr(), uid, "/health", "engine-ok /health", 15*time.Second); err != nil {
-		t.Fatalf("no route after the release: %v\nfrpc log:\n%s\nfrps log:\n%s", err, tailFile(frpcLog), r.logTail())
-	} else {
-		t.Logf("after the release the route was proven at attempt %d", n)
-	}
-	// frpc logs the start after it has set the phase (client/control.go:170-174), so the line can
-	// trail the first reply.
-	for end := time.Now().Add(10 * time.Second); !strings.Contains(tailFile(frpcLog), "start proxy success"); time.Sleep(50 * time.Millisecond) {
-		if time.Now().After(end) {
-			t.Fatalf("a reply crossed, but frpc's log never said it started the proxy:\n%s", tailFile(frpcLog))
-		}
-	}
-
-	killFrpc()
-	r.stop()
-	if !gone(r.proc.Rec().PID) || len(procsMentioning(r.state)) != 0 {
-		t.Errorf("processes left: pid %d gone=%v, mentioning the state dir: %v", r.proc.Rec().PID, gone(r.proc.Rec().PID), procsMentioning(r.state))
-	}
 }

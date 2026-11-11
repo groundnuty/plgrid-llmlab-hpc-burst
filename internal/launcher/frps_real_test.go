@@ -224,11 +224,13 @@ unixPath = %q
 	// base+10 routes a CONNECT for the UID to the engine through the tunnel, and answers 404 for a
 	// UID with no proxy. frps lists the proxy online, and answers its CONNECT with 200, before frpc
 	// can take a connection for it (#368, frps_route_test.go), so the first reply is awaited as the
-	// front awaits its first passing probe; then every CONNECT crosses at the first try.
+	// front awaits its first passing probe; then every CONNECT crosses at the first try. An early
+	// close that provenRoute retries is not proof of that race: frpc closes the work connection
+	// the same way when its dial of the engine's socket fails.
 	if n, err := provenRoute(h.FrpsTCPMuxAddr(), uid, "/health", "engine-ok /health", 15*time.Second); err != nil {
 		t.Fatalf("%v\nfrpc log:\n%s\nfrps log:\n%s", err, tailFile(filepath.Join(r.state, "frpc.log")), r.logTail())
 	} else if n > 1 {
-		t.Logf("the first reply crossed at attempt %d: frps listed the proxy online before frpc had started it", n)
+		t.Logf("the first reply crossed at attempt %d, after %d early closes (200, then the end of the connection before any reply byte)", n, n-1)
 	}
 	if status, code, body, err := tcpmuxGet(h.FrpsTCPMuxAddr(), uid, "/health", time.Now().Add(10*time.Second)); err != nil || !strings.Contains(status, " 200 ") || code != http.StatusOK || body != "engine-ok /health" {
 		t.Errorf("CONNECT %s after the first reply: %q, %d %q, %v", uid, status, code, body, err)
