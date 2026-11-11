@@ -44,7 +44,7 @@ spec:
       gpuModel: A100 # HBEP-4 fixes the string. facts.partitions[name=plgrid-now].gres is "gpu:a100:8", the same node type as plgrid-gpu-a100 (facts.hardware.node_documented.value.accelerator, "8x NVIDIA A100-SXM4-40GB")
       cpuArch: x86_64 # facts.partitions[name=plgrid-now].arch
       maxTime: 1h # facts.partitions[name=plgrid-now].max_time, "01:00:00"
-      gpusPerNode: 8 # facts.partitions[name=plgrid-now].gres, "gpu:a100:8": the field is a node fact. The per-user cap of one GPU (facts.slurm.qos.value[name=plgrid-now].max_tres_per_user, "cpu=16,gres/gpu=1,mem=125G") is typed in qos below, maxGpusPerUser, and the most GPUs one Allocation may request is the smaller of the two, 1 (`@hpc-burst-science-agent`, 1 Nov 2026). PartitionTooShort, not the sizing, keeps Instances off this partition (see above)
+      gpusPerNode: 8 # facts.partitions[name=plgrid-now].gres, "gpu:a100:8": the field is a node fact. The per-user cap of one GPU (facts.slurm.qos.value[name=plgrid-now].max_tres_per_user, "cpu=16,gres/gpu=1,mem=125G") is typed in qos below, maxGpusPerUser, and the most GPUs one Allocation may request is the smaller of the two, 1 (`@hpc-burst-science-agent`, 1 Nov 2026). Under this profile Instances ARE placed on this partition (its 20m lead is under the 1h limit, header), each sized by that cap: one GPU
       cpusPerGpu: 16 # facts.hardware.node_documented.value.proportional_cpus_per_gpu, the same node type as plgrid-gpu-a100
       memPerGpu: 128000Mi # facts.hardware.node_documented.value.proportional_ram_per_gpu_mb, 128000 (the node's 1024000 divided by its 8 GPUs), as for plgrid-gpu-a100
       imageFormat: sandbox # facts.containers.apptainer_compute_nodes.value.plgrid-gpu-a100 (S1 probe 2: a SIF fails, a sandbox runs), the same node type as plgrid-gpu-a100 (facts.partitions[name=plgrid-now].gres is "gpu:a100:8"). Probe 2 ran on plgrid-gpu-a100 only, so the first run on plgrid-now is the measurement (issue #376, `@hpc-burst-science-agent`, 11 Nov 2026)
@@ -76,11 +76,9 @@ spec:
   # jobName.maxLength is measured, not a default: the conformance run on Athena plgrid-now of 1 Nov 2026
   # (step 5, a 56-character job name submitted and read back unchanged from squeue and from sacct; issue #93, comment 6557645735) is
   # its source, recorded as the fact
-  # facts.slurm.plgrid_now_conformance.value.job_name_56_characters_unchanged_in_squeue_and_sacct. The schema holds job-name rules per profile, not per partition, so this value covers
-  # plgrid-gpu-a100 too, which has not run the step. That is sound because Athena runs one Slurm
-  # configuration for all its partitions, and the read-back is the safety net against a partition-specific rename:
-  # a job whose name came back shortened is refused and cancelled (HBEP-4, Risks)
-  # (`@hpc-burst-science-agent`, option (b), 1 Nov 2026).
+  # facts.slurm.plgrid_now_conformance.value.job_name_56_characters_unchanged_in_squeue_and_sacct. The run was on this profile's own
+  # partition, and the read-back stays the safety net: a job whose name came back shortened is refused and
+  # cancelled (HBEP-4, Risks) (`@hpc-burst-science-agent`, option (b), 1 Nov 2026).
   jobName:
     maxLength: 56
 
