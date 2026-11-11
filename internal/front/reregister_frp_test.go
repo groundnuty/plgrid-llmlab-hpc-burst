@@ -99,6 +99,17 @@ func newPluggedTunFront(t *testing.T, edit func([]byte) []byte) (*tunFront, *fro
 	return f, slot
 }
 
+// waitDropped waits until frps no longer lists the UID's proxy online: the killed frpc's session is
+// gone, so the next "online" is the new frpc's registration, not the old one still listed.
+func (r *frpRig) waitDropped(uid types.UID) {
+	r.t.Helper()
+	for end := time.Now().Add(20 * time.Second); r.proxyStatus(string(uid)) == "online"; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(end) {
+			r.t.Fatalf("frps never dropped the killed frpc's proxy for %s\n%s", uid, r.logTail())
+		}
+	}
+}
+
 // waitUnregistered waits until the front no longer routes to the UID.
 func (f *tunFront) waitUnregistered(uid types.UID, why string) {
 	f.t.Helper()
@@ -169,11 +180,7 @@ func TestFrontRoutesNothingToAUIDRegisteredAgainUntilAProbePasses(t *testing.T) 
 				f.waitUnregistered(a, "after frps closed its proxy")
 			} else {
 				// The close is unheard: the stale registration stays until the next NewProxy.
-				for end := time.Now().Add(20 * time.Second); f.rig.proxyStatus(string(a)) == "online"; time.Sleep(20 * time.Millisecond) {
-					if time.Now().After(end) {
-						t.Fatal("frps never dropped the killed frpc's proxy")
-					}
-				}
+				f.rig.waitDropped(a)
 				if !f.tun.Registered(a) {
 					t.Fatal("the front lost the route although it heard no call")
 				}
@@ -262,6 +269,7 @@ func TestFrontRefusesARouteThroughARegistrationFrpcHasNotStarted(t *testing.T) {
 	}
 	slot.mu.Unlock()
 	p1.kill()
+	f.rig.waitDropped(a)
 	p2 := f.rig.startFrpcEdited(a, sock, dial2, noMux)
 	select {
 	case err := <-armed:
@@ -399,5 +407,47 @@ func TestFrpsRestartTakesEveryRouteAwayUntilEachProbePasses(t *testing.T) {
 	f.waitReprobed(b)
 	if status, body, _ := f.chat("s1"); status != http.StatusOK {
 		t.Fatalf("after both re-probes: %d %s", status, body)
+	}
+}
+
+// TestARealReconnectToADeadEngineReportsPathProbeFailingOnce: over the real frps and frpc, a ready
+// Instance with TunnelConnected True reconnects while its engine is dead (an OOM-killed engine). frps
+// lists the new proxy online, the front takes the route away at the new registration, and the
+// failing probes of the new registration report one PathProbeFailing, as HBEP-6's Reporting
+// promises, with the Instance never routable (the Fable review of #380).
+func TestARealReconnectToADeadEngineReportsPathProbeFailingOnce(t *testing.T) {
+	f, _ := newPluggedTunFront(t, nil)
+	dial, _ := f.rig.serveDialHome(ModeSSH)
+	f.tunDeployment(1)
+	key := newKey(t)
+	e, sock := f.rig.engine(key)
+	a := f.tunInstance("md-a", key)
+	p1 := f.rig.startFrpc(a, sock, dial)
+	f.rig.waitOnline(a, p1)
+	f.apply()
+	f.waitRegistered(a)
+
+	e.Set(enginetest.Behaviour{Health: http.StatusServiceUnavailable})
+	p1.kill()
+	f.rig.waitDropped(a)
+	p2 := f.rig.startFrpc(a, sock, dial)
+	f.rig.waitOnline(a, p2)
+	for end := time.Now().Add(20 * time.Second); len(f.events.failings()) == 0; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatalf("no PathProbeFailing after the reconnect to a dead engine\n%s", f.logs.String())
+		}
+		if f.tun.Registered(a) {
+			t.Fatal("the front routes to an Instance whose new registration fails its probes")
+		}
+		f.prober.Round(context.Background())
+	}
+	for i := 0; i < 3; i++ {
+		f.prober.Round(context.Background())
+	}
+	if got := f.events.failings(); len(got) != 1 || got[0].UID != a {
+		t.Fatalf("PathProbeFailing reported %d times (%v), want once for %s", len(got), got, a)
+	}
+	if f.tun.Registered(a) {
+		t.Fatal("the front routes to an Instance whose new registration fails its probes")
 	}
 }

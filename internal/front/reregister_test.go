@@ -533,3 +533,105 @@ func uidN(i int) string {
 }
 
 func pointerTo[T any](v T) *T { return &v }
+
+// postPlugin posts frps's call for op and the UID to the front's plugin, and requires an acceptance.
+func postPlugin(t *testing.T, h *frpsPlugin, op string, uid types.UID) {
+	t.Helper()
+	body := `{"version":"0.1.0","op":"` + op + `","content":{"user":{},"proxy_name":"` + string(uid) + `"}}`
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, agentapi.FrontFrpsPluginPath, strings.NewReader(body)))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"reject":false`) {
+		t.Fatalf("%s for %s: HTTP %d %s, want an acceptance", op, uid, w.Code, w.Body)
+	}
+}
+
+// TestAReconnectToADeadPathReportsPathProbeFailingOnce: a ready Instance whose TunnelConnected is
+// True registers again, and the engine behind the new registration is dead. The new registration
+// took the route away at once (Bump), so the probes' failures never meet a registration to take
+// away; the front still reports the loss, as HBEP-6's Reporting promises: one PathProbeFailing at
+// probeFailures failures in a row, and none after. The route stays away throughout. Once for a
+// NewProxy alone, and once for a CloseProxy then a NewProxy (frps closes the old session first).
+func TestAReconnectToADeadPathReportsPathProbeFailingOnce(t *testing.T) {
+	for _, ops := range [][]string{{opNewProxy}, {opCloseProxy, opNewProxy}} {
+		t.Run(strings.Join(ops, " then "), func(t *testing.T) {
+			m := startMuxDouble(t)
+			var mu sync.Mutex
+			insts := []v1alpha1.Instance{probeInstance("00000000-0000-4000-8000-000000000051", v1alpha1.InstanceReady, metav1.ConditionTrue)}
+			uid := insts[0].UID
+			m.set(uid, http.StatusOK)
+			p, tun, ev := newTestProber(t, m, clock.NewFake(t0), &insts, &mu)
+			h := &frpsPlugin{tun: tun, prober: p, log: discardLog()}
+			p.Round(context.Background())
+			if !tun.Registered(uid) {
+				t.Fatal("the first probe did not register the UID")
+			}
+			m.set(uid, http.StatusServiceUnavailable)
+			for _, op := range ops {
+				postPlugin(t, h, op, uid)
+			}
+			for i := 1; i <= p.failures+2; i++ {
+				p.Round(context.Background())
+				want := 0
+				if i >= p.failures {
+					want = 1
+				}
+				got := ev.failings()
+				if len(got) != want {
+					t.Fatalf("after failing probe %d of the new registration: %d PathProbeFailing, want %d", i, len(got), want)
+				}
+				if want == 1 && (got[0].UID != uid || got[0].Failures != p.failures || got[0].Registered || got[0].Passed) {
+					t.Fatalf("the PathProbeFailing reported %+v, want the UID at %d failures, not registered", got[0], p.failures)
+				}
+				if tun.Registered(uid) {
+					t.Fatalf("a failing probe %d registered the UID", i)
+				}
+			}
+		})
+	}
+}
+
+// TestAReconnectWhoseReprobePassesReportsNothing: a new registration whose re-probe passes reports
+// nothing; the pass clears the loss it carried. A later loss of that registration is reported once,
+// as any registered Instance's is.
+func TestAReconnectWhoseReprobePassesReportsNothing(t *testing.T) {
+	m := startMuxDouble(t)
+	var mu sync.Mutex
+	insts := []v1alpha1.Instance{probeInstance("00000000-0000-4000-8000-000000000052", v1alpha1.InstanceReady, metav1.ConditionTrue)}
+	uid := insts[0].UID
+	m.set(uid, http.StatusOK)
+	p, tun, ev := newTestProber(t, m, clock.NewFake(t0), &insts, &mu)
+	h := &frpsPlugin{tun: tun, prober: p, log: discardLog()}
+	p.Round(context.Background())
+	postPlugin(t, h, opNewProxy, uid)
+	p.Round(context.Background())
+	if !tun.Registered(uid) || len(ev.failings()) != 0 {
+		t.Fatalf("after a passing re-probe: registered %v, %d PathProbeFailing, want registered and none", tun.Registered(uid), len(ev.failings()))
+	}
+	m.set(uid, http.StatusServiceUnavailable)
+	for i := 0; i < p.failures+2; i++ {
+		p.Round(context.Background())
+	}
+	if n := len(ev.failings()); n != 1 || tun.Registered(uid) {
+		t.Fatalf("a later loss of the new registration: %d PathProbeFailing, registered %v; want one, and not registered", n, tun.Registered(uid))
+	}
+}
+
+// TestANewProxyForANeverRegisteredUIDReportsNothing: a UID that no probe ever registered has no
+// registration to lose, so a NewProxy and failing probes after it report nothing, as before #371.
+func TestANewProxyForANeverRegisteredUIDReportsNothing(t *testing.T) {
+	m := startMuxDouble(t)
+	var mu sync.Mutex
+	insts := []v1alpha1.Instance{probeInstance("00000000-0000-4000-8000-000000000053", v1alpha1.InstanceReady, metav1.ConditionTrue)}
+	uid := insts[0].UID
+	m.set(uid, http.StatusServiceUnavailable)
+	p, tun, ev := newTestProber(t, m, clock.NewFake(t0), &insts, &mu)
+	h := &frpsPlugin{tun: tun, prober: p, log: discardLog()}
+	p.Round(context.Background())
+	postPlugin(t, h, opNewProxy, uid)
+	for i := 0; i < p.failures+2; i++ {
+		p.Round(context.Background())
+	}
+	if n := len(ev.failings()); n != 0 || tun.Registered(uid) {
+		t.Fatalf("a never-registered UID: %d PathProbeFailing, registered %v; want none, and not registered", n, tun.Registered(uid))
+	}
+}

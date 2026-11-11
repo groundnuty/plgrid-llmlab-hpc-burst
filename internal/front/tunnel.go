@@ -211,8 +211,9 @@ func (t *Tunnel) Epoch(uid types.UID) uint64 {
 // takes the lock for a few map writes only, and calls the subscribers in a
 // goroutine of their own, because frps waits for the plugin's answer on the
 // frpc session's control connection. They need not have run first: a dialer
-// they hold carries the old epoch, and its next dial fails.
-func (t *Tunnel) Bump(uid types.UID) {
+// they hold carries the old epoch, and its next dial fails. It reports whether
+// the UID was registered.
+func (t *Tunnel) Bump(uid types.UID) (wasRegistered bool) {
 	t.mu.Lock()
 	t.last++
 	t.epoch[uid] = t.last
@@ -227,6 +228,7 @@ func (t *Tunnel) Bump(uid types.UID) {
 			}
 		}()
 	}
+	return was
 }
 
 // forget moves the UID's epoch on, for an Instance the front no longer probes,

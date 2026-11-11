@@ -94,15 +94,21 @@ func (h *frpsPlugin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.log.Warn("frps's NewProxy names no Instance UID; refused", "proxy", req.Content.ProxyName)
 			break
 		}
-		h.tun.Bump(uid)
+		was := h.tun.Bump(uid)
 		if h.prober != nil {
+			if was {
+				h.prober.lostRegistration(uid)
+			}
 			h.prober.Reregistered(uid)
 		}
 		h.log.Info("frps registers the Instance's tunnel again; it routes nothing to it until a probe passes", "uid", string(uid))
 	case req.Op == opCloseProxy:
 		if uid := types.UID(req.Content.ProxyName); checkUID(uid) == nil {
-			h.tun.Bump(uid)
+			was := h.tun.Bump(uid)
 			if h.prober != nil {
+				if was {
+					h.prober.lostRegistration(uid)
+				}
 				h.prober.Reregistered(uid)
 			}
 			h.log.Info("frps closed the Instance's tunnel; it routes nothing to it until a probe passes", "uid", string(uid))

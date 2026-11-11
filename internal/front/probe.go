@@ -121,6 +121,12 @@ type probeState struct {
 	name    string // namespace/name
 	fails   int
 	running bool
+	// lost is set when a new registration took the UID's registration away
+	// (lostRegistration), and cleared by a pass that counts. While it is set,
+	// probeFailures failures in a row report PathProbeFailing once, as they
+	// would have had the registration still stood: the Bump took it away
+	// before the failures could (HBEP-6, Reporting; the Fable review of #380).
+	lost bool
 	// The latest verdict: passed, at the front's clock time at; has is false
 	// before the first.
 	has    bool
@@ -151,6 +157,18 @@ func (p *Prober) Reregistered(uid types.UID) {
 	select {
 	case p.kick <- struct{}{}:
 	default:
+	}
+}
+
+// lostRegistration records that a new registration of the UID took a
+// registration away (Tunnel.Bump reported one): the probes of the new one then
+// count toward PathProbeFailing from no failures, as a registered UID's do.
+// The front's plugin calls it. It never blocks past p.mu.
+func (p *Prober) lostRegistration(uid types.UID) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if st := p.state[uid]; st != nil {
+		st.lost, st.fails = true, 0
 	}
 }
 
@@ -401,25 +419,44 @@ func (p *Prober) probeOne(ctx context.Context, in *v1alpha1.Instance, st *probeS
 	res.Failures = st.fails
 	st.has, st.passed, st.at = true, err == nil, p.clk.Now()
 	register := err == nil || (st.fails < p.failures && p.tun.Registered(in.UID))
+	lost := st.lost
 	if err == nil {
 		delete(p.awaiting, in.UID)
+		st.lost = false
+	}
+	// A registration that a new one took away, whose probes have now failed
+	// probeFailures times in a row with no pass: the loss HBEP-6 reports, once.
+	lostNow := err != nil && lost && st.fails >= p.failures
+	if lostNow {
+		st.lost = false
 	}
 	p.mu.Unlock()
 	was, applied := p.tun.setRegisteredAt(in.UID, register, &epoch)
 	if !applied {
 		// The epoch moved between the check above and here: the same case,
 		// with the pass already counted against the failure run, which a UID
-		// without a registration does not use.
+		// without a registration does not use. The pass proved nothing, so
+		// the UID keeps whatever loss it carried.
 		register = false
+		p.mu.Lock()
+		if p.state[in.UID] == st {
+			st.lost = lost
+		}
+		p.mu.Unlock()
 		p.Reregistered(in.UID)
 	}
 	res.Registered = register
 	switch {
 	case !was && register:
 		p.log.Info("the Instance's tunnel passed its probe; its transport counts as registered", "instance", res.Instance, "uid", string(in.UID))
-	case was && !register:
-		p.log.Warn("the Instance's tunnel failed its probe in a row; its transport no longer counts as registered, so it is not eligible",
-			"instance", res.Instance, "uid", string(in.UID), "failures", res.Failures, "error", res.Error)
+	case was && !register, lostNow:
+		if lostNow {
+			p.log.Warn("the Instance's tunnel was registered again, and its probes failed in a row with none passing; it is not eligible",
+				"instance", res.Instance, "uid", string(in.UID), "failures", res.Failures, "error", res.Error)
+		} else {
+			p.log.Warn("the Instance's tunnel failed its probe in a row; its transport no longer counts as registered, so it is not eligible",
+				"instance", res.Instance, "uid", string(in.UID), "failures", res.Failures, "error", res.Error)
+		}
 		if in.Status.Phase == v1alpha1.InstanceReady && meta.IsStatusConditionTrue(in.Status.Conditions, v1alpha1.ConditionTunnelConnected) {
 			p.events.PathProbeFailing(in, res)
 		}
