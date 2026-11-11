@@ -1,4 +1,4 @@
-package launcher
+package testenv
 
 import (
 	"bufio"
@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"syscall"
 	"time"
@@ -33,20 +32,21 @@ import (
 // connection ends (server/proxy/proxy.go:268-292). The product never routes on the listing: the
 // front routes only after its own probe, a GET through the tunnel, has passed
 // (internal/front/tunnel.go:150-157, probe.go:225; HBEP-6, The front's half). The tests wait the
-// same way, with provenRoute.
+// same way, with ProvenRoute (moved here from internal/launcher's tests, #369, for #371 and
+// #372).
 
-// errClosedBeforeReply is an early close: frps answered the CONNECT with 200, and the connection
+// ErrClosedBeforeReply is an early close: frps answered the CONNECT with 200, and the connection
 // ended before any byte of the reply. That race ends this way, but an early close does not prove
 // it: frpc also closes the work connection before any reply when its dial of the engine's socket
 // fails (pkg/plugin/client/unix_domain_socket.go:52-57). A reset counts as well as a close: frps
 // may close the user connection with the request still unread, and the kernel then resets it.
-var errClosedBeforeReply = errors.New("frps answered the CONNECT with 200, then the connection ended before any byte of a reply")
+var ErrClosedBeforeReply = errors.New("frps answered the CONNECT with 200, then the connection ended before any byte of a reply")
 
-// tcpmuxGet sends CONNECT host:80 to frps's tcpmux port at addr, as the front does (HBEP-6, The
+// TCPMuxGet sends CONNECT host:80 to frps's tcpmux port at addr, as the front does (HBEP-6, The
 // front's half), and on a 200 sends GET path through the tunnel. It returns the CONNECT's status
-// line and, after a 200, the reply's status code and the first 64 bytes of its body. Everything
-// happens before deadline.
-func tcpmuxGet(addr, host, path string, deadline time.Time) (status string, code int, body string, err error) {
+// line and, after a 200, the reply's status code and the first 64 bytes of its body, so a body
+// compared with it must be shorter. Everything happens before deadline.
+func TCPMuxGet(addr, host, path string, deadline time.Time) (status string, code int, body string, err error) {
 	c, err := net.DialTimeout("tcp", addr, time.Until(deadline))
 	if err != nil {
 		return "", 0, "", err
@@ -78,13 +78,13 @@ func tcpmuxGet(addr, host, path string, deadline time.Time) (status string, code
 	}
 	if _, err := fmt.Fprintf(c, "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path, host); err != nil {
 		if endedEarly(err) {
-			return status, 0, "", errClosedBeforeReply
+			return status, 0, "", ErrClosedBeforeReply
 		}
 		return status, 0, "", fmt.Errorf("writing the request through the tunnel: %w", err)
 	}
 	if _, err := rd.Peek(1); err != nil {
 		if endedEarly(err) {
-			return status, 0, "", errClosedBeforeReply
+			return status, 0, "", ErrClosedBeforeReply
 		}
 		return status, 0, "", fmt.Errorf("waiting for the reply through the tunnel: %w", err)
 	}
@@ -105,14 +105,14 @@ func endedEarly(err error) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
 }
 
-// provenRoute waits until a CONNECT for host through frps's tcpmux port at addr, and a GET path
+// ProvenRoute waits until a CONNECT for host through frps's tcpmux port at addr, and a GET path
 // through it, bring back a 200 with the body want: only a reply that crossed the tunnel proves the
 // route, since frps lists the proxy online, and answers its CONNECT with 200, before frpc can
-// serve it (above). It retries errClosedBeforeReply alone, on a new connection each time; any
+// serve it (above). It retries ErrClosedBeforeReply alone, on a new connection each time; any
 // other outcome (a CONNECT status other than 200, a timeout, another error, another reply) ends it
 // at once with that error. When bound runs out it returns the last error, so an early close that
 // lasts (a socket that cannot be dialled) fails the wait. It returns how many attempts it made.
-func provenRoute(addr, host, path, want string, bound time.Duration) (attempts int, err error) {
+func ProvenRoute(addr, host, path, want string, bound time.Duration) (attempts int, err error) {
 	var last error
 	for end := time.Now().Add(bound); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
 		attempts++
@@ -120,9 +120,9 @@ func provenRoute(addr, host, path, want string, bound time.Duration) (attempts i
 		if deadline.After(end) {
 			deadline = end
 		}
-		status, code, body, err := tcpmuxGet(addr, host, path, deadline)
+		status, code, body, err := TCPMuxGet(addr, host, path, deadline)
 		switch {
-		case errors.Is(err, errClosedBeforeReply):
+		case errors.Is(err, ErrClosedBeforeReply):
 			last = err
 			continue
 		case err != nil:
@@ -135,16 +135,4 @@ func provenRoute(addr, host, path, want string, bound time.Duration) (attempts i
 		return attempts, nil
 	}
 	return attempts, fmt.Errorf("CONNECT %s: no reply crossed the tunnel in %d attempts within %s; the last: %v", host, attempts, bound, last)
-}
-
-// tailFile returns the last 2000 bytes of the file at path, or why it cannot be read.
-func tailFile(path string) string {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return err.Error()
-	}
-	if len(b) > 2000 {
-		b = b[len(b)-2000:]
-	}
-	return string(b)
 }
