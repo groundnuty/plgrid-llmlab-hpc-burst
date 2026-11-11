@@ -655,17 +655,18 @@ func (r *relay) once(ctx context.Context) (time.Duration, bool, EndKind, string)
 		r.refuse("the ssh client: " + err.Error())
 		return 0, false, EndRetried, ""
 	}
-	// The relay keeper's start (OwnerOptions.Pidfd) in place of alpha's,
-	// which is startProcess, unchanged.
-	startProcess := startProcess
+	// The relay keeper's start (OwnerOptions.Pidfd) in place of alpha's, which
+	// is startProcess: a process group of its own, stopped behind the guards
+	// and the reap barrier of groupsig.go (issue #370).
+	startRelay := func(cmd *exec.Cmd) (*process, error) { return startProcess(cmd, o.Logger) }
 	if o.Pidfd {
-		startProcess = func(cmd *exec.Cmd) (*process, error) { return startPidfdProcess(cmd, o.Logger) }
+		startRelay = func(cmd *exec.Cmd) (*process, error) { return startPidfdProcess(cmd, o.Logger) }
 	}
 	if r.t.BeforeStart != nil && !r.t.BeforeStart(r.ch, r.epoch, seq) {
 		r.refuse("the start was not allowed (Target.BeforeStart)")
 		return 0, false, EndRetried, ""
 	}
-	p, err := startProcess(cmd)
+	p, err := startRelay(cmd)
 	if err != nil {
 		r.refuse("the ssh client could not be started: " + err.Error())
 		if r.t.OnStartFailed != nil {
@@ -700,21 +701,33 @@ func (r *relay) once(ctx context.Context) (time.Duration, bool, EndKind, string)
 		}
 	case <-ctx.Done():
 	}
-	p.stop(o.StopGrace)
+	stopErr := p.stop(o.StopGrace)
 	cancel()
 	if !serveEnded {
 		serveErr = <-served
 	}
 	up := time.Since(start)
 	exit := -1
-	if ps := p.cmd.ProcessState; ps != nil {
-		exit = ps.ExitCode()
-	}
 	var stderr, failure string
-	if r.t.Stderr != nil {
-		stderr = r.t.Stderr(p.cmd)
+	if stopErr == nil {
+		// Only a relay that was reaped has an exit status and a finished
+		// standard error: reading them before is a race with its waiter.
+		if ps := p.cmd.ProcessState; ps != nil {
+			exit = ps.ExitCode()
+		}
+		if r.t.Stderr != nil {
+			stderr = r.t.Stderr(p.cmd)
+		}
 	}
 	kind, cause := classifyEnd(exit, stderr)
+	if stopErr != nil {
+		// A relay that could not be signalled, or not seen to end, is not
+		// known to have ended: the end is a retried one, and its successor
+		// supersedes it if it runs on (its pipes are closed with the session,
+		// so it normally ends by itself).
+		o.Logger.Error("a relay's ssh could not be stopped and may still run", "tag", r.t.Tag, "channel", r.ch, "job", id, "pid", p.pid, "err", stopErr)
+		kind, cause = EndRetried, "the relay's ssh could not be stopped and may still run: "+stopErr.Error()
+	}
 	switch {
 	case errors.Is(serveErr, ErrUnexpectedOutput), errors.Is(serveErr, ErrNoPreamble):
 		kind, cause = EndRetried, serveErr.Error()
@@ -777,12 +790,29 @@ type process struct {
 	// pf is the relay keeper's pidfd for the process (startPidfdProcess);
 	// nil for alpha's.
 	pf *pidfdHold
+	// lead is alpha's pinned process group leader (startProcess); nil for the
+	// keeper's.
+	lead *groupLeader
 }
 
 // startProcess starts cmd in a process group of its own, with pipes for its
 // standard input and output, and a KILL when this process dies
-// (startLockedThread).
-func startProcess(cmd *exec.Cmd) (*process, error) {
+// (startLockedThread). The leader is pinned (groupsig.go) before anything can
+// reap it, and reaped only through the barrier. The first start probes the
+// kernel calls the guards need, and a missing one refuses the start.
+func startProcess(cmd *exec.Cmd, log *slog.Logger) (*process, error) {
+	return startGuardedProcess(cmd, log, groupSink)
+}
+
+// groupSink is the group signal alpha's relays use: killGroup. Only a test
+// replaces it (export_test.go), to record what would be sent.
+var groupSink = killGroup
+
+// startGuardedProcess is startProcess with the signal sink a test injects.
+func startGuardedProcess(cmd *exec.Cmd, log *slog.Logger, sink func(int, syscall.Signal) error) (*process, error) {
+	if err := groupCalls(); err != nil {
+		return nil, err
+	}
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -796,7 +826,23 @@ func startProcess(cmd *exec.Cmd) (*process, error) {
 		return nil, err
 	}
 	p := &process{cmd: cmd, pid: cmd.Process.Pid, in: in, out: out, done: make(chan struct{})}
-	go func() { _ = cmd.Wait(); close(p.done) }()
+	lead := newGroupLeader(log, sink)
+	if err := lead.pin(p.pid); err != nil {
+		// Not pinned, so no group signal can ever follow (the pin error refuses
+		// them all), and nothing here signals the process by its number. Its
+		// pipes are closed, so a relay's ssh normally ends by itself (its relay
+		// step ends when its standard input closes, HBEP-6), and it is reaped
+		// in the background; one that ignores the end of its input outlives
+		// Drop and ends only with this process, by its parent-death signal.
+		lead.markReaping()
+		_ = in.Close()
+		_ = out.Close()
+		go func() { _ = cmd.Wait() }()
+		log.Error("a relay's ssh started and could not be pinned: it is refused, and never signalled by its number", "pid", p.pid, "err", err)
+		return nil, err
+	}
+	p.lead = lead
+	go func() { _ = lead.reap(cmd); close(p.done) }()
 	return p, nil
 }
 
@@ -840,26 +886,15 @@ func (p *process) Close() error {
 	return errors.Join(p.in.Close(), p.out.Close())
 }
 
-// stop stops the relay by its PID: TERM to its process group, KILL after
-// grace, and returns once it is reaped. A relay that already exited is only
-// waited for.
-func (p *process) stop(grace time.Duration) {
+// stop stops the relay: the keeper's through its pidfd (pf), alpha's by TERM
+// to its process group, KILL after grace, through the leader's guards
+// (stopGroup, groupsig.go), and returns once it is reaped. A relay that
+// already exited is only waited for. An error means a guard refused a signal
+// that stayed refused, or the relay was not seen to end: it may still run.
+func (p *process) stop(grace time.Duration) error {
 	if p.pf != nil {
 		p.pf.stop(p, grace)
-		return
+		return nil
 	}
-	select {
-	case <-p.done:
-		return
-	default:
-	}
-	_ = syscall.Kill(-p.pid, syscall.SIGTERM)
-	t := time.NewTimer(grace)
-	defer t.Stop()
-	select {
-	case <-p.done:
-	case <-t.C:
-		_ = syscall.Kill(-p.pid, syscall.SIGKILL)
-		<-p.done
-	}
+	return p.stopGroup(grace)
 }
