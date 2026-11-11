@@ -129,6 +129,11 @@ type rigSetup struct {
 	// noWatch starts no watch: the measurement of what a watch costs starts its
 	// own (TestWatchOverhead).
 	noWatch bool
+	// relayKeeper runs up with --relay-keeper, in host-dialed mode (HBEP-6, The
+	// relay keeper; #343's keeper rehearsal, keeper_*_test.go), and k3sVersion,
+	// when set, is up's --version. Unset, up's arguments are as before.
+	relayKeeper bool
+	k3sVersion  string
 }
 
 func startRig(t *testing.T, mode string) *rig {
@@ -160,7 +165,7 @@ func startRigWith(t *testing.T, s rigSetup) *rig {
 	}
 	// The controller lists the checkpoint from the Hub double through
 	// HF_ENDPOINT, which up passes on to it.
-	r.h = startRigHost(t, b, dir, dh, stack.CleanEnv("HF_ENDPOINT="+r.hub.URL), s.ports)
+	r.h = startRigHost(t, b, dir, dh, stack.CleanEnv("HF_ENDPOINT="+r.hub.URL), s.ports, s.hostOptions()...)
 	r.fc = rigClient(t, r.h)
 	arch := stack.CPUArch(t)
 	r.h.PlaceAgentBuild(arch)
@@ -181,9 +186,9 @@ func startRigWith(t *testing.T, s rigSetup) *rig {
 
 // startRigHost is the stack's hpcburst up with the rehearsal's own choices: its
 // front tuning, and a down past its bound that says so.
-func startRigHost(t *testing.T, b stack.Binaries, dir string, dh stack.DialHome, env []string, ports stack.Ports) *stack.Host {
+func startRigHost(t *testing.T, b stack.Binaries, dir string, dh stack.DialHome, env []string, ports stack.Ports, opts ...stack.HostOption) *stack.Host {
 	t.Helper()
-	return stack.StartHost(t, b, dir, dh, env, ports, rehearsalFrontTuning, stack.NameDownBound)
+	return stack.StartHost(t, b, dir, dh, env, ports, rehearsalFrontTuning, append([]stack.HostOption{stack.NameDownBound}, opts...)...)
 }
 
 // rigClient is the rig's client of the front. The rehearsal reads no send times,
