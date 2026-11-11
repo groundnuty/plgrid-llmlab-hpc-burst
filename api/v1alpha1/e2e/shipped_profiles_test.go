@@ -46,6 +46,12 @@ var shippedProfiles = []struct {
 		{"storage", "home_readable_from_compute_nodes"}, {"reachability", "compute_node_outbound_internet"},
 		{"compute_node", "host_python3"}, {"compute_node", "architecture"},
 	}, false},
+	// The profile for short test deployments on plgrid-now (issue #376): the same facts, whole.
+	{"athena-now.yaml", "athena-now", [][]string{
+		{"slurm", "hold_release"}, {"containers", "apptainer_compute_nodes"}, {"containers", "user_namespaces_compute_nodes"},
+		{"storage", "home_readable_from_compute_nodes"}, {"reachability", "compute_node_outbound_internet"},
+		{"compute_node", "host_python3"}, {"compute_node", "architecture"},
+	}, false},
 	{"llmlab.yaml", "llmlab", nil, true},
 }
 
@@ -178,6 +184,11 @@ func TestShippedProfilesRefuseABrokenValue(t *testing.T) {
 		{"a negative memory cap", "athena.yaml", "-125Gi", []any{"spec", "qos", 0, "maxMemPerUser"}, []string{"maxMemPerUser must be positive"}},
 		{"a memory cap of zero", "athena.yaml", "0", []any{"spec", "qos", 0, "maxMemPerUser"}, []string{"maxMemPerUser must be positive"}},
 		{"a QOS with no name", "helios.yaml", nil, []any{"spec", "qos", 2, "name"}, []string{"name", "Required value"}},
+		// The profile for short test deployments (issue #376), the same checks on its own entries.
+		{"athena-now: an imageFormat that Apptainer does not run", "athena-now.yaml", "oci", []any{"spec", "partitions", 0, "imageFormat"}, []string{"imageFormat", "Unsupported value"}},
+		{"athena-now: a partition qos that the profile does not list", "athena-now.yaml", "unlisted", []any{"spec", "partitions", 0, "qos"}, []string{"must be listed in qos"}},
+		{"athena-now: a startTimeout of zero", "athena-now.yaml", "0s", []any{"spec", "health", "startTimeout"}, []string{"startTimeout must be a positive duration"}},
+		{"athena-now: a drainWindow of zero", "athena-now.yaml", "0s", []any{"spec", "drainWindow"}, []string{"drainWindow must be a positive duration"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -215,6 +226,10 @@ func TestShippedProfilesKeepTheirTypedQOS(t *testing.T) {
 			`[{"name":"plgrid","maxSubmitPerUser":1000,"overPartQos":false},` +
 				`{"name":"plgrid-now","maxSubmitPerUser":1,"maxGpusPerUser":1,"maxCpusPerUser":16,"maxMemPerUser":"125Gi","overPartQos":false}]`,
 			map[string]string{"plgrid-gpu-a100": "plgrid", "plgrid-now": "plgrid-now"}},
+		// The profile for short test deployments (issue #376): the plgrid-now partition and its QOS only.
+		{"athena-now.yaml",
+			`[{"name":"plgrid-now","maxSubmitPerUser":1,"maxGpusPerUser":1,"maxCpusPerUser":16,"maxMemPerUser":"125Gi","overPartQos":false}]`,
+			map[string]string{"plgrid-now": "plgrid-now"}},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
 			stored, err := strictCreate(t, edit(t, loadShipped(t, tc.file), uniq("qos"), "metadata", "name"))
