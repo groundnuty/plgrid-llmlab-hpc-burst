@@ -57,18 +57,51 @@ func TestASecondRunOnALiveKeepersStateDirChangesNothing(t *testing.T) {
 	}
 }
 
+// cleaner is what hangingSSHG needs of a test: a *testing.T, or the hand-run
+// double of lock_leak_test.go.
+type cleaner interface {
+	Helper()
+	TempDir() string
+	Cleanup(func())
+	Fatalf(format string, args ...any)
+}
+
+// hangingSSHG makes a test double ssh whose ssh -G waits until the file
+// release appears in its directory, and answers then; any other call of it is
+// a sleep. It writes "running" in the directory when its ssh -G starts to wait.
+//
+// The double must never outlive its test (issue 402: one whose test had failed
+// ran for 22 h 40 min, since the test wrote release only on its success path).
+// Two things end it. A cleanup registered right after TempDir writes release;
+// cleanups run last in, first out, so it runs before TempDir's removal of the
+// directory, on every exit of the test. And its loop also ends when the
+// directory is gone, so a test that never reaches the cleanup, or a cleanup
+// that fails to write, still frees it.
+func hangingSSHG(t cleaner) (dir, ssh, release string) {
+	t.Helper()
+	dir = t.TempDir()
+	if strings.Contains(dir, "'") {
+		t.Fatalf("the test's directory holds a quote: %q", dir)
+	}
+	release = filepath.Join(dir, "release")
+	t.Cleanup(func() {
+		// Best effort: the double's loop also ends when the directory is gone.
+		_ = os.WriteFile(release, nil, 0o600)
+	})
+	ssh = filepath.Join(dir, "ssh")
+	script := "#!/bin/sh\ncase \"$1\" in -G) : > '" + dir + "/running'; while [ ! -e '" + release + "' ] && [ -d '" + dir + "' ]; do sleep 0.05; done; echo hostname login.example; exit 0;; esac\nexec sleep 300 </dev/null\n"
+	if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
+		t.Fatalf("the double ssh: %v", err)
+	}
+	return dir, ssh, release
+}
+
 // A Provider's first set resolves its login host with ssh -G outside the
 // keeper's lock, so a slow ssh -G stalls only that set: while it runs, ping
 // and status, which take the lock, still answer. Here the double's ssh -G
 // waits until the test lets it go (the review of PR 356).
 func TestSshGRunsOutsideTheKeepersLock(t *testing.T) {
-	dir := t.TempDir()
-	release := filepath.Join(dir, "release")
-	ssh := filepath.Join(dir, "ssh")
-	script := "#!/bin/sh\ncase \"$1\" in -G) while [ ! -e " + release + " ]; do sleep 0.05; done; echo hostname login.example; exit 0;; esac\nexec sleep 300 </dev/null\n"
-	if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	dir, ssh, release := hangingSSHG(t)
 	r := newRig(t)
 	var runner *OwnerRunner
 	k, _ := r.open(func(o *Options) {
