@@ -13,7 +13,10 @@ package relaykeeper
 // say which of them run. Each way the double is ended is then shown alone:
 // the release file written by the cleanup with the directory kept, and the
 // directory removed with the cleanup never run. Each is killed by dropping
-// the one thing it tests. The real test uses the same helper.
+// the one thing it tests. The real test uses the same helper. A crash of the
+// test binary (a go test -timeout, a SIGKILL, an out-of-memory kill) runs no
+// cleanup at all; two more tests show the double ends then, when its parent is
+// gone and at a bound of its own (the review of PR 410).
 
 import (
 	"context"
@@ -173,4 +176,45 @@ func TestTheReleaseIsWrittenBeforeTheDirectoryIsRemoved(t *testing.T) {
 		t.Error("the directory was removed before the release file was written: the cleanup runs after TempDir's removal")
 	}
 	requireExit(t, exit, "all the cleanups ran")
+}
+
+// A crash of the test binary runs no cleanup (a go test -timeout panics from
+// the alarm goroutine; a SIGKILL or an out-of-memory kill gives it no chance),
+// so neither release nor the directory's removal comes. The double then ends
+// because its parent is gone. Here the parent is a short-lived intermediate
+// shell that starts the double in the background, waits until the double is
+// waiting (so the double started under the intermediate's PID), and ends. The
+// double's answer goes to a file, and it is written only when the loop ends:
+// that file is the observation, never a signal or a PID. Nothing else can end
+// the double: no release, its directory stays, its own bound is five minutes.
+func TestTheDoubleSshGEndsWhenItsParentIsGone(t *testing.T) {
+	h := &handCleaner{t: t}
+	dir, ssh, _ := hangingSSHG(h)
+	// A double this test leaves (its parent check broken) is ended by the
+	// cleanups of a test that failed: release written, directory removed.
+	t.Cleanup(func() { h.finish(func(handCleanup) bool { return true }) })
+	answer := filepath.Join(dir, "answer")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c",
+		`"$1" -G >"$2" 2>&1 & while [ ! -e "$3" ]; do sleep 0.02; done`, "sh", ssh, answer, filepath.Join(dir, "running"))
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("the intermediate shell: %v", err)
+	}
+	eventuallyQ(t, 30*time.Second, "the orphaned double ending on its own (its answer written)", func() bool {
+		b, _ := os.ReadFile(answer)
+		return strings.Contains(string(b), "hostname login.example")
+	})
+}
+
+// The double's own bound: with its parent alive, its directory there and
+// nothing to release it, it ends after its polls. The bound is shortened to 20
+// polls here (the default is 6,000, about five minutes).
+func TestTheDoubleSshGEndsAtItsOwnBound(t *testing.T) {
+	h := &handCleaner{t: t}
+	dir, ssh, _ := hangingSSHGWith(h, 20)
+	t.Cleanup(func() { h.finish(func(handCleanup) bool { return true }) })
+	exit, _ := startFake(t, ssh, dir)
+	requireExit(t, exit, "its own bound of 20 polls")
 }
