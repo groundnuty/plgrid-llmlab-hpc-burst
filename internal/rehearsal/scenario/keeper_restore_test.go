@@ -62,7 +62,10 @@ func TestRehearsalKeeperRestoreAcceptsTheLeadersLowerEpoch(t *testing.T) {
 	}
 	r.t.Logf("the upgrade took %s; its backup %s", time.Since(start).Round(100*time.Millisecond), backup)
 	r.c = stack.KubeClient(r.t, r.h.State)
-	l1 := r.newLeader("after the upgrade", nil, "")
+	l1 := r.newLeader("after the upgrade", nil, l0.holder)
+	if l1.transitions != l0.transitions+1 {
+		r.t.Errorf("after the upgrade the Lease's leaseTransitions went %d -> %d; client-go adds one on a holder change", l0.transitions, l1.transitions)
+	}
 	r.waitFence("after the upgrade", l1.transitions)
 	v1 := r.keeperRelays("after the upgrade", in.Status.JobID)
 	if v1.epoch != v0.epoch+1 {
@@ -94,7 +97,9 @@ func TestRehearsalKeeperRestoreAcceptsTheLeadersLowerEpoch(t *testing.T) {
 		r.t.Fatalf("up --relay-keeper after the restore: %v\n%s", err, out)
 	}
 	r.c = stack.KubeClient(r.t, r.h.State)
-	ln := r.newLeader("after the restore", nil, "")
+	// The restored Lease is the backup's: released by the old leader, or still
+	// naming it, so the leader after the restore is another holder than l0's.
+	ln := r.newLeader("after the restore", nil, l0.holder)
 	if ln.transitions >= fence {
 		r.t.Fatalf("the leader after the restore is at Lease epoch %d, not below the keeper's fence %d before it: the test would show nothing", ln.transitions, fence)
 	}

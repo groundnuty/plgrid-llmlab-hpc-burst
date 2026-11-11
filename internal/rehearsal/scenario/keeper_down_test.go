@@ -78,6 +78,9 @@ func processTCP(pid int) ([]tcpSock, error) {
 	var out []tcpSock
 	for _, table := range []string{"/net/tcp", "/net/tcp6"} {
 		b, err := os.ReadFile(dir + table)
+		if table == "/net/tcp6" && errors.Is(err, os.ErrNotExist) {
+			continue // no IPv6 in this kernel
+		}
 		if err != nil {
 			return nil, err
 		}

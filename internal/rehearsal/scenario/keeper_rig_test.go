@@ -95,6 +95,7 @@ func (r *rig) keeperStart() *v1alpha1.Instance {
 	r.providerReady()
 	stack.Create(r.t, r.c, stack.ServedDeployment(keeperTiming, r.engineEnv...))
 	var ready *v1alpha1.Instance
+	last := ""
 	stack.WaitFor(r.t, 2*stack.WaitDeadline, "an Instance ready on a running job", func() bool {
 		for _, in := range r.instances() {
 			if in.Status.Phase != v1alpha1.InstanceReady || in.Status.JobID == "" {
@@ -107,7 +108,10 @@ func (r *rig) keeperStart() *v1alpha1.Instance {
 				return true
 			}
 		}
-		r.t.Logf("waiting:%s", r.describe())
+		if d := r.describe(); d != last {
+			r.t.Logf("waiting:%s", d)
+			last = d
+		}
 		return false
 	})
 	return ready

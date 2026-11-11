@@ -132,11 +132,12 @@ type launcherStatus struct {
 	} `json:"controllers"`
 }
 
-// statusJSON runs hpcburst status --json, with the API's checks, and returns
-// its report, its output and its error.
+// statusJSON runs hpcburst status --json, with the API's checks but its
+// garbage-collector probe, which waits up to a minute, and returns its
+// report, its output and its error.
 func (r *rig) statusJSON() (launcherStatus, string, error) {
 	r.t.Helper()
-	out, err := stack.Run(r.t, stack.Within(r.t, 2*stack.StatusTimeout), r.h.Env, r.h.B.HPCBurst, "status", "--state-dir", r.h.State, "--json")
+	out, err := stack.Run(r.t, stack.Within(r.t, 2*stack.StatusTimeout), r.h.Env, r.h.B.HPCBurst, "status", "--state-dir", r.h.State, "--json", "--no-gc-probe")
 	var st launcherStatus
 	if jerr := json.NewDecoder(strings.NewReader(out)).Decode(&st); jerr != nil {
 		return st, out, fmt.Errorf("status --json (%v): %w", err, jerr)
