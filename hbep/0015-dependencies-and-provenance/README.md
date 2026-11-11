@@ -280,4 +280,4 @@ Sources were read on 2026-10-30, except where another date is given.
 
 ## Amendments
 
-- **2026-11-11: Envoy's pin** (Pinned versions). An amendment, as HBEP-5's open question 2 requires: each router's row is added by an amendment merged before the code that adopts it. Envoy v1.40.2 joins the table, with its reason (spike S13) and its bump trigger (S13's harness and S2c). Before, the table had no router.
+- **2026-11-11: Envoy's pin** (Pinned versions, its header and the new-row rule). An amendment, as HBEP-5's open question 2 requires: each router's row is added by an amendment merged before the code that adopts it. Envoy v1.40.2 joins the table as a proposed row, whose file the adopting PR adds. Its reason is spike S13, with S2c (#62) as what would remove it, and its bump trigger is a fix or feature we need, accepted only through S13's harness and HBEP-5's beta Deadlines test. The header now covers rows added since 1 Nov, and the new-row rule reads "never the Pin cell of an existing row". Before, the table had no router.
