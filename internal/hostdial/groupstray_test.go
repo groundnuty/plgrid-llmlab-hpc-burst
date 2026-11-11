@@ -160,8 +160,10 @@ func TestADroppedRelayWhoseStopWasRefusedKeepsItsSlotsAndOnExitUntilItIsReaped(t
 		t.Errorf("OnExit was called %d times for relays whose processes still run", n)
 	}
 	// The slots: the pair is not free while the relays run. The wait is for an answer that must not come, so
-	// it is bounded; a release before this point would have answered at once.
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	// it is bounded, and the bound is well above what it rules out: a release that has happened by now
+	// answers at once, and one that a goroutine makes after Drop returns takes microseconds to a few
+	// milliseconds, even on a loaded VM (the spinners of a -count=50 run), against 2 s here.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	if release, err := slots.Acquire(ctx, tg.Login, 2); err == nil {
 		release()
 		t.Error("the login node's slots were given back while the relays still run")
