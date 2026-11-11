@@ -217,7 +217,7 @@ metadatas.token = "<the Allocation's credential>"
 transport.protocol = "wss"
 transport.tls.trustedCaFile = "<the staged launcher certificate>"
 transport.tls.serverName = "dial-home.hpcburst.invalid"
-transport.poolCount = 0
+transport.poolCount = 0   # frp reads 0 as unset and uses 1 (frpc in the job)
 transport.tcpMuxKeepaliveInterval = 10
 transport.heartbeatInterval = 10
 transport.heartbeatTimeout = 25
@@ -491,7 +491,7 @@ Read at frp v0.71.1 (`fatedier/frp`, tag `v0.71.1`, commit `d8cf180`). Paths are
 | The tcpmux `CONNECT` is answered 200 when the domain is routed, before the connection is handed to the proxy; the work connection is taken after that, waiting up to `userConnTimeout` | `pkg/util/vhost/vhost.go:168-224`; `pkg/util/tcpmux/httpconnect.go:73-82`; `server/proxy/proxy.go:147-155`; `server/control.go:595-637` |
 | frps closes a user connection that gets no work connection, at `userConnTimeout`; one that drew a work connection lives as long as that stream | `server/proxy/proxy.go:268-292`, `:147-199`; `server/control.go:619-631` |
 | An unknown domain gets 404 | `pkg/util/vhost/vhost.go:184-188`; `pkg/util/tcpmux/httpconnect.go:99-106` |
-| frpc's `poolCount` of 0 is read as unset and becomes 1, so one spare work connection exists from the login; frps replaces each one it hands out | `pkg/config/v1/client.go:153`; `server/control.go:634-635` |
+| frpc's `poolCount` of 0 is read as unset and becomes 1, so one spare work connection exists from the login; frps replaces each one it hands out | `pkg/config/v1/client.go:153`; `client/control_session.go:112`; `server/control.go:446`, `:690-692` (from the login) and `:634-635` (the replacement) |
 | `bindAddr` defaults to every interface, and `proxyBindAddr` follows it; the tcpmux listener binds `proxyBindAddr` | `pkg/config/v1/server.go:110-114`; `server/service.go:199-211` |
 | The web server defaults to loopback; frps keeps proxy statistics only while it runs | `pkg/config/v1/common.go:50-73`; `server/service.go:155-167` |
 | `GET /api/proxy/{type}` lists the proxies of a type, online and offline, with `name`, `status`, `conf`, `lastStartTime` and `lastCloseTime`; the API sits behind the web server's auth, and `/healthz` before it | `server/api_router.go:27-49`; `server/http/controller.go:151-161`, `:234-257`; `server/http/model/types.go:100-115` |
@@ -746,6 +746,7 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - 2026-11-10: two amendments to the relay keeper's interface, from its build (#354).
 - 2026-11-10: an unreachable relay keeper makes the Provider unready, from the keeper's build (#360).
 - 2026-11-11: alpha graduates on Athena alone; Helios's parts move to beta (owner decision).
+- 2026-11-11: erratum: frp reads `poolCount = 0` as 1, so the spare work connection exists from the login (#368, PR #369).
 
 ## Amendments
 
@@ -828,4 +829,4 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 
   Before, an unreachable keeper left the Provider `Ready`.
 - **2026-11-11: alpha graduates on Athena alone** (Graduation criteria; Test plan). An amendment by the owner's decision of 11 Nov 2026 ("Athena alone", recorded on #145 and approved on PR #373), with Helios GH200 down and no return date. Alpha's criteria now bind Athena, and their Helios parts not already met move to beta, to run when GH200 returns. Already met: a relay on Athena `plgrid-now` (10 Nov 2026, #305). A row on `plgrid-now` counts for `plgrid-gpu-a100` when it runs one job of one GPU within 1 h; the no-cut handover and S1's hour stay on `plgrid-gpu-a100`. Before, alpha needed both Helios and Athena.
-- **2026-11-11: erratum** (Dial-home modes, frpc's configuration; frp facts): frp reads `poolCount = 0` as unset and uses 1, so the spare work connection exists from the login, not only after a replacement. Found in #368's investigation (PR #369). Before, the text said frps keeps one spare and implied the configured 0 meant none.
+- **2026-11-11: erratum** (frpc in the job; frp facts): frp reads `poolCount = 0` as unset and uses 1, so the spare work connection exists from the login, not only after a replacement. Found in #368's investigation (PR #369). Before, the text said frps keeps one spare and implied the configured 0 meant none.
