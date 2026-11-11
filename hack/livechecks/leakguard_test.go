@@ -76,6 +76,51 @@ func TestASeedStandingAloneIsStillALeak(t *testing.T) {
 	}
 }
 
+// A seed that is as long as a hash's shortest run, or longer, and stands on its
+// own is a value and is reported: the run IS the seed, so there is no hash for
+// it to lie in. (PR 367's condition: a standalone 9-digit job id.) Inside a
+// longer run it is a hash's part and is not reported.
+func TestAStandaloneSeedAsLongAsAHashIsStillALeak(t *testing.T) {
+	for _, seed := range []string{"123456789", "9876543210", "abcdef123456789"} {
+		for name, out := range map[string]string{
+			"in a sentence":       "sbatch: Job " + seed + " queued\n",
+			"as the whole output": seed,
+			"after an equals":     "JOB=" + seed + "\n",
+			"in a path":           "jobs/job-" + seed + ".out\n",
+		} {
+			t.Run(seed+"/"+name, func(t *testing.T) {
+				if got := leaks(out, []string{seed}); len(got) != 1 || got[0] != seed {
+					t.Errorf("a standalone seed %q in %q: reported %q, want it as a leak", seed, out, got)
+				}
+			})
+		}
+		t.Run(seed+"/inside a longer run", func(t *testing.T) {
+			out := "digest e1f2" + seed + "a3b4c5\n"
+			if got := leaks(out, []string{seed}); len(got) != 0 {
+				t.Errorf("a seed %q inside a longer hex run %q was reported: %q", seed, out, got)
+			}
+		})
+	}
+}
+
+// The rule's boundary, stated: a hex-only seed inside a run that is at least
+// hashRunMin long and strictly longer than the seed, by however little, is
+// taken for a part of a hash. So an 8-digit seed with one hex digit glued to it
+// (a 9-digit run) is not reported, and nor is a 9-digit seed with one glued
+// (a 10-digit run); with the glued digit gone, the same seed is a leak. The
+// seeds in use are 5 and 6 digits, so for them the boundary is the run's
+// length alone; this is where the rule stops for a longer seed.
+func TestARunOneLongerThanALongSeedIsTakenForAHash(t *testing.T) {
+	for _, seed := range []string{"12345678", "123456789"} {
+		if got := leaks("job a"+seed+" queued\n", []string{seed}); len(got) != 0 {
+			t.Errorf("seed %q with one hex digit glued before it was reported: %q", seed, got)
+		}
+		if got := leaks("job "+seed+" queued\n", []string{seed}); len(got) != 1 {
+			t.Errorf("seed %q standing alone was not reported: %q", seed, got)
+		}
+	}
+}
+
 // A hash that holds a seed does not hide a real leak in the same output, on
 // another line or on the same one.
 func TestAHashHoldingASeedDoesNotHideALeakBesideIt(t *testing.T) {

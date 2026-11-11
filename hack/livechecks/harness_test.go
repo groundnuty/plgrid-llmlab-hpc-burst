@@ -342,7 +342,7 @@ const hashRunMin = 9
 // leaks returns the seeds the output carries. A seed made only of hex digits
 // (a port, a job id) is not counted where it lies inside a hash: inside a
 // maximal run of hex digits, bounded by other characters or the ends of the
-// output, that is hashRunMin or more long. Such runs are new on every run, and
+// output, that is hashRunMin or more long and longer than the seed itself. Such runs are new on every run, and
 // a hex-only seed turns up inside one by chance (#366: "40321" inside
 // c0 40321 99613...). Anywhere else the seed is a leak, whatever its
 // neighbours: ":40321", "probe40321", "jobs/job424242.out", "40321bytes". Every
@@ -377,7 +377,10 @@ func containsSeed(out, seed string) bool {
 		for hi < len(out) && isHexDigit(out[hi]) {
 			hi++
 		}
-		if hi-lo < hashRunMin {
+		// Hidden only if the run is a hash's length AND longer than the seed
+		// itself: a run that IS the seed is a value, not a hash (a standalone
+		// job id of 9 digits is a leak).
+		if hi-lo < hashRunMin || hi-lo == len(seed) {
 			return true
 		}
 		from = start + 1
