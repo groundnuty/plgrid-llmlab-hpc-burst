@@ -209,6 +209,9 @@ func TestFrontRoutesNothingToAUIDRegisteredAgainUntilAProbePasses(t *testing.T) 
 // dial error, resent once (HBEP-5). Through the front the request is refused cleanly, since the UID
 // is not routable. After the release the re-probe registers the UID, and requests cross.
 //
+// The front hears only the new registration's NewProxy, not the old session's CloseProxy, so the
+// NewProxy alone must take the route away, as when the CloseProxy comes late.
+//
 // frps and frpc run with transport.tcpMux off, so that each work connection is a wss connection of
 // its own and the relay sees the control connection apart (frp's client/connector.go:165-182); what
 // frpc does with its messages is the same either way.
@@ -235,6 +238,10 @@ func TestFrontRefusesARouteThroughARegistrationFrpcHasNotStarted(t *testing.T) {
 	armed := make(chan error, 1)
 	var once sync.Once
 	slot.mu.Lock()
+	// Only the new registration's NewProxy reaches the front: the old session's CloseProxy, which
+	// frps posts from a goroutine of its own, may come late in production, so the NewProxy alone
+	// must take the route away.
+	slot.only = opNewProxy
 	slot.hook = func(op string) {
 		if op != opNewProxy {
 			return

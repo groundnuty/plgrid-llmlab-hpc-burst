@@ -101,6 +101,10 @@ type Prober struct {
 	// probe has not passed since. kick wakes Run for it.
 	awaiting map[types.UID]*reprobe
 	kick     chan struct{}
+	// beforeVerdict, when set, runs after a probe's early epoch check and before
+	// its verdict is applied: a test makes the epoch move just there, which only
+	// the check under the Tunnel's lock (setRegisteredAt) can catch.
+	beforeVerdict func(types.UID)
 }
 
 // reprobe is one UID's place on the re-probe schedule.
@@ -165,47 +169,81 @@ func (p *Prober) reprobeAt() (time.Time, bool) {
 
 // Run probes every probeInterval until ctx ends. A round starts every
 // interval, or as soon as the previous one ended when that took longer; a
-// round waits for its probes, which probeTimeout bounds. Between rounds it
-// runs the re-probes as they fall due (Reprobe).
+// round waits for its probes, which probeTimeout bounds. The re-probes run
+// apart from the rounds (runReprobes), so a round that waits on a slow probe
+// never holds a re-probe up. Run returns once both have stopped.
 func (p *Prober) Run(ctx context.Context) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		p.runReprobes(ctx)
+	}()
+	defer wg.Wait()
 	for {
 		start := p.clk.Now()
 		p.Round(ctx)
-		due := start.Add(p.interval)
-		for p.clk.Now().Before(due) {
-			wait := due.Sub(p.clk.Now())
-			if at, ok := p.reprobeAt(); ok {
-				wait = min(wait, max(at.Sub(p.clk.Now()), 0))
-			}
-			if !p.sleep(ctx, wait) {
-				return
-			}
-			p.Reprobe(ctx)
+		wait := max(p.interval-p.clk.Now().Sub(start), 0)
+		next := make(chan struct{})
+		t := p.clk.AfterFunc(wait, func() { close(next) })
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return
+		case <-next:
 		}
 	}
 }
 
-// sleep waits for d, or for a kick, and reports false once ctx has ended.
-func (p *Prober) sleep(ctx context.Context, d time.Duration) bool {
-	next := make(chan struct{})
-	t := p.clk.AfterFunc(d, func() { close(next) })
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-next:
-	case <-p.kick:
+// runReprobes runs the re-probe schedule until ctx ends: it starts each
+// re-probe as it falls due, without waiting for it, and sleeps until the next
+// one is due or a kick (Reregistered) comes. A UID has one probe at a time
+// (probeState.running), whether a round's or a re-probe's. It returns once its
+// probes have ended.
+func (p *Prober) runReprobes(ctx context.Context) {
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	for {
+		if at, ok := p.reprobeAt(); ok && !p.clk.Now().Before(at) {
+			p.startReprobes(ctx, &wg)
+		}
+		var due <-chan struct{}
+		var t clock.Timer
+		if at, ok := p.reprobeAt(); ok {
+			c := make(chan struct{})
+			t = p.clk.AfterFunc(max(at.Sub(p.clk.Now()), 0), func() { close(c) })
+			due = c
+		}
+		select {
+		case <-ctx.Done():
+		case <-due:
+		case <-p.kick:
+		}
+		if t != nil {
+			t.Stop()
+		}
+		if ctx.Err() != nil {
+			return
+		}
 	}
-	return true
 }
 
-// Reprobe probes, concurrently, each probed Instance whose re-probe is due and
-// whose previous probe has ended, moves each one's next attempt on, and waits
-// for the probes. A UID whose wait would reach probeInterval leaves the
-// schedule after this attempt; the rounds go on probing it. So does one the
-// front does not probe (not yet in a probed phase, or gone), at once. One whose
-// probe still runs is put off by reprobeFirst, so Run never spins on it.
+// Reprobe runs the re-probes that are due now and waits for them
+// (startReprobes). Run does not call it: tests drive the schedule with it.
 func (p *Prober) Reprobe(ctx context.Context) {
+	var wg sync.WaitGroup
+	p.startReprobes(ctx, &wg)
+	wg.Wait()
+}
+
+// startReprobes starts, concurrently, a probe of each probed Instance whose
+// re-probe is due and whose previous probe has ended, and moves each one's next
+// attempt on; wg counts the probes. A UID whose wait would reach probeInterval
+// leaves the schedule after this attempt; the rounds go on probing it. So does
+// one the front does not probe (not yet in a probed phase, or gone), at once.
+// One whose probe still runs is put off by reprobeFirst. So every entry left
+// due now is moved on, and runReprobes never spins.
+func (p *Prober) startReprobes(ctx context.Context, wg *sync.WaitGroup) {
 	insts := p.source()
 	live := make(map[types.UID]*v1alpha1.Instance, len(insts))
 	for i := range insts {
@@ -244,7 +282,6 @@ func (p *Prober) Reprobe(ctx context.Context) {
 		start, states = append(start, in), append(states, st)
 	}
 	p.mu.Unlock()
-	var wg sync.WaitGroup
 	for i := range start {
 		wg.Add(1)
 		go func(in *v1alpha1.Instance, st *probeState) {
@@ -252,7 +289,6 @@ func (p *Prober) Reprobe(ctx context.Context) {
 			p.probeOne(ctx, in, st)
 		}(start[i], states[i])
 	}
-	wg.Wait()
 }
 
 // probed reports whether the front probes an Instance in this state: phase
@@ -345,6 +381,9 @@ func (p *Prober) probeOne(ctx context.Context, in *v1alpha1.Instance, st *probeS
 		p.log.Info("the Instance's tunnel was registered again while its probe ran; the pass does not count", "instance", in.Namespace+"/"+in.Name, "uid", string(in.UID))
 		p.Reregistered(in.UID)
 		return
+	}
+	if p.beforeVerdict != nil {
+		p.beforeVerdict(in.UID)
 	}
 	res := ProbeResult{UID: in.UID, Instance: in.Namespace + "/" + in.Name, Phase: in.Status.Phase, Status: status, Passed: err == nil, Duration: time.Since(began)}
 	p.mu.Lock()

@@ -143,8 +143,8 @@ func TestProbePassThroughAReplacedRegistrationDoesNotCount(t *testing.T) {
 
 // TestReregisteredUIDIsReprobedOnItsBackoffUntilAPass: a UID registered again
 // is probed at once, then 100 ms, 200 ms and 400 ms later while its probes
-// fail, and leaves the schedule at its first pass. The schedule runs between
-// rounds: the next round stays probeInterval after the previous one.
+// fail, and leaves the schedule at its first pass. The schedule runs apart from
+// the rounds: the next round stays probeInterval after the previous one.
 func TestReregisteredUIDIsReprobedOnItsBackoffUntilAPass(t *testing.T) {
 	m := startMuxDouble(t)
 	var mu sync.Mutex
@@ -171,14 +171,15 @@ func TestReregisteredUIDIsReprobedOnItsBackoffUntilAPass(t *testing.T) {
 	m.set(uid, http.StatusServiceUnavailable)
 	tun.Bump(uid)
 	p.Reregistered(uid)
-	waitFor("the re-probe at once", func() bool { return m.hit(uid) == 2 && clk.Pending() == 1 })
+	// Two timers from here: the next round's, and the next re-probe's.
+	waitFor("the re-probe at once", func() bool { return m.hit(uid) == 2 && clk.Pending() == 2 })
 	for i, wait := range []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond} {
 		clk.Advance(wait - time.Millisecond)
 		if n := m.hit(uid); n != 2+i {
 			t.Fatalf("re-probe %d came before its wait of %s: %d probes", i+1, wait, n)
 		}
 		clk.Advance(time.Millisecond)
-		waitFor("the re-probe after "+wait.String(), func() bool { return m.hit(uid) == 3+i && clk.Pending() == 1 })
+		waitFor("the re-probe after "+wait.String(), func() bool { return m.hit(uid) == 3+i && clk.Pending() == 2 })
 		if tun.Registered(uid) {
 			t.Fatal("a failing re-probe registered the UID")
 		}
@@ -197,6 +198,136 @@ func TestReregisteredUIDIsReprobedOnItsBackoffUntilAPass(t *testing.T) {
 	}
 	clk.Advance(time.Millisecond)
 	waitFor("the next round", func() bool { return m.hit(uid) == hits+1 })
+}
+
+// TestSetRegisteredAtRefusesAStaleEpoch: a pass reached in an epoch that has
+// moved since registers nothing, and tells no subscriber; one in the current
+// epoch registers.
+func TestSetRegisteredAtRefusesAStaleEpoch(t *testing.T) {
+	tun := NewTunnel("127.0.0.1:1", time.Second)
+	const uid = types.UID("00000000-0000-4000-8000-000000000041")
+	stale := tun.Epoch(uid)
+	tun.Bump(uid)
+	calls := 0
+	tun.Subscribe(func() { calls++ })
+	if was, applied := tun.setRegisteredAt(uid, true, &stale); was || applied || tun.Registered(uid) || calls != 0 {
+		t.Fatalf("a pass in a stale epoch: was %v, applied %v, registered %v, %d subscriber calls", was, applied, tun.Registered(uid), calls)
+	}
+	cur := tun.Epoch(uid)
+	if _, applied := tun.setRegisteredAt(uid, true, &cur); !applied || !tun.Registered(uid) || calls != 1 {
+		t.Fatalf("a pass in the current epoch: applied %v, registered %v, %d subscriber calls", applied, tun.Registered(uid), calls)
+	}
+}
+
+// TestProbePassWhoseEpochMovesAfterTheEarlyCheckDoesNotCount: the epoch moves
+// after the probe's early check and before its verdict is applied (the
+// beforeVerdict hook), which only the check under the Tunnel's lock
+// (setRegisteredAt) can catch. The pass registers nothing, tells no subscriber,
+// and puts the UID back on the re-probe schedule; the re-probe registers it.
+func TestProbePassWhoseEpochMovesAfterTheEarlyCheckDoesNotCount(t *testing.T) {
+	m := startMuxDouble(t)
+	var mu sync.Mutex
+	insts := []v1alpha1.Instance{probeInstance("00000000-0000-4000-8000-000000000042", v1alpha1.InstanceReady, metav1.ConditionTrue)}
+	uid := insts[0].UID
+	m.set(uid, http.StatusOK)
+	p, tun, _ := newTestProber(t, m, clock.NewFake(t0), &insts, &mu)
+	var once sync.Once
+	p.beforeVerdict = func(u types.UID) { once.Do(func() { tun.Bump(u) }) }
+	calls := 0
+	tun.Subscribe(func() { calls++ })
+	p.Round(context.Background())
+	if tun.Registered(uid) || calls != 0 {
+		t.Fatalf("a pass whose epoch moved before its verdict: registered %v, %d subscriber calls", tun.Registered(uid), calls)
+	}
+	if !p.isAwaiting(uid) {
+		t.Fatal("the UID is not back on the re-probe schedule")
+	}
+	p.Reprobe(context.Background())
+	if !tun.Registered(uid) {
+		t.Fatal("the re-probe in the new epoch did not register the UID")
+	}
+}
+
+// TestReprobeIsNotHeldUpByASlowRound: a round waits for its probes, up to
+// probeTimeout, so one Instance whose /health hangs keeps a round open for
+// that long. A UID registered again meanwhile is still re-probed at once, and
+// routable again while that round goes on.
+func TestReprobeIsNotHeldUpByASlowRound(t *testing.T) {
+	m := startMuxDouble(t)
+	var mu sync.Mutex
+	insts := []v1alpha1.Instance{
+		probeInstance("00000000-0000-4000-8000-000000000043", v1alpha1.InstanceReady, metav1.ConditionTrue),
+		probeInstance("00000000-0000-4000-8000-000000000044", v1alpha1.InstanceReady, metav1.ConditionTrue),
+	}
+	a, slow := insts[0].UID, insts[1].UID
+	m.set(a, http.StatusOK)
+	m.set(slow, http.StatusOK)
+	clk := clock.NewFake(t0)
+	p, tun, _ := newTestProber(t, m, clk, &insts, &mu)
+	held, release := m.holdNext(t, slow, "health")
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() { p.Run(ctx); close(stopped) }()
+	defer func() { release(); cancel(); <-stopped }()
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the round never reached the slow Instance's GET /health")
+	}
+	for end := time.Now().Add(5 * time.Second); !tun.Registered(a); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatal("the first round's probe of A never registered it")
+		}
+	}
+
+	tun.Bump(a)
+	p.Reregistered(a)
+	for end := time.Now().Add(5 * time.Second); !tun.Registered(a); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatalf("A was not re-probed while the round waited on the slow Instance (hits %d)", m.hit(a))
+		}
+	}
+	if m.hit(slow) != 0 {
+		t.Fatal("the slow Instance's probe ended before A's re-probe: the round was not held open")
+	}
+}
+
+// TestForgottenUIDGetsAFreshEpoch: an Instance the front stops probing gets a
+// fresh epoch, not 0 again, so a dialer handed out before can never match,
+// even once the UID is probed and registered again.
+func TestForgottenUIDGetsAFreshEpoch(t *testing.T) {
+	m := startMuxDouble(t)
+	var mu sync.Mutex
+	insts := []v1alpha1.Instance{probeInstance("00000000-0000-4000-8000-000000000045", v1alpha1.InstanceReady, metav1.ConditionTrue)}
+	uid := insts[0].UID
+	m.set(uid, http.StatusOK)
+	p, tun, _ := newTestProber(t, m, clock.NewFake(t0), &insts, &mu)
+	p.Round(context.Background())
+	old, ok := tun.Dialer(uid)
+	if !ok || tun.Epoch(uid) != 0 {
+		t.Fatalf("after the first pass: dialer %v, epoch %d, want a dialer at epoch 0", ok, tun.Epoch(uid))
+	}
+	mu.Lock()
+	saved := insts
+	insts = nil
+	mu.Unlock()
+	p.Round(context.Background()) // the Instance is no longer probed: forgotten
+	if tun.Epoch(uid) == 0 {
+		t.Fatal("a forgotten UID's epoch went back to 0")
+	}
+	mu.Lock()
+	insts = saved
+	mu.Unlock()
+	p.Round(context.Background())
+	if !tun.Registered(uid) {
+		t.Fatal("the UID did not register again")
+	}
+	if c, err := old(context.Background()); err == nil {
+		c.Close()
+		t.Fatal("a dialer from before the UID was forgotten connected")
+	} else if !errors.Is(err, errReregistered) {
+		t.Fatalf("the old dialer: %v, want errReregistered", err)
+	}
 }
 
 // TestReprobeScheduleEndsAtProbeInterval: a UID whose re-probes keep failing

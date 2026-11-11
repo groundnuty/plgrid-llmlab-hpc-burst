@@ -50,8 +50,10 @@ type Tunnel struct {
 	reg  map[types.UID]bool
 	subs []func()
 	// epoch is each UID's registration epoch; a UID that was never bumped is
-	// at 0. Values come from last, so no value is ever given twice, even to a
-	// UID forgotten and seen again.
+	// at 0. Values other than 0 come from last, so none is given twice, and a
+	// UID the front stops probing gets a fresh one (forget) rather than going
+	// back to 0. An entry is kept for every UID that was ever bumped or probed:
+	// a few bytes per Instance over the front's life.
 	epoch map[types.UID]uint64
 	last  uint64
 }
@@ -227,11 +229,13 @@ func (t *Tunnel) Bump(uid types.UID) {
 	}
 }
 
-// forget drops the UID's epoch, for an Instance the front no longer probes. A
-// later Bump gives it a value no dialer has seen.
+// forget moves the UID's epoch on, for an Instance the front no longer probes,
+// whose registration the prober has just taken away: a dialer handed out
+// before can then never match again, even if the UID comes back.
 func (t *Tunnel) forget(uid types.UID) {
 	t.mu.Lock()
-	delete(t.epoch, uid)
+	t.last++
+	t.epoch[uid] = t.last
 	t.mu.Unlock()
 }
 
