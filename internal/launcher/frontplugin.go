@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -28,6 +29,25 @@ func checkFrontPlugin(addr string, eh *EntryHealth, add func(string, ...any)) {
 		return
 	}
 	ok = true
+}
+
+// checkFrpsNamesTheFront adds a problem when the host runs a front and frps, and frps's own
+// configuration does not post to the front's plugin at the front's health address (#371). frps
+// would then register proxies the front never hears of, and the no-op call of checkFrontPlugin
+// would still find the front answering: it proves the front listens, not that frps calls it.
+func checkFrpsNamesTheFront(l layout, st *State, bad func(string, ...any)) {
+	if st.FrontRun == nil || st.Frps == nil {
+		return
+	}
+	path := FrpsConfigFile(l.host(st.Ports))
+	b, err := os.ReadFile(path)
+	if err != nil {
+		bad("frps's configuration: %v", err)
+		return
+	}
+	if addr := st.Ports.FrontHealthAddr(); !strings.Contains(string(b), frontPluginBlock(addr)) {
+		bad("frps's configuration %s does not post to the front's plugin at %s: frps registers proxies the front never hears of (HBEP-6, Admission)", path, addr)
+	}
 }
 
 func postFrontPlugin(addr string) error {

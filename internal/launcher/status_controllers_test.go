@@ -515,6 +515,55 @@ func TestStatusFrontPluginMustAnswer(t *testing.T) {
 	})
 }
 
+// TestStatusFrpsMustPostToTheFront: on a host that runs a front and frps, frps's own configuration
+// must post to the front's plugin at the front's health address, or frps registers proxies the
+// front never hears of while the front's plugin still answers status's no-op call (#371, the review
+// of #380). A file without the front's plugin, or with it at another address, is a problem; with
+// it, none. A host without a front is not asked.
+func TestStatusFrpsMustPostToTheFront(t *testing.T) {
+	const problem = "does not post to the front's plugin"
+	for _, c := range []struct {
+		name      string
+		front     bool   // the record holds a front
+		plugin    string // the front plugin address rendered into frps's file; "" renders none
+		wantFound bool
+	}{
+		{"the front's plugin at the front's health address", true, "127.0.0.1:29224", false},
+		{"no front's plugin in frps's file", true, "", true},
+		{"the front's plugin at another address", true, "127.0.0.1:29299", true},
+		{"no front recorded", false, "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := newSupervisedFakeHost(t)
+			s.st.Frps = &FrpsRunConfig{Binary: "/opt/frp/frps", Version: DefaultFrpVersion}
+			s.st.Ports.FrontHealth = 29224
+			if c.front {
+				s.st.FrontRun = &FrontRunConfig{Binary: "/opt/hpcburst-front", Config: "/etc/front.json"}
+			}
+			if err := s.l.saveState(s.st); err != nil {
+				t.Fatal(err)
+			}
+			h := s.l.host(s.st.Ports)
+			var err error
+			if c.plugin == "" {
+				_, err = WriteFrpsConfig(h, testWebPassword)
+			} else {
+				_, err = WriteFrpsConfigWithFront(h, testWebPassword, c.plugin)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			rep := s.status(true)
+			if found := strings.Contains(strings.Join(rep.Reasons, "\n"), problem); found != c.wantFound {
+				t.Fatalf("the problem %q is reported %v, want %v; reasons %v", problem, found, c.wantFound, rep.Reasons)
+			}
+			if c.wantFound && rep.Health != Unhealthy {
+				t.Fatalf("health %s with frps not posting to the front", rep.Health)
+			}
+		})
+	}
+}
+
 // readyzFake is the lifecycle controller's /readyz on a test server: controller-runtime's own
 // healthz.Handler, mounted as the manager mounts it (pkg/manager/internal.go:308-310), so the
 // statuses are its: 200, 500 for a failing check, and 404 for a name it does not know. The

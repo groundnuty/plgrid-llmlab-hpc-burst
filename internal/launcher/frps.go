@@ -135,20 +135,23 @@ func renderFrpsConfig(h agentapi.Host, webPassword, frontAddr string) (string, e
 	w("path = %q", agentapi.FrpsPluginPath)
 	w("ops = [%s]", strings.Join(ops, ", "))
 	if frontAddr != "" {
-		fops := make([]string, len(frontPluginOps))
-		for i, op := range frontPluginOps {
-			fops[i] = fmt.Sprintf("%q", op)
-		}
 		w("")
 		w("# The front's plugin, after the controller's: frps stops at the first refusal, so the front hears only admitted")
 		w("# proxies, and registers a proxy only once the front has stopped routing to its UID (HBEP-6, Admission).")
-		w("[[httpPlugins]]")
-		w("name = %q", frontPluginName)
-		w("addr = %q", frontAddr)
-		w("path = %q", agentapi.FrontFrpsPluginPath)
-		w("ops = [%s]", strings.Join(fops, ", "))
+		b.WriteString(frontPluginBlock(frontAddr))
 	}
 	return b.String(), nil
+}
+
+// frontPluginBlock is the front's plugin entry exactly as RenderFrpsConfigWithFront writes it, one
+// line per key; status looks for it in frps's file (checkFrpsNamesTheFront).
+func frontPluginBlock(frontAddr string) string {
+	fops := make([]string, len(frontPluginOps))
+	for i, op := range frontPluginOps {
+		fops[i] = fmt.Sprintf("%q", op)
+	}
+	return fmt.Sprintf("[[httpPlugins]]\nname = %q\naddr = %q\npath = %q\nops = [%s]\n",
+		frontPluginName, frontAddr, agentapi.FrontFrpsPluginPath, strings.Join(fops, ", "))
 }
 
 // EnsureFrpsWebPassword returns the web server's password from agentapi.Host.FrpsWebPasswordFile,
