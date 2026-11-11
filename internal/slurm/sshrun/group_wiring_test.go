@@ -1,24 +1,19 @@
 package sshrun
 
 // Tests for how group.go is wired into the transport (issue 363): killMaster's
-// and Cancel's signals reach the sink, a refusal leaves the real master alone,
-// and a scan of the sources keeps killGroup the only numeric signal and the
-// barrier the only way to reap. The guards themselves are in group_test.go,
-// which also has the helpers; the stop, start and probe tests are in
-// group_startstop_test.go.
+// and Cancel's signals reach the sink, and a stalled check is cut through it.
+// The guards themselves are in group_test.go, which also has the helpers; the
+// barrier in group_barrier_test.go; the stop and start tests in
+// group_startstop_test.go; the probe in group_probe_test.go; the scan of the
+// sources in group_scan_test.go.
 
 import (
 	"bufio"
 	"context"
 	"errors"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"go/types"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -195,8 +190,26 @@ func TestStalledCheckStillEndsWhenAGuardRefusesTheGroupSignal(t *testing.T) {
 	if err := s.Connect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	leaders := make(chan *groupLeader, 8)
+	s.leaderHook = func(g *groupLeader) { leaders <- g }
 	cut, result := runStalledCheck(t, r, s)
-	swap(t, &procRead, procFailing) // the stall was observed; now the check client's pin cannot be read
+	// The fake can log its stall before the parent finished pinning it: wait
+	// for the pin, then make /proc unreadable, so the refusal is Cancel's, at
+	// the cut, and not a failed start.
+	select {
+	case g := <-leaders:
+		select {
+		case <-g.ready:
+			if g.pinErr != nil {
+				t.Fatalf("the check client was not pinned: %v", g.pinErr)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatal("the check client's pinning did not finish")
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("no leader was made for the check")
+	}
+	swap(t, &procRead, procFailing)
 	cut()
 	select {
 	case ok := <-result:
@@ -237,88 +250,5 @@ func TestStalledCheckStillEndsWhenTheGroupSignalFails(t *testing.T) {
 	}
 	if got := rec.got(); len(got) != 1 {
 		t.Errorf("the sink was called %d times, want the one attempt: %+v", len(got), got)
-	}
-}
-
-// The package's only numeric signal is killGroup, reached only through the
-// sink New sets. The pin failure's kill goes through the leader's own pidfd,
-// and only the barrier (groupLeader.reap), the failed pin's bounded cleanup
-// and the probe reap a child. A new kill(2), a signal through an os.Process, a
-// process lookup by PID, a pidfd signal or a reap anywhere else fails this
-// scan. It reads the package's non-test sources, so it needs no signal to run.
-func TestNoUnguardedSignalsInThePackage(t *testing.T) {
-	// Where each name may appear: enclosing function -> its count.
-	identUses := map[string]map[string]int{
-		"killGroup":       {"New": 1},
-		"pidfdSendSignal": {"start": 1, "probePidfd": 1, "probeChild": 1},
-	}
-	// Calls named Wait on a command: only these functions reap.
-	waitIn := map[string]bool{"reap": true, "reapBounded": true, "start": true, "probePidfd": true}
-	files, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	uses := map[string]map[string]int{}
-	killCalls := 0
-	for _, name := range files {
-		if strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			fn, ok := n.(*ast.FuncDecl)
-			if !ok {
-				return true
-			}
-			ast.Inspect(fn, func(n ast.Node) bool {
-				if id, ok := n.(*ast.Ident); ok {
-					if _, watched := identUses[id.Name]; watched && fn.Name.Name != id.Name {
-						if uses[id.Name] == nil {
-							uses[id.Name] = map[string]int{}
-						}
-						uses[id.Name][fn.Name.Name]++
-					}
-				}
-				sel, ok := n.(*ast.SelectorExpr)
-				if !ok {
-					return true
-				}
-				recv, member := types.ExprString(sel.X), sel.Sel.Name
-				if member == "Wait" && (recv == "cmd" || strings.HasSuffix(recv, ".cmd")) && !waitIn[fn.Name.Name] {
-					t.Errorf("%s: %s.Wait in %s reaps outside the barrier", name, recv, fn.Name.Name)
-				}
-				isSignal := (member == "Kill" || member == "Tgkill" || member == "Tkill" || member == "Killpg" || member == "PidfdSendSignal") && (recv == "syscall" || recv == "unix") ||
-					(member == "Kill" || member == "Signal") && strings.HasSuffix(recv, ".Process") ||
-					member == "FindProcess" && recv == "os"
-				if !isSignal {
-					return true
-				}
-				if fn.Name.Name == "killGroup" && recv == "unix" && member == "Kill" {
-					killCalls++
-					return true
-				}
-				t.Errorf("%s: %s.%s in %s signals outside the guarded function", name, recv, member, fn.Name.Name)
-				return true
-			})
-			return false
-		})
-	}
-	if killCalls != 1 {
-		t.Errorf("killGroup makes %d kill calls, want exactly the one", killCalls)
-	}
-	for ident, want := range identUses {
-		for fn, n := range uses[ident] {
-			if want[fn] != n {
-				t.Errorf("%s names %s %d times, want %d: it may be named only in %v", fn, ident, n, want[fn], want)
-			}
-		}
-		for fn, n := range want {
-			if uses[ident][fn] != n {
-				t.Errorf("%s names %s %d times, want %d", fn, ident, uses[ident][fn], n)
-			}
-		}
 	}
 }

@@ -144,6 +144,7 @@ type SSH struct {
 	killGrace      time.Duration
 	stopRetryPause time.Duration
 	log            *slog.Logger
+	leaderHook     func(*groupLeader) // tests only: told of each leader before its start
 
 	mu       sync.Mutex
 	master   *master
@@ -418,7 +419,7 @@ func (s *SSH) startMaster(ctx context.Context) (*master, string) {
 	cmd.Env = s.o.Env
 	cmd.Stderr = &limited{w: &stderr, n: 4096}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
-	leader := newGroupLeader(s.logger(), s.signalGroup)
+	leader := s.newLeader()
 	if err := leader.start(cmd); err != nil { // its own group, pinned (group.go)
 		return nil, "the ssh client could not be started"
 	}
@@ -455,13 +456,24 @@ func (s *SSH) check(ctx context.Context) bool {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, s.o.Binary, s.controlArgs("check")...)
 	cmd.Env = s.o.Env
-	leader := newGroupLeader(s.logger(), s.signalGroup)
+	leader := s.newLeader()
 	cmd.Cancel = func() error { return leader.signal(syscall.SIGKILL) }
 	cmd.WaitDelay = time.Second
 	if err := leader.start(cmd); err != nil { // its own group, pinned (group.go)
 		return false
 	}
 	return leader.reap(cmd) == nil // behind the barrier; releases the pidfd
+}
+
+// newLeader makes the leader a process of this transport will be pinned in.
+// leaderHook, when set (tests only), is told of it, so a test can wait for its
+// pinning.
+func (s *SSH) newLeader() *groupLeader {
+	g := newGroupLeader(s.logger(), s.signalGroup)
+	if s.leaderHook != nil {
+		s.leaderHook(g)
+	}
+	return g
 }
 
 // logger is the transport's logger, slog's default when none was set.
@@ -520,18 +532,25 @@ func (s *SSH) killMaster(m *master) error {
 }
 
 // gone turns a failed group signal into nil when it failed because the
-// master was already gone (its leader exited, or its group is empty), after
-// giving its reap a moment; any other failure is returned, the master may
-// still run.
+// master was already gone, and only on EVIDENCE that it is: its waiter reaped
+// it (m.done), or its pidfd shows that it exited. A refusal that says "being
+// reaped" or "exited" is not evidence by itself (a barrier that could not
+// await the exit sets it on a live master), and a wait is not evidence
+// either: with none, the master may still run, so the failure is returned
+// and the caller keeps ownership.
 func (s *SSH) gone(m *master, err error) error {
 	if !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, syscall.ESRCH) {
 		return err
 	}
 	select {
 	case <-m.done:
+		return nil
 	case <-time.After(s.killGrace):
 	}
-	return nil
+	if m.leader.exited() {
+		return nil
+	}
+	return fmt.Errorf("sshrun: the ssh master's group was not signalled (%w), and it has not been seen to exit", err)
 }
 
 // stopStarted stops a master by killMaster, and once more after

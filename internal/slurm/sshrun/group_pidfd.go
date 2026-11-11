@@ -68,24 +68,45 @@ func probePidfd() error {
 		return fmt.Errorf("sshrun: the pidfd probe could not start %s with a pidfd from clone (CLONE_PIDFD): %w", prog, err)
 	}
 	failed := probeChild(cmd.Process.Pid, fd)
-	// The child has nobody's attention but ours: end and reap it, bounded.
-	done := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(done) }()
+	// A probe that failed may have left its child running: end it through
+	// its pidfd first, so the wait below is short.
+	if failed != nil && fd >= 0 {
+		_ = pidfdSendSignal(fd, syscall.SIGKILL, nil, 0)
+	}
+	// The child has nobody's attention but ours: reap it, bounded. A reap that
+	// fails, or a child that cannot be ended, is a failure of the probe, not
+	// something to swallow: New must not report success with an unreaped
+	// probe child behind it.
+	waited := make(chan error, 1)
+	go func() { waited <- cmd.Wait() }()
+	var waitErr, cleanupErr error
 	select {
-	case <-done:
+	case waitErr = <-waited:
 	case <-time.After(probeBound):
 		if fd >= 0 {
 			_ = pidfdSendSignal(fd, syscall.SIGKILL, nil, 0)
 		}
 		select {
-		case <-done:
+		case waitErr = <-waited:
+			cleanupErr = fmt.Errorf("did not end by itself within %s", probeBound)
 		case <-time.After(probeBound):
+			cleanupErr = fmt.Errorf("could not be ended within %s and may still run", 2*probeBound)
 		}
 	}
 	if fd >= 0 {
 		_ = unix.Close(fd)
 	}
-	return failed
+	switch {
+	case failed != nil && cleanupErr != nil:
+		return fmt.Errorf("%w; and the probe's child %v", failed, cleanupErr)
+	case failed != nil:
+		return failed
+	case cleanupErr != nil:
+		return fmt.Errorf("sshrun: the pidfd probe's child %v", cleanupErr)
+	case waitErr != nil:
+		return fmt.Errorf("sshrun: the pidfd probe's child did not end cleanly: %w", waitErr)
+	}
+	return nil
 }
 
 // probeChild runs the calls on the child pid, whose pidfd from clone is fd.
@@ -118,6 +139,20 @@ func probeChild(pid, fd int) error {
 	}); err != nil {
 		return missing("waitid(P_PIDFD, WNOWAIT)", err)
 	}
+	// The very call the reap barrier makes, awaitExit: a BLOCKING waitid, on a
+	// child that exits. A filter can allow the two calls above and refuse this
+	// flag combination, and then every master's barrier would fail on a live
+	// master (PR 365 delta review). The child exits by itself; the wait for
+	// that is bounded, so the blocking call returns at once.
+	if _, err := retryEINTR(func() (int, error) { return pidfdPoll(fds, int(probeBound.Milliseconds())) }); err != nil {
+		return missing("poll on a pidfd", err)
+	}
+	if fds[0].Revents&unix.POLLIN == 0 {
+		return fmt.Errorf("sshrun: the pidfd probe's child did not exit within %s, so the barrier's blocking waitid could not be tried", probeBound)
+	}
+	if err := awaitExit(fd); err != nil {
+		return missing("waitid(P_PIDFD, WEXITED|WNOWAIT) (the blocking call that awaits an exit without reaping)", err)
+	}
 	return nil
 }
 
@@ -126,7 +161,7 @@ func probeChild(pid, fd int) error {
 // PID, and so its group's number, cannot be handed out again.
 func awaitExit(fd int) error {
 	for {
-		err := unix.Waitid(unix.P_PIDFD, fd, nil, unix.WEXITED|unix.WNOWAIT, nil)
+		err := pidfdWaitid(fd, unix.WEXITED|unix.WNOWAIT)
 		if !errors.Is(err, syscall.EINTR) {
 			return err
 		}

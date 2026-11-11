@@ -229,6 +229,23 @@ func reapBounded(cmd *exec.Cmd) bool {
 	}
 }
 
+// exited reports whether the leader is known to have exited: its pidfd was
+// released (after the reap), or polls readable. It is evidence, and false
+// means no evidence, not that it runs.
+func (g *groupLeader) exited() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return true
+	}
+	if g.fd < 0 {
+		return false
+	}
+	fds := []unix.PollFd{{Fd: int32(g.fd), Events: unix.POLLIN}}
+	n, err := retryEINTR(func() (int, error) { return pidfdPoll(fds, 0) })
+	return err == nil && n > 0 && fds[0].Revents&(unix.POLLNVAL|unix.POLLERR) == 0
+}
+
 // markReaping is the barrier: it takes the mutex every signal holds, so it
 // waits for a signal that is under way, and sets reaping, which refuses every
 // later one. Every reap of a pinned leader comes after it.

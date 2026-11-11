@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -41,8 +42,9 @@ func parkedOnMutex(fn string) bool {
 // one (groupLeader.reap, as the master's waiter and check use it).
 func TestAReapWaitsForASignalThatIsUnderWay(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
+	var enter sync.Once
 	rec := &sinkRecorder{forward: func(int, syscall.Signal) error {
-		close(entered)
+		enter.Do(func() { close(entered) })
 		<-release
 		return nil
 	}}

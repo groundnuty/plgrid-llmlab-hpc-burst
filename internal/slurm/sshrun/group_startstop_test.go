@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -21,50 +22,6 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 )
-
-// New probes every call the guards and the barrier need, on a real child, and
-// names the one a kernel (or its seccomp filter) lacks. The control: with
-// nothing missing, New succeeds.
-func TestNewNamesTheMissingPidfdCall(t *testing.T) {
-	r := newRig(t)
-	mk := func() error {
-		_, err := New(Options{Name: "prov-a", Config: exampleConfig, ControlDir: r.ctl})
-		return err
-	}
-	if err := mk(); err != nil {
-		t.Fatalf("New on this kernel: %v", err)
-	}
-	cases := []struct {
-		name   string
-		break_ func(t *testing.T)
-		want   string
-	}{
-		{"pidfd_open", func(t *testing.T) {
-			swap(t, &pidfdOpen, func(int, int) (int, error) { return -1, syscall.ENOSYS })
-		}, "pidfd_open"},
-		{"pidfd_send_signal", func(t *testing.T) {
-			swap(t, &pidfdSendSignal, func(int, unix.Signal, *unix.Siginfo, int) error { return syscall.EPERM })
-		}, "pidfd_send_signal"},
-		{"poll", func(t *testing.T) {
-			swap(t, &pidfdPoll, func([]unix.PollFd, int) (int, error) { return -1, syscall.EPERM })
-		}, "poll on a pidfd"},
-		{"waitid", func(t *testing.T) {
-			swap(t, &pidfdWaitid, func(int, int) error { return syscall.ENOSYS })
-		}, "waitid(P_PIDFD, WNOWAIT)"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			c.break_(t)
-			err := mk()
-			if err == nil {
-				t.Fatalf("New accepted a kernel without %s", c.name)
-			}
-			if !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), "pinned pidfd") {
-				t.Errorf("the error does not name %q: %v", c.want, err)
-			}
-		})
-	}
-}
 
 // A refused stop keeps the live master owned. A transient /proc read failure
 // (EMFILE) makes the start-time guard refuse twice: Close returns an error
@@ -138,6 +95,118 @@ func TestACloseThatIsRefusedKeepsTheMasterOwned(t *testing.T) {
 	}
 	if !gone {
 		t.Error("the master is still owned after it was stopped")
+	}
+}
+
+// Ownership is released only on evidence that the master is gone, never on a
+// window (PR 365 delta review). A filter that refuses the barrier's blocking
+// waitid, but passed the probe, makes awaitExit fail on a LIVE master: its
+// reaping flag goes true, so every signal is refused as "being reaped", and
+// the refusal says "gone" without it being true. The stop must not take that
+// for an exit: the master stays owned and stuck, with its socket, Close
+// returns an error, and no second master starts.
+func TestAMasterWhoseExitCannotBeAwaitedStaysOwned(t *testing.T) {
+	r := newRig(t)
+	s := r.transport("prov-a", exampleConfig, nil)
+	log, logs := capturedLog()
+	s.log = log
+	s.stopRetryPause = 10 * time.Millisecond
+	s.killGrace = 100 * time.Millisecond
+	rec := &sinkRecorder{forward: killGroup}
+	s.signalGroup = rec.sink
+	orig := pidfdWaitid
+	swap(t, &pidfdWaitid, func(fd, options int) error { // the blocking call fails; the polling one works
+		if options&unix.WNOHANG == 0 {
+			return syscall.EPERM
+		}
+		return orig(fd, options)
+	})
+	if err := s.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	m := s.master
+	s.mu.Unlock()
+	t.Cleanup(func() { // the stop was refused: end the master by hand, through its pidfd
+		endThroughPidfd(m.leader)
+		<-m.done
+	})
+
+	err := s.Close()
+	if err == nil {
+		t.Fatal("Close reported success for a live master that was never signalled")
+	}
+	if !strings.Contains(err.Error(), "not been seen to exit") {
+		t.Errorf("Close's error does not say that no exit was seen: %v", err)
+	}
+	if got := rec.got(); len(got) != 0 {
+		t.Errorf("a refused signal reached the sink: %+v", got)
+	}
+	if out := logs.String(); !strings.Contains(out, "could not be awaited") {
+		t.Errorf("the barrier's failure is not in the log: %s", out)
+	}
+	s.mu.Lock()
+	owned, stuck := s.master == m, m.stuck
+	s.mu.Unlock()
+	if !owned || !stuck {
+		t.Errorf("the live master is not kept: owned=%v stuck=%v", owned, stuck)
+	}
+	if _, err := os.Stat(s.socket); err != nil {
+		t.Errorf("the master's socket was removed: %v", err)
+	}
+	select {
+	case <-m.done:
+		t.Error("the master ended, although nothing was sent to it")
+	default:
+	}
+	if exited, err := waitReadable(m.leader.fd, 0); err != nil || exited {
+		t.Errorf("the master's pidfd shows an exit: exited=%v err=%v", exited, err)
+	}
+}
+
+// A refusal that does not last is not a failure of the stop: the stop is
+// retried once. The first read of the master's /proc row fails (EMFILE) and
+// the next ones succeed, so the first TERM is refused, and the retry, after a
+// short pause, sends it. Close returns nil, with one signal sent.
+func TestARefusedStopIsRetriedOnce(t *testing.T) {
+	r := newRig(t)
+	s := r.transport("prov-a", exampleConfig, nil)
+	log, logs := capturedLog()
+	s.log = log
+	s.stopRetryPause = 10 * time.Millisecond
+	rec := &sinkRecorder{forward: killGroup}
+	s.signalGroup = rec.sink
+	if err := s.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	m := s.master
+	s.mu.Unlock()
+	t.Cleanup(func() {
+		endThroughPidfd(m.leader)
+		<-m.done
+	})
+	var failedOnce atomic.Bool
+	swap(t, &procRead, func(name string) ([]byte, error) {
+		if failedOnce.CompareAndSwap(false, true) {
+			return nil, syscall.EMFILE
+		}
+		return os.ReadFile(name)
+	})
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close, whose first signal was refused only once: %v", err)
+	}
+	want := []sinkCall{{m.cmd.Process.Pid, syscall.SIGTERM}}
+	if got := rec.got(); len(got) != 1 || got[0] != want[0] {
+		t.Errorf("the sink saw %+v, want the retried %+v", got, want)
+	}
+	if out := logs.String(); !strings.Contains(out, "guard="+guardCannotTell) {
+		t.Errorf("the first refusal is not in the log: %s", out)
+	}
+	select {
+	case <-m.done:
+	default:
+		t.Error("Close returned before the master was reaped")
 	}
 }
 
