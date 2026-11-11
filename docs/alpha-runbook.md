@@ -20,7 +20,8 @@ Alpha graduates on Athena alone (the owner's decision of 11 Nov 2026, "Athena al
 | `alpha-athena-handover`, `tunnel-hour-athena`, `gpu-accounting-athena`, `reach-athena`, `reach-host-dialed-athena` | alpha | as in "State of the wiring" |
 | `alpha-athena-now-serve`, `alpha-athena-now-nooverlap` | alpha, planned | **not yet built** (#376's P3 and P4); `pending` in the script's table: `--list` names them and `--run` refuses them (exit 2) |
 | `alpha-helios-nooverlap`, `tunnel-hour-helios`, `gpu-accounting-helios`, `reach-helios`, `reach-host-dialed-helios` | **beta** | kept: `ready` in every table of the script, run by their own names with their own settings, in no alias, and no part of alpha's run |
-| `conformance-helios`, `conformance-helios-gh200`, `real-engine` | unchanged | issue #386 does not move them; no alias ran them |
+| `conformance-helios`, `conformance-helios-gh200` | **beta** | kept like the five above, runnable by name, in no alias. Helios's conformance (HBEP-4: a held Allocation's round trip, a 56-character job name) was met on 8 Nov 2026 and stays met (#373 keeps the met parts met); the rows run again when GH200 returns (the science agent's ruling on #386, 11 Nov 2026) |
+| `real-engine` | **beta** | kept, runnable by name, in no alias. Its remaining item, #94 (the agent's registration through the dial-home path on GH200), is beta's since alpha graduated on Athena alone (the science agent's ruling on #386, 11 Nov 2026) |
 
 The aliases stand for Athena rows alone, and a test of `hack/livechecks` (`TestNoAliasStandsForABetaRow`) fails if one gains a beta row:
 - `tunnel-hour` stands for `tunnel-hour-athena`;
@@ -56,15 +57,15 @@ The script's exit code and the word on the screen, for every row:
 
 | Row | Its bound | The line when its job never starts |
 |---|---|---|
-| `conformance-helios` | start wait, 30 min | `a job did not start within 30 min of its acceptance and was cancelled by its tag` |
-| `conformance-helios-gh200`, `conformance-athena`, `gpu-accounting-helios` (beta), `reach-helios` (beta), `reach-athena`, `reach-host-dialed-helios` (beta), `reach-host-dialed-athena` | start wait, 10 min | `a job did not start within 10 min of its acceptance and was cancelled by its tag` |
-| `real-engine`, `alpha-helios-nooverlap` (beta), `tunnel-hour-helios` (beta) | wait in the queue, 30 min (their slot's) | `a job was still pending after 30 min in the queue and was cancelled by its tag` |
+| `conformance-helios` (beta) | start wait, 30 min | `a job did not start within 30 min of its acceptance and was cancelled by its tag` |
+| `conformance-helios-gh200` (beta), `conformance-athena`, `gpu-accounting-helios` (beta), `reach-helios` (beta), `reach-athena`, `reach-host-dialed-helios` (beta), `reach-host-dialed-athena` | start wait, 10 min | `a job did not start within 10 min of its acceptance and was cancelled by its tag` |
+| `real-engine` (beta), `alpha-helios-nooverlap` (beta), `tunnel-hour-helios` (beta) | wait in the queue, 30 min (their slot's) | `a job was still pending after 30 min in the queue and was cancelled by its tag` |
 | `alpha-athena-handover`, `tunnel-hour-athena`, `gpu-accounting-athena` | wait in the queue, 2 h (no slot) | `a job was still pending after 120 min in the queue and was cancelled by its tag` |
 | `tunnel-hour-helios` (beta), `tunnel-hour-athena` | and the `endTime` cap, whichever comes first | `a job was still pending a minute before its deployment's first end and was cancelled by its tag` |
 | `alpha-athena-handover` | and its second job, by the first's drain start | `the first job ran and the second never started by the first's drain start, and was cancelled by its tag` |
 | `alpha-helios-nooverlap` (beta) | and its second job, the wait in the queue from the first's lease end | `the first job ran and the second never started within 30 min of the first's lease end, and was cancelled by its tag` |
 
-The Helios rows in this table (`alpha-helios-nooverlap`, `tunnel-hour-helios`, `reach-helios`, `reach-host-dialed-helios`, `gpu-accounting-helios`) are beta's; their bounds are unchanged. An explicit `LIVE_PENDING_MAX_SECONDS` sets the wait in the queue of the rows that have one, shorter or longer (`1 min 30 s` for 90). Every line above is followed by `not a failure`. `hack/livechecks` reads the script's cluster table and fails, naming the row, for a row that has no case in its table of these lines (`TestEveryRowMapsAJobThatNeverStartedToNotRun`), so a row added later cannot end a never-started job in `FAIL`.
+The Helios rows in this table (`alpha-helios-nooverlap`, `tunnel-hour-helios`, `reach-helios`, `reach-host-dialed-helios`, `gpu-accounting-helios`, `conformance-helios`, `conformance-helios-gh200` and `real-engine`) are beta's; their bounds are unchanged. An explicit `LIVE_PENDING_MAX_SECONDS` sets the wait in the queue of the rows that have one, shorter or longer (`1 min 30 s` for 90). Every line above is followed by `not a failure`. `hack/livechecks` reads the script's cluster table and fails, naming the row, for a row that has no case in its table of these lines (`TestEveryRowMapsAJobThatNeverStartedToNotRun`), so a row added later cannot end a never-started job in `FAIL`.
 
 ## State of the wiring
 

@@ -13,10 +13,13 @@ import (
 	"testing"
 )
 
-// betaRows are the rows that moved to beta: the Helios stack, accounting and reach rows, the ones issue #386 names and the
-// aliases ran. conformance-helios, conformance-helios-gh200 and real-engine are not among them: no alias ever ran them, and
-// whether their criteria are already met is not decided here (HBEP-4, Graduation criteria); they stay as they were.
-var betaRows = []string{"alpha-helios-nooverlap", "tunnel-hour-helios", "gpu-accounting-helios", "reach-helios", "reach-host-dialed-helios"}
+// betaRows are the rows that moved to beta: the eight Helios rows. Five are the stack, accounting and reach rows that
+// issue #386 names and the aliases ran. The other three, conformance-helios, conformance-helios-gh200 and real-engine, are
+// the science agent's ruling on #386 (11 Nov 2026): Helios's conformance was met on 8 Nov 2026 and stays met (HBEP-4;
+// #373 keeps the met parts met), and real-engine's remaining item, #94 (the agent's registration through the dial-home
+// path on GH200), is beta's. No alias ever ran those three, and none may.
+var betaRows = []string{"alpha-helios-nooverlap", "tunnel-hour-helios", "gpu-accounting-helios", "reach-helios", "reach-host-dialed-helios",
+	"conformance-helios", "conformance-helios-gh200", "real-engine"}
 
 // plannedRows are #376's P3 and P4: named, not built.
 var plannedRows = []string{"alpha-athena-now-serve", "alpha-athena-now-nooverlap"}
@@ -201,6 +204,25 @@ func TestTheRunbookIsInStepWithTheTables(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("the runbook's table has no line for the planned row %s", r)
+		}
+	}
+	// The three rows that moved by the science agent's ruling have their reasons on their own table lines.
+	for _, c := range []struct{ row, reason string }{
+		{"conformance-helios", "met on 8 Nov 2026"},
+		{"conformance-helios-gh200", "met on 8 Nov 2026"},
+		{"real-engine", "#94"},
+	} {
+		found := false
+		for _, l := range strings.Split(section, "\n") {
+			if strings.HasPrefix(l, "|") && strings.Contains(l, "`"+c.row+"`") {
+				found = true
+				if !strings.Contains(l, "**beta**") || !strings.Contains(l, c.reason) {
+					t.Errorf("the runbook's table line of %s does not say beta and %q: %s", c.row, c.reason, l)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("the runbook's table has no line for %s", c.row)
 		}
 	}
 	for _, want := range []string{"#378", "#380", "#145", "LIVE_OWNER_GO_ATHENA_NOW", "#376"} {
