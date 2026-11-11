@@ -140,7 +140,8 @@ type successorOutcome struct {
 }
 
 // nowSuccessorStart is row B's wait for its successor's job once the predecessor's has left the slot (Q7 and the start
-// wait). Every second it reads the watch for the successor's Allocation and a submission of it refused for the submit
+// wait). At the guard's cadence (r.every(), GuardEvery: a read of squeue --me on the shared login node no more often than
+// the guard's own) it reads the watch for the successor's Allocation and a submission of it refused for the submit
 // limit, then a fresh listing of the user's queue (squeue --me) for a job that is not the run's in the slot
 // (ForeignInSlot), and for the successor's job:
 //   - a job that is not the run's in the slot ends the wait at once: the slot is taken. The run never waits on that job
@@ -200,7 +201,10 @@ func (r *liveRun) nowSuccessorStart(ctx context.Context, p Plan, predAlloc strin
 		case succAlloc != "" && !now.Before(created.Add(p.Row.StartWait)), !now.Before(deadline):
 			return succAlloc, r.nowSuccessorPastStartWait(p, succTag)
 		}
-		time.Sleep(time.Second)
+		// The poll only waits: the gap is the controller's own times (the successor's ReadyTime, the predecessor's recorded
+		// lease end), and the start wait's end is decided by a fresh look (nowSuccessorPastStartWait), so a look up to one
+		// interval late changes no verdict.
+		time.Sleep(r.every())
 	}
 }
 

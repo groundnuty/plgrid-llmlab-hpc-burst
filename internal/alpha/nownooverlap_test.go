@@ -19,8 +19,8 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
-// Row B's figures: two jobs of 21 minutes, the lead of athena-now.yaml 20 minutes; a hold of 10 + 21 + 10 + 12 + 2 = 55
-// minutes inside the hour (Q3), as the profile's own comment works it out; ReleaseWhenIdle with the live idle limit of 2
+// Row B's figures: two jobs of 21 minutes, the lead of athena-now.yaml 20 minutes; a hold of 10 + 21 + 3 + 10 + 12 + 3 = 59
+// minutes inside the hour (Q3); ReleaseWhenIdle with the live idle limit of 2
 // minutes; the owner's go of plgrid-now; two jobs; no QOS.
 func TestRowBsFiguresFitTheHour(t *testing.T) {
 	r := rowOf("alpha-athena-now-nooverlap")
@@ -28,8 +28,8 @@ func TestRowBsFiguresFitTheHour(t *testing.T) {
 	if r.Lease != 21*time.Minute || tm.Lead() != 20*time.Minute || r.Lease <= tm.Lead() {
 		t.Errorf("lease %s and lead %s: want 21 and 20 minutes, the lease longer", r.Lease, tm.Lead())
 	}
-	if r.SlotHold != 55*time.Minute || r.SlotHold > time.Hour {
-		t.Errorf("slot hold %s, want 55 minutes, inside the hour", r.SlotHold)
+	if r.SlotHold != 59*time.Minute || r.SlotHold > time.Hour {
+		t.Errorf("slot hold %s, want 59 minutes, inside the hour", r.SlotHold)
 	}
 	if r.StartWait != 10*time.Minute || r.MostJobs != 2 || r.Partition != "plgrid-now" || r.QOS != "" || r.Profile != "athena-now" || r.OwnerGo != OwnerGoAthenaNow {
 		t.Errorf("the row is %+v", r)
@@ -39,6 +39,25 @@ func TestRowBsFiguresFitTheHour(t *testing.T) {
 	}
 	if p := r.Plan(); !p.ReleaseWhenIdle || p.IdleLimit != 2*time.Minute || p.LeaseLimit != 21*time.Minute {
 		t.Errorf("the plan is %+v, want ReleaseWhenIdle with 2 minutes and the 21-minute lease", p)
+	}
+}
+
+// Row B's slot hold is at least the bounds its own run keeps on a pass, each read from what the run uses: the first job's
+// start wait as its first clock (FirstClock), the predecessor's lease, the wait for the successor's Allocation
+// (SuccessorAllocationWait) and the successor's own start wait (Row.StartWait, the bound of nowSuccessorStart), the
+// successor's start to ready (the profile's health.startTimeout, past which the controller fails it and the run ends its
+// deployment), and the end once the deployment goes (the idle limit, which ReleaseWhenIdle still waits, and a minute).
+// So the stated hold cannot drift below the code's own bounds (the Fable review of PR #406, which found 55 against 59).
+func TestRowBsSlotHoldIsAtLeastItsOwnBounds(t *testing.T) {
+	r := rowOf("alpha-athena-now-nooverlap")
+	tm := r.Clock()
+	first, pastEnd := FirstClock(r, 2*time.Hour, r.Lease, DrainWindow(tm.MaxRequestDuration, tm.DrainMargin, 0))
+	if pastEnd || first != r.StartWait {
+		t.Fatalf("the first clock is %s (past the end %t), want the start wait %s", first, pastEnd, r.StartWait)
+	}
+	bounds := first + r.Lease + SuccessorAllocationWait + r.StartWait + tm.StartTimeout + tm.IdleLimit + time.Minute
+	if r.SlotHold < bounds || r.SlotHold > time.Hour {
+		t.Errorf("slot hold %s, below the run's own bounds on a pass, %s, or past the hour", r.SlotHold, bounds)
 	}
 }
 
