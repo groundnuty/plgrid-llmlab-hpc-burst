@@ -181,6 +181,33 @@ The pins that a design decision rests on, as on `main` on 2026-11-01. The file i
 - **Changes:** ordinary PRs, reviewed for the content rules and ID stability. A change to these rules is an amendment of this HBEP.
 - **Lessons from the framework's own operation** join the same catalogue.
 
+### Releases
+
+A release is a tag on `main` with its binaries, their checksums and its notes (owner decision, 11 Nov 2026: "Tag an alpha release" once alpha graduates).
+- **The first tag** is `v0.1.0-alpha.1`. It's made on `main`'s merge commit at the moment every alpha criterion on Athena has passed, linked from issue #145. Later alpha tags count up (`-alpha.2`), and beta's begin at `v0.2.0-beta.1`. The tag follows Go's module versioning, so `go install …@v0.1.0-alpha.1` works.
+- **Its binaries:**
+  - **which:** `hpcburst` (the launcher), `hpcburst-controller` and `hb-agent`, each for linux amd64 and arm64, so six;
+  - **how:** built with `-trimpath`, from the tagged commit, with Go from `hack/go-pins.txt`;
+  - **the version:** each carries the tag in its build information and prints it with a `version` subcommand. Not `--version`: `hpcburst up --version` already names the k3s release;
+  - **checksums:** a `SHA256SUMS` file lists the six. That's the integrity record; signing and attestations stay out of scope (Non-goals).
+- **What it doesn't ship:** third-party binaries. The launcher fetches frp and k3s from their pins files, checked by sha256, as today. The release notes list the pins the release was tested with: k3s, frp, vLLM's image digest, Go, and, from beta, Envoy.
+- **Its notes:**
+  - GitHub's generated notes from the merged pull requests since the previous tag;
+  - a short summary written by the science agent, giving the platforms measured, the HBEPs at their stage, and the stated limits that still apply;
+  - the date.
+
+  No results or data of the study, and no cluster paths, job IDs or addresses (AGENTS.md).
+- **How it's made:**
+  - a workflow that runs on a pushed `v*` tag;
+  - it builds the six binaries with the pinned Go;
+  - it runs CI's required checks on that commit again, and fails if any fails;
+  - it writes `SHA256SUMS` and creates the GitHub release.
+
+  It reuses GitHub Releases and `gh release create`, and adds no release tool, so it adds no dependency to pin. Only the owner, or an agent on the owner's dated go, pushes a tag.
+- **Before the first tag:**
+  - a dry run of the workflow by `workflow_dispatch`, which builds and checksums the six binaries and publishes nothing;
+  - `hpcburst up` run from the dry run's launcher, with its controller and agent, on the single-user host's rehearsal (HBEP-11).
+
 ### Test plan
 
 - **The copy check** fails for a `third_party/forked/` folder without `ORIGIN.md`, or with an `ORIGIN.md` missing a field. It is planned and does not run in CI yet. The four `ORIGIN.md` files' field names were aligned in #150 (`Upstream URL`, `Commit or tag`, `SPDX licence`, `Changes`, and `Why copied rather than imported`), with no recorded value changed.
@@ -277,8 +304,10 @@ Sources were read on 2026-10-30, except where another date is given.
 - 2026-11-01: erratum: the Test plan records that #150 aligned the four `ORIGIN.md` files' field names, where the text said the copy check's PR would.
 - 2026-11-01: erratum: `hack/fetch-frp.sh`'s `--agent-builds` mode reads the pins file and places frpc for both architectures (PR #157); only its default mode still fetches linux_amd64 alone.
 - 2026-11-11: Envoy's pin row, for beta's router (HBEP-5).
+- 2026-11-11: releases defined; the first tag is `v0.1.0-alpha.1` once alpha graduates (owner decision).
 
 ## Amendments
 
 None.
 - **2026-11-11: Envoy's pin** (Pinned versions). An amendment, as HBEP-5's open question 2 requires: each router's row is added by an amendment merged before the code that adopts it. Envoy v1.40.2 joins the table, with its reason (spike S13) and its bump trigger (S13's harness and S2c). Before, the table had no router.
+- **2026-11-11: releases** (Releases). An amendment by the owner's decision of 11 Nov 2026 ("Tag an alpha release", recorded on #145). A release is a `v*` tag on `main` with the framework's six binaries, their `SHA256SUMS` and its notes, made by a workflow that reuses GitHub Releases. The first is `v0.1.0-alpha.1`, once every alpha criterion on Athena has passed. Before, the project had no release.
