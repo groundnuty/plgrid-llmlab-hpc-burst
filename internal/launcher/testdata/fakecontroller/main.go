@@ -43,6 +43,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -58,6 +59,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"golang.org/x/sys/unix"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -128,7 +130,7 @@ func main() {
 	}
 	readyz := readyzHandler(ctl)
 	if _, off := ctl("no-health"); !off {
-		l, err := net.Listen("tcp", *health)
+		l, err := (&net.ListenConfig{Control: reusePort}).Listen(context.Background(), "tcp", *health)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "fakecontroller:", err)
 			os.Exit(1)
@@ -172,6 +174,18 @@ func main() {
 			}
 		}
 	}
+}
+
+// reusePort sets SO_REUSEPORT on the health listener. The launcher's tests hold the port they chose
+// for it with a socket of their own from that moment (controllers_test.go, reservePort), so that
+// nothing else can take it before this process binds it, and between its restarts; SO_REUSEPORT lets
+// this process bind and listen on it beside that holder (issue #384).
+func reusePort(network, address string, c syscall.RawConn) error {
+	var serr error
+	if err := c.Control(func(fd uintptr) { serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1) }); err != nil {
+		return err
+	}
+	return serr
 }
 
 // frontFlagsOK is the real controller's rule for its front flags (cmd/hpcburst-controller): none,

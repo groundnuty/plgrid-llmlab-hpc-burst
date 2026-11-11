@@ -22,6 +22,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // superviseEnv, set to a state directory, turns the test binary into "hpcburst supervise" for that
@@ -86,6 +88,41 @@ type ctlFixture struct {
 	base  int    // the port base; the controller's /healthz is base+6
 	ports Ports
 	st    *State
+	// releasePort gives up the hold on the controller's health port (reservePort), which lasts until
+	// the test ends; a test that needs the port taken by another process calls it first.
+	releasePort func()
+}
+
+// reservePort takes a loopback port and holds it: a TCP socket bound to it, never listening, with
+// SO_REUSEPORT. While it is held nothing else can take the port, neither another bind nor, as the
+// source port of an outbound connection, a connect (the kernel does not choose a port that a bind
+// holds), but a process that sets SO_REUSEPORT too, as the fake controller does for its health port,
+// can bind it and listen on it, and bind it again after a restart (issue #384: a port that freePort
+// returns can be taken in the gap before the fake binds it, and was, in CI). release gives the port
+// up; it runs when the test ends too, and may be called more than once.
+func reservePort(t *testing.T) (port int, release func()) {
+	t.Helper()
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
+		unix.Close(fd)
+		t.Fatal(err)
+	}
+	if err := unix.Bind(fd, &unix.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+		unix.Close(fd)
+		t.Fatal(err)
+	}
+	sa, err := unix.Getsockname(fd)
+	if err != nil {
+		unix.Close(fd)
+		t.Fatal(err)
+	}
+	var once sync.Once
+	release = func() { once.Do(func() { unix.Close(fd) }) }
+	t.Cleanup(release)
+	return sa.(*unix.SockaddrInet4).Port, release
 }
 
 // freePort returns a loopback port that nothing held a moment ago.
@@ -112,9 +149,12 @@ func newCtlFixture(t *testing.T, front Front) *ctlFixture {
 		t.Fatal(err)
 	}
 	// The block is laid out as the spec has it (base, +1, +2, +3 the agent endpoint, +5, +6 the
-	// controller's /healthz), around a free port for the controller, so the fake can bind it.
-	base := freePort(t) - 6
-	f := &ctlFixture{t: t, l: l, ctl: t.TempDir(), base: base,
+	// controller's /healthz), around a port for the controller that the fixture holds until the test
+	// ends (reservePort), so that nothing else takes it before the fake binds it, nor between its
+	// restarts (issue #384).
+	port, release := reservePort(t)
+	base := port - 6
+	f := &ctlFixture{t: t, l: l, ctl: t.TempDir(), base: base, releasePort: release,
 		ports: Ports{API: base, HTTPS: base + 1, KCM: base + 2, Agent: base + 3, LB: base + 5, Controller: base + 6}}
 	f.st = &State{Version: "v1.36.5+k3s1", Ports: f.ports, Procs: []ProcRec{self}, StartedAt: time.Now(), Front: front,
 		Controllers: &ControllerConfig{Binary: fakeControllerBin(t)}}
@@ -215,11 +255,36 @@ func (f *ctlFixture) await(what string, cond func(e EntryRecord) bool) EntryReco
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	f.t.Fatalf("timed out waiting for %s; supervisor.json: %s", what, fileOf(f.l.supervisorFile()))
+	f.t.Fatal(f.withChildLogs(fmt.Sprintf("timed out waiting for %s; supervisor.json: %s", what, fileOf(f.l.supervisorFile()))))
 	return EntryRecord{}
 }
 
 func fileOf(path string) string { b, _ := os.ReadFile(path); return string(b) }
+
+// childLogs is what the supervised processes wrote to their logs (logs/<name>.log: the fake
+// controller's standard error, so that a failed bind names itself), each file's last 4 KiB under its
+// name, or "" when they wrote nothing. The supervisor's own lines are in the test's log already.
+func (f *ctlFixture) childLogs() string {
+	paths, _ := filepath.Glob(filepath.Join(f.l.logDir(), "*.log"))
+	var out strings.Builder
+	for _, p := range paths {
+		if p == f.l.supervisorLog() || p == f.l.auditLog() {
+			continue
+		}
+		b := fileOf(p)
+		if len(b) > 4096 {
+			b = "..." + b[len(b)-4096:]
+		}
+		if strings.TrimSpace(b) != "" {
+			fmt.Fprintf(&out, "\n%s:\n%s", filepath.Base(p), strings.TrimRight(b, "\n"))
+		}
+	}
+	return out.String()
+}
+
+// withChildLogs is msg followed by the supervised processes' logs, for a wait that timed out: the
+// reason a process never came up is usually in what it wrote (issue #384).
+func (f *ctlFixture) withChildLogs(msg string) string { return msg + f.childLogs() }
 
 func (f *ctlFixture) awaitRunning() EntryRecord {
 	f.t.Helper()
@@ -253,7 +318,7 @@ func (f *ctlFixture) readJSON(name string, v any) {
 			return
 		}
 		if time.Now().After(deadline) {
-			f.t.Fatalf("the fake controller wrote no %s: %v", name, err)
+			f.t.Fatal(f.withChildLogs(fmt.Sprintf("the fake controller wrote no %s: %v", name, err)))
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
