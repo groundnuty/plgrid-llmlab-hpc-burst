@@ -9,7 +9,9 @@
 #   HPCBURST_SSHD           sshd for the fake login node and the gateway (default /usr/sbin/sshd)
 #   REHEARSAL_RUN           a -test.run pattern (default '^TestRehearsal(Direct|SSH|HostDialed)$', issue #146's two
 #                           and #298's host-dialed mode;
-#                           '^TestRehearsalPart3$' runs issue #193's third part, about 8 minutes more)
+#                           '^TestRehearsalPart3$' runs issue #193's third part, about 8 minutes more;
+#                           '^TestRehearsalKeeper' runs #343's relay keeper tests, about 11 minutes,
+#                           which need HPCBURST_BIN_DIR to hold k3s-1.35.9/k3s too)
 #   REHEARSAL_OUT           where the binaries go (default a new temporary directory)
 #   REHEARSAL_PREBUILT=1    run the binaries already in REHEARSAL_OUT instead of building them,
 #                           so the run can take a host's resource lock without a build inside it
@@ -20,7 +22,7 @@
 #                           6444 and 10250. Without it, the test records whichever of them listen
 #                           and fails if that changes.
 # It binds 127.0.0.1 only, on ports 29500-29539 (issue #146's tests), 29780-29799 (#298's host-dialed
-# mode), 29680-29699 (issue #193's)
+# mode), 29680-29699 (issue #193's), 30020-30033 (#343's relay keeper tests)
 # and kernel-chosen ones, and never touches a system k3s.
 #
 # The test starts k3s, the supervisor, the fake jobs and the sshds in sessions of their own, and
