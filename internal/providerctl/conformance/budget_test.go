@@ -70,7 +70,8 @@ func newWaitReader(t *testing.T) *waitReader {
 func (r *waitReader) length(e ast.Expr) time.Duration {
 	r.t.Helper()
 	known := map[string]time.Duration{"duplicateWait": duplicateWait, "accountingEndWait": accountingEndWait, "accountingDeleteWait": accountingDeleteWait, "reachEndWait": reachEndWait,
-		"hostDialedSessionWait": hostDialedSessionWait, "hostDialedProbeWait": hostDialedProbeWait, "hostDialedFenceWait": hostDialedFenceWait, "hostDialedEndWait": hostDialedEndWait}
+		"hostDialedSessionWait": hostDialedSessionWait, "hostDialedProbeWait": hostDialedProbeWait, "hostDialedFenceWait": hostDialedFenceWait, "hostDialedEndWait": hostDialedEndWait,
+		"stageEndWait": stageEndWait, "stageDeleteWait": stageDeleteWait}
 	switch x := e.(type) {
 	case *ast.Ident:
 		if d, ok := known[x.Name]; ok {
@@ -264,6 +265,8 @@ func TestEveryRowsTimeoutIsAboveTheWorstCaseItsSourceAddsUpTo(t *testing.T) {
 			body, wantStartWaits = "TestConformance", 2
 		case strings.HasPrefix(row.name, "gpu-accounting-"):
 			body, wantStartWaits = "gpuAccountingBody", 1
+		case row.name == alpha.NowStageRow().Name:
+			body, wantStartWaits = "stageBody", 1
 		case strings.HasPrefix(row.name, "reach-host-dialed-"):
 			body, wantStartWaits = "hostDialedBody", 1
 		case strings.HasPrefix(row.name, "reach-"):

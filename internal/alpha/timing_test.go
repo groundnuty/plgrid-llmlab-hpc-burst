@@ -34,7 +34,7 @@ func TestLiveRowsKeepTheLiveTiming(t *testing.T) {
 	if LiveTiming() != liveTimingByHand {
 		t.Errorf("LiveTiming() = %+v, want %+v", LiveTiming(), liveTimingByHand)
 	}
-	all := slices.Concat(Rows(), AccountingRows(), ReachRows(), HostDialedRows())
+	all := slices.Concat(Rows(), AccountingRows(), ReachRows(), HostDialedRows(), StageRows())
 	for _, r := range all {
 		if r.Profile == "athena-now" {
 			if r.Timing != AthenaNowTiming() || r.Clock().Lead() != 20*time.Minute {

@@ -386,6 +386,13 @@ var hostDialedRows = []Row{
 	{Name: "reach-host-dialed-athena", Cluster: "athena", Partition: "plgrid-now", GPUs: 1, Lease: 5 * time.Minute, Budget: 25 * time.Minute, SlotHold: 16 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#305 and #145"},
 }
 
+// stageRows are the pre-staging rows (issue #376; nowserve.go), which run in internal/providerctl/conformance: one job
+// whose agent build stages the image and the checkpoint where the agent stages, with no stack and no Instance.
+var stageRows = []Row{NowStageRow()}
+
+// StageRows returns a copy of the pre-staging rows.
+func StageRows() []Row { return append([]Row(nil), stageRows...) }
+
 // Rows returns a copy of the stack rows: the ones this package runs.
 func Rows() []Row { return append([]Row(nil), rows...) }
 
@@ -400,7 +407,7 @@ func ReachRows() []Row { return append([]Row(nil), reachRows...) }
 
 // RowByName finds a row, of any kind.
 func RowByName(name string) (Row, bool) {
-	for _, r := range append(append(append(append([]Row(nil), rows...), accountingRows...), reachRows...), hostDialedRows...) {
+	for _, r := range append(append(append(append(append([]Row(nil), rows...), accountingRows...), reachRows...), hostDialedRows...), stageRows...) {
 		if r.Name == name {
 			return r, true
 		}

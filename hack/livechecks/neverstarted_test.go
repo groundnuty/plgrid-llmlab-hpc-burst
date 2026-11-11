@@ -49,6 +49,7 @@ var neverStartedBound = map[string]struct {
 	"reach-host-dialed-helios": {notRunStartWait10, true},
 	"reach-host-dialed-athena": {notRunStartWait10, true},
 	"alpha-athena-now-serve":   {notRunNowStartWait10, true},
+	"alpha-athena-now-stage":   {notRunStartWait10, true},
 }
 
 var cleanupLeftNone = regexp.MustCompile(`cleanup: left behind 0 \(cancelled \d+\)`)
@@ -273,6 +274,8 @@ var cannotTellLine = map[string]string{
 	"reach-athena":             "FAIL (exit status 1)",
 	"reach-host-dialed-helios": "FAIL (exit status 1)",
 	"reach-host-dialed-athena": "FAIL (exit status 1)",
+	"alpha-athena-now-serve":   "FAIL (exit status 1)",
+	"alpha-athena-now-stage":   "FAIL (exit status 1)",
 }
 
 func TestEveryRowThatCannotCallItsJobNeverStartedEndsAFailure(t *testing.T) {

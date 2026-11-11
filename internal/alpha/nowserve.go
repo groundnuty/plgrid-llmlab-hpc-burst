@@ -97,6 +97,28 @@ func NowServeRow() Row {
 		PostsTo: "#145 and #376", Timing: AthenaNowTiming(), OwnerGo: OwnerGoAthenaNow}
 }
 
+// The pre-staging row (issue #376; the science agent's ruling (a) and its rulings 1 to 3 of 11 Nov 2026): a job of its
+// own on plgrid-now, run before row A and outside its hour, whose agent build is a test-only helper
+// (internal/providerctl/conformance/stagehelper) that calls the real stager with the agent's own configuration, and so
+// stages the sandbox image and the checkpoint where the agent stages, the Provider's staging directory as the profile
+// names it. It starts no Instance and runs no stack. A cold build on A100 is unmeasured, so this row is the cold-start
+// measurement: a staging past its lease is a FAIL that names it.
+const (
+	// NowStageLease is the job's time limit: the cold staging's bound.
+	NowStageLease = 30 * time.Minute
+	// NowStageBudget is the row's timeout, its start wait included (the conformance package's
+	// TestEveryRowsTimeoutIsAboveTheWorstCaseItsSourceAddsUpTo adds it up from the test's source).
+	NowStageBudget = 60 * time.Minute
+)
+
+// NowStageRow is the pre-staging row: plgrid-now under athena-now.yaml, a start wait of 10 minutes, a lease of 30 and two
+// minutes for the end, a hold of 42 minutes in its own hour, and the owner's go of plgrid-now.
+func NowStageRow() Row {
+	return Row{Name: "alpha-athena-now-stage", Cluster: "athena", Profile: "athena-now", Partition: "plgrid-now", GPUs: 1, Lease: NowStageLease,
+		Budget: NowStageBudget, SlotHold: NowStartWait + NowStageLease + 2*time.Minute, StartWait: NowStartWait, MostJobs: 1,
+		PostsTo: "#145 and #376", Timing: AthenaNowTiming(), OwnerGo: OwnerGoAthenaNow}
+}
+
 // ErrRequeueRefused is what row A's scenario returns, beside what it saw, when the scheduler refused the requeue of the
 // run's own job (Q5): the requeue was never put to the test. Run judges the rest of the run, and a failure there wins;
 // with none, the run is NOT RUN (NotRun), its record and text to post written with the reason, never a pass.

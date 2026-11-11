@@ -608,10 +608,10 @@ func TestStandInNowServe(t *testing.T) {
 		t.Fatalf("%s failed its verdict over the stand-in: %s", s.row.Name, Summary(s.failures))
 	}
 	// Every check passed, the requeue's three parts among them. The stand-in starts cold (its image is built and its
-	// checkpoint downloaded in this run), so the agent's log cannot show a warm start: the run is NOT RUN on that alone,
-	// and on nothing else.
-	if s.err != nil && (!errors.Is(s.err, ErrWarmUnshown) || errors.Is(s.err, ErrRequeueRefused)) {
-		t.Fatalf("%s did not finish, or ended NOT RUN on another count than its cold start: %v", s.row.Name, s.err)
+	// checkpoint downloaded in this run, by the real agent and stager), so its agent's own log must not show a warm start:
+	// the run is NOT RUN on that alone, and on nothing else. A pass here would be a warm start read off a cold log.
+	if !errors.Is(s.err, ErrWarmUnshown) || errors.Is(s.err, ErrRequeueRefused) {
+		t.Fatalf("%s ended with %v; want the NOT RUN of a warm start its cold agent log does not show, and nothing else", s.row.Name, s.err)
 	}
 	// The cluster's own record: one job of the run, requeued once and cancelled, never a second.
 	var ours []fakeslurm.Job

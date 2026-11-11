@@ -28,6 +28,7 @@ import (
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/alpha"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 )
 
@@ -207,6 +208,9 @@ func clock(t *testing.T, text string) time.Duration {
 // notAConformanceRun is a row of the script that TestConformance does not run: the alpha rows of issue #194, whose
 // leases are the deployments' (the accounting rows run through this harness and keep its 5-minute Allocations).
 func notAConformanceRun(name string) bool {
+	if name == alpha.NowStageRow().Name {
+		return false // the pre-staging row of issue #376 is a conformance run (nowstage_test.go)
+	}
 	return strings.HasPrefix(name, "alpha-") || strings.HasPrefix(name, "tunnel-hour-")
 }
 

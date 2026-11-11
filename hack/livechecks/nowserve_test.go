@@ -7,9 +7,14 @@ package livechecks
 // its cleanup leaves nothing. The lines are written out here from the science agent's rulings, not read from the script.
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/alpha"
 )
 
 func TestRowAsNotRunsThroughTheScript(t *testing.T) {
@@ -61,5 +66,58 @@ func TestARowAMarkerOnAnotherRowIsAFailure(t *testing.T) {
 	}
 	if strings.Contains(res.out, "NOT RUN") {
 		t.Errorf("a row A marker on another row read as NOT RUN:\n%s", res.out)
+	}
+}
+
+// The pre-staging row's shape is the package's row (internal/alpha, NowStageRow): athena-now on plgrid-now, its slot, row
+// A's per-GPU size, the 30-minute time limit that is its lease, its timeout its budget and its start wait of 10 minutes.
+func TestTheScriptsStageRowIsThePackagesRow(t *testing.T) {
+	b, err := os.ReadFile(scriptPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := alpha.NowStageRow()
+	var f []string
+	for _, l := range block(t, string(b), "CLUSTER SHAPES") {
+		if g := strings.Split(l, "|"); g[0] == r.Name {
+			f = g
+		}
+	}
+	if len(f) != 14 {
+		t.Fatalf("the script has no shape of 14 fields for %s: %q", r.Name, f)
+	}
+	// name | host | profile | partition | qos | slot | account key | GPUs | CPUs | memory | time limit | timeout | extra | start wait
+	want := []string{r.Name, r.Cluster, r.ProfileName(), r.Partition, "-", "plgrid-now", "ACCOUNT_ATHENA_A100", "1", "16", "125Gi", "00:30:00",
+		fmt.Sprint(int(r.Budget / time.Minute)), "-", fmt.Sprint(int(r.StartWait / time.Minute))}
+	if strings.Join(f, "|") != strings.Join(want, "|") {
+		t.Errorf("the script's shape is %q, the package's row gives %q", f, want)
+	}
+	if r.Lease != 30*time.Minute || r.SlotHold != 42*time.Minute || r.MostJobs != 1 || r.OwnerGo != alpha.OwnerGoAthenaNow {
+		t.Errorf("the package's pre-staging row is %+v", r)
+	}
+}
+
+// The pre-staging row builds its helper before its slot, and its test gets the build, the profile and the start wait, and
+// none of the stack rows' settings.
+func TestTheStageRowBuildsItsHelperAndGivesTheTestItsEnvironment(t *testing.T) {
+	w := newAlphaWorld(t)
+	res := w.run(nil, "--run", "alpha-athena-now-stage", "--yes")
+	if res.code != 0 {
+		t.Fatalf("exit %d:\n%s", res.code, res.out)
+	}
+	env := w.stateFile("test-env-TestNowStage")
+	for _, want := range []string{"HPCBURST_CONFORMANCE=1", "HPCBURST_CONF_PROFILE=athena-now", "HPCBURST_CONF_PARTITION=plgrid-now", "HPCBURST_CONF_START_WAIT=10m", "HPCBURST_CONF_STAGE_HELPER="} {
+		if !strings.Contains(env, want) {
+			t.Errorf("the test's environment lacks %s:\n%s", want, env)
+		}
+	}
+	for _, not := range []string{"HPCBURST_ALPHA_RUN_ID", "HPCBURST_ALPHA_DIALHOME_MODE", "HPCBURST_CONF_QOS"} {
+		if strings.Contains(env, not) {
+			t.Errorf("the test's environment has %s:\n%s", not, env)
+		}
+	}
+	ev := w.stateFile("events")
+	if i, j := strings.Index(ev, "build-stage-helper "), strings.Index(ev, "testbin "); i < 0 || j < 0 || i > j {
+		t.Errorf("the helper was not built before the test ran:\n%s", ev)
 	}
 }

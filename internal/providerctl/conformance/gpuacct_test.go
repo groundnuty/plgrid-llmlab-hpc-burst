@@ -164,6 +164,8 @@ type dryExtra struct {
 	run   func(*fakeslurm.RunMode)
 	login func(plat *fakeslurm.Platform, creds, home string)
 	kit   func(*worldKit)
+	// settings changes the run's settings before the world is built (the pre-staging row: the profile's own staging).
+	settings func(settings) settings
 }
 
 // dryWorld is the world of a dry run over a fake Slurm in run mode: the agent stand-in is run by the fake, on this
@@ -198,7 +200,7 @@ func dryWorld(t *testing.T, r alpha.Row, fault, out string, shape dryShape, agen
 		}
 	}
 	vars := map[string]string{
-		"HPCBURST_CONF_PROFILE": r.Cluster, "HPCBURST_CONF_PARTITION": r.Partition, "HPCBURST_CONF_CREDENTIALS": creds,
+		"HPCBURST_CONF_PROFILE": r.ProfileName(), "HPCBURST_CONF_PARTITION": r.Partition, "HPCBURST_CONF_CREDENTIALS": creds,
 		"HPCBURST_CONF_ACCOUNT": "example-account", "HPCBURST_CONF_GPUS": "1", "HPCBURST_CONF_CPUS": shape.cpus, "HPCBURST_CONF_MEMORY": shape.memory,
 		"HPCBURST_CONF_STAGING": "$SCRATCH/hpc-burst-conformance", "HPCBURST_CONF_HOST_LOCK": filepath.Join(dir, "lock"),
 		"HPCBURST_CONF_CONTROL_DIR": filepath.Join(dir, "ctl"), "HPCBURST_CONF_OUT": out, "HPCBURST_CONF_QOS": r.QOS,
@@ -304,6 +306,9 @@ func dryWorld(t *testing.T, r alpha.Row, fault, out string, shape dryShape, agen
 		}
 		if x.kit != nil {
 			x.kit(&kit)
+		}
+		if x.settings != nil {
+			s = x.settings(s)
 		}
 	}
 	w := buildWorld(t, s, kit)

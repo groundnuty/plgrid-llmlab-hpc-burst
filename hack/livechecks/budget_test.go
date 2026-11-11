@@ -47,7 +47,7 @@ func TestEveryRowsTimeoutIsDerivedFromItsBounds(t *testing.T) {
 			if _, ok := alpha.RowByName(name); !ok {
 				t.Errorf("%s has a test here, and no row in internal/alpha", name)
 			}
-		case strings.HasPrefix(name, "conformance-"), strings.HasPrefix(name, "gpu-accounting-"), strings.HasPrefix(name, "reach-"):
+		case strings.HasPrefix(name, "conformance-"), strings.HasPrefix(name, "gpu-accounting-"), strings.HasPrefix(name, "reach-"), name == alpha.NowStageRow().Name:
 			// internal/providerctl/conformance, TestEveryRowsTimeoutIsAboveTheWorstCaseItsSourceAddsUpTo.
 		case name == "real-engine":
 			timeout, err := strconv.Atoi(f[11])

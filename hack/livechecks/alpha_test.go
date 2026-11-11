@@ -156,7 +156,7 @@ func newAlphaWorld(t *testing.T) *world {
 	w := newWorld(t)
 	w.alphaSettings(nil)
 	w.useAlphaStubs()
-	for _, s := range []string{"hack/build-agents.sh", "hack/fetch-frp.sh"} {
+	for _, s := range []string{"hack/build-agents.sh", "hack/fetch-frp.sh", "hack/build-stage-helper.sh"} {
 		if err := os.Chmod(filepath.Join(w.repo, s), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -205,6 +205,11 @@ func TestTheScriptsShapesAreThePackagesRows(t *testing.T) {
 		// name | host | profile | partition | qos | slot | account key | GPUs | CPUs | memory | time limit | timeout | extra
 		if f[1] != r.Cluster || f[2] != r.ProfileName() || f[3] != r.Partition || f[4] != qos || f[7] != "1" {
 			t.Errorf("%s: shape %v differs from the package's row %+v", r.Name, f, r)
+		}
+		// A row on Athena's one-job partition holds the owner's shared slot, which the slot guard reads by this column
+		// (check_slot): the partition is the slot's token there (issue #376).
+		if r.Partition == "plgrid-now" && f[5] != "plgrid-now" {
+			t.Errorf("%s runs on plgrid-now and the shape names the slot %q: the slot guard would not read it", r.Name, f[5])
 		}
 		var h, m, s int
 		if _, err := fmt.Sscanf(f[10], "%d:%d:%d", &h, &m, &s); err != nil {
@@ -852,6 +857,8 @@ func TestTheRowsThatHoldTheOwnersSlotForHoursNeedTheOwnersGo(t *testing.T) {
 		{"tunnel-hour-helios", "LIVE_OWNER_GO_HELIOS_NOW", "may pend up to 30 min in the queue (then it is cancelled by its tag and the run is NOT RUN), then holds QOS now's GPU for about 2 h 20 min; the owner's go is needed (the development rule on #145)"},
 		// Row A on plgrid-now (issue #376, Q6): its start wait of 10 minutes, then the hour it holds the slot: 10 + 48 + 2.
 		{"alpha-athena-now-serve", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
+		// The pre-staging row (issue #376): its start wait, then 10 + 30 + 2 = 42 minutes, rounded up to ten.
+		{"alpha-athena-now-stage", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 0 h 50 min; the owner's go is needed (the development rule on #145)"},
 	}
 	for _, c := range rows {
 		for _, stale := range []struct{ name, value string }{{"missing", ""}, {"yesterday's", yesterday}, {"1", "1"}, {"yes", "yes"}} {
@@ -934,7 +941,7 @@ func TestTheScriptsSlotHoldIsThePackagesRoundedUp(t *testing.T) {
 		}
 		got[f[0]], key[f[0]] = f[2], f[1]
 	}
-	all := slices.Concat(alpha.Rows(), alpha.AccountingRows(), alpha.ReachRows(), alpha.HostDialedRows())
+	all := slices.Concat(alpha.Rows(), alpha.AccountingRows(), alpha.ReachRows(), alpha.HostDialedRows(), alpha.StageRows())
 	for name := range got {
 		if _, ok := alpha.RowByName(name); !ok {
 			t.Errorf("the owner-go table names %s, which no package row is", name)
