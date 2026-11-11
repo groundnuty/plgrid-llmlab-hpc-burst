@@ -115,7 +115,7 @@ func TestNoUnguardedGroupSignalsInTheDefaultPath(t *testing.T) {
 		"job.go:Close":                  {"j.wg.Wait": 1},
 		"owner.go:Start":                {"wg.Wait": 1, "o.wg.Wait": 1},
 		"owner.go:Stop":                 {"wg.Wait": 1, "o.wg.Wait": 1},
-		"owner.go:startLocked":          {"wg.Wait": 1},
+		"owner.go:startLocked":          {"wg.Wait": 1, "a.strays.Wait": 1}, // WaitGroups: the loops, then the strays (relay.holdStray)
 		"serve.go:Serve":                {"wg.Wait": 1},
 	}
 	// Where each name may appear: file:function -> its count.

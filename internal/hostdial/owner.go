@@ -293,7 +293,9 @@ func (o *Owner) Want(t Target) {
 
 // Drop records that the Allocation tagged tag is no longer running (its job
 // ended, or the Allocation is being deleted) and stops its relays by PID. It
-// returns once their processes are gone.
+// returns once their processes are gone, except a relay whose stop was refused
+// (the Owner logs it): that one stays the Owner's, its slots stay taken and
+// Target.OnExit waits until its process is reaped (relay.holdStray).
 func (o *Owner) Drop(tag string) {
 	o.mu.Lock()
 	delete(o.want, tag)
@@ -438,6 +440,11 @@ type allocRelays struct {
 	relays []*relay
 	done   chan struct{}
 
+	// strays counts the relays whose stop was refused and whose processes may still run (relay.holdStray):
+	// the Allocation's slots are given back only when they are all reaped.
+	strays sync.WaitGroup
+	strayN atomic.Int32
+
 	mu      sync.Mutex
 	waiting bool
 }
@@ -462,12 +469,13 @@ func (o *Owner) stopLocked(a *allocRelays) {
 
 // startLocked starts an Allocation's relays: it takes the pair of slots on
 // the login node first, waiting while the node has no two free, and holds
-// them until both relays have stopped, through every restart and backoff.
+// them until both relays have stopped, through every restart and backoff. A
+// relay whose stop was refused keeps them until its process is reaped.
 func (o *Owner) startLocked(t Target) *allocRelays {
 	ctx, cancel := context.WithCancel(o.ctx)
 	a := &allocRelays{cancel: cancel, done: make(chan struct{}), waiting: true}
 	for _, ch := range agentapi.RelayChannels {
-		a.relays = append(a.relays, &relay{o: o, t: t, ch: ch, epoch: o.epoch, target: agentapi.RelayTargetAddr(o.o.Ports[ch])})
+		a.relays = append(a.relays, &relay{o: o, t: t, a: a, ch: ch, epoch: o.epoch, target: agentapi.RelayTargetAddr(o.o.Ports[ch])})
 	}
 	// A seeded channel reads as final at once, not only once its pair of
 	// slots is taken (Target.Final).
@@ -482,7 +490,6 @@ func (o *Owner) startLocked(t Target) *allocRelays {
 		if err != nil {
 			return
 		}
-		defer release()
 		a.mu.Lock()
 		a.waiting = false
 		a.mu.Unlock()
@@ -492,6 +499,14 @@ func (o *Owner) startLocked(t Target) *allocRelays {
 			go func() { defer wg.Done(); r.loop(ctx) }()
 		}
 		wg.Wait()
+		// A relay whose stop was refused may still run, and is still the Owner's (relay.holdStray): its
+		// slots are given back when its process is reaped, not before. The loops are all over, so no
+		// stray is added any more.
+		if a.strayN.Load() > 0 {
+			go func() { a.strays.Wait(); release() }()
+			return
+		}
+		release()
 	}()
 	return a
 }
@@ -500,6 +515,7 @@ func (o *Owner) startLocked(t Target) *allocRelays {
 type relay struct {
 	o      *Owner
 	t      Target
+	a      *allocRelays // the Allocation's relays, whose slots a stray keeps
 	ch     agentapi.RelayChannel
 	epoch  int64
 	target string
@@ -516,7 +532,8 @@ type relay struct {
 	finalCause string
 	lastEnded  time.Time
 	lastWait   time.Duration
-	restarts   []time.Time // the drops of sessions that came up, within the restart window
+	restarts   []time.Time   // the drops of sessions that came up, within the restart window
+	stray      chan struct{} // closed when the process whose stop was refused has been reaped (holdStray)
 	stats      ServeStats
 }
 
@@ -579,6 +596,14 @@ func (r *relay) loop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-time.After(wait):
+		}
+		// No successor starts beside a process whose stop was refused: this one waits for it to be reaped.
+		if ch := r.strayDone(); ch != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ch:
+			}
 		}
 		before := r.stats.Sessions.Load()
 		up, started, kind, cause := r.once(ctx)
@@ -736,13 +761,62 @@ func (r *relay) once(ctx context.Context) (time.Duration, bool, EndKind, string)
 		cause = failure
 	}
 	r.mu.Lock()
-	r.pid, r.lastEnded, r.failure, r.lastEnd = 0, time.Now(), failure, kind.String()+": "+cause
+	if stopErr == nil {
+		r.pid = 0
+	}
+	r.lastEnded, r.failure, r.lastEnd = time.Now(), failure, kind.String()+": "+cause
 	r.mu.Unlock()
 	o.Logger.Info("relay ended", "tag", r.t.Tag, "channel", r.ch, "job", id, "up", up.Round(time.Millisecond), "exit", exit, "end", kind.String(), "cause", cause)
+	if stopErr != nil {
+		// Its process may still run: it stays listed, its slots stay taken and OnExit, which says that the
+		// process is gone, waits until it is.
+		r.holdStray(p)
+		return up, true, kind, cause
+	}
 	if r.t.OnExit != nil {
 		r.t.OnExit(r.ch)
 	}
 	return up, true, kind, cause
+}
+
+// holdStray keeps a relay whose stop was refused, or not seen to finish, as the Owner's until its process is
+// reaped (issue #370, the review of PR 378): its PID stays listed, the Allocation's slots stay taken (the loops
+// that end before it hand them to it), no successor starts beside it (loop waits for it), and Target.OnExit,
+// which the relay keeper reads as "the process is gone", is called once, when it is. A stop that was not refused
+// is read as before: the process was reaped when the stop returned.
+func (r *relay) holdStray(p *process) {
+	done := make(chan struct{})
+	r.mu.Lock()
+	r.stray = done
+	r.mu.Unlock()
+	a := r.a
+	a.strayN.Add(1)
+	a.strays.Add(1)
+	go func() {
+		defer a.strays.Done()
+		defer a.strayN.Add(-1)
+		<-p.done
+		r.mu.Lock()
+		if r.pid == p.pid {
+			r.pid = 0
+		}
+		r.mu.Unlock()
+		r.o.o.Logger.Info("a relay's ssh ended after its stop was refused", "tag", r.t.Tag, "channel", r.ch, "pid", p.pid)
+		if r.t.OnExit != nil {
+			r.t.OnExit(r.ch)
+		}
+		close(done)
+	}()
+}
+
+// strayDone is the channel that closes when the process whose stop was refused is reaped, nil when there is none
+// (or it was reaped and waited for already).
+func (r *relay) strayDone() chan struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ch := r.stray
+	r.stray = nil
+	return ch
 }
 
 // jobIsOurs reads the Provider's latest listing under the Allocation's tag
