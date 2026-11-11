@@ -1,0 +1,201 @@
+# The release workflow (issue #401, HBEP-15 Releases).
+#
+# On a pushed tag v* it makes a DRAFT release, and nothing else:
+#   check    hack/release-check.sh: the tag is a version Go reads, its notes docs/releases/<tag>.md are
+#            committed, the checkout is the commit it names, and that commit is on origin/main
+#            (git merge-base --is-ancestor). A tag pushed from anywhere else fails here, before anything
+#            is built, and no release is made.
+#   ci       ci.yml, called through workflow_call, so the required checks are the ones every pull
+#            request ran, not a copy of them.
+#   archive  hack/release-archive.sh: the linux amd64 archive and its SHA256SUMS, built with the pinned
+#            Go, with the pins of k3s, frps and frpc checked and `go version -m` of each host binary
+#            required to show the tag without +dirty. The same five steps as ci.yml install the Go.
+#   draft    gh release create --draft, with the archive and SHA256SUMS, the summary
+#            docs/releases/<tag>.md (--notes-file) and GitHub's generated notes (--generate-notes).
+#            Only on a tag push, and after check, ci and archive have all passed.
+# The owner publishes the draft by hand, after the rehearsal has run from its archive
+# (hack/rehearsal.sh, REHEARSAL_ARCHIVE). No tag is ever moved or deleted (HBEP-15, A failed release).
+#
+# A run started by hand (workflow_dispatch) builds and checksums the archive and publishes NOTHING: check,
+# ci and draft are skipped, and the archive job's binaries report the pseudo-version of the commit (the
+# tag, when the run is started on a tag's ref). It proves the archive.
+#
+# Security. The workflow reads no secret: the only credential is the job token, handed to gh by the draft
+# step alone. permissions is contents: read for the workflow, and the draft job alone has contents:
+# write; it runs no code of the repository, only gh and sha256sum, on the archive that the unprivileged
+# archive job built. Every action is pinned by commit SHA, and tag names reach scripts through env, never
+# through the expression in a command line. The workflow has no concurrency group of its own: ci.yml,
+# called from here, groups by its caller's workflow name and the commit (release-<sha>), so a group of
+# this workflow's own with that name would wait on its own called jobs forever.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # hack/fetch-go.sh installs the version go.mod names; see ci.yml.
+  GOTOOLCHAIN: local
+  GOPROXY: "https://proxy.golang.org|direct"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check:
+    name: check the tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      # The whole history, with origin/main's: is-ancestor needs the commits between the tag and main.
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the tag can be released
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: bash hack/release-check.sh "$TAG"
+
+      - name: Nothing to check on a run started by hand
+        if: github.event_name != 'push' || github.ref_type != 'tag'
+        run: echo "A run started by hand builds the archive and publishes nothing, so no tag is checked."
+
+  ci:
+    name: ci
+    needs: check
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  archive:
+    name: archive
+    needs: check
+    runs-on: ubuntu-24.04
+    # The Kubernetes libraries compile from scratch for three binaries and two agents.
+    timeout-minutes: 60
+    steps:
+      # The whole history, so that Go finds the tag (and, off a tag, the pseudo-version's base).
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Go comes from a pinned tarball, not from actions/setup-go (see the top of this file).
+      - name: Read the Go version from go.mod
+        id: goversion
+        run: |
+          # A failing script must fail this step: "echo ...$(cmd)" would hide its exit status.
+          version=$(bash hack/fetch-go.sh --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the cached Go archive
+        id: goarchive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}
+
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
+          echo "::add-matcher::$GITHUB_WORKSPACE/.github/go-problem-matcher.json"
+
+      - name: Save the Go archive to the cache
+        if: steps.goarchive.outputs.cache-hit != 'true' && github.event_name != 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: ${{ steps.goarchive.outputs.cache-primary-key }}
+
+      - name: Check the Go on PATH is the pinned toolchain
+        id: gocheck
+        run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
+
+      # The modules are downloaded here, before anything builds: go mod download, tried again when it
+      # fails, then go mod verify (hack/go-mod-download.sh, issue #346). Nothing is cached between runs.
+      - name: Download and verify the Go modules
+        run: bash hack/go-mod-download.sh
+
+      - name: Go version
+        run: go version
+
+      - name: Build the archive
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          args=()
+          if [ -n "$TAG" ]; then
+            args+=(--tag "$TAG")
+          fi
+          # Outside the checkout: a file in it would make the tree dirty, and every binary +dirty.
+          bash hack/release-archive.sh ${args[@]+"${args[@]}"} "$RUNNER_TEMP/release"
+
+      - name: Show the checksums
+        run: |
+          {
+            echo "### SHA256SUMS"
+            echo '```'
+            cat "$RUNNER_TEMP/release/SHA256SUMS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the archive for the next job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release
+          path: |
+            ${{ runner.temp }}/release/hpcburst-*-linux-amd64.tar.gz
+            ${{ runner.temp }}/release/SHA256SUMS
+          if-no-files-found: error
+
+  draft:
+    name: draft release
+    needs: [check, ci, archive]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      # For docs/releases/<tag>.md only; no code of the repository runs in this job.
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch the archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: ${{ runner.temp }}/release
+
+      - name: Check the archive against its checksums
+        run: |
+          cd "$RUNNER_TEMP/release"
+          ls -l
+          archive=$(ls hpcburst-*-linux-amd64.tar.gz)
+          grep -F "  $archive" SHA256SUMS | sha256sum -c -
+
+      # A DRAFT: nothing is published, and no tag or release is edited. gh is on the runner image.
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --draft --verify-tag --generate-notes \
+            --notes-file "docs/releases/$TAG.md" \
+            "$RUNNER_TEMP"/release/hpcburst-*-linux-amd64.tar.gz "$RUNNER_TEMP/release/SHA256SUMS"

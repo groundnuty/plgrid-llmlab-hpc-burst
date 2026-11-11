@@ -4,8 +4,18 @@
 # over a fake Slurm cluster in run mode reached over real ssh and sshd.
 #
 #   HPCBURST_BIN_DIR=<dir with k3s-1.36.5/k3s> HPCBURST_FRP_DIR=<dir with frps, frpc> hack/rehearsal.sh
+#   REHEARSAL_ARCHIVE=<a release archive> hack/rehearsal.sh
+#
+# The second form runs a draft release's own bytes (HBEP-15, Releases): hack/release-unpack.sh unpacks
+# the archive (hack/release-archive.sh) into REHEARSAL_OUT, under the names the prebuilt mode takes
+# (hpcburst, hpcburst-controller, hpcburst-front, hb-agent), takes the k3s directory from the archive's
+# bin/ (HPCBURST_BIN_DIR) and puts its frps and its x86_64 frpc in REHEARSAL_OUT/frp (HPCBURST_FRP_DIR).
+# The archive gives all three, so neither variable may be set. rehearsal.test is built from the checkout,
+# which is the tag's: the archive holds no test. A SHA256SUMS beside the archive is checked. The archive
+# has the one pinned k3s, so '^TestRehearsalKeeper', which needs k3s-1.35.9 too, does not run from it.
 #
 # Optional:
+#   REHEARSAL_UNPACK_ONLY=1 with REHEARSAL_ARCHIVE, unpack and stop: nothing is built or run
 #   HPCBURST_SSHD           sshd for the fake login node and the gateway (default /usr/sbin/sshd)
 #   REHEARSAL_RUN           a -test.run pattern (default '^TestRehearsal(Direct|SSH|HostDialed)$', issue #146's two
 #                           and #298's host-dialed mode;
@@ -33,11 +43,30 @@
 # needs a systemd user manager; on a CI runner, enable lingering for the user first.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-: "${HPCBURST_BIN_DIR:?set HPCBURST_BIN_DIR to a directory with k3s-1.36.5/k3s (hack/fetch-k3s.sh DIR 1.36.5)}"
-: "${HPCBURST_FRP_DIR:?set HPCBURST_FRP_DIR to a directory with the pinned frps and frpc (hack/fetch-frp.sh DIR)}"
+if [ -n "${REHEARSAL_ARCHIVE:-}" ]; then
+	if [ -n "${HPCBURST_BIN_DIR:-}" ] || [ -n "${HPCBURST_FRP_DIR:-}" ]; then
+		echo "rehearsal.sh: REHEARSAL_ARCHIVE gives the k3s and frp directories itself; unset HPCBURST_BIN_DIR and HPCBURST_FRP_DIR" >&2
+		exit 2
+	fi
+	if [ "${REHEARSAL_PREBUILT:-0}" = 1 ]; then
+		echo "rehearsal.sh: REHEARSAL_ARCHIVE and REHEARSAL_PREBUILT=1 are two ways to the binaries; use one" >&2
+		exit 2
+	fi
+else
+	: "${HPCBURST_BIN_DIR:?set HPCBURST_BIN_DIR to a directory with k3s-1.36.5/k3s (hack/fetch-k3s.sh DIR 1.36.5), or set REHEARSAL_ARCHIVE}"
+	: "${HPCBURST_FRP_DIR:?set HPCBURST_FRP_DIR to a directory with the pinned frps and frpc (hack/fetch-frp.sh DIR), or set REHEARSAL_ARCHIVE}"
+fi
 out="${REHEARSAL_OUT:-$(mktemp -d)}"
 mkdir -p "$out"
-if [ "${REHEARSAL_PREBUILT:-0}" = 1 ]; then
+if [ -n "${REHEARSAL_ARCHIVE:-}" ]; then
+	bash hack/release-unpack.sh "$REHEARSAL_ARCHIVE" "$out" "$out/frp"
+	export HPCBURST_BIN_DIR="$out/archive/bin" HPCBURST_FRP_DIR="$out/frp"
+	if [ "${REHEARSAL_UNPACK_ONLY:-0}" = 1 ]; then
+		exit 0
+	fi
+	go test -c -o "$out/rehearsal.test" ./internal/rehearsal/scenario
+	echo "running the binaries of $REHEARSAL_ARCHIVE in $out"
+elif [ "${REHEARSAL_PREBUILT:-0}" = 1 ]; then
 	for f in hpcburst hpcburst-controller hpcburst-front hb-agent rehearsal.test; do
 		if [ ! -x "$out/$f" ]; then
 			echo "rehearsal.sh: REHEARSAL_PREBUILT=1, but $out/$f is missing" >&2
