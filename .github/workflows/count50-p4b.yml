@@ -1,0 +1,268 @@
+# One-off workflow for a throwaway draft PR (issue #343, PR 4's Stage B), never merged. It runs the
+# relay keeper's tests with REAL controller processes (internal/relaykeeper/keeperproc, ctl*_test.go)
+# -count=50 each under two CPU spinners, with HPCBURST_REQUIRE_SSHD=1 so a missing sshd fails instead
+# of skipping. It also applies each test's named one-line product mutant by hand, after a baseline run
+# under the same flags, and requires the named test to fail.
+#
+# The Go and sshd steps are ci.yml's go job's (the pinned, checked toolchain since #335), with the Go
+# archive's cache restored only, never saved. The envtest binaries come from hack/test-binaries.sh,
+# which checks each one's sha256 against its pin. No secret is read, and nothing is pushed.
+name: count50-p4b
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/count50-p4b.yml
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+  HPCBURST_REQUIRE_SSHD: "1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  keeperproc:
+    name: keeperproc ${{ matrix.test }} -count=50
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - TestARealControllersHandOverCutsNoStream
+          - TestARealControllersRestartCutsNoStream
+          - TestAFinalEndSurvivesARealControllerRestart
+          - TestAFinalEndOfADeletedAllocationIsRefusedByTheRealNextLeader
+          - TestACrashAfterTheMarkRaisesRelayFailedOnceWithRealControllers
+          - TestARealControllerOnAHeldLoginHostIsLoginHostInUse
+          - TestARealControllerWithItsKeeperSocketMissingIsUnavailableAndAdmitsNothing
+          - TestAStaleRealControllersAcknowledgementAndSetAreRefusedForTheirEpoch
+          - TestARealLeaderStopsSendingBeforeItReleasesTheLease
+    steps:
+      - name: Check out the PR's head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Read the Go version from go.mod
+        id: goversion
+        run: |
+          version=$(bash hack/fetch-go.sh --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the cached Go archive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}
+
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
+
+      - name: Check the Go on PATH is the pinned toolchain
+        run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
+
+      # As CI's go and crd jobs: hack/test-binaries.sh fetches etcd and kube-apiserver and checks each
+      # one's sha256 against its pin; the tests' internal/testenv.FindBinaries finds them in the cache.
+      - name: Fetch the pinned Kubernetes binaries
+        run: |
+          echo "HPCBURST_TOOLS_CACHE=$RUNNER_TEMP/hpcburst-tools" >> "$GITHUB_ENV"
+          HPCBURST_TOOLS_CACHE="$RUNNER_TEMP/hpcburst-tools" bash hack/test-binaries.sh
+
+      - name: Provide OpenSSH's sshd for the rehearsal login node
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+            sudo chmod 755 /usr/sbin/policy-rc.d
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+            sudo rm -f /usr/sbin/policy-rc.d
+          fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
+          /usr/sbin/sshd -V 2>&1 | head -1
+          echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
+
+      - name: Build the test binary
+        run: go test -c -o "$RUNNER_TEMP/kp.test" ./internal/relaykeeper/keeperproc/
+
+      - name: Run it 50 times under two CPU spinners
+        working-directory: internal/relaykeeper/keeperproc
+        run: |
+          # Two spinners at the lowest priority, each bounded by timeout, so they end by themselves;
+          # the runner ends what is left at the job's end. The longest test, about 40 s, takes about
+          # 35 min for 50 runs, under the spinners' bound.
+          for i in 1 2; do timeout 140m nice -n 19 sh -c 'while :; do :; done' & done
+          log="$RUNNER_TEMP/count50.log"
+          rc=0
+          "$RUNNER_TEMP/kp.test" -test.run '^${{ matrix.test }}$' -test.count 50 -test.v -test.timeout 140m > "$log" 2>&1 || rc=$?
+          passes=$(grep -c -E '^--- PASS: ${{ matrix.test }} ' "$log" || true)
+          fails=$(grep -c -E '^--- FAIL: ${{ matrix.test }} ' "$log" || true)
+          skips=$(grep -c -E '^\s*--- SKIP' "$log" || true)
+          leaks=$(grep -E '^rehearsal: [0-9]+ leaked' "$log" | sort | uniq -c | tr '\n' ' ' || echo "no leak line")
+          {
+            echo "### ${{ matrix.test }}"
+            echo "passes: $passes of 50; fails: $fails; skips: $skips; $leaks; exit $rc"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -E '^(--- FAIL|    [a-z_]+_test\.go:[0-9]+:)' "$log" | head -200 || true
+          test "$rc" = 0 && test "$passes" = 50 && test "$skips" = 0 && ! grep -E '^rehearsal: [1-9][0-9]* leaked' "$log"
+
+  mutants:
+    name: mutant ${{ matrix.id }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Item 1: the keeper replaces a relay that a new leader's same Want names.
+          - id: keeper-replaces-on-hand-over
+            file: internal/relaykeeper/ownerrunner.go
+            from: 'in != nil && in.want.Entry == e && in.host == host'
+            to: 'in != nil && false && in.want.Entry == e && in.host == host'
+            tests: TestARealControllersHandOverCutsNoStream TestARealControllersRestartCutsNoStream
+          # Item 7: the keeper does not report a held final end again (no replay).
+          - id: final-end-not-replayed
+            file: internal/relaykeeper/keeper.go
+            from: 'if e.Provider == p && !e.Decided {'
+            to: 'if false && e.Provider == p && !e.Decided {'
+            tests: TestAFinalEndSurvivesARealControllerRestart
+          # Item 8: the controller ignores the ends a report carries, so none is acknowledged.
+          - id: reported-ends-ignored
+            file: internal/providerctl/keeper.go
+            from: "\t\tk.queueEnds(rep.Ends)\n"
+            to: "\t\tk.queueEnds(nil)\n"
+            tests: TestAFinalEndOfADeletedAllocationIsRefusedByTheRealNextLeader
+          # Item 9: RelayFailed raised whether or not this write made the mark (Q12).
+          - id: relay-failed-without-newly-written
+            file: internal/providerctl/keeper.go
+            from: "\t\t\tif wrote {\n"
+            to: "\t\t\tif wrote || true {\n"
+            tests: TestACrashAfterTheMarkRaisesRelayFailedOnceWithRealControllers
+          # Item 13: Ready is not set to RelayKeeperUnavailable.
+          - id: unavailable-not-set
+            file: internal/providerctl/providerstatus.go
+            from: "\tif why := l.s.keeperUnavailable(now); why != \"\" {\n"
+            to: "\tif why := l.s.keeperUnavailable(now); false && why != \"\" {\n"
+            tests: TestARealControllerWithItsKeeperSocketMissingIsUnavailableAndAdmitsNothing
+          # Item 13: a login_host refusal does not reach the claim, so Ready names no holder.
+          - id: login-host-refusal-dropped
+            file: internal/providerctl/keeper.go
+            from: "\t\tk.login, k.inUse = refused.Refused.LoginHost, loginHostInUse(refused.Refused.LoginHost, refused.Refused.Holder, false)\n"
+            to: "\t\tk.login = refused.Refused.LoginHost\n"
+            tests: TestARealControllerOnAHeldLoginHostIsLoginHostInUse
+          # Item 3: the keeper accepts a set or an ack from a lower Lease epoch.
+          - id: stale-epoch-accepted
+            file: internal/relaykeeper/keeper.go
+            from: 'if seen && epoch < f.HighestEpoch {'
+            to: 'if false && seen && epoch < f.HighestEpoch {'
+            tests: TestAStaleRealControllersAcknowledgementAndSetAreRefusedForTheirEpoch
+          # Fencing: the lead's end and the release hook wait for no exchange in flight, so a send can
+          # outlast the release. Two edits of one mechanism: each wait alone keeps the order.
+          - id: sends-outlast-the-release
+            file: internal/providerctl/keeper.go
+            from: "\tk.endLeadAfterSends(r)\n\t<-done\n\tk.stopDeadline()\n"
+            to: "\tgo k.endLeadAfterSends(r)\n\tk.stopDeadline()\n"
+            from2: "\tk.endLeadAfterSends(r)\n\tif done != nil {\n"
+            to2: "\tgo k.endLeadAfterSends(r)\n\tif done != nil && false {\n"
+            tests: TestARealLeaderStopsSendingBeforeItReleasesTheLease
+    steps:
+      - name: Check out the PR's head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Read the Go version from go.mod
+        id: goversion
+        run: |
+          version=$(bash hack/fetch-go.sh --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the cached Go archive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}
+
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
+
+      - name: Check the Go on PATH is the pinned toolchain
+        run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
+
+      - name: Fetch the pinned Kubernetes binaries
+        run: |
+          echo "HPCBURST_TOOLS_CACHE=$RUNNER_TEMP/hpcburst-tools" >> "$GITHUB_ENV"
+          HPCBURST_TOOLS_CACHE="$RUNNER_TEMP/hpcburst-tools" bash hack/test-binaries.sh
+
+      - name: Provide OpenSSH's sshd
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+            sudo chmod 755 /usr/sbin/policy-rc.d
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+            sudo rm -f /usr/sbin/policy-rc.d
+          fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
+          echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
+
+      - name: Baseline, then the mutant, under the same flags
+        working-directory: internal/relaykeeper/keeperproc
+        env:
+          MUT_FILE: ${{ matrix.file }}
+          MUT_FROM: ${{ matrix.from }}
+          MUT_TO: ${{ matrix.to }}
+          MUT_FROM2: ${{ matrix.from2 }}
+          MUT_TO2: ${{ matrix.to2 }}
+          MUT_TESTS: ${{ matrix.tests }}
+        run: |
+          root=$(git rev-parse --show-toplevel)
+          run="^($(echo "$MUT_TESTS" | tr ' ' '|'))\$"
+          build() { (cd "$root" && go test -c -o "$RUNNER_TEMP/kp.test" ./internal/relaykeeper/keeperproc/); }
+          runit() { rc=0; "$RUNNER_TEMP/kp.test" -test.run "$run" -test.count 1 -test.v -test.timeout 30m > "$1" 2>&1 || rc=$?; echo "$rc"; }
+          build
+          base=$(runit "$RUNNER_TEMP/base.log")
+          for t in $MUT_TESTS; do
+            grep -q "^--- PASS: $t " "$RUNNER_TEMP/base.log" || { echo "::error::baseline: $t did not pass (exit $base)"; tail -50 "$RUNNER_TEMP/base.log"; exit 1; }
+          done
+          test "$base" = 0 || { echo "::error::baseline exit $base"; exit 1; }
+          python3 -I - "$root/$MUT_FILE" <<'EOF'
+          import os, sys
+          p = sys.argv[1]
+          s = open(p).read()
+          edits = [(os.environ["MUT_FROM"], os.environ["MUT_TO"])]
+          if os.environ.get("MUT_FROM2"):
+              edits.append((os.environ["MUT_FROM2"], os.environ["MUT_TO2"]))
+          for a, b in edits:
+              n = s.count(a)
+              if n != 1:
+                  sys.exit(f"the mutant's text occurs {n} times in {p}, want once: {a!r}")
+              s = s.replace(a, b)
+          open(p, "w").write(s)
+          EOF
+          (cd "$root" && git diff --stat && git diff | head -30)
+          build
+          mut=$(runit "$RUNNER_TEMP/mut.log")
+          killed=1
+          for t in $MUT_TESTS; do
+            if grep -q "^--- FAIL: $t " "$RUNNER_TEMP/mut.log"; then
+              echo "killed by $t:"; grep -A6 "^--- FAIL: $t " "$RUNNER_TEMP/mut.log" | head -12
+            else
+              echo "::error::$t did not fail under the mutant"; killed=0
+            fi
+          done
+          echo "### mutant ${{ matrix.id }}: baseline exit $base, mutant exit $mut, killed by every named test: $killed" >> "$GITHUB_STEP_SUMMARY"
+          test "$killed" = 1 && test "$mut" != 0
