@@ -364,6 +364,25 @@ func (f *frpsProc) request(uid, path string) (connect int, status int, body stri
 	return 200, r2.StatusCode, string(b), err
 }
 
+// waitRoute waits until a CONNECT for uid and a GET path through it bring back want
+// (testenv.ProvenRoute): frps lists a proxy online, and answers a CONNECT for it with 200, before
+// frpc can take a connection for it (#368, #372), so online is no route. It retries only an early
+// close (200, then the end of the connection before any reply byte), within 15 s.
+func (f *frpsProc) waitRoute(t *testing.T, uid, path, want string) {
+	t.Helper()
+	n, err := testenv.ProvenRoute("127.0.0.1:"+strconv.Itoa(f.muxPort), uid, path, want, 15*time.Second)
+	if err != nil {
+		b, _ := os.ReadFile(f.log)
+		if len(b) > 2000 {
+			b = b[len(b)-2000:]
+		}
+		t.Fatalf("%v\nfrps log:\n%s", err, b)
+	}
+	if n > 1 {
+		t.Logf("the first reply crossed at attempt %d, after %d early closes (200, then the end of the connection before any reply byte)", n, n-1)
+	}
+}
+
 // ---- the dial-home listener ----
 
 // terminator stands in for the front's dial-home listener (HBEP-6, The

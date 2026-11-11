@@ -193,6 +193,7 @@ func TestFrpcRegistersThroughTheWSSFront(t *testing.T) {
 	a := makeCert(t, launcherName)
 	r := newDirectRig(t, directOptions{termCert: a.tls, staged: a.pem, pin: a.pin})
 	eventually(t, 15*time.Second, "frps to list the Instance's proxy online", func() bool { return r.frps.online(t, hInstUID) })
+	r.frps.waitRoute(t, hInstUID, "/health", "engine for "+hInstUID+": /health")
 	connect, status, body, err := r.frps.request(hInstUID, "/health")
 	if err != nil || connect != 200 || status != 200 || body != "engine for "+hInstUID+": /health" {
 		t.Fatalf("through the tunnel: CONNECT %d, %d %q, %v", connect, status, body, err)
@@ -315,6 +316,7 @@ func TestFrpcLogsInAgainAfterFrpsRestarts(t *testing.T) {
 	eventually(t, 15*time.Second, "frps to list the Instance's proxy online", func() bool { return r.frps.online(t, hInstUID) })
 	r.frps.restart(t)
 	eventually(t, 40*time.Second, "frpc to log in to the restarted frps", func() bool { return r.frps.online(t, hInstUID) })
+	r.frps.waitRoute(t, hInstUID, "/health", "engine for "+hInstUID+": /health")
 	if _, status, _, err := r.frps.request(hInstUID, "/health"); err != nil || status != 200 {
 		t.Fatalf("through the tunnel after the restart: %d, %v", status, err)
 	}
@@ -358,6 +360,7 @@ func TestFrpcIgnoresTheProxyVariables(t *testing.T) {
 	if n := trapped.Load(); n != 0 {
 		t.Fatalf("frpc dialled the proxy from the agent's environment %d times", n)
 	}
+	r.frps.waitRoute(t, hInstUID, "/health", "engine for "+hInstUID+": /health")
 	if _, status, _, err := r.frps.request(hInstUID, "/health"); err != nil || status != 200 {
 		t.Fatalf("through the tunnel: %d, %v", status, err)
 	}

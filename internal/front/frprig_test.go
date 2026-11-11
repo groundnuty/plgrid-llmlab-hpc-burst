@@ -274,7 +274,10 @@ func (r *frpRig) startFrpc(uid types.UID, sock, dialHome string) *frpcProc {
 	return p
 }
 
-// waitOnline waits until frps lists the UID's proxy online.
+// waitOnline waits until frps lists the UID's proxy online. That is no route yet: frps lists it,
+// and answers its CONNECT with 200, before frpc can take a connection for it (#368,
+// testenv.ProvenRoute). So no caller sends through the tunnel on it alone: each then waits for a
+// passing probe (tunFront.waitRegistered), a GET through the tunnel, or retries its request (#372).
 func (r *frpRig) waitOnline(uid types.UID, p *frpcProc) {
 	r.t.Helper()
 	for end := time.Now().Add(20 * time.Second); r.proxyStatus(string(uid)) != "online"; time.Sleep(50 * time.Millisecond) {
