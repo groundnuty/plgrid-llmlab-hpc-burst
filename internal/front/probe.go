@@ -70,6 +70,15 @@ func (NopPathEvents) PathProbeFailing(*v1alpha1.Instance, ProbeResult) {}
 // probe; probeFailures failures in a row make it not registered, so the
 // Instance is not eligible (HBEP-5's skip, which keeps its place in its group
 // and its in-flight count); one passing probe makes it eligible again.
+//
+// A new registration of the UID's proxy (the front's plugin, Reregistered)
+// takes the registration away at once (Tunnel.Bump) and puts the UID on the
+// re-probe schedule: it is probed at once, then after reprobeFirst, doubling,
+// until a probe passes or the wait would reach probeInterval, when the rounds
+// carry on alone. Each re-probe is an ordinary probe. The first ones often
+// come before frps has registered the proxy, or before frpc has started it,
+// which is why they repeat. A pass counts only if the UID's epoch has not
+// moved since the probe began (#371).
 type Prober struct {
 	tun      *Tunnel
 	clk      clock.Clock
@@ -88,7 +97,21 @@ type Prober struct {
 	// out in this staleness; zero once a round ends (probe_report.go).
 	beat     time.Time
 	missedAt time.Time
+	// awaiting is the re-probe schedule: the UIDs registered again whose
+	// probe has not passed since. kick wakes Run for it.
+	awaiting map[types.UID]*reprobe
+	kick     chan struct{}
 }
+
+// reprobe is one UID's place on the re-probe schedule.
+type reprobe struct {
+	next time.Time     // when it is due
+	wait time.Duration // the wait after the next attempt
+}
+
+// reprobeFirst is the wait after the first re-probe; each later wait doubles,
+// and the schedule ends once a wait would reach probeInterval.
+const reprobeFirst = 100 * time.Millisecond
 
 type probeState struct {
 	name    string // namespace/name
@@ -110,29 +133,126 @@ func NewProber(cfg Config, tun *Tunnel, clk clock.Clock, source func() []v1alpha
 	return &Prober{
 		tun: tun, clk: clk, interval: cfg.ProbeInterval.D(), timeout: cfg.ProbeTimeout.D(), failures: cfg.ProbeFailures,
 		source: source, events: events, log: log, state: map[types.UID]*probeState{}, beat: clk.Now(),
+		awaiting: map[types.UID]*reprobe{}, kick: make(chan struct{}, 1),
 	}
+}
+
+// Reregistered puts the UID on the re-probe schedule, due now, and wakes Run.
+// The front's plugin calls it after Tunnel.Bump, for frps's NewProxy. It never
+// blocks.
+func (p *Prober) Reregistered(uid types.UID) {
+	p.mu.Lock()
+	p.awaiting[uid] = &reprobe{next: p.clk.Now(), wait: reprobeFirst}
+	p.mu.Unlock()
+	select {
+	case p.kick <- struct{}{}:
+	default:
+	}
+}
+
+// reprobeAt is when the next re-probe is due, and false when none is.
+func (p *Prober) reprobeAt() (time.Time, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var at time.Time
+	for _, r := range p.awaiting {
+		if at.IsZero() || r.next.Before(at) {
+			at = r.next
+		}
+	}
+	return at, !at.IsZero()
 }
 
 // Run probes every probeInterval until ctx ends. A round starts every
 // interval, or as soon as the previous one ended when that took longer; a
-// round waits for its probes, which probeTimeout bounds.
+// round waits for its probes, which probeTimeout bounds. Between rounds it
+// runs the re-probes as they fall due (Reprobe).
 func (p *Prober) Run(ctx context.Context) {
 	for {
 		start := p.clk.Now()
 		p.Round(ctx)
-		wait := p.interval - p.clk.Now().Sub(start)
-		if wait < 0 {
-			wait = 0
-		}
-		next := make(chan struct{})
-		t := p.clk.AfterFunc(wait, func() { close(next) })
-		select {
-		case <-ctx.Done():
-			t.Stop()
-			return
-		case <-next:
+		due := start.Add(p.interval)
+		for p.clk.Now().Before(due) {
+			wait := due.Sub(p.clk.Now())
+			if at, ok := p.reprobeAt(); ok {
+				wait = min(wait, max(at.Sub(p.clk.Now()), 0))
+			}
+			if !p.sleep(ctx, wait) {
+				return
+			}
+			p.Reprobe(ctx)
 		}
 	}
+}
+
+// sleep waits for d, or for a kick, and reports false once ctx has ended.
+func (p *Prober) sleep(ctx context.Context, d time.Duration) bool {
+	next := make(chan struct{})
+	t := p.clk.AfterFunc(d, func() { close(next) })
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-next:
+	case <-p.kick:
+	}
+	return true
+}
+
+// Reprobe probes, concurrently, each probed Instance whose re-probe is due and
+// whose previous probe has ended, moves each one's next attempt on, and waits
+// for the probes. A UID whose wait would reach probeInterval leaves the
+// schedule after this attempt; the rounds go on probing it. So does one the
+// front does not probe (not yet in a probed phase, or gone), at once. One whose
+// probe still runs is put off by reprobeFirst, so Run never spins on it.
+func (p *Prober) Reprobe(ctx context.Context) {
+	insts := p.source()
+	live := make(map[types.UID]*v1alpha1.Instance, len(insts))
+	for i := range insts {
+		if in := &insts[i]; probed(in) {
+			live[in.UID] = in
+		}
+	}
+	now := p.clk.Now()
+	var start []*v1alpha1.Instance
+	var states []*probeState
+	p.mu.Lock()
+	for uid, r := range p.awaiting {
+		in := live[uid]
+		switch {
+		case in == nil:
+			delete(p.awaiting, uid)
+			continue
+		case now.Before(r.next):
+			continue
+		}
+		st := p.state[uid]
+		if st == nil {
+			st = &probeState{name: in.Namespace + "/" + in.Name}
+			p.state[uid] = st
+		}
+		if st.running {
+			r.next = now.Add(reprobeFirst)
+			continue
+		}
+		if r.wait >= p.interval {
+			delete(p.awaiting, uid)
+		} else {
+			r.next, r.wait = now.Add(r.wait), 2*r.wait
+		}
+		st.running = true
+		start, states = append(start, in), append(states, st)
+	}
+	p.mu.Unlock()
+	var wg sync.WaitGroup
+	for i := range start {
+		wg.Add(1)
+		go func(in *v1alpha1.Instance, st *probeState) {
+			defer wg.Done()
+			p.probeOne(ctx, in, st)
+		}(start[i], states[i])
+	}
+	wg.Wait()
 }
 
 // probed reports whether the front probes an Instance in this state: phase
@@ -166,6 +286,13 @@ func (p *Prober) Round(ctx context.Context) {
 			gone = append(gone, uid)
 		}
 	}
+	// A re-probe for an Instance the front does not probe (not yet placed in a
+	// probed phase, or gone) waits no longer: the rounds take it up.
+	for uid := range p.awaiting {
+		if live[uid] == nil {
+			delete(p.awaiting, uid)
+		}
+	}
 	for uid, in := range live {
 		st := p.state[uid]
 		if st == nil {
@@ -181,6 +308,7 @@ func (p *Prober) Round(ctx context.Context) {
 	p.mu.Unlock()
 	for _, uid := range gone {
 		p.tun.setRegistered(uid, false)
+		p.tun.forget(uid)
 	}
 	var wg sync.WaitGroup
 	for i := range start {
@@ -199,12 +327,23 @@ func (p *Prober) Round(ctx context.Context) {
 // probeOne probes one Instance and applies the verdict.
 func (p *Prober) probeOne(ctx context.Context, in *v1alpha1.Instance, st *probeState) {
 	began := time.Now()
+	epoch := p.tun.Epoch(in.UID)
 	status, err := p.check(ctx, in.UID)
 	if ctx.Err() != nil {
 		// The front is stopping: a probe it cut says nothing about the path.
 		p.mu.Lock()
 		st.running = false
 		p.mu.Unlock()
+		return
+	}
+	if err == nil && p.tun.Epoch(in.UID) != epoch {
+		// The proxy registered again while the probe ran, so its pass proves
+		// the replaced registration only: no verdict, and a re-probe soon.
+		p.mu.Lock()
+		st.running = false
+		p.mu.Unlock()
+		p.log.Info("the Instance's tunnel was registered again while its probe ran; the pass does not count", "instance", in.Namespace+"/"+in.Name, "uid", string(in.UID))
+		p.Reregistered(in.UID)
 		return
 	}
 	res := ProbeResult{UID: in.UID, Instance: in.Namespace + "/" + in.Name, Phase: in.Status.Phase, Status: status, Passed: err == nil, Duration: time.Since(began)}
@@ -223,9 +362,19 @@ func (p *Prober) probeOne(ctx context.Context, in *v1alpha1.Instance, st *probeS
 	res.Failures = st.fails
 	st.has, st.passed, st.at = true, err == nil, p.clk.Now()
 	register := err == nil || (st.fails < p.failures && p.tun.Registered(in.UID))
+	if err == nil {
+		delete(p.awaiting, in.UID)
+	}
 	p.mu.Unlock()
+	was, applied := p.tun.setRegisteredAt(in.UID, register, &epoch)
+	if !applied {
+		// The epoch moved between the check above and here: the same case,
+		// with the pass already counted against the failure run, which a UID
+		// without a registration does not use.
+		register = false
+		p.Reregistered(in.UID)
+	}
 	res.Registered = register
-	was := p.tun.setRegistered(in.UID, register)
 	switch {
 	case !was && register:
 		p.log.Info("the Instance's tunnel passed its probe; its transport counts as registered", "instance", res.Instance, "uid", string(in.UID))
