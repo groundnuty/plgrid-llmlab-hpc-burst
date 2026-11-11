@@ -22,6 +22,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/relaykeeper"
 )
 
@@ -36,12 +38,12 @@ import (
 func TestRehearsalKeeperStatusWhileRelaysRunThenDownAndTheSwitchBack(t *testing.T) {
 	// No watch: down stops the API it would follow.
 	r := startKeeperRig(t, rigSetup{noWatch: true})
-	in := r.keeperStart()
+	in, _ := r.keeperStart()
 	key := r.fc.KeyFor(in)
 	v := r.keeperRelays("after the start", in.Status.JobID)
 	ref := r.quietReference("status while relays run", in, key, func() { r.keeperStatusWhileRelaysRun(v) })
 	running := r.runningAllocationNames()
-	r.keeperDown(key, ref, v)
+	r.keeperDown(in, key, ref, v)
 	r.keeperSwitchBackRefused(running, in.Status.JobID)
 }
 
@@ -149,11 +151,26 @@ func (r *rig) keeperStatusWhileRelaysRun(v keeperView) {
 	r.t.Logf("status while relays run: %s; the keeper %d held %d dials to the dial-home listener and %d TCP sockets in all", st.Health, v.keeper.pid, len(dials), len(socks))
 }
 
+// downLead is how many tokens of the stream the engine generates before down.
+const downLead = 300
+
+// generatedTokens is the Instance's engine's generated tokens as the serving
+// controller exports them from its agent's latest report
+// (hpcburst_instance_generation_tokens_total), and whether it has one.
+func (r *rig) generatedTokens(in *v1alpha1.Instance) (float64, bool) {
+	ss, err := scrape(r.ports.URL(12, "/metrics"))
+	if err != nil {
+		return 0, false
+	}
+	got := find(ss, "hpcburst_instance_generation_tokens_total", map[string]string{"instance_uid": string(in.UID)})
+	return sum(got), len(got) > 0
+}
+
 // keeperDown runs down with a stream in flight: the stream is cut, what
 // arrived of it is in order, and the keeper, the supervisor, the controller
 // and every relay ssh of the keeper, pinned before, are gone; the keeper's
 // state file is kept, and no retired marker is written.
-func (r *rig) keeperDown(key, ref string, v keeperView) {
+func (r *rig) keeperDown(in *v1alpha1.Instance, key, ref string, v keeperView) {
 	r.t.Helper()
 	defer r.stepTimer("keeper down")()
 	pins := []*stackPin{v.keeper, v.sup}
@@ -172,8 +189,15 @@ func (r *rig) keeperDown(key, ref string, v keeperView) {
 		r.t.Fatalf("pin the controller: %v", err)
 	}
 	pins = append(pins, ctl)
+	g0, _ := r.generatedTokens(in)
 	first, done := r.fc.StartStream(keeperStreamBody(), key)
 	r.firstToken("down", first)
+	// A stretch of the stream first, so what arrives before the cut is more
+	// than its first tokens: the engine's own count, as the agent reports it.
+	stack.WaitState(r.t, stack.WaitDeadline, "the engine to generate "+strconv.Itoa(downLead)+" tokens of the stream", func() (bool, string) {
+		g, ok := r.generatedTokens(in)
+		return ok && g >= g0+downLead, fmt.Sprintf("%g generated, %g before the stream (read %v)", g, g0, ok)
+	})
 	start := time.Now()
 	if err := r.h.DownErr(); err != nil {
 		r.t.Fatalf("down: %v", err)

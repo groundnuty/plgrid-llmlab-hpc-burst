@@ -42,7 +42,7 @@ func TestRehearsalKeeperRestoreAcceptsTheLeadersLowerEpoch(t *testing.T) {
 	}
 	// No watch: down and the restore stop and roll back the API it would follow.
 	r := startKeeperRig(t, rigSetup{noWatch: true, k3sVersion: keeperOlderK3s})
-	in := r.keeperStart()
+	in, repl := r.keeperStart()
 	key := r.fc.KeyFor(in)
 	v0 := r.keeperRelays("on k3s "+keeperOlderK3s, in.Status.JobID)
 	ref := r.quietReference("the quiet reference stream", in, key, nil)
@@ -113,6 +113,7 @@ func TestRehearsalKeeperRestoreAcceptsTheLeadersLowerEpoch(t *testing.T) {
 		r.t.Errorf("the keeper refused %d sets or acknowledgements for their epoch after the restore: %v", got[wire.RefusedEpoch], got)
 	}
 	r.tunnelBack("after the restore", in)
+	r.tunnelBack("after the restore, the replacement's", repl)
 	key = r.fc.KeyFor(in)
 	first, done := r.fc.StartStream(keeperStreamBody(), key)
 	r.firstToken("after the restore", first)

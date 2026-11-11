@@ -87,18 +87,20 @@ func startKeeperRig(t *testing.T, s rigSetup) *rig {
 }
 
 // keeperStart creates the served deployment with keeperTiming once the
-// Provider is Ready, and returns the first Instance to be ready, whose job runs
-// in the fake cluster.
-func (r *rig) keeperStart() *v1alpha1.Instance {
+// Provider is Ready, and returns its primary Instance, ready on a job that runs
+// in the fake cluster, and the primary's replacement (HBEP-7: created at the
+// primary's start when no queue wait is observed), once both are ready and
+// registered at the front, so the ring holds both before a key is chosen.
+func (r *rig) keeperStart() (primary, repl *v1alpha1.Instance) {
 	r.t.Helper()
 	defer r.stepTimer("keeper start")()
 	r.providerReady()
 	stack.Create(r.t, r.c, stack.ServedDeployment(keeperTiming, r.engineEnv...))
 	var ready *v1alpha1.Instance
 	last := ""
-	stack.WaitFor(r.t, 2*stack.WaitDeadline, "an Instance ready on a running job", func() bool {
+	stack.WaitFor(r.t, 2*stack.WaitDeadline, "the primary Instance ready on a running job", func() bool {
 		for _, in := range r.instances() {
-			if in.Status.Phase != v1alpha1.InstanceReady || in.Status.JobID == "" {
+			if in.Status.Phase != v1alpha1.InstanceReady || in.Status.JobID == "" || in.Annotations[v1alpha1.AnnotationPredecessor] != "" {
 				continue
 			}
 			id, err := strconv.Atoi(in.Status.JobID)
@@ -114,7 +116,8 @@ func (r *rig) keeperStart() *v1alpha1.Instance {
 		}
 		return false
 	})
-	return ready
+	rp := r.replacementReady(ready)
+	return ready, &rp
 }
 
 // keeperReport is the keeper's status report, read over its socket.

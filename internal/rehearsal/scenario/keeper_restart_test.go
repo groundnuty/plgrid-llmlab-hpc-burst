@@ -34,7 +34,7 @@ import (
 //livecheck:none the keeper rehearsal; hack/rehearsal.sh runs it, with REHEARSAL_RUN naming it
 func TestRehearsalKeeperControllerRestartAndHandOverCutNoServingStream(t *testing.T) {
 	r := startKeeperRig(t, rigSetup{})
-	in := r.keeperStart()
+	in, _ := r.keeperStart()
 	key := r.fc.KeyFor(in)
 	v := r.keeperRelays("after the start", in.Status.JobID)
 	ref := r.quietReference("the quiet reference stream", in, key, nil)
