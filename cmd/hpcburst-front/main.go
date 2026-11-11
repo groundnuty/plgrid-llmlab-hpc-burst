@@ -3,6 +3,13 @@
 // it on the single-user host (HBEP-11).
 //
 //	hpcburst-front --config FILE --state-dir DIR --port-base N [--mode direct|ssh|host-dialed] [--health-addr HOST:PORT] [--kubeconfig FILE]
+//	hpcburst-front version
+//
+// "version" prints the binary's release from its build information, as "hpcburst-front <tag>
+// <commit> <time>[ dirty]" (internal/version documents the format). It is a subcommand, like the
+// other two host binaries', so that the three are asked the same way, and not a --version flag,
+// which hpcburst already uses for the k3s release; the first argument "version" cannot be taken
+// for one of the front's flags, which all begin with "--".
 //
 // Its settings are in the configuration file (HBEP-5, Parameters). Keys are
 // read from mode-600 files at run time and never appear on its command line.
@@ -29,6 +36,9 @@ import (
 )
 
 func main() {
+	if code, ok := versionCommand(os.Args[1:], os.Stdout, os.Stderr); ok {
+		os.Exit(code)
+	}
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "hpcburst-front:", err)
 		var u usageError

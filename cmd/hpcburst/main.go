@@ -7,6 +7,11 @@
 //	hpcburst upgrade --to V    move it one step up (next minor, or a newer patch) and verify every object is kept
 //	hpcburst restore --backup DIR  put a backup's store back (the host stopped): the only way down
 //	hpcburst down    [flags]   stop the recorded processes and confirm nothing listens
+//	hpcburst version           print the binary's release from its build information
+//
+// "hpcburst version" prints one line, "hpcburst <tag> <commit> <time>[ dirty]" (internal/version
+// documents the format). It is a command, not a flag: up's --version is the k3s release to start
+// and keeps that meaning, and hpcburst has no --version of its own.
 //
 // up also starts the controllers' supervisor, a hidden "hpcburst supervise" process that keeps
 // hpcburst-controller running and restarts it when it exits.
@@ -30,6 +35,7 @@ import (
 	"syscall"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/version"
 )
 
 const (
@@ -39,7 +45,7 @@ const (
 	exitStopped   = 3
 	exitBuilds    = 4
 	envBinDir     = "HPCBURST_BIN_DIR"
-	usageSummary  = "usage: hpcburst <up|status|upgrade|restore|down|guard> [flags]  (hpcburst <command> -h lists a command's flags)"
+	usageSummary  = "usage: hpcburst <up|status|upgrade|restore|down|guard|version> [flags]  (hpcburst <command> -h lists a command's flags)"
 	stateDirUsage = "state directory (default $XDG_STATE_HOME/hpcburst, or ~/.local/state/hpcburst)"
 	binDirUsage   = "directory with the pinned k3s binaries, as hack/fetch-k3s.sh lays them out (default $" + envBinDir + ", or $XDG_CACHE_HOME/hpcburst/k3s, or ~/.cache/hpcburst/k3s)"
 )
@@ -70,6 +76,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return cmdRestore(args[1:], stdout, stderr)
 	case "guard":
 		return cmdGuard(ctx, args[1:], stdout, stderr)
+	case "version":
+		return version.Command("hpcburst", args[1:], stdout, stderr)
 	case "supervise": // hidden: started by up
 		return cmdSupervise(ctx, args[1:], stdout, stderr)
 	case "-h", "-help", "--help", "help":

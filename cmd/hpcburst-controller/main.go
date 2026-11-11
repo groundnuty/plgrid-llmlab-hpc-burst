@@ -47,6 +47,10 @@
 // With "relaykeeper" as its first argument the binary is the relay keeper
 // instead (relaykeeper.go; HBEP-6, The relay keeper), and none of the flags
 // above apply.
+//
+// With "version" as its first argument it prints its release from its build
+// information and exits, as "hpcburst-controller <tag> <commit> <time>[ dirty]"
+// (internal/version documents the format); it takes no flags.
 package main
 
 import (
@@ -238,6 +242,9 @@ func run(ctx context.Context, f flags, d deps) error {
 
 func main() {
 	// A subcommand runs before the controller's flags are parsed.
+	if code, ok := versionCommand(os.Args[1:], os.Stdout, os.Stderr); ok {
+		os.Exit(code)
+	}
 	if code, ok := runSubcommand(os.Args[1:], os.Stderr); ok {
 		os.Exit(code)
 	}
