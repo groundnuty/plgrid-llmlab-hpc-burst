@@ -413,7 +413,8 @@ func (r *liveRun) drainingAlone(in v1alpha1.Instance) bool {
 
 // requeue sends the requeue: scontrol requeuehold of the job by its ID over the run's own transport (RequeueHoldLine),
 // or the test's seam (requeueFn). Only an answer of the scheduler's is a reply; a call that did not reach it is an error.
-// The scheduler's own text goes to the test's private log, never to the post: it can name the job's ID.
+// The scheduler's raw text goes to the test's private log; the post has its words with every job ID and path replaced
+// (RequeueReplyOf).
 func (r *liveRun) requeue(ctx context.Context, jobID string) (RequeueReply, error) {
 	if r.requeueFn != nil {
 		return r.requeueFn(ctx, jobID)
@@ -426,7 +427,7 @@ func (r *liveRun) requeue(ctx context.Context, jobID string) (RequeueReply, erro
 	if err != nil {
 		return RequeueReply{}, err
 	}
-	reply := RequeueReplyOf(res.ExitCode, res.Stdout, res.Stderr)
+	reply := RequeueReplyOf(res.ExitCode, res.Stdout, res.Stderr, jobID)
 	if !reply.Accepted {
 		r.t.Logf("the requeue: scontrol exited %d: %.300s", res.ExitCode, strings.TrimSpace(string(res.Stderr)+" "+string(res.Stdout)))
 	}
