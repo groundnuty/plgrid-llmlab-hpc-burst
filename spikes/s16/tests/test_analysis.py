@@ -83,9 +83,15 @@ class Relogin(unittest.TestCase):
                 {"plugin": "front", "op": "NewProxy", "proxy": "u1", "start_ns": int((cut + 69.9) * 1e9), "end_ns": int((cut + 70.0) * 1e9)}])
             self.write(d, "admit-calls.jsonl", [
                 {"plugin": "admit", "op": "Login", "reject": True, "start_ns": int((cut + 0.5) * 1e9), "end_ns": int((cut + 1.7) * 1e9)}])
-            self.write(d, "reg-1.jsonl", [{"t_ns": int((cut - 20) * 1e9), "i": 0, "reg": True},
-                                          {"t_ns": int((cut + 2.2) * 1e9), "i": 0, "reg": True},
-                                          {"t_ns": int((cut + 70.1) * 1e9), "i": 1, "reg": True}])
+            # Probes: before the cut both pass in epoch 1; after it, a pass still in epoch 1 (the
+            # registration the restart replaced) does not count; the new epoch's passes do.
+            self.write(d, "probes.jsonl", [
+                {"t_ns": int((cut - 5) * 1e9), "i": 0, "pass": True, "reg": True, "ep": 1},
+                {"t_ns": int((cut - 5) * 1e9), "i": 1, "pass": True, "reg": True, "ep": 1},
+                {"t_ns": int((cut + 1.0) * 1e9), "i": 0, "pass": False, "reg": False, "ep": 1},
+                {"t_ns": int((cut + 1.5) * 1e9), "i": 1, "pass": True, "reg": True, "ep": 1},
+                {"t_ns": int((cut + 2.2) * 1e9), "i": 0, "pass": True, "reg": True, "ep": 3},
+                {"t_ns": int((cut + 70.1) * 1e9), "i": 1, "pass": True, "reg": True, "ep": 4}])
             out = analysis.relogin(analysis.Run(d))
         self.assertTrue(out["pre_valid"])
         self.assertEqual(out["inflight_tunnels"], 2)

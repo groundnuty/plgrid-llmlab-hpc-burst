@@ -32,7 +32,8 @@ def flat(d, prefix=""):
     out = {}
     for k, v in d.items():
         key = prefix + k
-        if isinstance(v, dict) and k in ("registered_s", "routed_s", "first_token_s", "pause_start_rel_cut"):
+        if isinstance(v, dict) and k in ("registered_s", "routed_s", "first_token_s", "pause_start_rel_cut",
+                                                    "first_request_start_s", "first_request_ttft_s"):
             for kk, vv in v.items():
                 out[key + "_" + kk] = vv
         elif isinstance(v, (dict, list)):
@@ -243,27 +244,32 @@ def cmd_tables(res):
     rl = read_csv(os.path.join(res, "relogin.csv"))
     if rl:
         print("### Re-login\n")
+        print("Ranges over the runs that count (valid); runs that don't are in the runs and valid columns.\n")
         groups = {}
         for r in rl:
             groups.setdefault((r["variant"], int(r["n"])), []).append(r)
         rows = []
         for (var, n), g in sorted(groups.items(), key=lambda x: (x[0][0], x[0][1])):
-            f = lambda k: [num(r.get(k)) for r in g]
+            # Only runs that count: every tunnel streamed in every second before the event, with
+            # a request in flight across it (the issue's rule); the others are counted, not used.
+            f = lambda k: [num(r.get(k)) for r in g if r["valid"] == "True"]
             rows.append([var, n, len(g), "/".join(sorted({vendor(r["cpu_model"]) for r in g})), sum(1 for r in g if r["valid"] == "True"),
                          sum(1 for r in g if bound(r.get("recover_peak_host_busy"))), rng(f("pre_emptiest_second"), 0),
                          rng(f("inflight_tunnels"), 0), rng(f("cut_requests"), 0), rng(f("registered_s_max")), rng(f("routed_s_p50")),
-                         rng(f("routed_s_max")), rng(f("first_token_s_p50")), rng(f("first_token_s_max")), rng(f("not_back_60s"), 0),
+                         rng(f("routed_s_max")), rng(f("first_token_s_p50")), rng(f("first_token_s_max")),
+                         rng(f("first_request_ttft_s_p50")), rng(f("first_request_ttft_s_max")), rng(f("not_back_60s"), 0),
                          rng(f("paused"), 0), rng(f("front_term_to_exit_s"), 1), rng(f("recover_front_host_cores")),
                          rng(f("recover_peak_front_host_cores")), rng(f("recover_peak_host_busy"))])
         md(["event", "tunnels", "runs", "runners", "valid", "host-bound second in the recovery", "emptiest pre-second", "in flight at the cut", "cut", "registered again max s",
-            "routed again p50 s", "routed again max s", "first token p50 s", "first token max s", "not back in 60 s", "paused",
+            "routed again p50 s", "routed again max s", "first token p50 s", "first token max s",
+            "first request's TTFT p50 s", "first request's TTFT max s", "not routed again in 60 s", "paused",
             "front TERM to exit s", "front host cores (10 s)", "peak front host cores", "peak host busy"], rows)
         calls = read_csv(os.path.join(res, "calls.csv"))
         lat = {}
         info = {r["run_id"]: r for r in rl}
         for c in calls:
             r = info.get(c["run_id"])
-            if not r or r["variant"] == "none":
+            if not r or r["variant"] == "none" or r["valid"] != "True":
                 continue
             s = num(c["start_rel_cut_ms"])
             if s is None or s < -1000 or s > 90000:
@@ -274,21 +280,37 @@ def cmd_tables(res):
             xs = [x for x, _ in v]
             rows.append([var, n, plugin, op, len(xs), "%.2f" % analysis.percentile(xs, 50), "%.2f" % analysis.percentile(xs, 99),
                          "%.2f" % max(xs), sum(1 for x in xs if x > analysis.PLUGIN_RULE_MS), sum(rj for _, rj in v)])
-        print("#### The plugins' calls, from 1 s before the cut to 90 s after (all repetitions pooled)\n")
+        print("#### The plugins' calls, from 1 s before the cut to 90 s after (the valid runs pooled)\n")
         md(["event", "tunnels", "plugin", "op", "calls", "p50 ms", "p99 ms", "max ms", "over 1 s", "refused"], rows)
     cl = read_csv(os.path.join(res, "caplink.csv"))
     if cl:
         print("### The capped link\n")
         rows = []
         for r in sorted(cl, key=lambda r: (int(r["n"]), r["discipline"] + (r["buffer"] or ""), -float(r["cap_mbps"] or 0), int(r["rep"]))):
+            capped = num(r["cap_mbps"]) or 0
+            counted = ("excluded: not at its cap" if capped and r.get("link_at_cap") != "True"
+                       else "excluded: host-bound" if bound(r.get("host_busy")) else "counted")
             rows.append([r["n"], r["streams"], r["cap_mbps"] or "uncapped", r["discipline"] + ((" " + r["buffer"]) if r["buffer"] else ""),
-                         "%s (%s)" % (r["rep"], vendor(r["cpu_model"])), r["valid"], "yes" if bound(r.get("host_busy")) else "no", "%.0f" % num(r["offered_tok_s"]), "%.0f" % num(r["delivered_tok_s"]),
+                         "%s (%s)" % (r["rep"], vendor(r["cpu_model"])), counted, r["valid"], "yes" if bound(r.get("host_busy")) else "no", "%.0f" % num(r["offered_tok_s"]), "%.0f" % num(r["delivered_tok_s"]),
                          r.get("link_up_min") and "%.3f" % num(r["link_up_min"]) or "-",
                          r.get("link_down_min") and "%.3f" % num(r["link_down_min"]) or "-", r["link_at_cap"],
                          "%.1f" % num(r["gap_p99_ms"]) if r.get("gap_p99_ms") else "-", r["drops"], r["frpc_relogins"],
                          r["heartbeat_timeout_lines"], r["probes_failed"], "%.2f" % num(r["host_busy"]) if r.get("host_busy") else "-"])
-        md(["tunnels", "streams", "cap Mb/s", "queue", "rep (runner)", "valid", "host-bound", "offered tok/s", "delivered tok/s", "link up min", "link down min",
+        md(["tunnels", "streams", "cap Mb/s", "queue", "rep (runner)", "counted", "valid", "host-bound", "offered tok/s", "delivered tok/s", "link up min", "link down min",
             "at cap", "gap p99 ms", "list-seconds not online", "frpc re-logins", "heartbeat timeouts", "probes failed", "host busy"], rows)
+        cfg = {}
+        for r in cl:
+            capped = num(r["cap_mbps"]) or 0
+            k = (int(r["n"]), r["streams"], r["cap_mbps"] or "uncapped", r["discipline"] + ((" " + r["buffer"]) if r["buffer"] else ""))
+            c = cfg.setdefault(k, [0, 0, 0])
+            if (capped and r.get("link_at_cap") != "True") or bound(r.get("host_busy")):
+                c[1] += 1
+            else:
+                c[0] += 1
+                c[2] += r.get("hb_failed") == "True"
+        print("#### Runs counted per configuration (a capped run counts only if every second of its window was at 95% of the cap or more, and a heartbeat finding only where the host stayed under 85% busy)\n")
+        md(["tunnels", "streams", "cap Mb/s", "queue", "counted", "excluded", "counted with a heartbeat failure"],
+           [list(k) + v for k, v in sorted(cfg.items(), key=lambda x: (x[0][0], x[0][3], -(num(x[0][2]) or 0)))])
     rs = read_csv(os.path.join(res, "rssh.csv"))
     if rs:
         print("### R_ssh\n")
@@ -371,16 +393,25 @@ def measured_slopes(res):
         if r["valid"] == "True" and r.get("ssh_cores") and not bound(r.get("host_busy")):
             pts.setdefault((vendor(r["cpu_model"]), r["cipher_asked"]), []).append((num(r["ktok_s"]), num(r["ssh_cores"])))
     r_ssh = {k: analysis.linfit(v) for k, v in pts.items()}
-    return r_front, r_ssh
+    # ssh's cost per token falls as a relay carries more (per-packet cost): the worst per class,
+    # at one stream per relay (20 tokens/s), is the reserve for relays that carry little.
+    low = {}
+    for r in read_csv(os.path.join(res, "rssh.csv")):
+        if r["level"] == "load" and r["streams"] == "1" and r.get("ssh_cores_per_ktok") and r["valid"] == "True":
+            k = vendor(r["cpu_model"])
+            low[k] = max(low.get(k, 0.0), num(r["ssh_cores_per_ktok"]))
+    return r_front, r_ssh, low
 
 
 def cmd_budget(res):
-    r_front, r_ssh = measured_slopes(res)
+    r_front, r_ssh, low = measured_slopes(res)
     print("Measured slopes (cores per 1,000 tokens/s):")
     for k, f in sorted(r_front.items()):
         print("  R_front %-5s %s" % (k, "%.4f (fixed %.4f, %d pairs)" % (f["slope"], f["intercept"], f["n"]) if f else "-"))
     for (k, c), f in sorted(r_ssh.items()):
         print("  R_ssh   %-5s %-24s %s" % (k, c, "%.4f (fixed %.5f, %d points)" % (f["slope"], f["intercept"], f["n"]) if f else "-"))
+    for k, v in sorted(low.items()):
+        print("  R_ssh   %-5s at one stream per relay (the worst level, every cipher): %.4f" % (k, v))
     print("\nTokens/s per front core at 70%, with S14's per-runner a, b, c (S14_FITS), against S14's provisional reserves:")
     for mode in ("direct", "host-dialed"):
         for ven, fits in S14_FITS[mode].items():
@@ -395,8 +426,10 @@ def cmd_budget(res):
                         if mode == "direct":
                             row += ", measured %5.0f" % per_core(b, a, c, n, rf)
                         else:
-                            for cip, sl in sorted(ssh.items()):
-                                row += ", measured (%s) %5.0f" % (cip.replace("@openssh.com", ""), per_core(b, a, c, n, rf + sl))
+                            sl = max(ssh.values()) if ssh else 0.0
+                            row += ", measured (fit %.3f) %5.0f" % (sl, per_core(b, a, c, n, rf + sl))
+                            if ven in low:
+                                row += ", measured (one stream per relay, %.3f) %5.0f" % (low[ven], per_core(b, a, c, n, rf + low[ven]))
                     cells.append(row)
                 print("  %-11s %-5s %3d tunnels: %s" % (mode, ven, n, " | ".join(cells)))
 

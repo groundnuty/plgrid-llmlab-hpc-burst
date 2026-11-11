@@ -259,21 +259,34 @@ def relogin(run):
             continue
         d = reg_again if c["plugin"] == "front" else admit_again
         d.setdefault(c.get("proxy"), t)
-    # Routed again: the front counts the UID registered again (a probe passed in the new epoch);
-    # after a front restart, in the new front's first registration.
-    gen_cut = max([g for g, _ in run.regs()] or [1])
-    routed = {}
-    for g, r in run.regs():
-        t = r["t_ns"] / 1e9
-        if r["reg"] and t >= t_cut and (m.get("event_kind") != "front" or g == gen_cut):
-            routed.setdefault(r["i"], t)
-    # First token through the front after the cut.
-    first_tok = {}
+    # Routed again: a probe passed in the new epoch, after which the front counts the UID
+    # registered again (the issue's definition), read from every probe the front logged. After an
+    # frps restart the epoch must have moved past the last one probed before the cut; after a
+    # front restart every probe after the cut is the new front's. (The registration-change log,
+    # reg-*.jsonl, is not used: a Bump and a re-probe that passes milliseconds later can both
+    # land before the scan that the Tunnel's subscriber call starts, so the scan sees no change.)
+    ep_pre, routed = {}, {}
+    for p in run.lines("probes.jsonl"):
+        if "pass" not in p:
+            continue
+        t = p["t_ns"] / 1e9
+        if t < t_cut:
+            ep_pre[p["i"]] = p.get("ep", 0)
+        elif p["pass"] and p.get("reg") and p["i"] not in routed:
+            if m.get("event_kind") != "frps" or p.get("ep", 0) > ep_pre.get(p["i"], 0):
+                routed[p["i"]] = t
+    # First token through the front after the cut, and the time to first token of the first
+    # request started after the cut that got one (the router's view of the tunnel catching up).
+    first_tok, first_req = {}, {}
     for r in load:
         for t in token_times(r):
             if t > t_cut:
                 first_tok[r["i"]] = min(first_tok.get(r["i"], t), t)
                 break
+        ts = token_times(r)
+        s0 = r["s"] / 1e9
+        if ts and s0 > t_cut and (r["i"] not in first_req or s0 < first_req[r["i"]][0]):
+            first_req[r["i"]] = (s0, ts[0] - s0)
     proxies = sorted(set(reg_again))
     out["registered_again"] = len(reg_again)
     uids = m.get("uids") or []
@@ -289,6 +302,8 @@ def relogin(run):
     out["pause_start_rel_cut"] = dist(starts)
     out["per_instance"] = [dict(p, routed_rel_cut=(routed[p["i"]] - t_cut) if p["i"] in routed else None,
                                 first_token_rel_cut=(first_tok[p["i"]] - t_cut) if p["i"] in first_tok else None,
+                                first_request_start_rel_cut=(first_req[p["i"]][0] - t_cut) if p["i"] in first_req else None,
+                                first_request_ttft=first_req[p["i"]][1] if p["i"] in first_req else None,
                                 rereg_rel_cut=(rereg[p["i"]] - t_cut) if p["i"] in rereg else None) for p in pz]
     out["client"] = m.get("client")
     out["routed_again"] = len(routed)
@@ -298,6 +313,8 @@ def relogin(run):
         out["registered_s"] = dist(rg)
         out["routed_s"] = dist(rr)
         out["first_token_s"] = dist([first_tok[i] - t_cut for i in first_tok])
+        out["first_request_start_s"] = dist([v[0] - t_cut for v in first_req.values()])
+        out["first_request_ttft_s"] = dist([v[1] for v in first_req.values()])
         out["not_back_60s"] = n - sum(1 for x in rr if x <= RELOGIN_RULE_S)
     # The plugins' latency over the recovery: from 1 s before the cut until the post window ends
     # (at most 90 s after the cut), so the teardown's CloseProxy calls stay out.
