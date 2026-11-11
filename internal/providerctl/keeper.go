@@ -489,12 +489,16 @@ type keeperView struct {
 	refusal string
 }
 
-// snapshot is the keeper's state at now for a status pass, and records it as
-// what the pass read, in the same critical section, so the wake-up compares
-// with exactly the state the pass used (noteStatus).
-func (k *keeperState) snapshot(now time.Time) keeperView {
+// snapshot is the keeper's state for a status pass, and records it as what
+// the pass read, in the same critical section, so the wake-up compares with
+// exactly the state the pass used (noteStatus). The clock is read inside that
+// critical section too: a time read before it could be one at which the
+// deadline had not yet passed while atDeadline, finding the state unchanged
+// from seen, sent no wake-up (the snapshot delta of PR 360).
+func (k *keeperState) snapshot() keeperView {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	now := k.now()
 	k.seen = k.keyLocked(now)
 	return keeperView{keeper: true, unavailable: k.unavailableLocked(now), refusal: k.refusalLocked()}
 }
@@ -503,7 +507,7 @@ func (k *keeperState) snapshot(now time.Time) keeperView {
 // keeper mode.
 func (s *shared) keeperSnapshot() keeperView {
 	if r := s.relays; r != nil && r.keeper != nil {
-		return r.keeper.snapshot(s.o.Clock.Now())
+		return r.keeper.snapshot()
 	}
 	return keeperView{}
 }

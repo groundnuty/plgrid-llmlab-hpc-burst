@@ -50,10 +50,12 @@ type statusLoop struct {
 	mu       sync.Mutex
 	failures uint64
 	// keeper is what this pass read of the relay keeper, in one snapshot
-	// (keeper mode only; the zero view elsewhere), and keeperRead, when set
-	// by a test, runs right after it is taken.
-	keeper     keeperView
-	keeperRead func()
+	// (keeper mode only; the zero view elsewhere). keeperRead and
+	// keeperPassed, when set by a test, run right after it is taken and once
+	// the pass has returned.
+	keeper       keeperView
+	keeperRead   func()
+	keeperPassed func()
 }
 
 // statusRefresh is how stale lastSuccessfulStatusRead may get before a pass
@@ -100,10 +102,15 @@ func (l *statusLoop) sync(ctx context.Context) error {
 	}
 	// Keeper mode: ONE snapshot of the keeper for this pass, recorded as what
 	// it read, for its wake-up (the delta review of PR 360).
+	l.mu.Lock()
+	hook, passed := l.keeperRead, l.keeperPassed
+	l.mu.Unlock()
+	if passed != nil {
+		defer passed()
+	}
 	snap := l.s.keeperSnapshot()
 	l.mu.Lock()
 	l.keeper = snap
-	hook := l.keeperRead
 	l.mu.Unlock()
 	if hook != nil {
 		hook()
