@@ -22,6 +22,14 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/relaykeeper/wire"
 )
 
+// restoreRefTokens is the quiet reference's length, taken before the
+// upgrade, and restoreTokens what the stream after the restore reads of the
+// same request before its client ends it: both well inside the stream.
+const (
+	restoreRefTokens = 1000
+	restoreTokens    = 750
+)
+
 // keeperOlderK3s is the release the restore test starts on and restores to;
 // keeperNewerK3s, the rehearsal's own, is what it upgrades to.
 const (
@@ -32,7 +40,9 @@ const (
 // TestRehearsalKeeperRestoreAcceptsTheLeadersLowerEpoch: after a restore, the
 // real leader's Lease epoch, lower than the keeper's fence before it, is
 // accepted: the keeper starts the running Allocation's relays at its next E,
-// frpc logs in again over them, and a stream crosses whole and in order.
+// frpc logs in again over them, and a stream crosses them in order, the
+// start of the same request's quiet reply from before the upgrade, cut only
+// by its client.
 //
 //livecheck:none the keeper rehearsal; hack/rehearsal.sh runs it, with REHEARSAL_RUN naming it
 func TestRehearsalKeeperRestoreAcceptsTheLeadersLowerEpoch(t *testing.T) {
@@ -45,7 +55,7 @@ func TestRehearsalKeeperRestoreAcceptsTheLeadersLowerEpoch(t *testing.T) {
 	in, repl := r.keeperStart()
 	key := r.fc.KeyFor(in)
 	v0 := r.keeperRelays("on k3s "+keeperOlderK3s, in.Status.JobID)
-	ref := r.quietReference("the quiet reference stream", in, key, nil)
+	ref := r.openReference("the quiet reference", key, in, restoreRefTokens)
 	l0, ok := r.providerLease()
 	if !ok || l0.holder == "" {
 		r.t.Fatalf("the Provider's Lease has no holder: %+v", l0)
@@ -115,9 +125,14 @@ func TestRehearsalKeeperRestoreAcceptsTheLeadersLowerEpoch(t *testing.T) {
 	r.tunnelBack("after the restore", in)
 	r.tunnelBack("after the restore, the replacement's", repl)
 	key = r.fc.KeyFor(in)
-	first, done := r.fc.StartStream(keeperStreamBody(), key)
-	r.firstToken("after the restore", first)
-	r.wholeStream("after the restore", r.keeperStream("after the restore", done), in, ref)
+	cuts0 := r.frontCutsByHop()
+	s := r.startOpenStream("after the restore", key)
+	r.waitFirst(s)
+	r.waitTokens(s, restoreTokens, time.Time{}, "across the keeper's new relays")
+	r.closeNow(s)
+	r.clientEnded(s, in)
+	r.oneClientCut("after the restore", cuts0, r.frontCutsByHop())
+	r.inOrder(s, ref)
 	if n := r.keeperStarts("after the restore"); n != 3 {
 		r.t.Errorf("the keeper's state file records %d starts, want 3: up, the upgrade and the up after the restore", n)
 	}

@@ -42,22 +42,35 @@ import (
 // base+7) and the front's client listener 30033.
 var portsKeeper = stack.Ports{Base: 30020, ClientAddr: "127.0.0.1:30033"}
 
-// keeperTiming is rehearsalTiming with a 25 min lease (under the partition's
-// 30 min), so a test's events, an upgrade, a down and a restore among them,
-// all come before the primary's drain start; the drain window is the same, so
-// drainStartOf and beforeDrain hold for it.
-var keeperTiming = stack.Timing{Lease: "25m", MaxRequest: "90s", DrainMargin: "30s", DrainWindow: "10m", StopGrace: "5s", AgentTimeout: "20s", StartTimeout: "4m"}
+// keeperTiming is the keeper rehearsal's clock: a 25 min lease (under the
+// partition's 30 min), and a maxRequestDuration of 20 min, so an open stream
+// (openTokens) is never cut by the front's deadline before its client ends
+// it. Its drain window is keeperDrainWindow, the profile's 4 min drainWindow,
+// shorter than maxRequestDuration plus drainMargin (api/v1alpha1,
+// InstanceDrainWindow), so a test's events, an upgrade, a down and a restore
+// among them, all come before the primary's drain start, 21 min after its
+// start. HBEP-7's lead (4 min plus 0 plus the 4 min startTimeout) is under the
+// lease.
+var keeperTiming = stack.Timing{Lease: "25m", MaxRequest: "20m", DrainMargin: "30s", DrainWindow: "4m", StopGrace: "5s", AgentTimeout: "20s", StartTimeout: "4m"}
 
-// keeperStreamTokens is each keeper stream: 3,500 tokens at tokenDelay, about
-// 70 s, under maxRequestDuration (90 s) and within max-model-len 4096. It is
-// long enough to run from before a controller's end until well after the next
-// leader's first set is accepted, and to outlast a down.
-const keeperStreamTokens = 3500
+// keeperDrainWindow is keeperTiming's drain window, from its spec alone.
+const keeperDrainWindow = 4 * time.Minute
 
-// keeperStreamBody is every keeper stream's request: one greedy prompt, so one
-// output.
-func keeperStreamBody() string {
-	return stack.ChatBody(stack.Model, keeperStreamTokens, keeperStreamTokens, true, "")
+// keeperMaxModelLen is the keeper deployment's engine max-model-len: room for
+// an open stream's prompt and openTokens.
+const keeperMaxModelLen = "65536"
+
+// keeperBeforeDrain fails an event that would start less than two minutes
+// before the primary's drain start (keeperDrainWindow before its lease end).
+func (r *rig) keeperBeforeDrain(event string, in *v1alpha1.Instance) {
+	r.t.Helper()
+	now, _ := r.instance(in.Name)
+	if now.Status.LeaseEnd == nil {
+		r.t.Fatalf("%s: Instance %s has no lease end", event, in.Name)
+	}
+	if left := time.Until(now.Status.LeaseEnd.Add(-keeperDrainWindow)); left < 2*time.Minute {
+		r.t.Fatalf("%s would start %s before the primary's drain start: lengthen the lease", event, left.Round(time.Second))
+	}
 }
 
 // hostOptions are up's options of the rig's setup: none for an alpha stack.
@@ -95,7 +108,7 @@ func (r *rig) keeperStart() (primary, repl *v1alpha1.Instance) {
 	r.t.Helper()
 	defer r.stepTimer("keeper start")()
 	r.providerReady()
-	stack.Create(r.t, r.c, stack.ServedDeployment(keeperTiming, r.engineEnv...))
+	stack.Create(r.t, r.c, stack.ServedDeploymentAs(stack.Served{Name: stack.MDName, Model: stack.Model, Provider: stack.ProviderName, MaxModelLen: keeperMaxModelLen}, keeperTiming, r.engineEnv...))
 	var ready *v1alpha1.Instance
 	last := ""
 	stack.WaitFor(r.t, 2*stack.WaitDeadline, "the primary Instance ready on a running job", func() bool {

@@ -28,11 +28,14 @@ import (
 )
 
 // TestRehearsalKeeperStatusWhileRelaysRunThenDownAndTheSwitchBack: a status
-// taken while relays run and a stream crosses finds the keeper healthy, the
-// stream whole; a down with a stream in flight cuts it, leaves none of the
-// keeper, the supervisor and every relay ssh, pinned before, and keeps the
-// keeper's state file; and up without --relay-keeper then refuses, naming the
-// running Allocations, and leaves the host stopped and the keeper unstarted.
+// taken while relays run and a stream crosses finds the keeper healthy, and
+// the stream, which its client ends a margin of tokens after the status, is
+// the start of its quiet reply, cut only by its client; a down with an open
+// stream in flight cuts it at the host, after a prefix in order, and leaves
+// none of the keeper, the supervisor and every relay ssh, pinned before, and
+// keeps the keeper's state file; and up without --relay-keeper then refuses,
+// naming the running Allocations, and leaves the host stopped and the keeper
+// unstarted.
 //
 //livecheck:none the keeper rehearsal; hack/rehearsal.sh runs it, with REHEARSAL_RUN naming it
 func TestRehearsalKeeperStatusWhileRelaysRunThenDownAndTheSwitchBack(t *testing.T) {
@@ -41,11 +44,32 @@ func TestRehearsalKeeperStatusWhileRelaysRunThenDownAndTheSwitchBack(t *testing.
 	in, _ := r.keeperStart()
 	key := r.fc.KeyFor(in)
 	v := r.keeperRelays("after the start", in.Status.JobID)
-	ref := r.quietReference("status while relays run", in, key, func() { r.keeperStatusWhileRelaysRun(v) })
+
+	cuts0 := r.frontCutsByHop()
+	s := r.startOpenStream("status while relays run", key)
+	r.waitFirst(s)
+	r.keeperStatusWhileRelaysRun(v)
+	doneAt := time.Now()
+	r.waitTokens(s, marginTokens, doneAt, "after the status")
+	r.closeNow(s)
+	r.clientEnded(s, in)
+	r.oneClientCut("status while relays run", cuts0, r.frontCutsByHop())
+	n, _ := s.tokens(time.Time{})
+	ref := r.openReference("the quiet reference", key, in, max(n, downRefTokens))
+	r.inOrder(s, ref)
+
 	running := r.runningAllocationNames()
 	r.keeperDown(in, key, ref, v)
 	r.keeperSwitchBackRefused(running, in.Status.JobID)
 }
+
+// downRefTokens is the least the quiet reference holds for down's stream,
+// which the host's stop cuts a few seconds after downLead tokens.
+const downRefTokens = 1500
+
+// hostCuts are the hops a host's stop can cut a stream at: the tunnel or the
+// upstream connection, as the relays end, or the front's own shutdown.
+var hostCuts = map[string]bool{"tunnel": true, "upstream": true, "front_shutdown": true}
 
 // tcpSock is a TCP socket of a process: its state as the kernel writes it
 // (01 established, 0A listening) and its ports.
@@ -151,23 +175,11 @@ func (r *rig) keeperStatusWhileRelaysRun(v keeperView) {
 	r.t.Logf("status while relays run: %s; the keeper %d held %d dials to the dial-home listener and %d TCP sockets in all", st.Health, v.keeper.pid, len(dials), len(socks))
 }
 
-// downLead is how many tokens of the stream the engine generates before down.
+// downLead is how many tokens the stream receives before down.
 const downLead = 300
 
-// generatedTokens is the Instance's engine's generated tokens as the serving
-// controller exports them from its agent's latest report
-// (hpcburst_instance_generation_tokens_total), and whether it has one.
-func (r *rig) generatedTokens(in *v1alpha1.Instance) (float64, bool) {
-	ss, err := scrape(r.ports.URL(12, "/metrics"))
-	if err != nil {
-		return 0, false
-	}
-	got := find(ss, "hpcburst_instance_generation_tokens_total", map[string]string{"instance_uid": string(in.UID)})
-	return sum(got), len(got) > 0
-}
-
-// keeperDown runs down with a stream in flight: the stream is cut, what
-// arrived of it is in order, and the keeper, the supervisor, the controller
+// keeperDown runs down with an open stream in flight: the host's stop cuts
+// it, what arrived of it is in order, and the keeper, the supervisor, the controller
 // and every relay ssh of the keeper, pinned before, are gone; the keeper's
 // state file is kept, and no retired marker is written.
 func (r *rig) keeperDown(in *v1alpha1.Instance, key, ref string, v keeperView) {
@@ -189,30 +201,31 @@ func (r *rig) keeperDown(in *v1alpha1.Instance, key, ref string, v keeperView) {
 		r.t.Fatalf("pin the controller: %v", err)
 	}
 	pins = append(pins, ctl)
-	g0, _ := r.generatedTokens(in)
-	first, done := r.fc.StartStream(keeperStreamBody(), key)
-	r.firstToken("down", first)
-	// A stretch of the stream first, so what arrives before the cut is more
-	// than its first tokens: the engine's own count, as the agent reports it.
-	stack.WaitState(r.t, stack.WaitDeadline, "the engine to generate "+strconv.Itoa(downLead)+" tokens of the stream", func() (bool, string) {
-		g, ok := r.generatedTokens(in)
-		return ok && g >= g0+downLead, fmt.Sprintf("%g generated, %g before the stream (read %v)", g, g0, ok)
-	})
+	s := r.startOpenStream("down", key)
+	r.waitFirst(s)
+	r.waitTokens(s, downLead, time.Time{}, "before down")
 	start := time.Now()
 	if err := r.h.DownErr(); err != nil {
 		r.t.Fatalf("down: %v", err)
 	}
 	took := time.Since(start)
-	s := r.keeperStream("down", done)
-	got := contentOf(s.Body)
-	if s.Err == nil && len(streamProblems(sseParse(s.Body), keeperStreamTokens)) == 0 {
-		r.t.Errorf("the stream arrived whole across a down that took %s: down left something serving", took.Round(100*time.Millisecond))
+	r.waitEnd(s, stack.WaitDeadline)
+	_, endErr, byClient := s.state()
+	if byClient {
+		r.t.Fatal("down: the stream was ended by its client")
 	}
-	if got == "" || !strings.HasPrefix(ref, got) {
-		r.t.Errorf("what arrived of the stream before down cut it, %d bytes, is not the start of the request's quiet reply: %.120q", len(got), got)
+	if p := openEventProblems(s.events, true); len(p) > 0 {
+		r.t.Errorf("down: the stream's events: %s", strings.Join(p, "; "))
 	}
-	r.t.Logf("down took %s; the stream received %d of %d tokens, in order, and ended %s after down began (%v)",
-		took.Round(100*time.Millisecond), len(strings.Fields(got)), keeperStreamTokens, s.EndAt.Sub(start).Round(100*time.Millisecond), s.Err)
+	r.inOrder(s, ref)
+	row := r.fc.RowOf(s.id)
+	if row.CutBy == nil || !hostCuts[*row.CutBy] || row.Finish == nil || (*row.Finish != "cut" && *row.Finish != "truncated") || row.InstanceUID != string(in.UID) {
+		r.t.Errorf("down: the stream's record: finish %s, cut by %s, on %s; want it cut at the host (tunnel, upstream or front_shutdown), on %s",
+			strOrNil(row.Finish), strOrNil(row.CutBy), row.InstanceUID, in.UID)
+	}
+	n, _ := s.tokens(time.Time{})
+	r.t.Logf("down took %s; the stream received %d tokens, in order, ended %s after down began (%v), cut by %s",
+		took.Round(100*time.Millisecond), n, s.endAt.Sub(start).Round(100*time.Millisecond), endErr, strOrNil(row.CutBy))
 	for _, p := range pins {
 		p.waitExited(r.t, 30*time.Second)
 	}

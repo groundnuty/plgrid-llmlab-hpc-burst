@@ -21,15 +21,18 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/relaykeeper/wire"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // TestRehearsalKeeperControllerRestartAndHandOverCutNoServingStream: with the
 // relay keeper, a controller restart and a leadership hand-over, each with a
-// serving stream running across it, cut no stream: it arrives whole and in
-// order, the front counts no cut, the relays' ssh are the very processes
-// pinned before, the keeper's E and the relays' (E, N) are unchanged, and the
-// agent registers with the next leader over the same control relay.
+// serving stream running across it, cut no stream. The stream runs until the
+// event's outcome is seen (the next copy leads, the keeper accepts its epoch,
+// the agent reports to it, and the relays are the very processes pinned
+// before, at the same E and (E, N)), and a margin of tokens after that; then
+// its client ends it. What it received is the start of the same request's
+// quiet reply, and the front counted one cut, its client's.
 //
 //livecheck:none the keeper rehearsal; hack/rehearsal.sh runs it, with REHEARSAL_RUN naming it
 func TestRehearsalKeeperControllerRestartAndHandOverCutNoServingStream(t *testing.T) {
@@ -37,18 +40,17 @@ func TestRehearsalKeeperControllerRestartAndHandOverCutNoServingStream(t *testin
 	in, _ := r.keeperStart()
 	key := r.fc.KeyFor(in)
 	v := r.keeperRelays("after the start", in.Status.JobID)
-	ref := r.quietReference("the quiet reference stream", in, key, nil)
-	r.keeperControllerEvent("restart", syscall.SIGKILL, in, key, ref, v)
-	r.keeperControllerEvent("hand-over", syscall.SIGTERM, in, key, ref, v)
+	r.keeperControllerEvent("restart", syscall.SIGKILL, in, key, v)
+	r.keeperControllerEvent("hand-over", syscall.SIGTERM, in, key, v)
 }
 
 // keeperControllerEvent ends the leading controller with sig, through its
 // pinned pidfd, while a serving stream runs, and checks what HBEP-6 says the
 // keeper leaves standing.
-func (r *rig) keeperControllerEvent(event string, sig syscall.Signal, in *v1alpha1.Instance, key, ref string, v keeperView) {
+func (r *rig) keeperControllerEvent(event string, sig syscall.Signal, in *v1alpha1.Instance, key string, v keeperView) {
 	r.t.Helper()
 	defer r.stepTimer("keeper " + event)()
-	r.beforeDrain("keeper "+event, in)
+	r.keeperBeforeDrain("keeper "+event, in)
 	before, ok := r.instance(in.Name)
 	if !ok || before.Status.Phase != v1alpha1.InstanceReady || before.Status.Agent == nil {
 		r.t.Fatalf("%s: needs a ready, registered Instance %s: %+v", event, in.Name, before.Status)
@@ -61,20 +63,19 @@ func (r *rig) keeperControllerEvent(event string, sig syscall.Signal, in *v1alph
 	rep0 := r.keeperReport()
 	st0, _ := upRelays(rep0, v.job)
 	refused0 := refusedOf(providerPart(rep0))
-	cuts0, ok := r.frontCounter("hpcburst_front_cuts_total")
-	if !ok {
-		r.t.Fatalf("%s: the front's /metrics did not answer", event)
-	}
 	ctl, _, err := pinEntry(r.t, r.h.State, "controller", v.sup)
 	if err != nil {
 		r.t.Fatalf("%s: pin the controller: %v", event, err)
 	}
-	first, done := r.fc.StartStream(keeperStreamBody(), key)
-	r.firstToken(event, first)
+	cuts0 := r.frontCutsByHop()
+	s := r.startOpenStream(event, key)
+	r.waitFirst(s)
 	if err := ctl.signal(sig); err != nil {
 		r.t.Fatalf("%s: %s to the controller %d through its pidfd: %v", event, sig, ctl.pid, err)
 	}
 	at := time.Now()
+
+	// The outcome, each part observed, while the stream runs.
 	ctl.waitExited(r.t, stack.WaitDeadline)
 	l1 := r.newLeader(event, ctl, l0.holder)
 	ledAt := time.Now()
@@ -83,21 +84,25 @@ func (r *rig) keeperControllerEvent(event string, sig syscall.Signal, in *v1alph
 	}
 	acceptedAt := r.waitFence(event+", the next leader's", l1.transitions)
 	reportedAt := r.agentReported(event, in, at)
-	r.t.Logf("%s: the next controller led %s after the %s, the keeper accepted its epoch %d %s after, the agent reported to it %s after",
-		event, ledAt.Sub(at).Round(100*time.Millisecond), sig, l1.transitions, acceptedAt.Sub(at).Round(100*time.Millisecond), reportedAt.Sub(at).Round(100*time.Millisecond))
+	r.sameRelays(event, v, st0)
+	outcomeAt := time.Now()
+	r.t.Logf("%s: the next controller led %s after the %s, the keeper accepted its epoch %d %s after, the agent reported to it %s after, the relays were confirmed %s after",
+		event, ledAt.Sub(at).Round(100*time.Millisecond), sig, l1.transitions, acceptedAt.Sub(at).Round(100*time.Millisecond),
+		reportedAt.Sub(at).Round(100*time.Millisecond), outcomeAt.Sub(at).Round(100*time.Millisecond))
 
-	// The stream ran across the event, from before the signal to after the
-	// next leader's epoch was accepted and the agent reported to it, and
-	// arrived whole and in order.
-	_, row := r.wholeStream(event, r.keeperStream(event, done), in, ref)
+	// Tokens kept coming after the outcome; then the client ends the stream.
+	r.waitTokens(s, marginTokens, outcomeAt, "after the outcome")
+	r.closeNow(s)
+	row := r.clientEnded(s, in)
+	r.t.Logf("%s: the stream received %s", event, tokensLine(s, outcomeAt))
 	rs, re := parseRecordTime(row.StartTime), parseRecordTime(row.EndTime)
-	if !rs.Before(at) || !re.After(acceptedAt) || !re.After(reportedAt) {
-		r.t.Errorf("%s: the stream ran %s to %s, not across the signal %s, the accepted epoch %s and the agent's report %s", event, row.StartTime, row.EndTime,
-			at.UTC().Format(time.RFC3339Nano), acceptedAt.UTC().Format(time.RFC3339Nano), reportedAt.UTC().Format(time.RFC3339Nano))
+	if !rs.Before(at) || !re.After(outcomeAt) {
+		r.t.Errorf("%s: the stream ran %s to %s, not from before the signal %s to after the outcome %s", event, row.StartTime, row.EndTime,
+			at.UTC().Format(time.RFC3339Nano), outcomeAt.UTC().Format(time.RFC3339Nano))
 	}
-	if cuts, _ := r.frontCounter("hpcburst_front_cuts_total"); cuts != cuts0 {
-		r.t.Errorf("%s: the front counted %g cuts across it, want none", event, cuts-cuts0)
-	}
+	r.oneClientCut(event, cuts0, r.frontCutsByHop())
+	n, _ := s.tokens(time.Time{})
+	r.inOrder(s, r.openReference(event+": the quiet reference", key, in, n))
 
 	// What ended was the controller, as the supervisor saw it end.
 	rec, err := readSupervisor(r.h.State)
@@ -111,27 +116,10 @@ func (r *rig) keeperControllerEvent(event string, sig syscall.Signal, in *v1alph
 		r.t.Errorf("%s: the controller's exit %+v, want killed", event, *e.LastExit)
 	}
 
-	// No relay was replaced: the same ssh processes, still the same keeper's
-	// children, at the same (E, N), started once; the keeper's E is the same,
-	// as its report and the launcher's status read it; nothing was refused.
-	if err := v.keeper.stillChild(v.sup); err != nil {
-		r.t.Errorf("%s: the relay keeper: %v", event, err)
-	}
-	rep1 := r.keeperReport()
-	st1, n := upRelays(rep1, v.job)
-	if rep1.KeeperEpoch != v.epoch {
-		r.t.Errorf("%s: the keeper's E is %d, was %d", event, rep1.KeeperEpoch, v.epoch)
-	}
-	for _, ch := range agentapi.RelayChannels {
-		if err := v.relays[ch].stillChild(v.keeper); err != nil {
-			r.t.Errorf("%s: the %s relay was replaced: %v", event, ch, err)
-		}
-		a, b := st0[ch], st1[ch]
-		if n[ch] != 1 || b.PID != a.PID || b.Epoch != a.Epoch || b.Seq != a.Seq || b.Starts != a.Starts || b.Epoch != v.epoch {
-			r.t.Errorf("%s: the keeper's %s relay is %+v (%d up), was %+v: want the same process at the same (E, N), with no start", event, ch, b, n[ch], a)
-		}
-	}
-	if got := refusedOf(providerPart(rep1)); !sameCounts(got, refused0) {
+	// Still no relay replaced, and nothing refused; the launcher's status
+	// reads the keeper at the same E.
+	r.sameRelays(event+", after the stream", v, st0)
+	if got := refusedOf(providerPart(r.keeperReport())); !sameCounts(got, refused0) {
 		r.t.Errorf("%s: the keeper's refusals went %v -> %v", event, refused0, got)
 	}
 	if st, _, _ := r.statusJSON(); !keeperAtE(st, v.keeper.pid, v.epoch) {
@@ -154,6 +142,31 @@ func (r *rig) keeperControllerEvent(event string, sig syscall.Signal, in *v1alph
 		}
 		if o.Phase != v1alpha1.InstanceReady {
 			r.t.Errorf("%s: Instance %s left ready (%s)", event, in.Name, o.Phase)
+		}
+	}
+}
+
+// sameRelays checks that no relay was replaced: the same ssh processes,
+// still the same keeper's children, as the keeper reports them before (st0),
+// at the same (E, N), started no more often; the keeper itself the same
+// process at the same E.
+func (r *rig) sameRelays(what string, v keeperView, st0 map[agentapi.RelayChannel]wire.RelayState) {
+	r.t.Helper()
+	if err := v.keeper.stillChild(v.sup); err != nil {
+		r.t.Errorf("%s: the relay keeper: %v", what, err)
+	}
+	rep := r.keeperReport()
+	st1, n := upRelays(rep, v.job)
+	if rep.KeeperEpoch != v.epoch {
+		r.t.Errorf("%s: the keeper's E is %d, was %d", what, rep.KeeperEpoch, v.epoch)
+	}
+	for _, ch := range agentapi.RelayChannels {
+		if err := v.relays[ch].stillChild(v.keeper); err != nil {
+			r.t.Errorf("%s: the %s relay was replaced: %v", what, ch, err)
+		}
+		a, b := st0[ch], st1[ch]
+		if n[ch] != 1 || b.PID != a.PID || b.Epoch != a.Epoch || b.Seq != a.Seq || b.Starts != a.Starts || b.Epoch != v.epoch {
+			r.t.Errorf("%s: the keeper's %s relay is %+v (%d up), was %+v: want the same process at the same (E, N), with no start", what, ch, b, n[ch], a)
 		}
 	}
 }
