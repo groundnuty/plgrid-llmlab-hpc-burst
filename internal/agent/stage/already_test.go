@@ -3,11 +3,14 @@ package stage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -370,4 +373,140 @@ func TestCheckpointRepairedAndDownloadedFilesLogNoWarmStart(t *testing.T) {
 		t.Fatalf("the rehash: %+v", f)
 	}
 	wantWarm(t, "the verification's rehash after a cold start", lc)
+}
+
+// The line a failed check leaves (it existed before issue 392, and carried the
+// staged path; `@hpc-burst-science-agent` ruled on 11 Nov 2026 that it names
+// the digest instead): the digest, the reason and the error, with the error's
+// own paths hidden. An image path is <image> and its record's path <record>.
+// The expected text is literal, down to the operating system's wording for a
+// missing file.
+func TestImageFailedCheckLogsItsDigestAndNoPath(t *testing.T) {
+	const prefix = "stage: image sha256:2222222222222222222222222222222222222222222222222222222222222222: failed its check ("
+	const suffix = "): staging it again"
+	for _, tc := range []struct {
+		name   string
+		format agentapi.ImageFormat
+		damage func(t *testing.T, path string)
+		detail string // the error's text, which must start the parentheses
+		exact  bool   // the parentheses hold nothing else
+	}{
+		{"SIF sidecar removed: an operating system error names its path", agentapi.ImageFormatSIF, func(t *testing.T, sif string) {
+			if err := os.Remove(sif + ".sha256"); err != nil {
+				t.Fatal(err)
+			}
+		}, "open <record>: no such file or directory", true},
+		{"SIF sidecar garbled: our own message names its path", agentapi.ImageFormatSIF, func(t *testing.T, sif string) {
+			os.WriteFile(sif+".sha256", []byte("not json"), 0o640)
+		}, "record <record>: ", false},
+		{"SIF sidecar names another image", agentapi.ImageFormatSIF, func(t *testing.T, sif string) {
+			b, _ := os.ReadFile(sif + ".sha256")
+			other := strings.Replace(string(b), digest, "sha256:"+strings.Repeat("3", 64), 1)
+			if other == string(b) {
+				t.Fatal("the sidecar does not hold the digest")
+			}
+			os.WriteFile(sif+".sha256", []byte(other), 0o640)
+		}, "record <record> is not a hpcburst-sif/1 record for " + digest, true},
+		{"sandbox manifest removed", agentapi.ImageFormatSandbox, func(t *testing.T, sb string) {
+			if err := os.Remove(sb + ".manifest"); err != nil {
+				t.Fatal(err)
+			}
+		}, "open <record>: no such file or directory", true},
+		{"sandbox manifest truncated", agentapi.ImageFormatSandbox, func(t *testing.T, sb string) {
+			b, _ := os.ReadFile(sb + ".manifest")
+			i := strings.LastIndex(strings.TrimSuffix(string(b), "\n"), "\n")
+			os.WriteFile(sb+".manifest", b[:i+1], 0o640)
+		}, "manifest <record> ends without its count", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _, root := newStager(t, nil)
+			l := withLog(s)
+			first := stageImage(t, s, tc.format)
+			tc.damage(t, first.Path)
+			l.reset()
+			stageImage(t, s, tc.format) // pulled or built again
+
+			var lines []string
+			for _, line := range strings.Split(l.String(), "\n") {
+				if strings.Contains(line, "failed its check") {
+					lines = append(lines, line)
+				}
+			}
+			if len(lines) != 1 {
+				t.Fatalf("%d lines with the failed check, want 1: %q", len(lines), lines)
+			}
+			line := lines[0]
+			want := prefix + tc.detail
+			if tc.exact {
+				want += suffix
+			}
+			if !strings.HasPrefix(line, want) || !strings.HasSuffix(line, suffix) {
+				t.Errorf("the line is %q, want it to start %q and end %q", line, want, suffix)
+			}
+			if strings.Contains(line, root) {
+				t.Errorf("the line %q names the staging root %q", line, root)
+			}
+			// The format's own name, hpcburst-sif/1, holds a slash; nothing else may.
+			if strings.Contains(strings.ReplaceAll(line, "hpcburst-sif/1", ""), "/") {
+				t.Errorf("the line %q holds a slash outside the format's name", line)
+			}
+		})
+	}
+}
+
+// verifyImage's errors hide the staging paths wherever they come from, and
+// stay reachable by errors.Is: an operating system error from lstat, and one
+// from walking a sandbox whose directory cannot be read.
+func TestVerifyImageErrorsNameNoStagingPath(t *testing.T) {
+	t.Run("lstat in a path whose parent is a file", func(t *testing.T) {
+		s, _, root := newStager(t, nil)
+		if err := os.MkdirAll(s.c.StagingDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(s.c.StagingDir, "images"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		final := filepath.Join(s.c.StagingDir, agentapi.StagedImagePath(digest, agentapi.ImageFormatSIF))
+		err := s.verifyImage(context.Background(), final, digest, agentapi.ImageFormatSIF)
+		if err == nil {
+			t.Fatal("no error for an image below a file")
+		}
+		if got, want := err.Error(), "lstat <image>: not a directory"; got != want {
+			t.Errorf("the error says %q, want %q", got, want)
+		}
+		if strings.Contains(err.Error(), root) {
+			t.Errorf("the error %q names the staging root", err)
+		}
+		if !errors.Is(err, syscall.ENOTDIR) {
+			t.Errorf("the error %q no longer wraps the operating system's", err)
+		}
+	})
+	t.Run("a sandbox directory that cannot be read", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads every directory")
+		}
+		s, _, root := newStager(t, nil)
+		res := stageImage(t, s, agentapi.ImageFormatSandbox)
+		sub := filepath.Join(res.Path, "sub")
+		if err := os.Mkdir(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(sub, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(sub, 0o755) })
+		err := s.verifyImage(context.Background(), res.Path, digest, agentapi.ImageFormatSandbox)
+		if err == nil {
+			t.Fatal("no error for a sandbox with an unreadable directory")
+		}
+		if got, want := err.Error(), "open <image>/sub: permission denied"; got != want {
+			t.Errorf("the error says %q, want %q", got, want)
+		}
+		if strings.Contains(err.Error(), root) {
+			t.Errorf("the error %q names the staging root", err)
+		}
+		if !errors.Is(err, fs.ErrPermission) {
+			t.Errorf("the error %q no longer wraps the operating system's", err)
+		}
+	})
 }
