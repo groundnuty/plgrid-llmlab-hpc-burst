@@ -39,7 +39,8 @@ func (in inputs) missing() []string {
 }
 
 // The steps a failure is attributed to. They are the only words an error line
-// holds besides "outcome=error step=".
+// or a signalled line holds besides "outcome=error step=" and
+// "outcome=signalled step=".
 const (
 	stepConfig     = "config"
 	stepImage      = "image"
@@ -50,7 +51,10 @@ const (
 // result is what a staging came to.
 type result struct {
 	// step is the step that failed, empty when staging succeeded.
-	step              string
+	step string
+	// signalled says the step failed once the signal had cancelled the staging
+	// (runInputs): the job's time limit or a cancel, not the step's own error.
+	signalled         bool
 	imageSeconds      int64
 	imageBuilt        bool
 	checkpointSeconds int64
@@ -59,7 +63,10 @@ type result struct {
 
 // line is the one line of the result file: fixed words and numbers only.
 func (r result) line() string {
-	if r.step != "" {
+	switch {
+	case r.signalled:
+		return "outcome=signalled step=" + r.step
+	case r.step != "":
 		return "outcome=error step=" + r.step
 	}
 	return fmt.Sprintf("outcome=ok image_seconds=%d image_built=%t checkpoint_seconds=%d files=%d mismatched=%d",

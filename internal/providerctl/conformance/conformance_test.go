@@ -259,7 +259,8 @@ type world struct {
 	failedIsStart bool
 	// keepStaging says the Provider stages in the profile's own staging directory, which the agent stages in and keeps,
 	// not a run's own: the pre-staging row of issue #376 (nowstage_test.go). The cleanup then removes no staging
-	// directory; the run's Allocation, deleted by its body, has the Provider remove its own files.
+	// directory; the row removes its Allocation's own directory, the credential first, on every exit of the run
+	// (removeOwnAllocation, a cleanup its body registers before the submit).
 	keepStaging bool
 }
 
@@ -423,7 +424,7 @@ func (w *world) cleanup() {
 		}
 	}
 	if w.keepStaging {
-		w.t.Logf("the staging directory is the profile's own, which the agent stages in: it is kept")
+		w.t.Logf("the staging directory is the profile's own, which the agent stages in: it is kept, less the run's Allocation directory")
 	} else if w.batch != nil && w.cap != nil {
 		if err := removeStaging(context.Background(), w.batch, w.cap); err != nil {
 			w.p.log("cleanup staging: %v", err)

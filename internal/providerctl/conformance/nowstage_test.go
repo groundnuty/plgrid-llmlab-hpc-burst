@@ -10,9 +10,14 @@ package conformance
 // (NOT RUN when the slot's owner keeps it waiting), and is cancelled by its tag.
 //
 // A cold build on A100 is unmeasured, so this row is the cold-start measurement: a staging that has not ended by the
-// job's 30-minute time limit, which ends the helper before it writes its result, is a FAIL that names that. The result
-// is the helper's one line of fixed words and numbers, read back and held to its form (stagehelper, writeResult), so no
-// path or other text of the node reaches the test or the post. That row A starts warm is shown by row A's own agent log,
+// job's 30-minute time limit is a FAIL that names that. Slurm's TERM at the limit cancels the staging, and the helper
+// writes its signalled line (outcome=signalled, never a step's error line), or, when the KILL comes first, nothing. The
+// result is the helper's one line of fixed words and numbers, read back and held to its form (stagehelper, writeResult),
+// so no path or other text of the node reaches the test or the post.
+//
+// The staging directory is kept, for row A; the Allocation's own directory in it, alloc/<tag>, with its agent.json,
+// its staged credential and the job's output, is not: it goes on every exit of the run, the credential first
+// (removeOwnAllocation, registered before the submit), as the run-directory wipe of the other rows would take it. That row A starts warm is shown by row A's own agent log,
 // never by this row's line (internal/alpha, warmStartShownByTheAgentsOwnLog).
 
 import (
@@ -42,7 +47,6 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/alpha"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -51,7 +55,10 @@ const (
 	// stageTimeLimit is the job's time limit, the row's lease (alpha.NowStageLease); hack/live-checks.sh's shape carries
 	// it as 00:30:00.
 	stageTimeLimit = "30m"
-	// stageEndWait is how long the job may take once it has started: its time limit and a minute for the scheduler.
+	// stageEndWait is how long the job may take once it has started: its time limit and a minute for the scheduler. Slurm's
+	// KillWait (180 s on Athena) does not add to it: at the limit the job's base state is TIMEOUT, which is Ended while the
+	// job is still COMPLETING (provider.SlurmPhase; AllocationObservation.JobCompleting), and the Allocation's deletion,
+	// bounded by stageDeleteWait, is what waits for the COMPLETING to clear. A dry run shortens it (bound).
 	stageEndWait = 31 * time.Minute
 	// stageDeleteWait bounds the deletion of the run's Allocation, whose finalizer has the Provider remove its files.
 	stageDeleteWait = 5 * time.Minute
@@ -65,11 +72,14 @@ const (
 var (
 	stageOKLine    = regexp.MustCompile(`^outcome=ok image_seconds=(\d+) image_built=(true|false) checkpoint_seconds=(\d+) files=(\d+) mismatched=(\d+)\n$`)
 	stageErrorLine = regexp.MustCompile(`^outcome=error step=(image|files|checkpoint|config)\n$`)
+	// stageSignalledLine is a step cut off by the signal: Slurm's TERM at the time limit, or a cancel.
+	stageSignalledLine = regexp.MustCompile(`^outcome=signalled step=(image|files|checkpoint|config)\n$`)
 )
 
 // stageResult is the helper's line as read.
 type stageResult struct {
 	present, ok                     bool
+	signalled                       bool
 	step                            string
 	imageSeconds, checkpointSeconds int
 	imageBuilt                      bool
@@ -85,14 +95,22 @@ func parseStageResult(b []byte) (stageResult, error) {
 	if m := stageErrorLine.FindSubmatch(b); m != nil {
 		return stageResult{present: true, step: string(m[1])}, nil
 	}
+	if m := stageSignalledLine.FindSubmatch(b); m != nil {
+		return stageResult{present: true, signalled: true, step: string(m[1])}, nil
+	}
 	return stageResult{}, fmt.Errorf("the stage helper's result is not one of its lines")
 }
 
 // stageVerdict is the row's verdict from the helper's line and the job's time on the cluster (its start to its end, the
-// scheduler's): PASS for a staging that ended ok with nothing mismatched, else a FAIL with its reason. A missing line
-// from a job that ran its whole time limit is the cold staging past its lease.
+// scheduler's): PASS for a staging that ended ok with nothing mismatched, else a FAIL with its reason. A job that ran its
+// whole time limit and whose helper was signalled, or left no line, is the cold staging past its lease, the cold-start
+// FAIL; a signalled helper whose job ended sooner was cancelled. Neither is ever a step's error.
 func stageVerdict(r stageResult, ran, limit time.Duration) (pass bool, why string) {
 	switch {
+	case r.signalled && ran >= limit-time.Minute:
+		return false, fmt.Sprintf("the cold staging did not finish within the row's %s lease: the job ran %s and the time limit's signal ended the helper in its %s step (the cold-start measurement: past its lease it is a FAIL)", limit, ran.Round(time.Second), r.step)
+	case r.signalled:
+		return false, fmt.Sprintf("a signal ended the stage helper in its %s step after %s, within the row's %s lease: a cancel, not its time limit", r.step, ran.Round(time.Second), limit)
 	case !r.present && ran >= limit-time.Minute:
 		return false, fmt.Sprintf("the cold staging did not finish within the row's %s lease: the job ran %s and the helper was ended before it wrote its result (the cold-start measurement: past its lease it is a FAIL)", limit, ran.Round(time.Second))
 	case !r.present:
@@ -233,11 +251,14 @@ func stageBody(t testing.TB, w *world, rowName string) {
 	w.timeLimit = stageTimeLimit
 	a := w.newAlloc(name)
 	tag := v1alpha1.JobTag(a.Namespace, a.Name, a.UID)
+	// Registered before the submit (the first reconcile of untilRuns): whatever ends the run from here, a NOT RUN, a Fatal or
+	// a pass, the Allocation's own directory goes, its credential first.
+	t.Cleanup(func() { w.removeOwnAllocation(tag) })
 	// The job waits in the queue (the start wait, the first clock: past it the job is cancelled by its tag and the run is
 	// NOT RUN, with no text to post; startwait_test.go), runs, and ends by itself or at its time limit.
 	started := func(a *v1alpha1.Allocation) bool { return accountingStarted(t, a) }
 	w.untilRuns("the job", name, "the job runs", w.at(), "", started)
-	w.until(name, "the job ends", stageEndWait, func(a *v1alpha1.Allocation) bool {
+	w.until(name, "the job ends", w.bound(stageEndWait), func(a *v1alpha1.Allocation) bool {
 		accountingNotFailed(t, a)
 		return a.Status.AtProvider.Phase == v1alpha1.AllocationEnded
 	})
@@ -283,8 +304,8 @@ func stageBody(t testing.TB, w *world, rowName string) {
 		posts += "- " + why + "\n"
 	}
 	w.p.save(alpha.PostsFile, []byte(posts))
-	w.p.save(alpha.RecordFile, []byte(fmt.Sprintf("{\"row\": %q, \"verdict\": %q, \"ranSeconds\": %d, \"result\": {\"present\": %t, \"ok\": %t, \"step\": %q, \"imageBuilt\": %t, \"imageSeconds\": %d, \"files\": %d, \"checkpointSeconds\": %d, \"mismatched\": %d}}\n",
-		row.Name, verdict, int(ran.Seconds()), res.present, res.ok, res.step, res.imageBuilt, res.imageSeconds, res.files, res.checkpointSeconds, res.mismatched)))
+	w.p.save(alpha.RecordFile, []byte(fmt.Sprintf("{\"row\": %q, \"verdict\": %q, \"ranSeconds\": %d, \"result\": {\"present\": %t, \"ok\": %t, \"signalled\": %t, \"step\": %q, \"imageBuilt\": %t, \"imageSeconds\": %d, \"files\": %d, \"checkpointSeconds\": %d, \"mismatched\": %d}}\n",
+		row.Name, verdict, int(ran.Seconds()), res.present, res.ok, res.signalled, res.step, res.imageBuilt, res.imageSeconds, res.files, res.checkpointSeconds, res.mismatched)))
 	if !pass {
 		t.Fatalf("%s: %s", row.Name, why)
 	}
@@ -326,28 +347,30 @@ func TestTheStageRowsDryRunStagesWhereTheAgentStages(t *testing.T) {
 	hub := stack.StartHub(t)
 	helper := dryStageHelper(t, t.TempDir())
 	r := alpha.NowStageRow()
-	out := filepath.Join(t.TempDir(), "out")
-	if err := os.MkdirAll(out, 0o700); err != nil {
-		t.Fatal(err)
-	}
 	jobEnv := map[string]string{"HPCBURST_APPTAINER": filepath.Join(bin, "apptainer"), "HF_ENDPOINT": hub.URL}
-	// A short job directory: the job's TMPDIR holds the helper's run directory, whose socket paths the agent's own rule
-	// holds to 107 bytes (agent.MakeRunDir), as the host-dialed rows' dry runs do.
-	jobs, err := os.MkdirTemp("", "d")
-	if err != nil {
-		t.Fatal(err)
+	// The fake cluster's $SCRATCH, with what a cleanup must keep laid out in it (nowstage_alloc_test.go).
+	w, plat, scratch := stageExitWorld(t, "", helper, jobEnv, nil)
+	out := w.p.dir
+	rec, tag := runStageExit(t, w)
+	if rec.failed != "" || rec.skipped != "" || len(rec.errors) != 0 {
+		t.Fatalf("the dry run did not pass: failed %q, skipped %q, errors %q", rec.failed, rec.skipped, rec.errors)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(jobs) })
-	w, _ := dryWorld(t, r, "", out, dryShape{cpus: "16", memory: "125Gi"}, helper, jobEnv, dryExtra{
-		run:      func(rm *fakeslurm.RunMode) { rm.JobDir = jobs },
-		kit:      func(k *worldKit) { k.keepStaging = true },
-		settings: func(s settings) settings { return withProfileStaging(t, s) },
-	})
-	stageBody(t, w, r.Name)
+	// The pass's exit: the Allocation's directory gone with its credential, by its deletion and by the cleanup alike, and
+	// the image and checkpoint the helper staged kept.
+	rec.finish()
+	if len(rec.errors) != 0 {
+		t.Errorf("the cleanup reported %q", rec.errors)
+	}
+	allocationGone(t, scratch, tag)
+	noRunJobLive(t, plat)
+	for _, p := range stagedByTheHelper() {
+		if _, err := os.Stat(filepath.Join(scratch, p)); err != nil {
+			t.Errorf("the cleanup removed the staged %s: %v", p, err)
+		}
+	}
 	// What the agent of row A would then find: a fresh real stager, configured as cmd/hb-agent configures it, over the same
 	// staging directory (the fake cluster's $SCRATCH), says by its own lines (PR #393) that the image is already staged
 	// and verified and that every listed file is present and matching, and builds nothing.
-	scratch := filepath.Join(w.artefacts[len(w.artefacts)-1], "root", "scratch")
 	run, err := os.MkdirTemp("", "r")
 	if err != nil {
 		t.Fatal(err)
@@ -387,9 +410,10 @@ func TestTheStageRowsDryRunStagesWhereTheAgentStages(t *testing.T) {
 	}
 }
 
-// The verdict from the helper's line and the job's time, by hand: a staging that ended ok passes; a missing line from a job
-// that ran its whole 30 minutes is the cold staging past its lease, a FAIL that names it; a failed step and a mismatched
-// file are FAILs; a line of another form is refused.
+// The verdict from the helper's line and the job's time, by hand: a staging that ended ok passes; a signalled line or a
+// missing one from a job that ran its whole 30 minutes is the cold staging past its lease, a FAIL that names it and never
+// a step's error; a signalled line from a job that ended sooner is a cancel; a failed step and a mismatched file are
+// FAILs; a line of another form is refused.
 //
 //livecheck:none a dry test on this host, no cluster
 func TestTheStageRowsVerdict(t *testing.T) {
@@ -407,6 +431,17 @@ func TestTheStageRowsVerdict(t *testing.T) {
 	if pass, why := stageVerdict(stageResult{}, 5*time.Minute, limit); pass || !strings.Contains(why, "left no result") {
 		t.Errorf("a helper that left nothing within the lease: %t, %q", pass, why)
 	}
+	cut, err := parseStageResult([]byte("outcome=signalled step=image\n"))
+	if err != nil || !cut.present || cut.ok || !cut.signalled || cut.step != "image" {
+		t.Fatalf("the signalled line read as %+v, %v", cut, err)
+	}
+	if pass, why := stageVerdict(cut, 30*time.Minute, limit); pass || !strings.Contains(why, "did not finish within the row's 30m0s lease") ||
+		!strings.Contains(why, "time limit's signal ended the helper in its image step") || strings.Contains(why, "failed at") {
+		t.Errorf("a staging cut off by the time limit: %t, %q", pass, why)
+	}
+	if pass, why := stageVerdict(cut, 4*time.Minute, limit); pass || !strings.Contains(why, "a cancel, not its time limit") || strings.Contains(why, "failed at") {
+		t.Errorf("a staging cancelled within its lease: %t, %q", pass, why)
+	}
 	failed, _ := parseStageResult([]byte("outcome=error step=checkpoint\n"))
 	if pass, why := stageVerdict(failed, 3*time.Minute, limit); pass || !strings.Contains(why, "checkpoint step") {
 		t.Errorf("a failed staging: %t, %q", pass, why)
@@ -416,7 +451,7 @@ func TestTheStageRowsVerdict(t *testing.T) {
 	if pass, _ := stageVerdict(mism, 12*time.Minute, limit); pass {
 		t.Error("a mismatched file passes")
 	}
-	for _, bad := range []string{"", "outcome=ok\n", "outcome=error step=/scratch\n", "outcome=ok image_seconds=1 image_built=true checkpoint_seconds=1 files=1 mismatched=0", "x\noutcome=error step=image\n"} {
+	for _, bad := range []string{"", "outcome=ok\n", "outcome=error step=/scratch\n", "outcome=signalled step=/scratch\n", "outcome=signalled\n", "outcome=ok image_seconds=1 image_built=true checkpoint_seconds=1 files=1 mismatched=0", "x\noutcome=error step=image\n"} {
 		if _, err := parseStageResult([]byte(bad)); err == nil {
 			t.Errorf("%q read as a line of the helper's", bad)
 		}
