@@ -142,14 +142,14 @@ func (s *Stager) repair(ctx context.Context, dir string, req agent.CheckpointReq
 	if err := s.download(ctx, dir, req, f, t); err != nil {
 		if aside != "" {
 			if rerr := os.Rename(aside, p); rerr != nil {
-				s.logf("putting %s back: %v", p, rerr)
+				s.logf("checkpoint file %s: putting the file back: %v", f.Path, hidePaths(rerr, aside, "<aside>", p, "<file>"))
 			}
 		}
 		return r, err
 	}
 	if aside != "" {
 		if err := os.Remove(aside); err != nil {
-			s.logf("removing %s: %v", aside, err)
+			s.logf("checkpoint file %s: removing the copy moved aside: %v", f.Path, hidePaths(err, aside, "<aside>"))
 		}
 	}
 	r.Outcome = agentapi.FileMatch
@@ -173,7 +173,12 @@ func (s *Stager) removeStaleParts(dir string) {
 		if n := d.Name(); strings.HasPrefix(n, ".") && strings.Contains(n, ".part-") {
 			if fi, err := d.Info(); err == nil && time.Since(fi.ModTime()) > staleTempAge {
 				if err := os.Remove(p); err != nil {
-					s.logf("removing %s: %v", p, err)
+					// Named by its place in the checkpoint, never by its path.
+					name := d.Name()
+					if rel, rerr := filepath.Rel(dir, p); rerr == nil {
+						name = filepath.ToSlash(rel)
+					}
+					s.logf("checkpoint file %s: removing a stale download: %v", name, hidePaths(err, p, "<part>"))
 				}
 			}
 		}

@@ -131,8 +131,21 @@ func TestUnremovableRunTreeIsLogged(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, prefix := range []string{"hb-apptainer-cache-", "hb-apptainer-tmp-"} {
-		if !strings.Contains(log.String(), "stage: removing "+filepath.Join(root, prefix)) {
-			t.Errorf("no log line for the %s tree that was left: %q", prefix, log.String())
+		// The line names the tree by its own name, never by its path (issue
+		// 394), and the path in the error reads <tree>.
+		var lines []string
+		for _, line := range strings.Split(log.String(), "\n") {
+			if strings.HasPrefix(line, "stage: removing "+prefix) {
+				lines = append(lines, line)
+			}
 		}
+		if len(lines) != 1 {
+			t.Errorf("%d log lines for the %s tree that was left, want 1: %q", len(lines), prefix, log.String())
+			continue
+		}
+		if !strings.Contains(lines[0], ": ") || !strings.HasSuffix(lines[0], " <tree>: permission denied") {
+			t.Errorf("the line %q does not end with the error, with its path written <tree>", lines[0])
+		}
+		wantNoPath(t, root, lines, "")
 	}
 }

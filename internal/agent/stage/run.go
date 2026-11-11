@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -82,7 +83,7 @@ func (s *Stager) runApptainer(ctx context.Context, args []string) (int64, error)
 	}
 	peak, measured := stopSampling() // the last sample, before the deferred removals
 	if !measured {
-		s.logf("apptainer %s: no sample of the use of %s succeeded; the build's peak is unknown", args[0], s.c.TmpDir)
+		s.logf("apptainer %s: no sample of the use of the temporary directory succeeded; the build's peak is unknown", args[0])
 	}
 	if code := g.ExitCode(); code != 0 {
 		if err := ctx.Err(); err != nil {
@@ -101,7 +102,8 @@ func (s *Stager) runApptainer(ctx context.Context, args []string) (int64, error)
 // review, Opus 5).
 func (s *Stager) removeTree(dir string) {
 	if err := removeAll(dir); err != nil {
-		s.logf("removing %s: %v", dir, err)
+		// The temporary tree's name, never its path.
+		s.logf("removing %s: %v", filepath.Base(dir), hidePaths(err, dir, "<tree>"))
 	}
 }
 
