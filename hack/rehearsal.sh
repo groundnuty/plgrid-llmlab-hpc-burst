@@ -10,7 +10,7 @@
 #   REHEARSAL_RUN           a -test.run pattern (default '^TestRehearsal(Direct|SSH|HostDialed)$', issue #146's two
 #                           and #298's host-dialed mode;
 #                           '^TestRehearsalPart3$' runs issue #193's third part, about 8 minutes more;
-#                           '^TestRehearsalKeeper' runs #343's relay keeper tests, about 11 minutes,
+#                           '^TestRehearsalKeeper' runs #343's relay keeper tests, about 7 minutes,
 #                           which need HPCBURST_BIN_DIR to hold k3s-1.35.9/k3s too)
 #   REHEARSAL_OUT           where the binaries go (default a new temporary directory)
 #   REHEARSAL_PREBUILT=1    run the binaries already in REHEARSAL_OUT instead of building them,

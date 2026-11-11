@@ -968,7 +968,7 @@ jobs:
   rehearsal-keeper:
     name: rehearsal keeper
     runs-on: ubuntu-24.04
-    # Compiling the four binaries and the test from scratch, then a run of about 11 minutes whose
+    # Compiling the four binaries and the test from scratch, then a run of about 7 minutes whose
     # -test.timeout is 25 minutes, so that the test's own waits give up and its clean-up runs
     # before the job is cancelled.
     timeout-minutes: 40
