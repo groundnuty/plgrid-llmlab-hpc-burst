@@ -368,7 +368,7 @@ def log_records(path):
     return out
 
 
-PATH_RE = re.compile(r"/[^\s\"',;]+")
+PATH_RE = re.compile(r"/[^\s\"',;:]+")
 
 
 def scrub(text):
