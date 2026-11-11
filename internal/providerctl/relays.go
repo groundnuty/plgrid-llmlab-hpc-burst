@@ -191,7 +191,13 @@ func (r *relayState) claimLogin(cfg slurm.SSHConfig) (login, inUse string, err e
 	if err != nil {
 		return "", "", err
 	}
-	login = strings.ToLower(rel.Login())
+	host, err := rel.Login()
+	if err != nil {
+		// ssh -G timed out (issue 403): no host to claim this pass. The status
+		// says why, and the next pass runs ssh -G again, bounded again.
+		return "", "", err
+	}
+	login = strings.ToLower(host)
 	if holder, pending, ok := r.hosts.Claim(login, r.provider); !ok {
 		return login, loginHostInUse(login, holder, pending), nil
 	}

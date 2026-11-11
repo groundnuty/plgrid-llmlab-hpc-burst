@@ -4,8 +4,10 @@ package sshrun
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
@@ -41,7 +44,22 @@ type RelayOptions struct {
 	// removes it, as it removes a derived one. "" is alpha's: a name derived
 	// from the credentials with a random part.
 	ConfigFile string
+	// LoginTimeout bounds Login's ssh -G; 0 means DefaultLoginTimeout.
+	LoginTimeout time.Duration
+	// Logger is for the guarded stop of a timed-out ssh -G (group.go); nil
+	// means slog's default.
+	Logger *slog.Logger
 }
+
+// DefaultLoginTimeout is how long Login lets ssh -G run (issue 403,
+// `@hpc-burst-science-agent`'s ruling, 11 Nov 2026). ssh -G only reads the
+// configuration, so it answers at once; it can stall only when something it
+// runs on the way hangs, a Match exec command in the file.
+const DefaultLoginTimeout = 10 * time.Second
+
+// ErrLoginTimeout is what Login returns when ssh -G did not answer within its
+// bound; the error wraps it, so errors.Is finds it.
+var ErrLoginTimeout = errors.New("sshrun: ssh -G timed out")
 
 // Relay makes the ssh clients of host-dialed mode's relays (HBEP-6,
 // Dial-home modes, host-dialed mode): one process per relay, each on a
@@ -56,6 +74,10 @@ type Relay struct {
 	mu     sync.Mutex
 	closed bool
 	login  string
+
+	// signalGroup is killGroup; a field so the leader of ssh -G is made as the
+	// transport's are (group.go), and the package scan sees one use of it.
+	signalGroup func(pgid int, sig syscall.Signal) error
 }
 
 // NewRelay writes the relays' configuration file and returns the maker. Close
@@ -88,7 +110,7 @@ func NewRelay(o RelayOptions) (*Relay, error) {
 		if err := checkConfigFile(o.ControlDir, o.ConfigFile); err != nil {
 			return nil, err
 		}
-		r := &Relay{o: o, config: o.ConfigFile}
+		r := newRelay(o, o.ConfigFile)
 		if err := writeConfigFile(o.ControlDir, r.config, o.Config); err != nil {
 			return nil, err
 		}
@@ -98,11 +120,16 @@ func NewRelay(o RelayOptions) (*Relay, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &Relay{o: o, config: conf}
+	r := newRelay(o, conf)
 	if err := writeConfigFile(o.ControlDir, r.config, o.Config); err != nil {
 		return nil, err
 	}
 	return r, nil
+}
+
+// newRelay is a Relay with its group signal in place (see Relay.signalGroup).
+func newRelay(o RelayOptions, config string) *Relay {
+	return &Relay{o: o, config: config, signalGroup: killGroup}
 }
 
 // configFileName is a stable configuration file's name (RelayOptions.ConfigFile):
@@ -220,25 +247,105 @@ func Stderr(cmd *exec.Cmd) string {
 // Login is the login node as the slots and the one-Provider-per-host rule
 // name it: the host name as ssh -G resolves it through the relays' own
 // configuration file (HBEP-6, Capacity), so an alias and a full name of one
-// node are one host. When ssh -G fails, it is the configured HostName.
-func (r *Relay) Login() string {
+// node are one host. When ssh -G fails, it is the configured HostName, with a
+// nil error, and that answer is kept for the Relay's life.
+//
+// ssh -G runs for at most the bound (RelayOptions.LoginTimeout, default
+// DefaultLoginTimeout) and is then ended with everything it started, a Match
+// exec command included (issue 403). That is the one failure Login reports: an
+// error wrapping ErrLoginTimeout, naming the bound and, when ssh's standard
+// error shows one, the last Match exec command it started (which is the
+// operator's own configuration text, so it is for logs, as Stderr's is), with
+// the configured HostName as the host. A timeout is never kept, and never
+// turns into a quiet fallback later: the next Login runs ssh -G again, bounded
+// again.
+//
+// Login holds the Relay's lock while ssh -G runs, so a Command or a Close
+// waits up to the bound behind a stalled one.
+func (r *Relay) Login() (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.login != "" {
-		return r.login
+		return r.login, nil
 	}
-	r.login = r.o.Config.HostName
-	cmd := exec.Command(r.o.Binary, "-G", "-F", r.config, alias)
+	host, err := r.resolveLogin()
+	if err != nil {
+		return r.o.Config.HostName, err
+	}
+	r.login = host
+	return host, nil
+}
+
+// loginStderrKept is how much of ssh -G's standard error is kept, for the
+// Match exec command a timeout names.
+const loginStderrKept = 16 << 10
+
+// resolveLogin runs ssh -G as the leader of a process group of its own (so
+// the Match exec commands it starts are in it), under the bound. It returns
+// the host ssh names, the configured HostName when ssh could not answer, and
+// an error only for a timeout. The caller holds r.mu.
+//
+// -v is after -G: the doubles in the tests read the first argument, and
+// without -v ssh writes no word about the commands it runs; with it, stdout is
+// the same and standard error says "Executing command: '...'" before each.
+func (r *Relay) resolveLogin() (string, error) {
+	fallback := r.o.Config.HostName
+	bound := r.o.LoginTimeout
+	if bound <= 0 {
+		bound = DefaultLoginTimeout
+	}
+	log := r.o.Logger
+	if log == nil {
+		log = slog.Default()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), bound)
+	defer cancel()
+	var stdout bytes.Buffer
+	stderr := &limited{w: &bytes.Buffer{}, n: loginStderrKept}
+	cmd := exec.CommandContext(ctx, r.o.Binary, "-G", "-v", "-F", r.config, alias)
 	cmd.Env = r.o.Env
-	if out, err := cmd.Output(); err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			if h, ok := strings.CutPrefix(line, "hostname "); ok && strings.TrimSpace(h) != "" {
-				r.login = strings.TrimSpace(h)
-				break
-			}
+	cmd.Stdout, cmd.Stderr = &stdout, stderr
+	leader := newGroupLeader(log, r.signalGroup)
+	cmd.Cancel = func() error { return leader.signal(syscall.SIGKILL) }
+	cmd.WaitDelay = time.Second
+	if err := leader.start(cmd); err != nil { // its own group, pinned (group.go)
+		return fallback, nil
+	}
+	runErr := leader.reap(cmd) // behind the barrier; releases the pidfd
+	if runErr != nil && ctx.Err() != nil {
+		return "", loginTimeoutError(bound, stderr.w.String())
+	}
+	if runErr != nil {
+		return fallback, nil
+	}
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		if h, ok := strings.CutPrefix(line, "hostname "); ok && strings.TrimSpace(h) != "" {
+			return strings.TrimSpace(h), nil
 		}
 	}
-	return r.login
+	return fallback, nil
+}
+
+// execLinePrefix starts ssh's verbose line for a Match exec command.
+const execLinePrefix = "Executing command: '"
+
+// loginTimeoutError is the timeout's error: the bound, and the last Match exec
+// command ssh's standard error shows, quoted and cut to 200 bytes, never any
+// other line of it (they name the configuration file and the host).
+func loginTimeoutError(bound time.Duration, stderr string) error {
+	last := ""
+	for _, line := range strings.Split(stderr, "\n") {
+		if i := strings.Index(line, execLinePrefix); i >= 0 {
+			last = strings.TrimSuffix(strings.TrimSpace(line[i+len(execLinePrefix):]), "'")
+		}
+	}
+	if last == "" {
+		return fmt.Errorf("%w after %s", ErrLoginTimeout, bound)
+	}
+	if len(last) > 200 {
+		last = last[:200]
+	}
+	return fmt.Errorf("%w after %s (the last Match exec command it started: %q)", ErrLoginTimeout, bound, last)
 }
 
 // Close removes the configuration file; later Commands fail.
