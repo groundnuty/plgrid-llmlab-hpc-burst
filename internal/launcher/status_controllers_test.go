@@ -19,6 +19,8 @@ import (
 	"github.com/go-logr/logr"
 	crhealthz "sigs.k8s.io/controller-runtime/pkg/healthz"
 	crlog "sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // quietControllerRuntime gives controller-runtime's logger a sink once per process. Its healthz
@@ -202,6 +204,10 @@ type supervisedFakeHost struct {
 	// readyz answers /readyz on its own (readyzFake): a test steers the readiness checks and reads
 	// which paths were asked.
 	readyz *readyzFake
+	// pluginCode and pluginBody are the answer to a POST of the front's frps plugin
+	// (agentapi.FrontFrpsPluginPath): an acceptance by default.
+	pluginCode *int
+	pluginBody *string
 }
 
 func newSupervisedFakeHost(t *testing.T) *supervisedFakeHost {
@@ -209,6 +215,7 @@ func newSupervisedFakeHost(t *testing.T) *supervisedFakeHost {
 	h := newFakeHost(t)
 	quietControllerRuntime.Do(func() { crlog.SetLogger(logr.Discard()) })
 	code, body := http.StatusOK, ""
+	pluginCode, pluginBody := http.StatusOK, `{"reject":false,"unchange":true}`
 	readyz := newReadyzFake()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// As the manager mounts its readiness handler (pkg/manager/internal.go:308-310): /readyz
@@ -217,12 +224,17 @@ func newSupervisedFakeHost(t *testing.T) *supervisedFakeHost {
 			readyz.ServeHTTP(w, r)
 			return
 		}
+		if r.URL.Path == agentapi.FrontFrpsPluginPath && r.Method == http.MethodPost {
+			w.WriteHeader(pluginCode)
+			_, _ = io.WriteString(w, pluginBody)
+			return
+		}
 		w.WriteHeader(code)
 		_, _ = io.WriteString(w, body)
 	}))
 	t.Cleanup(srv.Close)
 	u, _ := url.Parse(srv.URL)
-	s := &supervisedFakeHost{fakeHost: h, health: u.Host, code: &code, body: &body, readyz: readyz}
+	s := &supervisedFakeHost{fakeHost: h, health: u.Host, code: &code, body: &body, readyz: readyz, pluginCode: &pluginCode, pluginBody: &pluginBody}
 	port, _ := strconv.Atoi(u.Port())
 	const supPID, childPID = 4343, 4344
 	writeFakeProc(t, h.root, supPID, "S", 1, 2000)
@@ -453,6 +465,103 @@ func TestStatusFrontUsageDegraded(t *testing.T) {
 			t.Errorf("health %s, entries %+v", rep.Health, rep.Controllers)
 		}
 	})
+}
+
+// TestStatusFrontPluginMustAnswer: status posts a no-op call to the front's frps plugin on the
+// front's health address, and a front whose plugin does not accept it is unhealthy, since frps
+// refuses every new proxy while the front's plugin does not answer (#371; HBEP-6, Admission and
+// Operational readiness). The controller's entry is not asked.
+func TestStatusFrontPluginMustAnswer(t *testing.T) {
+	const ok = `{"synced":true,"usage":{"state":"ok"}}`
+	front := func(s *supervisedFakeHost) *StatusReport {
+		s.t.Helper()
+		*s.body = ok
+		s.writeSupervisorFile(s.supRec, EntryRecord{Name: "front", Health: s.health, State: entryRunning, Proc: &s.childRec})
+		return s.status(true)
+	}
+	t.Run("the plugin accepts: healthy", func(t *testing.T) {
+		rep := front(newSupervisedFakeHost(t))
+		if c := rep.Controllers[0]; rep.Health != Healthy || c.FrpsPluginOK == nil || !*c.FrpsPluginOK {
+			t.Fatalf("health %s, reasons %v, entry %+v", rep.Health, rep.Reasons, c)
+		}
+	})
+	for _, c := range []struct {
+		name string
+		code int
+		body string
+	}{
+		{"it answers 503", http.StatusServiceUnavailable, ""},
+		{"it answers 404 (a front without the plugin)", http.StatusNotFound, "404 page not found"},
+		{"it refuses", http.StatusOK, `{"reject":true,"reject_reason":"no"}`},
+		{"its answer is not a verdict", http.StatusOK, `{"synced":true}`},
+	} {
+		t.Run(c.name+": unhealthy", func(t *testing.T) {
+			s := newSupervisedFakeHost(t)
+			*s.pluginCode, *s.pluginBody = c.code, c.body
+			rep := front(s)
+			e := rep.Controllers[0]
+			if rep.Health != Unhealthy || e.FrpsPluginOK == nil || *e.FrpsPluginOK || !strings.Contains(strings.Join(rep.Reasons, "\n"), "frps refuses every new proxy") {
+				t.Fatalf("health %s, reasons %v, entry %+v", rep.Health, rep.Reasons, e)
+			}
+		})
+	}
+	t.Run("the controller is not asked", func(t *testing.T) {
+		s := newSupervisedFakeHost(t) // its entry is the controller
+		*s.pluginCode = http.StatusServiceUnavailable
+		rep := s.status(true)
+		if rep.Health != Healthy || rep.Controllers[0].FrpsPluginOK != nil {
+			t.Fatalf("health %s, entries %+v", rep.Health, rep.Controllers)
+		}
+	})
+}
+
+// TestStatusFrpsMustPostToTheFront: on a host that runs a front and frps, frps's own configuration
+// must post to the front's plugin at the front's health address, or frps registers proxies the
+// front never hears of while the front's plugin still answers status's no-op call (#371, the review
+// of #380). A file without the front's plugin, or with it at another address, is a problem; with
+// it, none. A host without a front is not asked.
+func TestStatusFrpsMustPostToTheFront(t *testing.T) {
+	const problem = "does not post to the front's plugin"
+	for _, c := range []struct {
+		name      string
+		front     bool   // the record holds a front
+		plugin    string // the front plugin address rendered into frps's file; "" renders none
+		wantFound bool
+	}{
+		{"the front's plugin at the front's health address", true, "127.0.0.1:29224", false},
+		{"no front's plugin in frps's file", true, "", true},
+		{"the front's plugin at another address", true, "127.0.0.1:29299", true},
+		{"no front recorded", false, "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := newSupervisedFakeHost(t)
+			s.st.Frps = &FrpsRunConfig{Binary: "/opt/frp/frps", Version: DefaultFrpVersion}
+			s.st.Ports.FrontHealth = 29224
+			if c.front {
+				s.st.FrontRun = &FrontRunConfig{Binary: "/opt/hpcburst-front", Config: "/etc/front.json"}
+			}
+			if err := s.l.saveState(s.st); err != nil {
+				t.Fatal(err)
+			}
+			h := s.l.host(s.st.Ports)
+			var err error
+			if c.plugin == "" {
+				_, err = WriteFrpsConfig(h, testWebPassword)
+			} else {
+				_, err = WriteFrpsConfigWithFront(h, testWebPassword, c.plugin)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			rep := s.status(true)
+			if found := strings.Contains(strings.Join(rep.Reasons, "\n"), problem); found != c.wantFound {
+				t.Fatalf("the problem %q is reported %v, want %v; reasons %v", problem, found, c.wantFound, rep.Reasons)
+			}
+			if c.wantFound && rep.Health != Unhealthy {
+				t.Fatalf("health %s with frps not posting to the front", rep.Health)
+			}
+		})
+	}
 }
 
 // readyzFake is the lifecycle controller's /readyz on a test server: controller-runtime's own

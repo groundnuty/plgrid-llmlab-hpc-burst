@@ -207,6 +207,12 @@ func TestFrontSupervision(t *testing.T) {
 	if up.FrontHealth != healthAddr {
 		t.Errorf("up reports the front's health on %q, want %s", up.FrontHealth, healthAddr)
 	}
+	// frps posts each admitted registration to the front's plugin, on the front's health address
+	// (#371): up wrote that into frps's own file, after the controller's plugin.
+	if cfg := fileOf(filepath.Join(h.dir, agentapi.FrpsDirName, "frps.toml")); !strings.Contains(cfg, `name = "hpcburst-front"`+"\n"+`addr = "`+healthAddr+`"`+"\n"+`path = "`+agentapi.FrontFrpsPluginPath+`"`) ||
+		strings.Index(cfg, `name = "hpcburst-front"`) < strings.Index(cfg, `name = "hpcburst"`+"\n") {
+		t.Errorf("frps's configuration does not post to the front's plugin at %s after the controller's; its plugins:\n%s", healthAddr, frpsPluginSection(cfg))
+	}
 
 	// ---- the front runs as a child of the supervisor, with exactly its command line ----
 	var fe frontEntryRecord

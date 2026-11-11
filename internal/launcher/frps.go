@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -28,6 +30,14 @@ const (
 // (`@hpc-burst-science-agent`, 31 Oct 2026, HBEP-6): a failed Ping call makes frpc close its
 // session, so subscribing would drop every tunnel whenever the plugin is down.
 var frpsPluginOps = []string{"Login", "NewProxy", "CloseProxy"}
+
+// frontPluginOps are the operations frps posts to the front's plugin, the second (#371; HBEP-6,
+// Admission): each admitted registration and each close of a proxy, so that the front stops
+// routing to the Instance's UID before frps registers it again.
+var frontPluginOps = []string{"NewProxy", "CloseProxy"}
+
+// frontPluginName is the front's plugin entry's name in frps's configuration.
+const frontPluginName = "hpcburst-front"
 
 // FrpsDir is the launcher's frps directory, <state>/frps, which holds the web password file
 // (agentapi.FrpsDirName) and the configuration.
@@ -61,6 +71,24 @@ func checkTOMLPath(what, p string) error {
 // password that is not a key's form, a port block that does not fit below 65536, and a state
 // directory that cannot sit inside a quoted TOML string.
 func RenderFrpsConfig(h agentapi.Host, webPassword string) (string, error) {
+	return renderFrpsConfig(h, webPassword, "")
+}
+
+// RenderFrpsConfigWithFront is RenderFrpsConfig for a host whose launcher runs a front: frps gets
+// a second server plugin, the front's, at frontAddr (the front's health address, base+4), for
+// NewProxy and CloseProxy, after the lifecycle controller's (HBEP-6, Admission; #371). frps calls
+// its plugins in that order and stops at the first that refuses or does not answer (frp v0.71.1,
+// pkg/plugin/server/manager.go:70-98), so the front hears only proxies the controller admitted,
+// and frps refuses new proxies while the front does not answer. frontAddr must be 127.0.0.1:<port>.
+func RenderFrpsConfigWithFront(h agentapi.Host, webPassword, frontAddr string) (string, error) {
+	host, port, err := net.SplitHostPort(frontAddr)
+	if p, perr := strconv.Atoi(port); err != nil || perr != nil || host != "127.0.0.1" || p < 1 || p > 65535 {
+		return "", fmt.Errorf("the front's plugin address %q is not 127.0.0.1:<port>", frontAddr)
+	}
+	return renderFrpsConfig(h, webPassword, frontAddr)
+}
+
+func renderFrpsConfig(h agentapi.Host, webPassword, frontAddr string) (string, error) {
 	if err := agentapi.CheckKey([]byte(webPassword)); err != nil {
 		return "", fmt.Errorf("frps web password: %w", err)
 	}
@@ -106,7 +134,24 @@ func RenderFrpsConfig(h agentapi.Host, webPassword string) (string, error) {
 	w("addr = %q", h.FrpsPluginAddr())
 	w("path = %q", agentapi.FrpsPluginPath)
 	w("ops = [%s]", strings.Join(ops, ", "))
+	if frontAddr != "" {
+		w("")
+		w("# The front's plugin, after the controller's: frps stops at the first refusal, so the front hears only admitted")
+		w("# proxies, and registers a proxy only once the front has stopped routing to its UID (HBEP-6, Admission).")
+		b.WriteString(frontPluginBlock(frontAddr))
+	}
 	return b.String(), nil
+}
+
+// frontPluginBlock is the front's plugin entry exactly as RenderFrpsConfigWithFront writes it, one
+// line per key; status looks for it in frps's file (checkFrpsNamesTheFront).
+func frontPluginBlock(frontAddr string) string {
+	fops := make([]string, len(frontPluginOps))
+	for i, op := range frontPluginOps {
+		fops[i] = fmt.Sprintf("%q", op)
+	}
+	return fmt.Sprintf("[[httpPlugins]]\nname = %q\naddr = %q\npath = %q\nops = [%s]\n",
+		frontPluginName, frontAddr, agentapi.FrontFrpsPluginPath, strings.Join(fops, ", "))
 }
 
 // EnsureFrpsWebPassword returns the web server's password from agentapi.Host.FrpsWebPasswordFile,
@@ -153,6 +198,19 @@ func WriteFrpsConfig(h agentapi.Host, webPassword string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return writeFrpsConfigText(h, text)
+}
+
+// WriteFrpsConfigWithFront is WriteFrpsConfig with the front's plugin (RenderFrpsConfigWithFront).
+func WriteFrpsConfigWithFront(h agentapi.Host, webPassword, frontAddr string) (string, error) {
+	text, err := RenderFrpsConfigWithFront(h, webPassword, frontAddr)
+	if err != nil {
+		return "", err
+	}
+	return writeFrpsConfigText(h, text)
+}
+
+func writeFrpsConfigText(h agentapi.Host, text string) (string, error) {
 	for _, d := range []string{FrpsDir(h), filepath.Dir(FrpsLogFile(h))} {
 		if err := os.MkdirAll(d, agentapi.KeyDirMode); err != nil {
 			return "", err

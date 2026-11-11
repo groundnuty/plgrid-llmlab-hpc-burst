@@ -1,7 +1,6 @@
 package front
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -200,7 +199,13 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, x *exchange, n n
 			p.failedBeforeHeaders(w, x, t, err)
 			return
 		}
-		p.router.ReportConnect(t.key(), true)
+		// The front's own fence is not the target failing, so it doesn't count
+		// toward the pause: a dial aborted because the Instance registered
+		// again, or no transport left in the router's view (#371). The re-probe
+		// that follows decides whether the Instance takes traffic again.
+		if !isOwnFence(err) {
+			p.router.ReportConnect(t.key(), true)
+		}
 		p.log.Warn("no connection to the target; nothing was sent", "request", x.id, "target", t.key(), "error", err.Error())
 		tried, exclude = t, t.key()
 	}
@@ -285,7 +290,7 @@ func (p *Proxy) send(x *exchange, r *http.Request, t *target, body []byte, rb re
 	if t.inst != nil {
 		tr, ok := p.inst.get(t.inst.UID)
 		if !ok {
-			return nil, &dialError{err: errors.New("the Instance has no registered transport")}
+			return nil, &dialError{err: errNoTransport}
 		}
 		k, err := agentapi.ReadKeyFile(agentapi.InstanceKeyPath(p.host.CredentialsDir(), string(t.inst.UID)))
 		if err != nil {
