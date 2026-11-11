@@ -22,6 +22,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -244,7 +245,10 @@ func runNode(args []string) error {
 		return err
 	}
 	if err := os.Link(exe, agent); err != nil {
-		return fmt.Errorf("link the binary as the staged agent: %w", err)
+		// Another file system than the binary's (a hard link cannot cross): a copy does as well.
+		if cerr := copyExecutable(exe, agent); cerr != nil {
+			return fmt.Errorf("link the binary as the staged agent: %v; copy: %w", err, cerr)
+		}
 	}
 	rd := Ready{SSHConfig: creds, Known: filepath.Join(base, "n", "known_hosts"), Agent: agent, Base: base, ControlDir: filepath.Join(base, "c"), PID: os.Getpid()}
 	if _, port, err := net.SplitHostPort(node.Addr()); err == nil {
@@ -288,4 +292,22 @@ func runNode(args []string) error {
 	signal.Notify(term, syscall.SIGTERM, syscall.SIGINT)
 	<-term
 	return nil
+}
+
+// copyExecutable copies the file at src to dst with mode 0755.
+func copyExecutable(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o755)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
