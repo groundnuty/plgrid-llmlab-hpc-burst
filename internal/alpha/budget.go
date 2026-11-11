@@ -64,6 +64,10 @@ func (r Row) RunDeadline(pendingMax time.Duration) time.Duration {
 //     for the primary to end, the guard's last looks, two catch-ups (the worker restart's and the result's), Close. Its
 //     successor must be ready by the drain start, so its second job has no wait of its own.
 //   - The no-overlap row: the predecessor's lease end, SuccessorWait, the guard's last looks, two catch-ups, Close.
+//   - Row B on plgrid-now (alpha-athena-now-nooverlap): its start wait, the predecessor's lease and EndMargin for its job
+//     to be seen gone from the slot, the successor's Allocation (SuccessorAllocationWait) and its own start wait, then
+//     health.startTimeout and ReadyMargin for it to be ready, the guard's last looks, a drain window and EndMargin for the
+//     jobs to end once the deployment goes, two catch-ups (the result's and the deployment end's), Close.
 //   - Row A on plgrid-now (alpha-athena-now-serve): its start wait; every step to the requeue before the drain start,
 //     which the requeue's own check ends the run in failure past (now_flows_test.go); then the requeue's window
 //     (NowRequeueTail), a drain window and EndMargin for the job to end once the deployment goes, three catch-ups (the
@@ -82,6 +86,9 @@ func (r Row) WorstCase(pendingMax time.Duration) time.Duration {
 		return StartupWait + first + r.Lease + SuccessorWait(tm, pendingMax) + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout
 	case "alpha-athena-now-serve":
 		return StartupWait + first + (r.Lease - dw) + NowRequeueTail(tm) + dw + EndMargin + 3*stack.CatchUpWorstCase + CloseTimeout
+	case "alpha-athena-now-nooverlap":
+		return StartupWait + first + r.Lease + EndMargin + SuccessorAllocationWait + r.StartWait + tm.StartTimeout + ReadyMargin + lastLooks +
+			dw + EndMargin + 2*stack.CatchUpWorstCase + CloseTimeout
 	}
 	return StartupWait + first + (r.Lease - dw) + dw + EndMargin + stack.CatchUpWorstCase + CloseTimeout
 }
@@ -102,8 +109,12 @@ func Scaled(waits time.Duration) time.Duration { return waits * BudgetFactorPerc
 func (r Row) bounds(pendingMax time.Duration) time.Duration {
 	tm := r.Clock()
 	first, _ := FirstClock(r, pendingMax, r.Lease, DrainWindow(tm.MaxRequestDuration, tm.DrainMargin, 0))
-	if r.Name == "alpha-helios-nooverlap" {
+	switch r.Name {
+	case "alpha-helios-nooverlap":
 		first += pendingMax
+	case "alpha-athena-now-nooverlap":
+		// The successor's own start wait, from its Allocation's creation.
+		first += r.StartWait
 	}
 	return first + r.Lease
 }

@@ -205,6 +205,11 @@ type Row struct {
 	// athena-now.yaml (issue #376, Q6). Empty for a row that needs none.
 	// hack/livechecks compares it with the script's owner-go table.
 	OwnerGo string
+	// ReleaseWhenIdle says the row's deployment releases each job once its Instance has ended, after the live idle
+	// limit (Timing.IdleLimit): the no-overlap rows, whose successor waits on the predecessor's job, on Helios's GPU cap
+	// (alpha-helios-nooverlap) or on plgrid-now's one-job slot (alpha-athena-now-nooverlap, issue #376's row B;
+	// hbep/0007-lifecycle-controller/README.md:482). Row.Plan reads it; no row name does.
+	ReleaseWhenIdle bool
 }
 
 // ProfileName is the row's shipped platform profile: Profile, else its cluster's.
@@ -325,13 +330,13 @@ type DeploymentSpec struct {
 }
 
 // Plan is the deployment the row's scenario must apply: the row's Provider alone,
-// the shortest lease, the 5-minute request deadline, and for the no-overlap row
-// ReleaseWhenIdle with a short idle limit (hbep/0007-lifecycle-controller/
-// README.md, the alpha run on Helios).
+// the shortest lease, the 5-minute request deadline, and for the no-overlap rows
+// (Row.ReleaseWhenIdle) ReleaseWhenIdle with a short idle limit
+// (hbep/0007-lifecycle-controller/README.md:482).
 func (r Row) Plan() DeploymentSpec {
 	tm := r.Clock()
 	d := DeploymentSpec{Providers: []ProviderRef{{Name: r.Cluster, Cluster: r.Cluster}}, LeaseLimit: r.Lease, MaxRequestDuration: tm.MaxRequestDuration}
-	if r.Name == "alpha-helios-nooverlap" {
+	if r.ReleaseWhenIdle {
 		d.ReleaseWhenIdle, d.IdleLimit = true, tm.IdleLimit
 	}
 	return d
@@ -342,11 +347,13 @@ var rows = []Row{
 	// Two Allocations together on plgrid-gpu-a100, which has no one-job slot.
 	{Name: "alpha-athena-handover", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: MinLease(), Budget: 150 * time.Minute, MostJobs: 2, PostsTo: "#145 and #93"},
 	// The predecessor, and the successor pending beside it in QOS now.
-	{Name: "alpha-helios-nooverlap", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: MinLease(), Budget: 213 * time.Minute, SlotHold: MinLease() + 45*time.Minute, MostJobs: 2, PostsTo: "#145 and #94", OwnerGo: OwnerGoHeliosNow},
+	{Name: "alpha-helios-nooverlap", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: MinLease(), Budget: 213 * time.Minute, SlotHold: MinLease() + 45*time.Minute, MostJobs: 2, PostsTo: "#145 and #94", OwnerGo: OwnerGoHeliosNow, ReleaseWhenIdle: true},
 	{Name: "tunnel-hour-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: DefaultTunnelLease(), Budget: DefaultTunnelLease() + TunnelRunOver, SlotHold: DefaultTunnelLease(), MostJobs: 1, PostsTo: "#145", OwnerGo: OwnerGoHeliosNow},
 	{Name: "tunnel-hour-athena", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: DefaultTunnelLease(), Budget: DefaultTunnelLease() + TunnelRunOver, MostJobs: 1, PostsTo: "#145"},
 	// Row A of issue #376 (nowserve.go): one job on plgrid-now, the owner's shared one-job slot, under athena-now.yaml.
 	NowServeRow(),
+	// Row B of issue #376 (nownooverlap.go): two jobs in turn on the same slot, no-overlap mode on the one-slot path.
+	NowNoOverlapRow(),
 }
 
 // The settings of the owner's go (Row.OwnerGo).
