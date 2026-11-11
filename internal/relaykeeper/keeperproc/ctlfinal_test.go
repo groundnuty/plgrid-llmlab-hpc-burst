@@ -263,8 +263,30 @@ func TestAFinalEndOfADeletedAllocationIsRefusedByTheRealNextLeader(t *testing.T)
 	e := f.replay()
 	epoch := f.newEpoch()
 	ack := f.ackOf(f.cb.pid(), e, "B's acknowledgement of the deleted Allocation's end")
-	if ack.ack.Outcome != wire.OutcomeRefused || ack.ack.Reason != wire.AckDeleted || ack.ack.LeaseEpoch != epoch || ack.acked == nil || !ack.acked.Decided {
-		t.Errorf("B's acknowledgement %+v was answered %+v %+v, want refused, %s, at Lease epoch %d, and decided", *ack.ack, ack.acked, ack.refused, wire.AckDeleted, epoch)
+	if ack.ack.Outcome != wire.OutcomeRefused || ack.ack.Reason != wire.AckDeleted || ack.ack.LeaseEpoch != epoch || ack.acked == nil {
+		t.Errorf("B's acknowledgement %+v was answered %+v %+v, want refused, %s, at Lease epoch %d, and acked", *ack.ack, ack.acked, ack.refused, wire.AckDeleted, epoch)
+	}
+	// The keeper keeps an end's record until its Allocation leaves a
+	// complete set (HBEP-6, The keeper's state file). B drops the deleting
+	// Allocation from its sets, so a complete set of B's can reach the keeper
+	// before the acknowledgement, which then finds no record: the keeper
+	// answers it as not decided, and the end is gone all the same. That is
+	// allowed only with such a set before it, read off the wire.
+	if ack.acked != nil && !ack.acked.Decided {
+		dropped := false
+		for _, r := range f.g.tap.requests(from(f.cb.pid())) {
+			if r.n >= ack.n || r.set == nil || !r.set.Complete || r.report == nil {
+				continue
+			}
+			named := false
+			for _, en := range r.set.Allocations {
+				named = named || en.UID == e.UID
+			}
+			dropped = dropped || !named
+		}
+		if !dropped {
+			t.Errorf("B's acknowledgement was answered as not decided, with no complete set of B's leaving the Allocation out before it: the keeper had no record of an end it reported")
+		}
 	}
 	f.reportedNoMore(ack, false)
 	if al, ok := f.g.api.allocation(t, allocNS, f.a.Name); ok {
