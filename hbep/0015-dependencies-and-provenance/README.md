@@ -187,11 +187,12 @@ The pins that a design decision rests on, as on `main` on 2026-11-01, plus rows 
 
 A release is a tag on `main` with its archive, its checksums and its notes (owner decisions, 11 Nov 2026: "Tag an alpha release" once alpha graduates, and "Bundle k3s and frp", [issue #145, comment 6790758697](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/145#issuecomment-6790758697) and PR #389).
 
-- **The first tag** is `v0.1.0-alpha.1`, a valid Go pre-release version. It's made after the alpha status PRs (HBEP-1) have merged, on a `main` commit with no code change since the commits the alpha evidence ran on. Later alpha tags count up (`-alpha.2`), and beta's begin at `v0.2.0-beta.1`.
-- **The archive** is one per host architecture, linux amd64 for alpha, laid out as `up` expects. Plain names, so `up` finds its siblings:
-  - `bin/`: `hpcburst`, `hpcburst-controller` and `hpcburst-front`, built from the tag with the pinned Go (`hack/go-pins.txt`), `CGO_ENABLED=0` and `-trimpath`, with VCS stamping on. Each reports the tag from its build information. The release fails unless `go version -m` shows the tag, without `+dirty`.
-  - `bin/` also holds the pinned k3s and frps, each checked against the pins file the launcher embeds before it's packed (`internal/launcher/k3s-pins.txt`, `frp-pins.txt`), so `up --bin-dir` needs no clone.
-  - `agent-builds/`: `hb-agent-x86_64` and `hb-agent-aarch64`, built by `hack/build-agents.sh` at the tag. Each one's identity is its sha256, the agentDigest, which that script makes the same on any machine; their `-version` prints what that script gives. Beside them sit the pinned frpc builds that `hack/fetch-frp.sh --agent-builds` places.
+- **The first tag** is `v0.1.0-alpha.1`, a valid Go pre-release version. It's made after the alpha status PRs (HBEP-1) have merged, on a `main` commit with no change to the Go packages (`api/`, `cmd/`, `internal/`, `pkg/`), the pins files, `config/crd/` or `profiles/` since the commits the alpha evidence ran on. The release workflow, its scripts and the notes may land after. Later alpha tags count up (`-alpha.2`), and beta's begin at `v0.2.0-beta.1`.
+- **The archive** is one per host architecture, linux amd64 for alpha, with everything `up` and the controller read, so no clone is needed:
+  - `bin/`: `hpcburst`, `hpcburst-controller` and `hpcburst-front`, under plain names, since `up` finds the other two beside its own executable. Each is built from the tag with the pinned Go (`hack/go-pins.txt`), `CGO_ENABLED=0` and `-trimpath`, with VCS stamping on, and reports the tag from its build information. The release fails unless `go version -m` shows the tag, without `+dirty`.
+  - **`bin/` also holds the pinned k3s and frps,** at the paths `up --bin-dir bin` resolves, as `hack/fetch-k3s.sh` and `hack/fetch-frp.sh` lay them out: `bin/k3s-1.36.5/k3s` and `bin/frp-0.71.1/frps`. Each is checked against the pins file the launcher embeds before it's packed (`internal/launcher/k3s-pins.txt`, `frp-pins.txt`).
+  - **`agent-builds/`:** `hb-agent-x86_64` and `hb-agent-aarch64`, built by `hack/build-agents.sh` at the tag, with the pinned frpc builds that `hack/fetch-frp.sh --agent-builds` places. Each agent's identity is its sha256, the agentDigest, which that script makes the same on any machine; its `-version` prints what that script gives. The operator copies this directory to `<state>/agent-builds`, where `up` checks it and the controller stages from it (HBEP-4, Files first). `up` reads no agent build from the archive itself.
+  - **`config/crd/` and `profiles/`:** the CRDs `up --manifests` installs, and the shipped PlatformProfiles, from the tag.
 - **Checksums:** a `SHA256SUMS` file lists the archive and every file in it. It catches corruption, not a replaced asset, since it sits beside them; signing and attestations stay out of scope (Non-goals; Security).
 - **Its notes:**
   - GitHub's generated notes from the merged pull requests since the previous tag;
@@ -201,7 +202,7 @@ A release is a tag on `main` with its archive, its checksums and its notes (owne
 - **How it's made:**
   1. A workflow runs on a pushed `v*` tag. It fails unless the tagged commit is on `origin/main` (`git merge-base --is-ancestor`), and it calls CI's workflow for the required checks, through `workflow_call`, rather than copying them.
   2. It builds the archive and `SHA256SUMS`, and creates a draft release with `gh release create --draft`.
-  3. The rehearsal (`hack/rehearsal.sh` with `REHEARSAL_PREBUILT=1`, issue #146) runs from the draft's archive on the single-user host.
+  3. The rehearsal runs from the draft's archive on the single-user host. The release PR gives `hack/rehearsal.sh` an archive input: it unpacks the archive into the names its prebuilt mode takes (`REHEARSAL_PREBUILT=1`, issue #146), with the agent as `hb-agent` and frps and frpc as its frp directory expects. `rehearsal.test` is built from a checkout of the tag.
   4. Only then is the release published.
 
   It reuses GitHub Releases and the GitHub CLI already on the runner image, and adds no release tool.
@@ -274,7 +275,7 @@ Sources were read on 2026-10-30, except where another date is given.
 
 | Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
 |---|---|---|---|
-| GitHub CLI and GitHub Releases | [cli/cli](https://github.com/cli/cli), MIT; GitHub Releases is a service | The release workflow (Releases): `gh release create`, with the CLI already on the runner image |
+| GitHub CLI and GitHub Releases | [cli/cli](https://github.com/cli/cli); GitHub Releases is a GitHub service | MIT (cli/cli, read 2026-11-11) | The release workflow (Releases): `gh release create`, with the CLI already on the runner image |
 | Go modules and the Go checksum database | golang/go, https://go.dev/ref/mod | BSD-3-Clause (GitHub licence field, read 2026-11-01) | The record and checksums of Go dependencies (`go.mod`, `go.sum`) |
 
 ### Designs and published work borrowed
