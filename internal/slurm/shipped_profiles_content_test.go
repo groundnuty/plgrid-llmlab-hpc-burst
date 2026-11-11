@@ -24,8 +24,11 @@ var (
 	// A user or grant name of the PLGrid form: "plg" followed by more name, which is not a partition or
 	// QOS ("plgrid", "plgrid-now", "plgrid_now_conformance" and so on).
 	profilePlgName = regexp.MustCompile(`\bplg[a-z0-9_-]*\b`)
-	// A job ID: "job" and a number of five or more digits.
-	profileJobID = regexp.MustCompile(`(?i)\bjob(?: id)?[ :=#]+[0-9]{5,}\b`)
+	// A job ID: "job", "job id", "jobid", "job_id" or "JobId" (also after "SLURM_": SLURM_JOB_ID) and a number of
+	// five or more digits after a space, a colon, an equals sign or a number sign; "-j" or "--job", "--jobs" or
+	// "--jobid" and such a number (sacct -j, squeue --jobs). Slurm's own output has these forms (scontrol's
+	// JobId=, the JSON's job_id, sacct's -j), as the prose "from job 1234567" does.
+	profileJobID = regexp.MustCompile(`(?i:(?:\b|_)job(?:[ _-]?id)?\b[ :=#]+[0-9]{5,}\b)|(?:^|\s)-j[ =]*[0-9]{5,}\b|(?:^|\s)--job(?:id|s)?[ =]+[0-9]{5,}\b`)
 )
 
 // identifiersIn returns what a manifest's text holds that the content rules forbid.
@@ -77,13 +80,28 @@ func TestTheIdentifierScanFindsEachKindAndSparesTheProfilesNames(t *testing.T) {
 		{"a login host", "ssh: login01.example.org", 1},
 		{"a user or grant name", "account: plgexampleuser-gpu-a100", 1},
 		{"a job ID", "from job 1234567 of the run", 1},
+		// Slurm's own forms (the review of PR 385: scontrol, squeue and sacct output pasted into a note).
+		{"a job ID: Submitted batch job", "Submitted batch job 1234567", 1},
+		{"a job ID: scontrol's JobId=", "JobId=1234567 JobName=x", 1},
+		{"a job ID: the JSON's job_id", "job_id: 1234567", 1},
+		{"a job ID: jobid", "jobid 1234567", 1},
+		{"a job ID: sacct -j", "sacct -j 1234567", 1},
+		{"a job ID: -j with no space", "sacct -j1234567", 1},
+		{"a job ID: squeue --jobs", "squeue --jobs=1234567", 1},
+		{"a job ID: SLURM_JOB_ID", "SLURM_JOB_ID=1234567", 1},
 		{"partitions and QOSes of the profiles", "plgrid-gpu-a100 plgrid-now plgrid plgrid_now_conformance plgrid-services", 0},
 		{"an image digest", "image docker.io/example/vllm-openai@sha256:0123456789abcdef", 0},
 		{"a documentation URL", "https://docs.example.org/pages", 0},
 		{"a 4-digit number", "job 1234 is not an ID", 0},
+		{"the forms with a short number", "JobId=1234 job_id: 12 jobid 99 -j 5 SLURM_JOB_ID=4321", 0},
+		{"words that hold job", "subjob 1234567 and jobs 1234567", 0},
+		{"a job name rule", "jobName: maxLength 56 job_name_56_characters_unchanged", 0},
+		{"a number after -J (ssh's jump host)", "ssh -J gateway 1234567", 0},
 	} {
-		if got := identifiersIn(tc.text); len(got) != tc.want {
-			t.Errorf("%s: found %q, want %d", tc.name, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got := identifiersIn(tc.text); len(got) != tc.want {
+				t.Errorf("found %q, want %d", got, tc.want)
+			}
+		})
 	}
 }
