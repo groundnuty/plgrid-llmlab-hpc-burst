@@ -60,6 +60,7 @@ func TestARealControllerOnAHeldLoginHostIsLoginHostInUse(t *testing.T) {
 	pins := g.k.pins(up)
 	s := g.w.openStream(j, serving)
 	s.mustEcho(64<<10, "before the second Provider's controller")
+	g.w.roundTrip(j, control, 16<<10)
 	host := strings.ToLower(g.w.creds.HostName)
 	p := g.provider("example-c")
 	c := g.startController("c", p.name, g.tap.path)
@@ -94,6 +95,7 @@ func TestARealControllerOnAHeldLoginHostIsLoginHostInUse(t *testing.T) {
 			t.Errorf("the holder's %s relay %+v, want it up as it was, PID %d", ch, rs, up[ch].PID)
 		}
 	}
+	g.w.roundTrip(j, control, 16<<10)
 	s.whole()
 }
 
@@ -148,6 +150,7 @@ func TestARealControllerWithItsKeeperSocketMissingIsUnavailableAndAdmitsNothing(
 	pins := g.k.pins(up)
 	s := g.w.openStream(j, serving)
 	s.mustEcho(64<<10, "before the keeper's socket goes")
+	g.w.roundTrip(j, control, 16<<10)
 	a.term()
 	s.mustEcho(32<<10, "after A's stop")
 	g.tap.stop()
@@ -176,6 +179,7 @@ func TestARealControllerWithItsKeeperSocketMissingIsUnavailableAndAdmitsNothing(
 	for range 3 {
 		s.mustEcho(32<<10, "while the keeper is unavailable to C")
 	}
+	g.w.roundTrip(j, control, 16<<10)
 	if l := g.api.lease(t, p.name); l.holder == "" {
 		t.Fatalf("no copy holds the Lease while C runs: %+v", l)
 	}
@@ -202,6 +206,7 @@ func TestARealControllerWithItsKeeperSocketMissingIsUnavailableAndAdmitsNothing(
 	for range 3 {
 		s.mustEcho(32<<10, "at the end")
 	}
+	g.w.roundTrip(j, control, 16<<10)
 	g.ownSbatches(own + 1)
 	s.whole()
 }

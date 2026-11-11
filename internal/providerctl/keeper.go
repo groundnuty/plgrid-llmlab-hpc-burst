@@ -173,15 +173,21 @@ func newKeeperRelayState(o Options, s RelaySettings) (*relayState, error) {
 func (k *keeperState) claim() (login, inUse string, err error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	return k.login, k.refusalLocked(), nil
+}
+
+// refusalLocked is the claim's refusal, or "" when it is granted; the caller
+// holds mu.
+func (k *keeperState) refusalLocked() string {
 	switch {
 	case k.replaced != "":
-		return k.login, k.replaced, nil
+		return k.replaced
 	case k.inUse != "":
-		return k.login, k.inUse, nil
+		return k.inUse
 	case !k.answered:
-		return k.login, claimPending, nil
+		return claimPending
 	}
-	return k.login, "", nil
+	return ""
 }
 
 // claimPending is the refusal while the keeper has not accepted a set of this
@@ -470,20 +476,40 @@ func (k *keeperState) keyLocked(now time.Time) string {
 	return fmt.Sprintf("%t|%t|%s|%s", k.unavailableLocked(now) == "", k.answered, k.inUse, k.replaced)
 }
 
-// observe records what a status pass is about to read of the keeper. A
-// change after it makes noteStatus wake the loop again.
-func (k *keeperState) observe(now time.Time) {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	k.seen = k.keyLocked(now)
+// keeperView is what one status pass reads of the keeper, in one snapshot:
+// whether the keeper is reachable and how the claim stands, read together
+// under one lock, so the pass never combines a claim and a reachability that
+// no single moment had (the delta review of PR 360). The zero value is
+// outside keeper mode.
+type keeperView struct {
+	keeper bool
+	// unavailable is why the keeper is unreachable, or "".
+	unavailable string
+	// refusal is the claim's refusal, or "" when it is granted.
+	refusal string
 }
 
-// keeperObserve is observe for the status loop's pass; nothing outside keeper
-// mode.
-func (s *shared) keeperObserve() {
+// snapshot is the keeper's state for a status pass, and records it as what
+// the pass read, in the same critical section, so the wake-up compares with
+// exactly the state the pass used (noteStatus). The clock is read inside that
+// critical section too: a time read before it could be one at which the
+// deadline had not yet passed while atDeadline, finding the state unchanged
+// from seen, sent no wake-up (the snapshot delta of PR 360).
+func (k *keeperState) snapshot() keeperView {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	now := k.now()
+	k.seen = k.keyLocked(now)
+	return keeperView{keeper: true, unavailable: k.unavailableLocked(now), refusal: k.refusalLocked()}
+}
+
+// keeperSnapshot is snapshot for the status loop's pass; the zero view outside
+// keeper mode.
+func (s *shared) keeperSnapshot() keeperView {
 	if r := s.relays; r != nil && r.keeper != nil {
-		r.keeper.observe(s.o.Clock.Now())
+		return r.keeper.snapshot()
 	}
+	return keeperView{}
 }
 
 // keeperStatus is the status loop's wake-up in keeper mode; nil, which

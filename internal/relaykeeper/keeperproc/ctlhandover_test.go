@@ -43,6 +43,11 @@ func realHandOver(t *testing.T, kill bool) {
 	jobBefore := j.status(t)
 	s := g.w.openStream(j, serving)
 	s.mustEcho(64<<10, "before the event")
+	// The control relay carries bytes too, before and after the event: a
+	// new connection each time, since in a deployment the control target is
+	// the controller's own agent endpoint (HBEP-6: the control streams end
+	// with the controller), here the test's echo listener.
+	g.w.roundTrip(j, control, 16<<10)
 	b := g.startController("b", p.name, g.tap.path)
 	b.waitLog(logAcquiring)
 	s.mustEcho(32<<10, "with B standing by")
@@ -52,6 +57,7 @@ func realHandOver(t *testing.T, kill bool) {
 	if n := len(g.tap.requests(from(b.pid()))); n != 0 {
 		t.Errorf("B sent %d requests to the keeper while it stood by", n)
 	}
+	g.w.roundTrip(j, control, 16<<10)
 	m := g.k.log.mark()
 	if kill {
 		a.kill()
@@ -84,6 +90,7 @@ func realHandOver(t *testing.T, kill bool) {
 	for range 4 {
 		s.mustEcho(32<<10, "after B's complete set")
 	}
+	g.w.roundTrip(j, control, 16<<10)
 	listed := map[agentapi.RelayChannel]int{}
 	for _, r := range g.k.relaysOf(p, j.tag) {
 		listed[r.Channel]++
