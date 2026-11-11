@@ -67,6 +67,19 @@ func init() {
 type ctlTimings struct {
 	LeaseDurationMS, RenewDeadlineMS, RetryPeriodMS int64
 	PollMS, BusyMS, SendMS, GraceMS                 int64
+	// SetRenewMS, when set, is the renew deadline a desired set's validity
+	// adds (RelaySettings.RenewDeadline) in place of the manager's own: a
+	// test that needs its sets to outlive a dead sender by a wide margin
+	// lengthens it, leaving the Lease's timings as they are.
+	SetRenewMS int64
+}
+
+// setRenew is the renew deadline the sets' validity adds.
+func (tm ctlTimings) setRenew() int64 {
+	if tm.SetRenewMS > 0 {
+		return tm.SetRenewMS
+	}
+	return tm.RenewDeadlineMS
 }
 
 // The timings of Stage B's controllers. The renew deadline is above the
@@ -164,7 +177,7 @@ func realControllerMain(args []string) int {
 		Front:          &providerctl.FrontSettings{Mode: agentapi.DialHomeHostDialed, CertPEM: c.CertPEM, CertPin: c.CertPin, FrpcDigests: c.FrpcDigests},
 		Relays: &providerctl.RelaySettings{
 			Ports:        map[agentapi.RelayChannel]int{agentapi.RelayControl: c.Control, agentapi.RelayServing: c.Serving},
-			KeeperSocket: c.Socket, KeeperSendInterval: ms(tm.SendMS), RenewDeadline: ms(tm.RenewDeadlineMS),
+			KeeperSocket: c.Socket, KeeperSendInterval: ms(tm.SendMS), RenewDeadline: ms(tm.setRenew()),
 		},
 		PollInterval: ms(tm.PollMS),
 		BusyInterval: ms(tm.BusyMS),
@@ -223,7 +236,7 @@ func (g *rig) startController(name, provider, socket string) *realCtl {
 		SSH: g.w.creds, CredentialsFile: filepath.Join(g.w.base, "creds"), StagingDir: g.w.staging, Partition: g.partition,
 		ControlDir: ctlDir, CredentialsDir: g.credsDir, AgentBuildsDir: g.buildsDir,
 		Control: g.w.targets[control].port(), Serving: g.w.targets[serving].port(),
-		CertPEM: g.certPEM, CertPin: g.certPin, FrpcDigests: g.frpcDigests, Timings: stageBTimings,
+		CertPEM: g.certPEM, CertPin: g.certPin, FrpcDigests: g.frpcDigests, Timings: g.ctlTimings(),
 	}
 	b, err := json.Marshal(c)
 	if err != nil {

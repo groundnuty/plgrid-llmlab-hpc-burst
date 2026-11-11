@@ -50,6 +50,15 @@ func startFinal(t *testing.T, name string, rule func(a *realCtl) func(r *tapReq)
 	t.Helper()
 	f := &finalRun{t: t, g: newRig(t)}
 	g := f.g
+	// The final end comes from a relay restart after A is dead, which the
+	// keeper makes only under A's last unexpired set. With the sets' validity
+	// lengthened to the 2 s poll plus 60 s, that set outlives A by about 55 s
+	// (its age carries the 5 s exchange bound), not about 8 s, so the refused
+	// restart cannot miss it under load; the Lease's own timings are
+	// stageBTimings'.
+	tm := stageBTimings
+	tm.SetRenewMS = 60_000
+	g.timings = &tm
 	f.p = g.provider("example-a")
 	f.a, f.j = g.running(f.p, name)
 	f.own = g.w.allSbatches()

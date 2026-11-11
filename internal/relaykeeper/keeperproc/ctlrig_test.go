@@ -63,6 +63,17 @@ type rig struct {
 	certPEM             []byte
 	certPin             string
 	frpcDigests         map[string]string
+	// timings, when set, are the controllers' timings in place of
+	// stageBTimings.
+	timings *ctlTimings
+}
+
+// ctlTimings are the timings of the rig's controllers.
+func (g *rig) ctlTimings() ctlTimings {
+	if g.timings != nil {
+		return *g.timings
+	}
+	return stageBTimings
 }
 
 // newRig starts the world, the API server, a keeper on a new state directory
