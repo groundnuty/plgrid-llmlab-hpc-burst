@@ -28,7 +28,7 @@ func TestRowAsNotRunsThroughTheScript(t *testing.T) {
 		{"pend-past-bound", row + ": NOT RUN (a job did not start within 10 min of the deployment's creation, the row's start wait, and was cancelled by its tag; not a failure)", false},
 		{"requeue-refused", row + ": NOT RUN (the scheduler refused the requeue of the run's own job: the scheduler says the operation is disabled for this job; the run's other checks passed; not a failure)", true},
 		{"warm-no-image", row + ": NOT RUN (the agent's own log did not show the warm start: the image already staged and verified: false; checkpoint files present and matching: 3 of 3; the run's other checks passed; not a failure)", true},
-		{"warm-cold-then-retry", row + ": NOT RUN (the agent's own log did not show the warm start: the first staging was built, failed or tried again: not the first attempt's evidence; the run's other checks passed; not a failure)", true},
+		{"warm-cold-then-retry", row + ": NOT RUN (the agent's own log did not show the warm start: the first staging was built, failed a check or was tried again: not the first attempt's evidence; the run's other checks passed; not a failure)", true},
 		{"warm-no-start", row + ": NOT RUN (the agent's own log did not show the warm start: the log read is not the whole of the agent's first start to its first worker; the run's other checks passed; not a failure)", true},
 	} {
 		t.Run(c.fault, func(t *testing.T) {
