@@ -684,12 +684,15 @@ def run_caplink_one(env, n, streams, mbps, discipline, buffer, rep, args):
 def run_caplink(env, args):
     """The uncapped control, then each discipline's ladder from the top cap down, until its first
     heartbeat failure or the cap where the tunnels' own demand binds (both included)."""
-    out = [run_caplink_one(env, args.tunnels, args.streams, 0, "fair", None, args.rep, args)]
+    ctl = run_caplink_one(env, args.tunnels, args.streams, 0, "fair", None, args.rep, args)
+    out = [ctl]
+    bpt = analysis.caplink(analysis.Run(ctl)).get("up_bytes_per_token")
+    log("the uncapped control carried %s bytes per token up the link" % bpt)
     for disc, buf in args.disciplines:
         for mbps in args.caps:
             dst = run_caplink_one(env, args.tunnels, args.streams, mbps, disc, buf, args.rep, args)
             out.append(dst)
-            verdict = analysis.caplink_stop(dst)
+            verdict = analysis.caplink_stop(dst, bpt)
             log("%s: %s" % (os.path.basename(dst), verdict))
             if verdict["stop"]:
                 break

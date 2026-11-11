@@ -465,7 +465,7 @@ def heartbeat_witnesses(run, t_ready, t1):
                 last[i] = st
     fl = run.m.get("frpc_log") or {}
     fs = run.m.get("frps_log") or {}
-    probes_failed = sum(1 for p in run.lines("probes.jsonl") if p.get("t_ns", 0) / 1e9 > t_ready and p.get("pass") is False)
+    probes_failed = sum(1 for p in run.lines("probes.jsonl") if t_ready < p.get("t_ns", 0) / 1e9 <= t1 and p.get("pass") is False)
     return {"drops": drops, "unreadable_lists": unreadable,
             "frpc_relogins": max(0, fl.get("login to server success", 0) - run.n),
             "heartbeat_timeout_lines": fl.get("heartbeat timeout", 0) + fs.get("heartbeat timeout", 0),
@@ -503,7 +503,11 @@ def caplink(run):
     g = gaps_ms(load, t0, t1)
     ready = [e["t"] for e in m["events"] if e["event"] == "all-routed"]
     hb = heartbeat_witnesses(run, ready[0] if ready else t0, t1)
-    out.update(offered_tok_s=offered, delivered_tok_s=delivered, demand_binds=delivered < 0.95 * offered,
+    series = [r for r in run.lines("link-series.jsonl") if t0 + 1 <= r["t"] <= t1]
+    up = sum(r["up_bytes"] for r in series)
+    secs = len(series)
+    out.update(offered_tok_s=offered, delivered_tok_s=delivered, delivered_share=delivered / offered if offered else None,
+               up_bytes_per_token=(up / secs) / delivered if secs and delivered and not m.get("filler_conns") else None,
                valid=valid, emptiest_second=emptiest, empty_tunnels=len(empty), gap_p50_ms=percentile(g, 50),
                gap_p99_ms=percentile(g, 99), gap_max_ms=max(g) if g else None, **hb)
     out.update({"link_" + k: v for k, v in link_fill(run, t0, t1).items()})
@@ -515,12 +519,19 @@ def caplink(run):
     return out
 
 
-def caplink_stop(run_dir):
+def demand_binds(offered_tok_s, bytes_per_token, rate_Bps):
+    """The tunnels' own demand binds when the token bytes they offer (tokens/s times the bytes per
+    token the uncapped control carried up the link) reach the cap."""
+    return bool(rate_Bps and bytes_per_token and offered_tok_s * bytes_per_token >= rate_Bps)
+
+
+def caplink_stop(run_dir, bytes_per_token):
     """Whether a discipline's ladder stops at this run: its first heartbeat failure, or the cap
     where the tunnels' own demand binds (both included in the ladder), or a run that failed."""
     r = caplink(Run(run_dir))
-    stop = r.get("status") != "ok" or r.get("hb_failed") or r.get("demand_binds")
-    return {"stop": bool(stop), "hb_failed": r.get("hb_failed"), "demand_binds": r.get("demand_binds"),
+    binds = demand_binds(r.get("offered_tok_s") or 0, bytes_per_token, Run(run_dir).m.get("rate_Bps"))
+    stop = r.get("status") != "ok" or r.get("hb_failed") or binds
+    return {"stop": bool(stop), "hb_failed": r.get("hb_failed"), "demand_binds": binds,
             "at_cap": r.get("link_at_cap"), "status": r.get("status")}
 
 
@@ -546,6 +557,8 @@ def ssh_negotiated(logdir):
                         ciphers.append("%s %s %s %s" % m.groups())
         except OSError:
             continue
+        if kex is None and not ciphers:
+            continue  # an ssh that negotiated nothing: sshrun's "ssh -G" for the login host's name
         key = "kex=%s; %s" % (kex, "; ".join(sorted(set(ciphers))))
         out[key] = out.get(key, 0) + 1
     return out
