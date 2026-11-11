@@ -172,7 +172,7 @@ Read at frp v0.71.1 (`fatedier/frp`, tag `v0.71.1`).
 | `s16ssh.sh` | the relays' ssh: the system's ssh with `-v -E <log>` |
 | `s16.py` | the driver: `relogin`, `caplink`, `rssh`, `rfront`, `host`, `leftovers` |
 | `analysis.py`, `tests/` | the result rules, with their tests |
-| `summarize.py` | `extract` (raw files to `results/`), `tables`, `verify` |
+| `summarize.py` | `extract` (raw files to `results/`, with a scan for host paths), `tables`, `verify` (every CPU figure from the samples), `budget` (one front core's tokens/s with the measured reserves) |
 | `results/` | the committed results (Results) |
 
 ```sh
