@@ -606,6 +606,12 @@ func (f firstOnly) TunnelHour(_ context.Context, p Plan) (TunnelHourObs, error) 
 	return TunnelHourObs{}, err
 }
 
+func (f firstOnly) NowServe(_ context.Context, p Plan) (NowServeObs, error) {
+	err := f.firstJobStarted(p)
+	f.after()
+	return NowServeObs{}, err
+}
+
 // The first job's side of it, through Run: its deferred Close turns the NOT RUN into a failure that names the start, before any marker.
 func TestRunEndsAFailureWhenAFirstJobReadAsWaitingHadStartedByItsCancel(t *testing.T) {
 	row := rowOf("tunnel-hour-athena")

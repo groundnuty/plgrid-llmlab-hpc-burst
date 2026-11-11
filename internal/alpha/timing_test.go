@@ -24,14 +24,27 @@ var liveTimingByHand = Timing{
 	ConcurrentStreams: 16, StreamRate: 20, MinIdleGap: 2 * time.Minute, MaxSampleGap: 2 * time.Minute,
 	// The large requests (issue #224; the ruling (4) on PR 255): 0.4 MB prompts from two senders, half a second apart.
 	UploadBody: 400_000, UploadStreams: 2, UploadPause: 500 * time.Millisecond,
+	// HBEP-5's long stream on plgrid-now (issue #376, Q4): 7,000 tokens.
+	ServeTokens: 7000,
 }
 
+// Every live row keeps the zero Timing, but the rows under profiles/athena-now.yaml (issue #376), whose clock is that
+// profile's margins (TestTheNowRowsClockIsTheShippedProfiles reads the file).
 func TestLiveRowsKeepTheLiveTiming(t *testing.T) {
 	if LiveTiming() != liveTimingByHand {
 		t.Errorf("LiveTiming() = %+v, want %+v", LiveTiming(), liveTimingByHand)
 	}
 	all := slices.Concat(Rows(), AccountingRows(), ReachRows(), HostDialedRows())
 	for _, r := range all {
+		if r.Profile == "athena-now" {
+			if r.Timing != AthenaNowTiming() || r.Clock().Lead() != 20*time.Minute {
+				t.Errorf("row %s runs under athena-now.yaml with the Timing %+v and a lead of %s, want the profile's margins and 20 min", r.Name, r.Timing, r.Clock().Lead())
+			}
+			continue
+		}
+		if r.Profile != "" {
+			t.Errorf("row %s names the profile %s, whose clock no test holds", r.Name, r.Profile)
+		}
 		if r.Timing != (Timing{}) {
 			t.Errorf("row %s has a Timing of its own, %+v: a live row keeps the zero Timing", r.Name, r.Timing)
 		}

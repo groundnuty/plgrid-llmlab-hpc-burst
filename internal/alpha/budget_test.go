@@ -40,6 +40,13 @@ func TestEachStackRowsWorstCaseIsItsWaitsAddedUp(t *testing.T) {
 		{"the hour on Athena, 2 h", rowOf("tunnel-hour-athena"), 120, 11 + 120 + 122 + 15 + 5 + 1 + 5, 120 + 166, 11 + 5 + 1 + 5},
 		{"the hour on Athena, its wait capped a minute before the first end", rowOf("tunnel-hour-athena"), 180, 11 + 121 + 122 + 15 + 5 + 1 + 5, 180 + 166, 11 + 5 + 1 + 5},
 		{"the hour at the longest lease", long, 120, 11 + 120 + 225 + 15 + 5 + 1 + 5, 120 + 269, 11 + 5 + 1 + 5},
+		// Row A on plgrid-now (issue #376): its start wait of 10 is its first clock whatever wait is asked, then its 48-minute
+		// lease less the 7-minute drain window to the requeue, the requeue's window (3 for the drain seen, 1 for scontrol, 5
+		// for the result, 5 and 2 for the held stream's deadline and the client's margin past it, 3 for the events), the
+		// drain window and 5 for the job to end once the deployment goes, three catch-ups and 5 to close. Its run's deadline
+		// is its budget, 115, which holds the start wait.
+		{"row A on plgrid-now, 30", rowOf("alpha-athena-now-serve"), 30, 11 + 10 + 41 + (3 + 1 + 5 + 5 + 2 + 3) + 7 + 5 + 3 + 5, 115, 11 + 19 + 5 + 3 + 5},
+		{"row A on plgrid-now, 2 h asked", rowOf("alpha-athena-now-serve"), 120, 11 + 10 + 41 + (3 + 1 + 5 + 5 + 2 + 3) + 7 + 5 + 3 + 5, 115, 11 + 19 + 5 + 3 + 5},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			p := time.Duration(c.pending) * time.Minute
@@ -112,6 +119,15 @@ var liveWaits = map[string]string{
 	"largeRequests: time.Sleep(tm.UploadPause)":                                                   "pacing",
 	"TunnelHour: time.After(rateAsked + r.fc.RequestTimeout() + 2*time.Minute)":                   "the lease",
 	"TunnelHour: r.waitFor(tm.MinIdleGap + time.Minute)":                                          "the lease",
+	"successorOf: stack.BoundedDeadline(d)":                                                       "the waits that call it, listed here",
+	"nowGauges: r.waitFor(stack.WaitDeadline)":                                                    "the lease",
+	"requeueSnapshot: r.syncWatch(stack.KindAllocations | stack.KindInstances)":                   "the lease (the time-left check before it leaves it a minute)",
+	"requeueOwnJob: r.waitFor(stack.WaitDeadline)":                                                "term: NowRequeueTail",
+	"requeueOwnJob: r.syncWatch(stack.KindInstances | stack.KindAllocations)":                     "term: stack.CatchUpWorstCase",
+	"requeueResult: stack.BoundedDeadline(RequeueResultWait)":                                     "term: NowRequeueTail",
+	"requeueResult: time.Sleep(time.Second)":                                                      "pacing",
+	"nowEvents: stack.BoundedDeadline(stack.WaitDeadline)":                                        "term: NowRequeueTail",
+	"nowEvents: time.Sleep(time.Second)":                                                          "pacing",
 }
 
 // waitOf is how a call reads in liveWaits, or "" when it is not a wait.
@@ -132,7 +148,7 @@ func waitOf(fset *token.FileSet, fn string, call *ast.CallExpr) string {
 	switch recv + "." + sel.Sel.Name {
 	case "r.waitFor", "time.After", "time.Sleep":
 		arg = 0
-	case "r.successorOf", "r.untilBefore", "context.WithTimeout", "stack.WaitFor", "r.syncWatch":
+	case "r.successorOf", "r.untilBefore", "context.WithTimeout", "stack.WaitFor", "r.syncWatch", "stack.BoundedDeadline":
 		arg = 1
 	}
 	if arg < 0 || arg >= len(call.Args) {
@@ -142,12 +158,12 @@ func waitOf(fset *token.FileSet, fn string, call *ast.CallExpr) string {
 }
 
 // The live steps' whole list of waits against liveWaits, and the few calls that make up a term of the sum. It reads every function of
-// the three files that hold them. What it cannot see: a wait inside a function of another package, past the ones the stack's start
+// the four files that hold them. What it cannot see: a wait inside a function of another package, past the ones the stack's start
 // allows, and a wait written some other way than the calls waitOf knows.
 func TestTheLiveStepsWaitOnWhatTheSumsCount(t *testing.T) {
 	fset := token.NewFileSet()
 	found := map[string]int{}
-	for _, file := range []string{"steps_live_test.go", "live_flows_test.go", "guard_live_test.go"} {
+	for _, file := range []string{"steps_live_test.go", "live_flows_test.go", "guard_live_test.go", "now_flows_test.go"} {
 		f, err := parser.ParseFile(fset, file, nil, 0)
 		if err != nil {
 			t.Fatal(err)

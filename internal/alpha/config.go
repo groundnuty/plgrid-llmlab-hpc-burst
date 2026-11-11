@@ -177,6 +177,9 @@ func ConfigFromEnv(getenv func(string) string, mine ...string) (cfg Config, skip
 		bad = append(bad, envMode+" must be direct, ssh or host-dialed")
 	}
 	// The script's shape and this package's row are one fact; a mismatch is a drift, not a setting.
+	if cfg.Profile != "" && cfg.Profile != row.ProfileName() {
+		bad = append(bad, "the script's profile differs from the row's")
+	}
 	if p := need(envPartition); p != "" && p != row.Partition {
 		bad = append(bad, "the script's partition differs from the row's")
 	}

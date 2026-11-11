@@ -86,3 +86,12 @@ func TestAlphaHeliosNoOverlap(t *testing.T) {
 func TestTunnelHour(t *testing.T) {
 	runRow(t, "tunnel", "tunnel-hour-helios", "tunnel-hour-athena")
 }
+
+// TestAlphaAthenaNowServe is row A of issue #376 on Athena plgrid-now under profiles/athena-now.yaml: the long stream
+// with attribution, the deployment ID under its tag, HBEP-8's events and engine gauges, one worker-rung restart, and
+// the requeue of the run's own job last.
+//
+//livecheck:alpha-athena-now-serve
+func TestAlphaAthenaNowServe(t *testing.T) {
+	runRow(t, "nowserve", "alpha-athena-now-serve")
+}

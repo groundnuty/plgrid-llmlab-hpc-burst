@@ -64,8 +64,40 @@ var dryCases = map[string][]dryCase{
 		{"duplicate-tag", "a tag names more than one job"},
 		{"extra-allocation", "exactly two Allocations"},
 	},
-	"tunnel-hour-helios": tunnelCases,
-	"tunnel-hour-athena": tunnelCases,
+	"tunnel-hour-helios":     tunnelCases,
+	"tunnel-hour-athena":     tunnelCases,
+	"alpha-athena-now-serve": nowServeCases,
+}
+
+// nowServeCases are row A's (issue #376; nowserve.go). The refused requeue on its own is NOT RUN, not a failure
+// (TestARefusedRequeueIsNotRunUnlessAnotherCheckFails); with a cut long stream beside it, the failure wins.
+var nowServeCases = []dryCase{
+	{"", ""},
+	{"cut", "the long stream was cut"},
+	{"short-stream", "did not deliver exactly the row's tokens"},
+	{"past-deadline", "did not end within the deployment's deadline"},
+	{"unattributed", "a response lacked its attribution headers"},
+	{"no-responses", "no response, so attribution is unchecked"},
+	{"no-restart", "0 restarts at the worker rung, want 1"},
+	{"two-restarts", "2 restarts at the worker rung, want 1"},
+	{"wrong-identity", "deployment-ID label or identity record is not its ID's display form"},
+	{"events-missing", "an expected one of HBEP-8's events was not there"},
+	{"events-unchecked", "HBEP-8's events were not checked"},
+	{"gauge-problem", "HBEP-8's engine gauges broke a rule"},
+	{"not-ready", "the Instance was not seen ready"},
+	{"untagged", "a job tag was not written down before its submission"},
+	{"wrong-partition", "a job ran on another partition than the row's"},
+	{"default-lease", "the deployment's leaseLimit is not the row's shortest lease"},
+	{"short-lease", "not longer than the lead an Instance needs (PartitionTooShort)"},
+	{"duplicate-tag", "a tag names more than one job"},
+	{"extra-allocation", "exactly one Allocation"},
+	{"requeue-refused-cut", "the long stream was cut"},
+	{"requeue-refused-no-drain", "was not seen draining the Instance alone"},
+	{"requeue-not-requeued", "did not end with reason Requeued"},
+	{"requeue-replacement", "the requeue was followed by a replacement"},
+	{"requeue-not-released", "release did not end the held job"},
+	{"requeue-no-drain", "was not seen draining the Instance alone"},
+	{"requeue-not-attempted", "the requeue of the run's own job was not attempted"},
 }
 
 var tunnelCases = []dryCase{
@@ -109,6 +141,8 @@ var tunnelCases = []dryCase{
 
 func familyOf(row string) string {
 	switch {
+	case strings.HasPrefix(row, "alpha-athena-now-serve"):
+		return "nowserve"
 	case strings.HasPrefix(row, "alpha-athena"):
 		return "handover"
 	case strings.HasPrefix(row, "alpha-helios"):
@@ -447,8 +481,8 @@ func neverStartedErrors() map[string]error {
 func stackRows(t *testing.T) []Row {
 	t.Helper()
 	out := Rows()
-	if len(out) != 4 {
-		t.Fatalf("the package runs %d stack rows, the table below was written for 4: add the new row's cases", len(out))
+	if len(out) != 5 {
+		t.Fatalf("the package runs %d stack rows, the table below was written for 5 (row A on plgrid-now added, #376): add the new row's cases", len(out))
 	}
 	return out
 }
@@ -457,8 +491,8 @@ func stackRows(t *testing.T) []Row {
 func allRows(t *testing.T) []Row {
 	t.Helper()
 	out := append(append(Rows(), AccountingRows()...), ReachRows()...)
-	if len(out) != 8 {
-		t.Fatalf("there are %d rows, the table below was written for 8: add the new row's cases", len(out))
+	if len(out) != 9 {
+		t.Fatalf("there are %d rows, the table below was written for 9 (row A on plgrid-now added, #376): add the new row's cases", len(out))
 	}
 	return out
 }

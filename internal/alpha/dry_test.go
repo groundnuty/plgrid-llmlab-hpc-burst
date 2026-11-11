@@ -43,6 +43,7 @@ const (
 var dryFaults = map[string][]string{
 	"handover":  {"cut", "no-stream", "two-restarts", "no-restart", "no-handover", "late-successor", "wrong-partition", "untagged", "unattributed", "adds-helios", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "no-responses", "pend-past-bound", "second-never-started", "second-never-started-late", "second-never-started-unknown", "second-never-started-cut", "second-never-started-late-cut", "second-never-started-no-restart", "second-never-started-not-known"},
 	"nooverlap": {"nocap", "nogap", "noslot", "cut", "no-stream", "late-submit", "untagged", "wrong-partition", "adds-athena", "default-lease", "short-lease", "no-release-when-idle", "duplicate-tag", "extra-allocation", "two-restarts", "no-restart", "pend-past-bound", "second-never-started", "second-never-started-late", "second-never-started-unknown", "second-never-started-cut", "second-never-started-late-cut", "second-never-started-no-restart", "second-never-started-not-known"},
+	"nowserve":  {"cut", "short-stream", "past-deadline", "unattributed", "no-responses", "no-restart", "two-restarts", "wrong-identity", "events-missing", "events-unchecked", "gauge-problem", "not-ready", "untagged", "wrong-partition", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "pend-past-bound", "requeue-refused", "requeue-refused-cut", "requeue-refused-no-drain", "requeue-not-requeued", "requeue-replacement", "requeue-not-released", "requeue-no-drain", "requeue-not-attempted", "warm-no-image", "warm-file-missing", "warm-other-digest", "warm-other-file", "warm-unread"},
 	"tunnel":    {"short", "cut", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition", "adds-other-cluster", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "past-deadline", "past-drain", "no-drain-start", "stream-cut-error", "reconnect", "disconnected", "sparse-samples", "late-first-sample", "no-concurrency", "slow-streams", "no-idle-gap", "no-long-stream", "no-back-to-back", "no-load-rate", "slow-start", "no-large", "large-apart", "response-overlap", "no-upload-rate", "no-download-rate", "upload-not-under-load", "pend-past-bound"},
 }
 
@@ -99,7 +100,7 @@ func newDrySteps(t *testing.T, cfg Config, family string) *drySteps {
 	}
 	plat := fakeslurm.New(clock, fcfg)
 	d := &drySteps{t: t, cfg: cfg, clock: clock, plat: plat, root: root, untaggedAt: 2}
-	if family == "tunnel" {
+	if family == "tunnel" || family == "nowserve" {
 		d.untaggedAt = 1
 	}
 	d.sess = plat.Login(fakeslurm.Login{User: "example-user", Env: map[string]string{"HOME": home, "SCRATCH": scratch}})
@@ -149,7 +150,7 @@ func (d *drySteps) deployment() DeploymentSpec {
 		dep.LeaseLimit = 2 * dep.LeaseLimit
 	case "short-lease":
 		// a lease at the lead: PartitionTooShort on the real controller, which would make no Allocation
-		dep.LeaseLimit = Lead()
+		dep.LeaseLimit = d.cfg.Row.Clock().Lead()
 	case "no-release-when-idle":
 		dep.ReleaseWhenIdle, dep.IdleLimit = false, 0
 	}
@@ -329,7 +330,7 @@ func (d *drySteps) pendPastBound(p Plan) error {
 		return err
 	}
 	p.Logf(pendCancelled, d.now().Sub(began))
-	return &NotStartedError{Bound: bound, PastEnd: pastEnd}
+	return &NotStartedError{Bound: bound, PastEnd: pastEnd, StartWait: p.Row.StartWait > 0 && !pastEnd}
 }
 
 // cancelTag cancels the live jobs of a tag, as the live scenario's Close does, and waits until the cluster says they ended.
@@ -752,6 +753,162 @@ func (d *drySteps) TunnelHour(_ context.Context, p Plan) (TunnelHourObs, error) 
 		obs.DrainStart = time.Time{}
 	}
 	return obs, nil
+}
+
+// NowServe is row A over the fake cluster (issue #376): one job, run on the manual clock; what the stack would show is
+// stood in for, and the requeue is the fake's own RequeueHold of the run's job, then the cancel by the job's tag that
+// the failed Allocation's release makes (internal/providerctl/delete.go, toCancel), with the cluster's record read
+// for both. Each fault departs from the healthy run in one way that must fail the row, or, for requeue-refused, end
+// it NOT RUN.
+func (d *drySteps) NowServe(_ context.Context, p Plan) (NowServeObs, error) {
+	if d.fault("pend-past-bound") {
+		return NowServeObs{}, d.pendPastBound(p)
+	}
+	tm := p.Row.Clock()
+	uid := "00000000-0000-4000-8000-" + fmt.Sprintf("%012d", len(d.tags)+1)
+	tag := d.tag(p, "now")
+	n, id := d.submit(tag, d.partitionFor(true), d.cfg.Row.QOS)
+	j := d.running(id)
+	started := *j.StartTime
+	d.extras(p, tag)
+	d.tick(8 * time.Minute) // a warm start, inside the profile's 12 minutes
+	ready := d.now()
+	drain := started.Add(d.deployment().LeaseLimit - DrainWindow(tm.MaxRequestDuration, tm.DrainMargin, 0))
+	length := 4 * time.Minute
+	if d.fault("past-deadline") {
+		length = tm.MaxRequestDuration + time.Second
+	}
+	stream := Stream{ID: "long", Opened: ready.Add(time.Minute), Ended: ready.Add(time.Minute + length), Complete: true, Tokens: tm.ServeTokens}
+	switch {
+	case d.fault("cut"), d.fault("requeue-refused-cut"):
+		stream.Complete, stream.CutBy = false, "tunnel"
+	case d.fault("short-stream"):
+		stream.Tokens = tm.ServeTokens - 1
+	}
+	full := strings.Repeat("0123456789abcdef", 4)
+	identity := IdentityObs{Read: true, Tag: HBEP3Tag("dry", "now", uid), JobName: j.Name, ExternalName: tag, ObservedTag: tag,
+		DeploymentID: full, DisplayLabel: full[:12], IdentityRecord: "id-" + full[:12], RecordDisplayLabel: full[:12], RecordKind: v1alpha1.RecordIdentity}
+	if d.fault("wrong-identity") {
+		identity.DisplayLabel = full[1:13]
+	}
+	obs := NowServeObs{Deployment: d.deployment(), ReadyAt: ready, DrainStart: drain, Stream: stream, Rate: 30, Identity: identity,
+		Events: ObsCheck{Checked: true}, Gauges: ObsCheck{Checked: true}, WorkerRestarts: 1, Responses: 12, Attributed: 12}
+	switch {
+	case d.fault("not-ready"):
+		obs.ReadyAt = time.Time{}
+	case d.fault("unattributed"):
+		obs.Attributed = 11
+	case d.fault("no-responses"):
+		obs.Responses, obs.Attributed = 0, 0
+	case d.fault("no-restart"):
+		obs.WorkerRestarts = 0
+	case d.fault("two-restarts"):
+		obs.WorkerRestarts = 2
+	case d.fault("events-missing"):
+		obs.Events.Missing = []string{"failing/Requeued regarding Instance dry/now"}
+	case d.fault("events-unchecked"):
+		obs.Events.Checked = false
+	case d.fault("gauge-problem"):
+		obs.Gauges.Problems = []string{"hpcburst_instance_generation_tokens_total: 0 series and 1 unknown samples, want it known"}
+	}
+	obs.Warm = d.warm()
+	d.tick(20 * time.Minute) // the worker restart and the rest, before the drain start
+	obs.Requeue, obs.Tags = d.requeue(p, n, id, tag), append([]string(nil), d.tags...)
+	if !obs.Requeue.Attempted || obs.Requeue.Accepted {
+		return obs, nil
+	}
+	return obs, &RequeueRefusedError{Reason: obs.Requeue.Refusal}
+}
+
+// dryImageDigest and dryFiles are the dry run's image and the files its identity record lists.
+var (
+	dryImageDigest = "sha256:" + strings.Repeat("5e", 32)
+	dryFiles       = []string{"config.json", "model.safetensors", "tokenizer.json"}
+)
+
+// dryAgentLog is an agent's log of a warm start, written from the reason words (StagedAlreadyVerified and the rest):
+// slog's text form for the image, the stager's plain form for the files, and lines of other work around them. A fault
+// takes one line away or names another digest or file in it.
+func (d *drySteps) dryAgentLog() string {
+	digest := dryImageDigest
+	if d.fault("warm-other-digest") {
+		digest = "sha256:" + strings.Repeat("6f", 32)
+	}
+	var b strings.Builder
+	b.WriteString("time=2026-11-02T09:00:01Z level=INFO msg=\"allocation agent starting\" version=dry\n")
+	if !d.fault("warm-no-image") {
+		fmt.Fprintf(&b, "time=2026-11-02T09:00:02Z level=INFO msg=\"stage: image %s\" digest=%s\n", StagedAlreadyVerified, digest)
+	}
+	for i, f := range dryFiles {
+		if d.fault("warm-file-missing") && i == 1 {
+			continue
+		}
+		if d.fault("warm-other-file") && i == 1 {
+			f = "model.safetensors.index.json" // another file, with the listed one's name inside it
+		}
+		fmt.Fprintf(&b, "stage: checkpoint file %s %s\n", f, StagedPresentMatching)
+	}
+	b.WriteString("time=2026-11-02T09:00:05Z level=INFO msg=\"worker started\"\n")
+	return b.String()
+}
+
+// warm is the dry run's warm start as the live steps read it: the image digest, the record's files and the agent's log.
+func (d *drySteps) warm() WarmObs {
+	w := WarmObs{ImageDigest: dryImageDigest, Files: append([]string(nil), dryFiles...)}
+	if d.fault("warm-unread") {
+		return w
+	}
+	w.LogRead, w.Lines = true, ParseAgentStagingLines([]byte(d.dryAgentLog()))
+	return w
+}
+
+// requeue is row A's last step over the fake cluster.
+func (d *drySteps) requeue(p Plan, n int, id, tag string) RequeueObs {
+	ro := RequeueObs{Attempted: !d.fault("requeue-not-attempted"), DrainingSeen: !d.fault("requeue-no-drain") && !d.fault("requeue-refused-no-drain")}
+	if !ro.Attempted {
+		d.end(n, id)
+		return ro
+	}
+	if strings.HasPrefix(d.cfg.DryFault, "requeue-refused") {
+		// The scheduler refused: the job runs on until the drain ends it.
+		ro.Refusal = refusalDisabled
+		d.tick(time.Minute)
+		d.end(n, id)
+		return ro
+	}
+	ro.Accepted = true
+	jid, err := strconv.Atoi(id)
+	if err != nil {
+		d.t.Fatal(err)
+	}
+	if err := d.plat.RequeueHold(jid); err != nil {
+		d.t.Fatalf("the fake's requeue: %v", err)
+	}
+	d.tick(10 * time.Second)
+	ro.EndReason, ro.AllocationReleased = v1alpha1.ReasonRequeued, true
+	if d.fault("requeue-not-requeued") {
+		ro.EndReason = v1alpha1.ReasonDrained
+	}
+	if d.fault("requeue-not-released") {
+		ro.AllocationReleased = false
+	} else if err := d.cancelTag(tag); err != nil {
+		d.t.Fatal(err)
+	}
+	jobs, err := dryLedger{d}.Jobs(context.Background(), []string{tag})
+	if err != nil {
+		d.t.Fatal(err)
+	}
+	for _, j := range jobs {
+		if j.ID == id {
+			ro.JobEnded, ro.JobRequeued = j.EndTime != nil, provider.AccountingRequeued(j)
+		}
+	}
+	if d.fault("requeue-replacement") {
+		// A replacement Allocation's job, which the deployment's end must have kept from being made.
+		d.submit(d.tag(p, "replacement"), d.cfg.Row.Partition, d.cfg.Row.QOS)
+		ro.NewAllocations, ro.NewInstances = 1, 1
+	}
+	return ro
 }
 
 func (d *drySteps) out(n int) string { return filepath.Join(d.root, fmt.Sprintf("job-%d.out", n)) }

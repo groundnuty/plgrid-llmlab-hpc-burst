@@ -168,28 +168,10 @@ func (r *liveRun) current(in v1alpha1.Instance) v1alpha1.Instance {
 // its ID is our Allocation's (and the Instance's), the Allocation's tag is
 // one the run wrote down, and the queue's --me listing shows that ID running
 // under that tag. Anything else fails the row (the science agent's condition 1).
+// It is ourJobFor (now_flows_test.go) for the worker fault.
 func (r *liveRun) ourJob(ctx context.Context, in v1alpha1.Instance) string {
-	t := r.t
-	t.Helper()
-	var a v1alpha1.Allocation
-	cctx, cancel := stack.CallCtx(t)
-	err := r.c.Get(cctx, client.ObjectKey{Name: in.Spec.AllocationRef.Name, Namespace: in.Namespace}, &a)
-	cancel()
-	if err != nil {
-		t.Fatalf("worker fault: the Instance's Allocation: %v", err)
-	}
-	id, tag := a.Status.AtProvider.JobID, v1alpha1.JobTag(a.Namespace, a.Name, a.UID)
-	if id == "" || id != in.Status.JobID {
-		t.Fatal("worker fault: the Instance's job is not its Allocation's")
-	}
-	if !r.tags.Tagged(tag) {
-		t.Fatal("worker fault: the Allocation's tag is not one the run wrote down")
-	}
-	j, listed, err := r.batch.QueueJob(ctx, id)
-	if err != nil || !listed || j.Name != tag || j.Phase != v1alpha1.AllocationRunning {
-		t.Fatalf("worker fault: the queue's --me listing does not show the run's job running under its tag (listed %v, phase %s, read error %v)", listed, j.Phase, err != nil)
-	}
-	return id
+	r.t.Helper()
+	return r.ourJobFor(ctx, in, "worker fault")
 }
 
 // workerRestart is the worker-rung fault: it kills the engine of the

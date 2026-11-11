@@ -23,7 +23,14 @@ import (
 // A FAIL means the property the row tests was absent, and a queue wait tests nothing. The row is a
 // parameter so that no rule by row can come back unseen: TestEveryRowEndsNotRunWhenItsJobNeverStarts
 // asks it of every row in Rows.
-func NotRun(_ Row, err error) bool { return neverStarted(err) }
+//
+// Two NOT RUNs are not a job that never started, both row A's (issue #376): its requeue that the
+// scheduler refused (ErrRequeueRefused; the science agent's ruling Q5), where the requeue was never
+// put to the test, and its warm start that the agent's own log did not show (ErrWarmUnshown; the
+// ruling 1(b)). Run has judged the rest of that run first, and returns either only when nothing failed.
+func NotRun(_ Row, err error) bool {
+	return neverStarted(err) || errors.Is(err, ErrRequeueRefused) || errors.Is(err, ErrWarmUnshown)
+}
 
 // neverStarted is whether err says a job of the run never started within a bound.
 func neverStarted(err error) bool {
@@ -35,6 +42,19 @@ func neverStarted(err error) bool {
 // when it was the deployment's first end, which hack/live-checks.sh reads off the marker to name
 // that bound in its line (the wait in the queue otherwise); any other gives pendingMax.
 func NotRunNote(row Row, pendingMax time.Duration, err error) string {
+	if errors.Is(err, ErrRequeueRefused) || errors.Is(err, ErrWarmUnshown) {
+		var why []string
+		if errors.Is(err, ErrRequeueRefused) {
+			why = append(why, fmt.Sprintf("%s (%s)", requeueRefusedWords, refusalOf(err)))
+		}
+		var w *WarmUnshownError
+		if errors.As(err, &w) {
+			why = append(why, fmt.Sprintf("%s (%s)", warmUnshownWords, w.counts()))
+		} else if errors.Is(err, ErrWarmUnshown) {
+			why = append(why, warmUnshownWords)
+		}
+		return fmt.Sprintf("%s: %s; the run's other checks passed; this run's jobs were cancelled by tag\n", row.Name, strings.Join(why, "; "))
+	}
 	if errors.Is(err, ErrSecondNotStarted) {
 		return fmt.Sprintf("%s: %s; ReplacementLate for its deployment: %s; this run's jobs were cancelled by tag\n", row.Name, secondNotStartedWords, lateOf(err))
 	}
@@ -42,6 +62,9 @@ func NotRunNote(row Row, pendingMax time.Duration, err error) string {
 	if errors.As(err, &ns) {
 		if ns.PastEnd {
 			return fmt.Sprintf("%s: a job was still pending after %s, a minute before the deployment's first end; this run's jobs were cancelled by tag\n", row.Name, ns.Bound)
+		}
+		if ns.StartWait {
+			return fmt.Sprintf("%s: a job did not start within the start wait of %s from the deployment's creation; this run's jobs were cancelled by tag\n", row.Name, ns.Bound)
 		}
 		pendingMax = ns.Bound
 	}
@@ -57,8 +80,11 @@ func lateOf(err error) string {
 	return LateUnknown
 }
 
-// stopsTheRun is whether a scenario's error leaves nothing to judge. ErrSecondNotStarted leaves the first job's part.
-func stopsTheRun(err error) bool { return err != nil && !errors.Is(err, ErrSecondNotStarted) }
+// stopsTheRun is whether a scenario's error leaves nothing to judge. ErrSecondNotStarted leaves the first job's part, and
+// ErrRequeueRefused everything before the requeue.
+func stopsTheRun(err error) bool {
+	return err != nil && !errors.Is(err, ErrSecondNotStarted) && !errors.Is(err, ErrRequeueRefused)
+}
 
 // secondNotStartedWords say what happened to a run of two jobs, in the marker, which hack/live-checks.sh reads for
 // them, and in the text to post of a run whose first job's part failed.
@@ -73,7 +99,7 @@ const secondNotStartedWords = "the first job ran and the second never started"
 func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(string, ...any)) (failures []string, err error) {
 	defer func() {
 		if cerr := st.Close(ctx); cerr != nil {
-			if neverStarted(err) {
+			if NotRun(cfg.Row, err) {
 				// A close that failed may have left a job: that is a failure, never a NOT RUN.
 				err = fmt.Errorf("closing the steps after a job that did not start: %v (%v)", cerr, err)
 				return
@@ -93,6 +119,9 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 		summary func([]string, []provider.Job) string
 		// second is the scenario's ErrSecondNotStarted: what it saw of the first job is judged, and decides the end.
 		second error
+		// refused is row A's NOT RUN (nowServeNotRun: a refused requeue, a warm start the agent's log did not show): the
+		// rest of the run is judged, recorded and posted with the reason, and with no failure the run is NOT RUN.
+		refused error
 	)
 	switch {
 	case strings.HasPrefix(cfg.Row.Name, "alpha-athena-handover"):
@@ -131,6 +160,18 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 		tags, obs = o.Tags, o
 		judge = func(j []provider.Job) []string { return VerifyTunnelHour(cfg.Row, o, j) }
 		summary = func(f []string, _ []provider.Job) string { return tunnelHourPost(cfg.Row, o, f) }
+	case strings.HasPrefix(cfg.Row.Name, "alpha-athena-now-serve"):
+		o, serr := st.NowServe(ctx, plan)
+		if stopsTheRun(serr) || errors.Is(serr, ErrSecondNotStarted) {
+			return nil, serr
+		}
+		if serr != nil && (!o.Requeue.Attempted || o.Requeue.Accepted) {
+			return nil, fmt.Errorf("the scenario says the requeue was refused, and its observation does not: %v", serr)
+		}
+		refused = nowServeNotRun(o, serr)
+		tags, obs = o.Tags, o
+		judge = func(j []provider.Job) []string { return VerifyNowServe(cfg.Row, o, j) }
+		summary = func(f []string, _ []provider.Job) string { return nowServePost(cfg.Row, o, f) }
 	default:
 		return nil, fmt.Errorf("row %q is not one this package runs", cfg.Row.Name)
 	}
@@ -154,8 +195,11 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 		return nil, second // the job never started and nothing else failed: no record and no text to post
 	}
 	verdict := "pass"
-	if len(failures) > 0 {
+	switch {
+	case len(failures) > 0:
 		verdict = "fail"
+	case refused != nil:
+		verdict = "not run"
 	}
 	if serr := rec.SaveJSON(RecordFile, map[string]any{
 		"row": cfg.Row.Name, "mode": cfg.Mode(), "frontLabel": cfg.FrontLabel, "verdict": verdict, "failures": failures,
@@ -169,6 +213,9 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 	}
 	if serr := rec.SaveText(PostsFile, InsertFrontLine(post, cfg.FrontLabel)); serr != nil {
 		return failures, fmt.Errorf("the text to post could not be written: %w", serr)
+	}
+	if refused != nil && len(failures) == 0 {
+		return nil, refused // the requeue was never put to the test and nothing else failed: NOT RUN, its reason posted
 	}
 	return failures, nil
 }
