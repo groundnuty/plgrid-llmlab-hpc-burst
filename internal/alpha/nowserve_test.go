@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // The plgrid-now rows run under profiles/athena-now.yaml as shipped (Q1): their clock is that file's margins, read from
@@ -281,62 +283,99 @@ func TestTheDeploymentIDUnderItsTagIsCheckedAsHBEP3Says(t *testing.T) {
 	}
 }
 
-// The warm start is shown only by the agent's own lines (the ruling 1(b) on #376, relayed with #392's reason words): the
-// image by "already staged and verified" or "staged by another Allocation" naming its digest, and every file the identity
-// record lists by "present and matching" naming it. The fixtures are written from the reason words; a line that names
-// another digest or another file shows nothing.
+// The warm start is shown only by the agent's own lines (the ruling 1(b) on #376 and its conditions, relayed with #393's
+// reason words): the whole log of the job's first execution, opening with the agent's start line (restartCount 0), its
+// first staging the only attempt, its one image line naming the digest, and a file line naming each file the identity
+// record lists less what the stager skips (a list from outside the log). The fixtures are written from the constants;
+// warmpin_test.go pins those to the agent's and the stager's own.
 func TestTheWarmStartIsShownOnlyByTheAgentsOwnLines(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("ab", 32)
-	files := []string{"config.json", "model.safetensors"}
-	// The stager's own form (internal/agent/stage, PR #393; warmpin_test.go pins it).
+	record := []agentapi.FileDigest{{Path: "config.json"}, {Path: "model.safetensors"}, {Path: "original/consolidated.pth"}}
+	skipLast := func(files []agentapi.FileDigest, _ string) []bool {
+		out := make([]bool, len(files))
+		out[len(out)-1] = true
+		return out
+	}
+	files, skipped := ExpectedWarmFiles(record, "", skipLast)
+	if want := []string{"config.json", "model.safetensors"}; !slices.Equal(files, want) || !slices.Equal(skipped, []string{"original/consolidated.pth"}) {
+		t.Fatalf("the expected files are %q, skipped %q; want %q and the last", files, skipped, want)
+	}
+	pre := `time=2026-11-11T10:00:00Z level=INFO msg="host-dialed: listening for the relays" control=1 serving=2`
+	start := func(n int) string {
+		return fmt.Sprintf("time=2026-11-11T10:00:01Z level=INFO msg=%q version=x mode=host-dialed cpuArch=x86_64 gpus=1 restartCount=%d", AgentStartMsg, n)
+	}
+	build := fmt.Sprintf("time=2026-11-11T10:00:02Z level=INFO msg=%q tmpDir=$TMPDIR", AgentBuildMsg)
+	failed := fmt.Sprintf("time=2026-11-11T10:00:02Z level=WARN msg=%q uid=u generation=1 err=x", AgentStageFailMsg)
+	worker := fmt.Sprintf("time=2026-11-11T10:00:09Z level=INFO msg=%q worker=worker-0 pid=1", AgentWorkerMsg)
+	// The stager's own form (internal/agent/stage, PR #393).
 	imageLine := func(reason, d string) string { return "stage: image " + d + ": " + reason }
 	fileLine := func(f string) string { return "stage: checkpoint file " + f + ": " + StagedPresentMatching }
-	shown := func(lines ...string) *WarmUnshownError {
-		return warmStartShownByTheAgentsOwnLog(WarmObs{LogRead: true, ImageDigest: digest, Files: files, Lines: ParseAgentStagingLines([]byte(strings.Join(lines, "\n")))})
+	shownIn := func(files []string, lines ...string) *WarmUnshownError {
+		return warmStartShownByTheAgentsOwnLog(WarmObs{LogRead: true, ImageDigest: digest, Files: files, Log: ParseAgentLog([]byte(strings.Join(lines, "\n") + "\n"))})
 	}
-	if e := shown(imageLine(StagedAlreadyVerified, digest), fileLine("config.json"), fileLine("model.safetensors")); e != nil {
-		t.Errorf("the warm start with every line is not shown: %v", e)
+	shown := func(lines ...string) *WarmUnshownError { return shownIn(files, lines...) }
+	warmLines := []string{imageLine(StagedAlreadyVerified, digest), fileLine("config.json"), fileLine("model.safetensors")}
+	plain := append(append([]string{pre, start(0)}, warmLines...), worker)
+	if e := shown(plain...); e != nil {
+		t.Fatalf("the plain warm log, the skipped file with no line, is not shown: %+v", e)
 	}
-	if e := shown(imageLine(StagedByAnother, digest), fileLine("model.safetensors"), fileLine("config.json")); e != nil {
-		t.Errorf("an image staged by another Allocation is not shown warm: %v", e)
+	if e := shown(start(0), imageLine(StagedByAnother, digest), fileLine("model.safetensors"), fileLine("config.json"), worker); e != nil {
+		t.Errorf("an image staged by another Allocation is not shown warm: %+v", e)
 	}
-	// The digest may stand without its prefix, as a stager line that names the hex alone would.
-	if e := shown("stage: image "+strings.TrimPrefix(digest, "sha256:")+": "+StagedAlreadyVerified, fileLine("config.json"), fileLine("model.safetensors")); e != nil {
-		t.Errorf("the image named by its hex alone is not shown warm: %v", e)
+	if e := shown(start(0), "stage: image "+strings.TrimPrefix(digest, "sha256:")+": "+StagedAlreadyVerified, fileLine("config.json"), fileLine("model.safetensors"), worker); e != nil {
+		t.Errorf("the image named by its hex alone is not shown warm: %+v", e)
 	}
-	if e := shown("time=2026-11-11T10:00:00Z level=INFO msg=\"stage: image "+StagedAlreadyVerified+"\" digest="+digest, fileLine("config.json"), fileLine("model.safetensors")); e != nil {
-		t.Errorf("slog's text form of the image line is not read: %v", e)
+	// What comes after the first worker's start is not the first staging's: a rung-2 restage's lines, or a second
+	// execution's, do not count, either way.
+	if e := shown(append(slices.Clone(plain), imageLine(StagedAlreadyVerified, digest), build, start(1))...); e != nil {
+		t.Errorf("lines after the first worker's start changed the verdict: %+v", e)
 	}
 	for name, c := range map[string]struct {
-		lines                 []string
-		wantImage             bool
-		wantFiles, wantFiles2 int
+		lines []string
+		files []string // nil for the expected set
+		check func(*WarmUnshownError) bool
 	}{
-		"no image line":                  {[]string{fileLine("config.json"), fileLine("model.safetensors")}, false, 2, 2},
-		"one file missing":               {[]string{imageLine(StagedAlreadyVerified, digest), fileLine("config.json")}, true, 1, 2},
-		"another digest":                 {[]string{imageLine(StagedAlreadyVerified, "sha256:"+strings.Repeat("cd", 32)), fileLine("config.json"), fileLine("model.safetensors")}, false, 2, 2},
-		"another file":                   {[]string{imageLine(StagedAlreadyVerified, digest), fileLine("config.json"), fileLine("model.safetensors.index.json")}, true, 1, 2},
-		"the image's digest as a file's": {[]string{fileLine(digest), fileLine("config.json"), fileLine("model.safetensors")}, false, 2, 2},
-		"slog's form, another digest":    {[]string{"time=2026-11-11T10:00:00Z level=INFO msg=\"stage: image " + StagedAlreadyVerified + "\" digest=sha256:" + strings.Repeat("cd", 32), fileLine("config.json"), fileLine("model.safetensors")}, false, 2, 2},
-		"a build, not a reuse":           {[]string{"time=2026-11-11T10:00:00Z level=INFO msg=\"building image\" digest=" + digest, fileLine("config.json"), fileLine("model.safetensors")}, false, 2, 2},
+		"a cold build, then a retry's warm lines":    {[]string{start(0), build, imageLine(StagedAlreadyVerified, digest), fileLine("config.json"), fileLine("model.safetensors"), worker}, nil, func(e *WarmUnshownError) bool { return e.Retried }},
+		"a failed attempt, then a retry's":           {[]string{start(0), failed, imageLine(StagedAlreadyVerified, digest), fileLine("config.json"), fileLine("model.safetensors"), worker}, nil, func(e *WarmUnshownError) bool { return e.Retried }},
+		"a silent cancel, then a retry (two images)": {[]string{start(0), imageLine(StagedAlreadyVerified, digest), imageLine(StagedAlreadyVerified, digest), fileLine("config.json"), fileLine("model.safetensors"), worker}, nil, func(e *WarmUnshownError) bool { return e.Retried }},
+		"no start line":                            {append([]string{pre}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
+		"a start line with restartCount 1":         {append([]string{start(1)}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
+		"a line nobody accounted for before it":    {append([]string{"slurmstepd: something", start(0)}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
+		"a read that ends before the first worker": {append([]string{start(0)}, warmLines...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
+		"no image line":                            {[]string{start(0), fileLine("config.json"), fileLine("model.safetensors"), worker}, nil, func(e *WarmUnshownError) bool { return !e.ImageShown && e.FilesShown == 2 }},
+		"a checkpoint file missing":                {[]string{start(0), imageLine(StagedAlreadyVerified, digest), fileLine("config.json"), worker}, nil, func(e *WarmUnshownError) bool { return e.ImageShown && e.FilesShown == 1 && e.FilesOf == 2 }},
+		"another digest":                           {[]string{start(0), imageLine(StagedAlreadyVerified, "sha256:"+strings.Repeat("cd", 32)), fileLine("config.json"), fileLine("model.safetensors"), worker}, nil, func(e *WarmUnshownError) bool { return !e.ImageShown }},
+		"another file":                             {[]string{start(0), imageLine(StagedAlreadyVerified, digest), fileLine("config.json"), fileLine("model.safetensors.index.json"), worker}, nil, func(e *WarmUnshownError) bool { return e.FilesShown == 1 }},
+		"a build, not a reuse":                     {[]string{start(0), build, fileLine("config.json"), fileLine("model.safetensors"), worker}, nil, func(e *WarmUnshownError) bool { return e.Retried && !e.ImageShown }},
+		// "every" is the record's list less the skipped files, never the files the log mentions: a log that names only
+		// config.json matches every file it mentions, and not the list.
+		"every file from the log's own mentions": {[]string{start(0), imageLine(StagedAlreadyVerified, digest), fileLine("config.json"), worker}, nil, func(e *WarmUnshownError) bool { return e.FilesOf == 2 && e.FilesShown == 1 }},
+		"a record that lists no file":            {plain, []string{}, func(e *WarmUnshownError) bool { return e.FilesOf == 0 }},
 	} {
-		e := shown(c.lines...)
+		fs := files
+		if c.files != nil {
+			fs = c.files
+		}
+		e := shownIn(fs, c.lines...)
 		if e == nil {
 			t.Errorf("%s: the warm start is shown", name)
 			continue
 		}
-		if e.ImageShown != c.wantImage || e.FilesShown != c.wantFiles || e.FilesOf != c.wantFiles2 {
-			t.Errorf("%s: %+v, want the image %t and %d of %d files", name, e, c.wantImage, c.wantFiles, c.wantFiles2)
+		if !c.check(e) {
+			t.Errorf("%s: %+v, not the reason expected", name, e)
 		}
 	}
 	if e := warmStartShownByTheAgentsOwnLog(WarmObs{ImageDigest: digest, Files: files}); e == nil || e.LogRead {
 		t.Errorf("a log that was not read shows the warm start: %+v", e)
 	}
-	if e := warmStartShownByTheAgentsOwnLog(WarmObs{LogRead: true, ImageDigest: digest, Lines: ParseAgentStagingLines([]byte(imageLine(StagedAlreadyVerified, digest)))}); e == nil {
-		t.Error("a record that lists no file shows a warm checkpoint")
+	// Without the rule nothing is skipped, so the skipped file's missing line makes the plain log NOT RUN, never a pass.
+	if all, _ := ExpectedWarmFiles(record, "", nil); shownIn(all, plain...) == nil {
+		t.Error("with no skip rule, a file with no line still passes")
 	}
-	if c := (&WarmUnshownError{LogRead: true, FilesShown: 1, FilesOf: 2}).counts(); regexp.MustCompile(`[/]|sha256|safetensors`).MatchString(c) {
-		t.Errorf("the counts %q name a path, a digest or a file", c)
+	for _, e := range []*WarmUnshownError{{}, {LogRead: true, NotWhole: true}, {LogRead: true, Retried: true}, {LogRead: true, FilesShown: 1, FilesOf: 2}} {
+		if c := e.counts(); regexp.MustCompile(`[/]|sha256|safetensors`).MatchString(c) {
+			t.Errorf("the counts %q name a path, a digest or a file", c)
+		}
 	}
 }
 
@@ -345,7 +384,8 @@ func TestTheWarmStartIsShownOnlyByTheAgentsOwnLines(t *testing.T) {
 // which says NOT RUN with the counts and no name; with a failure beside it, the failure wins.
 func TestAWarmStartTheAgentsLogDidNotShowIsNotRun(t *testing.T) {
 	row := rowOf("alpha-athena-now-serve")
-	for _, fault := range []string{"warm-no-image", "warm-file-missing", "warm-other-digest", "warm-other-file", "warm-unread"} {
+	for _, fault := range []string{"warm-no-image", "warm-file-missing", "warm-other-digest", "warm-other-file", "warm-unread", "warm-cold-then-retry",
+		"warm-failed-then-retry", "warm-cancel-then-retry", "warm-no-start", "warm-restarted", "warm-unknown-first", "warm-truncated"} {
 		t.Run(fault, func(t *testing.T) {
 			cfg := Config{Row: row, Dry: true, DryFault: fault, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
 			rec, err := NewRecorder(cfg.Out)
@@ -380,7 +420,7 @@ func TestAWarmStartTheAgentsLogDidNotShowIsNotRun(t *testing.T) {
 		if serr != nil {
 			t.Fatal(serr)
 		}
-		o.Warm.Lines = nil
+		o.Warm.Log = nil
 		failures, err := Run(context.Background(), cfg, fixedNowServe{drySteps: st, o: o}, rec, t.Logf)
 		if err != nil || len(failures) == 0 || !strings.Contains(Summary(failures), "the long stream was cut") {
 			t.Fatalf("failures %v, err %v; want the cut's FAIL to outrank the warm start's NOT RUN", failures, err)

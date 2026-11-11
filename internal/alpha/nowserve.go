@@ -43,6 +43,7 @@ import (
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -474,18 +475,57 @@ const (
 	StagedPresentMatching = "present and matching"
 )
 
+// The agent's own messages the warm start's check reads, each the msg of one slog line of the agent (pinned to their
+// call sites in warmpin_test.go): its start (cmd/hb-agent/main.go), an image build and a failed staging attempt
+// (internal/agent/converge.go), and a worker's start (internal/agent/workers.go), which comes only once the
+// Instance's staging is done.
+const (
+	AgentStartMsg      = "allocation agent starting"
+	AgentBuildMsg      = "building image"
+	AgentStageFailMsg  = "staging failed"
+	AgentWorkerMsg     = "worker started"
+	agentRestartKey    = "restartCount"
+	agentPreStartLevel = "INFO|WARN"
+)
+
+// AgentPreStartMsgs are the agent's own lines that may come before its start line in the job's standard error, which is
+// the file row A reads: the bootstrap writes nothing there on a run that reaches the agent (internal/slurm, bootstrap),
+// so the file opens with the agent's own lines. Each is a step of cmd/hb-agent's main before its start line that does
+// not stop the agent (an Error line there is followed by its exit), or a goroutine of the host-dialed listener it starts
+// before it (internal/hostdial, job.go), whose relays may connect before the start line is written. Nothing else may
+// come first: a log that does not open with the agent's first start is not the whole log of the first execution, and
+// shows no warm start (the science agent's condition of 11 Nov 2026 on #376). warmpin_test.go pins each to its call site.
+var AgentPreStartMsgs = []string{
+	"cannot mark inherited file descriptors close-on-exec",
+	"no GPU list: registering without one",
+	"host-dialed: listening for the relays",
+	"the relay socket's directory is under the fallback, not TMPDIR, and outlives a killed agent",
+	"relay session up",
+	"relay session ended",
+	"a relay was refused as superseded",
+	"a relay connection was refused",
+	"a relay's hello was refused",
+	"a connection found no relay session and is closed",
+}
+
 // ErrWarmUnshown is row A's NOT RUN when the agent's own log of its job does not show the warm start (the science
-// agent's ruling 1(b) on #376): the image staged already, by a line naming its digest, and every checkpoint file the
-// deployment's identity record lists present and matching, by a line naming that file. A warm claim without that
-// evidence is NOT RUN, never a pass: the row starts warm only because of the pre-staging row (PR #385's profile, a
-// 12-minute startTimeout), and a cold start that happened to fit would prove nothing about it.
+// agent's ruling 1(b) on #376): the image staged already and every checkpoint file present and matching, by the
+// stager's own lines, in the job's first staging attempt. A warm claim without that evidence is NOT RUN, never a pass:
+// the row starts warm only because of the pre-staging row (PR #385's profile, a 12-minute startTimeout), and a cold
+// start that happened to fit would prove nothing about it.
 var ErrWarmUnshown = errors.New("the agent's own log did not show the warm start")
 
-// WarmUnshownError is ErrWarmUnshown with what was missing, in counts: the post and the marker carry no name or path.
+// WarmUnshownError is ErrWarmUnshown with what was missing, in fixed words and counts: the post and the marker carry
+// no name or path.
 type WarmUnshownError struct {
+	LogRead bool
+	// NotWhole: the read does not open with the agent's first start (restartCount 0, after its pre-start lines only),
+	// or does not reach the end of its first staging.
+	NotWhole bool
+	// Retried: the first staging was not the only attempt (an image build, a failed attempt, or a second image line).
+	Retried             bool
 	ImageShown          bool
 	FilesShown, FilesOf int
-	LogRead             bool
 }
 
 func (e *WarmUnshownError) Error() string {
@@ -493,8 +533,13 @@ func (e *WarmUnshownError) Error() string {
 }
 
 func (e *WarmUnshownError) counts() string {
-	if !e.LogRead {
+	switch {
+	case !e.LogRead:
 		return "the agent's log of the job could not be read"
+	case e.NotWhole:
+		return "the log read is not the whole of the agent's first start to its first worker"
+	case e.Retried:
+		return "the first staging was built, failed or tried again: not the first attempt's evidence"
 	}
 	return fmt.Sprintf("the image %s: %t; checkpoint files %s: %d of %d", StagedAlreadyVerified, e.ImageShown, StagedPresentMatching, e.FilesShown, e.FilesOf)
 }
@@ -502,86 +547,201 @@ func (e *WarmUnshownError) counts() string {
 // Is makes the error ErrWarmUnshown.
 func (e *WarmUnshownError) Is(target error) bool { return target == ErrWarmUnshown }
 
-// AgentStagingLine is one line of the agent's log that carries one of the three reason words: the reason, and the
-// line's tokens, among which a line names its digest or its file.
-type AgentStagingLine struct {
-	Reason string   `json:"reason"`
-	Tokens []string `json:"tokens"`
+// The kinds of AgentLogLine.
+const (
+	LineStart       = "start"
+	LinePreStart    = "pre-start"
+	LineBuild       = "build"
+	LineStageFailed = "staging-failed"
+	LineWorker      = "worker-started"
+	LineImage       = "image"
+	LineFile        = "file"
+	LineOther       = "other"
+)
+
+// AgentLogLine is one line of the agent's log of the job, as the warm start's check reads it: its kind, a start line's
+// restartCount (-1 when it has none), and a stager line's reason and tokens, among which it names its digest or file.
+// The record keeps these, not the line: an Apptainer line can name a path.
+type AgentLogLine struct {
+	Kind         string   `json:"kind"`
+	RestartCount int      `json:"restartCount,omitempty"`
+	Reason       string   `json:"reason,omitempty"`
+	Tokens       []string `json:"tokens,omitempty"`
 }
 
-// WarmObs is what row A read for its warm start: whether the agent's log of the job was read, the image digest and
-// the checkpoint files the deployment asks for (the Instance's launch, the identity record's list), and the log's
-// staging lines (ParseAgentStagingLines).
-type WarmObs struct {
-	LogRead     bool               `json:"logRead"`
-	ImageDigest string             `json:"imageDigest"`
-	Files       []string           `json:"files"`
-	Lines       []AgentStagingLine `json:"lines,omitempty"`
-}
+var (
+	slogMsg     = regexp.MustCompile(`(?:^|\s)msg=("(?:[^"\\]|\\.)*"|\S+)`)
+	slogLevel   = regexp.MustCompile(`(?:^|\s)level=(INFO|WARN|ERROR|DEBUG)(?:\s|$)`)
+	slogRestart = regexp.MustCompile(`(?:^|\s)` + agentRestartKey + `=(\d+)(?:\s|$)`)
+)
 
-// ParseAgentStagingLines reads the agent's log: every line that carries one of the three reason words, with its
-// tokens. A token is a word of the line split on white space, with its quotes and surrounding punctuation taken off,
-// and a key=value word taken as its value, so that slog's text form (msg="..." digest=sha256:...) and a plain line
-// (stage: image sha256:... already staged and verified) read alike. A name is matched as a whole token, never inside
-// another (model.safetensors is not in model.safetensors.index.json).
-func ParseAgentStagingLines(log []byte) []AgentStagingLine {
-	var out []AgentStagingLine
-	for _, l := range strings.Split(string(log), "\n") {
-		reason := ""
-		for _, r := range []string{StagedAlreadyVerified, StagedByAnother, StagedPresentMatching} {
-			if strings.Contains(l, r) {
-				reason = r
-				break
-			}
-		}
-		if reason == "" {
-			continue
-		}
-		var toks []string
-		for _, w := range strings.Fields(l) {
-			if i := strings.IndexByte(w, '='); i >= 0 {
-				w = w[i+1:]
-			}
-			w = strings.Trim(w, "\"'`,;:()[]{}")
-			if w != "" {
-				toks = append(toks, w)
-			}
-		}
-		out = append(out, AgentStagingLine{Reason: reason, Tokens: toks})
+// ParseAgentLog reads the agent's log of the job (the job's standard error), line by line, in order. A line is the
+// agent's own when it is slog's text form with one of the messages above (its msg, unquoted); a stager line with one of
+// the reason words is an image or a file line, its tokens the words of the line split on white space, with quotes and
+// surrounding punctuation taken off and a key=value word taken as its value, so that a name is matched as a whole token,
+// never inside another (model.safetensors is not in model.safetensors.index.json). Every other line is "other".
+func ParseAgentLog(log []byte) []AgentLogLine {
+	var out []AgentLogLine
+	text := strings.TrimSuffix(string(log), "\n")
+	if text == "" {
+		return nil
+	}
+	for _, l := range strings.Split(text, "\n") {
+		out = append(out, parseAgentLine(l))
 	}
 	return out
 }
 
-// warmStartShownByTheAgentsOwnLog is the warm-start check's one seam (the ruling 1(b) on #376): the image is shown
-// warm by a line with StagedAlreadyVerified or StagedByAnother naming the Instance's image digest, and the checkpoint by
-// one line with StagedPresentMatching naming each file the identity record lists. A line naming another digest or
-// another file shows nothing, and a record that lists no file, or a log not read, shows no warm checkpoint. It returns
-// the counts for the post and the marker; nil when the warm start is shown.
+func parseAgentLine(l string) AgentLogLine {
+	msg := ""
+	if m := slogMsg.FindStringSubmatch(l); m != nil {
+		msg = m[1]
+		if u, err := strconv.Unquote(msg); err == nil {
+			msg = u
+		}
+	}
+	level := ""
+	if m := slogLevel.FindStringSubmatch(l); m != nil {
+		level = m[1]
+	}
+	switch {
+	case msg == AgentStartMsg && level == "INFO":
+		n := -1
+		if m := slogRestart.FindStringSubmatch(l); m != nil {
+			n, _ = strconv.Atoi(m[1])
+		}
+		return AgentLogLine{Kind: LineStart, RestartCount: n}
+	case msg == AgentBuildMsg:
+		return AgentLogLine{Kind: LineBuild}
+	case msg == AgentStageFailMsg:
+		return AgentLogLine{Kind: LineStageFailed}
+	case msg == AgentWorkerMsg:
+		return AgentLogLine{Kind: LineWorker}
+	case msg != "" && strings.Contains(agentPreStartLevel, level) && level != "" && slicesContains(AgentPreStartMsgs, msg):
+		return AgentLogLine{Kind: LinePreStart}
+	}
+	kind, reason := "", ""
+	for _, r := range []string{StagedAlreadyVerified, StagedByAnother, StagedPresentMatching} {
+		if strings.Contains(l, r) {
+			kind, reason = LineImage, r
+			if r == StagedPresentMatching {
+				kind = LineFile
+			}
+			break
+		}
+	}
+	if kind == "" {
+		return AgentLogLine{Kind: LineOther}
+	}
+	var toks []string
+	for _, w := range strings.Fields(l) {
+		if i := strings.IndexByte(w, '='); i >= 0 {
+			w = w[i+1:]
+		}
+		w = strings.Trim(w, "\"'`,;:()[]{}")
+		if w != "" {
+			toks = append(toks, w)
+		}
+	}
+	return AgentLogLine{Kind: kind, Reason: reason, Tokens: toks}
+}
+
+// WarmObs is what row A read for its warm start: whether the agent's log of the job was read, the image digest, the
+// checkpoint files that must each show present and matching (ExpectedWarmFiles: from outside the log), the files the
+// stager skips, and the log's lines (ParseAgentLog).
+type WarmObs struct {
+	LogRead     bool           `json:"logRead"`
+	ImageDigest string         `json:"imageDigest"`
+	Files       []string       `json:"files"`
+	Skipped     []string       `json:"skipped,omitempty"`
+	Log         []AgentLogLine `json:"log,omitempty"`
+}
+
+// SkipRule is the stage package's rule of the checkpoint files the engine does not load, which staging skips with no
+// line (internal/agent/stage, skippedFiles, by the launch's --load-format): one result per file, in order. The steps
+// pass the stage package's own (stage.SkippedFiles, PR #393's export), never a rule of this package's, and never one
+// read off the log.
+type SkipRule func(files []agentapi.FileDigest, loadFormat string) []bool
+
+// ExpectedWarmFiles is the set of checkpoint files of which every one must show "present and matching", from OUTSIDE
+// the log (the science agent's point of 11 Nov 2026 on #376): the checkpoint's own file list from the Instance's identity
+// record, the list the agent's stager is given (internal/lifecycle, desired.go: Checks.Verify.Files), less the files the
+// stager skips by the deployment's load format, by the stage package's own rule. A nil rule skips nothing: that can
+// only make a warm start NOT RUN, never pass one.
+func ExpectedWarmFiles(files []agentapi.FileDigest, loadFormat string, skip SkipRule) (expected, skipped []string) {
+	var skips []bool
+	if skip != nil {
+		skips = skip(files, loadFormat)
+	}
+	for i, f := range files {
+		if i < len(skips) && skips[i] {
+			skipped = append(skipped, f.Path)
+			continue
+		}
+		expected = append(expected, f.Path)
+	}
+	return expected, skipped
+}
+
+// warmStartShownByTheAgentsOwnLog is the warm-start check's one seam (the ruling 1(b) on #376 and its conditions), nil
+// when the warm start is shown:
+//   - the log is whole: it opens with the agent's start line, restartCount 0, after the agent's pre-start lines only
+//     (AgentPreStartMsgs), and the read reaches the end of the first staging;
+//   - the window is that first execution's first staging: from the start line to the first of a worker's start
+//     (AgentWorkerMsg, which comes only once staging is done) and a second start line (a second execution);
+//   - in it, the first attempt alone: no image build, no failed attempt, and exactly one image line, since a silent
+//     cancel that got past the image check leaves a second one;
+//   - that one image line names the Instance's image digest, and for each expected file (ExpectedWarmFiles) a file
+//     line names it; a line naming another digest or file shows nothing.
 func warmStartShownByTheAgentsOwnLog(w WarmObs) *WarmUnshownError {
 	e := &WarmUnshownError{LogRead: w.LogRead, FilesOf: len(w.Files)}
 	if !w.LogRead {
 		return e
 	}
-	names := func(reasons ...string) map[string]bool {
-		m := map[string]bool{}
-		for _, l := range w.Lines {
-			if slicesContains(reasons, l.Reason) {
-				for _, t := range l.Tokens {
-					m[t] = true
-				}
+	i := 0
+	for i < len(w.Log) && w.Log[i].Kind == LinePreStart {
+		i++
+	}
+	if i == len(w.Log) || w.Log[i].Kind != LineStart || w.Log[i].RestartCount != 0 {
+		e.NotWhole = true
+		return e
+	}
+	end := -1
+	for j := i + 1; j < len(w.Log); j++ {
+		if k := w.Log[j].Kind; k == LineWorker || k == LineStart {
+			end = j
+			break
+		}
+	}
+	if end < 0 {
+		e.NotWhole = true
+		return e
+	}
+	images, imageNamed := 0, false
+	named := map[string]bool{}
+	for _, l := range w.Log[i+1 : end] {
+		switch l.Kind {
+		case LineBuild, LineStageFailed:
+			e.Retried = true
+		case LineImage:
+			images++
+			imageNamed = imageNamed || slicesContains(l.Tokens, w.ImageDigest) || slicesContains(l.Tokens, strings.TrimPrefix(w.ImageDigest, "sha256:"))
+		case LineFile:
+			for _, t := range l.Tokens {
+				named[t] = true
 			}
 		}
-		return m
 	}
-	img := names(StagedAlreadyVerified, StagedByAnother)
-	e.ImageShown = w.ImageDigest != "" && (img[w.ImageDigest] || img[strings.TrimPrefix(w.ImageDigest, "sha256:")])
-	files := names(StagedPresentMatching)
+	if images > 1 {
+		e.Retried = true
+	}
+	e.ImageShown = w.ImageDigest != "" && images == 1 && imageNamed
 	for _, f := range w.Files {
-		if files[f] {
+		if named[f] {
 			e.FilesShown++
 		}
 	}
-	if e.ImageShown && e.FilesOf > 0 && e.FilesShown == e.FilesOf {
+	if !e.Retried && e.ImageShown && e.FilesOf > 0 && e.FilesShown == e.FilesOf {
 		return nil
 	}
 	return e

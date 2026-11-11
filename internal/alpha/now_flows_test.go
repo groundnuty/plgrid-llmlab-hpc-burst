@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/obscheck"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
@@ -47,7 +49,7 @@ func (r *liveRun) NowServe(ctx context.Context, p Plan) (NowServeObs, error) {
 	}
 	o.DrainStart = ds
 	o.Deployment = r.observedDeployment()
-	var files []string
+	var files []agentapi.FileDigest
 	o.Identity, files = r.identityOf(ctx, in)
 	// The warm start, from the agent's own log of the job, read while the job runs: an accepted requeue's release
 	// removes the Allocation's files.
@@ -82,7 +84,7 @@ func (r *liveRun) NowServe(ctx context.Context, p Plan) (NowServeObs, error) {
 // Allocation's external name and observed tag, and the Instance's deployment ID, its label and its identity record.
 // A read that fails leaves its field empty, which the verdict fails.
 // It returns, beside it, the checkpoint files the identity record lists, for the warm start (warmOf).
-func (r *liveRun) identityOf(ctx context.Context, in v1alpha1.Instance) (IdentityObs, []string) {
+func (r *liveRun) identityOf(ctx context.Context, in v1alpha1.Instance) (IdentityObs, []agentapi.FileDigest) {
 	var a v1alpha1.Allocation
 	cctx, cancel := stack.CallCtx(r.t)
 	err := r.c.Get(cctx, client.ObjectKey{Name: in.Spec.AllocationRef.Name, Namespace: in.Namespace}, &a)
@@ -103,7 +105,7 @@ func (r *liveRun) identityOf(ctx context.Context, in v1alpha1.Instance) (Identit
 	cctx, cancel = stack.CallCtx(r.t)
 	err = r.c.Get(cctx, client.ObjectKey{Name: in.Spec.IdentityRecord, Namespace: in.Namespace}, &rec)
 	cancel()
-	var files []string
+	var files []agentapi.FileDigest
 	if err == nil {
 		o.RecordDisplayLabel, o.RecordKind = rec.Labels[v1alpha1.LabelDeploymentID], rec.Labels[v1alpha1.LabelRecord]
 		if files, err = identityRecordFiles(rec.Data.Raw); err != nil {
@@ -114,47 +116,52 @@ func (r *liveRun) identityOf(ctx context.Context, in v1alpha1.Instance) (Identit
 }
 
 // identityRecordFiles is the checkpoint files an identity record lists, read from its data as HBEP-3's canonical object
-// holds them (the record's "canonical" member, whose "files" are each a path and a SHA-256).
-func identityRecordFiles(raw []byte) ([]string, error) {
+// holds them (the record's "canonical" member, whose "files" are each a path and a SHA-256): the list the agent's
+// stager is given (internal/lifecycle, desired.go, Checks.Verify.Files).
+func identityRecordFiles(raw []byte) ([]agentapi.FileDigest, error) {
 	var d struct {
 		Canonical struct {
-			Files []struct {
-				Path string `json:"path"`
-			} `json:"files"`
+			Files []agentapi.FileDigest `json:"files"`
 		} `json:"canonical"`
 	}
 	if err := json.Unmarshal(raw, &d); err != nil {
 		return nil, err
 	}
-	var out []string
-	for _, f := range d.Canonical.Files {
-		out = append(out, f.Path)
-	}
-	return out, nil
+	return d.Canonical.Files, nil
 }
 
-// warmOf reads the warm start's evidence (the ruling 1(b) on #376): the Instance's image digest, the identity record's
-// files, and the staging lines of the agent's own log of the job (ParseAgentStagingLines). The verdict's seam
+// stageSkipRule is the stage package's rule of the files the engine does not load (nowserve.go, SkipRule). It waits on
+// PR #393's export, stage.SkippedFiles: until that is merged here it is nil, and no file counts as skipped, which can
+// only make a warm start NOT RUN.
+var stageSkipRule SkipRule
+
+// warmOf reads the warm start's evidence (the ruling 1(b) on #376): the Instance's image digest, the files that must
+// each show present and matching (ExpectedWarmFiles: the identity record's list less what the stager skips by the
+// launch's load format, from outside the log), and the agent's own log of the job (ParseAgentLog). The verdict's seam
 // (warmStartShownByTheAgentsOwnLog) judges them; a log that could not be read shows nothing.
-func (r *liveRun) warmOf(ctx context.Context, in v1alpha1.Instance, files []string) WarmObs {
-	w := WarmObs{ImageDigest: in.Spec.Launch.ImageDigest, Files: files}
+func (r *liveRun) warmOf(ctx context.Context, in v1alpha1.Instance, files []agentapi.FileDigest) WarmObs {
+	w := WarmObs{ImageDigest: in.Spec.Launch.ImageDigest}
+	w.Files, w.Skipped = ExpectedWarmFiles(files, agent.LoadFormat(in.Spec.Launch.Command), stageSkipRule)
 	b, err := r.agentLog(ctx, in)
 	if err != nil {
 		r.t.Logf("the agent's log of the job could not be read for the warm start: %v", err)
 		return w
 	}
-	w.LogRead, w.Lines = true, ParseAgentStagingLines(b)
-	r.t.Logf("%s: the agent's log of the job has %d staging lines with the reason words", r.cfg.Row.Name, len(w.Lines))
+	w.LogRead, w.Log = true, ParseAgentLog(b)
+	r.t.Logf("%s: the agent's log of the job, read whole up to %d bytes: %d lines", r.cfg.Row.Name, agentLogMax, len(w.Log))
 	return w
 }
 
-// agentLogLine is the read of a job's agent log on the login node: the lines with the stager's reason words, from the
-// job's standard error, where the agent and its stager write their log (cmd/hb-agent; agentapi.JobErrorName); exit 3
-// when there is no such file. path is checked by the caller.
+// agentLogMax is how much of the agent's log row A reads, from its start: the first staging of a warm start is in its
+// first lines, and a read that does not reach that staging's end shows nothing (warmStartShownByTheAgentsOwnLog).
+const agentLogMax = 4 << 20
+
+// agentLogLine is the read of a job's agent log on the login node: the head of the job's standard error, where the agent
+// and its stager write their log (cmd/hb-agent; agentapi.JobErrorName); exit 3 when there is no such file. path is
+// checked by the caller.
 func agentLogLine(path string) string {
 	q := "'" + path + "'"
-	return "if [ -r " + q + " ]; then grep -F -e '" + StagedAlreadyVerified + "' -e '" + StagedByAnother + "' -e '" + StagedPresentMatching + "' -- " + q +
-		" | head -n 4000; else exit 3; fi"
+	return "if [ -r " + q + " ]; then head -c " + strconv.Itoa(agentLogMax) + " -- " + q + "; else exit 3; fi"
 }
 
 // safePath is the shape a path of the agent's log must have before it goes into a command line: absolute, and of
