@@ -131,7 +131,7 @@ func (f *ctlFixture) awaitEntry(name, what string, cond func(e EntryRecord) bool
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	f.t.Fatalf("timed out waiting for %s; supervisor.json: %s", what, fileOf(f.l.supervisorFile()))
+	f.t.Fatal(f.withChildLogs(fmt.Sprintf("timed out waiting for %s; supervisor.json: %s", what, fileOf(f.l.supervisorFile()))))
 	return EntryRecord{}
 }
 
@@ -179,11 +179,13 @@ func TestCheckEntryExactSockets(t *testing.T) {
 		// 127.0.0.1:P, answering /healthz with 200. Matching port numbers alone would call the
 		// child the holder of 127.0.0.1:P, and count the foreign answer.
 		f := newCtlFixture(t, Front{})
-		port := freePort(t)
-		foreign, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+		// The foreign listener takes its port itself, so the port is held from the moment it is chosen
+		// (a freePort that is released and bound again leaves a gap, issue #384).
+		foreign, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
 		}
+		port := foreign.Addr().(*net.TCPAddr).Port
 		srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })}
 		go srv.Serve(foreign)
 		t.Cleanup(func() { srv.Close() })
