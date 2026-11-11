@@ -1,0 +1,308 @@
+# One-off workflow for a throwaway draft PR (issue #412, spike S16), never merged.
+# Spike S16 measures HBEP-6 open question 11's four open items that need no GPU, on GitHub-hosted runners, because 600 frpc
+# and a full shared link would breach the shared development VM's limits (the VM ran builds and 1-10 tunnel smokes only).
+# One job per item, each with its own timeout, so one item's overrun does not end the others; each repetition is its own
+# job on a fresh runner, which records its CPU model with its results.
+#   - relogin: a mass re-login of 1, 10, 100, 300 and 600 frpc through both of frps's plugins (the lifecycle controller's
+#     admission plugin and the front's), after an frps restart and after a front restart, with a no-restart window and the
+#     client hold-off control; 1 stream per tunnel at 5 tokens/s, a request in flight across every restart.
+#   - caplink: 100 tunnels x 4 streams and 300 x 1 at 20 tokens/s through a shared capped link (s16link), FIFO at 100 ms
+#     and 1 s buffers and the per-connection control, each ladder from 200 Mb/s down until the first heartbeat failure or
+#     the cap where the tunnels' own demand binds, with bulk filler on the same link and an uncapped control.
+#   - rssh: real OpenSSH relays in host-dialed mode through internal/rehearsal's login node on loopback, at OpenSSH's
+#     default cipher and at aes128-gcm and aes256-gcm, 4 Allocations at 1-64 streams each plus an idle phase.
+#   - rfront: the front's proxy in the request path against the same load straight to frps's tcpmux port.
+# Go comes from the pinned tarball (hack/fetch-go.sh), as in ci.yml; frp from spikes/s16/fetch.sh, checked against
+# internal/launcher/frp-pins.txt. Caches are restored only, never saved. No secret is read, nothing is pushed.
+name: s16
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/s16.yml
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  relogin:
+    name: relogin rep ${{ matrix.rep }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    strategy:
+      fail-fast: false
+      matrix:
+        rep: [1, 2, 3]
+    steps:
+      - name: Check out the PR's head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Read the Go version from go.mod
+        id: goversion
+        run: |
+          version=$(bash hack/fetch-go.sh --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Restore the cached Go archive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
+      - name: The runner
+        run: |
+          git log -2 --format='%H %s'
+          python3 spikes/s16/s16.py host
+          lscpu | grep -E '^(Model name|CPU\(s\)|Thread|Core|Socket)'
+          free -m
+          ulimit -n; ulimit -Hn
+          sysctl net.ipv4.ip_local_port_range net.ipv4.tcp_tw_reuse net.core.somaxconn
+          python3 --version
+          ssh -V
+      - name: Fetch frp and build the harness
+        env:
+          S16_BIN: ${{ runner.temp }}/s16bin
+        run: bash spikes/s16/fetch.sh
+      - name: The harness's unit tests
+        working-directory: spikes/s16
+        run: |
+          go vet ./...
+          go test -count=1 ./...
+          python3 -m unittest discover -s tests -v
+      - name: The measurements
+        env:
+          S16_BIN: ${{ runner.temp }}/s16bin
+          S16_WORK: ${{ runner.temp }}/w
+          S16_RESULTS: ${{ runner.temp }}/s16results/relogin-rep${{ matrix.rep }}
+        run: |
+          mkdir -p -m 700 "$S16_WORK"
+          ulimit -n "$(ulimit -Hn)"
+          python3 spikes/s16/s16.py relogin --rep ${{ matrix.rep }}
+          python3 spikes/s16/s16.py leftovers
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: s16-${{ github.job }}-${{ matrix.tunnels || 'all' }}-rep${{ matrix.rep }}
+          path: ${{ runner.temp }}/s16results
+          retention-days: 14
+          if-no-files-found: error
+
+  caplink:
+    name: caplink ${{ matrix.tunnels }}x${{ matrix.streams }} rep ${{ matrix.rep }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        rep: [1, 2, 3]
+        tunnels: [100, 300]
+        include:
+          - tunnels: 100
+            streams: 4
+          - tunnels: 300
+            streams: 1
+    steps:
+      - name: Check out the PR's head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Read the Go version from go.mod
+        id: goversion
+        run: |
+          version=$(bash hack/fetch-go.sh --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Restore the cached Go archive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
+      - name: The runner
+        run: |
+          git log -2 --format='%H %s'
+          python3 spikes/s16/s16.py host
+          lscpu | grep -E '^(Model name|CPU\(s\)|Thread|Core|Socket)'
+          free -m
+          ulimit -n; ulimit -Hn
+          sysctl net.ipv4.ip_local_port_range net.ipv4.tcp_tw_reuse net.core.somaxconn
+          python3 --version
+          ssh -V
+      - name: Fetch frp and build the harness
+        env:
+          S16_BIN: ${{ runner.temp }}/s16bin
+        run: bash spikes/s16/fetch.sh
+      - name: The measurements
+        env:
+          S16_BIN: ${{ runner.temp }}/s16bin
+          S16_WORK: ${{ runner.temp }}/w
+          S16_RESULTS: ${{ runner.temp }}/s16results/caplink-${{ matrix.tunnels }}-rep${{ matrix.rep }}
+        run: |
+          mkdir -p -m 700 "$S16_WORK"
+          ulimit -n "$(ulimit -Hn)"
+          python3 spikes/s16/s16.py caplink --rep ${{ matrix.rep }} --tunnels ${{ matrix.tunnels }} --streams ${{ matrix.streams }}
+          python3 spikes/s16/s16.py leftovers
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: s16-${{ github.job }}-${{ matrix.tunnels || 'all' }}-rep${{ matrix.rep }}
+          path: ${{ runner.temp }}/s16results
+          retention-days: 14
+          if-no-files-found: error
+
+  rssh:
+    name: rssh rep ${{ matrix.rep }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        rep: [1, 2, 3]
+    steps:
+      - name: Check out the PR's head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Read the Go version from go.mod
+        id: goversion
+        run: |
+          version=$(bash hack/fetch-go.sh --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Restore the cached Go archive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
+      - name: The runner
+        run: |
+          git log -2 --format='%H %s'
+          python3 spikes/s16/s16.py host
+          lscpu | grep -E '^(Model name|CPU\(s\)|Thread|Core|Socket)'
+          free -m
+          ulimit -n; ulimit -Hn
+          sysctl net.ipv4.ip_local_port_range net.ipv4.tcp_tw_reuse net.core.somaxconn
+          python3 --version
+          ssh -V
+      - name: Fetch frp and build the harness
+        env:
+          S16_BIN: ${{ runner.temp }}/s16bin
+        run: bash spikes/s16/fetch.sh
+      # As standins-p4.yml: OpenSSH's sshd for internal/rehearsal's login node, with the system's ssh service off.
+      - name: Provide OpenSSH's sshd for the rehearsal login node
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+            sudo chmod 755 /usr/sbin/policy-rc.d
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+            sudo rm -f /usr/sbin/policy-rc.d
+          fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
+          /usr/sbin/sshd -V 2>&1 | head -1
+          echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
+      - name: The measurements
+        env:
+          S16_BIN: ${{ runner.temp }}/s16bin
+          S16_WORK: ${{ runner.temp }}/w
+          S16_RESULTS: ${{ runner.temp }}/s16results/rssh-rep${{ matrix.rep }}
+        run: |
+          mkdir -p -m 700 "$S16_WORK"
+          python3 spikes/s16/s16.py rssh --rep ${{ matrix.rep }}
+          python3 spikes/s16/s16.py leftovers
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: s16-${{ github.job }}-${{ matrix.tunnels || 'all' }}-rep${{ matrix.rep }}
+          path: ${{ runner.temp }}/s16results
+          retention-days: 14
+          if-no-files-found: error
+
+  rfront:
+    name: rfront rep ${{ matrix.rep }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        rep: [1, 2, 3]
+    steps:
+      - name: Check out the PR's head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Read the Go version from go.mod
+        id: goversion
+        run: |
+          version=$(bash hack/fetch-go.sh --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Restore the cached Go archive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
+      - name: The runner
+        run: |
+          git log -2 --format='%H %s'
+          python3 spikes/s16/s16.py host
+          lscpu | grep -E '^(Model name|CPU\(s\)|Thread|Core|Socket)'
+          free -m
+          ulimit -n; ulimit -Hn
+          sysctl net.ipv4.ip_local_port_range net.ipv4.tcp_tw_reuse net.core.somaxconn
+          python3 --version
+          ssh -V
+      - name: Fetch frp and build the harness
+        env:
+          S16_BIN: ${{ runner.temp }}/s16bin
+        run: bash spikes/s16/fetch.sh
+      - name: The measurements
+        env:
+          S16_BIN: ${{ runner.temp }}/s16bin
+          S16_WORK: ${{ runner.temp }}/w
+          S16_RESULTS: ${{ runner.temp }}/s16results/rfront-rep${{ matrix.rep }}
+        run: |
+          mkdir -p -m 700 "$S16_WORK"
+          python3 spikes/s16/s16.py rfront --rep ${{ matrix.rep }}
+          python3 spikes/s16/s16.py leftovers
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: s16-${{ github.job }}-${{ matrix.tunnels || 'all' }}-rep${{ matrix.rep }}
+          path: ${{ runner.temp }}/s16results
+          retention-days: 14
+          if-no-files-found: error
