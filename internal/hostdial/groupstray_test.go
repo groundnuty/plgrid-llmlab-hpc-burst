@@ -9,9 +9,9 @@ package hostdial_test
 import (
 	"context"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -53,19 +53,59 @@ func (e *exitLog) total() int {
 	return t
 }
 
-// refuseProcReads makes every read of a /proc/<pid>/stat fail while on is set, as an exhausted descriptor
-// table does: the start-time guard cannot read, so every group signal is refused (leader-checkable).
-func refuseProcReads(t *testing.T) *atomic.Bool {
+// procRefusal makes the reads of /proc/<pid>/stat of the chosen processes fail, as an exhausted descriptor table
+// does: the start-time guard cannot read, so every group signal to those processes is refused (leader-checkable).
+// A process it does not name is read as usual, so a successor's start (which pins the process by reading it)
+// is not refused.
+type procRefusal struct {
+	mu   sync.Mutex
+	pids map[string]bool
+}
+
+func (r *procRefusal) refuse(pids ...int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.pids == nil {
+		r.pids = map[string]bool{}
+	}
+	for _, p := range pids {
+		r.pids["/proc/"+strconv.Itoa(p)+"/stat"] = true
+	}
+}
+
+// allow ends every refusal.
+func (r *procRefusal) allow() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pids = nil
+}
+
+func (r *procRefusal) refused(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.pids[name]
+}
+
+func refuseProcReads(t *testing.T) *procRefusal {
 	t.Helper()
-	var on atomic.Bool
+	r := &procRefusal{}
 	t.Cleanup(hostdial.SwapGroupProcRead(func(name string) ([]byte, error) {
-		if on.Load() && strings.HasPrefix(name, "/proc/") && strings.HasSuffix(name, "/stat") {
+		if r.refused(name) {
 			return nil, syscall.EMFILE
 		}
 		return os.ReadFile(name)
 	}))
 	t.Cleanup(hostdial.SwapStopRetryPause(10 * time.Millisecond))
-	return &on
+	return r
+}
+
+// pidsOf lists the relays' processes.
+func pidsOf(up map[agentapi.RelayChannel]hostdial.RelayState) []int {
+	var out []int
+	for _, r := range up {
+		out = append(out, r.PID)
+	}
+	return out
 }
 
 // pidfdsOf opens a pidfd on each relay's process, to end it by hand through a handle that cannot name another
@@ -103,7 +143,7 @@ func TestADroppedRelayWhoseStopWasRefusedKeepsItsSlotsAndOnExitUntilItIsReaped(t
 	up := waitUp(t, own, tg.Tag)
 	fds := pidfdsOf(t, up)
 
-	refusing.Store(true)
+	refusing.refuse(pidsOf(up)...)
 	dropped := make(chan struct{})
 	go func() { own.Drop(tg.Tag); close(dropped) }()
 	select {
@@ -129,7 +169,7 @@ func TestADroppedRelayWhoseStopWasRefusedKeepsItsSlotsAndOnExitUntilItIsReaped(t
 	cancel()
 
 	// They are reaped: OnExit is called once for each, and the slots come back.
-	refusing.Store(false)
+	refusing.allow()
 	for ch, fd := range fds {
 		if err := unix.PidfdSendSignal(fd, syscall.SIGKILL, nil, 0); err != nil {
 			t.Fatalf("KILL to the %s relay: %v", ch, err)
@@ -171,7 +211,11 @@ func TestARelayWhoseStopWasRefusedGetsNoSuccessorBesideItsProcess(t *testing.T) 
 	waitFor(t, time.Minute, "both relays started", func() bool {
 		return relayOf(own, tg.Tag, agentapi.RelayControl).PID != 0 && relayOf(own, tg.Tag, agentapi.RelayServing).PID != 0
 	})
-	refusing.Store(true)
+	started := map[agentapi.RelayChannel]hostdial.RelayState{}
+	for _, ch := range agentapi.RelayChannels {
+		started[ch] = relayOf(own, tg.Tag, ch)
+	}
+	refusing.refuse(pidsOf(started)...)
 	pids := map[agentapi.RelayChannel]int{}
 	waitFor(t, time.Minute, "both relays' sessions ended and their stops refused", func() bool {
 		for _, ch := range agentapi.RelayChannels {
@@ -201,7 +245,7 @@ func TestARelayWhoseStopWasRefusedGetsNoSuccessorBesideItsProcess(t *testing.T) 
 		}
 	}
 
-	refusing.Store(false)
+	refusing.allow()
 	for ch, fd := range fds {
 		if err := unix.PidfdSendSignal(fd, syscall.SIGKILL, nil, 0); err != nil {
 			t.Fatalf("KILL to the %s relay: %v", ch, err)
