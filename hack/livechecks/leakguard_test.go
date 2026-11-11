@@ -1,0 +1,83 @@
+package livechecks
+
+// Tests for the leak guard's handling of hex-only seeds (#366). The guard
+// failed by chance whenever one of those seeds turned up inside a random commit
+// hash in the output; it must pass such an output, and must still fail an output
+// that carries the seed as a value.
+
+import (
+	"strings"
+	"testing"
+)
+
+// The output of CI run 42939135845, which failed on a fixed seed: the plan's
+// range line, whose second hash holds "40321" at its third character.
+const hashHoldingTheSeed = "range: e1151e8c8c5d3fd8a60c77c4ea35e3dba0617486..c04032199613610d1911832c22386ad186d39796, 1 file(s) changed\n"
+
+// A hex-only seed inside a hash, wherever in the hash, is not a leak. The
+// outputs are fixed, not drawn at random, so the test does not depend on
+// finding a hash.
+func TestAHexOnlySeedInsideAHashIsNotALeak(t *testing.T) {
+	cases := map[string]string{
+		"the failure of run 42939135845":       hashHoldingTheSeed,
+		"at the start of a hash":               "range: 40321a0b7e5d4c3b2a1908f7e6d5c4b3a2f1e0d9..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+		"at the end of a hash":                 "range: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa..9e8d7c6b5a49382716f5e4d3c2b1a0f9e8d40321\n",
+		"in an abbreviated hash of a run name": "live-20261111120000-b40321cde\n",
+		"in an uppercase hash":                 "digest C0D40321E99613610D1911832C22386AD186D3979\n",
+		"in a long digit string":               "tag 2026404032112 built\n",
+		"the other hex-only seed in a hash":    "range: a1b2c3d4e5f6a7b8c9d0424242e1f2a3b4c5d6e7f\n",
+	}
+	for name, out := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := leaks(out, leakSeeds); len(got) != 0 {
+				t.Errorf("a hash-held seed was reported as a leak: %q in %q", got, out)
+			}
+		})
+	}
+}
+
+// The same seeds as values are leaks: delimited by anything that is not a hex
+// digit, at the ends of the output too. And a seed with a character no hash
+// holds is a plain substring, even right after hex digits.
+func TestASeedStandingAloneIsStillALeak(t *testing.T) {
+	cases := []struct{ name, out, seed string }{
+		{"after a colon", "dialing host:40321\n", "40321"},
+		{"after an equals sign", "LIVE_PROBE_PORT=40321\n", "40321"},
+		{"in a quoted value", `port "40321" refused` + "\n", "40321"},
+		{"in a label", "gateway-40321\n", "40321"},
+		{"on its own line", "40321", "40321"},
+		{"beside a letter that is not hex", "port40321 and x40321y\n", "40321"},
+		{"the job id", "sbatch: Job 424242 to start\n", "424242"},
+		{"the job id after a dash", "--- FAIL: TestX/SEEDKEY-424242 (0.00s)\n", "424242"},
+		{"a seed with a non-hex character, after hex digits", "deadbeefSEEDKEY\n", "SEEDKEY"},
+		{"a seed with a non-hex character, inside a hash-like run", "0123456789abcdefseed.example0123456789abcdef\n", "seed.example"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := leaks(c.out, leakSeeds)
+			found := false
+			for _, s := range got {
+				found = found || s == c.seed
+			}
+			if !found {
+				t.Errorf("the seed %q standing in %q was not reported (reported: %q)", c.seed, c.out, got)
+			}
+		})
+	}
+}
+
+// A hash that holds a seed does not hide a real leak in the same output.
+func TestAHashHoldingASeedDoesNotHideALeakBesideIt(t *testing.T) {
+	out := hashHoldingTheSeed + "stub: port 40321 refused\n"
+	if got := leaks(out, leakSeeds); len(got) != 1 || got[0] != "40321" {
+		t.Errorf("reported %q, want the one real leak of 40321", got)
+	}
+}
+
+// The world's guard is the same rule: it passes an output that carries a seed
+// only inside a hash.
+func TestNoLeakPassesAnOutputWhoseHashHoldsASeed(t *testing.T) {
+	w := &world{t: t, dir: t.TempDir()}
+	w.noLeak(hashHoldingTheSeed)
+	w.noLeak(strings.Repeat("c04032199613610d1911832c22386ad186d39796\n", 3))
+}

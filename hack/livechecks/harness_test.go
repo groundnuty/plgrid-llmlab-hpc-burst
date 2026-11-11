@@ -315,11 +315,59 @@ func (w *world) noLeftoverProcess(cmd *exec.Cmd) {
 // noLeak fails when the screen output carries a seeded secret or a private path.
 func (w *world) noLeak(out string) {
 	w.t.Helper()
-	for _, s := range append(append([]string{}, leakSeeds...), w.dir, os.TempDir()+"/") {
-		if strings.Contains(out, s) {
-			w.t.Errorf("the output carries %q:\n%s", s, out)
+	for _, s := range leaks(out, append(append([]string{}, leakSeeds...), w.dir, os.TempDir()+"/")) {
+		w.t.Errorf("the output carries %q:\n%s", s, out)
+	}
+}
+
+// leaks returns the seeds the output carries. A seed made only of hex digits
+// (a port, a job id) counts only as a whole token: where it is neither
+// preceded nor followed by another hex digit. The output holds commit hashes
+// that are new on every run (the plan prints its range's two, and a run's
+// name carries an abbreviated one), and a hex-only seed turns up inside one by
+// chance (#366: "40321" inside c0 40321 99613...). A leak of such a seed is
+// the value itself, delimited by anything but a hex digit (":40321", "=40321",
+// "gateway-40321"), and is still caught. Every other seed is a plain
+// substring: it holds a character no hash does.
+func leaks(out string, seeds []string) []string {
+	var found []string
+	for _, s := range seeds {
+		if containsSeed(out, s) {
+			found = append(found, s)
 		}
 	}
+	return found
+}
+
+func containsSeed(out, seed string) bool {
+	if seed == "" || !isHex(seed) {
+		return seed != "" && strings.Contains(out, seed)
+	}
+	for from := 0; ; {
+		i := strings.Index(out[from:], seed)
+		if i < 0 {
+			return false
+		}
+		start := from + i
+		end := start + len(seed)
+		if (start == 0 || !isHexDigit(out[start-1])) && (end == len(out) || !isHexDigit(out[end])) {
+			return true
+		}
+		from = start + 1
+	}
+}
+
+func isHexDigit(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+}
+
+func isHex(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if !isHexDigit(s[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func (w *world) stateFile(name string) string {
