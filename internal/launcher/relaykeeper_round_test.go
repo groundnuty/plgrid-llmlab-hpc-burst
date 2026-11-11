@@ -7,6 +7,7 @@ package launcher
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -133,8 +134,12 @@ func TestTheKeepersPingMustBeTheKeepersOwn(t *testing.T) {
 // new one (the delta review of PR 361).
 func TestKeeperFdInodesRetriesAClosedDescriptorOnce(t *testing.T) {
 	// Another process's descriptors: reading this process's own would meet the directory
-	// descriptor ReadDir itself opened, closed by the time its link is read.
+	// descriptor ReadDir itself opened, closed by the time its link is read. The bystander is
+	// read only once it has settled: a freshly exec'd sleep runs its dynamic loader first,
+	// which opens and closes descriptor 3 for each library, and a snapshot taken then really
+	// does see a descriptor close (CI, run 43082006242, on PR 361's second main merge).
 	other := startBystander(t, "sleep", "300").Process.Pid
+	settled(t, other)
 	read := fdReadlink
 	t.Cleanup(func() { fdReadlink = read })
 	calls := 0
@@ -225,5 +230,44 @@ func TestRestoreTakesTheKeepersLockFirst(t *testing.T) {
 	}
 	if got, _ := relaykeeper.LoadState(path); got == nil || got.Providers["example-a"].HighestEpoch != 7 {
 		t.Errorf("the keeper's fence after the refusal: %+v, want it kept", got)
+	}
+}
+
+// settled waits, within 10 s, until pid is asleep (state S) holding exactly descriptors 0, 1
+// and 2, the state a started sleep keeps for the rest of its life, read twice in a row.
+func settled(t *testing.T, pid int) {
+	t.Helper()
+	look := func() (string, bool) {
+		b, err := os.ReadFile(procPath(pid, "stat"))
+		if err != nil {
+			return err.Error(), false
+		}
+		st, err := parseStat(string(b))
+		if err != nil {
+			return err.Error(), false
+		}
+		fds, err := os.ReadDir(procPath(pid, "fd"))
+		if err != nil {
+			return err.Error(), false
+		}
+		var names []string
+		for _, fd := range fds {
+			names = append(names, fd.Name())
+		}
+		got := strings.Join(names, ",")
+		return fmt.Sprintf("state %c, descriptors %s", st.State, got), st.State == 'S' && got == "0,1,2"
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		d1, ok1 := look()
+		if ok1 {
+			if _, ok2 := look(); ok2 {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the bystander pid %d did not settle within 10 s: %s", pid, d1)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
