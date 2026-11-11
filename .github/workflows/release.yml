@@ -34,6 +34,8 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+  # THROWAWAY ONLY (never merged): run the dry-run archive job on this PR.
+  pull_request:
 
 permissions:
   contents: read
