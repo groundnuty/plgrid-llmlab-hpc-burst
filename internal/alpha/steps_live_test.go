@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/obscheck"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/sshrun"
@@ -65,6 +66,13 @@ type world struct {
 	// matchEngine tells the engine among the job's processes (PickEngine):
 	// MatchesCommand on a cluster, the stand-in's own for its fake Apptainer.
 	matchEngine func(argv, command []string) bool
+	// gpuModel is the gpu_model label of the Instance's info series, the row's
+	// partition's (HBEP-8, Engine gauges per Instance), and notReported the
+	// engine gauges the world's engine does not export (obscheck.GaugeView): a
+	// real vLLM's none (obscheck.VLLMNotReported, HBEP-8:419), the stand-in's
+	// engine double's two prefix-cache counters (obscheck.DoubleNotReported).
+	gpuModel    string
+	notReported map[string]bool
 }
 
 // livePorts are the live stack's ports on this host: the launcher's block
@@ -119,6 +127,12 @@ func liveWorld(cfg Config) (world, error) {
 		}
 	}
 	r := cfg.Row
+	gpuModel := ""
+	for _, part := range pp.Spec.Partitions {
+		if part.Name == r.Partition {
+			gpuModel = part.GPUModel
+		}
+	}
 	prov := &v1alpha1.Provider{Spec: v1alpha1.ProviderSpec{
 		PlatformProfileRef: v1alpha1.ObjectReference{Name: pp.Name}, Account: cfg.Account, AllowedPartitions: []string{r.Partition},
 		QOS: r.QOS, CredentialsRef: &v1alpha1.CredentialsReference{File: cfg.Credentials},
@@ -134,7 +148,7 @@ func liveWorld(cfg Config) (world, error) {
 		dh:    stack.DialHome{Mode: cfg.DialHomeMode, Addr: cfg.DialHomeAddr, KeyPath: cfg.DialHomeKey},
 		ports: livePorts(cfg.DialHomeListen), env: stack.CleanEnv(),
 		objects: []client.Object{&pp, prov}, provider: r.Cluster, cluster: r.Cluster, qos: r.QOS, md: &md, profile: pp.Spec,
-		controlDir: cfg.ControlDir, hostLock: cfg.HostLock, matchEngine: MatchesCommand,
+		controlDir: cfg.ControlDir, hostLock: cfg.HostLock, matchEngine: MatchesCommand, gpuModel: gpuModel, notReported: obscheck.VLLMNotReported,
 	}, nil
 }
 
@@ -168,6 +182,9 @@ func (f failedSteps) NoOverlap(context.Context, Plan) (NoOverlapObs, error) {
 }
 func (f failedSteps) TunnelHour(context.Context, Plan) (TunnelHourObs, error) {
 	return TunnelHourObs{}, f.err
+}
+func (f failedSteps) NowServe(context.Context, Plan) (NowServeObs, error) {
+	return NowServeObs{}, f.err
 }
 func (f failedSteps) Ledger() Ledger              { return &BatchLedger{} }
 func (f failedSteps) Close(context.Context) error { return nil }
@@ -229,6 +246,14 @@ type liveRun struct {
 	// what is left after it (standin_stop_test.go) are no part of a live row's Close. That look ends in time for the cancel of the jobs
 	// and the clean-ups after it (stopBy, stopReserve), or does not happen, which the stand-ins fail.
 	stop *stackStop
+	// requeueFn, when a test sets it, sends row A's requeue in place of scontrol requeuehold over the run's transport
+	// (requeue): the stand-in's fake Slurm takes no requeuehold (internal/slurm/fakeslurm, scontrol.go), so the stand-in
+	// of an accepted requeue sends it through the fake's own RequeueHold, as the rehearsal's part 3 does
+	// (internal/rehearsal/scenario, part3_requeue_test.go). The stand-in of a refused one leaves it unset.
+	requeueFn func(ctx context.Context, jobID string) (RequeueReply, error)
+	// agentLogFn, when a test sets it, is the command line that reads row A's agent log at the path, in place of
+	// agentLogLine: the stand-in's fake login shell has tail -c and no grep (internal/slurm/fakeslurm, builtins.go).
+	agentLogFn func(path string) string
 	// allocsFn is the watch's Allocation versions, and boundedFn stack.BoundedDeadline, unless a test sets them.
 	allocsFn   func() []stack.AllocObservation
 	boundedFn  func(time.Duration) (time.Time, bool)
@@ -633,7 +658,7 @@ func (r *liveRun) firstJobStarted(p Plan) error {
 			r.claimed = true
 			r.watch.ResetsDecideNothing() // this run ends on the scheduler's read, and judges nothing from the watch
 			p.Logf("%s: the run's first job was still pending %s after the deployment's creation; the run ends and its jobs are cancelled", p.Row.Name, time.Since(r.created).Round(time.Second))
-			return &NotStartedError{Bound: bound, PastEnd: pastEnd}
+			return &NotStartedError{Bound: bound, PastEnd: pastEnd, StartWait: p.Row.StartWait > 0 && !pastEnd}
 		}
 		time.Sleep(time.Second)
 	}

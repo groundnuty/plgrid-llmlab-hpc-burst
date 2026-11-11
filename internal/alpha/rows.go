@@ -194,14 +194,38 @@ type Row struct {
 	// Timing is the clock the row is judged on; the zero Timing is the live
 	// one (Clock).
 	Timing Timing
+	// Profile names the row's shipped platform profile (profiles/<name>.yaml);
+	// empty for the profile named after the row's cluster (ProfileName). Only the
+	// plgrid-now rows of issue #376 run under another, athena-now.yaml.
+	Profile string
+	// OwnerGo names the setting that must hold today's UTC date before the row
+	// runs, the owner's go for the slot it holds (the development rule on #145):
+	// LIVE_OWNER_GO_HELIOS_NOW for the rows that hold QOS now's GPU for hours,
+	// LIVE_OWNER_GO_ATHENA_NOW for the rows that hold plgrid-now's slot under
+	// athena-now.yaml (issue #376, Q6). Empty for a row that needs none.
+	// hack/livechecks compares it with the script's owner-go table.
+	OwnerGo string
+}
+
+// ProfileName is the row's shipped platform profile: Profile, else its cluster's.
+func (r Row) ProfileName() string {
+	if r.Profile != "" {
+		return r.Profile
+	}
+	return r.Cluster
 }
 
 // Timing is the clock a row's judgement runs on: the deployment timing its
 // scenario applies and what its hour of traffic must hold. The zero Timing is
-// the live one: a zero field means this file's constant (LiveTiming). Only a
+// the live one: a zero field means this file's constant (LiveTiming). A
 // stand-in run of the live steps, which drives the real stack against a fake
-// cluster within a 20-minute hold, scales it (issue #245); every live row keeps
-// the zero Timing.
+// cluster within a 20-minute hold, scales it (issue #245). Every live row keeps
+// the zero Timing but the rows on plgrid-now (issue #376): their clock is the
+// margins of the shipped profile they run under, profiles/athena-now.yaml
+// (AthenaNowTiming), since athena.yaml's give a lead of 1 h 45 min, which the
+// partition's 1 h limit cannot host (the science agent's ruling Q1 on #376:
+// the rows test what ships, so the profile is a shipped one and not an overlay
+// in the test). TestTheNowRowsClockIsTheShippedProfiles reads the file.
 type Timing struct {
 	MaxRequestDuration, DrainMargin, HandoverMargin, StartTimeout time.Duration
 	// IdleLimit is the no-overlap row's idleLimit, and MaxIdleLimit the longest
@@ -222,6 +246,9 @@ type Timing struct {
 	// sender takes after a reply.
 	UploadBody, UploadStreams int
 	UploadPause               time.Duration
+	// ServeTokens is the exact length, in tokens, of row A's long stream on
+	// plgrid-now (ServeStreamTokens live; issue #376, Q4).
+	ServeTokens int
 }
 
 // LiveTiming is the live rows' clock: this file's constants, and S1's hour.
@@ -229,7 +256,7 @@ func LiveTiming() Timing {
 	return Timing{MaxRequestDuration: MaxRequestDuration, DrainMargin: DrainMargin, HandoverMargin: HandoverMargin, StartTimeout: StartTimeout,
 		IdleLimit: IdleLimit, MaxIdleLimit: 10 * time.Minute, TunnelHour: TunnelHour, Hour: Hour, MinChain: MinChain, MaxChainGap: MaxChainGap,
 		NearDeadline: NearDeadline, ConcurrentStreams: ConcurrentStreams, StreamRate: StreamRate, MinIdleGap: MinIdleGap, MaxSampleGap: MaxSampleGap,
-		UploadBody: UploadBody, UploadStreams: UploadStreams, UploadPause: UploadPause}
+		UploadBody: UploadBody, UploadStreams: UploadStreams, UploadPause: UploadPause, ServeTokens: ServeStreamTokens}
 }
 
 // Clock is the row's Timing with each zero field taken from LiveTiming.
@@ -268,6 +295,9 @@ func (r Row) Clock() Timing {
 		t.UploadStreams = l.UploadStreams
 	}
 	fill(&t.UploadPause, l.UploadPause)
+	if t.ServeTokens == 0 {
+		t.ServeTokens = l.ServeTokens
+	}
 	return t
 }
 
@@ -312,10 +342,18 @@ var rows = []Row{
 	// Two Allocations together on plgrid-gpu-a100, which has no one-job slot.
 	{Name: "alpha-athena-handover", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: MinLease(), Budget: 150 * time.Minute, MostJobs: 2, PostsTo: "#145 and #93"},
 	// The predecessor, and the successor pending beside it in QOS now.
-	{Name: "alpha-helios-nooverlap", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: MinLease(), Budget: 213 * time.Minute, SlotHold: MinLease() + 45*time.Minute, MostJobs: 2, PostsTo: "#145 and #94"},
-	{Name: "tunnel-hour-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: DefaultTunnelLease(), Budget: DefaultTunnelLease() + TunnelRunOver, SlotHold: DefaultTunnelLease(), MostJobs: 1, PostsTo: "#145"},
+	{Name: "alpha-helios-nooverlap", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: MinLease(), Budget: 213 * time.Minute, SlotHold: MinLease() + 45*time.Minute, MostJobs: 2, PostsTo: "#145 and #94", OwnerGo: OwnerGoHeliosNow},
+	{Name: "tunnel-hour-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: DefaultTunnelLease(), Budget: DefaultTunnelLease() + TunnelRunOver, SlotHold: DefaultTunnelLease(), MostJobs: 1, PostsTo: "#145", OwnerGo: OwnerGoHeliosNow},
 	{Name: "tunnel-hour-athena", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: DefaultTunnelLease(), Budget: DefaultTunnelLease() + TunnelRunOver, MostJobs: 1, PostsTo: "#145"},
+	// Row A of issue #376 (nowserve.go): one job on plgrid-now, the owner's shared one-job slot, under athena-now.yaml.
+	NowServeRow(),
 }
+
+// The settings of the owner's go (Row.OwnerGo).
+const (
+	OwnerGoHeliosNow = "LIVE_OWNER_GO_HELIOS_NOW"
+	OwnerGoAthenaNow = "LIVE_OWNER_GO_ATHENA_NOW"
+)
 
 // accountingRows are the rows of the accounting check, which runs in
 // internal/providerctl/conformance (a GPU job through the Provider's controller,
@@ -348,6 +386,13 @@ var hostDialedRows = []Row{
 	{Name: "reach-host-dialed-athena", Cluster: "athena", Partition: "plgrid-now", GPUs: 1, Lease: 5 * time.Minute, Budget: 25 * time.Minute, SlotHold: 16 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#305 and #145"},
 }
 
+// stageRows are the pre-staging rows (issue #376; nowserve.go), which run in internal/providerctl/conformance: one job
+// whose agent build stages the image and the checkpoint where the agent stages, with no stack and no Instance.
+var stageRows = []Row{NowStageRow()}
+
+// StageRows returns a copy of the pre-staging rows.
+func StageRows() []Row { return append([]Row(nil), stageRows...) }
+
 // Rows returns a copy of the stack rows: the ones this package runs.
 func Rows() []Row { return append([]Row(nil), rows...) }
 
@@ -362,7 +407,7 @@ func ReachRows() []Row { return append([]Row(nil), reachRows...) }
 
 // RowByName finds a row, of any kind.
 func RowByName(name string) (Row, bool) {
-	for _, r := range append(append(append(append([]Row(nil), rows...), accountingRows...), reachRows...), hostDialedRows...) {
+	for _, r := range append(append(append(append(append([]Row(nil), rows...), accountingRows...), reachRows...), hostDialedRows...), stageRows...) {
 		if r.Name == name {
 			return r, true
 		}

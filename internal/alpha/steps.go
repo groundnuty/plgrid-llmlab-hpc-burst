@@ -87,6 +87,9 @@ type Steps interface {
 	Handover(ctx context.Context, p Plan) (HandoverObs, error)
 	NoOverlap(ctx context.Context, p Plan) (NoOverlapObs, error)
 	TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
+	// NowServe is row A on plgrid-now (issue #376; nowserve.go). Beside what it saw it may return
+	// ErrRequeueRefused, which leaves the rest of the run to judge.
+	NowServe(ctx context.Context, p Plan) (NowServeObs, error)
 	// Ledger is the cluster's record of this run's jobs.
 	Ledger() Ledger
 	// WatchResets is how many times the run's watch started again from the

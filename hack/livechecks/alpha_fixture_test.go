@@ -17,8 +17,17 @@ func alphaFixtureFiles() map[string]string {
 		"examples/provider-helios-gh200.yaml": "kind: Provider\n",
 		"hack/build-agents.sh":                "#!/bin/bash\n" + alphaBuildStub + "\n",
 		"hack/fetch-frp.sh":                   "#!/bin/bash\n" + alphaFetchStub + "\n",
+		// The plgrid-now rows of issue #376: row A's inputs, and the pre-staging row's helper package and build script.
+		"profiles/athena-now.yaml":                             "name: athena-now\n",
+		"examples/modeldeployment-qwen25-instruct.yaml":        "kind: ModelDeployment\n",
+		"internal/providerctl/conformance/stagehelper/main.go": "package main\n\nfunc main() {}\n",
+		"hack/build-stage-helper.sh":                           "#!/bin/bash\n" + stageBuildStub + "\n",
 	}
 }
+
+// The pre-staging row's build script (prepare_stage): it records that it ran, with its arguments, and makes the helper.
+const stageBuildStub = `echo "build-stage-helper $*" >> "$STUB_STATE/events"
+echo helper > "$1"`
 
 // The two scripts prepare_alpha runs: they record that they ran, with their arguments, and make what the run later looks for.
 const alphaBuildStub = `echo "build-agents $*" >> "$STUB_STATE/events"

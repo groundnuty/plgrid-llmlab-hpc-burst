@@ -72,27 +72,47 @@ var ErrQueueWaitPastEnd = errors.New("a tunnel row's job was still pending a min
 // the end, before the deployment ends. pastEnd says the end, not the operator's
 // wait, is what bounds it. A row of two jobs has no such end: its end follows
 // the cluster's clock while no job of its runs (TwoJobGuard).
+//
+// A row with a start wait (Row.StartWait, the plgrid-now rows of issue #376)
+// has it as its first clock, from the deployment's creation, and takes no
+// other: the operator's wait is not read (hack/live-checks.sh, "A row with a
+// start wait has the start wait as its first clock and takes no other"). The
+// deployment's first end still bounds it when that comes first.
 func FirstClock(row Row, pendingMax, timeLimit, drainWindow time.Duration) (bound time.Duration, pastEnd bool) {
+	wait := row.firstWait(pendingMax)
 	if row.MostJobs == 1 {
-		if c := timeLimit - drainWindow - time.Minute; c < pendingMax {
+		if c := timeLimit - drainWindow - time.Minute; c < wait {
 			return c, true
 		}
 	}
-	return pendingMax, false
+	return wait, false
+}
+
+// firstWait is the wait in the queue each job of the row may take: its start wait, else the operator's.
+func (r Row) firstWait(pendingMax time.Duration) time.Duration {
+	if r.StartWait > 0 {
+		return r.StartWait
+	}
+	return pendingMax
 }
 
 // NotStartedError is a run whose first job was still pending when its first
 // clock (FirstClock) ran out, after the run cancelled its jobs by their tags
 // and saw none left. It is ErrNotStarted, and ErrQueueWaitPastEnd too when the
-// deployment's first end was the bound.
+// deployment's first end was the bound. StartWait says the bound was the
+// row's start wait.
 type NotStartedError struct {
-	Bound   time.Duration
-	PastEnd bool
+	Bound     time.Duration
+	PastEnd   bool
+	StartWait bool
 }
 
 func (e *NotStartedError) Error() string {
-	if e.PastEnd {
+	switch {
+	case e.PastEnd:
 		return fmt.Sprintf("%v (after %s)", ErrQueueWaitPastEnd, e.Bound)
+	case e.StartWait:
+		return fmt.Sprintf("%v (after the row's start wait of %s)", ErrNotStarted, e.Bound)
 	}
 	return fmt.Sprintf("%v (after %s)", ErrNotStarted, e.Bound)
 }

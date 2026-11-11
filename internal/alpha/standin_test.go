@@ -18,9 +18,17 @@ package alpha
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -29,11 +37,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/enginedouble"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/stage"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/obscheck"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // envStandIn is the stand-in proof's gate.
@@ -61,6 +74,18 @@ var standInTunnel = Timing{MaxRequestDuration: 75 * time.Second, DrainMargin: 30
 	StartTimeout: 4 * time.Minute, TunnelHour: 5*time.Minute + 5*time.Second, Hour: 5 * time.Minute, NearDeadline: time.Minute,
 	MinIdleGap: 30 * time.Second, MaxSampleGap: 30 * time.Second,
 	UploadBody: 128 << 10, UploadStreams: 1, UploadPause: 250 * time.Millisecond}
+
+// Row A on plgrid-now (issue #376): the pair's scaled margins, a long stream of 3,000 tokens (a minute at the engine
+// double's 50 tokens a second, under the 90 s deadline), and a 14-minute lease, so that the stream, the worker restart
+// and the requeue's window all come before the deployment's planned end, a minute before the drain start (12 minutes
+// in: the drain window is 2 minutes).
+var standInNow = Timing{MaxRequestDuration: 90 * time.Second, DrainMargin: 30 * time.Second, HandoverMargin: 30 * time.Second,
+	StartTimeout: 4 * time.Minute, ServeTokens: 3000}
+
+// standInNowEngine is row A's engine double: the stand-in's token delay, and no prefix-cache counter lines, so that two
+// engine gauges are not reported (HBEP-8, Unknown samples: not_reported) and the gauge check takes the double's set
+// (obscheck.DoubleNotReported), as the rehearsal's part 3 does (part3EngineModes); a live row takes a real vLLM's, none.
+const standInNowEngine = "token-delay=" + "20ms" + ",no-prefix-cache-metrics"
 
 // standInFrontLabel says where the stand-in's front ran (issue #224): this
 // development host, its note saying the run reached no cluster.
@@ -95,6 +120,8 @@ func standInRow(t *testing.T, name string) Row {
 	switch {
 	case strings.HasPrefix(name, "tunnel-hour-"):
 		r.Timing, r.Lease = standInTunnel, 12*time.Minute
+	case name == "alpha-athena-now-serve":
+		r.Timing, r.Lease = standInNow, 14*time.Minute
 	default:
 		r.Timing, r.Lease = standInPair, 7*time.Minute
 	}
@@ -183,9 +210,21 @@ func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)
 	if err := os.Mkdir(ctl, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if row.Name == "alpha-athena-now-serve" && reshape == nil {
+		// plgrid-now's one job per user: a replacement's job could only pend behind the run's.
+		shape.Partitions = []fakeslurm.Partition{{Name: stack.Partition, GPUOnly: true, Slots: 1}}
+	}
+	if row.Name == "alpha-athena-now-serve" {
+		// athena-now.yaml sends plgrid-now a sandbox, which the pre-staging row's helper stages.
+		prof.Spec.Partitions[0].ImageFormat = v1alpha1.ImageFormatSandbox
+	}
 	hub := stack.StartHub(t)
-	md := stack.ServedDeployment(stm, v1alpha1.EnvVar{Name: "HB_ENGINE_DOUBLE", Value: "token-delay=" + standInTokenDelay.String()})
-	if strings.HasPrefix(row.Name, "tunnel-hour-") {
+	engine, notReported := "token-delay="+standInTokenDelay.String(), map[string]bool(nil)
+	if row.Name == "alpha-athena-now-serve" {
+		engine, notReported = standInNowEngine, obscheck.DoubleNotReported
+	}
+	md := stack.ServedDeployment(stm, v1alpha1.EnvVar{Name: "HB_ENGINE_DOUBLE", Value: engine})
+	if strings.HasPrefix(row.Name, "tunnel-hour-") || row.Name == "alpha-athena-now-serve" {
 		// The live deployment's context (steps_live_test.go), so that a large body (MinLargeBody) fits under it.
 		for i, f := range md.Spec.Source.Served.Flags {
 			if f.Name == "max-model-len" {
@@ -200,6 +239,7 @@ func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)
 		env:     stack.CleanEnv("HF_ENDPOINT=" + hub.URL),
 		objects: []client.Object{prof, prov}, provider: stack.ProviderName, cluster: row.Cluster, qos: row.QOS, md: md, profile: prof.Spec,
 		controlDir: ctl, hostLock: filepath.Join(dir, "host.lock"), matchEngine: standInEngineMatch(t),
+		gpuModel: prof.Spec.Partitions[0].GPUModel, notReported: notReported,
 	}, cl
 }
 
@@ -520,4 +560,313 @@ func TestStandInNoOverlapHostDialed(t *testing.T) {
 //livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
 func TestStandInTunnelHourHostDialed(t *testing.T) {
 	runStandInIn(t, "tunnel-hour-athena", standInHostDialed)
+}
+
+// standInNowServe runs row A's LIVE steps over the stand-in, through Run, with the stand-in cluster's one-job partition. With
+// accept set, the requeue goes through the fake's own RequeueHold (liveRun.requeueFn: the fake's scontrol takes no
+// requeuehold), as the rehearsal's part 3 sends it; with it unset, the live steps send scontrol requeuehold over the run's
+// ssh to the fake's login, which refuses it.
+func standInNowServe(t *testing.T, accept bool) (secondHeldRun, *stack.Cluster) {
+	t.Helper()
+	return standInNowServeAfter(t, accept, nil)
+}
+
+// standInNowServeAfter is standInNowServe with before, when set, run once the stand-in cluster and the stack's world are
+// made and before row A's run: the warm stand-in's pre-staging (preStage).
+func standInNowServeAfter(t *testing.T, accept bool, before func(cl *stack.Cluster, w world)) (secondHeldRun, *stack.Cluster) {
+	t.Helper()
+	if os.Getenv(envStandIn) != "1" {
+		t.Skipf("the stand-in proof of the live steps runs only with %s=1 (internal/alpha, standin_test.go)", envStandIn)
+	}
+	row := standInRow(t, "alpha-athena-now-serve")
+	id, err := NewRunID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Row: row, StandIn: true, Out: filepath.Join(t.TempDir(), "out"), PendingMax: 2 * time.Minute, RunID: id, FrontLabel: standInFrontLabel}
+	t.Logf("%s: %s, the requeue accepted by the fake's own RequeueHold: %t", row.Name, cfg.Mode(), accept)
+	rec, err := NewRecorder(cfg.Out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, cl := standInWorldShaped(t, row, nil)
+	if before != nil {
+		before(cl, w)
+	}
+	lr := newLiveRun(t, cfg, w)
+	lr.stop = &stackStop{}
+	// The fake login's shell reads a file's last bytes, and no more; a stand-in run's log is short.
+	lr.agentLogFn = func(path string) string { return "tail -c 65536 " + path }
+	if accept {
+		lr.requeueFn = func(_ context.Context, jobID string) (RequeueReply, error) {
+			n, err := strconv.Atoi(jobID)
+			if err != nil {
+				return RequeueReply{}, err
+			}
+			if err := cl.Plat.RequeueHold(n); err != nil {
+				return RequeueReply{}, err
+			}
+			return RequeueReply{Accepted: true}, nil
+		}
+	}
+	var st Steps = lr
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.PendingMax+25*time.Minute)
+	defer cancel()
+	failures, err := Run(ctx, cfg, st, rec, t.Logf)
+	return secondHeldRun{row: row, cfg: cfg, cl: cl, prefix: TagPrefix(id), failures: failures, err: err, stop: *lr.stop}, cl
+}
+
+// TestStandInNowServe is alpha-athena-now-serve's live steps over the stand-in, with the requeue accepted: the proof of the
+// requeue's order (nowserve.go). With the deployment's end set first, the requeued Instance ends Requeued, no replacement
+// Allocation or job appears, and the failed Allocation's release cancels the held job before the run ends anything itself.
+// The verdict judges each from the run's reads; this test then reads the fake cluster's own record of the run's jobs.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInNowServe(t *testing.T) {
+	s, cl := standInNowServe(t, true)
+	if err := s.stop.problem(); err != nil {
+		t.Fatalf("the stack did not stop cleanly, whatever the run ended with: %v", err)
+	}
+	post, _ := os.ReadFile(filepath.Join(s.cfg.Out, PostsFile))
+	t.Logf("%s's text to post:\n%s", s.row.Name, post)
+	if len(s.failures) > 0 {
+		t.Fatalf("%s failed its verdict over the stand-in: %s", s.row.Name, Summary(s.failures))
+	}
+	// Every check passed, the requeue's three parts among them. The stand-in starts cold (its image is built and its
+	// checkpoint downloaded in this run, by the real agent and stager), so its agent's own log must not show a warm start:
+	// the run is NOT RUN on that alone, and on nothing else. A pass here would be a warm start read off a cold log.
+	if !errors.Is(s.err, ErrWarmUnshown) || errors.Is(s.err, ErrRequeueRefused) {
+		t.Fatalf("%s ended with %v; want the NOT RUN of a warm start its cold agent log does not show, and nothing else", s.row.Name, s.err)
+	}
+	// The cluster's own record: one job of the run, requeued once and cancelled, never a second.
+	var ours []fakeslurm.Job
+	for _, j := range cl.Plat.Jobs() {
+		if strings.HasPrefix(j.Name, s.prefix) {
+			ours = append(ours, j)
+		}
+	}
+	if len(ours) != 1 {
+		t.Fatalf("the fake cluster holds %d jobs of the run, want the one", len(ours))
+	}
+	if j := ours[0]; j.RestartCount < 1 || j.State != fakeslurm.Cancelled {
+		t.Errorf("the run's job has restart count %d and state %s, want a requeue and a cancel", j.RestartCount, j.State)
+	}
+	record, err := os.ReadFile(filepath.Join(s.cfg.Out, RecordFile))
+	if err != nil || !strings.Contains(string(record), "STAND-IN RUN") || strings.Contains(string(record), "LIVE RUN") {
+		t.Errorf("the record does not say the run was a stand-in one (%v)", err)
+	}
+}
+
+// TestStandInNowServeRequeueRefused is alpha-athena-now-serve's live steps over the stand-in with the requeue sent as the live
+// row sends it, scontrol requeuehold over the run's ssh, which the fake's login refuses: the run is NOT RUN, never a pass, its
+// record and text to post written with the refusal's reason, and its job ended by the deployment's end.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInNowServeRequeueRefused(t *testing.T) {
+	s, cl := standInNowServe(t, false)
+	if err := s.stop.problem(); err != nil {
+		t.Fatalf("the stack did not stop cleanly, whatever the run ended with: %v", err)
+	}
+	if len(s.failures) != 0 || !errors.Is(s.err, ErrRequeueRefused) || !NotRun(s.row, s.err) {
+		t.Fatalf("failures %v, err %v; want the NOT RUN of a refused requeue", s.failures, s.err)
+	}
+	note := NotRunNote(s.row, s.cfg.PendingMax, s.err)
+	t.Logf("the marker would say: %s", strings.TrimSpace(note))
+	post, err := os.ReadFile(filepath.Join(s.cfg.Out, PostsFile))
+	if err != nil || !strings.Contains(string(post), s.row.Name+": NOT RUN") || strings.Contains(string(post), ": PASS") {
+		t.Errorf("the text to post does not say NOT RUN (%v):\n%s", err, post)
+	}
+	t.Logf("%s's text to post:\n%s", s.row.Name, post)
+	for _, j := range cl.Plat.Jobs() {
+		if strings.HasPrefix(j.Name, s.prefix) && (j.RestartCount != 0 || !j.Finished) {
+			t.Errorf("the run's job has restart count %d and finished %t, want no requeue and an end", j.RestartCount, j.Finished)
+		}
+	}
+}
+
+// preStage is the pre-staging row's staging on the stand-in cluster, before row A: the real stage helper
+// (internal/providerctl/conformance/stagehelper), built here with the stand-in deployment's image and checkpoint
+// compiled in, run as a job of the stand-in's fake Slurm with the environment every job of that cluster has (the engine
+// double's Apptainer), from an Allocation directory of its own whose agent.json names the Provider's staging directory as
+// the profile does ($SCRATCH/stage on the stand-in's login) and the stand-in's Hub. The pre-staging row's own path, a
+// conformance Allocation of the Provider's controller, needs a Provider whose agent build is the helper, which the
+// stand-in's stack (one Provider, the real agent) does not have; the helper, its inputs and the staging directory are the
+// row's. The job must leave its ok line with the image built, before row A's job may take the one-job slot.
+func preStage(t *testing.T, cl *stack.Cluster, w world) {
+	t.Helper()
+	hubURL := ""
+	for _, e := range w.env {
+		if v, ok := strings.CutPrefix(e, "HF_ENDPOINT="); ok {
+			hubURL = v
+		}
+	}
+	if hubURL == "" {
+		t.Fatal("the stand-in world names no Hub")
+	}
+	bin := stack.ShortDir(t)
+	helper := filepath.Join(bin, "stagehelper")
+	flags := "-X main.image=docker.io/vllm/vllm-openai -X main.imageDigest=" + stack.EngineDigest + " -X main.checkpointRepo=" + stack.CheckpointRepo +
+		" -X main.checkpointRev=" + stack.CheckpointRev + " -X main.loadFormat=auto"
+	build := exec.Command("go", "build", "-ldflags", flags, "-o", helper, "./internal/providerctl/conformance/stagehelper")
+	build.Dir = filepath.Join("..", "..")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build the stage helper: %v\n%s", err, out)
+	}
+	staging := filepath.Join(cl.Scratch, "stage")
+	alloc := filepath.Join(staging, "alloc", "hb-prestage-000000000000")
+	if err := os.MkdirAll(alloc, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := agentapi.AgentConfig{ProtocolVersion: agentapi.ProtocolVersion, Tag: "hb-prestage-000000000000", Mode: agentapi.DialHomeDirect,
+		Endpoint: standInPorts.DialHomeListen, CertSPKISHA256: strings.Repeat("a", 64), FrpcDigest: strings.Repeat("b", 64),
+		StagingDir: staging, DialHomeDir: filepath.Join(cl.Home, ".hpcburst", "dial-home"), HubEndpoint: hubURL}
+	b, err := cfg.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(alloc, agentapi.ConfigFileName), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := agentapi.WriteKeyFile(filepath.Join(alloc, agent.CredentialFileName), strings.Repeat("0123456789abcdef", 4)); err != nil {
+		t.Fatal(err)
+	}
+	sess := cl.Plat.Login(fakeslurm.Login{User: stack.ClusterUser, Env: map[string]string{"HOME": cl.Home, "SCRATCH": cl.Scratch}})
+	res, err := sess.Run(context.Background(), slurm.Command{Line: "sbatch --parsable --no-requeue --job-name=prestage --partition=" + stack.Partition +
+		" --time=00:10:00 --gres=gpu:1 --cpus-per-task=1 --mem=1024 '--wrap=" + helper + " " + alloc + "'"})
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("the pre-staging job was not accepted: %v exit %d %s", err, res.ExitCode, res.Stderr)
+	}
+	id, err := strconv.Atoi(strings.TrimSpace(strings.SplitN(string(res.Stdout), ";", 2)[0]))
+	if err != nil {
+		t.Fatalf("sbatch printed %q", res.Stdout)
+	}
+	stack.WaitFor(t, stack.WaitDeadline, "the pre-staging job to finish", func() bool {
+		j, ok := cl.Plat.Job(id)
+		return ok && j.Finished
+	})
+	line, err := os.ReadFile(filepath.Join(alloc, "stage-result"))
+	if err != nil || !regexp.MustCompile(`^outcome=ok image_seconds=\d+ image_built=true checkpoint_seconds=\d+ files=\d+ mismatched=0\n$`).Match(line) {
+		t.Fatalf("the pre-staging job left %q (%v), want a cold staging that ended ok", line, err)
+	}
+	t.Logf("pre-staged on the stand-in, as the pre-staging row stages: %s", strings.TrimSpace(string(line)))
+}
+
+// standInHubFiles is the stand-in Hub's checkpoint as its identity record lists it, read over plain net/http, less what
+// the stage package's own rule skips (stage.SkippedFiles; the launch names no --load-format): the files whose
+// "present and matching" lines a warm start must show, from outside the run.
+func standInHubFiles(t *testing.T, hubURL string) []string {
+	t.Helper()
+	get := func(url string) []byte {
+		resp, err := http.Get(url)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s: %d %v", url, resp.StatusCode, err)
+		}
+		return b
+	}
+	var listing []struct{ Path, Type string }
+	if err := json.Unmarshal(get(hubURL+"/api/models/"+stack.CheckpointRepo+"/tree/"+stack.CheckpointRev), &listing); err != nil {
+		t.Fatal(err)
+	}
+	var files []agentapi.FileDigest
+	for _, e := range listing {
+		if e.Type == "file" {
+			files = append(files, agentapi.FileDigest{Path: e.Path})
+		}
+	}
+	skip := stage.SkippedFiles(files, "")
+	var out []string
+	for i, f := range files {
+		if !skip[i] {
+			out = append(out, f.Path)
+		}
+	}
+	sort.Strings(out)
+	if len(out) < 2 {
+		t.Fatalf("the stand-in's Hub lists %d files the stager stages", len(out))
+	}
+	return out
+}
+
+// TestStandInNowServeWarm is alpha-athena-now-serve's live steps over the stand-in, warm: the pre-staging row's helper
+// stages first (preStage), and then row A's real agent must find its cache warm, by its own lines, and the row PASSES
+// with every check, the requeue's three parts and the warm start among them. The record's reading of the agent's log is
+// held to the stand-in Hub's file list less the stager's skips, read here from outside the run.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInNowServeWarm(t *testing.T) {
+	var hubURL string
+	s, _ := standInNowServeAfter(t, true, func(cl *stack.Cluster, w world) {
+		preStage(t, cl, w)
+		for _, e := range w.env {
+			if v, ok := strings.CutPrefix(e, "HF_ENDPOINT="); ok {
+				hubURL = v
+			}
+		}
+	})
+	if err := s.stop.problem(); err != nil {
+		t.Fatalf("the stack did not stop cleanly, whatever the run ended with: %v", err)
+	}
+	post, _ := os.ReadFile(filepath.Join(s.cfg.Out, PostsFile))
+	t.Logf("%s's text to post:\n%s", s.row.Name, post)
+	if s.err != nil || len(s.failures) > 0 {
+		t.Fatalf("%s ended with %v and failures %v; want a PASS, warm", s.row.Name, s.err, s.failures)
+	}
+	if !strings.Contains(string(post), s.row.Name+": PASS") {
+		t.Errorf("the text to post does not say PASS")
+	}
+	b, err := os.ReadFile(filepath.Join(s.cfg.Out, RecordFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec struct {
+		Observation NowServeObs `json:"observation"`
+	}
+	if err := json.Unmarshal(b, &rec); err != nil {
+		t.Fatal(err)
+	}
+	o := rec.Observation
+	want := standInHubFiles(t, hubURL)
+	got := append([]string(nil), o.Warm.Files...)
+	sort.Strings(got)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("the run expected the files %q, the Hub less the stager's skips is %q", got, want)
+	}
+	// The agent's own lines, in its first staging: the image's digest already staged and verified, each file present and
+	// matching, and no build, before the first worker's start.
+	image, files, build, worker := false, map[string]bool{}, false, false
+	for _, l := range o.Warm.Log {
+		if worker {
+			break
+		}
+		switch l.Kind {
+		case LineWorker:
+			worker = true
+		case LineBuild:
+			build = true
+		case LineImage:
+			image = image || (l.Reason == StagedAlreadyVerified && slices.Contains(l.Tokens, stack.EngineDigest))
+		case LineFile:
+			for _, tok := range l.Tokens {
+				files[tok] = true
+			}
+		}
+	}
+	if !worker || build || !image {
+		t.Errorf("the agent's log, to its first worker's start (seen %t): a build %t; the image's digest already staged and verified %t", worker, build, image)
+	}
+	for _, f := range want {
+		if !files[f] {
+			t.Errorf("the agent's log has no %q line for %s", StagedPresentMatching, f)
+		}
+	}
+	r := o.Requeue
+	if !r.Accepted || r.EndReason != v1alpha1.ReasonRequeued || r.NewAllocations != 0 || r.NewInstances != 0 || !r.AllocationReleased || !r.JobEnded {
+		t.Errorf("the requeue's three parts: %+v", r)
+	}
 }

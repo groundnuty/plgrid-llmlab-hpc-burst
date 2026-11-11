@@ -47,6 +47,9 @@ var alphaShapes = []alphaShape{
 	{"tunnel-hour-athena", "TestTunnelHour", "athena", "partition plgrid-gpu-a100, 1 GPU, 16 CPU, 125Gi, time limit 02:17:00, one job, no requeue", "", "SEEDACCT-a100", true},
 	{"gpu-accounting-helios", "TestGPUAccounting", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 117Gi, time limit 00:05:00, one job, no requeue, each job to start within 10 min", "now", "SEEDACCT-gh", false},
 	{"gpu-accounting-athena", "TestGPUAccounting", "athena", "partition plgrid-gpu-a100, 1 GPU, 16 CPU, 125Gi, time limit 00:05:00, one job, no requeue", "", "SEEDACCT-a100", false},
+	// Row A on plgrid-now (issue #376): the A100 node type's per-GPU size, a lease of 48 minutes (the hour less its start
+	// wait of 10 and 2 of cleanup, the science agent's ruling Q3), no QOS (the partition's own applies).
+	{"alpha-athena-now-serve", "TestAlphaAthenaNowServe", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:48:00, one job, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
 }
 
 // alphaStubGo stands in for go in an alpha row's prepare step: build into a directory, and test -c.
@@ -91,6 +94,8 @@ case $mode in
   midnight) echo "--- PASS: $t (0.01s)"; echo PASS; echo "$STUB_NEXT_DATE" > "$LIVE_FAKE_DATE_FILE" ;;
   late-hidden) echo "hb-late-bbbbbbbbbbbb" >> "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/job-tags.txt"; echo "9003|hb-late-bbbbbbbbbbbb|normal|plgrid|PENDING" >> "$STUB_STATE/queue"; echo "--- PASS: $t (0.01s)"; echo PASS ;;
   not-run) echo "step: a job did not start within the start-wait bound of 10m0s; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  # The marker of row A's refused requeue (internal/alpha, NotRunNote), on whatever row runs it.
+  not-run-row-a) echo "$HPCBURST_ALPHA_ROW: the scheduler refused the requeue of the run's own job (the scheduler's words: scontrol: error: Requested operation is presently disabled for job [job]); the run's other checks passed; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   # The marker of a first job that ran and a second that never started (internal/alpha, NotRunNote).
   not-run-second) echo "$HPCBURST_ALPHA_ROW: the first job ran and the second never started; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   sleep) leave; touch "$STUB_STATE/started"; exec sleep 3600 ;;
@@ -137,6 +142,7 @@ func (w *world) alphaSettings(mutate func(m map[string]string)) {
 		m["LIVE_DIALHOME_ADDR"] = "gateway-seed.example:29999"
 		m["LIVE_BIN_DIR"] = bin
 		m["LIVE_OWNER_GO_HELIOS_NOW"] = time.Now().UTC().Format("2006-01-02")
+		m["LIVE_OWNER_GO_ATHENA_NOW"] = time.Now().UTC().Format("2006-01-02")
 		m["LIVE_FRONT_HOST_LABEL"] = exampleFrontLabel
 		if mutate != nil {
 			mutate(m)
@@ -150,7 +156,7 @@ func newAlphaWorld(t *testing.T) *world {
 	w := newWorld(t)
 	w.alphaSettings(nil)
 	w.useAlphaStubs()
-	for _, s := range []string{"hack/build-agents.sh", "hack/fetch-frp.sh"} {
+	for _, s := range []string{"hack/build-agents.sh", "hack/fetch-frp.sh", "hack/build-stage-helper.sh"} {
 		if err := os.Chmod(filepath.Join(w.repo, s), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -197,8 +203,13 @@ func TestTheScriptsShapesAreThePackagesRows(t *testing.T) {
 			qos = "-"
 		}
 		// name | host | profile | partition | qos | slot | account key | GPUs | CPUs | memory | time limit | timeout | extra
-		if f[1] != r.Cluster || f[2] != r.Cluster || f[3] != r.Partition || f[4] != qos || f[7] != "1" {
+		if f[1] != r.Cluster || f[2] != r.ProfileName() || f[3] != r.Partition || f[4] != qos || f[7] != "1" {
 			t.Errorf("%s: shape %v differs from the package's row %+v", r.Name, f, r)
+		}
+		// A row on Athena's one-job partition holds the owner's shared slot, which the slot guard reads by this column
+		// (check_slot): the partition is the slot's token there (issue #376).
+		if r.Partition == "plgrid-now" && f[5] != "plgrid-now" {
+			t.Errorf("%s runs on plgrid-now and the shape names the slot %q: the slot guard would not read it", r.Name, f[5])
 		}
 		var h, m, s int
 		if _, err := fmt.Sscanf(f[10], "%d:%d:%d", &h, &m, &s); err != nil {
@@ -365,7 +376,7 @@ func TestAnAlphaRunBuildsBeforeTheSlotAndGivesTheTestItsEnvironment(t *testing.T
 				"HPCBURST_ALPHA_DIALHOME_MODE=direct", "HPCBURST_ALPHA_DIALHOME_ADDR=gateway-seed.example:29999",
 				"HPCBURST_ALPHA_HOST_LOCK=" + filepath.Join(w.dir, "locks", s.host+".lock"),
 				"HPCBURST_ALPHA_CREDENTIALS=" + filepath.Join(w.dir, s.host+".ssh"), "HPCBURST_ALPHA_BIN_DIR=" + filepath.Join(w.dir, "bindir")}
-			if s.slot != "" {
+			if s.hasQOS() {
 				want = append(want, "HPCBURST_ALPHA_QOS="+s.slot)
 			}
 			for _, x := range want {
@@ -400,7 +411,9 @@ func TestAnAlphaRunBuildsBeforeTheSlotAndGivesTheTestItsEnvironment(t *testing.T
 	}
 }
 
-func (s alphaShape) hasQOS() bool { return s.slot != "" }
+// hasQOS says the row runs under a QOS of its own: the slot is a QOS (Helios's now). On Athena's plgrid-now the slot is the
+// partition, whose own QOS applies, and no --qos is sent (issue #376).
+func (s alphaShape) hasQOS() bool { return s.slot != "" && s.slot != "plgrid-now" }
 
 // Each alias stands for its Athena row alone (issue #386: alpha graduates on Athena, and the Helios rows are beta's, run by
 // their own names), so one test binary runs, its PASS is the row's, and no Helios row is run or named. The helios row
@@ -568,7 +581,7 @@ func TestASignalDuringAnAlphaRunRunsTheCleanup(t *testing.T) {
 }
 
 func TestPlanNamesTheAlphaRowsWhenTheStackChanges(t *testing.T) {
-	alphaRows := []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-athena", "tunnel-hour-helios"}
+	alphaRows := []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-athena", "tunnel-hour-helios", "alpha-athena-now-serve"}
 	// The rehearsal row (issue #193) builds and runs the same stack, on this host: it is a local row.
 	stackRows := append(append([]string{}, alphaRows...), "rehearsal-part3")
 	cases := []struct {
@@ -580,7 +593,7 @@ func TestPlanNamesTheAlphaRowsWhenTheStackChanges(t *testing.T) {
 		{"a stack binary", "cmd/hpcburst-front/main.go", "package main\n\nimport _ \"example.test/fx/internal/stack\"\n\nfunc main() { _ = 1 }\n", stackRows},
 		{"the example the rows apply", "examples/provider-athena-a100.yaml", "kind: Provider\nx: 1\n", []string{"alpha-athena-handover"}},
 		{"a package the accounting rows and conformance run, not the stack", "internal/providerctl/providerctl.go", "package providerctl\n\nimport _ \"example.test/fx/internal/slurm\"\n\nvar X = 1\n",
-			[]string{"conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-helios", "reach-athena", "reach-helios", "reach-host-dialed-athena", "reach-host-dialed-helios"}},
+			[]string{"conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-helios", "reach-athena", "reach-helios", "reach-host-dialed-athena", "reach-host-dialed-helios", "alpha-athena-now-stage"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -840,10 +853,14 @@ func TestHostDialedModeSettingsAreRefusedWhenWrong(t *testing.T) {
 func TestTheRowsThatHoldTheOwnersSlotForHoursNeedTheOwnersGo(t *testing.T) {
 	today := time.Now().UTC().Format("2006-01-02")
 	yesterday := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
-	rows := []struct{ row, hold string }{
+	rows := []struct{ row, setting, hold string }{
 		// The note states the pend and the hold (issue #222): the owner reads both before saying yes.
-		{"alpha-helios-nooverlap", "may pend up to 30 min in the queue (then it is cancelled by its tag and the run is NOT RUN), then holds QOS now's GPU for about 2 h 40 min; the owner's go is needed (the development rule on #145)"},
-		{"tunnel-hour-helios", "may pend up to 30 min in the queue (then it is cancelled by its tag and the run is NOT RUN), then holds QOS now's GPU for about 2 h 20 min; the owner's go is needed (the development rule on #145)"},
+		{"alpha-helios-nooverlap", "LIVE_OWNER_GO_HELIOS_NOW", "may pend up to 30 min in the queue (then it is cancelled by its tag and the run is NOT RUN), then holds QOS now's GPU for about 2 h 40 min; the owner's go is needed (the development rule on #145)"},
+		{"tunnel-hour-helios", "LIVE_OWNER_GO_HELIOS_NOW", "may pend up to 30 min in the queue (then it is cancelled by its tag and the run is NOT RUN), then holds QOS now's GPU for about 2 h 20 min; the owner's go is needed (the development rule on #145)"},
+		// Row A on plgrid-now (issue #376, Q6): its start wait of 10 minutes, then the hour it holds the slot: 10 + 48 + 2.
+		{"alpha-athena-now-serve", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
+		// The pre-staging row (issue #376): its start wait, then 10 + 30 + 2 = 42 minutes, rounded up to ten.
+		{"alpha-athena-now-stage", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 0 h 50 min; the owner's go is needed (the development rule on #145)"},
 	}
 	for _, c := range rows {
 		for _, stale := range []struct{ name, value string }{{"missing", ""}, {"yesterday's", yesterday}, {"1", "1"}, {"yes", "yes"}} {
@@ -851,16 +868,16 @@ func TestTheRowsThatHoldTheOwnersSlotForHoursNeedTheOwnersGo(t *testing.T) {
 				w := newAlphaWorld(t)
 				w.alphaSettings(func(m map[string]string) {
 					if stale.value == "" {
-						delete(m, "LIVE_OWNER_GO_HELIOS_NOW")
+						delete(m, c.setting)
 					} else {
-						m["LIVE_OWNER_GO_HELIOS_NOW"] = stale.value
+						m[c.setting] = stale.value
 					}
 				})
 				res := w.run(nil, "--run", c.row, "--yes")
 				if res.code != 3 {
 					t.Fatalf("exit %d, want 3:\n%s", res.code, res.out)
 				}
-				w.contains(res, c.row+": "+c.hold, "setting LIVE_OWNER_GO_HELIOS_NOW must hold today's UTC date ("+today+")")
+				w.contains(res, c.row+": "+c.hold, "setting "+c.setting+" must hold today's UTC date ("+today+")")
 				if w.stateFile("go-argv") != "" || w.stateFile("sbatch-argv") != "" || w.stateFile("cancelled") != "" {
 					t.Errorf("a refused run built, estimated or cancelled something: %s %s", w.stateFile("go-argv"), w.stateFile("sbatch-argv"))
 				}
@@ -910,26 +927,36 @@ func TestTheRowsThatHoldTheOwnersSlotForHoursNeedTheOwnersGo(t *testing.T) {
 	}
 }
 
-// The script's hold and the package's are one fact each.
+// The script's hold and the package's are one fact each, and so are the owner's go each row needs and its setting
+// (Row.OwnerGo): the rows that hold QOS now's GPU for hours, and the plgrid-now deployment rows (issue #376, Q6), which
+// hold the slot for up to the hour, so that a length alone could not tell them from reach-athena's 13 minutes.
 func TestTheScriptsSlotHoldIsThePackagesRoundedUp(t *testing.T) {
 	b, err := os.ReadFile(scriptPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := map[string]string{}
+	got, key := map[string]string{}, map[string]string{}
 	for _, l := range block(t, string(b), "OWNER GO") {
 		f := strings.Split(l, "|")
 		if len(f) != 3 {
 			t.Fatalf("owner-go row %q has %d fields, want 3", l, len(f))
 		}
-		got[f[0]] = f[2]
+		got[f[0]], key[f[0]] = f[2], f[1]
 	}
-	for _, r := range alpha.Rows() {
+	all := slices.Concat(alpha.Rows(), alpha.AccountingRows(), alpha.ReachRows(), alpha.HostDialedRows(), alpha.StageRows())
+	for name := range got {
+		if _, ok := alpha.RowByName(name); !ok {
+			t.Errorf("the owner-go table names %s, which no package row is", name)
+		}
+	}
+	for _, r := range all {
 		min, ok := got[r.Name]
-		wantHours := r.SlotHold > time.Hour // the rows that hold the slot for hours need the go
-		if wantHours != ok {
-			t.Errorf("%s: slot hold %s, in the owner-go table: %t", r.Name, r.SlotHold, ok)
+		if (r.OwnerGo != "") != ok || (ok && key[r.Name] != r.OwnerGo) {
+			t.Errorf("%s: the package's owner's go is %q, the table's %q (in it: %t)", r.Name, r.OwnerGo, key[r.Name], ok)
 			continue
+		}
+		if r.OwnerGo != "" && r.SlotHold <= 0 {
+			t.Errorf("%s needs the owner's go and holds no slot", r.Name)
 		}
 		if ok {
 			rounded := int((r.SlotHold + 10*time.Minute - time.Nanosecond) / (10 * time.Minute) * 10)

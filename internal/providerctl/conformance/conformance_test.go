@@ -257,6 +257,11 @@ type world struct {
 	// failedIsStart makes untilRuns take a Failed Allocation as a job that started (the host-dialed rows: an agent that
 	// stops at its start ends its job Failed, which their verdict names).
 	failedIsStart bool
+	// keepStaging says the Provider stages in the profile's own staging directory, which the agent stages in and keeps,
+	// not a run's own: the pre-staging row of issue #376 (nowstage_test.go). The cleanup then removes no staging
+	// directory; the row removes its Allocation's own directory, the credential first, on every exit of the run
+	// (removeOwnAllocation, a cleanup its body registers before the submit).
+	keepStaging bool
 }
 
 // limit is the time limit of the Allocations newAlloc makes.
@@ -308,6 +313,8 @@ type worldKit struct {
 	hostDialed *hostDialedRig
 	// poll is the controller's and the listing's poll interval; zero is worldPollInterval.
 	poll time.Duration
+	// keepStaging is world.keepStaging.
+	keepStaging bool
 }
 
 // worldPollInterval is a live world's poll interval, the controller's and the Provider's listing's: a running job is
@@ -330,7 +337,7 @@ func newWorld(t *testing.T) *world {
 
 // buildWorld is the world over the settings and the kit.
 func buildWorld(t *testing.T, s settings, kit worldKit) *world {
-	w := &world{t: t, s: s, p: newPrivate(t, s.out), jobIDs: map[string]bool{}, began: time.Now()}
+	w := &world{t: t, s: s, p: newPrivate(t, s.out), jobIDs: map[string]bool{}, began: time.Now(), keepStaging: kit.keepStaging}
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -416,7 +423,9 @@ func (w *world) cleanup() {
 			w.p.log("cleanup cancel %s: %s %v", r.JobID, r.Outcome, r.Err)
 		}
 	}
-	if w.batch != nil && w.cap != nil {
+	if w.keepStaging {
+		w.t.Logf("the staging directory is the profile's own, which the agent stages in: it is kept, less the run's Allocation directory")
+	} else if w.batch != nil && w.cap != nil {
 		if err := removeStaging(context.Background(), w.batch, w.cap); err != nil {
 			w.p.log("cleanup staging: %v", err)
 			w.t.Errorf("the run's staging directory was not removed: %v", err)

@@ -145,9 +145,20 @@ const (
 
 var EngineGauges = []string{GaugeRunning, GaugeWaiting, GaugeTPOT, GaugePreempt, GaugePrefixQ, GaugePrefixHit, GaugeKV, GaugeGenerated}
 
-// notReported are the gauges the served engines do not export: the engine
-// double's no-prefix-cache-metrics mode (part3EngineModes).
-var notReported = map[string]bool{GaugePrefixQ: true, GaugePrefixHit: true}
+// The engine gauges an engine does not export, which the checks treat as never
+// known (HBEP-8, Unknown samples: reason not_reported). It is the caller's, for the
+// engine its run serves (issue #376, P3):
+//   - DoubleNotReported is the rehearsal's engine double in its
+//     no-prefix-cache-metrics mode (internal/rehearsal/scenario, part3EngineModes):
+//     the two prefix-cache counters;
+//   - VLLMNotReported is a real vLLM v0.32.0, which exports every one of them: it
+//     registers both prefix-cache counters unconditionally, at 0 with prefix
+//     caching off (HBEP-8, Test plan, "An engine double that omits the
+//     prefix-cache counter lines", citing vLLM's loggers.py, lines 660-677).
+var (
+	DoubleNotReported = map[string]bool{GaugePrefixQ: true, GaugePrefixHit: true}
+	VLLMNotReported   = map[string]bool{}
+)
 
 // seriesNames are a gauge's series in the exposition: a summary's _sum and
 // _count (HBEP-8: no quantiles), else its own name.
@@ -169,6 +180,9 @@ type GaugeView struct {
 	// minGenerated is a lower bound on generation_tokens_total: the tokens
 	// the front saw the Instance generate.
 	MinGenerated float64
+	// NotReported are the engine gauges the Instance's engine does not export
+	// (DoubleNotReported, VLLMNotReported); nil is an engine that exports them all.
+	NotReported map[string]bool
 }
 
 // GaugeProblems holds one Instance's series to HBEP-8 (Unknown samples;
@@ -203,7 +217,7 @@ func GaugeProblems(ss []Sample, v GaugeView) []string {
 		switch {
 		case !v.Reported:
 			wantReason = v.StaleReason
-		case notReported[g]:
+		case v.NotReported[g]:
 			wantReason = "not_reported"
 		}
 		if wantReason == "" {
@@ -284,7 +298,7 @@ func PendingGaugeProblems(ss []Sample, v GaugeView) (problems []string, none boo
 // and fresh, and the reads with no series of the Instance at all (unserved:
 // a controller that does not know the Instance yet), which hold no gauge
 // sample either.
-func RestartReadProblems(reads [][]Sample, uid string) (problems []string, stale, fresh, unserved int) {
+func RestartReadProblems(reads [][]Sample, uid string, notReported map[string]bool) (problems []string, stale, fresh, unserved int) {
 	w := map[string]string{"instance_uid": uid, "worker": "worker-0"}
 	for i, ss := range reads {
 		if len(Find(ss, "hpcburst_instance_info", map[string]string{"instance_uid": uid})) == 0 {

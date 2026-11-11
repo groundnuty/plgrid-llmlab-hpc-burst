@@ -15,13 +15,13 @@ import (
 func TestEveryRowRunsOnAShippedProfileThatListsItsPartition(t *testing.T) {
 	for _, r := range Rows() {
 		t.Run(r.Name, func(t *testing.T) {
-			spec := shippedProfile(t, r.Cluster) // reads profiles/<cluster>.yaml; a missing file fails
+			spec := shippedProfile(t, r.ProfileName()) // reads profiles/<name>.yaml; a missing file fails
 			listed := false
 			for _, p := range spec.Partitions {
 				listed = listed || p.Name == r.Partition
 			}
 			if !listed {
-				t.Errorf("row %s runs on partition %s, which profiles/%s.yaml does not list", r.Name, r.Partition, r.Cluster)
+				t.Errorf("row %s runs on partition %s, which profiles/%s.yaml does not list", r.Name, r.Partition, r.ProfileName())
 			}
 		})
 	}

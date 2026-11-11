@@ -25,7 +25,7 @@ var (
 
 // stackRowTests are the tests of the rows internal/alpha runs.
 var stackRowTests = map[string]string{"alpha-athena-handover": "TestAlphaAthenaHandover", "alpha-helios-nooverlap": "TestAlphaHeliosNoOverlap",
-	"tunnel-hour-helios": "TestTunnelHour", "tunnel-hour-athena": "TestTunnelHour"}
+	"tunnel-hour-helios": "TestTunnelHour", "tunnel-hour-athena": "TestTunnelHour", "alpha-athena-now-serve": "TestAlphaAthenaNowServe"}
 
 // B5 and B6 of the review of PR 284: a row's timeout must let its bound fire first, so a test fails when it can fire
 // before them. The sum comes from the row's own bounds and the real waits, never from a number kept beside the table.
@@ -47,7 +47,7 @@ func TestEveryRowsTimeoutIsDerivedFromItsBounds(t *testing.T) {
 			if _, ok := alpha.RowByName(name); !ok {
 				t.Errorf("%s has a test here, and no row in internal/alpha", name)
 			}
-		case strings.HasPrefix(name, "conformance-"), strings.HasPrefix(name, "gpu-accounting-"), strings.HasPrefix(name, "reach-"):
+		case strings.HasPrefix(name, "conformance-"), strings.HasPrefix(name, "gpu-accounting-"), strings.HasPrefix(name, "reach-"), name == alpha.NowStageRow().Name:
 			// internal/providerctl/conformance, TestEveryRowsTimeoutIsAboveTheWorstCaseItsSourceAddsUpTo.
 		case name == "real-engine":
 			timeout, err := strconv.Atoi(f[11])

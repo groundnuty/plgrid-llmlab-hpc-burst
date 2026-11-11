@@ -4,6 +4,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/enginedouble"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal"
 )
 
@@ -11,6 +12,9 @@ import (
 // parsed: the reach-host-dialed rows' dry runs reach the fake Slurm through a user-level sshd whose forced command is
 // this binary again (hostdialed_dry_test.go). It then removes the agent the dry runs built.
 func TestMain(m *testing.M) {
+	// The pre-staging row's dry run gives its helper the engine double's fake Apptainer, which is this binary under the
+	// name apptainer (enginedouble.Install).
+	enginedouble.Dispatch()
 	rehearsal.Dispatch()
 	code := m.Run()
 	if dryAgent.dir != "" {

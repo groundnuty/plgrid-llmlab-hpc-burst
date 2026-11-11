@@ -149,6 +149,13 @@ var noOverlapFaults = []string{"nocap", "nogap", "noslot", "cut", "no-stream", "
 var tunnelFaults = []string{"short", "cut", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition", "adds-other-cluster", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "past-deadline", "past-drain", "no-drain-start", "stream-cut-error", "reconnect", "disconnected", "sparse-samples", "late-first-sample", "no-concurrency", "slow-streams", "no-idle-gap", "no-long-stream", "no-back-to-back", "no-load-rate", "no-large", "large-apart", "response-overlap", "no-upload-rate", "no-download-rate", "upload-not-under-load"}
 var accountingFaults = []string{"node-two", "node-none"}
 
+// nowServeFaults are row A's failing faults (issue #376; internal/alpha, run_test.go's nowServeCases); its NOT RUNs are
+// TestRowAsNotRunsThroughTheScript's.
+var nowServeFaults = []string{"cut", "short-stream", "past-deadline", "unattributed", "no-responses", "no-restart", "two-restarts", "wrong-identity",
+	"events-missing", "events-unchecked", "gauge-problem", "not-ready", "untagged", "wrong-partition", "default-lease", "short-lease", "duplicate-tag",
+	"extra-allocation", "requeue-refused-cut", "requeue-refused-no-drain", "requeue-not-requeued", "requeue-replacement", "requeue-not-released",
+	"requeue-no-drain", "requeue-not-attempted"}
+
 // accountingPassing: a cluster that does not confine devices lists the whole node to nvidia-smi, and one that
 // does not set CUDA_VISIBLE_DEVICES leaves nvidia-smi the witness; neither is a false failure.
 var accountingPassing = []string{"smi-whole-node", "cvd-unset"}
@@ -165,6 +172,7 @@ var dryRows = []dryRow{
 	{"tunnel-hour-athena", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", tunnelFaults, nil, nil},
 	{"gpu-accounting-helios", confPkg, "HPCBURST_LIVECHECKS_CONF_TEST", accountingFaults, accountingPassing, []string{"slot-held"}},
 	{"gpu-accounting-athena", confPkg, "HPCBURST_LIVECHECKS_CONF_TEST", accountingFaults, accountingPassing, nil},
+	{"alpha-athena-now-serve", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", nowServeFaults, nil, nil},
 }
 
 func containsString(list []string, s string) bool {

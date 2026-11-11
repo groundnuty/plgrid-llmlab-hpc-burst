@@ -255,6 +255,11 @@ func (s watchedSteps) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, er
 	return s.drySteps.TunnelHour(ctx, p)
 }
 
+func (s watchedSteps) NowServe(ctx context.Context, p Plan) (NowServeObs, error) {
+	s.scenarioBegins()
+	return s.drySteps.NowServe(ctx, p)
+}
+
 // resetsAtStart is a Steps whose WatchResets returns a count read earlier. It is the support of one mutant of hack/mutate-alpha.sh, which
 // makes Run read the count at its start by wrapping its steps in it (the count would then lose every reset that comes after); no test uses it.
 type resetsAtStart struct {
