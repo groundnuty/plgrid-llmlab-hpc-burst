@@ -1,0 +1,122 @@
+# One-off, never merged (copy it to .github/workflows/s17-measure.yml on a DO-NOT-MERGE draft PR whose head merges
+# this spike's branch): spike S17's measurements (issue #413, HBEP-6 open question 12's open items) on GitHub-hosted
+# runners. Four groups, each its own job on a fresh runner, three repetitions each:
+#   fifo        direct mode, layouts (a) and (c) through a shared FIFO link at three queue depths, and through the fair
+#               link, during a 64 MiB download
+#   ssh         host-dialed mode through S15's bridge and through a real ssh client, a real sshd (internal/rehearsal)
+#               and srun's standard streams
+#   concurrent  1, 2 and 4 downloads at once, in direct mode and through real ssh
+#   many        10 and 50 Instances, each with a bulk request every 10 s, in direct mode
+# Each job records the runner's CPU model and count with its results and uploads its runs.csv, samples, host
+# counters and raw files as an artifact. The jobs use no secret and write nothing to the repository.
+name: s17-measure
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/s17-measure.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    name: s17 ${{ matrix.group }} rep ${{ matrix.rep }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        rep: [1, 2, 3]
+        include:
+          - group: fifo
+            args: ''
+          - group: ssh
+            args: ''
+          - group: concurrent
+            args: '--modes direct,ssh --layouts a,c --concurrent 1,2,4'
+          - group: many
+            args: '--ready-timeout 180'
+        group: [fifo, ssh, concurrent, many]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          # The PR's own head, whose parent is the spike branch's head, not the merge with main.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # The ssh and concurrent groups run OpenSSH's sshd as this user, in inetd mode, through internal/rehearsal's
+      # login node: no service and no root. As in ci.yml: installed only when missing, never started as a service.
+      - name: Provide OpenSSH's sshd
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+            sudo chmod 755 /usr/sbin/policy-rc.d
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+            sudo rm -f /usr/sbin/policy-rc.d
+          fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
+          /usr/sbin/sshd -V 2>&1 | head -1
+          echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
+
+      - name: The runner
+        run: |
+          git log -1 --format='%P' | sed 's/^/parents /'
+          python3 spikes/s17/s17.py host
+          nproc
+          lscpu | grep -E '^(Model name|CPU\(s\)|Thread|Core|Socket)'
+          free -m
+          ulimit -n; ulimit -Hn
+          sysctl net.ipv4.tcp_wmem net.ipv4.tcp_rmem net.core.rmem_max net.ipv4.tcp_tw_reuse
+          python3 --version
+
+      - name: Fetch the pinned binaries and build the harness
+        env:
+          S17_BIN: ${{ runner.temp }}/s17bin
+        run: bash spikes/s17/fetch.sh
+
+      - name: The harness's unit tests
+        working-directory: spikes/s17
+        run: |
+          go vet ./...
+          go test -count=1 ./...
+          python3 -m unittest discover -s tests -v
+
+      - name: The measurements
+        env:
+          S17_BIN: ${{ runner.temp }}/s17bin
+          S17_WORK: ${{ runner.temp }}/s17w
+          S17_RESULTS: ${{ runner.temp }}/s17results/${{ matrix.group }}/rep${{ matrix.rep }}
+          # The ssh node's scratch directory (sshd's files, the relay socket and the control socket have path limits).
+          S17_TMP: /tmp
+        run: |
+          python3 spikes/s17/s17.py run --group ${{ matrix.group }} --rep ${{ matrix.rep }} ${{ matrix.args }}
+          python3 spikes/s17/s17.py leftovers
+          python3 - <<'PY'
+          import csv, os
+          path = os.path.join(os.environ["S17_RESULTS"], "runs.csv")
+          keys = ["group", "mode", "layout", "queue", "queue_bytes", "concurrent", "instances", "status", "valid", "recv_rate_median",
+                  "gap_ref_p99_ms", "gap_bulk_p99_ms", "gap_bulk_max_ms", "gap_p99_ms", "ttfb_p50_ms", "ttfb_p99_ms",
+                  "cpu_ref_front", "cpu_bulk_front", "tls_accepts_per_s", "overlap_min", "drops_api", "frpc_relogins", "node_leaked"]
+          print("\t".join(keys))
+          for r in csv.DictReader(open(path)):
+              print("\t".join(str(r.get(k, "")) for k in keys))
+          PY
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: s17-${{ matrix.group }}-rep${{ matrix.rep }}
+          path: ${{ runner.temp }}/s17results/${{ matrix.group }}/rep${{ matrix.rep }}
+          retention-days: 14
+          if-no-files-found: error
