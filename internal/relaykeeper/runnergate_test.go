@@ -12,6 +12,7 @@ package relaykeeper
 import (
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -296,33 +297,103 @@ func TestAGatePassedStartThatNeverResolvesKeepsHolding(t *testing.T) {
 // instance no longer being the tag's current one (the Runner): it never
 // launches, nothing is recorded or marked, and the restored A's relays start
 // and carry bytes.
+//
+// The Runner's queue may coalesce B and the restored A, or take B first;
+// which it does depended on timing (the science agent's ask on #356). So the
+// test takes both paths every run, each forced, and says which it took:
+//   - coalesced: the worker is held inside a re-sent A's op while B and the
+//     restored A arrive, so the queue holds the restored A alone;
+//   - in turn: the worker takes B, its instance installed, before the
+//     restored A is sent.
 func TestTheFirstAAttemptIsRefusedAfterAToBToA(t *testing.T) {
-	w := newRKWorld(t)
-	j := w.submit("hb-rk-aba-0123456789ab", 30*time.Second)
-	rg := newRealRig(t, w, rigOptions{})
-	hold := newLatch()
-	rg.plan(func(hw *hookedWant) {
-		if hw.n == 0 {
-			hw.afterList = hold
+	for _, coalesced := range []bool{true, false} {
+		name := "B taken in turn"
+		if coalesced {
+			name = "B and the restored A coalesced"
 		}
-	})
-	a := w.entry(j, genOne)
-	accepted(t, rg.k, rg.set(rkProv, true, a))
-	old := rg.hooked(j.tag, genOne)
-	rkWaitFor(t, time.Minute, "both first A listings passed and waiting", func() bool { return old.count(func() int { return old.afterWait }) == 2 })
-	accepted(t, rg.k, rg.set(rkProv, true, w.entry(j, genTwo)))
-	accepted(t, rg.k, rg.set(rkProv, true, a))
-	rg.k.mu.Lock()
-	cur := rg.k.wanted[rkProv][j.tag]
-	rg.k.mu.Unlock()
-	if cur.entry != a || cur.inc == old.w.Incarnation {
-		t.Fatalf("the restored A's Want %+v: want A's entry under a new incarnation, not %d", cur, old.w.Incarnation)
+		t.Run(name, func(t *testing.T) {
+			w := newRKWorld(t)
+			j := w.submit("hb-rk-aba-0123456789ab", 30*time.Second)
+			stall := make(chan struct{})
+			stalling := make(chan struct{}, 1)
+			var hold atomic.Bool
+			rg := newRealRig(t, w, rigOptions{runner: func(o *OwnerRunnerOptions) {
+				o.beforeOp = func(string, string) {
+					if hold.Load() {
+						select {
+						case stalling <- struct{}{}:
+						default:
+						}
+						<-stall
+					}
+				}
+			}})
+			t.Cleanup(func() {
+				hold.Store(false)
+				select {
+				case <-stall:
+				default:
+					close(stall)
+				}
+			})
+			paused := newLatch()
+			rg.plan(func(hw *hookedWant) {
+				if hw.n == 0 {
+					hw.afterList = paused
+				}
+			})
+			a := w.entry(j, genOne)
+			accepted(t, rg.k, rg.set(rkProv, true, a))
+			old := rg.hooked(j.tag, genOne)
+			rkWaitFor(t, time.Minute, "both first A listings passed and waiting", func() bool { return old.count(func() int { return old.afterWait }) == 2 })
+			p := rg.hr.OwnerRunner.prov(rkProv)
+			curInc := func() uint64 {
+				p.mu.Lock()
+				defer p.mu.Unlock()
+				if in := p.cur[j.tag]; in != nil {
+					return in.want.Incarnation
+				}
+				return 0
+			}
+			keeperInc := func() uint64 {
+				rg.k.mu.Lock()
+				defer rg.k.mu.Unlock()
+				return rg.k.wanted[rkProv][j.tag].inc
+			}
+			if coalesced {
+				hold.Store(true)
+				accepted(t, rg.k, rg.set(rkProv, true, a)) // a re-sent A: the worker is held inside its op
+				select {
+				case <-stalling:
+				case <-time.After(time.Minute):
+					t.Fatal("the worker did not take the re-sent A within a minute")
+				}
+				accepted(t, rg.k, rg.set(rkProv, true, w.entry(j, genTwo)))
+				accepted(t, rg.k, rg.set(rkProv, true, a))
+				if n := p.queue.pending(); n != 1 {
+					t.Fatalf("pending Wants of the tag with the worker held: %d, want 1, the restored A alone", n)
+				}
+				hold.Store(false)
+				close(stall)
+			} else {
+				accepted(t, rg.k, rg.set(rkProv, true, w.entry(j, genTwo)))
+				b := keeperInc()
+				rkWaitFor(t, time.Minute, "B's instance installed", func() bool { return curInc() == b })
+				accepted(t, rg.k, rg.set(rkProv, true, a))
+			}
+			restored := keeperInc()
+			if restored == old.w.Incarnation {
+				t.Fatalf("the restored A's incarnation %d is the first A's", restored)
+			}
+			rkWaitFor(t, time.Minute, "the restored A's instance installed", func() bool { return curInc() == restored })
+			t.Logf("path: coalesced=%v (the restored A's incarnation %d, the first A's %d)", coalesced, restored, old.w.Incarnation)
+			paused.open()
+			refusedAtTheGate(t, rg, old, j)
+			rg.waitPair(rkProv, j.tag)
+			for _, ch := range agentapi.RelayChannels {
+				rkRoundTrip(t, j, ch, 16<<10)
+			}
+			rg.noEnds()
+		})
 	}
-	hold.open()
-	refusedAtTheGate(t, rg, old, j)
-	rg.waitPair(rkProv, j.tag)
-	for _, ch := range agentapi.RelayChannels {
-		rkRoundTrip(t, j, ch, 16<<10)
-	}
-	rg.noEnds()
 }

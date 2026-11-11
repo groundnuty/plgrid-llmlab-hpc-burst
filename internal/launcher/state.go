@@ -102,6 +102,11 @@ type State struct {
 	// Frps is the frps the supervisor runs (HBEP-6). Nil when no frps was found at up, or no
 	// controllers run.
 	Frps *FrpsRunConfig `json:"frps,omitempty"`
+	// RelayKeeper is up --relay-keeper: the supervisor runs the relay keeper beside the
+	// controller, which hands it its host-dialed relays (HBEP-6, The relay keeper; HBEP-11). It is
+	// set only in host-dialed mode, with controllers. down removes this record; the keeper's own
+	// state file stays, and the switch-back guard reads that (relaykeeper.go).
+	RelayKeeper bool `json:"relay_keeper,omitempty"`
 }
 
 // ControllerConfig is the launcher's choice of what to run beside k3s.

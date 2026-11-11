@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/relaykeeper"
 )
 
 // RestoreOptions are the inputs of Restore.
@@ -22,6 +24,9 @@ type RestoreReport struct {
 	Version  string `json:"version"`  // the release that wrote the restored store: what up starts next
 	Backup   string `json:"backup"`   // what was restored
 	Replaced string `json:"replaced"` // where the store it replaced was moved; empty when there was none
+	// KeeperFencesCleared is whether the relay keeper's accepted Lease epochs were cleared: there
+	// was a keeper state file (HBEP-6, The relay keeper).
+	KeeperFencesCleared bool `json:"keeper_fences_cleared,omitempty"`
 }
 
 // Restore puts a backup's store and server token back in place of the current ones, with the host
@@ -48,6 +53,19 @@ func Restore(o RestoreOptions) (*RestoreReport, error) {
 		return nil, err
 	}
 	defer unlock()
+	// The relay keeper's lock first, when it ever ran here: a keeper that runs (one started by
+	// hand) refuses the restore before anything changes, a stale launcher record included (the
+	// review of PR 361). Held to the end, so none starts meanwhile.
+	keeperState := relaykeeper.StatePath(l.dir)
+	var releaseKeeper func()
+	if _, err := os.Stat(keeperState); err == nil {
+		if releaseKeeper, err = relaykeeper.LockState(l.dir); err != nil {
+			return nil, fmt.Errorf("nothing was restored or cleared: %w (a host may be running here; stop it with hpcburst down)", err)
+		}
+		defer releaseKeeper()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("the relay keeper's state file %s: %w", keeperState, err)
+	}
 	st, err := l.loadState()
 	if err != nil {
 		return nil, err
@@ -73,6 +91,16 @@ func Restore(o RestoreOptions) (*RestoreReport, error) {
 	// Move the current store aside rather than copy over it: a write-ahead log the later release
 	// left next to state.db would otherwise be replayed onto the restored file.
 	rep := &RestoreReport{Version: info.Version, Backup: src}
+	// A restored store rolls the Providers' Leases back, so the relay keeper's accepted Lease
+	// epochs are cleared, or it would refuse the real leaders' lower epochs (HBEP-6, The relay
+	// keeper). Under the keeper's lock, taken before anything else changed.
+	if releaseKeeper != nil {
+		if err := relaykeeper.ClearLeaseEpochsHeld(keeperState); err != nil {
+			return nil, fmt.Errorf("nothing of the store was restored: the relay keeper's accepted Lease epochs could not be cleared: %w", err)
+		}
+		rep.KeeperFencesCleared = true
+		logf(o.Log, "cleared the relay keeper's accepted Lease epochs in %s", keeperState)
+	}
 	server := filepath.Dir(l.sqliteDir())
 	if err := os.MkdirAll(server, 0o700); err != nil {
 		return nil, err
