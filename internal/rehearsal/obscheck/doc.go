@@ -12,10 +12,11 @@
 // Only _test.go files import it, as they do internal/rehearsal, and TestOnlyTestFilesImportIt holds that, so no
 // product binary links it.
 //
-// What is the stand-in's and not yet a parameter: notReported lists the two prefix-cache gauges that the
-// rehearsal's engine double does not export (part3EngineModes, its no-prefix-cache-metrics mode), so the checks
-// treat them as never known. A row on a real engine that exports them has to make that a parameter first: this
-// package moved the checks as they were, and changed no behaviour.
+// The gauges an engine does not export are the caller's (GaugeView.NotReported, RestartReadProblems's notReported):
+// the rehearsal passes DoubleNotReported, the two prefix-cache gauges its engine double does not export
+// (part3EngineModes, its no-prefix-cache-metrics mode), and a row on a real vLLM passes VLLMNotReported, which is
+// empty (issue #376, P3). The move of P2 changed no behaviour; P3 made the set a parameter, with the rehearsal's
+// value the moved one.
 //
 // Provenance: new package; moved from internal/rehearsal/scenario's part3_events_test.go, part3_metrics_test.go and
 // part3_guards_test.go (issues #146 and #193; issue #376, P2). The move is mechanical: each declaration is the

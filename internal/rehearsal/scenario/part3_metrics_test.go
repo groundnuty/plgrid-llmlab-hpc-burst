@@ -159,7 +159,7 @@ func (p3 *part3) gauges(d *depRun, when string) {
 		return len(g) == 1 && g[0].Value >= min, fmt.Sprintf("%s: %v, want at least %v", obscheck.GaugeGenerated, g, min)
 	})
 	view := obscheck.GaugeView{UID: string(in.UID), Namespace: in.Namespace, Name: in.Name, Deployment: d.Name, Provider: d.Provider,
-		GPUModel: "example-gpu", Reported: true, MinGenerated: min}
+		GPUModel: "example-gpu", Reported: true, MinGenerated: min, NotReported: obscheck.DoubleNotReported}
 	for _, p := range obscheck.GaugeProblems(ss, view) {
 		r.t.Errorf("gauges %s, primary %s: %s", when, in.Name, p)
 	}
@@ -170,7 +170,7 @@ func (p3 *part3) gauges(d *depRun, when string) {
 		}
 		pending = append(pending, x.Name)
 		pv := obscheck.GaugeView{UID: string(x.UID), Namespace: x.Namespace, Name: x.Name, Deployment: d.Name, Provider: d.Provider,
-			GPUModel: "example-gpu", StaleReason: "stale"}
+			GPUModel: "example-gpu", StaleReason: "stale", NotReported: obscheck.DoubleNotReported}
 		problems, none := obscheck.PendingGaugeProblems(ss, pv)
 		for _, p := range problems {
 			r.t.Errorf("gauges %s, pending successor %s: %s", when, x.Name, p)
