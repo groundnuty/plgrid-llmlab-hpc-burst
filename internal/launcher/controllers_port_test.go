@@ -46,6 +46,14 @@ func TestAFixturesControllerPortCannotBeTakenBeforeTheFakeBinds(t *testing.T) {
 	f.supervise(SuperviseOptions{})
 	first := f.awaitRunning()
 	awaitHealthy(t, addr)
+	// SO_REUSEPORT on the fake's listener lets only a process that sets it too bind beside the fake;
+	// a foreign process that does not (a plain listener, as every test that plays one is) still cannot.
+	if l, err := net.Listen("tcp", addr); err == nil {
+		t.Cleanup(func() { l.Close() })
+		t.Errorf("a plain listener took %s beside the running fake", addr)
+	} else if !errors.Is(err, syscall.EADDRINUSE) {
+		t.Errorf("a plain listener on %s beside the running fake: %v, want address already in use", addr, err)
+	}
 	// It exits, the supervisor starts it again, and it binds the same port again.
 	f.steer("exit", "1")
 	f.await("a second start", func(e EntryRecord) bool {
