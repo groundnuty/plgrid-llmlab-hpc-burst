@@ -34,7 +34,10 @@ func ehStripped() http.Header {
 		"X-Envoy-Upstream-Rq-Timeout-Ms": {"1"},
 		"x-envoy-retry-on":               {"5xx,reset"},
 		"X-ENVOY-ORIGINAL-PATH":          {"/admin"},
-		"X-Forwarded-For":                {"10.1.2.3", "192.168.7.7"},
+		// The values are private (RFC 1918) addresses on purpose: Envoy deems
+		// a request internal when X-Forwarded-For holds a private address,
+		// so a private value is what makes this request model the attack.
+		"X-Forwarded-For": {"10.1.2.3", "192.168.7.7"},
 	}
 }
 
