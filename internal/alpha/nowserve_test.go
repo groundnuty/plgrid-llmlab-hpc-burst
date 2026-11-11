@@ -16,11 +16,14 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/yaml"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
 // The plgrid-now rows run under profiles/athena-now.yaml as shipped (Q1): their clock is that file's margins, read from
@@ -460,5 +463,48 @@ func TestTheExpectedFilesAreTheRecordsLessWhatTheStagerSkips(t *testing.T) {
 	}, "\n")
 	if e := warmStartShownByTheAgentsOwnLog(WarmObs{LogRead: true, ImageDigest: digest, Files: files, Log: ParseAgentLog([]byte(log))}); e != nil {
 		t.Errorf("a warm log with no line for the skipped files is not shown: %+v", e)
+	}
+}
+
+// Row A's start wait runs from the deployment's creation, not from its job's submission (the science agent's condition
+// on it: an expiry is NOT RUN, never a FAIL). Through the live steps' own waiter: the deployment created 10 minutes and a
+// second ago, its job submitted just now and pending, the wait in the queue the operator allows two hours. A clock from
+// the submission would wait ten minutes more; the creation's has run out, so the waiter ends at its first look with the
+// start wait's NotStartedError, which is NOT RUN with no failure (Run, then the script's exit 3:
+// hack/livechecks, TestRowAsNotRunsThroughTheScript). A waiter on the submission's clock would not answer within the
+// test's 30 s.
+func TestRowAsStartWaitRunsFromTheDeploymentsCreation(t *testing.T) {
+	row := rowOf("alpha-athena-now-serve")
+	submitted := metav1.NewTime(time.Now())
+	pending := allocVersion(v1alpha1.AllocationPending, "", nil)
+	pending.Allocation.Status.AtProvider.SubmitTime = &submitted
+	waiter := func(created time.Time) chan error {
+		r := &liveRun{t: t, guardFail: make(chan struct{}), limit: row.Lease, dw: 7 * time.Minute, created: created,
+			allocsFn: func() []stack.AllocObservation { return []stack.AllocObservation{pending} },
+			lookFn: func(context.Context) (Look, error) {
+				return Look{Clock: time.Now(), Jobs: []provider.Job{waitingJob("p", v1alpha1.AllocationPending)}}, nil
+			}}
+		done := make(chan error, 1)
+		go func() { done <- r.firstJobStarted(Plan{Row: row, PendingMax: 2 * time.Hour, Logf: t.Logf}) }()
+		return done
+	}
+	done := waiter(time.Now().Add(-10*time.Minute - time.Second))
+	select {
+	case err := <-done:
+		var ns *NotStartedError
+		if !errors.As(err, &ns) || !ns.StartWait || ns.Bound != 10*time.Minute || !NotRun(row, err) {
+			t.Fatalf("firstJobStarted = %v, want the NOT RUN of the start wait of 10 min", err)
+		}
+		cfg := Config{Row: row, Out: filepath.Join(t.TempDir(), "out"), FrontLabel: testFrontLabel}
+		rec, rerr := NewRecorder(cfg.Out)
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		failures, rerr := Run(context.Background(), cfg, notStarted{failedSteps: failedSteps{err: err}}, rec, t.Logf)
+		if len(failures) != 0 || !NotRun(row, rerr) {
+			t.Errorf("Run = %v, %v; want NOT RUN with no failure", failures, rerr)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the waiter is still waiting: the start wait is not counted from the deployment's creation")
 	}
 }
