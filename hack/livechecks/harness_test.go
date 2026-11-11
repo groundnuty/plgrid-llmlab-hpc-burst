@@ -73,6 +73,13 @@ type world struct {
 	repo, dir, state, bin string
 	settings, base, tmp   string
 	reports               map[*exec.Cmd]string // the reaper's report of each command built by command
+	leakSink              errorfer             // tests only: where noLeak reports; nil means t
+}
+
+// errorfer is the part of *testing.T that noLeak reports through.
+type errorfer interface {
+	Helper()
+	Errorf(format string, args ...any)
 }
 
 func (w *world) out() string { return filepath.Join(w.dir, "out") }
@@ -315,20 +322,31 @@ func (w *world) noLeftoverProcess(cmd *exec.Cmd) {
 // noLeak fails when the screen output carries a seeded secret or a private path.
 func (w *world) noLeak(out string) {
 	w.t.Helper()
+	var sink errorfer = w.t
+	if w.leakSink != nil {
+		sink = w.leakSink
+	}
 	for _, s := range leaks(out, append(append([]string{}, leakSeeds...), w.dir, os.TempDir()+"/")) {
-		w.t.Errorf("the output carries %q:\n%s", s, out)
+		sink.Errorf("the output carries %q:\n%s", s, out)
 	}
 }
 
+// hashRunMin is the shortest run of hex digits that counts as a hash: the
+// output holds the plan's range, two 40-digit commit hashes, and a run's name
+// with a 9-digit abbreviated one (hack/live-checks.sh, rev-parse --short=9).
+// Git's shortest abbreviation is 7, but a 7- or 8-digit run is no hash this
+// output prints, and one is how a seed hides: "job424242" has the run
+// "b424242".
+const hashRunMin = 9
+
 // leaks returns the seeds the output carries. A seed made only of hex digits
-// (a port, a job id) counts only as a whole token: where it is neither
-// preceded nor followed by another hex digit. The output holds commit hashes
-// that are new on every run (the plan prints its range's two, and a run's
-// name carries an abbreviated one), and a hex-only seed turns up inside one by
-// chance (#366: "40321" inside c0 40321 99613...). A leak of such a seed is
-// the value itself, delimited by anything but a hex digit (":40321", "=40321",
-// "gateway-40321"), and is still caught. Every other seed is a plain
-// substring: it holds a character no hash does.
+// (a port, a job id) is not counted where it lies inside a hash: inside a
+// maximal run of hex digits, bounded by other characters or the ends of the
+// output, that is hashRunMin or more long. Such runs are new on every run, and
+// a hex-only seed turns up inside one by chance (#366: "40321" inside
+// c0 40321 99613...). Anywhere else the seed is a leak, whatever its
+// neighbours: ":40321", "probe40321", "jobs/job424242.out", "40321bytes". Every
+// other seed is a plain substring: it holds a character no hash does.
 func leaks(out string, seeds []string) []string {
 	var found []string
 	for _, s := range seeds {
@@ -340,8 +358,11 @@ func leaks(out string, seeds []string) []string {
 }
 
 func containsSeed(out, seed string) bool {
-	if seed == "" || !isHex(seed) {
-		return seed != "" && strings.Contains(out, seed)
+	if seed == "" {
+		return false
+	}
+	if !isHex(seed) {
+		return strings.Contains(out, seed)
 	}
 	for from := 0; ; {
 		i := strings.Index(out[from:], seed)
@@ -349,8 +370,14 @@ func containsSeed(out, seed string) bool {
 			return false
 		}
 		start := from + i
-		end := start + len(seed)
-		if (start == 0 || !isHexDigit(out[start-1])) && (end == len(out) || !isHexDigit(out[end])) {
+		lo, hi := start, start+len(seed)
+		for lo > 0 && isHexDigit(out[lo-1]) {
+			lo--
+		}
+		for hi < len(out) && isHexDigit(out[hi]) {
+			hi++
+		}
+		if hi-lo < hashRunMin {
 			return true
 		}
 		from = start + 1
