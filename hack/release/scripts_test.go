@@ -620,6 +620,26 @@ func TestArchiveIsTheSameBytesWhenBuiltAgain(t *testing.T) {
 	}
 }
 
+// A seed that holds an frpc beside the frps, as a cache of hack/fetch-frp.sh's does, does not put it in
+// the archive: the archive carries frps in bin/ and each architecture's frpc in agent-builds/.
+func TestArchiveDropsAnFrpcThatASeedHoldsBesideTheFrps(t *testing.T) {
+	f := newFixture(t)
+	write(t, filepath.Join(f.seed, "bin", "frp-0.71.1", "frpc"), seedFiles["agent-builds/frpc-x86_64"], 0o755)
+	out, code := f.build(t, "--tag", fixtureTag)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+	names, _ := readArchive(t, filepath.Join(f.out, "hpcburst-"+fixtureTag+"-linux-amd64.tar.gz"))
+	for _, n := range names {
+		if n == "bin/frp-0.71.1/frpc" {
+			t.Errorf("the archive holds %s", n)
+		}
+	}
+	if len(names) != len(archiveFiles)+len(archiveDirs) {
+		t.Errorf("the archive has %d entries, want the layout's %d", len(names), len(archiveFiles)+len(archiveDirs))
+	}
+}
+
 // A run with no tag is the dry run the workflow's hand-started runs make: the archive is named by the
 // pseudo-version of the commit, which its binaries report.
 func TestArchiveWithoutATagIsNamedByThePseudoVersionOfTheCommit(t *testing.T) {

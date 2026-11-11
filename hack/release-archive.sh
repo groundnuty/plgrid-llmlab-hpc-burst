@@ -139,11 +139,13 @@ if [ -n "$seed" ]; then
 fi
 if [ "$nofetch" = 0 ]; then
   bash hack/fetch-k3s.sh "$stage/bin" "$K3S_DIR_VERSION"
-  # frps and frpc land together; the archive carries frps here, and the amd64 frpc below, in agent-builds.
+  # frps and frpc land together (see below for the frpc).
   mkdir -p "$stage/bin/frp-$FRP_VERSION"
   bash hack/fetch-frp.sh "$stage/bin/frp-$FRP_VERSION"
-  rm -f "$stage/bin/frp-$FRP_VERSION/frpc"
 fi
+# The archive carries frps here, and the amd64 frpc in agent-builds: whatever put an frpc beside this
+# frps, a fetch or a seed (a cache holds both), it does not go in.
+rm -f "$stage/bin/frp-$FRP_VERSION/frpc"
 if [ "$nofetch" = 0 ]; then
   bash hack/fetch-frp.sh --agent-builds "$stage/agent-builds"
 fi
