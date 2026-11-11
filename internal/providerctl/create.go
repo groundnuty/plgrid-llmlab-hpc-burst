@@ -56,6 +56,11 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 			return managed.ExternalCreation{}, errors.New("refusing to submit: " + inUse)
 		}
 	}
+	// Keeper mode: no new Allocation is admitted while the keeper is
+	// unreachable (HBEP-6, The relay keeper, as #360 amends it).
+	if why := e.s.keeperUnavailable(e.now()); why != "" {
+		return managed.ExternalCreation{}, errors.New("refusing to submit: " + why)
+	}
 	name := meta.GetExternalName(a)
 	if tag := v1alpha1.JobTag(a.Namespace, a.Name, a.UID); name != tag {
 		return managed.ExternalCreation{}, fmt.Errorf("refusing to submit: the external name is not this Allocation's job tag %s", tag)
@@ -126,6 +131,14 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 			}
 			return managed.ExternalCreation{}, e.rejectedWith(wctx, a, claim, why, true)
 		}
+	}
+	// Keeper mode: admission read again, as one state, right before the
+	// submission, since the keeper may have become unreachable or refused the
+	// claim while the files were staged (the delta review of PR 360).
+	if why := e.s.keeperAdmission(e.now()); why != "" {
+		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		return managed.ExternalCreation{}, e.rejectedWith(wctx, a, claim, "refusing to submit: "+why, false)
 	}
 	e.p.SetBusy(name, true)
 	id, outcome, serr := e.p.Submit(ctx, req)
