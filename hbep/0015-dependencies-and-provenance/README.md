@@ -10,6 +10,7 @@ This HBEP decides where the repository records the origin and version of each pa
 - Field lessons live in a public catalogue, [`docs/lessons/README.md`](../../docs/lessons/README.md), with stable IDs `L-<section>.<item>`. HBEPs cite lessons by these IDs.
 - "Pinned versions" lists each pin that a design decision rests on, with its reason and what triggers a bump.
 - A bump is one PR. It re-checks every HBEP citation of the bumped source, and the live tests under the changed code are run again after it merges.
+- "Releases" defines a release: a tag on `main` with a self-contained archive, its checksums and its notes. The first is `v0.1.0-alpha.1`, once alpha graduates.
 
 It is written for authors and reviewers of HBEPs and code PRs.
 
@@ -97,6 +98,7 @@ Open questions 1 to 5 were removed with the licence policy and `build/dependenci
 | A design or paper borrowed | the adopting HBEP's "Designs and published work borrowed" table | HBEP review |
 | A field lesson | `docs/lessons/README.md`, cited by ID in the HBEP's "Field lessons answered" table | the lesson ID check |
 | A pin that a design decision rests on | Pinned versions, below | the bump PR's review |
+| A release of this framework | its tag, its archive's `SHA256SUMS`, and `docs/releases/<tag>.md` (Releases, below) | the release PR's review and the release workflow |
 
 - **`build/dependencies.yaml` does not exist on `main`, and this HBEP does not create it.** The pins files above already hold each binary's sha256, and the launcher embeds them. A central list would be a second copy to keep in step.
 - HBEP-4, HBEP-6 and HBEP-11 named `build/dependencies.yaml` as the record of frp's and k3s's checksums. They now name the pins files, by erratum in the same PR as this HBEP's move to implementable.
@@ -183,30 +185,29 @@ The pins that a design decision rests on, as on `main` on 2026-11-01, plus rows 
 
 ### Releases
 
-A release is a tag on `main` with its binaries, their checksums and its notes (owner decision, 11 Nov 2026: "Tag an alpha release" once alpha graduates).
-- **The first tag** is `v0.1.0-alpha.1`. It's made on `main`'s merge commit at the moment every alpha criterion on Athena has passed, linked from issue #145. Later alpha tags count up (`-alpha.2`), and beta's begin at `v0.2.0-beta.1`. The tag follows Go's module versioning, so `go install …@v0.1.0-alpha.1` works.
-- **Its binaries:**
-  - **which:** `hpcburst` (the launcher), `hpcburst-controller` and `hb-agent`, each for linux amd64 and arm64, so six;
-  - **how:** built with `-trimpath`, from the tagged commit, with Go from `hack/go-pins.txt`;
-  - **the version:** each carries the tag in its build information and prints it with a `version` subcommand. Not `--version`: `hpcburst up --version` already names the k3s release;
-  - **checksums:** a `SHA256SUMS` file lists the six. That's the integrity record; signing and attestations stay out of scope (Non-goals).
-- **What it doesn't ship:** third-party binaries. The launcher fetches frp and k3s from their pins files, checked by sha256, as today. The release notes list the pins the release was tested with: k3s, frp, vLLM's image digest, Go, and, from beta, Envoy.
+A release is a tag on `main` with its archive, its checksums and its notes (owner decisions, 11 Nov 2026: "Tag an alpha release" once alpha graduates, and "Bundle k3s and frp", [issue #145, comment 6790758697](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/145#issuecomment-6790758697) and PR #389).
+
+- **The first tag** is `v0.1.0-alpha.1`, a valid Go pre-release version. It's made after the alpha status PRs (HBEP-1) have merged, on a `main` commit with no code change since the commits the alpha evidence ran on. Later alpha tags count up (`-alpha.2`), and beta's begin at `v0.2.0-beta.1`.
+- **The archive** is one per host architecture, linux amd64 for alpha, laid out as `up` expects. Plain names, so `up` finds its siblings:
+  - `bin/`: `hpcburst`, `hpcburst-controller` and `hpcburst-front`, built from the tag with the pinned Go (`hack/go-pins.txt`), `CGO_ENABLED=0` and `-trimpath`, with VCS stamping on. Each reports the tag from its build information. The release fails unless `go version -m` shows the tag, without `+dirty`.
+  - `bin/` also holds the pinned k3s and frps, each checked against the pins file the launcher embeds before it's packed (`internal/launcher/k3s-pins.txt`, `frp-pins.txt`), so `up --bin-dir` needs no clone.
+  - `agent-builds/`: `hb-agent-x86_64` and `hb-agent-aarch64`, built by `hack/build-agents.sh` at the tag. Each one's identity is its sha256, the agentDigest, which that script makes the same on any machine; their `-version` prints what that script gives. Beside them sit the pinned frpc builds that `hack/fetch-frp.sh --agent-builds` places.
+- **Checksums:** a `SHA256SUMS` file lists the archive and every file in it. It catches corruption, not a replaced asset, since it sits beside them; signing and attestations stay out of scope (Non-goals; Security).
 - **Its notes:**
   - GitHub's generated notes from the merged pull requests since the previous tag;
-  - a short summary written by the science agent, giving the platforms measured, the HBEPs at their stage, and the stated limits that still apply;
-  - the date.
+  - a summary committed by PR before the tag, as `docs/releases/<tag>.md`, so the push scan and a review see it, and published with `--notes-file`. It gives the platforms measured, the HBEPs at their stage, the stated limits that still apply, and the pins the release carries.
 
-  No results or data of the study, and no cluster paths, job IDs or addresses (AGENTS.md).
+  The summary follows HBEP-1's content rules: no results or data of the www-2027 study, no credentials, cluster paths, job IDs, host or account names.
 - **How it's made:**
-  - a workflow that runs on a pushed `v*` tag;
-  - it builds the six binaries with the pinned Go;
-  - it runs CI's required checks on that commit again, and fails if any fails;
-  - it writes `SHA256SUMS` and creates the GitHub release.
+  1. A workflow runs on a pushed `v*` tag. It fails unless the tagged commit is on `origin/main` (`git merge-base --is-ancestor`), and it calls CI's workflow for the required checks, through `workflow_call`, rather than copying them.
+  2. It builds the archive and `SHA256SUMS`, and creates a draft release with `gh release create --draft`.
+  3. The rehearsal (`hack/rehearsal.sh` with `REHEARSAL_PREBUILT=1`, issue #146) runs from the draft's archive on the single-user host.
+  4. Only then is the release published.
 
-  It reuses GitHub Releases and `gh release create`, and adds no release tool, so it adds no dependency to pin. Only the owner, or an agent on the owner's dated go, pushes a tag.
-- **Before the first tag:**
-  - a dry run of the workflow by `workflow_dispatch`, which builds and checksums the six binaries and publishes nothing;
-  - `hpcburst up` run from the dry run's launcher, with its controller and agent, on the single-user host's rehearsal (HBEP-11).
+  It reuses GitHub Releases and the GitHub CLI already on the runner image, and adds no release tool.
+- **Who tags:** the owner, or an agent on the owner's go, dated and recorded on #145. Since every agent pushes through the owner's login (HBEP-1), this is a procedure, not an enforced rule.
+- **A failed release:** the tag stays, and no release is published. The fix ships as the next tag (`-alpha.N+1`). A tag is never moved or deleted, since a Go version names an immutable snapshot.
+- **Not built:** arm64 host binaries. No check runs them yet; the aarch64 agent is built because GH200 nodes need it.
 
 ### Test plan
 
@@ -228,11 +229,13 @@ A release is a tag on `main` with its binaries, their checksums and its notes (o
 
 ### Security
 
+
 - `go.sum` checksums and the Go checksum database pin module contents; the `go` command checks them on every download.
 - Every binary the framework downloads is checked against its sha256 pin before it runs. Images are pulled by digest.
 - The dependency questions ask about side effects at import.
 - The catalogue's content rules keep private infrastructure data out of a public repository.
 - Accepted limits: no signing, attestations or reproducible builds for now. Software the site provides is not verified by us.
+- **Releases:** the release workflow needs `contents: write`, unlike CI, which reads no secret and pushes nothing. `SHA256SUMS` sits beside the assets, so it catches corruption, not a replaced asset. Both are accepted limits.
 
 ### Graduation criteria
 
@@ -271,6 +274,7 @@ Sources were read on 2026-10-30, except where another date is given.
 
 | Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
 |---|---|---|---|
+| GitHub CLI and GitHub Releases | [cli/cli](https://github.com/cli/cli), MIT; GitHub Releases is a service | The release workflow (Releases): `gh release create`, with the CLI already on the runner image |
 | Go modules and the Go checksum database | golang/go, https://go.dev/ref/mod | BSD-3-Clause (GitHub licence field, read 2026-11-01) | The record and checksums of Go dependencies (`go.mod`, `go.sum`) |
 
 ### Designs and published work borrowed
@@ -309,4 +313,4 @@ Sources were read on 2026-10-30, except where another date is given.
 ## Amendments
 
 - **2026-11-11: Envoy's pin** (Pinned versions). An amendment, as HBEP-5's open question 2 requires: each router's row is added by an amendment merged before the code that adopts it. Envoy v1.40.2 joins the table, with its reason (spike S13) and its bump trigger (S13's harness and S2c). Before, the table had no router.
-- **2026-11-11: releases** (Releases). An amendment by the owner's decision of 11 Nov 2026 ("Tag an alpha release", recorded on #145). A release is a `v*` tag on `main` with the framework's six binaries, their `SHA256SUMS` and its notes, made by a workflow that reuses GitHub Releases. The first is `v0.1.0-alpha.1`, once every alpha criterion on Athena has passed. Before, the project had no release.
+- **2026-11-11: releases** (Summary; Where each origin is recorded; Releases; Security; Prior art). An amendment by the owner's decisions of 11 Nov 2026 ("Tag an alpha release", [issue #145, comment 6790758697](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/145#issuecomment-6790758697); "Bundle k3s and frp", PR #389). A release is a `v*` tag on `main`: one self-contained archive per host architecture, holding our three host binaries, the pinned k3s and frps, the two agents built by `hack/build-agents.sh` and their frpc, with `SHA256SUMS` and notes. It's built and checked by a workflow that reuses GitHub Releases, published only after the rehearsal runs from the draft. The first is `v0.1.0-alpha.1`, after the alpha status PRs. Before, the project had no release.
