@@ -1,6 +1,6 @@
 # Spike S17: the open items of the bulk layout (HBEP-6, open question 12)
 
-Issue #413. S15 (#336) measured one bulk transfer at a time and HBEP-6 adopted layout (c) for bulk paths: a separate frpc with `tcpMux = false`, its own proxy and a second frps. This spike runs the five items S15 left open, as four measurements: a FIFO bottleneck shared by the two frpc's connections, the relay's real `ssh` and `srun` buffers, several bulk transfers at once, and many Instances (the handshake per bulk request, and several Instances behind one link) with a bulk request each per 10 s. The measurements ran on GitHub-hosted runners, three repetitions on fresh runners (111 runs); the development VM ran only builds, smoke runs and the harness's own tests. Every run was valid and finished: **layout (c) still protects the token streams under all four, with one condition on the first**, and the third and fourth cost almost nothing.
+Issue #413. S15 (#336) measured one bulk transfer at a time and HBEP-6 adopted layout (c) for bulk paths: a separate frpc with `tcpMux = false`, its own proxy and a second frps. This spike runs the five items S15 left open, as four measurements: a FIFO bottleneck shared by the two frpc's connections, the relay's real `ssh` and `srun` buffers, several bulk transfers at once, and many Instances (the handshake per bulk request, and several Instances behind one link) with a bulk request each per 10 s. The measurements ran on GitHub-hosted runners, three repetitions on fresh runners (111 runs: 96 measured, 15 calibrations); the development VM ran only builds, smoke runs and the harness's own tests. Every measured run was valid and every run finished: **layout (c) still protects the token streams under all four, with one condition on the first**, and the third and fourth cost almost nothing.
 
 ## Findings
 
@@ -98,7 +98,7 @@ Every process the harness starts binds a kernel-chosen port on 127.0.0.1 and rep
 
 ## Results
 
-All tables come from `results/<group>/rep{1,2,3}/`, rendered by `python3 summarize.py tables`. Every run finished (`status ok`) and was valid.
+All tables come from `results/<group>/rep{1,2,3}/`, rendered by `python3 summarize.py tables`. Every run finished (`status ok`); the 96 measured runs were all valid (15 more are calibrations).
 
 **How to read the tables:** gaps are pooled over the repetitions' valid runs (each row pools three runs, one per repetition); a "p99" rests on 3,300 or more gaps during transfers in every row of the first three groups. The reference gap's p99 is 51.4–52.1 ms in every row. Ranges in brackets are the minimum and maximum over the three repetitions. `python3 summarize.py verify` recomputes from the committed files every value the tables take from `runs.csv`: 1,656 CPU figures from the samples (within 0.00005 cores), 87 transfer summaries, 96 validity verdicts, 72 gap summaries and 24 many-Instances summaries, 24 TLS rates, 111 link connection counts, 36 queue statistics and 159 connection maxima; it finds no mismatch, and it exits 1 on one.
 
