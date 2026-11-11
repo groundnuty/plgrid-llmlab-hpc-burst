@@ -95,7 +95,7 @@ case $mode in
   late-hidden) echo "hb-late-bbbbbbbbbbbb" >> "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/job-tags.txt"; echo "9003|hb-late-bbbbbbbbbbbb|normal|plgrid|PENDING" >> "$STUB_STATE/queue"; echo "--- PASS: $t (0.01s)"; echo PASS ;;
   not-run) echo "step: a job did not start within the start-wait bound of 10m0s; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   # The marker of row A's refused requeue (internal/alpha, NotRunNote), on whatever row runs it.
-  not-run-row-a) echo "$HPCBURST_ALPHA_ROW: the scheduler refused the requeue of the run's own job (the scheduler says the operation is disabled for this job); the run's other checks passed; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  not-run-row-a) echo "$HPCBURST_ALPHA_ROW: the scheduler refused the requeue of the run's own job (the scheduler's words: scontrol: error: Requested operation is presently disabled for job [job]); the run's other checks passed; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   # The marker of a first job that ran and a second that never started (internal/alpha, NotRunNote).
   not-run-second) echo "$HPCBURST_ALPHA_ROW: the first job ran and the second never started; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   sleep) leave; touch "$STUB_STATE/started"; exec sleep 3600 ;;

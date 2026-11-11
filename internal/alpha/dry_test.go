@@ -905,6 +905,12 @@ func (d *drySteps) warm() WarmObs {
 	return w
 }
 
+// dryRefusalText is the scheduler's refusal of the dry run's requeue, as Slurm words ESLURM_DISABLED for a job: it names
+// the job's ID.
+func dryRefusalText(id string) string {
+	return "scontrol: error: Requested operation is presently disabled for job " + id
+}
+
 // requeue is row A's last step over the fake cluster.
 func (d *drySteps) requeue(p Plan, n int, id, tag string) RequeueObs {
 	ro := RequeueObs{Attempted: !d.fault("requeue-not-attempted"), DrainingSeen: !d.fault("requeue-no-drain") && !d.fault("requeue-refused-no-drain")}
@@ -913,8 +919,9 @@ func (d *drySteps) requeue(p Plan, n int, id, tag string) RequeueObs {
 		return ro
 	}
 	if strings.HasPrefix(d.cfg.DryFault, "requeue-refused") {
-		// The scheduler refused: the job runs on until the drain ends it.
-		ro.Refusal = refusalDisabled
+		// The scheduler refused, in Slurm's own words for a job that may not be requeued, which name the job's ID: the
+		// job runs on until the drain ends it.
+		ro.Refusal = RequeueReplyOf(1, nil, []byte(dryRefusalText(id)), id).Refusal
 		d.tick(time.Minute)
 		d.end(n, id)
 		return ro

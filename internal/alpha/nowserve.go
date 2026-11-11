@@ -29,8 +29,9 @@ package alpha
 // not judged; the requeue's kill cuts it.
 //
 // A requeue the scheduler refuses is NOT RUN, exit 3 (ErrRequeueRefused),
-// never a pass, with the reason posted as a fixed label; the run's other checks
-// are judged first, and a failure there wins.
+// never a pass, posted with the scheduler's own words, every job ID and path in
+// them replaced (requeue.go); the run's other checks are judged first, and a
+// failure there wins.
 
 import (
 	"crypto/sha256"
@@ -117,77 +118,6 @@ func NowStageRow() Row {
 	return Row{Name: "alpha-athena-now-stage", Cluster: "athena", Profile: "athena-now", Partition: "plgrid-now", GPUs: 1, Lease: NowStageLease,
 		Budget: NowStageBudget, SlotHold: NowStartWait + NowStageLease + 2*time.Minute, StartWait: NowStartWait, MostJobs: 1,
 		PostsTo: "#145 and #376", Timing: AthenaNowTiming(), OwnerGo: OwnerGoAthenaNow}
-}
-
-// ErrRequeueRefused is what row A's scenario returns, beside what it saw, when the scheduler refused the requeue of the
-// run's own job (Q5): the requeue was never put to the test. Run judges the rest of the run, and a failure there wins;
-// with none, the run is NOT RUN (NotRun), its record and text to post written with the reason, never a pass.
-var ErrRequeueRefused = errors.New("the scheduler refused the requeue of the run's own job")
-
-// RequeueRefusedError is ErrRequeueRefused with the reason, a fixed label (RequeueReplyOf).
-type RequeueRefusedError struct{ Reason string }
-
-func (e *RequeueRefusedError) Error() string {
-	return fmt.Sprintf("%v (%s)", ErrRequeueRefused, e.Reason)
-}
-
-// Is makes the error ErrRequeueRefused.
-func (e *RequeueRefusedError) Is(target error) bool { return target == ErrRequeueRefused }
-
-// refusalOf is the reason a refusal gives.
-func refusalOf(err error) string {
-	var r *RequeueRefusedError
-	if errors.As(err, &r) {
-		return r.Reason
-	}
-	return refusalOther
-}
-
-// RequeueHoldLine is the scontrol line that requeues the run's own job and holds it (Q5: requeuehold, not a plain
-// requeue, which would leave the job pending without a hold, free to run a second time in the slot). jobID must be
-// digits only: it is checked to be the run's by its ID and tag first (ourJob).
-func RequeueHoldLine(jobID string) (string, error) {
-	if _, err := strconv.ParseUint(jobID, 10, 64); err != nil || strings.TrimLeft(jobID, "0123456789") != "" {
-		return "", errors.New("a job ID must be digits only")
-	}
-	return "scontrol requeuehold " + jobID, nil
-}
-
-// The reasons of a refused requeue, as posted: fixed labels, since the scheduler's own text can carry the job's ID.
-const (
-	refusalDisabled  = "the scheduler says the operation is disabled for this job"
-	refusalDenied    = "the scheduler denied the operation to this user"
-	refusalNotNow    = "the scheduler says the job is not one it can requeue now"
-	refusalNoCommand = "the scheduler's scontrol does not take requeuehold"
-	refusalOther     = "another refusal; the scheduler's text is in the private log"
-)
-
-// RequeueReply is what the scontrol call of the requeue said: accepted (exit 0), or refused, with a fixed label.
-type RequeueReply struct {
-	Accepted bool
-	Refusal  string
-}
-
-// RequeueReplyOf reads the call's exit code and its output. A transport failure is not a reply at all (the caller's error,
-// a failure of the run): only an answer of the scheduler's is a refusal.
-func RequeueReplyOf(exit int, stdout, stderr []byte) RequeueReply {
-	if exit == 0 {
-		return RequeueReply{Accepted: true}
-	}
-	text := strings.ToLower(string(stdout) + " " + string(stderr))
-	switch {
-	case strings.Contains(text, "disabled"):
-		return RequeueReply{Refusal: refusalDisabled}
-	case strings.Contains(text, "permission denied") || strings.Contains(text, "access denied") || strings.Contains(text, "not authorized"):
-		return RequeueReply{Refusal: refusalDenied}
-	case strings.Contains(text, "already finished") || strings.Contains(text, "not pending") || strings.Contains(text, "invalid job id") ||
-		strings.Contains(text, "is not running") || strings.Contains(text, "completing"):
-		return RequeueReply{Refusal: refusalNotNow}
-	case strings.Contains(text, "invalid keyword") || strings.Contains(text, "invalid command") || strings.Contains(text, "unrecognized") ||
-		strings.Contains(text, "supports only") || strings.Contains(text, "usage"):
-		return RequeueReply{Refusal: refusalNoCommand}
-	}
-	return RequeueReply{Refusal: refusalOther}
 }
 
 // HBEP3Tag is an Allocation's job tag computed from HBEP-3 (Allocation and job identity), here and not with the

@@ -144,30 +144,6 @@ func TestTheRequeueLineTakesAJobIDOfDigitsOnly(t *testing.T) {
 	}
 }
 
-// The scheduler's reply: exit 0 is an accepted requeue, any other a refusal whose reason is one fixed label, which never
-// carries the scheduler's own text (it can name the job's ID).
-func TestARequeueReplyIsAcceptedOrRefusedWithAFixedLabel(t *testing.T) {
-	if r := RequeueReplyOf(0, nil, nil); !r.Accepted || r.Refusal != "" {
-		t.Errorf("exit 0 read as %+v", r)
-	}
-	for _, c := range []struct{ text, want string }{
-		{"scontrol: error: Requested operation is presently disabled for job 12345", refusalDisabled},
-		{"scontrol: error: Access/permission denied for job 12345", refusalDenied},
-		{"slurm_load_jobs error: Invalid job id specified", refusalNotNow},
-		{"scontrol: error: Job has already finished", refusalNotNow},
-		{"scontrol: error: the fake supports only: scontrol release <jobid>[,<jobid>...]", refusalNoCommand},
-		{"something else for job 12345 at /scratch/people/example", refusalOther},
-	} {
-		r := RequeueReplyOf(1, nil, []byte(c.text))
-		if r.Accepted || r.Refusal != c.want {
-			t.Errorf("%q read as %+v, want the refusal %q", c.text, r, c.want)
-		}
-		if regexp.MustCompile(`[0-9/]`).MatchString(r.Refusal) {
-			t.Errorf("the label %q carries a digit or a path", r.Refusal)
-		}
-	}
-}
-
 // HBEP3Tag is computed from HBEP-3's text; the contracts' helper is an independent implementation of the same rule, so
 // the two agree on names under and over the 40 characters a tag keeps.
 func TestHBEP3TagIsTheContractsTag(t *testing.T) {
@@ -207,11 +183,21 @@ func TestARefusedRequeueIsNotRunUnlessAnotherCheckFails(t *testing.T) {
 				if !strings.Contains(string(record), `"verdict": "not run"`) && !strings.Contains(string(record), `"verdict":"not run"`) {
 					t.Errorf("the record does not say not run:\n%s", record)
 				}
-				if !strings.Contains(string(posts), "alpha-athena-now-serve: NOT RUN") || !strings.Contains(string(posts), refusalDisabled) || strings.Contains(string(posts), ": PASS") {
-					t.Errorf("the text to post does not say NOT RUN with the reason:\n%s", posts)
+				// The scheduler's words, with the job's ID replaced, in the post, the record and the marker's note alike.
+				words := RequeueReplyOf(1, nil, []byte(dryRefusalText("1234567")), "1234567").Refusal
+				if !strings.HasSuffix(words, "presently disabled for job "+jobToken) {
+					t.Fatalf("the dry refusal's words are %q", words)
 				}
-				if note := NotRunNote(row, cfg.PendingMax, err); !strings.Contains(note, requeueRefusedWords+" ("+refusalDisabled+")") {
-					t.Errorf("the marker's note %q does not say the requeue was refused, with the reason", note)
+				if !strings.Contains(string(posts), "alpha-athena-now-serve: NOT RUN") || !strings.Contains(string(posts), words) || strings.Contains(string(posts), ": PASS") {
+					t.Errorf("the text to post does not say NOT RUN with the scheduler's words:\n%s", posts)
+				}
+				if note := NotRunNote(row, cfg.PendingMax, err); !strings.Contains(note, requeueRefusedWords+" ("+words+")") {
+					t.Errorf("the marker's note %q does not say the requeue was refused, in the scheduler's words", note)
+				}
+				for name, b := range map[string][]byte{"text to post": posts, "record": record} {
+					if regexp.MustCompile(`for job [0-9]`).Match(b) {
+						t.Errorf("the %s names the job's ID:\n%s", name, b)
+					}
 				}
 				return
 			}
@@ -253,7 +239,7 @@ func TestTheRequeueVerdictNeedsEachOfItsThreeParts(t *testing.T) {
 		}
 	}
 	// A refused requeue judges only the window before it.
-	if f := requeueChecks(RequeueObs{Attempted: true, DrainingSeen: true, Refusal: refusalDisabled}); len(f) != 0 {
+	if f := requeueChecks(RequeueObs{Attempted: true, DrainingSeen: true, Refusal: "the scheduler's words: Requested operation is presently disabled for job [job]"}); len(f) != 0 {
 		t.Errorf("a refused requeue with the drain seen fails: %v", f)
 	}
 }
