@@ -33,6 +33,11 @@
 //     CheckTimeout, a new master by ConnectTimeout, the caller's context and
 //     Close, so a master that accepts a connection and never answers cannot
 //     block the transport.
+//   - The master and each "ssh -O check" run in a process group of their own,
+//     and the group is signalled only through one guarded function (group.go):
+//     never a PGID of 1 or less or this process's own group, and only while
+//     the leader, pinned by pidfd and start time when it started, is still
+//     alive, still our child, and still shows its start time.
 //
 // Errors never carry ssh's standard error, which names the host and the user;
 // they say what kind of failure it was.
