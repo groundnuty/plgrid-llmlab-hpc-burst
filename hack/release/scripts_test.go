@@ -1103,6 +1103,13 @@ func TestRehearsalArchiveInputUnpacksTheReleaseArchiveIntoThePrebuiltNames(t *te
 	if got := readFile(t, filepath.Join(out, "archive", "bin", "k3s-1.36.5", "k3s")); got != seedFiles["bin/k3s-1.36.5/k3s"] {
 		t.Errorf("k3s under archive/bin holds %q", got)
 	}
+	// The two directories the run would read, as the script says them: the archive's own bin/, where
+	// k3s-1.36.5/k3s and frp-0.71.1/frps are, and the frp directory with frps and frpc.
+	for _, want := range []string{"HPCBURST_BIN_DIR=" + filepath.Join(out, "archive", "bin"), "HPCBURST_FRP_DIR=" + filepath.Join(out, "frp")} {
+		if !strings.Contains("\n"+o, "\n"+want+"\n") {
+			t.Errorf("the output lacks the line %q:\n%s", want, o)
+		}
+	}
 	// Unpack-only builds and runs nothing: no test binary, and no scope.
 	if _, err := os.Stat(filepath.Join(out, "rehearsal.test")); err == nil {
 		t.Error("unpack-only built rehearsal.test")

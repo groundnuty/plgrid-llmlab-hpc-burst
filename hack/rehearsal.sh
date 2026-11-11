@@ -61,6 +61,8 @@ mkdir -p "$out"
 if [ -n "${REHEARSAL_ARCHIVE:-}" ]; then
 	bash hack/release-unpack.sh "$REHEARSAL_ARCHIVE" "$out" "$out/frp"
 	export HPCBURST_BIN_DIR="$out/archive/bin" HPCBURST_FRP_DIR="$out/frp"
+	echo "HPCBURST_BIN_DIR=$HPCBURST_BIN_DIR"
+	echo "HPCBURST_FRP_DIR=$HPCBURST_FRP_DIR"
 	if [ "${REHEARSAL_UNPACK_ONLY:-0}" = 1 ]; then
 		exit 0
 	fi
