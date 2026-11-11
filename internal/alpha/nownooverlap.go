@@ -34,15 +34,22 @@ const (
 	// SuccessorAllocationWait bounds the wait, once the predecessor's job has left the slot, for the controller to create
 	// the successor's Allocation: one pass of the lifecycle controller.
 	SuccessorAllocationWait = stack.WaitDeadline
+	// nowEndAfterIdle is what the end of the run takes beyond the idle limit, once the deployment is deleted: the drain
+	// ends on the agent's next report with no request running (internal/lifecycle, drainStep), and the cancel of the job
+	// once released. The release itself waits the idle limit even then: ReleaseWhenIdle holds after the deployment's
+	// deletion (internal/lifecycle, retention.go; keepUntil applies to Keep alone).
+	nowEndAfterIdle = time.Minute
 )
 
 // NowNoOverlapRow is row B: two jobs of one GPU in turn on plgrid-now, no QOS (plgrid-now's own applies, as on row A),
-// ReleaseWhenIdle with the live idle limit, the owner's go of plgrid-now (Q6), and a slot hold of its two start waits, the
-// predecessor's lease, the successor's start to ready and two minutes for the end: 10 + 21 + 10 + 12 + 2 = 55 minutes (Q3).
+// ReleaseWhenIdle with the live idle limit, the owner's go of plgrid-now (Q6), and a slot hold of the bounds its run keeps
+// on a pass (Q3): the first start wait, the predecessor's lease, the successor's Allocation, its own start wait, its start
+// to ready, and the end (the idle limit and a minute): 10 + 21 + 3 + 10 + 12 + 3 = 59 minutes, inside the hour
+// (TestRowBsSlotHoldIsAtLeastItsOwnBounds; the Fable review of PR #406).
 func NowNoOverlapRow() Row {
 	return Row{Name: "alpha-athena-now-nooverlap", Cluster: "athena", Profile: "athena-now", Partition: "plgrid-now", GPUs: 1,
 		Lease: NowNoOverlapLease, Budget: NowNoOverlapBudget,
-		SlotHold:  NowStartWait + NowNoOverlapLease + NowStartWait + NowStartTimeout + 2*time.Minute,
+		SlotHold:  NowStartWait + NowNoOverlapLease + SuccessorAllocationWait + NowStartWait + NowStartTimeout + IdleLimit + nowEndAfterIdle,
 		StartWait: NowStartWait, MostJobs: 2, PostsTo: "#145 and #376", Timing: AthenaNowTiming(), OwnerGo: OwnerGoAthenaNow,
 		ReleaseWhenIdle: true}
 }

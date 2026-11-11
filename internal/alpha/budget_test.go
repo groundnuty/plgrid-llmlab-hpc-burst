@@ -142,7 +142,7 @@ var liveWaits = map[string]string{
 	"nowPredecessorLeft: r.waitFor(time.Until(leaseEnd) + EndMargin)":                                "term: the predecessor's lease and EndMargin",
 	"nowSuccessorStart: stack.BoundedDeadline(SuccessorAllocationWait + p.Row.StartWait)":            "term: SuccessorAllocationWait and the successor's start wait",
 	"nowSuccessorStart: context.WithTimeout(time.Minute)":                                            "a call",
-	"nowSuccessorStart: time.Sleep(time.Second)":                                                     "pacing",
+	"nowSuccessorStart: time.Sleep(r.every())":                                                       "pacing",
 }
 
 // waitOf is how a call reads in liveWaits, or "" when it is not a wait.
