@@ -190,6 +190,20 @@ def cmd_extract(src, dst):
     for name in ("relogin_instances", "calls", "link_series", "tunnels", "samples", "host"):
         write_csv(os.path.join(dst, name + ".csv"), out[name], compress=True)
     print("extracted: " + ", ".join("%s %d" % (k, len(v)) for k, v in out.items()))
+    sys.exit(scan(dst))
+
+
+def scan(dst):
+    """The committed files must name no host path (a login or a job directory can ride in one)."""
+    import re
+    leak = re.compile(r"/(home|tmp|Users|root|var|mnt|scratch|net)/")
+    bad = []
+    for p in sorted(glob.glob(os.path.join(dst, "*.csv")) + glob.glob(os.path.join(dst, "*.csv.xz"))):
+        text = lzma.open(p, "rt").read() if p.endswith(".xz") else open(p).read()
+        if leak.search(text):
+            bad.append(os.path.basename(p))
+    print("scan: %s" % ("clean" if not bad else "a host path in " + ", ".join(bad)))
+    return 1 if bad else 0
 
 
 # --- tables ---------------------------------------------------------------------------------------
@@ -201,6 +215,19 @@ def rng(vals, digits=2):
     lo, hi = min(v), max(v)
     f = "%%.%df" % digits
     return f % lo if round(lo, digits) == round(hi, digits) else (f + "–" + f) % (lo, hi)
+
+
+HOST_BOUND = 0.85  # S14's rule: a run with all CPUs at least 85% busy measures the runner
+
+
+def vendor(model):
+    m = (model or "").upper()
+    return "AMD" if "AMD" in m else "Intel" if "INTEL" in m else (model or "?")
+
+
+def bound(v):
+    x = num(v)
+    return x is not None and x >= HOST_BOUND
 
 
 def md(header, rows):
@@ -221,12 +248,13 @@ def cmd_tables(res):
         rows = []
         for (var, n), g in sorted(groups.items(), key=lambda x: (x[0][0], x[0][1])):
             f = lambda k: [num(r.get(k)) for r in g]
-            rows.append([var, n, len(g), sum(1 for r in g if r["valid"] == "True"), rng(f("pre_emptiest_second"), 0),
+            rows.append([var, n, len(g), "/".join(sorted({vendor(r["cpu_model"]) for r in g})), sum(1 for r in g if r["valid"] == "True"),
+                         sum(1 for r in g if bound(r.get("recover_peak_host_busy"))), rng(f("pre_emptiest_second"), 0),
                          rng(f("inflight_tunnels"), 0), rng(f("cut_requests"), 0), rng(f("registered_s_max")), rng(f("routed_s_p50")),
                          rng(f("routed_s_max")), rng(f("first_token_s_p50")), rng(f("first_token_s_max")), rng(f("not_back_60s"), 0),
                          rng(f("paused"), 0), rng(f("front_term_to_exit_s"), 1), rng(f("recover_front_host_cores")),
                          rng(f("recover_peak_front_host_cores")), rng(f("recover_peak_host_busy"))])
-        md(["event", "tunnels", "runs", "valid", "emptiest pre-second", "in flight at the cut", "cut", "registered again max s",
+        md(["event", "tunnels", "runs", "runners", "valid", "host-bound second in the recovery", "emptiest pre-second", "in flight at the cut", "cut", "registered again max s",
             "routed again p50 s", "routed again max s", "first token p50 s", "first token max s", "not back in 60 s", "paused",
             "front TERM to exit s", "front host cores (10 s)", "peak front host cores", "peak host busy"], rows)
         calls = read_csv(os.path.join(res, "calls.csv"))
@@ -253,33 +281,34 @@ def cmd_tables(res):
         rows = []
         for r in sorted(cl, key=lambda r: (int(r["n"]), r["discipline"] + (r["buffer"] or ""), -float(r["cap_mbps"] or 0), int(r["rep"]))):
             rows.append([r["n"], r["streams"], r["cap_mbps"] or "uncapped", r["discipline"] + ((" " + r["buffer"]) if r["buffer"] else ""),
-                         r["rep"], r["valid"], "%.0f" % num(r["offered_tok_s"]), "%.0f" % num(r["delivered_tok_s"]),
+                         "%s (%s)" % (r["rep"], vendor(r["cpu_model"])), r["valid"], "yes" if bound(r.get("host_busy")) else "no", "%.0f" % num(r["offered_tok_s"]), "%.0f" % num(r["delivered_tok_s"]),
                          r.get("link_up_min") and "%.3f" % num(r["link_up_min"]) or "-",
                          r.get("link_down_min") and "%.3f" % num(r["link_down_min"]) or "-", r["link_at_cap"],
                          "%.1f" % num(r["gap_p99_ms"]) if r.get("gap_p99_ms") else "-", r["drops"], r["frpc_relogins"],
                          r["heartbeat_timeout_lines"], r["probes_failed"], "%.2f" % num(r["host_busy"]) if r.get("host_busy") else "-"])
-        md(["tunnels", "streams", "cap Mb/s", "queue", "rep", "valid", "offered tok/s", "delivered tok/s", "link up min", "link down min",
-            "at cap", "gap p99 ms", "drops", "frpc re-logins", "heartbeat timeouts", "probes failed", "host busy"], rows)
+        md(["tunnels", "streams", "cap Mb/s", "queue", "rep (runner)", "valid", "host-bound", "offered tok/s", "delivered tok/s", "link up min", "link down min",
+            "at cap", "gap p99 ms", "list-seconds not online", "frpc re-logins", "heartbeat timeouts", "probes failed", "host busy"], rows)
     rs = read_csv(os.path.join(res, "rssh.csv"))
     if rs:
         print("### R_ssh\n")
         rows = []
         for r in rs:
-            rows.append([r["cipher_asked"], r["rep"], r["level"], r["streams"], "%.2f" % num(r["ktok_s"]), r["valid"],
+            rows.append([r["cipher_asked"], "%s (%s)" % (r["rep"], vendor(r["cpu_model"])), r["level"], r["streams"], "%.2f" % num(r["ktok_s"]), r["valid"],
+                         "yes" if bound(r.get("host_busy")) else "no",
                          "%.4f" % num(r["ssh_cores"]) if r.get("ssh_cores") else "-", "%.4f" % num(r["sshd_cores"]) if r.get("sshd_cores") else "-",
                          "%.3f" % num(r["ssh_cores_per_ktok"]) if r.get("ssh_cores_per_ktok") else "-"])
-        md(["cipher asked", "rep", "phase", "streams per tunnel", "k tok/s", "valid", "ssh cores", "sshd cores", "ssh cores per 1k tok/s"], rows)
+        md(["cipher asked", "rep (runner)", "phase", "streams per tunnel", "k tok/s", "valid", "host-bound", "ssh cores", "sshd cores", "ssh cores per 1k tok/s"], rows)
         fits = {}
         for r in rs:
-            if r["valid"] == "True" and r.get("ssh_cores"):
-                fits.setdefault((r["cipher_asked"], r["rep"]), []).append((num(r["ktok_s"]), num(r["ssh_cores"])))
+            if r["valid"] == "True" and r.get("ssh_cores") and not bound(r.get("host_busy")):
+                fits.setdefault((r["cipher_asked"], r["rep"], vendor(r["cpu_model"])), []).append((num(r["ktok_s"]), num(r["ssh_cores"])))
         rows = []
-        for (c, rep), pts in sorted(fits.items()):
+        for (c, rep, ven), pts in sorted(fits.items()):
             f = analysis.linfit(pts)
             if f:
-                rows.append([c, rep, "%.4f" % f["slope"], "%.5f" % f["intercept"], "%.5f" % (f["intercept"] / 8), f["n"]])
-        print("#### R_ssh fits: ssh cores = R_ssh × (tokens/s ÷ 1000) + fixed, over the idle phase and the valid levels\n")
-        md(["cipher asked", "rep", "R_ssh (cores per 1k tok/s)", "fixed cores (8 relays)", "fixed per relay", "points"], rows)
+                rows.append([c, "%s (%s)" % (rep, ven), "%.4f" % f["slope"], "%.5f" % f["intercept"], "%.5f" % (f["intercept"] / 8), f["n"]])
+        print("#### R_ssh fits: ssh cores = R_ssh × (tokens/s ÷ 1000) + fixed, over the idle phase and the valid levels that were not host-bound\n")
+        md(["cipher asked", "rep (runner)", "R_ssh (cores per 1k tok/s)", "fixed cores (8 relays)", "fixed per relay", "points"], rows)
         neg = sorted({(r["cipher_asked"], r["negotiated"]) for r in rs})
         print("Negotiated (from every relay's ssh -v log):\n")
         for c, n in neg:
@@ -288,17 +317,20 @@ def cmd_tables(res):
     rf = read_csv(os.path.join(res, "rfront.csv"))
     if rf:
         print("### R_front\n")
-        rows_in = [{"n": int(r["n"]), "streams": int(r["streams"]), "rep": r["rep"], "via": r["via"], "valid": r["valid"] == "True",
+        rows_in = [{"n": int(r["n"]), "streams": int(r["streams"]), "rep": r["rep"], "via": r["via"],
+                    "valid": r["valid"] == "True" and not bound(r.get("host_busy")),
                     "ktok_s": num(r["ktok_s"]), "front_cores": num(r["front_cores"]), "frps_cores": num(r["frps_cores"])} for r in rf]
         pairs = analysis.rfront_pairs(rows_in)
         frps = {(r["n"], r["streams"], r["rep"], r["via"]): r["frps_cores"] for r in rows_in}
         rows = []
         for p in pairs:
             dfrps = (frps.get((p["n"], p["streams"], p["rep"], "front")) or 0) - (frps.get((p["n"], p["streams"], p["rep"], "tcpmux")) or 0)
-            rows.append([p["n"], p["streams"], p["rep"], "%.2f" % p["ktok_s"], "%.3f" % p["front_cores_via_front"],
+            ven = vendor(next((r["cpu_model"] for r in rf if r["rep"] == p["rep"]), ""))
+            rows.append([p["n"], p["streams"], "%s (%s)" % (p["rep"], ven), "%.2f" % p["ktok_s"], "%.3f" % p["front_cores_via_front"],
                          "%.3f" % p["front_cores_via_tcpmux"], "%.3f" % p["r_front_per_ktok"], "%.3f" % dfrps,
                          "%.3f" % ((p["delta_cores"] + dfrps) / p["ktok_s"])])
-        md(["tunnels", "streams", "rep", "k tok/s", "front cores via the front", "front cores via tcpmux", "R_front per 1k tok/s",
+        print("Pairs whose arms were both valid and not host-bound (all CPUs at least 85% busy).\n")
+        md(["tunnels", "streams", "rep (runner)", "k tok/s", "front cores via the front", "front cores via tcpmux", "R_front per 1k tok/s",
             "frps cores difference", "front + frps difference per 1k tok/s"], rows)
 
 

@@ -246,7 +246,7 @@ def relogin(run):
     out["cut_requests"] = sum(1 for c in cuts.values() if not c["done"])
     kinds = {}
     for c in cuts.values():
-        k = "completed" if c["done"] else re.sub(r"[0-9]+", "#", c["err"])[:60]
+        k = "completed" if c["done"] else scrub(c["err"])[:60]
         kinds[k] = kinds.get(k, 0) + 1
     out["cut_kinds"] = kinds
     # Registered again: the front's plugin answered an accepted NewProxy for the UID after the cut
@@ -368,6 +368,15 @@ def log_records(path):
     return out
 
 
+PATH_RE = re.compile(r"/[^\s\"',;]+")
+
+
+def scrub(text):
+    """An error's text with every path and digit run masked, for the committed tables: a path can
+    carry a login or a job's directory."""
+    return re.sub(r"[0-9]+", "#", PATH_RE.sub("<path>", text or ""))
+
+
 def failure_kind(err):
     """What a failed connection to an Instance was, from the front's log: frps down (its tcpmux
     port refused the dial), frps up with no proxy for the UID (404), a dial the epoch check aborted
@@ -381,7 +390,7 @@ def failure_kind(err):
         return "epoch moved (not counted)"
     if "timeout" in e or "deadline" in e:
         return "set-up time-out"
-    return "other: " + re.sub(r"[0-9]+", "#", e)[:60]
+    return "other: " + scrub(e)[:60]
 
 
 def pauses(run, t_cut, rereg):

@@ -101,6 +101,11 @@ class Relogin(unittest.TestCase):
                          "dial refused (frps down)")
         self.assertEqual(analysis.failure_kind("CONNECT answered 404 Not Found"), "set-up 404 (no proxy yet)")
 
+    def test_scrub_masks_paths_and_numbers(self):
+        got = analysis.scrub('dial unix /home/example-user/t/w/run-123/c/s/7: connect: no such file')
+        self.assertEqual(got, "dial unix <path>: connect: no such file")
+        self.assertEqual(analysis.failure_kind("read /tmp/x/y: reset"), "other: read <path>: reset")
+
     def test_parse_ts(self):
         self.assertAlmostEqual(analysis.parse_ts("1970-01-01T00:00:01.250Z"), 1.25)
         self.assertEqual(analysis.parse_ts("1970-01-01T00:01:00Z"), 60.0)
