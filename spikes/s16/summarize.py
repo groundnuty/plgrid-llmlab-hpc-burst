@@ -4,6 +4,7 @@
     python3 summarize.py extract <artifacts dir> results     every raw run under the dir, to results/
     python3 summarize.py tables  [results]                    the README's tables, from results/ alone
     python3 summarize.py verify  [results]                    every CPU figure again from the samples
+    python3 summarize.py budget  [results]                    the per-front rates with the measured reserves
 
 extract reads each run's raw directory (S16_RESULTS/raw/<run_id>/, as s16.py wrote it) and writes,
 per item, one CSV row per run with the measures analysis.py computes, plus the evidence behind them:
@@ -334,6 +335,72 @@ def cmd_tables(res):
             "frps cores difference", "front + frps difference per 1k tok/s"], rows)
 
 
+# --- budget ---------------------------------------------------------------------------------------
+
+# Spike S14's per-runner fits of the measured stack (frps plus the dial-home listener; plus the
+# relay owner and its ssh stand-ins in host-dialed mode), front cores = b x tunnels + a x q + c, as
+# `python3 spikes/s14/summarize.py fits` prints them from S14's committed results at eaa225ed.
+S14_FITS = {
+    "direct": {"AMD": [(0.00060, 0.0814, 0.0168), (0.00064, 0.0831, 0.0155)], "Intel": [(0.00039, 0.0491, 0.0218)]},
+    "host-dialed": {"AMD": [(0.00156, 0.1275, 0.0255), (0.00151, 0.1340, 0.0274)], "Intel": [(0.00080, 0.0793, 0.0440)]},
+}
+S14_SHARE = {"direct": 0.45, "host-dialed": 0.25}  # S14's provisional R_front = s x a x q
+BUDGET = 0.7  # HBEP-6: the steady-state terms under 70% of the front's cores
+
+
+def per_core(b, a, c, n, extra):
+    """tokens/s one front core carries at n tunnels: b n + (a + extra) q + c = 0.7."""
+    return max(0.0, (BUDGET - b * n - c) / (a + extra) * 1000.0)
+
+
+def measured_slopes(res):
+    """R_front and R_ssh per runner class: the slopes of least-squares fits, R_front of the front
+    process's extra cores against tokens/s / 1000 over the valid, not host-bound pairs; R_ssh of ssh's
+    cores over the idle phase and the valid levels, per cipher."""
+    rf = read_csv(os.path.join(res, "rfront.csv"))
+    rows_in = [{"n": int(r["n"]), "streams": int(r["streams"]), "rep": r["rep"], "via": r["via"],
+                "valid": r["valid"] == "True" and not bound(r.get("host_busy")), "ktok_s": num(r["ktok_s"]),
+                "front_cores": num(r["front_cores"]), "cpu": vendor(r["cpu_model"])} for r in rf]
+    cpu = {r["rep"]: r["cpu"] for r in rows_in}
+    pts = {}
+    for p in analysis.rfront_pairs(rows_in):
+        pts.setdefault(cpu.get(p["rep"]), []).append((p["ktok_s"], p["delta_cores"]))
+    r_front = {k: analysis.linfit(v) for k, v in pts.items()}
+    pts = {}
+    for r in read_csv(os.path.join(res, "rssh.csv")):
+        if r["valid"] == "True" and r.get("ssh_cores") and not bound(r.get("host_busy")):
+            pts.setdefault((vendor(r["cpu_model"]), r["cipher_asked"]), []).append((num(r["ktok_s"]), num(r["ssh_cores"])))
+    r_ssh = {k: analysis.linfit(v) for k, v in pts.items()}
+    return r_front, r_ssh
+
+
+def cmd_budget(res):
+    r_front, r_ssh = measured_slopes(res)
+    print("Measured slopes (cores per 1,000 tokens/s):")
+    for k, f in sorted(r_front.items()):
+        print("  R_front %-5s %s" % (k, "%.4f (fixed %.4f, %d pairs)" % (f["slope"], f["intercept"], f["n"]) if f else "-"))
+    for (k, c), f in sorted(r_ssh.items()):
+        print("  R_ssh   %-5s %-24s %s" % (k, c, "%.4f (fixed %.5f, %d points)" % (f["slope"], f["intercept"], f["n"]) if f else "-"))
+    print("\nTokens/s per front core at 70%, with S14's per-runner a, b, c (S14_FITS), against S14's provisional reserves:")
+    for mode in ("direct", "host-dialed"):
+        for ven, fits in S14_FITS[mode].items():
+            rf = (r_front.get(ven) or {}).get("slope")
+            ssh = {c: f["slope"] for (v, c), f in r_ssh.items() if v == ven and f}
+            for n in (100, 300, 600):
+                cells = []
+                for b, a, c in fits:
+                    prov = S14_SHARE[mode] * a + (0.045 if mode == "host-dialed" else 0.0)
+                    row = "stack %5.0f, provisional %5.0f" % (per_core(b, a, c, n, 0.0), per_core(b, a, c, n, prov))
+                    if rf is not None:
+                        if mode == "direct":
+                            row += ", measured %5.0f" % per_core(b, a, c, n, rf)
+                        else:
+                            for cip, sl in sorted(ssh.items()):
+                                row += ", measured (%s) %5.0f" % (cip.replace("@openssh.com", ""), per_core(b, a, c, n, rf + sl))
+                    cells.append(row)
+                print("  %-11s %-5s %3d tunnels: %s" % (mode, ven, n, " | ".join(cells)))
+
+
 # --- verify ---------------------------------------------------------------------------------------
 
 def cmd_verify(res):
@@ -397,6 +464,8 @@ def main():
         cmd_extract(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else os.path.join(HERE, "results"))
     elif cmd == "tables":
         cmd_tables(sys.argv[2] if len(sys.argv) > 2 else os.path.join(HERE, "results"))
+    elif cmd == "budget":
+        cmd_budget(sys.argv[2] if len(sys.argv) > 2 else os.path.join(HERE, "results"))
     elif cmd == "verify":
         sys.exit(cmd_verify(sys.argv[2] if len(sys.argv) > 2 else os.path.join(HERE, "results")))
     else:
