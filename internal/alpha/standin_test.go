@@ -124,6 +124,10 @@ func standInRow(t *testing.T, name string) Row {
 		r.Timing, r.Lease = standInTunnel, 12*time.Minute
 	case name == "alpha-athena-now-serve":
 		r.Timing, r.Lease = standInNow, 14*time.Minute
+	case name == "alpha-athena-now-nooverlap":
+		// Row B: the pair's clock and lease, and each job's start wait scaled to 2 minutes, so that a successor held past it
+		// ends the stand-in in minutes (TestStandInNowNoOverlapSecondHeld).
+		r.Timing, r.Lease, r.StartWait = standInPair, 7*time.Minute, 2*time.Minute
 	default:
 		r.Timing, r.Lease = standInPair, 7*time.Minute
 	}

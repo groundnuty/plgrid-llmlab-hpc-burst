@@ -2,12 +2,15 @@ package alpha
 
 // Row B over the stand-in (issue #376; nownooverlap.go): the LIVE steps over the real stack against the fake Slurm behind
 // the rehearsal's sshd, in the one-slot shape (standInWorldShaped: a partition QOS of one submitted job and one GPU per
-// user, as athena-now.yaml types plgrid-now). Both jobs start warm from the pre-staging row's staging (preStage). The
+// user, as athena-now.yaml types plgrid-now), in four runs: healthy, the owner's job taking the slot, the successor
+// refused for the submit limit, and the successor's job held past its start wait. Both jobs start warm from the
+// pre-staging row's staging (preStage). The
 // owner's own job is the fake's OutsideJob, under the cluster's user, which the run's squeue --me lists. It proves the
 // wiring, not a cluster: no stand-in pass is cluster evidence.
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -32,6 +35,9 @@ const (
 	// ownerRefusesSuccessor: the successor's sbatch is held, the owner's job takes the slot, and the held sbatch goes at
 	// once, so that the scheduler refuses it for the submit limit, whatever the run read first.
 	ownerRefusesSuccessor
+	// successorHeld: no owner's job; the scheduler registers the successor's job on an admin hold (the fake's AdminHold,
+	// what a scheduler can do to a job any day), so that it never starts within its start wait.
+	successorHeld
 )
 
 // standInNowNoOverlap runs row B's live steps over the stand-in, warm, with the owner's job as owner says.
@@ -55,9 +61,11 @@ func standInNowNoOverlap(t *testing.T, owner int) (secondHeldRun, *stack.Cluster
 	lr := newLiveRun(t, cfg, w)
 	lr.stop = &stackStop{}
 	lr.agentLogFn = func(path string) string { return "tail -c 65536 " + path }
-	if owner != ownerNone {
-		release := ownerTakesTheSlot(t, cl, TagPrefix(id), owner == ownerRefusesSuccessor)
-		lr.slotTakenFn = release
+	switch owner {
+	case ownerSeenFirst, ownerRefusesSuccessor:
+		lr.slotTakenFn = ownerTakesTheSlot(t, cl, TagPrefix(id), owner == ownerRefusesSuccessor)
+	case successorHeld:
+		holdTheSuccessorsSubmission(t, cl, TagPrefix(id))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
@@ -116,6 +124,26 @@ func ownerTakesTheSlot(t *testing.T, cl *stack.Cluster, prefix string, now bool)
 		t.Log("stand-in: the run has seen the owner's job in the slot; the held sbatch goes")
 		release()
 	}
+}
+
+// holdTheSuccessorsSubmission makes the next sbatch once the run's first job runs, the successor's, register its job on
+// an admin hold: listed and waiting, never started.
+func holdTheSuccessorsSubmission(t *testing.T, cl *stack.Cluster, prefix string) {
+	t.Helper()
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for !firstJobRunning(cl, prefix) {
+			select {
+			case <-stop:
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+		cl.Plat.Script(fakeslurm.AdminHold())
+		t.Log("stand-in: the scheduler will register the successor's job on an admin hold")
+	}()
+	t.Cleanup(func() { close(stop); <-done })
 }
 
 // firstJobRunning reports whether the fake shows a job of the run running.
@@ -212,6 +240,40 @@ func TestStandInNowNoOverlapSuccessorRefused(t *testing.T) {
 	if sbatches < 2 {
 		t.Errorf("the fake saw %d sbatch calls of the run, want the predecessor's and at least one of the successor's", sbatches)
 	}
+	// The run read the refusal: from the watch while it waited, or from the whole watch after its catch-up.
+	var rec struct {
+		Observation struct {
+			Slot SlotObs `json:"slot"`
+		} `json:"observation"`
+	}
+	b, err := os.ReadFile(filepath.Join(s.cfg.Out, RecordFile))
+	if err != nil || json.Unmarshal(b, &rec) != nil || !rec.Observation.Slot.Refused || !rec.Observation.Slot.ForeignSeen {
+		t.Errorf("the record does not show the refusal for the submit limit beside the owner's job (%v): %+v", err, rec.Observation.Slot)
+	}
+}
+
+// TestStandInNowNoOverlapSecondHeld is row B over the stand-in with its successor's job registered on an admin hold: its
+// start wait (scaled to 2 minutes on the stand-in) runs out from its Allocation's creation with the job listed and
+// waiting, so the row is NOT RUN, with no record and no text to post, the held job cancelled by its tag, and the fake's
+// record shows one job of the run that ran and one that never started.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInNowNoOverlapSecondHeld(t *testing.T) {
+	s, _ := standInNowNoOverlap(t, successorHeld)
+	if err := s.stop.problem(); err != nil {
+		t.Fatalf("the stack did not stop cleanly, whatever the run ended with: %v", err)
+	}
+	var ns *SecondNotStartedError
+	if len(s.failures) != 0 || !errors.As(s.err, &ns) || ns.StartWait != 2*time.Minute || !NotRun(s.row, s.err) {
+		t.Fatalf("failures %v, err %v; want the NOT RUN of a successor past its start wait", s.failures, s.err)
+	}
+	note := NotRunNote(s.row, s.cfg.PendingMax, s.err)
+	t.Logf("the marker would say: %s", strings.TrimSpace(note))
+	if !strings.Contains(note, "within its start wait of 2m0s from its Allocation's creation") {
+		t.Errorf("the marker's note %q does not name the successor's start wait", note)
+	}
+	s.oneRanOneNever(t)
+	s.wroteNothing(t, "a second job that never started")
 }
 
 // standInSlotTakenIsNotRun is what both owner stand-ins require: NOT RUN for the slot taken, no failure, a marker and
