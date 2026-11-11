@@ -20,7 +20,11 @@ package keeperproc
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -172,7 +176,12 @@ func (f *finalRun) replay(cutOK bool) wire.FinalEnd {
 		case !cutOK:
 			f.s.mustEcho(8<<10, "while B takes over")
 		case !f.cut:
-			f.cut = f.s.echo(8<<10, 10*time.Second) != nil
+			if err := f.s.echo(8<<10, 10*time.Second); err != nil {
+				if !transportCut(err) {
+					f.t.Fatalf("the serving stream while B takes over: %v; only a cut of the connection is allowed", err)
+				}
+				f.cut = true
+			}
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -181,6 +190,14 @@ func (f *finalRun) replay(cutOK bool) wire.FinalEnd {
 		f.t.Errorf("the final end reported to B %+v: want the control channel's failed end at the step limit, job %s, at E %d", e, f.j.id, firstE)
 	}
 	return e
+}
+
+// transportCut reports whether err is the connection's end (the far end
+// gone, reset, or closed), the cut a test may allow; anything else, a byte
+// that differs above all, or a time-out, is not.
+func transportCut(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) || errors.Is(err, net.ErrClosed)
 }
 
 // ackOf waits for an acknowledgement of e from pid that the keeper answered,
@@ -305,7 +322,9 @@ func TestAFinalEndOfADeletedAllocationIsRefusedByTheRealNextLeader(t *testing.T)
 	if ack.acked != nil && !ack.acked.Decided {
 		dropped := false
 		for _, r := range f.g.tap.requests(from(f.cb.pid())) {
-			if r.n >= ack.n || r.set == nil || !r.set.Complete || r.report == nil {
+			// An expired set changes nothing (it moves the fence only), so
+			// only an unexpired one can have dropped the record.
+			if r.n >= ack.n || r.set == nil || !r.set.Complete || r.report == nil || r.report.Expired {
 				continue
 			}
 			named := false
@@ -315,7 +334,7 @@ func TestAFinalEndOfADeletedAllocationIsRefusedByTheRealNextLeader(t *testing.T)
 			dropped = dropped || !named
 		}
 		if !dropped {
-			t.Errorf("B's acknowledgement was answered as not decided, with no complete set of B's leaving the Allocation out before it: the keeper had no record of an end it reported")
+			t.Errorf("B's acknowledgement was answered as not decided, with no unexpired complete set of B's leaving the Allocation out before it: the keeper had no record of an end it reported")
 		}
 	}
 	f.reportedNoMore(ack, false)

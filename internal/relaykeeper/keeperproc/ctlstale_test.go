@@ -31,8 +31,8 @@ import (
 // record on its Lease (as client-go's elector writes one: no holder,
 // leaseTransitions kept), and B, standing by, takes the Lease at once, one
 // epoch up, and leads. A is then resumed by SIGCONT through its pidfd. Its
-// renewals fail, but its renew deadline (80 s in this test) is far off, so it
-// goes on leading, and sending, at its old epoch for tens of seconds. A Lease
+// renewals fail, but its renew deadline (30 min in this test) is far off, so it
+// goes on leading, and sending, at its old epoch. A Lease
 // that expired instead would not do: client-go's renew deadline is below its
 // lease duration, so a copy paused past its successor's take-over finds its
 // renew deadline passed at once on resume, and whether it sends before its
@@ -57,8 +57,13 @@ import (
 // Nothing A sends after B's take-over is accepted by either keeper.
 func TestAStaleRealControllersAcknowledgementAndSetAreRefusedForTheirEpoch(t *testing.T) {
 	g := newRig(t)
+	// A's renew deadline, 30 min, is above the sum of the bounds of every
+	// wait between A's pause and the last request the test needs from it
+	// (about 15 min), so A, correct, cannot stop leading before it; the Lease
+	// duration must exceed it. A set's validity takes a renew deadline of
+	// its own, 60 s, under the keeper's 2 min bound.
 	tm := stageBTimings
-	tm.LeaseDurationMS, tm.RenewDeadlineMS = 90_000, 80_000
+	tm.LeaseDurationMS, tm.RenewDeadlineMS, tm.SetRenewMS = 31*60_000, 30*60_000, 60_000
 	g.timings = &tm
 	p := g.provider("example-a")
 	a1, j1 := g.running(p, "kp-stla")
@@ -82,6 +87,10 @@ func TestAStaleRealControllersAcknowledgementAndSetAreRefusedForTheirEpoch(t *te
 	s := g.w.openStream(j2, serving)
 	s.mustEcho(64<<10, "before the final end")
 	g.w.roundTrip(j2, control, 16<<10)
+	// The first Allocation's relays carry bytes too, before its control
+	// relay's final end, and its serving relay after it.
+	g.w.roundTrip(j1, control, 16<<10)
+	g.w.roundTrip(j1, serving, 16<<10)
 	cb := g.startController("b", p.name, g.tap.path)
 	bpid := cb.pid()
 	cb.waitLog(logAcquiring)
@@ -175,6 +184,7 @@ func TestAStaleRealControllersAcknowledgementAndSetAreRefusedForTheirEpoch(t *te
 	if pins1[serving].exited() {
 		t.Error("the first Allocation's serving relay's ssh, held through its pidfd, exited")
 	}
+	g.w.roundTrip(j1, serving, 16<<10)
 	s.mustEcho(32<<10, "before the keeper's restart")
 	s.whole()
 
@@ -196,9 +206,6 @@ func TestAStaleRealControllersAcknowledgementAndSetAreRefusedForTheirEpoch(t *te
 	if g.k.epoch != firstE+1 {
 		t.Errorf("the restarted keeper took E %d, want %d", g.k.epoch, firstE+1)
 	}
-	if !s.cut() {
-		t.Error("the serving stream still echoes across the keeper's restart")
-	}
 	runs1, runs2 := len(g.w.sruns(j1.id)), len(g.w.sruns(j2.id))
 	reached := func(r *tapReq) bool { return r.forwarded.After(stopped) && r.replyKind != "" }
 	first := g.tap.snapshot(g.tap.waitReq(t, time.Minute, "a request answered by the restarted keeper", reached))
@@ -215,6 +222,11 @@ func TestAStaleRealControllersAcknowledgementAndSetAreRefusedForTheirEpoch(t *te
 	}
 	if got := g.k.log.since(0, logStarted); len(got) != 0 {
 		t.Errorf("a relay started on A's stale set: %q", got)
+	}
+	// The stream was cut by the restart (checked here, after the last
+	// request the test needs from A: cut's own bound is long).
+	if !s.cut() {
+		t.Error("the serving stream still echoes across the keeper's restart")
 	}
 
 	// B's next set is accepted, and starts the second Allocation's relays.
