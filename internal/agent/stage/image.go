@@ -139,8 +139,7 @@ func (s *Stager) verifyImage(ctx context.Context, final, digest string, format a
 		return err
 	}
 	// The record first: its path starts with the image's.
-	hide := strings.NewReplacer(recordPath(final, format), "<record>", final, "<image>")
-	return &hiddenPathError{msg: hide.Replace(err.Error()), err: err}
+	return hidePaths(err, recordPath(final, format), "<record>", final, "<image>")
 }
 
 // hiddenPathError is an error whose text has its paths hidden.
@@ -151,6 +150,19 @@ type hiddenPathError struct {
 
 func (e *hiddenPathError) Error() string { return e.msg }
 func (e *hiddenPathError) Unwrap() error { return e.err }
+
+// hidePaths returns err with each path in pairs written as what stands for it
+// (a path, then its stand-in, and so on), so that a log line which prints it
+// names no path of the staging directory or of the job's temporary space. Where
+// one path starts another, as an image's does its copy moved aside, the longer
+// comes first: the replacements are tried in the order given. The error stays
+// reachable by errors.Is and errors.As. A nil error stays nil.
+func hidePaths(err error, pairs ...string) error {
+	if err == nil {
+		return nil
+	}
+	return &hiddenPathError{msg: strings.NewReplacer(pairs...).Replace(err.Error()), err: err}
+}
 
 // checkImage is verifyImage's check, with the errors as they arise.
 func (s *Stager) checkImage(ctx context.Context, final, digest string, format agentapi.ImageFormat) error {
@@ -232,7 +244,7 @@ func (s *Stager) stageImage(ctx context.Context, image, digest string, format ag
 	fail := func(err error) error {
 		if aside != "" {
 			if rerr := os.Rename(aside, final); rerr != nil {
-				s.logf("putting %s back: %v", final, rerr)
+				s.logf("image %s: putting the image back: %v", digest, hidePaths(rerr, aside, "<aside>", final, "<image>"))
 			}
 		}
 		return err
@@ -268,8 +280,9 @@ func (s *Stager) stageImage(ctx context.Context, image, digest string, format ag
 		return fail(err)
 	}
 	if aside != "" {
-		if err := removeAll(aside); err != nil {
-			s.logf("removing %s: %v", aside, err)
+		if err := s.removeImagePath(aside); err != nil {
+			// removeAll can name the parent directory too, when it cannot open it.
+			s.logf("image %s: removing the copy moved aside: %v", digest, hidePaths(err, aside, "<aside>", dir, "<images>"))
 		}
 	}
 	return nil
@@ -316,9 +329,22 @@ func (s *Stager) removeStaleTemps(dir, hex, lockPath string) {
 	temps, _ := filepath.Glob(filepath.Join(dir, ".tmp-"+hex+"-*"))
 	for _, p := range temps {
 		if fi, err := os.Lstat(p); err == nil && time.Since(fi.ModTime()) > staleTempAge {
-			if err := removeAll(p); err != nil {
-				s.logf("removing %s: %v", p, err)
+			if err := s.removeImagePath(p); err != nil {
+				s.logf("image sha256:%s: removing a stale temporary output: %v", hex, hidePaths(err, p, "<temp>", dir, "<images>"))
 			}
 		}
 	}
+}
+
+// removeImagePath removes the copy of an image that was moved aside, once its
+// replacement is in place, or a stale temporary output. hooks.removeImagePath
+// replaces it in a test. No operating-system state fails the first cleanly
+// (removeAll puts back the permissions that would, and the removal follows the
+// last rename at once); and a directory that fails removeAll's open of it also
+// fails the Glob that finds a stale output, so the second never gets there.
+func (s *Stager) removeImagePath(p string) error {
+	if s.hooks.removeImagePath != nil {
+		return s.hooks.removeImagePath(p)
+	}
+	return removeAll(p)
 }

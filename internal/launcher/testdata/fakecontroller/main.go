@@ -37,7 +37,9 @@
 // accepts exactly the front's command line as the launcher writes it: --config, --state-dir,
 // --port-base and --health-addr, all required, and optionally --mode. In that role a file usage in
 // $FAKECTRL_DIR holds the usage state its /healthz reports in the front's usage member (HBEP-8:
-// "ok" or "failing"); without the file it reports "ok". A file bind-gate makes it bind its health
+// "ok" or "failing"); without the file it reports "ok". It also answers the front's frps plugin at
+// agentapi.FrontFrpsPluginPath (POST, #371) with an acceptance, and with 503 while a file
+// plugin-failing exists. A file bind-gate makes it bind its health
 // port late, as the real front does after its first lists: it writes front-waiting (its PID) and
 // waits, at most 30 s, for a file bind-now before it binds; a port taken by then makes it exit 1.
 //
@@ -61,6 +63,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -158,6 +161,15 @@ func main() {
 		go http.Serve(l, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !asFront && (r.URL.Path == "/readyz" || strings.HasPrefix(r.URL.Path, "/readyz/")) {
 				readyz.ServeHTTP(w, r)
+				return
+			}
+			if asFront && r.URL.Path == agentapi.FrontFrpsPluginPath && r.Method == http.MethodPost {
+				if _, bad := ctl("plugin-failing"); bad {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"reject":false,"unchange":true}`)
 				return
 			}
 			if _, bad := ctl("unhealthy"); bad || r.URL.Path != "/healthz" {

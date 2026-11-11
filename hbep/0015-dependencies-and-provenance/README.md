@@ -10,6 +10,7 @@ This HBEP decides where the repository records the origin and version of each pa
 - Field lessons live in a public catalogue, [`docs/lessons/README.md`](../../docs/lessons/README.md), with stable IDs `L-<section>.<item>`. HBEPs cite lessons by these IDs.
 - "Pinned versions" lists each pin that a design decision rests on, with its reason and what triggers a bump.
 - A bump is one PR. It re-checks every HBEP citation of the bumped source, and the live tests under the changed code are run again after it merges.
+- "Releases" defines a release: a tag on `main` with a self-contained archive, its checksums and its notes. The first is `v0.1.0-alpha.1`, once alpha graduates.
 
 It is written for authors and reviewers of HBEPs and code PRs.
 
@@ -97,6 +98,7 @@ Open questions 1 to 5 were removed with the licence policy and `build/dependenci
 | A design or paper borrowed | the adopting HBEP's "Designs and published work borrowed" table | HBEP review |
 | A field lesson | `docs/lessons/README.md`, cited by ID in the HBEP's "Field lessons answered" table | the lesson ID check |
 | A pin that a design decision rests on | Pinned versions, below | the bump PR's review |
+| A release of this framework | its tag, its archive's `SHA256SUMS`, and `docs/releases/<tag>.md` (Releases, below) | the release PR's review and the release workflow |
 
 - **`build/dependencies.yaml` does not exist on `main`, and this HBEP does not create it.** The pins files above already hold each binary's sha256, and the launcher embeds them. A central list would be a second copy to keep in step.
 - HBEP-4, HBEP-6 and HBEP-11 named `build/dependencies.yaml` as the record of frp's and k3s's checksums. They now name the pins files, by erratum in the same PR as this HBEP's move to implementable.
@@ -122,7 +124,7 @@ Open questions 1 to 5 were removed with the licence policy and `build/dependenci
 
 ### Pinned versions
 
-The pins that a design decision rests on, as on `main` on 2026-11-01. The file in "Recorded in" is the record. `docs/development.md`, "Pinned versions", lists the pins of the build and the tests, the test host's binaries included.
+The pins that a design decision rests on, as on `main` on 2026-11-01, plus rows added since by amendment, each dated in Amendments; a row whose file isn't on `main` yet says so. The file in "Recorded in" is the record. `docs/development.md`, "Pinned versions", lists the pins of the build and the tests, the test host's binaries included.
 
 | Dependency | Pin | Recorded in | Why this version | Bump when |
 |---|---|---|---|---|
@@ -132,6 +134,7 @@ The pins that a design decision rests on, as on `main` on 2026-11-01. The file i
 | k3s | v1.36.5+k3s1, the default; v1.35.9+k3s1, the source of the minor-upgrade test; each for amd64 and arm64 | `internal/launcher/k3s-pins.txt` (sha256 per release asset), embedded by the launcher; the default is `DefaultVersion` in `internal/launcher/pins.go`. `hack/fetch-k3s.sh` reads the same file. The launcher records which release last wrote the store, and `hpcburst up` starts only that release on it (`internal/launcher/storeversion.go`) | The releases spike S3 measured on the single-user host, upgrade included (HBEP-11). HBEP-8 cites v1.36.5+k3s1's source. | A fix or feature we need. Upgrades go one minor version at a time with a backup first (HBEP-11), so the old default becomes the upgrade test's source |
 | frp (frps, frpc) | v0.71.1; amd64 and arm64 in the pins file; the fetch script's default mode fetches linux_amd64 only, and its `--agent-builds` mode both | `internal/launcher/frp-pins.txt` (the tarball's, frps's and frpc's sha256 per architecture), embedded by the launcher and read by the controller for `agent.json`'s frpc digest; `hack/fetch-frp.sh`'s default mode, which fetches the test host's frps and frpc, keeps its own amd64 copy, which `TestFrpPinsAgreeWithTheFetchScript` (`internal/launcher/frps_test.go`) compares; its `--agent-builds DIR` mode reads the pins file itself and places frpc for every pinned architecture as `DIR/frpc-<cpuArch>` (PR #157) | HBEP-6's tunnel, as spikes S1 and S1c measured it | frps and frpc move together. An frps upgrade waits until no running Allocation has another frpc version, or until that pair is tested (HBEP-6) |
 | vLLM | v0.32.0. The real-engine test runs `docker.io/vllm/vllm-openai` at the v0.32.0 tag's multi-arch index, digest `sha256:befccf0e…` | Per deployment: each served ModelDeployment's `spec.source.served.engine.imageDigest`. The version the framework is written against: `internal/agent/enginedouble/config.go` (`Version`), `cmd/hb-agent/realengine_plan_test.go` (image, digest and version), `spikes/s94/README.md` | The engine of spikes S2b and S94. HBEPs 3, 4, 5, 6, 7 and 8 cite its v0.32.0 source by file and line, and the engine double and the CRD descriptions follow the same source. | An engine fix or feature a deployment needs. The bump also re-checks the engine double and the CRD descriptions, and re-runs the real-engine test |
+| Envoy (beta) | v1.40.2, the linux x86_64 and aarch_64 release binaries; their sha256s, from Envoy's signed `checksums.txt.asc`, are in `spikes/s13/README.md` | Proposed: a pins file the adopting code adds (such as `internal/agent/envoy-pins.txt`), read before anything runs Envoy (Dependencies). It isn't on `main` until that PR, which adds the file and corrects this cell by erratum. The row joins the matches-its-file checks (Graduation criteria; Operational readiness 1) when that PR merges | HBEP-5's candidate router for an Instance's several workers (open question 2). Spike S13 (PR #324) delivered all 440 request variants to the workers unchanged; 1.33.2 did too, on x86_64 only, and 1.40.2 was the latest release and the only one S13 ran on aarch64, which GH200 nodes are. S2c (issue #62) decides between Envoy and the fallback, which would remove this row | A fix or feature we need, a security release included, accepted only when S13's harness shows every valid case byte-exact and HBEP-5's beta Deadlines test (Test plan, Beta, the router) passes |
 | Apptainer | Not pinned by us: 1.5.4 on Helios GH200 nodes, 1.4.5 on Athena A100 nodes (spike S1 probe 2, 30 Oct 2026) | `profiles/helios.yaml` and `profiles/athena.yaml`, `facts.containers.apptainer_compute_nodes` | The site provides it (HBEP-7). Athena's cannot run a SIF, so its profile sets `imageFormat: sandbox` | Not by us. When a site upgrades it, the fact is measured again and the live tests on that platform are run again |
 
 ### Upgrading a pinned dependency
@@ -142,7 +145,7 @@ The pins that a design decision rests on, as on `main` on 2026-11-01. The file i
   - A citation whose cited behaviour is unchanged gets the new version and line. That is an erratum of its HBEP, and it goes in the bump PR (HBEP-1).
   - A citation whose behaviour changed is an amendment of its HBEP. The amendment merges first, with approval, and the bump follows it (HBEP-1, Building from an HBEP).
   - The PR lists each citation with the line it now cites. A grep that finds no old version string shows only that the citations were renamed, not that they were read again.
-- **The record.** The bump PR changes the file in "Recorded in", and its row in `docs/development.md` where it has one. The bump PR always updates the row's Pin cell here, as an erratum, so the table matches its file the moment the bump merges. A new row, or a changed reason or trigger, is an amendment of this HBEP, merged before the bump, and that amendment changes only the reason and trigger, never the Pin cell (HBEP-1).
+- **The record.** The bump PR changes the file in "Recorded in", and its row in `docs/development.md` where it has one. The bump PR always updates the row's Pin cell here, as an erratum, so the table matches its file the moment the bump merges. A new row, or a changed reason or trigger, is an amendment of this HBEP, merged before the bump, and that amendment changes only the reason and trigger, never the Pin cell of an existing row (HBEP-1).
 - **Live re-run after merge.** After the bump merges, every live test that runs the changed code is run again on `main`: tests that need a real cluster, GPU or engine and do not run in CI, such as the real-engine run on GH200 (issue #94) and the Slurm provider's conformance runs (`internal/providerctl/conformance`, run with `HPCBURST_CONFORMANCE=1`; HBEP-4, Graduation criteria; results so far on issue #93). This is the post-merge live-rerun rule, as applied in issue #94 on 1 Nov 2026. The bump is done once the re-runs are posted on its issue.
 
 **Worked example: controller-runtime after alpha.**
@@ -180,6 +183,33 @@ The pins that a design decision rests on, as on `main` on 2026-11-01. The file i
 - **Changes:** ordinary PRs, reviewed for the content rules and ID stability. A change to these rules is an amendment of this HBEP.
 - **Lessons from the framework's own operation** join the same catalogue.
 
+### Releases
+
+A release is a tag on `main` with its archive, its checksums and its notes (owner decisions, 11 Nov 2026: "Tag an alpha release" once alpha graduates, and "Bundle k3s and frp", [issue #145, comment 6790758697](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/145#issuecomment-6790758697) and PR #389).
+
+- **The first tag** is `v0.1.0-alpha.1`, a valid Go pre-release version. It's made after the alpha status PRs (HBEP-1) have merged, on a `main` commit with no change to the Go packages (`api/`, `cmd/`, `internal/`, `pkg/`), the pins files, `config/crd/` or `profiles/` since the commits the alpha evidence ran on. The release workflow, its scripts and the notes may land after. Later alpha tags count up (`-alpha.2`), and beta's begin at `v0.2.0-beta.1`.
+- **The archive** is one per host architecture, linux amd64 for alpha, with everything `up` and the controller read, so no clone is needed:
+  - `bin/`: `hpcburst`, `hpcburst-controller` and `hpcburst-front`, under plain names, since `up` finds the other two beside its own executable. Each is built from the tag with the pinned Go (`hack/go-pins.txt`), `CGO_ENABLED=0` and `-trimpath`, with VCS stamping on, and reports the tag from its build information. The release fails unless `go version -m` shows the tag, without `+dirty`.
+  - **`bin/` also holds the pinned k3s and frps,** at the paths `up --bin-dir bin` resolves, as `hack/fetch-k3s.sh` and `hack/fetch-frp.sh` lay them out: `bin/k3s-1.36.5/k3s` and `bin/frp-0.71.1/frps`. Each is checked against the pins file the launcher embeds before it's packed (`internal/launcher/k3s-pins.txt`, `frp-pins.txt`).
+  - **`agent-builds/`:** `hb-agent-x86_64` and `hb-agent-aarch64`, built by `hack/build-agents.sh` at the tag, with the pinned frpc builds that `hack/fetch-frp.sh --agent-builds` places. Each agent's identity is its sha256, the agentDigest, which that script makes the same on any machine; its `-version` prints what that script gives. The operator copies this directory to `<state>/agent-builds`, where `up` checks it and the controller stages from it (HBEP-4, Files first). `up` reads no agent build from the archive itself.
+  - **`config/crd/` and `profiles/`:** the CRDs `up --manifests` installs, and the shipped PlatformProfiles, from the tag.
+- **Checksums:** a `SHA256SUMS` file lists the archive and every file in it. It catches corruption, not a replaced asset, since it sits beside them; signing and attestations stay out of scope (Non-goals; Security).
+- **Its notes:**
+  - GitHub's generated notes from the merged pull requests since the previous tag;
+  - a summary committed by PR before the tag, as `docs/releases/<tag>.md`, so the push scan and a review see it, and published with `--notes-file`. It gives the platforms measured, the HBEPs at their stage, the stated limits that still apply, and the pins the release carries.
+
+  The summary follows HBEP-1's content rules: no results or data of the www-2027 study, no credentials, cluster paths, job IDs, host or account names.
+- **How it's made:**
+  1. A workflow runs on a pushed `v*` tag. It fails unless the tagged commit is on `origin/main` (`git merge-base --is-ancestor`), and it calls CI's workflow for the required checks, through `workflow_call`, rather than copying them.
+  2. It builds the archive and `SHA256SUMS`, and creates a draft release with `gh release create --draft`.
+  3. The rehearsal runs from the draft's archive on the single-user host. The release PR gives `hack/rehearsal.sh` an archive input: it unpacks the archive into the names its prebuilt mode takes (`REHEARSAL_PREBUILT=1`, issue #146), with the agent as `hb-agent` and frps and frpc as its frp directory expects. `rehearsal.test` is built from a checkout of the tag.
+  4. Only then is the release published.
+
+  It reuses GitHub Releases and the GitHub CLI already on the runner image, and adds no release tool.
+- **Who tags:** the owner, or an agent on the owner's go, dated and recorded on #145. Since every agent pushes through the owner's login (HBEP-1), this is a procedure, not an enforced rule.
+- **A failed release:** the tag stays, and no release is published. The fix ships as the next tag (`-alpha.N+1`). A tag is never moved or deleted, since a Go version names an immutable snapshot.
+- **Not built:** arm64 host binaries. No check runs them yet; the aarch64 agent is built because GH200 nodes need it.
+
 ### Test plan
 
 - **The copy check** fails for a `third_party/forked/` folder without `ORIGIN.md`, or with an `ORIGIN.md` missing a field. It is planned and does not run in CI yet. The four `ORIGIN.md` files' field names were aligned in #150 (`Upstream URL`, `Commit or tag`, `SPDX licence`, `Changes`, and `Why copied rather than imported`), with no recorded value changed.
@@ -200,11 +230,13 @@ The pins that a design decision rests on, as on `main` on 2026-11-01. The file i
 
 ### Security
 
+
 - `go.sum` checksums and the Go checksum database pin module contents; the `go` command checks them on every download.
 - Every binary the framework downloads is checked against its sha256 pin before it runs. Images are pulled by digest.
 - The dependency questions ask about side effects at import.
 - The catalogue's content rules keep private infrastructure data out of a public repository.
 - Accepted limits: no signing, attestations or reproducible builds for now. Software the site provides is not verified by us.
+- **Releases:** the release workflow needs `contents: write`, unlike CI, which reads no secret and pushes nothing. `SHA256SUMS` sits beside the assets, so it catches corruption, not a replaced asset. Both are accepted limits.
 
 ### Graduation criteria
 
@@ -243,6 +275,7 @@ Sources were read on 2026-10-30, except where another date is given.
 
 | Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
 |---|---|---|---|
+| GitHub CLI and GitHub Releases | [cli/cli](https://github.com/cli/cli); GitHub Releases is a GitHub service | MIT (cli/cli, read 2026-11-11) | The release workflow (Releases): `gh release create`, with the CLI already on the runner image |
 | Go modules and the Go checksum database | golang/go, https://go.dev/ref/mod | BSD-3-Clause (GitHub licence field, read 2026-11-01) | The record and checksums of Go dependencies (`go.mod`, `go.sum`) |
 
 ### Designs and published work borrowed
@@ -275,7 +308,10 @@ Sources were read on 2026-10-30, except where another date is given.
 - 2026-11-01: erratum: the licence jobs and the scripts in `hack/` are recorded as removed in #150, where the text said they were kept but unused.
 - 2026-11-01: erratum: the Test plan records that #150 aligned the four `ORIGIN.md` files' field names, where the text said the copy check's PR would.
 - 2026-11-01: erratum: `hack/fetch-frp.sh`'s `--agent-builds` mode reads the pins file and places frpc for both architectures (PR #157); only its default mode still fetches linux_amd64 alone.
+- 2026-11-11: Envoy's pin row, for beta's router (HBEP-5).
+- 2026-11-11: releases defined; the first tag is `v0.1.0-alpha.1` once alpha graduates (owner decision).
 
 ## Amendments
 
-None.
+- **2026-11-11: Envoy's pin** (Pinned versions, its header and the new-row rule). An amendment, as HBEP-5's open question 2 requires: each router's row is added by an amendment merged before the code that adopts it. Envoy v1.40.2 joins the table as a proposed row, whose file the adopting PR adds. Its reason is spike S13, with S2c (#62) as what would remove it, and its bump trigger is a fix or feature we need, accepted only through S13's harness and HBEP-5's beta Deadlines test. The header now covers rows added since 1 Nov, and the new-row rule reads "never the Pin cell of an existing row". Before, the table had no router.
+- **2026-11-11: releases** (Summary; Where each origin is recorded; Releases; Security; Prior art). An amendment by the owner's decisions of 11 Nov 2026 ("Tag an alpha release", [issue #145, comment 6790758697](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/145#issuecomment-6790758697); "Bundle k3s and frp", PR #389). A release is a `v*` tag on `main`: one self-contained archive per host architecture, holding our three host binaries, the pinned k3s and frps, the two agents built by `hack/build-agents.sh` and their frpc, with `SHA256SUMS` and notes. It's built and checked by a workflow that reuses GitHub Releases, published only after the rehearsal runs from the draft. The first is `v0.1.0-alpha.1`, after the alpha status PRs. Before, the project had no release.

@@ -95,6 +95,19 @@ type dialError struct{ err error }
 func (e *dialError) Error() string { return "connect: " + e.err.Error() }
 func (e *dialError) Unwrap() error { return e.err }
 
+// errNoTransport is a target the router chose whose transport is gone: the
+// router's view is behind for a moment after a registration was taken away
+// (Tunnel.Bump calls the router's refresh in a goroutine of its own).
+var errNoTransport = errors.New("the Instance has no registered transport")
+
+// isOwnFence reports whether a dial failed on the front's own fence rather than
+// on the target (#371): the Instance registered again after the dial was routed
+// (errReregistered), or its transport was already taken away (errNoTransport).
+// Neither counts toward the pause.
+func isOwnFence(err error) bool {
+	return errors.Is(err, errReregistered) || errors.Is(err, errNoTransport)
+}
+
 // isDialError reports whether err is a connection that never opened: refused,
 // unreachable, past connectTimeout toward LLMLab, or, toward an Instance, a
 // tunnel set-up that frps refused or that passed tunnelSetupTimeout.

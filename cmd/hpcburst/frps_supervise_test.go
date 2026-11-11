@@ -63,6 +63,15 @@ func aliveAs(p stateProc) bool {
 	return err == nil && v == p.StartTicks
 }
 
+// frpsPluginSection is frps's configuration from its first plugin on: the part a test may print,
+// since the web password sits above it.
+func frpsPluginSection(cfg string) string {
+	if i := strings.Index(cfg, "[[httpPlugins]]"); i >= 0 {
+		return cfg[i:]
+	}
+	return "(no [[httpPlugins]] section)"
+}
+
 // TestFrpsSupervision: frps runs as a child of the supervisor, from the verified descriptor (its
 // command name is "3", the descriptor's number, so nothing may find it by name; argv[0] is the
 // recorded binary, for ps), holds exactly base+9, base+10 and base+11 on loopback, and answers
@@ -90,6 +99,11 @@ func TestFrpsSupervision(t *testing.T) {
 	wantPorts := []int{base + 9, base + 10, base + 11}
 	if !slices.Equal(up.FrpsPorts, wantPorts) {
 		t.Errorf("up reports frps's ports %v, want %v", up.FrpsPorts, wantPorts)
+	}
+	// No front was given, so frps's file names no front's plugin (#371): frps posts only to the
+	// controller's.
+	if cfg := fileOf(filepath.Join(h.dir, "frps", "frps.toml")); !strings.Contains(cfg, `name = "hpcburst"`) || strings.Contains(cfg, "hpcburst-front") {
+		t.Errorf("frps's configuration on a host without a front; its plugins:\n%s", frpsPluginSection(cfg))
 	}
 	wantListen := []string{fmt.Sprintf("127.0.0.1:%d", base+9), fmt.Sprintf("127.0.0.1:%d", base+10), fmt.Sprintf("127.0.0.1:%d", base+11)}
 	web := fmt.Sprintf("127.0.0.1:%d", base+11)

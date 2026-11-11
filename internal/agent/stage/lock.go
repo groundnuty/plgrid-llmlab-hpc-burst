@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"syscall"
 	"time"
 )
@@ -42,6 +43,9 @@ type hooks struct {
 	afterRehash func()
 	// flock replaces syscall.Flock.
 	flock func(fd, how int) error
+	// removeImagePath replaces the removal of an image's copy moved aside
+	// and of a stale temporary output (image.go).
+	removeImagePath func(path string) error
 }
 
 // tryLock takes the lock if it is free.
@@ -67,7 +71,9 @@ func (s *Stager) tryLock(path string) (*lock, bool, error) {
 		case flockUnsupported(err):
 			f.Close()
 			s.noFlock.Do(func() {
-				s.logf("flock is not supported at %s (%v): staging goes on without exclusion between agents", path, err)
+				// The lock file's name, never its path: ".<hex>.lock" beside
+				// an image, or the checkpoint lock's own name.
+				s.logf("flock is not supported at %s (%v): staging goes on without exclusion between agents", filepath.Base(path), err)
 			})
 			return nil, true, nil
 		default:

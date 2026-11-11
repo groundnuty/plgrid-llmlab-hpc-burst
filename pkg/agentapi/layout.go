@@ -222,6 +222,12 @@ const (
 	// which the launcher writes into frps's configuration and the lifecycle
 	// controller serves.
 	FrpsPluginPath = "/frp/v1/handler"
+	// FrontFrpsPluginPath is the path of frps's second server plugin, the
+	// front's, served on the front's health address (base+4). frps posts each
+	// NewProxy and CloseProxy there after the lifecycle controller's plugin
+	// admitted it, so the front stops routing to an Instance's UID before
+	// frps registers it again (HBEP-6, Admission; #371).
+	FrontFrpsPluginPath = "/frp/v1/front"
 )
 
 // CredentialsDir is <state>/credentials, the dir of AllocationCredentialPath

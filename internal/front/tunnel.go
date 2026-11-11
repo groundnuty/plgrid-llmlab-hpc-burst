@@ -20,12 +20,28 @@ import (
 // Instance UID (HBEP-6, frp facts: an unknown domain gets 404).
 var errNoProxy = errors.New("frps has no proxy for this Instance (404)")
 
+// errReregistered is a dial that found, after frps's 200, that the Instance's
+// proxy was registered again since the dial was routed: frps may already route
+// the CONNECT to a registration frpc has not started, whose work connection
+// would end before any reply (#368, #371). No byte of a request was written,
+// so it is a dial error, resent once (HBEP-5, open question 5).
+var errReregistered = errors.New("the Instance's tunnel was registered again after this request was routed; nothing was sent")
+
 // Tunnel is the Transports of HBEP-6's dial-home tunnel (HBEP-5,
 // Reachability; HBEP-6, The front's half). It reaches an Instance through
 // frps's tcpmux port on loopback with CONNECT <UID>:80, and it counts an
 // Instance's transport as registered only while the front's probe through it
 // passes (Prober). Routing never rests on frps's view or on the Instance's
 // TunnelConnected condition alone.
+//
+// Each UID has a registration epoch (#371; HBEP-6, Admission; HBEP-5). frps
+// posts every NewProxy and CloseProxy it admits to the front's plugin
+// (frpsPlugin) before it registers the proxy, and the plugin calls Bump: the
+// epoch moves on and the UID stops counting as registered. A route proven in an
+// earlier epoch no longer counts. A probe registers the UID only if the epoch
+// has not moved since the probe began (setRegisteredAt), and a dial that a
+// router obtained earlier checks the epoch after frps's 200 and before any byte
+// of a request (Dialer).
 type Tunnel struct {
 	muxAddr string
 	setup   time.Duration
@@ -33,13 +49,20 @@ type Tunnel struct {
 	mu   sync.Mutex
 	reg  map[types.UID]bool
 	subs []func()
+	// epoch is each UID's registration epoch; a UID that was never bumped is
+	// at 0. Values other than 0 come from last, so none is given twice, and a
+	// UID the front stops probing gets a fresh one (forget) rather than going
+	// back to 0. An entry is kept for every UID that was ever bumped or probed:
+	// a few bytes per Instance over the front's life.
+	epoch map[types.UID]uint64
+	last  uint64
 }
 
 // NewTunnel returns a Tunnel that dials frps's tcpmux port at muxAddr and
 // bounds each connection's set-up by setup (tunnelSetupTimeout). No Instance
 // is registered until a probe passes.
 func NewTunnel(muxAddr string, setup time.Duration) *Tunnel {
-	return &Tunnel{muxAddr: muxAddr, setup: setup, reg: map[types.UID]bool{}}
+	return &Tunnel{muxAddr: muxAddr, setup: setup, reg: map[types.UID]bool{}, epoch: map[types.UID]uint64{}}
 }
 
 // Dial opens a connection to the Instance's engine through frps (HBEP-6, The
@@ -55,6 +78,13 @@ func NewTunnel(muxAddr string, setup time.Duration) *Tunnel {
 // the HTTP transport turns it into a dialError, which is resent once and
 // counts toward the Instance's pause (HBEP-5, open question 5; Pauses).
 func (t *Tunnel) Dial(ctx context.Context, uid types.UID) (net.Conn, error) {
+	return t.dial(ctx, uid, nil)
+}
+
+// dial is Dial. With routed set, it also refuses the connection when the
+// UID's epoch is no longer *routed by the time frps's 200 has been read: the
+// CONNECT may then have reached a registration that frpc has not started.
+func (t *Tunnel) dial(ctx context.Context, uid types.UID, routed *uint64) (net.Conn, error) {
 	if err := checkUID(uid); err != nil {
 		return nil, err
 	}
@@ -104,6 +134,13 @@ func (t *Tunnel) Dial(ctx context.Context, uid types.UID) (net.Conn, error) {
 		// The context ended as the reply came: the deadline is in the past.
 		return nil, t.setupErr(ctx, uid, "read frps's reply", ctx.Err())
 	}
+	// frps's plugin call for a new registration comes before frps registers the
+	// proxy, which comes before it routes this CONNECT and writes the 200. So if
+	// frps routed the CONNECT to a registration newer than the one this dial was
+	// routed for, the epoch had moved before the 200 was read.
+	if routed != nil && t.Epoch(uid) != *routed {
+		return nil, fmt.Errorf("CONNECT %s: %w", uid, errReregistered)
+	}
 	_ = c.SetDeadline(time.Time{})
 	ok = true
 	if br.Buffered() > 0 {
@@ -150,10 +187,58 @@ func (c *bufferedConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 // Dialer implements Transports: the CONNECT dialer, while the Instance's
 // probe passes.
 func (t *Tunnel) Dialer(uid types.UID) (DialFunc, bool) {
-	if !t.Registered(uid) {
+	t.mu.Lock()
+	on, e := t.reg[uid], t.epoch[uid]
+	t.mu.Unlock()
+	if !on {
 		return nil, false
 	}
-	return func(ctx context.Context) (net.Conn, error) { return t.Dial(ctx, uid) }, true
+	// The dialer carries the epoch it was handed in: one kept past a new
+	// registration (a router's, an Instance transport's) fails its next dial
+	// cleanly instead of reaching a registration no probe has proven.
+	return func(ctx context.Context) (net.Conn, error) { return t.dial(ctx, uid, &e) }, true
+}
+
+// Epoch returns the UID's registration epoch.
+func (t *Tunnel) Epoch(uid types.UID) uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.epoch[uid]
+}
+
+// Bump moves the UID's epoch on and takes away its registration: frps is
+// about to register the UID's proxy again, or has closed it (frpsPlugin). It
+// takes the lock for a few map writes only, and calls the subscribers in a
+// goroutine of their own, because frps waits for the plugin's answer on the
+// frpc session's control connection. They need not have run first: a dialer
+// they hold carries the old epoch, and its next dial fails. It reports whether
+// the UID was registered.
+func (t *Tunnel) Bump(uid types.UID) (wasRegistered bool) {
+	t.mu.Lock()
+	t.last++
+	t.epoch[uid] = t.last
+	was := t.reg[uid]
+	delete(t.reg, uid)
+	subs := append([]func(){}, t.subs...)
+	t.mu.Unlock()
+	if was {
+		go func() {
+			for _, f := range subs {
+				f()
+			}
+		}()
+	}
+	return was
+}
+
+// forget moves the UID's epoch on, for an Instance the front no longer probes,
+// whose registration the prober has just taken away: a dialer handed out
+// before can then never match again, even if the UID comes back.
+func (t *Tunnel) forget(uid types.UID) {
+	t.mu.Lock()
+	t.last++
+	t.epoch[uid] = t.last
+	t.mu.Unlock()
 }
 
 // Registered reports whether the Instance's transport counts as registered.
@@ -174,8 +259,21 @@ func (t *Tunnel) Subscribe(f func()) {
 // Subscribers are called only on a change, and outside the lock: the router
 // they rebuild calls Dialer.
 func (t *Tunnel) setRegistered(uid types.UID, on bool) (was bool) {
+	was, _ = t.setRegisteredAt(uid, on, nil)
+	return was
+}
+
+// setRegisteredAt is setRegistered for a verdict reached in a given epoch: it
+// registers the UID only while the epoch is still at, so a probe that passed
+// through a registration replaced while it ran proves nothing (applied is
+// false, and nothing changes). Taking a registration away always applies.
+func (t *Tunnel) setRegisteredAt(uid types.UID, on bool, at *uint64) (was, applied bool) {
 	t.mu.Lock()
 	was = t.reg[uid]
+	if on && at != nil && t.epoch[uid] != *at {
+		t.mu.Unlock()
+		return was, false
+	}
 	if on {
 		t.reg[uid] = true
 	} else {
@@ -188,5 +286,5 @@ func (t *Tunnel) setRegistered(uid types.UID, on bool) (was bool) {
 			f()
 		}
 	}
-	return was
+	return was, true
 }

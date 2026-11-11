@@ -92,10 +92,15 @@ func (s *State) frpsEntry(l layout) *supervised {
 
 // writeFrpsFiles makes sure frps's web password exists (kept when it does, so the lifecycle
 // controller's copy stays valid) and writes frps's configuration with it, both mode 600 (HBEP-6).
-func writeFrpsFiles(h agentapi.Host) (string, error) {
+// frontAddr is the front's health address when the launcher runs a front, and then frps gets the
+// front's plugin too (RenderFrpsConfigWithFront); it is empty when no front runs.
+func writeFrpsFiles(h agentapi.Host, frontAddr string) (string, error) {
 	key, _, err := EnsureFrpsWebPassword(h)
 	if err != nil {
 		return "", err
 	}
-	return WriteFrpsConfig(h, key)
+	if frontAddr == "" {
+		return WriteFrpsConfig(h, key)
+	}
+	return WriteFrpsConfigWithFront(h, key, frontAddr)
 }

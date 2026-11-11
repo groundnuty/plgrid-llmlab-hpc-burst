@@ -45,6 +45,11 @@ type EntryHealth struct {
 	// (HBEP-8, Usage records): "ok" or "failing". The front reports it; it is empty for a process
 	// whose body has no usage member, such as the controller.
 	UsageState string `json:"usage_state,omitempty"`
+	// FrpsPluginOK is whether the front's frps plugin answered the launcher's no-op call on the
+	// front's health address (checkFrontPlugin): frps refuses every new proxy while it does not
+	// (HBEP-6, Admission and Operational readiness). nil: not asked, which is every process but the
+	// front, and a front whose /healthz did not answer 200.
+	FrpsPluginOK *bool `json:"frps_plugin_ok,omitempty"`
 	// Degraded names what is degraded while the process keeps serving: DegradedUsage while its
 	// usage sink says failing. It is not a health problem: the report stays healthy and status
 	// exits 0, and only this process's line says degraded (@hpc-burst-science-agent, 31 Oct 2026;
@@ -221,6 +226,9 @@ func checkEntry(sup *procHandle, supPID int, e EntryRecord) (EntryHealth, []stri
 	eh.HealthzOK = &ok
 	if ok && e.Name == controllerEntryName {
 		checkReadyz(e.Health, &eh, add)
+	}
+	if ok && e.Name == frontEntryName {
+		checkFrontPlugin(e.Health, &eh, add)
 	}
 	if ok {
 		// A failing usage sink is stated, never counted against health: the front keeps serving.

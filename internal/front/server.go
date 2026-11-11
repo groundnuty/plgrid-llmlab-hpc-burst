@@ -275,6 +275,20 @@ func listen(o Options, f *Front, frp *frpPassthrough, base context.Context) ([]*
 		}
 		return nil, err
 	}
+	// The health listener comes first: it serves the front's frps plugin, and
+	// frps refuses every new proxy while that does not answer, so it must
+	// answer before the dial-home listener lets any frpc reach frps (#371).
+	if o.HealthListener != nil || o.HealthAddr != "" {
+		hl, err := listenerOr(o.HealthListener, o.HealthAddr)
+		if err != nil {
+			return fail(fmt.Errorf("health: %w", err))
+		}
+		opened = append(opened, hl)
+		f.Health = hl.Addr()
+		servers = append(servers, serve(&http.Server{Handler: healthHandler(f, o.Log), ReadHeaderTimeout: 10 * time.Second}, hl, o.Log))
+	} else if f.Tunnel != nil {
+		o.Log.Warn("the front serves no health address, so not its frps plugin either: an frps that posts its NewProxy calls to the front refuses every new proxy (HBEP-6, Admission)")
+	}
 	cl, err := listenerOr(o.ClientListener, cfg.ClientListen)
 	if err != nil {
 		return fail(fmt.Errorf("clientListen: %w", err))
@@ -306,14 +320,6 @@ func listen(o Options, f *Front, frp *frpPassthrough, base context.Context) ([]*
 	}
 	f.Client, f.Dial = cl.Addr(), dl.Addr()
 	servers = append(servers, serve(clientServer(cfg, f.Proxy, base), cl, o.Log), serve(&http.Server{Handler: dh, ReadHeaderTimeout: time.Minute}, dl, o.Log))
-	if o.HealthListener != nil || o.HealthAddr != "" {
-		hl, err := listenerOr(o.HealthListener, o.HealthAddr)
-		if err != nil {
-			return fail(fmt.Errorf("health: %w", err))
-		}
-		f.Health = hl.Addr()
-		servers = append(servers, serve(&http.Server{Handler: healthHandler(f), ReadHeaderTimeout: 10 * time.Second}, hl, o.Log))
-	}
 	return servers, nil
 }
 
@@ -375,9 +381,13 @@ func usageHealthOf(st usage.Stats) usageHealth {
 // readiness 1), and GET /metrics (HBEP-8, Metrics). A usage failure is stated
 // in the body and never changes the status: the front keeps serving, and a
 // readiness failure would restart it (HBEP-8, Usage records).
-func healthHandler(f *Front) http.Handler {
+func healthHandler(f *Front, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", f.Metrics.Handler())
+	if f.Tunnel != nil {
+		// frps's second server plugin (frpsPlugin; HBEP-6, Admission).
+		mux.Handle(agentapi.FrontFrpsPluginPath, &frpsPlugin{tun: f.Tunnel, prober: f.Prober, log: log})
+	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		now := time.Now()
 		st := f.Router.Status()

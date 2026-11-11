@@ -70,6 +70,15 @@ func (NopPathEvents) PathProbeFailing(*v1alpha1.Instance, ProbeResult) {}
 // probe; probeFailures failures in a row make it not registered, so the
 // Instance is not eligible (HBEP-5's skip, which keeps its place in its group
 // and its in-flight count); one passing probe makes it eligible again.
+//
+// A new registration of the UID's proxy (the front's plugin, Reregistered)
+// takes the registration away at once (Tunnel.Bump) and puts the UID on the
+// re-probe schedule: it is probed at once, then after reprobeFirst, doubling,
+// until a probe passes or the wait would reach probeInterval, when the rounds
+// carry on alone. Each re-probe is an ordinary probe. The first ones often
+// come before frps has registered the proxy, or before frpc has started it,
+// which is why they repeat. A pass counts only if the UID's epoch has not
+// moved since the probe began (#371).
 type Prober struct {
 	tun      *Tunnel
 	clk      clock.Clock
@@ -88,12 +97,36 @@ type Prober struct {
 	// out in this staleness; zero once a round ends (probe_report.go).
 	beat     time.Time
 	missedAt time.Time
+	// awaiting is the re-probe schedule: the UIDs registered again whose
+	// probe has not passed since. kick wakes Run for it.
+	awaiting map[types.UID]*reprobe
+	kick     chan struct{}
+	// beforeVerdict, when set, runs after a probe's early epoch check and before
+	// its verdict is applied: a test makes the epoch move just there, which only
+	// the check under the Tunnel's lock (setRegisteredAt) can catch.
+	beforeVerdict func(types.UID)
 }
+
+// reprobe is one UID's place on the re-probe schedule.
+type reprobe struct {
+	next time.Time     // when it is due
+	wait time.Duration // the wait after the next attempt
+}
+
+// reprobeFirst is the wait after the first re-probe; each later wait doubles,
+// and the schedule ends once a wait would reach probeInterval.
+const reprobeFirst = 100 * time.Millisecond
 
 type probeState struct {
 	name    string // namespace/name
 	fails   int
 	running bool
+	// lost is set when a new registration took the UID's registration away
+	// (lostRegistration), and cleared by a pass that counts. While it is set,
+	// probeFailures failures in a row report PathProbeFailing once, as they
+	// would have had the registration still stood: the Bump took it away
+	// before the failures could (HBEP-6, Reporting; the Fable review of #380).
+	lost bool
 	// The latest verdict: passed, at the front's clock time at; has is false
 	// before the first.
 	has    bool
@@ -110,20 +143,65 @@ func NewProber(cfg Config, tun *Tunnel, clk clock.Clock, source func() []v1alpha
 	return &Prober{
 		tun: tun, clk: clk, interval: cfg.ProbeInterval.D(), timeout: cfg.ProbeTimeout.D(), failures: cfg.ProbeFailures,
 		source: source, events: events, log: log, state: map[types.UID]*probeState{}, beat: clk.Now(),
+		awaiting: map[types.UID]*reprobe{}, kick: make(chan struct{}, 1),
 	}
+}
+
+// Reregistered puts the UID on the re-probe schedule, due now, and wakes Run.
+// The front's plugin calls it after Tunnel.Bump, for frps's NewProxy. It never
+// blocks.
+func (p *Prober) Reregistered(uid types.UID) {
+	p.mu.Lock()
+	p.awaiting[uid] = &reprobe{next: p.clk.Now(), wait: reprobeFirst}
+	p.mu.Unlock()
+	select {
+	case p.kick <- struct{}{}:
+	default:
+	}
+}
+
+// lostRegistration records that a new registration of the UID took a
+// registration away (Tunnel.Bump reported one): the probes of the new one then
+// count toward PathProbeFailing from no failures, as a registered UID's do.
+// The front's plugin calls it. It never blocks past p.mu.
+func (p *Prober) lostRegistration(uid types.UID) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if st := p.state[uid]; st != nil {
+		st.lost, st.fails = true, 0
+	}
+}
+
+// reprobeAt is when the next re-probe is due, and false when none is.
+func (p *Prober) reprobeAt() (time.Time, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var at time.Time
+	for _, r := range p.awaiting {
+		if at.IsZero() || r.next.Before(at) {
+			at = r.next
+		}
+	}
+	return at, !at.IsZero()
 }
 
 // Run probes every probeInterval until ctx ends. A round starts every
 // interval, or as soon as the previous one ended when that took longer; a
-// round waits for its probes, which probeTimeout bounds.
+// round waits for its probes, which probeTimeout bounds. The re-probes run
+// apart from the rounds (runReprobes), so a round that waits on a slow probe
+// never holds a re-probe up. Run returns once both have stopped.
 func (p *Prober) Run(ctx context.Context) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		p.runReprobes(ctx)
+	}()
+	defer wg.Wait()
 	for {
 		start := p.clk.Now()
 		p.Round(ctx)
-		wait := p.interval - p.clk.Now().Sub(start)
-		if wait < 0 {
-			wait = 0
-		}
+		wait := max(p.interval-p.clk.Now().Sub(start), 0)
 		next := make(chan struct{})
 		t := p.clk.AfterFunc(wait, func() { close(next) })
 		select {
@@ -132,6 +210,102 @@ func (p *Prober) Run(ctx context.Context) {
 			return
 		case <-next:
 		}
+	}
+}
+
+// runReprobes runs the re-probe schedule until ctx ends: it starts each
+// re-probe as it falls due, without waiting for it, and sleeps until the next
+// one is due or a kick (Reregistered) comes. A UID has one probe at a time
+// (probeState.running), whether a round's or a re-probe's. It returns once its
+// probes have ended.
+func (p *Prober) runReprobes(ctx context.Context) {
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	for {
+		if at, ok := p.reprobeAt(); ok && !p.clk.Now().Before(at) {
+			p.startReprobes(ctx, &wg)
+		}
+		var due <-chan struct{}
+		var t clock.Timer
+		if at, ok := p.reprobeAt(); ok {
+			c := make(chan struct{})
+			t = p.clk.AfterFunc(max(at.Sub(p.clk.Now()), 0), func() { close(c) })
+			due = c
+		}
+		select {
+		case <-ctx.Done():
+		case <-due:
+		case <-p.kick:
+		}
+		if t != nil {
+			t.Stop()
+		}
+		if ctx.Err() != nil {
+			return
+		}
+	}
+}
+
+// Reprobe runs the re-probes that are due now and waits for them
+// (startReprobes). Run does not call it: tests drive the schedule with it.
+func (p *Prober) Reprobe(ctx context.Context) {
+	var wg sync.WaitGroup
+	p.startReprobes(ctx, &wg)
+	wg.Wait()
+}
+
+// startReprobes starts, concurrently, a probe of each probed Instance whose
+// re-probe is due and whose previous probe has ended, and moves each one's next
+// attempt on; wg counts the probes. A UID whose wait would reach probeInterval
+// leaves the schedule after this attempt; the rounds go on probing it. So does
+// one the front does not probe (not yet in a probed phase, or gone), at once.
+// One whose probe still runs is put off by reprobeFirst. So every entry left
+// due now is moved on, and runReprobes never spins.
+func (p *Prober) startReprobes(ctx context.Context, wg *sync.WaitGroup) {
+	insts := p.source()
+	live := make(map[types.UID]*v1alpha1.Instance, len(insts))
+	for i := range insts {
+		if in := &insts[i]; probed(in) {
+			live[in.UID] = in
+		}
+	}
+	now := p.clk.Now()
+	var start []*v1alpha1.Instance
+	var states []*probeState
+	p.mu.Lock()
+	for uid, r := range p.awaiting {
+		in := live[uid]
+		switch {
+		case in == nil:
+			delete(p.awaiting, uid)
+			continue
+		case now.Before(r.next):
+			continue
+		}
+		st := p.state[uid]
+		if st == nil {
+			st = &probeState{name: in.Namespace + "/" + in.Name}
+			p.state[uid] = st
+		}
+		if st.running {
+			r.next = now.Add(reprobeFirst)
+			continue
+		}
+		if r.wait >= p.interval {
+			delete(p.awaiting, uid)
+		} else {
+			r.next, r.wait = now.Add(r.wait), 2*r.wait
+		}
+		st.running = true
+		start, states = append(start, in), append(states, st)
+	}
+	p.mu.Unlock()
+	for i := range start {
+		wg.Add(1)
+		go func(in *v1alpha1.Instance, st *probeState) {
+			defer wg.Done()
+			p.probeOne(ctx, in, st)
+		}(start[i], states[i])
 	}
 }
 
@@ -166,6 +340,13 @@ func (p *Prober) Round(ctx context.Context) {
 			gone = append(gone, uid)
 		}
 	}
+	// A re-probe for an Instance the front does not probe (not yet placed in a
+	// probed phase, or gone) waits no longer: the rounds take it up.
+	for uid := range p.awaiting {
+		if live[uid] == nil {
+			delete(p.awaiting, uid)
+		}
+	}
 	for uid, in := range live {
 		st := p.state[uid]
 		if st == nil {
@@ -181,6 +362,7 @@ func (p *Prober) Round(ctx context.Context) {
 	p.mu.Unlock()
 	for _, uid := range gone {
 		p.tun.setRegistered(uid, false)
+		p.tun.forget(uid)
 	}
 	var wg sync.WaitGroup
 	for i := range start {
@@ -199,6 +381,7 @@ func (p *Prober) Round(ctx context.Context) {
 // probeOne probes one Instance and applies the verdict.
 func (p *Prober) probeOne(ctx context.Context, in *v1alpha1.Instance, st *probeState) {
 	began := time.Now()
+	epoch := p.tun.Epoch(in.UID)
 	status, err := p.check(ctx, in.UID)
 	if ctx.Err() != nil {
 		// The front is stopping: a probe it cut says nothing about the path.
@@ -206,6 +389,19 @@ func (p *Prober) probeOne(ctx context.Context, in *v1alpha1.Instance, st *probeS
 		st.running = false
 		p.mu.Unlock()
 		return
+	}
+	if err == nil && p.tun.Epoch(in.UID) != epoch {
+		// The proxy registered again while the probe ran, so its pass proves
+		// the replaced registration only: no verdict, and a re-probe soon.
+		p.mu.Lock()
+		st.running = false
+		p.mu.Unlock()
+		p.log.Info("the Instance's tunnel was registered again while its probe ran; the pass does not count", "instance", in.Namespace+"/"+in.Name, "uid", string(in.UID))
+		p.Reregistered(in.UID)
+		return
+	}
+	if p.beforeVerdict != nil {
+		p.beforeVerdict(in.UID)
 	}
 	res := ProbeResult{UID: in.UID, Instance: in.Namespace + "/" + in.Name, Phase: in.Status.Phase, Status: status, Passed: err == nil, Duration: time.Since(began)}
 	p.mu.Lock()
@@ -223,15 +419,44 @@ func (p *Prober) probeOne(ctx context.Context, in *v1alpha1.Instance, st *probeS
 	res.Failures = st.fails
 	st.has, st.passed, st.at = true, err == nil, p.clk.Now()
 	register := err == nil || (st.fails < p.failures && p.tun.Registered(in.UID))
+	lost := st.lost
+	if err == nil {
+		delete(p.awaiting, in.UID)
+		st.lost = false
+	}
+	// A registration that a new one took away, whose probes have now failed
+	// probeFailures times in a row with no pass: the loss HBEP-6 reports, once.
+	lostNow := err != nil && lost && st.fails >= p.failures
+	if lostNow {
+		st.lost = false
+	}
 	p.mu.Unlock()
+	was, applied := p.tun.setRegisteredAt(in.UID, register, &epoch)
+	if !applied {
+		// The epoch moved between the check above and here: the same case,
+		// with the pass already counted against the failure run, which a UID
+		// without a registration does not use. The pass proved nothing, so
+		// the UID keeps whatever loss it carried.
+		register = false
+		p.mu.Lock()
+		if p.state[in.UID] == st {
+			st.lost = lost
+		}
+		p.mu.Unlock()
+		p.Reregistered(in.UID)
+	}
 	res.Registered = register
-	was := p.tun.setRegistered(in.UID, register)
 	switch {
 	case !was && register:
 		p.log.Info("the Instance's tunnel passed its probe; its transport counts as registered", "instance", res.Instance, "uid", string(in.UID))
-	case was && !register:
-		p.log.Warn("the Instance's tunnel failed its probe in a row; its transport no longer counts as registered, so it is not eligible",
-			"instance", res.Instance, "uid", string(in.UID), "failures", res.Failures, "error", res.Error)
+	case was && !register, lostNow:
+		if lostNow {
+			p.log.Warn("the Instance's tunnel was registered again, and its probes failed in a row with none passing; it is not eligible",
+				"instance", res.Instance, "uid", string(in.UID), "failures", res.Failures, "error", res.Error)
+		} else {
+			p.log.Warn("the Instance's tunnel failed its probe in a row; its transport no longer counts as registered, so it is not eligible",
+				"instance", res.Instance, "uid", string(in.UID), "failures", res.Failures, "error", res.Error)
+		}
 		if in.Status.Phase == v1alpha1.InstanceReady && meta.IsStatusConditionTrue(in.Status.Conditions, v1alpha1.ConditionTunnelConnected) {
 			p.events.PathProbeFailing(in, res)
 		}
