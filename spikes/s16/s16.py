@@ -446,13 +446,13 @@ class Stack:
             state[e["i"]] = e["reg"]
         return sum(1 for v in state.values() if v)
 
-    def start_frpc(self, timeout=90):
+    def start_frpc(self, timeout=90, alive=None):
         t0 = self.event("frpc-start")
         pathenv = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
         for t in self.spec["tunnels"]:
             self.P.start("frpc-%03d" % t["index"], [self.env.b("frpc"), "-c", t["frpc"]], nice=self.env.nice_node,
                          env=pathenv, logname="frpc")
-        wait_for("every proxy online", lambda: self.online() == self.n, timeout, step=0.25)
+        wait_for("every proxy online", lambda: self.online() == self.n, timeout, alive=alive, step=0.25)
         self.event("all-online", s=round(time.time() - t0, 3))
         wait_for("every tunnel routed (a passing probe)", lambda: self.registered() == self.n, timeout, step=0.25)
         self.event("all-routed", s=round(time.time() - t0, 3))
@@ -625,9 +625,14 @@ def run_relogin(env, n, event, rep, args):
             man["t_event"] = st.event("no-event")
         # Back: every proxy online again and every tunnel routed again by the (current) front, or
         # the recovery timeout. The 60 s rule is the analysis's; the wait runs on past it.
+        def back():
+            if event == "none":
+                return True
+            again = {c.get("proxy") for c in read_lines(st.f("front-calls.jsonl"))
+                     if c.get("op") == "NewProxy" and not c.get("reject") and c["end_ns"] / 1e9 > man["t_event"]}
+            return len(again) == n and st.online() == n and st.registered() == n
         try:
-            wait_for("every tunnel back", lambda: time.time() > man["t_event"] + 1 and st.online() == n and st.registered() == n,
-                     args.recover, step=0.2)
+            wait_for("every tunnel back", back, args.recover, step=0.5)
             man["t_back_seen"] = time.time()
         except RuntimeError:
             man["t_back_seen"] = None
@@ -642,8 +647,19 @@ def run_relogin(env, n, event, rep, args):
 
 # --- item 2: the capped link ----------------------------------------------------------------------
 
+def link_chunk(rate_bps):
+    """The link's largest chunk: 16 KiB (S1c's), or at a low cap the power of two at most 1% of a
+    second's bytes (at least 1 KiB), so a chunk's booked second cannot swing a second's count by
+    more than about 1% against the 95% rule."""
+    c = 16384
+    while rate_bps and c > 1024 and c > rate_bps / 100:
+        c //= 2
+    return c
+
+
 def link_args(rate_bps, discipline, buffer):
-    a = ["-up-rate", "%.0f" % rate_bps, "-down-rate", "%.0f" % rate_bps, "-discipline", discipline]
+    a = ["-up-rate", "%.0f" % rate_bps, "-down-rate", "%.0f" % rate_bps, "-discipline", discipline,
+         "-chunk", str(link_chunk(rate_bps))]
     if discipline == "fifo":
         a += ["-buffer-up", buffer, "-buffer-down", buffer]
     return a
@@ -702,7 +718,9 @@ def run_caplink(env, args):
 # --- item 3: R_ssh --------------------------------------------------------------------------------
 
 def run_rssh(env, cipher, rep, args):
-    rid = run_id("rssh", cipher.replace("@openssh.com", "").replace("default", "dflt"), "r%d" % rep)
+    # Short names: sshrun refuses a control directory whose socket path would pass 90 bytes.
+    tag = {"default": "dflt", "aes128-gcm@openssh.com": "a128", "aes256-gcm@openssh.com": "a256"}.get(cipher, "c%d" % (abs(hash(cipher)) % 1000))
+    rid = run_id("rssh", tag, "r%d" % rep)
     st = Stack(env, rid, args.allocations, mode="host-dialed", token_delay_ms=50)
     man = {"item": "rssh", "rep": rep, "cipher_asked": cipher, "levels": [], "idle_s": args.idle, "window_s": args.window}
     status = "ok"
@@ -722,7 +740,7 @@ def run_rssh(env, cipher, rep, args):
         st.P.start("owner", [env.b("s16"), "owner", "-spec", st.spec_path, "-login", st.f("login-ready.json"),
                              "-ssh", env.b("s16ssh"), "-agent", env.b("s16node.test"), "-control-dir", st.f("ctl"),
                              "-state", st.f("owner-state.json"), "-log", st.f("logs/owner.log")], env=ssh_env)
-        st.start_frpc(timeout=120)
+        st.start_frpc(timeout=120, alive=lambda: st.P.alive("owner") and st.P.alive("login"))
         man["listeners"] = st.check_loopback()
         st.start_sampler()
         time.sleep(2)
