@@ -58,6 +58,9 @@ type OwnerRunnerOptions struct {
 	// defaults.
 	SSHBinary string
 	SSHEnv    []string
+	// SSHLoginTimeout bounds the ssh -G that names a login host; zero means
+	// sshrun.DefaultLoginTimeout. Tests shorten it.
+	SSHLoginTimeout time.Duration
 	// MinBackoff, MaxBackoff and StopGrace are hostdial's; zero means its
 	// defaults.
 	MinBackoff, MaxBackoff, StopGrace time.Duration
@@ -284,8 +287,9 @@ func (p *provRunner) relay(s wire.SSH) (*sshrun.Relay, error) {
 	}
 	rl, err := sshrun.NewRelay(sshrun.RelayOptions{
 		Name: p.name, Binary: p.r.o.SSHBinary, Env: p.r.o.SSHEnv, ControlDir: p.r.o.SSHDir,
-		ConfigFile: filepath.Join(p.r.o.SSHDir, p.name+"-"+key+".conf"),
-		Config:     slurm.SSHConfig{HostName: s.HostName, User: s.User, Port: s.Port, IdentityFile: s.IdentityFile, UserKnownHostsFile: s.KnownHostsFile},
+		ConfigFile: filepath.Join(p.r.o.SSHDir, p.name+"-"+key+".conf"), Logger: p.r.o.Logger,
+		LoginTimeout: p.r.o.SSHLoginTimeout,
+		Config:       slurm.SSHConfig{HostName: s.HostName, User: s.User, Port: s.Port, IdentityFile: s.IdentityFile, UserKnownHostsFile: s.KnownHostsFile},
 	})
 	if err != nil {
 		return nil, err
@@ -296,17 +300,25 @@ func (p *provRunner) relay(s wire.SSH) (*sshrun.Relay, error) {
 
 // LoginHost is the login host the Provider's relays for s reach, as ssh -G
 // resolves it, lower case; when s cannot be made into a relay's settings, it
-// is the configured HostName, lower case, and every start of it fails.
-func (r *OwnerRunner) LoginHost(provider string, s wire.SSH) string {
+// is the configured HostName, lower case, and every start of it fails. When
+// ssh -G times out (sshrun.ErrLoginTimeout) it is "" and the error: the host
+// is not known, and the keeper claims none for that set (issue 403; ruling (b)
+// on PR 409, `@hpc-burst-science-agent`, 11 Nov 2026).
+func (r *OwnerRunner) LoginHost(provider string, s wire.SSH) (string, error) {
 	p := r.prov(provider)
 	p.mu.Lock()
 	rl, err := p.relay(s)
 	p.mu.Unlock()
 	if err != nil {
 		r.o.Logger.Error("the Provider's ssh settings cannot be used", "provider", provider, "err", err)
-		return strings.ToLower(s.HostName)
+		return strings.ToLower(s.HostName), nil
 	}
-	return strings.ToLower(rl.Login())
+	host, err := rl.Login()
+	if err != nil {
+		r.o.Logger.Error("the Provider's login host could not be read", "provider", provider, "err", err)
+		return "", err
+	}
+	return strings.ToLower(host), nil
 }
 
 // Want queues w's Allocation's relays for the Provider's worker, replacing
@@ -344,7 +356,14 @@ func (p *provRunner) want(s wire.SSH, w Want) {
 		p.r.o.Logger.Error("a relay's ssh settings cannot be used: it is not started", "provider", p.name, "tag", w.Entry.Tag, "err", err)
 		return
 	}
-	host := strings.ToLower(rl.Login())
+	login, err := rl.Login()
+	if err != nil {
+		// Not started on a guessed host: a later Want, with ssh -G answering,
+		// names the real one and the relays are not started twice.
+		p.r.o.Logger.Error("a relay's login host could not be read: it is not started", "provider", p.name, "tag", w.Entry.Tag, "err", err)
+		return
+	}
+	host := strings.ToLower(login)
 	e := w.Entry
 	// The Want's incarnation is the relays' identity (Want.Incarnation): a
 	// re-created Provider, a new generation, a move, and a Drop followed by

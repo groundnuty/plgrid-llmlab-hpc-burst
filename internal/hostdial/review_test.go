@@ -81,7 +81,7 @@ func TestHostDialedABlipNeverGivesASlotToAnotherAllocation(t *testing.T) {
 			t.Errorf("C's %s listener got a greeting while C waits", ch)
 		}
 	}
-	if n := slots.InUse(w.relay.Login()); n != 4 {
+	if n := slots.InUse(w.login()); n != 4 {
 		t.Errorf("%d slots in use, want 4", n)
 	}
 	own.Drop(b.tag)

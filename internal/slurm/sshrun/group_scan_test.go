@@ -95,8 +95,8 @@ func clean() { h(); g.signal(1); leader.reap(cmd) }
 }
 
 // The package's only numeric signal is killGroup, reached only through the
-// sink New sets. The pin failure's kill goes through the leader's own pidfd,
-// and only the barrier (groupLeader.reap), the failed pin's bounded cleanup
+// sink New sets (the transport's) and newRelay sets (the relays', for ssh -G).
+// The pin failure's kill goes through the leader's own pidfd, and only the barrier (groupLeader.reap), the failed pin's bounded cleanup
 // and the probe reap a child. A new kill(2), a signal through an os.Process
 // (under any alias), a process lookup by PID, a pidfd signal or a reap
 // anywhere else fails this scan. It reads the package's non-test sources, so
@@ -112,7 +112,7 @@ func TestNoUnguardedSignalsInThePackage(t *testing.T) {
 	}
 	// Where each name may appear: enclosing function -> its count.
 	identUses := map[string]map[string]int{
-		"killGroup":       {"New": 1},
+		"killGroup":       {"New": 1, "newRelay": 1},
 		"pidfdSendSignal": {"start": 1, "probePidfd": 2, "probeChild": 1},
 	}
 	files, err := filepath.Glob("*.go")

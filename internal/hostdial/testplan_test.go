@@ -358,7 +358,7 @@ func TestHostDialedFifthRelayWaits(t *testing.T) {
 			t.Errorf("the waiting %s relay of %s started %d times", r.Channel, r.Tag, r.Starts)
 		}
 	}
-	if n := slots.InUse(w.relay.Login()); n != 4 {
+	if n := slots.InUse(w.login()); n != 4 {
 		t.Errorf("%d slots in use on the login node, want 4", n)
 	}
 	// Free the slots of an Allocation whose two relays both run.
@@ -380,7 +380,7 @@ func TestHostDialedFifthRelayWaits(t *testing.T) {
 		waitFor(t, time.Minute, "the waiting "+string(r.Channel)+" relay of "+r.Tag+" up", func() bool { return relayOf(own, r.Tag, r.Channel).PID != 0 })
 		roundTrip(t, byTag[r.Tag], r.Channel, string(r.Channel), payload(2000))
 	}
-	if n := slots.InUse(w.relay.Login()); n != 4 {
+	if n := slots.InUse(w.login()); n != 4 {
 		t.Errorf("%d slots in use after the hand-over of slots, want 4", n)
 	}
 }

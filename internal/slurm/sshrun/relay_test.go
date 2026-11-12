@@ -78,15 +78,23 @@ func TestRelayLoginIsSSHGsHostName(t *testing.T) {
 		t.Cleanup(func() { _ = r.Close() })
 		return r
 	}
+	login := func(r *Relay) string {
+		t.Helper()
+		host, err := r.Login()
+		if err != nil {
+			t.Fatalf("Login: %v", err)
+		}
+		return host
+	}
 	a := relay("helios-a", "LOGIN01.Example.org", "example-user", "ssh")
 	b := relay("helios-b", "login01.example.org", "other-user", "ssh")
-	if got := a.Login(); got != "login01.example.org" {
+	if got := login(a); got != "login01.example.org" {
 		t.Errorf("Login = %q, want ssh -G's hostname login01.example.org", got)
 	}
-	if a.Login() != b.Login() {
-		t.Errorf("one login host spelt two ways gives two keys: %q and %q", a.Login(), b.Login())
+	if login(a) != login(b) {
+		t.Errorf("one login host spelt two ways gives two keys: %q and %q", login(a), login(b))
 	}
-	if got := relay("helios-c", "LOGIN01.Example.org", "example-user", "/bin/false").Login(); got != "LOGIN01.Example.org" {
+	if got := login(relay("helios-c", "LOGIN01.Example.org", "example-user", "/bin/false")); got != "LOGIN01.Example.org" {
 		t.Errorf("with no ssh -G, Login = %q, want the configured HostName", got)
 	}
 }

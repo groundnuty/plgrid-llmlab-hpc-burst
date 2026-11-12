@@ -176,7 +176,12 @@ func (w *world) staleRelays(ctx context.Context, g *hostDialedRig, target hostdi
 		w.p.log("stale relays: %v", err)
 		return nil
 	}
-	target.Login, target.Command, target.Gen = rel.Login(), rel.Command, "stale"
+	login, err := rel.Login()
+	if err != nil {
+		w.p.log("stale relays: %v", err)
+		return nil
+	}
+	target.Login, target.Command, target.Gen = login, rel.Command, "stale"
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	done := make(chan struct{})

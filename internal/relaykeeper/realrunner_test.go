@@ -127,7 +127,14 @@ func (rg *realRig) set(p string, complete bool, entries ...wire.Entry) wire.Desi
 }
 
 // host is the login host as the keeper resolved it.
-func (rg *realRig) host() string { return rg.rr.LoginHost(rkProv, rg.w.ssh()) }
+func (rg *realRig) host() string {
+	rg.t.Helper()
+	host, err := rg.rr.LoginHost(rkProv, rg.w.ssh())
+	if err != nil {
+		rg.t.Fatalf("the login host: %v", err)
+	}
+	return host
+}
 
 // probe is rkOther's set for the login host, with one Allocation that
 // carries RelayEndedForGood: it claims the host when it is free, and starts

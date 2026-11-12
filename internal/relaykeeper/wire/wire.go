@@ -279,6 +279,7 @@ const (
 	RefusedVersion   = "version"
 	RefusedMalformed = "malformed"
 	// RefusedState is a keeper that could not write and sync its state file,
+	// or could not read a set's login host (its ssh -G timed out, issue 403),
 	// so the request took no effect; the sender tries again on its next round.
 	RefusedState = "state"
 )
