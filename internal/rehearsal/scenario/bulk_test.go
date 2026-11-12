@@ -26,6 +26,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -114,6 +115,9 @@ func measureBulk(t *testing.T, mode string, ports stack.Ports, bulkPath bool) bu
 	r.engineEnv = []v1alpha1.EnvVar{{Name: "HB_ENGINE_DOUBLE", Value: "token-delay=" + bulkTokenDelay.String() + ",reply-bytes=" + strconv.Itoa(bulkReplyBytes)}}
 	in := r.startServing(bulkPath)
 	key := r.fc.KeyFor(in)
+	// Without the bulk path (the control, HBEP-6:659's "bulk path off"), the real agent runs the
+	// token frpc alone: the controller wrote no bulk block. With it, the bulk frpc beside it.
+	r.waitFrpcs(in, 1, map[bool]int{true: 1, false: 0}[bulkPath])
 
 	before := frontMetric(t, ports, `hpcburst_front_bulk_requests_total{path="bulk"}`)
 	if bulkPath && before != 0 {
@@ -249,6 +253,67 @@ func frontMetric(t *testing.T, p stack.Ports, series string) float64 {
 		}
 	}
 	return -1
+}
+
+// agentFrpcs counts the frpc processes the agent of the Instance's job runs: the token frpc
+// (frpc.toml) and the bulk frpc (frpc-bulk.toml), told apart by the configuration on their command
+// lines (internal/agent, Frpc.ConfigPath).
+func (r *rig) agentFrpcs(in *v1alpha1.Instance) (token, bulk int) {
+	r.t.Helper()
+	agent := r.jobAgent(r.jobOf(in))
+	if agent == 0 {
+		return 0, 0
+	}
+	for _, c := range stack.ChildrenOf(agent) {
+		if !isStagedFrpc(stack.ProcessExe(c)) {
+			continue
+		}
+		b, err := os.ReadFile("/proc/" + strconv.Itoa(c) + "/cmdline")
+		if err != nil {
+			continue
+		}
+		switch args := strings.Split(strings.TrimRight(string(b), "\x00"), "\x00"); {
+		case strings.HasSuffix(args[len(args)-1], "/frpc-bulk.toml"):
+			bulk++
+		case strings.HasSuffix(args[len(args)-1], "/frpc.toml"):
+			token++
+		}
+	}
+	return token, bulk
+}
+
+// waitFrpcs waits until the Instance's agent runs exactly token and bulk frpc, and they stay so for
+// a few seconds: a bulk frpc that is missing at first must also never appear.
+func (r *rig) waitFrpcs(in *v1alpha1.Instance, token, bulk int) {
+	r.t.Helper()
+	var since time.Time
+	stack.WaitState(r.t, stack.WaitDeadline, fmt.Sprintf("the agent to run %d token and %d bulk frpc", token, bulk), func() (bool, string) {
+		tk, bk := r.agentFrpcs(in)
+		if tk != token || bk != bulk {
+			since = time.Time{}
+			return false, fmt.Sprintf("%d token, %d bulk", tk, bk)
+		}
+		if since.IsZero() {
+			since = time.Now()
+		}
+		return time.Since(since) >= 3*time.Second, "settling"
+	})
+}
+
+// jobOf is the job ID of the Allocation the Instance runs on.
+func (r *rig) jobOf(in *v1alpha1.Instance) int {
+	r.t.Helper()
+	for _, a := range r.allocations() {
+		if a.Name == in.Spec.AllocationRef.Name && a.Status.AtProvider.JobID != "" {
+			id, err := strconv.Atoi(a.Status.AtProvider.JobID)
+			if err != nil {
+				r.t.Fatalf("job ID %q: %v", a.Status.AtProvider.JobID, err)
+			}
+			return id
+		}
+	}
+	r.t.Fatalf("no job for the Instance %s", in.Name)
+	return 0
 }
 
 // writeCredentials writes the Provider's ssh credentials for the login node: through S17's link in

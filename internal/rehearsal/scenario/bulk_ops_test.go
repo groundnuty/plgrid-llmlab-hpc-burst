@@ -5,6 +5,7 @@ package scenario_test
 // tested in parts 2 to 6, with the real frp where it matters.
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -173,5 +174,76 @@ func TestTeardownLeavesNoBulkProxy(t *testing.T) {
 	})
 	if r.frpsProxies()[string(in.UID)] {
 		t.Errorf("frps still lists the ended Instance %s online", in.UID)
+	}
+}
+
+// TestPreBulkAllocationKeepsItsTokenTunnel (HBEP-6:659 and :661): an Allocation staged before the bulk
+// path was turned on keeps its token tunnel and takes no bulk transport. The host starts without the
+// bulk path and its Instance serves; then down, and up --bulk-path on the same state. The launcher's
+// first certificate, which the Allocation's frpc trusts, has the same bytes; its real agent, whose
+// agent.json has no bulk block, still runs one frpc; the front, now with the bulk path, registers no
+// bulk transport for it, and serves its non-streamed requests through the token tunnel, with neither
+// bulk counter moving.
+//
+//livecheck:none a hosted throwaway runs it (IMPL-COMMON: rehearsals on hosted runners)
+func TestPreBulkAllocationKeepsItsTokenTunnel(t *testing.T) {
+	requireRehearsal(t)
+	for _, c := range []struct {
+		mode  string
+		ports stack.Ports
+	}{
+		{"direct", portsBulkDirect},
+		{string(agentapi.DialHomeHostDialed), portsBulkHostDialed},
+	} {
+		t.Run(c.mode, func(t *testing.T) {
+			r := startRigWith(t, rigSetup{mode: c.mode, ports: c.ports})
+			r.engineEnv = []v1alpha1.EnvVar{{Name: "HB_ENGINE_DOUBLE", Value: "token-delay=" + bulkTokenDelay.String()}}
+			in := r.startServing(false)
+			key := r.fc.KeyFor(in)
+			r.waitFrpcs(in, 1, 0)
+			certPath := filepath.Join(r.h.State, "agent-endpoint", "tls.crt")
+			before, err := os.ReadFile(certPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := r.sendSmall(key); code != http.StatusOK {
+				t.Fatalf("before the switch: %d", code)
+			}
+
+			r.h.Down()
+			r.h.Ports.BulkPath, r.ports.BulkPath = true, true
+			if out, err := r.h.UpAgain("--bulk-path"); err != nil {
+				t.Fatalf("up --bulk-path on the same state: %v\n%s", err, out)
+			}
+			after, err := os.ReadFile(certPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatal("up --bulk-path changed the first certificate's bytes: the Allocation staged before would lose its token tunnel")
+			}
+			if _, err := os.Stat(filepath.Join(r.h.State, "agent-endpoint", "tls-bulk.crt")); err != nil {
+				t.Fatalf("up --bulk-path issued no second certificate: %v", err)
+			}
+			stack.WaitState(t, stack.WaitDeadline, "the Instance's token transport to register again", func() (bool, string) {
+				reg, _ := stack.Registered(r.ports, in)
+				return reg, "not registered"
+			})
+			r.waitFrpcs(in, 1, 0)
+			if code := r.sendSmall(key); code != http.StatusOK {
+				t.Fatalf("after the switch: %d, want 200 through the token tunnel", code)
+			}
+			if reg := frontMetric(t, r.ports, "hpcburst_front_bulk_registered"); reg != 0 {
+				t.Errorf("the front registered %v bulk transports for an Allocation staged before the bulk path", reg)
+			}
+			b := frontMetric(t, r.ports, `hpcburst_front_bulk_requests_total{path="bulk"}`)
+			fb := frontMetric(t, r.ports, `hpcburst_front_bulk_requests_total{path="fallback"}`)
+			if b != 0 || fb != 0 {
+				t.Errorf("bulk counters %v and %v: a request of an Allocation staged before the bulk path tried a bulk transport", b, fb)
+			}
+			if r.frpsBulkProxies()[string(in.UID)] {
+				t.Error("frps-bulk lists a proxy for an Allocation staged before the bulk path")
+			}
+		})
 	}
 }
