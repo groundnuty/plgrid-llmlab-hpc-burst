@@ -141,8 +141,8 @@ func (w *world) alphaSettings(mutate func(m map[string]string)) {
 		m["LIVE_DIALHOME_MODE"] = "direct"
 		m["LIVE_DIALHOME_ADDR"] = "gateway-seed.example:29999"
 		m["LIVE_BIN_DIR"] = bin
-		m["LIVE_OWNER_GO_HELIOS_NOW"] = time.Now().UTC().Format("2006-01-02")
-		m["LIVE_OWNER_GO_ATHENA_NOW"] = time.Now().UTC().Format("2006-01-02")
+		m["LIVE_OWNER_GO_HELIOS_NOW"] = w.day
+		m["LIVE_OWNER_GO_ATHENA_NOW"] = w.day
 		m["LIVE_FRONT_HOST_LABEL"] = exampleFrontLabel
 		if mutate != nil {
 			mutate(m)
@@ -151,9 +151,12 @@ func (w *world) alphaSettings(mutate func(m map[string]string)) {
 }
 
 // newAlphaWorld is a world with the alpha settings, the alpha stubs and the stub build scripts executable.
-func newAlphaWorld(t *testing.T) *world {
+func newAlphaWorld(t *testing.T) *world { return newAlphaWorldAt(t, time.Now) }
+
+// newAlphaWorldAt is newAlphaWorld with the clock that gives the world its day (newWorldAt).
+func newAlphaWorldAt(t *testing.T, clock func() time.Time) *world {
 	t.Helper()
-	w := newWorld(t)
+	w := newWorldAt(t, clock)
 	w.alphaSettings(nil)
 	w.useAlphaStubs()
 	for _, s := range []string{"hack/build-agents.sh", "hack/fetch-frp.sh", "hack/build-stage-helper.sh"} {
@@ -851,8 +854,6 @@ func TestHostDialedModeSettingsAreRefusedWhenWrong(t *testing.T) {
 // script rounds up to ten minutes, 2 h 40 min; the hour's row holds its lease, by default 2 h 17 min (the GH200 measurement of 23 min 39 s is over the 20 minutes
 // under which the short lease would be kept), rounded to 2 h 20 min.
 func TestTheRowsThatHoldTheOwnersSlotForHoursNeedTheOwnersGo(t *testing.T) {
-	today := time.Now().UTC().Format("2006-01-02")
-	yesterday := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
 	rows := []struct{ row, setting, hold string }{
 		// The note states the pend and the hold (issue #222): the owner reads both before saying yes.
 		{"alpha-helios-nooverlap", "LIVE_OWNER_GO_HELIOS_NOW", "may pend up to 30 min in the queue (then it is cancelled by its tag and the run is NOT RUN), then holds QOS now's GPU for about 2 h 40 min; the owner's go is needed (the development rule on #145)"},
@@ -863,9 +864,14 @@ func TestTheRowsThatHoldTheOwnersSlotForHoursNeedTheOwnersGo(t *testing.T) {
 		{"alpha-athena-now-stage", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 0 h 50 min; the owner's go is needed (the development rule on #145)"},
 	}
 	for _, c := range rows {
-		for _, stale := range []struct{ name, value string }{{"missing", ""}, {"yesterday's", yesterday}, {"1", "1"}, {"yes", "yes"}} {
+		for _, stale := range []struct{ name, value string }{{"missing", ""}, {"yesterday's", "(the world's yesterday)"}, {"1", "1"}, {"yes", "yes"}} {
 			t.Run(c.row+"/"+stale.name, func(t *testing.T) {
 				w := newAlphaWorld(t)
+				today, yesterday := w.day, w.dayPlus(-1)
+				stale := stale
+				if stale.name == "yesterday's" {
+					stale.value = yesterday
+				}
 				w.alphaSettings(func(m map[string]string) {
 					if stale.value == "" {
 						delete(m, c.setting)
@@ -971,13 +977,12 @@ func TestTheScriptsSlotHoldIsThePackagesRoundedUp(t *testing.T) {
 // past UTC midnight, or a build that does, leaves the go of another day. The date comes from a file the test
 // changes (LIVE_FAKE_DATE_FILE, read each time), so the run crosses midnight between two rows.
 func TestTheOwnersGoIsReadAgainBeforeEachProtectedRow(t *testing.T) {
-	today := time.Now().UTC().Format("2006-01-02")
-	tomorrow := time.Now().UTC().AddDate(0, 0, 1).Format("2006-01-02")
+	var tomorrow string // the world's tomorrow, set by withDate, which the subtests read after it
 	withDate := func(t *testing.T, extra ...string) (*world, []string) {
 		w := newAlphaWorld(t)
-		f := filepath.Join(w.dir, "today")
-		write(t, f, today+"\n", 0o644)
-		return w, append([]string{"LIVE_FAKE_DATE_FILE=" + f, "STUB_NEXT_DATE=" + tomorrow}, extra...)
+		tomorrow = w.dayPlus(1)
+		// The date file is the world's own (LIVE_FAKE_DATE_FILE, set by w.env): the stubs change it.
+		return w, append([]string{"STUB_NEXT_DATE=" + tomorrow}, extra...)
 	}
 	t.Run("the control: the date stays", func(t *testing.T) {
 		w, env := withDate(t)
