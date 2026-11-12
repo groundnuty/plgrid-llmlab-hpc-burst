@@ -46,6 +46,7 @@ type closeProxyHold struct {
 	armed   bool
 	held    chan string // the proxy name of each CloseProxy held
 	release chan struct{}
+	passed  chan struct{} // a value once each held call, released, has reached the front's plugin
 }
 
 func (h *closeProxyHold) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -59,13 +60,17 @@ func (h *closeProxyHold) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = json.Unmarshal(b, &call)
 	h.mu.Lock()
 	hold := h.armed && call.Op == opCloseProxy
+	release := h.release
 	h.mu.Unlock()
 	if hold {
 		h.held <- call.Content.ProxyName
-		<-h.release
+		<-release
 	}
 	r.Body = io.NopCloser(bytes.NewReader(b))
 	h.plugin.ServeHTTP(w, r)
+	if hold {
+		h.passed <- struct{}{}
+	}
 }
 
 func (h *closeProxyHold) arm() {
@@ -178,64 +183,106 @@ func (r *realBulkFront) register(what string) {
 	})
 }
 
-// TestRealBulkFrpcKilledFallsBackOnce (trap 4, HBEP-6:658): after the bulk transport carried a
-// request, the bulk frpc is killed through its pidfd with frps-bulk's CloseProxy held, so the front
-// still has the bulk transport registered. The next non-streamed request is served by the SAME
-// Instance's token frpc, counts one fallback, starts no failure run, and takes the bulk transport out
-// of use. Once the CloseProxy is released and the bulk frpc runs again, a probe registers it again
-// and the next request takes it.
+// TestRealBulkFrpcKilledFallsBackOnce (trap 4, HBEP-6:658 as amended on #448): after the bulk
+// transport carried a request, the bulk frpc is killed through its pidfd with frps-bulk's CloseProxy
+// held, so the front still has the bulk transport registered. frps deletes the proxy before it calls
+// the plugin, so a new bulk dial fails and the request falls back: served by the SAME Instance's
+// token frpc, one fallback, no pause, the bulk transport out of use. But a request written into the
+// pooled bulk connection in the milliseconds before frp closes it gets 502 upstream_closed instead,
+// never resent: also no pause, the bulk transport out of use, and the next request on the token
+// tunnel. Each round checks its branch's invariants, then lets the CloseProxy through, restarts the
+// bulk frpc and re-registers it; the test repeats until a round has shown the fallback on the real
+// frp, up to fallbackRounds, and fails if none does.
 func TestRealBulkFrpcKilledFallsBackOnce(t *testing.T) {
-	hold := &closeProxyHold{held: make(chan string, 8), release: make(chan struct{})}
+	const fallbackRounds = 5
+	hold := &closeProxyHold{held: make(chan string, 8), release: make(chan struct{}), passed: make(chan struct{}, 8)}
+	pmux := http.NewServeMux()
+	pmux.Handle(agentapi.FrontFrpsBulkPluginPath, hold)
+	r := newRealBulkFront(t, pmux, false, func(f *bulkFront) { hold.plugin = f.bulk.plugin(f.log) })
+	f, uid := r.bulkFront, r.uid
 	t.Cleanup(func() {
+		hold.mu.Lock()
+		defer hold.mu.Unlock()
 		select {
 		case <-hold.release:
 		default:
 			close(hold.release)
 		}
 	})
-	pmux := http.NewServeMux()
-	pmux.Handle(agentapi.FrontFrpsBulkPluginPath, hold)
-	r := newRealBulkFront(t, pmux, false, func(f *bulkFront) { hold.plugin = f.bulk.plugin(f.log) })
-	f, uid := r.bulkFront, r.uid
 	r.startFrpc(false)
 	bulkProc, bulkDone := r.startFrpc(true)
 	r.register("both transports to register through the real frps")
-	if code, by := f.send("/v1/chat/completions", chatPlain); code != http.StatusOK || by != "bulk" {
-		t.Fatalf("before the loss: %d through %q; the test needs a bulk transport that carried a request", code, by)
-	}
-
-	hold.arm()
-	if err := bulkProc.Kill(); err != nil {
-		t.Fatalf("SIGKILL to the bulk frpc through its pidfd: %v", err)
-	}
-	<-bulkDone
-	select {
-	case name := <-hold.held:
-		if name != string(uid) {
-			t.Fatalf("frps-bulk's CloseProxy names %q, want %s", name, uid)
+	sawFallback := false
+	for round := 1; round <= fallbackRounds && !sawFallback; round++ {
+		b0, fb0, _ := f.bulkCounts()
+		if code, by := f.send("/v1/chat/completions", chatPlain); code != http.StatusOK || by != "bulk" {
+			t.Fatalf("round %d, before the loss: %d through %q; the round needs a bulk transport that carried a request", round, code, by)
 		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("frps-bulk never posted CloseProxy for the killed bulk frpc")
-	}
-	if !f.bulk.tun.Registered(uid) {
-		t.Fatal("the bulk transport is unregistered while its CloseProxy is held: this would test the unregister, not the fallback")
-	}
-	if code, by := f.send("/v1/chat/completions", chatPlain); code != http.StatusOK || by != "token" {
-		t.Fatalf("after the kill: %d through %q, want 200 from the same Instance's token frpc", code, by)
-	}
-	if n := f.router.failures(f.keys[0]); n != 0 || f.router.Paused(f.keys[0]) {
-		t.Errorf("the dead bulk frpc counted toward the pause: failures %d, paused %v", n, f.router.Paused(f.keys[0]))
-	}
-	if f.bulk.tun.Registered(uid) {
-		t.Error("the bulk transport is still registered after its dial failed")
-	}
-	if b, fb, _ := f.bulkCounts(); b != 1 || fb != 1 {
-		t.Errorf("metrics: bulk %v, fallback %v; want 1 and 1", b, fb)
-	}
+		hold.mu.Lock()
+		hold.armed, hold.release = true, make(chan struct{})
+		release := hold.release
+		hold.mu.Unlock()
+		if err := bulkProc.Kill(); err != nil {
+			t.Fatalf("round %d: SIGKILL to the bulk frpc through its pidfd: %v", round, err)
+		}
+		<-bulkDone
+		select {
+		case name := <-hold.held:
+			if name != string(uid) {
+				t.Fatalf("round %d: frps-bulk's CloseProxy names %q, want %s", round, name, uid)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatalf("round %d: frps-bulk never posted CloseProxy for the killed bulk frpc", round)
+		}
+		if !f.bulk.tun.Registered(uid) {
+			t.Fatalf("round %d: the bulk transport is unregistered while its CloseProxy is held: this would test the unregister, not the fallback", round)
+		}
+		tokenBefore := len(f.engToken.Requests())
+		resp := f.post("/v1/chat/completions", chatPlain)
+		body := readAll(t, resp)
+		_, fb, _ := f.bulkCounts()
+		switch {
+		case resp.StatusCode == http.StatusOK && len(f.engToken.Requests()) == tokenBefore+1 && fb == fb0+1:
+			sawFallback = true // the fallback: the same Instance's token frpc served it
+		case resp.StatusCode == http.StatusBadGateway && strings.Contains(body, "upstream_closed") && fb == fb0:
+			// The pooled connection, written before frp closed it: never resent.
+			if n := len(f.engToken.Requests()); n != tokenBefore {
+				t.Errorf("round %d: the 502 request was sent again through the token transport (%d requests there)", round, n-tokenBefore)
+			}
+			if code, by := f.send("/v1/chat/completions", chatPlain); code != http.StatusOK || by != "token" {
+				t.Errorf("round %d: the request after the 502: %d through %q, want the token tunnel", round, code, by)
+			}
+		default:
+			t.Fatalf("round %d, after the kill: %d %.200s, token requests +%d, fallbacks +%v; want a fallback through the token frpc or a 502 upstream_closed", round, resp.StatusCode, body, len(f.engToken.Requests())-tokenBefore, fb-fb0)
+		}
+		if n := f.router.failures(f.keys[0]); n != 0 || f.router.Paused(f.keys[0]) {
+			t.Errorf("round %d: the dead bulk frpc counted toward the pause: failures %d, paused %v", round, n, f.router.Paused(f.keys[0]))
+		}
+		if f.bulk.tun.Registered(uid) {
+			t.Errorf("round %d: the bulk transport is still registered after the loss", round)
+		}
+		if b, _, _ := f.bulkCounts(); b < b0+1 {
+			t.Errorf("round %d: bulk %v -> %v, want the first request counted", round, b0, b)
+		}
+		t.Logf("round %d: %s", round, map[bool]string{true: "the fallback, through the token frpc", false: "502 upstream_closed on the pooled connection"}[sawFallback])
 
-	close(hold.release)
-	r.startFrpc(true)
-	r.register("the restarted bulk frpc to register again")
+		hold.mu.Lock()
+		hold.armed = false
+		hold.mu.Unlock()
+		close(release)
+		// The held CloseProxy reaches the front's plugin before the bulk frpc returns, so it can't
+		// take the new registration away.
+		select {
+		case <-hold.passed:
+		case <-time.After(30 * time.Second):
+			t.Fatalf("round %d: the released CloseProxy never reached the front's plugin", round)
+		}
+		bulkProc, bulkDone = r.startFrpc(true)
+		r.register("the restarted bulk frpc to register again")
+	}
+	if !sawFallback {
+		t.Fatalf("no round of %d showed the fallback on the real frp: every request after the kill met the pooled connection", fallbackRounds)
+	}
 	if code, by := f.send("/v1/chat/completions", chatPlain); code != http.StatusOK || by != "bulk" {
 		t.Errorf("after the bulk frpc came back: %d through %q, want the bulk transport", code, by)
 	}
