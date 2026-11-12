@@ -65,7 +65,8 @@ type shapes struct {
 // servedPlan is what a served spec gives the controller before any provider is
 // chosen: the GPU count, the declared max-model-len and the shapes.
 type servedPlan struct {
-	gpus        int32
+	gpus        int32 // each worker's: tensor-parallel-size times pipeline-parallel-size
+	workers     int32 // spec.workersPerInstance, 1 when absent (HBEP-7, Several workers)
 	maxNumSeqs  int32
 	maxModelLen *int32
 	shapes      shapes
@@ -115,7 +116,10 @@ func checkServed(md *v1alpha1.ModelDeployment) (servedPlan, error) {
 	if err != nil {
 		return servedPlan{}, refuse("%v", err)
 	}
-	plan := servedPlan{gpus: tp * pp, maxNumSeqs: seqs}
+	plan := servedPlan{gpus: tp * pp, maxNumSeqs: seqs, workers: md.Spec.WorkersPerInstanceCount()}
+	if plan.workers < 1 {
+		return servedPlan{}, refuse("workersPerInstance %d: an Instance needs at least one worker (HBEP-7, Several workers)", plan.workers)
+	}
 	if _, ok := flagValue(s, "max-model-len"); ok {
 		mml, err := intFlag(s, "max-model-len", 0)
 		if err != nil {
@@ -290,6 +294,15 @@ func renderLaunch(md *v1alpha1.ModelDeployment, plan servedPlan) v1alpha1.Launch
 		Image: s.Engine.Image, ImageDigest: s.Engine.ImageDigest,
 		Command: cmd, Env: env, KeyEnv: keyEnv,
 		Checkpoint:   v1alpha1.LaunchCheckpoint{Repository: s.Checkpoint.Repository, Revision: s.Checkpoint.Revision},
-		ChatTemplate: tmpl, GPUs: plan.gpus, MaxNumSeqs: plan.maxNumSeqs,
+		ChatTemplate: tmpl, GPUs: plan.gpus, MaxNumSeqs: plan.maxNumSeqs, Workers: launchWorkers(plan.workers),
 	}
+}
+
+// launchWorkers is launch.workers for an Instance of n workers: set only above 1, so an Instance of one
+// worker has the launch it had before workers were counted (HBEP-7, Several workers).
+func launchWorkers(n int32) *int32 {
+	if n <= 1 {
+		return nil
+	}
+	return &n
 }
