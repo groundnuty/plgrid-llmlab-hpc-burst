@@ -278,6 +278,12 @@ var scriptStops = map[string]struct {
 		},
 		reached: []string{"is not a file", "only linux_amd64 is pinned"},
 	},
+	// The pins file is read right after the arguments, so a missing one stops the script before it
+	// fetches anything (#454).
+	"hack/fetch-envoy.sh": {
+		env:     func(t *testing.T) []string { return []string{"ENVOY_PINS_FILE=/nonexistent/envoy-pins"} },
+		reached: []string{"is not a file"},
+	},
 	"hack/fetch-k3s.sh": {
 		env:     func(t *testing.T) []string { return []string{"K3S_PINS_FILE=/nonexistent/k3s-pins"} },
 		reached: []string{"cannot read", "no pinned k3s binary"},

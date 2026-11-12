@@ -133,6 +133,12 @@ hack/build-agents.sh "$STATE/agent-builds"
 hack/fetch-frp.sh --agent-builds "$STATE/agent-builds"
 ```
 
+With Instances behind a router (beta, opt-in: `hpcburst up --instance-router envoy`), `status` also checks `envoy-<cpuArch>` for each of those architectures, against the digest `internal/agent/envoypin/envoy-pins.txt` pins, since every job is then staged with it ([HBEP-5](../hbep/0005-llmlab-compatible-front/README.md), Inside an Instance). Fetch both architectures' builds with:
+
+```
+hack/fetch-envoy.sh --agent-builds "$STATE/agent-builds"
+```
+
 The line reads `not checked` with the cause when the API server was not asked (`hpcburst status --no-api`, or an unhealthy host). A Provider whose partition has no build also shows on the deployment, as `ProviderUnavailable`.
 
 ## Why a ModelDeployment is degraded
