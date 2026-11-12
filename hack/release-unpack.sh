@@ -6,7 +6,7 @@
 # usage: hack/release-unpack.sh ARCHIVE OUT FRP_DIR
 #
 # OUT must not hold archive/ yet. It receives
-#   OUT/archive/            the archive as it unpacks: bin/, agent-builds/, config/, profiles/.
+#   OUT/archive/            the archive as it unpacks: bin/, agent-builds/, config/, profiles/, examples/.
 #                           OUT/archive/bin is the directory `hpcburst up --bin-dir` and the rehearsal's
 #                           HPCBURST_BIN_DIR read: it holds k3s-1.36.5/k3s and frp-0.71.1/frps where they
 #                           are looked for

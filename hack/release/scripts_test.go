@@ -308,6 +308,7 @@ var dataFiles = map[string]string{
 	"config/crd/example.yaml": "kind: CustomResourceDefinition\n",
 	"profiles/example.yaml":   "kind: PlatformProfile\n",
 	"profiles/README.md":      "The shipped profiles.\n",
+	"examples/example.yaml":   "kind: ModelDeployment\n",
 }
 
 // archiveFiles is every file of the archive with its mode: the specified layout, written out.
@@ -322,11 +323,12 @@ var archiveFiles = map[string]int64{
 	"bin/hpcburst-front":            0o755,
 	"bin/k3s-1.36.5/k3s":            0o755,
 	"config/crd/example.yaml":       0o644,
+	"examples/example.yaml":         0o644,
 	"profiles/README.md":            0o644,
 	"profiles/example.yaml":         0o644,
 }
 
-var archiveDirs = []string{"agent-builds/", "bin/", "bin/frp-0.71.1/", "bin/k3s-1.36.5/", "config/", "config/crd/", "profiles/"}
+var archiveDirs = []string{"agent-builds/", "bin/", "bin/frp-0.71.1/", "bin/k3s-1.36.5/", "config/", "config/crd/", "examples/", "profiles/"}
 
 // fixture is a small checkout that the release scripts can build from.
 type fixture struct {
@@ -713,6 +715,14 @@ func TestArchiveRefusesEachCauseBeforeWritingAnything(t *testing.T) {
 		{"a tagged commit built as a dry run", func(t *testing.T, f *fixture) []string {
 			return nil
 		}, "is not a pseudo-version of this commit"},
+		{"a commit without examples/", func(t *testing.T, f *fixture) []string {
+			if err := os.RemoveAll(filepath.Join(f.dir, "examples")); err != nil {
+				t.Fatal(err)
+			}
+			git(t, f.dir, "add", "-A")
+			git(t, f.dir, "commit", "-q", "-m", "no examples")
+			return nil
+		}, "the commit has no examples/"},
 		{"a tag of a major version the module path does not allow", func(t *testing.T, f *fixture) []string {
 			write(t, filepath.Join(f.dir, "docs", "releases", "v2.0.0.md"), "notes\n", 0o644)
 			git(t, f.dir, "add", "-A")
