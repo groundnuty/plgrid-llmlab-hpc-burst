@@ -63,6 +63,15 @@ type FrontSettings struct {
 	// stages the frpc build of that cpuArch in the agent-builds directory
 	// (agentapi.FrpcBuildName) only when its content has this digest.
 	FrpcDigests map[string]string
+	// EnvoyDigests is the SHA-256 of the Envoy binary for each cpuArch, as
+	// internal/agent/envoypin's envoy-pins.txt pins it, when the controller runs
+	// Instances behind a router (--instance-router envoy; #429, #454); empty
+	// otherwise, and then no Envoy is staged. Set, Create stages the Envoy build
+	// of the partition's cpuArch (agentapi.EnvoyBuildName) at
+	// agentapi.StagedEnvoyPath of its digest, only when its content has it, and
+	// refuses to submit without it. agent.json does not name it: the agent finds
+	// Envoy by the digest pinned in its own build.
+	EnvoyDigests map[string]string
 }
 
 // CheckCertificate returns an error unless the agent would accept CertPEM as the
