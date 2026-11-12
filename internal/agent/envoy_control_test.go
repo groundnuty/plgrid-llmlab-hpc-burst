@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -29,6 +30,7 @@ import (
 type router struct {
 	dir    string
 	worker *testWorker
+	ready  *agent.Readiness // the readiness endpoint Envoy health-checks the worker through
 	proc   *agent.EnvoyProc // the agent's own start; nil for a control
 	raw    *rawEnvoy        // a control's process; nil for the agent's own
 }
@@ -49,10 +51,40 @@ func (r *router) client(t *testing.T) *http.Client {
 // double with the spec behind it.
 func agentRouter(t *testing.T, spec workerSpec) *router {
 	t.Helper()
-	p, dir := startTestEnvoy(t)
-	r := &router{dir: dir, proc: p}
-	logTailOnFailure(t, filepath.Join(dir, agent.EnvoyLogFile))
-	r.worker = startWorker(t, dir, spec)
+	return newRouter(t, routerOpts{spec: spec, verified: true, wait: "healthy"})
+}
+
+// routerOpts shape newRouter.
+type routerOpts struct {
+	spec     workerSpec
+	verified bool                 // the readiness endpoint holds worker-0 verified
+	edit     func(map[string]any) // nil: the agent's own start (StartEnvoy); set: a control of the test's own
+	wait     string               // the state to wait for in Envoy's /clusters, "" for none
+}
+
+// newRouter starts the worker double, the agent's readiness endpoint and Envoy, in that order, so
+// Envoy's first check finds the worker, then waits for worker-0's state in Envoy.
+func newRouter(t *testing.T, o routerOpts) *router {
+	t.Helper()
+	dir := shortDir(t)
+	r := &router{dir: dir}
+	r.worker = startWorker(t, dir, o.spec)
+	r.ready = startReadiness(t, dir, o.verified)
+	if o.edit == nil {
+		r.proc = startTestEnvoyIn(t, dir, r.ready)
+		logTailOnFailure(t, filepath.Join(dir, agent.EnvoyLogFile))
+	} else {
+		m := renderMap(t, agent.EnvoyConfig{
+			RunDir:        dir,
+			Workers:       []agent.EnvoyWorker{{Name: "worker-0", Socket: workerSock(dir)}},
+			ReadinessPort: r.ready.Port(),
+		})
+		o.edit(m)
+		r.raw = startRawEnvoy(t, dir, mustJSON(t, m))
+	}
+	if o.wait != "" {
+		r.waitWorker(t, o.wait, 30*time.Second)
+	}
 	return r
 }
 
@@ -61,16 +93,7 @@ func agentRouter(t *testing.T, spec workerSpec) *router {
 // envoyconf_test.go walk to it). The control is the test's own: see the top of this file.
 func controlRouter(t *testing.T, spec workerSpec, edit func(m map[string]any)) *router {
 	t.Helper()
-	dir := shortDir(t)
-	m := renderMap(t, agent.EnvoyConfig{
-		RunDir:  dir,
-		Workers: []agent.EnvoyWorker{{Name: "worker-0", Socket: workerSock(dir)}},
-	})
-	edit(m)
-	r := &router{dir: dir}
-	r.raw = startRawEnvoy(t, dir, mustJSON(t, m))
-	r.worker = startWorker(t, dir, spec)
-	return r
+	return newRouter(t, routerOpts{spec: spec, verified: true, edit: edit, wait: "healthy"})
 }
 
 // rawEnvoy is an Envoy the test started itself, from a config the agent's guard would refuse.
@@ -200,4 +223,68 @@ func getVia(c *http.Client, path string, timeout time.Duration, header http.Head
 		return nil, nil, fmt.Errorf("GET %s: %w", path, err)
 	}
 	return resp, cancel, nil
+}
+
+// workerState is worker-0's state in Envoy's own /clusters?format=json: "healthy", "failed_active"
+// (its active check fails), "ejected" (outlier detection), or "pending" (not yet checked).
+func (r *router) workerState(t *testing.T) string {
+	t.Helper()
+	c := unixClient(r.admin())
+	defer c.Transport.(*http.Transport).CloseIdleConnections()
+	resp, err := c.Get("http://admin/clusters?format=json")
+	if err != nil {
+		t.Fatalf("Envoy's admin: %v", err)
+	}
+	defer resp.Body.Close()
+	var doc struct {
+		Clusters []struct {
+			Name  string `json:"name"`
+			Hosts []struct {
+				Hostname string `json:"hostname"`
+				Health   struct {
+					FailedActive  bool `json:"failed_active_health_check"`
+					FailedOutlier bool `json:"failed_outlier_check"`
+					Pending       bool `json:"pending_active_hc"`
+				} `json:"health_status"`
+			} `json:"host_statuses"`
+		} `json:"cluster_statuses"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+		t.Fatalf("Envoy's /clusters?format=json: %v", err)
+	}
+	for _, c := range doc.Clusters {
+		for _, h := range c.Hosts {
+			if c.Name != "workers" || h.Hostname != "worker-0" {
+				continue
+			}
+			switch {
+			case h.Health.FailedOutlier:
+				return "ejected"
+			case h.Health.FailedActive:
+				return "failed_active"
+			case h.Health.Pending:
+				return "pending"
+			}
+			return "healthy"
+		}
+	}
+	t.Fatalf("Envoy's /clusters names no worker-0: %+v", doc)
+	return ""
+}
+
+// waitWorker waits until Envoy's /clusters holds worker-0 in state, reading it again every 100 ms (the
+// state is Envoy's, which tells no one when it changes), and returns how long that took.
+func (r *router) waitWorker(t *testing.T, state string, within time.Duration) time.Duration {
+	t.Helper()
+	start := time.Now()
+	for {
+		got := r.workerState(t)
+		if got == state {
+			return time.Since(start)
+		}
+		if time.Since(start) > within {
+			t.Fatalf("Envoy holds worker-0 %s, not %s, after %v", got, state, within)
+		}
+		time.Sleep(100 * time.Millisecond) // re-reads Envoy's state, an observable one, with a deadline
+	}
 }

@@ -24,6 +24,7 @@ var raisedByLifecycle = map[string][]string{
 	},
 	eventFailing: {
 		v1alpha1.ReasonWorkerRestart, v1alpha1.ReasonInstanceRestart, v1alpha1.ReasonRestartLoop,
+		v1alpha1.ReasonRouterRestart,
 		v1alpha1.ReasonRegistrationTimeout, v1alpha1.ReasonStartTimeout, v1alpha1.ReasonTunnelNotConnected,
 		v1alpha1.ReasonQualificationFailed, v1alpha1.ReasonVerificationFailed, v1alpha1.ReasonAllocationFailed,
 		v1alpha1.ReasonAllocationLost, v1alpha1.ReasonAllocationRefused, v1alpha1.ReasonRequeued,

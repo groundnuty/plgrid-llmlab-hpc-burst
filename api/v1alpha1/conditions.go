@@ -199,7 +199,7 @@ const (
 	ReasonInstanceRestart = "InstanceRestart"
 )
 
-// Reasons of an Instance's Healthy condition. The four malfunction signals are
+// Reasons of an Instance's Healthy condition. The malfunction signals are
 // also InstanceRestart.Signal (HBEP-7, Health and restarts).
 const (
 	// ReasonHealthy: no malfunction signal (status True).
@@ -214,7 +214,17 @@ const (
 	// ReasonPartExited: a part exited without being told to, whatever its
 	// exit code.
 	ReasonPartExited = "PartExited"
+	// ReasonRouterCheckFailing: behind a router, the router's active check
+	// of the worker failed for health.failureThreshold reports in a row, while
+	// the worker's current generation is verified (HBEP-7, Several workers;
+	// `@hpc-burst-science-agent`, 12 Nov 2026, #429, Q5).
+	ReasonRouterCheckFailing = "RouterCheckFailing"
 )
+
+// ReasonRouterRestart is the reason of the router rung's failing event: the
+// controller restarts an Instance's router, which leaves the workers running
+// (HBEP-7, Several workers and Health and restarts; HBEP-8, Reasons).
+const ReasonRouterRestart = "RouterRestart"
 
 // Reasons of an Instance's AgentUnreachable condition.
 const (
