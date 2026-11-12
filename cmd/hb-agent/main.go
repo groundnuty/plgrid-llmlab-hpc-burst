@@ -168,7 +168,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	}
 	a, err := agent.New(agent.Options{
 		API:    tr.client,
-		Tunnel: tr.frpc,
+		Tunnel: tr.tunnel(),
 		Engines: func(socket, key string, l agentapi.Launch) agent.Engine {
 			return engine.New(socket, key, engine.WithReasoning(agent.DeclaresReasoningParser(l.Command)), engine.WithLogger(log))
 		},
