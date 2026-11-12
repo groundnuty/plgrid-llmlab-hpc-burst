@@ -38,18 +38,23 @@ func TestATunnelRowsLongStreamThatDoesNotFitIsNotRunThroughTheScript(t *testing.
 	}
 }
 
-// The marker's numbers are the only text of it that reaches the screen: words where the rate goes are not printed.
+// The marker's numbers are the only text of it that reaches the screen: words where the rate goes, or where the stream that fits goes,
+// are not printed.
 func TestTheLongMarkersReasonIsPrintedOnlyAsNumbers(t *testing.T) {
 	const row = "tunnel-hour-athena"
-	w := newAlphaWorld(t)
-	res := w.run([]string{"STUB_ALPHA_MODE=not-run-long-words"}, "--run", row, "--yes")
-	if res.code != 3 {
-		t.Fatalf("exit %d, want 3:\n%s", res.code, res.out)
-	}
-	w.contains(res, row+": NOT RUN (the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate: "+
-		"the rate and the context could not be read from the marker; the hour was not started, and the run's jobs were cancelled by tag; not a failure)")
-	if strings.Contains(res.out, "owner-private-host") {
-		t.Errorf("text of the marker's reason reached the screen:\n%s", res.out)
+	for _, mode := range []string{"not-run-long-words", "not-run-long-fit-words"} {
+		t.Run(mode, func(t *testing.T) {
+			w := newAlphaWorld(t)
+			res := w.run([]string{"STUB_ALPHA_MODE=" + mode}, "--run", row, "--yes")
+			if res.code != 3 {
+				t.Fatalf("exit %d, want 3:\n%s", res.code, res.out)
+			}
+			w.contains(res, row+": NOT RUN (the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate: "+
+				"the rate and the context could not be read from the marker; the hour was not started, and the run's jobs were cancelled by tag; not a failure)")
+			if strings.Contains(res.out, "owner-private-host") {
+				t.Errorf("text of the marker's reason reached the screen:\n%s", res.out)
+			}
+		})
 	}
 }
 
