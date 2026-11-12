@@ -82,3 +82,44 @@ func TestInstanceWorkersStatusRoundTripsKeyedByName(t *testing.T) {
 	got.Status.Workers = []v1alpha1.InstanceWorker{{Name: "router"}}
 	requireRefused(t, c.Status().Update(bg(), got), "name")
 }
+
+// The ruled bounds (#439, Q3): workersPerInstance and launch.workers are 1 to 8, and status.workers[]
+// holds at most 8 entries. 0 and 9 are refused, 8 is accepted; 9 workers in status are refused.
+func TestWorkersBounds(t *testing.T) {
+	ns := newNamespace(t)
+	for _, tc := range []struct {
+		n  int32
+		ok bool
+	}{{0, false}, {1, true}, {8, true}, {9, false}} {
+		md := newModelDeployment(ns, "bounds-"+string(rune('a'+tc.n)))
+		v := tc.n
+		md.Spec.WorkersPerInstance = &v
+		err := c.Create(bg(), md)
+		if tc.ok {
+			must(t, err, "create with workersPerInstance in bounds")
+		} else {
+			requireRefused(t, err, "workersPerInstance")
+		}
+		in := newInstance(ns, "bounds-in-"+string(rune('a'+tc.n)))
+		in.Spec.Launch.Workers = &v
+		err = c.Create(bg(), in)
+		if tc.ok {
+			must(t, err, "create with launch.workers in bounds")
+		} else {
+			requireRefused(t, err, "workers")
+		}
+	}
+	in := newInstance(ns, "nine-in-status")
+	must(t, c.Create(bg(), in), "create")
+	got := &v1alpha1.Instance{}
+	must(t, c.Get(bg(), objKey(in), got), "get")
+	for i := 0; i < 9; i++ {
+		got.Status.Workers = append(got.Status.Workers, v1alpha1.InstanceWorker{Name: v1alpha1.WorkerName(i)})
+	}
+	requireRefused(t, c.Status().Update(bg(), got), "workers")
+	must(t, c.Get(bg(), objKey(in), got), "get")
+	for i := 0; i < 8; i++ {
+		got.Status.Workers = append(got.Status.Workers, v1alpha1.InstanceWorker{Name: v1alpha1.WorkerName(i)})
+	}
+	must(t, c.Status().Update(bg(), got), "write 8 workers")
+}

@@ -29,7 +29,7 @@ func withWorkers(md *v1alpha1.ModelDeployment, n int32) *v1alpha1.ModelDeploymen
 // Two workers of TP 2: the Allocation gets 2 x 2 = 4 GPUs, 64 CPUs and 480Gi, the node's whole; the
 // Instance's launch keeps each worker's 2 GPUs and records 2 workers.
 func TestWorkersSizeTheAllocation(t *testing.T) {
-	rg := newRig(t)
+	rg := newWorkersRig(t)
 	rg.create(withWorkers(provisionFlags(mdSpec("md"), "tensor-parallel-size", "2"), 2))
 	rg.until(2*time.Minute, 10*time.Second, "one Allocation and its Instance", func() bool {
 		return len(rg.allocations("md")) == 1 && len(rg.instances("md")) == 1
@@ -51,7 +51,7 @@ func TestWorkersSizeTheAllocation(t *testing.T) {
 // byte for byte, and the deployment ID is the same, so the count is no ID input. Two workers of the same
 // serving spec have the same ID too.
 func TestOneWorkerKeepsAlphasLaunchAndTheCountIsNoIDInput(t *testing.T) {
-	rg := newRig(t)
+	rg := newWorkersRig(t)
 	rg.create(mdSpec("absent"))
 	rg.create(withWorkers(mdSpec("one"), 1))
 	rg.create(withWorkers(mdSpec("two"), 2))
@@ -84,7 +84,7 @@ func equalLaunch(a, b v1alpha1.Launch) bool {
 // 4-GPU node, so the deployment is Degraded with SpecUnsupported, names the count, and gets no
 // Allocation. 2 workers of TP 2, exactly the node, is the control.
 func TestWorkersAboveTheNodeAreRefusedNotCapped(t *testing.T) {
-	rg := newRig(t)
+	rg := newWorkersRig(t)
 	rg.create(withWorkers(provisionFlags(mdSpec("md"), "tensor-parallel-size", "2"), 3))
 	provisionSettle(rg)
 	c := provisionDegraded(rg, "md")
@@ -95,7 +95,7 @@ func TestWorkersAboveTheNodeAreRefusedNotCapped(t *testing.T) {
 		t.Errorf("%d Allocations, Instances and submissions, want none", n)
 	}
 
-	ctl := newRig(t)
+	ctl := newWorkersRig(t)
 	ctl.create(withWorkers(provisionFlags(mdSpec("md"), "tensor-parallel-size", "2"), 2))
 	provisionSettle(ctl)
 	if n := ctl.submissions(); n != 1 {
@@ -133,7 +133,7 @@ func TestPartitionSizingForWorkers(t *testing.T) {
 // Instance created at 2 workers keeps 2 when the deployment moves to 3, and the next Instance, from a
 // scale-up, gets 3.
 func TestACountChangeAppliesToNewInstancesOnly(t *testing.T) {
-	rg := newRig(t)
+	rg := newWorkersRig(t)
 	rg.create(withWorkers(mdSpec("md"), 2))
 	rg.until(2*time.Minute, 10*time.Second, "the first Instance", func() bool { return len(rg.instances("md")) == 1 })
 	first := rg.instances("md")[0]
@@ -178,3 +178,41 @@ func TestWorkersTimesTheRungsMustFitTheRestartsKept(t *testing.T) {
 
 // second is the error of a two-result call.
 func second[T any](_ T, err error) error { return err }
+
+// newWorkersRig is the rig with the controller run under --instance-router envoy, which several workers
+// need (Q7).
+func newWorkersRig(t *testing.T) *rig {
+	t.Helper()
+	rg := newRig(t)
+	rg.r.Config.InstanceRouter = v1alpha1.InstanceRouterEnvoy
+	return rg
+}
+
+// Several workers need the controller's --instance-router envoy (the science agent's ruling on #439,
+// Q7): without it a deployment of 2 workers is refused, SpecUnsupported naming the flag, with no
+// Allocation, while one of 1 worker runs as alpha does. With the flag the 2-worker Instance runs behind
+// Envoy (HBEP-7: "An Instance with more than one worker always gets one").
+func TestSeveralWorkersNeedTheRouterFlag(t *testing.T) {
+	rg := newRig(t) // no --instance-router
+	rg.create(withWorkers(mdSpec("two"), 2))
+	rg.create(withWorkers(mdSpec("one"), 1))
+	rg.until(2*time.Minute, 10*time.Second, "the one-worker Instance", func() bool { return len(rg.instances("one")) == 1 })
+	provisionSettle(rg)
+	c := provisionDegraded(rg, "two")
+	if c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonSpecUnsupported || !strings.Contains(c.Message, "--instance-router envoy") || !strings.Contains(c.Message, "workersPerInstance 2") {
+		t.Fatalf("2 workers without the flag: Degraded = %s/%s (%s), want True/SpecUnsupported naming --instance-router envoy", c.Status, c.Reason, c.Message)
+	}
+	if n := len(rg.allocations("two")) + len(rg.instances("two")); n != 0 {
+		t.Errorf("2 workers without the flag: %d Allocations and Instances, want none", n)
+	}
+	if in := rg.instances("one")[0]; in.Spec.Launch.Router != "" || in.Spec.Launch.Workers != nil {
+		t.Errorf("1 worker without the flag: launch.router %q, launch.workers %s; want alpha's, none of either", in.Spec.Launch.Router, countOf(in.Spec.Launch.Workers))
+	}
+
+	on := newWorkersRig(t)
+	on.create(withWorkers(mdSpec("two"), 2))
+	on.until(2*time.Minute, 10*time.Second, "the 2-worker Instance", func() bool { return len(on.instances("two")) == 1 })
+	if in := on.instances("two")[0]; in.Spec.Launch.Router != v1alpha1.InstanceRouterEnvoy || in.Spec.Launch.Workers == nil || *in.Spec.Launch.Workers != 2 {
+		t.Errorf("2 workers with the flag: launch.router %q, launch.workers %s; want envoy and 2", in.Spec.Launch.Router, countOf(in.Spec.Launch.Workers))
+	}
+}

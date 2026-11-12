@@ -149,6 +149,8 @@ type Launch struct {
 	// inventory. It is capacity, not a deployment-ID input (HBEP-3).
 	//
 	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=8
 	Workers *int32 `json:"workers,omitempty"`
 }
 
@@ -354,6 +356,7 @@ type InstanceStatus struct {
 	// +optional
 	// +listType=map
 	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=8
 	Workers []InstanceWorker `json:"workers,omitempty"`
 
 	// Agent is what the controller keeps of the agent's registration for this

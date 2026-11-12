@@ -229,6 +229,8 @@ spec:
                       desired workers, the front's cap (HBEP-5, Load bound and cap) and HBEP-8's
                       inventory. It is capacity, not a deployment-ID input (HBEP-3).
                     format: int32
+                    maximum: 8
+                    minimum: 1
                     type: integer
                 required:
                 - checkpoint
@@ -597,6 +599,7 @@ spec:
                   required:
                   - name
                   type: object
+                maxItems: 8
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
