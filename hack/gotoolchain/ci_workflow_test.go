@@ -167,8 +167,9 @@ func TestCIEveryJobRunsTheSameFivePinnedGoSteps(t *testing.T) {
 			t.Errorf("job %s: the check step runs %q", j.id, check.str("run"))
 		}
 	}
-	// Branch protection names these four jobs, so a rename blocks every merge.
-	for _, name := range []string{"go", "tidy", "crd and envtest", "launcher-k3s"} {
+	// Branch protection names these five jobs, so a rename blocks every merge. "go own-timeout" holds
+	// hack/go-test.sh's groups (issue #295); it is required, or those tests would drop out of the gate.
+	for _, name := range []string{"go", "go own-timeout", "tidy", "crd and envtest", "launcher-k3s"} {
 		if !names[name] {
 			t.Errorf("ci.yml has no job named %q: branch protection requires it", name)
 		}
@@ -435,4 +436,75 @@ func TestCITidyAssertsTheEmptyCacheBeforeTheFirstGoCommand(t *testing.T) {
 		return
 	}
 	t.Fatal("no job named tidy")
+}
+
+// Issue #295: the go job's groups run in a job of their own, "go own-timeout", because the two together
+// came within 1.35x of the go job's 30 minutes. The new job is a required check, so its name is fixed, and
+// it needs what the groups needed in the go job: the same checkout, the same pinned Go and modules, the
+// same pinned frp and Kubernetes binaries and sshd, on the same runner, with a limit of its own that is at
+// least twice its expected time (about 640 s expected). The steps are compared with the go job's, word for
+// word; which tests run where is the union test's (internal/testenv).
+func TestCIGoOwnTimeoutJobHasTheGoJobsSetupAndALimitOfItsOwn(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Jobs map[string]struct {
+			Name           string `json:"name"`
+			RunsOn         string `json:"runs-on"`
+			TimeoutMinutes int    `json:"timeout-minutes"`
+			Steps          []step `json:"steps"`
+		} `json:"jobs"`
+	}
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		t.Fatalf("ci.yml is not valid YAML: %v", err)
+	}
+	goJob, own := doc.Jobs["go"], doc.Jobs["go-own"]
+	if own.Name != "go own-timeout" {
+		t.Fatalf("the job go-own is named %q, want %q: branch protection requires that name", own.Name, "go own-timeout")
+	}
+	if own.RunsOn != goJob.RunsOn || own.RunsOn != "ubuntu-24.04" {
+		t.Errorf("go-own runs on %q and go on %q, want both ubuntu-24.04", own.RunsOn, goJob.RunsOn)
+	}
+	// At least 2x its expected time: about 640 s expected, so 20 minutes is the least, and 30 is the go job's.
+	if own.TimeoutMinutes != 30 || goJob.TimeoutMinutes != 30 {
+		t.Errorf("timeout-minutes is %d for go-own and %d for go, want 30 for both (go-own's expected time is about 640 s)", own.TimeoutMinutes, goJob.TimeoutMinutes)
+	}
+	named := func(steps []step, name string) []step {
+		var out []step
+		for _, s := range steps {
+			if s.str("name") == name {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	for _, name := range []string{
+		"Check out the repository",
+		"Read the Go version from go.mod", "Restore the cached Go archive", "Install the pinned Go toolchain",
+		"Save the Go archive to the cache", "Check the Go on PATH is the pinned toolchain",
+		"Download and verify the Go modules", "Go version",
+		"Choose where the Kubernetes test binaries are cached", "Restore the cached pinned binaries",
+		"Fetch the pinned frp binaries", "Fetch the pinned Kubernetes binaries", "Save the pinned binaries to the cache",
+		"Provide OpenSSH's sshd for the tunnel tests",
+	} {
+		g, o := named(goJob.Steps, name), named(own.Steps, name)
+		if len(g) != 1 || len(o) != 1 {
+			t.Errorf("step %q: %d in go, %d in go-own, want 1 in each", name, len(g), len(o))
+			continue
+		}
+		if !reflect.DeepEqual(g[0], o[0]) {
+			t.Errorf("step %q differs between go and go-own:\n go     %v\n go-own %v", name, g[0], o[0])
+		}
+	}
+	// What the go job keeps and the go-own job does not do: gofmt, go vet and the packages' run.
+	for _, name := range []string{"gofmt", "go vet", "go test"} {
+		if n := len(named(own.Steps, name)); n != 0 {
+			t.Errorf("go-own has %d step %q, which belongs to the go job", n, name)
+		}
+		if n := len(named(goJob.Steps, name)); n != 1 {
+			t.Errorf("go has %d steps %q, want 1", n, name)
+		}
+	}
 }
