@@ -365,7 +365,7 @@ func TestCIGoproxyIsAPipeToDirectAndNothingElseChangesWhereModulesComeFrom(t *te
 // -diff exits 1 both for an untidy module and for a failed download, so a retry would hide the first
 // kind (it relies on the GOPROXY pipe alone).
 func TestCIEveryBuildingJobDownloadsAndVerifiesModulesRightAfterTheGoCheck(t *testing.T) {
-	building := map[string]bool{"go": false, "crd and envtest": false, "launcher-k3s": false, "rehearsal": false, "rehearsal part 3": false}
+	building := map[string]bool{"go": false, "go own-timeout": false, "crd and envtest": false, "launcher-k3s": false, "rehearsal": false, "rehearsal part 3": false, "rehearsal keeper": false}
 	for _, j := range loadJobs(t) {
 		check := -1
 		for i, s := range j.steps {
