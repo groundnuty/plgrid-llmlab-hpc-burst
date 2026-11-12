@@ -66,3 +66,11 @@ func RouterHoldDownForTest(a *Agent) bool {
 	defer a.routerHold.mu.Unlock()
 	return a.routerHold.down
 }
+
+// SetEnvoyLoaderForTest makes the glibc check run loader for whatever loader Envoy names (envoyglibc.go),
+// and returns its reset.
+func SetEnvoyLoaderForTest(loader string) (reset func()) {
+	old := envoyLoader
+	envoyLoader = func(string) string { return loader }
+	return func() { envoyLoader = old }
+}

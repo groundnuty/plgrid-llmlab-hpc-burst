@@ -61,6 +61,10 @@ func StartEnvoy(s EnvoyStart, now time.Time) (*EnvoyProc, error) {
 		return nil, err
 	}
 	defer bin.Close()
+	// Envoy runs bare, so the node's glibc must be new enough for it (#454).
+	if err := checkEnvoyGlibc(bin); err != nil {
+		return nil, err
+	}
 	cfgPath := filepath.Join(c.RunDir, EnvoyConfigFile)
 	if err := writeFileAtomic(cfgPath, raw, 0o600); err != nil {
 		return nil, fmt.Errorf("envoy: config: %w", err)
