@@ -449,22 +449,29 @@ An Instance runs several workers behind a router in beta (HBEP-3, HBEP-5). This 
   - **The listener's first run** on a pipe is #429's Bytes test, since S13 ran Envoy on TCP. Envoy 1.40.2's `Listener.address` is a `core.v3.Address`, whose oneof carries `Pipe`.
 - **Readiness.** The agent binds one loopback TCP port at run time (port 0), held for the Allocation's life.
   - Each Envoy endpoint's health check targets it through `health_check_config.address`, with `hostname` set to the worker's name. Envoy 1.40.2 expects that address to be an IP, and `hostname` overrides the check's Host header per endpoint.
-  - The agent answers 200 for a verified worker whose engine's `/health` passes, 503 for any other worker, and 404 for an unknown name (HBEP-5, Worker health).
+  - The agent answers 200 for a verified worker whose engine's `/health` passes, 503 for any other worker, and 404 for an unknown name (HBEP-5, Worker health). "Verified" is the desired state's per-worker `Verified`, which the controller sets once that worker's current generation is verified and warmed up, since the agent never sees the controller's verdict otherwise.
+  - **The admin socket** allows exactly `/clusters?format=json`. Envoy's router filter suppresses its own `x-envoy-*` headers toward the workers, and its circuit breakers sit at their field maximum, since the front's cap governs.
+  - **The timeouts** are rendered from the Instance's effective `maxRequestDuration` (the deployment's `routing.maxRequestDuration`, else the 2 h default) plus 1 h. A front whose own default is raised above 2 h is a stated limit, until that value reaches the controller.
+  - **Opt-in:** until spike S2c (#62) sets the default, an Instance gets a router when the controller runs with `--instance-router envoy`. The choice is recorded per Instance at creation, as an immutable `launch.router` outside the deployment ID. An Instance with more than one worker always gets one.
 - **Verification, qualification and warm-up are per worker,** each against the worker's own socket, never through the router:
-  - **The checks:** each worker gets the settings comparison and its own verification record. With one worker, the record keeps its name, `ver-<instance UID>-<generation>`. With several, each record carries its worker: `ver-<instance UID>-<worker>-<generation>`, the generation counting that worker's verifications. The record's contents don't change.
+  - **The checks:** the desired state asks for checks per worker, so a worker restarted while the Instance is `ready` is verified on its own. Each worker gets the settings comparison and its own verification record. With one worker, the record keeps its name, `ver-<instance UID>-<generation>`. With several, each record carries its worker: `ver-<instance UID>-<worker>-<generation>`, the generation counting that worker's verifications. The record's contents don't change.
   - **The KV and qualification checks:** each worker is checked for ⌈`targetSessions` ÷ N⌉ sessions, so the report's timings stay within its 4 MiB bound at any N. Each exited worker's log tail is at most 8 KiB.
   - **A restarted worker** warms up on its socket while the readiness port still answers 503 for it, so it's never live during warm-up (Notes).
 - **Becoming ready.** An Instance enters `ready` the first time when every worker has passed, and one probe through the router has passed, within `health.startTimeout` of its start instruction.
   - It then stays `ready` while the router holds at least one worker healthy, with the front's cap scaled by healthy workers (HBEP-5).
-  - The controller writes the router's healthy count to `status.healthyWorkers`, from the agent's report of Envoy's `/clusters`.
+  - The controller writes the router's healthy count to `status.healthyWorkers`, from the agent's report of Envoy's `/clusters`. A worker that fails its active check, or that Envoy has ejected, isn't counted, since Envoy routes to neither.
   - With none healthy it's not eligible, and stays `ready` until the ladder acts.
 - **Health and restarts with several workers** (Health and restarts):
   - **A worker's own signal:**
-    - Envoy holding it unhealthy, its exit, only errors, or no progress, each judged from that worker's report and gauges.
+    - its active health check failing in Envoy, its exit, only errors, or no progress, each judged from that worker's report and gauges. An outlier ejection alone isn't a restart signal: a worker that keeps failing requests reaches its rung through only errors.
     - It enters the ladder at the worker rung, for that worker, and the Instance stays `ready` while another worker is healthy.
     - Each worker's rung counts its own `restart.attemptsPerRung` within `restart.window`. A worker that exhausts them takes the Instance to the whole-Instance rung.
     - A restarted worker must pass within `health.startTimeout` of its restart, or the attempt counts as failed.
-  - **The router's signal** (its exit, or the front's probe through it failing while workers are healthy) enters at the router rung. The Instance leaves `ready` for the router's restart.
+  - **The router's signal** (its exit, or the front's probe through it failing while workers are healthy) enters at the router rung:
+    - the controller writes `healthyWorkers` 0 first, so the Instance is unroutable;
+    - it records part `router` and raises the router's generation;
+    - the phase stays `ready`, with no re-verify, and `healthyWorkers` returns once `/clusters` holds a worker healthy;
+    - after `restart.attemptsPerRung` the ladder climbs to the worker rung.
   - **The whole-Instance and new-Allocation rungs** are unchanged, and `RestartLoop` still counts Allocations.
 - **Metrics:** HBEP-8's inventory names each desired worker, so a worker that reports no gauges shows as unknown rather than absent.
 - **Not in beta:** several nodes per Instance, and several Instances per Allocation.
@@ -491,7 +498,7 @@ An Instance runs several workers behind a router in beta (HBEP-3, HBEP-5). This 
   Once Instances have routers, a signal of the router's enters at the router rung, and a worker's at that worker's rung (Several workers; HBEP-5, open question 2).
 - **Attempts.** Each rung is tried `restart.attemptsPerRung` times within `restart.window`, `restart.backoff` apart, before the next rung.
 - **Recorded first.** Before each restart, the controller emits an event (type `failing`, the rung as reason, naming the signal and the controller as actor), records the restart in the Instance's `status.restarts`, then raises that part's restart generation on the Instance by compare-and-swap. The agent acts on the generation. The event says that in-flight requests were cut. The attempts per rung are counted from `status.restarts`, so they survive a controller restart.
-- **Not routable while restarting.** A restarting Instance leaves `ready` for `verifying`, so the front stops routing new requests to it, and returns after its checks. With several workers, only a router restart or the whole-Instance rung does that: a worker restart keeps the Instance `ready` while another worker is healthy (Several workers). The front keeps it in its balancer group, and the cut requests leave its count as they fail (HBEP-5).
+- **Not routable while restarting.** A restarting Instance leaves `ready` for `verifying`, so the front stops routing new requests to it, and returns after its checks. Behind a router, a worker restart with other workers healthy and a router restart keep the Instance `ready`; it's unroutable through `healthyWorkers` instead (Several workers). The whole-Instance rung leaves `ready` as before. The front keeps it in its balancer group, and the cut requests leave its count as they fail (HBEP-5).
 - **Restart and provisioning loops.** When three Allocations in a row in one class fail before or at rung 3 within `restart.window` (a refused or failed job, a failed check, or a failed whole-Instance restart), the deployment is degraded. Provisioning in that class pauses with backoff, and an event fires. A Rejected submission, a refusal for a full submit limit included, is not a refused job here: it ends no Instance, so it never counts toward `RestartLoop` or the pause (HBEP-4, QOS limits). The count is of failed Instance ends, as on `main`.
 - **A requeue** fails the Instance, and its Allocation is deleted (HBEP-3, open question 13). The controller sees it from the provider's phase (`Failed`, reason `Requeued`), or from a second execution's registration: another `agentInstanceID`, or a higher `restartCount` (The allocation agent). Nothing from the first execution is reused.
 
@@ -646,7 +653,7 @@ Against the fake Slurm of spike S4, through the Slurm plugin (HBEP-4). The fake 
 - Several workers (beta; Several workers):
   - an Instance of `workersPerInstance` 2 on two GPUs starts each worker on its own GPU (each sees one device) and its own socket, verifies and qualifies each against its socket, and enters `ready` only when both have passed and a probe through Envoy has;
   - a worker killed while another is healthy is restarted at the worker rung alone, the Instance stays `ready`, `status.healthyWorkers` goes from 2 to 1 and back, and the restarted worker takes traffic only after its own verification;
-  - Envoy killed is restarted at the router rung, and the Instance leaves `ready` until it's back;
+  - Envoy killed is restarted at the router rung: `healthyWorkers` goes to 0 at once and returns once Envoy holds a worker healthy, while the phase stays `ready`;
   - a deployment whose `workersPerInstance` changes keeps its running Instances' counts, and its next Instance takes the new one;
   - a count whose `gpus` exceeds `gpusPerNode` or `maxGpusPerUser` is refused, not capped.
   - A run with one GPU per worker but both workers seeing every device proves nothing about the GPU slices.
