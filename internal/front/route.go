@@ -63,7 +63,15 @@ func errNoReadyTarget(model string) *routeError {
 // 6). exclude is a target the request already failed to reach, for the one
 // resend. It never widens to a broader level.
 func (r *Router) choose(ctx context.Context, n naming.Name, key, exclude string) (*target, *routeError) {
-	r.mu.Lock()
+	// A request waits for one rebuild, two at most under a barging reader
+	// (#417; lockFresh). The view it
+	// routes on may be a rebuild behind the transports: a target whose
+	// registration was taken away since has no dialer when the proxy asks for
+	// one, and a dialer it holds carries the epoch it was handed in, which the
+	// dial checks after frps's 200 and before any byte (Tunnel.Dialer,
+	// Tunnel.dial; HBEP-5, Reachability). So no route is served from a view older
+	// than its epoch.
+	r.lockFresh()
 	v := r.view
 	if v == nil {
 		r.mu.Unlock()
@@ -209,8 +217,11 @@ func (r *Router) waitServed(ctx context.Context, d *inventory.Deployment, g *bal
 }
 
 // instance looks a member up in the current view.
+// It is called only for a member that joined the live group after the view the
+// request read, so the view is already the one that added it: it rebuilds
+// nothing.
 func (r *Router) instance(key string) *inventory.Instance {
-	r.mu.Lock()
+	r.lockAsReader()
 	defer r.mu.Unlock()
 	if r.view == nil {
 		return nil
