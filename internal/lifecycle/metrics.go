@@ -163,6 +163,9 @@ type instanceEntry struct {
 	startInstr    time.Time
 	agentTimeout  time.Duration
 	probeInterval time.Duration
+	// workers are the Instance's launch.workers, whose names the inventory gives: worker-0 alone with one
+	// (HBEP-8; HBEP-7, Several workers).
+	workers []string
 }
 
 // instanceCollector builds the Instance series at scrape time from the
@@ -246,8 +249,18 @@ func (c *instanceCollector) collect(out []prometheus.Metric) []prometheus.Metric
 		}
 		av := agentView{report: rep.Instance, reportAt: at, reportTime: rep.Time, unreachable: unreachable, now: now, probeInterval: e.probeInterval}
 		gen := strconv.FormatInt(rep.Instance.Generation, 10)
+		reported := map[string]bool{}
 		for i := range rep.Instance.Workers {
 			out = collectWorker(out, e, av, &rep.Instance.Workers[i], gen)
+			reported[rep.Instance.Workers[i].Name] = true
+		}
+		// With several workers, a worker of launch.workers that the report lacks shows as unknown, never
+		// absent (HBEP-7, Several workers, Metrics; HBEP-8, Unknown samples: stale, unless the agent is
+		// unreachable). One worker's inventory is alpha's, unchanged.
+		for _, w := range e.workers {
+			if len(e.workers) > 1 && !reported[w] {
+				out = collectUnknownWorker(out, e, w, unreachable)
+			}
 		}
 	}
 	return out
@@ -270,7 +283,7 @@ func (c *instanceCollector) live(ctx context.Context) ([]instanceEntry, error) {
 		if !owned || ended(in) {
 			continue
 		}
-		e := instanceEntry{uid: in.UID, namespace: in.Namespace, name: in.Name, md: md, provider: in.Labels[v1alpha1.LabelProvider]}
+		e := instanceEntry{uid: in.UID, namespace: in.Namespace, name: in.Name, md: md, provider: in.Labels[v1alpha1.LabelProvider], workers: workerNames(in)}
 		if in.Status.Agent != nil {
 			e.agentID = in.Status.Agent.AgentInstanceID
 		}
@@ -353,12 +366,21 @@ func (c *instanceCollector) providerFacts(ctx context.Context, name string) (pro
 // is for a metric the engine does not export (HBEP-8, Unknown samples;
 // `@hpc-burst-science-agent`, 1 Nov 2026, for #111).
 func collectUnreported(out []prometheus.Metric, e instanceEntry, unreachable bool) []prometheus.Metric {
+	for _, w := range e.workers {
+		out = collectUnknownWorker(out, e, w, unreachable)
+	}
+	return out
+}
+
+// collectUnknownWorker appends worker w's every engine metric as unknown: stale, or agent_unreachable
+// when the agent is judged unreachable.
+func collectUnknownWorker(out []prometheus.Metric, e instanceEntry, w string, unreachable bool) []prometheus.Metric {
 	reason := unknownStale
 	if unreachable {
 		reason = unknownAgentUnreachable
 	}
 	for _, m := range engineMetrics {
-		out = append(out, prometheus.MustNewConstMetric(descUnknown, prometheus.GaugeValue, 1, string(e.uid), agentapi.WorkerName(0), m.name, reason))
+		out = append(out, prometheus.MustNewConstMetric(descUnknown, prometheus.GaugeValue, 1, string(e.uid), w, m.name, reason))
 	}
 	return out
 }
