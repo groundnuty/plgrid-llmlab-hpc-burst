@@ -59,6 +59,14 @@ func TestTheRouterSectionFetchesEnvoyThenStartsWithTheRouter(t *testing.T) {
 		t.Errorf("the up command %q does not start the state directory the fetch filled", up)
 	}
 	checkHpcburst(t, home, up[1:])
+	// As step 4's command is (TestStartCommandIsHostDialedAndTheBinaryAcceptsIt): the binary takes it as
+	// written, with the front's files the page makes and an empty binary directory, and gets past every
+	// check of its flags and mode, to where it looks for k3s.
+	frontFiles(t, d, home)
+	out, code := run(t, baseEnv(home), upBinary(t), up[1:]...)
+	if m := missingK3s.FindStringSubmatch(out); code == 0 || m == nil || m[1] != d.bin {
+		t.Errorf("the router section's up should stop where up looks for k3s in %s (exit %d):\n%s", d.bin, code, out)
+	}
 	// The prose names the glibc the agent checks, as HBEP-5 records it.
 	if !regexp.MustCompile(`glibc 2\.30 or later`).MatchString(sec) {
 		t.Error("the router section does not say Envoy needs glibc 2.30 or later")

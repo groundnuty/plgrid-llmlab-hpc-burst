@@ -31,8 +31,13 @@ func fakeLoader(t *testing.T, out string) {
 func startWithLoader(t *testing.T) error {
 	t.Helper()
 	dir := shortDir(t)
+	rd, err := agent.NewReadiness()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rd.Close() })
 	p, err := agent.StartEnvoy(agent.EnvoyStart{Binary: testenv.EnvoyBinary(t), Ready: 30 * time.Second,
-		Config: agent.EnvoyConfig{RunDir: dir, Workers: []agent.EnvoyWorker{{Name: "worker-0", Socket: filepath.Join(dir, "worker-0.sock")}}}}, time.Now())
+		Config: agent.EnvoyConfig{RunDir: dir, Workers: []agent.EnvoyWorker{{Name: "worker-0", Socket: filepath.Join(dir, "worker-0.sock")}}, ReadinessPort: rd.Port()}}, time.Now())
 	if err == nil {
 		t.Cleanup(func() { p.Group.Stop(5 * time.Second); <-p.Group.Done(); p.Close() })
 	}

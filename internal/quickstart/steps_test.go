@@ -43,6 +43,11 @@ func startCommand(t *testing.T, d dirs, home string) command {
 	var found []command
 	for _, c := range repoCommands(t, d, home) {
 		if len(c.words) > 1 && c.words[0] == "bin/hpcburst" && c.words[1] == "up" {
+			// The beta router section's up, with --instance-router, has its own check:
+			// TestTheRouterSectionFetchesEnvoyThenStartsWithTheRouter (router_section_test.go).
+			if slices.Contains(c.words, "--instance-router") {
+				continue
+			}
 			found = append(found, c)
 		}
 	}
