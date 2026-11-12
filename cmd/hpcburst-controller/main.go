@@ -217,7 +217,6 @@ func run(ctx context.Context, f flags, d deps) error {
 	opts := managerOptions(f, cfg, os.Getenv)
 	opts.Registry = d.registry
 	opts.RelayKeeperSocket = f.relayKeeperSocket
-	opts.InstanceRouter = v1alpha1.InstanceRouter(f.instanceRouter)
 	// One raised-events counter for this copy: the lifecycle controller, its
 	// tunnel-state reader and the Provider managers count into it, and the
 	// lifecycle controller's serving collector exports it (HBEP-8, Raised
@@ -287,5 +286,6 @@ func managerOptions(f flags, cfg *rest.Config, getenv func(string) string) lifec
 		Config: cfg, CredentialsDir: f.host.CredentialsDir(), AgentBuildsDir: f.host.AgentBuildsDir(),
 		FrontConfigured: f.frontMode != "", HostDialed: f.frontMode == string(agentapi.DialHomeHostDialed), HealthAddr: f.healthAddr, MetricsAddr: f.host.ControllerMetricsAddr(),
 		LeaderElection: f.leaderElect, Workers: f.workers, HubEndpoint: getenv(hubEndpointEnv),
+		InstanceRouter: v1alpha1.InstanceRouter(f.instanceRouter),
 	}
 }
