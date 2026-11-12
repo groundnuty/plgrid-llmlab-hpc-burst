@@ -163,7 +163,7 @@ A ModelDeployment with a managed source (an entry LLMLab serves) gets none of th
 
 - **Means:** `hpcburst up` was given no `--front-mode` (and, in `direct` and `ssh` modes, no `--front-addr`), so the jobs would have no route home.
 - **The controller** submits no Allocation for any deployment.
-- **You:** stop the host and start it again with the dial-home flags of your mode, as in the quickstart's step 4. `--front-mode host-dialed` alone is enough in host-dialed mode. `up` does not remember them across `down` (Down and up across an upgrade) ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), Single-user host).
+- **You:** stop the host and start it again with the dial-home flags of your mode: the quickstart's step 4 gives `host-dialed`, and its [Alpha's limits](quickstart.md#alphas-limits) says what `direct` and `ssh` take. `--front-mode host-dialed` alone is enough in host-dialed mode. `up` does not remember them across `down` (Down and up across an upgrade) ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), Single-user host).
 
 ### `VerificationFailed`
 
