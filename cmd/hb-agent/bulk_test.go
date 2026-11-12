@@ -286,9 +286,18 @@ func newTRig(t *testing.T, o rigOptions) *tRig {
 	}
 	r.tr = tr
 	// The recorders go in before the first Serve, which is what starts anything.
-	tr.frpc.OnStart = r.tokenSt.add
+	// They run after any hook the transport set, never in its place.
+	chain := func(prev func(agent.ProcessID), rec func(agent.ProcessID)) func(agent.ProcessID) {
+		return func(id agent.ProcessID) {
+			if prev != nil {
+				prev(id)
+			}
+			rec(id)
+		}
+	}
+	tr.frpc.OnStart = chain(tr.frpc.OnStart, r.tokenSt.add)
 	if tr.bulk != nil {
-		tr.bulk.OnStart = r.bulkSt.add
+		tr.bulk.OnStart = chain(tr.bulk.OnStart, r.bulkSt.add)
 	}
 	if o.backoff > 0 {
 		tr.frpc.MinBackoff, tr.frpc.MaxBackoff = o.backoff, 4*o.backoff
