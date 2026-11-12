@@ -7,6 +7,8 @@ package launcher
 // reader, as the positive control that the parser fits what the kernel writes.
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -497,7 +500,7 @@ func TestOpenFilesWarningsAtUp(t *testing.T) {
 			}}}
 			r.writeLocked()
 
-			got := openFilesWarnings(s.l)
+			got := openFilesWarnings(s.l, nil)
 			if len(got) != len(c.wantWarnings) {
 				t.Fatalf("warnings %q, want %d: %q", got, len(c.wantWarnings), c.wantWarnings)
 			}
@@ -515,13 +518,13 @@ func TestOpenFilesWarningsAtUp(t *testing.T) {
 // with no frps and no front) there is nothing to check and nothing is said.
 func TestOpenFilesWarningsAtUpNeedTheRecord(t *testing.T) {
 	s := newSupervisedFakeHost(t)
-	if got := openFilesWarnings(s.l); len(got) != 0 {
+	if got := openFilesWarnings(s.l, nil); len(got) != 0 {
 		t.Errorf("a record with only the controller: %q, want none", got)
 	}
 	if err := os.Remove(s.l.supervisorFile()); err != nil {
 		t.Fatal(err)
 	}
-	got := openFilesWarnings(s.l)
+	got := openFilesWarnings(s.l, nil)
 	if len(got) != 1 || !strings.Contains(got[0], "were not checked: cannot read the supervisor's record") {
 		t.Errorf("no record: %q, want one warning that the limits were not checked", got)
 	}
@@ -656,6 +659,13 @@ func TestReadOpenFilesOfAnotherProcessFitsTheKernel(t *testing.T) {
 	}
 }
 
+// openFilesWarningText is up's warning for a tunnel process whose hard limit is below 5,400, as
+// HBEP-11 and HBEP-6 give it: the limit, and the figure. It is typed here and not built from the
+// code's constants, so a wrong figure in the code is a different text.
+func openFilesWarningText(name string, pid int, limit string) string {
+	return fmt.Sprintf("warning: %s (pid %d) has a hard limit of %s open files, below the 5400 that HBEP-6 gives for the front at 300 tunnels x 8 streams: it can stop accepting connections under that load. The Go runtime already raises the soft limit to the hard one, so the hard limit is what binds; the session or service that runs hpcburst up sets it, so raise it there and restart the host", name, pid, limit)
+}
+
 // startLimitedChild starts a real process (a shell that sets both its limits on open files to
 // limit and becomes sleep) and returns its PID. It needs the test process's own hard limit to be at
 // least limit, since a limit can only be lowered; prlimit(2) on the child confirms what it got, so
@@ -690,11 +700,7 @@ func startLimitedChild(t *testing.T, limit uint64) int {
 // openFilesWarnings fails here: one that never warns fails the first cases, one that always warns
 // fails the controls.
 func TestOpenFilesWarningsAtUpForRealChildren(t *testing.T) {
-	// The warning as HBEP-11 and HBEP-6 give it, typed here and not built from the code's constants.
-	const tail = " open files, below the 5400 that HBEP-6 gives for the front at 300 tunnels x 8 streams: it can stop accepting connections under that load. The Go runtime already raises the soft limit to the hard one, so the hard limit is what binds; the session or service that runs hpcburst up sets it, so raise it there and restart the host"
-	warning := func(name string, pid int, limit string) string {
-		return fmt.Sprintf("warning: %s (pid %d) has a hard limit of %s%s", name, pid, limit, tail)
-	}
+	warning := openFilesWarningText
 	record := func(t *testing.T, entries map[string]int) layout {
 		t.Helper()
 		l, err := newLayout(filepath.Join(shortDir(t), "st"))
@@ -730,7 +736,7 @@ func TestOpenFilesWarningsAtUpForRealChildren(t *testing.T) {
 	} {
 		t.Run(fmt.Sprintf("a front with a hard limit of %d", c.limit), func(t *testing.T) {
 			pid := startLimitedChild(t, c.limit)
-			got := openFilesWarnings(record(t, map[string]int{"front": pid}))
+			got := openFilesWarnings(record(t, map[string]int{"front": pid}), nil)
 			switch {
 			case c.warns && (len(got) != 1 || got[0] != warning("front", pid, strconv.FormatUint(c.limit, 10))):
 				t.Errorf("warnings %q, want exactly %q", got, warning("front", pid, strconv.FormatUint(c.limit, 10)))
@@ -741,9 +747,92 @@ func TestOpenFilesWarningsAtUpForRealChildren(t *testing.T) {
 	}
 	t.Run("two children, only the low one is named", func(t *testing.T) {
 		front, frps := startLimitedChild(t, 65536), startLimitedChild(t, 4096)
-		got := openFilesWarnings(record(t, map[string]int{"front": front, "frps": frps}))
+		got := openFilesWarnings(record(t, map[string]int{"front": front, "frps": frps}), nil)
 		if want := warning("frps", frps, "4096"); len(got) != 1 || got[0] != want {
 			t.Errorf("warnings %q, want exactly %q", got, want)
 		}
 	})
+}
+
+// TestUpStartsTheControllersAndWarnsOnALowHardLimit drives up's own path to the warning: the step
+// of Up that starts the controllers (startControllers, which Up calls and which holds the loop that
+// adds each warning to the report and the log), with the real supervisor, the fake controller and
+// the fake front as real processes, and the limit reader INJECTED (UpOptions.limitReader; nil in
+// production, which reads /proc). A hard limit of 4,096 puts the warning, whole, in the report's
+// Warnings and in the log; 65,536 puts none in either. In both the reader is asked for the front
+// and for no other process, so the control's silence is not a loop that never ran. A mutant that
+// deletes the loop fails both cases.
+func TestUpStartsTheControllersAndWarnsOnALowHardLimit(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		hard  uint64
+		warns bool
+	}{
+		{"a hard limit of 4,096", 4096, true},
+		{"a hard limit of 65,536", 65536, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newCtlFixture(t, Front{})
+			withFront(f)
+			k3s := startBystander(t, "sleep", "300")
+			k3sRec, err := newRec("k3s", k3s.Process.Pid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.st.Procs = []ProcRec{k3sRec}
+			self, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(superviseEnv, f.l.dir)
+			stopOnExit(t, f)
+			var asked []int
+			var log bytes.Buffer
+			o := UpOptions{StateDir: f.l.dir, Log: &log, supervisorArgv: []string{self},
+				limitReader: func(h *procHandle) (Limit, Limit, error) {
+					asked = append(asked, h.rec.PID)
+					return Limit{Value: c.hard}, Limit{Value: c.hard}, nil
+				}}
+			rep := &UpReport{}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			what, err := startControllers(ctx, f.l, f.ports, o, f.st, f.st.Controllers.Binary, f.st.FrontRun, nil, rep)
+			if err != nil {
+				t.Fatalf("startControllers failed at %q: %v", what, err)
+			}
+			// The step is up's: it started the supervisor and filled in the report.
+			if rep.SupervisorPID == 0 || rep.ControllerBin != f.st.Controllers.Binary || rep.FrontHealth == "" {
+				t.Errorf("the report is %+v", rep)
+			}
+			var frontPID int
+			for _, e := range f.record().Entries {
+				if e.Name == "front" && e.Proc != nil {
+					frontPID = e.Proc.PID
+				}
+			}
+			if frontPID == 0 {
+				t.Fatalf("no running front in %s", fileOf(f.l.supervisorFile()))
+			}
+			if len(asked) != 1 || asked[0] != frontPID {
+				t.Errorf("the reader was asked for pids %v, want the front's (%d) alone: the controller is not a tunnel process", asked, frontPID)
+			}
+			want := openFilesWarningText("front", frontPID, "4096")
+			var got []string
+			for _, w := range rep.Warnings {
+				if strings.Contains(w, "open files") {
+					got = append(got, w)
+				}
+			}
+			switch {
+			case c.warns && (len(got) != 1 || got[0] != want):
+				t.Errorf("the report's open-files warnings are %q, want exactly %q", got, want)
+			case c.warns && !strings.Contains(log.String(), want+"\n"):
+				t.Errorf("the log lacks the warning %q:\n%s", want, log.String())
+			case !c.warns && len(got) != 0:
+				t.Errorf("the report carries %q for a hard limit of %d", got, c.hard)
+			case !c.warns && strings.Contains(log.String(), "open files"):
+				t.Errorf("the log mentions open files for a hard limit of %d:\n%s", c.hard, log.String())
+			}
+		})
+	}
 }

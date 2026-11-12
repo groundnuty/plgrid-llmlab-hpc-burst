@@ -47,6 +47,9 @@ type UpOptions struct {
 
 	// supervisorArgv, set by tests only, replaces the supervisor's command line.
 	supervisorArgv []string
+	// limitReader, set by tests only, replaces the read of a tunnel process's open-files limits
+	// (openFilesWarnings); nil reads /proc/<pid>/limits as status does.
+	limitReader func(h *procHandle) (soft, hard Limit, err error)
 	// eventTTL and omitEventTTL, set by tests only, are launchSpec's fields of the same names.
 	eventTTL     string
 	omitEventTTL bool
@@ -352,49 +355,8 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 		if err != nil {
 			return abort("controllers", err)
 		}
-		argv := o.supervisorArgv
-		if argv == nil {
-			if argv, err = supervisorArgv(l); err != nil {
-				return abort("controllers", err)
-			}
-		}
-		st.Controllers = &ControllerConfig{Binary: ctrlBin}
-		st.FrontRun, st.Frps = frontRun, frpsRun
-		if frpsRun != nil {
-			// frps's web password and configuration, both mode 600 (HBEP-6), before the supervisor
-			// that starts frps; a password that exists is kept, so the controller's copy stays valid.
-			// With a front, frps posts each admitted registration to the front's plugin as well, on
-			// the front's health address (HBEP-6, Admission; #371).
-			frontAddr := ""
-			if frontRun != nil {
-				frontAddr = ports.FrontHealthAddr()
-			}
-			if _, err := writeFrpsFiles(l.host(ports), frontAddr); err != nil {
-				return abort("frps", err)
-			}
-		} else {
-			rep.Warnings = append(rep.Warnings, noFrpsWarning)
-			logf(o.Log, "%s", noFrpsWarning)
-		}
-		if err := startSupervisor(ctx, l, st, argv, superviseStartTimeout, o.Log); err != nil {
-			return abort("controllers", err)
-		}
-		rep.SupervisorPID, rep.ControllerBin, rep.ControllerHealth = st.Procs[len(st.Procs)-1].PID, ctrlBin, ports.ControllerAddr()
-		if frontRun != nil {
-			rep.FrontHealth = ports.FrontHealthAddr()
-		}
-		if frpsRun != nil {
-			h := l.host(ports)
-			rep.FrpsPorts = []int{h.FrpsBindPort(), h.FrpsTCPMuxPort(), h.FrpsWebPort()}
-		}
-		if o.RelayKeeper {
-			rep.RelayKeeperSocket = l.host(ports).RelayKeeperSocket()
-		}
-		// A tunnel process whose hard limit on open files is below HBEP-6's figure is warned about,
-		// never refused: the limit is the host's to set (HBEP-11, Single-user host; #431).
-		for _, w := range openFilesWarnings(l) {
-			rep.Warnings = append(rep.Warnings, w)
-			logf(o.Log, "%s", w)
+		if what, err := startControllers(ctx, l, ports, o, st, ctrlBin, frontRun, frpsRun, rep); err != nil {
+			return abort(what, err)
 		}
 	}
 	if !front.Set() {
@@ -407,6 +369,59 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 		return rep, checkBuildsAtUp(ctx, l, ports, rep)
 	}
 	return rep, nil
+}
+
+// startControllers is the step of up that starts the controllers, once the namespace their Leases
+// live in exists: it records them in st, writes frps's files, starts the supervisor, which starts
+// the controller, the front and frps, and fills in the report, with the warnings among it. On an
+// error it returns the step's name for up's abort.
+func startControllers(ctx context.Context, l layout, ports Ports, o UpOptions, st *State, ctrlBin string, frontRun *FrontRunConfig, frpsRun *FrpsRunConfig, rep *UpReport) (string, error) {
+	argv := o.supervisorArgv
+	if argv == nil {
+		var err error
+		if argv, err = supervisorArgv(l); err != nil {
+			return "controllers", err
+		}
+	}
+	st.Controllers = &ControllerConfig{Binary: ctrlBin}
+	st.FrontRun, st.Frps = frontRun, frpsRun
+	if frpsRun != nil {
+		// frps's web password and configuration, both mode 600 (HBEP-6), before the supervisor
+		// that starts frps; a password that exists is kept, so the controller's copy stays valid.
+		// With a front, frps posts each admitted registration to the front's plugin as well, on
+		// the front's health address (HBEP-6, Admission; #371).
+		frontAddr := ""
+		if frontRun != nil {
+			frontAddr = ports.FrontHealthAddr()
+		}
+		if _, err := writeFrpsFiles(l.host(ports), frontAddr); err != nil {
+			return "frps", err
+		}
+	} else {
+		rep.Warnings = append(rep.Warnings, noFrpsWarning)
+		logf(o.Log, "%s", noFrpsWarning)
+	}
+	if err := startSupervisor(ctx, l, st, argv, superviseStartTimeout, o.Log); err != nil {
+		return "controllers", err
+	}
+	rep.SupervisorPID, rep.ControllerBin, rep.ControllerHealth = st.Procs[len(st.Procs)-1].PID, ctrlBin, ports.ControllerAddr()
+	if frontRun != nil {
+		rep.FrontHealth = ports.FrontHealthAddr()
+	}
+	if frpsRun != nil {
+		h := l.host(ports)
+		rep.FrpsPorts = []int{h.FrpsBindPort(), h.FrpsTCPMuxPort(), h.FrpsWebPort()}
+	}
+	if o.RelayKeeper {
+		rep.RelayKeeperSocket = l.host(ports).RelayKeeperSocket()
+	}
+	// A tunnel process whose hard limit on open files is below HBEP-6's figure is warned about,
+	// never refused: the limit is the host's to set (HBEP-11, Single-user host; #431).
+	for _, w := range openFilesWarnings(l, o.limitReader) {
+		rep.Warnings = append(rep.Warnings, w)
+		logf(o.Log, "%s", w)
+	}
+	return "", nil
 }
 
 // checkBuildsAtUp sets rep.AgentBuilds. It returns an *AgentBuildsError when a build is missing or

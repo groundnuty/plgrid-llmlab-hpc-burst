@@ -214,8 +214,13 @@ func (e *EntryHealth) addDegraded(cause string) {
 // for each whose HARD limit is below OpenFilesHardFloor, naming the limit and the figure, and one
 // for each whose limit could not be read (a check that could not look is not a check that
 // passed). It never refuses: the limit is the host's to set. It reads the processes the supervisor
-// recorded in supervisor.json, each through a handle verified against its record.
-func openFilesWarnings(l layout) []string {
+// recorded in supervisor.json, each through a handle verified against its record. read replaces
+// the read of the limits (tests only; up's test seam, UpOptions.limitReader); nil reads them from
+// /proc through the handle, as status does.
+func openFilesWarnings(l layout, read func(h *procHandle) (soft, hard Limit, err error)) []string {
+	if read == nil {
+		read = (*procHandle).readLimits
+	}
 	f, err := readSupervisorFile(l)
 	if err != nil {
 		return []string{fmt.Sprintf("warning: the open-files limits of frps and the front were not checked: cannot read the supervisor's record: %v", err)}
@@ -234,7 +239,7 @@ func openFilesWarnings(l layout) []string {
 			out = append(out, fmt.Sprintf("warning: the open-files limit of %s (pid %d) was not checked: it is not running as recorded: %s", e.Name, e.Proc.PID, d))
 			continue
 		}
-		_, hard, err := h.readLimits()
+		_, hard, err := read(h)
 		h.Close()
 		switch {
 		case err != nil:
