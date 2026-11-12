@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -334,6 +335,75 @@ func TestRealBulkEpochsAreSeparate(t *testing.T) {
 	}
 }
 
+// curConns is the UID's current connections on the frps whose web server is web: the user
+// connections frps has given a work connection (frp v0.71.1, server/proxy/proxy.go,
+// handleUserTCPConnection), -1 when the proxy isn't listed or the list can't be read.
+func curConns(web, pw, uid string) int64 {
+	req, _ := http.NewRequest(http.MethodGet, "http://"+web+"/api/proxy/tcpmux", nil)
+	req.SetBasicAuth(agentapi.FrpsWebUser, pw)
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		return -1
+	}
+	defer resp.Body.Close()
+	var v struct {
+		Proxies []struct {
+			Name     string `json:"name"`
+			CurConns int64  `json:"curConns"`
+		} `json:"proxies"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&v) != nil {
+		return -1
+	}
+	for _, p := range v.Proxies {
+		if p.Name == uid {
+			return p.CurConns
+		}
+	}
+	return -1
+}
+
+// drainSpare makes sure the frps at mux holds no spare work connection for uid once its frpc is
+// stopped. frp keeps one (it reads poolCount = 0 as 1, HBEP-6's erratum of 11 Nov 2026), and a user
+// connection given it would wait on the stopped frpc until the front's idleTimeout (HBEP-6's frozen
+// work connection, a stated limit) instead of being closed at userConnTimeout. A dummy connection is
+// opened straight to frps and either takes the spare, which frps's curConns shows, or, with none, is
+// closed by frps at userConnTimeout. Either way frps then has none, and the stopped frpc can't make
+// another. The dummy stays open until the test ends.
+func drainSpare(t *testing.T, mux, web, pw, uid string) {
+	t.Helper()
+	before := curConns(web, pw, uid)
+	if before < 0 {
+		t.Fatalf("frps at %s does not list %s", web, uid)
+	}
+	c, err := net.DialTimeout("tcp", mux, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	fmt.Fprintf(c, "CONNECT %s:80 HTTP/1.1\r\nHost: %s:80\r\n\r\n", uid, uid)
+	closed := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, c) // the 200, then EOF only if frps closes it
+		close(closed)
+	}()
+	for end := time.Now().Add(30 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		select {
+		case <-closed:
+			t.Logf("%s had no spare work connection: frps closed the dummy at userConnTimeout", mux)
+			return
+		default:
+		}
+		if curConns(web, pw, uid) > before {
+			t.Logf("the dummy took %s's spare work connection", mux)
+			return
+		}
+		if time.Now().After(end) {
+			t.Fatalf("the dummy connection to %s neither took a work connection nor was closed", mux)
+		}
+	}
+}
+
 // TestRealBulkCutBeforeHeadersRaisesNoPause (trap 3 on the real frp, HBEP-6:661 and :517): the bulk
 // frpc, the test's own child, is stopped through its handle (SIGSTOP), so frps-bulk answers a new
 // CONNECT and then waits userConnTimeout (frp's default, 10 s; the launcher sets none) for a work
@@ -342,8 +412,10 @@ func TestRealBulkEpochsAreSeparate(t *testing.T) {
 // and counts nothing toward the pause. The control is the same cut on the token transport, with the
 // token frpc stopped: it counts one failure toward the pause, as HBEP-5 says.
 //
-// No request runs before the stops, so neither pool holds a connection whose work connection was made
-// before the stop: each request opens a new one, and frps's wait is what cuts it.
+// No request runs before the stops, so neither of the front's pools holds a connection whose work
+// connection was made before the stop: each request opens a new one. And frp's spare work connection is
+// taken by a dummy connection first (drainSpare), so frps's own wait is what cuts it, every time: with
+// the spare left there, a request given it waits on the stopped frpc until the front's idleTimeout.
 func TestRealBulkCutBeforeHeadersRaisesNoPause(t *testing.T) {
 	r := newRealBulkFront(t, nil, false, nil)
 	f, uid := r.bulkFront, r.uid
@@ -372,6 +444,7 @@ func TestRealBulkCutBeforeHeadersRaisesNoPause(t *testing.T) {
 	}
 
 	stop("the bulk frpc", bulkProc)
+	drainSpare(t, r.rig.host.FrpsBulkTCPMuxAddr(), r.rig.host.FrpsBulkWebAddr(), r.rig.pwBulk, string(uid))
 	cut("the bulk request with the bulk frpc stopped")
 	if f.bulk.tun.Registered(uid) {
 		t.Error("the bulk transport is still registered after its request was cut before the headers")
@@ -391,6 +464,7 @@ func TestRealBulkCutBeforeHeadersRaisesNoPause(t *testing.T) {
 
 	// The control: the same cut on the token transport counts toward the pause.
 	stop("the token frpc", tokenProc)
+	drainSpare(t, r.rig.host.FrpsTCPMuxAddr(), r.rig.host.FrpsWebAddr(), r.rig.pwFirst, string(uid))
 	cut("the token request with the token frpc stopped")
 	if n := f.router.failures(f.keys[0]); n != 1 {
 		t.Errorf("the token cut counted %d failures toward the pause, want 1: the control can't tell the bulk cut apart", n)
