@@ -375,7 +375,13 @@ func TestBulkEpochFenceFallsBack(t *testing.T) {
 	held, release := f.muxBulk.holdNext(t, uid, "connect")
 	done := make(chan [2]any, 1)
 	go func() { c, by := f.send("/v1/chat/completions", chatPlain); done <- [2]any{c, by} }()
-	<-held
+	select {
+	case <-held:
+	case r := <-done:
+		t.Fatalf("the request ended (%v through %q) without its CONNECT reaching the bulk frps", r[0], r[1])
+	case <-time.After(failAfter):
+		t.Fatal("the request's CONNECT never reached the bulk frps")
+	}
 	pluginCall(t, f.bulk.plugin(f.log), opNewProxy, uid) // frps registers the bulk proxy again
 	release()
 	r := <-done
