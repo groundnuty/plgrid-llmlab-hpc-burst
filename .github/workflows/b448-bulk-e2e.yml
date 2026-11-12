@@ -113,3 +113,4 @@ jobs:
       - name: hack/rehearsal.sh
         run: REHEARSAL_OUT="$RUNNER_TEMP/rehearsal" REHEARSAL_TIMEOUT=110m REHEARSAL_RUN='^(TestBulk64MiBReplyBesideEightStreams|TestFrpsBulkRestartCutsOnlyBulk|TestTeardownLeavesNoBulkProxy|TestPreBulkAllocationKeepsItsTokenTunnel)$' bash hack/rehearsal.sh
 
+# rerun on #480's head with main merged
