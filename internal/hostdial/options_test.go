@@ -119,21 +119,50 @@ func writeScript(t *testing.T, dir, name, body string) string {
 
 // The group probe's relay double starts a child that records the signals it
 // gets, then waits. The child records "ready" once its traps are set, each
-// TERM as "term", and ends on WINCH with "winch"; it ends by itself after
-// about a minute, so a failed test leaves no process behind for long. It
-// holds none of the relay's standard streams: exec.Cmd.Wait waits for a
-// stream that a child still holds, so the relay's stop would wait for the
-// child.
+// TERM as "term", and "winch" when a WINCH has ended its loop; it ends by
+// itself after about a minute, so a failed test leaves no process behind for
+// long. It holds none of the relay's standard streams: exec.Cmd.Wait waits
+// for a stream that a child still holds, so the relay's stop would wait for
+// the child.
+//
+// The WINCH trap only sets a flag, and "winch" is written after the loop
+// (issue #437). dash runs a trap's action through evaltree, which first runs
+// any trap that became pending meanwhile (dotrap, eval.c, has no guard against
+// re-entry): a WINCH that comes while the TERM trap runs has its trap run
+// inside the TERM trap, before the TERM trap's echo. A WINCH trap that wrote
+// "winch" and exited there ended the child without "term", although the TERM
+// had been delivered. The flag is set only inside a trap and read only by the
+// loop, which goes on only once every trap under way has returned, so the
+// TERM trap of a TERM delivered before the WINCH has written "term" before
+// "winch" is written.
+//
+// The TERM trap first sources the file named by the child's second argument,
+// if it has one. The relay double passes none;
+// TestTheGroupChildKeepsATermWhoseTrapAWinchInterrupts holds the trap there.
 const (
 	groupRelaySh = `sh "$2/child.sh" "$2/$1.log" </dev/null >/dev/null 2>&1 &
 echo $! > "$2/$1.pid.tmp" && mv "$2/$1.pid.tmp" "$2/$1.pid"
 wait
 `
-	groupChildSh = `trap 'echo term >> "$1"' TERM
-trap 'echo winch >> "$1"; exit 0' WINCH
+	groupChildSh = `w=
+trap '[ -z "$2" ] || . "$2"; echo term >> "$1"' TERM
+trap 'w=1' WINCH
 echo ready >> "$1"
 i=0
-while [ "$i" -lt 600 ]; do sleep 0.1; i=$((i + 1)); done
+while [ -z "$w" ] && [ "$i" -lt 600 ]; do sleep 0.1; i=$((i + 1)); done
+[ -z "$w" ] || echo winch >> "$1"
+`
+	// groupTermHoldSh, sourced by the child's TERM trap, marks that the
+	// trap has started and holds it, with builtins only, until the test
+	// creates the release file. A hold that runs out (some tens of seconds)
+	// says so in a file of its own, so a run whose WINCH did not come inside
+	// the trap fails instead of passing.
+	groupTermHoldSh = `: > "$1.in-term"
+n=0
+until [ -e "$1.release" ]; do
+	n=$((n + 1))
+	if [ "$n" -ge 20000000 ]; then : > "$1.held-out"; break; fi
+done
 `
 )
 
@@ -154,9 +183,10 @@ type groupSeen struct {
 // records each relay's process group and the attributes its command was
 // started with, then Drops the Allocation, which returns once the relays are
 // gone. Then it sends each child WINCH through its verified pin and reads
-// what the child recorded once it has exited. WINCH is numbered above TERM,
-// so a TERM the stop sent before it is handled first and its line comes
-// first: the order is the evidence, not a wait.
+// what the child recorded once it has exited. A TERM the stop sent was
+// delivered before the WINCH, and the child writes "winch" only after every
+// trap that ran has returned (groupChildSh), so a TERM's line comes first:
+// the order is the evidence, not a wait.
 func groupProbe(t *testing.T, o hostdial.OwnerOptions) map[agentapi.RelayChannel]groupSeen {
 	t.Helper()
 	dir := t.TempDir()
@@ -280,6 +310,63 @@ func TestAPidfdRelayLeadsNoGroupAndItsStopReachesOnlyIt(t *testing.T) {
 		if s.lines != "ready\nwinch\n" {
 			t.Errorf("the keeper's %s relay's child recorded %q, want no TERM, only the test's WINCH", ch, s.lines)
 		}
+	}
+}
+
+// The group probe's child keeps the record of a TERM whose trap a WINCH
+// interrupts (issue #437). The test starts the child itself, sends it TERM
+// through its verified pin, waits until the TERM trap has started and is held
+// (groupTermHoldSh), sends WINCH, then releases the trap. The WINCH is queued
+// before the release exists, so the child takes it before it can leave the
+// hold, and dash runs the WINCH trap inside the TERM trap. A child whose
+// WINCH trap wrote "winch" and exited there recorded "ready\nwinch\n" for a
+// TERM it was sent: the false failure of
+// TestAlphasRelayLeadsItsOwnGroupAndItsStopSignalsIt, and, read the other way,
+// a stray TERM that TestAPidfdRelayLeadsNoGroupAndItsStopReachesOnlyIt would
+// not have seen. Each step waits on what the child wrote, never on time.
+func TestTheGroupChildKeepsATermWhoseTrapAWinchInterrupts(t *testing.T) {
+	dir := t.TempDir()
+	child := writeScript(t, dir, "child.sh", groupChildSh)
+	hold := writeScript(t, dir, "hold.sh", groupTermHoldSh)
+	log := filepath.Join(dir, "child.log")
+	cmd := exec.Command("/bin/sh", child, log, hold)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// Registered before the pin, so it reaps the child after the pin's KILL.
+	t.Cleanup(func() { _ = cmd.Wait() })
+	c, err := pin(t, cmd.Process.Pid)
+	if err != nil {
+		t.Fatalf("pin the child %d: %v", cmd.Process.Pid, err)
+	}
+	exists := func(name string) bool {
+		_, err := os.Stat(name)
+		return err == nil
+	}
+	waitFor(t, 30*time.Second, "the child ready", func() bool {
+		b, err := os.ReadFile(log)
+		return err == nil && strings.HasPrefix(string(b), "ready\n")
+	})
+	if err := c.signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("TERM to the child: %v", err)
+	}
+	waitFor(t, 30*time.Second, "the child's TERM trap held", func() bool { return exists(log + ".in-term") })
+	if err := c.signal(syscall.SIGWINCH); err != nil {
+		t.Fatalf("WINCH to the child: %v", err)
+	}
+	if err := os.WriteFile(log+".release", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.waitExit(t, 30*time.Second, "the child")
+	if exists(log + ".held-out") {
+		t.Fatal("the TERM trap's hold ran out before the test released it, so the WINCH did not come inside the trap: this run proves nothing")
+	}
+	b, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "ready\nterm\nwinch\n" {
+		t.Errorf("the child recorded %q for a TERM and a WINCH that came while the TERM's trap ran, want \"ready\\nterm\\nwinch\\n\"", b)
 	}
 }
 
