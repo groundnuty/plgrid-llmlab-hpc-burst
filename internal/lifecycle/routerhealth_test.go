@@ -432,18 +432,29 @@ func TestFailuresCountedDuringReverificationRestartNothing(t *testing.T) {
 	})
 }
 
-// A router that is not running when a restarted worker is verified does not hold the Instance out of
-// ready: it returns, and the router rung, which runs only in ready, restarts the router.
-func TestAReturnToReadyIsNotHeldByARouterThatExited(t *testing.T) {
+// A router that exits while a restarted worker reverifies is restarted there, at the router rung, with
+// the Instance left verifying; the return to ready then waits for the new router to hold the worker
+// healthy. The gate admits no router that is not running, so without the rung before ready the
+// Instance would wait out health.startTimeout.
+func TestARouterThatExitsDuringReverificationIsRestartedThere(t *testing.T) {
 	rg, in, ag := routerRig(t)
 	ag.CrashWorker(healthWorker, 137)
 	healthUntilEvent(rg, in.Name, 0, time.Minute, startTick)
 	ag.CrashRouter(1)
 	healthUntilEvent(rg, in.Name, 1, 10*time.Minute, startTick)
 	if f := healthFailing(rg, in.Name); !slices.Equal(f, []string{v1alpha1.ReasonWorkerRestart, v1alpha1.ReasonRouterRestart}) {
-		t.Errorf("failing events %v, want WorkerRestart, then RouterRestart once ready again", f)
+		t.Errorf("failing events %v, want WorkerRestart, then RouterRestart", f)
 	}
-	startUntil(rg, "md", 5*time.Minute, "the router back with the worker healthy", func() bool { h := healthyWorkersOf(rg, in.Name); return h != nil && *h == 1 })
+	if got := rg.instance(in.Name); got.Status.Phase != v1alpha1.InstanceVerifying {
+		t.Errorf("at the router's restart the phase is %s, want verifying: the rung restarts it where the Instance is", got.Status.Phase)
+	}
+	startUntil(rg, "md", 5*time.Minute, "ready, with the new router holding the worker healthy", func() bool {
+		h := healthyWorkersOf(rg, in.Name)
+		return rg.readyCount("md") == 1 && h != nil && *h == 1
+	})
+	if rs := rg.instance(in.Name).Status.Restarts; len(rs) != 2 {
+		t.Errorf("restarts %+v, want the worker's and the router's", rs)
+	}
 }
 
 // holdBeforeReady keeps an Instance behind a router out of its first ready: its router's probe is

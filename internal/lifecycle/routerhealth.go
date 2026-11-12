@@ -146,15 +146,12 @@ func routerProbePasses(in *v1alpha1.Instance, av agentView) bool {
 // that rejoins counts again (HBEP-5, Inside an Instance, Worker health). A healthy worker's count of
 // failed checks is 0, so the failures counted while it was unverified, during its own warm-up, are never
 // judged against it once it is verified (HBEP-7, Several workers; Q5, as corrected; #455's review). A
-// router that is not running lets a return to ready through, so its rung, which runs only in ready,
-// restarts it; at the first entry the probe gate holds it.
+// router that is not running admits nothing: the router rung, which runs before ready too, restarts it
+// where the Instance is.
 func routerAdmitsReady(in *v1alpha1.Instance, av agentView) bool {
 	rr := currentRouter(in, av)
-	if rr == nil {
+	if rr == nil || rr.Phase != agentapi.PartRunning {
 		return false
-	}
-	if rr.Phase != agentapi.PartRunning {
-		return in.Status.ReadyTime != nil
 	}
 	for _, w := range rr.Workers {
 		if w.Name == v1alpha1.WorkerName(0) && w.Healthy {
