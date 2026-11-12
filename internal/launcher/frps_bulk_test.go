@@ -3,10 +3,19 @@ package launcher
 // Tests of the bulk path's second frps's configuration and files (HBEP-6, The bulk path; #448).
 
 import (
+	"bytes"
+	"context"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
+	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -227,5 +236,143 @@ func TestWriteFrpsBulkFilesWritesTheFrontsBulkPluginOnlyWithAFront(t *testing.T)
 		if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
 			t.Errorf("the second frps's file: %v %v, want mode 0600", fi, err)
 		}
+	}
+}
+
+// b448Base is a launcher base in #448's port block (30280-30359, IMPL-COMMON): a test that runs the
+// second frps binds its plugin stub at base+8 (30288) and frps-bulk at base+13 to base+15
+// (30293-30295), and nothing else of the block.
+const b448Base = 30280
+
+// startFrpsBulk starts the real frps from the launcher's own frps-bulk file, edited by edit when it
+// is set, and waits for its web server. The caller serves the plugin at base+8 (startAdmitAll). It
+// stops frps at the end of the test, and checks the root k3s is unchanged.
+func startFrpsBulk(t *testing.T, edit func([]byte) []byte) (agentapi.Host, *FrpsProc) {
+	t.Helper()
+	frps, _ := testenv.FrpBinaries(t)
+	before := rootK3sListening(t)
+	t.Cleanup(func() {
+		if after := rootK3sListening(t); after != before {
+			t.Errorf("the root k3s's listeners changed: %q -> %q", before, after)
+		}
+	})
+	h := agentapi.Host{StateDir: shortDir(t), PortBase: b448Base}
+	path, err := writeFrpsBulkFiles(h, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edit != nil {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, edit(b), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bin, err := ResolveFrpsFile(frps, DefaultFrpVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(bin.Close)
+	spec := frpsBulkSpecFor(h)
+	spec.Bin = bin
+	p, err := StartFrps(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = p.Stop(context.Background(), 2*time.Second) })
+	for end := time.Now().Add(15 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		select {
+		case <-p.Done():
+			t.Fatalf("frps-bulk exited at start: %s", p.ExitStatus())
+		default:
+		}
+		if resp, err := (&http.Client{Timeout: time.Second}).Get("http://" + h.FrpsBulkWebAddr() + "/healthz"); err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == 200 {
+				break
+			}
+		}
+		if time.Now().After(end) {
+			t.Fatal("frps-bulk's web server never answered /healthz")
+		}
+	}
+	return h, p
+}
+
+// startAdmitAll serves a plugin at addr that admits every call to path, as the controller's would
+// admit the test's nothing: frps-bulk only posts to it.
+func startAdmitAll(t *testing.T, addr, path string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatalf("the plugin stub cannot listen on %s: %v", addr, err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc(path, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"reject":false,"unchange":true}`)
+	})
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+}
+
+// exactPortProblems is the supervisor's own check of an frps's ports (checkEntry): the process
+// tree's bound sockets against exactly the three, TCP on 127.0.0.1, and nothing else.
+func exactPortProblems(t *testing.T, p *FrpsProc, ports []int) []string {
+	t.Helper()
+	ph, v, d := openRec(p.Rec())
+	if v != Ours {
+		t.Fatalf("frps-bulk is %v: %s", v, d)
+	}
+	defer ph.Close()
+	owned, others, err := treeBound(ph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := make([]sock, 0, len(ports))
+	for _, port := range ports {
+		want = append(want, sock{Listener: Listener{Addr: "127.0.0.1", Port: port}, proto: "tcp"})
+	}
+	return verifyExactListeners(want, owned, others)
+}
+
+// TestFrpsBulkRealHoldsExactlyItsThreeLoopbackPorts (HBEP-6, Test plan, Loopback only: "with the
+// bulk path on, the same for the second frps"): the real frps, from the launcher's frps-bulk file,
+// holds exactly base+13 to base+15 on 127.0.0.1, by the supervisor's own check and by ss(8). The
+// positive control, as the Test plan asks: the same file without bindAddr makes frps listen on every
+// interface, and the same check then fails, so it can.
+func TestFrpsBulkRealHoldsExactlyItsThreeLoopbackPorts(t *testing.T) {
+	testenv.FrpBinaries(t)
+	startAdmitAll(t, agentapi.Host{PortBase: b448Base}.FrpsPluginAddr(), agentapi.FrpsBulkPluginPath)
+	h, p := startFrpsBulk(t, nil)
+	ports := []int{h.FrpsBulkBindPort(), h.FrpsBulkTCPMuxPort(), h.FrpsBulkWebPort()}
+	if probs := exactPortProblems(t, p, ports); len(probs) != 0 {
+		t.Errorf("frps-bulk from the launcher's file: %v", probs)
+	}
+	var mine []string
+	for _, e := range ssListeners(t, 1, 65535, true) {
+		if strings.Contains(e.Pids, "pid="+strconv.Itoa(p.Rec().PID)+",") {
+			mine = append(mine, e.String())
+		}
+	}
+	sort.Strings(mine)
+	want := []string{"tcp " + h.FrpsBulkBindAddr(), "tcp " + h.FrpsBulkTCPMuxAddr(), "tcp " + h.FrpsBulkWebAddr()}
+	sort.Strings(want)
+	if !slices.Equal(mine, want) {
+		t.Errorf("sockets of frps-bulk in ss -p:\n got %v\nwant %v", mine, want)
+	}
+	if _, err := p.Stop(context.Background(), 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	_, wild := startFrpsBulk(t, func(b []byte) []byte {
+		return bytes.Replace(b, []byte("bindAddr = \"127.0.0.1\"\n"), nil, 1)
+	})
+	probs := exactPortProblems(t, wild, ports)
+	if !strings.Contains(strings.Join(probs, "; "), "is missing") || !strings.Contains(strings.Join(probs, "; "), "also listens on") {
+		t.Errorf("frps-bulk without bindAddr passed the check: %v", probs)
 	}
 }
