@@ -390,6 +390,12 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 		if o.RelayKeeper {
 			rep.RelayKeeperSocket = l.host(ports).RelayKeeperSocket()
 		}
+		// A tunnel process whose hard limit on open files is below HBEP-6's figure is warned about,
+		// never refused: the limit is the host's to set (HBEP-11, Single-user host; #431).
+		for _, w := range openFilesWarnings(l) {
+			rep.Warnings = append(rep.Warnings, w)
+			logf(o.Log, "%s", w)
+		}
 	}
 	if !front.Set() {
 		rep.Warnings = append(rep.Warnings, frontWarning)
