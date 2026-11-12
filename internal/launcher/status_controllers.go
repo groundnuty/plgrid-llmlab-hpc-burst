@@ -50,10 +50,18 @@ type EntryHealth struct {
 	// (HBEP-6, Admission and Operational readiness). nil: not asked, which is every process but the
 	// front, and a front whose /healthz did not answer 200.
 	FrpsPluginOK *bool `json:"frps_plugin_ok,omitempty"`
-	// Degraded names what is degraded while the process keeps serving: DegradedUsage while its
-	// usage sink says failing. It is not a health problem: the report stays healthy and status
-	// exits 0, and only this process's line says degraded (@hpc-burst-science-agent, 31 Oct 2026;
-	// HBEP-8, Usage records, and HBEP-11).
+	// OpenFiles is a tunnel process's descriptors in use and its soft and hard limits on them,
+	// read from /proc/<pid>/limits and /proc/<pid>/fd through the process's verified handle
+	// (openfiles.go; HBEP-11, Single-user host; #431). It is set for frps and the front only, and
+	// only when the reading succeeded: OpenFilesUnknown says why it did not, and one of the two
+	// is set for each tunnel process that runs, so a missing reading is never a reading of 0.
+	OpenFiles        *OpenFiles `json:"open_files,omitempty"`
+	OpenFilesUnknown string     `json:"open_files_unknown,omitempty"`
+	// Degraded names what is degraded while the process keeps serving, joined with "; ":
+	// DegradedUsage while its usage sink says failing, and DegradedOpenFiles while its descriptors
+	// in use pass 80% of its soft limit. It is not a health problem: the report stays healthy and
+	// status exits 0, and only this process's line says degraded (@hpc-burst-science-agent,
+	// 31 Oct 2026; HBEP-8, Usage records, and HBEP-11).
 	Degraded string `json:"degraded,omitempty"`
 	Detail   string `json:"detail,omitempty"`
 }
@@ -174,6 +182,12 @@ func checkEntry(sup *procHandle, supPID int, e EntryRecord) (EntryHealth, []stri
 		return eh, problems
 	}
 	eh.Running = true
+	if tunnelEntry(e.Name) {
+		// Read before the checks that can end the look early, so that a process too short of
+		// descriptors to be healthy still says so. A process that exited meanwhile is reported as
+		// not running by the checks below, as at every other look.
+		checkOpenFiles(h, &eh)
+	}
 	if e.HealthSocket != "" {
 		// The relay keeper: no port, and a ping answered on its socket (relaykeeper.go). A
 		// process that exited since is not running, as at every other look.
@@ -234,7 +248,7 @@ func checkEntry(sup *procHandle, supPID int, e EntryRecord) (EntryHealth, []stri
 		// A failing usage sink is stated, never counted against health: the front keeps serving.
 		switch eh.UsageState = usageStateOf(body); {
 		case eh.UsageState == usageFailing:
-			eh.Degraded = DegradedUsage
+			eh.addDegraded(DegradedUsage)
 		case e.Name == frontEntryName && eh.UsageState != usageOK:
 			// The front always states its sink; a body without that member, cut at the read limit,
 			// or with a state HBEP-8 does not name leaves it unknown, and status says so.

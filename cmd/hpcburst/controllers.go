@@ -68,6 +68,13 @@ func printSupervision(w io.Writer, r *launcher.StatusReport) {
 			// The state is empty when the readiness could not be read at all.
 			line += ", readiness: " + cmp.Or(c.ReadyzState, "not read")
 		}
+		// A tunnel process's open files (HBEP-11, #431): the reading, or that it could not be read.
+		// An unknown is never shown as a number.
+		if of := c.OpenFiles; of != nil {
+			line += fmt.Sprintf(", open files %d in use, soft limit %s, hard limit %s", of.InUse, of.Soft, of.Hard)
+		} else if c.OpenFilesUnknown != "" {
+			line += ", open files unknown (" + c.OpenFilesUnknown + ")"
+		}
 		if c.Degraded != "" {
 			line += ", degraded: " + c.Degraded
 		}

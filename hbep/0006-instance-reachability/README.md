@@ -251,7 +251,7 @@ multiplexer = "httpconnect"
 customDomains = ["<the Instance's UID>"]
 [proxies.plugin]
 type = "unix_domain_socket"
-unixPath = "<the engine's socket>"
+unixPath = "<the agent's serving socket>"
 ```
 
 - **Certificate checks.** frpc skips verification silently when `trustedCaFile` is empty (frp facts). So the agent refuses to start frpc without the staged certificate, and only after checking that the certificate's public-key pin equals `agent.json`'s pin (HBEP-7). Go accepts a self-signed certificate that is itself in the trusted pool (`crypto/x509/verify.go:835-836` at go1.25.0) and then checks `serverName` against its DNS names.
@@ -259,7 +259,7 @@ unixPath = "<the engine's socket>"
 - **`loginFailExit = false`.** frp's default makes frpc exit when its first login fails. With `false` it keeps retrying, like the ssh forwards. frpc is part of the agent's transport, not a part of the Instance: the agent restarts it with backoff if it exits, without asking the controller, as it keeps its ssh forwards (HBEP-7). A tunnel down is not a dead Instance.
 - **`user` is not set,** so frps sees the proxy name unchanged (frp facts).
 - **Logs.** frpc logs to a file in the job's private temporary directory (`log.to`), and its console output is discarded. frpc logs its run ID, which is enough to attach a work connection to its session (Risks), so the log never reaches the job's output files on shared storage.
-- **The proxy** reaches the engine through frp's `unix_domain_socket` client plugin. A `tcpmux` proxy hands each work connection to its plugin, so no TCP listener serves the Instance on the node (frp facts). In beta, a router that listens on loopback (HBEP-5) is reached through `localIP` and `localPort` instead.
+- **The proxy** reaches the agent's serving socket through frp's `unix_domain_socket` client plugin, and the agent forwards it to the engine's socket. A `tcpmux` proxy hands each work connection to its plugin, so no TCP listener serves the Instance on the node (frp facts). In beta frpc keeps that socket, and the agent forwards it to Envoy's Unix socket instead of the engine's (HBEP-5; HBEP-7, Several workers). vllm-router, the fallback, listens on loopback, and the agent forwards to it there.
 - **Heartbeats** are S1's set (Heartbeats). `poolCount = 0` is S1's tested value, but frp v0.71.1 reads 0 as unset and uses 1 (`pkg/config/v1/client.go:153`). So frpc opens one spare work connection at login, and frps replaces each one it hands out (frp facts).
 
 ### Dial-home modes
@@ -796,6 +796,7 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - 2026-11-11: the front's plugin, second, and the re-probe after a new registration (#371).
 - 2026-11-12: open question 12's measured items from spike S17, and the relay ssh's rekey stall as a stated limit.
 - 2026-11-12: open question 11 answered to 600 tunnels from spike S16 and the front fixes #421 and #424.
+- 2026-11-12: several workers per Instance, for beta (HBEP-7, Several workers).
 
 ## Amendments
 
@@ -892,3 +893,4 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
   Before, a new registration changed nothing at the front, which routed on until its next probe failed `probeFailures` times; frps had one plugin, the controller's.
 - **2026-11-12: S15's open items measured** (Risks; Open questions 12; Graduation criteria). An amendment from spike S17 (issue #413, PR #416). The bulk layout keeps the token streams' gap at 53–57 ms under concurrent transfers and real relay buffers, and below one frpc's under a shared FIFO bottleneck that drains in under about 85 ms (72 ms at 1 MiB). Beta's criteria gain the real path's buffer read. Many Instances cost little in direct mode, and add no time to first byte when frp's spare work connection is waiting. The relay ssh's rekey stall, about 100–180 ms about once per GiB on the runners' OpenSSH, is a stated limit with a Risk. Before, S15's open items were listed as open and blocking beta; the contract's other items stay open.
 - **2026-11-12: many tunnels on one front, answered to 600 in direct mode** (Open questions 11; Graduation criteria; Operational readiness 5; Prior art). An amendment from spike S16 (issue #412, PR #420) and the fixes it led to (#421, #424), the science agent's decision. The measured R_front (0.11–0.12 × q to 100 tunnels, then S16's own fit) and R_ssh (0.08–0.02 × q, per packet) replace S14's assumed reserves. A mass re-login of up to 600 tunnels recovers in seconds, and a capped shared link starves no heartbeat, both in direct mode on AMD runners. The operating limit rises from 300 to 600 tunnels in direct mode, and stays 300 in host-dialed mode. The three items left (a dedicated front host near full CPU, the client-facing TLS, the cluster's cipher) don't block beta. Before, S14's steady state was all that was measured, the reserves were assumed, and five open items blocked beta.
+- **2026-11-12: several workers per Instance, for beta** (frpc in the job). An amendment, the science agent's design, with HBEP-7's Several workers section as its one home: in beta frpc keeps dialing the agent's serving socket, which the agent forwards to Envoy's Unix socket. Before, a router on loopback was to be reached through `localIP` and `localPort`.

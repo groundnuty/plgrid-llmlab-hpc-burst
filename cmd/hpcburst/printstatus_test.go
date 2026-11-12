@@ -101,6 +101,54 @@ func TestPrintStatusFrontAndController(t *testing.T) {
 	}
 }
 
+// TestPrintStatusOpenFiles: a tunnel process's line carries its descriptors in use and its limits, an
+// unlimited limit as the word, and "degraded: open files" past 80% of the soft limit, joined with
+// the usage sink's cause when both apply. A reading that could not be made is "open files unknown"
+// with its cause, and never shows a number (#431, HBEP-11). The lines are literals.
+func TestPrintStatusOpenFiles(t *testing.T) {
+	yes := true
+	base := launcher.EntryHealth{Name: "front", Running: true, PID: 8, State: "running", Health: "127.0.0.1:2", HealthzOK: &yes}
+	with := func(f func(e *launcher.EntryHealth)) launcher.EntryHealth {
+		e := base
+		f(&e)
+		return e
+	}
+	const prefix = "supervised front: running=true pid 8, running, restarts 0, GET /healthz on 127.0.0.1:2: true"
+	for _, c := range []struct {
+		name  string
+		entry launcher.EntryHealth
+		want  string
+	}{
+		{"a reading", with(func(e *launcher.EntryHealth) {
+			e.OpenFiles = &launcher.OpenFiles{InUse: 812, Soft: launcher.Limit{Value: 1048576}, Hard: launcher.Limit{Value: 1048576}}
+		}), prefix + ", open files 812 in use, soft limit 1048576, hard limit 1048576\n"},
+		{"unlimited limits", with(func(e *launcher.EntryHealth) {
+			e.OpenFiles = &launcher.OpenFiles{InUse: 12, Soft: launcher.Limit{Unlimited: true}, Hard: launcher.Limit{Unlimited: true}}
+		}), prefix + ", open files 12 in use, soft limit unlimited, hard limit unlimited\n"},
+		{"degraded", with(func(e *launcher.EntryHealth) {
+			e.OpenFiles = &launcher.OpenFiles{InUse: 810, Soft: launcher.Limit{Value: 1000}, Hard: launcher.Limit{Value: 100000}}
+			e.Degraded = launcher.DegradedOpenFiles
+		}), prefix + ", open files 810 in use, soft limit 1000, hard limit 100000, degraded: open files\n"},
+		{"degraded twice", with(func(e *launcher.EntryHealth) {
+			e.OpenFiles = &launcher.OpenFiles{InUse: 810, Soft: launcher.Limit{Value: 1000}, Hard: launcher.Limit{Value: 100000}}
+			e.Degraded = launcher.DegradedUsage + "; " + launcher.DegradedOpenFiles
+		}), prefix + ", open files 810 in use, soft limit 1000, hard limit 100000, degraded: usage writes failing; open files\n"},
+		{"unknown", with(func(e *launcher.EntryHealth) {
+			e.OpenFilesUnknown = "pid 8: /proc/8/limits: permission denied"
+		}), prefix + ", open files unknown (pid 8: /proc/8/limits: permission denied)\n"},
+		{"not asked, as of the controller", base, prefix + "\n"},
+	} {
+		var b bytes.Buffer
+		printStatus(&b, &launcher.StatusReport{Health: launcher.Healthy, Version: "v1", Supervisor: &launcher.SupervisorHealth{Running: true, PID: 6}, Controllers: []launcher.EntryHealth{c.entry}})
+		if !strings.Contains(b.String(), c.want) {
+			t.Errorf("%s: the status text is\n%s\nwant the line %q", c.name, b.String(), c.want)
+		}
+		if c.name == "unknown" && strings.Contains(b.String(), "in use") {
+			t.Errorf("an unknown reading prints a number:\n%s", b.String())
+		}
+	}
+}
+
 // TestFrontText: the recorded front as the status and up lines print it. Direct and ssh print the
 // mode and the address, as before; host-dialed has no address and says so.
 func TestFrontText(t *testing.T) {

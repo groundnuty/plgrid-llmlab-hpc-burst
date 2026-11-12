@@ -52,7 +52,13 @@ type Options struct {
 	// FreeBytes reads the free space behind hpcburst_usage_dir_free_bytes;
 	// nil is statfs. A test moves it.
 	FreeBytes FreeBytesFunc
+	// stop, when set, replaces stopServing: a test reads the two bounds Run
+	// passes it (#432). Nil in production.
+	stop stopFunc
 }
+
+// stopFunc is stopServing's signature, for Options.stop.
+type stopFunc func(servers []*http.Server, cancelBase context.CancelCauseFunc, p *Proxy, shutdownGrace, handlerWait time.Duration, log *slog.Logger)
 
 // DefaultShutdownGrace is how long a stop lets requests in flight finish.
 const DefaultShutdownGrace = 10 * time.Second
@@ -174,7 +180,13 @@ func Run(ctx context.Context, o Options) error {
 	if grace <= 0 {
 		grace = DefaultShutdownGrace
 	}
-	stopServing(servers, cancelBase, proxy, grace, o.Log)
+	// One configured grace bounds both waits of a stop; #432 split them in
+	// stopServing only so that a test can wait on state.
+	stop := o.stop
+	if stop == nil {
+		stop = stopServing
+	}
+	stop(servers, cancelBase, proxy, grace, grace, o.Log)
 	// The tunnels carried the requests that just ended.
 	if frp != nil {
 		frp.Close()
@@ -183,13 +195,19 @@ func Run(ctx context.Context, o Options) error {
 }
 
 // stopServing stops the listeners and lets the requests in flight finish for
-// grace. Then it cuts the rest, cutBy front_shutdown: each stream gets one
-// error event and each request answers, and it waits for their handlers,
-// so every record is written before the usage sink closes and none is lost
-// without a gap (@hpc-burst-science-agent, 31 Oct 2026; PR #95 review, Opus
-// B5).
-func stopServing(servers []*http.Server, cancelBase context.CancelCauseFunc, p *Proxy, grace time.Duration, log *slog.Logger) {
-	shut, cancel := context.WithTimeout(context.Background(), grace)
+// shutdownGrace. Then it cuts the rest, cutBy front_shutdown: each stream gets
+// one error event and each request answers, and it waits for their handlers
+// for at most handlerWait, so every record is written before the usage sink
+// closes and none is lost without a gap (@hpc-burst-science-agent, 31 Oct
+// 2026; PR #95 review, Opus B5).
+//
+// The two bounds are separate arguments so that a test can keep a short
+// shutdownGrace, which only makes it fast, and give handlerWait a generous
+// bound: the wait ends as soon as the handlers have returned, so a slow
+// runner cannot lose a record to a fixed window (#432). Run passes its one
+// configured grace for both.
+func stopServing(servers []*http.Server, cancelBase context.CancelCauseFunc, p *Proxy, shutdownGrace, handlerWait time.Duration, log *slog.Logger) {
+	shut, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 	defer cancel()
 	var wg sync.WaitGroup
 	for _, s := range servers {
@@ -201,8 +219,8 @@ func stopServing(servers []*http.Server, cancelBase context.CancelCauseFunc, p *
 	}
 	wg.Wait()
 	cancelBase(errCutShutdown)
-	if !p.waitHandlers(grace) {
-		log.Error("requests still run after the shutdown cut; their usage records may be lost", "waited", grace.String())
+	if !p.waitHandlers(handlerWait) {
+		log.Error("requests still run after the shutdown cut; their usage records may be lost", "waited", handlerWait.String())
 	}
 }
 
