@@ -652,7 +652,7 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
     - **Proves nothing here:** a restart test with no stream running, or a keeper and a controller in one process.
   - **None of these proves anything here:** a relay test with both ends in one process and no `srun` standard input and output between them, or a count of relays with no byte crossing.
 - **Loopback only.** frps holds exactly its three loopback ports, and `ss` shows no frps listener on another address; with the bulk path on, the same for the second frps. A positive control: started without `bindAddr`, frps listens on every interface, so the check can fail.
-- **The bulk path** (beta; The bulk path), on loopback through S1c's emulator at 48 MB/s and a 2.3 ms round trip, in direct and host-dialed mode:
+- **The bulk path** (beta; The bulk path), on loopback through S17's link, in its fair mode, at 48 MB/s and a 2.3 ms round trip, in direct and host-dialed mode:
   - a 64 MiB non-streamed reply goes through the bulk tunnel while 8 token streams run, and their inter-token gap stays within S17's figure for this layout;
   - a bulk `NewProxy` and `CloseProxy` move only the bulk epoch, and the token path's routing is untouched, and the reverse;
   - the bulk frpc killed after its transport was registered: the next non-streamed request is sent once through the token tunnel and succeeds, the bulk transport is unregistered, and no pause is raised; when the bulk frpc returns, a probe registers it again;
