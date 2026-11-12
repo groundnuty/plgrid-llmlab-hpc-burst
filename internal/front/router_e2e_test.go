@@ -218,6 +218,11 @@ func TestRouterWorkerKilledWhileAStreamRuns(t *testing.T) {
 		}
 		sent++
 	}
+	// The cut counted as the first failure: the pause came after pauseAfterFailures-1 more. A front that
+	// did not count the upstream cut would need pauseAfterFailures of them (#470's review).
+	if want := f.cfg.PauseAfterFailures - 1; sent != want {
+		t.Errorf("paused after the cut and %d failed requests, want %d: the cut must count as the first failure (pauseAfterFailures %d)", sent, want, f.cfg.PauseAfterFailures)
+	}
 	t.Logf("paused after the cut and %d failed requests", sent)
 	f.r.WaitWorker(t, "failed_active", 30*time.Second)
 	if took := time.Since(killed); took > 12*time.Second {
@@ -241,8 +246,10 @@ func TestRouterRestartKeepsTheInstanceUnroutableUntilTheWorkerIsBack(t *testing.
 	before := len(f.e.Requests())
 	r := ehPost(t, f.harness, reBody)
 	readAll(t, r)
-	if r.StatusCode == http.StatusOK || len(f.e.Requests()) != before {
-		t.Errorf("with healthyWorkers 0 and the router down: %d, and the worker saw %d new requests; want no route", r.StatusCode, len(f.e.Requests())-before)
+	// The front itself refuses: its record names no Instance. Routed to the dead router, the forwarder's
+	// own 503 would come back with the Instance in the record (#470's review: a 503 alone tells neither).
+	if rec := f.record(r.Header.Get("hpcburst-request-id")); r.StatusCode == http.StatusOK || rec.Instance != "" || len(f.e.Requests()) != before {
+		t.Errorf("with healthyWorkers 0 and the router down: %d, routed to %q, and the worker saw %d new requests; want the front's own refusal, no route", r.StatusCode, rec.Instance, len(f.e.Requests())-before)
 	}
 	f.r.RestartEnvoy(t) // the agent starts the router again; it holds worker-0 healthy
 	r = ehPost(t, f.harness, reBody)

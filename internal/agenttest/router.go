@@ -72,8 +72,10 @@ func StartRouter(t testing.TB, serve func(ln net.Listener)) *Router {
 	}
 	t.Cleanup(func() { r.fwd.Close() })
 	r.fwd.RouteTo("") // router mode from the start: no worker is ever the target
-	r.startEnvoy(t)
+	// Registered before the start, so an Envoy whose worker never turns healthy is stopped too: Envoy's
+	// process group would otherwise outlive the test binary (#470's review).
 	t.Cleanup(func() { r.stopEnvoy(syscall.SIGTERM) })
+	r.startEnvoy(t)
 	return r
 }
 
