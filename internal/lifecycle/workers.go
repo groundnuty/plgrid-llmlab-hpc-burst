@@ -195,3 +195,21 @@ func workerSessions(target int32, in *v1alpha1.Instance) int32 {
 	n := v1alpha1.LaunchWorkers(in.Spec.Launch)
 	return (target + n - 1) / n
 }
+
+// workerRestartKind is a worker's record's restart: "start" at its first verification, else the rung
+// that last restarted it, its own ("worker") or the whole Instance's ("instance"), from status.restarts;
+// "restart" when that has left restart.window (restartKind, for one worker).
+func workerRestartKind(in *v1alpha1.Instance, w string) string {
+	if workerVerificationGeneration(in, w) == 1 {
+		return "start"
+	}
+	for i := len(in.Status.Restarts) - 1; i >= 0; i-- {
+		switch in.Status.Restarts[i].Part {
+		case w:
+			return "worker"
+		case v1alpha1.PartInstance:
+			return "instance"
+		}
+	}
+	return "restart"
+}

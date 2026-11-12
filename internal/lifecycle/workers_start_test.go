@@ -182,6 +182,13 @@ func TestAWorkerExitBeforeTheFirstReadyRestartsThatWorkerAlone(t *testing.T) {
 	if parts := restartParts(in); !slices.Equal(parts, []string{"worker-1"}) {
 		t.Errorf("restarts %v, want worker-1's alone", parts)
 	}
+	// worker-1's second record says its own rung restarted it; worker-0's first, a start.
+	for rec, want := range map[string]string{"ver-" + string(in.UID) + "-worker-1-2": "worker", "ver-" + string(in.UID) + "-worker-0-1": "start"} {
+		d, ok, err := rg.r.readVerification(rg.ctx, rigNS, rec)
+		if err != nil || !ok || d.Restart != want {
+			t.Errorf("record %s: restart %q (found %v, %v), want %q", rec, d.Restart, ok, err, want)
+		}
+	}
 	// worker-1 warmed up again at its new verification generation, 2.
 	if !askedWarmUp(ag, "worker-1", 2) {
 		t.Error("no desired state asked worker-1's warm-up at verification generation 2")

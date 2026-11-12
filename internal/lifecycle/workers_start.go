@@ -285,7 +285,7 @@ func (p *pass) workerVerifiedResult(in *v1alpha1.Instance, alloc *v1alpha1.Alloc
 		rehash := !isTrue(in.Status.Conditions, v1alpha1.ConditionQualified)
 		data = judgeVerify(d, v, rehash, sh)
 		data.Instance, data.DeploymentID, data.Generation = in.Name, string(in.Spec.DeploymentID), gen
-		data.Restart = restartKind(in)
+		data.Restart = workerRestartKind(in, w)
 		data.GPUType = p.gpuType(alloc)
 		raw, err := json.Marshal(data)
 		if err != nil {
