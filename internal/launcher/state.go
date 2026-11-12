@@ -107,6 +107,9 @@ type State struct {
 	// set only in host-dialed mode, with controllers. down removes this record; the keeper's own
 	// state file stays, and the switch-back guard reads that (relaykeeper.go).
 	RelayKeeper bool `json:"relay_keeper,omitempty"`
+	// InstanceRouter is up --instance-router: the router each new Instance runs in front of its
+	// worker, passed to the controller (#429, #454); "" for none (alpha).
+	InstanceRouter string `json:"instance_router,omitempty"`
 }
 
 // ControllerConfig is the launcher's choice of what to run beside k3s.

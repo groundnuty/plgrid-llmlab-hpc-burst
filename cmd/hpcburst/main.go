@@ -159,6 +159,7 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.FrontConfig, "front-config", "", "the front's configuration file (HBEP-5); when given, the supervisor runs the front beside the controllers")
 	fs.StringVar(&o.FrontBin, "front-bin", "", "the front's binary (default "+launcher.FrontBinName+" in the directory of this executable)")
 	fs.StringVar(&o.FrpsBin, "frps-bin", "", "frps, the dial-home tunnel's server (HBEP-6), checked against the pinned frp "+launcher.DefaultFrpVersion+" (default frp-"+launcher.DefaultFrpVersion+"/frps in --bin-dir; when that is absent, no frps runs and up warns); it runs under the controllers' supervisor")
+	fs.StringVar(&o.InstanceRouter, "instance-router", "", "beta, opt-in: the router each new Instance runs in front of its worker, envoy; passed to the controller, and the agent builds then include Envoy's (hack/fetch-envoy.sh --agent-builds), which every job is staged with (unset: none, alpha)")
 	fs.BoolVar(&o.RelayKeeper, "relay-keeper", false, "beta, host-dialed mode only: run the relay keeper (the controller binary's relaykeeper subcommand) under the supervisor, so a controller restart cuts no host-dialed stream (HBEP-6); without it, up refuses while the keeper's state file shows it ran here and Allocations are running")
 	fs.BoolVar(&asJSON, "json", false, "print the result as JSON")
 	if code, done := parse(fs, args); done {

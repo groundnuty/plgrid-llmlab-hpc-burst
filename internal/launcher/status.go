@@ -251,7 +251,7 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 	}
 	// The builds are staged by the controllers, so a host without them has none to check.
 	if st.Controllers != nil {
-		checkBuildsInStatus(ctx, cfg, l.host(st.Ports).AgentBuildsDir(), rep, bad)
+		checkBuildsInStatus(ctx, cfg, l.host(st.Ports).AgentBuildsDir(), st.InstanceRouter, rep, bad)
 	}
 	// The answers count only if the recorded processes held the ports throughout: the listeners
 	// again, then the identities.
@@ -286,12 +286,12 @@ func statusGuard(ctx context.Context, cfg *rest.Config, rep *StatusReport, bad f
 // checkBuildsInStatus sets rep.AgentBuilds from the API server's PlatformProfiles, and makes every
 // missing or mismatched build a reason the host is unhealthy: a host whose first submission would
 // be refused is not ready for work. Status exits 1 until the builds are fixed, and 0 after.
-func checkBuildsInStatus(ctx context.Context, cfg *rest.Config, dir string, rep *StatusReport, bad func(string, ...any)) {
+func checkBuildsInStatus(ctx context.Context, cfg *rest.Config, dir, router string, rep *StatusReport, bad func(string, ...any)) {
 	if rep.Readyz == nil || !*rep.Readyz {
 		rep.AgentBuilds = &AgentBuilds{Dir: dir, Detail: "the API server is not ready, so the PlatformProfiles were not read"}
 		return
 	}
-	ab, err := CheckAgentBuilds(ctx, cfg, dir)
+	ab, err := CheckAgentBuildsFor(ctx, cfg, dir, router)
 	if err != nil {
 		rep.AgentBuilds = &AgentBuilds{Dir: dir, Detail: err.Error()}
 		bad("agent builds could not be checked: %v", err)
