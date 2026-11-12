@@ -97,12 +97,18 @@ func runOwner(args []string) error {
 	for _, t := range sp.Tunnels {
 		jobs[t.Tag] = provider.Job{ID: login.JobID, Name: t.Tag, Phase: v1alpha1.AllocationRunning}
 	}
+	// The login host ssh -G resolves, once: since PR 409 (issue 403) a bounded ssh -G that fails or
+	// times out is an error, never a quiet fallback to the configured name.
+	loginHost, err := relay.Login()
+	if err != nil {
+		return fmt.Errorf("the relays' login host: %w", err)
+	}
 	for _, t := range sp.Tunnels {
 		if err := os.MkdirAll(t.Dir, 0o700); err != nil {
 			return err
 		}
 		o.Want(hostdial.Target{
-			Tag: t.Tag, JobID: login.JobID, AgentPath: *agentPath, AllocDir: t.Dir, UID: t.Allocation, Login: relay.Login(),
+			Tag: t.Tag, JobID: login.JobID, AgentPath: *agentPath, AllocDir: t.Dir, UID: t.Allocation, Login: loginHost,
 			Jobs: jobs, Gen: "1", Command: relay.Command, Stderr: sshrun.Stderr, Describe: sshrun.Classify,
 		})
 	}
