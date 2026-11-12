@@ -10,8 +10,16 @@ package agent_test
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
+	"encoding/pem"
+	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -32,19 +40,65 @@ const (
 )
 
 // bulkPair makes the two certificates of one launcher key, as the launcher
-// issues them: the first names the token server, the second the bulk server
-// only. Their pin is the same, since it is the key's.
+// issues them (internal/launcher/agentcert.go): self-signed leaves, not CAs,
+// with the digital-signature key usage and the server-auth extended key usage.
+// The first names the token server (and localhost, as the launcher's does), the
+// second the bulk server only. Their pin is the same, since it is the key's.
+//
+// They must not be CAs: a CA certificate of the same key would make the second a
+// valid child of the first in frpc's trusted pool, and the second would be
+// accepted by a frpc that trusts only the first (HBEP-6: "the certificate isn't
+// a CA, so a new leaf for the same key doesn't chain to the old one"). makeCert's
+// certificates are CAs, so these are made here.
 type bulkPair struct {
 	first, second testCert
 	pin           string
 }
 
+func makeLeaf(t *testing.T, key *ecdsa.PrivateKey, serial int64, names []string, ips []net.IP) testCert {
+	t.Helper()
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(serial),
+		Subject:               pkix.Name{CommonName: "hpcburst agent endpoint"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              names,
+		IPAddresses:           ips,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The pin is the SHA-256 of the DER SubjectPublicKeyInfo (HBEP-7), computed
+	// here, independently of agentapi.PinOf.
+	sum := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+	return testCert{
+		pem: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pin: hex.EncodeToString(sum[:]),
+		tls: tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: cert},
+	}
+}
+
 func makeBulkPair(t *testing.T) bulkPair {
 	t.Helper()
-	first := makeCert(t, tokenName)
-	second := makeCertWith(t, certOpts{names: []string{bulkName}, key: first.tls.PrivateKey.(*ecdsa.PrivateKey)})
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := makeLeaf(t, key, 1, []string{"localhost", tokenName}, []net.IP{net.IPv4(127, 0, 0, 1)})
+	second := makeLeaf(t, key, 2, []string{bulkName}, nil)
 	if first.pin != second.pin {
 		t.Fatalf("the fixture's two certificates have pins %s and %s, want one key's", first.pin, second.pin)
+	}
+	if first.tls.Leaf.IsCA || second.tls.Leaf.IsCA {
+		t.Fatal("the fixture's certificates must not be CAs")
 	}
 	return bulkPair{first: first, second: second, pin: first.pin}
 }
