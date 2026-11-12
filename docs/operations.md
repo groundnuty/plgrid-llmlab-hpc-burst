@@ -163,7 +163,7 @@ A ModelDeployment with a managed source (an entry LLMLab serves) gets none of th
 
 - **Means:** `hpcburst up` was given no `--front-mode` (and, in `direct` and `ssh` modes, no `--front-addr`), so the jobs would have no route home.
 - **The controller** submits no Allocation for any deployment.
-- **You:** stop the host and start it again with the dial-home flags of your mode, as in the quickstart's step 4. `--front-mode host-dialed` alone is enough in host-dialed mode. `up` does not remember them across `down` (Down and up across an upgrade) ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), Single-user host).
+- **You:** stop the host and start it again with the dial-home flags of your mode: the quickstart's step 4 gives `host-dialed`, and its [Alpha's limits](quickstart.md#alphas-limits) says what `direct` and `ssh` take. `--front-mode host-dialed` alone is enough in host-dialed mode. `up` does not remember them across `down` (Down and up across an upgrade) ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), Single-user host).
 
 ### `VerificationFailed`
 
@@ -251,11 +251,13 @@ An Instance moves through `pending`, `starting`, `verifying`, `ready`, `draining
 |---|---|---|
 | `Verified` | `Pending`, `Passed`, `Failed`, `WorkerRestart`, `InstanceRestart` | unknown with `Pending` from the agent's registration until checked; true with `Passed`; false with `Failed` when a verification fails; unknown with the restart's reason while it verifies again after a restart. Unknown means the check has not run, or not yet again; false means it ran and failed (`internal/lifecycle/instances.go`, `pending`; `verify.go`, `verified`; `health.go`, `restart`) |
 | `Qualified`, `WarmedUp` | `Pending`, `Passed`, `Failed`, `WorkerRestart`, `InstanceRestart` | unknown with `Pending` until checked; true with `Passed`. A worker restart sets `WarmedUp` to unknown with `WorkerRestart` and keeps `Qualified`; a whole-Instance restart sets both to unknown with `InstanceRestart`. A failed check writes its own condition, `Qualified` or `WarmedUp`, false with `Failed` and the outcome as its message, and the Instance ends with `QualificationFailed`, in `status.endReason` and on `Healthy` (`internal/lifecycle/instances.go`, `pending` and `failCheck`; `verify.go`, `starting`; `health.go`, `restart`) |
-| `Healthy` | `Healthy`, `ProbeFailing`, `ErrorsOnly`, `NoProgress`, `PartExited` and other signals | true with `Healthy` once ready; false with the signal behind a restart ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Health and restarts), or with the end reason of an Instance that failed |
+| `Healthy` | `Healthy`, `ProbeFailing`, `ErrorsOnly`, `NoProgress`, `PartExited`, `RouterCheckFailing` and other signals | true with `Healthy` once ready; false with the signal behind a restart ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Health and restarts), or with the end reason of an Instance that failed |
 | `AgentUnreachable` | `ReportsMissing`, `Reporting` | no report from the agent for `health.agentTimeout`. The front routes no new request to it, and nothing restarts on that basis alone. The controller also raises a `failing` event `HeartbeatMissed`, described [below](#heartbeatmissed) |
 | `TunnelConnected` | `ProxyOnline`, `ProxyOffline`, `ProxyListUnreadable` | whether frps lists the Instance's proxy online. It gates only an Instance's first entry to `ready`: an Instance that has been ready returns to `ready` after a restart whatever it says. The front does not route on it, but on its own probe of the path ([HBEP-6](../hbep/0006-instance-reachability/README.md), Path state; `internal/lifecycle/verify.go`; `internal/front/inventory/build.go`) |
 
 Before each restart the controller emits a `failing` event `WorkerRestart` or `InstanceRestart`, which names the signal and says that requests in flight were cut. The ladder restarts the worker, then the whole Instance, each `restart.attemptsPerRung` times within `restart.window`, then gives up on the Allocation.
+
+Behind a router (beta, opt-in), the router's exit, or its probe failing while it holds a worker healthy, restarts only the router: a `failing` event `RouterRestart`, `status.healthyWorkers` set to 0 so the front routes nothing to the Instance, and the phase left `ready`. After `restart.attemptsPerRung` router restarts the ladder climbs to the whole Instance. A worker the router holds failing its check while verified is restarted at the worker rung, with the signal `RouterCheckFailing` ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Several workers).
 
 ### `HeartbeatMissed`
 

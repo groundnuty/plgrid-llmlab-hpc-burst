@@ -52,4 +52,36 @@ type RouterReport struct {
 	// once it has exited without being told to or could not start; for a refused start, the
 	// refusal. Absent otherwise.
 	LogTail string `json:"logTail,omitempty"`
+	// Workers are the workers as the router holds them, from its admin's /clusters?format=json, read
+	// at ClustersReadAt; absent until the first read (HBEP-5, Worker health).
+	Workers        []RouterWorker `json:"workers,omitempty"`
+	ClustersReadAt *time.Time     `json:"clustersReadAt,omitempty"`
+	// Probe is the agent's own probe of the router: GET /health through the router's socket, with no
+	// x-session-id, so it reaches a worker the router holds healthy (HBEP-7, Several workers).
+	Probe *RouterProbe `json:"probe,omitempty"`
+}
+
+// RouterWorker is one worker as the router holds it.
+type RouterWorker struct {
+	// Name is the worker's name, the endpoint's hostname in the router's config.
+	Name string `json:"name"`
+	// Healthy says the router routes to it: its active health check passes and it is not ejected.
+	Healthy bool `json:"healthy"`
+	// FailedActiveCheck says its active health check fails (Envoy's failed_active_health_check).
+	FailedActiveCheck bool `json:"failedActiveCheck,omitempty"`
+	// Ejected says outlier detection has ejected it (Envoy's failed_outlier_check).
+	Ejected bool `json:"ejected,omitempty"`
+	// ConsecutiveFailedChecks counts the agent's reads of /clusters in a row, up to the latest, that
+	// found the worker's active check failing: the controller's Envoy-unhealthy signal compares it with
+	// health.failureThreshold (HBEP-7, Several workers).
+	ConsecutiveFailedChecks int32 `json:"consecutiveFailedChecks,omitempty"`
+}
+
+// RouterProbe is the latest of the agent's probes of the router.
+type RouterProbe struct {
+	Time time.Time `json:"time"`
+	// OK says the probe got a 200.
+	OK bool `json:"ok"`
+	// ConsecutiveFailures counts the failed probes in a row, up to this one.
+	ConsecutiveFailures int32 `json:"consecutiveFailures,omitempty"`
 }

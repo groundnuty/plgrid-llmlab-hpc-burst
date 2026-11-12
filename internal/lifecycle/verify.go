@@ -124,6 +124,17 @@ func (p *pass) starting(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av ag
 	if in.Status.ReadyTime == nil && !isTrue(in.Status.Conditions, v1alpha1.ConditionTunnelConnected) {
 		return nil
 	}
+	// Behind a router, the first entry to ready also waits for the agent's probe through the router to
+	// pass, at the desired router generation (HBEP-7, Several workers, Becoming ready).
+	if in.Status.ReadyTime == nil && routed(in) && !routerProbePasses(in, av) {
+		return nil
+	}
+	// Behind a router, every entry to ready, a return after a worker restart too, waits for the router
+	// to hold the worker healthy (routerAdmitsReady): the failures Envoy counted while it was not yet
+	// verified end there, so none of them is judged against it once it is (#455's review).
+	if routed(in) && !routerAdmitsReady(in, av) {
+		return nil
+	}
 	return p.becomeReady(in, alloc)
 }
 
