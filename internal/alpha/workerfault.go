@@ -14,8 +14,11 @@ package alpha
 //     PickEngine finds EXACTLY ONE engine: the process the agent launched
 //     through Apptainer, that is a process of our job (or a descendant of
 //     one) under an Apptainer process, with only Apptainer's and shells
-//     between them, whose command is the launch's engine command, its
-//     program included (MatchesCommand). Zero or several fail the row, with
+//     between them, or whose Apptainer parent is hidden from this user (the
+//     listing has no such parent and could not read its /proc entry: the
+//     setuid starter of another user, issue #488), whose command is the
+//     launch's engine command, its program included (MatchesCommand). Zero
+//     or several fail the row, with
 //     no retry, and the failure carries a redacted shape of the job's
 //     process tree (Shape, issue #445), never the listing;
 //  3. a second step kills that process alone, with SIGKILL, through a pidfd
@@ -75,7 +78,11 @@ func SrunLine(jobID string) (string, error) {
 // job's job_<id> (Slurm's cgroup plugins put every task of a job there, under
 // v1 and v2), the segment last or followed by "/"; and the cgroup's form, j
 // when any of its segments is job_<digits>, of any job, o otherwise. The form
-// never carries the number.
+// never carries the number. A process whose parent's /proc/<ppid>/stat this
+// step cannot read has the word parent-hidden after its command line: with
+// hidepid, the process of another user (Apptainer's setuid starter, whose
+// children are the job's) is not there to read, and it is not in the listing
+// either (issue #488).
 func ListScript(jobID string) string { return listScript("/proc", jobID) }
 
 // listScript is ListScript over a process tree at proc, so that a test can
@@ -109,7 +116,9 @@ for d in "$proc"/[0-9]*; do
   fi
   cmd=$(base64 -w0 < "$d/cmdline" 2>/dev/null) || continue
   [ -n "$cmd" ] || continue
-  echo "proc ${d#"$proc"/} $ppid $start $env $cg $form $cmd"
+  hidden=
+  if [ "$ppid" -gt 0 ] && ! cat "$proc/$ppid/stat" > /dev/null 2>&1; then hidden=' parent-hidden'; fi
+  echo "proc ${d#"$proc"/} $ppid $start $env $cg $form $cmd$hidden"
 done
 echo "listed"
 `
@@ -131,6 +140,10 @@ type NodeProc struct {
 	// CgroupJobForm when it holds a segment job_<digits> of any job.
 	CgroupJob, CgroupJobForm bool
 	Argv                     []string
+	// ParentHidden is true when the listing could not read its parent's /proc entry (issue #488): with its parent absent from the
+	// listing too, the parent is what a privileged starter looks like from the job's user (PickEngine's condition 2). A parent that
+	// can be read is not hidden, whether it is listed or not.
+	ParentHidden bool
 	// cmdline is the raw command line, base64, as the kill script reads it again.
 	cmdline string
 }
@@ -198,8 +211,16 @@ func ParseListing(out []byte) ([]NodeProc, error) {
 }
 
 // parseProc reads one process line: proc, the PID, the parent's, the start
-// time, the environment field, the cgroup's two and the command line.
+// time, the environment field, the cgroup's two and the command line, then
+// parent-hidden when the listing could not read the parent's /proc entry.
 func parseProc(f []string) (NodeProc, error) {
+	hidden := false
+	if len(f) == 9 {
+		if f[8] != "parent-hidden" {
+			return NodeProc{}, ErrListing
+		}
+		hidden, f = true, f[:8]
+	}
 	if len(f) != 8 || f[0] != "proc" || (f[5] != "0" && f[5] != "1") || (f[6] != "j" && f[6] != "o") || (f[5] == "1" && f[6] != "j") {
 		return NodeProc{}, ErrListing
 	}
@@ -213,7 +234,7 @@ func parseProc(f []string) (NodeProc, error) {
 	}
 	cg := f[5] == "1"
 	return NodeProc{PID: pid, PPID: ppid, Start: f[3], InJob: env == EnvJob || cg, Env: env, CgroupJob: cg, CgroupJobForm: f[6] == "j",
-		Argv: splitArgv(raw), cmdline: f[7]}, nil
+		Argv: splitArgv(raw), cmdline: f[7], ParentHidden: hidden}, nil
 }
 
 // withoutTreeOf is procs without the process self and its descendants.
@@ -348,12 +369,17 @@ func (e ErrEngineCount) Error() string {
 //     process between them ends the walk. So vLLM's own children (its
 //     EngineCore or workers, even a forked copy with the same command line)
 //     are never the engine: the process to kill is the one whose exit makes
-//     apptainer exit, which the agent reports and the worker rung restarts;
+//     apptainer exit, which the agent reports and the worker rung restarts.
+//     Or its parent is hidden from this user (issue #488; the science agent's
+//     ruling, 12 Nov 2026): the parent's PID is absent from the listing AND its
+//     /proc entry cannot be read, which is what Apptainer's setuid starter,
+//     running as another user, looks like to the job's user. A parent that is
+//     visible must still be Apptainer's, as before;
 //  3. running the launch's command (match: MatchesCommand on a cluster; a
 //     stand-in gives its own, for the fake Apptainer's translated paths).
 //
-// Anything but exactly one is an error that carries the redacted shape of the
-// job's process tree. Every listed process is this user's (ListScript), and
+// All three, and exactly ONE process meeting them: anything else is an error
+// that carries the redacted shape of the job's process tree. Every listed process is this user's (ListScript), and
 // the kill checks the process again (KillHelper).
 func PickEngine(procs []NodeProc, command []string, match func(argv, command []string) bool) (NodeProc, error) {
 	t := newProcTree(procs, command, match)

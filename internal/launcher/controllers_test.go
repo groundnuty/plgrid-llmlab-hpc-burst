@@ -8,6 +8,7 @@ package launcher
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -174,9 +175,23 @@ func newCtlFixture(t *testing.T, front Front) *ctlFixture {
 }
 
 // steer creates a control file of the fake.
+// steer writes the steering file name in one step: a file of its own in the same directory, renamed
+// into place, so the fake, which polls, never reads it empty or half written (issue #491: os.WriteFile
+// creates the file empty first, and a fake that read "" exited 0 where the test asked for 3).
 func (f *ctlFixture) steer(name, content string) {
 	f.t.Helper()
-	if err := os.WriteFile(filepath.Join(f.ctl, name), []byte(content), 0o644); err != nil {
+	tmp, err := os.CreateTemp(f.ctl, "."+name+".steer-*")
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	_, werr := tmp.WriteString(content)
+	cerr := tmp.Close()
+	if err := errors.Join(werr, cerr, os.Chmod(tmp.Name(), 0o644)); err != nil {
+		_ = os.Remove(tmp.Name())
+		f.t.Fatal(err)
+	}
+	if err := os.Rename(tmp.Name(), filepath.Join(f.ctl, name)); err != nil {
+		_ = os.Remove(tmp.Name())
 		f.t.Fatal(err)
 	}
 }

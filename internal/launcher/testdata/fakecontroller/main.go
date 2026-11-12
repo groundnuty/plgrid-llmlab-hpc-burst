@@ -33,6 +33,13 @@
 // It records argv-<pid>.json and env-<pid>.json, and appends "<pid> <unix nanoseconds>" to the file
 // starts, before it serves anything.
 //
+// A file whose content is a number (exit, always-exit, exit-once-recorded, slow-term, keeper-delay)
+// counts only once it holds one (issue #491): a writer that creates the file and then fills it leaves
+// it empty for a moment, and an empty read once made the fake exit 0. While such a file is empty or not
+// a number, exit waits for the next tick and the others are read again every 5 ms, for at most 10 s,
+// after which the process exits 125 and says which file it was. The first time the process finds such
+// a file, it writes steer-wait-<name> beside it, holding what it read, so a test can see the wait.
+//
 // Installed under the name hpcburst-front it stands in for the front instead (issue #64), and then
 // accepts exactly the front's command line as the launcher writes it: --config, --state-dir,
 // --port-base and --health-addr, all required, and optionally --mode. In that role a file usage in
@@ -99,7 +106,7 @@ func main() {
 		config = fs.String("config", "", "")
 		fs.String("mode", "", "")
 	} else {
-		for _, name := range []string{"front-mode", "front-addr", "relay-keeper-socket"} {
+		for _, name := range []string{"front-mode", "front-addr", "relay-keeper-socket", "instance-router"} {
 			fs.String(name, "", "")
 		}
 		fs.Bool("bulk-path", false, "")
@@ -127,15 +134,13 @@ func main() {
 		b, err := os.ReadFile(filepath.Join(dir, name))
 		return strings.TrimSpace(string(b)), err == nil
 	}
-	if code, ok := ctl("always-exit"); ok {
-		n, _ := strconv.Atoi(code)
+	if n, ok := steeredInt(dir, "always-exit"); ok {
 		os.Exit(n)
 	}
-	if code, ok := ctl("exit-once-recorded"); ok {
+	if n, ok := steeredInt(dir, "exit-once-recorded"); ok {
 		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline) && !recordedRunning(*stateDir, pid); {
 			time.Sleep(5 * time.Millisecond)
 		}
-		n, _ := strconv.Atoi(code)
 		os.Exit(n)
 	}
 
@@ -195,15 +200,14 @@ func main() {
 	for {
 		select {
 		case <-term:
-			if ms, ok := ctl("slow-term"); ok {
-				n, _ := strconv.Atoi(ms)
+			if n, ok := steeredInt(dir, "slow-term"); ok {
 				time.Sleep(time.Duration(n) * time.Millisecond)
 			}
 			os.Exit(0)
 		case <-tick.C:
-			if code, ok := ctl("exit"); ok {
+			// An exit file that does not hold a number yet is left for the next tick.
+			if n, state := readInt(dir, "exit"); state == steerNumber {
 				_ = os.Remove(filepath.Join(dir, "exit"))
-				n, _ := strconv.Atoi(code)
 				os.Exit(n)
 			}
 		}
@@ -340,6 +344,54 @@ func bindExtra(dir string, pid int, ctl func(string) (string, bool)) {
 	record(filepath.Join(dir, fmt.Sprintf("extra-bound-%d", pid)), bound)
 }
 
+// steerState is what a numeric steering file holds when it is read.
+type steerState int
+
+const (
+	steerAbsent    steerState = iota // no such file: not steered
+	steerNotNumber                   // the file is there, empty or not yet a number
+	steerNumber                      // the file holds a number
+)
+
+// readInt reads the numeric steering file dir/name once. A file that is there but does not hold a
+// number is never read as 0 (issue #491): the first time it is found so, steer-wait-<name> is written
+// beside it, holding what was read.
+func readInt(dir, name string) (int, steerState) {
+	b, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		return 0, steerAbsent
+	}
+	content := strings.TrimSpace(string(b))
+	n, err := strconv.Atoi(content)
+	if err != nil {
+		marker := filepath.Join(dir, "steer-wait-"+name)
+		if _, statErr := os.Stat(marker); errors.Is(statErr, os.ErrNotExist) {
+			record(marker, content)
+		}
+		return 0, steerNotNumber
+	}
+	return n, steerNumber
+}
+
+// steeredInt is the number in the steering file dir/name, and whether the file is there. A file that
+// does not hold a number yet is read again every 5 ms until it does, or is removed; after 10 s the
+// process exits 125, naming the file, rather than act on a value nobody wrote.
+func steeredInt(dir, name string) (int, bool) {
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		n, state := readInt(dir, name)
+		switch {
+		case state == steerAbsent:
+			return 0, false
+		case state == steerNumber:
+			return n, true
+		case !time.Now().Before(deadline):
+			b, _ := os.ReadFile(filepath.Join(dir, name))
+			fmt.Fprintf(os.Stderr, "fakecontroller: the steering file %s has held %q, not a number, for 10 s\n", name, strings.TrimSpace(string(b)))
+			os.Exit(125)
+		}
+	}
+}
+
 func record(path string, v any) {
 	b, _ := json.Marshal(v)
 	tmp := path + ".tmp"
@@ -398,8 +450,7 @@ func keeperMain(args []string) int {
 		<-ctx.Done()
 		return 0
 	}
-	if b, err := os.ReadFile(filepath.Join(dir, "keeper-delay")); err == nil {
-		ms, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	if ms, ok := steeredInt(dir, "keeper-delay"); ok {
 		select {
 		case <-time.After(time.Duration(ms) * time.Millisecond):
 		case <-ctx.Done():

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"syscall"
 	"time"
@@ -39,6 +40,14 @@ type FrpsSpec struct {
 	Log    string     // frps's standard output and error are appended here (FrpsLogFile)
 	Dir    string     // the working directory
 	Nice   int        // run under nice(1) with this value when not zero
+	// ExitWithParent makes frps die with the process that starts it: the kernel sends it SIGKILL
+	// when that process ends, however it ends (killed, or a test timeout's panic, which runs no
+	// cleanup). Without it frps is detached and outlives its starter, which is what Release and
+	// StopFrps with a record are for, and what the supervisor's own start (supervise.go) does not
+	// rely on. The test rigs set it, so that a killed test binary leaves no frps on the rig's fixed
+	// ports for the next rig to find (#484). It is off by default, so nothing that starts frps to
+	// have it outlive the caller changes.
+	ExitWithParent bool
 }
 
 // Argv is the full command. frps runs the descriptor of the verified binary (execPath), with
@@ -98,15 +107,49 @@ func StartFrps(s FrpsSpec) (*FrpsProc, error) {
 		cmd.Args[0] = s.Bin.Path // what ps shows; the file executed is still the descriptor
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	// startProc takes the pidfd from clone and records the identity while it is held; on a failure
-	// it stops the child again and reaps it.
-	h, err := startProc(FrpsProcName, cmd)
+	done := make(chan struct{})
+	var h *procHandle
+	if s.ExitWithParent {
+		cmd.SysProcAttr.Pdeathsig = syscall.SIGKILL
+		h, err = startOnLockedThread(FrpsProcName, cmd, done)
+	} else {
+		// startProc takes the pidfd from clone and records the identity while it is held; on a
+		// failure it stops the child again and reaps it.
+		if h, err = startProc(FrpsProcName, cmd); err == nil {
+			go func() { _ = cmd.Wait(); close(done) }()
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
-	p := &FrpsProc{h: h, cmd: cmd, done: make(chan struct{})}
-	go func() { _ = cmd.Wait(); close(p.done) }()
-	return p, nil
+	return &FrpsProc{h: h, cmd: cmd, done: done}, nil
+}
+
+// startOnLockedThread is startProc for a child with Pdeathsig, which the kernel ties to the thread
+// that created the child, not to the process: the child gets its signal when that thread exits
+// (golang/go#27505). A goroutine's thread is the runtime's to end, and a goroutine that locks its
+// thread and returns ends it. So the child is created, and then waited for, by one goroutine that
+// locks its OS thread and never unlocks it: the thread lives until frps has exited and been reaped
+// (done is closed then), and ends after it, when no child is left for the signal to reach. The
+// caller's own goroutine and thread are free to move or end.
+func startOnLockedThread(name string, cmd *exec.Cmd, done chan struct{}) (*procHandle, error) {
+	type started struct {
+		h   *procHandle
+		err error
+	}
+	res := make(chan started, 1)
+	go func() {
+		runtime.LockOSThread()
+		h, err := startProc(name, cmd)
+		res <- started{h, err}
+		if err != nil {
+			return
+		}
+		_ = cmd.Wait()
+		close(done)
+	}()
+	r := <-res
+	return r.h, r.err
 }
 
 // Rec is the record of the process: its name, PID, start time and boot ID.

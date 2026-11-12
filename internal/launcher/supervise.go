@@ -158,6 +158,11 @@ func (s *State) supervisedSet(l layout) ([]supervised, error) {
 			args = append(args, "--front-addr", s.Front.Addr)
 		}
 	}
+	// Beta, opt-in: the router each new Instance runs (#429, #454). Without it, the command line is
+	// as before, byte for byte.
+	if s.InstanceRouter != "" {
+		args = append(args, "--instance-router", s.InstanceRouter)
+	}
 	set := []supervised{{Name: controllerEntryName, Path: s.Controllers.Binary, Args: args, Health: health, TermGrace: controllerTermGrace}}
 	front, err := s.frontEntry(l)
 	if err != nil {

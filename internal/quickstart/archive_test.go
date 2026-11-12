@@ -30,8 +30,9 @@ import (
 //   - the fixture is held to what the repository's own unpacker accepts (hack/release-unpack.sh
 //     refuses an archive that lacks an entry it needs, and one whose files SHA256SUMS does not
 //     list), so a change to the release layout fails here before it fails a user;
-//   - the lines are run in a clone's root, with STATE and BIN set, and each place a later step
-//     reads is looked at afterwards.
+//   - the lines are run in an empty directory, not a clone, with STATE and BIN set, and each place a
+//     later step reads is looked at afterwards: the archive path needs no clone (issue #479), so
+//     every file the later steps read must come from the archive.
 
 // archiveBlock is the shell block that checks and unpacks the archive.
 func archiveBlock(t *testing.T) block {
@@ -75,16 +76,42 @@ func launcherLayout(t *testing.T) (k3s, frps string) {
 	return rel(pathOf(t, errK3s)), rel(pathOf(t, errFrps))
 }
 
+// archiveCommitDirs are the commit's directories the archive carries whole, as HBEP-15's Releases
+// lists them (config/crd/, profiles/ and examples/, the last by its amendment of 12 Nov 2026), typed
+// here: hack/release-archive.sh's own list is not read.
+var archiveCommitDirs = []string{"config/crd", "profiles", "examples"}
+
 // archiveMembers maps each file name of the archive to its content: the files the page's lines
-// read, and one file each of config/crd and profiles/, which the real archive carries too.
+// read, and the commit's files under archiveCommitDirs, with their content, as the real archive
+// carries them.
 func archiveMembers(t *testing.T) map[string]string {
 	t.Helper()
 	k3s, frps := launcherLayout(t)
 	m := map[string]string{
-		"bin/" + k3s:              "the k3s binary",
-		"bin/" + frps:             "the frps binary",
-		"config/crd/example.yaml": "a CRD",
-		"profiles/example.yaml":   "a profile",
+		"bin/" + k3s:  "the k3s binary",
+		"bin/" + frps: "the frps binary",
+	}
+	for _, d := range archiveCommitDirs {
+		n := 0
+		err := filepath.WalkDir(filepath.Join(root, d), func(p string, e os.DirEntry, err error) error {
+			if err != nil || e.IsDir() {
+				return err
+			}
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			rel, err := filepath.Rel(root, p)
+			if err != nil {
+				return err
+			}
+			m[filepath.ToSlash(rel)] = string(b)
+			n++
+			return nil
+		})
+		if err != nil || n == 0 {
+			t.Fatalf("the repository's %s/ gives the archive no file (%d, %v)", d, n, err)
+		}
 	}
 	for _, prog := range buildPrograms(t) {
 		m["bin/"+prog] = "the " + prog + " binary"
@@ -115,7 +142,7 @@ func writeArchive(t *testing.T, dir, name string, members map[string]string) str
 	var sums []string
 	for _, n := range names {
 		mode := int64(0o755)
-		if strings.HasPrefix(n, "config/") || strings.HasPrefix(n, "profiles/") {
+		if strings.HasPrefix(n, "config/") || strings.HasPrefix(n, "profiles/") || strings.HasPrefix(n, "examples/") {
 			mode = 0o644
 		}
 		body := members[n]
@@ -146,20 +173,20 @@ func writeArchive(t *testing.T, dir, name string, members map[string]string) str
 // archiveName is the archive file the page's tar line unpacks.
 func archiveName(t *testing.T) string {
 	t.Helper()
-	m := regexp.MustCompile(`(?m)^tar -xzf (\S+) -C \S+$`).FindStringSubmatch(archiveBlock(t).text)
+	m := regexp.MustCompile(`(?m)^tar -xzf (\S+)(?: -C \S+)?$`).FindStringSubmatch(archiveBlock(t).text)
 	if m == nil {
-		t.Fatalf("the archive block has no tar -xzf <archive> -C <dir> line:\n%s", archiveBlock(t).text)
+		t.Fatalf("the archive block has no tar -xzf <archive> line:\n%s", archiveBlock(t).text)
 	}
 	return m[1]
 }
 
-// runArchiveBlock runs the page's lines in a clone's root that holds the archive and its
-// SHA256SUMS, with the directories of the test as STATE and BIN, and returns what it printed and
-// how it ended. The block runs under set -eu, as a user who stops at the first error would.
-func runArchiveBlock(t *testing.T, clone string, d dirs, home string) (string, int) {
+// runArchiveBlock runs the page's lines in work, an empty directory (not a clone) that holds the
+// archive and its SHA256SUMS, with the directories of the test as STATE and BIN, and returns what it
+// printed and how it ended. The block runs under set -eu, as a user who stops at the first error would.
+func runArchiveBlock(t *testing.T, work string, d dirs, home string) (string, int) {
 	t.Helper()
 	cmd := exec.Command("bash", "-c", "set -eu\n"+archiveBlock(t).text)
-	cmd.Dir = clone
+	cmd.Dir = work
 	cmd.Env = append(baseEnv(home), "STATE="+d.state, "BIN="+d.bin)
 	out, err := cmd.CombinedOutput()
 	switch e := err.(type) {
@@ -192,7 +219,7 @@ func TestArchiveFixtureIsWhatTheReleaseUnpackerAccepts(t *testing.T) {
 // The page's lines leave every file where the launcher and the controller look for it.
 func TestArchiveLinesPlaceWhatTheLauncherAndTheControllerRead(t *testing.T) {
 	members := archiveMembers(t)
-	clone := t.TempDir()
+	clone := t.TempDir() // the directory the page's lines run in: empty but for the download
 	writeArchive(t, clone, archiveName(t), members)
 	d, home := testDirs(t)
 	if out, code := runArchiveBlock(t, clone, d, home); code != 0 {
@@ -252,7 +279,7 @@ func TestArchiveLinesStopOnADamagedArchive(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("the archive lines pass on a damaged archive:\n%s", out)
 	}
-	for _, p := range []string{"release", "bin"} {
+	for _, p := range []string{"bin", "agent-builds", "config", "profiles", "examples"} {
 		if _, err := os.Stat(filepath.Join(clone, p)); err == nil {
 			t.Errorf("the lines went past the checksum: %s exists", p)
 		}
@@ -281,5 +308,62 @@ func TestArchiveNamesAreTheReleaseWorkflowsAndTheTagIsOne(t *testing.T) {
 	}
 	if want := "hpcburst-" + h[1] + "-linux-amd64.tar.gz"; name != want {
 		t.Errorf("the heading says %s is the release, so the archive is %s; the page unpacks %s", h[1], want, name)
+	}
+}
+
+// laterReads are the repository paths that the blocks after the archive block read from the working
+// directory, named as TestNamedPathsExist names them in code, and the host binaries under bin/.
+var laterReads = regexp.MustCompile(`(?:examples/[a-z0-9-]+\.yaml|profiles/[a-z0-9-]+\.yaml|config/crd|\bbin/[a-z-]+)`)
+
+// The archive path needs no clone: no step after the archive block runs a script of the repository,
+// and every repository path those steps read is in the working directory once the archive lines have
+// run there, in a directory that is not a clone. A path the archive does not carry, such as an
+// example missing from examples/, fails here.
+func TestArchivePathNeedsNoClone(t *testing.T) {
+	all := blocks(t)
+	at := -1
+	for i, b := range all {
+		if b.lang == "" && strings.Contains(b.text, "sha256sum -c") {
+			at = i
+		}
+	}
+	if at < 0 {
+		t.Fatal("docs/quickstart.md has no archive block")
+	}
+	reads := map[string]bool{}
+	for _, b := range all[at+1:] {
+		if strings.Contains(b.text, "hack/") {
+			t.Errorf("a step after the archive block runs a repository script, which an archive user does not have:\n%s", b.text)
+		}
+		for _, p := range laterReads.FindAllString(b.text, -1) {
+			reads[p] = true
+		}
+	}
+	var kinds []string
+	for _, prefix := range []string{"bin/", "config/crd", "profiles/", "examples/"} {
+		for p := range reads {
+			if strings.HasPrefix(p, prefix) {
+				kinds = append(kinds, prefix)
+				break
+			}
+		}
+	}
+	if len(kinds) != 4 {
+		t.Fatalf("the later steps read %v; want at least one path under each of bin/, config/crd, profiles/ and examples/, or this test checks nothing", reads)
+	}
+
+	work := t.TempDir()
+	if _, err := os.Stat(filepath.Join(work, ".git")); err == nil {
+		t.Fatal("the working directory is a clone")
+	}
+	writeArchive(t, work, archiveName(t), archiveMembers(t))
+	d, home := testDirs(t)
+	if out, code := runArchiveBlock(t, work, d, home); code != 0 {
+		t.Fatalf("the archive lines fail (exit %d):\n%s", code, out)
+	}
+	for p := range reads {
+		if _, err := os.Stat(filepath.Join(work, p)); err != nil {
+			t.Errorf("a later step reads %s, which the unpacked archive does not hold: %v", p, err)
+		}
 	}
 }
