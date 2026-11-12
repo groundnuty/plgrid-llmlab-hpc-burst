@@ -16,11 +16,11 @@ import (
 )
 
 // Router holds the routing view and one balancer group per served
-// ModelDeployment. It rebuilds the view at every control-plane change, every
-// transport registration, every drain start and every pause that ends, and
-// pushes each group's members, eligibility, bound and caps into it (HBEP-5,
-// Load bound and cap: recomputed at every join, leave and change of
-// eligibility).
+// ModelDeployment. It rebuilds the view after each burst of control-plane
+// changes and of transport registrations (#417), at every drain start and every
+// pause that ends, and pushes each group's members, eligibility, bound and caps
+// into it (HBEP-5, Load bound and cap: recomputed after each burst of joins,
+// leaves and changes of eligibility, and before any read that needs it).
 type Router struct {
 	cfg     Config
 	clk     clock.Clock
