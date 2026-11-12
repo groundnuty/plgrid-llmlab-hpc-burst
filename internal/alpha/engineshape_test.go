@@ -141,6 +141,16 @@ func TestPickEngineNeverPicksANearMiss(t *testing.T) {
 		"in the job, under Apptainer outside it":     {rpOut, {PID: 51, PPID: 30, InJob: true, CgroupJob: true, CgroupJobForm: true, Argv: shapeEngine}},
 		"in the job, under a program not a shell":    {{PID: 60, PPID: 10, Env: EnvOther, Argv: []string{"/usr/bin/python3", "/opt/launcher.py"}}, {PID: 61, PPID: 60, Env: EnvOther, Argv: shapeEngine}},
 		"in the job, a forked copy under the engine": {{PID: 70, PPID: 12, Env: EnvOther, Argv: shapeEngine}},
+		// Membership by descent, both sides (team-lead's review of the plan): a process with the launch's command
+		// that descends from no process of the job (reparented to init, its environment clean, in another job's
+		// cgroup or none) and one that descends from ANOTHER job's processes are never the job's.
+		"reparented to init, no job":                 {{PID: 80, PPID: 1, Env: EnvOther, Argv: shapeEngine}},
+		"reparented to init, another job's cgroup":   {{PID: 81, PPID: 1, Env: EnvOther, CgroupJobForm: true, Argv: shapeEngine}},
+		"reparented to init, environment unreadable": {{PID: 82, PPID: 1, Env: EnvUnreadable, Argv: shapeEngine}},
+		"descended from another job": {
+			{PID: 90, PPID: 1, Env: EnvOther, CgroupJobForm: true, Argv: agent.Argv},
+			{PID: 91, PPID: 90, Env: EnvUnreadable, CgroupJobForm: true, Argv: rpOut.Argv},
+			{PID: 92, PPID: 91, Env: EnvOther, CgroupJobForm: true, Argv: shapeEngine}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if p, err := PickEngine(append(append([]NodeProc(nil), job...), miss...), shapeCmd, MatchesCommand); err != nil || p.PID != 12 {

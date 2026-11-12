@@ -76,6 +76,13 @@ def die_with_parent():
 sys.exit(subprocess.call([os.path.join(here, "vllm")] + sys.argv[1:], preexec_fn=die_with_parent))
 `
 
+// orphanDouble starts the engine and exits at once, so that the engine is an orphan, reparented to init or a
+// subreaper outside every job, with the launch's very command line and no Slurm variable.
+const orphanDouble = `import os, subprocess, sys
+here = os.path.dirname(os.path.abspath(sys.argv[0]))
+subprocess.Popen([os.path.join(here, "vllm")] + sys.argv[1:], env={"PATH": "/usr/bin:/bin"}, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+`
+
 // faultShape is one candidate shape: the job's scripts ({dir} is the job's directory, {py} the interpreter, {args}
 // the launch's arguments), the engine double's mode, and the job tree's shape, its counts line aside.
 type faultShape struct {
@@ -313,6 +320,36 @@ func (r *faultRig) outsideEngine() int {
 	return engine
 }
 
+// orphanEngine starts the launch's command as an orphan of no job, from the test itself, and returns its PID. Its
+// cleanup kills it through a pidfd opened before its command line is checked again, so a later process that took
+// its PID is left alone.
+func (r *faultRig) orphanEngine() int {
+	r.t.Helper()
+	dir := filepath.Join(r.root, "orphan")
+	r.engineDir(dir, "")
+	r.write(filepath.Join(dir, "start.py"), orphanDouble, 0o644)
+	cmd := exec.Command(r.py, append([]string{filepath.Join(dir, "start.py")}, faultLaunch[1:]...)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		r.t.Fatalf("the orphan's starter: %v, %q", err, out)
+	}
+	engine := r.enginePID(dir)
+	r.t.Cleanup(func() {
+		p, err := os.FindProcess(engine) // a pidfd on Linux: it names the process at the PID now
+		if err != nil {
+			return
+		}
+		defer p.Release()
+		if b, _ := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", engine)); strings.Contains(string(b), filepath.Join(dir, "vllm")) {
+			_ = p.Kill()
+			waitGone(r.t, engine, "the orphan engine")
+		}
+	})
+	if b, _ := os.ReadFile(fmt.Sprintf("/proc/%d/stat", engine)); strings.Contains(string(b), ") S "+strconv.Itoa(cmd.Process.Pid)+" ") {
+		r.t.Fatal("the orphan engine still has its starter as its parent")
+	}
+	return engine
+}
+
 func TestTheWorkerFaultFindsTheEngineInEachShape(t *testing.T) {
 	me, err := user.Current()
 	if err != nil {
@@ -327,10 +364,12 @@ func TestTheWorkerFaultFindsTheEngineInEachShape(t *testing.T) {
 			engine := r.enginePID(dir)
 			var spared []int
 			if strings.HasPrefix(c.name, "(d)") {
-				// Near misses of the widest membership rule: the launch's command run by the job's own shell, under
-				// the same tree in another job, and under a runtime parent of no job.
+				// Near misses of the widest membership rule, the launch's very command: run by the job's own shell
+				// (in the job, not under Apptainer), under the same tree in ANOTHER job (descended from that job's
+				// processes), under a runtime parent of no job, and an orphan of no job (reparented to init or a
+				// subreaper). None is picked (FindEngine finds exactly the engine), and the kill spares them all.
 				_, other := r.job("other", faultShape{scripts: c.scripts})
-				spared = append(spared, r.enginePID(filepath.Join(dir, "near")), r.enginePID(other), r.outsideEngine())
+				spared = append(spared, r.enginePID(filepath.Join(dir, "near")), r.enginePID(other), r.outsideEngine(), r.orphanEngine())
 			}
 
 			eng, shape, err := FindEngine(ctx, r.sess, jobID, faultLaunch, MatchesCommand, time.Minute)
