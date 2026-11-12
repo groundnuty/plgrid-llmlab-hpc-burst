@@ -310,6 +310,27 @@ type ModelDeploymentSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	Instances int32 `json:"instances"`
 
+	// WorkersPerInstance is the number of workers in each Instance (beta; HBEP-7,
+	// Several workers): copies of the Instance's engine launch, each using
+	// tensor-parallel-size times pipeline-parallel-size GPUs of the Instance's one
+	// node, behind the Instance's router. Absent is 1, alpha's one worker. The
+	// controller copies it into each Instance's launch.workers, when it is above 1,
+	// as it creates the Instance, so an Instance of one worker stays as it was
+	// before workers were counted, and a change applies only to Instances created
+	// after it, a replacement at handover or a scale-up, and running Instances keep
+	// their count. It is capacity, not a deployment-ID input (HBEP-3), like
+	// instances. The Allocation's GPU count is this times tensor-parallel-size
+	// times pipeline-parallel-size, refused on a Provider, never capped, above the
+	// partition's gpusPerNode or the QOS's maxGpusPerUser (HBEP-7, Provisioning).
+	// Above 1 it needs the lifecycle controller's --instance-router envoy, since
+	// several workers always run behind a router; without it the deployment is
+	// refused, with Degraded reason SpecUnsupported (HBEP-7, Several workers).
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=8
+	WorkersPerInstance *int32 `json:"workersPerInstance,omitempty"`
+
 	// Providers says where the deployment may run.
 	Providers ProviderSelection `json:"providers"`
 

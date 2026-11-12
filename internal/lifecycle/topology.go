@@ -201,6 +201,24 @@ func classes(pvs []*providerView) []v1alpha1.AcceleratorClass {
 // cap shrinks them and leaves the GPU count as it is (HBEP-4, QOS limits). A
 // memory request is capped at the maxMemPerUser in whole MiB, rounded down.
 func partitionSizing(pv *providerView, gpus int32, leaseLimit *v1alpha1.Duration) (v1alpha1.BatchParameters, error) {
+	return partitionSizingFor(pv, gpus, 1, leaseLimit)
+}
+
+// partitionSizingFor is partitionSizing for an Instance of workers workers of perWorker GPUs each: the
+// Allocation's GPU count is their product, on one node, refused, never capped, above the same limits
+// (HBEP-7, Several workers, Sizing). With one worker it is partitionSizing, its refusals word for word.
+func partitionSizingFor(pv *providerView, perWorker, workers int32, leaseLimit *v1alpha1.Duration) (v1alpha1.BatchParameters, error) {
+	// Each worker's rung and the router's and the whole Instance's must fit the restarts status.restarts
+	// keeps, so each part's spent rung stays visible (HBEP-7, Several workers, Health and restarts). With
+	// one worker it always fits: (1 + 2) x maxAttemptsPerRung is 24.
+	if a := pv.settings.attemptsPerRung; (workers+2)*a > maxRestartsKept {
+		return v1alpha1.BatchParameters{}, refuse("workersPerInstance %d on Provider %s, whose profile sets restart.attemptsPerRung %d: (workers + 2) x attempts is %d restarts, above the %d that status.restarts keeps (HBEP-7, Several workers)", workers, pv.name, a, (workers+2)*a, maxRestartsKept)
+	}
+	gpus := perWorker * workers
+	needs := fmt.Sprintf("the serving spec needs %d GPUs (tensor-parallel-size times pipeline-parallel-size)", gpus)
+	if workers > 1 {
+		needs = fmt.Sprintf("the deployment needs %d GPUs (workersPerInstance %d times %d, tensor-parallel-size times pipeline-parallel-size)", gpus, workers, perWorker)
+	}
 	part := pv.partition
 	maxGPUs, known := v1alpha1.MaxAllocationGPUs(part, pv.limits)
 	if !known || part.CPUsPerGPU == nil || part.MemPerGPU == nil {
@@ -211,9 +229,9 @@ func partitionSizing(pv *providerView, gpus int32, leaseLimit *v1alpha1.Duration
 		// Provider cannot host the Instance (`@hpc-burst-science-agent`,
 		// 1 Nov 2026, from PR 1's review).
 		if q := pv.limits.MaxGPUsPerUser; q != nil && (part.GPUsPerNode == nil || *q < *part.GPUsPerNode) {
-			return v1alpha1.BatchParameters{}, refuse("the serving spec needs %d GPUs (tensor-parallel-size times pipeline-parallel-size), above the %s %d of QOS %s on Provider %s (partition %s); a parallel size is refused, never capped (HBEP-7, Provisioning)", gpus, v1alpha1.LimitMaxGPUsPerUser, *q, pv.limits.From[v1alpha1.LimitMaxGPUsPerUser], pv.name, part.Name)
+			return v1alpha1.BatchParameters{}, refuse("%s, above the %s %d of QOS %s on Provider %s (partition %s); a parallel size is refused, never capped (HBEP-7, Provisioning)", needs, v1alpha1.LimitMaxGPUsPerUser, *q, pv.limits.From[v1alpha1.LimitMaxGPUsPerUser], pv.name, part.Name)
 		}
-		return v1alpha1.BatchParameters{}, refuse("the serving spec needs %d GPUs (tensor-parallel-size times pipeline-parallel-size), above the %d per node of partition %s; alpha Instances are single-node (HBEP-7, Provisioning)", gpus, *part.GPUsPerNode, part.Name)
+		return v1alpha1.BatchParameters{}, refuse("%s, above the %d per node of partition %s; alpha Instances are single-node (HBEP-7, Provisioning)", needs, *part.GPUsPerNode, part.Name)
 	}
 	lim, bound, err := allocationTimeLimit(pv, leaseLimit)
 	if err != nil {

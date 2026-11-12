@@ -111,7 +111,7 @@ func (p *pass) decideOverlap(in *v1alpha1.Instance) (overlapCheck, error) {
 	if pv == nil || !pv.usable() || pv.tooShort != "" || a == nil || a.Spec.ForProvider.Batch == nil || p.specErr != "" || p.md == nil {
 		return overlapCheck{beside: true}, nil
 	}
-	params, err := partitionSizing(pv, p.plan.gpus, p.md.Spec.LeaseLimit)
+	params, err := partitionSizingFor(pv, p.plan.gpus, p.plan.workers, p.md.Spec.LeaseLimit)
 	if err != nil {
 		return overlapCheck{beside: true}, nil
 	}
@@ -141,7 +141,7 @@ func (p *pass) decideOverlap(in *v1alpha1.Instance) (overlapCheck, error) {
 		if cid := p.ids[q.class]; cid == nil || cid.id == "" || cid.blocked != "" {
 			continue
 		}
-		qparams, err := partitionSizing(q, p.plan.gpus, p.md.Spec.LeaseLimit)
+		qparams, err := partitionSizingFor(q, p.plan.gpus, p.plan.workers, p.md.Spec.LeaseLimit)
 		if err != nil {
 			continue
 		}

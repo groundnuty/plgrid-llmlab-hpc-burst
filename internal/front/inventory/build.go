@@ -288,12 +288,18 @@ func durationOr(d *v1alpha1.Duration, def time.Duration) (time.Duration, error) 
 }
 
 // routedCap is the cap of an Instance behind a router, which reports its healthy workers (HBEP-5, Load
-// bound and cap): a set instanceCap scaled by healthy workers over desired workers, rounded down, else
-// the engine's maximum concurrent sequences times the healthy workers. Desired workers are Workers, the
-// one an Instance runs until several land (#439).
+// bound and cap): a set instanceCap scaled by healthy workers over desired workers, rounded down, and
+// never below 1 while a worker is healthy, since the balancer reads a cap of 0 as no cap; else the
+// engine's maximum concurrent sequences times the healthy workers. Desired workers are the Instance's
+// own launch.workers (HBEP-7, Several workers). With no healthy worker the Instance is not eligible
+// (build), whatever its cap.
 func routedCap(r *v1alpha1.Routing, inst *v1alpha1.Instance, healthy int) int {
 	if r != nil && r.InstanceCap != nil && *r.InstanceCap > 0 {
-		return int(*r.InstanceCap) * healthy / Workers
+		c := int(*r.InstanceCap) * healthy / int(v1alpha1.LaunchWorkers(inst.Spec.Launch))
+		if c < 1 && healthy > 0 {
+			c = 1
+		}
+		return c
 	}
 	seqs := int(inst.Spec.Launch.MaxNumSeqs)
 	if seqs <= 0 {
