@@ -27,8 +27,9 @@ import (
 //   - a shorter deadline shortens the window (2m + 2m = 4m, lead 17m, shortest lease 18m), and a
 //     longer one never lengthens it (30m + 2m is above 7m, so 7m);
 //   - the hour of the one-slot handover (the plan of issue #376, section 3): a start wait of 10m,
-//     the predecessor's 21m lease, a second start wait of 10m, the successor ready within
-//     startTimeout 12m, and 2m of cleanup: 10 + 21 + 10 + 12 + 2 = 55m, inside 1 h.
+//     the predecessor's 21m lease, up to 3m for the successor's Allocation, a second start wait of
+//     10m, the successor ready within startTimeout 12m, and 3m for the end (the 2m idle limit and a
+//     minute): 10 + 21 + 3 + 10 + 12 + 3 = 59m, inside 1 h.
 
 // shippedProfileFile reads a shipped manifest strictly; a missing file fails, it never skips.
 func shippedProfileFile(t *testing.T, file string) (v1alpha1.PlatformProfile, map[string]any) {
@@ -189,8 +190,9 @@ func TestShippedAthenaNowFitsTheHour(t *testing.T) {
 // The profile's own text states the lead and the hour it is built for, and the arithmetic holds
 // with the values it carries: the lead, from drainWindow, handoverMargin and startTimeout, is
 // 20m; the shortest lease, 21m; and the one-slot handover's hour (a 10 min start wait, that
-// lease, a second start wait, a start within startTimeout, 2 min of cleanup) is inside the
-// partition's 1 h. A startTimeout of 15m, say, would make the hour 61m and fail here.
+// lease, up to 3 min for the second job's Allocation, a second start wait, a start within
+// startTimeout, and the end: the 2 min idle limit and a minute; internal/alpha, row B's SlotHold)
+// is inside the partition's 1 h. A startTimeout of 14m, say, would make the hour 61m and fail here.
 func TestShippedAthenaNowStatesItsLeadAndTheHourFits(t *testing.T) {
 	prof, _ := shippedProfileFile(t, "athena-now.yaml")
 	d := func(v *v1alpha1.Duration) time.Duration {
@@ -212,15 +214,15 @@ func TestShippedAthenaNowStatesItsLeadAndTheHourFits(t *testing.T) {
 		t.Errorf("the lead is %s, want 20m", lead)
 	}
 	lease := lead + time.Minute // whole minutes, and a time limit must be longer than the lead
-	hold := 10*time.Minute + lease + 10*time.Minute + start + 2*time.Minute
-	if lease != 21*time.Minute || hold != 55*time.Minute || hold > time.Hour {
-		t.Errorf("shortest lease %s, one-slot hour %s; want 21m and 55m, inside 1h", lease, hold)
+	hold := 10*time.Minute + lease + 3*time.Minute + 10*time.Minute + start + 3*time.Minute
+	if lease != 21*time.Minute || hold != 59*time.Minute || hold > time.Hour {
+		t.Errorf("shortest lease %s, one-slot hour %s; want 21m and 59m, inside 1h", lease, hold)
 	}
 	raw, err := os.ReadFile(filepath.Join("..", "..", "profiles", "athena-now.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"= 20m", "21 minutes or more", "10 + 21 + 10 + 12 + 2 = 55 minutes", "NOT for real serving", "TEST deployments"} {
+	for _, want := range []string{"= 20m", "21 minutes or more", "10 + 21 + 3 + 10 + 12 + 3 = 59 minutes", "NOT for real serving", "TEST deployments"} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("athena-now.yaml's header does not say %q", want)
 		}

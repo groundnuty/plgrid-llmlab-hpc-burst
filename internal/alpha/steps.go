@@ -36,9 +36,19 @@ const (
 // deployment (the science agent, on PR 284). That is information for whoever reads the line, and no check: nothing
 // decides on it, and an event that could not be read says so. In no-overlap mode the gap is planned, and the controller
 // does not raise it (internal/lifecycle/handover.go), so "not raised" is what that row expects.
-type SecondNotStartedError struct{ ReplacementLate string }
+//
+// StartWait is the bound that ran out on a row whose every job has a start wait (Row.StartWait; issue #376's row B): the
+// second job was still waiting that long after its Allocation's creation. Zero on the rows whose bound is the wait in the
+// queue from the predecessor's lease end.
+type SecondNotStartedError struct {
+	ReplacementLate string
+	StartWait       time.Duration
+}
 
 func (e *SecondNotStartedError) Error() string {
+	if e.StartWait > 0 {
+		return fmt.Sprintf("%v (within its start wait of %s from its Allocation's creation); ReplacementLate for its deployment: %s", ErrSecondNotStarted, e.StartWait, e.ReplacementLate)
+	}
 	return fmt.Sprintf("%v; ReplacementLate for its deployment: %s", ErrSecondNotStarted, e.ReplacementLate)
 }
 
@@ -90,6 +100,9 @@ type Steps interface {
 	// NowServe is row A on plgrid-now (issue #376; nowserve.go). Beside what it saw it may return
 	// ErrRequeueRefused, which leaves the rest of the run to judge.
 	NowServe(ctx context.Context, p Plan) (NowServeObs, error)
+	// NowNoOverlap is row B on plgrid-now (issue #376; nownooverlap.go). Beside what it saw it may return ErrSlotTaken
+	// or ErrSecondNotStarted, which leave the predecessor's part to judge.
+	NowNoOverlap(ctx context.Context, p Plan) (NowNoOverlapObs, error)
 	// Ledger is the cluster's record of this run's jobs.
 	Ledger() Ledger
 	// WatchResets is how many times the run's watch started again from the

@@ -186,6 +186,9 @@ func (f failedSteps) TunnelHour(context.Context, Plan) (TunnelHourObs, error) {
 func (f failedSteps) NowServe(context.Context, Plan) (NowServeObs, error) {
 	return NowServeObs{}, f.err
 }
+func (f failedSteps) NowNoOverlap(context.Context, Plan) (NowNoOverlapObs, error) {
+	return NowNoOverlapObs{}, f.err
+}
 func (f failedSteps) Ledger() Ledger              { return &BatchLedger{} }
 func (f failedSteps) Close(context.Context) error { return nil }
 func (f failedSteps) WatchResets() int            { return 0 }
@@ -237,6 +240,9 @@ type liveRun struct {
 	// job of a run that read its second so, which has started and may.
 	claimed     bool
 	claimedPred string
+	// slotTakenFn, when set, runs once row B's read of the slot has seen a job that is not the run's in it, before the run
+	// ends its deployment: a stand-in orders the fake's held submission after it.
+	slotTakenFn func()
 	// endEvery is how often Close looks for the run's jobs to have ended; 0 is five seconds. A test sets it.
 	endEvery time.Duration
 	// wrapAPI, when a test sets it, wraps the run's API client as start makes it: a stand-in whose catch-up fails on demand (#303).

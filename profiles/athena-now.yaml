@@ -13,8 +13,10 @@
 #        = min(drainWindow 7m, routing.maxRequestDuration + drainMargin 2m) + 1m + 12m = 20m,
 # so an Allocation of the partition's time limit, 1 h, or of a leaseLimit of 21 minutes or more (time limits
 # are whole minutes and must be longer than the lead), is placed. Two jobs of 21 minutes each, one after the
-# other on the one-job slot, with a start wait of 10 minutes before each, ready within 12 minutes and 2
-# minutes of cleanup, take 10 + 21 + 10 + 12 + 2 = 55 minutes: inside the hour, with 5 to spare.
+# other on the one-job slot, with a start wait of 10 minutes before each, up to 3 minutes for the second's
+# Allocation once the first has left the slot, ready within 12 minutes, and 3 minutes for the end (the 2-minute
+# idle limit and a minute), take 10 + 21 + 3 + 10 + 12 + 3 = 59 minutes: inside the hour (internal/alpha, row B's
+# SlotHold).
 #
 # Where each value comes from (HBEP-4, open question 7). Every typed value has a comment that names one of
 # three sources, as in athena.yaml:

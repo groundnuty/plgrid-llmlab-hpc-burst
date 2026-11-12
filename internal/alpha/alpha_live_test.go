@@ -95,3 +95,12 @@ func TestTunnelHour(t *testing.T) {
 func TestAlphaAthenaNowServe(t *testing.T) {
 	runRow(t, "nowserve", "alpha-athena-now-serve")
 }
+
+// TestAlphaAthenaNowNoOverlap is row B of issue #376 on Athena plgrid-now under profiles/athena-now.yaml: HBEP-7's
+// no-overlap mode on the one-slot path, two jobs in turn, both warm, with a stream across the drain start, the
+// successor's Allocation only after the predecessor's job has left the slot, and the gap measured.
+//
+//livecheck:alpha-athena-now-nooverlap
+func TestAlphaAthenaNowNoOverlap(t *testing.T) {
+	runRow(t, "nownooverlap", "alpha-athena-now-nooverlap")
+}

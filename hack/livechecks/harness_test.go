@@ -72,8 +72,14 @@ type world struct {
 	t                     *testing.T
 	repo, dir, state, bin string
 	settings, base, tmp   string
-	reports               map[*exec.Cmd]string // the reaper's report of each command built by command
-	leakSink              errorfer             // tests only: where noLeak reports; nil means t
+	// day is the one UTC day of this world, read from its clock once, when the world is made. The
+	// owner's-go settings of a fixture hold it, and the script's idea of today is it too: w.env gives the
+	// script LIVE_FAKE_DATE_FILE, a file with it. Two readings of the real clock, one by the fixture
+	// and one by the script's `date -u`, are two clocks, and a test that spans UTC midnight between them
+	// fails (issue #422).
+	day      string
+	reports  map[*exec.Cmd]string // the reaper's report of each command built by command
+	leakSink errorfer             // tests only: where noLeak reports; nil means t
 }
 
 // errorfer is the part of *testing.T that noLeak reports through.
@@ -108,7 +114,11 @@ func git(t *testing.T, dir string, args ...string) string {
 
 // newWorld builds the fixture repository with the real script in it, the stub
 // commands, a stub cluster state and a settings file that is complete.
-func newWorld(t *testing.T) *world {
+func newWorld(t *testing.T) *world { return newWorldAt(t, time.Now) }
+
+// newWorldAt is newWorld with the clock that gives the world its day. A test that pins a boundary passes
+// a clock of its own; every other test takes the real one.
+func newWorldAt(t *testing.T, clock func() time.Time) *world {
 	t.Helper()
 	for _, tool := range []string{"git", "go", "flock", "timeout", "tar", "bash", "python3"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -119,7 +129,7 @@ func newWorld(t *testing.T) *world {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := &world{t: t, dir: t.TempDir(), reports: map[*exec.Cmd]string{}}
+	w := &world{t: t, dir: t.TempDir(), reports: map[*exec.Cmd]string{}, day: clock().UTC().Format("2006-01-02")}
 	w.repo, w.state, w.bin, w.tmp = filepath.Join(w.dir, "repo"), filepath.Join(w.dir, "state"), filepath.Join(w.dir, "bin"), filepath.Join(w.dir, "tmp")
 	for _, d := range []string{w.repo, w.state, w.bin, w.tmp, filepath.Join(w.dir, "locks"), filepath.Join(w.dir, "reports")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -136,8 +146,22 @@ func newWorld(t *testing.T) *world {
 	w.base = git(t, w.repo, "rev-parse", "HEAD")
 	w.installStubs()
 	w.writeSettings(nil)
+	write(t, w.dayFile(), w.day+"\n", 0o644)
 	t.Cleanup(func() { _ = os.RemoveAll(w.tmp) })
 	return w
+}
+
+// dayFile is the file the script reads its today from (LIVE_FAKE_DATE_FILE, a seam of its own).
+func (w *world) dayFile() string { return filepath.Join(w.dir, "fixture-today") }
+
+// dayPlus is the world's day moved by n days: yesterday is -1, tomorrow 1.
+func (w *world) dayPlus(n int) string {
+	w.t.Helper()
+	d, err := time.Parse("2006-01-02", w.day)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	return d.AddDate(0, 0, n).Format("2006-01-02")
 }
 
 // commitFile changes (or, with content "", deletes) one file in a new commit and returns the commit.
@@ -214,7 +238,10 @@ func (w *world) env(extra []string) []string {
 		env = append(env, e)
 	}
 	env = append(env, "PATH="+w.bin+":"+os.Getenv("PATH"), "HPCBURST_LIVE_SETTINGS="+w.settings, "STUB_STATE="+w.state,
-		"LIVE_POLL_SECONDS=0", "LIVE_CLEAN_POLL_SECONDS=0", "TMPDIR="+w.tmp, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		"LIVE_POLL_SECONDS=0", "LIVE_CLEAN_POLL_SECONDS=0", "TMPDIR="+w.tmp, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+		// The script's today is the world's day, not the real clock's (see world.day). A test's own entry
+		// below wins: the last of two for one name is the one the script gets.
+		"LIVE_FAKE_DATE_FILE="+w.dayFile())
 	return append(env, extra...)
 }
 

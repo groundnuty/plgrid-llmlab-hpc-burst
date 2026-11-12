@@ -69,6 +69,9 @@ func TestTheShortestLeaseIsJustAboveThePartitionTooShortMinimum(t *testing.T) {
 			// Row A on plgrid-now runs under athena-now.yaml, whose lead is 20 minutes; its lease is the hour less its start
 			// wait and two minutes of cleanup (the science agent's ruling Q3 on #376): 60 - 10 - 2.
 			want = 48 * time.Minute
+		case r.Name == "alpha-athena-now-nooverlap":
+			// Row B on plgrid-now: the shortest lease athena-now.yaml places, its 20-minute lead and a minute.
+			want = 21 * time.Minute
 		}
 		if r.Lease != want {
 			t.Errorf("%s: lease %s, want %s", r.Name, r.Lease, want)
@@ -192,9 +195,10 @@ func TestDeploymentBoundaries(t *testing.T) {
 // The accounting row under QOS now has the start-wait guard of conformance-helios-gh200 (the science agent's
 // rule of 2 Nov 2026: a job that has not started within 10 minutes of its acceptance is cancelled by its tag and
 // the row is NOT RUN); the rows with no slot have none, and the stack rows keep the queue wait of the operator, but row A
-// on plgrid-now (issue #376, the plan's section 3), whose first clock is a start wait of 10 minutes in the owner's slot.
+// on plgrid-now (issue #376, the plan's section 3), whose first clock is a start wait of 10 minutes in the owner's slot,
+// and row B, each of whose two jobs has one.
 func TestOnlyTheAccountingRowOnHeliosHasAStartWait(t *testing.T) {
-	want := map[string]time.Duration{"gpu-accounting-helios": 10 * time.Minute, "alpha-athena-now-serve": 10 * time.Minute}
+	want := map[string]time.Duration{"gpu-accounting-helios": 10 * time.Minute, "alpha-athena-now-serve": 10 * time.Minute, "alpha-athena-now-nooverlap": 10 * time.Minute}
 	for _, r := range append(Rows(), AccountingRows()...) {
 		if r.StartWait != want[r.Name] {
 			t.Errorf("%s: start wait %s, want %s", r.Name, r.StartWait, want[r.Name])

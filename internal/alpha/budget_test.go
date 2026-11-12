@@ -47,6 +47,13 @@ func TestEachStackRowsWorstCaseIsItsWaitsAddedUp(t *testing.T) {
 		// is its budget, 115, which holds the start wait.
 		{"row A on plgrid-now, 30", rowOf("alpha-athena-now-serve"), 30, 11 + 10 + 41 + (3 + 1 + 5 + 5 + 2 + 3) + 7 + 5 + 3 + 5, 115, 11 + 19 + 5 + 3 + 5},
 		{"row A on plgrid-now, 2 h asked", rowOf("alpha-athena-now-serve"), 120, 11 + 10 + 41 + (3 + 1 + 5 + 5 + 2 + 3) + 7 + 5 + 3 + 5, 115, 11 + 19 + 5 + 3 + 5},
+		// Row B on plgrid-now (issue #376): its start wait of 10, the predecessor's 21-minute lease and 5 for its job to be seen
+		// gone from the slot, 3 for the successor's Allocation and the successor's own start wait of 10, then 12 and 5 for it to
+		// be ready, 1 for the guard's last looks, the 7-minute drain window and 5 for the jobs to end once the deployment goes,
+		// two catch-ups and 5 to close. Its bounds are its two start waits and the lease, 41; its run's deadline is its
+		// budget, 115.
+		{"row B on plgrid-now, 30", rowOf("alpha-athena-now-nooverlap"), 30, 11 + 10 + 21 + 5 + 3 + 10 + 12 + 5 + 1 + 7 + 5 + 2 + 5, 115, 11 + 5 + 3 + 12 + 5 + 1 + 7 + 5 + 2 + 5},
+		{"row B on plgrid-now, 2 h asked", rowOf("alpha-athena-now-nooverlap"), 120, 11 + 10 + 21 + 5 + 3 + 10 + 12 + 5 + 1 + 7 + 5 + 2 + 5, 115, 11 + 5 + 3 + 12 + 5 + 1 + 7 + 5 + 2 + 5},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			p := time.Duration(c.pending) * time.Minute
@@ -128,6 +135,14 @@ var liveWaits = map[string]string{
 	"requeueResult: time.Sleep(time.Second)":                                                      "pacing",
 	"nowEvents: stack.BoundedDeadline(stack.WaitDeadline)":                                        "term: NowRequeueTail",
 	"nowEvents: time.Sleep(time.Second)":                                                          "pacing",
+	// Row B (now_nooverlap_flows_test.go).
+	"NowNoOverlap: r.syncWatch(stack.KindInstances | stack.KindAllocations | stack.KindDeployments)": "term: stack.CatchUpWorstCase",
+	"nowNoOverlapSteps: r.untilBefore(lead)":                                                         "the lease",
+	"nowNoOverlapSteps: r.successorOf(r.readyWait())":                                                "term: health.startTimeout and ReadyMargin",
+	"nowPredecessorLeft: r.waitFor(time.Until(leaseEnd) + EndMargin)":                                "term: the predecessor's lease and EndMargin",
+	"nowSuccessorStart: stack.BoundedDeadline(SuccessorAllocationWait + p.Row.StartWait)":            "term: SuccessorAllocationWait and the successor's start wait",
+	"nowSuccessorStart: context.WithTimeout(time.Minute)":                                            "a call",
+	"nowSuccessorStart: time.Sleep(r.every())":                                                       "pacing",
 }
 
 // waitOf is how a call reads in liveWaits, or "" when it is not a wait.
@@ -163,7 +178,7 @@ func waitOf(fset *token.FileSet, fn string, call *ast.CallExpr) string {
 func TestTheLiveStepsWaitOnWhatTheSumsCount(t *testing.T) {
 	fset := token.NewFileSet()
 	found := map[string]int{}
-	for _, file := range []string{"steps_live_test.go", "live_flows_test.go", "guard_live_test.go", "now_flows_test.go"} {
+	for _, file := range []string{"steps_live_test.go", "live_flows_test.go", "guard_live_test.go", "now_flows_test.go", "now_nooverlap_flows_test.go"} {
 		f, err := parser.ParseFile(fset, file, nil, 0)
 		if err != nil {
 			t.Fatal(err)
@@ -203,6 +218,9 @@ func TestTheLiveStepsWaitOnWhatTheSumsCount(t *testing.T) {
 		"live_flows_test.go": {
 			"r.syncWatch(ctx, stack.KindInstances|stack.KindAllocations, \"the handover's result\"); err != nil {\n\t\treturn HandoverObs{}, notKnownBeside(err, second)",
 			"r.syncWatch(ctx, stack.KindInstances|stack.KindAllocations|stack.KindDeployments, \"the no-overlap row's result\"); err != nil {\n\t\treturn NoOverlapObs{}, notKnownBeside(err, second)",
+		},
+		"now_nooverlap_flows_test.go": {
+			"r.syncWatch(ctx, stack.KindInstances|stack.KindAllocations|stack.KindDeployments, \"row B's result\"); err != nil {\n\t\treturn NowNoOverlapObs{}, notKnownBeside(err, end)",
 		},
 	} {
 		src, err := os.ReadFile(file)

@@ -1,7 +1,8 @@
 package testenv
 
-// The CI half of the union count (gotest_union_test.go): CI's go job runs the packages and every group in
-// a step of its own, and the crd job runs hack/check.sh, whose "all" runs every part. A step or a job that
+// The CI half of the union count (gotest_union_test.go): CI's go job runs the packages, its go own-timeout
+// job (id go-own, a required check since issue #295) runs every group in a step of its own, and the crd job
+// runs hack/check.sh, whose "all" runs every part. A step or a job that
 // can be skipped, or whose failure does not fail the job, would leave a part's tests out of a required
 // check while the check stays green, so the guard reads each step's and each job's if: and
 // continue-on-error as well as its run script.
@@ -69,13 +70,15 @@ func ciJobs(t *testing.T, root string) map[string]ciJob {
 	return doc.Jobs
 }
 
-// ciProblems returns one line for each part that CI's go job does not run in exactly one step that always
-// counts, and the same for the crd job's hack/check.sh, whose "all" runs every part
-// (TestGoTestScriptIsWhatCIAndCheckRun checks that it does).
+// ciProblems returns one line for each part that CI does not run in exactly one step that always counts:
+// the packages' run in the go job, each group in the go-own job (go own-timeout), and the crd job's
+// hack/check.sh, whose "all" runs every part (TestGoTestScriptIsWhatCIAndCheckRun checks that it does).
+// A part in the wrong job is a problem too: a group in the go job as well would run twice, and the
+// packages' run in the go-own job likewise.
 func ciProblems(jobs map[string]ciJob, groups []string) []string {
 	var problems []string
 	add := func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) }
-	for _, id := range []string{"go", "crd"} {
+	for _, id := range []string{"go", "go-own", "crd"} {
 		j := jobs[id]
 		// A job skipped by its if: reports success, so a required check would pass with nothing run.
 		if c := condition(j.If); c != "" {
@@ -85,19 +88,21 @@ func ciProblems(jobs map[string]ciJob, groups []string) []string {
 			add("CI's %s job has continue-on-error: %v, which passes it when a part fails", id, j.ContinueOnError)
 		}
 	}
-	// "own" alone or "all" in the go job would run the groups a second time.
-	for _, extra := range []string{"bash hack/go-test.sh own", "bash hack/go-test.sh all"} {
-		for _, s := range jobs["go"].Steps {
-			for _, line := range strings.Split(s.Run, "\n") {
-				if strings.TrimSpace(line) == extra {
-					add("CI's go job runs %q, which runs the groups again", extra)
+	// "own" alone or "all" in either job would run the groups a second time.
+	for _, id := range []string{"go", "go-own"} {
+		for _, extra := range []string{"bash hack/go-test.sh own", "bash hack/go-test.sh all"} {
+			for _, s := range jobs[id].Steps {
+				for _, line := range strings.Split(s.Run, "\n") {
+					if strings.TrimSpace(line) == extra {
+						add("CI's %s job runs %q, which runs the groups again", id, extra)
+					}
 				}
 			}
 		}
 	}
 	want := []struct{ job, cmd string }{{"go", "bash hack/go-test.sh packages"}}
 	for _, g := range groups {
-		want = append(want, struct{ job, cmd string }{"go", "bash hack/go-test.sh own " + g})
+		want = append(want, struct{ job, cmd string }{"go-own", "bash hack/go-test.sh own " + g})
 	}
 	want = append(want, struct{ job, cmd string }{"crd", "bash hack/check.sh"})
 	for _, w := range want {
@@ -113,6 +118,15 @@ func ciProblems(jobs map[string]ciJob, groups []string) []string {
 		if mayContinue(s.ContinueOnError) {
 			add("CI's %s job runs %q with continue-on-error: %v, which passes the job when it fails", w.job, w.cmd, s.ContinueOnError)
 		}
+	}
+	// The other direction: no part in the other job.
+	for _, g := range groups {
+		if n := len(stepsRunning(jobs["go"].Steps, "bash hack/go-test.sh own "+g)); n > 0 {
+			add("CI's go job runs %q in %d steps, which belong to the go-own job: it would run twice", "bash hack/go-test.sh own "+g, n)
+		}
+	}
+	if n := len(stepsRunning(jobs["go-own"].Steps, "bash hack/go-test.sh packages")); n > 0 {
+		add("CI's go-own job runs %q in %d steps, which belongs to the go job: it would run twice", "bash hack/go-test.sh packages", n)
 	}
 	return problems
 }
