@@ -21,8 +21,9 @@ var liveTimingByHand = Timing{
 	IdleLimit: 2 * time.Minute, MaxIdleLimit: 10 * time.Minute,
 	TunnelHour: 61 * time.Minute, Hour: time.Hour,
 	MinChain: 3, MaxChainGap: 10 * time.Second, NearDeadline: 4 * time.Minute,
-	// The hour's long stream is at least 2 minutes (issue #451; the science agent's ruling (b), 12 Nov 2026).
-	LongFloor:         2 * time.Minute,
+	// The hour's long stream is sized at 135 s or more, so that no stream under 2 minutes is a pass (issue #451; the science agent's
+	// ruling (b), 12 Nov 2026, and (ii) on #452): 135 s of the 270 s cap is 120 s of NearDeadline's 240 s.
+	LongFloor:         135 * time.Second,
 	ConcurrentStreams: 16, StreamRate: 20, MinIdleGap: 2 * time.Minute, MaxSampleGap: 2 * time.Minute,
 	// The large requests (issue #224; the ruling (4) on PR 255): 0.4 MB prompts from two senders, half a second apart.
 	UploadBody: 400_000, UploadStreams: 2, UploadPause: 500 * time.Millisecond,
@@ -90,7 +91,7 @@ func TestClockTakesEachFieldItsOwn(t *testing.T) {
 func scaledTunnel() Row {
 	r, _ := RowByName("tunnel-hour-helios")
 	r.Timing = Timing{MaxRequestDuration: time.Minute, DrainMargin: 30 * time.Second, HandoverMargin: 30 * time.Second, StartTimeout: 4 * time.Minute,
-		TunnelHour: 4*time.Minute + 4*time.Second, Hour: 4 * time.Minute, NearDeadline: 48 * time.Second,
+		TunnelHour: 4*time.Minute + 4*time.Second, Hour: 4 * time.Minute, NearDeadline: 48 * time.Second, LongFloor: 27 * time.Second,
 		MinIdleGap: 30 * time.Second, MaxSampleGap: 30 * time.Second, IdleLimit: 10 * time.Second, MaxIdleLimit: time.Minute}
 	r.Lease = 8 * time.Minute
 	return r
@@ -105,7 +106,7 @@ func scaledHour(r Row) (TunnelHourObs, []provider.Job) {
 	s := func(d time.Duration) time.Time { return t0.Add(d) }
 	var reqs []Stream
 	for i, from := range []time.Duration{0, 51 * time.Second, 102 * time.Second} {
-		reqs = append(reqs, Stream{ID: "a" + string(rune('0'+i)), Opened: s(from), Ended: s(from + 50*time.Second), Complete: true})
+		reqs = append(reqs, Stream{ID: "a" + string(rune('0'+i)), Opened: s(from), Ended: s(from + 50*time.Second), Complete: true, Long: true})
 	}
 	for i := 0; i < 16; i++ {
 		reqs = append(reqs, Stream{ID: "c" + string(rune('a'+i)), Opened: s(152 * time.Second), Ended: s(172 * time.Second), Complete: true, Tokens: 500})
@@ -113,7 +114,7 @@ func scaledHour(r Row) (TunnelHourObs, []provider.Job) {
 	// A large request (issue #224), its body sent while the 16 streams were open.
 	reqs = append(reqs, Stream{ID: "l0", Opened: s(155 * time.Second), Ended: s(160 * time.Second), Complete: true,
 		BodyBytes: 200_000, BodyStart: s(155 * time.Second), BodyEnd: s(157 * time.Second)})
-	reqs = append(reqs, Stream{ID: "b0", Opened: s(212 * time.Second), Ended: s(262 * time.Second), Complete: true})
+	reqs = append(reqs, Stream{ID: "b0", Opened: s(212 * time.Second), Ended: s(262 * time.Second), Complete: true, Long: true})
 	var samples []TunnelSample
 	for at := time.Duration(0); at <= 272*time.Second; at += 10 * time.Second {
 		samples = append(samples, TunnelSample{At: s(at), LastStart: s(-30 * time.Second), Connected: true})
@@ -141,7 +142,7 @@ func TestAScaledRowIsJudgedOnItsClock(t *testing.T) {
 		"the deployment's leaseLimit is not longer than the lead an Instance needs (PartitionTooShort)",
 		"the requests lasted less than an hour",
 		"the cluster's record shows the job ran under an hour",
-		"the hour held no completed long stream, as long as the context allows at the measured rate, within the deadline",
+		longStreamFailure,
 		"the hour held no idle stretch of 2 minutes with heartbeats only",
 	} {
 		if !slices.Contains(f, want) {

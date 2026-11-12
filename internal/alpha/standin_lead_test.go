@@ -68,8 +68,17 @@ func standInLeadRun(t *testing.T, name, engine string, clock func(Row) Row) seco
 			t.Fatal("the stand-in's deployment has no engine double setting to change")
 		}
 	}
+	if name == "alpha-athena-now-nooverlap" {
+		// Row B starts both jobs warm: the pre-staging row's staging is done, and the agent's own log is read from its tail, as
+		// standInNowNoOverlap does. Without it the run ends NOT RUN for the warm start its log did not show (run 43200139547,
+		// fit-row-b: ten of ten), after the lead and the streams have worked.
+		preStage(t, cl, w)
+	}
 	lr := newLiveRun(t, cfg, w)
 	lr.stop = &stackStop{}
+	if name == "alpha-athena-now-nooverlap" {
+		lr.agentLogFn = func(path string) string { return "tail -c 65536 " + path }
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.PendingMax+20*time.Minute)
 	defer cancel()
 	failures, err := Run(ctx, cfg, lr, rec, t.Logf)

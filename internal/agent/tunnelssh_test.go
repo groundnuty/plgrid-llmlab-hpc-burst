@@ -266,7 +266,58 @@ func TestTunnelSSHModeCarriesBothConnections(t *testing.T) {
 // false an frpc started early would still register in the end, so the
 // outcome alone proves nothing; the window and the synchronized observation
 // do. No second clock is compared (Astra nit 4, Opus N5).
+//
+// frps listing the proxy online does not say the hook has recorded the start:
+// frpc logs in within about 20 ms of its start, on its own process, while the
+// hook still dials the port before it appends (#460, one CI failure with
+// "frpc never started" in a log that showed the start). So the test waits for
+// its own record, after frps's, before it reads the record.
 func TestTunnelStartsFrpcOnlyOnceConnection2Listens(t *testing.T) {
+	frpcStartsOnlyOnceConnection2Listens(t, nil)
+}
+
+// The same test with the hook's append held until the test has read the record
+// once, so frps lists the proxy online and the test's first read finds no
+// record, as a loaded runner makes happen by chance (#460). The ordering is
+// made, not waited for: the hold opens only after that first read, so the test
+// is deterministic. Without the wait for the record, this fails with "frpc
+// never started".
+func TestTunnelStartsFrpcOnlyOnceConnection2ListensWhenTheHookRecordsLate(t *testing.T) {
+	frpcStartsOnlyOnceConnection2Listens(t, newFrpcRecordHold())
+}
+
+// frpcRecordHold is the test seam for the hook's record of an frpc start. A
+// nil *frpcRecordHold holds nothing, which is what the ordinary test passes.
+// Otherwise the hook parks, after its own observation and before its append,
+// until the test releases it.
+type frpcRecordHold struct {
+	opened chan struct{}
+	once   sync.Once
+}
+
+func newFrpcRecordHold() *frpcRecordHold { return &frpcRecordHold{opened: make(chan struct{})} }
+
+// wait parks the hook until release.
+func (h *frpcRecordHold) wait() {
+	if h != nil {
+		<-h.opened
+	}
+}
+
+// release lets the parked hook, and any later one, append. It is safe to call
+// more than once, and on nil.
+func (h *frpcRecordHold) release() {
+	if h != nil {
+		h.once.Do(func() { close(h.opened) })
+	}
+}
+
+// frpcStartsOnlyOnceConnection2Listens is the body of
+// TestTunnelStartsFrpcOnlyOnceConnection2Listens. A non-nil hold parks each
+// frpc start's append (see frpcRecordHold); the test's first read of the
+// record releases it, after the read has taken its copy.
+func frpcStartsOnlyOnceConnection2Listens(t *testing.T, hold *frpcRecordHold) {
+	t.Helper()
 	var mu sync.Mutex
 	type start struct {
 		listening bool
@@ -274,18 +325,32 @@ func TestTunnelStartsFrpcOnlyOnceConnection2Listens(t *testing.T) {
 		err       error
 	}
 	var starts []start
+	// started counts the hook's entries, which a hold cannot delay: the early
+	// window must see an early frpc start even while its record is parked.
+	var started atomic.Int32
 	r := newSSHRig(t, sshRigOptions{sshdDown: true, onFrpc: func(r *sshRig, _ agent.ProcessID) {
+		started.Add(1)
 		_, port, err := readConfigServer(r.frpc.ConfigPath())
 		s := start{listening: err == nil && loopbackListens(port), port: port, err: err}
+		hold.wait()
 		mu.Lock()
 		starts = append(starts, s)
 		mu.Unlock()
 	}})
+	// Registered after the rig's cleanups, so it runs before they stop frpc: a
+	// hook still parked would hold frpc's loop and its stop with it.
+	t.Cleanup(hold.release)
+	// read copies the record. The hold opens after the copy, so the copy
+	// cannot hold an append the hold was keeping back.
+	read := func() []start {
+		mu.Lock()
+		got := append([]start(nil), starts...)
+		mu.Unlock()
+		hold.release()
+		return got
+	}
 	time.Sleep(3 * time.Second)
-	mu.Lock()
-	early := len(starts)
-	mu.Unlock()
-	if early != 0 {
+	if early := started.Load(); early != 0 {
 		t.Fatalf("frpc started %d times while connection 2 could not listen", early)
 	}
 	if st, _ := r.tunnel.State(); st.Listening || st.Port == 0 || loopbackListens(st.Port) {
@@ -296,9 +361,14 @@ func TestTunnelStartsFrpcOnlyOnceConnection2Listens(t *testing.T) {
 	}
 	r.sshd.down.Store(false)
 	eventually(t, 20*time.Second, "frps to list the Instance's proxy online", func() bool { return r.frps.online(t, hInstUID) })
-	mu.Lock()
-	first := starts
-	mu.Unlock()
+	// frps's word is not the hook's: wait for the hook's own record.
+	var first []start
+	eventually(t, 20*time.Second, "the hook to record frpc's start", func() bool {
+		first = read()
+		return len(first) > 0
+	})
+	// The wait above ends only with a record; this guard keeps first[0] safe
+	// if the wait is ever changed.
 	if len(first) == 0 {
 		t.Fatal("frpc never started")
 	}

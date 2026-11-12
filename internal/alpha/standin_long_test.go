@@ -2,12 +2,14 @@ package alpha
 
 // The stand-in proof of the hour's long stream (issue #451): the LIVE steps of the tunnel rows over the real stack and the fake Slurm
 // (standin_test.go), run with HPCBURST_ALPHA_STANDIN=1 under the stand-in's rules (launcher.lock, a memory cap; heavy runs on a hosted
-// runner). The stand-in's deployment has the context 32768 (the large bodies need it), its engine double streams 50 tokens a second, and
-// its clock is scaled: a deadline of 75 s, a NearDeadline of 60 s (a cap of 67.5 s) and a floor of 30 s. What fits, 32256 / 50, is over
-// ten minutes, so the cap binds: the stand-in's long stream is its cap, as before the stream was sized to the context, and the hour passes
-// with it. The fit between the floor and the cap, at the A100's rate on 32768, is out of the stand-in's reach: the burst needs 45 s of
-// stream in the same context (about 716 tokens a second at most), so no engine double leaves a fit under the cap. That case is proved in
-// the unit tests (longstream_test.go), at the A100's numbers.
+// runner). The stand-in's deployment has the context 32768 (the large bodies need it), its engine double streams 50 tokens a second (a
+// 20 ms token delay, standin_test.go; the double's rate is a mode, not a fixed property), and its clock is scaled, a quarter of the live one:
+// a deadline of 75 s, a NearDeadline of 60 s (a cap of 67.5 s), a sizing floor of 33.75 s and so a bar floor of 30 s. What fits, 32256 / 50,
+// is over ten minutes, so the cap binds: the stand-in's long stream is its cap, as before the stream was sized to the context, and the hour
+// passes with it. A fit between the floor and the cap is within a stand-in's reach only with a much faster double: at 478 to 716 tokens a
+// second (a token delay of about 1.5 ms) the fit is 45 to 67 s, and the 45 s burst still fits (32256 / 45 is 717). No stand-in runs one, and
+// that case is proved in the unit and verdict tests (longstream_test.go) at the A100's own numbers: 199 tokens a second on 32768 gives 162 s,
+// a bar of 2 min 24 s. The wiring end to end is proved here at the cap and at NOT RUN.
 
 import (
 	"encoding/json"

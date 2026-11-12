@@ -512,7 +512,7 @@ func trafficChecks(reqs []Stream, tm Timing, uploadNotMeasured bool) []string {
 	for _, r := range reqs {
 		// A completed stream (the delta round of PR 255, B3): a large request that came late is no request near
 		// the deadline, though it passes requestChecks.
-		if d := r.Ended.Sub(r.Opened); r.Complete && d >= tm.NearDeadline && d <= tm.MaxRequestDuration {
+		if d := r.Ended.Sub(r.Opened); r.Long && r.Complete && d >= tm.NearDeadline && d <= tm.MaxRequestDuration {
 			long = true
 		}
 	}

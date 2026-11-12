@@ -401,7 +401,7 @@ func TestInstanceRestartEntriesAreBounded(t *testing.T) {
 		want     string
 	}{
 		{"17 entries", seventeen, "must have at most 16 items"},
-		{"the part router", entry(func(r *v1alpha1.InstanceRestart) { r.Part = "router" }), "restarts[0].part"},
+		{"the part routers", entry(func(r *v1alpha1.InstanceRestart) { r.Part = "routers" }), "restarts[0].part"},
 		{"the part worker-x", entry(func(r *v1alpha1.InstanceRestart) { r.Part = "worker-x" }), "restarts[0].part"},
 		{"the part worker- with no number", entry(func(r *v1alpha1.InstanceRestart) { r.Part = "worker-" }), "restarts[0].part"},
 		{"no part", entry(func(r *v1alpha1.InstanceRestart) { r.Part = "" }), "restarts[0].part"},
