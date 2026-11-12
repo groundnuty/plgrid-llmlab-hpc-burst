@@ -498,6 +498,31 @@ func TestBulkClosedBeforeHeadersRaisesNoPause(t *testing.T) {
 	}
 }
 
+// TestBulkIdleCutUnregistersWithoutPause (the plan's R5, HBEP-6:518): a bulk request that gets no
+// byte within idleTimeout, as on a frozen bulk work connection, is cut by the front as on the token
+// path (504, front_idle), and it also unregisters the bulk transport and re-probes it; the cut counts
+// nothing toward the pause.
+func TestBulkIdleCutUnregistersWithoutPause(t *testing.T) {
+	f := newBulkFront(t, 1, false, func(c *Config) { c.IdleTimeout = Duration(300 * time.Millisecond) })
+	hold := make(chan struct{})
+	t.Cleanup(func() { close(hold) })
+	f.engBulk.Set(enginetest.Behaviour{Hold: hold})
+	resp := f.post("/v1/chat/completions", chatPlain)
+	body := readAll(t, resp)
+	if resp.StatusCode != http.StatusGatewayTimeout || !strings.Contains(body, "request_timeout") {
+		t.Fatalf("a bulk request with no byte past idleTimeout: %d %s, want 504 request_timeout", resp.StatusCode, body)
+	}
+	if f.bulk.tun.Registered(f.uids[0]) {
+		t.Error("the idle cut left the bulk transport registered")
+	}
+	if _, ok := f.bulk.prober.reprobeAt(); !ok {
+		t.Error("the idle cut did not put the bulk transport on the re-probe schedule")
+	}
+	if n := f.router.failures(f.keys[0]); n != 0 || f.router.Paused(f.keys[0]) {
+		t.Errorf("the idle cut counted toward the pause: failures %d", n)
+	}
+}
+
 // TestBulkFiveHundredCountsTowardPause: a response's own outcome counts as on the token path: three
 // 5xx answers through the bulk transport pause the Instance.
 func TestBulkFiveHundredCountsTowardPause(t *testing.T) {
