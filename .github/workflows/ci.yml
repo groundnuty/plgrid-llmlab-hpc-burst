@@ -12,6 +12,9 @@
 # The go, go own-timeout, crd and launcher-k3s jobs also fetch the pinned frp binaries
 # (hack/fetch-frp.sh) and set HPCBURST_REQUIRE_FRP=1, so the tests that start frps and frpc fail rather
 # than skip without them.
+# The go, go own-timeout and crd jobs also fetch the pinned Envoy binary (hack/fetch-envoy.sh, issue
+# #429) and set HPCBURST_REQUIRE_ENVOY=1, so the tests that run Envoy fail rather than skip without it.
+# launcher-k3s runs only internal/launcher and cmd/hpcburst, which run no Envoy.
 # The go, go own-timeout and crd jobs also provide OpenSSH's sshd (HPCBURST_SSHD) for the ssh-mode tunnel tests,
 # which fail under HPCBURST_REQUIRE_FRP=1 without it; the runner's sshd service is never started.
 #
@@ -21,8 +24,9 @@
 # The scripts check every file against its pin on every run, restored or not, and download what does
 # not match, so the cache only decides whether a download is needed, never what runs. Each cache has
 # one exact key: the runner's OS and architecture, a hash of the files that name the pins (the
-# scripts hold the frp and Kubernetes pins, internal/launcher/k3s-pins.txt holds k3s's), and, for k3s,
-# the versions the job fetches. No restore-keys, so an old entry is never used for a new pin.
+# scripts hold the frp and Kubernetes pins, internal/launcher/k3s-pins.txt holds k3s's and
+# internal/agent/envoypin/envoy-pins.txt Envoy's), and, for k3s, the versions the job fetches. No
+# restore-keys, so an old entry is never used for a new pin.
 #
 # GitHub scopes a cache to the branch that saved it: a run reads its own branch's caches and the
 # default branch's, and a pull request's own cache is visible to no other pull request. So what
@@ -205,6 +209,33 @@ jobs:
             ${{ runner.temp }}/hpcburst-tools
           key: ${{ steps.binaries.outputs.cache-primary-key }}
 
+      # Envoy 1.40.2, beta's Instance router (HBEP-5; issue #429), for the tests that run it. Its cache
+      # entry is its own, keyed by the script and the pins file it reads, so a change to the frp or
+      # Kubernetes pins does not download Envoy's 107 MB again, nor the reverse. hack/fetch-envoy.sh
+      # checks the binary against internal/agent/envoypin/envoy-pins.txt on every run, restored or not.
+      # HPCBURST_REQUIRE_ENVOY=1 makes internal/testenv.EnvoyBinary fail, instead of skip, without it.
+      - name: Restore the cached Envoy binary
+        id: envoy
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/envoy
+          key: envoy-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-envoy.sh', 'internal/agent/envoypin/envoy-pins.txt') }}
+
+      - name: Fetch the pinned Envoy binary
+        run: |
+          bash hack/fetch-envoy.sh "$RUNNER_TEMP/envoy"
+          {
+            echo "HPCBURST_ENVOY_DIR=$RUNNER_TEMP/envoy"
+            echo "HPCBURST_REQUIRE_ENVOY=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Save the Envoy binary to the cache
+        if: steps.envoy.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/envoy
+          key: ${{ steps.envoy.outputs.cache-primary-key }}
+
       # The ssh-mode tunnel tests (internal/agent) run OpenSSH's sshd as this user, in inetd
       # mode, with no service and no root. With HPCBURST_REQUIRE_FRP=1 a missing sshd fails them.
       # The package is installed only when sshd is missing, with policy-rc.d refusing to start
@@ -359,6 +390,33 @@ jobs:
             ${{ runner.temp }}/frp
             ${{ runner.temp }}/hpcburst-tools
           key: ${{ steps.binaries.outputs.cache-primary-key }}
+
+      # Envoy 1.40.2, beta's Instance router (HBEP-5; issue #429), for the tests that run it. Its cache
+      # entry is its own, keyed by the script and the pins file it reads, so a change to the frp or
+      # Kubernetes pins does not download Envoy's 107 MB again, nor the reverse. hack/fetch-envoy.sh
+      # checks the binary against internal/agent/envoypin/envoy-pins.txt on every run, restored or not.
+      # HPCBURST_REQUIRE_ENVOY=1 makes internal/testenv.EnvoyBinary fail, instead of skip, without it.
+      - name: Restore the cached Envoy binary
+        id: envoy
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/envoy
+          key: envoy-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-envoy.sh', 'internal/agent/envoypin/envoy-pins.txt') }}
+
+      - name: Fetch the pinned Envoy binary
+        run: |
+          bash hack/fetch-envoy.sh "$RUNNER_TEMP/envoy"
+          {
+            echo "HPCBURST_ENVOY_DIR=$RUNNER_TEMP/envoy"
+            echo "HPCBURST_REQUIRE_ENVOY=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Save the Envoy binary to the cache
+        if: steps.envoy.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/envoy
+          key: ${{ steps.envoy.outputs.cache-primary-key }}
 
       # The ssh-mode tunnel tests (internal/agent) run OpenSSH's sshd as this user, in inetd
       # mode, with no service and no root. With HPCBURST_REQUIRE_FRP=1 a missing sshd fails them.
@@ -574,6 +632,33 @@ jobs:
             ${{ runner.temp }}/frp
             ${{ runner.temp }}/hpcburst-tools
           key: ${{ steps.binaries.outputs.cache-primary-key }}
+
+      # Envoy 1.40.2, beta's Instance router (HBEP-5; issue #429), for the tests that run it. Its cache
+      # entry is its own, keyed by the script and the pins file it reads, so a change to the frp or
+      # Kubernetes pins does not download Envoy's 107 MB again, nor the reverse. hack/fetch-envoy.sh
+      # checks the binary against internal/agent/envoypin/envoy-pins.txt on every run, restored or not.
+      # HPCBURST_REQUIRE_ENVOY=1 makes internal/testenv.EnvoyBinary fail, instead of skip, without it.
+      - name: Restore the cached Envoy binary
+        id: envoy
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/envoy
+          key: envoy-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-envoy.sh', 'internal/agent/envoypin/envoy-pins.txt') }}
+
+      - name: Fetch the pinned Envoy binary
+        run: |
+          bash hack/fetch-envoy.sh "$RUNNER_TEMP/envoy"
+          {
+            echo "HPCBURST_ENVOY_DIR=$RUNNER_TEMP/envoy"
+            echo "HPCBURST_REQUIRE_ENVOY=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Save the Envoy binary to the cache
+        if: steps.envoy.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/envoy
+          key: ${{ steps.envoy.outputs.cache-primary-key }}
 
       # The ssh-mode tunnel tests (internal/agent) run OpenSSH's sshd as this user, in inetd
       # mode, with no service and no root. With HPCBURST_REQUIRE_FRP=1 a missing sshd fails them.

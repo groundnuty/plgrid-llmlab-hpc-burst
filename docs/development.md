@@ -174,6 +174,7 @@ The lifecycle controller never imports `internal/slurm` or `internal/providerctl
 - `go.mod` and `go.sum` for the Go modules;
 - `internal/launcher/k3s-pins.txt` for k3s;
 - `internal/launcher/frp-pins.txt` for frps and frpc;
+- `internal/agent/envoypin/envoy-pins.txt` for Envoy;
 - `hack/test-binaries.sh` for the test host's `kube-apiserver`, `kube-controller-manager` and `etcd`.
 
 The table below lists the pins of the build and the tests, the test host's binaries included.
@@ -193,6 +194,7 @@ The Kubernetes libraries match crossplane-runtime v2.4.3, which HBEP-4's provide
 | `kube-apiserver`, `kube-controller-manager` (the assembled test host of `internal/testenv`) | v1.36.2, sha256-pinned in `hack/test-binaries.sh` |
 | `etcd` (the assembled test host) | v3.6.8, sha256-pinned in `hack/test-binaries.sh` |
 | `frps`, `frpc` (HBEP-6's tunnel; the launcher runs frps, the tests start both) | [frp](https://github.com/fatedier/frp) v0.71.1 (Apache-2.0). Pinned in `internal/launcher/frp-pins.txt` for linux_amd64 and linux_arm64, embedded in the launcher, which checks frps against it before every start. `hack/fetch-frp.sh DIR` keeps its own linux_amd64 copy of the sums (the pin spike S1c used) for the tests, and `TestFrpPinsAgreeWithTheFetchScript` compares them; `hack/fetch-frp.sh --agent-builds DIR` reads the pins file itself for both architectures. `cpu_arch` in the script (the table is `hack/cpu-arch.sh`'s, which `hack/build-agents.sh` reads too) maps frp's `amd64` and `arm64` to `x86_64` and `aarch64`, as the launcher's `archTable` does, and `TestScriptsMapArchitecturesAsCPUArchOfDoes` (`internal/launcher/frp_fetchscript_test.go`) compares the two |
+| `envoy` (beta's Instance router, HBEP-5; the tests run it) | [Envoy](https://github.com/envoyproxy/envoy) 1.40.2 (Apache-2.0), the linux x86_64 and aarch_64 release binaries. Pinned in `internal/agent/envoypin/envoy-pins.txt`, from the release's signed `checksums.txt.asc` (spike S13). `hack/fetch-envoy.sh DIR` reads the same file and installs `DIR/envoy-1.40.2/envoy`, and `internal/testenv`'s `EnvoyBinary` checks a test's binary against it (`HPCBURST_ENVOY_DIR=DIR`; `HPCBURST_REQUIRE_ENVOY=1` turns a skip into a failure) |
 | Go toolchain (the compiler CI runs) | go1.26.0 linux_amd64 from [go.dev/dl](https://go.dev/dl/) (BSD-3-Clause). The tarball's sha256 (go.dev's own listing) and the sha256 of `go/bin/go` are pinned in `hack/go-pins.txt`, which `hack/fetch-go.sh` reads; go.mod's go line must have a line there |
 
 Kubernetes' explicit ±1-minor skew rule is written for kubectl. client-go instead documents compatibility through the APIs a client and a cluster share ([client-go compatibility](https://github.com/kubernetes/client-go/blob/v0.35.3/README.md#compatibility-client-go---kubernetes-clusters)). A 0.35 client against a 1.36 server is a reasonable choice for shared stable APIs, and the tests against k3s 1.36 check the APIs we use. A change to any of these pins is its own PR (HBEP-15, "Upgrading a pinned dependency").
