@@ -699,6 +699,21 @@ spec:
                 x-kubernetes-validations:
                 - message: source names exactly one of served and managed
                   rule: has(self.served) != has(self.managed)
+              workersPerInstance:
+                description: |-
+                  WorkersPerInstance is the number of workers in each Instance (beta; HBEP-7,
+                  Several workers): copies of the Instance's engine launch, each using
+                  tensor-parallel-size times pipeline-parallel-size GPUs of the Instance's one
+                  node, behind the Instance's router. Absent is 1, alpha's one worker. The
+                  controller copies it into each Instance's launch.workers when it creates
+                  the Instance, so a change applies only to Instances created after it, a
+                  replacement at handover or a scale-up, and running Instances keep their
+                  count. It is capacity, not a deployment-ID input (HBEP-3), like instances.
+                  The Allocation's GPU count is this times tensor-parallel-size times
+                  pipeline-parallel-size, refused on a Provider, never capped, above the
+                  partition's gpusPerNode or the QOS's maxGpusPerUser (HBEP-7, Provisioning).
+                format: int32
+                type: integer
               workload:
                 description: |-
                   Workload holds the shapes for warm-up and qualification (HBEP-7, What

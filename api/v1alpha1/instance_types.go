@@ -137,6 +137,19 @@ type Launch struct {
 	//
 	// +optional
 	Router InstanceRouter `json:"router,omitempty"`
+
+	// Workers is the number of the Instance's workers (beta; HBEP-7, Several
+	// workers): the ModelDeployment's workersPerInstance when the controller
+	// created the Instance, kept for the Instance's life by the spec's
+	// immutability rule. Each worker runs this launch on its own GPUs, GPUs being
+	// the count each uses, and its own socket. Absent is 1, alpha's one worker,
+	// and the controller sets it only above 1, so an Instance of one worker has
+	// the launch it had before. Everything about a running Instance reads it: its
+	// desired workers, the front's cap (HBEP-5, Load bound and cap) and HBEP-8's
+	// inventory. It is capacity, not a deployment-ID input (HBEP-3).
+	//
+	// +optional
+	Workers *int32 `json:"workers,omitempty"`
 }
 
 // InstanceRouter is a router an Instance can run in front of its workers
@@ -330,6 +343,19 @@ type InstanceStatus struct {
 	// +kubebuilder:validation:Minimum=0
 	HealthyWorkers *int32 `json:"healthyWorkers,omitempty"`
 
+	// Workers is the durable state of each of the Instance's workers (beta;
+	// HBEP-7, Several workers), one entry per worker of launch.workers, written by
+	// the lifecycle controller as each worker is verified, qualified and warmed
+	// up. The controller computes each worker's verifiedGeneration in the agent's
+	// desired state from it, so a restarted controller resumes with every
+	// verified worker still taking traffic. It is absent for an Instance of one
+	// worker, whose state stays in the Instance's own conditions and records.
+	//
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Workers []InstanceWorker `json:"workers,omitempty"`
+
 	// Agent is what the controller keeps of the agent's registration for this
 	// Instance (HBEP-7, The allocation agent).
 	//
@@ -383,6 +409,42 @@ type AgentRegistration struct {
 
 	// RegisteredTime is when the controller accepted the registration.
 	RegisteredTime metav1.Time `json:"registeredTime"`
+}
+
+// InstanceWorker is one worker's durable state (HBEP-7, Several workers).
+type InstanceWorker struct {
+	// Name is the worker's name, worker-<i> (WorkerName).
+	//
+	// +kubebuilder:validation:Pattern=`^worker-[0-9]+$`
+	Name string `json:"name"`
+
+	// VerifiedGeneration is the worker's restart generation last verified,
+	// qualified and warmed up: the agent's readiness answers 200 for the worker
+	// only while its current generation equals it. Absent until the worker's
+	// first verification passes.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	VerifiedGeneration *int64 `json:"verifiedGeneration,omitempty"`
+
+	// Record names the worker's latest verification record,
+	// ver-<instance UID>-<worker>-<generation> (HBEP-7, Instance start).
+	//
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	Record string `json:"record,omitempty"`
+
+	// Verdict is that record's verdict.
+	//
+	// +optional
+	// +kubebuilder:validation:MaxLength=64
+	Verdict string `json:"verdict,omitempty"`
+
+	// WarmedUp is whether the worker's warm-up for its current generation is
+	// done.
+	//
+	// +optional
+	WarmedUp bool `json:"warmedUp,omitempty"`
 }
 
 // InstanceRestart is one restart of a part of an Instance, recorded before the
