@@ -301,6 +301,8 @@ func (p *pass) createInstance(pv *providerView, cid *classID, pred *v1alpha1.Ins
 			Launch:        renderLaunch(p.md, p.plan),
 		},
 	}
+	// Beta, opt-in: the router the Instance runs for its life (#429).
+	in.Spec.Launch.Router = p.r.Config.InstanceRouter
 	if pred != nil {
 		in.Annotations = map[string]string{v1alpha1.AnnotationPredecessor: pred.Name}
 		if o.successorOf != "" {

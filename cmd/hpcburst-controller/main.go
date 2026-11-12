@@ -71,6 +71,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/lifecycle"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -90,6 +91,11 @@ type flags struct {
 	// controller sends it desired sets; "" is alpha, the relays the
 	// controller's own. The launcher passes the path; none is computed here.
 	relayKeeperSocket string
+	// instanceRouter is the router each new Instance runs in front of its
+	// worker (beta, opt-in; HBEP-5, Inside an Instance; #429): "envoy", or ""
+	// for none, alpha's shape. It is recorded in each Instance's launch at
+	// creation, so a restart with another value changes no running Instance.
+	instanceRouter string
 }
 
 func parse(args []string, stderr io.Writer) (flags, error) {
@@ -105,6 +111,7 @@ func parse(args []string, stderr io.Writer) (flags, error) {
 	fs.BoolVar(&f.leaderElect, "leader-elect", true, "take the lifecycle Lease, a guard against a stale second copy")
 	fs.IntVar(&f.workers, "workers", lifecycle.DefaultWorkers, "work queue workers")
 	fs.StringVar(&f.relayKeeperSocket, "relay-keeper-socket", "", "the relay keeper's Unix socket, in host-dialed mode only (beta): the keeper holds the relays; unset, the controller does (alpha)")
+	fs.StringVar(&f.instanceRouter, "instance-router", "", "the router each new Instance runs in front of its worker (beta): envoy; unset, none (alpha)")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
@@ -136,6 +143,8 @@ func parse(args []string, stderr io.Writer) (flags, error) {
 		return flags{}, fmt.Errorf("--relay-keeper-socket is for --front-mode %s only", agentapi.DialHomeHostDialed)
 	case f.relayKeeperSocket != "" && (!filepath.IsAbs(f.relayKeeperSocket) || len(f.relayKeeperSocket) > agentapi.MaxRelaySocketPath):
 		return flags{}, fmt.Errorf("--relay-keeper-socket must be an absolute path of at most %d bytes", agentapi.MaxRelaySocketPath)
+	case f.instanceRouter != "" && f.instanceRouter != string(v1alpha1.InstanceRouterEnvoy):
+		return flags{}, fmt.Errorf("--instance-router %q: want %s, or unset for no router (alpha)", f.instanceRouter, v1alpha1.InstanceRouterEnvoy)
 	}
 	if f.kubeconfig == "" {
 		f.kubeconfig = filepath.Join(f.host.StateDir, "kubeconfig")
@@ -208,6 +217,7 @@ func run(ctx context.Context, f flags, d deps) error {
 	opts := managerOptions(f, cfg, os.Getenv)
 	opts.Registry = d.registry
 	opts.RelayKeeperSocket = f.relayKeeperSocket
+	opts.InstanceRouter = v1alpha1.InstanceRouter(f.instanceRouter)
 	// One raised-events counter for this copy: the lifecycle controller, its
 	// tunnel-state reader and the Provider managers count into it, and the
 	// lifecycle controller's serving collector exports it (HBEP-8, Raised

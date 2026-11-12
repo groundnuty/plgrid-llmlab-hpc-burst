@@ -34,6 +34,11 @@ type Config struct {
 	// AgentDigest returns the SHA-256, 64 lowercase hex, of the allocation
 	// agent's build for a CPU architecture (HBEP-7, Provisioning).
 	AgentDigest func(cpuArch string) (string, error)
+	// InstanceRouter is the router every new Instance runs in front of its
+	// worker, recorded in its launch.router at creation (beta, opt-in; #429):
+	// "" is alpha, no router. A running Instance keeps what it was created
+	// with.
+	InstanceRouter v1alpha1.InstanceRouter
 }
 
 // Reconciler is the lifecycle controller's reconcile loop, keyed per
