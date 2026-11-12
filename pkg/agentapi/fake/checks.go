@@ -20,15 +20,40 @@ import "github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 // and its result is Done, after the last round, or in the first Step in which
 // the desired state no longer asks for warm-up after rounds were run.
 func (in *instance) applyChecks(e Engine, i agentapi.DesiredInstance, runs bool) {
-	c := i.Checks
+	applyChecksTo(e, i, i.Checks, &in.checks, runs)
+}
+
+// applyWorkerChecks runs each worker's own checks (DesiredWorker.Checks), with several workers
+// (HBEP-7, Several workers): each against its own process, gated on that worker alone running for the
+// desired generations (workerRunsFor), so one worker's restart never holds another's checks back. A
+// worker's results are held on its process and go with it.
+func (in *instance) applyWorkerChecks(e Engine, i agentapi.DesiredInstance) {
+	for _, dw := range i.Workers {
+		w := in.find(dw.Name)
+		if w == nil {
+			continue
+		}
+		applyChecksTo(e, i, dw.Checks, &w.checks, w.runsFor(i, dw))
+	}
+}
+
+// runsFor reports whether this worker runs a process started for its desired generation and the
+// desired Instance generation (or a later one): runsFor for one worker.
+func (w *worker) runsFor(i agentapi.DesiredInstance, dw agentapi.DesiredWorker) bool {
+	return w.phase == agentapi.PartRunning && w.instGen >= i.Generation && w.generation >= dw.Generation
+}
+
+// applyChecksTo runs the checks c asks for into *held, once per verification generation: the
+// Instance's own (applyChecks) or one worker's (applyWorkerChecks).
+func applyChecksTo(e Engine, i agentapi.DesiredInstance, c *agentapi.Checks, held **agentapi.CheckResults, runs bool) {
 	if c == nil {
-		in.finishWarmUp()
+		finishWarmUp(*held)
 		return
 	}
-	if in.checks == nil || in.checks.VerificationGeneration != c.VerificationGeneration {
-		in.checks = &agentapi.CheckResults{VerificationGeneration: c.VerificationGeneration}
+	if *held == nil || (*held).VerificationGeneration != c.VerificationGeneration {
+		*held = &agentapi.CheckResults{VerificationGeneration: c.VerificationGeneration}
 	}
-	res := in.checks
+	res := *held
 
 	if runs && c.Verify != nil && res.Verify == nil {
 		v := e.verify(i, *c.Verify)
@@ -41,7 +66,7 @@ func (in *instance) applyChecks(e Engine, i agentapi.DesiredInstance, runs bool)
 		res.Qualify = &q
 	}
 	if c.WarmUp == nil {
-		in.finishWarmUp()
+		finishWarmUp(res)
 		return
 	}
 	if !runs {
@@ -65,9 +90,9 @@ func (in *instance) applyChecks(e Engine, i agentapi.DesiredInstance, runs bool)
 
 // finishWarmUp marks the held warm-up done, when rounds were run: the desired
 // state no longer asks for more. Results exist only once a round has run.
-func (in *instance) finishWarmUp() {
-	if in.checks != nil && in.checks.WarmUp != nil {
-		in.checks.WarmUp.Done = true
+func finishWarmUp(res *agentapi.CheckResults) {
+	if res != nil && res.WarmUp != nil {
+		res.WarmUp.Done = true
 	}
 }
 

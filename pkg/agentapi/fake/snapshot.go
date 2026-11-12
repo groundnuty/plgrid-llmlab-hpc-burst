@@ -30,11 +30,7 @@ func (a *Agent) snapshot(now time.Time) agentapi.Report {
 	if w := in.find(agentapi.WorkerName(0)); w != nil && w.phase == agentapi.PartRunning {
 		ir.ServingEndpoint = "unix:" + w.socket
 	}
-	ir.Checks = clonePtr(in.checks, func(c agentapi.CheckResults) agentapi.CheckResults {
-		c = cloneCheckResults(c)
-		cutFreeText(&c)
-		return c
-	})
+	ir.Checks = clonePtr(in.checks, reportedChecks)
 	r.Instance = ir
 	return r
 }
@@ -57,6 +53,7 @@ func (a *Agent) workerReport(w *worker, now time.Time) agentapi.WorkerReport {
 		h := a.engine.health(now, Process{Worker: w.name, PID: w.pid, Start: w.start, Generation: w.generation})
 		wr.Health = &h
 	}
+	wr.Checks = clonePtr(w.checks, reportedChecks)
 	return wr
 }
 
@@ -83,4 +80,11 @@ func cutFreeText(c *agentapi.CheckResults) {
 			}
 		}
 	}
+}
+
+// reportedChecks is check results as the report carries them: a copy, with the agent's cuts of free text.
+func reportedChecks(c agentapi.CheckResults) agentapi.CheckResults {
+	c = cloneCheckResults(c)
+	cutFreeText(&c)
+	return c
 }

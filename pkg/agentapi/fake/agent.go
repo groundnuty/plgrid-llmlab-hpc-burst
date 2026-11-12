@@ -112,6 +112,9 @@ type worker struct {
 	instGen    int64 // the Instance's restart generation this process was started for
 	socket     string
 	killAt     time.Time // when a stopping worker is killed (stop.go)
+	// checks are this worker's own checks' results (DesiredWorker.Checks, several workers), held on
+	// this process and gone with it.
+	checks *agentapi.CheckResults
 }
 
 // NewAgent returns an Agent that talks to b as c and takes the time from now
@@ -347,6 +350,13 @@ func checkDesired(d agentapi.DesiredState) error {
 		if c := d.Instance.Checks; c != nil && c.WarmUp != nil {
 			if n := c.WarmUp.TargetSessions; n < 1 || n > agentapi.MaxTargetSessions {
 				return fmt.Errorf("fake agent: warm-up targetSessions is %d, outside 1..%d (agentapi.MaxTargetSessions)", n, agentapi.MaxTargetSessions)
+			}
+		}
+		for _, dw := range d.Instance.Workers {
+			if c := dw.Checks; c != nil && c.WarmUp != nil {
+				if n := c.WarmUp.TargetSessions; n < 1 || n > agentapi.MaxTargetSessions {
+					return fmt.Errorf("fake agent: %s's warm-up targetSessions is %d, outside 1..%d (agentapi.MaxTargetSessions)", dw.Name, n, agentapi.MaxTargetSessions)
+				}
 			}
 		}
 	}
