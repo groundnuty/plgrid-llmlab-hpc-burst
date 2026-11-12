@@ -49,6 +49,13 @@ func newBulkRig(t *testing.T) *bulkRig {
 // frontBulk, 127.0.0.1:<port>, when it is set (launcher.WriteFrpsBulkConfigWithFront).
 func newBulkRigWith(t *testing.T, frontBulk string) *bulkRig {
 	t.Helper()
+	return newBulkRigFronts(t, "", frontBulk)
+}
+
+// newBulkRigFronts is newBulkRig whose first frps posts to the front's plugin at frontToken and
+// whose second posts to the front's bulk plugin at frontBulk, each when it is set.
+func newBulkRigFronts(t *testing.T, frontToken, frontBulk string) *bulkRig {
+	t.Helper()
 	frps, frpc := testenv.FrpBinaries(t)
 	checkRootK3s(t)
 	r := &bulkRig{t: t, host: agentapi.Host{StateDir: shortDir(t), PortBase: bulkRigBase}, frpc: frpc}
@@ -75,6 +82,9 @@ func newBulkRigWith(t *testing.T, frontBulk string) *bulkRig {
 		t.Fatal(err)
 	}
 	cfgFirst, err := launcher.WriteFrpsConfig(r.host, r.pwFirst)
+	if frontToken != "" {
+		cfgFirst, err = launcher.WriteFrpsConfigWithFront(r.host, r.pwFirst, frontToken)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
