@@ -95,6 +95,10 @@ type pathState struct {
 	// ago. A successful read that does not list it ends the run, so its clock starts again; a
 	// read that fails is skipped.
 	suspects map[string]time.Time
+
+	// bulk is the second frps's state, set only with --bulk-path (tunnel_bulk.go); nil means nothing
+	// of the bulk path runs, and readOnce reads one list.
+	bulk *bulkPathState
 }
 
 func (s *pathState) clock() time.Time {
@@ -106,6 +110,7 @@ func (s *pathState) clock() time.Time {
 
 // run returns nil once ctx ends, also while it waits for the cache.
 func (s *pathState) run(ctx context.Context) error {
+	defer s.waitBulk() // nothing of the state outlives its stop
 	if !s.cache.WaitForCacheSync(ctx) {
 		if ctx.Err() != nil {
 			return nil
@@ -175,6 +180,11 @@ func (s *pathState) readOnce(ctx context.Context) {
 		}
 	}
 	tunnelReads.Add(1)
+	// The second frps's list is read after every condition is written, and apart from this loop
+	// (startBulkRead): TunnelConnected, which follows the first list only, never waits for it, and nor
+	// does the next pass (HBEP-6, The bulk path: an Instance's first `ready` doesn't wait for the bulk
+	// path).
+	s.startBulkRead(ctx, uids)
 }
 
 // apply writes the condition on the Instance when its status or reason differs from the stored
