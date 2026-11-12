@@ -136,18 +136,20 @@ func openVerifiedEnvoy(path string) (*os.File, error) {
 	return f, nil
 }
 
-// waitSockets waits until each path is a Unix socket, or the process exits, or the deadline passes.
+// waitSockets waits until the process listens on each path, or exits, or the deadline passes.
+// Listening is read from /proc/net/unix by the process's own socket inodes: a socket file exists from
+// Envoy's bind, a moment before its listen, and a check or a connect in between finds no listener (seen
+// twice in 100 starts under load), so the file's existence alone is not readiness.
 func waitSockets(g *procgroup.Group, within time.Duration, paths ...string) error {
 	deadline := time.NewTimer(within)
 	defer deadline.Stop()
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
 	for {
+		listening, _ := listeningUnixSockets(socketInodes(g.PID()))
 		all := true
 		for _, p := range paths {
-			if fi, err := os.Lstat(p); err != nil || fi.Mode()&os.ModeSocket == 0 {
-				all = false
-			}
+			all = all && listening[p]
 		}
 		if all {
 			return nil
