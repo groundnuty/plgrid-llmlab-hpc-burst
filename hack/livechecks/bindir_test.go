@@ -9,6 +9,7 @@ package livechecks
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -129,15 +130,53 @@ func TestEveryStackRowWithARightBinDirPassesTheCheckAndReadsTheQueue(t *testing.
 	}
 }
 
-// The rows that start no stack are not asked for the layout: the accounting rows and the pre-staging row need no frp. Their directory
-// need not exist at all.
+// The rows that start no stack are not asked for the layout: the accounting rows, the conformance rows, the pre-staging row and the reach
+// rows (the host-dialed ones too) need no frp and no k3s from LIVE_BIN_DIR, which here names a directory that does not exist. Each
+// is run without --yes, which every cluster row answers with exit 4 once its settings pass, so a refusal for any other reason (exit 3, or
+// the layout's words) fails the case; and the row set is the script's own table, read, so that a row added later is in it or named here.
 func TestTheRowsThatStartNoStackAreNotAskedForTheBinDir(t *testing.T) {
-	w := newAlphaWorld(t)
-	w.alphaSettings(func(m map[string]string) { m["LIVE_BIN_DIR"] = "/no/such/dir" })
-	for _, row := range []string{"gpu-accounting-helios", "gpu-accounting-athena"} {
-		res := w.run(nil, "--run", row)
-		if res.code != 4 || strings.Contains(res.out, "LIVE_BIN_DIR") {
-			t.Errorf("%s: exit %d, want 4 (not run, no --yes) and no word of LIVE_BIN_DIR:\n%s", row, res.code, res.out)
+	w := newWorld(t)
+	w.reachSettings(func(m map[string]string) { m["LIVE_BIN_DIR"] = "/no/such/dir" })
+	w.useAlphaStubs()
+	// The cluster table's rows that the stack rows are not: written out, and checked against the table below.
+	noStack := []string{
+		"gpu-accounting-helios", "gpu-accounting-athena",
+		"conformance-helios", "conformance-helios-gh200", "conformance-athena",
+		"alpha-athena-now-stage",
+		"reach-helios", "reach-athena", "reach-host-dialed-helios", "reach-host-dialed-athena",
+	}
+	b, err := os.ReadFile(scriptPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inTable := map[string]bool{}
+	for _, l := range block(t, string(b), "CLUSTER SHAPES") {
+		inTable[strings.Split(l, "|")[0]] = true
+	}
+	stack := map[string]bool{}
+	for _, s := range stackRows(t) {
+		stack[s.row] = true
+	}
+	for _, row := range noStack {
+		if !inTable[row] {
+			t.Errorf("%s is not a row of the script's cluster table", row)
 		}
+		if stack[row] {
+			t.Errorf("%s starts the stack, so it is not a row to leave out of the layout check", row)
+		}
+	}
+	// Every other cluster row is a stack row or is named above; real-engine runs a plan of its own and takes no bin dir either.
+	for row := range inTable {
+		if !stack[row] && !slices.Contains(noStack, row) && row != "real-engine" {
+			t.Errorf("%s is a cluster row that is neither a stack row nor named as one that starts no stack: add it to the right list", row)
+		}
+	}
+	for _, row := range noStack {
+		t.Run(row, func(t *testing.T) {
+			res := w.run(nil, "--run", row)
+			if res.code != 4 || strings.Contains(res.out, "LIVE_BIN_DIR") {
+				t.Errorf("exit %d, want 4 (not run, no --yes) and no word of LIVE_BIN_DIR:\n%s", res.code, res.out)
+			}
+		})
 	}
 }
