@@ -156,6 +156,16 @@ func (b *Backend) desiredInstance(ctx context.Context, in *v1alpha1.Instance) (*
 		}
 		di.HubToken = tok
 	}
+	// Several workers: each worker has its own checks and verifiedGeneration, and the Instance's own
+	// checks stay empty (HBEP-7, Several workers; Q6).
+	if several(in) {
+		ws, err := b.desiredWorkers(ctx, in, md)
+		if err != nil {
+			return nil, err
+		}
+		di.Workers = ws
+		return di, nil
+	}
 	switch in.Status.Phase {
 	case v1alpha1.InstanceStarting, v1alpha1.InstanceVerifying:
 		checks, err := b.checks(ctx, in, md)
@@ -179,17 +189,11 @@ func (b *Backend) checks(ctx context.Context, in *v1alpha1.Instance, md *v1alpha
 	if !isTrue(in.Status.Conditions, v1alpha1.ConditionVerified) {
 		req := &agentapi.VerifyRequest{}
 		if !qualified {
-			var rec appsv1.ControllerRevision
-			if err := b.Reader.Get(ctx, client.ObjectKey{Namespace: in.Namespace, Name: in.Spec.IdentityRecord}, &rec); err != nil {
-				return nil, agentapi.Errorf(agentapi.CodeUnavailable, "read identity record %s: %v", in.Spec.IdentityRecord, err)
-			}
-			files, err := recordFiles(&rec)
+			files, err := b.identityFiles(ctx, in)
 			if err != nil {
 				return nil, err
 			}
-			for _, f := range files {
-				req.Files = append(req.Files, agentapi.FileDigest{Path: f.Path, SHA256: f.SHA256})
-			}
+			req.Files = files
 		}
 		c.Verify = req
 		return c, nil
@@ -216,6 +220,23 @@ func (b *Backend) checks(ctx context.Context, in *v1alpha1.Instance, md *v1alpha
 		return nil, nil
 	}
 	return c, nil
+}
+
+// identityFiles is the identity record's file list, which a verification that rehashes carries.
+func (b *Backend) identityFiles(ctx context.Context, in *v1alpha1.Instance) ([]agentapi.FileDigest, error) {
+	var rec appsv1.ControllerRevision
+	if err := b.Reader.Get(ctx, client.ObjectKey{Namespace: in.Namespace, Name: in.Spec.IdentityRecord}, &rec); err != nil {
+		return nil, agentapi.Errorf(agentapi.CodeUnavailable, "read identity record %s: %v", in.Spec.IdentityRecord, err)
+	}
+	files, err := recordFiles(&rec)
+	if err != nil {
+		return nil, err
+	}
+	var out []agentapi.FileDigest
+	for _, f := range files {
+		out = append(out, agentapi.FileDigest{Path: f.Path, SHA256: f.SHA256})
+	}
+	return out, nil
 }
 
 func (b *Backend) modelDeployment(ctx context.Context, in *v1alpha1.Instance) (*v1alpha1.ModelDeployment, error) {

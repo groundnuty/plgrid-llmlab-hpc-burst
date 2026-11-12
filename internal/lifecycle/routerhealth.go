@@ -153,12 +153,17 @@ func routerAdmitsReady(in *v1alpha1.Instance, av agentView) bool {
 	if rr == nil || rr.Phase != agentapi.PartRunning {
 		return false
 	}
+	// Every worker: worker-0 with one, each with several (HBEP-7, Several workers, Becoming ready).
+	healthy := map[string]bool{}
 	for _, w := range rr.Workers {
-		if w.Name == v1alpha1.WorkerName(0) && w.Healthy {
-			return true
+		healthy[w.Name] = w.Healthy
+	}
+	for _, w := range workerNames(in) {
+		if !healthy[w] {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // routerRung applies the router's signal to an Instance behind a router, ready or not yet: the router
