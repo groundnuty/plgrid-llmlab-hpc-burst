@@ -61,6 +61,22 @@ func VerificationRecordName(instance types.UID, generation int64) (string, error
 	return VerificationRecordPrefix + string(instance) + "-" + strconv.FormatInt(generation, 10), nil
 }
 
+// WorkerVerificationRecordName is the name of one verification of one worker of an Instance of several
+// workers: ver-<instance UID>-<worker>-<generation>, the generation counting that worker's
+// verifications from 1 (HBEP-7, Several workers). An Instance of one worker keeps VerificationRecordName.
+func WorkerVerificationRecordName(instance types.UID, worker string, generation int64) (string, error) {
+	if _, err := VerificationRecordName(instance, generation); err != nil {
+		return "", err
+	}
+	if !workerName.MatchString(worker) {
+		return "", fmt.Errorf("a worker's verification record needs a worker name, worker-<i>; got %q", worker)
+	}
+	return VerificationRecordPrefix + string(instance) + "-" + worker + "-" + strconv.FormatInt(generation, 10), nil
+}
+
+// workerName is a worker's name, worker-<i> with no leading zero (WorkerName).
+var workerName = regexp.MustCompile(`^worker-(0|[1-9][0-9]*)$`)
+
 // ParseVerificationRecordName returns the Instance UID and the generation that
 // a verification record's name holds. It accepts exactly the names
 // VerificationRecordName returns.
@@ -108,6 +124,25 @@ func NewVerificationRecord(namespace, modelDeployment, deploymentID string, inst
 		return nil, err
 	}
 	name, err := VerificationRecordName(instance, generation)
+	if err != nil {
+		return nil, err
+	}
+	rec, err := newRecord(name, namespace, RecordVerification, modelDeployment, deploymentID, instance, data)
+	if err != nil {
+		return nil, err
+	}
+	rec.Revision = generation
+	return rec, nil
+}
+
+// NewWorkerVerificationRecord is NewVerificationRecord for one worker of an Instance of several workers,
+// named WorkerVerificationRecordName (HBEP-7, Several workers). The labels and the contents are a
+// verification record's; only the name carries the worker.
+func NewWorkerVerificationRecord(namespace, modelDeployment, deploymentID string, instance types.UID, worker string, generation int64, data []byte) (*appsv1.ControllerRevision, error) {
+	if _, err := IdentityRecordName(deploymentID); err != nil {
+		return nil, err
+	}
+	name, err := WorkerVerificationRecordName(instance, worker, generation)
 	if err != nil {
 		return nil, err
 	}
