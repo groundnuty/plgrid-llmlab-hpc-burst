@@ -155,6 +155,11 @@ func TestTheRouterProbeSignal(t *testing.T) {
 		if r, ok := lastRestart(rg, in.Name); !ok || r.Part != v1alpha1.PartRouter || r.Signal != v1alpha1.ReasonProbeFailing {
 			t.Errorf("the last restart is %+v, want the router's for ProbeFailing", r)
 		}
+		// The report that raised the signal holds the worker healthy, so only the rung's own write makes
+		// the Instance unroutable: healthyWorkers 0 at the Step of the restart.
+		if h := healthyWorkersOf(rg, in.Name); h == nil || *h != 0 {
+			t.Errorf("at the router rung, healthyWorkers %v, want 0 though the stale report holds the worker healthy", h)
+		}
 	})
 	t.Run("control: no worker healthy", func(t *testing.T) {
 		rg, in, ag := routerRig(t)
