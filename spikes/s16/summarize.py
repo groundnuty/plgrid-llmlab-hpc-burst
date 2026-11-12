@@ -403,6 +403,63 @@ def measured_slopes(res):
     return r_front, r_ssh, low
 
 
+def lstsq(rows, ys):
+    """Least squares by the normal equations, solved with partial pivoting (no numpy)."""
+    k = len(rows[0])
+    m = [[sum(x[i] * x[j] for x in rows) for j in range(k)] + [sum(x[i] * y for x, y in zip(rows, ys))] for i in range(k)]
+    for i in range(k):
+        p = max(range(i, k), key=lambda r: abs(m[r][i]))
+        m[i], m[p] = m[p], m[i]
+        for r in range(k):
+            if r != i:
+                f = m[r][i] / m[i][i]
+                for j in range(i, k + 1):
+                    m[r][j] -= f * m[i][j]
+    return [m[i][k] / m[i][i] for i in range(k)]
+
+
+def host_features(q, n):
+    """The refit's terms: tokens/s / 1000, tunnels, their product (a per-token cost that grows
+    with the tunnel count, as the front's did), and a constant."""
+    return [q, n, n * q, 1.0]
+
+
+def front_host_points(res):
+    """S16's own measurements of the front host in direct mode, frps plus the front process
+    (its proxy, dial-home listener and probe), per runner class: the R_front runs' proxied arm
+    (10-100 tunnels, 0.2-7.9 k tokens/s) and the re-login runs' no-event pre-windows (1-600
+    tunnels at 5 tokens/s each), the valid runs only and none host-bound."""
+    tokens = {}
+    for r in read_csv(os.path.join(res, "tunnels.csv")):
+        tokens[r["run_id"]] = tokens.get(r["run_id"], 0) + int(r["tokens"])
+    pts = {}
+    for r in read_csv(os.path.join(res, "rfront.csv")):
+        if r["via"] == "front" and r["valid"] == "True" and not bound(r.get("host_busy")):
+            pts.setdefault(vendor(r["cpu_model"]), []).append((num(r["ktok_s"]), int(r["n"]), num(r["front_cores"]) + num(r["frps_cores"])))
+    for r in read_csv(os.path.join(res, "relogin.csv")):
+        if r["variant"] == "none" and r["valid"] == "True" and r.get("pre_start"):
+            secs = int(float(r["pre_end"]) - float(r["pre_start"]))
+            q = tokens.get(r["run_id"], 0) / secs / 1000.0
+            pts.setdefault(vendor(r["cpu_model"]), []).append((q, int(r["n"]), num(r["pre_front_cores"]) + num(r["pre_frps_cores"])))
+    return pts
+
+
+def front_host_fit(points):
+    """cores = A q + B n + D n q + C over the points, with the observed/predicted range over the
+    points of at least 0.05 cores (smaller ones are within a tick or two of nothing) and the rms."""
+    coef = lstsq([host_features(q, n) for q, n, _ in points], [y for _, _, y in points])
+    pred = lambda q, n: sum(a * b for a, b in zip(coef, host_features(q, n)))
+    ratios = [y / pred(q, n) for q, n, y in points if y >= 0.05 and pred(q, n) > 0]
+    rms = (sum((y - pred(q, n)) ** 2 for q, n, y in points) / len(points)) ** 0.5
+    return {"A": coef[0], "B": coef[1], "D": coef[2], "C": coef[3], "n_max": max(n for _, n, _ in points),
+            "points": len(points), "ratio_min": min(ratios), "ratio_max": max(ratios), "rms": rms}
+
+
+def refit_per_core(f, n):
+    """tokens/s one front core carries at n tunnels under the refit: A q + B n + D n q + C = 0.7."""
+    return max(0.0, (BUDGET - f["B"] * n - f["C"]) / (f["A"] + f["D"] * n) * 1000.0)
+
+
 def cmd_budget(res):
     r_front, r_ssh, low = measured_slopes(res)
     print("Measured slopes (cores per 1,000 tokens/s):")
@@ -412,6 +469,14 @@ def cmd_budget(res):
         print("  R_ssh   %-5s %-24s %s" % (k, c, "%.4f (fixed %.5f, %d points)" % (f["slope"], f["intercept"], f["n"]) if f else "-"))
     for k, v in sorted(low.items()):
         print("  R_ssh   %-5s at one stream per relay (the worst level, every cipher): %.4f" % (k, v))
+    print("\nS16's refit of the front host in direct mode (frps + the front process), cores = A q + B n + D n q + C:")
+    for ven, pts in sorted(front_host_points(res).items()):
+        f = front_host_fit(pts)
+        rates = ", ".join("%d tunnels %5.0f%s" % (n, refit_per_core(f, n), "" if n <= f["n_max"] else " (past the fit's range)")
+                          for n in (100, 300, 600))
+        print("  %-5s A %.4f, B %.6f, D %.6f, C %.4f; %d points, 1-%d tunnels; observed/predicted %.2f-%.2f, rms %.3f cores"
+              % (ven, f["A"], f["B"], f["D"], f["C"], f["points"], f["n_max"], f["ratio_min"], f["ratio_max"], f["rms"]))
+        print("        tokens/s per front core at 70%%: %s" % rates)
     print("\nTokens/s per front core at 70%, with S14's per-runner a, b, c (S14_FITS), against S14's provisional reserves:")
     for mode in ("direct", "host-dialed"):
         for ven, fits in S14_FITS[mode].items():

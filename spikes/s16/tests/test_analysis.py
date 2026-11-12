@@ -173,5 +173,32 @@ class Front(unittest.TestCase):
         self.assertEqual(analysis.rfront_pairs(rows), [])
 
 
+class Budget(unittest.TestCase):
+    """summarize.py's refit of the front host: cores = A q + B n + D n q + C."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+        import summarize
+        self.s = summarize
+
+    def test_the_refit_recovers_known_coefficients(self):
+        # Points made from A = 0.2, B = 0.001, D = 0.0003, C = 0.01 at the spike's shapes.
+        pts = []
+        for n, q in ((10, 0.2), (10, 1.6), (50, 1.0), (50, 4.0), (100, 2.0), (100, 8.0), (300, 1.5), (600, 3.0)):
+            pts.append((q, n, 0.2 * q + 0.001 * n + 0.0003 * n * q + 0.01))
+        f = self.s.front_host_fit(pts)
+        for k, want in (("A", 0.2), ("B", 0.001), ("D", 0.0003), ("C", 0.01)):
+            self.assertAlmostEqual(f[k], want, places=9)
+        self.assertAlmostEqual(f["ratio_min"], 1.0, places=9)
+        self.assertEqual(f["n_max"], 600)
+
+    def test_one_core_at_70_percent(self):
+        # At 100 tunnels: 0.7 = 0.2 q + 0.1 + 0.03 q + 0.01, so q = 0.59 / 0.23 = 2.5652 k tokens/s.
+        f = {"A": 0.2, "B": 0.001, "D": 0.0003, "C": 0.01}
+        self.assertAlmostEqual(self.s.refit_per_core(f, 100), 590 / 0.23, places=6)
+        # A tunnel count whose fixed terms alone pass the budget leaves nothing.
+        self.assertEqual(self.s.refit_per_core(f, 800), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -18,23 +18,22 @@ No tunnel failed to come back, no plugin call came near HBEP-6's 1 s rule, and n
   | tunnels | 1 | 10 | 100 | 300 | 600 |
   |---|---:|---:|---:|---:|---:|
   | re-registered, max s (both plugins answered `NewProxy`, so frps registers; witness: the plugins' call logs) | 2.0–2.1 | 2.2 | 2.2–2.3 | 2.4–2.8 | 2.7–3.4 |
-  | routed again, max s, front restart (a probe passed in the new epoch; witness: the front's probe log) | 2.0–2.1 | 2.2–2.3 | 2.5–2.9 | 6.1–10.2 | 10.5 |
+  | routed again, max s, front restart (a probe passed in the new epoch; witness: the front's probe log, an upper bound past 100 tunnels) | 2.0–2.1 | 2.2–2.3 | 2.5–2.9 | 6.1–10.2 | 10.5 |
   | routed again, max s, frps restart | 2.1 | 2.2 | 3.0–3.7 | 7.0–8.0 | 5.0–6.0 |
   | first token through the front, max s, front restart (witness: the client) | 2.5–2.8 | 2.6–2.7 | 3.0–3.5 | 6.7–10.8 | 22.2–25.7 |
   | first token through the front, max s, frps restart | 30.2–30.6 | 30.6–30.7 | 30.9–31.3 | 34.4–35.8 | not reached in 44 s: 223 and 600 of 600 tunnels had none |
   | first token through the front, max s, frps restart, hold-off client (no request until 3 s after a cut) | 3.2 | 3.2 | 3.2–4.0 | 10.3–16.9 | 38.4; and in the other run not reached in 44 s by 600 of 600 |
 
   - **Re-registration is set by frpc's backoff:** its immediate retry finds frps or the front still down, and the next comes 2.0–2.2 s later (frp facts). Above that floor, 600 tunnels added 1.5 s.
-  - **Routed again, past 100 tunnels, is set by the router.** The probe's pass is applied and reported only after its synchronous `Router.Refresh` (`internal/front/probe.go:434`, then `:464`; `tunnel.go:261-290`), and each Refresh rebuilds the whole view under the router's lock (`router.go:71`, `:84-88`, `:95-107`).
-    - So N re-registrations run as N rebuilds in a row, each holding the lock; at 600 tunnels every probe's pass was reported at 10.5 s.
-    - One Refresh cost 15, 45 and 79 ms at 100, 300 and 600 tunnels on the shared VM (`cmd/s16/refresh_test.go`, `S16_MEASURE_REFRESH=1`): 600 in a row is 47 s there.
+  - **Routed again, as the probe log reports it, is an upper bound past 100 tunnels.** The re-probe runs as soon as the front hears the re-registration, so the issue's definition (a pass in the new epoch) is met at the pass, about 2.5–3.5 s after the cut. But the pass is reported only after its synchronous `Router.Refresh` (`internal/front/probe.go:434`, then `:464`; `tunnel.go:261-290`), and the prober clears the UID's `running` mark before that (`probe.go:408`). So while a pass waits for the router's lock, the next 10 s Round re-probes the UID, finds it registered and reports at once. The reported maxima at 300 and 600 are the earlier of the rebuild chain and that Round: after both 600-tunnel front restarts, 362 and 400 of the 600 passes fall in the 10.0–10.5 s bin. "Within 11 s" holds as a bound; the router's lag is measured by the first request's time to first token below, not by this row.
+    - Each Refresh rebuilds the whole view under the router's lock (`router.go:71`, `:84-88`, `:95-107`). One cost 15, 45 and 79 ms at 100, 300 and 600 tunnels on the shared VM (`cmd/s16/refresh_test.go`, `S16_MEASURE_REFRESH=1`): 600 in a row is 47 s there.
   - **First token through the front is set by the same rebuilds, and after an frps restart also by HBEP-5's pause:**
-    - **The rebuilds:** a client request needs the router's lock too, so the first request on each tunnel after the cut waited for the rebuilds. Its time to first token was 0.2–1.0 s at 100 tunnels, 3.8–19.3 s at 300 and 19.2–35.3 s at 600, after which each tunnel streamed normally. After an frps restart at 600 tunnels (two refreshes per tunnel, a Bump and a pass), the observed 44 s ended before most tunnels' first request was answered. Filed as #417.
+    - **The rebuilds (#417's witness):** a client request needs the router's lock too (`route.go:66`), so the first request on each tunnel after the cut waited for the rebuilds. Its time to first token was 0.2–1.0 s at 100 tunnels, 3.8–19.3 s at 300 and 19.2–35.3 s at 600, after which each tunnel streamed normally. After an frps restart at 600 tunnels (two refreshes per tunnel, a Bump and a pass), the observed 44 s ended before most tunnels' first request was answered. Filed as #417.
     - **The pause, after an frps restart:** the cut stream, then dials refused while frps was down and set-up 404s before frpc re-registered, made three failures in a row. So the front paused every Instance with three such failures for 30 s (`pauseAfterFailures` 3, `pauseDuration` 30 s): all of them at 1, 10 and 100 tunnels, 166–282 of 300, and 58–221 of 600, starting 0.0–5 s after the cut (fewer at 600, where the router's lock slowed the requests that would have failed).
     - With the client sending 1 request per tunnel, retried at once after a cut and every 50–500 ms while refused, the first token came at 30–36 s up to 300 tunnels. At 600 it did not come within the 44 s observed for 223 and 600 of the 600 tunnels (the two runs that count).
     - The hold-off control paused nothing, and its first token came at 3.2–4.0 s up to 100 tunnels: the pause, not the re-login, cost the 30 s. The science agent ruled that a re-registration and its first passing probe clear the old epoch's pause (#418).
   - **A front restart's TERM to exit** took the 10 s shutdown grace while streams ran, or less when the closed loop's requests had fallen into step and ended sooner (1.7–10.3 s); the tunnels are cut at the exit.
-- **The plugins answer far inside HBEP-6's 1 s rule.** Over every call from 1 s before the cut to 90 s after, both plugins, every size: p50 0.03–0.09 ms, p99 at most 38 ms, max 164 ms (the front's `NewProxy` at 600). No call took over 1 s, and none was refused, so the 30 s refused-proxy floor never applied.
+- **The plugins answer far inside HBEP-6's 1 s rule.** Over every call from 1 s before the cut to 90 s after, both plugins, every size, in the runs that count: p50 0.03–0.09 ms, p99 at most 38 ms, max 144 ms (the front's `NewProxy` at 600). No call took over 1 s, and none was refused, so the 30 s refused-proxy floor never applied.
 - **The front host's CPU in the 10 s after a cut** (frps, the admission plugin and the front) was 0.2–0.4 cores at 100 tunnels, 0.8–1.4 at 300 and 1.1–1.5 at 600, against 0.1–0.2, 0.4–0.6 and 1.2–1.6 with no event. Its busiest second reached 1.9–2.1 cores at 600.
   - That includes the client's retries: the hold-off control, which sends none, took 1.1–1.4 cores at 600.
   - One recovery second at 600 crossed 85% busy.
@@ -58,9 +57,17 @@ No tunnel failed to come back, no plugin call came near HBEP-6's 1 s rule, and n
   - The front process's added cores per 1,000 tokens/s were 0.10–0.17 on the AMD runner and 0.05–0.13 on the Intel ones; fitted, 0.12 and 0.11.
   - S14's provisional s × a is 0.037 (AMD) and 0.022 (Intel).
   - frps's own cost fell by 0.001–0.06 cores in the proxied arm, as the front reuses tcpmux connections, so front plus frps adds 0.05–0.15.
-- **What it does to one front core** (HBEP-6's 70% rule, S14's per-runner stack fits, `python3 summarize.py budget`):
-  - direct mode at 100, 300 and 600 tunnels: about 3,000, 2,400 and 1,450–1,570 tokens/s on the AMD fits, and 4,060, 3,560 and 2,820 on the Intel fit, against S14's provisional 5,150–5,280 and 8,980 at 100;
-  - host-dialed mode, with one stream per relay: 1,550–1,570 tokens/s at 100 tunnels and 630–650 at 300 (AMD), and 2,320 and 1,680 (Intel);
+- **What it does to one front core** (HBEP-6's 70% rule, `python3 summarize.py budget`):
+  - **At 100 tunnels,** with S14's per-runner stack fits plus the measured reserves: about 3,000 tokens/s in direct mode (AMD fits) and 4,060 (Intel fit), against S14's provisional 5,150–5,280 and 8,980. In host-dialed mode with one stream per relay: 1,550–1,570 (AMD) and 2,320 (Intel).
+  - **Past 100 tunnels the front's cost per token grows with the tunnel count,** so the 0.12 × q reserve, fitted at 10–100 tunnels, does not extrapolate. At one stream per tunnel, R_front per pair rises from 0.113 at 10 tunnels to 0.127 at 50 and 0.165 at 100 (AMD). The no-event re-login runs that count show the front process alone at 0.14–0.24 cores per 1,000 tokens/s at 100 tunnels, 0.22–0.32 at 300 and 0.34–0.45 at 600, while frps's own stays at 0.06–0.11. Against those runs, S14's fit plus 0.12 × q is 13–59% low at 300 and 600 tunnels on four of the five, and 19% high on the fifth.
+  - **So the front host is refitted from S16's own runs** (frps plus the front process, direct mode: the R_front runs' proxied arm and the no-event pre-windows):
+    - the model is cores = A q + B n + D n q + C;
+    - AMD: A 0.248, B −0.00025, D 0.00043, C 0.013, over 15 points at 1–600 tunnels; Intel: A 0.122, B 0.00083, D 0.00039, C 0.013, over 16 points at 1–300;
+    - observed/predicted is 0.75–1.19 (AMD) and 0.84–1.23 (Intel), with an rms of 0.08 cores, across five CPU models (S14 saw 44% within one);
+    - the growth is in the per-token term D (on AMD the per-tunnel B comes out slightly negative).
+  - **One core at 70% under the refit:** 2,440, 2,020 and 1,650 tokens/s at 100, 300 and 600 tunnels (AMD), and 3,770 and 1,850 at 100 and 300 (Intel); Intel's 600 is past its fit.
+    - At 100 tunnels the refit and the S14-based figure agree within the runners' spread.
+    - In host-dialed mode the growth was not measured, so its budget is given at 100 tunnels only.
   - at 600 host-dialed tunnels S14's per-tunnel term alone uses the AMD core's budget.
 
 ## Question
@@ -535,7 +542,7 @@ Pairs whose arms were both valid and not host-bound (all CPUs at least 85% busy)
 ## Verdict
 
 **Mass re-login.**
-- By the issue's definition (a probe passes in the new epoch), every size up to 600 tunnels was back within 11 s, and no tunnel took over 60 s. Both plugins answered every call within 164 ms, and refused none.
+- By the issue's definition (a probe passes in the new epoch), every size up to 600 tunnels was back within 11 s (the probe log's upper bound; the passes came about 2.5–3.5 s after the cut), and no tunnel took over 60 s. Both plugins answered every call within 144 ms, and refused none.
 - What a client sees is set by the front, not by frp or the plugins:
   - **the router's O(N²) rebuild** (#417), which held the first request on each tunnel 4–19 s at 300 tunnels and 19–35 s at 600, and at 600 after an frps restart past the 44 s observed;
   - after an frps restart, **HBEP-5's 30 s pause** on every Instance that saw three failed requests while frps was down or before frpc re-registered (#418).
@@ -543,25 +550,23 @@ Pairs whose arms were both valid and not host-bound (all CPUs at least 85% busy)
 
 **A capped shared link** starves no heartbeat. No discipline, cap or size measured failed a heartbeat, down to the cap where the tunnels' own token bytes bind. A bloated FIFO buffer costs latency (about 2 s per request at 1 s of buffer, both ways), not tunnels. The link bounds the rate, as S1c's rule says, at about 280 bytes per token up the link in direct mode.
 
-**R_ssh and R_front replace S14's provisional terms:**
+**R_ssh and R_front replace S14's provisional terms,** R_front up to 100 tunnels:
 - `R_ssh` is a per-packet cost, the cipher making no difference: 0.05–0.08 × q for relays at one stream (20 tokens/s), falling to 0.012–0.022 × q at 1,260 tokens/s per relay. S14's 0.045 × q is too low by about 1.7× for lightly loaded relays.
-- `R_front` is 0.11–0.12 × q, fitted (0.05–0.17 × q per measured pair), 3–5 times S14's floor s × a.
+- `R_front` is 0.11–0.12 × q at 10–100 tunnels, fitted (0.05–0.17 × q per measured pair), 3–5 times S14's floor s × a. It grows with the tunnel count, so past 100 tunnels the front host is budgeted from S16's own refit (Findings).
 
 **The per-front tunnel limit the measurements support:** measured to 600 by the probe; client-visible recovery grows about as N² until #417 is fixed. Until then, a front whose clients must see a restart's recovery within a few seconds stays at or below about 100 tunnels: at 300, the first token through the front took up to 11 s after a front restart, and 36 s after an frps restart (with #418's pause). The steady-state budget, with the measured reserves, gives one front core about:
-- 3,000 (AMD fits) to 4,060 (Intel fit) tokens/s at 100 tunnels in direct mode, 2,370–3,560 at 300, and 1,450–2,820 at 600;
-- 1,550–2,320 tokens/s at 100 host-dialed tunnels with one stream per relay, and 630–1,680 at 300.
-
-These are about 0.45–0.62 of S14's estimates with the provisional reserves.
+- at 100 tunnels: 3,000 (AMD fits) to 4,060 (Intel fit) tokens/s in direct mode, about 0.45–0.58 of S14's estimates with the provisional reserves (the refit gives 2,440–3,770); and 1,550–2,320 tokens/s in host-dialed mode with one stream per relay;
+- past 100 tunnels, direct mode, from S16's refit of the front host (Findings): 2,020 (AMD) and 1,850 (Intel) at 300 tunnels, and 1,650 (AMD) at 600. In host-dialed mode the front's growth with tunnels was not measured.
 
 ## Proposed HBEP-6 text for open question 11
 
 For the science agent to amend. It replaces the item's last three bullets ("The steady-state per-front budget", "Until the open items are measured", "Still open"); the bullets on steady state, memory, drops and latency stand.
 
 > - **The steady-state per-front budget** (S14, with S16's measured reserves; spike S16, issue #412), with `q = tokens/s ÷ 1000`, keeps `a × q + b × tunnels + c + R_front + R_ssh` under 70% of the cores left to these processes on the front's host:
->   - R_front = 0.11–0.12 × q is the front's own proxy (S16, fitted on 4-CPU hosted runners; 0.05–0.17 × q per measured pair), 3–5 times S14's floor;
+>   - R_front = 0.11–0.12 × q is the front's own proxy at 10–100 tunnels (S16, fitted on 4-CPU hosted runners; 0.05–0.17 × q per measured pair), 3–5 times S14's floor. Its cost per token grows with the tunnel count, so past 100 tunnels the front host (frps plus the front) is budgeted from S16's own fit, cores = A q + B n + D n q + C (A 0.12–0.25, D 0.0004 per tunnel per 1,000 tokens/s, within 25% of every measured point of 0.05 cores or more, at 1–600 tunnels);
 >   - R_ssh, in host-dialed mode, is ssh's cost per relay, per packet rather than per token: 0.08 × q for relays carrying one stream (20 tokens/s), falling to 0.02 × q at about 1,300 tokens/s per relay, with no difference between OpenSSH's default (chacha20-poly1305) and aes128-gcm or aes256-gcm. The cluster's own negotiation is unknown.
->   - That is about 3,000–4,000 tokens/s per front core at 100 direct tunnels, 2,400–3,600 at 300 and 1,400–2,800 at 600, and 1,500–2,300 at 100 host-dialed tunnels with one stream per relay, for 60-token streams with a new connection per request.
-> - **A mass re-login** (S16): after an frps or a front restart, every tunnel of 600 re-registered within 3.4 s (frpc's backoff floor is 2.0–2.2 s) and was routed again by the front's probe within 11 s. Both plugins answered every call within 0.2 s, far inside the 1 s rule.
+>   - That is about 2,400–4,000 tokens/s per front core at 100 direct tunnels, 1,850–2,000 at 300 and 1,650 at 600 (one runner class; the other's fit ends at 300), and 1,500–2,300 at 100 host-dialed tunnels with one stream per relay, for 60-token streams with a new connection per request.
+> - **A mass re-login** (S16): after an frps or a front restart, every tunnel of 600 re-registered within 3.4 s (frpc's backoff floor is 2.0–2.2 s) and was routed again by the front's probe within 11 s (an upper bound; the passes came about 2.5–3.5 s after the cut). Both plugins answered every call within 0.15 s, far inside the 1 s rule.
 > - **What the client sees after a restart is the front's, and is open:**
 >   - the router rebuilds its whole view under its lock on every registration change, so recovery grows about as N²: the first request on a tunnel took 4–19 s at 300 tunnels and 19–35 s at 600, and after an frps restart at 600 most tunnels had served no token through the front 44 s after the cut (#417);
 >   - after an frps restart, HBEP-5's pause holds every Instance with three failed requests in the restart's window for 30 s after its tunnel is back (#418).
@@ -651,7 +656,7 @@ For the science agent to amend. It replaces the item's last three bullets ("The 
 | `s16ssh.sh` | the relays' ssh: the system's ssh with `-v -E <log>` |
 | `s16.py` | the driver: `relogin`, `caplink`, `rssh`, `rfront`, `host`, `leftovers` |
 | `analysis.py`, `tests/` | the result rules, with their tests |
-| `summarize.py` | `extract` (raw files to `results/`, with a scan for host paths), `tables`, `verify` (every CPU figure from the samples), `budget` (one front core's tokens/s with the measured reserves) |
+| `summarize.py` | `extract` (raw files to `results/`, with a scan for host paths), `tables`, `verify` (every CPU figure from the samples), `budget` (one front core's tokens/s with the measured reserves, and the front-host refit with its residuals) |
 | `results/` | the committed results (Results) |
 
 ```sh
