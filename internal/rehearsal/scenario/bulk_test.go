@@ -7,9 +7,11 @@ package scenario_test
 // mode on the relays' ssh to the login node.
 //
 // Each mode runs twice, one stack after the other: first without the bulk path, the run's own
-// control, then with it. The science agent's ruling S4 on #448: the run is valid only if its control
-// stalls the streams to a gap p99 of 110 ms or more, and it passes at a bulk-on p99 of 75 ms or less.
-// A control under 110 ms makes the run INVALID, never a pass; both figures are always logged.
+// control, then with it. The science agent's ruling S4 on #448, as revised after the third hosted run
+// (comment 6828152670; judgeS4): the run is valid when its control stalls the streams to a gap p99 of
+// at least 85 ms, and it passes when the bulk-on p99 is 75 ms or less and at least 30 ms below its own
+// control. A control under 85 ms makes the run INVALID, never a pass; both figures and the link's
+// achieved rate are always logged.
 //
 // What would make this prove nothing, and how it's ruled out:
 //   - a reply that fits in frp's 6 MiB stream window: the reply is 64 MiB, and the link's byte
@@ -54,8 +56,9 @@ const (
 	bulkTokenDelay  = 50 * time.Millisecond // 20 tokens/s
 	bulkStreamLen   = 600                   // tokens: 30 s, well past the transfer
 	bulkReplyBytes  = 64 << 20
-	s4ControlMinP99 = 110 * time.Millisecond // a control below this makes the run invalid (S4)
-	s4PassMaxP99    = 75 * time.Millisecond  // a bulk-on p99 at or below this passes (S4)
+	s4ControlMinP99 = 85 * time.Millisecond // a control below this makes the run invalid (S4, revised)
+	s4PassMaxP99    = 75 * time.Millisecond // a bulk-on p99 above this fails (S4)
+	s4PassMinMargin = 30 * time.Millisecond // a bulk-on p99 less than this below its control fails (S4, revised)
 )
 
 // bulkRun is one stack's measurement.
@@ -98,14 +101,41 @@ func TestBulk64MiBReplyBesideEightStreams(t *testing.T) {
 			t.Logf("%s: gap p99 without the bulk path %s (%d gaps), with it %s (%d gaps); the reply took %s and %s (%.1f and %.1f MB/s through the link)",
 				c.mode, control.p99, control.gaps, on.p99, on.gaps, control.took, on.took,
 				float64(control.replyBytes)/control.took.Seconds()/1e6, float64(on.replyBytes)/on.took.Seconds()/1e6)
-			switch {
-			case control.p99 < s4ControlMinP99:
-				t.Fatalf("INVALID run, neither a pass nor a fail: without the bulk path the gap p99 is %s, below S4's %s, so this run can't show a stall to remove (with the bulk path: %s)", control.p99, s4ControlMinP99, on.p99)
-			case on.p99 > s4PassMaxP99:
-				t.Errorf("with the bulk path the gap p99 is %s, above S4's %s (without it: %s)", on.p99, s4PassMaxP99, control.p99)
+			switch v, why := judgeS4(control.p99, on.p99); v {
+			case s4Invalid:
+				t.Fatalf("INVALID run, neither a pass nor a fail: %s", why)
+			case s4Fail:
+				t.Errorf("S4 fails: %s", why)
+			default:
+				t.Logf("S4 passes: %s", why)
 			}
 		})
 	}
+}
+
+// s4Verdict is S4's judgement of one run.
+type s4Verdict int
+
+const (
+	s4Invalid s4Verdict = iota // the control shows no stall to remove: neither a pass nor a fail
+	s4Fail
+	s4Pass
+)
+
+// judgeS4 judges one run by S4 as revised (#448, comment 6828152670): valid when the control's gap
+// p99 is at least s4ControlMinP99; then a pass when the bulk-on p99 is at most s4PassMaxP99 and at
+// least s4PassMinMargin below the control, and a fail otherwise. It says why, with both figures.
+func judgeS4(control, bulk time.Duration) (s4Verdict, string) {
+	figures := fmt.Sprintf("gap p99 %s without the bulk path, %s with it, %s apart", control, bulk, control-bulk)
+	switch {
+	case control < s4ControlMinP99:
+		return s4Invalid, fmt.Sprintf("%s: the control is under %s, so this run can't show a stall to remove", figures, s4ControlMinP99)
+	case bulk > s4PassMaxP99:
+		return s4Fail, fmt.Sprintf("%s: the bulk path's is above %s", figures, s4PassMaxP99)
+	case control-bulk < s4PassMinMargin:
+		return s4Fail, fmt.Sprintf("%s: less than %s apart", figures, s4PassMinMargin)
+	}
+	return s4Pass, figures
 }
 
 // measureBulk starts a stack in mode, through S17's link, with or without the bulk path, starts one
