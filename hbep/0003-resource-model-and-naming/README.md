@@ -135,7 +135,7 @@ In these stories, `helios-a`, `helios-b` and `athena-a` are names an operator ga
 - **Engine fingerprint:** the identifier an engine reports on its responses, such as vLLM's `system_fingerprint`. It is recorded, and is never the identity.
 - **Instance key:** each Instance's own key, generated when it starts and kept in its identity package, the identity data the Instance holds (HBEP-9). The front uses it toward the Instance. It is never a deployment-ID input.
 - **Worker:** one engine server process, which may span several GPUs, inside an Instance.
-  - An Instance is the endpoint the front reaches: its own router in front of one or more workers. An Instance with one worker may have none, as in alpha (HBEP-7); the front then reaches the worker (HBEP-5).
+  - An Instance is the endpoint the front reaches: its own router in front of one or more workers. An Instance with one worker may have none, as in alpha (HBEP-7); the front then reaches the worker (HBEP-5). In beta an Instance has `spec.workersPerInstance` workers, each a copy of the Instance's one engine launch (HBEP-7, Several workers). The count is capacity, so it isn't a deployment-ID input, like the number of Instances.
   - The front picks the deployment and the Instance; the Instance's router picks the worker (HBEP-5). So the front always knows which Instance answered.
   - Pooling workers across Instances is not part of this design (open question 11).
 - **Instance phases:**
@@ -268,6 +268,7 @@ The inputs form one JSON object. Every scalar value in it is a string. Booleans 
   | `enforce-eager`, `compilation-config` | input | change the compiled kernels, so the arithmetic |
   | `attention-backend` | input | picks the attention kernels |
   | `tensor-parallel-size`, `pipeline-parallel-size`, `enable-expert-parallel` | input | set the arithmetic layout |
+| `data-parallel-size` | input; refused above 1 | the framework runs its workers itself, counted by `spec.workersPerInstance`, which isn't an input (HBEP-7, Several workers) |
   | `speculative-config` | input | changes how output tokens are computed |
   | `seed` | input | changes sampled outputs |
   | `generation-config`, `override-generation-config` | input | set the default sampling parameters |
@@ -467,6 +468,7 @@ The resource model replaces state that www-2027 operators kept by hand: per-job 
 - 2026-10-30: amendment with HBEP-5 becoming implementable: an Instance with one worker may have no router.
 - 2026-10-31: amendment from the merged contracts (PR #71) and Hub listing (PR #68): the `Degraded` reason `IdentityUnresolved`, `engine.image` outside the ID, HBEP-9's listing rule, and no Allocation in alpha before a class has its ID.
 - 2026-10-31: amendment from the real LLMLab read (issue #69): open question 5's check before beta is done, and model and catalog names are field values only; "the hold is lifted exactly once" qualified with HBEP-4's known risk.
+- 2026-11-12: several workers per Instance, for beta (HBEP-7, Several workers).
 
 ## Amendments
 
@@ -492,3 +494,4 @@ The resource model replaces state that www-2027 operators kept by hand: per-job 
   - **Model and catalog names are field values only** (Naming levels). They never become Kubernetes object names or label values; a hash is used if one is ever needed. Before, this HBEP said nothing of where such names may appear.
   - **LLMLab reports no revision,** so its catalog entries' canonical objects omit `revision` (Deployment ID; HBEP-4). The rule is unchanged.
   - **"Lifted exactly once" is qualified** (open question 13; Allocation and job identity) with the known risk HBEP-4 records from PR #96's review: a leader that stalls after its last re-read can release a later hold of the same job, after an administrator requeued it with a hold. Before, the guarantee had no exception.
+- **2026-11-12: several workers per Instance, for beta** (Resource model). An amendment, the science agent's design, with HBEP-7's Several workers section as its one home: the Instance's workers in beta are `spec.workersPerInstance` copies of one engine launch, and the count isn't a deployment-ID input; `data-parallel-size` above 1 stays refused. Before, the worker count had no source.
