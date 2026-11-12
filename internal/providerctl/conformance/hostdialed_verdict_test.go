@@ -473,7 +473,7 @@ func hostDialedPosts(o hostDialedObs, checks []hostDialedCheck, qos string, gpus
 		}
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s: %s (posts to %s)\n", o.Row.Name, verdict, o.Row.PostsTo)
+	fmt.Fprintf(&b, "%s: %s (%s)\n", o.Row.Name, verdict, o.Row.PostsNote())
 	for _, c := range checks {
 		word := "ok"
 		if !c.OK {

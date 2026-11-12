@@ -13,6 +13,25 @@ import (
 // slot use (UTC start and end) is printed by hack/live-checks.sh and goes in the
 // same comment.
 
+// BetaSection is the heading of #145 that a Helios row's text goes under: Helios is beta's since alpha graduated on Athena
+// alone (the owner's decision of 11 Nov 2026, recorded on #145), so its results wait there for GH200's return.
+const BetaSection = "Beta: when GH200 returns"
+
+// PostsNote is what a verdict line of the reach and host-dialed rows says of where its text goes: "posts to #145"; for a
+// Helios row, under BetaSection; and for a row with an Origin, that closed issue by name, which the text names and never
+// posts to (`@hpc-burst-science-agent`, 12 Nov 2026, on #145). The stack and accounting rows' lines say "posts to" and their
+// PostsTo alone.
+func (r Row) PostsNote() string {
+	note := "posts to " + r.PostsTo
+	if r.Cluster == "helios" {
+		note += ` under "` + BetaSection + `"`
+	}
+	if r.Origin != "" {
+		note += "; origin issue " + r.Origin
+	}
+	return note
+}
+
 func verdictLine(row Row, failures []string) string {
 	if len(failures) == 0 {
 		return fmt.Sprintf("%s: PASS (posts to %s)", row.Name, row.PostsTo)

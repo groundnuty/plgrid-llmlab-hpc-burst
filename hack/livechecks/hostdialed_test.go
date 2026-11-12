@@ -82,8 +82,8 @@ func TestTheScriptsReachHostDialedRowsAreThePackagesRows(t *testing.T) {
 		if f[1] != r.Cluster || f[2] != r.Cluster || f[3] != r.Partition || f[4] != qos || f[5] == "-" || f[7] != "1" || f[8] != "1" || f[9] != "1Gi" || f[10] != "00:05:00" || len(f) != 14 || f[13] != "10" {
 			t.Errorf("%s: shape %v differs from #305's (the partition and QOS of %+v; a slot; 1 GPU, 1 CPU, 1Gi, 5 min, a start wait of 10)", r.Name, f, r)
 		}
-		if r.Lease != 5*time.Minute || r.StartWait != 10*time.Minute || r.MostJobs != 1 || r.PostsTo != "#305 and #145" {
-			t.Errorf("%s: the package's row %+v is not one job of 5 minutes with a start wait of 10, posted to #305 and #145", r.Name, r)
+		if r.Lease != 5*time.Minute || r.StartWait != 10*time.Minute || r.MostJobs != 1 || r.PostsTo != "#145" || r.Origin != "#305" {
+			t.Errorf("%s: the package's row %+v is not one job of 5 minutes with a start wait of 10, posted to #145 with the origin issue #305", r.Name, r)
 		}
 		if f[11] != fmt.Sprint(int(r.Budget/time.Minute)) {
 			t.Errorf("%s: the shape's timeout is %s minutes, the package's budget %s", r.Name, f[11], r.Budget)
