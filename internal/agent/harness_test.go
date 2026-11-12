@@ -117,6 +117,9 @@ type harnessOptions struct {
 	logTee slog.Handler
 	// envoy is Options.EnvoyBinary: the Envoy an Instance with a router runs.
 	envoy string
+	// baseEnv is added to the agent's own environment, after the test process's: the job's
+	// CUDA_VISIBLE_DEVICES, say.
+	baseEnv []string
 }
 
 // newHarness starts a real agent against a fake Backend behind a fake Gate,
@@ -174,6 +177,7 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 		apptainer = o.apptainer
 	}
 	baseEnv := append(os.Environ(), "HB_FAKE_APPTAINER_LOG="+h.appLog, noExitSleep)
+	baseEnv = append(baseEnv, o.baseEnv...)
 	if o.home != "" {
 		baseEnv = slices.DeleteFunc(baseEnv, func(kv string) bool { return strings.HasPrefix(kv, "HOME=") })
 		baseEnv = append(baseEnv, "HOME="+o.home)

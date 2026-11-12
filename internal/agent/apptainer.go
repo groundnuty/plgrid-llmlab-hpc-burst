@@ -36,6 +36,11 @@ type WorkerExec struct {
 	Key string
 	// BaseEnv is the agent's own environment, os.Environ() in production.
 	BaseEnv []string
+	// Devices is the worker's slice of the job's CUDA_VISIBLE_DEVICES when the Instance runs several
+	// workers (workerDevices): set as the container's CUDA_VISIBLE_DEVICES, replacing any value the
+	// launch sets, so two workers never share a device. Nil with one worker, whose precedence is
+	// alpha's: the launch's value, else the job's (the science agent's ruling on #439, Q1).
+	Devices []string
 	// RouterKeepAlive says the worker runs behind a router: it gets vLLM's keep-alive at 120 s, above
 	// the router's 50 s idle, set by the framework outside the serving spec, as the listen address is,
 	// so it replaces any value the launch gives (HBEP-5, Inside an Instance; router.go).
@@ -109,7 +114,14 @@ func (w WorkerExec) Env() ([]string, error) {
 			return nil, fmt.Errorf("launch variable %q is not a variable name", v.Name)
 		}
 		seen[v.Name] = true
+		if w.Devices != nil && v.Name == "CUDA_VISIBLE_DEVICES" {
+			continue // replaced by the worker's slice, below
+		}
 		env = append(env, apptainerEnvPrefixes[0]+v.Name+"="+v.Value)
+	}
+	// Several workers: each sees exactly its own slice of the job's devices (HBEP-7, Several workers).
+	if w.Devices != nil {
+		env = append(env, apptainerEnvPrefixes[0]+"CUDA_VISIBLE_DEVICES="+strings.Join(w.Devices, ","))
 	}
 	// --cleanenv drops the job's CUDA_VISIBLE_DEVICES, which Slurm sets to
 	// the GPUs it gave the job: forward it, unless the launch sets it, so the

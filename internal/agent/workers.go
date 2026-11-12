@@ -67,6 +67,20 @@ func (a *Agent) startWorker(in *instance, dw agentapi.DesiredWorker, instGen int
 		Key:           in.key,
 		BaseEnv:       a.o.BaseEnv,
 	}
+	// Several workers: each runs the launch on its own socket and its own slice of the job's devices
+	// (HBEP-7, Several workers). One worker runs the launch as it is.
+	if in.workerCount > 1 {
+		idx, err := workerIndex(dw.Name)
+		if err != nil {
+			return fail(err)
+		}
+		if ex.Launch, err = workerLaunch(in.launch, dw.Name); err != nil {
+			return fail(err)
+		}
+		if ex.Devices, err = workerDevices(a.o.BaseEnv, idx, in.workerCount, int(in.launch.GPUs)); err != nil {
+			return fail(err)
+		}
+	}
 	ex.RouterKeepAlive = in.routerDesired != nil
 	env, err := ex.Env()
 	if err != nil {

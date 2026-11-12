@@ -81,6 +81,9 @@ type instance struct {
 	// checks, computed once from the staged file (genSampling); nil until a
 	// check unit needs it, and again after a new generation or staging.
 	sampling *genSampling
+	// workerCount is the number of the desired workers: above 1, each worker runs on its own socket and
+	// its own slice of the job's devices (workerLaunch, workerDevices).
+	workerCount int
 }
 
 // worker is one engine process of the Instance.
@@ -284,8 +287,8 @@ func (a *Agent) applyRun(i agentapi.DesiredInstance) {
 	in.keyStored = i.KeyStored
 	in.hubToken = i.HubToken
 	in.routerDesired = i.Router
-	if c := i.Checks; c != nil && c.Verify != nil && len(c.Verify.Files) > 0 && (!in.haveFiles || in.filesGen != i.Generation) {
-		in.files = append([]agentapi.FileDigest(nil), c.Verify.Files...)
+	if files := verifyFiles(i); len(files) > 0 && (!in.haveFiles || in.filesGen != i.Generation) {
+		in.files = append([]agentapi.FileDigest(nil), files...)
 		in.filesGen = i.Generation
 		in.haveFiles = true
 	}
@@ -335,6 +338,7 @@ func (a *Agent) applyRun(i agentapi.DesiredInstance) {
 // once the old one is gone. A worker that exited or was stopped does not start
 // again until a generation rises: the agent never restarts a part by itself.
 func (a *Agent) convergeWorkers(in *instance, i agentapi.DesiredInstance) {
+	in.workerCount = len(i.Workers)
 	for _, dw := range i.Workers {
 		w := in.find(dw.Name)
 		switch {
@@ -556,4 +560,19 @@ func (a *Agent) cancelStaging(in *instance) {
 func filesKey(files []agentapi.FileDigest) [32]byte {
 	b, _ := json.Marshal(files)
 	return sha256.Sum256(b)
+}
+
+// verifyFiles is the identity record's file list a desired Instance's verification carries, which staging
+// needs: the Instance's own checks', with one worker, else the first worker's whose checks carry one, with
+// several (the science agent's ruling on #439, Q6: the checks are per worker then).
+func verifyFiles(i agentapi.DesiredInstance) []agentapi.FileDigest {
+	if c := i.Checks; c != nil && c.Verify != nil && len(c.Verify.Files) > 0 {
+		return c.Verify.Files
+	}
+	for _, dw := range i.Workers {
+		if c := dw.Checks; c != nil && c.Verify != nil && len(c.Verify.Files) > 0 {
+			return c.Verify.Files
+		}
+	}
+	return nil
 }
