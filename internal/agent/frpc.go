@@ -113,6 +113,15 @@ type Frpc struct {
 	StopGrace time.Duration
 	// OnStart, when set, is told each frpc process Frpc starts.
 	OnStart func(ProcessID)
+	// Bulk makes this the bulk frpc (beta; HBEP-6, The bulk path), the second
+	// frpc the agent runs for the Instance when agent.json carries the bulk
+	// block: tcpMux off, TLS server name BulkDialHomeServerName, and CertFile
+	// the second certificate (dial-home-bulk.crt), checked against that name
+	// (agentapi.VerifyDialHomeCertFor) before it is trusted. It keeps its own
+	// files in RunDir (frpc-bulk.toml, frpc-bulk.log, dial-home-bulk.crt) and
+	// its own restarts, so it touches nothing of the token frpc's. The zero
+	// value is the token frpc, exactly as before.
+	Bulk bool
 
 	mu   sync.Mutex
 	uid  string
@@ -151,15 +160,38 @@ func (f *Frpc) desired() (string, <-chan struct{}) {
 	return f.uid, f.kickLocked()
 }
 
+// The bulk frpc's files in the run directory (HBEP-6, The bulk path: its own
+// configuration and log files, mode 600; frpc makes its log mode 600 itself).
+const (
+	bulkConfigName = "frpc-bulk.toml"
+	bulkLogName    = "frpc-bulk.log"
+	bulkCertName   = "dial-home-bulk.crt"
+)
+
 // ConfigPath is frpc's configuration file in the run directory.
-func (f *Frpc) ConfigPath() string { return filepath.Join(f.RunDir, "frpc.toml") }
+func (f *Frpc) ConfigPath() string {
+	if f.Bulk {
+		return filepath.Join(f.RunDir, bulkConfigName)
+	}
+	return filepath.Join(f.RunDir, "frpc.toml")
+}
 
 // LogPath is frpc's log file in the run directory.
-func (f *Frpc) LogPath() string { return filepath.Join(f.RunDir, "frpc.log") }
+func (f *Frpc) LogPath() string {
+	if f.Bulk {
+		return filepath.Join(f.RunDir, bulkLogName)
+	}
+	return filepath.Join(f.RunDir, "frpc.log")
+}
 
 // TrustedCertPath is the copy of the checked certificate in the run
 // directory, frpc's trustedCaFile.
-func (f *Frpc) TrustedCertPath() string { return filepath.Join(f.RunDir, "dial-home.crt") }
+func (f *Frpc) TrustedCertPath() string {
+	if f.Bulk {
+		return filepath.Join(f.RunDir, bulkCertName)
+	}
+	return filepath.Join(f.RunDir, "dial-home.crt")
+}
 
 // running is the frpc process Frpc runs and what it was started for.
 type running struct {
@@ -360,7 +392,7 @@ func (f *Frpc) prepareOnce() error {
 	if err != nil {
 		return fmt.Errorf("the dial-home certificate: %w", err)
 	}
-	if err := VerifyDialHomeCert(b, f.CertSPKISHA256, time.Now()); err != nil {
+	if err := f.verifyCert(b); err != nil {
 		return err
 	}
 	bin, err := openVerifiedBinary(f.Binary, f.FrpcDigest)
@@ -376,6 +408,18 @@ func (f *Frpc) prepareOnce() error {
 	}
 	f.bin = bin
 	return nil
+}
+
+// verifyCert checks the staged certificate's bytes against the name this frpc
+// checks the front by: the token frpc's certificate against
+// DialHomeServerName, the bulk frpc's against BulkDialHomeServerName (HBEP-6,
+// The bulk path: each file against its own name), with the same pin, since the
+// two certificates carry one key.
+func (f *Frpc) verifyCert(b []byte) error {
+	if f.Bulk {
+		return VerifyBulkDialHomeCert(b, f.CertSPKISHA256, time.Now())
+	}
+	return VerifyDialHomeCert(b, f.CertSPKISHA256, time.Now())
 }
 
 // start writes frpc's configuration for uid and target, mode 600, and starts
@@ -396,6 +440,9 @@ func (f *Frpc) start(ctx context.Context, uid string, target FrpcTarget, logger 
 		ServerAddr: target.Host, ServerPort: target.Port,
 		LogFile: f.LogPath(), Token: f.Credential, CAFile: f.TrustedCertPath(),
 		ServerName: agentapi.DialHomeServerName, UID: uid, Socket: f.Socket,
+	}
+	if f.Bulk {
+		cfg.ServerName, cfg.TCPMuxOff = agentapi.BulkDialHomeServerName, true
 	}
 	b, err := cfg.Render()
 	if err != nil {
