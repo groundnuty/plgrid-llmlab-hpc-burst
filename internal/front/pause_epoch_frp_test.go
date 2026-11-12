@@ -55,6 +55,7 @@ func TestAnFrpsRestartWithRequestsInTheGapRoutesAgainOnTheFirstPass(t *testing.T
 	rig.startFrps()
 	rig.waitOnline(a, p)
 	f.waitReprobed(a)
+	f.router.quiesce(t) // the rebuild that follows the pass, which clears the pause (#417 coalesces them)
 	registered := time.Now()
 	status, body, _ := f.chat("after")
 	if status != http.StatusOK {

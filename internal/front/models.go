@@ -21,7 +21,7 @@ type modelEntry struct {
 // a request for it could be placed now: an eligible Instance of ours, or an
 // attached managed entry that is not paused.
 func (r *Router) Models() []modelEntry {
-	r.mu.Lock()
+	r.lockFresh()
 	defer r.mu.Unlock()
 	if r.view == nil {
 		return nil

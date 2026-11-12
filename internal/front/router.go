@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -55,6 +56,21 @@ type Router struct {
 	// beforePick, when set, runs between reading the view and picking from
 	// the live groups: a seam for tests that force a join in between.
 	beforePick func()
+
+	// The coalesced rebuilds of a burst of registration changes (#417). dirty
+	// says a registration changed since the last rebuild began; running, that a
+	// goroutine rebuilds while it is set (drain); gen counts the rebuilds that
+	// finished, and waiting the readers waiting for the lock, for the one-rebuild
+	// bound (lockFresh). rebuilds counts every rebuild; afterBuild, when set,
+	// runs inside one right after the view is built, and beforeStop in drain
+	// after its last rebuild and before it stops: the seams of the tests.
+	dirty      atomic.Bool
+	running    atomic.Bool
+	gen        atomic.Uint64
+	waiting    atomic.Int32
+	rebuilds   atomic.Int64
+	afterBuild func()
+	beforeStop func()
 }
 
 type pause struct {
@@ -81,20 +97,109 @@ func NewRouter(cfg Config, clk clock.Clock, trans Transports, rec Recorder, log 
 		groups: map[string]*balancer.Group{}, rings: map[string]*balancer.Ring{}, pauses: map[string]*pause{},
 		reported: map[string]string{}, problems: map[string]bool{}, leaseEnds: map[types.UID]time.Time{},
 	}
-	trans.Subscribe(r.Refresh)
+	// The Transports calls this on every registration change, the Tunnel's
+	// probe from its verdict, synchronously: it marks the view stale and returns
+	// at once, so a burst of N changes costs a rebuild or two, never N in a row
+	// under the lock that routing needs (#417).
+	trans.Subscribe(r.markDirty)
 	return r
 }
 
-// Update replaces the snapshot and rebuilds the view.
+// markDirty records that a registration changed, and starts the goroutine that
+// rebuilds the view unless one runs. It takes no lock.
+func (r *Router) markDirty() {
+	r.dirty.Store(true)
+	if r.running.CompareAndSwap(false, true) {
+		go r.drain()
+	}
+}
+
+// drain rebuilds the view while it is stale, then stops. A change that lands
+// after its last look re-starts it (markDirty), and one that lands between its
+// last look and its stop is seen by the re-check, so no change is left without a
+// rebuild after it. Between two rebuilds it lets every reader waiting for the
+// lock go first: a reader then waits for the one rebuild in progress when it
+// came, never for a second one taken from under it (lockFresh).
+func (r *Router) drain() {
+	for {
+		for r.dirty.Load() {
+			r.yieldToReaders(0)
+			r.mu.Lock()
+			r.syncLocked()
+			r.mu.Unlock()
+		}
+		if r.beforeStop != nil {
+			r.beforeStop()
+		}
+		r.running.Store(false)
+		if !r.dirty.Load() || !r.running.CompareAndSwap(false, true) {
+			return
+		}
+	}
+}
+
+// syncLocked rebuilds the view when a registration changed since the last
+// rebuild began.
+func (r *Router) syncLocked() {
+	if r.dirty.Load() {
+		r.rebuildLocked()
+	}
+}
+
+// lockFresh takes the lock for a reader of the view, which then waits for at
+// most one rebuild (#417): when one finished while it waited for the lock, it
+// reads that view, though changes since may have marked it stale; else it
+// brings a stale view up to date itself. Its caller unlocks.
+func (r *Router) lockFresh() {
+	gen := r.gen.Load()
+	r.lockAsReader()
+	if r.gen.Load() == gen {
+		r.syncLocked()
+	}
+}
+
+// lockAsReader takes the lock as a reader: counted in waiting while it waits,
+// so that a rebuild about to start lets it go first (yieldToReaders).
+func (r *Router) lockAsReader() {
+	r.waiting.Add(1)
+	r.mu.Lock()
+	r.waiting.Add(-1)
+}
+
+// controlPlaneYield bounds how long a control-plane rebuild (Update, Refresh)
+// lets waiting readers go first, so that a steady stream of requests cannot
+// hold back a new snapshot. The drain's rebuilds yield without a bound: while
+// they wait, each reader brings the view up to date itself.
+const controlPlaneYield = 100 * time.Millisecond
+
+// yieldToReaders waits, before a rebuild takes the lock, until no reader waits
+// for it, or for max when it is not 0. A reader that came while a rebuild ran
+// then takes the lock next, and waits for that one rebuild alone; without it,
+// a rebuild that follows at once would take the lock first (sync.Mutex lets a
+// running goroutine take it ahead of one it wakes).
+func (r *Router) yieldToReaders(max time.Duration) {
+	var waited time.Duration
+	for r.waiting.Load() > 0 && (max == 0 || waited < max) {
+		const step = 50 * time.Microsecond
+		time.Sleep(step) // a yield to the readers, not a wait on time
+		waited += step
+	}
+}
+
+// Update replaces the snapshot and rebuilds the view. The watch's loop calls it
+// once per burst of control-plane changes (startWatch).
 func (r *Router) Update(s inventory.Snapshot) {
+	r.yieldToReaders(controlPlaneYield)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.snap = s
 	r.rebuildLocked()
 }
 
-// Refresh rebuilds the view from the current snapshot at the current time.
+// Refresh rebuilds the view from the current snapshot at the current time: the
+// timer's, at a drain start or a pause's end.
 func (r *Router) Refresh() {
+	r.yieldToReaders(controlPlaneYield)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.rebuildLocked()
@@ -105,7 +210,13 @@ func (r *Router) hasTransport(uid types.UID) bool {
 	return ok
 }
 
+// rebuildLocked rebuilds the view from the snapshot and the transports' current
+// registrations. It clears dirty first, before it reads any registration: a
+// change during the rebuild sets it again, and the next rebuild reads it, so the
+// last registration state of a burst always reaches the view.
 func (r *Router) rebuildLocked() {
+	r.dirty.Store(false)
+	defer func() { r.rebuilds.Add(1); r.gen.Add(1) }()
 	now := r.clk.Now()
 	var joined map[types.UID]bool
 	prev := r.view
@@ -113,6 +224,9 @@ func (r *Router) rebuildLocked() {
 		joined = prev.Joined
 	}
 	v := inventory.Build(r.snap, inventory.Inputs{Now: now, HasTransport: r.hasTransport, Joined: joined, MaxRequestDuration: r.cfg.MaxRequestDuration.D()})
+	if r.afterBuild != nil {
+		r.afterBuild()
+	}
 	r.view, r.builtAt = v, now
 	r.indexLocked()
 	for k, p := range r.pauses {
@@ -297,7 +411,7 @@ func (r *Router) ReportConnect(key string, failed bool) {
 // failures is the target's count of failed connections in a row since its
 // last success or pause.
 func (r *Router) failures(key string) int {
-	r.mu.Lock()
+	r.lockFresh()
 	defer r.mu.Unlock()
 	if p := r.pauses[key]; p != nil {
 		return p.failures
@@ -331,7 +445,7 @@ func (r *Router) targetLabelsLocked(key string) (provider, deployment string) {
 
 // Paused reports whether a target is paused now.
 func (r *Router) Paused(key string) bool {
-	r.mu.Lock()
+	r.lockFresh()
 	defer r.mu.Unlock()
 	return r.pausedLocked(key, r.clk.Now())
 }
@@ -457,7 +571,7 @@ type Status struct {
 
 // Status returns a summary of the view.
 func (r *Router) Status() Status {
-	r.mu.Lock()
+	r.lockFresh()
 	defer r.mu.Unlock()
 	s := Status{BuiltAt: r.builtAt, Deployments: map[string]int{}, Instances: len(r.snap.Instances), LeaseEnds: len(r.leaseEnds)}
 	if r.view == nil {

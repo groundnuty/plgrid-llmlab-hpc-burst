@@ -4,7 +4,9 @@ package front
 // epoch and a probe passes there (#418; the science agent's ruling (a) of 11 Nov 2026; HBEP-5, Pauses). A pause from
 // the current epoch holds for its full pauseDuration, and a new registration whose probe fails clears nothing. These run
 // on the fake clock, over the Tunnel and a tcpmux double: no wait of pauseDuration decides any of them, and each run of
-// failures is the pause rule's 3.
+// failures is the pause rule's 3. The router's rebuilds are coalesced (#417), so a pass clears the pause at the rebuild
+// that follows it: each test waits for the rebuilds to settle (quiesce, on the router's own state) before it reads the
+// pause, with the fake clock frozen.
 
 import (
 	"context"
@@ -73,6 +75,7 @@ func (f *epochFront) reregister() {
 		f.t.Fatal("the new registration did not move the epoch and take the registration away")
 	}
 	f.prober.Reprobe(context.Background())
+	f.router.quiesce(f.t)
 }
 
 // TestAPassInANewEpochClearsTheOldEpochsPause: a pause accumulated before the Instance registered again is cleared by
@@ -143,11 +146,13 @@ func TestANewRegistrationWhoseProbeFailsClearsNothing(t *testing.T) {
 		f.router.Refresh()
 		f.prober.Reprobe(context.Background())
 	}
+	f.router.quiesce(f.t)
 	if f.tun.Registered(f.uid) || !f.router.Paused(f.key) {
 		t.Fatalf("a new registration whose probes fail: registered %t, paused %t; want the pause to stand", f.tun.Registered(f.uid), f.router.Paused(f.key))
 	}
 	f.m.set(f.uid, http.StatusOK)
 	f.prober.Round(context.Background())
+	f.router.quiesce(f.t)
 	if !f.tun.Registered(f.uid) || f.router.Paused(f.key) {
 		t.Fatalf("a pass in the new epoch at last: registered %t, paused %t; want it registered and the pause cleared", f.tun.Registered(f.uid), f.router.Paused(f.key))
 	}
