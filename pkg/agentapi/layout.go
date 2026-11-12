@@ -31,6 +31,17 @@ const FrpcBinaryName = "frpc"
 // the staging directory.
 func StagedFrpcPath(digest string) string { return path.Join("frpc", digest, FrpcBinaryName) }
 
+// EnvoyBinaryName is Envoy's file name wherever it is staged.
+const EnvoyBinaryName = "envoy"
+
+// StagedEnvoyPath is where the provider stages the Envoy binary with this SHA-256 (hex), relative to
+// the profile's resolved stagingDir: envoy/<digest>/envoy, next to frpc's. Envoy is the router an
+// Instance runs in front of its workers when the controller runs with --instance-router envoy (beta,
+// opt-in; #429, #454). It is a pinned release binary, run bare as frpc is, and agent.json does not name
+// its digest: the agent finds it by the digest of the Envoy pinned in its own build
+// (internal/agent/envoypin) and checks it against that pin before it runs it.
+func StagedEnvoyPath(digest string) string { return path.Join("envoy", digest, EnvoyBinaryName) }
+
 // AllocationDir is the Allocation's directory, alloc/<tag>; the bootstrap runs
 // the agent with its absolute path as the only argument.
 func AllocationDir(tag string) string { return path.Join("alloc", tag) }
@@ -463,6 +474,12 @@ func AgentBuildName(cpuArch string) string { return AgentBinaryName + "-" + cpuA
 // StagedFrpcPath of that digest, and refuses one with another digest (HBEP-4,
 // Submission: Files first). hack/fetch-frp.sh --agent-builds places it.
 func FrpcBuildName(cpuArch string) string { return FrpcBinaryName + "-" + cpuArch }
+
+// EnvoyBuildName is the file name of the Envoy build for a CPU architecture in the same agent-builds
+// directory: envoy-<cpuArch>, with the profile's cpuArch strings. Its SHA-256 is the digest pinned in
+// internal/agent/envoypin's envoy-pins.txt; the provider stages it at StagedEnvoyPath of that digest,
+// and refuses one with another digest. hack/fetch-envoy.sh --agent-builds places it.
+func EnvoyBuildName(cpuArch string) string { return EnvoyBinaryName + "-" + cpuArch }
 
 // CheckCredential returns an error unless b is an Allocation credential's exact
 // form, which is a key's form (CheckKey): 256 random bits as 64 lowercase hex

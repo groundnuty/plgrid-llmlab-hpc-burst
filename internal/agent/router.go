@@ -33,15 +33,16 @@ const (
 )
 
 // StagedEnvoyPath is where the Envoy pinned for this machine's architecture is staged under a
-// staging directory: <stagingDir>/envoy/<sha256>/envoy, by its digest as frpc is. Staging it there is
-// a follow-up of #429 (the science agent's ruling, Q11); "" when no Envoy is pinned for the
-// architecture, which refuses any router start.
+// staging directory: <stagingDir>/envoy/<sha256>/envoy (agentapi.StagedEnvoyPath), by the digest of
+// the pin in the agent's own build, where the provider stages it when the controller runs Instances
+// behind a router (#454); "" when no Envoy is pinned for the architecture, which refuses any router
+// start.
 func StagedEnvoyPath(stagingDir string) string {
 	p, err := envoypin.For(runtime.GOARCH)
 	if err != nil || stagingDir == "" {
 		return ""
 	}
-	return filepath.Join(stagingDir, "envoy", p.SHA256, "envoy")
+	return filepath.Join(stagingDir, filepath.FromSlash(agentapi.StagedEnvoyPath(p.SHA256)))
 }
 
 // routerPart is the Instance's router.
