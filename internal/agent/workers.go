@@ -67,6 +67,7 @@ func (a *Agent) startWorker(in *instance, dw agentapi.DesiredWorker, instGen int
 		Key:           in.key,
 		BaseEnv:       a.o.BaseEnv,
 	}
+	ex.RouterKeepAlive = in.routerDesired != nil
 	env, err := ex.Env()
 	if err != nil {
 		return fail(err)
@@ -346,6 +347,10 @@ func (a *Agent) shutdown() {
 			groups = append(groups, w.proc)
 		}
 	}
+	if r := in.router; r != nil && r.live() && r.proc != nil {
+		r.proc.Group.Stop(a.stopGrace)
+		groups = append(groups, r.proc.Group)
+	}
 	deadline := time.NewTimer(a.stopGrace + shutdownMargin)
 	defer deadline.Stop()
 	for _, g := range groups {
@@ -362,6 +367,10 @@ func (a *Agent) shutdown() {
 			w.phase = agentapi.PartStopped
 			w.cleaning = false
 		}
+	}
+	if r := in.router; r != nil && r.proc != nil && r.live() {
+		code := r.proc.Group.ExitCode()
+		r.exitCode, r.phase = &code, agentapi.PartStopped
 	}
 }
 

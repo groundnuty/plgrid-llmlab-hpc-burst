@@ -33,6 +33,9 @@ type Forwarder struct {
 
 	mu     sync.Mutex
 	target string // the engine socket; "" when no worker serves
+	// router is router mode (beta, router.go): the target is the router's socket, and SetTarget, which
+	// the workers call, changes nothing.
+	router bool
 }
 
 // NewForwarder listens on the Unix socket at path, mode 0600.
@@ -90,7 +93,34 @@ func (f *Forwarder) Path() string { return f.path }
 func (f *Forwarder) SetTarget(socket string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.router {
+		return
+	}
 	f.target = socket
+}
+
+// RouteTo puts the forwarder in router mode, forwarding to the router's socket; "" while the router does
+// not run, so new requests get 503. In router mode no worker's socket is ever the target.
+func (f *Forwarder) RouteTo(socket string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.router = true
+	f.target = socket
+}
+
+// LeaveRouter ends router mode, with no target, so a worker's SetTarget counts again.
+func (f *Forwarder) LeaveRouter() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.router = false
+	f.target = ""
+}
+
+// Routed reports whether the forwarder is in router mode.
+func (f *Forwarder) Routed() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.router
 }
 
 // Target returns the current engine socket.

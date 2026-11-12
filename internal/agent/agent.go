@@ -65,6 +65,9 @@ type Options struct {
 	// serves that Instance's proxy (HBEP-6, frpc in the job): its UID while
 	// the desired state runs it, and "" once it ends. *Frpc is one.
 	Tunnel Tunnel
+	// EnvoyBinary is the staged Envoy that an Instance with a router runs (StagedEnvoyPath in
+	// production; router.go). "" refuses every router start.
+	EnvoyBinary string
 
 	// ReportInterval: a report at least this often (agentapi.ReportInterval
 	// when 0).
