@@ -358,17 +358,21 @@ func TestWithBulkCertificateRefusesWhatItCannotServe(t *testing.T) {
 	}
 }
 
-// TestRunServesTheBulkSplit: the whole front, with Options.BulkPath, splits its dial-home listener
-// by server name (listen's wiring), and refuses the bulk path in ssh mode, with no mode, and
+// TestRunServesTheBulkSplit: the whole front, with Options.BulkPath, presents each name's
+// certificate and splits its dial-home listener by server name (listen's wiring), and refuses the bulk path in ssh mode, with no mode, and
 // without the second certificate.
 func TestRunServesTheBulkSplit(t *testing.T) {
 	host := agentapi.Host{StateDir: t.TempDir(), PortBase: kernelPortBase(t)}
-	bulkPair(t, host)
+	first, bulk := bulkPair(t, host)
 	upFirst, upBulk := startRawUpstream(t, switching), startRawUpstream(t, switching)
 	f, _ := runProbeFront(t, startMuxDouble(t), func(o *Options) {
 		o.Mode, o.Host, o.BulkPath = ModeHostDialed, host, true
 		o.Config.FrpsBindAddr, o.Config.FrpsBulkBindAddr = upFirst.ln.Addr().String(), upBulk.ln.Addr().String()
 	})
+	// The running front presents each name's certificate (listen's withBulkCertificate).
+	if !bytes.Equal(peerCert(t, f.Dial.String(), bulkName), bulk) || !bytes.Equal(peerCert(t, f.Dial.String(), agentapi.DialHomeServerName), first) {
+		t.Error("the running front does not present the second certificate to the bulk name and the first to the token's")
+	}
 	for _, c := range []struct {
 		name      string
 		wantFirst bool
