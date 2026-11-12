@@ -25,8 +25,9 @@ const envoyRunDir = "/hpcburst/run-example" // only a string here: nothing binds
 
 func envoyCfg() agent.EnvoyConfig {
 	return agent.EnvoyConfig{
-		RunDir:  envoyRunDir,
-		Workers: []agent.EnvoyWorker{{Name: "worker-0", Socket: envoyRunDir + "/worker-0.sock"}},
+		RunDir:        envoyRunDir,
+		Workers:       []agent.EnvoyWorker{{Name: "worker-0", Socket: envoyRunDir + "/worker-0.sock"}},
+		ReadinessPort: 30160, // only a number here: nothing binds it
 	}
 }
 
@@ -103,6 +104,21 @@ func TestEnvoyConfigCarriesHBEP5sSettings(t *testing.T) {
 		"max_requests":                   at(t, c, "circuit_breakers", "thresholds", 0, "max_requests"),
 		"worker-0's socket":              at(t, c, "load_assignment", "endpoints", 0, "lb_endpoints", 0, "endpoint", "address", "pipe", "path"),
 		"worker-0's name":                at(t, c, "load_assignment", "endpoints", 0, "lb_endpoints", 0, "endpoint", "hostname"),
+		"check timeout":                  at(t, c, "health_checks", 0, "timeout"),
+		"check interval":                 at(t, c, "health_checks", 0, "interval"),
+		"check before traffic":           at(t, c, "health_checks", 0, "no_traffic_interval"),
+		"unhealthy after":                at(t, c, "health_checks", 0, "unhealthy_threshold"),
+		"healthy after":                  at(t, c, "health_checks", 0, "healthy_threshold"),
+		"check path":                     at(t, c, "health_checks", 0, "http_health_check", "path"),
+		"check address":                  at(t, c, "load_assignment", "endpoints", 0, "lb_endpoints", 0, "endpoint", "health_check_config", "address", "socket_address", "address"),
+		"check port":                     at(t, c, "load_assignment", "endpoints", 0, "lb_endpoints", 0, "endpoint", "health_check_config", "address", "socket_address", "port_value"),
+		"check Host":                     at(t, c, "load_assignment", "endpoints", 0, "lb_endpoints", 0, "endpoint", "health_check_config", "hostname"),
+		"consecutive 5xx":                at(t, c, "outlier_detection", "consecutive_5xx"),
+		"base ejection":                  at(t, c, "outlier_detection", "base_ejection_time"),
+		"max ejection":                   at(t, c, "outlier_detection", "max_ejection_time"),
+		"max ejection percent":           at(t, c, "outlier_detection", "max_ejection_percent"),
+		"uneject on a passing check":     at(t, c, "outlier_detection", "successful_active_health_check_uneject_host"),
+		"panic threshold":                at(t, c, "common_lb_config", "healthy_panic_threshold", "value"),
 		"the number of top-level fields": float64(len(m)),
 	} {
 		want := map[string]any{
@@ -113,6 +129,11 @@ func TestEnvoyConfigCarriesHBEP5sSettings(t *testing.T) {
 			"max_connections": float64(4294967295), "max_pending_requests": float64(4294967295), "max_requests": float64(4294967295),
 			"worker-0's socket": envoyRunDir + "/worker-0.sock", "worker-0's name": "worker-0",
 			"the number of top-level fields": float64(2),
+			"check timeout":                  "2s", "check interval": "5s", "check before traffic": "5s",
+			"unhealthy after": float64(2), "healthy after": float64(1), "check path": "/ready",
+			"check address": "127.0.0.1", "check port": float64(30160), "check Host": "worker-0",
+			"consecutive 5xx": float64(3), "base ejection": "30s", "max ejection": "300s",
+			"max ejection percent": float64(100), "uneject on a passing check": false, "panic threshold": float64(0),
 		}[name]
 		if got != want {
 			t.Errorf("%s = %v, want %v", name, got, want)
@@ -186,6 +207,42 @@ func TestEnvoyGuardRefusesEachFault(t *testing.T) {
 		{"hashing another header", func(m map[string]any) {
 			at(t, routeOf(t, m), "hash_policy", 0, "header").(map[string]any)["header_name"] = "x-other"
 		}, "header_name is x-other"},
+		{"no panic threshold, so Envoy's default 50%", func(m map[string]any) { delete(clusterOf(t, m), "common_lb_config") }, "has no common_lb_config"},
+		{"a panic threshold of 50%", func(m map[string]any) {
+			at(t, clusterOf(t, m), "common_lb_config", "healthy_panic_threshold").(map[string]any)["value"] = 50
+		}, "healthy_panic_threshold.value is 50"},
+		{"no health checks", func(m map[string]any) { delete(clusterOf(t, m), "health_checks") }, "has no health_checks"},
+		{"checks every 60 s", func(m map[string]any) {
+			at(t, clusterOf(t, m), "health_checks", 0).(map[string]any)["interval"] = "60s"
+		}, "interval is 60s"},
+		{"no no_traffic_interval, so Envoy's 60 s", func(m map[string]any) {
+			delete(at(t, clusterOf(t, m), "health_checks", 0).(map[string]any), "no_traffic_interval")
+		}, "has no no_traffic_interval"},
+		{"unhealthy after 3 failures", func(m map[string]any) {
+			at(t, clusterOf(t, m), "health_checks", 0).(map[string]any)["unhealthy_threshold"] = 3
+		}, "unhealthy_threshold is 3"},
+		{"a check of the engine's own /health", func(m map[string]any) {
+			at(t, clusterOf(t, m), "health_checks", 0, "http_health_check").(map[string]any)["path"] = "/health"
+		}, "path is /health"},
+		{"no outlier detection", func(m map[string]any) { delete(clusterOf(t, m), "outlier_detection") }, "has no outlier_detection"},
+		{"Envoy's default 10% ejection", func(m map[string]any) {
+			clusterOf(t, m)["outlier_detection"].(map[string]any)["max_ejection_percent"] = 10
+		}, "max_ejection_percent is 10"},
+		{"a passing check unejects", func(m map[string]any) {
+			clusterOf(t, m)["outlier_detection"].(map[string]any)["successful_active_health_check_uneject_host"] = true
+		}, "successful_active_health_check_uneject_host is true"},
+		{"a check of another port", func(m map[string]any) {
+			at(t, clusterOf(t, m), "load_assignment", "endpoints", 0, "lb_endpoints", 0, "endpoint", "health_check_config", "address", "socket_address").(map[string]any)["port_value"] = 30161
+		}, "port_value is 30161"},
+		{"a check off loopback", func(m map[string]any) {
+			at(t, clusterOf(t, m), "load_assignment", "endpoints", 0, "lb_endpoints", 0, "endpoint", "health_check_config", "address", "socket_address").(map[string]any)["address"] = "0.0.0.0"
+		}, "address is 0.0.0.0"},
+		{"a check naming another worker", func(m map[string]any) {
+			at(t, clusterOf(t, m), "load_assignment", "endpoints", 0, "lb_endpoints", 0, "endpoint", "health_check_config").(map[string]any)["hostname"] = "worker-1"
+		}, "hostname is worker-1"},
+		{"a check with no Host", func(m map[string]any) {
+			delete(at(t, clusterOf(t, m), "load_assignment", "endpoints", 0, "lb_endpoints", 0, "endpoint", "health_check_config").(map[string]any), "hostname")
+		}, "has no hostname"},
 		{"Envoy's default 1 h upstream idle", func(m map[string]any) {
 			at(t, clusterOf(t, m), "typed_extension_protocol_options", "envoy.extensions.upstreams.http.v3.HttpProtocolOptions", "common_http_protocol_options").(map[string]any)["idle_timeout"] = "3600s"
 		}, "idle_timeout is 3600s"},

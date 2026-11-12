@@ -284,7 +284,11 @@ var scriptStops = map[string]struct {
 	},
 	"hack/build-agents.sh": {
 		// A go that fails: the script has read its arguments and checked the architectures, and
-		// stops at the toolchain check, before it creates anything.
+		// stops at the toolchain check, before it creates anything. A refused architecture also
+		// ends with "nothing was built", so that phrase cannot show the arguments were accepted;
+		// the toolchain's own message, which comes after the architectures are checked, does
+		// (the quickstart passes x86_64, and a misspelt one would stop earlier, with another
+		// message).
 		env: func(t *testing.T) []string {
 			stub := t.TempDir()
 			if err := os.WriteFile(filepath.Join(stub, "go"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
@@ -292,7 +296,7 @@ var scriptStops = map[string]struct {
 			}
 			return []string{"PATH=" + stub + string(os.PathListSeparator) + os.Getenv("PATH")}
 		},
-		reached: []string{"nothing was built"},
+		reached: []string{"cannot run Go"},
 	},
 }
 

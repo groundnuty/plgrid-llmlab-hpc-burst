@@ -173,6 +173,12 @@ type DesiredWorker struct {
 	// agent binds the job's private temporary directory at ContainerRunDir,
 	// so no port can clash on a shared node (HBEP-7, What it runs; L-7.7).
 	EngineSocket string `json:"engineSocket"`
+	// VerifiedGeneration is the worker's restart generation the controller has
+	// verified and warmed up (beta, behind a router; HBEP-7, Several workers).
+	// The agent's readiness endpoint answers 200 for the worker only while it
+	// equals Generation, so a generation raised but not yet verified never
+	// takes traffic. Absent: none verified yet, since a generation starts at 0.
+	VerifiedGeneration *int64 `json:"verifiedGeneration,omitempty"`
 }
 
 // Launch is an Instance's launch on the wire, a copy of the Instance's
