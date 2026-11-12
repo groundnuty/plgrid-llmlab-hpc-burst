@@ -1,0 +1,245 @@
+# THROWAWAY, never merged: #454's named mutants on a hosted runner (the VM is too loaded). Each mutant
+# is one exact edit; its named tests run on the unmutated tree first (the baseline, which must pass),
+# then on the mutant (which must fail), and the tree is restored. Read-only.
+name: e454-mutants
+on:
+  pull_request:
+    paths:
+      - .github/workflows/e454-mutants.yml
+permissions:
+  contents: read
+jobs:
+  mutants:
+    name: e454 mutants
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out the pull request's head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Read the Go version from go.mod
+        id: goversion
+        run: |
+          version=$(bash hack/fetch-go.sh --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Restore the cached Go archive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
+      - name: Check the Go on PATH is the pinned toolchain
+        run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
+      - name: Download and verify the Go modules
+        run: bash hack/go-mod-download.sh
+      - name: Restore the cached Envoy binary
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/envoy
+          key: envoy-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-envoy.sh', 'internal/agent/envoypin/envoy-pins.txt') }}
+      - name: Fetch the pinned Envoy binary
+        run: |
+          bash hack/fetch-envoy.sh "$RUNNER_TEMP/envoy"
+          {
+            echo "HPCBURST_ENVOY_DIR=$RUNNER_TEMP/envoy"
+            echo "HPCBURST_REQUIRE_ENVOY=1"
+          } >> "$GITHUB_ENV"
+      - name: Write the mutant table
+        run: |
+          cat > "$RUNNER_TEMP/mutants.json" <<'MUTANTS_EOF'
+          [
+           {
+            "name": "S1 Envoy staged without a router",
+            "pkg": "./internal/providerctl",
+            "run": "^TestWithoutARouterNoEnvoyIsStaged$",
+            "edits": [
+             {
+              "file": "internal/providerctl/create.go",
+              "old": "\tif len(e.s.o.Front.EnvoyDigests) == 0 {\n\t\treturn \"\", false, nil\n\t}\n",
+              "new": ""
+             }
+            ]
+           },
+           {
+            "name": "S2 a wrong Envoy build not refused before the claim",
+            "pkg": "./internal/providerctl",
+            "run": "^TestAWrongOrMissingEnvoyIsRefusedBeforeAnyClaim$",
+            "edits": [
+             {
+              "file": "internal/providerctl/create.go",
+              "old": "\t\tif _, err := e.s.builds.find(envoyBuild, e.s.o.AgentBuildsDir, arch, envoy); err != nil {\n\t\t\treturn err.Error()\n\t\t}\n",
+              "new": "\t\t_ = envoy\n"
+             }
+            ]
+           },
+           {
+            "name": "S3 the Envoy build is not staged",
+            "pkg": "./internal/providerctl",
+            "run": "^TestARouterStagesThePartitionsEnvoyByDigest$",
+            "edits": [
+             {
+              "file": "internal/providerctl/create.go",
+              "old": "\t\tenvoyFile = append(envoyFile, file(agentapi.StagedEnvoyPath(envoySum), 0o700, envoy))\n",
+              "new": "\t\t_ = envoy\n"
+             }
+            ]
+           },
+           {
+            "name": "C1 the controller gives Envoy digests without the flag",
+            "pkg": "./cmd/hpcburst-controller",
+            "run": "^TestTheRouterFlagGivesTheProviderEnvoysDigests$",
+            "edits": [
+             {
+              "file": "cmd/hpcburst-controller/components.go",
+              "old": "\tif f.instanceRouter == string(v1alpha1.InstanceRouterEnvoy) {\n\t\tif fs.EnvoyDigests, err",
+              "new": "\tif true {\n\t\tif fs.EnvoyDigests, err"
+             }
+            ]
+           },
+           {
+            "name": "L1 the launcher drops the router from the controller's args",
+            "pkg": "./internal/launcher",
+            "run": "^TestTheRouterReachesTheControllersCommandLine$",
+            "edits": [
+             {
+              "file": "internal/launcher/supervise.go",
+              "old": "\t\targs = append(args, \"--instance-router\", s.InstanceRouter)\n",
+              "new": ""
+             }
+            ]
+           },
+           {
+            "name": "L2 an upgrade drops the router",
+            "pkg": "./internal/launcher",
+            "run": "^TestAnUpgradeKeepsTheRouter$",
+            "edits": [
+             {
+              "file": "internal/launcher/upgrade.go",
+              "old": "\tspec.instanceRouter = st.InstanceRouter\n",
+              "new": ""
+             }
+            ]
+           },
+           {
+            "name": "L3 up's check ignores the recorded router",
+            "pkg": "./internal/launcher",
+            "run": "^TestTheRecordedRouterMakesUpAndStatusCheckEnvoysBuilds$",
+            "edits": [
+             {
+              "file": "internal/launcher/up.go",
+              "old": "\tab, err = CheckAgentBuildsFor(ctx, cfg, dir, recordedRouter(l))",
+              "new": "\tab, err = CheckAgentBuildsFor(ctx, cfg, dir, \"\")"
+             }
+            ]
+           },
+           {
+            "name": "L4 up takes any router",
+            "pkg": "./internal/launcher",
+            "run": "^TestUpRefusesABadRouterBeforeAnythingStarts$",
+            "edits": [
+             {
+              "file": "internal/launcher/up.go",
+              "old": "\tif o.InstanceRouter != \"\" && o.InstanceRouter != string(v1alpha1.InstanceRouterEnvoy) {",
+              "new": "\tif false {"
+             }
+            ]
+           },
+           {
+            "name": "A1 the agent skips the glibc check",
+            "pkg": "./internal/agent",
+            "run": "^TestEnvoyIsRefusedOnAGlibcOlderThanItNeeds$",
+            "edits": [
+             {
+              "file": "internal/agent/envoy.go",
+              "old": "\tif err := checkEnvoyGlibc(bin); err != nil {\n\t\treturn nil, err\n\t}\n",
+              "new": ""
+             }
+            ]
+           },
+           {
+            "name": "A2 the glibc check compares the major version only",
+            "pkg": "./internal/agent",
+            "run": "^TestEnvoyIsRefusedOnAGlibcOlderThanItNeeds$",
+            "edits": [
+             {
+              "file": "internal/agent/envoyglibc.go",
+              "old": "\tif maj < need[0] || (maj == need[0] && minor < need[1]) {",
+              "new": "\tif maj < need[0] {"
+             }
+            ]
+           },
+           {
+            "name": "F1 fetch-envoy.sh places an agent build without its checksum",
+            "pkg": "./internal/agent/envoypin",
+            "run": "^TestFetchEnvoyRefusesAnAgentBuildThatIsNotItsPin$",
+            "edits": [
+             {
+              "file": "hack/fetch-envoy.sh",
+              "old": "  if [ \"$got\" != \"$sum\" ]; then",
+              "new": "  if false; then"
+             }
+            ]
+           },
+           {
+            "name": "F2 fetch-envoy.sh takes two versions for one architecture",
+            "pkg": "./internal/agent/envoypin",
+            "run": "^TestFetchEnvoyRefusesTwoVersionsForOneArchitectureInAgentBuilds$",
+            "edits": [
+             {
+              "file": "hack/fetch-envoy.sh",
+              "old": "    case $seen in *\" $parch \"*) die",
+              "new": "    case $seen in *\" NOMATCH \"*) die"
+             }
+            ]
+           }
+          ]
+          MUTANTS_EOF
+          cat > "$RUNNER_TEMP/mutants.py" <<'RUNNER_EOF'
+          import json, os, subprocess, sys
+          table = json.load(open(os.environ["MUTANTS_JSON"]))
+          def go_test(pkg, run):
+              p = subprocess.run(["go", "test", "-count=1", "-v", "-run", run, pkg], capture_output=True, text=True)
+              out = p.stdout + p.stderr
+              fails = [l.strip() for l in out.splitlines() if "_test.go:" in l][:2]
+              return p.returncode, fails, [l for l in out.splitlines() if l.startswith("--- ")]
+          bad = 0
+          for m in table:
+              rc, _, lines = go_test(m["pkg"], m["run"])
+              orig = {}
+              for e in m["edits"]:
+                  txt = orig.get(e["file"]) or open(e["file"]).read()
+                  orig.setdefault(e["file"], txt)
+                  if txt.count(e["old"]) != 1:
+                      print(f"== {m['name']}: ANCHOR in {e['file']} found {txt.count(e['old'])} times"); bad += 1; break
+              else:
+                  cur = dict(orig)
+                  for e in m["edits"]:
+                      cur[e["file"]] = cur[e["file"]].replace(e["old"], e["new"])
+                  for f, t in cur.items():
+                      open(f, "w").write(t)
+                  try:
+                      mrc, fails, mlines = go_test(m["pkg"], m["run"])
+                  finally:
+                      for f in orig:
+                          subprocess.run(["git", "checkout", "--", f], check=True)
+                  verdict = "KILLED" if rc == 0 and mrc != 0 else ("SURVIVED" if mrc == 0 else "BASELINE NOT GREEN")
+                  print(f"== {m['name']}\n  baseline exit={rc} {lines}\n  mutant exit={mrc} {mlines}\n  {verdict}")
+                  for l in fails:
+                      print("  failing line:", l[:260])
+                  if verdict != "KILLED":
+                      bad += 1
+              if subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True).stdout.strip():
+                  print("  NOT RESTORED"); bad += 1
+          print(f"{len(table)} mutants, {bad} not killed or not run")
+          sys.exit(1 if bad else 0)
+          RUNNER_EOF
+      - name: Run each mutant against its baseline
+        env:
+          MUTANTS_JSON: ${{ runner.temp }}/mutants.json
+        run: python3 "$RUNNER_TEMP/mutants.py"
