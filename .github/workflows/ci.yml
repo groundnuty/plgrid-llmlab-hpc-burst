@@ -79,10 +79,11 @@ on:
   # Seeds the caches from main by hand; see above.
   workflow_dispatch:
   # The release workflow (release.yml, HBEP-15 Releases) calls these same jobs for a pushed tag, so it
-  # runs the required checks rather than a copy of them. No job is renamed for it: the four required
-  # checks stay go, tidy, crd and envtest, and launcher-k3s. Under a call, github.event_name and
-  # github.ref are the caller's, so the cache-save steps above also run for a tag, and write entries
-  # scoped to that tag, which no other run reads; the restores still read the default branch's.
+  # runs the required checks rather than a copy of them. No job is renamed for it: the five required
+  # checks stay go, go own-timeout, tidy, crd and envtest, and launcher-k3s. Under a call,
+  # github.event_name and github.ref are the caller's, so the cache-save steps above also run for a tag,
+  # and write entries scoped to that tag, which no other run reads; the restores still read the default
+  # branch's.
   workflow_call:
 
 permissions:
