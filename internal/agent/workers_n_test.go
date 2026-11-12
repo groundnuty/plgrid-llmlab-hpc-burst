@@ -117,3 +117,30 @@ func TestTooFewDevicesForTheWorkersIsRefused(t *testing.T) {
 		t.Errorf("%d workers were executed, want none", n)
 	}
 }
+
+// Each worker's checks, asked in its DesiredWorker.Checks, run against the engine double on its own
+// socket, and their results are in that worker's own report; the Instance's own checks are absent, as
+// the desired state asks none (Q6).
+func TestEachWorkersCheckResultsAreInItsReport(t *testing.T) {
+	h := newHarness(t, harnessOptions{baseEnv: []string{"CUDA_VISIBLE_DEVICES=0,1"}})
+	h.set(h.workersState(2, ""))
+	r := h.waitReport("each worker's verification in its own report", 60*time.Second, func(r agentapi.Report) bool {
+		if r.Instance == nil || len(r.Instance.Workers) != 2 {
+			return false
+		}
+		for _, w := range r.Instance.Workers {
+			if w.Checks == nil || w.Checks.Verify == nil || !w.Checks.Verify.Done {
+				return false
+			}
+		}
+		return true
+	})
+	for _, w := range r.Instance.Workers {
+		if w.Checks.VerificationGeneration != 1 || w.Checks.Verify.Error != "" || w.Checks.Verify.Fingerprint == "" {
+			t.Errorf("%s's verification: %+v, want generation 1, a fingerprint and no error", w.Name, w.Checks.Verify)
+		}
+	}
+	if r.Instance.Checks != nil {
+		t.Errorf("the Instance's own checks are %+v, want none: only the workers' were asked", r.Instance.Checks)
+	}
+}
