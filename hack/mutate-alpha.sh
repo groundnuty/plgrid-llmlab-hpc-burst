@@ -542,7 +542,20 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'live_flows_test.go@@"the no-overlap row'"'"'s result"); err != nil {@@"the no-overlap row'"'"'s result"); err != nil && second == nil {'
   'rows.go@@	r.Budget = lease + TunnelRunOver@@	_ = r.Budget'
   'live_flows_test.go@@	r.untilBefore(ds, lead, "the stream across the drain start")@@	r.waitFor(time.Hour, "a wait no sum holds", func() bool { return true }); r.untilBefore(ds, lead, "the stream across the drain start")'
-  'live_flows_test.go@@r.successorOf(pre.Name, time.Until(ds)-lead-lead/2, nil)@@r.successorOf(pre.Name, time.Until(ds), nil)'
+  'live_flows_test.go@@r.successorOf(pre.Name, time.Until(ds)+LeadTimesFor(lead).SuccessorWaitEnds, nil)@@r.successorOf(pre.Name, time.Until(ds), nil)'
+  # #447: the handover streams' lead sized to the deployment's max-model-len (handoverlead.go): the minimum, the floor (dropped, and inclusive), the
+  # rounding down, the prompt's reserve, the successor wait's half lead, the NOT RUN, the context the live steps read, and the script's marker.
+  'handoverlead.go@@	return min(maxRequest/3, fit), nil@@	return maxRequest / 3, nil'
+  'handoverlead.go@@	if secs < LeadFloor.Seconds() {@@	if secs <= LeadFloor.Seconds() {'
+  'handoverlead.go@@	if secs < LeadFloor.Seconds() {@@	if secs < 0 {'
+  'handoverlead.go@@	secs := math.Floor(float64(room) / rate / 2)@@	secs := float64(room) / rate / 2'
+  'handoverlead.go@@const PromptReserve = 512@@const PromptReserve = 256'
+  'handoverlead.go@@SuccessorWaitEnds: -lead - lead/2@@SuccessorWaitEnds: -lead'
+  'run.go@@errors.Is(err, ErrSlotTaken) || errors.Is(err, ErrLeadTooShort)@@errors.Is(err, ErrSlotTaken)'
+  'live_flows_test.go@@return FitLead(r.tm.MaxRequestDuration, r.maxModelLenOrDefault(), rate)@@return FitLead(r.tm.MaxRequestDuration, 32768, rate)'
+  'hack/live-checks.sh@@  ! lead_marker || case $n in alpha-athena-handover|alpha-helios-nooverlap|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1@@  true'
+  'hack/live-checks.sh@@    elif lead_marker; then@@    elif false; then'
+  'hack/live-checks.sh@@at [0-9]+ tokens/s with max-model-len@@at .+ tokens/s with max-model-len'
   'hack/live-checks.sh@@        TMIN[$name]=$((v + 29))@@        TMIN[$name]=$((v + 28))'
   'hack/live-checks.sh@@tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|02:17:00|166|-C memfs@@tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|02:17:00|165|-C memfs'
   'hack/live-checks.sh@@tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|166|-@@tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|165|-'
@@ -780,7 +793,7 @@ compile_of() {
 # parent-death SIGKILL, which it asks for.
 rehearsal_tests='ExitedSSHD|ZeroRowSignalsNothing|BelowWalksNothing|Guard2Alone|SignalProcs|RefusalIsTheErrorOfClose|WithRelayEnvSelectsNothing|ReportLeaks|CloseReturnsWhen|BeforeItsParent|LeftTheTree|StillAliveAtItsDeadline|StillOutsideTheTree|RelayGuard|ForcedCommandDies|ForcedCommandExecs|GuardFailureIsLogged'
 # The tests of the script's kind.
-script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot|HostDialedMode'
+script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot|HostDialedMode|HandoverRowsLead|LeadMarkersReason|LeadMarkerOnARow'
 # tests_of <path> [control|<names>]: the command that judges a mutant of path, in the array tests. With control, the same command with
 # no mutant: from the binaries kept at the baseline, the tree being as it was. With names (a regexp), that, for those tests alone, to
 # the end. The
