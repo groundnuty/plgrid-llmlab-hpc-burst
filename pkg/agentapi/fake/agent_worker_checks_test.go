@@ -58,3 +58,25 @@ func TestEachWorkersChecksAreInItsOwnReport(t *testing.T) {
 		t.Errorf("worker-1 after its restart: generation %d, checks %+v; want generation 1 checked at verification generation 2", w.Generation, w.Checks)
 	}
 }
+
+// A worker's warm-up above its share of agentapi.MaxTargetSessions is refused, as the real agent refuses
+// it: two workers may each ask 512, not 513. The fake returns the refusal from Step, so a rig test of a
+// controller that asks too much fails at once.
+func TestAWorkersWarmUpAboveItsShareIsRefused(t *testing.T) {
+	for _, c := range []struct {
+		sessions int32
+		refused  bool
+	}{{512, false}, {513, true}} {
+		r := newRig(t, fake.Engine{})
+		r.set(run(instance(func(i *agentapi.DesiredInstance) {
+			withWorkers(0, 0)(i)
+			for n := range i.Workers {
+				i.Workers[n].Checks = &agentapi.Checks{VerificationGeneration: 1, WarmUp: &agentapi.WarmUpRequest{Shapes: shapes, TargetSessions: c.sessions}}
+			}
+		})))
+		err := r.a.Step(bgndCtx)
+		if (err != nil) != c.refused {
+			t.Errorf("two workers at %d sessions each: Step returned %v, want refused %v", c.sessions, err, c.refused)
+		}
+	}
+}

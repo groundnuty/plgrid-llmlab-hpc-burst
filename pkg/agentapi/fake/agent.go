@@ -352,10 +352,12 @@ func checkDesired(d agentapi.DesiredState) error {
 				return fmt.Errorf("fake agent: warm-up targetSessions is %d, outside 1..%d (agentapi.MaxTargetSessions)", n, agentapi.MaxTargetSessions)
 			}
 		}
+		// Each worker's warm-up asks at most its share, as the real agent refuses beyond it.
+		most := agentapi.MaxWorkerTargetSessions(len(d.Instance.Workers))
 		for _, dw := range d.Instance.Workers {
 			if c := dw.Checks; c != nil && c.WarmUp != nil {
-				if n := c.WarmUp.TargetSessions; n < 1 || n > agentapi.MaxTargetSessions {
-					return fmt.Errorf("fake agent: %s's warm-up targetSessions is %d, outside 1..%d (agentapi.MaxTargetSessions)", dw.Name, n, agentapi.MaxTargetSessions)
+				if n := c.WarmUp.TargetSessions; n < 1 || n > most {
+					return fmt.Errorf("fake agent: %s's warm-up targetSessions is %d, outside 1..%d (agentapi.MaxWorkerTargetSessions)", dw.Name, n, most)
 				}
 			}
 		}
