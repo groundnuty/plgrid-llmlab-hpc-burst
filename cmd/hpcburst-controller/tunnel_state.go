@@ -95,6 +95,10 @@ type pathState struct {
 	// ago. A successful read that does not list it ends the run, so its clock starts again; a
 	// read that fails is skipped.
 	suspects map[string]time.Time
+
+	// bulk is the second frps's state, set only with --bulk-path (tunnel_bulk.go); nil means nothing
+	// of the bulk path runs, and readOnce reads one list.
+	bulk *bulkPathState
 }
 
 func (s *pathState) clock() time.Time {
@@ -165,6 +169,7 @@ func (s *pathState) readOnce(ctx context.Context) {
 		return
 	}
 	s.reportOrphans(ctx, rep, uids)
+	s.readBulk(ctx, uids)
 	for _, in := range live {
 		want, ok := rep.Conditions[string(in.UID)]
 		if !ok {

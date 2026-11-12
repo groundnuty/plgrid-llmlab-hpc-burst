@@ -18,7 +18,13 @@
 //
 //	hpcburst-controller --state-dir DIR --port-base PORT --health-addr 127.0.0.1:PORT
 //	    [--front-mode direct|ssh --front-addr HOST:PORT | --front-mode host-dialed]
-//	    [--kubeconfig FILE] [--leader-elect=true] [--workers 4]
+//	    [--kubeconfig FILE] [--leader-elect=true] [--workers 4] [--bulk-path]
+//
+// --bulk-path (beta; HBEP-6, The bulk path) is passed only when the launcher's state records the bulk
+// path, in direct or host-dialed mode: the controller then serves frps-bulk's plugin path
+// (agentapi.FrpsBulkPluginPath) beside the first's, reads frps-bulk's proxy list at base+15, and
+// stages the launcher's second certificate with agent.json's bulk block (tunnel_bulk.go;
+// components.go). Without it nothing of that runs.
 //
 // --front-mode host-dialed takes no --front-addr, and --front-addr is refused with it: the host
 // dials the jobs through the login node, so agent.json names no endpoint (HBEP-6, Dial-home
@@ -90,6 +96,11 @@ type flags struct {
 	// controller sends it desired sets; "" is alpha, the relays the
 	// controller's own. The launcher passes the path; none is computed here.
 	relayKeeperSocket string
+	// bulkPath is --bulk-path (beta; HBEP-6, The bulk path; #448): the launcher runs the second frps, so
+	// the controller serves its plugin path, reads its proxy list at base+15, stages the second
+	// certificate and writes agent.json's bulk block. The launcher passes it only when its state
+	// records the bulk path; without it nothing of the bulk path runs in the controller.
+	bulkPath bool
 }
 
 func parse(args []string, stderr io.Writer) (flags, error) {
@@ -105,6 +116,7 @@ func parse(args []string, stderr io.Writer) (flags, error) {
 	fs.BoolVar(&f.leaderElect, "leader-elect", true, "take the lifecycle Lease, a guard against a stale second copy")
 	fs.IntVar(&f.workers, "workers", lifecycle.DefaultWorkers, "work queue workers")
 	fs.StringVar(&f.relayKeeperSocket, "relay-keeper-socket", "", "the relay keeper's Unix socket, in host-dialed mode only (beta): the keeper holds the relays; unset, the controller does (alpha)")
+	fs.BoolVar(&f.bulkPath, "bulk-path", false, "the launcher runs the second frps for the bulk path (beta): serve its plugin path, read its proxy list and stage the second certificate; direct and host-dialed mode only")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
@@ -136,6 +148,15 @@ func parse(args []string, stderr io.Writer) (flags, error) {
 		return flags{}, fmt.Errorf("--relay-keeper-socket is for --front-mode %s only", agentapi.DialHomeHostDialed)
 	case f.relayKeeperSocket != "" && (!filepath.IsAbs(f.relayKeeperSocket) || len(f.relayKeeperSocket) > agentapi.MaxRelaySocketPath):
 		return flags{}, fmt.Errorf("--relay-keeper-socket must be an absolute path of at most %d bytes", agentapi.MaxRelaySocketPath)
+	// The bulk path is built for direct and host-dialed mode (HBEP-6, The bulk path), which `up
+	// --bulk-path` enforces (the science agent's ruling S2, #448); the controller refuses the rest too, so
+	// a flag that would do nothing, or read a port past the block, is never accepted in silence.
+	case f.bulkPath && f.frontMode == "":
+		return flags{}, errors.New("--bulk-path needs --front-mode direct or host-dialed")
+	case f.bulkPath && f.frontMode == string(agentapi.DialHomeSSH):
+		return flags{}, fmt.Errorf("--bulk-path is for --front-mode %s or %s only: in ssh mode the agent starts no bulk frpc", agentapi.DialHomeDirect, agentapi.DialHomeHostDialed)
+	case f.bulkPath && f.host.PortBase > 65535-agentapi.FrpsBulkWebPortOffset:
+		return flags{}, fmt.Errorf("--port-base %d is out of range with --bulk-path: the block reaches base+%d", f.host.PortBase, agentapi.FrpsBulkWebPortOffset)
 	}
 	if f.kubeconfig == "" {
 		f.kubeconfig = filepath.Join(f.host.StateDir, "kubeconfig")
@@ -180,7 +201,10 @@ func checkCredentialsDir(dir string) error {
 // component that writes each Instance's TunnelConnected condition. events is
 // the copy's raised-events counter, which a component that raises events
 // counts into through its recorder (HBEP-8, Raised events).
-var extraRunnables = []func(mgr manager.Manager, host agentapi.Host, backend agentapi.Backend, listen func(addr string) (net.Listener, error), events *eventcount.Counter) (manager.Runnable, error){addTunnel}
+//
+// bulkPath is --bulk-path: addTunnel then serves the second frps's plugin path and reads its list too
+// (tunnel_bulk.go).
+var extraRunnables = []func(mgr manager.Manager, host agentapi.Host, backend agentapi.Backend, listen func(addr string) (net.Listener, error), events *eventcount.Counter, bulkPath bool) (manager.Runnable, error){addTunnel}
 
 func run(ctx context.Context, f flags, d deps) error {
 	// The agent endpoint and frps's plugin are bound through ls (components.go),
@@ -229,7 +253,7 @@ func run(ctx context.Context, f flags, d deps) error {
 		return err
 	}
 	for _, add := range extraRunnables {
-		r, err := add(mgr, f.host, backend, ls.Listen, events)
+		r, err := add(mgr, f.host, backend, ls.Listen, events, f.bulkPath)
 		if err != nil {
 			return err
 		}
