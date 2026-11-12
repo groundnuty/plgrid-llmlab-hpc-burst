@@ -174,6 +174,9 @@ func (s *State) supervisedSet(l layout) ([]supervised, error) {
 	if frps := s.frpsEntry(l); frps != nil {
 		set = append(set, *frps)
 	}
+	if bulk := s.frpsBulkEntry(l); bulk != nil {
+		set = append(set, *bulk)
+	}
 	if keeper := s.keeperEntry(l); keeper != nil {
 		// The controller hands its host-dialed relays to the keeper (HBEP-6, The relay keeper); with
 		// no keeper, its command line is as before, byte for byte.

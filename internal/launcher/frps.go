@@ -81,21 +81,57 @@ func RenderFrpsConfig(h agentapi.Host, webPassword string) (string, error) {
 // pkg/plugin/server/manager.go:70-98), so the front hears only proxies the controller admitted,
 // and frps refuses new proxies while the front does not answer. frontAddr must be 127.0.0.1:<port>.
 func RenderFrpsConfigWithFront(h agentapi.Host, webPassword, frontAddr string) (string, error) {
-	host, port, err := net.SplitHostPort(frontAddr)
-	if p, perr := strconv.Atoi(port); err != nil || perr != nil || host != "127.0.0.1" || p < 1 || p > 65535 {
-		return "", fmt.Errorf("the front's plugin address %q is not 127.0.0.1:<port>", frontAddr)
+	if err := checkFrontPluginAddr(frontAddr); err != nil {
+		return "", err
 	}
 	return renderFrpsConfig(h, webPassword, frontAddr)
 }
 
+// checkFrontPluginAddr refuses a front's plugin address that is not 127.0.0.1:<port>.
+func checkFrontPluginAddr(frontAddr string) error {
+	host, port, err := net.SplitHostPort(frontAddr)
+	if p, perr := strconv.Atoi(port); err != nil || perr != nil || host != "127.0.0.1" || p < 1 || p > 65535 {
+		return fmt.Errorf("the front's plugin address %q is not 127.0.0.1:<port>", frontAddr)
+	}
+	return nil
+}
+
+// frpsShape is what sets the bulk path's second frps apart from the first in its configuration
+// (beta; HBEP-6, The bulk path): its three loopback ports, its log, the paths it posts to on the
+// two plugins, and tcpMux off. Everything else is the first's, byte for byte.
+type frpsShape struct {
+	bind, mux, web        int
+	log                   string
+	pluginPath, frontPath string
+	muxOff                bool
+}
+
+// tokenFrpsShape is the first frps's: base+9 to base+11, frps.log, the plugins' first paths, and
+// frp's default tcpMux.
+func tokenFrpsShape(h agentapi.Host) frpsShape {
+	return frpsShape{bind: h.FrpsBindPort(), mux: h.FrpsTCPMuxPort(), web: h.FrpsWebPort(), log: FrpsLogFile(h),
+		pluginPath: agentapi.FrpsPluginPath, frontPath: agentapi.FrontFrpsPluginPath}
+}
+
+// bulkFrpsShape is the bulk path's frps: base+13 to base+15, frps-bulk.log, the plugins' bulk
+// paths, and transport.tcpMux = false (HBEP-6, The bulk path).
+func bulkFrpsShape(h agentapi.Host) frpsShape {
+	return frpsShape{bind: h.FrpsBulkBindPort(), mux: h.FrpsBulkTCPMuxPort(), web: h.FrpsBulkWebPort(), log: FrpsBulkLogFile(h),
+		pluginPath: agentapi.FrpsBulkPluginPath, frontPath: agentapi.FrontFrpsBulkPluginPath, muxOff: true}
+}
+
 func renderFrpsConfig(h agentapi.Host, webPassword, frontAddr string) (string, error) {
+	return renderFrps(h, tokenFrpsShape(h), webPassword, frontAddr)
+}
+
+func renderFrps(h agentapi.Host, s frpsShape, webPassword, frontAddr string) (string, error) {
 	if err := agentapi.CheckKey([]byte(webPassword)); err != nil {
 		return "", fmt.Errorf("frps web password: %w", err)
 	}
 	if err := checkTOMLPath("state directory", h.StateDir); err != nil {
 		return "", err
 	}
-	for _, p := range []int{h.FrpsPluginPort(), h.FrpsBindPort(), h.FrpsTCPMuxPort(), h.FrpsWebPort()} {
+	for _, p := range []int{h.FrpsPluginPort(), s.bind, s.mux, s.web} {
 		if p < 1 || p > 65535 {
 			return "", fmt.Errorf("the port block at %d puts an frps port at %d, outside 1-65535", h.PortBase, p)
 		}
@@ -109,9 +145,9 @@ func renderFrpsConfig(h agentapi.Host, webPassword, frontAddr string) (string, e
 	w("# Written by hpcburst at every start (HBEP-6). It holds the web password: mode 600, never edited by hand.")
 	w("# Loopback only: bindAddr defaults to every interface, and proxyBindAddr follows it.")
 	w(`bindAddr = "127.0.0.1"`)
-	w("bindPort = %d", h.FrpsBindPort())
+	w("bindPort = %d", s.bind)
 	w(`proxyBindAddr = "127.0.0.1"`)
-	w("tcpmuxHTTPConnectPort = %d", h.FrpsTCPMuxPort())
+	w("tcpmuxHTTPConnectPort = %d", s.mux)
 	w("# Every other listener stays off. Port 0 is frp's default; it is written so a new default cannot turn one on.")
 	w("kcpBindPort = 0")
 	w("quicBindPort = 0")
@@ -121,10 +157,16 @@ func renderFrpsConfig(h agentapi.Host, webPassword, frontAddr string) (string, e
 	w("# Token authentication with no token: frps's own check passes every login, and the plugin is the gate.")
 	w(`auth.method = "token"`)
 	w(`webServer.addr = "127.0.0.1"`)
-	w("webServer.port = %d", h.FrpsWebPort())
+	w("webServer.port = %d", s.web)
 	w("webServer.user = %q", agentapi.FrpsWebUser)
 	w("webServer.password = %q", webPassword)
-	w("log.to = %q", FrpsLogFile(h))
+	w("log.to = %q", s.log)
+	if s.muxOff {
+		w("# The bulk path's frps (beta): every connection on its own, with no multiplexed session, so a large")
+		w("# reply holds no other connection back. S1's heartbeat set is written all the same, since with")
+		w("# tcpMux off frp's defaults are 90 s (HBEP-6, The bulk path).")
+		w("transport.tcpMux = false")
+	}
 	w("transport.tcpMuxKeepaliveInterval = %d", frpsTCPMuxKeepaliveInterval)
 	w("transport.heartbeatTimeout = %d", frpsHeartbeatTimeout)
 	w("transport.tcpKeepalive = %d", frpsTCPKeepalive)
@@ -132,13 +174,13 @@ func renderFrpsConfig(h agentapi.Host, webPassword, frontAddr string) (string, e
 	w("[[httpPlugins]]")
 	w(`name = "hpcburst"`)
 	w("addr = %q", h.FrpsPluginAddr())
-	w("path = %q", agentapi.FrpsPluginPath)
+	w("path = %q", s.pluginPath)
 	w("ops = [%s]", strings.Join(ops, ", "))
 	if frontAddr != "" {
 		w("")
 		w("# The front's plugin, after the controller's: frps stops at the first refusal, so the front hears only admitted")
 		w("# proxies, and registers a proxy only once the front has stopped routing to its UID (HBEP-6, Admission).")
-		b.WriteString(frontPluginBlock(frontAddr))
+		b.WriteString(frontPluginBlockAt(frontAddr, s.frontPath))
 	}
 	return b.String(), nil
 }
@@ -146,12 +188,18 @@ func renderFrpsConfig(h agentapi.Host, webPassword, frontAddr string) (string, e
 // frontPluginBlock is the front's plugin entry exactly as RenderFrpsConfigWithFront writes it, one
 // line per key; status looks for it in frps's file (checkFrpsNamesTheFront).
 func frontPluginBlock(frontAddr string) string {
+	return frontPluginBlockAt(frontAddr, agentapi.FrontFrpsPluginPath)
+}
+
+// frontPluginBlockAt is frontPluginBlock for the front's plugin at path: agentapi.FrontFrpsPluginPath
+// for the first frps, agentapi.FrontFrpsBulkPluginPath for the bulk path's (HBEP-6, The bulk path).
+func frontPluginBlockAt(frontAddr, path string) string {
 	fops := make([]string, len(frontPluginOps))
 	for i, op := range frontPluginOps {
 		fops[i] = fmt.Sprintf("%q", op)
 	}
 	return fmt.Sprintf("[[httpPlugins]]\nname = %q\naddr = %q\npath = %q\nops = [%s]\n",
-		frontPluginName, frontAddr, agentapi.FrontFrpsPluginPath, strings.Join(fops, ", "))
+		frontPluginName, frontAddr, path, strings.Join(fops, ", "))
 }
 
 // EnsureFrpsWebPassword returns the web server's password from agentapi.Host.FrpsWebPasswordFile,
@@ -163,7 +211,17 @@ func frontPluginBlock(frontAddr string) string {
 // still secret. The state directory's lock serialises the launcher's commands, so two of them
 // never create the file at once.
 func EnsureFrpsWebPassword(h agentapi.Host) (key string, created bool, err error) {
-	path := h.FrpsWebPasswordFile()
+	return ensureWebPasswordFile(h.FrpsWebPasswordFile())
+}
+
+// EnsureFrpsBulkWebPassword is EnsureFrpsWebPassword for the bulk path's second frps, whose
+// password is a file of its own, agentapi.Host.FrpsBulkWebPasswordFile (HBEP-6, The bulk path).
+func EnsureFrpsBulkWebPassword(h agentapi.Host) (key string, created bool, err error) {
+	return ensureWebPasswordFile(h.FrpsBulkWebPasswordFile())
+}
+
+// ensureWebPasswordFile is EnsureFrpsWebPassword for the password file at path.
+func ensureWebPasswordFile(path string) (key string, created bool, err error) {
 	key, err = agentapi.ReadKeyFile(path)
 	switch {
 	case err == nil:
@@ -211,12 +269,17 @@ func WriteFrpsConfigWithFront(h agentapi.Host, webPassword, frontAddr string) (s
 }
 
 func writeFrpsConfigText(h agentapi.Host, text string) (string, error) {
-	for _, d := range []string{FrpsDir(h), filepath.Dir(FrpsLogFile(h))} {
+	return writeFrpsConfigTextAt(FrpsConfigFile(h), FrpsLogFile(h), text)
+}
+
+// writeFrpsConfigTextAt writes text at path, mode 600, after creating path's directory and log's
+// (mode 700).
+func writeFrpsConfigTextAt(path, log, text string) (string, error) {
+	for _, d := range []string{filepath.Dir(path), filepath.Dir(log)} {
 		if err := os.MkdirAll(d, agentapi.KeyDirMode); err != nil {
 			return "", err
 		}
 	}
-	path := FrpsConfigFile(h)
 	if err := writeFileAtomic(path, []byte(text), 0o600); err != nil {
 		return "", fmt.Errorf("write %s: %w", path, err)
 	}

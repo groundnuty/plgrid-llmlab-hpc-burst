@@ -36,6 +36,10 @@ type Ports struct {
 	// configuration file, not taken from this block.
 	FrontHealth int `json:"front_health,omitempty"`
 	DialHome    int `json:"dial_home,omitempty"`
+	// BulkPath is set when the block also holds the bulk path's second frps, at base+13 to base+15
+	// (beta; HBEP-6, The bulk path): All() then reaches base+15. Without it the block is base to
+	// base+12, exactly as before the bulk path (the science agent's ruling S1 on #448).
+	BulkPath bool `json:"bulk_path,omitempty"`
 }
 
 // Base is the start of the block, the port the controllers' --port-base names. PortsFromBase puts
@@ -84,16 +88,36 @@ func PortsFromBase(base int) (Ports, error) {
 		FrontHealth: base + frontHealthPortOffset, DialHome: host.DialHomePort()}, nil
 }
 
+// bulkBlockLastOffset is the block's last port with the bulk path: the second frps's web server,
+// agentapi.FrpsBulkWebPortOffset (15).
+const bulkBlockLastOffset = agentapi.FrpsBulkWebPortOffset
+
+// WithBulkPath is p with the bulk path's three ports added to its block, base+13 to base+15 (HBEP-6,
+// The bulk path). A base whose block would then pass 65535 is refused, naming the top port (the
+// science agent's ruling S1 on #448).
+func (p Ports) WithBulkPath() (Ports, error) {
+	if top := p.Base() + bulkBlockLastOffset; top > 65535 {
+		return Ports{}, fmt.Errorf("port base %d does not fit the bulk path (--bulk-path): its block base..base+%d would end at port %d, above 65535; the highest base for it is %d", p.Base(), bulkBlockLastOffset, top, 65535-bulkBlockLastOffset)
+	}
+	p.BulkPath = true
+	return p, nil
+}
+
 // Expected are the ports the running k3s must hold, and no others. The controllers' ports are
 // not among them: status checks those per supervised process.
 func (p Ports) Expected() []int { return []int{p.API, p.HTTPS, p.KCM} }
 
 // All are the ports that must be free before a start: the whole block, base..base+12. k3s binds
 // three of them and the controller, the front and frps the others, so an operator's listener on
-// any of them makes up refuse. down warns about a foreign listener left on any of them.
+// any of them makes up refuse. down warns about a foreign listener left on any of them. With the
+// bulk path the block is base..base+15 (WithBulkPath).
 func (p Ports) All() []int {
-	all := make([]int, 0, blockLastOffset+1)
-	for port := p.Base(); port <= p.Base()+blockLastOffset; port++ {
+	last := blockLastOffset
+	if p.BulkPath {
+		last = bulkBlockLastOffset
+	}
+	all := make([]int, 0, last+1)
+	for port := p.Base(); port <= p.Base()+last; port++ {
 		all = append(all, port)
 	}
 	return all
