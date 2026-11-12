@@ -184,6 +184,7 @@ func TestFrontSettingsBulkPath(t *testing.T) {
 		{"a bulk certificate of another key", func() { _, other, _ := ctltest.CertPair(t); writeBulkCert(t, host, other) }, "its pin"},
 		{"the bulk file holds nothing", func() { writeBulkCert(t, host, []byte("not a certificate\n")) }, "the dial-home certificate"},
 		{"no bulk file", func() { _ = os.Remove(host.BulkCertFile()) }, "the bulk dial-home certificate"},
+		{"an empty bulk file, which would read as no bulk path", func() { writeBulkCert(t, host, nil) }, "is empty"},
 	} {
 		t.Run(rc.name, func(t *testing.T) {
 			rc.setup()
