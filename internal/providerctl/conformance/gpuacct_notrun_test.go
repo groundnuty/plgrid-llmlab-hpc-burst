@@ -7,6 +7,8 @@ package conformance
 // no kept accounting record. The row's Athena twin has no slot: its first clock is the wait in the queue
 // (HPCBURST_CONF_PENDING_MAX_SECONDS), and past that its job is cancelled by its tag and the run is NOT RUN too
 // (the science agent's ruling of 8 Nov 2026, #272: a queue wait tests nothing, so it is never a FAIL).
+// The row on plgrid-now (gpu-accounting-athena-now, #145) has the same start-wait guard, under the partition's own
+// one-job slot: the partition's QOS is the slot, so the row names none of its own.
 
 import (
 	"os"
@@ -22,8 +24,8 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 )
 
-// Both rows, one bound each: the slot row's start wait of 10 minutes, and the no-slot row's wait in the queue, set
-// to a minute by the dry world. Expected values are written out, not read from the rows. Neither run may be
+// Each row, one bound each: the slot rows' start wait of 10 minutes, and the no-slot row's wait in the queue, set
+// to a minute by the dry world. Expected values are written out, not read from the rows. No run may be
 // reported as a failure, and a job that never started is cancelled by its tag with the owner's job left alone.
 func TestTheAccountingRowIsNotRunWhenTheOwnersJobHoldsTheSlot(t *testing.T) {
 	for _, c := range []struct {
@@ -32,6 +34,8 @@ func TestTheAccountingRowIsNotRunWhenTheOwnersJobHoldsTheSlot(t *testing.T) {
 	}{
 		{"gpu-accounting-helios", "slot-held", "NOT RUN: the job: a job did not start within 10m0s of its acceptance", 10 * time.Minute},
 		{"gpu-accounting-athena", "queue-held", "NOT RUN: the job: a job was still pending after 1m0s in the queue", time.Minute},
+		// plgrid-now: the owner's other job holds the partition's own one-job slot (the profile's QOS for it).
+		{"gpu-accounting-athena-now", "slot-held", "NOT RUN: the job: a job did not start within 10m0s of its acceptance", 10 * time.Minute},
 	} {
 		t.Run(c.row, func(t *testing.T) { accountingNotRun(t, c.row, c.fault, c.wantSkip, c.bound) })
 	}

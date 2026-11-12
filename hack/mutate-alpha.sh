@@ -279,7 +279,14 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'hack/live-checks.sh@@HPCBURST_ALPHA_RUN_ID=$RUN_ID
   export_front_label "$n"@@HPCBURST_ALPHA_RUN_ID=$RUN_ID'
   'hack/live-checks.sh@@gpu-accounting-athena
+gpu-accounting-athena-now@@gpu-accounting-athena-now'
+  'hack/live-checks.sh@@gpu-accounting-athena-now
 # END FRONT LABEL@@# END FRONT LABEL'
+  'hack/live-checks.sh@@gpu-accounting-athena-now|LIVE_OWNER_GO_ATHENA_NOW|20
+# END OWNER GO@@# END OWNER GO'
+  'hack/live-checks.sh@@gpu-accounting-athena-now|athena|athena-now|plgrid-now|-|plgrid-now|@@gpu-accounting-athena-now|athena|athena-now|plgrid-now|-|-|'
+  'hack/live-checks.sh@@gpu-accounting-athena-now|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|32|-|10@@gpu-accounting-athena-now|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|32|-|15'
+  'hack/live-checks.sh@@gpu-accounting-athena-now|athena|athena-now|@@gpu-accounting-athena-now|athena|athena|'
   'rows.go@@return lease - (MaxRequestDuration + DrainMargin) - TunnelHour@@return lease - (MaxRequestDuration + DrainMargin) + TunnelHour'
   'rows.go@@if measured < ShortLeaseRule {@@if measured <= ShortLeaseRule {'
   'rows.go@@lease < MinLease() || lease > MaxTunnelLease@@lease <= MinLease() || lease > MaxTunnelLease'

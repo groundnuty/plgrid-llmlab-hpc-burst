@@ -525,8 +525,8 @@ func stackRows(t *testing.T) []Row {
 func allRows(t *testing.T) []Row {
 	t.Helper()
 	out := append(append(Rows(), AccountingRows()...), ReachRows()...)
-	if len(out) != 10 {
-		t.Fatalf("there are %d rows, the table below was written for 10 (rows A and B on plgrid-now added, #376): add the new row's cases", len(out))
+	if len(out) != 11 {
+		t.Fatalf("there are %d rows, the table below was written for 11 (rows A and B on plgrid-now added, #376, and the accounting row on plgrid-now, #145): add the new row's cases", len(out))
 	}
 	return out
 }

@@ -365,9 +365,17 @@ const (
 // accountingRows are the rows of the accounting check, which runs in
 // internal/providerctl/conformance (a GPU job through the Provider's controller,
 // no stack and no dial-home route). Lease and Budget are the job's.
+//
+// gpu-accounting-athena-now is the same check on Athena's one-job partition plgrid-now, under
+// athena-now.yaml (`@hpc-burst-science-agent`, 12 Nov 2026, #145: the A100 queue was about two days out, and a
+// row on plgrid-now counts for plgrid-gpu-a100 when it runs one job of one GPU within an hour, #373's
+// equivalence). It has the one-job slot's guards (the slot read before and after the builds, a start wait of 10
+// minutes) and the owner's go of plgrid-now. Its slot hold is the start wait, the job's time limit and a minute
+// for the end, as the host-dialed rows' is. gpu-accounting-athena stays for when the A100 queue opens.
 var accountingRows = []Row{
 	{Name: "gpu-accounting-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: 5 * time.Minute, Budget: 32 * time.Minute, SlotHold: 15 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#145 and #93"},
 	{Name: "gpu-accounting-athena", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: 5 * time.Minute, Budget: 25 * time.Minute, MostJobs: 1, PostsTo: "#145 and #93"},
+	{Name: "gpu-accounting-athena-now", Cluster: "athena", Profile: "athena-now", Partition: "plgrid-now", GPUs: 1, Lease: 5 * time.Minute, Budget: 32 * time.Minute, SlotHold: 16 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#145 and #93", Timing: AthenaNowTiming(), OwnerGo: OwnerGoAthenaNow},
 }
 
 // reachRows are the rows of the reach check (issue #225), which runs in
