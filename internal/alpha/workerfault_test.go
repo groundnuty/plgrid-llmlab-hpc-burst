@@ -37,25 +37,45 @@ func b64(argv ...string) string {
 }
 
 func TestParseListing(t *testing.T) {
-	out := fmt.Sprintf("proc 10 1 500 1 %s\nproc 11 10 501 0 %s\nlisted\n", b64("/x/apptainer", "exec"), b64("python3", "vllm", "serve"))
+	// The listing's own shell (PID 7) and what it started (8, and 9 under 8) are left out.
+	out := fmt.Sprintf("self 7\nproc 10 1 500 1 0 o %s\nproc 11 10 501 0 1 j %s\nproc 12 11 502 u 0 j %s\nproc 7 3 503 1 1 j %s\nproc 8 7 504 1 1 j %s\nproc 9 8 505 1 1 j %s\nlisted\n",
+		b64("/x/apptainer", "exec"), b64("python3", "vllm", "serve"), b64("Apptainer runtime parent"), b64("bash", "-s"), b64("cat"), b64("grep"))
 	procs, err := ParseListing([]byte(out))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(procs) != 2 || procs[0].PID != 10 || procs[0].PPID != 1 || procs[0].Start != "500" || !procs[0].InJob ||
-		procs[1].InJob || strings.Join(procs[1].Argv, " ") != "python3 vllm serve" {
-		t.Errorf("ParseListing = %+v", procs)
+	if len(procs) != 3 {
+		t.Fatalf("ParseListing = %+v, want the three processes that are not the listing's own", procs)
 	}
+	if p := procs[0]; p.PID != 10 || p.PPID != 1 || p.Start != "500" || !p.InJob || p.Env != EnvJob || p.CgroupJob || p.CgroupJobForm {
+		t.Errorf("by its environment: %+v", p)
+	}
+	if p := procs[1]; p.PID != 11 || !p.InJob || p.Env != EnvOther || !p.CgroupJob || !p.CgroupJobForm || strings.Join(p.Argv, " ") != "python3 vllm serve" {
+		t.Errorf("by its cgroup: %+v", p)
+	}
+	if p := procs[2]; p.PID != 12 || p.InJob || p.Env != EnvUnreadable || p.CgroupJob || !p.CgroupJobForm {
+		t.Errorf("an unreadable environment in another job's cgroup: %+v", p)
+	}
+	line := func(f string) string { return "self 7\n" + f + "\nlisted\n" }
 	for name, bad := range map[string]string{
-		"no end":           "proc 10 1 500 1 " + b64("a") + "\n",
-		"a line after":     "listed\nproc 10 1 500 1 " + b64("a") + "\n",
-		"a field short":    "proc 10 1 500 " + b64("a") + "\nlisted\n",
-		"an injob of 2":    "proc 10 1 500 2 " + b64("a") + "\nlisted\n",
-		"a PID not number": "proc x 1 500 1 " + b64("a") + "\nlisted\n",
-		"a start not num":  "proc 10 1 s 1 " + b64("a") + "\nlisted\n",
-		"bad base64":       "proc 10 1 500 1 !!!\nlisted\n",
-		"another word":     "pid 10 1 500 1 " + b64("a") + "\nlisted\n",
-		"PID 0":            "proc 0 1 500 1 " + b64("a") + "\nlisted\n",
+		"no end":                   "self 7\nproc 10 1 500 1 0 o " + b64("a") + "\n",
+		"a line after":             "self 7\nlisted\nproc 10 1 500 1 0 o " + b64("a") + "\n",
+		"no self line":             "proc 10 1 500 1 0 o " + b64("a") + "\nlisted\n",
+		"self not a number":        "self x\nlisted\n",
+		"self of 0":                "self 0\nlisted\n",
+		"self with more words":     "self 7 8\nlisted\n",
+		"self twice":               line("self 8"),
+		"the old six fields":       line("proc 10 1 500 1 " + b64("a")),
+		"a field short":            line("proc 10 1 500 1 0 " + b64("a")),
+		"an env of 2":              line("proc 10 1 500 2 0 o " + b64("a")),
+		"a cgroup of 2":            line("proc 10 1 500 1 2 o " + b64("a")),
+		"a form of x":              line("proc 10 1 500 1 0 x " + b64("a")),
+		"the job's cgroup, form o": line("proc 10 1 500 1 1 o " + b64("a")),
+		"a PID not number":         line("proc x 1 500 1 0 o " + b64("a")),
+		"a start not num":          line("proc 10 1 s 1 0 o " + b64("a")),
+		"bad base64":               line("proc 10 1 500 1 0 o !!!"),
+		"another word":             line("pid 10 1 500 1 0 o " + b64("a")),
+		"PID 0":                    line("proc 0 1 500 1 0 o " + b64("a")),
 	} {
 		if _, err := ParseListing([]byte(bad)); !errors.Is(err, ErrListing) {
 			t.Errorf("%s: ParseListing returned %v, want ErrListing", name, err)
@@ -84,18 +104,25 @@ func TestMatchesCommand(t *testing.T) {
 		"a script by a relative path":            {with("python3", "vllm"), false},
 		"the program by a relative path":         {with("bin/vllm"), false},
 		"an interpreter that is not Python":      {with("/bin/bash", "/usr/local/bin/vllm"), false},
-		"an interpreter flag with a value":       {with("python3", "-X", "dev", "/usr/local/bin/vllm"), false},
-		"an option whose value is the path":      {with("python3", "-X", "/usr/local/bin/vllm"), false},
-		"a module run with -m":                   {with("python3", "-m", "vllm"), false},
-		"a name that only ends with it":          {with("/usr/local/bin/xvllm"), false},
-		"bound paths rewritten (a stand-in's)":   {[]string{"/t/alpha.test", "serve", "/tmp/c/model", "--port=8000", "--uds=/tmp/r/engine.sock"}, false},
-		"another model":                          {[]string{"vllm", "serve", "/hpcburst/model2", "--port=8000", "--uds=/hpcburst/run/engine.sock"}, false},
-		"another port":                           {[]string{"python3", "/usr/local/bin/vllm", "serve", "/hpcburst/model", "--port=8001", "--uds=/hpcburst/run/engine.sock"}, false},
-		"another socket":                         {[]string{"vllm", "serve", "/hpcburst/model", "--port=8000", "--uds=/hpcburst/run/other.sock"}, false},
-		"an argument missing":                    {[]string{"python3", "/usr/local/bin/vllm", "serve", "/hpcburst/model", "--port=8000"}, false},
-		"one more at the end":                    {append([]string{"vllm"}, append(append([]string(nil), args...), "--x")...), false},
-		"no program before":                      {args, false},
-		"another subcommand":                     {[]string{"python3", "/usr/local/bin/vllm", "bench", "/hpcburst/model", "--port=8000", "--uds=/hpcburst/run/engine.sock"}, false},
+		// Issue #445, candidate (c): the interpreter's options with a value, and those of no value Python 3.11
+		// added (-P), before the program's path. This case's expectation was false before #445.
+		"an interpreter option with a value":   {with("python3", "-X", "dev", "/usr/local/bin/vllm"), true},
+		"options with values attached":         {with("/opt/venv/bin/python3.12", "-Xfaulthandler", "-Wignore", "-P", "/usr/local/bin/vllm"), true},
+		"-W with its value as the next word":   {with("python3", "-W", "ignore", "-Pu", "/usr/local/bin/vllm"), true},
+		"an option whose value is the path":    {with("python3", "-X", "/usr/local/bin/vllm"), false},
+		"-X with no value at the end":          {[]string{"python3", "-X"}, false},
+		"code run with -c":                     {with("python3", "-c", "import x", "/usr/local/bin/vllm"), false},
+		"an option the interpreter lacks":      {with("python3", "-Z", "/usr/local/bin/vllm"), false},
+		"a module run with -m":                 {with("python3", "-m", "vllm"), false},
+		"a name that only ends with it":        {with("/usr/local/bin/xvllm"), false},
+		"bound paths rewritten (a stand-in's)": {[]string{"/t/alpha.test", "serve", "/tmp/c/model", "--port=8000", "--uds=/tmp/r/engine.sock"}, false},
+		"another model":                        {[]string{"vllm", "serve", "/hpcburst/model2", "--port=8000", "--uds=/hpcburst/run/engine.sock"}, false},
+		"another port":                         {[]string{"python3", "/usr/local/bin/vllm", "serve", "/hpcburst/model", "--port=8001", "--uds=/hpcburst/run/engine.sock"}, false},
+		"another socket":                       {[]string{"vllm", "serve", "/hpcburst/model", "--port=8000", "--uds=/hpcburst/run/other.sock"}, false},
+		"an argument missing":                  {[]string{"python3", "/usr/local/bin/vllm", "serve", "/hpcburst/model", "--port=8000"}, false},
+		"one more at the end":                  {append([]string{"vllm"}, append(append([]string(nil), args...), "--x")...), false},
+		"no program before":                    {args, false},
+		"another subcommand":                   {[]string{"python3", "/usr/local/bin/vllm", "bench", "/hpcburst/model", "--port=8000", "--uds=/hpcburst/run/engine.sock"}, false},
 	} {
 		if got := MatchesCommand(c.argv, cmd); got != c.want {
 			t.Errorf("%s: MatchesCommand(%q) = %v, want %v", name, c.argv, got, c.want)
@@ -126,13 +153,15 @@ func TestPickEngine(t *testing.T) {
 		procs []NodeProc
 		want  int
 	}{
-		"no engine":                 {[]NodeProc{agent, leader, fuse}, 0},
-		"only the lookalike":        {[]NodeProc{agent, leader, lookalike}, 0},
-		"two engines":               {[]NodeProc{agent, leader, engine, {PID: 13, PPID: 10, Argv: engine.Argv}}, 2},
-		"the leader not in the job": {[]NodeProc{agent, {PID: 10, PPID: 5, Argv: leader.Argv}, engine}, 0},
-		"the leader not Apptainer":  {[]NodeProc{agent, {PID: 10, PPID: 5, InJob: true, Argv: []string{"/bin/bash", "run.sh"}}, engine}, 0},
-		"no parent listed":          {[]NodeProc{agent, engine}, 0},
-		"an engine of another job":  {[]NodeProc{{PID: 20, PPID: 1, Argv: leader.Argv}, {PID: 21, PPID: 20, Argv: engine.Argv}}, 0},
+		"no engine":          {[]NodeProc{agent, leader, fuse}, 0},
+		"only the lookalike": {[]NodeProc{agent, leader, lookalike}, 0},
+		"two engines":        {[]NodeProc{agent, leader, engine, {PID: 13, PPID: 10, Argv: engine.Argv}}, 2},
+		// Issue #445: a leader that is not InJob but is the agent's child is of the job by descent (candidate (d),
+		// TestPickEngineInEachShape); one that descends from no process of the job is not.
+		"the leader of no job":     {[]NodeProc{agent, {PID: 10, PPID: 1, Argv: leader.Argv}, engine}, 0},
+		"the leader not Apptainer": {[]NodeProc{agent, {PID: 10, PPID: 5, InJob: true, Argv: []string{"/bin/bash", "run.sh"}}, engine}, 0},
+		"no parent listed":         {[]NodeProc{agent, engine}, 0},
+		"an engine of another job": {[]NodeProc{{PID: 20, PPID: 1, Argv: leader.Argv}, {PID: 21, PPID: 20, Argv: engine.Argv}}, 0},
 	} {
 		_, err := PickEngine(c.procs, cmd, MatchesCommand)
 		var ec ErrEngineCount
@@ -151,8 +180,10 @@ func TestPickEngine(t *testing.T) {
 
 // The listing's job membership over a process tree of the test's own, so that the cgroup is the test's to
 // write: a process whose environment does not carry the job's SLURM_JOB_ID is still of the job when its cgroup
-// holds the segment job_<id>, under v2 (one line) and v1 (a line per controller); job_<id> as the prefix of a
-// longer ID is not the job.
+// holds the segment job_<id>, under v2 (one line) and v1 (a line per controller), the segment last too (issue
+// #445, candidate (d)); job_<id> as the prefix of a longer ID is not the job. The listing says what each
+// environment said (an unreadable one, as a process that is not dumpable has, is "u") and the cgroup's form:
+// job_<digits> of any job, or other.
 func TestTheListingFindsTheJobByItsCgroupToo(t *testing.T) {
 	root := t.TempDir()
 	stat := func(pid, ppid int) string {
@@ -174,18 +205,35 @@ func TestTheListingFindsTheJobByItsCgroupToo(t *testing.T) {
 	write(103, 101, "", "12:memory:/slurm/uid_1000/job_4321/step_0\n4:cpu:/slurm/uid_1000/job_4321/step_0\n", "/usr/bin/apptainer", "exec")
 	write(104, 1, "", "0::/system.slice/slurmstepd.scope/job_43210/step_0\n", "/usr/bin/apptainer", "exec")
 	write(105, 1, "SLURM_JOB_ID=43210\x00", "0::/user.slice\n", "/usr/bin/apptainer", "exec")
+	write(106, 101, "", "0::/system.slice/slurmstepd.scope/job_4321\n", "/usr/bin/apptainer", "exec")
+	write(107, 101, "SLURM_JOB_ID=4321\x00", "0::/system.slice/slurmstepd.scope/job_4321x/step_0\n", "Apptainer runtime parent")
+	if err := os.Chmod(filepath.Join(root, "107", "environ"), 0); err != nil {
+		t.Fatal(err)
+	}
 	procs, err := ParseListing(runScript(t, listScript(root, "4321")))
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := map[int]bool{}
-	for _, p := range procs {
-		got[p.PID] = p.InJob
+	type seen struct {
+		in, cg, form bool
+		env          EnvState
 	}
-	want := map[int]bool{101: true, 102: true, 103: true, 104: false, 105: false}
-	for pid, in := range want {
-		if v, ok := got[pid]; !ok || v != in {
-			t.Errorf("process %d: listed %v, of the job %v; want of the job %v", pid, ok, v, in)
+	got := map[int]seen{}
+	for _, p := range procs {
+		got[p.PID] = seen{p.InJob, p.CgroupJob, p.CgroupJobForm, p.Env}
+	}
+	want := map[int]seen{
+		101: {true, false, false, EnvJob},
+		102: {true, true, true, EnvOther},
+		103: {true, true, true, EnvOther},
+		104: {false, false, true, EnvOther},
+		105: {false, false, false, EnvOther},
+		106: {true, true, true, EnvOther},
+		107: {false, false, false, EnvUnreadable},
+	}
+	for pid, w := range want {
+		if v, ok := got[pid]; !ok || v != w {
+			t.Errorf("process %d: listed %v as %+v; want %+v", pid, ok, v, w)
 		}
 	}
 }
