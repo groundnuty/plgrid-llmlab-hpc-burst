@@ -1,0 +1,203 @@
+# THROWAWAY, never merged (issue #462): the rehearsal from the archive that release.yml built on a
+# workflow_dispatch run on main. It downloads that run's `release` artifact (the archive and its
+# SHA256SUMS), checks the archive is that run's commit, unpacks it as a user would and runs its
+# binaries' version lines, then runs REHEARSAL_ARCHIVE=<it> hack/rehearsal.sh, whose release-unpack.sh
+# puts the archive's bytes under the names the prebuilt mode takes and whose rehearsal.test is built
+# from a checkout of the same commit. Nothing in this job builds cmd/: the only compile is
+# rehearsal.test. A last step compares every binary the rehearsal ran with the archive's, byte for
+# byte. Read-only: contents and actions read, no secret, cache restore only, nothing saved.
+#
+# RELEASE_RUN_ID is the dispatched release run, set by substitution before the commit (never typed).
+name: r462-archive-rehearsal
+on:
+  pull_request:
+    paths:
+      - .github/workflows/r462-archive-rehearsal.yml
+permissions:
+  contents: read
+  actions: read
+env:
+  RELEASE_RUN_ID: "43219803198"
+  GOTOOLCHAIN: local
+  GOPROXY: "https://proxy.golang.org|direct"
+defaults:
+  run:
+    # bash with -e and -o pipefail.
+    shell: bash
+jobs:
+  rehearsal:
+    name: rehearsal from the release archive
+    runs-on: ubuntu-24.04
+    # rehearsal.test compiles from scratch (no build cache), then a run whose -test.timeout is 30 minutes.
+    timeout-minutes: 50
+    steps:
+      # The run must be release.yml, started by hand on main, and finished with success (its ci and
+      # draft jobs skipped). Its head commit is what this job checks out and builds rehearsal.test from.
+      - name: Read the release run
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          [[ $RELEASE_RUN_ID =~ ^[0-9]+$ ]] || { echo "RELEASE_RUN_ID is not a run ID: $RELEASE_RUN_ID"; exit 1; }
+          info=$(gh api "repos/$REPO/actions/runs/$RELEASE_RUN_ID" \
+            --jq '[.name, .path, .event, .head_branch, .status, .conclusion, .head_sha, .html_url] | @tsv')
+          IFS=$'\t' read -r name path event branch status conclusion sha url <<< "$info"
+          echo "run $url: name=$name path=$path event=$event branch=$branch status=$status conclusion=$conclusion sha=$sha"
+          [ "$name" = release ] || { echo "not the release workflow"; exit 1; }
+          [[ $path == .github/workflows/release.yml* ]] || { echo "not release.yml"; exit 1; }
+          [ "$event" = workflow_dispatch ] || { echo "not a run started by hand"; exit 1; }
+          [ "$branch" = main ] || { echo "not a run on main"; exit 1; }
+          [ "$status" = completed ] && [ "$conclusion" = success ] || { echo "the run did not succeed"; exit 1; }
+          [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "no head commit"; exit 1; }
+          gh api "repos/$REPO/actions/runs/$RELEASE_RUN_ID/jobs" --jq '.jobs[] | "job \(.name): \(.conclusion)"'
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the release run's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.run.outputs.sha }}
+          persist-credentials: false
+
+      - name: The checkout is the release run's commit
+        env:
+          SHA: ${{ steps.run.outputs.sha }}
+        run: |
+          [ "$(git rev-parse HEAD)" = "$SHA" ]
+          [ -z "$(git status --porcelain)" ]
+          echo "checked out $SHA"
+
+      - name: Read the Go version from go.mod
+        id: goversion
+        run: |
+          version=$(bash hack/fetch-go.sh --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the cached Go archive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}
+
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
+
+      - name: Check the Go on PATH is the pinned toolchain
+        run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
+
+      - name: Download and verify the Go modules
+        run: bash hack/go-mod-download.sh
+
+      - name: Fetch the release run's archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: ${{ runner.temp }}/release
+          run-id: ${{ env.RELEASE_RUN_ID }}
+          github-token: ${{ github.token }}
+
+      # The archive's name carries the pseudo-version of the commit it was built from
+      # (hack/release-archive.sh): its 12 hex digits must be the run's head commit.
+      - name: The archive is the release run's commit
+        env:
+          SHA: ${{ steps.run.outputs.sha }}
+        run: |
+          cd "$RUNNER_TEMP/release"
+          ls -l
+          mapfile -t found < <(ls hpcburst-*-linux-amd64.tar.gz)
+          [ "${#found[@]}" -eq 1 ] || { echo "expected one archive, found ${#found[@]}"; exit 1; }
+          archive=${found[0]}
+          [[ $archive =~ ^hpcburst-(v[0-9].*[-.][0-9]{14}-([0-9a-f]{12}))-linux-amd64\.tar\.gz$ ]] || { echo "not a pseudo-version archive name: $archive"; exit 1; }
+          version=${BASH_REMATCH[1]}
+          [ "${BASH_REMATCH[2]}" = "${SHA:0:12}" ] || { echo "$archive is not commit ${SHA:0:12}"; exit 1; }
+          echo "archive $archive: $(stat -c %s "$archive") bytes, sha256 $(sha256sum "$archive" | cut -d' ' -f1)"
+          echo "SHA256SUMS: $(wc -l < SHA256SUMS) lines (the archive and $(($(wc -l < SHA256SUMS) - 1)) files)"
+          {
+            echo "ARCHIVE=$RUNNER_TEMP/release/$archive"
+            echo "ARCHIVE_VERSION=$version"
+          } >> "$GITHUB_ENV"
+
+      # What a user does first: unpack into an empty directory beside the archive and SHA256SUMS, check
+      # every sum, and ask each binary its version, from the archive's own layout.
+      - name: Unpack as a user would, and check every sum
+        env:
+          SHA: ${{ steps.run.outputs.sha }}
+        run: |
+          u=$RUNNER_TEMP/user
+          mkdir "$u"
+          cp "$ARCHIVE" "$RUNNER_TEMP/release/SHA256SUMS" "$u/"
+          cd "$u"
+          tar -xzf "$(basename "$ARCHIVE")"
+          sha256sum -c SHA256SUMS
+          for b in hpcburst hpcburst-controller hpcburst-front; do
+            line=$(bin/$b version)
+            echo "$line"
+            read -r name ver commit _ <<< "$line"
+            [ "$name" = "$b" ] && [ "$ver" = "$ARCHIVE_VERSION" ] && [ "$commit" = "$SHA" ] && [[ $line != *" dirty" ]] || { echo "$b reports $line"; exit 1; }
+          done
+          agent-builds/hb-agent-x86_64 -version
+          # Display only: the sums above are the check on these two.
+          bin/k3s-1.36.5/k3s --version 2>&1 | head -1 || true
+          bin/frp-0.71.1/frps --version || true
+
+      - name: Provide OpenSSH's sshd for the login node
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+            sudo chmod 755 /usr/sbin/policy-rc.d
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+            sudo rm -f /usr/sbin/policy-rc.d
+          fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
+          /usr/sbin/sshd -V 2>&1 | head -1
+          echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
+
+      - name: Start a systemd user manager for this user
+        run: |
+          if ! dpkg -s dbus-user-session > /dev/null 2>&1; then
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q dbus-user-session
+          fi
+          sudo loginctl enable-linger "$(id -un)"
+          rt="/run/user/$(id -u)"
+          timeout 60 sh -c "until test -S '$rt/systemd/private' && test -S '$rt/bus'; do sleep 1; done"
+          echo "XDG_RUNTIME_DIR=$rt" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$rt/bus" >> "$GITHUB_ENV"
+          XDG_RUNTIME_DIR="$rt" DBUS_SESSION_BUS_ADDRESS="unix:path=$rt/bus" systemd-run --user --scope -q true
+
+      # The archive input, as HBEP-15 step 3 runs it: no HPCBURST_BIN_DIR or HPCBURST_FRP_DIR (the
+      # archive gives both) and no REHEARSAL_PREBUILT (hack/rehearsal.sh refuses it beside an archive).
+      - name: hack/rehearsal.sh from the archive
+        run: |
+          unset HPCBURST_BIN_DIR HPCBURST_FRP_DIR REHEARSAL_PREBUILT
+          REHEARSAL_ARCHIVE="$ARCHIVE" REHEARSAL_OUT="$RUNNER_TEMP/rehearsal" \
+            REHEARSAL_RUN='^TestRehearsal(Direct|SSH|HostDialed)$' bash hack/rehearsal.sh 2>&1 | tee "$RUNNER_TEMP/rehearsal.log"
+
+      # Every binary the rehearsal ran is the archive's, byte for byte (the user directory was checked
+      # against SHA256SUMS above), and the only other file in its directory is rehearsal.test.
+      - name: The rehearsal ran the archive's bytes
+        if: always() && steps.run.outcome == 'success'
+        run: |
+          o=$RUNNER_TEMP/rehearsal u=$RUNNER_TEMP/user
+          if [ -f "$RUNNER_TEMP/rehearsal.log" ]; then
+            echo "test results:"
+            grep -E '^(--- |ok |FAIL|PASS$)' "$RUNNER_TEMP/rehearsal.log" || true
+          fi
+          test -d "$o" || { echo "the rehearsal made no directory"; exit 1; }
+          ls -la "$o" "$o/frp" || true
+          pairs=(
+            "hpcburst bin/hpcburst" "hpcburst-controller bin/hpcburst-controller" "hpcburst-front bin/hpcburst-front"
+            "hb-agent agent-builds/hb-agent-x86_64" "frp/frps bin/frp-0.71.1/frps" "frp/frpc agent-builds/frpc-x86_64"
+            "archive/bin/k3s-1.36.5/k3s bin/k3s-1.36.5/k3s"
+          )
+          for p in "${pairs[@]}"; do
+            read -r ran want <<< "$p"
+            cmp "$o/$ran" "$u/$want"
+            echo "same bytes: $ran = the archive's $want"
+          done
+          extra=$(cd "$o" && find . -maxdepth 1 -type f | sed 's|^\./||' | LC_ALL=C sort | grep -v -x -E 'hpcburst|hpcburst-controller|hpcburst-front|hb-agent|rehearsal\.test' || true)
+          [ -z "$extra" ] || { echo "files the archive did not give: $extra"; exit 1; }
