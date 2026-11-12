@@ -23,7 +23,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -282,5 +284,68 @@ func TestRealBulkEpochsAreSeparate(t *testing.T) {
 			t.Errorf("%s's NewProxy: the %s epoch %d -> %d, registered %v; want it untouched", c.name, c.keptNam, keptBefore, c.kept.Epoch(uid), c.kept.Registered(uid))
 		}
 		r.register(c.name + " to register again")
+	}
+}
+
+// TestRealBulkCutBeforeHeadersRaisesNoPause (trap 3 on the real frp, HBEP-6:661 and :517): the bulk
+// frpc, the test's own child, is stopped through its handle (SIGSTOP), so frps-bulk answers a new
+// CONNECT and then waits userConnTimeout (frp's default, 10 s; the launcher sets none) for a work
+// connection that never comes, and closes the user connection after the front wrote the request.
+// The front answers 502 upstream_closed, never sends it again, takes the bulk transport out of use
+// and counts nothing toward the pause. The control is the same cut on the token transport, with the
+// token frpc stopped: it counts one failure toward the pause, as HBEP-5 says.
+//
+// No request runs before the stops, so neither pool holds a connection whose work connection was made
+// before the stop: each request opens a new one, and frps's wait is what cuts it.
+func TestRealBulkCutBeforeHeadersRaisesNoPause(t *testing.T) {
+	r := newRealBulkFront(t, nil, false, nil)
+	f, uid := r.bulkFront, r.uid
+	tokenProc, _ := r.startFrpc(false)
+	bulkProc, _ := r.startFrpc(true)
+	r.register("both transports to register through the real frps")
+	stop := func(name string, p *os.Process) {
+		t.Helper()
+		if err := p.Signal(syscall.SIGSTOP); err != nil {
+			t.Fatalf("SIGSTOP to %s through its handle: %v", name, err)
+		}
+		t.Cleanup(func() { _ = p.Signal(syscall.SIGCONT) })
+	}
+	cut := func(want string) {
+		t.Helper()
+		start := time.Now()
+		resp := f.post("/v1/chat/completions", chatPlain)
+		body := readAll(t, resp)
+		if resp.StatusCode != http.StatusBadGateway || !strings.Contains(body, "upstream_closed") {
+			t.Fatalf("%s: %d %s, want 502 upstream_closed", want, resp.StatusCode, body)
+		}
+		// frps's own wait cut it, not the front's: it took about userConnTimeout.
+		if took := time.Since(start); took < 9*time.Second {
+			t.Fatalf("%s: answered after %s, before frps's 10 s userConnTimeout: something else cut it", want, took)
+		}
+	}
+
+	stop("the bulk frpc", bulkProc)
+	cut("the bulk request with the bulk frpc stopped")
+	if f.bulk.tun.Registered(uid) {
+		t.Error("the bulk transport is still registered after its request was cut before the headers")
+	}
+	if _, ok := f.bulk.prober.reprobeAt(); !ok {
+		t.Error("the bulk transport is not on the re-probe schedule")
+	}
+	if n := f.router.failures(f.keys[0]); n != 0 || f.router.Paused(f.keys[0]) {
+		t.Errorf("the bulk cut counted toward the pause: failures %d, paused %v", n, f.router.Paused(f.keys[0]))
+	}
+	if b, fb, _ := f.bulkCounts(); b != 1 || fb != 0 {
+		t.Errorf("metrics: bulk %v, fallback %v; want 1 (written) and 0", b, fb)
+	}
+	if n := len(f.engToken.Requests()); n != 0 {
+		t.Errorf("the cut bulk request was sent again through the token transport: %d requests there", n)
+	}
+
+	// The control: the same cut on the token transport counts toward the pause.
+	stop("the token frpc", tokenProc)
+	cut("the token request with the token frpc stopped")
+	if n := f.router.failures(f.keys[0]); n != 1 {
+		t.Errorf("the token cut counted %d failures toward the pause, want 1: the control can't tell the bulk cut apart", n)
 	}
 }
