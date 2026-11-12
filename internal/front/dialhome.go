@@ -46,6 +46,9 @@ type DialHome struct {
 	mode   string
 	agent  http.Handler
 	tunnel http.Handler
+	// bulk is the bulk path's /~!frp passthrough to the second frps, for requests under
+	// agentapi.BulkDialHomeServerName (dialhome_bulk.go); nil without the bulk path.
+	bulk http.Handler
 }
 
 // NewDialHome builds the handler. In direct mode the passthrough connects to
@@ -76,6 +79,12 @@ func NewDialHome(mode string, host agentapi.Host, tunnel http.Handler) (*DialHom
 }
 
 func (d *DialHome) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if d.servesBulk(r) {
+		// The bulk path's server name (HBEP-6, The bulk path): /~!frp to the second frps,
+		// every other path, /agent/v1/ included, 404 (frpPassthrough answers it).
+		d.bulk.ServeHTTP(w, r)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/agent/v1/") {
 		if d.agent == nil {
 			http.NotFound(w, r) // ssh mode: the agent uses its forward; host-dialed: a relay
