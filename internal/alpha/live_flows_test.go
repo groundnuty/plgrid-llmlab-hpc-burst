@@ -78,17 +78,24 @@ func (r *liveRun) rate(key string) float64 {
 	return float64(s.Tokens) / s.Ended.Sub(s.Opened).Seconds()
 }
 
-// tokensFor is how many tokens make a stream last d at rate, within the
-// deployment's max-model-len less a margin for the prompt.
-func (r *liveRun) tokensFor(d time.Duration, rate float64) (int, error) {
-	n := max(int(rate*d.Seconds()), 1)
+// maxModelLenOrDefault is the deployment's max-model-len as tokensFor reads it: vLLM's 4096 when its flags set none (maxModelLen,
+// below, is the strict reading the large bodies need).
+func (r *liveRun) maxModelLenOrDefault() int {
 	maxLen := 4096
 	for _, f := range r.w.md.Spec.Source.Served.Flags {
 		if f.Name == "max-model-len" {
 			fmt.Sscan(f.Value, &maxLen)
 		}
 	}
-	if n+512 > maxLen {
+	return maxLen
+}
+
+// tokensFor is how many tokens make a stream last d at rate, within the
+// deployment's max-model-len less a margin for the prompt (PromptReserve).
+func (r *liveRun) tokensFor(d time.Duration, rate float64) (int, error) {
+	n := max(int(rate*d.Seconds()), 1)
+	maxLen := r.maxModelLenOrDefault()
+	if n+PromptReserve > maxLen {
 		return 0, fmt.Errorf("%w: %d tokens for %s at %.0f tokens/s, max-model-len %d", ErrRequestTooLong, n, d, rate, maxLen)
 	}
 	return n, nil
@@ -239,8 +246,13 @@ func (r *liveRun) workerRestart(ctx context.Context, p Plan, in v1alpha1.Instanc
 
 // streamLead is how long before the drain start the streams that cross it
 // open: a third of the deadline, so that each runs a third past it and ends
-// well within the deadline.
-func (r *liveRun) streamLead() time.Duration { return r.tm.MaxRequestDuration / 3 }
+// well within the deadline, or less when the deployment's max-model-len cannot
+// hold a stream of two leads at the measured rate (FitLead, issue #447). Its
+// error is ErrLeadTooShort when even the floor's lead does not fit: the row is
+// NOT RUN. Call it once the rate is measured, before anything the lead times.
+func (r *liveRun) streamLead(rate float64) (time.Duration, error) {
+	return FitLead(r.tm.MaxRequestDuration, r.maxModelLenOrDefault(), rate)
+}
 
 // untilBefore waits until lead before t, failing when that has passed.
 func (r *liveRun) untilBefore(t time.Time, lead time.Duration, what string) {
@@ -264,6 +276,12 @@ func (r *liveRun) Handover(ctx context.Context, p Plan) (HandoverObs, error) {
 	}
 	key := r.fc.KeyFor(&pre)
 	rate := r.rate(key)
+	// The lead comes from the measured rate, before the restart: a deployment whose context cannot hold a stream that tells a
+	// cut from an end is NOT RUN with nothing yet restarted.
+	lead, err := r.streamLead(rate)
+	if err != nil {
+		return HandoverObs{}, err
+	}
 	times := r.workerRestart(ctx, p, pre)
 	pre = r.current(pre)
 	ds, ok := DrainStartOf(&pre, r.dw)
@@ -274,8 +292,7 @@ func (r *liveRun) Handover(ctx context.Context, p Plan) (HandoverObs, error) {
 	// predecessor's streams open whether or not it is ready by then: they are the first job's part of the run, which stands
 	// if the second never starts (the delta review of PR 284, L1). So this wait stops in time to open them, half the lead
 	// before they open, and the rest of the replacement's time runs with them in flight.
-	lead := r.streamLead()
-	succ, ok := r.successorOf(pre.Name, time.Until(ds)-lead-lead/2, nil)
+	succ, ok := r.successorOf(pre.Name, time.Until(ds)+LeadTimesFor(lead).SuccessorWaitEnds, nil)
 	key = r.fc.KeyFor(&pre) // the ring as it is now: with both Instances, once the replacement is ready
 	n, err := r.tokensFor(2*lead, rate)
 	if err != nil {
@@ -343,13 +360,16 @@ func (r *liveRun) NoOverlap(ctx context.Context, p Plan) (NoOverlapObs, error) {
 	}
 	key := r.fc.KeyFor(&pre)
 	rate := r.rate(key)
+	lead, err := r.streamLead(rate) // before the restart, as in Handover
+	if err != nil {
+		return NoOverlapObs{}, err
+	}
 	times := r.workerRestart(ctx, p, pre)
 	pre = r.current(pre)
 	ds, ok := DrainStartOf(&pre, r.dw)
 	if !ok {
 		r.t.Fatal("the primary has no lease end")
 	}
-	lead := r.streamLead()
 	n, err := r.tokensFor(2*lead, rate)
 	if err != nil {
 		return NoOverlapObs{}, err

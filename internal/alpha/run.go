@@ -32,8 +32,13 @@ import (
 // A third is row B's (issue #376): a job that is not the run's held the one-job slot between the row's two jobs
 // (ErrSlotTaken; the science agent's ruling Q7), the owner's own work, so the one-slot handover was never put to the
 // test.
+//
+// A fourth is a handover row's before its streams open (issue #447; the science agent's ruling (a), 12 Nov 2026): the lead
+// that fits the deployment's max-model-len at the engine's measured rate is under LeadFloor (ErrLeadTooShort), so no
+// stream long enough to tell a cut from an end can cross the drain start. Nothing was driven past the rate stream, and
+// the run's jobs are cancelled by their tags.
 func NotRun(_ Row, err error) bool {
-	return neverStarted(err) || errors.Is(err, ErrRequeueRefused) || errors.Is(err, ErrWarmUnshown) || errors.Is(err, ErrSlotTaken)
+	return neverStarted(err) || errors.Is(err, ErrRequeueRefused) || errors.Is(err, ErrWarmUnshown) || errors.Is(err, ErrSlotTaken) || errors.Is(err, ErrLeadTooShort)
 }
 
 // neverStarted is whether err says a job of the run never started within a bound.
@@ -46,6 +51,15 @@ func neverStarted(err error) bool {
 // when it was the deployment's first end, which hack/live-checks.sh reads off the marker to name
 // that bound in its line (the wait in the queue otherwise); any other gives pendingMax.
 func NotRunNote(row Row, pendingMax time.Duration, err error) string {
+	if errors.Is(err, ErrLeadTooShort) {
+		// The rate and the context, numbers only: hack/live-checks.sh reads the reason in parentheses (row_a_reason).
+		reason := ""
+		var lt *LeadTooShortError
+		if errors.As(err, &lt) {
+			reason = " (" + lt.counts() + ")"
+		}
+		return fmt.Sprintf("%s: %s%s; the run opened no stream across the drain start; this run's jobs were cancelled by tag\n", row.Name, leadTooShortWords, reason)
+	}
 	if errors.Is(err, ErrRequeueRefused) || errors.Is(err, ErrWarmUnshown) || errors.Is(err, ErrSlotTaken) {
 		why := notRunWhy(err)
 		if why == "" && errors.Is(err, ErrWarmUnshown) {
