@@ -571,8 +571,9 @@ def tables(root):
                 ", ".join("%.0f" % (int(x) / (1 << 20)) for x in k["rekey_input_bytes"].split()) or "-"))
         p("\n### All-stream stalls against the rekeys\n")
         p("An all-stream stall is a gap of more than 100 ms in at least 6 of the 8 token streams, starting within 0.3 s of one another, while the transfers ran. Its bytes are the transfers' payload at the client when it began (the steps give a range, shown as the midpoint); the rekey's are what the ssh connection had received when its new keys took effect, which runs ahead of the client by what sits in the buffers between (frp's 6 MiB window, the relay's, the sockets'). A stall matches a rekey when its bytes lie from 16 MiB below the rekey's to 2 MiB above (`analysis.match_rekeys`).\n")
-        p("| run | repetition | valid | rekeys | all-stream stalls | rekeys with a stall | stalls with no rekey | rekey at MiB (connection) → stall at MiB (payload), gap per stream ms |")
-        p("|---|---:|---|---:|---:|---:|---:|---|")
+        p("The first columns use the rule as set before the runs (a gap of more than 100 ms); the last two repeat the match with a gap of more than 80 ms, to show how near the threshold the stalls are and that a looser one finds no stall that is not a rekey.\n")
+        p("| run | repetition | valid | rekeys | all-stream stalls | rekeys with a stall | stalls with no rekey | rekey at MiB (connection) → stall at MiB (payload), gap per stream ms | rekeys with a stall, over 80 ms | stalls with no rekey, over 80 ms |")
+        p("|---|---:|---|---:|---:|---:|---:|---|---:|---:|")
         for r in rows:
             L = lds.get(r["run_id"])
             ks = [k for k in sc.get(r["run_id"], []) if k["channel"] == "serving"]
@@ -581,9 +582,12 @@ def tables(root):
             stalls = analysis.all_stream_stalls(L)
             rb = [int(x) for x in ks[0]["rekey_input_bytes"].split()]
             pairs, lonely, free = analysis.match_rekeys(stalls, rb)
-            p("| %s | %s | %s | %d | %d | %d | %d | %s |" % (
+            loose = analysis.all_stream_stalls(L, min_gap_ms=80)
+            lp, ll, lf = analysis.match_rekeys(loose, rb)
+            p("| %s | %s | %s | %d | %d | %d | %d | %s | %d | %d |" % (
                 r["variant"], r["rep"], r.get("valid"), len(rb), len(stalls), len(pairs), len(free),
-                "; ".join("%.0f → %.0f, %d–%d" % (x / (1 << 20), (st["moved_lo"] + st["moved_hi"]) / 2 / (1 << 20), st["min_ms"], st["max_ms"]) for x, st in pairs) or "-"))
+                "; ".join("%.0f → %.0f, %d–%d" % (x / (1 << 20), (st["moved_lo"] + st["moved_hi"]) / 2 / (1 << 20), st["min_ms"], st["max_ms"]) for x, st in pairs) or "-",
+                len(lp), len(lf)))
     p("\n### Tunnel losses\n")
     p("Summed over all %d runs: frps's lists (a proxy not online or registered again), frpc logins beyond the first (every frpc), relay sessions beyond the first, and heartbeat-timeout lines.\n" % len(runs))
     s = lambda c: sum(int(float(r[c])) for r in runs if r.get(c) not in (None, ""))  # noqa: E731
