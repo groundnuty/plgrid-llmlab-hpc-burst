@@ -1022,6 +1022,32 @@ jobs:
             ${{ runner.temp }}/frp
           key: ${{ steps.binaries.outputs.cache-primary-key }}
 
+      # Envoy 1.40.2, for TestRehearsalInstanceRouter (#454): up --instance-router envoy places it in
+      # the agent builds, and the Provider's controller stages it to the fake job, where the agent runs
+      # it bare. As in the go job, its cache entry is its own, and hack/fetch-envoy.sh checks it against
+      # envoy-pins.txt on every run; HPCBURST_REQUIRE_ENVOY=1 makes a missing one fail, not skip.
+      - name: Restore the cached Envoy binary
+        id: envoy
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/envoy
+          key: envoy-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-envoy.sh', 'internal/agent/envoypin/envoy-pins.txt') }}
+
+      - name: Fetch the pinned Envoy binary
+        run: |
+          bash hack/fetch-envoy.sh "$RUNNER_TEMP/envoy"
+          {
+            echo "HPCBURST_ENVOY_DIR=$RUNNER_TEMP/envoy"
+            echo "HPCBURST_REQUIRE_ENVOY=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Save the Envoy binary to the cache
+        if: steps.envoy.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/envoy
+          key: ${{ steps.envoy.outputs.cache-primary-key }}
+
       # The fake login node and the ssh dial-home run OpenSSH's sshd as this user, in inetd mode,
       # with no service and no root, as for the go job's tunnel tests.
       - name: Provide OpenSSH's sshd for the login node
@@ -1056,7 +1082,7 @@ jobs:
       # Issue #146's two tests and #298's host-dialed mode only: issue #193's part 3 runs in its own
       # job (rehearsal-part3), so each job stays under its time budget.
       - name: hack/rehearsal.sh
-        run: REHEARSAL_OUT="$RUNNER_TEMP/rehearsal" REHEARSAL_RUN='^TestRehearsal(Direct|SSH|HostDialed)$' bash hack/rehearsal.sh
+        run: REHEARSAL_OUT="$RUNNER_TEMP/rehearsal" REHEARSAL_RUN='^TestRehearsal(Direct|SSH|HostDialed|InstanceRouter)$' bash hack/rehearsal.sh
 
   # The one-host rehearsal's third part (issue #193), on #146's rig: HBEP-5's 7,000-token stream
   # and attribution, HBEP-8's events and metrics, HBEP-3's requeue, HBEP-6's controller restart
