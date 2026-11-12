@@ -714,6 +714,11 @@ func (in *InstanceStatus) DeepCopyInto(out *InstanceStatus) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.HealthyWorkers != nil {
+		in, out := &in.HealthyWorkers, &out.HealthyWorkers
+		*out = new(int32)
+		**out = **in
+	}
 	if in.Agent != nil {
 		in, out := &in.Agent, &out.Agent
 		*out = new(AgentRegistration)

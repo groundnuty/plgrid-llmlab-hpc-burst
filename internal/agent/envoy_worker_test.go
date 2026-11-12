@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -47,6 +48,12 @@ type workerSpec struct {
 	First       time.Duration // wait this long before writing any response header or byte
 	Hold        *holdGate     // when set, every request waits here before it is answered
 	IdleTimeout time.Duration // the server's IdleTimeout: how long it keeps an idle connection; 0 for none
+	// Unhealthy, when set and true, makes /health answer 503. /health is answered without the key and
+	// never recorded, as vLLM serves it: the agent's readiness endpoint probes it.
+	Unhealthy *atomic.Bool
+	// Status, when set and not 0, is the status every request is answered with, before anything else:
+	// a worker that answers 5xx while its /health passes.
+	Status *atomic.Int32
 }
 
 const (
@@ -125,6 +132,10 @@ type connKey struct{}
 // testWorker is the running double.
 type testWorker struct {
 	spec workerSpec
+	// stop ends the worker's server and removes its socket, as a killed engine leaves none.
+	stop func()
+	// healthHits counts the GET /health it answered: only the agent's readiness endpoint sends one.
+	healthHits atomic.Int64
 
 	mu      sync.Mutex
 	reqs    []*workerRequest
@@ -155,10 +166,15 @@ func startWorker(t *testing.T, dir string, spec workerSpec) *testWorker {
 	}
 	served := make(chan struct{})
 	go func() { defer close(served); _ = srv.Serve(ln) }()
-	t.Cleanup(func() {
-		_ = srv.Close() // ends the connections, which cancels every request still being held or streamed
-		<-served
-	})
+	var once sync.Once
+	w.stop = func() {
+		once.Do(func() {
+			_ = srv.Close() // ends the connections, which cancels every request still being held or streamed
+			<-served
+			_ = os.Remove(workerSock(dir))
+		})
+	}
+	t.Cleanup(w.stop)
 	return w
 }
 
@@ -208,6 +224,15 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 }
 
 func (w *testWorker) handle(rw http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/health" {
+		w.healthHits.Add(1)
+		if u := w.spec.Unhealthy; u != nil && u.Load() {
+			rw.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		rw.WriteHeader(http.StatusOK)
+		return
+	}
 	ctx := r.Context()
 	body, _ := io.ReadAll(r.Body)
 	rec := &workerRequest{Method: r.Method, Path: r.URL.RequestURI(), Header: r.Header.Clone(), Body: body, At: time.Now()}
@@ -225,6 +250,11 @@ func (w *testWorker) handle(rw http.ResponseWriter, r *http.Request) {
 	outcome := "cut" // what a handler that returns before it answers means: the other end ended it
 	defer func() { setOutcome(outcome) }()
 
+	if s := w.spec.Status; s != nil && s.Load() != 0 {
+		outcome = "status"
+		rw.WriteHeader(int(s.Load()))
+		return
+	}
 	if w.spec.Key != "" && r.Header.Get("Authorization") != "Bearer "+w.spec.Key {
 		outcome = "unauthorized"
 		http.Error(rw, workerUnauthorized, http.StatusUnauthorized)

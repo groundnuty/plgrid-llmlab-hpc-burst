@@ -79,3 +79,31 @@ func TestInstanceLaunchRouterIsEnvoyOrAbsentAndImmutable(t *testing.T) {
 	got.Spec.Launch.Router = ""
 	requireRefused(t, c.Update(bg(), got), "immutable")
 }
+
+// status.healthyWorkers is the router's healthy count (HBEP-5, Worker health): absent in alpha, 0 and up
+// accepted, and below 0 refused.
+func TestInstanceHealthyWorkersRoundTripsAndIsNotNegative(t *testing.T) {
+	ns := newNamespace(t)
+	in := newInstance(ns, "healthy-workers")
+	must(t, c.Create(bg(), in), "create")
+	got := &v1alpha1.Instance{}
+	must(t, c.Get(bg(), objKey(in), got), "get")
+	if got.Status.HealthyWorkers != nil {
+		t.Errorf("a new Instance has healthyWorkers %d, want none", *got.Status.HealthyWorkers)
+	}
+	for _, n := range []int32{0, 1} {
+		must(t, c.Get(bg(), objKey(in), got), "get")
+		v := n
+		got.Status.HealthyWorkers = &v
+		must(t, c.Status().Update(bg(), got), "write healthyWorkers")
+		again := &v1alpha1.Instance{}
+		must(t, c.Get(bg(), objKey(in), again), "get")
+		if again.Status.HealthyWorkers == nil || *again.Status.HealthyWorkers != n {
+			t.Errorf("healthyWorkers read back as %v, want %d", again.Status.HealthyWorkers, n)
+		}
+	}
+	must(t, c.Get(bg(), objKey(in), got), "get")
+	minus := int32(-1)
+	got.Status.HealthyWorkers = &minus
+	requireRefused(t, c.Status().Update(bg(), got), "healthyWorkers")
+}

@@ -23,7 +23,9 @@ import (
 //     would cut a long reply is refused at launch rather than found mid-stream;
 //   - the router filter suppressing Envoy's own x-envoy-* headers;
 //   - the circuit breakers' three thresholds at Envoy's field maximum;
-//   - the workers on Unix sockets, each named.
+//   - the workers on Unix sockets, each named, each health-checked through the agent's readiness port
+//     with its own name as the check's Host;
+//   - the health checks, outlier detection and panic threshold at HBEP-5's values (Worker health).
 //
 // Each map is held to the keys the agent writes, so a field that is not checked here cannot be
 // added unnoticed. The first fault is returned, naming its place.
@@ -34,7 +36,7 @@ func CheckEnvoyConfig(raw []byte, c EnvoyConfig) error {
 	if err := dec.Decode(&root); err != nil {
 		return refuse("the bootstrap is not JSON: %v", err)
 	}
-	g := guard{floor: EnvoyRouterTimeout, runDir: c.RunDir}
+	g := guard{floor: EnvoyRouterTimeout, runDir: c.RunDir, readinessPort: c.ReadinessPort}
 	top, err := g.object(root, "", "admin", "static_resources")
 	if err != nil {
 		return err
@@ -68,8 +70,106 @@ func refuse(format string, a ...any) error {
 }
 
 type guard struct {
-	floor  time.Duration
-	runDir string
+	floor         time.Duration
+	runDir        string
+	readinessPort int
+}
+
+// num checks a JSON number equal to want.
+func (g guard) num(v any, at string, want int64) error {
+	if n, ok := v.(json.Number); !ok || n.String() != fmt.Sprint(want) {
+		return refuse("%s is %v, want %d", at, v, want)
+	}
+	return nil
+}
+
+// health checks the cluster's worker health: the active check, outlier detection and no panic mode.
+func (g guard) health(c map[string]any, at string) error {
+	lb, err := g.object(c["common_lb_config"], at+".common_lb_config", "healthy_panic_threshold")
+	if err != nil {
+		return err
+	}
+	pt, err := g.object(lb["healthy_panic_threshold"], at+".common_lb_config.healthy_panic_threshold", "value")
+	if err != nil {
+		return err
+	}
+	if err := g.num(pt["value"], at+".common_lb_config.healthy_panic_threshold.value", envoyHealthyPanicPercent); err != nil {
+		return refuse("%v: with a panic threshold Envoy routes to unhealthy workers once few are healthy", err)
+	}
+	hcs, err := g.list(c["health_checks"], at+".health_checks", 1)
+	if err != nil {
+		return err
+	}
+	hat := at + ".health_checks[0]"
+	hc, err := g.object(hcs[0], hat, "timeout", "interval", "no_traffic_interval", "unhealthy_threshold", "healthy_threshold", "http_health_check")
+	if err != nil {
+		return err
+	}
+	for k, want := range map[string]time.Duration{"timeout": envoyHCTimeout, "interval": envoyHCInterval, "no_traffic_interval": envoyHCInterval} {
+		if err := g.str(hc[k], hat+"."+k, envoySeconds(want)); err != nil {
+			return err
+		}
+	}
+	if err := g.num(hc["unhealthy_threshold"], hat+".unhealthy_threshold", envoyHCUnhealthy); err != nil {
+		return err
+	}
+	if err := g.num(hc["healthy_threshold"], hat+".healthy_threshold", envoyHCHealthy); err != nil {
+		return err
+	}
+	hh, err := g.object(hc["http_health_check"], hat+".http_health_check", "path")
+	if err != nil {
+		return err
+	}
+	if err := g.str(hh["path"], hat+".http_health_check.path", envoyHealthPath); err != nil {
+		return err
+	}
+	oat := at + ".outlier_detection"
+	od, err := g.object(c["outlier_detection"], oat, "consecutive_5xx", "base_ejection_time", "max_ejection_time", "max_ejection_percent", "successful_active_health_check_uneject_host")
+	if err != nil {
+		return err
+	}
+	if err := g.num(od["consecutive_5xx"], oat+".consecutive_5xx", envoyOutlier5xx); err != nil {
+		return err
+	}
+	if err := g.str(od["base_ejection_time"], oat+".base_ejection_time", envoySeconds(envoyEjectionBase)); err != nil {
+		return err
+	}
+	if err := g.str(od["max_ejection_time"], oat+".max_ejection_time", envoySeconds(envoyEjectionMax)); err != nil {
+		return err
+	}
+	if err := g.num(od["max_ejection_percent"], oat+".max_ejection_percent", envoyMaxEjectionPercent); err != nil {
+		return refuse("%v: Envoy's default 10%% would keep a failing worker in a small Instance", err)
+	}
+	if u, ok := od["successful_active_health_check_uneject_host"].(bool); !ok || u {
+		return refuse("%s.successful_active_health_check_uneject_host is %v, want false: a passing check would bring back a worker that fails requests", oat, od["successful_active_health_check_uneject_host"])
+	}
+	return nil
+}
+
+// healthCheckConfig checks an endpoint's check target: the readiness port on 127.0.0.1, named host.
+func (g guard) healthCheckConfig(v any, at, host string) error {
+	h, err := g.object(v, at, "address", "hostname")
+	if err != nil {
+		return err
+	}
+	a, err := g.object(h["address"], at+".address", "socket_address")
+	if err != nil {
+		return err
+	}
+	sa, err := g.object(a["socket_address"], at+".address.socket_address", "address", "port_value")
+	if err != nil {
+		return err
+	}
+	if err := g.str(sa["address"], at+".address.socket_address.address", envoyHealthCheckAddress); err != nil {
+		return err
+	}
+	if err := g.num(sa["port_value"], at+".address.socket_address.port_value", int64(g.readinessPort)); err != nil {
+		return refuse("%v: the check must reach the agent's readiness endpoint", err)
+	}
+	if err := g.str(h["hostname"], at+".hostname", host); err != nil {
+		return refuse("%v: the check names the worker by its Host", err)
+	}
+	return nil
 }
 
 // object returns v as a map whose keys are exactly allowed's, all present.
@@ -294,8 +394,11 @@ func (g guard) hcm(v any, at string) error {
 }
 
 func (g guard) cluster(v any, at string) error {
-	c, err := g.object(v, at, "name", "type", "lb_policy", "connect_timeout", "circuit_breakers", "typed_extension_protocol_options", "load_assignment")
+	c, err := g.object(v, at, "name", "type", "lb_policy", "connect_timeout", "common_lb_config", "health_checks", "outlier_detection", "circuit_breakers", "typed_extension_protocol_options", "load_assignment")
 	if err != nil {
+		return err
+	}
+	if err := g.health(c, at); err != nil {
 		return err
 	}
 	if err := g.str(c["name"], at+".name", envoyClusterName); err != nil {
@@ -359,12 +462,16 @@ func (g guard) cluster(v any, at string) error {
 		if err != nil {
 			return err
 		}
-		ep, err := g.object(lbe["endpoint"], eat+".endpoint", "hostname", "address")
+		ep, err := g.object(lbe["endpoint"], eat+".endpoint", "hostname", "address", "health_check_config")
 		if err != nil {
 			return err
 		}
-		if n, _ := ep["hostname"].(string); n == "" {
+		n, _ := ep["hostname"].(string)
+		if n == "" {
 			return refuse("%s.endpoint.hostname is empty: each worker is named", eat)
+		}
+		if err := g.healthCheckConfig(ep["health_check_config"], eat+".endpoint.health_check_config", n); err != nil {
+			return err
 		}
 		if err := g.pipe(ep["address"], eat+".endpoint.address", "", false); err != nil {
 			return err

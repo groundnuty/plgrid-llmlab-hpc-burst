@@ -26,6 +26,7 @@ func (a *Agent) snapshot(now time.Time) agentapi.Report {
 	for _, w := range in.workers {
 		ir.Workers = append(ir.Workers, a.workerReport(w, now))
 	}
+	ir.Router = a.routerReport(now)
 	if w := in.find(agentapi.WorkerName(0)); w != nil && w.phase == agentapi.PartRunning {
 		ir.ServingEndpoint = "unix:" + w.socket
 	}
