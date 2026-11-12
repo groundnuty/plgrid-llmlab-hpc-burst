@@ -306,7 +306,7 @@ func TestBuildAgentsRefusesAnUnknownCPUArchBeforeBuildingAnything(t *testing.T) 
 			t.Errorf("cpuArch %q: %s holds %v after a refusal, want nothing", bad, dir, got)
 		}
 	}
-	if out, code := runBuildAgents(t, root, nil); code != 1 || !strings.Contains(out, "usage: hack/build-agents.sh DIR") {
+	if out, code := runBuildAgents(t, root, nil); code != 1 || !strings.Contains(out, "usage: hack/build-agents.sh [--version VERSION] DIR") {
 		t.Errorf("no DIR: exit %d, want 1 and a usage line:\n%s", code, out)
 	}
 }

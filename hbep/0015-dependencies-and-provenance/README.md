@@ -202,7 +202,7 @@ A release is a tag on `main` with its archive, its checksums and its notes (owne
 - **How it's made:**
   1. A workflow runs on a pushed `v*` tag. It fails unless the tagged commit is on `origin/main` (`git merge-base --is-ancestor`), and it calls CI's workflow for the required checks, through `workflow_call`, rather than copying them.
   2. It builds the archive and `SHA256SUMS`, and creates a draft release with `gh release create --draft`.
-  3. The rehearsal runs from the draft's archive on the single-user host, through `hack/rehearsal.sh`'s archive input (`REHEARSAL_ARCHIVE`). It unpacks the archive into the names the prebuilt mode takes (issue #146), with the agent as `hb-agent` and frps and frpc as its frp directory expects, so `REHEARSAL_PREBUILT=1` is not set beside it, and the script refuses the two together. `rehearsal.test` is built from a checkout of the tag.
+  3. The rehearsal runs from the draft's archive on the single-user host, through `hack/rehearsal.sh`'s archive input (`REHEARSAL_ARCHIVE`). It unpacks the archive into the names the prebuilt mode takes (issue #146), with the agent as `hb-agent` and frps and frpc as its frp directory expects, so `REHEARSAL_PREBUILT=1` is not set beside it, and the script refuses the two together. It refuses `HPCBURST_BIN_DIR` and `HPCBURST_FRP_DIR` beside it too, since it sets both from the archive. `rehearsal.test` is built from a checkout of the tag.
   4. Only then is the release published.
 
   It reuses GitHub Releases and the GitHub CLI already on the runner image, and adds no release tool.
@@ -312,6 +312,7 @@ Sources were read on 2026-10-30, except where another date is given.
 - 2026-11-11: releases defined; the first tag is `v0.1.0-alpha.1` once alpha graduates (owner decision).
 - 2026-11-12: erratum: Envoy's row names its pins file, `internal/agent/envoypin/envoy-pins.txt`, which #429's first PR adds, where the cell named a proposed file; the list of pins files in Where each origin is recorded names it too.
 - 2026-11-12: erratum: Releases step 3 names the rehearsal's archive input, `REHEARSAL_ARCHIVE`, which `hack/rehearsal.sh` refuses beside `REHEARSAL_PREBUILT=1`, where the text gave the prebuilt flag as the input (#462).
+- 2026-11-12: erratum: Releases step 3 says that `hack/rehearsal.sh` also refuses `HPCBURST_BIN_DIR` and `HPCBURST_FRP_DIR` beside the archive input, which sets both itself (a note from #466's review).
 - 2026-11-12: the first tag's freeze includes `examples/`.
 
 ## Amendments
