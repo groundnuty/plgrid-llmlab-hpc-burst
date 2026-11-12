@@ -18,6 +18,16 @@ import (
 // certificate; `@hpc-burst-science-agent`, 31 Oct 2026).
 const DialHomeServerName = "dial-home.hpcburst.invalid"
 
+// BulkDialHomeServerName is the bulk path's server name (beta; HBEP-6, The bulk
+// path, `@hpc-burst-science-agent`, 12 Nov 2026): the bulk frpc's
+// transport.tls.serverName, and the only DNS name of the launcher's second
+// certificate, which is issued for the same key as the first and so has the
+// same pin. The dial-home listener serves that certificate, and passes
+// GET /~!frp to the second frps, only to a client that names this server. The
+// first certificate never carries it: re-issuing the first would cut every
+// running Allocation's token tunnel (HBEP-6, The bulk path).
+const BulkDialHomeServerName = "bulk.dial-home.hpcburst.invalid"
+
 // PinOf returns a certificate's pin: the SHA-256 of its DER-encoded
 // SubjectPublicKeyInfo, as 64 lowercase hex characters. The pin follows the
 // key, so a certificate re-issued for the same key keeps it.
