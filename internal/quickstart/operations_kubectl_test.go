@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
 	"sigs.k8s.io/yaml"
@@ -139,8 +140,31 @@ type kubectlVerb struct {
 // (internal/providerctl/external.go), so a later attempt's value is refused without it.
 var kubectlVerbs = map[string]kubectlVerb{
 	"get": {
-		flags: map[string]valueCheck{"-o": outputValue, "-l": selectorValue, "-n": namespaceValue, "--sort-by": prefixed(".")},
+		flags: map[string]valueCheck{"-o": outputValue, "-l": selectorValue, "-n": namespaceValue, "--sort-by": prefixed("."), "-w": nil},
 		args:  kindAnd(0, 1),
+	},
+	// wait takes one kind/name, and --for the Ready condition or the object's deletion. The
+	// quickstart uses it on a ModelDeployment; --timeout is a Go duration, as kubectl reads it.
+	"wait": {
+		flags: map[string]valueCheck{
+			"--for":     oneOf("condition="+v1alpha1.ConditionReady, "delete"),
+			"--timeout": positiveDuration,
+			"-n":        namespaceValue,
+		},
+		required: []string{"--for"},
+		args: func(pos []string, crds crdKinds, _ map[string]string) error {
+			if len(pos) != 1 {
+				return fmt.Errorf("want one kind/name argument, got %q", pos)
+			}
+			kind, name, ok := strings.Cut(pos[0], "/")
+			if !ok || name == "" {
+				return fmt.Errorf("want kind/name, got %q", pos[0])
+			}
+			if crds[kind] == nil {
+				return fmt.Errorf("%s is not a kind of config/crd", kind)
+			}
+			return nil
+		},
 	},
 	"describe": {
 		flags: map[string]valueCheck{"-l": selectorValue, "-n": namespaceValue},
@@ -214,6 +238,14 @@ var kubectlVerbs = map[string]kubectlVerb{
 			return checkPatch(k.schema, body, "")
 		},
 	},
+}
+
+// positiveDuration accepts a Go duration above zero, which is how kubectl reads --timeout.
+func positiveDuration(v string) error {
+	if d, err := time.ParseDuration(v); err != nil || d <= 0 {
+		return fmt.Errorf("want a positive duration such as 3h")
+	}
+	return nil
 }
 
 func prefixed(p string) valueCheck {

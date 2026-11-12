@@ -112,6 +112,10 @@ case $mode in
   not-run-row-b-warm) echo "$HPCBURST_ALPHA_ROW: the agent's own log did not show the warm start (the successor's job: the agent's log of the job could not be read); the run's other checks passed; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   # The marker of a first job that ran and a second that never started (internal/alpha, NotRunNote).
   not-run-second) echo "$HPCBURST_ALPHA_ROW: the first job ran and the second never started; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  # The marker of a handover row whose streams' lead does not fit the deployment's max-model-len (internal/alpha, NotRunNote, issue
+  # #447), on whatever row runs it; and the same with words where the numbers go, which the script must not print.
+  not-run-lead) echo "$HPCBURST_ALPHA_ROW: no stream across the drain start that is long enough to tell a cut from an end fits the deployment's max-model-len at the engine's measured rate (at 600 tokens/s with max-model-len 32768 the lead that fits is 26s, under the floor of 30s); the run opened no stream across the drain start; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  not-run-lead-words) echo "$HPCBURST_ALPHA_ROW: no stream across the drain start that is long enough to tell a cut from an end fits the deployment's max-model-len at the engine's measured rate (at owner-private-host tokens/s with max-model-len 32768 the lead that fits is 26s, under the floor of 30s); the run opened no stream across the drain start; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   sleep) leave; touch "$STUB_STATE/started"; exec sleep 3600 ;;
   # A job of the run's own prefix whose tag was never written down (a watch that never delivered, a write that
   # failed), beside a job of another run's prefix; with untagged-not-run, the run ended NOT RUN with it pending.
@@ -140,16 +144,23 @@ func (w *world) useAlphaStubs(rows ...string) {
 	_ = rows
 }
 
+// pinnedBinaries lays out dir as hack/fetch-k3s.sh and hack/fetch-frp.sh do: k3s under k3s-1.36.5/, and frps and frpc at the top,
+// each an executable file.
+func pinnedBinaries(t *testing.T, dir string) {
+	t.Helper()
+	for _, f := range []string{"k3s-1.36.5/k3s", "frps", "frpc"} {
+		write(t, filepath.Join(dir, f), "#!/bin/bash\n", 0o755)
+	}
+}
+
 // alphaSettings adds what the alpha rows need to the world's settings file.
 func (w *world) alphaSettings(mutate func(m map[string]string)) {
 	w.t.Helper()
 	bin := filepath.Join(w.dir, "bindir")
 	key := filepath.Join(w.dir, "dialhome-key")
-	for _, d := range []string{bin} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			w.t.Fatal(err)
-		}
-	}
+	// The directory is laid out as hack/fetch-k3s.sh and hack/fetch-frp.sh lay it out: every row that starts the stack checks it
+	// before the slot is read (issue #444).
+	pinnedBinaries(w.t, bin)
 	write(w.t, key, "SEEDDIALKEY\n", 0o600)
 	w.writeSettings(func(m map[string]string) {
 		m["LIVE_DIALHOME_MODE"] = "direct"

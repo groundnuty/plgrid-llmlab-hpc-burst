@@ -19,7 +19,14 @@ import (
 //   - the circuit breakers' three thresholds are Envoy's field maximum (Q8), since the front's cap
 //     governs and an overflow 503 would count toward the Instance's pause;
 //   - the router filter suppresses the x-envoy-* headers Envoy would add, so the workers see only
-//     what HBEP-5 lists (the observation of #429's stage 0).
+//     what HBEP-5 lists (the observation of #429's stage 0);
+//   - worker health (HBEP-5, Worker health; HBEP-7, Several workers): an active HTTP check of each
+//     worker every 5 s with a 2 s time-out, to the agent's one readiness port with the worker's name as
+//     its Host, unhealthy after 2 failures or at once on a 503, healthy after 1 pass, and the same 5 s
+//     before any traffic; outlier detection ejecting a worker after 3 consecutive 5xx for 30 s, longer
+//     after each repeat up to 300 s (Q10), any share of the workers, and never brought back early by a
+//     passing check; and no panic mode, so with no healthy worker Envoy answers 503 rather than route
+//     to an unhealthy one.
 //
 // The JSON is written with encoding/json from the types below, which mirror Envoy's v3 API names; the
 // agent links nothing outside the standard library. A guard that reads the rendered bytes back
@@ -61,6 +68,19 @@ const (
 	EnvoyRouterTimeout = 3 * time.Hour
 	// envoyClustersPath is the one admin path allowed: the agent's read of each worker's health.
 	envoyClustersPath = "/clusters?format=json"
+
+	// Worker health (HBEP-5, Worker health).
+	envoyHealthPath          = "/ready"
+	envoyHCInterval          = 5 * time.Second
+	envoyHCTimeout           = 2 * time.Second
+	envoyHCUnhealthy         = 2
+	envoyHCHealthy           = 1
+	envoyOutlier5xx          = 3
+	envoyEjectionBase        = 30 * time.Second
+	envoyEjectionMax         = 300 * time.Second
+	envoyMaxEjectionPercent  = 100
+	envoyHealthCheckAddress  = "127.0.0.1"
+	envoyHealthyPanicPercent = 0
 )
 
 // EnvoyWorker is one endpoint of the workers' cluster: a worker by name, on its engine socket.
@@ -75,6 +95,9 @@ type EnvoyConfig struct {
 	RunDir string
 	// Workers are the Instance's workers, in order.
 	Workers []EnvoyWorker
+	// ReadinessPort is the agent's readiness endpoint on 127.0.0.1 (Readiness), which Envoy
+	// health-checks every worker through.
+	ReadinessPort int
 }
 
 // The bootstrap's types: only the fields the agent sets, in Envoy's JSON names.
@@ -148,6 +171,9 @@ type (
 		Type                          string                    `json:"type"`
 		LBPolicy                      string                    `json:"lb_policy"`
 		ConnectTimeout                string                    `json:"connect_timeout"`
+		CommonLBConfig                envoyCommonLB             `json:"common_lb_config"`
+		HealthChecks                  []envoyHealthCheck        `json:"health_checks"`
+		OutlierDetection              envoyOutlier              `json:"outlier_detection"`
 		CircuitBreakers               envoyCircuitBreakers      `json:"circuit_breakers"`
 		TypedExtensionProtocolOptions map[string]envoyHTTPProto `json:"typed_extension_protocol_options"`
 		LoadAssignment                envoyLoadAssignment       `json:"load_assignment"`
@@ -177,8 +203,41 @@ type (
 		Endpoint envoyEndpoint `json:"endpoint"`
 	}
 	envoyEndpoint struct {
-		Hostname string       `json:"hostname"`
-		Address  envoyAddress `json:"address"`
+		Hostname          string                 `json:"hostname"`
+		Address           envoyAddress           `json:"address"`
+		HealthCheckConfig envoyHealthCheckConfig `json:"health_check_config"`
+	}
+	envoyCommonLB struct {
+		HealthyPanicThreshold envoyPercent `json:"healthy_panic_threshold"`
+	}
+	envoyPercent struct {
+		Value float64 `json:"value"`
+	}
+	envoyHealthCheck struct {
+		Timeout            string            `json:"timeout"`
+		Interval           string            `json:"interval"`
+		NoTrafficInterval  string            `json:"no_traffic_interval"`
+		UnhealthyThreshold uint32            `json:"unhealthy_threshold"`
+		HealthyThreshold   uint32            `json:"healthy_threshold"`
+		HTTPHealthCheck    map[string]string `json:"http_health_check"`
+	}
+	envoyOutlier struct {
+		Consecutive5xx                         uint32 `json:"consecutive_5xx"`
+		BaseEjectionTime                       string `json:"base_ejection_time"`
+		MaxEjectionTime                        string `json:"max_ejection_time"`
+		MaxEjectionPercent                     uint32 `json:"max_ejection_percent"`
+		SuccessfulActiveHealthCheckUnejectHost bool   `json:"successful_active_health_check_uneject_host"`
+	}
+	envoyHealthCheckConfig struct {
+		Address  envoySocketAddress `json:"address"`
+		Hostname string             `json:"hostname"`
+	}
+	envoySocketAddress struct {
+		SocketAddress envoyIPPort `json:"socket_address"`
+	}
+	envoyIPPort struct {
+		Address   string `json:"address"`
+		PortValue int    `json:"port_value"`
 	}
 )
 
@@ -200,10 +259,20 @@ func RenderEnvoyConfig(c EnvoyConfig) ([]byte, error) {
 	if len(c.Workers) == 0 {
 		return nil, errors.New("envoy: no worker to route to")
 	}
+	if c.ReadinessPort <= 0 || c.ReadinessPort > 65535 {
+		return nil, fmt.Errorf("envoy: readiness port %d is not a port", c.ReadinessPort)
+	}
 	timeout := envoySeconds(EnvoyRouterTimeout)
 	var eps []envoyLBEndpoint
 	for _, w := range c.Workers {
-		eps = append(eps, envoyLBEndpoint{Endpoint: envoyEndpoint{Hostname: w.Name, Address: envoyAddress{Pipe: &envoyPipe{Path: w.Socket}}}})
+		eps = append(eps, envoyLBEndpoint{Endpoint: envoyEndpoint{
+			Hostname: w.Name, Address: envoyAddress{Pipe: &envoyPipe{Path: w.Socket}},
+			// The check goes to the agent's readiness port, naming the worker by its Host.
+			HealthCheckConfig: envoyHealthCheckConfig{
+				Address:  envoySocketAddress{SocketAddress: envoyIPPort{Address: envoyHealthCheckAddress, PortValue: c.ReadinessPort}},
+				Hostname: w.Name,
+			},
+		}})
 	}
 	b := envoyBootstrap{
 		Admin: envoyAdmin{
@@ -234,6 +303,16 @@ func RenderEnvoyConfig(c EnvoyConfig) ([]byte, error) {
 			}},
 			Clusters: []envoyCluster{{
 				Name: envoyClusterName, Type: "STATIC", LBPolicy: "RING_HASH", ConnectTimeout: envoySeconds(envoyConnectTimeout),
+				CommonLBConfig: envoyCommonLB{HealthyPanicThreshold: envoyPercent{Value: envoyHealthyPanicPercent}},
+				HealthChecks: []envoyHealthCheck{{
+					Timeout: envoySeconds(envoyHCTimeout), Interval: envoySeconds(envoyHCInterval), NoTrafficInterval: envoySeconds(envoyHCInterval),
+					UnhealthyThreshold: envoyHCUnhealthy, HealthyThreshold: envoyHCHealthy,
+					HTTPHealthCheck: map[string]string{"path": envoyHealthPath},
+				}},
+				OutlierDetection: envoyOutlier{
+					Consecutive5xx: envoyOutlier5xx, BaseEjectionTime: envoySeconds(envoyEjectionBase), MaxEjectionTime: envoySeconds(envoyEjectionMax),
+					MaxEjectionPercent: envoyMaxEjectionPercent, SuccessfulActiveHealthCheckUnejectHost: false,
+				},
 				CircuitBreakers: envoyCircuitBreakers{Thresholds: []envoyThreshold{{
 					Priority: "DEFAULT", MaxConnections: envoyMaxThreshold, MaxPendingRequests: envoyMaxThreshold, MaxRequests: envoyMaxThreshold,
 				}}},

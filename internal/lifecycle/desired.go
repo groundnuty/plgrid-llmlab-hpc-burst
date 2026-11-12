@@ -139,6 +139,8 @@ func (b *Backend) desiredInstance(ctx context.Context, in *v1alpha1.Instance) (*
 	// (#429). An Instance without launch.router gets none: alpha's shape.
 	if in.Spec.Launch.Router != "" {
 		di.Router = &agentapi.DesiredRouter{Kind: agentapi.RouterKind(in.Spec.Launch.Router), Generation: restartGeneration(in, v1alpha1.PartRouter)}
+		// The worker takes traffic through the router only once its generation is verified.
+		di.Workers[0].VerifiedGeneration = verifiedGeneration(in)
 	}
 	if _, err := os.Stat(agentapi.InstanceKeyPath(b.CredentialsDir, string(in.UID))); err == nil {
 		di.KeyStored = true

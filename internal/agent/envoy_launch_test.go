@@ -35,11 +35,30 @@ func shortDir(t *testing.T) string {
 
 func startTestEnvoy(t *testing.T) (*agent.EnvoyProc, string) {
 	t.Helper()
-	bin := testenv.EnvoyBinary(t)
 	dir := shortDir(t)
+	return startTestEnvoyIn(t, dir, startReadiness(t, dir, false)), dir
+}
+
+// startReadiness starts the agent's readiness endpoint for worker-0 in dir, verified or not, and stops
+// it when the test ends.
+func startReadiness(t *testing.T, dir string, verified bool) *agent.Readiness {
+	t.Helper()
+	rd, err := agent.NewReadiness()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rd.Close() })
+	rd.Set(map[string]agent.ReadyWorker{"worker-0": {Socket: filepath.Join(dir, "worker-0.sock"), Verified: verified}})
+	return rd
+}
+
+// startTestEnvoyIn starts Envoy through the agent in dir, for worker-0, health-checked through rd.
+func startTestEnvoyIn(t *testing.T, dir string, rd *agent.Readiness) *agent.EnvoyProc {
+	t.Helper()
+	bin := testenv.EnvoyBinary(t)
 	p, err := agent.StartEnvoy(agent.EnvoyStart{
 		Binary: bin, Ready: 30 * time.Second,
-		Config: agent.EnvoyConfig{RunDir: dir, Workers: []agent.EnvoyWorker{{Name: "worker-0", Socket: filepath.Join(dir, "worker-0.sock")}}},
+		Config: agent.EnvoyConfig{RunDir: dir, Workers: []agent.EnvoyWorker{{Name: "worker-0", Socket: filepath.Join(dir, "worker-0.sock")}}, ReadinessPort: rd.Port()},
 	}, time.Now())
 	if err != nil {
 		t.Fatalf("StartEnvoy: %v", err)
@@ -49,7 +68,7 @@ func startTestEnvoy(t *testing.T) (*agent.EnvoyProc, string) {
 		<-p.Group.Done()
 		p.Close()
 	})
-	return p, dir
+	return p
 }
 
 func TestStartEnvoyListensOnlyOnItsPipes(t *testing.T) {
@@ -216,7 +235,7 @@ func TestStartEnvoyRefusesABinaryThatIsNotThePin(t *testing.T) {
 	}
 	_, err := agent.StartEnvoy(agent.EnvoyStart{
 		Binary: fake, Ready: 5 * time.Second,
-		Config: agent.EnvoyConfig{RunDir: dir, Workers: []agent.EnvoyWorker{{Name: "worker-0", Socket: filepath.Join(dir, "worker-0.sock")}}},
+		Config: agent.EnvoyConfig{RunDir: dir, Workers: []agent.EnvoyWorker{{Name: "worker-0", Socket: filepath.Join(dir, "worker-0.sock")}}, ReadinessPort: 30160},
 	}, time.Now())
 	if err == nil || !errors.Is(err, agent.ErrEnvoyRefused) || !strings.Contains(err.Error(), "not the pin of Envoy 1.40.2") {
 		t.Fatalf("StartEnvoy with another binary: %v, want a refusal naming the pin", err)

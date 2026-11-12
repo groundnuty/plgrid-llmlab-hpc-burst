@@ -44,6 +44,10 @@ type UpOptions struct {
 	// controller binary. Without it, up refuses while the keeper's state file shows it ran and
 	// Allocations are running (relaykeeper.go).
 	RelayKeeper bool
+	// BulkPath is up --bulk-path (beta; HBEP-6, The bulk path): the supervisor runs a second frps
+	// for the bulk path, frps-bulk, at base+13 to base+15, and up keeps a second certificate for the
+	// agent endpoint's key, naming the bulk server only. It needs a controller binary and frps.
+	BulkPath bool
 
 	// supervisorArgv, set by tests only, replaces the supervisor's command line.
 	supervisorArgv []string
@@ -79,6 +83,8 @@ type UpReport struct {
 	FrontHealth string `json:"front_health,omitempty"`
 	// FrpsPorts are frps's bind, tcpmux and web ports when frps runs.
 	FrpsPorts []int `json:"frps_ports,omitempty"`
+	// FrpsBulkPorts are the second frps's bind, tcpmux and web ports when up ran it (--bulk-path).
+	FrpsBulkPorts []int `json:"frps_bulk_ports,omitempty"`
 	// RelayKeeperSocket is the relay keeper's socket when up ran it (--relay-keeper).
 	RelayKeeperSocket string `json:"relay_keeper_socket,omitempty"`
 	// AgentBuilds is the check of the builds the PlatformProfiles' partitions need (#158), made
@@ -123,6 +129,7 @@ func startAndWait(ctx context.Context, spec launchSpec, front Front, timeout tim
 	rec := h.rec
 	st := newRecord(spec, rec, front, t0)
 	st.RelayKeeper = spec.relayKeeper
+	st.BulkPath = spec.bulkPath
 	// Record before waiting: an interrupted or crashed start is then still cleaned up by down.
 	if err := spec.l.saveState(st); err != nil {
 		_, _ = stopRecorded(context.Background(), st, 10*time.Second, log)
@@ -206,6 +213,14 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 	if o.RelayKeeper && front.Mode != string(agentapi.DialHomeHostDialed) {
 		return nil, errRelayKeeperMode
 	}
+	if o.BulkPath {
+		if err := checkBulkPathFront(front, frontRun); err != nil {
+			return nil, err
+		}
+		if ports, err = ports.WithBulkPath(); err != nil {
+			return nil, err
+		}
+	}
 	if o.RelayKeeper && ctrlBin == "" {
 		return nil, errors.New("the relay keeper was asked for (--relay-keeper), but no controller binary was found: the keeper is the controller binary's relaykeeper subcommand")
 	}
@@ -224,6 +239,9 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 		}
 	} else if o.FrpsBin != "" {
 		return nil, errors.New("frps was asked for (--frps-bin), but no controller binary was found: frps runs under the controllers' supervisor")
+	}
+	if o.BulkPath && frpsRun == nil {
+		return nil, errBulkPathNoFrps
 	}
 	unlock, err := l.lockState()
 	if err != nil {
@@ -283,11 +301,19 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 	if err := checkPortsFree(ports.All()); err != nil {
 		return nil, fmt.Errorf("refusing to start: %w", err)
 	}
+	// The bulk path's second certificate, for the same key, once the ports are known free, so an up
+	// refused on a port leaves none behind; the first is only read (HBEP-6, The bulk path).
+	if o.BulkPath {
+		if err := ensureBulkCert(l.host(ports), o.Log); err != nil {
+			return nil, err
+		}
+	}
 
 	spec := launchSpec{l: l, bin: bin, ports: ports, nice: o.Nice, eventTTL: o.eventTTL, omitEventTTL: o.omitEventTTL}
 	if ctrlBin != "" {
 		spec.controllers, spec.frontRun, spec.frps = &ControllerConfig{Binary: ctrlBin}, frontRun, frpsRun
 		spec.relayKeeper = o.RelayKeeper
+		spec.bulkPath = o.BulkPath
 	}
 	st, readyzAt, readyAt, err := startAndWait(ctx, spec, front, o.ReadyTimeout, o.Log)
 	if err != nil {
@@ -397,6 +423,13 @@ func startControllers(ctx context.Context, l layout, ports Ports, o UpOptions, s
 		if _, err := writeFrpsFiles(l.host(ports), frontAddr); err != nil {
 			return "frps", err
 		}
+		// The bulk path's second frps: its own password and configuration, posting to the
+		// plugins' bulk paths (HBEP-6, The bulk path).
+		if st.BulkPath {
+			if _, err := writeFrpsBulkFiles(l.host(ports), frontAddr); err != nil {
+				return "frps-bulk", err
+			}
+		}
 	} else {
 		rep.Warnings = append(rep.Warnings, noFrpsWarning)
 		logf(o.Log, "%s", noFrpsWarning)
@@ -411,6 +444,9 @@ func startControllers(ctx context.Context, l layout, ports Ports, o UpOptions, s
 	if frpsRun != nil {
 		h := l.host(ports)
 		rep.FrpsPorts = []int{h.FrpsBindPort(), h.FrpsTCPMuxPort(), h.FrpsWebPort()}
+		if st.BulkPath {
+			rep.FrpsBulkPorts = []int{h.FrpsBulkBindPort(), h.FrpsBulkTCPMuxPort(), h.FrpsBulkWebPort()}
+		}
 	}
 	if o.RelayKeeper {
 		rep.RelayKeeperSocket = l.host(ports).RelayKeeperSocket()
