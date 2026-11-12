@@ -49,6 +49,10 @@ type Stream struct {
 	// Ticks are the times, on the client's clock, at which the reply's data
 	// lines (its tokens) arrived; not in the record.
 	Ticks []time.Time `json:"-"`
+	// Long is the stream's ROLE in the tunnel hour: it is one of the long requests the row sized to the context (TunnelHour's nLong
+	// chains). Check 2 is judged on these alone, whatever the length of any other stream: a burst stream that happens to cross the bar
+	// is not evidence that the long stream completes (issue #451; the science agent's ruling (a), 12 Nov 2026).
+	Long bool `json:"long,omitempty"`
 }
 
 // PromptCounted reports whether the engine answered the request with a

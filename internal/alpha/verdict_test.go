@@ -199,7 +199,7 @@ func (m mix) requests(start time.Time) []Stream {
 	at := start
 	run := func(tag string) {
 		for i := 0; i < 3; i++ {
-			out = append(out, Stream{ID: fmt.Sprintf("%s%d", tag, i), Opened: at, Ended: at.Add(m.near), Complete: true})
+			out = append(out, Stream{ID: fmt.Sprintf("%s%d", tag, i), Opened: at, Ended: at.Add(m.near), Complete: true, Long: true})
 			at = at.Add(m.near + m.gap)
 		}
 	}
@@ -220,7 +220,7 @@ func (m mix) requests(start time.Time) []Stream {
 		if end.Sub(at) < l {
 			l = end.Sub(at)
 		}
-		out = append(out, Stream{ID: "p", Opened: at, Ended: at.Add(l), Complete: true})
+		out = append(out, Stream{ID: "p", Opened: at, Ended: at.Add(l), Complete: true, Long: true})
 		at = at.Add(l)
 	}
 	return out

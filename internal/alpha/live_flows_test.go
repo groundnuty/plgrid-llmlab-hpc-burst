@@ -67,6 +67,13 @@ func (r *liveRun) observe(out stack.Streamed) Stream {
 // finish waits for a stream and observes it.
 func (r *liveRun) finish(s stream) Stream { return r.observe(r.wait(s)) }
 
+// finishLong is finish for one of the tunnel hour's long requests: it carries its role, which check 2 judges on (Stream.Long).
+func (r *liveRun) finishLong(s stream) Stream {
+	o := r.finish(s)
+	o.Long = true
+	return o
+}
+
 // rate is the engine's token rate through the front, from one stream, so that
 // the run sizes a request to a length.
 func (r *liveRun) rate(key string) float64 {
@@ -699,7 +706,7 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	first := time.Now()
 	var reqs []Stream
 	for i := 0; i < tm.MinChain; i++ {
-		reqs = append(reqs, r.finish(r.openStream(nLong, key, "")))
+		reqs = append(reqs, r.finishLong(r.openStream(nLong, key, "")))
 	}
 	// The burst, and inside it the download's path rate with one more stream,
 	// and the large requests beside it once every stream of the burst runs.
@@ -749,7 +756,7 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 			p.Logf("%s: the drain start comes before the hour is over", p.Row.Name)
 			break
 		}
-		reqs = append(reqs, r.finish(r.openStream(nLong, key, "")))
+		reqs = append(reqs, r.finishLong(r.openStream(nLong, key, "")))
 	}
 	samples := smp.end()
 	dep := r.observedDeployment()

@@ -106,7 +106,7 @@ func scaledHour(r Row) (TunnelHourObs, []provider.Job) {
 	s := func(d time.Duration) time.Time { return t0.Add(d) }
 	var reqs []Stream
 	for i, from := range []time.Duration{0, 51 * time.Second, 102 * time.Second} {
-		reqs = append(reqs, Stream{ID: "a" + string(rune('0'+i)), Opened: s(from), Ended: s(from + 50*time.Second), Complete: true})
+		reqs = append(reqs, Stream{ID: "a" + string(rune('0'+i)), Opened: s(from), Ended: s(from + 50*time.Second), Complete: true, Long: true})
 	}
 	for i := 0; i < 16; i++ {
 		reqs = append(reqs, Stream{ID: "c" + string(rune('a'+i)), Opened: s(152 * time.Second), Ended: s(172 * time.Second), Complete: true, Tokens: 500})
@@ -114,7 +114,7 @@ func scaledHour(r Row) (TunnelHourObs, []provider.Job) {
 	// A large request (issue #224), its body sent while the 16 streams were open.
 	reqs = append(reqs, Stream{ID: "l0", Opened: s(155 * time.Second), Ended: s(160 * time.Second), Complete: true,
 		BodyBytes: 200_000, BodyStart: s(155 * time.Second), BodyEnd: s(157 * time.Second)})
-	reqs = append(reqs, Stream{ID: "b0", Opened: s(212 * time.Second), Ended: s(262 * time.Second), Complete: true})
+	reqs = append(reqs, Stream{ID: "b0", Opened: s(212 * time.Second), Ended: s(262 * time.Second), Complete: true, Long: true})
 	var samples []TunnelSample
 	for at := time.Duration(0); at <= 272*time.Second; at += 10 * time.Second {
 		samples = append(samples, TunnelSample{At: s(at), LastStart: s(-30 * time.Second), Connected: true})

@@ -185,11 +185,10 @@ func TestACheck2AsksForTheSameShareOfWhatWasSizedAndNeverUnderTwoMinutes(t *test
 	}
 }
 
-// Check 2 through trafficChecks, on the live clock, each at its boundary and the expectation typed: a hour whose chains of requests are
-// each of length near has a completed long stream when near meets the bar, and not a second under. The A100's plan of 162 s asks
-// 144 s; a plan of 140 s asks 124.444 s, so 2 min 5 s passes and 2 min 4 s does not; a plan of 130 s (which the sizing refuses, but the
+// Check 2 through trafficChecks, on the live clock, each at its boundary and the expectation typed. The A100's plan of 162 s asks 144 s;
+// a plan of 140 s asks 124.444 s, so 2 min 5 s passes and 2 min 4 s does not; a plan of 130 s (which the sizing refuses, but the
 // verdict is its own judge) asks 2 minutes, so 119 s does not pass though the share, 115.6 s, would let it: the mutant that drops the
-// maximum fails here; a plan at the cap asks for 240 s.
+// maximum fails here; a plan at the cap asks for 240 s. The long requests alone answer it: the hour's burst streams last 100 s here.
 func TestACheck2NeverAcceptsAStreamUnderItsBar(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -207,38 +206,78 @@ func TestACheck2NeverAcceptsAStreamUnderItsBar(t *testing.T) {
 		{"a plan at the cap, 240 s", 270 * time.Second, 240 * time.Second, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			m := goodMix()
-			m.near = c.near
-			// Without the requests of the deadline's length that pad the hour: they would be a run back to back, and long, themselves.
-			// And with the burst's streams shorter than any bar here: the good mix's last 2 minutes each, which meets a bar of exactly 2
-			// minutes by themselves, so that only the long requests can answer the check (see the note in the PR body on #452).
-			var reqs []Stream
-			for _, r := range m.requests(at(20 * time.Minute)) {
-				switch {
-				case r.ID == "p":
-				case strings.HasPrefix(r.ID, "c"):
-					r.Ended = r.Opened.Add(100 * time.Second)
-					reqs = append(reqs, r)
-				default:
-					reqs = append(reqs, r)
-				}
-			}
-			tm := LiveTiming().withLongPlan(LongPlan{Length: c.plan})
-			var got []string
-			for _, f := range trafficChecks(reqs, tm, false) {
-				if strings.Contains(f, "long stream") {
-					got = append(got, f)
-				}
-			}
-			want := []string(nil)
-			if c.want != "" {
-				want = []string{c.want}
-			}
-			if !slices.Equal(got, want) {
-				t.Errorf("a plan of %s and requests of %s: long-stream failures %v, want %v", c.plan, c.near, got, want)
+			reqs := check2Hour(c.near, 100*time.Second, true)
+			if got := longStreamFailures(reqs, LiveTiming().withLongPlan(LongPlan{Length: c.plan})); !slices.Equal(got, wantLongFailures(c.want)) {
+				t.Errorf("a plan of %s and long requests of %s: long-stream failures %v, want %v", c.plan, c.near, got, wantLongFailures(c.want))
 			}
 		})
 	}
+}
+
+// Check 2 is judged on the long requests only, by their role (Stream.Long), never by a length: the hour's burst streams last 2 min 30 s
+// here, over the A100's bar of 2 min 24 s, and must not stand in for the long stream (issue #451; the science agent's ruling (a),
+// 12 Nov 2026). A cut long stream fails check 2 while the burst streams run long and complete; a long stream under the bar fails it
+// too; the long stream complete passes. A mutant that counts every stream, as the check did, fails the first two.
+func TestACheck2IsJudgedOnTheLongRequestsAndNotOnTheBurst(t *testing.T) {
+	plan := LongPlan{Length: 162 * time.Second} // asks 144 s
+	for _, c := range []struct {
+		name     string
+		near     time.Duration // the long requests' length
+		complete bool          // whether they completed
+		burst    time.Duration // the burst streams' length, all complete
+		want     string
+	}{
+		{"the long stream cut, the burst long and complete", 150 * time.Second, false, 150 * time.Second, longStreamFailure},
+		{"the long stream under the bar, the burst over it", 143 * time.Second, true, 150 * time.Second, longStreamFailure},
+		{"the long stream complete, the burst over the bar", 144 * time.Second, true, 150 * time.Second, ""},
+		{"the long stream complete, the burst short", 144 * time.Second, true, 100 * time.Second, ""},
+		{"the long stream cut, the burst short", 150 * time.Second, false, 100 * time.Second, longStreamFailure},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			reqs := check2Hour(c.near, c.burst, c.complete)
+			if got := longStreamFailures(reqs, LiveTiming().withLongPlan(plan)); !slices.Equal(got, wantLongFailures(c.want)) {
+				t.Errorf("long-stream failures %v, want %v", got, wantLongFailures(c.want))
+			}
+		})
+	}
+}
+
+// check2Hour is the good mix's requests without the padding of the deadline's length, with the long chains (the mix's a and b) lasting
+// near, complete or not, and the burst's 16 streams (c) lasting burst, all complete.
+func check2Hour(near, burst time.Duration, complete bool) []Stream {
+	m := goodMix()
+	m.near = near
+	var reqs []Stream
+	for _, r := range m.requests(at(20 * time.Minute)) {
+		switch {
+		case r.ID == "p":
+			continue
+		case strings.HasPrefix(r.ID, "c"):
+			r.Ended = r.Opened.Add(burst)
+		case r.Long:
+			r.Complete = complete
+		}
+		reqs = append(reqs, r)
+	}
+	return reqs
+}
+
+// longStreamFailures is the long-stream failures of trafficChecks on tm, and wantLongFailures the typed expectation of one.
+func longStreamFailures(reqs []Stream, tm Timing) []string {
+	var got []string
+	for _, f := range trafficChecks(reqs, tm, false) {
+		if strings.Contains(f, "long stream") {
+			got = append(got, f)
+		}
+	}
+	return got
+}
+
+func wantLongFailures(want string) []string {
+	if want == "" {
+		return nil
+	}
+	return []string{want}
 }
 
 // The verdict reads the plan: on the scaled clock (a deadline of 60 s, NearDeadline 48 s, a cap of 54 s), an hour whose longest completed
@@ -289,7 +328,9 @@ func TestTheTextToPostCarriesTheLongStreamsPlan(t *testing.T) {
 		t.Errorf("a run with no plan posted a long stream's line:\n%s", post)
 	}
 	o.LongPlan = LongPlan{Length: 50 * time.Second, Tokens: 9950, Rate: 199, MaxModelLen: 32768}
-	want := "- the long stream: 9950 tokens, sized for 50s at the measured 199 tokens/s on a context of 32768 (cap 54s, floor 27s); the longest completed stream within the deadline: 50s\n"
+	// A burst stream longer than any long request is not "the longest completed long stream": the line reports the role.
+	o.Requests = append(append([]Stream(nil), o.Requests...), Stream{ID: "cz", Opened: o.Requests[0].Opened, Ended: o.Requests[0].Opened.Add(58 * time.Second), Complete: true})
+	want := "- the long stream: 9950 tokens, sized for 50s at the measured 199 tokens/s on a context of 32768 (cap 54s, floor 27s); the longest completed long stream within the deadline: 50s\n"
 	if post := tunnelHourPost(r, o, nil); !strings.Contains(post, want) {
 		t.Errorf("the text to post lacks %q:\n%s", want, post)
 	}
