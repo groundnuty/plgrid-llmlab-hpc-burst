@@ -470,7 +470,7 @@ An Instance runs several workers behind a router in beta (HBEP-3, HBEP-5). This 
     - A restarted worker must pass within `health.startTimeout` of its restart, or the attempt counts as failed.
   - **The router's signal** (its exit, or the router's probe failing `health.failureThreshold` reports in a row while `/clusters` holds a worker healthy) enters at the router rung:
     - the controller writes `healthyWorkers` 0 first, so the Instance is unroutable;
-    - it records part `router` and raises the router's generation;
+    - it records part `router`, emits a `failing` event with reason `RouterRestart` (HBEP-8's Reasons table gains it with the code that raises it, #429), and raises the router's generation;
     - the phase stays `ready`, with no re-verify, and `healthyWorkers` returns once `/clusters` holds a worker healthy;
     - after `restart.attemptsPerRung` the ladder climbs to the whole-Instance rung.
   - **The whole-Instance and new-Allocation rungs** are unchanged, and `RestartLoop` still counts Allocations.
