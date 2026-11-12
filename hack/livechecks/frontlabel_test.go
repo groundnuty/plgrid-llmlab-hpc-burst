@@ -21,9 +21,9 @@ const exampleFrontLabel = "the development host, outside Cyfronet's network (3.4
 
 // labelledRows are the rows whose text to post names where the front ran: the rows that write a posts.md.
 var labelledRows = []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-helios", "tunnel-hour-athena", "gpu-accounting-helios", "gpu-accounting-athena",
-	"alpha-athena-now-serve"}
+	"alpha-athena-now-serve", "alpha-athena-now-nooverlap"}
 
-// The seven rows run their own compiled test in dry mode, through the script, and the text they wrote names the label
+// The eight rows run their own compiled test in dry mode, through the script, and the text they wrote names the label
 // the settings gave: the second line, right after the verdict. With the label unset a row refuses, exit 3, naming the
 // setting, before anything is built, estimated, submitted or cancelled.
 func TestEveryRowThatPostsNamesWhereTheFrontRanAndRefusesWithoutIt(t *testing.T) {

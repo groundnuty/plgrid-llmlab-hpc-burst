@@ -64,9 +64,41 @@ var dryCases = map[string][]dryCase{
 		{"duplicate-tag", "a tag names more than one job"},
 		{"extra-allocation", "exactly two Allocations"},
 	},
-	"tunnel-hour-helios":     tunnelCases,
-	"tunnel-hour-athena":     tunnelCases,
-	"alpha-athena-now-serve": nowServeCases,
+	"tunnel-hour-helios":         tunnelCases,
+	"tunnel-hour-athena":         tunnelCases,
+	"alpha-athena-now-serve":     nowServeCases,
+	"alpha-athena-now-nooverlap": nowNoOverlapCases,
+}
+
+// nowNoOverlapCases are row B's (issue #376; nownooverlap.go). Its NOT RUNs (the owner's job in the slot, a warm start
+// not shown, a successor past its start wait) are TestRowBsNotRunsAreNotRunUnlessAnotherCheckFails's; with a cut stream
+// beside them, the failure wins, as here.
+var nowNoOverlapCases = []dryCase{
+	{"", ""},
+	{"cut", "a stream was cut"},
+	{"no-stream", "no stream was in flight at the drain start"},
+	{"noslot", "the deployment never showed NoOverlapSlot"},
+	{"nogap", "the gap was not measured"},
+	// The positive control of the one-slot order: a successor queued ahead of the predecessor's end, as the queued path does.
+	{"early-submit", "the successor was submitted before the predecessor's job ended"},
+	{"created-early", "the successor's Allocation was created before the predecessor's job had left the slot"},
+	{"order-unseen", "the watch did not show both the predecessor's leaving the slot and the successor's Allocation"},
+	{"marked", "carries the queued-successor mark"},
+	{"not-ended", "the deployment was not seen ended"},
+	{"not-ready", "the predecessor was not seen ready"},
+	{"successor-not-ready", "the successor was not seen ready"},
+	{"refused-no-owner", "refused for the submit limit while no job outside the run was seen in the slot"},
+	{"no-pred-tag", "the predecessor's job tag was not read"},
+	{"untagged", "a job tag was not written down before its submission"},
+	{"wrong-partition", "a job ran on another partition than the row's"},
+	{"adds-helios", "the deployment does not allow exactly one Provider"},
+	{"default-lease", "the deployment's leaseLimit is not the row's shortest lease"},
+	{"short-lease", "not longer than the lead an Instance needs (PartitionTooShort)"},
+	{"no-release-when-idle", "the no-overlap deployment lacks ReleaseWhenIdle with a short idleLimit"},
+	{"duplicate-tag", "a tag names more than one job"},
+	{"extra-allocation", "exactly two Allocations"},
+	{"second-never-started-cut", "a stream was cut"},
+	{"slot-taken-cut", "a stream was cut"},
 }
 
 // nowServeCases are row A's (issue #376; nowserve.go). The refused requeue on its own is NOT RUN, not a failure
@@ -143,6 +175,8 @@ func familyOf(row string) string {
 	switch {
 	case strings.HasPrefix(row, "alpha-athena-now-serve"):
 		return "nowserve"
+	case strings.HasPrefix(row, "alpha-athena-now-nooverlap"):
+		return "nownooverlap"
 	case strings.HasPrefix(row, "alpha-athena"):
 		return "handover"
 	case strings.HasPrefix(row, "alpha-helios"):
@@ -481,8 +515,8 @@ func neverStartedErrors() map[string]error {
 func stackRows(t *testing.T) []Row {
 	t.Helper()
 	out := Rows()
-	if len(out) != 5 {
-		t.Fatalf("the package runs %d stack rows, the table below was written for 5 (row A on plgrid-now added, #376): add the new row's cases", len(out))
+	if len(out) != 6 {
+		t.Fatalf("the package runs %d stack rows, the table below was written for 6 (rows A and B on plgrid-now added, #376): add the new row's cases", len(out))
 	}
 	return out
 }
@@ -491,8 +525,8 @@ func stackRows(t *testing.T) []Row {
 func allRows(t *testing.T) []Row {
 	t.Helper()
 	out := append(append(Rows(), AccountingRows()...), ReachRows()...)
-	if len(out) != 9 {
-		t.Fatalf("there are %d rows, the table below was written for 9 (row A on plgrid-now added, #376): add the new row's cases", len(out))
+	if len(out) != 10 {
+		t.Fatalf("there are %d rows, the table below was written for 10 (rows A and B on plgrid-now added, #376): add the new row's cases", len(out))
 	}
 	return out
 }

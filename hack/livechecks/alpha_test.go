@@ -50,6 +50,9 @@ var alphaShapes = []alphaShape{
 	// Row A on plgrid-now (issue #376): the A100 node type's per-GPU size, a lease of 48 minutes (the hour less its start
 	// wait of 10 and 2 of cleanup, the science agent's ruling Q3), no QOS (the partition's own applies).
 	{"alpha-athena-now-serve", "TestAlphaAthenaNowServe", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:48:00, one job, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
+	// Row B on plgrid-now (issue #376): the same size, two jobs of 21 minutes in turn (athena-now.yaml's lead of 20 and a
+	// minute), each with its start wait of 10.
+	{"alpha-athena-now-nooverlap", "TestAlphaAthenaNowNoOverlap", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:21:00, at most 2 jobs at once, each of this shape, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
 }
 
 // alphaStubGo stands in for go in an alpha row's prepare step: build into a directory, and test -c.
@@ -96,6 +99,10 @@ case $mode in
   not-run) echo "step: a job did not start within the start-wait bound of 10m0s; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   # The marker of row A's refused requeue (internal/alpha, NotRunNote), on whatever row runs it.
   not-run-row-a) echo "$HPCBURST_ALPHA_ROW: the scheduler refused the requeue of the run's own job (the scheduler's words: scontrol: error: Requested operation is presently disabled for job [job]); the run's other checks passed; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  # The markers of row B's NOT RUNs (internal/alpha, NotRunNote), on whatever row runs them: the slot taken between its jobs, and a
+  # job's warm start not shown.
+  not-run-row-b-slot) echo "$HPCBURST_ALPHA_ROW: a job that is not the run's held the one-job slot between the row's two jobs: the owner's own work, left untouched; the run ended its deployment; the run's other checks passed; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  not-run-row-b-warm) echo "$HPCBURST_ALPHA_ROW: the agent's own log did not show the warm start (the successor's job: the agent's log of the job could not be read); the run's other checks passed; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   # The marker of a first job that ran and a second that never started (internal/alpha, NotRunNote).
   not-run-second) echo "$HPCBURST_ALPHA_ROW: the first job ran and the second never started; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   sleep) leave; touch "$STUB_STATE/started"; exec sleep 3600 ;;
@@ -581,7 +588,7 @@ func TestASignalDuringAnAlphaRunRunsTheCleanup(t *testing.T) {
 }
 
 func TestPlanNamesTheAlphaRowsWhenTheStackChanges(t *testing.T) {
-	alphaRows := []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-athena", "tunnel-hour-helios", "alpha-athena-now-serve"}
+	alphaRows := []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-athena", "tunnel-hour-helios", "alpha-athena-now-serve", "alpha-athena-now-nooverlap"}
 	// The rehearsal row (issue #193) builds and runs the same stack, on this host: it is a local row.
 	stackRows := append(append([]string{}, alphaRows...), "rehearsal-part3")
 	cases := []struct {
@@ -859,6 +866,8 @@ func TestTheRowsThatHoldTheOwnersSlotForHoursNeedTheOwnersGo(t *testing.T) {
 		{"tunnel-hour-helios", "LIVE_OWNER_GO_HELIOS_NOW", "may pend up to 30 min in the queue (then it is cancelled by its tag and the run is NOT RUN), then holds QOS now's GPU for about 2 h 20 min; the owner's go is needed (the development rule on #145)"},
 		// Row A on plgrid-now (issue #376, Q6): its start wait of 10 minutes, then the hour it holds the slot: 10 + 48 + 2.
 		{"alpha-athena-now-serve", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
+		// Row B on plgrid-now (issue #376): its first start wait, then 10 + 21 + 3 + 10 + 12 + 3 = 59 minutes, rounded up to ten.
+		{"alpha-athena-now-nooverlap", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
 		// The pre-staging row (issue #376): its start wait, then 10 + 30 + 2 = 42 minutes, rounded up to ten.
 		{"alpha-athena-now-stage", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 0 h 50 min; the owner's go is needed (the development rule on #145)"},
 	}

@@ -101,6 +101,8 @@ const standInTokenDelay = 20 * time.Millisecond
 const (
 	standInQOS     = "example-now"
 	standInPartQOS = "example-part"
+	// standInOneJobQOS is row B's partition QOS on the stand-in: plgrid-now's one submitted job and one GPU per user.
+	standInOneJobQOS = "example-onejob"
 )
 
 // standInRow is the row on the stand-in: the scaled clock and lease, and the
@@ -122,6 +124,10 @@ func standInRow(t *testing.T, name string) Row {
 		r.Timing, r.Lease = standInTunnel, 12*time.Minute
 	case name == "alpha-athena-now-serve":
 		r.Timing, r.Lease = standInNow, 14*time.Minute
+	case name == "alpha-athena-now-nooverlap":
+		// Row B: the pair's clock and lease, and each job's start wait scaled to 2 minutes, so that a successor held past it
+		// ends the stand-in in minutes (TestStandInNowNoOverlapSecondHeld).
+		r.Timing, r.Lease, r.StartWait = standInPair, 7*time.Minute, 2*time.Minute
 	default:
 		r.Timing, r.Lease = standInPair, 7*time.Minute
 	}
@@ -197,6 +203,15 @@ func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)
 			{Name: row.QOS, MaxSubmitPerUser: stack.Ptr(int32(1)), MaxGPUsPerUser: stack.Ptr(int32(1))}}
 		prov.Spec.QOS = row.QOS
 	}
+	if row.Name == "alpha-athena-now-nooverlap" {
+		// plgrid-now's one-job slot as athena-now.yaml types it (the plan's gap (e) on #376): a partition QOS of one
+		// submitted job and one GPU per user, and no Provider QOS, so the controller takes the one-slot path from the
+		// QOS's count. Part 3's one-slot fake is the model (internal/rehearsal/scenario, oneSlotDep).
+		shape.Partitions = []fakeslurm.Partition{{Name: stack.Partition, GPUOnly: true, QOS: standInOneJobQOS}}
+		shape.QOS = []fakeslurm.QOS{{Name: standInOneJobQOS, MaxSubmitPerUser: fakeslurm.Cap(1), MaxGPUsPerUser: fakeslurm.Cap(1)}}
+		prof.Spec.Partitions[0].QOS = standInOneJobQOS
+		prof.Spec.QOS = []v1alpha1.QOSProfile{{Name: standInOneJobQOS, MaxSubmitPerUser: stack.Ptr(int32(1)), MaxGPUsPerUser: stack.Ptr(int32(1))}}
+	}
 	if reshape != nil {
 		reshape(&shape)
 	}
@@ -214,7 +229,7 @@ func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)
 		// plgrid-now's one job per user: a replacement's job could only pend behind the run's.
 		shape.Partitions = []fakeslurm.Partition{{Name: stack.Partition, GPUOnly: true, Slots: 1}}
 	}
-	if row.Name == "alpha-athena-now-serve" {
+	if row.Name == "alpha-athena-now-serve" || row.Name == "alpha-athena-now-nooverlap" {
 		// athena-now.yaml sends plgrid-now a sandbox, which the pre-staging row's helper stages.
 		prof.Spec.Partitions[0].ImageFormat = v1alpha1.ImageFormatSandbox
 	}

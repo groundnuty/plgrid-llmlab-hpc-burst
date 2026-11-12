@@ -474,6 +474,8 @@ var ErrWarmUnshown = errors.New("the agent's own log did not show the warm start
 // WarmUnshownError is ErrWarmUnshown with what was missing, in fixed words and counts: the post and the marker carry
 // no name or path.
 type WarmUnshownError struct {
+	// Job names the job whose log it is, in fixed words, on a row of two jobs (row B); empty on row A.
+	Job     string
 	LogRead bool
 	// NotWhole: the read does not open with the agent's first start (restartCount 0, after its pre-start lines only),
 	// or does not reach the end of its first staging.
@@ -489,6 +491,9 @@ func (e *WarmUnshownError) Error() string {
 }
 
 func (e *WarmUnshownError) counts() string {
+	if e.Job != "" {
+		return e.Job + ": " + (&WarmUnshownError{LogRead: e.LogRead, NotWhole: e.NotWhole, Retried: e.Retried, ImageShown: e.ImageShown, FilesShown: e.FilesShown, FilesOf: e.FilesOf}).counts()
+	}
 	switch {
 	case !e.LogRead:
 		return "the agent's log of the job could not be read"
