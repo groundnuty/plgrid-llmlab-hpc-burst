@@ -209,9 +209,22 @@ func checkDesired(d agentapi.DesiredState) error {
 	if len(d.Instance.Workers) == 0 {
 		return fmt.Errorf("its Instance has no worker")
 	}
+	n := len(d.Instance.Workers)
+	seen := map[string]bool{}
 	for _, w := range d.Instance.Workers {
 		if w.EngineSocket != agentapi.ContainerEngineSocket(w.Name) {
 			return fmt.Errorf("worker %q's engine socket %q is not %q", w.Name, w.EngineSocket, agentapi.ContainerEngineSocket(w.Name))
+		}
+		// Each worker is worker-<i> with i below the number of workers, named once: worker i's devices
+		// are the job's i-th slice (workerDevices; #495's review).
+		if i, err := workerIndex(w.Name); err != nil || i >= n || seen[w.Name] {
+			return fmt.Errorf("worker %q is not one of worker-0 to worker-%d, named once", w.Name, n-1)
+		}
+		seen[w.Name] = true
+		if c := w.Checks; c != nil && c.WarmUp != nil {
+			if t, most := c.WarmUp.TargetSessions, agentapi.MaxWorkerTargetSessions(n); t < 1 || t > most {
+				return fmt.Errorf("worker %q's warm-up targetSessions %d is outside 1..%d, its share of %d among %d workers", w.Name, t, most, agentapi.MaxTargetSessions, n)
+			}
 		}
 	}
 	if c := d.Instance.Checks; c != nil && c.WarmUp != nil {

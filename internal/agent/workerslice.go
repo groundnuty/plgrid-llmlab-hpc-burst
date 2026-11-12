@@ -31,6 +31,9 @@ func workerDevices(baseEnv []string, index, n, k int) ([]string, error) {
 	if k < 1 {
 		return nil, fmt.Errorf("each worker uses %d GPUs: want 1 or more", k)
 	}
+	if index < 0 || index >= n {
+		return nil, fmt.Errorf("worker %d of %d: no such worker", index, n)
+	}
 	if !found || len(devs) < n*k {
 		return nil, fmt.Errorf("the job's CUDA_VISIBLE_DEVICES names %d devices (%q), and %d workers of %d GPUs need %d: workers never share a device", len(devs), list, n, k, n*k)
 	}

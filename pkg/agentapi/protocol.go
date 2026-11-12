@@ -286,3 +286,14 @@ func TruncateUTF8(s string, n int) string {
 	}
 	return s[:cut]
 }
+
+// MaxWorkerTargetSessions is the most concurrent requests a warm-up round of one of n workers sends:
+// ceil(MaxTargetSessions / n), each worker's share of the most an Instance is checked for (HBEP-7,
+// Several workers). The agent refuses a desired state whose worker asks more, since n workers' reports
+// at more than their share would not fit MaxBodyBytes. With one worker it is MaxTargetSessions.
+func MaxWorkerTargetSessions(n int) int32 {
+	if n < 1 {
+		n = 1
+	}
+	return int32((MaxTargetSessions + n - 1) / n)
+}
