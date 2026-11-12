@@ -256,7 +256,7 @@ As listed in Notes. Extensions are additive: response headers, extra fields in e
     - ready < desired: c = `loadBound.loose` (2.0), and no cap.
 
     Both bounds are at least 1.0, and `tight` is at most `loose` (open question 3): the tight bound applies at full membership, with the cap, and the loose one below it, without.
-- **The cap's value** per Instance: `spec.routing.instanceCap` when set; otherwise the Instance's `launch.maxNumSeqs`, the `--max-num-seqs` its launch passes, times the Instance's workers. In beta, behind a router, the workers counted are those its router holds healthy (Inside an Instance, Worker health), and a set `instanceCap` is scaled by healthy workers over desired workers, rounded down. Desired workers are the ModelDeployment's `spec.workersPerInstance`, and healthy ones the Instance's `status.healthyWorkers` (HBEP-7, Several workers). The launch always passes it: the serving spec's value, else the framework's default of 256 (HBEP-7). So every Instance's cap is known.
+- **The cap's value** per Instance: `spec.routing.instanceCap` when set; otherwise the Instance's `launch.maxNumSeqs`, the `--max-num-seqs` its launch passes, times the Instance's workers. In beta, behind a router, the workers counted are those its router holds healthy (Inside an Instance, Worker health), and a set `instanceCap` is scaled by healthy workers over desired workers, rounded down. Desired workers are the Instance's own `launch.workers`, copied from the ModelDeployment's `spec.workersPerInstance` at creation, and healthy ones its `status.healthyWorkers` (HBEP-7, Several workers). The launch always passes it: the serving spec's value, else the framework's default of 256 (HBEP-7). So every Instance's cap is known.
 - **The capped pick** (S10b): KubeAI's pick at c; if the choice already holds its cap, its reservation is released and the request goes to the next eligible Instance on the ring that is below its cap. The spill is reserved through the group, so it counts in the bound's mean. When every eligible Instance is at its cap, nothing is reserved and the request waits in the ModelDeployment's FIFO at the front. A completion, a join, an Instance that is eligible again, or the cap going off places the oldest one. After `queueTimeout` it gets 503 `capacity`.
 - **When the cap returns** with an Instance above it, nothing is cut. That Instance gets no new request until it is below the cap (S10c).
 - **Filters.** For `model@<provider>`, pinned names and ineligible Instances, the walk skips Instances that do not match, and T and n stay those of the whole group. The walk uses the ring replica, checked against the fork's own picks as S10b's tests do.
@@ -271,7 +271,7 @@ As listed in Notes. Extensions are additive: response headers, extra fields in e
 HBEP-7 runs the Instance's processes; this HBEP sets what the front needs from them.
 
 **Alpha: one worker, no router** (HBEP-7's alpha scope; open question 2).
-- The front sends each request through the Instance's serving path: HBEP-6's tunnel, whose frpc, started by the allocation agent, dials the engine's Unix socket (HBEP-6, HBEP-7).
+- The front sends each request through the Instance's serving path: HBEP-6's tunnel, whose frpc, started by the allocation agent, dials the agent's serving socket, which the agent forwards to the engine's Unix socket (HBEP-6, HBEP-7).
 - The engine checks the Instance key, which the agent passes to it through the environment (HBEP-7). The socket sits in the job's private temporary directory, so other users' jobs on the node cannot reach it.
 - The request carries `x-session-id` (Conversation key). The single worker ignores it.
 - The worker's health is the Instance's health. A connection failure, a 5xx, a `response.failed` and an upstream-side cut after the headers (`cutBy` `upstream` or `tunnel`) count toward the Instance's pause (Load bound and cap, Pauses); HBEP-7's probe and restart ladder handle the worker.
@@ -288,7 +288,7 @@ HBEP-7 runs the Instance's processes; this HBEP sets what the front needs from t
   - **A planned stop waits.** The router is stopped only once its Instance is no longer routable and has no request in flight, and KILL then follows the polite stop (L-3.3). For llm-d's EPP, TERM let the open stream finish (150 of 150 tokens) while new requests got HTTP 500, and TERM with KILL after 10 s cut the stream at 40 s.
   - **Recovery from a malfunction doesn't wait** for requests in flight. The Instance is made unroutable first, then HBEP-7's bounded router restart runs, and the cuts are counted.
   - **Not tested under TERM:** vllm-router alone, or Envoy alone, by S2. Envoy closes its listeners at once on shutdown.
-  - **The front's probe through Envoy** carries no `x-session-id`, so it reaches one worker that Envoy holds healthy. A pass shows Envoy and at least one healthy worker. Each worker's health comes from the agent's report (Worker health, below), not from the probe.
+  - **The front's probe through Envoy** carries no `x-session-id`, so it reaches one worker that Envoy holds healthy. A pass shows Envoy and at least one healthy worker. Each worker's health comes from the agent's report (Worker health, below), not from the probe. The front's probe gates routing only; the controller's view of the router comes from the agent's own probe through it (HBEP-7, Several workers).
 - **Worker health behind Envoy** (beta; open question 2). Envoy's own checks, in its configuration from the agent:
   - **active HTTP health checks** of each worker's readiness, every 5 s with a 2 s time-out: unhealthy after 2 failures, or at once on a 503, and healthy again after 1 pass. `no_traffic_interval` is set to 5 s too, since its default of 60 s applies to a cluster that has had no traffic yet.
     - **The check's target** is the agent's per-worker readiness endpoint on loopback, not the engine's `/health` directly: one port the agent binds at run time, with the worker named by the check's Host (`health_check_config.hostname`; HBEP-7, Several workers). It answers 200 only for a worker the agent has verified (HBEP-7's settings comparison and warm-up) whose engine's `/health` passes.
@@ -299,7 +299,7 @@ HBEP-7 runs the Instance's processes; this HBEP sets what the front needs from t
 
   **The agent reads it** from Envoy's admin interface on a Unix socket of mode 0600 in the job's private temporary directory (`admin.address.pipe` with `mode`; S13 validated the config, and the first live use is this Test plan's). The socket's limits:
   - there's no TCP admin listener;
-  - `admin.allow_paths` allows only `/clusters`, so the socket is read-only;
+  - `admin.allow_paths` allows exactly `/clusters?format=json`, so the socket is read-only;
   - the bootstrap defines no admin runtime layer, since the runtime key `upstream.healthy_panic_threshold` would override the cluster's 0%;
   - Envoy logs to the same private directory, since a trace-level log would print request headers, the Instance key included.
 

@@ -251,7 +251,7 @@ multiplexer = "httpconnect"
 customDomains = ["<the Instance's UID>"]
 [proxies.plugin]
 type = "unix_domain_socket"
-unixPath = "<the engine's socket>"
+unixPath = "<the agent's serving socket>"
 ```
 
 - **Certificate checks.** frpc skips verification silently when `trustedCaFile` is empty (frp facts). So the agent refuses to start frpc without the staged certificate, and only after checking that the certificate's public-key pin equals `agent.json`'s pin (HBEP-7). Go accepts a self-signed certificate that is itself in the trusted pool (`crypto/x509/verify.go:835-836` at go1.25.0) and then checks `serverName` against its DNS names.
@@ -259,7 +259,7 @@ unixPath = "<the engine's socket>"
 - **`loginFailExit = false`.** frp's default makes frpc exit when its first login fails. With `false` it keeps retrying, like the ssh forwards. frpc is part of the agent's transport, not a part of the Instance: the agent restarts it with backoff if it exits, without asking the controller, as it keeps its ssh forwards (HBEP-7). A tunnel down is not a dead Instance.
 - **`user` is not set,** so frps sees the proxy name unchanged (frp facts).
 - **Logs.** frpc logs to a file in the job's private temporary directory (`log.to`), and its console output is discarded. frpc logs its run ID, which is enough to attach a work connection to its session (Risks), so the log never reaches the job's output files on shared storage.
-- **The proxy** reaches the engine through frp's `unix_domain_socket` client plugin. A `tcpmux` proxy hands each work connection to its plugin, so no TCP listener serves the Instance on the node (frp facts). In beta frpc keeps that socket, and the agent forwards it to Envoy's Unix socket instead of the engine's (HBEP-5; HBEP-7, Several workers). vllm-router, the fallback, listens on loopback, and the agent forwards to it there.
+- **The proxy** reaches the agent's serving socket through frp's `unix_domain_socket` client plugin, and the agent forwards it to the engine's socket. A `tcpmux` proxy hands each work connection to its plugin, so no TCP listener serves the Instance on the node (frp facts). In beta frpc keeps that socket, and the agent forwards it to Envoy's Unix socket instead of the engine's (HBEP-5; HBEP-7, Several workers). vllm-router, the fallback, listens on loopback, and the agent forwards to it there.
 - **Heartbeats** are S1's set (Heartbeats). `poolCount = 0` is S1's tested value, but frp v0.71.1 reads 0 as unset and uses 1 (`pkg/config/v1/client.go:153`). So frpc opens one spare work connection at login, and frps replaces each one it hands out (frp facts).
 
 ### Dial-home modes
