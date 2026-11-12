@@ -126,9 +126,15 @@ func runOwner(args []string) error {
 		for _, t := range rd.Tunnels {
 			jobs[t.Tag] = provider.Job{ID: t.JobID, Name: t.Tag, Phase: v1alpha1.AllocationRunning}
 		}
+		// The login node as the relay's ssh -G resolves it, once: a timed-out ssh -G is an error here, never a quiet
+		// fallback to the configured name (issue #403, PR 409).
+		loginHost, err := relay.Login()
+		if err != nil {
+			return fmt.Errorf("the login node: %w", err)
+		}
 		for _, t := range rd.Tunnels {
 			o.Want(hostdial.Target{
-				Tag: t.Tag, JobID: t.JobID, AgentPath: rd.Agent, AllocDir: t.AllocDir, UID: t.UID, Login: relay.Login(),
+				Tag: t.Tag, JobID: t.JobID, AgentPath: rd.Agent, AllocDir: t.AllocDir, UID: t.UID, Login: loginHost,
 				Jobs: jobs, Gen: "1", Command: sshCommand(relay.Command, sshOpts, *sshDebug), Stderr: sshrun.Stderr, Describe: sshrun.Classify,
 			})
 		}
