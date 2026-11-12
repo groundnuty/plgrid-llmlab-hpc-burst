@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -173,6 +174,54 @@ func (p *Proc) Kill() error { return unix.PidfdSendSignal(p.fd, unix.SIGKILL, ni
 
 // Close closes the pidfd.
 func (p *Proc) Close() { _ = unix.Close(p.fd) }
+
+// IdentityOf is the identity of the running process with the PID: its start time and this boot's ID,
+// read from the kernel. A test that started the process records it for the test that checks on it
+// later (ProcID, OpenProc).
+func IdentityOf(pid int) (ProcID, error) {
+	ticks, err := startTicks(pid)
+	if err != nil {
+		return ProcID{}, fmt.Errorf("the start time of pid %d: %w", pid, err)
+	}
+	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return ProcID{}, fmt.Errorf("read the boot ID: %w", err)
+	}
+	return ProcID{PID: pid, StartTicks: ticks, BootID: strings.TrimSpace(string(boot))}, nil
+}
+
+// StartDyingWithParent starts cmd so that the kernel kills it (SIGKILL) when this test binary ends,
+// however it ends: killed, or panicked by go test's -timeout, which runs no t.Cleanup (#484). done is
+// closed once cmd has exited and been reaped, and cmd.ProcessState is set by then. The caller keeps
+// cmd.Process, and stops it as before.
+//
+// The kernel ties Pdeathsig to the THREAD that created the child, not to the process: the child gets
+// its signal when that thread exits (golang/go#27505), and a goroutine that locks its thread and
+// returns ends it. So cmd is created, and then waited for, by one goroutine that locks its OS thread
+// and never unlocks it: the thread lives until the child has been reaped, and ends after it, when no
+// child is left for the signal to reach. The caller's own goroutine is free to move or end.
+func StartDyingWithParent(cmd *exec.Cmd) (done <-chan struct{}, err error) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Pdeathsig = syscall.SIGKILL
+	d := make(chan struct{})
+	started := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread()
+		if err := cmd.Start(); err != nil {
+			started <- err
+			return
+		}
+		started <- nil
+		_ = cmd.Wait()
+		close(d)
+	}()
+	if err := <-started; err != nil {
+		return nil, err
+	}
+	return d, nil
+}
 
 // A Child is this test binary run on one test alone, as a subprocess of the test that started it,
 // as the repo's other self-exec tests do (TestEnvoyBinaryProbe). The test it runs is a no-op unless

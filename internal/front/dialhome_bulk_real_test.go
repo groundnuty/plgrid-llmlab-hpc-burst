@@ -181,11 +181,12 @@ func (r *bulkRig) startFrpc(uid, sock, dialHome, serverName, ca string, bulk boo
 	writeMode600(r.t, cfg, string(text))
 	cmd := exec.Command(r.frpc, "-c", cfg)
 	cmd.Env = []string{"PATH=/usr/bin:/bin"}
-	if err := cmd.Start(); err != nil {
+	// To die with this test binary: one that is killed runs no cleanup, and a frpc left running logs in
+	// to the next rig's frps (#484).
+	done, err := testenv.StartDyingWithParent(cmd)
+	if err != nil {
 		r.t.Fatal(err)
 	}
-	done := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(done) }()
 	r.t.Cleanup(func() {
 		_ = cmd.Process.Kill() // a pidfd signal to this one process (os.Process on Linux)
 		<-done

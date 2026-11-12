@@ -3,6 +3,7 @@ package launcher
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -23,16 +24,28 @@ import (
 // test binary (this binary, on one test, as TestEnvoyBinaryProbe does), so that what the rig does
 // at its start is what the test sees, and not a copy of it.
 
-// frpsRigChildBaseEnv names the port base the child's rig takes.
-const frpsRigChildBaseEnv = "HPCBURST_FRPS_RIG_CHILD_BASE"
+// frpsRigChildBaseEnv names the port base the child's rig takes, and frpsRigChildModeEnv how it
+// starts frps: empty is the rig as it is, "detached" starts it without ExitWithParent and then lets
+// go of it (Release), as a caller does that leaves frps to be found again from its record.
+const (
+	frpsRigChildBaseEnv = "HPCBURST_FRPS_RIG_CHILD_BASE"
+	frpsRigChildModeEnv = "HPCBURST_FRPS_RIG_CHILD_MODE"
+)
 
 // frpsRigChildTest is the test the children below run.
 const frpsRigChildTest = "TestFrpsRigChild"
 
+// frpsRigRecord is what the child writes for its parent: the launcher's record of its frps (name,
+// PID, start time, boot ID), and the identity of the frpc it started, when it started one.
+type frpsRigRecord struct {
+	Frps ProcRec         `json:"frps"`
+	Frpc *testenv.ProcID `json:"frpc,omitempty"`
+}
+
 // TestFrpsRigChild is run only as a child of the tests below, and returns at once otherwise. It
-// starts the frps rig on the port base it is given, writes the launcher's record of that frps
-// (name, PID, start time, boot ID) for its parent, and waits to be killed. The 2 minutes only end a
-// child that nobody kills.
+// starts the frps rig on the port base it is given, and, unless it is told to detach, a frpc that logs
+// in to that frps; writes the records of what it started for its parent; and waits to be killed. The
+// 2 minutes only end a child that nobody kills.
 func TestFrpsRigChild(t *testing.T) {
 	if _, ok := testenv.ChildRecordPath(); !ok {
 		return
@@ -41,8 +54,30 @@ func TestFrpsRigChild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s: %v", frpsRigChildBaseEnv, err)
 	}
+	detached := os.Getenv(frpsRigChildModeEnv) == "detached"
+	if detached {
+		frpsRigExitWithParent = false
+	}
 	r := newFrpsRig(t, base, 0)
-	testenv.WriteChildRecord(t, r.proc.Rec())
+	rec := frpsRigRecord{Frps: r.proc.Rec()}
+	if detached {
+		r.proc.Release()
+	} else {
+		_, frpc := testenv.FrpBinaries(t)
+		cfg := filepath.Join(r.state, "frpc-child.toml")
+		conf := fmt.Sprintf("serverAddr = \"127.0.0.1\"\nserverPort = %d\nloginFailExit = false\nlog.to = %q\nmetadatas.token = \"tok-child\"\ntransport.protocol = \"tcp\"\n",
+			r.host.FrpsBindPort(), filepath.Join(r.state, "frpc-child.log"))
+		if err := os.WriteFile(cfg, []byte(conf), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, pid := startFrpcProc(t, frpc, cfg)
+		id, err := testenv.IdentityOf(pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec.Frpc = &id
+	}
+	testenv.WriteChildRecord(t, rec)
 	select {
 	case <-time.After(2 * time.Minute):
 		t.Fatal("the child was not killed")
@@ -86,29 +121,78 @@ func TestFrpsRigRefusesAPortSomethingHolds(t *testing.T) {
 }
 
 // The leak itself: a test binary that is killed, as `go test -timeout` and an outer time limit kill
-// one, runs no t.Cleanup, and the frps it started was left running on the rig's ports. The test runs
-// the real rig in a child, waits for the child's record of its frps (the launcher's own: PID, start
-// time, boot ID), takes it by a pidfd, which proves it is running and is the recorded process, kills
-// the child through ITS pidfd, and requires frps to exit: by the pidfd's readiness, not by a sleep,
-// and by the record, never by a name. A frps that does not exit is stopped through its verified
-// pidfd, so a failing run does not leave it for the next one.
-func TestAKilledTestBinaryLeavesNoFrps(t *testing.T) {
+// one, runs no t.Cleanup, and the frps and the frpc it started were left running. The test runs the
+// real rig in a child, waits for the child's records (the launcher's own for frps: PID, start time,
+// boot ID; the same three values for frpc), takes each process by a pidfd, which proves it is running
+// and is the recorded one, kills the child through ITS pidfd, and requires both to exit: by the
+// pidfd's readiness, not by a sleep, and by the record, never by a name. A process that does not exit
+// is killed through its verified pidfd, so a failing run does not leave it for the next one.
+func TestAKilledTestBinaryLeavesNoFrpsAndNoFrpc(t *testing.T) {
 	testenv.FrpBinaries(t)
 	child := testenv.StartChild(t, frpsRigChildTest, frpsRigChildBaseEnv+"="+strconv.Itoa(frpsRigBase))
-	var id testenv.ProcID
-	child.WaitRecord(2*time.Minute, &id)
-	frps, err := testenv.OpenProc(id)
-	if err != nil {
-		t.Fatalf("the child's frps %+v is not running before the kill, so this check could not see a leak: %v", id, err)
+	var rec frpsRigRecord
+	child.WaitRecord(2*time.Minute, &rec)
+	if rec.Frpc == nil {
+		t.Fatalf("the child recorded no frpc: %+v", rec)
 	}
-	defer frps.Close()
-	if frps.WaitExit(0) {
-		t.Fatalf("the child's frps %+v had already exited before the kill", id)
+	ids := map[string]testenv.ProcID{
+		"frps": {PID: rec.Frps.PID, StartTicks: rec.Frps.StartTicks, BootID: rec.Frps.BootID},
+		"frpc": *rec.Frpc,
+	}
+	held := map[string]*testenv.Proc{}
+	for name, id := range ids {
+		p, err := testenv.OpenProc(id)
+		if err != nil {
+			t.Fatalf("the child's %s %+v is not running before the kill, so this check could not see a leak: %v", name, id, err)
+		}
+		defer p.Close()
+		if p.WaitExit(0) {
+			t.Fatalf("the child's %s %+v had already exited before the kill", name, id)
+		}
+		held[name] = p
 	}
 	child.Kill()
-	if !frps.WaitExit(20 * time.Second) {
-		_ = frps.Kill()
-		t.Fatalf("frps %+v outlived the test binary that started it and was killed", id)
+	for name, p := range held {
+		if !p.WaitExit(20 * time.Second) {
+			_ = p.Kill()
+			t.Errorf("%s %+v outlived the test binary that started it and was killed", name, ids[name])
+		}
+	}
+}
+
+// What ExitWithParent changes, and nothing else: a frps started WITHOUT it outlives its starter, as
+// StartFrps and Release have always allowed, so that a caller that exits can leave frps to be found
+// again from its record (StopFrps). The child starts the rig's frps without the field, lets go of it
+// (Release), and is killed through its pidfd. frps is taken by a pidfd before that, and must still be
+// running 500 ms after the child has been reaped (the signal a Pdeathsig would send is sent when the
+// child's thread exits, so a frps that was signalled dies within milliseconds, and one that is alive
+// then was not). StopFrps with the child's record must find it, verify it as ours, and stop it with
+// TERM, which is the use the field leaves alone. frps that is still running at the end is killed
+// through its verified pidfd.
+func TestFrpsStartedWithoutExitWithParentOutlivesItsReleasedStarter(t *testing.T) {
+	testenv.FrpBinaries(t)
+	child := testenv.StartChild(t, frpsRigChildTest, frpsRigChildBaseEnv+"="+strconv.Itoa(frpsRigBase), frpsRigChildModeEnv+"=detached")
+	var rec frpsRigRecord
+	child.WaitRecord(2*time.Minute, &rec)
+	p, err := testenv.OpenProc(testenv.ProcID{PID: rec.Frps.PID, StartTicks: rec.Frps.StartTicks, BootID: rec.Frps.BootID})
+	if err != nil {
+		t.Fatalf("the child's frps %+v is not running before the kill: %v", rec.Frps, err)
+	}
+	defer p.Close()
+	defer func() { _ = p.Kill() }() // a no-op once it has exited
+	child.Kill()
+	if p.WaitExit(500 * time.Millisecond) {
+		t.Fatalf("a frps started without ExitWithParent exited when its released starter was killed: %+v", rec.Frps)
+	}
+	rep, err := StopFrps(context.Background(), rec.Frps, 10*time.Second)
+	if err != nil {
+		t.Fatalf("StopFrps with the record of a frps that outlived its starter: %v (%+v)", err, rep)
+	}
+	if rep.Before != Ours.String() || !strings.Contains(rep.Signals, "TERM") {
+		t.Errorf("StopFrps found it %q and sent %q; want it verified as ours and stopped with TERM: %+v", rep.Before, rep.Signals, rep)
+	}
+	if !p.WaitExit(10 * time.Second) {
+		t.Errorf("frps %+v did not exit after StopFrps", rec.Frps)
 	}
 }
 

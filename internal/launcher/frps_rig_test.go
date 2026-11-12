@@ -31,6 +31,12 @@ const (
 	frpsRigBase2 = 29248
 )
 
+// frpsRigExitWithParent is whether the rig starts frps with ExitWithParent: it does, so that a test
+// binary that is killed cannot leave a frps on the rig's fixed ports (#484). Only the child test of
+// TestFrpsStartedWithoutExitWithParentOutlivesItsReleasedStarter clears it, to show what frps does
+// when it is not set.
+var frpsRigExitWithParent = true
+
 // pluginCall is one request frps posted to the plugin.
 type pluginCall struct {
 	Op      string // from the request body
@@ -191,7 +197,7 @@ func newFrpsRigEdited(t *testing.T, base, nice int, frpsPath string, afterResolv
 		afterResolve(r.bin)
 	}
 	r.stub = startPluginStub(t, r.host)
-	r.proc, err = StartFrps(FrpsSpec{Bin: r.bin, Config: cfg, Log: FrpsLogFile(r.host), Dir: r.state, Nice: nice, ExitWithParent: true})
+	r.proc, err = StartFrps(FrpsSpec{Bin: r.bin, Config: cfg, Log: FrpsLogFile(r.host), Dir: r.state, Nice: nice, ExitWithParent: frpsRigExitWithParent})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,6 +366,15 @@ func gone(pid int) bool {
 // returned function kills it earlier, as a crashed job would, and waits for it.
 func startFrpc(t *testing.T, frpc, cfg string) (kill func()) {
 	t.Helper()
+	kill, _ = startFrpcProc(t, frpc, cfg)
+	return kill
+}
+
+// startFrpcProc is startFrpc that also returns the PID. frpc is started to die with this test
+// binary (testenv.StartDyingWithParent), so that a test binary that is killed leaves no frpc to log
+// in to the next rig's frps (#484).
+func startFrpcProc(t *testing.T, frpc, cfg string) (kill func(), pid int) {
+	t.Helper()
 	log, err := os.Create(cfg + ".out")
 	if err != nil {
 		t.Fatal(err)
@@ -369,11 +384,10 @@ func startFrpc(t *testing.T, frpc, cfg string) (kill func()) {
 	cmd.Env = []string{"PATH=/usr/bin:/bin"}
 	cmd.Stdout, cmd.Stderr = log, log
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
+	done, err := testenv.StartDyingWithParent(cmd)
+	if err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(done) }()
 	killed := false
 	kill = func() {
 		if killed {
@@ -388,7 +402,7 @@ func startFrpc(t *testing.T, frpc, cfg string) (kill func()) {
 		}
 	}
 	t.Cleanup(kill)
-	return kill
+	return kill, cmd.Process.Pid
 }
 
 // copyFile copies src to dst with the given mode.

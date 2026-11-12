@@ -31,14 +31,23 @@ const (
 	rigChildTest    = "TestFrontRigChild"
 )
 
+// frontRigRecord is what the child writes for its parent: the launcher's record of each frps it
+// started (name, PID, start time, boot ID), and the identity of the frpc it started, when it started
+// one.
+type frontRigRecord struct {
+	Frps []launcher.ProcRec `json:"frps"`
+	Frpc *testenv.ProcID    `json:"frpc,omitempty"`
+}
+
 // TestFrontRigChild is run only as a child of the tests below, and returns at once otherwise. It
-// starts the rig named by its kind ("frp": the single frps, "bulk": the two frps of the bulk path)
-// and writes the launcher's record of the first frps (name, PID, start time, boot ID) for its
-// parent, then waits to be killed. The 2 minutes only end a child that nobody kills.
+// starts the rig named by its kind ("frp": the single frps, and a frpc that logs in through it;
+// "bulk": the two frps of the bulk path), writes the records of what it started for its parent, and
+// waits to be killed. The 2 minutes only end a child that nobody kills.
 func TestFrontRigChild(t *testing.T) {
 	if _, ok := testenv.ChildRecordPath(); !ok {
 		return
 	}
+	var rec frontRigRecord
 	switch kind := os.Getenv(rigChildKindEnv); kind {
 	case "frp":
 		base, err := strconv.Atoi(os.Getenv(rigChildBaseEnv))
@@ -51,17 +60,24 @@ func TestFrontRigChild(t *testing.T) {
 		}
 		frpRigBases <- base
 		r := newFrpRig(t)
-		testenv.WriteChildRecord(t, []launcher.ProcRec{r.proc.Rec()})
+		rec.Frps = []launcher.ProcRec{r.proc.Rec()}
+		dial, _ := r.serveDialHome(ModeDirect)
+		_, sock := r.engine(newKey(t))
+		p := r.startFrpc("00000000-0000-4000-8000-000000000484", sock, dial)
+		id, err := testenv.IdentityOf(p.cmd.Process.Pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec.Frpc = &id
 	case "bulk":
 		r := newBulkRig(t)
-		var recs []launcher.ProcRec
 		for _, p := range r.procs {
-			recs = append(recs, p.Rec())
+			rec.Frps = append(rec.Frps, p.Rec())
 		}
-		testenv.WriteChildRecord(t, recs)
 	default:
 		t.Fatalf("%s is %q, want frp or bulk", rigChildKindEnv, kind)
 	}
+	testenv.WriteChildRecord(t, rec)
 	<-time.After(2 * time.Minute)
 	t.Fatal("the child was not killed")
 }
@@ -107,42 +123,57 @@ func TestFrontRigsRefuseAPortSomethingHolds(t *testing.T) {
 }
 
 // The leak itself: a test binary that is killed, as `go test -timeout` and an outer time limit kill
-// one, runs no t.Cleanup, and the frps it started was left running on the rig's ports. Each case
-// runs a real rig in a child, waits for the child's record of every frps it started (the launcher's
-// own: PID, start time, boot ID), takes each by a pidfd, which proves it is running and is the
-// recorded process, kills the child through ITS pidfd, and requires every frps to exit: by the
-// pidfd's readiness, not by a sleep, and by the record, never by a name. A frps that does not exit
-// is stopped through its verified pidfd, so a failing run does not leave it for the next one.
-func TestAKilledTestBinaryLeavesNoFrontRigFrps(t *testing.T) {
+// one, runs no t.Cleanup, and the frps and the frpc it started were left running on the rig's ports.
+// Each case runs a real rig in a child, waits for the child's records of what it started (the
+// launcher's own for each frps: PID, start time, boot ID; the same three values for a frpc), takes
+// each process by a pidfd, which proves it is running and is the recorded one, kills the child
+// through ITS pidfd, and requires every process to exit: by the pidfd's readiness, not by a sleep,
+// and by the record, never by a name. A process that does not exit is killed through its verified
+// pidfd, so a failing run does not leave it for the next one.
+func TestAKilledTestBinaryLeavesNoFrontRigProcess(t *testing.T) {
 	testenv.FrpBinaries(t)
-	for _, c := range []struct{ name, kind, base string }{
-		{"the frp rig", "frp", strconv.Itoa(frpRigChildBase)},
-		{"the bulk rig, with its two frps", "bulk", strconv.Itoa(bulkRigBase)},
+	for _, c := range []struct {
+		name, kind, base string
+		frps, frpc       int
+	}{
+		{"the frp rig: its frps and a frpc", "frp", strconv.Itoa(frpRigChildBase), 1, 1},
+		{"the bulk rig: its two frps", "bulk", strconv.Itoa(bulkRigBase), 2, 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			child := testenv.StartChild(t, rigChildTest, rigChildKindEnv+"="+c.kind, rigChildBaseEnv+"="+c.base)
-			var recs []testenv.ProcID
-			child.WaitRecord(2*time.Minute, &recs)
-			if want := map[string]int{"frp": 1, "bulk": 2}[c.kind]; len(recs) != want {
-				t.Fatalf("the child recorded %d frps, want %d: %+v", len(recs), want, recs)
+			var rec frontRigRecord
+			child.WaitRecord(2*time.Minute, &rec)
+			ids := map[string]testenv.ProcID{}
+			for i, r := range rec.Frps {
+				ids["frps "+strconv.Itoa(i+1)] = testenv.ProcID{PID: r.PID, StartTicks: r.StartTicks, BootID: r.BootID}
 			}
-			var held []*testenv.Proc
-			for _, id := range recs {
+			if rec.Frpc != nil {
+				ids["frpc"] = *rec.Frpc
+			}
+			wantFrpc := 0
+			if rec.Frpc != nil {
+				wantFrpc = 1
+			}
+			if len(rec.Frps) != c.frps || wantFrpc != c.frpc {
+				t.Fatalf("the child recorded %d frps and %d frpc, want %d and %d: %+v", len(rec.Frps), wantFrpc, c.frps, c.frpc, rec)
+			}
+			held := map[string]*testenv.Proc{}
+			for name, id := range ids {
 				p, err := testenv.OpenProc(id)
 				if err != nil {
-					t.Fatalf("the child's frps %+v is not running before the kill, so this check could not see a leak: %v", id, err)
+					t.Fatalf("the child's %s %+v is not running before the kill, so this check could not see a leak: %v", name, id, err)
 				}
 				defer p.Close()
 				if p.WaitExit(0) {
-					t.Fatalf("the child's frps %+v had already exited before the kill", id)
+					t.Fatalf("the child's %s %+v had already exited before the kill", name, id)
 				}
-				held = append(held, p)
+				held[name] = p
 			}
 			child.Kill()
-			for i, p := range held {
+			for name, p := range held {
 				if !p.WaitExit(20 * time.Second) {
 					_ = p.Kill()
-					t.Errorf("frps %+v outlived the test binary that started it and was killed", recs[i])
+					t.Errorf("%s %+v outlived the test binary that started it and was killed", name, ids[name])
 				}
 			}
 		})

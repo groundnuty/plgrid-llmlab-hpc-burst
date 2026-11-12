@@ -5,10 +5,13 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // listenHeld holds a loopback listener on a port of the kernel's choosing for the test, and returns
@@ -182,5 +185,144 @@ func TestParseStartTicks(t *testing.T) {
 	}
 	if _, err := startTicks(0x7fffffff); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("a PID with no process: %v, want a not-exist error", err)
+	}
+}
+
+// dyingChildHolderTest is the test the leak test below runs as a child.
+const dyingChildHolderTest = "TestDyingChildHolder"
+
+// TestDyingChildHolder is run only as a child of the test below, and returns at once otherwise. It
+// starts a process with StartDyingWithParent, writes that process's identity for its parent, and
+// waits to be killed. The 2 minutes only end a child that nobody kills.
+func TestDyingChildHolder(t *testing.T) {
+	if _, ok := ChildRecordPath(); !ok {
+		return
+	}
+	cmd := exec.Command("sleep", "300")
+	done, err := StartDyingWithParent(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := IdentityOf(cmd.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	WriteChildRecord(t, id)
+	select {
+	case <-time.After(2 * time.Minute):
+		t.Fatal("the child was not killed")
+	case <-done:
+		t.Fatal("the held process exited under the child")
+	}
+}
+
+// A process started with StartDyingWithParent dies with the test binary that started it, when that is
+// killed and runs no cleanup. The test runs a child test binary, which starts such a process and
+// records its identity (PID, start time, boot ID); the test takes the process by a pidfd, which
+// proves it is running and is the recorded one, kills the child through ITS pidfd, and requires the
+// process to exit: by the pidfd's readiness, not by a sleep, and by the record, never by a name. A
+// process that does not exit is killed through its verified pidfd, so a failing run leaves nothing.
+func TestAProcessStartedToDieWithItsParentDiesWithAKilledTestBinary(t *testing.T) {
+	child := StartChild(t, dyingChildHolderTest)
+	var id ProcID
+	child.WaitRecord(2*time.Minute, &id)
+	p, err := OpenProc(id)
+	if err != nil {
+		t.Fatalf("the child's process %+v is not running before the kill, so this check could not see a leak: %v", id, err)
+	}
+	defer p.Close()
+	if p.WaitExit(0) {
+		t.Fatalf("the child's process %+v had already exited before the kill", id)
+	}
+	child.Kill()
+	if !p.WaitExit(20 * time.Second) {
+		_ = p.Kill()
+		t.Fatalf("process %+v outlived the test binary that started it and was killed", id)
+	}
+}
+
+// StartDyingWithParent starts the process and reports its end: done closes once it has exited and been
+// reaped, with its exit status set, and a program that does not exist is an error, not a done.
+func TestStartDyingWithParentReportsStartAndEnd(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "exit 3")
+	done, err := StartDyingWithParent(cmd)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("done never closed for a process that exits at once")
+	}
+	if got := cmd.ProcessState.ExitCode(); got != 3 {
+		t.Errorf("exit code %d, want 3", got)
+	}
+	if d, err := StartDyingWithParent(exec.Command(t.TempDir() + "/no-such-program")); err == nil || d != nil {
+		t.Errorf("a program that does not exist: done %v, err %v; want an error", d, err)
+	}
+}
+
+// Pdeathsig is tied to the thread that created the child, so StartDyingWithParent creates the child
+// and waits for it on a goroutine of its own that locks its thread. The test starts a process from a
+// goroutine that locks its thread and returns, which ends the thread, waits until that thread is gone
+// from /proc/self/task (a state, not a time), and requires the process still to be running: it was
+// not created by that thread. The process is held 500 ms after the thread is gone: a child the kernel
+// signalled at the thread's exit was signalled before that exit can be seen, and dies within
+// milliseconds, so a child that is alive then was not signalled. The process's main thread is never
+// ended by the runtime, so a starter that finds itself there parks on it until the test ends, and the
+// next one runs on another thread.
+func TestStartDyingWithParentSurvivesItsCallersThreadEnding(t *testing.T) {
+	type started struct {
+		cmd  *exec.Cmd
+		done <-chan struct{}
+		tid  int
+		main bool
+		err  error
+	}
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	var r started
+	for attempt := 0; attempt < 4 && (attempt == 0 || r.main); attempt++ {
+		res := make(chan started, 1)
+		go func() {
+			runtime.LockOSThread() // never unlocked: the thread ends when this goroutine returns
+			tid := unix.Gettid()
+			if tid == os.Getpid() {
+				res <- started{tid: tid, main: true}
+				<-release
+				return
+			}
+			cmd := exec.Command("sleep", "300")
+			done, err := StartDyingWithParent(cmd)
+			res <- started{cmd, done, tid, false, err}
+		}()
+		r = <-res
+	}
+	if r.main {
+		t.Fatal("every starter ran on the process's main thread, which the runtime never ends, so this test cannot show what a thread's end does")
+	}
+	if r.err != nil {
+		t.Fatalf("start: %v", r.err)
+	}
+	t.Cleanup(func() { _ = r.cmd.Process.Kill(); <-r.done })
+	for end := time.Now().Add(20 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if _, err := os.Stat("/proc/self/task/" + strconv.Itoa(r.tid)); errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatalf("the starter's thread %d never ended, so this test cannot show what its end does", r.tid)
+		}
+	}
+	id, err := IdentityOf(r.cmd.Process.Pid)
+	if err != nil {
+		t.Fatalf("the process is gone after its starter's thread ended: %v", err)
+	}
+	p, err := OpenProc(id)
+	if err != nil {
+		t.Fatalf("the process is gone after its starter's thread ended: %v", err)
+	}
+	defer p.Close()
+	if p.WaitExit(500 * time.Millisecond) {
+		t.Fatal("the process exited after its starter's thread ended")
 	}
 }
