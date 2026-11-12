@@ -323,3 +323,112 @@ func TestARouterRestartDoesNotSpendTheWorkerRung(t *testing.T) {
 		t.Errorf("failing events %v, want RouterRestart then WorkerRestart", f)
 	}
 }
+
+// worker0View is worker-0 in the router part of an agent's last report, and whether there was one.
+func worker0View(ag *afake.Agent) (agentapi.RouterWorker, bool) {
+	rep, ok := ag.LastReport()
+	if !ok || rep.Instance == nil || rep.Instance.Router == nil {
+		return agentapi.RouterWorker{}, false
+	}
+	for _, w := range rep.Instance.Router.Workers {
+		if w.Name == v1alpha1.WorkerName(0) {
+			return w, true
+		}
+	}
+	return agentapi.RouterWorker{}, false
+}
+
+// The failures Envoy counts while a restarted worker warms up are not judged against it once it is
+// verified (HBEP-7, Several workers: "Envoy's check counts only for a worker whose current generation
+// is verified"; #455's review). Behind the router a worker restart reverifies the worker while the
+// readiness endpoint answers 503, so Envoy holds it failing and the count of failed checks grows; Envoy
+// still holds it failing for a check or two after it is verified (RouterLag). The return to ready waits
+// for the router's first pass, and the worker is not restarted again.
+func TestFailuresCountedDuringReverificationRestartNothing(t *testing.T) {
+	t.Run("a return after a worker restart", func(t *testing.T) {
+		rg, in, ag := routerRig(t)
+		ag.RouterLag = 2
+		ag.CrashWorker(healthWorker, 137)
+		healthUntilEvent(rg, in.Name, 0, time.Minute, startTick)
+		var counted int32
+		for end := rg.clock.Now().Add(10 * time.Minute); rg.readyCount("md") == 0; startStep(rg, "md", startTick) {
+			if !rg.clock.Now().Before(end) {
+				t.Fatal("the Instance did not return to ready within 10 minutes")
+			}
+			if w, ok := worker0View(ag); ok && w.FailedActiveCheck && w.ConsecutiveFailedChecks > counted {
+				counted = w.ConsecutiveFailedChecks
+			}
+		}
+		if counted < 3 {
+			t.Fatalf("the router counted at most %d failed checks of the reverifying worker: the test needs at least 3, the threshold", counted)
+		}
+		for i := 0; i < 6; i++ {
+			startStep(rg, "md", startTick)
+		}
+		got := rg.instance(in.Name)
+		if rs := got.Status.Restarts; len(rs) != 1 || rs[0].Signal != v1alpha1.ReasonPartExited {
+			t.Errorf("restarts %+v, want only the one for the exit: %d failed checks counted while unverified restarted it again", rs, counted)
+		}
+		if f := healthFailing(rg, in.Name); !slices.Equal(f, []string{v1alpha1.ReasonWorkerRestart}) {
+			t.Errorf("failing events %v, want one WorkerRestart", f)
+		}
+		if got.Status.Phase != v1alpha1.InstanceReady {
+			t.Errorf("phase %s, want ready", got.Status.Phase)
+		}
+		t.Logf("the router counted %d failed checks during the reverification", counted)
+	})
+	t.Run("the first entry", func(t *testing.T) {
+		// The agent reads /clusters before it probes the router, so one report can show the probe
+		// passing beside the worker still failing, with the failures of its warm-up counted.
+		rg := newRig(t)
+		rg.r.Config.InstanceRouter = v1alpha1.InstanceRouterEnvoy
+		rg.engine = func(string) afake.Engine { return afake.Engine{} }
+		rg.create(mdSpec("md"))
+		startUntil(rg, "md", 10*time.Minute, "the agent", func() bool { return len(rg.agents) == 1 })
+		stale := true
+		for _, ra := range rg.agents {
+			ra.agent.RouterView = func(rr *agentapi.RouterReport) {
+				if !stale {
+					return
+				}
+				rr.Probe.OK, rr.Probe.ConsecutiveFailures = true, 0
+				for i := range rr.Workers {
+					rr.Workers[i].Healthy, rr.Workers[i].FailedActiveCheck, rr.Workers[i].ConsecutiveFailedChecks = false, true, 3
+				}
+			}
+		}
+		startUntil(rg, "md", 10*time.Minute, "verified and warmed up", func() bool {
+			ins := rg.instances("md")
+			return len(ins) == 1 && verifiedWorker(&ins[0])
+		})
+		for i := 0; i < 6; i++ {
+			startStep(rg, "md", startTick)
+		}
+		in := rg.instances("md")[0]
+		if n := rg.readyCount("md"); n != 0 {
+			t.Fatalf("%d ready with the router holding the worker failing beside a passing probe, want 0", n)
+		}
+		stale = false
+		startUntil(rg, "md", 2*time.Minute, "ready once the router holds the worker healthy", func() bool { return rg.readyCount("md") == 1 })
+		for i := 0; i < 6; i++ {
+			startStep(rg, "md", startTick)
+		}
+		if rs := rg.instance(in.Name).Status.Restarts; len(rs) != 0 {
+			t.Errorf("restarts %+v at the first entry, want none", rs)
+		}
+	})
+}
+
+// A router that is not running when a restarted worker is verified does not hold the Instance out of
+// ready: it returns, and the router rung, which runs only in ready, restarts the router.
+func TestAReturnToReadyIsNotHeldByARouterThatExited(t *testing.T) {
+	rg, in, ag := routerRig(t)
+	ag.CrashWorker(healthWorker, 137)
+	healthUntilEvent(rg, in.Name, 0, time.Minute, startTick)
+	ag.CrashRouter(1)
+	healthUntilEvent(rg, in.Name, 1, 10*time.Minute, startTick)
+	if f := healthFailing(rg, in.Name); !slices.Equal(f, []string{v1alpha1.ReasonWorkerRestart, v1alpha1.ReasonRouterRestart}) {
+		t.Errorf("failing events %v, want WorkerRestart, then RouterRestart once ready again", f)
+	}
+	startUntil(rg, "md", 5*time.Minute, "the router back with the worker healthy", func() bool { h := healthyWorkersOf(rg, in.Name); return h != nil && *h == 1 })
+}

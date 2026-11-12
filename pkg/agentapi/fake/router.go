@@ -21,6 +21,10 @@ type router struct {
 	verified   map[string]*int64 // each desired worker's VerifiedGeneration, as last applied
 	failed     map[string]int32  // each worker's failed checks in a row
 	probeFails int32
+	// passing and lag model Envoy's next check: a worker that has just become healthy is still held
+	// failing for Agent.RouterLag more reports.
+	passing map[string]bool
+	lag     map[string]int
 }
 
 // applyRouter starts, or restarts at a raised generation, the router the desired Instance names.
@@ -35,7 +39,8 @@ func (a *Agent) applyRouter(i agentapi.DesiredInstance) {
 	}
 	r := in.router
 	if r == nil || i.Router.Generation > r.generation {
-		r = &router{kind: i.Router.Kind, generation: i.Router.Generation, phase: agentapi.PartRunning, failed: map[string]int32{}}
+		r = &router{kind: i.Router.Kind, generation: i.Router.Generation, phase: agentapi.PartRunning,
+			failed: map[string]int32{}, passing: map[string]bool{}, lag: map[string]int{}}
 		in.router = r
 	}
 	r.verified = map[string]*int64{}
@@ -69,6 +74,14 @@ func (a *Agent) routerReport(now time.Time) *agentapi.RouterReport {
 		for _, w := range in.workers {
 			v := r.verified[w.name]
 			ok := w.phase == agentapi.PartRunning && v != nil && *v == w.generation
+			if ok && !r.passing[w.name] {
+				r.lag[w.name] = a.RouterLag
+			}
+			r.passing[w.name] = ok
+			if ok && r.lag[w.name] > 0 {
+				r.lag[w.name]--
+				ok = false // Envoy has not checked it again yet
+			}
 			rw := agentapi.RouterWorker{Name: w.name, Healthy: ok, FailedActiveCheck: !ok}
 			if ok {
 				r.failed[w.name] = 0

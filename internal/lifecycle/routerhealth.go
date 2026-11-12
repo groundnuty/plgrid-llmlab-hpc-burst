@@ -140,6 +140,29 @@ func routerProbePasses(in *v1alpha1.Instance, av agentView) bool {
 	return rr != nil && rr.Phase == agentapi.PartRunning && rr.Probe != nil && rr.Probe.OK
 }
 
+// routerAdmitsReady reports whether a report at the desired router generation lets the Instance enter
+// ready: the router holds worker-0 healthy, its first pass since its verification, from which a worker
+// that rejoins counts again (HBEP-5, Inside an Instance, Worker health). A healthy worker's count of
+// failed checks is 0, so the failures counted while it was unverified, during its own warm-up, are never
+// judged against it once it is verified (HBEP-7, Several workers; Q5, as corrected; #455's review). A
+// router that is not running lets a return to ready through, so its rung, which runs only in ready,
+// restarts it; at the first entry the probe gate holds it.
+func routerAdmitsReady(in *v1alpha1.Instance, av agentView) bool {
+	rr := currentRouter(in, av)
+	if rr == nil {
+		return false
+	}
+	if rr.Phase != agentapi.PartRunning {
+		return in.Status.ReadyTime != nil
+	}
+	for _, w := range rr.Workers {
+		if w.Name == v1alpha1.WorkerName(0) && w.Healthy {
+			return true
+		}
+	}
+	return false
+}
+
 // routerRung applies the router's signal to a ready Instance behind a router: the router rung. It
 // returns true when it acted, so the worker's signals wait.
 func (p *pass) routerRung(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agentView, st settings) (bool, error) {

@@ -50,6 +50,10 @@ type Agent struct {
 	// Agent has built it as Envoy would hold the workers (router.go): a test
 	// shapes the router's view with it.
 	RouterView func(*agentapi.RouterReport)
+	// RouterLag is how many reports the router still holds a worker failing after it has become
+	// verified and running: Envoy's next active check, up to its 5 s interval later, against the
+	// agent's reads every probe interval (router.go). 0 shows the change in the next report.
+	RouterLag int
 
 	backend agentapi.Backend
 	caller  agentapi.Caller
