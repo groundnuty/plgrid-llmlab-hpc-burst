@@ -304,14 +304,31 @@ type InstanceStatus struct {
 	// controller appends one before it raises the part's restart generation,
 	// and drops the entries older than restart.window. The attempts per rung
 	// and the restart history are counted from them, so the ladder survives a
-	// controller restart (HBEP-7, Health and restarts). At most 16 are kept,
-	// the newest; a profile whose attemptsPerRung times the rungs exceeds 16
-	// counts only those.
+	// controller restart (HBEP-7, Health and restarts). At most 32 are kept,
+	// the newest. A profile allows at most 8 attempts per rung, so the three
+	// rungs of an Instance behind a router (the router, the worker and the
+	// whole Instance) fit, 24 at most (`@hpc-burst-science-agent`, 12 Nov 2026,
+	// #429).
 	//
 	// +optional
 	// +listType=atomic
-	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:MaxItems=32
 	Restarts []InstanceRestart `json:"restarts,omitempty"`
+
+	// HealthyWorkers is how many of the Instance's workers its router holds
+	// healthy and not ejected, from the agent's report of Envoy's /clusters
+	// (HBEP-5, Inside an Instance, Worker health, the name it proposes). It is
+	// absent while the Instance has no router (alpha) and until the first report
+	// that carries the router's view. The front's cap for the Instance is
+	// launch.maxNumSeqs times this count, and an Instance with 0 is not eligible.
+	// An ejected worker is not counted, since Envoy routes to neither. Before the
+	// router rung raises the router's restart generation, the controller writes
+	// 0, so the Instance is unroutable until its router holds a worker healthy
+	// again (`@hpc-burst-science-agent`, 12 Nov 2026, #429, Q5 and Q6).
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	HealthyWorkers *int32 `json:"healthyWorkers,omitempty"`
 
 	// Agent is what the controller keeps of the agent's registration for this
 	// Instance (HBEP-7, The allocation agent).

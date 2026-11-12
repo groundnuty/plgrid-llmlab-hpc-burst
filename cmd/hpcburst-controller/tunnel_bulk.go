@@ -24,6 +24,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -89,6 +91,35 @@ type bulkPathState struct {
 	// unreadable says the last read of the list failed, so that the log says so when that changes
 	// and not on every read.
 	unreadable bool
+	// reading is set while a read of frps-bulk's list runs (startBulkRead), and reads counts it, so
+	// the state's stop waits for it.
+	reading atomic.Bool
+	reads   sync.WaitGroup
+}
+
+// startBulkRead reads frps-bulk's list in a goroutine of its own, so a frps-bulk that does not answer
+// (the reader's 5 s timeout) never holds the loop that reads the first list and writes the conditions:
+// the next pass, a token registration's among them, runs on time (the review of #474). One read runs at
+// a time: while one is still running, a pass reads no bulk list, and the next pass after it does. It
+// does nothing without the bulk path.
+func (s *pathState) startBulkRead(ctx context.Context, uids []string) {
+	b := s.bulk
+	if b == nil || !b.reading.CompareAndSwap(false, true) {
+		return
+	}
+	b.reads.Add(1)
+	go func() {
+		defer b.reads.Done()
+		defer b.reading.Store(false)
+		s.readBulk(ctx, uids)
+	}()
+}
+
+// waitBulk waits for the read of frps-bulk's list that runs, if any.
+func (s *pathState) waitBulk() {
+	if s.bulk != nil {
+		s.bulk.reads.Wait()
+	}
 }
 
 // readBulk reads the second frps's list and reports its orphans. It writes no condition: TunnelConnected

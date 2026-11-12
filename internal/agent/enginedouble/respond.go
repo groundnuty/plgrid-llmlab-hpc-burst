@@ -105,7 +105,7 @@ func (h *handler) single(w http.ResponseWriter, r *http.Request, req chatRequest
 		c := a.content()
 		msg.Content = &c
 	}
-	if h.cfg.ReplyBytes > 0 && msg.Content != nil && len(*msg.Content) < h.cfg.ReplyBytes {
+	if h.cfg.ReplyBytes > 0 && msg.Content != nil && len(*msg.Content) < h.cfg.ReplyBytes && asksForPadding(req.Messages) {
 		// reply-bytes: a large non-streamed reply (#448's bulk-path rehearsal), its content padded
 		// with spaces after the answer.
 		padded := *msg.Content + strings.Repeat(" ", h.cfg.ReplyBytes-len(*msg.Content))
@@ -120,6 +120,18 @@ func (h *handler) single(w http.ResponseWriter, r *http.Request, req chatRequest
 		Choices: []respChoice{choice}, Usage: u, SystemFingerprint: h.fingerprint(),
 	})
 	return n, true
+}
+
+// ReplyBytesMarker is the last message's content of a request whose reply reply-bytes pads.
+const ReplyBytesMarker = "hb-engine-double: reply-bytes"
+
+// asksForPadding says whether the request's last message is ReplyBytesMarker, as a JSON string.
+func asksForPadding(msgs []message) bool {
+	if len(msgs) == 0 {
+		return false
+	}
+	var s string
+	return json.Unmarshal(msgs[len(msgs)-1].Content, &s) == nil && s == ReplyBytesMarker
 }
 
 // chunk is ChatCompletionStreamResponse.

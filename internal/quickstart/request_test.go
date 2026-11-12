@@ -30,9 +30,11 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/fake"
 )
 
-// The quickstart applies profiles/helios.yaml, examples/provider-helios-gh200.yaml and
-// examples/modeldeployment-qwen25-instruct.yaml. This file builds the request that the lifecycle
-// controller makes from exactly those three files, and runs it through the check that the Slurm
+// The quickstart's Helios note (beta) names profiles/helios.yaml, examples/provider-helios-gh200.yaml
+// and examples/modeldeployment-qwen25-instruct.yaml, and its Athena steps name profiles/athena.yaml,
+// examples/provider-athena-a100.yaml and examples/modeldeployment-athena-qwen25-instruct.yaml
+// (athena_request_test.go). This file builds the request that the lifecycle
+// controller makes from exactly such three files, and runs it through the check that the Slurm
 // provider runs before it submits (PR 206 review, B1): the example Provider asks for QOS now, whose
 // maxWall is 12 h, and a request sized from the partition's maxTime alone (48 h) would be refused
 // before it reached Slurm, with the quickstart's deployment never starting. Nothing is compared
@@ -82,17 +84,34 @@ func mustYAML(t *testing.T, path string, into any) {
 	}
 }
 
-// planQuickstart loads the three files, lets the caller edit the two objects a user would edit,
+// planInput names the three manifests a plan is made from, and whether the host runs in
+// host-dialed mode, which the lifecycle controller reads as a cap on each Provider's Allocations.
+type planInput struct {
+	profile, provider, deployment string
+	hostDialed                    bool
+}
+
+// planQuickstart is the plan of the Helios objects the quickstart's Helios note names.
+func planQuickstart(t *testing.T, edit func(*v1alpha1.Provider, *v1alpha1.ModelDeployment)) quickstartPlan {
+	t.Helper()
+	return planFiles(t, planInput{
+		profile:    "profiles/helios.yaml",
+		provider:   "examples/provider-helios-gh200.yaml",
+		deployment: "examples/modeldeployment-qwen25-instruct.yaml",
+	}, edit)
+}
+
+// planFiles loads the three files, lets the caller edit the two objects a user would edit,
 // runs the lifecycle controller until it makes an Allocation (or three rounds pass), and checks
 // the Allocation's request as the provider does.
-func planQuickstart(t *testing.T, edit func(*v1alpha1.Provider, *v1alpha1.ModelDeployment)) quickstartPlan {
+func planFiles(t *testing.T, in planInput, edit func(*v1alpha1.Provider, *v1alpha1.ModelDeployment)) quickstartPlan {
 	t.Helper()
 	var prof v1alpha1.PlatformProfile
 	var prov v1alpha1.Provider
 	var md v1alpha1.ModelDeployment
-	mustYAML(t, "profiles/helios.yaml", &prof)
-	mustYAML(t, "examples/provider-helios-gh200.yaml", &prov)
-	mustYAML(t, "examples/modeldeployment-qwen25-instruct.yaml", &md)
+	mustYAML(t, in.profile, &prof)
+	mustYAML(t, in.provider, &prov)
+	mustYAML(t, in.deployment, &md)
 	if edit != nil {
 		edit(&prov, &md)
 	}
@@ -148,7 +167,7 @@ func planQuickstart(t *testing.T, edit func(*v1alpha1.Provider, *v1alpha1.ModelD
 		Client: c, Reader: c, Clock: clock,
 		Backend:     &lifecycle.Backend{Reader: c, Clock: clock, CredentialsDir: t.TempDir()},
 		Checkpoints: stubCheckpoints{}, Recorder: &lifecycle.MemoryRecorder{},
-		Config: lifecycle.Config{CredentialsDir: t.TempDir(), FrontConfigured: true,
+		Config: lifecycle.Config{CredentialsDir: t.TempDir(), FrontConfigured: true, HostDialed: in.hostDialed,
 			AgentDigest: func(string) (string, error) { return strings.Repeat("a", 64), nil }},
 	}
 	key2 := types.NamespacedName{Namespace: md.Namespace, Name: md.Name}

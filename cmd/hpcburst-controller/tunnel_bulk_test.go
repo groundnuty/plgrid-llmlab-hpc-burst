@@ -85,11 +85,13 @@ func newBulkRig(t *testing.T, objs ...client.Object) *bulkRig {
 	return r
 }
 
-// read runs one read of both lists at the clock's start plus offset.
+// read runs one read of both lists at the clock's start plus offset, and waits for the bulk list's,
+// which runs apart from the pass (startBulkRead).
 func (r *bulkRig) read(offset time.Duration) {
 	r.t.Helper()
 	r.now = r.base.Add(offset)
 	r.state.readOnce(r.t.Context())
+	r.state.waitBulk()
 }
 
 func (r *bulkRig) readEvery(from, to time.Duration) {
@@ -418,6 +420,7 @@ func TestBulkReadTheStopCutStartsNoClock(t *testing.T) {
 		return frpsplugin.BuildReport(nil, proxies(online, "stray"), nil)
 	})
 	r.state.readOnce(ctx)
+	r.state.waitBulk()
 	if n := len(r.state.bulk.suspects); n != 0 {
 		t.Errorf("%d suspects after a read the stop cut, want none", n)
 	}
@@ -437,34 +440,52 @@ func TestPathStateWithoutBulkReadsOneList(t *testing.T) {
 	r.wantSplit("a bulk-only orphan with the bulk path off", 0, 0)
 }
 
-// TestBulkReaderThatBlocksDoesNotDelayTheConditions (HBEP-6, The bulk path: "an Instance's first `ready` doesn't
-// wait for the bulk path"): a bulk reader that does not answer (a frps-bulk web server that hangs holds the
-// reader for its 5 s timeout) leaves the first list's condition written. The reader here blocks until the
-// test releases it; the test waits on the stored condition while the read pass is still inside the bulk read
-// (it has not returned), so a pass that read the bulk list before writing the conditions never writes it.
+// TestBulkReaderThatBlocksDoesNotDelayTheConditions (HBEP-6, The bulk path: "an Instance's first `ready`
+// doesn't wait for the bulk path"; the review of #474): a bulk reader that does not answer (a frps-bulk web
+// server that hangs holds the reader for its 5 s timeout) holds no pass of the first list. The reader here
+// blocks until the test releases it. While it blocks, the pass that started it returns with its condition
+// written, and a token registration that comes next (a second Instance's proxy online) is read and written
+// by the next pass at once; that pass reads no second bulk list, since one still runs.
 func TestBulkReaderThatBlocksDoesNotDelayTheConditions(t *testing.T) {
-	r := newBulkRig(t, bulkInstances()...)
+	r := newBulkRig(t, append(bulkInstances(), unitInstance("in-2", "uid-2", 1))...)
 	r.tok.list = proxies(online, "uid-1")
-	entered, release := make(chan struct{}, 1), make(chan struct{})
+	entered, release := make(chan struct{}, 4), make(chan struct{})
 	var once sync.Once
-	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	t.Cleanup(func() { once.Do(func() { close(release) }); r.state.waitBulk() })
 	r.state.bulk.reader = readerFunc(func(context.Context, []string) frpsplugin.Report {
 		entered <- struct{}{}
 		<-release
 		return frpsplugin.BuildReport(nil, nil, nil)
 	})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		r.state.readOnce(t.Context())
-	}()
-	waitUntil(t, 10*time.Second, "the stored TunnelConnected while the bulk reader blocks", func() bool { return r.condOf("in-1") == "True/ProxyOnline" })
-	await(t, entered) // the pass goes on to read the bulk list, which blocks
+	pass := func(what string) {
+		t.Helper()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			r.state.readOnce(t.Context())
+		}()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s: the pass did not return while the bulk reader blocked: a frps-bulk that hangs holds the first list's reads", what)
+		}
+	}
+	pass("the first pass")
+	if got := r.condOf("in-1"); got != "True/ProxyOnline" {
+		t.Fatalf("in-1's TunnelConnected = %q after the first pass, want True/ProxyOnline", got)
+	}
+	await(t, entered) // the first pass's bulk read runs, and blocks
+
+	r.tok.list = proxies(online, "uid-1", "uid-2") // a token registration, while frps-bulk still hangs
+	pass("the pass after a token registration")
+	if got := r.condOf("in-2"); got != "True/ProxyOnline" {
+		t.Errorf("in-2's TunnelConnected = %q while frps-bulk hangs, want True/ProxyOnline: the token registration was read late", got)
+	}
 	select {
-	case <-done:
-		t.Fatal("the pass returned while the bulk reader was blocked: the test did not hold it in the bulk read")
+	case <-entered:
+		t.Error("the second pass started a second bulk read while the first still ran")
 	default:
 	}
 	once.Do(func() { close(release) })
-	await(t, done)
+	r.state.waitBulk()
 }

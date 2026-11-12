@@ -253,6 +253,12 @@ func bulkEndpointCert(path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("the bulk dial-home certificate (hpcburst up --bulk-path issues it): %w", err)
 	}
+	if len(b) == 0 {
+		// Empty bytes would read as "no bulk path" (FrontSettings.BulkPathOn), so the controller would
+		// run with --bulk-path while staging nothing for it: refused like a missing file (the review of
+		// #474).
+		return nil, fmt.Errorf("the bulk dial-home certificate %s is empty (hpcburst up --bulk-path issues it)", path)
+	}
 	return b, nil
 }
 

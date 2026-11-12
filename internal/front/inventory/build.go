@@ -111,6 +111,11 @@ func (v *View) addServed(md *v1alpha1.ModelDeployment, insts []*v1alpha1.Instanc
 	attached := v.attachedProviders(md, providers)
 	for _, inst := range insts {
 		if m := v.routable(md, d, inst, attached, in); m != nil {
+			// Behind a router, an Instance whose router holds no worker healthy is not eligible
+			// (HBEP-5, Inside an Instance, Worker health).
+			if h := inst.Status.HealthyWorkers; h != nil && *h == 0 {
+				m.Eligible = false
+			}
 			d.Members = append(d.Members, m)
 			v.Joined[inst.UID] = true
 		}
@@ -182,6 +187,9 @@ func (v *View) routable(md *v1alpha1.ModelDeployment, d *Deployment, inst *v1alp
 }
 
 func instanceCap(r *v1alpha1.Routing, inst *v1alpha1.Instance) int {
+	if h := inst.Status.HealthyWorkers; h != nil {
+		return routedCap(r, inst, int(*h))
+	}
 	if r != nil && r.InstanceCap != nil && *r.InstanceCap > 0 {
 		return int(*r.InstanceCap)
 	}
@@ -277,4 +285,19 @@ func durationOr(d *v1alpha1.Duration, def time.Duration) (time.Duration, error) 
 		return def, nil
 	}
 	return d.AsDuration()
+}
+
+// routedCap is the cap of an Instance behind a router, which reports its healthy workers (HBEP-5, Load
+// bound and cap): a set instanceCap scaled by healthy workers over desired workers, rounded down, else
+// the engine's maximum concurrent sequences times the healthy workers. Desired workers are Workers, the
+// one an Instance runs until several land (#439).
+func routedCap(r *v1alpha1.Routing, inst *v1alpha1.Instance, healthy int) int {
+	if r != nil && r.InstanceCap != nil && *r.InstanceCap > 0 {
+		return int(*r.InstanceCap) * healthy / Workers
+	}
+	seqs := int(inst.Spec.Launch.MaxNumSeqs)
+	if seqs <= 0 {
+		seqs = v1alpha1.DefaultMaxNumSeqs
+	}
+	return seqs * healthy
 }

@@ -110,6 +110,7 @@ func (s *pathState) clock() time.Time {
 
 // run returns nil once ctx ends, also while it waits for the cache.
 func (s *pathState) run(ctx context.Context) error {
+	defer s.waitBulk() // nothing of the state outlives its stop
 	if !s.cache.WaitForCacheSync(ctx) {
 		if ctx.Err() != nil {
 			return nil
@@ -179,11 +180,11 @@ func (s *pathState) readOnce(ctx context.Context) {
 		}
 	}
 	tunnelReads.Add(1)
-	// The second frps's list is read last, after every condition is written: a frps-bulk that does not
-	// answer holds this loop for the reader's timeout, and TunnelConnected, which follows the first list
-	// only, must never wait for it (HBEP-6, The bulk path: an Instance's first `ready` doesn't wait for
-	// the bulk path).
-	s.readBulk(ctx, uids)
+	// The second frps's list is read after every condition is written, and apart from this loop
+	// (startBulkRead): TunnelConnected, which follows the first list only, never waits for it, and nor
+	// does the next pass (HBEP-6, The bulk path: an Instance's first `ready` doesn't wait for the bulk
+	// path).
+	s.startBulkRead(ctx, uids)
 }
 
 // apply writes the condition on the Instance when its status or reason differs from the stored

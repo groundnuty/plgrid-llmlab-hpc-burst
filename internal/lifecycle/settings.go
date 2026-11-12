@@ -127,6 +127,9 @@ func resolveSettings(p v1alpha1.PlatformProfileSpec) (settings, error) {
 	return s, err
 }
 
-// maxAttemptsPerRung is the most attempts per rung the bounded restart history
-// can count for both rungs of the alpha ladder.
-const maxAttemptsPerRung = maxRestartsKept / 2
+// maxAttemptsPerRung is the most attempts per rung a profile may set. It is 8,
+// its own constant, no longer maxRestartsKept / 2: status.restarts keeps 32, so
+// the three rungs of an Instance behind a router fit, 24 at most, and no
+// profile's validation changed when the bound rose from 16
+// (`@hpc-burst-science-agent`, 12 Nov 2026, #429).
+const maxAttemptsPerRung = 8
