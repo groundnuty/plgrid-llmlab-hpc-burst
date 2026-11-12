@@ -375,7 +375,8 @@ func (s *supervisedFakeHost) checkTunnelChild(name string) (EntryHealth, []strin
 // the process's own 120 descriptors, taken while it lived, or no reading. Never a number for a
 // process that was gone when its files were read, and never silence for one that is reported as
 // running. At least one look must be the one right after the files were read, where the exit is
-// found by the verification that follows them.
+// found by the verification that follows them. A second family closes the descriptors one look
+// before the pidfd fires, which is when a count would read 0.
 func TestOpenFilesAreNeverReadFromAProcessThatExited(t *testing.T) {
 	fixture := func(t *testing.T) *supervisedFakeHost {
 		s := newSupervisedFakeHost(t)
@@ -393,26 +394,59 @@ func TestOpenFilesAreNeverReadFromAProcessThatExited(t *testing.T) {
 		t.Fatalf("only %d looks at the pidfd in a whole check", total)
 	}
 	foundAfterTheRead := false
+	// judge is the rule for every look: a reading of the process's own 120 descriptors, or no
+	// reading, and never a number for a process that was gone, nor silence for one reported running.
+	judge := func(t *testing.T, eh EntryHealth, problems []string) {
+		t.Helper()
+		switch {
+		case eh.OpenFiles != nil:
+			if eh.OpenFiles.InUse != 120 || eh.OpenFiles.Soft.String() != "1000" || eh.OpenFiles.Hard.String() != "100000" || eh.OpenFilesUnknown != "" {
+				t.Errorf("a reading of %+v (unknown %q); the process has 120 descriptors, soft 1000, hard 100000", eh.OpenFiles, eh.OpenFilesUnknown)
+			}
+		case eh.OpenFilesUnknown != "":
+			if strings.Contains(eh.OpenFilesUnknown, "no longer the recorded one") || strings.Contains(eh.OpenFilesUnknown, "changed while") {
+				foundAfterTheRead = true
+			}
+			if eh.Degraded != "" {
+				t.Errorf("degraded %q on an unknown", eh.Degraded)
+			}
+		case eh.Running:
+			t.Errorf("a running process with neither a reading nor an unknown: %+v, problems %v", eh, problems)
+		}
+	}
 	for k := 1; k <= total; k++ {
 		t.Run(fmt.Sprintf("exits at look %d", k), func(t *testing.T) {
 			s := fixture(t)
 			s.exitsAtLook(k)
 			eh, problems := s.checkTunnelChild("front")
-			switch {
-			case eh.OpenFiles != nil:
-				if eh.OpenFiles.InUse != 120 || eh.OpenFiles.Soft.String() != "1000" || eh.OpenFiles.Hard.String() != "100000" || eh.OpenFilesUnknown != "" {
-					t.Errorf("a reading of %+v (unknown %q); the process has 120 descriptors, soft 1000, hard 100000", eh.OpenFiles, eh.OpenFilesUnknown)
+			judge(t, eh, problems)
+		})
+	}
+	// A process that exits closes its descriptors before its pidfd fires (the kernel's order, as in
+	// TestCheckEntryProcessExitsDuringTheCheck), and a zombie's fd directory lists nothing without an
+	// error. So here the descriptors close at look k and the pidfd fires at look k+1: a count taken in
+	// between is 0, and only the verification after the listing keeps it from being reported.
+	for k := 1; k <= total; k++ {
+		t.Run(fmt.Sprintf("its descriptors close at look %d and its pidfd fires at the next", k), func(t *testing.T) {
+			s := fixture(t)
+			fdDir := filepath.Join(s.root, strconv.Itoa(s.childRec.PID), "fd")
+			n := 0
+			s.f.onExited = func() {
+				switch n++; n {
+				case k:
+					if err := os.RemoveAll(fdDir); err != nil {
+						t.Error(err)
+					}
+					if err := os.MkdirAll(fdDir, 0o755); err != nil {
+						t.Error(err)
+					}
+				case k + 1:
+					s.f.setAlive(s.childRec.PID, false)
 				}
-			case eh.OpenFilesUnknown != "":
-				if strings.Contains(eh.OpenFilesUnknown, "no longer the recorded one") || strings.Contains(eh.OpenFilesUnknown, "changed while") {
-					foundAfterTheRead = true
-				}
-				if eh.Degraded != "" {
-					t.Errorf("degraded %q on an unknown", eh.Degraded)
-				}
-			case eh.Running:
-				t.Errorf("a running process with neither a reading nor an unknown: %+v, problems %v", eh, problems)
 			}
+			t.Cleanup(func() { s.f.onExited = nil })
+			eh, problems := s.checkTunnelChild("front")
+			judge(t, eh, problems)
 		})
 	}
 	if !foundAfterTheRead {
@@ -620,4 +654,96 @@ func TestReadOpenFilesOfAnotherProcessFitsTheKernel(t *testing.T) {
 	if want := limitOf(rl.Max); got.Hard != want {
 		t.Errorf("read hard limit %s; prlimit says %s", got.Hard, want)
 	}
+}
+
+// startLimitedChild starts a real process (a shell that sets both its limits on open files to
+// limit and becomes sleep) and returns its PID. It needs the test process's own hard limit to be at
+// least limit, since a limit can only be lowered; prlimit(2) on the child confirms what it got, so
+// the setup is not taken on trust.
+func startLimitedChild(t *testing.T, limit uint64) int {
+	t.Helper()
+	var own unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &own); err != nil {
+		t.Fatal(err)
+	}
+	if own.Max < limit {
+		t.Fatalf("this test process's hard limit on open files is %d, below the %d the case gives its child: a limit can only be lowered", own.Max, limit)
+	}
+	cmd := startBystander(t, "bash", "-c", "ulimit -n "+strconv.FormatUint(limit, 10)+" && exec sleep 300")
+	pid := cmd.Process.Pid
+	waitExecOfSleep(t, pid)
+	var rl unix.Rlimit
+	if err := unix.Prlimit(pid, unix.RLIMIT_NOFILE, nil, &rl); err != nil {
+		t.Fatal(err)
+	}
+	if rl.Cur != limit || rl.Max != limit {
+		t.Fatalf("prlimit says the child's limits are %d and %d, want both %d: the setup did not give it that limit", rl.Cur, rl.Max, limit)
+	}
+	return pid
+}
+
+// TestOpenFilesWarningsAtUpForRealChildren drives openFilesWarnings, the function up's loop calls,
+// with tunnel entries that are REAL children started with a hard limit of their own, read through
+// the real /proc reader and each entry's real pidfd and PID (no fake tree, no fake pidfds).
+// 4,096 and 5,399 warn, with the exact text; 5,400 and 65,536 do not; and in one record of two
+// children only the low one is named. A mutant that drops the hard-limit comparison from
+// openFilesWarnings fails here: one that never warns fails the first cases, one that always warns
+// fails the controls.
+func TestOpenFilesWarningsAtUpForRealChildren(t *testing.T) {
+	// The warning as HBEP-11 and HBEP-6 give it, typed here and not built from the code's constants.
+	const tail = " open files, below the 5400 that HBEP-6 gives for the front at 300 tunnels x 8 streams: it can stop accepting connections under that load. The Go runtime already raises the soft limit to the hard one, so the hard limit is what binds; the session or service that runs hpcburst up sets it, so raise it there and restart the host"
+	warning := func(name string, pid int, limit string) string {
+		return fmt.Sprintf("warning: %s (pid %d) has a hard limit of %s%s", name, pid, limit, tail)
+	}
+	record := func(t *testing.T, entries map[string]int) layout {
+		t.Helper()
+		l, err := newLayout(filepath.Join(shortDir(t), "st"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(l.controllerDir(), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		var es []EntryRecord
+		for _, name := range []string{"front", "frps"} { // the order of the record, whatever the map's
+			pid, ok := entries[name]
+			if !ok {
+				continue
+			}
+			rec, err := newRec(name, pid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			es = append(es, EntryRecord{Name: name, State: entryRunning, Proc: &rec})
+		}
+		(&reporter{l: l, f: SupervisorFile{Schema: supervisorSchema, Supervisor: ProcRec{Name: supervisorName, PID: os.Getpid()}, Entries: es}}).writeLocked()
+		return l
+	}
+	for _, c := range []struct {
+		limit uint64
+		warns bool
+	}{
+		{4096, true},
+		{5399, true},
+		{5400, false},
+		{65536, false},
+	} {
+		t.Run(fmt.Sprintf("a front with a hard limit of %d", c.limit), func(t *testing.T) {
+			pid := startLimitedChild(t, c.limit)
+			got := openFilesWarnings(record(t, map[string]int{"front": pid}))
+			switch {
+			case c.warns && (len(got) != 1 || got[0] != warning("front", pid, strconv.FormatUint(c.limit, 10))):
+				t.Errorf("warnings %q, want exactly %q", got, warning("front", pid, strconv.FormatUint(c.limit, 10)))
+			case !c.warns && len(got) != 0:
+				t.Errorf("warnings %q for a hard limit of %d, want none", got, c.limit)
+			}
+		})
+	}
+	t.Run("two children, only the low one is named", func(t *testing.T) {
+		front, frps := startLimitedChild(t, 65536), startLimitedChild(t, 4096)
+		got := openFilesWarnings(record(t, map[string]int{"front": front, "frps": frps}))
+		if want := warning("frps", frps, "4096"); len(got) != 1 || got[0] != want {
+			t.Errorf("warnings %q, want exactly %q", got, want)
+		}
+	})
 }
