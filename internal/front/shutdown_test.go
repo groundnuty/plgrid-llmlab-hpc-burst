@@ -90,7 +90,6 @@ func holdFirstRecord(f *scFix, hold time.Duration) *heldRecord {
 // testShutdownGrace and testHandlerWait, and checks the streams' ends and the
 // usage records. afterStop, when set, runs as soon as stopServing has returned.
 func stopThreeStreams(t *testing.T, f *scFix, afterStop func()) {
-	t.Helper()
 	f.setAll(enginetest.Behaviour{Tokens: 100000, PerToken: 20 * time.Millisecond})
 	reqs := []struct{ path, body string }{{scChat, prChatStream}, {scChat, prChatStream}, {"/v1/responses", prRespStream}}
 	bodies := make([]string, len(reqs))
@@ -141,11 +140,13 @@ func stopThreeStreams(t *testing.T, f *scFix, afterStop func()) {
 		}
 	}
 	recs := f.records()
-	if len(recs) == len(reqs)+1 && recs[len(recs)-1].RequestID == "after-restart" {
-		if after != recs[len(recs)-2].Counter+1 {
-			t.Errorf("the record after a restart has counter %d, want %d: a clean stop left a gap", after, recs[len(recs)-2].Counter+1)
+	// The restart's own record is told by its ID, not by the count: with a
+	// stream's record missing, a count would take it for that stream's.
+	if n := len(recs); n > 0 && recs[n-1].RequestID == "after-restart" {
+		if n > 1 && after != recs[n-2].Counter+1 {
+			t.Errorf("the record after a restart has counter %d, want %d: a clean stop left a gap", after, recs[n-2].Counter+1)
 		}
-		recs = recs[:len(recs)-1]
+		recs = recs[:n-1]
 	}
 	if len(recs) != len(reqs) {
 		t.Fatalf("%d usage records after the stop, want %d", len(recs), len(reqs))
