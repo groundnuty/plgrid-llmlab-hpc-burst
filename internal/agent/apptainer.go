@@ -36,6 +36,10 @@ type WorkerExec struct {
 	Key string
 	// BaseEnv is the agent's own environment, os.Environ() in production.
 	BaseEnv []string
+	// RouterKeepAlive says the worker runs behind a router: it gets vLLM's keep-alive at 120 s, above
+	// the router's 50 s idle, set by the framework outside the serving spec, as the listen address is,
+	// so it replaces any value the launch gives (HBEP-5, Inside an Instance; router.go).
+	RouterKeepAlive bool
 }
 
 // Args returns the apptainer argument vector, without the program: exec with
@@ -127,6 +131,15 @@ func (w WorkerExec) Env() ([]string, error) {
 			return nil, fmt.Errorf("the launch's env sets %s, which carries the Instance's key", w.Launch.KeyEnv)
 		}
 		env = append(env, apptainerEnvPrefixes[0]+w.Launch.KeyEnv+"="+w.Key)
+	}
+	if w.RouterKeepAlive {
+		keep := env[:0:0]
+		for _, kv := range env {
+			if !strings.HasPrefix(kv, apptainerEnvPrefixes[0]+routerKeepAliveVar+"=") {
+				keep = append(keep, kv)
+			}
+		}
+		env = append(keep, apptainerEnvPrefixes[0]+routerKeepAliveVar+"="+routerKeepAlive)
 	}
 	return env, nil
 }

@@ -122,7 +122,34 @@ type Launch struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=1048576
 	MaxNumSeqs int32 `json:"maxNumSeqs"`
+
+	// Router names the router that runs in front of the Instance's workers, when
+	// one does (HBEP-5, Inside an Instance): "envoy" is Envoy 1.40.2 with
+	// ring_hash on x-session-id, pinned in internal/agent/envoypin. Absent is
+	// alpha: one worker and no router, with the serving path forwarded to the
+	// worker's socket. The lifecycle controller sets it when it creates the
+	// Instance, from its --instance-router flag, and the spec's immutability rule
+	// keeps it for the Instance's life, so a controller restarted with another
+	// flag never adds or drops a router under a running Instance
+	// (`@hpc-burst-science-agent`, 12 Nov 2026, #429). It says where traffic
+	// goes, not what serves it, so it is no deployment-ID input (HBEP-9 excludes
+	// router policy).
+	//
+	// +optional
+	Router InstanceRouter `json:"router,omitempty"`
 }
+
+// InstanceRouter is a router an Instance can run in front of its workers
+// (Launch.Router).
+//
+// +kubebuilder:validation:Enum=envoy
+type InstanceRouter string
+
+// Routers.
+const (
+	// InstanceRouterEnvoy is Envoy 1.40.2 (HBEP-5, open question 2; #429).
+	InstanceRouterEnvoy InstanceRouter = "envoy"
+)
 
 // DefaultMaxNumSeqs is the framework's --max-num-seqs when the serving spec
 // gives none (HBEP-7, What the controller reads): vLLM's own default for an
@@ -345,11 +372,13 @@ type AgentRegistration struct {
 // controller raised the part's restart generation (HBEP-7, Health and
 // restarts: recorded first).
 type InstanceRestart struct {
-	// Part is the part restarted: PartInstance, or a worker, WorkerName(i).
+	// Part is the part restarted: PartInstance, PartRouter, or a worker,
+	// WorkerName(i). The router rung records PartRouter (HBEP-7, Health and
+	// restarts; `@hpc-burst-science-agent`, 12 Nov 2026, #429, Q6).
 	//
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=32
-	// +kubebuilder:validation:Pattern=`^(instance|worker-[0-9]+)$`
+	// +kubebuilder:validation:Pattern=`^(instance|router|worker-[0-9]+)$`
 	Part string `json:"part"`
 
 	// Generation is the part's restart generation the restart raised it to.

@@ -52,3 +52,17 @@ func PeriodicClosedForTest(a *Agent) bool { return a.rep.closed() }
 
 // SnapshotKeyForTest is snapshotKey: the snapshot without what changes with every report.
 func SnapshotKeyForTest(r agentapi.Report) []byte { return snapshotKey(r) }
+
+// SetRouterStartHookForTest sets the seam a router start's hand-over calls at each stage (router.go,
+// routerStartSeam), and returns its reset.
+func SetRouterStartHookForTest(f func(stage string, p *EnvoyProc)) (reset func()) {
+	routerStartHook.Store(&f)
+	return func() { routerStartHook.Store(nil) }
+}
+
+// RouterHoldDownForTest says whether a's shutdown has marked the routers' hand-over down.
+func RouterHoldDownForTest(a *Agent) bool {
+	a.routerHold.mu.Lock()
+	defer a.routerHold.mu.Unlock()
+	return a.routerHold.down
+}

@@ -100,6 +100,10 @@ type Options struct {
 	// hpcburst_collector_success{collector="relays"}; "" is alpha: no keeper
 	// read, no relay series (HBEP-8, Metrics).
 	RelayKeeperSocket string
+	// InstanceRouter is hpcburst-controller's --instance-router: the router
+	// each new Instance runs in front of its worker (beta, opt-in; #429). ""
+	// is alpha: no router (Config.InstanceRouter).
+	InstanceRouter v1alpha1.InstanceRouter
 
 	// newCache, when set, builds the manager's cache: a test holds the
 	// caches' sync with it.
@@ -336,6 +340,7 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		Recorder: KubeRecorder{R: eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle), counted, eventcount.ControllerLifecycle)},
 		Config:   Config{CredentialsDir: o.CredentialsDir, FrontConfigured: o.FrontConfigured, HostDialed: o.HostDialed, AgentDigest: builds.digest},
 	}
+	r.Config.InstanceRouter = o.InstanceRouter
 	if lock != nil {
 		if err := mgr.Add(&gapEmitter{lock: lock, reader: mgr.GetAPIReader(), rec: r.Recorder, onDone: o.onGap}); err != nil {
 			return nil, nil, err

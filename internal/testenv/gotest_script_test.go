@@ -20,7 +20,8 @@ import (
 
 // The groups as this test expects them: the lease test (#291), internal/lifecycle's other control-plane
 // tests in three groups and cmd/hpcburst-controller's failover tests (#295), and hack/livechecks' dry
-// runs through the script (PR #306), host-dialed and the rest.
+// runs through the script (PR #306), host-dialed and the rest, and internal/agent's two real-Envoy tests
+// that wait out Envoy's own defaults (issue #429).
 const ownTestName = "TestLifecycleManagerReleasesItsLeaseOnEveryStop"
 
 var (
@@ -31,6 +32,7 @@ var (
 	lifecycleControlPlane = []string{"TestManagerOnControlPlane", "TestVerificationRecordRoundTripsThroughTheAPIServer",
 		"TestLifecycleLeaseReleaseUnderLatency", "TestStartLifecycleLeaderOfAManagerThatLeadsBeforeTheLeaseIsRead"}
 	controllerFailover = []string{"TestControllerProcessesFailOverMidSubmit", "TestControllerProcessesFailOverBeforeSubmit"}
+	envoyTimeouts      = []string{"TestEnvoyStreamIdleOutlivesTheDefault", "TestEnvoyClosesIdleUpstreamConnectionsFirst"}
 	hostDialedDry      = []string{"TestEachHostDialedFaultFailsTheRowThroughTheScript", "TestEveryHostDialedRowPassesThroughTheScriptOverTheFake",
 		"TestAHostDialedRowWhoseSlotIsHeldIsNotRunThroughTheScript", "TestADryHostDialedBinaryRefusesLiveSettings"}
 	otherDry = []string{"TestEveryAlphaRowPassesItsDryRunAndEveryFaultFailsIt", "TestADryBinaryRefusesLiveSettings", "TestAJobPendingPastTheBoundIsNotRunOnEveryRow",
@@ -51,6 +53,7 @@ var groups = []group{
 	{"lifecycle-copies", "./internal/lifecycle", "190s", lifecycleCopies},
 	{"lifecycle-control-plane", "./internal/lifecycle", "170s", lifecycleControlPlane},
 	{"controller-failover", "./cmd/hpcburst-controller", "460s", controllerFailover},
+	{"envoy-timeouts", "./internal/agent", "1200s", envoyTimeouts},
 	{"livechecks-hostdialed", "./hack/livechecks", "150s", hostDialedDry},
 	{"livechecks-dry", "./hack/livechecks", "270s", otherDry},
 }
@@ -262,6 +265,7 @@ func TestGoTestScriptAllRunsEveryPart(t *testing.T) {
 		{"all: the packages fail", "all", func() goDouble { d := allPassed(); d.packagesCode = "1"; return d }(), 1},
 		{"all: the first group fails", "all", failed("lease"), 1},
 		{"all: the last group fails", "all", failed("livechecks-dry"), 1},
+		{"all: the envoy-timeouts group fails", "all", failed("envoy-timeouts"), 1},
 		{"own: every group passes", "own", allPassed(), 0},
 		{"own: the first group fails, the rest still run", "own", failed("lease"), 1},
 		{"own: a group matched nothing", "own", func() goDouble { d := allPassed(); delete(d.outputs, "livechecks-hostdialed"); return d }(), 1},

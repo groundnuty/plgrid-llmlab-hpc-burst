@@ -19,7 +19,6 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/frpsplugin"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 )
 
 // srunTimeout bounds one srun step of the worker fault, the ssh call included.
@@ -189,22 +188,13 @@ func (r *liveRun) workerRestart(ctx context.Context, p Plan, in v1alpha1.Instanc
 	t.Helper()
 	before := len(r.current(in).Status.Restarts)
 	jobID := r.ourJob(ctx, in)
-	line, err := SrunLine(jobID)
+	// A count that is not one fails with the job's process tree, redacted (Shape, issue #445); a found engine logs
+	// it too, so that a passing run still shows the tree its platform has. Never the listing itself.
+	eng, shape, err := FindEngine(ctx, r.tr, jobID, in.Spec.Launch.Command, r.w.matchEngine, srunTimeout)
 	if err != nil {
 		t.Fatalf("worker fault: %v", err)
 	}
-	res, err := r.tr.Run(ctx, slurm.Command{Line: line, Stdin: []byte(ListScript(jobID)), Timeout: srunTimeout})
-	if err != nil || res.ExitCode != 0 {
-		t.Fatalf("worker fault: the srun step that lists the job's processes failed (exit %d, transport error %v)", res.ExitCode, err != nil)
-	}
-	procs, err := ParseListing(res.Stdout)
-	if err != nil {
-		t.Fatalf("worker fault: %v", err)
-	}
-	eng, err := PickEngine(procs, in.Spec.Launch.Command, r.w.matchEngine)
-	if err != nil {
-		t.Fatalf("worker fault: %v", err)
-	}
+	p.Logf("%s: worker fault: %s", p.Row.Name, shape)
 	r.ourJob(ctx, in) // again, right before the kill
 	for _, x := range r.instances() {
 		if x.Annotations[v1alpha1.AnnotationPredecessor] == in.Name {
@@ -212,9 +202,8 @@ func (r *liveRun) workerRestart(ctx context.Context, p Plan, in v1alpha1.Instanc
 			p.Logf("%s: at the kill, the replacement %s is %s, registered %v (known %v)", p.Row.Name, x.Name, x.Status.Phase, reg, known)
 		}
 	}
-	res, err = r.tr.Run(ctx, slurm.Command{Line: line, Stdin: []byte(KillScript(eng)), Timeout: srunTimeout})
-	if err != nil || res.ExitCode != 0 || !Killed(res.Stdout, eng) {
-		t.Fatalf("worker fault: the srun step that kills the engine did not (exit %d, transport error %v, said %q)", res.ExitCode, err != nil, res.Stdout)
+	if err := KillEngine(ctx, r.tr, jobID, eng, srunTimeout); err != nil {
+		t.Fatalf("worker fault: %v", err)
 	}
 	times := RestartTimes{Killed: time.Now()}
 	p.Logf("%s: killed the engine of the run's job by its PID (command digest %s)", p.Row.Name, CommandDigest(eng.Argv))

@@ -26,8 +26,22 @@ import (
 // shares it. Every error starts with "the dial-home certificate:" and never
 // holds the certificate's bytes.
 func VerifyDialHomeCert(b []byte, pin string, now time.Time) error {
+	return VerifyDialHomeCertFor(b, pin, DialHomeServerName, now)
+}
+
+// VerifyDialHomeCertFor is VerifyDialHomeCert against the server name the file's
+// frpc checks: DialHomeServerName for the token frpc's certificate, which
+// VerifyDialHomeCert checks, and BulkDialHomeServerName for the bulk path's
+// second certificate (beta; HBEP-6, The bulk path: the agent and the Provider's
+// pre-stage check verify each file against its own name). The two certificates
+// share a key, so the pin is the same for both. Any other name is refused before
+// the bytes are read, so a caller cannot check against a name no frpc uses.
+func VerifyDialHomeCertFor(b []byte, pin, name string, now time.Time) error {
 	refuse := func(format string, args ...any) error {
 		return fmt.Errorf("the dial-home certificate: %s", fmt.Sprintf(format, args...))
+	}
+	if name != DialHomeServerName && name != BulkDialHomeServerName {
+		return refuse("%q is not a dial-home server name (%s or %s)", name, DialHomeServerName, BulkDialHomeServerName)
 	}
 	if pin == "" {
 		return refuse("no pin (agent.json's certSPKISHA256) to check it against")
@@ -65,8 +79,8 @@ func VerifyDialHomeCert(b []byte, pin string, now time.Time) error {
 	if got := PinOf(c); subtle.ConstantTimeCompare([]byte(got), []byte(pin)) != 1 {
 		return refuse("its pin %s is not agent.json's %s", got, pin)
 	}
-	if err := c.VerifyHostname(DialHomeServerName); err != nil {
-		return refuse("it does not name %s, which frpc checks: %v", DialHomeServerName, err)
+	if err := c.VerifyHostname(name); err != nil {
+		return refuse("it does not name %s, which frpc checks: %v", name, err)
 	}
 	if now.Before(c.NotBefore) || now.After(c.NotAfter) {
 		return refuse("it is valid from %s to %s, not now (%s)", c.NotBefore.UTC().Format(time.RFC3339), c.NotAfter.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))

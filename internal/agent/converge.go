@@ -65,6 +65,10 @@ type instance struct {
 	fileResultsFresh bool
 
 	workers []*worker
+	// routerDesired is the desired state's router (beta, opt-in; router.go), nil for alpha's shape;
+	// router is the router part, once started.
+	routerDesired *agentapi.DesiredRouter
+	router        *routerPart
 
 	// Checks of the current verification generation, and the one check unit
 	// running, if any.
@@ -109,6 +113,9 @@ func (w *worker) alive() bool {
 func (w *worker) live() bool { return w.alive() || w.phase == agentapi.PartStopping || w.cleaning }
 
 func (in *instance) anyLive() bool {
+	if in.router != nil && in.router.live() {
+		return true
+	}
 	for _, w := range in.workers {
 		if w.live() {
 			return true
@@ -162,6 +169,9 @@ func (a *Agent) converge() {
 	switch d.Action {
 	case agentapi.ActionRun:
 		a.applyRun(*d.Instance)
+		if a.inst != nil && a.inst.uid == d.Instance.UID {
+			a.convergeRouter(a.inst, *d.Instance)
+		}
 		if a.inst != nil && a.inst.uid == d.Instance.UID {
 			serve = a.inst.uid
 		}
@@ -238,6 +248,7 @@ func (a *Agent) idle() {
 		return
 	}
 	a.stopWorkers(in)
+	a.idleRouter(in)
 	a.cancelStaging(in)
 	a.cancelUnit(in)
 	a.finishWarmUp(in)
@@ -272,6 +283,7 @@ func (a *Agent) applyRun(i agentapi.DesiredInstance) {
 	}
 	in.keyStored = i.KeyStored
 	in.hubToken = i.HubToken
+	in.routerDesired = i.Router
 	if c := i.Checks; c != nil && c.Verify != nil && len(c.Verify.Files) > 0 && (!in.haveFiles || in.filesGen != i.Generation) {
 		in.files = append([]agentapi.FileDigest(nil), c.Verify.Files...)
 		in.filesGen = i.Generation

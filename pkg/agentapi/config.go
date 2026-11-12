@@ -110,6 +110,23 @@ type AgentConfig struct {
 	// on #156). Empty, the agent uses its own HF_ENDPOINT, then the public
 	// Hub. Set, it must pass CheckHubEndpoint.
 	HubEndpoint string `json:"hubEndpoint,omitempty"`
+
+	// Bulk is the bulk path's settings (beta; HBEP-6, The bulk path): set,
+	// the agent starts a second frpc for the Instance, the bulk frpc, with
+	// tcpMux off, to the second frps. The Provider's controller writes it only
+	// while the launcher runs the bulk path, and never in ssh mode, so an
+	// Allocation staged without it runs one frpc, as before. Its certificate is
+	// StagedBulkDialHomeCertPath, pinned by CertSPKISHA256, since it is
+	// issued for the same key (`@hpc-burst-science-agent`, 12 Nov 2026, #448).
+	Bulk *BulkPath `json:"bulk,omitempty"`
+}
+
+// BulkPath is agent.json's bulk block.
+type BulkPath struct {
+	// ServerName is the bulk frpc's transport.tls.serverName, which the
+	// dial-home listener routes the bulk frpc's websocket by. Validate
+	// requires exactly BulkDialHomeServerName.
+	ServerName string `json:"serverName"`
 }
 
 // SSHForward is what the agent's ssh forward needs besides the endpoint and the
@@ -266,6 +283,14 @@ func (c AgentConfig) Validate() error {
 	if c.HubEndpoint != "" {
 		if err := CheckHubEndpoint(c.HubEndpoint); err != nil {
 			bad("hubEndpoint: %v", err)
+		}
+	}
+	if c.Bulk != nil {
+		if c.Mode == DialHomeSSH {
+			bad("bulk is set in ssh mode: the bulk path is built for direct and host-dialed mode only (HBEP-6, The bulk path)")
+		}
+		if c.Bulk.ServerName != BulkDialHomeServerName {
+			bad("bulk.serverName %q: want exactly %q", c.Bulk.ServerName, BulkDialHomeServerName)
 		}
 	}
 	return errors.Join(errs...)
