@@ -95,9 +95,7 @@ func (w *world) useRehearsal(mutate func(m map[string]string)) string {
 	write(w.t, filepath.Join(w.bin, "go"), rehearsalGo, 0o755)
 	write(w.t, filepath.Join(w.repo, "hack", "rehearsal.sh"), rehearsalSh, 0o755)
 	bin := filepath.Join(w.dir, "pinned")
-	for _, f := range []string{"k3s-1.36.5/k3s", "frps", "frpc"} {
-		write(w.t, filepath.Join(bin, f), "#!/bin/bash\n", 0o755)
-	}
+	pinnedBinaries(w.t, bin)
 	w.writeSettings(func(m map[string]string) {
 		m["LIVE_BIN_DIR"] = bin
 		if mutate != nil {
