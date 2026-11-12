@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -15,11 +16,11 @@ import (
 )
 
 // Router holds the routing view and one balancer group per served
-// ModelDeployment. It rebuilds the view at every control-plane change, every
-// transport registration, every drain start and every pause that ends, and
-// pushes each group's members, eligibility, bound and caps into it (HBEP-5,
-// Load bound and cap: recomputed at every join, leave and change of
-// eligibility).
+// ModelDeployment. It rebuilds the view after each burst of control-plane
+// changes and of transport registrations (#417), at every drain start and every
+// pause that ends, and pushes each group's members, eligibility, bound and caps
+// into it (HBEP-5, Load bound and cap: recomputed after each burst of joins,
+// leaves and changes of eligibility, and before any read that needs it).
 type Router struct {
 	cfg     Config
 	clk     clock.Clock
@@ -36,6 +37,7 @@ type Router struct {
 	groups    map[string]*balancer.Group
 	rings     map[string]*balancer.Ring // model name -> ring over its served Instances
 	pauses    map[string]*pause         // target key -> pause
+	keyUID    map[string]types.UID      // an Instance's key (namespace/name) -> its UID, from the snapshot
 	timer     clock.Timer
 	reported  map[string]string // short profile -> resourceVersion already reported
 	problems  map[string]bool   // problems already logged
@@ -54,11 +56,38 @@ type Router struct {
 	// beforePick, when set, runs between reading the view and picking from
 	// the live groups: a seam for tests that force a join in between.
 	beforePick func()
+
+	// The coalesced rebuilds of a burst of registration changes (#417). dirty
+	// says a registration changed since the last rebuild began; running, that a
+	// goroutine rebuilds while it is set (drain); gen counts the rebuilds that
+	// finished, and waiting the readers waiting for the lock, for the one-rebuild
+	// bound (lockFresh). rebuilds counts every rebuild; afterBuild, when set,
+	// runs inside one right after the view is built, and beforeStop in drain
+	// after its last rebuild and before it stops: the seams of the tests.
+	dirty      atomic.Bool
+	running    atomic.Bool
+	gen        atomic.Uint64
+	waiting    atomic.Int32
+	rebuilds   atomic.Int64
+	afterBuild func()
+	beforeStop func()
 }
 
 type pause struct {
 	failures int
 	until    time.Time
+	// uid and epoch are the Instance the run of failures is toward and the registration epoch it was accumulated in
+	// (#418): the epoch when the run began, at its first failure. A dial routed in one epoch can fail after the next has
+	// begun (frps's 404 before it registers the proxy again), so the run's start, not its latest failure, says which
+	// registration it was accumulated against. A managed target has neither, and its pause is never cleared by an epoch.
+	uid   types.UID
+	epoch uint64
+}
+
+// epochs is what the router reads of a Transports that keeps registration epochs (Tunnel, HBEP-6): the UID's current
+// epoch. A Transports without them (StaticTransports) clears no pause by epoch.
+type epochs interface {
+	Epoch(uid types.UID) uint64
 }
 
 // NewRouter returns a router with an empty view. metrics may be nil.
@@ -68,20 +97,114 @@ func NewRouter(cfg Config, clk clock.Clock, trans Transports, rec Recorder, log 
 		groups: map[string]*balancer.Group{}, rings: map[string]*balancer.Ring{}, pauses: map[string]*pause{},
 		reported: map[string]string{}, problems: map[string]bool{}, leaseEnds: map[types.UID]time.Time{},
 	}
-	trans.Subscribe(r.Refresh)
+	// The Transports calls this on every registration change, the Tunnel's
+	// probe from its verdict, synchronously: it marks the view stale and returns
+	// at once, so a burst of N changes costs a rebuild or two, never N in a row
+	// under the lock that routing needs (#417).
+	trans.Subscribe(r.markDirty)
 	return r
 }
 
-// Update replaces the snapshot and rebuilds the view.
+// markDirty records that a registration changed, and starts the goroutine that
+// rebuilds the view unless one runs. It takes no lock.
+func (r *Router) markDirty() {
+	r.dirty.Store(true)
+	if r.running.CompareAndSwap(false, true) {
+		go r.drain()
+	}
+}
+
+// drain rebuilds the view while it is stale, then stops. A change that lands
+// after its last look re-starts it (markDirty), and one that lands between its
+// last look and its stop is seen by the re-check, so no change is left without a
+// rebuild after it. Between two rebuilds it lets every reader waiting for the
+// lock go first, so a second rebuild of its own never comes ahead of a reader
+// that waited for the first (lockFresh has the bound).
+func (r *Router) drain() {
+	for {
+		for r.dirty.Load() {
+			r.yieldToReaders(0)
+			r.mu.Lock()
+			r.syncLocked()
+			r.mu.Unlock()
+		}
+		if r.beforeStop != nil {
+			r.beforeStop()
+		}
+		r.running.Store(false)
+		if !r.dirty.Load() || !r.running.CompareAndSwap(false, true) {
+			return
+		}
+	}
+}
+
+// syncLocked rebuilds the view when a registration changed since the last
+// rebuild began.
+func (r *Router) syncLocked() {
+	if r.dirty.Load() {
+		r.rebuildLocked()
+	}
+}
+
+// lockFresh takes the lock for a reader of the view (#417): when a rebuild
+// finished while it waited for the lock, it reads that view, though changes since
+// may have marked it stale; else it brings a stale view up to date itself. Its
+// caller unlocks. A reader waits for one rebuild, the one in progress when it
+// came, and for at most two under a barging reader: a reader R2 that comes as
+// that rebuild ends, after it, can take the lock before the woken R
+// (sync.Mutex), find no rebuild finished during its own wait and the view marked
+// again, and rebuild it itself while R waits (the Fable review of PR #424).
+func (r *Router) lockFresh() {
+	gen := r.gen.Load()
+	r.lockAsReader()
+	if r.gen.Load() == gen {
+		r.syncLocked()
+	}
+}
+
+// lockAsReader takes the lock as a reader: counted in waiting while it waits,
+// so that a rebuild about to start lets it go first (yieldToReaders).
+func (r *Router) lockAsReader() {
+	r.waiting.Add(1)
+	r.mu.Lock()
+	r.waiting.Add(-1)
+}
+
+// controlPlaneYield bounds how long a control-plane rebuild (Update, Refresh)
+// lets waiting readers go first, so that a steady stream of requests cannot
+// hold back a new snapshot. The drain's rebuilds yield without a bound: while
+// they wait, each reader brings the view up to date itself.
+const controlPlaneYield = 100 * time.Millisecond
+
+// yieldToReaders waits, before a rebuild takes the lock, until no reader waits
+// for it, or for max when it is not 0. A reader that came while a rebuild ran
+// then takes the lock ahead of this one; without it, a rebuild that follows at
+// once would take the lock first (sync.Mutex lets a running goroutine take it
+// ahead of one it wakes). It governs the drain's rebuilds and the control
+// plane's; a reader that rebuilds itself does not yield (lockFresh's bound).
+func (r *Router) yieldToReaders(max time.Duration) {
+	var waited time.Duration
+	for r.waiting.Load() > 0 && (max == 0 || waited < max) {
+		const step = 50 * time.Microsecond
+		time.Sleep(step) // a yield to the readers, not a wait on time
+		waited += step
+	}
+}
+
+// Update replaces the snapshot and rebuilds the view. The watch's loop calls it
+// once per burst of control-plane changes (startWatch).
 func (r *Router) Update(s inventory.Snapshot) {
+	r.yieldToReaders(controlPlaneYield)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.snap = s
 	r.rebuildLocked()
 }
 
-// Refresh rebuilds the view from the current snapshot at the current time.
+// Refresh rebuilds the view from the current snapshot at the current time: the
+// timer's, at a drain start or a pause's end.
 func (r *Router) Refresh() {
+	r.yieldToReaders(controlPlaneYield)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.rebuildLocked()
@@ -92,7 +215,13 @@ func (r *Router) hasTransport(uid types.UID) bool {
 	return ok
 }
 
+// rebuildLocked rebuilds the view from the snapshot and the transports' current
+// registrations. It clears dirty first, before it reads any registration: a
+// change during the rebuild sets it again, and the next rebuild reads it, so the
+// last registration state of a burst always reaches the view.
 func (r *Router) rebuildLocked() {
+	r.dirty.Store(false)
+	defer func() { r.rebuilds.Add(1); r.gen.Add(1) }()
 	now := r.clk.Now()
 	var joined map[types.UID]bool
 	prev := r.view
@@ -100,6 +229,9 @@ func (r *Router) rebuildLocked() {
 		joined = prev.Joined
 	}
 	v := inventory.Build(r.snap, inventory.Inputs{Now: now, HasTransport: r.hasTransport, Joined: joined, MaxRequestDuration: r.cfg.MaxRequestDuration.D()})
+	if r.afterBuild != nil {
+		r.afterBuild()
+	}
 	r.view, r.builtAt = v, now
 	r.indexLocked()
 	for k, p := range r.pauses {
@@ -107,6 +239,7 @@ func (r *Router) rebuildLocked() {
 			delete(r.pauses, k)
 		}
 	}
+	r.clearStalePausesLocked()
 	live := map[string]bool{}
 	r.rings = map[string]*balancer.Ring{}
 	for _, m := range v.Models {
@@ -136,6 +269,14 @@ func (r *Router) rebuildLocked() {
 }
 
 func (r *Router) indexLocked() {
+	// From the snapshot, not the view: a failure can be reported for an
+	// Instance the view does not hold as a member at that moment (one that has
+	// not joined, with no transport yet), and its pause must still record it.
+	r.keyUID = map[string]types.UID{}
+	for i := range r.snap.Instances {
+		in := &r.snap.Instances[i]
+		r.keyUID[in.Namespace+"/"+in.Name] = in.UID
+	}
 	r.leaseEnds = map[types.UID]time.Time{}
 	for i := range r.snap.Instances {
 		in := &r.snap.Instances[i]
@@ -210,6 +351,29 @@ func (r *Router) stateLocked(d *inventory.Deployment, now time.Time) (balancer.S
 	return st, ready
 }
 
+// clearStalePausesLocked clears each pause, or run of failures, that was accumulated in an earlier registration epoch
+// of its Instance than the one its transport is registered in now (#418; the science agent's ruling (a) of 11 Nov 2026;
+// HBEP-5, Pauses). A registration in the current epoch is made only by a probe that passed in it (Tunnel.Bump takes the
+// registration away, and setRegisteredAt registers a pass only in the epoch it began in), so a registered transport in a
+// later epoch is a re-registration whose first probe passed there. A pause from the current epoch is untouched, and so
+// is one whose Instance registered again and has not passed a probe since: it has no registration. The router runs this
+// at every rebuild, which every registration change triggers (Transports.Subscribe).
+func (r *Router) clearStalePausesLocked() {
+	ep, ok := r.trans.(epochs)
+	if !ok {
+		return
+	}
+	for k, p := range r.pauses {
+		if p.uid == "" || ep.Epoch(p.uid) <= p.epoch || !r.hasTransport(p.uid) {
+			continue
+		}
+		paused := !p.until.IsZero()
+		delete(r.pauses, k)
+		r.log.Info("a pause from an earlier registration is cleared: the Instance registered again, and a probe passed in the new registration",
+			"target", k, "paused", paused, "failures", p.failures)
+	}
+}
+
 func (r *Router) pausedLocked(key string, now time.Time) bool {
 	p := r.pauses[key]
 	return p != nil && now.Before(p.until)
@@ -230,7 +394,10 @@ func (r *Router) ReportConnect(key string, failed bool) {
 		return
 	}
 	if p == nil {
-		p = &pause{}
+		p = &pause{uid: r.keyUID[key]}
+		if ep, ok := r.trans.(epochs); ok && p.uid != "" {
+			p.epoch = ep.Epoch(p.uid)
+		}
 		r.pauses[key] = p
 	}
 	p.failures++
@@ -247,7 +414,7 @@ func (r *Router) ReportConnect(key string, failed bool) {
 // failures is the target's count of failed connections in a row since its
 // last success or pause.
 func (r *Router) failures(key string) int {
-	r.mu.Lock()
+	r.lockFresh()
 	defer r.mu.Unlock()
 	if p := r.pauses[key]; p != nil {
 		return p.failures
@@ -281,7 +448,7 @@ func (r *Router) targetLabelsLocked(key string) (provider, deployment string) {
 
 // Paused reports whether a target is paused now.
 func (r *Router) Paused(key string) bool {
-	r.mu.Lock()
+	r.lockFresh()
 	defer r.mu.Unlock()
 	return r.pausedLocked(key, r.clk.Now())
 }
@@ -407,7 +574,7 @@ type Status struct {
 
 // Status returns a summary of the view.
 func (r *Router) Status() Status {
-	r.mu.Lock()
+	r.lockFresh()
 	defer r.mu.Unlock()
 	s := Status{BuiltAt: r.builtAt, Deployments: map[string]int{}, Instances: len(r.snap.Instances), LeaseEnds: len(r.leaseEnds)}
 	if r.view == nil {

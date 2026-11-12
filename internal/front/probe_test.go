@@ -27,13 +27,48 @@ import (
 
 // muxDouble answers CONNECT <UID>:80 with 200 for the UIDs it has and 404
 // otherwise, then answers GET /health with the UID's status. holdNext makes it
-// hold an exchange unanswered.
+// hold an exchange unanswered. With engine set (forwardTo), it hands any other
+// request on the tunnel to that engine, as frps hands it to the Instance's frpc.
 type muxDouble struct {
 	ln     net.Listener
 	mu     sync.Mutex
 	health map[types.UID]int
 	hits   map[types.UID]int
 	holds  map[types.UID]*muxHold
+	engine string
+}
+
+// forwardTo makes the double hand each request on a tunnel that is not its
+// probe to the engine at addr, both ways, until either side closes.
+func (m *muxDouble) forwardTo(addr string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.engine = addr
+}
+
+// forward hands the request read from the tunnel, and all that follows it, to
+// the engine.
+func (m *muxDouble) forward(c net.Conn, br *bufio.Reader, req *http.Request) {
+	m.mu.Lock()
+	addr := m.engine
+	m.mu.Unlock()
+	if addr == "" {
+		return
+	}
+	e, err := net.Dial("tcp", addr)
+	if err != nil {
+		return
+	}
+	defer e.Close()
+	_ = c.SetDeadline(time.Time{})
+	if err := req.Write(e); err != nil {
+		return
+	}
+	go func() {
+		_, _ = io.Copy(e, br)
+		_ = e.Close()
+	}()
+	_, _ = io.Copy(c, e)
 }
 
 // muxHold holds a UID's exchanges at one step until it is released.
@@ -144,7 +179,14 @@ func (m *muxDouble) serve(c net.Conn) {
 		return
 	}
 	_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-	if req, err = http.ReadRequest(br); err != nil || req.URL.Path != "/health" || req.Header.Get("Authorization") != "" {
+	if req, err = http.ReadRequest(br); err != nil {
+		return
+	}
+	if req.URL.Path != "/health" {
+		m.forward(c, br, req)
+		return
+	}
+	if req.Header.Get("Authorization") != "" {
 		return
 	}
 	m.wait(c, uid, "health")

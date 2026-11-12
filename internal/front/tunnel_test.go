@@ -47,7 +47,7 @@ func (f *tunFront) tunDeployment(n int32) {
 // deployment's group, whether it is eligible now, and its in-flight count.
 func (f *tunFront) routing(uid types.UID) (member, eligible bool, inFlight int64) {
 	r := f.router
-	r.mu.Lock()
+	r.lockFresh()
 	defer r.mu.Unlock()
 	if r.view == nil {
 		return false, false, 0

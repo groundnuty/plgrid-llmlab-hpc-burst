@@ -538,7 +538,13 @@ type tunFront struct {
 
 func newTunFront(t *testing.T, rig *frpRig) *tunFront {
 	t.Helper()
-	h := newHarnessReal(t, nil)
+	return newTunFrontWith(t, rig, nil)
+}
+
+// newTunFrontWith is newTunFront with the front's configuration passed through edit, when not nil.
+func newTunFrontWith(t *testing.T, rig *frpRig, edit func(*Config)) *tunFront {
+	t.Helper()
+	h := newHarnessReal(t, edit)
 	h.host = rig.host // Instance keys go to the rig's credentials directory
 	f := &tunFront{harness: h, rig: rig, events: &recordedPathEvents{}}
 	f.log = slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
