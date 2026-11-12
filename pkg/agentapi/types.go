@@ -142,6 +142,10 @@ type DesiredInstance struct {
 	// beside this one (doc.go, Parts).
 	Workers []DesiredWorker `json:"workers"`
 
+	// Router, when set, is the router to run in front of the workers (beta,
+	// opt-in; router.go). Absent is alpha: no router.
+	Router *DesiredRouter `json:"router,omitempty"`
+
 	// Checks, when set, asks the agent to verify, qualify or warm up now.
 	Checks *Checks `json:"checks,omitempty"`
 
@@ -314,6 +318,9 @@ type InstanceReport struct {
 	Staging *Staging `json:"staging,omitempty"`
 	// Workers report each engine process. Alpha: one, worker-0.
 	Workers []WorkerReport `json:"workers,omitempty"`
+	// Router reports the router part, when the desired state asks for one
+	// (router.go).
+	Router *RouterReport `json:"router,omitempty"`
 	// ServingEndpoint is where the agent serves the Instance's serving path,
 	// forwarded straight to worker-0's EngineSocket in alpha (HBEP-7, What it
 	// runs). Its form is HBEP-6's; empty until the agent serves it.

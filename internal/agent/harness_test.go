@@ -115,6 +115,8 @@ type harnessOptions struct {
 	buildReportTimeout time.Duration
 	// logTee, when set, also receives every record the agent logs.
 	logTee slog.Handler
+	// envoy is Options.EnvoyBinary: the Envoy an Instance with a router runs.
+	envoy string
 }
 
 // newHarness starts a real agent against a fake Backend behind a fake Gate,
@@ -221,6 +223,7 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 		MinBackoff:           20 * time.Millisecond,
 		MaxBackoff:           200 * time.Millisecond,
 		BuildReportTimeout:   o.buildReportTimeout,
+		EnvoyBinary:          o.envoy,
 	})
 	if err != nil {
 		t.Fatal(err)

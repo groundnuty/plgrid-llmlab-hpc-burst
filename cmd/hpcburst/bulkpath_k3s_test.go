@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -120,6 +121,19 @@ func TestUpBulkPath(t *testing.T) {
 	}
 	if r := cli(t, h.args("down")...); r.code != exitOK {
 		t.Fatalf("down exited %d: %s", r.code, r.err)
+	}
+
+	// ---- refused on a port of the bulk path's three: no second certificate is left behind ----
+	held, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", bulkUpBase+14))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := up("--bulk-path"); r.code == exitOK || !strings.Contains(r.err, itoa(bulkUpBase+14)) {
+		t.Fatalf("up --bulk-path with base+14 taken: exit %d, %s; want a refusal naming the port", r.code, r.err)
+	}
+	held.Close()
+	if _, err := os.Stat(hostAPI.BulkCertFile()); !os.IsNotExist(err) {
+		t.Errorf("an up --bulk-path refused on a port left the second certificate: %v", err)
 	}
 
 	// ---- with the bulk path ----
