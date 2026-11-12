@@ -14,21 +14,21 @@ Commands run from the repository root. `<user>`, `<account>`, `<grant>` and `<lo
 
 - **An Athena grant** for GPU jobs: its account name, and a login on the Athena login node.
 - **An ssh key** for that login node that works without a passphrase prompt. The transport runs ssh in batch mode ([HBEP-4](../hbep/0004-provider-interface/README.md), Transport). Log in by hand once, so that the login node's host key is in your `known_hosts`. The transport always checks it.
-- **A host** for the control plane: a Linux machine that you use as a plain user, with no root and no system change ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), Single-user host). It runs a user-level k3s (about 400 MiB of memory), the controllers, the front and frps. They listen on loopback only, on a block of 13 ports starting at 29220 (`hpcburst up -h`, `--port-base`). Those ports must be free.
+- **A host** for the control plane: a Linux machine that you use as a plain user, with no root and no system change ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), Single-user host). It runs a user-level k3s (about 400 MiB of memory), the controllers, the front and frps (a tunnel server). They listen on loopback only, on a block of 13 ports starting at 29220 (`hpcburst up -h`, `--port-base`). Those ports must be free.
 - **Tools:** `curl`, `openssl` and an OpenSSH client. To build from source you also need Go 1.26 or later ([development.md](development.md) lists the pins). The frps download in step 2 is pinned for Linux on x86_64. On another architecture, supply your own frps with `hpcburst up --frps-bin`, which checks it against the launcher's pin.
 
 You need no gateway, no port forward and no restricted key. In `host-dialed` mode the Provider's ssh credentials are all that the host asks for. The other two modes, `direct` and `ssh`, need a route that you provide ([Alpha's limits](#alphas-limits)).
 
 ## 2. Build and fetch the binaries
 
-Two directories matter, and the launcher resolves each of them itself. The state directory is where the host keeps its records, its kubeconfig and the controller's agent builds. The binary directory is where it looks for the pinned k3s and frps. Set them once, in the shell you use for the rest of this page. The two lines below apply the launcher's own rule (`DefaultStateDir` and `DefaultBinDir` in `internal/launcher/state.go`, plus the `HPCBURST_BIN_DIR` override that `cmd/hpcburst/main.go` puts first). With none of the variables set they are the launcher's defaults, and with some set they follow them:
+Two directories matter. The state directory holds the host's records, its kubeconfig and the controller's agent builds. The binary directory holds the pinned k3s and frps. Set both once, in the shell you use for the rest of this page. The two lines below give the launcher's own defaults, and follow `XDG_STATE_HOME`, `XDG_CACHE_HOME` and `HPCBURST_BIN_DIR` when you have set them:
 
 ```
 STATE=${XDG_STATE_HOME:-$HOME/.local/state}/hpcburst
 BIN=${HPCBURST_BIN_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/hpcburst/k3s}
 ```
 
-Every command below passes `"$STATE"` or `"$BIN"` explicitly: to the launcher as `--state-dir` and `--bin-dir`, to the scripts as their directory argument. The build step, the launcher and `kubectl` therefore cannot end up in different places. Set both again in a new shell. To use other directories, give the two lines other values.
+Every command below passes `"$STATE"` or `"$BIN"` on purpose, to the launcher as `--state-dir` and `--bin-dir` and to the scripts as their directory argument. So the build step, the launcher and `kubectl` cannot end up in different places. Set both again in a new shell. To use other directories, give the two lines other values.
 
 Choose one of the two ways to get the binaries.
 
@@ -53,13 +53,13 @@ hack/fetch-frp.sh --agent-builds "$STATE/agent-builds"
 hack/build-agents.sh "$STATE/agent-builds" x86_64
 ```
 
-The build's sha256 is the digest the controller puts in each Allocation. The script pins the Go toolchain, the flags and the environment, so the same source gives the same digest on any machine. It prints each digest with the Go version beside it.
+The controller records the agent build's sha256 with every job it submits. The script pins the Go toolchain, the flags and the environment, so the same source gives the same digest on any machine. It prints each digest with the Go version beside it.
 
 ### Release archive (once v0.1.0-alpha.1 is published)
 
-This path is for when release v0.1.0-alpha.1 is published. It is not available before that. It replaces the build above, and it is for Linux on x86_64. Keep working in a clone of the repository, checked out at that tag, so that `config/crd`, `profiles/` and `examples/` match the binaries. The archive carries the first two but not `examples/`.
+Once release v0.1.0-alpha.1 is published, you can unpack its archive instead of building. Until then this path does not exist, and you build from source. The archive is for Linux on x86_64 and replaces the two blocks above.
 
-Download `hpcburst-v0.1.0-alpha.1-linux-amd64.tar.gz` and `SHA256SUMS` from the release page into the repository root, then check and unpack the archive and put its files where the build puts them:
+Keep working in a clone of the repository, checked out at that tag. The commands below read `config/crd`, `profiles/` and `examples/` from it, and the archive carries the first two but not `examples/`. Download `hpcburst-v0.1.0-alpha.1-linux-amd64.tar.gz` and `SHA256SUMS` from the release page into the repository root. Then check the archive, unpack it, and put its files where the build puts them:
 
 ```
 sha256sum -c --ignore-missing SHA256SUMS
@@ -140,7 +140,7 @@ alias hbk='KUBECONFIG="$STATE/kubeconfig" "$BIN/k3s-1.36.5/k3s" kubectl'
 
 ## 5. Apply a Provider and a ModelDeployment
 
-The files in [`examples/`](../examples) are what this step applies. CI admits each one against the real CRDs, so they stay valid as the contracts change. A Provider holds placeholders, so you edit a copy of it and apply the copy. Replace `<account>`, `<grant>` and `<user>`, and point `credentialsRef.file` at the file you wrote in step 3. Keep the Provider's name, because the ModelDeployments name it. The ModelDeployments hold none of your values and are applied as they are.
+The files in [`examples/`](../examples) are what this step applies. CI checks each one against the framework's own API definitions, so they stay valid as the API changes. A Provider holds placeholders, so you edit a copy of it and apply the copy. Replace `<account>`, `<grant>` and `<user>`, and point `credentialsRef.file` at the file you wrote in step 3. Keep the Provider's name, because the ModelDeployments name it. The ModelDeployments hold none of your values and are applied as they are.
 
 ```
 hbk apply -f profiles/athena.yaml
@@ -167,7 +167,7 @@ The profile tells `status` which agent builds the host needs. Once it is applied
 
 The profile ([`profiles/README.md`](../profiles/README.md)) holds what is true for everyone on a platform. A Provider holds what is yours. The rules for a ModelDeployment, such as the pinned checkpoint revision and engine digest, are in [HBEP-3](../hbep/0003-resource-model-and-naming/README.md) and [HBEP-7](../hbep/0007-lifecycle-controller/README.md). Admission refuses a value that breaks one and says which.
 
-The Provider shows `Ready` once its first read of the platform succeeds. The ModelDeployment then submits an Allocation, which waits in Athena's queue, stages the agent and the checkpoint, and starts the engine. The wait in the queue depends on the cluster and the partition, and can be days when the cluster is busy. Watch it with `hbk get modeldeployments -w`, or wait for it:
+The Provider shows `Ready` once its first read of the platform succeeds. The ModelDeployment then submits an Allocation, which is one Slurm job. It waits in Athena's queue, stages the agent and the checkpoint, and starts the engine, which the framework calls an Instance. The wait in the queue depends on the cluster and the partition, and can be days when the cluster is busy. Watch it with `hbk get modeldeployments -w`, or wait for it:
 
 ```
 hbk wait --for=condition=Ready modeldeployment/athena-qwen25-instruct --timeout=24h
@@ -230,7 +230,7 @@ Helios is beta, to run when the GH200 nodes return. The steps are the same, with
 
 - **Athena is the alpha platform, and its runs are still being measured.** The runs are tracked in [issue #145](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/145). Expect queue waits and start-up times to move as the profile is tuned.
 - **`plgrid-now` is for short tests, not for serving.** The partition gives one GPU and one job at a time, for one hour. Only `profiles/athena-now.yaml` accepts a deployment there: its margins are cut to fit the hour, and the image and the checkpoint should already be staged, because a cold start can run past them. With `profiles/athena.yaml` the deployment is Degraded with `PartitionTooShort` and gets no job. Real serving uses `plgrid-gpu-a100`.
-- **In `host-dialed` mode no job dials your host,** so a host that compute nodes cannot reach works with the Provider's ssh credentials alone ([HBEP-6](../hbep/0006-instance-reachability/README.md), Host-dialed mode). The price is that the controller owns the relays. They die with its process, so a restart cuts the token streams on them, and the new controller starts the relays again within seconds (1 s, doubling to 30 s). A Provider has at most 2 Allocations, pending or running, so a third waits at `SubmitLimitReached`. Only one host-dialed Provider runs per login host: a second Provider on the same login node is refused, and shows `Ready` false. Each relay is an ssh session and an `srun` client on the login node, and compute nothing ([HBEP-4](../hbep/0004-provider-interface/README.md), open question 14).
+- **In `host-dialed` mode no job dials your host,** so a host that compute nodes cannot reach works with the Provider's ssh credentials alone ([HBEP-6](../hbep/0006-instance-reachability/README.md), Host-dialed mode). The price is that the controller owns the relays. They die with its process, so a restart cuts the token streams on them, and the new controller starts the relays again within seconds (1 s, doubling to 30 s). A Provider has at most 2 Allocations, pending or running, so a third waits at `SubmitLimitReached`. Only one host-dialed Provider runs per login host: a second Provider on the same login node is refused, and shows `Ready` false. Each relay is an ssh session and an `srun` client on the login node, and neither computes anything ([HBEP-4](../hbep/0004-provider-interface/README.md), open question 14).
 - **`direct` and `ssh` modes need a route that you provide.** In `direct` mode the front's dial-home listener (`dialHomeListen` in the front's configuration) must be reachable from the compute nodes, and `up` takes `--front-addr`. In `ssh` mode each job holds two `ssh -N -L` connections to a gateway with a restricted key, which you create and authorize once per cluster. `up` takes `--front-addr` and `--front-key`, and only checks that the key file exists. The key's lines name the launcher's port block, so another `--port-base` needs new keys ([HBEP-6](../hbep/0006-instance-reachability/README.md), Dial-home modes). Nothing in this repository sets either route up for you.
 - **Beta, and off unless switched on:** the Envoy router in front of an Instance's engine ([HBEP-5](../hbep/0005-llmlab-compatible-front/README.md)), the bulk path for large replies ([HBEP-6](../hbep/0006-instance-reachability/README.md), The bulk path), and the relay keeper that keeps the relays across a controller restart. The `up` command in step 4 switches on none of them.
 - **One user, one host.** The host is a single-user k3s on one machine ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md)). A team option is not part of alpha.
