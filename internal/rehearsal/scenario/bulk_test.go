@@ -120,9 +120,11 @@ func measureBulk(t *testing.T, mode string, ports stack.Ports, bulkPath bool) bu
 	// token frpc alone: the controller wrote no bulk block. With it, the bulk frpc beside it.
 	r.waitFrpcs(in, 1, map[bool]int{true: 1, false: 0}[bulkPath])
 
+	// KeyFor's key search sent short non-streamed requests through the front: with the bulk path they
+	// took the bulk transport already, which is the rule at work on the whole stack.
 	before := frontMetric(t, ports, `hpcburst_front_bulk_requests_total{path="bulk"}`)
-	if bulkPath && before != 0 {
-		t.Fatalf("the bulk counter is %v before the reply", before)
+	if bulkPath && before < 1 {
+		t.Fatalf("the bulk counter is %v after the key search's non-streamed requests: they did not take the bulk transport", before)
 	}
 	if !bulkPath && before != -1 {
 		t.Fatalf("without the bulk path the front exports the bulk counter (%v)", before)
@@ -186,7 +188,10 @@ func measureBulk(t *testing.T, mode string, ports stack.Ports, bulkPath bool) bu
 	if len(gaps) < bulkStreams*int(end.Sub(start)/bulkTokenDelay)/2 {
 		t.Fatalf("only %d gaps overlap the %s transfer", len(gaps), end.Sub(start))
 	}
-	return bulkRun{p99: p99(gaps), gaps: len(gaps), took: end.Sub(start), replyBytes: n, linkBytes: linkGrew, bulkSent: after}
+	run := bulkRun{p99: p99(gaps), gaps: len(gaps), took: end.Sub(start), replyBytes: n, linkBytes: linkGrew, bulkSent: after}
+	t.Logf("%s, bulk path %v: gap p99 %s over %d gaps in the reply's window; the %d-byte reply took %s (%.1f MB/s through the link, which carried %d bytes)",
+		mode, bulkPath, run.p99, run.gaps, run.replyBytes, run.took, float64(run.replyBytes)/run.took.Seconds()/1e6, run.linkBytes)
+	return run
 }
 
 // gapsOverlapping returns the inter-token gaps whose interval overlaps [start, end]: a stream stalled
