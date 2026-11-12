@@ -634,11 +634,13 @@ func TestAClientGoneDuringTheBulkDialCountsNothing(t *testing.T) {
 	}
 	cancel()
 	<-done
-	release()
-	waitRouterState(t, "the request to leave the Instance's cap", func() bool {
+	// The front gives up on the request (it leaves the Instance's cap) while the CONNECT is still
+	// held: only then is nothing written, whatever the held dial does once released.
+	waitRouterState(t, "the front to give up the request while its CONNECT is held", func() bool {
 		_, _, n := f.routingOf(uid)
 		return n == 0
 	})
+	release()
 	if b, fb, _ := f.bulkCounts(); b != 0 || fb != 0 {
 		t.Errorf("a client gone during the bulk dial counted bulk %v, fallback %v; want 0, 0: nothing was written", b, fb)
 	}
