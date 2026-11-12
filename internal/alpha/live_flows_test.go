@@ -67,6 +67,13 @@ func (r *liveRun) observe(out stack.Streamed) Stream {
 // finish waits for a stream and observes it.
 func (r *liveRun) finish(s stream) Stream { return r.observe(r.wait(s)) }
 
+// finishLong is finish for one of the tunnel hour's long requests: it carries its role, which check 2 judges on (Stream.Long).
+func (r *liveRun) finishLong(s stream) Stream {
+	o := r.finish(s)
+	o.Long = true
+	return o
+}
+
 // rate is the engine's token rate through the front, from one stream, so that
 // the run sizes a request to a length.
 func (r *liveRun) rate(key string) float64 {
@@ -78,17 +85,24 @@ func (r *liveRun) rate(key string) float64 {
 	return float64(s.Tokens) / s.Ended.Sub(s.Opened).Seconds()
 }
 
-// tokensFor is how many tokens make a stream last d at rate, within the
-// deployment's max-model-len less a margin for the prompt.
-func (r *liveRun) tokensFor(d time.Duration, rate float64) (int, error) {
-	n := max(int(rate*d.Seconds()), 1)
+// maxModelLenOrDefault is the deployment's max-model-len as tokensFor reads it: vLLM's 4096 when its flags set none (maxModelLen,
+// below, is the strict reading the large bodies need).
+func (r *liveRun) maxModelLenOrDefault() int {
 	maxLen := 4096
 	for _, f := range r.w.md.Spec.Source.Served.Flags {
 		if f.Name == "max-model-len" {
 			fmt.Sscan(f.Value, &maxLen)
 		}
 	}
-	if n+512 > maxLen {
+	return maxLen
+}
+
+// tokensFor is how many tokens make a stream last d at rate, within the
+// deployment's max-model-len less a margin for the prompt (PromptReserve).
+func (r *liveRun) tokensFor(d time.Duration, rate float64) (int, error) {
+	n := max(int(rate*d.Seconds()), 1)
+	maxLen := r.maxModelLenOrDefault()
+	if n+PromptReserve > maxLen {
 		return 0, fmt.Errorf("%w: %d tokens for %s at %.0f tokens/s, max-model-len %d", ErrRequestTooLong, n, d, rate, maxLen)
 	}
 	return n, nil
@@ -239,8 +253,13 @@ func (r *liveRun) workerRestart(ctx context.Context, p Plan, in v1alpha1.Instanc
 
 // streamLead is how long before the drain start the streams that cross it
 // open: a third of the deadline, so that each runs a third past it and ends
-// well within the deadline.
-func (r *liveRun) streamLead() time.Duration { return r.tm.MaxRequestDuration / 3 }
+// well within the deadline, or less when the deployment's max-model-len cannot
+// hold a stream of two leads at the measured rate (FitLead, issue #447). Its
+// error is ErrLeadTooShort when even the floor's lead does not fit: the row is
+// NOT RUN. Call it once the rate is measured, before anything the lead times.
+func (r *liveRun) streamLead(rate float64) (time.Duration, error) {
+	return FitLead(r.tm.MaxRequestDuration, r.maxModelLenOrDefault(), rate)
+}
 
 // untilBefore waits until lead before t, failing when that has passed.
 func (r *liveRun) untilBefore(t time.Time, lead time.Duration, what string) {
@@ -264,6 +283,12 @@ func (r *liveRun) Handover(ctx context.Context, p Plan) (HandoverObs, error) {
 	}
 	key := r.fc.KeyFor(&pre)
 	rate := r.rate(key)
+	// The lead comes from the measured rate, before the restart: a deployment whose context cannot hold a stream that tells a
+	// cut from an end is NOT RUN with nothing yet restarted.
+	lead, err := r.streamLead(rate)
+	if err != nil {
+		return HandoverObs{}, err
+	}
 	times := r.workerRestart(ctx, p, pre)
 	pre = r.current(pre)
 	ds, ok := DrainStartOf(&pre, r.dw)
@@ -274,8 +299,7 @@ func (r *liveRun) Handover(ctx context.Context, p Plan) (HandoverObs, error) {
 	// predecessor's streams open whether or not it is ready by then: they are the first job's part of the run, which stands
 	// if the second never starts (the delta review of PR 284, L1). So this wait stops in time to open them, half the lead
 	// before they open, and the rest of the replacement's time runs with them in flight.
-	lead := r.streamLead()
-	succ, ok := r.successorOf(pre.Name, time.Until(ds)-lead-lead/2, nil)
+	succ, ok := r.successorOf(pre.Name, time.Until(ds)+LeadTimesFor(lead).SuccessorWaitEnds, nil)
 	key = r.fc.KeyFor(&pre) // the ring as it is now: with both Instances, once the replacement is ready
 	n, err := r.tokensFor(2*lead, rate)
 	if err != nil {
@@ -343,13 +367,16 @@ func (r *liveRun) NoOverlap(ctx context.Context, p Plan) (NoOverlapObs, error) {
 	}
 	key := r.fc.KeyFor(&pre)
 	rate := r.rate(key)
+	lead, err := r.streamLead(rate) // before the restart, as in Handover
+	if err != nil {
+		return NoOverlapObs{}, err
+	}
 	times := r.workerRestart(ctx, p, pre)
 	pre = r.current(pre)
 	ds, ok := DrainStartOf(&pre, r.dw)
 	if !ok {
 		r.t.Fatal("the primary has no lease end")
 	}
-	lead := r.streamLead()
 	n, err := r.tokensFor(2*lead, rate)
 	if err != nil {
 		return NoOverlapObs{}, err
@@ -645,11 +672,17 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	key := r.fc.KeyFor(&in)
 	rate := r.rate(key)
 	tm := r.tm
-	long := tm.NearDeadline + (tm.MaxRequestDuration-tm.NearDeadline)/2
+	// The long stream is as long as the context allows at the measured rate, capped at LongCap (4 min 30 s) and at least the
+	// floor (2 min): below it the row is NOT RUN, before the hour (issue #451). Sized once, and posted with the result.
+	long, err := FitLong(tm, r.maxModelLenOrDefault(), rate)
+	if err != nil {
+		return TunnelHourObs{}, err
+	}
 	nLong, err := r.tokensFor(long, rate)
 	if err != nil {
 		return TunnelHourObs{}, err
 	}
+	plan := LongPlan{Length: long, Tokens: nLong, Rate: rate, MaxModelLen: r.maxModelLenOrDefault()}
 	burst := min(tm.MaxRequestDuration*6/10, 2*time.Minute)
 	if burst < rateAsked+10*time.Second {
 		return TunnelHourObs{}, fmt.Errorf("a burst of %s cannot hold the %s path-rate measurement: the deadline %s is too short", burst, rateAsked, tm.MaxRequestDuration)
@@ -673,7 +706,7 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	first := time.Now()
 	var reqs []Stream
 	for i := 0; i < tm.MinChain; i++ {
-		reqs = append(reqs, r.finish(r.openStream(nLong, key, "")))
+		reqs = append(reqs, r.finishLong(r.openStream(nLong, key, "")))
 	}
 	// The burst, and inside it the download's path rate with one more stream,
 	// and the large requests beside it once every stream of the burst runs.
@@ -723,7 +756,7 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 			p.Logf("%s: the drain start comes before the hour is over", p.Row.Name)
 			break
 		}
-		reqs = append(reqs, r.finish(r.openStream(nLong, key, "")))
+		reqs = append(reqs, r.finishLong(r.openStream(nLong, key, "")))
 	}
 	samples := smp.end()
 	dep := r.observedDeployment()
@@ -739,5 +772,5 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 		time.Since(first).Round(time.Second), pr.BytesPerSecond(), pr.TokensPerSecond(), len(larges), tm.UploadBody, hol.InFlight.Round(time.Millisecond),
 		hol.Send.Round(time.Millisecond), hol.Prefill.Round(time.Millisecond), hol.Elsewhere.Round(time.Millisecond))
 	return TunnelHourObs{Tags: tags, Requests: reqs, Samples: samples, DrainStart: ds, Deployment: dep, Rates: []PathRate{pr},
-		UploadNotMeasured: UploadNotMeasuredLive, HeadOfLine: &hol}, nil
+		UploadNotMeasured: UploadNotMeasuredLive, HeadOfLine: &hol, LongPlan: plan}, nil
 }

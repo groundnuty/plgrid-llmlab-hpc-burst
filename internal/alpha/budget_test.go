@@ -106,7 +106,7 @@ var liveWaits = map[string]string{
 	"waitFor: stack.WaitFor(d)":                                                                   "the waits that call it, listed here",
 	"workerRestart: r.waitFor(r.tm.StartTimeout + 5*time.Minute)":                                 "the lease",
 	"untilBefore: r.waitFor(time.Until(at) + time.Minute)":                                        "the lease",
-	"Handover: r.successorOf(time.Until(ds) - lead - lead/2)":                                     "the lease",
+	"Handover: r.successorOf(time.Until(ds) + LeadTimesFor(lead).SuccessorWaitEnds)":              "the lease",
 	"Handover: r.untilBefore(lead)":                                                               "the lease",
 	"Handover: r.successorOf(time.Until(ds))":                                                     "the lease",
 	"Handover: r.waitFor(r.dw + EndMargin)":                                                       "term: the drain window and EndMargin",

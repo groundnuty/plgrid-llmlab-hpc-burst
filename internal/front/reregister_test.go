@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -145,48 +147,88 @@ func TestProbePassThroughAReplacedRegistrationDoesNotCount(t *testing.T) {
 // is probed at once, then 100 ms, 200 ms and 400 ms later while its probes
 // fail, and leaves the schedule at its first pass. The schedule runs apart from
 // the rounds: the next round stays probeInterval after the previous one.
+//
+// The test advances the fake clock only when the last probe is over, which it
+// reads from the probe's recorded verdict, never from the double's hit count: a
+// hit is counted when GET /health arrives, and a clock moved on then can reach
+// the next attempt while the probe still runs, which puts the attempt off
+// without using up a step (#473). The "held" run forces that order at every
+// attempt: each probe's verdict is held after its hit is counted, and the wait
+// that follows lets it go only after it has looked and found the probe unfinished,
+// so a wait that takes the hit for the end of the probe fails every time.
 func TestReregisteredUIDIsReprobedOnItsBackoffUntilAPass(t *testing.T) {
+	t.Run("free", func(t *testing.T) { reprobeBackoff(t, false) })
+	t.Run("held", func(t *testing.T) { reprobeBackoff(t, true) })
+}
+
+func reprobeBackoff(t *testing.T, held bool) {
 	m := startMuxDouble(t)
 	var mu sync.Mutex
 	insts := []v1alpha1.Instance{probeInstance("00000000-0000-4000-8000-000000000034", v1alpha1.InstanceReady, metav1.ConditionTrue)}
 	uid := insts[0].UID
 	m.set(uid, http.StatusOK)
 	clk := clock.NewFake(t0)
-	p, tun, _ := newTestProber(t, m, clk, &insts, &mu)
+	p, tun, ev := newTestProber(t, m, clk, &insts, &mu)
+	var hold *verdictHold // nil in the free run
+	if held {
+		hold = newVerdictHold(p)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan struct{})
 	go func() { p.Run(ctx); close(stopped) }()
-	defer func() { cancel(); <-stopped }()
+	defer func() { hold.release(); cancel(); <-stopped }()
 	waitFor := func(what string, cond func() bool) {
 		t.Helper()
-		for end := time.Now().Add(5 * time.Second); !cond(); time.Sleep(5 * time.Millisecond) {
-			if time.Now().After(end) {
-				t.Fatalf("timed out waiting for %s (hits %d, registered %v)", what, m.hit(uid), tun.Registered(uid))
-			}
-		}
+		pollUntil(t, what, cond, hold.release, func() string {
+			return fmt.Sprintf("hits %d, recorded %d, registered %v", m.hit(uid), ev.probes(uid), tun.Registered(uid))
+		})
 	}
-	waitFor("the first round", func() bool { return tun.Registered(uid) && clk.Pending() == 1 })
+	// recorded: the n-th probe of the UID is over, and the schedule's next timer is armed.
+	recorded := func(n int) func() bool {
+		return func() bool { return ev.probes(uid) == n && clk.Pending() == 2 }
+	}
+	// start runs what starts the n-th probe. In the held run it then waits for the probe to be held
+	// at its verdict and checks the state a wait on the hit count would mistake for its end: the hit
+	// is counted, nothing is recorded, the probe is running, and the schedule has armed its timers
+	// (timers of them: the next round's, and the next re-probe's when the UID is still on the
+	// schedule), so that the wait after it finds nothing missing but the verdict.
+	start := func(n, timers int, fire func()) {
+		t.Helper()
+		g := hold.arm()
+		fire()
+		if g == nil {
+			return
+		}
+		g.waitReached(t, "probe "+strconv.Itoa(n))
+		if hits, done := m.hit(uid), ev.probes(uid); hits != n || done != n-1 || !p.isProbing(uid) {
+			t.Fatalf("probe %d held: %d hits, %d recorded, probing %v; want %d hits (arrived), %d recorded (not over), probing", n, hits, done, p.isProbing(uid), n, n-1)
+		}
+		pollUntil(t, "the timers armed while probe "+strconv.Itoa(n)+" is held", func() bool { return clk.Pending() == timers }, nil, nil)
+	}
+	waitFor("the first round", func() bool { return ev.probes(uid) == 1 && tun.Registered(uid) && clk.Pending() == 1 })
 
 	// frps announces a new registration; the engine is not answering yet.
 	m.set(uid, http.StatusServiceUnavailable)
 	tun.Bump(uid)
-	p.Reregistered(uid)
 	// Two timers from here: the next round's, and the next re-probe's.
-	waitFor("the re-probe at once", func() bool { return m.hit(uid) == 2 && clk.Pending() == 2 })
-	for i, wait := range []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond} {
+	start(2, 2, func() { p.Reregistered(uid) })
+	waitFor("the re-probe at once", recorded(2))
+	waits := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond}
+	for i, wait := range waits {
 		clk.Advance(wait - time.Millisecond)
 		if n := m.hit(uid); n != 2+i {
 			t.Fatalf("re-probe %d came before its wait of %s: %d probes", i+1, wait, n)
 		}
-		clk.Advance(time.Millisecond)
-		waitFor("the re-probe after "+wait.String(), func() bool { return m.hit(uid) == 3+i && clk.Pending() == 2 })
+		start(3+i, 2, func() { clk.Advance(time.Millisecond) })
+		waitFor("the re-probe after "+wait.String(), recorded(3+i))
 		if tun.Registered(uid) {
 			t.Fatal("a failing re-probe registered the UID")
 		}
 	}
 	m.set(uid, http.StatusOK)
-	clk.Advance(800 * time.Millisecond)
-	waitFor("the passing re-probe", func() bool { return tun.Registered(uid) })
+	passing := 3 + len(waits)
+	start(passing, 2, func() { clk.Advance(800 * time.Millisecond) })
+	waitFor("the passing re-probe", func() bool { return ev.probes(uid) == passing && tun.Registered(uid) })
 	if _, ok := p.reprobeAt(); ok {
 		t.Fatal("the UID stayed on the re-probe schedule after its pass")
 	}
@@ -196,8 +238,8 @@ func TestReregisteredUIDIsReprobedOnItsBackoffUntilAPass(t *testing.T) {
 	if n := m.hit(uid); n != hits {
 		t.Fatalf("%d probes after the pass and before the next round, want none", n-hits)
 	}
-	clk.Advance(time.Millisecond)
-	waitFor("the next round", func() bool { return m.hit(uid) == hits+1 })
+	start(hits+1, 0, func() { clk.Advance(time.Millisecond) })
+	waitFor("the next round", func() bool { return ev.probes(uid) == hits+1 })
 }
 
 // TestSetRegisteredAtRefusesAStaleEpoch: a pass reached in an epoch that has

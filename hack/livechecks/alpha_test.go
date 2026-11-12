@@ -47,6 +47,9 @@ var alphaShapes = []alphaShape{
 	{"tunnel-hour-athena", "TestTunnelHour", "athena", "partition plgrid-gpu-a100, 1 GPU, 16 CPU, 125Gi, time limit 02:17:00, one job, no requeue", "", "SEEDACCT-a100", true},
 	{"gpu-accounting-helios", "TestGPUAccounting", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 117Gi, time limit 00:05:00, one job, no requeue, each job to start within 10 min", "now", "SEEDACCT-gh", false},
 	{"gpu-accounting-athena", "TestGPUAccounting", "athena", "partition plgrid-gpu-a100, 1 GPU, 16 CPU, 125Gi, time limit 00:05:00, one job, no requeue", "", "SEEDACCT-a100", false},
+	// The accounting row on plgrid-now (issue #145, the science agent's ruling of 12 Nov 2026): the same job as the Athena
+	// twin, in the one-job partition with its start wait of 10 minutes. No QOS: the partition's own is the slot.
+	{"gpu-accounting-athena-now", "TestGPUAccounting", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:05:00, one job, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", false},
 	// Row A on plgrid-now (issue #376): the A100 node type's per-GPU size, a lease of 48 minutes (the hour less its start
 	// wait of 10 and 2 of cleanup, the science agent's ruling Q3), no QOS (the partition's own applies).
 	{"alpha-athena-now-serve", "TestAlphaAthenaNowServe", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:48:00, one job, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
@@ -64,7 +67,11 @@ for a in "$@"; do [ "$prev" = -o ] && out=$a; prev=$a; done
 case "$1" in
   build) mkdir -p "$out" && for b in hpcburst hpcburst-controller hpcburst-front; do echo binary > "$out/$b"; done
          [ -z "${STUB_ROLL_AT_BUILD:-}" ] || echo "$STUB_NEXT_DATE" > "$LIVE_FAKE_DATE_FILE" ;;
-  test) mkdir -p "$(dirname "$out")"; cp "$STUB_STATE/testbin.sh" "$out"; chmod +x "$out" ;;
+  test) mkdir -p "$(dirname "$out")"; cp "$STUB_STATE/testbin.sh" "$out"; chmod +x "$out"
+        # A conformance row's only build is the test binary's, so these hooks are its "during the builds": another job
+        # takes the one-job slot, or the date rolls over, after the first look and before the second.
+        [ -z "${STUB_SEED_AT_TESTC:-}" ] || echo "$STUB_SEED_AT_TESTC" >> "$STUB_STATE/queue"
+        [ -z "${STUB_ROLL_AT_TESTC:-}" ] || echo "$STUB_NEXT_DATE" > "$LIVE_FAKE_DATE_FILE" ;;
 esac
 `
 
@@ -105,6 +112,15 @@ case $mode in
   not-run-row-b-warm) echo "$HPCBURST_ALPHA_ROW: the agent's own log did not show the warm start (the successor's job: the agent's log of the job could not be read); the run's other checks passed; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   # The marker of a first job that ran and a second that never started (internal/alpha, NotRunNote).
   not-run-second) echo "$HPCBURST_ALPHA_ROW: the first job ran and the second never started; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  # The marker of a handover row whose streams' lead does not fit the deployment's max-model-len (internal/alpha, NotRunNote, issue
+  # #447), on whatever row runs it; and the same with words where the numbers go, which the script must not print.
+  not-run-lead) echo "$HPCBURST_ALPHA_ROW: no stream across the drain start that is long enough to tell a cut from an end fits the deployment's max-model-len at the engine's measured rate (at 600 tokens/s with max-model-len 32768 the lead that fits is 26s, under the floor of 30s); the run opened no stream across the drain start; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  not-run-lead-words) echo "$HPCBURST_ALPHA_ROW: no stream across the drain start that is long enough to tell a cut from an end fits the deployment's max-model-len at the engine's measured rate (at owner-private-host tokens/s with max-model-len 32768 the lead that fits is 26s, under the floor of 30s); the run opened no stream across the drain start; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  # The marker of a tunnel row whose long stream does not fit the deployment's max-model-len (internal/alpha, NotRunNote, issue #451),
+  # on whatever row runs it; and the same with words where the numbers go, which the script must not print.
+  not-run-long) echo "$HPCBURST_ALPHA_ROW: the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate (at 300 tokens/s with max-model-len 32768 the stream that fits is 1m47s, under the floor of 2m15s); the hour was not started; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  not-run-long-words) echo "$HPCBURST_ALPHA_ROW: the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate (at owner-private-host tokens/s with max-model-len 32768 the stream that fits is 1m47s, under the floor of 2m15s); the hour was not started; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  not-run-long-fit-words) echo "$HPCBURST_ALPHA_ROW: the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate (at 300 tokens/s with max-model-len 32768 the stream that fits is owner-private-host, under the floor of 2m15s); the hour was not started; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   sleep) leave; touch "$STUB_STATE/started"; exec sleep 3600 ;;
   # A job of the run's own prefix whose tag was never written down (a watch that never delivered, a write that
   # failed), beside a job of another run's prefix; with untagged-not-run, the run ended NOT RUN with it pending.
@@ -133,16 +149,23 @@ func (w *world) useAlphaStubs(rows ...string) {
 	_ = rows
 }
 
+// pinnedBinaries lays out dir as hack/fetch-k3s.sh and hack/fetch-frp.sh do: k3s under k3s-1.36.5/, and frps and frpc at the top,
+// each an executable file.
+func pinnedBinaries(t *testing.T, dir string) {
+	t.Helper()
+	for _, f := range []string{"k3s-1.36.5/k3s", "frps", "frpc"} {
+		write(t, filepath.Join(dir, f), "#!/bin/bash\n", 0o755)
+	}
+}
+
 // alphaSettings adds what the alpha rows need to the world's settings file.
 func (w *world) alphaSettings(mutate func(m map[string]string)) {
 	w.t.Helper()
 	bin := filepath.Join(w.dir, "bindir")
 	key := filepath.Join(w.dir, "dialhome-key")
-	for _, d := range []string{bin} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			w.t.Fatal(err)
-		}
-	}
+	// The directory is laid out as hack/fetch-k3s.sh and hack/fetch-frp.sh lay it out: every row that starts the stack checks it
+	// before the slot is read (issue #444).
+	pinnedBinaries(w.t, bin)
 	write(w.t, key, "SEEDDIALKEY\n", 0o600)
 	w.writeSettings(func(m map[string]string) {
 		m["LIVE_DIALHOME_MODE"] = "direct"
@@ -183,7 +206,7 @@ func TestListNamesTheAlphaRowsAndTheAliases(t *testing.T) {
 	for _, s := range alphaShapes {
 		w.contains(res, s.row+"  cluster  ready")
 	}
-	w.contains(res, "tunnel-hour  alias  runs tunnel-hour-athena in turn", "gpu-accounting  alias  runs gpu-accounting-athena in turn")
+	w.contains(res, "tunnel-hour  alias  runs tunnel-hour-athena in turn", "gpu-accounting  alias  runs gpu-accounting-athena-now in turn")
 }
 
 // The script's cluster shapes and the package's rows are one fact each: a partition, a QOS and a GPU count
@@ -319,7 +342,7 @@ func TestSettingsAreAskedOnlyOfTheRowsThatNeedThem(t *testing.T) {
 		delete(m, "LIVE_DIALHOME_ADDR")
 		delete(m, "LIVE_BIN_DIR")
 	})
-	for _, row := range []string{"gpu-accounting-helios", "gpu-accounting-athena"} {
+	for _, row := range []string{"gpu-accounting-helios", "gpu-accounting-athena", "gpu-accounting-athena-now"} {
 		if res := w.run(nil, "--run", row); res.code != 4 {
 			t.Errorf("%s with no dial-home route: exit %d, want 4:\n%s", row, res.code, res.out)
 		}
@@ -430,8 +453,9 @@ func (s alphaShape) hasQOS() bool { return s.slot != "" && s.slot != "plgrid-now
 // still runs by its name (beta_rows_test.go and the rows' own tests).
 func TestTheAliasesRunTheirAthenaRowAlone(t *testing.T) {
 	for alias, row := range map[string]string{
-		"tunnel-hour":    "tunnel-hour-athena",
-		"gpu-accounting": "gpu-accounting-athena",
+		"tunnel-hour": "tunnel-hour-athena",
+		// Since 12 Nov 2026 (issue #145) gpu-accounting stands for the row on plgrid-now, the A100 queue being days out.
+		"gpu-accounting": "gpu-accounting-athena-now",
 	} {
 		t.Run(alias, func(t *testing.T) {
 			w := newAlphaWorld(t)
@@ -448,6 +472,10 @@ func TestTheAliasesRunTheirAthenaRowAlone(t *testing.T) {
 			if n := strings.Count(w.stateFile("events"), "testbin "); n != 1 {
 				t.Errorf("%d test runs, want 1", n)
 			}
+			// The row's own name is a prefix of its plgrid-now twin's: only the one the alias names ran.
+			if other := "gpu-accounting-athena"; alias == "gpu-accounting" && strings.Contains(res.out, other+": ") {
+				t.Errorf("the alias %s also ran %s:\n%s", alias, other, res.out)
+			}
 		})
 	}
 	// A bare name that is no row or alias is still an error.
@@ -459,7 +487,7 @@ func TestTheAliasesRunTheirAthenaRowAlone(t *testing.T) {
 
 func TestASkippedOrFailedAlphaTestIsAFailure(t *testing.T) {
 	for _, mode := range []string{"skip", "fail"} {
-		for _, row := range []string{"alpha-athena-handover", "gpu-accounting-athena"} {
+		for _, row := range []string{"alpha-athena-handover", "gpu-accounting-athena", "gpu-accounting-athena-now"} {
 			t.Run(mode+"/"+row, func(t *testing.T) {
 				w := newAlphaWorld(t)
 				res := w.run([]string{"STUB_ALPHA_MODE=" + mode}, "--run", row, "--yes")
@@ -603,7 +631,7 @@ func TestPlanNamesTheAlphaRowsWhenTheStackChanges(t *testing.T) {
 		{"a stack binary", "cmd/hpcburst-front/main.go", "package main\n\nimport _ \"example.test/fx/internal/stack\"\n\nfunc main() { _ = 1 }\n", stackRows},
 		{"the example the rows apply", "examples/provider-athena-a100.yaml", "kind: Provider\nx: 1\n", []string{"alpha-athena-handover"}},
 		{"a package the accounting rows and conformance run, not the stack", "internal/providerctl/providerctl.go", "package providerctl\n\nimport _ \"example.test/fx/internal/slurm\"\n\nvar X = 1\n",
-			[]string{"conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-helios", "reach-athena", "reach-helios", "reach-host-dialed-athena", "reach-host-dialed-helios", "alpha-athena-now-stage"}},
+			[]string{"conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-athena-now", "gpu-accounting-helios", "reach-athena", "reach-helios", "reach-host-dialed-athena", "reach-host-dialed-helios", "alpha-athena-now-stage"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -638,6 +666,8 @@ func TestTheTimeoutIsTheRunTimePlusTheWaitInTheQueue(t *testing.T) {
 		{"gpu-accounting-athena", "TestGPUAccounting", "-test.timeout 36m"},        // 25 + 600/60 + 1
 		// Under a start-wait bound the bound is the first clock: 32 + 0 + 1, whatever the wait the operator allows.
 		{"gpu-accounting-helios", "TestGPUAccounting", "-test.timeout 33m"},
+		// The row on plgrid-now has a start wait too: the same 32 + 0 + 1.
+		{"gpu-accounting-athena-now", "TestGPUAccounting", "-test.timeout 33m"},
 	} {
 		t.Run(c.row, func(t *testing.T) {
 			w := newAlphaWorld(t)
@@ -648,7 +678,7 @@ func TestTheTimeoutIsTheRunTimePlusTheWaitInTheQueue(t *testing.T) {
 				t.Errorf("the test binary ran with %q, want %q", args, c.want)
 			}
 			env := w.stateFile("test-env-" + c.test)
-			if c.row == "gpu-accounting-helios" {
+			if c.row == "gpu-accounting-helios" || c.row == "gpu-accounting-athena-now" {
 				// The bound is its first clock; the operator's wait is not passed on, and does not lengthen the timeout.
 				if !strings.Contains(env, "HPCBURST_CONF_START_WAIT=10m") || strings.Contains(env, "PENDING_MAX_SECONDS") {
 					t.Errorf("the test did not get the start-wait bound alone as its first clock:\n%s", env)
@@ -871,6 +901,9 @@ func TestTheRowsThatHoldTheOwnersSlotForHoursNeedTheOwnersGo(t *testing.T) {
 		{"alpha-athena-now-nooverlap", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
 		// The pre-staging row (issue #376): its start wait, then 10 + 30 + 2 = 42 minutes, rounded up to ten.
 		{"alpha-athena-now-stage", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 0 h 50 min; the owner's go is needed (the development rule on #145)"},
+		// The accounting row on plgrid-now (issue #145): its start wait of 10, a job of 5 minutes and a minute for the end, 16
+		// minutes, rounded up to ten: 20.
+		{"gpu-accounting-athena-now", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 0 h 20 min; the owner's go is needed (the development rule on #145)"},
 	}
 	for _, c := range rows {
 		for _, stale := range []struct{ name, value string }{{"missing", ""}, {"yesterday's", "(the world's yesterday)"}, {"1", "1"}, {"yes", "yes"}} {

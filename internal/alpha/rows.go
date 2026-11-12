@@ -54,9 +54,16 @@ const (
 	// two requests of such a run.
 	MinChain    = 3
 	MaxChainGap = 10 * time.Second
-	// NearDeadline is the length of the longest request the hour must contain:
-	// about 4 minutes, close to the 5-minute deadline.
+	// NearDeadline is the length of the longest request the hour must contain
+	// when its long stream is sized at the cap: 4 minutes of the 4 min 30 s cap
+	// (LongCap), close to the 5-minute deadline. A stream sized to the context at
+	// the measured rate is judged at the same share of what it was sized for
+	// (Timing.withLongPlan; issue #451).
 	NearDeadline = 4 * time.Minute
+	// LongFloor is the shortest fit the hour's long stream is sized at (issue #451; the science agent's ruling (b), 12 Nov 2026, and its
+	// ruling (ii) on #452): a fit under it is NOT RUN. It is 135 s so that no stream under 2 minutes is ever a pass: the bar a stream
+	// sized at the floor is judged at, its share NearDeadline/LongCap of 135 s, is 120 s (Timing.LongBarFloor).
+	LongFloor = 135 * time.Second
 	// ConcurrentStreams streams of at least StreamRate tokens a second each must be
 	// open at the same moment.
 	ConcurrentStreams = 16
@@ -238,10 +245,12 @@ type Timing struct {
 	IdleLimit, MaxIdleLimit time.Duration
 	// TunnelHour is how long the hour's traffic runs, and Hour the span its
 	// requests and the job must cover.
-	TunnelHour, Hour  time.Duration
-	MinChain          int
-	MaxChainGap       time.Duration
-	NearDeadline      time.Duration
+	TunnelHour, Hour time.Duration
+	MinChain         int
+	MaxChainGap      time.Duration
+	NearDeadline     time.Duration
+	// LongFloor is the shortest fit the hour's long stream is sized at (LongFloor; FitLong).
+	LongFloor         time.Duration
 	ConcurrentStreams int
 	StreamRate        float64
 	MinIdleGap        time.Duration
@@ -260,7 +269,7 @@ type Timing struct {
 func LiveTiming() Timing {
 	return Timing{MaxRequestDuration: MaxRequestDuration, DrainMargin: DrainMargin, HandoverMargin: HandoverMargin, StartTimeout: StartTimeout,
 		IdleLimit: IdleLimit, MaxIdleLimit: 10 * time.Minute, TunnelHour: TunnelHour, Hour: Hour, MinChain: MinChain, MaxChainGap: MaxChainGap,
-		NearDeadline: NearDeadline, ConcurrentStreams: ConcurrentStreams, StreamRate: StreamRate, MinIdleGap: MinIdleGap, MaxSampleGap: MaxSampleGap,
+		NearDeadline: NearDeadline, LongFloor: LongFloor, ConcurrentStreams: ConcurrentStreams, StreamRate: StreamRate, MinIdleGap: MinIdleGap, MaxSampleGap: MaxSampleGap,
 		UploadBody: UploadBody, UploadStreams: UploadStreams, UploadPause: UploadPause, ServeTokens: ServeStreamTokens}
 }
 
@@ -282,6 +291,7 @@ func (r Row) Clock() Timing {
 	fill(&t.Hour, l.Hour)
 	fill(&t.MaxChainGap, l.MaxChainGap)
 	fill(&t.NearDeadline, l.NearDeadline)
+	fill(&t.LongFloor, l.LongFloor)
 	fill(&t.MinIdleGap, l.MinIdleGap)
 	fill(&t.MaxSampleGap, l.MaxSampleGap)
 	if t.MinChain == 0 {
@@ -365,9 +375,17 @@ const (
 // accountingRows are the rows of the accounting check, which runs in
 // internal/providerctl/conformance (a GPU job through the Provider's controller,
 // no stack and no dial-home route). Lease and Budget are the job's.
+//
+// gpu-accounting-athena-now is the same check on Athena's one-job partition plgrid-now, under
+// athena-now.yaml (`@hpc-burst-science-agent`, 12 Nov 2026, #145: the A100 queue was about two days out, and a
+// row on plgrid-now counts for plgrid-gpu-a100 when it runs one job of one GPU within an hour, #373's
+// equivalence). It has the one-job slot's guards (the slot read before and after the builds, a start wait of 10
+// minutes) and the owner's go of plgrid-now. Its slot hold is the start wait, the job's time limit and a minute
+// for the end, as the host-dialed rows' is. gpu-accounting-athena stays for when the A100 queue opens.
 var accountingRows = []Row{
 	{Name: "gpu-accounting-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: 5 * time.Minute, Budget: 32 * time.Minute, SlotHold: 15 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#145 and #93"},
 	{Name: "gpu-accounting-athena", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: 5 * time.Minute, Budget: 25 * time.Minute, MostJobs: 1, PostsTo: "#145 and #93"},
+	{Name: "gpu-accounting-athena-now", Cluster: "athena", Profile: "athena-now", Partition: "plgrid-now", GPUs: 1, Lease: 5 * time.Minute, Budget: 32 * time.Minute, SlotHold: 16 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#145 and #93", Timing: AthenaNowTiming(), OwnerGo: OwnerGoAthenaNow},
 }
 
 // reachRows are the rows of the reach check (issue #225), which runs in

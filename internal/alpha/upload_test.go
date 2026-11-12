@@ -508,7 +508,7 @@ func TestALateLargeRequestIsNoRequestNearTheDeadline(t *testing.T) {
 	late := Stream{ID: "x0", Opened: at, Ended: at.Add(50 * time.Second), BodyBytes: 196_400, ExpectedTokens: 32_737, ArrivedTokens: 32_737,
 		SendStart: at, SendEnd: at.Add(50 * time.Second)}
 	o.Requests = append(o.Requests, late)
-	if f := VerifyTunnelHour(r, o, jobs); !slices.Equal(f, []string{"the hour held no request of about 4 minutes, near the deadline"}) {
+	if f := VerifyTunnelHour(r, o, jobs); !slices.Equal(f, []string{longStreamFailure}) {
 		t.Errorf("an hour whose only request near the deadline is a late large request: failures %v; want the near-deadline one alone", f)
 	}
 	// The control: the same hour with one completed stream of 50 s passes.

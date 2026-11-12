@@ -64,6 +64,15 @@
 # warm start its agent's own log did not show. Its first job's start wait runs from the deployment's creation, its second's
 # from its Allocation's creation, after the first has left the slot ("the first job ran and the second never started within
 # its start wait ...").
+# The three rows that open a stream across a drain start (alpha-athena-handover, alpha-helios-nooverlap and
+# alpha-athena-now-nooverlap; #447) have one more NOT RUN, of a run that did start: after the rate stream, the lead of the stream
+# (a third of the deadline, or less when the deployment's max-model-len cannot hold a stream of two leads at the measured rate) is
+# under 30 s, so no stream long enough to tell a cut from an end can cross the drain start, and a row that ran on one would be a
+# weaker pass. The run opens no stream and its jobs are cancelled by their tags; its marker says the rate and the context
+# ("... long enough to tell a cut from an end ..."), which judge prints.
+# The tunnel rows (tunnel-hour-helios and tunnel-hour-athena; #451) have one of the same kind: their long stream is as long as the
+# context allows at the rate measured before the hour, capped at 4 min 30 s, and when what fits is under 2 minutes the row opens no
+# hour, is NOT RUN, and its marker says the rate and the context ("... does not hold a long stream ..."), which judge prints.
 # NOT RUN means the job affirmatively never started (review of PR 284): a read at the bound must show it waiting. A job
 # that started, a job a read does not list, and a read that fails are failures that name what they found, exit 1. That read
 # is not the last word: a job can start between it and the cancel, so every row reads the job's history once it is cancelled.
@@ -108,16 +117,18 @@
 #   LIVE_DIALHOME_KEY            ssh mode only: the restricted dial-home key file, mode 600
 #   LIVE_DIALHOME_LISTEN         direct mode: host:port of the front's dial-home listener on this host, where the
 #                                owner's route arrives; a direct run without it fails at its first step, naming it
-#   LIVE_BIN_DIR                 absolute path of the directory with k3s-1.36.5/ and the pinned frp (frps, frpc); read by
-#                                the rows that run the stack and by rehearsal-part3
+#   LIVE_BIN_DIR                 absolute path of the directory with k3s-1.36.5/ and the pinned frp (frps, frpc at its top
+#                                level, as hack/fetch-frp.sh lays them); read by the rows that run the stack and by
+#                                rehearsal-part3. Every one of those rows checks its layout first (exit 3, naming the setting,
+#                                never the value), before the slot is read and before anything is built (issue #444)
 #   LIVE_TUNNEL_LEASE_MINUTES    optional, the tunnel rows' lease in minutes, 106 to 240 (default 137, the shape below): the owner's
 #                                choice when giving the go; the shape, the hold note and the test follow it
 #   LIVE_OWNER_GO_HELIOS_NOW     today's UTC date (YYYY-MM-DD), once the owner has said yes to the run: the rows that hold
 #                                QOS now's GPU for hours (alpha-helios-nooverlap, tunnel-hour-helios) refuse without it
 #   LIVE_OWNER_GO_ATHENA_NOW     the same for the deployment rows on Athena's one-job partition plgrid-now under
-#                                profiles/athena-now.yaml (alpha-athena-now-serve, alpha-athena-now-stage and
-#                                alpha-athena-now-nooverlap; issue #376, Q6, citing the owner's decision
-#                                of 11 Nov 2026 on #145): today's UTC date, checked as LIVE_OWNER_GO_HELIOS_NOW is. The code
+#                                profiles/athena-now.yaml (alpha-athena-now-serve, alpha-athena-now-stage,
+#                                alpha-athena-now-nooverlap and gpu-accounting-athena-now; issue #376, Q6, citing the
+#                                owner's decision of 11 Nov 2026 on #145): today's UTC date, checked as LIVE_OWNER_GO_HELIOS_NOW is. The code
 #                                agent's go posted on #145 with its UTC start and end, before each run, is the operator's to
 #                                post, not this script's to check
 #   LIVE_FRONT_HOST_LABEL        where the front ran, in three parts (issue #224): a ROLE from a fixed list (the FRONT ROLES
@@ -194,6 +205,7 @@ alpha-athena-now-serve|cluster|internal/alpha|^TestAlphaAthenaNowServe$|HPCBURST
 alpha-athena-now-stage|cluster|internal/providerctl/conformance|^TestNowStage$|HPCBURST_CONFORMANCE|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml,hack/build-stage-helper.sh|host|ready
 gpu-accounting-helios|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
 gpu-accounting-athena|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
+gpu-accounting-athena-now|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/athena-now.yaml|host|ready
 reach-helios|cluster|internal/providerctl/conformance|^TestReach$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
 reach-athena|cluster|internal/providerctl/conformance|^TestReach$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
 reach-host-dialed-helios|cluster|internal/providerctl/conformance|^TestReachHostDialed$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host,linux-arm64|ready
@@ -246,6 +258,12 @@ TABLE
 # gpu-accounting-helios (issue #194) has the same two guards as conformance-helios-gh200: it starts only when squeue --me shows
 # no job in QOS now, and its one job must start within 10 min of its acceptance (else cancelled by its tag, NOT RUN, exit 3). The
 # row's other guard, the wait of LIVE_PENDING_MAX_SECONDS, applies to gpu-accounting-athena only, which has no slot.
+# gpu-accounting-athena-now (issue #145, the science agent's ruling of 12 Nov 2026) is the same test on Athena's one-job
+# partition plgrid-now under profiles/athena-now.yaml, because the A100 queue is days out: a row on plgrid-now counts for
+# plgrid-gpu-a100 when it runs one job of one GPU within an hour (PR #373). It has the slot guard (the slot is read before the
+# builds and again after them), a start wait of 10 min and the owner's go of plgrid-now, as the other plgrid-now rows have. It
+# starts no stack, so it takes no LIVE_BIN_DIR. The bare name gpu-accounting stands for it; gpu-accounting-athena stays, runnable
+# by name, for when the A100 queue opens.
 # conformance-helios-gh200: it starts only when squeue --me shows no job in QOS now, pending or running, whoever's (exit 3,
 # "skipped: the now slot is in use"), and each of its two jobs (step 1, step 3) must start within 10
 # min of its acceptance. A run that goes well takes about 25 min: two start waits of 10 min and about 5 min of running.
@@ -275,6 +293,7 @@ alpha-athena-now-stage|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_
 alpha-athena-now-nooverlap|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:21:00|115|-|10
 gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|32|-|10
 gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|25|-
+gpu-accounting-athena-now|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|32|-|10
 reach-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:02:00|20|-C memfs|10
 reach-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|1|1Gi|00:02:00|20|-|10
 reach-host-dialed-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|25|-C memfs|10
@@ -320,6 +339,7 @@ alpha-athena-now-stage|1
 alpha-athena-now-nooverlap|2
 gpu-accounting-helios|1
 gpu-accounting-athena|1
+gpu-accounting-athena-now|1
 reach-helios|1
 reach-athena|1
 reach-host-dialed-helios|1
@@ -341,6 +361,7 @@ tunnel-hour-helios|LIVE_OWNER_GO_HELIOS_NOW|140
 alpha-athena-now-serve|LIVE_OWNER_GO_ATHENA_NOW|60
 alpha-athena-now-stage|LIVE_OWNER_GO_ATHENA_NOW|50
 alpha-athena-now-nooverlap|LIVE_OWNER_GO_ATHENA_NOW|60
+gpu-accounting-athena-now|LIVE_OWNER_GO_ATHENA_NOW|20
 # END OWNER GO
 TABLE
 }
@@ -408,6 +429,7 @@ alpha-athena-now-serve
 alpha-athena-now-nooverlap
 gpu-accounting-helios
 gpu-accounting-athena
+gpu-accounting-athena-now
 # END FRONT LABEL
 TABLE
 }
@@ -428,12 +450,14 @@ TABLE
 # Athena alone (the owner's decision of 11 Nov 2026, "Athena alone", recorded on #145, and PR #373), so each
 # alias stands for its Athena row. The Helios rows are beta's: they stay in every table and run by their own
 # names, but no alias runs them, so a Helios row that is skipped or lacks its settings cannot fail alpha's run
-# (issue #386; docs/alpha-runbook.md, Alpha rows and beta rows). name | rows.
+# (issue #386; docs/alpha-runbook.md, Alpha rows and beta rows). Since 12 Nov 2026 (issue #145) gpu-accounting stands for
+# gpu-accounting-athena-now, the same test on plgrid-now, since the A100 queue is days out; gpu-accounting-athena runs by
+# its own name. name | rows.
 alias_table() {
   cat <<'TABLE'
 # BEGIN ALIASES
 tunnel-hour|tunnel-hour-athena
-gpu-accounting|gpu-accounting-athena
+gpu-accounting|gpu-accounting-athena-now
 reach|reach-athena
 reach-host-dialed|reach-host-dialed-athena
 # END ALIASES
@@ -532,7 +556,7 @@ usage() {
 usage: hack/live-checks.sh --list
        hack/live-checks.sh --plan <base>..<head>      which live tests cover the range; runs nothing
        hack/live-checks.sh --run <name>... [--yes]    runs only the named tests (a cluster test needs --yes);
-                                                      tunnel-hour and gpu-accounting stand for their two rows
+                                                      tunnel-hour, gpu-accounting, reach and reach-host-dialed stand for their Athena row
 Settings: HPCBURST_LIVE_SETTINGS names a mode-600 KEY=VALUE file; the keys are listed in this script's header.
 Exit: 0 passed; 1 failed, skipped or left a job; 2 usage; 3 refused; 4 cluster test not run (no --yes).
 USAGE
@@ -683,11 +707,13 @@ check_owner_go() {
   return 1
 }
 
-# check_rehearsal_settings: what the rehearsal row needs (issue #193): the directory with the pinned k3s and frp. It
-# must be absolute, because the test runs in its package directory, and it must hold what hack/rehearsal.sh and the
-# test look for, so that a missing binary refuses the row (exit 3) before the builds instead of failing a long run.
-# Every problem is reported.
-check_rehearsal_settings() {
+# check_bin_dir: the directory with the pinned k3s and frp, which every row that starts the stack needs (the rehearsal row and
+# the alpha stack rows, issue #444). The live tests take the front's frps and frpc from the TOP of it (internal/alpha,
+# steps_live_test.go) and hpcburst up takes k3s from k3s-1.36.5/ in it, so a directory laid out the launcher's way (frp under
+# frp-0.71.1/) fails there, 0.08 s in, after the slot has been read. It must be absolute, because the test runs in its package
+# directory, and it must hold what hack/rehearsal.sh and the tests look for, so that a missing binary refuses the row (exit 3)
+# before the slot is read and before any build. Every problem is reported, by the setting's name, never its value.
+check_bin_dir() {
   local bad=0 d f
   [ -n "${S[LIVE_BIN_DIR]:-}" ] || { say "live-checks: setting LIVE_BIN_DIR is missing"; return 1; }
   d=${S[LIVE_BIN_DIR]}
@@ -695,10 +721,13 @@ check_rehearsal_settings() {
   [ -d "$d" ] || { say "live-checks: LIVE_BIN_DIR is not a directory"; return 1; }
   [ -f "$d/k3s-1.36.5/k3s" ] && [ -x "$d/k3s-1.36.5/k3s" ] || { say "live-checks: LIVE_BIN_DIR has no executable k3s-1.36.5/k3s (hack/fetch-k3s.sh)"; bad=1; }
   for f in frps frpc; do
-    [ -f "$d/$f" ] && [ -x "$d/$f" ] || { say "live-checks: LIVE_BIN_DIR has no executable $f (hack/fetch-frp.sh)"; bad=1; }
+    [ -f "$d/$f" ] && [ -x "$d/$f" ] || { say "live-checks: LIVE_BIN_DIR has no executable $f at its top level (hack/fetch-frp.sh puts it there)"; bad=1; }
   done
   return $bad
 }
+
+# check_rehearsal_settings: what the rehearsal row needs (issue #193): the directory with the pinned k3s and frp.
+check_rehearsal_settings() { check_bin_dir; }
 
 # check_reach_settings: what a reach row needs besides a cluster test's own settings (issue #225): the gateway's forwarded
 # port, which is private (host and port), and the label that stands for it in public output. Every problem is reported by
@@ -728,8 +757,8 @@ check_reach_settings() {
 reach_is_host_dialed() { [ "${S[LIVE_DIALHOME_MODE]:-}" = host-dialed ]; }
 
 # check_alpha_settings <name>: what a row that runs the stack needs besides a cluster test's own settings: the
-# dial-home route (the owner provides it, HBEP-6) and the directory with the pinned binaries. Every problem
-# is reported. #174 (no-overlap queue-wait growth) needs no setting: it is on main (#208), and so in every
+# dial-home route (the owner provides it, HBEP-6) and the directory with the pinned binaries (check_bin_dir: its layout, not
+# only that it is a directory). Every problem is reported. #174 (no-overlap queue-wait growth) needs no setting: it is on main (#208), and so in every
 # checkout that has these rows.
 check_alpha_settings() {
   local name=$1 bad=0 mode host_dialed=0
@@ -750,9 +779,9 @@ check_alpha_settings() {
   else
     alpha_need LIVE_DIALHOME_ADDR && { [[ ${S[LIVE_DIALHOME_ADDR]} =~ ^[A-Za-z0-9._-]+:[0-9]{1,5}$ ]] || { say "live-checks: LIVE_DIALHOME_ADDR must be host:port"; bad=1; }; }
   fi
-  if alpha_need LIVE_BIN_DIR; then
-    case ${S[LIVE_BIN_DIR]} in /*) [ -d "${S[LIVE_BIN_DIR]}" ] || { say "live-checks: LIVE_BIN_DIR is not a directory"; bad=1; } ;; *) say "live-checks: LIVE_BIN_DIR must be an absolute path"; bad=1 ;; esac
-  fi
+  # The pinned binaries' layout, checked here for every row that starts the stack, before the slot is read and before any build
+  # (issue #444; the science agent's ruling on #145, 12 Nov 2026): a wrong directory is a refusal (exit 3) that names the setting.
+  check_bin_dir || bad=1
   return $bad
 }
 
@@ -1034,6 +1063,8 @@ not_run_verdict() {
   ! requeue_marker || [ "$n" = alpha-athena-now-serve ] || return 1
   ! warm_marker || case $n in alpha-athena-now-serve|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1
   ! slot_marker || [ "$n" = alpha-athena-now-nooverlap ] || return 1
+  ! lead_marker || case $n in alpha-athena-handover|alpha-helios-nooverlap|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1
+  ! long_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac || return 1
   ! first_end_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac
 }
 
@@ -1054,6 +1085,35 @@ row_a_reason() { sed -n -E "s/.*$1 \(([^()]*)\).*/\1/p" "$REC_DIR/not-run.txt" 2
 # first_end_marker: the run's NOT RUN marker says its job was still pending a minute before its deployment's first
 # end (internal/alpha, NotRunNote): the bound a tunnel row has beside the wait in the queue, which judge names.
 first_end_marker() { grep -q "a minute before the deployment's first end" "$REC_DIR/not-run.txt" 2>/dev/null; }
+
+# lead_marker: the run's NOT RUN marker says the lead of the streams across the drain start is under the floor (internal/alpha,
+# NotRunNote, LeadFloor; issue #447): no stream long enough to tell a cut from an end fits the deployment's max-model-len at the
+# engine's measured rate. The rows that open such a stream have it, and not_run_verdict holds it to them. lead_reason is the
+# numbers the marker carries in parentheses (the rate, the context, the lead that fits, the floor), as row_a_reason reads them.
+lead_marker() { grep -q "long enough to tell a cut from an end" "$REC_DIR/not-run.txt" 2>/dev/null; }
+lead_reason() {
+  local r
+  r=$(row_a_reason "no stream across the drain start that is long enough to tell a cut from an end fits the deployment's max-model-len at the engine's measured rate")
+  if printf '%s\n' "$r" | grep -q -E -x 'at [0-9]+ tokens/s with max-model-len [0-9]+ the lead that fits is [0-9]+s, under the floor of [0-9]+s'; then
+    printf '%s' "$r"
+  else
+    printf 'the rate and the context could not be read from the marker'
+  fi
+}
+
+# long_marker: the run's NOT RUN marker says the stream that fits the deployment's max-model-len at the engine's measured rate is
+# under the floor of the hour's long stream (internal/alpha, NotRunNote, LongFloor; issue #451). The tunnel rows have it, and
+# not_run_verdict holds it to them. long_reason is the numbers the marker carries in parentheses, as lead_reason reads them.
+long_marker() { grep -q "does not hold a long stream" "$REC_DIR/not-run.txt" 2>/dev/null; }
+long_reason() {
+  local r
+  r=$(row_a_reason "the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate")
+  if printf '%s\n' "$r" | grep -q -E -x 'at [0-9]+ tokens/s with max-model-len [0-9]+ the stream that fits is [0-9hms.]+, under the floor of [0-9hms.]+'; then
+    printf '%s' "$r"
+  else
+    printf 'the rate and the context could not be read from the marker'
+  fi
+}
 
 # second_job_marker: the run's NOT RUN marker says its first job ran and its second never started (internal/alpha,
 # NotRunNote): the bound a row of two jobs has for its second.
@@ -1088,6 +1148,10 @@ judge() {
       say "$n: NOT RUN (the first job ran and the second never started $(second_job_bound "$n"), and was cancelled by its tag; not a failure)"
       late=$(sed -n -E 's/.*ReplacementLate for its deployment: (raised|not raised|unknown);.*/\1/p' "$REC_DIR/not-run.txt" 2>/dev/null | head -1)
       [ -z "$late" ] || say "$n: ReplacementLate for its deployment: $late (information, not a check)"
+    elif lead_marker; then
+      say "$n: NOT RUN (no stream across the drain start that is long enough to tell a cut from an end fits the deployment's max-model-len at the engine's measured rate: $(lead_reason); the run opened no stream, and its jobs were cancelled by tag; not a failure)"
+    elif long_marker; then
+      say "$n: NOT RUN (the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate: $(long_reason); the hour was not started, and the run's jobs were cancelled by tag; not a failure)"
     elif row_a_marker; then
       if requeue_marker; then say "$n: NOT RUN (the scheduler refused the requeue of the run's own job: $(row_a_reason "the scheduler refused the requeue of the run's own job"); the run's other checks passed; not a failure)"; fi
       if warm_marker; then say "$n: NOT RUN (the agent's own log did not show the warm start: $(row_a_reason "the agent's own log did not show the warm start"); the run's other checks passed; not a failure)"; fi
@@ -1959,8 +2023,9 @@ esac
 
 # --run
 [ ${#REQUESTED[@]} -gt 0 ] || { say "live-checks: --run needs at least one test name"; exit 2; }
-# A bare name for the rows alpha runs (tunnel-hour, gpu-accounting, reach, reach-host-dialed: their Athena rows) stands for
-# them, run one after the other. A Helios row is beta's and runs by its own name.
+# A bare name for the rows alpha runs (tunnel-hour, gpu-accounting, reach, reach-host-dialed: their Athena rows, and for
+# gpu-accounting the one on plgrid-now) stands for them, run one after the other. A Helios row is beta's and runs by its own
+# name.
 declare -a EXPANDED=()
 for name in "${REQUESTED[@]}"; do
   if [ -n "${ALIAS[$name]+x}" ]; then

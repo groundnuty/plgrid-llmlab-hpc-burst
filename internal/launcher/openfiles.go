@@ -38,8 +38,11 @@ const (
 const DegradedOpenFiles = "open files"
 
 // tunnelEntry says whether a supervised entry is a tunnel process, one whose open files are
-// reported: frps, and the front, which holds both the client listener and the dial-home listener.
-func tunnelEntry(name string) bool { return name == frpsEntryName || name == frontEntryName }
+// reported: frps, the bulk path's frps-bulk, and the front, which holds both the client listener
+// and the dial-home listener.
+func tunnelEntry(name string) bool {
+	return name == frpsEntryName || name == frontEntryName || name == frpsBulkEntryName
+}
 
 // Limit is one resource limit as /proc/<pid>/limits states it: a number, or the word "unlimited".
 // The zero Value is a real limit (0), so "unlimited" is its own field and never a number.

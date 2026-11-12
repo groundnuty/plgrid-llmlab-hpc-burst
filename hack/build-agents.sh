@@ -2,13 +2,22 @@
 # Cross-compile the allocation agent (cmd/hb-agent) for each cpuArch and place it where the
 # Provider's controller finds it.
 #
-# usage: hack/build-agents.sh DIR [CPUARCH...]
+# usage: hack/build-agents.sh [--version VERSION] DIR [CPUARCH...]
 #
 # DIR is the controller's agent-builds directory (<state>/agent-builds, agentapi.Host.AgentBuildsDir),
 # the one hack/fetch-frp.sh --agent-builds DIR places frpc in. For each cpuArch (x86_64 and aarch64,
 # or only those named) the build is DIR/hb-agent-<cpuArch> (agentapi.AgentBuildName), mode 755. Its
 # sha256 is the agentDigest the lifecycle controller sets, and the script prints it. The aarch64 build
 # is the one Helios's GH200 nodes need; nothing else makes it.
+#
+# --version VERSION is what the agent reports (`hb-agent -version`, and the agentVersion of its
+# registration), given to the linker as -ldflags "-X main.version=VERSION" and nothing else. Without it
+# the agent reports "dev", and the build is the one this script made before the option existed. The
+# release archive (hack/release-archive.sh) gives it the version its host binaries report: the tag, or
+# on a run with no tag the commit's pseudo-version. VERSION must be a Go version, vMAJOR.MINOR.PATCH
+# with an optional pre-release (the tag shape hack/release-check.sh takes, which a pseudo-version also
+# has), and is refused before anything is built otherwise. The same sources and the same VERSION give
+# the same bytes, as below; another VERSION gives other bytes, and so another agentDigest.
 #
 # The build is a static binary for linux, the same bytes whoever runs it, wherever the checkout is
 # and whatever its git state or its caller's environment. CGO_ENABLED=0 (no C library, so it runs on
@@ -22,7 +31,8 @@
 # that file may also have held for the toolchain's sake, GOPATH, GOMODCACHE, GOCACHE and GOPROXY, are
 # read once before that and passed explicitly. GOFLAGS is replaced by -mod=readonly and the caller's
 # -p=N, if it has one (parallelism does not change the bytes); every other entry (-ldflags, -gcflags,
-# -tags, -overlay and the like can) is dropped, and the script says so on stderr.
+# -tags, -overlay and the like can) is dropped, and the script says so on stderr. The only -ldflags a
+# build gets is the script's own, from --version.
 #
 # The toolchain is the module's pinned Go: GOTOOLCHAIN is set to go.mod's go line, exactly (go 1.26.0
 # gives go1.26.0, which is what CI installs from go.mod), whatever GOTOOLCHAIN or Go the caller has.
@@ -56,7 +66,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
-[ $# -ge 1 ] && [ -n "$1" ] || die "usage: hack/build-agents.sh DIR [CPUARCH...]"
+usage="usage: hack/build-agents.sh [--version VERSION] DIR [CPUARCH...]"
+agentversion=
+if [ "${1:-}" = --version ]; then
+  [ $# -ge 2 ] && [ -n "$2" ] || die "--version needs a value; nothing was built ($usage)"
+  agentversion=$2
+  shift 2
+fi
+# A Go version: vMAJOR.MINOR.PATCH with an optional pre-release, the tag shape hack/release-check.sh
+# takes (no build metadata), which a pseudo-version also has. Its characters are letters, digits, dots
+# and hyphens, so it reaches the linker as one word.
+semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+[ -z "$agentversion" ] || [[ $agentversion =~ $semver ]] ||
+  die "--version '$agentversion' is not a Go version, vMAJOR.MINOR.PATCH with an optional pre-release (v0.1.0-alpha.1); nothing was built"
+[ $# -ge 1 ] && [ -n "$1" ] || die "$usage"
 case $1 in
   /*) dir=$1 ;;
   *) dir=$PWD/$1 ;;
@@ -103,12 +126,16 @@ export GOENV=off GOEXPERIMENT= GOFIPS140=off
 mkdir -p "$dir"
 stage=$(mktemp -d "$dir/.build.XXXXXX")
 
+# The linker's flags: the version, when one was given, and nothing otherwise.
+ldflags=() vnote=
+[ -z "$agentversion" ] || { ldflags=(-ldflags "-X main.version=$agentversion"); vnote=" version $agentversion"; }
+
 for cpu in "${archs[@]}"; do
   out=$dir/hb-agent-$cpu
   (
     cd "$root"
     CGO_ENABLED=0 GOOS=linux GOARCH=$(go_arch "$cpu") GOAMD64=v1 GOARM64=v8.0 GOWORK=off \
-      go build -trimpath -buildvcs=false -o "$stage/hb-agent-$cpu" ./cmd/hb-agent
+      go build -trimpath -buildvcs=false ${ldflags[@]+"${ldflags[@]}"} -o "$stage/hb-agent-$cpu" ./cmd/hb-agent
   ) || die "building cmd/hb-agent for $cpu failed; $out is as it was"
   chmod 755 "$stage/hb-agent-$cpu"
   sum=$(sha256sum "$stage/hb-agent-$cpu" | cut -d' ' -f1)
@@ -118,9 +145,9 @@ for cpu in "${archs[@]}"; do
       chmod 755 "$out"
       note=", mode set to 755"
     fi
-    echo "ok       hb-agent-$cpu ($out) sha256 $sum ($goversion)$note"
+    echo "ok       hb-agent-$cpu ($out) sha256 $sum ($goversion)$vnote$note"
     continue
   fi
   mv -fT "$stage/hb-agent-$cpu" "$out"
-  echo "built    hb-agent-$cpu ($out) sha256 $sum ($goversion)"
+  echo "built    hb-agent-$cpu ($out) sha256 $sum ($goversion)$vnote"
 done

@@ -58,7 +58,10 @@ func (r *liveRun) nowNoOverlapSteps(ctx context.Context, p Plan, pre v1alpha1.In
 	o.DrainStart = ds
 	key := r.fc.KeyFor(&pre)
 	rate := r.rate(key)
-	lead := r.streamLead()
+	lead, err := r.streamLead(rate)
+	if err != nil {
+		return err
+	}
 	n, err := r.tokensFor(2*lead, rate)
 	if err != nil {
 		return err

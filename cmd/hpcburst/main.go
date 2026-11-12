@@ -160,6 +160,7 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.FrontBin, "front-bin", "", "the front's binary (default "+launcher.FrontBinName+" in the directory of this executable)")
 	fs.StringVar(&o.FrpsBin, "frps-bin", "", "frps, the dial-home tunnel's server (HBEP-6), checked against the pinned frp "+launcher.DefaultFrpVersion+" (default frp-"+launcher.DefaultFrpVersion+"/frps in --bin-dir; when that is absent, no frps runs and up warns); it runs under the controllers' supervisor")
 	fs.BoolVar(&o.RelayKeeper, "relay-keeper", false, "beta, host-dialed mode only: run the relay keeper (the controller binary's relaykeeper subcommand) under the supervisor, so a controller restart cuts no host-dialed stream (HBEP-6); without it, up refuses while the keeper's state file shows it ran here and Allocations are running")
+	fs.BoolVar(&o.BulkPath, "bulk-path", false, "beta: run a second frps for the bulk path at base+13 to base+15, beside the first, and keep a second certificate for the agent endpoint's key naming bulk.dial-home.hpcburst.invalid, so an Instance's non-streamed replies can take a tunnel of their own (HBEP-6, The bulk path); needs frps")
 	fs.BoolVar(&asJSON, "json", false, "print the result as JSON")
 	if code, done := parse(fs, args); done {
 		return code
@@ -208,6 +209,9 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	if len(rep.FrpsPorts) > 0 {
 		fmt.Fprintf(stdout, "frps: supervised, loopback ports %v\n", rep.FrpsPorts)
+	}
+	if len(rep.FrpsBulkPorts) > 0 {
+		fmt.Fprintf(stdout, "frps-bulk (the bulk path): supervised, loopback ports %v\n", rep.FrpsBulkPorts)
 	}
 	if o.ManifestsDir != "" {
 		fmt.Fprintf(stdout, "applied %d manifests from %s\n", rep.Applied, o.ManifestsDir)
