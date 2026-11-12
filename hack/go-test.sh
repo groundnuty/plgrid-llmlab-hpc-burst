@@ -13,6 +13,10 @@
 #     manager's start and stop, Lease expiry, informer syncs), not a fixed sleep;
 #   - controller-failover: cmd/hpcburst-controller's two HBEP-11 failover tests, 150 s of its 400 s, whose
 #     takeover waits for two of controller-runtime's 15 s Leases to expire after a SIGKILL (issue #295);
+#   - envoy-timeouts: internal/agent's two real-Envoy tests that wait out Envoy's own defaults, about 6
+#     minutes of the package's run: a worker that is silent for 310 s, past Envoy's 5 minute stream idle
+#     timeout, and an upstream connection that idles 50 s before Envoy closes it (issue #429). Both wait on
+#     observable state (a response, the worker's connection events), never a fixed sleep;
 #   - livechecks-hostdialed and livechecks-dry: hack/livechecks' dry runs through hack/live-checks.sh, the
 #     tests that build and run the real conformance and alpha test binaries and a real agent, which took
 #     that package to the 10 minutes in the crd and envtest job (the science agent's ruling on PR #306).
@@ -33,13 +37,17 @@ cd "$root" || exit 1
 # run on a25f9438 (42.8 s and 82.0 s in its go job). Issue #295's groups take the sum of each test's worst
 # in the go job of main's five healthy runs of 10 Nov 2026 (42844202426 to 42849291185), a bound on the
 # group's worst: lifecycle-caches 58.8 s, lifecycle-copies 62.1 s, lifecycle-control-plane 56.2 s and
-# controller-failover 150.5 s.
+# controller-failover 150.5 s. envoy-timeouts' 1200 s is about 3x its local run, not yet a CI one:
+# TestEnvoyStreamIdleOutlivesTheDefault took 310.7 s (its two halves run at once, bound by the worker's
+# silence of 310 s) and TestEnvoyClosesIdleUpstreamConnectionsFirst 50.7 s (bound by Envoy's 50 s upstream
+# idle), 362 s in all. The first green CI run should replace it with 3x its own.
 groups=(
   "lease|./internal/lifecycle|TestLifecycleManagerReleasesItsLeaseOnEveryStop|150s"
   "lifecycle-caches|./internal/lifecycle|TestCachesNeedsEveryWatchedInformer TestCachesRecoverFromAStalledDiscovery TestCachesStopDuringAStalledDiscovery TestCachesListIsWhatTheControllerWatches|180s"
   "lifecycle-copies|./internal/lifecycle|TestMetricsStandbyOnTwoManagers TestMetricsLostLeaseStopsBeforeANewCopyLeads TestMetricsCopiesStartAgainOnALostPort TestRaisedEventsOnTwoManagers|190s"
   "lifecycle-control-plane|./internal/lifecycle|TestManagerOnControlPlane TestVerificationRecordRoundTripsThroughTheAPIServer TestLifecycleLeaseReleaseUnderLatency TestStartLifecycleLeaderOfAManagerThatLeadsBeforeTheLeaseIsRead|170s"
   "controller-failover|./cmd/hpcburst-controller|TestControllerProcessesFailOverMidSubmit TestControllerProcessesFailOverBeforeSubmit|460s"
+  "envoy-timeouts|./internal/agent|TestEnvoyStreamIdleOutlivesTheDefault TestEnvoyClosesIdleUpstreamConnectionsFirst|1200s"
   "livechecks-hostdialed|./hack/livechecks|TestEachHostDialedFaultFailsTheRowThroughTheScript TestEveryHostDialedRowPassesThroughTheScriptOverTheFake TestAHostDialedRowWhoseSlotIsHeldIsNotRunThroughTheScript TestADryHostDialedBinaryRefusesLiveSettings|150s"
   "livechecks-dry|./hack/livechecks|TestEveryAlphaRowPassesItsDryRunAndEveryFaultFailsIt TestADryBinaryRefusesLiveSettings TestAJobPendingPastTheBoundIsNotRunOnEveryRow TestALiveRunWithNoListenerFailsLoudlyAndUsesNoCluster TestAnAccountingRowWithNoSlotThatPendedPastItsWaitIsNotRun TestEveryRowThatPostsNamesWhereTheFrontRanAndRefusesWithoutIt TestACatchUpThatCannotTellIsAFailureOnATwoJobRow TestASecondJobThatNeverStartedIsNotRunOnTheTwoJobRows TestEveryReachRowReportsEachOutcomeThroughTheScript TestADryReachBinaryRefusesLiveSettingsAndARealGateway TestAReachRowWhoseSlotIsHeldIsNotRun|270s"
 )

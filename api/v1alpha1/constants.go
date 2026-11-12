@@ -129,6 +129,11 @@ const (
 // router, once Instances have one, is the part "router".
 const PartInstance = "instance"
 
+// PartRouter is the part name of an Instance's router, whose restart
+// generation the router rung raises (HBEP-7, Health and restarts;
+// `@hpc-burst-science-agent`, 12 Nov 2026, #429, Q6).
+const PartRouter = "router"
+
 // WorkerName returns the name of the i-th worker of an Instance: worker-<i>.
 func WorkerName(i int) string { return "worker-" + strconv.Itoa(i) }
 
