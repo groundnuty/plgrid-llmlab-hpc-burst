@@ -18,6 +18,10 @@ func (p *pass) ready(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agent
 	if av.unreachable || av.report == nil {
 		return nil // a path that is down is not a dead Instance (HBEP-6)
 	}
+	// Behind a router, the router's own signal first: its rung (routerhealth.go).
+	if acted, err := p.routerRung(in, alloc, av, st); acted || err != nil {
+		return err
+	}
 	signal, msg := p.healthSignal(in, alloc, av, st)
 	if signal == "" {
 		now := metav1.NewTime(p.now)
@@ -53,6 +57,10 @@ func (p *pass) healthSignal(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, a
 	}
 	if !h.ProbeOK && h.ConsecutiveProbeFailures >= st.failureThreshold {
 		return v1alpha1.ReasonProbeFailing, fmt.Sprintf("the health probe failed %d times in a row", h.ConsecutiveProbeFailures)
+	}
+	// Behind a router, the router holding the verified worker failing its active check.
+	if sig, msg := routerCheckSignal(in, av, st); sig != "" {
+		return sig, msg
 	}
 	// The gauge-based signals need fresh metrics: stale gauges are unknown.
 	if !av.metricsFresh(w) {
@@ -156,6 +164,13 @@ func (p *pass) restart(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal
 	var workerTries, instTries int32
 	var last time.Time
 	for _, r := range recent {
+		// The router rung counts its own tries (routerhealth.go); its restarts still space the others.
+		if r.Part == v1alpha1.PartRouter {
+			if r.Time.After(last) {
+				last = r.Time.Time
+			}
+			continue
+		}
 		if r.Part == v1alpha1.PartInstance {
 			instTries++
 		} else {
@@ -223,7 +238,7 @@ func (p *pass) restart(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal
 }
 
 // maxRestartsKept is status.restarts' bound (the CRD's maxItems).
-const maxRestartsKept = 16
+const maxRestartsKept = 32
 
 // failedEnd reports whether an ended Instance failed: any end but a drain. A
 // failed Instance counts towards its class's failure streak (HBEP-7, Restart

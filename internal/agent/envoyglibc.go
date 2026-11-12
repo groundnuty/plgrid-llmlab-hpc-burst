@@ -18,16 +18,26 @@ import (
 // measurement). It runs bare on a node whose glibc is that or later. On an older one its exec would
 // fail with a loader's error and exit 127, so the agent checks first and refuses, naming the glibc it
 // found and the one Envoy needs (the science agent's ruling on #454). Both are read, not assumed: the
-// need from Envoy's own symbol versions, the node's from its loader's --version.
+// need from Envoy's own symbol versions, the node's glibc from getconf GNU_LIBC_VERSION.
+//
+// getconf, not the loader's --version: ld.so only gained --version (and --help) in glibc 2.33, so on
+// an older node it takes --version for a program to run, and fails without naming a version. getconf
+// is glibc's own (its base package on every distribution: libc-bin, glibc-common), has printed
+// "glibc X.Y" since 2.3.2, and reports the system glibc, the one Envoy's loader loads (#477's review).
+// Running libc.so.6 itself would print the version too, but its path differs between distributions.
 
-// envoyLoader is the loader the check runs for the interpreter Envoy names. Tests replace it with a
-// fake loader; production runs the interpreter itself.
+// envoyLoader is the path the check looks for the loader Envoy names at. Tests replace it with a fake
+// node's loader; production looks at the interpreter itself.
 var envoyLoader = func(interp string) string { return interp }
 
-// loaderVersion is the version in a glibc loader's --version: "... release version 2.34."
-var loaderVersion = regexp.MustCompile(`release version (\d+)\.(\d+)`)
+// glibcProbe is the command that prints the node's glibc version. Tests replace it with a fake node's.
+var glibcProbe = []string{"getconf", "GNU_LIBC_VERSION"}
 
-// checkEnvoyGlibc refuses an Envoy binary whose glibc this node's loader is older than.
+// glibcVersion is the version in getconf GNU_LIBC_VERSION's answer: "glibc 2.34".
+var glibcVersion = regexp.MustCompile(`^glibc (\d+)\.(\d+)`)
+
+// checkEnvoyGlibc refuses an Envoy binary whose loader this node lacks, or whose glibc this node's is
+// older than.
 func checkEnvoyGlibc(bin *os.File) error {
 	interp, need, err := envoyGlibcNeed(bin)
 	if err != nil {
@@ -36,22 +46,25 @@ func checkEnvoyGlibc(bin *os.File) error {
 	if interp == "" {
 		return nil // statically linked: no loader and no glibc to check
 	}
+	if fi, err := os.Stat(envoyLoader(interp)); err != nil || !fi.Mode().IsRegular() || fi.Mode()&0o111 == 0 {
+		return refuse("Envoy needs glibc %d.%d or later through its loader %s, which this node does not have (%v)", need[0], need[1], interp, err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, envoyLoader(interp), "--version")
+	cmd := exec.CommandContext(ctx, glibcProbe[0], glibcProbe[1:]...)
 	cmd.Env = []string{}
 	out, err := cmd.Output()
 	if err != nil {
-		return refuse("Envoy needs glibc %d.%d or later, through its loader %s, and running that loader on this node failed: %v", need[0], need[1], interp, err)
+		return refuse("Envoy needs glibc %d.%d or later, and reading this node's glibc (%s) failed: %v", need[0], need[1], strings.Join(glibcProbe, " "), err)
 	}
-	m := loaderVersion.FindSubmatch(out)
+	m := glibcVersion.FindSubmatch(bytes.TrimSpace(out))
 	if m == nil {
-		return refuse("Envoy needs glibc %d.%d or later, and this node's loader %s names no glibc version: %.120q", need[0], need[1], interp, bytes.TrimSpace(out))
+		return refuse("Envoy needs glibc %d.%d or later, and %s names no glibc version: %.120q", need[0], need[1], strings.Join(glibcProbe, " "), bytes.TrimSpace(out))
 	}
 	maj, _ := strconv.Atoi(string(m[1]))
 	minor, _ := strconv.Atoi(string(m[2]))
 	if maj < need[0] || (maj == need[0] && minor < need[1]) {
-		return refuse("Envoy needs glibc %d.%d or later, and this node's glibc is %d.%d (its loader %s): Envoy cannot run bare here", need[0], need[1], maj, minor, interp)
+		return refuse("Envoy needs glibc %d.%d or later, and this node's glibc is %d.%d: Envoy cannot run bare here", need[0], need[1], maj, minor)
 	}
 	return nil
 }
