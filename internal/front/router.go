@@ -36,6 +36,7 @@ type Router struct {
 	groups    map[string]*balancer.Group
 	rings     map[string]*balancer.Ring // model name -> ring over its served Instances
 	pauses    map[string]*pause         // target key -> pause
+	keyUID    map[string]types.UID      // an Instance's key (namespace/name) -> its UID, from the snapshot
 	timer     clock.Timer
 	reported  map[string]string // short profile -> resourceVersion already reported
 	problems  map[string]bool   // problems already logged
@@ -59,6 +60,18 @@ type Router struct {
 type pause struct {
 	failures int
 	until    time.Time
+	// uid and epoch are the Instance the run of failures is toward and the registration epoch it was accumulated in
+	// (#418): the epoch when the run began, at its first failure. A dial routed in one epoch can fail after the next has
+	// begun (frps's 404 before it registers the proxy again), so the run's start, not its latest failure, says which
+	// registration it was accumulated against. A managed target has neither, and its pause is never cleared by an epoch.
+	uid   types.UID
+	epoch uint64
+}
+
+// epochs is what the router reads of a Transports that keeps registration epochs (Tunnel, HBEP-6): the UID's current
+// epoch. A Transports without them (StaticTransports) clears no pause by epoch.
+type epochs interface {
+	Epoch(uid types.UID) uint64
 }
 
 // NewRouter returns a router with an empty view. metrics may be nil.
@@ -107,6 +120,7 @@ func (r *Router) rebuildLocked() {
 			delete(r.pauses, k)
 		}
 	}
+	r.clearStalePausesLocked()
 	live := map[string]bool{}
 	r.rings = map[string]*balancer.Ring{}
 	for _, m := range v.Models {
@@ -136,6 +150,14 @@ func (r *Router) rebuildLocked() {
 }
 
 func (r *Router) indexLocked() {
+	// From the snapshot, not the view: a failure can be reported for an
+	// Instance the view does not hold as a member at that moment (one that has
+	// not joined, with no transport yet), and its pause must still record it.
+	r.keyUID = map[string]types.UID{}
+	for i := range r.snap.Instances {
+		in := &r.snap.Instances[i]
+		r.keyUID[in.Namespace+"/"+in.Name] = in.UID
+	}
 	r.leaseEnds = map[types.UID]time.Time{}
 	for i := range r.snap.Instances {
 		in := &r.snap.Instances[i]
@@ -210,6 +232,29 @@ func (r *Router) stateLocked(d *inventory.Deployment, now time.Time) (balancer.S
 	return st, ready
 }
 
+// clearStalePausesLocked clears each pause, or run of failures, that was accumulated in an earlier registration epoch
+// of its Instance than the one its transport is registered in now (#418; the science agent's ruling (a) of 11 Nov 2026;
+// HBEP-5, Pauses). A registration in the current epoch is made only by a probe that passed in it (Tunnel.Bump takes the
+// registration away, and setRegisteredAt registers a pass only in the epoch it began in), so a registered transport in a
+// later epoch is a re-registration whose first probe passed there. A pause from the current epoch is untouched, and so
+// is one whose Instance registered again and has not passed a probe since: it has no registration. The router runs this
+// at every rebuild, which every registration change triggers (Transports.Subscribe).
+func (r *Router) clearStalePausesLocked() {
+	ep, ok := r.trans.(epochs)
+	if !ok {
+		return
+	}
+	for k, p := range r.pauses {
+		if p.uid == "" || ep.Epoch(p.uid) <= p.epoch || !r.hasTransport(p.uid) {
+			continue
+		}
+		paused := !p.until.IsZero()
+		delete(r.pauses, k)
+		r.log.Info("a pause from an earlier registration is cleared: the Instance registered again, and a probe passed in the new registration",
+			"target", k, "paused", paused, "failures", p.failures)
+	}
+}
+
 func (r *Router) pausedLocked(key string, now time.Time) bool {
 	p := r.pauses[key]
 	return p != nil && now.Before(p.until)
@@ -230,7 +275,10 @@ func (r *Router) ReportConnect(key string, failed bool) {
 		return
 	}
 	if p == nil {
-		p = &pause{}
+		p = &pause{uid: r.keyUID[key]}
+		if ep, ok := r.trans.(epochs); ok && p.uid != "" {
+			p.epoch = ep.Epoch(p.uid)
+		}
 		r.pauses[key] = p
 	}
 	p.failures++
