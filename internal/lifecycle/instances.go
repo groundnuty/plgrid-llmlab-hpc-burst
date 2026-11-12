@@ -425,6 +425,10 @@ func (p *pass) running(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) error 
 	if err != nil {
 		return err
 	}
+	// Behind a router: the router's healthy count, from a current report (routerhealth.go).
+	if err := p.writeHealthyWorkers(in, av); err != nil {
+		return err
+	}
 	if in.Status.Phase == v1alpha1.InstanceDraining {
 		return p.draining(in, alloc, av)
 	}

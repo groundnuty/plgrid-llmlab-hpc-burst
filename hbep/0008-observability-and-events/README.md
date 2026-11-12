@@ -170,7 +170,7 @@ The API refuses a new event without `action` or `reason`, with either over 128 c
 | `degraded` | `PathProbeFailing` | Instance | front |
 | `degraded` | `TunnelOrphaned` | the Allocation whose credential admitted the tunnel, else the `lifecycle` `Lease` | lifecycle controller |
 | `degraded` | `ObservationGap` | the emitter's own `Lease` | the lifecycle controller and the front, at start |
-| `failing` | `WorkerRestart`, `InstanceRestart`, `RestartLoop`, `RegistrationTimeout`, `StartTimeout`, `TunnelNotConnected`, `QualificationFailed`, `VerificationFailed`, `AllocationFailed`, `AllocationLost`, `AllocationRefused`, `Requeued`, `SubmittedAsOther`, `RelayEndedForGood`, `AllocationEndedEarly` | Instance | lifecycle controller |
+| `failing` | `WorkerRestart`, `InstanceRestart`, `RouterRestart`, `RestartLoop`, `RegistrationTimeout`, `StartTimeout`, `TunnelNotConnected`, `QualificationFailed`, `VerificationFailed`, `AllocationFailed`, `AllocationLost`, `AllocationRefused`, `Requeued`, `SubmittedAsOther`, `RelayEndedForGood`, `AllocationEndedEarly` | Instance | lifecycle controller |
 | `failing` | `HeartbeatMissed` | the stale observer's resource (Observers) | the component that judges it |
 | `failing` | `UsageWriteFailed` | the front's `Lease` | front |
 | `replaced` | `HandedOver` | Instance | lifecycle controller |
@@ -574,6 +574,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-10: the relay keeper's epoch and read-success series.
 - 2026-11-11: alpha graduates on Athena alone; Helios's parts move to beta (owner decision).
 - 2026-11-12: several workers per Instance, for beta (HBEP-7, Several workers).
+- 2026-11-12: erratum: `RouterRestart`, the router rung's `failing` event regarding an Instance, joins the Reasons table with the code that raises it (#429), as HBEP-7's Several workers says.
 
 ## Amendments
 

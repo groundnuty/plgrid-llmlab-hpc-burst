@@ -46,6 +46,11 @@ type Agent struct {
 	// any report shows it applied.
 	OnDesired func(agentapi.DesiredState)
 
+	// RouterView, when set, edits the router part of each report, after the
+	// Agent has built it as Envoy would hold the workers (router.go): a test
+	// shapes the router's view with it.
+	RouterView func(*agentapi.RouterReport)
+
 	backend agentapi.Backend
 	caller  agentapi.Caller
 	now     func() time.Time
@@ -87,6 +92,9 @@ type instance struct {
 	// is the Instance generation that staging is for (staging.go).
 	stageStart time.Time
 	stageGen   int64
+
+	// router is the Instance's router, when the desired state asks for one (router.go).
+	router *router
 }
 
 // worker is one fake engine process.
