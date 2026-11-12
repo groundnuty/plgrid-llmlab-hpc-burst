@@ -236,7 +236,9 @@ func TestReaperForwardsASignalToTheScript(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	_ = cmd.Wait()
+	if _, timedOut := waitBounded(cmd, stopBound); timedOut {
+		t.Fatalf("the reaper over the trapping script did not exit within %s of the TERM it forwarded; the process tree, as it is now:\n%s", stopBound, hangDump(cmd.Process.Pid))
+	}
 	if got := cmd.ProcessState.ExitCode(); got != 5 {
 		t.Errorf("exit %d, want 5: the script's trap did not run", got)
 	}

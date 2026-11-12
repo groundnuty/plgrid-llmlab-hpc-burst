@@ -296,6 +296,12 @@ func (w *world) start(extra []string, args ...string) (*exec.Cmd, *bytes.Buffer)
 // some more; past it the script is not stopping, and the test says what it was doing instead of waiting for the package's timeout.
 const stopBound = 60 * time.Second
 
+// rehearsalStopBound bounds the wait for a stopped rehearsal row. Its script waits up to REHEARSAL_STOP_STEPS x 0.2 s (90 s) between TERM
+// and KILL for rehearsal.sh's teardown (hack/live-checks.sh), then the reaper gives what is left a grace and kills it (up to 2 x
+// leftoverDeadline): a correct stop can take about 100 s, and stopBound would give up on it. This is that, and 20 s more.
+// TestTheRehearsalStopBoundExceedsTheScriptsGrace reads the script's steps, so the bound cannot drift below them.
+const rehearsalStopBound = 2 * time.Minute
+
 // waitBounded waits for cmd for at most bound, and says whether it did not exit in time (then err is nil).
 func waitBounded(cmd *exec.Cmd, bound time.Duration) (err error, timedOut bool) {
 	done := make(chan error, 1)
