@@ -54,12 +54,16 @@ const (
 	// two requests of such a run.
 	MinChain    = 3
 	MaxChainGap = 10 * time.Second
-	// NearDeadline is the length of the longest request the hour must contain:
-	// about 4 minutes, close to the 5-minute deadline.
+	// NearDeadline is the length of the longest request the hour must contain
+	// when its long stream is sized at the cap: 4 minutes of the 4 min 30 s cap
+	// (LongCap), close to the 5-minute deadline. A stream sized to the context at
+	// the measured rate is judged at the same share of what it was sized for
+	// (Timing.withLongPlan; issue #451).
 	NearDeadline = 4 * time.Minute
-	// LongFloor is the shortest long stream the hour runs with when the deployment's context cannot hold NearDeadline's at the
-	// engine's measured rate (issue #451; the science agent's ruling (b), 12 Nov 2026): under it the row is NOT RUN.
-	LongFloor = 2 * time.Minute
+	// LongFloor is the shortest fit the hour's long stream is sized at (issue #451; the science agent's ruling (b), 12 Nov 2026, and its
+	// ruling (ii) on #452): a fit under it is NOT RUN. It is 135 s so that no stream under 2 minutes is ever a pass: the bar a stream
+	// sized at the floor is judged at, its share NearDeadline/LongCap of 135 s, is 120 s (Timing.LongBarFloor).
+	LongFloor = 135 * time.Second
 	// ConcurrentStreams streams of at least StreamRate tokens a second each must be
 	// open at the same moment.
 	ConcurrentStreams = 16
@@ -245,7 +249,7 @@ type Timing struct {
 	MinChain         int
 	MaxChainGap      time.Duration
 	NearDeadline     time.Duration
-	// LongFloor is the shortest long stream the hour's check 2 accepts to size (LongFloor; FitLong).
+	// LongFloor is the shortest fit the hour's long stream is sized at (LongFloor; FitLong).
 	LongFloor         time.Duration
 	ConcurrentStreams int
 	StreamRate        float64

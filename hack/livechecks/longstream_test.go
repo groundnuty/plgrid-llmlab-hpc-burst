@@ -11,10 +11,10 @@ import (
 )
 
 // longLine is what the script prints for the marker of a rate of 300 tokens a second on a context of 32768, whose fitting stream is
-// 1 min 47 s against a floor of 2 minutes: NOT RUN, exit 3, with the numbers and no other text from the marker.
+// 1 min 47 s against a floor of 2 min 15 s: NOT RUN, exit 3, with the numbers and no other text from the marker.
 func longLine(row string) string {
 	return row + ": NOT RUN (the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate: " +
-		"at 300 tokens/s with max-model-len 32768 the stream that fits is 1m47s, under the floor of 2m0s; the hour was not started, and the run's jobs were cancelled by tag; not a failure)"
+		"at 300 tokens/s with max-model-len 32768 the stream that fits is 1m47s, under the floor of 2m15s; the hour was not started, and the run's jobs were cancelled by tag; not a failure)"
 }
 
 func TestATunnelRowsLongStreamThatDoesNotFitIsNotRunThroughTheScript(t *testing.T) {

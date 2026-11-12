@@ -50,7 +50,7 @@ func (e *LongTooShortError) Error() string {
 func (e *LongTooShortError) Is(target error) bool { return target == ErrLongTooShort }
 
 // FitLong is the length of the hour's long stream: as long as max-model-len less PromptReserve holds at rate tokens a second,
-// rounded down to a whole second, and capped at the row's LongCap. A stream that fits for less than the row's LongFloor is a
+// rounded down to a whole second, and capped at the row's LongCap. A stream that fits for less than the row's LongFloor (135 s live) is a
 // *LongTooShortError (ErrLongTooShort); at or over the cap it is the cap itself, to the nanosecond. A rate that is not a
 // positive finite number is a plain error. The floor judges what fits, as FitLead's does.
 func FitLong(tm Timing, maxModelLen int, rate float64) (time.Duration, error) {
@@ -77,20 +77,31 @@ type LongPlan struct {
 	MaxModelLen int           `json:"maxModelLen"`
 }
 
-// withLongPlan is the clock the hour's traffic is judged on: NearDeadline, the shortest completed stream check 2 accepts, is
-// what the plan asks for. A stream planned at the cap must last NearDeadline, as it always had (4 minutes of 4 min 30 s); a
-// shorter plan keeps that ratio (a stream sized for 2 min 42 s must last 2 min 24 s), the margin the sizing leaves for the rate
-// the stream then runs at. A run with no plan (a dry run, or an observation that lacks it) is judged on NearDeadline, which is
-// the strictest the check has.
+// LongBarFloor is the shortest completed stream check 2 ever accepts: the share NearDeadline/LongCap of LongFloor, the shortest fit a
+// stream is sized at. It is 2 minutes at the live clock (135 s of 270 s is 240 s of 4 min 30 s: 120 s), so that no stream under 2
+// minutes is a pass, whatever a plan's share gives (the science agent's ruling (ii) on #452, 12 Nov 2026). Rounded to the millisecond.
+func (t Timing) LongBarFloor() time.Duration {
+	// Seconds, not Durations: the product of two Durations overflows.
+	return time.Duration(math.Round(t.LongFloor.Seconds()*t.NearDeadline.Seconds()/t.LongCap().Seconds()*1000)) * time.Millisecond
+}
+
+// withLongPlan is the clock the hour's traffic is judged on: NearDeadline, the shortest completed stream check 2 accepts, is what the
+// plan asks for, which is max(the plan's share, LongBarFloor). A stream planned at the cap must last NearDeadline, as it always had (4
+// minutes of 4 min 30 s); a shorter plan keeps that share (a stream sized for 2 min 42 s must last 2 min 24 s), the margin the sizing
+// leaves for the rate the stream then runs at, since the measured rate includes the time to the first token; and no bar is under
+// LongBarFloor (2 minutes live). A plan the sizing makes is never under LongFloor, whose share is the floor of the bar, so the maximum
+// binds only for a plan the sizing did not make (a record from another version, or a hand-built one): the verdict is its own judge.
+// A run with no plan (a dry run, or an observation that lacks it) is judged on NearDeadline, which is the strictest the check has.
 func (t Timing) withLongPlan(p LongPlan) Timing {
 	c := t.LongCap()
 	if p.Length <= 0 || p.Length >= c {
 		return t
 	}
 	// Seconds, not Durations: the product of two Durations overflows. Rounded to the millisecond.
-	t.NearDeadline = time.Duration(math.Round(p.Length.Seconds()*t.NearDeadline.Seconds()/c.Seconds()*1000)) * time.Millisecond
+	share := time.Duration(math.Round(p.Length.Seconds()*t.NearDeadline.Seconds()/c.Seconds()*1000)) * time.Millisecond
+	t.NearDeadline = max(share, t.LongBarFloor())
 	return t
 }
 
 // longStreamFailure is check 2's failure, in the verdict and the text to post.
-const longStreamFailure = "the hour held no completed long stream, as long as the context allows at the measured rate, within the deadline"
+const longStreamFailure = "the hour held no completed long stream within the deadline, of at least 8/9 of its planned length (the context at the measured rate, capped at 4 min 30 s) and at least 2 minutes"
