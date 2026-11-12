@@ -37,7 +37,7 @@ type Router struct {
 	groups    map[string]*balancer.Group
 	rings     map[string]*balancer.Ring // model name -> ring over its served Instances
 	pauses    map[string]*pause         // target key -> pause
-	keyUID    map[string]types.UID      // a served Instance's key -> its UID, from the view
+	keyUID    map[string]types.UID      // an Instance's key (namespace/name) -> its UID, from the snapshot
 	timer     clock.Timer
 	reported  map[string]string // short profile -> resourceVersion already reported
 	problems  map[string]bool   // problems already logged
@@ -264,15 +264,13 @@ func (r *Router) rebuildLocked() {
 }
 
 func (r *Router) indexLocked() {
+	// From the snapshot, not the view: a failure can be reported for an
+	// Instance the view does not hold as a member at that moment (one that has
+	// not joined, with no transport yet), and its pause must still record it.
 	r.keyUID = map[string]types.UID{}
-	if r.view != nil {
-		for _, m := range r.view.Models {
-			for _, d := range m.Served {
-				for _, i := range d.Members {
-					r.keyUID[i.Key] = i.UID
-				}
-			}
-		}
+	for i := range r.snap.Instances {
+		in := &r.snap.Instances[i]
+		r.keyUID[in.Namespace+"/"+in.Name] = in.UID
 	}
 	r.leaseEnds = map[types.UID]time.Time{}
 	for i := range r.snap.Instances {
