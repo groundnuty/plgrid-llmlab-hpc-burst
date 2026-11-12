@@ -1,0 +1,73 @@
+# THROWAWAY, never merged: #494's hang hunt on hosted runners (IMPL-COMMON: heavy runs go there). The stop tests of the script
+# (hack/livechecks), repeated under load, with the bounded wait and its dump (waitStopped, hangDump) that name what a script that does not
+# stop is doing. Read-only: no secret, cache restore only, nothing saved. Two jobs:
+#   targeted: the five tests that stop a script with a signal, -count=300, under two nice-19 spinners;
+#   package:  the whole package, -count=3, under the same spinners (the hang was seen in a full package run).
+name: l494-stress
+on:
+  pull_request:
+    paths:
+      - .github/workflows/l494-stress.yml
+permissions:
+  contents: read
+jobs:
+  stress:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: targeted
+            count: 300
+            timeout: 80m
+            run: "^(TestAnInterruptedRealEngineRunWaitsForALateRegistrationToo|TestRealEngineRunCancelsItsJobWhenInterrupted|TestAStopDuringAnInFlightPollIsActedOnWhenItReturns|TestCleanupWaitsForALateJobWhenTheTestWasStopped|TestSignalStopsTheTestAndRunsTheCleanup)$"
+          - name: package
+            count: 3
+            timeout: 100m
+            run: "."
+    name: stress ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Check out the pull request's head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Read the Go version from go.mod
+        id: goversion
+        run: |
+          version=$(bash hack/fetch-go.sh --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Restore the cached Go archive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
+      - name: Check the Go on PATH is the pinned toolchain
+        run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
+      - name: Download and verify the Go modules
+        run: bash hack/go-mod-download.sh
+      - name: Build the test binary
+        run: go test -c -o "$RUNNER_TEMP/livechecks.test" ./hack/livechecks
+      - name: Run under load (two spinners at nice 19)
+        working-directory: hack/livechecks
+        run: |
+          for i in 1 2; do nice -n 19 sh -c 'while :; do :; done' & done
+          trap 'kill $(jobs -p) 2> /dev/null' EXIT
+          log="$RUNNER_TEMP/stress.log"
+          rc=0
+          "$RUNNER_TEMP/livechecks.test" -test.v -test.count=${{ matrix.count }} -test.timeout ${{ matrix.timeout }} -test.run '${{ matrix.run }}' > "$log" 2>&1 || rc=$?
+          echo "exit=$rc; count asked: ${{ matrix.count }}"
+          echo "pass lines: $(grep -c -E '^--- PASS' "$log")"
+          echo "fail lines: $(grep -c -E '^--- FAIL' "$log")"
+          echo "skip lines: $(grep -c -E '^\s*--- SKIP' "$log")"
+          # A script that did not stop: the test's own message and the dump of its process tree, whole.
+          grep -n "did not stop within" "$log" | head -20 || true
+          grep -B2 -A60 -E "did not stop within" "$log" | head -600 || true
+          grep -B3 -A30 -E '^--- FAIL' "$log" | head -300 || true
+          exit "$rc"
