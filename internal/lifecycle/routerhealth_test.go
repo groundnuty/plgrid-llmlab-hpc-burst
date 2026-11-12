@@ -6,6 +6,7 @@ package lifecycle
 // come from HBEP-7's rules and the rulings, never from the code under test.
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -27,6 +28,14 @@ func routerRig(t *testing.T, opts ...rigOption) (*rig, v1alpha1.Instance, *afake
 }
 
 func healthyWorkersOf(rg *rig, name string) *int32 { return rg.instance(name).Status.HealthyWorkers }
+
+// countOf prints a healthyWorkers value: its number, or "absent".
+func countOf(h *int32) string {
+	if h == nil {
+		return "absent"
+	}
+	return fmt.Sprint(*h)
+}
 
 func lastRestart(rg *rig, name string) (v1alpha1.InstanceRestart, bool) {
 	rs := rg.instance(name).Status.Restarts
@@ -67,7 +76,7 @@ func TestVerifiedGenerationIsDesiredOnlyOnceVerified(t *testing.T) {
 		t.Errorf("seen: none before verification %v, verified after %v; want both", sawNone, sawVerified)
 	}
 	if h := healthyWorkersOf(rg, in.Name); h == nil || *h != 1 {
-		t.Errorf("a ready Instance behind a router has healthyWorkers %v, want 1", h)
+		t.Errorf("a ready Instance behind a router has healthyWorkers %s, want 1", countOf(h))
 	}
 }
 
@@ -101,7 +110,7 @@ func TestTheRouterRungRestartsOnlyTheRouter(t *testing.T) {
 	healthUntilEvent(rg, in.Name, 0, time.Minute, startTick)
 	got := rg.instance(in.Name)
 	if h := got.Status.HealthyWorkers; h == nil || *h != 0 {
-		t.Errorf("after the rung, healthyWorkers %v, want 0", h)
+		t.Errorf("after the rung, healthyWorkers %s, want 0", countOf(h))
 	}
 	if r, ok := lastRestart(rg, in.Name); !ok || r.Part != v1alpha1.PartRouter || r.Generation != 1 || r.Signal != v1alpha1.ReasonPartExited {
 		t.Errorf("the last restart is %+v, want the router's, generation 1, signal PartExited", r)
@@ -138,7 +147,7 @@ func TestAStaleRouterReportCannotUndoTheRung(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		startStep(rg, "md", startTick)
 		if h := healthyWorkersOf(rg, in.Name); h == nil || *h != 0 {
-			t.Fatalf("step %d: healthyWorkers %v from a stale report, want the rung's 0", i, h)
+			t.Fatalf("step %d: healthyWorkers %s from a stale report, want the rung's 0", i, countOf(h))
 		}
 	}
 	ag.RouterView = nil
@@ -158,7 +167,7 @@ func TestTheRouterProbeSignal(t *testing.T) {
 		// The report that raised the signal holds the worker healthy, so only the rung's own write makes
 		// the Instance unroutable: healthyWorkers 0 at the Step of the restart.
 		if h := healthyWorkersOf(rg, in.Name); h == nil || *h != 0 {
-			t.Errorf("at the router rung, healthyWorkers %v, want 0 though the stale report holds the worker healthy", h)
+			t.Errorf("at the router rung, healthyWorkers %s, want 0 though the stale report holds the worker healthy", countOf(h))
 		}
 	})
 	t.Run("control: no worker healthy", func(t *testing.T) {
