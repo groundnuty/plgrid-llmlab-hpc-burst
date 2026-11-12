@@ -42,3 +42,27 @@ func TestTheCapScalesByTheInstancesOwnWorkers(t *testing.T) {
 		})
 	}
 }
+
+// A scaled cap that rounds down to 0 while a worker is healthy is 1, never 0, which the balancer reads as
+// no cap (HBEP-5, Load bound and cap, as amended for #439): instanceCap 1, 2 workers, 1 healthy is
+// 1 x 1 / 2, rounded down to 0, so 1; instanceCap 1, 8 workers, 3 healthy is 0, so 1. With no healthy
+// worker the Instance is not eligible, its cap 0, as before.
+func TestAScaledCapIsNeverBelowOneWhileAWorkerIsHealthy(t *testing.T) {
+	one := int32(1)
+	for _, c := range []struct {
+		name       string
+		n, healthy int32
+	}{
+		{"instanceCap 1, 2 workers, 1 healthy", 2, 1},
+		{"instanceCap 1, 8 workers, 3 healthy", 8, 3},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if m := member(t, workersSnap(c.n, c.healthy, &one)); m.Cap != 1 || !m.Eligible {
+				t.Errorf("cap %d eligible %v, want 1 and eligible: a cap of 0 would mean no cap", m.Cap, m.Eligible)
+			}
+		})
+	}
+	if m := member(t, workersSnap(2, 0, &one)); m.Cap != 0 || m.Eligible {
+		t.Errorf("no healthy worker: cap %d eligible %v, want 0 and not eligible", m.Cap, m.Eligible)
+	}
+}

@@ -2,8 +2,8 @@ package e2e
 
 // Several workers per Instance (beta; HBEP-7, Several workers; HBEP-11's rows): the ModelDeployment's
 // workersPerInstance, the Instance's launch.workers, kept by the spec's immutability rule, and its
-// status.workers[], keyed by the worker's name. The fields' bounds wait for the science agent's answer
-// (#439, Q3), so only the shapes are checked here.
+// status.workers[], keyed by the worker's name. The bounds the science agent ruled (#439, Q3) are
+// checked in TestWorkersBounds.
 
 import (
 	"testing"
