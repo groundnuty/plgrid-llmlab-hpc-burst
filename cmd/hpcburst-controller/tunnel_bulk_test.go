@@ -15,6 +15,7 @@ package main
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -434,4 +435,36 @@ func TestPathStateWithoutBulkReadsOneList(t *testing.T) {
 		t.Errorf("reads: first frps %d, frps-bulk %d, want 2 and 0 with no bulk state", r.tok.reads, r.blk.reads)
 	}
 	r.wantSplit("a bulk-only orphan with the bulk path off", 0, 0)
+}
+
+// TestBulkReaderThatBlocksDoesNotDelayTheConditions (HBEP-6, The bulk path: "an Instance's first `ready` doesn't
+// wait for the bulk path"): a bulk reader that does not answer (a frps-bulk web server that hangs holds the
+// reader for its 5 s timeout) leaves the first list's condition written. The reader here blocks until the
+// test releases it; the test waits on the stored condition while the read pass is still inside the bulk read
+// (it has not returned), so a pass that read the bulk list before writing the conditions never writes it.
+func TestBulkReaderThatBlocksDoesNotDelayTheConditions(t *testing.T) {
+	r := newBulkRig(t, bulkInstances()...)
+	r.tok.list = proxies(online, "uid-1")
+	entered, release := make(chan struct{}, 1), make(chan struct{})
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	r.state.bulk.reader = readerFunc(func(context.Context, []string) frpsplugin.Report {
+		entered <- struct{}{}
+		<-release
+		return frpsplugin.BuildReport(nil, nil, nil)
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.state.readOnce(t.Context())
+	}()
+	waitUntil(t, 10*time.Second, "the stored TunnelConnected while the bulk reader blocks", func() bool { return r.condOf("in-1") == "True/ProxyOnline" })
+	await(t, entered) // the pass goes on to read the bulk list, which blocks
+	select {
+	case <-done:
+		t.Fatal("the pass returned while the bulk reader was blocked: the test did not hold it in the bulk read")
+	default:
+	}
+	once.Do(func() { close(release) })
+	await(t, done)
 }

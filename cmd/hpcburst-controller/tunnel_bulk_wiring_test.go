@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -195,9 +196,16 @@ type tunnelWiring struct {
 // --bulk-path is on. The cache is open, the credentials are in place, and the timings are shortened.
 func startWiring(t *testing.T, bulkPath bool, objs ...client.Object) *tunnelWiring {
 	t.Helper()
+	return startWiringEvery(t, bulkPath, 40*time.Millisecond, objs...)
+}
+
+// startWiringEvery is startWiring with the read period the test sets: a long one leaves the plugin's
+// calls as the only thing that wakes a read.
+func startWiringEvery(t *testing.T, bulkPath bool, period time.Duration, objs ...client.Object) *tunnelWiring {
+	t.Helper()
 	setVars(t, &feedPeriod, 20*time.Millisecond)
 	setVars(t, &feedMinGap, time.Millisecond)
-	setVars(t, &tunnelReadPeriod, 40*time.Millisecond)
+	setVars(t, &tunnelReadPeriod, period)
 	setVars(t, &tunnelReadSettle, 2*time.Millisecond)
 	setVars(t, &tunnelOrphanGrace, 300*time.Millisecond)
 
@@ -320,13 +328,18 @@ func (w *tunnelWiring) condition(name string) string {
 
 func (w *tunnelWiring) endInstance(name string) {
 	w.t.Helper()
-	in := &v1alpha1.Instance{}
-	if err := w.cl.Get(w.t.Context(), client.ObjectKey{Namespace: "team-a", Name: name}, in); err != nil {
-		w.t.Fatal(err)
-	}
-	in.Status.Phase = v1alpha1.InstanceEnded
-	in.Status.EndReason = v1alpha1.ReasonDrained
-	if err := w.cl.Status().Update(w.t.Context(), in); err != nil {
+	// tunnel-state writes the Instance's TunnelConnected condition meanwhile (3 of 50 runs under load
+	// met a newer resourceVersion), so each attempt reads the Instance again.
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		in := &v1alpha1.Instance{}
+		if err := w.cl.Get(w.t.Context(), client.ObjectKey{Namespace: "team-a", Name: name}, in); err != nil {
+			return err
+		}
+		in.Status.Phase = v1alpha1.InstanceEnded
+		in.Status.EndReason = v1alpha1.ReasonDrained
+		return w.cl.Status().Update(w.t.Context(), in)
+	})
+	if err != nil {
 		w.t.Fatal(err)
 	}
 }
@@ -494,5 +507,35 @@ func TestBulkPluginPathRefusesWhatTheFirstRefuses(t *testing.T) {
 	}
 	if reject, reason := w.call("/frp/v1/handler/other", "Login", map[string]any{"metas": map[string]string{"token": credA}}); !reject || reason != "HTTP 404" {
 		t.Errorf("an unknown plugin path: reject=%t %q, want HTTP 404", reject, reason)
+	}
+}
+
+// TestBulkPluginCallWakesOneReadOfBothLists (HBEP-6, Path state: the list is read "about a second after each
+// NewProxy and CloseProxy", and the bulk path's second list "the same way"): with the read period an hour, the
+// only thing that reads is a plugin call. A CloseProxy posted to the BULK path, and then an accepted bulk
+// NewProxy, each wake exactly one read, of the first list and of frps-bulk's, at the same settle time. The
+// test waits on the two web servers' own counts of lists served, never on a time. A bulk Notifier that
+// woke a trigger nobody reads, or none, leaves the counts where they were.
+func TestBulkPluginCallWakesOneReadOfBothLists(t *testing.T) {
+	w := startWiringEvery(t, true, time.Hour, bulkWiringObjects()...)
+	// The read at the start, of both lists. The period is an hour, so no other read comes by itself.
+	waitUntil(t, 30*time.Second, "the read at the start of both lists", func() bool { return w.token.listed.Load() >= 1 && w.bulk.listed.Load() >= 1 })
+	for _, step := range []struct {
+		name string
+		call func() (bool, string)
+	}{
+		{"a CloseProxy at the bulk path", func() (bool, string) {
+			return w.call(agentapi.FrpsBulkPluginPath, "CloseProxy", map[string]any{"user": map[string]any{"metas": map[string]string{"token": credA}}, "proxy_name": "uid-live"})
+		}},
+		{"an accepted NewProxy at the bulk path", func() (bool, string) { return w.newProxy(agentapi.FrpsBulkPluginPath, "uid-live") }},
+	} {
+		tFrom, bFrom, reads := w.token.listed.Load(), w.bulk.listed.Load(), tunnelReads.Load()
+		if reject, reason := step.call(); reject {
+			t.Fatalf("%s was refused: %q", step.name, reason)
+		}
+		waitUntil(t, 30*time.Second, step.name+": a read of both lists", func() bool { return w.token.listed.Load() > tFrom && w.bulk.listed.Load() > bFrom })
+		if dt, db, dr := w.token.listed.Load()-tFrom, w.bulk.listed.Load()-bFrom, tunnelReads.Load()-reads; dt != 1 || db != 1 || dr != 1 {
+			t.Errorf("%s woke %d reads of the first list, %d of frps-bulk's and %d passes; want one of each", step.name, dt, db, dr)
+		}
 	}
 }

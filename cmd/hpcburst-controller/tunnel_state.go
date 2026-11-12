@@ -169,7 +169,6 @@ func (s *pathState) readOnce(ctx context.Context) {
 		return
 	}
 	s.reportOrphans(ctx, rep, uids)
-	s.readBulk(ctx, uids)
 	for _, in := range live {
 		want, ok := rep.Conditions[string(in.UID)]
 		if !ok {
@@ -180,6 +179,11 @@ func (s *pathState) readOnce(ctx context.Context) {
 		}
 	}
 	tunnelReads.Add(1)
+	// The second frps's list is read last, after every condition is written: a frps-bulk that does not
+	// answer holds this loop for the reader's timeout, and TunnelConnected, which follows the first list
+	// only, must never wait for it (HBEP-6, The bulk path: an Instance's first `ready` doesn't wait for
+	// the bulk path).
+	s.readBulk(ctx, uids)
 }
 
 // apply writes the condition on the Instance when its status or reason differs from the stored
