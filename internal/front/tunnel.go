@@ -248,6 +248,14 @@ func (t *Tunnel) Registered(uid types.UID) bool {
 	return t.reg[uid]
 }
 
+// registeredCount is how many UIDs count as registered: the bulk path's gauge
+// (hpcburst_front_bulk_registered).
+func (t *Tunnel) registeredCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.reg)
+}
+
 // Subscribe implements Transports.
 func (t *Tunnel) Subscribe(f func()) {
 	t.mu.Lock()

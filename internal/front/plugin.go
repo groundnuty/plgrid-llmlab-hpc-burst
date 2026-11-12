@@ -51,6 +51,17 @@ type frpsPlugin struct {
 	tun    *Tunnel
 	prober *Prober // nil when the front probes nothing
 	log    *slog.Logger
+	// path is the path the plugin serves; empty is agentapi.FrontFrpsPluginPath, the first frps's.
+	// The bulk path's plugin serves agentapi.FrontFrpsBulkPluginPath (bulk.go).
+	path string
+}
+
+// servedPath is the path the plugin serves.
+func (h *frpsPlugin) servedPath() string {
+	if h.path == "" {
+		return agentapi.FrontFrpsPluginPath
+	}
+	return h.path
 }
 
 // pluginRequest is frps's call (pkg/plugin/server/types.go:21-25, :46-54).
@@ -69,7 +80,7 @@ type pluginResponse struct {
 }
 
 func (h *frpsPlugin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != agentapi.FrontFrpsPluginPath {
+	if r.URL.Path != h.servedPath() {
 		http.NotFound(w, r)
 		return
 	}

@@ -46,6 +46,8 @@ type Proxy struct {
 	// shutdown cut and before its record exists: a stop that does not wait
 	// for the handler loses that record (#432). Nil in production.
 	beforeWrite func(requestID string)
+	// bulk is the bulk path's transport (bulk.go); nil without the bulk path.
+	bulk *bulkPath
 }
 
 // ProxyOptions are the inputs of NewProxy.
@@ -191,6 +193,9 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, x *exchange, n n
 		// step 9); Release is idempotent, so the explicit calls stay.
 		defer t.release()
 		p.setTarget(x, t)
+		if p.bulk.takes(t, rb) && p.forwardBulk(w, r, x, t, body, rb, key) {
+			return
+		}
 		resp, err := p.send(x, r, t, body, rb, key)
 		if err == nil {
 			// Deferred, so a cut body's abort panic reports too.
@@ -278,6 +283,12 @@ func (p *Proxy) setTarget(x *exchange, t *target) {
 // x-envoy-* and X-Forwarded-For headers removed (HBEP-5, Contract and Request
 // headers).
 func (p *Proxy) send(x *exchange, r *http.Request, t *target, body []byte, rb requestBody, key string) (*http.Response, error) {
+	return p.sendWith(x, r, t, body, rb, key, p.inst)
+}
+
+// sendWith is send toward an Instance through inst: the token transports (send), or the bulk
+// path's (forwardBulk). Toward a managed target inst is not used.
+func (p *Proxy) sendWith(x *exchange, r *http.Request, t *target, body []byte, rb requestBody, key string, inst *instanceTransports) (*http.Response, error) {
 	h := r.Header.Clone()
 	stripHop(h)
 	h.Del("Authorization")
@@ -293,7 +304,7 @@ func (p *Proxy) send(x *exchange, r *http.Request, t *target, body []byte, rb re
 	var out []byte
 	path := r.URL.EscapedPath()
 	if t.inst != nil {
-		tr, ok := p.inst.get(t.inst.UID)
+		tr, ok := inst.get(t.inst.UID)
 		if !ok {
 			return nil, &dialError{err: errNoTransport}
 		}
