@@ -151,3 +151,46 @@ func TestAnUpgradeKeepsTheRouter(t *testing.T) {
 		})
 	}
 }
+
+// up's and status's builds checks read the router the launcher recorded: with up --instance-router
+// envoy recorded, the Envoy builds are required, and once placed with their pinned digests, nothing is
+// missing. The same host with no router recorded is the control: its builds pass without Envoy's.
+func TestTheRecordedRouterMakesUpAndStatusCheckEnvoysBuilds(t *testing.T) {
+	useTestPins(t)
+	envoyX86, envoyArm := []byte("an envoy for x86_64\n"), []byte("an envoy for aarch64\n")
+	pins := map[string]string{"x86_64": hexSum(envoyX86), "aarch64": hexSum(envoyArm)}
+	old := envoyBuildPins
+	envoyBuildPins = func() (map[string]string, error) { return pins, nil }
+	t.Cleanup(func() { envoyBuildPins = old })
+	s := newSupervisedFakeHost(t)
+	s.setProfiles()
+	dir := buildsDirOf(t, s.fakeHost)
+	place(t, dir, allBuilds)
+
+	rep := &UpReport{}
+	if err := checkBuildsAtUp(context.Background(), s.l, s.st.Ports, rep); err != nil {
+		t.Fatalf("no router recorded, every alpha build in place: %v", err)
+	}
+
+	s.st.InstanceRouter = "envoy"
+	if err := s.l.saveState(s.st); err != nil {
+		t.Fatal(err)
+	}
+	rep = &UpReport{}
+	err := checkBuildsAtUp(context.Background(), s.l, s.st.Ports, rep)
+	if err == nil || len(rep.AgentBuilds.Problems) != 2 || !strings.Contains(err.Error(), "envoy-x86_64 is missing") || !strings.Contains(err.Error(), "hack/fetch-envoy.sh --agent-builds") {
+		t.Fatalf("with the router recorded and no Envoy build: %v, problems %+v", err, rep.AgentBuilds.Problems)
+	}
+	if st := s.status(false); st.Health != Unhealthy || !strings.Contains(strings.Join(st.Reasons, "; "), "envoy-aarch64") {
+		t.Errorf("status with the router recorded and no Envoy build: %s %v", st.Health, st.Reasons)
+	}
+
+	place(t, dir, map[string][]byte{"envoy-x86_64": envoyX86, "envoy-aarch64": envoyArm})
+	rep = &UpReport{}
+	if err := checkBuildsAtUp(context.Background(), s.l, s.st.Ports, rep); err != nil {
+		t.Fatalf("with the router recorded and both Envoy builds in place: %v", err)
+	}
+	if st := s.status(false); st.Health != Healthy {
+		t.Errorf("status with both Envoy builds in place: %s %v", st.Health, st.Reasons)
+	}
+}
