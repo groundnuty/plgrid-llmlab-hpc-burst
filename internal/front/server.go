@@ -349,7 +349,9 @@ func listen(o Options, f *Front, frp *frpPassthrough, base context.Context) ([]*
 	if err != nil {
 		return fail(err)
 	}
-	if o.BulkPath {
+	if f.bulkFrp != nil {
+		// One gate for both halves of the split, the handler above and the certificate here (the
+		// review of #459): a bulk handler is never served without the second certificate.
 		if tlsCfg, err = withBulkCertificate(tlsCfg, o.Host); err != nil {
 			return fail(err)
 		}
