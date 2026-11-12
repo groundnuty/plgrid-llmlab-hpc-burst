@@ -105,6 +105,12 @@ func (h *handler) single(w http.ResponseWriter, r *http.Request, req chatRequest
 		c := a.content()
 		msg.Content = &c
 	}
+	if h.cfg.ReplyBytes > 0 && msg.Content != nil && len(*msg.Content) < h.cfg.ReplyBytes {
+		// reply-bytes: a large non-streamed reply (#448's bulk-path rehearsal), its content padded
+		// with spaces after the answer.
+		padded := *msg.Content + strings.Repeat(" ", h.cfg.ReplyBytes-len(*msg.Content))
+		msg.Content = &padded
+	}
 	choice := respChoice{Message: msg, FinishReason: a.finish}
 	if req.ReturnTokenIDs {
 		choice.TokenIDs = a.allIDs()
