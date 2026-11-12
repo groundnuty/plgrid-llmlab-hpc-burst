@@ -52,43 +52,55 @@ func containerCVD(inv appInvocation) (cvd []string, uds string) {
 	return cvd, uds
 }
 
+// Each worker sees exactly its own device, read from the container's own environment, in the
+// controller's own shape, a launch that sets no CUDA_VISIBLE_DEVICES, where the job's whole list must
+// not be forwarded after the slice (#495's review), and with a launch that sets one, which the slice
+// replaces.
 func TestEachWorkerRunsOnItsOwnDeviceAndSocket(t *testing.T) {
-	h := newHarness(t, harnessOptions{baseEnv: []string{"CUDA_VISIBLE_DEVICES=0,1"}})
-	h.set(h.workersState(2, "7")) // the launch sets 7: every worker's slice replaces it
-	r := h.waitReport("both workers running", 60*time.Second, func(r agentapi.Report) bool {
-		if r.Instance == nil || len(r.Instance.Workers) != 2 {
-			return false
-		}
-		for _, w := range r.Instance.Workers {
-			if w.Phase != agentapi.PartRunning {
-				return false
+	for _, c := range []struct{ name, launchCVD string }{
+		{"the launch sets none", ""},
+		{"the launch sets 7", "7"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			launchCVD := c.launchCVD
+			h := newHarness(t, harnessOptions{baseEnv: []string{"CUDA_VISIBLE_DEVICES=0,1"}})
+			h.set(h.workersState(2, launchCVD))
+			r := h.waitReport("both workers running", 60*time.Second, func(r agentapi.Report) bool {
+				if r.Instance == nil || len(r.Instance.Workers) != 2 {
+					return false
+				}
+				for _, w := range r.Instance.Workers {
+					if w.Phase != agentapi.PartRunning {
+						return false
+					}
+				}
+				return true
+			})
+			got := map[string][]string{}
+			socks := map[string]bool{}
+			for _, inv := range h.execs() {
+				cvd, uds := containerCVD(inv)
+				got[uds] = cvd
+				socks[uds] = true
 			}
-		}
-		return true
-	})
-	got := map[string][]string{}
-	socks := map[string]bool{}
-	for _, inv := range h.execs() {
-		cvd, uds := containerCVD(inv)
-		got[uds] = cvd
-		socks[uds] = true
-	}
-	want := map[string][]string{
-		agentapi.ContainerEngineSocket("worker-0"): {"0"},
-		agentapi.ContainerEngineSocket("worker-1"): {"1"},
-	}
-	for sock, cvd := range want {
-		if !slices.Equal(got[sock], cvd) {
-			t.Errorf("the worker on %s sees CUDA_VISIBLE_DEVICES %q, want exactly %q", sock, got[sock], cvd)
-		}
-	}
-	if len(socks) != 2 {
-		t.Errorf("the workers ran on sockets %v, want two of their own", socks)
-	}
-	for _, w := range r.Instance.Workers {
-		if !strings.HasSuffix(w.EngineSocket, "/"+w.Name+".sock") {
-			t.Errorf("%s reports socket %s, not its own", w.Name, w.EngineSocket)
-		}
+			want := map[string][]string{
+				agentapi.ContainerEngineSocket("worker-0"): {"0"},
+				agentapi.ContainerEngineSocket("worker-1"): {"1"},
+			}
+			for sock, cvd := range want {
+				if !slices.Equal(got[sock], cvd) {
+					t.Errorf("the worker on %s sees CUDA_VISIBLE_DEVICES %q, want exactly %q", sock, got[sock], cvd)
+				}
+			}
+			if len(socks) != 2 {
+				t.Errorf("the workers ran on sockets %v, want two of their own", socks)
+			}
+			for _, w := range r.Instance.Workers {
+				if !strings.HasSuffix(w.EngineSocket, "/"+w.Name+".sock") {
+					t.Errorf("%s reports socket %s, not its own", w.Name, w.EngineSocket)
+				}
+			}
+		})
 	}
 }
 

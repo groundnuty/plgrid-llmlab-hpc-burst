@@ -15,7 +15,7 @@ import (
 // workersReport is the worst report of n workers.
 func workersReport(n int) Report {
 	base := restOfReport(nil)
-	share := (MaxTargetSessions + n - 1) / n
+	share := int(MaxWorkerTargetSessions(n))
 	r := base
 	in := *base.Instance
 	in.Checks = nil
@@ -63,4 +63,13 @@ func TestSeveralWorkersReportsFitTheBodyLimit(t *testing.T) {
 		}
 	}
 	t.Logf("the largest worst report is %d bytes, at %d workers, of the %d limit", largest, at, MaxBodyBytes)
+}
+
+// Each worker's share of MaxTargetSessions, ceil(1024 / n), worked out by hand.
+func TestMaxWorkerTargetSessions(t *testing.T) {
+	for n, want := range map[int]int32{0: 1024, 1: 1024, 2: 512, 3: 342, 7: 147, 8: 128} {
+		if got := MaxWorkerTargetSessions(n); got != want {
+			t.Errorf("%d workers: %d, want %d", n, got, want)
+		}
+	}
 }

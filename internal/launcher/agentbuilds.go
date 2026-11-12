@@ -56,6 +56,9 @@ type ArchBuilds struct {
 	Partitions []string `json:"partitions"` // profile/partition, sorted
 	Agent      BuildFile
 	Frpc       BuildFile
+	// Envoy is the check of the Envoy build, made only when the controller runs Instances behind a
+	// router (up --instance-router envoy; #454); nil otherwise.
+	Envoy *BuildFile `json:"envoy,omitempty"`
 }
 
 // BuildProblem is one thing wrong with the builds, and what fixes it.
@@ -322,4 +325,46 @@ func sha256Of(path string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// envoyBuildPins gives the pinned Envoy digest of each cpuArch (EnvoyDigests). A test replaces it,
+// since no test can make an Envoy with the pinned digest.
+var envoyBuildPins = EnvoyDigests
+
+// CheckAgentBuildsFor is CheckAgentBuilds for a host whose controller runs Instances behind router
+// (up --instance-router; "" for none): with a router, every cpuArch also needs its Envoy build,
+// envoy-<cpuArch>, with the digest envoy-pins.txt pins, since the Provider's controller stages it for
+// every job then (#454). Without one it is CheckAgentBuilds, and Envoy is not looked at.
+func CheckAgentBuildsFor(ctx context.Context, cfg *rest.Config, dir, router string) (*AgentBuilds, error) {
+	rep, err := CheckAgentBuilds(ctx, cfg, dir)
+	if err != nil || router == "" {
+		return rep, err
+	}
+	pins, err := envoyBuildPins()
+	if err != nil {
+		return nil, err
+	}
+	checkEnvoyBuilds(rep, dir, pins)
+	return rep, nil
+}
+
+// checkEnvoyBuilds adds the check of each checked cpuArch's Envoy build to rep, and its problems.
+func checkEnvoyBuilds(rep *AgentBuilds, dir string, pins map[string]string) {
+	for i := range rep.Archs {
+		a := &rep.Archs[i]
+		f := checkBuildFile(agentapi.EnvoyBuildName(a.CPUArch), dir, pins[a.CPUArch])
+		a.Envoy = &f
+		problem := func(what, fix string) {
+			rep.Problems = append(rep.Problems, BuildProblem{CPUArch: a.CPUArch, Partitions: a.Partitions, What: what, Fix: fix})
+		}
+		switch {
+		case pins[a.CPUArch] == "":
+			problem("envoy-pins.txt pins no Envoy for it", "pin Envoy for the architecture in internal/agent/envoypin/envoy-pins.txt")
+		case !f.OK && f.Present && f.SHA256 != "":
+			problem(fmt.Sprintf("%s in %s has sha256 %s, but the pin (envoy-pins.txt) says %s", f.Name, dir, f.SHA256, f.Expected),
+				"hack/fetch-envoy.sh --agent-builds "+ShellQuote(dir))
+		case !f.OK:
+			problem(f.problem(dir), "hack/fetch-envoy.sh --agent-builds "+ShellQuote(dir))
+		}
+	}
 }

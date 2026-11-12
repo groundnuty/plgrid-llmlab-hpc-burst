@@ -1,6 +1,6 @@
 # Quickstart
 
-This page takes you from a clone of the repository to one request through the front, on Athena. You start a control-plane host on your own machine. You tell it where a model may run (a Provider) and which model you want (a ModelDeployment). You then send an OpenAI-style request to the front, by the model's plain name. The framework submits and supervises the Slurm jobs.
+This page takes you from a clone of the repository, or from the release archive, to one request through the front, on Athena. You start a control-plane host on your own machine. You tell it where a model may run (a Provider) and which model you want (a ModelDeployment). You then send an OpenAI-style request to the front, by the model's plain name. The framework submits and supervises the Slurm jobs.
 
 The route is **Athena, in `host-dialed` mode**. Your host dials each job through the login node, so no compute node ever has to reach your machine. Helios is beta and waits for the GH200 nodes to return ([Helios](#helios-beta)).
 
@@ -8,7 +8,7 @@ The framework is alpha, and real runs are still being measured. Follow them in [
 
 Read [HBEP-2](../hbep/0002-scope-and-user-story/README.md) first for what the framework is for. Each rule this page relies on lives in an HBEP, and the steps link there instead of repeating it.
 
-Commands run from the repository root. `<user>`, `<account>`, `<grant>` and `<login-node>` stand for your own values. Nothing private belongs in a manifest you share.
+Commands run from the repository root, or, on the release archive's path (step 2), from the directory you unpacked the archive in. `<user>`, `<account>`, `<grant>` and `<login-node>` stand for your own values. Nothing private belongs in a manifest you share.
 
 ## 1. What you need
 
@@ -59,19 +59,19 @@ The controller records the agent build's sha256 with every job it submits. The s
 
 Once release v0.1.0-alpha.1 is published, you can unpack its archive instead of building. Until then this path does not exist, and you build from source. The archive is for Linux on x86_64 and replaces the two blocks above.
 
-Keep working in a clone of the repository, checked out at that tag. The commands below read `config/crd`, `profiles/` and `examples/` from it, and the archive carries the first two but not `examples/`. Download `hpcburst-v0.1.0-alpha.1-linux-amd64.tar.gz` and `SHA256SUMS` from the release page into the repository root. Then check the archive, unpack it, and put its files where the build puts them:
+You need no clone of the repository. Besides the binaries, the archive carries the `config/crd`, `profiles/` and `examples/` that the later steps read ([HBEP-15](../hbep/0015-dependencies-and-provenance/README.md), Releases). Make an empty directory, download `hpcburst-v0.1.0-alpha.1-linux-amd64.tar.gz` and `SHA256SUMS` from the release page into it, and run the rest of this page from there. Check the archive, unpack it in place, check every file it unpacked, and put k3s, frps and the agent builds where the launcher and the controller read them:
 
 ```
 sha256sum -c --ignore-missing SHA256SUMS
-mkdir -p release bin "$BIN"
-tar -xzf hpcburst-v0.1.0-alpha.1-linux-amd64.tar.gz -C release
-cp release/bin/hpcburst* bin/
-cp -r release/bin/k3s-1.36.5 release/bin/frp-0.71.1 "$BIN"/
+tar -xzf hpcburst-v0.1.0-alpha.1-linux-amd64.tar.gz
+sha256sum -c --quiet SHA256SUMS
+mkdir -p "$BIN"
+cp -r bin/k3s-1.36.5 bin/frp-0.71.1 "$BIN"/
 install -d -m 700 "$STATE" "$STATE/agent-builds"
-cp release/agent-builds/* "$STATE/agent-builds/"
+cp agent-builds/* "$STATE/agent-builds/"
 ```
 
-From here on the steps are the same for both ways.
+The archive's `bin/` already holds the three host binaries side by side, as `up` needs them, and its `agent-builds/` holds the agent and `frpc` for both `x86_64` and `aarch64`. From here on the steps are the same for both ways.
 
 ## 3. Write your credentials files
 
@@ -223,8 +223,22 @@ Then apply `profiles/llmlab.yaml`, a copy of `provider-llmlab.yaml` with `<user>
 Helios is beta, to run when the GH200 nodes return. The steps are the same, with these changes:
 
 - Write a Helios ssh file, as in step 3, and apply `profiles/helios.yaml`, a copy of `provider-helios-gh200.yaml` and `modeldeployment-qwen25-instruct.yaml`.
-- Build the `aarch64` agent as well. Helios `plgrid-gpu-gh200` needs it, and the Helios profile also lists an `x86_64` CPU partition. `hack/build-agents.sh` with no architecture builds both.
+- Build the `aarch64` agent as well. Helios `plgrid-gpu-gh200` needs it, and the Helios profile also lists an `x86_64` CPU partition. `hack/build-agents.sh` with no architecture builds both; the release archive's `agent-builds/` already holds both.
 - The Helios example asks for QOS `now` (`qos: now`). It limits each job to 12 hours and everything you run at once, your other jobs on that login included, to one GPU, 72 CPUs and 122400Mi of memory. Further jobs can queue behind a running one, but they wait while that GPU is in use, so no quick start is promised ([HBEP-4](../hbep/0004-provider-interface/README.md), QOS limits). Delete the line to use your association's default QOS.
+
+## Beta: Instances behind a router
+
+Opt-in. With `--instance-router envoy`, the controller runs each new Instance's worker behind Envoy ([HBEP-5](../hbep/0005-llmlab-compatible-front/README.md), Inside an Instance), and every job is staged with Envoy's build. The release archive doesn't ship that build, so fetch it into the agent builds first, then start the host with the flag; the other flags are step 4's:
+
+```
+hack/fetch-envoy.sh --agent-builds "$STATE/agent-builds"
+bin/hpcburst up --state-dir "$STATE" --bin-dir "$BIN" --manifests config/crd \
+  --front-config ~/.config/hpcburst/front.json \
+  --front-mode host-dialed --instance-router envoy
+```
+
+- `up` and `status` then check `envoy-<cpuArch>` for each partition's architecture, against the pinned digest, and name the fetch command when one is missing or wrong.
+- Envoy runs bare in the job and needs glibc 2.30 or later on the compute nodes. The agent checks it before it starts Envoy, and refuses an older node, naming the glibc it found and the one Envoy needs.
 
 ## Alpha's limits
 

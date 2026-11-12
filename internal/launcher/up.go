@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -48,6 +49,12 @@ type UpOptions struct {
 	// for the bulk path, frps-bulk, at base+13 to base+15, and up keeps a second certificate for the
 	// agent endpoint's key, naming the bulk server only. It needs a controller binary and frps.
 	BulkPath bool
+	// InstanceRouter is up --instance-router (beta, opt-in; #429, #454): the router each new Instance
+	// runs in front of its worker, "envoy", passed to the controller as its --instance-router. With
+	// it, the agent builds include Envoy's, which the Provider's controller stages to every job.
+	// "" is alpha: no router, and the controller's command line is as before. It needs a controller
+	// binary.
+	InstanceRouter string
 
 	// supervisorArgv, set by tests only, replaces the supervisor's command line.
 	supervisorArgv []string
@@ -130,6 +137,7 @@ func startAndWait(ctx context.Context, spec launchSpec, front Front, timeout tim
 	st := newRecord(spec, rec, front, t0)
 	st.RelayKeeper = spec.relayKeeper
 	st.BulkPath = spec.bulkPath
+	st.InstanceRouter = spec.instanceRouter
 	// Record before waiting: an interrupted or crashed start is then still cleaned up by down.
 	if err := spec.l.saveState(st); err != nil {
 		_, _ = stopRecorded(context.Background(), st, 10*time.Second, log)
@@ -220,6 +228,12 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 		if ports, err = ports.WithBulkPath(); err != nil {
 			return nil, err
 		}
+	}
+	if o.InstanceRouter != "" && o.InstanceRouter != string(v1alpha1.InstanceRouterEnvoy) {
+		return nil, fmt.Errorf("--instance-router %q: want %s, or none (alpha)", o.InstanceRouter, v1alpha1.InstanceRouterEnvoy)
+	}
+	if o.InstanceRouter != "" && ctrlBin == "" {
+		return nil, errors.New("a router was asked for (--instance-router), but no controller binary was found: the controller runs the Instances")
 	}
 	if o.RelayKeeper && ctrlBin == "" {
 		return nil, errors.New("the relay keeper was asked for (--relay-keeper), but no controller binary was found: the keeper is the controller binary's relaykeeper subcommand")
@@ -314,6 +328,7 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 		spec.controllers, spec.frontRun, spec.frps = &ControllerConfig{Binary: ctrlBin}, frontRun, frpsRun
 		spec.relayKeeper = o.RelayKeeper
 		spec.bulkPath = o.BulkPath
+		spec.instanceRouter = o.InstanceRouter
 	}
 	st, readyzAt, readyAt, err := startAndWait(ctx, spec, front, o.ReadyTimeout, o.Log)
 	if err != nil {
@@ -467,7 +482,7 @@ func checkBuildsAtUp(ctx context.Context, l layout, ports Ports, rep *UpReport) 
 	cfg, err := restConfig(l.kubeconfig(), ports, 30*time.Second)
 	var ab *AgentBuilds
 	if err == nil {
-		ab, err = CheckAgentBuilds(ctx, cfg, dir)
+		ab, err = CheckAgentBuildsFor(ctx, cfg, dir, recordedRouter(l))
 	}
 	if err != nil {
 		rep.AgentBuilds = &AgentBuilds{Dir: dir, Detail: err.Error()}
@@ -481,3 +496,13 @@ func checkBuildsAtUp(ctx context.Context, l layout, ports Ports, rep *UpReport) 
 }
 
 var errNotRunning = errors.New("no host is recorded in the state directory")
+
+// recordedRouter is the router the launcher's record names (up --instance-router), "" for none or
+// when no record can be read.
+func recordedRouter(l layout) string {
+	st, err := l.loadState()
+	if err != nil || st == nil {
+		return ""
+	}
+	return st.InstanceRouter
+}

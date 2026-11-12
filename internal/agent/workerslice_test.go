@@ -116,3 +116,75 @@ func TestWorkerExecSetsTheSliceReplacingTheLaunchsValue(t *testing.T) {
 		t.Errorf("one worker: %q, want the launch's 7, as alpha", env)
 	}
 }
+
+// The controller's own shape: a launch with no CUDA_VISIBLE_DEVICES. The container gets the slice, once,
+// and never the job's whole list after it, which, last in the environment, would win (#495's review).
+func TestWorkerExecSetsTheSliceWhenTheLaunchSetsNone(t *testing.T) {
+	w := WorkerExec{Launch: testLaunch(), Key: testKey, BaseEnv: []string{"PATH=/usr/bin", "CUDA_VISIBLE_DEVICES=0,1"}, Devices: []string{"1"}}
+	env, err := w.Env()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cvd []string
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "APPTAINERENV_CUDA_VISIBLE_DEVICES=") {
+			cvd = append(cvd, kv)
+		}
+	}
+	if !slices.Equal(cvd, []string{"APPTAINERENV_CUDA_VISIBLE_DEVICES=1"}) {
+		t.Errorf("the container's CUDA_VISIBLE_DEVICES: %q, want exactly the slice, 1", cvd)
+	}
+	// One worker, the same launch: alpha forwards the job's list.
+	w.Devices = nil
+	if env, err = w.Env(); err != nil || !slices.Contains(env, "APPTAINERENV_CUDA_VISIBLE_DEVICES=0,1") {
+		t.Errorf("one worker: %q, %v; want the job's 0,1 forwarded, as alpha", env, err)
+	}
+}
+
+func TestWorkerDevicesRefusesAnIndexBeyondTheWorkers(t *testing.T) {
+	if got, err := workerDevices([]string{"CUDA_VISIBLE_DEVICES=0,1"}, 5, 2, 1); err == nil {
+		t.Errorf("worker 5 of 2: %q, want an error, never a panic", got)
+	}
+}
+
+// The agent refuses a desired state whose workers are not worker-0 to worker-<N-1>, each named once, or
+// whose worker asks a warm-up above its share of MaxTargetSessions, ceil(1024 / N) (#495's review).
+func TestCheckDesiredRefusesBadWorkers(t *testing.T) {
+	const noWarmUp = -1
+	worker := func(name string, sessions int32) agentapi.DesiredWorker {
+		dw := agentapi.DesiredWorker{Name: name, EngineSocket: agentapi.ContainerEngineSocket(name)}
+		if sessions != noWarmUp {
+			dw.Checks = &agentapi.Checks{VerificationGeneration: 1, WarmUp: &agentapi.WarmUpRequest{TargetSessions: sessions}}
+		}
+		return dw
+	}
+	state := func(ws ...agentapi.DesiredWorker) agentapi.DesiredState {
+		return agentapi.DesiredState{Action: agentapi.ActionRun, Instance: &agentapi.DesiredInstance{Workers: ws}}
+	}
+	eight := func(sessions int32) agentapi.DesiredState {
+		var ws []agentapi.DesiredWorker
+		for i := 0; i < 8; i++ {
+			ws = append(ws, worker(agentapi.WorkerName(i), sessions))
+		}
+		return state(ws...)
+	}
+	for _, c := range []struct {
+		name string
+		d    agentapi.DesiredState
+		ok   bool
+	}{
+		{"worker-0 and worker-1", state(worker("worker-0", noWarmUp), worker("worker-1", noWarmUp)), true},
+		{"worker-0 and worker-5", state(worker("worker-0", noWarmUp), worker("worker-5", noWarmUp)), false},
+		{"worker-0 twice", state(worker("worker-0", noWarmUp), worker("worker-0", noWarmUp)), false},
+		{"a router as a worker", state(worker("router", noWarmUp)), false},
+		{"8 workers at 128 sessions, the share", eight(128), true},
+		{"8 workers at 129 sessions", eight(129), false},
+		{"one worker at 1024 sessions", state(worker("worker-0", 1024)), true},
+		{"one worker at 1025 sessions", state(worker("worker-0", 1025)), false},
+		{"a worker at 0 sessions", state(worker("worker-0", noWarmUp), worker("worker-1", 0)), false},
+	} {
+		if err := checkDesired(c.d); (err == nil) != c.ok {
+			t.Errorf("%s: %v, want accepted %v", c.name, err, c.ok)
+		}
+	}
+}

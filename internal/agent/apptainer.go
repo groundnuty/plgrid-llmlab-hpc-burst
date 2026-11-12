@@ -126,8 +126,10 @@ func (w WorkerExec) Env() ([]string, error) {
 	// --cleanenv drops the job's CUDA_VISIBLE_DEVICES, which Slurm sets to
 	// the GPUs it gave the job: forward it, unless the launch sets it, so the
 	// engine sees exactly those GPUs (Apptainer's GPU documentation; L-3.4).
-	// It is not a deployment-ID input (HBEP-3's table).
-	if cudaVisible != "" && !seen["CUDA_VISIBLE_DEVICES"] {
+	// It is not a deployment-ID input (HBEP-3's table). With several workers
+	// the worker's slice, above, replaces it: forwarding the job's whole list
+	// after it would let every worker see every device (#495's review).
+	if cudaVisible != "" && !seen["CUDA_VISIBLE_DEVICES"] && w.Devices == nil {
 		env = append(env, apptainerEnvPrefixes[0]+"CUDA_VISIBLE_DEVICES="+cudaVisible)
 	}
 	for _, c := range engineCacheVars {

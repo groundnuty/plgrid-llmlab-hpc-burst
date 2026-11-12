@@ -92,6 +92,9 @@ func newFrpRigWith(t *testing.T, o frpRigOptions) *frpRig {
 	t.Cleanup(func() { frpRigBases <- base }) // runs last: frps is stopped by then
 	dir := shortDir(t)
 	r := &frpRig{t: t, host: agentapi.Host{StateDir: dir, PortBase: base}, dir: dir, frpc: frpc, frps: frps}
+	// Before anything binds: a frps that an earlier, killed test binary left here answers /healthz,
+	// and the rig would take it for its own (#484).
+	testenv.RequireFreePorts(t, "the frp rig", r.host.FrpsPluginAddr(), r.host.FrpsBindAddr(), r.host.FrpsTCPMuxAddr(), r.host.FrpsWebAddr())
 	r.cert = writeDialHomeCert(t, r.host)
 	startAdmitAllPlugin(t, r.host)
 	var err error
@@ -132,7 +135,7 @@ func (r *frpRig) startFrps() {
 		r.t.Fatal(err)
 	}
 	r.t.Cleanup(bin.Close)
-	if r.proc, err = launcher.StartFrps(launcher.FrpsSpec{Bin: bin, Config: r.cfg, Log: launcher.FrpsLogFile(r.host), Dir: r.dir}); err != nil {
+	if r.proc, err = launcher.StartFrps(launcher.FrpsSpec{Bin: bin, Config: r.cfg, Log: launcher.FrpsLogFile(r.host), Dir: r.dir, ExitWithParent: true}); err != nil {
 		r.t.Fatal(err)
 	}
 	for end := time.Now().Add(15 * time.Second); ; time.Sleep(50 * time.Millisecond) {
@@ -315,11 +318,13 @@ func (r *frpRig) startFrpcEdited(uid types.UID, sock, dialHome string, edit func
 	cmd.Env = []string{"PATH=/usr/bin:/bin"}
 	cmd.Stdout, cmd.Stderr = out, out
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
+	// To die with this test binary: one that is killed runs no cleanup, and a frpc left running logs in
+	// to the next rig's frps (#484).
+	done, err := testenv.StartDyingWithParent(cmd)
+	if err != nil {
 		r.t.Fatal(err)
 	}
-	p := &frpcProc{t: r.t, cmd: cmd, log: cfg + ".log", done: make(chan struct{})}
-	go func() { _ = cmd.Wait(); close(p.done) }()
+	p := &frpcProc{t: r.t, cmd: cmd, log: cfg + ".log", done: done}
 	r.t.Cleanup(p.kill)
 	return p
 }
@@ -342,7 +347,7 @@ type frpcProc struct {
 	t    *testing.T
 	cmd  *exec.Cmd
 	log  string
-	done chan struct{}
+	done <-chan struct{}
 	once sync.Once
 }
 

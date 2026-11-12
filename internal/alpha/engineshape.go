@@ -151,9 +151,22 @@ func (t procTree) inJob(p NodeProc) bool {
 	return false
 }
 
+// parentHidden reports whether p's parent is hidden from this user: its PID is not in the listing and the listing could not read
+// its /proc entry (issue #488). A parent the listing has, or one it could read, is not hidden.
+func (t procTree) parentHidden(p NodeProc) bool {
+	_, listed := t.parent(p)
+	return !listed && p.ParentHidden
+}
+
 // underApptainer reports whether p's parent is Apptainer's, or a shell under
-// one, and so on up, each of the job (PickEngine's condition 2).
+// one, and so on up, each of the job; or whether p's own parent is hidden from
+// this user, as Apptainer's setuid starter is (PickEngine's condition 2). The
+// hidden parent counts at p's own parent alone, never above a shell: it is the
+// engine's parent that the listing cannot see.
 func (t procTree) underApptainer(p NodeProc) bool {
+	if t.parentHidden(p) {
+		return true
+	}
 	cur := p
 	for range len(t.procs) + 1 {
 		q, ok := t.parent(cur)
@@ -274,9 +287,12 @@ func (t procTree) line(p NodeProc, depth int) string {
 	}
 	l := fmt.Sprintf("d%d %s in-job:%s env:%s cgroup:%s argv:%s meets:%s", depth, kindOf(p.Argv), how, env, cgroup, argvForm(p.Argv), strings.Join(meets, "+"))
 	if depth == 0 {
-		if _, ok := t.parent(p); ok {
+		switch _, ok := t.parent(p); {
+		case ok:
 			l += " parent:outside-the-job"
-		} else {
+		case p.ParentHidden:
+			l += " parent:hidden"
+		default:
 			l += " parent:unlisted"
 		}
 	}
