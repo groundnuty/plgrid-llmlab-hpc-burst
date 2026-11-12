@@ -226,6 +226,20 @@ Helios is beta, to run when the GH200 nodes return. The steps are the same, with
 - Build the `aarch64` agent as well. Helios `plgrid-gpu-gh200` needs it, and the Helios profile also lists an `x86_64` CPU partition. `hack/build-agents.sh` with no architecture builds both.
 - The Helios example asks for QOS `now` (`qos: now`). It limits each job to 12 hours and everything you run at once, your other jobs on that login included, to one GPU, 72 CPUs and 122400Mi of memory. Further jobs can queue behind a running one, but they wait while that GPU is in use, so no quick start is promised ([HBEP-4](../hbep/0004-provider-interface/README.md), QOS limits). Delete the line to use your association's default QOS.
 
+## Beta: Instances behind a router
+
+Opt-in. With `--instance-router envoy`, the controller runs each new Instance's worker behind Envoy ([HBEP-5](../hbep/0005-llmlab-compatible-front/README.md), Inside an Instance), and every job is staged with Envoy's build. The release archive doesn't ship that build, so fetch it into the agent builds first, then start the host with the flag; the other flags are step 4's:
+
+```
+hack/fetch-envoy.sh --agent-builds "$STATE/agent-builds"
+bin/hpcburst up --state-dir "$STATE" --bin-dir "$BIN" --manifests config/crd \
+  --front-config ~/.config/hpcburst/front.json \
+  --front-mode host-dialed --instance-router envoy
+```
+
+- `up` and `status` then check `envoy-<cpuArch>` for each partition's architecture, against the pinned digest, and name the fetch command when one is missing or wrong.
+- Envoy runs bare in the job and needs glibc 2.30 or later on the compute nodes. The agent checks it before it starts Envoy, and refuses an older node, naming the glibc it found and the one Envoy needs.
+
 ## Alpha's limits
 
 - **Athena is the alpha platform, and its runs are still being measured.** The runs are tracked in [issue #145](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/145). Expect queue waits and start-up times to move as the profile is tuned.

@@ -99,7 +99,7 @@ func main() {
 		config = fs.String("config", "", "")
 		fs.String("mode", "", "")
 	} else {
-		for _, name := range []string{"front-mode", "front-addr", "relay-keeper-socket"} {
+		for _, name := range []string{"front-mode", "front-addr", "relay-keeper-socket", "instance-router"} {
 			fs.String(name, "", "")
 		}
 		fs.Bool("bulk-path", false, "")
