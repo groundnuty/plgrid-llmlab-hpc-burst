@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/enginedouble"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
@@ -210,13 +211,15 @@ func p99(d []time.Duration) time.Duration {
 	return s[int(math.Ceil(0.99*float64(len(s))))-1]
 }
 
-// drainChat sends one non-streamed chat request and reads its whole body, counting the bytes: the
-// stack's client keeps at most 8 MiB of a reply, and would cut a 64 MiB one.
+// drainChat sends one non-streamed chat request marked for the engine double's reply-bytes (its last
+// message is enginedouble.ReplyBytesMarker, so the agent's own checks of the engine get small replies)
+// and reads its whole body, counting the bytes: the stack's client keeps at most 8 MiB of a reply, and
+// would cut a 64 MiB one.
 func drainChat(t *testing.T, r *rig, key string) (int64, int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), stack.WaitDeadline)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+r.h.Ports.ClientAddr+"/v1/chat/completions",
-		strings.NewReader(stack.ChatBody(stack.Model, 8, 0, false, "")))
+		strings.NewReader(stack.ChatBody(stack.Model, 8, 0, false, enginedouble.ReplyBytesMarker)))
 	if err != nil {
 		return 0, 0, err
 	}

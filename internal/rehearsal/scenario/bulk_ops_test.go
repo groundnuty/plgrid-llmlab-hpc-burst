@@ -228,7 +228,9 @@ func TestPreBulkAllocationKeepsItsTokenTunnel(t *testing.T) {
 		{string(agentapi.DialHomeHostDialed), portsBulkHostDialed},
 	} {
 		t.Run(c.mode, func(t *testing.T) {
-			r := startRigWith(t, rigSetup{mode: c.mode, ports: c.ports})
+			// No watch: down and up restart the API server, which resets a watch, and this test reads
+			// nothing from one.
+			r := startRigWith(t, rigSetup{mode: c.mode, ports: c.ports, noWatch: true})
 			r.engineEnv = []v1alpha1.EnvVar{{Name: "HB_ENGINE_DOUBLE", Value: "token-delay=" + bulkTokenDelay.String()}}
 			in := r.startServing(false)
 			key := r.fc.KeyFor(in)
