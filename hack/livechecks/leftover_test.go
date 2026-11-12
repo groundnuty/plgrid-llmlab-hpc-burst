@@ -425,7 +425,7 @@ func TestAStoppedScriptThatDoesNotStopIsGivenUpOnAndItsDumpNamesIt(t *testing.T)
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 	// The script ignores TERM once its trap is in: wait on that state, not on a time.
 	var dump string
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		dump = hangDump(cmd.Process.Pid)
 		if ignoresTerm(dump) {
@@ -455,7 +455,7 @@ func TestAStoppedScriptThatDoesNotStopIsGivenUpOnAndItsDumpNamesIt(t *testing.T)
 		if !r.timedOut {
 			t.Errorf("waitBounded returned (%v, timed out %t) for a script that ignores TERM, want it to give up at its bound", r.err, r.timedOut)
 		}
-	case <-time.After(30 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("waitBounded did not return: its wait is not bounded")
 	}
 }
@@ -481,46 +481,54 @@ func TestTheDumpNamesTheLockAProcessWaitsOnAndItsHolder(t *testing.T) {
 	if _, err := exec.LookPath("flock"); err != nil {
 		t.Skip("no flock program on this host")
 	}
-	lock := filepath.Join(t.TempDir(), "host.lock")
-	if err := os.WriteFile(lock, nil, 0o600); err != nil {
-		t.Fatal(err)
+	// holdLock starts a flock command holding a lock on a new file, and returns the file and the holder's PID once the lock is held.
+	holdLock := func(name string) (string, int) {
+		lock := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(lock, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		pr, pw, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { pw.Close(); pr.Close() })
+		holder := exec.Command("flock", lock, "bash", "-c", "echo held; read x")
+		holder.Stdin = pr
+		out, err := holder.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := holder.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = holder.Process.Kill(); _ = holder.Wait() })
+		held := make(chan struct{})
+		go func() {
+			buf := make([]byte, 16)
+			_, _ = out.Read(buf)
+			close(held)
+		}()
+		select {
+		case <-held:
+		case <-time.After(30 * time.Second):
+			t.Fatalf("the holder of %s never took the lock", name)
+		}
+		return lock, holder.Process.Pid
 	}
-	held := make(chan struct{})
-	holder := exec.Command("flock", lock, "bash", "-c", "echo held; read x")
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pw.Close()
-	defer pr.Close()
-	holder.Stdin = pr
-	out, err := holder.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := holder.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = holder.Process.Kill(); _ = holder.Wait() })
-	go func() {
-		buf := make([]byte, 16)
-		_, _ = out.Read(buf)
-		close(held)
-	}()
-	select {
-	case <-held:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the holder never took the lock")
-	}
-	waiter := exec.Command("bash", "-c", `flock "$1" true`, "live-checks.sh", lock)
+	lock, holderPID := holdLock("host.lock")
+	// Another lock, held by another process, that nothing in the tree under dump waits on or holds: it must not appear.
+	other, otherPID := holdLock("other.lock")
+	// The waiting flock is a CHILD of the bash named live-checks.sh (the bash cannot exec its last command: another follows), as the
+	// script's remote() is a child of the script, so the dump has to walk the tree to find it.
+	waiter := exec.Command("bash", "-c", `flock "$1" true; echo done`, "live-checks.sh", lock)
 	if err := waiter.Start(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = waiter.Process.Kill(); _ = waiter.Wait() })
 	// Wait on the state: the dump shows the wait once the flock child has called flock(2).
-	want := fmt.Sprintf("held by pid %d ", holder.Process.Pid)
+	want := fmt.Sprintf("held by pid %d ", holderPID)
 	var dump string
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		dump = hangDump(waiter.Process.Pid)
 		if strings.Contains(dump, "waits on lock") && strings.Contains(dump, want) {
@@ -533,6 +541,13 @@ func TestTheDumpNamesTheLockAProcessWaitsOnAndItsHolder(t *testing.T) {
 	}
 	if !strings.Contains(dump, "the locked file: "+lock) {
 		t.Errorf("the dump does not name the locked file %s:\n%s", lock, dump)
+	}
+	if want := fmt.Sprintf("ppid %d state ", waiter.Process.Pid); !strings.Contains(dump, want) {
+		t.Errorf("the dump does not show the waiting flock as a child of the script (%q):\n%s", want, dump)
+	}
+	// What is not the tree's is not listed: not the other lock, not its holder, and no lock the tree holds (it holds none).
+	if strings.Contains(dump, other) || strings.Contains(dump, fmt.Sprintf("pid %d ", otherPID)) || strings.Contains(dump, "holds:") {
+		t.Errorf("the dump lists a lock or a holder that is not the waiting tree's:\n%s", dump)
 	}
 	t.Logf("the dump, as a hang would print it:\n%s", dump)
 }
