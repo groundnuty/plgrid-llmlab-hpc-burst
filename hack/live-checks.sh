@@ -64,6 +64,12 @@
 # warm start its agent's own log did not show. Its first job's start wait runs from the deployment's creation, its second's
 # from its Allocation's creation, after the first has left the slot ("the first job ran and the second never started within
 # its start wait ...").
+# The three rows that open a stream across a drain start (alpha-athena-handover, alpha-helios-nooverlap and
+# alpha-athena-now-nooverlap; #447) have one more NOT RUN, of a run that did start: after the rate stream, the lead of the stream
+# (a third of the deadline, or less when the deployment's max-model-len cannot hold a stream of two leads at the measured rate) is
+# under 30 s, so no stream long enough to tell a cut from an end can cross the drain start, and a row that ran on one would be a
+# weaker pass. The run opens no stream and its jobs are cancelled by their tags; its marker says the rate and the context
+# ("... long enough to tell a cut from an end ..."), which judge prints.
 # NOT RUN means the job affirmatively never started (review of PR 284): a read at the bound must show it waiting. A job
 # that started, a job a read does not list, and a read that fails are failures that name what they found, exit 1. That read
 # is not the last word: a job can start between it and the cancel, so every row reads the job's history once it is cancelled.
@@ -1034,6 +1040,7 @@ not_run_verdict() {
   ! requeue_marker || [ "$n" = alpha-athena-now-serve ] || return 1
   ! warm_marker || case $n in alpha-athena-now-serve|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1
   ! slot_marker || [ "$n" = alpha-athena-now-nooverlap ] || return 1
+  ! lead_marker || case $n in alpha-athena-handover|alpha-helios-nooverlap|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1
   ! first_end_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac
 }
 
@@ -1054,6 +1061,21 @@ row_a_reason() { sed -n -E "s/.*$1 \(([^()]*)\).*/\1/p" "$REC_DIR/not-run.txt" 2
 # first_end_marker: the run's NOT RUN marker says its job was still pending a minute before its deployment's first
 # end (internal/alpha, NotRunNote): the bound a tunnel row has beside the wait in the queue, which judge names.
 first_end_marker() { grep -q "a minute before the deployment's first end" "$REC_DIR/not-run.txt" 2>/dev/null; }
+
+# lead_marker: the run's NOT RUN marker says the lead of the streams across the drain start is under the floor (internal/alpha,
+# NotRunNote, LeadFloor; issue #447): no stream long enough to tell a cut from an end fits the deployment's max-model-len at the
+# engine's measured rate. The rows that open such a stream have it, and not_run_verdict holds it to them. lead_reason is the
+# numbers the marker carries in parentheses (the rate, the context, the lead that fits, the floor), as row_a_reason reads them.
+lead_marker() { grep -q "long enough to tell a cut from an end" "$REC_DIR/not-run.txt" 2>/dev/null; }
+lead_reason() {
+  local r
+  r=$(row_a_reason "no stream across the drain start that is long enough to tell a cut from an end fits the deployment's max-model-len at the engine's measured rate")
+  if printf '%s\n' "$r" | grep -q -E -x 'at [0-9]+ tokens/s with max-model-len [0-9]+ the lead that fits is [0-9]+s, under the floor of [0-9]+s'; then
+    printf '%s' "$r"
+  else
+    printf 'the rate and the context could not be read from the marker'
+  fi
+}
 
 # second_job_marker: the run's NOT RUN marker says its first job ran and its second never started (internal/alpha,
 # NotRunNote): the bound a row of two jobs has for its second.
@@ -1088,6 +1110,8 @@ judge() {
       say "$n: NOT RUN (the first job ran and the second never started $(second_job_bound "$n"), and was cancelled by its tag; not a failure)"
       late=$(sed -n -E 's/.*ReplacementLate for its deployment: (raised|not raised|unknown);.*/\1/p' "$REC_DIR/not-run.txt" 2>/dev/null | head -1)
       [ -z "$late" ] || say "$n: ReplacementLate for its deployment: $late (information, not a check)"
+    elif lead_marker; then
+      say "$n: NOT RUN (no stream across the drain start that is long enough to tell a cut from an end fits the deployment's max-model-len at the engine's measured rate: $(lead_reason); the run opened no stream, and its jobs were cancelled by tag; not a failure)"
     elif row_a_marker; then
       if requeue_marker; then say "$n: NOT RUN (the scheduler refused the requeue of the run's own job: $(row_a_reason "the scheduler refused the requeue of the run's own job"); the run's other checks passed; not a failure)"; fi
       if warm_marker; then say "$n: NOT RUN (the agent's own log did not show the warm start: $(row_a_reason "the agent's own log did not show the warm start"); the run's other checks passed; not a failure)"; fi
