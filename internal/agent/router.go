@@ -54,6 +54,10 @@ type routerPart struct {
 	exitCode   *int
 	logTail    string
 	gone       bool // its process group has ended
+	// The router's health, from the polling of the running router (routerwatch.go).
+	workers        []agentapi.RouterWorker
+	clustersReadAt *time.Time
+	probe          *agentapi.RouterProbe
 }
 
 func (r *routerPart) alive() bool {
@@ -94,6 +98,7 @@ func (a *Agent) convergeRouter(in *instance, i agentapi.DesiredInstance) {
 		in.router = a.startRouter(in, i)
 		r = in.router
 	}
+	a.publishReadiness(in, i)
 	target := ""
 	if r != nil && r.phase == agentapi.PartRunning {
 		target = a.routerListener()
@@ -118,7 +123,15 @@ func (a *Agent) startRouter(in *instance, i agentapi.DesiredInstance) *routerPar
 	if a.o.EnvoyBinary == "" {
 		return fail(fmt.Errorf("no Envoy binary for %s is configured", runtime.GOARCH))
 	}
-	cfg := EnvoyConfig{RunDir: a.o.RunDir}
+	if a.ready == nil {
+		ready, err := NewReadiness()
+		if err != nil {
+			return fail(fmt.Errorf("the readiness endpoint: %w", err))
+		}
+		a.ready = ready
+		a.log.Info("readiness endpoint listening", "port", ready.Port())
+	}
+	cfg := EnvoyConfig{RunDir: a.o.RunDir, ReadinessPort: a.ready.Port()}
 	for _, dw := range i.Workers {
 		cfg.Workers = append(cfg.Workers, EnvoyWorker{
 			Name: dw.Name, Socket: filepath.Join(a.o.RunDir, strings.TrimPrefix(dw.EngineSocket, agentapi.ContainerRunDir+"/")),
@@ -161,6 +174,7 @@ func (a *Agent) routerStarted(in *instance, r *routerPart, p *EnvoyProc, err err
 	} else {
 		r.phase = agentapi.PartRunning
 		a.log.Info("router is serving", "router", r.kind, "pid", p.Group.PID(), "generation", r.generation)
+		a.watchRouterHealth(r)
 	}
 	g := p.Group
 	a.wg.Add(2)
@@ -242,6 +256,18 @@ func (r *routerPart) report(listener string) *agentapi.RouterReport {
 		c := *r.exitCode
 		rr.ExitCode = &c
 	}
+	if r.phase == agentapi.PartRunning {
+		rr.Workers = append([]agentapi.RouterWorker(nil), r.workers...)
+		if r.clustersReadAt != nil {
+			t := r.clustersReadAt.UTC()
+			rr.ClustersReadAt = &t
+		}
+		if r.probe != nil {
+			p := *r.probe
+			p.Time = p.Time.UTC()
+			rr.Probe = &p
+		}
+	}
 	return rr
 }
 
@@ -262,6 +288,31 @@ func (a *Agent) idleRouter(in *instance) {
 	}
 	if a.fwd.Routed() {
 		a.fwd.RouteTo("")
+	}
+}
+
+// publishReadiness tells the readiness endpoint which workers are verified: a worker whose process
+// runs, for the desired Instance generation and its own desired generation, at the generation the
+// controller verified (DesiredWorker.VerifiedGeneration).
+func (a *Agent) publishReadiness(in *instance, i agentapi.DesiredInstance) {
+	if a.ready == nil {
+		return
+	}
+	ws := map[string]ReadyWorker{}
+	for _, dw := range i.Workers {
+		w := in.find(dw.Name)
+		rw := ReadyWorker{Socket: filepath.Join(a.o.RunDir, strings.TrimPrefix(dw.EngineSocket, agentapi.ContainerRunDir+"/"))}
+		rw.Verified = w != nil && w.phase == agentapi.PartRunning && w.instGen == i.Generation && w.generation == dw.Generation &&
+			dw.VerifiedGeneration != nil && *dw.VerifiedGeneration == dw.Generation
+		ws[dw.Name] = rw
+	}
+	a.ready.Set(ws)
+}
+
+// closeReadiness stops the readiness endpoint at the agent's end.
+func (a *Agent) closeReadiness() {
+	if a.ready != nil {
+		_ = a.ready.Close()
 	}
 }
 
