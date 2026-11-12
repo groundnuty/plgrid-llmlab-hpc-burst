@@ -196,7 +196,11 @@ type Row struct {
 	// queue at once: the verdicts check the cluster's own record of job identities
 	// and occupancy against it.
 	MostJobs int
-	// PostsTo names where the run's result and its slot use are posted.
+	// PostsTo names where the run's result and its slot use are posted: the issue (or issues) a row's text says it goes to.
+	// A row posts to #145, the alpha list, and to the issue of its own work where it has one that is open (#376 for the
+	// plgrid-now hour rows, #94 for the Helios real-engine run). It names no closed issue: #93, which the accounting rows and
+	// the handover named, was closed and was about the hold lift (`@hpc-burst-science-agent`, 12 Nov 2026, on #145), so those
+	// four rows post to #145 alone. TestNoRowPostsToAClosedIssue holds the list.
 	PostsTo string
 	// Timing is the clock the row is judged on; the zero Timing is the live
 	// one (Clock).
@@ -355,7 +359,7 @@ func (r Row) Plan() DeploymentSpec {
 // rows are the live rows of the runbook that run the stack.
 var rows = []Row{
 	// Two Allocations together on plgrid-gpu-a100, which has no one-job slot.
-	{Name: "alpha-athena-handover", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: MinLease(), Budget: 150 * time.Minute, MostJobs: 2, PostsTo: "#145 and #93"},
+	{Name: "alpha-athena-handover", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: MinLease(), Budget: 150 * time.Minute, MostJobs: 2, PostsTo: "#145"},
 	// The predecessor, and the successor pending beside it in QOS now.
 	{Name: "alpha-helios-nooverlap", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: MinLease(), Budget: 213 * time.Minute, SlotHold: MinLease() + 45*time.Minute, MostJobs: 2, PostsTo: "#145 and #94", OwnerGo: OwnerGoHeliosNow, ReleaseWhenIdle: true},
 	{Name: "tunnel-hour-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: DefaultTunnelLease(), Budget: DefaultTunnelLease() + TunnelRunOver, SlotHold: DefaultTunnelLease(), MostJobs: 1, PostsTo: "#145", OwnerGo: OwnerGoHeliosNow},
@@ -383,9 +387,9 @@ const (
 // minutes) and the owner's go of plgrid-now. Its slot hold is the start wait, the job's time limit and a minute
 // for the end, as the host-dialed rows' is. gpu-accounting-athena stays for when the A100 queue opens.
 var accountingRows = []Row{
-	{Name: "gpu-accounting-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: 5 * time.Minute, Budget: 32 * time.Minute, SlotHold: 15 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#145 and #93"},
-	{Name: "gpu-accounting-athena", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: 5 * time.Minute, Budget: 25 * time.Minute, MostJobs: 1, PostsTo: "#145 and #93"},
-	{Name: "gpu-accounting-athena-now", Cluster: "athena", Profile: "athena-now", Partition: "plgrid-now", GPUs: 1, Lease: 5 * time.Minute, Budget: 32 * time.Minute, SlotHold: 16 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#145 and #93", Timing: AthenaNowTiming(), OwnerGo: OwnerGoAthenaNow},
+	{Name: "gpu-accounting-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: 5 * time.Minute, Budget: 32 * time.Minute, SlotHold: 15 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#145"},
+	{Name: "gpu-accounting-athena", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: 5 * time.Minute, Budget: 25 * time.Minute, MostJobs: 1, PostsTo: "#145"},
+	{Name: "gpu-accounting-athena-now", Cluster: "athena", Profile: "athena-now", Partition: "plgrid-now", GPUs: 1, Lease: 5 * time.Minute, Budget: 32 * time.Minute, SlotHold: 16 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#145", Timing: AthenaNowTiming(), OwnerGo: OwnerGoAthenaNow},
 }
 
 // reachRows are the rows of the reach check (issue #225), which runs in
