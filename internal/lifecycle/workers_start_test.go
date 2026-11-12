@@ -134,9 +134,10 @@ func TestAWorkerExitBeforeTheFirstReadyRestartsThatWorkerAlone(t *testing.T) {
 			rr.Probe.OK, rr.Probe.ConsecutiveFailures = false, 0 // held, as holdBeforeReady holds it
 		}
 	})
-	startUntil(rg, "md", 10*time.Minute, "both workers warmed up, held before ready", func() bool {
+	startUntil(rg, "md", 10*time.Minute, "both workers warmed up and the Instance's conditions True, held before ready", func() bool {
 		ins := rg.instances("md")
-		return len(ins) == 1 && workerWarmed(&ins[0], "worker-0") && workerWarmed(&ins[0], "worker-1")
+		return len(ins) == 1 && workerWarmed(&ins[0], "worker-0") && workerWarmed(&ins[0], "worker-1") &&
+			isTrue(ins[0].Status.Conditions, v1alpha1.ConditionWarmedUp)
 	})
 	name := rg.instances("md")[0].Name
 	before := rg.instance(name)
@@ -159,6 +160,12 @@ func TestAWorkerExitBeforeTheFirstReadyRestartsThatWorkerAlone(t *testing.T) {
 	if workerWarmed(got, "worker-1") {
 		t.Error("worker-1 still counts as warmed up after its restart")
 	}
+	// A worker's restart leaves the Instance's own conditions True (HBEP-7, Several workers).
+	for _, c := range []string{v1alpha1.ConditionVerified, v1alpha1.ConditionQualified, v1alpha1.ConditionWarmedUp} {
+		if !isTrue(got.Status.Conditions, c) {
+			t.Errorf("the Instance's %s after worker-1's restart: %s, want True", c, conditionReason(got, c))
+		}
+	}
 	hold = false
 	startUntil(rg, "md", 10*time.Minute, "ready after worker-1's restart", func() bool { return rg.readyCount("md") == 1 })
 	in := rg.instance(name)
@@ -167,6 +174,89 @@ func TestAWorkerExitBeforeTheFirstReadyRestartsThatWorkerAlone(t *testing.T) {
 	}
 	if parts := restartParts(in); !slices.Equal(parts, []string{"worker-1"}) {
 		t.Errorf("restarts %v, want worker-1's alone", parts)
+	}
+	// worker-1 warmed up again at its new verification generation, 2.
+	if !askedWarmUp(ag, "worker-1", 2) {
+		t.Error("no desired state asked worker-1's warm-up at verification generation 2")
+	}
+}
+
+// askedWarmUp reports whether a desired state asked worker w's warm-up at verification generation gen.
+func askedWarmUp(ag *afake.Agent, w string, gen int64) bool {
+	for _, d := range ag.Seen() {
+		if d.Instance == nil {
+			continue
+		}
+		for _, dw := range d.Instance.Workers {
+			if dw.Name == w && dw.Checks != nil && dw.Checks.VerificationGeneration == gen && dw.Checks.WarmUp != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// running reports whether the agent's last report runs worker w at restart generation gen.
+func runningAt(ag *afake.Agent, w string, gen int64) bool {
+	rep, ok := ag.LastReport()
+	if !ok || rep.Instance == nil {
+		return false
+	}
+	r := reportOf(rep.Instance, w)
+	return r != nil && r.Generation == gen && r.Phase == agentapi.PartRunning
+}
+
+// With attemptsPerRung 1, each worker counts its own attempts: worker-0's restart spends worker-0's rung
+// only, so worker-1's first exit restarts worker-1, and its second climbs to the whole-Instance rung.
+// That restart verifies and warms up every worker again: right after it no worker is taken as verified,
+// and each is asked its warm-up at its new verification generation.
+func TestEachWorkerCountsItsOwnAttemptsThenTheWholeInstanceRung(t *testing.T) {
+	hold := true
+	rg := newRig(t, withProfile(func(p *v1alpha1.PlatformProfileSpec) {
+		p.Restart = &v1alpha1.RestartPolicy{AttemptsPerRung: ptrTo(int32(1)), Window: dur(4 * time.Hour)}
+	}))
+	rg.r.Config.InstanceRouter = v1alpha1.InstanceRouterEnvoy
+	rg.engine = func(string) afake.Engine { return afake.Engine{} }
+	rg.onAgent = func(ra *rigAgent) {
+		ra.agent.RouterView = func(rr *agentapi.RouterReport) {
+			if hold && rr.Probe != nil {
+				rr.Probe.OK, rr.Probe.ConsecutiveFailures = false, 0
+			}
+		}
+	}
+	rg.create(withWorkers(mdSpec("md"), 2))
+	startUntil(rg, "md", 10*time.Minute, "the agent", func() bool { return len(rg.agents) == 1 })
+	var ag *afake.Agent
+	for _, ra := range rg.agents {
+		ag = ra.agent
+	}
+	startUntil(rg, "md", 10*time.Minute, "both workers running", func() bool { return runningAt(ag, "worker-0", 0) && runningAt(ag, "worker-1", 0) })
+	name := rg.instances("md")[0].Name
+	crashUntil := func(w string, gen int64, want []string) {
+		t.Helper()
+		startUntil(rg, "md", 10*time.Minute, w+" running at its generation", func() bool { return runningAt(ag, w, gen) })
+		ag.CrashWorker(w, 1)
+		startUntil(rg, "md", 10*time.Minute, "the restart after "+w+"'s exit", func() bool { return len(rg.instance(name).Status.Restarts) == len(want) })
+		if got := restartParts(rg.instance(name)); !slices.Equal(got, want) {
+			t.Fatalf("restarts %v, want %v", got, want)
+		}
+	}
+	crashUntil("worker-0", 0, []string{"worker-0"})
+	crashUntil("worker-1", 0, []string{"worker-0", "worker-1"})
+	crashUntil("worker-1", 1, []string{"worker-0", "worker-1", v1alpha1.PartInstance})
+	got := rg.instance(name)
+	for _, e := range got.Status.Workers {
+		if e.WarmedUp || e.VerifiedGeneration != nil {
+			t.Errorf("%s's entry right after the whole-Instance restart: %+v, want neither warmed up nor verified", e.Name, e)
+		}
+	}
+	hold = false
+	startUntil(rg, "md", 10*time.Minute, "ready after the whole-Instance restart", func() bool { return rg.readyCount("md") == 1 })
+	// Verification generations: worker-0 is 1 + 1 + 1 = 3, worker-1 is 1 + 1 + 1 = 3.
+	for _, w := range []string{"worker-0", "worker-1"} {
+		if !askedWarmUp(ag, w, 3) {
+			t.Errorf("no desired state asked %s's warm-up at verification generation 3", w)
+		}
 	}
 }
 
