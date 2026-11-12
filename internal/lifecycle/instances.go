@@ -441,6 +441,14 @@ func (p *pass) running(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) error 
 		}
 		p.at(ds)
 	}
+	// Behind a router, the router rung runs before the first ready too: HBEP-7 gives the router's exit
+	// the router rung in any phase. It keeps the phase, and health.startTimeout still bounds the first
+	// ready (the science agent's ruling on #455). In ready, ready() runs it.
+	if in.Status.Phase == v1alpha1.InstanceStarting || in.Status.Phase == v1alpha1.InstanceVerifying {
+		if acted, err := p.routerRung(in, alloc, av, st); acted || err != nil {
+			return err
+		}
+	}
 	switch in.Status.Phase {
 	case v1alpha1.InstanceStarting, v1alpha1.InstanceVerifying:
 		return p.starting(in, alloc, av, st)

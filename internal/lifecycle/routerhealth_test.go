@@ -376,6 +376,19 @@ func TestFailuresCountedDuringReverificationRestartNothing(t *testing.T) {
 			t.Errorf("phase %s, want ready", got.Status.Phase)
 		}
 		t.Logf("the router counted %d failed checks during the reverification", counted)
+		// The control: failures after the verification still count. Envoy now holds the verified
+		// worker failing, one more failed check at each report, and the worker rung restarts it.
+		var n int32
+		ag.RouterView = func(rr *agentapi.RouterReport) {
+			n++
+			for i := range rr.Workers {
+				rr.Workers[i].Healthy, rr.Workers[i].FailedActiveCheck, rr.Workers[i].ConsecutiveFailedChecks = false, true, n
+			}
+		}
+		healthUntilEvent(rg, in.Name, 1, 5*time.Minute, startTick)
+		if r, ok := lastRestart(rg, in.Name); !ok || r.Part != v1alpha1.WorkerName(0) || r.Signal != v1alpha1.ReasonRouterCheckFailing {
+			t.Errorf("after %d failed checks of the verified worker, the restart is %+v, want worker-0's for RouterCheckFailing", n, r)
+		}
 	})
 	t.Run("the first entry", func(t *testing.T) {
 		// The agent reads /clusters before it probes the router, so one report can show the probe
@@ -431,4 +444,94 @@ func TestAReturnToReadyIsNotHeldByARouterThatExited(t *testing.T) {
 		t.Errorf("failing events %v, want WorkerRestart, then RouterRestart once ready again", f)
 	}
 	startUntil(rg, "md", 5*time.Minute, "the router back with the worker healthy", func() bool { h := healthyWorkersOf(rg, in.Name); return h != nil && *h == 1 })
+}
+
+// holdBeforeReady keeps an Instance behind a router out of its first ready: its router's probe is
+// reported failing, with no failure counted, so the first-entry gate holds it and no router signal
+// fires. hold false lets it through.
+func holdBeforeReady(rg *rig, hold *bool) {
+	for _, ra := range rg.agents {
+		ra.agent.RouterView = func(rr *agentapi.RouterReport) {
+			if *hold {
+				rr.Probe.OK, rr.Probe.ConsecutiveFailures = false, 0
+			}
+		}
+	}
+}
+
+// routedVerifying brings one Instance of "md", behind a router, to verifying with its router running,
+// held before its first ready.
+func routedVerifying(t *testing.T, hold *bool, opts ...rigOption) (*rig, string, *afake.Agent) {
+	t.Helper()
+	rg := newRig(t, opts...)
+	rg.r.Config.InstanceRouter = v1alpha1.InstanceRouterEnvoy
+	rg.engine = func(string) afake.Engine { return afake.Engine{} }
+	rg.create(mdSpec("md"))
+	startUntil(rg, "md", 10*time.Minute, "the agent", func() bool { return len(rg.agents) == 1 })
+	holdBeforeReady(rg, hold)
+	var ag *afake.Agent
+	for _, ra := range rg.agents {
+		ag = ra.agent
+	}
+	startUntil(rg, "md", 10*time.Minute, "verifying with the router running", func() bool {
+		ins := rg.instances("md")
+		if len(ins) != 1 || ins[0].Status.Phase != v1alpha1.InstanceVerifying {
+			return false
+		}
+		rep, ok := ag.LastReport()
+		return ok && rep.Instance != nil && rep.Instance.Router != nil && rep.Instance.Router.Phase == agentapi.PartRunning
+	})
+	return rg, rg.instances("md")[0].Name, ag
+}
+
+// A router that exits before the first ready is restarted at the router rung, in place: the Instance
+// stays verifying, nothing is verified again, and it reaches ready once the router serves (the
+// science agent's ruling on #455: HBEP-7 gives the router's exit the rung in any phase).
+func TestTheRouterRungRunsBeforeTheFirstReady(t *testing.T) {
+	hold := true
+	rg, name, ag := routedVerifying(t, &hold)
+	before := rg.instance(name)
+	workerGen, verGen := restartGeneration(before, v1alpha1.WorkerName(0)), verificationGeneration(before)
+	ag.CrashRouter(1)
+	healthUntilEvent(rg, name, 0, 5*time.Minute, startTick)
+	got := rg.instance(name)
+	if r, ok := lastRestart(rg, name); !ok || r.Part != v1alpha1.PartRouter || r.Signal != v1alpha1.ReasonPartExited {
+		t.Errorf("the restart is %+v, want the router's for PartExited", r)
+	}
+	if f := healthFailing(rg, name); !slices.Equal(f, []string{v1alpha1.ReasonRouterRestart}) {
+		t.Errorf("failing events %v, want [RouterRestart]", f)
+	}
+	if got.Status.Phase != v1alpha1.InstanceVerifying || got.Status.ReadyTime != nil {
+		t.Errorf("phase %s, ready time %v: the router rung keeps the Instance where it is", got.Status.Phase, got.Status.ReadyTime)
+	}
+	if restartGeneration(got, v1alpha1.WorkerName(0)) != workerGen || verificationGeneration(got) != verGen {
+		t.Errorf("the router rung moved worker-0's generation or the verification's: %d/%d, were %d/%d",
+			restartGeneration(got, v1alpha1.WorkerName(0)), verificationGeneration(got), workerGen, verGen)
+	}
+	hold = false
+	startUntil(rg, "md", 10*time.Minute, "ready after the router's restart", func() bool { return rg.readyCount("md") == 1 })
+}
+
+// Router exits before the first ready count toward attemptsPerRung like any rung, and past it the
+// ladder climbs to the whole-Instance rung.
+func TestRouterExitsBeforeTheFirstReadyClimb(t *testing.T) {
+	hold := true
+	rg, name, ag := routedVerifying(t, &hold, withProfile(func(p *v1alpha1.PlatformProfileSpec) {
+		p.Restart = &v1alpha1.RestartPolicy{AttemptsPerRung: ptrTo(int32(1)), Window: dur(4 * time.Hour)}
+	}))
+	ag.CrashRouter(1)
+	healthUntilEvent(rg, name, 0, 5*time.Minute, startTick)
+	startUntil(rg, "md", 5*time.Minute, "the router running again", func() bool {
+		rep, ok := ag.LastReport()
+		return ok && rep.Instance != nil && rep.Instance.Router != nil && rep.Instance.Router.Phase == agentapi.PartRunning &&
+			rep.Instance.Router.Generation == 1
+	})
+	ag.CrashRouter(1)
+	healthUntilEvent(rg, name, 1, 5*time.Minute, startTick)
+	if r, ok := lastRestart(rg, name); !ok || r.Part != v1alpha1.PartInstance {
+		t.Errorf("the second router exit's restart is %+v, want the whole-Instance rung", r)
+	}
+	if f := healthFailing(rg, name); !slices.Equal(f, []string{v1alpha1.ReasonRouterRestart, v1alpha1.ReasonInstanceRestart}) {
+		t.Errorf("failing events %v, want RouterRestart, then InstanceRestart", f)
+	}
 }

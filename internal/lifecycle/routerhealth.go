@@ -22,8 +22,9 @@ import (
 //     restarted worker is failing by design during its own warm-up, and an ejection alone is no signal;
 //   - the router's exit, or its probe failing health.failureThreshold reports in a row while /clusters
 //     holds a worker healthy, enters the router rung: healthyWorkers 0 first, then the restart recorded
-//     under part router, then its generation raised; the phase stays ready, nothing is verified again,
-//     and after attemptsPerRung tries the ladder climbs to the whole-Instance rung;
+//     under part router, then its generation raised; the phase stays as it is, ready, or starting or
+//     verifying before the first ready, nothing is verified again, and after attemptsPerRung tries the
+//     ladder climbs to the whole-Instance rung (the science agent's ruling on #455);
 //   - the first entry to ready waits for the router's probe to pass.
 
 // routed reports whether the Instance runs behind a router.
@@ -163,8 +164,8 @@ func routerAdmitsReady(in *v1alpha1.Instance, av agentView) bool {
 	return false
 }
 
-// routerRung applies the router's signal to a ready Instance behind a router: the router rung. It
-// returns true when it acted, so the worker's signals wait.
+// routerRung applies the router's signal to an Instance behind a router, ready or not yet: the router
+// rung. It returns true when it acted, so the worker's signals wait.
 func (p *pass) routerRung(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agentView, st settings) (bool, error) {
 	if !routed(in) || av.unreachable {
 		return false, nil
