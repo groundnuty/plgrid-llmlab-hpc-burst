@@ -55,6 +55,10 @@ type Options struct {
 	// stop, when set, replaces stopServing: a test reads the two bounds Run
 	// passes it (#432). Nil in production.
 	stop stopFunc
+	// BulkPath turns the bulk path on (beta; HBEP-6, The bulk path): the dial-home listener
+	// serves the launcher's second certificate to the bulk server name and passes that name's
+	// /~!frp to the second frps (dialhome_bulk.go). Off, the front is as before.
+	BulkPath bool
 }
 
 // stopFunc is stopServing's signature, for Options.stop.
@@ -77,6 +81,8 @@ type Front struct {
 	Client net.Addr
 	Dial   net.Addr
 	Health net.Addr
+	// bulkFrp is the bulk path's /~!frp passthrough to the second frps; nil without the bulk path.
+	bulkFrp *frpPassthrough
 }
 
 // Run starts the front and serves until ctx ends: it reads its keys, opens
@@ -100,6 +106,16 @@ func Run(ctx context.Context, o Options) error {
 	frpsBind, frpsMux, ferr := cfg.FrpsAddrs(o.Host)
 	if ferr != nil && ValidMode(o.Mode) {
 		return ferr
+	}
+	var bulkBind string
+	if o.BulkPath {
+		if err := checkBulkMode(o.Mode); err != nil {
+			return err
+		}
+		var err error
+		if bulkBind, _, err = cfg.FrpsBulkAddrs(o.Host); err != nil {
+			return err
+		}
 	}
 	var tunnel *Tunnel
 	switch {
@@ -143,6 +159,9 @@ func Run(ctx context.Context, o Options) error {
 	var frp *frpPassthrough
 	if ferr == nil {
 		frp = newFrpPassthrough(frpsBind, cfg.TunnelSetupTimeout.D(), o.Log)
+	}
+	if o.BulkPath {
+		f.bulkFrp = newFrpPassthrough(bulkBind, cfg.TunnelSetupTimeout.D(), o.Log)
 	}
 	// The client server's base context: cancelled at a stop, after the
 	// grace, so the requests still in flight are cut with front_shutdown.
@@ -190,6 +209,9 @@ func Run(ctx context.Context, o Options) error {
 	// The tunnels carried the requests that just ended.
 	if frp != nil {
 		frp.Close()
+	}
+	if f.bulkFrp != nil {
+		f.bulkFrp.Close()
 	}
 	return nil // the deferred Close then flushes the usage sink
 }
@@ -320,9 +342,19 @@ func listen(o Options, f *Front, frp *frpPassthrough, base context.Context) ([]*
 	if err != nil {
 		return fail(err)
 	}
+	if f.bulkFrp != nil {
+		dh.withBulk(f.bulkFrp)
+	}
 	tlsCfg, err := dialHomeTLS(o.Mode, o.Host)
 	if err != nil {
 		return fail(err)
+	}
+	if f.bulkFrp != nil {
+		// One gate for both halves of the split, the handler above and the certificate here (the
+		// review of #459): a bulk handler is never served without the second certificate.
+		if tlsCfg, err = withBulkCertificate(tlsCfg, o.Host); err != nil {
+			return fail(err)
+		}
 	}
 	dialAddr, err := cfg.DialHomeAddr(o.Mode, o.Host)
 	if err != nil && o.DialHomeListener == nil {

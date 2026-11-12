@@ -44,6 +44,7 @@ var neverStartedBound = map[string]struct {
 	"tunnel-hour-athena":         {notRunPending2h, false},
 	"gpu-accounting-helios":      {notRunStartWait10, true},
 	"gpu-accounting-athena":      {notRunPending2h, false},
+	"gpu-accounting-athena-now":  {notRunStartWait10, true},
 	"reach-helios":               {notRunStartWait10, true},
 	"reach-athena":               {notRunStartWait10, true},
 	"reach-host-dialed-helios":   {notRunStartWait10, true},
@@ -244,7 +245,7 @@ func TestACatchUpThatCannotTellIsAFailureOnATwoJobRow(t *testing.T) {
 
 // Only a row of two jobs has a second job: the marker that says one never started, on a row of one, is a failure.
 func TestAMarkerOfASecondJobThatNeverStartedOnARowOfOneIsAFailure(t *testing.T) {
-	for _, row := range []string{"tunnel-hour-athena", "tunnel-hour-helios", "gpu-accounting-athena", "reach-helios"} {
+	for _, row := range []string{"tunnel-hour-athena", "tunnel-hour-helios", "gpu-accounting-athena", "gpu-accounting-athena-now", "reach-helios"} {
 		t.Run(row, func(t *testing.T) {
 			t.Parallel()
 			w := slotWorld(t, row)
@@ -271,6 +272,7 @@ var cannotTellLine = map[string]string{
 	"tunnel-hour-athena":         "FAIL (exit status 1)",
 	"gpu-accounting-helios":      "FAIL (exit status 1)",
 	"gpu-accounting-athena":      "FAIL (exit status 1)",
+	"gpu-accounting-athena-now":  "FAIL (exit status 1)",
 	"reach-helios":               "FAIL (exit status 1)",
 	"reach-athena":               "FAIL (exit status 1)",
 	"reach-host-dialed-helios":   "FAIL (exit status 1)",

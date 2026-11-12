@@ -50,6 +50,13 @@ type FrontSettings struct {
 	// Submission: Files first; HBEP-6, frpc in the job). Both dial-home modes
 	// run frpc, so both need it (CheckCertificate).
 	CertPEM []byte
+	// BulkCertPEM is the bulk path's second certificate (beta; HBEP-6, The bulk path), as the launcher
+	// keeps it (agentapi.Host.BulkCertFile): exactly one PEM certificate for the first one's key, so
+	// with CertPin's pin, naming agentapi.BulkDialHomeServerName. It is set only while the launcher
+	// runs the bulk path. Then, outside ssh mode, Create stages it unchanged as alloc/<tag>/
+	// dial-home-bulk.crt, which only the bulk frpc trusts, and writes agent.json's bulk block
+	// (BulkPathOn); empty, nothing of the bulk path is staged or written.
+	BulkCertPEM []byte
 	// SSHUser, AgentPort and DialHomePort are the ssh mode's user on the
 	// control-plane host, the agent endpoint's loopback port and the dial-home
 	// listener's loopback port (agentapi.Host.DialHomePort).
@@ -87,6 +94,26 @@ func (f *FrontSettings) CheckCertificate(now time.Time) error {
 		return errors.New("no dial-home certificate is configured (CertPEM): frpc would verify nothing without one")
 	}
 	return agentapi.VerifyDialHomeCert(f.CertPEM, f.CertPin, now)
+}
+
+// BulkPathOn says the Allocations get the bulk path: the second certificate is set, and the mode is
+// not ssh, where the agent starts no bulk frpc (HBEP-6, The bulk path), so neither the file nor
+// agent.json's bulk block is written there.
+func (f *FrontSettings) BulkPathOn() bool {
+	return len(f.BulkCertPEM) > 0 && f.Mode != agentapi.DialHomeSSH
+}
+
+// CheckBulkCertificate returns an error unless the agent would accept BulkCertPEM as the staged
+// bulk certificate with the pin CertPin at time now: agentapi.VerifyDialHomeCertFor with
+// agentapi.BulkDialHomeServerName, the check the agent runs before it starts the bulk frpc. The
+// pin is the first certificate's, since both are issued for one key. Each file is judged against its
+// own name, so the first certificate offered as the bulk file is refused, and CheckCertificate
+// refuses the bulk one offered as the first. With the bulk path off it returns nil.
+func (f *FrontSettings) CheckBulkCertificate(now time.Time) error {
+	if !f.BulkPathOn() {
+		return nil
+	}
+	return agentapi.VerifyDialHomeCertFor(f.BulkCertPEM, f.CertPin, agentapi.BulkDialHomeServerName, now)
 }
 
 // ProfileSource reads and validates a Provider's profile, settings and

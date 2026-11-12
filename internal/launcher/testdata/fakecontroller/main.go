@@ -45,7 +45,8 @@
 //
 // The controller's role also takes --relay-keeper-socket under the real controller's rule (#343,
 // PR 4): with --front-mode host-dialed only, an absolute path of at most agentapi.MaxRelaySocketPath
-// bytes. With "relaykeeper" as its first argument the binary is the relay keeper instead, as
+// bytes. It also takes --bulk-path (#448, part 3), as the real controller does: with --front-mode
+// direct or host-dialed only. With "relaykeeper" as its first argument the binary is the relay keeper instead, as
 // hpcburst-controller's subcommand is: it runs the real keeper (relaykeeper.Run) with the
 // subcommand's flags, --state-dir and --port-base, so the launcher's tests supervise a real keeper,
 // with its state file, process lock and socket. In that role it records argv-<pid>.json too, and
@@ -101,6 +102,7 @@ func main() {
 		for _, name := range []string{"front-mode", "front-addr", "relay-keeper-socket", "instance-router"} {
 			fs.String(name, "", "")
 		}
+		fs.Bool("bulk-path", false, "")
 	}
 	stateDir := fs.String("state-dir", "", "")
 	portBase := fs.Int("port-base", 0, "")
@@ -231,6 +233,10 @@ func frontFlagsOK(fs *flag.FlagSet) bool {
 		return ""
 	}
 	mode, addr := value("front-mode"), value("front-addr")
+	// The real controller's rule for --bulk-path (#448, part 3): direct or host-dialed mode only.
+	if value("bulk-path") == "true" && mode != "direct" && mode != "host-dialed" {
+		return false
+	}
 	// The real controller's rule for the keeper's socket (#343, PR 4).
 	if sock := value("relay-keeper-socket"); sock != "" && (mode != "host-dialed" || !filepath.IsAbs(sock) || len(sock) > agentapi.MaxRelaySocketPath) {
 		return false

@@ -39,6 +39,11 @@ type FrpcConfig struct {
 	UID string
 	// Socket is the Unix socket the proxy serves.
 	Socket string
+	// TCPMuxOff writes transport.tcpMux = false, which makes this the bulk
+	// frpc (beta; HBEP-6, The bulk path): its own session, not frp's
+	// multiplexed one, to the second frps. The token frpc leaves it unset, and
+	// its rendering is unchanged.
+	TCPMuxOff bool
 }
 
 var (
@@ -99,6 +104,9 @@ func (c FrpcConfig) Render() ([]byte, error) {
 	line("transport.tls.trustedCaFile", q(c.CAFile))
 	line("transport.tls.serverName", q(c.ServerName))
 	line("transport.poolCount", "0")
+	if c.TCPMuxOff {
+		line("transport.tcpMux", "false")
+	}
 	line("transport.tcpMuxKeepaliveInterval", "10")
 	line("transport.heartbeatInterval", "10")
 	line("transport.heartbeatTimeout", "25")
@@ -160,6 +168,17 @@ func CheckDialHomeCert(path, pin string) error {
 // errRefused.
 func VerifyDialHomeCert(b []byte, pin string, now time.Time) error {
 	if err := agentapi.VerifyDialHomeCert(b, pin, now); err != nil {
+		return fmt.Errorf("%w: %w", errRefused, err)
+	}
+	return nil
+}
+
+// VerifyBulkDialHomeCert is VerifyDialHomeCert for the bulk path's second
+// certificate: the bytes are checked against BulkDialHomeServerName, with the
+// pin of agent.json, which both certificates share (beta; HBEP-6, The bulk
+// path). Every error wraps errRefused.
+func VerifyBulkDialHomeCert(b []byte, pin string, now time.Time) error {
+	if err := agentapi.VerifyDialHomeCertFor(b, pin, agentapi.BulkDialHomeServerName, now); err != nil {
 		return fmt.Errorf("%w: %w", errRefused, err)
 	}
 	return nil

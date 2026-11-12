@@ -178,6 +178,8 @@ var dryRows = []dryRow{
 	{"tunnel-hour-athena", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", tunnelFaults, nil, nil},
 	{"gpu-accounting-helios", confPkg, "HPCBURST_LIVECHECKS_CONF_TEST", accountingFaults, accountingPassing, []string{"slot-held"}},
 	{"gpu-accounting-athena", confPkg, "HPCBURST_LIVECHECKS_CONF_TEST", accountingFaults, accountingPassing, nil},
+	// plgrid-now (issue #145): the Athena twin's job under the partition's own one-job slot, which the owner's job can hold.
+	{"gpu-accounting-athena-now", confPkg, "HPCBURST_LIVECHECKS_CONF_TEST", accountingFaults, accountingPassing, []string{"slot-held"}},
 	{"alpha-athena-now-serve", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", nowServeFaults, nil, nil},
 	{"alpha-athena-now-nooverlap", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", nowNoOverlapFaults, nil, nil},
 }

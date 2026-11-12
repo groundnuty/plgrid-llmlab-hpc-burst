@@ -357,7 +357,7 @@ func VerifyTunnelHour(row Row, o TunnelHourObs, jobs []provider.Job) []string {
 	f = append(f, sessionChecks(o.Requests, o.Samples, tm)...)
 	// A live row in alpha has no sender-side timing of the upload (the science agent's ruling (4) on PR 255).
 	live := o.UploadNotMeasured != ""
-	f = append(f, trafficChecks(o.Requests, tm, live)...)
+	f = append(f, trafficChecks(o.Requests, tm.withLongPlan(o.LongPlan), live)...)
 	f = append(f, rateChecks(o.Rates, live)...)
 	lf, by := ledgerChecks(row, o.Tags, jobs)
 	f = append(f, lf...)
@@ -512,12 +512,12 @@ func trafficChecks(reqs []Stream, tm Timing, uploadNotMeasured bool) []string {
 	for _, r := range reqs {
 		// A completed stream (the delta round of PR 255, B3): a large request that came late is no request near
 		// the deadline, though it passes requestChecks.
-		if d := r.Ended.Sub(r.Opened); r.Complete && d >= tm.NearDeadline && d <= tm.MaxRequestDuration {
+		if d := r.Ended.Sub(r.Opened); r.Long && r.Complete && d >= tm.NearDeadline && d <= tm.MaxRequestDuration {
 			long = true
 		}
 	}
 	if !long {
-		f = append(f, "the hour held no request of about 4 minutes, near the deadline")
+		f = append(f, longStreamFailure)
 	}
 	if concurrentStreams(reqs, tm.StreamRate) < tm.ConcurrentStreams {
 		f = append(f, "the hour held no 16 concurrent streams at 20 tokens a second")

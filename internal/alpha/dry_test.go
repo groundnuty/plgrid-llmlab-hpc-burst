@@ -627,8 +627,9 @@ func (d *drySteps) TunnelHour(_ context.Context, p Plan) (TunnelHourObs, error) 
 	// requests back to back until the hour is over.
 	var reqs []Stream
 	at := ready
-	add := func(id string, length time.Duration, tokens int) Stream {
-		r := Stream{ID: id, Opened: at, Ended: at.Add(length), Complete: true, Tokens: tokens}
+	// long marks the chains of long requests, the role check 2 is judged on (Stream.Long); the burst's streams have none.
+	add := func(id string, length time.Duration, tokens int, long bool) Stream {
+		r := Stream{ID: id, Opened: at, Ended: at.Add(length), Complete: true, Tokens: tokens, Long: long}
 		reqs = append(reqs, r)
 		return r
 	}
@@ -640,7 +641,7 @@ func (d *drySteps) TunnelHour(_ context.Context, p Plan) (TunnelHourObs, error) 
 		gap = 30 * time.Second
 	}
 	for i := 0; i < 3; i++ {
-		add(fmt.Sprintf("a%d", i), length, 0)
+		add(fmt.Sprintf("a%d", i), length, 0, true)
 		at = at.Add(length + gap)
 	}
 	burst, rate := ConcurrentStreams, 20
@@ -651,7 +652,7 @@ func (d *drySteps) TunnelHour(_ context.Context, p Plan) (TunnelHourObs, error) 
 		rate = 10
 	}
 	for i := 0; i < burst; i++ {
-		add(fmt.Sprintf("c%d", i), 120*time.Second, 120*rate)
+		add(fmt.Sprintf("c%d", i), 120*time.Second, 120*rate, false)
 	}
 	// Large request bodies (issue #224), 0.1 to 0.4 MB, sent while the burst's streams are open: each opens and ends
 	// strictly inside the burst's 120 s (at 5, 30, 55 and 80 s, 10 s long: 15 s apart, so they are not a run back to
@@ -689,7 +690,7 @@ func (d *drySteps) TunnelHour(_ context.Context, p Plan) (TunnelHourObs, error) 
 		stop = ready.Add(40 * time.Minute)
 	}
 	for i := 0; at.Before(stop); i++ {
-		add(fmt.Sprintf("b%d", i), length, 0)
+		add(fmt.Sprintf("b%d", i), length, 0, true)
 		at = at.Add(length + gap)
 	}
 	if d.fault("past-deadline") {
