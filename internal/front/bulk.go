@@ -24,6 +24,7 @@ package front
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -104,7 +105,18 @@ func (b *bulkPath) lose(uid types.UID) {
 // as if the bulk path had not been tried, so the token send keeps HBEP-5's one resend.
 func (p *Proxy) forwardBulk(w http.ResponseWriter, r *http.Request, x *exchange, t *target, body []byte, rb requestBody, key string) bool {
 	uid := t.inst.UID
-	resp, err := p.sendWith(x, r, t, body, rb, key, p.bulk.inst)
+	// conn is the connection the attempt took and base its count of written bytes then: the
+	// request counts as sent on the bulk path only if some byte of it reached that connection
+	// (the plan's R1), whatever error a cut leaves, such as the context's cause when the client
+	// leaves during the bulk dial.
+	var conn *countingConn
+	var base int64
+	resp, err := p.sendWith(x, r, t, body, rb, key, p.bulk.inst, func(c net.Conn) {
+		if conn = countingOf(c); conn != nil {
+			base = conn.written.Load()
+		}
+	})
+	wrote := resp != nil || (conn != nil && conn.written.Load() != base)
 	if err != nil && isDialError(err) {
 		if x.ctx.Err() != nil {
 			// The client left, or the front cut the request, while the bulk dial ran: nothing
@@ -118,7 +130,9 @@ func (p *Proxy) forwardBulk(w http.ResponseWriter, r *http.Request, x *exchange,
 		p.bulk.log.Warn("the bulk transport could not be dialled; nothing was sent, and the request takes the token transport", "request", x.id, "target", t.key(), "error", err.Error())
 		return false
 	}
-	p.metrics.bulkSent()
+	if wrote {
+		p.metrics.bulkSent()
+	}
 	if err == nil {
 		// Deferred, so a cut body's abort panic reports too, as on the token path.
 		defer p.reportOutcome(t, x)
