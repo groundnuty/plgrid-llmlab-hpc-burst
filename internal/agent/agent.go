@@ -133,6 +133,9 @@ type Agent struct {
 	malformedLogged string
 	fwd             *Forwarder
 	lastOffered     []byte
+	// ready is the per-worker readiness endpoint the router health-checks: bound at the first Instance
+	// with a router and kept for the Allocation's life; nil for alpha (router.go).
+	ready *Readiness
 	// tunnelUID is the Instance the tunnel was last told to serve.
 	tunnelUID string
 	// settings from the newest desired state with an Action the agent knows.
@@ -219,6 +222,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	a.fwd = fwd
 	defer fwd.Close()
+	defer a.closeReadiness()
 	defer a.serveTunnel("")
 
 	loopCtx, cancelLoop := context.WithCancel(ctx)

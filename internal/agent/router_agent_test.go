@@ -27,11 +27,34 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
-// routerState runs the harness's Instance with Envoy in front of its worker.
+// routerState runs the harness's Instance with Envoy in front of its worker, whose generation the
+// controller has verified (DesiredWorker.VerifiedGeneration), so the router may route to it.
 func routerState(h *harness, instGen, workerGen, routerGen int64) agentapi.DesiredState {
 	d := h.runState("", instGen, workerGen, nil)
 	d.Instance.Router = &agentapi.DesiredRouter{Kind: agentapi.RouterEnvoy, Generation: routerGen}
+	verified := workerGen
+	d.Instance.Workers[0].VerifiedGeneration = &verified
 	return d
+}
+
+// routerServing: worker-0 and the router run, the router at gen, and the router's own /clusters, read
+// after worker-0's process started, holds worker-0 healthy.
+func routerServing(gen int64) func(agentapi.Report) bool {
+	return func(r agentapi.Report) bool {
+		if !routerRunning(gen)(r) {
+			return false
+		}
+		rr, w := routerOf(r), worker0(r)
+		if rr.ClustersReadAt == nil || w.StartTime == nil || !rr.ClustersReadAt.After(*w.StartTime) {
+			return false
+		}
+		for _, rw := range rr.Workers {
+			if rw.Name == agentapi.WorkerName(0) && rw.Healthy {
+				return true
+			}
+		}
+		return false
+	}
 }
 
 func routerOf(r agentapi.Report) *agentapi.RouterReport {
@@ -148,7 +171,7 @@ func TestTheAgentRunsTheRouterInFrontOfItsWorker(t *testing.T) {
 	bin := testenv.EnvoyBinary(t)
 	h := newHarness(t, harnessOptions{envoy: bin})
 	h.set(routerState(h, 1, 0, 0))
-	r := h.waitReport("worker-0 and the router running", time.Minute, routerRunning(0))
+	r := h.waitReport("worker-0 behind a router that holds it healthy", time.Minute, routerServing(0))
 	rr := routerOf(r)
 	if rr.Kind != agentapi.RouterEnvoy || rr.Socket != filepath.Join(h.runDir, "router.sock") || rr.PID <= 0 || rr.StartTime == nil {
 		t.Errorf("the router's report: %+v", rr)
@@ -171,13 +194,18 @@ func TestTheAgentRunsTheRouterInFrontOfItsWorker(t *testing.T) {
 	if !strings.Contains(string(cmdline), filepath.Join(h.runDir, "envoy.json")) {
 		t.Errorf("the router's command line %q does not name the agent's config", strings.ReplaceAll(string(cmdline), "\x00", " "))
 	}
-	// The serving path goes through Envoy to the worker.
+	// The serving path goes through Envoy to the worker. The agent's own probe of the router goes
+	// through Envoy too, every probe interval, so the count is checked against 50 requests sent at once:
+	// a serving path that skipped Envoy would add only the few probes of that moment.
+	const sent = 50
 	before := envoyRequests(t, h.runDir)
-	if status, body := serve(t, h, "/health"); status != http.StatusOK {
-		t.Fatalf("GET /health through the serving socket: %d %q, want the worker's 200", status, body)
+	for i := 0; i < sent; i++ {
+		if status, body := serve(t, h, "/health"); status != http.StatusOK {
+			t.Fatalf("GET /health through the serving socket: %d %q, want the worker's 200", status, body)
+		}
 	}
-	if after := envoyRequests(t, h.runDir); after != before+1 {
-		t.Errorf("Envoy sent worker-0 %d requests, then %d: the serving path did not go through it", before, after)
+	if after := envoyRequests(t, h.runDir); after < before+sent {
+		t.Errorf("Envoy sent worker-0 %d requests, then %d, for %d sent: the serving path did not go through it", before, after, sent)
 	}
 }
 
@@ -281,7 +309,7 @@ func TestAWorkerBehindTheRouterGetsTheKeepAlive(t *testing.T) {
 func TestTheAgentNeverRestartsTheRouterByItself(t *testing.T) {
 	h := newHarness(t, harnessOptions{envoy: testenv.EnvoyBinary(t)})
 	h.set(routerState(h, 1, 0, 0))
-	r := h.waitReport("the router running", time.Minute, routerRunning(0))
+	r := h.waitReport("the router serving", time.Minute, routerServing(0))
 	pid, workerPID := routerOf(r).PID, worker0(r).PID
 	pidfdKill(t, pid)
 	r = h.waitReport("the router exited", 30*time.Second, func(r agentapi.Report) bool {
@@ -306,7 +334,7 @@ func TestTheAgentNeverRestartsTheRouterByItself(t *testing.T) {
 	}
 	// The controller's router rung raises its generation: only then does it start again.
 	h.set(routerState(h, 1, 0, 1))
-	r = h.waitReport("the router running at generation 1", time.Minute, routerRunning(1))
+	r = h.waitReport("the router serving at generation 1", time.Minute, routerServing(1))
 	if rr := routerOf(r); rr.PID == pid {
 		t.Errorf("the router at generation 1 has the old PID %d", pid)
 	}
@@ -330,9 +358,9 @@ func TestAWorkerRestartLeavesTheRouterRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.set(routerState(h, 1, 1, 0))
-	r = h.waitReport("worker-0 at generation 1", time.Minute, func(r agentapi.Report) bool {
+	r = h.waitReport("worker-0 at generation 1, held healthy again", time.Minute, func(r agentapi.Report) bool {
 		w := worker0(r)
-		return w != nil && w.Generation == 1 && w.Phase == agentapi.PartRunning && w.PID != workerPID
+		return w != nil && w.Generation == 1 && w.Phase == agentapi.PartRunning && w.PID != workerPID && routerServing(0)(r)
 	})
 	if rr := routerOf(r); rr.PID != pid || rr.Phase != agentapi.PartRunning {
 		t.Errorf("a worker restart restarted the router: %+v, was PID %d", rr, pid)
@@ -396,4 +424,48 @@ func TestTheForwarderInRouterModeIgnoresTheWorkers(t *testing.T) {
 	f.LeaveRouter()
 	f.SetTarget("worker.sock")
 	step("LeaveRouter and a worker's SetTarget", "worker.sock")
+}
+
+// The agent's report carries the router's own view of its worker, read from the running Envoy's
+// /clusters, and the agent's probe through the router. Taking the worker's verification away makes
+// Envoy hold it failing (the readiness endpoint answers 503): the report then shows the failing check,
+// counted in a row, and the probe failing too, since no worker is healthy. Giving it back clears both.
+func TestTheReportCarriesTheRoutersViewOfItsWorker(t *testing.T) {
+	h := newHarness(t, harnessOptions{envoy: testenv.EnvoyBinary(t)})
+	h.set(routerState(h, 1, 0, 0))
+	r := h.waitReport("the router serving", time.Minute, routerServing(0))
+	if p := routerOf(r).Probe; p == nil || !p.OK {
+		t.Errorf("with worker-0 healthy, the router's probe is %+v, want OK", p)
+	}
+	unverified := routerState(h, 1, 0, 0)
+	unverified.Instance.Workers[0].VerifiedGeneration = nil
+	h.set(unverified)
+	r = h.waitReport("Envoy holding worker-0 failing for 2 reads, and the probe failing", time.Minute, func(r agentapi.Report) bool {
+		rr := routerOf(r)
+		if rr == nil || rr.Probe == nil || rr.Probe.OK || rr.Probe.ConsecutiveFailures < 2 {
+			return false
+		}
+		for _, w := range rr.Workers {
+			if w.Name == agentapi.WorkerName(0) && !w.Healthy && w.FailedActiveCheck && w.ConsecutiveFailedChecks >= 2 {
+				return true
+			}
+		}
+		return false
+	})
+	if w := worker0(r); w.Phase != agentapi.PartRunning {
+		t.Errorf("worker-0 is %s: the test needs it running and only unverified", w.Phase)
+	}
+	h.set(routerState(h, 1, 0, 0))
+	r = h.waitReport("worker-0 healthy again", time.Minute, func(r agentapi.Report) bool {
+		rr := routerOf(r)
+		if !routerServing(0)(r) || rr.Probe == nil || !rr.Probe.OK {
+			return false
+		}
+		for _, w := range rr.Workers {
+			if w.Name == agentapi.WorkerName(0) && w.ConsecutiveFailedChecks == 0 {
+				return true
+			}
+		}
+		return false
+	})
 }
