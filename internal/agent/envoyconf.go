@@ -15,7 +15,7 @@ import (
 //   - the listener is a mode-0600 Unix socket in the job's private directory, never a TCP port, and
 //     the admin likewise, allowing exactly /clusters?format=json (Q3), with no admin runtime layer;
 //   - the route's timeout and idle_timeout and the connection manager's stream_idle_timeout are each
-//     the Instance's effective maxRequestDuration plus 1 h (Q7), which the launch guard checks;
+//     EnvoyRouterTimeout, 10,800 s, which the launch guard checks (Q7, as corrected);
 //   - the circuit breakers' three thresholds are Envoy's field maximum (Q8), since the front's cap
 //     governs and an overflow 503 would count toward the Instance's pause;
 //   - the router filter suppresses the x-envoy-* headers Envoy would add, so the workers see only
@@ -52,8 +52,13 @@ const (
 	envoyConnectTimeout = 5 * time.Second
 	// envoyMaxThreshold is Envoy's field maximum for a circuit-breaker threshold (a uint32).
 	envoyMaxThreshold = 1<<32 - 1
-	// envoyRouterHeadroom is what the router's timeouts add to the Instance's maxRequestDuration.
-	envoyRouterHeadroom = time.Hour
+	// EnvoyRouterTimeout is each of the router's three timeouts: the front's maximum request duration,
+	// 2 h, plus 1 h (HBEP-5; HBEP-7, Several workers). It is never taken from a deployment's
+	// routing.maxRequestDuration, which is mutable and can only shorten the front's: Envoy's config is
+	// rendered once, so a deployment created with a short value that later dropped it would have its long
+	// replies cut, with no line in any log (L-4.1). A shorter deployment value needs nothing, since the
+	// front cuts first (the science agent's ruling on #429, Q7, as corrected on 12 Nov 2026).
+	EnvoyRouterTimeout = 3 * time.Hour
 	// envoyClustersPath is the one admin path allowed: the agent's read of each worker's health.
 	envoyClustersPath = "/clusters?format=json"
 )
@@ -70,13 +75,7 @@ type EnvoyConfig struct {
 	RunDir string
 	// Workers are the Instance's workers, in order.
 	Workers []EnvoyWorker
-	// MaxRequestDuration is the Instance's effective maxRequestDuration, which the desired state
-	// carries; each router timeout is this plus one hour.
-	MaxRequestDuration time.Duration
 }
-
-// RouterTimeout is each of the router's three timeouts for the config.
-func (c EnvoyConfig) RouterTimeout() time.Duration { return c.MaxRequestDuration + envoyRouterHeadroom }
 
 // The bootstrap's types: only the fields the agent sets, in Envoy's JSON names.
 type (
@@ -201,10 +200,7 @@ func RenderEnvoyConfig(c EnvoyConfig) ([]byte, error) {
 	if len(c.Workers) == 0 {
 		return nil, errors.New("envoy: no worker to route to")
 	}
-	if c.MaxRequestDuration <= 0 || c.MaxRequestDuration%time.Second != 0 {
-		return nil, fmt.Errorf("envoy: maxRequestDuration %v is not a positive whole number of seconds", c.MaxRequestDuration)
-	}
-	timeout := envoySeconds(c.RouterTimeout())
+	timeout := envoySeconds(EnvoyRouterTimeout)
 	var eps []envoyLBEndpoint
 	for _, w := range c.Workers {
 		eps = append(eps, envoyLBEndpoint{Endpoint: envoyEndpoint{Hostname: w.Name, Address: envoyAddress{Pipe: &envoyPipe{Path: w.Socket}}}})

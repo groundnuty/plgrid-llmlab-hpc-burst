@@ -19,7 +19,7 @@ import (
 //   - the admin and the one listener on mode-0600 Unix sockets at their paths in the run directory,
 //     never a TCP address; the admin allowing exactly /clusters?format=json;
 //   - each of the route's timeout and idle_timeout and the connection manager's stream_idle_timeout
-//     at least the Instance's maxRequestDuration plus 1 h, and no other deadline set, so a value that
+//     at least EnvoyRouterTimeout (10,800 s), and no other deadline set, so a value that
 //     would cut a long reply is refused at launch rather than found mid-stream;
 //   - the router filter suppressing Envoy's own x-envoy-* headers;
 //   - the circuit breakers' three thresholds at Envoy's field maximum;
@@ -28,16 +28,13 @@ import (
 // Each map is held to the keys the agent writes, so a field that is not checked here cannot be
 // added unnoticed. The first fault is returned, naming its place.
 func CheckEnvoyConfig(raw []byte, c EnvoyConfig) error {
-	if c.MaxRequestDuration <= 0 {
-		return refuse("the Instance's maxRequestDuration %v is not positive, so no router timeout can be checked", c.MaxRequestDuration)
-	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var root any
 	if err := dec.Decode(&root); err != nil {
 		return refuse("the bootstrap is not JSON: %v", err)
 	}
-	g := guard{floor: c.RouterTimeout(), runDir: c.RunDir}
+	g := guard{floor: EnvoyRouterTimeout, runDir: c.RunDir}
 	top, err := g.object(root, "", "admin", "static_resources")
 	if err != nil {
 		return err
@@ -183,7 +180,7 @@ func (g guard) timeout(v any, at string) error {
 		return refuse("%s is %v, not a duration", at, v)
 	}
 	if d < g.floor {
-		return refuse("%s is %v, below the Instance's maxRequestDuration plus 1 h (%v): it would cut a long or slow reply", at, d, g.floor)
+		return refuse("%s is %v, below the front's maximum request duration plus 1 h (%v): it would cut a long or slow reply", at, d, g.floor)
 	}
 	return nil
 }

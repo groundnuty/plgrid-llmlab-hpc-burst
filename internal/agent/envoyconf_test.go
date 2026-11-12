@@ -6,12 +6,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // The router's bootstrap and its launch guard (envoyconf.go, envoyguard.go). Expected values are
@@ -21,11 +23,10 @@ import (
 
 const envoyRunDir = "/hpcburst/run-example" // only a string here: nothing binds it
 
-func envoyCfg(mrd time.Duration) agent.EnvoyConfig {
+func envoyCfg() agent.EnvoyConfig {
 	return agent.EnvoyConfig{
-		RunDir:             envoyRunDir,
-		Workers:            []agent.EnvoyWorker{{Name: "worker-0", Socket: envoyRunDir + "/worker-0.sock"}},
-		MaxRequestDuration: mrd,
+		RunDir:  envoyRunDir,
+		Workers: []agent.EnvoyWorker{{Name: "worker-0", Socket: envoyRunDir + "/worker-0.sock"}},
 	}
 }
 
@@ -79,8 +80,8 @@ func mustJSON(t *testing.T, v any) []byte {
 
 // The values HBEP-5 and the rulings name, read from the rendered bootstrap.
 func TestEnvoyConfigCarriesHBEP5sSettings(t *testing.T) {
-	m := renderMap(t, envoyCfg(2*time.Hour))
-	if err := agent.CheckEnvoyConfig(mustJSON(t, m), envoyCfg(2*time.Hour)); err != nil {
+	m := renderMap(t, envoyCfg())
+	if err := agent.CheckEnvoyConfig(mustJSON(t, m), envoyCfg()); err != nil {
 		t.Fatalf("the agent's own config is refused: %v", err)
 	}
 	r, h, c := routeOf(t, m), hcmOf(t, m), clusterOf(t, m)
@@ -117,14 +118,10 @@ func TestEnvoyConfigCarriesHBEP5sSettings(t *testing.T) {
 			t.Errorf("%s = %v, want %v", name, got, want)
 		}
 	}
-	// A deployment's shorter maxRequestDuration gives shorter timeouts (Q7), 1 h plus 1 h.
-	if got := routeOf(t, renderMap(t, envoyCfg(time.Hour)))["timeout"]; got != "7200s" {
-		t.Errorf("with maxRequestDuration 1 h the route timeout is %v, want 7200s", got)
-	}
 }
 
 func TestEnvoyGuardRefusesEachFault(t *testing.T) {
-	cfg := envoyCfg(2 * time.Hour)
+	cfg := envoyCfg()
 	for _, c := range []struct {
 		name string
 		edit func(m map[string]any)
@@ -207,14 +204,17 @@ func TestEnvoyGuardRefusesEachFault(t *testing.T) {
 	}
 }
 
-// The floor is the Instance's maxRequestDuration plus 1 h, exactly: at it the config runs, one second
-// below it does not, and a config rendered for a shorter deployment is refused for a longer one.
-func TestEnvoyGuardFloorIsMaxRequestDurationPlusAnHour(t *testing.T) {
-	cfg := envoyCfg(2 * time.Hour)
+// The floor is the front's maximum request duration plus 1 h, 10,800 s, exactly: at it the config
+// runs, one second below it does not (Q7, as corrected).
+func TestEnvoyGuardFloorIsTheFrontsMaximumPlusAnHour(t *testing.T) {
+	if agent.EnvoyRouterTimeout != 10800*time.Second {
+		t.Fatalf("EnvoyRouterTimeout = %v, want 10,800 s: the front's 2 h plus 1 h", agent.EnvoyRouterTimeout)
+	}
+	cfg := envoyCfg()
 	for _, c := range []struct {
 		value string
 		ok    bool
-	}{{"10800s", true}, {"10801s", true}, {"10799s", false}, {"10799.5s", false}} {
+	}{{"10800s", true}, {"10801s", true}, {"10799s", false}, {"10799.5s", false}, {"7200s", false}} {
 		m := renderMap(t, cfg)
 		routeOf(t, m)["timeout"] = c.value
 		err := agent.CheckEnvoyConfig(mustJSON(t, m), cfg)
@@ -222,21 +222,38 @@ func TestEnvoyGuardFloorIsMaxRequestDurationPlusAnHour(t *testing.T) {
 			t.Errorf("a route timeout of %s: %v, want accepted=%v", c.value, err, c.ok)
 		}
 	}
-	short := renderMap(t, envoyCfg(time.Hour))
-	if err := agent.CheckEnvoyConfig(mustJSON(t, short), envoyCfg(2*time.Hour)); err == nil || !strings.Contains(err.Error(), "is 2h0m0s, below") {
-		t.Errorf("a 1 h deployment's config checked for a 2 h one: %v, want a refusal", err)
-	}
-	if err := agent.CheckEnvoyConfig(mustJSON(t, renderMap(t, cfg)), envoyCfg(0)); err == nil {
-		t.Error("a zero maxRequestDuration was accepted")
-	}
 	for _, bad := range []agent.EnvoyConfig{
-		{RunDir: "relative", Workers: cfg.Workers, MaxRequestDuration: time.Hour},
-		{RunDir: envoyRunDir, MaxRequestDuration: time.Hour},
-		{RunDir: envoyRunDir, Workers: cfg.Workers, MaxRequestDuration: 1500 * time.Millisecond},
+		{RunDir: "relative", Workers: cfg.Workers},
+		{RunDir: envoyRunDir},
 	} {
 		if _, err := agent.RenderEnvoyConfig(bad); err == nil {
 			t.Errorf("RenderEnvoyConfig(%+v) rendered", bad)
 		}
+	}
+}
+
+// No deployment's maxRequestDuration can reach the router's timeouts (Q7, as corrected): neither what
+// the agent renders from (EnvoyConfig) nor what the controller sends it (DesiredRouter, DesiredInstance)
+// has a duration a timeout could be taken from, so a deployment with a short maxRequestDuration gets
+// 10,800 s like any other. A field added for that fails here.
+func TestTheRouterTimeoutsTakeNothingFromADeployment(t *testing.T) {
+	durationType := reflect.TypeOf(time.Duration(0))
+	wireDuration := reflect.TypeOf(agentapi.Duration(0))
+	for _, typ := range []reflect.Type{reflect.TypeOf(agent.EnvoyConfig{}), reflect.TypeOf(agentapi.DesiredRouter{})} {
+		for i := 0; i < typ.NumField(); i++ {
+			if f := typ.Field(i); f.Type == durationType || f.Type == wireDuration {
+				t.Errorf("%s.%s is a duration: the router's timeouts must not come from a deployment", typ.Name(), f.Name)
+			}
+		}
+	}
+	for _, f := range []string{"MaxRequestDuration", "RouterTimeout"} {
+		if _, ok := reflect.TypeOf(agentapi.DesiredInstance{}).FieldByName(f); ok {
+			t.Errorf("DesiredInstance has %s: the router's timeouts must not come from a deployment", f)
+		}
+	}
+	r := routeOf(t, renderMap(t, envoyCfg()))
+	if r["timeout"] != "10800s" || r["idle_timeout"] != "10800s" {
+		t.Errorf("the route's timeouts are %v and %v, want 10800s each", r["timeout"], r["idle_timeout"])
 	}
 }
 
@@ -246,7 +263,7 @@ func TestEnvoyGuardFloorIsMaxRequestDurationPlusAnHour(t *testing.T) {
 func TestTheRealEnvoyValidatesTheAgentsConfig(t *testing.T) {
 	bin := testenv.EnvoyBinary(t)
 	dir := t.TempDir()
-	cfg := envoyCfg(2 * time.Hour)
+	cfg := envoyCfg()
 	cfg.RunDir = dir
 	cfg.Workers[0].Socket = filepath.Join(dir, "worker-0.sock")
 	raw, err := agent.RenderEnvoyConfig(cfg)

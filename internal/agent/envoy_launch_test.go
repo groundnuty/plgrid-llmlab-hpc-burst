@@ -33,13 +33,13 @@ func shortDir(t *testing.T) string {
 	return d
 }
 
-func startTestEnvoy(t *testing.T, mrd time.Duration) (*agent.EnvoyProc, string) {
+func startTestEnvoy(t *testing.T) (*agent.EnvoyProc, string) {
 	t.Helper()
 	bin := testenv.EnvoyBinary(t)
 	dir := shortDir(t)
 	p, err := agent.StartEnvoy(agent.EnvoyStart{
 		Binary: bin, Ready: 30 * time.Second,
-		Config: agent.EnvoyConfig{RunDir: dir, Workers: []agent.EnvoyWorker{{Name: "worker-0", Socket: filepath.Join(dir, "worker-0.sock")}}, MaxRequestDuration: mrd},
+		Config: agent.EnvoyConfig{RunDir: dir, Workers: []agent.EnvoyWorker{{Name: "worker-0", Socket: filepath.Join(dir, "worker-0.sock")}}},
 	}, time.Now())
 	if err != nil {
 		t.Fatalf("StartEnvoy: %v", err)
@@ -53,7 +53,7 @@ func startTestEnvoy(t *testing.T, mrd time.Duration) (*agent.EnvoyProc, string) 
 }
 
 func TestStartEnvoyListensOnlyOnItsPipes(t *testing.T) {
-	p, dir := startTestEnvoy(t, 2*time.Hour)
+	p, dir := startTestEnvoy(t)
 	listener, admin := filepath.Join(dir, "router.sock"), filepath.Join(dir, "envoy-admin.sock")
 	for _, s := range []string{listener, admin} {
 		fi, err := os.Lstat(s)
@@ -216,7 +216,7 @@ func TestStartEnvoyRefusesABinaryThatIsNotThePin(t *testing.T) {
 	}
 	_, err := agent.StartEnvoy(agent.EnvoyStart{
 		Binary: fake, Ready: 5 * time.Second,
-		Config: agent.EnvoyConfig{RunDir: dir, Workers: []agent.EnvoyWorker{{Name: "worker-0", Socket: filepath.Join(dir, "worker-0.sock")}}, MaxRequestDuration: 2 * time.Hour},
+		Config: agent.EnvoyConfig{RunDir: dir, Workers: []agent.EnvoyWorker{{Name: "worker-0", Socket: filepath.Join(dir, "worker-0.sock")}}},
 	}, time.Now())
 	if err == nil || !errors.Is(err, agent.ErrEnvoyRefused) || !strings.Contains(err.Error(), "not the pin of Envoy 1.40.2") {
 		t.Fatalf("StartEnvoy with another binary: %v, want a refusal naming the pin", err)
