@@ -82,6 +82,11 @@ func (s firstClockSteps) NowServe(_ context.Context, p Plan) (NowServeObs, error
 	return NowServeObs{}, err
 }
 
+func (s firstClockSteps) NowNoOverlap(_ context.Context, p Plan) (NowNoOverlapObs, error) {
+	_, err := s.firstReady(p)
+	return NowNoOverlapObs{}, err
+}
+
 // A run whose first job never started ends NOT RUN on the scheduler's read, and judges nothing it read from the watch: so a reset of the
 // watch leaves it NOT RUN, and the watch's clean-up logs the reset and fails nothing. The reset here is of the Allocation stream, the one
 // the first job's wait reads. The run's deployment was created an hour ago, so the first clock has run out at the wait's first look.

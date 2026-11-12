@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# The root module's tests: the one definition that hack/check.sh and CI's go job both run (issue #282).
+# The root module's tests: the one definition that hack/check.sh and CI's go and go own-timeout jobs run
+# (issue #282; the groups run in go own-timeout since issue #295).
 #
 # go test's 10-minute package timeout stays: a raised one would hide a real hang for longer. So the tests
 # that would bring a package close to it run after the packages, in groups, each group under a timeout of

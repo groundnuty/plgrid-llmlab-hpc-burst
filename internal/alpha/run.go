@@ -28,8 +28,12 @@ import (
 // scheduler refused (ErrRequeueRefused; the science agent's ruling Q5), where the requeue was never
 // put to the test, and its warm start that the agent's own log did not show (ErrWarmUnshown; the
 // ruling 1(b)). Run has judged the rest of that run first, and returns either only when nothing failed.
+//
+// A third is row B's (issue #376): a job that is not the run's held the one-job slot between the row's two jobs
+// (ErrSlotTaken; the science agent's ruling Q7), the owner's own work, so the one-slot handover was never put to the
+// test.
 func NotRun(_ Row, err error) bool {
-	return neverStarted(err) || errors.Is(err, ErrRequeueRefused) || errors.Is(err, ErrWarmUnshown)
+	return neverStarted(err) || errors.Is(err, ErrRequeueRefused) || errors.Is(err, ErrWarmUnshown) || errors.Is(err, ErrSlotTaken)
 }
 
 // neverStarted is whether err says a job of the run never started within a bound.
@@ -42,20 +46,18 @@ func neverStarted(err error) bool {
 // when it was the deployment's first end, which hack/live-checks.sh reads off the marker to name
 // that bound in its line (the wait in the queue otherwise); any other gives pendingMax.
 func NotRunNote(row Row, pendingMax time.Duration, err error) string {
-	if errors.Is(err, ErrRequeueRefused) || errors.Is(err, ErrWarmUnshown) {
-		var why []string
-		if errors.Is(err, ErrRequeueRefused) {
-			why = append(why, fmt.Sprintf("%s (%s)", requeueRefusedWords, refusalOf(err)))
+	if errors.Is(err, ErrRequeueRefused) || errors.Is(err, ErrWarmUnshown) || errors.Is(err, ErrSlotTaken) {
+		why := notRunWhy(err)
+		if why == "" && errors.Is(err, ErrWarmUnshown) {
+			why = warmUnshownWords
 		}
-		var w *WarmUnshownError
-		if errors.As(err, &w) {
-			why = append(why, fmt.Sprintf("%s (%s)", warmUnshownWords, w.counts()))
-		} else if errors.Is(err, ErrWarmUnshown) {
-			why = append(why, warmUnshownWords)
-		}
-		return fmt.Sprintf("%s: %s; the run's other checks passed; this run's jobs were cancelled by tag\n", row.Name, strings.Join(why, "; "))
+		return fmt.Sprintf("%s: %s; the run's other checks passed; this run's jobs were cancelled by tag\n", row.Name, why)
 	}
 	if errors.Is(err, ErrSecondNotStarted) {
+		var s *SecondNotStartedError
+		if errors.As(err, &s) && s.StartWait > 0 {
+			return fmt.Sprintf("%s: %s within its start wait of %s from its Allocation's creation; ReplacementLate for its deployment: %s; this run's jobs were cancelled by tag\n", row.Name, secondNotStartedWords, s.StartWait, lateOf(err))
+		}
 		return fmt.Sprintf("%s: %s; ReplacementLate for its deployment: %s; this run's jobs were cancelled by tag\n", row.Name, secondNotStartedWords, lateOf(err))
 	}
 	var ns *NotStartedError
@@ -83,7 +85,7 @@ func lateOf(err error) string {
 // stopsTheRun is whether a scenario's error leaves nothing to judge. ErrSecondNotStarted leaves the first job's part, and
 // ErrRequeueRefused everything before the requeue.
 func stopsTheRun(err error) bool {
-	return err != nil && !errors.Is(err, ErrSecondNotStarted) && !errors.Is(err, ErrRequeueRefused)
+	return err != nil && !errors.Is(err, ErrSecondNotStarted) && !errors.Is(err, ErrRequeueRefused) && !errors.Is(err, ErrSlotTaken)
 }
 
 // secondNotStartedWords say what happened to a run of two jobs, in the marker, which hack/live-checks.sh reads for
@@ -160,6 +162,24 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 		tags, obs = o.Tags, o
 		judge = func(j []provider.Job) []string { return VerifyTunnelHour(cfg.Row, o, j) }
 		summary = func(f []string, _ []provider.Job) string { return tunnelHourPost(cfg.Row, o, f) }
+	case strings.HasPrefix(cfg.Row.Name, "alpha-athena-now-nooverlap"):
+		o, serr := st.NowNoOverlap(ctx, plan)
+		if stopsTheRun(serr) {
+			return nil, serr
+		}
+		if errors.Is(serr, ErrSecondNotStarted) {
+			second = serr
+		}
+		refused = nowNoOverlapNotRun(o, serr)
+		partial := second != nil || errors.Is(serr, ErrSlotTaken)
+		tags, obs = o.Tags, o
+		judge = func(j []provider.Job) []string {
+			if partial {
+				return dedupe(nowNoOverlapFirstJobChecks(cfg.Row, o, j))
+			}
+			return VerifyNowNoOverlap(cfg.Row, o, j)
+		}
+		summary = func(f []string, j []provider.Job) string { return nowNoOverlapPost(cfg.Row, o, f, j, refused) }
 	case strings.HasPrefix(cfg.Row.Name, "alpha-athena-now-serve"):
 		o, serr := st.NowServe(ctx, plan)
 		if stopsTheRun(serr) || errors.Is(serr, ErrSecondNotStarted) {

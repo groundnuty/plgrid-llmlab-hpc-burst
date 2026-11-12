@@ -31,7 +31,13 @@ var watchReaders = map[string]stack.WatchClass{
 	"requeueResult": {Why: "waits itself: a wait whose condition is the watch, bounded by RequeueResultWait; requeueOwnJob makes the catch-up after it"},
 
 	"firstJobStarted": {Why: "waits itself: a wait whose condition is the watch"},
-	"allocations":     {Why: "helper: firstJobStarted's read, classed here"},
+	// Row B (issue #376; now_nooverlap_flows_test.go).
+	"NowNoOverlap":          {Syncs: []string{"KindAllocations|KindDeployments|KindInstances"}},
+	"nowNoOverlapFromWatch": {Why: "helper: NowNoOverlap makes the catch-up before it calls this"},
+	"nowPredecessorLeft":    {Why: "waits itself: a wait whose condition is the watch, bounded by the predecessor's lease end and EndMargin"},
+	"nowSuccessorStart":     {Why: "waits itself: a wait whose condition is the watch and the queue, bounded by SuccessorAllocationWait and the start wait; a refusal it misses is read again after NowNoOverlap's catch-up (nowNoOverlapFromWatch)"},
+	"nowThirdJobSign":       {Why: "successorOf's stop: a wait's condition on the watch, which only ends the wait early"},
+	"allocations":           {Why: "helper: firstJobStarted's read, classed here"},
 }
 
 func TestWatchInventory(t *testing.T) {
