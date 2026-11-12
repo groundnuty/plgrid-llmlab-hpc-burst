@@ -279,13 +279,6 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 			return nil, err
 		}
 	}
-	// The bulk path's second certificate, for the same key, before anything starts too: the first
-	// is only read (HBEP-6, The bulk path).
-	if o.BulkPath {
-		if err := ensureBulkCert(l.host(ports), o.Log); err != nil {
-			return nil, err
-		}
-	}
 	bin, err := ResolveBinary(o.BinDir, version)
 	if err != nil {
 		return nil, err
@@ -307,6 +300,13 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 	// binary is being hashed.
 	if err := checkPortsFree(ports.All()); err != nil {
 		return nil, fmt.Errorf("refusing to start: %w", err)
+	}
+	// The bulk path's second certificate, for the same key, once the ports are known free, so an up
+	// refused on a port leaves none behind; the first is only read (HBEP-6, The bulk path).
+	if o.BulkPath {
+		if err := ensureBulkCert(l.host(ports), o.Log); err != nil {
+			return nil, err
+		}
 	}
 
 	spec := launchSpec{l: l, bin: bin, ports: ports, nice: o.Nice, eventTTL: o.eventTTL, omitEventTTL: o.omitEventTTL}

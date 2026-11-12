@@ -184,6 +184,16 @@ With a `routing.maxRequestDuration` of 5 minutes and the shipped profiles' value
 
 **The tunnel rows' lease is chosen by measurement.** The hour of traffic (61 minutes) must end before the drain start, 15 minutes before the lease ends, so the Instance must be ready within `lease - 76 minutes` of its job's start (`LatestReady`): 30 minutes under the shortest lease, 1 h 46 min, and 61 minutes under 2 h 17 min (a start of up to `health.startTimeout`, the hour, the drain window and a minute). The rule: take GH200's measured start-to-ready with the cold SIF build included; under 20 minutes, keep 1 h 46 min, else 2 h 17 min. The measurement is the second real-engine run on Helios GH200 ([issue #94, comment 6557821833](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/94#issuecomment-6557821833)): a cold build with an empty image cache and a slow Hub; the job started at 11:42:26Z and its first Instance had qualified and warmed up at 12:06:05Z, **23 min 39 s** later. That is over 20 minutes, so the default is **2 h 17 min**, and the Helios row holds the slot for about 2 h 20 min. A failed hour costs that hold and a rerun, which is worse than the margin. The owner may choose the other value, or any from 106 to 240 minutes, with `LIVE_TUNNEL_LEASE_MINUTES` when giving the go; the hold note, the shape and the test follow it, and a start slower than the lease allows fails the row with "the hour ended after the Instance's drain start".
 
+## The worker-rung fault's process tree
+
+The stack rows' worker-rung fault lists the processes of the run's job on its node and kills the engine: the process the agent launched through Apptainer (`internal/alpha/workerfault.go`, `PickEngine`; issue #445). The listing itself holds paths, logins and job IDs, so it is never logged. Instead the step writes a redacted shape of the job's process tree (`internal/alpha/engineshape.go`, `Shape`): a line of counts, then a line per process of the job's tree with its depth, a kind for its program, how it is of the job, its cgroup's form and which of the pick's three conditions it meets (`job`, `apptainer`, `command`). It holds no PID, path, login, host or job ID.
+- **Where it is:** in the run's private test log when the engine was found, and in the row's FAILED output when the count was not one. It is for the operator and the agents to read, never for a post: the posts (`posts.md`) do not carry it.
+- **Reading a failure:** the engine is the line that meets `job+command`. Look at what it lacks, and at the lines above it:
+  - no `apptainer`, under a process of kind `other`: an Apptainer name the pick does not know;
+  - no `apptainer`, with `parent:unlisted` at depth 0: its parent is not this user's to list;
+  - no line meets `command`, but a `python` or `vllm` line sits under the `runtime-parent`: the command line's form differs (its `argv:` form says how);
+  - the counts line says 0 in the job's tree: no process's environment or cgroup tied it to the job.
+
 ## The runs
 
 Durations are plans, from the lease each row sets (`internal/alpha/rows.go`); the first run replaces them with a measurement. The queue wait comes on top of every one.

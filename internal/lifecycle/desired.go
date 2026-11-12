@@ -135,6 +135,11 @@ func (b *Backend) desiredInstance(ctx context.Context, in *v1alpha1.Instance) (*
 			Name: worker, Generation: restartGeneration(in, worker), EngineSocket: agentapi.ContainerEngineSocket(worker),
 		}},
 	}
+	// Beta, opt-in: the Instance's router, with its own restart generation
+	// (#429). An Instance without launch.router gets none: alpha's shape.
+	if in.Spec.Launch.Router != "" {
+		di.Router = &agentapi.DesiredRouter{Kind: agentapi.RouterKind(in.Spec.Launch.Router), Generation: restartGeneration(in, v1alpha1.PartRouter)}
+	}
 	if _, err := os.Stat(agentapi.InstanceKeyPath(b.CredentialsDir, string(in.UID))); err == nil {
 		di.KeyStored = true
 	}

@@ -77,6 +77,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/lifecycle"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -101,6 +102,11 @@ type flags struct {
 	// certificate and writes agent.json's bulk block. The launcher passes it only when its state
 	// records the bulk path; without it nothing of the bulk path runs in the controller.
 	bulkPath bool
+	// instanceRouter is the router each new Instance runs in front of its
+	// worker (beta, opt-in; HBEP-5, Inside an Instance; #429): "envoy", or ""
+	// for none, alpha's shape. It is recorded in each Instance's launch at
+	// creation, so a restart with another value changes no running Instance.
+	instanceRouter string
 }
 
 func parse(args []string, stderr io.Writer) (flags, error) {
@@ -117,6 +123,7 @@ func parse(args []string, stderr io.Writer) (flags, error) {
 	fs.IntVar(&f.workers, "workers", lifecycle.DefaultWorkers, "work queue workers")
 	fs.StringVar(&f.relayKeeperSocket, "relay-keeper-socket", "", "the relay keeper's Unix socket, in host-dialed mode only (beta): the keeper holds the relays; unset, the controller does (alpha)")
 	fs.BoolVar(&f.bulkPath, "bulk-path", false, "the launcher runs the second frps for the bulk path (beta): serve its plugin path, read its proxy list and stage the second certificate; direct and host-dialed mode only")
+	fs.StringVar(&f.instanceRouter, "instance-router", "", "the router each new Instance runs in front of its worker (beta): envoy; unset, none (alpha)")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
@@ -157,6 +164,8 @@ func parse(args []string, stderr io.Writer) (flags, error) {
 		return flags{}, fmt.Errorf("--bulk-path is for --front-mode %s or %s only: in ssh mode the agent starts no bulk frpc", agentapi.DialHomeDirect, agentapi.DialHomeHostDialed)
 	case f.bulkPath && f.host.PortBase > 65535-agentapi.FrpsBulkWebPortOffset:
 		return flags{}, fmt.Errorf("--port-base %d is out of range with --bulk-path: the block reaches base+%d", f.host.PortBase, agentapi.FrpsBulkWebPortOffset)
+	case f.instanceRouter != "" && f.instanceRouter != string(v1alpha1.InstanceRouterEnvoy):
+		return flags{}, fmt.Errorf("--instance-router %q: want %s, or unset for no router (alpha)", f.instanceRouter, v1alpha1.InstanceRouterEnvoy)
 	}
 	if f.kubeconfig == "" {
 		f.kubeconfig = filepath.Join(f.host.StateDir, "kubeconfig")
@@ -301,5 +310,6 @@ func managerOptions(f flags, cfg *rest.Config, getenv func(string) string) lifec
 		Config: cfg, CredentialsDir: f.host.CredentialsDir(), AgentBuildsDir: f.host.AgentBuildsDir(),
 		FrontConfigured: f.frontMode != "", HostDialed: f.frontMode == string(agentapi.DialHomeHostDialed), HealthAddr: f.healthAddr, MetricsAddr: f.host.ControllerMetricsAddr(),
 		LeaderElection: f.leaderElect, Workers: f.workers, HubEndpoint: getenv(hubEndpointEnv),
+		InstanceRouter: v1alpha1.InstanceRouter(f.instanceRouter),
 	}
 }

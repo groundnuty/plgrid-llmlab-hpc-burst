@@ -9,11 +9,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
@@ -302,5 +304,63 @@ func TestStatusFrpsBulkMustPostToTheFrontsBulkPlugin(t *testing.T) {
 	// The first frps's file posting to the bulk path, or the reverse, is not the same block.
 	if strings.Contains(frontPluginBlock(ports.FrontHealthAddr()), "/bulk") {
 		t.Error("the first frps's front block names the bulk path")
+	}
+}
+
+// TestAnUpgradeKeepsTheBulkPath: upgrade starts the new release with the record's bulk path, ports
+// included, as it keeps the relay keeper (TestAnUpgradeKeepsTheRelayKeeper); a host without the bulk
+// path stays without it.
+func TestAnUpgradeKeepsTheBulkPath(t *testing.T) {
+	for _, bulk := range []bool{true, false} {
+		t.Run(map[bool]string{true: "a bulk-path host", false: "an alpha host"}[bulk], func(t *testing.T) {
+			l := storeLayout(t)
+			putStore(t, l, "v1", "tok", "")
+			if err := l.saveStoreVersion("v1.35.9+k3s1", "up"); err != nil {
+				t.Fatal(err)
+			}
+			ports, err := PortsFromBase(30020)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bulk {
+				if ports, err = ports.WithBulkPath(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			st := &State{Version: "v1.35.9+k3s1", Ports: ports, Front: Front{Mode: string(agentapi.DialHomeHostDialed)},
+				Controllers: &ControllerConfig{Binary: "/opt/example/hpcburst-controller"}, BulkPath: bulk}
+			ops := &fakeHostOps{t: t, l: l}
+			if _, _, _, _, err := replaceHost(context.Background(), l, st, Binary{Version: mustVersion(t, "v1.36.5+k3s1")}, ops, time.Second, time.Second, nil); err != nil {
+				t.Fatal(err)
+			}
+			if ops.spec.bulkPath != bulk || ops.spec.ports.BulkPath != bulk {
+				t.Fatalf("the new host's launch spec carries bulkPath %v and a block with the bulk path %v, want %v", ops.spec.bulkPath, ops.spec.ports.BulkPath, bulk)
+			}
+		})
+	}
+}
+
+// TestEachCertificateNamesExactlyItsOwnName (the review of #456 and #458): one certificate carrying
+// both names would pass both checks, so the launcher's issuance keeps them apart. The second
+// certificate names the bulk server alone; the first names localhost, the token's server and
+// 127.0.0.1, as it did before the bulk path, and never the bulk server.
+func TestEachCertificateNamesExactlyItsOwnName(t *testing.T) {
+	h := testHost(t)
+	if err := ensureAgentEndpointPair(h, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureBulkCert(h, nil); err != nil {
+		t.Fatal(err)
+	}
+	first, bulk := certFile(t, h.AgentCertFile()), certFile(t, h.BulkCertFile())
+	if !slices.Equal(first.DNSNames, []string{"localhost", "dial-home.hpcburst.invalid"}) || len(first.IPAddresses) != 1 || !first.IPAddresses[0].Equal(net.IPv4(127, 0, 0, 1)) ||
+		len(first.URIs) != 0 || len(first.EmailAddresses) != 0 {
+		t.Errorf("the first certificate names %v %v %v %v; want localhost and dial-home.hpcburst.invalid, and 127.0.0.1", first.DNSNames, first.IPAddresses, first.URIs, first.EmailAddresses)
+	}
+	if !slices.Equal(bulk.DNSNames, []string{bulkName}) || len(bulk.IPAddresses) != 0 || len(bulk.URIs) != 0 || len(bulk.EmailAddresses) != 0 {
+		t.Errorf("the second certificate names %v %v %v %v; want %s alone", bulk.DNSNames, bulk.IPAddresses, bulk.URIs, bulk.EmailAddresses, bulkName)
+	}
+	if first.VerifyHostname(bulkName) == nil || bulk.VerifyHostname("dial-home.hpcburst.invalid") == nil {
+		t.Error("a certificate passes the other's name")
 	}
 }
