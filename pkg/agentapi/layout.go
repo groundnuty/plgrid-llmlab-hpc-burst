@@ -54,6 +54,21 @@ func StagedDialHomeCertPath(tag string) string {
 	return path.Join(AllocationDir(tag), StagedDialHomeCertName)
 }
 
+// StagedBulkDialHomeCertName is the file name of the bulk path's second
+// certificate in the Allocation's directory (beta; HBEP-6, The bulk path;
+// `@hpc-burst-science-agent`, 12 Nov 2026, #448). It is public, and only the
+// bulk frpc trusts it.
+const StagedBulkDialHomeCertName = "dial-home-bulk.crt"
+
+// StagedBulkDialHomeCertPath is the Allocation's copy of the bulk path's
+// second certificate, alloc/<tag>/dial-home-bulk.crt: Host.BulkCertFile's,
+// for the key whose pin agent.json carries. It is staged only with
+// agent.json's bulk block, and the agent checks it against that pin and
+// BulkDialHomeServerName (VerifyDialHomeCertFor) before it runs the bulk frpc.
+func StagedBulkDialHomeCertPath(tag string) string {
+	return path.Join(AllocationDir(tag), StagedBulkDialHomeCertName)
+}
+
 // StagedConfigPath is the Allocation's agent.json, mode 600.
 func StagedConfigPath(tag string) string { return path.Join(AllocationDir(tag), ConfigFileName) }
 
