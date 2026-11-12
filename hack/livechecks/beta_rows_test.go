@@ -56,6 +56,15 @@ func TestNoAliasStandsForABetaRow(t *testing.T) {
 			ready[r.name] = true
 		}
 	}
+	host := map[string]string{}
+	sb, err := os.ReadFile(scriptPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range block(t, string(sb), "CLUSTER SHAPES") {
+		f := strings.Split(l, "|")
+		host[f[0]] = f[1]
+	}
 	aliases := readAliases(t)
 	if len(aliases) != 4 {
 		t.Errorf("%d aliases, want tunnel-hour, gpu-accounting, reach and reach-host-dialed", len(aliases))
@@ -71,8 +80,10 @@ func TestNoAliasStandsForABetaRow(t *testing.T) {
 			if !ready[r] {
 				t.Errorf("alias %s stands for %s, which is not a ready row", alias, r)
 			}
-			if !strings.HasSuffix(r, "-athena") {
-				t.Errorf("alias %s stands for %s, which is not an Athena row", alias, r)
+			// An Athena row is one the cluster table puts on the athena host. Not the name's ending: the accounting row on
+			// plgrid-now is gpu-accounting-athena-now (issue #145), and an alias may stand for it.
+			if host[r] != "athena" {
+				t.Errorf("alias %s stands for %s, which is not an Athena row (the cluster table's host is %q)", alias, r, host[r])
 			}
 		}
 	}
@@ -117,7 +128,7 @@ func TestAnAliasRunNeedsNoHeliosSetting(t *testing.T) {
 		world      func(t *testing.T) *world
 	}{
 		{"tunnel-hour", "tunnel-hour-athena", newAlphaWorld},
-		{"gpu-accounting", "gpu-accounting-athena", newAlphaWorld},
+		{"gpu-accounting", "gpu-accounting-athena-now", newAlphaWorld},
 		{"reach", "reach-athena", newReachWorld},
 		{"reach-host-dialed", "reach-host-dialed-athena", hostDialedWorld},
 	} {

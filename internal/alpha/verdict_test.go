@@ -199,7 +199,7 @@ func (m mix) requests(start time.Time) []Stream {
 	at := start
 	run := func(tag string) {
 		for i := 0; i < 3; i++ {
-			out = append(out, Stream{ID: fmt.Sprintf("%s%d", tag, i), Opened: at, Ended: at.Add(m.near), Complete: true})
+			out = append(out, Stream{ID: fmt.Sprintf("%s%d", tag, i), Opened: at, Ended: at.Add(m.near), Complete: true, Long: true})
 			at = at.Add(m.near + m.gap)
 		}
 	}
@@ -220,7 +220,7 @@ func (m mix) requests(start time.Time) []Stream {
 		if end.Sub(at) < l {
 			l = end.Sub(at)
 		}
-		out = append(out, Stream{ID: "p", Opened: at, Ended: at.Add(l), Complete: true})
+		out = append(out, Stream{ID: "p", Opened: at, Ended: at.Add(l), Complete: true, Long: true})
 		at = at.Add(l)
 	}
 	return out
@@ -444,7 +444,7 @@ func TestTheTrafficOfTheHourAtItsBoundaries(t *testing.T) {
 		{"as it should be", func(*mix) {}, ""},
 		{"a gap of 10 s between requests", func(m *mix) { m.gap = 10 * time.Second }, ""},
 		{"a gap of 11 s between requests", func(m *mix) { m.gap = 11 * time.Second }, "no run of requests back to back"},
-		{"requests of 239 s", func(m *mix) { m.near = 239 * time.Second }, "no request of about 4 minutes"},
+		{"requests of 239 s", func(m *mix) { m.near = 239 * time.Second }, "no completed long stream"},
 		{"requests of 300 s", func(m *mix) { m.near = 300 * time.Second }, ""},
 		{"15 concurrent streams", func(m *mix) { m.burst = 15 }, "no 16 concurrent streams"},
 		{"streams at 19.9 tokens a second", func(m *mix) { m.rate = 19.9 }, "no 16 concurrent streams"},

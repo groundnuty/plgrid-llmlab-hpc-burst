@@ -96,7 +96,7 @@ var dryGPUFaults = map[string][2]string{
 
 // TestGPUAccounting is the run on one platform.
 //
-//livecheck:gpu-accounting-helios,gpu-accounting-athena
+//livecheck:gpu-accounting-helios,gpu-accounting-athena,gpu-accounting-athena-now
 func TestGPUAccounting(t *testing.T) {
 	if os.Getenv("HPCBURST_ALPHA_DRY") == "1" {
 		dryGPUAccounting(t)
@@ -134,7 +134,7 @@ func dryGPUAccounting(t *testing.T) {
 
 // dryAccountingWorld is the world of a dry run of an accounting row over a fake Slurm in run mode, and the fake.
 // The settings are the row's, as the script would pass them. The faults are the node's (dryGPUFaults) and
-// slot-held: the owner's other job holds QOS now's one GPU, so this run's job pends past the start-wait bound,
+// slot-held: the owner's other job holds the one-job slot (QOS now's one GPU, or plgrid-now's), so this run's job pends past the start-wait bound,
 // on a clock that moves only when the wait sleeps, so that the bound is reached at once and the job can never
 // have started; and queue-held, the same for a row with no slot, whose bound is the wait in the queue (a cap on the
 // fake partition that the owner's job fills). The other runs wait on the real clock, for a job that starts in seconds.
@@ -148,9 +148,8 @@ func dryAccountingWorld(t *testing.T, row, fault, out string) (*world, *fakeslur
 	if !known {
 		t.Fatalf("the dry fault %q is not one of the row's", fault)
 	}
-	if fault == "slot-held" && r.QOS == "" {
-		t.Fatalf("the dry fault slot-held needs a row under a one-job QOS")
-	}
+	// slot-held needs a one-job slot: a QOS of the row, or the partition's own QOS from the profile (plgrid-now's, for
+	// gpu-accounting-athena-now). dryWorld refuses it for a row with neither.
 	return dryWorld(t, r, fault, out, dryShape{cpus: "4", memory: "8Gi"}, dryGPUAgent, map[string]string{"FAKE_NODE_CVD": node[0], "FAKE_NODE_SMI": node[1]})
 }
 
