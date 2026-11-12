@@ -133,16 +133,23 @@ func (w *world) useAlphaStubs(rows ...string) {
 	_ = rows
 }
 
+// pinnedBinaries lays out dir as hack/fetch-k3s.sh and hack/fetch-frp.sh do: k3s under k3s-1.36.5/, and frps and frpc at the top,
+// each an executable file.
+func pinnedBinaries(t *testing.T, dir string) {
+	t.Helper()
+	for _, f := range []string{"k3s-1.36.5/k3s", "frps", "frpc"} {
+		write(t, filepath.Join(dir, f), "#!/bin/bash\n", 0o755)
+	}
+}
+
 // alphaSettings adds what the alpha rows need to the world's settings file.
 func (w *world) alphaSettings(mutate func(m map[string]string)) {
 	w.t.Helper()
 	bin := filepath.Join(w.dir, "bindir")
 	key := filepath.Join(w.dir, "dialhome-key")
-	for _, d := range []string{bin} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			w.t.Fatal(err)
-		}
-	}
+	// The directory is laid out as hack/fetch-k3s.sh and hack/fetch-frp.sh lay it out: every row that starts the stack checks it
+	// before the slot is read (issue #444).
+	pinnedBinaries(w.t, bin)
 	write(w.t, key, "SEEDDIALKEY\n", 0o600)
 	w.writeSettings(func(m map[string]string) {
 		m["LIVE_DIALHOME_MODE"] = "direct"

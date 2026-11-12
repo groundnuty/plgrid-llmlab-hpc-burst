@@ -701,6 +701,14 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'hack/live-checks.sh@@reach-host-dialed-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|25|-C memfs|10@@reach-host-dialed-helios|helios|helios|plgrid-gpu-gh200|now|-|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|25|-C memfs|10'
   'hack/live-checks.sh@@reach-host-dialed|reach-host-dialed-helios,reach-host-dialed-athena@@reach-host-dialed|reach-host-dialed-athena'
   'hack/live-checks.sh@@reach-host-dialed-athena|cmd/hb-agent@@reach-host-dialed-athena|internal/slurm'
+  # #444: every row that starts the stack checks LIVE_BIN_DIR's layout before the slot is read (check_bin_dir): the alpha rows' call (the
+  # incident: only the rehearsal row checked), each of the three binaries, the executable bit, the setting named and never its value, every problem at once.
+  'hack/live-checks.sh@@  check_bin_dir || bad=1@@  [ -d "${S[LIVE_BIN_DIR]:-/}" ] || bad=1'
+  'hack/live-checks.sh@@for f in frps frpc; do@@for f in frps; do'
+  'hack/live-checks.sh@@[ -f "$d/$f" ] && [ -x "$d/$f" ] || { say "live-checks: LIVE_BIN_DIR has no executable $f at@@[ -f "$d/$f" ] || { say "live-checks: LIVE_BIN_DIR has no executable $f at'
+  'hack/live-checks.sh@@say "live-checks: LIVE_BIN_DIR has no executable $f at its top level@@say "live-checks: $d has no executable $f at its top level'
+  'hack/live-checks.sh@@at its top level (hack/fetch-frp.sh puts it there)"; bad=1; }@@at its top level (hack/fetch-frp.sh puts it there)"; return 1; }'
+  'hack/live-checks.sh@@[ -f "$d/k3s-1.36.5/k3s" ] && [ -x "$d/k3s-1.36.5/k3s" ] || { say "live-checks: LIVE_BIN_DIR has no executable k3s-1.36.5/k3s (hack/fetch-k3s.sh)"; bad=1; }@@:'
   'internal/providerctl/conformance/hostdialed_verdict_test.go@@{o.JobID, "<the job>"}@@{"", "<the job>"}'
   'internal/providerctl/conformance/hostdialed_verdict_test.go@@	s = pathWord.ReplaceAllString(s, "<a path>")@@	s = pathWord.ReplaceAllString(s, "$0")'
   # PR 306's review: the evidence each line of the post now requires (B1, B2, B4, B5; B3's is hostdial's own lifecycle).
@@ -780,7 +788,7 @@ compile_of() {
 # parent-death SIGKILL, which it asks for.
 rehearsal_tests='ExitedSSHD|ZeroRowSignalsNothing|BelowWalksNothing|Guard2Alone|SignalProcs|RefusalIsTheErrorOfClose|WithRelayEnvSelectsNothing|ReportLeaks|CloseReturnsWhen|BeforeItsParent|LeftTheTree|StillAliveAtItsDeadline|StillOutsideTheTree|RelayGuard|ForcedCommandDies|ForcedCommandExecs|GuardFailureIsLogged'
 # The tests of the script's kind.
-script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot|HostDialedMode'
+script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot|HostDialedMode|EveryStackRow|TheRowsThatStartNoStack'
 # tests_of <path> [control|<names>]: the command that judges a mutant of path, in the array tests. With control, the same command with
 # no mutant: from the binaries kept at the baseline, the tree being as it was. With names (a regexp), that, for those tests alone, to
 # the end. The
