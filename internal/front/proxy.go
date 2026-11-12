@@ -41,6 +41,11 @@ type Proxy struct {
 	// path has no pass marker of its own, so a test proves that a request
 	// raised no event by it (HBEP-8, Raised events, condition 3).
 	afterFinish func(requestID string)
+	// beforeWrite, when set, runs in each request's finish just before its
+	// usage record's write, so a test holds one handler there, after the
+	// shutdown cut and before its record exists: a stop that does not wait
+	// for the handler loses that record (#432). Nil in production.
+	beforeWrite func(requestID string)
 }
 
 // ProxyOptions are the inputs of NewProxy.
@@ -429,6 +434,9 @@ func (p *Proxy) finish(x *exchange) {
 	// Counted whether or not its record could be written: the client got
 	// its answer either way, and the sink counts the loss on its own.
 	p.metrics.observe(x.rec)
+	if p.beforeWrite != nil {
+		p.beforeWrite(x.id)
+	}
 	if _, err := p.sink.Write(x.rec); err != nil {
 		p.log.Error("usage record not written", "request", x.id, "error", err.Error())
 		p.router.usageFailed(x.id, err)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/enginetest"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/inventory"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/usage"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // TestRunStopCutsAStreamAndWritesItsRecord (PR #95 review, Opus B5's
@@ -231,5 +233,63 @@ func TestHealthAndEventOnAFailingUsageSink(t *testing.T) {
 	}
 	if v, ok := find(t, ss, "hpcburst_usage_records_total"); !ok || v != 0 {
 		t.Errorf("hpcburst_usage_records_total = %v (present %v), want 0: nothing reached the disk", v, ok)
+	}
+}
+
+// TestRunPassesOneGraceToBothWaitsOfAStop (#432): stopServing takes the
+// Shutdown grace and the handler wait apart, so that a test can wait on state;
+// Run still gives both the one configured grace, and DefaultShutdownGrace when
+// none is set, so production's stop is unchanged. The bounds are read at Run's
+// own call, through Options.stop; nothing is in flight, so the stop is
+// instant whatever the grace.
+func TestRunPassesOneGraceToBothWaitsOfAStop(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		grace time.Duration
+		want  time.Duration
+	}{
+		{"configured", 7 * time.Second, 7 * time.Second},
+		{"default", 0, DefaultShutdownGrace},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := runOptions(t, "", agentapi.Host{StateDir: t.TempDir()}, "")
+			dial, err := listenFree()
+			if err != nil {
+				t.Fatal(err)
+			}
+			o.DialHomeListener = dial
+			o.ShutdownGrace = tc.grace
+			var calls int
+			var shutdown, handlers time.Duration
+			o.stop = func(servers []*http.Server, cancelBase context.CancelCauseFunc, p *Proxy, shutdownGrace, handlerWait time.Duration, log *slog.Logger) {
+				calls++
+				shutdown, handlers = shutdownGrace, handlerWait
+				stopServing(servers, cancelBase, p, shutdownGrace, handlerWait, log)
+			}
+			ready := make(chan *Front, 1)
+			o.Ready = func(f *Front) { ready <- f }
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- Run(ctx, o) }()
+			select {
+			case <-ready:
+			case err := <-done:
+				t.Fatalf("Run returned early: %v", err)
+			case <-time.After(30 * time.Second):
+				cancel()
+				<-done
+				t.Fatal("the front did not start")
+			}
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if calls != 1 {
+				t.Fatalf("Run stopped %d times, want once", calls)
+			}
+			if shutdown != tc.want || handlers != tc.want {
+				t.Errorf("Run passed a Shutdown grace of %v and a handler wait of %v, want %v for both", shutdown, handlers, tc.want)
+			}
+		})
 	}
 }

@@ -2,6 +2,7 @@ package front
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"net/http"
 	"strings"
@@ -15,6 +16,17 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/usage"
 )
 
+// The two waits of a stop in these tests (#432). The streams never finish on
+// their own, so http.Server.Shutdown always runs out its grace: it is kept
+// short, which only makes the tests fast. The wait for the cut handlers ends
+// the moment they have returned, so its bound is generous: a test waits on that
+// state, and a slow runner cannot lose a record to a window of a few hundred
+// milliseconds.
+const (
+	testShutdownGrace = 300 * time.Millisecond
+	testHandlerWait   = 30 * time.Second
+)
+
 // TestShutdownCutsStreamsAndKeepsTheirRecords (@hpc-burst-science-agent, 31
 // Oct 2026; PR #95 review, Opus B5): the front stops with three streams
 // running. After the grace each stream gets exactly one error event, detail
@@ -22,6 +34,63 @@ import (
 // front_shutdown, before the sink closes, with no gap in the counters.
 func TestShutdownCutsStreamsAndKeepsTheirRecords(t *testing.T) {
 	f := newScFix(t, scOpts{instances: 3, engineReal: true})
+	stopThreeStreams(t, f, nil)
+}
+
+// TestShutdownWaitsForAHandlerSlowerThanTheShutdownGrace (#432): one handler is
+// held, after the cut and before its usage record's write, for a time well past
+// the Shutdown grace. The stop still waits for it, by state and not by a
+// window: its record is there, and the handler had returned when stopServing
+// did. With the handler wait bound back at the Shutdown grace, stopServing
+// gives up at 300 ms, the sink closes first and the record is lost: "2 usage
+// records after the stop, want 3", the line CI showed.
+func TestShutdownWaitsForAHandlerSlowerThanTheShutdownGrace(t *testing.T) {
+	f := newScFix(t, scOpts{instances: 3, engineReal: true})
+	held := holdFirstRecord(f, 1*time.Second)
+	stopThreeStreams(t, f, func() {
+		if !held.released.Load() {
+			t.Errorf("stopServing returned while a handler was still held before its record's write: it waited for a window, not for the handlers")
+		}
+	})
+	if !held.entered.Load() {
+		t.Fatal("no handler reached its record's write, so the test held nothing")
+	}
+	if !held.afterCut.Load() {
+		t.Fatal("the handler was held before the shutdown cut, so the stop's wait for handlers was never at stake")
+	}
+}
+
+// heldRecord is a handler held in finish before its record's write, and what
+// the test saw of it.
+type heldRecord struct {
+	entered  atomic.Bool // a handler reached the hook
+	afterCut atomic.Bool // the cut had happened (cause: the shutdown) when it did
+	released atomic.Bool // its hold is over
+}
+
+// holdFirstRecord holds the first handler to reach its record's write for
+// hold. The hold is a delay the code under test has to outlast, not a window
+// the test asserts within: stopServing waits for the handlers' return, however
+// long that takes, up to its bound.
+func holdFirstRecord(f *scFix, hold time.Duration) *heldRecord {
+	h := &heldRecord{}
+	// Set before any request, so no handler reads it while it is written.
+	f.proxy.beforeWrite = func(string) {
+		if !h.entered.CompareAndSwap(false, true) {
+			return
+		}
+		h.afterCut.Store(context.Cause(f.base) == errCutShutdown)
+		time.Sleep(hold)
+		h.released.Store(true)
+	}
+	return h
+}
+
+// stopThreeStreams opens three streams on f, stops the front with
+// testShutdownGrace and testHandlerWait, and checks the streams' ends and the
+// usage records. afterStop, when set, runs as soon as stopServing has returned.
+func stopThreeStreams(t *testing.T, f *scFix, afterStop func()) {
+	t.Helper()
 	f.setAll(enginetest.Behaviour{Tokens: 100000, PerToken: 20 * time.Millisecond})
 	reqs := []struct{ path, body string }{{scChat, prChatStream}, {scChat, prChatStream}, {"/v1/responses", prRespStream}}
 	bodies := make([]string, len(reqs))
@@ -45,7 +114,10 @@ func TestShutdownCutsStreamsAndKeepsTheirRecords(t *testing.T) {
 		}()
 	}
 
-	stopServing([]*http.Server{f.srv}, f.cancelBase, f.proxy, 300*time.Millisecond, discardLog())
+	stopServing([]*http.Server{f.srv}, f.cancelBase, f.proxy, testShutdownGrace, testHandlerWait, discardLog())
+	if afterStop != nil {
+		afterStop()
+	}
 	if err := f.sink.Close(); err != nil {
 		t.Fatalf("sink: %v", err)
 	}
@@ -107,7 +179,7 @@ func TestShutdownBeforeFirstByte(t *testing.T) {
 	queued := scGo(f.harness, errChatBody(scModel, false, "queued"))
 	errWaitFor(t, "the third request to queue", func() bool { return f.router.Status().Waiting == 1 })
 
-	stopServing([]*http.Server{f.srv}, f.cancelBase, f.proxy, 200*time.Millisecond, discardLog())
+	stopServing([]*http.Server{f.srv}, f.cancelBase, f.proxy, 200*time.Millisecond, testHandlerWait, discardLog())
 	for i, c := range []*scCall{whole, streamed, queued} {
 		resp, body := c.wait(t)
 		checkErrorBody(t, body, codeShuttingDown, "shutdown")
