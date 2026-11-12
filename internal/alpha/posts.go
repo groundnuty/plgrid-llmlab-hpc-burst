@@ -90,10 +90,29 @@ func tunnelHourPost(row Row, o TunnelHourObs, failures []string) string {
 		verdictLine(row, failures), deploymentLine(o.Deployment), len(o.Requests), last.Sub(first).Round(time.Second), longestChain(o.Requests, tm.MaxChainGap),
 		tm.StreamRate, concurrentStreams(o.Requests, tm.StreamRate), longestIdle(o.Requests).Round(time.Second), cut,
 		len(sessions), len(o.Samples), connected, largeLine(o, tm)+rateLines(o)+headOfLineLine(o))
+	b.WriteString(longPlanLine(o, tm))
 	for _, fl := range TunnelHourFlags(o) {
 		fmt.Fprintf(&b, "- FLAG: %s\n", fl)
 	}
 	return b.String()
+}
+
+// longPlanLine: the hour's long stream as the live row sized it, once, before the hour (issue #451): its tokens and length, the
+// rate and the context it was sized at, the cap and the floor, and the longest completed stream within the deadline that the hour
+// held. A run with no plan (a dry run) has no line.
+func longPlanLine(o TunnelHourObs, tm Timing) string {
+	p := o.LongPlan
+	if p.Length <= 0 {
+		return ""
+	}
+	var longest time.Duration
+	for _, r := range o.Requests {
+		if d := r.Ended.Sub(r.Opened); r.Complete && d <= tm.MaxRequestDuration {
+			longest = max(longest, d)
+		}
+	}
+	return fmt.Sprintf("- the long stream: %d tokens, sized for %s at the measured %.0f tokens/s on a context of %d (cap %s, floor %s); the longest completed stream within the deadline: %s\n",
+		p.Tokens, p.Length, p.Rate, p.MaxModelLen, tm.LongCap(), tm.LongFloor, longest.Round(time.Second))
 }
 
 // largeLine: how many requests had a body of 0.1 MB or more, the range of the bodies, and how many of them were

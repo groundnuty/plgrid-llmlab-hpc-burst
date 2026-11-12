@@ -232,6 +232,9 @@ type TunnelHourObs struct {
 	// HeadOfLine is the streams' longest gap between two tokens while a large
 	// body was in flight, against the rest of the hour (live rows).
 	HeadOfLine *HeadOfLine `json:"headOfLine,omitempty"`
+	// LongPlan is the hour's long stream as the live row sized it, once, before the hour (FitLong), and posted with the result
+	// (issue #451). A dry run, which sizes nothing, leaves it empty, and the verdict then asks for NearDeadline.
+	LongPlan LongPlan `json:"longPlan,omitzero"`
 }
 
 // HeadOfLine is the head-of-line measure of the tunnel hour (HeadOfLineOf):

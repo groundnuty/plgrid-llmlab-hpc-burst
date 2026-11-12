@@ -167,7 +167,7 @@ var tunnelCases = []dryCase{
 	{"no-concurrency", "no 16 concurrent streams"},
 	{"slow-streams", "no 16 concurrent streams"},
 	{"no-idle-gap", "no idle stretch"},
-	{"no-long-stream", "no request of about 4 minutes"},
+	{"no-long-stream", "no completed long stream"},
 	{"no-back-to-back", "no run of requests back to back"},
 }
 

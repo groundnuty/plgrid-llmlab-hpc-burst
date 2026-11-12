@@ -21,6 +21,8 @@ var liveTimingByHand = Timing{
 	IdleLimit: 2 * time.Minute, MaxIdleLimit: 10 * time.Minute,
 	TunnelHour: 61 * time.Minute, Hour: time.Hour,
 	MinChain: 3, MaxChainGap: 10 * time.Second, NearDeadline: 4 * time.Minute,
+	// The hour's long stream is at least 2 minutes (issue #451; the science agent's ruling (b), 12 Nov 2026).
+	LongFloor:         2 * time.Minute,
 	ConcurrentStreams: 16, StreamRate: 20, MinIdleGap: 2 * time.Minute, MaxSampleGap: 2 * time.Minute,
 	// The large requests (issue #224; the ruling (4) on PR 255): 0.4 MB prompts from two senders, half a second apart.
 	UploadBody: 400_000, UploadStreams: 2, UploadPause: 500 * time.Millisecond,
@@ -139,7 +141,7 @@ func TestAScaledRowIsJudgedOnItsClock(t *testing.T) {
 		"the deployment's leaseLimit is not longer than the lead an Instance needs (PartitionTooShort)",
 		"the requests lasted less than an hour",
 		"the cluster's record shows the job ran under an hour",
-		"the hour held no request of about 4 minutes, near the deadline",
+		"the hour held no completed long stream, as long as the context allows at the measured rate, within the deadline",
 		"the hour held no idle stretch of 2 minutes with heartbeats only",
 	} {
 		if !slices.Contains(f, want) {

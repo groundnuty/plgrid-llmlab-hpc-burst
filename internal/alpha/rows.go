@@ -57,6 +57,9 @@ const (
 	// NearDeadline is the length of the longest request the hour must contain:
 	// about 4 minutes, close to the 5-minute deadline.
 	NearDeadline = 4 * time.Minute
+	// LongFloor is the shortest long stream the hour runs with when the deployment's context cannot hold NearDeadline's at the
+	// engine's measured rate (issue #451; the science agent's ruling (b), 12 Nov 2026): under it the row is NOT RUN.
+	LongFloor = 2 * time.Minute
 	// ConcurrentStreams streams of at least StreamRate tokens a second each must be
 	// open at the same moment.
 	ConcurrentStreams = 16
@@ -238,10 +241,12 @@ type Timing struct {
 	IdleLimit, MaxIdleLimit time.Duration
 	// TunnelHour is how long the hour's traffic runs, and Hour the span its
 	// requests and the job must cover.
-	TunnelHour, Hour  time.Duration
-	MinChain          int
-	MaxChainGap       time.Duration
-	NearDeadline      time.Duration
+	TunnelHour, Hour time.Duration
+	MinChain         int
+	MaxChainGap      time.Duration
+	NearDeadline     time.Duration
+	// LongFloor is the shortest long stream the hour's check 2 accepts to size (LongFloor; FitLong).
+	LongFloor         time.Duration
 	ConcurrentStreams int
 	StreamRate        float64
 	MinIdleGap        time.Duration
@@ -260,7 +265,7 @@ type Timing struct {
 func LiveTiming() Timing {
 	return Timing{MaxRequestDuration: MaxRequestDuration, DrainMargin: DrainMargin, HandoverMargin: HandoverMargin, StartTimeout: StartTimeout,
 		IdleLimit: IdleLimit, MaxIdleLimit: 10 * time.Minute, TunnelHour: TunnelHour, Hour: Hour, MinChain: MinChain, MaxChainGap: MaxChainGap,
-		NearDeadline: NearDeadline, ConcurrentStreams: ConcurrentStreams, StreamRate: StreamRate, MinIdleGap: MinIdleGap, MaxSampleGap: MaxSampleGap,
+		NearDeadline: NearDeadline, LongFloor: LongFloor, ConcurrentStreams: ConcurrentStreams, StreamRate: StreamRate, MinIdleGap: MinIdleGap, MaxSampleGap: MaxSampleGap,
 		UploadBody: UploadBody, UploadStreams: UploadStreams, UploadPause: UploadPause, ServeTokens: ServeStreamTokens}
 }
 
@@ -282,6 +287,7 @@ func (r Row) Clock() Timing {
 	fill(&t.Hour, l.Hour)
 	fill(&t.MaxChainGap, l.MaxChainGap)
 	fill(&t.NearDeadline, l.NearDeadline)
+	fill(&t.LongFloor, l.LongFloor)
 	fill(&t.MinIdleGap, l.MinIdleGap)
 	fill(&t.MaxSampleGap, l.MaxSampleGap)
 	if t.MinChain == 0 {

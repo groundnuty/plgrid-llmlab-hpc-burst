@@ -71,7 +71,7 @@ var standInPair = Timing{MaxRequestDuration: 90 * time.Second, DrainMargin: 30 *
 // are prompts of 128 KiB from one sender that pauses 250 ms after each reply,
 // to keep the stand-in's load on this host light.
 var standInTunnel = Timing{MaxRequestDuration: 75 * time.Second, DrainMargin: 30 * time.Second, HandoverMargin: 30 * time.Second,
-	StartTimeout: 4 * time.Minute, TunnelHour: 5*time.Minute + 5*time.Second, Hour: 5 * time.Minute, NearDeadline: time.Minute,
+	StartTimeout: 4 * time.Minute, TunnelHour: 5*time.Minute + 5*time.Second, Hour: 5 * time.Minute, NearDeadline: time.Minute, LongFloor: 30 * time.Second,
 	MinIdleGap: 30 * time.Second, MaxSampleGap: 30 * time.Second,
 	UploadBody: 128 << 10, UploadStreams: 1, UploadPause: 250 * time.Millisecond}
 

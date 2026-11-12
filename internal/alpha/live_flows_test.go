@@ -676,11 +676,17 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	key := r.fc.KeyFor(&in)
 	rate := r.rate(key)
 	tm := r.tm
-	long := tm.NearDeadline + (tm.MaxRequestDuration-tm.NearDeadline)/2
+	// The long stream is as long as the context allows at the measured rate, capped at LongCap (4 min 30 s) and at least the
+	// floor (2 min): below it the row is NOT RUN, before the hour (issue #451). Sized once, and posted with the result.
+	long, err := FitLong(tm, r.maxModelLenOrDefault(), rate)
+	if err != nil {
+		return TunnelHourObs{}, err
+	}
 	nLong, err := r.tokensFor(long, rate)
 	if err != nil {
 		return TunnelHourObs{}, err
 	}
+	plan := LongPlan{Length: long, Tokens: nLong, Rate: rate, MaxModelLen: r.maxModelLenOrDefault()}
 	burst := min(tm.MaxRequestDuration*6/10, 2*time.Minute)
 	if burst < rateAsked+10*time.Second {
 		return TunnelHourObs{}, fmt.Errorf("a burst of %s cannot hold the %s path-rate measurement: the deadline %s is too short", burst, rateAsked, tm.MaxRequestDuration)
@@ -770,5 +776,5 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 		time.Since(first).Round(time.Second), pr.BytesPerSecond(), pr.TokensPerSecond(), len(larges), tm.UploadBody, hol.InFlight.Round(time.Millisecond),
 		hol.Send.Round(time.Millisecond), hol.Prefill.Round(time.Millisecond), hol.Elsewhere.Round(time.Millisecond))
 	return TunnelHourObs{Tags: tags, Requests: reqs, Samples: samples, DrainStart: ds, Deployment: dep, Rates: []PathRate{pr},
-		UploadNotMeasured: UploadNotMeasuredLive, HeadOfLine: &hol}, nil
+		UploadNotMeasured: UploadNotMeasuredLive, HeadOfLine: &hol, LongPlan: plan}, nil
 }
