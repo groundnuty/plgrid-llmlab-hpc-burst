@@ -193,6 +193,7 @@ A release is a tag on `main` with its archive, its checksums and its notes (owne
   - **`bin/` also holds the pinned k3s and frps,** at the paths `up --bin-dir bin` resolves, as `hack/fetch-k3s.sh` and `hack/fetch-frp.sh` lay them out: `bin/k3s-1.36.5/k3s` and `bin/frp-0.71.1/frps`. Each is checked against the pins file the launcher embeds before it's packed (`internal/launcher/k3s-pins.txt`, `frp-pins.txt`).
   - **`agent-builds/`:** `hb-agent-x86_64` and `hb-agent-aarch64`, built by `hack/build-agents.sh` at the tag, with the pinned frpc builds that `hack/fetch-frp.sh --agent-builds` places. Each agent's identity is its sha256, the agentDigest, which that script makes the same on any machine; its `-version` prints what that script gives. The operator copies this directory to `<state>/agent-builds`, where `up` checks it and the controller stages from it (HBEP-4, Files first). `up` reads no agent build from the archive itself.
   - **`config/crd/`, `profiles/` and `examples/`:** the CRDs `up --manifests` installs, the shipped PlatformProfiles, and the example Providers and ModelDeployments the quickstart applies, from the tag. So the quickstart runs from the unpacked archive, with no clone.
+  - **Not in it:** Envoy's builds, used only with the beta `--instance-router envoy`, are fetched with `hack/fetch-envoy.sh` (`--agent-builds`). Beta's first release revisits it.
 - **Checksums:** a `SHA256SUMS` file lists the archive and every file in it. It catches corruption, not a replaced asset, since it sits beside them; signing and attestations stay out of scope (Non-goals; Security).
 - **Its notes:**
   - GitHub's generated notes from the merged pull requests since the previous tag;
@@ -202,7 +203,7 @@ A release is a tag on `main` with its archive, its checksums and its notes (owne
 - **How it's made:**
   1. A workflow runs on a pushed `v*` tag. It fails unless the tagged commit is on `origin/main` (`git merge-base --is-ancestor`), and it calls CI's workflow for the required checks, through `workflow_call`, rather than copying them.
   2. It builds the archive and `SHA256SUMS`, and creates a draft release with `gh release create --draft`.
-  3. The rehearsal runs from the draft's archive on the single-user host, through `hack/rehearsal.sh`'s archive input (`REHEARSAL_ARCHIVE`). It unpacks the archive into the names the prebuilt mode takes (issue #146), with the agent as `hb-agent` and frps and frpc as its frp directory expects, so `REHEARSAL_PREBUILT=1` is not set beside it, and the script refuses the two together. `rehearsal.test` is built from a checkout of the tag.
+  3. The rehearsal runs from the draft's archive on the single-user host, through `hack/rehearsal.sh`'s archive input (`REHEARSAL_ARCHIVE`). It unpacks the archive into the names the prebuilt mode takes (issue #146), with the agent as `hb-agent` and frps and frpc as its frp directory expects, so `REHEARSAL_PREBUILT=1` is not set beside it, and the script refuses the two together. It refuses `HPCBURST_BIN_DIR` and `HPCBURST_FRP_DIR` beside it too, since it sets both from the archive. `rehearsal.test` is built from a checkout of the tag.
   4. Only then is the release published.
 
   It reuses GitHub Releases and the GitHub CLI already on the runner image, and adds no release tool.
@@ -312,6 +313,8 @@ Sources were read on 2026-10-30, except where another date is given.
 - 2026-11-11: releases defined; the first tag is `v0.1.0-alpha.1` once alpha graduates (owner decision).
 - 2026-11-12: erratum: Envoy's row names its pins file, `internal/agent/envoypin/envoy-pins.txt`, which #429's first PR adds, where the cell named a proposed file; the list of pins files in Where each origin is recorded names it too.
 - 2026-11-12: erratum: Releases step 3 names the rehearsal's archive input, `REHEARSAL_ARCHIVE`, which `hack/rehearsal.sh` refuses beside `REHEARSAL_PREBUILT=1`, where the text gave the prebuilt flag as the input (#462).
+- 2026-11-12: erratum: Releases step 3 says that `hack/rehearsal.sh` also refuses `HPCBURST_BIN_DIR` and `HPCBURST_FRP_DIR` beside the archive input, which sets both itself (a note from #466's review).
+- 2026-11-12: erratum: the archive does not ship Envoy's builds, used only with the beta `--instance-router envoy`; they are fetched with `hack/fetch-envoy.sh --agent-builds` (the science agent's ruling on #454).
 - 2026-11-12: the archive carries `examples/` (amendment, #479).
 
 ## Amendments

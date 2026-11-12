@@ -12,11 +12,13 @@ import (
 	"testing"
 )
 
-// goShim is a go command that logs its calls to $SHIM_LOG. `go version` announces a download on stderr
-// first, as the go command does when it fetches the toolchain it was asked for, and then prints the
-// version of $GOTOOLCHAIN; `go env V...` prints shim-V for each; `go build ... -o OUT ...` writes
-// the file OUT; every other call fails.
+// goShim is a go command that logs its build calls to $SHIM_LOG, with their argument count ARGC and
+// their arguments, and the first word of every call to $SHIM_LOG.calls. `go version` announces a
+// download on stderr first, as the go command does when it fetches the toolchain it was asked for, and
+// then prints the version of $GOTOOLCHAIN; `go env V...` prints shim-V for each; `go build ... -o OUT
+// ...` writes the file OUT; every other call fails.
 const goShim = `#!/bin/sh
+echo "$1" >> "$SHIM_LOG.calls"
 case "$1" in
 version)
   echo "go: downloading $GOTOOLCHAIN (linux/amd64)" >&2
@@ -27,7 +29,7 @@ env)
   for v in "$@"; do echo "shim-$v"; done
   ;;
 build)
-  echo "build|GOFLAGS=$GOFLAGS|GOTOOLCHAIN=$GOTOOLCHAIN|GOENV=$GOENV|GOFIPS140=$GOFIPS140|GOEXPERIMENT=[$GOEXPERIMENT]|GOMODCACHE=$GOMODCACHE|GOCACHE=$GOCACHE|GOPATH=$GOPATH|GOPROXY=$GOPROXY|CGO_ENABLED=$CGO_ENABLED|GOARCH=$GOARCH|GOAMD64=$GOAMD64|GOWORK=$GOWORK|ARGS=$*" >> "$SHIM_LOG"
+  echo "build|GOFLAGS=$GOFLAGS|GOTOOLCHAIN=$GOTOOLCHAIN|GOENV=$GOENV|GOFIPS140=$GOFIPS140|GOEXPERIMENT=[$GOEXPERIMENT]|GOMODCACHE=$GOMODCACHE|GOCACHE=$GOCACHE|GOPATH=$GOPATH|GOPROXY=$GOPROXY|CGO_ENABLED=$CGO_ENABLED|GOARCH=$GOARCH|GOAMD64=$GOAMD64|GOWORK=$GOWORK|ARGC=$#|ARGS=$*" >> "$SHIM_LOG"
   out=
   prev=
   for a in "$@"; do

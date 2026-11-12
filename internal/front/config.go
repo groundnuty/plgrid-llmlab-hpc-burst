@@ -38,6 +38,12 @@ type Config struct {
 	// launcher's port base + 9 and + 10 (FrpsAddrs).
 	FrpsBindAddr string `json:"frpsBindAddr,omitempty"`
 	FrpsMuxAddr  string `json:"frpsMuxAddr,omitempty"`
+	// FrpsBulkBindAddr and FrpsBulkMuxAddr are the bulk path's second frps's bind and tcpmux
+	// ports (beta; HBEP-5, Parameters; HBEP-6, The bulk path). They are read only with the bulk
+	// path on; unset, they default to the IPv4 loopback address at the launcher's port base + 13
+	// and + 14 (FrpsBulkAddrs).
+	FrpsBulkBindAddr string `json:"frpsBulkBindAddr,omitempty"`
+	FrpsBulkMuxAddr  string `json:"frpsBulkMuxAddr,omitempty"`
 	// TunnelSetupTimeout bounds, toward an Instance, the dial to frps plus
 	// the CONNECT exchange (HBEP-5, Parameters: tunnelSetupTimeout).
 	TunnelSetupTimeout Duration `json:"tunnelSetupTimeout,omitempty"`
@@ -169,6 +175,11 @@ func (c Config) Validate() error {
 			continue // the default depends on the host: DialHomeAddr, FrpsAddrs
 		}
 		if _, _, err := net.SplitHostPort(addr); err != nil {
+			probs = append(probs, fmt.Sprintf("%s %q is not host:port", name, addr))
+		}
+	}
+	for name, addr := range map[string]string{"frpsBulkBindAddr": c.FrpsBulkBindAddr, "frpsBulkMuxAddr": c.FrpsBulkMuxAddr} {
+		if _, _, err := net.SplitHostPort(addr); addr != "" && err != nil {
 			probs = append(probs, fmt.Sprintf("%s %q is not host:port", name, addr))
 		}
 	}

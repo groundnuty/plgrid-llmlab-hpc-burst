@@ -168,7 +168,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	}
 	a, err := agent.New(agent.Options{
 		API:    tr.client,
-		Tunnel: tr.frpc,
+		Tunnel: tr.tunnel(),
 		// Envoy, for an Instance with a router (beta, opt-in; #429), by its pin's digest.
 		EnvoyBinary: agent.StagedEnvoyPath(job.Config.StagingDir),
 		Engines: func(socket, key string, l agentapi.Launch) agent.Engine {

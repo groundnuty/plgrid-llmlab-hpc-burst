@@ -4,7 +4,7 @@ A framework for bursting LLM serving from PLGrid LLMLab onto HPC clusters, behin
 
 Design decisions are made as enhancement proposals in [`hbep/`](hbep/README.md), and the first components are being built from the implementable ones.
 
-**Getting started:** [`docs/quickstart.md`](docs/quickstart.md) takes you from a clone to a request through the front; [`examples/`](examples) holds the manifests it applies.
+**Getting started:** [`docs/quickstart.md`](docs/quickstart.md) takes you from a clone, or from the release archive, to a request through the front; [`examples/`](examples) holds the manifests it applies.
 
 ## Licence
 

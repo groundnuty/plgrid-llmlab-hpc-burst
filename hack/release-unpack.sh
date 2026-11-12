@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Unpacks a release archive (hack/release-archive.sh) into the names the rehearsal's prebuilt mode takes
-# (hack/rehearsal.sh with REHEARSAL_PREBUILT=1, issue #146), so that the rehearsal runs the draft's own
-# bytes (HBEP-15, Releases: how it's made, step 3).
+# (issue #146), so that the rehearsal runs the draft's own bytes (HBEP-15, Releases: how it's made, step
+# 3). hack/rehearsal.sh's archive input (REHEARSAL_ARCHIVE) calls it, and then sets HPCBURST_BIN_DIR and
+# HPCBURST_FRP_DIR itself; it refuses REHEARSAL_PREBUILT=1, HPCBURST_BIN_DIR and HPCBURST_FRP_DIR beside
+# the archive.
 #
 # usage: hack/release-unpack.sh ARCHIVE OUT FRP_DIR
 #
