@@ -290,3 +290,22 @@ func TestAlphaNeverWritesHealthyWorkers(t *testing.T) {
 		}
 	}
 }
+
+// A router restart is not a worker try: with attemptsPerRung 1, a worker fault after the router's
+// restart still enters the worker rung, not the whole Instance's.
+func TestARouterRestartDoesNotSpendTheWorkerRung(t *testing.T) {
+	rg, in, ag := routerRig(t, withProfile(func(p *v1alpha1.PlatformProfileSpec) {
+		p.Restart = &v1alpha1.RestartPolicy{AttemptsPerRung: ptrTo(int32(1)), Window: dur(4 * time.Hour)}
+	}))
+	ag.CrashRouter(1)
+	healthUntilEvent(rg, in.Name, 0, time.Minute, startTick)
+	startUntil(rg, "md", 5*time.Minute, "the router back", func() bool { h := healthyWorkersOf(rg, in.Name); return h != nil && *h == 1 })
+	ag.CrashWorker(healthWorker, 137)
+	healthUntilEvent(rg, in.Name, 1, 5*time.Minute, startTick)
+	if r, ok := lastRestart(rg, in.Name); !ok || r.Part != v1alpha1.WorkerName(0) {
+		t.Errorf("the worker's restart after the router's is %+v, want the worker rung", r)
+	}
+	if f := healthFailing(rg, in.Name); !slices.Equal(f, []string{v1alpha1.ReasonRouterRestart, v1alpha1.ReasonWorkerRestart}) {
+		t.Errorf("failing events %v, want RouterRestart then WorkerRestart", f)
+	}
+}
