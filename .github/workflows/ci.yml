@@ -299,7 +299,9 @@ jobs:
     runs-on: ubuntu-24.04
     # hack/go-test.sh's groups, the tests that run on their own -timeout, apart from the go job (issue
     # #295): the two together ran 1,174-1,331 s of the go job's 30 minutes, 1.35x at worst, and with the
-    # groups here the go job keeps about 840 s of its 30 minutes and this job about 640 s of its own.
+    # groups here the go job keeps about 840 s of its 30 minutes and this job about 640 s of its own. The
+    # envoy-timeouts group (issue #429) adds about 370 s to this job, which leaves about 1,010 s of its 30
+    # minutes (a local estimate; the first run on CI will say).
     # The same setup as the go job, step for step, since the groups need the same Go, the pinned frp and
     # Kubernetes binaries and sshd; no build cache is restored, so the Kubernetes libraries compile
     # from scratch here too. This job's name is a required check of main: a rename would stop every merge.
@@ -468,6 +470,15 @@ jobs:
       - name: go test, cmd/hpcburst-controller's failover tests on their own timeout
         if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
         run: bash hack/go-test.sh own controller-failover
+
+      # internal/agent's two real-Envoy tests that wait out Envoy's own defaults (a worker silent for
+      # 310 s, an upstream connection idle for 50 s) run on their own timeout for the same reason (issue
+      # #429): about 6 minutes between them, which the package's run would carry. The step fails unless
+      # both ran and passed, with nothing skipped, so a runner without Envoy fails it (the job sets
+      # HPCBURST_REQUIRE_ENVOY=1 and fetches the pinned binary above).
+      - name: go test, internal/agent's real-Envoy timeout tests on their own timeout
+        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
+        run: bash hack/go-test.sh own envoy-timeouts
 
       # hack/livechecks' dry runs through hack/live-checks.sh, which build and run the real test
       # binaries and agent, run in two groups of their own for the same reason (PR #306): each step
