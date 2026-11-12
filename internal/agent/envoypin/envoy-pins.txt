@@ -1,0 +1,15 @@
+# Pinned Envoy release binaries (project: envoyproxy/envoy, https://github.com/envoyproxy/envoy,
+# Apache-2.0), for beta's Instance router (HBEP-5, Inside an Instance; HBEP-15, Pinned versions).
+#
+# One source of truth: package envoypin embeds this file, and everything that runs Envoy checks the
+# binary against it first (internal/testenv's EnvoyBinary today, the allocation agent once it runs
+# Envoy). hack/fetch-envoy.sh reads it to download and check the same bytes. Each sum is the one in
+# the release's signed checksums.txt.asc, which GitHub's digest of the asset matches (spike S13,
+# spikes/s13/README.md, Provenance). Add a line here, and nowhere else, to allow another build.
+#
+# arch is Go's name (GOARCH), as in internal/launcher/k3s-pins.txt; hack/cpu-arch.sh maps it to the
+# kernel's.
+#
+# version  arch   asset                         sha256
+1.40.2     amd64  envoy-1.40.2-linux-x86_64     1d64506e25c1844f146162ddb2ece7010fa4e784faddb40a079021491f1f03cc
+1.40.2     arm64  envoy-1.40.2-linux-aarch_64   b9d6d1e06dd5838a3506de9f4deebad3de9a2ce6cadb87cd76222ca286213baf
