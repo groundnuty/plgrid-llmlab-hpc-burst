@@ -121,15 +121,6 @@ bin/hpcburst up --state-dir "$STATE" --bin-dir "$BIN" --manifests config/crd \
   - `host-dialed` takes neither `--front-addr` nor `--front-key`, and `up` refuses either one. You set up no gateway port forward and no restricted key, and `front.json` needs no `dialHomeListen`: the front's dial-home listener stays on loopback at the port base plus 7, as in `ssh` mode, and the front refuses any other `dialHomeListen` in this mode, since the relays dial only that address. The Provider's ssh credentials from step 3 are all it asks. The controller keeps two relays for each running Allocation, one for the agent's control traffic and one for the token tunnel. Each relay is an `ssh` from your host to the Provider's login node that runs an `srun` step in the job, and the job's two connections run back over it. Three limits follow. Restarting the controller cuts the streams in flight, because the relays die with its process, and the new controller starts them again within seconds (the owner accepted that for alpha). A Provider has at most 2 Allocations, pending or running, so a third waits at `SubmitLimitReached`. And only one host-dialed Provider runs per login host: a second Provider on the same login node, as another partition of that cluster is, is refused and shows `Ready` false. Operations ([Host-dialed relays](operations.md#host-dialed-relays)) says how to see the relays and what their failures mean.
 - `up` prints the kubeconfig path, `kubeconfig` in the state directory. `status` and `down` take the same `--state-dir`; without it they use the launcher's default, which is not `"$STATE"` if you chose another directory. `status` exits 0 when the host is healthy, 1 when it is not, and 3 when it is stopped. `up` exits 4 when the host is up but an agent build that a profile needs is missing or wrong; the host keeps running, and the message names the command that fixes the build.
 
-**Beta, opt-in: Instances behind a router.** With `--instance-router envoy`, the controller runs each new Instance's worker behind Envoy ([HBEP-5](../hbep/0005-llmlab-compatible-front/README.md), Inside an Instance), and every job is staged with Envoy's build, which you fetch, as the release archive does not ship it. Envoy runs bare in the job and needs glibc 2.30 or later on the compute nodes; the agent refuses to start it on an older one, naming both versions.
-
-```
-hack/fetch-envoy.sh --agent-builds "$STATE/agent-builds"
-bin/hpcburst up --state-dir "$STATE" --bin-dir "$BIN" --manifests config/crd \
-  --front-config ~/.config/hpcburst/front.json \
-  --front-mode host-dialed --instance-router envoy
-```
-
 Use that kubeconfig with the `kubectl` of the k3s you fetched, or with your own. The alias reads `STATE` and `BIN` when you run it:
 
 ```
@@ -198,6 +189,20 @@ bin/hpcburst down --state-dir "$STATE"
 ```
 
 `down` stops the processes it started and confirms that nothing of theirs still listens. It does not call the clusters, so a job left behind runs to its time limit; check your queue (`squeue`) if the lists were not empty.
+
+## Beta: Instances behind a router
+
+Opt-in. With `--instance-router envoy`, the controller runs each new Instance's worker behind Envoy ([HBEP-5](../hbep/0005-llmlab-compatible-front/README.md), Inside an Instance), and every job is staged with Envoy's build. The release archive doesn't ship that build, so fetch it into the agent builds first, then start the host with the flag; the other flags are step 4's:
+
+```
+hack/fetch-envoy.sh --agent-builds "$STATE/agent-builds"
+bin/hpcburst up --state-dir "$STATE" --bin-dir "$BIN" --manifests config/crd \
+  --front-config ~/.config/hpcburst/front.json \
+  --front-mode host-dialed --instance-router envoy
+```
+
+- `up` and `status` then check `envoy-<cpuArch>` for each partition's architecture, against the pinned digest, and name the fetch command when one is missing or wrong.
+- Envoy runs bare in the job and needs glibc 2.30 or later on the compute nodes. The agent checks it before it starts Envoy, and refuses an older node, naming the glibc it found and the one Envoy needs.
 
 ## Alpha's limits
 
