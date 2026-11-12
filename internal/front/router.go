@@ -118,8 +118,8 @@ func (r *Router) markDirty() {
 // after its last look re-starts it (markDirty), and one that lands between its
 // last look and its stop is seen by the re-check, so no change is left without a
 // rebuild after it. Between two rebuilds it lets every reader waiting for the
-// lock go first: a reader then waits for the one rebuild in progress when it
-// came, never for a second one taken from under it (lockFresh).
+// lock go first, so a second rebuild of its own never comes ahead of a reader
+// that waited for the first (lockFresh has the bound).
 func (r *Router) drain() {
 	for {
 		for r.dirty.Load() {
@@ -146,10 +146,14 @@ func (r *Router) syncLocked() {
 	}
 }
 
-// lockFresh takes the lock for a reader of the view, which then waits for at
-// most one rebuild (#417): when one finished while it waited for the lock, it
-// reads that view, though changes since may have marked it stale; else it
-// brings a stale view up to date itself. Its caller unlocks.
+// lockFresh takes the lock for a reader of the view (#417): when a rebuild
+// finished while it waited for the lock, it reads that view, though changes since
+// may have marked it stale; else it brings a stale view up to date itself. Its
+// caller unlocks. A reader waits for one rebuild, the one in progress when it
+// came, and for at most two under a barging reader: a reader R2 that comes as
+// that rebuild ends, after it, can take the lock before the woken R
+// (sync.Mutex), find no rebuild finished during its own wait and the view marked
+// again, and rebuild it itself while R waits (the Fable review of PR #424).
 func (r *Router) lockFresh() {
 	gen := r.gen.Load()
 	r.lockAsReader()
@@ -174,9 +178,10 @@ const controlPlaneYield = 100 * time.Millisecond
 
 // yieldToReaders waits, before a rebuild takes the lock, until no reader waits
 // for it, or for max when it is not 0. A reader that came while a rebuild ran
-// then takes the lock next, and waits for that one rebuild alone; without it,
-// a rebuild that follows at once would take the lock first (sync.Mutex lets a
-// running goroutine take it ahead of one it wakes).
+// then takes the lock ahead of this one; without it, a rebuild that follows at
+// once would take the lock first (sync.Mutex lets a running goroutine take it
+// ahead of one it wakes). It governs the drain's rebuilds and the control
+// plane's; a reader that rebuilds itself does not yield (lockFresh's bound).
 func (r *Router) yieldToReaders(max time.Duration) {
 	var waited time.Duration
 	for r.waiting.Load() > 0 && (max == 0 || waited < max) {

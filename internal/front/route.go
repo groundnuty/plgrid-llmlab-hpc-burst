@@ -63,7 +63,8 @@ func errNoReadyTarget(model string) *routeError {
 // 6). exclude is a target the request already failed to reach, for the one
 // resend. It never widens to a broader level.
 func (r *Router) choose(ctx context.Context, n naming.Name, key, exclude string) (*target, *routeError) {
-	// A request waits for at most one rebuild (#417; lockFresh). The view it
+	// A request waits for one rebuild, two at most under a barging reader
+	// (#417; lockFresh). The view it
 	// routes on may be a rebuild behind the transports: a target whose
 	// registration was taken away since has no dialer when the proxy asks for
 	// one, and a dialer it holds carries the epoch it was handed in, which the

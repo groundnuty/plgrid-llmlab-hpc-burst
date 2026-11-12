@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -30,12 +31,21 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/enginetest"
 )
 
-// The bound of the re-login, well past what one coalesced rebuild costs at 600 tunnels (S16 measured 79 ms for one on
-// the shared VM) and far below what one rebuild per change costs (600 in a row is 47 s there).
+// The re-login's bounds.
 const (
-	// reloginTokenBound: every tunnel's first token through the front comes this soon after the re-registrations: the
-	// witness of #417 (S16's review: "routed again" is capped by the prober's own round, so the first request's time to
-	// first token is what a client sees). The passes' times are logged, not judged.
+	// reloginBurstRebuilds bounds the rebuilds a re-login of every tunnel costs, in the default run: a number that does
+	// not grow with the tunnels. One rebuild per change costs two per tunnel (its re-registration and its pass): 600 at
+	// 300 tunnels. On the shared VM the coalesced re-login cost 2 at both sizes; the bound leaves a loaded runner room
+	// for Bump's subscriber goroutines to come in after a rebuild, each of which can start one more.
+	reloginBurstRebuilds = 50
+	// reloginHangGuard is how long the default run's clients wait for their first tokens before it names a hang: it
+	// decides no pass.
+	reloginHangGuard = 2 * time.Minute
+	// reloginTokenBound is the measurement's (HPCBURST_RELOGIN_BOUND=1): every tunnel's first token through the front
+	// comes this soon after the re-registrations, well past what one coalesced rebuild costs at 600 tunnels (S16 measured
+	// 79 ms for one on the shared VM) and far below what one rebuild per change costs (600 in a row is 47 s there). It is
+	// the witness of #417 (S16's review: "routed again" is capped by the prober's own round, so the first request's time
+	// to first token is what a client sees). The passes' times are logged, not judged.
 	reloginTokenBound = 5 * time.Second
 	// reloginClientRetry is how long a client waits before it asks again after a refusal (S16's client retried every
 	// 50-500 ms).
@@ -172,10 +182,74 @@ func firstToken(ctx context.Context, client *http.Client, url, clientKey, model 
 	return time.Time{}, fmt.Errorf("no first token before the deadline (last: %s)", last)
 }
 
-// TestAMassReloginRoutesAndStreamsWithinSecondsOfTheProbe at 300 and 600 tunnels: every tunnel's first request gets its
-// first token through the front within reloginTokenBound of the re-registrations. With one rebuild per registration
+// TestAMassReloginCostsAFewRebuildsAndEveryTunnelStreams, in the default run, at 300 and 600 tunnels: every tunnel
+// re-registers at once, as frps's plugin hears it on a restart, and every re-probe passes; once the rebuilds settle the
+// burst has cost at most reloginBurstRebuilds rebuilds, a number that does not grow with the tunnels (one rebuild per
+// change costs two per tunnel: its re-registration and its pass), and then every tunnel's first request streams through
+// the front. It waits on state alone: the deadline only names a hang. The bound in time is the measurement's,
+// TestAMassReloginStreamsWithinSecondsOfTheReregistration, gated.
+func TestAMassReloginCostsAFewRebuildsAndEveryTunnelStreams(t *testing.T) {
+	for _, n := range []int{300, 600} {
+		t.Run(fmt.Sprintf("%d tunnels", n), func(t *testing.T) {
+			f, uids, passes := newMuxFront(t, n)
+			passes.arm()
+			before := f.router.rebuilds.Load()
+			for _, u := range uids {
+				f.tun.Bump(u)
+				f.prober.Reregistered(u)
+			}
+			f.prober.Reprobe(context.Background())
+			for i, u := range uids {
+				if _, ok := passes.of(u); !ok {
+					t.Fatalf("tunnel %d: no re-probe passed after its re-registration", i)
+				}
+			}
+			waitRouterState(t, "every tunnel's re-registration to reach the router", func() bool {
+				for _, u := range uids {
+					if _, eligible, _ := f.routing(u); !eligible {
+						return false
+					}
+				}
+				return true
+			})
+			f.router.quiesce(t)
+			burst := f.router.rebuilds.Load() - before
+			t.Logf("%d tunnels: the re-login cost %d rebuilds", n, burst)
+			if burst > reloginBurstRebuilds {
+				t.Errorf("the re-login of %d tunnels cost %d rebuilds, want at most %d: one rebuild per change costs %d", n, burst, reloginBurstRebuilds, 2*n)
+			}
+			client := &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: n}}
+			t.Cleanup(client.CloseIdleConnections)
+			ctx, cancel := context.WithTimeout(context.Background(), reloginHangGuard)
+			defer cancel()
+			errs := make([]error, n)
+			var wg sync.WaitGroup
+			for i := range uids {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					_, errs[i] = firstToken(ctx, client, f.url, f.clientKey, fmt.Sprintf("m-%d", i))
+				}(i)
+			}
+			wg.Wait()
+			for i, err := range errs {
+				if err != nil {
+					t.Fatalf("tunnel %d after the re-login: %v", i, err)
+				}
+			}
+		})
+	}
+}
+
+// TestAMassReloginStreamsWithinSecondsOfTheReregistration is the measurement, judged in time, so it runs only with
+// HPCBURST_RELOGIN_BOUND=1 (a fixed wall-clock bound has no place in the default run, which a slow runner would fail):
+// at 300 and 600 tunnels, a client per tunnel retries its model from the re-registrations on, and every tunnel's first
+// request gets its first token through the front within reloginTokenBound of them. With one rebuild per registration
 // change it takes tens of seconds at 300, and at 600 a tunnel gets none in the minute the clients wait.
-func TestAMassReloginRoutesAndStreamsWithinSecondsOfTheProbe(t *testing.T) {
+func TestAMassReloginStreamsWithinSecondsOfTheReregistration(t *testing.T) {
+	if os.Getenv("HPCBURST_RELOGIN_BOUND") != "1" {
+		t.Skip("a measurement in wall-clock time: set HPCBURST_RELOGIN_BOUND=1")
+	}
 	for _, n := range []int{300, 600} {
 		t.Run(fmt.Sprintf("%d tunnels", n), func(t *testing.T) { massRelogin(t, n) })
 	}

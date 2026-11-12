@@ -1,9 +1,10 @@
 package front
 
 // The router's rebuilds of a burst of registration changes are coalesced (#417): the Transports' subscriber marks the
-// view stale and returns, a goroutine rebuilds it while it is stale, and a reader of the view waits for at most one
-// rebuild. These tests hold chosen rebuilds at a seam (Router.afterBuild, right after the view is built) and wait on
-// the router's own state, never on a time window: a deadline here only names a failure.
+// view stale and returns, a goroutine rebuilds it while it is stale, and a reader of the view waits for one rebuild (two
+// at most under a barging reader, which these tests do not make: lockFresh), not for one per change. These tests hold
+// chosen rebuilds at a seam (Router.afterBuild, right after the view is built) and wait on the router's own state, never
+// on a time window: a deadline here only names a failure.
 
 import (
 	"context"
