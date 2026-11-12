@@ -10,7 +10,9 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -167,5 +169,59 @@ func TestOneWorkersRestartLeavesAnothersChecks(t *testing.T) {
 	}
 	if ck := in.wck["worker-1"]; ck.checks.Verify != nil {
 		t.Errorf("worker-1's result from its old process landed: %+v", ck.checks.Verify)
+	}
+}
+
+// rehashCounter is a Stager that counts the rehashes a verification asks for.
+type rehashCounter struct {
+	Stager
+	n *atomic.Int32
+}
+
+func (s rehashCounter) Checkpoint(context.Context, CheckpointRequest) (CheckpointResult, error) {
+	s.n.Add(1)
+	return CheckpointResult{}, nil
+}
+
+// A staging's rehash serves each worker's first verification after it: two workers started together
+// rehash the checkpoint no more, and the second verification of either does rehash.
+func TestAStagingsRehashServesEachWorkersFirstVerification(t *testing.T) {
+	h := newHeldAgent(t)
+	var rehashes atomic.Int32
+	h.o.Stager = rehashCounter{n: &rehashes}
+	dir := t.TempDir()
+	writeGenerationConfig(t, dir, `{}`)
+	in, i := twoWorkerChecks(dir)
+	files := []agentapi.FileDigest{{Path: "config.json", SHA256: strings.Repeat("ab", 32)}}
+	staged := []agentapi.FileResult{{Path: "config.json", Outcome: agentapi.FileMatch, SHA256: strings.Repeat("ab", 32)}}
+	in.fileResults, in.filesKey, in.stagingSeq = staged, filesKey(files), 1
+	for w := range i.Workers {
+		i.Workers[w].Checks.Verify.Files = files
+	}
+	h.inst = in
+	h.runChecks(in, i)
+	h.startedOn(t)
+	h.startedOn(t)
+	h.release("/run/worker-0.sock")
+	h.release("/run/worker-1.sock")
+	h.next(t, "a verification ended")
+	h.next(t, "the other verification ended")
+	if n := rehashes.Load(); n != 0 {
+		t.Errorf("the first verifications after a staging rehashed %d times, want none: the staging's rehash serves each", n)
+	}
+	for _, name := range []string{"worker-0", "worker-1"} {
+		if v := in.wck[name].checks.Verify; v == nil || len(v.Files) != 1 || v.Files[0].Outcome != agentapi.FileMatch {
+			t.Errorf("%s's verification carries %+v, want the staging's rehash", name, v)
+		}
+	}
+	// A new verification generation of worker-0 rehashes: the staging served its first one.
+	i.Workers[0].Checks = &agentapi.Checks{VerificationGeneration: 2, Verify: &agentapi.VerifyRequest{Files: files}}
+	h.releases["/run/worker-0.sock"] = make(chan struct{})
+	h.runChecks(in, i)
+	h.startedOn(t)
+	h.release("/run/worker-0.sock")
+	h.next(t, "worker-0's second verification ended")
+	if n := rehashes.Load(); n != 1 {
+		t.Errorf("worker-0's second verification rehashed %d times, want once", n)
 	}
 }
