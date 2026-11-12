@@ -193,6 +193,7 @@ A release is a tag on `main` with its archive, its checksums and its notes (owne
   - **`bin/` also holds the pinned k3s and frps,** at the paths `up --bin-dir bin` resolves, as `hack/fetch-k3s.sh` and `hack/fetch-frp.sh` lay them out: `bin/k3s-1.36.5/k3s` and `bin/frp-0.71.1/frps`. Each is checked against the pins file the launcher embeds before it's packed (`internal/launcher/k3s-pins.txt`, `frp-pins.txt`).
   - **`agent-builds/`:** `hb-agent-x86_64` and `hb-agent-aarch64`, built by `hack/build-agents.sh` at the tag, with the pinned frpc builds that `hack/fetch-frp.sh --agent-builds` places. Each agent's identity is its sha256, the agentDigest, which that script makes the same on any machine; its `-version` prints what that script gives. The operator copies this directory to `<state>/agent-builds`, where `up` checks it and the controller stages from it (HBEP-4, Files first). `up` reads no agent build from the archive itself.
   - **`config/crd/` and `profiles/`:** the CRDs `up --manifests` installs, and the shipped PlatformProfiles, from the tag.
+  - **Not in it:** Envoy's builds, used only with the beta `--instance-router envoy`, are fetched with `hack/fetch-envoy.sh` (`--agent-builds`). Beta's first release revisits it.
 - **Checksums:** a `SHA256SUMS` file lists the archive and every file in it. It catches corruption, not a replaced asset, since it sits beside them; signing and attestations stay out of scope (Non-goals; Security).
 - **Its notes:**
   - GitHub's generated notes from the merged pull requests since the previous tag;
@@ -311,6 +312,7 @@ Sources were read on 2026-10-30, except where another date is given.
 - 2026-11-11: Envoy's pin row, for beta's router (HBEP-5).
 - 2026-11-11: releases defined; the first tag is `v0.1.0-alpha.1` once alpha graduates (owner decision).
 - 2026-11-12: erratum: Envoy's row names its pins file, `internal/agent/envoypin/envoy-pins.txt`, which #429's first PR adds, where the cell named a proposed file; the list of pins files in Where each origin is recorded names it too.
+- 2026-11-12: erratum: the archive does not ship Envoy's builds, used only with the beta `--instance-router envoy`; they are fetched with `hack/fetch-envoy.sh --agent-builds` (the science agent's ruling on #454).
 
 ## Amendments
 
