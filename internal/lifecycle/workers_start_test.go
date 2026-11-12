@@ -250,6 +250,12 @@ func TestEachWorkerCountsItsOwnAttemptsThenTheWholeInstanceRung(t *testing.T) {
 	}
 	crashUntil("worker-0", 0, []string{"worker-0"})
 	crashUntil("worker-1", 0, []string{"worker-0", "worker-1"})
+	// Both workers verify and warm up again, so their entries hold something for the whole-Instance
+	// restart to clear.
+	startUntil(rg, "md", 10*time.Minute, "both workers warmed up again", func() bool {
+		in := rg.instance(name)
+		return workerWarmed(in, "worker-0") && workerWarmed(in, "worker-1")
+	})
 	crashUntil("worker-1", 1, []string{"worker-0", "worker-1", v1alpha1.PartInstance})
 	got := rg.instance(name)
 	for _, e := range got.Status.Workers {
