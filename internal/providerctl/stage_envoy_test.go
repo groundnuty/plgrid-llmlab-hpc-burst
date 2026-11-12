@@ -77,6 +77,17 @@ func TestARouterStagesThePartitionsEnvoyByDigest(t *testing.T) {
 			if _, ok := files["envoy/"+tc.other+"/envoy"]; ok {
 				t.Error("the other architecture's Envoy was staged too")
 			}
+			// Envoy is staged before agent.json, which stays last (HBEP-4: agent.json is staged after the
+			// files it names).
+			var order []string
+			for _, c := range e.batch.Calls() {
+				if c.Op == "ensure-file" {
+					order = append(order, c.Args[0])
+				}
+			}
+			if n := len(order); n < 2 || !strings.HasSuffix(order[n-1], "/agent.json") || order[n-2] != "envoy/"+tc.digest+"/envoy" {
+				t.Errorf("the staging order %v, want Envoy just before agent.json, which stays last", order)
+			}
 		})
 	}
 }
