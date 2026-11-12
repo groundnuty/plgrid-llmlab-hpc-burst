@@ -157,6 +157,11 @@ func startSupervisor(ctx context.Context, l layout, st *State, argv []string, ti
 	if err := ensureAgentEndpointPair(l.host(st.Ports), log); err != nil {
 		return err
 	}
+	if st.BulkPath {
+		if err := ensureBulkCert(l.host(st.Ports), log); err != nil {
+			return err
+		}
+	}
 	lf, err := os.OpenFile(l.supervisorLog(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err

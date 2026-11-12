@@ -5,10 +5,28 @@ package launcher
 // base+15), its own log and password, the plugins' bulk paths, and transport.tcpMux = false.
 
 import (
+	"errors"
+	"fmt"
 	"path/filepath"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
+
+// checkBulkPathFront refuses up --bulk-path without a front to serve it: no front mode, no front
+// process, or ssh mode, where the agent starts no bulk frpc (HBEP-6, The bulk path; the science
+// agent's ruling S2 on #448). Each is refused with its reason, as --relay-keeper is outside
+// host-dialed mode, so the flag never quietly does nothing.
+func checkBulkPathFront(front Front, frontRun *FrontRunConfig) error {
+	switch {
+	case !front.Set():
+		return errors.New("--bulk-path needs a front (--front-mode direct or host-dialed): the bulk frpc reaches its frps through the front's dial-home listener")
+	case front.Mode == string(agentapi.DialHomeSSH):
+		return fmt.Errorf("--bulk-path is for --front-mode %s or %s only: in ssh mode the agent starts no bulk frpc (HBEP-6, The bulk path)", agentapi.DialHomeDirect, agentapi.DialHomeHostDialed)
+	case frontRun == nil:
+		return errors.New("--bulk-path needs the front to run (--front-config): the front's dial-home listener sends the bulk frpc to its frps by the TLS server name, and its bulk transport carries the requests")
+	}
+	return nil
+}
 
 // FrpsBulkDir is the second frps's directory, <state>/frps-bulk, which holds its web password file
 // and its configuration.
