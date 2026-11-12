@@ -30,12 +30,12 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/enginetest"
 )
 
-// The bounds of the re-login, each well past what one coalesced rebuild costs at 600 tunnels (S16 measured 79 ms for
-// one on the shared VM) and far below what one rebuild per change costs (600 in a row is 47 s there).
+// The bound of the re-login, well past what one coalesced rebuild costs at 600 tunnels (S16 measured 79 ms for one on
+// the shared VM) and far below what one rebuild per change costs (600 in a row is 47 s there).
 const (
-	// reloginProbeBound: every re-probe's pass is reported this soon after the re-registrations.
-	reloginProbeBound = 5 * time.Second
-	// reloginTokenBound: every tunnel's first token comes this soon after its probe passed.
+	// reloginTokenBound: every tunnel's first token through the front comes this soon after the re-registrations: the
+	// witness of #417 (S16's review: "routed again" is capped by the prober's own round, so the first request's time to
+	// first token is what a client sees). The passes' times are logged, not judged.
 	reloginTokenBound = 5 * time.Second
 	// reloginClientRetry is how long a client waits before it asks again after a refusal (S16's client retried every
 	// 50-500 ms).
@@ -172,9 +172,9 @@ func firstToken(ctx context.Context, client *http.Client, url, clientKey, model 
 	return time.Time{}, fmt.Errorf("no first token before the deadline (last: %s)", last)
 }
 
-// TestAMassReloginRoutesAndStreamsWithinSecondsOfTheProbe at 300 and 600 tunnels: every re-probe's pass is reported
-// within reloginProbeBound of the re-registrations, and every tunnel's first token comes within reloginTokenBound of
-// its own pass. With one rebuild per registration change, the passes alone take tens of seconds at 600.
+// TestAMassReloginRoutesAndStreamsWithinSecondsOfTheProbe at 300 and 600 tunnels: every tunnel's first request gets its
+// first token through the front within reloginTokenBound of the re-registrations. With one rebuild per registration
+// change it takes tens of seconds at 300, and at 600 a tunnel gets none in the minute the clients wait.
 func TestAMassReloginRoutesAndStreamsWithinSecondsOfTheProbe(t *testing.T) {
 	for _, n := range []int{300, 600} {
 		t.Run(fmt.Sprintf("%d tunnels", n), func(t *testing.T) { massRelogin(t, n) })
@@ -210,25 +210,23 @@ func massRelogin(t *testing.T, n int) {
 
 	var toPass, toToken []time.Duration
 	for i, u := range uids {
-		p, ok := passes.of(u)
-		if !ok {
-			t.Fatalf("tunnel %d: no probe passed after the re-registration", i)
-		}
 		if errs[i] != nil {
 			t.Fatalf("tunnel %d: %v", i, errs[i])
 		}
-		toPass = append(toPass, p.Sub(cut))
-		toToken = append(toToken, tokens[i].Sub(p))
+		toToken = append(toToken, tokens[i].Sub(cut))
+		if p, ok := passes.of(u); ok {
+			toPass = append(toPass, p.Sub(cut))
+		}
 	}
 	slices.Sort(toPass)
 	slices.Sort(toToken)
-	t.Logf("%d tunnels: the re-probes took %s; a pass after the re-registration p50 %s, max %s; the first token after its pass p50 %s, max %s",
-		n, probed.Round(time.Millisecond), toPass[n/2].Round(time.Millisecond), toPass[n-1].Round(time.Millisecond),
-		toToken[n/2].Round(time.Millisecond), toToken[n-1].Round(time.Millisecond))
-	if toPass[n-1] > reloginProbeBound {
-		t.Errorf("the last pass was reported %s after the re-registrations, want at most %s", toPass[n-1].Round(time.Millisecond), reloginProbeBound)
+	passLine := "no pass recorded"
+	if k := len(toPass); k > 0 {
+		passLine = fmt.Sprintf("%d passes, p50 %s, max %s", k, toPass[k/2].Round(time.Millisecond), toPass[k-1].Round(time.Millisecond))
 	}
+	t.Logf("%d tunnels, from the re-registrations: the first token p50 %s, max %s; the re-probes took %s (%s)",
+		n, toToken[n/2].Round(time.Millisecond), toToken[n-1].Round(time.Millisecond), probed.Round(time.Millisecond), passLine)
 	if toToken[n-1] > reloginTokenBound {
-		t.Errorf("the slowest first token came %s after its pass, want at most %s", toToken[n-1].Round(time.Millisecond), reloginTokenBound)
+		t.Errorf("the slowest tunnel's first token came %s after the re-registrations, want at most %s", toToken[n-1].Round(time.Millisecond), reloginTokenBound)
 	}
 }
