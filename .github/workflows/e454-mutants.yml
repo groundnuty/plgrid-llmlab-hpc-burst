@@ -1,4 +1,4 @@
-# THROWAWAY, never merged: #454's named mutants on a hosted runner (the VM is too loaded). Each mutant
+# THROWAWAY, never merged: #454's 14 named mutants on a hosted runner (the VM is too loaded). Each mutant
 # is one exact edit; its named tests run on the unmutated tree first (the baseline, which must pass),
 # then on the mutant (which must fail), and the tree is restored. Read-only.
 name: e454-mutants
@@ -195,6 +195,35 @@ jobs:
               "file": "hack/fetch-envoy.sh",
               "old": "    case $seen in *\" $parch \"*) die",
               "new": "    case $seen in *\" NOMATCH \"*) die"
+             }
+            ]
+           },
+           {
+            "name": "G1 back to the loader's --version",
+            "pkg": "./internal/agent",
+            "run": "^TestEnvoyIsRefusedOnAGlibcOlderThanItNeeds$",
+            "edits": [
+             {
+              "file": "internal/agent/envoyglibc.go",
+              "old": "\tcmd := exec.CommandContext(ctx, glibcProbe[0], glibcProbe[1:]...)\n",
+              "new": "\tcmd := exec.CommandContext(ctx, envoyLoader(interp), \"--version\")\n"
+             },
+             {
+              "file": "internal/agent/envoyglibc.go",
+              "old": "var glibcVersion = regexp.MustCompile(`^glibc (\\d+)\\.(\\d+)`)",
+              "new": "var glibcVersion = regexp.MustCompile(`release version (\\d+)\\.(\\d+)`)"
+             }
+            ]
+           },
+           {
+            "name": "G2 no check of Envoy's loader on the node",
+            "pkg": "./internal/agent",
+            "run": "^TestEnvoyIsRefusedOnANodeWithoutItsLoader$",
+            "edits": [
+             {
+              "file": "internal/agent/envoyglibc.go",
+              "old": "\tif fi, err := os.Stat(envoyLoader(interp)); err != nil || !fi.Mode().IsRegular() || fi.Mode()&0o111 == 0 {",
+              "new": "\tif fi, err := os.Stat(envoyLoader(interp)); false && (err != nil || !fi.Mode().IsRegular() || fi.Mode()&0o111 == 0) {"
              }
             ]
            }
