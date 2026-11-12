@@ -7,10 +7,12 @@ package scenario_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -123,8 +125,18 @@ func TestFrpsBulkRestartCutsOnlyBulk(t *testing.T) {
 				e, ok := rec.entryOf("frps-bulk")
 				return ok && e.Proc.PID != bulkEntry.Proc.PID, "not yet"
 			})
+			// Meanwhile requests take the token tunnel (HBEP-6, Operational readiness 2): the request is
+			// answered, and it took the bulk transport only if that was registered again by then, which
+			// the gauge read after it says.
+			sentBefore := frontMetric(t, c.ports, `hpcburst_front_bulk_requests_total{path="bulk"}`)
 			if code := r.sendSmall(key); code != http.StatusOK {
-				t.Errorf("a non-streamed request while the bulk path came back: %d, want 200 through the token tunnel", code)
+				t.Errorf("a non-streamed request while frps-bulk came back: %d, want 200", code)
+			}
+			if sent := frontMetric(t, c.ports, `hpcburst_front_bulk_requests_total{path="bulk"}`); sent > sentBefore &&
+				frontMetric(t, c.ports, "hpcburst_front_bulk_registered") < 1 {
+				t.Errorf("the request meanwhile was written to a bulk transport (bulk %v -> %v) that is not registered: it should have taken the token tunnel", sentBefore, sent)
+			} else {
+				t.Logf("the request meanwhile took the %s", map[bool]string{true: "bulk transport, registered again by then", false: "token tunnel"}[sent > sentBefore])
 			}
 			for i, d := range dones {
 				s := <-d
@@ -153,27 +165,47 @@ func TestFrpsBulkRestartCutsOnlyBulk(t *testing.T) {
 	}
 }
 
-// TestTeardownLeavesNoBulkProxy (HBEP-6, Test plan, Teardown, with the bulk path on): when the
-// deployment scales to zero and its Instance ends, the second frps lists no online proxy for it, as
-// the first doesn't. The control is the same list while the Instance serves: it lists the proxy, so
-// the read can see one.
+// TestTeardownLeavesNoBulkProxy (HBEP-6, Test plan, Teardown, with the bulk path on), in direct and
+// host-dialed mode: when the deployment scales to zero and its Instance ends, the second frps lists no
+// online proxy for it, as the first doesn't. The control is the same list while the Instance serves: it
+// lists the proxy, so the read can see one. Then down leaves nothing listening on the whole block,
+// base..base+15, the bulk path's three ports included.
 //
 //livecheck:none a hosted throwaway runs it (IMPL-COMMON: rehearsals on hosted runners)
 func TestTeardownLeavesNoBulkProxy(t *testing.T) {
 	requireRehearsal(t)
-	r := startRigWith(t, rigSetup{mode: "direct", ports: portsBulkDirect, bulkPath: true})
-	r.engineEnv = []v1alpha1.EnvVar{{Name: "HB_ENGINE_DOUBLE", Value: "token-delay=" + bulkTokenDelay.String()}}
-	in := r.startServing(true)
-	if !r.frpsBulkProxies()[string(in.UID)] {
-		t.Fatalf("frps-bulk does not list the serving Instance %s online: the check below could not see a proxy", in.UID)
-	}
-	r.scaleToZero()
-	r.waitAllEnded([]types.UID{in.UID})
-	stack.WaitState(t, stack.WaitDeadline, "frps-bulk to list the ended Instance's proxy offline", func() (bool, string) {
-		return !r.frpsBulkProxies()[string(in.UID)], "still online"
-	})
-	if r.frpsProxies()[string(in.UID)] {
-		t.Errorf("frps still lists the ended Instance %s online", in.UID)
+	for _, c := range []struct {
+		mode  string
+		ports stack.Ports
+	}{
+		{"direct", portsBulkDirect},
+		{string(agentapi.DialHomeHostDialed), portsBulkHostDialed},
+	} {
+		t.Run(c.mode, func(t *testing.T) {
+			r := startRigWith(t, rigSetup{mode: c.mode, ports: c.ports, bulkPath: true})
+			r.engineEnv = []v1alpha1.EnvVar{{Name: "HB_ENGINE_DOUBLE", Value: "token-delay=" + bulkTokenDelay.String()}}
+			in := r.startServing(true)
+			if !r.frpsBulkProxies()[string(in.UID)] {
+				t.Fatalf("frps-bulk does not list the serving Instance %s online: the check below could not see a proxy", in.UID)
+			}
+			r.scaleToZero()
+			r.waitAllEnded([]types.UID{in.UID})
+			stack.WaitState(t, stack.WaitDeadline, "frps-bulk to list the ended Instance's proxy offline", func() (bool, string) {
+				return !r.frpsBulkProxies()[string(in.UID)], "still online"
+			})
+			if r.frpsProxies()[string(in.UID)] {
+				t.Errorf("frps still lists the ended Instance %s online", in.UID)
+			}
+			block := r.h.Ports.All()
+			if !slices.Contains(block, c.ports.Base+15) {
+				t.Fatalf("the stack's block %v does not reach base+15: the check below would miss frps-bulk's ports", block)
+			}
+			r.h.Down()
+			stack.WaitState(t, 30*time.Second, "nothing to listen on base..base+15 after down", func() (bool, string) {
+				l := stack.Listening(t, block)
+				return len(l) == 0, fmt.Sprintf("still listening: %v", l)
+			})
+		})
 	}
 }
 
