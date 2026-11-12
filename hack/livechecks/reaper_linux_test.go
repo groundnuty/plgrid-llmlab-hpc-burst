@@ -96,7 +96,8 @@ func killMarked(mark string) {
 // (the reaper and its descendants) with its parent, its state, the kernel function it waits in and its command line, and, for the
 // script, its signal sets: SigPnd and ShdPnd (signals waiting to be delivered), SigBlk, SigIgn and SigCgt (blocked, ignored and caught).
 // A stop that the script never acted on shows as TERM (bit 15, mask 0x4000) pending or caught-and-blocked there. The flock locks held
-// by any of them are listed too (/proc/locks), since a wait on a host lock is a wait on its holder. It reads /proc and signals nothing.
+// by any of them are listed too, and for a process waiting in flock the lock it waits on and that lock's holder, whoever it is
+// (lockLines): a wait on a host lock is a wait on its holder. It reads /proc and signals nothing.
 func hangDump(root int) string {
 	table, err := readProcTable()
 	if err != nil {
@@ -125,15 +126,90 @@ func hangDump(root int) string {
 			}
 		}
 	}
-	if locks, err := os.ReadFile("/proc/locks"); err == nil {
-		for _, l := range strings.Split(string(locks), "\n") {
-			f := strings.Fields(l)
-			if len(f) > 4 {
-				if pid, err := strconv.Atoi(f[4]); err == nil && in[pid] {
-					b.WriteString("  lock: " + l + "\n")
-				}
+	b.WriteString(lockLines(in, table))
+	return b.String()
+}
+
+// lockLines reads /proc/locks for the processes in. A held lock of one of them is listed; a lock one of them WAITS on (a line marked
+// "->") is listed with the lock's holders, any process: the holder's PID, parent, state, command line and, when one of its descriptors
+// names the locked file, that file's path. A line is "<n>: [-> ]FLOCK ADVISORY WRITE <pid> <major>:<minor>:<inode> 0 EOF".
+func lockLines(in map[int]bool, table map[int]procInfo) string {
+	raw, err := os.ReadFile("/proc/locks")
+	if err != nil {
+		return ""
+	}
+	type lock struct {
+		line, dev string
+		pid       int
+		waiter    bool
+	}
+	var all []lock
+	for _, l := range strings.Split(string(raw), "\n") {
+		f := strings.Fields(l)
+		at := 4
+		waiter := len(f) > 1 && f[1] == "->"
+		if waiter {
+			at = 5
+		}
+		if len(f) <= at+1 {
+			continue
+		}
+		pid, err := strconv.Atoi(f[at])
+		if err != nil {
+			continue
+		}
+		all = append(all, lock{line: l, dev: f[at+1], pid: pid, waiter: waiter})
+	}
+	var b strings.Builder
+	for _, l := range all {
+		if !in[l.pid] {
+			continue
+		}
+		if !l.waiter {
+			b.WriteString("  holds: " + l.line + "\n")
+			continue
+		}
+		fmt.Fprintf(&b, "  pid %d waits on lock %s: %s\n", l.pid, l.dev, l.line)
+		for _, h := range all {
+			if h.waiter || h.dev != l.dev {
+				continue
+			}
+			cmd, _ := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", h.pid))
+			args := strings.TrimSpace(strings.ReplaceAll(string(cmd), "\x00", " "))
+			if len(args) > 160 {
+				args = args[:160] + "..."
+			}
+			fmt.Fprintf(&b, "    held by pid %d (ppid %d, state %c): %s\n", h.pid, table[h.pid].ppid, table[h.pid].state, args)
+			if path := lockedPath(h.pid, h.dev); path != "" {
+				fmt.Fprintf(&b, "    the locked file: %s\n", path)
 			}
 		}
 	}
 	return b.String()
+}
+
+// lockedPath is the path of the file that a descriptor of pid names and whose inode is the one in dev ("major:minor:inode"), or "".
+func lockedPath(pid int, dev string) string {
+	parts := strings.Split(dev, ":")
+	ino, err := strconv.ParseUint(parts[len(parts)-1], 10, 64)
+	if err != nil {
+		return ""
+	}
+	fds, err := os.ReadDir(fmt.Sprintf("/proc/%d/fd", pid))
+	if err != nil {
+		return ""
+	}
+	for _, fd := range fds {
+		link := fmt.Sprintf("/proc/%d/fd/%s", pid, fd.Name())
+		fi, err := os.Stat(link)
+		if err != nil {
+			continue
+		}
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Ino == ino {
+			if target, err := os.Readlink(link); err == nil {
+				return target
+			}
+		}
+	}
+	return ""
 }

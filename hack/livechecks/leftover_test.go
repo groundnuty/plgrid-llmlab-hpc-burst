@@ -471,3 +471,68 @@ func ignoresTerm(dump string) bool {
 	}
 	return false
 }
+
+// The dump names the lock a blocked process waits on and who holds it, a process of any tree (issue #494, since a wait on a host lock
+// held by another package's test binary would look like a hang of this script). The test holds a flock on a file with a flock command of
+// its own (outside the tree under dump), and starts a bash named live-checks.sh whose child flock waits on it: the dump of that bash must
+// say that a pid waits on the lock, that the holder is the test's flock command, and the file's path. The expectations are the holder's
+// PID and the file's path, both known to the test.
+func TestTheDumpNamesTheLockAProcessWaitsOnAndItsHolder(t *testing.T) {
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("no flock program on this host")
+	}
+	lock := filepath.Join(t.TempDir(), "host.lock")
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	held := make(chan struct{})
+	holder := exec.Command("flock", lock, "bash", "-c", "echo held; read x")
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pw.Close()
+	defer pr.Close()
+	holder.Stdin = pr
+	out, err := holder.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := holder.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = holder.Process.Kill(); _ = holder.Wait() })
+	go func() {
+		buf := make([]byte, 16)
+		_, _ = out.Read(buf)
+		close(held)
+	}()
+	select {
+	case <-held:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the holder never took the lock")
+	}
+	waiter := exec.Command("bash", "-c", `flock "$1" true`, "live-checks.sh", lock)
+	if err := waiter.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = waiter.Process.Kill(); _ = waiter.Wait() })
+	// Wait on the state: the dump shows the wait once the flock child has called flock(2).
+	want := fmt.Sprintf("held by pid %d ", holder.Process.Pid)
+	var dump string
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		dump = hangDump(waiter.Process.Pid)
+		if strings.Contains(dump, "waits on lock") && strings.Contains(dump, want) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the dump never named the lock and its holder (%q):\n%s", want, dump)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(dump, "the locked file: "+lock) {
+		t.Errorf("the dump does not name the locked file %s:\n%s", lock, dump)
+	}
+	t.Logf("the dump, as a hang would print it:\n%s", dump)
+}
