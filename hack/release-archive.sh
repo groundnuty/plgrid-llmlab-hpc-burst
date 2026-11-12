@@ -234,7 +234,12 @@ for f in "${executables[@]}"; do chmod 755 "$stage/$f"; done
 # ---- the archive and its checksums ---------------------------------------------------------------------
 name=hpcburst-$version-linux-amd64.tar.gz
 mtime=$(git log -1 --format=%ct HEAD)
-LC_ALL=C tar --sort=name --mtime="@$mtime" --owner=0 --group=0 --numeric-owner -C "$stage" -cf - bin agent-builds config profiles examples |
+# The top-level entries: bin/, agent-builds/, and the first part of each COMMIT_DIRS entry (config/, ...).
+tops=(bin agent-builds)
+for d in "${COMMIT_DIRS[@]}"; do
+  [[ " ${tops[*]} " == *" ${d%%/*} "* ]] || tops+=("${d%%/*}")
+done
+LC_ALL=C tar --sort=name --mtime="@$mtime" --owner=0 --group=0 --numeric-owner -C "$stage" -cf - "${tops[@]}" |
   gzip -n -9 > "$work/$name"
 {
   ( cd "$work" && sha256sum -- "$name" )
