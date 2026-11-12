@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -68,12 +69,18 @@ type Options struct {
 	MaxInFlight int
 	// Notifier hears accepted NewProxy and CloseProxy calls; nil means nobody does.
 	Notifier Notifier
+	// Path is the URL path the handler serves; empty means agentapi.FrpsPluginPath. The bulk path's
+	// second frps posts to agentapi.FrpsBulkPluginPath (beta; HBEP-6, The bulk path: a plugin call
+	// names no frps, so the path is how a plugin keeps its state per frps), served by a second
+	// Handler with its own Notifier. It must start with a slash.
+	Path string
 }
 
-// Handler is frps's HTTP server plugin. It serves agentapi.FrpsPluginPath, and answers 404 anywhere
-// else. Mount it on agentapi.Host.FrpsPluginAddr, on a server with ReadHeaderTimeout and
-// WriteTimeout set: the handler's deadline starts once the headers are read.
+// Handler is frps's HTTP server plugin. It serves Options.Path (agentapi.FrpsPluginPath by default),
+// and answers 404 anywhere else. Mount it on agentapi.Host.FrpsPluginAddr, on a server with
+// ReadHeaderTimeout and WriteTimeout set: the handler's deadline starts once the headers are read.
 type Handler struct {
+	path     string
 	idx      Index
 	notify   Notifier
 	deadline time.Duration
@@ -99,7 +106,13 @@ func NewHandler(idx Index, o Options) (*Handler, error) {
 	if o.MaxInFlight < 0 {
 		return nil, fmt.Errorf("frps plugin: MaxInFlight %d is negative", o.MaxInFlight)
 	}
-	return &Handler{idx: idx, notify: o.Notifier, deadline: o.Deadline, slots: make(chan struct{}, o.MaxInFlight)}, nil
+	if o.Path == "" {
+		o.Path = agentapi.FrpsPluginPath
+	}
+	if !strings.HasPrefix(o.Path, "/") {
+		return nil, fmt.Errorf("frps plugin: path %q does not start with a slash", o.Path)
+	}
+	return &Handler{path: o.Path, idx: idx, notify: o.Notifier, deadline: o.Deadline, slots: make(chan struct{}, o.MaxInFlight)}, nil
 }
 
 // request is frps's call (frp pkg/plugin/server/types.go:21-25): the operation in the body, and
@@ -168,7 +181,7 @@ func refuse(why string) verdict { return verdict{reject: true, reason: why} }
 // finds every slot taken is a refusal at once. The slot is taken before the body is read, so a
 // flood of stalled bodies counts against the cap like any other call.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != agentapi.FrpsPluginPath {
+	if r.URL.Path != h.path {
 		http.NotFound(w, r)
 		return
 	}
