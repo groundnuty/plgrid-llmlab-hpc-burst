@@ -366,14 +366,14 @@ func TestInstanceEndTimeAndRestartsRoundTrip(t *testing.T) {
 		}
 	}
 
-	// Sixteen entries are the most kept.
-	sixteen := make([]v1alpha1.InstanceRestart, 16)
-	for i := range sixteen {
-		sixteen[i] = v1alpha1.InstanceRestart{Part: v1alpha1.PartInstance, Generation: int64(i + 1), Time: t0, Signal: v1alpha1.ReasonProbeFailing}
+	// Thirty-two entries are the most kept.
+	thirtyTwo := make([]v1alpha1.InstanceRestart, 32)
+	for i := range thirtyTwo {
+		thirtyTwo[i] = v1alpha1.InstanceRestart{Part: v1alpha1.PartInstance, Generation: int64(i + 1), Time: t0, Signal: v1alpha1.ReasonProbeFailing}
 	}
 	must(t, c.Get(bg(), objKey(in), got), "get")
-	got.Status.Restarts = sixteen
-	must(t, c.Status().Update(bg(), got), "write 16 restarts")
+	got.Status.Restarts = thirtyTwo
+	must(t, c.Status().Update(bg(), got), "write 32 restarts")
 }
 
 // Each bound of an Instance's restart entries refuses what it should, and only
@@ -391,16 +391,16 @@ func TestInstanceRestartEntriesAreBounded(t *testing.T) {
 		edit(&r)
 		return []v1alpha1.InstanceRestart{r}
 	}
-	seventeen := make([]v1alpha1.InstanceRestart, 17)
-	for i := range seventeen {
-		seventeen[i] = valid()
+	thirtyThree := make([]v1alpha1.InstanceRestart, 33)
+	for i := range thirtyThree {
+		thirtyThree[i] = valid()
 	}
 	for _, tc := range []struct {
 		name     string
 		restarts []v1alpha1.InstanceRestart
 		want     string
 	}{
-		{"17 entries", seventeen, "must have at most 16 items"},
+		{"33 entries", thirtyThree, "must have at most 32 items"},
 		{"the part routers", entry(func(r *v1alpha1.InstanceRestart) { r.Part = "routers" }), "restarts[0].part"},
 		{"the part worker-x", entry(func(r *v1alpha1.InstanceRestart) { r.Part = "worker-x" }), "restarts[0].part"},
 		{"the part worker- with no number", entry(func(r *v1alpha1.InstanceRestart) { r.Part = "worker-" }), "restarts[0].part"},
@@ -418,6 +418,13 @@ func TestInstanceRestartEntriesAreBounded(t *testing.T) {
 			requireRefused(t, c.Status().Update(bg(), got), tc.want)
 		})
 	}
+	// The bound from the other side: exactly 32 entries are accepted, next to the 33 refused above.
+	t.Run("accept 32 entries", func(t *testing.T) {
+		got := &v1alpha1.Instance{}
+		must(t, c.Get(bg(), objKey(in), got), "get")
+		got.Status.Restarts = thirtyThree[:32]
+		must(t, c.Status().Update(bg(), got), "write 32 restarts")
+	})
 }
 
 // The agent's instance ID is 32 lowercase hex characters, as the agent draws it
