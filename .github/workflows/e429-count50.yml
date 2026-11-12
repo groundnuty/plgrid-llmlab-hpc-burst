@@ -18,7 +18,7 @@ jobs:
           - name: quick
             count: 50
             timeout: 170m
-            run: "^(TestTheAgentRunsTheRouterInFrontOfItsWorker|TestTheAgentNeverRestartsTheRouterByItself|TestAWorkerRestartLeavesTheRouterRunning|TestAWorkerBehindTheRouterGetsTheKeepAlive|TestARouterThatCannotStartIsReportedAndBypassesNothing|TestAlphaAgentStartsNoRouter|TestStartEnvoyListensOnlyOnItsPipes|TestCheckEnvoySocketsSeesWhatAProcessListensOn|TestEnvoySuppressesItsOwnHeaders|TestEnvoyPassesAuthorizationAndSessionIDUnchanged|TestEnvoyCircuitBreakersSitAboveEnvoysDefault|TestEnvoyAdminSocketIsReadOnly|TestTheForwarderAddsNothingOnTheWayToTheRouter|TestTheForwarderCheckSeesAnAddedHeader)$"
+            run: "^(TestTheAgentRunsTheRouterInFrontOfItsWorker|TestTheAgentNeverRestartsTheRouterByItself|TestAWorkerRestartLeavesTheRouterRunning|TestAWorkerBehindTheRouterGetsTheKeepAlive|TestARouterThatCannotStartIsReportedAndBypassesNothing|TestAlphaAgentStartsNoRouter|TestStartEnvoyListensOnlyOnItsPipes|TestCheckEnvoySocketsSeesWhatAProcessListensOn|TestEnvoySuppressesItsOwnHeaders|TestEnvoyPassesAuthorizationAndSessionIDUnchanged|TestEnvoyCircuitBreakersSitAboveEnvoysDefault|TestEnvoyAdminSocketIsReadOnly|TestAWholeInstanceRestartRestagesBehindTheRouter|TestAnEnvoyStartedWhileTheAgentEndsIsStopped)$"
           - name: route-timeout
             count: 50
             timeout: 60m
