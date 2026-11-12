@@ -170,9 +170,9 @@ func raiseNoFile() error {
 	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &r); err != nil {
 		return err
 	}
-	if r.Cur == r.Max {
-		return nil
-	}
+	// Set even when the soft limit already equals the hard one: Go's runtime keeps the limit it
+	// started with and restores it for its children unless the program sets one itself, so this
+	// Setrlimit is what makes Envoy inherit the hard limit (#442's review).
 	r.Cur = r.Max
 	return syscall.Setrlimit(syscall.RLIMIT_NOFILE, &r)
 }

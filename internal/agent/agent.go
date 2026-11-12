@@ -133,6 +133,8 @@ type Agent struct {
 	malformedLogged string
 	fwd             *Forwarder
 	lastOffered     []byte
+	// routerHold hands started routers from their start goroutines to the loop (router.go).
+	routerHold routerHold
 	// tunnelUID is the Instance the tunnel was last told to serve.
 	tunnelUID string
 	// settings from the newest desired state with an Action the agent knows.
