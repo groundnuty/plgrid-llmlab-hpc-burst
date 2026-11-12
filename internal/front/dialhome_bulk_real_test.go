@@ -42,6 +42,13 @@ type bulkRig struct {
 
 func newBulkRig(t *testing.T) *bulkRig {
 	t.Helper()
+	return newBulkRigWith(t, "")
+}
+
+// newBulkRigWith is newBulkRig whose second frps also posts to the front's bulk plugin at
+// frontBulk, 127.0.0.1:<port>, when it is set (launcher.WriteFrpsBulkConfigWithFront).
+func newBulkRigWith(t *testing.T, frontBulk string) *bulkRig {
+	t.Helper()
 	frps, frpc := testenv.FrpBinaries(t)
 	checkRootK3s(t)
 	r := &bulkRig{t: t, host: agentapi.Host{StateDir: shortDir(t), PortBase: bulkRigBase}, frpc: frpc}
@@ -72,6 +79,9 @@ func newBulkRig(t *testing.T) *bulkRig {
 		t.Fatal(err)
 	}
 	cfgBulk, err := launcher.WriteFrpsBulkConfig(r.host, r.pwBulk)
+	if frontBulk != "" {
+		cfgBulk, err = launcher.WriteFrpsBulkConfigWithFront(r.host, r.pwBulk, frontBulk)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,6 +170,14 @@ func (r *bulkRig) engineSocket(label string) string {
 // its pidfd (os.Process) at the end of the test.
 func (r *bulkRig) startFrpc(uid, sock, dialHome, serverName, ca string, bulk bool) string {
 	r.t.Helper()
+	log, _, _ := r.startFrpcProc(uid, sock, dialHome, serverName, ca, bulk)
+	return log
+}
+
+// startFrpcProc is startFrpc, and also returns frpc's process, whose Kill and Signal go through its
+// pidfd (os.Process on Linux), and a channel closed once it has exited.
+func (r *bulkRig) startFrpcProc(uid, sock, dialHome, serverName, ca string, bulk bool) (string, *os.Process, <-chan struct{}) {
+	r.t.Helper()
 	r.n++
 	host, port, _ := net.SplitHostPort(dialHome)
 	pn, _ := strconv.Atoi(port)
@@ -184,7 +202,7 @@ func (r *bulkRig) startFrpc(uid, sock, dialHome, serverName, ca string, bulk boo
 		_ = cmd.Process.Kill() // a pidfd signal to this one process (os.Process on Linux)
 		<-done
 	})
-	return cfg + ".log"
+	return cfg + ".log", cmd.Process, done
 }
 
 // via sends CONNECT uid:80 to the tcpmux port mux and GET /health, and returns who served it.

@@ -601,3 +601,51 @@ func TestNoBulkSeriesWithoutBulkPath(t *testing.T) {
 		t.Errorf("with the bulk path: bulk %v, fallback %v, registered %v; want 0, 0, 1", b, fb, reg)
 	}
 }
+
+// TestAClientGoneDuringTheBulkDialCountsNothing (R1; the review of #461): a client that leaves while
+// the bulk CONNECT is still held wrote nothing on the bulk transport, so the request counts neither
+// path="bulk" nor path="fallback". Go's transport returns the context's cause there, not the dial
+// error, so the count must come from the bytes written. The control: a request that completes
+// counts path="bulk" once.
+func TestAClientGoneDuringTheBulkDialCountsNothing(t *testing.T) {
+	f := newBulkFront(t, 1, false)
+	uid := f.uids[0]
+	held, release := f.muxBulk.holdNext(t, uid, "connect")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.url+"/v1/chat/completions", strings.NewReader(chatPlain))
+		if err != nil {
+			done <- err
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+f.clientKey)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+		done <- err
+	}()
+	select {
+	case <-held:
+	case <-time.After(failAfter):
+		t.Fatal("the request's CONNECT never reached the bulk frps")
+	}
+	cancel()
+	<-done
+	release()
+	waitRouterState(t, "the request to leave the Instance's cap", func() bool {
+		_, _, n := f.routingOf(uid)
+		return n == 0
+	})
+	if b, fb, _ := f.bulkCounts(); b != 0 || fb != 0 {
+		t.Errorf("a client gone during the bulk dial counted bulk %v, fallback %v; want 0, 0: nothing was written", b, fb)
+	}
+	if code, by := f.send("/v1/chat/completions", chatPlain); code != http.StatusOK || by != "bulk" {
+		t.Fatalf("the control request: %d through %q", code, by)
+	}
+	if b, _, _ := f.bulkCounts(); b != 1 {
+		t.Errorf("a completed bulk request counted bulk %v, want 1", b)
+	}
+}
