@@ -181,7 +181,8 @@ func TestUpRefusesTheBulkPathWithoutFrps(t *testing.T) {
 // TestSupervisedSetWithoutTheBulkPathIsUnchanged: without the bulk path the set is the controller
 // and frps, with the controller's command line as before (S5: the first frps's entry is pinned by
 // TestSupervisedSetRunsFrps). The control: with it, exactly one entry more, frps-bulk, running the
-// same verified binary with its own configuration, health and three ports, base+13 to base+15.
+// same verified binary with its own configuration, health and three ports, base+13 to base+15, and
+// the controller's command line gains --bulk-path (part 3).
 func TestSupervisedSetWithoutTheBulkPathIsUnchanged(t *testing.T) {
 	st := &State{
 		Ports:       Ports{API: 29220, Controller: 29226},
@@ -207,8 +208,10 @@ func TestSupervisedSetWithoutTheBulkPathIsUnchanged(t *testing.T) {
 	if len(with) != 3 || with[2].Name != "frps-bulk" {
 		t.Fatalf("supervised set with the bulk path: %+v", with)
 	}
-	if !slices.Equal(with[0].Args, wantCtl) {
-		t.Errorf("part 2 gives the controller no new argument; got %q", with[0].Args)
+	// Part 3 (#448): the controller reads frps-bulk's list and serves its plugin path, so with the bulk
+	// path recorded its command line gains --bulk-path at its end, and nothing else.
+	if want := append(slices.Clone(wantCtl), "--bulk-path"); !slices.Equal(with[0].Args, want) {
+		t.Errorf("the controller's command line with the bulk path\n got %q\nwant %q", with[0].Args, want)
 	}
 	b := with[2]
 	if b.Path != "/proc/self/fd/3" || b.Argv0 != "/opt/frp/frps" || b.Health != "127.0.0.1:29235" || !b.WaitReady || b.Open == nil {
