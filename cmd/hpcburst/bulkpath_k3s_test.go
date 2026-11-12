@@ -64,6 +64,19 @@ func spkiOf(t *testing.T, path string) ([32]byte, *x509.Certificate) {
 	return sha256.Sum256(c.RawSubjectPublicKeyInfo), c
 }
 
+// tailOf is the last n lines of the file at path, or why it can't be read.
+func tailOf(path string, n int) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err.Error()
+	}
+	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
+}
+
 // entryPID returns the PID of the named supervised entry once it runs.
 func entryPID(t *testing.T, dir, name string) int {
 	t.Helper()
@@ -100,9 +113,15 @@ func TestUpBulkPath(t *testing.T) {
 	if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The CRDs go in with --manifests: the front opens its listeners, base+4 among them, only after
+	// its watches' first list, which never comes without them.
 	up := func(extra ...string) cliResult {
-		return cli(t, h.upArgs(bulkUpBase, append(frpsArgs(t), append([]string{"--json", "--controller-bin", ctl, "--front-config", cfg, "--front-bin", fb,
-			"--front-mode", "host-dialed"}, extra...)...)...)...)
+		r := cli(t, h.upArgs(bulkUpBase, append(frpsArgs(t), append([]string{"--json", "--controller-bin", ctl, "--manifests", "../../config/crd",
+			"--front-config", cfg, "--front-bin", fb, "--front-mode", "host-dialed"}, extra...)...)...)...)
+		if r.code != exitOK {
+			t.Logf("up %v exited %d; the front's log ends:\n%s", extra, r.code, tailOf(filepath.Join(h.dir, "logs", "front.log"), 40))
+		}
+		return r
 	}
 	block := func() []string { return listeningInRange(t, bulkUpBase, bulkUpBase+15) }
 
