@@ -76,6 +76,13 @@ func NewHostReader(h agentapi.Host) (*Reader, error) {
 	return NewReader(ReaderConfig{Addr: h.FrpsWebAddr(), User: agentapi.FrpsWebUser, PasswordFile: h.FrpsWebPasswordFile()})
 }
 
+// NewHostBulkReader returns the Reader for the bulk path's second frps, frps-bulk (beta; HBEP-6, The
+// bulk path): its web address, at base+15, agentapi.FrpsWebUser and its own web password file, never
+// the first frps's.
+func NewHostBulkReader(h agentapi.Host) (*Reader, error) {
+	return NewReader(ReaderConfig{Addr: h.FrpsBulkWebAddr(), User: agentapi.FrpsWebUser, PasswordFile: h.FrpsBulkWebPasswordFile()})
+}
+
 // Proxy is one entry of frps's list (frp server/http/model/types.go:100-111), the fields the
 // inventory uses (HBEP-6, Path state).
 type Proxy struct {
