@@ -163,6 +163,9 @@ func newFrpsRigEdited(t *testing.T, base, nice int, frpsPath string, afterResolv
 	})
 	r := &frpsRig{t: t, state: shortDir(t)}
 	r.host = agentapi.Host{StateDir: r.state, PortBase: base}
+	// Before anything binds: a frps that an earlier, killed test binary left here answers /healthz,
+	// and the rig would take it for its own (#484).
+	testenv.RequireFreePorts(t, "the frps rig", r.host.FrpsPluginAddr(), r.host.FrpsBindAddr(), r.host.FrpsTCPMuxAddr(), r.host.FrpsWebAddr())
 	var err error
 	if r.pw, _, err = EnsureFrpsWebPassword(r.host); err != nil {
 		t.Fatal(err)
@@ -188,7 +191,7 @@ func newFrpsRigEdited(t *testing.T, base, nice int, frpsPath string, afterResolv
 		afterResolve(r.bin)
 	}
 	r.stub = startPluginStub(t, r.host)
-	r.proc, err = StartFrps(FrpsSpec{Bin: r.bin, Config: cfg, Log: FrpsLogFile(r.host), Dir: r.state, Nice: nice})
+	r.proc, err = StartFrps(FrpsSpec{Bin: r.bin, Config: cfg, Log: FrpsLogFile(r.host), Dir: r.state, Nice: nice, ExitWithParent: true})
 	if err != nil {
 		t.Fatal(err)
 	}
