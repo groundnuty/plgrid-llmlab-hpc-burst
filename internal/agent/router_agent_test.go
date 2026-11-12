@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
@@ -396,4 +397,99 @@ func TestTheForwarderInRouterModeIgnoresTheWorkers(t *testing.T) {
 	f.LeaveRouter()
 	f.SetTarget("worker.sock")
 	step("LeaveRouter and a worker's SetTarget", "worker.sock")
+}
+
+// routerStateModes is routerState with the engine double's modes.
+func routerStateModes(h *harness, modes string, instGen, workerGen, routerGen int64) agentapi.DesiredState {
+	d := h.runState(modes, instGen, workerGen, nil)
+	d.Instance.Router = &agentapi.DesiredRouter{Kind: agentapi.RouterEnvoy, Generation: routerGen}
+	return d
+}
+
+// The whole-Instance rung (HBEP-7, rung 2) on an Instance behind a router: every part stops, the
+// staged files are checked again, and the worker and the router start again at the new generation.
+// The worker ignores TERM until its KILL after the stop grace, so Envoy is gone first, as with a real
+// engine: a router started again before the restage would be a live part never stopped, and the
+// restage would never come (#442's review). A worker that exits at once on TERM could win that race
+// and prove nothing.
+func TestAWholeInstanceRestartRestagesBehindTheRouter(t *testing.T) {
+	h := newHarness(t, harnessOptions{envoy: testenv.EnvoyBinary(t)})
+	h.set(routerStateModes(h, "ignore-term", 1, 0, 0))
+	r := h.waitReport("worker-0 and the router running", time.Minute, routerRunning(0))
+	oldWorker, oldRouter := worker0(r).PID, routerOf(r).PID
+	h.set(routerStateModes(h, "ignore-term", 2, 0, 0))
+	r = h.waitReport("worker-0 and the router running again at Instance generation 2", 2*time.Minute, func(r agentapi.Report) bool {
+		w, rr := worker0(r), routerOf(r)
+		return r.Instance != nil && r.Instance.Generation == 2 && w != nil && w.Phase == agentapi.PartRunning && w.PID != oldWorker &&
+			rr != nil && rr.Phase == agentapi.PartRunning && rr.PID != oldRouter
+	})
+	if status, body := serve(t, h, "/health"); status != http.StatusOK {
+		t.Errorf("GET /health after the whole-Instance restart: %d %q, want the worker's 200", status, body)
+	}
+}
+
+// pidfdExited reports whether the process behind a pidfd has exited, waiting up to within for it.
+func pidfdExited(t *testing.T, fd int, within time.Duration) bool {
+	t.Helper()
+	fds := []struct {
+		fd      int32
+		events  int16
+		revents int16
+	}{{fd: int32(fd), events: 0x1}} // POLLIN: the process has exited
+	ts := syscall.NsecToTimespec(int64(within))
+	n, _, errno := syscall.Syscall6(syscall.SYS_PPOLL, uintptr(unsafe.Pointer(&fds[0])), 1, uintptr(unsafe.Pointer(&ts)), 0, 0, 0)
+	if errno != 0 {
+		t.Fatalf("ppoll on the pidfd: %v", errno)
+	}
+	return n == 1 && fds[0].revents&0x1 != 0
+}
+
+// An Envoy whose start ends while the agent ends is stopped, never left running (#442's review): at
+// the stage "started" the agent has already ended when the start tries to hand Envoy over, so the
+// start stops it; at "held" the hand-over went to a loop that has ended, so shutdown stops it. Each
+// case opens a pidfd on that Envoy and requires it to fire once the agent's Run has returned.
+func TestAnEnvoyStartedWhileTheAgentEndsIsStopped(t *testing.T) {
+	bin := testenv.EnvoyBinary(t)
+	for _, stage := range []string{"started", "held"} {
+		t.Run(stage, func(t *testing.T) {
+			h := newHarness(t, harnessOptions{envoy: bin})
+			fired := make(chan int, 1)
+			reset := agent.SetRouterStartHookForTest(func(s string, p *agent.EnvoyProc) {
+				if s != stage || p == nil {
+					return
+				}
+				fd, _, errno := syscall.Syscall(434, uintptr(p.Group.PID()), 0, 0) // pidfd_open
+				if errno != 0 {
+					t.Errorf("pidfd_open: %v", errno)
+					return
+				}
+				h.cancel() // the agent's context ends during the router's start
+				// Wait for the agent's shutdown to begin, an observable state, before the hand-over.
+				for deadline := time.Now().Add(30 * time.Second); !agent.RouterHoldDownForTest(h.agent); {
+					if time.Now().After(deadline) {
+						t.Errorf("the agent's shutdown did not begin within 30 s")
+						break
+					}
+					time.Sleep(time.Millisecond)
+				}
+				select {
+				case fired <- int(fd):
+				default:
+				}
+			})
+			defer reset()
+			h.set(routerState(h, 1, 0, 0))
+			var fd int
+			select {
+			case fd = <-fired:
+			case <-time.After(time.Minute):
+				t.Fatal("the router's start never reached the stage")
+			}
+			defer syscall.Close(fd)
+			h.stop() // waits for Run to return
+			if !pidfdExited(t, fd, 10*time.Second) {
+				t.Errorf("Envoy is still running after the agent ended (stage %s)", stage)
+			}
+		})
+	}
 }

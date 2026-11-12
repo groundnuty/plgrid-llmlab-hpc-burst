@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/envoypin"
@@ -84,8 +86,11 @@ func (a *Agent) convergeRouter(in *instance, i agentapi.DesiredInstance) {
 			in.router, r = nil, nil
 		}
 	}
-	// The router starts with the Instance's parts, once its staging has passed.
-	if r == nil && in.staged {
+	// The router starts with the Instance's parts, once the staging for the desired Instance
+	// generation has passed. On a raised generation (rung 2) applyRun stops every part and restages
+	// only once none is live; a router started before that restage would be a live part at the new
+	// generation, never stopped, and the restage would never come (#442's review).
+	if r == nil && in.staged && in.stageGen == i.Generation {
 		in.router = a.startRouter(in, i)
 		r = in.router
 	}
@@ -125,22 +130,24 @@ func (a *Agent) startRouter(in *instance, i agentapi.DesiredInstance) *routerPar
 	go func() {
 		defer a.wg.Done()
 		p, err := StartEnvoy(EnvoyStart{Binary: bin, Config: cfg, Ready: envoyReady}, now)
-		select {
-		case a.events <- func() { a.routerStarted(in, r, p, err) }:
-		case <-a.ctx.Done():
-			// The agent is ending and its loop no longer runs: stop what started, here.
-			if p != nil {
-				p.Group.Stop(grace)
-				<-p.Group.Done()
-				p.Close()
-			}
+		routerStartSeam("started", p)
+		if p != nil && !a.holdRouter(p) {
+			// The agent is ending: no loop will take this Envoy, so it is stopped here.
+			stopRouterProc(p, grace)
+			return
 		}
+		routerStartSeam("held", p)
+		// A hand-over the ending loop never runs leaves p held, and shutdown stops it.
+		a.post(func() { a.routerStarted(in, r, p, err) })
 	}()
 	return r
 }
 
 // routerStarted takes a router's start result on the loop.
 func (a *Agent) routerStarted(in *instance, r *routerPart, p *EnvoyProc, err error) {
+	if p != nil {
+		a.releaseRouter(p) // the loop owns it now
+	}
 	if err != nil {
 		code := startFailedExitCode
 		r.phase, r.exitCode, r.logTail = agentapi.PartExited, &code, tailUTF8(err.Error(), agentapi.MaxLogTailBytes)
@@ -257,3 +264,67 @@ func (a *Agent) idleRouter(in *instance) {
 		a.fwd.RouteTo("")
 	}
 }
+
+// routerHold is the hand-over of started routers from their start goroutines to the loop (#442's
+// review): a start goroutine holds its Envoy here until the loop takes it (routerStarted). shutdown,
+// once the loop has ended, marks the agent down and stops whatever is still held; a start that ends
+// after that stops its own Envoy. So an Envoy started while the agent ends is never left running.
+type routerHold struct {
+	mu   sync.Mutex
+	down bool
+	held map[*EnvoyProc]bool
+}
+
+// holdRouter holds a started Envoy for the loop; false once the agent is ending.
+func (a *Agent) holdRouter(p *EnvoyProc) bool {
+	h := &a.routerHold
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.down {
+		return false
+	}
+	if h.held == nil {
+		h.held = map[*EnvoyProc]bool{}
+	}
+	h.held[p] = true
+	return true
+}
+
+// releaseRouter hands a held Envoy to the loop.
+func (a *Agent) releaseRouter(p *EnvoyProc) {
+	h := &a.routerHold
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.held, p)
+}
+
+// takeHeldRouters marks the agent down and returns the Envoys still held, which no loop will take.
+func (a *Agent) takeHeldRouters() []*EnvoyProc {
+	h := &a.routerHold
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.down = true
+	var out []*EnvoyProc
+	for p := range h.held {
+		out = append(out, p)
+	}
+	h.held = nil
+	return out
+}
+
+// stopRouterProc stops an Envoy no part owns: TERM, KILL after grace, and waits for its group.
+func stopRouterProc(p *EnvoyProc, grace time.Duration) {
+	p.Group.Stop(grace)
+	<-p.Group.Done()
+	p.Close()
+}
+
+// routerStartSeam is a test seam (export_test.go): it is told each stage of a router start's
+// hand-over, "started" and then "held", with the started Envoy. Production never sets it.
+func routerStartSeam(stage string, p *EnvoyProc) {
+	if f := routerStartHook.Load(); f != nil {
+		(*f)(stage, p)
+	}
+}
+
+var routerStartHook atomic.Pointer[func(stage string, p *EnvoyProc)]
