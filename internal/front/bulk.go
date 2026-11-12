@@ -105,7 +105,14 @@ func (b *bulkPath) lose(uid types.UID) {
 func (p *Proxy) forwardBulk(w http.ResponseWriter, r *http.Request, x *exchange, t *target, body []byte, rb requestBody, key string) bool {
 	uid := t.inst.UID
 	resp, err := p.sendWith(x, r, t, body, rb, key, p.bulk.inst)
-	if err != nil && x.ctx.Err() == nil && isDialError(err) {
+	if err != nil && isDialError(err) {
+		if x.ctx.Err() != nil {
+			// The client left, or the front cut the request, while the bulk dial ran: nothing
+			// was written anywhere, so it counts neither as bulk nor as a fallback.
+			t.release()
+			p.failedBulkBeforeHeaders(w, x, t, err)
+			return true
+		}
 		p.bulk.unregister(uid)
 		p.metrics.bulkFellBack()
 		p.bulk.log.Warn("the bulk transport could not be dialled; nothing was sent, and the request takes the token transport", "request", x.id, "target", t.key(), "error", err.Error())
