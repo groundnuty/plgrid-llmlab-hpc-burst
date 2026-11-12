@@ -81,7 +81,11 @@ var _ tunnelCache = cache.Cache(nil)
 // a leader component (`component.leader`) starts only in the copy that leads
 // the lifecycle Lease, a plain one in every copy. frps need not run when this
 // starts; the reads then say Unknown until it does.
-func addTunnel(mgr manager.Manager, host agentapi.Host, _ agentapi.Backend, listen func(addr string) (net.Listener, error), events *eventcount.Counter) (manager.Runnable, error) {
+//
+// With bulkPath (--bulk-path; beta, HBEP-6, The bulk path) it also serves the second frps's plugin
+// path on the same server and reads that frps's list (tunnel_bulk.go); without it nothing of that is
+// built, and the plugin server's handler is the first frps's alone.
+func addTunnel(mgr manager.Manager, host agentapi.Host, _ agentapi.Backend, listen func(addr string) (net.Listener, error), events *eventcount.Counter, bulkPath bool) (manager.Runnable, error) {
 	reader, err := frpsplugin.NewHostReader(host)
 	if err != nil {
 		return nil, err
@@ -105,12 +109,21 @@ func addTunnel(mgr manager.Manager, host agentapi.Host, _ agentapi.Backend, list
 		rec:      lifecycle.KubeRecorder{R: eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle), events, eventcount.ControllerLifecycle)},
 		admitted: admitted,
 	}
+	var served http.Handler = handler
+	if bulkPath {
+		bulk, err := newBulkTunnel(host, trigger, index)
+		if err != nil {
+			return nil, err
+		}
+		state.bulk = bulk.state
+		served = bulk.route(handler)
+	}
 	if err := mgr.Add(component{name: "tunnel-state", log: state.log, leader: true, start: state.run}); err != nil {
 		return nil, err
 	}
 	feedLog := named("frps-plugin", "addr", host.FrpsPluginAddr())
 	server := &pluginServer{
-		addr: host.FrpsPluginAddr(), handler: handler, log: feedLog,
+		addr: host.FrpsPluginAddr(), handler: served, log: feedLog,
 		listen: func(context.Context) (net.Listener, error) { return listen(host.FrpsPluginAddr()) },
 		feed:   &pluginFeed{cache: mgr.GetCache(), reader: mgr.GetClient(), index: index, credDir: host.CredentialsDir(), log: feedLog},
 	}

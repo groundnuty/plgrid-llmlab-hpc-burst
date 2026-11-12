@@ -602,3 +602,20 @@ func (e *recordedPathEvents) failings() []ProbeResult {
 	defer e.mu.Unlock()
 	return append([]ProbeResult(nil), e.failing...)
 }
+
+// probes is how many verdicts the prober has recorded for the UID. Probed is the last thing
+// probeOne does, after it has cleared the probe's running flag, applied the verdict and updated the
+// re-probe schedule, so a count that has reached n means the n-th probe is over. The mux double's
+// hit count is not that: it counts a GET /health when it arrives, before the reply, so a test that
+// takes a hit for the end of a probe goes on while the probe still runs (#473).
+func (e *recordedPathEvents) probes(uid types.UID) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	n := 0
+	for _, r := range e.probed {
+		if r.UID == uid {
+			n++
+		}
+	}
+	return n
+}

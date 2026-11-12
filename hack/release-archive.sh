@@ -17,7 +17,8 @@
 #                                           -trimpath and VCS stamping on
 #   bin/k3s-1.36.5/k3s                      the pinned k3s, where `hpcburst up --bin-dir bin` looks
 #   bin/frp-0.71.1/frps                     the pinned frps, likewise (its frpc is agent-builds/frpc-x86_64)
-#   agent-builds/hb-agent-x86_64, hb-agent-aarch64     hack/build-agents.sh
+#   agent-builds/hb-agent-x86_64, hb-agent-aarch64     hack/build-agents.sh --version VERSION, so that
+#                                           each agent reports the version its host binaries do
 #   agent-builds/frpc-x86_64, frpc-aarch64             hack/fetch-frp.sh --agent-builds
 #   config/crd/, profiles/                  from the commit, as git archive gives them
 #
@@ -33,6 +34,9 @@
 #   - a host binary whose `go version -m` does not show the tag exactly, without +dirty, with
 #     vcs.modified=false. Without --tag it must show a pseudo-version of this commit. All three
 #     binaries must show the same version.
+#   - an x86_64 agent whose `-version` does not name that version (on a linux x86_64 machine, which can
+#     run it; elsewhere the script says it was not run). The version reaches the agent through the
+#     linker's -X, which ignores a variable that is not there, so the agent itself is asked.
 #
 # --tag TAG     the version the binaries must report. Without it the run is a dry one: the same archive,
 #               with the pseudo-version in its name.
@@ -194,7 +198,18 @@ done
 echo "versions $version on ${HOST_BINARIES[*]}"
 
 # ---- the agents -----------------------------------------------------------------------------------------
-bash hack/build-agents.sh "$stage/agent-builds"
+# The version the host binaries report: the tag, or on a dry run the pseudo-version, so a dry run builds
+# the agents the way a tag does (issue #469).
+bash hack/build-agents.sh --version "$version" "$stage/agent-builds"
+# The linker's -X ignores a variable that does not exist, so the agent is asked what it reports.
+case "$(uname -s) $(uname -m)" in
+  "Linux x86_64" | "Linux amd64")
+    said=$("$stage/agent-builds/hb-agent-x86_64" -version 2>&1) || die "hb-agent-x86_64 -version failed: $said"
+    [[ $said == "hb-agent $version, protocol "* ]] || die "hb-agent-x86_64 reports '$said', and the host binaries report $version"
+    echo "agent    hb-agent-x86_64 reports: $said"
+    ;;
+  *) echo "agent    hb-agent-x86_64 -version was not run: this is $(uname -s) $(uname -m)" ;;
+esac
 
 # ---- the commit's own files --------------------------------------------------------------------------
 git archive --format=tar HEAD config/crd profiles | tar -x -C "$stage"
