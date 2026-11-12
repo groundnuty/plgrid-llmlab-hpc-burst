@@ -24,7 +24,11 @@ type Runner interface {
 	// LoginHost is the Provider's login host for its ssh settings: as ssh -G
 	// resolves its HostName through the keeper's own -F file for them, in
 	// lower case (HBEP-6, Capacity; the science agent's ruling on #343's Q4).
-	LoginHost(provider string, ssh wire.SSH) string
+	// An error means the host could not be read (ssh -G timed out, issue
+	// 403): the keeper then claims nothing for that set and refuses it, since
+	// a host it guessed could be another Provider's (`@hpc-burst-science-agent`,
+	// ruling (b) on PR 409, 11 Nov 2026).
+	LoginHost(provider string, ssh wire.SSH) (string, error)
 	// Want keeps both relays of w's Allocation, on ssh. A Want of the same
 	// identity (UID, job, channel, Gen, and the rest of the entry) changes
 	// nothing, so a new leader adopts the relays and replaces none.

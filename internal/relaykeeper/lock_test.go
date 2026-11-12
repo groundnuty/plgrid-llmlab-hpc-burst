@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -57,18 +58,73 @@ func TestASecondRunOnALiveKeepersStateDirChangesNothing(t *testing.T) {
 	}
 }
 
+// cleaner is what hangingSSHG needs of a test: a *testing.T, or the hand-run
+// double of lock_leak_test.go.
+type cleaner interface {
+	Helper()
+	TempDir() string
+	Cleanup(func())
+	Fatalf(format string, args ...any)
+}
+
+// sshGMaxPolls is how many 50 ms polls the double's ssh -G makes before it
+// gives up by itself: 6,000, about 5 minutes, far above any test's need.
+const sshGMaxPolls = 6000
+
+// hangingSSHG makes a test double ssh whose ssh -G waits until the file
+// release appears in its directory, and answers then; any other call of it is
+// a sleep. It writes "running" in the directory when its ssh -G starts to wait.
+//
+// The double must never outlive its test (issue 402: one whose test had failed
+// ran for 22 h 40 min, since the test wrote release only on its success path).
+// A test that fails, or panics, runs its cleanups, and a cleanup registered
+// right after TempDir writes release; cleanups run last in, first out, so it
+// runs before TempDir's removal of the directory. The loop of ssh -G also ends
+// when that directory is gone, which closes the gap between the write and the
+// removal (a 50 ms poll can miss a file that exists for microseconds). A crash
+// of the test binary runs no cleanup at all: a go test -timeout panics from
+// the alarm goroutine, and a SIGKILL or an out-of-memory kill gives it no
+// chance (the review of PR 410). So the loop also ends when its parent is gone
+// (its parent's PID is no longer the one it started under, so an orphan is
+// found whoever adopts it), and after a bound of its own, sshGMaxPolls polls.
+func hangingSSHG(t cleaner) (dir, ssh, release string) {
+	return hangingSSHGWith(t, sshGMaxPolls)
+}
+
+// hangingSSHGWith is hangingSSHG with the double's own bound, in polls, which
+// a test shortens.
+func hangingSSHGWith(t cleaner, maxPolls int) (dir, ssh, release string) {
+	t.Helper()
+	dir = t.TempDir()
+	if strings.Contains(dir, "'") {
+		t.Fatalf("the test's directory holds a quote: %q", dir)
+	}
+	release = filepath.Join(dir, "release")
+	t.Cleanup(func() {
+		// Best effort: the double's loop also ends when the directory is gone.
+		_ = os.WriteFile(release, nil, 0o600)
+	})
+	ssh = filepath.Join(dir, "ssh")
+	script := "#!/bin/sh\ncase \"$1\" in -G)\n" +
+		// The parent now is the one the shell started under: PPid in /proc is
+		// the parent's PID at this moment, and $PPID is the one at the start.
+		"  parent_gone() { while read -r k v; do if [ \"$k\" = PPid: ]; then [ \"$v\" != \"$PPID\" ]; return; fi; done < /proc/$$/status; }\n" +
+		"  : > '" + dir + "/running'\n" +
+		"  n=0\n" +
+		"  while [ ! -e '" + release + "' ] && [ -d '" + dir + "' ] && [ $n -lt " + strconv.Itoa(maxPolls) + " ] && ! parent_gone; do sleep 0.05; n=$((n+1)); done\n" +
+		"  echo hostname login.example; exit 0;;\nesac\nexec sleep 300 </dev/null\n"
+	if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
+		t.Fatalf("the double ssh: %v", err)
+	}
+	return dir, ssh, release
+}
+
 // A Provider's first set resolves its login host with ssh -G outside the
 // keeper's lock, so a slow ssh -G stalls only that set: while it runs, ping
 // and status, which take the lock, still answer. Here the double's ssh -G
 // waits until the test lets it go (the review of PR 356).
 func TestSshGRunsOutsideTheKeepersLock(t *testing.T) {
-	dir := t.TempDir()
-	release := filepath.Join(dir, "release")
-	ssh := filepath.Join(dir, "ssh")
-	script := "#!/bin/sh\ncase \"$1\" in -G) while [ ! -e " + release + " ]; do sleep 0.05; done; echo hostname login.example; exit 0;; esac\nexec sleep 300 </dev/null\n"
-	if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	dir, ssh, release := hangingSSHG(t)
 	r := newRig(t)
 	var runner *OwnerRunner
 	k, _ := r.open(func(o *Options) {

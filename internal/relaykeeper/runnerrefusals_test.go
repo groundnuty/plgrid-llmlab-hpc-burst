@@ -34,10 +34,14 @@ func startedNothing(t *testing.T, rg *realRig, hw *hookedWant) {
 	if s := hw.startsOf(); len(s) != 0 {
 		t.Errorf("a process started: %+v", s)
 	}
+	host, err := rg.k.runner.LoginHost(hw.p, rg.w.ssh())
+	if err != nil {
+		t.Fatalf("the login host: %v", err)
+	}
 	rg.k.mu.Lock()
 	defer rg.k.mu.Unlock()
 	for key := range rg.k.inflight {
-		if key.tag == hw.w.Entry.Tag && key.inc == hw.w.Incarnation && key.host == rg.k.runner.LoginHost(hw.p, rg.w.ssh()) {
+		if key.tag == hw.w.Entry.Tag && key.inc == hw.w.Incarnation && key.host == host {
 			t.Errorf("the keeper holds a start of the Want's relays: %+v", key)
 		}
 	}

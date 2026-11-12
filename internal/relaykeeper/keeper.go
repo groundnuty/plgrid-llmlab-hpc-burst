@@ -315,7 +315,15 @@ func (k *Keeper) handleSet(s wire.DesiredSet) (wire.Kind, any) {
 	// The login host first, with no lock held: its first resolution for a
 	// Provider's ssh settings runs ssh -G, which must not stall the gate and
 	// every hook behind the keeper's lock (the review of PR 356).
-	host := k.runner.LoginHost(s.Provider, s.SSH)
+	host, err := k.runner.LoginHost(s.Provider, s.SSH)
+	if err != nil {
+		// ssh -G timed out (issue 403; ruling (b) on PR 409): the host is not
+		// known, so nothing is claimed, no fence moves and nothing changes. The
+		// controller reads a RefusedState as no decision and sends again on
+		// its next round, so the Provider waits.
+		k.o.Logger.Error("a set is refused: the Provider's login host could not be read, so it claims none", "provider", s.Provider, "err", err)
+		return refuse(wire.RefusedState, err.Error())
+	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if err := k.settle(); err != nil {

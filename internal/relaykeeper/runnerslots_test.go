@@ -286,7 +286,11 @@ func TestEveryProvidersOwnerSharesTheLoginHostsSlots(t *testing.T) {
 	if n := len(relaySSHs(t, a.id, b.id, c.id)); n != 4 {
 		t.Errorf("%d relay ssh clients run on the login host for two Providers, want 4", n)
 	}
-	if n := slots.InUse(rr.LoginHost(rkProv, w.ssh())); n != 4 {
+	login, err := rr.LoginHost(rkProv, w.ssh())
+	if err != nil {
+		t.Fatalf("the login host: %v", err)
+	}
+	if n := slots.InUse(login); n != 4 {
 		t.Errorf("%d of the Runner's slots are in use, want 4", n)
 	}
 	for _, ch := range agentapi.RelayChannels {
