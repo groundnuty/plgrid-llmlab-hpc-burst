@@ -54,6 +54,21 @@ func StagedDialHomeCertPath(tag string) string {
 	return path.Join(AllocationDir(tag), StagedDialHomeCertName)
 }
 
+// StagedBulkDialHomeCertName is the file name of the bulk path's second
+// certificate in the Allocation's directory (beta; HBEP-6, The bulk path;
+// `@hpc-burst-science-agent`, 12 Nov 2026, #448). It is public, and only the
+// bulk frpc trusts it.
+const StagedBulkDialHomeCertName = "dial-home-bulk.crt"
+
+// StagedBulkDialHomeCertPath is the Allocation's copy of the bulk path's
+// second certificate, alloc/<tag>/dial-home-bulk.crt: Host.BulkCertFile's,
+// for the key whose pin agent.json carries. It is staged only with
+// agent.json's bulk block, and the agent checks it against that pin and
+// BulkDialHomeServerName (VerifyDialHomeCertFor) before it runs the bulk frpc.
+func StagedBulkDialHomeCertPath(tag string) string {
+	return path.Join(AllocationDir(tag), StagedBulkDialHomeCertName)
+}
+
 // StagedConfigPath is the Allocation's agent.json, mode 600.
 func StagedConfigPath(tag string) string { return path.Join(AllocationDir(tag), ConfigFileName) }
 
@@ -174,6 +189,11 @@ const (
 	// its private key (PEM, mode 0600).
 	AgentCertFileName = "tls.crt"
 	AgentKeyFileName  = "tls.key"
+	// AgentBulkCertFileName is the bulk path's second certificate (PEM), in
+	// AgentEndpointDirName beside the first: issued for the first's key, for
+	// BulkDialHomeServerName only (beta; HBEP-6, The bulk path). It has no key
+	// file of its own.
+	AgentBulkCertFileName = "tls-bulk.crt"
 	// AgentEndpointPortOffset is the agent endpoint's port, relative to the
 	// launcher's port base.
 	AgentEndpointPortOffset = 3
@@ -208,6 +228,14 @@ const (
 	// the launcher's port base (HBEP-8, Metrics; HBEP-11). It makes the
 	// launcher's block 13 ports, base to base+12.
 	ControllerMetricsPortOffset = 12
+	// FrpsBulkBindPortOffset, FrpsBulkTCPMuxPortOffset and FrpsBulkWebPortOffset
+	// are the second frps's bind port, tcpmux CONNECT port and web server, for
+	// the bulk path (beta; HBEP-6, The bulk path): base+13 to base+15, since
+	// base+12 is the controller's metrics. Only a launcher run with the bulk
+	// path starts that frps, so nothing binds them otherwise.
+	FrpsBulkBindPortOffset   = 13
+	FrpsBulkTCPMuxPortOffset = 14
+	FrpsBulkWebPortOffset    = 15
 
 	// FrpsDirName is the launcher's frps directory under the state directory,
 	// which holds the web password file.
@@ -228,6 +256,20 @@ const (
 	// admitted it, so the front stops routing to an Instance's UID before
 	// frps registers it again (HBEP-6, Admission; #371).
 	FrontFrpsPluginPath = "/frp/v1/front"
+
+	// FrpsBulkDirName is the second frps's directory under the state
+	// directory, for the bulk path (beta): it holds that frps's own web
+	// password file (FrpsWebPasswordFileName), apart from the first's (HBEP-6,
+	// The bulk path: its own configuration file and web password).
+	FrpsBulkDirName = "frps-bulk"
+	// FrpsBulkPluginPath and FrontFrpsBulkPluginPath are the paths the second
+	// frps posts to on the lifecycle controller's plugin (base+8) and on the
+	// front's (base+4), for the bulk path (beta). A plugin call carries nothing
+	// that names its frps, so the path is how each plugin keeps its state per
+	// frps: a bulk NewProxy or CloseProxy moves only the UID's bulk epoch
+	// (HBEP-6, The bulk path: admission and the front's plugin, proposed paths).
+	FrpsBulkPluginPath      = "/frp/v1/handler/bulk"
+	FrontFrpsBulkPluginPath = "/frp/v1/front/bulk"
 )
 
 // CredentialsDir is <state>/credentials, the dir of AllocationCredentialPath
@@ -319,6 +361,46 @@ func (h Host) ControllerMetricsAddr() string { return loopback(h.ControllerMetri
 // differ from frps's.
 func (h Host) FrpsWebPasswordFile() string {
 	return filepath.Join(h.StateDir, FrpsDirName, FrpsWebPasswordFileName)
+}
+
+// BulkCertFile is <state>/agent-endpoint/tls-bulk.crt, the bulk path's second
+// certificate: the first's key, BulkDialHomeServerName only (beta; HBEP-6, The
+// bulk path). The dial-home listener serves it, with AgentKeyFile, to a client
+// that names BulkDialHomeServerName.
+func (h Host) BulkCertFile() string {
+	return filepath.Join(h.StateDir, AgentEndpointDirName, AgentBulkCertFileName)
+}
+
+// FrpsBulkBindPort is the second frps's bind port, for the bulk path: the port
+// base plus FrpsBulkBindPortOffset.
+func (h Host) FrpsBulkBindPort() int { return h.PortBase + FrpsBulkBindPortOffset }
+
+// FrpsBulkBindAddr is "127.0.0.1:<FrpsBulkBindPort>", where the dial-home
+// listener passes the bulk frpc's websocket (HBEP-5, Parameters:
+// frpsBulkBindAddr's default).
+func (h Host) FrpsBulkBindAddr() string { return loopback(h.FrpsBulkBindPort()) }
+
+// FrpsBulkTCPMuxPort is the second frps's tcpmux CONNECT port: the port base
+// plus FrpsBulkTCPMuxPortOffset.
+func (h Host) FrpsBulkTCPMuxPort() int { return h.PortBase + FrpsBulkTCPMuxPortOffset }
+
+// FrpsBulkTCPMuxAddr is "127.0.0.1:<FrpsBulkTCPMuxPort>", which the front's bulk
+// transport dials (HBEP-5, Parameters: frpsBulkMuxAddr's default).
+func (h Host) FrpsBulkTCPMuxAddr() string { return loopback(h.FrpsBulkTCPMuxPort()) }
+
+// FrpsBulkWebPort is the second frps's web server port: the port base plus
+// FrpsBulkWebPortOffset.
+func (h Host) FrpsBulkWebPort() int { return h.PortBase + FrpsBulkWebPortOffset }
+
+// FrpsBulkWebAddr is "127.0.0.1:<FrpsBulkWebPort>": the lifecycle controller
+// reads the second frps's proxy list there, and the launcher its /healthz.
+func (h Host) FrpsBulkWebAddr() string { return loopback(h.FrpsBulkWebPort()) }
+
+// FrpsBulkWebPasswordFile is <state>/frps-bulk/web-password, mode 600: the
+// second frps's web password, a key file as FrpsWebPasswordFile is, and never
+// the same file (HBEP-6, The bulk path: its own web password).
+func (h Host) FrpsBulkWebPasswordFile() string {
+	return filepath.Join(h.StateDir, FrpsBulkDirName, FrpsWebPasswordFileName)
 }
 
 // RelayKeeperDir is <state>/relaykeeper, mode 700: the relay keeper's own
