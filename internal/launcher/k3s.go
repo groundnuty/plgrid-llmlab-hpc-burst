@@ -30,6 +30,9 @@ type launchSpec struct {
 	// relayKeeper is State.RelayKeeper, the supervision's relay keeper (relaykeeper.go): the first
 	// durable record carries it with the rest, and an upgrade brings a keeper host back as one.
 	relayKeeper bool
+	// bulkPath is State.BulkPath, up --bulk-path (beta; HBEP-6, The bulk path): the first durable
+	// record carries it with the rest, and an upgrade brings a bulk-path host back as one.
+	bulkPath bool
 	// instanceRouter is State.InstanceRouter: the first durable record carries it, and an upgrade
 	// keeps it.
 	instanceRouter string

@@ -107,6 +107,10 @@ type State struct {
 	// set only in host-dialed mode, with controllers. down removes this record; the keeper's own
 	// state file stays, and the switch-back guard reads that (relaykeeper.go).
 	RelayKeeper bool `json:"relay_keeper,omitempty"`
+	// BulkPath is up --bulk-path (beta; HBEP-6, The bulk path): the supervisor runs the second frps,
+	// frps-bulk, beside the first, and the launcher keeps the second certificate for the agent
+	// endpoint's key. It is set only with frps. Without it, nothing of the bulk path runs.
+	BulkPath bool `json:"bulk_path,omitempty"`
 	// InstanceRouter is up --instance-router: the router each new Instance runs in front of its
 	// worker, passed to the controller (#429, #454); "" for none (alpha).
 	InstanceRouter string `json:"instance_router,omitempty"`

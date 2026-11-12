@@ -187,6 +187,7 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 	hostBad := rep.Health != Healthy // k3s's own state, before the controllers are judged
 	checkSupervision(l, st, sup, rep, bad)
 	checkFrpsNamesTheFront(l, st, bad)
+	checkFrpsBulkNamesTheFront(l, st, bad)
 	if statusStageHook != nil {
 		statusStageHook("listeners")
 	}

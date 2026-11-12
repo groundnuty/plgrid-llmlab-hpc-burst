@@ -50,6 +50,24 @@ func checkFrpsNamesTheFront(l layout, st *State, bad func(string, ...any)) {
 	}
 }
 
+// checkFrpsBulkNamesTheFront is checkFrpsNamesTheFront for the bulk path's second frps: with the
+// bulk path and a front, its configuration posts to the front's plugin at the front's bulk path
+// (HBEP-6, The bulk path), or the front would never take a bulk UID out of routing.
+func checkFrpsBulkNamesTheFront(l layout, st *State, bad func(string, ...any)) {
+	if !st.BulkPath || st.FrontRun == nil || st.Frps == nil {
+		return
+	}
+	path := FrpsBulkConfigFile(l.host(st.Ports))
+	b, err := os.ReadFile(path)
+	if err != nil {
+		bad("the bulk path's frps configuration: %v", err)
+		return
+	}
+	if addr := st.Ports.FrontHealthAddr(); !strings.Contains(string(b), frontPluginBlockAt(addr, agentapi.FrontFrpsBulkPluginPath)) {
+		bad("the bulk path's frps configuration %s does not post to the front's plugin at %s%s: it registers bulk proxies the front never hears of (HBEP-6, The bulk path)", path, addr, agentapi.FrontFrpsBulkPluginPath)
+	}
+}
+
 func postFrontPlugin(addr string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), healthzTimeout)
 	defer cancel()

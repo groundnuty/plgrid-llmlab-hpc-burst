@@ -110,6 +110,11 @@ func Upgrade(ctx context.Context, o UpgradeOptions) (*UpgradeReport, error) {
 			return nil, err
 		}
 	}
+	if st.BulkPath {
+		if err := ensureBulkCert(l.host(st.Ports), o.Log); err != nil {
+			return nil, err
+		}
+	}
 	cfg, err := restConfig(l.kubeconfig(), st.Ports, 60*time.Second)
 	if err != nil {
 		return nil, err
@@ -208,6 +213,7 @@ func replaceHost(ctx context.Context, l layout, st *State, bin Binary, ops hostO
 	// A keeper host comes back as one: the keeper, the controller's socket and the switch back's
 	// premise all ride on this (the review of PR 361).
 	spec.relayKeeper = st.RelayKeeper
+	spec.bulkPath = st.BulkPath
 	spec.instanceRouter = st.InstanceRouter
 	if st.frpsMissing() {
 		logf(log, "%s", noFrpsUpgradeWarning)

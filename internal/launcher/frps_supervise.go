@@ -20,6 +20,14 @@ import (
 // frpsEntryName is frps's entry in the supervised set and in supervisor.json.
 const frpsEntryName = FrpsProcName
 
+// frpsBulkEntryName is the bulk path's second frps's entry (HBEP-6, The bulk path: "supervised by
+// the launcher beside the first as frps-bulk").
+const frpsBulkEntryName = "frps-bulk"
+
+// errBulkPathNoFrps refuses up --bulk-path on a host that runs no frps: the second frps is the
+// bulk path's server, and it runs the binary the first does.
+var errBulkPathNoFrps = errors.New("the bulk path was asked for (--bulk-path), but no frps runs (--frps-bin, or frp-" + DefaultFrpVersion + "/frps in --bin-dir, with a controller binary): the bulk path's second frps runs the same binary under the controllers' supervisor")
+
 // FrpsRunConfig is the frps the supervisor runs: the pinned binary, checked against the pin by
 // version at every start. The configuration is FrpsConfigFile of the host, which up writes.
 type FrpsRunConfig struct {
@@ -58,6 +66,11 @@ func frpsSpecFor(h agentapi.Host) FrpsSpec {
 	return FrpsSpec{Config: FrpsConfigFile(h), Log: FrpsLogFile(h), Dir: h.StateDir}
 }
 
+// frpsBulkSpecFor is the start of the bulk path's second frps for the host, without its binary.
+func frpsBulkSpecFor(h agentapi.Host) FrpsSpec {
+	return FrpsSpec{Config: FrpsBulkConfigFile(h), Log: FrpsBulkLogFile(h), Dir: h.StateDir}
+}
+
 // frpsEntry is frps's supervised entry, or nil when no frps was recorded. Its health is the
 // three loopback ports of HBEP-6 (bind, tcpmux and the web server), exactly, and GET /healthz on
 // the web server, which answers before the server's password check.
@@ -66,15 +79,31 @@ func (s *State) frpsEntry(l layout) *supervised {
 		return nil
 	}
 	h := l.host(s.Ports)
-	spec := frpsSpecFor(h)
-	run := *s.Frps
+	return frpsEntryFor(*s.Frps, frpsEntryName, frpsSpecFor(h), h.FrpsWebAddr(), []int{h.FrpsBindPort(), h.FrpsTCPMuxPort(), h.FrpsWebPort()})
+}
+
+// frpsBulkEntry is the bulk path's second frps's supervised entry, or nil when the record has no
+// bulk path or no frps (HBEP-6, The bulk path). It runs the first's binary, checked against the pin
+// at every start in the same way, and its health is its own three loopback ports, exactly, and its
+// own web server's GET /healthz.
+func (s *State) frpsBulkEntry(l layout) *supervised {
+	if s.Frps == nil || !s.BulkPath {
+		return nil
+	}
+	h := l.host(s.Ports)
+	return frpsEntryFor(*s.Frps, frpsBulkEntryName, frpsBulkSpecFor(h), h.FrpsBulkWebAddr(), []int{h.FrpsBulkBindPort(), h.FrpsBulkTCPMuxPort(), h.FrpsBulkWebPort()})
+}
+
+// frpsEntryFor is an frps's supervised entry: run's binary, from its verified descriptor, started
+// as spec, judged healthy by health and exactly ports.
+func frpsEntryFor(run FrpsRunConfig, name string, spec FrpsSpec, health string, ports []int) *supervised {
 	return &supervised{
-		Name:   frpsEntryName,
+		Name:   name,
 		Path:   execPath(), // the verified binary, passed at descriptor 3 by Open
 		Argv0:  run.Binary, // what ps shows; the file executed is still the descriptor
 		Args:   spec.Argv()[1:],
-		Health: h.FrpsWebAddr(),
-		Ports:  []int{h.FrpsBindPort(), h.FrpsTCPMuxPort(), h.FrpsWebPort()},
+		Health: health,
+		Ports:  ports,
 		Env:    spec.Env(),
 		// Copied, sealed and checked against the pin again before every start: a binary replaced or
 		// rewritten since up fails its start, and the supervisor reports it, instead of running
