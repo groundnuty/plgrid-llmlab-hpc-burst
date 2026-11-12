@@ -146,3 +146,110 @@ func TestVerifyDialHomeCertForEachName(t *testing.T) {
 		t.Errorf("VerifyDialHomeCert on the bulk-only certificate: %v, want a refusal for the token name", err)
 	}
 }
+
+// directConfig and hostDialedConfig are validConfig in the two modes the bulk path is built for.
+func directConfig() AgentConfig {
+	c := validConfig()
+	c.Mode, c.Endpoint, c.SSH = DialHomeDirect, "front.example:8443", nil
+	return c
+}
+
+func hostDialedConfig() AgentConfig {
+	c := validConfig()
+	c.Mode, c.Endpoint, c.SSH, c.Allocation = DialHomeHostDialed, "", nil, "00000000-0000-4000-8000-000000000001"
+	return c
+}
+
+// TestAgentConfigWithoutBulkEncodesAsBefore: an agent.json without the bulk block is byte for byte
+// the file a Provider wrote before the bulk path, typed here as JSON, not produced by the encoder
+// under test: no "bulk" key, not even a null one. The control: with the block, the bytes differ by
+// exactly the block, written as the science agent ruled it (#448, S3).
+func TestAgentConfigWithoutBulkEncodesAsBefore(t *testing.T) {
+	const before = `{
+  "protocolVersion": "v1",
+  "tag": "hb-helios-a-x7k2p-1bda24d00504",
+  "mode": "direct",
+  "endpoint": "front.example:8443",
+  "certSPKISHA256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "frpcDigest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "stagingDir": "/scratch/example-user",
+  "dialHomeDir": "/home/example-user/.hpcburst/dial-home"
+}
+`
+	c := directConfig()
+	got, err := c.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != before {
+		t.Errorf("agent.json without the bulk block changed:\n%s", got)
+	}
+	c.Bulk = &BulkPath{ServerName: "bulk.dial-home.hpcburst.invalid"}
+	with, err := c.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Replace(before, "\n}\n", ",\n  \"bulk\": {\n    \"serverName\": \"bulk.dial-home.hpcburst.invalid\"\n  }\n}\n", 1)
+	if string(with) != want {
+		t.Errorf("agent.json with the bulk block:\n%s\nwant:\n%s", with, want)
+	}
+	back, err := DecodeAgentConfig(with)
+	if err != nil || back.Bulk == nil || back.Bulk.ServerName != BulkDialHomeServerName {
+		t.Errorf("the bulk block does not round-trip: %+v, %v", back.Bulk, err)
+	}
+	if back, err := DecodeAgentConfig([]byte(before)); err != nil || back.Bulk != nil {
+		t.Errorf("an agent.json from before the bulk path decodes with a bulk block %+v, %v", back.Bulk, err)
+	}
+}
+
+// TestAgentConfigBulkBlock: the bulk block is taken in direct and host-dialed mode with exactly
+// the bulk server's name, and refused in ssh mode and with any other name (#448, S3: Validate
+// requires exactly that name and refuses it in ssh mode). Each refusal is also refused by Encode,
+// so no Provider writes such a file.
+func TestAgentConfigBulkBlock(t *testing.T) {
+	for name, c := range map[string]AgentConfig{"direct": directConfig(), "host-dialed": hostDialedConfig()} {
+		c.Bulk = &BulkPath{ServerName: "bulk.dial-home.hpcburst.invalid"}
+		if err := c.Validate(); err != nil {
+			t.Errorf("%s mode with the bulk block was refused: %v", name, err)
+		}
+	}
+	for _, tc := range []struct {
+		name       string
+		c          AgentConfig
+		serverName string
+		want       string
+	}{
+		{"ssh mode", validConfig(), "bulk.dial-home.hpcburst.invalid", "bulk is set in ssh mode"},
+		{"the token's name", directConfig(), "dial-home.hpcburst.invalid", `bulk.serverName "dial-home.hpcburst.invalid"`},
+		{"no name", directConfig(), "", `bulk.serverName ""`},
+		{"another case", directConfig(), "BULK.dial-home.hpcburst.invalid", `bulk.serverName "BULK.dial-home.hpcburst.invalid"`},
+		{"a trailing dot", hostDialedConfig(), "bulk.dial-home.hpcburst.invalid.", `bulk.serverName "bulk.dial-home.hpcburst.invalid."`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := tc.c
+			c.Bulk = &BulkPath{ServerName: tc.serverName}
+			err := c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Validate: %v, want an error containing %q", err, tc.want)
+			}
+			if _, err := c.Encode(); err == nil {
+				t.Error("Encode wrote it")
+			}
+		})
+	}
+}
+
+// TestStagedBulkDialHomeCertPath: the staged file's name, typed from the ruling (#448, S3), beside
+// the token frpc's certificate in the Allocation's directory and never the same file.
+func TestStagedBulkDialHomeCertPath(t *testing.T) {
+	const tag = "hb-helios-a-x7k2p-1bda24d00504"
+	if StagedBulkDialHomeCertName != "dial-home-bulk.crt" {
+		t.Errorf("StagedBulkDialHomeCertName = %q, the ruling names dial-home-bulk.crt", StagedBulkDialHomeCertName)
+	}
+	if got, want := StagedBulkDialHomeCertPath(tag), "alloc/"+tag+"/dial-home-bulk.crt"; got != want {
+		t.Errorf("StagedBulkDialHomeCertPath = %q, want %q", got, want)
+	}
+	if StagedBulkDialHomeCertPath(tag) == StagedDialHomeCertPath(tag) {
+		t.Error("the two staged certificates share a path")
+	}
+}
