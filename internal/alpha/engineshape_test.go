@@ -158,6 +158,65 @@ func TestPickEngineNeverPicksANearMiss(t *testing.T) {
 	}
 }
 
+// The kinds of argv[0], from the names Apptainer and SingularityCE give their processes and from the forms a shell,
+// an interpreter and vLLM's titles take; an Apptainer kind is what PickEngine walks up to.
+func TestKindOf(t *testing.T) {
+	for _, c := range []struct {
+		argv      []string
+		kind      string
+		apptainer bool
+	}{
+		{[]string{"Apptainer runtime parent"}, "runtime-parent", true},
+		{[]string{"Apptainer runtime parent: /x/vllm.sandbox"}, "runtime-parent", true},
+		{[]string{"Singularity runtime parent"}, "runtime-parent", true},
+		{[]string{"/usr/libexec/apptainer/bin/starter-suid"}, "starter", true},
+		{[]string{"/usr/libexec/apptainer/bin/starter"}, "starter", true},
+		{[]string{"appinit", "", ""}, "starter", true},
+		{[]string{"sinit"}, "starter", true},
+		{[]string{"/usr/bin/apptainer", "exec"}, "apptainer", true},
+		{[]string{"/usr/bin/singularity", "exec"}, "apptainer", true},
+		{[]string{"/usr/bin/python3", "/usr/local/bin/vllm"}, "python", false},
+		{[]string{"python3.12"}, "python", false},
+		{[]string{"python"}, "python", false},
+		{[]string{"/usr/local/bin/vllm", "serve"}, "vllm", false},
+		{[]string{"VLLM::EngineCore"}, "vllm", false},
+		{[]string{"/bin/sh", "-c", "x"}, "shell", false},
+		{[]string{"-bash"}, "shell", false},
+		{[]string{"/usr/bin/dash"}, "shell", false},
+		{[]string{"/scratch/stage/hb-agent"}, "other", false},
+		{[]string{"squashfuse_ll"}, "other", false},
+		{[]string{"/usr/bin/pythonista"}, "other", false},
+		{[]string{"my-starter"}, "other", false},
+		{nil, "other", false},
+	} {
+		if k, a := kindOf(c.argv), isApptainer(c.argv); k != c.kind || a != c.apptainer {
+			t.Errorf("kindOf(%q) = %s, isApptainer %v; want %s, %v", c.argv, k, a, c.kind, c.apptainer)
+		}
+	}
+}
+
+func TestArgvForm(t *testing.T) {
+	for _, c := range []struct {
+		argv []string
+		form string
+	}{
+		{[]string{"/usr/local/bin/vllm", "serve"}, "program"},
+		{[]string{"Apptainer runtime parent"}, "program"},
+		{nil, "program"},
+		{[]string{"/usr/bin/python3", "/usr/local/bin/vllm", "serve"}, "python-script"},
+		{[]string{"python3", "-s", "/usr/local/bin/vllm"}, "python-options-script"},
+		{[]string{"python3", "-X", "faulthandler", "/usr/local/bin/vllm"}, "python-options-script"},
+		{[]string{"python3", "-m", "vllm.entrypoints.cli.main", "serve"}, "python-module"},
+		{[]string{"python3", "-c", "from multiprocessing.spawn import spawn_main"}, "python-code"},
+		{[]string{"python3", "vllm"}, "python-other"},
+		{[]string{"python3"}, "python"},
+	} {
+		if f := argvForm(c.argv); f != c.form {
+			t.Errorf("argvForm(%q) = %s, want %s", c.argv, f, c.form)
+		}
+	}
+}
+
 // numberRE finds the numbers in a shape.
 var numberRE = regexp.MustCompile(`[0-9]+`)
 

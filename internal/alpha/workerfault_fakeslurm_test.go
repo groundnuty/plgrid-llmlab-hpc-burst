@@ -356,6 +356,12 @@ func TestTheWorkerFaultFindsTheEngineInEachShape(t *testing.T) {
 				t.Errorf("the shape leaks %q:\n%s", leaks, shape)
 			}
 
+			// A process that is no longer the one listed is left alone, and the step says it did not kill.
+			stale := eng
+			stale.Start = "1"
+			if err := KillEngine(ctx, r.sess, jobID, stale, time.Minute); err == nil || !alive(engine) {
+				t.Fatalf("KillEngine of a stale listing: %v, the engine alive %v; want a refusal and the engine alive", err, alive(engine))
+			}
 			if err := KillEngine(ctx, r.sess, jobID, eng, time.Minute); err != nil {
 				t.Fatal(err)
 			}
