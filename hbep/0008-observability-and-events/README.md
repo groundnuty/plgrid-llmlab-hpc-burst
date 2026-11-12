@@ -100,7 +100,7 @@ A past project served models on several Slurm clusters behind its own fronts. It
    - **Decided for alpha:** our own names, prefixed `hpcburst_`, with units in the name, following Prometheus's naming conventions. vLLM's names are mapped to them in the agent and the controller (Design details, Metrics). Source: science agent, 31 Oct 2026.
    - **Open (blocks beta):** OpenTelemetry's conventions for generative AI, as names or as a mapping.
 2. **How engine metrics leave the job.**
-   - **Decided for alpha:** in the agent's health reports (HBEP-7, The allocation agent), never by a scrape through the tunnel. The tunnel carries only the front's routed requests and its passthrough (HBEP-6). Source: HBEP-6 and HBEP-7.
+   - **Decided for alpha:** in the agent's health reports (HBEP-7, The allocation agent), never by a scrape through the tunnel. The tunnels carry only the front's routed requests and its passthrough: the token tunnel, and in beta the bulk tunnel (HBEP-6, The bulk path). Source: HBEP-6 and HBEP-7.
    - Spike S9 asked whether a scrape through the front and tunnel shows a gone Instance as down. Alpha has no such scrape, and the unknown rule answers the rest, so S9 is not needed for alpha.
 3. **Where "degraded" and "failing" are defined.**
    - **Decided for alpha:** HBEP-7's malfunction signals, with thresholds in the platform profile's `health` group (HBEP-4, Platform profile schema). Source: HBEP-4 and HBEP-7.
@@ -574,6 +574,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-10: the relay keeper's epoch and read-success series.
 - 2026-11-11: alpha graduates on Athena alone; Helios's parts move to beta (owner decision).
 - 2026-11-12: several workers per Instance, for beta (HBEP-7, Several workers).
+- 2026-11-12: the bulk path, open question 12's contract (HBEP-6, The bulk path).
 - 2026-11-12: erratum: `RouterRestart`, the router rung's `failing` event regarding an Instance, joins the Reasons table with the code that raises it (#429), as HBEP-7's Several workers says.
 
 ## Amendments
@@ -612,3 +613,4 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - **2026-11-10: the relay keeper's epoch and read success** (Metrics; Raised events, condition 2). An amendment with HBEP-6's of the same day. It adds `hpcburst_relay_keeper_epoch` and `hpcburst_collector_success{collector="relays"}`, which exists in keeper mode only, and counts a relay waiting for its slot pair as `retrying`. The absence proof's condition 2 asks for every success series. Before, there were two success series and no keeper epoch.
 - **2026-11-11: alpha graduates on Athena alone** (Graduation criteria). An amendment by the owner's decision of 11 Nov 2026 ("Athena alone", recorded on #145 and approved on PR #373), with Helios GH200 down and no return date. Alpha's criteria now bind Athena, and their Helios parts not already met move to beta, to run when GH200 returns. A row on `plgrid-now` counts for `plgrid-gpu-a100` when it runs one job of one GPU within 1 h; the no-cut handover and S1's hour stay on `plgrid-gpu-a100`. Before, alpha needed both Helios and Athena.
 - **2026-11-12: several workers per Instance, for beta** (Engine gauges; Implementation status). An amendment, the science agent's design, with HBEP-7's Several workers section as its one home: the inventory names each of the Instance's workers, and a worker that reports no gauges shows as unknown. The router rung's `failing` reason, `RouterRestart`, joins the Reasons table in the change that raises it (#429), since the table is checked against the code. Before, only `worker-0` was named.
+- **2026-11-12: the bulk path** (Open questions 2). An amendment, the science agent's design: the tunnels carry only the front's routed requests and passthrough, the token tunnel and in beta the bulk tunnel. The bulk path's two front series are proposed in HBEP-6 (The bulk path). Before, there was one tunnel.

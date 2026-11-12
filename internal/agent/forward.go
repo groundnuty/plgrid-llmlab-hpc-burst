@@ -66,6 +66,9 @@ func NewForwarder(path string) (*Forwarder, error) {
 			},
 			MaxIdleConnsPerHost: 64,
 			IdleConnTimeout:     90 * time.Second,
+			// The engine gets the request as the front sent it: Go's transport would otherwise add
+			// Accept-Encoding: gzip to a request that names none, and gunzip the reply (#440).
+			DisableCompression: true,
 		},
 		FlushInterval: -1,
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
