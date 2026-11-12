@@ -200,7 +200,9 @@ func workersThroughput(tps []*v1alpha1.Throughput) *v1alpha1.Throughput {
 // workerStartSignal returns the malfunction of an Instance of several workers that is not ready yet, and
 // the worker whose rung it enters: a worker that exited at its current generations (a clean exit too;
 // L-2.9), or a start past health.startTimeout from its start instruction, or from its last restart,
-// taken by the first worker not yet warmed up, else worker-0.
+// taken by the worker that holds the start back (HBEP-7:469: the timeout judges that worker): the first
+// not yet warmed up, else the first the current router report does not hold healthy, else worker-0
+// (#498's review).
 func (p *pass) workerStartSignal(in *v1alpha1.Instance, av agentView, st settings) (string, string) {
 	names := workerNames(in)
 	if av.report != nil && !av.unreachable {
@@ -226,6 +228,17 @@ func (p *pass) workerStartSignal(in *v1alpha1.Instance, av agentView, st setting
 	for _, w := range names {
 		if !workerWarmed(in, w) {
 			return w, v1alpha1.ReasonStartTimeout
+		}
+	}
+	if rr := currentRouter(in, av); rr != nil {
+		healthy := map[string]bool{}
+		for _, rw := range rr.Workers {
+			healthy[rw.Name] = rw.Healthy
+		}
+		for _, w := range names {
+			if !healthy[w] {
+				return w, v1alpha1.ReasonStartTimeout
+			}
 		}
 	}
 	return names[0], v1alpha1.ReasonStartTimeout
@@ -299,9 +312,15 @@ func (p *pass) workerVerifiedResult(in *v1alpha1.Instance, alloc *v1alpha1.Alloc
 			return err
 		}
 	}
+	now := metav1.NewTime(p.now)
 	if err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
 		s.VerificationRecord, s.Verdict = name, data.Verdict
 		setWorker(s, w, func(e *v1alpha1.InstanceWorker) { e.Record, e.Verdict, e.WarmedUp = name, string(data.Verdict), false })
+		// A failed verdict sets the Instance's Verified False, as with one worker, before the Instance acts
+		// on it (api/v1alpha1/conditions.go): a worker restart has left the condition True (#498's review).
+		if data.Verdict != v1alpha1.VerdictPass {
+			cond(&s.Conditions, v1alpha1.ConditionVerified, metav1.ConditionFalse, v1alpha1.ReasonFailed, w+": "+data.Message, in.Generation, now)
+		}
 	}); err != nil {
 		return err
 	}

@@ -341,3 +341,117 @@ func conditionMessage(in *v1alpha1.Instance, typ string) string {
 	}
 	return ""
 }
+
+// holdWorkerOne makes the fake router hold worker-1 failing its active check while *hold.
+func holdWorkerOne(hold *bool) func(*agentapi.RouterReport) {
+	return func(rr *agentapi.RouterReport) {
+		if !*hold {
+			return
+		}
+		for i := range rr.Workers {
+			if rr.Workers[i].Name == "worker-1" {
+				rr.Workers[i].Healthy, rr.Workers[i].FailedActiveCheck = false, true
+			}
+		}
+	}
+}
+
+// After a restart, a start past health.startTimeout judges the worker that holds it back (HBEP-7:469):
+// with both workers warmed up and the router holding worker-1 failing, the timeout restarts worker-1, not
+// the healthy worker-0 (#498's review). The earlier restart, worker-0's, is what lets the timeout
+// restart rather than fail the Instance, as a first start's does.
+func TestAStartTimeoutRestartsTheWorkerTheRouterHoldsFailing(t *testing.T) {
+	hold := true
+	rg, ag := twoWorkersRig(t, holdWorkerOne(&hold))
+	startUntil(rg, "md", 10*time.Minute, "both workers running", func() bool { return runningAt(ag, "worker-0", 0) && runningAt(ag, "worker-1", 0) })
+	name := rg.instances("md")[0].Name
+	ag.CrashWorker("worker-0", 1)
+	startUntil(rg, "md", 10*time.Minute, "worker-0's restart", func() bool { return len(rg.instance(name).Status.Restarts) == 1 })
+	startUntil(rg, "md", 10*time.Minute, "both workers warmed up", func() bool {
+		in := rg.instance(name)
+		return workerWarmed(in, "worker-0") && workerWarmed(in, "worker-1")
+	})
+	// status.restarts keeps the restarts within restart.window, so worker-0's may have left it by then:
+	// the timeout's restart is the one whose signal is StartTimeout.
+	startUntil(rg, "md", 4*time.Hour, "the start timeout's restart, or the Instance's end", func() bool {
+		in := rg.instance(name)
+		r, _ := lastRestart(rg, name)
+		return r.Signal == v1alpha1.ReasonStartTimeout || in.Status.Phase == v1alpha1.InstanceEnded || in.Status.Phase == v1alpha1.InstanceReady
+	})
+	if in := rg.instance(name); in.Status.Phase != v1alpha1.InstanceVerifying {
+		t.Fatalf("phase %s (end reason %q, %s), restarts %v: want verifying, restarted by the timeout", in.Status.Phase, in.Status.EndReason, conditionMessage(in, v1alpha1.ConditionReady), restartParts(in))
+	}
+	r, _ := lastRestart(rg, name)
+	if r.Part != "worker-1" || r.Signal != v1alpha1.ReasonStartTimeout {
+		t.Errorf("the timeout's restart is %+v, want worker-1's for StartTimeout: the router holds worker-1 failing", r)
+	}
+}
+
+// worker-1's verification fails after its restart, a settings contradiction: the Instance's Verified,
+// which the restart left True, is set False with worker-1's message before the Instance ends with
+// VerificationFailed, as with one worker (#498's review).
+func TestAWorkersFailedVerdictSetsTheInstancesVerifiedFalse(t *testing.T) {
+	var calls int
+	e := afake.Engine{Verify: func(i agentapi.DesiredInstance, r agentapi.VerifyRequest) agentapi.VerifyResult {
+		// The fake answers each worker in order: calls 1 and 2 are the first verifications, 3 worker-1's
+		// after its restart.
+		if calls++; calls >= 3 {
+			return afake.VerifySettings(map[string]string{"max-model-len": "16384"})(i, r)
+		}
+		return afake.DefaultVerify(i, r)
+	}}
+	hold := true
+	rg, ag := twoWorkersRigWith(t, e, func(rr *agentapi.RouterReport) {
+		if hold && rr.Probe != nil {
+			rr.Probe.OK, rr.Probe.ConsecutiveFailures = false, 0
+		}
+	})
+	startUntil(rg, "md", 10*time.Minute, "the Instance verified, held before ready", func() bool {
+		ins := rg.instances("md")
+		return len(ins) == 1 && isTrue(ins[0].Status.Conditions, v1alpha1.ConditionVerified) && runningAt(ag, "worker-1", 0)
+	})
+	name := rg.instances("md")[0].Name
+	ag.CrashWorker("worker-1", 1)
+	st, everReady := verifEnded(rg, name)
+	if everReady || st.EndReason != v1alpha1.ReasonVerificationFailed {
+		t.Fatalf("ever ready %v, end reason %q, want never ready and VerificationFailed", everReady, st.EndReason)
+	}
+	got := rg.instance(name)
+	if isTrue(got.Status.Conditions, v1alpha1.ConditionVerified) || conditionReason(got, v1alpha1.ConditionVerified) != v1alpha1.ReasonFailed ||
+		!strings.HasPrefix(conditionMessage(got, v1alpha1.ConditionVerified), "worker-1: ") {
+		t.Errorf("the ended Instance's Verified: %s, %q; want False, Failed, naming worker-1", conditionReason(got, v1alpha1.ConditionVerified), conditionMessage(got, v1alpha1.ConditionVerified))
+	}
+}
+
+// worker-1's first verification fails its rehash while worker-0's passes: the whole Instance restages
+// once. At the next verification worker-0's rehash fails too, and it is worker-1's earlier record that
+// makes it the second failure: the Instance ends VerificationFailed, with no second restage. The
+// workers share the staged checkpoint (#498's review: the earlier record is any worker's).
+func TestWorkerOnesEarlierRehashFailureDecides(t *testing.T) {
+	var calls int
+	e := afake.Engine{Verify: func(i agentapi.DesiredInstance, r agentapi.VerifyRequest) agentapi.VerifyResult {
+		if calls++; calls >= 2 {
+			return afake.VerifyChangedFile("model.safetensors")(i, r)
+		}
+		return afake.DefaultVerify(i, r)
+	}}
+	rg, _ := twoWorkersRigWith(t, e, nil)
+	name := rg.instances("md")[0].Name
+	st, everReady := verifEnded(rg, name)
+	if everReady || st.EndReason != v1alpha1.ReasonVerificationFailed {
+		t.Fatalf("ever ready %v, end reason %q, want never ready and VerificationFailed", everReady, st.EndReason)
+	}
+	in := rg.instance(name)
+	if parts := restartParts(in); !slices.Equal(parts, []string{v1alpha1.PartInstance}) {
+		t.Errorf("restarts %v, want one restage", parts)
+	}
+	for rec, want := range map[string]string{
+		"ver-" + string(in.UID) + "-worker-0-1": string(v1alpha1.VerdictPass),
+		"ver-" + string(in.UID) + "-worker-1-1": string(v1alpha1.VerdictFail),
+		"ver-" + string(in.UID) + "-worker-0-2": string(v1alpha1.VerdictFail),
+	} {
+		if d, ok, err := rg.r.readVerification(rg.ctx, rigNS, rec); err != nil || !ok || string(d.Verdict) != want {
+			t.Errorf("record %s: verdict %q (found %v, %v), want %q", rec, d.Verdict, ok, err, want)
+		}
+	}
+}
