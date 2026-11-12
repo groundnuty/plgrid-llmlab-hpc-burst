@@ -70,15 +70,19 @@ func FitLead(maxRequest time.Duration, maxModelLen int, rate float64) (time.Dura
 		return 0, fmt.Errorf("a lead cannot be sized from a request deadline of %s", maxRequest)
 	}
 	room := max(maxModelLen-PromptReserve, 0)
-	secs := math.Floor(float64(room) / rate / 2)
+	secs := float64(room) / rate / 2
 	if secs < LeadFloor.Seconds() {
 		// Under the floor, so no overflow in the conversion.
-		return 0, &LeadTooShortError{Rate: rate, MaxModelLen: maxModelLen, Fit: time.Duration(secs) * time.Second}
+		return 0, &LeadTooShortError{Rate: rate, MaxModelLen: maxModelLen, Fit: wholeSeconds(secs)}
 	}
 	// Past the deadline's third the fit does not bind. Capping the seconds first keeps a very slow rate from overflowing the Duration.
-	fit := time.Duration(min(secs, maxRequest.Seconds())) * time.Second
+	fit := wholeSeconds(min(secs, maxRequest.Seconds()))
 	return min(maxRequest/3, fit), nil
 }
+
+// wholeSeconds is secs, which is not negative, as a Duration of whole seconds, rounded down: Go's conversion of a float to an
+// integer drops the fraction.
+func wholeSeconds(secs float64) time.Duration { return time.Duration(secs) * time.Second }
 
 // LeadTimes are the instants a lead sets, as offsets from the drain start (negative: before it).
 type LeadTimes struct {

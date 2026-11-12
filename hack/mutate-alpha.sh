@@ -545,10 +545,10 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'live_flows_test.go@@r.successorOf(pre.Name, time.Until(ds)+LeadTimesFor(lead).SuccessorWaitEnds, nil)@@r.successorOf(pre.Name, time.Until(ds), nil)'
   # #447: the handover streams' lead sized to the deployment's max-model-len (handoverlead.go): the minimum, the floor (dropped, and inclusive), the
   # rounding down, the prompt's reserve, the successor wait's half lead, the NOT RUN, the context the live steps read, and the script's marker.
-  'handoverlead.go@@	return min(maxRequest/3, fit), nil@@	return maxRequest / 3, nil'
+  'handoverlead.go@@	return min(maxRequest/3, fit), nil@@	_ = fit; return maxRequest / 3, nil'
   'handoverlead.go@@	if secs < LeadFloor.Seconds() {@@	if secs <= LeadFloor.Seconds() {'
   'handoverlead.go@@	if secs < LeadFloor.Seconds() {@@	if secs < 0 {'
-  'handoverlead.go@@	secs := math.Floor(float64(room) / rate / 2)@@	secs := float64(room) / rate / 2'
+  'handoverlead.go@@func wholeSeconds(secs float64) time.Duration { return time.Duration(secs) * time.Second }@@func wholeSeconds(secs float64) time.Duration { return time.Duration(math.Round(secs)) * time.Second }'
   'handoverlead.go@@const PromptReserve = 512@@const PromptReserve = 256'
   'handoverlead.go@@SuccessorWaitEnds: -lead - lead/2@@SuccessorWaitEnds: -lead'
   'run.go@@errors.Is(err, ErrSlotTaken) || errors.Is(err, ErrLeadTooShort)@@errors.Is(err, ErrSlotTaken)'
