@@ -171,6 +171,10 @@ func (s *State) supervisedSet(l layout) ([]supervised, error) {
 	}
 	if bulk := s.frpsBulkEntry(l); bulk != nil {
 		set = append(set, *bulk)
+		// The controller serves frps-bulk's plugin path, reads its list and stages the second
+		// certificate (HBEP-6, The bulk path); without the bulk path, its command line is as before,
+		// byte for byte.
+		set[0].Args = append(set[0].Args, "--bulk-path")
 	}
 	if keeper := s.keeperEntry(l); keeper != nil {
 		// The controller hands its host-dialed relays to the keeper (HBEP-6, The relay keeper); with

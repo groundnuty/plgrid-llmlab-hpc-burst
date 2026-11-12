@@ -205,6 +205,9 @@ func checkScheme(s *runtime.Scheme) error {
 // question 8, amended 9 Nov 2026), and parse refused an address for it. The settings are checked as agent.json takes them
 // (checkFront), so a value every submission would fail on stops the binary
 // here, before anything listens.
+//
+// With --bulk-path (beta; HBEP-6, The bulk path) the settings also keep the launcher's second
+// certificate (BulkCertPEM), which Create stages beside the first and names in agent.json's bulk block.
 func frontSettings(f flags, d deps) (*providerctl.FrontSettings, error) {
 	if f.frontMode == "" {
 		return nil, nil
@@ -228,10 +231,29 @@ func frontSettings(f flags, d deps) (*providerctl.FrontSettings, error) {
 		}
 		fs.SSHUser, fs.AgentPort, fs.DialHomePort = u, f.host.AgentEndpointPort(), f.host.DialHomePort()
 	}
+	if f.bulkPath {
+		bulkPEM, err := bulkEndpointCert(f.host.BulkCertFile())
+		if err != nil {
+			return nil, err
+		}
+		fs.BulkCertPEM = bulkPEM
+	}
 	if err := checkFront(fs); err != nil {
 		return nil, fmt.Errorf("the front settings: %w", err)
 	}
 	return fs, nil
+}
+
+// bulkEndpointCert reads the bulk path's second certificate, which `hpcburst up --bulk-path` issues for
+// the agent endpoint's key (agentapi.Host.BulkCertFile; HBEP-6, The bulk path). The bytes are kept as
+// they are, since Create stages them unchanged; checkFront then verifies them against the bulk name and
+// the first certificate's pin, with the agent's own check.
+func bulkEndpointCert(path string) ([]byte, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("the bulk dial-home certificate (hpcburst up --bulk-path issues it): %w", err)
+	}
+	return b, nil
 }
 
 // sampleTag, sampleStaging and sampleDialHome stand in, in checkFront, for
@@ -260,6 +282,10 @@ func checkFront(fs *providerctl.FrontSettings) error {
 	if err := fs.CheckCertificate(time.Now()); err != nil {
 		errs = append(errs, err)
 	}
+	// The second certificate, when the bulk path is on, is judged against its own name and the same pin.
+	if err := fs.CheckBulkCertificate(time.Now()); err != nil {
+		errs = append(errs, err)
+	}
 	for _, arch := range slices.Sorted(maps.Keys(fs.FrpcDigests)) {
 		c := agentapi.AgentConfig{
 			ProtocolVersion: agentapi.ProtocolVersion, Tag: sampleTag, Mode: fs.Mode, Endpoint: fs.Endpoint,
@@ -270,6 +296,9 @@ func checkFront(fs *providerctl.FrontSettings) error {
 			c.SSH = &agentapi.SSHForward{User: fs.SSHUser, AgentPort: fs.AgentPort, DialHomePort: fs.DialHomePort}
 		case agentapi.DialHomeHostDialed:
 			c.Allocation = sampleUID
+		}
+		if fs.BulkPathOn() {
+			c.Bulk = &agentapi.BulkPath{ServerName: agentapi.BulkDialHomeServerName}
 		}
 		if _, err := c.Encode(); err != nil {
 			errs = append(errs, fmt.Errorf("agent.json for cpuArch %s: %w", arch, err))

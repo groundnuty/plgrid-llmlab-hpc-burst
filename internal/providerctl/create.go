@@ -434,6 +434,9 @@ func (e *external) prerequisites(a *v1alpha1.Allocation) string {
 	if err := e.s.o.Front.CheckCertificate(e.now()); err != nil {
 		return err.Error()
 	}
+	if err := e.s.o.Front.CheckBulkCertificate(e.now()); err != nil {
+		return err.Error()
+	}
 	if _, err := e.credential(a); err != nil {
 		return "waiting for the Allocation's credential: " + err.Error()
 	}
@@ -509,6 +512,9 @@ func (e *external) files(a *v1alpha1.Allocation, tag string, paths slurm.Paths) 
 	if err := f.CheckCertificate(e.now()); err != nil {
 		return nil, err
 	}
+	if err := f.CheckBulkCertificate(e.now()); err != nil {
+		return nil, err
+	}
 	cfg := agentapi.AgentConfig{
 		ProtocolVersion: agentapi.ProtocolVersion, Tag: tag, Mode: f.Mode, Endpoint: f.Endpoint,
 		CertSPKISHA256: f.CertPin, FrpcDigest: frpcSum, StagingDir: paths.Staging, DialHomeDir: paths.DialHomeDir(),
@@ -521,17 +527,36 @@ func (e *external) files(a *v1alpha1.Allocation, tag string, paths slurm.Paths) 
 		// The agent greets its relays with it (HBEP-6, The rendezvous).
 		cfg.Allocation = string(a.UID)
 	}
+	if f.BulkPathOn() {
+		cfg.Bulk = &agentapi.BulkPath{ServerName: agentapi.BulkDialHomeServerName}
+	}
 	js, err := cfg.Encode()
 	if err != nil {
 		return nil, fmt.Errorf("agent.json: %w", err)
 	}
-	return []provider.File{
+	staged := []provider.File{
 		file(agentapi.StagedAgentPath(digest), 0o700, bin),
 		file(agentapi.StagedFrpcPath(frpcSum), 0o700, frpc),
 		file(agentapi.StagedCredentialPath(tag), 0o600, cred),
 		file(agentapi.StagedDialHomeCertPath(tag), 0o644, f.CertPEM),
 		file(agentapi.StagedConfigPath(tag), 0o600, js),
-	}, nil
+	}
+	if f.BulkPathOn() {
+		staged = withBulkCert(staged, tag, f.BulkCertPEM)
+	}
+	return staged, nil
+}
+
+// withBulkCert returns staged with the bulk path's second certificate before the last file, agent.json,
+// which stays last (HBEP-4: agent.json is staged after the files it names). The certificate is public
+// as the first is, so mode 644 (HBEP-6, The bulk path; the science agent's ruling S3 on #448: the file
+// is alloc/<tag>/dial-home-bulk.crt, pinned by agent.json's certSPKISHA256).
+func withBulkCert(staged []provider.File, tag string, bulkPEM []byte) []provider.File {
+	last := len(staged) - 1
+	out := make([]provider.File, 0, len(staged)+1)
+	out = append(out, staged[:last]...)
+	out = append(out, file(agentapi.StagedBulkDialHomeCertPath(tag), 0o644, bulkPEM))
+	return append(out, staged[last])
 }
 
 // frpcDigest is the frpc digest that agent.json names: the Front settings' one
