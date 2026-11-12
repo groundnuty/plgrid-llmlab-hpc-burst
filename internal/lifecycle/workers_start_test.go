@@ -9,6 +9,7 @@ package lifecycle
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,9 +25,15 @@ import (
 // up; f, when set, reshapes the fake router's view before the agent first reports.
 func twoWorkersRig(t *testing.T, f func(*agentapi.RouterReport)) (*rig, *afake.Agent) {
 	t.Helper()
+	return twoWorkersRigWith(t, afake.Engine{}, f)
+}
+
+// twoWorkersRigWith is twoWorkersRig with the fake agent's engine.
+func twoWorkersRigWith(t *testing.T, e afake.Engine, f func(*agentapi.RouterReport)) (*rig, *afake.Agent) {
+	t.Helper()
 	rg := newRig(t)
 	rg.r.Config.InstanceRouter = v1alpha1.InstanceRouterEnvoy
-	rg.engine = func(string) afake.Engine { return afake.Engine{} }
+	rg.engine = func(string) afake.Engine { return e }
 	rg.onAgent = func(ra *rigAgent) { ra.agent.RouterView = f }
 	rg.create(withWorkers(mdSpec("md"), 2))
 	startUntil(rg, "md", 10*time.Minute, "the agent", func() bool { return len(rg.agents) == 1 })
@@ -157,8 +164,8 @@ func TestAWorkerExitBeforeTheFirstReadyRestartsThatWorkerAlone(t *testing.T) {
 	if e := workerEntry(got, "worker-0"); e.Record != entry0.Record || !e.WarmedUp {
 		t.Errorf("worker-0's entry after worker-1's restart: %+v, want %+v", e, entry0)
 	}
-	if workerWarmed(got, "worker-1") {
-		t.Error("worker-1 still counts as warmed up after its restart")
+	if e := workerEntry(got, "worker-1"); e.WarmedUp || workerWarmed(got, "worker-1") {
+		t.Errorf("worker-1's entry right after its restart: %+v, want its warm-up to run again", e)
 	}
 	// A worker's restart leaves the Instance's own conditions True (HBEP-7, Several workers).
 	for _, c := range []string{v1alpha1.ConditionVerified, v1alpha1.ConditionQualified, v1alpha1.ConditionWarmedUp} {
@@ -266,4 +273,58 @@ func restartParts(in *v1alpha1.Instance) []string {
 		out = append(out, r.Part)
 	}
 	return out
+}
+
+// A checkpoint file that changed fails the rehash on the workers' first verification: the whole Instance
+// restages once, and the next failure ends it, VerificationFailed, never ready. The earlier failure is
+// any worker's, since the workers share the staged checkpoint.
+func TestTwoWorkersRehashRestagesOnceThenFails(t *testing.T) {
+	rg, _ := twoWorkersRigWith(t, afake.Engine{Verify: afake.VerifyChangedFile("model.safetensors")}, nil)
+	name := rg.instances("md")[0].Name
+	st, everReady := verifEnded(rg, name)
+	if everReady || st.EndReason != v1alpha1.ReasonVerificationFailed {
+		t.Fatalf("ever ready %v, end reason %q, want never ready and VerificationFailed", everReady, st.EndReason)
+	}
+	if parts := restartParts(rg.instance(name)); !slices.Equal(parts, []string{v1alpha1.PartInstance}) {
+		t.Errorf("restarts %v, want one restage, the whole Instance's", parts)
+	}
+}
+
+// worker-1's qualification fails while worker-0's passes: the Instance fails, QualificationFailed, the
+// condition naming worker-1, and it is never ready. Qualification is judged on every worker's results.
+func TestOneWorkersFailedQualificationFailsTheInstance(t *testing.T) {
+	var calls int
+	e := afake.Engine{Qualify: func(i agentapi.DesiredInstance, r agentapi.QualifyRequest) agentapi.QualifyResult {
+		q := afake.DefaultQualify(i, r)
+		// The fake answers each worker's checks in the workers' order: the second call is worker-1's.
+		if calls++; calls == 2 {
+			for n := range q.Checks {
+				if q.Checks[n].Name == agentapi.CheckHealth {
+					q.Checks[n].Passed = false
+				}
+			}
+		}
+		return q
+	}}
+	rg, _ := twoWorkersRigWith(t, e, nil)
+	name := rg.instances("md")[0].Name
+	st, everReady := verifEnded(rg, name)
+	if everReady || st.EndReason != v1alpha1.ReasonQualificationFailed {
+		t.Fatalf("ever ready %v, end reason %q, want never ready and QualificationFailed", everReady, st.EndReason)
+	}
+	if c := conditionMessage(rg.instance(name), v1alpha1.ConditionQualified); !strings.HasPrefix(c, "worker-1: ") {
+		t.Errorf("the Qualified condition says %q, want worker-1's failure", c)
+	}
+	if calls != 2 {
+		t.Errorf("%d qualifications, want one for each worker", calls)
+	}
+}
+
+func conditionMessage(in *v1alpha1.Instance, typ string) string {
+	for _, c := range in.Status.Conditions {
+		if c.Type == typ {
+			return c.Message
+		}
+	}
+	return ""
 }
