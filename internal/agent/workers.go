@@ -336,6 +336,23 @@ func (a *Agent) stopWorkers(in *instance) {
 // the stop grace, waiting on the groups directly, as the loop's events no
 // longer flow.
 func (a *Agent) shutdown() {
+	// Routers that started while the agent ended, which no loop took (router.go, routerHold).
+	held := a.takeHeldRouters()
+	for _, p := range held {
+		p.Group.Stop(a.stopGrace)
+	}
+	defer func() {
+		deadline := time.NewTimer(a.stopGrace + shutdownMargin)
+		defer deadline.Stop()
+		for _, p := range held {
+			select {
+			case <-p.Group.Done():
+				p.Close()
+			case <-deadline.C:
+				a.log.Error("a router's process group outlived the stop grace and its KILL", "pid", p.Group.PID())
+			}
+		}
+	}()
 	in := a.inst
 	if in == nil {
 		return
