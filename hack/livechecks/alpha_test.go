@@ -47,6 +47,9 @@ var alphaShapes = []alphaShape{
 	{"tunnel-hour-athena", "TestTunnelHour", "athena", "partition plgrid-gpu-a100, 1 GPU, 16 CPU, 125Gi, time limit 02:17:00, one job, no requeue", "", "SEEDACCT-a100", true},
 	{"gpu-accounting-helios", "TestGPUAccounting", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 117Gi, time limit 00:05:00, one job, no requeue, each job to start within 10 min", "now", "SEEDACCT-gh", false},
 	{"gpu-accounting-athena", "TestGPUAccounting", "athena", "partition plgrid-gpu-a100, 1 GPU, 16 CPU, 125Gi, time limit 00:05:00, one job, no requeue", "", "SEEDACCT-a100", false},
+	// The accounting row on plgrid-now (issue #145, the science agent's ruling of 12 Nov 2026): the same job as the Athena
+	// twin, in the one-job partition with its start wait of 10 minutes. No QOS: the partition's own is the slot.
+	{"gpu-accounting-athena-now", "TestGPUAccounting", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:05:00, one job, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", false},
 	// Row A on plgrid-now (issue #376): the A100 node type's per-GPU size, a lease of 48 minutes (the hour less its start
 	// wait of 10 and 2 of cleanup, the science agent's ruling Q3), no QOS (the partition's own applies).
 	{"alpha-athena-now-serve", "TestAlphaAthenaNowServe", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:48:00, one job, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
@@ -64,7 +67,11 @@ for a in "$@"; do [ "$prev" = -o ] && out=$a; prev=$a; done
 case "$1" in
   build) mkdir -p "$out" && for b in hpcburst hpcburst-controller hpcburst-front; do echo binary > "$out/$b"; done
          [ -z "${STUB_ROLL_AT_BUILD:-}" ] || echo "$STUB_NEXT_DATE" > "$LIVE_FAKE_DATE_FILE" ;;
-  test) mkdir -p "$(dirname "$out")"; cp "$STUB_STATE/testbin.sh" "$out"; chmod +x "$out" ;;
+  test) mkdir -p "$(dirname "$out")"; cp "$STUB_STATE/testbin.sh" "$out"; chmod +x "$out"
+        # A conformance row's only build is the test binary's, so these hooks are its "during the builds": another job
+        # takes the one-job slot, or the date rolls over, after the first look and before the second.
+        [ -z "${STUB_SEED_AT_TESTC:-}" ] || echo "$STUB_SEED_AT_TESTC" >> "$STUB_STATE/queue"
+        [ -z "${STUB_ROLL_AT_TESTC:-}" ] || echo "$STUB_NEXT_DATE" > "$LIVE_FAKE_DATE_FILE" ;;
 esac
 `
 
@@ -183,7 +190,7 @@ func TestListNamesTheAlphaRowsAndTheAliases(t *testing.T) {
 	for _, s := range alphaShapes {
 		w.contains(res, s.row+"  cluster  ready")
 	}
-	w.contains(res, "tunnel-hour  alias  runs tunnel-hour-athena in turn", "gpu-accounting  alias  runs gpu-accounting-athena in turn")
+	w.contains(res, "tunnel-hour  alias  runs tunnel-hour-athena in turn", "gpu-accounting  alias  runs gpu-accounting-athena-now in turn")
 }
 
 // The script's cluster shapes and the package's rows are one fact each: a partition, a QOS and a GPU count
@@ -319,7 +326,7 @@ func TestSettingsAreAskedOnlyOfTheRowsThatNeedThem(t *testing.T) {
 		delete(m, "LIVE_DIALHOME_ADDR")
 		delete(m, "LIVE_BIN_DIR")
 	})
-	for _, row := range []string{"gpu-accounting-helios", "gpu-accounting-athena"} {
+	for _, row := range []string{"gpu-accounting-helios", "gpu-accounting-athena", "gpu-accounting-athena-now"} {
 		if res := w.run(nil, "--run", row); res.code != 4 {
 			t.Errorf("%s with no dial-home route: exit %d, want 4:\n%s", row, res.code, res.out)
 		}
@@ -430,8 +437,9 @@ func (s alphaShape) hasQOS() bool { return s.slot != "" && s.slot != "plgrid-now
 // still runs by its name (beta_rows_test.go and the rows' own tests).
 func TestTheAliasesRunTheirAthenaRowAlone(t *testing.T) {
 	for alias, row := range map[string]string{
-		"tunnel-hour":    "tunnel-hour-athena",
-		"gpu-accounting": "gpu-accounting-athena",
+		"tunnel-hour": "tunnel-hour-athena",
+		// Since 12 Nov 2026 (issue #145) gpu-accounting stands for the row on plgrid-now, the A100 queue being days out.
+		"gpu-accounting": "gpu-accounting-athena-now",
 	} {
 		t.Run(alias, func(t *testing.T) {
 			w := newAlphaWorld(t)
@@ -448,6 +456,10 @@ func TestTheAliasesRunTheirAthenaRowAlone(t *testing.T) {
 			if n := strings.Count(w.stateFile("events"), "testbin "); n != 1 {
 				t.Errorf("%d test runs, want 1", n)
 			}
+			// The row's own name is a prefix of its plgrid-now twin's: only the one the alias names ran.
+			if other := "gpu-accounting-athena"; alias == "gpu-accounting" && strings.Contains(res.out, other+": ") {
+				t.Errorf("the alias %s also ran %s:\n%s", alias, other, res.out)
+			}
 		})
 	}
 	// A bare name that is no row or alias is still an error.
@@ -459,7 +471,7 @@ func TestTheAliasesRunTheirAthenaRowAlone(t *testing.T) {
 
 func TestASkippedOrFailedAlphaTestIsAFailure(t *testing.T) {
 	for _, mode := range []string{"skip", "fail"} {
-		for _, row := range []string{"alpha-athena-handover", "gpu-accounting-athena"} {
+		for _, row := range []string{"alpha-athena-handover", "gpu-accounting-athena", "gpu-accounting-athena-now"} {
 			t.Run(mode+"/"+row, func(t *testing.T) {
 				w := newAlphaWorld(t)
 				res := w.run([]string{"STUB_ALPHA_MODE=" + mode}, "--run", row, "--yes")
@@ -603,7 +615,7 @@ func TestPlanNamesTheAlphaRowsWhenTheStackChanges(t *testing.T) {
 		{"a stack binary", "cmd/hpcburst-front/main.go", "package main\n\nimport _ \"example.test/fx/internal/stack\"\n\nfunc main() { _ = 1 }\n", stackRows},
 		{"the example the rows apply", "examples/provider-athena-a100.yaml", "kind: Provider\nx: 1\n", []string{"alpha-athena-handover"}},
 		{"a package the accounting rows and conformance run, not the stack", "internal/providerctl/providerctl.go", "package providerctl\n\nimport _ \"example.test/fx/internal/slurm\"\n\nvar X = 1\n",
-			[]string{"conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-helios", "reach-athena", "reach-helios", "reach-host-dialed-athena", "reach-host-dialed-helios", "alpha-athena-now-stage"}},
+			[]string{"conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-athena-now", "gpu-accounting-helios", "reach-athena", "reach-helios", "reach-host-dialed-athena", "reach-host-dialed-helios", "alpha-athena-now-stage"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -638,6 +650,8 @@ func TestTheTimeoutIsTheRunTimePlusTheWaitInTheQueue(t *testing.T) {
 		{"gpu-accounting-athena", "TestGPUAccounting", "-test.timeout 36m"},        // 25 + 600/60 + 1
 		// Under a start-wait bound the bound is the first clock: 32 + 0 + 1, whatever the wait the operator allows.
 		{"gpu-accounting-helios", "TestGPUAccounting", "-test.timeout 33m"},
+		// The row on plgrid-now has a start wait too: the same 32 + 0 + 1.
+		{"gpu-accounting-athena-now", "TestGPUAccounting", "-test.timeout 33m"},
 	} {
 		t.Run(c.row, func(t *testing.T) {
 			w := newAlphaWorld(t)
@@ -648,7 +662,7 @@ func TestTheTimeoutIsTheRunTimePlusTheWaitInTheQueue(t *testing.T) {
 				t.Errorf("the test binary ran with %q, want %q", args, c.want)
 			}
 			env := w.stateFile("test-env-" + c.test)
-			if c.row == "gpu-accounting-helios" {
+			if c.row == "gpu-accounting-helios" || c.row == "gpu-accounting-athena-now" {
 				// The bound is its first clock; the operator's wait is not passed on, and does not lengthen the timeout.
 				if !strings.Contains(env, "HPCBURST_CONF_START_WAIT=10m") || strings.Contains(env, "PENDING_MAX_SECONDS") {
 					t.Errorf("the test did not get the start-wait bound alone as its first clock:\n%s", env)
@@ -871,6 +885,9 @@ func TestTheRowsThatHoldTheOwnersSlotForHoursNeedTheOwnersGo(t *testing.T) {
 		{"alpha-athena-now-nooverlap", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
 		// The pre-staging row (issue #376): its start wait, then 10 + 30 + 2 = 42 minutes, rounded up to ten.
 		{"alpha-athena-now-stage", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 0 h 50 min; the owner's go is needed (the development rule on #145)"},
+		// The accounting row on plgrid-now (issue #145): its start wait of 10, a job of 5 minutes and a minute for the end, 16
+		// minutes, rounded up to ten: 20.
+		{"gpu-accounting-athena-now", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 0 h 20 min; the owner's go is needed (the development rule on #145)"},
 	}
 	for _, c := range rows {
 		for _, stale := range []struct{ name, value string }{{"missing", ""}, {"yesterday's", "(the world's yesterday)"}, {"1", "1"}, {"yes", "yes"}} {

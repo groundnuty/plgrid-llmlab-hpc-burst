@@ -196,17 +196,24 @@ func TestDeploymentBoundaries(t *testing.T) {
 // rule of 2 Nov 2026: a job that has not started within 10 minutes of its acceptance is cancelled by its tag and
 // the row is NOT RUN); the rows with no slot have none, and the stack rows keep the queue wait of the operator, but row A
 // on plgrid-now (issue #376, the plan's section 3), whose first clock is a start wait of 10 minutes in the owner's slot,
-// and row B, each of whose two jobs has one.
+// and row B, each of whose two jobs has one. So has the accounting row on plgrid-now (issue #145, the science agent's ruling
+// of 12 Nov 2026): the same test as the Athena row of plgrid-gpu-a100, in the partition's one-job slot. The expected values
+// are written out here, not read from the rows.
 func TestOnlyTheAccountingRowOnHeliosHasAStartWait(t *testing.T) {
-	want := map[string]time.Duration{"gpu-accounting-helios": 10 * time.Minute, "alpha-athena-now-serve": 10 * time.Minute, "alpha-athena-now-nooverlap": 10 * time.Minute}
+	want := map[string]time.Duration{"gpu-accounting-helios": 10 * time.Minute, "gpu-accounting-athena-now": 10 * time.Minute, "alpha-athena-now-serve": 10 * time.Minute, "alpha-athena-now-nooverlap": 10 * time.Minute}
 	for _, r := range append(Rows(), AccountingRows()...) {
 		if r.StartWait != want[r.Name] {
 			t.Errorf("%s: start wait %s, want %s", r.Name, r.StartWait, want[r.Name])
 		}
 	}
-	// Its budget covers the wait, the job's end and the deletion: 10 + 10 + 5 minutes, and a margin.
-	r, _ := RowByName("gpu-accounting-helios")
-	if r.Budget < r.StartWait+15*time.Minute {
-		t.Errorf("budget %s is below the start wait and the test's other deadlines, %s", r.Budget, r.StartWait+15*time.Minute)
+	// Their budget covers the wait, the job's end and the deletion: 10 + 10 + 5 minutes, and a margin.
+	for _, name := range []string{"gpu-accounting-helios", "gpu-accounting-athena-now"} {
+		r, ok := RowByName(name)
+		if !ok {
+			t.Fatalf("no row %s", name)
+		}
+		if r.Budget < r.StartWait+15*time.Minute {
+			t.Errorf("%s: budget %s is below the start wait and the test's other deadlines, %s", name, r.Budget, r.StartWait+15*time.Minute)
+		}
 	}
 }

@@ -115,9 +115,9 @@
 #   LIVE_OWNER_GO_HELIOS_NOW     today's UTC date (YYYY-MM-DD), once the owner has said yes to the run: the rows that hold
 #                                QOS now's GPU for hours (alpha-helios-nooverlap, tunnel-hour-helios) refuse without it
 #   LIVE_OWNER_GO_ATHENA_NOW     the same for the deployment rows on Athena's one-job partition plgrid-now under
-#                                profiles/athena-now.yaml (alpha-athena-now-serve, alpha-athena-now-stage and
-#                                alpha-athena-now-nooverlap; issue #376, Q6, citing the owner's decision
-#                                of 11 Nov 2026 on #145): today's UTC date, checked as LIVE_OWNER_GO_HELIOS_NOW is. The code
+#                                profiles/athena-now.yaml (alpha-athena-now-serve, alpha-athena-now-stage,
+#                                alpha-athena-now-nooverlap and gpu-accounting-athena-now; issue #376, Q6, citing the
+#                                owner's decision of 11 Nov 2026 on #145): today's UTC date, checked as LIVE_OWNER_GO_HELIOS_NOW is. The code
 #                                agent's go posted on #145 with its UTC start and end, before each run, is the operator's to
 #                                post, not this script's to check
 #   LIVE_FRONT_HOST_LABEL        where the front ran, in three parts (issue #224): a ROLE from a fixed list (the FRONT ROLES
@@ -194,6 +194,7 @@ alpha-athena-now-serve|cluster|internal/alpha|^TestAlphaAthenaNowServe$|HPCBURST
 alpha-athena-now-stage|cluster|internal/providerctl/conformance|^TestNowStage$|HPCBURST_CONFORMANCE|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml,hack/build-stage-helper.sh|host|ready
 gpu-accounting-helios|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
 gpu-accounting-athena|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
+gpu-accounting-athena-now|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/athena-now.yaml|host|ready
 reach-helios|cluster|internal/providerctl/conformance|^TestReach$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
 reach-athena|cluster|internal/providerctl/conformance|^TestReach$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
 reach-host-dialed-helios|cluster|internal/providerctl/conformance|^TestReachHostDialed$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host,linux-arm64|ready
@@ -246,6 +247,12 @@ TABLE
 # gpu-accounting-helios (issue #194) has the same two guards as conformance-helios-gh200: it starts only when squeue --me shows
 # no job in QOS now, and its one job must start within 10 min of its acceptance (else cancelled by its tag, NOT RUN, exit 3). The
 # row's other guard, the wait of LIVE_PENDING_MAX_SECONDS, applies to gpu-accounting-athena only, which has no slot.
+# gpu-accounting-athena-now (issue #145, the science agent's ruling of 12 Nov 2026) is the same test on Athena's one-job
+# partition plgrid-now under profiles/athena-now.yaml, because the A100 queue is days out: a row on plgrid-now counts for
+# plgrid-gpu-a100 when it runs one job of one GPU within an hour (PR #373). It has the slot guard (the slot is read before the
+# builds and again after them), a start wait of 10 min and the owner's go of plgrid-now, as the other plgrid-now rows have. It
+# starts no stack, so it takes no LIVE_BIN_DIR. The bare name gpu-accounting stands for it; gpu-accounting-athena stays, runnable
+# by name, for when the A100 queue opens.
 # conformance-helios-gh200: it starts only when squeue --me shows no job in QOS now, pending or running, whoever's (exit 3,
 # "skipped: the now slot is in use"), and each of its two jobs (step 1, step 3) must start within 10
 # min of its acceptance. A run that goes well takes about 25 min: two start waits of 10 min and about 5 min of running.
@@ -275,6 +282,7 @@ alpha-athena-now-stage|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_
 alpha-athena-now-nooverlap|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:21:00|115|-|10
 gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|32|-|10
 gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|25|-
+gpu-accounting-athena-now|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|32|-|10
 reach-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:02:00|20|-C memfs|10
 reach-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|1|1Gi|00:02:00|20|-|10
 reach-host-dialed-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|25|-C memfs|10
@@ -320,6 +328,7 @@ alpha-athena-now-stage|1
 alpha-athena-now-nooverlap|2
 gpu-accounting-helios|1
 gpu-accounting-athena|1
+gpu-accounting-athena-now|1
 reach-helios|1
 reach-athena|1
 reach-host-dialed-helios|1
@@ -341,6 +350,7 @@ tunnel-hour-helios|LIVE_OWNER_GO_HELIOS_NOW|140
 alpha-athena-now-serve|LIVE_OWNER_GO_ATHENA_NOW|60
 alpha-athena-now-stage|LIVE_OWNER_GO_ATHENA_NOW|50
 alpha-athena-now-nooverlap|LIVE_OWNER_GO_ATHENA_NOW|60
+gpu-accounting-athena-now|LIVE_OWNER_GO_ATHENA_NOW|20
 # END OWNER GO
 TABLE
 }
@@ -408,6 +418,7 @@ alpha-athena-now-serve
 alpha-athena-now-nooverlap
 gpu-accounting-helios
 gpu-accounting-athena
+gpu-accounting-athena-now
 # END FRONT LABEL
 TABLE
 }
@@ -428,12 +439,14 @@ TABLE
 # Athena alone (the owner's decision of 11 Nov 2026, "Athena alone", recorded on #145, and PR #373), so each
 # alias stands for its Athena row. The Helios rows are beta's: they stay in every table and run by their own
 # names, but no alias runs them, so a Helios row that is skipped or lacks its settings cannot fail alpha's run
-# (issue #386; docs/alpha-runbook.md, Alpha rows and beta rows). name | rows.
+# (issue #386; docs/alpha-runbook.md, Alpha rows and beta rows). Since 12 Nov 2026 (issue #145) gpu-accounting stands for
+# gpu-accounting-athena-now, the same test on plgrid-now, since the A100 queue is days out; gpu-accounting-athena runs by
+# its own name. name | rows.
 alias_table() {
   cat <<'TABLE'
 # BEGIN ALIASES
 tunnel-hour|tunnel-hour-athena
-gpu-accounting|gpu-accounting-athena
+gpu-accounting|gpu-accounting-athena-now
 reach|reach-athena
 reach-host-dialed|reach-host-dialed-athena
 # END ALIASES
@@ -532,7 +545,7 @@ usage() {
 usage: hack/live-checks.sh --list
        hack/live-checks.sh --plan <base>..<head>      which live tests cover the range; runs nothing
        hack/live-checks.sh --run <name>... [--yes]    runs only the named tests (a cluster test needs --yes);
-                                                      tunnel-hour and gpu-accounting stand for their two rows
+                                                      tunnel-hour, gpu-accounting, reach and reach-host-dialed stand for their Athena row
 Settings: HPCBURST_LIVE_SETTINGS names a mode-600 KEY=VALUE file; the keys are listed in this script's header.
 Exit: 0 passed; 1 failed, skipped or left a job; 2 usage; 3 refused; 4 cluster test not run (no --yes).
 USAGE
@@ -1959,8 +1972,9 @@ esac
 
 # --run
 [ ${#REQUESTED[@]} -gt 0 ] || { say "live-checks: --run needs at least one test name"; exit 2; }
-# A bare name for the rows alpha runs (tunnel-hour, gpu-accounting, reach, reach-host-dialed: their Athena rows) stands for
-# them, run one after the other. A Helios row is beta's and runs by its own name.
+# A bare name for the rows alpha runs (tunnel-hour, gpu-accounting, reach, reach-host-dialed: their Athena rows, and for
+# gpu-accounting the one on plgrid-now) stands for them, run one after the other. A Helios row is beta's and runs by its own
+# name.
 declare -a EXPANDED=()
 for name in "${REQUESTED[@]}"; do
   if [ -n "${ALIAS[$name]+x}" ]; then
