@@ -56,13 +56,14 @@ type instance struct {
 	staged       bool // staging for stageGen succeeded
 	imagePath    string
 	ckptDir      string
-	// fileResults are the rehash results of the last staging, for the file
-	// list whose hash is filesKey. They serve only the first verification
-	// after that staging (fileResultsFresh); a later one rehashes (PR #87
-	// review, Astra B2, Opus B1).
-	fileResults      []agentapi.FileResult
-	filesKey         [32]byte
-	fileResultsFresh bool
+	// fileResults are the rehash results of the last staging, number
+	// stagingSeq, for the file list whose hash is filesKey. They serve only
+	// each checker's first verification after that staging
+	// (checker.usedStaging); a later one rehashes (PR #87 review, Astra B2,
+	// Opus B1).
+	fileResults []agentapi.FileResult
+	filesKey    [32]byte
+	stagingSeq  int
 
 	workers []*worker
 	// routerDesired is the desired state's router (beta, opt-in; router.go), nil for alpha's shape;
@@ -70,17 +71,11 @@ type instance struct {
 	routerDesired *agentapi.DesiredRouter
 	router        *routerPart
 
-	// Checks of the current verification generation, and the one check unit
-	// running, if any.
-	checks *agentapi.CheckResults
-	unit   *checkUnit
-	// sectionKeys holds, for each section of checks, the processes it was
-	// taken against.
-	sectionKeys map[string]procKey
-	// sampling is the sampling of the current verification generation's
-	// checks, computed once from the staged file (genSampling); nil until a
-	// check unit needs it, and again after a new generation or staging.
-	sampling *genSampling
+	// ck is the Instance's own checks (DesiredInstance.Checks, one worker),
+	// and wck each worker's (DesiredWorker.Checks, several workers), by name
+	// (checks.go).
+	ck  checker
+	wck map[string]*checker
 	// workerCount is the number of the desired workers: above 1, each worker runs on its own socket and
 	// its own slice of the job's devices (workerLaunch, workerDevices).
 	workerCount int
@@ -524,10 +519,13 @@ func (a *Agent) stagingDone(in *instance, gen int64, img ImageResult, ck Checkpo
 	in.imagePath = img.Path
 	in.imageVerified = img.Verified
 	in.ckptDir = ck.Dir
-	in.sampling = nil // a staging may bring a new file
+	in.ck.sampling = nil // a staging may bring a new file
+	for _, c := range in.wck {
+		c.sampling = nil
+	}
 	in.fileResults = ck.Files
 	in.filesKey = filesKey(files)
-	in.fileResultsFresh = true
+	in.stagingSeq++
 }
 
 // LoadFormat returns the --load-format a launch's command passes, "" when it

@@ -260,9 +260,7 @@ func (a *Agent) leaderExited(in *instance, g *procgroup.Group) {
 	if w.name == agentapi.WorkerName(0) {
 		a.fwd.SetTarget("")
 	}
-	if in.unit != nil {
-		a.cancelUnit(in) // its process is gone; a result from it is never used
-	}
+	a.cancelUnitsFor(in, w.name) // its process is gone; a result from it is never used
 	if w.phase == agentapi.PartStopping || w.phase == agentapi.PartStopped {
 		// An intentional stop. The leader's exit and the group's end are two
 		// events from two goroutines (watch), so the group's end can be

@@ -53,6 +53,12 @@ func (a *Agent) snapshot() agentapi.Report {
 			}
 			wr.Health = &h
 		}
+		// Several workers: each worker's own checks (DesiredWorker.Checks).
+		if ck := in.wck[w.name]; ck != nil && ck.checks != nil {
+			c := cloneChecks(*ck.checks)
+			cutFreeText(&c)
+			wr.Checks = &c
+		}
 		ir.Workers = append(ir.Workers, wr)
 	}
 	if w := in.find(agentapi.WorkerName(0)); w != nil && w.phase == agentapi.PartRunning {
@@ -67,8 +73,8 @@ func (a *Agent) snapshot() agentapi.Report {
 			ir.ServingEndpoint = ""
 		}
 	}
-	if in.checks != nil {
-		c := cloneChecks(*in.checks)
+	if in.ck.checks != nil {
+		c := cloneChecks(*in.ck.checks)
 		cutFreeText(&c)
 		ir.Checks = &c
 	}

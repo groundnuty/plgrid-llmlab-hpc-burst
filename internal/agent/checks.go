@@ -16,9 +16,35 @@ const (
 	unitWarmUp  = "warmUp"
 )
 
-// checkUnit is one piece of check work running against the Instance's
+// checker is one set of checks and their state: the Instance's own, which
+// runs against worker-0 while every desired worker runs (one worker, as
+// alpha), or one worker's, which runs against that worker's own socket while
+// that worker runs (several workers; HBEP-7, Several workers; the science
+// agent's ruling on #439, Q6). Each runs one unit at a time, so warm-up never
+// overlaps the checks it follows, and several workers' checks run side by
+// side.
+type checker struct {
+	// checks of the current verification generation, and the one check unit
+	// running, if any.
+	checks *agentapi.CheckResults
+	unit   *checkUnit
+	// sectionKeys holds, for each section of checks, the processes it was
+	// taken against.
+	sectionKeys map[string]procKey
+	// sampling is the sampling of the current verification generation's
+	// checks, computed once from the staged file (genSampling); nil until a
+	// check unit needs it, and again after a new generation or staging.
+	sampling *genSampling
+	// usedStaging is the staging (instance.stagingSeq) whose rehash this
+	// checker's verification has used: each staging's rehash serves each
+	// checker's first verification after it, and a later one rehashes (PR #87
+	// review, Astra B2, Opus B1).
+	usedStaging int
+}
+
+// checkUnit is one piece of check work of one checker, running against its
 // workers: verification, qualification, or one warm-up round. One runs at a
-// time, so warm-up never overlaps the checks it follows. A cancelled unit
+// time per checker, so warm-up never overlaps the checks it follows. A cancelled unit
 // stays the current one until its goroutine has returned, so nothing that
 // follows it (a warm-up's Done, the next unit) starts while its requests are
 // still unwinding (PR #87 review, Astra B7).
@@ -54,7 +80,49 @@ func (in *instance) processKey(i agentapi.DesiredInstance) (procKey, bool) {
 	return procKey(b.String()), true
 }
 
-// runChecks runs the checks the desired Instance asks for, once per
+// workerKey is processKey for one worker's own checks: the Instance
+// generation and that worker's restart generation and process, and false when
+// that worker does not run a process started for the desired generations. It
+// covers no other worker, so one worker's restart never drops another's
+// results: each is verified on its own (HBEP-7, Several workers).
+func (in *instance) workerKey(i agentapi.DesiredInstance, dw agentapi.DesiredWorker) (procKey, bool) {
+	w := in.find(dw.Name)
+	if w == nil || w.proc == nil || w.phase != agentapi.PartRunning || w.instGen < i.Generation || w.generation < dw.Generation {
+		return "", false
+	}
+	id := w.proc.ID()
+	return procKey(strconv.FormatInt(in.generation, 10) + ";" + w.name + ":" + strconv.FormatInt(w.generation, 10) + ":" + strconv.Itoa(id.PID) + ":" + strconv.FormatUint(id.StartTime, 10)), true
+}
+
+// workerChecker is worker name's checker, made on first use.
+func (in *instance) workerChecker(name string) *checker {
+	if in.wck == nil {
+		in.wck = map[string]*checker{}
+	}
+	ck := in.wck[name]
+	if ck == nil {
+		ck = &checker{}
+		in.wck[name] = ck
+	}
+	return ck
+}
+
+// runChecks runs the checks the desired Instance asks for: the Instance's own
+// (DesiredInstance.Checks, one worker), against worker-0, and each worker's
+// (DesiredWorker.Checks, several workers), against that worker's own socket,
+// never through the router (HBEP-7, Several workers).
+func (a *Agent) runChecks(in *instance, i agentapi.DesiredInstance) {
+	a.runChecker(in, &in.ck, i.Checks, func() (procKey, bool) { return in.processKey(i) }, func() Engine { return a.engine0(in) })
+	for _, dw := range i.Workers {
+		if dw.Checks == nil && in.wck[dw.Name] == nil {
+			continue
+		}
+		dw := dw
+		a.runChecker(in, in.workerChecker(dw.Name), dw.Checks, func() (procKey, bool) { return in.workerKey(i, dw) }, func() Engine { return a.engineOf(in, dw.Name) })
+	}
+}
+
+// runChecker runs one checker's checks, once per
 // verification generation and set of running processes, against the engine's
 // local socket (HBEP-7, Instance start). The agent reports raw results; the
 // controller judges.
@@ -74,64 +142,63 @@ func (in *instance) processKey(i agentapi.DesiredInstance) (procKey, bool) {
 //     the agent then cancels the round in flight, waits for it to return, and
 //     only then reports WarmUp.Done (agentapi's documentation, Warm-up gates
 //     ready).
-func (a *Agent) runChecks(in *instance, i agentapi.DesiredInstance) {
-	c := i.Checks
+func (a *Agent) runChecker(in *instance, ck *checker, c *agentapi.Checks, keyOf func() (procKey, bool), eng func() Engine) {
 	if c == nil {
-		a.finishWarmUp(in)
+		a.finishWarmUpOf(ck)
 		return
 	}
-	if in.checks == nil || in.checks.VerificationGeneration != c.VerificationGeneration {
-		a.cancelUnit(in)
-		in.checks = &agentapi.CheckResults{VerificationGeneration: c.VerificationGeneration}
-		in.sectionKeys = map[string]procKey{}
-		in.sampling = nil // the new generation reads the staged file again
+	if ck.checks == nil || ck.checks.VerificationGeneration != c.VerificationGeneration {
+		a.cancelUnitOf(ck)
+		ck.checks = &agentapi.CheckResults{VerificationGeneration: c.VerificationGeneration}
+		ck.sectionKeys = map[string]procKey{}
+		ck.sampling = nil // the new generation reads the staged file again
 	}
 	// Results stand only while the processes they were taken against run:
-	// when the desired workers do not all run (one restarts, exits, or its
+	// when the processes do not all run (one restarts, exits, or its
 	// generation was raised), every section is dropped at once, so no report
 	// shows a result of a process that is gone.
-	key, runs := in.processKey(i)
-	a.dropStaleSections(in, key)
+	key, runs := keyOf()
+	a.dropStaleSections(ck, key)
 	if c.WarmUp == nil {
-		a.finishWarmUp(in)
+		a.finishWarmUpOf(ck)
 	}
-	if in.unit != nil {
-		if !runs || in.unit.key != key {
-			a.cancelUnit(in)
+	if ck.unit != nil {
+		if !runs || ck.unit.key != key {
+			a.cancelUnitOf(ck)
 		}
 		return
 	}
 	if !runs || !in.staged {
 		return
 	}
-	res := in.checks
-	if in.sampling.refused() && (c.Verify == nil || res.Verify != nil) {
+	res := ck.checks
+	if ck.sampling.refused() && (c.Verify == nil || res.Verify != nil) {
 		return // the file was refused: nothing more is checked in this generation
 	}
 	switch {
 	case c.Verify != nil && res.Verify == nil:
-		a.startVerify(in, *c.Verify, key)
+		a.startVerify(in, ck, *c.Verify, key, eng())
 	case c.Qualify != nil && res.Qualify == nil:
-		a.startQualify(in, *c.Qualify, key)
+		a.startQualify(in, ck, *c.Qualify, key, eng())
 	case c.WarmUp != nil && (res.WarmUp == nil || !res.WarmUp.Done):
 		if res.WarmUp == nil {
 			res.WarmUp = &agentapi.WarmUpResult{}
-			in.sectionKeys[unitWarmUp] = key
+			ck.sectionKeys[unitWarmUp] = key
 		}
 		n := int32(len(res.WarmUp.Rounds)) + 1
 		if n > agentapi.MaxWarmUpRounds {
 			res.WarmUp.Done = true
 			return
 		}
-		a.startWarmUp(in, n, *c.WarmUp, key)
+		a.startWarmUp(in, ck, n, *c.WarmUp, key, eng())
 	}
 }
 
 // dropStaleSections drops every completed or started section taken against
 // other processes than key; with an empty key, every section.
-func (a *Agent) dropStaleSections(in *instance, key procKey) {
-	res := in.checks
-	for kind, k := range in.sectionKeys {
+func (a *Agent) dropStaleSections(ck *checker, key procKey) {
+	res := ck.checks
+	for kind, k := range ck.sectionKeys {
 		if k == key {
 			continue
 		}
@@ -143,7 +210,7 @@ func (a *Agent) dropStaleSections(in *instance, key procKey) {
 		case unitWarmUp:
 			res.WarmUp = nil
 		}
-		delete(in.sectionKeys, kind)
+		delete(ck.sectionKeys, kind)
 		a.log.Info("check results dropped: the processes they were taken against are gone", "section", kind, "verificationGeneration", res.VerificationGeneration)
 	}
 }
@@ -158,28 +225,33 @@ func (a *Agent) engine0(in *instance) Engine {
 	return a.o.Engines(w.socket, in.key, in.launch)
 }
 
-func (a *Agent) newUnit(in *instance, kind string, round int32, key procKey) (*checkUnit, context.Context) {
+// engineOf is the Engine of worker name, on its own socket, which its own
+// checks run against.
+func (a *Agent) engineOf(in *instance, name string) Engine {
+	return a.o.Engines(in.find(name).socket, in.key, in.launch)
+}
+
+func (a *Agent) newUnit(ck *checker, kind string, round int32, key procKey) (*checkUnit, context.Context) {
 	ctx, cancel := context.WithCancel(a.ctx)
-	u := &checkUnit{kind: kind, gen: in.checks.VerificationGeneration, key: key, round: round, cancel: cancel}
-	in.unit = u
+	u := &checkUnit{kind: kind, gen: ck.checks.VerificationGeneration, key: key, round: round, cancel: cancel}
+	ck.unit = u
 	return u, ctx
 }
 
 // unitDone takes a unit's completion: the unit stops being the current one,
 // and its result is accepted when it was not cancelled and still belongs to
 // the current verification generation.
-func (a *Agent) unitDone(in *instance, u *checkUnit) bool {
-	if a.inst != in || in.unit != u {
+func (a *Agent) unitDone(in *instance, ck *checker, u *checkUnit) bool {
+	if a.inst != in || ck.unit != u {
 		return false
 	}
-	in.unit = nil
+	ck.unit = nil
 	u.cancel()
-	return !u.cancelled && in.checks != nil && in.checks.VerificationGeneration == u.gen
+	return !u.cancelled && ck.checks != nil && ck.checks.VerificationGeneration == u.gen
 }
 
-func (a *Agent) startVerify(in *instance, req agentapi.VerifyRequest, key procKey) {
-	u, ctx := a.newUnit(in, unitVerify, 0, key)
-	eng := a.engine0(in)
+func (a *Agent) startVerify(in *instance, ck *checker, req agentapi.VerifyRequest, key procKey, eng Engine) {
+	u, ctx := a.newUnit(ck, unitVerify, 0, key)
 	digest := ""
 	if in.imageVerified {
 		// The image the agent ran, checked at its staging against the
@@ -188,14 +260,14 @@ func (a *Agent) startVerify(in *instance, req agentapi.VerifyRequest, key procKe
 		digest = in.launch.ImageDigest
 	}
 	files := req.Files
-	reuse := len(files) > 0 && in.fileResultsFresh && in.filesKey == filesKey(files)
+	reuse := len(files) > 0 && in.stagingSeq != 0 && ck.usedStaging != in.stagingSeq && in.filesKey == filesKey(files)
 	if reuse {
-		in.fileResultsFresh = false // the staged rehash serves one verification
+		ck.usedStaging = in.stagingSeq // the staged rehash serves one verification of each checker
 	}
 	cached := append([]agentapi.FileResult(nil), in.fileResults...)
 	launch := in.launch
 	ckptDir := in.ckptDir
-	gs := in.genSampling()
+	gs := ck.genSampling()
 	reasoning := DeclaresReasoningParser(launch.Command)
 	gen := u.gen
 	a.wg.Add(1)
@@ -239,58 +311,56 @@ func (a *Agent) startVerify(in *instance, req agentapi.VerifyRequest, key procKe
 		}
 		res.Done = true
 		a.post(func() {
-			if a.unitDone(in, u) {
-				in.checks.Verify = &res
-				in.sectionKeys[unitVerify] = u.key
+			if a.unitDone(in, ck, u) {
+				ck.checks.Verify = &res
+				ck.sectionKeys[unitVerify] = u.key
 			}
 		})
 	}()
 }
 
-func (a *Agent) startQualify(in *instance, req agentapi.QualifyRequest, key procKey) {
-	u, ctx := a.newUnit(in, unitQualify, 0, key)
-	eng := a.engine0(in)
-	gs, ckptDir, reasoning, gen := in.genSampling(), in.ckptDir, DeclaresReasoningParser(in.launch.Command), u.gen
+func (a *Agent) startQualify(in *instance, ck *checker, req agentapi.QualifyRequest, key procKey, eng Engine) {
+	u, ctx := a.newUnit(ck, unitQualify, 0, key)
+	gs, ckptDir, reasoning, gen := ck.genSampling(), in.ckptDir, DeclaresReasoningParser(in.launch.Command), u.gen
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
 		g := gs.resolve(ckptDir, reasoning, a.log, gen)
 		if g.file.refused != nil {
 			// No check runs against a refused file; the unit ends with no result.
-			a.post(func() { a.unitDone(in, u) })
+			a.post(func() { a.unitDone(in, ck, u) })
 			return
 		}
 		res := eng.Qualify(ctx, req, g.sampling)
 		res.Done = true
 		a.post(func() {
-			if a.unitDone(in, u) {
-				in.checks.Qualify = &res
-				in.sectionKeys[unitQualify] = u.key
+			if a.unitDone(in, ck, u) {
+				ck.checks.Qualify = &res
+				ck.sectionKeys[unitQualify] = u.key
 			}
 		})
 	}()
 }
 
-func (a *Agent) startWarmUp(in *instance, n int32, req agentapi.WarmUpRequest, key procKey) {
-	u, ctx := a.newUnit(in, unitWarmUp, n, key)
-	eng := a.engine0(in)
-	gs, ckptDir, reasoning, gen := in.genSampling(), in.ckptDir, DeclaresReasoningParser(in.launch.Command), u.gen
+func (a *Agent) startWarmUp(in *instance, ck *checker, n int32, req agentapi.WarmUpRequest, key procKey, eng Engine) {
+	u, ctx := a.newUnit(ck, unitWarmUp, n, key)
+	gs, ckptDir, reasoning, gen := ck.genSampling(), in.ckptDir, DeclaresReasoningParser(in.launch.Command), u.gen
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
 		g := gs.resolve(ckptDir, reasoning, a.log, gen)
 		if g.file.refused != nil {
-			a.post(func() { a.unitDone(in, u) })
+			a.post(func() { a.unitDone(in, ck, u) })
 			return
 		}
 		round := eng.WarmUpRound(ctx, n, req, g.sampling)
 		round.Round = n
 		a.post(func() {
-			if !a.unitDone(in, u) {
+			if !a.unitDone(in, ck, u) {
 				return
 			}
-			w := in.checks.WarmUp
-			if w == nil || w.Done || in.sectionKeys[unitWarmUp] != u.key {
+			w := ck.checks.WarmUp
+			if w == nil || w.Done || ck.sectionKeys[unitWarmUp] != u.key {
 				return
 			}
 			w.Rounds = append(w.Rounds, round)
@@ -301,24 +371,50 @@ func (a *Agent) startWarmUp(in *instance, n int32, req agentapi.WarmUpRequest, k
 	}()
 }
 
-// cancelUnit cancels the running unit. The unit stays the current one until
-// its goroutine returns (unitDone), and its result is then dropped.
+// cancelUnit cancels the running unit of every checker of the Instance.
 func (a *Agent) cancelUnit(in *instance) {
-	if in.unit == nil || in.unit.cancelled {
-		return
+	a.cancelUnitOf(&in.ck)
+	for _, ck := range in.wck {
+		a.cancelUnitOf(ck)
 	}
-	in.unit.cancelled = true
-	in.unit.cancel()
 }
 
-// finishWarmUp ends warm-up: the round in flight is cancelled, and the warm-up
-// held, once a round has started, is Done only after that round has returned.
+// cancelUnitOf cancels a checker's running unit. The unit stays the current
+// one until its goroutine returns (unitDone), and its result is then dropped.
+func (a *Agent) cancelUnitOf(ck *checker) {
+	if ck.unit == nil || ck.unit.cancelled {
+		return
+	}
+	ck.unit.cancelled = true
+	ck.unit.cancel()
+}
+
+// cancelUnitsFor cancels the units a worker's processes ran: the Instance's
+// own checks, which run while every worker runs, and that worker's.
+func (a *Agent) cancelUnitsFor(in *instance, name string) {
+	a.cancelUnitOf(&in.ck)
+	if ck := in.wck[name]; ck != nil {
+		a.cancelUnitOf(ck)
+	}
+}
+
+// finishWarmUp ends warm-up for every checker of the Instance.
 func (a *Agent) finishWarmUp(in *instance) {
-	if in.unit != nil && in.unit.kind == unitWarmUp {
-		a.cancelUnit(in)
+	a.finishWarmUpOf(&in.ck)
+	for _, ck := range in.wck {
+		a.finishWarmUpOf(ck)
+	}
+}
+
+// finishWarmUpOf ends a checker's warm-up: the round in flight is cancelled,
+// and the warm-up held, once a round has started, is Done only after that
+// round has returned.
+func (a *Agent) finishWarmUpOf(ck *checker) {
+	if ck.unit != nil && ck.unit.kind == unitWarmUp {
+		a.cancelUnitOf(ck)
 		return // Done once the cancelled round has returned
 	}
-	if in.checks != nil && in.checks.WarmUp != nil {
-		in.checks.WarmUp.Done = true
+	if ck.checks != nil && ck.checks.WarmUp != nil {
+		ck.checks.WarmUp.Done = true
 	}
 }
