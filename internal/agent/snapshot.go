@@ -58,6 +58,15 @@ func (a *Agent) snapshot() agentapi.Report {
 	if w := in.find(agentapi.WorkerName(0)); w != nil && w.phase == agentapi.PartRunning {
 		ir.ServingEndpoint = "unix:" + a.fwd.Path()
 	}
+	// Behind a router, the path is served once the router runs (router.go).
+	if in.routerDesired != nil {
+		if r := in.router; r != nil {
+			ir.Router = r.report(a.routerListener())
+		}
+		if in.router == nil || in.router.phase != agentapi.PartRunning {
+			ir.ServingEndpoint = ""
+		}
+	}
 	if in.checks != nil {
 		c := cloneChecks(*in.checks)
 		cutFreeText(&c)

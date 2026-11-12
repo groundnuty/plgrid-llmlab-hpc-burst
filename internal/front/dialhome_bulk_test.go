@@ -415,3 +415,28 @@ func TestRunServesTheBulkSplit(t *testing.T) {
 		})
 	}
 }
+
+// TestBulkHandlerAlwaysComesWithItsCertificate (the review of #459): listen serves the bulk handler
+// and the second certificate under one gate, the bulk passthrough being set. Called with the
+// passthrough set and Options.BulkPath false, it still presents the second certificate to the bulk
+// name, so the two halves of the split can never come apart.
+func TestBulkHandlerAlwaysComesWithItsCertificate(t *testing.T) {
+	host := agentapi.Host{StateDir: t.TempDir(), PortBase: kernelPortBase(t)}
+	_, bulk := bulkPair(t, host)
+	o := runOptions(t, ModeHostDialed, host, "")
+	o.DialHomeListener = kernelListener(t)
+	f := &Front{bulkFrp: newFrpPassthrough("127.0.0.1:1", time.Second, discardLog())}
+	frp := newFrpPassthrough("127.0.0.1:1", time.Second, discardLog())
+	servers, err := listen(o, f, frp, context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, s := range servers {
+			_ = s.Close()
+		}
+	})
+	if got := peerCert(t, f.Dial.String(), bulkName); !bytes.Equal(got, bulk) {
+		t.Error("with the bulk handler set, the bulk name did not get the second certificate")
+	}
+}
