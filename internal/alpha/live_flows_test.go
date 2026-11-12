@@ -67,6 +67,13 @@ func (r *liveRun) observe(out stack.Streamed) Stream {
 // finish waits for a stream and observes it.
 func (r *liveRun) finish(s stream) Stream { return r.observe(r.wait(s)) }
 
+// finishLong is finish for one of the tunnel hour's long requests: it carries its role, which check 2 judges on (Stream.Long).
+func (r *liveRun) finishLong(s stream) Stream {
+	o := r.finish(s)
+	o.Long = true
+	return o
+}
+
 // rate is the engine's token rate through the front, from one stream, so that
 // the run sizes a request to a length.
 func (r *liveRun) rate(key string) float64 {
@@ -665,11 +672,17 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	key := r.fc.KeyFor(&in)
 	rate := r.rate(key)
 	tm := r.tm
-	long := tm.NearDeadline + (tm.MaxRequestDuration-tm.NearDeadline)/2
+	// The long stream is as long as the context allows at the measured rate, capped at LongCap (4 min 30 s) and at least the
+	// floor (2 min): below it the row is NOT RUN, before the hour (issue #451). Sized once, and posted with the result.
+	long, err := FitLong(tm, r.maxModelLenOrDefault(), rate)
+	if err != nil {
+		return TunnelHourObs{}, err
+	}
 	nLong, err := r.tokensFor(long, rate)
 	if err != nil {
 		return TunnelHourObs{}, err
 	}
+	plan := LongPlan{Length: long, Tokens: nLong, Rate: rate, MaxModelLen: r.maxModelLenOrDefault()}
 	burst := min(tm.MaxRequestDuration*6/10, 2*time.Minute)
 	if burst < rateAsked+10*time.Second {
 		return TunnelHourObs{}, fmt.Errorf("a burst of %s cannot hold the %s path-rate measurement: the deadline %s is too short", burst, rateAsked, tm.MaxRequestDuration)
@@ -693,7 +706,7 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	first := time.Now()
 	var reqs []Stream
 	for i := 0; i < tm.MinChain; i++ {
-		reqs = append(reqs, r.finish(r.openStream(nLong, key, "")))
+		reqs = append(reqs, r.finishLong(r.openStream(nLong, key, "")))
 	}
 	// The burst, and inside it the download's path rate with one more stream,
 	// and the large requests beside it once every stream of the burst runs.
@@ -743,7 +756,7 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 			p.Logf("%s: the drain start comes before the hour is over", p.Row.Name)
 			break
 		}
-		reqs = append(reqs, r.finish(r.openStream(nLong, key, "")))
+		reqs = append(reqs, r.finishLong(r.openStream(nLong, key, "")))
 	}
 	samples := smp.end()
 	dep := r.observedDeployment()
@@ -759,5 +772,5 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 		time.Since(first).Round(time.Second), pr.BytesPerSecond(), pr.TokensPerSecond(), len(larges), tm.UploadBody, hol.InFlight.Round(time.Millisecond),
 		hol.Send.Round(time.Millisecond), hol.Prefill.Round(time.Millisecond), hol.Elsewhere.Round(time.Millisecond))
 	return TunnelHourObs{Tags: tags, Requests: reqs, Samples: samples, DrainStart: ds, Deployment: dep, Rates: []PathRate{pr},
-		UploadNotMeasured: UploadNotMeasuredLive, HeadOfLine: &hol}, nil
+		UploadNotMeasured: UploadNotMeasuredLive, HeadOfLine: &hol, LongPlan: plan}, nil
 }

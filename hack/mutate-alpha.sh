@@ -563,6 +563,26 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'hack/live-checks.sh@@  ! lead_marker || case $n in alpha-athena-handover|alpha-helios-nooverlap|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1@@  true'
   'hack/live-checks.sh@@    elif lead_marker; then@@    elif false; then'
   'hack/live-checks.sh@@at [0-9]+ tokens/s with max-model-len@@at .+ tokens/s with max-model-len'
+  # #451: the tunnel hour's long stream sized to the context (longstream.go): the cap, the floor (dropped, and inclusive), the cap's formula,
+  # the share check 2 asks of a shorter plan, the verdict reading the plan, the NOT RUN, the post's line, and the script's marker.
+  'longstream.go@@	if c := tm.LongCap(); secs >= c.Seconds() {@@	if c := tm.LongCap(); false && secs >= c.Seconds() {'
+  'longstream.go@@	if secs < tm.LongFloor.Seconds() {@@	if secs < 0 {'
+  'longstream.go@@	if secs < tm.LongFloor.Seconds() {@@	if secs <= tm.LongFloor.Seconds() {'
+  'longstream.go@@	return t.NearDeadline + (t.MaxRequestDuration-t.NearDeadline)/2@@	return t.MaxRequestDuration'
+  # #451 (ruling (a)): check 2 is judged on the long requests only, by role; and the lead's floor judges the FINAL lead.
+  'verdict.go@@r.Long && r.Complete && d >= tm.NearDeadline@@r.Complete && d >= tm.NearDeadline'
+  'handoverlead.go@@	if lead < LeadFloor {@@	if fit < LeadFloor {'
+  'longstream.go@@	t.NearDeadline = max(share, t.LongBarFloor())@@	_ = share; t.NearDeadline = p.Length'
+  'longstream.go@@	t.NearDeadline = max(share, t.LongBarFloor())@@	t.NearDeadline = share'
+  'longstream.go@@Seconds()*t.NearDeadline.Seconds()/t.LongCap().Seconds()*1000))@@Seconds()*1000))'
+  'rows.go@@	LongFloor = 135 * time.Second@@	LongFloor = 2 * time.Minute'
+  'verdict.go@@trafficChecks(o.Requests, tm.withLongPlan(o.LongPlan), live)@@trafficChecks(o.Requests, tm, live)'
+  'run.go@@ || errors.Is(err, ErrLeadTooShort) || errors.Is(err, ErrLongTooShort)@@ || errors.Is(err, ErrLeadTooShort)'
+  'posts.go@@	b.WriteString(longPlanLine(o, tm))@@	b.WriteString("")'
+  'hack/live-checks.sh@@  ! long_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac || return 1@@  true'
+  'hack/live-checks.sh@@    elif long_marker; then@@    elif false; then'
+  'hack/live-checks.sh@@the stream that fits is [0-9hms.]+@@the stream that fits is .+'
+  'hack/live-checks.sh@@at [0-9]+ tokens/s with max-model-len [0-9]+ the stream that fits is@@at .+ tokens/s with max-model-len [0-9]+ the stream that fits is'
   'hack/live-checks.sh@@        TMIN[$name]=$((v + 29))@@        TMIN[$name]=$((v + 28))'
   'hack/live-checks.sh@@tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|02:17:00|166|-C memfs@@tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|02:17:00|165|-C memfs'
   'hack/live-checks.sh@@tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|166|-@@tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|165|-'
@@ -808,7 +828,7 @@ compile_of() {
 # parent-death SIGKILL, which it asks for.
 rehearsal_tests='ExitedSSHD|ZeroRowSignalsNothing|BelowWalksNothing|Guard2Alone|SignalProcs|RefusalIsTheErrorOfClose|WithRelayEnvSelectsNothing|ReportLeaks|CloseReturnsWhen|BeforeItsParent|LeftTheTree|StillAliveAtItsDeadline|StillOutsideTheTree|RelayGuard|ForcedCommandDies|ForcedCommandExecs|GuardFailureIsLogged'
 # The tests of the script's kind.
-script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot|HostDialedMode|HandoverRowsLead|LeadMarkersReason|LeadMarkerOnARow|EveryStackRow|TheRowsThatStartNoStack'
+script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot|HostDialedMode|HandoverRowsLead|LeadMarkersReason|LeadMarkerOnARow|EveryStackRow|TheRowsThatStartNoStack|TunnelRowsLongStream|LongMarkersReason|LongMarkerOnARow'
 # tests_of <path> [control|<names>]: the command that judges a mutant of path, in the array tests. With control, the same command with
 # no mutant: from the binaries kept at the baseline, the tree being as it was. With names (a regexp), that, for those tests alone, to
 # the end. The
