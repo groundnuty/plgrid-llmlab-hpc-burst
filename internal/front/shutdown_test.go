@@ -46,7 +46,7 @@ func TestShutdownCutsStreamsAndKeepsTheirRecords(t *testing.T) {
 // records after the stop, want 3", the line CI showed.
 func TestShutdownWaitsForAHandlerSlowerThanTheShutdownGrace(t *testing.T) {
 	f := newScFix(t, scOpts{instances: 3, engineReal: true})
-	held := holdFirstRecord(f, 1*time.Second)
+	held := holdFirstRecord(f.proxy, func() bool { return context.Cause(f.base) == errCutShutdown }, time.Second)
 	stopThreeStreams(t, f, func() {
 		if !held.released.Load() {
 			t.Errorf("stopServing returned while a handler was still held before its record's write: it waited for a window, not for the handlers")
@@ -68,18 +68,19 @@ type heldRecord struct {
 	released atomic.Bool // its hold is over
 }
 
-// holdFirstRecord holds the first handler to reach its record's write for
-// hold. The hold is a delay the code under test has to outlast, not a window
-// the test asserts within: stopServing waits for the handlers' return, however
-// long that takes, up to its bound.
-func holdFirstRecord(f *scFix, hold time.Duration) *heldRecord {
+// holdFirstRecord holds the first handler of p to reach its record's write for
+// hold, and notes whether cut said the shutdown cut had happened by then. The
+// hold is a delay the code under test has to outlast, not a window the test
+// asserts within: a stop waits for the handlers' return, however long that
+// takes, up to its bound. Call it before any request, so that no handler reads
+// the hook while it is written.
+func holdFirstRecord(p *Proxy, cut func() bool, hold time.Duration) *heldRecord {
 	h := &heldRecord{}
-	// Set before any request, so no handler reads it while it is written.
-	f.proxy.beforeWrite = func(string) {
+	p.beforeWrite = func(string) {
 		if !h.entered.CompareAndSwap(false, true) {
 			return
 		}
-		h.afterCut.Store(context.Cause(f.base) == errCutShutdown)
+		h.afterCut.Store(cut())
 		time.Sleep(hold)
 		h.released.Store(true)
 	}

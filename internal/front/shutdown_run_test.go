@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,6 +31,13 @@ import (
 // stream gets one stream_cut, detail shutdown, and when Run returns its usage
 // record is in the log with cutBy front_shutdown. This checks Run's own
 // wiring: the client server's base context and the stop sequence.
+//
+// Like the shutdown tests (#432) it waits on state, not on a window: the stop
+// goes through Options.stop with the Shutdown grace Run passes, ShutdownGrace
+// 300 ms, and the generous handler wait; and the stream's handler is held 1 s
+// between the cut and its record's write, so a handler wait of the grace would
+// lose the record. TestRunPassesOneGraceToBothWaitsOfAStop reads what Run
+// passes for the handler wait.
 func TestRunStopCutsAStreamAndWritesItsRecord(t *testing.T) {
 	h := newHarness(t, nil)
 	instanceKey := newKey(t)
@@ -47,14 +55,24 @@ func TestRunStopCutsAStreamAndWritesItsRecord(t *testing.T) {
 	o := runOptions(t, "", h.host, "")
 	o.Config.ClientKeysFile = h.cfg.ClientKeysFile
 	o.Config.UsageDir = filepath.Join(h.dir, "usage-run")
-	o.Dynamic, o.Transports, o.ShutdownGrace = client, h.trans, 300*time.Millisecond
+	o.Dynamic, o.Transports, o.ShutdownGrace = client, h.trans, testShutdownGrace
 	dial, err := listenFree()
 	if err != nil {
 		t.Fatal(err)
 	}
 	o.DialHomeListener = dial
+	var cut, releasedAtStop atomic.Bool
+	var held *heldRecord
+	o.stop = func(servers []*http.Server, cancelBase context.CancelCauseFunc, p *Proxy, shutdownGrace, _ time.Duration, log *slog.Logger) {
+		noting := func(cause error) { cut.Store(true); cancelBase(cause) }
+		stopServing(servers, noting, p, shutdownGrace, testHandlerWait, log)
+		releasedAtStop.Store(held.released.Load())
+	}
 	ready := make(chan *Front, 1)
-	o.Ready = func(f *Front) { ready <- f }
+	o.Ready = func(f *Front) {
+		held = holdFirstRecord(f.Proxy, cut.Load, time.Second)
+		ready <- f
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- Run(ctx, o) }()
@@ -97,6 +115,12 @@ func TestRunStopCutsAStreamAndWritesItsRecord(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	done <- nil // for the deferred receive
+	if !held.entered.Load() || !held.afterCut.Load() {
+		t.Fatalf("the stream's handler was not held after the shutdown cut (reached its record's write %v, after the cut %v), so the stop's wait for it was never at stake", held.entered.Load(), held.afterCut.Load())
+	}
+	if !releasedAtStop.Load() {
+		t.Error("the stop returned while the stream's handler was still held before its record's write: it waited for a window, not for the handler")
+	}
 	if n := errorEvents(string(rest)); n != 1 || !strings.Contains(string(rest), `"detail":"shutdown"`) {
 		t.Errorf("the stream got %d error events, want one stream_cut with detail shutdown; its end: %q", n, string(rest)[max(0, len(rest)-300):])
 	}
