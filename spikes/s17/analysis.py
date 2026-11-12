@@ -2,6 +2,7 @@
 (tests/test_analysis.py). Nothing here reads a process or a clock. window_samples, cores, peak,
 busy_cores, drops, logins and host_bound are spike S14's (spikes/s14/analysis.py at 3f863bad)."""
 import math
+import re
 
 TOKEN_MS = 50.0  # the engine double's pace: one token per 50 ms
 
@@ -321,3 +322,206 @@ def handshake_rates(stats, t_from, t_to):
         return None
     return {"accepts_per_s": (rows[-1][1] - rows[0][1]) / dt, "hellos_per_s": (rows[-1][2] - rows[0][2]) / dt,
             "accepts": rows[-1][1] - rows[0][1], "hellos": rows[-1][2] - rows[0][2], "seconds": dt}
+
+
+def batch_spans(trs):
+    """Per batch of concurrent transfers: (first start, last end) in ns, where a transfer's end is the later of the
+    client's end and the receiver's last byte (transfer_window)."""
+    by = {}
+    for tr in trs:
+        ws, we = transfer_window(tr)
+        b = tr.get("batch", 0)
+        lo, hi = by.get(b, (ws, we))
+        by[b] = (min(lo, ws), max(hi, we))
+    return by
+
+
+def late_batch_stalls(load, window_ms=400, min_gap_ms=100, min_streams=6):
+    """Stalls of the token streams near the end of a batch of transfers (issue #413's review: every ssh run that
+    moved 1 GiB through the relay's one ssh connection stalled all its streams just before the batch that crossed
+    it ended). For each batch, the streams that have a gap of more than min_gap_ms inside the batch whose end falls
+    in the batch's last window_ms; a batch counts when at least min_streams streams do. Returns {batch: {streams,
+    min_ms, max_ms, before_end_ms, gib}}: the streams' count, the stall's smallest and largest gap, how long before
+    the batch's end the last of those gaps ended, and the bytes the transfers had moved by the batch's end, in GiB."""
+    spans = batch_spans(load["transfers"])
+    out = {}
+    for b, (bs, be) in sorted(spans.items()):
+        found, ends = [], []
+        for rs in load["streams_runs"]:
+            best = None
+            for r in rs:
+                tk = r["tokens_ns"]
+                for a, z in zip(tk, tk[1:]):
+                    g = (z - a) / 1e6
+                    if g > min_gap_ms and a >= bs and be - window_ms * 1_000_000 <= z <= be:
+                        if best is None or g > best[0]:
+                            best = (g, z)
+            if best:
+                found.append(best[0])
+                ends.append(best[1])
+        if len(found) >= min_streams:
+            done = sum(tr["bytes"] for tr in load["transfers"] if tr.get("batch", 0) <= b)
+            out[b] = {"streams": len(found), "min_ms": min(found), "max_ms": max(found),
+                      "before_end_ms": (be - max(ends)) / 1e6, "gib": done / (1 << 30)}
+    return out
+
+
+def batch_ttfb(trs):
+    """Per batch, the transfers' times to first byte (from before the dial to the first byte at the receiver, ms)
+    in increasing order: the first to answer first."""
+    by = {}
+    for tr in trs:
+        if tr.get("err") or tr.get("status") != 200 or not tr.get("recv_first_ns"):
+            continue
+        by.setdefault(tr.get("batch", 0), []).append((tr["recv_first_ns"] - tr["start_ns"]) / 1e6)
+    return {b: sorted(v) for b, v in by.items()}
+
+
+# --- the relay's ssh: key exchanges and stalls (issue #413, the review of PR 416) -----------------------------------
+
+_KEX = {
+    "algorithm": re.compile(r"kex: algorithm: (\S+)"),
+    "host_key": re.compile(r"kex: host key algorithm: (\S+)"),
+    "in": re.compile(r"kex: server->client cipher: (\S+) MAC: (\S+) compression: (\S+)"),
+    "out": re.compile(r"kex: client->server cipher: (\S+) MAC: (\S+) compression: (\S+)"),
+}
+_NEWKEYS = re.compile(r"ssh_set_newkeys: rekeying (in|out), input (\d+) bytes (\d+) blocks, output (\d+) bytes (\d+) blocks")
+
+
+def parse_ssh_debug(text):
+    """The facts of one relay client's debug log (ssh -v), and nothing else of it (the log names the host and the user):
+    the client's and the server's version, the relay channel the command line ran ("control" or "serving"), each key
+    exchange's negotiated algorithms (the first and every rekey), who started each exchange, the rekey limits in
+    blocks, and, at each rekey, the bytes the connection had received and sent."""
+    rec = {"local_version": "", "remote_version": "", "channel": "", "kex": [], "exchanges": 0, "initiator": [],
+           "rekey_in": [], "rekey_out": [], "rekeys": []}
+    first_kexinit = None
+    for line in text.splitlines():
+        m = re.search(r"Local version string SSH-2\.0-(.*)$", line)
+        if m:
+            rec["local_version"] = m.group(1).strip()
+        m = re.search(r"remote software version (.*)$", line)
+        if m:
+            rec["remote_version"] = m.group(1).strip()
+        if "Sending command:" in line:
+            m = re.search(r"\brelay (control|serving)\b", line)
+            if m:
+                rec["channel"] = m.group(1)
+        if "SSH2_MSG_KEXINIT sent" in line and first_kexinit is None:
+            first_kexinit = "client"
+        elif "SSH2_MSG_KEXINIT received" in line and first_kexinit is None:
+            first_kexinit = "server"
+        m = _KEX["algorithm"].search(line)
+        if m:
+            rec["kex"].append({"algorithm": m.group(1)})
+            rec["initiator"].append(first_kexinit or "")
+            first_kexinit = None
+            continue
+        if rec["kex"]:
+            k = rec["kex"][-1]
+            m = _KEX["host_key"].search(line)
+            if m:
+                k["host_key"] = m.group(1)
+            m = _KEX["in"].search(line)
+            if m:
+                k["cipher_in"], k["mac_in"], k["compression_in"] = m.groups()
+            m = _KEX["out"].search(line)
+            if m:
+                k["cipher_out"], k["mac_out"], k["compression_out"] = m.groups()
+        if "SSH2_MSG_NEWKEYS received" in line:
+            rec["exchanges"] += 1
+        m = re.search(r"rekey in after (\d+) blocks", line)
+        if m:
+            rec["rekey_in"].append(int(m.group(1)))
+        m = re.search(r"rekey out after (\d+) blocks", line)
+        if m:
+            rec["rekey_out"].append(int(m.group(1)))
+        m = _NEWKEYS.search(line)
+        if m:
+            rec["rekeys"].append({"dir": m.group(1), "input_bytes": int(m.group(2)), "output_bytes": int(m.group(4))})
+    return rec
+
+
+STEP_NS = 100_000_000  # a download's received-bytes steps are 100 ms wide (the load client's StepMs)
+
+
+def bytes_moved_at(load, t_ns):
+    """The bytes the transfers had received by t_ns, as (low, high): a transfer's steps give its cumulative bytes at
+    the end of each 100 ms after its first byte, so inside a step the count lies between the steps' two ends. A
+    transfer with no steps counts only once it ended."""
+    lo = hi = 0
+    for tr in load["transfers"]:
+        first, last, total = tr.get("recv_first_ns") or 0, tr.get("recv_last_ns") or 0, tr.get("bytes") or 0
+        steps = tr.get("steps_bytes") or []
+        if not first or t_ns < first:
+            continue
+        if t_ns >= last or not steps:
+            lo += total if t_ns >= last else 0
+            hi += total
+            continue
+        i = int((t_ns - first) // STEP_NS)
+        lo += steps[i - 1] if 0 < i <= len(steps) else 0
+        hi += steps[i] if i < len(steps) else total
+    return lo, hi
+
+
+def all_stream_stalls(load, min_gap_ms=100, min_streams=6, cluster_ms=300):
+    """Stalls of the token streams that hit most of them at once while transfers ran: gaps of more than min_gap_ms
+    whose starts lie within cluster_ms of one another, in at least min_streams distinct streams, from the first
+    transfer's start to the last one's end. Returns a list, in time order, of {start_ns (the earliest gap's start),
+    streams, min_ms, max_ms (the streams' longest gap each), moved_lo, moved_hi (the bytes the transfers had received
+    then, bytes_moved_at)}."""
+    spans = batch_spans(load["transfers"])
+    if not spans:
+        return []
+    w0 = min(s for s, _ in spans.values())
+    w1 = max(e for _, e in spans.values())
+    gaps = []
+    for si, rs in enumerate(load["streams_runs"]):
+        for r in rs:
+            tk = r["tokens_ns"]
+            for a, z in zip(tk, tk[1:]):
+                if (z - a) / 1e6 > min_gap_ms and w0 <= a <= w1:
+                    gaps.append((a, z, si))
+    gaps.sort()
+    clusters = []
+    for g in gaps:
+        if clusters and g[0] - clusters[-1][0][0] <= cluster_ms * 1_000_000:
+            clusters[-1].append(g)
+        else:
+            clusters.append([g])
+    out = []
+    for c in clusters:
+        per = {}
+        for a, z, si in c:
+            per[si] = max(per.get(si, 0), (z - a) / 1e6)
+        if len(per) >= min_streams:
+            lo, hi = bytes_moved_at(load, c[0][0])
+            out.append({"start_ns": c[0][0], "streams": len(per), "min_ms": min(per.values()), "max_ms": max(per.values()),
+                        "moved_lo": lo, "moved_hi": hi})
+    return out
+
+
+MIB = 1 << 20
+# A stall's bytes are the transfers' payload at the client; the rekey's are what the ssh connection had received. The
+# connection is ahead of the client by what sits in the buffers between them (frp's 6 MiB window, the relay's, the
+# sockets'), so a stall matches a rekey when its bytes lie from REKEY_BELOW below the connection's count to REKEY_ABOVE
+# above it (the steps' resolution, a few MiB for four transfers, is inside the range the stall carries).
+REKEY_BELOW, REKEY_ABOVE = 16 * MIB, 2 * MIB
+
+
+def match_rekeys(stalls, rekey_bytes, below=REKEY_BELOW, above=REKEY_ABOVE):
+    """Pairs each rekey (the bytes the connection had received when its new keys took effect) with the nearest
+    unpaired all-stream stall (by its bytes' midpoint) whose bytes (moved_lo..moved_hi) overlap [rekey - below, rekey + above]. Returns
+    (pairs, unmatched_rekeys, unmatched_stalls): pairs are (rekey_bytes, stall); the others are what found no partner."""
+    free = list(stalls)
+    pairs, lonely = [], []
+    for rb in rekey_bytes:
+        near = [st for st in free if st["moved_hi"] >= rb - below and st["moved_lo"] <= rb + above]
+        hit = min(near, key=lambda st: abs((st["moved_lo"] + st["moved_hi"]) / 2 - rb), default=None)
+        if hit is None:
+            lonely.append(rb)
+        else:
+            free.remove(hit)
+            pairs.append((rb, hit))
+    return pairs, lonely, free

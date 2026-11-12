@@ -537,6 +537,33 @@ def rewrite_ssh_config(ready, link_port, sshdir):
     return path
 
 
+def parse_ssh_logs(row, debug_dir):
+    """The relay clients' debug logs, parsed (analysis.parse_ssh_debug) into one record per client; nothing of
+    the logs but those facts is kept. row gets the serving relay's key exchanges (the first and every rekey) and
+    its negotiated algorithms."""
+    out = []
+    if not debug_dir or not os.path.isdir(debug_dir):
+        return out
+    for name in sorted(os.listdir(debug_dir)):
+        with open(os.path.join(debug_dir, name), errors="replace") as fh:
+            rec = analysis.parse_ssh_debug(fh.read())
+        rec["client"] = name.rsplit(".", 1)[0]
+        out.append(rec)
+    serving = [r for r in out if r.get("channel") == "serving"]
+    row["ssh_clients"] = len(out)
+    if serving:
+        r = serving[0]
+        row["ssh_serving_clients"] = len(serving)
+        row["ssh_key_exchanges"] = r["exchanges"]
+        row["ssh_version"] = r.get("local_version", "")
+        k = (r.get("kex") or [{}])[0]
+        row["ssh_kex_algorithm"], row["ssh_host_key"] = k.get("algorithm", ""), k.get("host_key", "")
+        row["ssh_cipher_in"], row["ssh_mac_in"] = k.get("cipher_in", ""), k.get("mac_in", "")
+        row["ssh_cipher_out"], row["ssh_mac_out"] = k.get("cipher_out", ""), k.get("mac_out", "")
+        row["ssh_rekey_in_blocks"], row["ssh_rekey_out_blocks"] = (r.get("rekey_in") or [""])[0], (r.get("rekey_out") or [""])[0]
+    return out
+
+
 def link_argv(env, run, upstream_port, args, queue, queue_bytes):
     argv = [env.b("s17link"), "-map", "127.0.0.1:0=127.0.0.1:%d" % upstream_port,
             "-addrs", os.path.join(run, "link.addrs"),
@@ -555,6 +582,8 @@ def run_config(env, cfg, args, path_rate=None, calibrate=False):
     args = copy.copy(args)
     if cfg.get("bytes"):
         args.bytes = int(cfg["bytes"])
+    if cfg.get("count"):
+        args.count = int(cfg["count"])
     if cfg.get("scenario") == "many":
         args.streams = 1 if args.streams == 8 else args.streams  # a many-Instances run: one stream per Instance by default
     mode, layout, kind, rep = cfg["mode"], cfg["layout"], cfg["kind"], cfg["rep"]
@@ -576,12 +605,15 @@ def run_config(env, cfg, args, path_rate=None, calibrate=False):
     P = Procs(run)
     row = {"run_id": run_id, "mode": mode, "layout": tag, "kind": kind, "rep": rep, "status": "ok", "scenario": scenario,
            "queue": queue, "queue_bytes": queue_bytes if queue == "fifo" else "", "concurrent": concurrent,
-           "instances": n, "streams_per_instance": args.streams, "bytes_asked": args.bytes,
+           "instances": n, "streams_per_instance": args.streams, "bytes_asked": args.bytes, "batches_asked": args.count,
            "link_rate": args.rate, "link_delay_us": args.delay_us, "link_rcvbuf": args.rcvbuf}
     row.update(host_info())
     if path_rate:
         row["path_rate"] = round(path_rate)
     sampler, t_ready, ports = None, None, {}
+    ssh_debug_dir = None
+    row["variant"] = cfg.get("variant", "")
+    row["ssh_opts"] = ";".join(cfg.get("ssh_opts", []))
     try:
         subprocess.run([env.b("s17"), "certs", "-dir", run], check=True)
         cert = os.path.join(run, "cert.pem")
@@ -633,10 +665,19 @@ def run_config(env, cfg, args, path_rate=None, calibrate=False):
             sshdir = os.path.join(run, "ssh")
             os.makedirs(sshdir, mode=0o700, exist_ok=True)
             ssh_cfg = rewrite_ssh_config(ready, link_port, sshdir)
-            P.start("owner", [env.b("s17"), "owner", "-spec", spec, "-ssh-config", ssh_cfg, "-node-ready", os.path.join(run, "node-ready.json"),
-                              "-ssh-control-dir", ready["control_dir"], "-control-port", str(free_ports(1)[0]),
-                              "-serving-port", str(dialhome), "-state", os.path.join(run, "owner-state.json"),
-                              "-log", os.path.join(run, "logs", "owner.log")])
+            owner_argv = [env.b("s17"), "owner", "-spec", spec, "-ssh-config", ssh_cfg, "-node-ready", os.path.join(run, "node-ready.json"),
+                          "-ssh-control-dir", ready["control_dir"], "-control-port", str(free_ports(1)[0]),
+                          "-serving-port", str(dialhome), "-state", os.path.join(run, "owner-state.json"),
+                          "-log", os.path.join(run, "logs", "owner.log")]
+            for o in cfg.get("ssh_opts", []):
+                owner_argv += ["-ssh-opt", o]
+            if cfg.get("ssh_debug"):
+                # The relay clients' debug logs (ssh -v -E): the negotiated algorithms and every key exchange. They name
+                # the host and the user, so they stay in the run's private directory; only the parsed facts are kept.
+                ssh_debug_dir = os.path.join(sshdir, "dbg")
+                os.makedirs(ssh_debug_dir, mode=0o700, exist_ok=True)
+                owner_argv += ["-ssh-debug-dir", ssh_debug_dir]
+            P.start("owner", owner_argv)
         elif mode == "host-dialed":
             P.start("owner", [env.b("s17"), "owner", "-spec", spec, "-bridge", env.b("s17bridge"),
                               "-link", "127.0.0.1:%d" % link_port, "-control-port", str(free_ports(1)[0]),
@@ -742,6 +783,7 @@ def run_config(env, cfg, args, path_rate=None, calibrate=False):
             P.stop(name)
         row["leftovers"] = len(P.leftovers())
         row["leftover_listeners"] = len(listeners_of([pid for _, pid, _ in P.procs.values() if start_time(pid)] or [0]))
+    kex = parse_ssh_logs(row, ssh_debug_dir)
     count_losses(row, run, mode, sampler, t_ready, {"frps": [t["uid"] for t in tunnels], "frps2": [t["uid"] + "-bulk" for t in tunnels] if layout == "c" else []})
     link = read_json(os.path.join(run, "link.json")) or []
     row["link_conns"] = len(link)
@@ -768,7 +810,7 @@ def run_config(env, cfg, args, path_rate=None, calibrate=False):
         if hs:
             row["tls_accepts_per_s"], row["tls_hellos_per_s"] = round(hs["accepts_per_s"], 3), round(hs["hellos_per_s"], 3)
             row["tls_accepts_window"], row["tls_hellos_window"] = hs["accepts"], hs["hellos"]
-    raw = {"row": row, "load": read_json(os.path.join(run, "load.json")), "link": link, "link_queue": q, "listener_stats": lst,
+    raw = {"row": row, "load": read_json(os.path.join(run, "load.json")), "link": link, "link_queue": q, "listener_stats": lst, "ssh_kex": kex,
            "owner": read_json(os.path.join(run, "owner-state.json")), "node": read_json(os.path.join(run, "node-state.json")),
            "polls": sampler.polls if sampler else [], "conns": sampler.conns if sampler else [], "samples": samples}
     with open(os.path.join(env.results, "raw", run_id + ".json"), "w") as fh:
@@ -875,7 +917,7 @@ def count_losses(row, run, mode, sampler, t_ready, uids):
 
 BDP_BYTES = 110_400      # 48 MB/s x 2.3 ms
 FRP_WINDOW = 6 * MIB     # frp's stream window, S15's mechanism
-GROUPS = ("fifo", "ssh", "concurrent", "many")
+GROUPS = ("fifo", "ssh", "concurrent", "many", "rekey")
 
 
 def configs_for(group, args):
@@ -897,6 +939,16 @@ def configs_for(group, args):
         for mode in args.modes:
             for layout in args.layouts:
                 out.append(dict(mode=mode, layout=layout, kind="download", queue="fair"))
+    elif group == "rekey":
+        # The review of PR 416: the all-stream stall at 1 GiB through real ssh is consistent with OpenSSH's default
+        # rekey. Layout (c), four downloads at once, through the real relay, with the relay clients' debug logs (the
+        # negotiated algorithms and every key exchange): (A) the default, downloads of 40 MiB (160 MiB a batch, so the
+        # 1 GiB point falls inside a batch, not at its end), nine batches (1.40 GiB); (B) the same with RekeyLimit
+        # 256M, which should add a stall at about every 256 MiB; (C) the default, downloads of 64 MiB, nine batches
+        # (2.25 GiB), for a second stall at 2 GiB.
+        out.append(dict(mode="ssh", layout="c", kind="download", queue="fair", concurrent=4, variant="default-40MiB", bytes=40 << 20, count=9, ssh_debug=True))
+        out.append(dict(mode="ssh", layout="c", kind="download", queue="fair", concurrent=4, variant="rekey256M-40MiB", bytes=40 << 20, count=9, ssh_debug=True, ssh_opts=["RekeyLimit=256M"]))
+        out.append(dict(mode="ssh", layout="c", kind="download", queue="fair", concurrent=4, variant="default-64MiB", bytes=64 << 20, count=9, ssh_debug=True))
     elif group == "concurrent":
         # Criterion 3: 1, 2 and 4 downloads at once beside 8 token streams, layouts (a) and (c).
         for mode in args.modes:
