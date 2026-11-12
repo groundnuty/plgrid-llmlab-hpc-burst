@@ -60,7 +60,7 @@ func TestOneWorkerKeepsAlphasLaunchAndTheCountIsNoIDInput(t *testing.T) {
 	})
 	absent, one, two := rg.instances("absent")[0], rg.instances("one")[0], rg.instances("two")[0]
 	if absent.Spec.Launch.Workers != nil || one.Spec.Launch.Workers != nil {
-		t.Errorf("launch.workers = %v and %v for one worker, want absent", absent.Spec.Launch.Workers, one.Spec.Launch.Workers)
+		t.Errorf("launch.workers = %s and %s for one worker, want absent", countOf(absent.Spec.Launch.Workers), countOf(one.Spec.Launch.Workers))
 	}
 	if got, want := one.Spec.Launch, absent.Spec.Launch; !equalLaunch(got, want) {
 		t.Errorf("workersPerInstance 1 changed the launch:\n got %+v\nwant %+v", got, want)
@@ -119,10 +119,13 @@ func TestPartitionSizingForWorkers(t *testing.T) {
 	if got, err := partitionSizingFor(q, 1, 2, nil); err != nil || got.GPUs != 2 {
 		t.Errorf("2 workers of 1 GPU under a 2-GPU QOS: %+v, %v; want 2 GPUs", got, err)
 	}
-	_, one := partitionSizingFor(planProvider(), 5, 1, nil)
-	_, alpha := partitionSizing(planProvider(), 5, nil)
-	if one == nil || alpha == nil || one.Error() != alpha.Error() {
-		t.Errorf("one worker's refusal %q differs from partitionSizing's %q", one, alpha)
+	// One worker's refusal is main's text, written out: partitionSizing is now partitionSizingFor's
+	// one-worker case, so comparing the two would compare the code with itself.
+	const alpha = "the serving spec needs 5 GPUs (tensor-parallel-size times pipeline-parallel-size), above the 4 per node of partition gpu-part; alpha Instances are single-node (HBEP-7, Provisioning)"
+	for _, err := range []error{second(partitionSizingFor(planProvider(), 5, 1, nil)), second(partitionSizing(planProvider(), 5, nil))} {
+		if err == nil || err.Error() != alpha {
+			t.Errorf("one worker's refusal %q, want main's %q", err, alpha)
+		}
 	}
 }
 
@@ -172,3 +175,6 @@ func TestWorkersTimesTheRungsMustFitTheRestartsKept(t *testing.T) {
 		t.Errorf("3 workers at 6 attempts, 30: %+v, %v; want sized", got, err)
 	}
 }
+
+// second is the error of a two-result call.
+func second[T any](_ T, err error) error { return err }
