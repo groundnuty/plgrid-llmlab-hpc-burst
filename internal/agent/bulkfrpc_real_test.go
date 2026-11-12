@@ -326,7 +326,7 @@ func TestBulkFrpcRestartsAlone(t *testing.T) {
 	if tokID.PID == 0 || tokID.StartTime == 0 || bulkID.PID == 0 || bulkID.StartTime == 0 {
 		t.Fatalf("recorded IDs %+v and %+v lack a PID or a start time", tokID, bulkID)
 	}
-	pidfdKill(t, bulkID)
+	pidfdKillID(t, bulkID)
 	eventually(t, 20*time.Second, "the bulk frpc to start again", func() bool { return bulkStarts.count() >= 2 })
 	again, _ := bulkStarts.last()
 	if again == bulkID {
@@ -360,7 +360,7 @@ func TestTokenFrpcRestartLeavesBulk(t *testing.T) {
 	if tokID.PID == 0 || tokID.StartTime == 0 || bulkID.PID == 0 || bulkID.StartTime == 0 {
 		t.Fatalf("recorded IDs %+v and %+v lack a PID or a start time", tokID, bulkID)
 	}
-	pidfdKill(t, tokID)
+	pidfdKillID(t, tokID)
 	eventually(t, 20*time.Second, "the token frpc to start again", func() bool { return tokStarts.count() >= 2 })
 	again, _ := tokStarts.last()
 	if again == tokID {

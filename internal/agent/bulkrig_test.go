@@ -46,11 +46,11 @@ import (
 
 // ---- processes, signalled by pidfd only ----
 
-// pidfdKill sends KILL to the process the ID names, through a pidfd opened for
+// pidfdKillID sends KILL to the process the ID names, through a pidfd opened for
 // it, after checking that the process behind the descriptor is the recorded one:
 // the start time of PID is read again once the descriptor is open, and a PID
 // that shows another start time was reaped and reused, so nothing is sent.
-func pidfdKill(t testing.TB, id agent.ProcessID) {
+func pidfdKillID(t testing.TB, id agent.ProcessID) {
 	t.Helper()
 	if err := pidfdSignal(id, syscall.SIGKILL); err != nil {
 		t.Fatalf("kill %d: %v", id.PID, err)
