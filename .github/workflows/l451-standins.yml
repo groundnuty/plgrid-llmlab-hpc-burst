@@ -1,0 +1,122 @@
+# THROWAWAY, never merged: #451's stand-ins (internal/alpha, standin_long_test.go) on hosted runners, each at -count=10 under two nice-19
+# spinners (IMPL-COMMON: stand-ins and heavy runs go on hosted runners). Read-only: no secret, cache restore only, nothing saved.
+# One job per test and row: TestStandInATunnelRowWhoseLongStreamDoesNotFitIsNotRun (the floor raised above what fits, so the tunnel row
+# ends NOT RUN before any request of the hour; tunnel-hour-athena and tunnel-hour-helios) and
+# TestStandInTheTunnelHoursLongStreamIsItsCapWhenTheContextHoldsIt (tunnel-hour-athena over the stand-in: the hour passes, and its record
+# and text to post carry the plan, the stand-ins' cap of 67.5 s). A hour's run takes about 15 minutes, so ten of them take about 150.
+name: l451-standins
+on:
+  pull_request:
+    paths:
+      - .github/workflows/l451-standins.yml
+permissions:
+  contents: read
+jobs:
+  standin:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: notrun-athena, run: "^TestStandInATunnelRowWhoseLongStreamDoesNotFitIsNotRun$/^tunnel-hour-athena$", count: 10, timeout: 100m}
+          - {name: notrun-helios, run: "^TestStandInATunnelRowWhoseLongStreamDoesNotFitIsNotRun$/^tunnel-hour-helios$", count: 10, timeout: 100m}
+          - {name: cap-athena, run: "^TestStandInTheTunnelHoursLongStreamIsItsCapWhenTheContextHoldsIt$", count: 10, timeout: 200m}
+    name: standin ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 230
+    env:
+      K3S_VERSIONS: '["1.36.5"]'
+    steps:
+      - name: Check out the pull request's head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Read the Go version from go.mod
+        id: goversion
+        run: |
+          version=$(bash hack/fetch-go.sh --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the cached Go archive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}
+
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
+
+      - name: Check the Go on PATH is the pinned toolchain
+        run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
+
+      - name: Download and verify the Go modules
+        run: bash hack/go-mod-download.sh
+
+      - name: Restore the cached pinned binaries
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/k3s-bin
+            ${{ runner.temp }}/frp
+          key: binaries-rehearsal-k3s-${{ join(fromJSON(env.K3S_VERSIONS), '-') }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-frp.sh', 'hack/fetch-k3s.sh', 'internal/launcher/k3s-pins.txt') }}
+
+      - name: Fetch the pinned k3s binary
+        run: |
+          echo "HPCBURST_BIN_DIR=$RUNNER_TEMP/k3s-bin" >> "$GITHUB_ENV"
+          bash hack/fetch-k3s.sh "$RUNNER_TEMP/k3s-bin" ${{ join(fromJSON(env.K3S_VERSIONS), ' ') }}
+
+      - name: Fetch the pinned frp binaries
+        run: |
+          bash hack/fetch-frp.sh "$RUNNER_TEMP/frp"
+          {
+            echo "HPCBURST_FRP_DIR=$RUNNER_TEMP/frp"
+            echo "HPCBURST_REQUIRE_FRP=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Provide OpenSSH's sshd for the fake login node
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+            sudo chmod 755 /usr/sbin/policy-rc.d
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+            sudo rm -f /usr/sbin/policy-rc.d
+          fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
+          /usr/sbin/sshd -V 2>&1 | head -1
+          {
+            echo "HPCBURST_SSHD=/usr/sbin/sshd"
+            echo "HPCBURST_REQUIRE_SSHD=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Build the stack's four binaries and the test binary
+        run: |
+          mkdir -p "$RUNNER_TEMP/stack-bin"
+          go build -o "$RUNNER_TEMP/stack-bin/" ./cmd/hpcburst ./cmd/hpcburst-controller ./cmd/hpcburst-front ./cmd/hb-agent
+          go test -c -o "$RUNNER_TEMP/alpha.test" ./internal/alpha
+          echo "HPCBURST_REHEARSAL_BIN=$RUNNER_TEMP/stack-bin" >> "$GITHUB_ENV"
+
+      - name: Run the stand-in under load (two spinners at nice 19)
+        working-directory: internal/alpha
+        env:
+          HPCBURST_ALPHA_STANDIN: "1"
+        run: |
+          for i in 1 2; do nice -n 19 sh -c 'while :; do :; done' & done
+          trap 'kill $(jobs -p) 2> /dev/null' EXIT
+          log="$RUNNER_TEMP/standin.log"
+          rc=0
+          "$RUNNER_TEMP/alpha.test" -test.v -test.count=${{ matrix.count }} -test.timeout ${{ matrix.timeout }} \
+            -test.run '${{ matrix.run }}' > "$log" 2>&1 || rc=$?
+          echo "exit=$rc"
+          echo "count asked: ${{ matrix.count }}"
+          echo "pass lines: $(grep -c -E '^(    )?--- PASS: ' "$log")"
+          echo "fail lines: $(grep -c -E '^(    )?--- FAIL: ' "$log")"
+          echo "skip lines: $(grep -c -E '^\s*--- SKIP: ' "$log")"
+          # What each run measured and said, never a path or a name beyond the row's: the plan of each run, each NOT RUN marker.
+          grep -h -E 'the long stream was sized for|the marker would say' "$log" | sed 's/^ *[a-z_]*\.go:[0-9]*: //' | sort | uniq -c | head -60 || true
+          grep -B2 -A25 -E '^\s*--- FAIL' "$log" | head -300 || true
+          exit "$rc"
