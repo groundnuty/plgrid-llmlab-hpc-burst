@@ -49,9 +49,8 @@ func TestFitLeadIsTheSmallerOfTheDeadlinesThirdAndWhatFits(t *testing.T) {
 		{"the prompt's reserve", 5 * time.Minute, 8512, 100, 40 * time.Second},
 		// The floor itself: (30512 - 512) / 500 / 2 = 30 s exactly runs.
 		{"exactly the floor", 5 * time.Minute, 30512, 500, 30 * time.Second},
-		// A deadline whose third is under the floor is the row's own timing: it runs with that third, as before the lead was
-		// sized (the floor binds what fits, not the deadline's third). (32768 - 512) / 100 / 2 = 161 s fits.
-		{"a deadline's third under the floor", 45 * time.Second, 32768, 100, 15 * time.Second},
+		// A deadline whose third is exactly the floor runs with it: 90 s / 3 = 30 s (the stand-ins' deadline), where (32768 - 512) / 100 / 2 = 161 s fits.
+		{"a deadline whose third is exactly the floor", 90 * time.Second, 32768, 100, 30 * time.Second},
 		// A rate so slow that the seconds that fit do not fit a Duration: the deadline's third.
 		{"a vanishing rate", 5 * time.Minute, 32768, 1e-12, 100 * time.Second},
 	} {
@@ -90,8 +89,13 @@ func TestFitLeadUnderTheFloorIsLeadTooShort(t *testing.T) {
 		// A context that is all reserve has no room for a stream.
 		{"a context of the reserve alone", 5 * time.Minute, 512, 100, 0},
 		{"a context under the reserve", 5 * time.Minute, 100, 100, 0},
-		// The floor judges what fits, so a short deadline's third does not rescue it.
-		{"a short deadline on a fast rate", 45 * time.Second, 32768, 600, 26 * time.Second},
+		// The floor judges the FINAL lead, so it is the deadline's third that is named when that is the shorter term: a deadline of 45 s
+		// has a third of 15 s, where (32768 - 512) / 600 / 2 = 26 s fits (the science agent's ruling (a) on #451, 12 Nov 2026).
+		{"a short deadline on a fast rate", 45 * time.Second, 32768, 600, 15 * time.Second},
+		// A deadline whose third is under the floor is NOT RUN on its own, whatever the context fits: (32768 - 512) / 100 / 2 = 161 s.
+		{"a short deadline on a slow rate", 45 * time.Second, 32768, 100, 15 * time.Second},
+		// 89 s / 3 = 29.67 s, named in whole seconds, as the marker prints it.
+		{"a deadline whose third is a hair under the floor", 89 * time.Second, 32768, 100, 29 * time.Second},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			got, err := FitLead(c.maxRequest, c.maxModelLen, c.rate)
