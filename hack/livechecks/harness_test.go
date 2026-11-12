@@ -292,6 +292,34 @@ func (w *world) start(extra []string, args ...string) (*exec.Cmd, *bytes.Buffer)
 	return cmd, &out
 }
 
+// stopBound bounds a test's wait for a script it has stopped (issue #494). A run that stops normally takes seconds, a loaded host
+// some more; past it the script is not stopping, and the test says what it was doing instead of waiting for the package's timeout.
+const stopBound = 60 * time.Second
+
+// waitBounded waits for cmd for at most bound, and says whether it did not exit in time (then err is nil).
+func waitBounded(cmd *exec.Cmd, bound time.Duration) (err error, timedOut bool) {
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return err, false
+	case <-time.After(bound):
+		return nil, true
+	}
+}
+
+// waitStopped waits for cmd, the reaper over a script that the test has signalled, for at most stopBound. When it does not exit in
+// time, the test fails with the output so far and a dump of the process tree (hangDump). The reaper is stopped by the test's cleanup
+// (reaperCommand), which closes its pipe so that it kills what is left. It returns what cmd.Wait returned.
+func (w *world) waitStopped(cmd *exec.Cmd, out *bytes.Buffer) error {
+	w.t.Helper()
+	err, timedOut := waitBounded(cmd, stopBound)
+	if timedOut {
+		w.t.Fatalf("the script did not stop within %s of its stop signal; its output so far:\n%s\nthe process tree, as it is now:\n%s", stopBound, out.String(), hangDump(cmd.Process.Pid))
+	}
+	return err
+}
+
 // signal sends sig to the reaper, which forwards it to the script, and returns once the reaper
 // has acknowledged the forward. A test that goes on to release what the script waits on needs
 // this: forwarding is asynchronous, and without the acknowledgement the script could see the

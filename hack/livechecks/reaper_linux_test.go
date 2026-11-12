@@ -4,6 +4,7 @@ package livechecks
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -89,4 +90,50 @@ func killMarked(mark string) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	}
+}
+
+// hangDump says what the process tree of the reaper root is doing, for a test that gave up waiting on it (issue #494): each process
+// (the reaper and its descendants) with its parent, its state, the kernel function it waits in and its command line, and, for the
+// script, its signal sets: SigPnd and ShdPnd (signals waiting to be delivered), SigBlk, SigIgn and SigCgt (blocked, ignored and caught).
+// A stop that the script never acted on shows as TERM (bit 15, mask 0x4000) pending or caught-and-blocked there. The flock locks held
+// by any of them are listed too (/proc/locks), since a wait on a host lock is a wait on its holder. It reads /proc and signals nothing.
+func hangDump(root int) string {
+	table, err := readProcTable()
+	if err != nil {
+		return "no process table: " + err.Error()
+	}
+	pids := append([]int{root}, descendantsOf(root, table)...)
+	in := map[int]bool{}
+	var b strings.Builder
+	for _, p := range pids {
+		in[p] = true
+		cmd, _ := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", p))
+		wchan, _ := os.ReadFile(fmt.Sprintf("/proc/%d/wchan", p))
+		args := strings.TrimSpace(strings.ReplaceAll(string(cmd), "\x00", " "))
+		if len(args) > 160 {
+			args = args[:160] + "..."
+		}
+		fmt.Fprintf(&b, "  pid %d ppid %d state %c wchan %s: %s\n", p, table[p].ppid, table[p].state, strings.TrimSpace(string(wchan)), args)
+		if strings.Contains(string(cmd), "live-checks.sh") {
+			st, _ := os.ReadFile(fmt.Sprintf("/proc/%d/status", p))
+			for _, l := range strings.Split(string(st), "\n") {
+				for _, k := range []string{"SigPnd", "ShdPnd", "SigBlk", "SigIgn", "SigCgt"} {
+					if strings.HasPrefix(l, k+":") {
+						b.WriteString("    " + l + "\n")
+					}
+				}
+			}
+		}
+	}
+	if locks, err := os.ReadFile("/proc/locks"); err == nil {
+		for _, l := range strings.Split(string(locks), "\n") {
+			f := strings.Fields(l)
+			if len(f) > 4 {
+				if pid, err := strconv.Atoi(f[4]); err == nil && in[pid] {
+					b.WriteString("  lock: " + l + "\n")
+				}
+			}
+		}
+	}
+	return b.String()
 }

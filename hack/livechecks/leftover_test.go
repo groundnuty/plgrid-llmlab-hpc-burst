@@ -2,6 +2,7 @@ package livechecks
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -403,4 +404,70 @@ sleep 600`
 		// The subtest ends here, with the run going.
 	})
 	waitUntil(t, "every process of the ended run to go", func() bool { return len(markedPIDs(mark)) == 0 })
+}
+
+// The bounded wait of a stopped script (issue #494) gives up on one that does not stop, and its dump names what the tree is doing: a
+// script that ignores TERM (here a bash named live-checks.sh, blocked reading a pipe the test holds open) shows TERM in its ignored
+// signals and its parent, and the wait returns within its bound instead of waiting for ever. The expectations are the signal's number (TERM is 15,
+// so bit 14 of the masks) and the bound given.
+func TestAStoppedScriptThatDoesNotStopIsGivenUpOnAndItsDumpNamesIt(t *testing.T) {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pw.Close()
+	defer pr.Close()
+	cmd := exec.Command("bash", "-c", `trap '' TERM; read x`, "live-checks.sh")
+	cmd.Stdin = pr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	// The script ignores TERM once its trap is in: wait on that state, not on a time.
+	var dump string
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		dump = hangDump(cmd.Process.Pid)
+		if ignoresTerm(dump) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the script never showed TERM among its ignored signals:\n%s", dump)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// The process's state is not asserted: a read of /proc can catch it running for the instant it takes to enter its read.
+	if want := fmt.Sprintf("pid %d ppid %d state ", cmd.Process.Pid, os.Getpid()); !strings.Contains(dump, want) || !strings.Contains(dump, "live-checks.sh") {
+		t.Errorf("the dump does not show the script with its parent:\n%s", dump)
+	}
+	// And the wait is bounded: signalled, the script still does not exit, so the wait ends at the bound, reporting it.
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	type res struct {
+		err      error
+		timedOut bool
+	}
+	got := make(chan res, 1)
+	go func() { e, to := waitBounded(cmd, 300*time.Millisecond); got <- res{e, to} }()
+	select {
+	case r := <-got:
+		if !r.timedOut {
+			t.Errorf("waitBounded returned (%v, timed out %t) for a script that ignores TERM, want it to give up at its bound", r.err, r.timedOut)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("waitBounded did not return: its wait is not bounded")
+	}
+}
+
+// ignoresTerm reports whether the dump's SigIgn line has bit 14 (SIGTERM, signal 15) set.
+func ignoresTerm(dump string) bool {
+	for _, l := range strings.Split(dump, "\n") {
+		if f := strings.Fields(l); len(f) == 2 && f[0] == "SigIgn:" {
+			if v, err := strconv.ParseUint(f[1], 16, 64); err == nil && v&(1<<14) != 0 {
+				return true
+			}
+		}
+	}
+	return false
 }

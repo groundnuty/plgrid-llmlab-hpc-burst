@@ -171,7 +171,7 @@ func TestSignalStopsTheTestAndRunsTheCleanup(t *testing.T) {
 	cmd, out := w.start([]string{"STUB_TEST_MODE=sleep"}, "--run", "conformance-helios", "--yes")
 	w.waitFor("started")
 	w.signal(cmd, syscall.SIGTERM)
-	err := cmd.Wait()
+	err := w.waitStopped(cmd, out)
 	w.noLeak(out.String())
 	w.noLeftoverProcess(cmd)
 	if exitCode(err) == 0 {
@@ -402,7 +402,7 @@ func TestSignalDuringTheBuildStopsBeforeTheSlotIsTaken(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(w.state, "release"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := cmd.Wait()
+	err := w.waitStopped(cmd, out)
 	w.noLeak(out.String())
 	w.noLeftoverProcess(cmd)
 	if exitCode(err) == 0 {

@@ -47,6 +47,7 @@ done
 echo "squeue ${fmt}${id:+ job}" >> "$STUB_STATE/events"
 if [ -n "$id" ]; then
   touch "$STUB_STATE/polled"
+  if [ -n "${STUB_SQUEUE_HOLD:-}" ] && [ ! -e "$STUB_STATE/held" ]; then touch "$STUB_STATE/held"; until [ -e "$STUB_STATE/release-squeue" ]; do sleep 0.02; done; fi
   if [ -n "${LIVE_FAKE_CLOCK:-}" ] && [ -n "${STUB_CLOCK_STEP:-}" ]; then echo $(( $(cat "$LIVE_FAKE_CLOCK") + STUB_CLOCK_STEP )) > "$LIVE_FAKE_CLOCK"; fi
   if [ -e "$STUB_STATE/forever-$id" ]; then cat "$STUB_STATE/forever-$id"; exit 0; fi
   f="$STUB_STATE/jobstates-$id"
