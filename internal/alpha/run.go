@@ -37,8 +37,12 @@ import (
 // that fits the deployment's max-model-len at the engine's measured rate is under LeadFloor (ErrLeadTooShort), so no
 // stream long enough to tell a cut from an end can cross the drain start. Nothing was driven past the rate stream, and
 // the run's jobs are cancelled by their tags.
+//
+// A fifth is the tunnel rows' (issue #451; the science agent's ruling (b), 12 Nov 2026): the stream that fits the deployment's
+// max-model-len at the engine's measured rate is under the row's LongFloor (ErrLongTooShort), so the hour cannot hold the
+// long stream its check 2 asks for. Nothing was sent but the rate stream.
 func NotRun(_ Row, err error) bool {
-	return neverStarted(err) || errors.Is(err, ErrRequeueRefused) || errors.Is(err, ErrWarmUnshown) || errors.Is(err, ErrSlotTaken) || errors.Is(err, ErrLeadTooShort)
+	return neverStarted(err) || errors.Is(err, ErrRequeueRefused) || errors.Is(err, ErrWarmUnshown) || errors.Is(err, ErrSlotTaken) || errors.Is(err, ErrLeadTooShort) || errors.Is(err, ErrLongTooShort)
 }
 
 // neverStarted is whether err says a job of the run never started within a bound.
@@ -59,6 +63,14 @@ func NotRunNote(row Row, pendingMax time.Duration, err error) string {
 			reason = " (" + lt.counts() + ")"
 		}
 		return fmt.Sprintf("%s: %s%s; the run opened no stream across the drain start; this run's jobs were cancelled by tag\n", row.Name, leadTooShortWords, reason)
+	}
+	if errors.Is(err, ErrLongTooShort) {
+		reason := ""
+		var lt *LongTooShortError
+		if errors.As(err, &lt) {
+			reason = " (" + lt.counts() + ")"
+		}
+		return fmt.Sprintf("%s: %s%s; the hour was not started; this run's jobs were cancelled by tag\n", row.Name, longTooShortWords, reason)
 	}
 	if errors.Is(err, ErrRequeueRefused) || errors.Is(err, ErrWarmUnshown) || errors.Is(err, ErrSlotTaken) {
 		why := notRunWhy(err)

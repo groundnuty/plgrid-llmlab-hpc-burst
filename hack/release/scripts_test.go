@@ -343,9 +343,10 @@ func newFixtureIn(t *testing.T, base string) *fixture {
 	f := &fixture{dir: filepath.Join(base, "repo"), seed: filepath.Join(base, "seed"), out: filepath.Join(base, "out")}
 	goVer := strings.TrimPrefix(runtime.Version(), "go")
 	write(t, filepath.Join(f.dir, "go.mod"), "module github.com/groundnuty/plgrid-llmlab-hpc-burst\n\ngo "+goVer+"\n", 0o644)
-	for _, cmd := range []string{"hpcburst", "hpcburst-controller", "hpcburst-front", "hb-agent"} {
+	for _, cmd := range []string{"hpcburst", "hpcburst-controller", "hpcburst-front"} {
 		write(t, filepath.Join(f.dir, "cmd", cmd, "main.go"), "package main\n\nfunc main() {}\n", 0o644)
 	}
+	write(t, filepath.Join(f.dir, "cmd", "hb-agent", "main.go"), agentStandIn, 0o644)
 	for name, body := range dataFiles {
 		write(t, filepath.Join(f.dir, name), body, 0o644)
 	}

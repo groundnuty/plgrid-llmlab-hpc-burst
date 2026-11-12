@@ -140,7 +140,7 @@ func TestTheRowsThatStartNoStackAreNotAskedForTheBinDir(t *testing.T) {
 	w.useAlphaStubs()
 	// The cluster table's rows that the stack rows are not: written out, and checked against the table below.
 	noStack := []string{
-		"gpu-accounting-helios", "gpu-accounting-athena",
+		"gpu-accounting-helios", "gpu-accounting-athena", "gpu-accounting-athena-now",
 		"conformance-helios", "conformance-helios-gh200", "conformance-athena",
 		"alpha-athena-now-stage",
 		"reach-helios", "reach-athena", "reach-host-dialed-helios", "reach-host-dialed-athena",

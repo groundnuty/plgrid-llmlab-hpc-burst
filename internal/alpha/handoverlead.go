@@ -13,11 +13,11 @@ import (
 	"time"
 )
 
-// LeadFloor is the shortest fitting lead a row runs with. A stream opens one lead before the drain start and lasts two,
+// LeadFloor is the shortest lead a row runs with. A stream opens one lead before the drain start and lasts two,
 // so a lead under the floor leaves a stream that only just straddles the drain start: its end could be told from a cut by
-// less than the floor's seconds, and a row that ran on that would be a weaker pass. The floor applies to the lead that
-// fits the deployment's context (the second term of the minimum), not to MaxRequestDuration/3: a deadline short enough
-// to make that one under the floor is the row's own timing, as it was before the lead was sized.
+// less than the floor's seconds, and a row that ran on that would be a weaker pass. The floor applies to the FINAL lead,
+// min(MaxRequestDuration/3, what the context fits), whichever term set it (the science agent's ruling (a) on #451, 12 Nov
+// 2026): a deadline whose third is under the floor is NOT RUN too.
 const LeadFloor = 30 * time.Second
 
 // PromptReserve is how many tokens of a deployment's max-model-len a stream leaves for its prompt (tokensFor's margin).
@@ -60,8 +60,9 @@ func (e *LeadTooShortError) Is(target error) bool { return target == ErrLeadTooS
 // the stream still fits (a stream of 2*fit seconds holds at most the room), and the lead is a number a person can read:
 // at 199 tokens a second with a context of 32768 it is 81 s (81.04 before the rounding).
 //
-// A fit under LeadFloor is a *LeadTooShortError (ErrLeadTooShort). A rate that is not a positive finite number, or a
-// request deadline that is not positive, is a plain error: the caller measured nothing a lead can be sized from.
+// A lead under LeadFloor, whichever of the two terms set it (the context's fit, or a deadline whose third is short), is a
+// *LeadTooShortError (ErrLeadTooShort). A rate that is not a positive finite number, or a request deadline that is not positive,
+// is a plain error: the caller measured nothing a lead can be sized from.
 func FitLead(maxRequest time.Duration, maxModelLen int, rate float64) (time.Duration, error) {
 	if !(rate > 0) || math.IsInf(rate, 0) {
 		return 0, fmt.Errorf("a lead cannot be sized from a measured rate of %v tokens/s", rate)
@@ -70,14 +71,15 @@ func FitLead(maxRequest time.Duration, maxModelLen int, rate float64) (time.Dura
 		return 0, fmt.Errorf("a lead cannot be sized from a request deadline of %s", maxRequest)
 	}
 	room := max(maxModelLen-PromptReserve, 0)
-	secs := float64(room) / rate / 2
-	if secs < LeadFloor.Seconds() {
-		// Under the floor, so no overflow in the conversion.
-		return 0, &LeadTooShortError{Rate: rate, MaxModelLen: maxModelLen, Fit: wholeSeconds(secs)}
-	}
 	// Past the deadline's third the fit does not bind. Capping the seconds first keeps a very slow rate from overflowing the Duration.
-	fit := wholeSeconds(min(secs, maxRequest.Seconds()))
-	return min(maxRequest/3, fit), nil
+	fit := wholeSeconds(min(float64(room)/rate/2, maxRequest.Seconds()))
+	lead := min(maxRequest/3, fit)
+	// The floor judges the FINAL lead, whichever term set it: a deadline whose third is under it is NOT RUN too (the science agent's
+	// ruling (a) on #451, 12 Nov 2026, from the review of #449). Fit then names the lead in whole seconds, as the marker prints it.
+	if lead < LeadFloor {
+		return 0, &LeadTooShortError{Rate: rate, MaxModelLen: maxModelLen, Fit: wholeSeconds(lead.Seconds())}
+	}
+	return lead, nil
 }
 
 // wholeSeconds is secs, which is not negative, as a Duration of whole seconds, rounded down: Go's conversion of a float to an

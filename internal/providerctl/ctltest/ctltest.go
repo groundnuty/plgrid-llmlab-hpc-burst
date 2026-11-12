@@ -87,3 +87,35 @@ func Frpc(t testing.TB, dir, cpuArch string) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
+
+// CertPair returns the bulk path's two certificates for one key, as the launcher issues them (beta;
+// HBEP-6, The bulk path): the first names agentapi.DialHomeServerName, the second
+// agentapi.BulkDialHomeServerName only, and the pin is the key's, which both carry. Every call has
+// its own key. A test that judges a file's name parses it with crypto/x509; it never asks this
+// helper which name a file has.
+func CertPair(t testing.TB) (firstPEM, bulkPEM []byte, pin string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := func(serial int64, name string) []byte {
+		tmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(serial), Subject: pkix.Name{CommonName: "example launcher"},
+			DNSNames:  []string{name},
+			NotBefore: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC), NotAfter: time.Date(2120, 1, 1, 0, 0, 0, 0, time.UTC),
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	}
+	firstPEM, bulkPEM = issue(1, agentapi.DialHomeServerName), issue(2, agentapi.BulkDialHomeServerName)
+	blk, _ := pem.Decode(firstPEM)
+	c, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return firstPEM, bulkPEM, agentapi.PinOf(c)
+}
