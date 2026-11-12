@@ -310,7 +310,8 @@ func TestTheShapeLeaksNothing(t *testing.T) {
 		t.Errorf("the shape leaks %q:\n%s", leaks, shape)
 	}
 	if !strings.Contains(shape, "\n  d1 runtime-parent in-job:cgroup env:unreadable cgroup:job_<n> argv:program meets:job\n") ||
-		!strings.Contains(shape, "\n  d2 python in-job:cgroup env:no cgroup:job_<n> argv:python-options-script meets:job+apptainer+command\n") {
+		!strings.Contains(shape, "\n  d2 python in-job:cgroup env:no cgroup:job_<n> argv:python-options-script meets:job+apptainer+command\n") ||
+		!strings.Contains(shape, "\n  d1 shell in-job:env+cgroup env:job cgroup:job_<n> argv:program meets:job") {
 		t.Errorf("the shape does not show the engine under the runtime parent:\n%s", shape)
 	}
 	if p, err := PickEngine(procs, command, MatchesCommand); err != nil || p.PID != 3456703 {
