@@ -95,6 +95,10 @@ func (p *Proxy) relay(w http.ResponseWriter, x *exchange, t *target, resp *http.
 	for k, vs := range resp.Header {
 		h[k] = append([]string(nil), vs...)
 	}
+	if x.retried && resp.StatusCode >= 500 {
+		// A 5xx after the front's own retry is a give-up (HBEP-5, open question 5).
+		h.Set(headerShouldRetry, "false")
+	}
 	stripHop(h)
 	h.Del("Content-Length")
 	h.Del("Content-Encoding")

@@ -150,10 +150,12 @@ func TestFaultNoByteReachesAnyTarget(t *testing.T) {
 	}
 }
 
-// TestFaultEngineErrorPassesThroughAndIsNeverResent: an Instance answers
-// with an error status. The request had reached the engine, so it is not sent
-// again, not even to the other Instance that would answer it: the client gets
-// the engine's status and body unchanged, and the engines together saw it once.
+// TestFaultEngineErrorPassesThroughAndIsNeverResent: the only Instance answers
+// with an error status. The request had reached the engine, and no other
+// Instance is ready to retry to, so it is not sent again: the client gets the
+// engine's status and body unchanged, and the engine saw it once. (With another
+// Instance ready a 5xx before any body byte is retried there once, HBEP-5's
+// open question 5 as decided for beta: retry_test.go.)
 func TestFaultEngineErrorPassesThroughAndIsNeverResent(t *testing.T) {
 	for _, tc := range []struct {
 		status int
@@ -163,9 +165,9 @@ func TestFaultEngineErrorPassesThroughAndIsNeverResent(t *testing.T) {
 		{503, `{"error":{"message":"the engine is not ready","type":"server_error","param":null,"code":503}}`},
 	} {
 		t.Run(fmt.Sprintf("status_%d", tc.status), func(t *testing.T) {
-			f := newScFix(t, scOpts{instances: 2, desired: 2})
+			f := newScFix(t, scOpts{instances: 1, desired: 1})
 			keys := scKeys(t, f.names, f.names[0], 1)
-			f.engines[0].Set(enginetest.Behaviour{Status: tc.status, ErrorBody: tc.body}) // B is healthy
+			f.engines[0].Set(enginetest.Behaviour{Status: tc.status, ErrorBody: tc.body})
 
 			resp, body := scChatOnce(t, f.harness, keys[0])
 			if resp.StatusCode != tc.status || body != tc.body {
@@ -174,8 +176,11 @@ func TestFaultEngineErrorPassesThroughAndIsNeverResent(t *testing.T) {
 			if scEmitterOf(resp) != "instance" || scInstanceOf(resp) != f.names[0] {
 				t.Errorf("emitter %q instance %q, want instance and %s", scEmitterOf(resp), scInstanceOf(resp), f.names[0])
 			}
-			if got := f.counts(); got[0] != 1 || got[1] != 0 {
-				t.Errorf("the engines saw %v requests, want [1 0]: never sent again", got)
+			if got := f.counts(); len(got) != 1 || got[0] != 1 {
+				t.Errorf("the engines saw %v requests, want [1]: never sent again", got)
+			}
+			if v := resp.Header.Get(headerShouldRetry); v != "" {
+				t.Errorf("x-should-retry %q with no retry possible, want none (a one-Instance deployment is unchanged)", v)
 			}
 		})
 	}
