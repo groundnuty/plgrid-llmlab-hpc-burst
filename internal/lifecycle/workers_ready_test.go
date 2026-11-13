@@ -322,3 +322,23 @@ func TestAWorkerFailingRightAfterTheFirstReadyIsJudgedByItsChecks(t *testing.T) 
 		t.Errorf("the restart is %+v, want worker-1's for RouterCheckFailing", r)
 	}
 }
+
+// worker-1 dies and is restarted, and the agent's path goes down before it applies the raised generation:
+// for the next 90 seconds, past the restart backoff and within health.agentTimeout, the controller holds
+// only the agent's last report, worker-1 exited at generation 0. That raises nothing more: one death is
+// one restart (HBEP-7).
+func TestAWorkerWhoseRestartTheAgentHasNotAppliedSignalsNothing(t *testing.T) {
+	rg, ag, name := readyTwo(t, nil)
+	ag.CrashWorker("worker-1", 1)
+	for len(rg.instance(name).Status.Restarts) == 0 {
+		startStep(rg, "md", startTick)
+	}
+	ag.Silence(true)
+	for range 9 {
+		startStep(rg, "md", startTick)
+	}
+	if parts := restartParts(rg.instance(name)); !slices.Equal(parts, []string{"worker-1"}) {
+		t.Errorf("restarts %v, want one, worker-1's", parts)
+	}
+	ag.Silence(false)
+}

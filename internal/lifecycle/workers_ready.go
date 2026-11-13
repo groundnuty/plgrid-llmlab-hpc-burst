@@ -141,11 +141,11 @@ func (p *pass) workerSignal(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, a
 }
 
 // workerRouterCheck is worker w's router signal: the router holds it failing its active check for
-// health.failureThreshold reports in a row, counted only once the router has admitted it at its current
-// generation.
+// health.failureThreshold reports in a row. workerSignal asks it only for a worker the router has admitted
+// at its current generation, so the failures counted before then never judge it (Q2).
 func workerRouterCheck(in *v1alpha1.Instance, av agentView, st settings, w string) (string, string) {
 	rr := currentRouter(in, av)
-	if rr == nil || rr.Phase != agentapi.PartRunning || !routerAdmitted(in, w) {
+	if rr == nil || rr.Phase != agentapi.PartRunning {
 		return "", ""
 	}
 	for _, rw := range rr.Workers {
