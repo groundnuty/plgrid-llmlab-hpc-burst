@@ -204,3 +204,36 @@ func TestTwoStuckWorkersBesideAnIdleOneEachRestart(t *testing.T) {
 		t.Errorf("restarts %v, want %v", parts, want)
 	}
 }
+
+// A skew seen for two reports, then no report for 110 s (below agentTimeout's 2m, so the agent is not
+// unreachable), then reports resuming skewed: the last report went stale in the silence, which starts the
+// clock again, so the signal waits a whole kvSkewTimeout from the reports' return and never fires on
+// snapshots 110 s apart (#525's review).
+func TestASkewAcrossASilenceWaitsAWholeKVSkewTimeoutFromTheReturn(t *testing.T) {
+	g := map[string]afake.Gauges{"worker-0": idleGauges, "worker-1": idleGauges}
+	rg, name := skewRig(t, 2, g, nil)
+	var ag *afake.Agent
+	for _, ra := range rg.agents {
+		ag = ra.agent
+	}
+	g["worker-1"] = stuckGauges
+	if rs := stepFor(t, rg, name, 2*startTick, 0); len(rs) != 0 {
+		t.Fatalf("restarts %+v in the skew's first two ticks", rs)
+	}
+	ag.Silence(true)
+	if rs := stepFor(t, rg, name, 110*time.Second, 0); len(rs) != 0 {
+		t.Fatalf("restarts %+v while the agent was silent: the skew was seen for two reports", rs)
+	}
+	ag.Silence(false)
+	resumeAt := rg.clock.Now()
+	if rs := stepFor(t, rg, name, defaultKVSkewTimeout-2*startTick, 0); len(rs) != 0 {
+		t.Fatalf("restarts %+v within kvSkewTimeout of the reports' return (%s after it): the stale report must start the clock again", rs, rg.clock.Now().Sub(resumeAt))
+	}
+	var rs []v1alpha1.InstanceRestart
+	for end := resumeAt.Add(defaultKVSkewTimeout + 3*startTick); rg.clock.Now().Before(end) && len(rs) == 0; {
+		rs = stepFor(t, rg, name, startTick, 0)
+	}
+	if len(rs) != 1 || rs[0].Part != "worker-1" || rs[0].Signal != v1alpha1.ReasonKVSkew {
+		t.Errorf("restarts %+v, want worker-1's KVSkew kvSkewTimeout after the reports' return", rs)
+	}
+}

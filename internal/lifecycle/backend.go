@@ -54,7 +54,7 @@ type tracker struct {
 	// lastRead is the MetricsReadAt of the last sample taken in.
 	lastRead *time.Time
 	// skewSince is when this process's KV skew began, zero while it is not skewed, and skewSeen the
-	// receipt time of the last report it was judged on, so each report is judged once (kvskew.go).
+	// receipt time of the last report it was judged on, so a start is taken once per report (kvskew.go).
 	skewSince, skewSeen time.Time
 	// samples hold only reads with a known ResponsesByStatus.
 	samples []healthSample
@@ -330,13 +330,18 @@ func (s *agentState) track(instUID string, w agentapi.WorkerReport, now time.Tim
 	}
 }
 
-// skewClock advances worker w's KV-skew clock by the report received at reportAt, once per report, and
-// returns since when the skew has held: zero while it does not, or when the process has no tracker (no
-// metrics read yet), which never starts a clock (kvskew.go). The skew holds while the report's gauges
-// show it (skewed) and the worker is not draining: its generated-token counter known and unchanged since
-// the clock started (HBEP-7: a loaded worker still generates tokens; the science agent's correction on
-// #518). Gauges that don't show it stop the clock; a counter that moved starts it again at this report.
-func (b *Backend) skewClock(allocUID types.UID, instUID string, w agentapi.WorkerReport, reportAt time.Time, skewed bool) time.Time {
+// skewClock advances worker w's KV-skew clock by the report received at reportAt and returns since when
+// the skew has held: zero while it does not, or when the process has no tracker (no metrics read yet),
+// which never starts a clock (kvskew.go). The skew holds while the report, judged at this pass, shows it
+// (skewed: fresh gauges included) and the worker is not draining: its generated-token counter known, in
+// this sample and as the tracker's baseline, and unchanged since the clock started (HBEP-7, by #520).
+//
+// A stop applies at every pass: a report that has gone stale since a pass that judged it skewed stops the
+// clock at the next pass on it (#525's review). A start is taken once per report, so a pass on a report
+// already judged never starts it again. And a report received more than bound (two probe intervals, the
+// gauges' freshness) after the last one judged starts it again at that report: between them no fresh
+// report showed the skew, which HBEP-7 counts as stale, even when no pass ran to see it.
+func (b *Backend) skewClock(allocUID types.UID, instUID string, w agentapi.WorkerReport, reportAt time.Time, skewed bool, bound time.Duration) time.Time {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	s, ok := b.agents[string(allocUID)]
@@ -347,14 +352,19 @@ func (b *Backend) skewClock(allocUID types.UID, instUID string, w agentapi.Worke
 	if !ok {
 		return time.Time{}
 	}
-	if !reportAt.Equal(t.skewSeen) {
+	newReport := !reportAt.Equal(t.skewSeen)
+	gap := newReport && !t.skewSeen.IsZero() && reportAt.Sub(t.skewSeen) > bound
+	if newReport {
 		t.skewSeen = reportAt
-		switch {
-		case !skewed || t.tokens == nil:
-			t.skewSince = time.Time{}
-		case t.skewSince.IsZero() || t.tokensSince.After(t.skewSince):
-			t.skewSince = reportAt
-		}
+	}
+	h := w.Health
+	switch {
+	case !skewed || h == nil || h.GeneratedTokens == nil || t.tokens == nil:
+		t.skewSince = time.Time{}
+	case !newReport:
+		// A report already judged: a start is never taken twice.
+	case t.skewSince.IsZero() || gap || t.tokensSince.After(t.skewSince):
+		t.skewSince = reportAt
 	}
 	return t.skewSince
 }

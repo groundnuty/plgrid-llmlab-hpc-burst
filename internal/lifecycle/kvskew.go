@@ -63,8 +63,8 @@ func workerSkewed(in *v1alpha1.Instance, av agentView, w string) bool {
 	return false
 }
 
-// kvSkewSignal is worker w's KV-skew signal: its skew clock, advanced by the current report, has run
-// health.kvSkewTimeout. The clock is kept per process in the Backend's tracker and floored at this
+// kvSkewSignal is worker w's KV-skew signal: its skew clock, advanced by the current report judged at
+// this pass (a report gone stale stops it), has run health.kvSkewTimeout. The clock is kept per process in the Backend's tracker and floored at this
 // controller's start, so a restarted controller starts it again (Q4): it delays the signal and never
 // hastens it. Until the signal is due, the pass is asked back at its deadline.
 func (p *pass) kvSkewSignal(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agentView, st settings, w *agentapi.WorkerReport) (string, string) {
@@ -83,16 +83,19 @@ func (p *pass) kvSkewSignal(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, a
 	return v1alpha1.ReasonKVSkew, fmt.Sprintf("%s has sat at a full KV cache with requests waiting and its token counter flat, while a sibling idles, for %s", w.Name, p.now.Sub(since))
 }
 
-// advanceSkew advances worker w's skew clock by the current report and returns its start.
+// advanceSkew advances worker w's skew clock by the current report, judged at this pass, and returns its
+// start. The bound is the gauges' freshness, two probe intervals (agentapi.Health.MetricsFresh).
 func (p *pass) advanceSkew(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agentView, w *agentapi.WorkerReport) time.Time {
-	return p.r.Backend.skewClock(alloc.UID, string(in.UID), *w, av.reportAt, workerSkewed(in, av, w.Name))
+	bound := agentapi.MetricsStaleProbeIntervals * av.probeInterval
+	return p.r.Backend.skewClock(alloc.UID, string(in.UID), *w, av.reportAt, workerSkewed(in, av, w.Name), bound)
 }
 
-// advanceSkewClocks advances every worker's skew clock by the current report, once per pass, before any
+// advanceSkewClocks advances every worker's skew clock by the current report at every pass, before any
 // signal is taken: a worker whose signal is not asked this pass, behind another's, still has every report
-// judged, a clear included.
+// judged, a clear or a report gone stale included. An unreachable agent's last report is judged too: it
+// is not skewed (workerSkewed), which stops the clocks.
 func (p *pass) advanceSkewClocks(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agentView) {
-	if av.report == nil || av.unreachable {
+	if av.report == nil {
 		return
 	}
 	for i := range av.report.Workers {
