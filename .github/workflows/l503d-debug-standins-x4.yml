@@ -3,18 +3,18 @@
 # live steps over the real stack and the fake Slurm; it must end NOT RUN for the cold start only, and assert that the stack's release,
 # not the cleanup or the time limit, ended the job) and the warm one (TestStandInNowServeWarm: the pre-staged row passes). Read-only: no
 # secret, cache restore only, nothing saved.
-name: l503c-debug-standins
+name: l503d-debug-standins-x4
 on:
   pull_request:
     paths:
-      - .github/workflows/l503c-debug-standins.yml
+      - .github/workflows/l503d-debug-standins-x4.yml
 permissions:
   contents: read
 jobs:
   standin:
     name: standin ${{ matrix.name }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -152,8 +152,9 @@ jobs:
           rc=0
           HPCBURST_ALPHA_STANDIN=1 HPCBURST_REHEARSAL=1 HPCBURST_REHEARSAL_BIN="$STANDIN_OUT" HPCBURST_REQUIRE_FRP=1 HPCBURST_REQUIRE_SSHD=1 \
             systemd-run --user --scope -q -p MemoryMax=6G -p MemorySwapMax=0 \
-            "$STANDIN_OUT/alpha.test" -test.v -test.timeout 40m -test.run '${{ matrix.run }}' > "$log" 2>&1 || rc=$?
+            "$STANDIN_OUT/alpha.test" -test.v -test.count=4 -test.timeout 45m -test.run '${{ matrix.run }}' > "$log" 2>&1 || rc=$?
           echo "exit=$rc"
+          echo "iterations: pass $(grep -c -E '^--- PASS' "$log"), fail $(grep -c -E '^--- FAIL' "$log") of 4"
           echo "pass lines: $(grep -c -E '^--- PASS' "$log")"
           echo "fail lines: $(grep -c -E '^--- FAIL' "$log")"
           echo "skip lines: $(grep -c -E '^\s*--- SKIP' "$log")"
