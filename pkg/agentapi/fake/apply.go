@@ -58,6 +58,7 @@ func (a *Agent) applyRun(i agentapi.DesiredInstance, now time.Time) {
 		a.convergeWorkers(i, now)
 	}
 	in.applyChecks(a.engine, i, in.runsFor(i))
+	in.applyWorkerChecks(a.engine, i)
 	a.applyRouter(i)
 }
 

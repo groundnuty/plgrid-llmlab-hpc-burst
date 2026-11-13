@@ -329,3 +329,28 @@ func TestDuration(t *testing.T) {
 		t.Error("soon parsed")
 	}
 }
+
+// A worker's verification record (HBEP-7, Several workers): ver-<instance UID>-<worker>-<generation>,
+// a verification record's labels and contents, only the name carrying the worker.
+func TestWorkerVerificationRecordName(t *testing.T) {
+	const uid = "11111111-2222-3333-4444-555555555555"
+	if got, err := WorkerVerificationRecordName(uid, "worker-1", 3); err != nil || got != "ver-"+uid+"-worker-1-3" {
+		t.Errorf("worker-1's record of generation 3: %q, %v; want ver-%s-worker-1-3", got, err, uid)
+	}
+	for _, bad := range []struct {
+		uid    types.UID
+		worker string
+		gen    int64
+	}{{uid, "router", 1}, {uid, "worker-01", 1}, {uid, "worker-", 1}, {uid, "worker-1", 0}, {"not-a-uid", "worker-1", 1}} {
+		if got, err := WorkerVerificationRecordName(bad.uid, bad.worker, bad.gen); err == nil {
+			t.Errorf("WorkerVerificationRecordName(%q, %q, %d) = %q, want an error", bad.uid, bad.worker, bad.gen, got)
+		}
+	}
+	rec, err := NewWorkerVerificationRecord("ns", "md", strings.Repeat("d", 64), uid, "worker-1", 3, []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Name != "ver-"+uid+"-worker-1-3" || rec.Revision != 3 || rec.Labels[LabelRecord] != RecordVerification || rec.Labels[LabelInstanceUID] != uid {
+		t.Errorf("the record: name %q, revision %d, labels %v", rec.Name, rec.Revision, rec.Labels)
+	}
+}

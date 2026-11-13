@@ -29,6 +29,9 @@ const (
 // reports, then ready. A part that exits, or a start that outlasts
 // health.startTimeout, is a malfunction.
 func (p *pass) starting(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agentView, st settings) error {
+	if several(in) {
+		return p.startingWorkers(in, alloc, av, st)
+	}
 	if signal := p.startSignal(in, av, st); signal != "" {
 		return p.malfunction(in, alloc, signal, st)
 	}
@@ -297,9 +300,19 @@ func (p *pass) verified(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, v *ag
 	if data.Verdict == v1alpha1.VerdictPass {
 		return nil
 	}
+	return p.failedVerification(in, alloc, name, data, st,
+		func() (bool, error) { return p.r.earlierRehashFailure(p.ctx, in, gen) },
+		func() error { return p.restart(in, alloc, signalVerifyRead, "", st, data.Message) })
+}
+
+// failedVerification acts on a failed verification record: a failed rehash restages through the
+// whole-Instance rung, once (earlier says whether a rehash failed before); a failed engine read verifies
+// again after retry, a worker restart; a settings contradiction or a shape that does not fit stops the
+// class; and the Instance fails.
+func (p *pass) failedVerification(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, name string, data verificationData, st settings, earlier func() (bool, error), retry func() error) error {
 	switch data.Cause {
 	case causeRehash:
-		earlier, err := p.r.earlierRehashFailure(p.ctx, in, gen)
+		earlier, err := earlier()
 		if err != nil {
 			return err
 		}
@@ -314,7 +327,7 @@ func (p *pass) verified(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, v *ag
 		// not a verdict on the engine: verify again after a worker restart,
 		// the ladder's first rung, which the restart limits bound (review of
 		// PR 88).
-		return p.restart(in, alloc, signalVerifyRead, "", st, data.Message)
+		return retry()
 	case causeContradiction, causeShape:
 		lifts := stopLifts(data.Cause, true)
 		// The Instance caused it, so it is the event's related object (HBEP-8, Events; as for CapacityDropped).
@@ -431,6 +444,11 @@ func (r *Reconciler) writeVerification(ctx context.Context, md string, in *v1alp
 	if err != nil {
 		return err
 	}
+	return r.createRecord(ctx, rec)
+}
+
+// createRecord creates a verification record; one that already exists is left as it is.
+func (r *Reconciler) createRecord(ctx context.Context, rec *appsv1.ControllerRevision) error {
 	if err := r.Client.Create(ctx, rec, owner); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create verification record %s: %w", rec.Name, err)
 	}

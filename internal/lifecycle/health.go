@@ -156,6 +156,18 @@ func (p *pass) finishRestarts(in *v1alpha1.Instance) error {
 // recorded in status.restarts, then the generation is raised by
 // compare-and-swap, so a deliberate restart is never read as a crash.
 func (p *pass) restart(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal, force string, st settings, detail ...string) error {
+	return p.climb(in, alloc, signal, force, v1alpha1.WorkerName(0), st, detail...)
+}
+
+// restartWorker is restart with worker w's signal, for an Instance of several workers: the ladder starts
+// at w's own rung, which counts w's own attempts (HBEP-7, Several workers).
+func (p *pass) restartWorker(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal, w string, st settings, detail ...string) error {
+	return p.climb(in, alloc, signal, "", w, st, detail...)
+}
+
+// climb is restart, whose worker rung is worker's. Its attempts are worker's own restarts, and the
+// whole-Instance rung's are the Instance's; with one worker, worker-0's are every worker restart.
+func (p *pass) climb(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal, force, worker string, st settings, detail ...string) error {
 	msg := signal
 	if len(detail) > 0 && detail[0] != "" {
 		msg = detail[0]
@@ -171,9 +183,10 @@ func (p *pass) restart(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal
 			}
 			continue
 		}
-		if r.Part == v1alpha1.PartInstance {
+		switch r.Part {
+		case v1alpha1.PartInstance:
 			instTries++
-		} else {
+		case worker:
 			workerTries++
 		}
 		if r.Time.After(last) {
@@ -192,7 +205,7 @@ func (p *pass) restart(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal
 	part := ""
 	switch {
 	case force != v1alpha1.PartInstance && workerTries < st.attemptsPerRung:
-		part = v1alpha1.WorkerName(0)
+		part = worker
 	case instTries < st.attemptsPerRung:
 		part = v1alpha1.PartInstance
 	}
@@ -214,12 +227,25 @@ func (p *pass) restart(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal
 			s.Restarts = s.Restarts[n-maxRestartsKept:]
 		}
 		s.Phase = v1alpha1.InstanceVerifying
-		// The checks run again: Unknown, not False (api/v1alpha1/conditions.go, ReasonWorkerRestart and
-		// ReasonInstanceRestart). A worker restart keeps Qualified.
-		cond(&s.Conditions, v1alpha1.ConditionVerified, metav1.ConditionUnknown, reason, "reverifying after the restart", in.Generation, now)
-		cond(&s.Conditions, v1alpha1.ConditionWarmedUp, metav1.ConditionUnknown, reason, "warming up again after the restart", in.Generation, now)
-		if part == v1alpha1.PartInstance {
-			cond(&s.Conditions, v1alpha1.ConditionQualified, metav1.ConditionUnknown, reason, "qualifying again after the restart", in.Generation, now)
+		switch {
+		case several(in) && part != v1alpha1.PartInstance:
+			// Several workers: a worker's restart verifies and warms up that worker alone, and leaves the
+			// Instance's own conditions True (HBEP-7, Several workers). Its record moves with its
+			// generation, so it is no longer verified; its warm-up is to run again.
+			setWorker(s, part, func(e *v1alpha1.InstanceWorker) { e.WarmedUp = false })
+		default:
+			// The checks run again: Unknown, not False (api/v1alpha1/conditions.go, ReasonWorkerRestart and
+			// ReasonInstanceRestart). A worker restart keeps Qualified.
+			cond(&s.Conditions, v1alpha1.ConditionVerified, metav1.ConditionUnknown, reason, "reverifying after the restart", in.Generation, now)
+			cond(&s.Conditions, v1alpha1.ConditionWarmedUp, metav1.ConditionUnknown, reason, "warming up again after the restart", in.Generation, now)
+			if part == v1alpha1.PartInstance {
+				cond(&s.Conditions, v1alpha1.ConditionQualified, metav1.ConditionUnknown, reason, "qualifying again after the restart", in.Generation, now)
+			}
+			// Several workers, the whole Instance: every worker verifies and warms up again, and none is
+			// taken as verified meanwhile.
+			for i := range s.Workers {
+				s.Workers[i].WarmedUp, s.Workers[i].VerifiedGeneration = false, nil
+			}
 		}
 		cond(&s.Conditions, v1alpha1.ConditionHealthy, metav1.ConditionFalse, signal, msg, in.Generation, now)
 	}); err != nil {
