@@ -33,7 +33,8 @@ import (
 // window after clusterNow, a reading of the cluster's clock taken before the
 // deployment exists, so that no replacement is planned at the job's start,
 // whenever it comes: the job is submitted after the deployment's creation, and
-// a job's lease end is its start plus its time limit, on the cluster's clock.
+// a job's lease end is no earlier than its start plus its time limit, on the
+// cluster's clock (TwoJobGuard.planned).
 // API times are whole seconds.
 func FirstEndOfOne(clusterNow time.Time, timeLimit, drainWindow time.Duration) time.Time {
 	return clusterNow.Add(timeLimit - drainWindow).Truncate(time.Second)
@@ -202,8 +203,9 @@ type Look struct {
 // deployment's end must be no later than the successor's drain start BEFORE
 // that pass, and strictly after the predecessor's drain start once a
 // successor may exist, so that the handover happens. A job's drain start is
-// its start plus its time limit less the drain window, on the cluster's clock.
-// So:
+// its lease end less the drain window, on the cluster's clock, and its lease
+// end is its start plus its time limit, or later by the time its configuration
+// took (planned). So:
 //
 //   - While no job of the run has started, and while only the predecessor
 //     has, the end is the latest look's cluster clock plus the time limit less
@@ -219,7 +221,8 @@ type Look struct {
 //     for good.
 //
 // A third job of the run that starts, a started job whose time limit is not
-// the one planned with, and an EndOfTwo error are errors: the run must stop.
+// the one planned with or whose lease end is earlier than its start plus it
+// (planned), and an EndOfTwo error are errors: the run must stop.
 // The guard never lowers the end: an older end came from an earlier clock and
 // is still no later than any later start's drain start.
 type TwoJobGuard struct {
@@ -241,8 +244,8 @@ func (g *TwoJobGuard) Next(l Look) (end time.Time, final bool, err error) {
 		if !jobStarted(j) {
 			continue
 		}
-		if j.HardEnd == nil || j.HardEnd.Sub(*j.StartTime) != g.TimeLimit {
-			return time.Time{}, false, fmt.Errorf("a job of the run started with a lease end that is not its start plus the time limit %s the guard plans with", g.TimeLimit)
+		if err := g.planned(j); err != nil {
+			return time.Time{}, false, err
 		}
 		started = append(started, j)
 	}
@@ -276,6 +279,28 @@ func (g *TwoJobGuard) Next(l Look) (end time.Time, final bool, err error) {
 		g.end = e
 	}
 	return g.end, false, nil
+}
+
+// planned checks that a started job has a lease the guard plans with. Its lease end may be later than its start plus
+// the time limit, never earlier: when a job's configuration (its prolog, its nodes made ready) ends a whole second or
+// more after its start, Slurm sets its end_time to that moment plus the time limit and leaves its start as it was
+// (Slurm 23.11.7, src/slurmctld/job_mgr.c: job_config_fini, _job_time_limit_incr). Row B's live run of 13 Nov 2026
+// saw one second of it. A later lease end only puts the job's drain start later than an end given before the job
+// started assumes, so that end stays at or before it. The guard takes a later one only when the listing gives the
+// job's own time limit and it is the planned one; with none listed, the lease end must be its start plus the time
+// limit exactly, since a longer time limit could not be told from a configuration.
+func (g *TwoJobGuard) planned(j provider.Job) error {
+	switch {
+	case j.HardEnd == nil:
+		return errors.New("a job of the run started with no lease end")
+	case j.HardEnd.Before(j.StartTime.Add(g.TimeLimit)):
+		return fmt.Errorf("a job of the run started with a lease end before its start plus the time limit %s the guard plans with", g.TimeLimit)
+	case j.TimeLimit != 0 && j.TimeLimit != g.TimeLimit:
+		return fmt.Errorf("a job of the run is listed with the time limit %s, not the %s the guard plans with", j.TimeLimit, g.TimeLimit)
+	case j.TimeLimit == 0 && !j.HardEnd.Equal(j.StartTime.Add(g.TimeLimit)):
+		return fmt.Errorf("a job of the run started with a lease end later than its start plus the time limit %s the guard plans with, and no time limit listed to say why", g.TimeLimit)
+	}
+	return nil
 }
 
 // jobStarted reports whether a listed job has started: it has a start time,
