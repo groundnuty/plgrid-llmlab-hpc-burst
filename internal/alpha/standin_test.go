@@ -636,6 +636,49 @@ func TestStandInNowServe(t *testing.T) {
 	post, _ := os.ReadFile(filepath.Join(s.cfg.Out, PostsFile))
 	t.Logf("%s's text to post:\n%s", s.row.Name, post)
 	if len(s.failures) > 0 {
+		// DEBUG, throwaway only (never merged): what the record and the stack's logs hold of the run's Allocations and jobs.
+		if b, err := os.ReadFile(filepath.Join(s.cfg.Out, RecordFile)); err == nil {
+			var rr struct {
+				Observation struct {
+					Tags []string `json:"tags"`
+				} `json:"observation"`
+				Jobs []struct {
+					Name  string
+					State []string
+				} `json:"jobs"`
+			}
+			if json.Unmarshal(b, &rr) == nil {
+				t.Logf("DEBUG: %d tags, %d jobs in the record", len(rr.Observation.Tags), len(rr.Jobs))
+				for i, tg := range rr.Observation.Tags {
+					has := false
+					for _, j := range rr.Jobs {
+						has = has || j.Name == tg
+					}
+					t.Logf("DEBUG: tag %d has a job in the ledger: %t", i+1, has)
+				}
+			}
+		}
+		for i, j := range cl.Plat.Jobs() {
+			t.Logf("DEBUG: fake job %d: ours %t, state %s, restart %d, start %s, end %s", i+1, strings.HasPrefix(j.Name, s.prefix), j.State, j.RestartCount, j.Start.Format(time.TimeOnly), j.End.Format(time.TimeOnly))
+		}
+		if b, err := os.ReadFile(filepath.Join(s.cfg.Out, "evidence", "controller.log")); err == nil {
+			var keep []string
+			for _, l := range strings.Split(string(b), "\n") {
+				low := strings.ToLower(l)
+				if strings.Contains(low, "allocation") || strings.Contains(low, "released") || strings.Contains(low, "retention") || strings.Contains(low, "replac") {
+					if len(l) > 320 {
+						l = l[:320]
+					}
+					keep = append(keep, l)
+				}
+			}
+			if len(keep) > 120 {
+				keep = keep[len(keep)-120:]
+			}
+			t.Logf("DEBUG: the controller's lines about Allocations (the last %d):\n%s", len(keep), strings.Join(keep, "\n"))
+		} else {
+			t.Logf("DEBUG: no controller log was kept: %v", err)
+		}
 		t.Fatalf("%s failed its verdict over the stand-in: %s", s.row.Name, Summary(s.failures))
 	}
 	// Every check passed. The stand-in starts cold (its image is built and its checkpoint downloaded in this run, by the real agent and
