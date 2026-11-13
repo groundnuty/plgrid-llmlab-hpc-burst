@@ -76,9 +76,9 @@ var standInTunnel = Timing{MaxRequestDuration: 75 * time.Second, DrainMargin: 30
 	UploadBody: 128 << 10, UploadStreams: 1, UploadPause: 250 * time.Millisecond}
 
 // Row A on plgrid-now (issue #376): the pair's scaled margins, a long stream of 3,000 tokens (a minute at the engine
-// double's 50 tokens a second, under the 90 s deadline), and a 14-minute lease, so that the stream, the worker restart
-// and the requeue's window all come before the deployment's planned end, a minute before the drain start (12 minutes
-// in: the drain window is 2 minutes).
+// double's 50 tokens a second, under the 90 s deadline), and a 14-minute lease, so that the stream and the worker restart
+// all come before the deployment's planned end, a minute before the drain start (12 minutes in: the drain window is 2
+// minutes).
 var standInNow = Timing{MaxRequestDuration: 90 * time.Second, DrainMargin: 30 * time.Second, HandoverMargin: 30 * time.Second,
 	StartTimeout: 4 * time.Minute, ServeTokens: 3000}
 
@@ -577,18 +577,16 @@ func TestStandInTunnelHourHostDialed(t *testing.T) {
 	runStandInIn(t, "tunnel-hour-athena", standInHostDialed)
 }
 
-// standInNowServe runs row A's LIVE steps over the stand-in, through Run, with the stand-in cluster's one-job partition. With
-// accept set, the requeue goes through the fake's own RequeueHold (liveRun.requeueFn: the fake's scontrol takes no
-// requeuehold), as the rehearsal's part 3 sends it; with it unset, the live steps send scontrol requeuehold over the run's
-// ssh to the fake's login, which refuses it.
-func standInNowServe(t *testing.T, accept bool) (secondHeldRun, *stack.Cluster) {
+// standInNowServe runs row A's LIVE steps over the stand-in, through Run, with the stand-in cluster's one-job partition. Row A sends
+// no requeue (#503): the run ends with the deployment's deletion and its job's end.
+func standInNowServe(t *testing.T) (secondHeldRun, *stack.Cluster) {
 	t.Helper()
-	return standInNowServeAfter(t, accept, nil)
+	return standInNowServeAfter(t, nil)
 }
 
 // standInNowServeAfter is standInNowServe with before, when set, run once the stand-in cluster and the stack's world are
 // made and before row A's run: the warm stand-in's pre-staging (preStage).
-func standInNowServeAfter(t *testing.T, accept bool, before func(cl *stack.Cluster, w world)) (secondHeldRun, *stack.Cluster) {
+func standInNowServeAfter(t *testing.T, before func(cl *stack.Cluster, w world)) (secondHeldRun, *stack.Cluster) {
 	t.Helper()
 	if os.Getenv(envStandIn) != "1" {
 		t.Skipf("the stand-in proof of the live steps runs only with %s=1 (internal/alpha, standin_test.go)", envStandIn)
@@ -599,7 +597,7 @@ func standInNowServeAfter(t *testing.T, accept bool, before func(cl *stack.Clust
 		t.Fatal(err)
 	}
 	cfg := Config{Row: row, StandIn: true, Out: filepath.Join(t.TempDir(), "out"), PendingMax: 2 * time.Minute, RunID: id, FrontLabel: standInFrontLabel}
-	t.Logf("%s: %s, the requeue accepted by the fake's own RequeueHold: %t", row.Name, cfg.Mode(), accept)
+	t.Logf("%s: %s", row.Name, cfg.Mode())
 	rec, err := NewRecorder(cfg.Out)
 	if err != nil {
 		t.Fatal(err)
@@ -612,18 +610,6 @@ func standInNowServeAfter(t *testing.T, accept bool, before func(cl *stack.Clust
 	lr.stop = &stackStop{}
 	// The fake login's shell reads a file's last bytes, and no more; a stand-in run's log is short.
 	lr.agentLogFn = func(path string) string { return "tail -c 65536 " + path }
-	if accept {
-		lr.requeueFn = func(_ context.Context, jobID string) (RequeueReply, error) {
-			n, err := strconv.Atoi(jobID)
-			if err != nil {
-				return RequeueReply{}, err
-			}
-			if err := cl.Plat.RequeueHold(n); err != nil {
-				return RequeueReply{}, err
-			}
-			return RequeueReply{Accepted: true}, nil
-		}
-	}
 	var st Steps = lr
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.PendingMax+25*time.Minute)
 	defer cancel()
@@ -631,14 +617,19 @@ func standInNowServeAfter(t *testing.T, accept bool, before func(cl *stack.Clust
 	return secondHeldRun{row: row, cfg: cfg, cl: cl, prefix: TagPrefix(id), failures: failures, err: err, stop: *lr.stop}, cl
 }
 
-// TestStandInNowServe is alpha-athena-now-serve's live steps over the stand-in, with the requeue accepted: the proof of the
-// requeue's order (nowserve.go). With the deployment's end set first, the requeued Instance ends Requeued, no replacement
-// Allocation or job appears, and the failed Allocation's release cancels the held job before the run ends anything itself.
-// The verdict judges each from the run's reads; this test then reads the fake cluster's own record of the run's jobs.
+// TestStandInNowServe is alpha-athena-now-serve's live steps over the stand-in, through Run: the Instance ready, the stream, the
+// identity, the gauges, the worker-rung restart, the events, then the deployment deleted and its job ended (no requeue: #503). The
+// verdict judges what the steps saw; this test then reads the fake cluster's own record of the run's jobs. The job must have ended
+// by the stack's own release of its Allocation, before the run's cleanup could: it ended before Close began to stop the stack (the
+// cleanup's cancel of what is left comes after), and before its time limit (so it was not the scheduler's). "Finished" alone would
+// pass on either of those, and the time limit is the case #503 was. How the release ends a job is not a cancel here: the controller
+// tells the agent to stop once its Allocation is deleted (lifecycle, Desired), the agent exits 0 and the job is COMPLETED before the
+// Provider's finalizer has anything to scancel, so the fake never sends it a TERM. Either end is the release's; a TERM after Close
+// began, or an end after it, is the cleanup's.
 //
 //livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
 func TestStandInNowServe(t *testing.T) {
-	s, cl := standInNowServe(t, true)
+	s, cl := standInNowServe(t)
 	if err := s.stop.problem(); err != nil {
 		t.Fatalf("the stack did not stop cleanly, whatever the run ended with: %v", err)
 	}
@@ -647,13 +638,12 @@ func TestStandInNowServe(t *testing.T) {
 	if len(s.failures) > 0 {
 		t.Fatalf("%s failed its verdict over the stand-in: %s", s.row.Name, Summary(s.failures))
 	}
-	// Every check passed, the requeue's three parts among them. The stand-in starts cold (its image is built and its
-	// checkpoint downloaded in this run, by the real agent and stager), so its agent's own log must not show a warm start:
-	// the run is NOT RUN on that alone, and on nothing else. A pass here would be a warm start read off a cold log.
-	if !errors.Is(s.err, ErrWarmUnshown) || errors.Is(s.err, ErrRequeueRefused) {
+	// Every check passed. The stand-in starts cold (its image is built and its checkpoint downloaded in this run, by the real agent and
+	// stager), so its agent's own log must not show a warm start: the run is NOT RUN on that alone, and on nothing else. A pass here
+	// would be a warm start read off a cold log.
+	if !errors.Is(s.err, ErrWarmUnshown) {
 		t.Fatalf("%s ended with %v; want the NOT RUN of a warm start its cold agent log does not show, and nothing else", s.row.Name, s.err)
 	}
-	// The cluster's own record: one job of the run, requeued once and cancelled, never a second.
 	var ours []fakeslurm.Job
 	for _, j := range cl.Plat.Jobs() {
 		if strings.HasPrefix(j.Name, s.prefix) {
@@ -663,39 +653,23 @@ func TestStandInNowServe(t *testing.T) {
 	if len(ours) != 1 {
 		t.Fatalf("the fake cluster holds %d jobs of the run, want the one", len(ours))
 	}
-	if j := ours[0]; j.RestartCount < 1 || j.State != fakeslurm.Cancelled {
-		t.Errorf("the run's job has restart count %d and state %s, want a requeue and a cancel", j.RestartCount, j.State)
+	j := ours[0]
+	if j.RestartCount != 0 || !j.Finished || (j.State != fakeslurm.Completed && j.State != fakeslurm.Cancelled) {
+		t.Errorf("the run's job has restart count %d, state %s and finished %t, want no requeue, an end by the agent's exit or a cancel, and finished", j.RestartCount, j.State, j.Finished)
+	}
+	if j.End.IsZero() || !j.End.Before(s.stop.began) {
+		t.Errorf("the job ended at %s and Close began to stop the stack at %s: the stack's release did not end it before the cleanup could",
+			j.End.Format(time.TimeOnly), s.stop.began.Format(time.TimeOnly))
+	}
+	if !j.TermAt.IsZero() && !j.TermAt.Before(s.stop.began) {
+		t.Errorf("the job was sent TERM at %s, after Close began to stop the stack at %s: the cleanup's cancel ended it", j.TermAt.Format(time.TimeOnly), s.stop.began.Format(time.TimeOnly))
+	}
+	if limit := j.Start.Add(time.Duration(j.TimeLimit) * time.Minute); !j.End.Before(limit) {
+		t.Errorf("the job ended at %s, not before its time limit at %s: the scheduler's limit ended it, not the release", j.End.Format(time.TimeOnly), limit.Format(time.TimeOnly))
 	}
 	record, err := os.ReadFile(filepath.Join(s.cfg.Out, RecordFile))
 	if err != nil || !strings.Contains(string(record), "STAND-IN RUN") || strings.Contains(string(record), "LIVE RUN") {
 		t.Errorf("the record does not say the run was a stand-in one (%v)", err)
-	}
-}
-
-// TestStandInNowServeRequeueRefused is alpha-athena-now-serve's live steps over the stand-in with the requeue sent as the live
-// row sends it, scontrol requeuehold over the run's ssh, which the fake's login refuses: the run is NOT RUN, never a pass, its
-// record and text to post written with the refusal's reason, and its job ended by the deployment's end.
-//
-//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
-func TestStandInNowServeRequeueRefused(t *testing.T) {
-	s, cl := standInNowServe(t, false)
-	if err := s.stop.problem(); err != nil {
-		t.Fatalf("the stack did not stop cleanly, whatever the run ended with: %v", err)
-	}
-	if len(s.failures) != 0 || !errors.Is(s.err, ErrRequeueRefused) || !NotRun(s.row, s.err) {
-		t.Fatalf("failures %v, err %v; want the NOT RUN of a refused requeue", s.failures, s.err)
-	}
-	note := NotRunNote(s.row, s.cfg.PendingMax, s.err)
-	t.Logf("the marker would say: %s", strings.TrimSpace(note))
-	post, err := os.ReadFile(filepath.Join(s.cfg.Out, PostsFile))
-	if err != nil || !strings.Contains(string(post), s.row.Name+": NOT RUN") || strings.Contains(string(post), ": PASS") {
-		t.Errorf("the text to post does not say NOT RUN (%v):\n%s", err, post)
-	}
-	t.Logf("%s's text to post:\n%s", s.row.Name, post)
-	for _, j := range cl.Plat.Jobs() {
-		if strings.HasPrefix(j.Name, s.prefix) && (j.RestartCount != 0 || !j.Finished) {
-			t.Errorf("the run's job has restart count %d and finished %t, want no requeue and an end", j.RestartCount, j.Finished)
-		}
 	}
 }
 
@@ -810,13 +784,13 @@ func standInHubFiles(t *testing.T, hubURL string) []string {
 
 // TestStandInNowServeWarm is alpha-athena-now-serve's live steps over the stand-in, warm: the pre-staging row's helper
 // stages first (preStage), and then row A's real agent must find its cache warm, by its own lines, and the row PASSES
-// with every check, the requeue's three parts and the warm start among them. The record's reading of the agent's log is
+// with every check, the warm start among them. The record's reading of the agent's log is
 // held to the stand-in Hub's file list less the stager's skips, read here from outside the run.
 //
 //livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
 func TestStandInNowServeWarm(t *testing.T) {
 	var hubURL string
-	s, _ := standInNowServeAfter(t, true, func(cl *stack.Cluster, w world) {
+	s, _ := standInNowServeAfter(t, func(cl *stack.Cluster, w world) {
 		preStage(t, cl, w)
 		for _, e := range w.env {
 			if v, ok := strings.CutPrefix(e, "HF_ENDPOINT="); ok {
@@ -879,9 +853,5 @@ func TestStandInNowServeWarm(t *testing.T) {
 		if !files[f] {
 			t.Errorf("the agent's log has no %q line for %s", StagedPresentMatching, f)
 		}
-	}
-	r := o.Requeue
-	if !r.Accepted || r.EndReason != v1alpha1.ReasonRequeued || r.NewAllocations != 0 || r.NewInstances != 0 || !r.AllocationReleased || !r.JobEnded {
-		t.Errorf("the requeue's three parts: %+v", r)
 	}
 }

@@ -1,11 +1,12 @@
 package alpha
 
-// Row A of issue #376 (nowserve.go): its clock against the shipped profile, its start wait as its first clock, the
-// requeue's line and reply, HBEP-3's tag against the contracts' helper, and its NOT RUN on a refused requeue. Expected
-// values come from the profile file, HBEP-3 and the science agent's rulings on #376, written out here.
+// Row A of issue #376 (nowserve.go): its clock against the shipped profile, its start wait as its first clock, HBEP-3's tag
+// against the contracts' helper, its NOT RUN on a warm start the agent's log did not show, and that it sends no requeue (#503).
+// Expected values come from the profile file, HBEP-3 and the science agent's rulings on #376 and #503, written out here.
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -133,17 +134,6 @@ func TestRowAsJobPendingPastItsStartWaitIsNotRun(t *testing.T) {
 	}
 }
 
-func TestTheRequeueLineTakesAJobIDOfDigitsOnly(t *testing.T) {
-	if l, err := RequeueHoldLine("4242"); err != nil || l != "scontrol requeuehold 4242" {
-		t.Errorf("RequeueHoldLine(4242) = %q, %v", l, err)
-	}
-	for _, bad := range []string{"", "42 43", "42;rm", "-1", "4_2", "42\n", "abc"} {
-		if _, err := RequeueHoldLine(bad); err == nil {
-			t.Errorf("RequeueHoldLine(%q) took it", bad)
-		}
-	}
-}
-
 // HBEP3Tag is computed from HBEP-3's text; the contracts' helper is an independent implementation of the same rule, so
 // the two agree on names under and over the 40 characters a tag keeps.
 func TestHBEP3TagIsTheContractsTag(t *testing.T) {
@@ -158,89 +148,52 @@ func TestHBEP3TagIsTheContractsTag(t *testing.T) {
 	}
 }
 
-// A refused requeue is NOT RUN, never a pass (Q5): with nothing else failed the run returns ErrRequeueRefused, after its
-// record (verdict "not run") and its text to post, which says NOT RUN with the reason; with a failure beside it, the
-// failure wins and the run is a FAIL.
-func TestARefusedRequeueIsNotRunUnlessAnotherCheckFails(t *testing.T) {
+// Row A sends no requeue (the science agent's ruling of 13 Nov 2026 on #503, correcting its ruling Q5 of 11 Nov on #376): the plugin
+// submits --no-requeue, so a user's scontrol requeuehold is refused by design and a row that sent it could never pass. A healthy run
+// through Run passes, and neither its record nor its text to post nor its failures say a word of a requeue. The source of the live
+// steps name neither scontrol requeuehold nor the Requeued reason (the event it raised) either, so a step cannot come back unseen.
+func TestRowASendsNoRequeue(t *testing.T) {
 	row := rowOf("alpha-athena-now-serve")
-	for _, c := range []struct {
-		fault      string
-		wantNotRun bool
-	}{{"requeue-refused", true}, {"requeue-refused-cut", false}, {"requeue-refused-no-drain", false}} {
-		t.Run(c.fault, func(t *testing.T) {
-			cfg := Config{Row: row, Dry: true, DryFault: c.fault, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
-			rec, err := NewRecorder(cfg.Out)
-			if err != nil {
-				t.Fatal(err)
-			}
-			failures, err := Run(context.Background(), cfg, newDrySteps(t, cfg, "nowserve"), rec, t.Logf)
-			record, _ := os.ReadFile(filepath.Join(cfg.Out, RecordFile))
-			posts, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
-			if c.wantNotRun {
-				if !errors.Is(err, ErrRequeueRefused) || !NotRun(row, err) || len(failures) != 0 {
-					t.Fatalf("failures %v, err %v; want the NOT RUN of a refused requeue", failures, err)
-				}
-				if !strings.Contains(string(record), `"verdict": "not run"`) && !strings.Contains(string(record), `"verdict":"not run"`) {
-					t.Errorf("the record does not say not run:\n%s", record)
-				}
-				// The scheduler's words, with the job's ID replaced, in the post, the record and the marker's note alike.
-				words := RequeueReplyOf(1, nil, []byte(dryRefusalText("1234567")), "1234567").Refusal
-				if !strings.HasSuffix(words, "presently disabled for job "+jobToken) {
-					t.Fatalf("the dry refusal's words are %q", words)
-				}
-				if !strings.Contains(string(posts), "alpha-athena-now-serve: NOT RUN") || !strings.Contains(string(posts), words) || strings.Contains(string(posts), ": PASS") {
-					t.Errorf("the text to post does not say NOT RUN with the scheduler's words:\n%s", posts)
-				}
-				if note := NotRunNote(row, cfg.PendingMax, err); !strings.Contains(note, requeueRefusedWords+" ("+words+")") {
-					t.Errorf("the marker's note %q does not say the requeue was refused, in the scheduler's words", note)
-				}
-				for name, b := range map[string][]byte{"text to post": posts, "record": record} {
-					if regexp.MustCompile(`for job [0-9]`).Match(b) {
-						t.Errorf("the %s names the job's ID:\n%s", name, b)
-					}
-				}
-				return
-			}
-			if err != nil || len(failures) == 0 || NotRun(row, err) {
-				t.Fatalf("failures %v, err %v; want a FAIL that outranks the refusal", failures, err)
-			}
-			if !strings.Contains(string(posts), "alpha-athena-now-serve: FAIL") || !strings.Contains(string(posts), "refused by the scheduler") {
-				t.Errorf("the text to post does not say FAIL beside the refusal:\n%s", posts)
-			}
-		})
+	cfg := Config{Row: row, Dry: true, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
+	rec, err := NewRecorder(cfg.Out)
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-// The requeue's verdict has three parts (the science agent's ruling 4 on #376): the Instance Failed with reason Requeued;
-// no second Allocation or job; the held job cancelled by the release. Each alone fails the run, from a healthy
-// observation that passes.
-func TestTheRequeueVerdictNeedsEachOfItsThreeParts(t *testing.T) {
-	ok := RequeueObs{Attempted: true, Accepted: true, DrainingSeen: true, EndReason: v1alpha1.ReasonRequeued, AllocationReleased: true, JobEnded: true, JobRequeued: true}
-	if f := requeueChecks(ok); len(f) != 0 {
-		t.Fatalf("the healthy requeue fails: %v", f)
+	failures, err := Run(context.Background(), cfg, newDrySteps(t, cfg, "nowserve"), rec, t.Logf)
+	if err != nil || len(failures) != 0 {
+		t.Fatalf("a healthy run: failures %v, err %v; want a pass", failures, err)
 	}
-	for name, c := range map[string]struct {
-		mutate func(*RequeueObs)
-		want   string
-	}{
-		"ended Drained":            {func(o *RequeueObs) { o.EndReason = v1alpha1.ReasonDrained }, "did not end with reason Requeued"},
-		"no end seen":              {func(o *RequeueObs) { o.EndReason = "" }, "did not end with reason Requeued"},
-		"a replacement Allocation": {func(o *RequeueObs) { o.NewAllocations = 1 }, "followed by a replacement"},
-		"a replacement Instance":   {func(o *RequeueObs) { o.NewInstances = 1 }, "followed by a replacement"},
-		"not released":             {func(o *RequeueObs) { o.AllocationReleased = false }, "release did not end the held job"},
-		"the job not ended":        {func(o *RequeueObs) { o.JobEnded = false }, "release did not end the held job"},
-		"not requeued":             {func(o *RequeueObs) { o.JobRequeued = false }, "does not show the job requeued"},
-		"no drain first":           {func(o *RequeueObs) { o.DrainingSeen = false }, "not seen draining"},
-	} {
-		o := ok
-		c.mutate(&o)
-		if f := Summary(requeueChecks(o)); !strings.Contains(f, c.want) {
-			t.Errorf("%s: failed checks %q lack %q", name, f, c.want)
+	record, _ := os.ReadFile(filepath.Join(cfg.Out, RecordFile))
+	posts, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
+	if !strings.Contains(string(record), `"verdict": "pass"`) && !strings.Contains(string(record), `"verdict":"pass"`) {
+		t.Errorf("the record does not say pass:\n%s", record)
+	}
+	// The record's observation, what the run saw, has no requeue member (the jobs' own records do carry the scheduler's Requeued flag,
+	// which is the cluster's, not a step of the row's), and the text to post says no word of one.
+	var saved struct {
+		Observation map[string]json.RawMessage `json:"observation"`
+	}
+	if err := json.Unmarshal(record, &saved); err != nil || len(saved.Observation) == 0 {
+		t.Fatalf("the record's observation could not be read (%v):\n%s", err, record)
+	}
+	for k := range saved.Observation {
+		if strings.Contains(strings.ToLower(k), "requeue") {
+			t.Errorf("the record's observation has a %q member: row A sends no requeue", k)
 		}
 	}
-	// A refused requeue judges only the window before it.
-	if f := requeueChecks(RequeueObs{Attempted: true, DrainingSeen: true, Refusal: "the scheduler's words: Requested operation is presently disabled for job [job]"}); len(f) != 0 {
-		t.Errorf("a refused requeue with the drain seen fails: %v", f)
+	if strings.Contains(strings.ToLower(string(posts)), "requeue") {
+		t.Errorf("the text to post says a word of a requeue:\n%s", posts)
+	}
+	for _, file := range []string{"now_flows_test.go", "steps_live_test.go", "live_flows_test.go", "guard_live_test.go", "now_nooverlap_flows_test.go"} {
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, word := range []string{"requeuehold", "ReasonRequeued"} {
+			if strings.Contains(string(src), word) {
+				t.Errorf("%s names %s: the live steps send no requeue and expect no Requeued event", file, word)
+			}
+		}
 	}
 }
 
@@ -383,7 +336,7 @@ func TestAWarmStartTheAgentsLogDidNotShowIsNotRun(t *testing.T) {
 				t.Fatal(err)
 			}
 			failures, err := Run(context.Background(), cfg, newDrySteps(t, cfg, "nowserve"), rec, t.Logf)
-			if !errors.Is(err, ErrWarmUnshown) || errors.Is(err, ErrRequeueRefused) || !NotRun(row, err) || len(failures) != 0 {
+			if !errors.Is(err, ErrWarmUnshown) || !NotRun(row, err) || len(failures) != 0 {
 				t.Fatalf("failures %v, err %v; want the NOT RUN of a warm start not shown", failures, err)
 			}
 			posts, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
@@ -399,7 +352,7 @@ func TestAWarmStartTheAgentsLogDidNotShowIsNotRun(t *testing.T) {
 		})
 	}
 	t.Run("beside a failure", func(t *testing.T) {
-		// requeue-refused-cut has the warm start shown; a cut stream with the image line gone is the failure that wins.
+		// a cut dry run has the warm start shown; a cut stream with the image line gone is the failure that wins.
 		cfg := Config{Row: row, Dry: true, DryFault: "cut", Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
 		rec, err := NewRecorder(cfg.Out)
 		if err != nil {
@@ -492,5 +445,172 @@ func TestRowAsStartWaitRunsFromTheDeploymentsCreation(t *testing.T) {
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("the waiter is still waiting: the start wait is not counted from the deployment's creation")
+	}
+}
+
+// The restart ladder (HBEP-7, Health and restarts) read off the Instances: the worker rung, the whole-Instance rung, and the last, which
+// fails an Instance with RestartLoop. Row A's engine kill is one restart at the worker rung; a climb past it is named by its rung, never
+// left to show only as a second Allocation (#503; the science agent's guidance). The expected words are written out here.
+func TestLadderOfReadsTheClimbOffTheInstances(t *testing.T) {
+	inst := func(phase v1alpha1.InstancePhase, reason string, parts ...string) v1alpha1.Instance {
+		in := v1alpha1.Instance{}
+		in.Status.Phase, in.Status.EndReason = phase, reason
+		for _, p := range parts {
+			in.Status.Restarts = append(in.Status.Restarts, v1alpha1.InstanceRestart{Part: p})
+		}
+		return in
+	}
+	for _, c := range []struct {
+		name string
+		ins  []v1alpha1.Instance
+		want LadderObs
+	}{
+		{"no restart", []v1alpha1.Instance{inst(v1alpha1.InstanceReady, "")}, LadderObs{}},
+		{"the worker restart row A makes", []v1alpha1.Instance{inst(v1alpha1.InstanceReady, "", "worker-0")}, LadderObs{WorkerRestarts: 1}},
+		{"a router restart is neither rung", []v1alpha1.Instance{inst(v1alpha1.InstanceReady, "", "worker-0", v1alpha1.PartRouter)}, LadderObs{WorkerRestarts: 1}},
+		{"the whole-Instance rung", []v1alpha1.Instance{inst(v1alpha1.InstanceReady, "", "worker-0", "worker-0", v1alpha1.PartInstance)}, LadderObs{WorkerRestarts: 2, InstanceRestarts: 1}},
+		{"the last rung", []v1alpha1.Instance{inst(v1alpha1.InstanceEnded, v1alpha1.ReasonRestartLoop, "worker-0", "worker-0", v1alpha1.PartInstance, v1alpha1.PartInstance),
+			inst(v1alpha1.InstanceReady, "")}, LadderObs{WorkerRestarts: 2, InstanceRestarts: 2, RestartLoop: true}},
+		{"an Instance that ended by a drain is no loop", []v1alpha1.Instance{inst(v1alpha1.InstanceEnded, v1alpha1.ReasonDrained, "worker-0")}, LadderObs{WorkerRestarts: 1}},
+		{"a RestartLoop reason on an Instance that has not ended is no loop", []v1alpha1.Instance{inst(v1alpha1.InstanceReady, v1alpha1.ReasonRestartLoop)}, LadderObs{}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := LadderOf(c.ins); got != c.want {
+				t.Errorf("LadderOf = %+v, want %+v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestTheLadderCheckNamesTheRungTheWorkerRestartClimbedTo(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		l    LadderObs
+		want []string
+	}{
+		{"the worker rung is enough", LadderObs{WorkerRestarts: 1}, nil},
+		{"the whole-Instance rung", LadderObs{WorkerRestarts: 2, InstanceRestarts: 1},
+			[]string{"the worker restart climbed to the whole-Instance rung (rung 2 of 3: 2 restarts at the worker rung and 1 at the whole-Instance rung)"}},
+		{"the last rung", LadderObs{WorkerRestarts: 2, InstanceRestarts: 2, RestartLoop: true},
+			[]string{"the worker restart climbed to a new Allocation (rung 3 of 3: 2 restarts at the worker rung and 2 at the whole-Instance rung, then the Instance failed with RestartLoop)"}},
+		{"the last rung outranks the one before it", LadderObs{InstanceRestarts: 1, RestartLoop: true},
+			[]string{"the worker restart climbed to a new Allocation (rung 3 of 3: 0 restarts at the worker rung and 1 at the whole-Instance rung, then the Instance failed with RestartLoop)"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ladderChecks(c.l); !slices.Equal(got, c.want) {
+				t.Errorf("ladderChecks = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// A climb leads the verdict's failures, before the marks it leaves (a second Allocation, a job with no record, two restarts): the cause is
+// named first, and the marks are still said.
+func TestAClimbOfTheLadderLeadsRowAsFailures(t *testing.T) {
+	row := rowOf("alpha-athena-now-serve")
+	cfg := Config{Row: row, Dry: true, DryFault: "ladder-climb", Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
+	rec, err := NewRecorder(cfg.Out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failures, err := Run(context.Background(), cfg, newDrySteps(t, cfg, "nowserve"), rec, t.Logf)
+	if err != nil || len(failures) == 0 {
+		t.Fatalf("failures %v, err %v; want a FAIL", failures, err)
+	}
+	if !strings.HasPrefix(failures[0], "the worker restart climbed to a new Allocation") {
+		t.Errorf("the first failure is %q, want the climb named first", failures[0])
+	}
+	if !slices.Contains(failures, "2 restarts at the worker rung, want 1") {
+		t.Errorf("the mark of the climb, the count of worker restarts, is not among %q", failures)
+	}
+	// Beside a failure that the verdict finds first (the deployment's lease is not the row's), the climb still leads: it is the cause.
+	t.Run("beside a failure of the deployment", func(t *testing.T) {
+		cfg := Config{Row: row, Dry: true, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
+		rec, err := NewRecorder(cfg.Out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st := newDrySteps(t, cfg, "nowserve")
+		o, serr := st.NowServe(context.Background(), Plan{Row: row, Rec: rec, PendingMax: time.Minute, Logf: t.Logf})
+		if serr != nil {
+			t.Fatal(serr)
+		}
+		o.Ladder = LadderObs{WorkerRestarts: 2, InstanceRestarts: 2, RestartLoop: true}
+		o.Deployment.LeaseLimit = 0
+		failures, err := Run(context.Background(), cfg, fixedNowServe{drySteps: st, o: o}, rec, t.Logf)
+		if err != nil || len(failures) < 2 {
+			t.Fatalf("failures %v, err %v; want the climb and a failure of the deployment", failures, err)
+		}
+		if !strings.HasPrefix(failures[0], "the worker restart climbed to a new Allocation") {
+			t.Errorf("the first failure is %q, want the climb ahead of %q", failures[0], failures[1])
+		}
+	})
+}
+
+// The live steps read the ladder off the watch's last Instances, as they read the worker restarts beside it: a pin on the source, since
+// the stand-in that runs the live steps is gated, as the budget test pins the live waits.
+func TestRowAReadsTheLadderOffTheWatch(t *testing.T) {
+	src, err := os.ReadFile("now_flows_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"o.WorkerRestarts = WorkerRestarts(r.watch.Last())", "o.Ladder = LadderOf(r.watch.Last())"} {
+		if n := strings.Count(string(src), want); n != 1 {
+			t.Errorf("now_flows_test.go has %q %d times, want once: row A must read the restart ladder's climb from the watch", want, n)
+		}
+	}
+}
+
+// The wait for the worker restart (live_flows_test.go, workerRestart) ends well only on the same Instance ready and serving again, and a
+// climb of the restart ladder to its last rung ends the Instance, so the wait must fail on an ended or gone Instance and name the climb
+// there: the verdict that names it (ladderChecks) never runs after a step that failed (the delta review of PR 509). The failure's words
+// are written out here.
+func TestAWorkerRestartThatEndsTheInstanceFailsNamingTheClimb(t *testing.T) {
+	inst := func(phase v1alpha1.InstancePhase, reason string, parts ...string) v1alpha1.Instance {
+		in := v1alpha1.Instance{}
+		in.Name = "inst-a"
+		in.Status.Phase, in.Status.EndReason = phase, reason
+		for _, p := range parts {
+			in.Status.Restarts = append(in.Status.Restarts, v1alpha1.InstanceRestart{Part: p})
+		}
+		return in
+	}
+	const loop = "the worker restart climbed to a new Allocation (rung 3 of 3: 2 restarts at the worker rung and 2 at the whole-Instance rung, then the Instance failed with RestartLoop)"
+	climbed := []string{"worker-0", "worker-0", v1alpha1.PartInstance, v1alpha1.PartInstance}
+	for _, c := range []struct {
+		name string
+		in   v1alpha1.Instance
+		gone bool
+		want string
+	}{
+		{"ready again after the restart", inst(v1alpha1.InstanceReady, "", "worker-0"), false, ""},
+		{"verifying while the restart runs", inst(v1alpha1.InstanceVerifying, "", "worker-0"), false, ""},
+		{"gone, no climb", inst(v1alpha1.InstanceReady, "", "worker-0"), true, "worker fault: Instance inst-a is gone"},
+		{"gone, its last version ended RestartLoop", inst(v1alpha1.InstanceEnded, v1alpha1.ReasonRestartLoop, climbed...), true,
+			"worker fault: " + loop + " (Instance inst-a is gone)"},
+		{"ended RestartLoop, still listed", inst(v1alpha1.InstanceEnded, v1alpha1.ReasonRestartLoop, climbed...), false,
+			"worker fault: " + loop + ` (Instance inst-a ended (reason "RestartLoop"))`},
+		{"ended by a drain", inst(v1alpha1.InstanceEnded, v1alpha1.ReasonDrained, "worker-0"), false, `worker fault: Instance inst-a ended (reason "Drained")`},
+		{"gone after the whole-Instance rung", inst(v1alpha1.InstanceReady, "", "worker-0", "worker-0", v1alpha1.PartInstance), true,
+			"worker fault: the worker restart climbed to the whole-Instance rung (rung 2 of 3: 2 restarts at the worker rung and 1 at the whole-Instance rung) (Instance inst-a is gone)"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := workerRestartFailure(c.in, c.gone); got != c.want {
+				t.Errorf("workerRestartFailure =\n%q\nwant\n%q", got, c.want)
+			}
+		})
+	}
+}
+
+// The wait consults it at both places it can fail: a pin on the source, since the step runs only against a stack.
+func TestTheWorkerRestartWaitConsultsTheLadderWhereItFails(t *testing.T) {
+	src, err := os.ReadFile("live_flows_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"t.Fatalf(\"%s\", workerRestartFailure(last, true))", "if msg := workerRestartFailure(now, false); msg != \"\" {"} {
+		if n := strings.Count(string(src), want); n != 1 {
+			t.Errorf("live_flows_test.go has %q %d times, want once: the wait for the worker restart must name a climb of the ladder where it fails", want, n)
+		}
 	}
 }

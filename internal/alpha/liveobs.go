@@ -389,6 +389,37 @@ const UploadNotMeasuredLive = "no sender-side timing on the live path"
 // (HeadOfLineOf): a body's send, its prefill, or neither.
 const HeadOfLineStall = time.Second
 
+// LadderObs is how far the restart ladder climbed on the run's Instances (HBEP-7, Health and restarts: the worker rung, then the whole
+// Instance, each tried restart.attemptsPerRung times, then a new Allocation: the Instance fails with RestartLoop and its Allocation is
+// released). Row A kills one engine and expects the worker rung to be enough; a climb past it is a FAIL of that step, named by its rung
+// (issue #503; the science agent's guidance of 13 Nov 2026).
+type LadderObs struct {
+	// WorkerRestarts and InstanceRestarts count the restarts recorded at the worker rung and at the whole-Instance rung.
+	WorkerRestarts   int `json:"workerRestarts"`
+	InstanceRestarts int `json:"instanceRestarts"`
+	// RestartLoop says an Instance ended with RestartLoop: the ladder's last rung, which made a new Allocation.
+	RestartLoop bool `json:"restartLoop"`
+}
+
+// LadderOf reads the ladder's climb off the Instances, each in the last version the run saw.
+func LadderOf(ins []v1alpha1.Instance) LadderObs {
+	var l LadderObs
+	for _, in := range ins {
+		for _, r := range in.Status.Restarts {
+			switch {
+			case strings.HasPrefix(r.Part, "worker-"):
+				l.WorkerRestarts++
+			case r.Part == v1alpha1.PartInstance:
+				l.InstanceRestarts++
+			}
+		}
+		if in.Status.Phase == v1alpha1.InstanceEnded && in.Status.EndReason == v1alpha1.ReasonRestartLoop {
+			l.RestartLoop = true
+		}
+	}
+	return l
+}
+
 // WorkerRestarts counts the restarts at the worker rung that the run's
 // Instances recorded (status.restarts whose part is a worker, HBEP-7, Health
 // and restarts). Each Instance is given in the last version the run saw.

@@ -101,8 +101,8 @@ var nowNoOverlapCases = []dryCase{
 	{"slot-taken-cut", "a stream was cut"},
 }
 
-// nowServeCases are row A's (issue #376; nowserve.go). The refused requeue on its own is NOT RUN, not a failure
-// (TestARefusedRequeueIsNotRunUnlessAnotherCheckFails); with a cut long stream beside it, the failure wins.
+// nowServeCases are row A's (issue #376; nowserve.go). A warm start the agent's log did not show on its own is NOT RUN, not a failure
+// (TestAWarmStartTheAgentsLogDidNotShowIsNotRun); with a cut long stream beside it, the failure wins. Row A sends no requeue (#503).
 var nowServeCases = []dryCase{
 	{"", ""},
 	{"cut", "the long stream was cut"},
@@ -112,6 +112,8 @@ var nowServeCases = []dryCase{
 	{"no-responses", "no response, so attribution is unchecked"},
 	{"no-restart", "0 restarts at the worker rung, want 1"},
 	{"two-restarts", "2 restarts at the worker rung, want 1"},
+	{"ladder-instance-rung", "the worker restart climbed to the whole-Instance rung (rung 2 of 3: 2 restarts at the worker rung and 1 at the whole-Instance rung)"},
+	{"ladder-climb", "the worker restart climbed to a new Allocation (rung 3 of 3: 2 restarts at the worker rung and 2 at the whole-Instance rung, then the Instance failed with RestartLoop)"},
 	{"wrong-identity", "deployment-ID label or identity record is not its ID's display form"},
 	{"events-missing", "an expected one of HBEP-8's events was not there"},
 	{"events-unchecked", "HBEP-8's events were not checked"},
@@ -123,13 +125,6 @@ var nowServeCases = []dryCase{
 	{"short-lease", "not longer than the lead an Instance needs (PartitionTooShort)"},
 	{"duplicate-tag", "a tag names more than one job"},
 	{"extra-allocation", "exactly one Allocation"},
-	{"requeue-refused-cut", "the long stream was cut"},
-	{"requeue-refused-no-drain", "was not seen draining the Instance alone"},
-	{"requeue-not-requeued", "did not end with reason Requeued"},
-	{"requeue-replacement", "the requeue was followed by a replacement"},
-	{"requeue-not-released", "release did not end the held job"},
-	{"requeue-no-drain", "was not seen draining the Instance alone"},
-	{"requeue-not-attempted", "the requeue of the run's own job was not attempted"},
 }
 
 var tunnelCases = []dryCase{

@@ -611,6 +611,23 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'hack/live-checks.sh@@real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|79|-C memfs@@real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|75|-C memfs'
   'hack/live-checks.sh@@conformance-helios-gh200|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|57|-C memfs|10@@conformance-helios-gh200|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|50|-C memfs|10'
   'hack/live-checks.sh@@conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|57|-|10@@conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|50|-|10'
+  # #503: row A sends no requeue; its worst case is the default formula with the events read last and the worker restart's and the deployment's
+  # end's catch-ups, and its NOT RUN is the warm start alone.
+  'budget.go@@(r.Lease - dw) + stack.WaitDeadline + dw@@(r.Lease - dw) + dw'
+  'budget.go@@stack.WaitDeadline + dw + EndMargin + 2*stack.CatchUpWorstCase@@stack.WaitDeadline + dw + EndMargin + stack.CatchUpWorstCase'
+  'run.go@@		refused = nowServeNotRun(o)@@		refused = nil'
+  # #503: the restart ladder's climb is named by its rung in row A's verdict (LadderOf reads it, ladderChecks names it).
+  'nowserve.go@@	case l.RestartLoop:@@	case false && l.RestartLoop:'
+  'nowserve.go@@	case l.InstanceRestarts > 0:@@	case false && l.InstanceRestarts > 0:'
+  'nowserve.go@@	f := ladderChecks(o.Ladder)@@	f := []string(nil)'
+  'liveobs.go@@			case r.Part == v1alpha1.PartInstance:@@			case false:'
+  'liveobs.go@@		if in.Status.Phase == v1alpha1.InstanceEnded && in.Status.EndReason == v1alpha1.ReasonRestartLoop {@@		if in.Status.EndReason == v1alpha1.ReasonRestartLoop {'
+  'now_flows_test.go@@	o.Ladder = LadderOf(r.watch.Last())@@	o.Ladder = LadderOf(nil)'
+  # #503, the delta review of PR 509: the wait for the worker restart fails on an ended or gone Instance and names a climb of the ladder.
+  'live_flows_test.go@@			t.Fatalf("%s", workerRestartFailure(last, true))@@			_ = last; t.Fatalf("worker fault: Instance %s is gone", in.Name)'
+  'live_flows_test.go@@		if msg := workerRestartFailure(now, false); msg != "" {@@		if msg := ""; msg != "" {'
+  'live_flows_test.go@@	if climb := ladderChecks(LadderOf([]v1alpha1.Instance{last})); len(climb) > 0 {@@	if climb := ladderChecks(LadderObs{}); len(climb) > 0 {'
+  'live_flows_test.go@@	case last.Status.Phase == v1alpha1.InstanceEnded:@@	case false:'
   'budget.go@@	CloseTimeout = 5 * time.Minute@@	CloseTimeout = 4 * time.Minute'
   'budget.go@@	ReadyMargin = 5 * time.Minute@@	ReadyMargin = 4 * time.Minute'
   'budget.go@@	EndMargin = 5 * time.Minute@@	EndMargin = 4 * time.Minute'
