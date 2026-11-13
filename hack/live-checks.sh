@@ -55,10 +55,11 @@
 #   - a two-job row's second job, once its first has run: by the first's drain start on the handover, and within the wait in
 #     the queue of the first's lease end on no-overlap ("the first job ran and the second never started ..."). A failure of
 #     the part of the run that did happen still wins: that row fails.
-# Row A on plgrid-now (alpha-athena-now-serve, issue #376) has two NOT RUNs of a run that did start, each after its test has
-# judged the rest of the run, whose failure wins: the scheduler's refusal of the requeue of the run's own job (Q5), and a
-# warm start its agent's own log did not show (the ruling 1(b)). Its marker names them in fixed words, which judge prints;
-# its text to post is written too, saying NOT RUN with the reason. Its start wait runs from the deployment's creation.
+# Row A on plgrid-now (alpha-athena-now-serve, issue #376) has one NOT RUN of a run that did start, after its test has judged the
+# rest of the run, whose failure wins: a warm start its agent's own log did not show (the ruling 1(b)). Its marker names it in fixed
+# words, which judge prints; its text to post is written too, saying NOT RUN with the reason. Its start wait runs from the
+# deployment's creation. It sends no requeue: the plugin submits --no-requeue, so a user's requeue is refused by design, and the
+# refusal that was a NOT RUN until 13 Nov 2026 is gone with the step (#503).
 # Row B on plgrid-now (alpha-athena-now-nooverlap, issue #376) has two of its own, judged the same way: a job that is not the
 # run's held the one-job slot between its two jobs (the owner's own work, which the run never touches; Q7), and either job's
 # warm start its agent's own log did not show. Its first job's start wait runs from the deployment's creation, its second's
@@ -1060,7 +1061,6 @@ not_run_verdict() {
   [ -n "$REC_DIR" ] && [ -f "$REC_DIR/not-run.txt" ] && [ ! -L "$REC_DIR/not-run.txt" ] || return 1
   [ -n "${HOST[$n]:-}" ] || return 1
   ! second_job_marker || [ "${MOSTJOBS[$n]:-1}" -ge 2 ] || return 1
-  ! requeue_marker || [ "$n" = alpha-athena-now-serve ] || return 1
   ! warm_marker || case $n in alpha-athena-now-serve|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1
   ! slot_marker || [ "$n" = alpha-athena-now-nooverlap ] || return 1
   ! lead_marker || case $n in alpha-athena-handover|alpha-helios-nooverlap|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1
@@ -1069,17 +1069,15 @@ not_run_verdict() {
 }
 
 # row_a_marker: the run's NOT RUN marker says a plgrid-now row's run that did start was not put to the test (internal/alpha,
-# NotRunNote; issue #376): row A's requeue refused, a warm start an agent's own log did not show (row A's, or either job's
-# of row B), or row B's slot taken by a job that is not the run's. Each is a NOT RUN of a run whose other checks passed, and
-# not_run_verdict holds each to the rows that have it.
-row_a_marker() { requeue_marker || warm_marker || slot_marker; }
-requeue_marker() { grep -q "the scheduler refused the requeue of the run's own job" "$REC_DIR/not-run.txt" 2>/dev/null; }
+# NotRunNote; issue #376): a warm start an agent's own log did not show (row A's, or either job of row B's), or row B's slot taken
+# by a job that is not the run's. Each is a NOT RUN of a run whose other checks passed, and not_run_verdict holds each to the rows
+# that have it.
+row_a_marker() { warm_marker || slot_marker; }
 warm_marker() { grep -q "the agent's own log did not show the warm start" "$REC_DIR/not-run.txt" 2>/dev/null; }
 slot_marker() { grep -q "held the one-job slot between the row's two jobs" "$REC_DIR/not-run.txt" 2>/dev/null; }
 
-# row_a_reason <marker words>: the reason in parentheses after the words, as NotRunNote writes it: a refused requeue's is
-# the scheduler's own words with every job ID and path replaced and brackets for its parentheses, a warm start's its
-# counts (internal/alpha, refusalWords and WarmUnshownError: no ID, path or name).
+# row_a_reason <marker words>: the reason in parentheses after the words, as NotRunNote writes it: a warm start's is its
+# counts (internal/alpha, WarmUnshownError: no ID, path or name).
 row_a_reason() { sed -n -E "s/.*$1 \(([^()]*)\).*/\1/p" "$REC_DIR/not-run.txt" 2>/dev/null | head -1; }
 
 # first_end_marker: the run's NOT RUN marker says its job was still pending a minute before its deployment's first
@@ -1153,7 +1151,6 @@ judge() {
     elif long_marker; then
       say "$n: NOT RUN (the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate: $(long_reason); the hour was not started, and the run's jobs were cancelled by tag; not a failure)"
     elif row_a_marker; then
-      if requeue_marker; then say "$n: NOT RUN (the scheduler refused the requeue of the run's own job: $(row_a_reason "the scheduler refused the requeue of the run's own job"); the run's other checks passed; not a failure)"; fi
       if warm_marker; then say "$n: NOT RUN (the agent's own log did not show the warm start: $(row_a_reason "the agent's own log did not show the warm start"); the run's other checks passed; not a failure)"; fi
       if slot_marker; then say "$n: NOT RUN (a job that is not the run's held the one-job slot between the row's two jobs: the owner's own work, left untouched; the run ended its deployment; the run's other checks passed; not a failure)"; fi
     elif [ "${SWAIT[$n]:--}" != - ] && [ "${PKG[$n]}" = internal/alpha ]; then

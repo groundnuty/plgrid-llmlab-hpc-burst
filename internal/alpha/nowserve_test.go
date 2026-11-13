@@ -1,11 +1,12 @@
 package alpha
 
-// Row A of issue #376 (nowserve.go): its clock against the shipped profile, its start wait as its first clock, the
-// requeue's line and reply, HBEP-3's tag against the contracts' helper, and its NOT RUN on a refused requeue. Expected
-// values come from the profile file, HBEP-3 and the science agent's rulings on #376, written out here.
+// Row A of issue #376 (nowserve.go): its clock against the shipped profile, its start wait as its first clock, HBEP-3's tag
+// against the contracts' helper, its NOT RUN on a warm start the agent's log did not show, and that it sends no requeue (#503).
+// Expected values come from the profile file, HBEP-3 and the science agent's rulings on #376 and #503, written out here.
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -133,17 +134,6 @@ func TestRowAsJobPendingPastItsStartWaitIsNotRun(t *testing.T) {
 	}
 }
 
-func TestTheRequeueLineTakesAJobIDOfDigitsOnly(t *testing.T) {
-	if l, err := RequeueHoldLine("4242"); err != nil || l != "scontrol requeuehold 4242" {
-		t.Errorf("RequeueHoldLine(4242) = %q, %v", l, err)
-	}
-	for _, bad := range []string{"", "42 43", "42;rm", "-1", "4_2", "42\n", "abc"} {
-		if _, err := RequeueHoldLine(bad); err == nil {
-			t.Errorf("RequeueHoldLine(%q) took it", bad)
-		}
-	}
-}
-
 // HBEP3Tag is computed from HBEP-3's text; the contracts' helper is an independent implementation of the same rule, so
 // the two agree on names under and over the 40 characters a tag keeps.
 func TestHBEP3TagIsTheContractsTag(t *testing.T) {
@@ -158,89 +148,52 @@ func TestHBEP3TagIsTheContractsTag(t *testing.T) {
 	}
 }
 
-// A refused requeue is NOT RUN, never a pass (Q5): with nothing else failed the run returns ErrRequeueRefused, after its
-// record (verdict "not run") and its text to post, which says NOT RUN with the reason; with a failure beside it, the
-// failure wins and the run is a FAIL.
-func TestARefusedRequeueIsNotRunUnlessAnotherCheckFails(t *testing.T) {
+// Row A sends no requeue (the science agent's ruling of 13 Nov 2026 on #503, correcting its ruling Q5 of 11 Nov on #376): the plugin
+// submits --no-requeue, so a user's scontrol requeuehold is refused by design and a row that sent it could never pass. A healthy run
+// through Run passes, and neither its record nor its text to post nor its failures say a word of a requeue. The source of the live
+// steps name neither scontrol requeuehold nor the Requeued reason (the event it raised) either, so a step cannot come back unseen.
+func TestRowASendsNoRequeue(t *testing.T) {
 	row := rowOf("alpha-athena-now-serve")
-	for _, c := range []struct {
-		fault      string
-		wantNotRun bool
-	}{{"requeue-refused", true}, {"requeue-refused-cut", false}, {"requeue-refused-no-drain", false}} {
-		t.Run(c.fault, func(t *testing.T) {
-			cfg := Config{Row: row, Dry: true, DryFault: c.fault, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
-			rec, err := NewRecorder(cfg.Out)
-			if err != nil {
-				t.Fatal(err)
-			}
-			failures, err := Run(context.Background(), cfg, newDrySteps(t, cfg, "nowserve"), rec, t.Logf)
-			record, _ := os.ReadFile(filepath.Join(cfg.Out, RecordFile))
-			posts, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
-			if c.wantNotRun {
-				if !errors.Is(err, ErrRequeueRefused) || !NotRun(row, err) || len(failures) != 0 {
-					t.Fatalf("failures %v, err %v; want the NOT RUN of a refused requeue", failures, err)
-				}
-				if !strings.Contains(string(record), `"verdict": "not run"`) && !strings.Contains(string(record), `"verdict":"not run"`) {
-					t.Errorf("the record does not say not run:\n%s", record)
-				}
-				// The scheduler's words, with the job's ID replaced, in the post, the record and the marker's note alike.
-				words := RequeueReplyOf(1, nil, []byte(dryRefusalText("1234567")), "1234567").Refusal
-				if !strings.HasSuffix(words, "presently disabled for job "+jobToken) {
-					t.Fatalf("the dry refusal's words are %q", words)
-				}
-				if !strings.Contains(string(posts), "alpha-athena-now-serve: NOT RUN") || !strings.Contains(string(posts), words) || strings.Contains(string(posts), ": PASS") {
-					t.Errorf("the text to post does not say NOT RUN with the scheduler's words:\n%s", posts)
-				}
-				if note := NotRunNote(row, cfg.PendingMax, err); !strings.Contains(note, requeueRefusedWords+" ("+words+")") {
-					t.Errorf("the marker's note %q does not say the requeue was refused, in the scheduler's words", note)
-				}
-				for name, b := range map[string][]byte{"text to post": posts, "record": record} {
-					if regexp.MustCompile(`for job [0-9]`).Match(b) {
-						t.Errorf("the %s names the job's ID:\n%s", name, b)
-					}
-				}
-				return
-			}
-			if err != nil || len(failures) == 0 || NotRun(row, err) {
-				t.Fatalf("failures %v, err %v; want a FAIL that outranks the refusal", failures, err)
-			}
-			if !strings.Contains(string(posts), "alpha-athena-now-serve: FAIL") || !strings.Contains(string(posts), "refused by the scheduler") {
-				t.Errorf("the text to post does not say FAIL beside the refusal:\n%s", posts)
-			}
-		})
+	cfg := Config{Row: row, Dry: true, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
+	rec, err := NewRecorder(cfg.Out)
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-// The requeue's verdict has three parts (the science agent's ruling 4 on #376): the Instance Failed with reason Requeued;
-// no second Allocation or job; the held job cancelled by the release. Each alone fails the run, from a healthy
-// observation that passes.
-func TestTheRequeueVerdictNeedsEachOfItsThreeParts(t *testing.T) {
-	ok := RequeueObs{Attempted: true, Accepted: true, DrainingSeen: true, EndReason: v1alpha1.ReasonRequeued, AllocationReleased: true, JobEnded: true, JobRequeued: true}
-	if f := requeueChecks(ok); len(f) != 0 {
-		t.Fatalf("the healthy requeue fails: %v", f)
+	failures, err := Run(context.Background(), cfg, newDrySteps(t, cfg, "nowserve"), rec, t.Logf)
+	if err != nil || len(failures) != 0 {
+		t.Fatalf("a healthy run: failures %v, err %v; want a pass", failures, err)
 	}
-	for name, c := range map[string]struct {
-		mutate func(*RequeueObs)
-		want   string
-	}{
-		"ended Drained":            {func(o *RequeueObs) { o.EndReason = v1alpha1.ReasonDrained }, "did not end with reason Requeued"},
-		"no end seen":              {func(o *RequeueObs) { o.EndReason = "" }, "did not end with reason Requeued"},
-		"a replacement Allocation": {func(o *RequeueObs) { o.NewAllocations = 1 }, "followed by a replacement"},
-		"a replacement Instance":   {func(o *RequeueObs) { o.NewInstances = 1 }, "followed by a replacement"},
-		"not released":             {func(o *RequeueObs) { o.AllocationReleased = false }, "release did not end the held job"},
-		"the job not ended":        {func(o *RequeueObs) { o.JobEnded = false }, "release did not end the held job"},
-		"not requeued":             {func(o *RequeueObs) { o.JobRequeued = false }, "does not show the job requeued"},
-		"no drain first":           {func(o *RequeueObs) { o.DrainingSeen = false }, "not seen draining"},
-	} {
-		o := ok
-		c.mutate(&o)
-		if f := Summary(requeueChecks(o)); !strings.Contains(f, c.want) {
-			t.Errorf("%s: failed checks %q lack %q", name, f, c.want)
+	record, _ := os.ReadFile(filepath.Join(cfg.Out, RecordFile))
+	posts, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
+	if !strings.Contains(string(record), `"verdict": "pass"`) && !strings.Contains(string(record), `"verdict":"pass"`) {
+		t.Errorf("the record does not say pass:\n%s", record)
+	}
+	// The record's observation, what the run saw, has no requeue member (the jobs' own records do carry the scheduler's Requeued flag,
+	// which is the cluster's, not a step of the row's), and the text to post says no word of one.
+	var saved struct {
+		Observation map[string]json.RawMessage `json:"observation"`
+	}
+	if err := json.Unmarshal(record, &saved); err != nil || len(saved.Observation) == 0 {
+		t.Fatalf("the record's observation could not be read (%v):\n%s", err, record)
+	}
+	for k := range saved.Observation {
+		if strings.Contains(strings.ToLower(k), "requeue") {
+			t.Errorf("the record's observation has a %q member: row A sends no requeue", k)
 		}
 	}
-	// A refused requeue judges only the window before it.
-	if f := requeueChecks(RequeueObs{Attempted: true, DrainingSeen: true, Refusal: "the scheduler's words: Requested operation is presently disabled for job [job]"}); len(f) != 0 {
-		t.Errorf("a refused requeue with the drain seen fails: %v", f)
+	if strings.Contains(strings.ToLower(string(posts)), "requeue") {
+		t.Errorf("the text to post says a word of a requeue:\n%s", posts)
+	}
+	for _, file := range []string{"now_flows_test.go", "steps_live_test.go", "live_flows_test.go", "guard_live_test.go", "now_nooverlap_flows_test.go"} {
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, word := range []string{"requeuehold", "ReasonRequeued"} {
+			if strings.Contains(string(src), word) {
+				t.Errorf("%s names %s: the live steps send no requeue and expect no Requeued event", file, word)
+			}
+		}
 	}
 }
 
@@ -383,7 +336,7 @@ func TestAWarmStartTheAgentsLogDidNotShowIsNotRun(t *testing.T) {
 				t.Fatal(err)
 			}
 			failures, err := Run(context.Background(), cfg, newDrySteps(t, cfg, "nowserve"), rec, t.Logf)
-			if !errors.Is(err, ErrWarmUnshown) || errors.Is(err, ErrRequeueRefused) || !NotRun(row, err) || len(failures) != 0 {
+			if !errors.Is(err, ErrWarmUnshown) || !NotRun(row, err) || len(failures) != 0 {
 				t.Fatalf("failures %v, err %v; want the NOT RUN of a warm start not shown", failures, err)
 			}
 			posts, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
@@ -399,7 +352,7 @@ func TestAWarmStartTheAgentsLogDidNotShowIsNotRun(t *testing.T) {
 		})
 	}
 	t.Run("beside a failure", func(t *testing.T) {
-		// requeue-refused-cut has the warm start shown; a cut stream with the image line gone is the failure that wins.
+		// a cut dry run has the warm start shown; a cut stream with the image line gone is the failure that wins.
 		cfg := Config{Row: row, Dry: true, DryFault: "cut", Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
 		rec, err := NewRecorder(cfg.Out)
 		if err != nil {

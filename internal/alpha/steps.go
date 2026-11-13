@@ -97,8 +97,7 @@ type Steps interface {
 	Handover(ctx context.Context, p Plan) (HandoverObs, error)
 	NoOverlap(ctx context.Context, p Plan) (NoOverlapObs, error)
 	TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
-	// NowServe is row A on plgrid-now (issue #376; nowserve.go). Beside what it saw it may return
-	// ErrRequeueRefused, which leaves the rest of the run to judge.
+	// NowServe is row A on plgrid-now (issue #376; nowserve.go).
 	NowServe(ctx context.Context, p Plan) (NowServeObs, error)
 	// NowNoOverlap is row B on plgrid-now (issue #376; nownooverlap.go). Beside what it saw it may return ErrSlotTaken
 	// or ErrSecondNotStarted, which leave the predecessor's part to judge.

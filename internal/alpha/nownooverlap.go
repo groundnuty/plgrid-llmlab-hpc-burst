@@ -360,14 +360,11 @@ func warmLine(job string, w WarmObs, ready bool) string {
 }
 
 // notRunWhy is the fixed words of a NOT RUN that did start: the slot taken, a warm start unshown (which job, and its
-// counts), a refused requeue.
+// counts).
 func notRunWhy(err error) string {
 	var why []string
 	if errors.Is(err, ErrSlotTaken) {
 		why = append(why, slotTakenWords)
-	}
-	if errors.Is(err, ErrRequeueRefused) {
-		why = append(why, fmt.Sprintf("%s (%s)", requeueRefusedWords, refusalOf(err)))
 	}
 	for _, w := range warmUnshownOf(err) {
 		why = append(why, fmt.Sprintf("%s (%s)", warmUnshownWords, w.counts()))

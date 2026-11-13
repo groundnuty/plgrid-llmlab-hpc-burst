@@ -8,30 +8,18 @@ package alpha
 // deadline, with attribution on every response; the Instance's deployment ID
 // under its Allocation's tag (HBEP-3, ported from the rehearsal's part 3);
 // HBEP-8's events and engine gauges, through internal/rehearsal/obscheck; one
-// worker-rung restart (HBEP-7); and last, scontrol requeuehold of the run's own
-// job by its ID (Q5).
+// worker-rung restart (HBEP-7); HBEP-8's events once everything that raises them has happened; then the deployment goes and
+// its job is seen ended.
 //
-// The requeue's order (the parent brief's "show how", the code agent's ruling):
-// before the deployment's endTime the lifecycle controller would replace a
-// Requeued failure with a new Allocation, a second job in a one-job row
-// (internal/lifecycle/reconcile.go: capacity and replacements run only while
-// the deployment is not shutting down). So the run sets the deployment's end to
-// now, waits until the controller is seen draining the Instance with nothing
-// planned beside it, checks the job is the run's own by its ID and tag, and
-// only then requeues it. The failure still ends the Instance with reason
-// Requeued (internal/lifecycle/instances.go: allocationFailed runs before the
-// shutdown's drain), and the release of the failed Allocation cancels the held
-// job (internal/providerctl/delete.go, toCancel), which frees the owner's slot.
-// A stream held open across that window keeps the Instance draining until the
-// requeue lands: with no request running, the drain would end the Instance as
-// Drained on the agent's next report, and the requeue would then meet a job its
-// release had already cancelled. That stream is the window's means, recorded and
-// not judged; the requeue's kill cuts it.
-//
-// A requeue the scheduler refuses is NOT RUN, exit 3 (ErrRequeueRefused),
-// never a pass, posted with the scheduler's own words, every job ID and path in
-// them replaced (requeue.go); the run's other checks are judged first, and a
-// failure there wins.
+// There is no requeue of the run's own job (the science agent's ruling on #503, 13 Nov 2026, which corrects its ruling Q5
+// of 11 Nov on #376): the plugin submits --no-requeue (HBEP-4:195; HBEP-7's Provisioning), so a user's scontrol
+// requeuehold is refused by design ("Requested operation is presently disabled"), and a requeue is an administrator's act
+// on these clusters. A row that sent it could never pass. What a requeue does to an Instance, that it fails with reason
+// Requeued and its Allocation is released, stays covered on the fake Slurm (HBEP-7's Test plan, the second execution;
+// internal/rehearsal/scenario, part 3). With it went the order the requeue needed: the row set the deployment's end to now
+// so that no replacement would follow the Requeued failure, held a stream open across that window and waited to see the
+// controller drain the Instance alone. The row now ends as the others do, by deleting the deployment (HBEP-7's Release,
+// shutdown), and sees its job ended in the cluster's record.
 
 import (
 	"crypto/sha256"
@@ -70,20 +58,7 @@ const (
 	// timeout column, as for the other rows with a start wait): above the row's worst case with its factor
 	// (TestEachStackRowsWorstCaseIsItsWaitsAddedUp; hack/livechecks, TestEveryStackRowsTimeoutIsAboveItsWorstCase).
 	NowServeBudget = 115 * time.Minute
-	// RequeueTimeout bounds the scontrol call of the requeue, the ssh included.
-	RequeueTimeout = time.Minute
-	// RequeueResultWait bounds the wait, after an accepted requeue, for its result: the Instance ended, its Allocation
-	// released and the held job ended in the cluster's record. Each is one pass of a controller, polling at most every
-	// few seconds, and the cancel one scancel.
-	RequeueResultWait = 5 * time.Minute
-	// holdStreamMax is the longest the stream held across the requeue's window lasts at the measured rate: the window
-	// itself (the end set, the drain seen, the job checked, the requeue sent) takes seconds.
-	holdStreamMax = 2 * time.Minute
 )
-
-// HoldStreamFor is how long the stream held across the requeue's window lasts at the measured rate: two minutes, or two
-// thirds of the deadline when that is shorter, so that the front's deadline never ends it first.
-func HoldStreamFor(tm Timing) time.Duration { return min(holdStreamMax, tm.MaxRequestDuration*2/3) }
 
 // AthenaNowTiming is the clock of the rows under profiles/athena-now.yaml: its margins and the 5-minute deadline.
 func AthenaNowTiming() Timing {
@@ -196,31 +171,6 @@ type ObsCheck struct {
 	Problems []string `json:"problems,omitempty"`
 }
 
-// RequeueObs is the requeue of the run's own job as the run saw it.
-type RequeueObs struct {
-	// Attempted says the run sent the requeue; Accepted that the scheduler took it, Refusal its reason when not.
-	Attempted bool   `json:"attempted"`
-	Accepted  bool   `json:"accepted"`
-	Refusal   string `json:"refusal,omitempty"`
-	// DrainingSeen says the controller was seen draining the Instance, at the deployment's end the run set, with no
-	// other Instance or Allocation of the run beside it, before the requeue was sent.
-	DrainingSeen bool `json:"drainingSeen"`
-	// EndReason is the reason the Instance ended with after the requeue ("" when the run did not see it end).
-	EndReason string `json:"endReason,omitempty"`
-	// AllocationReleased says the watch saw the Instance's Allocation deleted after the requeue; JobEnded that the
-	// cluster's record then showed the job ended, and JobRequeued requeued (its requeue flag, or a restart count),
-	// both read before the run ended anything itself.
-	AllocationReleased bool `json:"allocationReleased"`
-	JobEnded           bool `json:"jobEnded"`
-	JobRequeued        bool `json:"jobRequeued"`
-	// NewAllocations and NewInstances count those of the run the watch saw after the requeue that it had not seen
-	// before it: a replacement.
-	NewAllocations int `json:"newAllocations"`
-	NewInstances   int `json:"newInstances"`
-	// HoldStream is the stream held open across the window, recorded and not judged: the requeue's kill cuts it.
-	HoldStream Stream `json:"holdStream"`
-}
-
 // NowServeObs is a run of row A.
 type NowServeObs struct {
 	Tags       []string       `json:"tags"`
@@ -243,8 +193,6 @@ type NowServeObs struct {
 	// Responses counts the responses the run received; Attributed those that carried HBEP-5's attribution headers.
 	Responses  int `json:"responses"`
 	Attributed int `json:"attributed"`
-	// Requeue is the last step.
-	Requeue RequeueObs `json:"requeue"`
 	// Warm is the warm start as the agent's own log of the job showed it (the ruling 1(b) on #376).
 	Warm WarmObs `json:"warm"`
 }
@@ -283,39 +231,10 @@ func obsChecks(what string, c ObsCheck) []string {
 	return f
 }
 
-// requeueChecks: "a requeue of the Allocation's job fails its Instance" (HBEP-3, open question 13 and Test plan; Q5), in
-// a one-job row: no replacement, and the held job cancelled by the failed Allocation's release, so that the slot frees.
-// A refusal leaves the requeue unjudged (NOT RUN), but the window before it is the run's: the end set and the drain seen.
-func requeueChecks(o RequeueObs) []string {
-	if !o.Attempted {
-		return []string{"the requeue of the run's own job was not attempted"}
-	}
-	var f []string
-	if !o.DrainingSeen {
-		f = append(f, "the controller was not seen draining the Instance alone at the deployment's end before the requeue")
-	}
-	if !o.Accepted {
-		return f
-	}
-	if o.EndReason != v1alpha1.ReasonRequeued {
-		f = append(f, "the requeued Instance did not end with reason Requeued")
-	}
-	if !o.JobRequeued {
-		f = append(f, "the cluster's record does not show the job requeued")
-	}
-	if o.NewAllocations > 0 || o.NewInstances > 0 {
-		f = append(f, "the requeue was followed by a replacement")
-	}
-	if !o.AllocationReleased || !o.JobEnded {
-		f = append(f, "the failed Allocation's release did not end the held job before the run ended anything itself")
-	}
-	return f
-}
-
 // VerifyNowServe judges alpha-athena-now-serve.
 //
 //	hbep/0005-llmlab-compatible-front/README.md:442 and :488: the long stream through the front, attributed (Q4).
-//	hbep/0003-resource-model-and-naming/README.md:380, :332: the deployment ID under its tag; a requeue fails its Instance.
+//	hbep/0003-resource-model-and-naming/README.md:380, :332: the deployment ID under its tag.
 //	hbep/0008-observability-and-events/README.md:450-451: the events and the engine gauges.
 //	hbep/0007-lifecycle-controller/README.md:663: one restart at the worker rung (Q8: plgrid-now counts for it).
 func VerifyNowServe(row Row, o NowServeObs, jobs []provider.Job) []string {
@@ -337,21 +256,17 @@ func VerifyNowServe(row Row, o NowServeObs, jobs []provider.Job) []string {
 	f = append(f, obsChecks("events", o.Events)...)
 	f = append(f, obsChecks("engine gauges", o.Gauges)...)
 	f = append(f, restartChecks(o.WorkerRestarts)...)
-	f = append(f, requeueChecks(o.Requeue)...)
 	return dedupe(f)
 }
 
-// nowServePost is row A's text to post. A refused requeue with no failure is NOT RUN, and the line says so with the
-// reason; with a failure the run is a FAIL, the refusal beside it.
+// nowServePost is row A's text to post. A warm start the agent's own log did not show, with no failure, is NOT RUN, and the line
+// says so with the reason; with a failure the run is a FAIL.
 func nowServePost(row Row, o NowServeObs, failures []string) string {
 	var b strings.Builder
 	head := verdictLine(row, failures)
 	warm := warmStartShownByTheAgentsOwnLog(o.Warm)
 	if len(failures) == 0 {
 		var why []string
-		if o.Requeue.Attempted && !o.Requeue.Accepted {
-			why = append(why, fmt.Sprintf("%s (%s)", requeueRefusedWords, o.Requeue.Refusal))
-		}
 		if warm != nil {
 			why = append(why, fmt.Sprintf("%s (%s)", warmUnshownWords, warm.counts()))
 		}
@@ -370,16 +285,6 @@ func nowServePost(row Row, o NowServeObs, failures []string) string {
 		fmt.Fprintf(&b, "- the warm start, from the agent's own log: the image staged already, its digest named (%s, or %s), and all %d checkpoint files %s\n", StagedAlreadyVerified, StagedByAnother, len(o.Warm.Files), StagedPresentMatching)
 	} else {
 		fmt.Fprintf(&b, "- the warm start, from the agent's own log: NOT shown (%s): NOT RUN, never a pass\n", warm.counts())
-	}
-	r := o.Requeue
-	switch {
-	case !r.Attempted:
-		b.WriteString("- the requeue: not attempted\n")
-	case !r.Accepted:
-		fmt.Fprintf(&b, "- the requeue: refused by the scheduler (%s): NOT RUN, never a pass; the drain at the deployment's end was seen first: %t\n", r.Refusal, r.DrainingSeen)
-	default:
-		fmt.Fprintf(&b, "- the requeue, after the deployment's end and the drain were seen (%t): the Instance ended %s; the job requeued in the cluster's record: %t; the failed Allocation released: %t, and the held job ended by it: %t; replacements: %d Allocations, %d Instances\n",
-			r.DrainingSeen, orNone(r.EndReason), r.JobRequeued, r.AllocationReleased, r.JobEnded, r.NewAllocations, r.NewInstances)
 	}
 	return b.String()
 }
@@ -400,17 +305,6 @@ func obsWord(c ObsCheck) string {
 	}
 	return "all expected, none wrong"
 }
-
-func orNone(s string) string {
-	if s == "" {
-		return "with no end seen"
-	}
-	return "with reason " + s
-}
-
-// requeueRefusedWords say what happened to a run whose requeue was refused, in the marker, which hack/live-checks.sh
-// reads for them.
-const requeueRefusedWords = "the scheduler refused the requeue of the run's own job"
 
 // The reason words of the stager's log lines for an artifact found already staged (issue #392; the science agent's
 // ruling of 11 Nov 2026 on #376, relayed by the code agent's builder k343): each line names its image digest or its
@@ -721,17 +615,12 @@ func slicesContains(list []string, s string) bool {
 	return false
 }
 
-// nowServeNotRun is what ends a run of row A NOT RUN when nothing failed: the scheduler's refusal of the requeue (the
-// scenario's ErrRequeueRefused), and the warm start the agent's own log did not show; both when both hold.
-func nowServeNotRun(o NowServeObs, scenarioErr error) error {
-	var errs []error
-	if errors.Is(scenarioErr, ErrRequeueRefused) {
-		errs = append(errs, scenarioErr)
-	}
+// nowServeNotRun is what ends a run of row A NOT RUN when nothing failed: the warm start the agent's own log did not show.
+func nowServeNotRun(o NowServeObs) error {
 	if w := warmStartShownByTheAgentsOwnLog(o.Warm); w != nil {
-		errs = append(errs, w)
+		return w
 	}
-	return errors.Join(errs...)
+	return nil
 }
 
 // warmUnshownWords say what happened to a run whose warm start the agent's log did not show, in the marker, which

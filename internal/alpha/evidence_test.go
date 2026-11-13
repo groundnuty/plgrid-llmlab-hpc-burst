@@ -96,7 +96,7 @@ func (brokenScenario) NowServe(context.Context, Plan) (NowServeObs, error) {
 }
 
 // Run tells the steps to keep their evidence when the run failed, by a failed check or a broken scenario, and not for a pass or for a NOT
-// RUN: a refused requeue is the case here, which is not a failure.
+// RUN: a warm start the agent's log did not show is the case here, which is not a failure.
 func TestRunTellsTheStepsToKeepTheEvidenceOfAFailedRunOnly(t *testing.T) {
 	row := rowOf("alpha-athena-now-serve")
 	for _, c := range []struct {
@@ -109,7 +109,7 @@ func TestRunTellsTheStepsToKeepTheEvidenceOfAFailedRunOnly(t *testing.T) {
 	}{
 		{"a pass", "", false, 0, false, false},
 		{"a failed check, the long stream cut", "cut", false, 1, false, true},
-		{"a NOT RUN, the requeue refused", "requeue-refused", false, 0, true, false},
+		{"a NOT RUN, the warm start not shown", "warm-unread", false, 0, true, false},
 		{"a broken scenario", "", true, 1, true, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {

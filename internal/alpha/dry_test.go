@@ -44,7 +44,7 @@ const (
 var dryFaults = map[string][]string{
 	"handover":  {"cut", "no-stream", "two-restarts", "no-restart", "no-handover", "late-successor", "wrong-partition", "untagged", "unattributed", "adds-helios", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "no-responses", "pend-past-bound", "second-never-started", "second-never-started-late", "second-never-started-unknown", "second-never-started-cut", "second-never-started-late-cut", "second-never-started-no-restart", "second-never-started-not-known"},
 	"nooverlap": {"nocap", "nogap", "noslot", "cut", "no-stream", "late-submit", "untagged", "wrong-partition", "adds-athena", "default-lease", "short-lease", "no-release-when-idle", "duplicate-tag", "extra-allocation", "two-restarts", "no-restart", "pend-past-bound", "second-never-started", "second-never-started-late", "second-never-started-unknown", "second-never-started-cut", "second-never-started-late-cut", "second-never-started-no-restart", "second-never-started-not-known"},
-	"nowserve":  {"cut", "short-stream", "past-deadline", "unattributed", "no-responses", "no-restart", "two-restarts", "wrong-identity", "events-missing", "events-unchecked", "gauge-problem", "not-ready", "untagged", "wrong-partition", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "pend-past-bound", "requeue-refused", "requeue-refused-cut", "requeue-refused-no-drain", "requeue-not-requeued", "requeue-replacement", "requeue-not-released", "requeue-no-drain", "requeue-not-attempted", "warm-no-image", "warm-file-missing", "warm-other-digest", "warm-other-file", "warm-unread", "warm-cold-then-retry", "warm-failed-then-retry", "warm-cancel-then-retry", "warm-failed-check", "warm-no-start", "warm-restarted", "warm-unknown-first", "warm-truncated"},
+	"nowserve":  {"cut", "short-stream", "past-deadline", "unattributed", "no-responses", "no-restart", "two-restarts", "wrong-identity", "events-missing", "events-unchecked", "gauge-problem", "not-ready", "untagged", "wrong-partition", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "pend-past-bound", "warm-no-image", "warm-file-missing", "warm-other-digest", "warm-other-file", "warm-unread", "warm-cold-then-retry", "warm-failed-then-retry", "warm-cancel-then-retry", "warm-failed-check", "warm-no-start", "warm-restarted", "warm-unknown-first", "warm-truncated"},
 	"tunnel":    {"short", "cut", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition", "adds-other-cluster", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "past-deadline", "past-drain", "no-drain-start", "stream-cut-error", "reconnect", "disconnected", "sparse-samples", "late-first-sample", "no-concurrency", "slow-streams", "no-idle-gap", "no-long-stream", "no-back-to-back", "no-load-rate", "slow-start", "no-large", "large-apart", "response-overlap", "no-upload-rate", "no-download-rate", "upload-not-under-load", "pend-past-bound"},
 }
 
@@ -758,10 +758,8 @@ func (d *drySteps) TunnelHour(_ context.Context, p Plan) (TunnelHourObs, error) 
 }
 
 // NowServe is row A over the fake cluster (issue #376): one job, run on the manual clock; what the stack would show is
-// stood in for, and the requeue is the fake's own RequeueHold of the run's job, then the cancel by the job's tag that
-// the failed Allocation's release makes (internal/providerctl/delete.go, toCancel), with the cluster's record read
-// for both. Each fault departs from the healthy run in one way that must fail the row, or, for requeue-refused, end
-// it NOT RUN.
+// stood in for, and the run's end is the job's end once the deployment goes (no requeue: #503). Each fault departs from the
+// healthy run in one way that must fail the row, or, for warm-unread, end it NOT RUN.
 func (d *drySteps) NowServe(_ context.Context, p Plan) (NowServeObs, error) {
 	if d.fault("pend-past-bound") {
 		return NowServeObs{}, d.pendPastBound(p)
@@ -782,7 +780,7 @@ func (d *drySteps) NowServe(_ context.Context, p Plan) (NowServeObs, error) {
 	}
 	stream := Stream{ID: "long", Opened: ready.Add(time.Minute), Ended: ready.Add(time.Minute + length), Complete: true, Tokens: tm.ServeTokens}
 	switch {
-	case d.fault("cut"), d.fault("requeue-refused-cut"):
+	case d.fault("cut"):
 		stream.Complete, stream.CutBy = false, "tunnel"
 	case d.fault("short-stream"):
 		stream.Tokens = tm.ServeTokens - 1
@@ -807,7 +805,7 @@ func (d *drySteps) NowServe(_ context.Context, p Plan) (NowServeObs, error) {
 	case d.fault("two-restarts"):
 		obs.WorkerRestarts = 2
 	case d.fault("events-missing"):
-		obs.Events.Missing = []string{"failing/Requeued regarding Instance dry/now"}
+		obs.Events.Missing = []string{"failing/WorkerRestart regarding Instance dry/now"}
 	case d.fault("events-unchecked"):
 		obs.Events.Checked = false
 	case d.fault("gauge-problem"):
@@ -815,11 +813,11 @@ func (d *drySteps) NowServe(_ context.Context, p Plan) (NowServeObs, error) {
 	}
 	obs.Warm = d.warm()
 	d.tick(20 * time.Minute) // the worker restart and the rest, before the drain start
-	obs.Requeue, obs.Tags = d.requeue(p, n, id, tag), append([]string(nil), d.tags...)
-	if !obs.Requeue.Attempted || obs.Requeue.Accepted {
-		return obs, nil
-	}
-	return obs, &RequeueRefusedError{Reason: obs.Requeue.Refusal}
+	// The deployment goes, and the job ends with it.
+	d.tick(time.Minute)
+	d.end(n, id)
+	obs.Tags = append([]string(nil), d.tags...)
+	return obs, nil
 }
 
 // dryImageDigest and dryFiles are the dry run's image and the files its identity record lists; dryFiles' last is one the
@@ -904,62 +902,6 @@ func (d *drySteps) warm() WarmObs {
 	}
 	w.LogRead, w.Log = true, ParseAgentLog([]byte(d.dryAgentLog()))
 	return w
-}
-
-// dryRefusalText is the scheduler's refusal of the dry run's requeue, as Slurm words ESLURM_DISABLED for a job: it names
-// the job's ID.
-func dryRefusalText(id string) string {
-	return "scontrol: error: Requested operation is presently disabled for job " + id
-}
-
-// requeue is row A's last step over the fake cluster.
-func (d *drySteps) requeue(p Plan, n int, id, tag string) RequeueObs {
-	ro := RequeueObs{Attempted: !d.fault("requeue-not-attempted"), DrainingSeen: !d.fault("requeue-no-drain") && !d.fault("requeue-refused-no-drain")}
-	if !ro.Attempted {
-		d.end(n, id)
-		return ro
-	}
-	if strings.HasPrefix(d.cfg.DryFault, "requeue-refused") {
-		// The scheduler refused, in Slurm's own words for a job that may not be requeued, which name the job's ID: the
-		// job runs on until the drain ends it.
-		ro.Refusal = RequeueReplyOf(1, nil, []byte(dryRefusalText(id)), id).Refusal
-		d.tick(time.Minute)
-		d.end(n, id)
-		return ro
-	}
-	ro.Accepted = true
-	jid, err := strconv.Atoi(id)
-	if err != nil {
-		d.t.Fatal(err)
-	}
-	if err := d.plat.RequeueHold(jid); err != nil {
-		d.t.Fatalf("the fake's requeue: %v", err)
-	}
-	d.tick(10 * time.Second)
-	ro.EndReason, ro.AllocationReleased = v1alpha1.ReasonRequeued, true
-	if d.fault("requeue-not-requeued") {
-		ro.EndReason = v1alpha1.ReasonDrained
-	}
-	if d.fault("requeue-not-released") {
-		ro.AllocationReleased = false
-	} else if err := d.cancelTag(tag); err != nil {
-		d.t.Fatal(err)
-	}
-	jobs, err := dryLedger{d}.Jobs(context.Background(), []string{tag})
-	if err != nil {
-		d.t.Fatal(err)
-	}
-	for _, j := range jobs {
-		if j.ID == id {
-			ro.JobEnded, ro.JobRequeued = j.EndTime != nil, provider.AccountingRequeued(j)
-		}
-	}
-	if d.fault("requeue-replacement") {
-		// A replacement Allocation's job, which the deployment's end must have kept from being made.
-		d.submit(d.tag(p, "replacement"), d.cfg.Row.Partition, d.cfg.Row.QOS)
-		ro.NewAllocations, ro.NewInstances = 1, 1
-	}
-	return ro
 }
 
 func (d *drySteps) out(n int) string { return filepath.Join(d.root, fmt.Sprintf("job-%d.out", n)) }

@@ -41,12 +41,11 @@ func TestEachStackRowsWorstCaseIsItsWaitsAddedUp(t *testing.T) {
 		{"the hour on Athena, its wait capped a minute before the first end", rowOf("tunnel-hour-athena"), 180, 11 + 121 + 122 + 15 + 5 + 1 + 5, 180 + 166, 11 + 5 + 1 + 5},
 		{"the hour at the longest lease", long, 120, 11 + 120 + 225 + 15 + 5 + 1 + 5, 120 + 269, 11 + 5 + 1 + 5},
 		// Row A on plgrid-now (issue #376): its start wait of 10 is its first clock whatever wait is asked, then its 48-minute
-		// lease less the 7-minute drain window to the requeue, the requeue's window (3 for the drain seen, 1 for scontrol, 5
-		// for the result, 5 and 2 for the held stream's deadline and the client's margin past it, 3 for the events), the
-		// drain window and 5 for the job to end once the deployment goes, three catch-ups and 5 to close. Its run's deadline
-		// is its budget, 115, which holds the start wait.
-		{"row A on plgrid-now, 30", rowOf("alpha-athena-now-serve"), 30, 11 + 10 + 41 + (3 + 1 + 5 + 5 + 2 + 3) + 7 + 5 + 3 + 5, 115, 11 + 19 + 5 + 3 + 5},
-		{"row A on plgrid-now, 2 h asked", rowOf("alpha-athena-now-serve"), 120, 11 + 10 + 41 + (3 + 1 + 5 + 5 + 2 + 3) + 7 + 5 + 3 + 5, 115, 11 + 19 + 5 + 3 + 5},
+		// lease less the 7-minute drain window, 3 for the events read last, the drain window and 5 for the job to end once the
+		// deployment goes, two catch-ups (the worker restart's and the deployment's end's) and 5 to close. There is no requeue
+		// window (#503). Its run's deadline is its budget, 115, which holds the start wait.
+		{"row A on plgrid-now, 30", rowOf("alpha-athena-now-serve"), 30, 11 + 10 + 41 + 3 + 7 + 5 + 2 + 5, 115, 11 + 3 + 5 + 2 + 5},
+		{"row A on plgrid-now, 2 h asked", rowOf("alpha-athena-now-serve"), 120, 11 + 10 + 41 + 3 + 7 + 5 + 2 + 5, 115, 11 + 3 + 5 + 2 + 5},
 		// Row B on plgrid-now (issue #376): its start wait of 10, the predecessor's 21-minute lease and 5 for its job to be seen
 		// gone from the slot, 3 for the successor's Allocation and the successor's own start wait of 10, then 12 and 5 for it to
 		// be ready, 1 for the guard's last looks, the 7-minute drain window and 5 for the jobs to end once the deployment goes,
@@ -129,12 +128,7 @@ var liveWaits = map[string]string{
 	"TunnelHour: r.waitFor(tm.MinIdleGap + time.Minute)":                                          "the lease",
 	"successorOf: stack.BoundedDeadline(d)":                                                       "the waits that call it, listed here",
 	"nowGauges: r.waitFor(stack.WaitDeadline)":                                                    "the lease",
-	"requeueSnapshot: r.syncWatch(stack.KindAllocations | stack.KindInstances)":                   "the lease (the time-left check before it leaves it a minute)",
-	"requeueOwnJob: r.waitFor(stack.WaitDeadline)":                                                "term: NowRequeueTail",
-	"requeueOwnJob: r.syncWatch(stack.KindInstances | stack.KindAllocations)":                     "term: stack.CatchUpWorstCase",
-	"requeueResult: stack.BoundedDeadline(RequeueResultWait)":                                     "term: NowRequeueTail",
-	"requeueResult: time.Sleep(time.Second)":                                                      "pacing",
-	"nowEvents: stack.BoundedDeadline(stack.WaitDeadline)":                                        "term: NowRequeueTail",
+	"nowEvents: stack.BoundedDeadline(stack.WaitDeadline)":                                        "term: stack.WaitDeadline, the events read last",
 	"nowEvents: time.Sleep(time.Second)":                                                          "pacing",
 	// Row B (now_nooverlap_flows_test.go).
 	"NowNoOverlap: r.syncWatch(stack.KindInstances | stack.KindAllocations | stack.KindDeployments)": "term: stack.CatchUpWorstCase",

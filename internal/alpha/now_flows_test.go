@@ -12,13 +12,11 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -28,12 +26,15 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
 // NowServe is alpha-athena-now-serve: the Instance ready; the long stream; the deployment ID under its tag; the
-// engine gauges; one worker-rung restart; the requeue of the run's own job last; HBEP-8's events once everything
-// that raises them has happened; then the deployment goes and its job is seen ended.
+// engine gauges; one worker-rung restart; HBEP-8's events once everything that raises them has happened; then the
+// deployment goes and its job is seen ended. There is no requeue of the run's own job: the plugin submits --no-requeue
+// (HBEP-4:195; HBEP-7's Provisioning), so a user's requeue of it is refused by design, and a requeue is an
+// administrator's act on these clusters (the science agent's ruling on #503, 13 Nov 2026, which corrects its ruling of
+// 11 Nov on #376). What a requeue does to an Instance stays covered on the fake Slurm (HBEP-7's Test plan, the second
+// execution; internal/rehearsal/scenario, part 3).
 func (r *liveRun) NowServe(ctx context.Context, p Plan) (NowServeObs, error) {
 	r.start(p)
 	in, err := r.firstReady(p)
@@ -52,8 +53,7 @@ func (r *liveRun) NowServe(ctx context.Context, p Plan) (NowServeObs, error) {
 	o.Deployment = r.observedDeployment()
 	var files []agentapi.FileDigest
 	o.Identity, files = r.identityOf(ctx, in)
-	// The warm start, from the agent's own log of the job, read while the job runs: an accepted requeue's release
-	// removes the Allocation's files.
+	// The warm start, from the agent's own log of the job, read while the job runs.
 	o.Warm = r.warmOf(ctx, in, files)
 	key := r.fc.KeyFor(&in)
 	o.Rate = r.rate(key)
@@ -61,14 +61,8 @@ func (r *liveRun) NowServe(ctx context.Context, p Plan) (NowServeObs, error) {
 	o.Gauges = r.nowGauges(in)
 	o.WorkerRestart = r.workerRestart(ctx, p, in)
 	in = r.current(in)
-	var refused error
-	o.Requeue, refused = r.requeueOwnJob(ctx, p, in, o.Rate)
-	if refused != nil && !errors.Is(refused, ErrRequeueRefused) {
-		return NowServeObs{}, refused
-	}
-	o.Events = r.nowEvents(in, o.Requeue.Accepted)
-	// The run is over: the deployment goes, and the cluster's record shows its job ended (a refused requeue leaves the
-	// job running until the drain ends it). On an accepted requeue the job has ended already, by the release.
+	o.Events = r.nowEvents(in)
+	// The run is over: the deployment goes, and the cluster's record shows its job ended.
 	r.endDeployment(ctx, p)
 	tags, err := r.runTags()
 	if err != nil {
@@ -77,7 +71,7 @@ func (r *liveRun) NowServe(ctx context.Context, p Plan) (NowServeObs, error) {
 	o.Tags = tags
 	o.WorkerRestarts = WorkerRestarts(r.watch.Last())
 	o.Responses, o.Attributed = r.attribution()
-	return o, refused
+	return o, nil
 }
 
 // identityOf reads the Instance's deployment ID under its Allocation's tag (HBEP-3; the rehearsal's part 3,
@@ -266,11 +260,10 @@ func (r *liveRun) nowGauges(in v1alpha1.Instance) ObsCheck {
 // table (hbep/0008-observability-and-events/README.md:164-177) and HBEP-7's rules, for this row's steps, never from what
 // the run emitted (issue #193, Verifications that prove nothing): the agent registered (started); the Instance verified,
 // qualified and warmed up (ready); its drain start under an hour away with no replacement ready, in a one-job row of a
-// 48-minute lease, from its ready on (ending-soon, HBEP-7:547); the worker-rung restart (failing); and, when the
-// scheduler took the requeue, its failure (failing, HBEP-3). Forbidden: a handover, since no replacement was ever
-// ready. What else the run raised is not judged here beyond its form (obscheck.EventProblems holds every typed event
+// 48-minute lease, from its ready on (ending-soon, HBEP-7:547); and the worker-rung restart (failing). Forbidden: a
+// handover, since no replacement was ever ready. What else the run raised is not judged here beyond its form (obscheck.EventProblems holds every typed event
 // to HBEP-8's form). It waits, bounded, for every expected event, then reads the forbidden ones and the form once.
-func (r *liveRun) nowEvents(in v1alpha1.Instance, requeued bool) ObsCheck {
+func (r *liveRun) nowEvents(in v1alpha1.Instance) ObsCheck {
 	inst := func(action, reason, why string) obscheck.WantEvent {
 		return obscheck.WantEvent{Action: action, Reason: reason, Kind: "Instance", Namespace: in.Namespace, Name: in.Name, Controller: obscheck.LifecycleController, Why: why}
 	}
@@ -279,9 +272,6 @@ func (r *liveRun) nowEvents(in v1alpha1.Instance, requeued bool) ObsCheck {
 		inst("ready", "Ready", "verified, qualified and warmed up (Instance start)"),
 		inst("ending-soon", "NoReplacementReady", "ready with its drain start under an hour away and no replacement ready (HBEP-7:547)"),
 		inst("failing", v1alpha1.ReasonWorkerRestart, "the worker-rung restart (HBEP-7, Health and restarts)"),
-	}
-	if requeued {
-		want = append(want, inst("failing", v1alpha1.ReasonRequeued, "the requeue of the run's own job (HBEP-3)"))
 	}
 	forbid := []obscheck.WantEvent{{Action: "replaced", Reason: v1alpha1.EventReasonHandedOver, Kind: "Instance", Namespace: in.Namespace, Name: in.Name,
 		Why: "no replacement was ever ready in a one-job row"}}
@@ -300,173 +290,6 @@ func (r *liveRun) nowEvents(in v1alpha1.Instance, requeued bool) ObsCheck {
 		c.Missing = append(c.Missing, m.String()+" ("+m.Why+")")
 	}
 	return c
-}
-
-// requeueOwnJob is the last step (Q5; nowserve.go, the order): a stream held open, the deployment's end set to now, the
-// controller seen draining the Instance alone, the job checked to be the run's own by its ID and tag, then scontrol
-// requeuehold of it by its ID. A refusal of the scheduler's ends the step with ErrRequeueRefused and the held stream
-// left to finish; a call that never reached it fails the run. An accepted requeue is followed, bounded, until the
-// Instance has ended, its Allocation is released and the cluster's record shows the job ended, each recorded as seen;
-// then the watch is brought up to date and anything of the run it had not seen before the requeue is counted.
-func (r *liveRun) requeueOwnJob(ctx context.Context, p Plan, in v1alpha1.Instance, rate float64) (RequeueObs, error) {
-	t := r.t
-	var ro RequeueObs
-	holdFor := HoldStreamFor(r.tm)
-	n, err := r.tokensFor(holdFor, rate)
-	if err != nil {
-		return ro, err
-	}
-	// The whole window must come before the deployment's own end (oneJob), which would drain the Instance first.
-	if left := time.Until(r.oneEnd); left < holdFor+time.Minute {
-		t.Fatalf("the requeue: %s is left before the deployment's planned end, under the %s its window needs: the steps before it took too long for the lease", left.Round(time.Second), holdFor+time.Minute)
-	}
-	knownA, knownI, err := r.requeueSnapshot(ctx)
-	if err != nil {
-		return ro, err
-	}
-	hold := r.openStream(n, r.fc.KeyFor(&in), "")
-	<-hold.first
-	if _, err := r.endAt(time.Now()); err != nil {
-		t.Fatalf("the requeue: %v", err)
-	}
-	p.Logf("%s: the deployment's end is now, with a stream of %d tokens in flight", p.Row.Name, n)
-	r.waitFor(stack.WaitDeadline, "the controller to drain the Instance alone at the deployment's end", func() bool { return r.drainingAlone(in) })
-	ro.DrainingSeen = true
-	jobID := r.ourJobFor(ctx, in, "the requeue")
-	reply, err := r.requeue(ctx, jobID)
-	if err != nil {
-		t.Fatalf("the requeue: the scontrol call did not reach the scheduler, so nothing is known of a refusal: %v", err)
-	}
-	ro.Attempted = true
-	if !reply.Accepted {
-		ro.Refusal = reply.Refusal
-		p.Logf("%s: the scheduler refused the requeue (%s); the row is NOT RUN unless another check fails", p.Row.Name, reply.Refusal)
-		ro.HoldStream = r.finish(hold)
-		return ro, &RequeueRefusedError{Reason: reply.Refusal}
-	}
-	ro.Accepted = true
-	at := time.Now()
-	p.Logf("%s: the scheduler took the requeue of the run's own job", p.Row.Name)
-	r.requeueResult(ctx, in, jobID, &ro)
-	p.Logf("%s: %s after the requeue: the Instance ended %q, its Allocation released %t, the job ended %t and requeued %t in the cluster's record",
-		p.Row.Name, time.Since(at).Round(time.Second), ro.EndReason, ro.AllocationReleased, ro.JobEnded, ro.JobRequeued)
-	ro.HoldStream = r.finish(hold)
-	if err := r.syncWatch(ctx, stack.KindInstances|stack.KindAllocations, "the run's Instances and Allocations after the requeue"); err != nil {
-		return ro, err
-	}
-	newA := map[types.UID]bool{}
-	for _, o := range r.watch.Allocations() {
-		if !knownA[o.UID] {
-			newA[o.UID] = true
-		}
-	}
-	ro.NewAllocations = len(newA)
-	for _, u := range r.watch.UIDs() {
-		if !knownI[u] {
-			ro.NewInstances++
-		}
-	}
-	return ro, nil
-}
-
-// requeueSnapshot is the run's Allocations and Instances before the requeue, once the watch has caught up with the API:
-// what came after, the result is checked against.
-func (r *liveRun) requeueSnapshot(ctx context.Context) (allocs, insts map[types.UID]bool, err error) {
-	if err := r.syncWatch(ctx, stack.KindAllocations|stack.KindInstances, "the run's Allocations and Instances before the requeue"); err != nil {
-		return nil, nil, err
-	}
-	allocs, insts = map[types.UID]bool{}, map[types.UID]bool{}
-	for _, o := range r.watch.Allocations() {
-		allocs[o.UID] = true
-	}
-	for _, u := range r.watch.UIDs() {
-		insts[u] = true
-	}
-	return allocs, insts, nil
-}
-
-// drainingAlone reads, from the API, that the controller drains the Instance at the deployment's end and plans nothing
-// beside it: the Instance draining, no other Instance of the run that has not ended, and no Allocation but its own.
-func (r *liveRun) drainingAlone(in v1alpha1.Instance) bool {
-	x, ok := r.lookup(in)
-	if !ok || x.Status.Phase != v1alpha1.InstanceDraining {
-		return false
-	}
-	for _, y := range r.instances() {
-		if y.UID != in.UID && y.Status.Phase != v1alpha1.InstanceEnded {
-			return false
-		}
-	}
-	var al v1alpha1.AllocationList
-	ctx, cancel := stack.CallCtx(r.t)
-	defer cancel()
-	if err := r.c.List(ctx, &al, client.InNamespace(r.w.md.Namespace)); err != nil {
-		return false
-	}
-	for _, a := range al.Items {
-		if a.Name != in.Spec.AllocationRef.Name {
-			return false
-		}
-	}
-	return true
-}
-
-// requeue sends the requeue: scontrol requeuehold of the job by its ID over the run's own transport (RequeueHoldLine),
-// or the test's seam (requeueFn). Only an answer of the scheduler's is a reply; a call that did not reach it is an error.
-// The scheduler's raw text goes to the test's private log; the post has its words with every job ID and path replaced
-// (RequeueReplyOf).
-func (r *liveRun) requeue(ctx context.Context, jobID string) (RequeueReply, error) {
-	if r.requeueFn != nil {
-		return r.requeueFn(ctx, jobID)
-	}
-	line, err := RequeueHoldLine(jobID)
-	if err != nil {
-		return RequeueReply{}, err
-	}
-	res, err := r.tr.Run(ctx, slurm.Command{Line: line, Timeout: RequeueTimeout})
-	if err != nil {
-		return RequeueReply{}, err
-	}
-	reply := RequeueReplyOf(res.ExitCode, res.Stdout, res.Stderr, jobID)
-	if !reply.Accepted {
-		r.t.Logf("the requeue: scontrol exited %d: %.300s", res.ExitCode, strings.TrimSpace(string(res.Stderr)+" "+string(res.Stdout)))
-	}
-	return reply, nil
-}
-
-// requeueResult follows an accepted requeue, bounded by RequeueResultWait: the Instance's end and its reason, from the
-// watch; its Allocation's deletion, from the watch; and, once both are seen, the job's end and its requeue in the
-// cluster's own record, read by its tag. What it has seen when the bound runs out stays in the record; the verdict
-// fails what is missing.
-func (r *liveRun) requeueResult(ctx context.Context, in v1alpha1.Instance, jobID string, ro *RequeueObs) {
-	tag := r.tagOf(in)
-	led := r.Ledger()
-	deadline, _ := stack.BoundedDeadline(r.t, RequeueResultWait)
-	for {
-		if o, ended := r.watch.First(in.UID, time.Time{}, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceEnded }); ended {
-			ro.EndReason = o.EndReason
-		}
-		ro.AllocationReleased = slices.ContainsFunc(r.watch.Allocations(), func(o stack.AllocObservation) bool {
-			return o.Name == in.Spec.AllocationRef.Name && o.Deleted
-		})
-		if ro.EndReason != "" && ro.AllocationReleased && tag != "" {
-			if jobs, err := led.Jobs(ctx, []string{tag}); err == nil {
-				for _, j := range jobs {
-					if j.ID == jobID {
-						ro.JobEnded, ro.JobRequeued = j.EndTime != nil, provider.AccountingRequeued(j)
-					}
-				}
-			}
-		}
-		if ro.EndReason != "" && ro.AllocationReleased && ro.JobEnded {
-			return
-		}
-		if !time.Now().Before(deadline) {
-			r.t.Logf("the requeue's result: not everything was seen within %s", RequeueResultWait)
-			return
-		}
-		time.Sleep(time.Second)
-	}
 }
 
 // ourJobFor is ourJob, its failures naming the step that needs it.

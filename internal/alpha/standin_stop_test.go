@@ -52,7 +52,10 @@ func stopBy(now time.Time, wait time.Duration, deadline time.Time, hasDeadline b
 // stackStop is what Close saw of the stack's stop: the processes hpcburst status reported before down, whether down ran, its own error,
 // and what was left after it, or why that was not looked at. The zero value is a stop nothing saw, which problem reports.
 type stackStop struct {
-	procs      []stack.Proc
+	procs []stack.Proc
+	// began is when Close began to stop the stack: everything the stack's own controllers did to the run's jobs came before it, and the
+	// cleanup's cancel of what was left comes after (liveRun.Close stops the stack first).
+	began      time.Time
 	statusErr  error
 	ran        bool
 	downErr    error
@@ -67,6 +70,7 @@ type stackStop struct {
 // before reads the stack's processes, for after to compare; nothing on a nil stackStop, a run that does not check its stop.
 func (s *stackStop) before(h *stack.Host) {
 	if s != nil {
+		s.began = time.Now()
 		s.procs, s.statusErr = h.Processes()
 	}
 }

@@ -611,6 +611,11 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'hack/live-checks.sh@@real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|79|-C memfs@@real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|75|-C memfs'
   'hack/live-checks.sh@@conformance-helios-gh200|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|57|-C memfs|10@@conformance-helios-gh200|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|50|-C memfs|10'
   'hack/live-checks.sh@@conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|57|-|10@@conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|50|-|10'
+  # #503: row A sends no requeue; its worst case is the default formula with the events read last and the worker restart's and the deployment's
+  # end's catch-ups, and its NOT RUN is the warm start alone.
+  'budget.go@@(r.Lease - dw) + stack.WaitDeadline + dw@@(r.Lease - dw) + dw'
+  'budget.go@@stack.WaitDeadline + dw + EndMargin + 2*stack.CatchUpWorstCase@@stack.WaitDeadline + dw + EndMargin + stack.CatchUpWorstCase'
+  'run.go@@		refused = nowServeNotRun(o)@@		refused = nil'
   'budget.go@@	CloseTimeout = 5 * time.Minute@@	CloseTimeout = 4 * time.Minute'
   'budget.go@@	ReadyMargin = 5 * time.Minute@@	ReadyMargin = 4 * time.Minute'
   'budget.go@@	EndMargin = 5 * time.Minute@@	EndMargin = 4 * time.Minute'

@@ -153,8 +153,7 @@ var accountingFaults = []string{"node-two", "node-none"}
 // TestRowAsNotRunsThroughTheScript's.
 var nowServeFaults = []string{"cut", "short-stream", "past-deadline", "unattributed", "no-responses", "no-restart", "two-restarts", "wrong-identity",
 	"events-missing", "events-unchecked", "gauge-problem", "not-ready", "untagged", "wrong-partition", "default-lease", "short-lease", "duplicate-tag",
-	"extra-allocation", "requeue-refused-cut", "requeue-refused-no-drain", "requeue-not-requeued", "requeue-replacement", "requeue-not-released",
-	"requeue-no-drain", "requeue-not-attempted"}
+	"extra-allocation"}
 
 // nowNoOverlapFaults are row B's failing faults (issue #376; internal/alpha, run_test.go's nowNoOverlapCases); its NOT RUNs
 // are TestRowBsNotRunsThroughTheScript's.

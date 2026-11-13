@@ -24,10 +24,10 @@ import (
 // parameter so that no rule by row can come back unseen: TestEveryRowEndsNotRunWhenItsJobNeverStarts
 // asks it of every row in Rows.
 //
-// Two NOT RUNs are not a job that never started, both row A's (issue #376): its requeue that the
-// scheduler refused (ErrRequeueRefused; the science agent's ruling Q5), where the requeue was never
-// put to the test, and its warm start that the agent's own log did not show (ErrWarmUnshown; the
-// ruling 1(b)). Run has judged the rest of that run first, and returns either only when nothing failed.
+// Two NOT RUNs are not a job that never started, both row A's (issue #376): its warm start that the agent's own log
+// did not show (ErrWarmUnshown; the ruling 1(b)), and row B's (below). Row A's requeue, which the scheduler refuses by design for
+// a job submitted --no-requeue, is not a step of the row any more (issue #503; the science agent's ruling of 13 Nov 2026), and so
+// no NOT RUN. Run has judged the rest of that run first, and returns it only when nothing failed.
 //
 // A third is row B's (issue #376): a job that is not the run's held the one-job slot between the row's two jobs
 // (ErrSlotTaken; the science agent's ruling Q7), the owner's own work, so the one-slot handover was never put to the
@@ -42,7 +42,7 @@ import (
 // max-model-len at the engine's measured rate is under the row's LongFloor (ErrLongTooShort), so the hour cannot hold the
 // long stream its check 2 asks for. Nothing was sent but the rate stream.
 func NotRun(_ Row, err error) bool {
-	return neverStarted(err) || errors.Is(err, ErrRequeueRefused) || errors.Is(err, ErrWarmUnshown) || errors.Is(err, ErrSlotTaken) || errors.Is(err, ErrLeadTooShort) || errors.Is(err, ErrLongTooShort)
+	return neverStarted(err) || errors.Is(err, ErrWarmUnshown) || errors.Is(err, ErrSlotTaken) || errors.Is(err, ErrLeadTooShort) || errors.Is(err, ErrLongTooShort)
 }
 
 // neverStarted is whether err says a job of the run never started within a bound.
@@ -72,7 +72,7 @@ func NotRunNote(row Row, pendingMax time.Duration, err error) string {
 		}
 		return fmt.Sprintf("%s: %s%s; the hour was not started; this run's jobs were cancelled by tag\n", row.Name, longTooShortWords, reason)
 	}
-	if errors.Is(err, ErrRequeueRefused) || errors.Is(err, ErrWarmUnshown) || errors.Is(err, ErrSlotTaken) {
+	if errors.Is(err, ErrWarmUnshown) || errors.Is(err, ErrSlotTaken) {
 		why := notRunWhy(err)
 		if why == "" && errors.Is(err, ErrWarmUnshown) {
 			why = warmUnshownWords
@@ -109,9 +109,9 @@ func lateOf(err error) string {
 }
 
 // stopsTheRun is whether a scenario's error leaves nothing to judge. ErrSecondNotStarted leaves the first job's part, and
-// ErrRequeueRefused everything before the requeue.
+// ErrSlotTaken the predecessor's.
 func stopsTheRun(err error) bool {
-	return err != nil && !errors.Is(err, ErrSecondNotStarted) && !errors.Is(err, ErrRequeueRefused) && !errors.Is(err, ErrSlotTaken)
+	return err != nil && !errors.Is(err, ErrSecondNotStarted) && !errors.Is(err, ErrSlotTaken)
 }
 
 // secondNotStartedWords say what happened to a run of two jobs, in the marker, which hack/live-checks.sh reads for
@@ -155,7 +155,7 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 		summary func([]string, []provider.Job) string
 		// second is the scenario's ErrSecondNotStarted: what it saw of the first job is judged, and decides the end.
 		second error
-		// refused is row A's NOT RUN (nowServeNotRun: a refused requeue, a warm start the agent's log did not show): the
+		// refused is row A's NOT RUN (nowServeNotRun: a warm start the agent's log did not show): the
 		// rest of the run is judged, recorded and posted with the reason, and with no failure the run is NOT RUN.
 		refused error
 	)
@@ -216,13 +216,10 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 		summary = func(f []string, j []provider.Job) string { return nowNoOverlapPost(cfg.Row, o, f, j, refused) }
 	case strings.HasPrefix(cfg.Row.Name, "alpha-athena-now-serve"):
 		o, serr := st.NowServe(ctx, plan)
-		if stopsTheRun(serr) || errors.Is(serr, ErrSecondNotStarted) {
+		if serr != nil {
 			return nil, serr
 		}
-		if serr != nil && (!o.Requeue.Attempted || o.Requeue.Accepted) {
-			return nil, fmt.Errorf("the scenario says the requeue was refused, and its observation does not: %v", serr)
-		}
-		refused = nowServeNotRun(o, serr)
+		refused = nowServeNotRun(o)
 		tags, obs = o.Tags, o
 		judge = func(j []provider.Job) []string { return VerifyNowServe(cfg.Row, o, j) }
 		summary = func(f []string, _ []provider.Job) string { return nowServePost(cfg.Row, o, f) }
@@ -269,7 +266,7 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 		return failures, fmt.Errorf("the text to post could not be written: %w", serr)
 	}
 	if refused != nil && len(failures) == 0 {
-		return nil, refused // the requeue was never put to the test and nothing else failed: NOT RUN, its reason posted
+		return nil, refused // a warm start or a slot was never put to the test and nothing else failed: NOT RUN, its reason posted
 	}
 	return failures, nil
 }
