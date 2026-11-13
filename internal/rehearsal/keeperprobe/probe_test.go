@@ -57,6 +57,7 @@ func TestRelayLineOfReadsAnSshsRemoteCommand(t *testing.T) {
 		{"too short", "srun -u --overlap --jobid=424242", false, 0, 0},
 		{"one word short of a channel", "srun -u --overlap --jobid=424242 --ntasks=1 hb-agent " + agentapi.RelaySubcommand, false, 0, 0},
 		{"a dangling flag", base + " --epoch", true, -1, -1},
+		{"another word where the job is", "srun -u --overlap --jobx=424242 --ntasks=1 hb-agent " + agentapi.RelaySubcommand + " serving", false, 0, 0},
 		{"another ntasks", "srun -u --overlap --jobid=424242 --ntasks=2 hb-agent " + agentapi.RelaySubcommand + " serving", false, 0, 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {

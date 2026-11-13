@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
@@ -215,6 +217,25 @@ func TestStillChildNamesAnotherParentAndAnotherStartTime(t *testing.T) {
 	}
 }
 
+// A pin whose pidfd is no longer open has seen nothing: poll answers that the descriptor is invalid, which is not the process exiting, and a
+// wait on the pin must not return as if it had.
+func TestAPinWhoseDescriptorIsClosedHasNotSeenTheProcessExit(t *testing.T) {
+	cmd := startSleep(t)
+	p, err := OpenPin(t, "the sleep", cmd.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Exited() {
+		t.Fatal("a live process reads as exited")
+	}
+	if err := unix.Close(p.FD); err != nil {
+		t.Fatal(err)
+	}
+	if p.Exited() {
+		t.Error("a pin with a closed descriptor reads as exited")
+	}
+}
+
 func TestAnUnverifiedPinSignalsNothing(t *testing.T) {
 	cmd := startSleep(t)
 	p, err := OpenPin(t, "the sleep", cmd.Process.Pid)
@@ -318,13 +339,23 @@ func TestPinSupervisorVerifiesTheRecordAgainstTheProcess(t *testing.T) {
 			}
 		})
 	}
-	// A process that started before this test process is not the supervisor this test's up recorded.
+	// A process that started before this test process is not the supervisor this test's up recorded, even when its recorded start time is
+	// its own: this test's parent (go test, or the shell that ran the binary) is older than the test, and its record is right.
 	t.Run("one that started before this test process", func(t *testing.T) {
+		ppid := os.Getppid()
+		if ppid <= 1 {
+			t.Skip("this test has no parent to name")
+		}
+		_, ticks, err := StatRow(ppid)
+		if err != nil {
+			t.Fatal(err)
+		}
 		state := t.TempDir()
-		old := LauncherProc{Name: "supervisor", PID: 1, StartTicks: 1, BootID: bootID(t)}
+		old := LauncherProc{Name: "supervisor", PID: ppid, StartTicks: ticks, BootID: bootID(t)}
 		writeRecord(t, state, old, old, nil)
-		if p, err := PinSupervisor(t, state); err == nil {
-			t.Fatalf("PinSupervisor pinned pid 1: %+v", p)
+		p, err := PinSupervisor(t, state)
+		if err == nil || !strings.Contains(err.Error(), "started before this test process") {
+			t.Fatalf("PinSupervisor of an older process = %+v, %v; want it refused as started before this test process", p, err)
 		}
 	})
 }
