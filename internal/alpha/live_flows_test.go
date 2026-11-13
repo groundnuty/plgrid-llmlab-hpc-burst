@@ -622,12 +622,14 @@ func (s *sampler) end() []TunnelSample {
 func (r *liveRun) endDeployment(ctx context.Context, p Plan) {
 	t := r.t
 	t.Helper()
+	r.debugState("before the delete")
 	cctx, cancel := stack.CallCtx(t)
 	err := r.c.Delete(cctx, &v1alpha1.ModelDeployment{ObjectMeta: metav1.ObjectMeta{Name: r.w.md.Name, Namespace: r.w.md.Namespace}})
 	cancel()
 	if err != nil {
 		t.Fatalf("delete the run's deployment: %v", err)
 	}
+	r.debugState("just after the delete")
 	led := r.Ledger()
 	// The run's tags are read from the watch while the jobs end: every Allocation
 	// of the run must be in it (issue #281).
@@ -657,6 +659,7 @@ func (r *liveRun) endDeployment(ctx context.Context, p Plan) {
 		}
 		return true, state
 	})
+	r.debugState("after the wait")
 	p.Logf("%s: the deployment is deleted and its jobs ended", p.Row.Name)
 }
 

@@ -3,11 +3,11 @@
 # live steps over the real stack and the fake Slurm; it must end NOT RUN for the cold start only, and assert that the stack's release,
 # not the cleanup or the time limit, ended the job) and the warm one (TestStandInNowServeWarm: the pre-staged row passes). Read-only: no
 # secret, cache restore only, nothing saved.
-name: l503d-debug-standins-x4
+name: l503e-debug-state-x4
 on:
   pull_request:
     paths:
-      - .github/workflows/l503d-debug-standins-x4.yml
+      - .github/workflows/l503e-debug-state-x4.yml
 permissions:
   contents: read
 jobs:
@@ -159,6 +159,8 @@ jobs:
           echo "fail lines: $(grep -c -E '^--- FAIL' "$log")"
           echo "skip lines: $(grep -c -E '^\s*--- SKIP' "$log")"
           grep -n -E "the job was sent TERM|time limit|restart count|--- (PASS|FAIL)|worker-rung restart, from|the run's jobs are ended|the deployment is deleted|DEBUG" "$log" | cut -c1-400 || true
-          sed -n '/DEBUG: the controller.s lines/,/^--- FAIL/p' "$log" | head -160 | cut -c1-360 || true
+          sed -n '/DEBUG: the controller.s lines/,/^--- FAIL/p' "$log" | head -60 | cut -c1-300 || true
+          echo "--- the state dumps of every iteration (patched in by debug-state.patch):"
+          grep -E -A45 'DEBUG\[[a-z ]*\]: [0-9]+ events' "$log" | grep -v '^--$' | head -500 | cut -c1-260 || true
           grep -B2 -A25 -E '^--- FAIL' "$log" | head -200 | cut -c1-400 || true
           exit "$rc"
