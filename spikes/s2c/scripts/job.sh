@@ -8,8 +8,8 @@
 #   envoy-nobound  the same configuration without hash_balance_factor
 #   probe          the dead-worker probe behind the bound Envoy arm (run_probe; s2crouter probe), the science agent's ruling on #62
 # Steps (the regime letter of a PLAN item): B = KV cache capped at KV_BLOCKS_B blocks per worker, S2b's load; H = the same
-# cap with LOAD_ARGS_H, S2b's workload at twice the concurrency, so the bound has load to act on (e429: on real Envoy at
-# factor 125 a hot worker sheds only from about its 6th concurrent request); A = KV_BLOCKS_A (S2b's profiled size), S2b's
+# cap with LOAD_ARGS_H, S2b's workload at twice the concurrency, so the bound has load to act on (Envoy gives each worker
+# ceil(ceil((active + 1) x 1.25) / workers) slots, HBEP-5:133); A = KV_BLOCKS_A (S2b's profiled size), S2b's
 # load. The default PLAN runs A last, so the budget guard drops it first (the science agent's ruling on #62).
 #
 # Topology: NWORK vLLM servers, each started by `s2crouter worker` (the agent's own WorkerExec: Apptainer, a Unix

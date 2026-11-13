@@ -59,7 +59,8 @@ digest (`agent.StagedEnvoyPath`), and an arm changes at most one field:
 - Each arm records the agent's rendering, the bytes Envoy was started with, their sha256 and the paths that differ.
   That is at most `...consistent_hashing_lb_config.hash_balance_factor`.
 
-**The bound.** #518's PR 1 adds bounded loads to the agent's configuration at 125. Until it merges, the bound arm's
+**The bound.** HBEP-5 decided bounded loads at `hash_balance_factor: 125` provisionally (13 Nov 2026, #520), and
+#518's PR 1 adds them to the agent's configuration. Until it merges, the bound arm's
 factor is the harness parameter `BOUND`, default 125. Before the merge, `envoy-bound` is the edited start and
 `envoy-nobound` the product's. After it, the other way round, with no change to the harness
 (`cmd/s2crouter/bound_test.go` pins both cases).
@@ -82,12 +83,14 @@ The run label salts every system prompt and every session key, and every worker'
 **Three steps** (the letter of a `PLAN` item):
 - **B:** each worker's KV cache capped at 6,000 blocks (96,000 tokens), S2b's load. This is where affinity matters
   (S2b, regime B).
-- **H:** the same cap with twice S2b's concurrency: 192 sessions, 64 in flight. In S2b's own samples, its workload
-  kept 1.0 to 2.0 requests running per worker on average, peaking at 3 to 7, on one shared GH200. #518's
-  measurement on real Envoy found that at factor 125 a hot worker sheds only from about its 6th concurrent request.
-  So at S2b's load the bound and no-bound arms could look the same. H gives the bound load to act on. The summary
-  reports each step's peak in-flight per worker, which shows whether it got there. The science agent accepted H on
-  #62.
+- **H:** the same cap with twice S2b's concurrency: 192 sessions, 64 in flight. Envoy gives each worker
+  ⌈⌈(active requests + 1) × 1.25⌉ ÷ workers⌉ slots and skips only a worker above them (HBEP-5:133). With two
+  workers, #518 measured the sixth request on one worker as the first to spill. In S2b's own samples, its workload
+  kept 1.0 to 2.0 requests running per worker on average, peaking at 3 to 7, on one shared GH200. At four workers
+  that gives about 2 to 3 slots each, so only S2b's peaks would cross the bound, and with a GPU per worker requests
+  finish sooner and fewer overlap. The bound and no-bound arms could then look the same. H gives the bound load to
+  act on. The summary reports each step's peak in-flight per worker, which shows whether it got there. The science
+  agent accepted H on #62.
 - **A:** 33,010 blocks, S2b's profiled size, S2b's load.
 
 Both regimes' budgets are explicit (`--num-gpu-blocks-override`), so they equal S2b's whatever the A100's memory.
