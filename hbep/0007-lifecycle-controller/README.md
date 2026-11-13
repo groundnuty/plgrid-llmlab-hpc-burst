@@ -484,7 +484,14 @@ An Instance runs several workers behind a router in beta (HBEP-3, HBEP-5). This 
   - only errors: over `errorOnlyWindow`, the engine answered requests and every answer was a server error;
   - no token progress: requests running, and the generated-token counter unchanged for `noProgressTimeout`. A request in prefill generates no token, so in alpha that time-out is 30 min, equal to the front's `idleTimeout`, and a prefill the front allows is never restarted (open question 6);
   - a part exits without being told to, whatever its exit code. A clean exit is a failure too (L-2.9);
-  - one worker at a full KV cache with requests waiting while another idles, for `kvSkewTimeout`. This needs several workers, so it is not in alpha.
+  - one worker at a full KV cache with requests waiting while another idles, for `kvSkewTimeout`. This needs several workers, so it is not in alpha. Read from each report's snapshot of all workers (science-agent ruling, 13 Nov 2026, for #518):
+    - **full:** the worker's KV-cache usage is 0.95 or more;
+    - **waiting:** it has a request waiting;
+    - **idles:** a sibling the router can route to (warmed up, admitted by the router and held healthy in the latest report) has no request running and none waiting;
+    - **not draining:** the worker's generated-token counter is unchanged;
+    - **held:** every report for `kvSkewTimeout` shows all of it. A report where it clears, or where either worker's gauge is missing or stale, starts the clock again.
+
+    A few heavy sessions can fill one worker while a sibling idles from load alone, since bounded loads don't spill them (HBEP-5), but a loaded worker still generates tokens. So the signal is a stuck worker that a sibling could relieve: it acts after `kvSkewTimeout` rather than waiting for `noProgressTimeout`. It enters at that worker's rung, and the Instance stays `ready`.
   - behind Envoy (beta), a worker that Envoy holds unhealthy for `health.failureThreshold` reports in a row, from the agent's report of Envoy's health checks (HBEP-5, Inside an Instance, Worker health).
     - **The ladder:** it enters at the worker rung, for that worker, not the router rung. The Instance stays `ready` while Envoy holds at least one other worker healthy, and only that worker restarts. Its rung-1 verification is what Envoy's check waits for before it takes traffic again: the agent serves each worker's readiness on loopback, 200 only for a verified worker whose engine's `/health` passes, and Envoy health-checks that.
     - **One restart per death:** while a worker's raised restart generation isn't yet applied, the worker raises no further signal, and its exit and Envoy-unhealthy signals count as one restart.
@@ -878,6 +885,7 @@ The controller applies by policy what www-2027 operators did per job: holder bat
 - 2026-11-12: the bulk path, open question 12's contract (HBEP-6, The bulk path).
 - 2026-11-12: several workers: the GPU slice applies with several workers only, and several workers need the router flag (for #439).
 - 2026-11-13: deletion releases an empty Allocation at once, and a restarted worker's process waits for Envoy to hold it unhealthy (for #503, #439).
+- 2026-11-13: the KV-skew signal's thresholds are named (for #518).
 
 ## Amendments
 
@@ -985,3 +993,4 @@ The controller applies by policy what www-2027 operators did per job: holder bat
   - An Allocation with no Instance whose ModelDeployment is being deleted is released at once, whatever its retention policy. #503 found a deleted deployment's job running on for its `ReleaseWhenIdle` idle limit (30 minutes in the example), holding GPUs and, on `plgrid-now`, the shared slot.
   - With several workers, a restarted worker's new process starts only once Envoy holds it unhealthy, or one check interval plus its timeout after the death. #439's stack test saw a restarted engine take a request before its verification.
   - Before, deletion followed the retention policy, and the new process could start while Envoy still routed to the worker.
+- **2026-11-13: the KV-skew signal's thresholds** (Health and restarts). An amendment by the science agent's rulings on #518's plan, corrected by #518's measurement: "full" is KV-cache usage at 0.95 or more, "waiting" a request waiting, "idles" a routable sibling with nothing running or waiting, and "not draining" the worker's generated-token counter unchanged, all held in every fresh report for `kvSkewTimeout`. The last condition is there because a few heavy sessions can fill one worker from load alone, even with bounded loads, and a loaded worker still generates tokens. Before, the thresholds were unnamed.

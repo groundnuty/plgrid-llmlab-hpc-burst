@@ -89,7 +89,7 @@ func TestTunnelHour(t *testing.T) {
 
 // TestAlphaAthenaNowServe is row A of issue #376 on Athena plgrid-now under profiles/athena-now.yaml: the long stream
 // with attribution, the deployment ID under its tag, HBEP-8's events and engine gauges, one worker-rung restart, and
-// the requeue of the run's own job last.
+// the deployment's end with its job seen ended (no requeue: #503).
 //
 //livecheck:alpha-athena-now-serve
 func TestAlphaAthenaNowServe(t *testing.T) {

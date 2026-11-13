@@ -19,16 +19,13 @@ var watchReaders = map[string]stack.WatchClass{
 	"NoOverlap":     {Syncs: []string{"KindAllocations|KindDeployments|KindInstances"}},
 	"endDeployment": {Syncs: []string{"KindAllocations"}},
 	// Row A (issue #376; now_flows_test.go).
-	"requeueSnapshot": {Syncs: []string{"KindAllocations|KindInstances"}},
-	"requeueOwnJob":   {Syncs: []string{"KindAllocations|KindInstances"}},
 
 	"attribution": {Why: "helper: Handover makes the catch-up before it calls this"},
 	"tagOf":       {Why: "helper: Handover makes the catch-up before it calls this"},
 	"last":        {Why: "helper: Handover makes the catch-up before it calls this"},
 	"runTags":     {Why: "helper: each result makes the catch-up first; TunnelHour's follows endDeployment's, on the same stream"},
 
-	"NowServe":      {Why: "its restart count reads the Instances' last versions after workerRestart's catch-up of them, which follows the only restart the row makes"},
-	"requeueResult": {Why: "waits itself: a wait whose condition is the watch, bounded by RequeueResultWait; requeueOwnJob makes the catch-up after it"},
+	"NowServe": {Why: "its restart count reads the Instances' last versions after workerRestart's catch-up of them, which follows the only restart the row makes"},
 
 	"firstJobStarted": {Why: "waits itself: a wait whose condition is the watch"},
 	// Row B (issue #376; now_nooverlap_flows_test.go).
