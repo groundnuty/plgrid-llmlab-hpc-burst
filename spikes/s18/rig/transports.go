@@ -76,22 +76,25 @@ func IDIn(b []byte) string { return string(idPattern.Find(b)) }
 type Cutter struct {
 	Marker  string        // "" : no F3
 	HoldFor time.Duration // at most this long for the engine's admitted record
+	// Times is how many connections of one ID are cut, 1 when unset: F3 is one failure. F3x2, a
+	// tunnel that flaps under one request, cuts its first two, to measure arm (d)'s false stops (Q2).
+	Times int
 
 	mu   sync.Mutex
-	done map[string]bool
+	done map[string]int
 }
 
-// claim reports whether id is cut now: its first marked write.
+// claim reports whether id is cut now: one of its first Times marked writes.
 func (c *Cutter) claim(id string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.done == nil {
-		c.done = map[string]bool{}
+		c.done = map[string]int{}
 	}
-	if id == "" || c.done[id] {
+	if id == "" || c.done[id] >= max(1, c.Times) {
 		return false
 	}
-	c.done[id] = true
+	c.done[id]++
 	return true
 }
 

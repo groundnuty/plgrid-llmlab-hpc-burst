@@ -21,7 +21,7 @@ const (
 // Config is a run's stand.
 type Config struct {
 	N      int    // Instances
-	Fault  string // "", "F1", "F2", "F3", "F4"
+	Fault  string // "", "F1", "F2", "F3", "F3x2" (F3 on a request's first two connections), "F4"
 	Policy *Policy
 	// D1 and D2 emulate the controller: D1 after a death the Instance leaves routing (not ready), as a
 	// probe interval's signal does; D2 after it the double is restarted and, once healthy, ready again.
@@ -51,6 +51,7 @@ type Rig struct {
 	mu       sync.Mutex
 	ready    []bool
 	restarts int
+	pending  int // deaths whose restart is not ready yet
 	pinned   map[int]string
 	closing  bool
 	wg       sync.WaitGroup
@@ -61,8 +62,11 @@ type Rig struct {
 func New(dir string, c Config) (*Rig, error) {
 	r := &Rig{Config: c, dir: dir, Trans: NewTransports(), ready: make([]bool, c.N), pinned: map[int]string{}}
 	r.Cutter = &Cutter{HoldFor: 10 * time.Second}
-	if c.Fault == "F3" {
+	switch c.Fault {
+	case "F3":
 		r.Cutter.Marker = MarkF3
+	case "F3x2":
+		r.Cutter.Marker, r.Cutter.Times = MarkF3, 2
 	}
 	f, err := NewFront(dir, c.N, r.Trans, c.FrontConfig)
 	if err != nil {
@@ -114,9 +118,15 @@ func (r *Rig) died(i int) {
 		return
 	}
 	r.wg.Add(1)
+	r.pending++
 	r.mu.Unlock()
 	go func() {
 		defer r.wg.Done()
+		defer func() {
+			r.mu.Lock()
+			r.pending--
+			r.mu.Unlock()
+		}()
 		t0 := time.Now()
 		time.Sleep(r.D1)
 		r.setReady(i, false)
@@ -151,12 +161,17 @@ func (r *Rig) Ready(i int) bool {
 	return r.ready[i]
 }
 
-// AllReady waits until every Instance is alive and ready again.
+// AllReady waits until every Instance is alive, ready and unpaused by the front again, with no restart
+// pending.
 func (r *Rig) AllReady(ctx context.Context) error {
 	for {
-		ok := true
+		r.mu.Lock()
+		ok := r.pending == 0
+		r.mu.Unlock()
 		for i := 0; i < r.N; i++ {
-			if !r.Ready(i) || !r.Doubles.Alive(i) {
+			// The front's own pause too: failures during a death pause an Instance for pauseDuration
+			// (HBEP-5, Pauses), which outlasts the restart.
+			if !r.Ready(i) || !r.Doubles.Alive(i) || r.Front.Router.Paused(r.Front.Instances[i].Key) {
 				ok = false
 			}
 		}
@@ -169,6 +184,17 @@ func (r *Rig) AllReady(ctx context.Context) error {
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
+}
+
+// Deaths is how many engines have died on their own so far.
+func (r *Rig) Deaths() int {
+	n := 0
+	for _, e := range r.Doubles.Exits() {
+		if !e.Stopped {
+			n++
+		}
+	}
+	return n
 }
 
 // Restarts is how many deaths the controller emulation has restarted.
