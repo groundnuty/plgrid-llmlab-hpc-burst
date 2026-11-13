@@ -73,6 +73,7 @@ var guideNames = map[string]string{
 	"PartExited":           v1alpha1.ReasonPartExited,
 	"RouterCheckFailing":   v1alpha1.ReasonRouterCheckFailing,
 	"RouterRestart":        v1alpha1.ReasonRouterRestart,
+	"CrashCorrelated":      v1alpha1.ReasonCrashCorrelated,
 	"ReportsMissing":       v1alpha1.ReasonReportsMissing,
 	"Reporting":            v1alpha1.ReasonReporting,
 	"ProxyOnline":          v1alpha1.ReasonProxyOnline,

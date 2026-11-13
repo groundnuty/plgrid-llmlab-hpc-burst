@@ -265,6 +265,8 @@ Before each restart the controller emits a `failing` event `WorkerRestart` or `I
 
 Behind a router (beta, opt-in), the router's exit, or its probe failing while it holds a worker healthy, restarts only the router: a `failing` event `RouterRestart`, `status.healthyWorkers` set to 0 so the front routes nothing to the Instance, and the phase left `ready`. After `restart.attemptsPerRung` router restarts the ladder climbs to the whole Instance. A worker the router holds failing its check while verified is restarted at the worker rung, with the signal `RouterCheckFailing` ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Several workers).
 
+When a worker exits without being told to within 30 s after a worker of another Instance of the same ModelDeployment did, the controller also raises a `failing` event `CrashCorrelated` regarding the Instance whose exit made the pair, with the other in `related`: a request may be crashing every engine it reaches. It is an event only; each Instance still restarts by its own ladder. The window is judged on the exit times the agents report. One Instance crashing again and again is `RestartLoop`'s, not this ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Health and restarts: Crash correlation).
+
 ### `HeartbeatMissed`
 
 The controller raises a `failing` event `HeartbeatMissed` regarding an Instance when its `AgentUnreachable` turns true. It is a `Warning` event, and it ends nothing: it is not one of the end reasons below. The same reason is also raised, regarding other objects, when a Provider's status read goes stale and when the `front` or `lifecycle` `Lease` does ([HBEP-8](../hbep/0008-observability-and-events/README.md), Observers); this entry is about the Instance's.

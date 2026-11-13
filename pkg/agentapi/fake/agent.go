@@ -108,8 +108,9 @@ type worker struct {
 	pid        int
 	start      time.Time
 	exitCode   *int
-	generation int64 // the worker's restart generation this process was started for
-	instGen    int64 // the Instance's restart generation this process was started for
+	exitedAt   time.Time // CrashWorker's time (WorkerReport.ExitedAt)
+	generation int64     // the worker's restart generation this process was started for
+	instGen    int64     // the Instance's restart generation this process was started for
 	socket     string
 	killAt     time.Time // when a stopping worker is killed (stop.go)
 	// checks are this worker's own checks' results (DesiredWorker.Checks, several workers), held on
@@ -210,6 +211,7 @@ func (a *Agent) CrashWorker(name string, exitCode int) {
 	}
 	w.phase = agentapi.PartExited
 	w.exitCode = &exitCode
+	w.exitedAt = a.now()
 }
 
 // Step is one convergence step. It registers if it must, polls the desired

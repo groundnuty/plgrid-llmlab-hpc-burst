@@ -49,6 +49,10 @@ func (a *Agent) workerReport(w *worker, now time.Time) agentapi.WorkerReport {
 		code := *w.exitCode
 		wr.ExitCode = &code
 	}
+	if w.phase == agentapi.PartExited && !w.exitedAt.IsZero() {
+		at := w.exitedAt.UTC()
+		wr.ExitedAt = &at
+	}
 	if w.phase == agentapi.PartRunning {
 		h := a.engine.health(now, Process{Worker: w.name, PID: w.pid, Start: w.start, Generation: w.generation})
 		wr.Health = &h

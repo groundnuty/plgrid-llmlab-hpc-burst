@@ -65,6 +65,11 @@ const (
 	// ReasonRestartLoop: three Allocations in a row in one class failed
 	// within restart.window; provisioning in that class pauses.
 	ReasonRestartLoop = "RestartLoop"
+	// ReasonCrashCorrelated: a worker exited without being told to within 30 s
+	// after a worker of another Instance of the same ModelDeployment did: a
+	// request may be crashing every engine it reaches. An event only (HBEP-7,
+	// Health and restarts: Crash correlation; #539).
+	ReasonCrashCorrelated = "CrashCorrelated"
 	// ReasonVerificationFailed: verification stopped provisioning in a class.
 	// The lifecycle controller (#61) sets it; this states its contract.
 	// A settings contradiction stops it until the serving spec changes; a

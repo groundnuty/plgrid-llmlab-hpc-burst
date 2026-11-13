@@ -336,7 +336,7 @@ The process that an Allocation's job runs. It is a static binary, one build per 
 - **Desired state, pulled.** The agent long-polls for what its Allocation should run now: nothing, one Instance with its `launch` and the restart generation of each part, or stop. For that Instance it also says whether to verify, qualify or warm up now, with the identity record's file list and the workload's shapes. It converges on that state, as a kubelet converges on its pods, so a missed message is corrected by the next poll.
   - **The start instruction carries the file list** (science-agent ruling, 31 Oct 2026, for #87). For a first start and for a rung-2 restage, the desired state for that Instance generation carries `Checks.Verify` with `Files`. The agent starts no worker without it, so a worker never starts on unstaged files. It reports staging in progress with a message that the file list is awaited, and an Instance whose list never comes fails at `health.startTimeout` (Instance start). A worker restart (rung 1) compares settings only, so its `Checks.Verify` carries no files.
 - **Reports.** At least every 15 s, and at every change, the agent posts:
-  - for each part: its phase, process ID and start time, exit code, and the restart generation it applied; and for an engine whose start failed, its log, cut short like any free-text field;
+  - for each part: its phase, process ID and start time, exit code, and the restart generation it applied; for a worker that exited without being told to, when it exited by the agent's clock (`ExitedAt`), on which crash correlation is judged (Health and restarts); and for an engine whose start failed, its log, cut short like any free-text field;
   - staging progress. The agent's Hub GETs send `Accept-Encoding: identity`, so the Hub sends an exact `Content-Length`, and the total and the bytes done are byte-exact. A response that still lacks `Content-Length` leaves that file's total unknown, never guessed: `bytesTotal` is omitted while any file's length is unknown, and `bytesDone` still counts (science-agent ruling, 1 Nov 2026, from issue #94). Before, the Hub compressed small files and sent them with no `Content-Length`, so the bytes counted overshot the total;
   - for verification: the file rehash results, the engine's resolved settings, its version and the image digest it ran;
   - for qualification and warm-up: each check's outcome, with a failure's reason code in `CheckOutcome.Reason` and, for the behaviour check, the context it ran at in `CheckOutcome.ContextTokens`; the timings of every request by shape and round, the KV capacity the engine reported at start-up, the served model names, and the measured template overhead;
@@ -888,6 +888,7 @@ The controller applies by policy what www-2027 operators did per job: holder bat
 - 2026-11-13: deletion releases an empty Allocation at once, and a restarted worker's process waits for Envoy to hold it unhealthy (for #503, #439).
 - 2026-11-13: the KV-skew signal's thresholds are named (for #518).
 - 2026-11-13: the crash-correlation event is defined (S18, #528).
+- 2026-11-13: erratum: a worker's report carries its exit time (`ExitedAt`), set by the agent when it sees the worker exit without being told to; crash correlation's 30 s window is judged on it, and on the exit's first sight when an older agent omits it (#539).
 
 ## Amendments
 
