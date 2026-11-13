@@ -32,8 +32,10 @@ import (
 //   - the job restarts the victim (it watches for the killed file); the probe verifies it (its
 //     /health, its model list and one request straight to its socket) and only then flags it verified,
 //     which the agent's readiness endpoint, polled by Envoy, reports. It holds the worker unverified for
-//     -hold after its engine answers, so Envoy is shown keeping out a worker whose engine is healthy but
-//     unverified (the readiness endpoint never answers from the engine's /health alone, #429). Until the
+//     -hold from the moment its engine answers AND Envoy no longer holds it ejected (the outlier detection
+//     that the dead worker's connect failures set off ejects it for 30 s or more, during which it takes
+//     nothing whatever the readiness says), so the readiness gate alone keeps out a worker whose engine
+//     is healthy but unverified (it never answers from the engine's /health alone, #429). Until the
 //     verification Envoy's rq_success for the victim must not grow, and its placement log must show no
 //     probe request; after it, a request in the victim's key must reach the victim again.
 // probe.json records the timings (the pause and the recovery) and each check; the exit status is 1 if
@@ -64,15 +66,20 @@ type probeSample struct {
 }
 
 type probeRecord struct {
-	Victim    string         `json:"victim"`
-	Keys      map[string]int `json:"keys_tried_per_worker"`
-	Streams   []streamResult `json:"streams"`
-	Samples   []probeSample  `json:"samples"`
-	HealthyS  *float64       `json:"victim_healthy_s"`  // its socket answered /health again
-	HoldS     float64        `json:"hold_s"`            // unverified for this long after that
-	VerifiedS *float64       `json:"victim_verified_s"` // flagged verified
-	AdmittedS *float64       `json:"victim_admitted_s"` // a request in its key reached it again
-	Non200    int            `json:"non_200"`
+	Victim       string         `json:"victim"`
+	Keys         map[string]int `json:"keys_tried_per_worker"`
+	Streams      []streamResult `json:"streams"`
+	Samples      []probeSample  `json:"samples"`
+	HealthyS     *float64       `json:"victim_healthy_s"` // its socket answered /health again
+	Ejected      bool           `json:"victim_ejected"`   // Envoy's outlier detection ejected it after the kill
+	EjectionEndS *float64       `json:"victim_ejection_end_s"`
+	HoldStartS   *float64       `json:"hold_start_s"`                    // engine healthy and not ejected: only the readiness gate is left
+	HoldS        float64        `json:"hold_s"`                          // unverified for this long from the hold's start
+	GateSeen     int            `json:"hold_reads_failing_active_check"` // reads in the hold where Envoy showed its active check failing
+	HoldReads    int            `json:"hold_reads"`
+	VerifiedS    *float64       `json:"victim_verified_s"` // flagged verified
+	AdmittedS    *float64       `json:"victim_admitted_s"` // a request in its key reached it again
+	Non200       int            `json:"non_200"`
 	// The non-200s split for the science agent's ruling (the verdict counts them all until then):
 	// CutAtKill are requests Envoy had already written to the victim's pooled connection when it died
 	// (its reply names a connection termination, within the first interval after the kill), which the
@@ -267,11 +274,32 @@ func runProbe(o probeOpts) (*probeRecord, error) {
 			}
 		}
 		if verifiedAt.IsZero() {
+			flags, ferr := hostFlags(admin)
+			if ferr != nil {
+				return rec, ferr
+			}
+			vf := flags[victim]
+			if vf.outlier {
+				rec.Ejected = true
+			} else if rec.Ejected && rec.EjectionEndS == nil {
+				e := since()
+				rec.EjectionEndS = &e
+			}
 			if rec.HealthyS == nil && get(direct, "http://w/health") == nil {
 				h := since()
 				rec.HealthyS = &h
 			}
-			if rec.HealthyS != nil && since() >= *rec.HealthyS+o.hold.Seconds() && modelListed(direct, o.served) {
+			if rec.HealthyS != nil && rec.HoldStartS == nil && !vf.outlier {
+				h := since()
+				rec.HoldStartS = &h
+			}
+			if rec.HoldStartS != nil {
+				rec.HoldReads++
+				if vf.active {
+					rec.GateSeen++
+				}
+			}
+			if rec.HoldStartS != nil && since() >= *rec.HoldStartS+o.hold.Seconds() && modelListed(direct, o.served) {
 				// The harness's verification: one request straight to the restarted worker's socket.
 				st, _, err := chat(direct, o.served, "verify", tag(o.arm+"-verify", 0, 0), 4)
 				if err == nil && st == 200 {
@@ -328,6 +356,8 @@ func runProbe(o probeOpts) (*probeRecord, error) {
 	check(rec.EarlyEnvoy == 0 && rec.EarlyPlaced == 0 && !verifiedAt.IsZero(), "nothing reaches the restarted worker before its verification",
 		fmt.Sprintf("Envoy counted %d, its placement log %d, verified=%v", rec.EarlyEnvoy, rec.EarlyPlaced, !verifiedAt.IsZero()))
 	check(rec.AdmittedS != nil, "the verified worker takes its key's requests again", "never admitted")
+	check(rec.HoldReads > 0 && rec.GateSeen == rec.HoldReads, "the readiness gate held the healthy, unverified worker out",
+		fmt.Sprintf("in the hold Envoy showed the victim's active check failing in %d of %d reads", rec.GateSeen, rec.HoldReads))
 	rec.Passed = true
 	for _, c := range rec.Checks {
 		if strings.HasPrefix(c, "FAIL") {
@@ -456,6 +486,42 @@ func modelListed(c *http.Client, served string) bool {
 		}
 	}
 	return false
+}
+
+// hostFlag is one worker's health in Envoy's /clusters?format=json (the agent's parseClusters fields).
+type hostFlag struct{ active, outlier, pending bool }
+
+// hostFlags reads every worker's health flags from Envoy's admin.
+func hostFlags(admin string) (map[string]hostFlag, error) {
+	body, err := unixGet(admin, "http://admin/clusters?format=json")
+	if err != nil {
+		return nil, err
+	}
+	var doc struct {
+		Clusters []struct {
+			Name  string `json:"name"`
+			Hosts []struct {
+				Hostname string `json:"hostname"`
+				Health   struct {
+					FailedActive  bool `json:"failed_active_health_check"`
+					FailedOutlier bool `json:"failed_outlier_check"`
+					PendingActive bool `json:"pending_active_hc"`
+				} `json:"health_status"`
+			} `json:"host_statuses"`
+		} `json:"cluster_statuses"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, err
+	}
+	out := map[string]hostFlag{}
+	for _, c := range doc.Clusters {
+		if c.Name == "workers" {
+			for _, h := range c.Hosts {
+				out[h.Hostname] = hostFlag{active: h.Health.FailedActive, outlier: h.Health.FailedOutlier, pending: h.Health.PendingActive}
+			}
+		}
+	}
+	return out, nil
 }
 
 // hostStats reads every worker's counters from Envoy's /clusters?format=json.

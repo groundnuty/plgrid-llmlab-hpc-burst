@@ -118,13 +118,24 @@ the science agent's. Every worker's key is read from Envoy's own per-host counte
    while they stream. The siblings' streams must end uncut.
 2. From the kill on, a request in the victim's key goes every 250 ms. Each must be answered 200, by a sibling, never
    a 503.
-3. The job restarts the victim. The probe holds it unverified for 15 s (three of Envoy's health checks) after its
-   engine answers, verifies it with one request straight to its socket, and only then flags it verified, which the
-   agent's readiness endpoint reports to Envoy. Until then Envoy's `rq_success` for the victim must not grow, and its
-   placement log must show no probe request. After it, a request in the victim's key must reach the victim again.
+3. The job restarts the victim. The probe holds it unverified for 15 s (three of Envoy's health checks), counted from
+   the moment its engine answers AND Envoy no longer holds it ejected. The dead worker's connect failures set off
+   outlier detection, which ejects it for 30 s or more, and during that it takes nothing whatever the readiness says.
+   So the hold starts only once the readiness gate alone keeps it out, and every read in the hold must show Envoy's
+   active check of it failing. The probe then verifies it with one request straight to its socket, and only then flags
+   it verified, which the agent's readiness endpoint reports to Envoy. Until then Envoy's `rq_success` for the victim
+   must not grow, and its placement log must show no probe request. After it, a request in the victim's key must
+   reach the victim again.
 
-`probe.json` records each check and the timeline: when the victim was healthy again, verified, and admitted, plus
-the longest probe request during the outage.
+`probe.json` records each check and the timeline: when the victim was healthy again, when its ejection ended, when
+the hold started, when it was verified and admitted, plus the longest probe request during the outage.
+
+**A known failure, pending the science agent's ruling.** The dry run's probe sees one 503 in most runs (3 of 4 alone):
+a request Envoy writes to the victim's pooled connection within about a millisecond of the kill, which Envoy answers
+"upstream connect error or disconnect/reset before headers. reset reason: connection termination". The agent's retry
+policy retries nothing written to a worker, by design (`internal/agent/envoyconf.go`; the residual accepted on #507).
+`probe.json` counts such a request as `cut_at_kill`, apart from any later failure (`non_200_later`). The no-503 check
+still counts both until the ruling.
 
 ## What each output means
 
