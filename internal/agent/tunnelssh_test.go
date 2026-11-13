@@ -100,6 +100,7 @@ func newSSHRig(t *testing.T, o sshRigOptions) *sshRig {
 		return &agent.SSHForward{
 			SSH: sshBin, Config: cfg, RemotePort: remote, Name: name, Log: sshLog, Logger: logger,
 			MinBackoff: 300 * time.Millisecond, MaxBackoff: time.Second, StopGrace: 2 * time.Second,
+			ExitWithParent: true, // a killed test binary leaves no forward (#514)
 			OnStart: func(id agent.ProcessID) {
 				r.w.add("ssh "+name, id)
 				r.mu.Lock()
@@ -533,7 +534,8 @@ func TestTheRestrictedKeyRefusesEverythingElse(t *testing.T) {
 
 	// A forward to a third port: ssh binds its end, sshd refuses the channel.
 	f := &agent.SSHForward{SSH: r.sshBin, Config: r.cfg, RemotePort: portOf(third), Name: "third", Log: io.Discard,
-		MinBackoff: 300 * time.Millisecond, MaxBackoff: time.Second, StopGrace: 2 * time.Second, OnStart: r.w.recorder("ssh third")}
+		MinBackoff: 300 * time.Millisecond, MaxBackoff: time.Second, StopGrace: 2 * time.Second, OnStart: r.w.recorder("ssh third"),
+		ExitWithParent: true}
 	stop := runBackground(t, "the third forward", f.Run)
 	eventually(t, 20*time.Second, "the third forward to listen", func() bool { st, _ := f.State(); return st.Listening })
 	st, _ := f.State()

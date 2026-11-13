@@ -59,6 +59,10 @@ type SSHForward struct {
 	StopGrace time.Duration
 	// OnStart, when set, is told each ssh process the loop starts.
 	OnStart func(ProcessID)
+	// ExitWithParent makes each ssh die with the process that started it (procgroup's
+	// Spec.ExitWithParent). Tests set it, so that a test binary killed before its t.Cleanup leaves no
+	// forward running (#514); the agent leaves it off.
+	ExitWithParent bool
 
 	st forwardState
 }
@@ -273,7 +277,7 @@ func (s *SSHForward) once(ctx context.Context, args []string, port int) error {
 	if grace <= 0 {
 		grace = 5 * time.Second
 	}
-	g, err := procgroup.Start(procgroup.Spec{Path: s.SSH, Args: args, Stdout: s.Log, Stderr: s.Log}, time.Now())
+	g, err := procgroup.Start(procgroup.Spec{Path: s.SSH, Args: args, Stdout: s.Log, Stderr: s.Log, ExitWithParent: s.ExitWithParent}, time.Now())
 	if err != nil {
 		return err
 	}

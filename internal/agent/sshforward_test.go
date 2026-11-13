@@ -84,7 +84,7 @@ func TestSSHForwardStopsAndReapsItsChildren(t *testing.T) {
 			var started []agent.ProcessID
 			fwd := &agent.SSHForward{
 				SSH: tc.ssh, RemotePort: 29299, Config: sshConfig(t, root),
-				Log: io.Discard, StopGrace: grace,
+				Log: io.Discard, StopGrace: grace, ExitWithParent: true,
 				OnStart: func(id agent.ProcessID) { mu.Lock(); started = append(started, id); mu.Unlock() },
 			}
 			os.Remove(childPIDFile)
@@ -226,7 +226,7 @@ func TestSSHGetsNoInheritedDescriptor(t *testing.T) {
 	var started []agent.ProcessID
 	fwd := &agent.SSHForward{
 		SSH: stub, RemotePort: 29299, Config: sshConfig(t, root),
-		Log: io.Discard, StopGrace: 200 * time.Millisecond,
+		Log: io.Discard, StopGrace: 200 * time.Millisecond, ExitWithParent: true,
 		OnStart: func(id agent.ProcessID) { mu.Lock(); started = append(started, id); mu.Unlock() },
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -327,7 +327,7 @@ func TestSSHForwardStopsListeningWhenSSHExits(t *testing.T) {
 	var started []agent.ProcessID
 	fwd := &agent.SSHForward{
 		SSH: wrapper, RemotePort: 29299, Config: sshConfig(t, root), Log: io.Discard,
-		MinBackoff: 20 * time.Second, StopGrace: grace,
+		MinBackoff: 20 * time.Second, StopGrace: grace, ExitWithParent: true,
 		OnStart: func(id agent.ProcessID) { mu.Lock(); started = append(started, id); mu.Unlock() },
 	}
 	ctx, cancel := context.WithCancel(context.Background())

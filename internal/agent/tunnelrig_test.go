@@ -241,7 +241,8 @@ transport.tcpKeepalive = 30
 // up, as when another package took one of its ports first.
 func (f *frpsProc) start(t *testing.T) bool {
 	t.Helper()
-	g, err := procgroup.Start(procgroup.Spec{Path: f.bin, Args: []string{"-c", f.config}}, time.Now())
+	// ExitWithParent: a killed test binary leaves no frps on the rig's fixed ports (#514, as #484).
+	g, err := procgroup.Start(procgroup.Spec{Path: f.bin, Args: []string{"-c", f.config}, ExitWithParent: true}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
