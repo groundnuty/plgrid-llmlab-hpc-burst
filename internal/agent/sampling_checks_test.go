@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -61,6 +62,49 @@ func (h *harness) chatEvents() []enginedouble.LogEvent {
 		}
 	}
 	return out
+}
+
+// warmUpSent is how many warm-up requests the agent reported in r's rounds: each round's requests,
+// all of which the engine double logged, since every request whose body it decoded gets a line.
+func warmUpSent(r agentapi.Report) int {
+	n := 0
+	if c := checksOf(r); c != nil && c.WarmUp != nil {
+		for _, round := range c.WarmUp.Rounds {
+			n += len(round.Requests)
+		}
+	}
+	return n
+}
+
+// waitChatEvents reads the engine double's chat requests once its log holds every request the agent
+// reported in done, the report that says warm-up is done: at least warmUpSent(done) warm-up requests
+// and at least checkCounts of each check's. The double writes a request's line when the request
+// ends, so a reply can reach the agent before its line is in the log, and on a loaded machine the
+// last one may not be written yet when the agent reports warm-up done (#500). The wait is bounded;
+// on its bound the events read last are returned, and the caller's assertions say what is missing.
+// afterRead, when set, is called after each read (TestTheSamplingLogWaitOutlastsALateRequestLine).
+func (h *harness) waitChatEvents(done agentapi.Report, afterRead func()) []enginedouble.LogEvent {
+	h.t.Helper()
+	want := warmUpSent(done)
+	for end := time.Now().Add(60 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		events := h.chatEvents()
+		if afterRead != nil {
+			afterRead()
+		}
+		n, warm := countsOf(events), 0
+		for _, ev := range events {
+			if requestCheck(ev.Tail) == "warmUp" {
+				warm++
+			}
+		}
+		complete := warm >= want
+		for c, k := range checkCounts {
+			complete = complete && n[c] >= k
+		}
+		if complete || time.Now().After(end) {
+			return events
+		}
+	}
 }
 
 // checkCounts is how many requests each check sent once, counted by hand:
@@ -221,9 +265,9 @@ func TestTheChecksSendTheSamplingOfTheirModel(t *testing.T) {
 			inst.Checks = &end
 			stopped.Instance = &inst
 			h.set(stopped)
-			h.waitReport("warm-up done", 60*time.Second, warmDone)
+			done := h.waitReport("warm-up done", 60*time.Second, warmDone)
 
-			events := h.chatEvents()
+			events := h.waitChatEvents(done, nil)
 			if got := countsOf(events); !reflect.DeepEqual(got, checkCounts) {
 				t.Errorf("requests per check %v, want %v: a check was sent twice or not at all", got, checkCounts)
 			}
@@ -246,6 +290,65 @@ func TestTheChecksSendTheSamplingOfTheirModel(t *testing.T) {
 				t.Errorf("%d warm-up requests logged, want at least a round of 6", warm)
 			}
 		})
+	}
+}
+
+// TestTheSamplingLogWaitOutlastsALateRequestLine reproduces #500 without load. The engine double holds
+// back every "request" line of its log until a gate file exists (hold-request-log), so the agent
+// reports warm-up done while the log holds none of the round's lines: a read right after "done", the
+// sampling test's old read, misses them. The gate opens only after waitChatEvents's first read, so a
+// wait that reads once returns too few lines every time, and one that waits for the reported
+// requests returns them all.
+func TestTheSamplingLogWaitOutlastsALateRequestLine(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	gate := filepath.Join(h.root, "release-request-log")
+	checks := &agentapi.Checks{
+		VerificationGeneration: 1,
+		Verify:                 &agentapi.VerifyRequest{Files: defaultFiles},
+		Qualify:                &agentapi.QualifyRequest{Shapes: hShapes, ToolCalls: true},
+		WarmUp:                 &agentapi.WarmUpRequest{Shapes: hShapes, ToolCalls: true, TargetSessions: 1},
+	}
+	d := h.runState("reasoning-first=20,hold-request-log="+gate, 1, 0, checks)
+	h.set(d)
+	h.waitReport("qualification and a warm-up round", 90*time.Second, func(r agentapi.Report) bool {
+		c := checksOf(r)
+		return qualified(1)(r) && c.WarmUp != nil && len(c.WarmUp.Rounds) >= 1
+	})
+	end := *d.Instance.Checks
+	end.WarmUp = nil
+	stopped, inst := d, *d.Instance
+	inst.Checks = &end
+	stopped.Instance = &inst
+	h.set(stopped)
+	done := h.waitReport("warm-up done", 60*time.Second, warmDone)
+	want := warmUpSent(done)
+	if want < 6 {
+		t.Fatalf("the agent reported %d warm-up requests, want at least a round of 6", want)
+	}
+	// The seam holds: right after "done" the log has none of the requests' lines.
+	if n := len(h.chatEvents()); n != 0 {
+		t.Fatalf("%d chat request lines are in the log while the gate is closed: the seam does not hold them", n)
+	}
+
+	var once sync.Once
+	events := h.waitChatEvents(done, func() {
+		once.Do(func() {
+			if err := os.WriteFile(gate, nil, 0o600); err != nil {
+				t.Error(err)
+			}
+		})
+	})
+	warm := 0
+	for _, ev := range events {
+		if requestCheck(ev.Tail) == "warmUp" {
+			warm++
+		}
+	}
+	if warm < want {
+		t.Errorf("waitChatEvents returned %d warm-up requests, want the %d the agent reported", warm, want)
+	}
+	if got := countsOf(events); !reflect.DeepEqual(got, checkCounts) {
+		t.Errorf("requests per check %v, want %v", got, checkCounts)
 	}
 }
 

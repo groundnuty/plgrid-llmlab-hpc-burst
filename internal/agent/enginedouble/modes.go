@@ -73,6 +73,12 @@ func applyMode(c *Config, name, val string, hasVal bool) error {
 		return flag(&c.OmitTPOTCount)
 	case "ignore-term":
 		return flag(&c.IgnoreTerm)
+	case "hold-request-log":
+		if !hasVal || val == "" {
+			return fmt.Errorf("needs the path of the file that releases the lines")
+		}
+		c.HoldRequestLog = val
+		return nil
 	case "write-caches":
 		return flag(&c.WriteCaches)
 	case "write-home":
