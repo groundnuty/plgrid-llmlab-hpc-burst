@@ -315,12 +315,41 @@ func TestArchiveNamesAreTheReleaseWorkflowsAndTheTagIsOne(t *testing.T) {
 // directory, named as TestNamedPathsExist names them in code, and the host binaries under bin/.
 var laterReads = regexp.MustCompile(`(?:examples/[a-z0-9-]+\.yaml|profiles/[a-z0-9-]+\.yaml|config/crd|\bbin/[a-z-]+)`)
 
-// The archive path needs no clone: no step after the archive block runs a script of the repository,
-// and every repository path those steps read is in the working directory once the archive lines have
-// run there, in a directory that is not a clone. A path the archive does not carry, such as an
-// example missing from examples/, fails here.
+// stepsText is the page from its start to the end of its numbered steps: up to the first level-2
+// heading after "## 1." that is not itself a numbered step ("## Optional: ...", "## Helios (beta)",
+// "## Beta: ..."). The archive path is those steps; the sections after them are options a reader
+// may take, and each says what it needs.
+func stepsText(t *testing.T) string {
+	t.Helper()
+	page := readRepoFile(t, "docs/quickstart.md")
+	first := regexp.MustCompile(`(?m)^## 1\. `).FindStringIndex(page)
+	if first == nil {
+		t.Fatal(`docs/quickstart.md has no "## 1." step`)
+	}
+	rest := page[first[1]:]
+	if end := regexp.MustCompile(`(?m)^## [^0-9]`).FindStringIndex(rest); end != nil {
+		return page[:first[1]+end[0]]
+	}
+	return page
+}
+
+// stepBlocks are the fenced code blocks of the numbered steps (stepsText).
+func stepBlocks(t *testing.T) []block {
+	t.Helper()
+	var out []block
+	for _, m := range fence.FindAllStringSubmatch(stepsText(t), -1) {
+		out = append(out, block{lang: m[1], text: m[2]})
+	}
+	return out
+}
+
+// The archive path needs no clone: no numbered step after the archive block runs a script of the
+// repository, and every repository path those steps read is in the working directory once the archive
+// lines have run there, in a directory that is not a clone. A path the archive does not carry, such as
+// an example missing from examples/, fails here. The optional sections after the steps are not the
+// archive path; TestASectionThatRunsARepositoryScriptSaysItNeedsAClone holds them to saying so.
 func TestArchivePathNeedsNoClone(t *testing.T) {
-	all := blocks(t)
+	all := stepBlocks(t)
 	at := -1
 	for i, b := range all {
 		if b.lang == "" && strings.Contains(b.text, "sha256sum -c") {
@@ -365,5 +394,35 @@ func TestArchivePathNeedsNoClone(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(work, p)); err != nil {
 			t.Errorf("a later step reads %s, which the unpacked archive does not hold: %v", p, err)
 		}
+	}
+}
+
+// A section after the numbered steps that runs a script of the repository needs a clone, which the
+// archive path does not have, so the section's own text must say it needs a clone (the beta router
+// section fetches Envoy's build with hack/fetch-envoy.sh: HBEP-15 ships no Envoy in the archive).
+func TestASectionThatRunsARepositoryScriptSaysItNeedsAClone(t *testing.T) {
+	page := readRepoFile(t, "docs/quickstart.md")
+	after := page[len(stepsText(t)):]
+	if after == "" {
+		t.Fatal("docs/quickstart.md has no section after its numbered steps: this test would check nothing")
+	}
+	sections := regexp.MustCompile(`(?m)^## `).Split(after, -1)
+	runs := 0
+	for _, s := range sections {
+		if s == "" {
+			continue
+		}
+		heading, _, _ := strings.Cut(s, "\n")
+		for _, m := range fence.FindAllStringSubmatch(s, -1) {
+			if strings.Contains(m[2], "hack/") {
+				runs++
+				if !strings.Contains(s, "needs a clone") {
+					t.Errorf("the section %q runs a repository script but doesn't say it needs a clone:\n%s", heading, m[2])
+				}
+			}
+		}
+	}
+	if runs == 0 {
+		t.Fatal("no section after the steps runs a repository script: the beta router section's fetch is gone, so this test checks nothing; drop or retarget it")
 	}
 }
