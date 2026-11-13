@@ -198,12 +198,24 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, x *exchange, n n
 		// step 9); Release is idempotent, so the explicit calls stay.
 		defer t.release()
 		p.setTarget(x, t)
-		if p.bulk.takes(t, rb) && p.forwardBulk(w, r, x, t, body, rb, key) {
-			return
-		}
-		resp, err := p.send(x, r, t, body, rb, key)
 		var held *http.Response // a 5xx before any body byte, not yet written
+		var err error
+		bulk := false // the failure came through the bulk transport: a close there counts nothing toward the pause
+		if p.bulk.takes(t, rb) {
+			var o bulkOutcome
+			switch o, held, err = p.forwardBulk(w, r, x, t, body, rb, key); o {
+			case bulkAnswered:
+				return
+			case bulkHeld, bulkClosed:
+				bulk = true
+			}
+		}
+		var resp *http.Response
+		if !bulk {
+			resp, err = p.send(x, r, t, body, rb, key)
+		}
 		switch {
+		case bulk:
 		case err == nil && !(p.retryable(x, t) && retryableStatus(resp.StatusCode)):
 			// Only the attempt that answers the client defers its report:
 			// a deferred report reads the request's final record. Deferred,
@@ -258,17 +270,26 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, x *exchange, n n
 		next, rerr := p.router.choose(x.ctx, n, key, append(slices.Clip(written), unreached...))
 		if rerr != nil && rerr.code != codeCapacity && rerr.cutBy == "" && rerr.status != statusClientClosed {
 			// No other Instance ready: no retry, and no header, as alpha.
-			if held != nil {
+			switch {
+			case held != nil:
 				defer p.reportOutcome(t, x)
 				p.relay(w, x, t, held, rb, r.URL.Path)
-				return
+			case bulk:
+				p.failedBulkBeforeHeaders(w, x, t, err)
+			default:
+				p.failedBeforeHeaders(w, x, t, err)
 			}
-			p.failedBeforeHeaders(w, x, t, err)
 			return
 		}
 		// The retry is decided. The failure counts toward its own Instance's
-		// pause once, here; its answer is never written.
-		p.router.ReportConnect(t.key(), true)
+		// pause once, here, but a close on the bulk transport, which takes the
+		// bulk registration away instead (HBEP-6, The bulk path); its answer is
+		// never written.
+		if bulk && held == nil {
+			p.bulk.lose(t.inst.UID)
+		} else {
+			p.router.ReportConnect(t.key(), true)
+		}
 		if held != nil {
 			_ = held.Body.Close()
 			p.log.Warn("the target answered a 5xx before any body byte; the request is sent once more, to another Instance", "request", x.id, "target", t.key(), "status", held.StatusCode)
@@ -279,9 +300,6 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, x *exchange, n n
 		if rerr != nil {
 			// Placed in the FIFO and not served within queueTimeout, or cut
 			// while it waited there.
-			if rerr.code == codeCapacity {
-				w.Header().Set(headerShouldRetry, "false")
-			}
 			p.routeFail(w, x, rerr)
 			return
 		}
@@ -308,6 +326,13 @@ func retryableStatus(status int) bool {
 // own retry, which the OpenAI SDK obeys and doesn't retry (HBEP-5, open
 // question 5).
 const headerShouldRetry = "X-Should-Retry"
+
+// giveUpAfterRetry reports whether an answer of status is a give-up after the
+// front's own retry: every final non-2xx once the retry was decided (#539,
+// Q2), whether the front raised it or the target answered it.
+func giveUpAfterRetry(x *exchange, status int) bool {
+	return x.retried && (status < 200 || status > 299)
+}
 
 // reportOutcome counts a relayed response toward the target's pause, by
 // the rule #96 states (@hpc-burst-science-agent, 31 Oct 2026):
@@ -473,9 +498,6 @@ func (p *Proxy) failedBeforeHeaders(w http.ResponseWriter, x *exchange, t *targe
 		}
 		x.rec.CutBy = strp(cut)
 		p.log.Warn("the connection closed after the request was written, before the response headers", "request", x.id, "target", t.key(), "error", err.Error())
-		if x.retried {
-			w.Header().Set(headerShouldRetry, "false")
-		}
 		p.fail(w, x, http.StatusBadGateway, codeUpstreamClosed, cut, "", "the connection to the target closed before it answered; the request is not sent again")
 	}
 }
@@ -497,9 +519,6 @@ func (p *Proxy) cutBeforeFirstByte(w http.ResponseWriter, x *exchange, cut, msg 
 func (p *Proxy) unreachable(w http.ResponseWriter, x *exchange, t *target) {
 	x.attr = forTarget(x.id, t, emitterFront)
 	x.rec.Emitter = emitterFront
-	if x.retried {
-		w.Header().Set(headerShouldRetry, "false")
-	}
 	p.fail(w, x, http.StatusBadGateway, codeUpstreamUnreachable, "", "", "no byte reached the target, after the one resend")
 }
 
@@ -524,6 +543,11 @@ func (p *Proxy) routeFail(w http.ResponseWriter, x *exchange, e *routeError) {
 func (p *Proxy) fail(w http.ResponseWriter, x *exchange, status int, code, detail, param, message string) {
 	h := w.Header()
 	x.attr.set(h)
+	if giveUpAfterRetry(x, status) && code != codeShuttingDown {
+		// A 503 shutting_down asks the client to send again, to a front that
+		// will be back (#539, Q2).
+		h.Set(headerShouldRetry, "false")
+	}
 	h.Set("Content-Type", "application/json")
 	x.rec.Status = status
 	if x.rec.Finish == nil {

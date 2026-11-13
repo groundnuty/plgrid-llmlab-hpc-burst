@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/enginetest"
 )
 
@@ -361,4 +362,106 @@ func TestARetryWaitingInTheFIFOIsNotCutByTheFirstAttemptsIdleTimer(t *testing.T)
 	busy.wait(t)
 	resp, body := call.wait(t)
 	wantWhole(t, resp, body, walk[1])
+}
+
+// An upstream's own 504 is a time-out (#539, Q3): passed through as it came, never retried, with no header.
+func TestAnUpstream504IsPassedThroughAndNotRetried(t *testing.T) {
+	f, key, walk := retryFix(t, 2, scOpts{})
+	const body504 = `{"error":{"message":"upstream request timeout","type":"server_error","param":null,"code":504}}`
+	f.engines[0].Set(enginetest.Behaviour{Status: 504, ErrorBody: body504})
+	resp, body := scChatOnce(t, f.harness, key)
+	if resp.StatusCode != 504 || body != body504 || scInstanceOf(resp) != walk[0] {
+		t.Fatalf("status %d from %q: %s; want the upstream's 504 as it came, from %s", resp.StatusCode, scInstanceOf(resp), body, walk[0])
+	}
+	if v := resp.Header.Get(headerShouldRetry); v != "" {
+		t.Errorf("x-should-retry %q, want none: there was no retry", v)
+	}
+	wantCounts(t, f, 1, 0)
+}
+
+// Every final non-2xx after the front's retry carries the header (#539, Q2): the retry's own 4xx, its
+// upstream 504, and the front's own 504 cut of the retry attempt; but not a 503 shutting_down, which asks
+// the client to send again.
+func TestEveryNon2xxAfterTheRetryCarriesTheHeaderButShuttingDown(t *testing.T) {
+	for _, status := range []int{400, 504} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			f, key, _ := retryFix(t, 2, scOpts{})
+			f.engines[0].Set(enginetest.Behaviour{CloseBeforeHeaders: true})
+			f.engines[1].Set(enginetest.Behaviour{Status: status, ErrorBody: `{"error":{"message":"x","type":"x","param":null,"code":400}}`})
+			resp, body := scChatOnce(t, f.harness, key)
+			if resp.StatusCode != status || resp.Header.Get(headerShouldRetry) != "false" {
+				t.Fatalf("status %d, x-should-retry %q, want %d and false: %s", resp.StatusCode, resp.Header.Get(headerShouldRetry), status, body)
+			}
+			wantCounts(t, f, 1, 1)
+		})
+	}
+	t.Run("the front's 504 cut of the retry", func(t *testing.T) {
+		f, key, _ := retryFix(t, 2, scOpts{cfg: func(c *Config) { c.StreamHeadersTimeout = Duration(DefaultStreamHeaders) }})
+		call, holdB := timerStep(t, f, key, true, 0)
+		defer close(holdB)
+		f.clk.Advance(DefaultStreamHeaders)
+		resp, body := call.wait(t)
+		checkErrorBody(t, body, codeRequestTimeout, "headers")
+		if resp.StatusCode != 504 || resp.Header.Get(headerShouldRetry) != "false" {
+			t.Fatalf("status %d, x-should-retry %q, want 504 and false", resp.StatusCode, resp.Header.Get(headerShouldRetry))
+		}
+	})
+	t.Run("shutting_down", func(t *testing.T) {
+		f, key, _ := retryFix(t, 2, scOpts{})
+		hold := make(chan struct{})
+		defer close(hold)
+		f.engines[0].Set(enginetest.Behaviour{CloseBeforeHeaders: true})
+		f.engines[1].Set(enginetest.Behaviour{Hold: hold})
+		call := scGo(f.harness, errChatBody(scModel, false, "hi"), "x-session-id", key)
+		waitState(t, "the retry on the second Instance", func() bool { return f.engines[1].Open() == 1 })
+		stopServing([]*http.Server{f.srv}, f.cancelBase, f.proxy, 200*time.Millisecond, testHandlerWait, discardLog())
+		resp, body := call.wait(t)
+		checkErrorBody(t, body, codeShuttingDown, "shutdown")
+		if resp.StatusCode != 503 || resp.Header.Get(headerShouldRetry) != "" {
+			t.Fatalf("status %d, x-should-retry %q, want 503 and none: shutting_down asks the client to send again", resp.StatusCode, resp.Header.Get(headerShouldRetry))
+		}
+	})
+}
+
+// unreadyFix is two Instances of which only the first is ready: nothing to retry to.
+func unreadyFix(t *testing.T) (*scFix, string) {
+	t.Helper()
+	f := newScFix(t, scOpts{instances: 2, desired: 2, inst: func(i int, o *instanceOpts) {
+		if i == 1 {
+			o.phase = v1alpha1.InstanceVerifying
+		}
+	}})
+	return f, scKeys(t, f.names[:1], f.names[0], 1)[0]
+}
+
+// With no other Instance ready, a failure is answered as alpha answers it and counts toward the pause
+// once: the retry's decision must not count it before finding there is nothing to retry to (a double
+// count). A held 5xx is relayed as it came, so its target is chosen before it is closed.
+func TestWithNoOtherInstanceReadyAFailureCountsOnceAndAHeld5xxIsRelayedWhole(t *testing.T) {
+	t.Run("closed", func(t *testing.T) {
+		f, key := unreadyFix(t)
+		f.engines[0].Set(enginetest.Behaviour{CloseBeforeHeaders: true})
+		resp, body := scChatOnce(t, f.harness, key)
+		checkErrorBody(t, body, codeUpstreamClosed, "tunnel")
+		if resp.StatusCode != 502 || resp.Header.Get(headerShouldRetry) != "" {
+			t.Fatalf("status %d, x-should-retry %q, want 502 and none", resp.StatusCode, resp.Header.Get(headerShouldRetry))
+		}
+		if n := f.router.failures(f.names[0]); n != 1 {
+			t.Errorf("%d failures in a row on %s after one close, want 1", n, f.names[0])
+		}
+		wantCounts(t, f, 1, 0)
+	})
+	t.Run("a held 5xx", func(t *testing.T) {
+		f, key := unreadyFix(t)
+		const body500 = `{"error":{"message":"CUDA out of memory in the engine","type":"server_error","param":null,"code":500}}`
+		f.engines[0].Set(enginetest.Behaviour{Status: 500, ErrorBody: body500})
+		resp, body := scChatOnce(t, f.harness, key)
+		if resp.StatusCode != 500 || body != body500 || resp.Header.Get(headerShouldRetry) != "" {
+			t.Fatalf("status %d, x-should-retry %q, body %s; want the engine's 500 and body as they came, and no header", resp.StatusCode, resp.Header.Get(headerShouldRetry), body)
+		}
+		if n := f.router.failures(f.names[0]); n != 1 {
+			t.Errorf("%d failures in a row on %s after one 5xx, want 1", n, f.names[0])
+		}
+		wantCounts(t, f, 1, 0)
+	})
 }
