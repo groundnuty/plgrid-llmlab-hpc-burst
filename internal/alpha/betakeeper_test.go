@@ -171,6 +171,15 @@ func TestEachKeeperCheckNamesItsOwnFailure(t *testing.T) {
 			}
 		})
 	}
+	// Relays that were not read are reported by their own check and compared by none: a missing reading is not "a relay was replaced".
+	for _, unread := range []func(o *KeeperObs){func(o *KeeperObs) { o.Before.Read = false }, func(o *KeeperObs) { o.After.Read = false }} {
+		o := goodKeeperObs(row)
+		unread(&o)
+		o.After.Control.PID += 7
+		if f := sameRelayChecks(o.Before, o.After); len(f) != 0 {
+			t.Errorf("relays that were not read are compared: %q", f)
+		}
+	}
 	// The outcome's bound is a boundary too: an outcome at exactly the bound passes the controller's check.
 	{
 		o := goodKeeperObs(row)
