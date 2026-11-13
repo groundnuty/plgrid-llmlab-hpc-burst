@@ -1,0 +1,226 @@
+{
+  "cell": {
+    "name": "b-F4",
+    "arm": "b",
+    "fault": "F4",
+    "stream": false,
+    "rps": 5,
+    "duration_ns": 252453729251,
+    "trials": 20,
+    "client_retries": false,
+    "n": 3,
+    "d1_ns": 1000000000,
+    "d2_ns": 5000000000,
+    "token_delay": "5ms",
+    "seed": 62
+  },
+  "Requests": 1294,
+  "Marked": 20,
+  "Fired": 20,
+  "Attempts": 1294,
+  "Success": 0.9845440494590417,
+  "SuccessMarked": 0,
+  "SuccessFired": 0,
+  "SuccessUnmarked": 1,
+  "Duplicates": 26,
+  "ReExecutions": 0,
+  "Deaths": 40,
+  "Restarts": 40,
+  "TTFBFiredP50": 70.119061,
+  "TTFBFiredP95": 100.236664,
+  "TTFBUnmarkedP50": 42.62074,
+  "TTFBUnmarkedP95": 62.176365,
+  "CorrFront": 20,
+  "CorrFrontFalse": 0,
+  "CorrController": {
+    "10m0s": 39,
+    "2m0s": 39,
+    "30s": 33
+  },
+  "CorrContent": 20,
+  "CorrContentFalse": 0,
+  "FalseDeaths": 0,
+  "FalseStops": 0,
+  "poison": [
+    {
+      "base": "s18id-b02335-13",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-b02335-39",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-b02335-65",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-b02335-220",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-b02335-376",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-b02335-402",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-b02335-428",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-b02335-579",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-b02335-605",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-b02335-631",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-b02335-657",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-b02335-810",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-b02335-836",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-b02335-987",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-b02335-1013",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-b02335-1039",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-b02335-1065",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-b02335-1091",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-b02335-1242",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-b02335-1269",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    }
+  ]
+}

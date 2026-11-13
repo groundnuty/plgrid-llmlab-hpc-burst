@@ -1,0 +1,228 @@
+{
+  "cell": {
+    "name": "c-F4-b10-r1-sdk-stream",
+    "arm": "c",
+    "burst": 10,
+    "refill": 1,
+    "fault": "F4",
+    "stream": true,
+    "rps": 5,
+    "duration_ns": 608009386118,
+    "trials": 20,
+    "client_retries": true,
+    "n": 3,
+    "d1_ns": 1000000000,
+    "d2_ns": 5000000000,
+    "token_delay": "5ms",
+    "seed": 138
+  },
+  "Requests": 3072,
+  "Marked": 20,
+  "Fired": 20,
+  "Attempts": 3112,
+  "Success": 0.004557291666666667,
+  "SuccessMarked": 0,
+  "SuccessFired": 0,
+  "SuccessUnmarked": 0.0045871559633027525,
+  "Duplicates": 20,
+  "ReExecutions": 0,
+  "Deaths": 60,
+  "Restarts": 60,
+  "TTFBFiredP50": 0,
+  "TTFBFiredP95": 0,
+  "TTFBUnmarkedP50": 43.183689,
+  "TTFBUnmarkedP95": 43.648066,
+  "CorrFront": 20,
+  "CorrFrontFalse": 0,
+  "CorrController": {
+    "10m0s": 59,
+    "2m0s": 59,
+    "30s": 40
+  },
+  "CorrContent": 20,
+  "CorrContentFalse": 0,
+  "FalseDeaths": 0,
+  "FalseStops": 0,
+  "poison": [
+    {
+      "base": "s18id-d30a4e-13",
+      "attempts": 3,
+      "deaths": 3,
+      "final_status": 503,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d30a4e-166",
+      "attempts": 3,
+      "deaths": 3,
+      "final_status": 503,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d30a4e-319",
+      "attempts": 3,
+      "deaths": 3,
+      "final_status": 503,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d30a4e-472",
+      "attempts": 3,
+      "deaths": 3,
+      "final_status": 503,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d30a4e-625",
+      "attempts": 3,
+      "deaths": 3,
+      "final_status": 503,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d30a4e-778",
+      "attempts": 3,
+      "deaths": 3,
+      "final_status": 503,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d30a4e-931",
+      "attempts": 3,
+      "deaths": 3,
+      "final_status": 503,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d30a4e-1084",
+      "attempts": 3,
+      "deaths": 3,
+      "final_status": 503,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d30a4e-1237",
+      "attempts": 3,
+      "deaths": 3,
+      "final_status": 503,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d30a4e-1390",
+      "attempts": 3,
+      "deaths": 3,
+      "final_status": 503,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d30a4e-1543",
+      "attempts": 3,
+      "deaths": 3,
+      "final_status": 503,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d30a4e-1696",
+      "attempts": 3,
+      "deaths": 3,
+      "final_status": 503,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d30a4e-1849",
+      "attempts": 3,
+      "deaths": 3,
+      "final_status": 503,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d30a4e-2002",
+      "attempts": 3,
+      "deaths": 3,
+      "final_status": 503,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d30a4e-2155",
+      "attempts": 3,
+      "deaths": 3,
+      "final_status": 503,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d30a4e-2308",
+      "attempts": 3,
+      "deaths": 3,
+      "final_status": 503,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d30a4e-2461",
+      "attempts": 3,
+      "deaths": 3,
+      "final_status": 503,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d30a4e-2614",
+      "attempts": 3,
+      "deaths": 3,
+      "final_status": 503,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d30a4e-2767",
+      "attempts": 3,
+      "deaths": 3,
+      "final_status": 503,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d30a4e-2920",
+      "attempts": 3,
+      "deaths": 3,
+      "final_status": 503,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    }
+  ]
+}

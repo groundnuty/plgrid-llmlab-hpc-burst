@@ -1,0 +1,228 @@
+{
+  "cell": {
+    "name": "c-F4-b1-r0.1-stream",
+    "arm": "c",
+    "burst": 1,
+    "refill": 0.1,
+    "fault": "F4",
+    "stream": true,
+    "rps": 5,
+    "duration_ns": 356007126823,
+    "trials": 20,
+    "client_retries": false,
+    "n": 3,
+    "d1_ns": 1000000000,
+    "d2_ns": 5000000000,
+    "token_delay": "5ms",
+    "seed": 134
+  },
+  "Requests": 1812,
+  "Marked": 20,
+  "Fired": 20,
+  "Attempts": 1812,
+  "Success": 0.9751655629139073,
+  "SuccessMarked": 0,
+  "SuccessFired": 0,
+  "SuccessUnmarked": 0.9860491071428571,
+  "Duplicates": 14,
+  "ReExecutions": 0,
+  "Deaths": 34,
+  "Restarts": 34,
+  "TTFBFiredP50": 0,
+  "TTFBFiredP95": 0,
+  "TTFBUnmarkedP50": 6.066748,
+  "TTFBUnmarkedP95": 6.342247,
+  "CorrFront": 14,
+  "CorrFrontFalse": 0,
+  "CorrController": {
+    "10m0s": 33,
+    "2m0s": 33,
+    "30s": 24
+  },
+  "CorrContent": 14,
+  "CorrContentFalse": 0,
+  "FalseDeaths": 0,
+  "FalseStops": 0,
+  "poison": [
+    {
+      "base": "s18id-d88bf5-13",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d88bf5-39",
+      "attempts": 1,
+      "deaths": 1,
+      "final_status": 502,
+      "corr_front": false,
+      "corr_controller": false,
+      "corr_content": false
+    },
+    {
+      "base": "s18id-d88bf5-65",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d88bf5-219",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d88bf5-373",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d88bf5-526",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d88bf5-680",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d88bf5-836",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d88bf5-862",
+      "attempts": 1,
+      "deaths": 1,
+      "final_status": 502,
+      "corr_front": false,
+      "corr_controller": false,
+      "corr_content": false
+    },
+    {
+      "base": "s18id-d88bf5-888",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d88bf5-914",
+      "attempts": 1,
+      "deaths": 1,
+      "final_status": 502,
+      "corr_front": false,
+      "corr_controller": false,
+      "corr_content": false
+    },
+    {
+      "base": "s18id-d88bf5-940",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d88bf5-966",
+      "attempts": 1,
+      "deaths": 1,
+      "final_status": 502,
+      "corr_front": false,
+      "corr_controller": false,
+      "corr_content": false
+    },
+    {
+      "base": "s18id-d88bf5-993",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d88bf5-1148",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d88bf5-1174",
+      "attempts": 1,
+      "deaths": 1,
+      "final_status": 502,
+      "corr_front": false,
+      "corr_controller": false,
+      "corr_content": false
+    },
+    {
+      "base": "s18id-d88bf5-1325",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d88bf5-1351",
+      "attempts": 1,
+      "deaths": 1,
+      "final_status": 502,
+      "corr_front": false,
+      "corr_controller": false,
+      "corr_content": false
+    },
+    {
+      "base": "s18id-d88bf5-1502",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-d88bf5-1658",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    }
+  ]
+}

@@ -1,0 +1,226 @@
+{
+  "cell": {
+    "name": "b-F4-stream",
+    "arm": "b",
+    "fault": "F4",
+    "stream": true,
+    "rps": 5,
+    "duration_ns": 201420581027,
+    "trials": 20,
+    "client_retries": false,
+    "n": 3,
+    "d1_ns": 1000000000,
+    "d2_ns": 5000000000,
+    "token_delay": "5ms",
+    "seed": 132
+  },
+  "Requests": 1039,
+  "Marked": 20,
+  "Fired": 20,
+  "Attempts": 1039,
+  "Success": 0.9778633301251203,
+  "SuccessMarked": 0,
+  "SuccessFired": 0,
+  "SuccessUnmarked": 0.9970559371933267,
+  "Duplicates": 20,
+  "ReExecutions": 0,
+  "Deaths": 40,
+  "Restarts": 40,
+  "TTFBFiredP50": 0,
+  "TTFBFiredP95": 0,
+  "TTFBUnmarkedP50": 6.037799,
+  "TTFBUnmarkedP95": 6.250729,
+  "CorrFront": 20,
+  "CorrFrontFalse": 0,
+  "CorrController": {
+    "10m0s": 39,
+    "2m0s": 39,
+    "30s": 36
+  },
+  "CorrContent": 20,
+  "CorrContentFalse": 0,
+  "FalseDeaths": 0,
+  "FalseStops": 0,
+  "poison": [
+    {
+      "base": "s18id-4de404-13",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-4de404-39",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-4de404-65",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-4de404-91",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-4de404-117",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-4de404-268",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-4de404-294",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-4de404-320",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-4de404-347",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-4de404-373",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-4de404-399",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-4de404-550",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-4de404-576",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-4de404-602",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-4de404-629",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-4de404-655",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-4de404-681",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-4de404-707",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-4de404-733",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    },
+    {
+      "base": "s18id-4de404-888",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true
+    }
+  ]
+}
