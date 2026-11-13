@@ -1082,7 +1082,7 @@ jobs:
       # Issue #146's two tests and #298's host-dialed mode only: issue #193's part 3 runs in its own
       # job (rehearsal-part3), so each job stays under its time budget.
       - name: hack/rehearsal.sh
-        run: REHEARSAL_OUT="$RUNNER_TEMP/rehearsal" REHEARSAL_RUN='^TestRehearsal(Direct|SSH|HostDialed|InstanceRouter)$' bash hack/rehearsal.sh
+        run: REHEARSAL_OUT="$RUNNER_TEMP/rehearsal" REHEARSAL_RUN='^TestRehearsal(Direct|SSH|HostDialed|InstanceRouter|TwoWorkers)$' bash hack/rehearsal.sh
 
   # The one-host rehearsal's third part (issue #193), on #146's rig: HBEP-5's 7,000-token stream
   # and attribution, HBEP-8's events and metrics, HBEP-3's requeue, HBEP-6's controller restart

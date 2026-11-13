@@ -34,7 +34,11 @@ import (
 func (r *rig) stepStart() *v1alpha1.Instance {
 	r.t.Helper()
 	r.providerReady()
-	stack.Create(r.t, r.c, stack.ServedDeployment(rehearsalTiming, r.engineEnv...))
+	md := stack.ServedDeployment(rehearsalTiming, r.engineEnv...)
+	if r.mdWorkers > 0 {
+		md.Spec.WorkersPerInstance = &r.mdWorkers
+	}
+	stack.Create(r.t, r.c, md)
 	var alloc v1alpha1.Allocation
 	stack.WaitFor(r.t, stack.WaitDeadline, "an Allocation with a job ID", func() bool {
 		for _, a := range r.allocations() {

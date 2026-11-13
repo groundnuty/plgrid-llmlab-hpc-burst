@@ -32,7 +32,8 @@
 #                           6444 and 10250. Without it, the test records whichever of them listen
 #                           and fails if that changes.
 # It binds 127.0.0.1 only, on ports 29500-29539 (issue #146's tests), 29780-29799 (#298's host-dialed
-# mode), 29680-29699 (issue #193's), 30020-30033 (#343's relay keeper tests)
+# mode), 29680-29699 (issue #193's), 30020-30033 (#343's relay keeper tests), 30360-30379 (#454's
+# Instance behind Envoy), 30400-30419 (#439's two workers behind Envoy)
 # and kernel-chosen ones, and never touches a system k3s.
 #
 # The test starts k3s, the supervisor, the fake jobs and the sshds in sessions of their own, and

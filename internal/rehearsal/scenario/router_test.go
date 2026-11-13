@@ -181,4 +181,32 @@ func TestRehearsalInstanceRouter(t *testing.T) {
 	if after := envoyRequests(t, admin); after <= before {
 		t.Errorf("Envoy's requests to worker-0 went from %d to %d: the request did not cross the router", before, after)
 	}
+
+	// One worker behind Envoy (HBEP-7, Several workers, Test plan): a worker restart leaves ready for
+	// verifying and returns, as in alpha. The engine is killed through a pidfd.
+	engines := r.engineProcesses(id)
+	if len(engines) != 1 {
+		t.Fatalf("job %d runs %d engines %v, want one", id, len(engines), engines)
+	}
+	pidfdKill(t, engines[0], "--uds=")
+	killAt := time.Now()
+	stack.WaitFor(t, 3*stack.WaitDeadline, "worker-0 restarted and the Instance ready again", func() bool {
+		now, ok := r.instance(in.Name)
+		return ok && now.Status.Phase == v1alpha1.InstanceReady && len(now.Status.Restarts) == 1 &&
+			now.Annotations[v1alpha1.RestartGenerationAnnotation(agentapi.WorkerName(0))] == "1"
+	})
+	if now, _ := r.instance(in.Name); now.Status.Restarts[0].Part != agentapi.WorkerName(0) || now.Status.Restarts[0].Signal != v1alpha1.ReasonPartExited {
+		t.Errorf("the restart is %+v, want worker-0's for PartExited", now.Status.Restarts[0])
+	}
+	r.syncWatch(stack.KindInstances, "the Instance's phases after worker-0's kill")
+	left, ok := r.watch.First(in.UID, killAt, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceVerifying })
+	if !ok {
+		t.Fatal("the watch never saw the Instance verifying after worker-0's kill: with one worker, a worker restart leaves ready, as in alpha")
+	}
+	if _, back := r.watch.First(in.UID, left.At, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceReady }); !back {
+		t.Error("the watch never saw the Instance ready again after its worker's restart")
+	}
+	if reply := r.fc.Send("/v1/chat/completions", stack.ChatBody(stack.Model, 32, 8, false, ""), key); reply.Status != http.StatusOK {
+		t.Errorf("a request after the worker's restart: %d %.200q", reply.Status, reply.Body)
+	}
 }
