@@ -82,6 +82,9 @@ func (s rigSetup) hostOptions() []stack.HostOption {
 	if s.k3sVersion != "" {
 		o = append(o, stack.K3sVersion(s.k3sVersion))
 	}
+	if s.bulkPath {
+		o = append(o, stack.BulkPath)
+	}
 	if s.instanceRouter {
 		o = append(o, stack.InstanceRouter)
 	}
