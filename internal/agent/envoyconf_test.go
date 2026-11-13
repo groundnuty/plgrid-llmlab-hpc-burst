@@ -128,6 +128,7 @@ func TestEnvoyConfigCarriesHBEP5sSettings(t *testing.T) {
 		"max ejection percent":           at(t, c, "outlier_detection", "max_ejection_percent"),
 		"uneject on a passing check":     at(t, c, "outlier_detection", "successful_active_health_check_uneject_host"),
 		"panic threshold":                at(t, c, "common_lb_config", "healthy_panic_threshold", "value"),
+		"bounded loads":                  at(t, c, "common_lb_config", "consistent_hashing_lb_config", "hash_balance_factor"),
 		"the number of top-level fields": float64(len(m)),
 	} {
 		want := map[string]any{
@@ -144,7 +145,7 @@ func TestEnvoyConfigCarriesHBEP5sSettings(t *testing.T) {
 			"unhealthy after": float64(2), "healthy after": float64(1), "check path": "/ready",
 			"check address": "127.0.0.1", "check port": float64(30160), "check Host": "worker-0",
 			"consecutive 5xx": float64(3), "base ejection": "30s", "max ejection": "300s",
-			"max ejection percent": float64(100), "uneject on a passing check": false, "panic threshold": float64(0),
+			"max ejection percent": float64(100), "uneject on a passing check": false, "panic threshold": float64(0), "bounded loads": float64(125),
 		}[name]
 		if got != want {
 			t.Errorf("%s = %v, want %v", name, got, want)
@@ -222,6 +223,17 @@ func TestEnvoyGuardRefusesEachFault(t *testing.T) {
 			at(t, clusterOf(t, m), "circuit_breakers", "thresholds", 0).(map[string]any)["max_requests"] = 1024
 		}, "max_requests is 1024"},
 		{"no circuit breakers", func(m map[string]any) { delete(clusterOf(t, m), "circuit_breakers") }, "has no circuit_breakers"},
+		// ring_hash's bounded loads at the front's tight bound (HBEP-5; #518): absent, sessions pile onto
+		// one worker while a sibling idles.
+		{"no bounded loads", func(m map[string]any) {
+			delete(at(t, clusterOf(t, m), "common_lb_config").(map[string]any), "consistent_hashing_lb_config")
+		}, "has no consistent_hashing_lb_config"},
+		{"another bound", func(m map[string]any) {
+			at(t, clusterOf(t, m), "common_lb_config", "consistent_hashing_lb_config").(map[string]any)["hash_balance_factor"] = 200
+		}, "hash_balance_factor"},
+		{"hashing by host name too", func(m map[string]any) {
+			at(t, clusterOf(t, m), "common_lb_config", "consistent_hashing_lb_config").(map[string]any)["use_hostname_for_hashing"] = true
+		}, "sets use_hostname_for_hashing"},
 		{"Envoy's default of 3 parallel retries", func(m map[string]any) {
 			at(t, clusterOf(t, m), "circuit_breakers", "thresholds", 0).(map[string]any)["max_retries"] = 3
 		}, "max_retries is 3"},

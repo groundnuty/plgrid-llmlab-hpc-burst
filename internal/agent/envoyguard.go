@@ -26,7 +26,8 @@ import (
 //   - the workers on Unix sockets, each named, each health-checked through the agent's readiness port
 //     with its own name as the check's Host;
 //   - the health checks, outlier detection and panic threshold at HBEP-5's values (Worker health);
-//   - the route's retry: once, on connect-failure and reset-before-request only, to another worker.
+//   - the route's retry: once, on connect-failure and reset-before-request only, to another worker;
+//   - ring_hash's bounded loads at the front's tight bound, hash_balance_factor 125 (HBEP-5).
 //
 // Each map is held to the keys the agent writes, so a field that is not checked here cannot be
 // added unnoticed. The first fault is returned, naming its place.
@@ -86,9 +87,16 @@ func (g guard) num(v any, at string, want int64) error {
 
 // health checks the cluster's worker health: the active check, outlier detection and no panic mode.
 func (g guard) health(c map[string]any, at string) error {
-	lb, err := g.object(c["common_lb_config"], at+".common_lb_config", "healthy_panic_threshold")
+	lb, err := g.object(c["common_lb_config"], at+".common_lb_config", "healthy_panic_threshold", "consistent_hashing_lb_config")
 	if err != nil {
 		return err
+	}
+	ch, err := g.object(lb["consistent_hashing_lb_config"], at+".common_lb_config.consistent_hashing_lb_config", "hash_balance_factor")
+	if err != nil {
+		return err
+	}
+	if err := g.num(ch["hash_balance_factor"], at+".common_lb_config.consistent_hashing_lb_config.hash_balance_factor", envoyHashBalanceFactor); err != nil {
+		return refuse("%v: without bounded loads sessions pile onto one worker while a sibling idles (HBEP-5, Inside an Instance)", err)
 	}
 	pt, err := g.object(lb["healthy_panic_threshold"], at+".common_lb_config.healthy_panic_threshold", "value")
 	if err != nil {
