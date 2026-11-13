@@ -298,3 +298,54 @@ func TestTheBulkLiveFlowRefusesWithoutAStagedDouble(t *testing.T) {
 		t.Error("a refusal for want of a staged double ends the run NOT RUN: it is a failure of the setup, and the script holds the row pending so that it is never reached")
 	}
 }
+
+// minGaps is half of what BulkStreams streams at BulkTokenDelay give across the transfer, written out for the two transfers the stand-in and the
+// rehearsal measured: a stream of 20 tokens a second gives 20 gaps a second.
+func TestMinGapsIsHalfOfWhatEightStreamsGive(t *testing.T) {
+	for _, c := range []struct {
+		took time.Duration
+		want int
+	}{{3 * time.Second, 240}, {2704 * time.Millisecond, 216}, {time.Second, 80}, {49 * time.Millisecond, 0}, {0, 0}} {
+		if got := minGaps(c.took); got != c.want {
+			t.Errorf("minGaps(%s) = %d, want %d", c.took, got, c.want)
+		}
+	}
+}
+
+// The bulk path takes up's block from 13 ports to 16 (base+13 to base+15, the second frps), so the bulk row's client listener may not be where the
+// other rows' is, base+13; every port of its stack is distinct and inside the alpha stack's block of IMPL-COMMON, 29700 to 29719.
+func TestTheBulkRowsPortsAreDistinctAndInsideTheAlphaBlock(t *testing.T) {
+	bulk := portsFor(BetaBulkName, livePorts("127.0.0.1:29714"))
+	bulk.BulkPath = true
+	seen := map[int]bool{}
+	for _, p := range bulk.All() {
+		if seen[p] {
+			t.Errorf("port %d is used twice in the bulk row's stack %v", p, bulk.All())
+		}
+		seen[p] = true
+		if p < 29700 || p > 29719 {
+			t.Errorf("port %d is outside the alpha stack's block 29700-29719", p)
+		}
+	}
+	if bulk.ClientAddr != "127.0.0.1:29716" || bulk.DialHomeListen != "127.0.0.1:29717" {
+		t.Errorf("the bulk row's client and dial-home listeners are %s and %s, want 29716 and 29717", bulk.ClientAddr, bulk.DialHomeListen)
+	}
+	// The other rows keep the base block's listeners.
+	for _, name := range []string{BetaRouterName, BetaKeeperName, "alpha-athena-now-serve"} {
+		if p := portsFor(name, livePorts("127.0.0.1:29714")); p.ClientAddr != "127.0.0.1:29713" || p.DialHomeListen != "127.0.0.1:29714" {
+			t.Errorf("%s's listeners changed: %s and %s", name, p.ClientAddr, p.DialHomeListen)
+		}
+	}
+	// The control of this test: the base block's client listener is inside the bulk path's block, which is why the bulk row moved it.
+	base := livePorts("")
+	base.BulkPath = true
+	count := 0
+	for _, p := range base.All() {
+		if p == 29713 {
+			count++
+		}
+	}
+	if count != 2 {
+		t.Errorf("port 29713 appears %d times in the base block with the bulk path, want 2 (the client listener and the second frps): the reason the row moved", count)
+	}
+}
