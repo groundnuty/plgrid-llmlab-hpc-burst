@@ -188,7 +188,7 @@ func TestRehearsalInstanceRouter(t *testing.T) {
 	if len(engines) != 1 {
 		t.Fatalf("job %d runs %d engines %v, want one", id, len(engines), engines)
 	}
-	pidfdKill(t, engines[0], "--uds=")
+	pidfdKill(t, engines[0], "--uds")
 	killAt := time.Now()
 	stack.WaitFor(t, 3*stack.WaitDeadline, "worker-0 restarted and the Instance ready again", func() bool {
 		now, ok := r.instance(in.Name)

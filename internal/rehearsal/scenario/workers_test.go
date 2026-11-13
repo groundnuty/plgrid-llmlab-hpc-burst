@@ -62,10 +62,19 @@ func (r *rig) engineWorkers(jobID int) map[string]engineProc {
 				e.cvd = append(e.cvd, v)
 			}
 		}
-		for _, a := range strings.Split(string(cmd), "\x00") {
-			if sock, ok := strings.CutPrefix(a, "--uds="); ok {
+		// The controller's launch passes --uds and the socket as two arguments; --uds=<socket> is read too.
+		args := strings.Split(string(cmd), "\x00")
+		for i, a := range args {
+			sock, ok := strings.CutPrefix(a, "--uds=")
+			if !ok && a == "--uds" && i+1 < len(args) {
+				sock, ok = args[i+1], true
+			}
+			if ok {
 				e.worker = strings.TrimSuffix(filepath.Base(sock), ".sock")
 			}
+		}
+		if e.worker == "" {
+			r.t.Fatalf("engine process %d names no --uds socket: %q", pid, args)
 		}
 		out[e.worker] = e
 	}
@@ -170,15 +179,21 @@ func restartParts(in v1alpha1.Instance) []string {
 	return out
 }
 
-// sendSome sends n short requests through the front and requires each to be served.
+// sendSome sends n short requests through the front, each in a session of its own (x-session-id, on
+// which Envoy's ring hash places a request), and requires each to be served. With one Instance, every
+// session reaches it.
 func (r *rig) sendSome(key string, n int, what string) {
 	r.t.Helper()
 	for i := 0; i < n; i++ {
-		if rp := r.fc.Send("/v1/chat/completions", stack.ChatBody(stack.Model, 4, 0, false, ""), key); rp.Status != http.StatusOK {
+		sessions++
+		if rp := r.fc.Send("/v1/chat/completions", stack.ChatBody(stack.Model, 4, 0, false, ""), key+"-s"+strconv.Itoa(sessions)); rp.Status != http.StatusOK {
 			r.t.Fatalf("%s: request %d: %d %.200q", what, i, rp.Status, rp.Body)
 		}
 	}
 }
+
+// sessions numbers sendSome's sessions, so none repeats within a run.
+var sessions int
 
 // TestRehearsalTwoWorkers is the whole stack with an Instance of two workers behind Envoy.
 //
@@ -271,10 +286,9 @@ func TestRehearsalTwoWorkers(t *testing.T) {
 		return false
 	})
 	victim = map[string]string{"worker-0": "worker-1", "worker-1": "worker-0"}[streamOn]
-	pidfdKill(t, engines[victim].pid, "--uds=")
+	pidfdKill(t, engines[victim].pid, "--uds")
 	killAt := time.Now()
 	var counts []int32
-	servedAtKill := hostStats(t, admin)[victim]["rq_total"]
 	stack.WaitFor(t, 3*stack.WaitDeadline, victim+" back, verified again and admitted", func() bool {
 		now, ok := r.instance(in.Name)
 		if !ok || now.Status.Phase != v1alpha1.InstanceReady {
@@ -292,15 +306,27 @@ func TestRehearsalTwoWorkers(t *testing.T) {
 				e = x
 			}
 		}
-		back := e.Record == "ver-"+string(in.UID)+"-"+victim+"-2" && e.WarmedUp && e.RouterAdmittedGeneration != nil && *e.RouterAdmittedGeneration == 1
-		if !back {
-			// Not yet verified again: a request goes to the other worker only.
-			r.sendSome(key, 1, "step (c), while "+victim+" rejoins")
-			if got := hostStats(t, admin)[victim]["rq_total"]; got != servedAtKill {
-				t.Fatalf("step (c): Envoy sent %s %d requests while it rejoined, before its verification", victim, got-servedAtKill)
+		verified := func(x v1alpha1.Instance) bool {
+			for _, e := range x.Status.Workers {
+				if e.Name == victim {
+					return e.Record == "ver-"+string(in.UID)+"-"+victim+"-2" && e.WarmedUp && e.VerifiedGeneration != nil && *e.VerifiedGeneration == 1
+				}
 			}
+			return false
 		}
-		return back && now.Status.HealthyWorkers != nil && *now.Status.HealthyWorkers == 2
+		if !verified(now) {
+			// Not yet verified again: a request goes to the other worker only. The status is read again
+			// after the request: only while it still shows the worker unverified does a request to it count.
+			served := hostStats(t, admin)[victim]["rq_total"]
+			r.sendSome(key, 1, "step (c), while "+victim+" rejoins")
+			got := hostStats(t, admin)[victim]["rq_total"]
+			if later, _ := r.instance(in.Name); got != served && !verified(later) {
+				t.Fatalf("step (c): Envoy sent %s a request while it rejoined, before its verification", victim)
+			}
+			return false
+		}
+		_ = e
+		return now.Status.HealthyWorkers != nil && *now.Status.HealthyWorkers == 2 && e.RouterAdmittedGeneration != nil && *e.RouterAdmittedGeneration == 1
 	})
 	streamed := <-done
 	if body := string(streamed.Body); streamed.Status != http.StatusOK || !strings.Contains(body, "[DONE]") || strings.Contains(body, "stream_cut") {
