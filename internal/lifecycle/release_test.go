@@ -144,13 +144,13 @@ func TestReleaseEndTimeDrainsAndCancelsPending(t *testing.T) {
 	}
 }
 
-// TestReleaseDeletionDrainsInstancesAndFollowsRetention covers "Deletion of the
-// ModelDeployment: as shutdown, then the objects are removed". The fake client
-// has no garbage collector, so the test deletes the Instances as it would; they
-// keep the drain finalizer until they have ended. With the default policy the
-// deployment's end has come, so the started Allocation is released; one kept
-// until 09:00:00 stays until then.
-func TestReleaseDeletionDrainsInstancesAndFollowsRetention(t *testing.T) {
+// TestReleaseDeletionDrainsInstancesThenReleasesWhateverTheRetention covers "Deletion of the ModelDeployment: as shutdown, then the
+// objects are removed", and HBEP-7's rule that a deployment's deletion releases its empty Allocations at once, whatever their policy
+// (issue #503). The fake client has no garbage collector, so the test deletes the Instances as it would; they keep the drain finalizer
+// until they have ended. Once they have, the started Allocation is released under the default policy, under keep until a date an hour
+// away, and under release-when-idle with a limit of 20 minutes: none waits for its date or its limit, which a deployment that still
+// exists would (TestAnEmptyAllocationOfADeletedDeploymentGoesAtOnceButAnExistingOnesKeepsItsPolicy).
+func TestReleaseDeletionDrainsInstancesThenReleasesWhateverTheRetention(t *testing.T) {
 	until := metav1.NewTime(rigStart.Add(time.Hour))
 	for _, tc := range []struct {
 		name   string
@@ -158,6 +158,7 @@ func TestReleaseDeletionDrainsInstancesAndFollowsRetention(t *testing.T) {
 	}{
 		{"the default policy", nil},
 		{"keep until a date", &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionKeep, Until: &until}},
+		{"release when idle, 20 minutes", &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: dur(20 * time.Minute)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rg := newRig(t)
@@ -183,10 +184,11 @@ func TestReleaseDeletionDrainsInstancesAndFollowsRetention(t *testing.T) {
 			if n := allocCount(rg.batch, "scancel", allocJobID(&pending)); n < 1 || !allocReleased(rg, pending.Name) {
 				t.Errorf("pending Allocation released %v, scancel calls %d: it must be cancelled", allocReleased(rg, pending.Name), n)
 			}
-			if tc.policy == nil {
-				rg.until(2*time.Minute, 10*time.Second, "all Allocations gone", func() bool { return len(rg.allocations("md")) == 0 })
-			} else {
-				retentionReleaseAt(t, rg, serving.Name, until.Time, time.Minute)
+			// The started Allocation goes as soon as its Instance has ended: well inside the 20 minute limit and the hour's date.
+			rg.until(2*time.Minute, 10*time.Second, "the serving Allocation released", func() bool { return allocReleased(rg, serving.Name) })
+			rg.run(time.Minute, 10*time.Second)
+			if n := allocCount(rg.batch, "scancel", allocJobID(&serving)); n < 1 {
+				t.Errorf("scancel calls for the serving job = %d, want at least 1: the release's finalizer cancels it", n)
 			}
 			rg.run(10*time.Minute, time.Minute)
 			if got := rg.submissions(); got != 2 {
@@ -333,47 +335,71 @@ func TestReleaseInterruptedProviderReportsEachOutcome(t *testing.T) {
 	}
 }
 
-// TestReleaseDeletionUnderReleaseWhenIdleWaitsOutTheIdleLimit pins what the controller does today with an Allocation whose deployment
-// was deleted and whose policy is release-when-idle (issue #503): nothing releases it at the deletion. The deployment's end has come
-// (keepUntil), but keepUntil applies to Keep alone, so the Allocation is kept for its idle limit, counted from the end of its last
-// Instance, and its job runs on until then. Row A's live deployment carried the example's 30 minutes, which outlasted the row's 12
-// minute wait for the job's end, so the job ended only by the row's own cleanup. The default policy and a kept-until date are the
-// cases of TestReleaseDeletionDrainsInstancesAndFollowsRetention; this is the third. The idle limit here is 20 minutes: the
-// Allocation is not released at 10 minutes after the Instance ended, and is released at 20.
-func TestReleaseDeletionUnderReleaseWhenIdleWaitsOutTheIdleLimit(t *testing.T) {
-	rg := newRig(t)
-	md := mdSpec("md")
-	md.Spec.RetentionPolicy = &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: dur(20 * time.Minute)}
-	serving, _, _ := releaseServingAndPending(t, rg, md)
-	if err := rg.c.Delete(rg.ctx, rg.md("md")); err != nil {
-		t.Fatal(err)
-	}
-	for _, in := range rg.instances("md") {
-		if err := rg.c.Delete(rg.ctx, &in); err != nil {
-			t.Fatal(err)
-		}
-	}
-	rg.until(2*time.Minute, 10*time.Second, "the Instances gone", func() bool { return len(rg.instances("md")) == 0 })
-	a, ok := rg.allocation(serving.Name)
-	if !ok || !a.DeletionTimestamp.IsZero() || a.Status.AtProvider.StartTime == nil {
-		t.Fatalf("the serving Allocation must be started, empty and kept once its Instance is gone: %+v", a)
-	}
-	idleSince, ok, err := v1alpha1.IdleSince(a)
-	if err != nil || !ok {
-		t.Fatalf("the Allocation has no idle anchor (%v, %v): the idle limit counts from nowhere", ok, err)
-	}
-	// Ten minutes into the idle limit the deployment has been gone for ten minutes and the job still runs.
-	for rg.clock.Now().Before(idleSince.Add(10 * time.Minute)) {
-		rg.clock.Advance(10 * time.Second)
-		rg.Step()
-	}
-	if allocReleased(rg, serving.Name) || allocCount(rg.batch, "scancel", allocJobID(&serving)) != 0 {
-		t.Fatalf("the Allocation of a deleted deployment was released 10 minutes into its 20 minute idle limit (scancel calls %d): the controller's behaviour changed; update this test and #503",
-			allocCount(rg.batch, "scancel", allocJobID(&serving)))
-	}
-	retentionReleaseAt(t, rg, serving.Name, idleSince.Add(20*time.Minute), 10*time.Second)
-	rg.run(time.Minute, 10*time.Second)
-	if n := allocCount(rg.batch, "scancel", allocJobID(&serving)); n < 1 {
-		t.Errorf("scancel calls for the released job = %d, want at least 1", n)
+// TestAnEmptyAllocationOfADeletedDeploymentGoesAtOnceButAnExistingOnesKeepsItsPolicy is the reproduction of issue #503, turned into the
+// behaviour HBEP-7's Release now says (the science agent's ruling on #503, 13 Nov 2026). Row A's live run timed out at 12 minutes
+// waiting for its job to end after the deployment was deleted: the deployment carried the example's release-when-idle with 30 minutes,
+// and a deletion was not consulted in that branch, so the idle Allocation kept its job for the whole limit. Now an empty Allocation of a
+// deployment that is deleted is released at once, whatever its policy, and one of a deployment that still exists keeps its policy:
+//
+//	policy                      deployment deleted         deployment exists (scaled to zero)
+//	release when idle, 20 min   released within a minute   kept 10 minutes in, released at the limit
+//	keep until a date (1 h)     released within a minute   kept until the date, then released
+//
+// Each Allocation is made empty the same way (retentionEmpty: one Instance served, then spec.instances 0 and stepped until it ended), so
+// the two columns differ in the deployment's deletion alone.
+func TestAnEmptyAllocationOfADeletedDeploymentGoesAtOnceButAnExistingOnesKeepsItsPolicy(t *testing.T) {
+	until := metav1.NewTime(rigStart.Add(time.Hour))
+	for _, tc := range []struct {
+		name   string
+		policy *v1alpha1.RetentionPolicy
+		// release is when a deployment that exists releases the Allocation: its emptiness plus the idle limit, or the date.
+		release func(emptyAt time.Time) time.Time
+	}{
+		{"release when idle, 20 minutes", &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: dur(20 * time.Minute)},
+			func(emptyAt time.Time) time.Time { return emptyAt.Add(20 * time.Minute) }},
+		{"keep until a date", &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionKeep, Until: &until},
+			func(time.Time) time.Time { return until.Time }},
+	} {
+		t.Run(tc.name+"/the deployment is deleted", func(t *testing.T) {
+			rg := newRig(t)
+			a, _ := retentionEmpty(t, rg, tc.policy)
+			if err := rg.c.Delete(rg.ctx, rg.md("md")); err != nil {
+				t.Fatal(err)
+			}
+			rg.until(time.Minute, 10*time.Second, "the empty Allocation of the deleted deployment released", func() bool { return allocReleased(rg, a.Name) })
+			rg.run(time.Minute, 10*time.Second)
+			if n := allocCount(rg.batch, "scancel", allocJobID(&a)); n < 1 {
+				t.Errorf("scancel calls for the released job = %d, want at least 1", n)
+			}
+		})
+		// A deployment that a finalizer holds (a foreground delete puts one) is still there, with its deletion timestamp set: it is being
+		// deleted, and the Allocation goes just the same.
+		t.Run(tc.name+"/the deployment is being deleted", func(t *testing.T) {
+			rg := newRig(t)
+			a, _ := retentionEmpty(t, rg, tc.policy)
+			rg.mutateMD("md", func(m *v1alpha1.ModelDeployment) { m.Finalizers = append(m.Finalizers, "test.example/hold") })
+			if err := rg.c.Delete(rg.ctx, rg.md("md")); err != nil {
+				t.Fatal(err)
+			}
+			if got := rg.md("md"); got == nil || got.DeletionTimestamp.IsZero() {
+				t.Fatalf("the deployment must be held by its finalizer with its deletion timestamp set: %+v", got)
+			}
+			rg.until(time.Minute, 10*time.Second, "the empty Allocation of the deployment being deleted released", func() bool { return allocReleased(rg, a.Name) })
+		})
+		t.Run(tc.name+"/the deployment exists", func(t *testing.T) {
+			rg := newRig(t)
+			a, emptyAt := retentionEmpty(t, rg, tc.policy)
+			release := tc.release(emptyAt)
+			// Ten minutes in, nothing has released it, and nothing has cancelled its job.
+			for rg.clock.Now().Before(emptyAt.Add(10 * time.Minute)) {
+				rg.clock.Advance(10 * time.Second)
+				rg.Step()
+			}
+			if allocReleased(rg, a.Name) || allocCount(rg.batch, "scancel", allocJobID(&a)) != 0 {
+				t.Fatalf("the Allocation of a deployment that exists was released 10 minutes after it emptied (scancel calls %d): its policy no longer holds",
+					allocCount(rg.batch, "scancel", allocJobID(&a)))
+			}
+			retentionReleaseAt(t, rg, a.Name, release, 10*time.Second)
+		})
 	}
 }
