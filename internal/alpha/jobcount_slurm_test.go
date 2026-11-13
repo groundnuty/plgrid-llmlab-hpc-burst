@@ -105,8 +105,9 @@ func listed(t *testing.T, reply []byte, n int) []provider.Job {
 	return js
 }
 
-func ptrTime(t time.Time) *time.Time { return &t }
-func ptrInt(n int64) *int64          { return &n }
+func ptrTime(t time.Time) *time.Time        { return &t }
+func ptrInt(n int64) *int64                 { return &n }
+func ptrDur(d time.Duration) *time.Duration { return &d }
 
 // The reproduction: the run's first job started three minutes after the deployment, and its configuration ended a
 // second (or a minute and a half) after its start, so squeue lists its end_time that much past its start plus its time
@@ -115,7 +116,7 @@ func ptrInt(n int64) *int64          { return &n }
 // (drainStartOf), the same whether its look came before the configuration ended or after. With a configuration that
 // ended in the second it started (the shape of every Athena reply recorded before 13 Nov 2026), it works as before.
 func TestTheTwoJobGuardTakesTheLeaseEndSlurmGivesAfterConfiguration(t *testing.T) {
-	for _, config := range []time.Duration{0, time.Second, 90 * time.Second} {
+	for _, config := range []time.Duration{0, time.Second, 90 * time.Second, MaxLeaseSlack} {
 		g := &TwoJobGuard{TimeLimit: rowBLimit, DrainWindow: rowBDrainWindow}
 		first, _, err := g.Next(Look{Clock: guardAt})
 		if err != nil {
@@ -150,7 +151,7 @@ func TestTheTwoJobGuardTakesTheLeaseEndSlurmGivesAfterConfiguration(t *testing.T
 // less the drain window, at or before the drain start of either lease end, never the drain start of the later one: an
 // end there would plan a third job until the Provider read the job again.
 func TestTheTwoJobGuardEndsAtTheSuccessorsEarliestDrainStart(t *testing.T) {
-	for _, config := range []time.Duration{0, time.Second, 90 * time.Second} {
+	for _, config := range []time.Duration{0, time.Second, 90 * time.Second, MaxLeaseSlack} {
 		g := &TwoJobGuard{TimeLimit: rowBLimit, DrainWindow: rowBDrainWindow}
 		if _, _, err := g.Next(Look{Clock: guardAt}); err != nil {
 			t.Fatal(err)
@@ -181,8 +182,9 @@ func TestTheTwoJobGuardEndsAtTheSuccessorsEarliestDrainStart(t *testing.T) {
 }
 
 // The guard keeps its protection through the same parser: a lease end before the job's start plus the planned time
-// limit (an earlier drain start than the ends the guard gave assume), a listed time limit that is not the planned one,
-// a longer lease end with no time limit listed to say why, and no lease end at all each stop the run.
+// limit (an earlier drain start than the ends the guard gave assume), one more than MaxLeaseSlack after it (the science
+// agent's bound on #534; exactly MaxLeaseSlack is taken, above), a listed time limit that is not the planned one, a
+// longer lease end with no time limit listed to say why, and no lease end at all each stop the run.
 func TestTheTwoJobGuardStillStopsTheRunOnALeaseItDoesNotPlanWith(t *testing.T) {
 	start := guardAt.Add(3 * time.Minute)
 	for _, c := range []struct {
@@ -192,6 +194,7 @@ func TestTheTwoJobGuardStillStopsTheRunOnALeaseItDoesNotPlanWith(t *testing.T) {
 		want  string
 	}{
 		{"a lease end a second short of the planned time limit", ptrTime(start.Add(rowBLimit - time.Second)), ptrInt(rowBLimitMinutes), "before its start plus the time limit"},
+		{"a lease end a second past the slack the guard takes", ptrTime(start.Add(rowBLimit + MaxLeaseSlack + time.Second)), ptrInt(rowBLimitMinutes), "5m1s past its start plus the time limit 21m0s, more than the 5m0s the guard takes"},
 		{"a listed time limit a minute longer than planned", ptrTime(start.Add(rowBLimit + time.Minute)), ptrInt(rowBLimitMinutes + 1), "listed with the time limit 22m0s"},
 		{"a listed time limit a minute shorter than planned", ptrTime(start.Add(rowBLimit)), ptrInt(rowBLimitMinutes - 1), "listed with the time limit 20m0s"},
 		{"a later lease end and no time limit listed", ptrTime(start.Add(rowBLimit + time.Second)), nil, "no time limit listed"},
@@ -205,5 +208,40 @@ func TestTheTwoJobGuardStillStopsTheRunOnALeaseItDoesNotPlanWith(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: Next's error is %v, want one that says %q", c.name, err, c.want)
 		}
+	}
+}
+
+// The slack the row posts: the most any look listed each job's lease end past its start plus the time limit. The
+// predecessor's first look lands while it is still configuring (its end_time not moved yet), the next after Slurm moved
+// it a second; the successor's look sees it moved a minute and a half. The predecessor's slack is kept once it has left
+// the listing. Before any job ran there is none to post.
+func TestTheTwoJobGuardKeepsEachJobsMostLeaseSlack(t *testing.T) {
+	g := &TwoJobGuard{TimeLimit: rowBLimit, DrainWindow: rowBDrainWindow}
+	if _, _, err := g.Next(Look{Clock: guardAt}); err != nil {
+		t.Fatal(err)
+	}
+	if p, s := g.LeaseSlacks(); p != nil || s != nil {
+		t.Fatalf("before any job ran, LeaseSlacks = %v, %v, want none", p, s)
+	}
+	pred := guardAt.Add(3 * time.Minute)
+	look := func(at time.Time, j athenaJob) {
+		t.Helper()
+		if _, _, err := g.Next(Look{Clock: at, Jobs: listed(t, athenaRunning(t, j), 1)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	look(pred.Add(time.Second), athenaJob{4601, "p", pred, ptrTime(pred.Add(rowBLimit)), ptrInt(rowBLimitMinutes)})
+	if p, s := g.LeaseSlacks(); p == nil || *p != 0 || s != nil {
+		t.Errorf("mid-configuration, LeaseSlacks = %v, %v, want 0s and none", p, s)
+	}
+	look(pred.Add(3*time.Second), athenaJob{4601, "p", pred, ptrTime(pred.Add(rowBLimit + time.Second)), ptrInt(rowBLimitMinutes)})
+	succ := pred.Add(rowBLimit + 5*time.Minute)
+	look(succ.Add(2*time.Second), athenaJob{4602, "s", succ, ptrTime(succ.Add(rowBLimit + 90*time.Second)), ptrInt(rowBLimitMinutes)})
+	p, s := g.LeaseSlacks()
+	if p == nil || *p != time.Second || s == nil || *s != 90*time.Second {
+		t.Fatalf("LeaseSlacks = %v, %v, want 1s and 1m30s", p, s)
+	}
+	if n, m := LeaseSlackSeconds(p), LeaseSlackSeconds(s); *n != 1 || *m != 90 || LeaseSlackSeconds(nil) != nil {
+		t.Errorf("LeaseSlackSeconds = %d, %d, want 1 and 90", *n, *m)
 	}
 }

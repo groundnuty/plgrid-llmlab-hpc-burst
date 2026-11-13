@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -226,8 +227,9 @@ type Look struct {
 //     the time its configuration took.
 //
 // A third job of the run that starts, a started job whose time limit is not
-// the one planned with or whose lease end is earlier than its start plus it
-// (planned), and an EndOfTwo error are errors: the run must stop.
+// the one planned with or whose lease end is earlier than its start plus it,
+// or more than MaxLeaseSlack later (planned), and an EndOfTwo error are
+// errors: the run must stop.
 // The guard never lowers the end: an older end came from an earlier clock and
 // is still no later than any later start's drain start.
 type TwoJobGuard struct {
@@ -235,16 +237,24 @@ type TwoJobGuard struct {
 	// DrainWindow the controller's (v1alpha1.InstanceDrainWindow).
 	TimeLimit, DrainWindow time.Duration
 
+	// mu guards what follows: Next runs on the guard's goroutine, and
+	// LeaseSlacks may be read from the run's while it does.
+	mu             sync.Mutex
 	pred, succ     string
 	predDrainStart time.Time
 	end            time.Time
 	final          bool
+	// slack is, by job ID, the most any look listed the job's lease end past
+	// its start plus the time limit (planned).
+	slack map[string]time.Duration
 }
 
 // Next is the end the deployment must have after the look l, and whether it
 // is final (the successor's drain start, as drainStartOf reckons it). An error
 // must stop the run.
 func (g *TwoJobGuard) Next(l Look) (end time.Time, final bool, err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	var started []provider.Job
 	for _, j := range l.Jobs {
 		if !jobStarted(j) {
@@ -253,6 +263,7 @@ func (g *TwoJobGuard) Next(l Look) (end time.Time, final bool, err error) {
 		if err := g.planned(j); err != nil {
 			return time.Time{}, false, err
 		}
+		g.noteSlack(j)
 		started = append(started, j)
 	}
 	sort.SliceStable(started, func(a, b int) bool { return started[a].StartTime.Before(*started[b].StartTime) })
@@ -297,14 +308,18 @@ func (g *TwoJobGuard) drainStartOf(j provider.Job) time.Time {
 	return j.StartTime.Add(g.TimeLimit - g.DrainWindow)
 }
 
+// MaxLeaseSlack is the most a started job's lease end may be past its start plus the planned time limit (planned): the
+// science agent's acceptance of issue #534, 13 Nov 2026. A configuration that took longer stops the run.
+const MaxLeaseSlack = 5 * time.Minute
+
 // planned checks that a started job has a lease the guard plans with. Its lease end may be later than its start plus
 // the time limit, never earlier: when a job's configuration (its prolog, its nodes made ready) ends a whole second or
 // more after its start, Slurm sets its end_time to that moment plus the time limit and leaves its start as it was
 // (Slurm 23.11.7, src/slurmctld/job_mgr.c: job_config_fini, _job_time_limit_incr). Row B's live run of 13 Nov 2026
 // saw one second of it. A later lease end only puts the job's drain start later than an end given before the job
 // started assumes, so that end stays at or before it. The guard takes a later one only when the listing gives the
-// job's own time limit and it is the planned one; with none listed, the lease end must be its start plus the time
-// limit exactly, since a longer time limit could not be told from a configuration.
+// job's own time limit and it is the planned one, and only up to MaxLeaseSlack later; with none listed, the lease end
+// must be its start plus the time limit exactly, since a longer time limit could not be told from a configuration.
 func (g *TwoJobGuard) planned(j provider.Job) error {
 	switch {
 	case j.HardEnd == nil:
@@ -315,8 +330,38 @@ func (g *TwoJobGuard) planned(j provider.Job) error {
 		return fmt.Errorf("a job of the run is listed with the time limit %s, not the %s the guard plans with", j.TimeLimit, g.TimeLimit)
 	case j.TimeLimit == 0 && !j.HardEnd.Equal(j.StartTime.Add(g.TimeLimit)):
 		return fmt.Errorf("a job of the run started with a lease end later than its start plus the time limit %s the guard plans with, and no time limit listed to say why", g.TimeLimit)
+	case j.HardEnd.After(j.StartTime.Add(g.TimeLimit + MaxLeaseSlack)):
+		return fmt.Errorf("a job of the run started with a lease end %s past its start plus the time limit %s, more than the %s the guard takes",
+			j.HardEnd.Sub(j.StartTime.Add(g.TimeLimit)), g.TimeLimit, MaxLeaseSlack)
 	}
 	return nil
+}
+
+// noteSlack keeps the most any look listed a job that planned accepted with its lease end past its start plus the time
+// limit. Slurm only ever moves a lease end later, so a look made while the job was still configuring gives the less.
+func (g *TwoJobGuard) noteSlack(j provider.Job) {
+	if g.slack == nil {
+		g.slack = map[string]time.Duration{}
+	}
+	s := j.HardEnd.Sub(j.StartTime.Add(g.TimeLimit))
+	if old, ok := g.slack[j.ID]; !ok || s > old {
+		g.slack[j.ID] = s
+	}
+}
+
+// LeaseSlacks is what the row posts of the slack (noteSlack): the most any look listed the predecessor's and the
+// successor's lease ends past their start plus the time limit, each nil while no look has seen that job run.
+func (g *TwoJobGuard) LeaseSlacks() (pred, succ *time.Duration) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	of := func(id string) *time.Duration {
+		s, ok := g.slack[id]
+		if id == "" || !ok {
+			return nil
+		}
+		return &s
+	}
+	return of(g.pred), of(g.succ)
 }
 
 // jobStarted reports whether a listed job has started: it has a start time,

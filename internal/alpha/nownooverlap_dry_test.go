@@ -41,7 +41,9 @@ func (d *drySteps) NowNoOverlap(_ context.Context, p Plan) (NowNoOverlapObs, err
 	d.extras(p, tag0)
 	d.tick(dryNowWarm)
 	o := NowNoOverlapObs{Deployment: d.deployment(), PredecessorTag: tag0, PredecessorReady: d.now(), NoOverlapSlotSeen: !d.fault("noslot"), NoReadyTarget: 3,
-		WarmPredecessor: d.warm(), OrderSeen: true, CreatedAfterLeft: true}
+		WarmPredecessor: d.warm(), OrderSeen: true, CreatedAfterLeft: true,
+		// The dry run has no guard; the slacks are those its looks would list, one configuring a second, one in the second it started.
+		PredecessorLeaseSlack: LeaseSlackSeconds(ptrDur(time.Second)), SuccessorLeaseSlack: LeaseSlackSeconds(ptrDur(0))}
 	if d.fault("not-ready") {
 		o.PredecessorReady = time.Time{}
 	}
