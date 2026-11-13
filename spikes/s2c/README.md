@@ -69,7 +69,8 @@ factor is the harness parameter `BOUND`, default 125. Before the merge, `envoy-b
 **vllm-router and the relay.** The workers serve on Unix sockets, and vllm-router takes only `http://` worker URLs.
 So the two vllm-router arms reach the workers through `s2crouter relay`, one loopback TCP listener per worker that
 copies bytes to the worker's socket and counts connections. That adds one loopback hop to `rr`'s and `vr-hash`'s
-time to first token; the Envoy arms have none. The relay control measures it: worker 0 alone takes a short load
+time to first token; the Envoy arms have none. The relay control, S2c's own addition (the science agent accepted it on
+#62 as an optional step), measures it: worker 0 alone takes a short load
 (16 sessions of 6 turns, 4 in flight) straight to its socket, then the same through the relay, each after a cache
 reset, and the summary gives the TTFT the relay added at p50, p95 and p99. The client (`cmd/s2cload`) is S2b's `s2bload` with one addition,
 `-unix`, which dials the Envoy arms' listener, the agent's `router.sock`.
@@ -102,6 +103,12 @@ Both regimes' budgets are explicit (`--num-gpu-blocks-override`), so they equal 
 run-to-run spread), H1 (the four arms), the probe on H's workers, A1 (the four arms), then the relay control. The job's time limit is
 75 minutes. A budget guard starts no arm once about 70 minutes are used, so A goes first if time runs short, as the
 science agent ruled, and the optional relay control before it. A skipped arm is listed in `failures.txt`, and the job exits 1 with its other results kept.
+
+**Signals.** Every signal the job sends goes through a pidfd (`s2crouter signal` and `stop`, `cmd/s2crouter/proc.go`),
+never by name, pattern or process group. A process is signalled only if it is the job's own: the root's parent must be
+`job.sh`, and every other member must descend from it. Its start time is read again after its pidfd is opened, so a PID
+that bash has reaped and the kernel has handed to another process is left alone. The probe's kill of the victim is the
+same.
 
 **The dead-worker probe** (`s2crouter probe`, on `envoy-bound`). It follows #510's step (c), and its three checks are
 the science agent's. Every worker's key is read from Envoy's own per-host counters, then:

@@ -129,22 +129,27 @@ cp "$STAGE/py/s2c_placement.py" "$RUN/py/" || { echo "job.sh: cannot stage the p
 FAILED=()   # one line per problem; any entry makes the final exit status 1
 fail() { FAILED+=("$1"); echo "$1" >> "$OUT/failures.txt"; log "FAIL: $1"; }
 
-# ---- processes: recorded by PID, stopped by PID (with descendants), never by name ----
+# ---- processes: recorded by PID; every signal goes through a pidfd, never by name, pattern or process group ----
+# `s2crouter signal|stop` (cmd/s2crouter/proc.go) signals a process only if it is this job's own child (its parent is
+# this shell), opens a pidfd for it and each descendant, and checks the start time again after the open, so a PID that
+# bash has reaped and the kernel has handed to another process is never signalled.
 declare -A PIDS=()
-descendants() { local c; echo "$1"; for c in $(ps -o pid= --ppid "$1" 2>/dev/null); do descendants "$c"; done; }
-alive() { kill -0 "$1" 2>/dev/null; }
-stop_tree() { # stop_tree <pid>: TERM the tree, KILL what is left after 15 s
-  local pid=$1 all p; [[ -n $pid ]] || return 0
-  all=$(descendants "$pid" | tr '\n' ' '); kill $all 2>/dev/null
-  for _ in $(seq 1 75); do alive "$pid" || break; sleep 0.2; done
-  for p in $all; do kill -9 "$p" 2>/dev/null; done; wait "$pid" 2>/dev/null; return 0
+descendants() { local c; echo "$1"; for c in $(ps -o pid= --ppid "$1" 2>/dev/null); do descendants "$c"; done; }   # for ps.txt only
+alive() { # alive <pid>: a running child of this job (/proc, no signal): not gone, not a zombie, and its parent is this shell
+  local s; s=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+  s=${s##*) }; set -- $s
+  [[ $1 != Z && $2 == "$$" ]]
+}
+stop_tree() { # stop_tree <pid>: TERM the tree, KILL what is left after 15 s, each through a verified pidfd
+  local pid=$1; [[ -n $pid ]] || return 0
+  "$ROUTER_BIN" stop -grace 15s "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 0
 }
 stop_named() { local n; for n in "$@"; do [[ -n ${PIDS[$n]:-} ]] && stop_tree "${PIDS[$n]}"; unset "PIDS[$n]"; done; }
 # stop_graceful <name>: TERM the process ALONE (the relay writes its counts, the Envoy launcher stops Envoy, only on TERM),
 # give it 20 s, then stop_tree. Returns 0 only when it exited 0 by itself; 124 when it had to be killed.
 stop_graceful() {
   local n=$1 pid=${PIDS[$1]:-} i rc=0; [[ -n $pid ]] || return 0
-  kill "$pid" 2>/dev/null
+  "$ROUTER_BIN" signal -sig TERM "$pid" 2>/dev/null
   for i in $(seq 1 100); do alive "$pid" || break; sleep 0.2; done
   if alive "$pid"; then rc=124; stop_tree "$pid"; else wait "$pid" 2>/dev/null; rc=$?; fi
   unset "PIDS[$n]"; return $rc

@@ -381,8 +381,102 @@ def probe(argv):
     sys.exit(1 if bad else 0)
 
 
+# ---------------------------------------------------------------- s2crouter signal | stop
+# As the real ones (cmd/s2crouter/proc.go): only a child of the caller's parent, its tree from /proc, a pidfd for each,
+# the start time checked again after the open; never a bare PID, a name or a group.
+def stat(pid):
+    with open("/proc/%d/stat" % pid) as f:
+        rest = f.read().rsplit(")", 1)[1].split()
+    return rest[0], int(rest[1]), int(rest[19])
+
+
+def members(root, tree):
+    _, ppid, start = stat(root)
+    if ppid != os.getppid():
+        die(1, "signal: process %d is not the job's own" % root)
+    listed = [(root, start)]
+    if tree:
+        kids = {}
+        for e in os.listdir("/proc"):
+            if e.isdigit():
+                try:
+                    _, pp, st = stat(int(e))
+                except (OSError, IndexError, ValueError):
+                    continue
+                kids.setdefault(pp, []).append((int(e), st))
+        i = 0
+        while i < len(listed):
+            listed += kids.get(listed[i][0], [])
+            i += 1
+    out = []
+    for pid, st in listed:
+        try:
+            fd = os.pidfd_open(pid)
+        except OSError:
+            continue
+        try:
+            same = stat(pid)[2] == st
+        except (OSError, IndexError, ValueError):
+            same = False
+        if same:
+            out.append((pid, st, fd))
+        else:
+            os.close(fd)
+    return out
+
+
+def send(ms, sig):
+    for _, _, fd in ms:
+        try:
+            signal.pidfd_send_signal(fd, sig)
+        except ProcessLookupError:
+            pass
+
+
+def running(m):
+    try:
+        state, _, st = stat(m[0])
+    except (OSError, IndexError, ValueError):
+        return False
+    return st == m[1] and state != "Z"
+
+
+def signal_main(argv):
+    names = {"TERM": signal.SIGTERM, "KILL": signal.SIGKILL, "INT": signal.SIGINT}
+    sig, tree, pids = signal.SIGTERM, False, []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "-sig":
+            sig = names[argv[i + 1]]; i += 2
+        elif argv[i] == "-tree":
+            tree = True; i += 1
+        else:
+            pids.append(int(argv[i])); i += 1
+    if len(pids) != 1:
+        die(2, "signal: one pid")
+    send(members(pids[0], tree), sig)
+
+
+def stop_main(argv):
+    grace, pids, i = 15.0, [], 0
+    while i < len(argv):
+        if argv[i] == "-grace":
+            grace = float(argv[i + 1].rstrip("s")); i += 2
+        else:
+            pids.append(int(argv[i])); i += 1
+    if len(pids) != 1:
+        die(2, "stop: one pid")
+    ms = members(pids[0], True)
+    send(ms, signal.SIGTERM)
+    end = time.time() + grace
+    while ms and running(ms[0]) and time.time() < end:
+        time.sleep(0.1)
+    send([m for m in ms if running(m)], signal.SIGKILL)
+
+
 def router(argv):
-    {"worker": worker, "envoy": envoy, "relay": relay, "probe": probe}.get(argv[0] if argv else "", lambda _: die(2, "usage: s2crouter worker|envoy|relay|probe"))(argv[1:])
+    {"worker": worker, "envoy": envoy, "relay": relay, "probe": probe, "signal": signal_main, "stop": stop_main}.get(
+        argv[0] if argv else "", lambda _: die(2, "usage: s2crouter worker|envoy|relay|probe|signal|stop"))(argv[1:])
 
 
 # ---------------------------------------------------------------- vllm-router

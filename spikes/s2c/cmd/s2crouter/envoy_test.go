@@ -253,6 +253,12 @@ func TestEnvoyArmsWithTheRealEnvoy(t *testing.T) {
 			if err := readJSON(filepath.Join(dir, "start.json"), &rec); err != nil {
 				t.Fatal(err)
 			}
+			// The record as the analysis reads it: diff is a list, empty for the product's own bytes, never null.
+			var raw map[string]json.RawMessage
+			_ = readJSON(filepath.Join(dir, "start.json"), &raw)
+			if d := strings.TrimSpace(string(raw["diff"])); !strings.HasPrefix(d, "[") {
+				t.Errorf("start.json diff is %s, want a JSON list", d)
+			}
 			if (rec.Mode == "product") != c.wantProduct {
 				t.Errorf("mode %q, want product=%v", rec.Mode, c.wantProduct)
 			}

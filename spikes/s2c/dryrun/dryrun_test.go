@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -197,8 +198,16 @@ func runJob(t *testing.T, p *fakeslurm.Platform, s *fakeslurm.Session, e dryEnv,
 	}
 }
 
-func jobLog(t *testing.T, j fakeslurm.Job) string {
-	b, _ := os.ReadFile(j.Output)
+// jobLog is the job's output: --output, or slurm-<id>.out in the submit directory (the login's HOME).
+func jobLog(t *testing.T, e dryEnv, j fakeslurm.Job) string {
+	p := j.Output
+	if p == "" {
+		p = fmt.Sprintf("slurm-%d.out", j.ID)
+	}
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(e.root, "home", p)
+	}
+	b, _ := os.ReadFile(p)
 	return string(b)
 }
 
@@ -226,7 +235,7 @@ func TestDryRunEveryArm(t *testing.T) {
 
 	j, results := runJob(t, p, s, e, "dry-all", nil, 20*time.Minute)
 	if j.State != "COMPLETED" {
-		t.Fatalf("the dry run ended %s:\n%s\nfailures: %s", j.State, tail(jobLog(t, j), 60), readMaybe(filepath.Join(results, "failures.txt")))
+		t.Fatalf("the dry run ended %s:\n%s\nfailures: %s", j.State, tail(jobLog(t, e, j), 60), readMaybe(filepath.Join(results, "failures.txt")))
 	}
 
 	t.Run("shape", func(t *testing.T) {
@@ -377,7 +386,7 @@ func TestDryRunFallbacksFail(t *testing.T) {
 		t.Run(c.fault, func(t *testing.T) {
 			j, results := runJob(t, p, s, e, "fault-"+c.fault, map[string]string{"S2C_FAULT": c.fault, "PLAN": c.plan}, 10*time.Minute)
 			if j.State != "FAILED" {
-				t.Fatalf("with S2C_FAULT=%s the job ended %s, want FAILED:\n%s", c.fault, j.State, tail(jobLog(t, j), 40))
+				t.Fatalf("with S2C_FAULT=%s the job ended %s, want FAILED:\n%s", c.fault, j.State, tail(jobLog(t, e, j), 40))
 			}
 			f := readMaybe(filepath.Join(results, "failures.txt"))
 			if !strings.Contains(f, c.arm) {
@@ -485,4 +494,45 @@ func checkSummary(t *testing.T, js string, arms []string) {
 			t.Errorf("no summary row for %s", a)
 		}
 	}
+}
+
+// TestDryRunProbeRepeat runs the probe alone S2C_DRY_PROBE_REPEAT times (it skips when that is unset) and
+// reports each run's failed probe requests with Envoy's own reply: the evidence for how often, and why, a
+// request racing the victim's death is answered 503.
+func TestDryRunProbeRepeat(t *testing.T) {
+	n, _ := strconv.Atoi(os.Getenv("S2C_DRY_PROBE_REPEAT"))
+	if n < 1 {
+		t.Skip("set S2C_DRY_PROBE_REPEAT=<runs> to run the probe alone repeatedly")
+	}
+	e := stage(t)
+	p := fakeslurm.New(realClock{}, fakeslurm.Config{
+		Partitions: []fakeslurm.Partition{{Name: "plgrid-gpu-a100", GPUOnly: true}},
+		NotListed:  fakeslurm.NotListedAthena, FirstJobID: 1234580,
+		Run: &fakeslurm.RunMode{Root: e.root, JobDir: filepath.Join(e.root, "j"), Env: map[string]string{"PATH": os.Getenv("PATH"), "HB_FAKE_APPTAINER_LOG": e.appLog}},
+	})
+	t.Cleanup(func() { _ = p.Close() })
+	s := p.Login(fakeslurm.Login{User: "exampleuser", Env: map[string]string{"HOME": filepath.Join(e.root, "home"), "SCRATCH": filepath.Join(e.root, "scratch")}})
+	failedRuns := 0
+	for i := 0; i < n; i++ {
+		tag := fmt.Sprintf("probe-%d", i)
+		_, results := runJob(t, p, s, e, tag, map[string]string{"PLAN": "H:1:probe"}, 10*time.Minute)
+		var pr struct {
+			Samples []struct {
+				AtS    float64 `json:"at_s"`
+				Status int     `json:"status"`
+				Err    string  `json:"err"`
+			} `json:"samples"`
+			Non200 int `json:"non_200"`
+		}
+		_ = json.Unmarshal([]byte(readMaybe(filepath.Join(results, "arms", "H1-probe", "probe.json"))), &pr)
+		if pr.Non200 > 0 {
+			failedRuns++
+		}
+		for _, x := range pr.Samples {
+			if x.Status != 200 || x.Err != "" {
+				t.Logf("run %d: %.4f s after the kill: %d %s", i, x.AtS, x.Status, x.Err)
+			}
+		}
+	}
+	t.Logf("%d of %d probe runs saw a failed request", failedRuns, n)
 }

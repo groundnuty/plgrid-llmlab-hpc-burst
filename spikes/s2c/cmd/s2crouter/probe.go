@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent"
@@ -374,6 +373,12 @@ func streamChat(c *http.Client, model, key, content string, tokens int, first ch
 	}
 	defer resp.Body.Close()
 	r.Status = resp.StatusCode
+	if r.Status != http.StatusOK {
+		// Envoy's own reply names why it answered so (its reset reason, for one), so keep its start.
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		r.Err, r.end = fmt.Sprintf("http %d: %q", r.Status, b), time.Now()
+		return r
+	}
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 64<<10), 1<<20)
 	for sc.Scan() {
@@ -480,46 +485,6 @@ func hostStats(admin string) (map[string]map[string]int64, error) {
 		return nil, errors.New("no workers cluster in /clusters")
 	}
 	return out, nil
-}
-
-// killTree sends SIGKILL to pid and every descendant, each through a pidfd (os.FindProcess opens
-// one on Linux), never to a process group.
-func killTree(pid int) error {
-	children := map[int][]int{}
-	ents, err := os.ReadDir("/proc")
-	if err != nil {
-		return err
-	}
-	for _, e := range ents {
-		p, err := strconv.Atoi(e.Name())
-		if err != nil {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join("/proc", e.Name(), "stat"))
-		if err != nil {
-			continue
-		}
-		f := strings.Fields(string(b[bytes.LastIndexByte(b, ')')+1:]))
-		if len(f) > 1 {
-			pp, _ := strconv.Atoi(f[1])
-			children[pp] = append(children[pp], p)
-		}
-	}
-	tree := []int{pid}
-	for i := 0; i < len(tree); i++ {
-		tree = append(tree, children[tree[i]]...)
-	}
-	var first error
-	for _, p := range tree {
-		proc, err := os.FindProcess(p)
-		if err == nil {
-			err = proc.Signal(syscall.SIGKILL)
-		}
-		if err != nil && !errors.Is(err, os.ErrProcessDone) && first == nil && p == pid {
-			first = err
-		}
-	}
-	return first
 }
 
 // placedBetween counts the placement log's lines of run label arm that started at or after from and

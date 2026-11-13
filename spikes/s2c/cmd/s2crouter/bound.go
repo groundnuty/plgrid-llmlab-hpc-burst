@@ -126,7 +126,7 @@ func diffPaths(a, b []byte) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out []string
+	out := []string{} // never nil: start.json says "diff": [] when nothing differs
 	walkDiff("", ma, mb, &out)
 	sort.Strings(out)
 	return out, nil

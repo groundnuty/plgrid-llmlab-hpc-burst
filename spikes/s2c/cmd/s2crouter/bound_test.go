@@ -126,7 +126,7 @@ func TestDiffPaths(t *testing.T) {
 		a, b string
 		want []string
 	}{
-		{`{"x":1,"y":{"z":[1,2]}}`, `{"x":1,"y":{"z":[1,2]}}`, nil},
+		{`{"x":1,"y":{"z":[1,2]}}`, `{"x":1,"y":{"z":[1,2]}}`, []string{}},
 		{`{"x":1}`, `{"x":2}`, []string{"x"}},
 		{`{"x":1}`, `{"x":1,"w":0}`, []string{"w"}},
 		{`{"y":{"z":[1,2]}}`, `{"y":{"z":[1,3]}}`, []string{"y.z[1]"}},
@@ -137,7 +137,7 @@ func TestDiffPaths(t *testing.T) {
 	}
 	for _, c := range cases {
 		got, err := diffPaths([]byte(c.a), []byte(c.b))
-		if err != nil || !slices.Equal(got, c.want) {
+		if err != nil || !slices.Equal(got, c.want) || got == nil {
 			t.Errorf("diff(%s, %s) = %q, %v; want %q", c.a, c.b, got, err, c.want)
 		}
 	}
