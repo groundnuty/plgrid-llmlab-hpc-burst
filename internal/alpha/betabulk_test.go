@@ -349,3 +349,35 @@ func TestTheBulkRowsPortsAreDistinctAndInsideTheAlphaBlock(t *testing.T) {
 		t.Errorf("port 29713 appears %d times in the base block with the bulk path, want 2 (the client listener and the second frps): the reason the row moved", count)
 	}
 }
+
+func TestAStreamBesideATransferIsDoneWhenCompleteAndWholeAndLongWhenItOutlastsIt(t *testing.T) {
+	t0 := time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC)
+	end := t0.Add(3 * time.Second)
+	whole := Stream{Complete: true, Tokens: BulkStreamTokens}
+	for _, c := range []struct {
+		name       string
+		s          Stream
+		lastTick   time.Time
+		noTicks    bool
+		done, long bool
+	}{
+		{"whole and outlasting the transfer", whole, end.Add(time.Nanosecond), false, true, true},
+		{"whole and ending at the transfer's last byte", whole, end, false, true, false},
+		{"whole and ending before it", whole, end.Add(-time.Second), false, true, false},
+		{"whole with no ticks", whole, time.Time{}, true, true, false},
+		{"one token short", Stream{Complete: true, Tokens: BulkStreamTokens - 1}, end.Add(time.Second), false, false, false},
+		{"one token over", Stream{Complete: true, Tokens: BulkStreamTokens + 1}, end.Add(time.Second), false, false, false},
+		{"cut", Stream{Complete: true, CutBy: "tunnel", Tokens: BulkStreamTokens}, end.Add(time.Second), false, false, false},
+		{"incomplete", Stream{Tokens: BulkStreamTokens}, end.Add(time.Second), false, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var ticks []time.Time
+			if !c.noTicks {
+				ticks = []time.Time{t0, c.lastTick}
+			}
+			if done, long := StreamBeside(c.s, ticks, end); done != c.done || long != c.long {
+				t.Errorf("StreamBeside = done %t, long %t; want %t, %t", done, long, c.done, c.long)
+			}
+		})
+	}
+}

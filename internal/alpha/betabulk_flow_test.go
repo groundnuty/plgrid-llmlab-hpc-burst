@@ -101,12 +101,12 @@ func (r *liveRun) bulkPhase(p Plan, what, key string, streamed bool) BulkPhase {
 	var gaps []time.Duration
 	for _, s := range ss {
 		out := r.wait(s)
-		obs := r.observe(out)
-		if obs.Complete && obs.CutBy == "" && obs.Tokens == BulkStreamTokens {
+		done, long := StreamBeside(r.observe(out), out.Ticks, end)
+		if done {
 			ph.StreamsDone++
-			if len(out.Ticks) > 0 && out.Ticks[len(out.Ticks)-1].After(end) {
-				ph.StreamsLong++
-			}
+		}
+		if long {
+			ph.StreamsLong++
 		}
 		gaps = append(gaps, GapsOverlapping(out.Ticks, start, end)...)
 	}

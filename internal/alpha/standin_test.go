@@ -132,9 +132,6 @@ func standInRow(t *testing.T, name string) Row {
 		r.Timing, r.Lease = standInTunnel, 12*time.Minute
 	case name == "alpha-athena-now-serve", name == BetaRouterName:
 		r.Timing, r.Lease = standInNow, 14*time.Minute
-	case name == BetaBulkName:
-		// The bulk row's streams last 30 s and its transfers seconds: the live 5-minute deadline, and a lease that holds both phases before the drain start.
-		r.Timing, r.Lease = standInKeeper, 20*time.Minute
 	case name == BetaKeeperName:
 		// The keeper row holds a stream across a controller restart, whose outcome takes about 35 s: a request deadline of the live 5 minutes, and a
 		// lease that holds the stream and the restart before the drain start.
@@ -1139,13 +1136,17 @@ func standInDouble(t *testing.T) DoubleObs {
 	return DoubleObs{Name: "the engine double (internal/agent/enginedouble, run as the stand-in's own test binary)", Digest: hex.EncodeToString(h.Sum(nil))}
 }
 
-// TestStandInBetaBulk is the bulk row's live steps over the stand-in, through Run: the real stack in host-dialed mode with the bulk path, the engine
-// double behind a fake Slurm reached through real ssh and S17's shaped link in fair mode on the relays' ssh, eight streams beside a 64 MiB reply, once
-// as the control (a streamed reply down the token transport) and once down the bulk path. The link must have carried both replies, and the verdict
-// must pass. This host's link is S17's shaped one, and the engine the stand-in's double, so the figures are the stand-in's, not Athena's.
-//
-//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
-func TestStandInBetaBulk(t *testing.T) {
+// bulkStandIn is one stand-in run of the bulk row through Run, with tweak applied to the world before it starts.
+type bulkStandIn struct {
+	row      Row
+	w        world
+	failures []string
+	err      error
+	post     []byte
+}
+
+func runBulkStandIn(t *testing.T, tweak func(w *world)) bulkStandIn {
+	t.Helper()
 	if os.Getenv(envStandIn) != "1" {
 		t.Skipf("the stand-in proof of the live steps runs only with %s=1 (internal/alpha, standin_test.go)", envStandIn)
 	}
@@ -1161,6 +1162,9 @@ func TestStandInBetaBulk(t *testing.T) {
 		t.Fatal(err)
 	}
 	w, _ := standInWorldShaped(t, row, nil)
+	if tweak != nil {
+		tweak(&w)
+	}
 	lr := newLiveRun(t, cfg, inMode(w, standInHostDialed))
 	lr.stop = &stackStop{}
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.PendingMax+25*time.Minute)
@@ -1171,16 +1175,44 @@ func TestStandInBetaBulk(t *testing.T) {
 	}
 	post, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
 	t.Logf("%s's text to post:\n%s", row.Name, post)
-	if err != nil {
-		t.Fatalf("%s did not finish: %v", row.Name, err)
+	return bulkStandIn{row: row, w: w, failures: failures, err: err, post: post}
+}
+
+// TestStandInBetaBulk is the bulk row's live steps over the stand-in, through Run: the real stack in host-dialed mode with the bulk path, the engine
+// double behind a fake Slurm reached through real ssh and S17's shaped link in fair mode on the relays' ssh, eight streams beside a 64 MiB reply, once
+// as the control (a streamed reply down the token transport) and once down the bulk path. The link must have carried both replies, and the verdict
+// must pass. This host's link is S17's shaped one, and the engine the stand-in's double, so the figures are the stand-in's, not Athena's.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInBetaBulk(t *testing.T) {
+	s := runBulkStandIn(t, nil)
+	if s.err != nil {
+		t.Fatalf("%s did not finish: %v", s.row.Name, s.err)
 	}
-	if len(failures) > 0 {
-		t.Fatalf("%s failed its verdict over the stand-in: %s", row.Name, Summary(failures))
+	if len(s.failures) > 0 {
+		t.Fatalf("%s failed its verdict over the stand-in: %s", s.row.Name, Summary(s.failures))
 	}
-	if carried := w.link.Up.Load() + w.link.Down.Load(); carried < 2*BulkReplyBytes {
+	if carried := s.w.link.Up.Load() + s.w.link.Down.Load(); carried < 2*BulkReplyBytes {
 		t.Errorf("the shaped link carried %d bytes, under the two replies' %d: a reply did not take the link", carried, 2*BulkReplyBytes)
 	}
-	if !strings.Contains(string(post), "THE ENGINE WAS A DOUBLE, not vLLM") || !strings.Contains(string(post), w.double.Digest) {
-		t.Errorf("the text to post does not name the double and its digest:\n%s", post)
+	if !strings.Contains(string(s.post), "THE ENGINE WAS A DOUBLE, not vLLM") || !strings.Contains(string(s.post), s.w.double.Digest) {
+		t.Errorf("the text to post does not name the double and its digest:\n%s", s.post)
+	}
+}
+
+// TestStandInBetaBulkWithoutTheBulkPathFails: the same run on a stack started without --bulk-path fails its verdict, naming that no Instance's bulk
+// transport was registered at the front and that the front's bulk counter could not be read. It is the row's check that the bulk path engaged, run
+// against a stack where it did not, and what a front without the path would say.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInBetaBulkWithoutTheBulkPathFails(t *testing.T) {
+	s := runBulkStandIn(t, func(w *world) { w.hostOpts = nil })
+	if s.err != nil {
+		t.Fatalf("the run ended with %v; want a failed verdict", s.err)
+	}
+	for _, want := range []string{"no Instance's bulk transport was registered at the front", "the front's bulk counter could not be read"} {
+		if !slices.Contains(s.failures, want) {
+			t.Errorf("failed checks %q do not hold %q", s.failures, want)
+		}
 	}
 }

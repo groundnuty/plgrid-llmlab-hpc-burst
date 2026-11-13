@@ -126,6 +126,15 @@ func Percentile(d []time.Duration, p float64) time.Duration {
 	return s[int(math.Ceil(p*float64(len(s))))-1]
 }
 
+// StreamBeside judges one token stream that ran beside a transfer: done says it ended complete, not cut, with exactly the BulkStreamTokens it asked
+// for, and long that it was still delivering tokens after the transfer's last byte (end), since a stream that ended before the transfer did measured
+// nothing of it. long needs done: a stream that was cut is no longer one.
+func StreamBeside(s Stream, ticks []time.Time, end time.Time) (done, long bool) {
+	done = s.Complete && s.CutBy == "" && s.Tokens == BulkStreamTokens
+	long = done && len(ticks) > 0 && ticks[len(ticks)-1].After(end)
+	return done, long
+}
+
 // minGaps is the fewest gaps a transfer of took must have overlapped for the phase to have measured it: half of what BulkStreams streams at
 // BulkTokenDelay would give across the window.
 func minGaps(took time.Duration) int { return BulkStreams * int(took/BulkTokenDelay) / 2 }
