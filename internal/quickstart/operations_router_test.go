@@ -21,6 +21,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
 
 const routerHeading = "### The router and several workers (beta)\n"
@@ -76,13 +78,16 @@ var routerFields = []struct{ path, kind string }{
 	{"status.restarts", "instance"},
 }
 
-// routerQuotes are the refusal messages the section quotes, each with the source file that raises it.
-var routerQuotes = []struct{ quote, file string }{
-	{"needs the lifecycle controller's --instance-router envoy", "internal/lifecycle/reconcile.go"},
-	{"(workers + 2) x attempts", "internal/lifecycle/topology.go"},
-	{"above the %d per node of partition", "internal/lifecycle/topology.go"},
-	{"Envoy cannot run bare here", "internal/agent/envoyglibc.go"},
-	{"router did not start", "internal/agent/router.go"},
+// routerQuotes are the refusal messages the section quotes. doc is how the section writes one, with a placeholder where the
+// message has a number or a name; code is the fragment of the source file that raises it, the message's format as written there.
+// A refusal that names a limit by its field has the field's constant spliced into both, so the word the guide uses is the constant's.
+var routerQuotes = []struct{ doc, code, file string }{
+	{"needs the lifecycle controller's --instance-router envoy", "needs the lifecycle controller's --instance-router envoy", "internal/lifecycle/reconcile.go"},
+	{"(workers + 2) x attempts", "(workers + 2) x attempts", "internal/lifecycle/topology.go"},
+	{"above the <m> per node of partition", "above the %d per node of partition", "internal/lifecycle/topology.go"},
+	{fmt.Sprintf("above the %s <q> of QOS <name> on Provider <provider>", v1alpha1.LimitMaxGPUsPerUser), "above the %s %d of QOS %s on Provider %s", "internal/lifecycle/topology.go"},
+	{"Envoy cannot run bare here", "Envoy cannot run bare here", "internal/agent/envoyglibc.go"},
+	{"router did not start", "router did not start", "internal/agent/router.go"},
 }
 
 // routerProblems sets a copy of the guide against the CRDs, the code and the quickstart's router block,
@@ -161,11 +166,11 @@ func routerProblems(t *testing.T, doc string, kinds crdKinds, quickstartUp []str
 	}
 	// The quoted refusals are the code's.
 	for _, q := range routerQuotes {
-		if !strings.Contains(sec, q.quote) && !strings.Contains(sec, strings.ReplaceAll(q.quote, "%d", "<m>")) {
-			out = append(out, fmt.Sprintf("the section does not quote %q", q.quote))
+		if !strings.Contains(sec, q.doc) {
+			out = append(out, fmt.Sprintf("the section does not quote %q", q.doc))
 		}
-		if !strings.Contains(readRepoFile(t, q.file), q.quote) {
-			out = append(out, fmt.Sprintf("%s does not hold %q, which the section quotes", q.file, q.quote))
+		if !strings.Contains(readRepoFile(t, q.file), q.code) {
+			out = append(out, fmt.Sprintf("%s does not hold %q, which the section's %q stands for", q.file, q.code, q.doc))
 		}
 	}
 	return append(out, routerBlockProblems(sec, quickstartUp)...)
@@ -263,6 +268,7 @@ func TestOperationsRouterChecksFailOnAMutant(t *testing.T) {
 		{"a wrong bound", "from 1 to 8", "from 1 to 9", "from 1 to 8"},
 		{"a wrong restart bound", "which holds 32 entries", "which holds 16 entries", "which holds 32 entries"},
 		{"a refusal no code raises", "Envoy cannot run bare here", "Envoy cannot run here", "Envoy cannot run bare here"},
+		{"a QOS refusal worded as no code words it", "of QOS <name> on Provider <provider>", "of the QOS <name> on Provider <provider>", "above the maxGpusPerUser <q> of QOS <name> on Provider <provider>"},
 		{"a turn-off that keeps the flag", "    --front-mode host-dialed\n  ```\n\n  - New Instances", "    --front-mode host-dialed --instance-router envoy\n  ```\n\n  - New Instances", "still has --instance-router"},
 		{"a turn-on that is not the quickstart's", "--front-mode host-dialed --instance-router envoy", "--front-mode ssh --instance-router envoy", "not the quickstart's"},
 	} {
