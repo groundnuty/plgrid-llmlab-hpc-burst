@@ -149,11 +149,11 @@ func TestAHeavySessionPastTheBoundSpillsToTheIdleSibling(t *testing.T) {
 			firstSpill = i + 1
 		}
 	}
-	if firstSpill < 5 {
-		t.Errorf("the first spill came at heavy session %d; want none before the 5th, under the bound", firstSpill)
-	}
-	if firstSpill == 0 {
+	switch {
+	case firstSpill == 0:
 		t.Errorf("none of %d heavy sessions hashed to worker-1 spilled to the idle worker-0: no bound", len(s))
+	case firstSpill < 5:
+		t.Errorf("the first spill came at heavy session %d; want none before the 5th, under the bound", firstSpill)
 	}
 	wg.Wait()
 	for i, c := range codes {
