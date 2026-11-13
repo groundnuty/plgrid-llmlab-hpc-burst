@@ -252,7 +252,7 @@ func TestHostDialedPostsNameEveryCheckAndNoPath(t *testing.T) {
 	o := goodObs()
 	posts := hostDialedPosts(o, judgeHostDialed(o), "plgrid-now (the partition's own; none requested)", 1, 1, "1Gi")
 	for _, want := range []string{
-		"reach-host-dialed-athena: PASS (posts to #305 and #145)\n",
+		"reach-host-dialed-athena: PASS (posts to #145; origin issue #305)\n",
 		"- the control session: ok: ", "- the serving session: ok: ", "- srun -u: ok: ", "- the rendezvous: ok: ", "- the preamble: ok: ",
 		"- the epoch: ok: both relays carried epoch 7; a relay pair of epoch 6, each with a higher sequence than the kept relay's, was refused as superseded on both channels",
 		"- the control session: ok: up: the agent registered over the control relay (1 registration(s), the recorded job); the stop was served to its poll over the same session, it sent its last report, and the job ended COMPLETED",

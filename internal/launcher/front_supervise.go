@@ -125,5 +125,9 @@ func (s *State) frontEntry(l layout) (*supervised, error) {
 	if s.Front.Mode != "" {
 		args = append(args, "--mode", s.Front.Mode)
 	}
+	if s.BulkPath {
+		// The bulk path (HBEP-6): with no bulk path, the front's command line is as before.
+		args = append(args, "--bulk-path")
+	}
 	return &supervised{Name: frontEntryName, Path: s.FrontRun.Binary, Args: args, Health: health, TermGrace: FrontTermGrace, WaitReady: true}, nil
 }
