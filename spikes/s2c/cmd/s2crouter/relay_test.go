@@ -58,7 +58,7 @@ func TestRelayCopiesBothWaysAndCounts(t *testing.T) {
 }
 
 func TestRelayMapRefusesNonLoopback(t *testing.T) {
-	for _, bad := range []string{"0.0.0.0:1=/s", ":1=/s", "127.0.0.1:1", "10.0.0.1:1=/s"} {
+	for _, bad := range []string{"[::]:1=/s", ":1=/s", "127.0.0.1:1", "example.org:1=/s"} {
 		if _, err := parseRelayMap(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}

@@ -13,7 +13,7 @@ import (
 func spec(index int, cuda string) workerSpec {
 	return workerSpec{
 		Index: index, Workers: 4, Apptainer: "apptainer", Image: "/st/images/abc.sandbox", Checkpoint: "/st/checkpoints/m/r",
-		RunDir: "/tmp/r", CacheDir: "/tmp/c", Served: "Qwen/Qwen2.5-1.5B-Instruct", MaxNumSeqs: 256,
+		RunDir: "/scratch/r", CacheDir: "/scratch/c", Served: "Qwen/Qwen2.5-1.5B-Instruct", MaxNumSeqs: 256,
 		PlacementLog: "/hpcburst/run/placement-B-w2.tsv", Flags: []string{"--max-model-len=16384", "--enable-prefix-caching"},
 		BaseEnv: []string{"PATH=/usr/bin", "CUDA_VISIBLE_DEVICES=" + cuda, "APPTAINERENV_STRAY=1"},
 	}
@@ -25,7 +25,7 @@ func TestWorkerInvocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{"exec", "--nv", "--cleanenv", "--no-home",
-		"--bind", "/st/checkpoints/m/r:/hpcburst/model:ro", "--bind", "/tmp/r:/hpcburst/run", "--bind", "/tmp/c:/hpcburst/cache",
+		"--bind", "/st/checkpoints/m/r:/hpcburst/model:ro", "--bind", "/scratch/r:/hpcburst/run", "--bind", "/scratch/c:/hpcburst/cache",
 		"/st/images/abc.sandbox",
 		"vllm", "serve", "/hpcburst/model", "--uds", "/hpcburst/run/worker-2.sock", "--served-model-name", "Qwen/Qwen2.5-1.5B-Instruct",
 		"--max-model-len=16384", "--enable-prefix-caching", "--max-num-seqs=256"}
