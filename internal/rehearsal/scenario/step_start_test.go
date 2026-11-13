@@ -34,7 +34,14 @@ import (
 func (r *rig) stepStart() *v1alpha1.Instance {
 	r.t.Helper()
 	r.providerReady()
-	stack.Create(r.t, r.c, stack.ServedDeployment(rehearsalTiming, r.engineEnv...))
+	md := stack.ServedDeployment(rehearsalTiming, r.engineEnv...)
+	if r.mdWorkers > 0 {
+		md.Spec.WorkersPerInstance = &r.mdWorkers
+	}
+	if r.mdLease != "" {
+		md.Spec.LeaseLimit = stack.Dur(r.mdLease)
+	}
+	stack.Create(r.t, r.c, md)
 	var alloc v1alpha1.Allocation
 	stack.WaitFor(r.t, stack.WaitDeadline, "an Allocation with a job ID", func() bool {
 		for _, a := range r.allocations() {
@@ -245,6 +252,10 @@ func (r *rig) checkStartRecords(in *v1alpha1.Instance) {
 	}
 	name := now.Status.VerificationRecord
 	uid, gen, err := v1alpha1.ParseVerificationRecordName(name)
+	if err != nil && v1alpha1.LaunchWorkers(now.Spec.Launch) > 1 {
+		// Several workers: the status names the latest worker's record (#439).
+		uid, _, gen, err = v1alpha1.ParseWorkerVerificationRecordName(name)
+	}
 	if err != nil || uid != in.UID || now.Status.Verdict != v1alpha1.VerdictPass {
 		r.t.Errorf("step (a): Instance %s names verification record %q (%v) with verdict %q; want one of its own that passed", in.Name, name, err, now.Status.Verdict)
 	}
