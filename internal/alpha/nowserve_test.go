@@ -560,3 +560,57 @@ func TestRowAReadsTheLadderOffTheWatch(t *testing.T) {
 		}
 	}
 }
+
+// The wait for the worker restart (live_flows_test.go, workerRestart) ends well only on the same Instance ready and serving again, and a
+// climb of the restart ladder to its last rung ends the Instance, so the wait must fail on an ended or gone Instance and name the climb
+// there: the verdict that names it (ladderChecks) never runs after a step that failed (the delta review of PR 509). The failure's words
+// are written out here.
+func TestAWorkerRestartThatEndsTheInstanceFailsNamingTheClimb(t *testing.T) {
+	inst := func(phase v1alpha1.InstancePhase, reason string, parts ...string) v1alpha1.Instance {
+		in := v1alpha1.Instance{}
+		in.Name = "inst-a"
+		in.Status.Phase, in.Status.EndReason = phase, reason
+		for _, p := range parts {
+			in.Status.Restarts = append(in.Status.Restarts, v1alpha1.InstanceRestart{Part: p})
+		}
+		return in
+	}
+	const loop = "the worker restart climbed to a new Allocation (rung 3 of 3: 2 restarts at the worker rung and 2 at the whole-Instance rung, then the Instance failed with RestartLoop)"
+	climbed := []string{"worker-0", "worker-0", v1alpha1.PartInstance, v1alpha1.PartInstance}
+	for _, c := range []struct {
+		name string
+		in   v1alpha1.Instance
+		gone bool
+		want string
+	}{
+		{"ready again after the restart", inst(v1alpha1.InstanceReady, "", "worker-0"), false, ""},
+		{"verifying while the restart runs", inst(v1alpha1.InstanceVerifying, "", "worker-0"), false, ""},
+		{"gone, no climb", inst(v1alpha1.InstanceReady, "", "worker-0"), true, "worker fault: Instance inst-a is gone"},
+		{"gone, its last version ended RestartLoop", inst(v1alpha1.InstanceEnded, v1alpha1.ReasonRestartLoop, climbed...), true,
+			"worker fault: " + loop + " (Instance inst-a is gone)"},
+		{"ended RestartLoop, still listed", inst(v1alpha1.InstanceEnded, v1alpha1.ReasonRestartLoop, climbed...), false,
+			"worker fault: " + loop + ` (Instance inst-a ended (reason "RestartLoop"))`},
+		{"ended by a drain", inst(v1alpha1.InstanceEnded, v1alpha1.ReasonDrained, "worker-0"), false, `worker fault: Instance inst-a ended (reason "Drained")`},
+		{"gone after the whole-Instance rung", inst(v1alpha1.InstanceReady, "", "worker-0", "worker-0", v1alpha1.PartInstance), true,
+			"worker fault: the worker restart climbed to the whole-Instance rung (rung 2 of 3: 2 restarts at the worker rung and 1 at the whole-Instance rung) (Instance inst-a is gone)"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := workerRestartFailure(c.in, c.gone); got != c.want {
+				t.Errorf("workerRestartFailure =\n%q\nwant\n%q", got, c.want)
+			}
+		})
+	}
+}
+
+// The wait consults it at both places it can fail: a pin on the source, since the step runs only against a stack.
+func TestTheWorkerRestartWaitConsultsTheLadderWhereItFails(t *testing.T) {
+	src, err := os.ReadFile("live_flows_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"t.Fatalf(\"%s\", workerRestartFailure(last, true))", "if msg := workerRestartFailure(now, false); msg != \"\" {"} {
+		if n := strings.Count(string(src), want); n != 1 {
+			t.Errorf("live_flows_test.go has %q %d times, want once: the wait for the worker restart must name a climb of the ladder where it fails", want, n)
+		}
+	}
+}

@@ -111,7 +111,7 @@ func (r *liveRun) tokensFor(d time.Duration, rate float64) (int, error) {
 // whyGone logs what the API recorded of an Instance that went away: its last
 // version's conditions, the events about it and about the deployment, and the
 // times that decide a drain, each from the kill.
-func (r *liveRun) whyGone(ctx context.Context, in v1alpha1.Instance, killed time.Time) {
+func (r *liveRun) whyGone(ctx context.Context, in v1alpha1.Instance, killed time.Time) v1alpha1.Instance {
 	t := r.t
 	if err := r.syncWatch(ctx, stack.KindInstances|stack.KindDeployments, "what became of the Instance"); err != nil {
 		t.Errorf("%v", err)
@@ -138,6 +138,28 @@ func (r *liveRun) whyGone(ctx context.Context, in v1alpha1.Instance, killed time
 		ds, _ := v1alpha1.DrainStart(x.Status.LeaseEnd.Time, r.w.profile, &v1alpha1.Routing{MaxRequestDuration: dur(r.tm.MaxRequestDuration)})
 		t.Logf("gone: its lease end is kill%+s, its drain start kill%+s", x.Status.LeaseEnd.Sub(killed).Round(time.Second), ds.Sub(killed).Round(time.Second))
 	}
+	return *x
+}
+
+// workerRestartFailure is what the wait for a worker restart fails with when the Instance it watches has ended or is gone, and "" when it
+// has not failed. When the restart ladder climbed (HBEP-7, Health and restarts), the failure names the rung in the words of the row's
+// verdict (ladderChecks): a climb to RestartLoop ends the Instance, so without this the wait would fail on "gone", or time out, before the
+// verdict could read the ladder, and the science agent's rule that a climb is named would not hold live (issue #503; the delta review of
+// PR 509). last is the Instance's last version seen, gone says the API no longer has it.
+func workerRestartFailure(last v1alpha1.Instance, gone bool) string {
+	var what string
+	switch {
+	case gone:
+		what = fmt.Sprintf("Instance %s is gone", last.Name)
+	case last.Status.Phase == v1alpha1.InstanceEnded:
+		what = fmt.Sprintf("Instance %s ended (reason %q)", last.Name, last.Status.EndReason)
+	default:
+		return ""
+	}
+	if climb := ladderChecks(LadderOf([]v1alpha1.Instance{last})); len(climb) > 0 {
+		return fmt.Sprintf("worker fault: %s (%s)", climb[0], what)
+	}
+	return "worker fault: " + what
 }
 
 // keyNow is a conversation key the front's ring maps to the Instance now, as
@@ -217,8 +239,13 @@ func (r *liveRun) workerRestart(ctx context.Context, p Plan, in v1alpha1.Instanc
 	r.waitFor(r.tm.StartTimeout+5*time.Minute, "the worker restart and the Instance serving the key again", func() bool {
 		now, ok := r.lookup(in)
 		if !ok {
+			last := r.whyGone(ctx, in, times.Killed)
+			t.Fatalf("%s", workerRestartFailure(last, true))
+		}
+		if msg := workerRestartFailure(now, false); msg != "" {
+			// An ended Instance does not come back: fail now, naming the climb if the ladder made it, and not at the wait's end.
 			r.whyGone(ctx, in, times.Killed)
-			t.Fatalf("worker fault: Instance %s is gone", in.Name)
+			t.Fatalf("%s", msg)
 		}
 		if len(now.Status.Restarts) <= before || now.Status.Phase != v1alpha1.InstanceReady {
 			return false
