@@ -29,6 +29,23 @@ func hostDialedDryRun(t *testing.T, row, fault string) (*stopRecorder, string, s
 	return rec, string(posts), out
 }
 
+// The first line of the text a host-dialed row posts, written out for each row (`@hpc-burst-science-agent`, 12 Nov 2026, on #145):
+// the text goes to #145 and names the row's origin issue, #305, which is closed and is named and not posted to; the Helios
+// row's goes under #145's section for beta. A row with no entry here fails, since an empty line would be found in any text.
+var hostDialedPassLine = map[string]string{
+	"reach-host-dialed-athena": "reach-host-dialed-athena: PASS (posts to #145; origin issue #305)",
+	"reach-host-dialed-helios": `reach-host-dialed-helios: PASS (posts to #145 under "Beta: when GH200 returns"; origin issue #305)`,
+}
+
+func hostDialedLine(t *testing.T, row string) string {
+	t.Helper()
+	l, ok := hostDialedPassLine[row]
+	if !ok {
+		t.Fatalf("no first line is written out for the row %s", row)
+	}
+	return l
+}
+
 func TestAReachHostDialedRunPassesOverTheFake(t *testing.T) {
 	for _, r := range alpha.HostDialedRows() {
 		t.Run(r.Name, func(t *testing.T) {
@@ -38,7 +55,7 @@ func TestAReachHostDialedRunPassesOverTheFake(t *testing.T) {
 				t.Fatalf("the healthy run did not pass: failed %q, skipped %q, errors %q\n%s", rec.failed, rec.skipped, rec.errors, posts)
 			}
 			for _, want := range []string{
-				r.Name + ": PASS (posts to #305 and #145)",
+				hostDialedLine(t, r.Name),
 				"- " + checkControl + ": ok: up",
 				"- " + checkServing + ": ok: up",
 				"- " + checkSrunU + ": ok:",
@@ -170,7 +187,7 @@ func TestEachHostDialedFaultFailsTheCheckItStandsFor(t *testing.T) {
 			if !strings.HasPrefix(rec.failed, row+" failed: ") || !strings.Contains(rec.failed, check) {
 				t.Fatalf("the run ended %q, want a failure naming %q:\n%s", rec.failed, check, posts)
 			}
-			for _, want := range append([]string{row + ": FAIL (posts to #305 and #145)", "- " + check + ": FAIL: "}, hostDialedFaultPosts[fault]...) {
+			for _, want := range append([]string{"reach-host-dialed-athena: FAIL (posts to #145; origin issue #305)", "- " + check + ": FAIL: "}, hostDialedFaultPosts[fault]...) {
 				if !strings.Contains(posts, want) {
 					t.Errorf("the text to post lacks %q:\n%s", want, posts)
 				}

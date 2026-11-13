@@ -14,3 +14,5 @@ func readProcTable() (map[int]procInfo, error) { return nil, errors.New("this ne
 func markedPIDs(string) []int { return nil }
 
 func killMarked(string) {}
+
+func hangDump(int) string { return "no /proc on this platform" }

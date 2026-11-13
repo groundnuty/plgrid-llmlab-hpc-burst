@@ -2,6 +2,7 @@ package livechecks
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -235,7 +236,9 @@ func TestReaperForwardsASignalToTheScript(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	_ = cmd.Wait()
+	if _, timedOut := waitBounded(cmd, stopBound); timedOut {
+		t.Fatalf("the reaper over the trapping script did not exit within %s of the TERM it forwarded; the process tree, as it is now:\n%s", stopBound, hangDump(cmd.Process.Pid))
+	}
 	if got := cmd.ProcessState.ExitCode(); got != 5 {
 		t.Errorf("exit %d, want 5: the script's trap did not run", got)
 	}
@@ -403,4 +406,150 @@ sleep 600`
 		// The subtest ends here, with the run going.
 	})
 	waitUntil(t, "every process of the ended run to go", func() bool { return len(markedPIDs(mark)) == 0 })
+}
+
+// The bounded wait of a stopped script (issue #494) gives up on one that does not stop, and its dump names what the tree is doing: a
+// script that ignores TERM (here a bash named live-checks.sh, blocked reading a pipe the test holds open) shows TERM in its ignored
+// signals and its parent, and the wait returns within its bound instead of waiting for ever. The expectations are the signal's number (TERM is 15,
+// so bit 14 of the masks) and the bound given.
+func TestAStoppedScriptThatDoesNotStopIsGivenUpOnAndItsDumpNamesIt(t *testing.T) {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pw.Close()
+	defer pr.Close()
+	cmd := exec.Command("bash", "-c", `trap '' TERM; read x`, "live-checks.sh")
+	cmd.Stdin = pr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	// The script ignores TERM once its trap is in: wait on that state, not on a time.
+	var dump string
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		dump = hangDump(cmd.Process.Pid)
+		if ignoresTerm(dump) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the script never showed TERM among its ignored signals:\n%s", dump)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// The process's state is not asserted: a read of /proc can catch it running for the instant it takes to enter its read.
+	if want := fmt.Sprintf("pid %d ppid %d state ", cmd.Process.Pid, os.Getpid()); !strings.Contains(dump, want) || !strings.Contains(dump, "live-checks.sh") {
+		t.Errorf("the dump does not show the script with its parent:\n%s", dump)
+	}
+	// And the wait is bounded: signalled, the script still does not exit, so the wait ends at the bound, reporting it.
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	type res struct {
+		err      error
+		timedOut bool
+	}
+	got := make(chan res, 1)
+	go func() { e, to := waitBounded(cmd, 300*time.Millisecond); got <- res{e, to} }()
+	select {
+	case r := <-got:
+		if !r.timedOut {
+			t.Errorf("waitBounded returned (%v, timed out %t) for a script that ignores TERM, want it to give up at its bound", r.err, r.timedOut)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("waitBounded did not return: its wait is not bounded")
+	}
+}
+
+// ignoresTerm reports whether the dump's SigIgn line has bit 14 (SIGTERM, signal 15) set.
+func ignoresTerm(dump string) bool {
+	for _, l := range strings.Split(dump, "\n") {
+		if f := strings.Fields(l); len(f) == 2 && f[0] == "SigIgn:" {
+			if v, err := strconv.ParseUint(f[1], 16, 64); err == nil && v&(1<<14) != 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// The dump names the lock a blocked process waits on and who holds it, a process of any tree (issue #494, since a wait on a host lock
+// held by another package's test binary would look like a hang of this script). The test holds a flock on a file with a flock command of
+// its own (outside the tree under dump), and starts a bash named live-checks.sh whose child flock waits on it: the dump of that bash must
+// say that a pid waits on the lock, that the holder is the test's flock command, and the file's path. The expectations are the holder's
+// PID and the file's path, both known to the test.
+func TestTheDumpNamesTheLockAProcessWaitsOnAndItsHolder(t *testing.T) {
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("no flock program on this host")
+	}
+	// holdLock starts a flock command holding a lock on a new file, and returns the file and the holder's PID once the lock is held.
+	holdLock := func(name string) (string, int) {
+		lock := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(lock, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		pr, pw, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { pw.Close(); pr.Close() })
+		holder := exec.Command("flock", lock, "bash", "-c", "echo held; read x")
+		holder.Stdin = pr
+		out, err := holder.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := holder.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = holder.Process.Kill(); _ = holder.Wait() })
+		held := make(chan struct{})
+		go func() {
+			buf := make([]byte, 16)
+			_, _ = out.Read(buf)
+			close(held)
+		}()
+		select {
+		case <-held:
+		case <-time.After(30 * time.Second):
+			t.Fatalf("the holder of %s never took the lock", name)
+		}
+		return lock, holder.Process.Pid
+	}
+	lock, holderPID := holdLock("host.lock")
+	// Another lock, held by another process, that nothing in the tree under dump waits on or holds: it must not appear.
+	other, otherPID := holdLock("other.lock")
+	// The waiting flock is a CHILD of the bash named live-checks.sh (the bash cannot exec its last command: another follows), as the
+	// script's remote() is a child of the script, so the dump has to walk the tree to find it.
+	waiter := exec.Command("bash", "-c", `flock "$1" true; echo done`, "live-checks.sh", lock)
+	if err := waiter.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = waiter.Process.Kill(); _ = waiter.Wait() })
+	// Wait on the state: the dump shows the wait once the flock child has called flock(2).
+	want := fmt.Sprintf("held by pid %d ", holderPID)
+	var dump string
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		dump = hangDump(waiter.Process.Pid)
+		if strings.Contains(dump, "waits on lock") && strings.Contains(dump, want) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the dump never named the lock and its holder (%q):\n%s", want, dump)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(dump, "the locked file: "+lock) {
+		t.Errorf("the dump does not name the locked file %s:\n%s", lock, dump)
+	}
+	if want := fmt.Sprintf("ppid %d state ", waiter.Process.Pid); !strings.Contains(dump, want) {
+		t.Errorf("the dump does not show the waiting flock as a child of the script (%q):\n%s", want, dump)
+	}
+	// What is not the tree's is not listed: not the other lock, not its holder, and no lock the tree holds (it holds none).
+	if strings.Contains(dump, other) || strings.Contains(dump, fmt.Sprintf("pid %d ", otherPID)) || strings.Contains(dump, "holds:") {
+		t.Errorf("the dump lists a lock or a holder that is not the waiting tree's:\n%s", dump)
+	}
+	t.Logf("the dump, as a hang would print it:\n%s", dump)
 }
