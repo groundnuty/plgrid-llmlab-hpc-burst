@@ -164,3 +164,4 @@ jobs:
           grep -E -A45 'DEBUG\[[a-z ]*\]: [0-9]+ events' "$log" | grep -v '^--$' | head -500 | cut -c1-260 || true
           grep -B2 -A25 -E '^--- FAIL' "$log" | head -200 | cut -c1-400 || true
           exit "$rc"
+# after the race fix (confirmDeployment)
