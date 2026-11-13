@@ -53,6 +53,9 @@ type tracker struct {
 	tokensSince time.Time
 	// lastRead is the MetricsReadAt of the last sample taken in.
 	lastRead *time.Time
+	// skewSince is when this process's KV skew began, zero while it is not skewed, and skewSeen the
+	// receipt time of the last report it was judged on, so each report is judged once (kvskew.go).
+	skewSince, skewSeen time.Time
 	// samples hold only reads with a known ResponsesByStatus.
 	samples []healthSample
 }
@@ -325,6 +328,33 @@ func (s *agentState) track(instUID string, w agentapi.WorkerReport, now time.Tim
 	if len(t.samples) > maxSamples {
 		t.samples = t.samples[len(t.samples)-maxSamples:]
 	}
+}
+
+// skewClock advances worker w's KV-skew clock by the report received at reportAt, once per report:
+// skewed starts it at that report, unless it runs, and not skewed stops it. It returns since when the
+// skew has held, zero when it does not, or when the process has no tracker (no metrics read yet), which
+// never starts a clock (kvskew.go).
+func (b *Backend) skewClock(allocUID types.UID, instUID string, w agentapi.WorkerReport, reportAt time.Time, skewed bool) time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	s, ok := b.agents[string(allocUID)]
+	if !ok {
+		return time.Time{}
+	}
+	t, ok := s.health[trackerKey(instUID, w)]
+	if !ok {
+		return time.Time{}
+	}
+	if !reportAt.Equal(t.skewSeen) {
+		t.skewSeen = reportAt
+		switch {
+		case !skewed:
+			t.skewSince = time.Time{}
+		case t.skewSince.IsZero():
+			t.skewSince = reportAt
+		}
+	}
+	return t.skewSince
 }
 
 // storeKey writes an Instance's key to its mode-600 file, once. The Instance

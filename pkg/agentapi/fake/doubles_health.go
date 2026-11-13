@@ -168,3 +168,17 @@ func HealthWithoutPrefixCache(now time.Time, _ Process) agentapi.Health {
 	h.PrefixCacheQueriedTokens, h.PrefixCacheHitTokens = nil, nil
 	return h
 }
+
+// HealthGauges returns an engine whose probe passes and whose metrics are read at every sample, with the
+// running and waiting requests and the KV cache's use that gauges gives for the sample's worker
+// (Process.Worker): each worker of an Instance its own (HBEP-7, the KV-skew signal; #518). gauges is
+// asked at every sample, so a test changes a worker's gauges as it goes. The generated-token counter
+// rises by 1,000 at every sample, so no no-progress signal comes of it; it is kept per process. Give each
+// Agent its own engine.
+func HealthGauges(gauges func(worker string) (running, waiting int64, kvCache float64)) func(time.Time, Process) agentapi.Health {
+	samples := perProcessCount{}
+	return func(now time.Time, p Process) agentapi.Health {
+		running, waiting, kv := gauges(p.Worker)
+		return metricsSample(now, running, waiting, 1000*samples.next(p), kv)
+	}
+}

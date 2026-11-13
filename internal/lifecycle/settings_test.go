@@ -118,6 +118,7 @@ func TestResolveSettingsEmptyProfileEqualsTheCRDDefaults(t *testing.T) {
 		{"health.probeInterval", got.probeInterval},
 		{"health.noProgressTimeout", got.noProgressTimeout},
 		{"health.errorOnlyWindow", got.errorOnlyWindow},
+		{"health.kvSkewTimeout", got.kvSkewTimeout},
 		{"health.agentTimeout", got.agentTimeout},
 		{"health.registrationTimeout", got.registrationTimeout},
 		{"health.startTimeout", got.startTimeout},
@@ -219,7 +220,7 @@ func TestResolveSettingsKeepsExplicitValues(t *testing.T) {
 		Health: &v1alpha1.HealthThresholds{
 			ProbeInterval: dur(5 * time.Second), FailureThreshold: ptrTo(int32(7)), NoProgressTimeout: dur(45 * time.Minute),
 			ErrorOnlyWindow: dur(2 * time.Minute), AgentTimeout: dur(3 * time.Minute), RegistrationTimeout: dur(20 * time.Minute),
-			StartTimeout: dur(2 * time.Hour),
+			StartTimeout: dur(2 * time.Hour), KVSkewTimeout: dur(3 * time.Minute),
 		},
 		Restart: &v1alpha1.RestartPolicy{
 			StopGrace: dur(15 * time.Second), AttemptsPerRung: ptrTo(int32(4)), Window: dur(time.Hour), Backoff: dur(45 * time.Second),
@@ -234,7 +235,7 @@ func TestResolveSettingsKeepsExplicitValues(t *testing.T) {
 	}
 	want := settings{
 		handoverMargin: 45 * time.Minute, maxIdle: got.maxIdle,
-		probeInterval: 5 * time.Second, failureThreshold: 7, noProgressTimeout: 45 * time.Minute, errorOnlyWindow: 2 * time.Minute,
+		probeInterval: 5 * time.Second, failureThreshold: 7, noProgressTimeout: 45 * time.Minute, errorOnlyWindow: 2 * time.Minute, kvSkewTimeout: 3 * time.Minute,
 		agentTimeout: 3 * time.Minute, registrationTimeout: 20 * time.Minute, startTimeout: 2 * time.Hour,
 		stopGrace: 15 * time.Second, attemptsPerRung: 4, restartWindow: time.Hour, restartBackoff: 45 * time.Second,
 	}
@@ -257,6 +258,7 @@ func TestResolveSettingsNamesTheBadDuration(t *testing.T) {
 		{"probeInterval", func(p *v1alpha1.PlatformProfileSpec) { p.Health = &v1alpha1.HealthThresholds{ProbeInterval: bad} }},
 		{"noProgressTimeout", func(p *v1alpha1.PlatformProfileSpec) { p.Health = &v1alpha1.HealthThresholds{NoProgressTimeout: bad} }},
 		{"errorOnlyWindow", func(p *v1alpha1.PlatformProfileSpec) { p.Health = &v1alpha1.HealthThresholds{ErrorOnlyWindow: bad} }},
+		{"kvSkewTimeout", func(p *v1alpha1.PlatformProfileSpec) { p.Health = &v1alpha1.HealthThresholds{KVSkewTimeout: bad} }},
 		{"agentTimeout", func(p *v1alpha1.PlatformProfileSpec) { p.Health = &v1alpha1.HealthThresholds{AgentTimeout: bad} }},
 		{"registrationTimeout", func(p *v1alpha1.PlatformProfileSpec) { p.Health = &v1alpha1.HealthThresholds{RegistrationTimeout: bad} }},
 		{"startTimeout", func(p *v1alpha1.PlatformProfileSpec) { p.Health = &v1alpha1.HealthThresholds{StartTimeout: bad} }},
