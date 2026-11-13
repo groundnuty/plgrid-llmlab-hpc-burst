@@ -1,14 +1,15 @@
-# One-off, never merged: copy it to .github/workflows/s18-rerun.yml on S18's DO-NOT-MERGE draft PR (#531), deleting
-# s18-measure.yml in the same commit so the first run's 16 groups do not run again, with the PR's head merging spike
-# S18's new head (issue #528). It reruns the 13 F4 cells the first run (43484909319) lost to a bound of 10 minutes
-# per F4 cell, fixed in the spike, on 7 jobs, plus the controls on the new head. No secret; nothing written to the
-# repository; the uploads hold each cell's records and summary, as in s18-measure.yml.
-name: s18-rerun
+# One-off, never merged: copy it to .github/workflows/s18-sweep2.yml on S18's DO-NOT-MERGE draft PR (#531), deleting
+# s18-measure.yml in the same commit so the first run's groups do not run again, with the PR's head merging spike
+# S18's new head (issue #528). The first run (43484909319) is void: the retry layer counted a given-up request's failure
+# twice toward the front's pause (fixed in the spike, with a control). This runs the whole sweep again on one head:
+# the controls, and Q5's 140 cells in 20 groups of about 30 minutes. No secret; nothing written to the repository;
+# the uploads hold each cell's records and summary, as before.
+name: s18-sweep2
 
 on:
   pull_request:
     branches: [main]
-    paths: ['.github/workflows/s18-rerun.yml']
+    paths: ['.github/workflows/s18-sweep2.yml']
 
 permissions:
   contents: read
@@ -48,7 +49,7 @@ jobs:
           go test -count=1 -v ./rig
           go test -c -o "$RUNNER_TEMP/run.test" ./run
           cd run && "$RUNNER_TEMP/run.test" -test.count=1 -test.v -test.timeout 30m \
-            -test.run '^(TestNoFault|TestF[1-4]UnderAlpha|TestTheLayerAtBudget0EqualsAlphaRequestForRequest|TestEachArmOnEachFault|TestEveryPoisonTrialFires)'
+            -test.run '^(TestNoFault|TestF[1-4]UnderAlpha|TestTheLayerAtBudget0EqualsAlphaRequestForRequest|TestTheLayerAtBudget0PausesAsAlphaDoes|TestEachArmOnEachFault|TestEveryPoisonTrialFires)'
 
   sweep:
     name: s18 sweep group ${{ matrix.group }}
@@ -57,7 +58,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [0, 1, 2, 3, 4, 5, 6]
+        group: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -86,8 +87,7 @@ jobs:
         working-directory: spikes/s18/run
         env:
           S18_GROUP: ${{ matrix.group }}
-          S18_GROUPS: '7'
-          S18_CELLS: 'a-F4-sdk,a-F4-sdk-stream,b-F4-sdk,b-F4-sdk-stream,c-F4-b1-r0.1-sdk,c-F4-b1-r0.1-sdk-stream,c-F4-b10-r1,c-F4-b10-r1-sdk,c-F4-b10-r1-sdk-stream,c-F4-b10-r1-stream,d-F4-b10-r1-sdk,d-F4-b10-r1-sdk-stream,d-F4-b10-r1-stream'
+          S18_GROUPS: '20'
           S18_OUT: ${{ runner.temp }}/s18results
         run: |
           "$RUNNER_TEMP/run.test" -test.count=1 -test.v -test.timeout 65m -test.run '^TestGroup$' 2>&1 | tee "$RUNNER_TEMP/group.log" \
@@ -98,7 +98,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: s18-rerun-group-${{ matrix.group }}
+          name: s18-sweep2-group-${{ matrix.group }}
           path: ${{ runner.temp }}/s18results
           retention-days: 14
           if-no-files-found: error

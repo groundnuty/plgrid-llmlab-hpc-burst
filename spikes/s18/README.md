@@ -62,8 +62,9 @@ imported only by tests.
   layer; the layer sends the request to Instance i, and on a failure before any response header (the connection closed
   or reset after the write, or a 5xx) sends it to another ready Instance under its policy, and returns headers to the
   front only once it holds a good reply. It reports each failed upstream to the front's own `Router.ReportConnect`, as
-  the front's failure path does, so the front's pauses act as in the product. A refused dial wrote nothing, so the
-  layer resends it once with no budget, as alpha's own rule does.
+  the front's failure path does, so the front's pauses act as in the product: the other Instances' outcomes (a closed
+  connection, a 5xx or a refused dial count; a success resets), while home's the front counts itself from what the
+  layer returns. A refused dial wrote nothing, so the layer resends it once with no budget, as alpha's own rule does.
   - **(b):** one retry, to another Instance.
   - **(c):** retries within a per-deployment token bucket (burst {1, 3, 10}, refill {0.1, 1} per second), at most one
     to each other Instance.
@@ -71,10 +72,21 @@ imported only by tests.
 - **The anchor:** the layer at budget 0 must equal arm (a) request for request (`TestTheLayerAtBudget0EqualsAlphaRequestForRequest`),
   which it does on no fault and on each of F1-F4: the same status, error code and detail, completeness, engine
   admissions and deaths. So the layer changes nothing but the retries.
-- **Fidelity gaps:** the front attributes a retried reply, its usage record and its in-flight count to the first
-  Instance, and a success there clears that Instance's failure count; the layer's "another Instance" is the next ready
-  one in order, not the ring's; and the layer's retries count against the front's `streamHeadersTimeout` and its
-  deadlines, as a front-side retry would.
+- **The pauses are anchored too:** the layer at budget 0 leaves the front's pause of an Instance as arm (a) does after
+  each of three F3 failures pinned to it (`TestTheLayerAtBudget0PausesAsAlphaDoes`). This control found a bias in the
+  layer's first version, which also reported home's failure itself: on a give-up the front counted it again, so arms
+  (b)-(d) paused Instances after two failures, not three. The first hosted run carried it (its unmarked requests
+  refused under F3 with no engine dead), and was discarded; every number here is from the run after the fix.
+- **Fidelity gaps:**
+  - the front attributes a retried reply, its usage record and its in-flight count to the first Instance;
+  - when the layer rescues a request that failed on its first Instance, the front sees a success there and resets
+    that Instance's failure count, where a front-side retry would count the failure: behind the layer a dead
+    Instance is paused only when a request to it cannot be rescued, while under (a) three refused dials pause it. What
+    the client sees is the same (a refused dial is resent at once under every arm); only which Instance the front
+    picks next differs;
+  - the layer's "another Instance" is the next ready one in order, not the ring's;
+  - the layer's retries count against the front's `streamHeadersTimeout` and its deadlines, as a front-side retry's
+    would.
 
 ### The faults
 
@@ -140,7 +152,8 @@ FILL.
 - **The validity mutants** (`scripts/mut18.py`), all killed: V1 the F1 fault aimed at every Instance; V2 a request ID
   reused; V3 the layer at budget 0 retrying; V4 deaths counted from the layer's closed attempts; V5 an F4 trial not
   waiting for the front's pause (it first survived: the control's three trials each hit a different Instance, and four
-  now revisit one); V6 the cutter cutting every marked write; V7 a false death judged by a time window.
+  now revisit one); V6 the cutter cutting every marked write; V7 a false death judged by a time window; V8 the layer
+  also reporting home's outcome (the bias the first hosted run carried; killed by `TestTheLayerAtBudget0PausesAsAlphaDoes`).
 
 ## Environment
 
