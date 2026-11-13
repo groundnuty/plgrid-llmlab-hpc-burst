@@ -61,6 +61,18 @@ func applyMode(c *Config, name, val string, hasVal bool) error {
 		return flag(&c.HealthFail)
 	case "errors-only":
 		return flag(&c.ErrorsOnly)
+	case "die-on":
+		if !hasVal || val == "" {
+			return fmt.Errorf("needs the marker, die-on=<text>")
+		}
+		c.DieOn = val
+		return nil
+	case "fail-on":
+		if !hasVal || val == "" {
+			return fmt.Errorf("needs the marker, fail-on=<text>")
+		}
+		c.FailOn = val
+		return nil
 	case "stall":
 		return flag(&c.Stall)
 	case "no-prefix-cache-metrics":

@@ -109,7 +109,9 @@
 // (Tail): a chat request's last user message, a completions request's
 // prompt. A request the double refuses (the errors-only mode, a 4xx)
 // is recorded too, with the Outcome "refused", so a test counts the attempts
-// a check made. A body that does not decode is not recorded.
+// a check made. A body that does not decode is not recorded. A request is
+// also recorded as "admitted" the moment it has a slot, with its Tail, so a
+// request the engine dies under (die-on) is still seen to have begun.
 //
 // # Reasoning and tool calls
 //
@@ -141,7 +143,10 @@
 // greedy-diverge=<n>, greedy-repeat, early-stop=<n>, loop-above=<tokens>,
 // tool-malformed, tool-args-null, tool-args-badtype, no-tool-call,
 // reports-nothing, report-max-model-len=<n>, health-fail, health-fail-after=<dur>,
-// errors-only, slow-first=<dur>, never-settle=<pct>, stall, token-delay=<dur>,
+// errors-only, die-on=<text> and fail-on=<text> (a chat or completions request whose prompt tail
+// carries the text, once admitted and recorded, ends the engine process at once with no reply byte,
+// or is answered 500: the faults of spike S18, #528), slow-first=<dur>, never-settle=<pct>, stall,
+// token-delay=<dur>,
 // reasoning-first=<n>, reasoning-forever, reply-bytes=<n> (a non-streamed chat
 // reply's content padded to n bytes), and four that leave lines out of
 // /metrics: no-prefix-cache-metrics (not the same as prefix caching off, which

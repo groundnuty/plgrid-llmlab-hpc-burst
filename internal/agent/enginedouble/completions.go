@@ -105,7 +105,7 @@ func (h *handler) completion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ans := h.answerFor(req.sampling, nil, promptIDs, max)
-	h.run(r, rec, promptIDs, max, ans, req.Stream, func(s *slot, u usage) (int, bool) {
+	h.run(w, r, rec, promptIDs, max, ans, req.Stream, func(s *slot, u usage) (int, bool) {
 		if req.Stream {
 			return h.completionStream(w, r, req, ans, s, u)
 		}
