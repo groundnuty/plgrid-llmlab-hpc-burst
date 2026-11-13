@@ -1,0 +1,13 @@
+# HELP vllm_router_processed_requests_total Total requests processed by each worker
+# TYPE vllm_router_processed_requests_total counter
+vllm_router_processed_requests_total{worker="http://127.0.0.1:41001"} 10
+vllm_router_processed_requests_total{worker="http://127.0.0.1:41002"} 8
+vllm_router_processed_requests_total{worker="http://127.0.0.1:41003"} 11
+vllm_router_processed_requests_total{worker="http://127.0.0.1:41004"} 4
+# TYPE vllm_router_policy_decisions_total counter
+vllm_router_policy_decisions_total{policy="round_robin",worker="http://127.0.0.1:41001"} 10
+vllm_router_policy_decisions_total{policy="round_robin",worker="http://127.0.0.1:41002"} 8
+vllm_router_policy_decisions_total{policy="round_robin",worker="http://127.0.0.1:41003"} 11
+vllm_router_policy_decisions_total{policy="round_robin",worker="http://127.0.0.1:41004"} 4
+vllm_router_requests_total{route="/v1/chat/completions"} 33
+vllm_router_active_workers 4

@@ -1,0 +1,17 @@
+{
+ "name": "B1-rr",
+ "regime": "B",
+ "rep": 1,
+ "arm": "rr",
+ "router": "vllm-router",
+ "policy": "round_robin",
+ "bound": null,
+ "kv_blocks": 6000,
+ "start_unix": 999.0,
+ "end_unix": 1011.0,
+ "client_rc": 0,
+ "nwork": 4,
+ "load_args": "-sessions 5",
+ "mode": "double",
+ "reset": "post"
+}

@@ -1,0 +1,10 @@
+{"run": "B1-rr", "session": 0, "turn": 0, "agent": 0, "start_unix": 1000.0, "ttft_ms": 140.0, "latency_ms": 500.0, "prompt_tokens": 100, "cached_tokens": 0, "completion_tokens": 48, "status": 200, "attempt": 1}
+{"run": "B1-rr", "session": 1, "turn": 0, "agent": 0, "start_unix": 1001.0, "ttft_ms": 100.0, "latency_ms": 500.0, "prompt_tokens": 100, "cached_tokens": 0, "completion_tokens": 48, "status": 200, "attempt": 1}
+{"run": "B1-rr", "session": 2, "turn": 0, "agent": 0, "start_unix": 1002.0, "ttft_ms": 110.0, "latency_ms": 500.0, "prompt_tokens": 100, "cached_tokens": 0, "completion_tokens": 48, "status": 200, "attempt": 1}
+{"run": "B1-rr", "session": 0, "turn": 1, "agent": 0, "start_unix": 1003.0, "ttft_ms": 190.0, "latency_ms": 500.0, "prompt_tokens": 100, "cached_tokens": 0, "completion_tokens": 48, "status": 200, "attempt": 1}
+{"run": "B1-rr", "session": 3, "turn": 0, "agent": 0, "start_unix": 1004.0, "ttft_ms": 120.0, "latency_ms": 500.0, "prompt_tokens": 100, "cached_tokens": 20, "completion_tokens": 48, "status": 200, "attempt": 1}
+{"run": "B1-rr", "session": 1, "turn": 1, "agent": 0, "start_unix": 1005.0, "ttft_ms": 130.0, "latency_ms": 500.0, "prompt_tokens": 100, "cached_tokens": 20, "completion_tokens": 48, "status": 200, "attempt": 1}
+{"run": "B1-rr", "session": 2, "turn": 1, "agent": 0, "start_unix": 1006.0, "ttft_ms": 150.0, "latency_ms": 500.0, "prompt_tokens": 100, "cached_tokens": 20, "completion_tokens": 48, "status": 200, "attempt": 1}
+{"run": "B1-rr", "session": 3, "turn": 1, "agent": 0, "start_unix": 1007.0, "ttft_ms": 160.0, "latency_ms": 500.0, "prompt_tokens": 100, "cached_tokens": 20, "completion_tokens": 48, "status": 200, "attempt": 1}
+{"run": "B1-rr", "session": 4, "turn": 0, "agent": 0, "start_unix": 1008.0, "ttft_ms": 170.0, "latency_ms": 500.0, "prompt_tokens": 100, "cached_tokens": 20, "completion_tokens": 48, "status": 200, "attempt": 1}
+{"run": "B1-rr", "session": 4, "turn": 1, "agent": 0, "start_unix": 1009.0, "ttft_ms": 180.0, "latency_ms": 500.0, "prompt_tokens": 100, "cached_tokens": 20, "completion_tokens": 48, "status": 200, "attempt": 1}
