@@ -66,6 +66,12 @@ type Config struct {
 	Stall              bool          // a streamed request stops after its first token and hangs
 	ReasoningFirst     int           // the reply reasons for this many tokens (0: off) before its answer
 	ReasoningForever   bool          // the reply reasons until max_tokens runs out, with no answer
+	// ReplyBytes, when above 0, pads to at least this many bytes the content of a non-streamed chat
+	// reply whose request's last message is ReplyBytesMarker: a large non-streamed reply, as the bulk
+	// path's test plan sends beside token streams (HBEP-6, Test plan, The bulk path; #448). Every other
+	// reply is as without the mode, so the agent's own checks of the engine, which read at most 16 MiB
+	// of a reply, are unchanged. A streamed reply is never padded.
+	ReplyBytes int
 
 	// The modes that leave lines out of /metrics, as an engine that does not
 	// export them would (the agent reads each absent line as unknown, not 0).

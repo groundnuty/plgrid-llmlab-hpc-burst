@@ -18,6 +18,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/linkemu"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -111,6 +112,8 @@ type rig struct {
 	beforeKill func()
 	// dir is the test's short scratch directory.
 	dir string
+	// link is S17's shaped link the jobs' traffic takes (rigSetup.link), nil without it.
+	link *linkemu.Link
 }
 
 // rigSetup is what one rehearsal stack is started with. #146's tests take
@@ -135,6 +138,11 @@ type rigSetup struct {
 	// when set, is up's --version. Unset, up's arguments are as before.
 	relayKeeper bool
 	k3sVersion  string
+	// bulkPath runs up with --bulk-path (HBEP-6, The bulk path; #448's bulk_test.go). link puts S17's
+	// link where S17 did: in direct mode in front of the dial-home listener, which the jobs then dial
+	// through it, and in host-dialed mode on the relays' ssh to the login node. Unset, the stack is
+	// as before.
+	bulkPath, link bool
 	// instanceRouter runs up with --instance-router envoy and places Envoy's build beside the agent's
 	// (#454, router_test.go). Unset, up's arguments and the builds are as before.
 	instanceRouter bool
@@ -155,10 +163,13 @@ func startRigWith(t *testing.T, s rigSetup) *rig {
 	// Nov 2026 on #156; step (a) checks the downloads reached the double).
 	r.cl = startRigCluster(t, dir, s.shape, s.engineGate)
 	creds := filepath.Join(dir, "provider-ssh")
-	if err := r.cl.Login.WriteCredentials(creds); err != nil {
+	if err := r.writeCredentials(s, creds); err != nil {
 		t.Fatal(err)
 	}
 	dh := stack.DialHome{Mode: "direct", Addr: s.ports.DialHomeListen}
+	if s.link && s.mode == "direct" {
+		dh.Addr, r.link = stack.StartLink(t, s.ports.DialHomeListen)
+	}
 	switch s.mode {
 	case "ssh":
 		dh = r.startGateway(dir)

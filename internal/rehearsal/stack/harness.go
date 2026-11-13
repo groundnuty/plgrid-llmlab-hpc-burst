@@ -350,6 +350,8 @@ type Ports struct {
 	Base           int
 	ClientAddr     string
 	DialHomeListen string
+	// BulkPath grows up's block to base..base+15, as up --bulk-path does (BulkPath, bulk.go).
+	BulkPath bool
 }
 
 // URL is http://127.0.0.1:<base+off><path>, one of up's listeners.
@@ -368,7 +370,11 @@ func (p Ports) All() []int {
 			}
 		}
 	}
-	for n := p.Base; n <= p.Base+12; n++ {
+	last := 12
+	if p.BulkPath {
+		last = 15 // the bulk path's second frps (HBEP-6, The bulk path)
+	}
+	for n := p.Base; n <= p.Base+last; n++ {
 		out = append(out, n)
 	}
 	return out
