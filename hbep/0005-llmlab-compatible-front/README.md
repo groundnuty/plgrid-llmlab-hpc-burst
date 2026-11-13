@@ -156,7 +156,7 @@ Routes to LLMLab still pass through LLMLab's own cut and injection. The front ca
      - **For a stream, the first byte is its headers,** which the front relays at once and vLLM sends before prefill. So a stream is retried only when it failed before its headers, and a death in prefill isn't retried.
      - **A time-out isn't retried.** A 504 (`streamHeadersTimeout`, `idleTimeout`, `maxRequestDuration`, the lease end) leaves the engine possibly still running the request, so it is never sent again. An upstream's own 504 is a time-out too: it's passed through as it came, and never retried.
      - **Once only,** so a request reaches at most two Instances. That is the bound "never after two Instances have died under one request", and no separate count is kept. S18 measured a separate two-deaths stop on top of a larger budget: it saved nothing, and gave up every request whose tunnel was cut twice.
-     - **To another Instance:** the retry walks the ring from the request's key and skips the Instance that failed, which is still eligible after one failure, under the load bound in force. S18's retry went to the next ready Instance in the same way.
+     - **To another Instance:** the retry walks the ring from the request's key and skips the Instance that failed, which is still eligible after one failure, under the load bound in force. S18's retry went to the next ready Instance in the same way. The retry goes to Instances only, never to a managed provider such as LLMLab, even when one is attached at the same level.
      - **No separate budget.** The retry is placed as a new request would be. An Instance that dies drops out of the ready set within about a second, so its requests are retried under the loose bound (c = 2.0, no cap; Load bound and cap): each sibling takes at most about twice the mean load, and the excess queues in its engine, as new requests do while fewer Instances are ready than desired. At full membership the caps and the FIFO apply. A token bucket would drop most requests of an Instance that dies busy, the case the retry is for, and S18 couldn't size one: it rescued 0.15–0.37 of the failures with a refill at a fifth of the fault rate. This departs from S18's verdict 2. A storm of retries on the siblings is unmeasured.
      - **Deadlines per attempt:** `streamHeadersTimeout` and `idleTimeout` start again at the retry's write. `maxRequestDuration` and the lease end count from the request's arrival, as before.
      - **One usage record per request,** naming the Instance of the final attempt. The first attempt's failure counts toward its own Instance's pause, as such a failure does today.
@@ -666,6 +666,7 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
 - 2026-11-13: Envoy's `ring_hash` runs with bounded loads at the front's tight bound, provisionally (for #518).
 - 2026-11-13: retries before the first byte are decided: once, to another Instance, with no separate budget, and `x-should-retry: false` on a give-up after the retry (S18, #528).
 - 2026-11-13: a 503 `shutting_down` after the retry carries no `x-should-retry`, and an upstream's own 504 is never retried (for #539).
+- 2026-11-13: erratum: the retry goes to Instances only, never to a managed provider, as "another ready Instance" already meant (#542's review).
 
 ## Amendments
 
