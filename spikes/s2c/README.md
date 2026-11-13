@@ -104,8 +104,10 @@ run-to-run spread), H1 (the four arms), the probe on H's workers, A1 (the four a
 75 minutes. A budget guard starts no arm once about 70 minutes are used, so A goes first if time runs short, as the
 science agent ruled, and the optional relay control before it. A skipped arm is listed in `failures.txt`, and the job exits 1 with its other results kept.
 
-**Signals.** Every signal the job sends goes through a pidfd (`s2crouter signal` and `stop`, `cmd/s2crouter/proc.go`),
-never by name, pattern or process group. A process is signalled only if it is the job's own: the root's parent must be
+**Signals.** Every signal the job's own code sends goes through a pidfd (`s2crouter signal` and `stop`,
+`cmd/s2crouter/proc.go`), never by name, pattern or process group. Two signals come from elsewhere: coreutils
+`timeout` ends the client it started (its own unreaped child), and the agent's `procgroup` stops the Envoy it started,
+in Envoy's own process group, as the agent does. A process is signalled only if it is the job's own: the root's parent must be
 `job.sh`, and every other member must descend from it. Its start time is read again after its pidfd is opened, so a PID
 that bash has reaped and the kernel has handed to another process is left alone. The probe's kill of the victim is the
 same.

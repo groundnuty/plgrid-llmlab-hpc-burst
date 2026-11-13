@@ -93,7 +93,13 @@ func stage(t *testing.T) dryEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.RemoveAll(root) })
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("kept the dry run's directory for a look: %s", root)
+			return
+		}
+		os.RemoveAll(root)
+	})
 	e := dryEnv{root: root, home: filepath.Join(root, "home", "s2c"), vrBin: vr}
 	e.stage = filepath.Join(e.home, "stage")
 	copyFile(t, filepath.Join(bin, "s2crouter"), filepath.Join(e.stage, "bin", "s2crouter"), 0o755)

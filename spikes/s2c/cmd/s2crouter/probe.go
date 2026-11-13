@@ -64,22 +64,29 @@ type probeSample struct {
 }
 
 type probeRecord struct {
-	Victim        string         `json:"victim"`
-	Keys          map[string]int `json:"keys_tried_per_worker"`
-	Streams       []streamResult `json:"streams"`
-	Samples       []probeSample  `json:"samples"`
-	HealthyS      *float64       `json:"victim_healthy_s"`  // its socket answered /health again
-	HoldS         float64        `json:"hold_s"`            // unverified for this long after that
-	VerifiedS     *float64       `json:"victim_verified_s"` // flagged verified
-	AdmittedS     *float64       `json:"victim_admitted_s"` // a request in its key reached it again
-	Non200        int            `json:"non_200"`
-	PauseMs       float64        `json:"max_latency_during_outage_ms"`
-	EarlyEnvoy    int            `json:"victim_rq_success_before_verification"`
-	EarlyPlaced   int            `json:"victim_placement_lines_before_verification"`
-	Checks        []string       `json:"checks"`
-	Passed        bool           `json:"passed"`
-	StreamTokens  int            `json:"stream_tokens"`
-	ProbeInterval string         `json:"probe_interval"`
+	Victim    string         `json:"victim"`
+	Keys      map[string]int `json:"keys_tried_per_worker"`
+	Streams   []streamResult `json:"streams"`
+	Samples   []probeSample  `json:"samples"`
+	HealthyS  *float64       `json:"victim_healthy_s"`  // its socket answered /health again
+	HoldS     float64        `json:"hold_s"`            // unverified for this long after that
+	VerifiedS *float64       `json:"victim_verified_s"` // flagged verified
+	AdmittedS *float64       `json:"victim_admitted_s"` // a request in its key reached it again
+	Non200    int            `json:"non_200"`
+	// The non-200s split for the science agent's ruling (the verdict counts them all until then):
+	// CutAtKill are requests Envoy had already written to the victim's pooled connection when it died
+	// (its reply names a connection termination, within the first interval after the kill), which the
+	// agent's retry policy does not retry by design (nothing written to a worker is retried); the
+	// others are NonLater.
+	CutAtKill     int      `json:"cut_at_kill"`
+	NonLater      int      `json:"non_200_later"`
+	PauseMs       float64  `json:"max_latency_during_outage_ms"`
+	EarlyEnvoy    int      `json:"victim_rq_success_before_verification"`
+	EarlyPlaced   int      `json:"victim_placement_lines_before_verification"`
+	Checks        []string `json:"checks"`
+	Passed        bool     `json:"passed"`
+	StreamTokens  int      `json:"stream_tokens"`
+	ProbeInterval string   `json:"probe_interval"`
 }
 
 func probeMain(args []string) int {
@@ -241,6 +248,11 @@ func runProbe(o probeOpts) (*probeRecord, error) {
 		rec.Samples = append(rec.Samples, s)
 		if st != 200 || cerr != nil {
 			rec.Non200++
+			if s.AtS <= o.interval.Seconds() && strings.Contains(s.Err, "connection termination") {
+				rec.CutAtKill++
+			} else {
+				rec.NonLater++
+			}
 		}
 		if s.LatencyMs > rec.PauseMs && verifiedAt.IsZero() {
 			rec.PauseMs = s.LatencyMs
@@ -311,7 +323,8 @@ func runProbe(o probeOpts) (*probeRecord, error) {
 	}
 	check(midStream, "the victim was killed mid-stream", "its stream ended before the kill: raise -stream-tokens")
 	check(uncut, "siblings' streams uncut", fmt.Sprintf("%+v", rec.Streams))
-	check(rec.Non200 == 0, "no 503 while the siblings are healthy", fmt.Sprintf("%d of %d probe requests failed", rec.Non200, len(rec.Samples)))
+	check(rec.Non200 == 0, "no 503 while the siblings are healthy", fmt.Sprintf("%d of %d probe requests failed (%d cut at the kill on the victim's pooled connection, %d later)",
+		rec.Non200, len(rec.Samples), rec.CutAtKill, rec.NonLater))
 	check(rec.EarlyEnvoy == 0 && rec.EarlyPlaced == 0 && !verifiedAt.IsZero(), "nothing reaches the restarted worker before its verification",
 		fmt.Sprintf("Envoy counted %d, its placement log %d, verified=%v", rec.EarlyEnvoy, rec.EarlyPlaced, !verifiedAt.IsZero()))
 	check(rec.AdmittedS != nil, "the verified worker takes its key's requests again", "never admitted")
