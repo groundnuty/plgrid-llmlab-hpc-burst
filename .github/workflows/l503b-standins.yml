@@ -160,3 +160,4 @@ jobs:
           grep -n -E "the job was sent TERM|time limit|restart count|--- (PASS|FAIL)|worker-rung restart, from|the run's jobs are ended|the deployment is deleted" "$log" | cut -c1-400 || true
           grep -B2 -A25 -E '^--- FAIL' "$log" | head -200 | cut -c1-400 || true
           exit "$rc"
+# rerun on #509's corrected assertion
