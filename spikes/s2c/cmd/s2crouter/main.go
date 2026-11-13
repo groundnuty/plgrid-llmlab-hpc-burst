@@ -3,6 +3,7 @@
 //	s2crouter worker ...  one vLLM worker under Apptainer, through agent.WorkerExec (worker.go)
 //	s2crouter envoy ...   one Envoy arm from the agent's own configuration (envoy.go)
 //	s2crouter relay ...   loopback TCP to Unix-socket relays for the vllm-router arms (relay.go)
+//	s2crouter probe ...   the dead-worker probe behind the bound Envoy arm (probe.go)
 //
 // It imports internal/agent and pkg/agentapi and changes nothing in them: every product behaviour it
 // relies on is called, not copied, except the few steps of agent.StartEnvoy that an edited
@@ -26,6 +27,8 @@ func main() {
 		code = envoyMain(os.Args[2:])
 	case "relay":
 		code = relayMain(os.Args[2:])
+	case "probe":
+		code = probeMain(os.Args[2:])
 	default:
 		usage()
 	}
@@ -33,7 +36,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: s2crouter worker|envoy|relay [flags]")
+	fmt.Fprintln(os.Stderr, "usage: s2crouter worker|envoy|relay|probe [flags]")
 	os.Exit(2)
 }
 

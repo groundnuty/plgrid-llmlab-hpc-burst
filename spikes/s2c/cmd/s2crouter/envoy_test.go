@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -74,13 +73,6 @@ func serveWorkers(t *testing.T, run string) *fakeWorkers {
 		t.Cleanup(func() { srv.Close() })
 	}
 	return fw
-}
-
-func unixClient(sock string) *http.Client {
-	return &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		var d net.Dialer
-		return d.DialContext(ctx, "unix", sock)
-	}}}
 }
 
 // self runs this test binary as s2crouter.
@@ -226,7 +218,7 @@ func TestEnvoyArmsWithTheRealEnvoy(t *testing.T) {
 			for i := range counts0 {
 				counts0[i] = fw.chats[i].Load()
 			}
-			cl := unixClient(filepath.Join(run, agent.EnvoyListenerSocket))
+			cl := unixClient(filepath.Join(run, agent.EnvoyListenerSocket), 10*time.Second)
 			const n = 40
 			for i := 0; i < n; i++ {
 				req, _ := http.NewRequest(http.MethodPost, "http://instance/v1/chat/completions", strings.NewReader("{}"))

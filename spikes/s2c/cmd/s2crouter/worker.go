@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -150,6 +151,11 @@ func workerMain(args []string) int {
 		return fail("worker %d: %v", s.Index, err)
 	}
 	argv := w.Args()
+	// A stale socket from an earlier process of this worker goes first, as the agent's startWorker
+	// removes it (internal/agent/workers.go): a killed engine leaves its socket file behind.
+	if err := os.Remove(filepath.Join(s.RunDir, agentapi.WorkerName(s.Index)+".sock")); err != nil && !os.IsNotExist(err) {
+		return fail("worker %d: a stale socket: %v", s.Index, err)
+	}
 	bin, err := exec.LookPath(s.Apptainer)
 	if err != nil {
 		return fail("worker %d: %v", s.Index, err)

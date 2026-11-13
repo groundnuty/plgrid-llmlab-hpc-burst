@@ -77,9 +77,9 @@ type startRecord struct {
 }
 
 type envoyOpts struct {
-	runDir, stageDir, bound, out, reference, fault string
-	workers                                        int
-	smoke                                          bool
+	runDir, stageDir, bound, out, reference, fault, verifyDir string
+	workers                                                   int
+	smoke                                                     bool
 }
 
 func envoyMain(args []string) int {
@@ -91,8 +91,9 @@ func envoyMain(args []string) int {
 	fs.StringVar(&o.bound, "bound", "", "hash_balance_factor, or none")
 	fs.StringVar(&o.out, "out", "", "directory for the arm's records")
 	fs.StringVar(&o.reference, "reference", "", "the product smoke's product-start.json")
-	fs.StringVar(&o.fault, "fault", "", "test seam: strip-bound runs without the bound while recording -bound")
+	fs.StringVar(&o.fault, "fault", "", "test seams: strip-bound runs without the bound while recording -bound; ignore-verify holds every worker verified whatever -verify-dir says")
 	fs.BoolVar(&o.smoke, "product-smoke", false, "start agent.StartEnvoy unchanged once, record it, stop it")
+	fs.StringVar(&o.verifyDir, "verify-dir", "", "a worker is verified while <dir>/worker-<i>.verified exists (the probe); unset: all are")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -102,7 +103,7 @@ func envoyMain(args []string) int {
 	if !o.smoke && o.bound == "" {
 		return fail("envoy: -bound is required")
 	}
-	if o.fault != "" && o.fault != "strip-bound" {
+	if o.fault != "" && o.fault != "strip-bound" && o.fault != "ignore-verify" {
 		return fail("envoy: unknown -fault %q", o.fault)
 	}
 	if err := os.MkdirAll(o.out, 0o755); err != nil {
@@ -131,6 +132,36 @@ func instanceConfig(runDir string, n int) (agent.EnvoyConfig, *agent.Readiness, 
 	}
 	ready.Set(ws)
 	return cfg, ready, nil
+}
+
+// watchVerified holds each worker verified in the readiness endpoint exactly while its flag file
+// exists in dir, read every 100 ms: the probe's stand-in for the controller's verification of a
+// restarted worker's generation, which the agent's readiness endpoint reports to Envoy (HBEP-5, Worker
+// health; HBEP-7, Several workers). It sets the state once before it returns.
+func watchVerified(ready *agent.Readiness, cfg agent.EnvoyConfig, dir string) (stop func()) {
+	set := func() {
+		ws := map[string]agent.ReadyWorker{}
+		for _, w := range cfg.Workers {
+			_, err := os.Stat(filepath.Join(dir, w.Name+".verified"))
+			ws[w.Name] = agent.ReadyWorker{Socket: w.Socket, Verified: err == nil}
+		}
+		ready.Set(ws)
+	}
+	set()
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(100 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				set()
+			}
+		}
+	}()
+	return func() { close(done) }
 }
 
 func envoySmoke(o envoyOpts) int {
@@ -183,6 +214,10 @@ func envoyArm(o envoyOpts) int {
 		return fail("envoy: readiness: %v", err)
 	}
 	defer ready.Close()
+	if o.verifyDir != "" && o.fault != "ignore-verify" {
+		stopWatch := watchVerified(ready, cfg, o.verifyDir)
+		defer stopWatch()
+	}
 	rendered, err := agent.RenderEnvoyConfig(cfg)
 	if err != nil {
 		return fail("envoy: render: %v", err)
