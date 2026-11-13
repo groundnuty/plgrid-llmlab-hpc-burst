@@ -258,7 +258,7 @@ func (p *pass) climb(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal, 
 			// Several workers, the whole Instance: every worker verifies and warms up again, and none is
 			// taken as verified meanwhile.
 			for i := range s.Workers {
-				s.Workers[i].WarmedUp, s.Workers[i].VerifiedGeneration = false, nil
+				s.Workers[i].WarmedUp, s.Workers[i].VerifiedGeneration, s.Workers[i].RouterAdmittedGeneration = false, nil, nil
 			}
 		}
 		cond(&s.Conditions, v1alpha1.ConditionHealthy, metav1.ConditionFalse, signal, msg, in.Generation, now)

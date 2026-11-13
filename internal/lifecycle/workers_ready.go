@@ -17,7 +17,8 @@ import (
 // checks, which the desired state asks while the Instance is ready, and takes traffic once its
 // verifiedGeneration is its generation. The router's failed checks count against a worker only from the
 // first report in which the router holds it healthy after its verification, its router admission, kept
-// on the Instance so a restarted controller keeps it (the science agent's ruling on #439, Q2).
+// in its status.workers entry as routerAdmittedGeneration so a restarted controller keeps it (the science
+// agent's rulings on #439, Q2 and where it is kept).
 
 // readyWorkers is ready for an Instance of several workers, after the router rung: a rejoining worker's
 // verification and warm-up, the router admissions, then each worker's signal.
@@ -52,12 +53,8 @@ func (p *pass) readyWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, a
 // routerAdmitted reports whether the router has held worker w healthy since its current generation was
 // verified: its router admission is that generation.
 func routerAdmitted(in *v1alpha1.Instance, w string) bool {
-	v, ok := in.Annotations[v1alpha1.RouterAdmittedAnnotation(w)]
-	if !ok {
-		return false
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	return err == nil && n == restartGeneration(in, w)
+	g := workerEntry(in, w).RouterAdmittedGeneration
+	return g != nil && *g == restartGeneration(in, w)
 }
 
 // admitWorkers records the router admission of each worker warmed up at its current generation that the
@@ -73,21 +70,19 @@ func (p *pass) admitWorkers(in *v1alpha1.Instance, av agentView) error {
 	for _, rw := range rr.Workers {
 		healthy[rw.Name] = rw.Healthy
 	}
-	admit := map[string]string{}
+	admit := map[string]int64{}
 	for _, w := range workerNames(in) {
 		if workerWarmed(in, w) && healthy[w] && !routerAdmitted(in, w) {
-			admit[w] = strconv.FormatInt(restartGeneration(in, w), 10)
+			admit[w] = restartGeneration(in, w)
 		}
 	}
 	if len(admit) == 0 {
 		return nil
 	}
-	return p.setMeta(in, func(n *v1alpha1.Instance) {
-		if n.Annotations == nil {
-			n.Annotations = map[string]string{}
-		}
+	return p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
 		for w, g := range admit {
-			n.Annotations[v1alpha1.RouterAdmittedAnnotation(w)] = g
+			g := g
+			setWorker(s, w, func(e *v1alpha1.InstanceWorker) { e.RouterAdmittedGeneration = &g })
 		}
 	})
 }

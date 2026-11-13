@@ -123,3 +123,24 @@ func TestWorkersBounds(t *testing.T) {
 	}
 	must(t, c.Status().Update(bg(), got), "write 8 workers")
 }
+
+// A worker's routerAdmittedGeneration (the science agent's ruling on #439): 0 and up accepted, below 0
+// refused.
+func TestInstanceWorkerRouterAdmittedGenerationIsNotNegative(t *testing.T) {
+	ns := newNamespace(t)
+	in := newInstance(ns, "admitted")
+	must(t, c.Create(bg(), in), "create")
+	got := &v1alpha1.Instance{}
+	must(t, c.Get(bg(), objKey(in), got), "get")
+	zero := int64(0)
+	got.Status.Workers = []v1alpha1.InstanceWorker{{Name: "worker-0", RouterAdmittedGeneration: &zero}}
+	must(t, c.Status().Update(bg(), got), "write routerAdmittedGeneration 0")
+	again := &v1alpha1.Instance{}
+	must(t, c.Get(bg(), objKey(in), again), "get")
+	if g := again.Status.Workers[0].RouterAdmittedGeneration; g == nil || *g != 0 {
+		t.Errorf("routerAdmittedGeneration read back as %v, want 0", g)
+	}
+	minus := int64(-1)
+	again.Status.Workers[0].RouterAdmittedGeneration = &minus
+	requireRefused(t, c.Status().Update(bg(), again), "routerAdmittedGeneration")
+}

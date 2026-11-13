@@ -172,8 +172,9 @@ func TestTheRoutersChecksCountOnlyFromAWorkersAdmission(t *testing.T) {
 	}
 }
 
-// A worker's router admission is kept on the Instance: after a controller restart, worker-1's failing
-// checks restart it promptly, for RouterCheckFailing, not an hour later for its start timeout.
+// A worker's router admission is kept in its status.workers entry: after a controller restart that
+// follows the admission, worker-1's failing checks restart it promptly, for RouterCheckFailing, not an
+// hour later for its start timeout.
 func TestARoutersAdmissionSurvivesAControllerRestart(t *testing.T) {
 	failing := false
 	var n int32
@@ -188,8 +189,8 @@ func TestARoutersAdmissionSurvivesAControllerRestart(t *testing.T) {
 			}
 		}
 	})
-	if v := rg.instance(name).Annotations[v1alpha1.RouterAdmittedAnnotation("worker-1")]; v != "0" {
-		t.Fatalf("worker-1's admission annotation is %q, want 0", v)
+	if g := workerEntry(rg.instance(name), "worker-1").RouterAdmittedGeneration; g == nil || *g != 0 {
+		t.Fatalf("worker-1's routerAdmittedGeneration is %v, want 0", g)
 	}
 	restartRouted(rg)
 	failing = true
@@ -341,4 +342,75 @@ func TestAWorkerWhoseRestartTheAgentHasNotAppliedSignalsNothing(t *testing.T) {
 		t.Errorf("restarts %v, want one, worker-1's", parts)
 	}
 	ag.Silence(false)
+}
+
+// A controller restart before a worker's admission counts nothing: worker-1 rejoins and warms up while
+// the router still holds it failing (RouterLag), the controller restarts then, and the failures the
+// router keeps counting, above the threshold, never restart worker-1, which is admitted once the router
+// holds it healthy.
+func TestAControllerRestartBeforeAdmissionCountsNothing(t *testing.T) {
+	rg, ag, name := readyTwo(t, nil)
+	ag.RouterLag = 12
+	ag.CrashWorker("worker-1", 1)
+	startUntil(rg, "md", 15*time.Minute, "worker-1 warmed up again, not admitted", func() bool {
+		in := rg.instance(name)
+		return restartGeneration(in, "worker-1") == 1 && workerWarmed(in, "worker-1") && !routerAdmitted(in, "worker-1")
+	})
+	restartRouted(rg)
+	var counted int32
+	startUntil(rg, "md", 10*time.Minute, "worker-1 admitted after the controller's restart", func() bool {
+		in := rg.instance(name)
+		if r, _ := lastRestart(rg, name); r.Signal == v1alpha1.ReasonRouterCheckFailing {
+			t.Fatalf("worker-1 restarted for RouterCheckFailing on failures counted before its admission: %+v", r)
+		}
+		if rw, ok := routerWorker(ag, "worker-1"); ok && !routerAdmitted(in, "worker-1") && rw.ConsecutiveFailedChecks > counted {
+			counted = rw.ConsecutiveFailedChecks
+		}
+		return routerAdmitted(in, "worker-1")
+	})
+	if counted < defaultFailureThreshold {
+		t.Fatalf("the router counted %d failures of worker-1 after the controller's restart and before its admission, under the threshold %d: the test did not put the gate to the test", counted, defaultFailureThreshold)
+	}
+	if parts := restartParts(rg.instance(name)); !slices.Equal(parts, []string{"worker-1"}) {
+		t.Errorf("restarts %v, want worker-1's exit alone", parts)
+	}
+}
+
+// A whole-Instance restart of a ready Instance clears every worker's router admission with its
+// verification: each must be admitted again at its next first ready.
+func TestAWholeInstanceRestartClearsEveryAdmission(t *testing.T) {
+	rg := newRig(t, withProfile(func(p *v1alpha1.PlatformProfileSpec) {
+		p.Restart = &v1alpha1.RestartPolicy{AttemptsPerRung: ptrTo(int32(1)), Window: dur(4 * time.Hour)}
+	}))
+	rg.r.Config.InstanceRouter = v1alpha1.InstanceRouterEnvoy
+	rg.engine = func(string) afake.Engine { return afake.Engine{} }
+	rg.create(withWorkers(mdSpec("md"), 2))
+	startUntil(rg, "md", 10*time.Minute, "the agent", func() bool { return len(rg.agents) == 1 })
+	var ag *afake.Agent
+	for _, ra := range rg.agents {
+		ag = ra.agent
+	}
+	admitted := func(gen1 int64) func() bool {
+		return func() bool {
+			ins := rg.instances("md")
+			if len(ins) != 1 || ins[0].Status.Phase != v1alpha1.InstanceReady {
+				return false
+			}
+			return restartGeneration(&ins[0], "worker-1") == gen1 && routerAdmitted(&ins[0], "worker-0") && routerAdmitted(&ins[0], "worker-1")
+		}
+	}
+	startUntil(rg, "md", 10*time.Minute, "ready, both admitted", admitted(0))
+	name := rg.instances("md")[0].Name
+	ag.CrashWorker("worker-1", 1)
+	startUntil(rg, "md", 10*time.Minute, "worker-1 back and admitted at generation 1", admitted(1))
+	ag.CrashWorker("worker-1", 1)
+	startUntil(rg, "md", 10*time.Minute, "the whole Instance's restart", func() bool {
+		r, _ := lastRestart(rg, name)
+		return r.Part == v1alpha1.PartInstance
+	})
+	for _, e := range rg.instance(name).Status.Workers {
+		if e.RouterAdmittedGeneration != nil || e.VerifiedGeneration != nil || e.WarmedUp {
+			t.Errorf("%s's entry right after the whole-Instance restart: %+v, want no admission, verification or warm-up", e.Name, e)
+		}
+	}
 }

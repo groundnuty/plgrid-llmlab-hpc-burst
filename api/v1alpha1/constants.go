@@ -119,10 +119,6 @@ const (
 	// AnnotationRestartPrefix starts the key of a restart generation
 	// (RestartGenerationAnnotation).
 	AnnotationRestartPrefix = Group + "/restart-"
-
-	// AnnotationRouterAdmittedPrefix starts the key of a worker's router
-	// admission (RouterAdmittedAnnotation).
-	AnnotationRouterAdmittedPrefix = Group + "/router-admitted-"
 )
 
 // Parts of an Instance whose restart generations the lifecycle controller
@@ -149,15 +145,6 @@ func WorkerName(i int) string { return "worker-" + strconv.Itoa(i) }
 // restarts the part when the generation it is sent rises (HBEP-7, Health and
 // restarts: recorded first).
 func RestartGenerationAnnotation(part string) string { return AnnotationRestartPrefix + part }
-
-// RouterAdmittedAnnotation returns the annotation key that holds, for one worker of an Instance of
-// several workers behind a router, the worker's restart generation at which the router first held it
-// healthy after its verification, for example hpcburst.groundnuty.github.io/router-admitted-worker-1.
-// The value is a decimal integer. The router's failed checks count against the worker only while it
-// equals the worker's restart generation, so the failures the router counted during the worker's own
-// warm-up never judge it (HBEP-7, Several workers; the science agent's ruling on #439, Q2). It is kept on
-// the Instance so a restarted controller keeps it.
-func RouterAdmittedAnnotation(worker string) string { return AnnotationRouterAdmittedPrefix + worker }
 
 // ControllerNamespace holds the controllers' leader Leases (HBEP-11,
 // Controllers). The launcher creates it.
