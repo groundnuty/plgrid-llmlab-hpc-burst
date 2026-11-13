@@ -31,6 +31,9 @@ func TestARestartedWorkersWaitRule(t *testing.T) {
 		{"a router that is not running", &routerPart{phase: agentapi.PartStarting}, down.Add(time.Second), true},
 		{"a read after the death holding it out", read(down.Add(time.Second), false), down.Add(2 * time.Second), true},
 		{"a read after the death still holding it healthy", read(down.Add(time.Second), true), down.Add(2 * time.Second), false},
+		{"a read after the death holding it ejected only", &routerPart{phase: agentapi.PartRunning, clustersReadAt: ptrTime(down.Add(time.Second)), workers: []agentapi.RouterWorker{
+			{Name: "worker-1", Ejected: true},
+		}}, down.Add(2 * time.Second), false},
 		{"a read from before the death holding it out", read(down.Add(-time.Second), false), down.Add(2 * time.Second), false},
 		{"no read yet, before the deadline", &routerPart{phase: agentapi.PartRunning}, down.Add(6 * time.Second), false},
 		{"the deadline, one interval plus the time-out", read(down.Add(time.Second), true), down.Add(envoyHCInterval + envoyHCTimeout), true},
@@ -49,3 +52,5 @@ func TestARestartedWorkersWaitRule(t *testing.T) {
 		a.wg.Wait()
 	}
 }
+
+func ptrTime(t time.Time) *time.Time { return &t }

@@ -110,6 +110,7 @@ func TestEnvoyConfigCarriesHBEP5sSettings(t *testing.T) {
 		"max_connections":                at(t, c, "circuit_breakers", "thresholds", 0, "max_connections"),
 		"max_pending_requests":           at(t, c, "circuit_breakers", "thresholds", 0, "max_pending_requests"),
 		"max_requests":                   at(t, c, "circuit_breakers", "thresholds", 0, "max_requests"),
+		"max_retries":                    at(t, c, "circuit_breakers", "thresholds", 0, "max_retries"),
 		"worker-0's socket":              at(t, c, "load_assignment", "endpoints", 0, "lb_endpoints", 0, "endpoint", "address", "pipe", "path"),
 		"worker-0's name":                at(t, c, "load_assignment", "endpoints", 0, "lb_endpoints", 0, "endpoint", "hostname"),
 		"check timeout":                  at(t, c, "health_checks", 0, "timeout"),
@@ -136,7 +137,7 @@ func TestEnvoyConfigCarriesHBEP5sSettings(t *testing.T) {
 			"suppress_envoy_headers": true, "hash header": "x-session-id", "lb_policy": "RING_HASH", "upstream idle": "50s",
 			"retry on": "connect-failure,reset-before-request", "retries": float64(1), "retry predicate": "envoy.retry_host_predicates.previous_hosts",
 			"retry picks":     float64(20),
-			"max_connections": float64(4294967295), "max_pending_requests": float64(4294967295), "max_requests": float64(4294967295),
+			"max_connections": float64(4294967295), "max_pending_requests": float64(4294967295), "max_requests": float64(4294967295), "max_retries": float64(4294967295),
 			"worker-0's socket": envoyRunDir + "/worker-0.sock", "worker-0's name": "worker-0",
 			"the number of top-level fields": float64(2),
 			"check timeout":                  "2s", "check interval": "5s", "check before traffic": "5s",
@@ -221,6 +222,12 @@ func TestEnvoyGuardRefusesEachFault(t *testing.T) {
 			at(t, clusterOf(t, m), "circuit_breakers", "thresholds", 0).(map[string]any)["max_requests"] = 1024
 		}, "max_requests is 1024"},
 		{"no circuit breakers", func(m map[string]any) { delete(clusterOf(t, m), "circuit_breakers") }, "has no circuit_breakers"},
+		{"Envoy's default of 3 parallel retries", func(m map[string]any) {
+			at(t, clusterOf(t, m), "circuit_breakers", "thresholds", 0).(map[string]any)["max_retries"] = 3
+		}, "max_retries is 3"},
+		{"no retry threshold, so Envoy's 3", func(m map[string]any) {
+			delete(at(t, clusterOf(t, m), "circuit_breakers", "thresholds", 0).(map[string]any), "max_retries")
+		}, "has no max_retries"},
 		{"a worker on TCP", func(m map[string]any) {
 			at(t, clusterOf(t, m), "load_assignment", "endpoints", 0, "lb_endpoints", 0, "endpoint").(map[string]any)["address"] = map[string]any{"socket_address": map[string]any{"address": "127.0.0.1", "port_value": 8000}}
 		}, "endpoint.address must be a Unix socket"},

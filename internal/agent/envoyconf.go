@@ -210,6 +210,7 @@ type (
 		MaxConnections     uint32 `json:"max_connections"`
 		MaxPendingRequests uint32 `json:"max_pending_requests"`
 		MaxRequests        uint32 `json:"max_requests"`
+		MaxRetries         uint32 `json:"max_retries"`
 	}
 	envoyHTTPProto struct {
 		Type                      string            `json:"@type"`
@@ -344,6 +345,10 @@ func RenderEnvoyConfig(c EnvoyConfig) ([]byte, error) {
 				},
 				CircuitBreakers: envoyCircuitBreakers{Thresholds: []envoyThreshold{{
 					Priority: "DEFAULT", MaxConnections: envoyMaxThreshold, MaxPendingRequests: envoyMaxThreshold, MaxRequests: envoyMaxThreshold,
+					// The retry's slot is held from the retry's decision until the retried attempt answers:
+					// Envoy's default of 3 would answer a fourth concurrent retry with an overflow 503 (#507's
+					// review). As for the other three, the front's cap governs.
+					MaxRetries: envoyMaxThreshold,
 				}}},
 				TypedExtensionProtocolOptions: map[string]envoyHTTPProto{
 					"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": {
