@@ -38,6 +38,7 @@ func TestParseModes(t *testing.T) {
 		{"exit-after=2s", func(c *Config) { c.ExitAfter, c.ExitAfterSet = 2*time.Second, true }},
 		{"exit-after=2s:7", func(c *Config) { c.ExitAfter, c.ExitAfterSet, c.ExitCode = 2*time.Second, true, 7 }},
 		{"die-on=FAULT-F1,fail-on=FAULT-F2", func(c *Config) { c.DieOn, c.FailOn = "FAULT-F1", "FAULT-F2" }},
+		{"early-headers", func(c *Config) { c.EarlyHeaders = true }},
 	}
 	for _, tc := range cases {
 		want := d

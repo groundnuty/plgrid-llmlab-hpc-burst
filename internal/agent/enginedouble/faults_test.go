@@ -7,9 +7,11 @@ package enginedouble
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os/exec"
@@ -47,8 +49,9 @@ func rawPost(t *testing.T, hc *http.Client, path string, body any) (int, []byte,
 	return resp.StatusCode, out, err
 }
 
-// recordedServer serves newHandler(cfg) in this process and keeps every record it makes.
-func recordedServer(t *testing.T, cfg Config) (*http.Client, func() []LogEvent) {
+// recordedServer serves newHandler(cfg) in this process and keeps every record it makes; the server's
+// own error log goes to errLog, when given.
+func recordedServer(t *testing.T, cfg Config, errLog ...*syncBuffer) (*http.Client, func() []LogEvent) {
 	t.Helper()
 	var mu sync.Mutex
 	var events []LogEvent
@@ -62,6 +65,9 @@ func recordedServer(t *testing.T, cfg Config) (*http.Client, func() []LogEvent) 
 		events = append(events, ev)
 		mu.Unlock()
 	})}
+	if len(errLog) > 0 {
+		srv.ErrorLog = log.New(errLog[0], "", 0)
+	}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return unixClient(socket), func() []LogEvent {
@@ -194,4 +200,91 @@ func TestDieOnEndsTheEngineProcessUnderTheMarkedRequest(t *testing.T) {
 	if req := eventsOf(log, "request", "id-0001"); len(req) != 1 || req[0].Outcome != "completed" {
 		t.Errorf("the unmarked request's record: %+v, want completed", req)
 	}
+}
+
+// early-headers (Q1 of #528): a streamed reply's status and headers go out the moment it is admitted,
+// before the wait for its first token, as vLLM does. With slow-first=1h the engine provably sits in that
+// wait (its admitted record is written and no token can come for an hour): with the mode the client has
+// the 200 and the event-stream header then; without it, it has nothing while the engine waits.
+func TestEarlyHeadersSendsAStreamsHeadersBeforeItsFirstToken(t *testing.T) {
+	for _, early := range []bool{true, false} {
+		cfg := cfgFor()
+		cfg.SlowFirst, cfg.EarlyHeaders = time.Hour, early
+		hc, records := recordedServer(t, cfg)
+		body, _ := json.Marshal(map[string]any{"model": "m", "messages": []map[string]string{{"role": "user", "content": "id-0001"}}, "max_tokens": 4, "stream": true})
+		ctx, cancel := context.WithCancel(context.Background())
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://engine/v1/chat/completions", bytes.NewReader(body))
+		got := make(chan *http.Response, 1)
+		go func() {
+			if resp, err := hc.Do(req); err == nil {
+				got <- resp
+			}
+			close(got)
+		}()
+		eventually(t, 10*time.Second, "the request admitted", func() bool { return len(eventsOf(records(), "admitted", "id-0001")) == 1 })
+		if early {
+			select {
+			case resp := <-got:
+				if resp == nil || resp.StatusCode != 200 || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+					t.Errorf("early-headers: the headers while the engine waits: %+v, want 200 and an event stream", resp)
+				}
+			case <-time.After(30 * time.Second):
+				t.Error("early-headers: no headers while the engine sits in its hour's wait for the first token")
+			}
+		} else {
+			select {
+			case resp := <-got:
+				t.Errorf("without early-headers the headers came while the engine waits for its first token: %+v", resp)
+			default:
+			}
+		}
+		cancel()
+	}
+}
+
+// With early-headers, a fault on a marked streamed request still comes before the headers: fail-on
+// answers 500, not a 200 stream. And an unmarked stream's body is as without the mode: its events, then
+// [DONE], with its headers written once (net/http logs a second WriteHeader as superfluous).
+func TestEarlyHeadersKeepsAFaultBeforeTheHeadersAndTheBodyUnchanged(t *testing.T) {
+	var errLog syncBuffer
+	body := func(early bool, text string) (int, string) {
+		cfg := cfgFor()
+		cfg.EarlyHeaders, cfg.FailOn = early, "FAULT-F2"
+		hc, _ := recordedServer(t, cfg, &errLog)
+		code, b, err := rawPost(t, hc, "/v1/chat/completions", map[string]any{"model": "m", "messages": []map[string]string{{"role": "user", "content": text}}, "max_tokens": 4, "ignore_eos": true, "stream": true})
+		if err != nil {
+			t.Fatalf("the stream: %v", err)
+		}
+		return code, string(b)
+	}
+	if code, b := body(true, "id-0002 FAULT-F2"); code != 500 {
+		t.Errorf("a marked stream with early-headers: %d %.120s, want 500 before any header of a stream", code, b)
+	}
+	events := func(b string) int { return strings.Count(b, "data: ") }
+	_, with := body(true, "id-0001")
+	_, without := body(false, "id-0001")
+	if events(with) != events(without) || !strings.HasSuffix(with, "data: [DONE]\n\n") {
+		t.Errorf("an unmarked stream: %d events with early-headers, %d without; want the same, ending [DONE]:\n%s", events(with), events(without), with)
+	}
+	if l := errLog.String(); l != "" {
+		t.Errorf("the server's error log: %q, want nothing (the headers written once)", l)
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for the server's goroutines.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

@@ -181,6 +181,7 @@ func (h *handler) completionSingle(w http.ResponseWriter, r *http.Request, req c
 // stall mode.
 func (h *handler) completionStream(w http.ResponseWriter, r *http.Request, req completionRequest, a answer, s *slot, u usage) (int, bool) {
 	sw := newSSEWriter(w)
+	sw.started = s.headersSent
 	id, created := newCompletionID(), time.Now().Unix()
 	words, ids := a.allWords(), a.allIDs()
 	includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage

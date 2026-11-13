@@ -64,8 +64,12 @@ type Config struct {
 	// DieOn and FailOn are the fault modes of #528 (spike S18): a chat or completions request whose
 	// prompt tail (LogEvent.Tail) carries DieOn ends the engine process at once once it is admitted
 	// and recorded, with no reply byte; one that carries FailOn is answered 500 then. Empty: off.
-	DieOn            string
-	FailOn           string
+	DieOn  string
+	FailOn string
+	// EarlyHeaders sends a streamed reply's status and headers the moment it is admitted, before the
+	// wait for its first token, as vLLM does (HBEP-5; the science agent's ruling on #528, Q1). Off,
+	// they go out with the first event, as before.
+	EarlyHeaders     bool
 	SlowFirst        time.Duration // the first request of each shape waits this long before its first token
 	NeverSettle      int           // each request of a shape waits this percent of TokenDelay*tokens longer than the last
 	Stall            bool          // a streamed request stops after its first token and hangs

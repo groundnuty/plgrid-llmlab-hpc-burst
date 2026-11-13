@@ -103,7 +103,9 @@ type slot struct {
 	e         *engine
 	kv        int64
 	generated int64 // tokens this request has generated
-	done      sync.Once
+	// headersSent: the early-headers mode sent the stream's status and headers when it was admitted.
+	headersSent bool
+	done        sync.Once
 }
 
 // admit waits for a free sequence slot, counting the request as waiting while

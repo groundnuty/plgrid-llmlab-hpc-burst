@@ -61,6 +61,8 @@ func applyMode(c *Config, name, val string, hasVal bool) error {
 		return flag(&c.HealthFail)
 	case "errors-only":
 		return flag(&c.ErrorsOnly)
+	case "early-headers":
+		return flag(&c.EarlyHeaders)
 	case "die-on":
 		if !hasVal || val == "" {
 			return fmt.Errorf("needs the marker, die-on=<text>")

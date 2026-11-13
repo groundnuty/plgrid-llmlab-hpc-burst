@@ -384,6 +384,10 @@ func (h *handler) run(w http.ResponseWriter, r *http.Request, rec *LogEvent, pro
 		writeError(w, http.StatusInternalServerError, "InternalServerError", "the engine failed on this request")
 		return
 	}
+	if stream && h.cfg.EarlyHeaders {
+		newSSEWriter(w).start()
+		s.headersSent = true
+	}
 	wait, nth := h.e.beforeFirstToken(shapeKey{len(promptIDs), limit}, ans.tokens())
 	rec.InjectedNS, rec.Nth = wait.Nanoseconds(), nth
 	if !sleep(ctx, wait) {

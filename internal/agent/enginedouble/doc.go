@@ -143,7 +143,9 @@
 // greedy-diverge=<n>, greedy-repeat, early-stop=<n>, loop-above=<tokens>,
 // tool-malformed, tool-args-null, tool-args-badtype, no-tool-call,
 // reports-nothing, report-max-model-len=<n>, health-fail, health-fail-after=<dur>,
-// errors-only, die-on=<text> and fail-on=<text> (a chat or completions request whose prompt tail
+// errors-only, early-headers (a streamed reply's status and headers go out when the request is
+// admitted, before the wait for its first token, as vLLM does), die-on=<text> and fail-on=<text>
+// (a chat or completions request whose prompt tail
 // carries the text, once admitted and recorded, ends the engine process at once with no reply byte,
 // or is answered 500: the faults of spike S18, #528), slow-first=<dur>, never-settle=<pct>, stall,
 // token-delay=<dur>,
