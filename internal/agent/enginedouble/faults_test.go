@@ -203,44 +203,76 @@ func TestDieOnEndsTheEngineProcessUnderTheMarkedRequest(t *testing.T) {
 }
 
 // early-headers (Q1 of #528): a streamed reply's status and headers go out the moment it is admitted,
-// before the wait for its first token, as vLLM does. With slow-first=1h the engine provably sits in that
-// wait (its admitted record is written and no token can come for an hour): with the mode the client has
-// the 200 and the event-stream header then; without it, it has nothing while the engine waits.
+// before the wait for its first token, as vLLM does. The handler is driven directly: with
+// slow-first=1h it is admitted, then sits in its wait (its admitted record is written, and no token can
+// come for an hour); the request is then cancelled, which ends the wait, and once ServeHTTP has returned
+// every write it made is in the recorder, so the check races nothing. With the mode it wrote the 200
+// and the event-stream header (and nothing else); without it, it wrote nothing at all.
 func TestEarlyHeadersSendsAStreamsHeadersBeforeItsFirstToken(t *testing.T) {
 	for _, early := range []bool{true, false} {
 		cfg := cfgFor()
 		cfg.SlowFirst, cfg.EarlyHeaders = time.Hour, early
-		hc, records := recordedServer(t, cfg)
+		var mu sync.Mutex
+		var events []LogEvent
+		h := newHandler(cfg, func(ev LogEvent) {
+			mu.Lock()
+			events = append(events, ev)
+			mu.Unlock()
+		})
 		body, _ := json.Marshal(map[string]any{"model": "m", "messages": []map[string]string{{"role": "user", "content": "id-0001"}}, "max_tokens": 4, "stream": true})
 		ctx, cancel := context.WithCancel(context.Background())
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://engine/v1/chat/completions", bytes.NewReader(body))
-		got := make(chan *http.Response, 1)
+		w := &writeRecorder{h: http.Header{}}
+		done := make(chan struct{})
 		go func() {
-			if resp, err := hc.Do(req); err == nil {
-				got <- resp
-			}
-			close(got)
+			h.ServeHTTP(w, req)
+			close(done)
 		}()
-		eventually(t, 10*time.Second, "the request admitted", func() bool { return len(eventsOf(records(), "admitted", "id-0001")) == 1 })
-		if early {
-			select {
-			case resp := <-got:
-				if resp == nil || resp.StatusCode != 200 || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
-					t.Errorf("early-headers: the headers while the engine waits: %+v, want 200 and an event stream", resp)
-				}
-			case <-time.After(30 * time.Second):
-				t.Error("early-headers: no headers while the engine sits in its hour's wait for the first token")
-			}
-		} else {
-			select {
-			case resp := <-got:
-				t.Errorf("without early-headers the headers came while the engine waits for its first token: %+v", resp)
-			default:
-			}
-		}
+		eventually(t, 10*time.Second, "the request admitted", func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(eventsOf(events, "admitted", "id-0001")) == 1
+		})
 		cancel()
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the handler did not return once its request was cancelled")
+		}
+		switch {
+		case early && (w.status != http.StatusOK || !strings.HasPrefix(w.h.Get("Content-Type"), "text/event-stream") || w.bytes != 0):
+			t.Errorf("early-headers: wrote status %d, Content-Type %q and %d body bytes during the wait; want 200, an event stream, and no body", w.status, w.h.Get("Content-Type"), w.bytes)
+		case !early && (w.status != 0 || w.bytes != 0):
+			t.Errorf("without early-headers: wrote status %d and %d body bytes during the wait for the first token; want nothing", w.status, w.bytes)
+		}
 	}
 }
+
+// writeRecorder is a ResponseWriter that keeps what a handler wrote: its status (0: none), its headers
+// and how many body bytes.
+type writeRecorder struct {
+	h      http.Header
+	status int
+	bytes  int
+}
+
+func (w *writeRecorder) Header() http.Header { return w.h }
+
+func (w *writeRecorder) WriteHeader(code int) {
+	if w.status == 0 {
+		w.status = code
+	}
+}
+
+func (w *writeRecorder) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	w.bytes += len(p)
+	return len(p), nil
+}
+
+func (w *writeRecorder) Flush() {}
 
 // With early-headers, a fault on a marked streamed request still comes before the headers: fail-on
 // answers 500, not a 200 stream. And an unmarked stream's body is as without the mode: its events, then
