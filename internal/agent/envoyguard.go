@@ -25,7 +25,8 @@ import (
 //   - the circuit breakers' three thresholds at Envoy's field maximum;
 //   - the workers on Unix sockets, each named, each health-checked through the agent's readiness port
 //     with its own name as the check's Host;
-//   - the health checks, outlier detection and panic threshold at HBEP-5's values (Worker health).
+//   - the health checks, outlier detection and panic threshold at HBEP-5's values (Worker health);
+//   - the route's retry: once, on connect-failure and reset-before-request only, to another worker.
 //
 // Each map is held to the keys the agent writes, so a field that is not checked here cannot be
 // added unnoticed. The first fault is returned, naming its place.
@@ -348,7 +349,7 @@ func (g guard) hcm(v any, at string) error {
 	if err != nil {
 		return err
 	}
-	ra, err := g.object(r["route"], rat+".route", "cluster", "timeout", "idle_timeout", "hash_policy")
+	ra, err := g.object(r["route"], rat+".route", "cluster", "timeout", "idle_timeout", "hash_policy", "retry_policy")
 	if err != nil {
 		return err
 	}
@@ -374,6 +375,9 @@ func (g guard) hcm(v any, at string) error {
 		if err := g.timeout(ra[k], rat+".route."+k); err != nil {
 			return err
 		}
+	}
+	if err := g.retry(ra["retry_policy"], rat+".route.retry_policy"); err != nil {
+		return err
 	}
 	fs, err := g.list(h["http_filters"], at+".http_filters", 1)
 	if err != nil {
@@ -478,4 +482,39 @@ func (g guard) cluster(v any, at string) error {
 		}
 	}
 	return nil
+}
+
+// retry checks the route's retry policy: once, on connect-failure and reset-before-request only, to
+// another worker (previous_hosts), with nothing else set, so a request written to a worker is never
+// retried (HBEP-5, Worker health).
+func (g guard) retry(v any, at string) error {
+	rp, err := g.object(v, at, "retry_on", "num_retries", "retry_host_predicate", "host_selection_retry_max_attempts")
+	if err != nil {
+		return err
+	}
+	if err := g.str(rp["retry_on"], at+".retry_on", envoyRetryOn); err != nil {
+		return err
+	}
+	if err := g.num(rp["num_retries"], at+".num_retries", envoyNumRetries); err != nil {
+		return err
+	}
+	if err := g.num(rp["host_selection_retry_max_attempts"], at+".host_selection_retry_max_attempts", envoyHostSelectionAttempts); err != nil {
+		return err
+	}
+	ps, err := g.list(rp["retry_host_predicate"], at+".retry_host_predicate", 1)
+	if err != nil {
+		return err
+	}
+	p, err := g.object(ps[0], at+".retry_host_predicate[0]", "name", "typed_config")
+	if err != nil {
+		return err
+	}
+	if err := g.str(p["name"], at+".retry_host_predicate[0].name", envoyPreviousHosts); err != nil {
+		return err
+	}
+	tc, err := g.object(p["typed_config"], at+".retry_host_predicate[0].typed_config", "@type")
+	if err != nil {
+		return err
+	}
+	return g.str(tc["@type"], at+".retry_host_predicate[0].typed_config.@type", typePreviousHosts)
 }

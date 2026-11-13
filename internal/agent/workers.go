@@ -269,6 +269,9 @@ func (a *Agent) leaderExited(in *instance, g *procgroup.Group) {
 		return
 	}
 	w.phase = agentapi.PartExited
+	if w.downAt.IsZero() {
+		w.downAt = a.clock()
+	}
 	w.logTail = readLogTail(engineLogPath(a.o.LogDir, w.name), a.keys)
 	a.log.Warn("worker exited without being told to", "worker", w.name, "pid", g.PID(), "exitCode", code)
 	select {
