@@ -330,10 +330,12 @@ func (s *agentState) track(instUID string, w agentapi.WorkerReport, now time.Tim
 	}
 }
 
-// skewClock advances worker w's KV-skew clock by the report received at reportAt, once per report:
-// skewed starts it at that report, unless it runs, and not skewed stops it. It returns since when the
-// skew has held, zero when it does not, or when the process has no tracker (no metrics read yet), which
-// never starts a clock (kvskew.go).
+// skewClock advances worker w's KV-skew clock by the report received at reportAt, once per report, and
+// returns since when the skew has held: zero while it does not, or when the process has no tracker (no
+// metrics read yet), which never starts a clock (kvskew.go). The skew holds while the report's gauges
+// show it (skewed) and the worker is not draining: its generated-token counter known and unchanged since
+// the clock started (HBEP-7: a loaded worker still generates tokens; the science agent's correction on
+// #518). Gauges that don't show it stop the clock; a counter that moved starts it again at this report.
 func (b *Backend) skewClock(allocUID types.UID, instUID string, w agentapi.WorkerReport, reportAt time.Time, skewed bool) time.Time {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -348,9 +350,9 @@ func (b *Backend) skewClock(allocUID types.UID, instUID string, w agentapi.Worke
 	if !reportAt.Equal(t.skewSeen) {
 		t.skewSeen = reportAt
 		switch {
-		case !skewed:
+		case !skewed || t.tokens == nil:
 			t.skewSince = time.Time{}
-		case t.skewSince.IsZero():
+		case t.skewSince.IsZero() || t.tokensSince.After(t.skewSince):
 			t.skewSince = reportAt
 		}
 	}

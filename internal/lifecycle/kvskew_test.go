@@ -29,6 +29,27 @@ func gauges(running, waiting int64, kv float64) skewGauges {
 
 const skewProbe = 10 * time.Second
 
+// skewInstance is an Instance of three workers, each warmed up and router-admitted at generation 0, but
+// those named in unadmitted.
+func skewInstance(unadmitted ...string) *v1alpha1.Instance {
+	in := &v1alpha1.Instance{}
+	in.UID = "11111111-2222-3333-4444-555555555555"
+	three := int32(3)
+	in.Spec.Launch.Workers = &three
+	g := int64(0)
+	for _, w := range []string{"worker-0", "worker-1", "worker-2"} {
+		rec, _ := workerRecordName(in, w)
+		e := v1alpha1.InstanceWorker{Name: w, Record: rec, Verdict: string(v1alpha1.VerdictPass), WarmedUp: true, VerifiedGeneration: &g, RouterAdmittedGeneration: &g}
+		for _, u := range unadmitted {
+			if u == w {
+				e.RouterAdmittedGeneration = nil
+			}
+		}
+		in.Status.Workers = append(in.Status.Workers, e)
+	}
+	return in
+}
+
 // skewView is the agentView of a report at now with each worker's gauges and the router's view: routed
 // names the workers its running router holds healthy; a worker absent from it is held unhealthy.
 func skewView(now time.Time, ws map[string]skewGauges, routed map[string]bool, routerRunning bool) agentView {
@@ -80,27 +101,31 @@ func TestWhenAWorkerIsKVSkewed(t *testing.T) {
 		{"the full worker's KV use unknown", map[string]skewGauges{"worker-0": idle, "worker-1": {running: full.running, waiting: full.waiting}}, both, true, false},
 		{"three workers, one idle and routed", map[string]skewGauges{"worker-0": full, "worker-1": full, "worker-2": idle}, both, true, true},
 	} {
-		if got := workerSkewed(skewView(now, c.ws, c.routed, c.router), "worker-1"); got != c.want {
+		if got := workerSkewed(skewInstance(), skewView(now, c.ws, c.routed, c.router), "worker-1"); got != c.want {
 			t.Errorf("%s: skewed %v, want %v", c.name, got, c.want)
 		}
 	}
 	av := skewView(now, map[string]skewGauges{"worker-0": idle, "worker-1": full}, both, true)
+	if workerSkewed(skewInstance("worker-0"), av, "worker-1") {
+		t.Error("the idle sibling not router-admitted (rejoining) counts as routable")
+	}
 	av.report.Router.Workers[0].Ejected = true
-	if workerSkewed(av, "worker-1") {
+	if workerSkewed(skewInstance(), av, "worker-1") {
 		t.Error("the idle sibling ejected by outlier detection counts as routed")
 	}
 	av.unreachable = true
 	av.report.Router.Workers[0].Ejected = false
-	if workerSkewed(av, "worker-1") {
+	if workerSkewed(skewInstance(), av, "worker-1") {
 		t.Error("an unreachable agent's last report counts")
 	}
 }
 
 // skewBackend is a Backend holding a tracker for worker-1's process of the report skewView builds.
 func skewBackend(av agentView) (*Backend, types.UID, string, agentapi.WorkerReport) {
-	alloc, inst := types.UID("alloc-1"), "inst-1"
+	alloc, inst := types.UID("alloc-1"), "11111111-2222-3333-4444-555555555555"
 	w := *reportOf(av.report, "worker-1")
-	b := &Backend{agents: map[string]*agentState{string(alloc): {health: map[string]*tracker{trackerKey(inst, w): {}}}}}
+	tokens := int64(1000)
+	b := &Backend{agents: map[string]*agentState{string(alloc): {health: map[string]*tracker{trackerKey(inst, w): {tokens: &tokens, tokensSince: av.now.Add(-time.Hour)}}}}}
 	return b, alloc, inst, w
 }
 
@@ -143,8 +168,7 @@ func TestTheKVSkewSignalIsDueAfterKVSkewTimeout(t *testing.T) {
 		return skewView(at, map[string]skewGauges{"worker-0": {running: agentapi.Int64(0), waiting: agentapi.Int64(0), kv: agentapi.Float64(0), stale: true}, "worker-1": gauges(8, 3, 0.97)}, routed, true)
 	}
 	st := settings{kvSkewTimeout: 2 * time.Minute}
-	in := &v1alpha1.Instance{}
-	in.UID = "inst-1"
+	in := skewInstance()
 	alloc := &v1alpha1.Allocation{}
 	alloc.UID = "alloc-1"
 	b, _, _, _ := skewBackend(skewed(t0))
@@ -190,5 +214,29 @@ func TestTheKVSkewSignalIsDueAfterKVSkewTimeout(t *testing.T) {
 	}
 	if sig, _ := signal(r3, mem3, skewed(t0.Add(3*time.Minute))); sig != v1alpha1.ReasonKVSkew {
 		t.Errorf("kvSkewTimeout after the controller's start: signal %q, want KVSkew", sig)
+	}
+}
+
+// Not draining (HBEP-7, by #520): the clock holds only while the worker's generated-token counter is known
+// and unchanged since it started. A counter that moves starts it again at that report; an unknown one
+// stops it.
+func TestTheSkewClockNeedsAFlatTokenCounter(t *testing.T) {
+	t0 := time.Date(2026, 11, 13, 9, 0, 0, 0, time.UTC)
+	av := skewView(t0, map[string]skewGauges{"worker-0": gauges(0, 0, 0), "worker-1": gauges(8, 3, 0.97)}, map[string]bool{"worker-0": true, "worker-1": true}, true)
+	b, alloc, inst, w := skewBackend(av)
+	tr := b.agents[string(alloc)].health[trackerKey(inst, w)]
+	if got := b.skewClock(alloc, inst, w, t0, true); !got.Equal(t0) {
+		t.Fatalf("a flat counter: the clock starts at %v, want %v", got, t0)
+	}
+	tr.tokensSince = t0.Add(15 * time.Second) // the counter moved, taken in with the report at t0+15s
+	if got := b.skewClock(alloc, inst, w, t0.Add(20*time.Second), true); !got.Equal(t0.Add(20 * time.Second)) {
+		t.Errorf("after the counter moved: the clock's start is %v, want it started again at %v", got, t0.Add(20*time.Second))
+	}
+	if got := b.skewClock(alloc, inst, w, t0.Add(30*time.Second), true); !got.Equal(t0.Add(20 * time.Second)) {
+		t.Errorf("the counter flat again: start %v, want %v kept", got, t0.Add(20*time.Second))
+	}
+	tr.tokens = nil
+	if got := b.skewClock(alloc, inst, w, t0.Add(40*time.Second), true); !got.IsZero() {
+		t.Errorf("an unknown counter: start %v, want the clock stopped", got)
 	}
 }

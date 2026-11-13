@@ -347,14 +347,14 @@ func TestHealthWithoutPrefixCacheOmitsOnlyThePrefixCacheCounters(t *testing.T) {
 }
 
 // HealthGauges gives each worker the gauges its function names for it, fresh at each sample, with a
-// counter that rises per process.
+// counter kept per process that rises, or stays flat for a worker that isn't draining.
 func TestHealthGaugesGivesEachWorkerItsOwn(t *testing.T) {
-	waiting := int64(3)
-	f := fake.HealthGauges(func(w string) (int64, int64, float64) {
+	g1 := fake.Gauges{Running: 8, Waiting: 3, KVCache: 0.97, Flat: true}
+	f := fake.HealthGauges(func(w string) fake.Gauges {
 		if w == "worker-1" {
-			return 8, waiting, 0.97
+			return g1
 		}
-		return 0, 0, 0.1
+		return fake.Gauges{KVCache: 0.1}
 	})
 	now := time.Date(2026, 11, 13, 9, 0, 0, 0, time.UTC)
 	h1 := f(now, fake.Process{Worker: "worker-1", PID: 11})
@@ -365,8 +365,11 @@ func TestHealthGaugesGivesEachWorkerItsOwn(t *testing.T) {
 	if h1.MetricsReadAt == nil || !h1.MetricsReadAt.Equal(now) {
 		t.Errorf("worker-1's metrics read at %v, want the sample's time", h1.MetricsReadAt)
 	}
-	waiting = 0
-	if h := f(now.Add(time.Second), fake.Process{Worker: "worker-1", PID: 11}); *h.WaitingRequests != 0 || *h.GeneratedTokens <= *h1.GeneratedTokens {
-		t.Errorf("worker-1's next sample: waiting %d, tokens %d after %d; want 0, and the counter risen", *h.WaitingRequests, *h.GeneratedTokens, *h1.GeneratedTokens)
+	if h := f(now.Add(time.Second), fake.Process{Worker: "worker-1", PID: 11}); *h.GeneratedTokens != *h1.GeneratedTokens {
+		t.Errorf("a flat worker's counter went from %d to %d", *h1.GeneratedTokens, *h.GeneratedTokens)
+	}
+	g1.Flat, g1.Waiting = false, 0
+	if h := f(now.Add(2*time.Second), fake.Process{Worker: "worker-1", PID: 11}); *h.WaitingRequests != 0 || *h.GeneratedTokens <= *h1.GeneratedTokens {
+		t.Errorf("worker-1 draining: waiting %d, tokens %d after %d; want 0, and the counter risen", *h.WaitingRequests, *h.GeneratedTokens, *h1.GeneratedTokens)
 	}
 }

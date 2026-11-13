@@ -169,16 +169,26 @@ func HealthWithoutPrefixCache(now time.Time, _ Process) agentapi.Health {
 	return h
 }
 
+// Gauges is one worker's gauges at a sample, for HealthGauges: its running and waiting requests and its
+// KV cache's use, and whether its generated-token counter stays where it is (Flat), a worker that isn't
+// draining, or rises by 1,000 at the sample, one that is.
+type Gauges struct {
+	Running, Waiting int64
+	KVCache          float64
+	Flat             bool
+}
+
 // HealthGauges returns an engine whose probe passes and whose metrics are read at every sample, with the
-// running and waiting requests and the KV cache's use that gauges gives for the sample's worker
-// (Process.Worker): each worker of an Instance its own (HBEP-7, the KV-skew signal; #518). gauges is
-// asked at every sample, so a test changes a worker's gauges as it goes. The generated-token counter
-// rises by 1,000 at every sample, so no no-progress signal comes of it; it is kept per process. Give each
-// Agent its own engine.
-func HealthGauges(gauges func(worker string) (running, waiting int64, kvCache float64)) func(time.Time, Process) agentapi.Health {
-	samples := perProcessCount{}
+// gauges gauges gives for the sample's worker (Process.Worker): each worker of an Instance its own
+// (HBEP-7, the KV-skew signal; #518). gauges is asked at every sample, so a test changes a worker's
+// gauges as it goes. The counter is kept per process. Give each Agent its own engine.
+func HealthGauges(gauges func(worker string) Gauges) func(time.Time, Process) agentapi.Health {
+	counts := map[int]int64{}
 	return func(now time.Time, p Process) agentapi.Health {
-		running, waiting, kv := gauges(p.Worker)
-		return metricsSample(now, running, waiting, 1000*samples.next(p), kv)
+		g := gauges(p.Worker)
+		if !g.Flat {
+			counts[p.PID] += 1000
+		}
+		return metricsSample(now, g.Running, g.Waiting, counts[p.PID], g.KVCache)
 	}
 }
