@@ -89,6 +89,9 @@ type rig struct {
 	// mdWorkers, when set, is the served deployment's workersPerInstance
 	// (#439, workers_test.go). Unset, the deployment is as before.
 	mdWorkers int32
+	// mdLease, when set, is the served deployment's leaseLimit, for a test
+	// whose steps outlast rehearsalTiming's (workers_test.go). Unset, as before.
+	mdLease string
 	// watch records every Instance version the API sends.
 	watch *stack.Recorder
 	// proxyEnds is when frps was first seen to list each ended Instance's

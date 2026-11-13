@@ -38,6 +38,9 @@ func (r *rig) stepStart() *v1alpha1.Instance {
 	if r.mdWorkers > 0 {
 		md.Spec.WorkersPerInstance = &r.mdWorkers
 	}
+	if r.mdLease != "" {
+		md.Spec.LeaseLimit = stack.Dur(r.mdLease)
+	}
 	stack.Create(r.t, r.c, md)
 	var alloc v1alpha1.Allocation
 	stack.WaitFor(r.t, stack.WaitDeadline, "an Allocation with a job ID", func() bool {
