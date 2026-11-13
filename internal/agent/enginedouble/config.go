@@ -60,12 +60,21 @@ type Config struct {
 	HealthFail         bool          // /health answers 503
 	HealthFailAfter    time.Duration // /health answers 200 until this long after the handler was made, then 503, when HealthFailAfterSet
 	HealthFailAfterSet bool
-	ErrorsOnly         bool          // chat and completions answer 500
-	SlowFirst          time.Duration // the first request of each shape waits this long before its first token
-	NeverSettle        int           // each request of a shape waits this percent of TokenDelay*tokens longer than the last
-	Stall              bool          // a streamed request stops after its first token and hangs
-	ReasoningFirst     int           // the reply reasons for this many tokens (0: off) before its answer
-	ReasoningForever   bool          // the reply reasons until max_tokens runs out, with no answer
+	ErrorsOnly         bool // chat and completions answer 500
+	// DieOn and FailOn are the fault modes of #528 (spike S18): a chat or completions request whose
+	// prompt tail (LogEvent.Tail) carries DieOn ends the engine process at once once it is admitted
+	// and recorded, with no reply byte; one that carries FailOn is answered 500 then. Empty: off.
+	DieOn  string
+	FailOn string
+	// EarlyHeaders sends a streamed reply's status and headers the moment it is admitted, before the
+	// wait for its first token, as vLLM does (HBEP-5; the science agent's ruling on #528, Q1). Off,
+	// they go out with the first event, as before.
+	EarlyHeaders     bool
+	SlowFirst        time.Duration // the first request of each shape waits this long before its first token
+	NeverSettle      int           // each request of a shape waits this percent of TokenDelay*tokens longer than the last
+	Stall            bool          // a streamed request stops after its first token and hangs
+	ReasoningFirst   int           // the reply reasons for this many tokens (0: off) before its answer
+	ReasoningForever bool          // the reply reasons until max_tokens runs out, with no answer
 	// ReplyBytes, when above 0, pads to at least this many bytes the content of a non-streamed chat
 	// reply whose request's last message is ReplyBytesMarker: a large non-streamed reply, as the bulk
 	// path's test plan sends beside token streams (HBEP-6, Test plan, The bulk path; #448). Every other

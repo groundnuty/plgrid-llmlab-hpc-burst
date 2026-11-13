@@ -219,7 +219,8 @@ func TestRowBsHealthyDryRunPostsItsMeasurements(t *testing.T) {
 		"from the predecessor's job end to the successor's submission: 10s; the successor's queue wait: 0s", "NoOverlapSlot seen: true",
 		"ReleaseWhenIdle true, idleLimit 2m0s", "a job outside the run seen in it: false", "created after the predecessor's job left the slot: true",
 		"the warm start of the predecessor's job, from its agent's own log: the image staged already", "the warm start of the successor's job, from its agent's own log: the image staged already",
-		"the deployment ended at the row's end, every job of the run seen ended: true"} {
+		"the deployment ended at the row's end, every job of the run seen ended: true",
+		"each job's lease end past its start plus its time limit, as the guard's looks listed it (at most 5m0s taken): the predecessor's job 1 s, the successor's job 0 s"} {
 		if !strings.Contains(string(posts), w) {
 			t.Errorf("the text to post lacks %q:\n%s", w, posts)
 		}
