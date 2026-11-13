@@ -336,6 +336,7 @@ func TestDryRunEveryArm(t *testing.T) {
 			Passed    bool     `json:"passed"`
 			Non200    int      `json:"non_200"`
 			NonLater  int      `json:"non_200_later"`
+			CutAtKill int      `json:"cut_at_kill"`
 			Early     int      `json:"victim_rq_success_before_verification"`
 			Placed    int      `json:"victim_placement_lines_before_verification"`
 			Verified  *float64 `json:"victim_verified_s"`
@@ -351,14 +352,13 @@ func TestDryRunEveryArm(t *testing.T) {
 		if err := json.Unmarshal([]byte(readFile(t, filepath.Join(results, "arms", "H1-probe", "probe.json"))), &p); err != nil {
 			t.Fatal(err)
 		}
-		// Every check but the no-503 one must pass. That one counts a request Envoy had already written to the
-		// victim's pooled connection at the kill, which the agent's retry policy does not retry by design; the
-		// science agent rules on it (#62). Here it may fail only for such a request, never for a later one.
-		if p.Victim != "worker-3" || p.NonLater != 0 || p.Early != 0 || p.Placed != 0 || len(p.Checks) != 6 {
+		// Every check passes: no non-200 after the kill's first interval, and at most one request cut at the
+		// kill (the science agent's ruling on #62: one per kill is expected, more is a finding).
+		if !p.Passed || p.Victim != "worker-3" || p.NonLater != 0 || p.CutAtKill > 1 || p.Early != 0 || p.Placed != 0 || len(p.Checks) != 7 {
 			t.Fatalf("probe: %+v", p)
 		}
 		for _, c := range p.Checks {
-			if !strings.HasPrefix(c, "ok ") && !strings.HasPrefix(c, "FAIL no 503 while the siblings are healthy:") {
+			if !strings.HasPrefix(c, "ok ") {
 				t.Errorf("probe check %q", c)
 			}
 		}
@@ -376,8 +376,7 @@ func TestDryRunEveryArm(t *testing.T) {
 	t.Run("summary", func(t *testing.T) {
 		out := filepath.Join(e.root, "summary.json")
 		cmd := exec.Command("python3", "-I", "-B", "../scripts/analyze.py", results, "--json", out)
-		// Exit 1 is a failed check, which checkSummary names: only the probe's no-503 check may fail, pending
-		// the science agent's ruling (#62). Exit 2, unreadable input, fails here.
+		// Exit 1 is a failed check, which checkSummary names; exit 2, unreadable input, fails here.
 		if b, err := cmd.CombinedOutput(); err != nil {
 			var ee *exec.ExitError
 			if !errors.As(err, &ee) || ee.ExitCode() != 1 {
@@ -483,12 +482,12 @@ func checkSummary(t *testing.T, js string, arms []string) {
 			continue
 		}
 		for _, c := range r.Checks {
-			if !c.OK && !(r.Arm == "probe" && c.Check == "no 503 while the siblings are healthy") { // pending the ruling (#62)
+			if !c.OK {
 				t.Errorf("%s: check %s failed", r.Name, c.Check)
 			}
 		}
 		if r.Arm == "probe" || r.Arm == "relay-control" {
-			if want := map[string]int{"probe": 6, "relay-control": 3}[r.Arm]; len(r.Checks) != want {
+			if want := map[string]int{"probe": 7, "relay-control": 3}[r.Arm]; len(r.Checks) != want {
 				t.Errorf("%s: %d checks, want %d", r.Name, len(r.Checks), want)
 			}
 			continue

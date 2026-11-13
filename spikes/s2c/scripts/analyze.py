@@ -690,7 +690,8 @@ def markdown(rows):
         p = r["probe"]
         text += (f"\n\nDead-worker probe {r['name']} (victim {p.get('victim')}): healthy again {fmt(p.get('victim_healthy_s'), '.1f')} s, "
                  f"verified {fmt(p.get('victim_verified_s'), '.1f')} s, admitted {fmt(p.get('victim_admitted_s'), '.1f')} s after the kill; "
-                 f"{len(p.get('samples') or [])} probe requests, {p.get('non_200')} not 200, longest {fmt(p.get('max_latency_during_outage_ms'), '.0f')} ms "
+                 f"{len(p.get('samples') or [])} probe requests, {p.get('non_200')} not 200 ({p.get('cut_at_kill', 'n/a')} cut at the kill, "
+                 f"{p.get('non_200_later', 'n/a')} later), longest {fmt(p.get('max_latency_during_outage_ms'), '.0f')} ms "
                  "during the outage\n" + "\n".join(check_line(c) for c in r["checks"]))
         notes += [f"- {r['name']}: {check_line(c)}" for c in r["checks"] if not c["ok"]]
     if rules:

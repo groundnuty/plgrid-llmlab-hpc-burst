@@ -785,7 +785,7 @@ class ProbeTest(unittest.TestCase):
             json.dump(self.META, f)
         if with_probe:
             with open(os.path.join(arm, "probe.json"), "w") as f:
-                json.dump({"victim": "worker-3", "checks": checks, "samples": [{"status": 200}] * 3, "non_200": 0,
+                json.dump({"victim": "worker-3", "checks": checks, "samples": [{"status": 200}] * 3, "non_200": 1, "cut_at_kill": 1, "non_200_later": 0,
                            "victim_healthy_s": 30.0, "victim_verified_s": 45.5, "victim_admitted_s": 50.0,
                            "max_latency_during_outage_ms": 812.0}, f)
         return d
@@ -800,6 +800,7 @@ class ProbeTest(unittest.TestCase):
         md = analyze.markdown(rows)
         self.assertIn("victim worker-3", md)
         self.assertIn("admitted 50.0 s after the kill", md)  # the probe's own figure, printed as given
+        self.assertIn("1 not 200 (1 cut at the kill, 0 later)", md)  # the count the ruling on #62 asks the post to give
 
     def test_failing_probe(self):
         checks = self.PASS[:2] + ["FAIL no 503 while the siblings are healthy: 2 of 40 probe requests failed"] + self.PASS[3:]

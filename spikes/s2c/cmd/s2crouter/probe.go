@@ -80,11 +80,11 @@ type probeRecord struct {
 	VerifiedS    *float64       `json:"victim_verified_s"` // flagged verified
 	AdmittedS    *float64       `json:"victim_admitted_s"` // a request in its key reached it again
 	Non200       int            `json:"non_200"`
-	// The non-200s split for the science agent's ruling (the verdict counts them all until then):
-	// CutAtKill are requests Envoy had already written to the victim's pooled connection when it died
-	// (its reply names a connection termination, within the first interval after the kill), which the
-	// agent's retry policy does not retry by design (nothing written to a worker is retried); the
-	// others are NonLater.
+	// The non-200s split as the science agent ruled on #62: CutAtKill are requests Envoy had already
+	// written to the victim's pooled connection when it died (its reply names a connection termination,
+	// within the first interval after the kill), which the agent's retry policy does not retry by design
+	// (nothing written to a worker is retried; the residual accepted on #507). One per kill is the
+	// expected shape and more is a finding; every other non-200, NonLater, fails the probe.
 	CutAtKill     int      `json:"cut_at_kill"`
 	NonLater      int      `json:"non_200_later"`
 	PauseMs       float64  `json:"max_latency_during_outage_ms"`
@@ -351,8 +351,9 @@ func runProbe(o probeOpts) (*probeRecord, error) {
 	}
 	check(midStream, "the victim was killed mid-stream", "its stream ended before the kill: raise -stream-tokens")
 	check(uncut, "siblings' streams uncut", fmt.Sprintf("%+v", rec.Streams))
-	check(rec.Non200 == 0, "no 503 while the siblings are healthy", fmt.Sprintf("%d of %d probe requests failed (%d cut at the kill on the victim's pooled connection, %d later)",
-		rec.Non200, len(rec.Samples), rec.CutAtKill, rec.NonLater))
+	check(rec.NonLater == 0, "no 503 while the siblings are healthy", fmt.Sprintf("%d of %d probe requests failed after the kill's first interval",
+		rec.NonLater, len(rec.Samples)))
+	check(rec.CutAtKill <= 1, "at most one request cut at the kill", fmt.Sprintf("%d cut at the kill on the victim's pooled connection: more than one is a finding (#62)", rec.CutAtKill))
 	check(rec.EarlyEnvoy == 0 && rec.EarlyPlaced == 0 && !verifiedAt.IsZero(), "nothing reaches the restarted worker before its verification",
 		fmt.Sprintf("Envoy counted %d, its placement log %d, verified=%v", rec.EarlyEnvoy, rec.EarlyPlaced, !verifiedAt.IsZero()))
 	check(rec.AdmittedS != nil, "the verified worker takes its key's requests again", "never admitted")

@@ -117,7 +117,7 @@ the science agent's. Every worker's key is read from Envoy's own per-host counte
 1. A long stream runs on every worker, and the last worker is killed (SIGKILL to its process tree, through pidfds)
    while they stream. The siblings' streams must end uncut.
 2. From the kill on, a request in the victim's key goes every 250 ms. Each must be answered 200, by a sibling, never
-   a 503.
+   a 503, apart from at most one request cut at the kill (below).
 3. The job restarts the victim. The probe holds it unverified for 15 s (three of Envoy's health checks), counted from
    the moment its engine answers AND Envoy no longer holds it ejected. The dead worker's connect failures set off
    outlier detection, which ejects it for 30 s or more, and during that it takes nothing whatever the readiness says.
@@ -130,12 +130,13 @@ the science agent's. Every worker's key is read from Envoy's own per-host counte
 `probe.json` records each check and the timeline: when the victim was healthy again, when its ejection ended, when
 the hold started, when it was verified and admitted, plus the longest probe request during the outage.
 
-**A known failure, pending the science agent's ruling.** The dry run's probe sees one 503 in most runs (3 of 4 alone):
-a request Envoy writes to the victim's pooled connection within about a millisecond of the kill, which Envoy answers
-"upstream connect error or disconnect/reset before headers. reset reason: connection termination". The agent's retry
-policy retries nothing written to a worker, by design (`internal/agent/envoyconf.go`; the residual accepted on #507).
-`probe.json` counts such a request as `cut_at_kill`, apart from any later failure (`non_200_later`). The no-503 check
-still counts both until the ruling.
+**The request cut at the kill** (the science agent's ruling on #62). In most dry runs (3 of 4 alone) the probe sees one
+503: a request Envoy writes to the victim's pooled connection within about a millisecond of the kill, which Envoy
+answers "upstream connect error or disconnect/reset before headers. reset reason: connection termination". The agent's
+retry policy retries nothing written to a worker, by design (`internal/agent/envoyconf.go`; the residual accepted on
+#507). Such a failure, within the first probe interval after the kill, is recorded as `cut_at_kill`. One per kill is
+the expected shape; more than one is a finding and fails the probe's own check. Every later non-200
+(`non_200_later`) fails the no-503 check. The summary gives both counts.
 
 ## What each output means
 
