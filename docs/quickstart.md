@@ -228,7 +228,7 @@ Helios is beta, to run when the GH200 nodes return. The steps are the same, with
 
 ## Beta: Instances behind a router
 
-Opt-in. With `--instance-router envoy`, the controller runs each new Instance's worker behind Envoy ([HBEP-5](../hbep/0005-llmlab-compatible-front/README.md), Inside an Instance), and every job is staged with Envoy's build. The release archive doesn't ship that build, so fetch it into the agent builds first, then start the host with the flag; the other flags are step 4's:
+Opt-in. With `--instance-router envoy`, the controller runs each new Instance's worker behind Envoy ([HBEP-5](../hbep/0005-llmlab-compatible-front/README.md), Inside an Instance), and every job is staged with Envoy's build. The release archive doesn't ship that build, so this section needs a clone of the repository: fetch the build from the clone into the agent builds first, then start the host with the flag; the other flags are step 4's:
 
 ```
 hack/fetch-envoy.sh --agent-builds "$STATE/agent-builds"

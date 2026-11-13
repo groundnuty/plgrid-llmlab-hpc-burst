@@ -179,6 +179,14 @@ type DesiredWorker struct {
 	// equals Generation, so a generation raised but not yet verified never
 	// takes traffic. Absent: none verified yet, since a generation starts at 0.
 	VerifiedGeneration *int64 `json:"verifiedGeneration,omitempty"`
+
+	// Checks asks for this worker's checks, against its own socket, never
+	// through the router (beta, several workers; HBEP-7, Several workers): the
+	// settings comparison, qualification and warm-up of this worker alone, so a
+	// worker restarted while the Instance is ready is verified on its own. With
+	// one worker the Instance's own Checks carry them, as before, and this is
+	// absent.
+	Checks *Checks `json:"checks,omitempty"`
 }
 
 // Launch is an Instance's launch on the wire, a copy of the Instance's
@@ -431,6 +439,12 @@ type WorkerReport struct {
 	// key is left at the cut (PR #138 review). Report.Redacted leaves it as
 	// it is.
 	LogTail string `json:"logTail,omitempty"`
+
+	// Checks are the results of this worker's latest Checks, for its
+	// verification generation (beta, several workers; HBEP-7, Several workers).
+	// With one worker the Instance report's own Checks carry them, and this is
+	// absent.
+	Checks *CheckResults `json:"checks,omitempty"`
 }
 
 // Health is one sample of an engine's health: the local probe every

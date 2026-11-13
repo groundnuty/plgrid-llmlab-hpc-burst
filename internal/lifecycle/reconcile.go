@@ -334,6 +334,12 @@ func (p *pass) prepareServed() error {
 		}
 	}
 	plan, err := checkServed(p.md)
+	// Several workers always run behind a router, which the controller stages and starts only under
+	// --instance-router envoy: without it they are refused, not started without one (HBEP-7, Several
+	// workers; the science agent's ruling on #439, Q7). With the flag every new Instance gets the router.
+	if err == nil && plan.workers > 1 && p.r.Config.InstanceRouter != v1alpha1.InstanceRouterEnvoy {
+		err = refuse("workersPerInstance %d needs the lifecycle controller's --instance-router envoy: several workers run behind a router, and this controller runs without one (HBEP-7, Several workers)", plan.workers)
+	}
 	var u *unsupported
 	switch {
 	case errors.As(err, &u):
