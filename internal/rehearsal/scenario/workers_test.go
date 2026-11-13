@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -304,14 +305,10 @@ func TestRehearsalTwoWorkers(t *testing.T) {
 	victim = map[string]string{"worker-0": "worker-1", "worker-1": "worker-0"}[streamOn]
 	pidfdKill(t, engines[victim].pid, "--uds")
 	killAt := time.Now()
-	// Envoy routes to the dead worker until its next active check, every 5 s (HBEP-5): within that
-	// window a request may reach the dead socket, or a restarted process that is not verified yet. That
-	// gap is an open finding, with the science agent; until its ruling, the strict check below starts
-	// once Envoy holds the worker failing its active check, which its own /clusters shows.
-	stack.WaitFor(t, stack.WaitDeadline, "Envoy to hold "+victim+" failing its active check", func() bool {
-		return hostStats(t, admin)[victim]["failed_active"] == 1
-	})
-	t.Logf("step (c): Envoy held %s failing %s after its kill", victim, time.Since(killAt).Round(10*time.Millisecond))
+	// From the kill on, strictly: a request is served, Envoy's route retrying one it sends the dead worker
+	// to its sibling, and none reaches the restarted process before its verification, which waits until
+	// Envoy holds the worker out of its routing (HBEP-5, Worker health; HBEP-7, Several workers; the
+	// science agent's ruling on #439, PR 4's finding).
 	var counts []int32
 	stack.WaitFor(t, 3*stack.WaitDeadline, victim+" back, verified again and admitted", func() bool {
 		now, ok := r.instance(in.Name)
@@ -413,42 +410,51 @@ func TestRehearsalTwoWorkers(t *testing.T) {
 	// restart. Then the gate lets it start, and it rejoins.
 	r.stepFailedRejoin(in, key, admin, streamOn, jobID, engines)
 
-	// (f) A count changed: the running Instance keeps its two workers, and the next Instance, from a
-	// scale-up, takes the new count, one.
+	// (f) A count changed: every Instance running keeps its two workers, the primary and its handover
+	// replacement (which a 20m lease brings at once: its drain start, less the class's default 30m
+	// start-to-ready, is past), and the next Instance, from a scale-up, takes the new count, one.
+	existing := map[types.UID]bool{}
+	for _, x := range r.instances() {
+		existing[x.UID] = true
+	}
 	var md v1alpha1.ModelDeployment
 	if !r.get(&md, stack.MDName, stack.Namespace) {
 		t.Fatal("step (f): no ModelDeployment")
 	}
 	patch := client.MergeFrom(md.DeepCopy())
-	md.Spec.WorkersPerInstance, md.Spec.Instances = nil, 2
+	md.Spec.WorkersPerInstance, md.Spec.Instances = nil, md.Spec.Instances+1
 	ctx, cancel = stack.CallCtx(t)
 	if err := r.c.Patch(ctx, &md, patch); err != nil {
 		t.Fatalf("step (f): patch: %v", err)
 	}
 	cancel()
-	patchedAt := time.Now()
 	var got v1alpha1.ModelDeployment
-	if !r.get(&got, stack.MDName, stack.Namespace) || got.Spec.WorkersPerInstance != nil || got.Spec.Instances != 2 {
-		t.Fatalf("step (f): the deployment after the patch: workersPerInstance %v, instances %d; want absent and 2", got.Spec.WorkersPerInstance, got.Spec.Instances)
+	if !r.get(&got, stack.MDName, stack.Namespace) || got.Spec.WorkersPerInstance != nil {
+		t.Fatalf("step (f): the deployment after the patch: workersPerInstance %v, want absent", got.Spec.WorkersPerInstance)
 	}
-	stack.WaitFor(t, 3*stack.WaitDeadline, "a second Instance ready", func() bool {
-		n := 0
+	var added v1alpha1.Instance
+	for end := time.Now().Add(3 * stack.WaitDeadline); ; time.Sleep(2 * time.Second) {
+		var seen []string
+		found := false
 		for _, x := range r.instances() {
-			if x.Status.Phase == v1alpha1.InstanceReady {
-				n++
+			seen = append(seen, x.Name+" "+string(x.Status.Phase)+" "+x.Status.EndReason+" workers "+strconv.Itoa(int(v1alpha1.LaunchWorkers(x.Spec.Launch))))
+			if !existing[x.UID] && x.Status.Phase == v1alpha1.InstanceReady {
+				added, found = x, true
 			}
 		}
-		return n == 2
-	})
+		if found {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatalf("step (f): no Instance of the scale-up ready within %s of the patch: %v;%s", 3*stack.WaitDeadline, seen, r.describe())
+		}
+	}
+	if w := added.Spec.Launch.Workers; w != nil {
+		t.Errorf("step (f): the scale-up's Instance %s has launch.workers %d, want absent, one worker", added.Name, *w)
+	}
 	for _, x := range r.instances() {
-		w := x.Spec.Launch.Workers
-		t.Logf("step (f): Instance %s, created %s (%s after the patch), phase %s, launch.workers %v",
-			x.Name, x.CreationTimestamp.Format(time.RFC3339), x.CreationTimestamp.Sub(patchedAt).Round(time.Second), x.Status.Phase, w)
-		switch {
-		case x.UID == in.UID && (w == nil || *w != 2):
-			t.Errorf("step (f): the running Instance's launch.workers is %v, want 2 kept", w)
-		case x.UID != in.UID && x.Status.Phase == v1alpha1.InstanceReady && w != nil:
-			t.Errorf("step (f): the new Instance's launch.workers is %d, want absent, one worker", *w)
+		if w := x.Spec.Launch.Workers; existing[x.UID] && x.Status.Phase != v1alpha1.InstanceEnded && (w == nil || *w != 2) {
+			t.Errorf("step (f): Instance %s, running before the change, has launch.workers %v, want 2 kept", x.Name, w)
 		}
 	}
 }
@@ -512,7 +518,8 @@ func (r *rig) stepFailedRejoin(in *v1alpha1.Instance, key, admin, w string, jobI
 	if !streamed.EndAt.After(timedOut) && !streamed.FirstAt.Before(timedOut) {
 		r.t.Logf("step (e2): the stream ran %s to %s, the timeout's restart was seen at %s", streamed.FirstAt.Format(time.RFC3339Nano), streamed.EndAt.Format(time.RFC3339Nano), timedOut.Format(time.RFC3339Nano))
 	}
-	if err := r.cl.gate.release(jobID); err != nil {
+	// Open the gate for good: a later start, step (f)'s new Instance, must not wait at it.
+	if err := r.cl.gate.open(); err != nil {
 		r.t.Fatal(err)
 	}
 	stack.WaitFor(r.t, 3*stack.WaitDeadline, w+" back after the gate's release", func() bool {
