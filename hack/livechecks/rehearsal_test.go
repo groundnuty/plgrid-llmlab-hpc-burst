@@ -413,7 +413,11 @@ func TestRehearsalRowInterruptWaitsForRehearsalShsTeardown(t *testing.T) {
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	err = cmd.Wait()
+	err, timedOut := waitBounded(cmd, rehearsalStopBound)
+	if timedOut {
+		b, _ := os.ReadFile(screen.Name())
+		t.Fatalf("the script did not stop within %s of its stop signal; the screen so far:\n%s\nthe process tree, as it is now:\n%s", rehearsalStopBound, b, hangDump(cmd.Process.Pid))
+	}
 	w.noLeftoverProcess(cmd)
 	b, _ := os.ReadFile(screen.Name())
 	w.noLeak(string(b))
@@ -425,5 +429,53 @@ func TestRehearsalRowInterruptWaitsForRehearsalShsTeardown(t *testing.T) {
 	}
 	if !tornDownWhenReported {
 		t.Errorf("the run reported the interrupt before rehearsal.sh had finished its teardown:\n%s", b)
+	}
+}
+
+// A stopped rehearsal row can take longer than a plain row to stop (its script waits up to REHEARSAL_STOP_STEPS x 0.2 s between TERM and
+// KILL for the teardown), so its wait has a bound of its own (rehearsalStopBound), and that bound must stay above the script's own grace,
+// the reaper's grace and its kills, and some slack. The steps are read from the script, so a longer grace there fails here, not as a
+// hang. The 90 s is the arithmetic of 450 steps of 0.2 s, written out.
+func TestTheRehearsalStopBoundExceedsTheScriptsGrace(t *testing.T) {
+	b, err := os.ReadFile(scriptPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^REHEARSAL_STOP_STEPS=([0-9]+)\s*$`).FindStringSubmatch(string(b))
+	if m == nil {
+		t.Fatal("the script has no REHEARSAL_STOP_STEPS line")
+	}
+	steps, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	grace := time.Duration(steps) * 200 * time.Millisecond
+	if grace != 90*time.Second {
+		t.Errorf("the rehearsal row's TERM-to-KILL grace is %s (%d steps), not the 90 s this bound was sized for: size it again", grace, steps)
+	}
+	if need := grace + 2*leftoverDeadline + 10*time.Second; rehearsalStopBound < need {
+		t.Errorf("rehearsalStopBound is %s, under the %s a correct stop can take (the grace %s, the reaper's grace and kills %s, 10 s of slack)", rehearsalStopBound, need, grace, 2*leftoverDeadline)
+	}
+	if rehearsalStopBound <= stopBound {
+		t.Errorf("rehearsalStopBound %s is not above stopBound %s", rehearsalStopBound, stopBound)
+	}
+	// And the interrupt test waits through it, not through stopBound, which a correct stop of this row (11 s here, 100 s at the script's
+	// own grace) would pass on the stub and fail on the cluster: a pin on the test's source, as the budget tests make.
+	src, err := os.ReadFile("rehearsal_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The interrupt test's own body: from its func line to the next func line (or the file's end), so a shorter file cannot panic the slice.
+	test := string(src)
+	i := strings.Index(test, "func TestRehearsalRowInterruptWaitsForRehearsalShsTeardown(")
+	if i < 0 {
+		t.Fatal("rehearsal_test.go has no TestRehearsalRowInterruptWaitsForRehearsalShsTeardown")
+	}
+	body := test[i:]
+	if n := strings.Index(body[1:], "\nfunc "); n >= 0 {
+		body = body[:n+1]
+	}
+	if !strings.Contains(body, "waitBounded(cmd, rehearsalStopBound)") {
+		t.Error("TestRehearsalRowInterruptWaitsForRehearsalShsTeardown does not wait through waitBounded(cmd, rehearsalStopBound)")
 	}
 }
