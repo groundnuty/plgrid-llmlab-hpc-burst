@@ -620,9 +620,12 @@ func standInNowServeAfter(t *testing.T, before func(cl *stack.Cluster, w world))
 // TestStandInNowServe is alpha-athena-now-serve's live steps over the stand-in, through Run: the Instance ready, the stream, the
 // identity, the gauges, the worker-rung restart, the events, then the deployment deleted and its job ended (no requeue: #503). The
 // verdict judges what the steps saw; this test then reads the fake cluster's own record of the run's jobs. The job must have ended
-// by the stack's own release of its Allocation: the fake's own TERM (a cancel) came before Close began to stop the stack, so the
-// cleanup's cancel of what is left (which comes after) did not end it, and before the job's time limit, so the end was not the
-// scheduler's. "Finished" alone would pass on either, and on the time limit it is the case #503 was.
+// by the stack's own release of its Allocation, before the run's cleanup could: it ended before Close began to stop the stack (the
+// cleanup's cancel of what is left comes after), and before its time limit (so it was not the scheduler's). "Finished" alone would
+// pass on either of those, and the time limit is the case #503 was. How the release ends a job is not a cancel here: the controller
+// tells the agent to stop once its Allocation is deleted (lifecycle, Desired), the agent exits 0 and the job is COMPLETED before the
+// Provider's finalizer has anything to scancel, so the fake never sends it a TERM. Either end is the release's; a TERM after Close
+// began, or an end after it, is the cleanup's.
 //
 //livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
 func TestStandInNowServe(t *testing.T) {
@@ -651,12 +654,15 @@ func TestStandInNowServe(t *testing.T) {
 		t.Fatalf("the fake cluster holds %d jobs of the run, want the one", len(ours))
 	}
 	j := ours[0]
-	if j.RestartCount != 0 || j.State != fakeslurm.Cancelled || !j.Finished {
-		t.Errorf("the run's job has restart count %d, state %s and finished %t, want no requeue, a cancel and an end", j.RestartCount, j.State, j.Finished)
+	if j.RestartCount != 0 || !j.Finished || (j.State != fakeslurm.Completed && j.State != fakeslurm.Cancelled) {
+		t.Errorf("the run's job has restart count %d, state %s and finished %t, want no requeue, an end by the agent's exit or a cancel, and finished", j.RestartCount, j.State, j.Finished)
 	}
-	if j.TermAt.IsZero() || !j.TermAt.Before(s.stop.began) {
-		t.Errorf("the job was sent TERM at %s and Close began to stop the stack at %s: the stack's release did not cancel it before the cleanup did",
-			j.TermAt.Format(time.TimeOnly), s.stop.began.Format(time.TimeOnly))
+	if j.End.IsZero() || !j.End.Before(s.stop.began) {
+		t.Errorf("the job ended at %s and Close began to stop the stack at %s: the stack's release did not end it before the cleanup could",
+			j.End.Format(time.TimeOnly), s.stop.began.Format(time.TimeOnly))
+	}
+	if !j.TermAt.IsZero() && !j.TermAt.Before(s.stop.began) {
+		t.Errorf("the job was sent TERM at %s, after Close began to stop the stack at %s: the cleanup's cancel ended it", j.TermAt.Format(time.TimeOnly), s.stop.began.Format(time.TimeOnly))
 	}
 	if limit := j.Start.Add(time.Duration(j.TimeLimit) * time.Minute); !j.End.Before(limit) {
 		t.Errorf("the job ended at %s, not before its time limit at %s: the scheduler's limit ended it, not the release", j.End.Format(time.TimeOnly), limit.Format(time.TimeOnly))
