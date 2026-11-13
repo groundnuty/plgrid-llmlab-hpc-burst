@@ -1,0 +1,12 @@
+{
+ "mode": "product",
+ "bound": "125",
+ "factor": 125,
+ "config_sha256": "0e27efa233ef05c6aae5a411b01b6f3adc66d3c9618665df8aade3d5f9925842",
+ "pid": 4242,
+ "argv": ["envoy", "-c", "/run/s2c/envoy.json", "--disable-hot-restart"],
+ "env": [],
+ "diff": [],
+ "envoy_sha256": "0000000000000000000000000000000000000000000000000000000000000001",
+ "glibc": "2.34"
+}

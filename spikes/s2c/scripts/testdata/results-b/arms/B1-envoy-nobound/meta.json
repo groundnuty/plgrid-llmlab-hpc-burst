@@ -1,0 +1,17 @@
+{
+ "name": "B1-envoy-nobound",
+ "regime": "B",
+ "rep": 1,
+ "arm": "envoy-nobound",
+ "router": "envoy",
+ "policy": null,
+ "bound": "none",
+ "kv_blocks": 6000,
+ "start_unix": 3999.0,
+ "end_unix": 4011.0,
+ "client_rc": 0,
+ "nwork": 4,
+ "load_args": "-sessions 5",
+ "mode": "double",
+ "reset": "post"
+}
