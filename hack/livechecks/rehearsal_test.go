@@ -465,8 +465,17 @@ func TestTheRehearsalStopBoundExceedsTheScriptsGrace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The interrupt test's own body: from its func line to the next func line (or the file's end), so a shorter file cannot panic the slice.
 	test := string(src)
-	if i := strings.Index(test, "func TestRehearsalRowInterruptWaitsForRehearsalShsTeardown("); i < 0 || !strings.Contains(test[i:i+3000], "waitBounded(cmd, rehearsalStopBound)") {
+	i := strings.Index(test, "func TestRehearsalRowInterruptWaitsForRehearsalShsTeardown(")
+	if i < 0 {
+		t.Fatal("rehearsal_test.go has no TestRehearsalRowInterruptWaitsForRehearsalShsTeardown")
+	}
+	body := test[i:]
+	if n := strings.Index(body[1:], "\nfunc "); n >= 0 {
+		body = body[:n+1]
+	}
+	if !strings.Contains(body, "waitBounded(cmd, rehearsalStopBound)") {
 		t.Error("TestRehearsalRowInterruptWaitsForRehearsalShsTeardown does not wait through waitBounded(cmd, rehearsalStopBound)")
 	}
 }
