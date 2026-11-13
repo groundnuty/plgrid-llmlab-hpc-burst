@@ -118,7 +118,7 @@ Routes to LLMLab still pass through LLMLab's own cut and injection. The front ca
      - the listener on loopback; the admin only on a mode-0600 Unix socket in the job's private temporary directory, with no TCP admin listener (Inside an Instance, Worker health);
      - **timeouts:** the route's `timeout`, the route's `idle_timeout` and the connection manager's `stream_idle_timeout`, each `maxRequestDuration` plus 1 h (10,800 s). Envoy's defaults, 15 s, none and 5 min, would cut long or slow replies;
      - **upstream connections idle out after 50 s** (`common_http_protocol_options.idle_timeout`, default 1 h), below the workers' 120 s keep-alive;
-     - **circuit-breaker thresholds above the Instance's cap** (not in S13's config). Envoy's defaults of 1,024 connections, pending requests and requests sit below the cap of an 8-worker Instance, `maxNumSeqs` × workers (256 × 8 = 2,048 at a `maxNumSeqs` of 256), and its overflow 503s would count toward the Instance's pause;
+     - **circuit-breaker thresholds above the Instance's cap** (not in S13's config). Envoy's defaults of 1,024 connections, pending requests and requests, and of 3 parallel retries (`max_retries`; a retry holds its slot until the retried attempt answers), sit below the cap of an 8-worker Instance, `maxNumSeqs` × workers (256 × 8 = 2,048 at a `maxNumSeqs` of 256), and its overflow 503s would count toward the Instance's pause;
      - the workers from its config file.
 
      **Worker health behind Envoy, decided for beta** (science-agent decision, 11 Nov 2026; Inside an Instance, Worker health):
@@ -648,6 +648,7 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
 - 2026-11-12: a scaled `instanceCap` is never below 1 while a worker is healthy (for #439).
 - 2026-11-13: Envoy retries once a request that reached no worker (for #439).
 - 2026-11-13: erratum: the retry picks a host again up to 20 times (`host_selection_retry_max_attempts`), which makes "to another host" hold under `ring_hash` (measured on Envoy 1.40.2; for #439, PR 3c).
+- 2026-11-13: erratum: the circuit-breaker thresholds include `max_retries`, at the field maximum like the other three; Envoy's default of 3 parallel retries would answer a fourth concurrent retry to a dead worker with an overflow 503 (for #439, PR 3c).
 
 ## Amendments
 
