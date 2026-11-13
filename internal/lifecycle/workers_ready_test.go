@@ -10,6 +10,7 @@ package lifecycle
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -412,5 +413,108 @@ func TestAWholeInstanceRestartClearsEveryAdmission(t *testing.T) {
 		if e.RouterAdmittedGeneration != nil || e.VerifiedGeneration != nil || e.WarmedUp {
 			t.Errorf("%s's entry right after the whole-Instance restart: %+v, want no admission, verification or warm-up", e.Name, e)
 		}
+	}
+}
+
+// readyTwoWith is readyTwo with the fake agent's engine and the rig's options.
+func readyTwoWith(t *testing.T, e afake.Engine, opts ...rigOption) (*rig, *afake.Agent, string) {
+	t.Helper()
+	rg := newRig(t, opts...)
+	rg.r.Config.InstanceRouter = v1alpha1.InstanceRouterEnvoy
+	rg.engine = func(string) afake.Engine { return e }
+	rg.create(withWorkers(mdSpec("md"), 2))
+	startUntil(rg, "md", 10*time.Minute, "ready, every worker admitted", func() bool {
+		if rg.readyCount("md") != 1 {
+			return false
+		}
+		in := rg.instances("md")[0]
+		return routerAdmitted(&in, "worker-0") && routerAdmitted(&in, "worker-1")
+	})
+	var ag *afake.Agent
+	for _, ra := range rg.agents {
+		ag = ra.agent
+	}
+	return rg, ag, rg.instances("md")[0].Name
+}
+
+// failingWarmUp is an engine whose warm-up never settles once *failing is set: before, the default.
+func failingWarmUp(failing *bool) afake.Engine {
+	return afake.Engine{WarmUpRound: func(n int32, req agentapi.WarmUpRequest) agentapi.WarmUpRound {
+		if *failing {
+			return afake.WarmUpNeverSettles(n, req)
+		}
+		return afake.DefaultWarmUpRound(n, req)
+	}}
+}
+
+// A rejoining worker whose warm-up fails is one failed attempt at its own rung (the science agent's
+// ruling on #439, PR 3b's question): worker-1, killed and restarted, fails its warm-up and is restarted
+// again, for WarmUpFailed, while the Instance stays ready on worker-0, which runs and is held healthy on
+// every step, never restarted.
+func TestARejoinsFailedWarmUpIsOneAttemptAtThatWorkersRung(t *testing.T) {
+	failing := false
+	rg, ag, name := readyTwoWith(t, failingWarmUp(&failing))
+	failing = true // only worker-1 warms up from here: worker-0 is warmed up
+	ag.CrashWorker("worker-1", 1)
+	startUntil(rg, "md", 20*time.Minute, "worker-1 restarted for its failed warm-up", func() bool {
+		in := rg.instance(name)
+		if in.Status.Phase != v1alpha1.InstanceReady {
+			t.Fatalf("phase %s (end reason %q) while worker-1 rejoins, want ready on worker-0", in.Status.Phase, in.Status.EndReason)
+		}
+		if !runningAt(ag, "worker-0", 0) {
+			t.Fatal("worker-0 is not running at generation 0")
+		}
+		if rw, ok := routerWorker(ag, "worker-0"); !ok || !rw.Healthy {
+			t.Fatalf("the router does not hold worker-0 healthy: %+v", rw)
+		}
+		r, _ := lastRestart(rg, name)
+		return r.Signal == signalWarmUp
+	})
+	in := rg.instance(name)
+	if parts := restartParts(in); !slices.Equal(parts, []string{"worker-1", "worker-1"}) {
+		t.Errorf("restarts %v, want worker-1's exit, then its failed warm-up", parts)
+	}
+	if restartGeneration(in, "worker-0") != 0 {
+		t.Error("worker-0 was restarted")
+	}
+}
+
+// With attemptsPerRung 1, worker-1's exit spends its rung, so its failed warm-up climbs to the
+// whole-Instance rung.
+func TestAFailedRejoinPastItsAttemptsClimbsToTheWholeInstance(t *testing.T) {
+	failing := false
+	rg, ag, name := readyTwoWith(t, failingWarmUp(&failing), withProfile(func(p *v1alpha1.PlatformProfileSpec) {
+		p.Restart = &v1alpha1.RestartPolicy{AttemptsPerRung: ptrTo(int32(1)), Window: dur(4 * time.Hour)}
+	}))
+	failing = true
+	ag.CrashWorker("worker-1", 1)
+	startUntil(rg, "md", 20*time.Minute, "the whole Instance's restart", func() bool {
+		r, _ := lastRestart(rg, name)
+		return r.Part == v1alpha1.PartInstance
+	})
+	if r, _ := lastRestart(rg, name); r.Signal != signalWarmUp {
+		t.Errorf("the whole Instance's restart is for %s, want worker-1's failed warm-up", r.Signal)
+	}
+}
+
+// A rejoin's contradiction verdict still ends the Instance, with the class stop: the settings worker-1
+// reports after its restart contradict the deployment, which its sibling runs too.
+func TestARejoinsContradictionEndsTheInstance(t *testing.T) {
+	contradict := false
+	e := afake.Engine{Verify: func(i agentapi.DesiredInstance, r agentapi.VerifyRequest) agentapi.VerifyResult {
+		if contradict {
+			return afake.VerifySettings(map[string]string{"max-model-len": "16384"})(i, r)
+		}
+		return afake.DefaultVerify(i, r)
+	}}
+	rg, ag, name := readyTwoWith(t, e)
+	contradict = true
+	ag.CrashWorker("worker-1", 1)
+	startUntil(rg, "md", 20*time.Minute, "the Instance ended", func() bool { return rg.instance(name).Status.Phase == v1alpha1.InstanceEnded })
+	if in := rg.instance(name); in.Status.EndReason != v1alpha1.ReasonVerificationFailed {
+		t.Errorf("end reason %q, want VerificationFailed", in.Status.EndReason)
+	}
+	if c := rg.condition("md", v1alpha1.ConditionDegraded); c.Reason != v1alpha1.ReasonVerificationFailed || !strings.Contains(c.Message, "stopped") {
+		t.Errorf("the deployment's Degraded: %s %q, want VerificationFailed with the class stopped", c.Reason, c.Message)
 	}
 }

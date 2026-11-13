@@ -77,7 +77,10 @@ func (p *pass) startingWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation
 		}
 	}
 	share := workerSessions(sh.targetSessions, in)
-	if ok, err := p.warmWorkers(in, alloc, ir, sh); !ok || err != nil {
+	if ok, err := p.warmWorkers(in, alloc, ir, sh, func(w, msg string) error {
+		// Before the first ready, as with one worker: the Instance fails.
+		return p.failCheck(in, alloc, v1alpha1.ConditionWarmedUp, w+": "+msg)
+	}); !ok || err != nil {
 		return err
 	}
 	if !everyWorker(names, func(w string) bool { return workerWarmed(in, w) }) {
@@ -155,9 +158,10 @@ func (p *pass) verifyWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, 
 }
 
 // warmWorkers judges the warm-up of each verified worker not yet warmed up, at its share of the target
-// sessions: a passed one is warmed up and verified at its restart generation; a failed one fails the
-// Instance, and ok is false.
-func (p *pass) warmWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, ir *agentapi.InstanceReport, sh shapes) (ok bool, err error) {
+// sessions: a passed one is warmed up and verified at its restart generation; on a failed one, failed
+// acts, and ok is false. Before the first ready, failed fails the Instance (startingWorkers); while it
+// is ready, it restarts that worker, one failed attempt at its own rung (readyWorkers).
+func (p *pass) warmWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, ir *agentapi.InstanceReport, sh shapes, failed func(w, msg string) error) (ok bool, err error) {
 	share := workerSessions(sh.targetSessions, in)
 	for _, w := range workerNames(in) {
 		if !workerVerified(in, w) || workerWarmed(in, w) {
@@ -170,7 +174,7 @@ func (p *pass) warmWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, ir
 		state, msg, _ := judgeWarmUp(c.WarmUp, share)
 		switch state {
 		case warmUpFailed:
-			return false, p.failCheck(in, alloc, v1alpha1.ConditionWarmedUp, w+": "+msg)
+			return false, failed(w, msg)
 		case warmUpRunning:
 			continue
 		}
