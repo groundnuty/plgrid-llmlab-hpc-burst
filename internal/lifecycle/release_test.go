@@ -332,3 +332,48 @@ func TestReleaseInterruptedProviderReportsEachOutcome(t *testing.T) {
 		t.Errorf("scancel calls on the second Provider after it answered = %d, want at least 1", n)
 	}
 }
+
+// TestReleaseDeletionUnderReleaseWhenIdleWaitsOutTheIdleLimit pins what the controller does today with an Allocation whose deployment
+// was deleted and whose policy is release-when-idle (issue #503): nothing releases it at the deletion. The deployment's end has come
+// (keepUntil), but keepUntil applies to Keep alone, so the Allocation is kept for its idle limit, counted from the end of its last
+// Instance, and its job runs on until then. Row A's live deployment carried the example's 30 minutes, which outlasted the row's 12
+// minute wait for the job's end, so the job ended only by the row's own cleanup. The default policy and a kept-until date are the
+// cases of TestReleaseDeletionDrainsInstancesAndFollowsRetention; this is the third. The idle limit here is 20 minutes: the
+// Allocation is not released at 10 minutes after the Instance ended, and is released at 20.
+func TestReleaseDeletionUnderReleaseWhenIdleWaitsOutTheIdleLimit(t *testing.T) {
+	rg := newRig(t)
+	md := mdSpec("md")
+	md.Spec.RetentionPolicy = &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: dur(20 * time.Minute)}
+	serving, _, _ := releaseServingAndPending(t, rg, md)
+	if err := rg.c.Delete(rg.ctx, rg.md("md")); err != nil {
+		t.Fatal(err)
+	}
+	for _, in := range rg.instances("md") {
+		if err := rg.c.Delete(rg.ctx, &in); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rg.until(2*time.Minute, 10*time.Second, "the Instances gone", func() bool { return len(rg.instances("md")) == 0 })
+	a, ok := rg.allocation(serving.Name)
+	if !ok || !a.DeletionTimestamp.IsZero() || a.Status.AtProvider.StartTime == nil {
+		t.Fatalf("the serving Allocation must be started, empty and kept once its Instance is gone: %+v", a)
+	}
+	idleSince, ok, err := v1alpha1.IdleSince(a)
+	if err != nil || !ok {
+		t.Fatalf("the Allocation has no idle anchor (%v, %v): the idle limit counts from nowhere", ok, err)
+	}
+	// Ten minutes into the idle limit the deployment has been gone for ten minutes and the job still runs.
+	for rg.clock.Now().Before(idleSince.Add(10 * time.Minute)) {
+		rg.clock.Advance(10 * time.Second)
+		rg.Step()
+	}
+	if allocReleased(rg, serving.Name) || allocCount(rg.batch, "scancel", allocJobID(&serving)) != 0 {
+		t.Fatalf("the Allocation of a deleted deployment was released 10 minutes into its 20 minute idle limit (scancel calls %d): the controller's behaviour changed; update this test and #503",
+			allocCount(rg.batch, "scancel", allocJobID(&serving)))
+	}
+	retentionReleaseAt(t, rg, serving.Name, idleSince.Add(20*time.Minute), 10*time.Second)
+	rg.run(time.Minute, 10*time.Second)
+	if n := allocCount(rg.batch, "scancel", allocJobID(&serving)); n < 1 {
+		t.Errorf("scancel calls for the released job = %d, want at least 1", n)
+	}
+}
