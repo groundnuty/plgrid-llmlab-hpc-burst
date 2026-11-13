@@ -290,11 +290,11 @@ func TestDryRunEveryArm(t *testing.T) {
 			}
 			devs[env["CUDA_VISIBLE_DEVICES"]]++
 		}
-		// Three steps (B, H, A), four workers each, and the probe's restart of the victim, the last
-		// worker: each device three times and device 3 four, never a list.
-		want := map[string]int{"0": 3, "1": 3, "2": 3, "3": 4}
-		if n != 13 || len(devs) != 4 {
-			t.Fatalf("%d worker starts on devices %v, want 13: %v", n, devs, want)
+		// Four starts of the four workers (B, H, B again, A, in the PLAN's order) and the probe's restart
+		// of the victim, the last worker: each device four times and device 3 five, never a list.
+		want := map[string]int{"0": 4, "1": 4, "2": 4, "3": 5}
+		if n != 17 || len(devs) != 4 {
+			t.Fatalf("%d worker starts on devices %v, want 17: %v", n, devs, want)
 		}
 		for d, w := range want {
 			if devs[d] != w {
@@ -349,7 +349,7 @@ func TestDryRunEveryArm(t *testing.T) {
 			Samples   []any    `json:"samples"`
 			StreamTok int      `json:"stream_tokens"`
 		}
-		if err := json.Unmarshal([]byte(readFile(t, filepath.Join(results, "arms", "H1-probe", "probe.json"))), &p); err != nil {
+		if err := json.Unmarshal([]byte(readFile(t, filepath.Join(results, "arms", "B2-probe", "probe.json"))), &p); err != nil {
 			t.Fatal(err)
 		}
 		// Every check passes: no non-200 after the kill's first interval, and at most one request cut at the
@@ -513,7 +513,7 @@ func checkSummary(t *testing.T, js string, arms []string) {
 			t.Errorf("%s: pass rule %+v", r.Name, r.PassRule)
 		}
 	}
-	for _, a := range append(arms, "H1-probe", "A1-relay-control") {
+	for _, a := range append(arms, "B2-probe", "A1-relay-control") {
 		if !seen[a] {
 			t.Errorf("no summary row for %s", a)
 		}

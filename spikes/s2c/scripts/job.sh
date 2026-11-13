@@ -25,7 +25,8 @@
 #
 # Environment (CONTRACT.md fixes every name): required S2C_HOME, IMAGE, CHECKPOINT_DIR, VR_BIN (every missing
 # one is named in one error, exit 2); optional MODE (vllm | double: the dry run) STAGE RESULT_TAG PLAN LOAD_ARGS NWORK
-# BOUND KV_BLOCKS_B KV_BLOCKS_A GPU_UTIL MAX_LEN MAX_NUM_SEQS SERVED BUDGET_S ARM_EST_S ARM_MAX_S WORKER_WAIT_S PORT_BASE
+# BOUND KV_BLOCKS_B KV_BLOCKS_A GPU_UTIL MAX_LEN MAX_NUM_SEQS SERVED BUDGET_S ARM_EST_S ARM_EST_S_H ARM_MAX_S ARM_MAX_S_H
+# JOB_LIMIT_S END_MARGIN_S ARM_OVERHEAD_S FIRST_WORKER_WAIT_S WORKER_WAIT_S PROBE_EST_S PROBE_MAX_S PORT_BASE
 # S2C_FAULT APPTAINER PYTHON, and, for tests that must not wait seconds on a poll: POLL_S SAMPLE_S DRAIN_WAIT_S
 # ENVOY_WAIT_S VR_WAIT_S RELAY_WAIT_S. MODE changes only what is recorded (env.txt, meta.json); the dry run's
 # engine double arrives as APPTAINER, so the code path is the same.
@@ -57,7 +58,9 @@ if ((${#missing[@]} > 0)); then echo "job.sh: required variables not set: ${miss
 MODE=${MODE:-vllm}
 STAGE=${STAGE:-$S2C_HOME/stage}
 RESULT_TAG=${RESULT_TAG:-run-$(date -u +%Y%m%dT%H%MZ)}
-PLAN=${PLAN:-"B:1:rr B:1:envoy-bound B:1:envoy-nobound B:1:vr-hash B:2:vr-hash B:2:envoy-nobound B:2:envoy-bound B:2:rr H:1:rr H:1:envoy-bound H:1:envoy-nobound H:1:vr-hash H:1:probe A:1:rr A:1:envoy-bound A:1:envoy-nobound A:1:vr-hash A:1:relay-control"}
+# The order the science agent agreed to on #62: B1, H1 (the bound's step), B2 (a repeat, for the spread), the probe, then
+# A1 and the optional relay control, so a short hour drops the relay control, then A, before anything earlier.
+PLAN=${PLAN:-"B:1:rr B:1:envoy-bound B:1:envoy-nobound B:1:vr-hash H:1:rr H:1:envoy-bound H:1:envoy-nobound H:1:vr-hash B:2:vr-hash B:2:envoy-nobound B:2:envoy-bound B:2:rr B:2:probe A:1:rr A:1:envoy-bound A:1:envoy-nobound A:1:vr-hash A:1:relay-control"}
 LOAD_ARGS=${LOAD_ARGS:-"-sessions 96 -turns 12 -concurrency 32 -agents 0.5,0.3,0.2 -sys-words 2000 -task-words 250 -tool-min 200 -tool-max 800 -think-min 500ms -think-max 2500ms -reply-tokens 48 -seed 1"}
 LOAD_ARGS_CONTROL=${LOAD_ARGS_CONTROL:-"-sessions 16 -turns 6 -concurrency 4 -agents 0.5,0.3,0.2 -sys-words 2000 -task-words 250 -tool-min 200 -tool-max 800 -think-min 500ms -think-max 2500ms -reply-tokens 48 -seed 1"}
 LOAD_ARGS_H=${LOAD_ARGS_H:-"-sessions 192 -turns 12 -concurrency 64 -agents 0.5,0.3,0.2 -sys-words 2000 -task-words 250 -tool-min 200 -tool-max 800 -think-min 500ms -think-max 2500ms -reply-tokens 48 -seed 1"}
@@ -70,13 +73,21 @@ MAX_LEN=${MAX_LEN:-16384}
 MAX_NUM_SEQS=${MAX_NUM_SEQS:-256}
 SERVED=${SERVED:-Qwen/Qwen2.5-1.5B-Instruct}
 BUDGET_S=${BUDGET_S:-4200}      # stop starting arms when this much job time is used: 70 min of the 75 (the science agent, #62)
-ARM_EST_S=${ARM_EST_S:-300}     # time one arm is expected to need, for the guard
-ARM_MAX_S=${ARM_MAX_S:-720}     # hard limit on one arm's client
+ARM_EST_S=${ARM_EST_S:-300}     # time one arm of B or A is expected to need, for the guard
+ARM_EST_S_H=${ARM_EST_S_H:-600} # the same for H, which carries twice the requests (#527's review)
+ARM_MAX_S=${ARM_MAX_S:-360}     # hard limit on one arm's client in B or A (S2b's clients ran 77 to 90 s)
+ARM_MAX_S_H=${ARM_MAX_S_H:-600} # the same in H
 PROBE_EST_S=${PROBE_EST_S:-420} # time the probe is expected to need, for the guard
-PROBE_MAX_S=${PROBE_MAX_S:-1200} # hard limit on the probe
+PROBE_MAX_S=${PROBE_MAX_S:-600} # hard limit on the probe, from its start to its end, the victim's return included
+# An arm is admitted only if its maximum, the sum of the limits job.sh enforces on it, ends ARM_END_MARGIN_S before the
+# job's time limit, so Slurm never cuts an arm and loses its data (#527's review). JOB_LIMIT_S is shape.sh's --time.
+JOB_LIMIT_S=${JOB_LIMIT_S:-4500}
+END_MARGIN_S=${END_MARGIN_S:-180}   # the last scrape, the workers' stop, the copy of the results and the cleanup
+ARM_OVERHEAD_S=${ARM_OVERHEAD_S:-120} # an arm's short steps: resets, scrapes, counters, the router's stop, the check
 PROBE_HOLD=${PROBE_HOLD:-15s}   # the restarted victim stays unverified this long after its engine answers
 PROBE_STREAM_TOKENS=${PROBE_STREAM_TOKENS:-1500}
-WORKER_WAIT_S=${WORKER_WAIT_S:-900}
+FIRST_WORKER_WAIT_S=${FIRST_WORKER_WAIT_S:-900} # the job's first worker start (cold caches)
+WORKER_WAIT_S=${WORKER_WAIT_S:-600}             # every later one: a step's restart, the probe's victim
 PORT_BASE=${PORT_BASE:-31000}
 S2C_FAULT=${S2C_FAULT:-}
 APPTAINER=${APPTAINER:-apptainer}
@@ -91,7 +102,7 @@ RELAY_WAIT_S=${RELAY_WAIT_S:-60}
 bad=()
 [[ $MODE == vllm || $MODE == double ]] || bad+=("MODE=$MODE (vllm or double)")
 case $S2C_FAULT in "" | client-to-other-router | strip-bound | early-admit) ;; *) bad+=("S2C_FAULT=$S2C_FAULT (client-to-other-router, strip-bound or early-admit)") ;; esac
-for v in NWORK KV_BLOCKS_B KV_BLOCKS_A MAX_LEN MAX_NUM_SEQS BUDGET_S ARM_EST_S ARM_MAX_S WORKER_WAIT_S PORT_BASE DRAIN_WAIT_S ENVOY_WAIT_S VR_WAIT_S RELAY_WAIT_S PROBE_EST_S PROBE_MAX_S PROBE_STREAM_TOKENS; do
+for v in NWORK KV_BLOCKS_B KV_BLOCKS_A MAX_LEN MAX_NUM_SEQS BUDGET_S ARM_EST_S ARM_EST_S_H ARM_MAX_S ARM_MAX_S_H FIRST_WORKER_WAIT_S WORKER_WAIT_S PORT_BASE DRAIN_WAIT_S ENVOY_WAIT_S VR_WAIT_S RELAY_WAIT_S PROBE_EST_S PROBE_MAX_S PROBE_STREAM_TOKENS JOB_LIMIT_S END_MARGIN_S ARM_OVERHEAD_S; do
   [[ ${!v} =~ ^[0-9]+$ ]] || bad+=("$v=${!v} (a whole number)")
 done
 [[ $NWORK =~ ^[0-9]+$ ]] && (( NWORK >= 1 )) || bad+=("NWORK must be at least 1")
@@ -207,7 +218,7 @@ safe_line() { grep -E -m1 -x '[A-Za-z0-9 ._,+()=-]{1,160}' || echo "unrecognised
   # vllm-router 0.1.17 has no --version: ask the venv's own Python (a failure here never fails the job).
   echo "$(timeout 30 "$(dirname "$VR_BIN")/python" -I -c 'import importlib.metadata as m; print("vllm_router", m.version("vllm-router"))' 2>/dev/null | grep -E -x 'vllm_router [A-Za-z0-9._+-]+' || echo "vllm_router unknown")"
   echo "served=$SERVED nwork=$NWORK gpu_util=$GPU_UTIL max_len=$MAX_LEN max_num_seqs=$MAX_NUM_SEQS kv_blocks_b=$KV_BLOCKS_B kv_blocks_a=$KV_BLOCKS_A bound=$BOUND fault=${S2C_FAULT:-none}"
-  echo "probe_hold=$PROBE_HOLD probe_stream_tokens=$PROBE_STREAM_TOKENS budget_s=$BUDGET_S"
+  echo "probe_hold=$PROBE_HOLD probe_stream_tokens=$PROBE_STREAM_TOKENS budget_s=$BUDGET_S job_limit_s=$JOB_LIMIT_S end_margin_s=$END_MARGIN_S arm_max_s=$ARM_MAX_S arm_max_s_h=$ARM_MAX_S_H"
 } > "$OUT/env.txt"
 log "env: $(tr '\n' ' ' < "$OUT/env.txt")"
 
@@ -248,8 +259,22 @@ fi
 
 # ---- workers ----
 REGIME=""
+WORKERS_STARTED=0
 kv_blocks() { case $1 in B | H) echo "$KV_BLOCKS_B" ;; A) echo "$KV_BLOCKS_A" ;; *) return 1 ;; esac; }
 load_args() { case $1 in H) echo "$LOAD_ARGS_H" ;; *) echo "$LOAD_ARGS" ;; esac; }
+arm_limit() { case $1 in H) echo "$ARM_MAX_S_H" ;; *) echo "$ARM_MAX_S" ;; esac; }   # the client's hard limit in a step
+arm_est() { case $1 in H) echo "$ARM_EST_S_H" ;; *) echo "$ARM_EST_S" ;; esac; }
+# arm_max <arm> <regime>: the sum of the limits job.sh enforces on the arm (its worker restart is added by run_arm)
+arm_max() {
+  local c; c=$(arm_limit "$2")
+  case $1 in
+  rr | vr-hash)  echo $(( RELAY_WAIT_S + VR_WAIT_S + c + DRAIN_WAIT_S + ARM_OVERHEAD_S )) ;;
+  envoy-*)       echo $(( ENVOY_WAIT_S + c + DRAIN_WAIT_S + ARM_OVERHEAD_S )) ;;
+  probe)         echo $(( ENVOY_WAIT_S + PROBE_MAX_S + WORKER_WAIT_S + ARM_OVERHEAD_S )) ;;
+  relay-control) echo $(( RELAY_WAIT_S + 2 * (ARM_MAX_S + DRAIN_WAIT_S) + ARM_OVERHEAD_S )) ;;
+  *)             echo $(( ARM_MAX_S + ARM_OVERHEAD_S )) ;;
+  esac
+}
 uget() { curl -sf -m 10 --unix-socket "$RUN/worker-$1.sock" "http://localhost$2"; }
 models_list_served() { "$PYTHON" -I -c 'import json, sys; sys.exit(0 if sys.argv[1] in [m["id"] for m in json.load(sys.stdin)["data"]] else 1)' "$SERVED"; }
 worker_ready() { # /health answers 200 and /v1/models lists the served name
@@ -271,13 +296,16 @@ start_workers() { # start_workers <A|B|H>: all in parallel, each then waited for
   local r=$1 i t=$(date +%s)
   kv_blocks "$r" > /dev/null || return 1
   for (( i = 0; i < NWORK; i++ )); do start_worker "$r" "$i"; done
-  local end=$(( t + WORKER_WAIT_S )) w rc left
+  local limit=$WORKER_WAIT_S w rc left end
+  (( WORKERS_STARTED == 0 )) && limit=$FIRST_WORKER_WAIT_S
+  WORKERS_STARTED=1
+  end=$(( t + limit ))
   for (( i = 0; i < NWORK; i++ )); do
     w=${PIDS[w$i]}
     left=$(( end - $(date +%s) )); (( left < 0 )) && left=0
     poll "$left" "$w" worker_ready "$i"; rc=$?
     if (( rc != 0 )); then
-      log "worker $i ($r) $([[ $rc == 2 ]] && echo "exited" || echo "not ready after ${WORKER_WAIT_S}s")"; tail -30 "$RUN/logs/worker-$r-w$i.log"
+      log "worker $i ($r) $([[ $rc == 2 ]] && echo "exited" || echo "not ready after ${limit}s")"; tail -30 "$RUN/logs/worker-$r-w$i.log"
       return 1
     fi
     log "worker $i ($r) ready after $(( $(date +%s) - t ))s"
@@ -416,16 +444,18 @@ run_probe() {
   ARM_VERIFY_DIR=""
   (( rc == 0 )) || return 1
   old=${PIDS[w$v]}
+  local deadline=$(( $(date +%s) + PROBE_MAX_S ))   # one deadline for the whole probe, the victim's return included
   "$ROUTER_BIN" probe -run-dir "$RUN" -workers "$NWORK" -victim "$v" -victim-pid "$old" -served "$SERVED" -verify-dir "$d/verify" \
     -out "$d" -arm "$name" -placement "$RUN/placement-$r-w$v.tsv" -hold "$PROBE_HOLD" -stream-tokens "$PROBE_STREAM_TOKENS" \
-    > "$d/probe.out" 2>&1 & PIDS[probe]=$!
+    -within "${PROBE_MAX_S}s" > "$d/probe.out" 2>&1 & PIDS[probe]=$!
   poll "$PROBE_MAX_S" "${PIDS[probe]}" file_exists "$d/killed"; rc=$?
   if (( rc == 0 )); then
     wait "$old" 2>/dev/null; unset "PIDS[w$v]"
     log "probe: worker $v killed; restarting it"
     start_worker "$r" "$v" "-restart"
   fi
-  poll "$PROBE_MAX_S" "" probe_ended || log "the probe did not end within ${PROBE_MAX_S}s"
+  local left=$(( deadline - $(date +%s) )); (( left < 0 )) && left=0
+  poll "$left" "" probe_ended || log "the probe did not end within ${PROBE_MAX_S}s of its start"
   if alive "${PIDS[probe]}"; then stop_named probe; PROBE_RC=124; else wait "${PIDS[probe]}"; PROBE_RC=$?; unset "PIDS[probe]"; fi
   return 0
 }
@@ -436,8 +466,16 @@ run_arm() { # run_arm <regime> <rep> <arm>
   if ! arm_def "$arm"; then skip "$name" "$d" "unknown arm"; return; fi
   kv=$(kv_blocks "$r") || { skip "$name" "$d" "unknown regime $r"; return; }
   used=$(( $(date +%s) - T0 ))
-  local est=$ARM_EST_S; [[ $arm == probe ]] && est=$PROBE_EST_S
+  local est max; est=$(arm_est "$r"); [[ $arm == probe ]] && est=$PROBE_EST_S
   if (( used + est > BUDGET_S )); then log "SKIP $name: ${used}s used of ${BUDGET_S}s"; skip "$name" "$d" "budget"; return; fi
+  max=$(arm_max "$arm" "$r")
+  if [[ $REGIME != "$r" ]] || ! workers_alive; then
+    if (( WORKERS_STARTED == 0 )); then max=$(( max + FIRST_WORKER_WAIT_S )); else max=$(( max + WORKER_WAIT_S )); fi
+  fi
+  if (( used + max + END_MARGIN_S > JOB_LIMIT_S )); then
+    log "SKIP $name: its maximum of ${max}s from ${used}s does not end ${END_MARGIN_S}s before the ${JOB_LIMIT_S}s limit"
+    skip "$name" "$d" "its maximum of ${max}s does not fit the job's remaining time"; return
+  fi
   if [[ $ARM_ROUTER == envoy && $SMOKE_OK != 1 ]]; then skip "$name" "$d" "$SMOKE_WHY"; return; fi
   if [[ $REGIME == "$r" ]] && ! workers_alive; then log "a worker of regime $r died"; REGIME=""; fi
   if [[ $REGIME != "$r" ]]; then
@@ -459,7 +497,7 @@ run_arm() { # run_arm <regime> <rep> <arm>
   log "RUN $name"
   # shellcheck disable=SC2086
   local largs; largs=$(load_args "$r")
-  timeout "$ARM_MAX_S" "$LOAD_BIN" "${CLIENT_ARGS[@]}" -model "$SERVED" -run "$name" -out "$d/client.jsonl" $largs > "$d/client.out" 2>&1
+  timeout "$(arm_limit "$r")" "$LOAD_BIN" "${CLIENT_ARGS[@]}" -model "$SERVED" -run "$name" -out "$d/client.jsonl" $largs > "$d/client.out" 2>&1
   rc=$?
   t2=$(date +%s.%N)
   stop_named sampler

@@ -347,7 +347,7 @@ def probe(argv):
     """Kills the victim (SIGKILL through a pidfd), writes <out>/killed, waits for the job to restart it (its /health
     again), flags it verified, and writes probe.json: a passing verdict, or with STUB_PROBE=fail a failing one, exit 1."""
     a, _ = parse_go(argv, {k: True for k in ("run-dir", "workers", "victim", "victim-pid", "served", "verify-dir", "out", "arm",
-                                             "placement", "hold", "stream-tokens")})
+                                             "placement", "hold", "stream-tokens", "within")})
     for k in ("run-dir", "workers", "victim", "victim-pid", "served", "verify-dir", "out", "arm", "placement"):
         if k not in a:
             die(2, "probe: -%s is required" % k)
@@ -901,6 +901,29 @@ check "the relay control's meta: arm and router relay-control, LOAD_ARGS_CONTROL
 check "both paths have their client records and their own reset" '[[ $(wc -l < "$OUT/arms/B1-relay-control/client-direct.jsonl") == 3 && $(wc -l < "$OUT/arms/B1-relay-control/client-relayed.jsonl") == 3 && -s $OUT/arms/B1-relay-control/reset-direct.txt && -s $OUT/arms/B1-relay-control/reset-relayed.txt ]]'
 check "the relay carried the relayed path: worker 0 only" '[[ $(wc -l < "$OUT/arms/B1-relay-control/relay-counts.tsv") == 1 ]] && awk -F"\t" "\$2 > 0 {f=1} END {exit !f}" "$OUT/arms/B1-relay-control/relay-counts.tsv"'
 check "no stub process is left after the relay control" '[[ $(leftovers) == 0 ]]'
+fi
+
+# ===================================================================== the guard (#527's review)
+# Expected from the job's header, worked by hand from the limits run_job sets (RELAY_WAIT_S 20, VR_WAIT_S 30, ARM_MAX_S 30,
+# DRAIN_WAIT_S 10) and the ones set here: rr's maximum is 20 + 30 + 30 + 10 + ARM_OVERHEAD_S 20 = 110 s, plus the first
+# worker start, FIRST_WORKER_WAIT_S 30, = 140 s; admitted only if 140 + END_MARGIN_S 180 = 320 s fit JOB_LIMIT_S.
+if want guard; then
+run_job maxtight "B:1:rr" ARM_OVERHEAD_S=20 FIRST_WORKER_WAIT_S=30 END_MARGIN_S=180 JOB_LIMIT_S=300
+check "an arm whose maximum (140 s + the 180 s margin) does not fit a 300 s limit is not admitted: exit 1, SKIPPED names it" '[[ $RC == 1 && ! -e $OUT/arms/B1-rr/meta.json ]] && grep -q "B1-rr skipped: its maximum of 140s does not fit the job" "$OUT/failures.txt"'
+run_job maxroom "B:1:rr" ARM_OVERHEAD_S=20 FIRST_WORKER_WAIT_S=30 END_MARGIN_S=180 JOB_LIMIT_S=400
+check "the same arm runs under a 400 s limit" '[[ $RC == 0 && -s $OUT/arms/B1-rr/meta.json ]]'
+run_job hest "B:1:rr H:1:rr" ARM_EST_S=1 ARM_EST_S_H=100000 BUDGET_S=1000
+check "H has its own estimate: with ARM_EST_S_H over the budget its arm is skipped for the budget while B's runs" '[[ $RC == 1 && -s $OUT/arms/B1-rr/meta.json && ! -e $OUT/arms/H1-rr/meta.json ]] && grep -q "H1-rr skipped: budget" "$OUT/failures.txt" && ! grep -q "B1-rr" "$OUT/failures.txt"'
+check "shape.sh's time limit is the guard's JOB_LIMIT_S default" '[[ $(sed -n "s/.*--time=\([0-9]*\):\([0-9]*\):\([0-9]*\).*/\1 \2 \3/p" "$HERE/shape.sh" | awk "{print \$1*3600+\$2*60+\$3}") == $(sed -n "s/^JOB_LIMIT_S=\${JOB_LIMIT_S:-\([0-9]*\)}.*/\1/p" "$HERE/job.sh") ]]'
+check "the default PLAN runs H1 before B2 and the probe, then A1, then the relay control (the order agreed on #62)" 'python3 -I -c "
+import re, sys
+plan = re.search(r\"^PLAN=\\$\\{PLAN:-\\\"([^\\\"]*)\", open(sys.argv[1]).read(), re.M).group(1).split()
+steps = [p.rsplit(\":\", 1)[0] if p.endswith(\":probe\") or p.endswith(\":relay-control\") else p.split(\":\")[0] + p.split(\":\")[1] for p in plan]
+first = lambda x: next(i for i, p in enumerate(plan) if p.startswith(x))
+ok = first(\"H:1:\") < first(\"B:2:\") < plan.index(\"B:2:probe\") < first(\"A:1:\") and plan[-1] == \"A:1:relay-control\"
+sys.exit(0 if ok else 1)
+" "$HERE/job.sh"'
+check "no stub process is left after the guard cases" '[[ $(leftovers) == 0 ]]'
 fi
 
 check "no stub process is left running after all cases" '[[ $(leftovers) == 0 ]]'

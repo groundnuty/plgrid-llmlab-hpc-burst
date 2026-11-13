@@ -99,10 +99,19 @@ The run label salts every system prompt and every session key, and every worker'
 
 Both regimes' budgets are explicit (`--num-gpu-blocks-override`), so they equal S2b's whatever the A100's memory.
 
-**The plan**, in this order: B1 (`rr`, `envoy-bound`, `envoy-nobound`, `vr-hash`), B2 (the same in reverse, for the
-run-to-run spread), H1 (the four arms), the probe on H's workers, A1 (the four arms), then the relay control. The job's time limit is
-75 minutes. A budget guard starts no arm once about 70 minutes are used, so A goes first if time runs short, as the
-science agent ruled, and the optional relay control before it. A skipped arm is listed in `failures.txt`, and the job exits 1 with its other results kept.
+**The plan**, in the order agreed on #62: B1 (`rr`, `envoy-bound`, `envoy-nobound`, `vr-hash`), H1 (the four arms), B2
+(B1's arms in reverse, for the run-to-run spread), the probe on B2's workers, A1 (the four arms), then the relay control.
+The job's time limit is 75 minutes. Two guards decide whether an arm starts, and a short hour drops the relay control,
+then A, before anything earlier, as the science agent ruled:
+- **The budget:** no arm starts once its expected time would pass about 70 minutes (`BUDGET_S`). The estimate is 300 s
+  for an arm of B or A, and 600 s for an arm of H, which carries twice the requests (`ARM_EST_S`, `ARM_EST_S_H`).
+- **The arm's maximum:** an arm starts only if everything job.sh lets it take ends 3 minutes before the job's limit
+  (`JOB_LIMIT_S`, `END_MARGIN_S`). That covers a worker restart when its step needs one (10 minutes; the job's first
+  start 15), the router's start (2 minutes), the client's hard limit (6 minutes in B and A, 10 in H), the drain
+  (2 minutes) and the short steps (2 minutes). So Slurm never cuts an arm and loses its data. The probe has one
+  deadline of 10 minutes, the victim's return included.
+
+A skipped arm is listed in `failures.txt`, and the job exits 1 with its other results kept.
 
 **Signals.** Every signal the job's own code sends goes through a pidfd (`s2crouter signal` and `stop`,
 `cmd/s2crouter/proc.go`), never by name, pattern or process group. Two signals come from elsewhere: coreutils
