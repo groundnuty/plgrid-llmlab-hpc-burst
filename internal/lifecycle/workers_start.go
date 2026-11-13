@@ -39,30 +39,9 @@ func (p *pass) startingWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation
 			return err
 		}
 	}
-	// checksOf is worker w's results at its current verification generation, from a process at its
-	// current generations.
-	checksOf := func(w string) *agentapi.CheckResults {
-		r := reportOf(ir, w)
-		if r == nil || !workerAt(ir, in, w, agentapi.PartRunning) || r.Checks == nil || r.Checks.VerificationGeneration != workerVerificationGeneration(in, w) {
-			return nil
-		}
-		return r.Checks
-	}
 	now := metav1.NewTime(p.now)
-	for _, w := range names {
-		if workerVerified(in, w) {
-			continue
-		}
-		c := checksOf(w)
-		if c == nil || c.Verify == nil || !c.Verify.Done {
-			continue
-		}
-		if err := p.workerVerifiedResult(in, alloc, w, c.Verify, st); err != nil {
-			return err
-		}
-		if !workerVerified(in, w) {
-			return nil // it failed: the Instance restarted or ended
-		}
+	if ok, err := p.verifyWorkers(in, alloc, ir, st); !ok || err != nil {
+		return err
 	}
 	if !everyWorker(names, func(w string) bool { return workerVerified(in, w) }) {
 		return nil
@@ -81,7 +60,7 @@ func (p *pass) startingWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation
 	if !isTrue(in.Status.Conditions, v1alpha1.ConditionQualified) {
 		var msgs []string
 		for _, w := range names {
-			c := checksOf(w)
+			c := workerResults(ir, in, w)
 			if c == nil || c.Qualify == nil || !c.Qualify.Done {
 				return nil
 			}
@@ -98,27 +77,11 @@ func (p *pass) startingWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation
 		}
 	}
 	share := workerSessions(sh.targetSessions, in)
-	for _, w := range names {
-		if workerWarmed(in, w) {
-			continue
-		}
-		c := checksOf(w)
-		if c == nil || c.WarmUp == nil {
-			continue
-		}
-		state, msg, _ := judgeWarmUp(c.WarmUp, share)
-		switch state {
-		case warmUpFailed:
-			return p.failCheck(in, alloc, v1alpha1.ConditionWarmedUp, w+": "+msg)
-		case warmUpRunning:
-			continue
-		}
-		gen := restartGeneration(in, w)
-		if err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
-			setWorker(s, w, func(e *v1alpha1.InstanceWorker) { e.WarmedUp, e.VerifiedGeneration = true, &gen })
-		}); err != nil {
-			return err
-		}
+	if ok, err := p.warmWorkers(in, alloc, ir, sh, func(w, msg string) error {
+		// Before the first ready, as with one worker: the Instance fails.
+		return p.failCheck(in, alloc, v1alpha1.ConditionWarmedUp, w+": "+msg)
+	}); !ok || err != nil {
+		return err
 	}
 	if !everyWorker(names, func(w string) bool { return workerWarmed(in, w) }) {
 		return nil
@@ -127,7 +90,7 @@ func (p *pass) startingWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation
 	// stopped its rounds once the desired state stopped asking.
 	var tps []*v1alpha1.Throughput
 	for _, w := range names {
-		c := checksOf(w)
+		c := workerResults(ir, in, w)
 		if c == nil || c.WarmUp == nil || !c.WarmUp.Done {
 			return nil
 		}
@@ -155,7 +118,74 @@ func (p *pass) startingWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation
 	if routed(in) && !routerAdmitsReady(in, av) {
 		return nil
 	}
+	// The router holds every worker healthy: each is admitted, so its checks count from here (Q2).
+	if err := p.admitWorkers(in, av); err != nil {
+		return err
+	}
 	return p.becomeReady(in, alloc)
+}
+
+// workerResults is worker w's check results at its current verification generation, from a process at
+// its current generations.
+func workerResults(ir *agentapi.InstanceReport, in *v1alpha1.Instance, w string) *agentapi.CheckResults {
+	r := reportOf(ir, w)
+	if r == nil || !workerAt(ir, in, w, agentapi.PartRunning) || r.Checks == nil || r.Checks.VerificationGeneration != workerVerificationGeneration(in, w) {
+		return nil
+	}
+	return r.Checks
+}
+
+// verifyWorkers judges each verification that a worker not yet verified at its current generation has
+// done. ok is false once a failed verdict has acted: the Instance restarted that worker or the whole
+// Instance, or ended.
+func (p *pass) verifyWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, ir *agentapi.InstanceReport, st settings) (ok bool, err error) {
+	for _, w := range workerNames(in) {
+		if workerVerified(in, w) {
+			continue
+		}
+		c := workerResults(ir, in, w)
+		if c == nil || c.Verify == nil || !c.Verify.Done {
+			continue
+		}
+		if err := p.workerVerifiedResult(in, alloc, w, c.Verify, st); err != nil {
+			return false, err
+		}
+		if !workerVerified(in, w) {
+			return false, nil // it failed: the Instance restarted or ended
+		}
+	}
+	return true, nil
+}
+
+// warmWorkers judges the warm-up of each verified worker not yet warmed up, at its share of the target
+// sessions: a passed one is warmed up and verified at its restart generation; on a failed one, failed
+// acts, and ok is false. Before the first ready, failed fails the Instance (startingWorkers); while it
+// is ready, it restarts that worker, one failed attempt at its own rung (readyWorkers).
+func (p *pass) warmWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, ir *agentapi.InstanceReport, sh shapes, failed func(w, msg string) error) (ok bool, err error) {
+	share := workerSessions(sh.targetSessions, in)
+	for _, w := range workerNames(in) {
+		if !workerVerified(in, w) || workerWarmed(in, w) {
+			continue
+		}
+		c := workerResults(ir, in, w)
+		if c == nil || c.WarmUp == nil {
+			continue
+		}
+		state, msg, _ := judgeWarmUp(c.WarmUp, share)
+		switch state {
+		case warmUpFailed:
+			return false, failed(w, msg)
+		case warmUpRunning:
+			continue
+		}
+		gen := restartGeneration(in, w)
+		if err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
+			setWorker(s, w, func(e *v1alpha1.InstanceWorker) { e.WarmedUp, e.VerifiedGeneration = true, &gen })
+		}); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 func everyWorker(names []string, ok func(string) bool) bool {

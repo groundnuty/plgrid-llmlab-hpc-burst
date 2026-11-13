@@ -18,15 +18,14 @@ import (
 
 var workerZeroSites = map[string]string{
 	"desired.go:desiredInstance":         "one worker's desired worker; several workers' are desiredWorkers, behind several",
-	"verify.go:workerRunning":            "one worker's start (starting, behind several) and the ready phase's healthSignal (part 3b)",
+	"verify.go:workerRunning":            "one worker's start (starting, behind several) and its ready-phase healthSignal",
 	"verify.go:workerExited":             "as workerRunning",
 	"verify.go:worker0":                  "the report's worker-0, for workerRunning, workerExited and healthSignal",
 	"writes.go:verificationGeneration":   "one worker's verification generation; several workers' is workerVerificationGeneration",
 	"routerhealth.go:verifiedGeneration": "one worker's verifiedGeneration; several workers' is in desiredWorkers",
-	"routerhealth.go:routerCheckSignal":  "the ready phase's router check of worker-0 (part 3b turns it per worker)",
-	"health.go:healthSignal":             "the ready phase's signals of worker-0 (part 3b turns them per worker)",
+	"routerhealth.go:routerCheckSignal":  "one worker's router check; several workers' is workerRouterCheck, from readyWorkers",
+	"health.go:healthSignal":             "one worker's ready-phase signals; several workers' are workerSignal, behind several in ready",
 	"health.go:restart":                  "the ladder from worker-0's rung; several workers name theirs through restartWorker",
-	"metrics.go:collectUnreported":       "HBEP-8's inventory of an unreported Instance (part 3b names each worker)",
 	"spec.go:renderLaunch":               "by design: the launch names worker-0's socket, which the agent replaces for each worker",
 }
 

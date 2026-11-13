@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // ready applies the health rules to a ready Instance (HBEP-7, Health and
@@ -21,6 +22,9 @@ func (p *pass) ready(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agent
 	// Behind a router, the router's own signal first: its rung (routerhealth.go).
 	if acted, err := p.routerRung(in, alloc, av, st); acted || err != nil {
 		return err
+	}
+	if several(in) {
+		return p.readyWorkers(in, alloc, av, st)
 	}
 	signal, msg := p.healthSignal(in, alloc, av, st)
 	if signal == "" {
@@ -62,8 +66,14 @@ func (p *pass) healthSignal(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, a
 	if sig, msg := routerCheckSignal(in, av, st); sig != "" {
 		return sig, msg
 	}
-	// The gauge-based signals need fresh metrics: stale gauges are unknown.
-	if !av.metricsFresh(w) {
+	return p.gaugeSignal(in, alloc, av, st, w)
+}
+
+// gaugeSignal is a running worker's gauge-based signal: no token progress, or only server errors. Both
+// need fresh metrics: stale gauges are unknown.
+func (p *pass) gaugeSignal(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agentView, st settings, w *agentapi.WorkerReport) (string, string) {
+	h := w.Health
+	if h == nil || !av.metricsFresh(w) {
 		return "", ""
 	}
 	t, ok := p.r.Backend.healthOf(alloc.UID, string(in.UID), *w)
@@ -226,7 +236,11 @@ func (p *pass) climb(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal, 
 		if n := len(s.Restarts); n > maxRestartsKept {
 			s.Restarts = s.Restarts[n-maxRestartsKept:]
 		}
-		s.Phase = v1alpha1.InstanceVerifying
+		// Several workers: a worker's restart keeps the phase, so a ready Instance stays ready and
+		// routable on its other workers (HBEP-7, Several workers); the whole Instance's verifies again.
+		if !several(in) || part == v1alpha1.PartInstance {
+			s.Phase = v1alpha1.InstanceVerifying
+		}
 		switch {
 		case several(in) && part != v1alpha1.PartInstance:
 			// Several workers: a worker's restart verifies and warms up that worker alone, and leaves the
@@ -244,7 +258,7 @@ func (p *pass) climb(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal, 
 			// Several workers, the whole Instance: every worker verifies and warms up again, and none is
 			// taken as verified meanwhile.
 			for i := range s.Workers {
-				s.Workers[i].WarmedUp, s.Workers[i].VerifiedGeneration = false, nil
+				s.Workers[i].WarmedUp, s.Workers[i].VerifiedGeneration, s.Workers[i].RouterAdmittedGeneration = false, nil, nil
 			}
 		}
 		cond(&s.Conditions, v1alpha1.ConditionHealthy, metav1.ConditionFalse, signal, msg, in.Generation, now)

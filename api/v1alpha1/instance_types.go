@@ -448,6 +448,20 @@ type InstanceWorker struct {
 	//
 	// +optional
 	WarmedUp bool `json:"warmedUp,omitempty"`
+
+	// RouterAdmittedGeneration is the worker's restart generation at which its
+	// router first held it healthy after its verification: its router
+	// admission (HBEP-7, Several workers; the science agent's ruling on #439,
+	// Q2, and on where it is kept). The router's failed checks count against
+	// the worker only while it equals the worker's current restart generation,
+	// so the failures the router counted during the worker's own warm-up never
+	// judge it; until then health.startTimeout from its restart does. Absent
+	// until the router first admits the worker, and again after a
+	// whole-Instance restart.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	RouterAdmittedGeneration *int64 `json:"routerAdmittedGeneration,omitempty"`
 }
 
 // InstanceRestart is one restart of a part of an Instance, recorded before the
