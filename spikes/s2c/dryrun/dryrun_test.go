@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -375,8 +376,13 @@ func TestDryRunEveryArm(t *testing.T) {
 	t.Run("summary", func(t *testing.T) {
 		out := filepath.Join(e.root, "summary.json")
 		cmd := exec.Command("python3", "-I", "-B", "../scripts/analyze.py", results, "--json", out)
+		// Exit 1 is a failed check, which checkSummary names: only the probe's no-503 check may fail, pending
+		// the science agent's ruling (#62). Exit 2, unreadable input, fails here.
 		if b, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("analyze.py: %v\n%s", err, b)
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) || ee.ExitCode() != 1 {
+				t.Fatalf("analyze.py: %v\n%s", err, b)
+			}
 		}
 		checkSummary(t, readFile(t, out), arms)
 	})

@@ -31,20 +31,26 @@ for p in cmd/s2crouter cmd/s2cload dryrun; do
   "${wrap[@]}" go test -c -o "$out/${p//\//_}.test" "./$p"
 done
 export HPCBURST_REQUIRE_ENVOY=1 S2C_REQUIRE_DRYRUN=1 S2C_DRY_BIN=$out/bin
-(cd cmd/s2crouter && "$out/cmd_s2crouter.test")
-(cd cmd/s2cload && "$out/cmd_s2cload.test")
-(cd dryrun && "$out/dryrun.test" -test.v -test.timeout 40m) > "$out/dryrun.log" 2>&1 || { tail -80 "$out/dryrun.log"; exit 1; }
-grep -E '^(=== RUN|--- |PASS|FAIL|ok)' "$out/dryrun.log" | grep -v '=== RUN' || true
 
-# Python and shell.
-python3 -I -B py/test_s2c_placement.py
-python3 -I -B scripts/test_analyze.py
-python3 -I -B scripts/test_pubcheck.py
-bash scripts/test_job_status.sh
-bash scripts/test_queue_check.sh
-
-# Publication check over every file git would commit under spikes/s2c, and over the diff against
-# origin/main when it exists. A finding fails the run.
-python3 -I -B scripts/pubcheck.py --ips --git .
-if git rev-parse --verify -q origin/main > /dev/null; then python3 -I -B scripts/pubcheck.py --ips --diff origin/main; fi
+# From here every step runs whatever an earlier one did, and the run fails at the end, naming each failed step.
+failed=()
+step() { local name=$1; shift; if "$@"; then echo "test.sh: ok   $name"; else echo "test.sh: FAIL $name"; failed+=("$name"); fi; }
+dryrun() {
+  (cd dryrun && "$out/dryrun.test" -test.v -test.timeout 40m) > "$out/dryrun.log" 2>&1; local rc=$?
+  grep -E '^(--- |    --- |PASS|FAIL|ok)|dryrun_test.go:|failures:' "$out/dryrun.log" || true
+  return $rc
+}
+step "launcher tests" bash -c "cd cmd/s2crouter && '$out/cmd_s2crouter.test'"
+step "client tests" bash -c "cd cmd/s2cload && '$out/cmd_s2cload.test'"
+step "dry run" dryrun
+step "placement middleware" python3 -I -B py/test_s2c_placement.py
+step "analysis" python3 -I -B scripts/test_analyze.py
+step "publication check's change" python3 -I -B scripts/test_pubcheck.py
+step "job status" bash scripts/test_job_status.sh
+step "queue check" bash scripts/test_queue_check.sh
+# Publication check over every file git would commit under spikes/s2c, and over the diff against origin/main
+# when it exists. A finding fails the run.
+step "publication check" python3 -I -B scripts/pubcheck.py --ips --git .
+if git rev-parse --verify -q origin/main > /dev/null; then step "publication check of the diff" python3 -I -B scripts/pubcheck.py --ips --diff origin/main; fi
+if ((${#failed[@]} > 0)); then echo "test.sh: FAILED: ${failed[*]}"; exit 1; fi
 echo "test.sh: all passed"
