@@ -89,10 +89,10 @@ const (
 	envoyNumRetries    = 1
 	envoyPreviousHosts = "envoy.retry_host_predicates.previous_hosts"
 	// envoyHostSelectionAttempts is how many times the retry's host selection may pick again when it
-	// lands on the worker that failed. Under RING_HASH a pick again takes the next entry of the ring, which
-	// belongs to the same worker about once in N for N workers, and Envoy's default of one more pick
-	// sends the retry back to the dead worker about half the time with two (measured on Envoy 1.40.2,
-	// #439). 20 picks leave that under one in a million with two workers.
+	// lands on the worker that failed (previous_hosts). Under RING_HASH a pick can land on the same worker
+	// again. Measured on Envoy 1.40.2 with two workers, a request in the dead worker's session (#439): with
+	// the field unset the retry went back to the dead worker in 2 runs of 3, with 0 in 1 of 6, with 1 in
+	// none of 6, and with 20 in none of 15. Picks again cost nothing, so 20.
 	envoyHostSelectionAttempts = 20
 	envoyHealthyPanicPercent   = 0
 )
