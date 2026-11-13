@@ -1,0 +1,12 @@
+{
+ "mode": "replica",
+ "bound": "none",
+ "factor": null,
+ "config_sha256": "0cc18a849d9b053b635874d408a63d5dd9ceea0409a371f7c09394f14356d3d5",
+ "pid": 4243,
+ "argv": ["envoy", "-c", "/run/s2c/envoy.json", "--disable-hot-restart"],
+ "env": [],
+ "diff": ["static_resources.clusters[0].common_lb_config.consistent_hashing_lb_config.hash_balance_factor"],
+ "envoy_sha256": "0000000000000000000000000000000000000000000000000000000000000001",
+ "glibc": "2.34"
+}

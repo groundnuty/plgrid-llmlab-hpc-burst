@@ -1,0 +1,11 @@
+# TYPE vllm_router_processed_requests_total counter
+vllm_router_processed_requests_total{worker="http://127.0.0.1:41001"} 2
+vllm_router_processed_requests_total{worker="http://127.0.0.1:41002"} 4
+vllm_router_processed_requests_total{worker="http://127.0.0.1:41003"} 2
+vllm_router_processed_requests_total{worker="http://127.0.0.1:41004"} 2
+vllm_router_policy_decisions_total{worker="http://127.0.0.1:41001",policy="consistent_hash"} 2
+vllm_router_policy_decisions_total{worker="http://127.0.0.1:41002",policy="consistent_hash"} 4
+vllm_router_policy_decisions_total{worker="http://127.0.0.1:41003",policy="consistent_hash"} 2
+vllm_router_policy_decisions_total{worker="http://127.0.0.1:41004",policy="consistent_hash"} 2
+vllm_router_requests_total{route="/v1/chat/completions"} 10
+vllm_router_active_workers 4

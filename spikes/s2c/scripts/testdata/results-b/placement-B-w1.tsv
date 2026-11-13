@@ -1,0 +1,16 @@
+1001.000000	1005.000000	1	B1-rr	1	0	B1-rr-s001
+1005.000000	1006.500000	1	B1-rr	1	1	B1-rr-s001
+1009.000000	1010.500000	1	B1-rr	4	1	B1-rr-s004
+2001.000000	2004.000000	1	B1-vr-hash	1	0	B1-vr-hash-s001
+2004.000000	2006.500000	1	B1-vr-hash	4	0	B1-vr-hash-s004
+2006.000000	2008.500000	1	B1-vr-hash	1	1	B1-vr-hash-s001
+2009.000000	2010.000000	1	B1-vr-hash	4	1	B1-vr-hash-s004
+3001.000000	3002.500000	1	B1-envoy-bound	1	0	B1-envoy-bound-s001
+3006.000000	3007.500000	1	B1-envoy-bound	1	1	B1-envoy-bound-s001
+3009.000000	3010.500000	1	B1-envoy-bound	4	1	B1-envoy-bound-s004
+4001.000000	4003.000000	1	B1-envoy-nobound	1	0	B1-envoy-nobound-s001
+4002.000000	4004.000000	1	B1-envoy-nobound	2	0	B1-envoy-nobound-s002
+4003.000000	4005.000000	1	B1-envoy-nobound	3	0	B1-envoy-nobound-s003
+4006.000000	4007.000000	1	B1-envoy-nobound	1	1	B1-envoy-nobound-s001
+4007.000000	4008.000000	1	B1-envoy-nobound	2	1	B1-envoy-nobound-s002
+4008.000000	4009.000000	1	B1-envoy-nobound	3	1	B1-envoy-nobound-s003
