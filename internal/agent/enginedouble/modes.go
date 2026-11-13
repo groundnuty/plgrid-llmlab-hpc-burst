@@ -95,6 +95,10 @@ func applyMode(c *Config, name, val string, hasVal bool) error {
 		n, err := intValue(val, hasVal, 1)
 		c.NaturalLen = n
 		return err
+	case "reply-bytes":
+		n, err := intValue(val, hasVal, 1)
+		c.ReplyBytes = n
+		return err
 	case "loop-above":
 		n, err := intValue(val, hasVal, 1)
 		c.LoopAbove = n

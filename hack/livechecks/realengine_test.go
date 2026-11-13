@@ -86,7 +86,7 @@ func TestRealEngineRunCancelsItsJobWhenInterrupted(t *testing.T) {
 	cmd, out := w.start([]string{"STUB_JOB_FOREVER=1", "STUB_FOREIGN=1", "LIVE_POLL_SECONDS=1"}, "--run", "real-engine", "--yes")
 	w.waitFor("polled")
 	w.signal(cmd, syscall.SIGTERM)
-	err := cmd.Wait()
+	err := w.waitStopped(cmd, out)
 	w.noLeak(out.String())
 	w.noLeftoverProcess(cmd)
 	if exitCode(err) == 0 {
@@ -325,5 +325,34 @@ func TestRealEngineRecordsAreFreshPerRun(t *testing.T) {
 	}
 	if m, _ := filepath.Glob(filepath.Join(w.out(), "real-engine-live-*")); len(m) != 2 {
 		t.Errorf("run directories %v, want two", m)
+	}
+}
+
+// A stop that arrives while the poll's squeue is in flight is acted on when that call returns (issue #494): bash holds a trapped
+// signal until its foreground command ends, and the loop then sees INTERRUPTED. The stub squeue holds its first poll on a seam
+// (STUB_SQUEUE_HOLD) until the test releases it; the test signals while it is held, and w.signal returns only when the reaper has
+// forwarded the signal, so the release comes after it with no timed window. The script must then stop, cancel its job and say so.
+func TestAStopDuringAnInFlightPollIsActedOnWhenItReturns(t *testing.T) {
+	w := newWorld(t)
+	w.useStubGo()
+	cmd, out := w.start(quick("STUB_JOB_FOREVER=1", "LIVE_POLL_SECONDS=1", "STUB_SQUEUE_HOLD=1"), "--run", "real-engine", "--yes")
+	w.waitFor("held")
+	w.signal(cmd, syscall.SIGTERM)
+	if err := os.WriteFile(filepath.Join(w.state, "release-squeue"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := w.waitStopped(cmd, out)
+	w.noLeak(out.String())
+	w.noLeftoverProcess(cmd)
+	if exitCode(err) == 0 {
+		t.Errorf("a stopped run exited 0:\n%s", out)
+	}
+	for _, want := range []string{"real-engine: FAIL (interrupted)", "cleanup: left behind 0 (cancelled 1)"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the output lacks %q:\n%s", want, out)
+		}
+	}
+	if q := w.stateFile("queue"); strings.Contains(q, "7001|") {
+		t.Errorf("the run's job was left in the queue:\n%s", q)
 	}
 }

@@ -75,9 +75,11 @@ package rehearsal
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
@@ -226,6 +228,61 @@ func (n *LoginNode) SSHConfig() string {
 // file.
 func (n *LoginNode) WriteCredentials(path string) error {
 	return writeAtomic(path, []byte(n.SSHConfig()))
+}
+
+// WriteCredentialsVia is WriteCredentials for a client that reaches the login node's sshd through
+// addr, 127.0.0.1:<port>, a shaped link in front of it (#448's bulk-path rehearsal, through S17's
+// link; spikes/s17/s17.py, rewrite_ssh_config): the file's Port is addr's, and its known-hosts file,
+// written beside it as <path>.known_hosts, names the sshd's host key at addr's port, so the client's
+// strict host-key check still holds.
+func (n *LoginNode) WriteCredentialsVia(path, addr string) error {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	known, err := os.ReadFile(n.files.knownHosts)
+	if err != nil {
+		return err
+	}
+	knownPath := path + ".known_hosts"
+	conf, kh, err := viaLink(n.SSHConfig(), string(known), n.port(), port, knownPath)
+	if err != nil {
+		return err
+	}
+	if err := writeAtomic(knownPath, []byte(kh)); err != nil {
+		return err
+	}
+	return writeAtomic(path, []byte(conf))
+}
+
+// viaLink rewrites an ssh_config for the login node and its known-hosts text to reach the sshd at
+// sshdPort through the link's port: the config's one Port line becomes the link's and its one
+// UserKnownHostsFile line names knownPath, and every known-hosts entry for [127.0.0.1]:<sshdPort>
+// names the link's port. A config without exactly one of each line, or known hosts with no entry for
+// the sshd, is an error, never a file that silently still names the sshd's own port.
+func viaLink(conf, known string, sshdPort int, linkPort, knownPath string) (string, string, error) {
+	lines := strings.Split(strings.TrimSuffix(conf, "\n"), "\n")
+	ports, files := 0, 0
+	for i, l := range lines {
+		f := strings.Fields(l)
+		if len(f) == 0 {
+			continue
+		}
+		switch strings.ToLower(f[0]) {
+		case "port":
+			lines[i], ports = "  Port "+linkPort, ports+1
+		case "userknownhostsfile":
+			lines[i], files = "  UserKnownHostsFile "+knownPath, files+1
+		}
+	}
+	if ports != 1 || files != 1 {
+		return "", "", fmt.Errorf("rehearsal: the ssh config has %d Port and %d UserKnownHostsFile lines, want one of each", ports, files)
+	}
+	from, to := "[127.0.0.1]:"+strconv.Itoa(sshdPort)+" ", "[127.0.0.1]:"+linkPort+" "
+	if !strings.Contains(known, from) {
+		return "", "", fmt.Errorf("rehearsal: the known-hosts file has no entry for the sshd at %s", strings.TrimSpace(from))
+	}
+	return strings.Join(lines, "\n") + "\n", strings.ReplaceAll(known, from, to), nil
 }
 
 // Close stops the listener, the relay and every sshd child with the
