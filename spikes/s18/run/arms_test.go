@@ -6,6 +6,7 @@ package run
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,5 +156,40 @@ func TestTheLayerAtBudget0PausesAsAlphaDoes(t *testing.T) {
 	}
 	if fmt.Sprint(l) != fmt.Sprint(a) {
 		t.Errorf("the layer at budget 0: paused after each of 3 failures %v, want arm (a)'s %v: each failure counted once", l, a)
+	}
+}
+
+// The other direction of the pause anchor: a failure on the Instance the layer retried to (not home) must
+// count toward that Instance's pause, as a front-side retry's would. Under (b), each request pinned to
+// Instance 1 carries both Instance 1's and Instance 2's F2 markers: home answers 500 (the front counts it),
+// the layer retries to Instance 2 (the next ready one), which answers 500 too (the layer reports it). After
+// three such requests both are paused (pauseAfterFailures 3), and neither after two. A layer that reported
+// no Instance's outcome would leave Instance 2 unpaused (V12).
+func TestTheLayersRetryTargetCountsTowardItsOwnPause(t *testing.T) {
+	p := rig.Policy{Name: "b", MaxRetries: 1}
+	r := stand(t, "F2", &p)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	c, s, _ := pinned(t, ctx, r, "sibling", 1)
+	home, sibling := r.Front.Instances[1].Key, r.Front.Instances[2].Key
+	var got []string
+	for k := 0; k < 3; k++ {
+		res := c.Do(ctx, c.NextBase(), 0, s, false, rig.MarkF2+"1 "+rig.MarkF2+"2")
+		if res.Status != 500 {
+			t.Fatalf("request %d: %d %s, want the engines' 500 after the one retry", k+1, res.Status, res.Code)
+		}
+		got = append(got, fmt.Sprintf("%v/%v", r.Front.Router.Paused(home), r.Front.Router.Paused(sibling)))
+	}
+	if want := "[false/false false/false true/true]"; fmt.Sprint(got) != want {
+		t.Errorf("paused (home/sibling) after each of 3 requests: %v, want %s", got, want)
+	}
+	begins, err := r.Begins()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, bs := range begins {
+		if strings.Contains(id, "sibling") && rig.Admissions(bs) == 2 && (bs[0].Instance != 1 || bs[1].Instance != 2) {
+			t.Errorf("%s begun on %+v, want Instance 1 then 2", id, bs)
+		}
 	}
 }

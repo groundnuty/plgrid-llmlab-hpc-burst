@@ -49,7 +49,8 @@
       "final_status": 502,
       "corr_front": false,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 1506106511
     },
     {
       "base": "s18id-66ac73-172",
@@ -58,7 +59,8 @@
       "final_status": 502,
       "corr_front": false,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 1505521004
     },
     {
       "base": "s18id-66ac73-331",
@@ -67,7 +69,8 @@
       "final_status": 502,
       "corr_front": false,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 1506626904
     },
     {
       "base": "s18id-66ac73-490",
@@ -76,7 +79,8 @@
       "final_status": 502,
       "corr_front": false,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 1504986014
     },
     {
       "base": "s18id-66ac73-649",
@@ -85,7 +89,8 @@
       "final_status": 502,
       "corr_front": false,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 1506038559
     },
     {
       "base": "s18id-66ac73-808",
@@ -94,7 +99,8 @@
       "final_status": 502,
       "corr_front": false,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 1505657182
     },
     {
       "base": "s18id-66ac73-967",
@@ -103,7 +109,8 @@
       "final_status": 502,
       "corr_front": false,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 1505389563
     },
     {
       "base": "s18id-66ac73-1126",
@@ -112,7 +119,8 @@
       "final_status": 502,
       "corr_front": false,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 1505337192
     },
     {
       "base": "s18id-66ac73-1285",
@@ -121,7 +129,8 @@
       "final_status": 502,
       "corr_front": false,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 1586141866
     },
     {
       "base": "s18id-66ac73-1444",
@@ -130,7 +139,8 @@
       "final_status": 502,
       "corr_front": false,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 1563528324
     },
     {
       "base": "s18id-66ac73-1603",
@@ -139,7 +149,8 @@
       "final_status": 502,
       "corr_front": false,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 1505546141
     },
     {
       "base": "s18id-66ac73-1762",
@@ -148,7 +159,8 @@
       "final_status": 502,
       "corr_front": false,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 1505140460
     },
     {
       "base": "s18id-66ac73-1921",
@@ -157,7 +169,8 @@
       "final_status": 502,
       "corr_front": false,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 1506045378
     },
     {
       "base": "s18id-66ac73-2080",
@@ -166,7 +179,8 @@
       "final_status": 502,
       "corr_front": false,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 1533072566
     },
     {
       "base": "s18id-66ac73-2239",
@@ -175,7 +189,8 @@
       "final_status": 502,
       "corr_front": false,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 1505843169
     },
     {
       "base": "s18id-66ac73-2398",
@@ -184,7 +199,8 @@
       "final_status": 502,
       "corr_front": false,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 1505613979
     },
     {
       "base": "s18id-66ac73-2557",
@@ -193,7 +209,8 @@
       "final_status": 502,
       "corr_front": false,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 1505161767
     },
     {
       "base": "s18id-66ac73-2716",
@@ -202,7 +219,8 @@
       "final_status": 502,
       "corr_front": false,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 1505886307
     },
     {
       "base": "s18id-66ac73-2875",
@@ -211,7 +229,8 @@
       "final_status": 502,
       "corr_front": false,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 1506144370
     },
     {
       "base": "s18id-66ac73-3034",
@@ -220,7 +239,8 @@
       "final_status": 502,
       "corr_front": false,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 1505651111
     }
   ]
 }

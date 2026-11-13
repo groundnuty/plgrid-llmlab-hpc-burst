@@ -68,14 +68,22 @@ type Summary struct {
 
 // PoisonTrial is one poison request's cost.
 type PoisonTrial struct {
-	Base           string `json:"base"`
-	Attempts       int    `json:"attempts"`
-	Deaths         int    `json:"deaths"`
-	Final          int    `json:"final_status"`
-	CorrFront      bool   `json:"corr_front"`
-	CorrController bool   `json:"corr_controller"` // deaths of two or more distinct Instances under it
-	CorrContent    bool   `json:"corr_content"`
+	Base      string `json:"base"`
+	Attempts  int    `json:"attempts"`
+	Deaths    int    `json:"deaths"`
+	Final     int    `json:"final_status"`
+	CorrFront bool   `json:"corr_front"`
+	// CorrController: candidate (ii) on this request's own deaths, two of them on distinct Instances
+	// within CorrWindow of each other, timed by the process ends.
+	CorrController bool `json:"corr_controller"`
+	CorrContent    bool `json:"corr_content"`
+	// DeathSpan is the time from the first to the last engine death under it, by the process ends; 0 with
+	// fewer than two.
+	DeathSpan time.Duration `json:"death_span_ns"`
 }
+
+// CorrWindow is candidate (ii)'s window, as proposed.
+const CorrWindow = 30 * time.Second
 
 // Analyze computes a cell's summary from the client's attempts, the engines' records, the process ends
 // and the layer's attempts (none under arm a).
@@ -268,19 +276,42 @@ func pct(xs []float64, p float64) float64 {
 	return s[k]
 }
 
-// PoisonCost is one poison request's cost: its attempts, the engines that died under them, and whether
-// each crash-correlation candidate fired.
-func PoisonCost(base string, rs []Result, begins map[string][]Begin, attempts []Attempt) PoisonTrial {
+// PoisonCost is one poison request's cost: its attempts, the engines that died under them, when (from the
+// process ends), and whether each crash-correlation candidate fired.
+func PoisonCost(base string, rs []Result, begins map[string][]Begin, attempts []Attempt, exits []Exit) PoisonTrial {
 	t := PoisonTrial{Base: base, Attempts: len(rs)}
 	if len(rs) > 0 {
 		t.Final = rs[len(rs)-1].Status
 	}
 	ids := map[string]bool{}
+	type death struct {
+		instance int
+		at       time.Time
+	}
+	var deaths []death
+	used := map[int]bool{} // an exit is one death: matched once
 	for _, r := range rs {
 		ids[r.ID] = true
 		for _, b := range begins[r.ID] {
-			if b.Admitted && b.Outcome == "" {
-				t.Deaths++
+			if !b.Admitted || b.Outcome != "" {
+				continue
+			}
+			t.Deaths++
+			// The process end of that Instance's engine during this attempt (from its start to its
+			// answer, with a second's slack either side), the earliest not yet matched.
+			lo, hi := r.Start.Add(-time.Second), r.Start.Add(max(r.End, 0)+time.Second)
+			k := -1
+			for j, e := range exits {
+				if e.Stopped || used[j] || e.Instance != b.Instance || e.At.Before(lo) || e.At.After(hi) {
+					continue
+				}
+				if k < 0 || e.At.Before(exits[k].At) {
+					k = j
+				}
+			}
+			if k >= 0 {
+				used[k] = true
+				deaths = append(deaths, death{b.Instance, exits[k].At})
 			}
 		}
 	}
@@ -295,17 +326,17 @@ func PoisonCost(base string, rs []Result, begins map[string][]Begin, attempts []
 			t.CorrFront = true
 		}
 	}
-	// Its deaths come seconds apart, inside every window: the controller-side candidate fires when they
-	// are of two or more distinct Instances.
-	dead := map[int]bool{}
-	for _, r := range rs {
-		for _, b := range begins[r.ID] {
-			if b.Admitted && b.Outcome == "" {
-				dead[b.Instance] = true
+	for a := range deaths {
+		for b := range deaths {
+			d := deaths[b].at.Sub(deaths[a].at)
+			if d > t.DeathSpan {
+				t.DeathSpan = d
+			}
+			if deaths[a].instance != deaths[b].instance && d >= 0 && d <= CorrWindow {
+				t.CorrController = true
 			}
 		}
 	}
-	t.CorrController = len(dead) >= 2
 	n, _ := contentClosed(rs, begins, closed, len(attempts) > 0)
 	t.CorrContent = n >= 2
 	return t

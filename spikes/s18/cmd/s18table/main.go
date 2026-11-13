@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s18/rig"
 )
@@ -66,11 +67,11 @@ var header = []string{"cell", "fault", "stream", "sdk_retries", "arm", "burst", 
 	"success", "success_fired", "success_unmarked", "duplicates", "reexecutions", "deaths", "restarts", "false_deaths", "false_stops",
 	"ttfb_fired_p50_ms", "ttfb_fired_p95_ms", "ttfb_unmarked_p50_ms", "ttfb_unmarked_p95_ms", "corr_front", "corr_front_false",
 	"corr_ctrl_30s", "corr_ctrl_2m", "corr_ctrl_10m", "corr_content", "corr_content_false", "poison_deaths_mean", "poison_deaths_max",
-	"poison_final", "poison_corr_front", "poison_corr_ctrl", "poison_corr_content"}
+	"poison_final", "poison_corr_front", "poison_corr_ctrl", "poison_corr_content", "poison_death_span_max_s"}
 
 func record(s rig.Summary) []string {
 	c := s.Cell
-	pm, px, finals, cf, cc, ct := poison(s.Poison)
+	pm, px, finals, cf, cc, ct, span := poison(s.Poison)
 	return []string{c.Name, c.Fault, fmt.Sprint(c.Stream), fmt.Sprint(c.ClientRetries), c.Arm, g(c.Burst), g(c.Refill), g(c.Rate),
 		fmt.Sprint(s.Requests), fmt.Sprint(s.Marked), fmt.Sprint(s.Fired),
 		f4(s.Success), f4(s.SuccessFired), f4(s.SuccessUnmarked), fmt.Sprint(s.Duplicates), fmt.Sprint(s.ReExecutions),
@@ -78,14 +79,15 @@ func record(s rig.Summary) []string {
 		f1(s.TTFBFiredP50), f1(s.TTFBFiredP95), f1(s.TTFBUnmarkedP50), f1(s.TTFBUnmarkedP95), fmt.Sprint(s.CorrFront),
 		fmt.Sprint(s.CorrFrontFalse), fmt.Sprint(s.CorrController["30s"]), fmt.Sprint(s.CorrController["2m0s"]),
 		fmt.Sprint(s.CorrController["10m0s"]), fmt.Sprint(s.CorrContent), fmt.Sprint(s.CorrContentFalse),
-		pm, px, finals, cf, cc, ct}
+		pm, px, finals, cf, cc, ct, span}
 }
 
-func poison(ps []rig.PoisonTrial) (mean, mx, finals, corrFront, corrCtrl, corrContent string) {
+func poison(ps []rig.PoisonTrial) (mean, mx, finals, corrFront, corrCtrl, corrContent, span string) {
 	if len(ps) == 0 {
-		return "", "", "", "", "", ""
+		return "", "", "", "", "", "", ""
 	}
 	sum, m, f, c, ct := 0, 0, 0, 0, 0
+	var sp time.Duration
 	st := map[int]int{}
 	for _, p := range ps {
 		sum += p.Deaths
@@ -100,6 +102,7 @@ func poison(ps []rig.PoisonTrial) (mean, mx, finals, corrFront, corrCtrl, corrCo
 		if p.CorrContent {
 			ct++
 		}
+		sp = max(sp, p.DeathSpan)
 	}
 	var parts []string
 	for k, v := range st {
@@ -108,7 +111,7 @@ func poison(ps []rig.PoisonTrial) (mean, mx, finals, corrFront, corrCtrl, corrCo
 	sort.Strings(parts)
 	n := len(ps)
 	return fmt.Sprintf("%.2f", float64(sum)/float64(n)), fmt.Sprint(m), strings.Join(parts, " "), fmt.Sprintf("%d/%d", f, n),
-		fmt.Sprintf("%d/%d", c, n), fmt.Sprintf("%d/%d", ct, n)
+		fmt.Sprintf("%d/%d", c, n), fmt.Sprintf("%d/%d", ct, n), fmt.Sprintf("%.2f", sp.Seconds())
 }
 
 func writeCSV(path string, rows []rig.Summary) error {

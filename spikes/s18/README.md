@@ -21,7 +21,7 @@ request costs once the client retries, and the crash-correlation event should be
   prefill (F3).
 - **A budget below the fault rate starves rescues, and is no poison guard.** With faults at 0.5 a second (10% of 5
   requests a second), a refill of 0.1 a second rescued 0.15-0.37 of the fired F2 and F3 requests; a refill of 1 a
-  second with a burst of 3 or 10 rescued all of them. Under the poison request the starved bucket (burst 1, refill
+  second with a burst of 3 or 10 rescued all of them (one streamed cell 0.99), and with a burst of 1, 0.62-0.74. Under the poison request the starved bucket (burst 1, refill
   0.1 a second) cut the engines killed per poison request from 2 to 1.7, only because it was empty 30% of the time.
 - **The two-deaths stop gives up every request whose tunnel fails twice, and saves nothing one retry does not.** A
   request cut on two connections in a row (F3x2, no engine dead) was given up by (d) every time: 0 of 50-56 rescued
@@ -30,14 +30,16 @@ request costs once the client retries, and the crash-correlation event should be
   that rescues the double cut lets a poison request reach a third engine: (c) with a burst of 10 killed all three.
 - **With the clients people use, the front cannot bound what a poison request costs.** The OpenAI SDK retries a 5xx
   twice by default (Q6), and each retry is a new request to the front. With it, every arm lost all three Instances to
-  each poison request, (a) included: 3 deaths in 20 of 20 trials, against 1 under (a) and 2 under (b) without it. The
-  front's bound per request multiplies by the client's attempts: with six or more Instances, (b) with the SDK would
-  reach six (derived; the stand had three).
+  each poison request: 3 deaths in 20 of 20 trials, against 1 under (a) and 2 under (b) without it. Under (a) that is
+  partly the stand's: a dead double is a refused dial, which alpha resends at once to another Instance, where a real
+  Instance's dead worker behind its live tunnel answers a 5xx that alpha passes through (Fidelity). The bound stands:
+  the front's limit per request multiplies by the client's attempts, so with six or more Instances, (b) with the SDK
+  can reach six (derived; the stand had three).
 - **The crash-correlation event (HBEP-7) can be the controller's: worker deaths on two distinct Instances of one
-  deployment within 30 s.** It fired on 20 of 20 poison requests in every cell where two or more engines died, (a) with
-  the SDK included, and never on a cut tunnel (0 in all 24 F3x2 cells). The front-side candidate, two closed attempts
-  under one request, missed (a) with the SDK (0 of 20) and fired on every double cut: 574 times in the F3x2 cells, no
-  engine dead.
+  deployment within 30 s.** The controller sees an exit, so a cut tunnel never looks like a death to it. A poison
+  request's deaths came at most 1.59 s apart (348 poison requests killed two or more engines), well inside 30 s, and the
+  window joined them in every one. The front-side candidate, two closed attempts under one request, missed (a) with the
+  SDK (0 of 20) and fired on every double cut: 574 times in the F3x2 cells, no engine dead.
 - **For a stream, the window closes at its headers (Q1).** Every stream ran the double's early-headers mode, and every
   fault here fires before the headers by construction, so the streamed results match the non-streamed ones: the
   mechanism works before the headers. On vLLM a death in prefill comes after them and is not retried, so the streamed
@@ -114,7 +116,9 @@ imported only by tests.
   each of three F3 failures pinned to it (`TestTheLayerAtBudget0PausesAsAlphaDoes`). This control found a bias in the
   layer's first version, which also reported home's failure itself: on a give-up the front counted it again, so arms
   (b)-(d) paused Instances after two failures, not three. The first hosted run carried it (its unmarked requests
-  refused under F3 with no engine dead), and was discarded; every number here is from the run after the fix.
+  refused under F3 with no engine dead), and was discarded; every number here is from the run after the fix. The other
+  direction is anchored as well: a failure on the Instance the layer retried to counts toward that Instance's pause
+  (`TestTheLayersRetryTargetCountsTowardItsOwnPause`, under (b), with both answering 500).
 - **Fidelity gaps:**
   - the front attributes a retried reply, its usage record and its in-flight count to the first Instance;
   - when the layer rescues a request that failed on its first Instance, the front sees a success there and resets
@@ -124,7 +128,13 @@ imported only by tests.
     picks next differs;
   - the layer's "another Instance" is the next ready one in order, not the ring's;
   - the layer's retries count against the front's `streamHeadersTimeout` and its deadlines, as a front-side retry's
-    would.
+    would;
+  - **a double is the whole Instance,** so its death closes its socket, and a later request to it is a refused dial,
+    which every arm resends at once to another Instance (alpha's own rule) while the controller emulation still routes
+    to it (D1 is 1 s, the SDK's first retry comes after 0.5 s). On a real Instance the worker dies behind its live
+    tunnel and forwarder, whose own 5xx alpha passes through unsent. That chain is what lets the SDK's retries reach a
+    new Instance each time under (a); under (b)-(d) the front's own retry of that 5xx would do the same. So the poison
+    costs with the SDK are the stand's, and the bound in Verdict 4 is the result.
 
 ### The faults
 
@@ -231,7 +241,9 @@ Each death also cuts the requests in flight on that engine; the layer's arms res
 
 ### The crash-correlation candidates
 
-Per poison request, how often each candidate fired:
+Per poison request, how often each candidate fired. For (ii), two of its deaths, on distinct Instances, within 30 s of
+each other, timed by the process ends (`death_span_ns` in each cell's summary; the largest span per cell is
+`poison_death_span_max_s` in `results.csv`):
 
 | arm, client | (i) front, one request | (ii) controller, distinct Instances | (iii) front, by content (derived) |
 |---|---|---|---|
@@ -247,8 +259,12 @@ Per poison request, how often each candidate fired:
 - **(i), front-side, per request:** two or more closed attempts under one front request. It cannot see the SDK's
   retries, each a request of its own, so it missed every poison request under (a) with the SDK, where all three
   Instances died.
-- **(ii), controller-side:** a worker death within 30 s after a death of another Instance of the same deployment. It
-  fired whenever a poison request killed two or more Instances, whoever retried.
+- **(ii), controller-side:** a worker death within 30 s after a death of another Instance of the same deployment. Its
+  firing per poison request follows the deaths column, since the controller tells a death from a cut by the exit
+  itself; what the run measured is the timing: a poison request's deaths came within milliseconds of each other when
+  the front's retry caused them, and 0.5-1.59 s apart with the SDK's retries, so the 30 s window held every pair (348
+  poison requests with two or more deaths). At cell level the window also joins deaths of consecutive trials, 30 s
+  apart: 33 joined deaths under (b) for its 20 trials of 2 deaths each, where 20 are within a trial.
 - **(iii), front-side by request content (derived, not an arm):** two or more written-then-closed failures for one
   request content across the client's retries (the request's base ID stands in for a body hash). It fires as (ii) does
   under F4.
@@ -262,19 +278,23 @@ Per poison request, how often each candidate fired:
 1. **Retry: yes, once, to another ready Instance,** for a request written and then closed before any response header,
    or answered 5xx before any body byte. It rescued every fired F2 and F3 request, and F1's whenever another Instance
    was up, for one duplicate execution each.
-2. **The budget is a storm limit, not a poison guard.** A per-deployment token bucket only rescues when its refill
-   keeps up with the failures: at a fifth of the fault rate it rescued 0.15-0.37, at twice it all. It lowered the
-   poison's cost only by being empty. The spike cannot size it for production fault rates; it can say that a refill
-   below the expected failure rate defeats the retry.
+2. **The budget is a storm limit, not a poison guard.** A per-deployment token bucket rescues only when both its knobs
+   keep up with the failures. Of the fired F2 and F3 requests at 10%: its refill (at a fifth of the fault rate it
+   rescued 0.15-0.37), and its burst, since failures arrive in clusters (at twice the fault rate, a burst of 1 rescued
+   0.62-0.74, and bursts of 3 and 10 all, but one cell at 0.99). F1's are lower at every bucket, since the other
+   Instance was sometimes dead too. It lowered the poison's cost only by being empty. The spike
+   cannot size it for production fault rates. **The science agent's decision (#538) is no separate bucket:** the retry
+   is bounded by the caps and the FIFO, like any request.
 3. **"Never after two Instances have died under one request" holds by construction with one retry,** since a request
    then reaches at most two Instances, so it needs no counter of its own. As a separate stop on top of a larger budget,
    (d), it saved nothing (2 deaths per poison, as (b)) and gave up every double cut (Q2's false stop). A request whose
    tunnel fails twice is not rescued by (b) either; rescuing it means a third attempt, which a poison request turns into
    a third death. The front cannot have both.
 4. **What F4 costs:** one Instance under alpha; two under one retry; three, every Instance of the stand, under a budget
-   that allows more, and under every arm once the client retries as the OpenAI SDK does. Deaths per poison request are
-   at most the Instances, and at most the client's attempts times the front's attempts per request (derived from the
-   cells; with more than three Instances, one retry with the SDK reaches six).
+   that allows more. With the OpenAI SDK's retries, three under every arm on the stand, where a dead double's refused
+   dial is resent at once (Fidelity); on real Instances fewer may die. Deaths per poison request are at most the
+   Instances, and at most the client's attempts times the front's attempts per request (derived from the cells; with
+   more than three Instances, one retry with the SDK can reach six).
 5. **What stops a poison request is not the front's per-request rule** once clients retry: each retry is a new
    request. Two levers remain:
    - **the controller,** through candidate (ii) as HBEP-7's crash-correlation event (below);
@@ -296,8 +316,10 @@ To replace the open item (`hbep/0005-llmlab-compatible-front/README.md:155`):
 >   or answered with a 5xx before any body byte. Once only, so a request reaches at most two Instances: that is the
 >   bound "never after two Instances have died under one request", and no separate count is kept. A refused or
 >   timed-out connection is resent as in alpha, outside this retry. A per-deployment token bucket limits these retries
->   in a storm of failures; its refill is at least the deployment's expected rate of such failures, since S18 rescued
->   0.15-0.37 of them with a refill at a fifth of it. The budget does not guard against a poison request.
+>   in a storm of failures, with both its knobs sized to the failures: a refill at least their expected rate (S18
+>   rescued 0.15-0.37 of them with a refill at a fifth of it) and a burst that absorbs failures arriving together (at
+>   twice the rate, a burst of 1 rescued 0.62-0.74 of them, and a burst of 3 nearly all). The budget does not guard against a
+>   poison request.
 > - For a stream, the response's first byte is its headers, which the front relays at once and vLLM sends before
 >   prefill: a stream is retried only when it failed before its headers, and a death in prefill is not retried.
 > - A retry is a duplicate execution: the first engine's work is lost.
@@ -305,36 +327,39 @@ To replace the open item (`hbep/0005-llmlab-compatible-front/README.md:155`):
 >   requests: with the OpenAI SDK's default of two retries, up to six Instances (S18: all three of its stand). HBEP-7's
 >   crash-correlation event is the guard across requests.
 
-The last point leaves open whether the front's give-up answer carries `x-should-retry: false` (Verdict, 5): it is a
-policy for the science agent, with the cost stated there.
+**Decided** (the science agent, #538), departing from this text in two places: **no separate bucket** (the retry's
+target is chosen as a new request's would be, and waits in the FIFO when every candidate is at its cap), and **the
+give-up 502 carries `x-should-retry: false`** after the front's own retry, not when there was no other Instance to
+retry to (Verdict, 5).
 
 ## The crash-correlation event (HBEP-7)
 
 HBEP-7 names the event as a mitigation of the poison-request risk (`:102`) and does not define it. Proposed definition,
 from candidate (ii): **a worker exit, other than one the controller asked for, within 30 s after an exit of a worker on
-another Instance of the same ModelDeployment.** It fired on every poison request that killed two or more Instances, the
-SDK's retries included, and never on a cut tunnel; it also fires on independent crashes frequent enough to matter (one
-every few seconds). One Instance's own crash loop is not counted: that is the restart ladder's. A poison request's deaths came
-at most 1.6 s apart (the SDK's retries, 0.5 s and 1 s after an answer), and a front-side retry's in the same second, so
-every window scored (30 s, 2 min, 10 min) holds them; 30 s also holds a slower client's retries, and the longer the
-window, the more independent crashes it joins. What the controller does on the event (an HBEP-8 event only, or holding the deployment's
-restarts) is HBEP-7's to decide; S18 measured its detection only.
+another Instance of the same ModelDeployment.** The controller sees the exits themselves, so a cut tunnel, which the
+front cannot tell from a death, never raises it. A poison request's deaths came at most 1.59 s apart in the run (the
+SDK's retries, 0.5 s and 1 s after an answer; a front-side retry's within milliseconds), so 30 s holds them with room
+for a slower client's retries, and a longer window joins more independent crashes. It also fires on independent
+crashes frequent enough to matter (one every few seconds). One Instance's own crash loop is not counted: that is the
+restart ladder's. What the controller does on the event is HBEP-7's to decide; S18 measured its timing only.
+**Decided** (#538): a `failing` event `CrashCorrelated`, an event only.
 
 ## Unit tests of the harness
 
-- `rig/`: `TestPoisonCostCountsInstancesAndContent`, `TestSelectAndBudget`, and `TestAnalyzeCountsFromTheRecords` (the
+- `rig/`: `TestPoisonCostCountsInstancesWindowAndContent`, `TestSelectAndBudget`, and `TestAnalyzeCountsFromTheRecords` (the
   analysis on hand-built records, every expected value counted by hand;
   it found that a false death was first judged by a 5 s window, which another request's death nearby fooled, and it is
   now judged from the engine's own record of the request) and `TestTheSweepIsQ5sAndItsGroupsCoverIt`.
-- `run/`: the controls above, and `TestEachArmOnEachFault` (each arm on each fault, the expectations derived from its
-  policy).
+- `run/`: the controls above, `TestTheLayersRetryTargetCountsTowardItsOwnPause`, and `TestEachArmOnEachFault` (each arm on
+  each fault, the expectations derived from its policy).
 - **The validity mutants** (`scripts/mut18.py`), all killed: V1 the F1 fault aimed at every Instance; V2 a request ID
   reused; V3 the layer at budget 0 retrying; V4 deaths counted from the layer's closed attempts; V5 an F4 trial not
   waiting for the front's pause (it first survived: the control's three trials each hit a different Instance, and four
   now revisit one); V6 the cutter cutting every marked write; V7 a false death judged by a time window; V8 the layer
   also reporting home's outcome (the bias the first hosted run carried; killed by `TestTheLayerAtBudget0PausesAsAlphaDoes`);
   V9 candidate (ii) counting one Instance dying again; V10 a poison's candidate (ii) counting deaths, not Instances;
-  V11 candidate (iii) counting one front request only.
+  V11 candidate (iii) counting one front request only; V12 the layer reporting no Instance's outcome (killed by
+  `TestTheLayersRetryTargetCountsTowardItsOwnPause`); V13 a poison's candidate (ii) with no window.
 
 ## Environment
 

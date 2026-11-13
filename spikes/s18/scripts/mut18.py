@@ -34,10 +34,14 @@ MUT = [
   [(R + "layer.go", "\t\treport := func(failed bool) {\n\t\t\tif target != home {\n", "\t\treport := func(failed bool) {\n\t\t\tif true {\n")]),
  ("V9 the controller-side candidate counting one Instance dying again", "rig", "^TestAnalyzeCountsFromTheRecords$",
   [(R + "analyze.go", "\t\t\tif ds[j].Instance != ds[k].Instance {\n", "\t\t\tif true {\n")]),
- ("V10 a poison's controller-side candidate counting deaths, not Instances", "rig", "^TestPoisonCostCountsInstancesAndContent$",
-  [(R + "analyze.go", "\tt.CorrController = len(dead) >= 2\n", "\tt.CorrController = t.Deaths >= 2\n")]),
+ ("V10 a poison's controller-side candidate counting deaths, not Instances", "rig", "^TestPoisonCostCountsInstancesWindowAndContent$",
+  [(R + "analyze.go", "\t\t\tif deaths[a].instance != deaths[b].instance && d >= 0 && d <= CorrWindow {\n", "\t\t\tif a != b && d >= 0 && d <= CorrWindow {\n")]),
  ("V11 the content candidate counting one front request only", "rig", "^TestAnalyzeCountsFromTheRecords$",
   [(R + "analyze.go", "\t\tif n, died := contentClosed(rs, begins, closedByID, len(attempts) > 0); n >= 2 {\n", "\t\tif n, died := contentClosed(rs[len(rs)-1:], begins, closedByID, len(attempts) > 0); n >= 2 {\n")]),
+ ("V12 the layer reporting no Instance's outcome", "run", "^TestTheLayersRetryTargetCountsTowardItsOwnPause$",
+  [(R + "layer.go", "\t\treport := func(failed bool) {\n\t\t\tif target != home {\n", "\t\treport := func(failed bool) {\n\t\t\tif false {\n")]),
+ ("V13 a poison's controller-side candidate with no window", "rig", "^TestPoisonCostCountsInstancesWindowAndContent$",
+  [(R + "analyze.go", "\t\t\tif deaths[a].instance != deaths[b].instance && d >= 0 && d <= CorrWindow {\n", "\t\t\tif deaths[a].instance != deaths[b].instance && d >= 0 {\n")]),
 ]
 def sh(c):
     p = subprocess.run(["bash", "-c", f"{ENV} && cd {MOD} && {c}"], capture_output=True, text=True)

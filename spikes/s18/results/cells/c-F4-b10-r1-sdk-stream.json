@@ -51,7 +51,8 @@
       "final_status": 503,
       "corr_front": true,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 2424276
     },
     {
       "base": "s18id-d30a4e-166",
@@ -60,7 +61,8 @@
       "final_status": 503,
       "corr_front": true,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 2664951
     },
     {
       "base": "s18id-d30a4e-319",
@@ -69,7 +71,8 @@
       "final_status": 503,
       "corr_front": true,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 2522852
     },
     {
       "base": "s18id-d30a4e-472",
@@ -78,7 +81,8 @@
       "final_status": 503,
       "corr_front": true,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 2727293
     },
     {
       "base": "s18id-d30a4e-625",
@@ -87,7 +91,8 @@
       "final_status": 503,
       "corr_front": true,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 2180134
     },
     {
       "base": "s18id-d30a4e-778",
@@ -96,7 +101,8 @@
       "final_status": 503,
       "corr_front": true,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 2241492
     },
     {
       "base": "s18id-d30a4e-931",
@@ -105,7 +111,8 @@
       "final_status": 503,
       "corr_front": true,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 2410294
     },
     {
       "base": "s18id-d30a4e-1084",
@@ -114,7 +121,8 @@
       "final_status": 503,
       "corr_front": true,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 2623604
     },
     {
       "base": "s18id-d30a4e-1237",
@@ -123,7 +131,8 @@
       "final_status": 503,
       "corr_front": true,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 2275184
     },
     {
       "base": "s18id-d30a4e-1390",
@@ -132,7 +141,8 @@
       "final_status": 503,
       "corr_front": true,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 2350011
     },
     {
       "base": "s18id-d30a4e-1543",
@@ -141,7 +151,8 @@
       "final_status": 503,
       "corr_front": true,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 2276369
     },
     {
       "base": "s18id-d30a4e-1696",
@@ -150,7 +161,8 @@
       "final_status": 503,
       "corr_front": true,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 3527447
     },
     {
       "base": "s18id-d30a4e-1849",
@@ -159,7 +171,8 @@
       "final_status": 503,
       "corr_front": true,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 2266250
     },
     {
       "base": "s18id-d30a4e-2002",
@@ -168,7 +181,8 @@
       "final_status": 503,
       "corr_front": true,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 2385211
     },
     {
       "base": "s18id-d30a4e-2155",
@@ -177,7 +191,8 @@
       "final_status": 503,
       "corr_front": true,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 2267923
     },
     {
       "base": "s18id-d30a4e-2308",
@@ -186,7 +201,8 @@
       "final_status": 503,
       "corr_front": true,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 3443648
     },
     {
       "base": "s18id-d30a4e-2461",
@@ -195,7 +211,8 @@
       "final_status": 503,
       "corr_front": true,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 2319712
     },
     {
       "base": "s18id-d30a4e-2614",
@@ -204,7 +221,8 @@
       "final_status": 503,
       "corr_front": true,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 2505617
     },
     {
       "base": "s18id-d30a4e-2767",
@@ -213,7 +231,8 @@
       "final_status": 503,
       "corr_front": true,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 2586705
     },
     {
       "base": "s18id-d30a4e-2920",
@@ -222,7 +241,8 @@
       "final_status": 503,
       "corr_front": true,
       "corr_controller": true,
-      "corr_content": true
+      "corr_content": true,
+      "death_span_ns": 3116784
     }
   ]
 }

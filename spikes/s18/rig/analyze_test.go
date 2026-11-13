@@ -93,23 +93,35 @@ func TestAnalyzeCountsFromTheRecords(t *testing.T) {
 	}
 }
 
-// A poison request's cost: the controller-side candidate fires on deaths of two distinct Instances, not on
-// one Instance dying twice; the content candidate counts its failures across the client's attempts.
-func TestPoisonCostCountsInstancesAndContent(t *testing.T) {
-	rs := []Result{{ID: "p/c0", Base: "p", Marker: MarkPoison, Status: 502, Code: "upstream_closed"},
-		{ID: "p/c1", Base: "p", Attempt: 1, Marker: MarkPoison, Status: 502, Code: "upstream_closed"}}
-	twoInstances := map[string][]Begin{"p/c0": {{Instance: 0, Admitted: true}}, "p/c1": {{Instance: 1, Admitted: true}}}
-	oneInstance := map[string][]Begin{"p/c0": {{Instance: 0, Admitted: true}}, "p/c1": {{Instance: 0, Admitted: true}}}
+// A poison request's cost: candidate (ii) fires on deaths of two distinct Instances within 30 s of each
+// other, timed by the process ends, not on one Instance dying twice nor on deaths further apart; the
+// content candidate counts its failures across the client's attempts; the span is first to last death.
+func TestPoisonCostCountsInstancesWindowAndContent(t *testing.T) {
+	t0 := time.Date(2026, 11, 13, 21, 0, 0, 0, time.UTC)
+	rs := []Result{{ID: "p/c0", Base: "p", Marker: MarkPoison, Status: 502, Code: "upstream_closed", Start: t0, End: 50 * time.Millisecond},
+		{ID: "p/c1", Base: "p", Attempt: 1, Marker: MarkPoison, Status: 502, Code: "upstream_closed", Start: t0.Add(600 * time.Millisecond), End: 50 * time.Millisecond}}
+	two := map[string][]Begin{"p/c0": {{Instance: 0, Admitted: true}}, "p/c1": {{Instance: 1, Admitted: true}}}
+	one := map[string][]Begin{"p/c0": {{Instance: 0, Admitted: true}}, "p/c1": {{Instance: 0, Admitted: true}}}
+	near := []Exit{{Instance: 0, At: t0.Add(10 * time.Millisecond)}, {Instance: 1, At: t0.Add(610 * time.Millisecond)},
+		{Instance: 1, At: t0.Add(200 * time.Millisecond), Stopped: true}} // the rig's own stop: no death
+	oneTwice := []Exit{{Instance: 0, At: t0.Add(10 * time.Millisecond)}, {Instance: 0, At: t0.Add(610 * time.Millisecond)}}
+	// Attempts 40 s apart: each death in its own attempt's span, the two beyond the window.
+	far := append([]Result(nil), rs...)
+	far[1].Start = t0.Add(40 * time.Second)
+	farExits := []Exit{{Instance: 0, At: t0.Add(10 * time.Millisecond)}, {Instance: 1, At: t0.Add(40*time.Second + 10*time.Millisecond)}}
 	for _, c := range []struct {
 		name   string
+		rs     []Result
 		begins map[string][]Begin
+		exits  []Exit
 		want   PoisonTrial
 	}{
-		{"two Instances", twoInstances, PoisonTrial{Base: "p", Attempts: 2, Deaths: 2, Final: 502, CorrController: true, CorrContent: true}},
-		{"one Instance twice", oneInstance, PoisonTrial{Base: "p", Attempts: 2, Deaths: 2, Final: 502, CorrController: false, CorrContent: true}},
+		{"two Instances 0.6 s apart", rs, two, near, PoisonTrial{Base: "p", Attempts: 2, Deaths: 2, Final: 502, CorrController: true, CorrContent: true, DeathSpan: 600 * time.Millisecond}},
+		{"one Instance twice", rs, one, oneTwice, PoisonTrial{Base: "p", Attempts: 2, Deaths: 2, Final: 502, CorrController: false, CorrContent: true, DeathSpan: 600 * time.Millisecond}},
+		{"two Instances 40 s apart", far, two, farExits, PoisonTrial{Base: "p", Attempts: 2, Deaths: 2, Final: 502, CorrController: false, CorrContent: true, DeathSpan: 40 * time.Second}},
 	} {
 		// Arm (a): no layer, so the front's own 502 upstream_closed answers are its closed failures.
-		if got := PoisonCost("p", rs, c.begins, nil); got != c.want {
+		if got := PoisonCost("p", c.rs, c.begins, nil, c.exits); got != c.want {
 			t.Errorf("%s: %+v, want %+v", c.name, got, c.want)
 		}
 	}

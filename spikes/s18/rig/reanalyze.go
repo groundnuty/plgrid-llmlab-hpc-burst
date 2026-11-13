@@ -44,7 +44,7 @@ func Reanalyze(dir string) (Summary, error) {
 		bases[r.Base] = append(bases[r.Base], r)
 	}
 	for _, b := range order {
-		s.Poison = append(s.Poison, PoisonCost(b, bases[b], begins, attempts))
+		s.Poison = append(s.Poison, PoisonCost(b, bases[b], begins, attempts, exits))
 	}
 	return s, nil
 }

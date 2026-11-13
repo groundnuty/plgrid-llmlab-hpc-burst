@@ -168,7 +168,7 @@ func runCell(t *testing.T, cell rig.Cell, dir string) rig.Summary {
 			if err != nil {
 				t.Fatal(err)
 			}
-			under := rig.PoisonCost(rs[0].Base, rs, begins, nil).Deaths
+			under := rig.PoisonCost(rs[0].Base, rs, begins, nil, nil).Deaths
 			eventually(t, time.Minute, "the poison's deaths seen", func() bool { return r.Deaths() >= before+under })
 			if err := r.AllReady(ctx); err != nil {
 				t.Fatal(err)
@@ -199,7 +199,7 @@ func runCell(t *testing.T, cell rig.Cell, dir string) rig.Summary {
 	}
 	s := rig.Analyze(cell, results, begins, r.Doubles.Exits(), attempts, r.Restarts())
 	for _, rs := range poisonRes {
-		poison = append(poison, rig.PoisonCost(rs[0].Base, rs, begins, attempts))
+		poison = append(poison, rig.PoisonCost(rs[0].Base, rs, begins, attempts, r.Doubles.Exits()))
 	}
 	s.Poison = poison
 	writeJSONL(t, filepath.Join(dir, "attempts.jsonl"), results)
