@@ -50,6 +50,9 @@ type EntryHealth struct {
 	// (HBEP-6, Admission and Operational readiness). nil: not asked, which is every process but the
 	// front, and a front whose /healthz did not answer 200.
 	FrpsPluginOK *bool `json:"frps_plugin_ok,omitempty"`
+	// FrpsBulkPluginOK is the same for the bulk path's plugin path, with the bulk path on
+	// (checkFrontBulkPlugin); nil when not asked.
+	FrpsBulkPluginOK *bool `json:"frps_bulk_plugin_ok,omitempty"`
 	// OpenFiles is a tunnel process's descriptors in use and its soft and hard limits on them,
 	// read from /proc/<pid>/limits and /proc/<pid>/fd through the process's verified handle
 	// (openfiles.go; HBEP-11, Single-user host; #431). It is set for frps and the front only, and
@@ -122,6 +125,9 @@ func checkSupervision(l layout, st *State, sup *procHandle, rep *StatusReport, b
 	}
 	for _, e := range f.Entries {
 		eh, problems := checkEntry(sup, supRec.PID, e)
+		if st.BulkPath && e.Name == frontEntryName && eh.HealthzOK != nil && *eh.HealthzOK {
+			checkFrontBulkPlugin(e.Health, &eh, func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) })
+		}
 		rep.Controllers = append(rep.Controllers, eh)
 		for _, p := range problems {
 			bad("%s: %s", e.Name, p)
