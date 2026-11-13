@@ -628,6 +628,111 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'live_flows_test.go@@		if msg := workerRestartFailure(now, false); msg != "" {@@		if msg := ""; msg != "" {'
   'live_flows_test.go@@	if climb := ladderChecks(LadderOf([]v1alpha1.Instance{last})); len(climb) > 0 {@@	if climb := ladderChecks(LadderObs{}); len(climb) > 0 {'
   'live_flows_test.go@@	case last.Status.Phase == v1alpha1.InstanceEnded:@@	case false:'
+  # #521, the router row (betarouter.go): its glibc rule and boundary, its verdict's every check, the response-level reading's counts and
+  # classification, the node probes, and the row's tracker. The live flow's wiring is the stand-ins' (hack/mutate-alpha.sh cannot run them).
+  'betarouter.go@@	if r.Agent.OK && r.Agent.Version.Less(MinEnvoyGlibc) {@@	if false && r.Agent.OK && r.Agent.Version.Less(MinEnvoyGlibc) {'
+  'betarouter.go@@	if r.Probe.OK && r.Probe.Version.Less(MinEnvoyGlibc) {@@	if false && r.Probe.OK && r.Probe.Version.Less(MinEnvoyGlibc) {'
+  'betarouter.go@@var MinEnvoyGlibc = GlibcVersion{2, 30}@@var MinEnvoyGlibc = GlibcVersion{2, 29}'
+  'betarouter.go@@var MinEnvoyGlibc = GlibcVersion{2, 30}@@var MinEnvoyGlibc = GlibcVersion{2, 31}'
+  'betarouter.go@@	return v.Major < w.Major || (v.Major == w.Major && v.Minor < w.Minor)@@	return v.Major < w.Major || (v.Major == w.Major && v.Minor <= w.Minor)'
+  'betarouter.go@@		if r.Agent.Version.Less(r.Probe.Version) {@@		if r.Probe.Version.Less(r.Agent.Version) {'
+  'betarouter.go@@	m := getconfGlibc.FindStringSubmatch(strings.TrimSpace(string(out)))@@	m := getconfGlibc.FindStringSubmatch(strings.TrimSpace(string(out))[:0])'
+  'run.go@@		errors.Is(err, ErrGlibcTooOld)
+}@@		false
+}'
+  'run.go@@		return fmt.Sprintf("%s: %s%s; the run sent no request through the front; this run'\''s jobs were cancelled by tag\n", row.Name, glibcTooOldWords, reason)@@		return fmt.Sprintf("%s: %s; the run sent no request through the front; this run'\''s jobs were cancelled by tag\n", row.Name, glibcTooOldWords)'
+  'betarouter.go@@	case e.Refused:
+		f = append(f, "the agent'\''s log says the router did not start")@@	case false:
+		f = append(f, "the agent'\''s log says the router did not start")'
+  'betarouter.go@@	case !e.Serving:
+		f = append(f, "the agent'\''s log does not say the router is serving")@@	case false:
+		f = append(f, "the agent'\''s log does not say the router is serving")'
+  'betarouter.go@@	case e.Procs != 1:@@	case e.Procs < 1:'
+  'betarouter.go@@	case e.Contained:
+		f = append(f, "Envoy does not run bare@@	case false:
+		f = append(f, "Envoy does not run bare'
+  'betarouter.go@@	case e.RunningDigest != e.PinnedDigest:@@	case false:'
+  'betarouter.go@@	case e.RunningDigest == "":@@	case false:'
+  'betarouter.go@@	case b.Expected <= 0 || b.Variants != b.Expected:@@	case b.Expected <= 0:'
+  'betarouter.go@@	case b.Complete != b.Variants:@@	case false:'
+  'betarouter.go@@	if b.RouterMade > 0 {@@	if false {'
+  'betarouter.go@@	case b.StreamOK == 0:@@	case false:'
+  'betarouter.go@@	case b.NonStreamOK == 0:@@	case false:'
+  'betarouter.go@@	case b.ChatOK == 0:@@	case false:'
+  'betarouter.go@@	case b.CompletionsOK == 0:@@	case false:'
+  'betarouter.go@@	if b.Status200+b.Status4xx+b.Status5xx != b.Complete {@@	if false {'
+  'betarouter.go@@	if b.InvalidSent <= 0 || b.InvalidRefused != b.InvalidSent {@@	if b.InvalidSent <= 0 {'
+  'betarouter.go@@	if o.HealthyAtReady != 1 {@@	if o.HealthyAtReady < 0 {'
+  'betarouter.go@@	if o.HealthyAfterRestart != 1 {@@	if o.HealthyAfterRestart < 0 {'
+  'betarouter.go@@	if o.LaunchRouter != "envoy" {@@	if false {'
+  'betarouter.go@@	if o.LaunchWorkers > 1 {@@	if o.LaunchWorkers > 2 {'
+  'betarouter.go@@	f := ladderChecks(o.Ladder)
+	f = append(f, deploymentChecks(row, o.Deployment)...)
+	lf, _ := ledgerChecks(row, o.Tags, jobs)
+	f = append(f, lf...)
+	f = append(f, tagCountChecks(row, o.Tags, "the row makes exactly one Allocation")...)
+	if o.ReadyAt.IsZero() {
+		f = append(f, "the Instance was not seen ready")
+	}
+	if o.LaunchRouter@@	f := []string(nil)
+	f = append(f, deploymentChecks(row, o.Deployment)...)
+	lf, _ := ledgerChecks(row, o.Tags, jobs)
+	f = append(f, lf...)
+	f = append(f, tagCountChecks(row, o.Tags, "the row makes exactly one Allocation")...)
+	if o.ReadyAt.IsZero() {
+		f = append(f, "the Instance was not seen ready")
+	}
+	if o.LaunchRouter'
+  'betarouter.go@@	f = append(f, healthyChecks(o)...)
+	f = append(f, envoyChecks(o.Envoy)...)@@	f = append(f, envoyChecks(o.Envoy)...)'
+  'betarouter.go@@	f = append(f, bytesChecks(o.Bytes)...)
+	if o.Responses@@	if o.Responses'
+  'betarouter.go@@	if o.Rate <= 0 {@@	if false {'
+  'betarouter.go@@	f = append(f, restartChecks(o.WorkerRestarts)...)
+	return dedupe(f)
+}
+
+// betaRouterPost@@	return dedupe(f)
+}
+
+// betaRouterPost'
+  'betarouter.go@@		if status >= 400 && status < 500 {
+			b.InvalidRefused++@@		if status >= 400 {
+			b.InvalidRefused++'
+  'betarouter.go@@			if chat {
+				b.ChatOK++@@			if !chat {
+				b.ChatOK++'
+  'betarouter.go@@			if stream {
+				b.StreamOK++@@			if !stream {
+				b.StreamOK++'
+  'betarouter.go@@	case 502, 503, 504:@@	case 502, 503:'
+  'betarouter.go@@		c.Complete = strings.Contains(text, "data: [DONE]")@@		c.Complete = true'
+  'betarouter.go@@	if status == 0 || cut {@@	if status == 0 {'
+  'betarouter.go@@var envoyFailureText = []string{"upstream connect error", @@var envoyFailureText = []string{'
+  'betarouter.go@@	if !strings.Contains(s, `"max_tokens"`) && !strings.Contains(s, `"max_completion_tokens"`) {@@	if !strings.Contains(s, `"max_tokens"`) {'
+  'betarouter.go@@		loc := s13Model.FindStringSubmatchIndex(s)
+		if loc != nil {
+			s = s[:loc[3]] + strconv.Quote(model) + s[loc[1]:]@@		loc := s13Model.FindStringSubmatchIndex(s)
+		if loc != nil {
+			s = s[:loc[3]] + strconv.Quote(model) + s[loc[3]:]'
+  'betarouter.go@@var s13Model = regexp.MustCompile(`("model"\s*:\s*)"s13-model"`)@@var s13Model = regexp.MustCompile(`("model":)"s13-model"`)'
+  'betarouter.go@@		if len(p.Argv) == 0 || filepath.Base(p.Argv[0]) != "envoy" || !t.inJob(p) {@@		if len(p.Argv) == 0 || filepath.Base(p.Argv[0]) != "envoy" {'
+  'betarouter.go@@			if isApptainer(q.Argv) {
+				contained = true@@			if false {
+				contained = true'
+  'betarouter.go@@	if p.PID <= 0 || !digitsOnly.MatchString(p.Start) || !base64Only.MatchString(p.cmdline) {@@	if p.PID <= 0 || !base64Only.MatchString(p.cmdline) {'
+  'betarouter.go@@[ "${20}" = "$start" ] || { echo changed; exit 0; }@@true || { echo changed; exit 0; }'
+  'betarouter.go@@[ "$now" = "$cmd" ] || { echo changed; exit 0; }@@true || { echo changed; exit 0; }'
+  'betarouter.go@@sum=$(sha256sum < /proc/$pid/exe 2>/dev/null)@@sum=$(sha256sum < /proc/$pid/cmdline 2>/dev/null)'
+  'betarouter.go@@	if len(f) != 2 || f[0] != "digest" || !sha256Hex.MatchString(f[1]) {@@	if len(f) != 2 || !sha256Hex.MatchString(f[1]) {'
+  'betarouter.go@@	r.Name, r.PostsTo = BetaRouterName, BetaTracker@@	r.Name, r.PostsTo = BetaRouterName, "#145"'
+  'betarouter.go@@const BetaTracker = "#522"@@const BetaTracker = "#376"'
+  'betarouter.go@@RESPONSE-LEVEL reading on vLLM, not bytes (vLLM cannot show the bytes it received; exact bytes are CI'\''s)@@reading on vLLM (S13)'
+  'steps_live_test.go@@	if name == BetaRouterName {
+		return []stack.HostOption{stack.InstanceRouter}
+	}@@	if false {
+		return []stack.HostOption{stack.InstanceRouter}
+	}'
   'budget.go@@	CloseTimeout = 5 * time.Minute@@	CloseTimeout = 4 * time.Minute'
   'budget.go@@	ReadyMargin = 5 * time.Minute@@	ReadyMargin = 4 * time.Minute'
   'budget.go@@	EndMargin = 5 * time.Minute@@	EndMargin = 4 * time.Minute'
