@@ -1,0 +1,248 @@
+{
+  "cell": {
+    "name": "c-F4-b10-r1",
+    "arm": "c",
+    "burst": 10,
+    "refill": 1,
+    "fault": "F4",
+    "stream": false,
+    "rps": 5,
+    "duration_ns": 607622137547,
+    "trials": 20,
+    "client_retries": false,
+    "n": 3,
+    "d1_ns": 1000000000,
+    "d2_ns": 5000000000,
+    "token_delay": "5ms",
+    "seed": 63
+  },
+  "Requests": 3070,
+  "Marked": 20,
+  "Fired": 20,
+  "Attempts": 3070,
+  "Success": 0.003908794788273616,
+  "SuccessMarked": 0,
+  "SuccessFired": 0,
+  "SuccessUnmarked": 0.003934426229508197,
+  "Duplicates": 21,
+  "ReExecutions": 0,
+  "Deaths": 60,
+  "Restarts": 60,
+  "TTFBFiredP50": 0,
+  "TTFBFiredP95": 0,
+  "TTFBUnmarkedP50": 42.276,
+  "TTFBUnmarkedP95": 43.441544,
+  "CorrFront": 22,
+  "CorrFrontFalse": 0,
+  "CorrController": {
+    "10m0s": 59,
+    "2m0s": 59,
+    "30s": 40
+  },
+  "CorrContent": 22,
+  "CorrContentFalse": 0,
+  "FalseDeaths": 1,
+  "FalseStops": 0,
+  "poison": [
+    {
+      "base": "s18id-a0605f-13",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2314646
+    },
+    {
+      "base": "s18id-a0605f-166",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2856018
+    },
+    {
+      "base": "s18id-a0605f-319",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2610406
+    },
+    {
+      "base": "s18id-a0605f-472",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2608904
+    },
+    {
+      "base": "s18id-a0605f-625",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2286760
+    },
+    {
+      "base": "s18id-a0605f-777",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2637562
+    },
+    {
+      "base": "s18id-a0605f-930",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 3223096
+    },
+    {
+      "base": "s18id-a0605f-1083",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 4713786
+    },
+    {
+      "base": "s18id-a0605f-1236",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2771665
+    },
+    {
+      "base": "s18id-a0605f-1389",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2717913
+    },
+    {
+      "base": "s18id-a0605f-1542",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2572580
+    },
+    {
+      "base": "s18id-a0605f-1694",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 3091706
+    },
+    {
+      "base": "s18id-a0605f-1847",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 3273912
+    },
+    {
+      "base": "s18id-a0605f-2000",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2656715
+    },
+    {
+      "base": "s18id-a0605f-2153",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2817783
+    },
+    {
+      "base": "s18id-a0605f-2306",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2769197
+    },
+    {
+      "base": "s18id-a0605f-2459",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 3561214
+    },
+    {
+      "base": "s18id-a0605f-2612",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2993597
+    },
+    {
+      "base": "s18id-a0605f-2765",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2682764
+    },
+    {
+      "base": "s18id-a0605f-2918",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 3494685
+    }
+  ]
+}
