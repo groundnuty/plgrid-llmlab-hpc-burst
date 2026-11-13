@@ -189,9 +189,10 @@ func (f failedSteps) NowServe(context.Context, Plan) (NowServeObs, error) {
 func (f failedSteps) NowNoOverlap(context.Context, Plan) (NowNoOverlapObs, error) {
 	return NowNoOverlapObs{}, f.err
 }
-func (f failedSteps) Ledger() Ledger              { return &BatchLedger{} }
-func (f failedSteps) Close(context.Context) error { return nil }
-func (f failedSteps) WatchResets() int            { return 0 }
+func (f failedSteps) BetaRouter(context.Context, Plan) (RouterObs, error) { return RouterObs{}, f.err }
+func (f failedSteps) Ledger() Ledger                                      { return &BatchLedger{} }
+func (f failedSteps) Close(context.Context) error                         { return nil }
+func (f failedSteps) WatchResets() int                                    { return 0 }
 
 // liveRun is one run of the live steps in a world.
 type liveRun struct {
