@@ -216,45 +216,60 @@ func (s *restartSeen) get() restartSeen {
 	return restartSeen{at: s.at, failing: s.failing, requests: s.requests, err: s.err, health: s.health}
 }
 
-// TestADeadWorkersRequestsGoToItsSiblingAndItsRestartWaitsForEnvoy: two workers; worker-1's engine is
-// killed. Requests in a session the ring hash places on worker-1, sent at once, before Envoy's next
-// check, are all answered by worker-0 through the retry. The controller's restart of worker-1 (its
-// generation raised at once, unverified) starts the new process only once Envoy holds worker-1 failing,
-// and no request reaches it until it is verified again.
-func TestADeadWorkersRequestsGoToItsSiblingAndItsRestartWaitsForEnvoy(t *testing.T) {
+// killWorker kills worker w's engine through a pidfd once it runs at generation gen, and waits until the
+// agent has seen it exit, while Envoy still routes to it: the window this file is about. It returns when
+// the kill was sent.
+func killWorker(t *testing.T, h *harness, w string, gen int64) time.Time {
+	t.Helper()
+	r := h.waitReport(w+" running", time.Minute, leaderOf(h, w, gen))
+	pidfdKillID(t, engineOf(t, pidOf(r, w)))
+	killAt := time.Now()
+	// Once the agent has seen the exit, the engine's connections are closed and Envoy has dropped its
+	// pooled ones, so a request opens a new connection, which fails. A request written onto a pooled
+	// connection in the milliseconds the engine dies is reset after it was sent, which the retry does not
+	// cover by design: nothing written to a worker is retried.
+	h.waitReport(w+" exited", time.Minute, func(r agentapi.Report) bool {
+		for _, wr := range r.Instance.Workers {
+			if wr.Name == w && wr.Phase == agentapi.PartExited {
+				return true
+			}
+		}
+		return false
+	})
+	if out, _, err := envoyHolds(h.runDir, w); err != nil || out {
+		t.Fatalf("Envoy already holds %s out of its routing %s after its kill (%s, %v): the test would not reach the window it is about", w, time.Since(killAt).Round(time.Millisecond), lastHealth, err)
+	}
+	return killAt
+}
+
+// TestADeadWorkersRequestsGoToItsSibling: two workers; worker-1's engine is killed. Requests in a session
+// the ring hash places on worker-1, sent before Envoy's next check, are each answered by worker-0 through
+// the route's retry: no client sees a 503.
+func TestADeadWorkersRequestsGoToItsSibling(t *testing.T) {
+	h := newHarness(t, harnessOptions{envoy: testenv.EnvoyBinary(t), baseEnv: []string{"CUDA_VISIBLE_DEVICES=0,1"}})
+	h.set(workersRouterState(h, 2))
+	h.waitReport("Envoy holding both workers healthy", time.Minute, routerHolds(map[string]bool{"worker-0": true, "worker-1": true}))
+	session := sessionOn(t, h, "worker-1")
+	killAt := killWorker(t, h, "worker-1", 0)
+	for i := 0; i < 10; i++ {
+		if code, body := send(t, h, session); code != http.StatusOK {
+			t.Fatalf("request %d in worker-1's session, %s after its kill: %d %q, want worker-0's answer through the retry", i, time.Since(killAt).Round(time.Millisecond), code, body)
+		}
+	}
+}
+
+// TestARestartedWorkersProcessWaitsForEnvoy: two workers; worker-1's engine is killed and the controller
+// restarts it at once, before any request reaches it. Its new process starts only once Envoy holds it out
+// of its routing; meanwhile and until it is verified again, its session's requests go to worker-0 and
+// none reaches worker-1; verified again, it takes them once more.
+func TestARestartedWorkersProcessWaitsForEnvoy(t *testing.T) {
 	h := newHarness(t, harnessOptions{envoy: testenv.EnvoyBinary(t), baseEnv: []string{"CUDA_VISIBLE_DEVICES=0,1"}})
 	d := workersRouterState(h, 2)
 	h.set(d)
 	h.waitReport("Envoy holding both workers healthy", time.Minute, routerHolds(map[string]bool{"worker-0": true, "worker-1": true}))
 	session := sessionOn(t, h, "worker-1")
 	seen := hookRestart(t, h, "worker-1")
-	r := h.waitReport("worker-1 running", time.Minute, leaderOf(h, "worker-1", 0))
-	pidfdKillID(t, engineOf(t, pidOf(r, "worker-1")))
-	killAt := time.Now()
-	// Once the agent has seen worker-1 exit: by then the engine's connections are closed, and Envoy has
-	// dropped its pooled ones, so a request opens a new connection, which fails. A request written onto a
-	// pooled connection in the milliseconds the engine dies is reset after it was sent, which the retry
-	// does not cover by design (nothing written to a worker is retried).
-	h.waitReport("worker-1 exited", time.Minute, func(r agentapi.Report) bool {
-		for _, wr := range r.Instance.Workers {
-			if wr.Name == "worker-1" && wr.Phase == agentapi.PartExited {
-				return true
-			}
-		}
-		return false
-	})
-	if failing, _, err := envoyHolds(h.runDir, "worker-1"); err != nil || failing {
-		t.Fatalf("Envoy already holds worker-1 out of its routing %s after its kill (%s, %v): the test would not reach the window it is about", time.Since(killAt).Round(time.Millisecond), lastHealth, err)
-	}
-
-	// Before Envoy's next check: the retry answers each from worker-0.
-	for i := 0; i < 10; i++ {
-		if code, body := send(t, h, session); code != http.StatusOK {
-			t.Fatalf("request %d in worker-1's session, %s after its kill: %d %q, want worker-0's answer through the retry", i, time.Since(killAt).Round(time.Millisecond), code, body)
-		}
-	}
-
-	// The controller restarts worker-1 at once: its new process waits for Envoy.
+	killAt := killWorker(t, h, "worker-1", 0)
 	d.Instance.Workers[1].Generation, d.Instance.Workers[1].VerifiedGeneration = 1, nil
 	h.set(d)
 	h.waitReport("worker-1's new process running", time.Minute, leaderOf(h, "worker-1", 1))
@@ -273,8 +288,6 @@ func TestADeadWorkersRequestsGoToItsSiblingAndItsRestartWaitsForEnvoy(t *testing
 	if _, n, _ := envoyHolds(h.runDir, "worker-1"); n != s.requests {
 		t.Errorf("Envoy sent worker-1 %d requests after its new process started, before its verification", n-s.requests)
 	}
-
-	// Verified again, it takes its session's requests once more.
 	v := int64(1)
 	d.Instance.Workers[1].VerifiedGeneration = &v
 	h.set(d)
@@ -297,9 +310,7 @@ func TestARestartedWorkerBehindTheRouterTakesNoRequestBeforeItsVerification(t *t
 	h.set(d)
 	h.waitReport("Envoy holding worker-0 healthy", time.Minute, routerHolds(map[string]bool{"worker-0": true}))
 	seen := hookRestart(t, h, "worker-0")
-	r := h.waitReport("worker-0 running", time.Minute, leaderOf(h, "worker-0", 0))
-	pidfdKillID(t, engineOf(t, pidOf(r, "worker-0")))
-	killAt := time.Now()
+	killAt := killWorker(t, h, "worker-0", 0)
 	d.Instance.Workers[0].Generation, d.Instance.Workers[0].VerifiedGeneration = 1, nil
 	h.set(d)
 	h.waitReport("worker-0's new process running", time.Minute, leaderOf(h, "worker-0", 1))

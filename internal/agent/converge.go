@@ -359,7 +359,7 @@ func (a *Agent) convergeWorkers(in *instance, i agentapi.DesiredInstance) {
 			in.workers = append(in.workers, a.startWorker(in, dw, i.Generation))
 		case i.Generation > w.instGen || dw.Generation > w.generation:
 			if w.downAt.IsZero() {
-				w.downAt = a.o.Now()
+				w.downAt = a.clock()
 			}
 			a.terminate(w)
 			if !w.live() && a.restartReleased(in, w) {
@@ -399,7 +399,7 @@ func (a *Agent) restartReleased(in *instance, w *worker) bool {
 		return true
 	}
 	deadline := w.downAt.Add(envoyHCInterval + envoyHCTimeout)
-	if !a.o.Now().Before(deadline) {
+	if !a.clock().Before(deadline) {
 		return true
 	}
 	if r.clustersReadAt != nil && r.clustersReadAt.After(w.downAt) {
@@ -419,7 +419,7 @@ func (a *Agent) restartReleased(in *instance, w *worker) bool {
 // wakeAt runs the loop once at t, so a wait that ends then is seen: a no-op event, after which the loop
 // converges. It ends with the loop.
 func (a *Agent) wakeAt(t time.Time) {
-	d := t.Sub(a.o.Now())
+	d := t.Sub(a.clock())
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
@@ -431,6 +431,15 @@ func (a *Agent) wakeAt(t time.Time) {
 		case <-a.ctx.Done():
 		}
 	}()
+}
+
+// clock is the agent's time, Options.Now, which New always sets; an Agent built by hand in a test may
+// leave it unset, which reads the system clock.
+func (a *Agent) clock() time.Time {
+	if a.o.Now == nil {
+		return time.Now()
+	}
+	return a.o.Now()
 }
 
 // restartStartHook, when set by a test, runs just before a restarted worker's new process starts.
