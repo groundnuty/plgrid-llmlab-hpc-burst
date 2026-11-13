@@ -1,0 +1,151 @@
+# THROWAWAY, never merged: #503's reproduction on a hosted runner (IMPL-COMMON: stand-ins and heavy runs go there). Row A's exact sequence
+# over the stand-in, with the retention the live world has (the example's ReleaseWhenIdle, 30 minutes), in one probe test
+# (internal/alpha/probe503_test.go, added to the throwaway's branch beside this file). Read-only: no secret, cache restore only, nothing
+# saved. The step passes when the probe reproduces the live failure (the wait for the job's end times out, naming the state it saw last)
+# and fails when it does not, so a green job means "reproduced" and a red one means "did not".
+name: l503-probe
+on:
+  pull_request:
+    paths:
+      - .github/workflows/l503-probe.yml
+permissions:
+  contents: read
+jobs:
+  probe:
+    name: probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      K3S_VERSIONS: '["1.36.5"]'
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the Go version from go.mod
+        id: goversion
+        run: |
+          # A failing script must fail this step: "echo ...$(cmd)" would hide its exit status.
+          version=$(bash hack/fetch-go.sh --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the cached Go archive
+        id: goarchive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-download
+          key: go-toolchain-${{ steps.goversion.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-go.sh', 'hack/go-pins.txt') }}
+
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
+          echo "::add-matcher::$GITHUB_WORKSPACE/.github/go-problem-matcher.json"
+
+      - name: Check the Go on PATH is the pinned toolchain
+        id: gocheck
+        run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
+
+      # The modules are downloaded here, before anything builds: go mod download, tried again when it
+      # fails, then go mod verify (hack/go-mod-download.sh, issue #346). Nothing is cached between runs.
+      - name: Download and verify the Go modules
+        run: bash hack/go-mod-download.sh
+
+      # The pinned binaries come from the cache when it has them (see the top of this file). The
+      # two rehearsal jobs share one entry. The path lines of the restore and the save must match.
+      - name: Restore the cached pinned binaries
+        id: binaries
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/k3s-bin
+            ${{ runner.temp }}/frp
+          key: binaries-rehearsal-k3s-${{ join(fromJSON(env.K3S_VERSIONS), '-') }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-frp.sh', 'hack/fetch-k3s.sh', 'internal/launcher/k3s-pins.txt') }}
+
+      # The rehearsal's hpcburst up starts k3s 1.36.5 only.
+      - name: Fetch the pinned k3s binary
+        run: |
+          echo "HPCBURST_BIN_DIR=$RUNNER_TEMP/k3s-bin" >> "$GITHUB_ENV"
+          bash hack/fetch-k3s.sh "$RUNNER_TEMP/k3s-bin" ${{ join(fromJSON(env.K3S_VERSIONS), ' ') }}
+
+      - name: Fetch the pinned frp binaries
+        run: |
+          bash hack/fetch-frp.sh "$RUNNER_TEMP/frp"
+          echo "HPCBURST_FRP_DIR=$RUNNER_TEMP/frp" >> "$GITHUB_ENV"
+
+      - name: Restore the cached Envoy binary
+        id: envoy
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/envoy
+          key: envoy-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-envoy.sh', 'internal/agent/envoypin/envoy-pins.txt') }}
+
+      - name: Fetch the pinned Envoy binary
+        run: |
+          bash hack/fetch-envoy.sh "$RUNNER_TEMP/envoy"
+          {
+            echo "HPCBURST_ENVOY_DIR=$RUNNER_TEMP/envoy"
+            echo "HPCBURST_REQUIRE_ENVOY=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Provide OpenSSH's sshd for the login node
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+            sudo chmod 755 /usr/sbin/policy-rc.d
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+            sudo rm -f /usr/sbin/policy-rc.d
+          fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
+          /usr/sbin/sshd -V 2>&1 | head -1
+          echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
+
+      # hack/rehearsal.sh runs the test in a transient systemd user scope, which it stops however
+      # the run ends, so nothing the test started outlives it. A hosted runner's user has no
+      # systemd user manager until lingering starts one.
+      - name: Start a systemd user manager for this user
+        run: |
+          if ! dpkg -s dbus-user-session > /dev/null 2>&1; then
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q dbus-user-session
+          fi
+          sudo loginctl enable-linger "$(id -un)"
+          rt="/run/user/$(id -u)"
+          timeout 60 sh -c "until test -S '$rt/systemd/private' && test -S '$rt/bus'; do sleep 1; done"
+          echo "XDG_RUNTIME_DIR=$rt" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$rt/bus" >> "$GITHUB_ENV"
+          XDG_RUNTIME_DIR="$rt" DBUS_SESSION_BUS_ADDRESS="unix:path=$rt/bus" systemd-run --user --scope -q true
+
+      # Issue #146's two tests and #298's host-dialed mode only: issue #193's part 3 runs in its own
+      # job (rehearsal-part3), so each job stays under its time budget.
+
+      - name: Build the stack's binaries and the alpha test binary
+        run: |
+          out="$RUNNER_TEMP/standin"
+          mkdir -p "$out"
+          go build -o "$out/" ./cmd/hpcburst ./cmd/hpcburst-controller ./cmd/hpcburst-front ./cmd/hb-agent
+          go test -c -o "$out/alpha.test" ./internal/alpha
+          echo "STANDIN_OUT=$out" >> "$GITHUB_ENV"
+
+      - name: Run the probe (row A's sequence with the live retention)
+        working-directory: internal/alpha
+        run: |
+          log="$RUNNER_TEMP/probe.log"
+          rc=0
+          HPCBURST_ALPHA_STANDIN=1 HPCBURST_REHEARSAL=1 HPCBURST_REHEARSAL_BIN="$STANDIN_OUT" HPCBURST_REQUIRE_FRP=1 HPCBURST_REQUIRE_SSHD=1 \
+            systemd-run --user --scope -q -p MemoryMax=6G -p MemorySwapMax=0 \
+            "$STANDIN_OUT/alpha.test" -test.v -test.timeout 40m -test.run '^TestProbe503RowAWithTheLiveRetention$' > "$log" 2>&1 || rc=$?
+          echo "exit=$rc"
+          # What the probe saw, in the order it saw it: the sequence's lines, the failure with its state, the job's record, the evidence.
+          grep -n -E "deployment's end is now|scheduler refused the requeue|requeue: scontrol|timed out after|PROBE:|last: |the run's jobs are ended|--- (PASS|FAIL)" "$log" | cut -c1-600 || true
+          echo "--- the controller's lines kept by the probe:"
+          sed -n '/PROBE: the controller.s log/,$p' "$log" | head -120 | cut -c1-400 || true
+          if grep -q "timed out after .* waiting for every job of the run to end in the cluster's record" "$log"; then
+            echo "REPRODUCED: the job outlived its teardown with the live retention"
+            exit 0
+          fi
+          echo "NOT REPRODUCED: the wait did not time out"
+          exit 1
