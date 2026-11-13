@@ -152,7 +152,9 @@
 // each cache a real engine fills at start, each at its variable) and
 // write-home (one file under HOME, as a cache that ignores its variable
 // writes) and print-key (the API key on stderr, which the engine's log then
-// holds, as an engine that logs its arguments does).
+// holds, as an engine that logs its arguments does); hold-request-log=<file>
+// holds back every "request" line of the engine's log, without holding the
+// reply, until <file> exists (Config.HoldRequestLog).
 //
 // # The executables
 //

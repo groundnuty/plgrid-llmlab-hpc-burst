@@ -189,7 +189,7 @@ func Main(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	srv := &http.Server{Handler: newHandler(cfg, func(ev LogEvent) { logv(ev) })}
+	srv := &http.Server{Handler: newHandler(cfg, holdRequestLines(cfg.HoldRequestLog, logv))}
 	go func() { _ = srv.Serve(ln) }()
 
 	select {
