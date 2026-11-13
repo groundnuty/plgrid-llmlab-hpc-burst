@@ -47,10 +47,17 @@ type Summary struct {
 	// TTFB, of whole 200s, in ms: p50 and p95 of the requests whose fault fired, and of the unmarked.
 	TTFBFiredP50, TTFBFiredP95, TTFBUnmarkedP50, TTFBUnmarkedP95 float64
 
-	// Candidate (i), front-side: front requests with two or more closed attempts (the layer's).
-	CorrFront int
-	// Candidate (ii), controller-side: deaths that came within the window after another, per window.
+	// Candidate (i), front-side: front requests with two or more closed attempts (the layer's), and of
+	// them those with no engine dead under them (a flapping tunnel).
+	CorrFront, CorrFrontFalse int
+	// Candidate (ii), controller-side: deaths that came within the window after a death of ANOTHER
+	// Instance of the deployment, per window.
 	CorrController map[string]int
+	// Candidate (iii), derived, front-side by request content: requests (one content, across the client's
+	// retries; the base ID stands in for a body hash) with two or more written-then-closed failures, as
+	// the front sees them, and of them those with no engine dead under them. All of a request's attempts
+	// come within seconds (the SDK's backoff is 0.5 s and 1 s), so no window is applied.
+	CorrContent, CorrContentFalse int
 	// FalseDeaths: closed attempts whose engine stayed alive (to the front, a death). FalseStops: requests
 	// arm (d)'s two-deaths stop gave up with no engine dead under them.
 	FalseDeaths, FalseStops int
@@ -66,7 +73,8 @@ type PoisonTrial struct {
 	Deaths         int    `json:"deaths"`
 	Final          int    `json:"final_status"`
 	CorrFront      bool   `json:"corr_front"`
-	CorrController bool   `json:"corr_controller"` // two or more deaths within the shortest window
+	CorrController bool   `json:"corr_controller"` // deaths of two or more distinct Instances under it
+	CorrContent    bool   `json:"corr_content"`
 }
 
 // Analyze computes a cell's summary from the client's attempts, the engines' records, the process ends
@@ -118,6 +126,15 @@ func Analyze(cell Cell, results []Result, begins map[string][]Begin, exits []Exi
 			}
 			if closedByID[r.ID] >= 2 {
 				s.CorrFront++
+				if !anyDeathUnder(bs) {
+					s.CorrFrontFalse++
+				}
+			}
+		}
+		if n, died := contentClosed(rs, begins, closedByID, len(attempts) > 0); n >= 2 {
+			s.CorrContent++
+			if !died {
+				s.CorrContentFalse++
 			}
 		}
 		if begun > 1 {
@@ -198,18 +215,40 @@ func diedUnder(bs []Begin, i int) bool {
 	return false
 }
 
-// correlated counts the deaths that came within w after another death of the deployment: each one the
-// controller-side candidate would raise its event on.
+// correlated counts the deaths that came within w after a death of ANOTHER Instance of the deployment:
+// each one the controller-side candidate would raise its event on. One Instance dying again (its own
+// crash loop) is the restart ladder's, not a correlation across Instances.
 func correlated(deaths []Exit, w time.Duration) int {
 	ds := append([]Exit(nil), deaths...)
 	sort.Slice(ds, func(a, b int) bool { return ds[a].At.Before(ds[b].At) })
 	n := 0
 	for k := 1; k < len(ds); k++ {
-		if ds[k].At.Sub(ds[k-1].At) <= w {
-			n++
+		for j := k - 1; j >= 0 && ds[k].At.Sub(ds[j].At) <= w; j-- {
+			if ds[j].Instance != ds[k].Instance {
+				n++
+				break
+			}
 		}
 	}
 	return n
+}
+
+// contentClosed is how many written-then-closed failures the front saw for one request content (its
+// attempts rs, across the client's retries), and whether an engine died under any of them: the layer's
+// closed attempts when the arm has a layer (layered), or else the front's own 502 upstream_closed answers.
+func contentClosed(rs []Result, begins map[string][]Begin, closedByID map[string]int, layered bool) (int, bool) {
+	n, died := 0, false
+	for _, r := range rs {
+		if layered {
+			n += closedByID[r.ID]
+		} else if r.Status == 502 && r.Code == "upstream_closed" {
+			n++
+		}
+		if anyDeathUnder(begins[r.ID]) {
+			died = true
+		}
+	}
+	return n, died
 }
 
 func share(n, of int) float64 {
@@ -256,6 +295,18 @@ func PoisonCost(base string, rs []Result, begins map[string][]Begin, attempts []
 			t.CorrFront = true
 		}
 	}
-	t.CorrController = t.Deaths >= 2 // its deaths come seconds apart, inside every window
+	// Its deaths come seconds apart, inside every window: the controller-side candidate fires when they
+	// are of two or more distinct Instances.
+	dead := map[int]bool{}
+	for _, r := range rs {
+		for _, b := range begins[r.ID] {
+			if b.Admitted && b.Outcome == "" {
+				dead[b.Instance] = true
+			}
+		}
+	}
+	t.CorrController = len(dead) >= 2
+	n, _ := contentClosed(rs, begins, closed, len(attempts) > 0)
+	t.CorrContent = n >= 2
 	return t
 }

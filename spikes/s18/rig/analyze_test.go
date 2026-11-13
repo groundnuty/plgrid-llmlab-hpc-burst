@@ -27,6 +27,11 @@ func TestAnalyzeCountsFromTheRecords(t *testing.T) {
 		// layer gave up, a 502, begun twice. Its two closed attempts are no death, and the front-side
 		// candidate counts it.
 		{ID: "s18id-x-5/c0", Base: "s18id-x-5", Marker: MarkF3, Status: 502},
+		// r6: a poison request the client sent twice (the SDK's retry), each a front request of its own:
+		// c0 died on Instance 2, c1 died on Instance 1. One closed attempt in each front request, so the
+		// per-request candidate (i) misses it; by content (iii) it is two.
+		{ID: "s18id-x-6/c0", Base: "s18id-x-6", Marker: MarkPoison, Status: 502, Code: "upstream_closed"},
+		{ID: "s18id-x-6/c1", Base: "s18id-x-6", Attempt: 1, Marker: MarkPoison, Status: 502, Code: "upstream_closed"},
 	}
 	begins := map[string][]Begin{
 		"s18id-x-1/c0": {{Instance: 0, Admitted: true, Outcome: "completed"}},
@@ -35,11 +40,20 @@ func TestAnalyzeCountsFromTheRecords(t *testing.T) {
 		"s18id-x-4/c0": {{Instance: 0, Admitted: true}},
 		"s18id-x-4/c1": {{Instance: 1, Admitted: true, Outcome: "completed"}},
 		"s18id-x-5/c0": {{Instance: 1, Admitted: true, Outcome: "cancelled"}, {Instance: 2, Admitted: true, Outcome: "cancelled"}},
+		"s18id-x-6/c0": {{Instance: 2, Admitted: true}},
+		"s18id-x-6/c1": {{Instance: 1, Admitted: true}},
 	}
 	exits := []Exit{
 		{Instance: 2, At: t0.Add(2 * time.Second)},
 		{Instance: 0, At: t0.Add(4 * time.Second)},
 		{Instance: 1, At: t0.Add(9 * time.Second), Stopped: true}, // the rig's own stop: no death
+		// Instance 0 dying again and again on its own: no correlation across Instances.
+		{Instance: 0, At: t0.Add(40 * time.Second)},
+		{Instance: 0, At: t0.Add(50 * time.Second)},
+		{Instance: 0, At: t0.Add(60 * time.Second)},
+		// r6's two deaths, of two Instances, a second apart, 40 s after the last of Instance 0's.
+		{Instance: 2, At: t0.Add(100 * time.Second)},
+		{Instance: 1, At: t0.Add(101 * time.Second)},
 	}
 	attempts := []Attempt{
 		{ID: "s18id-x-2/c0", Home: 0, Target: 0, Kind: "closed", At: t0.Add(time.Second)}, // F3: Instance 0 lived on
@@ -47,27 +61,56 @@ func TestAnalyzeCountsFromTheRecords(t *testing.T) {
 		{ID: "s18id-x-3/c0", Home: 2, Target: 2, Kind: "closed", At: t0.Add(2 * time.Second)},
 		{ID: "s18id-x-5/c0", Home: 1, Target: 1, Kind: "closed", At: t0.Add(6 * time.Second)},
 		{ID: "s18id-x-5/c0", Home: 1, Target: 2, Kind: "closed", At: t0.Add(6 * time.Second)},
+		{ID: "s18id-x-6/c0", Home: 2, Target: 2, Kind: "closed", At: t0.Add(100 * time.Second)},
+		{ID: "s18id-x-6/c1", Home: 1, Target: 1, Kind: "closed", At: t0.Add(101 * time.Second)},
 	}
 	s := Analyze(cell, results, begins, exits, attempts, 2)
 	want := map[string][2]float64{
-		"requests":       {float64(s.Requests), 5},
-		"marked":         {float64(s.Marked), 4},
-		"fired":          {float64(s.Fired), 4}, // r2 and r5 cancelled, r3 and r4 died under
-		"attempts":       {float64(s.Attempts), 6},
-		"duplicates":     {float64(s.Duplicates), 2}, // r2 and r5, each one front request begun twice
-		"re-executions":  {float64(s.ReExecutions), 1},
-		"deaths":         {float64(s.Deaths), 2},      // the stop is no death; the 4 closed attempts are not counted
-		"false deaths":   {float64(s.FalseDeaths), 3}, // r2's on 0, r5's on 1 and on 2
-		"success":        {s.Success, 0.6},
-		"success marked": {s.SuccessMarked, 0.5},
-		"success fired":  {s.SuccessFired, 0.5},
-		"corr front":     {float64(s.CorrFront), 1}, // r5, closed twice
-		"corr 30s":       {float64(s.CorrController["30s"]), 1},
-		"ttfb fired p50": {s.TTFBFiredP50, 30},
+		"requests":         {float64(s.Requests), 6},
+		"marked":           {float64(s.Marked), 5},
+		"fired":            {float64(s.Fired), 5}, // r2 and r5 cancelled, r3, r4 and r6 died under
+		"attempts":         {float64(s.Attempts), 8},
+		"duplicates":       {float64(s.Duplicates), 2},   // r2 and r5, each one front request begun twice
+		"re-executions":    {float64(s.ReExecutions), 2}, // r4 and r6, each begun in two client attempts
+		"deaths":           {float64(s.Deaths), 7},       // 2, 4, 40, 50, 60, 100, 101 s; the stop is none; 6 closed attempts
+		"false deaths":     {float64(s.FalseDeaths), 3},  // r2's on 0, r5's on 1 and on 2
+		"success":          {s.Success, 0.5},
+		"success marked":   {s.SuccessMarked, 0.4},
+		"success fired":    {s.SuccessFired, 0.4},
+		"corr front":       {float64(s.CorrFront), 1}, // r5, closed twice in one front request
+		"corr front false": {float64(s.CorrFrontFalse), 1},
+		// Within 30 s after a death of ANOTHER Instance: 4 s (after 2 s), 101 s (after 100 s); 40, 50 and 60
+		// s are Instance 0 again, and 100 s comes 40 s after 60 s: no other Instance's death in the 30 s before.
+		"corr 30s":           {float64(s.CorrController["30s"]), 2},
+		"corr content":       {float64(s.CorrContent), 2},      // r5 (two closed, one request), r6 (two, in two)
+		"corr content false": {float64(s.CorrContentFalse), 1}, // r5: no engine died
+		"ttfb fired p50":     {s.TTFBFiredP50, 30},
 	}
 	for name, v := range want {
 		if v[0] != v[1] {
 			t.Errorf("%s = %v, want %v", name, v[0], v[1])
+		}
+	}
+}
+
+// A poison request's cost: the controller-side candidate fires on deaths of two distinct Instances, not on
+// one Instance dying twice; the content candidate counts its failures across the client's attempts.
+func TestPoisonCostCountsInstancesAndContent(t *testing.T) {
+	rs := []Result{{ID: "p/c0", Base: "p", Marker: MarkPoison, Status: 502, Code: "upstream_closed"},
+		{ID: "p/c1", Base: "p", Attempt: 1, Marker: MarkPoison, Status: 502, Code: "upstream_closed"}}
+	twoInstances := map[string][]Begin{"p/c0": {{Instance: 0, Admitted: true}}, "p/c1": {{Instance: 1, Admitted: true}}}
+	oneInstance := map[string][]Begin{"p/c0": {{Instance: 0, Admitted: true}}, "p/c1": {{Instance: 0, Admitted: true}}}
+	for _, c := range []struct {
+		name   string
+		begins map[string][]Begin
+		want   PoisonTrial
+	}{
+		{"two Instances", twoInstances, PoisonTrial{Base: "p", Attempts: 2, Deaths: 2, Final: 502, CorrController: true, CorrContent: true}},
+		{"one Instance twice", oneInstance, PoisonTrial{Base: "p", Attempts: 2, Deaths: 2, Final: 502, CorrController: false, CorrContent: true}},
+	} {
+		// Arm (a): no layer, so the front's own 502 upstream_closed answers are its closed failures.
+		if got := PoisonCost("p", rs, c.begins, nil); got != c.want {
+			t.Errorf("%s: %+v, want %+v", c.name, got, c.want)
 		}
 	}
 }
