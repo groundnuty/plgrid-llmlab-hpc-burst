@@ -350,7 +350,7 @@ func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ans := h.answerFor(req.sampling, h.toolCallFor(req), promptIDs, max)
-	h.run(r, rec, promptIDs, max, ans, req.Stream, func(s *slot, u usage) (int, bool) {
+	h.run(w, r, rec, promptIDs, max, ans, req.Stream, func(s *slot, u usage) (int, bool) {
 		if req.Stream {
 			return h.stream(w, r, req, ans, s, u)
 		}
@@ -366,7 +366,7 @@ func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
 // to the engine's log when the request ends (recordEnd): from here on the
 // Outcome is "cancelled" unless the answer completes. run releases the slot
 // with the finish reason of a completed answer, "abort" otherwise.
-func (h *handler) run(r *http.Request, rec *LogEvent, promptIDs []int32, limit int, ans answer, stream bool, respond func(s *slot, u usage) (int, bool)) {
+func (h *handler) run(w http.ResponseWriter, r *http.Request, rec *LogEvent, promptIDs []int32, limit int, ans answer, stream bool, respond func(s *slot, u usage) (int, bool)) {
 	rec.Outcome = "cancelled"
 	finish := "abort"
 
@@ -377,7 +377,23 @@ func (h *handler) run(r *http.Request, rec *LogEvent, promptIDs []int32, limit i
 	}
 	defer func() { s.release(finish) }()
 	if h.e.record != nil {
-		h.e.record(LogEvent{Event: "admitted", PromptTokens: len(promptIDs), MaxTokens: limit, Stream: stream})
+		h.e.record(LogEvent{Event: "admitted", PromptTokens: len(promptIDs), MaxTokens: limit, Stream: stream, Tail: rec.Tail})
+	}
+	// The fault modes act on a marked request once it is admitted and recorded, before any reply
+	// byte (#528, spike S18): the engine dies under it, or answers 500.
+	switch {
+	case h.cfg.DieOn != "" && strings.Contains(rec.Tail, h.cfg.DieOn):
+		rec.Outcome = "died"
+		h.e.die()
+		return
+	case h.cfg.FailOn != "" && strings.Contains(rec.Tail, h.cfg.FailOn):
+		rec.Outcome = "refused"
+		writeError(w, http.StatusInternalServerError, "InternalServerError", "the engine failed on this request")
+		return
+	}
+	if stream && h.cfg.EarlyHeaders {
+		newSSEWriter(w).start()
+		s.headersSent = true
 	}
 	wait, nth := h.e.beforeFirstToken(shapeKey{len(promptIDs), limit}, ans.tokens())
 	rec.InjectedNS, rec.Nth = wait.Nanoseconds(), nth

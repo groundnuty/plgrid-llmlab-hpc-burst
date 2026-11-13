@@ -175,10 +175,12 @@ type delta struct {
 // the arguments, each with the index and "arguments" only.
 //
 // The first chunk is sent with the first token, after the wait before it, so
-// the time to the first byte is the time to the first token. In the stall mode
+// the time to the first byte is the time to the first token; in the
+// early-headers mode the headers went out before that wait. In the stall mode
 // the stream stops after the first token and waits for the client to go.
 func (h *handler) stream(w http.ResponseWriter, r *http.Request, req chatRequest, a answer, s *slot, u usage) (int, bool) {
 	sw := newSSEWriter(w)
+	sw.started = s.headersSent
 	id, created := newID(), time.Now().Unix()
 	send := func(c chunk) bool { return sw.send(c) }
 	newChunk := func(choices ...chunkChoice) chunk {
@@ -256,7 +258,8 @@ func (h *handler) stream(w http.ResponseWriter, r *http.Request, req chatRequest
 
 // sseWriter writes server-sent events as vLLM does: each event is
 // "data: <json>" and a blank line, flushed at once. The response headers go
-// out with the first event.
+// out with the first event, or, in the early-headers mode, when the request
+// is admitted (run).
 type sseWriter struct {
 	w       http.ResponseWriter
 	fl      http.Flusher
@@ -276,10 +279,7 @@ func (s *sseWriter) send(v any) bool {
 		return false
 	}
 	if !s.started {
-		s.w.Header().Set("Content-Type", "text/event-stream")
-		s.w.Header().Set("Cache-Control", "no-cache")
-		s.w.WriteHeader(http.StatusOK)
-		s.started = true
+		s.start()
 	}
 	if _, err := fmt.Fprintf(s.w, "data: %s\n\n", b); err != nil {
 		return false
@@ -295,6 +295,15 @@ func (s *sseWriter) done() bool {
 	}
 	s.flush()
 	return true
+}
+
+// start sends the stream's status and headers, and flushes them.
+func (s *sseWriter) start() {
+	s.w.Header().Set("Content-Type", "text/event-stream")
+	s.w.Header().Set("Cache-Control", "no-cache")
+	s.w.WriteHeader(http.StatusOK)
+	s.started = true
+	s.flush()
 }
 
 func (s *sseWriter) flush() {

@@ -412,7 +412,17 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'jobcount.go@@	if e := l.Clock.Add(g.TimeLimit - g.DrainWindow).Truncate(time.Second); e.After(g.end) {@@	if e := l.Clock.Add(g.TimeLimit).Truncate(time.Second); e.After(g.end) {'
   'jobcount.go@@e.After(g.end) {@@true {'
   'jobcount.go@@	case len(others) > 0 && (g.final || len(others) > 1):@@	case len(others) > 0 && g.final:'
-  'jobcount.go@@		if j.HardEnd == nil || j.HardEnd.Sub(*j.StartTime) != g.TimeLimit {@@		if j.HardEnd == nil {'
+  # Row B's live failure of 13 Nov 2026: a lease end Slurm moved past the start plus the time limit is taken only with
+  # the planned time limit listed, and every end comes from the start (TwoJobGuard.planned and drainStartOf).
+  'jobcount.go@@	case j.HardEnd.Before(j.StartTime.Add(g.TimeLimit)):@@	case false:'
+  'jobcount.go@@	case j.TimeLimit != 0 && j.TimeLimit != g.TimeLimit:@@	case false:'
+  'jobcount.go@@	case j.TimeLimit == 0 && !j.HardEnd.Equal(j.StartTime.Add(g.TimeLimit)):@@	case false:'
+  'jobcount.go@@end, err := EndOfTwo(g.predDrainStart, g.drainStartOf(others[0]))@@end, err := EndOfTwo(g.predDrainStart, others[0].HardEnd.Add(-g.DrainWindow))'
+  'jobcount.go@@g.pred, g.predDrainStart = started[0].ID, g.drainStartOf(started[0])@@g.pred, g.predDrainStart = started[0].ID, started[0].HardEnd.Add(-g.DrainWindow)'
+  # The science agent's bound on #534: at most MaxLeaseSlack of slack, exactly that taken; the slack posted is each job's most.
+  'jobcount.go@@	case j.HardEnd.After(j.StartTime.Add(g.TimeLimit + MaxLeaseSlack)):@@	case false:'
+  'jobcount.go@@	case j.HardEnd.After(j.StartTime.Add(g.TimeLimit + MaxLeaseSlack)):@@	case !j.HardEnd.Before(j.StartTime.Add(g.TimeLimit + MaxLeaseSlack)):'
+  'jobcount.go@@if old, ok := g.slack[j.ID]; !ok || s > old {@@if _, ok := g.slack[j.ID]; !ok {'
   'jobcount.go@@	return j.StartTime != nil && (j.EndTime == nil || j.EndTime.After(*j.StartTime))@@	return j.StartTime != nil'
   'jobcount.go@@	if g.pred == "" && len(started) > 0 {@@	if len(started) > 0 {'
   'jobcount.go@@	return clusterNow.Add(timeLimit - drainWindow).Truncate(time.Second)@@	return clusterNow.Add(timeLimit).Truncate(time.Second)'
