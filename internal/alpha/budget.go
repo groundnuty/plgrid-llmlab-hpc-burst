@@ -68,6 +68,10 @@ func (r Row) RunDeadline(pendingMax time.Duration) time.Duration {
 //     to be seen gone from the slot, the successor's Allocation (SuccessorAllocationWait) and its own start wait, then
 //     health.startTimeout and ReadyMargin for it to be ready, the guard's last looks, a drain window and EndMargin for the
 //     jobs to end once the deployment goes, two catch-ups (the result's and the deployment end's), Close.
+//   - The router row on plgrid-now (beta-athena-now-router, issue #521): row A's, less the events read last, which it does not read: its
+//     start wait; every step before the drain start (the glibc and Envoy probes, the response-level reading, the worker restart); then a
+//     drain window and EndMargin for the job to end once the deployment goes, two catch-ups (the worker restart's and the deployment's
+//     end's), Close.
 //   - Row A on plgrid-now (alpha-athena-now-serve): its start wait; every step before the drain start; the events, read
 //     last (stack.WaitDeadline); then a drain window and EndMargin for the job to end once the deployment goes, two
 //     catch-ups (the worker restart's and the deployment's end's), Close.
@@ -83,6 +87,8 @@ func (r Row) WorstCase(pendingMax time.Duration) time.Duration {
 		return StartupWait + first + (r.Lease - dw) + tm.MaxRequestDuration + dw + EndMargin + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout
 	case "alpha-helios-nooverlap":
 		return StartupWait + first + r.Lease + SuccessorWait(tm, pendingMax) + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout
+	case BetaRouterName:
+		return StartupWait + first + (r.Lease - dw) + dw + EndMargin + 2*stack.CatchUpWorstCase + CloseTimeout
 	case "alpha-athena-now-serve":
 		return StartupWait + first + (r.Lease - dw) + stack.WaitDeadline + dw + EndMargin + 2*stack.CatchUpWorstCase + CloseTimeout
 	case "alpha-athena-now-nooverlap":

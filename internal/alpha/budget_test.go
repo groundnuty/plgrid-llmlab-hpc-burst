@@ -46,6 +46,11 @@ func TestEachStackRowsWorstCaseIsItsWaitsAddedUp(t *testing.T) {
 		// window (#503). Its run's deadline is its budget, 115, which holds the start wait.
 		{"row A on plgrid-now, 30", rowOf("alpha-athena-now-serve"), 30, 11 + 10 + 41 + 3 + 7 + 5 + 2 + 5, 115, 11 + 3 + 5 + 2 + 5},
 		{"row A on plgrid-now, 2 h asked", rowOf("alpha-athena-now-serve"), 120, 11 + 10 + 41 + 3 + 7 + 5 + 2 + 5, 115, 11 + 3 + 5 + 2 + 5},
+		// The router row on plgrid-now (issue #521) is row A's without the events read last: the start wait of 10, the 48-minute lease less
+		// the 7-minute drain window, the drain window and 5 for the job to end once the deployment goes, two catch-ups and 5 to close. Its
+		// run's deadline is its budget, 115.
+		{"the router row on plgrid-now, 30", rowOf("beta-athena-now-router"), 30, 11 + 10 + 41 + 7 + 5 + 2 + 5, 115, 11 + 5 + 2 + 5},
+		{"the router row on plgrid-now, 2 h asked", rowOf("beta-athena-now-router"), 120, 11 + 10 + 41 + 7 + 5 + 2 + 5, 115, 11 + 5 + 2 + 5},
 		// Row B on plgrid-now (issue #376): its start wait of 10, the predecessor's 21-minute lease and 5 for its job to be seen
 		// gone from the slot, 3 for the successor's Allocation and the successor's own start wait of 10, then 12 and 5 for it to
 		// be ready, 1 for the guard's last looks, the 7-minute drain window and 5 for the jobs to end once the deployment goes,
@@ -130,6 +135,12 @@ var liveWaits = map[string]string{
 	"nowGauges: r.waitFor(stack.WaitDeadline)":                                                    "the lease",
 	"nowEvents: stack.BoundedDeadline(stack.WaitDeadline)":                                        "term: stack.WaitDeadline, the events read last",
 	"nowEvents: time.Sleep(time.Second)":                                                          "pacing",
+	// The router row (betarouter_flow_test.go): every step before the drain start is covered by the lease, as row A's are.
+	"routerFirstReady: r.waitFor(stack.WaitDeadline)": "the lease",
+	"routerFirstReady: r.waitFor(routerJobWait)":      "the lease",
+	"routerFirstReady: r.waitFor(r.readyWait())":      "the lease",
+	"healthyAgain: time.Sleep(2 * time.Second)":       "pacing",
+	"bytesReading: context.WithTimeout(BytesBound)":   "the lease",
 	// Row B (now_nooverlap_flows_test.go).
 	"NowNoOverlap: r.syncWatch(stack.KindInstances | stack.KindAllocations | stack.KindDeployments)": "term: stack.CatchUpWorstCase",
 	"nowNoOverlapSteps: r.untilBefore(lead)":                                                         "the lease",
@@ -173,7 +184,7 @@ func waitOf(fset *token.FileSet, fn string, call *ast.CallExpr) string {
 func TestTheLiveStepsWaitOnWhatTheSumsCount(t *testing.T) {
 	fset := token.NewFileSet()
 	found := map[string]int{}
-	for _, file := range []string{"steps_live_test.go", "live_flows_test.go", "guard_live_test.go", "now_flows_test.go", "now_nooverlap_flows_test.go"} {
+	for _, file := range []string{"steps_live_test.go", "live_flows_test.go", "guard_live_test.go", "now_flows_test.go", "now_nooverlap_flows_test.go", "betarouter_flow_test.go"} {
 		f, err := parser.ParseFile(fset, file, nil, 0)
 		if err != nil {
 			t.Fatal(err)

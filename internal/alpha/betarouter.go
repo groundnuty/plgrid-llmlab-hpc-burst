@@ -377,12 +377,62 @@ func envoyProcsWord(e EnvoyObs) string {
 // FailedKept is how many failed variants' keys the record keeps.
 const FailedKept = 20
 
+// Add counts one variant's response into the reading: chat says the variant went to the chat endpoint (else completions), stream that it was
+// streamed, valid that S13 says vLLM accepts it, key names it for the record, and status, body and cut are what the front answered (status 0
+// is no answer, cut that the body ended early). It is the one place the reading's counts are made, so that the live flow only carries a
+// response to it.
+func (b *BytesObs) Add(chat, stream, valid bool, key string, status int, body []byte, cut bool) {
+	cls := ClassifyReply(status, body, stream, cut)
+	b.Variants++
+	if !valid {
+		b.InvalidSent++
+		if status >= 400 && status < 500 {
+			b.InvalidRefused++
+		}
+	}
+	if cls.Complete {
+		b.Complete++
+		switch {
+		case status == 200:
+			b.Status200++
+			if stream {
+				b.StreamOK++
+			} else {
+				b.NonStreamOK++
+			}
+			if chat {
+				b.ChatOK++
+			} else {
+				b.CompletionsOK++
+			}
+		case status >= 400 && status < 500:
+			b.Status4xx++
+		default:
+			b.Status5xx++
+		}
+	}
+	if cls.RouterMade {
+		b.RouterMade++
+	}
+	if (!cls.Complete || cls.RouterMade) && len(b.Failed) < FailedKept {
+		b.Failed = append(b.Failed, key)
+	}
+}
+
+// The router row's waits, counted by the budget (budget.go): BytesBound bounds the whole response-level reading, and RouterHealthyWait the
+// wait for status.healthyWorkers to be 1 again once the Instance serves after the worker restart.
+const (
+	BytesBound        = 10 * time.Minute
+	RouterHealthyWait = time.Minute
+)
+
 // bytesMaxTokens is the generation bound the reading puts on a variant whose case sets none, so that every variant finishes in
 // seconds on a real engine. It changes the bytes, which is why the reading is a response-level one.
 const bytesMaxTokens = 8
 
-// s13Model is the model name S13's literal bodies carry.
-const s13Model = `"model":"s13-model"`
+// s13Model matches the model member S13's bodies carry, as written: compact, or with the spaces of the pretty-printed case. Its value is the
+// one thing replaced.
+var s13Model = regexp.MustCompile(`("model"\s*:\s*)"s13-model"`)
 
 // AdaptBody is a variant's body as the reading sends it: S13's model name replaced by the deployment's, and, where the case sets no
 // limit on generation (neither max_tokens nor max_completion_tokens, null or not), a bound after the opening brace. Everything else is
@@ -390,7 +440,10 @@ const s13Model = `"model":"s13-model"`
 func AdaptBody(body []byte, model string) []byte {
 	s := string(body)
 	if model != "" {
-		s = strings.Replace(s, s13Model, `"model":`+strconv.Quote(model), 1)
+		loc := s13Model.FindStringSubmatchIndex(s)
+		if loc != nil {
+			s = s[:loc[3]] + strconv.Quote(model) + s[loc[1]:]
+		}
 	}
 	if !strings.Contains(s, `"max_tokens"`) && !strings.Contains(s, `"max_completion_tokens"`) {
 		if i := strings.IndexByte(s, '{'); i >= 0 {

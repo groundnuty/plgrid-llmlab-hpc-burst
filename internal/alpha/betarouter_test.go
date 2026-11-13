@@ -5,10 +5,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 // The router row's logic (betarouter.go), each check with its words written out and its boundary.
@@ -324,6 +328,8 @@ func TestAdaptBodyChangesOnlyTheModelAndTheBound(t *testing.T) {
 		{"max_completion_tokens counts as a bound", `{"model":"s13-model","messages":[],"max_completion_tokens":48}`, "m", `{"model":"m","messages":[],"max_completion_tokens":48}`},
 		{"a streamed variant keeps its stream member first", `{"stream":true,"model":"s13-model","prompt":"hello"}`, "m", `{"max_tokens":8,"stream":true,"model":"m","prompt":"hello"}`},
 		{"no model name in the body", `{"prompt":"hello"}`, "m", `{"max_tokens":8,"prompt":"hello"}`},
+		{"S13's pretty-printed case keeps its spaces", "{\n  \"messages\": [ {\"content\": \"hello\", \"role\": \"user\"} ],\n  \"temperature\": 0.3,\n  \"model\": \"s13-model\"\n}", "m",
+			"{\"max_tokens\":8,\n  \"messages\": [ {\"content\": \"hello\", \"role\": \"user\"} ],\n  \"temperature\": 0.3,\n  \"model\": \"m\"\n}"},
 		{"an empty model keeps S13's", `{"model":"s13-model","prompt":"x"}`, "", `{"max_tokens":8,"model":"s13-model","prompt":"x"}`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -363,5 +369,91 @@ func TestClassifyReplyNamesWhatTheRouterMade(t *testing.T) {
 				t.Errorf("ClassifyReply = %+v, want %+v", got, c.want)
 			}
 		})
+	}
+}
+
+// BytesObs.Add is where the reading's counts are made: each class of response in its own count, an invalid variant's refusal by its 4xx, a
+// failure by its key (up to FailedKept of them).
+func TestBytesObsAddCountsEachResponseInItsOwnPlace(t *testing.T) {
+	okJSON := []byte(`{"choices":[{"text":"hi"}]}`)
+	okStream := []byte("data: {\"x\":1}\n\ndata: [DONE]\n\n")
+	refusal := []byte(`{"error":{"message":"no"}}`)
+	var b BytesObs
+	// chat 200 plain, chat 200 streamed, completions 200 plain, completions 200 streamed
+	b.Add(true, false, true, "c1", 200, okJSON, false)
+	b.Add(true, true, true, "c2", 200, okStream, false)
+	b.Add(false, false, true, "c3", 200, okJSON, false)
+	b.Add(false, true, true, "c4", 200, okStream, false)
+	want := BytesObs{Variants: 4, Complete: 4, Status200: 4, StreamOK: 2, NonStreamOK: 2, ChatOK: 2, CompletionsOK: 2}
+	if !equalBytes(b, want) {
+		t.Fatalf("after four answers: %+v, want %+v", b, want)
+	}
+	// An invalid variant refused with a 4xx: counted as sent and refused, as a 4xx, and no 200 of any mode.
+	b.Add(true, false, false, "bad", 400, refusal, false)
+	// An invalid one answered 200: sent, not refused.
+	b.Add(true, false, false, "bad2", 200, okJSON, false)
+	// A valid one the engine refuses with a 4xx of its own, and an engine's own 500: complete, not the router's.
+	b.Add(true, false, true, "v4xx", 422, refusal, false)
+	b.Add(false, false, true, "v500", 500, refusal, false)
+	if b.InvalidSent != 2 || b.InvalidRefused != 1 || b.Status4xx != 2 || b.Status5xx != 1 || b.Status200 != 5 || b.RouterMade != 0 || len(b.Failed) != 0 {
+		t.Errorf("after the refusals: %+v", b)
+	}
+	// A gateway status, no answer and a cut body are the router's or the path's, named by key; none of them is a complete 200.
+	b.Add(true, false, true, "gw", 503, []byte("no healthy upstream"), false)
+	b.Add(true, true, true, "none", 0, nil, false)
+	b.Add(false, true, true, "cut", 200, okStream[:10], true)
+	if b.RouterMade != 3 || len(b.Failed) != 3 || b.Failed[0] != "gw" || b.Failed[1] != "none" || b.Failed[2] != "cut" {
+		t.Errorf("after the failures: RouterMade %d, failed %v", b.RouterMade, b.Failed)
+	}
+	if b.Variants != 11 {
+		t.Errorf("Variants = %d, want the 4 answered, the 4 refusals and the 3 failures, 11", b.Variants)
+	}
+	// An engine's own 5xx is complete, and counted apart from the 2xx and 4xx: the status counts add up to Complete.
+	if b.Status200+b.Status4xx+b.Status5xx != b.Complete {
+		t.Errorf("the status counts %d+%d+%d do not add up to Complete %d", b.Status200, b.Status4xx, b.Status5xx, b.Complete)
+	}
+	// Only FailedKept keys are kept.
+	var many BytesObs
+	for i := 0; i < FailedKept+5; i++ {
+		many.Add(true, false, true, "k", 0, nil, false)
+	}
+	if len(many.Failed) != FailedKept || many.RouterMade != FailedKept+5 {
+		t.Errorf("kept %d keys and counted %d failures, want %d and %d", len(many.Failed), many.RouterMade, FailedKept, FailedKept+5)
+	}
+}
+
+func equalBytes(a, b BytesObs) bool {
+	return a.Variants == b.Variants && a.Complete == b.Complete && a.Status200 == b.Status200 && a.Status4xx == b.Status4xx && a.Status5xx == b.Status5xx &&
+		a.StreamOK == b.StreamOK && a.NonStreamOK == b.NonStreamOK && a.ChatOK == b.ChatOK && a.CompletionsOK == b.CompletionsOK &&
+		a.InvalidSent == b.InvalidSent && a.InvalidRefused == b.InvalidRefused && a.RouterMade == b.RouterMade
+}
+
+// healthyOf reads status.healthyWorkers as the row records it: the count, and -1 when the field is absent (no report of the router's view yet).
+func TestHealthyOfIsTheCountOrMinusOneWhenAbsent(t *testing.T) {
+	n := func(v int32) *int32 { return &v }
+	for _, c := range []struct {
+		name string
+		in   *int32
+		want int
+	}{{"absent", nil, -1}, {"zero", n(0), 0}, {"one", n(1), 1}, {"two", n(2), 2}} {
+		var in v1alpha1.Instance
+		in.Status.HealthyWorkers = c.in
+		if got := healthyOf(in); got != c.want {
+			t.Errorf("%s: healthyOf = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// Only the router row's stack runs Instances behind Envoy: its host options are the router's alone, and every other row's are none. The live
+// world and the stand-in's both take them from hostOptionsFor.
+func TestOnlyTheRouterRowsStackRunsInstancesBehindEnvoy(t *testing.T) {
+	opts := hostOptionsFor(BetaRouterName)
+	if len(opts) != 1 || reflect.ValueOf(opts[0]).Pointer() != reflect.ValueOf(stack.InstanceRouter).Pointer() {
+		t.Fatalf("the router row's host options are %d, want exactly stack.InstanceRouter", len(opts))
+	}
+	for _, r := range slices.Concat(Rows(), AccountingRows(), ReachRows(), HostDialedRows(), StageRows()) {
+		if r.Name != BetaRouterName && len(hostOptionsFor(r.Name)) != 0 {
+			t.Errorf("%s has host options: only the router row runs Instances behind a router", r.Name)
+		}
 	}
 }
