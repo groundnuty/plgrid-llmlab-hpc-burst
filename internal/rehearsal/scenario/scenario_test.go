@@ -19,6 +19,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -134,6 +135,9 @@ type rigSetup struct {
 	// when set, is up's --version. Unset, up's arguments are as before.
 	relayKeeper bool
 	k3sVersion  string
+	// instanceRouter runs up with --instance-router envoy and places Envoy's build beside the agent's
+	// (#454, router_test.go). Unset, up's arguments and the builds are as before.
+	instanceRouter bool
 }
 
 func startRig(t *testing.T, mode string) *rig {
@@ -169,6 +173,9 @@ func startRigWith(t *testing.T, s rigSetup) *rig {
 	r.fc = rigClient(t, r.h)
 	arch := stack.CPUArch(t)
 	r.h.PlaceAgentBuild(arch)
+	if s.instanceRouter {
+		r.h.PlaceEnvoyBuild(arch, testenv.EnvoyBinary(t))
+	}
 	r.c = stack.KubeClient(t, r.h.State)
 	objs := []client.Object{stack.BatchProfile(arch, rehearsalTiming), stack.BatchProvider(creds)}
 	if s.objects != nil {

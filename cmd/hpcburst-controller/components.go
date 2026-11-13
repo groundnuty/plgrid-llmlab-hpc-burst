@@ -224,6 +224,12 @@ func frontSettings(f flags, d deps) (*providerctl.FrontSettings, error) {
 		Mode: agentapi.DialHomeMode(f.frontMode), Endpoint: f.frontAddr, CertPin: pin, CertPEM: certPEM,
 		FrpcDigests: maps.Clone(digests),
 	}
+	// Behind a router, every job gets Envoy's build, staged by its pinned digest (#454).
+	if f.instanceRouter == string(v1alpha1.InstanceRouterEnvoy) {
+		if fs.EnvoyDigests, err = launcher.EnvoyDigests(); err != nil {
+			return nil, fmt.Errorf("the Envoy digests: %w", err)
+		}
+	}
 	if fs.Mode == agentapi.DialHomeSSH {
 		u, err := d.user()
 		if err != nil {
