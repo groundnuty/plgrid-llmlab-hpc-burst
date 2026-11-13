@@ -31,6 +31,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	afake "github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi/fake"
+	pfake "github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/fake"
 )
 
 func TestADeploymentBeingDeletedGetsNoReplacementAtAnyOrdering(t *testing.T) {
@@ -374,5 +376,69 @@ func TestAFailedReadBeforeACreateFailsThePassAndCreatesNothing(t *testing.T) {
 	}
 	if rr.submissions() != before {
 		t.Errorf("the pass whose read before a create failed made %d submissions", rr.submissions()-before)
+	}
+}
+
+// TestAnAllocationTheLadderMadeIsReleasedAtOnceOnDelete: the restart ladder's last rung fails the Instance with RestartLoop, releases its
+// Allocation and makes a new one (health.go, restart; HBEP-7, Health and restarts). That new Allocation, pending in the queue or already
+// running, is released at once when the deployment is deleted, like any other under HBEP-7's "as shutdown" and the release at once (#503;
+// the science agent's guidance on the ladder). The climb is the one of TestHealthRepeatedFailuresClimbLadder: two worker restarts, two
+// Instance restarts, then the loop. After the delete no further Allocation or submission appears, and none is left.
+func TestAnAllocationTheLadderMadeIsReleasedAtOnceOnDelete(t *testing.T) {
+	for _, state := range []string{"pending", "running"} {
+		t.Run(state, func(t *testing.T) {
+			rg, in, alloc := healthRig(t, func() afake.Engine { return afake.Engine{} })
+			// A policy that holds an empty Allocation for 20 minutes, which the ladder's new Allocation copies from the deployment: the
+			// release at once is what must override it.
+			rg.mutateMD("md", func(m *v1alpha1.ModelDeployment) {
+				m.Spec.RetentionPolicy = &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: dur(20 * time.Minute)}
+			})
+			if state == "pending" {
+				rg.batch.Enqueue(pfake.Script{QueueWait: 10 * time.Hour})
+			}
+			ag := rg.agentOf(alloc).agent
+			for k := 0; k < 5; k++ {
+				starts := len(ag.Starts())
+				ag.CrashWorker(healthWorker, 1)
+				healthUntilEvent(rg, in.Name, k, 3*time.Minute, startTick)
+				if k < 4 {
+					for len(ag.Starts()) == starts {
+						startStep(rg, "md", startTick)
+					}
+				}
+			}
+			if got := rg.instance(in.Name); got.Status.Phase != v1alpha1.InstanceEnded || got.Status.EndReason != v1alpha1.ReasonRestartLoop {
+				t.Fatalf("Instance %s (%s), want ended/RestartLoop: the climb did not reach its last rung", got.Status.Phase, got.Status.EndReason)
+			}
+			var made string
+			startUntil(rg, "md", 3*time.Minute, "the failed Allocation released and the ladder's new one made", func() bool {
+				if _, alive := rg.allocation(alloc); alive {
+					return false
+				}
+				for _, a := range rg.allocations("md") {
+					made = a.Name
+				}
+				return made != "" && rg.submissions() == 2
+			})
+			if a, ok := rg.allocation(made); !ok || (state == "pending") != (a.Status.AtProvider.StartTime == nil) {
+				t.Fatalf("the ladder's Allocation is %v (found %t), want it %s: the case would say nothing", a.Status.AtProvider.Phase, ok, state)
+			}
+			if err := rg.c.Delete(rg.ctx, rg.md("md")); err != nil {
+				t.Fatal(err)
+			}
+			for _, i := range rg.instances("md") {
+				if err := rg.c.Delete(rg.ctx, &i); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rg.until(2*time.Minute, 10*time.Second, "the ladder's Allocation released at once", func() bool { return allocReleased(rg, made) })
+			rg.run(20*time.Minute, time.Minute)
+			if left := rg.allAllocations(); len(left) != 0 {
+				t.Errorf("%d Allocations are left after the delete, want none", len(left))
+			}
+			if rg.submissions() != 2 {
+				t.Errorf("%d submissions in all, want the two (the first job and the ladder's): the delete made no third", rg.submissions())
+			}
+		})
 	}
 }
