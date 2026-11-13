@@ -634,18 +634,28 @@ func (r *liveRun) endDeployment(ctx context.Context, p Plan) {
 	if err := r.syncWatch(ctx, stack.KindAllocations, "the run's Allocations"); err != nil {
 		t.Errorf("%v", err)
 	}
-	r.waitFor(r.dw+EndMargin, "every job of the run to end in the cluster's record", func() bool {
+	// The failure of this wait names what it saw last (EndWaitState): each job's state and reason, each Allocation's phase, deletion, idle
+	// time and retention, and each Instance's phase (issue #503: row A's job outlived the wait under a 30 minute idle limit, and the
+	// failure said nothing of why). The ledger's own error, whose text can hold a host, goes to the private log once per change.
+	lastLedgerErr := ""
+	r.waitState(r.dw+EndMargin, "every job of the run to end in the cluster's record", func() (bool, string) {
 		tags, _ := r.runTags()
 		jobs, err := led.Jobs(ctx, tags)
+		if err != nil && err.Error() != lastLedgerErr {
+			lastLedgerErr = err.Error()
+			t.Logf("the cluster's record of the run's jobs could not be read: %v", err)
+		}
+		allocs, insts, apiErr := r.runObjects()
+		state := EndWaitState(jobs, err, allocs, insts, apiErr, time.Now())
 		if err != nil || len(jobs) == 0 {
-			return false
+			return false, state
 		}
 		for _, j := range jobs {
 			if j.EndTime == nil {
-				return false
+				return false, state
 			}
 		}
-		return true
+		return true, state
 	})
 	p.Logf("%s: the deployment is deleted and its jobs ended", p.Row.Name)
 }

@@ -104,6 +104,7 @@ var liveWaits = map[string]string{
 	"startGuard: time.After(r.every())":                                                           "a goroutine",
 	"startGuard: context.WithTimeout(time.Minute)":                                                "a goroutine",
 	"waitFor: stack.WaitFor(d)":                                                                   "the waits that call it, listed here",
+	"waitState: stack.WaitState(d)":                                                               "the waits that call it, listed here",
 	"workerRestart: r.waitFor(r.tm.StartTimeout + 5*time.Minute)":                                 "the lease",
 	"untilBefore: r.waitFor(time.Until(at) + time.Minute)":                                        "the lease",
 	"Handover: r.successorOf(time.Until(ds) + LeadTimesFor(lead).SuccessorWaitEnds)":              "the lease",
@@ -117,7 +118,7 @@ var liveWaits = map[string]string{
 	"Handover: r.syncWatch(stack.KindInstances | stack.KindAllocations)":                          "term: stack.CatchUpWorstCase",
 	"NoOverlap: r.syncWatch(stack.KindInstances | stack.KindAllocations | stack.KindDeployments)": "term: stack.CatchUpWorstCase",
 	"endDeployment: r.syncWatch(stack.KindAllocations)":                                           "term: stack.CatchUpWorstCase",
-	"endDeployment: r.waitFor(r.dw + EndMargin)":                                                  "term: the drain window and EndMargin",
+	"endDeployment: r.waitState(r.dw + EndMargin)":                                                "term: the drain window and EndMargin",
 	"wait: time.After(r.fc.RequestTimeout() + time.Minute)":                                       "term: the streams' MaxRequestDuration; a stream past it fails the run",
 	"startSampler: time.After(every)":                                                             "a goroutine",
 	"startSampler: context.WithTimeout(10 * time.Second)":                                         "a call",
@@ -161,9 +162,9 @@ func waitOf(fset *token.FileSet, fn string, call *ast.CallExpr) string {
 	recv := text(sel.X)
 	arg := -1
 	switch recv + "." + sel.Sel.Name {
-	case "r.waitFor", "time.After", "time.Sleep":
+	case "r.waitFor", "r.waitState", "time.After", "time.Sleep":
 		arg = 0
-	case "r.successorOf", "r.untilBefore", "context.WithTimeout", "stack.WaitFor", "r.syncWatch", "stack.BoundedDeadline":
+	case "r.successorOf", "r.untilBefore", "context.WithTimeout", "stack.WaitFor", "stack.WaitState", "r.syncWatch", "stack.BoundedDeadline":
 		arg = 1
 	}
 	if arg < 0 || arg >= len(call.Args) {

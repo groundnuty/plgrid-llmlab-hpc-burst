@@ -354,7 +354,7 @@ At zero desired Instances the controller applies the shutdown case ([HBEP-7](../
 - `Keep`, the default: it is kept, its job still running, until `retentionPolicy.until`, else the deployment's `endTime`, else the job's hard end;
 - either way, a profile's `maxIdle` releases it earlier: Athena's is 30 minutes, Helios sets none.
 
-So a kept job can hold its GPU for hours after the scale-down. To end it now, delete the Allocation once it hosts no live Instance; its finalizer cancels every job with its tag. Deleting the ModelDeployment instead releases its kept Allocations once their Instances have ended, except one whose own `retentionPolicy.until` is set: that date still holds (`internal/lifecycle/retention.go`, `keepUntil`).
+So a kept job can hold its GPU for hours after the scale-down. To end it now, delete the Allocation once it hosts no live Instance; its finalizer cancels every job with its tag. Deleting the ModelDeployment instead releases its Allocations at once, as soon as their Instances have ended, whatever their `retentionPolicy`: `ReleaseWhenIdle`'s idle limit and `Keep`'s `until` are for a deployment that still exists (HBEP-7, Release; `internal/lifecycle/retention.go`, `releaseEmpty`; before #503 a `ReleaseWhenIdle` job ran on for its whole idle limit after the deletion).
 
 ```
 hbk delete allocation <allocation>

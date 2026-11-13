@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -26,6 +27,35 @@ import (
 // so nothing is submitted twice and no Allocation is orphaned. On a Provider
 // with a submit limit, a slot is reserved under the Allocation's name before
 // the Instance is created (slots.go).
+
+// errDeploymentGone is what the creation of an Instance or an Allocation returns when the deployment is gone or being deleted by the time
+// it is about to be created (confirmDeployment): nothing is created, and the pass stops creating.
+var errDeploymentGone = errors.New("the deployment is gone or being deleted")
+
+// confirmDeployment reads the deployment again, from the API and not a cache, immediately before an Instance or an Allocation is
+// created, and says errDeploymentGone when it is gone, being deleted, or another deployment under the same name (issue #503; the
+// science agent's ruling of 13 Nov 2026). A pass reads the deployment once, at its start, and works from lists it reads after that, so a
+// delete that lands in between, with the garbage collector marking the Instances deleting, would otherwise read as a live deployment
+// with no live Instance, and capacity would make a replacement for a deployment that was just deleted. Reading it last, right before
+// each create, leaves only a delete that lands between this read and the create itself. That residual is bounded: an Instance made in it
+// is owned by the deleted deployment, so the garbage collector takes it and the shutdown rules end it; an Allocation made in it has no
+// Instance, so retention releases it at once (releaseEmpty: a pending Allocation with no Instance, and, once its job has started, the
+// deleted deployment's rule), and its job, if the Provider has submitted it by then, is cancelled by the Allocation's finalizer. The
+// pass also stops creating (p.shutdown); that changes nothing it writes, since a pass that finds the deployment gone here is working
+// from a copy that the deletion has made stale, so its status write conflicts in any case.
+func (p *pass) confirmDeployment() error {
+	var md v1alpha1.ModelDeployment
+	err := p.r.Reader.Get(p.ctx, p.key, &md)
+	switch {
+	case apierrors.IsNotFound(err):
+	case err != nil:
+		return fmt.Errorf("get ModelDeployment %s before a create: %w", p.key, err)
+	case md.UID == p.md.UID && md.DeletionTimestamp.IsZero():
+		return nil
+	}
+	p.shutdown = true
+	return errDeploymentGone
+}
 
 // canProvision reports whether new Allocations may be created at all.
 func (p *pass) canProvision() bool {
@@ -108,6 +138,9 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 			// (HBEP-7, Handover, No-overlap mode: "fixed at creation"). A reusable warm Allocation also
 			// means the primary has room beside it (decideOverlap), so this is not a queued-path successor.
 			if err := p.createInstance(pv, cid, pred, warm.Name, o); err != nil {
+				if errors.Is(err, errDeploymentGone) {
+					return false, nil
+				}
 				return false, err
 			}
 			// Placed: the Allocation is no longer idle (v1alpha1.ClearIdleSince).
@@ -131,9 +164,18 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 		}
 		if err := p.createInstance(pv, cid, pred, name, o); err != nil {
 			p.releaseSlot(pv, name)
+			if errors.Is(err, errDeploymentGone) {
+				return false, nil
+			}
 			return false, err
 		}
-		return true, p.createAllocation(pv, name, params, markValue(holds, o.successorOf))
+		if err := p.createAllocation(pv, name, params, markValue(holds, o.successorOf)); err != nil {
+			if errors.Is(err, errDeploymentGone) {
+				return false, nil // the Instance made just before it is the deleted deployment's to end
+			}
+			return true, err
+		}
+		return true, nil
 	}
 	return false, nil
 }
@@ -312,6 +354,9 @@ func (p *pass) createInstance(pv *providerView, cid *classID, pred *v1alpha1.Ins
 			}
 		}
 	}
+	if err := p.confirmDeployment(); err != nil {
+		return err
+	}
 	if err := p.r.Client.Create(p.ctx, in, owner); err != nil {
 		return fmt.Errorf("create Instance on Allocation %s: %w", alloc, err)
 	}
@@ -345,6 +390,10 @@ func (p *pass) createAllocation(pv *providerView, name string, params v1alpha1.B
 	}
 	if queuedOf != "" {
 		a.Annotations = map[string]string{v1alpha1.AnnotationQueuedSuccessor: queuedOf}
+	}
+	if err := p.confirmDeployment(); err != nil {
+		p.releaseSlot(pv, name)
+		return err
 	}
 	if err := p.r.Client.Create(p.ctx, a, owner); err != nil {
 		if apierrors.IsAlreadyExists(err) {
@@ -403,7 +452,10 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 		p.degrade(v1alpha1.ReasonSubmitLimitReached, "Instance %s waits for a submit slot for its Allocation %s: %s", in.Name, name, p.noSlot[pv.name])
 		return nil
 	}
-	return p.createAllocation(pv, name, params, markValue(holds, successorOf))
+	if err := p.createAllocation(pv, name, params, markValue(holds, successorOf)); err != nil && !errors.Is(err, errDeploymentGone) {
+		return err
+	}
+	return nil
 }
 
 // ensureCredential writes an Allocation's credential file, 256 random bits as

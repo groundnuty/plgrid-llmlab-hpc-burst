@@ -118,6 +118,10 @@ func stopsTheRun(err error) bool {
 // them, and in the text to post of a run whose first job's part failed.
 const secondNotStartedWords = "the first job ran and the second never started"
 
+// evidenceKeeper is a Steps that keeps what a failed run leaves to diagnose it from: the live steps keep the stack's logs and the agents'
+// logs in the record directory (evidence.go). Run tells it when the run failed in a way the steps did not Fatalf on.
+type evidenceKeeper interface{ KeepEvidence() }
+
 // Run is one row from its scenario to its verdict. It hands the scenario a
 // Recorder, takes what the scenario saw, reads the cluster's own record of the
 // run's jobs, judges both, writes the record and the text to post, and closes
@@ -126,6 +130,10 @@ const secondNotStartedWords = "the first job ran and the second never started"
 // could not write), which is a failure too but has no verdict.
 func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(string, ...any)) (failures []string, err error) {
 	defer func() {
+		// A run that failed keeps its evidence (issue #503): a failed check or a broken run, not a NOT RUN and not a pass.
+		if k, ok := st.(evidenceKeeper); ok && (len(failures) > 0 || (err != nil && !NotRun(cfg.Row, err))) {
+			k.KeepEvidence()
+		}
 		if cerr := st.Close(ctx); cerr != nil {
 			if NotRun(cfg.Row, err) {
 				// A close that failed may have left a job: that is a failure, never a NOT RUN.
