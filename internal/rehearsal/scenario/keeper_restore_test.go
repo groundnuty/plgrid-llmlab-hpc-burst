@@ -57,10 +57,10 @@ func TestRehearsalKeeperRestoreAcceptsTheLeadersLowerEpoch(t *testing.T) {
 	v0 := r.keeperRelays("on k3s "+keeperOlderK3s, in.Status.JobID)
 	ref := r.openReference("the quiet reference", key, in, restoreRefTokens)
 	l0, ok := r.providerLease()
-	if !ok || l0.holder == "" {
+	if !ok || l0.Holder == "" {
 		r.t.Fatalf("the Provider's Lease has no holder: %+v", l0)
 	}
-	r.waitFence("before the upgrade", l0.transitions)
+	r.waitFence("before the upgrade", l0.Transitions)
 
 	// The upgrade backs the store up with the Lease at l0's epoch. The whole
 	// group restarts, the keeper at its next E, and the next leader takes the
@@ -72,28 +72,28 @@ func TestRehearsalKeeperRestoreAcceptsTheLeadersLowerEpoch(t *testing.T) {
 	}
 	r.t.Logf("the upgrade took %s; its backup %s", time.Since(start).Round(100*time.Millisecond), backup)
 	r.c = stack.KubeClient(r.t, r.h.State)
-	l1 := r.newLeader("after the upgrade", nil, l0.holder)
-	if l1.transitions != l0.transitions+1 {
-		r.t.Errorf("after the upgrade the Lease's leaseTransitions went %d -> %d; client-go adds one on a holder change", l0.transitions, l1.transitions)
+	l1 := r.newLeader("after the upgrade", nil, l0.Holder)
+	if l1.Transitions != l0.Transitions+1 {
+		r.t.Errorf("after the upgrade the Lease's leaseTransitions went %d -> %d; client-go adds one on a holder change", l0.Transitions, l1.Transitions)
 	}
-	r.waitFence("after the upgrade", l1.transitions)
+	r.waitFence("after the upgrade", l1.Transitions)
 	v1 := r.keeperRelays("after the upgrade", in.Status.JobID)
-	if v1.epoch != v0.epoch+1 {
-		r.t.Errorf("the keeper after the upgrade is at E %d, was %d: want the next", v1.epoch, v0.epoch)
+	if v1.Epoch != v0.Epoch+1 {
+		r.t.Errorf("the keeper after the upgrade is at E %d, was %d: want the next", v1.Epoch, v0.Epoch)
 	}
 	r.tunnelBack("after the upgrade", in)
 
 	// One hand-over raises the fence above the epoch the restored Lease gives.
-	ctl, _, err := pinEntry(r.t, r.h.State, "controller", v1.sup)
+	ctl, _, err := pinEntry(r.t, r.h.State, "controller", v1.Sup)
 	if err != nil {
 		r.t.Fatalf("pin the controller: %v", err)
 	}
-	if err := ctl.signal(syscall.SIGTERM); err != nil {
-		r.t.Fatalf("TERM the controller %d through its pidfd: %v", ctl.pid, err)
+	if err := ctl.Signal(syscall.SIGTERM); err != nil {
+		r.t.Fatalf("TERM the controller %d through its pidfd: %v", ctl.PID, err)
 	}
-	ctl.waitExited(r.t, stack.WaitDeadline)
-	l2 := r.newLeader("after the hand-over", ctl, l1.holder)
-	r.waitFence("after the hand-over", l2.transitions)
+	ctl.WaitExited(r.t, stack.WaitDeadline)
+	l2 := r.newLeader("after the hand-over", ctl, l1.Holder)
+	r.waitFence("after the hand-over", l2.Transitions)
 	fence, _ := r.keeperFence()
 
 	// Down, restore, up: the store and its Lease go back to l0's epoch.
@@ -109,15 +109,15 @@ func TestRehearsalKeeperRestoreAcceptsTheLeadersLowerEpoch(t *testing.T) {
 	r.c = stack.KubeClient(r.t, r.h.State)
 	// The restored Lease is the backup's: released by the old leader, or still
 	// naming it, so the leader after the restore is another holder than l0's.
-	ln := r.newLeader("after the restore", nil, l0.holder)
-	if ln.transitions >= fence {
-		r.t.Fatalf("the leader after the restore is at Lease epoch %d, not below the keeper's fence %d before it: the test would show nothing", ln.transitions, fence)
+	ln := r.newLeader("after the restore", nil, l0.Holder)
+	if ln.Transitions >= fence {
+		r.t.Fatalf("the leader after the restore is at Lease epoch %d, not below the keeper's fence %d before it: the test would show nothing", ln.Transitions, fence)
 	}
-	r.waitFence("after the restore, the leader's lower epoch", ln.transitions)
-	r.t.Logf("after the restore the keeper accepted the leader's Lease epoch %d, below its fence %d before the restore (the backup's Lease at %d)", ln.transitions, fence, l0.transitions)
+	r.waitFence("after the restore, the leader's lower epoch", ln.Transitions)
+	r.t.Logf("after the restore the keeper accepted the leader's Lease epoch %d, below its fence %d before the restore (the backup's Lease at %d)", ln.Transitions, fence, l0.Transitions)
 	vn := r.keeperRelays("after the restore", in.Status.JobID)
-	if vn.epoch != v1.epoch+1 {
-		r.t.Errorf("the keeper after the restore is at E %d, was %d: want the next", vn.epoch, v1.epoch)
+	if vn.Epoch != v1.Epoch+1 {
+		r.t.Errorf("the keeper after the restore is at E %d, was %d: want the next", vn.Epoch, v1.Epoch)
 	}
 	if got := providerPart(r.keeperReport()).Refused; got[wire.RefusedEpoch] != 0 {
 		r.t.Errorf("the keeper refused %d sets or acknowledgements for their epoch after the restore: %v", got[wire.RefusedEpoch], got)

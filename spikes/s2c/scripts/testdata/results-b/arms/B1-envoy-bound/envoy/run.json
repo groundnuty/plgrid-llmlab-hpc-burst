@@ -1,0 +1,19 @@
+{
+ "static_resources": {
+  "clusters": [
+   {
+    "name": "workers",
+    "type": "STATIC",
+    "lb_policy": "RING_HASH",
+    "common_lb_config": {
+     "healthy_panic_threshold": {
+      "value": 0
+     },
+     "consistent_hashing_lb_config": {
+      "hash_balance_factor": 125
+     }
+    }
+   }
+  ]
+ }
+}

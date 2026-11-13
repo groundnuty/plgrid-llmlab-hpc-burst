@@ -56,38 +56,38 @@ func (r *rig) keeperControllerEvent(event string, sig syscall.Signal, in *v1alph
 		r.t.Fatalf("%s: needs a ready, registered Instance %s: %+v", event, in.Name, before.Status)
 	}
 	l0, ok := r.providerLease()
-	if !ok || l0.holder == "" {
+	if !ok || l0.Holder == "" {
 		r.t.Fatalf("%s: the Provider's Lease has no holder: %+v", event, l0)
 	}
-	r.waitFence(event+", before it", l0.transitions)
+	r.waitFence(event+", before it", l0.Transitions)
 	rep0 := r.keeperReport()
-	st0, _ := upRelays(rep0, v.job)
+	st0, _ := upRelays(rep0, v.Job)
 	refused0 := refusedOf(providerPart(rep0))
-	ctl, _, err := pinEntry(r.t, r.h.State, "controller", v.sup)
+	ctl, _, err := pinEntry(r.t, r.h.State, "controller", v.Sup)
 	if err != nil {
 		r.t.Fatalf("%s: pin the controller: %v", event, err)
 	}
 	cuts0 := r.frontCutsByHop()
 	s := r.startOpenStream(event, key)
 	r.waitFirst(s)
-	if err := ctl.signal(sig); err != nil {
-		r.t.Fatalf("%s: %s to the controller %d through its pidfd: %v", event, sig, ctl.pid, err)
+	if err := ctl.Signal(sig); err != nil {
+		r.t.Fatalf("%s: %s to the controller %d through its pidfd: %v", event, sig, ctl.PID, err)
 	}
 	at := time.Now()
 
 	// The outcome, each part observed, while the stream runs.
-	ctl.waitExited(r.t, stack.WaitDeadline)
-	l1 := r.newLeader(event, ctl, l0.holder)
+	ctl.WaitExited(r.t, stack.WaitDeadline)
+	l1 := r.newLeader(event, ctl, l0.Holder)
 	ledAt := time.Now()
-	if l1.transitions != l0.transitions+1 {
-		r.t.Errorf("%s: the Lease's leaseTransitions went %d -> %d; client-go adds one on a holder change", event, l0.transitions, l1.transitions)
+	if l1.Transitions != l0.Transitions+1 {
+		r.t.Errorf("%s: the Lease's leaseTransitions went %d -> %d; client-go adds one on a holder change", event, l0.Transitions, l1.Transitions)
 	}
-	acceptedAt := r.waitFence(event+", the next leader's", l1.transitions)
+	acceptedAt := r.waitFence(event+", the next leader's", l1.Transitions)
 	reportedAt := r.agentReported(event, in, at)
 	r.sameRelays(event, v, st0)
 	outcomeAt := time.Now()
 	r.t.Logf("%s: the next controller led %s after the %s, the keeper accepted its epoch %d %s after, the agent reported to it %s after, the relays were confirmed %s after",
-		event, ledAt.Sub(at).Round(100*time.Millisecond), sig, l1.transitions, acceptedAt.Sub(at).Round(100*time.Millisecond),
+		event, ledAt.Sub(at).Round(100*time.Millisecond), sig, l1.Transitions, acceptedAt.Sub(at).Round(100*time.Millisecond),
 		reportedAt.Sub(at).Round(100*time.Millisecond), outcomeAt.Sub(at).Round(100*time.Millisecond))
 
 	// Tokens kept coming after the outcome; then the client ends the stream.
@@ -106,7 +106,7 @@ func (r *rig) keeperControllerEvent(event string, sig syscall.Signal, in *v1alph
 
 	// What ended was the controller, as the supervisor saw it end.
 	rec, err := readSupervisor(r.h.State)
-	e, _ := rec.entryOf("controller")
+	e, _ := rec.EntryOf("controller")
 	switch {
 	case err != nil || e.LastExit == nil:
 		r.t.Errorf("%s: the supervisor records no exit of the controller: %v %+v", event, err, e)
@@ -122,8 +122,8 @@ func (r *rig) keeperControllerEvent(event string, sig syscall.Signal, in *v1alph
 	if got := refusedOf(providerPart(r.keeperReport())); !sameCounts(got, refused0) {
 		r.t.Errorf("%s: the keeper's refusals went %v -> %v", event, refused0, got)
 	}
-	if st, _, _ := r.statusJSON(); !keeperAtE(st, v.keeper.pid, v.epoch) {
-		r.t.Errorf("%s: hpcburst status does not show the keeper %d at E %d: %+v", event, v.keeper.pid, v.epoch, st.Controllers)
+	if st, _, _ := r.statusJSON(); !keeperAtE(st, v.Keeper.PID, v.Epoch) {
+		r.t.Errorf("%s: hpcburst status does not show the keeper %d at E %d: %+v", event, v.Keeper.PID, v.Epoch, st.Controllers)
 	}
 	if ctl := r.h.StatusPID("controller"); len(relayChildren(ctl)) != 0 {
 		r.t.Errorf("%s: the next controller %d runs relays of its own: %+v", event, ctl, relayChildren(ctl))
@@ -152,20 +152,20 @@ func (r *rig) keeperControllerEvent(event string, sig syscall.Signal, in *v1alph
 // process at the same E.
 func (r *rig) sameRelays(what string, v keeperView, st0 map[agentapi.RelayChannel]wire.RelayState) {
 	r.t.Helper()
-	if err := v.keeper.stillChild(v.sup); err != nil {
+	if err := v.Keeper.StillChild(v.Sup); err != nil {
 		r.t.Errorf("%s: the relay keeper: %v", what, err)
 	}
 	rep := r.keeperReport()
-	st1, n := upRelays(rep, v.job)
-	if rep.KeeperEpoch != v.epoch {
-		r.t.Errorf("%s: the keeper's E is %d, was %d", what, rep.KeeperEpoch, v.epoch)
+	st1, n := upRelays(rep, v.Job)
+	if rep.KeeperEpoch != v.Epoch {
+		r.t.Errorf("%s: the keeper's E is %d, was %d", what, rep.KeeperEpoch, v.Epoch)
 	}
 	for _, ch := range agentapi.RelayChannels {
-		if err := v.relays[ch].stillChild(v.keeper); err != nil {
+		if err := v.Relays[ch].StillChild(v.Keeper); err != nil {
 			r.t.Errorf("%s: the %s relay was replaced: %v", what, ch, err)
 		}
 		a, b := st0[ch], st1[ch]
-		if n[ch] != 1 || b.PID != a.PID || b.Epoch != a.Epoch || b.Seq != a.Seq || b.Starts != a.Starts || b.Epoch != v.epoch {
+		if n[ch] != 1 || b.PID != a.PID || b.Epoch != a.Epoch || b.Seq != a.Seq || b.Starts != a.Starts || b.Epoch != v.Epoch {
 			r.t.Errorf("%s: the keeper's %s relay is %+v (%d up), was %+v: want the same process at the same (E, N), with no start", what, ch, b, n[ch], a)
 		}
 	}

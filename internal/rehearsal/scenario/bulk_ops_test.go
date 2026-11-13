@@ -113,16 +113,16 @@ func TestFrpsBulkRestartCutsOnlyBulk(t *testing.T) {
 				}
 				dones = append(dones, d)
 			}
-			if err := bulk.signal(syscall.SIGKILL); err != nil {
+			if err := bulk.Signal(syscall.SIGKILL); err != nil {
 				t.Fatalf("SIGKILL to frps-bulk through its pidfd: %v", err)
 			}
-			bulk.waitExited(t, 30*time.Second)
+			bulk.WaitExited(t, 30*time.Second)
 			stack.WaitState(t, stack.WaitDeadline, "the supervisor to start frps-bulk again", func() (bool, string) {
 				rec, err := readSupervisor(r.h.State)
 				if err != nil {
 					return false, err.Error()
 				}
-				e, ok := rec.entryOf("frps-bulk")
+				e, ok := rec.EntryOf("frps-bulk")
 				return ok && e.Proc.PID != bulkEntry.Proc.PID, "not yet"
 			})
 			// Meanwhile requests take the token tunnel (HBEP-6, Operational readiness 2): the request is
@@ -148,7 +148,7 @@ func TestFrpsBulkRestartCutsOnlyBulk(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if e, ok := rec.entryOf("frps"); !ok || e.Proc.PID != firstEntry.Proc.PID || e.Proc.StartTicks != firstEntry.Proc.StartTicks {
+			if e, ok := rec.EntryOf("frps"); !ok || e.Proc.PID != firstEntry.Proc.PID || e.Proc.StartTicks != firstEntry.Proc.StartTicks {
 				t.Errorf("the first frps changed across frps-bulk's restart: %+v", e.Proc)
 			}
 			stack.WaitState(t, stack.WaitDeadline, "the bulk transport to register again", func() (bool, string) {

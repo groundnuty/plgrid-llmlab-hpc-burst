@@ -136,7 +136,7 @@ func hexPort(a string) int {
 // alive before and after it.
 func (r *rig) keeperStatusWhileRelaysRun(v keeperView) {
 	r.t.Helper()
-	socks, err := processTCP(v.keeper.pid)
+	socks, err := processTCP(v.Keeper.PID)
 	if err != nil {
 		r.t.Fatalf("the keeper's sockets: %v", err)
 	}
@@ -150,13 +150,13 @@ func (r *rig) keeperStatusWhileRelaysRun(v keeperView) {
 		}
 	}
 	if len(dials) == 0 {
-		r.t.Fatalf("the keeper %d holds no established connection to the dial-home listener (base+7): the status check would have nothing to tell from a bound port: %+v", v.keeper.pid, socks)
+		r.t.Fatalf("the keeper %d holds no established connection to the dial-home listener (base+7): the status check would have nothing to tell from a bound port: %+v", v.Keeper.PID, socks)
 	}
 	if len(listens) != 0 {
-		r.t.Errorf("the keeper %d listens on TCP: %+v", v.keeper.pid, listens)
+		r.t.Errorf("the keeper %d listens on TCP: %+v", v.Keeper.PID, listens)
 	}
-	for ch, p := range v.relays {
-		if err := p.stillChild(v.keeper); err != nil {
+	for ch, p := range v.Relays {
+		if err := p.StillChild(v.Keeper); err != nil {
 			r.t.Fatalf("the %s relay before status: %v", ch, err)
 		}
 	}
@@ -164,15 +164,15 @@ func (r *rig) keeperStatusWhileRelaysRun(v keeperView) {
 	if err != nil || st.Health != "healthy" || len(st.Reasons) != 0 {
 		r.t.Errorf("status while the keeper's relays run: %v, %s %q:\n%.2000s", err, st.Health, st.Reasons, out)
 	}
-	if !keeperAtE(st, v.keeper.pid, v.epoch) {
-		r.t.Errorf("status while the keeper's relays run does not show the keeper %d answering its ping at E %d: %+v", v.keeper.pid, v.epoch, st.Controllers)
+	if !keeperAtE(st, v.Keeper.PID, v.Epoch) {
+		r.t.Errorf("status while the keeper's relays run does not show the keeper %d answering its ping at E %d: %+v", v.Keeper.PID, v.Epoch, st.Controllers)
 	}
-	for ch, p := range v.relays {
-		if err := p.stillChild(v.keeper); err != nil {
+	for ch, p := range v.Relays {
+		if err := p.StillChild(v.Keeper); err != nil {
 			r.t.Errorf("the %s relay across status: %v", ch, err)
 		}
 	}
-	r.t.Logf("status while relays run: %s; the keeper %d held %d dials to the dial-home listener and %d TCP sockets in all", st.Health, v.keeper.pid, len(dials), len(socks))
+	r.t.Logf("status while relays run: %s; the keeper %d held %d dials to the dial-home listener and %d TCP sockets in all", st.Health, v.Keeper.PID, len(dials), len(socks))
 }
 
 // downLead is how many tokens the stream receives before down.
@@ -185,9 +185,9 @@ const downLead = 300
 func (r *rig) keeperDown(in *v1alpha1.Instance, key, ref string, v keeperView) {
 	r.t.Helper()
 	defer r.stepTimer("keeper down")()
-	pins := []*stackPin{v.keeper, v.sup}
-	for pid := range relayChildren(v.keeper.pid) {
-		p, err := pinChild(r.t, fmt.Sprintf("relay ssh %d", pid), pid, v.keeper, 0)
+	pins := []*stackPin{v.Keeper, v.Sup}
+	for pid := range relayChildren(v.Keeper.PID) {
+		p, err := pinChild(r.t, fmt.Sprintf("relay ssh %d", pid), pid, v.Keeper, 0)
 		if err != nil {
 			r.t.Fatalf("pin the keeper's relay ssh %d: %v", pid, err)
 		}
@@ -196,7 +196,7 @@ func (r *rig) keeperDown(in *v1alpha1.Instance, key, ref string, v keeperView) {
 	if len(pins) < 4 {
 		r.t.Fatalf("the keeper runs %d relays before down, want both of each running job's", len(pins)-2)
 	}
-	ctl, _, err := pinEntry(r.t, r.h.State, "controller", v.sup)
+	ctl, _, err := pinEntry(r.t, r.h.State, "controller", v.Sup)
 	if err != nil {
 		r.t.Fatalf("pin the controller: %v", err)
 	}
@@ -227,7 +227,7 @@ func (r *rig) keeperDown(in *v1alpha1.Instance, key, ref string, v keeperView) {
 	r.t.Logf("down took %s; the stream received %d tokens, in order, ended %s after down began (%v), cut by %s",
 		took.Round(100*time.Millisecond), n, s.endAt.Sub(start).Round(100*time.Millisecond), endErr, strOrNil(row.CutBy))
 	for _, p := range pins {
-		p.waitExited(r.t, 30*time.Second)
+		p.WaitExited(r.t, 30*time.Second)
 	}
 	path := relaykeeper.StatePath(r.h.State)
 	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
