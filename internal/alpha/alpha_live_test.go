@@ -96,6 +96,15 @@ func TestAlphaAthenaNowServe(t *testing.T) {
 	runRow(t, "nowserve", "alpha-athena-now-serve")
 }
 
+// TestBetaAthenaNowBulk is the bulk row of issue #521 (beta's tracker, #522) on Athena plgrid-now under profiles/athena-now.yaml, in host-dialed mode
+// with the bulk path, on the engine double: eight token streams beside a 64 MiB reply, once down the token transport as a streamed reply (the
+// control) and once as a non-streamed reply down the bulk path, and the streams' gap p99 read for each. A reading at or above 85 ms is a finding.
+//
+//livecheck:beta-athena-now-bulk
+func TestBetaAthenaNowBulk(t *testing.T) {
+	runRow(t, "betabulk", BetaBulkName)
+}
+
 // TestBetaAthenaNowKeeper is the keeper row of issue #521 (beta's tracker, #522) on Athena plgrid-now under profiles/athena-now.yaml, in host-dialed
 // mode with the relay keeper: the controller is killed through a pinned pidfd while a stream is served, and the stream finishes whole, the relays
 // the same processes, the agent undisturbed. A context that cannot hold a stream for the window is NOT RUN.

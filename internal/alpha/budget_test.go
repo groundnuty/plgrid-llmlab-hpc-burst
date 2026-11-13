@@ -53,6 +53,9 @@ func TestEachStackRowsWorstCaseIsItsWaitsAddedUp(t *testing.T) {
 		{"the router row on plgrid-now, 2 h asked", rowOf("beta-athena-now-router"), 120, 11 + 10 + 41 + 7 + 5 + 2 + 5, 115, 11 + 5 + 2 + 5},
 		// The keeper row on plgrid-now (issue #521) adds up as the router row does: its stream and the controller's restart are before the drain start.
 		{"the keeper row on plgrid-now, 30", rowOf("beta-athena-now-keeper"), 30, 11 + 10 + 41 + 7 + 5 + 2 + 5, 115, 11 + 5 + 2 + 5},
+		// The bulk row on plgrid-now (issue #521) adds up as the router row does: both phases are before the drain start.
+		{"the bulk row on plgrid-now, 30", rowOf("beta-athena-now-bulk"), 30, 11 + 10 + 41 + 7 + 5 + 2 + 5, 115, 11 + 5 + 2 + 5},
+		{"the bulk row on plgrid-now, 2 h asked", rowOf("beta-athena-now-bulk"), 120, 11 + 10 + 41 + 7 + 5 + 2 + 5, 115, 11 + 5 + 2 + 5},
 		{"the keeper row on plgrid-now, 2 h asked", rowOf("beta-athena-now-keeper"), 120, 11 + 10 + 41 + 7 + 5 + 2 + 5, 115, 11 + 5 + 2 + 5},
 		// Row B on plgrid-now (issue #376): its start wait of 10, the predecessor's 21-minute lease and 5 for its job to be seen
 		// gone from the slot, 3 for the successor's Allocation and the successor's own start wait of 10, then 12 and 5 for it to

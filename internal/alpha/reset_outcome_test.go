@@ -87,6 +87,11 @@ func (s firstClockSteps) NowNoOverlap(_ context.Context, p Plan) (NowNoOverlapOb
 	return NowNoOverlapObs{}, err
 }
 
+func (s firstClockSteps) BetaBulk(_ context.Context, p Plan) (BulkObs, error) {
+	_, err := s.firstReady(p)
+	return BulkObs{}, err
+}
+
 func (s firstClockSteps) BetaKeeper(_ context.Context, p Plan) (KeeperObs, error) {
 	_, err := s.firstReady(p)
 	return KeeperObs{}, err

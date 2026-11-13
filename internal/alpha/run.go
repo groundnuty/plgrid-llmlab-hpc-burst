@@ -241,6 +241,14 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 			return VerifyNowNoOverlap(cfg.Row, o, j)
 		}
 		summary = func(f []string, j []provider.Job) string { return nowNoOverlapPost(cfg.Row, o, f, j, refused) }
+	case cfg.Row.Name == BetaBulkName:
+		o, serr := st.BetaBulk(ctx, plan)
+		if serr != nil {
+			return nil, serr
+		}
+		tags, obs = o.Tags, o
+		judge = func(j []provider.Job) []string { return VerifyBetaBulk(cfg.Row, o, j) }
+		summary = func(f []string, _ []provider.Job) string { return betaBulkPost(cfg.Row, o, f) }
 	case cfg.Row.Name == BetaKeeperName:
 		o, serr := st.BetaKeeper(ctx, plan)
 		if serr != nil {
