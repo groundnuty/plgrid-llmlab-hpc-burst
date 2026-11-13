@@ -149,3 +149,4 @@ jobs:
           fi
           echo "NOT REPRODUCED: the wait did not time out"
           exit 1
+# rerun on #503's fixed head
