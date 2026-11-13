@@ -218,6 +218,10 @@ type liveRun struct {
 	batch *slurm.Batch
 	tr    *sshrun.SSH
 
+	// keepEvidence is set by Run when the run ended in a failure that is not a Fatalf of the steps (a failed check, a broken run): Close then
+	// keeps the evidence of a failed run (evidence_live_test.go). A Fatalf marks the test failed itself.
+	keepEvidence bool
+
 	// created is this host's time just before the deployment was created,
 	// from which the first clock runs, and clusterAtCreate the cluster's clock
 	// read before it, from which its first end is placed.
@@ -308,12 +312,21 @@ func (r *liveRun) Close(ctx context.Context) error {
 	defer cancel()
 	r.stopGuard()
 	var errs []error
+	// A failed run keeps its evidence (issue #503): the agents' logs while the API and the jobs still answer, the stack's own once it
+	// has stopped and written them out.
+	keep := r.t.Failed() || r.keepEvidence
+	if keep {
+		r.keepAgentLogs(cctx)
+	}
 	if r.h != nil {
 		r.stop.before(r.h)
 		// First, so that no controller submits a job after the cancel.
 		derr := r.h.DownErr()
 		errs = append(errs, derr)
 		r.stop.after(r.t, r.h, derr)
+		if keep {
+			r.keepStackLogs()
+		}
 	}
 	if r.batch != nil {
 		every := r.endEvery
