@@ -838,5 +838,48 @@ class ClientRecordTest(unittest.TestCase):
         self.assertEqual(len(analyze.load_client(d)), 1)
 
 
+class RelayControlTest(unittest.TestCase):
+    """The relay control's row: TTFT percentiles per path from its own records, the relayed minus the direct, and
+    its three checks. Hand arithmetic: direct TTFTs 10, 20, 30, 40 (n=4): p50 rank ceil(2.0)=2 -> 20, p95 and p99
+    rank 4 -> 40; relayed 11, 22, 33, 44: p50 22, p95 44, p99 44; added p50 2, p95 4, p99 4."""
+
+    META = {"name": "A1-relay-control", "regime": "A", "rep": 1, "arm": "relay-control", "router": "relay-control", "policy": None,
+            "bound": None, "kv_blocks": 33010, "start_unix": 1.0, "end_unix": 2.0, "client_rc": 0, "nwork": 4, "load_args": "", "mode": "double",
+            "reset": "post"}
+
+    def tree(self, relayed_ttfts, conns="1"):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        arm = os.path.join(d, "arms", "A1-relay-control")
+        os.makedirs(arm)
+        with open(os.path.join(arm, "meta.json"), "w") as f:
+            json.dump(self.META, f)
+        for path, ttfts in (("direct", [10, 20, 30, 40]), ("relayed", relayed_ttfts)):
+            with open(os.path.join(arm, f"client-{path}.jsonl"), "w") as f:
+                for x in ttfts:
+                    f.write(json.dumps({"ttft_ms": x, "latency_ms": x + 100, "prompt_tokens": 50, "cached_tokens": -1}) + "\n")
+        with open(os.path.join(arm, "relay-counts.tsv"), "w") as f:
+            f.write("127.0.0.1:30422\t" + conns + "\n")
+        return d
+
+    def test_added_latency(self):
+        rows = analyze.analyse(self.tree([11, 22, 33, 44]))
+        c = rows[0]["relay_control"]
+        self.assertEqual((c["direct"]["ttft_p50_ms"], c["direct"]["ttft_p95_ms"]), (20, 40))
+        self.assertEqual((c["relayed"]["ttft_p50_ms"], c["relayed"]["ttft_p95_ms"], c["relayed"]["ttft_p99_ms"]), (22, 44, 44))
+        self.assertEqual(c["added_ms"], {"p50": 2, "p95": 4, "p99": 4})
+        self.assertEqual(analyze.status_of(rows), 0)
+        self.assertNotIn("pass_rule", rows[0])
+        self.assertIn("Relay control A1-relay-control", analyze.markdown(rows))
+
+    def test_a_relay_that_carried_nothing_fails(self):
+        rows = analyze.analyse(self.tree([11, 22, 33, 44], conns="0"))
+        self.assertEqual(analyze.status_of(rows), 1)
+
+    def test_a_path_without_records_fails(self):
+        rows = analyze.analyse(self.tree([]))
+        self.assertEqual(analyze.status_of(rows), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

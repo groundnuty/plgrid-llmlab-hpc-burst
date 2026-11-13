@@ -453,9 +453,9 @@ func checkSummary(t *testing.T, js string, arms []string) {
 				t.Errorf("%s: check %s failed", r.Name, c.Check)
 			}
 		}
-		if r.Arm == "probe" {
-			if len(r.Checks) != 5 {
-				t.Errorf("%s: %d probe checks, want 5", r.Name, len(r.Checks))
+		if r.Arm == "probe" || r.Arm == "relay-control" {
+			if want := map[string]int{"probe": 5, "relay-control": 3}[r.Arm]; len(r.Checks) != want {
+				t.Errorf("%s: %d checks, want %d", r.Name, len(r.Checks), want)
 			}
 			continue
 		}
@@ -480,7 +480,7 @@ func checkSummary(t *testing.T, js string, arms []string) {
 			t.Errorf("%s: pass rule %+v", r.Name, r.PassRule)
 		}
 	}
-	for _, a := range append(arms, "H1-probe") {
+	for _, a := range append(arms, "H1-probe", "A1-relay-control") {
 		if !seen[a] {
 			t.Errorf("no summary row for %s", a)
 		}

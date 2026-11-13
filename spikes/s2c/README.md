@@ -27,6 +27,7 @@ The pass rule is issue #62's: a router passes if it beats round robin on hit rat
 | `envoy-bound` | Envoy 1.40.2 `ring_hash` on `x-session-id`, bounded loads at `hash_balance_factor` 125 | the agent's own configuration and start (below) |
 | `envoy-nobound` | the same configuration with `hash_balance_factor` removed, so the bound's effect is measured | the same |
 | `probe` | the dead-worker probe behind `envoy-bound` | `s2crouter probe` (below) |
+| `relay-control` | no router: worker 0's traffic straight to its socket, then through the relay | the relay's cost, measured (below) |
 
 llm-d is out: S2c decides between the two routers the product can run (the science agent on #62, 13 Nov 2026).
 `job.sh`'s dispatch table (`arm_def`) takes another arm as one case and a start function.
@@ -68,7 +69,9 @@ factor is the harness parameter `BOUND`, default 125. Before the merge, `envoy-b
 **vllm-router and the relay.** The workers serve on Unix sockets, and vllm-router takes only `http://` worker URLs.
 So the two vllm-router arms reach the workers through `s2crouter relay`, one loopback TCP listener per worker that
 copies bytes to the worker's socket and counts connections. That adds one loopback hop to `rr`'s and `vr-hash`'s
-time to first token; the Envoy arms have none. The client (`cmd/s2cload`) is S2b's `s2bload` with one addition,
+time to first token; the Envoy arms have none. The relay control measures it: worker 0 alone takes a short load
+(16 sessions of 6 turns, 4 in flight) straight to its socket, then the same through the relay, each after a cache
+reset, and the summary gives the TTFT the relay added at p50, p95 and p99. The client (`cmd/s2cload`) is S2b's `s2bload` with one addition,
 `-unix`, which dials the Envoy arms' listener, the agent's `router.sock`.
 
 **The workload** is S2b's (`cmd/s2cload`), seed 1 in every arm:
@@ -96,9 +99,9 @@ The run label salts every system prompt and every session key, and every worker'
 Both regimes' budgets are explicit (`--num-gpu-blocks-override`), so they equal S2b's whatever the A100's memory.
 
 **The plan**, in this order: B1 (`rr`, `envoy-bound`, `envoy-nobound`, `vr-hash`), B2 (the same in reverse, for the
-run-to-run spread), H1 (the four arms), the probe on H's workers, then A1 (the four arms). The job's time limit is
+run-to-run spread), H1 (the four arms), the probe on H's workers, A1 (the four arms), then the relay control. The job's time limit is
 75 minutes. A budget guard starts no arm once about 70 minutes are used, so A goes first if time runs short, as the
-science agent ruled. A skipped arm is listed in `failures.txt`, and the job exits 1 with its other results kept.
+science agent ruled, and the optional relay control before it. A skipped arm is listed in `failures.txt`, and the job exits 1 with its other results kept.
 
 **The dead-worker probe** (`s2crouter probe`, on `envoy-bound`). It follows #510's step (c), and its three checks are
 the science agent's. Every worker's key is read from Envoy's own per-host counters, then:
@@ -235,5 +238,4 @@ The job's shape (`scripts/shape.sh`): `plgrid-gpu-a100`, one node, `--gres=gpu:4
 - Every number: the live run has not happened.
 - How long four workers take to start on A100, and so whether all of the plan fits the 75 minutes.
 - Whether H's load is enough for the bound to act. Its peak in-flight per worker will say.
-- The relay's added latency, measured: an optional control (one worker, direct against relayed) is not built.
 - vllm-router's venv on Athena's compute nodes (step 2).

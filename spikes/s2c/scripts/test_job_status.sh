@@ -192,7 +192,8 @@ def worker(argv):
         return (500, b'{"success":false}') if mode == "fail" else (200, b'{"success":true}')
 
     serve_unix(os.path.join(run, "worker-%d.sock" % i), {("GET", "/health"): lambda h, b: (200, b"ok"), ("GET", "/v1/models"): models,
-                                                         ("GET", "/metrics"): metrics, ("POST", "/reset_prefix_cache"): reset})
+                                                         ("GET", "/metrics"): metrics, ("POST", "/reset_prefix_cache"): reset,
+                                                         ("POST", "/v1/chat/completions"): lambda h, b: (200, b'{"choices":[]}')})
     wait_forever_until_term()
 
 
@@ -476,6 +477,9 @@ def load(argv):
     if "unix" in a:
         if m.group(1) != "localhost":
             die(1, "s2cload: with -unix the url host is localhost")
+    elif run.endswith("-relayed"):
+        if m.group(1) != "127.0.0.1:%d" % (int(os.environ["STUB_BASE"]) + 2):
+            die(1, "s2cload: the relay control's relayed path must use worker 0's relay port")
     elif m.group(1) != "127.0.0.1:%s" % os.environ["STUB_BASE"]:
         die(1, "s2cload: the url must be http://127.0.0.1:RPORT/... of the first free block")
     nreq = int(os.environ.get("STUB_REQS", "3"))
@@ -791,6 +795,18 @@ check "a failing probe exits 1 and failures.txt names it" '[[ $RC == 1 ]] && gre
 run_job earlyadmit "H:1:probe" S2C_FAULT=early-admit
 check "S2C_FAULT=early-admit gives the probe's Envoy -fault ignore-verify" 'grep -q ignore-verify "$OUT/arms/H1-probe/envoy/start.json"'
 check "no stub process is left after the probe cases" '[[ $(leftovers) == 0 ]]'
+fi
+
+# ===================================================================== the relay control
+# Expected from the job's header: worker 0's load twice, straight to its socket and through one relay to it, each
+# after a reset; no router; the relay's counts kept.
+if want control; then
+run_job control "B:1:relay-control" LOAD_ARGS_CONTROL="-sessions 2 -turns 1"
+check "the relay control exits 0" '[[ $RC == 0 && ! -e $OUT/failures.txt ]]'
+check "the relay control's meta: arm and router relay-control, LOAD_ARGS_CONTROL" '[[ $(meta "$OUT/arms/B1-relay-control" arm) == "\"relay-control\"" && $(meta "$OUT/arms/B1-relay-control" router) == "\"relay-control\"" && $(meta "$OUT/arms/B1-relay-control" load_args) == "\"-sessions 2 -turns 1\"" ]]'
+check "both paths have their client records and their own reset" '[[ $(wc -l < "$OUT/arms/B1-relay-control/client-direct.jsonl") == 3 && $(wc -l < "$OUT/arms/B1-relay-control/client-relayed.jsonl") == 3 && -s $OUT/arms/B1-relay-control/reset-direct.txt && -s $OUT/arms/B1-relay-control/reset-relayed.txt ]]'
+check "the relay carried the relayed path: worker 0 only" '[[ $(wc -l < "$OUT/arms/B1-relay-control/relay-counts.tsv") == 1 ]] && awk -F"\t" "\$2 > 0 {f=1} END {exit !f}" "$OUT/arms/B1-relay-control/relay-counts.tsv"'
+check "no stub process is left after the relay control" '[[ $(leftovers) == 0 ]]'
 fi
 
 check "no stub process is left running after all cases" '[[ $(leftovers) == 0 ]]'

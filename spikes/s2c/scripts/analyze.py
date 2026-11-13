@@ -142,9 +142,9 @@ def pct(values, q):
 
 # ---------------------------------------------------------------- client and placement
 
-def load_client(arm_dir):
+def load_client(arm_dir, name="client.jsonl"):
     """The arm's client records, one per attempt."""
-    path = os.path.join(arm_dir, "client.jsonl")
+    path = os.path.join(arm_dir, name)
     out = []
     for n, line in enumerate(read_text(path).splitlines(), 1):
         if line.strip():
@@ -352,7 +352,7 @@ def load_meta(arm_dir):
     for k in ("name", "regime", "rep", "arm", "router", "nwork"):
         if k not in meta:
             raise Unreadable(f"{path}: no {k!r}")
-    if meta["router"] not in ("vllm-router", "envoy") or not isinstance(meta["nwork"], int) or meta["nwork"] < 1:
+    if meta["router"] not in ("vllm-router", "envoy", "relay-control") or not isinstance(meta["nwork"], int) or meta["nwork"] < 1:
         raise Unreadable(f"{path}: router {meta['router']!r} / nwork {meta['nwork']!r} not usable")
     if meta["router"] == "vllm-router" and not isinstance(meta.get("policy"), str):
         raise Unreadable(f"{path}: a vllm-router arm needs a policy")
@@ -581,6 +581,30 @@ def probe_row(arm_dir, meta):
     return row
 
 
+def control_row(arm_dir, meta):
+    """The relay control's row: worker 0's TTFT straight to its socket and through the relay, each from its own
+    client records, and the relayed minus the direct percentiles. Its checks: both paths measured every request
+    without a failure, and the relay carried the relayed path. Raises Unreadable."""
+    row = dict(meta)
+    paths, checks = {}, []
+    for path in ("direct", "relayed"):
+        st = client_stats(load_client(arm_dir, f"client-{path}.jsonl"))
+        paths[path] = st
+        checks.append({"check": f"{path} measured", "ok": st["requests_ok"] > 0 and st["failed_attempts"] == 0,
+                       "reason": f"{st['requests_ok']} measured, {st['failed_attempts']} failed"})
+    counts = read_text(os.path.join(arm_dir, "relay-counts.tsv")).split()
+    conns = int(counts[1]) if len(counts) == 2 and counts[1].isdigit() else 0
+    checks.append({"check": "the relay carried the relayed path", "ok": conns > 0, "reason": f"{conns} connections"})
+    row["relay_control"] = {
+        "direct": {k: paths["direct"][k] for k in ("requests_ok", "ttft_p50_ms", "ttft_p95_ms", "ttft_p99_ms")},
+        "relayed": {k: paths["relayed"][k] for k in ("requests_ok", "ttft_p50_ms", "ttft_p95_ms", "ttft_p99_ms")},
+        "added_ms": {q: (None if paths["relayed"][f"ttft_{q}_ms"] is None or paths["direct"][f"ttft_{q}_ms"] is None
+                         else paths["relayed"][f"ttft_{q}_ms"] - paths["direct"][f"ttft_{q}_ms"]) for q in ("p50", "p95", "p99")},
+    }
+    row.update({"checks": checks, "errors": []})
+    return row
+
+
 def analyse(results):
     """Rows of every arm under results/arms, with the pass rules attached."""
     rows = []
@@ -593,11 +617,16 @@ def analyse(results):
             continue
         try:
             meta = load_meta(arm_dir)
-            rows.append(probe_row(arm_dir, meta) if meta["arm"] == "probe" else arm_row(arm_dir, meta))
+            if meta["arm"] == "probe":
+                rows.append(probe_row(arm_dir, meta))
+            elif meta["arm"] == "relay-control":
+                rows.append(control_row(arm_dir, meta))
+            else:
+                rows.append(arm_row(arm_dir, meta))
         except Unreadable as e:
             rows.append({"name": name, "skipped": False, "errors": [str(e)], "checks": None, "arm": None, "regime": "?", "rep": 0})
     rows.sort(key=lambda r: (str(r.get("regime", "~")), r.get("rep", 0), ARM_ORDER.get(r.get("arm"), 9), r["name"]))
-    attach_pass_rules([r for r in rows if r.get("arm") and r.get("arm") != "probe"])
+    attach_pass_rules([r for r in rows if r.get("arm") and r.get("arm") not in ("probe", "relay-control")])
     return rows
 
 
@@ -622,7 +651,7 @@ def markdown(rows):
         if r.get("skipped"):
             out.append(f"| {r['name']} | skipped | " + " | ".join(["n/a"] * 12) + f" | skipped: {r['reason']} |")
             continue
-        if r.get("arm") == "probe":
+        if r.get("arm") in ("probe", "relay-control"):
             probes.append(r)
             continue
         p = r.get("placement") or {}
@@ -649,6 +678,15 @@ def markdown(rows):
             rules.append(f"- {r['name']}: {pr['verdict']}" + (f" ({parts})" if parts else ""))
     text = "\n".join(out)
     for r in probes:
+        if r.get("arm") == "relay-control":
+            c = r["relay_control"]
+            text += (f"\n\nRelay control {r['name']} (worker 0 alone): TTFT p50 / p95 / p99 direct "
+                     f"{fmt(c['direct']['ttft_p50_ms'], '.1f')} / {fmt(c['direct']['ttft_p95_ms'], '.1f')} / {fmt(c['direct']['ttft_p99_ms'], '.1f')} ms, "
+                     f"relayed {fmt(c['relayed']['ttft_p50_ms'], '.1f')} / {fmt(c['relayed']['ttft_p95_ms'], '.1f')} / {fmt(c['relayed']['ttft_p99_ms'], '.1f')} ms, "
+                     f"added {fmt(c['added_ms']['p50'], '.1f')} / {fmt(c['added_ms']['p95'], '.1f')} / {fmt(c['added_ms']['p99'], '.1f')} ms\n"
+                     + "\n".join(check_line(x) for x in r["checks"]))
+            notes += [f"- {r['name']}: {check_line(x)}" for x in r["checks"] if not x["ok"]]
+            continue
         p = r["probe"]
         text += (f"\n\nDead-worker probe {r['name']} (victim {p.get('victim')}): healthy again {fmt(p.get('victim_healthy_s'), '.1f')} s, "
                  f"verified {fmt(p.get('victim_verified_s'), '.1f')} s, admitted {fmt(p.get('victim_admitted_s'), '.1f')} s after the kill; "

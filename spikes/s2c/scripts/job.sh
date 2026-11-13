@@ -7,6 +7,7 @@
 #   envoy-bound    Envoy 1.40.2 ring_hash from the product's own configuration, bounded loads (BOUND, 125)
 #   envoy-nobound  the same configuration without hash_balance_factor
 #   probe          the dead-worker probe behind the bound Envoy arm (run_probe; s2crouter probe), the science agent's ruling on #62
+#   relay-control  the relay's own cost: worker 0's traffic straight to its socket, then through the relay (run_control_arm)
 # Steps (the regime letter of a PLAN item): B = KV cache capped at KV_BLOCKS_B blocks per worker, S2b's load; H = the same
 # cap with LOAD_ARGS_H, S2b's workload at twice the concurrency, so the bound has load to act on (Envoy gives each worker
 # ceil(ceil((active + 1) x 1.25) / workers) slots, HBEP-5:133); A = KV_BLOCKS_A (S2b's profiled size), S2b's
@@ -56,8 +57,9 @@ if ((${#missing[@]} > 0)); then echo "job.sh: required variables not set: ${miss
 MODE=${MODE:-vllm}
 STAGE=${STAGE:-$S2C_HOME/stage}
 RESULT_TAG=${RESULT_TAG:-run-$(date -u +%Y%m%dT%H%MZ)}
-PLAN=${PLAN:-"B:1:rr B:1:envoy-bound B:1:envoy-nobound B:1:vr-hash B:2:vr-hash B:2:envoy-nobound B:2:envoy-bound B:2:rr H:1:rr H:1:envoy-bound H:1:envoy-nobound H:1:vr-hash H:1:probe A:1:rr A:1:envoy-bound A:1:envoy-nobound A:1:vr-hash"}
+PLAN=${PLAN:-"B:1:rr B:1:envoy-bound B:1:envoy-nobound B:1:vr-hash B:2:vr-hash B:2:envoy-nobound B:2:envoy-bound B:2:rr H:1:rr H:1:envoy-bound H:1:envoy-nobound H:1:vr-hash H:1:probe A:1:rr A:1:envoy-bound A:1:envoy-nobound A:1:vr-hash A:1:relay-control"}
 LOAD_ARGS=${LOAD_ARGS:-"-sessions 96 -turns 12 -concurrency 32 -agents 0.5,0.3,0.2 -sys-words 2000 -task-words 250 -tool-min 200 -tool-max 800 -think-min 500ms -think-max 2500ms -reply-tokens 48 -seed 1"}
+LOAD_ARGS_CONTROL=${LOAD_ARGS_CONTROL:-"-sessions 16 -turns 6 -concurrency 4 -agents 0.5,0.3,0.2 -sys-words 2000 -task-words 250 -tool-min 200 -tool-max 800 -think-min 500ms -think-max 2500ms -reply-tokens 48 -seed 1"}
 LOAD_ARGS_H=${LOAD_ARGS_H:-"-sessions 192 -turns 12 -concurrency 64 -agents 0.5,0.3,0.2 -sys-words 2000 -task-words 250 -tool-min 200 -tool-max 800 -think-min 500ms -think-max 2500ms -reply-tokens 48 -seed 1"}
 NWORK=${NWORK:-4}
 BOUND=${BOUND:-125}
@@ -215,6 +217,7 @@ arm_def() { # arm_def <arm>: the dispatch table. Sets ARM_ROUTER ARM_POLICY ARM_
   envoy-bound)   ARM_ROUTER=envoy;       ARM_BOUND=$BOUND;           ARM_START=start_envoy ;;
   envoy-nobound) ARM_ROUTER=envoy;       ARM_BOUND=none;             ARM_START=start_envoy ;;
   probe)         ARM_ROUTER=envoy;       ARM_BOUND=$BOUND;           ARM_START=run_probe ;;
+  relay-control) ARM_ROUTER=relay-control;                            ARM_START=run_control_arm ;;
   *) return 1 ;;
   esac
 }
@@ -437,6 +440,7 @@ run_arm() { # run_arm <regime> <rep> <arm>
     start_workers "$r" || { stop_workers; skip "$name" "$d" "workers failed for regime $r"; return; }
   fi
   if [[ $arm == probe ]]; then run_probe_arm "$r" "$rep" "$name" "$d" "$kv"; return; fi
+  if [[ $arm == relay-control ]]; then run_control_arm "$r" "$rep" "$name" "$d" "$kv"; return; fi
   # An arm that starts on a cache that was not reset would measure the previous arm's blocks: it is not run.
   reset_all "$d" || { skip "$name" "$d" "prefix-cache reset failed"; return; }
   scrape "$d" before || { skip "$name" "$d" "scrape before the arm failed"; return; }
@@ -495,6 +499,42 @@ run_probe_arm() {
   # The restarted victim serves the next arm, or the next arm restarts every worker.
   if [[ -n ${PIDS[w$v]:-} ]] && poll "$WORKER_WAIT_S" "${PIDS[w$v]}" worker_ready "$v"; then log "worker $v ($r) ready again after the probe"
   else log "worker $v did not come back after the probe; the next arm restarts the workers"; REGIME=""; fi
+  sync_out
+}
+
+# run_control_arm <regime> <rep> <name> <dir> <kv>: the relay's cost, measured. Worker 0 alone takes LOAD_ARGS_CONTROL twice,
+# each after a cache reset and with its own run label: straight to its socket (direct), then through `s2crouter relay` to
+# the same socket (relayed), as the vllm-router arms reach it. No router runs; the analysis compares the TTFTs.
+run_control_arm() {
+  local r=$1 rep=$2 name=$3 d=$4 kv=$5 path rc res t1 t2 args p0
+  p0=$(relay_port 0)
+  t1=$(date +%s.%N)
+  log "RUN $name (the relay's cost on worker 0)"
+  for path in direct relayed; do
+    reset_all "$d" || { skip "$name" "$d" "prefix-cache reset failed"; return; }
+    mv "$d/reset.txt" "$d/reset-$path.txt"
+    if [[ $path == relayed ]]; then
+      rm -f "$d/relay-counts.tsv" "$d/relay-counts.tsv.ready"
+      "$ROUTER_BIN" relay -map "127.0.0.1:$p0=$RUN/worker-0.sock" -counts "$d/relay-counts.tsv" > "$d/relay.log" 2>&1 & PIDS[relay]=$!
+      poll "$RELAY_WAIT_S" "${PIDS[relay]}" file_exists "$d/relay-counts.tsv.ready" || { stop_stack "$name" 0; skip "$name" "$d" "the relay did not become ready"; return; }
+      args=(-url "http://127.0.0.1:$p0/v1/chat/completions")
+    else
+      args=(-unix "$RUN/worker-0.sock" -url http://localhost/v1/chat/completions)
+    fi
+    # shellcheck disable=SC2086
+    timeout "$ARM_MAX_S" "$LOAD_BIN" "${args[@]}" -model "$SERVED" -run "$name-$path" -out "$d/client-$path.jsonl" $LOAD_ARGS_CONTROL > "$d/client-$path.out" 2>&1
+    rc=$?
+    res=$(grep -E '^RESULT ' "$d/client-$path.out" | tail -1)
+    if (( rc != 0 )); then fail "$name: the $path client exit status $rc"
+    elif [[ $res != *' failed_attempts=0 '* || $res != *' aborted_sessions=0' ]]; then fail "$name: the $path client reported failures or no result"; fi
+    poll "$DRAIN_WAIT_S" "" drained || fail "$name: workers still had running requests after ${DRAIN_WAIT_S}s"
+    [[ $path == relayed ]] && stop_stack "$name" 1
+  done
+  [[ -s $d/relay-counts.tsv ]] || fail "$name: the relay left no counts"
+  t2=$(date +%s.%N)
+  write_meta "$d" "$name" "$r" "$rep" relay-control relay-control "" "" "$kv" "$t1" "$t2" 0 "$NWORK" "$LOAD_ARGS_CONTROL" "$MODE" \
+    || fail "$name: meta.json was not written"
+  log "END $name"
   sync_out
 }
 
