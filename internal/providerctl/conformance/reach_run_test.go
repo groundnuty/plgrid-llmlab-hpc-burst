@@ -266,8 +266,8 @@ func reachPosts(row alpha.Row, label, verdict, outcome, answer, qos string, gpus
 	if outcome == "reachable" {
 		what = answerText[answer]
 	}
-	return fmt.Sprintf("%s: %s (posts to %s)\n- the gateway's forwarded port, as %s: outcome %s\n- %s\n- from a compute node of partition %s, qos %s; one job of %d GPU, %d CPU and %s with no requeue\n",
-		row.Name, verdict, row.PostsTo, label, outcome, what, row.Partition, qos, gpus, cpus, memory)
+	return fmt.Sprintf("%s: %s (%s)\n- the gateway's forwarded port, as %s: outcome %s\n- %s\n- from a compute node of partition %s, qos %s; one job of %d GPU, %d CPU and %s with no requeue\n",
+		row.Name, verdict, row.PostsNote(), label, outcome, what, row.Partition, qos, gpus, cpus, memory)
 }
 
 // reachBody is the run, live or dry: one job through the Provider's controller, then the line it left.

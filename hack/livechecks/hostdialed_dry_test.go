@@ -104,6 +104,22 @@ var hostDialedOKLines = []string{
 	"- frps and frpc: not run: ",
 }
 
+// The first line of the text each host-dialed row posts, written out (`@hpc-burst-science-agent`, 12 Nov 2026, on #145): #145, the
+// closed origin issue #305 named and not posted to, and for the Helios row #145's section for beta. A row with no entry fails.
+var hostDialedPassLine = map[string]string{
+	"reach-host-dialed-athena": "reach-host-dialed-athena: PASS (posts to #145; origin issue #305)",
+	"reach-host-dialed-helios": `reach-host-dialed-helios: PASS (posts to #145 under "Beta: when GH200 returns"; origin issue #305)`,
+}
+
+func hostDialedLine(t *testing.T, row string) string {
+	t.Helper()
+	l, ok := hostDialedPassLine[row]
+	if !ok {
+		t.Fatalf("no first line is written out for the row %s", row)
+	}
+	return l
+}
+
 func TestEveryHostDialedRowPassesThroughTheScriptOverTheFake(t *testing.T) {
 	t.Parallel() // beside the package's other tests: each run is its own world, on ports the kernel chooses
 	for _, s := range hostDialedShapes {
@@ -116,7 +132,7 @@ func TestEveryHostDialedRowPassesThroughTheScriptOverTheFake(t *testing.T) {
 			}
 			w.contains(res, s.row+": tests: 1 passed, 0 failed, 0 skipped", s.row+": PASS", "cleanup: left behind 0")
 			posts := w.postsOf(s.row)
-			for _, want := range append([]string{s.row + ": PASS (posts to #305 and #145)"}, hostDialedOKLines...) {
+			for _, want := range append([]string{hostDialedLine(t, s.row)}, hostDialedOKLines...) {
 				if !strings.Contains(posts, want) {
 					t.Errorf("the text to post lacks %q:\n%s", want, posts)
 				}
@@ -144,7 +160,7 @@ func TestEachHostDialedFaultFailsTheRowThroughTheScript(t *testing.T) {
 			}
 			w.contains(res, row+": tests: 0 passed, 1 failed, 0 skipped", row+": FAIL", "cleanup: left behind 0")
 			posts := w.postsOf(row)
-			for _, want := range []string{row + ": FAIL (posts to #305 and #145)", line} {
+			for _, want := range []string{"reach-host-dialed-athena: FAIL (posts to #145; origin issue #305)", line} {
 				if !strings.Contains(posts, want) {
 					t.Errorf("the text to post lacks %q:\n%s", want, posts)
 				}
