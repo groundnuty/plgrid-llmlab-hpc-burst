@@ -243,11 +243,17 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, x *exchange, n n
 			}
 			dialResent, lastUnreached = true, t
 			unreached = append(unreached, t.key())
-			next, rerr := p.router.choose(x.ctx, n, key, append(slices.Clip(written), unreached...))
+			// Once the request was written somewhere, it goes only to another
+			// Instance, never to a managed provider.
+			choose := p.router.choose
+			if len(written) > 0 {
+				choose = p.router.chooseInstance
+			}
+			next, rerr := choose(x.ctx, n, key, append(slices.Clip(written), unreached...))
 			if rerr != nil {
 				// No other target: the same one again on a fresh connection,
 				// but never one the request was written to.
-				next, rerr = p.router.choose(x.ctx, n, key, written)
+				next, rerr = choose(x.ctx, n, key, written)
 			}
 			if rerr != nil {
 				p.unreachable(w, x, lastUnreached)
@@ -265,11 +271,18 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, x *exchange, n n
 		// closed, so with no other Instance ready the client gets the first
 		// failure as it came.
 		t.release()
+		// The failed Instance's idle and lease timers stop across the choice,
+		// so neither cuts a request bound elsewhere while it waits in the FIFO;
+		// the retry's target arms its own (setTarget, sendWith).
 		x.stopIdle()
+		x.armLease(func() (time.Time, bool) { return time.Time{}, false })
 		written = append(written, t.key())
-		next, rerr := p.router.choose(x.ctx, n, key, append(slices.Clip(written), unreached...))
+		next, rerr := p.router.chooseInstance(x.ctx, n, key, append(slices.Clip(written), unreached...))
 		if rerr != nil && rerr.code != codeCapacity && rerr.cutBy == "" && rerr.status != statusClientClosed {
-			// No other Instance ready: no retry, and no header, as alpha.
+			// No other Instance ready: no retry, and no header, as alpha. The
+			// failed Instance's timers are its own again.
+			p.setTarget(x, t)
+			x.armIdle(p.cfg.IdleTimeout.D())
 			switch {
 			case held != nil:
 				defer p.reportOutcome(t, x)
@@ -299,7 +312,10 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, x *exchange, n n
 		x.retried = true
 		if rerr != nil {
 			// Placed in the FIFO and not served within queueTimeout, or cut
-			// while it waited there.
+			// while it waited there: the front's answer, attributed to the
+			// front as before any target was chosen (Errors), not to the
+			// Instance that failed.
+			x.untarget()
 			p.routeFail(w, x, rerr)
 			return
 		}

@@ -8,7 +8,9 @@ package front
 // Instance by exclusion, never by chance.
 
 import (
+	"io"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -464,4 +466,123 @@ func TestWithNoOtherInstanceReadyAFailureCountsOnceAndAHeld5xxIsRelayedWhole(t *
 		}
 		wantCounts(t, f, 1, 0)
 	})
+}
+
+// llmlabBeside attaches LLMLab for the same model beside f's Instances, and returns how many requests it
+// received.
+func llmlabBeside(t *testing.T, f *scFix) *atomic.Int32 {
+	t.Helper()
+	var arrived atomic.Int32
+	llm := rawEngine(t, func(w http.ResponseWriter, r *http.Request) {
+		arrived.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	})
+	f.profile("llmlab", v1alpha1.PlatformManaged, "", "")
+	f.managedProvider("llmlab-a", "llmlab", "llmlab", "http://"+llm+"/v1", "llmlab-upstream-key-for-retry-test-01", chCatalog)
+	f.managedMD("md-llm", scModel, "llmlab", chCatalog, "llmlab-a")
+	f.apply()
+	return &arrived
+}
+
+// A request written to an Instance is retried only to another Instance, never run again on LLMLab
+// (HBEP-5, open question 5: "to another ready Instance"). One Instance with LLMLab attached, HBEP-5's own
+// user story: the Instance's 500, or its close, goes to the client as alpha sends it, with no header,
+// and LLMLab receives nothing.
+func TestARetryNeverGoesToAManagedProvider(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		b      enginetest.Behaviour
+		status int
+	}{
+		{"a 500", enginetest.Behaviour{Status: 500, ErrorBody: `{"error":{"message":"failed","type":"server_error","param":null,"code":500}}`}, 500},
+		{"a close", enginetest.Behaviour{CloseBeforeHeaders: true}, 502},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f, key, _ := retryFix(t, 1, scOpts{})
+			llm := llmlabBeside(t, f)
+			f.engines[0].Set(c.b)
+			resp, body := scChatOnce(t, f.harness, key)
+			if resp.StatusCode != c.status || resp.Header.Get(headerShouldRetry) != "" {
+				t.Fatalf("status %d, x-should-retry %q, want %d and none, as alpha: %s", resp.StatusCode, resp.Header.Get(headerShouldRetry), c.status, body)
+			}
+			if n := llm.Load(); n != 0 {
+				t.Errorf("LLMLab received %d requests, want none: a written request is never run again there", n)
+			}
+			wantCounts(t, f, 1)
+		})
+	}
+	t.Run("the retry's own resend", func(t *testing.T) {
+		// The second Instance's dial is refused after the first one's close: alpha's resend of the
+		// retry stays among Instances too.
+		f, key, _ := retryFix(t, 2, scOpts{})
+		llm := llmlabBeside(t, f)
+		f.engines[0].Set(enginetest.Behaviour{CloseBeforeHeaders: true})
+		f.engines[1].Close()
+		resp, body := scChatOnce(t, f.harness, key)
+		if resp.StatusCode != 502 || resp.Header.Get(headerShouldRetry) != "false" {
+			t.Fatalf("status %d, x-should-retry %q, want 502 upstream_unreachable after the retry, and false: %s", resp.StatusCode, resp.Header.Get(headerShouldRetry), body)
+		}
+		if n := llm.Load(); n != 0 {
+			t.Errorf("LLMLab received %d requests, want none", n)
+		}
+	})
+}
+
+// The give-up after the retry's FIFO wait is the front's own answer: no header names the Instance that
+// failed, and the usage record's emitter is the front (HBEP-5, Errors: 503 capacity, "the front").
+func TestTheGiveUpAfterTheFIFOWaitIsAttributedToTheFront(t *testing.T) {
+	f, key, walk := retryFix(t, 2, scOpts{
+		cfg:  func(c *Config) { c.QueueTimeout = Duration(200 * time.Millisecond) },
+		inst: func(i int, o *instanceOpts) { o.maxNumSeqs = 1 },
+	})
+	hold := make(chan struct{})
+	defer close(hold)
+	f.engines[1].Set(enginetest.Behaviour{Hold: hold})
+	_ = scGo(f.harness, errChatBody(scModel, false, "busy"), "x-session-id", scKeys(t, f.names, walk[1], 1)[0])
+	waitState(t, "the other Instance at its cap", func() bool { return f.engines[1].Open() == 1 })
+	f.engines[0].Set(enginetest.Behaviour{CloseBeforeHeaders: true})
+	resp, body := scChatOnce(t, f.harness, key)
+	checkErrorBody(t, body, codeCapacity, "")
+	if resp.StatusCode != 503 || scEmitterOf(resp) != emitterFront || scInstanceOf(resp) != "" || resp.Header.Get("hpcburst-instance-uid") != "" {
+		t.Fatalf("status %d, emitter %q, instance %q, uid %q; want 503 from the front, naming no Instance", resp.StatusCode, scEmitterOf(resp), scInstanceOf(resp), resp.Header.Get("hpcburst-instance-uid"))
+	}
+	rec := f.record(resp.Header.Get("hpcburst-request-id"))
+	if rec.Emitter != emitterFront || rec.Instance != "" || rec.InstanceUID != "" {
+		t.Errorf("usage record: emitter %q, Instance %q, UID %q; want the front and no Instance", rec.Emitter, rec.Instance, rec.InstanceUID)
+	}
+}
+
+// The failed Instance's lease timer stops across the retry's choice: its lease ending while the retry
+// waits in the FIFO does not cut a request bound elsewhere. The other Instance's lease is far off.
+func TestTheFailedInstancesLeaseDoesNotCutTheRetryInTheFIFO(t *testing.T) {
+	f, key, walk := retryFix(t, 2, scOpts{
+		profileWindow: "10m",
+		cfg: func(c *Config) {
+			c.QueueTimeout, c.MaxRequestDuration, c.IdleTimeout = Duration(30*time.Second), Duration(3*time.Hour), Duration(3*time.Hour)
+		},
+		inst: func(i int, o *instanceOpts) {
+			o.maxNumSeqs = 1
+			if i == 0 {
+				o.leaseEnd = t0.Add(time.Hour)
+			}
+		},
+	})
+	hold := make(chan struct{})
+	f.engines[1].Set(enginetest.Behaviour{Hold: hold})
+	busy := scGo(f.harness, errChatBody(scModel, false, "busy"), "x-session-id", scKeys(t, f.names, walk[1], 1)[0])
+	waitState(t, "the other Instance at its cap", func() bool { return f.engines[1].Open() == 1 })
+	f.engines[0].Set(enginetest.Behaviour{CloseBeforeHeaders: true})
+	call := scGo(f.harness, errChatBody(scModel, false, "hi"), "x-session-id", key)
+	waitState(t, "the retry waiting in the FIFO", func() bool { return len(f.engines[0].Requests()) == 1 && f.router.Status().Waiting == 1 })
+	f.clk.Advance(70 * time.Minute) // past the first Instance's lease end
+	if doneNow(call) {
+		resp, body := call.wait(t)
+		t.Fatalf("the retry was cut while it waited: %d %s; the failed Instance's lease timer ran on", resp.StatusCode, body)
+	}
+	f.engines[1].Set(enginetest.Behaviour{})
+	close(hold)
+	busy.wait(t)
+	resp, body := call.wait(t)
+	wantWhole(t, resp, body, walk[1])
 }

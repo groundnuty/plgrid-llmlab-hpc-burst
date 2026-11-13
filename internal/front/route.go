@@ -64,6 +64,18 @@ func errNoReadyTarget(model string) *routeError {
 // 6). exclude are the targets the request already failed on, for its resend
 // and its retry (open question 5). It never widens to a broader level.
 func (r *Router) choose(ctx context.Context, n naming.Name, key string, exclude []string) (*target, *routeError) {
+	return r.chooseAmong(ctx, n, key, exclude, true)
+}
+
+// chooseInstance is choose among Instances only, never a managed provider: a
+// request already written to an Instance is sent again only to another
+// Instance (HBEP-5, open question 5: "to another ready Instance"), never run
+// again on LLMLab.
+func (r *Router) chooseInstance(ctx context.Context, n naming.Name, key string, exclude []string) (*target, *routeError) {
+	return r.chooseAmong(ctx, n, key, exclude, false)
+}
+
+func (r *Router) chooseAmong(ctx context.Context, n naming.Name, key string, exclude []string, withManaged bool) (*target, *routeError) {
 	// A request waits for one rebuild, two at most under a barging reader
 	// (#417; lockFresh). The view it
 	// routes on may be a rebuild behind the transports: a target whose
@@ -95,7 +107,7 @@ func (r *Router) choose(ctx context.Context, n naming.Name, key string, exclude 
 	now := r.clk.Now()
 	var managed []*inventory.ManagedTarget
 	for _, t := range m.Managed {
-		if levelMatches(n, t.Provider, t.DisplayID) && !slices.Contains(exclude, t.Key) && !r.pausedLocked(t.Key, now) {
+		if withManaged && levelMatches(n, t.Provider, t.DisplayID) && !slices.Contains(exclude, t.Key) && !r.pausedLocked(t.Key, now) {
 			managed = append(managed, t)
 		}
 	}

@@ -106,6 +106,16 @@ func (x *exchange) armIdle(d time.Duration) {
 	x.idle.Reset(d)
 }
 
+// untarget attributes the request to the front alone again, as before any
+// target was chosen: the attribution headers and the usage record's target
+// fields, for an answer the front raises after its retry left the failed
+// Instance and found no other (HBEP-5, Errors).
+func (x *exchange) untarget() {
+	x.attr = attribution{requestID: x.id, emitter: emitterFront}
+	x.rec.Emitter = emitterFront
+	x.rec.Provider, x.rec.ModelDeployment, x.rec.DeploymentID, x.rec.Instance, x.rec.InstanceUID = "", "", "", "", ""
+}
+
 // stopIdle stops the idle time-out between a failed attempt and the retry's write, which arms it
 // again (HBEP-5, open question 5: idleTimeout starts again at the retry's write), so a retry waiting
 // in the FIFO is not cut by the first attempt's timer.
