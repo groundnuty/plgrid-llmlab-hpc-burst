@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Environment variables that name the files recording each invocation.
@@ -102,6 +103,30 @@ func (l *logFile) write(v any) error {
 		werr = cerr
 	}
 	return werr
+}
+
+// holdRequestLines returns the engine's record function: logv itself, or, with gate set, one that
+// writes every "request" line only once the file gate exists, each from a goroutine of its own, so
+// the request's reply is never held back (Config.HoldRequestLog). Other lines are written at once.
+func holdRequestLines(gate string, logv func(any)) func(LogEvent) {
+	if gate == "" {
+		return func(ev LogEvent) { logv(ev) }
+	}
+	return func(ev LogEvent) {
+		if ev.Event != "request" {
+			logv(ev)
+			return
+		}
+		go func() {
+			for {
+				if _, err := os.Stat(gate); err == nil {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			logv(ev)
+		}()
+	}
 }
 
 // secretName says whether a variable's value is hidden in logs.

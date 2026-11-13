@@ -86,6 +86,11 @@ type Config struct {
 	WriteCaches  bool // write a file into each cache a real engine fills at start (writeCaches)
 	WriteHome    bool // write a file under HOME, as a cache that ignores its variable does (writeCaches)
 	PrintKey     bool // print the API key to stderr at start, as an engine that logs its arguments may
+	// HoldRequestLog, when set, is a file whose absence holds back every "request" line of the
+	// engine's log (HB_ENGINE_DOUBLE_LOG): each waits in a goroutine of its own until the file
+	// exists, then is written, so the reply is never held. A test uses it to make the line of a
+	// request that has ended come after the agent has reported it, as a loaded machine can (#500).
+	HoldRequestLog string
 }
 
 // DefaultConfig returns the documented defaults: vLLM's 32768-token context,
