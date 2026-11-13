@@ -70,12 +70,12 @@ func TestCompletionIsInTheEngineLog(t *testing.T) {
 	post("/v1/completions", completionBody(3, map[string]any{"max_tokens": 5, "min_tokens": 5}))
 	post("/v1/completions", completionBody(2, map[string]any{"max_tokens": 4, "min_tokens": 4, "stream": true}))
 	// Each request is logged twice, as a chat request is: "admitted" when it
-	// takes a sequence slot, then "request" when it ends.
+	// takes a sequence slot, with its Tail (#528), then "request" when it ends.
 	want := []LogEvent{
-		{Event: "admitted", PromptTokens: 3, MaxTokens: 5},
+		{Event: "admitted", PromptTokens: 3, MaxTokens: 5, Tail: "w1 w2 w3"},
 		{Event: "request", Path: "/v1/completions", PromptTokens: 3, MaxTokens: 5, Outcome: "completed", Tokens: 5,
 			Sampling: &RequestSampling{}, Tail: "w1 w2 w3"},
-		{Event: "admitted", PromptTokens: 2, MaxTokens: 4, Stream: true},
+		{Event: "admitted", PromptTokens: 2, MaxTokens: 4, Stream: true, Tail: "w1 w2"},
 		{Event: "request", Path: "/v1/completions", PromptTokens: 2, MaxTokens: 4, Stream: true, Outcome: "completed", Tokens: 4,
 			Sampling: &RequestSampling{}, Tail: "w1 w2"},
 	}

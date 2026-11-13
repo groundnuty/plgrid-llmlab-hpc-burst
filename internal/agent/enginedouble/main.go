@@ -189,7 +189,9 @@ func Main(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	srv := &http.Server{Handler: newHandler(cfg, holdRequestLines(cfg.HoldRequestLog, logv))}
+	hd := newHandler(cfg, holdRequestLines(cfg.HoldRequestLog, logv))
+	hd.(*handler).e.die = dieNow
+	srv := &http.Server{Handler: hd}
 	go func() { _ = srv.Serve(ln) }()
 
 	select {
@@ -308,4 +310,12 @@ func writeCaches(getenv func(string) string, caches, homeOnly bool) error {
 		}
 	}
 	return nil
+}
+
+// dieNow ends the engine process at once, as a crash does (the die-on mode, #528): KILL to its own PID
+// only, never its group, so nothing more is written or answered and the kernel closes its sockets. The
+// admitted record before it is already in the log, whose file is closed after every line.
+func dieNow() {
+	_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+	select {} // KILL can't be caught: never reached
 }

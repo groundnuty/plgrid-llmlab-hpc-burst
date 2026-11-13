@@ -20,7 +20,7 @@ const (
 
 // LogEvent is one line of the engine's log (HB_ENGINE_DOUBLE_LOG). A test
 // decodes the lines with it. Event is "start" (Argv, Env, PID), "admitted"
-// (PromptTokens, MaxTokens, Stream: a chat or completions request has a slot and is about to wait, if
+// (PromptTokens, MaxTokens, Stream, Tail: a chat or completions request has a slot and is about to wait, if
 // the modes make it, and generate; written at once, so a test can tell that a
 // request is in flight), "request" (Path, PromptTokens, MaxTokens, Stream,
 // Outcome, Tokens, InjectedNS, Nth, Sampling, Tail: written when the request ends) or empty for the
@@ -39,8 +39,10 @@ type LogEvent struct {
 	PIDs []int `json:"pids,omitempty"`
 
 	// request: MaxTokens is the resolved limit; Outcome is "completed",
-	// "cancelled" (the client went away) or "refused" (the double answered
-	// with an error status); Tokens is how many tokens were sent.
+	// "cancelled" (the client went away), "refused" (the double answered
+	// with an error status) or "died" (die-on, in a handler a test serves:
+	// in the engine process nothing follows "admitted"); Tokens is how many
+	// tokens were sent.
 	Path         string `json:"path,omitempty"`
 	PromptTokens int    `json:"prompt_tokens,omitempty"`
 	MaxTokens    int    `json:"max_tokens,omitempty"`
