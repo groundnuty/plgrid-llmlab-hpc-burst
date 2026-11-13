@@ -41,29 +41,41 @@ func (s squeueOnly) Run(_ context.Context, cmd slurm.Command) (slurm.Result, err
 
 func (squeueOnly) Generation() uint64 { return 1 }
 
+// athenaJob is a running job of the run in an Athena reply: its ID and tag suffix, its start, and the end_time and
+// time_limit listed. A nil one is listed unset, as Slurm lists it: set, the number 0. Every value is invented.
+type athenaJob struct {
+	id     int64
+	suffix string
+	start  time.Time
+	end    *time.Time
+	limit  *int64
+}
+
 // athenaRunning is squeue --me --json as Athena's Slurm 23.11.7 sends it (data_parser v0.0.40), cut to the keys the
-// parser reads as internal/slurm/testdata/v0.0.40-athena-real/squeue-running.json is: the run's one job, running since
-// start, with the end_time and time_limit given. A nil one is listed unset, as Slurm lists it: set, the number 0.
-// Every value is invented.
-func athenaRunning(t *testing.T, start time.Time, end *time.Time, limitMinutes *int64) []byte {
+// parser reads as internal/slurm/testdata/v0.0.40-athena-real/squeue-running.json is.
+func athenaRunning(t *testing.T, jobs ...athenaJob) []byte {
 	t.Helper()
 	triple := func(n int64) map[string]any { return map[string]any{"set": true, "infinite": false, "number": n} }
-	job := map[string]any{
-		"job_id": 4601, "name": "hb-alpha-0a1b2c3d4e-p", "job_state": []string{"RUNNING"}, "state_reason": "None",
-		"hold": false, "priority": triple(1000), "restart_cnt": 0, "partition": "example-now",
-		"tres_req_str": "cpu=8,mem=64G,node=1,billing=8,gres/gpu=1",
-		"submit_time":  triple(start.Add(-3 * time.Minute).Unix()), "start_time": triple(start.Unix()),
-		"end_time": triple(0), "time_limit": triple(0),
-	}
-	if end != nil {
-		job["end_time"] = triple(end.Unix())
-	}
-	if limitMinutes != nil {
-		job["time_limit"] = triple(*limitMinutes)
+	var out []any
+	for _, j := range jobs {
+		o := map[string]any{
+			"job_id": j.id, "name": "hb-alpha-0a1b2c3d4e-" + j.suffix, "job_state": []string{"RUNNING"}, "state_reason": "None",
+			"hold": false, "priority": triple(1000), "restart_cnt": 0, "partition": "example-now",
+			"tres_req_str": "cpu=8,mem=64G,node=1,billing=8,gres/gpu=1",
+			"submit_time":  triple(j.start.Add(-3 * time.Minute).Unix()), "start_time": triple(j.start.Unix()),
+			"end_time": triple(0), "time_limit": triple(0),
+		}
+		if j.end != nil {
+			o["end_time"] = triple(j.end.Unix())
+		}
+		if j.limit != nil {
+			o["time_limit"] = triple(*j.limit)
+		}
+		out = append(out, o)
 	}
 	b, err := json.Marshal(map[string]any{
 		"meta":   map[string]any{"plugin": map[string]any{"data_parser": "data_parser/v0.0.40"}, "slurm": map[string]any{"release": "23.11.7"}},
-		"errors": []any{}, "warnings": []any{}, "jobs": []any{job},
+		"errors": []any{}, "warnings": []any{}, "jobs": out,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -71,8 +83,9 @@ func athenaRunning(t *testing.T, start time.Time, end *time.Time, limitMinutes *
 	return b
 }
 
-// listed is the run's jobs as the live look reads them (liveRun.look): the queue listing of a real batch client.
-func listed(t *testing.T, reply []byte) []provider.Job {
+// listed is the run's jobs as the live look reads them (liveRun.look): the queue listing of a real batch client, each
+// job running.
+func listed(t *testing.T, reply []byte, n int) []provider.Job {
 	t.Helper()
 	prof := provider.Profile{Name: "example", Spec: v1alpha1.PlatformProfileSpec{JSONDataParser: "v0.0.40"},
 		Partition: v1alpha1.PartitionProfile{Name: "example-now"}}
@@ -81,8 +94,13 @@ func listed(t *testing.T, reply []byte) []provider.Job {
 	if err != nil {
 		t.Fatalf("the listing: %v", err)
 	}
-	if len(js) != 1 || js[0].StartTime == nil {
-		t.Fatalf("the listing has %d jobs, want the one running", len(js))
+	if len(js) != n {
+		t.Fatalf("the listing has %d jobs, want %d", len(js), n)
+	}
+	for _, j := range js {
+		if j.StartTime == nil {
+			t.Fatalf("job %s of the listing has no start", j.ID)
+		}
 	}
 	return js
 }
@@ -92,10 +110,10 @@ func ptrInt(n int64) *int64          { return &n }
 
 // The reproduction: the run's first job started three minutes after the deployment, and its configuration ended a
 // second (or a minute and a half) after its start, so squeue lists its end_time that much past its start plus its time
-// limit, with its own time limit the planned one. The guard must take that lease end, not stop the run: the end it
-// gave before the start is still no later than the job's drain start, and it plans with Slurm's lease end from then on.
-// With a configuration that ended in the second it started (the shape of every Athena reply recorded before 13 Nov
-// 2026), it works as before.
+// limit, with its own time limit the planned one. The guard must take that lease, not stop the run. The end it gave
+// before the start is still no later than the job's drain start, and it reckons the job's drain start from its start
+// (drainStartOf), the same whether its look came before the configuration ended or after. With a configuration that
+// ended in the second it started (the shape of every Athena reply recorded before 13 Nov 2026), it works as before.
 func TestTheTwoJobGuardTakesTheLeaseEndSlurmGivesAfterConfiguration(t *testing.T) {
 	for _, config := range []time.Duration{0, time.Second, 90 * time.Second} {
 		g := &TwoJobGuard{TimeLimit: rowBLimit, DrainWindow: rowBDrainWindow}
@@ -105,7 +123,7 @@ func TestTheTwoJobGuardTakesTheLeaseEndSlurmGivesAfterConfiguration(t *testing.T
 		}
 		start := guardAt.Add(3 * time.Minute)
 		leaseEnd := start.Add(rowBLimit + config)
-		jobs := listed(t, athenaRunning(t, start, &leaseEnd, ptrInt(rowBLimitMinutes)))
+		jobs := listed(t, athenaRunning(t, athenaJob{4601, "p", start, &leaseEnd, ptrInt(rowBLimitMinutes)}), 1)
 		if !jobs[0].HardEnd.Equal(leaseEnd) {
 			t.Fatalf("configuration %s: the parser's lease end is %s, want squeue's end_time %s", config, jobs[0].HardEnd, leaseEnd)
 		}
@@ -114,13 +132,50 @@ func TestTheTwoJobGuardTakesTheLeaseEndSlurmGivesAfterConfiguration(t *testing.T
 		if err != nil {
 			t.Fatalf("configuration %s: the guard stopped the run: %v", config, err)
 		}
-		drainStart := leaseEnd.Add(-rowBDrainWindow)
-		if final || !end.Equal(at.Add(rowBLimit-rowBDrainWindow)) || !g.predDrainStart.Equal(drainStart) {
+		earliest := start.Add(rowBLimit - rowBDrainWindow)
+		if final || !end.Equal(at.Add(rowBLimit-rowBDrainWindow)) || !g.predDrainStart.Equal(earliest) {
 			t.Errorf("configuration %s: Next = %s %v with the predecessor's drain start %s, want %s false with %s",
-				config, end, final, g.predDrainStart, at.Add(rowBLimit-rowBDrainWindow), drainStart)
+				config, end, final, g.predDrainStart, at.Add(rowBLimit-rowBDrainWindow), earliest)
 		}
-		if first.After(drainStart) {
-			t.Errorf("configuration %s: the first end %s is after the job's drain start %s", config, first, drainStart)
+		if first.After(earliest) {
+			t.Errorf("configuration %s: the first end %s is after the job's earliest drain start %s", config, first, earliest)
+		}
+	}
+}
+
+// The successor's configuration ends a second (or a minute and a half) after its start, and the guard's look reads the
+// lease end Slurm moved, while the Provider's last read may still hold the one before it, its start plus the time
+// limit: the controller's drain start follows that read (internal/lifecycle, copyLeaseEnd), and it plans a replacement
+// for a deployment that ends after it (replacements). So the final end is the successor's start plus the time limit
+// less the drain window, at or before the drain start of either lease end, never the drain start of the later one: an
+// end there would plan a third job until the Provider read the job again.
+func TestTheTwoJobGuardEndsAtTheSuccessorsEarliestDrainStart(t *testing.T) {
+	for _, config := range []time.Duration{0, time.Second, 90 * time.Second} {
+		g := &TwoJobGuard{TimeLimit: rowBLimit, DrainWindow: rowBDrainWindow}
+		if _, _, err := g.Next(Look{Clock: guardAt}); err != nil {
+			t.Fatal(err)
+		}
+		pred := guardAt.Add(3 * time.Minute)
+		predEnd := pred.Add(rowBLimit + time.Second)
+		if _, _, err := g.Next(Look{Clock: pred.Add(2 * time.Second), Jobs: listed(t, athenaRunning(t, athenaJob{4601, "p", pred, &predEnd, ptrInt(rowBLimitMinutes)}), 1)}); err != nil {
+			t.Fatal(err)
+		}
+		// No overlap: the successor starts once the predecessor has left the slot, and the listing shows it alone.
+		succ := predEnd.Add(4 * time.Minute)
+		succEnd := succ.Add(rowBLimit + config)
+		end, final, err := g.Next(Look{Clock: succ.Add(2 * time.Second), Jobs: listed(t, athenaRunning(t, athenaJob{4602, "s", succ, &succEnd, ptrInt(rowBLimitMinutes)}), 1)})
+		if err != nil {
+			t.Fatalf("configuration %s: the guard stopped the run: %v", config, err)
+		}
+		before := succ.Add(rowBLimit).Add(-rowBDrainWindow) // the drain start of the lease end before the configuration ended
+		after := succEnd.Add(-rowBDrainWindow)              // and of the one after
+		if !final || !end.Equal(before) {
+			t.Errorf("configuration %s: Next = %s %v, want %s true, the successor's start plus the time limit less the drain window", config, end, final, before)
+		}
+		for _, ds := range []time.Time{before, after} {
+			if end.After(ds) {
+				t.Errorf("configuration %s: the final end %s is after the drain start %s, so the controller would plan a third job", config, end, ds)
+			}
 		}
 	}
 }
@@ -146,7 +201,7 @@ func TestTheTwoJobGuardStillStopsTheRunOnALeaseItDoesNotPlanWith(t *testing.T) {
 		if _, _, err := g.Next(Look{Clock: guardAt}); err != nil {
 			t.Fatal(err)
 		}
-		_, _, err := g.Next(Look{Clock: start.Add(2 * time.Second), Jobs: listed(t, athenaRunning(t, start, c.end, c.limit))})
+		_, _, err := g.Next(Look{Clock: start.Add(2 * time.Second), Jobs: listed(t, athenaRunning(t, athenaJob{4601, "p", start, c.end, c.limit}), 1)})
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: Next's error is %v, want one that says %q", c.name, err, c.want)
 		}

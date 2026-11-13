@@ -203,9 +203,13 @@ type Look struct {
 // deployment's end must be no later than the successor's drain start BEFORE
 // that pass, and strictly after the predecessor's drain start once a
 // successor may exist, so that the handover happens. A job's drain start is
-// its lease end less the drain window, on the cluster's clock, and its lease
-// end is its start plus its time limit, or later by the time its configuration
-// took (planned). So:
+// its lease end less the drain window, on the cluster's clock. Its lease end is
+// its start plus its time limit, or later by the time its configuration took
+// (planned), and the controller's drain start follows the lease end the
+// Provider last read (internal/lifecycle, copyLeaseEnd), which may be either.
+// So the guard reckons each job's drain start as the earliest of them, its
+// start plus the time limit less the drain window (drainStartOf): at or before
+// every drain start the controller can have for the job. So:
 //
 //   - While no job of the run has started, and while only the predecessor
 //     has, the end is the latest look's cluster clock plus the time limit less
@@ -217,8 +221,9 @@ type Look struct {
 //     start, and only then can the successor be created, after that look's
 //     clock, so its drain start is no earlier than the end. The end moves on
 //     with every look, so it is never reached while a job waits in the queue.
-//   - Once the successor has started, the end is its drain start (EndOfTwo),
-//     for good.
+//   - Once the successor has started, the end is its drain start so reckoned
+//     (EndOfTwo), for good: its lease's drain start, or earlier than that by
+//     the time its configuration took.
 //
 // A third job of the run that starts, a started job whose time limit is not
 // the one planned with or whose lease end is earlier than its start plus it
@@ -237,7 +242,8 @@ type TwoJobGuard struct {
 }
 
 // Next is the end the deployment must have after the look l, and whether it
-// is final (the successor's drain start). An error must stop the run.
+// is final (the successor's drain start, as drainStartOf reckons it). An error
+// must stop the run.
 func (g *TwoJobGuard) Next(l Look) (end time.Time, final bool, err error) {
 	var started []provider.Job
 	for _, j := range l.Jobs {
@@ -251,7 +257,7 @@ func (g *TwoJobGuard) Next(l Look) (end time.Time, final bool, err error) {
 	}
 	sort.SliceStable(started, func(a, b int) bool { return started[a].StartTime.Before(*started[b].StartTime) })
 	if g.pred == "" && len(started) > 0 {
-		g.pred, g.predDrainStart = started[0].ID, started[0].HardEnd.Add(-g.DrainWindow)
+		g.pred, g.predDrainStart = started[0].ID, g.drainStartOf(started[0])
 	}
 	var others []provider.Job
 	for _, j := range started {
@@ -265,7 +271,7 @@ func (g *TwoJobGuard) Next(l Look) (end time.Time, final bool, err error) {
 	case g.final:
 		return g.end, true, nil
 	case len(others) == 1:
-		end, err := EndOfTwo(g.predDrainStart, others[0].HardEnd.Add(-g.DrainWindow))
+		end, err := EndOfTwo(g.predDrainStart, g.drainStartOf(others[0]))
 		if err != nil {
 			return time.Time{}, false, err
 		}
@@ -279,6 +285,16 @@ func (g *TwoJobGuard) Next(l Look) (end time.Time, final bool, err error) {
 		g.end = e
 	}
 	return g.end, false, nil
+}
+
+// drainStartOf is the earliest drain start a started job that planned accepted can have: its start plus the planned
+// time limit, less the drain window. Its lease end is there or later in every listing, the guard's own and the
+// Provider's, and the guard's look can read a later one than the Provider last did. An end derived from the lease end
+// the guard read could then be after the drain start the controller has, which plans a replacement
+// (internal/lifecycle, replacements); an end derived from the start cannot. Where the lease end is the start plus the
+// time limit, the two agree.
+func (g *TwoJobGuard) drainStartOf(j provider.Job) time.Time {
+	return j.StartTime.Add(g.TimeLimit - g.DrainWindow)
 }
 
 // planned checks that a started job has a lease the guard plans with. Its lease end may be later than its start plus
