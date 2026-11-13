@@ -13,6 +13,7 @@ package agent_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -118,15 +119,17 @@ func TestAHeavySessionPastTheBoundSpillsToTheIdleSibling(t *testing.T) {
 		t.Fatal("the report carries no Instance key")
 	}
 	s := sessionsOn(t, h, "worker-1", 6)
+	base := quiesceRouterProbe(t, h, d)
 
 	// Six heavy sessions, about 15 s each, all hashed to worker-1, each sent once Envoy shows the one
 	// before it active. Judged by Envoy's own active requests, which the agent's short probes through the
 	// router, hashed on no session, do not move.
 	//
-	// The agent's own probe through the router, a short request, is now and then in flight at a pick and
-	// counts in the bound, which can move the first spill one session earlier; so sessions 1 to 4 must
-	// stay on worker-1, the first spill must come at the 5th or 6th, and by the 6th worker-0 must have one.
-	// Each read waits until exactly the sessions sent are active, so a probe is never counted as one.
+	// The agent's own probe through the router is quiesced (quiesceRouterProbe), and each read is tied to
+	// the sessions: Envoy's requests since then must number exactly the sessions sent, so the active
+	// requests read are those sessions and nothing else, and a probe can never be read as a spill (#524's
+	// review). The 5th or 6th is allowed for the first spill all the same, the bound's own arithmetic giving
+	// the 6th (the doc above).
 	var wg sync.WaitGroup
 	codes := make([]int, len(s))
 	firstSpill := 0
@@ -136,13 +139,9 @@ func TestAHeavySessionPastTheBoundSpillsToTheIdleSibling(t *testing.T) {
 			defer wg.Done()
 			codes[i] = chat(t, h, key, s[i], 300)
 		}(i)
-		deadline := time.Now().Add(30 * time.Second)
-		var a map[string]int
-		for a = hostStat(t, h.runDir, "rq_active"); a["worker-0"]+a["worker-1"] != i+1; a = hostStat(t, h.runDir, "rq_active") {
-			if time.Now().After(deadline) {
-				t.Fatalf("heavy session %d never showed active: %v", i+1, a)
-			}
-			time.Sleep(20 * time.Millisecond)
+		a, err := activeSessions(t, h, base, i+1)
+		if err != nil {
+			t.Fatalf("heavy session %d: %v", i+1, err)
 		}
 		t.Logf("heavy session %d, hashed to worker-1: Envoy shows %v active", i+1, a)
 		if a["worker-0"] > 0 && firstSpill == 0 {
@@ -160,5 +159,76 @@ func TestAHeavySessionPastTheBoundSpillsToTheIdleSibling(t *testing.T) {
 		if c != http.StatusOK {
 			t.Errorf("heavy session %d: %d", i+1, c)
 		}
+	}
+}
+
+func sum(m map[string]int) int {
+	n := 0
+	for _, v := range m {
+		n += v
+	}
+	return n
+}
+
+// quiesceRouterProbe stops the agent's own probe through the router, a GET /health in no session through
+// Envoy's listener, which lands on either worker and counts in Envoy's per-host counters (routerwatch.go):
+// the seam is the agent's probe interval, raised to an hour in the desired state once the workers are
+// healthy, which the router's polling takes for its next wait. It then requires Envoy's request count to
+// stay still for 2 s, twenty of the harness's 100 ms intervals, so that no probe is left, and returns that
+// count, from which every later request is one the test sent.
+func quiesceRouterProbe(t *testing.T, h *harness, d agentapi.DesiredState) int {
+	t.Helper()
+	d.Settings.ProbeInterval = agentapi.Duration(time.Hour)
+	h.set(d)
+	deadline := time.Now().Add(30 * time.Second)
+	last := sum(hostStat(t, h.runDir, "rq_total"))
+	for still := time.Now(); time.Since(still) < 2*time.Second; {
+		if time.Now().After(deadline) {
+			t.Fatal("Envoy's request count never stayed still for 2 s: the agent's probe through the router was not quiesced")
+		}
+		time.Sleep(100 * time.Millisecond)
+		if n := sum(hostStat(t, h.runDir, "rq_total")); n != last {
+			last, still = n, time.Now()
+		}
+	}
+	return last
+}
+
+// activeSessions waits until Envoy shows exactly the n sessions sent active, and returns its rq_active
+// then. It ties the count to the sessions: Envoy's requests since base, when the probe was quiesced, must
+// number exactly n, so every active request read is one of them. A request that is not one of them, a
+// probe in flight included, is an error, never read as a session.
+func activeSessions(t *testing.T, h *harness, base, n int) (map[string]int, error) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		a := hostStat(t, h.runDir, "rq_active")
+		total := sum(hostStat(t, h.runDir, "rq_total"))
+		if total > base+n {
+			return a, fmt.Errorf("Envoy counts %d requests since the probe was quiesced, not the %d sessions sent: a request that is not one of them entered, and the count can't be tied to the sessions", total-base, n)
+		}
+		if total == base+n && a["worker-0"]+a["worker-1"] == n {
+			return a, nil
+		}
+		if time.Now().After(deadline) {
+			return a, fmt.Errorf("the %d sessions never showed active: %v, %d requests since the quiesce", n, a, total-base)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A request in no session after the quiesce, as the agent's probe sends one, can't be read as a session:
+// activeSessions names it (#524's review).
+func TestARequestThatIsNotASessionIsNeverReadAsOne(t *testing.T) {
+	h := newHarness(t, harnessOptions{envoy: testenv.EnvoyBinary(t), baseEnv: []string{"CUDA_VISIBLE_DEVICES=0,1"}})
+	d := workersRouterState(h, 2)
+	h.set(d)
+	h.waitReport("Envoy holding both workers healthy", time.Minute, routerHolds(map[string]bool{"worker-0": true, "worker-1": true}))
+	base := quiesceRouterProbe(t, h, d)
+	if code, body := send(t, h, ""); code != http.StatusOK {
+		t.Fatalf("a request in no session: %d %q", code, body)
+	}
+	if _, err := activeSessions(t, h, base, 0); err == nil || !strings.Contains(err.Error(), "not one of them entered") {
+		t.Errorf("a request in no session after the quiesce: %v, want it named as no session", err)
 	}
 }
