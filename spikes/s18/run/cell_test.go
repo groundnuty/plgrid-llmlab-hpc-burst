@@ -48,6 +48,32 @@ func TestCell(t *testing.T) {
 		cell.Name, s.Success, s.SuccessMarked, s.SuccessUnmarked, s.Fired, s.Marked, s.Duplicates, s.ReExecutions, s.Deaths)
 }
 
+// TestGroup runs one hosted job's group of the sweep (rig.Groups of rig.Sweep), S18_GROUP of S18_GROUPS,
+// writing each cell under S18_OUT. Each cell is a subtest, so one cell's failure (its books unbalanced)
+// is reported and the group goes on.
+func TestGroup(t *testing.T) {
+	g, n, out := os.Getenv("S18_GROUP"), os.Getenv("S18_GROUPS"), os.Getenv("S18_OUT")
+	if g == "" || n == "" || out == "" {
+		t.Skip("one hosted job's group of the sweep: set S18_GROUP, S18_GROUPS and S18_OUT")
+	}
+	var gi, gn int
+	if _, err := fmt.Sscan(g, &gi); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Sscan(n, &gn); err != nil {
+		t.Fatal(err)
+	}
+	groups := rig.Groups(rig.Sweep(), gn)
+	for _, cell := range groups[gi] {
+		t.Run(cell.Name, func(t *testing.T) {
+			start := time.Now()
+			s := runCell(t, cell, filepath.Join(out, cell.Name))
+			t.Logf("%s in %s: success %.4f, fired %.4f (%d of %d marked), duplicates %d, re-executions %d, deaths %d",
+				cell.Name, time.Since(start).Round(time.Second), s.Success, s.SuccessFired, s.Fired, s.Marked, s.Duplicates, s.ReExecutions, s.Deaths)
+		})
+	}
+}
+
 func runCell(t *testing.T, cell rig.Cell, dir string) rig.Summary {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {

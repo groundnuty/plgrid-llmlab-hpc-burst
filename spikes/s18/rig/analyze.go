@@ -92,7 +92,7 @@ func Analyze(cell Cell, results []Result, begins map[string][]Begin, exits []Exi
 	for _, a := range attempts {
 		if a.Kind == "closed" {
 			closedByID[a.ID]++
-			if !diedAfter(deaths, a.Target, a.At) {
+			if !diedUnder(begins[a.ID], a.Target) {
 				s.FalseDeaths++
 			}
 		}
@@ -185,10 +185,13 @@ func anyDeathUnder(bs []Begin) bool {
 	return false
 }
 
-// diedAfter reports whether Instance i's engine died within 5 s after at.
-func diedAfter(deaths []Exit, i int, at time.Time) bool {
-	for _, d := range deaths {
-		if d.Instance == i && !d.At.Before(at.Add(-time.Second)) && d.At.Before(at.Add(5*time.Second)) {
+// diedUnder reports whether Instance i's engine died under the request: its record shows it admitted
+// and never ended. A closed attempt whose engine recorded an end lived through it (F3's cut): to the
+// front a death, a false one. Judged from the engine's records of that request, never a time window,
+// which another request's death nearby would fool.
+func diedUnder(bs []Begin, i int) bool {
+	for _, b := range bs {
+		if b.Instance == i && b.Admitted && b.Outcome == "" {
 			return true
 		}
 	}
