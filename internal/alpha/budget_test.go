@@ -152,6 +152,12 @@ var liveWaits = map[string]string{
 	"BetaKeeper: time.Sleep(KeeperKillAfter)":                  "the lease",
 	"BetaKeeper: r.syncWatch(stack.KindInstances)":             "term: stack.CatchUpWorstCase",
 	"keeperAgentReported: stack.WaitState(stack.WaitDeadline)": "the lease",
+	// The bulk row (betabulk_flow_test.go): two phases, each the streams' first tokens, a second of steady pace, the transfer and the streams' ends, all before
+	// the drain start, so the lease bounds them (a phase is at most 3 minutes for the first tokens, 3 for the transfer and the streams' request
+	// timeout and a minute for their ends, about 12 minutes, twice).
+	"bulkPhase: time.After(stack.WaitDeadline)":              "the lease",
+	"bulkPhase: time.Sleep(time.Second)":                     "pacing",
+	"drainTransfer: context.WithTimeout(stack.WaitDeadline)": "the lease",
 	// Row B (now_nooverlap_flows_test.go).
 	"NowNoOverlap: r.syncWatch(stack.KindInstances | stack.KindAllocations | stack.KindDeployments)": "term: stack.CatchUpWorstCase",
 	"nowNoOverlapSteps: r.untilBefore(lead)":                                                         "the lease",
@@ -195,7 +201,7 @@ func waitOf(fset *token.FileSet, fn string, call *ast.CallExpr) string {
 func TestTheLiveStepsWaitOnWhatTheSumsCount(t *testing.T) {
 	fset := token.NewFileSet()
 	found := map[string]int{}
-	for _, file := range []string{"steps_live_test.go", "live_flows_test.go", "guard_live_test.go", "now_flows_test.go", "now_nooverlap_flows_test.go", "betarouter_flow_test.go", "betakeeper_flow_test.go"} {
+	for _, file := range []string{"steps_live_test.go", "live_flows_test.go", "guard_live_test.go", "now_flows_test.go", "now_nooverlap_flows_test.go", "betarouter_flow_test.go", "betakeeper_flow_test.go", "betabulk_flow_test.go"} {
 		f, err := parser.ParseFile(fset, file, nil, 0)
 		if err != nil {
 			t.Fatal(err)

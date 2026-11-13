@@ -80,6 +80,10 @@ func TestStreamReplyBytesPadsOnlyTheMarkedStreamedReply(t *testing.T) {
 	if pFinish == 0 || pLast > pFinish {
 		t.Errorf("the finish chunk is %d and the last content chunk %d: the padding must come before the finish chunk", pFinish, pLast)
 	}
+	// No SSE line is as long as a bufio.Scanner's default limit (64 KiB): a reader of the stream needs no larger buffer.
+	if longest := longestLine(padded.body); longest >= 64<<10 {
+		t.Errorf("the longest SSE line is %d bytes, at or over 64 KiB", longest)
+	}
 	if got := len(pc) - len(qc); got != n {
 		t.Errorf("the padding is %d bytes, want exactly %d", got, n)
 	}
@@ -100,4 +104,13 @@ func TestStreamReplyBytesPadsOnlyTheMarkedStreamedReply(t *testing.T) {
 	if r := serve(t, cfg).post("/v1/chat/completions", body(StreamReplyBytesMarker, false)); r.status != 200 || len(r.body) >= 1<<20 {
 		t.Errorf("a non-streamed reply with the stream marker: %d, %d bytes; want 200 and no padding", r.status, len(r.body))
 	}
+}
+
+// longestLine is the length of the longest line of an SSE body, in bytes.
+func longestLine(b []byte) int {
+	longest := 0
+	for _, l := range bytes.Split(b, []byte("\n")) {
+		longest = max(longest, len(l))
+	}
+	return longest
 }

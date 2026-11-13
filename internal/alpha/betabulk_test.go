@@ -2,6 +2,7 @@ package alpha
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -283,5 +284,17 @@ func TestABulkReadingAtOrAboveTheRuleIsAFindingNeverAFailure(t *testing.T) {
 				t.Errorf("the text to post does not say PASS with a FINDING:\n%s", post)
 			}
 		})
+	}
+}
+
+// The live flow refuses at once, before it touches the cluster, when the world cannot name the engine double and its digest: a real vLLM cannot be
+// held saturating the path, so a run that read the bulk path's buffer on one would read nothing.
+func TestTheBulkLiveFlowRefusesWithoutAStagedDouble(t *testing.T) {
+	r := &liveRun{} // nothing of it is touched before the refusal
+	if _, err := r.BetaBulk(context.Background(), Plan{}); !errors.Is(err, ErrNoStagedDouble) {
+		t.Fatalf("BetaBulk with no staged double = %v, want ErrNoStagedDouble", err)
+	}
+	if NotRun(BetaBulkRow(), ErrNoStagedDouble) {
+		t.Error("a refusal for want of a staged double ends the run NOT RUN: it is a failure of the setup, and the script holds the row pending so that it is never reached")
 	}
 }

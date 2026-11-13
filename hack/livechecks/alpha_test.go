@@ -234,7 +234,7 @@ func TestTheScriptsShapesAreThePackagesRows(t *testing.T) {
 		f := strings.Split(l, "|")
 		shapes[f[0]] = f
 	}
-	all := append(alpha.Rows(), alpha.AccountingRows()...)
+	all := append(builtRows(), alpha.AccountingRows()...)
 	if len(all) != len(alphaShapes) {
 		t.Fatalf("the package has %d alpha rows, the test table %d", len(all), len(alphaShapes))
 	}
@@ -1023,7 +1023,7 @@ func TestTheScriptsSlotHoldIsThePackagesRoundedUp(t *testing.T) {
 		}
 		got[f[0]], key[f[0]] = f[2], f[1]
 	}
-	all := slices.Concat(alpha.Rows(), alpha.AccountingRows(), alpha.ReachRows(), alpha.HostDialedRows(), alpha.StageRows())
+	all := slices.Concat(builtRows(), alpha.AccountingRows(), alpha.ReachRows(), alpha.HostDialedRows(), alpha.StageRows())
 	for name := range got {
 		if _, ok := alpha.RowByName(name); !ok {
 			t.Errorf("the owner-go table names %s, which no package row is", name)
@@ -1111,7 +1111,7 @@ func TestTheScriptsMostJobsAreThePackagesRows(t *testing.T) {
 		}
 		got[f[0]] = f[1]
 	}
-	for _, r := range append(alpha.Rows(), alpha.AccountingRows()...) {
+	for _, r := range append(builtRows(), alpha.AccountingRows()...) {
 		if got[r.Name] != fmt.Sprint(r.MostJobs) {
 			t.Errorf("%s: the script allows %q jobs at once, the package's row %d", r.Name, got[r.Name], r.MostJobs)
 		}

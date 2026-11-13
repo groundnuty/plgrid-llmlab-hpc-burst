@@ -220,6 +220,7 @@ reach-host-dialed-athena|cluster|internal/providerctl/conformance|^TestReachHost
 alpha-athena-now-nooverlap|cluster|internal/alpha|^TestAlphaAthenaNowNoOverlap$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml|host|ready
 beta-athena-now-router|cluster|internal/alpha|^TestBetaAthenaNowRouter$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml,hack/fetch-envoy.sh|host|ready
 beta-athena-now-keeper|cluster|internal/alpha|^TestBetaAthenaNowKeeper$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml|host|ready
+beta-athena-now-bulk|cluster|-|-|-|-|-|pending
 rehearsal|cluster|-|-|-|-|-|pending
 # END LIVE TESTS
 TABLE

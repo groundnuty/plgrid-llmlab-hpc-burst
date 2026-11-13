@@ -18,6 +18,8 @@ package alpha
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -41,6 +43,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/enginedouble"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/stage"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/linkemu"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/obscheck"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
@@ -129,6 +132,9 @@ func standInRow(t *testing.T, name string) Row {
 		r.Timing, r.Lease = standInTunnel, 12*time.Minute
 	case name == "alpha-athena-now-serve", name == BetaRouterName:
 		r.Timing, r.Lease = standInNow, 14*time.Minute
+	case name == BetaBulkName:
+		// The bulk row's streams last 30 s and its transfers seconds: the live 5-minute deadline, and a lease that holds both phases before the drain start.
+		r.Timing, r.Lease = standInKeeper, 20*time.Minute
 	case name == BetaKeeperName:
 		// The keeper row holds a stream across a controller restart, whose outcome takes about 35 s: a request deadline of the live 5 minutes, and a
 		// lease that holds the stream and the restart before the drain start.
@@ -226,7 +232,16 @@ func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)
 	}
 	cl := stack.StartCluster(t, dir, shape, enginedouble.Install, nil)
 	creds := filepath.Join(dir, "provider-ssh")
-	if err := cl.Login.WriteCredentials(creds); err != nil {
+	var link *linkemu.Link
+	if row.Name == BetaBulkName {
+		// The bulk row reads a stall on the path: S17's link in its fair mode (48 MB/s each way, a 2.3 ms round trip) sits where S17 put it in host-dialed
+		// mode, on the relays' ssh to the login node, as the rehearsal's rig puts it (bulk_test.go). Without it the loopback would show no stall.
+		var addr string
+		addr, link = stack.StartLink(t, cl.Login.Addr())
+		if err := cl.Login.WriteCredentialsVia(creds, addr); err != nil {
+			t.Fatal(err)
+		}
+	} else if err := cl.Login.WriteCredentials(creds); err != nil {
 		t.Fatal(err)
 	}
 	prov.Spec.CredentialsRef = &v1alpha1.CredentialsReference{File: creds}
@@ -234,11 +249,11 @@ func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)
 	if err := os.Mkdir(ctl, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if (row.Name == "alpha-athena-now-serve" || row.Name == BetaRouterName || row.Name == BetaKeeperName) && reshape == nil {
+	if (row.Name == "alpha-athena-now-serve" || row.Name == BetaRouterName || row.Name == BetaKeeperName || row.Name == BetaBulkName) && reshape == nil {
 		// plgrid-now's one job per user: a replacement's job could only pend behind the run's.
 		shape.Partitions = []fakeslurm.Partition{{Name: stack.Partition, GPUOnly: true, Slots: 1}}
 	}
-	if row.Name == "alpha-athena-now-serve" || row.Name == "alpha-athena-now-nooverlap" || row.Name == BetaRouterName || row.Name == BetaKeeperName {
+	if row.Name == "alpha-athena-now-serve" || row.Name == "alpha-athena-now-nooverlap" || row.Name == BetaRouterName || row.Name == BetaKeeperName || row.Name == BetaBulkName {
 		// athena-now.yaml sends plgrid-now a sandbox, which the pre-staging row's helper stages.
 		prof.Spec.Partitions[0].ImageFormat = v1alpha1.ImageFormatSandbox
 	}
@@ -246,6 +261,10 @@ func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)
 	engine, notReported := "token-delay="+standInTokenDelay.String(), map[string]bool(nil)
 	if row.Name == "alpha-athena-now-serve" || row.Name == BetaRouterName || row.Name == BetaKeeperName {
 		engine, notReported = standInNowEngine, obscheck.DoubleNotReported
+	}
+	if row.Name == BetaBulkName {
+		// The bulk row's engine: 20 tokens a second (S17's streams), and a reply padded to 64 MiB for a request that asks for it, streamed or not.
+		engine = "token-delay=" + BulkTokenDelay.String() + ",reply-bytes=" + strconv.Itoa(BulkReplyBytes)
 	}
 	md := stack.ServedDeployment(stm, v1alpha1.EnvVar{Name: "HB_ENGINE_DOUBLE", Value: engine})
 	if strings.HasPrefix(row.Name, "tunnel-hour-") || row.Name == "alpha-athena-now-serve" || row.Name == BetaRouterName || row.Name == BetaKeeperName {
@@ -263,15 +282,20 @@ func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)
 	if row.Name == BetaRouterName {
 		envoyBin = testenv.EnvoyBinary(t)
 	}
+	double := DoubleObs{}
+	if row.Name == BetaBulkName {
+		// The stand-in's engine is the double: the fake apptainer links to this test binary, which serves as the engine (enginedouble.Install).
+		double = standInDouble(t)
+	}
 	return world{
-		name: "stand-in", bins: b, hostOpts: hostOpts, cpuArch: arch,
+		name: "stand-in", bins: b, hostOpts: hostOpts, cpuArch: arch, double: double, link: link,
 		place: func(h *stack.Host) {
 			h.PlaceAgentBuild(arch)
 			if envoyBin != "" {
 				h.PlaceEnvoyBuild(arch, envoyBin)
 			}
 		},
-		dh: standInDirect, ports: standInPorts,
+		dh: standInDirect, ports: portsFor(row.Name, standInPorts),
 		// The controller lists the checkpoint from the Hub double through HF_ENDPOINT, which up passes on to it.
 		env:     stack.CleanEnv("HF_ENDPOINT=" + hub.URL),
 		objects: []client.Object{prof, prov}, provider: stack.ProviderName, cluster: row.Cluster, qos: row.QOS, md: md, profile: prof.Spec,
@@ -1093,4 +1117,70 @@ func TestStandInBetaRouterFailsWhenTheRouterHoldsNoWorkerAfterTheRestart(t *test
 //livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
 func TestStandInBetaKeeper(t *testing.T) {
 	runStandInIn(t, BetaKeeperName, standInHostDialed)
+}
+
+// standInDouble names the engine double a stand-in run has: its own test binary, which the fake apptainer runs as the engine (enginedouble.Install),
+// and the SHA-256 of that binary as the run read it.
+func standInDouble(t *testing.T) DoubleObs {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		t.Fatal(err)
+	}
+	return DoubleObs{Name: "the engine double (internal/agent/enginedouble, run as the stand-in's own test binary)", Digest: hex.EncodeToString(h.Sum(nil))}
+}
+
+// TestStandInBetaBulk is the bulk row's live steps over the stand-in, through Run: the real stack in host-dialed mode with the bulk path, the engine
+// double behind a fake Slurm reached through real ssh and S17's shaped link in fair mode on the relays' ssh, eight streams beside a 64 MiB reply, once
+// as the control (a streamed reply down the token transport) and once down the bulk path. The link must have carried both replies, and the verdict
+// must pass. This host's link is S17's shaped one, and the engine the stand-in's double, so the figures are the stand-in's, not Athena's.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInBetaBulk(t *testing.T) {
+	if os.Getenv(envStandIn) != "1" {
+		t.Skipf("the stand-in proof of the live steps runs only with %s=1 (internal/alpha, standin_test.go)", envStandIn)
+	}
+	row := standInRow(t, BetaBulkName)
+	id, err := NewRunID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Row: row, StandIn: true, Out: filepath.Join(t.TempDir(), "out"), PendingMax: 2 * time.Minute, RunID: id, FrontLabel: standInFrontLabel,
+		DialHomeMode: standInHostDialed.Mode}
+	rec, err := NewRecorder(cfg.Out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, _ := standInWorldShaped(t, row, nil)
+	lr := newLiveRun(t, cfg, inMode(w, standInHostDialed))
+	lr.stop = &stackStop{}
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.PendingMax+25*time.Minute)
+	defer cancel()
+	failures, err := Run(ctx, cfg, lr, rec, t.Logf)
+	if perr := lr.stop.problem(); perr != nil {
+		t.Fatalf("the stack did not stop cleanly, whatever the run ended with: %v", perr)
+	}
+	post, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
+	t.Logf("%s's text to post:\n%s", row.Name, post)
+	if err != nil {
+		t.Fatalf("%s did not finish: %v", row.Name, err)
+	}
+	if len(failures) > 0 {
+		t.Fatalf("%s failed its verdict over the stand-in: %s", row.Name, Summary(failures))
+	}
+	if carried := w.link.Up.Load() + w.link.Down.Load(); carried < 2*BulkReplyBytes {
+		t.Errorf("the shaped link carried %d bytes, under the two replies' %d: a reply did not take the link", carried, 2*BulkReplyBytes)
+	}
+	if !strings.Contains(string(post), "THE ENGINE WAS A DOUBLE, not vLLM") || !strings.Contains(string(post), w.double.Digest) {
+		t.Errorf("the text to post does not name the double and its digest:\n%s", post)
+	}
 }

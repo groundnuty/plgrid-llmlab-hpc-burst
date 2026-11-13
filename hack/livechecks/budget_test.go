@@ -78,7 +78,7 @@ func TestEveryRowsTimeoutIsDerivedFromItsBounds(t *testing.T) {
 // must be above: the waits give up before the test's deadline, so a shorter timeout would cut one short and report what
 // the row's bound never decided.
 func TestEveryStackRowsTimeoutIsAboveItsWorstCase(t *testing.T) {
-	for _, row := range alpha.Rows() {
+	for _, row := range builtRows() {
 		test, ok := stackRowTests[row.Name]
 		if !ok {
 			t.Errorf("%s has no case here: name the test the row runs", row.Name)

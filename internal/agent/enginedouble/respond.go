@@ -129,8 +129,9 @@ const ReplyBytesMarker = "hb-engine-double: reply-bytes"
 // reply stays the usual one, which the earlier tests hold.
 const StreamReplyBytesMarker = "hb-engine-double: stream-reply-bytes"
 
-// streamPadChunk is the content of one padding chunk of a streamed reply: 64 KiB of spaces.
-const streamPadChunk = 64 << 10
+// streamPadChunk is the content of one padding chunk of a streamed reply: 16 KiB of spaces, so that every SSE line stays well under the 64 KiB a
+// bufio.Scanner takes by default and the front's 64 KiB line buffer, which a reader of the stream need not be told to enlarge.
+const streamPadChunk = 16 << 10
 
 // padStream sends the padding of a streamed reply: ReplyBytes bytes of space content in chunks of streamPadChunk, the last the remainder.
 func (h *handler) padStream(send func(chunk) bool, newChunk func(...chunkChoice) chunk) bool {
