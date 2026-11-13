@@ -222,7 +222,7 @@ func TestCleanupWaitsForALateJobWhenTheTestWasStopped(t *testing.T) {
 		cmd, out := w.start(append(late, "STUB_TEST_MODE=sleep-late"), "--run", "conformance-helios-gh200", "--yes")
 		w.waitFor("started")
 		w.signal(cmd, syscall.SIGTERM)
-		_ = cmd.Wait()
+		_ = w.waitStopped(cmd, out)
 		w.noLeak(out.String())
 		w.noLeftoverProcess(cmd)
 		for _, want := range []string{"FAIL (interrupted)", wait, "cleanup: left behind 0 (cancelled 1)"} {
@@ -256,7 +256,7 @@ func TestAnInterruptedRealEngineRunWaitsForALateRegistrationToo(t *testing.T) {
 	cmd, out := w.start(quick("STUB_JOB_FOREVER=1", "LIVE_POLL_SECONDS=1"), "--run", "real-engine", "--yes")
 	w.waitFor("polled")
 	w.signal(cmd, syscall.SIGTERM)
-	_ = cmd.Wait()
+	_ = w.waitStopped(cmd, out)
 	w.noLeak(out.String())
 	w.noLeftoverProcess(cmd)
 	for _, want := range []string{"cleanup: the test was stopped before it finished, so a submission in flight may still register; waited for it", "cleanup: left behind 0 (cancelled 1)"} {

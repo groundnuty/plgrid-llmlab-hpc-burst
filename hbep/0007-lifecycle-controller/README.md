@@ -457,7 +457,7 @@ An Instance runs several workers behind a router in beta (HBEP-3, HBEP-5). This 
   - **The checks:** with several workers, the desired state asks for checks per worker (`Checks` on each `DesiredWorker`, and `CheckResults` on each `WorkerReport`), so a worker restarted while the Instance is `ready` is verified on its own. Each worker gets the settings comparison and its own verification record.
   - **Durable per-worker state:** the Instance's status gains `workers[]` (proposed), one entry per worker with its name, the restart generation last verified, its verification record and verdict, and whether it's warmed up. The controller computes each `DesiredWorker`'s `verifiedGeneration` from it, so a restarted controller resumes with the workers' state intact. A per-worker restart leaves the Instance's own `Verified`, `Qualified` and `WarmedUp` conditions True. With one worker, the record keeps its name, `ver-<instance UID>-<generation>`. With several, each record carries its worker: `ver-<instance UID>-<worker>-<generation>`, the generation counting that worker's verifications. The record's contents don't change.
   - **The KV and qualification checks:** each worker is checked for ⌈`targetSessions` ÷ N⌉ sessions, so the report's timings stay within its 4 MiB bound at any N. Each exited worker's log tail is at most 8 KiB.
-  - **A restarted worker** warms up on its socket while the readiness port still answers 503 for it, so it's never live during warm-up (Notes).
+  - **A restarted worker** warms up on its socket while the readiness port still answers 503 for it, so it's never live during warm-up (Notes). Its new process starts only once Envoy holds the worker unhealthy, read from `/clusters`, or at the latest one check interval plus its timeout after the death. Until then Envoy can still route to the worker it last saw healthy, and the new process would take that traffic unverified.
 - **Becoming ready.** An Instance enters `ready` the first time when every worker has passed and the router's probe passes, within `health.startTimeout` of its start instruction. The router's probe is the agent's: one `GET /health` through the router's socket, with no `x-session-id`, every report, reported as the router part's health. The front's own probe gates routing only (HBEP-5).
   - It then stays `ready` while the router holds at least one worker healthy, with the front's cap scaled by healthy workers (HBEP-5).
   - The controller writes the router's healthy count to `status.healthyWorkers`, from the agent's report of Envoy's `/clusters`, taking it only from a report whose router part echoes the desired router generation. A worker that fails its active check, or that Envoy has ejected, isn't counted, since Envoy routes to neither.
@@ -543,14 +543,14 @@ Replacement before release (HBEP-3) applies only while the deployment keeps its 
 - Deletion of the ModelDeployment: as shutdown, then the objects are removed (HBEP-11).
 - Approved early termination (HBEP-10): as shutdown, before the end time.
 - Repurposing: as scale-down for the old deployment, which is ending or scaling down. The Allocation then hosts the new deployment's Instance.
-- In every case, an Allocation left with no Instance follows its retention policy (Retention), except one with `RelayEndedForGood`, which is released at once.
+- In every case, an Allocation left with no Instance follows its retention policy (Retention), except one with `RelayEndedForGood`, and one whose ModelDeployment is being deleted, which are released at once. A user who deletes a deployment releases its GPUs, whatever its policy: `ReleaseWhenIdle`'s idle limit, like `Keep`'s, is for a deployment that still exists.
 - A lease end is not a release: under the drain rule, an instance whose replacement is late drains and ends with its lease.
 
 Releasing an Allocation means deleting it. Its finalizer cancels every job with its tag (HBEP-4, HBEP-11).
 
 ### Retention
 
-An Allocation that hosts no Instance follows its retention policy, unless it has `RelayEndedForGood`. That one is released at once whatever its policy, since nothing placed on it can be reached (HBEP-6, What ends a relay; open question 8):
+An Allocation that hosts no Instance follows its retention policy, unless it has `RelayEndedForGood` or its ModelDeployment is being deleted (Release). That one is released at once whatever its policy, since nothing placed on it can be reached (HBEP-6, What ends a relay; open question 8):
 - keep it, as warm capacity, until a date, a grant's end or a deadline;
 - or release it when idle, after an idle limit.
 
@@ -877,6 +877,7 @@ The controller applies by policy what www-2027 operators did per job: holder bat
 - 2026-11-12: several workers per Instance, for beta (HBEP-7, Several workers).
 - 2026-11-12: the bulk path, open question 12's contract (HBEP-6, The bulk path).
 - 2026-11-12: several workers: the GPU slice applies with several workers only, and several workers need the router flag (for #439).
+- 2026-11-13: deletion releases an empty Allocation at once, and a restarted worker's process waits for Envoy to hold it unhealthy (for #503, #439).
 
 ## Amendments
 
@@ -980,3 +981,7 @@ The controller applies by policy what www-2027 operators did per job: holder bat
 - **2026-11-12: several workers per Instance, for beta** (Several workers; Provisioning; The allocation agent; Instance start; Health and restarts; Test plan). An amendment, the science agent's design, with this HBEP's Several workers section as its one home: the count (copied to the Instance's immutable `launch.workers`), the sizing, each worker's GPUs (replacing any launch value) and socket, the router as a part on a Unix socket behind the agent's forwarder, the readiness port with a per-worker `verifiedGeneration`, per-worker checks with durable `status.workers[]`, the agent's probe through the router, Envoy's timeouts at the front's maximum, and per-worker restarts with the router rung keeping `ready`. With one worker, a worker restart leaves `ready` as in alpha. Before, the alpha shape of one worker was the only one defined.
 - **2026-11-12: the bulk path** (The allocation agent). An amendment, the science agent's design: with the bulk path on, the agent starts, restarts and stops the bulk frpc beside the token frpc (HBEP-6, The bulk path). Before, the agent ran one frpc per Instance.
 - **2026-11-12: the GPU slice with one worker, and several workers without the router flag** (Several workers; Test plan). An amendment by the science agent's rulings on #439's plan (Q1, Q7). With several workers, each worker's `CUDA_VISIBLE_DEVICES` slice replaces any value the launch sets, and a job with fewer devices than N × k is refused; with one worker, the launch's value wins as in alpha, as this section's opening says. `workersPerInstance` above 1 is refused with `SpecUnsupported` on a controller run without `--instance-router envoy`, since Envoy is staged only with it. Before, the slice was said to replace the launch's value at every N, contradicting the section's opening, and an Instance of several workers on a controller without the flag would have started a router the job didn't have.
+- **2026-11-13: deletion releases at once; a restarted worker waits for Envoy** (Release; Retention; Several workers). An amendment by the science agent's rulings on #503 and #439.
+  - An Allocation with no Instance whose ModelDeployment is being deleted is released at once, whatever its retention policy. #503 found a deleted deployment's job running on for its `ReleaseWhenIdle` idle limit (30 minutes in the example), holding GPUs and, on `plgrid-now`, the shared slot.
+  - With several workers, a restarted worker's new process starts only once Envoy holds it unhealthy, or one check interval plus its timeout after the death. #439's stack test saw a restarted engine take a request before its verification.
+  - Before, deletion followed the retention policy, and the new process could start while Envoy still routed to the worker.
