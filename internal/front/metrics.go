@@ -37,6 +37,8 @@ type Metrics struct {
 	cuts     *prometheus.CounterVec
 	pauses   *prometheus.CounterVec
 	ttft     *prometheus.HistogramVec
+	// bulk counts bulk dispatches and fallbacks (enableBulk); nil without the bulk path.
+	bulk *prometheus.CounterVec
 }
 
 // NewMetrics registers the front's metrics. sink, when set, feeds the three
@@ -81,6 +83,41 @@ func NewMetrics(sink *usage.Sink, dir string, free FreeBytesFunc, events *eventc
 		m.reg.MustRegister(&usageCollector{sink: sink, dir: dir, free: free})
 	}
 	return m
+}
+
+// enableBulk registers the bulk path's two series (HBEP-6, The bulk path, Metrics): requests sent
+// through the bulk transport and requests whose bulk dial failed and took the token transport, by
+// path, both created at 0; and how many Instances have a registered bulk transport, read from
+// registered at each scrape. Only a front with the bulk path calls it, so without the bulk path
+// /metrics is as before.
+func (m *Metrics) enableBulk(registered func() int) {
+	if m == nil {
+		return
+	}
+	m.bulk = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "hpcburst_front_bulk_requests_total",
+		Help: "Non-streamed requests toward an Instance by the bulk path's outcome: path=bulk, written to the Instance's bulk transport; path=fallback, its bulk dial failed before any byte and it took the token transport.",
+	}, []string{"path"})
+	m.bulk.WithLabelValues("bulk")
+	m.bulk.WithLabelValues("fallback")
+	m.reg.MustRegister(m.bulk, prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "hpcburst_front_bulk_registered",
+		Help: "Instances whose bulk transport counts as registered: a probe through the bulk proxy passed in its current epoch.",
+	}, func() float64 { return float64(registered()) }))
+}
+
+// bulkSent counts a request written to a bulk transport.
+func (m *Metrics) bulkSent() {
+	if m != nil && m.bulk != nil {
+		m.bulk.WithLabelValues("bulk").Inc()
+	}
+}
+
+// bulkFellBack counts a request whose bulk dial failed and took the token transport.
+func (m *Metrics) bulkFellBack() {
+	if m != nil && m.bulk != nil {
+		m.bulk.WithLabelValues("fallback").Inc()
+	}
 }
 
 // Handler serves the metrics in Prometheus's text format.

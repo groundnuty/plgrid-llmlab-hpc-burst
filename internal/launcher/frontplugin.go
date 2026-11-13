@@ -68,10 +68,28 @@ func checkFrpsBulkNamesTheFront(l layout, st *State, bad func(string, ...any)) {
 	}
 }
 
+// checkFrontBulkPlugin is checkFrontPlugin for the bulk path's plugin path on the front's health
+// address (HBEP-6, The bulk path): the second frps posts each bulk registration there, and refuses
+// every new bulk proxy while it does not answer.
+func checkFrontBulkPlugin(addr string, eh *EntryHealth, add func(string, ...any)) {
+	ok := false
+	eh.FrpsBulkPluginOK = &ok
+	if err := postFrontPluginAt(addr, agentapi.FrontFrpsBulkPluginPath); err != nil {
+		add("POST %s on %s: %v; the bulk path's frps refuses every new bulk proxy while the front's plugin does not answer (HBEP-6, The bulk path)", agentapi.FrontFrpsBulkPluginPath, addr, err)
+		return
+	}
+	ok = true
+}
+
 func postFrontPlugin(addr string) error {
+	return postFrontPluginAt(addr, agentapi.FrontFrpsPluginPath)
+}
+
+// postFrontPluginAt posts frontPluginNoop to the front's plugin at path on addr.
+func postFrontPluginAt(addr, path string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), healthzTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+agentapi.FrontFrpsPluginPath, strings.NewReader(frontPluginNoop))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+path, strings.NewReader(frontPluginNoop))
 	if err != nil {
 		return err
 	}

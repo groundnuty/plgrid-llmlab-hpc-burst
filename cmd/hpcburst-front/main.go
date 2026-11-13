@@ -59,6 +59,7 @@ func run(args []string) error {
 	mode := fs.String("mode", "", "the dial-home mode the launcher recorded: direct, ssh or host-dialed (the last has no front address: the host dials the jobs)")
 	health := fs.String("health-addr", "", "loopback host:port for GET /healthz")
 	kubeconfig := fs.String("kubeconfig", "", "the control plane's kubeconfig (default: <state-dir>/kubeconfig)")
+	bulkPath := fs.Bool("bulk-path", false, "beta: the bulk path (HBEP-6): split the dial-home listener by TLS server name, and send each non-streamed request through the Instance's bulk transport while it is registered; the launcher passes it with up --bulk-path")
 	if err := fs.Parse(args); err != nil {
 		return usageError{err}
 	}
@@ -95,7 +96,9 @@ func run(args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	return front.Run(ctx, options(cfg, agentapi.Host{StateDir: *stateDir, PortBase: *portBase}, *mode, dyn, cs, rec, log, *health))
+	o := options(cfg, agentapi.Host{StateDir: *stateDir, PortBase: *portBase}, *mode, dyn, cs, rec, log, *health)
+	o.BulkPath = *bulkPath
+	return front.Run(ctx, o)
 }
 
 // options are Run's inputs in production. They set no Transports, so Run

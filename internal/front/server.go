@@ -83,6 +83,8 @@ type Front struct {
 	Health net.Addr
 	// bulkFrp is the bulk path's /~!frp passthrough to the second frps; nil without the bulk path.
 	bulkFrp *frpPassthrough
+	// bulk is the bulk path's transport and prober; nil without the bulk path.
+	bulk *bulkPath
 }
 
 // Run starts the front and serves until ctx ends: it reads its keys, opens
@@ -107,13 +109,13 @@ func Run(ctx context.Context, o Options) error {
 	if ferr != nil && ValidMode(o.Mode) {
 		return ferr
 	}
-	var bulkBind string
+	var bulkBind, bulkMux string
 	if o.BulkPath {
 		if err := checkBulkMode(o.Mode); err != nil {
 			return err
 		}
 		var err error
-		if bulkBind, _, err = cfg.FrpsBulkAddrs(o.Host); err != nil {
+		if bulkBind, bulkMux, err = cfg.FrpsBulkAddrs(o.Host); err != nil {
 			return err
 		}
 	}
@@ -155,6 +157,16 @@ func Run(ctx context.Context, o Options) error {
 		var stop func()
 		f.Prober, stop = startProber(ctx, cfg, tunnel, o, watch)
 		defer stop()
+	}
+	if o.BulkPath {
+		// The bulk path's transport, pool and probe (bulk.go; HBEP-6, The bulk path).
+		f.bulk = newBulkPath(cfg, bulkMux, o.Clock, func() []v1alpha1.Instance {
+			snap, _ := watch.Snapshot()
+			return snap.Instances
+		}, o.Log)
+		proxy.bulk = f.bulk
+		metrics.enableBulk(f.bulk.tun.registeredCount)
+		defer f.bulk.run(ctx)()
 	}
 	var frp *frpPassthrough
 	if ferr == nil {
@@ -437,6 +449,10 @@ func healthHandler(f *Front, log *slog.Logger) http.Handler {
 	if f.Tunnel != nil {
 		// frps's second server plugin (frpsPlugin; HBEP-6, Admission).
 		mux.Handle(agentapi.FrontFrpsPluginPath, &frpsPlugin{tun: f.Tunnel, prober: f.Prober, log: log})
+	}
+	if f.bulk != nil {
+		// The second frps's front plugin, at its own path (HBEP-6, The bulk path).
+		mux.Handle(agentapi.FrontFrpsBulkPluginPath, f.bulk.plugin(log))
 	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		now := time.Now()
