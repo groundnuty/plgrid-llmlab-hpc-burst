@@ -144,6 +144,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err := p.observe(); err != nil {
 		return ctrl.Result{}, err
 	}
+	if err := p.rereadDeployment(); err != nil {
+		return ctrl.Result{}, err
+	}
 	// The pass's clock is read here, after the reads, never before them. A
 	// writer of another component (the path-state writer's TunnelConnected, in
 	// this process and on this clock) can land between a clock read at the
@@ -220,6 +223,33 @@ func (p *pass) run() error {
 		return errors.Join(instErr, p.writeManagedStatus())
 	}
 	return errors.Join(instErr, p.writeStatus())
+}
+
+// rereadDeployment reads the ModelDeployment again, after observe's lists, and takes the newer view when it is gone or being deleted
+// (issue #503). The pass reads the deployment, then lists its Allocations and Instances: two reads, so a deletion can land between them,
+// and the garbage collector marks the deployment's Instances deleting a moment later. The pass would then hold a live deployment that
+// wants an Instance and Instances that no longer count, and capacity would make a replacement for a deployment that was just deleted:
+// an Instance and an Allocation, released as soon as they are seen. Reading the deployment after the lists makes the order safe. An
+// Instance is marked deleting only after its deployment is deleted, so a list that shows one is followed by a read that shows the
+// deletion; the other way round, a deployment read live after a list that predates the deletion costs only a pass working from a
+// list that is a moment old, which every pass is. A deployment found again under another UID is the old one gone.
+func (p *pass) rereadDeployment() error {
+	if p.md == nil {
+		return nil
+	}
+	var md v1alpha1.ModelDeployment
+	err := p.r.Reader.Get(p.ctx, p.key, &md)
+	switch {
+	case apierrors.IsNotFound(err):
+		p.md = nil
+	case err != nil:
+		return fmt.Errorf("get ModelDeployment %s again: %w", p.key, err)
+	case md.UID != p.md.UID:
+		p.md = nil
+	case !md.DeletionTimestamp.IsZero():
+		p.md = &md
+	}
+	return nil
 }
 
 // observe lists the ModelDeployment's Allocations (by its model-deployment
