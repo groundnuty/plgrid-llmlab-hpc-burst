@@ -214,6 +214,7 @@ func replaceHost(ctx context.Context, l layout, st *State, bin Binary, ops hostO
 	// premise all ride on this (the review of PR 361).
 	spec.relayKeeper = st.RelayKeeper
 	spec.bulkPath = st.BulkPath
+	spec.instanceRouter = st.InstanceRouter
 	if st.frpsMissing() {
 		logf(log, "%s", noFrpsUpgradeWarning)
 	}

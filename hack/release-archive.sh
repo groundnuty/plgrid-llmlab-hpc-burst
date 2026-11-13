@@ -20,11 +20,14 @@
 #   agent-builds/hb-agent-x86_64, hb-agent-aarch64     hack/build-agents.sh --version VERSION, so that
 #                                           each agent reports the version its host binaries do
 #   agent-builds/frpc-x86_64, frpc-aarch64             hack/fetch-frp.sh --agent-builds
-#   config/crd/, profiles/                  from the commit, as git archive gives them
+#   config/crd/, profiles/, examples/       from the commit, as git archive gives them: the CRDs, the shipped
+#                                           PlatformProfiles and the quickstart's example manifests, so an
+#                                           archive user needs no clone (issue #479)
 #
 # What it refuses (each before an archive is written):
 #   - a dirty checkout, one whose .git is a file (a worktree: Go 1.26 stamps nothing there), or OUT inside
 #     the checkout;
+#   - a commit without any file under one of COMMIT_DIRS (config/crd/, profiles/, examples/);
 #   - a Go other than the pinned one;
 #   - with --tag, a tag that is missing, or that does not name this commit, or whose notes file
 #     docs/releases/TAG.md is missing or empty;
@@ -60,6 +63,8 @@ K3S_DIR_VERSION=1.36.5           # the directory name hack/fetch-k3s.sh gives it
 K3S_PIN_VERSION=v1.36.5+k3s1     # its line in internal/launcher/k3s-pins.txt
 FRP_VERSION=0.71.1
 HOST_BINARIES=(hpcburst hpcburst-controller hpcburst-front)
+# The commit's own directories the archive carries, each as git archive gives it, and each required.
+COMMIT_DIRS=(config/crd profiles examples)
 
 die() { echo "release-archive.sh: $*" >&2; exit 1; }
 
@@ -92,6 +97,12 @@ esac
 [ -z "$(git status --porcelain)" ] || die "the checkout is not clean, so its binaries would report +dirty:
 $(git status --porcelain | head -5)"
 head=$(git rev-parse HEAD)
+# The commit's own directories, each with a file in it. git ls-tree prints nothing for a path the commit
+# lacks (git archive, below, would fail on it with a tar error instead).
+commit_files=$(git ls-tree -r --name-only HEAD "${COMMIT_DIRS[@]}")
+for d in "${COMMIT_DIRS[@]}"; do
+  grep -q "^$d/" <<< "$commit_files" || die "the commit has no $d/"
+done
 if [ -n "$tag" ]; then
   tagged=$(git rev-parse --verify --quiet "refs/tags/$tag^{commit}") || die "the tag $tag does not exist in this checkout"
   [ "$tagged" = "$head" ] || die "the checkout is $head, and the tag $tag names $tagged"
@@ -212,7 +223,7 @@ case "$(uname -s) $(uname -m)" in
 esac
 
 # ---- the commit's own files --------------------------------------------------------------------------
-git archive --format=tar HEAD config/crd profiles | tar -x -C "$stage"
+git archive --format=tar HEAD "${COMMIT_DIRS[@]}" | tar -x -C "$stage"
 
 # ---- the layout: exactly the entries the archive is specified to have ------------------------------
 expected=()
@@ -220,9 +231,7 @@ for b in "${HOST_BINARIES[@]}"; do expected+=("bin/$b"); done
 expected+=("$k3s_rel" "$frps_rel")
 for cpu in $(cpu_archs); do expected+=("agent-builds/hb-agent-$cpu" "agent-builds/frpc-$cpu"); done
 executables=("${expected[@]}")
-git ls-tree -r --name-only HEAD config/crd profiles > "$work/committed"
-[ -n "$(grep '^config/crd/' "$work/committed" || true)" ] || die "the commit has no config/crd/"
-[ -n "$(grep '^profiles/' "$work/committed" || true)" ] || die "the commit has no profiles/"
+printf '%s\n' "$commit_files" > "$work/committed"
 mapfile -t committed < "$work/committed"
 expected+=("${committed[@]}")
 ( cd "$stage" && find . -type f | sed 's|^\./||' | LC_ALL=C sort ) > "$work/found"
@@ -240,7 +249,12 @@ for f in "${executables[@]}"; do chmod 755 "$stage/$f"; done
 # ---- the archive and its checksums ---------------------------------------------------------------------
 name=hpcburst-$version-linux-amd64.tar.gz
 mtime=$(git log -1 --format=%ct HEAD)
-LC_ALL=C tar --sort=name --mtime="@$mtime" --owner=0 --group=0 --numeric-owner -C "$stage" -cf - bin agent-builds config profiles |
+# The top-level entries: bin/, agent-builds/, and the first part of each COMMIT_DIRS entry (config/, ...).
+tops=(bin agent-builds)
+for d in "${COMMIT_DIRS[@]}"; do
+  [[ " ${tops[*]} " == *" ${d%%/*} "* ]] || tops+=("${d%%/*}")
+done
+LC_ALL=C tar --sort=name --mtime="@$mtime" --owner=0 --group=0 --numeric-owner -C "$stage" -cf - "${tops[@]}" |
   gzip -n -9 > "$work/$name"
 {
   ( cd "$work" && sha256sum -- "$name" )

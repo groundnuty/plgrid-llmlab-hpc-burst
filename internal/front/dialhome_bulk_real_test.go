@@ -38,6 +38,7 @@ type bulkRig struct {
 	pwFirst, pwBulk string
 	first, bulkCert string // the two certificate files
 	n               int
+	procs           []*launcher.FrpsProc // the two frps, first the single one's, then the bulk path's
 }
 
 func newBulkRig(t *testing.T) *bulkRig {
@@ -100,14 +101,19 @@ func newBulkRigFronts(t *testing.T, frontToken, frontBulk string) *bulkRig {
 		t.Fatal(err)
 	}
 	t.Cleanup(bin.Close)
+	// The stub above holds the plugin's port, so these are the two frps's own. A frps that an earlier,
+	// killed test binary left on them answers /healthz, and the rig would take it for its own (#484).
+	testenv.RequireFreePorts(t, "the bulk rig", r.host.FrpsBindAddr(), r.host.FrpsTCPMuxAddr(), r.host.FrpsWebAddr(),
+		r.host.FrpsBulkBindAddr(), r.host.FrpsBulkTCPMuxAddr(), r.host.FrpsBulkWebAddr())
 	for _, s := range []struct{ cfg, log, web string }{
 		{cfgFirst, launcher.FrpsLogFile(r.host), r.host.FrpsWebAddr()},
 		{cfgBulk, launcher.FrpsBulkLogFile(r.host), r.host.FrpsBulkWebAddr()},
 	} {
-		p, err := launcher.StartFrps(launcher.FrpsSpec{Bin: bin, Config: s.cfg, Log: s.log, Dir: r.host.StateDir})
+		p, err := launcher.StartFrps(launcher.FrpsSpec{Bin: bin, Config: s.cfg, Log: s.log, Dir: r.host.StateDir, ExitWithParent: true})
 		if err != nil {
 			t.Fatal(err)
 		}
+		r.procs = append(r.procs, p)
 		t.Cleanup(func() { _, _ = p.Stop(context.Background(), 5*time.Second) })
 		waitUntilFor(t, 15*time.Second, "frps's /healthz on "+s.web, func() bool {
 			resp, err := (&http.Client{Timeout: time.Second}).Get("http://" + s.web + "/healthz")
@@ -203,11 +209,12 @@ func (r *bulkRig) startFrpcProc(uid, sock, dialHome, serverName, ca string, bulk
 	writeMode600(r.t, cfg, string(text))
 	cmd := exec.Command(r.frpc, "-c", cfg)
 	cmd.Env = []string{"PATH=/usr/bin:/bin"}
-	if err := cmd.Start(); err != nil {
+	// To die with this test binary: one that is killed runs no cleanup, and a frpc left running logs in
+	// to the next rig's frps (#484).
+	done, err := testenv.StartDyingWithParent(cmd)
+	if err != nil {
 		r.t.Fatal(err)
 	}
-	done := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(done) }()
 	r.t.Cleanup(func() {
 		_ = cmd.Process.Kill() // a pidfd signal to this one process (os.Process on Linux)
 		<-done

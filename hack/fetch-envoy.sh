@@ -2,6 +2,7 @@
 # Download the pinned Envoy release binary for this machine's architecture and check its sha256.
 #
 # usage: hack/fetch-envoy.sh [DIR]
+#        hack/fetch-envoy.sh --agent-builds DIR
 #
 # DIR defaults to $HPCBURST_ENVOY_DIR. Each pinned version for this architecture lands at
 # DIR/envoy-X.Y.Z/envoy, mode 755, where the tests look for it (HPCBURST_ENVOY_DIR=DIR,
@@ -24,6 +25,16 @@
 # DIR may be a restored CI cache (the workflow saves it between runs, so that a GitHub outage does not
 # fail every job). It is never trusted: the binary is checked against its pin on every run.
 #
+# agent-builds mode (--agent-builds DIR), for operators, places the pinned Envoy of every architecture
+# the pins file names as DIR/envoy-<cpuArch>, mode 755, where DIR is the controller's agent-builds
+# directory (<state>/agent-builds, agentapi.Host.AgentBuildsDir), beside frpc's builds
+# (hack/fetch-frp.sh --agent-builds). The Provider's controller stages that file to a job, by its
+# sha256, when the controller runs Instances behind a router (#454). It runs on any host architecture,
+# since it never runs what it fetches. The pins name architectures as Go does and the platform
+# profiles' cpuArch as the kernel does; hack/cpu-arch.sh maps the two. A pins file with more than one
+# version for an architecture is refused in this mode, since a build has one name per cpuArch. Each
+# architecture is fetched and checked on its own, by the same rules as above.
+#
 # ENVOY_RELEASE_BASE overrides the download site (default: the envoyproxy/envoy GitHub releases),
 # whose layout is <base>/v<version>/<asset>, for mirrors and for tests. ENVOY_PINS_FILE overrides the
 # pins file, for tests only.
@@ -35,9 +46,16 @@ base=${ENVOY_RELEASE_BASE:-https://github.com/envoyproxy/envoy/releases/download
 
 die() { echo "fetch-envoy.sh: $*" >&2; exit 1; }
 
-dest=${1:-${HPCBURST_ENVOY_DIR:-}}
-[ -n "$dest" ] || die "usage: hack/fetch-envoy.sh DIR (or set HPCBURST_ENVOY_DIR)"
-[ $# -le 1 ] || die "usage: hack/fetch-envoy.sh DIR: one directory, no more arguments"
+builds=
+if [ "${1:-}" = "--agent-builds" ]; then
+  [ $# -eq 2 ] && [ -n "$2" ] || die "usage: hack/fetch-envoy.sh --agent-builds DIR"
+  builds=1
+  dest=$2
+else
+  dest=${1:-${HPCBURST_ENVOY_DIR:-}}
+  [ -n "$dest" ] || die "usage: hack/fetch-envoy.sh DIR (or set HPCBURST_ENVOY_DIR) | hack/fetch-envoy.sh --agent-builds DIR"
+  [ $# -le 1 ] || die "usage: hack/fetch-envoy.sh DIR: one directory, no more arguments"
+fi
 [ -f "$pins" ] || die "the pins file $pins is not a file"
 
 # The pins name an architecture as Go does; this machine's name for it is the kernel's (x86_64,
@@ -49,6 +67,8 @@ if go_arch "$machine" > /dev/null; then
   arch=$(go_arch "$machine")
 elif cpu_arch "$machine" > /dev/null; then
   arch=$machine
+elif [ -n "$builds" ]; then
+  arch= # agent-builds mode fetches every architecture, whatever this machine is
 else
   die "no pinned Envoy binary for $machine"
 fi
@@ -65,6 +85,7 @@ release_arch() {
 # Every line is checked before the first download, whichever architecture it pins.
 n=0
 mine=()
+all=()
 while IFS= read -r line || [ -n "$line" ]; do
   n=$((n + 1))
   read -r -a f <<< "$line" || true
@@ -76,24 +97,25 @@ while IFS= read -r line || [ -n "$line" ]; do
   ra=$(release_arch "$parch") || die "$pins line $n: architecture $parch is not one Go names amd64 or arm64"
   [ "$asset" = "envoy-$version-linux-$ra" ] || die "$pins line $n: asset $asset is not Envoy $version's $parch release binary, envoy-$version-linux-$ra"
   [[ $sum =~ ^[0-9a-f]{64}$ ]] || die "$pins line $n: sha256 $sum is not 64 lowercase hex characters"
+  cpu_arch "$parch" > /dev/null || die "$pins line $n: architecture $parch has no cpuArch name in hack/cpu-arch.sh"
   [ "$parch" = "$arch" ] && mine+=("$version $asset $sum")
+  all+=("$version $asset $sum $parch")
 done < "$pins"
-[ ${#mine[@]} -gt 0 ] || die "$pins pins no Envoy binary for $arch ($machine)"
 
+# fetch TARGET URL SUM ASSET LABEL: place the file at URL as TARGET, mode 755, unless TARGET is there
+# with SUM already; a download with another sha256 is deleted and the script exits 1. LABEL names the
+# file in the messages.
 part=
 trap '[ -z "$part" ] || rm -f "$part"' EXIT
-for row in "${mine[@]}"; do
-  read -r version asset sum <<< "$row"
-  dir=$dest/envoy-$version
-  target=$dir/envoy
+fetch() {
+  local target=$1 url=$2 sum=$3 asset=$4 label=$5 got
   if [ -f "$target" ] && [ -x "$target" ] && echo "$sum  $target" | sha256sum -c --status -; then
-    echo "ok       envoy $version ($target)"
-    continue
+    echo "ok       $label ($target)"
+    return 0
   fi
-  mkdir -p "$dir"
-  url=$base/v$version/$asset
-  part=$(mktemp "$dir/.envoy.part.XXXXXX")
-  echo "fetching envoy $version from $url"
+  mkdir -p "$(dirname "$target")"
+  part=$(mktemp "$(dirname "$target")/.envoy.part.XXXXXX")
+  echo "fetching $label from $url"
   curl -fsSL --retry 3 --connect-timeout 15 --max-time 900 -o "$part" "$url" ||
     die "download of $url failed, and $target is not there with its pinned sha256"
   got=$(sha256sum "$part" | cut -d' ' -f1)
@@ -105,5 +127,27 @@ for row in "${mine[@]}"; do
   chmod 755 "$part"
   mv -fT "$part" "$target"
   part=
-  echo "verified envoy $version ($target) sha256 $sum"
+  echo "verified $label ($target) sha256 $sum"
+}
+
+if [ -n "$builds" ]; then
+  [ ${#all[@]} -gt 0 ] || die "$pins pins no Envoy binary"
+  seen=" "
+  for row in "${all[@]}"; do
+    read -r _ _ _ parch <<< "$row"
+    case $seen in *" $parch "*) die "$pins pins more than one Envoy version for $parch; an agent build has one name per cpuArch, so nothing was fetched" ;; esac
+    seen="$seen$parch "
+  done
+  for row in "${all[@]}"; do
+    read -r version asset sum parch <<< "$row"
+    fetch "$dest/envoy-$(cpu_arch "$parch")" "$base/v$version/$asset" "$sum" "$asset" "envoy-$(cpu_arch "$parch")"
+  done
+  exit 0
+fi
+
+[ ${#mine[@]} -gt 0 ] || die "$pins pins no Envoy binary for $arch ($machine)"
+
+for row in "${mine[@]}"; do
+  read -r version asset sum <<< "$row"
+  fetch "$dest/envoy-$version/envoy" "$base/v$version/$asset" "$sum" "$asset" "envoy $version"
 done
