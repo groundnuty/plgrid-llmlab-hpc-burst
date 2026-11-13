@@ -185,12 +185,13 @@ The pins that a design decision rests on, as on `main` on 2026-11-01, plus rows 
 
 ### Releases
 
-A release is a tag on `main` with its archive, its checksums and its notes (owner decisions, 11 Nov 2026: "Tag an alpha release" once alpha graduates, and "Bundle k3s and frp", [issue #145, comment 6790758697](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/145#issuecomment-6790758697) and PR #389).
+A release is a tag on `main` with its archive, its checksums and its notes (owner decisions, 11 Nov 2026: "Tag an alpha release" and "Bundle k3s and frp", [issue #145, comment 6790758697](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/145#issuecomment-6790758697) and PR #389; 13 Nov 2026: the first tag before graduation, PR #517, and its freeze on the shipped code, PR #526).
 
 - **The first tag** is `v0.1.0-alpha.1`, a valid Go pre-release version. It's made before alpha graduates (the owner's decision of 13 Nov 2026), once the alpha rows that run on Athena's `plgrid-now` have passed, on a `main` commit with no change to the shipped code since the commits the rows ran on. The shipped code is the Go packages the four shipped binaries are built from (`go list -deps` of `cmd/hpcburst`, `cmd/hpcburst-controller`, `cmd/hpcburst-front` and `cmd/hb-agent`), the pins files, `config/crd/`, `profiles/` and `examples/`. The live harness (`internal/alpha`, `hack/livechecks`) and tests aren't shipped, so a fix to them doesn't change what's tagged.
   - **The rows:** the pre-staging row, row A (`alpha-athena-now-serve`), row B (`alpha-athena-now-nooverlap`) and GPU accounting (`gpu-accounting-athena-now`), each run on a commit whose shipped code equals the tagged commit's, so the shipped code is the code the evidence ran. A row may run again on a later commit after a harness fix, and the other rows' results stand.
   - **Its notes list the alpha criteria still open:** those that need `plgrid-gpu-a100` (the no-cut handover with two jobs at once, and the one-hour tunnel run), and Helios's, which are beta's (#373).
-  - **Alpha's graduation and its status PRs (HBEP-1)** follow when those criteria pass, and a later alpha tag marks it. `examples/` is frozen with them because the live rows read its Provider files and the quickstart applies its examples, so the archive's examples are the ones the evidence used. The release workflow, its scripts and the notes may land after. Later alpha tags count up (`-alpha.2`), and beta's begin at `v0.2.0-beta.1`.
+  - **Alpha's graduation and its status PRs (HBEP-1)** follow when those criteria pass, and a later alpha tag marks it.
+  - **What may land after the rows:** `examples/` is part of the shipped code because the live rows read its Provider files and the quickstart applies its examples, so the archive's examples are the ones the evidence used. The release workflow, its scripts and the notes may land after. Later alpha tags count up (`-alpha.2`), and beta's begin at `v0.2.0-beta.1`.
 - **The archive** is one per host architecture, linux amd64 for alpha, with everything `up` and the controller read, so no clone is needed:
   - `bin/`: `hpcburst`, `hpcburst-controller` and `hpcburst-front`, under plain names, since `up` finds the other two beside its own executable. Each is built from the tag with the pinned Go (`hack/go-pins.txt`), `CGO_ENABLED=0` and `-trimpath`, with VCS stamping on, and reports the tag from its build information. The release fails unless `go version -m` shows the tag, without `+dirty`.
   - **`bin/` also holds the pinned k3s and frps,** at the paths `up --bin-dir bin` resolves, as `hack/fetch-k3s.sh` and `hack/fetch-frp.sh` lay them out: `bin/k3s-1.36.5/k3s` and `bin/frp-0.71.1/frps`. Each is checked against the pins file the launcher embeds before it's packed (`internal/launcher/k3s-pins.txt`, `frp-pins.txt`).
@@ -322,6 +323,7 @@ Sources were read on 2026-10-30, except where another date is given.
 - 2026-11-12: the first tag's freeze includes `examples/`.
 - 2026-11-13: the first tag is made before alpha graduates, on the commit the `plgrid-now` rows passed on (the owner's decision).
 - 2026-11-13: the first tag's freeze is on the shipped code, the packages the four binaries are built from, not every path under `internal/`.
+- 2026-11-13: erratum: Releases' opening no longer says the first tag waits for graduation, and the sentences on what's frozen and what may land after stand in their own bullet.
 
 ## Amendments
 
