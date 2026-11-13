@@ -214,7 +214,7 @@ var sessions int
 
 // TestRehearsalTwoWorkers is the whole stack with an Instance of two workers behind Envoy.
 //
-//livecheck:none CI's rehearsal job runs it (hack/rehearsal.sh)
+//livecheck:none CI's rehearsal-workers job runs it (hack/rehearsal.sh)
 func TestRehearsalTwoWorkers(t *testing.T) {
 	r := startRigWith(t, rigSetup{mode: "direct", ports: portsWorkers, instanceRouter: true, objects: twoGPUObjects, engineGate: true})
 	// The launch sets its own CUDA_VISIBLE_DEVICES: each worker's slice replaces it (HBEP-7, Several
