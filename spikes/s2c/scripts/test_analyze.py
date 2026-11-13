@@ -766,5 +766,77 @@ class SummaryTest(ResultsCase):
                          {"B1-vr-hash": "no rr baseline", "B1-envoy-bound": "no rr baseline", "B1-envoy-nobound": "no rr baseline"})
 
 
+class ProbeTest(unittest.TestCase):
+    """The dead-worker probe's arm: its row comes from probe.json alone, its checks are the probe's own lines,
+    and a FAIL line fails the summary (1); a probe arm without probe.json is unreadable (2)."""
+
+    META = {"name": "H1-probe", "regime": "H", "rep": 1, "arm": "probe", "router": "envoy", "policy": None, "bound": "125",
+            "kv_blocks": 6000, "start_unix": 1.0, "end_unix": 2.0, "client_rc": 0, "nwork": 4, "load_args": "", "mode": "double",
+            "reset": "post"}
+    PASS = ["ok the victim was killed mid-stream", "ok siblings' streams uncut", "ok no 503 while the siblings are healthy",
+            "ok nothing reaches the restarted worker before its verification", "ok the verified worker takes its key's requests again"]
+
+    def tree(self, checks, with_probe=True):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        arm = os.path.join(d, "arms", "H1-probe")
+        os.makedirs(arm)
+        with open(os.path.join(arm, "meta.json"), "w") as f:
+            json.dump(self.META, f)
+        if with_probe:
+            with open(os.path.join(arm, "probe.json"), "w") as f:
+                json.dump({"victim": "worker-3", "checks": checks, "samples": [{"status": 200}] * 3, "non_200": 0,
+                           "victim_healthy_s": 30.0, "victim_verified_s": 45.5, "victim_admitted_s": 50.0,
+                           "max_latency_during_outage_ms": 812.0}, f)
+        return d
+
+    def test_passing_probe(self):
+        rows = analyze.analyse(self.tree(self.PASS))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual([c["ok"] for c in rows[0]["checks"]], [True] * 5)
+        self.assertEqual(rows[0]["checks"][2]["check"], "no 503 while the siblings are healthy")
+        self.assertNotIn("pass_rule", rows[0])  # the pass rule is the arms', not the probe's
+        self.assertEqual(analyze.status_of(rows), 0)
+        md = analyze.markdown(rows)
+        self.assertIn("victim worker-3", md)
+        self.assertIn("admitted 50.0 s after the kill", md)  # the probe's own figure, printed as given
+
+    def test_failing_probe(self):
+        checks = self.PASS[:2] + ["FAIL no 503 while the siblings are healthy: 2 of 40 probe requests failed"] + self.PASS[3:]
+        rows = analyze.analyse(self.tree(checks))
+        self.assertEqual(analyze.status_of(rows), 1)
+        self.assertEqual(rows[0]["checks"][2], {"check": "no 503 while the siblings are healthy", "ok": False,
+                                                 "reason": "2 of 40 probe requests failed"})
+        self.assertIn("FAIL no 503 while the siblings are healthy", analyze.markdown(rows))
+
+    def test_probe_without_its_record(self):
+        rows = analyze.analyse(self.tree([], with_probe=False))
+        self.assertEqual(analyze.status_of(rows), 2)
+
+    def test_probe_with_a_malformed_line(self):
+        rows = analyze.analyse(self.tree(["maybe fine"]))
+        self.assertEqual(analyze.status_of(rows), 2)
+
+
+class ClientRecordTest(unittest.TestCase):
+    """A measured record without its timing is unreadable input, never a crash; a failed attempt needs none."""
+
+    def write(self, lines):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        with open(os.path.join(d, "client.jsonl"), "w") as f:
+            f.write("\n".join(json.dumps(x) for x in lines) + "\n")
+        return d
+
+    def test_missing_ttft_is_unreadable(self):
+        d = self.write([{"run": "B1-rr", "latency_ms": 5, "prompt_tokens": 10}])
+        with self.assertRaises(analyze.Unreadable):
+            analyze.load_client(d)
+
+    def test_failed_attempt_needs_no_timing(self):
+        d = self.write([{"run": "B1-rr", "err": "http 503"}])
+        self.assertEqual(len(analyze.load_client(d)), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

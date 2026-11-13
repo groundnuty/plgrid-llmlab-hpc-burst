@@ -154,6 +154,9 @@ def load_client(arm_dir):
                 raise Unreadable(f"{path}:{n}: not JSON ({e})")
             if not isinstance(rec, dict):
                 raise Unreadable(f"{path}:{n}: not an object")
+            missing = [k for k in ("ttft_ms", "latency_ms", "prompt_tokens") if not rec.get("err") and k not in rec]
+            if missing:
+                raise Unreadable(f"{path}:{n}: no {', '.join(missing)}")
             out.append(rec)
     return out
 
@@ -559,6 +562,25 @@ def arm_row(arm_dir, meta):
     return row
 
 
+def probe_row(arm_dir, meta):
+    """The dead-worker probe's row (s2crouter probe, behind the bound Envoy arm): its probe.json, whose
+    checks are the probe's own lines ("ok <check>" or "FAIL <check>: <reason>"). Raises Unreadable."""
+    path = os.path.join(arm_dir, "probe.json")
+    p = read_json(path)
+    if not isinstance(p, dict) or not isinstance(p.get("checks"), list) or not p["checks"]:
+        raise Unreadable(f"{path}: no checks")
+    checks = []
+    for line in p["checks"]:
+        ok = isinstance(line, str) and line.startswith("ok ")
+        if not ok and not (isinstance(line, str) and line.startswith("FAIL ")):
+            raise Unreadable(f"{path}: check line {line!r}")
+        name, _, reason = line[3:].partition(": ") if ok else line[5:].partition(": ")
+        checks.append({"check": name, "ok": ok, "reason": reason})
+    row = dict(meta)
+    row.update({"probe": p, "checks": checks, "errors": []})
+    return row
+
+
 def analyse(results):
     """Rows of every arm under results/arms, with the pass rules attached."""
     rows = []
@@ -570,11 +592,12 @@ def analyse(results):
                          "errors": [], "checks": None})
             continue
         try:
-            rows.append(arm_row(arm_dir, load_meta(arm_dir)))
+            meta = load_meta(arm_dir)
+            rows.append(probe_row(arm_dir, meta) if meta["arm"] == "probe" else arm_row(arm_dir, meta))
         except Unreadable as e:
             rows.append({"name": name, "skipped": False, "errors": [str(e)], "checks": None, "arm": None, "regime": "?", "rep": 0})
     rows.sort(key=lambda r: (str(r.get("regime", "~")), r.get("rep", 0), ARM_ORDER.get(r.get("arm"), 9), r["name"]))
-    attach_pass_rules([r for r in rows if r.get("arm")])
+    attach_pass_rules([r for r in rows if r.get("arm") and r.get("arm") != "probe"])
     return rows
 
 
@@ -594,9 +617,13 @@ def markdown(rows):
            "| Sessions per worker | Sticky | Busiest / mean | Peak in flight | Router counts | OK / failed | Checks | Pass rule |",
            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     notes = []
+    probes = []
     for r in rows:
         if r.get("skipped"):
             out.append(f"| {r['name']} | skipped | " + " | ".join(["n/a"] * 12) + f" | skipped: {r['reason']} |")
+            continue
+        if r.get("arm") == "probe":
+            probes.append(r)
             continue
         p = r.get("placement") or {}
         checks = r["checks"]
@@ -621,6 +648,13 @@ def markdown(rows):
                               for k, v in pr["parts"].items())
             rules.append(f"- {r['name']}: {pr['verdict']}" + (f" ({parts})" if parts else ""))
     text = "\n".join(out)
+    for r in probes:
+        p = r["probe"]
+        text += (f"\n\nDead-worker probe {r['name']} (victim {p.get('victim')}): healthy again {fmt(p.get('victim_healthy_s'), '.1f')} s, "
+                 f"verified {fmt(p.get('victim_verified_s'), '.1f')} s, admitted {fmt(p.get('victim_admitted_s'), '.1f')} s after the kill; "
+                 f"{len(p.get('samples') or [])} probe requests, {p.get('non_200')} not 200, longest {fmt(p.get('max_latency_during_outage_ms'), '.0f')} ms "
+                 "during the outage\n" + "\n".join(check_line(c) for c in r["checks"]))
+        notes += [f"- {r['name']}: {check_line(c)}" for c in r["checks"] if not c["ok"]]
     if rules:
         text += "\n\nPass rule against the rr arm of the same regime and rep:\n" + "\n".join(rules)
     if notes:
