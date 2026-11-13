@@ -135,6 +135,27 @@ func NewVerificationRecord(namespace, modelDeployment, deploymentID string, inst
 	return rec, nil
 }
 
+// ParseWorkerVerificationRecordName returns the Instance UID, the worker and the generation that a
+// worker's verification record's name holds. It accepts exactly the names WorkerVerificationRecordName
+// returns.
+func ParseWorkerVerificationRecordName(name string) (types.UID, string, int64, error) {
+	bad := fmt.Errorf("%q is not a worker's verification record name, ver-<instance UID>-<worker>-<generation>", name)
+	rest, ok := strings.CutPrefix(name, VerificationRecordPrefix)
+	if !ok || len(rest) < 38 || !uuid.MatchString(rest[:36]) || rest[36] != '-' {
+		return "", "", 0, bad
+	}
+	tail := rest[37:]
+	j := strings.LastIndexByte(tail, '-')
+	if j <= 0 || !workerName.MatchString(tail[:j]) {
+		return "", "", 0, bad
+	}
+	gen, err := strconv.ParseInt(tail[j+1:], 10, 64)
+	if err != nil || gen < 1 || strconv.FormatInt(gen, 10) != tail[j+1:] {
+		return "", "", 0, bad
+	}
+	return types.UID(rest[:36]), tail[:j], gen, nil
+}
+
 // NewWorkerVerificationRecord is NewVerificationRecord for one worker of an Instance of several workers,
 // named WorkerVerificationRecordName (HBEP-7, Several workers). The labels and the contents are a
 // verification record's; only the name carries the worker.

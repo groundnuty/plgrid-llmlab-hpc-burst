@@ -354,3 +354,28 @@ func TestWorkerVerificationRecordName(t *testing.T) {
 		t.Errorf("the record: name %q, revision %d, labels %v", rec.Name, rec.Revision, rec.Labels)
 	}
 }
+
+// A worker's record name parses back to its UID, worker and generation, and nothing else does.
+func TestParseWorkerVerificationRecordName(t *testing.T) {
+	const uid = "11111111-2222-3333-4444-555555555555"
+	name, err := WorkerVerificationRecordName(uid, "worker-1", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u, w, g, err := ParseWorkerVerificationRecordName(name); err != nil || u != uid || w != "worker-1" || g != 12 {
+		t.Errorf("parse %q: %q, %q, %d, %v; want %s, worker-1, 12", name, u, w, g, err, uid)
+	}
+	for _, bad := range []string{
+		"ver-" + uid + "-12",          // one worker's
+		"ver-" + uid + "-worker-1-0",  // generation 0
+		"ver-" + uid + "-worker-01-1", // not a worker's name
+		"ver-" + uid + "-router-1",
+		"ver-" + uid + "-worker-1-01",
+		"ver-not-a-uid-worker-1-1",
+		"id-" + uid + "-worker-1-1",
+	} {
+		if u, w, g, err := ParseWorkerVerificationRecordName(bad); err == nil {
+			t.Errorf("ParseWorkerVerificationRecordName(%q) = %q, %q, %d; want an error", bad, u, w, g)
+		}
+	}
+}
