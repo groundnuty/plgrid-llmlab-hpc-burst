@@ -271,6 +271,17 @@ func (r *liveRun) secondPastItsBound(predTag string, startBy time.Time) func() b
 	}
 }
 
+// waitState is waitFor whose failure names what the condition saw last (stack.WaitState), for a wait whose timeout must say what it
+// was waiting on (the wait for the run's jobs to end, issue #503).
+func (r *liveRun) waitState(d time.Duration, what string, cond func() (bool, string)) {
+	r.t.Helper()
+	guarded := func() (bool, string) {
+		r.checkGuard()
+		return cond()
+	}
+	stack.WaitState(r.t, d, what, guarded)
+}
+
 // waitFor is stack.WaitFor that fails the step at once when the guard has
 // stopped on an error.
 func (r *liveRun) waitFor(d time.Duration, what string, cond func() bool) {

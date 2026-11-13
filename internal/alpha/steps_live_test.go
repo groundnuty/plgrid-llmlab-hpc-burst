@@ -630,6 +630,24 @@ func (r *liveRun) instances() []v1alpha1.Instance {
 	return l.Items
 }
 
+// runObjects reads the Allocations and the Instances of the run's namespace from the API, for the state a wait names when it gives up
+// (EndWaitState). A read that fails is returned, never taken for an empty list; its text goes to the private log.
+func (r *liveRun) runObjects() ([]v1alpha1.Allocation, []v1alpha1.Instance, error) {
+	ctx, cancel := stack.CallCtx(r.t)
+	defer cancel()
+	var al v1alpha1.AllocationList
+	var il v1alpha1.InstanceList
+	err := r.c.List(ctx, &al, client.InNamespace(r.w.md.Namespace))
+	if err == nil {
+		err = r.c.List(ctx, &il, client.InNamespace(r.w.md.Namespace))
+	}
+	if err != nil {
+		r.t.Logf("the run's Allocations and Instances could not be read for the wait's state: %v", err)
+		return nil, nil, err
+	}
+	return al.Items, il.Items, nil
+}
+
 // firstJobStarted is the run's first clock (FirstClock): the first
 // Allocation's job must start within it of the deployment's creation. Past it
 // the run ends with a NotStartedError, and Close stops the stack and cancels
