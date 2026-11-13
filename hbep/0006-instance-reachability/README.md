@@ -861,6 +861,7 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - 2026-11-12: several workers per Instance, for beta (HBEP-7, Several workers).
 - 2026-11-12: the bulk path, open question 12's contract (HBEP-6, The bulk path).
 - 2026-11-12: a request written into a pooled bulk connection in the moment after the bulk frpc dies gets 502, from part 6's real-frp test (#448).
+- 2026-11-13: erratum: the bulk path's Test plan item runs through S17's link, in its fair mode, where it named S1c's emulator, which adds no delay; the 48 MB/s and 2.3 ms it states are unchanged (#448's part 7, #480).
 
 ## Amendments
 
