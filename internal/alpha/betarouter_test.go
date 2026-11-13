@@ -200,7 +200,7 @@ func TestEnvoyChecksNameEachWayItFails(t *testing.T) {
 }
 
 func TestBytesChecksRequireACompleteReadingOfEveryVariant(t *testing.T) {
-	good := BytesObs{Variants: 440, Expected: 440, Complete: 440, Status200: 400, Status4xx: 40, StreamOK: 190, NonStreamOK: 210, ChatOK: 250, CompletionsOK: 150}
+	good := BytesObs{Variants: 440, Expected: 440, Complete: 440, Status200: 400, Status4xx: 40, InvalidSent: 2, InvalidRefused: 2, StreamOK: 190, NonStreamOK: 210, ChatOK: 250, CompletionsOK: 150}
 	if f := bytesChecks(good); len(f) != 0 {
 		t.Fatalf("a good reading fails: %v", f)
 	}
@@ -218,6 +218,8 @@ func TestBytesChecksRequireACompleteReadingOfEveryVariant(t *testing.T) {
 		{"no chat 200", func(b *BytesObs) { b.ChatOK = 0 }, "no chat variant answered 200"},
 		{"no completions 200", func(b *BytesObs) { b.CompletionsOK = 0 }, "no completions variant answered 200"},
 		{"counts that do not add up", func(b *BytesObs) { b.Status4xx = 41 }, "the response-level reading's status counts do not add up"},
+		{"an invalid variant answered 200", func(b *BytesObs) { b.InvalidRefused = 1 }, "a variant S13 says vLLM refuses was not refused with a 4xx"},
+		{"no invalid variant sent", func(b *BytesObs) { b.InvalidSent, b.InvalidRefused = 0, 0 }, "a variant S13 says vLLM refuses was not refused with a 4xx"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			b := good
@@ -309,5 +311,57 @@ func TestARouterNodeWithAnOldGlibcIsNotRun(t *testing.T) {
 	// An error that is not this one, wrapped or not, is no NOT RUN.
 	if NotRun(row, errors.New("the node's glibc was not read")) {
 		t.Error("an unrelated error ends the run NOT RUN")
+	}
+}
+
+// AdaptBody changes S13's model name and bounds generation where the case sets none, and nothing else.
+func TestAdaptBodyChangesOnlyTheModelAndTheBound(t *testing.T) {
+	for _, c := range []struct{ name, in, model, want string }{
+		{"the model and the bound", `{"model":"s13-model","messages":[{"role":"user","content":"hello"}]}`, "Qwen/Qwen2.5-7B-Instruct",
+			`{"max_tokens":8,"model":"Qwen/Qwen2.5-7B-Instruct","messages":[{"role":"user","content":"hello"}]}`},
+		{"a case that sets max_tokens keeps it", `{"model":"s13-model","prompt":"hello","max_tokens":32}`, "m", `{"model":"m","prompt":"hello","max_tokens":32}`},
+		{"a null max_tokens is the case's", `{"model":"s13-model","prompt":"hello","max_tokens":null}`, "m", `{"model":"m","prompt":"hello","max_tokens":null}`},
+		{"max_completion_tokens counts as a bound", `{"model":"s13-model","messages":[],"max_completion_tokens":48}`, "m", `{"model":"m","messages":[],"max_completion_tokens":48}`},
+		{"a streamed variant keeps its stream member first", `{"stream":true,"model":"s13-model","prompt":"hello"}`, "m", `{"max_tokens":8,"stream":true,"model":"m","prompt":"hello"}`},
+		{"no model name in the body", `{"prompt":"hello"}`, "m", `{"max_tokens":8,"prompt":"hello"}`},
+		{"an empty model keeps S13's", `{"model":"s13-model","prompt":"x"}`, "", `{"max_tokens":8,"model":"s13-model","prompt":"x"}`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := string(AdaptBody([]byte(c.in), c.model)); got != c.want {
+				t.Errorf("AdaptBody = %s, want %s", got, c.want)
+			}
+		})
+	}
+}
+
+func TestClassifyReplyNamesWhatTheRouterMade(t *testing.T) {
+	okJSON := []byte(`{"choices":[{"text":"hi"}]}`)
+	for _, c := range []struct {
+		name   string
+		status int
+		body   []byte
+		stream bool
+		cut    bool
+		want   ReplyClass
+	}{
+		{"a whole answer", 200, okJSON, false, false, ReplyClass{Complete: true}},
+		{"a whole stream", 200, []byte("data: {\"x\":1}\n\ndata: [DONE]\n\n"), true, false, ReplyClass{Complete: true}},
+		{"a stream that never ended", 200, []byte("data: {\"x\":1}\n\n"), true, false, ReplyClass{}},
+		{"the engine's refusal", 400, []byte(`{"error":{"message":"no"}}`), false, false, ReplyClass{Complete: true}},
+		{"a refusal of a streamed request is a JSON body", 400, []byte(`{"error":{"message":"no"}}`), true, false, ReplyClass{Complete: true}},
+		{"the engine's own 500", 500, []byte(`{"error":{"message":"boom"}}`), false, false, ReplyClass{Complete: true}},
+		{"a gateway 503", 503, []byte("no healthy upstream"), false, false, ReplyClass{RouterMade: true}},
+		{"a gateway 502 with a JSON body", 502, okJSON, false, false, ReplyClass{Complete: true, RouterMade: true}},
+		{"a gateway 504", 504, []byte("upstream request timeout"), false, false, ReplyClass{RouterMade: true}},
+		{"Envoy's text under another status", 500, []byte("upstream connect error or disconnect/reset before headers"), false, false, ReplyClass{RouterMade: true}},
+		{"no response", 0, nil, false, false, ReplyClass{RouterMade: true}},
+		{"a body cut short", 200, okJSON, false, true, ReplyClass{RouterMade: true}},
+		{"a 200 that is not JSON", 200, []byte("<html>"), false, false, ReplyClass{}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ClassifyReply(c.status, c.body, c.stream, c.cut); got != c.want {
+				t.Errorf("ClassifyReply = %+v, want %+v", got, c.want)
+			}
+		})
 	}
 }

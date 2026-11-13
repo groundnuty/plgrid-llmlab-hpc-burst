@@ -21,8 +21,10 @@ package alpha
 // such a node, and a separate decision.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -187,10 +189,17 @@ type BytesObs struct {
 	Variants int `json:"variants"`
 	Expected int `json:"expected"`
 	// Complete counts those that ended with a whole response: status and a body that finished (a JSON document, or a stream that
-	// ended with [DONE]); Status200 and Status4xx how they answered.
+	// ended with [DONE]); Status200, Status4xx and Status5xx how they answered (Status5xx is an engine's own 5xx, never a gateway one).
 	Complete  int `json:"complete"`
 	Status200 int `json:"status200"`
 	Status4xx int `json:"status4xx"`
+	Status5xx int `json:"status5xx"`
+	// InvalidSent counts the variants S13 says vLLM refuses (its Invalid cases), InvalidRefused those answered with a 4xx.
+	InvalidSent    int `json:"invalidSent"`
+	InvalidRefused int `json:"invalidRefused"`
+	// Failed names, by S13's variant key and at most FailedKept of them, the variants that did not finish or that the router or the path
+	// failed: for the private record, never the post.
+	Failed []string `json:"failed,omitempty"`
 	// RouterMade counts the variants whose response was a failure the router or the path made: a gateway status (502, 503, 504), a
 	// response that was cut or never finished, or one that is not an engine's answer. Counts only, never a body.
 	RouterMade int `json:"routerMade"`
@@ -279,8 +288,11 @@ func bytesChecks(b BytesObs) []string {
 	case b.CompletionsOK == 0:
 		f = append(f, "no completions variant answered 200")
 	}
-	if b.Status200+b.Status4xx != b.Complete {
+	if b.Status200+b.Status4xx+b.Status5xx != b.Complete {
 		f = append(f, "the response-level reading's status counts do not add up")
+	}
+	if b.InvalidSent <= 0 || b.InvalidRefused != b.InvalidSent {
+		f = append(f, "a variant S13 says vLLM refuses was not refused with a 4xx")
 	}
 	return f
 }
@@ -360,4 +372,135 @@ func envoyProcsWord(e EnvoyObs) string {
 		return "one process"
 	}
 	return fmt.Sprintf("%d processes", e.Procs)
+}
+
+// FailedKept is how many failed variants' keys the record keeps.
+const FailedKept = 20
+
+// bytesMaxTokens is the generation bound the reading puts on a variant whose case sets none, so that every variant finishes in
+// seconds on a real engine. It changes the bytes, which is why the reading is a response-level one.
+const bytesMaxTokens = 8
+
+// s13Model is the model name S13's literal bodies carry.
+const s13Model = `"model":"s13-model"`
+
+// AdaptBody is a variant's body as the reading sends it: S13's model name replaced by the deployment's, and, where the case sets no
+// limit on generation (neither max_tokens nor max_completion_tokens, null or not), a bound after the opening brace. Everything else is
+// S13's bytes. It never fails: a body without S13's model name is sent as it is.
+func AdaptBody(body []byte, model string) []byte {
+	s := string(body)
+	if model != "" {
+		s = strings.Replace(s, s13Model, `"model":`+strconv.Quote(model), 1)
+	}
+	if !strings.Contains(s, `"max_tokens"`) && !strings.Contains(s, `"max_completion_tokens"`) {
+		if i := strings.IndexByte(s, '{'); i >= 0 {
+			s = s[:i+1] + `"max_tokens":` + strconv.Itoa(bytesMaxTokens) + `,` + s[i+1:]
+		}
+	}
+	return []byte(s)
+}
+
+// envoyFailureText is what Envoy's own error responses say (its local reply texts), which the front passes on; a 5xx that says one is
+// the router's, and so are the gateway statuses.
+var envoyFailureText = []string{"upstream connect error", "no healthy upstream", "upstream request timeout", "delayed connect error", "connection termination"}
+
+// ReplyClass is how the reading judges one response.
+type ReplyClass struct {
+	// Complete says the response finished: a status, and a body that is a whole JSON document, or a stream that ended with [DONE].
+	Complete bool
+	// RouterMade says the response is a failure the router or the path made: a gateway status, Envoy's own error text, or no response.
+	RouterMade bool
+}
+
+// ClassifyReply judges a response to a variant. status 0 is no response. A cut or unfinished body is incomplete, and, since no engine
+// answers by being cut, router-made.
+func ClassifyReply(status int, body []byte, stream bool, cut bool) ReplyClass {
+	if status == 0 || cut {
+		return ReplyClass{RouterMade: true}
+	}
+	c := ReplyClass{}
+	switch status {
+	case 502, 503, 504:
+		c.RouterMade = true
+	}
+	text := string(body)
+	for _, e := range envoyFailureText {
+		if strings.Contains(text, e) {
+			c.RouterMade = true
+		}
+	}
+	switch {
+	case status == 200 && stream:
+		c.Complete = strings.Contains(text, "data: [DONE]")
+	default:
+		c.Complete = json.Valid(body)
+	}
+	return c
+}
+
+// GlibcScript is the srun step that reads the node's glibc: one line, "glibc 2.34" (ParseGetconfGlibc). getconf is glibc's own, and
+// reports the system's, the one Envoy's loader loads (internal/agent/envoyglibc.go).
+const GlibcScript = "getconf GNU_LIBC_VERSION\n"
+
+// PickEnvoy reads the Envoy of the run's job off a listing (ListScript): the processes of the job, or descending from one, whose program is
+// named envoy, and whether any of them has an Apptainer process among its ancestors, which would not be bare. The agent starts Envoy as
+// its own child, from the staged file, under the name envoy (internal/agent/envoy.go, StartEnvoy).
+func PickEnvoy(procs []NodeProc) (envoys []NodeProc, contained bool) {
+	t := newProcTree(procs, nil, nil)
+	for _, p := range procs {
+		if len(p.Argv) == 0 || filepath.Base(p.Argv[0]) != "envoy" || !t.inJob(p) {
+			continue
+		}
+		envoys = append(envoys, p)
+		cur := p
+		for range len(procs) + 1 {
+			q, ok := t.parent(cur)
+			if !ok {
+				break
+			}
+			if isApptainer(q.Argv) {
+				contained = true
+			}
+			cur = q
+		}
+	}
+	return envoys, contained
+}
+
+var (
+	digitsOnly = regexp.MustCompile(`^[0-9]+$`)
+	base64Only = regexp.MustCompile(`^[A-Za-z0-9+/=]+$`)
+	sha256Hex  = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
+
+// EnvoyDigestScript is the srun step that reads the SHA-256 of a running Envoy's executable: the process at the PID must still be the one
+// listed (the same start time and command line, as the kill's helper checks), and then its /proc/<pid>/exe is read, which is the file the
+// kernel runs, not a path the agent says. It prints "digest <hex>", or one word: gone, changed or unreadable. The listed process's fields
+// are checked before they are written into the script.
+func EnvoyDigestScript(p NodeProc) (string, error) {
+	if p.PID <= 0 || !digitsOnly.MatchString(p.Start) || !base64Only.MatchString(p.cmdline) {
+		return "", errors.New("the listed process's fields are not ones a script can carry")
+	}
+	return `set -u
+pid=` + strconv.Itoa(p.PID) + `
+start=` + p.Start + `
+cmd=` + p.cmdline + `
+st=$(cat /proc/$pid/stat 2>/dev/null) || { echo gone; exit 0; }
+rest=${st##*) }
+set -- $rest
+[ "${20}" = "$start" ] || { echo changed; exit 0; }
+now=$(base64 -w0 < /proc/$pid/cmdline 2>/dev/null) || { echo gone; exit 0; }
+[ "$now" = "$cmd" ] || { echo changed; exit 0; }
+sum=$(sha256sum < /proc/$pid/exe 2>/dev/null) || { echo unreadable; exit 0; }
+echo "digest ${sum%% *}"
+`, nil
+}
+
+// ParseEnvoyDigest reads the digest off EnvoyDigestScript's output; false for any other word.
+func ParseEnvoyDigest(out []byte) (string, bool) {
+	f := strings.Fields(string(out))
+	if len(f) != 2 || f[0] != "digest" || !sha256Hex.MatchString(f[1]) {
+		return "", false
+	}
+	return f[1], true
 }

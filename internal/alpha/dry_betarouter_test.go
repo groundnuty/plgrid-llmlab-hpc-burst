@@ -12,7 +12,7 @@ import (
 
 // dryRouterBytes is the healthy response-level reading: S13's 440 variants, each answered, the 2 invalid ones with 4xx.
 func dryRouterBytes() BytesObs {
-	return BytesObs{Variants: 440, Expected: 440, Complete: 440, Status200: 400, Status4xx: 40, StreamOK: 190, NonStreamOK: 210, ChatOK: 250, CompletionsOK: 150}
+	return BytesObs{Variants: 440, Expected: 440, Complete: 440, Status200: 400, Status4xx: 40, InvalidSent: 2, InvalidRefused: 2, StreamOK: 190, NonStreamOK: 210, ChatOK: 250, CompletionsOK: 150}
 }
 
 // BetaRouter is the router row over the fake cluster.
