@@ -31,8 +31,12 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
-// lastHealth is the health flags of envoyHolds' last read, for a failure's message.
-var lastHealth string
+// lastHealth is the health flags of envoyHolds' last read, for a failure's message, and lastFailedActive
+// whether its active check failed the worker then.
+var (
+	lastHealth       string
+	lastFailedActive bool
+)
 
 // envoyHolds reads, from Envoy's admin, whether Envoy holds worker w out of its routing, and the worker's
 // rq_total.
@@ -73,9 +77,10 @@ func envoyHolds(runDir, w string) (failing bool, requests int, err error) {
 					requests, _ = strconv.Atoi(strings.Trim(string(s.Value), `"`))
 				}
 			}
-			// Envoy routes to it only while none of its active check failing, its outlier ejection or its
-			// first check still pending holds (as the agent reads it, parseClusters).
+			// out: Envoy routes to it no more, its active check failing, its outlier ejection or its first
+			// check still pending (as the agent reads it, parseClusters).
 			lastHealth = fmt.Sprintf("failed_active %v, failed_outlier %v, pending_active %v", h.Health.FailedActive, h.Health.FailedOutlier, h.Health.PendingActive)
+			lastFailedActive = h.Health.FailedActive
 			return h.Health.FailedActive || h.Health.FailedOutlier || h.Health.PendingActive, requests, nil
 		}
 	}
@@ -202,9 +207,10 @@ func hookRestart(t *testing.T, h *harness, w string) *restartSeen {
 		if name != w {
 			return
 		}
-		f, n, err := envoyHolds(h.runDir, w)
+		_, n, err := envoyHolds(h.runDir, w)
+		// The wait's rule: Envoy's active check fails the worker, which holds it out until its verification.
 		seen.mu.Lock()
-		seen.at, seen.failing, seen.requests, seen.err, seen.health = time.Now(), f, n, err, lastHealth
+		seen.at, seen.failing, seen.requests, seen.err, seen.health = time.Now(), lastFailedActive, n, err, lastHealth
 		seen.mu.Unlock()
 	}))
 	return seen
@@ -217,9 +223,10 @@ func (s *restartSeen) get() restartSeen {
 }
 
 // killWorker kills worker w's engine through a pidfd once it runs at generation gen, and waits until the
-// agent has seen it exit, while Envoy still routes to it: the window this file is about. It returns when
-// the kill was sent.
-func killWorker(t *testing.T, h *harness, w string, gen int64) time.Time {
+// agent has seen it exit. It returns when the kill was sent, and whether Envoy still routes to the worker
+// then: the window this file is about, which Envoy's 5 s check closes, now and then before the agent's
+// report of the exit (killInWindow).
+func killWorker(t *testing.T, h *harness, w string, gen int64) (time.Time, bool) {
 	t.Helper()
 	r := h.waitReport(w+" running", time.Minute, leaderOf(h, w, gen))
 	pidfdKillID(t, engineOf(t, pidOf(r, w)))
@@ -236,10 +243,40 @@ func killWorker(t *testing.T, h *harness, w string, gen int64) time.Time {
 		}
 		return false
 	})
-	if out, _, err := envoyHolds(h.runDir, w); err != nil || out {
-		t.Fatalf("Envoy already holds %s out of its routing %s after its kill (%s, %v): the test would not reach the window it is about", w, time.Since(killAt).Round(time.Millisecond), lastHealth, err)
+	out, _, err := envoyHolds(h.runDir, w)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return killAt
+	if out {
+		t.Logf("Envoy already held %s out of its routing %s after its kill (%s)", w, time.Since(killAt).Round(time.Millisecond), lastHealth)
+	}
+	return killAt, !out
+}
+
+// killInWindow kills worker idx of d's Instance, as killWorker does, until Envoy still routes to it once
+// the agent has seen its exit: when Envoy's check closed the window first, the worker is restarted and
+// verified again, Envoy waited for to hold it healthy, and killed again (#507's review: a precondition
+// that re-arms rather than fails). It returns the kill's time.
+func killInWindow(t *testing.T, h *harness, d *agentapi.DesiredState, idx int) time.Time {
+	t.Helper()
+	w := d.Instance.Workers[idx].Name
+	for attempt := 1; ; attempt++ {
+		killAt, open := killWorker(t, h, w, d.Instance.Workers[idx].Generation)
+		if open {
+			return killAt
+		}
+		if attempt == 4 {
+			t.Fatalf("Envoy's check closed the window before the agent's report of %s's exit in 4 attempts", w)
+		}
+		g := d.Instance.Workers[idx].Generation + 1
+		d.Instance.Workers[idx].Generation, d.Instance.Workers[idx].VerifiedGeneration = g, &g
+		h.set(*d)
+		want := map[string]bool{}
+		for _, dw := range d.Instance.Workers {
+			want[dw.Name] = true
+		}
+		h.waitReport("Envoy holding every worker healthy again", time.Minute, routerHolds(want))
+	}
 }
 
 // TestADeadWorkersRequestsGoToItsSibling: two workers; worker-1's engine is killed. Requests in a session
@@ -247,10 +284,11 @@ func killWorker(t *testing.T, h *harness, w string, gen int64) time.Time {
 // the route's retry: no client sees a 503.
 func TestADeadWorkersRequestsGoToItsSibling(t *testing.T) {
 	h := newHarness(t, harnessOptions{envoy: testenv.EnvoyBinary(t), baseEnv: []string{"CUDA_VISIBLE_DEVICES=0,1"}})
-	h.set(workersRouterState(h, 2))
+	d := workersRouterState(h, 2)
+	h.set(d)
 	h.waitReport("Envoy holding both workers healthy", time.Minute, routerHolds(map[string]bool{"worker-0": true, "worker-1": true}))
 	session := sessionOn(t, h, "worker-1")
-	killAt := killWorker(t, h, "worker-1", 0)
+	killAt := killInWindow(t, h, &d, 1)
 	for i := 0; i < 10; i++ {
 		if code, body := send(t, h, session); code != http.StatusOK {
 			t.Fatalf("request %d in worker-1's session, %s after its kill: %d %q, want worker-0's answer through the retry", i, time.Since(killAt).Round(time.Millisecond), code, body)
@@ -268,11 +306,12 @@ func TestARestartedWorkersProcessWaitsForEnvoy(t *testing.T) {
 	h.set(d)
 	h.waitReport("Envoy holding both workers healthy", time.Minute, routerHolds(map[string]bool{"worker-0": true, "worker-1": true}))
 	session := sessionOn(t, h, "worker-1")
+	killAt := killInWindow(t, h, &d, 1)
 	seen := hookRestart(t, h, "worker-1")
-	killAt := killWorker(t, h, "worker-1", 0)
-	d.Instance.Workers[1].Generation, d.Instance.Workers[1].VerifiedGeneration = 1, nil
+	gen := d.Instance.Workers[1].Generation + 1
+	d.Instance.Workers[1].Generation, d.Instance.Workers[1].VerifiedGeneration = gen, nil
 	h.set(d)
-	h.waitReport("worker-1's new process running", time.Minute, leaderOf(h, "worker-1", 1))
+	h.waitReport("worker-1's new process running", time.Minute, leaderOf(h, "worker-1", gen))
 	s := seen.get()
 	if s.at.IsZero() || s.err != nil {
 		t.Fatalf("the restart hook saw nothing of worker-1's restart (%v)", s.err)
@@ -288,8 +327,7 @@ func TestARestartedWorkersProcessWaitsForEnvoy(t *testing.T) {
 	if _, n, _ := envoyHolds(h.runDir, "worker-1"); n != s.requests {
 		t.Errorf("Envoy sent worker-1 %d requests after its new process started, before its verification", n-s.requests)
 	}
-	v := int64(1)
-	d.Instance.Workers[1].VerifiedGeneration = &v
+	d.Instance.Workers[1].VerifiedGeneration = &gen
 	h.set(d)
 	h.waitReport("Envoy holding both workers healthy again", time.Minute, routerHolds(map[string]bool{"worker-0": true, "worker-1": true}))
 	_, before, _ := envoyHolds(h.runDir, "worker-1")
@@ -309,11 +347,12 @@ func TestARestartedWorkerBehindTheRouterTakesNoRequestBeforeItsVerification(t *t
 	d := workersRouterState(h, 1)
 	h.set(d)
 	h.waitReport("Envoy holding worker-0 healthy", time.Minute, routerHolds(map[string]bool{"worker-0": true}))
+	killAt := killInWindow(t, h, &d, 0)
 	seen := hookRestart(t, h, "worker-0")
-	killAt := killWorker(t, h, "worker-0", 0)
-	d.Instance.Workers[0].Generation, d.Instance.Workers[0].VerifiedGeneration = 1, nil
+	gen := d.Instance.Workers[0].Generation + 1
+	d.Instance.Workers[0].Generation, d.Instance.Workers[0].VerifiedGeneration = gen, nil
 	h.set(d)
-	h.waitReport("worker-0's new process running", time.Minute, leaderOf(h, "worker-0", 1))
+	h.waitReport("worker-0's new process running", time.Minute, leaderOf(h, "worker-0", gen))
 	s := seen.get()
 	if s.at.IsZero() || s.err != nil {
 		t.Fatalf("the restart hook saw nothing of worker-0's restart (%v)", s.err)
@@ -326,5 +365,64 @@ func TestARestartedWorkerBehindTheRouterTakesNoRequestBeforeItsVerification(t *t
 	}
 	if _, n, _ := envoyHolds(h.runDir, "worker-0"); n != s.requests {
 		t.Errorf("Envoy sent worker-0 %d requests after its new process started, before its verification", n-s.requests)
+	}
+}
+
+// TestConcurrentRequestsOfADeadWorkerAllGoToItsSibling: more retries at once than Envoy's default of 3
+// parallel retries (#507's review). worker-0 answers slowly (token-delay), so each retried request holds
+// its retry slot for its whole answer; 32 requests at once in a session the ring hash places on the dead
+// worker-1 must all get worker-0's 200, none an overflow 503.
+func TestConcurrentRequestsOfADeadWorkerAllGoToItsSibling(t *testing.T) {
+	h := newHarness(t, harnessOptions{envoy: testenv.EnvoyBinary(t), baseEnv: []string{"CUDA_VISIBLE_DEVICES=0,1"}})
+	d := workersRouterState(h, 2)
+	d.Instance.Launch.Env = append(d.Instance.Launch.Env, agentapi.EnvVar{Name: "HB_ENGINE_DOUBLE", Value: "token-delay=50ms"})
+	h.set(d)
+	r := h.waitReport("Envoy holding both workers healthy", time.Minute, routerHolds(map[string]bool{"worker-0": true, "worker-1": true}))
+	key := r.Instance.Key
+	if key == "" {
+		t.Fatal("the report carries no Instance key")
+	}
+	session := sessionOn(t, h, "worker-1")
+	killAt := killInWindow(t, h, &d, 1)
+	const n = 32
+	codes := make([]int, n)
+	bodies := make([]string, n)
+	var start, done sync.WaitGroup
+	start.Add(1)
+	for i := 0; i < n; i++ {
+		done.Add(1)
+		go func(i int) {
+			defer done.Done()
+			c := unixClient(agent.ServingSocket(h.runDir))
+			defer c.Transport.(*http.Transport).CloseIdleConnections()
+			body := `{"model":"` + hServed + `","messages":[{"role":"user","content":"hello"}],"max_tokens":20,"min_tokens":20}`
+			req, _ := http.NewRequest(http.MethodPost, "http://instance/v1/chat/completions", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+key)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("x-session-id", session)
+			start.Wait()
+			resp, err := c.Do(req)
+			if err != nil {
+				codes[i], bodies[i] = -1, err.Error()
+				return
+			}
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			codes[i], bodies[i] = resp.StatusCode, string(b)
+		}(i)
+	}
+	start.Done()
+	done.Wait()
+	failed := 0
+	for i := range codes {
+		if codes[i] != http.StatusOK {
+			failed++
+			if failed <= 3 {
+				t.Errorf("request %d of %d at once, in worker-1's session %s after its kill: %d %.160q", i, n, time.Since(killAt).Round(time.Millisecond), codes[i], bodies[i])
+			}
+		}
+	}
+	if failed > 0 {
+		t.Errorf("%d of %d concurrent requests failed; want each answered by worker-0 through the retry", failed, n)
 	}
 }

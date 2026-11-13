@@ -388,11 +388,12 @@ func (a *Agent) convergeWorkers(in *instance, i agentapi.DesiredInstance) {
 
 // restartReleased reports whether a restarted worker's new process may start (HBEP-7, Several workers;
 // the science agent's ruling on #439, PR 4's finding): at once without a running router; behind one, once
-// the router's read of its workers, taken after the worker went down, holds it unhealthy, or at the latest
+// the router's read of its workers, taken after the worker went down, holds it failing its active check,
+// or at the latest
 // one active-check interval plus its timeout after it went down, by when Envoy has checked it. From the
-// worker's going down the readiness endpoint answers 503 for it, so Envoy marks it unhealthy at its next
-// check, and keeps it so until its new generation is verified: no request reaches the new process before
-// then. Until released, it arms one wake-up of the loop for the deadline.
+// worker's going down the readiness endpoint answers 503 for it, so Envoy's active check fails it at its
+// next check, and keeps failing it until its new generation is verified: no request reaches the new
+// process before then. Until released, it arms one wake-up of the loop for the deadline.
 func (a *Agent) restartReleased(in *instance, w *worker) bool {
 	r := in.router
 	if r == nil || r.phase != agentapi.PartRunning {
@@ -402,9 +403,11 @@ func (a *Agent) restartReleased(in *instance, w *worker) bool {
 	if !a.clock().Before(deadline) {
 		return true
 	}
+	// The active check failing is what holds the worker out until its verification; an outlier ejection
+	// alone can end first (#507's review).
 	if r.clustersReadAt != nil && r.clustersReadAt.After(w.downAt) {
 		for _, rw := range r.workers {
-			if rw.Name == w.name && !rw.Healthy {
+			if rw.Name == w.name && rw.FailedActiveCheck {
 				return true
 			}
 		}

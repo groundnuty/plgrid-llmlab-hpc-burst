@@ -435,11 +435,11 @@ func (g guard) cluster(v any, at string) error {
 	if err != nil {
 		return err
 	}
-	th, err := g.object(ths[0], at+".circuit_breakers.thresholds[0]", "priority", "max_connections", "max_pending_requests", "max_requests")
+	th, err := g.object(ths[0], at+".circuit_breakers.thresholds[0]", "priority", "max_connections", "max_pending_requests", "max_requests", "max_retries")
 	if err != nil {
 		return err
 	}
-	for _, k := range []string{"max_connections", "max_pending_requests", "max_requests"} {
+	for _, k := range []string{"max_connections", "max_pending_requests", "max_requests", "max_retries"} {
 		if n, ok := th[k].(json.Number); !ok || n.String() != fmt.Sprint(uint64(envoyMaxThreshold)) {
 			return refuse("%s.circuit_breakers.thresholds[0].%s is %v, want Envoy's maximum %d: an overflow 503 would count toward the Instance's pause", at, k, th[k], uint64(envoyMaxThreshold))
 		}
