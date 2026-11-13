@@ -169,7 +169,8 @@
 //     SLURM_JOB_USER, SLURM_JOB_PARTITION, SLURM_JOB_ACCOUNT,
 //     SLURM_SUBMIT_DIR, SLURM_CPUS_PER_TASK, SLURM_MEM_PER_NODE,
 //     SLURM_JOB_NUM_NODES, SLURM_NNODES, and SLURM_RESTART_COUNT after a
-//     requeue), TMPDIR, and the job variables (RunMode.JobVars): each a fresh
+//     requeue), for a GPU job CUDA_VISIBLE_DEVICES, the indices 0 to gpus-1
+//     of the GPUs it was given, TMPDIR, and the job variables (RunMode.JobVars): each a fresh
 //     directory of the execution under RunMode.JobDir, a featured one only
 //     for a job whose --constraint names the feature. The execution's
 //     directory goes when its processes are gone.

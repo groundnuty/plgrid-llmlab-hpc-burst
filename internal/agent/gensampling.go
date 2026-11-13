@@ -278,13 +278,13 @@ type genSampling struct {
 	sampling agentapi.Sampling
 }
 
-// genSampling returns the instance's sampling state for its current
+// genSampling returns a checker's sampling state for its current
 // verification generation. Only the agent's loop calls it.
-func (in *instance) genSampling() *genSampling {
-	if in.sampling == nil {
-		in.sampling = &genSampling{}
+func (ck *checker) genSampling() *genSampling {
+	if ck.sampling == nil {
+		ck.sampling = &genSampling{}
 	}
-	return in.sampling
+	return ck.sampling
 }
 
 // resolve reads the staged file in dir on its first call, and returns g.

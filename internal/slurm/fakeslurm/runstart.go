@@ -191,6 +191,16 @@ func (p *Platform) jobEnv(j *job, submitDir string, vars map[string]string) []st
 	if j.restartCnt > 0 {
 		slurmVars["SLURM_RESTART_COUNT"] = strconv.Itoa(j.restartCnt)
 	}
+	// A GPU job sees the GPUs it was given, as Slurm sets them where it confines a job's devices: their
+	// indices on the node, which within the job's cgroup are 0 to gpus-1. An Instance of several
+	// workers slices this list among them (HBEP-7, Several workers).
+	if j.gpus > 0 {
+		devs := make([]string, j.gpus)
+		for i := range devs {
+			devs[i] = strconv.Itoa(i)
+		}
+		slurmVars["CUDA_VISIBLE_DEVICES"] = strings.Join(devs, ",")
+	}
 	for k, v := range slurmVars {
 		env[k] = v
 	}

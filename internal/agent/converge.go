@@ -56,13 +56,14 @@ type instance struct {
 	staged       bool // staging for stageGen succeeded
 	imagePath    string
 	ckptDir      string
-	// fileResults are the rehash results of the last staging, for the file
-	// list whose hash is filesKey. They serve only the first verification
-	// after that staging (fileResultsFresh); a later one rehashes (PR #87
-	// review, Astra B2, Opus B1).
-	fileResults      []agentapi.FileResult
-	filesKey         [32]byte
-	fileResultsFresh bool
+	// fileResults are the rehash results of the last staging, number
+	// stagingSeq, for the file list whose hash is filesKey. They serve only
+	// each checker's first verification after that staging
+	// (checker.usedStaging); a later one rehashes (PR #87 review, Astra B2,
+	// Opus B1).
+	fileResults []agentapi.FileResult
+	filesKey    [32]byte
+	stagingSeq  int
 
 	workers []*worker
 	// routerDesired is the desired state's router (beta, opt-in; router.go), nil for alpha's shape;
@@ -70,17 +71,14 @@ type instance struct {
 	routerDesired *agentapi.DesiredRouter
 	router        *routerPart
 
-	// Checks of the current verification generation, and the one check unit
-	// running, if any.
-	checks *agentapi.CheckResults
-	unit   *checkUnit
-	// sectionKeys holds, for each section of checks, the processes it was
-	// taken against.
-	sectionKeys map[string]procKey
-	// sampling is the sampling of the current verification generation's
-	// checks, computed once from the staged file (genSampling); nil until a
-	// check unit needs it, and again after a new generation or staging.
-	sampling *genSampling
+	// ck is the Instance's own checks (DesiredInstance.Checks, one worker),
+	// and wck each worker's (DesiredWorker.Checks, several workers), by name
+	// (checks.go).
+	ck  checker
+	wck map[string]*checker
+	// workerCount is the number of the desired workers: above 1, each worker runs on its own socket and
+	// its own slice of the job's devices (workerLaunch, workerDevices).
+	workerCount int
 }
 
 // worker is one engine process of the Instance.
@@ -211,9 +209,22 @@ func checkDesired(d agentapi.DesiredState) error {
 	if len(d.Instance.Workers) == 0 {
 		return fmt.Errorf("its Instance has no worker")
 	}
+	n := len(d.Instance.Workers)
+	seen := map[string]bool{}
 	for _, w := range d.Instance.Workers {
 		if w.EngineSocket != agentapi.ContainerEngineSocket(w.Name) {
 			return fmt.Errorf("worker %q's engine socket %q is not %q", w.Name, w.EngineSocket, agentapi.ContainerEngineSocket(w.Name))
+		}
+		// Each worker is worker-<i> with i below the number of workers, named once: worker i's devices
+		// are the job's i-th slice (workerDevices; #495's review).
+		if i, err := workerIndex(w.Name); err != nil || i >= n || seen[w.Name] {
+			return fmt.Errorf("worker %q is not one of worker-0 to worker-%d, named once", w.Name, n-1)
+		}
+		seen[w.Name] = true
+		if c := w.Checks; c != nil && c.WarmUp != nil {
+			if t, most := c.WarmUp.TargetSessions, agentapi.MaxWorkerTargetSessions(n); t < 1 || t > most {
+				return fmt.Errorf("worker %q's warm-up targetSessions %d is outside 1..%d, its share of %d among %d workers", w.Name, t, most, agentapi.MaxTargetSessions, n)
+			}
 		}
 	}
 	if c := d.Instance.Checks; c != nil && c.WarmUp != nil {
@@ -284,8 +295,8 @@ func (a *Agent) applyRun(i agentapi.DesiredInstance) {
 	in.keyStored = i.KeyStored
 	in.hubToken = i.HubToken
 	in.routerDesired = i.Router
-	if c := i.Checks; c != nil && c.Verify != nil && len(c.Verify.Files) > 0 && (!in.haveFiles || in.filesGen != i.Generation) {
-		in.files = append([]agentapi.FileDigest(nil), c.Verify.Files...)
+	if files := verifyFiles(i); len(files) > 0 && (!in.haveFiles || in.filesGen != i.Generation) {
+		in.files = append([]agentapi.FileDigest(nil), files...)
 		in.filesGen = i.Generation
 		in.haveFiles = true
 	}
@@ -335,6 +346,7 @@ func (a *Agent) applyRun(i agentapi.DesiredInstance) {
 // once the old one is gone. A worker that exited or was stopped does not start
 // again until a generation rises: the agent never restarts a part by itself.
 func (a *Agent) convergeWorkers(in *instance, i agentapi.DesiredInstance) {
+	in.workerCount = len(i.Workers)
 	for _, dw := range i.Workers {
 		w := in.find(dw.Name)
 		switch {
@@ -520,10 +532,13 @@ func (a *Agent) stagingDone(in *instance, gen int64, img ImageResult, ck Checkpo
 	in.imagePath = img.Path
 	in.imageVerified = img.Verified
 	in.ckptDir = ck.Dir
-	in.sampling = nil // a staging may bring a new file
+	in.ck.sampling = nil // a staging may bring a new file
+	for _, c := range in.wck {
+		c.sampling = nil
+	}
 	in.fileResults = ck.Files
 	in.filesKey = filesKey(files)
-	in.fileResultsFresh = true
+	in.stagingSeq++
 }
 
 // LoadFormat returns the --load-format a launch's command passes, "" when it
@@ -556,4 +571,19 @@ func (a *Agent) cancelStaging(in *instance) {
 func filesKey(files []agentapi.FileDigest) [32]byte {
 	b, _ := json.Marshal(files)
 	return sha256.Sum256(b)
+}
+
+// verifyFiles is the identity record's file list a desired Instance's verification carries, which staging
+// needs: the Instance's own checks', with one worker, else the first worker's whose checks carry one, with
+// several (the science agent's ruling on #439, Q6: the checks are per worker then).
+func verifyFiles(i agentapi.DesiredInstance) []agentapi.FileDigest {
+	if c := i.Checks; c != nil && c.Verify != nil && len(c.Verify.Files) > 0 {
+		return c.Verify.Files
+	}
+	for _, dw := range i.Workers {
+		if c := dw.Checks; c != nil && c.Verify != nil && len(c.Verify.Files) > 0 {
+			return c.Verify.Files
+		}
+	}
+	return nil
 }

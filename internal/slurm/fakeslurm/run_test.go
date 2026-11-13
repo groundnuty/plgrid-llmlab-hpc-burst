@@ -325,3 +325,20 @@ func TestRunModeRefusesABadConfig(t *testing.T) {
 		})
 	}
 }
+
+// A GPU job sees its GPUs in CUDA_VISIBLE_DEVICES, the indices 0 to gpus-1, as Slurm sets them where it
+// confines a job's devices; a CPU job has none (HBEP-7, Several workers, slices this list).
+func TestRunModeGPUJobSeesItsDevices(t *testing.T) {
+	r := newRunRig(t, RunMode{JobDir: filepath.Join(t.TempDir(), "j")})
+	wrap := func(out string) string { return "env > " + out + ".tmp; mv " + out + ".tmp " + out }
+	two := r.submit(wrap(r.home+"/env-gpu2"), "--gres=gpu:2")
+	cpu := r.submit(wrap(r.home + "/env-cpu"))
+	if got := envOf(r.waitFile(r.home + "/env-gpu2"))["CUDA_VISIBLE_DEVICES"]; got != "0,1" {
+		t.Errorf("a job of 2 GPUs: CUDA_VISIBLE_DEVICES=%q, want 0,1", got)
+	}
+	if v, ok := envOf(r.waitFile(r.home + "/env-cpu"))["CUDA_VISIBLE_DEVICES"]; ok {
+		t.Errorf("a CPU job: CUDA_VISIBLE_DEVICES=%q, want it unset", v)
+	}
+	r.waitFinished(two)
+	r.waitFinished(cpu)
+}

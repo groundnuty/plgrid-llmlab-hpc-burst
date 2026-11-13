@@ -78,12 +78,12 @@ func TestARefusedGenerationStartsNoUnit(t *testing.T) {
 			}
 			// Until the unit that reads the file has ended, a unit may start; each
 			// ends by itself with the refusal, and the loop takes its event.
-			for n := 0; !in.sampling.refused(); n++ {
+			for n := 0; !in.ck.sampling.refused(); n++ {
 				if n > 3 {
 					t.Fatal("the generation's file was not refused after 3 units")
 				}
 				a.runChecks(in, i)
-				if in.unit == nil {
+				if in.ck.unit == nil {
 					continue
 				}
 				select {
@@ -97,8 +97,8 @@ func TestARefusedGenerationStartsNoUnit(t *testing.T) {
 			// the loop converges.
 			for n := range 20 {
 				a.runChecks(in, i)
-				if in.unit != nil {
-					t.Fatalf("pass %d started a %s unit in a refused generation", n, in.unit.kind)
+				if in.ck.unit != nil {
+					t.Fatalf("pass %d started a %s unit in a refused generation", n, in.ck.unit.kind)
 				}
 			}
 			if n := calls.Load(); n != 0 {
