@@ -217,6 +217,21 @@ spec:
                     enum:
                     - envoy
                     type: string
+                  workers:
+                    description: |-
+                      Workers is the number of the Instance's workers (beta; HBEP-7, Several
+                      workers): the ModelDeployment's workersPerInstance when the controller
+                      created the Instance, kept for the Instance's life by the spec's
+                      immutability rule. Each worker runs this launch on its own GPUs, GPUs being
+                      the count each uses, and its own socket. Absent is 1, alpha's one worker,
+                      and the controller sets it only above 1, so an Instance of one worker has
+                      the launch it had before. Everything about a running Instance reads it: its
+                      desired workers, the front's cap (HBEP-5, Load bound and cap) and HBEP-8's
+                      inventory. It is capacity, not a deployment-ID input (HBEP-3).
+                    format: int32
+                    maximum: 8
+                    minimum: 1
+                    type: integer
                 required:
                 - checkpoint
                 - command
@@ -540,6 +555,55 @@ spec:
                   can become ready (HBEP-7, Instance start; HBEP-11). The generation
                   counts the Instance's verifications from 1.
                 type: string
+              workers:
+                description: |-
+                  Workers is the durable state of each of the Instance's workers (beta;
+                  HBEP-7, Several workers), one entry per worker of launch.workers, written by
+                  the lifecycle controller as each worker is verified, qualified and warmed
+                  up. The controller computes each worker's verifiedGeneration in the agent's
+                  desired state from it, so a restarted controller resumes with every
+                  verified worker still taking traffic. It is absent for an Instance of one
+                  worker, whose state stays in the Instance's own conditions and records.
+                items:
+                  description: InstanceWorker is one worker's durable state (HBEP-7,
+                    Several workers).
+                  properties:
+                    name:
+                      description: Name is the worker's name, worker-<i> (WorkerName).
+                      pattern: ^worker-[0-9]+$
+                      type: string
+                    record:
+                      description: |-
+                        Record names the worker's latest verification record,
+                        ver-<instance UID>-<worker>-<generation> (HBEP-7, Instance start).
+                      maxLength: 253
+                      type: string
+                    verdict:
+                      description: Verdict is that record's verdict.
+                      maxLength: 64
+                      type: string
+                    verifiedGeneration:
+                      description: |-
+                        VerifiedGeneration is the worker's restart generation last verified,
+                        qualified and warmed up: the agent's readiness answers 200 for the worker
+                        only while its current generation equals it. Absent until the worker's
+                        first verification passes.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    warmedUp:
+                      description: |-
+                        WarmedUp is whether the worker's warm-up for its current generation is
+                        done.
+                      type: boolean
+                  required:
+                  - name
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
             type: object
         required:
         - spec

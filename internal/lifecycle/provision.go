@@ -83,7 +83,7 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 			p.at(until)
 			continue
 		}
-		params, err := partitionSizing(pv, p.plan.gpus, p.md.Spec.LeaseLimit)
+		params, err := partitionSizingFor(pv, p.plan.gpus, p.plan.workers, p.md.Spec.LeaseLimit)
 		if err != nil {
 			var u *unsupported
 			if asUnsupported(err, &u) {
@@ -368,7 +368,7 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 		return nil // retried on a later pass, when the Provider is usable again
 	}
 	name := in.Spec.AllocationRef.Name
-	params, err := partitionSizing(pv, in.Spec.Launch.GPUs, p.md.Spec.LeaseLimit)
+	params, err := partitionSizingFor(pv, in.Spec.Launch.GPUs, v1alpha1.LaunchWorkers(in.Spec.Launch), p.md.Spec.LeaseLimit)
 	if err != nil {
 		// The Provider's limits changed between the two creates (a zero GPU
 		// cap, say), and the pending Instance already counts as a primary, so

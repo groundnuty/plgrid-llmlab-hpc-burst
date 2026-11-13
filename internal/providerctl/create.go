@@ -447,6 +447,14 @@ func (e *external) prerequisites(a *v1alpha1.Allocation) string {
 	if _, err := e.s.builds.find(frpcBuild, e.s.o.AgentBuildsDir, arch, frpc); err != nil {
 		return err.Error()
 	}
+	// Behind a router, Envoy's build too (#454).
+	if envoy, on, err := e.envoyDigest(); err != nil {
+		return err.Error()
+	} else if on {
+		if _, err := e.s.builds.find(envoyBuild, e.s.o.AgentBuildsDir, arch, envoy); err != nil {
+			return err.Error()
+		}
+	}
 	return ""
 }
 
@@ -504,6 +512,17 @@ func (e *external) files(a *v1alpha1.Allocation, tag string, paths slurm.Paths) 
 	if err != nil {
 		return nil, err
 	}
+	// Behind a router, Envoy is staged beside frpc, by its digest (#454).
+	var envoyFile []provider.File
+	if envoySum, on, err := e.envoyDigest(); err != nil {
+		return nil, err
+	} else if on {
+		envoy, err := e.s.builds.read(envoyBuild, e.s.o.AgentBuildsDir, arch, envoySum)
+		if err != nil {
+			return nil, err
+		}
+		envoyFile = append(envoyFile, file(agentapi.StagedEnvoyPath(envoySum), 0o700, envoy))
+	}
 	cred, err := e.credential(a)
 	if err != nil {
 		return nil, err
@@ -544,6 +563,12 @@ func (e *external) files(a *v1alpha1.Allocation, tag string, paths slurm.Paths) 
 	if f.BulkPathOn() {
 		staged = withBulkCert(staged, tag, f.BulkCertPEM)
 	}
+	// Behind a router, Envoy is staged by digest beside frpc, before agent.json, which stays last (HBEP-4:
+	// agent.json is staged after the files it names; #454).
+	if len(envoyFile) > 0 {
+		last := len(staged) - 1
+		staged = append(append(append([]provider.File{}, staged[:last]...), envoyFile...), staged[last])
+	}
 	return staged, nil
 }
 
@@ -572,6 +597,22 @@ func (e *external) frpcDigest() (string, error) {
 	return d, nil
 }
 
+// envoyDigest is the digest of the Envoy to stage for the partition's CPU
+// architecture, and whether one is staged at all: only when the controller runs
+// Instances behind a router (Front.EnvoyDigests is set; #454). It reads
+// configuration only.
+func (e *external) envoyDigest() (string, bool, error) {
+	if len(e.s.o.Front.EnvoyDigests) == 0 {
+		return "", false, nil
+	}
+	arch := e.v.Profile.Partition.CPUArch
+	d, ok := e.s.o.Front.EnvoyDigests[arch]
+	if !ok {
+		return "", false, fmt.Errorf("no Envoy digest is configured for cpuArch %s, and the controller runs Instances behind a router", arch)
+	}
+	return d, true, nil
+}
+
 func file(path string, mode os.FileMode, content []byte) provider.File {
 	sum := sha256.Sum256(content)
 	return provider.File{Path: path, SHA256: hex.EncodeToString(sum[:]), Mode: mode, Content: content}
@@ -591,6 +632,7 @@ type buildKind struct {
 var (
 	agentBuild = buildKind{what: "agent build", digestOf: "the Allocation's agentDigest", file: agentapi.AgentBuildName}
 	frpcBuild  = buildKind{what: "frpc build", digestOf: "the pinned frpc digest", file: agentapi.FrpcBuildName}
+	envoyBuild = buildKind{what: "Envoy build", digestOf: "the pinned Envoy digest", file: agentapi.EnvoyBuildName}
 )
 
 // buildCache finds a build by digest without hashing it on every

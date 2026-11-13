@@ -85,6 +85,9 @@ func (s rigSetup) hostOptions() []stack.HostOption {
 	if s.bulkPath {
 		o = append(o, stack.BulkPath)
 	}
+	if s.instanceRouter {
+		o = append(o, stack.InstanceRouter)
+	}
 	return o
 }
 

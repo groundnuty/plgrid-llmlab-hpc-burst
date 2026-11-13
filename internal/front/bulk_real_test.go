@@ -366,15 +366,26 @@ func curConns(web, pw, uid string) int64 {
 // drainSpare makes sure the frps at mux holds no spare work connection for uid once its frpc is
 // stopped. frp keeps one (it reads poolCount = 0 as 1, HBEP-6's erratum of 11 Nov 2026), and a user
 // connection given it would wait on the stopped frpc until the front's idleTimeout (HBEP-6's frozen
-// work connection, a stated limit) instead of being closed at userConnTimeout. A dummy connection is
-// opened straight to frps and either takes the spare, which frps's curConns shows, or, with none, is
-// closed by frps at userConnTimeout. Either way frps then has none, and the stopped frpc can't make
-// another. The dummy stays open until the test ends.
+// work connection, a stated limit) instead of being closed at userConnTimeout. It first waits for frps
+// to count no connection of uid's open, since the probes just before close theirs a moment before
+// frps sees it. Then a dummy connection is opened straight to frps and either takes the spare, which
+// frps's curConns then counts, or, with none, is closed by frps at userConnTimeout. Either way frps
+// then has none, and the stopped frpc can't make another. The dummy stays open until the test ends.
 func drainSpare(t *testing.T, mux, web, pw, uid string) {
 	t.Helper()
-	before := curConns(web, pw, uid)
-	if before < 0 {
-		t.Fatalf("frps at %s does not list %s", web, uid)
+	waitStart := time.Now()
+	first := curConns(web, pw, uid)
+	for n, end := first, waitStart.Add(30*time.Second); ; n = curConns(web, pw, uid) {
+		if n == 0 {
+			if first != 0 {
+				t.Logf("frps at %s first counted %d connections of the UID open; 0 after %s", web, first, time.Since(waitStart).Round(time.Millisecond))
+			}
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+		if time.Now().After(end) {
+			t.Fatalf("frps at %s still counts %d connections of %s open before the dummy (-1: not listed)", web, n, uid)
+		}
 	}
 	c, err := net.DialTimeout("tcp", mux, 5*time.Second)
 	if err != nil {
@@ -394,7 +405,7 @@ func drainSpare(t *testing.T, mux, web, pw, uid string) {
 			return
 		default:
 		}
-		if curConns(web, pw, uid) > before {
+		if curConns(web, pw, uid) >= 1 {
 			t.Logf("the dummy took %s's spare work connection", mux)
 			return
 		}

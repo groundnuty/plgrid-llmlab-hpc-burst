@@ -111,6 +111,9 @@ type State struct {
 	// frps-bulk, beside the first, and the launcher keeps the second certificate for the agent
 	// endpoint's key. It is set only with frps. Without it, nothing of the bulk path runs.
 	BulkPath bool `json:"bulk_path,omitempty"`
+	// InstanceRouter is up --instance-router: the router each new Instance runs in front of its
+	// worker, passed to the controller (#429, #454); "" for none (alpha).
+	InstanceRouter string `json:"instance_router,omitempty"`
 }
 
 // ControllerConfig is the launcher's choice of what to run beside k3s.

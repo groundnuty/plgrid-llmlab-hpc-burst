@@ -33,6 +33,9 @@ type launchSpec struct {
 	// bulkPath is State.BulkPath, up --bulk-path (beta; HBEP-6, The bulk path): the first durable
 	// record carries it with the rest, and an upgrade brings a bulk-path host back as one.
 	bulkPath bool
+	// instanceRouter is State.InstanceRouter: the first durable record carries it, and an upgrade
+	// keeps it.
+	instanceRouter string
 	// eventTTL and omitEventTTL are set by tests only. eventTTL replaces DefaultEventTTL, so that a
 	// test can see the API server expire an Event within minutes; omitEventTTL leaves the argument
 	// out, as the releases before it was added did, to start the host that an upgrade must bring up
