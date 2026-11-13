@@ -447,3 +447,116 @@ func TestRowAsStartWaitRunsFromTheDeploymentsCreation(t *testing.T) {
 		t.Fatal("the waiter is still waiting: the start wait is not counted from the deployment's creation")
 	}
 }
+
+// The restart ladder (HBEP-7, Health and restarts) read off the Instances: the worker rung, the whole-Instance rung, and the last, which
+// fails an Instance with RestartLoop. Row A's engine kill is one restart at the worker rung; a climb past it is named by its rung, never
+// left to show only as a second Allocation (#503; the science agent's guidance). The expected words are written out here.
+func TestLadderOfReadsTheClimbOffTheInstances(t *testing.T) {
+	inst := func(phase v1alpha1.InstancePhase, reason string, parts ...string) v1alpha1.Instance {
+		in := v1alpha1.Instance{}
+		in.Status.Phase, in.Status.EndReason = phase, reason
+		for _, p := range parts {
+			in.Status.Restarts = append(in.Status.Restarts, v1alpha1.InstanceRestart{Part: p})
+		}
+		return in
+	}
+	for _, c := range []struct {
+		name string
+		ins  []v1alpha1.Instance
+		want LadderObs
+	}{
+		{"no restart", []v1alpha1.Instance{inst(v1alpha1.InstanceReady, "")}, LadderObs{}},
+		{"the worker restart row A makes", []v1alpha1.Instance{inst(v1alpha1.InstanceReady, "", "worker-0")}, LadderObs{WorkerRestarts: 1}},
+		{"a router restart is neither rung", []v1alpha1.Instance{inst(v1alpha1.InstanceReady, "", "worker-0", v1alpha1.PartRouter)}, LadderObs{WorkerRestarts: 1}},
+		{"the whole-Instance rung", []v1alpha1.Instance{inst(v1alpha1.InstanceReady, "", "worker-0", "worker-0", v1alpha1.PartInstance)}, LadderObs{WorkerRestarts: 2, InstanceRestarts: 1}},
+		{"the last rung", []v1alpha1.Instance{inst(v1alpha1.InstanceEnded, v1alpha1.ReasonRestartLoop, "worker-0", "worker-0", v1alpha1.PartInstance, v1alpha1.PartInstance),
+			inst(v1alpha1.InstanceReady, "")}, LadderObs{WorkerRestarts: 2, InstanceRestarts: 2, RestartLoop: true}},
+		{"an Instance that ended by a drain is no loop", []v1alpha1.Instance{inst(v1alpha1.InstanceEnded, v1alpha1.ReasonDrained, "worker-0")}, LadderObs{WorkerRestarts: 1}},
+		{"a RestartLoop reason on an Instance that has not ended is no loop", []v1alpha1.Instance{inst(v1alpha1.InstanceReady, v1alpha1.ReasonRestartLoop)}, LadderObs{}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := LadderOf(c.ins); got != c.want {
+				t.Errorf("LadderOf = %+v, want %+v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestTheLadderCheckNamesTheRungTheWorkerRestartClimbedTo(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		l    LadderObs
+		want []string
+	}{
+		{"the worker rung is enough", LadderObs{WorkerRestarts: 1}, nil},
+		{"the whole-Instance rung", LadderObs{WorkerRestarts: 2, InstanceRestarts: 1},
+			[]string{"the worker restart climbed to the whole-Instance rung (rung 2 of 3: 2 restarts at the worker rung and 1 at the whole-Instance rung)"}},
+		{"the last rung", LadderObs{WorkerRestarts: 2, InstanceRestarts: 2, RestartLoop: true},
+			[]string{"the worker restart climbed to a new Allocation (rung 3 of 3: 2 restarts at the worker rung and 2 at the whole-Instance rung, then the Instance failed with RestartLoop)"}},
+		{"the last rung outranks the one before it", LadderObs{InstanceRestarts: 1, RestartLoop: true},
+			[]string{"the worker restart climbed to a new Allocation (rung 3 of 3: 0 restarts at the worker rung and 1 at the whole-Instance rung, then the Instance failed with RestartLoop)"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ladderChecks(c.l); !slices.Equal(got, c.want) {
+				t.Errorf("ladderChecks = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// A climb leads the verdict's failures, before the marks it leaves (a second Allocation, a job with no record, two restarts): the cause is
+// named first, and the marks are still said.
+func TestAClimbOfTheLadderLeadsRowAsFailures(t *testing.T) {
+	row := rowOf("alpha-athena-now-serve")
+	cfg := Config{Row: row, Dry: true, DryFault: "ladder-climb", Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
+	rec, err := NewRecorder(cfg.Out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failures, err := Run(context.Background(), cfg, newDrySteps(t, cfg, "nowserve"), rec, t.Logf)
+	if err != nil || len(failures) == 0 {
+		t.Fatalf("failures %v, err %v; want a FAIL", failures, err)
+	}
+	if !strings.HasPrefix(failures[0], "the worker restart climbed to a new Allocation") {
+		t.Errorf("the first failure is %q, want the climb named first", failures[0])
+	}
+	if !slices.Contains(failures, "2 restarts at the worker rung, want 1") {
+		t.Errorf("the mark of the climb, the count of worker restarts, is not among %q", failures)
+	}
+	// Beside a failure that the verdict finds first (the deployment's lease is not the row's), the climb still leads: it is the cause.
+	t.Run("beside a failure of the deployment", func(t *testing.T) {
+		cfg := Config{Row: row, Dry: true, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
+		rec, err := NewRecorder(cfg.Out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st := newDrySteps(t, cfg, "nowserve")
+		o, serr := st.NowServe(context.Background(), Plan{Row: row, Rec: rec, PendingMax: time.Minute, Logf: t.Logf})
+		if serr != nil {
+			t.Fatal(serr)
+		}
+		o.Ladder = LadderObs{WorkerRestarts: 2, InstanceRestarts: 2, RestartLoop: true}
+		o.Deployment.LeaseLimit = 0
+		failures, err := Run(context.Background(), cfg, fixedNowServe{drySteps: st, o: o}, rec, t.Logf)
+		if err != nil || len(failures) < 2 {
+			t.Fatalf("failures %v, err %v; want the climb and a failure of the deployment", failures, err)
+		}
+		if !strings.HasPrefix(failures[0], "the worker restart climbed to a new Allocation") {
+			t.Errorf("the first failure is %q, want the climb ahead of %q", failures[0], failures[1])
+		}
+	})
+}
+
+// The live steps read the ladder off the watch's last Instances, as they read the worker restarts beside it: a pin on the source, since
+// the stand-in that runs the live steps is gated, as the budget test pins the live waits.
+func TestRowAReadsTheLadderOffTheWatch(t *testing.T) {
+	src, err := os.ReadFile("now_flows_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"o.WorkerRestarts = WorkerRestarts(r.watch.Last())", "o.Ladder = LadderOf(r.watch.Last())"} {
+		if n := strings.Count(string(src), want); n != 1 {
+			t.Errorf("now_flows_test.go has %q %d times, want once: row A must read the restart ladder's climb from the watch", want, n)
+		}
+	}
+}

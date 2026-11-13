@@ -151,7 +151,7 @@ var accountingFaults = []string{"node-two", "node-none"}
 
 // nowServeFaults are row A's failing faults (issue #376; internal/alpha, run_test.go's nowServeCases); its NOT RUNs are
 // TestRowAsNotRunsThroughTheScript's.
-var nowServeFaults = []string{"cut", "short-stream", "past-deadline", "unattributed", "no-responses", "no-restart", "two-restarts", "wrong-identity",
+var nowServeFaults = []string{"cut", "short-stream", "past-deadline", "unattributed", "no-responses", "no-restart", "two-restarts", "ladder-instance-rung", "ladder-climb", "wrong-identity",
 	"events-missing", "events-unchecked", "gauge-problem", "not-ready", "untagged", "wrong-partition", "default-lease", "short-lease", "duplicate-tag",
 	"extra-allocation"}
 

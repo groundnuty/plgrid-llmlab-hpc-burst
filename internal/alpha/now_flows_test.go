@@ -70,6 +70,7 @@ func (r *liveRun) NowServe(ctx context.Context, p Plan) (NowServeObs, error) {
 	}
 	o.Tags = tags
 	o.WorkerRestarts = WorkerRestarts(r.watch.Last())
+	o.Ladder = LadderOf(r.watch.Last())
 	o.Responses, o.Attributed = r.attribution()
 	return o, nil
 }

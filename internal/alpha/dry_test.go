@@ -44,7 +44,7 @@ const (
 var dryFaults = map[string][]string{
 	"handover":  {"cut", "no-stream", "two-restarts", "no-restart", "no-handover", "late-successor", "wrong-partition", "untagged", "unattributed", "adds-helios", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "no-responses", "pend-past-bound", "second-never-started", "second-never-started-late", "second-never-started-unknown", "second-never-started-cut", "second-never-started-late-cut", "second-never-started-no-restart", "second-never-started-not-known"},
 	"nooverlap": {"nocap", "nogap", "noslot", "cut", "no-stream", "late-submit", "untagged", "wrong-partition", "adds-athena", "default-lease", "short-lease", "no-release-when-idle", "duplicate-tag", "extra-allocation", "two-restarts", "no-restart", "pend-past-bound", "second-never-started", "second-never-started-late", "second-never-started-unknown", "second-never-started-cut", "second-never-started-late-cut", "second-never-started-no-restart", "second-never-started-not-known"},
-	"nowserve":  {"cut", "short-stream", "past-deadline", "unattributed", "no-responses", "no-restart", "two-restarts", "wrong-identity", "events-missing", "events-unchecked", "gauge-problem", "not-ready", "untagged", "wrong-partition", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "pend-past-bound", "warm-no-image", "warm-file-missing", "warm-other-digest", "warm-other-file", "warm-unread", "warm-cold-then-retry", "warm-failed-then-retry", "warm-cancel-then-retry", "warm-failed-check", "warm-no-start", "warm-restarted", "warm-unknown-first", "warm-truncated"},
+	"nowserve":  {"cut", "short-stream", "past-deadline", "unattributed", "no-responses", "no-restart", "two-restarts", "ladder-instance-rung", "ladder-climb", "wrong-identity", "events-missing", "events-unchecked", "gauge-problem", "not-ready", "untagged", "wrong-partition", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "pend-past-bound", "warm-no-image", "warm-file-missing", "warm-other-digest", "warm-other-file", "warm-unread", "warm-cold-then-retry", "warm-failed-then-retry", "warm-cancel-then-retry", "warm-failed-check", "warm-no-start", "warm-restarted", "warm-unknown-first", "warm-truncated"},
 	"tunnel":    {"short", "cut", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition", "adds-other-cluster", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "past-deadline", "past-drain", "no-drain-start", "stream-cut-error", "reconnect", "disconnected", "sparse-samples", "late-first-sample", "no-concurrency", "slow-streams", "no-idle-gap", "no-long-stream", "no-back-to-back", "no-load-rate", "slow-start", "no-large", "large-apart", "response-overlap", "no-upload-rate", "no-download-rate", "upload-not-under-load", "pend-past-bound"},
 }
 
@@ -792,7 +792,7 @@ func (d *drySteps) NowServe(_ context.Context, p Plan) (NowServeObs, error) {
 		identity.DisplayLabel = full[1:13]
 	}
 	obs := NowServeObs{Deployment: d.deployment(), ReadyAt: ready, DrainStart: drain, Stream: stream, Rate: 30, Identity: identity,
-		Events: ObsCheck{Checked: true}, Gauges: ObsCheck{Checked: true}, WorkerRestarts: 1, Responses: 12, Attributed: 12}
+		Events: ObsCheck{Checked: true}, Gauges: ObsCheck{Checked: true}, WorkerRestarts: 1, Ladder: LadderObs{WorkerRestarts: 1}, Responses: 12, Attributed: 12}
 	switch {
 	case d.fault("not-ready"):
 		obs.ReadyAt = time.Time{}
@@ -804,6 +804,10 @@ func (d *drySteps) NowServe(_ context.Context, p Plan) (NowServeObs, error) {
 		obs.WorkerRestarts = 0
 	case d.fault("two-restarts"):
 		obs.WorkerRestarts = 2
+	case d.fault("ladder-instance-rung"):
+		obs.WorkerRestarts, obs.Ladder = 2, LadderObs{WorkerRestarts: 2, InstanceRestarts: 1}
+	case d.fault("ladder-climb"):
+		obs.WorkerRestarts, obs.Ladder = 2, LadderObs{WorkerRestarts: 2, InstanceRestarts: 2, RestartLoop: true}
 	case d.fault("events-missing"):
 		obs.Events.Missing = []string{"failing/WorkerRestart regarding Instance dry/now"}
 	case d.fault("events-unchecked"):

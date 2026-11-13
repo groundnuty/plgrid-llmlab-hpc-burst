@@ -190,6 +190,8 @@ type NowServeObs struct {
 	// WorkerRestarts counts the restarts at the worker rung the run made, WorkerRestart their times.
 	WorkerRestarts int          `json:"workerRestarts"`
 	WorkerRestart  RestartTimes `json:"workerRestart"`
+	// Ladder is how far the restart ladder climbed (LadderObs): row A expects the worker rung to be enough.
+	Ladder LadderObs `json:"ladder"`
 	// Responses counts the responses the run received; Attributed those that carried HBEP-5's attribution headers.
 	Responses  int `json:"responses"`
 	Attributed int `json:"attributed"`
@@ -231,6 +233,21 @@ func obsChecks(what string, c ObsCheck) []string {
 	return f
 }
 
+// ladderChecks: the engine kill of row A is one restart at the worker rung, and the ladder climbs no further. Past it the result names
+// the rung: the whole-Instance rung (rung 2 of 3), or the last (rung 3 of 3), which fails the Instance with RestartLoop and makes a
+// new Allocation, the cause of a second tag that the tag count alone would report as a second Allocation.
+func ladderChecks(l LadderObs) []string {
+	switch {
+	case l.RestartLoop:
+		return []string{fmt.Sprintf("the worker restart climbed to a new Allocation (rung 3 of 3: %d restarts at the worker rung and %d at the whole-Instance rung, then the Instance failed with RestartLoop)",
+			l.WorkerRestarts, l.InstanceRestarts)}
+	case l.InstanceRestarts > 0:
+		return []string{fmt.Sprintf("the worker restart climbed to the whole-Instance rung (rung 2 of 3: %d restarts at the worker rung and %d at the whole-Instance rung)",
+			l.WorkerRestarts, l.InstanceRestarts)}
+	}
+	return nil
+}
+
 // VerifyNowServe judges alpha-athena-now-serve.
 //
 //	hbep/0005-llmlab-compatible-front/README.md:442 and :488: the long stream through the front, attributed (Q4).
@@ -238,7 +255,10 @@ func obsChecks(what string, c ObsCheck) []string {
 //	hbep/0008-observability-and-events/README.md:450-451: the events and the engine gauges.
 //	hbep/0007-lifecycle-controller/README.md:663: one restart at the worker rung (Q8: plgrid-now counts for it).
 func VerifyNowServe(row Row, o NowServeObs, jobs []provider.Job) []string {
-	f := deploymentChecks(row, o.Deployment)
+	// A climb of the restart ladder is named first: it is a cause, and the checks after it (a second Allocation, a job with no record,
+	// more than one restart) are its marks.
+	f := ladderChecks(o.Ladder)
+	f = append(f, deploymentChecks(row, o.Deployment)...)
 	lf, _ := ledgerChecks(row, o.Tags, jobs)
 	f = append(f, lf...)
 	f = append(f, tagCountChecks(row, o.Tags, "the row makes exactly one Allocation")...)
