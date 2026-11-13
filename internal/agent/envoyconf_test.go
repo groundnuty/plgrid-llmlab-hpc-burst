@@ -66,6 +66,10 @@ func routeOf(t *testing.T, m map[string]any) map[string]any {
 	return at(t, hcmOf(t, m), "route_config", "virtual_hosts", 0, "routes", 0, "route").(map[string]any)
 }
 
+func retryOf(t *testing.T, m map[string]any) map[string]any {
+	return routeOf(t, m)["retry_policy"].(map[string]any)
+}
+
 func clusterOf(t *testing.T, m map[string]any) map[string]any {
 	return at(t, m, "static_resources", "clusters", 0).(map[string]any)
 }
@@ -97,6 +101,10 @@ func TestEnvoyConfigCarriesHBEP5sSettings(t *testing.T) {
 		"admin path":                     at(t, m, "admin", "allow_paths", 0, "exact"),
 		"suppress_envoy_headers":         at(t, h, "http_filters", 0, "typed_config", "suppress_envoy_headers"),
 		"hash header":                    at(t, r, "hash_policy", 0, "header", "header_name"),
+		"retry on":                       at(t, r, "retry_policy", "retry_on"),
+		"retries":                        at(t, r, "retry_policy", "num_retries"),
+		"retry predicate":                at(t, r, "retry_policy", "retry_host_predicate", 0, "name"),
+		"retry picks":                    at(t, r, "retry_policy", "host_selection_retry_max_attempts"),
 		"lb_policy":                      c["lb_policy"],
 		"upstream idle":                  at(t, c, "typed_extension_protocol_options", "envoy.extensions.upstreams.http.v3.HttpProtocolOptions", "common_http_protocol_options", "idle_timeout"),
 		"max_connections":                at(t, c, "circuit_breakers", "thresholds", 0, "max_connections"),
@@ -126,6 +134,8 @@ func TestEnvoyConfigCarriesHBEP5sSettings(t *testing.T) {
 			"listener": envoyRunDir + "/router.sock", "listener mode": float64(0o600),
 			"admin": envoyRunDir + "/envoy-admin.sock", "admin mode": float64(0o600), "admin path": "/clusters?format=json",
 			"suppress_envoy_headers": true, "hash header": "x-session-id", "lb_policy": "RING_HASH", "upstream idle": "50s",
+			"retry on": "connect-failure,reset-before-request", "retries": float64(1), "retry predicate": "envoy.retry_host_predicates.previous_hosts",
+			"retry picks":     float64(20),
 			"max_connections": float64(4294967295), "max_pending_requests": float64(4294967295), "max_requests": float64(4294967295),
 			"worker-0's socket": envoyRunDir + "/worker-0.sock", "worker-0's name": "worker-0",
 			"the number of top-level fields": float64(2),
@@ -153,7 +163,21 @@ func TestEnvoyGuardRefusesEachFault(t *testing.T) {
 		{"a route idle timeout one second short", func(m map[string]any) { routeOf(t, m)["idle_timeout"] = "10799s" }, "route.idle_timeout is 2h59m59s"},
 		{"Envoy's default 5 min stream idle timeout", func(m map[string]any) { hcmOf(t, m)["stream_idle_timeout"] = "300s" }, "stream_idle_timeout is 5m0s"},
 		{"another deadline on the connection manager", func(m map[string]any) { hcmOf(t, m)["request_timeout"] = "1s" }, "sets request_timeout"},
-		{"a route retry policy", func(m map[string]any) { routeOf(t, m)["retry_policy"] = map[string]any{"retry_on": "5xx"} }, "sets retry_policy"},
+		// The route retries once, on connect-failure and reset-before-request only, to another worker
+		// (HBEP-5, Worker health; the science agent's ruling on #439): any other retry is refused.
+		{"no route retry policy", func(m map[string]any) { delete(routeOf(t, m), "retry_policy") }, "has no retry_policy"},
+		{"a retry on 5xx", func(m map[string]any) { retryOf(t, m)["retry_on"] = "5xx" }, "retry_policy.retry_on is 5xx"},
+		{"a retry on a reset after the request was sent", func(m map[string]any) {
+			retryOf(t, m)["retry_on"] = "connect-failure,reset"
+		}, "retry_policy.retry_on is connect-failure,reset"},
+		{"two retries", func(m map[string]any) { retryOf(t, m)["num_retries"] = 2 }, "retry_policy.num_retries"},
+		{"a retry to the same worker", func(m map[string]any) { delete(retryOf(t, m), "retry_host_predicate") }, "has no retry_host_predicate"},
+		{"another host predicate", func(m map[string]any) {
+			at(t, retryOf(t, m), "retry_host_predicate", 0).(map[string]any)["name"] = "envoy.retry_host_predicates.omit_canary_hosts"
+		}, "retry_host_predicate[0].name"},
+		{"a per-try timeout", func(m map[string]any) { retryOf(t, m)["per_try_timeout"] = "1s" }, "sets per_try_timeout"},
+		{"Envoy's one pick again", func(m map[string]any) { delete(retryOf(t, m), "host_selection_retry_max_attempts") }, "has no host_selection_retry_max_attempts"},
+		{"fewer picks again", func(m map[string]any) { retryOf(t, m)["host_selection_retry_max_attempts"] = 1 }, "host_selection_retry_max_attempts"},
 		{"a TCP listener on loopback", func(m map[string]any) {
 			at(t, m, "static_resources", "listeners", 0).(map[string]any)["address"] = map[string]any{"socket_address": map[string]any{"address": "127.0.0.1", "port_value": 0}}
 		}, "must be a Unix socket"},

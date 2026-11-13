@@ -70,17 +70,31 @@ const (
 	envoyClustersPath = "/clusters?format=json"
 
 	// Worker health (HBEP-5, Worker health).
-	envoyHealthPath          = "/ready"
-	envoyHCInterval          = 5 * time.Second
-	envoyHCTimeout           = 2 * time.Second
-	envoyHCUnhealthy         = 2
-	envoyHCHealthy           = 1
-	envoyOutlier5xx          = 3
-	envoyEjectionBase        = 30 * time.Second
-	envoyEjectionMax         = 300 * time.Second
-	envoyMaxEjectionPercent  = 100
-	envoyHealthCheckAddress  = "127.0.0.1"
-	envoyHealthyPanicPercent = 0
+	envoyHealthPath         = "/ready"
+	envoyHCInterval         = 5 * time.Second
+	envoyHCTimeout          = 2 * time.Second
+	envoyHCUnhealthy        = 2
+	envoyHCHealthy          = 1
+	envoyOutlier5xx         = 3
+	envoyEjectionBase       = 30 * time.Second
+	envoyEjectionMax        = 300 * time.Second
+	envoyMaxEjectionPercent = 100
+	envoyHealthCheckAddress = "127.0.0.1"
+
+	// The route's retry (HBEP-5, Worker health; the science agent's ruling on #439, PR 4's finding): once,
+	// on a failure to connect or a reset before the request was sent, to another worker. Such a request
+	// reached no engine, so the retry cannot run anything twice; nothing written to a worker is retried.
+	// It answers a request Envoy sends to a worker that has just died, before its next active check.
+	envoyRetryOn       = "connect-failure,reset-before-request"
+	envoyNumRetries    = 1
+	envoyPreviousHosts = "envoy.retry_host_predicates.previous_hosts"
+	// envoyHostSelectionAttempts is how many times the retry's host selection may pick again when it
+	// lands on the worker that failed. Under RING_HASH a pick again takes the next entry of the ring, which
+	// belongs to the same worker about once in N for N workers, and Envoy's default of one more pick
+	// sends the retry back to the dead worker about half the time with two (measured on Envoy 1.40.2,
+	// #439). 20 picks leave that under one in a million with two workers.
+	envoyHostSelectionAttempts = 20
+	envoyHealthyPanicPercent   = 0
 )
 
 // EnvoyWorker is one endpoint of the workers' cluster: a worker by name, on its engine socket.
@@ -158,6 +172,16 @@ type (
 		Timeout     string            `json:"timeout"`
 		IdleTimeout string            `json:"idle_timeout"`
 		HashPolicy  []envoyHashPolicy `json:"hash_policy"`
+		RetryPolicy envoyRetryPolicy  `json:"retry_policy"`
+	}
+	envoyRetryPolicy struct {
+		RetryOn                       string             `json:"retry_on"`
+		NumRetries                    int                `json:"num_retries"`
+		RetryHostPredicate            []envoyNamedConfig `json:"retry_host_predicate"`
+		HostSelectionRetryMaxAttempts int                `json:"host_selection_retry_max_attempts"`
+	}
+	envoyTyped struct {
+		Type string `json:"@type"`
 	}
 	envoyHashPolicy struct {
 		Header map[string]string `json:"header"`
@@ -245,6 +269,8 @@ const (
 	typeHCM         = "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager"
 	typeRouter      = "type.googleapis.com/envoy.extensions.filters.http.router.v3.Router"
 	typeHTTPOptions = "type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions"
+	// typePreviousHosts is the retry host predicate that sends a retry to another worker.
+	typePreviousHosts = "type.googleapis.com/envoy.extensions.retry.host.previous_hosts.v3.PreviousHostsPredicate"
 )
 
 // envoySeconds is a whole-second duration in Envoy's JSON form ("10800s").
@@ -294,6 +320,9 @@ func RenderEnvoyConfig(c EnvoyConfig) ([]byte, error) {
 								Route: envoyRouteAction{
 									Cluster: envoyClusterName, Timeout: timeout, IdleTimeout: timeout,
 									HashPolicy: []envoyHashPolicy{{Header: map[string]string{"header_name": envoySessionHeader}}},
+									RetryPolicy: envoyRetryPolicy{RetryOn: envoyRetryOn, NumRetries: envoyNumRetries,
+										RetryHostPredicate:            []envoyNamedConfig{{Name: envoyPreviousHosts, TypedConfig: envoyTyped{Type: typePreviousHosts}}},
+										HostSelectionRetryMaxAttempts: envoyHostSelectionAttempts},
 								},
 							}},
 						}}},
