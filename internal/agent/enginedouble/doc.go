@@ -142,7 +142,8 @@
 // tool-malformed, tool-args-null, tool-args-badtype, no-tool-call,
 // reports-nothing, report-max-model-len=<n>, health-fail, health-fail-after=<dur>,
 // errors-only, slow-first=<dur>, never-settle=<pct>, stall, token-delay=<dur>,
-// reasoning-first=<n>, reasoning-forever, and four that leave lines out of
+// reasoning-first=<n>, reasoning-forever, reply-bytes=<n> (a non-streamed chat
+// reply's content padded to n bytes), and four that leave lines out of
 // /metrics: no-prefix-cache-metrics (not the same as prefix caching off, which
 // a real vLLM reports as two counters at 0), no-tpot, no-tpot-sum and
 // no-tpot-count;
