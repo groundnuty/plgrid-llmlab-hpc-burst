@@ -20,6 +20,9 @@ import (
 // in its status.workers entry as routerAdmittedGeneration so a restarted controller keeps it (the science
 // agent's rulings on #439, Q2 and where it is kept).
 
+// signalWarmUp is the signal of a rejoining worker whose warm-up failed while its Instance is ready.
+const signalWarmUp = "WarmUpFailed"
+
 // readyWorkers is ready for an Instance of several workers, after the router rung: a rejoining worker's
 // verification and warm-up, the router admissions, then each worker's signal.
 func (p *pass) readyWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agentView, st settings) error {
@@ -28,7 +31,13 @@ func (p *pass) readyWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, a
 		return err
 	}
 	if sh, ok := p.shapesOf(in); ok {
-		if ok, err := p.warmWorkers(in, alloc, ir, sh); !ok || err != nil {
+		// A rejoining worker whose warm-up fails is one failed attempt at its own rung: the Instance stays
+		// ready on its siblings, and exhausted attempts climb to the whole-Instance rung (HBEP-7, Several
+		// workers; the science agent's ruling on #439, PR 3b's question). A contradiction verdict, in
+		// verifyWorkers, still ends the Instance, as with one worker.
+		if ok, err := p.warmWorkers(in, alloc, ir, sh, func(w, msg string) error {
+			return p.restartWorker(in, alloc, signalWarmUp, w, st, w+": "+msg)
+		}); !ok || err != nil {
 			return err
 		}
 	}
