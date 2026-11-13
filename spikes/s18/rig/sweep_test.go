@@ -45,3 +45,19 @@ func TestTheSweepIsQ5sAndItsGroupsCoverIt(t *testing.T) {
 		}
 	}
 }
+
+// A rerun selects cells by name, in the sweep's order, and refuses a name not in the sweep; an F4
+// cell's bound grows with its trials.
+func TestSelectAndBudget(t *testing.T) {
+	got, err := Select(Sweep(), []string{"c-F4-b10-r1-sdk", " a-F1-p1 "})
+	if err != nil || len(got) != 2 || got[0].Name != "a-F1-p1" || got[1].Name != "c-F4-b10-r1-sdk" {
+		t.Errorf("Select: %v, %v", got, err)
+	}
+	if _, err := Select(Sweep(), []string{"z-F9"}); err == nil {
+		t.Error("Select took a name not in the sweep")
+	}
+	f4 := Cell{Fault: "F4", Trials: 20}
+	if b := Budget(f4); b < 20*45*time.Second+5*time.Minute {
+		t.Errorf("an F4 cell of 20 trials gets %s, want well above 20 x 45 s", b)
+	}
+}

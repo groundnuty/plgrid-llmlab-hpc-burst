@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -49,7 +50,7 @@ func TestCell(t *testing.T) {
 }
 
 // TestGroup runs one hosted job's group of the sweep (rig.Groups of rig.Sweep), S18_GROUP of S18_GROUPS,
-// writing each cell under S18_OUT. Each cell is a subtest, so one cell's failure (its books unbalanced)
+// writing each cell under S18_OUT; S18_CELLS, when set, names the only cells to split (a rerun). Each cell is a subtest, so one cell's failure (its books unbalanced)
 // is reported and the group goes on.
 func TestGroup(t *testing.T) {
 	g, n, out := os.Getenv("S18_GROUP"), os.Getenv("S18_GROUPS"), os.Getenv("S18_OUT")
@@ -57,13 +58,20 @@ func TestGroup(t *testing.T) {
 		t.Skip("one hosted job's group of the sweep: set S18_GROUP, S18_GROUPS and S18_OUT")
 	}
 	var gi, gn int
-	if _, err := fmt.Sscan(g, &gi); err != nil {
+	var err error
+	if _, err = fmt.Sscan(g, &gi); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fmt.Sscan(n, &gn); err != nil {
 		t.Fatal(err)
 	}
-	groups := rig.Groups(rig.Sweep(), gn)
+	cells := rig.Sweep()
+	if names := os.Getenv("S18_CELLS"); names != "" {
+		if cells, err = rig.Select(cells, strings.Split(names, ",")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	groups := rig.Groups(cells, gn)
 	for _, cell := range groups[gi] {
 		t.Run(cell.Name, func(t *testing.T) {
 			start := time.Now()
@@ -85,7 +93,7 @@ func runCell(t *testing.T, cell rig.Cell, dir string) rig.Summary {
 		t.Fatal(err)
 	}
 	defer r.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), cell.Duration+10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), rig.Budget(cell))
 	defer cancel()
 	c := rig.NewClient(r.Front.URL, r.Front.ClientKey, fmt.Sprintf("%x", time.Now().UnixNano()&0xffffff))
 	rng := rand.New(rand.NewSource(cell.Seed))

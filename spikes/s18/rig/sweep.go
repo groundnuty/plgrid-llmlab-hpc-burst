@@ -2,6 +2,7 @@ package rig
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -81,15 +82,50 @@ func cellName(c Cell) string {
 	return n
 }
 
-// Groups splits the sweep into n groups of about equal running time, for n hosted jobs. A cell's
-// time is its duration, or about 30 s per F4 trial (its restarts and the front's pause).
-func Groups(cells []Cell, n int) [][]Cell {
-	cost := func(c Cell) time.Duration {
-		if c.Fault == "F4" {
-			return time.Duration(c.Trials) * 30 * time.Second
-		}
-		return c.Duration + 20*time.Second
+// cost is a cell's expected running time: its duration and its session probes, or for F4 about 45 s a
+// trial (its restarts and the front's 30 s pause: the first hosted run took 8-10 min for 20 trials that
+// killed one or two engines each).
+func cost(c Cell) time.Duration {
+	if c.Fault == "F4" {
+		return time.Duration(c.Trials) * 45 * time.Second
 	}
+	return c.Duration + 20*time.Second
+}
+
+// Budget is a cell's context bound: well above its expected time. An F4 cell has no duration, only
+// trials, so its bound grows with them (the first hosted run gave every F4 cell 10 min, and the 13
+// whose trials killed three engines each ran out).
+func Budget(c Cell) time.Duration {
+	if c.Fault == "F4" {
+		return time.Duration(c.Trials)*90*time.Second + 10*time.Minute
+	}
+	return c.Duration + 10*time.Minute
+}
+
+// Select is the cells of the sweep named in names, in the sweep's order; a name not in the sweep is an
+// error.
+func Select(cells []Cell, names []string) ([]Cell, error) {
+	want := map[string]bool{}
+	for _, n := range names {
+		if n = strings.TrimSpace(n); n != "" {
+			want[n] = true
+		}
+	}
+	var out []Cell
+	for _, c := range cells {
+		if want[c.Name] {
+			out = append(out, c)
+			delete(want, c.Name)
+		}
+	}
+	for n := range want {
+		return nil, fmt.Errorf("no cell %q in the sweep", n)
+	}
+	return out, nil
+}
+
+// Groups splits the cells into n groups of about equal running time, for n hosted jobs.
+func Groups(cells []Cell, n int) [][]Cell {
 	groups := make([][]Cell, n)
 	load := make([]time.Duration, n)
 	for _, c := range cells {
