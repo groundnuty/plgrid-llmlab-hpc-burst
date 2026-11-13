@@ -65,7 +65,7 @@ func TestTheShortestLeaseIsJustAboveThePartitionTooShortMinimum(t *testing.T) {
 		switch {
 		case strings.HasPrefix(r.Name, "tunnel-hour-"):
 			want = DefaultTunnelLease()
-		case r.Name == "alpha-athena-now-serve", r.Name == BetaRouterName:
+		case r.Name == "alpha-athena-now-serve", r.Name == BetaRouterName, r.Name == BetaKeeperName:
 			// Row A on plgrid-now runs under athena-now.yaml, whose lead is 20 minutes; its lease is the hour less its start
 			// wait and two minutes of cleanup (the science agent's ruling Q3 on #376): 60 - 10 - 2.
 			want = 48 * time.Minute
@@ -200,7 +200,7 @@ func TestDeploymentBoundaries(t *testing.T) {
 // of 12 Nov 2026): the same test as the Athena row of plgrid-gpu-a100, in the partition's one-job slot. The expected values
 // are written out here, not read from the rows.
 func TestOnlyTheAccountingRowOnHeliosHasAStartWait(t *testing.T) {
-	want := map[string]time.Duration{"gpu-accounting-helios": 10 * time.Minute, "gpu-accounting-athena-now": 10 * time.Minute, "alpha-athena-now-serve": 10 * time.Minute, "beta-athena-now-router": 10 * time.Minute, "alpha-athena-now-nooverlap": 10 * time.Minute}
+	want := map[string]time.Duration{"gpu-accounting-helios": 10 * time.Minute, "gpu-accounting-athena-now": 10 * time.Minute, "alpha-athena-now-serve": 10 * time.Minute, "beta-athena-now-router": 10 * time.Minute, "beta-athena-now-keeper": 10 * time.Minute, "alpha-athena-now-nooverlap": 10 * time.Minute}
 	for _, r := range append(Rows(), AccountingRows()...) {
 		if r.StartWait != want[r.Name] {
 			t.Errorf("%s: start wait %s, want %s", r.Name, r.StartWait, want[r.Name])

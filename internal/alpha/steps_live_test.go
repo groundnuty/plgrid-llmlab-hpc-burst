@@ -80,11 +80,16 @@ type world struct {
 }
 
 // hostOptionsFor are the options of the stack's host a row asks for beside the alpha stack: the router row's Instances run behind Envoy
-// (stack.InstanceRouter, `hpcburst up --instance-router envoy`), and no other row's do. The live world and the stand-in's both take them from
+// (stack.InstanceRouter, `hpcburst up --instance-router envoy`), the keeper row's relays are the relay keeper's (stack.RelayKeeper,
+// `hpcburst up --relay-keeper`), and no other row's are either. The live world and the stand-in's both take them from
 // here, so that a row's router is one decision.
 func hostOptionsFor(name string) []stack.HostOption {
-	if name == BetaRouterName {
+	switch name {
+	case BetaRouterName:
 		return []stack.HostOption{stack.InstanceRouter}
+	case BetaKeeperName:
+		// The relay keeper runs the relays of host-dialed mode (hpcburst up --relay-keeper), which the row's config requires.
+		return []stack.HostOption{stack.RelayKeeper}
 	}
 	return nil
 }
@@ -206,6 +211,7 @@ func (f failedSteps) NowNoOverlap(context.Context, Plan) (NowNoOverlapObs, error
 	return NowNoOverlapObs{}, f.err
 }
 func (f failedSteps) BetaRouter(context.Context, Plan) (RouterObs, error) { return RouterObs{}, f.err }
+func (f failedSteps) BetaKeeper(context.Context, Plan) (KeeperObs, error) { return KeeperObs{}, f.err }
 func (f failedSteps) Ledger() Ledger                                      { return &BatchLedger{} }
 func (f failedSteps) Close(context.Context) error                         { return nil }
 func (f failedSteps) WatchResets() int                                    { return 0 }

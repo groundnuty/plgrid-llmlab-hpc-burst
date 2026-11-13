@@ -96,6 +96,15 @@ func TestAlphaAthenaNowServe(t *testing.T) {
 	runRow(t, "nowserve", "alpha-athena-now-serve")
 }
 
+// TestBetaAthenaNowKeeper is the keeper row of issue #521 (beta's tracker, #522) on Athena plgrid-now under profiles/athena-now.yaml, in host-dialed
+// mode with the relay keeper: the controller is killed through a pinned pidfd while a stream is served, and the stream finishes whole, the relays
+// the same processes, the agent undisturbed. A context that cannot hold a stream for the window is NOT RUN.
+//
+//livecheck:beta-athena-now-keeper
+func TestBetaAthenaNowKeeper(t *testing.T) {
+	runRow(t, "betakeeper", BetaKeeperName)
+}
+
 // TestBetaAthenaNowRouter is the router row of issue #521 (beta's tracker, #522) on Athena plgrid-now under profiles/athena-now.yaml: Envoy's
 // first run on a compute node, run bare from the build staged by its pinned digest, the node's glibc, one request through the front, S13's
 // cases through the real path as a response-level reading on vLLM (not bytes), and one worker-rung restart with the router in front. A node

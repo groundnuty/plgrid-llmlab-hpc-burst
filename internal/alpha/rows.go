@@ -374,6 +374,8 @@ var rows = []Row{
 	NowNoOverlapRow(),
 	// The router row of issue #521 (betarouter.go), beta's: Envoy's first run on a compute node, on row A's hold of the same slot.
 	BetaRouterRow(),
+	// The keeper row of issue #521 (betakeeper.go), beta's: a controller restart while a stream runs, in host-dialed mode with the relay keeper.
+	BetaKeeperRow(),
 }
 
 // The settings of the owner's go (Row.OwnerGo).
