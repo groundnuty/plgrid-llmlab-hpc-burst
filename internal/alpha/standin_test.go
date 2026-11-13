@@ -1007,3 +1007,71 @@ func TestStandInBetaRouterOldGlibcInTheAgentsLog(t *testing.T) {
 		t.Fatalf("failures %v, err %v; want the NOT RUN of a node whose glibc is 2.28, read from the agent's log", s.failures, s.err)
 	}
 }
+
+// A router row whose agent's log does not say what the row reads there fails its verdict: the flow reads the log and the verdict judges it.
+// The stack runs as in the passing stand-in and Envoy runs, but the agent's log the steps read is another file's. Without the line that says
+// the router serves the row fails with that; with a line that says the router did not start, and no clause naming a glibc (which would be the
+// NOT RUN), it fails with that. Neither is NOT RUN, and neither is a pass.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInBetaRouterFailsOnWhatTheAgentsLogSays(t *testing.T) {
+	for _, c := range []struct{ name, log, want string }{
+		{"no serving line", `time=2026-11-14T10:00:01Z level=INFO msg="allocation agent starting"`, "the agent's log does not say the router is serving"},
+		{"a start that failed for another reason", `time=2026-11-14T10:00:01Z level=ERROR msg="router did not start" router=envoy err="envoy refused: the bootstrap is refused"`,
+			"the agent's log says the router did not start"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := runRouterStandIn(t, func(lr *liveRun, cl *stack.Cluster) {
+				log := filepath.Join(cl.Scratch, "other-agent.log")
+				if err := os.WriteFile(log, []byte(c.log+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				lr.agentLogFn = func(string) string { return "tail -c 65536 " + log }
+			})
+			if s.err != nil {
+				t.Fatalf("the run ended with %v; want a failed verdict naming %q", s.err, c.want)
+			}
+			if !slices.Contains(s.failures, c.want) {
+				t.Errorf("failed checks %q do not hold %q", s.failures, c.want)
+			}
+		})
+	}
+}
+
+// routerLostAfterARestart is the run's API client reading an Instance that has a restart recorded as one whose router holds no worker
+// healthy: status.healthyWorkers 0, whatever the controller wrote. The row reads healthyWorkers when the Instance is ready, before any restart,
+// where this changes nothing, and again once it serves after the worker restart, where it is what the row must find. Everything else passes
+// through.
+type routerLostAfterARestart struct{ client.Client }
+
+func (c routerLostAfterARestart) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := c.Client.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	if in, ok := obj.(*v1alpha1.Instance); ok && len(in.Status.Restarts) > 0 {
+		zero := int32(0)
+		in.Status.HealthyWorkers = &zero
+	}
+	return nil
+}
+
+// TestStandInBetaRouterFailsWhenTheRouterHoldsNoWorkerAfterTheRestart: the router row reads status.healthyWorkers again once the Instance
+// serves after the worker restart, and a router that then holds no worker healthy fails it, naming that read. It is the read the flow makes
+// itself (healthyAgain), not the verdict's check alone: the same run with the healthy count read as 1 in the flow passes.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInBetaRouterFailsWhenTheRouterHoldsNoWorkerAfterTheRestart(t *testing.T) {
+	s := runRouterStandIn(t, func(lr *liveRun, _ *stack.Cluster) {
+		lr.wrapAPI = func(c client.Client) client.Client { return routerLostAfterARestart{c} }
+	})
+	if s.err != nil {
+		t.Fatalf("the run ended with %v; want a failed verdict", s.err)
+	}
+	const want = "status.healthyWorkers was not 1 once the Instance served again after the worker restart"
+	if !slices.Contains(s.failures, want) {
+		t.Errorf("failed checks %q do not hold %q", s.failures, want)
+	}
+	if slices.Contains(s.failures, "status.healthyWorkers was not 1 when the Instance was first ready") {
+		t.Errorf("the read at ready, before any restart, was changed too: %q", s.failures)
+	}
+}
