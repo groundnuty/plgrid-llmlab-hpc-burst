@@ -207,6 +207,7 @@ func TestParseEnvoyDigest(t *testing.T) {
 		{"gone\n", false},
 		{"changed\n", false},
 		{"unreadable\n", false},
+		{"sum " + good + "\n", false},
 		{"digest " + good[:63] + "\n", false},
 		{"digest " + strings.ToUpper(good) + "\n", false},
 		{"digest " + good + " extra\n", false},

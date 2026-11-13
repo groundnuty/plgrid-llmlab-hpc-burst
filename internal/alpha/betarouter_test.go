@@ -359,6 +359,9 @@ func TestClassifyReplyNamesWhatTheRouterMade(t *testing.T) {
 		{"a gateway 503", 503, []byte("no healthy upstream"), false, false, ReplyClass{RouterMade: true}},
 		{"a gateway 502 with a JSON body", 502, okJSON, false, false, ReplyClass{Complete: true, RouterMade: true}},
 		{"a gateway 504", 504, []byte("upstream request timeout"), false, false, ReplyClass{RouterMade: true}},
+		{"a gateway 503 with a JSON body", 503, okJSON, false, false, ReplyClass{Complete: true, RouterMade: true}},
+		{"a gateway 504 with a JSON body", 504, okJSON, false, false, ReplyClass{Complete: true, RouterMade: true}},
+		{"a 501 with a JSON body is the engine's", 501, okJSON, false, false, ReplyClass{Complete: true}},
 		{"Envoy's text under another status", 500, []byte("upstream connect error or disconnect/reset before headers"), false, false, ReplyClass{RouterMade: true}},
 		{"no response", 0, nil, false, false, ReplyClass{RouterMade: true}},
 		{"a body cut short", 200, okJSON, false, true, ReplyClass{RouterMade: true}},
@@ -379,12 +382,13 @@ func TestBytesObsAddCountsEachResponseInItsOwnPlace(t *testing.T) {
 	okStream := []byte("data: {\"x\":1}\n\ndata: [DONE]\n\n")
 	refusal := []byte(`{"error":{"message":"no"}}`)
 	var b BytesObs
-	// chat 200 plain, chat 200 streamed, completions 200 plain, completions 200 streamed
+	// Two chat answers and one completions answer that are not streamed, and one streamed chat answer: every count different from its pair, so
+	// that a swap of chat with completions, or of streamed with not, shows.
 	b.Add(true, false, true, "c1", 200, okJSON, false)
-	b.Add(true, true, true, "c2", 200, okStream, false)
-	b.Add(false, false, true, "c3", 200, okJSON, false)
-	b.Add(false, true, true, "c4", 200, okStream, false)
-	want := BytesObs{Variants: 4, Complete: 4, Status200: 4, StreamOK: 2, NonStreamOK: 2, ChatOK: 2, CompletionsOK: 2}
+	b.Add(true, false, true, "c2", 200, okJSON, false)
+	b.Add(true, true, true, "c3", 200, okStream, false)
+	b.Add(false, false, true, "c4", 200, okJSON, false)
+	want := BytesObs{Variants: 4, Complete: 4, Status200: 4, StreamOK: 1, NonStreamOK: 3, ChatOK: 3, CompletionsOK: 1}
 	if !equalBytes(b, want) {
 		t.Fatalf("after four answers: %+v, want %+v", b, want)
 	}
@@ -392,10 +396,12 @@ func TestBytesObsAddCountsEachResponseInItsOwnPlace(t *testing.T) {
 	b.Add(true, false, false, "bad", 400, refusal, false)
 	// An invalid one answered 200: sent, not refused.
 	b.Add(true, false, false, "bad2", 200, okJSON, false)
+	// An invalid one answered with a 5xx: sent, not refused, since vLLM refuses by a 4xx.
+	b.Add(true, false, false, "bad3", 500, refusal, false)
 	// A valid one the engine refuses with a 4xx of its own, and an engine's own 500: complete, not the router's.
 	b.Add(true, false, true, "v4xx", 422, refusal, false)
 	b.Add(false, false, true, "v500", 500, refusal, false)
-	if b.InvalidSent != 2 || b.InvalidRefused != 1 || b.Status4xx != 2 || b.Status5xx != 1 || b.Status200 != 5 || b.RouterMade != 0 || len(b.Failed) != 0 {
+	if b.InvalidSent != 3 || b.InvalidRefused != 1 || b.Status4xx != 2 || b.Status5xx != 2 || b.Status200 != 5 || b.RouterMade != 0 || len(b.Failed) != 0 {
 		t.Errorf("after the refusals: %+v", b)
 	}
 	// A gateway status, no answer and a cut body are the router's or the path's, named by key; none of them is a complete 200.
@@ -405,8 +411,8 @@ func TestBytesObsAddCountsEachResponseInItsOwnPlace(t *testing.T) {
 	if b.RouterMade != 3 || len(b.Failed) != 3 || b.Failed[0] != "gw" || b.Failed[1] != "none" || b.Failed[2] != "cut" {
 		t.Errorf("after the failures: RouterMade %d, failed %v", b.RouterMade, b.Failed)
 	}
-	if b.Variants != 11 {
-		t.Errorf("Variants = %d, want the 4 answered, the 4 refusals and the 3 failures, 11", b.Variants)
+	if b.Variants != 12 {
+		t.Errorf("Variants = %d, want the 4 answered, the 5 others and the 3 failures, 12", b.Variants)
 	}
 	// An engine's own 5xx is complete, and counted apart from the 2xx and 4xx: the status counts add up to Complete.
 	if b.Status200+b.Status4xx+b.Status5xx != b.Complete {

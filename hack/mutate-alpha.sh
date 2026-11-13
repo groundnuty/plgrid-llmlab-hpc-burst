@@ -640,7 +640,8 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'run.go@@		errors.Is(err, ErrGlibcTooOld)
 }@@		false
 }'
-  'run.go@@		return fmt.Sprintf("%s: %s%s; the run sent no request through the front; this run'\''s jobs were cancelled by tag\n", row.Name, glibcTooOldWords, reason)@@		return fmt.Sprintf("%s: %s; the run sent no request through the front; this run'\''s jobs were cancelled by tag\n", row.Name, glibcTooOldWords)'
+  'run.go@@		return fmt.Sprintf("%s: %s%s; the run sent no request through the front; this run'\''s jobs were cancelled by tag\n", row.Name, glibcTooOldWords, reason)@@		_ = reason
+		return fmt.Sprintf("%s: %s; the run sent no request through the front; this run'\''s jobs were cancelled by tag\n", row.Name, glibcTooOldWords)'
   'betarouter.go@@	case e.Refused:
 		f = append(f, "the agent'\''s log says the router did not start")@@	case false:
 		f = append(f, "the agent'\''s log says the router did not start")'
