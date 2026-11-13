@@ -59,7 +59,7 @@ func TestEndWaitStateNamesWhatTheWaitSawLast(t *testing.T) {
 			name: "a job ID in the scheduler's reason is replaced, and two jobs are counted, one ended",
 			jobs: []provider.Job{
 				{ID: "1234567", State: []string{"PENDING"}, Phase: v1alpha1.AllocationPending, Reason: "launch failed for job 1234567 on a node"},
-				{ID: "3548079", State: []string{"COMPLETED", "COMPLETING"}, Phase: v1alpha1.AllocationEnded, EndTime: &ended},
+				{ID: "9081726", State: []string{"COMPLETED", "COMPLETING"}, Phase: v1alpha1.AllocationEnded, EndTime: &ended},
 			},
 			want: "2 jobs in the cluster's record, 1 ended: job 1: state PENDING, phase Pending, reason launch failed for job [job] on a node, ended no; " +
 				"job 2: state COMPLETED+COMPLETING, phase Ended, reason none given, ended yes; no Allocation; no Instance",
