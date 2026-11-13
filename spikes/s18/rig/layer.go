@@ -80,10 +80,12 @@ type Attempt struct {
 // Layer is arms (b)-(d): a retry layer at each Instance's tunnel position. The front dials Instance i's
 // layer socket; the layer sends the request to Instance i, and on a failure before any header retries
 // it on another Instance under its Policy, returning headers to the front only once it has a good reply.
-// Each failed upstream is reported to the front's own Router.ReportConnect, as the front's own failure
-// path does, so pauses behave as in the product. Fidelity gaps (README): the front attributes the reply
-// and its in-flight count to Instance i, and its success on i clears i's failure count; "another
-// Instance" is the next ready one in order, not the ring's.
+// The other Instances' outcomes are reported to the front's own Router.ReportConnect, and home's the
+// front counts itself, so each upstream failure counts toward a pause once, as in the product. Fidelity
+// gaps (README): the front attributes the reply and its in-flight count to Instance i; when the layer
+// rescues a request that failed on i, the front sees a success on i and resets i's count, so a dead
+// Instance behind the layer is paused only when a request to it cannot be rescued; "another Instance" is
+// the next ready one in order, not the ring's.
 type Layer struct {
 	Policy Policy
 
@@ -166,21 +168,29 @@ func (l *Layer) serve(home int, w http.ResponseWriter, req *http.Request) {
 		resp, kind := l.send(req.Context(), target, req, body)
 		l.record(Attempt{ID: id, Home: home, Target: target, Kind: kind, Status: statusOf(resp), At: time.Now()})
 		key := l.rig.Front.Instances[target].Key
+		// Each upstream outcome is counted toward the front's pause once, as the front's own rule does
+		// (reportOutcome: a 5xx and a written-then-closed connection count, a completion resets). Home's
+		// outcome is the front's to count, from what the layer returns it: a closed connection or a relayed
+		// 5xx when the layer gives up, a success when it rescues the request. So the layer reports only
+		// the other Instances' outcomes. (It once reported home's failure too, and the front counted it
+		// again on a give-up: TestTheLayerAtBudget0PausesAsAlphaDoes.)
+		report := func(failed bool) {
+			if target != home {
+				l.rig.Front.Router.ReportConnect(key, failed)
+			}
+		}
 		switch kind {
 		case "ok":
-			if target != home {
-				l.rig.Front.Router.ReportConnect(key, false)
-			}
+			report(false)
 			relay(w, resp)
 			return
 		case "cancelled":
 			return
 		case "closed":
 			deaths++
-			l.rig.Front.Router.ReportConnect(key, true)
-		case "5xx":
-		case "dial":
-			l.rig.Front.Router.ReportConnect(key, true)
+			report(true)
+		case "5xx", "dial":
+			report(true)
 		}
 		if last != nil {
 			last.Body.Close()

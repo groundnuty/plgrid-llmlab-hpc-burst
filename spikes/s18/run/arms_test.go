@@ -124,3 +124,36 @@ func TestEachArmOnEachFault(t *testing.T) {
 		})
 	}
 }
+
+// The layer at budget 0 must leave the front's pauses as arm (a) does, not only each request's outcome
+// (the anchor above compares outcomes, which is why it missed this). Each F3-marked request pinned to
+// Instance 1 is one written-then-closed failure there, which the front counts once toward its pause
+// (pauseAfterFailures 3). After two the Instance is not paused; after the third it is; and under the layer
+// it must be the same at every step. A layer that also reported home's failure itself counted each one
+// twice, pausing the Instance after two (found by this test; README, Fidelity).
+func TestTheLayerAtBudget0PausesAsAlphaDoes(t *testing.T) {
+	steps := func(p *rig.Policy) []bool {
+		r := stand(t, "F3", p)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		c, s, _ := pinned(t, ctx, r, "pause", 1)
+		key := r.Front.Instances[1].Key
+		var paused []bool
+		for k := 0; k < 3; k++ {
+			res := c.Do(ctx, c.NextBase(), 0, s, false, rig.MarkF3)
+			if res.Status != 502 {
+				t.Fatalf("marked request %d: %d %s, want the tunnel's 502", k+1, res.Status, res.Code)
+			}
+			paused = append(paused, r.Front.Router.Paused(key))
+		}
+		return paused
+	}
+	p := rig.Budget0
+	a, l := steps(nil), steps(&p)
+	if fmt.Sprint(a) != "[false false true]" {
+		t.Fatalf("arm (a): paused after each of 3 failures %v, want [false false true] (pauseAfterFailures 3)", a)
+	}
+	if fmt.Sprint(l) != fmt.Sprint(a) {
+		t.Errorf("the layer at budget 0: paused after each of 3 failures %v, want arm (a)'s %v: each failure counted once", l, a)
+	}
+}
