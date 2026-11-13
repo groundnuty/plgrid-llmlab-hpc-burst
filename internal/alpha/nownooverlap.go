@@ -36,8 +36,9 @@ const (
 	SuccessorAllocationWait = stack.WaitDeadline
 	// nowEndAfterIdle is what the end of the run takes beyond the idle limit, once the deployment is deleted: the drain
 	// ends on the agent's next report with no request running (internal/lifecycle, drainStep), and the cancel of the job
-	// once released. The release itself waits the idle limit even then: ReleaseWhenIdle holds after the deployment's
-	// deletion (internal/lifecycle, retention.go; keepUntil applies to Keep alone).
+	// once released. The release follows at once since #503 (the science agent's ruling of 13 Nov 2026; HBEP-7, Release:
+	// an empty Allocation of a deleted deployment goes whatever its policy), so the idle limit in the slot hold below is
+	// now slack the bound was sized with, not a wait the end has.
 	nowEndAfterIdle = time.Minute
 )
 
