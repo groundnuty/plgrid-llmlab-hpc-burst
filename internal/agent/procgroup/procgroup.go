@@ -26,6 +26,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -137,6 +138,11 @@ type Spec struct {
 	// Argv0, when set, is the process's argv[0] (what ps shows) in place of
 	// Path.
 	Argv0 string
+	// ExitWithParent gives the process SIGKILL when the process that started it dies, however it
+	// dies (Pdeathsig). A test binary that go test's -timeout panics, or that an outer limit kills,
+	// runs no t.Cleanup, and a child in a process group of its own then outlives it (#514, as #484
+	// for frps). It is opt-in, for tests: off, the process starts exactly as before.
+	ExitWithParent bool
 }
 
 // Group is one started process and its process group.
@@ -158,6 +164,22 @@ type Group struct {
 
 // Start starts the process as the leader of a new process group.
 func Start(s Spec, now time.Time) (*Group, error) {
+	cmd := s.command()
+	if s.ExitWithParent {
+		return startDyingWithParent(cmd, s.Path, now)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start %s: %w", s.Path, err)
+	}
+	g := newGroup(cmd, now)
+	go g.run()
+	return g, nil
+}
+
+// command is the process Start starts, not yet started: the leader of a new process group (Setpgid)
+// and nothing else in its SysProcAttr, whatever ExitWithParent says. Only startDyingWithParent, on
+// its own path, adds Pdeathsig.
+func (s Spec) command() *exec.Cmd {
 	cmd := exec.Command(s.Path, s.Args...)
 	if s.Argv0 != "" {
 		cmd.Args[0] = s.Argv0
@@ -170,9 +192,37 @@ func Start(s Spec, now time.Time) (*Group, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// I/O copying of a non-file writer must not hold up the reaping forever.
 	cmd.WaitDelay = 5 * time.Second
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start %s: %w", s.Path, err)
+	return cmd
+}
+
+// startDyingWithParent is Start for Spec.ExitWithParent. The kernel ties Pdeathsig to the THREAD
+// that created the child, not to the process: the child gets its signal when that thread exits
+// (golang/go#27505), and a goroutine that locks its thread and returns ends it. So the child is
+// created, and then reaped (run), by one goroutine that locks its OS thread and never unlocks it:
+// the thread lives until the child has been reaped, and ends after it, when no child is left for
+// the signal to reach. As testenv.StartDyingWithParent and the launcher's frps (#492).
+func startDyingWithParent(cmd *exec.Cmd, path string, now time.Time) (*Group, error) {
+	cmd.SysProcAttr.Pdeathsig = syscall.SIGKILL
+	started := make(chan error, 1)
+	var g *Group
+	go func() {
+		runtime.LockOSThread()
+		if err := cmd.Start(); err != nil {
+			started <- err
+			return
+		}
+		g = newGroup(cmd, now)
+		started <- nil
+		g.run()
+	}()
+	if err := <-started; err != nil {
+		return nil, fmt.Errorf("start %s: %w", path, err)
 	}
+	return g, nil
+}
+
+// newGroup is the Group of the started cmd, recorded by PID and start time.
+func newGroup(cmd *exec.Cmd, now time.Time) *Group {
 	g := &Group{
 		cmd:    cmd,
 		pid:    cmd.Process.Pid,
@@ -184,8 +234,7 @@ func Start(s Spec, now time.Time) (*Group, error) {
 	if st, err := readStat(g.pid); err == nil {
 		g.id.StartTime = st.start
 	}
-	go g.run()
-	return g, nil
+	return g
 }
 
 // run waits for the leader to exit without reaping it, then for the group to
