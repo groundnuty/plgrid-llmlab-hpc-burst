@@ -164,6 +164,22 @@ type Group struct {
 
 // Start starts the process as the leader of a new process group.
 func Start(s Spec, now time.Time) (*Group, error) {
+	cmd := s.command()
+	if s.ExitWithParent {
+		return startDyingWithParent(cmd, s.Path, now)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start %s: %w", s.Path, err)
+	}
+	g := newGroup(cmd, now)
+	go g.run()
+	return g, nil
+}
+
+// command is the process Start starts, not yet started: the leader of a new process group (Setpgid)
+// and nothing else in its SysProcAttr, whatever ExitWithParent says. Only startDyingWithParent, on
+// its own path, adds Pdeathsig.
+func (s Spec) command() *exec.Cmd {
 	cmd := exec.Command(s.Path, s.Args...)
 	if s.Argv0 != "" {
 		cmd.Args[0] = s.Argv0
@@ -176,15 +192,7 @@ func Start(s Spec, now time.Time) (*Group, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// I/O copying of a non-file writer must not hold up the reaping forever.
 	cmd.WaitDelay = 5 * time.Second
-	if s.ExitWithParent {
-		return startDyingWithParent(cmd, s.Path, now)
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start %s: %w", s.Path, err)
-	}
-	g := newGroup(cmd, now)
-	go g.run()
-	return g, nil
+	return cmd
 }
 
 // startDyingWithParent is Start for Spec.ExitWithParent. The kernel ties Pdeathsig to the THREAD
