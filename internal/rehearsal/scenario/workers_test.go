@@ -209,6 +209,54 @@ func (r *rig) sendSome(key string, n int, what string) {
 	}
 }
 
+// headerInstanceUID is the front's attribution header naming the Instance that answered (HBEP-5,
+// Attribution headers; internal/front, HeaderInstanceUID).
+const headerInstanceUID = "Hpcburst-Instance-Uid"
+
+// sendOn sends one short request in conversation key and requires it served by Instance in, as the
+// front's attribution header names it.
+func (r *rig) sendOn(in *v1alpha1.Instance, key, what string) {
+	r.t.Helper()
+	rp := r.fc.Send("/v1/chat/completions", stack.ChatBody(stack.Model, 4, 0, false, ""), key)
+	if rp.Status != http.StatusOK {
+		r.t.Fatalf("%s: a request in %s: %d %.200q", what, key, rp.Status, rp.Body)
+	}
+	if got := rp.Header.Get(headerInstanceUID); got != string(in.UID) {
+		r.t.Fatalf("%s: a request in %s was answered by Instance %q, not %s: the key is not pinned to it", what, key, got, in.UID)
+	}
+}
+
+// keyOn finds a conversation key that the front's ring sends to Instance in (the answer's
+// Hpcburst-Instance-Uid) and that its Envoy's ring hash sends to worker w (Envoy's own rq_success for w,
+// and only for w, rises by one). The front passes the key on as the x-session-id Envoy hashes, so both
+// mappings hold for the run. Never a guess: each is read from the answer and from Envoy.
+func (r *rig) keyOn(in *v1alpha1.Instance, admin, w, prefix string) string {
+	r.t.Helper()
+	for i := 0; i < 128; i++ {
+		key := prefix + "-" + strconv.Itoa(i)
+		before := hostStats(r.t, admin)
+		rp := r.fc.Send("/v1/chat/completions", stack.ChatBody(stack.Model, 1, 0, false, ""), key)
+		if rp.Status != http.StatusOK {
+			r.t.Fatalf("a key search request in %s: %d %.200q", key, rp.Status, rp.Body)
+		}
+		if rp.Header.Get(headerInstanceUID) != string(in.UID) {
+			continue
+		}
+		after := hostStats(r.t, admin)
+		on := ""
+		for h := range after {
+			if after[h]["rq_success"] == before[h]["rq_success"]+1 {
+				on += h
+			}
+		}
+		if on == w {
+			return key
+		}
+	}
+	r.t.Fatalf("no key of 128 maps to Instance %s and, on its Envoy, to %s", in.Name, w)
+	return ""
+}
+
 // sessions numbers sendSome's sessions, so none repeats within a run.
 var sessions int
 
@@ -232,6 +280,9 @@ func TestRehearsalTwoWorkers(t *testing.T) {
 	// once both have passed and the probe through Envoy has, and each takes requests.
 	if w := in.Spec.Launch.Workers; w == nil || *w != 2 || in.Spec.Launch.Router != v1alpha1.InstanceRouterEnvoy {
 		t.Fatalf("the Instance's launch: workers %v, router %q; want 2 and envoy", w, in.Spec.Launch.Router)
+	}
+	if len(in.Status.Workers) != 2 {
+		t.Fatalf("status.workers once ready: %+v, want two entries", in.Status.Workers)
 	}
 	for i, e := range in.Status.Workers {
 		want := "ver-" + string(in.UID) + "-" + v1alpha1.WorkerName(i) + "-1"
@@ -290,19 +341,28 @@ func TestRehearsalTwoWorkers(t *testing.T) {
 	// (c) A worker killed while a stream runs on the other: it restarts at its own rung alone, the
 	// Instance stays ready and the stream ends uncut, healthyWorkers goes 2, 1, 2, and the restarted
 	// worker takes requests only once verified again.
+	// The stream's key is the primary's (KeyFor); which worker Envoy gives it is read from Envoy, and the
+	// victim is the other. The probes go in a key pinned to the primary and, on its Envoy, to the victim
+	// (keyOn), so each probe is one the dead or restarted victim would get without the fix: the front's
+	// ring would otherwise send a share to the handover replacement, and Envoy a share to the sibling
+	// (#510's review).
+	before = hostStats(t, admin)
+	r.sendOn(in, key, "step (c)")
+	after = hostStats(t, admin)
+	var streamOn string
+	for w := range after {
+		if after[w]["rq_success"] > before[w]["rq_success"] {
+			streamOn = w
+		}
+	}
+	victim := map[string]string{"worker-0": "worker-1", "worker-1": "worker-0"}[streamOn]
+	if victim == "" {
+		t.Fatalf("step (c): Envoy's counters name no worker for the stream's key: %v, then %v", before, after)
+	}
+	probeKey := r.keyOn(in, admin, victim, "victim")
 	first, done := r.fc.StartStream(stack.ChatBody(stack.Model, 1500, 1500, true, ""), key)
 	<-first
-	var streamOn, victim string
-	stack.WaitFor(t, stack.WaitDeadline, "Envoy to show which worker serves the stream", func() bool {
-		for w, m := range hostStats(t, admin) {
-			if m["rq_active"] > 0 {
-				streamOn = w
-				return true
-			}
-		}
-		return false
-	})
-	victim = map[string]string{"worker-0": "worker-1", "worker-1": "worker-0"}[streamOn]
+	stack.WaitFor(t, stack.WaitDeadline, "Envoy to show the stream on "+streamOn, func() bool { return hostStats(t, admin)[streamOn]["rq_active"] > 0 })
 	pidfdKill(t, engines[victim].pid, "--uds")
 	killAt := time.Now()
 	// From the kill on, strictly: a request is served, Envoy's route retrying one it sends the dead worker
@@ -336,13 +396,15 @@ func TestRehearsalTwoWorkers(t *testing.T) {
 			return false
 		}
 		if !verified(now) {
-			// Not yet verified again: a request goes to the other worker only. The status is read again
-			// after the request: only while it still shows the worker unverified does a request to it count.
+			// Not yet verified again: a request in the victim's key is answered, by the sibling through
+			// Envoy's retry while the victim is dead, and never by the victim's restarted process. A
+			// successful answer from the victim counts only while the status, read after the request,
+			// still shows it unverified.
 			pre := hostStats(t, admin)[victim]
-			r.sendSome(key, 1, "step (c), while "+victim+" rejoins")
+			r.sendOn(in, probeKey, "step (c), while "+victim+" rejoins")
 			post := hostStats(t, admin)[victim]
-			if later, _ := r.instance(in.Name); post["rq_total"] != pre["rq_total"] && !verified(later) {
-				t.Fatalf("step (c): %s after the kill, Envoy sent %s a request while it rejoined, before its verification: before %v, after %v; restarts %v",
+			if later, _ := r.instance(in.Name); post["rq_success"] != pre["rq_success"] && !verified(later) {
+				t.Fatalf("step (c): %s after the kill, %s's restarted process answered a request before its verification: before %v, after %v; restarts %v",
 					time.Since(killAt).Round(10*time.Millisecond), victim, pre, post, restartParts(later))
 			}
 			return false
@@ -471,6 +533,9 @@ func (r *rig) stepFailedRejoin(in *v1alpha1.Instance, key, admin, w string, jobI
 	before, _ := r.instance(in.Name)
 	sibling := map[string]string{"worker-0": "worker-1", "worker-1": "worker-0"}[w]
 	siblingGen := before.Annotations[v1alpha1.RestartGenerationAnnotation(sibling)]
+	// The stream's key is pinned to this Instance and, on its Envoy, to the sibling (keyOn), read while
+	// both workers serve (#510's review).
+	sibKey := r.keyOn(in, admin, sibling, "sibling")
 	if err := r.cl.gate.arm(); err != nil {
 		r.t.Fatal(err)
 	}
@@ -490,8 +555,10 @@ func (r *rig) stepFailedRejoin(in *v1alpha1.Instance, key, admin, w string, jobI
 		_, held := r.cl.gate.held(jobID)
 		return !restartAt.IsZero() && held
 	})
-	// The sibling's stream straddles the timeout's restart, due at restartAt + twoWorkersStartTimeout:
-	// started 25 s before, 3,000 tokens at tokenDelay, about 60 s, within routing.maxRequestDuration's 90 s.
+	// The sibling's stream must straddle the timeout's restart, due at restartAt + twoWorkersStartTimeout.
+	// It starts 25 s before that and lasts about 80 s (4,000 tokens at tokenDelay, within
+	// routing.maxRequestDuration's 90 s); whether it straddled is then checked on state: Envoy shows it
+	// active on the sibling when the restart is seen, and it has not ended by then.
 	deadline := restartAt.Add(twoWorkersStartTimeout)
 	for time.Until(deadline) > 25*time.Second {
 		now, _ := r.instance(in.Name)
@@ -500,9 +567,17 @@ func (r *rig) stepFailedRejoin(in *v1alpha1.Instance, key, admin, w string, jobI
 		}
 		time.Sleep(2 * time.Second)
 	}
-	first, done := r.fc.StartStream(stack.ChatBody(stack.Model, 3000, 3000, true, ""), key+"-e2")
+	first, done := r.fc.StartStream(stack.ChatBody(stack.Model, 4000, 4000, true, ""), sibKey)
 	<-first
-	stack.WaitFor(r.t, 2*stack.WaitDeadline, w+"'s restart for its start timeout", func() bool {
+	stack.WaitFor(r.t, stack.WaitDeadline, "Envoy to show the stream on "+sibling, func() bool { return hostStats(r.t, admin)[sibling]["rq_active"] > 0 })
+	var streamed *stack.Streamed
+	stack.WaitFor(r.t, 2*stack.WaitDeadline, w+"'s restart for its start timeout, with the stream on "+sibling, func() bool {
+		select {
+		case s := <-done:
+			streamed = &s
+			r.t.Fatalf("step (e2): the stream ended at %s, before %s's restart for its start timeout: it does not straddle the failed rejoin", s.EndAt.Format(time.RFC3339Nano), w)
+		default:
+		}
 		now, _ := r.instance(in.Name)
 		if now.Status.Phase != v1alpha1.InstanceReady {
 			r.t.Fatalf("step (e2): Instance %s is %s, want ready on %s", in.Name, now.Status.Phase, sibling)
@@ -510,13 +585,16 @@ func (r *rig) stepFailedRejoin(in *v1alpha1.Instance, key, admin, w string, jobI
 		rs := now.Status.Restarts
 		return len(rs) > 0 && rs[len(rs)-1].Part == w && rs[len(rs)-1].Signal == v1alpha1.ReasonStartTimeout
 	})
-	timedOut := time.Now()
-	streamed := <-done
+	if a := hostStats(r.t, admin)[sibling]["rq_active"]; a == 0 {
+		r.t.Errorf("step (e2): Envoy shows no request active on %s when %s's failed rejoin is seen: the stream is not on the sibling then", sibling, w)
+	}
+	s := <-done
+	streamed = &s
 	if body := string(streamed.Body); streamed.Status != http.StatusOK || !strings.Contains(body, "[DONE]") || strings.Contains(body, "stream_cut") {
 		r.t.Errorf("step (e2): %s's stream: %d, ending %.200q; want it uncut through %s's failed rejoin", sibling, streamed.Status, body[max(0, len(body)-200):], w)
 	}
-	if !streamed.EndAt.After(timedOut) && !streamed.FirstAt.Before(timedOut) {
-		r.t.Logf("step (e2): the stream ran %s to %s, the timeout's restart was seen at %s", streamed.FirstAt.Format(time.RFC3339Nano), streamed.EndAt.Format(time.RFC3339Nano), timedOut.Format(time.RFC3339Nano))
+	if got := streamed.Header.Get(headerInstanceUID); got != string(in.UID) {
+		r.t.Errorf("step (e2): the stream was answered by Instance %q, not %s", got, in.UID)
 	}
 	// Open the gate for good: a later start, step (f)'s new Instance, must not wait at it.
 	if err := r.cl.gate.open(); err != nil {
