@@ -100,6 +100,11 @@ type worker struct {
 	// logTail is the end of the engine's output once the worker exited
 	// without being told to, or why it could not start (WorkerReport.LogTail).
 	logTail string
+	// downAt is when the worker stopped being one its router may route to: its unexpected exit, or the
+	// first sight of a raised generation. Zero while it serves. waitArmed: the wake-up for its restart's
+	// wait is armed (restartReleased).
+	downAt    time.Time
+	waitArmed bool
 }
 
 func (w *worker) alive() bool {
@@ -353,8 +358,14 @@ func (a *Agent) convergeWorkers(in *instance, i agentapi.DesiredInstance) {
 		case w == nil:
 			in.workers = append(in.workers, a.startWorker(in, dw, i.Generation))
 		case i.Generation > w.instGen || dw.Generation > w.generation:
+			if w.downAt.IsZero() {
+				w.downAt = a.clock()
+			}
 			a.terminate(w)
-			if !w.live() {
+			if !w.live() && a.restartReleased(in, w) {
+				if f := restartStartHook; f != nil {
+					f(w.name)
+				}
 				*w = *a.startWorker(in, dw, i.Generation)
 			}
 		}
@@ -374,6 +385,68 @@ func (a *Agent) convergeWorkers(in *instance, i agentapi.DesiredInstance) {
 		in.generation = i.Generation
 	}
 }
+
+// restartReleased reports whether a restarted worker's new process may start (HBEP-7, Several workers;
+// the science agent's ruling on #439, PR 4's finding): at once without a running router; behind one, once
+// the router's read of its workers, taken after the worker went down, holds it failing its active check,
+// or at the latest
+// one active-check interval plus its timeout after it went down, by when Envoy has checked it. From the
+// worker's going down the readiness endpoint answers 503 for it, so Envoy's active check fails it at its
+// next check, and keeps failing it until its new generation is verified: no request reaches the new
+// process before then. Until released, it arms one wake-up of the loop for the deadline.
+func (a *Agent) restartReleased(in *instance, w *worker) bool {
+	r := in.router
+	if r == nil || r.phase != agentapi.PartRunning {
+		return true
+	}
+	deadline := w.downAt.Add(envoyHCInterval + envoyHCTimeout)
+	if !a.clock().Before(deadline) {
+		return true
+	}
+	// The active check failing is what holds the worker out until its verification; an outlier ejection
+	// alone can end first (#507's review).
+	if r.clustersReadAt != nil && r.clustersReadAt.After(w.downAt) {
+		for _, rw := range r.workers {
+			if rw.Name == w.name && rw.FailedActiveCheck {
+				return true
+			}
+		}
+	}
+	if !w.waitArmed {
+		w.waitArmed = true
+		a.wakeAt(deadline)
+	}
+	return false
+}
+
+// wakeAt runs the loop once at t, so a wait that ends then is seen: a no-op event, after which the loop
+// converges. It ends with the loop.
+func (a *Agent) wakeAt(t time.Time) {
+	d := t.Sub(a.clock())
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+		c, stop := startTimer(d)
+		defer stop()
+		select {
+		case <-c:
+			a.post(func() {})
+		case <-a.ctx.Done():
+		}
+	}()
+}
+
+// clock is the agent's time, Options.Now, which New always sets; an Agent built by hand in a test may
+// leave it unset, which reads the system clock.
+func (a *Agent) clock() time.Time {
+	if a.o.Now == nil {
+		return time.Now()
+	}
+	return a.o.Now()
+}
+
+// restartStartHook, when set by a test, runs just before a restarted worker's new process starts.
+var restartStartHook func(worker string)
 
 func desires(ws []agentapi.DesiredWorker, name string) bool {
 	for _, w := range ws {

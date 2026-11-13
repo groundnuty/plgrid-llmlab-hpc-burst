@@ -70,17 +70,31 @@ const (
 	envoyClustersPath = "/clusters?format=json"
 
 	// Worker health (HBEP-5, Worker health).
-	envoyHealthPath          = "/ready"
-	envoyHCInterval          = 5 * time.Second
-	envoyHCTimeout           = 2 * time.Second
-	envoyHCUnhealthy         = 2
-	envoyHCHealthy           = 1
-	envoyOutlier5xx          = 3
-	envoyEjectionBase        = 30 * time.Second
-	envoyEjectionMax         = 300 * time.Second
-	envoyMaxEjectionPercent  = 100
-	envoyHealthCheckAddress  = "127.0.0.1"
-	envoyHealthyPanicPercent = 0
+	envoyHealthPath         = "/ready"
+	envoyHCInterval         = 5 * time.Second
+	envoyHCTimeout          = 2 * time.Second
+	envoyHCUnhealthy        = 2
+	envoyHCHealthy          = 1
+	envoyOutlier5xx         = 3
+	envoyEjectionBase       = 30 * time.Second
+	envoyEjectionMax        = 300 * time.Second
+	envoyMaxEjectionPercent = 100
+	envoyHealthCheckAddress = "127.0.0.1"
+
+	// The route's retry (HBEP-5, Worker health; the science agent's ruling on #439, PR 4's finding): once,
+	// on a failure to connect or a reset before the request was sent, to another worker. Such a request
+	// reached no engine, so the retry cannot run anything twice; nothing written to a worker is retried.
+	// It answers a request Envoy sends to a worker that has just died, before its next active check.
+	envoyRetryOn       = "connect-failure,reset-before-request"
+	envoyNumRetries    = 1
+	envoyPreviousHosts = "envoy.retry_host_predicates.previous_hosts"
+	// envoyHostSelectionAttempts is how many times the retry's host selection may pick again when it
+	// lands on the worker that failed (previous_hosts). Under RING_HASH a pick can land on the same worker
+	// again. Measured on Envoy 1.40.2 with two workers, a request in the dead worker's session (#439): with
+	// the field unset the retry went back to the dead worker in 2 runs of 3, with 0 in 1 of 6, with 1 in
+	// none of 6, and with 20 in none of 15. Picks again cost nothing, so 20.
+	envoyHostSelectionAttempts = 20
+	envoyHealthyPanicPercent   = 0
 )
 
 // EnvoyWorker is one endpoint of the workers' cluster: a worker by name, on its engine socket.
@@ -158,6 +172,16 @@ type (
 		Timeout     string            `json:"timeout"`
 		IdleTimeout string            `json:"idle_timeout"`
 		HashPolicy  []envoyHashPolicy `json:"hash_policy"`
+		RetryPolicy envoyRetryPolicy  `json:"retry_policy"`
+	}
+	envoyRetryPolicy struct {
+		RetryOn                       string             `json:"retry_on"`
+		NumRetries                    int                `json:"num_retries"`
+		RetryHostPredicate            []envoyNamedConfig `json:"retry_host_predicate"`
+		HostSelectionRetryMaxAttempts int                `json:"host_selection_retry_max_attempts"`
+	}
+	envoyTyped struct {
+		Type string `json:"@type"`
 	}
 	envoyHashPolicy struct {
 		Header map[string]string `json:"header"`
@@ -186,6 +210,7 @@ type (
 		MaxConnections     uint32 `json:"max_connections"`
 		MaxPendingRequests uint32 `json:"max_pending_requests"`
 		MaxRequests        uint32 `json:"max_requests"`
+		MaxRetries         uint32 `json:"max_retries"`
 	}
 	envoyHTTPProto struct {
 		Type                      string            `json:"@type"`
@@ -245,6 +270,8 @@ const (
 	typeHCM         = "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager"
 	typeRouter      = "type.googleapis.com/envoy.extensions.filters.http.router.v3.Router"
 	typeHTTPOptions = "type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions"
+	// typePreviousHosts is the retry host predicate that sends a retry to another worker.
+	typePreviousHosts = "type.googleapis.com/envoy.extensions.retry.host.previous_hosts.v3.PreviousHostsPredicate"
 )
 
 // envoySeconds is a whole-second duration in Envoy's JSON form ("10800s").
@@ -294,6 +321,9 @@ func RenderEnvoyConfig(c EnvoyConfig) ([]byte, error) {
 								Route: envoyRouteAction{
 									Cluster: envoyClusterName, Timeout: timeout, IdleTimeout: timeout,
 									HashPolicy: []envoyHashPolicy{{Header: map[string]string{"header_name": envoySessionHeader}}},
+									RetryPolicy: envoyRetryPolicy{RetryOn: envoyRetryOn, NumRetries: envoyNumRetries,
+										RetryHostPredicate:            []envoyNamedConfig{{Name: envoyPreviousHosts, TypedConfig: envoyTyped{Type: typePreviousHosts}}},
+										HostSelectionRetryMaxAttempts: envoyHostSelectionAttempts},
 								},
 							}},
 						}}},
@@ -315,6 +345,10 @@ func RenderEnvoyConfig(c EnvoyConfig) ([]byte, error) {
 				},
 				CircuitBreakers: envoyCircuitBreakers{Thresholds: []envoyThreshold{{
 					Priority: "DEFAULT", MaxConnections: envoyMaxThreshold, MaxPendingRequests: envoyMaxThreshold, MaxRequests: envoyMaxThreshold,
+					// The retry's slot is held from the retry's decision until the retried attempt answers:
+					// Envoy's default of 3 would answer a fourth concurrent retry with an overflow 503 (#507's
+					// review). As for the other three, the front's cap governs.
+					MaxRetries: envoyMaxThreshold,
 				}}},
 				TypedExtensionProtocolOptions: map[string]envoyHTTPProto{
 					"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": {

@@ -82,3 +82,11 @@ func SetGlibcProbeForTest(argv ...string) (reset func()) {
 	glibcProbe = argv
 	return func() { glibcProbe = old }
 }
+
+// SetRestartStartHookForTest runs f just before a restarted worker's new process starts (converge.go), and
+// returns its reset.
+func SetRestartStartHookForTest(f func(worker string)) (reset func()) {
+	old := restartStartHook
+	restartStartHook = f
+	return func() { restartStartHook = old }
+}
