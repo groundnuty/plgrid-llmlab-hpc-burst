@@ -637,21 +637,12 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'betarouter.go@@	return v.Major < w.Major || (v.Major == w.Major && v.Minor < w.Minor)@@	return v.Major < w.Major || (v.Major == w.Major && v.Minor <= w.Minor)'
   'betarouter.go@@		if r.Agent.Version.Less(r.Probe.Version) {@@		if r.Probe.Version.Less(r.Agent.Version) {'
   'betarouter.go@@	m := getconfGlibc.FindStringSubmatch(strings.TrimSpace(string(out)))@@	m := getconfGlibc.FindStringSubmatch(strings.TrimSpace(string(out))[:0])'
-  'run.go@@		errors.Is(err, ErrGlibcTooOld)
-}@@		false
-}'
-  'run.go@@		return fmt.Sprintf("%s: %s%s; the run sent no request through the front; this run'\''s jobs were cancelled by tag\n", row.Name, glibcTooOldWords, reason)@@		_ = reason
-		return fmt.Sprintf("%s: %s; the run sent no request through the front; this run'\''s jobs were cancelled by tag\n", row.Name, glibcTooOldWords)'
-  'betarouter.go@@	case e.Refused:
-		f = append(f, "the agent'\''s log says the router did not start")@@	case false:
-		f = append(f, "the agent'\''s log says the router did not start")'
-  'betarouter.go@@	case !e.Serving:
-		f = append(f, "the agent'\''s log does not say the router is serving")@@	case false:
-		f = append(f, "the agent'\''s log does not say the router is serving")'
+  'run.go@@		errors.Is(err, ErrGlibcTooOld)@@		false'
+  'run.go@@row.Name, glibcTooOldWords, reason)@@row.Name, glibcTooOldWords, reason[:0])'
+  'betarouter.go@@	case e.Refused:@@	case false:'
+  'betarouter.go@@	case !e.Serving:@@	case false:'
   'betarouter.go@@	case e.Procs != 1:@@	case e.Procs < 1:'
-  'betarouter.go@@	case e.Contained:
-		f = append(f, "Envoy does not run bare@@	case false:
-		f = append(f, "Envoy does not run bare'
+  'betarouter.go@@	case e.Contained:@@	case false:'
   'betarouter.go@@	case e.RunningDigest != e.PinnedDigest:@@	case false:'
   'betarouter.go@@	case e.RunningDigest == "":@@	case false:'
   'betarouter.go@@	case b.Expected <= 0 || b.Variants != b.Expected:@@	case b.Expected <= 0:'
@@ -667,60 +658,23 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'betarouter.go@@	if o.HealthyAfterRestart != 1 {@@	if o.HealthyAfterRestart < 0 {'
   'betarouter.go@@	if o.LaunchRouter != "envoy" {@@	if false {'
   'betarouter.go@@	if o.LaunchWorkers > 1 {@@	if o.LaunchWorkers > 2 {'
-  'betarouter.go@@	f := ladderChecks(o.Ladder)
-	f = append(f, deploymentChecks(row, o.Deployment)...)
-	lf, _ := ledgerChecks(row, o.Tags, jobs)
-	f = append(f, lf...)
-	f = append(f, tagCountChecks(row, o.Tags, "the row makes exactly one Allocation")...)
-	if o.ReadyAt.IsZero() {
-		f = append(f, "the Instance was not seen ready")
-	}
-	if o.LaunchRouter@@	f := []string(nil)
-	f = append(f, deploymentChecks(row, o.Deployment)...)
-	lf, _ := ledgerChecks(row, o.Tags, jobs)
-	f = append(f, lf...)
-	f = append(f, tagCountChecks(row, o.Tags, "the row makes exactly one Allocation")...)
-	if o.ReadyAt.IsZero() {
-		f = append(f, "the Instance was not seen ready")
-	}
-	if o.LaunchRouter'
-  'betarouter.go@@	f = append(f, healthyChecks(o)...)
-	f = append(f, envoyChecks(o.Envoy)...)@@	f = append(f, envoyChecks(o.Envoy)...)'
-  'betarouter.go@@	f = append(f, bytesChecks(o.Bytes)...)
-	if o.Responses@@	if o.Responses'
+  'betarouter.go@@	f := ladderChecks(o.Ladder)@@	f := []string(nil)'
+  'betarouter.go@@	f = append(f, healthyChecks(o)...)@@	_ = healthyChecks'
+  'betarouter.go@@	f = append(f, bytesChecks(o.Bytes)...)@@	_ = bytesChecks'
   'betarouter.go@@	if o.Rate <= 0 {@@	if false {'
-  'betarouter.go@@	f = append(f, restartChecks(o.WorkerRestarts)...)
-	return dedupe(f)
-}
-
-// betaRouterPost@@	return dedupe(f)
-}
-
-// betaRouterPost'
-  'betarouter.go@@		if status >= 400 && status < 500 {
-			b.InvalidRefused++@@		if status >= 400 {
-			b.InvalidRefused++'
-  'betarouter.go@@			if chat {
-				b.ChatOK++@@			if !chat {
-				b.ChatOK++'
-  'betarouter.go@@			if stream {
-				b.StreamOK++@@			if !stream {
-				b.StreamOK++'
+  'betarouter.go@@	f = append(f, restartChecks(o.WorkerRestarts)...)@@	_ = restartChecks'
+  'betarouter.go@@		if status >= 400 && status < 500 {@@		if status >= 400 {'
+  'betarouter.go@@			if chat {@@			if !chat {'
+  'betarouter.go@@			if stream {@@			if !stream {'
   'betarouter.go@@	case 502, 503, 504:@@	case 502, 503:'
   'betarouter.go@@		c.Complete = strings.Contains(text, "data: [DONE]")@@		c.Complete = true'
   'betarouter.go@@	if status == 0 || cut {@@	if status == 0 {'
   'betarouter.go@@var envoyFailureText = []string{"upstream connect error", @@var envoyFailureText = []string{'
   'betarouter.go@@	if !strings.Contains(s, `"max_tokens"`) && !strings.Contains(s, `"max_completion_tokens"`) {@@	if !strings.Contains(s, `"max_tokens"`) {'
-  'betarouter.go@@		loc := s13Model.FindStringSubmatchIndex(s)
-		if loc != nil {
-			s = s[:loc[3]] + strconv.Quote(model) + s[loc[1]:]@@		loc := s13Model.FindStringSubmatchIndex(s)
-		if loc != nil {
-			s = s[:loc[3]] + strconv.Quote(model) + s[loc[3]:]'
+  'betarouter.go@@			s = s[:loc[3]] + strconv.Quote(model) + s[loc[1]:]@@			s = s[:loc[3]] + strconv.Quote(model) + s[loc[3]:]'
   'betarouter.go@@var s13Model = regexp.MustCompile(`("model"\s*:\s*)"s13-model"`)@@var s13Model = regexp.MustCompile(`("model":)"s13-model"`)'
   'betarouter.go@@		if len(p.Argv) == 0 || filepath.Base(p.Argv[0]) != "envoy" || !t.inJob(p) {@@		if len(p.Argv) == 0 || filepath.Base(p.Argv[0]) != "envoy" {'
-  'betarouter.go@@			if isApptainer(q.Argv) {
-				contained = true@@			if false {
-				contained = true'
+  'betarouter.go@@			if isApptainer(q.Argv) {@@			if false {'
   'betarouter.go@@	if p.PID <= 0 || !digitsOnly.MatchString(p.Start) || !base64Only.MatchString(p.cmdline) {@@	if p.PID <= 0 || !base64Only.MatchString(p.cmdline) {'
   'betarouter.go@@[ "${20}" = "$start" ] || { echo changed; exit 0; }@@true || { echo changed; exit 0; }'
   'betarouter.go@@[ "$now" = "$cmd" ] || { echo changed; exit 0; }@@true || { echo changed; exit 0; }'
@@ -729,11 +683,7 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'betarouter.go@@	r.Name, r.PostsTo = BetaRouterName, BetaTracker@@	r.Name, r.PostsTo = BetaRouterName, "#145"'
   'betarouter.go@@const BetaTracker = "#522"@@const BetaTracker = "#376"'
   'betarouter.go@@RESPONSE-LEVEL reading on vLLM, not bytes (vLLM cannot show the bytes it received; exact bytes are CI'\''s)@@reading on vLLM (S13)'
-  'steps_live_test.go@@	if name == BetaRouterName {
-		return []stack.HostOption{stack.InstanceRouter}
-	}@@	if false {
-		return []stack.HostOption{stack.InstanceRouter}
-	}'
+  'steps_live_test.go@@	if name == BetaRouterName {@@	if false {'
   'budget.go@@	CloseTimeout = 5 * time.Minute@@	CloseTimeout = 4 * time.Minute'
   'budget.go@@	ReadyMargin = 5 * time.Minute@@	ReadyMargin = 4 * time.Minute'
   'budget.go@@	EndMargin = 5 * time.Minute@@	EndMargin = 4 * time.Minute'
