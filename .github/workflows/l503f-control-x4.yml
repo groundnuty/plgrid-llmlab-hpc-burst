@@ -3,11 +3,11 @@
 # live steps over the real stack and the fake Slurm; it must end NOT RUN for the cold start only, and assert that the stack's release,
 # not the cleanup or the time limit, ended the job) and the warm one (TestStandInNowServeWarm: the pre-staged row passes). Read-only: no
 # secret, cache restore only, nothing saved.
-name: l503e-debug-state-x4
+name: l503f-control-x4
 on:
   pull_request:
     paths:
-      - .github/workflows/l503e-debug-state-x4.yml
+      - .github/workflows/l503f-control-x4.yml
 permissions:
   contents: read
 jobs:

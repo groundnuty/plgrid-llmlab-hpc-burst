@@ -13,13 +13,11 @@ import (
 //   - one that has not started is cancelled: nothing waits for it;
 //   - one that ended, or failed, is released, as is a running one one of
 //     whose host-dialed relays ended for good (RelayEndedForGood);
-//   - a running one of a deployment that is gone or being deleted is released
-//     at once, whatever its policy (HBEP-7, Release; issue #503): the policy
-//     is for a deployment that still exists;
-//   - a running one of a deployment that exists is kept as warm capacity until
-//     its policy's date (the deployment's end time by default), or released
-//     after its idle limit under release-when-idle; the profile's maxIdle
-//     releases it even under keep. None outlives its hard end.
+//   - a running one is kept as warm capacity until its policy's date (the
+//     deployment's end time by default, or at once once the deployment is
+//     gone), or released after its idle limit under release-when-idle; the
+//     profile's maxIdle releases it even under keep. None outlives its hard
+//     end.
 func (p *pass) retention() error {
 	present := map[string]bool{}
 	for name := range p.allocs {
@@ -69,13 +67,6 @@ func (p *pass) releaseEmpty(a *v1alpha1.Allocation) (bool, string, error) {
 		// An Instance is created before its Allocation, so an unstarted
 		// Allocation with no live Instance waits for nothing.
 		return true, "a pending Allocation with no Instance is cancelled", nil
-	}
-	if p.md == nil || !p.md.DeletionTimestamp.IsZero() {
-		// A user who deletes a deployment releases its GPUs, whatever its policy (HBEP-7, Release; the science agent's ruling on
-		// #503, 13 Nov 2026): release-when-idle's limit, like keep's date, is for a deployment that still exists. Before this, only
-		// keep was cut by the deletion (keepUntil), and a release-when-idle job ran on for its whole idle limit, 30 minutes in the
-		// example, holding the owner's shared slot.
-		return true, "its deployment was deleted", nil
 	}
 	if obs.HardEnd != nil && !p.now.Before(obs.HardEnd.Time) {
 		return true, "its hard end passed", nil
@@ -176,16 +167,19 @@ func (p *pass) writeIdleSince(a *v1alpha1.Allocation, t *time.Time) error {
 	return nil
 }
 
-// keepUntil is the date a kept Allocation of a deployment that exists is kept
-// until: the policy's date, else the deployment's end time. Nil means until the
-// hard end. A deployment that is gone or being deleted never gets here: its empty
-// Allocation is released at once (releaseEmpty).
+// keepUntil is the date a kept Allocation is kept until: the policy's date,
+// else the deployment's end time; once the deployment is gone, its end has
+// come. Nil means until the hard end.
 func (p *pass) keepUntil(pol *v1alpha1.RetentionPolicy) *time.Time {
 	if pol != nil && pol.Until != nil {
 		t := pol.Until.Time
 		return &t
 	}
-	if p.md != nil && p.md.Spec.EndTime != nil {
+	if p.md == nil || !p.md.DeletionTimestamp.IsZero() {
+		t := p.now
+		return &t
+	}
+	if p.md.Spec.EndTime != nil {
 		t := p.md.Spec.EndTime.Time
 		return &t
 	}
