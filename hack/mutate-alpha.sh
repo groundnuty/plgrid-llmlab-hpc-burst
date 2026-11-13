@@ -688,7 +688,6 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   # host-dialed rule. The live flow's wiring is the stand-ins' (hack/mutate-alpha.sh cannot run them).
   'betakeeper.go@@	tm.LongFloor = KeeperWindow@@	tm.LongFloor = KeeperWindow / 2'
   'betakeeper.go@@	if errors.As(err, &lt) {@@	if false && errors.As(err, &lt) {'
-  'betakeeper.go@@	if !(rate > 0) || math.IsInf(rate, 0) {@@	if !(rate > 0) {'
   'betakeeper.go@@	if !r.Read {@@	if false {'
   'betakeeper.go@@	if r.KeeperEpoch < KeeperEpochBase {@@	if r.KeeperEpoch < KeeperEpochBase-1 {'
   'betakeeper.go@@	if r.ControllerOwn != 0 {@@	if r.ControllerOwn < 0 {'

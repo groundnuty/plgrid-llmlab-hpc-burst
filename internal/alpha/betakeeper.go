@@ -24,7 +24,6 @@ package alpha
 import (
 	"errors"
 	"fmt"
-	"math"
 	"strings"
 	"time"
 
@@ -82,11 +81,8 @@ func (e *KeeperStreamTooShortError) Is(target error) bool { return target == Err
 
 // FitKeeper is the length of the stream the keeper row holds across the restart: as long as max-model-len less PromptReserve holds at rate tokens
 // a second, rounded down to a whole second, capped at the row's LongCap, and at least the window. Under the window it is a
-// *KeeperStreamTooShortError. A rate that is not a positive finite number is a plain error. It is FitLong's sizing, with the window as the floor.
+// *KeeperStreamTooShortError. A rate that is not a positive finite number is FitLong's plain error. It is FitLong's sizing, with the window as the floor.
 func FitKeeper(tm Timing, maxModelLen int, rate float64) (time.Duration, error) {
-	if !(rate > 0) || math.IsInf(rate, 0) {
-		return 0, fmt.Errorf("a stream cannot be sized from a measured rate of %v tokens/s", rate)
-	}
 	tm.LongFloor = KeeperWindow
 	fit, err := FitLong(tm, maxModelLen, rate)
 	var lt *LongTooShortError
