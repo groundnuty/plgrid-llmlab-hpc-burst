@@ -416,7 +416,7 @@ func bytesChecks(b BytesObs) []string {
 		f = append(f, "a valid variant of S13's cases was answered with a 5xx: "+namedVariants(fiveXX))
 	}
 	if len(outside) > 0 {
-		f = append(f, "a valid variant outside S13's groups that a server may refuse was answered other than 200: "+namedVariants(outside))
+		f = append(f, "a valid variant of S13's cases was answered other than 200, which is allowed only as a 4xx in one of S13's groups that a server may refuse: "+namedVariants(outside))
 	}
 	if b.InvalidSent <= 0 || b.InvalidRefused != b.InvalidSent {
 		f = append(f, "a variant S13 says vLLM refuses was not refused with a 4xx")
