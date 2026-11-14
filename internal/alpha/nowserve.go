@@ -306,6 +306,7 @@ func nowServePost(row Row, o NowServeObs, failures []string) string {
 	} else {
 		fmt.Fprintf(&b, "- the warm start, from the agent's own log: NOT shown (%s): NOT RUN, never a pass\n", warm.counts())
 	}
+	b.WriteString(rehashLine("the job", o.Warm))
 	return b.String()
 }
 
@@ -350,10 +351,13 @@ const (
 // (internal/agent/converge.go), and a worker's start (internal/agent/workers.go), which comes only once the
 // Instance's staging is done.
 const (
-	AgentStartMsg      = "allocation agent starting"
-	AgentBuildMsg      = "building image"
-	AgentStageFailMsg  = "staging failed"
-	AgentWorkerMsg     = "worker started"
+	AgentStartMsg     = "allocation agent starting"
+	AgentBuildMsg     = "building image"
+	AgentStageFailMsg = "staging failed"
+	AgentWorkerMsg    = "worker started"
+	// AgentRehashMsg is the agent's line of a staging's rehash (internal/agent, converge.go: stagingDone), read for its numbers
+	// (RehashOf; issue #575), never by the warm start's check.
+	AgentRehashMsg     = "checkpoint rehashed"
 	agentRestartKey    = "restartCount"
 	agentPreStartLevel = "INFO|WARN"
 )
@@ -534,6 +538,9 @@ type WarmObs struct {
 	Files       []string       `json:"files"`
 	Skipped     []string       `json:"skipped,omitempty"`
 	Log         []AgentLogLine `json:"log,omitempty"`
+	// Rehash is the staging's rehash, from the same log (RehashOf): information for the text to post, which the warm start's
+	// check never reads.
+	Rehash RehashObs `json:"rehash"`
 }
 
 // SkipRule is the stage package's rule of the checkpoint files the engine does not load, which staging skips with no

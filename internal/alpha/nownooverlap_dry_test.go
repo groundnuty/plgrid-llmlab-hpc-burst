@@ -18,7 +18,7 @@ import (
 var nowNoOverlapFaults = []string{"cut", "no-stream", "noslot", "nogap", "early-submit", "created-early", "order-unseen", "marked",
 	"not-ended", "not-ready", "successor-not-ready", "refused-no-owner", "no-pred-tag", "untagged", "wrong-partition", "adds-helios", "default-lease",
 	"short-lease", "no-release-when-idle", "duplicate-tag", "extra-allocation", "pend-past-bound", "second-never-started",
-	"second-never-started-cut", "slot-taken", "slot-taken-refused", "slot-taken-cut", "warm-pre-unshown", "warm-suc-unshown"}
+	"second-never-started-cut", "slot-taken", "slot-taken-refused", "slot-taken-cut", "warm-pre-unshown", "warm-suc-unshown", "rehash-cold", "rehash-unread"}
 
 func init() { dryFaults["nownooverlap"] = nowNoOverlapFaults }
 

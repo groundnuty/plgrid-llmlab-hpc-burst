@@ -369,6 +369,8 @@ func nowNoOverlapPost(row Row, o NowNoOverlapObs, failures []string, jobs []prov
 		o.Slot.Reads, o.Slot.Failed, o.Slot.ForeignSeen, o.Slot.Refused)
 	b.WriteString(warmLine("the predecessor's job", o.WarmPredecessor, !o.PredecessorReady.IsZero()))
 	b.WriteString(warmLine("the successor's job", o.WarmSuccessor, !o.SuccessorReady.IsZero()))
+	b.WriteString(rehashLine("the predecessor's job", o.WarmPredecessor))
+	b.WriteString(rehashLine("the successor's job", o.WarmSuccessor))
 	fmt.Fprintf(&b, "- the deployment ended at the row's end, every job of the run seen ended: %t\n", o.DeploymentEnded)
 	return b.String()
 }

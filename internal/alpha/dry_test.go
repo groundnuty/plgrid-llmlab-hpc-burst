@@ -47,7 +47,7 @@ var dryFaults = map[string][]string{
 	"betabulk":   {"not-ready", "not-registered", "front-without-bulk", "control-took-bulk", "bulk-never-engaged", "bulk-twice", "counter-unread", "fallback", "control-fallback", "control-no-stall", "control-at-the-rule", "bulk-at-the-rule", "bulk-above-the-rule", "bulk-small-margin", "control-short-reply", "bulk-short-reply", "control-status", "bulk-status", "control-stream-cut", "bulk-stream-cut", "control-stream-short", "bulk-stream-short", "control-few-gaps", "bulk-few-gaps", "control-untimed", "control-cut", "bulk-cut", "invalid-and-cut", "double-unnamed", "double-digest-short", "double-digest-upper", "unattributed", "no-responses", "untagged", "wrong-partition", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "pend-past-bound"},
 	"betakeeper": {"window-too-short", "window-at-the-floor", "not-ready", "relays-unread-before", "relays-unread-after", "keeper-e-low", "controller-relays", "controller-relays-after", "relay-replaced-control", "relay-replaced-serving", "relay-seq-changed", "keeper-e-changed", "not-killed", "outcome-unseen", "outcome-late", "outcome-late-ended", "same-controller", "same-holder", "lease-not-risen", "lease-jumped", "fence-not-followed", "agent-not-reported", "agent-registration-changed", "unreachable", "instance-restarted", "cut", "incomplete", "short-stream", "past-deadline", "opened-after-kill", "outcome-at-90s", "outcome-at-60s", "outcome-in-the-margin", "ended-before-outcome", "ended-before-outcome-and-cut", "front-cut", "front-cuts-unread", "unattributed", "no-responses", "untagged", "wrong-partition", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "pend-past-bound"},
 	"betarouter": {"glibc-old-probe", "glibc-old-agent", "glibc-at-the-minimum", "glibc-one-under", "glibc-unread", "not-ready", "no-router-launch", "several-workers", "healthy-zero-at-ready", "healthy-absent-after-restart", "router-refused", "not-serving", "no-envoy", "two-envoys", "not-bare", "wrong-digest", "unread-executable", "no-pin", "no-rate", "bytes-short", "bytes-unfinished", "bytes-router-made", "bytes-no-stream-200", "bytes-no-chat-200", "bytes-past-bound", "control-router-alters", "control-both-refuse", "control-prompt-differs", "control-stream-ending", "control-incomplete", "control-unavailable", "unattributed", "no-responses", "no-restart", "two-restarts", "ladder-climb", "untagged", "wrong-partition", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "pend-past-bound"},
-	"nowserve":   {"cut", "short-stream", "past-deadline", "unattributed", "no-responses", "no-restart", "two-restarts", "ladder-instance-rung", "ladder-climb", "wrong-identity", "events-missing", "events-unchecked", "gauge-problem", "not-ready", "untagged", "wrong-partition", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "pend-past-bound", "warm-no-image", "warm-file-missing", "warm-other-digest", "warm-other-file", "warm-unread", "warm-cold-then-retry", "warm-failed-then-retry", "warm-cancel-then-retry", "warm-failed-check", "warm-no-start", "warm-restarted", "warm-unknown-first", "warm-truncated"},
+	"nowserve":   {"cut", "short-stream", "past-deadline", "unattributed", "no-responses", "no-restart", "two-restarts", "ladder-instance-rung", "ladder-climb", "wrong-identity", "events-missing", "events-unchecked", "gauge-problem", "not-ready", "untagged", "wrong-partition", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "pend-past-bound", "warm-no-image", "warm-file-missing", "warm-other-digest", "warm-other-file", "warm-unread", "warm-cold-then-retry", "warm-failed-then-retry", "warm-cancel-then-retry", "warm-failed-check", "warm-no-start", "warm-restarted", "warm-unknown-first", "warm-truncated", "rehash-cold", "rehash-unread"},
 	"tunnel":     {"short", "cut", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition", "adds-other-cluster", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "past-deadline", "past-drain", "no-drain-start", "stream-cut-error", "reconnect", "disconnected", "sparse-samples", "late-first-sample", "no-concurrency", "slow-streams", "no-idle-gap", "no-long-stream", "no-back-to-back", "no-load-rate", "slow-start", "no-large", "large-apart", "response-overlap", "no-upload-rate", "no-download-rate", "upload-not-under-load", "pend-past-bound"},
 }
 
@@ -888,6 +888,14 @@ func (d *drySteps) dryAgentLog() string {
 		}
 		fmt.Fprintf(&b, "stage: checkpoint file %s: %s\n", f, StagedPresentMatching)
 	}
+	// The staging's rehash (issue #575): information the post carries and no check reads, so a cold one or none passes.
+	switch {
+	case d.fault("rehash-unread"):
+	case d.fault("rehash-cold"):
+		fmt.Fprintf(&b, "time=2026-11-02T09:00:04Z level=INFO msg=%q uid=u generation=1 files=0 listed=4 bytes=0 ms=0\n", AgentRehashMsg)
+	default:
+		fmt.Fprintf(&b, "time=2026-11-02T09:00:04Z level=INFO msg=%q uid=u generation=1 files=3 listed=4 bytes=15400000000 ms=11000\n", AgentRehashMsg)
+	}
 	if !d.fault("warm-truncated") {
 		fmt.Fprintf(&b, "time=2026-11-02T09:00:05Z level=INFO msg=%q worker=worker-0 pid=1 generation=1 instanceGeneration=1\n", AgentWorkerMsg)
 	}
@@ -907,7 +915,8 @@ func (d *drySteps) warm() WarmObs {
 	if d.fault("warm-unread") {
 		return w
 	}
-	w.LogRead, w.Log = true, ParseAgentLog([]byte(d.dryAgentLog()))
+	log := []byte(d.dryAgentLog())
+	w.LogRead, w.Log, w.Rehash = true, ParseAgentLog(log), RehashOf(log)
 	return w
 }
 

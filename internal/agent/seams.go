@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
@@ -108,6 +109,18 @@ type CheckpointResult struct {
 	// mismatch (with the hash found), or absent for a file the engine does not
 	// load and staging therefore skipped.
 	Files []agentapi.FileResult
+	// Rehash is the rehash of the listed files found present at this call,
+	// before any repair or download (HBEP-9's open rehash time).
+	Rehash RehashStat
+}
+
+// RehashStat is one rehash of a checkpoint's present files: how many were
+// found present and hashed, of how many listed, their bytes, and how long the
+// rehash alone took. Files 0 is a cold start: nothing was present to rehash.
+type RehashStat struct {
+	Files, Listed int
+	Bytes         int64
+	Duration      time.Duration
 }
 
 // ImageResult is a staged image.

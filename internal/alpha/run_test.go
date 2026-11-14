@@ -102,6 +102,9 @@ var nowNoOverlapCases = []dryCase{
 	{"extra-allocation", "exactly two Allocations"},
 	{"second-never-started-cut", "a stream was cut"},
 	{"slot-taken-cut", "a stream was cut"},
+	// The rehash (issue #575) is information, never a check: a cold one, or none in the log, passes.
+	{"rehash-cold", ""},
+	{"rehash-unread", ""},
 }
 
 // nowServeCases are row A's (issue #376; nowserve.go). A warm start the agent's log did not show on its own is NOT RUN, not a failure
@@ -128,6 +131,9 @@ var nowServeCases = []dryCase{
 	{"short-lease", "not longer than the lead an Instance needs (PartitionTooShort)"},
 	{"duplicate-tag", "a tag names more than one job"},
 	{"extra-allocation", "exactly one Allocation"},
+	// The rehash (issue #575) is information, never a check: a cold one, or none in the log, passes.
+	{"rehash-cold", ""},
+	{"rehash-unread", ""},
 }
 
 var tunnelCases = []dryCase{

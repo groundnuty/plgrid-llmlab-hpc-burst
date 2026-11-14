@@ -142,8 +142,9 @@ func (r *liveRun) warmOf(ctx context.Context, in v1alpha1.Instance, files []agen
 		r.t.Logf("the agent's log of the job could not be read for the warm start: %v", err)
 		return w
 	}
-	w.LogRead, w.Log = true, ParseAgentLog(b)
-	r.t.Logf("%s: the agent's log of the job, read whole up to %d bytes: %d lines", r.cfg.Row.Name, agentLogMax, len(w.Log))
+	w.LogRead, w.Log, w.Rehash = true, ParseAgentLog(b), RehashOf(b)
+	r.t.Logf("%s: the agent's log of the job, read whole up to %d bytes: %d lines; the rehash read %t: %d of %d files, %d bytes, %d ms",
+		r.cfg.Row.Name, agentLogMax, len(w.Log), w.Rehash.Read, w.Rehash.Files, w.Rehash.Listed, w.Rehash.Bytes, w.Rehash.MS)
 	return w
 }
 
