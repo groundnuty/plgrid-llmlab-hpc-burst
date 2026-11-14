@@ -64,7 +64,7 @@ A past project ran a fleet of agents against several Slurm clusters, sharing one
 - An agent wants to scale `example-27b` from two Instances to one. The plan shows that this cancels a pending Allocation that has waited two days, that the Provider's observed queue waits reach three days at p90, and that Slurm's advisory estimate for the same job submitted now is four days. The plan needs approval. The person who operates the framework, the default approver, reads the plan and declines.
 - The operator lets one agent approve on the Sano Provider alone. That agent scales its Sano deployments down and approves its own plans. Its plan on Helios waits for the operator.
 - An agent's session dies mid-operation. Its successor holds the same identity, finds the Operation by its name, and reads what was done; nothing runs twice.
-- An agent plans the release of three kept Allocations on two providers. The plan lists exactly which jobs would be cancelled, and what each costs to get back. The owner approves that plan. The confirm runs it, and the report shows one cancellation failed on one provider.
+- An agent plans the release of three kept Allocations of one deployment, on two providers. The plan lists exactly which jobs would be cancelled, and what each costs to get back. The owner approves that plan. The confirm runs it, and the report shows one cancellation failed on one provider.
 - An agent repurposes an Allocation under the agreed policy. No approval is asked, and the plan still shows what the move costs.
 - Two experiment runners reserve sessions on one deployment for the same night. The front admits each up to its booking, and neither can double the load (stable).
 - An agent subscribed to "ending soon" is restarted. It resumes from its cursor and receives the events it missed (stable).
@@ -90,7 +90,7 @@ A past project ran a fleet of agents against several Slurm clusters, sharing one
   - **Not yet tested:** power loss or a kernel crash, the only cases where the fsync policy differs from the default. S8 did not test them; a FUSE test without root might work but was not attempted.
 - **Dry run is enforced by the server.** An Operation does nothing until its requester confirms its plan, whatever the client sends. Its plan reads provider facts but never changes a provider: it uses only status the controllers already keep, and Slurm's `sbatch --test-only`, which submits no job (Design details, The release cost).
 - **Actions under an agreed spec need no approval.** The lifecycle controller (HBEP-7) cancels hedge losers, releases an old Allocation once its replacement serves, releases what over-allocation does not keep or retain, releases an Allocation when its retention policy says, and ends a deployment at its "until when" without approval, because the ModelDeployment's spec and the retention policy already agreed to them. Approvals apply to actions outside the spec. Replacement before release (HBEP-3) holds regardless of approvals while the deployment keeps its desired capacity. It does not cover shutdown at the end time, scale-down, deletion, an approved early termination or a repurpose: their Instances drain and end without a replacement, because they lower a deployment's capacity rather than keep it. Each Allocation left with no Instance then follows its retention policy.
-- **An agent's edit that lowers capacity is not an agreed spec.** It is the request. Scale-down, an earlier end time and deletion make the controller release by following the new spec, so the capacity guard sends those edits through an Operation (Design details, The capacity guard).
+- **An agent's edit that lowers capacity is not an agreed spec.** It is the request. Scale-down, an earlier end time, deletion and several other edits make the controller release by following the new spec, so the capacity guard accepts from an agent only the edits that cannot release, and the rest go through an Operation or a person (Design details, The capacity guard).
 - **The release cost is shown, never decided on.** Observed queue waits are the number planning uses (HBEP-7, open question 2), and a start estimate is advisory (HBEP-4, Risks: "Start estimates are trusted"). The plan shows both with their observation times, and neither decides anything.
 - **Bulk actions select by label,** with a dry run that lists every match by name. There is no pattern matching on process or job names.
 
@@ -98,10 +98,10 @@ A past project ran a fleet of agents against several Slurm clusters, sharing one
 
 - **A relayed approval.** An approval counts only from the approver's own identity, checked at admission, and bound to one plan; a message saying someone approved is not one.
 - **An approval applied to a changed plan.** The approval names the plan's ID. If state changes before execution, the recomputed plan has another ID, and the Operation turns stale.
-- **An agent releases by editing the spec.** Scale-down, an earlier end time and deletion all make the controller release (HBEP-7, Release). Mitigation: the capacity guard refuses those edits from every agent identity, and they go through an Operation.
+- **An agent releases by editing the spec.** Scale-down, an earlier end time, deletion, a switch to a managed source, a longer drain window and an owner reference for the garbage collector all make the controller release or drain early (HBEP-7, Release). Mitigation: the capacity guard is an allowlist, which accepts from an agent only edits that cannot release.
 - **An agent writes itself into the approval policy.** Mitigation: the policy is a cluster-scoped kind that only persons may write (Design details, Identities and roles).
 - **An agent keeps using the admin kubeconfig.** The guard matches agent identities only, so it never sees such an agent. Mitigation: each agent gets its own identity in beta's first step, and the admin kubeconfig stays with the person as the break-glass credential. Its writes show in the audit log under the admin's name.
-- **A controller path added later releases on another spec edit.** Mitigation: a controller change that makes a spec edit release capacity adds that edit to the guard in the same PR.
+- **A controller path added later releases on an allowed edit.** Mitigation: a controller change that makes an allowlisted edit release capacity takes that edit off the allowlist in the same PR.
 - **Plans turn stale too often.** A plan that changes between confirm and approval wastes the approver's time. Mitigation: the plan's ID covers what is done and who must approve, never the cost figures, which age (Design details, The plan). Beta measures how often plans turn stale (Open questions 7).
 - **An owner lease expires while others depend on the resource.** Expiry must not release a serving deployment that other clients use. See Open questions.
 - **Owner leases that never expire** recreate the clean-up problem. Every owner lease has an expiry, and the inventory shows leases near it.
@@ -118,10 +118,12 @@ A past project ran a fleet of agents against several Slurm clusters, sharing one
 Each question ends Decided, with its source, or Open, with what decides it. A "Lean" under an open item is a proposal, not a decision. Where Design details builds a lean, the review round of the PR that makes this HBEP implementable approves it as the design (HBEP-1, Roles and approval); it is not an owner decision, and the owner can reverse it by amendment.
 
 1. **The interface agents use.**
-   - **Decided** (owner, 14 Nov 2026, issue #10): the Kubernetes API first, a command-line tool over it, and a tool server for language-model agents last, postponed.
+   - **Decided** (owner, 14 Nov 2026, issue #10): a tool server for language-model agents comes last, and is postponed ("I agree with you that definitely tool server comes last").
+   - **The Kubernetes API first, and a command-line tool over it,** is the science agent's reading of the owner's words, approved by this HBEP's review round (PR #582). The owner said a CLI "might be nicer for me", and was not sure what a model using the tool would prefer.
    - Today the `hpcburst` CLI has launcher commands only, `up`, `status`, `upgrade`, `restore`, `down`, `guard` and `version` (`cmd/hpcburst/main.go:48`), and the API has none of this HBEP's kinds. Design details names the CLI's first commands.
 2. **Which actions are irreversible.**
    - **Decided** (HBEP-7, open question 8; owner, 29 Oct 2026, PR #14): releasing or cancelling a started Allocation before its hard end, outside the spec; any release while a retention policy says keep. None is needed for cancelling pending hedge losers, releasing at the deployment's end time, restarts and handovers, or for releasing a failed Allocation or one with `RelayEndedForGood` (owner, 10 Nov 2026, recorded on PR #331).
+   - **Decided** (the science agent, in the review round of PR #582, 14 Nov 2026): a drain whose Allocation its retention then releases before its hard end counts as releasing a started Allocation before its hard end, so it needs approval. A scale-down under `ReleaseWhenIdle` was otherwise the eager release, ungated. Every target that lowers capacity shows its cost, approval or not.
    - **Decided** (owner, 14 Nov 2026): deleting audit records needs a person's confirmation. HBEP-11 already lets only an operator delete identity, verification and accounting records (Ownership, records and deletion).
    - **Open. Lean (Design details builds it):** cancelling a pending Allocation other than a hedge loser, since its queue age is lost; and taking a deployment's last ready Instance before its end time. Checked against what the controller does:
      - scale-down cancels pending Allocations first, newest first (`internal/lifecycle/handover.go:154`);
@@ -129,7 +131,7 @@ Each question ends Decided, with its source, or Open, with what decides it. A "L
      - deleting a deployment releases its empty Allocations at once, whatever their policy (`internal/lifecycle/retention.go:78`);
      - an earlier end time moves the date that a kept Allocation with no date of its own is kept until (`internal/lifecycle/retention.go:188`).
 
-     So each edit that lowers capacity (scale-down, an earlier end, deletion) can cause one of the four. What decides: the owner, if beta shows the lean too wide or too narrow.
+     So a scale-down, an earlier end or a deletion can each cause one of these. What decides: the owner, if beta shows the lean too wide or too narrow.
 3. **Whether a repurpose under an agreed policy needs approval.**
    - **Decided** (owner, 14 Nov 2026): no. Agents decide and steer repurposes, with no person.
    - **The policy** is HBEP-7's repurposing rule (open question 7, owner, 29 Oct 2026): the fit check, and a repurpose only of an Allocation whose deployment has no remaining work, reservation or fallback role, when the time saved exceeds the cost. The lifecycle controller checks it, and refuses a repurpose that fails it.
@@ -137,7 +139,8 @@ Each question ends Decided, with its source, or Open, with what decides it. A "L
    - Repurposing is built with HBEP-7's beta. HBEP-7's beta criterion says "with HBEP-10's approvals"; it changes by amendment with that code.
 4. **Who may approve.**
    - **Decided** (owner, 14 Nov 2026): approvers are set globally, and overridden per Provider (site), per namespace and per ModelDeployment, the narrowest winning. An approver may be a person or an agent. The default is a person, the human operator.
-   - **Open: the order between a Provider and a namespace,** which do not nest. Lean: ModelDeployment, then namespace, then Provider, then global. A namespace is one project's own choice, and a Provider is shared by every namespace that uses it. What decides: the owner.
+   - **Open: the order between a Provider and a namespace,** which do not nest. What decides: the owner.
+   - **Interim, until the owner decides** (the science agent, review round of PR #582): a ModelDeployment policy overrides its namespace's, since they nest, and global is the fallback. Where both a Provider policy and a namespace or ModelDeployment policy apply, the target needs an approval under each, so neither overrides the other (Design details, Approval policy).
    - At a grant's end, an approver approves an early termination or a scale-down. That is not an override of replacement before release, which applies only while desired capacity is kept (HBEP-3).
 5. **What an owner lease's expiry does.** Open, for stable. Lean: the resource becomes "orphaned", stops taking new Allocations and emits an event; release then needs the usual approval. Another identity may take the owner lease over. What decides: the owner, before stable's build.
 6. **The unit of a reservation.** Open, for stable. Lean: concurrent sessions on a deployment for a window; future capacity is a ModelDeployment with a start time. The front admits by booking, so HBEP-5 changes with it. What decides: the owner, with HBEP-5.
@@ -168,7 +171,7 @@ The API server already holds identities, access control, admission, concurrency,
 | Dry run | server-side dry run (`dryRun=All`) for direct writes | Operations, whose plan shows effects that a dry-run write cannot |
 | Confirm binds to plan | optimistic concurrency on the confirm write; UID preconditions on deletes | the plan's ID |
 | Approvals | RBAC for who may write; a ValidatingAdmissionPolicy that pins the approver to the requester | the ApprovalPolicy and Approval kinds |
-| The capacity guard | a ValidatingAdmissionPolicy, as HBEP-11's CRD guard | its three rules |
+| The capacity guard | a ValidatingAdmissionPolicy, as HBEP-11's CRD guard | its allowlist |
 | Idempotency | object names: the API server refuses a second create of one name | none |
 | Partial failure | the status subresource | per-target outcomes |
 | Audit | the API server's audit log, its policy and its rotation | the release cause |
@@ -185,32 +188,48 @@ The API server already holds identities, access control, admission, concurrency,
 - **Today every user and every controller share one kubeconfig,** k3s's admin credential, copied into the state directory (`internal/launcher/state.go:35`). HBEP-11 (Single-user host) already says the launcher issues one kubeconfig per identity; this builds it.
 - **The person** keeps the admin kubeconfig on the single-user host. It stays the break-glass credential and is never given to an agent.
 - **The controllers get their own ServiceAccounts** in `hpcburst-system`, so the audit log tells a controller's write from a person's.
-- **Roles.** The launcher installs two ClusterRoles, bound cluster-wide on the single-user host and per namespace in the team option:
-  - `hpcburst-agent`: read every framework kind, ControllerRevisions, Events and Leases; create and update ModelDeployments, their scale subresource included; create Operations, and update them to confirm; create Approvals; read ApprovalPolicies. No write to Allocations, Instances, Providers, PlatformProfiles, records, ApprovalPolicies, RBAC objects, admission policies or namespaces, and no delete of anything.
-  - `hpcburst-operator`: for persons other than the admin, in the team option: the agent role, plus writing ApprovalPolicies.
+- **Roles.** The launcher installs three ClusterRoles. A namespace's RoleBinding cannot grant cluster-scoped kinds, so the reads of those are a role of their own:
+  - `hpcburst-agent-read`, bound cluster-wide by a ClusterRoleBinding: read Providers, PlatformProfiles and ApprovalPolicies, the cluster-scoped kinds.
+  - `hpcburst-agent`, bound per namespace by a RoleBinding in the team option, and cluster-wide on the single-user host: read the namespaced framework kinds, ControllerRevisions, Events and Leases; create and update ModelDeployments, their scale subresource included; create Operations, and update them to confirm; create Approvals.
+  - `hpcburst-operator`, bound cluster-wide by a ClusterRoleBinding to persons other than the admin, in the team option: write ApprovalPolicies.
+
+  Agents get no write to Allocations, Instances, Providers, PlatformProfiles, records, ApprovalPolicies, RBAC objects, admission policies or namespaces, and no delete of anything.
 
 ### Owner and purpose
 
-- ModelDeployments and Operations carry two annotations: `hpcburst.groundnuty.github.io/owner`, the owner's user name as the API server reports it, and `hpcburst.groundnuty.github.io/purpose`, free text (Lean: at most 256 characters).
-- The lifecycle controller copies both to the Allocations and Instances it creates, so the inventory shows them on every object.
-- A ValidatingAdmissionPolicy refuses an agent's create of a ModelDeployment, and anyone's create of an Operation, whose owner differs from `request.userInfo.username`. A policy sees the whole object, annotations included, which a CRD's own rules cannot reach (HBEP-11, Admission). The CLI fills the owner in from a SelfSubjectReview, stable since Kubernetes 1.28 (authentication, above).
-- A person's create may leave the owner out. The inventory then shows it as unknown, and the audit log names the creator.
+- **On a ModelDeployment,** two annotations: `hpcburst.groundnuty.github.io/owner`, the owner's user name as the API server reports it, and `hpcburst.groundnuty.github.io/purpose`, free text (Lean: at most 256 characters). The owner policy, a ValidatingAdmissionPolicy:
+  - refuses an agent's create whose owner differs from `request.userInfo.username`;
+  - refuses any update, from any identity, that changes the owner annotation, comparing it with `oldObject`'s. So the owner is fixed at create.
+
+  A policy sees the whole object, annotations included, which a CRD's own rules cannot reach (HBEP-11, Admission).
+- **On an Operation,** the owner is `spec.owner`. The owner policy refuses its create, from any identity, unless `spec.owner` equals `request.userInfo.username`, and the spec is immutable after (Operations). The purpose is the same annotation as on a ModelDeployment.
+- The CLI fills the owner in from a SelfSubjectReview, stable since Kubernetes 1.28 (authentication, above).
+- The lifecycle controller copies the ModelDeployment's owner and purpose to the Allocations and Instances it creates, so the inventory shows them on every object.
+- A person's create of a ModelDeployment may leave the owner out. The inventory then shows it as unknown, and the audit log names the creator.
 - **Selection by owner** uses the label `hpcburst.groundnuty.github.io/owner-hash`: `u-` and the first 12 hex characters of the SHA-256 of the user name. A ServiceAccount's name holds `:`, which a label value refuses, so HBEP-11's long-value rule does not apply.
 
 ### The capacity guard
 
 A ValidatingAdmissionPolicy, `hpcburst-capacity-guard`, with `failurePolicy: Fail`, written and installed like the CRD guard (`config/admission/crd-deletion-guard.yaml`). Its match condition takes every request whose user carries the group `system:serviceaccounts:hpcburst-agents`: every agent identity, and nothing else. Match conditions can read `request`, the admission request's attributes, user included ([ValidatingAdmissionPolicy](https://github.com/kubernetes/website/blob/main/content/en/docs/reference/access-authn-authz/validating-admission-policy.md), accessed 2026-11-14).
 
-On a ModelDeployment it refuses:
-- a lower `spec.instances` (`api/v1alpha1/modeldeployment_types.go:311`), whether written to the object or through its scale subresource (`modeldeployments/scale`, `:644`);
-- a `spec.endTime` set where there was none, or moved earlier (`:341`);
-- a delete.
+**It is an allowlist.** An agent's update to a ModelDeployment, through the object or its scale subresource (`modeldeployments/scale`, `api/v1alpha1/modeldeployment_types.go:644`), is accepted only if every change in it is one of these:
+- a higher `spec.instances` (`:311`);
+- a later `spec.endTime`, or its removal (`:341`);
+- an edit of the serving spec, `spec.source.served` (`:304`), which stays present with `spec.source.managed` absent; it rolls out make-before-break (HBEP-3);
+- an edit of the purpose annotation.
 
-Each refusal's message names the command that does the same through an Operation: `hpcburst scale`, `hpcburst end`.
+Everything else must be unchanged: in metadata, the owner references, the finalizers, the labels and every annotation but the purpose; in the spec, `spec.source` apart from the serving spec, `spec.routing`, `spec.retentionPolicy`, `spec.providers` and every other field. An agent's delete of a ModelDeployment is refused. At create, an agent may set any field: what it creates is the agreed spec.
 
-- **Why these three.** Each makes the lifecycle controller release by following the new spec: scale-down cancels pending Allocations first (`internal/lifecycle/handover.go:154`), shutdown at the end time and a moved keep date release (`internal/lifecycle/retention.go:188`), and deletion releases at once (`:78`). The controller's own releases under an agreed spec stay ungated (Notes).
-- **Not guarded,** because they release nothing: raising `spec.instances`, extending the end time, and editing the serving spec, which rolls out make-before-break (HBEP-3). Nor a ModelDeployment's default retention policy, since each Allocation copies it at creation (`internal/lifecycle/provision.go:388`) and keeps its own after (`internal/lifecycle/retention.go:90`).
+- **Why an allowlist.** The first draft refused three edits by name, a denylist, and the review round of PR #582 found real paths it missed. Each of these releases capacity or brings a drain forward through the controller:
+  - a switch of `spec.source` to `managed`, which shuts the deployment down (`internal/lifecycle/reconcile.go:179`; `internal/lifecycle/instances.go:255`);
+  - raising or removing `spec.routing.maxRequestDuration`, which lengthens the drain window and so brings every drain start forward (`internal/lifecycle/instances.go:541`, used at `:436`);
+  - an owner reference or a finalizer that lets the garbage collector delete the ModelDeployment, an identity outside the guard, after which its empty Allocations are released at once (`internal/lifecycle/retention.go:73-78`);
+  - an edit of `spec.retentionPolicy`, which the Allocations created after it copy (`internal/lifecycle/provision.go:388`).
+
+  Besides those, a lower `spec.instances` cancels pending Allocations first (`internal/lifecycle/handover.go:154`), an earlier end time moves the keep date (`internal/lifecycle/retention.go:188`), and a delete releases at once (`:78`). An allowlist admits only edits that cannot release, so a path nobody listed is refused rather than open.
+- **Refusals.** A lower count, an earlier end and a delete get a message naming the command that does the same through an Operation: `hpcburst scale`, `hpcburst end`. Any other refused edit is made by a person directly, or by a later Operation action.
 - **Left to RBAC,** which denies agents every write to Allocations and Instances, and namespace deletion.
+- The controller's own releases under an agreed spec stay ungated (Notes).
 - **Persons and the controllers are outside the guard.** A person's direct edit is their own decision, and it shows in the audit log. The CLI sends a person's request through an Operation as well, so the person sees its cost.
 - `hpcburst status` reports whether the guard is installed, as it does for the CRD guard.
 
@@ -219,19 +238,22 @@ Each refusal's message names the command that does the same through an Operation
 An Operation is a namespaced kind: one request to lower capacity, planned before it runs. Its name is its idempotency key.
 
 - **Spec,** immutable once created (`self == oldSelf`), except `confirm`, which may be set once:
-  - `action`: `Scale`, a ModelDeployment to fewer Instances; `End`, a ModelDeployment's end now, with `delete: true` to remove it; or `Release`, Allocations that host no live Instance, named or selected by label. `Repurpose` joins with HBEP-7's repurposing.
+  - `action`: `Scale`, a ModelDeployment to fewer Instances; `End`, a ModelDeployment's end now, with `delete: true` to remove it; or `Release`, Allocations of one ModelDeployment that host no live Instance, named or selected by label. `Repurpose` joins with HBEP-7's repurposing.
   - the target and the action's parameters;
-  - the owner and purpose annotations (Owner and purpose);
-  - `confirm.planID`, absent until the requester confirms.
+  - `owner`, the requester, pinned to its creator at admission (Owner and purpose);
+  - `confirm.planID`, absent until the owner confirms.
+
+  The purpose is an annotation (Owner and purpose).
 - **Phases,** in status (Lean names): `Planning`, `Planned` (waiting for confirm), `AwaitingApproval`, `Executing`, `Done`, `PartlyFailed`, `Stale`, `Refused`.
-- **Who runs it.** The lifecycle controller, in the reconcile pass of each ModelDeployment it acts on. One worker holds a key at a time (HBEP-7, Controllers), so executing a plan never races the controller's own scale-down or handover. A `Release` target maps to the ModelDeployment named by its Allocation's `model-deployment` label, as HBEP-7's work queue maps it.
+- **Who runs it.** The lifecycle controller, in the reconcile pass of the one ModelDeployment it acts on. One worker holds a key at a time (HBEP-7, Controllers), so executing a plan never races the controller's own handover.
+- **One ModelDeployment per Operation.** A `Release` covers one ModelDeployment's Allocations, found by `spec.modelDeploymentRef.name`, as the controller maps an Allocation to its deployment (`internal/lifecycle/manager.go:457-462`), never by the `model-deployment` label, which a long name shortens (HBEP-11, API, Long values). The CLI creates one Operation per ModelDeployment.
 - **Removal.** An Operation is removed 7 days after it finishes, as a Job's `ttlSecondsAfterFinished` removes a finished Job ([TTL after finished](https://github.com/kubernetes/website/blob/main/content/en/docs/concepts/workloads/controllers/ttlafterfinished.md), stable since Kubernetes 1.23, accessed 2026-11-14). The audit log holds its content by then (Audit).
 
 #### The plan
 
 The lifecycle controller writes `status.plan` without side effects:
-- **each target:** its kind, name, UID and generation; its effect: cancel a pending Allocation, drain an Instance, drain the deployment's last ready Instance, release a kept Allocation, or keep an Allocation under its policy; whether the effect needs approval (What needs approval), and if so, the ApprovalPolicy that applies, with its generation and approvers;
-- **the release cost** of each target that needs approval (The release cost);
+- **each target:** its kind, name, UID and generation; its effect: cancel a pending Allocation, drain an Instance, drain the deployment's last ready Instance, release a kept Allocation, or keep an Allocation under its policy; whether the effect needs approval (What needs approval), and if so, each ApprovalPolicy that applies, with its generation and approvers;
+- **the release cost** of every target that lowers capacity, whether or not it needs approval (The release cost);
 - **the observation time** of every fact;
 - **`id`:** a hash over the targets' UIDs and generations, their effects, which of them need approval, and the policies that apply. Cost figures are left out, since they age; the CLI shows their age instead.
 
@@ -241,20 +263,25 @@ The plan comes from the same code that executes: a `Scale` plan runs the control
 
 - The requester sets `confirm.planID` by an update carrying the `resourceVersion` it read with the plan. A re-plan in between moves that version, and the API server refuses the update with a conflict, so the requester reads the new plan. The executing deletes carry a UID precondition (`Preconditions`, [`pkg/apis/meta/v1/types.go`, lines 749–756](https://github.com/kubernetes/apimachinery/blob/v0.35.3/pkg/apis/meta/v1/types.go#L749-L756), accessed 2026-11-14), as the controller's releases already do (`internal/lifecycle/writes.go:111`).
 - An empty plan ID, or one that is not the current plan's, is refused.
-- Only the Operation's owner may confirm it. The owner policy (Owner and purpose) refuses an update that sets `confirm` from any identity but the one in the owner annotation, so one agent cannot run another's plan on its own word (L-14.3).
+- Only the Operation's owner may confirm it. The owner policy refuses an update that sets `confirm` unless the requester is `oldObject.spec.owner`. That field was pinned to the Operation's creator at create and is immutable with the rest of the spec, so no other identity can make itself the owner, and one agent cannot run another's plan on its own word (L-14.3).
 - An Operation that is never confirmed never runs. A plan is the default, and running takes an explicit act that names the plan (L-11.6).
 
 #### Approval and execution
 
 - A plan with no target that needs approval runs once confirmed.
-- Otherwise it waits in `AwaitingApproval` until each target that needs approval has an Approval for the plan's ID from an approver of the policy that applies to it. Nothing runs before then.
-- **Before it acts,** the executing pass recomputes the plan from what it has just read. A different ID, as when a pending Allocation has started, another Instance has become ready or a policy has changed, turns the Operation `Stale`. Nothing runs, its approvals no longer count, and the requester plans again.
-- **Then the pass acts as the lifecycle controller:** for `Scale`, it lowers `spec.instances`; for `End`, it sets `spec.endTime` to now, or deletes the ModelDeployment; and it applies HBEP-7's matching Release case in the same pass. A `Release` deletes the named Allocations. An approved `End` is HBEP-7's approved early termination: as shutdown, before the end time (HBEP-7, Release).
+- Otherwise it waits in `AwaitingApproval` until each target that needs approval has an Approval for the plan's ID from an approver of each policy that applies to it. Nothing runs before then.
+- **The stale check runs once, before execution starts.** The pass recomputes the plan from what it has just read. A different ID, as when a pending Allocation has started, another Instance has become ready or a policy has changed, turns the Operation `Stale`. Nothing runs, its approvals no longer count, and the requester plans again.
+- **Then the targets are committed.** In one status write the controller records the approved targets, each with its UID, generation and effect, and sets `phase: Executing`. From then on it never re-plans. It acts target by target: a target already done is skipped, a target whose UID is gone counts as done, and a failed target is retried.
+- **How each action acts,** as the lifecycle controller, with a UID precondition on every delete:
+  - `Scale`: it cancels or drains exactly the committed targets, and lowers `spec.instances` in the same pass. While an Operation is `Executing` on a ModelDeployment, the controller's own scale-down selection (`internal/lifecycle/handover.go:158`) takes the committed targets instead of choosing its own;
+  - `End`: it sets `spec.endTime` to now, or deletes the ModelDeployment, and applies HBEP-7's shutdown case; the committed targets are everything the shutdown takes. An approved `End` is HBEP-7's approved early termination: as shutdown, before the end time (HBEP-7, Release);
+  - `Release`: it deletes the committed Allocations.
+- **A restart** resumes from the committed targets in status, never from a new plan.
 
 #### The report
 
 - `status.targets[]` holds one outcome per target: done, failed with its reason, or not started.
-- A target that fails is retried with backoff until it succeeds or the plan turns stale. The Operation is `PartlyFailed` meanwhile, never a single "rejected" (L-11.7).
+- A target that fails is retried with backoff until it succeeds. The Operation is `PartlyFailed` meanwhile, never a single "rejected" (L-11.7).
 - A released Allocation is done when its object is gone. Its finalizer allows that only once every job with its tag is cancelled (HBEP-11, Ownership, records and deletion).
 
 ### What needs approval
@@ -265,16 +292,17 @@ The plan comes from the same code that executes: a `Scale` plan runs the control
 | Drain a deployment's last ready Instance before its end time | yes | Lean (Open questions 2) |
 | Release a started Allocation before its hard end, outside the spec | yes | HBEP-7, open question 8 |
 | Release an Allocation that its retention policy keeps | yes | HBEP-7, open question 8 |
-| Drain an Instance while another stays ready, its Allocation kept | no | |
-| Release an Allocation under `ReleaseWhenIdle`, after its idle limit | no: the policy agreed to it | HBEP-7, open question 8 |
+| Drain an Instance whose Allocation its retention then releases before its hard end: under `ReleaseWhenIdle`, a keep date before the hard end, or the profile's `maxIdle` | yes: a release of a started Allocation before its hard end | the science agent, review round of PR #582 |
+| Drain an Instance while another stays ready, its Allocation kept until its hard end | no | |
+| The controller's own release, under `ReleaseWhenIdle` after its idle limit, of an Allocation emptied under the agreed spec (a handover, a failure), with no Operation | no: the policy agreed to it | HBEP-7, open question 8 |
 | Repurpose under the agreed policy | no | owner, 14 Nov 2026 |
 | Delete audit records | a person, outside any policy | owner, 14 Nov 2026 |
 
-So an `End` of a deployment that serves, or that waits in a queue, always needs approval: it drains the last ready Instance or cancels a pending Allocation. A `Scale` needs it when it cancels a pending Allocation or leaves no ready Instance. A `Release` of a kept Allocation needs it.
+So an `End` of a deployment that serves, or that waits in a queue, always needs approval: it drains the last ready Instance or cancels a pending Allocation. A `Scale` needs it when it cancels a pending Allocation, leaves no ready Instance, or drains an Instance whose Allocation its retention then releases before its hard end, as a scale-down under `ReleaseWhenIdle` does: that is the eager release this HBEP guards against. A `Release` of a kept Allocation needs it.
 
 ### The release cost
 
-For each target that needs approval, the plan shows:
+For every target that lowers capacity, whether or not it needs approval (the science agent, review round of PR #582), the plan shows:
 - **what is given up:**
   - a started Allocation's lease left, its hard end minus now (`status.atProvider.hardEnd`, `api/v1alpha1/allocation_types.go:404`), and the GPU-hours that leaves;
   - a pending Allocation's queue age, now minus its submit time (`submitTime`, `:382`), and its own advisory start estimate (`startEstimate`, `:392`);
@@ -294,9 +322,16 @@ The scale of the stake: on Helios a 1-GPU short job under QOS `now` started at o
 ApprovalPolicy is a cluster-scoped kind, so only cluster-wide RBAC can write it: persons, never agents (Identities and roles).
 - **`spec.scope`:** exactly one of `global`, a Provider's name, a namespace's name, or a ModelDeployment's namespace and name. One policy per scope (Lean: its name derives from the scope, with HBEP-11's long-value rule).
 - **`spec.approvers`:** users, groups and ServiceAccounts, in any mix. A ServiceAccount is a user to the API server, so an agent approves as a person does.
-- **Resolution.** For a target on Provider P, in namespace N, assigned to ModelDeployment M, the policy that applies is the first that exists of M, N, P and global (Open questions 4).
+- **Resolution, an interim until the owner decides the order between a Provider and a namespace** (Open questions 4). For a target on Provider P, in namespace N, assigned to ModelDeployment M:
+  - the namespace side is M's policy if it exists, else N's, since a ModelDeployment nests in its namespace;
+  - the Provider side is P's policy, if it exists;
+  - where both sides have a policy, the target needs an approval under each, so neither overrides the other;
+  - where only one side has a policy, that one applies;
+  - where neither has, the global policy applies.
+
+  The plan lists every policy a target needs, and an Approval counts toward each policy that names its approver.
 - **The default.** `hpcburst up` writes the global policy when none exists, naming the identity of the person's kubeconfig as a SelfSubjectReview reports it. With no policy at all, a target that needs approval waits: nothing is approvable without a policy.
-- **The owner's example.** The operator writes a Provider policy for Sano that names one agent. That agent approves its own plans on Sano; its plans elsewhere wait for the operator.
+- **The owner's example.** The operator writes a Provider policy for Sano that names one agent. Where no namespace or ModelDeployment policy also applies, that agent approves its own plans on Sano; its plans elsewhere wait for the operator.
 - A plan records each policy it applied, with its generation, so a change to the policy makes the plan stale at execution.
 
 ### Approvals
@@ -308,7 +343,7 @@ An Approval is a namespaced kind, in its Operation's namespace, immutable once c
 
 A ValidatingAdmissionPolicy refuses an Approval's create unless `spec.approver` equals the request's user name and groups. So an approval is accepted only from the approver's own identity, and a message saying someone approved is not one (L-14.3).
 
-- The lifecycle controller counts an Approval for a target only when its approver is in the policy that applies to the target, and its plan ID is the current plan's.
+- The lifecycle controller counts an Approval toward a policy that applies to a target only when that policy names its approver, and its plan ID is the current plan's. A target under two policies needs an Approval counted toward each.
 - One Approval covers every target of the plan whose policy names its approver.
 - An approver may approve their own Operation. The approval is still a separate act, bound to the plan.
 - **No webhook.** Admission only pins identities and refuses the guarded writes; the controller that executes checks approvals against the state it has just re-read. HBEP-11 (Admission) expected a webhook for these gates after alpha; this design needs none.
@@ -382,6 +417,7 @@ Events for stops that an Operation asked for keep their existing reasons, carry 
 ### What other HBEPs change
 
 Each change is an amendment, merged in its own PR before the code that needs it (HBEP-1, Building from an HBEP):
+- **HBEP-1:** its lifecycle table names `alpha` as the stage the `implemented` PR records (HBEP-1, Lifecycle, step 6), and this HBEP's first stage is beta. The amendment lets an HBEP whose Graduation criteria start at beta record `implemented` with stage `beta`. Like every change to HBEP-1, it merges only on the owner's word, and before HBEP-10's first `implemented` PR.
 - **HBEP-11:** the three kinds in the API table; under Admission, the capacity guard and the two identity pins, and its sentence on a webhook for these gates; under Single-user host, the agent and controller identities, the roles, the global policy and the audit policy and rotation; and its Risks line "An approval for it comes with HBEP-10". Lean for that line: removing the CRD guard stays a person's explicit step (`hpcburst guard remove`), outside approvals, since no agent may write admission policies.
 - **HBEP-4:** the `estimate` operation (The release cost), and an optional grant end in the Provider settings (Open questions 12).
 - **HBEP-7:** Operations executed in the ModelDeployment's reconcile pass; the release cause written before each delete; and its beta repurposing with no approval (Open questions 3).
@@ -390,21 +426,28 @@ Each change is an amendment, merged in its own PR before the code that needs it 
 ### Test plan
 
 Beta, against S4's fake Slurm and the single-user host, with two agent identities and one person:
-- **The guard.** As an agent identity, each guarded write is refused, with a message naming the command: a lower `spec.instances` through the object and through `kubectl scale`, an end time set or moved earlier, and a delete. Raising `spec.instances` and extending the end time are accepted. The same writes from the person's identity pass. A test run under the admin or a controller identity proves nothing about the guard, since neither is in its group.
+- **The guard.** As an agent identity, each of these updates is refused:
+  - a lower `spec.instances`, through the object and through `kubectl scale`, an end time set or moved earlier, and a delete, each with a message naming the command;
+  - a switch of `spec.source` to `managed`;
+  - raising or removing `spec.routing.maxRequestDuration`;
+  - adding an owner reference or a finalizer to the ModelDeployment;
+  - an edit of `spec.retentionPolicy`, of `spec.providers`, of a label, or of the owner annotation.
+
+  Raising `spec.instances`, a later end time or its removal, an edit of `spec.source.served`, and an edit of the purpose annotation are accepted, and so is an agent's create with any fields. The same refused writes from the person's identity pass, except a change of the owner annotation, which is refused for everyone. A test run under the admin or a controller identity proves nothing about the guard, since neither is in its group.
 - **RBAC.** An agent identity cannot update or delete an Allocation or an Instance, write an ApprovalPolicy, or delete a namespace.
 - **A plan has no side effects.** An unconfirmed Operation of each action is planned, and the fake Slurm's call log shows no submit, cancel or hold release, only reads and `--test-only`. Nothing in the API changes but the Operation's status. The plan lists every target by name.
-- **Confirm.** A confirm whose `resourceVersion` predates a re-plan is refused with a conflict; one refused after only an estimate was filled in is retried with the same plan ID and accepted. An empty or wrong plan ID is refused. A confirm from an identity other than the Operation's owner is refused at admission. An Operation never confirmed never runs.
-- **Stale plans.** Between approval and execution, start the pending Allocation, make another Instance ready, or edit the policy that applies: the Operation turns `Stale`, nothing runs, and its approval no longer counts.
-- **What needs approval,** in fixtures whose expectations are worked out by hand from HBEP-7's rules, never by the planner's code: a scale-down that cancels a pending Allocation needs approval; one that drains a ready Instance while another stays ready, its Allocation under `Keep`, does not; an `End` does; releasing a kept empty Allocation does; one under `ReleaseWhenIdle` past its limit is released by the controller with no Operation, and its release cause names the rule.
-- **Approvers.** An Approval that names another identity as approver is refused at admission. One from an identity outside the policy that applies does not count. A ModelDeployment policy overrides the global one, and a namespace policy a Provider policy. With no policy at all, the Operation waits. A test in which the requester approves its own plan proves nothing about relayed approvals; the test uses two identities, one outside the policy.
-- **The owner's example.** A Provider policy names agent A for one Provider. A's plan there runs on A's own approval; A's plan on another Provider waits for the person.
+- **Confirm.** A confirm whose `resourceVersion` predates a re-plan is refused with a conflict; one refused after only an estimate was filled in is retried with the same plan ID and accepted. An empty or wrong plan ID is refused. A confirm from an identity other than `oldObject.spec.owner` is refused at admission, and so is any update that changes `spec.owner`. An Operation never confirmed never runs.
+- **Stale plans.** Between approval and the start of execution, start the pending Allocation, make another Instance ready, or edit the policy that applies: the Operation turns `Stale`, nothing runs, and its approval no longer counts.
+- **What needs approval,** in fixtures whose expectations are worked out by hand from HBEP-7's rules, never by the planner's code: a scale-down that cancels a pending Allocation needs approval; one that drains a ready Instance while another stays ready, its Allocation under `Keep` with no date before its hard end, on a profile with no `maxIdle`, does not; the same drain under `ReleaseWhenIdle`, or under a keep date before the hard end, does; every target that lowers capacity shows its cost, approval or not; an `End` does; releasing a kept empty Allocation does; one under `ReleaseWhenIdle` past its limit is released by the controller with no Operation, and its release cause names the rule.
+- **Approvers.** An Approval that names another identity as approver is refused at admission. One from an identity outside every policy that applies does not count. A ModelDeployment policy overrides its namespace's, and the global policy applies only when no other does. Where a Provider policy and a namespace policy both apply, an approval under one alone does not run the plan, and one under each does. With no policy at all, the Operation waits. A test in which the requester approves its own plan proves nothing about relayed approvals; the test uses two identities, one outside the policy.
+- **The owner's example.** A Provider policy names agent A for one Provider, and no namespace or ModelDeployment policy applies. A's plan there runs on A's own approval; A's plan on another Provider waits for the person.
 - **The cost.** With the fake's fixed queue waits, the plan shows the median, the p90 and the largest, the lease left and the queue age, each worked out by hand from the fixture's times, and the fake's `--test-only` answer labelled advisory. A failing or slow estimate shows as unknown, never as zero. An expected value computed by the planner's own code proves nothing.
-- **Partial failure.** Release two kept Allocations on two Providers, with one Provider failing its cancel: the report shows one done and one failed and retried, never a single refusal.
+- **Partial failure.** Release two kept Allocations of one deployment, on two Providers, with one Provider failing its cancel: the report shows one done and one failed and retried, never a single refusal. A `Release` naming an Allocation of another deployment is refused. An Allocation whose deployment's name is long, so that its `model-deployment` label is shortened, is found by its `spec.modelDeploymentRef.name`.
 - **Idempotency.** Create an Operation, kill the client, and create it again under the same name: one Operation, and one execution. The same name with a different request is refused by the CLI.
-- **Restart.** Kill the lifecycle controller mid-execution: on restart it re-reads the Operation and its targets, and finishes or reports each target. Nothing is released twice.
+- **Restart and retry.** Kill the lifecycle controller mid-execution of a `Scale`: on restart it resumes from the committed targets in status, without re-planning. A target already done is skipped, one whose UID is gone counts as done, and a failed one is retried. Nothing is released twice, and no target outside the committed list is touched, even when the controller's own selection would now pick another (`internal/lifecycle/handover.go:158`).
 - **Audit.** After an approved `End`, the API server's audit log holds the Operation's create by the requester, the Approval's create by the approver with its plan ID, the plan and outcome writes, the release cause and each Allocation's delete, each under its own identity. Two agents running as one Unix user are told apart.
 - **Rotation.** With a small `audit-log-maxsize`, rotated files are gzipped and none is removed.
-- **Owner.** An agent's create of a ModelDeployment that names another owner is refused. The Allocations and Instances the controller creates carry the owner and purpose.
+- **Owner.** An agent's create of a ModelDeployment that names another owner is refused, and so is anyone's create of an Operation whose `spec.owner` is not the requester. The Allocations and Instances the controller creates carry the owner and purpose.
 
 Stable:
 - Stop a subscriber, emit events, restart it: it receives them all, in order per resource; past retention it receives a gap marker.
@@ -423,14 +466,14 @@ Stable:
 ### Security
 
 - Agent credentials are kubeconfigs of mode 600, one per identity, issued by the launcher; never on command lines or in logs. Agents never get the admin kubeconfig. Agents that share a Unix user are mutually trusted; separate credentials give them attribution only.
-- An Approval is accepted only when the writing identity is its named approver, checked at admission, and it counts only when the policy that applies names that approver. A confirm is accepted only from the Operation's owner, checked at admission. Operation status, plans included, is written only by the controllers.
+- An Approval is accepted only when the writing identity is its named approver, checked at admission, and it counts only toward a policy that applies and names that approver. A confirm is accepted only from the Operation's owner, checked at admission. Operation status, plans included, is written only by the controllers.
 - ApprovalPolicies are written only by persons.
 - The audit log logs bodies only for this HBEP's kinds and the lifecycle controller's writes to Allocations, which hold no credentials. Purposes are free text that others read; they must not hold credentials, prompts or private data.
 - Admin operations (attaching providers, adding and removing models) are Kubernetes API writes under RBAC (HBEP-5, HBEP-11). This HBEP's approvals add a second gate for the irreversible ones.
 
 ### Graduation criteria
 
-- **Alpha: none.** The release `v0.1.0-alpha.1` ships none of these primitives: no Operation, Approval or ApprovalPolicy kind in `api/v1alpha1/`; launcher commands only in the CLI (`cmd/hpcburst/main.go:48`); one admin kubeconfig for every user and controller (`internal/launcher/state.go:35`); and an audit log capped at four files of 100 MB (`internal/launcher/k3s.go:106-110`). The framework's alpha needs none: its controller takes no action that needs approval, and the single user changes the spec instead (HBEP-7, open question 8). This HBEP's first stage is beta, so its first `implemented` PR records stage `beta`. HBEP-1's lifecycle table names `alpha` as the stage that PR records, so that PR asks the approver.
+- **Alpha: none.** The release `v0.1.0-alpha.1` ships none of these primitives: no Operation, Approval or ApprovalPolicy kind in `api/v1alpha1/`; launcher commands only in the CLI (`cmd/hpcburst/main.go:48`); one admin kubeconfig for every user and controller (`internal/launcher/state.go:35`); and an audit log capped at four files of 100 MB (`internal/launcher/k3s.go:106-110`). The framework's alpha needs none: its controller takes no action that needs approval, and the single user changes the spec instead (HBEP-7, open question 8). This HBEP's first stage is beta, so its first `implemented` PR records stage `beta`, once the HBEP-1 amendment allows it (What other HBEPs change).
 - **Beta,** built in this order, each step usable on its own:
   1. **The guard:** agent identities and roles, the capacity guard, ApprovalPolicy with the person as default approver, Operations (`Scale`, `End`, `Release`) with a plan, a confirm and a per-target report, Approvals, and the release cost from status (lease left, queue age, the Provider's observed waits, start-to-ready).
   2. **The CLI** for it: `scale`, `end`, `release`, `confirm`, `approvals`, `approve`, `operation`, and `identity add`.
@@ -444,7 +487,7 @@ Stable:
 ## Operational readiness
 
 1. **Working:** the guard is installed (`hpcburst status`); a test Operation of a test agent identity is planned with current observation times; a guarded write from that identity is refused; the audit log grows, and its rotated files are compressed. A missing guard, a plan that stays `Planning`, or an audit log with no `RequestResponse` entries for Operations says it is not working.
-2. **Restart:** Operations, Approvals and policies live in the control plane (HBEP-11), so a restarted controller re-reads them. An executing Operation resumes in its ModelDeployment's next pass, which recomputes the plan first.
+2. **Restart:** Operations, Approvals and policies live in the control plane (HBEP-11), so a restarted controller re-reads them. An executing Operation resumes in its ModelDeployment's next pass, from the targets committed in its status, and is never re-planned.
 3. **Silent failure:**
    - a plan that changed a provider: the provider plugin's call log shows it;
    - an execution that ran a different plan than the approved one: the plan IDs in the audit log show it;
@@ -530,7 +573,8 @@ The primitives replace www-2027 practices: a shared gate on a common host (slots
 - 2026-10-30: aligned with HBEP-11 becoming implementable: the API host row.
 - 2026-10-30: HBEP-7's alpha takes no action that needs approval and repurposes nothing; noted under the repurpose question.
 - 2026-10-30: admin operations are Kubernetes API writes in alpha, as HBEP-5 now says.
-- 2026-11-14: implementable. The owner's decisions of 14 Nov 2026 on issue #10 folded in: approvers set globally and overridden per Provider, namespace and ModelDeployment, a person by default; no approval for a repurpose under policy; the audit kept for the grant, compressed when cold and deleted only after a person confirms; the API first, a CLI next and a tool server postponed. Design details written for beta on the Kubernetes API: agent identities and roles, the capacity guard, Operations with plans, release costs and confirms, ApprovalPolicy and Approvals, and the audit on the API server's log. S8's subscriptions decided for stable. Every other open question decided with its source, or left open with what decides it.
+- 2026-11-14: implementable. The owner's decisions of 14 Nov 2026 on issue #10 folded in: approvers set globally and overridden per Provider, namespace and ModelDeployment, a person by default; no approval for a repurpose under policy; the audit kept for the grant, compressed when cold and deleted only after a person confirms; a tool server last, postponed. Design details written for beta on the Kubernetes API: agent identities and roles, the capacity guard, Operations with plans, release costs and confirms, ApprovalPolicy and Approvals, and the audit on the API server's log. S8's subscriptions decided for stable. Every other open question decided with its source, or left open with what decides it.
+- 2026-11-14: revised by its review round (Astra and Fable, PR #582): the capacity guard is an allowlist; every target that lowers capacity shows its cost, and a drain that its retention turns into an early release needs approval; an Operation's owner is `spec.owner`, and a ModelDeployment's owner annotation is immutable; execution commits its targets and never re-plans; a `Release` covers one ModelDeployment; the roles split for cluster-scoped reads; a Provider policy and a namespace policy both apply until the owner decides their order; the interface's record relabelled; and an HBEP-1 amendment listed for a first stage of beta.
 
 ## Amendments
 
