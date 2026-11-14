@@ -28,8 +28,8 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
-// portsRouter: #454's block is 30360-30379; hpcburst up takes base to base+12.
-var portsRouter = stack.Ports{Base: 30360, ClientAddr: "127.0.0.1:30373", DialHomeListen: "127.0.0.1:30374"}
+// portsRouter: #454's block is 28360-28379; hpcburst up takes base to base+12.
+var portsRouter = stack.Ports{Base: 28360, ClientAddr: "127.0.0.1:28373", DialHomeListen: "127.0.0.1:28374"}
 
 // pinnedEnvoy is Envoy 1.40.2's published release sum for this machine's architecture, written out as
 // envoy-pins.txt carries it.

@@ -108,7 +108,7 @@ func (h *host) setAllocationPhase(name string, phase v1alpha1.AllocationPhase) {
 // passes with an alpha Allocation running; and up --relay-keeper removes it, the keeper resuming
 // at the next E.
 func TestRelayKeeperUpStatusDownAndTheSwitchBack(t *testing.T) {
-	const base = 30020
+	const base = 28020
 	h := newHost(t)
 	bin, ctlDir := fakeController(t)
 	up := func(extra ...string) cliResult {
@@ -235,7 +235,7 @@ func TestRelayKeeperUpStatusDownAndTheSwitchBack(t *testing.T) {
 func TestUpRefusesTheRelayKeeperOutsideHostDialed(t *testing.T) {
 	bin, _ := fakeController(t)
 	dir := filepath.Join(shortTmp(t, false), "st")
-	r := cli(t, "up", "--state-dir", dir, "--port-base", strconv.Itoa(30020), "--controller-bin", bin,
+	r := cli(t, "up", "--state-dir", dir, "--port-base", strconv.Itoa(28020), "--controller-bin", bin,
 		"--front-mode", "direct", "--front-addr", "front.example.test:8443", "--relay-keeper")
 	if r.code == exitOK || !strings.Contains(r.err, "--relay-keeper is for --front-mode host-dialed only") {
 		t.Fatalf("up --relay-keeper in direct mode exited %d: %s", r.code, r.err)

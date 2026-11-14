@@ -56,7 +56,7 @@ func TestAStalledWorkerHoldsOneEntryPerTagAndTheLatestWins(t *testing.T) {
 	var once sync.Once
 	stalled := make(chan struct{})
 	r, err := NewOwnerRunner(context.Background(), OwnerRunnerOptions{Epoch: EpochBase + 1,
-		Ports:  map[agentapi.RelayChannel]int{agentapi.RelayControl: 30000, agentapi.RelayServing: 30001},
+		Ports:  map[agentapi.RelayChannel]int{agentapi.RelayControl: 28000, agentapi.RelayServing: 28001},
 		SSHDir: filepath.Join(t.TempDir(), "ssh"), SSHBinary: filepath.Join(t.TempDir(), "no-such-ssh"),
 		beforeOp: func(string, string) {
 			once.Do(func() { close(stalled) })

@@ -94,7 +94,7 @@ func TestTheKeeperEntryOnlyWithRelayKeeper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ports, err := PortsFromBase(30020)
+	ports, err := PortsFromBase(28020)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestTheKeeperEntryOnlyWithRelayKeeper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"--state-dir", l.dir, "--port-base", "30020", "--health-addr", ports.ControllerAddr(), "--front-mode", "host-dialed"}
+	want := []string{"--state-dir", l.dir, "--port-base", "28020", "--health-addr", ports.ControllerAddr(), "--front-mode", "host-dialed"}
 	if len(alpha) != 1 || !slices.Equal(alpha[0].Args, want) {
 		t.Fatalf("the supervised set without the keeper: %+v; want the controller alone, with %q", alpha, want)
 	}
@@ -117,7 +117,7 @@ func TestTheKeeperEntryOnlyWithRelayKeeper(t *testing.T) {
 		t.Fatalf("the supervised set with the keeper: %+v; want the controller with the socket, then the keeper", beta)
 	}
 	k := beta[1]
-	if k.Name != keeperEntryName || k.Path != st.Controllers.Binary || !slices.Equal(k.Args, []string{"relaykeeper", "--state-dir", l.dir, "--port-base", "30020"}) ||
+	if k.Name != keeperEntryName || k.Path != st.Controllers.Binary || !slices.Equal(k.Args, []string{"relaykeeper", "--state-dir", l.dir, "--port-base", "28020"}) ||
 		k.HealthSocket != sock || k.Health != "" || !k.Setsid || !k.WaitReady || len(k.Ports) != 0 {
 		t.Errorf("the keeper's entry: %+v", k)
 	}

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# job.sh on stubs (loopback only, Unix sockets under a mktemp dir, TCP ports 30430-30439 only): its exit status, what it
+# job.sh on stubs (loopback only, Unix sockets under a mktemp dir, TCP ports 28430-28439 only): its exit status, what it
 # records, and that nothing is left running. The stubs stand in for what the contract names:
 #   s2crouter  worker (a vLLM server on a Unix socket), envoy (product smoke; an arm with READY, router and admin sockets), relay
 #   vllm-router, s2cload, analyze.py --check-arm, apptainer, the staged Envoy binary, the venv's python next to VR_BIN
@@ -714,7 +714,7 @@ SH
 chmod +x "$STAGE"/bin/* "$STAGE/envoy/$ENVOY_SHA_DIR/envoy" "$T/bin/apptainer" "$T/vr/vllm-router" "$T/vr2/vllm-router" "$T/vr/python"
 
 # run_job <case> <plan> [VAR=value...]: runs job.sh against the stubs; sets RC and OUT (the results directory) and ERR (stderr file).
-BASE_PORT=30430
+BASE_PORT=28430
 JOB_PREFIX=()   # a command to run job.sh under (the termed case runs it under timeout)
 run_job() {
   local name=$1 plan=$2; shift 2
@@ -746,7 +746,7 @@ for a in B1-rr B1-envoy-bound B1-envoy-nobound B1-vr-hash A1-rr; do
 done
 for a in B1-rr B1-vr-hash A1-rr; do
   check "$a: vllm-router files: vr-before/after.prom, relay-map.tsv, relay-counts.tsv, router.log" 'for f in vr-before.prom vr-after.prom relay-map.tsv relay-counts.tsv router.log; do [[ -s $OUT/arms/$a/$f ]] || exit 1; done; [[ ! -e $OUT/arms/$a/clusters-after.json ]]'
-  check "$a: relay-map.tsv is <relay port><TAB><worker>, ports from the first free block" '[[ $(cat "$OUT/arms/$a/relay-map.tsv") == "$(printf "30432\t0\n30433\t1\n30434\t2\n30435\t3")" ]]'
+  check "$a: relay-map.tsv is <relay port><TAB><worker>, ports from the first free block" '[[ $(cat "$OUT/arms/$a/relay-map.tsv") == "$(printf "28432\t0\n28433\t1\n28434\t2\n28435\t3")" ]]'
 done
 for a in B1-envoy-bound B1-envoy-nobound; do
   check "$a: Envoy files: clusters-before/after.json and the envoy/ records, no vllm-router files" 'for f in clusters-before.json clusters-after.json envoy/run.json envoy/start.json; do [[ -s $OUT/arms/$a/$f ]] || exit 1; done; [[ -e $OUT/arms/$a/envoy/READY && ! -e $OUT/arms/$a/vr-after.prom ]]'

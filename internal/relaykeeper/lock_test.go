@@ -27,7 +27,7 @@ func TestASecondRunOnALiveKeepersStateDirChangesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	ports := map[agentapi.RelayChannel]int{agentapi.RelayControl: 30002, agentapi.RelayServing: 30003}
+	ports := map[agentapi.RelayChannel]int{agentapi.RelayControl: 28002, agentapi.RelayServing: 28003}
 	ctx, cancel := context.WithCancel(context.Background())
 	ready := make(chan int64, 1)
 	done := make(chan error, 1)
@@ -131,7 +131,7 @@ func TestSshGRunsOutsideTheKeepersLock(t *testing.T) {
 		o.Runner = func(e int64) (Runner, error) {
 			var err error
 			runner, err = NewOwnerRunner(context.Background(), OwnerRunnerOptions{Epoch: e,
-				Ports:  map[agentapi.RelayChannel]int{agentapi.RelayControl: 30002, agentapi.RelayServing: 30003},
+				Ports:  map[agentapi.RelayChannel]int{agentapi.RelayControl: 28002, agentapi.RelayServing: 28003},
 				SSHDir: filepath.Join(dir, "d"), SSHBinary: ssh})
 			return runner, err
 		}
@@ -206,7 +206,7 @@ func TestClearLeaseEpochsRefusesWhileAKeeperRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	ports := map[agentapi.RelayChannel]int{agentapi.RelayControl: 30002, agentapi.RelayServing: 30003}
+	ports := map[agentapi.RelayChannel]int{agentapi.RelayControl: 28002, agentapi.RelayServing: 28003}
 	ctx, cancel := context.WithCancel(context.Background())
 	ready := make(chan int64, 1)
 	done := make(chan error, 1)

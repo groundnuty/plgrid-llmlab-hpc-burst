@@ -172,7 +172,7 @@ func runJob(t *testing.T, p *fakeslurm.Platform, s *fakeslurm.Session, e dryEnv,
 	t.Helper()
 	jobEnv := map[string]string{
 		"MODE": "double", "IMAGE": e.image, "CHECKPOINT_DIR": e.ckpt, "APPTAINER": e.apptainer, "VR_BIN": e.vrBin,
-		"RESULT_TAG": tag, "LOAD_ARGS": dryLoad, "LOAD_ARGS_H": dryLoadH, "PORT_BASE": "30420",
+		"RESULT_TAG": tag, "LOAD_ARGS": dryLoad, "LOAD_ARGS_H": dryLoadH, "PORT_BASE": "28420",
 	}
 	for k, v := range extra {
 		jobEnv[k] = v

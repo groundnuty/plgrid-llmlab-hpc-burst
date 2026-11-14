@@ -41,13 +41,13 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
-// The bulk rehearsal's ports, in #448's block (30280-30359, IMPL-COMMON): up's 16 at 30340-30355
-// (the bulk path's block reaches base+15), the client at 30356, and in direct mode the front's
-// dial-home listener at 30357; S17's link takes a kernel port. Host-dialed mode's dial-home listener
+// The bulk rehearsal's ports, in #448's block (28280-28359, IMPL-COMMON): up's 16 at 28340-28355
+// (the bulk path's block reaches base+15), the client at 28356, and in direct mode the front's
+// dial-home listener at 28357; S17's link takes a kernel port. Host-dialed mode's dial-home listener
 // is its loopback default, base+7.
 var (
-	portsBulkDirect     = stack.Ports{Base: 30340, ClientAddr: "127.0.0.1:30356", DialHomeListen: "127.0.0.1:30357"}
-	portsBulkHostDialed = stack.Ports{Base: 30340, ClientAddr: "127.0.0.1:30356"}
+	portsBulkDirect     = stack.Ports{Base: 28340, ClientAddr: "127.0.0.1:28356", DialHomeListen: "127.0.0.1:28357"}
+	portsBulkHostDialed = stack.Ports{Base: 28340, ClientAddr: "127.0.0.1:28356"}
 )
 
 // The measurement, as S17 ran it (HBEP-6, The bulk path, S17's figures) and the rulings fix it.

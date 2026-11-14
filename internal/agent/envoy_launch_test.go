@@ -235,7 +235,7 @@ func TestStartEnvoyRefusesABinaryThatIsNotThePin(t *testing.T) {
 	}
 	_, err := agent.StartEnvoy(agent.EnvoyStart{
 		Binary: fake, Ready: 5 * time.Second,
-		Config: agent.EnvoyConfig{RunDir: dir, Workers: []agent.EnvoyWorker{{Name: "worker-0", Socket: filepath.Join(dir, "worker-0.sock")}}, ReadinessPort: 30160},
+		Config: agent.EnvoyConfig{RunDir: dir, Workers: []agent.EnvoyWorker{{Name: "worker-0", Socket: filepath.Join(dir, "worker-0.sock")}}, ReadinessPort: 28160},
 	}, time.Now())
 	if err == nil || !errors.Is(err, agent.ErrEnvoyRefused) || !strings.Contains(err.Error(), "not the pin of Envoy 1.40.2") {
 		t.Fatalf("StartEnvoy with another binary: %v, want a refusal naming the pin", err)

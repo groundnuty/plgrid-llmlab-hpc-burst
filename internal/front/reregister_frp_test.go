@@ -28,8 +28,8 @@ import (
 
 // frontPluginFixedAddr is where TestFrpsRefusesNewProxiesWhileTheFrontsPluginIsDown puts the
 // front's plugin, which must be known before anything listens there: a port of #371's block,
-// 30050-30069 (IMPL-COMMON). The other tests take theirs from the kernel.
-const frontPluginFixedAddr = "127.0.0.1:30050"
+// 28050-28069 (IMPL-COMMON). The other tests take theirs from the kernel.
+const frontPluginFixedAddr = "127.0.0.1:28050"
 
 // frontPluginSlot serves the front's frps plugin for a rig. frps is configured with its address
 // before the front exists, so it answers 503 (frps then refuses the proxy) until set gives it the
