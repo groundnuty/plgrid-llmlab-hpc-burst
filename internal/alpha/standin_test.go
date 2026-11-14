@@ -27,7 +27,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -795,8 +794,13 @@ func preStage(t *testing.T, cl *stack.Cluster, w world) {
 		return ok && j.Finished
 	})
 	line, err := os.ReadFile(filepath.Join(alloc, "stage-result"))
-	if err != nil || !regexp.MustCompile(`^outcome=ok image_seconds=\d+ image_built=true checkpoint_seconds=\d+ files=\d+ mismatched=0\n$`).Match(line) {
-		t.Fatalf("the pre-staging job left %q (%v), want a cold staging that ended ok", line, err)
+	if err != nil {
+		t.Fatalf("the pre-staging job left no result: %v", err)
+	}
+	// Read by the pre-staging row's own parser (ParseStageResult), so this reading cannot keep an old form of the line.
+	r, err := ParseStageResult(line)
+	if err != nil || !r.OK || !r.ImageBuilt || r.Mismatched != 0 || !r.Rehash.Read || r.Rehash.Files != 0 {
+		t.Fatalf("the pre-staging job left %q (%+v, %v), want a cold staging that ended ok, nothing rehashed", line, r, err)
 	}
 	t.Logf("pre-staged on the stand-in, as the pre-staging row stages: %s", strings.TrimSpace(string(line)))
 }

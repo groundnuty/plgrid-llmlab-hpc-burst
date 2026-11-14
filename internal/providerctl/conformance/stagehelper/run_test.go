@@ -12,12 +12,17 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/alpha"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
-// okLine is the success line: fixed words and numbers.
-var okLine = regexp.MustCompile(`^outcome=ok image_seconds=[0-9]+ image_built=(true|false) checkpoint_seconds=[0-9]+ files=[0-9]+ mismatched=[0-9]+ rehash_files=[0-9]+ rehash_listed=[0-9]+ rehash_bytes=[0-9]+ rehash_ms=[0-9]+$`)
+// okLine is whether a line is the success line, by the one parser of it that the pre-staging row and the stand-ins read it
+// by too (internal/alpha, ParseStageResult), so the line this helper writes and theirs cannot drift.
+func okLine(line string) bool {
+	r, err := alpha.ParseStageResult([]byte(line + "\n"))
+	return err == nil && r.OK
+}
 
 func TestSuccessLineHasTheFixedForm(t *testing.T) {
 	hub := stack.StartHub(t)
@@ -29,7 +34,7 @@ func TestSuccessLineHasTheFixedForm(t *testing.T) {
 		t.Fatalf("exit %d: %s", code, errs)
 	}
 	line := fx.result(t)
-	if !okLine.MatchString(line) {
+	if !okLine(line) {
 		t.Fatalf("result line %q is not the fixed form", line)
 	}
 	// The counts, against the double's own list (not against the staging).
@@ -223,7 +228,7 @@ func TestRunReadsTheCompiledInVariables(t *testing.T) {
 	if code := run([]string{fx.alloc}, fx.getenv, &errs); code != 0 {
 		t.Fatalf("exit %d: %s", code, errs.String())
 	}
-	if line := fx.result(t); !okLine.MatchString(line) {
+	if line := fx.result(t); !okLine(line) {
 		t.Errorf("result line %q is not the fixed success form (stderr: %s)", line, errs.String())
 	}
 }

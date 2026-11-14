@@ -33,7 +33,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -68,14 +67,6 @@ const (
 	stageHelperSetting = "HPCBURST_CONF_STAGE_HELPER"
 )
 
-// The helper's lines (stagehelper's result.line), and nothing else.
-var (
-	stageOKLine    = regexp.MustCompile(`^outcome=ok image_seconds=(\d+) image_built=(true|false) checkpoint_seconds=(\d+) files=(\d+) mismatched=(\d+) rehash_files=(\d+) rehash_listed=(\d+) rehash_bytes=(\d+) rehash_ms=(\d+)\n$`)
-	stageErrorLine = regexp.MustCompile(`^outcome=error step=(image|files|checkpoint|config)\n$`)
-	// stageSignalledLine is a step cut off by the signal: Slurm's TERM at the time limit, or a cancel.
-	stageSignalledLine = regexp.MustCompile(`^outcome=signalled step=(image|files|checkpoint|config)\n$`)
-)
-
 // stageResult is the helper's line as read.
 type stageResult struct {
 	present, ok                     bool
@@ -88,21 +79,15 @@ type stageResult struct {
 	rehash alpha.RehashObs
 }
 
-// parseStageResult reads the helper's line; anything but one of its lines is an error.
+// parseStageResult reads the helper's line by the one parser of it (alpha.ParseStageResult, which the stand-ins that
+// pre-stage as this row does and the helper's own test read it by too); anything but one of its lines is an error.
 func parseStageResult(b []byte) (stageResult, error) {
-	if m := stageOKLine.FindSubmatch(b); m != nil {
-		n := func(i int) int { v, _ := strconv.Atoi(string(m[i])); return v }
-		n64 := func(i int) int64 { v, _ := strconv.ParseInt(string(m[i]), 10, 64); return v }
-		return stageResult{present: true, ok: true, imageSeconds: n(1), imageBuilt: string(m[2]) == "true", checkpointSeconds: n(3), files: n(4), mismatched: n(5),
-			rehash: alpha.RehashObs{Read: true, Files: n(6), Listed: n(7), Bytes: n64(8), MS: n64(9)}}, nil
+	r, err := alpha.ParseStageResult(b)
+	if err != nil {
+		return stageResult{}, err
 	}
-	if m := stageErrorLine.FindSubmatch(b); m != nil {
-		return stageResult{present: true, step: string(m[1])}, nil
-	}
-	if m := stageSignalledLine.FindSubmatch(b); m != nil {
-		return stageResult{present: true, signalled: true, step: string(m[1])}, nil
-	}
-	return stageResult{}, fmt.Errorf("the stage helper's result is not one of its lines")
+	return stageResult{present: r.Present, ok: r.OK, signalled: r.Signalled, step: r.Step, imageSeconds: r.ImageSeconds, checkpointSeconds: r.CheckpointSeconds,
+		imageBuilt: r.ImageBuilt, files: r.Files, mismatched: r.Mismatched, rehash: r.Rehash}, nil
 }
 
 // stageVerdict is the row's verdict from the helper's line and the job's time on the cluster (its start to its end, the
