@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -105,6 +106,8 @@ func TestEnvoyConfigCarriesHBEP5sSettings(t *testing.T) {
 		"retries":                        at(t, r, "retry_policy", "num_retries"),
 		"retry predicate":                at(t, r, "retry_policy", "retry_host_predicate", 0, "name"),
 		"retry picks":                    at(t, r, "retry_policy", "host_selection_retry_max_attempts"),
+		"retry back-off base":            at(t, r, "retry_policy", "retry_back_off", "base_interval"),
+		"retry back-off max":             at(t, r, "retry_policy", "retry_back_off", "max_interval"),
 		"lb_policy":                      c["lb_policy"],
 		"upstream idle":                  at(t, c, "typed_extension_protocol_options", "envoy.extensions.upstreams.http.v3.HttpProtocolOptions", "common_http_protocol_options", "idle_timeout"),
 		"max_connections":                at(t, c, "circuit_breakers", "thresholds", 0, "max_connections"),
@@ -127,6 +130,9 @@ func TestEnvoyConfigCarriesHBEP5sSettings(t *testing.T) {
 		"max ejection":                   at(t, c, "outlier_detection", "max_ejection_time"),
 		"max ejection percent":           at(t, c, "outlier_detection", "max_ejection_percent"),
 		"uneject on a passing check":     at(t, c, "outlier_detection", "successful_active_health_check_uneject_host"),
+		"local-origin errors apart":      at(t, c, "outlier_detection", "split_external_local_origin_errors"),
+		"ejected after local failures":   at(t, c, "outlier_detection", "consecutive_local_origin_failure"),
+		"local ejection enforced":        at(t, c, "outlier_detection", "enforcing_consecutive_local_origin_failure"),
 		"panic threshold":                at(t, c, "common_lb_config", "healthy_panic_threshold", "value"),
 		"bounded loads":                  at(t, c, "common_lb_config", "consistent_hashing_lb_config", "hash_balance_factor"),
 		"the number of top-level fields": float64(len(m)),
@@ -137,7 +143,10 @@ func TestEnvoyConfigCarriesHBEP5sSettings(t *testing.T) {
 			"admin": envoyRunDir + "/envoy-admin.sock", "admin mode": float64(0o600), "admin path": "/clusters?format=json",
 			"suppress_envoy_headers": true, "hash header": "x-session-id", "lb_policy": "RING_HASH", "upstream idle": "50s",
 			"retry on": "connect-failure,reset-before-request", "retries": float64(1), "retry predicate": "envoy.retry_host_predicates.previous_hosts",
-			"retry picks":     float64(20),
+			"retry picks": float64(20),
+			// HBEP-5 as #564 amends it (#561): the retry's back-off, and a dead worker ejected at once.
+			"retry back-off base": "0.1s", "retry back-off max": "0.25s",
+			"local-origin errors apart": true, "ejected after local failures": float64(1), "local ejection enforced": float64(100),
 			"max_connections": float64(4294967295), "max_pending_requests": float64(4294967295), "max_requests": float64(4294967295), "max_retries": float64(4294967295),
 			"worker-0's socket": envoyRunDir + "/worker-0.sock", "worker-0's name": "worker-0",
 			"the number of top-level fields": float64(2),
@@ -145,7 +154,7 @@ func TestEnvoyConfigCarriesHBEP5sSettings(t *testing.T) {
 			"unhealthy after": float64(2), "healthy after": float64(1), "check path": "/ready",
 			"check address": "127.0.0.1", "check port": float64(28160), "check Host": "worker-0",
 			"consecutive 5xx": float64(3), "base ejection": "30s", "max ejection": "300s",
-			"max ejection percent": float64(100), "uneject on a passing check": false, "panic threshold": float64(0), "bounded loads": float64(125),
+			"max ejection percent": float64(0), "uneject on a passing check": false, "panic threshold": float64(0), "bounded loads": float64(125),
 		}[name]
 		if got != want {
 			t.Errorf("%s = %v, want %v", name, got, want)
@@ -179,6 +188,18 @@ func TestEnvoyGuardRefusesEachFault(t *testing.T) {
 		}, "retry_host_predicate[0].name"},
 		{"a per-try timeout", func(m map[string]any) { retryOf(t, m)["per_try_timeout"] = "1s" }, "sets per_try_timeout"},
 		{"Envoy's one pick again", func(m map[string]any) { delete(retryOf(t, m), "host_selection_retry_max_attempts") }, "has no host_selection_retry_max_attempts"},
+		// The retry's back-off (#561): without it the retry can beat the ring's update after a dead
+		// worker's ejection, and land on it again.
+		{"no retry back-off, so Envoy's 25 ms", func(m map[string]any) { delete(retryOf(t, m), "retry_back_off") }, "has no retry_back_off"},
+		{"Envoy's 25 ms base", func(m map[string]any) {
+			retryOf(t, m)["retry_back_off"].(map[string]any)["base_interval"] = "0.025s"
+		}, "retry_back_off.base_interval is 0.025s"},
+		{"no back-off maximum, so ten times the base", func(m map[string]any) {
+			delete(retryOf(t, m)["retry_back_off"].(map[string]any), "max_interval")
+		}, "has no max_interval"},
+		{"a back-off maximum of 2.5 s", func(m map[string]any) {
+			retryOf(t, m)["retry_back_off"].(map[string]any)["max_interval"] = "2.5s"
+		}, "retry_back_off.max_interval is 2.5s"},
 		{"fewer picks again", func(m map[string]any) { retryOf(t, m)["host_selection_retry_max_attempts"] = 1 }, "host_selection_retry_max_attempts"},
 		{"a TCP listener on loopback", func(m map[string]any) {
 			at(t, m, "static_resources", "listeners", 0).(map[string]any)["address"] = map[string]any{"socket_address": map[string]any{"address": "127.0.0.1", "port_value": 0}}
@@ -271,6 +292,25 @@ func TestEnvoyGuardRefusesEachFault(t *testing.T) {
 		{"Envoy's default 10% ejection", func(m map[string]any) {
 			clusterOf(t, m)["outlier_detection"].(map[string]any)["max_ejection_percent"] = 10
 		}, "max_ejection_percent is 10"},
+		// A dead worker ejected at once (#561): a connection failure, reset or time-out apart from 5xx.
+		{"local-origin errors counted as 5xx", func(m map[string]any) {
+			clusterOf(t, m)["outlier_detection"].(map[string]any)["split_external_local_origin_errors"] = false
+		}, "split_external_local_origin_errors is false"},
+		{"no split of local-origin errors", func(m map[string]any) {
+			delete(clusterOf(t, m)["outlier_detection"].(map[string]any), "split_external_local_origin_errors")
+		}, "has no split_external_local_origin_errors"},
+		{"ejected after 3 connection failures", func(m map[string]any) {
+			clusterOf(t, m)["outlier_detection"].(map[string]any)["consecutive_local_origin_failure"] = 3
+		}, "consecutive_local_origin_failure is 3"},
+		{"Envoy's default 5 connection failures", func(m map[string]any) {
+			delete(clusterOf(t, m)["outlier_detection"].(map[string]any), "consecutive_local_origin_failure")
+		}, "has no consecutive_local_origin_failure"},
+		{"the local ejection not enforced", func(m map[string]any) {
+			clusterOf(t, m)["outlier_detection"].(map[string]any)["enforcing_consecutive_local_origin_failure"] = 0
+		}, "enforcing_consecutive_local_origin_failure is 0"},
+		{"every worker ejectable, the lone one too", func(m map[string]any) {
+			clusterOf(t, m)["outlier_detection"].(map[string]any)["max_ejection_percent"] = 100
+		}, "max_ejection_percent is 100"},
 		{"a passing check unejects", func(m map[string]any) {
 			clusterOf(t, m)["outlier_detection"].(map[string]any)["successful_active_health_check_uneject_host"] = true
 		}, "successful_active_health_check_uneject_host is true"},
@@ -387,5 +427,40 @@ func TestTheRealEnvoyValidatesTheAgentsConfig(t *testing.T) {
 	bad := strings.Replace(string(raw), `"suppress_envoy_headers"`, `"suppress_envoy_headerz"`, 1)
 	if out, err := validate("bad.json", []byte(bad)); err == nil || !strings.Contains(out, "suppress_envoy_headerz") {
 		t.Fatalf("Envoy accepted a misspelt field: %v\n%s", err, out)
+	}
+}
+
+// Outlier detection may eject every worker but one: max_ejection_percent is ⌈100·(n−1)/n⌉ for n workers, 0
+// for a lone worker (HBEP-5, Worker health; the science agent's ruling on #565). Envoy ejects only while
+// 100·(ejected+1)/n is at most it, so the last worker standing is never ejected. The expectations are the
+// ruling's numbers, not the formula again.
+func TestTheEjectionPercentKeepsOneWorkerIn(t *testing.T) {
+	for _, c := range []struct {
+		workers int
+		want    float64
+	}{{1, 0}, {2, 50}, {3, 67}, {4, 75}, {8, 88}} {
+		cfg := envoyCfg()
+		cfg.Workers = nil
+		for i := 0; i < c.workers; i++ {
+			w := "worker-" + strconv.Itoa(i)
+			cfg.Workers = append(cfg.Workers, agent.EnvoyWorker{Name: w, Socket: envoyRunDir + "/" + w + ".sock"})
+		}
+		m := renderMap(t, cfg)
+		if got := at(t, clusterOf(t, m), "outlier_detection", "max_ejection_percent"); got != c.want {
+			t.Errorf("%d worker(s): max_ejection_percent %v, want %v", c.workers, got, c.want)
+		}
+		if err := agent.CheckEnvoyConfig(mustJSON(t, m), cfg); err != nil {
+			t.Errorf("%d worker(s): the agent's own config is refused: %v", c.workers, err)
+		}
+		// The value of another count of workers is refused: 100 always, and n=2's 50 for any other n.
+		for _, other := range []float64{100, 50} {
+			if other == c.want {
+				continue
+			}
+			clusterOf(t, m)["outlier_detection"].(map[string]any)["max_ejection_percent"] = other
+			if err := agent.CheckEnvoyConfig(mustJSON(t, m), cfg); err == nil || !strings.Contains(err.Error(), "max_ejection_percent") {
+				t.Errorf("%d worker(s): max_ejection_percent %v: the guard says %v, want a refusal naming it", c.workers, other, err)
+			}
+		}
 	}
 }
