@@ -19,6 +19,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/deploymentid"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
 // data is a record's data, the shape a served ID's record has (internal/lifecycle's identityData).
@@ -83,4 +84,32 @@ func Ensure(ctx context.Context, c client.Client, r client.Reader, namespace str
 		return "", &Collision{Record: rec.Name, ResourceVersion: got.ResourceVersion, Stored: stored.SHA256, Want: id.SHA256}
 	}
 	return rec.Name, nil
+}
+
+// EnsureCatalog ensures the identity record, in namespace, of every entry of a catalog about to be published
+// (HBEP-9: written before the entry is published, so no published ID is without its record). It returns the
+// catalog to publish: every entry whose record holds its ID. An entry whose record holds another ID is left
+// out and returned as skipped (provider.SkipCollision, naming the record), which the controller's
+// CatalogEntrySkipped event reports. Any other failure is returned, and nothing is to be published: the pass
+// fails, and the catalog stays as last published.
+func EnsureCatalog(ctx context.Context, c client.Client, r client.Reader, namespace, platform string, catalog []v1alpha1.CatalogEntryStatus, fieldOwner string) ([]v1alpha1.CatalogEntryStatus, []provider.SkippedEntry, error) {
+	kept := make([]v1alpha1.CatalogEntryStatus, 0, len(catalog))
+	var skipped []provider.SkippedEntry
+	for _, e := range catalog {
+		entry := deploymentid.CatalogEntry{Platform: platform, CatalogName: e.Name}
+		if e.Revision != nil {
+			entry.Revision = *e.Revision
+		}
+		if _, err := Ensure(ctx, c, r, namespace, entry, fieldOwner); err != nil {
+			var col *Collision
+			if errors.As(err, &col) {
+				skipped = append(skipped, provider.SkippedEntry{Name: e.Name, Category: provider.SkipCollision,
+					Why: fmt.Sprintf("the identity record %s/%s of its deployment ID holds another ID (HBEP-3, the collision rule)", namespace, col.Record)})
+				continue
+			}
+			return nil, nil, fmt.Errorf("catalog entry %q: %w", e.Name, err)
+		}
+		kept = append(kept, e)
+	}
+	return kept, skipped, nil
 }

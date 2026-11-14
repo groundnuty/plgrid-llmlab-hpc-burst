@@ -147,7 +147,9 @@ func WorkerName(i int) string { return "worker-" + strconv.Itoa(i) }
 func RestartGenerationAnnotation(part string) string { return AnnotationRestartPrefix + part }
 
 // ControllerNamespace holds the controllers' leader Leases (HBEP-11,
-// Controllers). The launcher creates it.
+// Controllers), and the identity records of managed catalog entries' IDs,
+// which belong to no namespace and no Provider (HBEP-9, the managed entry's
+// identity record). The launcher creates it.
 const ControllerNamespace = "hpcburst-system"
 
 // LeaseLifecycle is the name of the lifecycle controller's leader Lease
