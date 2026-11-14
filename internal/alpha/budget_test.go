@@ -54,8 +54,9 @@ func TestEachStackRowsWorstCaseIsItsWaitsAddedUp(t *testing.T) {
 		// The keeper row on plgrid-now (issue #521) adds up as the router row does: its stream and the controller's restart are before the drain start.
 		{"the keeper row on plgrid-now, 30", rowOf("beta-athena-now-keeper"), 30, 11 + 10 + 41 + 7 + 5 + 2 + 5, 115, 11 + 5 + 2 + 5},
 		// The bulk row on plgrid-now (issue #521) adds up as the router row does: both phases are before the drain start.
-		{"the bulk row on plgrid-now, 30", rowOf("beta-athena-now-bulk"), 30, 11 + 10 + 41 + 7 + 5 + 2 + 5, 115, 11 + 5 + 2 + 5},
-		{"the bulk row on plgrid-now, 2 h asked", rowOf("beta-athena-now-bulk"), 120, 11 + 10 + 41 + 7 + 5 + 2 + 5, 115, 11 + 5 + 2 + 5},
+		// The bulk row adds 5 for the staging of the shipped agent its test shim execs, before the deployment (StageAgentWait; issue #521, option (A)).
+		{"the bulk row on plgrid-now, 30", rowOf("beta-athena-now-bulk"), 30, 11 + 5 + 10 + 41 + 7 + 5 + 2 + 5, 115, 11 + 5 + 5 + 2 + 5},
+		{"the bulk row on plgrid-now, 2 h asked", rowOf("beta-athena-now-bulk"), 120, 11 + 5 + 10 + 41 + 7 + 5 + 2 + 5, 115, 11 + 5 + 5 + 2 + 5},
 		{"the keeper row on plgrid-now, 2 h asked", rowOf("beta-athena-now-keeper"), 120, 11 + 10 + 41 + 7 + 5 + 2 + 5, 115, 11 + 5 + 2 + 5},
 		// Row B on plgrid-now (issue #376): its start wait of 10, the predecessor's 21-minute lease and 5 for its job to be seen
 		// gone from the slot, 3 for the successor's Allocation and the successor's own start wait of 10, then 12 and 5 for it to
@@ -158,8 +159,10 @@ var liveWaits = map[string]string{
 	// The bulk row (betabulk_flow_test.go): two phases, each the streams' first tokens, a second of steady pace, the transfer and the streams' ends, all before
 	// the drain start, so the lease bounds them (a phase is at most 3 minutes for the first tokens, 3 for the transfer and the streams' request
 	// timeout and a minute for their ends, about 12 minutes, twice).
-	"bulkPhase: time.After(stack.WaitDeadline)":              "the lease",
-	"bulkPhase: time.Sleep(time.Second)":                     "pacing",
+	"bulkPhase: time.After(stack.WaitDeadline)": "the lease",
+	"bulkPhase: time.Sleep(time.Second)":        "pacing",
+	// The bulk row's staging of the shipped agent its test shim execs (bulkshim_live_test.go, called from start), before the deployment.
+	"start: context.WithTimeout(StageAgentWait)":             "term: StageAgentWait (the bulk row's)",
 	"drainTransfer: context.WithTimeout(stack.WaitDeadline)": "the lease",
 	// Row B (now_nooverlap_flows_test.go).
 	"NowNoOverlap: r.syncWatch(stack.KindInstances | stack.KindAllocations | stack.KindDeployments)": "term: stack.CatchUpWorstCase",
@@ -204,7 +207,7 @@ func waitOf(fset *token.FileSet, fn string, call *ast.CallExpr) string {
 func TestTheLiveStepsWaitOnWhatTheSumsCount(t *testing.T) {
 	fset := token.NewFileSet()
 	found := map[string]int{}
-	for _, file := range []string{"steps_live_test.go", "live_flows_test.go", "guard_live_test.go", "now_flows_test.go", "now_nooverlap_flows_test.go", "betarouter_flow_test.go", "betakeeper_flow_test.go", "betabulk_flow_test.go"} {
+	for _, file := range []string{"steps_live_test.go", "live_flows_test.go", "guard_live_test.go", "now_flows_test.go", "now_nooverlap_flows_test.go", "betarouter_flow_test.go", "betakeeper_flow_test.go", "betabulk_flow_test.go", "bulkshim_live_test.go"} {
 		f, err := parser.ParseFile(fset, file, nil, 0)
 		if err != nil {
 			t.Fatal(err)

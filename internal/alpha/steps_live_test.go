@@ -34,6 +34,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/sshrun"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // What the live steps cannot wire from here; each names what is missing.
@@ -82,6 +83,9 @@ type world struct {
 	// engine double's two prefix-cache counters (obscheck.DoubleNotReported).
 	gpuModel    string
 	notReported map[string]bool
+	// shim is the bulk row's test shim and the shipped agent it execs (bulkshim_live_test.go), nil for every other row: the bulk row's engine is
+	// the double, which reaches the cluster's job only as the shim in hb-agent's place (issue #521, option (A)).
+	shim *testShim
 }
 
 // hostOptionsFor are the options of the stack's host a row asks for beside the alpha stack: the router row's Instances run behind Envoy
@@ -179,17 +183,39 @@ func liveWorld(cfg Config) (world, error) {
 	}}
 	prov.Name = r.Cluster
 	builds := filepath.Join(cfg.BuildDir, "agent-builds")
+	place := func(h *stack.Host) { copyBuilds(h, builds) }
+	matchEngine, notReported := MatchesCommand, obscheck.VLLMNotReported
+	var shim *testShim
+	var double DoubleObs
+	if r.Name == BetaBulkName {
+		// The bulk row's engine is the engine double, which reaches the job only as the test shim in hb-agent's place (issue #521, option (A)):
+		// the shim hack/live-checks.sh built for the node's CPU architecture, with the digest of the shipped agent it built beside it.
+		var err error
+		if shim, err = loadTestShim(filepath.Join(cfg.BuildDir, "test-shim", agentapi.AgentBuildName(cpuArch)),
+			filepath.Join(builds, agentapi.AgentBuildName(cpuArch)), builds); err != nil {
+			return world{}, err
+		}
+		place = func(h *stack.Host) {
+			copyBuilds(h, builds)
+			shim.place(h, cpuArch)
+		}
+		double = DoubleObs{Name: "the engine double, run by the bulk row's test shim (internal/agent/enginedouble/shim)", Digest: shim.shimDigest}
+		matchEngine, notReported = MatchesShimEngine(shim.shimDigest), obscheck.DoubleNotReported
+		// The double's pace and padding, as the stand-in's (standin_test.go): 20 tokens a second, and a reply padded to 64 MiB on request.
+		md.Spec.Source.Served.Env = append(md.Spec.Source.Served.Env, v1alpha1.EnvVar{Name: "HB_ENGINE_DOUBLE",
+			Value: "token-delay=" + BulkTokenDelay.String() + ",reply-bytes=" + strconv.Itoa(BulkReplyBytes)})
+	}
 	return world{
 		name: "live",
 		bins: stack.Binaries{HPCBurst: filepath.Join(cfg.BuildDir, "bin", "hpcburst"), Controller: filepath.Join(cfg.BuildDir, "bin", "hpcburst-controller"),
 			Front:  filepath.Join(cfg.BuildDir, "bin", "hpcburst-front"),
 			K3sDir: cfg.BinDir, Frps: filepath.Join(cfg.BinDir, "frps"), Frpc: filepath.Join(cfg.BinDir, "frpc"), Repo: repo},
-		place: func(h *stack.Host) { copyBuilds(h, builds) },
+		place: place,
 		dh:    stack.DialHome{Mode: cfg.DialHomeMode, Addr: cfg.DialHomeAddr, KeyPath: cfg.DialHomeKey},
 		ports: portsFor(cfg.Row.Name, livePorts(cfg.DialHomeListen)), env: stack.CleanEnv(),
 		objects: []client.Object{&pp, prov}, provider: r.Cluster, cluster: r.Cluster, qos: r.QOS, md: &md, profile: pp.Spec,
-		controlDir: cfg.ControlDir, hostLock: cfg.HostLock, matchEngine: MatchesCommand, gpuModel: gpuModel, notReported: obscheck.VLLMNotReported,
-		hostOpts: hostOpts, cpuArch: cpuArch,
+		controlDir: cfg.ControlDir, hostLock: cfg.HostLock, matchEngine: matchEngine, gpuModel: gpuModel, notReported: notReported,
+		hostOpts: hostOpts, cpuArch: cpuArch, shim: shim, double: double,
 	}, nil
 }
 
@@ -265,6 +291,9 @@ type liveRun struct {
 	// keepEvidence is set by Run when the run ended in a failure that is not a Fatalf of the steps (a failed check, a broken run): Close then
 	// keeps the evidence of a failed run (evidence_live_test.go). A Fatalf marks the test failed itself.
 	keepEvidence bool
+	// testAgentDir is the shipped agent's directory the bulk row staged under the Provider's staging root, "" before any: Close removes it by
+	// this exact path on every exit.
+	testAgentDir string
 
 	// created is this host's time just before the deployment was created,
 	// from which the first clock runs, and clusterAtCreate the cluster's clock
@@ -389,6 +418,13 @@ func (r *liveRun) Close(ctx context.Context) error {
 			}
 		}
 	}
+	if r.testAgentDir != "" && r.batch != nil {
+		// The bulk row's staged shipped agent goes by its exact path, on every exit; the leftover check names it if it remains.
+		errs = append(errs, removeTestAgent(cctx, r.tr, r.testAgentDir))
+	}
+	if r.w.shim != nil {
+		errs = append(errs, r.w.shim.buildsUnchanged())
+	}
 	if r.tr != nil {
 		errs = append(errs, r.tr.Close())
 	}
@@ -473,6 +509,12 @@ func (r *liveRun) start(p Plan) {
 		defer cancel()
 		return r.c.Get(ctx, client.ObjectKey{Name: r.w.provider}, &prov) == nil && v1alpha1.ProviderReady(&prov, time.Now())
 	})
+	if r.w.shim != nil {
+		// The shipped agent the bulk row's shim execs, staged before any job can start (issue #521, option (A)).
+		sctx, scancel := context.WithTimeout(context.Background(), StageAgentWait)
+		r.prestageAgent(sctx)
+		scancel()
+	}
 	md := r.deployment(p.Row)
 	p.Logf("%s: the deployment's first end is %s after the cluster's clock read before its creation", p.Row.Name, md.Spec.EndTime.Sub(r.clusterAtCreate).Round(time.Second))
 	r.created = time.Now()

@@ -35,7 +35,8 @@ func (d *drySteps) BetaBulk(_ context.Context, p Plan) (BulkObs, error) {
 	obs := BulkObs{
 		Deployment: d.deployment(), ReadyAt: ready, DrainStart: drain, Registered: 1,
 		Control: dryBulkPhase(150*time.Millisecond, 0), Bulk: dryBulkPhase(55*time.Millisecond, 1),
-		Double:    DoubleObs{Name: "the engine double (enginedouble, the stand-in's own build)", Digest: strings.Repeat("ab", 32)},
+		Double:    DoubleObs{Name: "the engine double, run by the bulk row's test shim (internal/agent/enginedouble/shim)", Digest: strings.Repeat("ab", 32)},
+		Shim:      dryShimObs(strings.Repeat("ab", 32), strings.Repeat("cd", 32)),
 		Responses: 18, Attributed: 18,
 	}
 	switch {
@@ -102,6 +103,14 @@ func (d *drySteps) BetaBulk(_ context.Context, p Plan) (BulkObs, error) {
 		obs.Double.Digest = strings.Repeat("ab", 31)
 	case d.fault("double-digest-upper"):
 		obs.Double.Digest = strings.Repeat("AB", 32)
+	case d.fault("shim-not-staged"):
+		obs.Shim.Allocation = obs.Shim.AgentDigest // the Provider staged the shipped agent itself, not the shim
+	case d.fault("shim-agent-not-shipped"):
+		obs.Shim.AgentRunning = strings.Repeat("ef", 32)
+	case d.fault("shim-engine-not-double"):
+		obs.Shim.EngineRunning = strings.Repeat("ef", 32)
+	case d.fault("shim-agent-unread"):
+		obs.Shim.AgentRunning = ""
 	case d.fault("unattributed"):
 		obs.Attributed = 17
 	case d.fault("no-responses"):
@@ -152,4 +161,10 @@ var betaBulkCases = []dryCase{
 	{"short-lease", "not longer than the lead an Instance needs (PartitionTooShort)"},
 	{"duplicate-tag", "a tag names more than one job"},
 	{"extra-allocation", "exactly one Allocation"},
+}
+
+// dryShimObs is a run through the test shim whose readings all agree: the Allocation names the shim, the agent process ran the shipped agent, the
+// engine and its Apptainer the shim.
+func dryShimObs(shim, agent string) ShimObs {
+	return ShimObs{ShimDigest: shim, AgentDigest: agent, Allocation: shim, AgentRunning: agent, EngineRunning: shim, ApptainerRunning: shim}
 }

@@ -55,6 +55,10 @@ func (r Row) RunDeadline(pendingMax time.Duration) time.Duration {
 	return time.Duration(r.MostJobs)*pendingMax + r.Budget
 }
 
+// StageAgentWait bounds the bulk row's staging of the shipped agent its test shim execs: an agent build of tens of MB written through the run's
+// ssh to the Provider's staging root, before the deployment is created (issue #521, option (A)).
+const StageAgentWait = 5 * time.Minute
+
 // WorstCase is the longest a stack row's test can take when every wait it has runs to its end, added up from the
 // steps' own waits: the stack's start, the first job's wait in the queue (FirstClock), its lease, then what comes after, Close included.
 // The script's timeout for the row must be above it, or the timeout fires before the row's bound can.
@@ -89,8 +93,11 @@ func (r Row) WorstCase(pendingMax time.Duration) time.Duration {
 		return StartupWait + first + (r.Lease - dw) + tm.MaxRequestDuration + dw + EndMargin + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout
 	case "alpha-helios-nooverlap":
 		return StartupWait + first + r.Lease + SuccessorWait(tm, pendingMax) + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout
-	case BetaRouterName, BetaKeeperName, BetaBulkName:
+	case BetaRouterName, BetaKeeperName:
 		return StartupWait + first + (r.Lease - dw) + dw + EndMargin + 2*stack.CatchUpWorstCase + CloseTimeout
+	case BetaBulkName:
+		// The router row's sum, and the staging of the shipped agent the test shim execs, before the deployment (issue #521, option (A)).
+		return StartupWait + StageAgentWait + first + (r.Lease - dw) + dw + EndMargin + 2*stack.CatchUpWorstCase + CloseTimeout
 	case "alpha-athena-now-serve":
 		return StartupWait + first + (r.Lease - dw) + stack.WaitDeadline + dw + EndMargin + 2*stack.CatchUpWorstCase + CloseTimeout
 	case "alpha-athena-now-nooverlap":

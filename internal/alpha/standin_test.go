@@ -18,8 +18,6 @@ package alpha
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -279,24 +277,34 @@ func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)
 	if row.Name == BetaRouterName {
 		envoyBin = testenv.EnvoyBinary(t)
 	}
-	double := DoubleObs{}
+	double, match := DoubleObs{}, standInEngineMatch(t)
+	place := func(h *stack.Host) {
+		h.PlaceAgentBuild(arch)
+		if envoyBin != "" {
+			h.PlaceEnvoyBuild(arch, envoyBin)
+		}
+	}
+	var shim *testShim
 	if row.Name == BetaBulkName {
-		// The stand-in's engine is the double: the fake apptainer links to this test binary, which serves as the engine (enginedouble.Install).
-		double = standInDouble(t)
+		// The bulk row runs as live does (issue #521, option (A)): the test shim in hb-agent's place in the stack's copy of an operator's agent
+		// builds, the shipped agent staged by the harness, and the engine the shim's double. The fake Apptainer the cluster's PATH has is never
+		// run: the shim names its own.
+		shim = standInShim(t, b, arch)
+		place = func(h *stack.Host) {
+			copyBuilds(h, shim.builds)
+			shim.place(h, arch)
+		}
+		double = DoubleObs{Name: "the engine double, run by the bulk row's test shim (internal/agent/enginedouble/shim)", Digest: shim.shimDigest}
+		match = MatchesShimEngine(shim.shimDigest)
 	}
 	return world{
-		name: "stand-in", bins: b, hostOpts: hostOpts, cpuArch: arch, double: double, link: link,
-		place: func(h *stack.Host) {
-			h.PlaceAgentBuild(arch)
-			if envoyBin != "" {
-				h.PlaceEnvoyBuild(arch, envoyBin)
-			}
-		},
-		dh: standInDirect, ports: portsFor(row.Name, standInPorts),
+		name: "stand-in", bins: b, hostOpts: hostOpts, cpuArch: arch, double: double, link: link, shim: shim,
+		place: place,
+		dh:    standInDirect, ports: portsFor(row.Name, standInPorts),
 		// The controller lists the checkpoint from the Hub double through HF_ENDPOINT, which up passes on to it.
 		env:     stack.CleanEnv("HF_ENDPOINT=" + hub.URL),
 		objects: []client.Object{prof, prov}, provider: stack.ProviderName, cluster: row.Cluster, qos: row.QOS, md: md, profile: prof.Spec,
-		controlDir: ctl, hostLock: filepath.Join(dir, "host.lock"), matchEngine: standInEngineMatch(t),
+		controlDir: ctl, hostLock: filepath.Join(dir, "host.lock"), matchEngine: match,
 		gpuModel: prof.Spec.Partitions[0].GPUModel, notReported: notReported,
 	}, cl
 }
@@ -1118,24 +1126,41 @@ func TestStandInBetaKeeper(t *testing.T) {
 	runStandInIn(t, BetaKeeperName, standInHostDialed)
 }
 
-// standInDouble names the engine double a stand-in run has: its own test binary, which the fake apptainer runs as the engine (enginedouble.Install),
-// and the SHA-256 of that binary as the run read it.
-func standInDouble(t *testing.T) DoubleObs {
+// standInShim builds the bulk row's test shim for the stand-in, as hack/live-checks.sh does for a live run: the shipped agent the stand-in runs is
+// built into it by its digest (-ldflags -X main.wantAgentDigest), CGO off, trimmed, for this host. The stand-in's operator agent builds are a
+// directory of the shipped agent and frpc under their build names, which the run must leave as it found them.
+func standInShim(t *testing.T, b stack.Binaries, arch string) *testShim {
 	t.Helper()
-	exe, err := os.Executable()
+	agent, err := os.ReadFile(b.Agent)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, err := os.Open(exe)
+	dir := stack.ShortDir(t)
+	builds := filepath.Join(dir, "agent-builds")
+	if err := os.Mkdir(builds, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for src, name := range map[string]string{b.Agent: agentapi.AgentBuildName(arch), b.Frpc: agentapi.FrpcBuildName(arch)} {
+		bs, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(builds, name), bs, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shimFile := filepath.Join(dir, "shim")
+	build := exec.Command("go", "build", "-trimpath", "-ldflags", "-X main.wantAgentDigest="+digestOf(agent), "-o", shimFile, "./internal/agent/enginedouble/shim")
+	build.Dir = filepath.Join("..", "..")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build the test shim: %v\n%s", err, out)
+	}
+	s, err := loadTestShim(shimFile, filepath.Join(builds, agentapi.AgentBuildName(arch)), builds)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		t.Fatal(err)
-	}
-	return DoubleObs{Name: "the engine double (internal/agent/enginedouble, run as the stand-in's own test binary)", Digest: hex.EncodeToString(h.Sum(nil))}
+	return s
 }
 
 // bulkStandIn is one stand-in run of the bulk row through Run, with tweak applied to the world before it starts.

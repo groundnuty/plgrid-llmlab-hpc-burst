@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -27,6 +28,9 @@ func TestPickAgentReadsTheJobsOneAgent(t *testing.T) {
 		{"a program that only mentions hb-agent", []NodeProc{agent, notAgent}, 100},
 		{"none", []NodeProc{relay, notAgent}, 0},
 		{"two", []NodeProc{agent, {PID: 300, PPID: 1, InJob: true, Argv: []string{"hb-agent", "/z"}}}, 0},
+		// The shim's engine runs as the shim's own staged file, named hb-agent, under the double's Apptainer under the agent: it is no agent.
+		{"the shim's engine under the agent", []NodeProc{agent, {PID: 110, PPID: 100, Argv: []string{"/staged/test-agent/y/shim-x/apptainer", "exec", "i", "vllm"}},
+			{PID: 120, PPID: 110, Argv: []string{"/staged/agent/abc/hb-agent", "serve", "/models/m"}}}, 100},
 	} {
 		got, ok := PickAgent(c.procs)
 		if c.want == 0 && ok || c.want != 0 && (!ok || got.PID != c.want) {
@@ -90,5 +94,28 @@ func TestTheDigestStepReadsTheExecutableNotTheCommandLine(t *testing.T) {
 	got, ok := ParseExeDigest(runScriptHere(t, script))
 	if want := fileDigest(t, real); !ok || got != want {
 		t.Fatalf("the step read %q (ok %t), want the executable's own digest %s, not the named file's", got, ok, want)
+	}
+}
+
+// The shim's engine is told by its program, the shim's own staged file, and the launch's arguments (a path among them the double's own).
+func TestMatchesShimEngine(t *testing.T) {
+	x := strings.Repeat("ab", 32)
+	match := MatchesShimEngine(x)
+	command := []string{"vllm", "serve", "/models/m", "--max-model-len", "32768"}
+	for _, c := range []struct {
+		name string
+		argv []string
+		want bool
+	}{
+		{"the shim's staged file, the same arguments", []string{"/scratch/u/agent/" + x + "/hb-agent", "serve", "/models/m", "--max-model-len", "32768"}, true},
+		{"a path the double rewrote, allowed", []string{"/scratch/u/agent/" + x + "/hb-agent", "serve", "/run/x/models/m", "--max-model-len", "32768"}, true},
+		{"another shim's file", []string{"/scratch/u/agent/" + strings.Repeat("cd", 32) + "/hb-agent", "serve", "/models/m", "--max-model-len", "32768"}, false},
+		{"a real vllm", command, false},
+		{"another argument", []string{"/scratch/u/agent/" + x + "/hb-agent", "serve", "/models/m", "--max-model-len", "4096"}, false},
+		{"one argument fewer", []string{"/scratch/u/agent/" + x + "/hb-agent", "serve", "/models/m", "--max-model-len"}, false},
+	} {
+		if got := match(c.argv, command); got != c.want {
+			t.Errorf("%s: %t, want %t", c.name, got, c.want)
+		}
 	}
 }
