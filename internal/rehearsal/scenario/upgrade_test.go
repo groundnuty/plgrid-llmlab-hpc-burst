@@ -43,16 +43,27 @@ var upgradeRestartReasons = []string{v1alpha1.ReasonWorkerRestart, v1alpha1.Reas
 // connection before the stack starts: something else on this host takes them, though no listener of
 // ours exists yet, as a Kubernetes NodePort (30000-32767) of the host's own k3s does, below the socket
 // layer where a free-port check by listeners cannot see it.
-func portsAnswered(p stack.Ports) []int {
+func portsAnswered(p stack.Ports) []int { return portsAnsweredBy(p, tcpAccepts) }
+
+// portsAnsweredBy is portsAnswered with the dial given: accepts reports whether addr accepts a connection.
+func portsAnsweredBy(p stack.Ports, accepts func(addr string) bool) []int {
 	var out []int
 	for n := p.Base; n <= p.Base+16; n++ {
-		c, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(n)), 300*time.Millisecond)
-		if err == nil {
-			c.Close()
+		if accepts(net.JoinHostPort("127.0.0.1", strconv.Itoa(n))) {
 			out = append(out, n)
 		}
 	}
 	return out
+}
+
+// tcpAccepts reports whether addr accepts a TCP connection within 300 ms.
+func tcpAccepts(addr string) bool {
+	c, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	c.Close()
+	return true
 }
 
 // startUpgradeRig is the keeper rig, on the upgrade test's ports, with the bulk path and the instance router
