@@ -139,7 +139,8 @@ var liveWaits = map[string]string{
 	"routerFirstReady: r.waitFor(stack.WaitDeadline)": "the lease",
 	"routerFirstReady: r.waitFor(routerJobWait)":      "the lease",
 	"routerFirstReady: r.waitFor(r.readyWait())":      "the lease",
-	"healthyAgain: time.Sleep(2 * time.Second)":       "pacing",
+	"healthyWithin: time.Sleep(2 * time.Second)":      "pacing",
+	"probeGlibc: time.Sleep(pause)":                   "pacing, between the glibc step's tries, before the Instance is ready: the lease",
 	"bytesReading: context.WithTimeout(BytesBound)":   "the lease",
 	// Row B (now_nooverlap_flows_test.go).
 	"NowNoOverlap: r.syncWatch(stack.KindInstances | stack.KindAllocations | stack.KindDeployments)": "term: stack.CatchUpWorstCase",

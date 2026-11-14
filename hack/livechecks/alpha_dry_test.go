@@ -159,7 +159,7 @@ var nowServeFaults = []string{"cut", "short-stream", "past-deadline", "unattribu
 // a node whose glibc is under 2.30, are TestTheRouterRowsGlibcNotRunThroughTheScript's; the dry run at the minimum is no failure.
 var betaRouterFaults = []string{"not-ready", "no-router-launch", "several-workers", "healthy-zero-at-ready", "healthy-absent-after-restart", "router-refused", "not-serving",
 	"no-envoy", "two-envoys", "not-bare", "wrong-digest", "unread-executable", "no-pin", "glibc-unread", "no-rate", "bytes-short", "bytes-unfinished", "bytes-router-made",
-	"bytes-no-stream-200", "bytes-no-chat-200", "unattributed", "no-responses", "no-restart", "two-restarts", "ladder-climb", "untagged", "wrong-partition", "default-lease",
+	"bytes-no-stream-200", "bytes-no-chat-200", "bytes-refused-outside", "bytes-5xx-in-group", "bytes-past-bound", "unattributed", "no-responses", "no-restart", "two-restarts", "ladder-climb", "untagged", "wrong-partition", "default-lease",
 	"short-lease", "duplicate-tag", "extra-allocation"}
 
 // nowNoOverlapFaults are row B's failing faults (issue #376; internal/alpha, run_test.go's nowNoOverlapCases); its NOT RUNs
