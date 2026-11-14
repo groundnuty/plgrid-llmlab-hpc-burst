@@ -60,6 +60,9 @@
 # words, which judge prints; its text to post is written too, saying NOT RUN with the reason. Its start wait runs from the
 # deployment's creation. It sends no requeue: the plugin submits --no-requeue, so a user's requeue is refused by design, and the
 # refusal that was a NOT RUN until 13 Nov 2026 is gone with the step (#503).
+# The router row on plgrid-now (beta-athena-now-router, issue #521; beta's tracker is #522) has one: the compute node's glibc is older
+# than the 2.30 Envoy needs, read on the node or from the agent's own log of a refused start. Its marker names the version alone, which
+# judge prints; the run sent no request, and its jobs were cancelled by their tags.
 # Row B on plgrid-now (alpha-athena-now-nooverlap, issue #376) has two of its own, judged the same way: a job that is not the
 # run's held the one-job slot between its two jobs (the owner's own work, which the run never touches; Q7), and either job's
 # warm start its agent's own log did not show. Its first job's start wait runs from the deployment's creation, its second's
@@ -212,6 +215,7 @@ reach-athena|cluster|internal/providerctl/conformance|^TestReach$|HPCBURST_CONFO
 reach-host-dialed-helios|cluster|internal/providerctl/conformance|^TestReachHostDialed$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host,linux-arm64|ready
 reach-host-dialed-athena|cluster|internal/providerctl/conformance|^TestReachHostDialed$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
 alpha-athena-now-nooverlap|cluster|internal/alpha|^TestAlphaAthenaNowNoOverlap$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml|host|ready
+beta-athena-now-router|cluster|internal/alpha|^TestBetaAthenaNowRouter$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml,hack/fetch-envoy.sh|host|ready
 rehearsal|cluster|-|-|-|-|-|pending
 # END LIVE TESTS
 TABLE
@@ -292,6 +296,7 @@ tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|12
 alpha-athena-now-serve|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
 alpha-athena-now-stage|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:30:00|60|-|10
 alpha-athena-now-nooverlap|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:21:00|115|-|10
+beta-athena-now-router|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
 gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|32|-|10
 gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|25|-
 gpu-accounting-athena-now|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|32|-|10
@@ -319,6 +324,7 @@ tunnel-hour-athena|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/h
 alpha-athena-now-serve|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 alpha-athena-now-stage|internal/providerctl/conformance/stagehelper
 alpha-athena-now-nooverlap|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
+beta-athena-now-router|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 rehearsal-part3|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 reach-host-dialed-helios|cmd/hb-agent
 reach-host-dialed-athena|cmd/hb-agent
@@ -338,6 +344,7 @@ tunnel-hour-athena|1
 alpha-athena-now-serve|1
 alpha-athena-now-stage|1
 alpha-athena-now-nooverlap|2
+beta-athena-now-router|1
 gpu-accounting-helios|1
 gpu-accounting-athena|1
 gpu-accounting-athena-now|1
@@ -362,6 +369,7 @@ tunnel-hour-helios|LIVE_OWNER_GO_HELIOS_NOW|140
 alpha-athena-now-serve|LIVE_OWNER_GO_ATHENA_NOW|60
 alpha-athena-now-stage|LIVE_OWNER_GO_ATHENA_NOW|50
 alpha-athena-now-nooverlap|LIVE_OWNER_GO_ATHENA_NOW|60
+beta-athena-now-router|LIVE_OWNER_GO_ATHENA_NOW|60
 gpu-accounting-athena-now|LIVE_OWNER_GO_ATHENA_NOW|20
 # END OWNER GO
 TABLE
@@ -428,6 +436,7 @@ tunnel-hour-helios
 tunnel-hour-athena
 alpha-athena-now-serve
 alpha-athena-now-nooverlap
+beta-athena-now-router
 gpu-accounting-helios
 gpu-accounting-athena
 gpu-accounting-athena-now
@@ -621,7 +630,7 @@ check_settings() {
         case $name in
           # The pre-staging row (issue #376) is a conformance run: no stack, so no dial-home or binary setting.
           alpha-athena-now-stage) ;;
-          alpha-*|tunnel-hour-*) check_alpha_settings "$name" || bad=1 ;;
+          alpha-*|tunnel-hour-*|beta-*) check_alpha_settings "$name" || bad=1 ;;
           # The host-dialed relay rows take no probe setting; a reach row in host-dialed mode is refused when it would run
           # (run_cluster), so its probe settings are not asked for.
           reach-host-dialed-*) ;;
@@ -1062,6 +1071,7 @@ not_run_verdict() {
   [ -n "${HOST[$n]:-}" ] || return 1
   ! second_job_marker || [ "${MOSTJOBS[$n]:-1}" -ge 2 ] || return 1
   ! warm_marker || case $n in alpha-athena-now-serve|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1
+  ! glibc_marker || [ "$n" = beta-athena-now-router ] || return 1
   ! slot_marker || [ "$n" = alpha-athena-now-nooverlap ] || return 1
   ! lead_marker || case $n in alpha-athena-handover|alpha-helios-nooverlap|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1
   ! long_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac || return 1
@@ -1074,6 +1084,19 @@ not_run_verdict() {
 # that have it.
 row_a_marker() { warm_marker || slot_marker; }
 warm_marker() { grep -q "the agent's own log did not show the warm start" "$REC_DIR/not-run.txt" 2>/dev/null; }
+# glibc_marker: the run's NOT RUN marker says the compute node's glibc is older than the 2.30 Envoy needs (internal/alpha, NotRunNote,
+# GlibcTooOldError; issue #521): the router row's. glibc_reason is the version it carries in parentheses, "glibc 2.28", as row_a_reason
+# reads it, and nothing else of the node.
+glibc_marker() { grep -q "the compute node's glibc is older than the 2.30 Envoy needs" "$REC_DIR/not-run.txt" 2>/dev/null; }
+glibc_reason() {
+  local r
+  r=$(row_a_reason "the compute node's glibc is older than the 2.30 Envoy needs")
+  if printf '%s\n' "$r" | grep -q -E -x 'glibc [0-9]+\.[0-9]+'; then
+    printf '%s' "$r"
+  else
+    printf 'the version could not be read from the marker'
+  fi
+}
 slot_marker() { grep -q "held the one-job slot between the row's two jobs" "$REC_DIR/not-run.txt" 2>/dev/null; }
 
 # row_a_reason <marker words>: the reason in parentheses after the words, as NotRunNote writes it: a warm start's is its
@@ -1150,6 +1173,8 @@ judge() {
       say "$n: NOT RUN (no stream across the drain start that is long enough to tell a cut from an end fits the deployment's max-model-len at the engine's measured rate: $(lead_reason); the run opened no stream, and its jobs were cancelled by tag; not a failure)"
     elif long_marker; then
       say "$n: NOT RUN (the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate: $(long_reason); the hour was not started, and the run's jobs were cancelled by tag; not a failure)"
+    elif glibc_marker; then
+      say "$n: NOT RUN (the compute node's glibc is older than the 2.30 Envoy needs ($(glibc_reason)); Envoy cannot run bare there; the run sent no request through the front, and the run's jobs were cancelled by tag; not a failure)"
     elif row_a_marker; then
       if warm_marker; then say "$n: NOT RUN (the agent's own log did not show the warm start: $(row_a_reason "the agent's own log did not show the warm start"); the run's other checks passed; not a failure)"; fi
       if slot_marker; then say "$n: NOT RUN (a job that is not the run's held the one-job slot between the row's two jobs: the owner's own work, left untouched; the run ended its deployment; the run's other checks passed; not a failure)"; fi
@@ -1357,7 +1382,7 @@ prepare_cluster() {
   case $1 in
     real-engine) prepare_real_engine "$1" ;;
     alpha-athena-now-stage) prepare_stage "$1" ;;
-    alpha-*|tunnel-hour-*) prepare_alpha "$1" ;;
+    alpha-*|tunnel-hour-*|beta-*) prepare_alpha "$1" ;;
     reach-host-dialed-*) prepare_host_dialed "$1" ;;
     *) build_test_binary "$1" "$OUT/$1.test" ;;
   esac
@@ -1396,7 +1421,7 @@ prepare_stage() {
 }
 
 # prepare_alpha <name>: the test binary, the three host binaries of the stack, and the agent and frpc builds of
-# the controller's agent-builds directory, all before the slot is taken. The test finds them through
+# the controller's agent-builds directory (and Envoy's, for the router row, hack/fetch-envoy.sh), all before the slot is taken. The test finds them through
 # HPCBURST_ALPHA_BUILD_DIR. Nothing here holds the slot.
 ALPHA_BUILD_DIR=""
 prepare_alpha() {
@@ -1408,7 +1433,8 @@ prepare_alpha() {
     with_build_lock go test -c -o "$OUT/$n.test" "./${PKG[$n]}" &&
     with_build_lock go build -o "$w/bin/" ./cmd/hpcburst ./cmd/hpcburst-controller ./cmd/hpcburst-front &&
     with_build_lock hack/build-agents.sh "$w/agent-builds" &&
-    hack/fetch-frp.sh --agent-builds "$w/agent-builds" ) >"$OUT/$n-build.log" 2>&1 ||
+    hack/fetch-frp.sh --agent-builds "$w/agent-builds" &&
+    { [ "$n" != beta-athena-now-router ] || hack/fetch-envoy.sh --agent-builds "$w/agent-builds"; } ) >"$OUT/$n-build.log" 2>&1 ||
     { say "$n: FAIL (a build step failed; see the build log in the output directory)"; return 1; }
   ALPHA_BUILD_DIR=$w
 }
@@ -1419,7 +1445,7 @@ execute_cluster() {
     real-engine) execute_real_engine "$n" ;;
     # The pre-staging row (issue #376): a conformance run with a start wait, its first clock, inside its timeout column.
     alpha-athena-now-stage) run_binary "$n" "$OUT/$n.test" "${TMIN[$n]}" env_conformance; judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
-    alpha-*|tunnel-hour-*)
+    alpha-*|tunnel-hour-*|beta-*)
       # The test owns the clocks of a queued run (HPCBURST_ALPHA_PENDING_MAX_SECONDS, then the row's run budget); this timeout
       # is the budget plus one wait in the queue for each of the row's jobs, so that no wait eats the run's time and the
       # bound fires first: a no-overlap successor waits on top of its predecessor (review of PR 284, B5; internal/alpha,
@@ -1487,7 +1513,7 @@ run_cluster() {
   RUN_ID=""; OWN_PREFIX=""
   case $n in
     alpha-athena-now-stage) ;; # a conformance run: its test writes each tag down before the submit
-    alpha-*|tunnel-hour-*)
+    alpha-*|tunnel-hour-*|beta-*)
       RUN_ID=$(new_run_id)
       [[ $RUN_ID =~ ^[0-9a-f]{10}$ ]] || { release_run_lock; say "$n: FAIL (no run ID could be drawn)"; return 1; }
       OWN_PREFIX="hb-alpha-$RUN_ID-" ;;

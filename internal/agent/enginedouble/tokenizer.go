@@ -63,6 +63,9 @@ func buildVocab() []string {
 type message struct {
 	Role    string          `json:"role"`
 	Content json.RawMessage `json:"content"`
+	// Name is the message's name member as written: absent, a string, or null. vLLM refuses a null one, as every message type of its
+	// union declares name as a string (S13's case enc/message-name-null, fields/vllm-v0.32.0.tsv).
+	Name json.RawMessage `json:"name"`
 }
 
 // text returns the message's text: a string content as it is, and the text

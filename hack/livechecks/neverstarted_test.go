@@ -51,6 +51,7 @@ var neverStartedBound = map[string]struct {
 	"reach-host-dialed-athena":   {notRunStartWait10, true},
 	"alpha-athena-now-serve":     {notRunNowStartWait10, true},
 	"alpha-athena-now-nooverlap": {notRunNowStartWait10, true},
+	"beta-athena-now-router":     {notRunNowStartWait10, true},
 	"alpha-athena-now-stage":     {notRunStartWait10, true},
 }
 
@@ -279,6 +280,7 @@ var cannotTellLine = map[string]string{
 	"reach-host-dialed-athena":   "FAIL (exit status 1)",
 	"alpha-athena-now-serve":     "FAIL (exit status 1)",
 	"alpha-athena-now-nooverlap": "FAIL (exit status 1)",
+	"beta-athena-now-router":     "FAIL (exit status 1)",
 	"alpha-athena-now-stage":     "FAIL (exit status 1)",
 }
 

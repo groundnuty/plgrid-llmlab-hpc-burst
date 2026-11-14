@@ -36,7 +36,8 @@ import (
 //
 // In both, the release, from the elector's release read to Start's return,
 // ends inside the supervisor's grace even after a whole shutdown grace, and
-// so inside down's 40 s (launcher.SupervisorGrace; TestControllerStopBudget).
+// so inside the supervisor's grace for the processes it stops after the front
+// (launcher.SupervisorGrace, 39 s; TestControllerStopBudget).
 // At 1 s it can pass the controller's own kill grace (launcher.
 // ControllerTermGrace, 34 s): its first attempt, three requests, is not in
 // the budget, and the supervisor's SIGKILL then ends the stop, as the kill

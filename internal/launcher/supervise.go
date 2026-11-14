@@ -391,17 +391,51 @@ func Supervise(ctx context.Context, o SuperviseOptions) error {
 	logf(o.Log, "supervisor pid %d runs %d process(es)", self.PID, len(specs))
 
 	env := childEnv(os.Environ())
-	var wg sync.WaitGroup
+	runInStopOrder(ctx, specs, func(ctx context.Context, sp supervised) {
+		(&runner{l: l, spec: sp, env: env, rep: rep, o: o}).run(ctx)
+	}, func(stage string) { logf(o.Log, "supervisor: stopping %s", stage) })
+	logf(o.Log, "supervisor stopped")
+	return nil
+}
+
+// runInStopOrder runs each spec's runner until ctx is done, then stops them in HBEP-11's order (on down
+// and upgrade, #553): the front first, waiting until its runner has returned, which is once its process
+// has exited (its shutdown grace, its cuts and its usage records, within FrontTermGrace's SIGKILL), then
+// every other process together: frps and the bulk frps, the relay keeper, the controller. So the front
+// cuts its requests in flight itself, as HBEP-5 says, before frps closes their tunnels. A set with no front
+// stops all at once. Until ctx is done each runner restarts its process as before. logStage, when set,
+// is told each stage as it starts.
+func runInStopOrder(ctx context.Context, specs []supervised, run func(context.Context, supervised), logStage func(string)) {
+	frontCtx, stopFront := context.WithCancel(context.WithoutCancel(ctx))
+	restCtx, stopRest := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopFront()
+	defer stopRest()
+	var front, rest sync.WaitGroup
+	hasFront := false
 	for _, sp := range specs {
+		wg, c := &rest, restCtx
+		if sp.Name == frontEntryName {
+			wg, c, hasFront = &front, frontCtx, true
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			(&runner{l: l, spec: sp, env: env, rep: rep, o: o}).run(ctx)
+			run(c, sp)
 		}()
 	}
-	wg.Wait()
-	logf(o.Log, "supervisor stopped")
-	return nil
+	<-ctx.Done()
+	if hasFront {
+		if logStage != nil {
+			logStage("the front first")
+		}
+		stopFront()
+		front.Wait()
+	}
+	if logStage != nil {
+		logStage("the tunnel processes and the controllers")
+	}
+	stopRest()
+	rest.Wait()
 }
 
 // runner keeps one supervised process running.

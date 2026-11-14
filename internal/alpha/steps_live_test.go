@@ -52,6 +52,10 @@ type world struct {
 	env   []string
 	// frontTuning is extra members of the front's configuration (stack.StartHost).
 	frontTuning string
+	// hostOpts are options of the stack's host, such as the router (stack.InstanceRouter); cpuArch is the node's CPU architecture as the
+	// profile names it, which names the Envoy build and its pin.
+	hostOpts []stack.HostOption
+	cpuArch  string
 	// objects are the PlatformProfile and the Provider.
 	objects []client.Object
 	// provider is the Provider's name, cluster the platform it is on, and qos
@@ -73,6 +77,16 @@ type world struct {
 	// engine double's two prefix-cache counters (obscheck.DoubleNotReported).
 	gpuModel    string
 	notReported map[string]bool
+}
+
+// hostOptionsFor are the options of the stack's host a row asks for beside the alpha stack: the router row's Instances run behind Envoy
+// (stack.InstanceRouter, `hpcburst up --instance-router envoy`), and no other row's do. The live world and the stand-in's both take them from
+// here, so that a row's router is one decision.
+func hostOptionsFor(name string) []stack.HostOption {
+	if name == BetaRouterName {
+		return []stack.HostOption{stack.InstanceRouter}
+	}
+	return nil
 }
 
 // livePorts are the live stack's ports on this host: the launcher's block
@@ -127,12 +141,13 @@ func liveWorld(cfg Config) (world, error) {
 		}
 	}
 	r := cfg.Row
-	gpuModel := ""
+	gpuModel, cpuArch := "", ""
 	for _, part := range pp.Spec.Partitions {
 		if part.Name == r.Partition {
-			gpuModel = part.GPUModel
+			gpuModel, cpuArch = part.GPUModel, part.CPUArch
 		}
 	}
+	hostOpts := hostOptionsFor(r.Name)
 	prov := &v1alpha1.Provider{Spec: v1alpha1.ProviderSpec{
 		PlatformProfileRef: v1alpha1.ObjectReference{Name: pp.Name}, Account: cfg.Account, AllowedPartitions: []string{r.Partition},
 		QOS: r.QOS, CredentialsRef: &v1alpha1.CredentialsReference{File: cfg.Credentials},
@@ -149,6 +164,7 @@ func liveWorld(cfg Config) (world, error) {
 		ports: livePorts(cfg.DialHomeListen), env: stack.CleanEnv(),
 		objects: []client.Object{&pp, prov}, provider: r.Cluster, cluster: r.Cluster, qos: r.QOS, md: &md, profile: pp.Spec,
 		controlDir: cfg.ControlDir, hostLock: cfg.HostLock, matchEngine: MatchesCommand, gpuModel: gpuModel, notReported: obscheck.VLLMNotReported,
+		hostOpts: hostOpts, cpuArch: cpuArch,
 	}, nil
 }
 
@@ -189,9 +205,10 @@ func (f failedSteps) NowServe(context.Context, Plan) (NowServeObs, error) {
 func (f failedSteps) NowNoOverlap(context.Context, Plan) (NowNoOverlapObs, error) {
 	return NowNoOverlapObs{}, f.err
 }
-func (f failedSteps) Ledger() Ledger              { return &BatchLedger{} }
-func (f failedSteps) Close(context.Context) error { return nil }
-func (f failedSteps) WatchResets() int            { return 0 }
+func (f failedSteps) BetaRouter(context.Context, Plan) (RouterObs, error) { return RouterObs{}, f.err }
+func (f failedSteps) Ledger() Ledger                                      { return &BatchLedger{} }
+func (f failedSteps) Close(context.Context) error                         { return nil }
+func (f failedSteps) WatchResets() int                                    { return 0 }
 
 // liveRun is one run of the live steps in a world.
 type liveRun struct {
@@ -259,6 +276,8 @@ type liveRun struct {
 	// agentLogFn, when a test sets it, is the command line that reads row A's agent log at the path, in place of
 	// agentLogLine: the stand-in's fake login shell has tail -c and no grep (internal/slurm/fakeslurm, builtins.go).
 	agentLogFn func(path string) string
+	// glibcScript, when set, is what the router row's probe runs on the node in place of GlibcScript: a stand-in whose node has another glibc.
+	glibcScript string
 	// allocsFn is the watch's Allocation versions, and boundedFn stack.BoundedDeadline, unless a test sets them.
 	allocsFn   func() []stack.AllocObservation
 	boundedFn  func(time.Duration) (time.Time, bool)
@@ -401,7 +420,7 @@ func (r *liveRun) start(p Plan) {
 	r.since, r.tags = time.Now(), p.Rec
 	p.Logf("%s: starting the stack (%s world)", p.Row.Name, r.w.name)
 	r.dw, r.limit = r.controllerWindow(), r.timeLimit()
-	r.h = stack.StartHost(t, r.w.bins, stack.ShortDir(t), r.w.dh, r.w.env, r.w.ports, r.w.frontTuning)
+	r.h = stack.StartHost(t, r.w.bins, stack.ShortDir(t), r.w.dh, r.w.env, r.w.ports, r.w.frontTuning, r.w.hostOpts...)
 	r.w.place(r.h)
 	r.c = stack.KubeClient(t, r.h.State)
 	if r.wrapAPI != nil {
