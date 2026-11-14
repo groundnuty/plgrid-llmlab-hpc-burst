@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	appsv1 "k8s.io/api/apps/v1"
 	"net/http"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/managedrecord"
 )
 
 // CatalogInterval is the least time between two catalog reads of one Provider
@@ -149,6 +151,11 @@ func New(opts Options) (*Controller, error) {
 	}
 	if opts.Provider == "" {
 		return nil, errors.New("managed controller: no Provider name")
+	}
+	// The catalog loop writes each entry's identity record, a ControllerRevision (HBEP-9): a scheme that
+	// does not know the kind would fail every catalog read, so it is refused here.
+	if gvk := appsv1.SchemeGroupVersion.WithKind("ControllerRevision"); !opts.Client.Scheme().Recognizes(gvk) {
+		return nil, fmt.Errorf("managed controller: the scheme does not know %s; a managed entry's identity record is one, so register k8s.io/api/apps/v1", gvk)
 	}
 	c := &Controller{
 		client: opts.Client, reader: opts.Reader, provider: opts.Provider, clock: opts.Clock,
@@ -404,6 +411,18 @@ func (c *Controller) write(ctx context.Context, prov *v1alpha1.Provider, out out
 		var err error
 		if merge, err = apply(prov, out); err != nil {
 			return err
+		}
+		if out.succeeded() {
+			// Every entry about to be published keeps its ID's identity record, written first; a record
+			// that holds another ID leaves its entry out (HBEP-9; HBEP-3, the collision rule). A record
+			// that can't be written fails the pass, and the catalog stays as last published.
+			kept, collided, err := managedrecord.EnsureCatalog(ctx, c.client, c.reader, v1alpha1.ControllerNamespace,
+				prov.Labels[v1alpha1.LabelPlatform], prov.Status.Catalog, v1alpha1.FieldManagerProvider)
+			if err != nil {
+				return fmt.Errorf("Provider %s: the catalog's identity records: %w", prov.Name, err)
+			}
+			prov.Status.Catalog, merge.Catalog = kept, kept
+			merge.Skipped = append(merge.Skipped, collided...)
 		}
 		if apiequality.Semantic.DeepEqual(old.Status, prov.Status) {
 			return nil
