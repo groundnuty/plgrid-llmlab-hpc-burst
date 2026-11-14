@@ -385,3 +385,23 @@ func TestControlOfCountsAndListsEachVariant(t *testing.T) {
 		t.Errorf("controlChecks = %q, want the unanswered named", f)
 	}
 }
+
+// A stream the engine ended with its own error event on both paths is listed alike and counted as ended alike, whose front answer has no
+// [DONE] (the front drops it after an engine's error event): the reading's completeness check discounts it. A stream that ended so through
+// the router only differs.
+func TestControlOfCountsAStreamTheEngineEndedAlike(t *testing.T) {
+	front := ok(strings.TrimSuffix(streamErr, "data: [DONE]\n\n"))
+	direct := ok(streamErr)
+	c := ControlOf([]ControlVariant{{Key: "chat/x#stream", Stream: true, Front: front, Direct: &direct}})
+	want := []AlikeVariant{{Key: "chat/x#stream", Status: 200, Error: "BadRequestError: the reasoning parser is not set", Ended: true}}
+	if c.EndedAlike != 1 || len(c.Differ) != 0 || !slices.Equal(c.Alike, want) {
+		t.Fatalf("ended alike %d, differ %v, alike %+v; want 1, none, %+v", c.EndedAlike, c.Differ, c.Alike, want)
+	}
+	if s := c.Alike[0].String(); s != "chat/x#stream 200 (BadRequestError: the reasoning parser is not set) [the stream ended by the engine's error event on both paths]" {
+		t.Errorf("listed as %q", s)
+	}
+	done := ok(stream1)
+	if d := ControlOf([]ControlVariant{{Key: "chat/x#stream", Stream: true, Front: front, Direct: &done}}); d.EndedAlike != 0 || len(d.Differ) != 1 {
+		t.Errorf("an error event through the router only: ended alike %d, differ %v; want 0 and the difference", d.EndedAlike, d.Differ)
+	}
+}

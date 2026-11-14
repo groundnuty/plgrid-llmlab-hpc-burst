@@ -214,7 +214,7 @@ func TestEnvoyChecksNameEachWayItFails(t *testing.T) {
 
 func TestBytesChecksRequireACompleteReadingOfEveryVariant(t *testing.T) {
 	good := dryRouterBytes()
-	if f := bytesChecks(good); len(f) != 0 {
+	if f := bytesChecks(good, 0); len(f) != 0 {
 		t.Fatalf("a good reading fails: %v", f)
 	}
 	// The engine's own refusals (dryRefusals of the valid variants and the 2 invalid ones) fail no check of the front's reading: whether they
@@ -240,11 +240,24 @@ func TestBytesChecksRequireACompleteReadingOfEveryVariant(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			b := good
 			c.mut(&b)
-			if f := bytesChecks(b); !slices.Contains(f, c.want) {
+			if f := bytesChecks(b, 0); !slices.Contains(f, c.want) {
 				t.Errorf("bytesChecks = %q, want it to hold %q", f, c.want)
 			}
 		})
 	}
+	// Answers the front's reading could not call finished, which the control found ended alike by the engine's own error event on both
+	// paths, are discounted: exactly those, never one more or fewer.
+	ended := good
+	ended.Complete -= 3
+	for _, c := range []struct {
+		endedAlike int
+		fails      bool
+	}{{3, false}, {2, true}, {4, true}, {0, true}} {
+		if f := bytesChecks(ended, c.endedAlike); slices.Contains(f, "a response of the response-level reading did not finish") != c.fails {
+			t.Errorf("3 unfinished, %d ended alike: bytesChecks = %q, want a failure %t", c.endedAlike, f, c.fails)
+		}
+	}
+
 }
 
 func TestHealthyChecksAreOneAtReadyAndAfterTheRestart(t *testing.T) {
@@ -277,7 +290,7 @@ func TestBetaRouterPostNamesTheBytesAsAResponseLevelReading(t *testing.T) {
 		"exact bytes are CI's",
 		"440 of 440 variants sent, 440 answered completely (400 with 200, 40 with 4xx, 0 with 5xx, 0 with another status), 0 failures made by the router or the path, 0 still awaited at the harness's own bound of 10m0s",
 		"- the engine's vLLM version: 0.32.0; S13's cases were enumerated against vLLM v0.32.0\n",
-		"- the direct-to-engine control (" + ControlHow + "): 440 variants sent straight to the engine in 14s (its bound 10m0s), 440 answered completely, 440 compared with the front's answer; 0 answered differently through the router\n",
+		"- the direct-to-engine control (" + ControlHow + "): 440 variants sent straight to the engine in 14s (its bound 10m0s), 440 answered completely, 440 compared with the front's answer; 0 answered differently through the router; 0 ended by the engine's own error event alike on both paths, which the front's reading cannot call finished (the front drops the engine's [DONE] after its error event)\n",
 		"- answered other than 200 alike on both paths (the engine's own refusals under this deployment), every one (40): ",
 		"the compute node's glibc: 2.34 (Envoy needs 2.30)",
 		"status.healthyWorkers 1 when ready and 1 after the worker restart",
@@ -649,7 +662,7 @@ func TestThroughTheDoubleTwoSendsOfEveryVariantAreAlike(t *testing.T) {
 		}
 	}
 	b.Expected = b.Variants
-	if f := bytesChecks(b); len(f) != 0 {
+	if f := bytesChecks(b, 0); len(f) != 0 {
 		t.Errorf("bytesChecks through the double = %q, want none", f)
 	}
 	ctl := ControlOf(cvs)
