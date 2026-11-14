@@ -142,7 +142,8 @@ var liveWaits = map[string]string{
 	"routerFirstReady: r.waitFor(stack.WaitDeadline)": "the lease",
 	"routerFirstReady: r.waitFor(routerJobWait)":      "the lease",
 	"routerFirstReady: r.waitFor(r.readyWait())":      "the lease",
-	"healthyAgain: time.Sleep(2 * time.Second)":       "pacing",
+	"healthyWithin: time.Sleep(2 * time.Second)":      "pacing",
+	"probeGlibc: time.Sleep(pause)":                   "pacing, between the glibc step's tries, before the Instance is ready: the lease",
 	"bytesReading: context.WithTimeout(BytesBound)":   "the lease",
 	// The keeper row (betakeeper_flow_test.go): the stream's first token, the kill's offset, the one catch-up and the new controller's report, all before the drain start.
 	"BetaKeeper: time.After(r.fc.RequestTimeout())":            "the lease",

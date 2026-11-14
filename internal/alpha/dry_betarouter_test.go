@@ -2,17 +2,56 @@ package alpha
 
 // The router row (issue #521; betarouter.go) over the fake cluster: one job, run on the manual clock; what the stack would show is
 // stood in for. Each fault departs from the healthy run in one way that must fail the row, or, for the glibc faults, end it NOT RUN
-// (TestARouterNodeWithAnOldGlibcIsNotRun).
+// (TestARouterNodeWithAnOldGlibcIsNotRun). The healthy reading is made by Add from S13's own cases (dryRouterBytes).
 
 import (
 	"context"
 	"strings"
 	"time"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/routerbytes/cases"
 )
 
-// dryRouterBytes is the healthy response-level reading: S13's 440 variants, each answered, the 2 invalid ones with 4xx.
-func dryRouterBytes() BytesObs {
-	return BytesObs{Variants: 440, Expected: 440, Complete: 440, Status200: 400, Status4xx: 40, InvalidSent: 2, InvalidRefused: 2, StreamOK: 190, NonStreamOK: 210, ChatOK: 250, CompletionsOK: 150}
+// dryRefusals is how many valid variants the healthy reading has refused with a 4xx: every one in one of S13's groups that a server may
+// still refuse, as the ruling (c) on #521 asks of the passing fixture.
+const dryRefusals = 38
+
+// dryRouterBytes is the healthy response-level reading, made by Add from S13's own cases: every variant answered whole; the 2 invalid ones
+// and the first dryRefusals valid ones in a refusal group with a 400; the rest with a 200. change, when set, alters one variant's answer
+// before Add counts it, for a fault.
+func dryRouterBytes(change ...func(a *Answer)) BytesObs {
+	okJSON, okStream, refusal := []byte(`{"choices":[{"text":"hi"}]}`), []byte("data: {\"x\":1}\n\ndata: [DONE]\n\n"), []byte(`{"error":{"message":"no"}}`)
+	var b BytesObs
+	refused := 0
+	for _, c := range cases.All() {
+		for _, v := range c.Variants() {
+			a := Answer{Chat: c.Endpoint == cases.Chat, Stream: v.Stream, Valid: v.Valid(), Group: RefusalGroupOf(c), Key: v.Key(), Status: 200, Body: okJSON}
+			if v.Stream {
+				a.Body = okStream
+			}
+			if !v.Valid() || (a.Group != "" && refused < dryRefusals) {
+				a.Status, a.Body = 400, refusal
+				if v.Valid() {
+					refused++
+				}
+			}
+			for _, ch := range change {
+				ch(&a)
+			}
+			b.Add(a)
+		}
+	}
+	b.Expected = b.Variants
+	return b
+}
+
+// answerTo sets the answer of the variant with the key, for a fault.
+func answerTo(key string, status int, body string) func(a *Answer) {
+	return func(a *Answer) {
+		if a.Key == key {
+			a.Status, a.Body = status, []byte(body)
+		}
+	}
 }
 
 // BetaRouter is the router row over the fake cluster.
@@ -94,6 +133,18 @@ func (d *drySteps) BetaRouter(_ context.Context, p Plan) (RouterObs, error) {
 		obs.Bytes.StreamOK = 0
 	case d.fault("bytes-no-chat-200"):
 		obs.Bytes.ChatOK = 0
+	case d.fault("bytes-refused-outside"):
+		// The ruling's example: a 400 on a plain temperature case, in no group S13 says a server may refuse.
+		obs.Bytes = dryRouterBytes(answerTo("chat/temperature#plain", 400, `{"error":{"message":"no"}}`))
+	case d.fault("bytes-5xx-in-group"):
+		// A 5xx is never allowed, even to a variant in a refusal group.
+		obs.Bytes = dryRouterBytes(answerTo("completions/suffix#plain", 500, `{"error":{"message":"engine"}}`))
+	case d.fault("bytes-past-bound"):
+		obs.Bytes = dryRouterBytes(func(a *Answer) {
+			if a.Key == "chat/temperature#stream" {
+				a.Status, a.Body, a.Cut, a.PastBound = 0, nil, true, true
+			}
+		})
 	case d.fault("unattributed"):
 		obs.Attributed = 459
 	case d.fault("no-responses"):
@@ -137,6 +188,9 @@ var betaRouterCases = []dryCase{
 	{"bytes-router-made", "a response of the response-level reading was a failure the router or the path made"},
 	{"bytes-no-stream-200", "no streamed variant answered 200"},
 	{"bytes-no-chat-200", "no chat variant answered 200"},
+	{"bytes-refused-outside", "a valid variant outside S13's groups that a server may refuse was answered other than 200: chat/temperature#plain 400 [outside S13's groups]"},
+	{"bytes-5xx-in-group", "a valid variant of S13's cases was answered with a 5xx: completions/suffix#plain 500 [suffix]"},
+	{"bytes-past-bound", "a response of the response-level reading did not finish"},
 	{"unattributed", "a response lacked its attribution headers"},
 	{"no-responses", "no response, so attribution is unchecked"},
 	{"no-restart", "0 restarts at the worker rung, want 1"},
