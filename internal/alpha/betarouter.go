@@ -324,13 +324,15 @@ func envoyChecks(e EnvoyObs) []string {
 	return f
 }
 
-// bytesChecks: the response-level reading is made, covers every variant, and the router made no failure of its own.
-func bytesChecks(b BytesObs) []string {
+// bytesChecks: the response-level reading is made, covers every variant, and the router made no failure of its own. endedAlike is how many
+// of the front's answers that did not finish the control found ended alike by the engine's own error event on both paths
+// (ControlObs.EndedAlike): the engine's ending, not the path's, so the completeness check discounts exactly those.
+func bytesChecks(b BytesObs, endedAlike int) []string {
 	var f []string
 	switch {
 	case b.Expected <= 0 || b.Variants != b.Expected:
 		return []string{"the response-level reading did not send every variant of S13's cases"}
-	case b.Complete != b.Variants:
+	case b.Complete+endedAlike != b.Variants:
 		f = append(f, "a response of the response-level reading did not finish")
 	}
 	if b.RouterMade > 0 {
@@ -396,7 +398,7 @@ func VerifyBetaRouter(row Row, o RouterObs, jobs []provider.Job) []string {
 	if o.Rate <= 0 {
 		f = append(f, "no request through the front was measured")
 	}
-	f = append(f, bytesChecks(o.Bytes)...)
+	f = append(f, bytesChecks(o.Bytes, o.Control.EndedAlike)...)
 	f = append(f, controlChecks(o.Bytes, o.Control)...)
 	if o.Responses <= 0 {
 		f = append(f, "the run recorded no response, so attribution is unchecked")
