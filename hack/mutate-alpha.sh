@@ -1091,6 +1091,18 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'internal/rehearsal/relayguard.go@@first, second := ask, check@@first, second := check, ask'
   'internal/rehearsal/relayguard.go@@os.O_WRONLY|os.O_APPEND, 0); ferr == nil {@@os.O_WRONLY|os.O_APPEND, 0); false && ferr == nil {'
   'internal/rehearsal/login.go@@return fmt.Sprintf("exec env %s=%s %s=%s %s", EnvRole, RoleRelay, EnvRelay, sock, exe)@@return fmt.Sprintf("%s=%s %s=%s %s", EnvRole, RoleRelay, EnvRelay, sock, exe)'
+  # #575: the agent's rehash line, read for HBEP-9's rehash time and posted by rows A and B, never a check.
+  'rehash.go@@msg != AgentRehashMsg || lv == nil || lv[1] != "INFO"@@msg != AgentRehashMsg || lv == nil'
+  'rehash.go@@			if v == nil {
+				return RehashObs{}
+			}@@			if v == nil {
+				continue
+			}'
+  'rehash.go@@	if r.Files == 0 {@@	if false {'
+  'rehash.go@@	case !r.Read:@@	case false:'
+  'nowserve.go@@	b.WriteString(rehashLine("the job", o.Warm))@@	_ = rehashLine'
+  'nownooverlap.go@@	b.WriteString(rehashLine("the successor'"'"'s job", o.WarmSuccessor))@@	_ = o.WarmSuccessor'
+  'internal/agent/converge.go@@"bytes", r.Bytes, "ms", r.Duration.Milliseconds())@@"bytes", r.Bytes, "millis", r.Duration.Milliseconds())'
 )
 # The mutants of a test of this script: a file with one mutant per line, in place of the list above.
 [ -z "${MUTATE_ALPHA_MUTANTS:-}" ] || mapfile -t mutants < "$MUTATE_ALPHA_MUTANTS"
