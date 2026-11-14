@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -123,7 +124,8 @@ func (r *rig) envoyOf(jobID int) (pid int, runDir string) {
 	return pid, runDir
 }
 
-// hostStats is Envoy's per-worker counters, rq_total and rq_active, from its admin socket.
+// hostStats is Envoy's per-worker counters, rq_total and rq_active, and its health flags (failed_active,
+// failed_outlier), from its admin socket.
 func hostStats(t *testing.T, admin string) map[string]map[string]int {
 	t.Helper()
 	tr := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -145,7 +147,8 @@ func hostStats(t *testing.T, admin string) map[string]map[string]int {
 					Value json.RawMessage `json:"value"`
 				} `json:"stats"`
 				Health struct {
-					FailedActive bool `json:"failed_active_health_check"`
+					FailedActive  bool `json:"failed_active_health_check"`
+					FailedOutlier bool `json:"failed_outlier_check"`
 				} `json:"health_status"`
 			} `json:"host_statuses"`
 		} `json:"cluster_statuses"`
@@ -164,6 +167,10 @@ func hostStats(t *testing.T, admin string) map[string]map[string]int {
 			// failed_active is 1 while Envoy's active check holds the worker failing.
 			if h.Health.FailedActive {
 				m["failed_active"] = 1
+			}
+			// failed_outlier is 1 while Envoy's outlier detection holds the worker ejected.
+			if h.Health.FailedOutlier {
+				m["failed_outlier"] = 1
 			}
 			out[h.Hostname] = m
 		}
@@ -196,15 +203,37 @@ func restartParts(in v1alpha1.Instance) []string {
 	return out
 }
 
-// sendSome sends n short requests through the front, each in a session of its own (x-session-id, on
-// which Envoy's ring hash places a request), and requires each to be served. With one Instance, every
-// session reaches it.
-func (r *rig) sendSome(key string, n int, what string) {
+// eachWorkerTakes shows that each of the Instance's two workers takes requests, by keys pinned to it.
+// sendSome's sessions can't show it: the front's ring sends a share of them to the primary's handover
+// replacement (a 20m lease brings one at once), and Envoy's ring splits the rest by the run's socket paths,
+// so with 20 sessions a worker getting none is a matter of chance (#570: "Envoy sent worker-1 158 requests,
+// then 158, of 20"). It first waits, within a bound, until Envoy holds neither worker out, logging what it
+// held. Then, for each worker, it finds a key the front sends to the Instance and Envoy to that worker
+// (keyOn, which already reads each probe's landing from Envoy), and sends one more request in it, which
+// must land on that worker.
+func (r *rig) eachWorkerTakes(in *v1alpha1.Instance, admin, what string) {
 	r.t.Helper()
-	for i := 0; i < n; i++ {
-		sessions++
-		if rp := r.fc.Send("/v1/chat/completions", stack.ChatBody(stack.Model, 4, 0, false, ""), key+"-s"+strconv.Itoa(sessions)); rp.Status != http.StatusOK {
-			r.t.Fatalf("%s: request %d: %d %.200q", what, i, rp.Status, rp.Body)
+	last := ""
+	stack.WaitFor(r.t, stack.WaitDeadline, what+": Envoy holding both workers in", func() bool {
+		st := hostStats(r.t, admin)
+		out := ""
+		for _, w := range []string{"worker-0", "worker-1"} {
+			if st[w]["failed_active"] == 1 || st[w]["failed_outlier"] == 1 {
+				out += fmt.Sprintf(" %s (active check failing %d, ejected %d)", w, st[w]["failed_active"], st[w]["failed_outlier"])
+			}
+		}
+		if out != "" && out != last {
+			r.t.Logf("%s: Envoy holds out%s", what, out)
+		}
+		last = out
+		return out == ""
+	})
+	for _, w := range []string{"worker-0", "worker-1"} {
+		k := r.keyOn(in, admin, w, strings.ReplaceAll(what, " ", "-")+"-"+w)
+		before := hostStats(r.t, admin)
+		r.sendOn(in, k, what)
+		if after := hostStats(r.t, admin); after[w]["rq_success"] != before[w]["rq_success"]+1 {
+			r.t.Errorf("%s: a request in a key pinned to %s: its rq_success went %d -> %d, want one more", what, w, before[w]["rq_success"], after[w]["rq_success"])
 		}
 	}
 }
@@ -257,9 +286,6 @@ func (r *rig) keyOn(in *v1alpha1.Instance, admin, w, prefix string) string {
 	return ""
 }
 
-// sessions numbers sendSome's sessions, so none repeats within a run.
-var sessions int
-
 // TestRehearsalTwoWorkers is the whole stack with an Instance of two workers behind Envoy.
 //
 //livecheck:none CI's rehearsal-workers job runs it (hack/rehearsal.sh)
@@ -301,14 +327,7 @@ func TestRehearsalTwoWorkers(t *testing.T) {
 	}
 	envoyPID, runDir := r.envoyOf(jobID)
 	admin := filepath.Join(runDir, "envoy-admin.sock")
-	before := hostStats(t, admin)
-	r.sendSome(key, 20, "step (a)")
-	after := hostStats(t, admin)
-	for _, w := range []string{"worker-0", "worker-1"} {
-		if after[w]["rq_total"] <= before[w]["rq_total"] {
-			t.Errorf("step (a): Envoy sent %s %d requests, then %d, of 20: both workers should take traffic", w, before[w]["rq_total"], after[w]["rq_total"])
-		}
-	}
+	r.eachWorkerTakes(in, admin, "step (a)")
 
 	// (b) A count whose GPUs exceed the node's is refused, not capped: three workers on two GPUs.
 	three := stack.ServedDeploymentAs(stack.Served{Name: "md-three", Model: "model-three", Provider: stack.ProviderName, MaxModelLen: "4096"}, rehearsalTiming)
@@ -346,9 +365,9 @@ func TestRehearsalTwoWorkers(t *testing.T) {
 	// (keyOn), so each probe is one the dead or restarted victim would get without the fix: the front's
 	// ring would otherwise send a share to the handover replacement, and Envoy a share to the sibling
 	// (#510's review).
-	before = hostStats(t, admin)
+	before := hostStats(t, admin)
 	r.sendOn(in, key, "step (c)")
-	after = hostStats(t, admin)
+	after := hostStats(t, admin)
 	var streamOn string
 	for w := range after {
 		if after[w]["rq_success"] > before[w]["rq_success"] {
@@ -423,24 +442,18 @@ func TestRehearsalTwoWorkers(t *testing.T) {
 	if o, left := r.watch.First(in.UID, killAt, func(o stack.Observation) bool { return o.Phase != v1alpha1.InstanceReady }); left {
 		t.Errorf("step (c): the watch saw the Instance %s at %s after %s's kill, want ready throughout", o.Phase, o.At.Format(time.RFC3339Nano), victim)
 	}
-	before = hostStats(t, admin)
-	r.sendSome(key, 20, "step (c), once back")
-	if after := hostStats(t, admin); after[victim]["rq_total"] <= before[victim]["rq_total"] {
-		t.Errorf("step (c): %s took no request once back", victim)
-	}
+	r.eachWorkerTakes(in, admin, "step (c), once back")
 
 	// (d) A controller restarted while every worker is verified keeps every worker taking requests,
 	// from status.workers: the step's own checks hold the Instance ready, registered and unrestarted,
 	// and both workers take requests after it.
 	r.stepControllerRestart(in, key)
-	before = hostStats(t, admin)
-	r.sendSome(key, 20, "step (d)")
-	after = hostStats(t, admin)
-	for _, w := range []string{"worker-0", "worker-1"} {
-		if after[w]["rq_total"] <= before[w]["rq_total"] {
-			t.Errorf("step (d): after the controller's restart Envoy sent %s %d requests, then %d, of 20", w, before[w]["rq_total"], after[w]["rq_total"])
-		}
+	// A worker the restart had un-verified would be held out by Envoy's active check: that fails here at
+	// once, while an ejection left from step (c)'s kill is waited out.
+	if st := hostStats(t, admin); st["worker-0"]["failed_active"] == 1 || st["worker-1"]["failed_active"] == 1 {
+		t.Errorf("step (d): after the controller's restart Envoy's active check holds a worker failing (worker-0 %d, worker-1 %d): the restart un-verified it", st["worker-0"]["failed_active"], st["worker-1"]["failed_active"])
 	}
+	r.eachWorkerTakes(in, admin, "step (d)")
 	if now, _ := r.instance(in.Name); now.Status.HealthyWorkers == nil || *now.Status.HealthyWorkers != 2 {
 		t.Errorf("step (d): healthyWorkers %v after the controller's restart, want 2", now.Status.HealthyWorkers)
 	}
