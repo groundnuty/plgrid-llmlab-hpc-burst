@@ -250,15 +250,15 @@ func TestBytesChecksRequireACompleteReadingOfEveryVariant(t *testing.T) {
 		{"no invalid variant sent", func(b *BytesObs) { b.InvalidSent, b.InvalidRefused = 0, 0 }, "a variant S13 says vLLM refuses was not refused with a 4xx"},
 		{"a valid variant outside the groups refused", func(b *BytesObs) {
 			b.NonOK = append(b.NonOK, NonOKVariant{"chat/temperature#plain", 400, ""})
-		}, "a valid variant outside S13's groups that a server may refuse was answered other than 200: chat/temperature#plain 400 [outside S13's groups]"},
+		}, "a valid variant of S13's cases was answered other than 200, which is allowed only as a 4xx in one of S13's groups that a server may refuse: chat/temperature#plain 400 [outside S13's groups]"},
 		{"a valid variant in a group answered 500", func(b *BytesObs) {
 			b.NonOK = append(b.NonOK, NonOKVariant{"completions/suffix#plain", 500, "suffix"})
 		}, "a valid variant of S13's cases was answered with a 5xx: completions/suffix#plain 500 [suffix]"},
 		{"a valid variant in a group answered with a 3xx", func(b *BytesObs) {
 			b.NonOK = append(b.NonOK, NonOKVariant{"chat/chat_template#plain", 302, "a request chat_template"})
-		}, "a valid variant outside S13's groups that a server may refuse was answered other than 200: chat/chat_template#plain 302 [a request chat_template]"},
+		}, "a valid variant of S13's cases was answered other than 200, which is allowed only as a 4xx in one of S13's groups that a server may refuse: chat/chat_template#plain 302 [a request chat_template]"},
 		{"eleven outside: ten named and the rest counted", outside(11),
-			"a valid variant outside S13's groups that a server may refuse was answered other than 200: chat/c00#plain 400 [outside S13's groups], chat/c01#plain 400 [outside S13's groups], chat/c02#plain 400 [outside S13's groups], chat/c03#plain 400 [outside S13's groups], chat/c04#plain 400 [outside S13's groups], chat/c05#plain 400 [outside S13's groups], chat/c06#plain 400 [outside S13's groups], chat/c07#plain 400 [outside S13's groups], chat/c08#plain 400 [outside S13's groups], chat/c09#plain 400 [outside S13's groups], and 1 more, named in the post"},
+			"a valid variant of S13's cases was answered other than 200, which is allowed only as a 4xx in one of S13's groups that a server may refuse: chat/c00#plain 400 [outside S13's groups], chat/c01#plain 400 [outside S13's groups], chat/c02#plain 400 [outside S13's groups], chat/c03#plain 400 [outside S13's groups], chat/c04#plain 400 [outside S13's groups], chat/c05#plain 400 [outside S13's groups], chat/c06#plain 400 [outside S13's groups], chat/c07#plain 400 [outside S13's groups], chat/c08#plain 400 [outside S13's groups], chat/c09#plain 400 [outside S13's groups], and 1 more, named in the post"},
 		{"a status that is none of 200, 4xx and 5xx, uncounted", func(b *BytesObs) { b.Complete++ }, "the response-level reading's status counts do not add up"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
