@@ -161,7 +161,7 @@ func (l *lockedBuffer) String() string {
 // logs instead of the test's output.
 func loggedOwner(t *testing.T, o hostdial.OwnerOptions, logs *lockedBuffer) *hostdial.Owner {
 	t.Helper()
-	o.Ports = map[agentapi.RelayChannel]int{control: 30000, serving: 30001}
+	o.Ports = map[agentapi.RelayChannel]int{control: 28000, serving: 28001}
 	o.Epoch = epoch(1)
 	if o.Slots == nil {
 		o.Slots = hostdial.NewSlots(0)

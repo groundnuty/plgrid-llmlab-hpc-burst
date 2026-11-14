@@ -60,18 +60,18 @@ func TestParseKeeper(t *testing.T) {
 		args    []string
 		wantErr string
 	}{
-		{"both flags", []string{"--state-dir", "/state", "--port-base", "30000"}, ""},
-		{"no state directory", []string{"--port-base", "30000"}, "--state-dir is required"},
-		{"an empty state directory", []string{"--state-dir", "", "--port-base", "30000"}, "--state-dir is required"},
+		{"both flags", []string{"--state-dir", "/state", "--port-base", "28000"}, ""},
+		{"no state directory", []string{"--port-base", "28000"}, "--state-dir is required"},
+		{"an empty state directory", []string{"--state-dir", "", "--port-base", "28000"}, "--state-dir is required"},
 		{"no port base", []string{"--state-dir", "/state"}, "--port-base is required"},
 		{"no flags", nil, "is required"},
 		{"a port base that is not a number", []string{"--state-dir", "/state", "--port-base", "x"}, "invalid value"},
-		{"a port base that is not an integer", []string{"--state-dir", "/state", "--port-base", "30000.5"}, "invalid value"},
+		{"a port base that is not an integer", []string{"--state-dir", "/state", "--port-base", "28000.5"}, "invalid value"},
 		{"an empty port base", []string{"--state-dir", "/state", "--port-base", ""}, "invalid value"},
-		{"an unknown flag", []string{"--state-dir", "/state", "--port-base", "30000", "--frobnicate"}, "not defined"},
+		{"an unknown flag", []string{"--state-dir", "/state", "--port-base", "28000", "--frobnicate"}, "not defined"},
 		// A controller flag is not the keeper's.
-		{"a controller flag", []string{"--state-dir", "/state", "--port-base", "30000", "--health-addr", "127.0.0.1:30012"}, "not defined"},
-		{"a stray argument", []string{"--state-dir", "/state", "--port-base", "30000", "extra"}, "unexpected arguments"},
+		{"a controller flag", []string{"--state-dir", "/state", "--port-base", "28000", "--health-addr", "127.0.0.1:28012"}, "not defined"},
+		{"a stray argument", []string{"--state-dir", "/state", "--port-base", "28000", "extra"}, "unexpected arguments"},
 		// The controller's range: the block ends at its metrics, base+12.
 		{"a port base below 1024", []string{"--state-dir", "/state", "--port-base", "80"}, "out of range"},
 		{"a port base too high for the block", []string{"--state-dir", "/state", "--port-base", "65524"}, "out of range"},
@@ -96,16 +96,16 @@ func TestParseKeeper(t *testing.T) {
 	}
 
 	t.Run("the flags fill the host", func(t *testing.T) {
-		f, err := parseKeeper([]string{"--port-base", "30000", "--state-dir", "/state"}, io.Discard)
+		f, err := parseKeeper([]string{"--port-base", "28000", "--state-dir", "/state"}, io.Discard)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if f.host.StateDir != "/state" || f.host.PortBase != 30000 {
-			t.Fatalf("host %+v, want state /state and port base 30000", f.host)
+		if f.host.StateDir != "/state" || f.host.PortBase != 28000 {
+			t.Fatalf("host %+v, want state /state and port base 28000", f.host)
 		}
 		// The ports the keeper's relays dial are the controller's relaySettings:
 		// the same function, the same host.
-		want := map[agentapi.RelayChannel]int{agentapi.RelayControl: 30003, agentapi.RelayServing: 30007}
+		want := map[agentapi.RelayChannel]int{agentapi.RelayControl: 28003, agentapi.RelayServing: 28007}
 		got := f.host.RelayChannelPorts()
 		if len(got) != len(want) || got[agentapi.RelayControl] != want[agentapi.RelayControl] || got[agentapi.RelayServing] != want[agentapi.RelayServing] {
 			t.Fatalf("relay channel ports %v, want %v (base+3 and base+7, HBEP-6)", got, want)
@@ -127,13 +127,13 @@ func TestRelaykeeperExitCodes(t *testing.T) {
 		wantCode int
 		wantLine string
 	}{
-		{"no state directory", []string{"--port-base", "30000"}, 2, "--state-dir is required"},
+		{"no state directory", []string{"--port-base", "28000"}, 2, "--state-dir is required"},
 		{"no port base", []string{"--state-dir", "/state"}, 2, "--port-base is required"},
 		{"a port base that is not an integer", []string{"--state-dir", "/state", "--port-base", "x"}, 2, "invalid value"},
-		{"an unknown flag", []string{"--state-dir", "/state", "--port-base", "30000", "--frobnicate"}, 2, "not defined"},
+		{"an unknown flag", []string{"--state-dir", "/state", "--port-base", "28000", "--frobnicate"}, 2, "not defined"},
 		// The state directory's parent is a file, so the keeper cannot make its
 		// state file's directory: a failure of the run, before it serves.
-		{"a state directory that cannot be used", []string{"--state-dir", filepath.Join(notADir, "state"), "--port-base", "30000"}, 1, "not a directory"},
+		{"a state directory that cannot be used", []string{"--state-dir", filepath.Join(notADir, "state"), "--port-base", "28000"}, 1, "not a directory"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -204,9 +204,9 @@ func startKeeperProc(t *testing.T, stateDir string) *keeperProc {
 		t.Fatal(err)
 	}
 	p := &keeperProc{pidfd: -1, stderr: &bytes.Buffer{}, done: make(chan struct{})}
-	// Port base 30000 is #343's block (30000-30039); the keeper process binds
+	// Port base 28000 is #343's block (28000-28039); the keeper process binds
 	// no port of it, since no relay runs.
-	p.cmd = exec.Command(exe, "relaykeeper", "--state-dir", stateDir, "--port-base", "30000")
+	p.cmd = exec.Command(exe, "relaykeeper", "--state-dir", stateDir, "--port-base", "28000")
 	p.cmd.Env = append(os.Environ(), keeperChildEnv+"=1")
 	p.cmd.Stderr = p.stderr
 	p.cmd.SysProcAttr = &syscall.SysProcAttr{PidFD: &p.pidfd}

@@ -592,10 +592,16 @@ func TestOnlyTheRouterRowsStackRunsInstancesBehindEnvoy(t *testing.T) {
 	}
 	routers := 0
 	for _, r := range slices.Concat(Rows(), AccountingRows(), ReachRows(), HostDialedRows(), StageRows()) {
-		if IsRouterRow(r.Name) {
+		switch {
+		case IsRouterRow(r.Name):
 			routers++
-		} else if len(hostOptionsFor(r.Name)) != 0 {
-			t.Errorf("%s has host options: only the router rows run Instances behind a router", r.Name)
+		case r.Name == BetaKeeperName, r.Name == BetaBulkName:
+			// The keeper row's relay keeper and the bulk row's bulk path: their own options, not a router.
+			if opts := hostOptionsFor(r.Name); len(opts) != 1 || reflect.ValueOf(opts[0]).Pointer() == reflect.ValueOf(stack.InstanceRouter).Pointer() {
+				t.Errorf("%s's host options are %d, want its one option and no router", r.Name, len(opts))
+			}
+		case len(hostOptionsFor(r.Name)) != 0:
+			t.Errorf("%s has host options: only the router rows run Instances behind a router, the keeper row the relay keeper and the bulk row the bulk path", r.Name)
 		}
 	}
 	if routers != 2 {

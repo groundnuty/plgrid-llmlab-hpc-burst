@@ -162,6 +162,14 @@ var betaRouterFaults = []string{"not-ready", "no-router-launch", "several-worker
 	"bytes-no-stream-200", "bytes-no-chat-200", "bytes-past-bound", "control-router-alters", "control-prompt-differs", "control-stream-ending", "control-incomplete", "control-unavailable", "unattributed", "no-responses", "no-restart", "two-restarts", "ladder-climb", "untagged", "wrong-partition", "default-lease",
 	"short-lease", "duplicate-tag", "extra-allocation"}
 
+// betaKeeperFaults are the keeper row's failing faults (issue #521; internal/alpha, dry_betakeeper_test.go's betaKeeperCases). Its NOT RUN, a stream the
+// context cannot hold for the restart's window, is TestTheKeeperRowsNotRunThroughTheScript's; a window at the floor is no failure.
+var betaKeeperFaults = []string{"not-ready", "relays-unread-before", "relays-unread-after", "keeper-e-low", "controller-relays", "controller-relays-after", "relay-replaced-control",
+	"relay-replaced-serving", "relay-seq-changed", "keeper-e-changed", "not-killed", "outcome-unseen", "outcome-late", "outcome-late-ended", "same-controller", "same-holder", "lease-not-risen",
+	"lease-jumped", "fence-not-followed", "agent-not-reported", "agent-registration-changed", "unreachable", "instance-restarted", "cut", "incomplete", "short-stream",
+	"past-deadline", "opened-after-kill", "ended-before-outcome-and-cut", "front-cut", "front-cuts-unread", "unattributed", "no-responses", "untagged", "wrong-partition",
+	"default-lease", "short-lease", "duplicate-tag", "extra-allocation"}
+
 // nowNoOverlapFaults are row B's failing faults (issue #376; internal/alpha, run_test.go's nowNoOverlapCases); its NOT RUNs
 // are TestRowBsNotRunsThroughTheScript's.
 var nowNoOverlapFaults = []string{"cut", "no-stream", "noslot", "nogap", "early-submit", "created-early", "order-unseen", "marked", "not-ended",
@@ -189,6 +197,7 @@ var dryRows = []dryRow{
 	{"alpha-athena-now-serve", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", nowServeFaults, nil, nil},
 	{"alpha-athena-now-nooverlap", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", nowNoOverlapFaults, nil, nil},
 	{"beta-athena-now-router", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaRouterFaults, []string{"glibc-at-the-minimum", "control-both-refuse"}, nil},
+	{"beta-athena-now-keeper", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaKeeperFaults, []string{"window-at-the-floor"}, nil},
 	// The router row on Helios's GH200 (issue #566): the same faults, on the Helios shape and slot.
 	{"beta-helios-now-router", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaRouterFaults, []string{"glibc-at-the-minimum", "control-both-refuse"}, nil},
 }

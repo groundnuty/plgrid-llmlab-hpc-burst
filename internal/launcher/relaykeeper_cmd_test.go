@@ -27,7 +27,7 @@ import (
 // BesideTheController's, whose controller would exit 2 on it if it were refused.
 func TestTheFakeControllerTakesTheKeepersSocketAsTheRealOneDoes(t *testing.T) {
 	bin := fakeControllerBin(t)
-	base := []string{"--state-dir", t.TempDir(), "--port-base", "30034", "--health-addr", "127.0.0.1:30040"}
+	base := []string{"--state-dir", t.TempDir(), "--port-base", "28034", "--health-addr", "127.0.0.1:28040"}
 	for name, extra := range map[string][]string{
 		"without a front mode":      {"--relay-keeper-socket", "/state/example/relaykeeper.sock"},
 		"in direct mode":            {"--front-mode", "direct", "--front-addr", "front.example.test:8443", "--relay-keeper-socket", "/state/example/relaykeeper.sock"},
@@ -77,7 +77,7 @@ func TestUpRefusesTheKeeperOutsideHostDialed(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			c.o.StateDir, c.o.PortBase = l.dir, 30020
+			c.o.StateDir, c.o.PortBase = l.dir, 28020
 			_, err = Up(context.Background(), c.o)
 			if err == nil || !strings.Contains(err.Error(), c.want) || (c.isErr != nil && !errors.Is(err, c.isErr)) {
 				t.Fatalf("up: %v; want refused, naming %q", err, c.want)

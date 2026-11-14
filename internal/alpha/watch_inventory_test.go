@@ -26,6 +26,8 @@ var watchReaders = map[string]stack.WatchClass{
 	"runTags":     {Why: "helper: each result makes the catch-up first; TunnelHour's follows endDeployment's, on the same stream"},
 
 	"NowServe": {Why: "its restart count reads the Instances' last versions after workerRestart's catch-up of them, which follows the only restart the row makes"},
+	// The keeper row (issue #521; betakeeper_flow_test.go).
+	"BetaKeeper": {Syncs: []string{"KindInstances"}},
 	// The router row (issue #521; betarouter_flow_test.go).
 	"BetaRouter": {Why: "its restart count reads the Instances' last versions after workerRestart's catch-up of them, which follows the only restart the row makes"},
 

@@ -68,6 +68,8 @@ var dryCases = map[string][]dryCase{
 	"tunnel-hour-athena":         tunnelCases,
 	"alpha-athena-now-serve":     nowServeCases,
 	"beta-athena-now-router":     betaRouterCases,
+	"beta-athena-now-keeper":     betaKeeperCases,
+	"beta-athena-now-bulk":       betaBulkCases,
 	"beta-helios-now-router":     betaRouterCases,
 	"alpha-athena-now-nooverlap": nowNoOverlapCases,
 }
@@ -174,6 +176,10 @@ func familyOf(row string) string {
 		return "nowserve"
 	case IsRouterRow(row):
 		return "betarouter"
+	case row == BetaKeeperName:
+		return "betakeeper"
+	case row == BetaBulkName:
+		return "betabulk"
 	case strings.HasPrefix(row, "alpha-athena-now-nooverlap"):
 		return "nownooverlap"
 	case strings.HasPrefix(row, "alpha-athena"):
@@ -514,8 +520,8 @@ func neverStartedErrors() map[string]error {
 func stackRows(t *testing.T) []Row {
 	t.Helper()
 	out := Rows()
-	if len(out) != 8 {
-		t.Fatalf("the package runs %d stack rows, the table below was written for 8 (rows A and B on plgrid-now added, #376, the router row, #521, and the Helios router row, #566): add the new row's cases", len(out))
+	if len(out) != 10 {
+		t.Fatalf("the package runs %d stack rows, the table below was written for 10 (rows A and B on plgrid-now added, #376, the router, keeper and bulk rows, #521, and the Helios router row, #566): add the new row's cases", len(out))
 	}
 	return out
 }
@@ -524,8 +530,8 @@ func stackRows(t *testing.T) []Row {
 func allRows(t *testing.T) []Row {
 	t.Helper()
 	out := append(append(Rows(), AccountingRows()...), ReachRows()...)
-	if len(out) != 13 {
-		t.Fatalf("there are %d rows, the table below was written for 13 (rows A and B on plgrid-now added, #376, the accounting row on plgrid-now, #145, the router row, #521, and the Helios router row, #566): add the new row's cases", len(out))
+	if len(out) != 15 {
+		t.Fatalf("there are %d rows, the table below was written for 15 (rows A and B on plgrid-now added, #376, the accounting row on plgrid-now, #145, the router, keeper and bulk rows, #521, and the Helios router row, #566): add the new row's cases", len(out))
 	}
 	return out
 }

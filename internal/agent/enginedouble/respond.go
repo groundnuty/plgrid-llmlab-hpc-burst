@@ -122,8 +122,40 @@ func (h *handler) single(w http.ResponseWriter, r *http.Request, req chatRequest
 	return n, true
 }
 
-// ReplyBytesMarker is the last message's content of a request whose reply reply-bytes pads.
+// ReplyBytesMarker is the last message's content of a request whose non-streamed reply reply-bytes pads.
 const ReplyBytesMarker = "hb-engine-double: reply-bytes"
+
+// StreamReplyBytesMarker is the last message's content of a streamed request whose reply reply-bytes pads: ReplyBytesMarker's own streamed
+// reply stays the usual one, which the earlier tests hold.
+const StreamReplyBytesMarker = "hb-engine-double: stream-reply-bytes"
+
+// streamPadChunk is the content of one padding chunk of a streamed reply: 16 KiB of spaces, so that every SSE line stays well under the 64 KiB a
+// bufio.Scanner takes by default and the front's 64 KiB line buffer, which a reader of the stream need not be told to enlarge.
+const streamPadChunk = 16 << 10
+
+// padStream sends the padding of a streamed reply: ReplyBytes bytes of space content in chunks of streamPadChunk, the last the remainder.
+func (h *handler) padStream(send func(chunk) bool, newChunk func(...chunkChoice) chunk) bool {
+	pad := strings.Repeat(" ", streamPadChunk)
+	for left := h.cfg.ReplyBytes; left > 0; left -= streamPadChunk {
+		text := pad
+		if left < streamPadChunk {
+			text = pad[:left]
+		}
+		if !send(newChunk(chunkChoice{Delta: delta{Content: &text}})) {
+			return false
+		}
+	}
+	return true
+}
+
+// asksForStreamPadding says whether the request's last message is StreamReplyBytesMarker, as a JSON string.
+func asksForStreamPadding(msgs []message) bool {
+	if len(msgs) == 0 {
+		return false
+	}
+	var s string
+	return json.Unmarshal(msgs[len(msgs)-1].Content, &s) == nil && s == StreamReplyBytesMarker
+}
 
 // asksForPadding says whether the request's last message is ReplyBytesMarker, as a JSON string.
 func asksForPadding(msgs []message) bool {
@@ -232,6 +264,11 @@ func (h *handler) stream(w http.ResponseWriter, r *http.Request, req chatRequest
 		last := g == total-1
 		if last {
 			c.FinishReason = &finish
+			// reply-bytes on a stream marked StreamReplyBytesMarker: the answer is followed by content chunks of spaces, to ReplyBytes in all,
+			// before the finish chunk (the bulk row's control: the same bytes as the non-streamed reply, through the token transport).
+			if h.cfg.ReplyBytes > 0 && asksForStreamPadding(req.Messages) && !h.padStream(send, newChunk) {
+				return false
+			}
 		}
 		out := newChunk(c)
 		if last {
