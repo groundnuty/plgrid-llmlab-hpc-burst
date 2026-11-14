@@ -1165,8 +1165,10 @@ func standInShim(t *testing.T, b stack.Binaries, arch string) *testShim {
 
 // bulkStandIn is one stand-in run of the bulk row through Run, with tweak applied to the world before it starts.
 type bulkStandIn struct {
-	row      Row
-	w        world
+	row Row
+	w   world
+	// staged is the shipped agent's directory the run staged under the stand-in's staging root, a real path: "" when it staged none.
+	staged   string
 	failures []string
 	err      error
 	post     []byte
@@ -1202,7 +1204,7 @@ func runBulkStandIn(t *testing.T, tweak func(w *world)) bulkStandIn {
 	}
 	post, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
 	t.Logf("%s's text to post:\n%s", row.Name, post)
-	return bulkStandIn{row: row, w: w, failures: failures, err: err, post: post}
+	return bulkStandIn{row: row, w: w, staged: lr.testAgentDir, failures: failures, err: err, post: post}
 }
 
 // TestStandInBetaBulk is the bulk row's live steps over the stand-in, through Run: the real stack in host-dialed mode with the bulk path, the engine
@@ -1221,6 +1223,16 @@ func TestStandInBetaBulk(t *testing.T) {
 	}
 	if carried := s.w.link.Up.Load() + s.w.link.Down.Load(); carried < 2*BulkReplyBytes {
 		t.Errorf("the shaped link carried %d bytes, under the two replies' %d: a reply did not take the link", carried, 2*BulkReplyBytes)
+	}
+	// Through the test shim (issue #521, option (A)): the shipped agent was staged, and is gone after the run; the operator's builds are as they
+	// were (Close's checks, which fail the run otherwise); the post names both digests as ruled.
+	if s.staged == "" {
+		t.Error("the run staged no shipped agent for the test shim")
+	} else if _, err := os.Stat(s.staged); !os.IsNotExist(err) {
+		t.Errorf("the shipped agent's staging directory remains after the run (%v)", err)
+	}
+	if want := "the Provider staged the test shim, digest " + s.w.shim.shimDigest + ", in hb-agent's place, and the harness staged the shipped agent, digest " + s.w.shim.agentDigest; !strings.Contains(string(s.post), want) {
+		t.Errorf("the text to post does not say %q", want)
 	}
 	if !strings.Contains(string(s.post), "THE ENGINE WAS A DOUBLE, not vLLM") || !strings.Contains(string(s.post), s.w.double.Digest) {
 		t.Errorf("the text to post does not name the double and its digest:\n%s", s.post)

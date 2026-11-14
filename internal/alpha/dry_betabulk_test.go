@@ -153,6 +153,11 @@ var betaBulkCases = []dryCase{
 	{"double-unnamed", "the engine double was not named with the SHA-256 of its binary"},
 	{"double-digest-short", "the engine double was not named with the SHA-256 of its binary"},
 	{"double-digest-upper", "the engine double was not named with the SHA-256 of its binary"},
+	// Through the test shim (issue #521, option (A)): a reading of what ran that is not the build it names is a failure (the ruling (3)).
+	{"shim-not-staged", "the Allocation names another agent build than the test shim: the Provider did not stage the shim in hb-agent's place"},
+	{"shim-agent-not-shipped", "the job's agent process is not the shipped agent the harness staged (its executable, read on the node)"},
+	{"shim-engine-not-double", "the engine is not the test shim's double (its executable, read on the node)"},
+	{"shim-agent-unread", "the executable of the job's agent process was not read on the node"},
 	{"unattributed", "a response lacked its attribution headers"},
 	{"no-responses", "no response, so attribution is unchecked"},
 	{"untagged", "a job tag was not written down before its submission"},

@@ -178,24 +178,36 @@ func (r *liveRun) shimReadings(ctx context.Context, p Plan, in v1alpha1.Instance
 		o.Allocation = a.Spec.ForProvider.Batch.AgentDigest
 	}
 	jobID := r.ourJobFor(ctx, in, "the test shim on the node")
+	var err2 error
+	if o.AgentRunning, o.EngineRunning, o.ApptainerRunning, err2 = readShimNode(ctx, r.tr, jobID, in.Spec.Launch.Command, s.shimDigest); err2 != nil {
+		t.Fatalf("the test shim on the node: %v", err2)
+	}
+	p.Logf("%s: through the test shim: the Allocation names the shim %t; on the node the agent process ran the shipped agent %t, the engine the shim %t, its Apptainer the shim %t",
+		p.Row.Name, o.Allocation == s.shimDigest, o.AgentRunning == s.agentDigest, o.EngineRunning == s.shimDigest, o.ApptainerRunning == s.shimDigest)
+}
+
+// readShimNode reads, on the job's node, the executables of the job's agent process, its engine (the shim's double, MatchesShimEngine) and the
+// Apptainer above the engine: one srun step lists the job's processes, and one for each reads a process's /proc/<pid>/exe (ExeDigestScript). A
+// process that is not found, or whose executable cannot be read, leaves its digest empty; only a listing that cannot be taken is an error.
+func readShimNode(ctx context.Context, run commandRunner, jobID string, command []string, shimDigest string) (agent, engine, apptainer string, err error) {
 	line, err := SrunLine(jobID)
 	if err != nil {
-		t.Fatalf("the test shim on the node: %v", err)
+		return "", "", "", err
 	}
-	res, err := r.tr.Run(ctx, slurm.Command{Line: line, Stdin: []byte(ListScript(jobID)), Timeout: srunTimeout})
+	res, err := run.Run(ctx, slurm.Command{Line: line, Stdin: []byte(ListScript(jobID)), Timeout: srunTimeout})
 	if err != nil || res.ExitCode != 0 {
-		t.Fatalf("the test shim on the node: the srun step that lists the job's processes failed (exit %d, transport error %v)", res.ExitCode, err != nil)
+		return "", "", "", fmt.Errorf("the srun step that lists the job's processes failed (exit %d, transport error %v)", res.ExitCode, err != nil)
 	}
 	procs, err := ParseListing(res.Stdout)
 	if err != nil {
-		t.Fatalf("the test shim on the node: %v", err)
+		return "", "", "", err
 	}
 	read := func(np NodeProc) string {
 		script, err := ExeDigestScript(np)
 		if err != nil {
 			return ""
 		}
-		res, err := r.tr.Run(ctx, slurm.Command{Line: line, Stdin: []byte(script), Timeout: srunTimeout})
+		res, err := run.Run(ctx, slurm.Command{Line: line, Stdin: []byte(script), Timeout: srunTimeout})
 		if err != nil || res.ExitCode != 0 {
 			return ""
 		}
@@ -203,14 +215,13 @@ func (r *liveRun) shimReadings(ctx context.Context, p Plan, in v1alpha1.Instance
 		return d
 	}
 	if ag, ok := PickAgent(procs); ok {
-		o.AgentRunning = read(ag)
+		agent = read(ag)
 	}
-	if eng, err := PickEngine(procs, in.Spec.Launch.Command, MatchesShimEngine(s.shimDigest)); err == nil {
-		o.EngineRunning = read(eng)
+	if eng, perr := PickEngine(procs, command, MatchesShimEngine(shimDigest)); perr == nil {
+		engine = read(eng)
 		if app, ok := ApptainerAbove(procs, eng); ok {
-			o.ApptainerRunning = read(app)
+			apptainer = read(app)
 		}
 	}
-	p.Logf("%s: through the test shim: the Allocation names the shim %t; on the node the agent process ran the shipped agent %t, the engine the shim %t, its Apptainer the shim %t",
-		p.Row.Name, o.Allocation == s.shimDigest, o.AgentRunning == s.agentDigest, o.EngineRunning == s.shimDigest, o.ApptainerRunning == s.shimDigest)
+	return agent, engine, apptainer, nil
 }

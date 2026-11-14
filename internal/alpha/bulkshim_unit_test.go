@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -82,7 +83,7 @@ func TestTheOperatorsAgentBuildsMustHashAsBefore(t *testing.T) {
 func stagingSession(t *testing.T) (*fakeslurm.Platform, *fakeslurm.Session, string, string) {
 	t.Helper()
 	plat := fakeslurm.New(slurm.RealClock, fakeslurm.Config{Partitions: []fakeslurm.Partition{{Name: standInPartition}}})
-	sess := plat.Login(fakeslurm.Login{User: "example-user", Env: map[string]string{"HOME": "/home/example-user", "SCRATCH": "/scratch/example-user"}})
+	sess := plat.Login(fakeslurm.Login{User: "example-user", Env: map[string]string{"HOME": "/users/example-user", "SCRATCH": "/scratch/example-user"}})
 	staging := "/scratch/example-user"
 	mine, sibling := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
 	for _, d := range []string{mine, sibling} {
@@ -140,5 +141,54 @@ func TestTheLeftoverCheckNamesAShippedAgentThatRemains(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), staging) {
 		t.Errorf("the error names the staging root, a cluster path: %v", err)
+	}
+}
+
+// cannedNode answers the srun steps of readShimNode from a listing of its own and a digest for each PID, as the node would.
+type cannedNode struct {
+	listing string
+	digests map[int]string
+}
+
+func (c cannedNode) Run(_ context.Context, cmd slurm.Command) (slurm.Result, error) {
+	in := string(cmd.Stdin)
+	if strings.Contains(in, "echo \"listed\"") || strings.Contains(in, "echo listed") {
+		return slurm.Result{Stdout: []byte(c.listing)}, nil
+	}
+	for pid, d := range c.digests {
+		if strings.Contains(in, "pid="+strconv.Itoa(pid)+"\n") {
+			return slurm.Result{Stdout: []byte("digest " + d + "\n")}, nil
+		}
+	}
+	return slurm.Result{Stdout: []byte("gone\n")}, nil
+}
+
+// The readings are the node's, each by the PID it picked: the agent process's executable (the shipped agent's), the engine's and the Apptainer's
+// above it (the shim's). The digests the node gives here are none of the harness's own, so a reading copied from what the harness staged reads wrong.
+func TestTheShimReadingsAreTheNodesOwn(t *testing.T) {
+	x := strings.Repeat("ab", 32) // the shim the harness built
+	command := []string{"vllm", "serve", "/models/m"}
+	listing := "self 7\n" + strings.Join([]string{
+		"proc 100 1 500 1 0 o " + b64("/scratch/u/agent/"+x+"/hb-agent", "/scratch/u/alloc/t-1"),
+		"proc 101 1 501 1 0 o " + b64("/scratch/u/agent/"+x+"/hb-agent", "relay", "control", "--dir", "/scratch/u/alloc/t-1"),
+		"proc 110 100 502 0 1 j " + b64("/scratch/u/test-agent/y/shim-ab/apptainer", "exec", "image", "vllm", "serve", "/models/m"),
+		"proc 120 110 503 0 1 j " + b64("/scratch/u/agent/"+x+"/hb-agent", "serve", "/models/m"),
+	}, "\n") + "\nlisted\n"
+	node := cannedNode{listing: listing, digests: map[int]string{100: strings.Repeat("01", 32), 110: strings.Repeat("02", 32), 120: strings.Repeat("03", 32)}}
+	agent, engine, app, err := readShimNode(context.Background(), node, "4242", command, x)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent != strings.Repeat("01", 32) || app != strings.Repeat("02", 32) || engine != strings.Repeat("03", 32) {
+		t.Errorf("readings agent %s, engine %s, apptainer %s; want the node's digests of PIDs 100, 120 and 110", agent, engine, app)
+	}
+	// A node whose engine cannot be told (no process runs the shim's file) reads it as not read, and the Apptainer with it.
+	node.listing = strings.Replace(listing, b64("/scratch/u/agent/"+x+"/hb-agent", "serve", "/models/m"), b64("python3", "-m", "vllm"), 1)
+	if _, engine, app, err := readShimNode(context.Background(), node, "4242", command, x); err != nil || engine != "" || app != "" {
+		t.Errorf("no shim engine: engine %q, apptainer %q, %v; want both unread", engine, app, err)
+	}
+	// A listing that cannot be taken is an error.
+	if _, _, _, err := readShimNode(context.Background(), cannedNode{listing: "garbage"}, "4242", command, x); err == nil {
+		t.Error("a listing that cannot be parsed read as a node")
 	}
 }

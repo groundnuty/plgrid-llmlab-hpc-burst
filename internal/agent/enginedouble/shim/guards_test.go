@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -51,20 +52,79 @@ func TestNoShippedBinaryReachesTheDoubleOrTheShim(t *testing.T) {
 		if len(deps) < 50 {
 			t.Fatalf("go list -deps of cmd/* for %s/%s listed %d packages: expected the shipped binaries' whole closure", target.goos, target.goarch, len(deps))
 		}
-		for _, d := range deps {
-			if d == doublePrefix || strings.HasPrefix(d, doublePrefix+"/") {
-				t.Errorf("a shipped binary (cmd/*, %s/%s) reaches %s: the double and the shim are test-only", target.goos, target.goarch, d)
-			}
+		for _, d := range reachesTheDouble(deps) {
+			t.Errorf("a shipped binary (cmd/*, %s/%s) reaches %s: the double and the shim are test-only", target.goos, target.goarch, d)
 		}
+	}
+}
+
+// reachesTheDouble are the import paths of a dependency list that are the double's or under it.
+func reachesTheDouble(deps []string) []string {
+	var out []string
+	for _, d := range deps {
+		if d == doublePrefix || strings.HasPrefix(d, doublePrefix+"/") {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// The closure check itself: the double and anything under it are named, a package that only shares a prefix of its name is not.
+func TestReachesTheDouble(t *testing.T) {
+	deps := []string{"fmt", "github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent", doublePrefix, doublePrefix + "/shim",
+		"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/enginedoubles"}
+	if got := reachesTheDouble(deps); strings.Join(got, " ") != doublePrefix+" "+doublePrefix+"/shim" {
+		t.Errorf("reachesTheDouble = %q, want the double and the shim alone", got)
+	}
+	if got := reachesTheDouble(deps[:2]); len(got) != 0 {
+		t.Errorf("reachesTheDouble of a clean list = %q", got)
 	}
 }
 
 // Nothing of the product can select the shim: no script, workflow or non-test source names its path, except the live
 // checks script, which builds it for the bulk row alone. Its tests (_test.go files) may.
 func TestNoProductConfigurationNamesTheShim(t *testing.T) {
-	root := moduleRoot(t)
+	scanned, named := namesOfTheShim(t, moduleRoot(t))
+	for _, rel := range named {
+		t.Errorf("%s names the bulk row's test shim (%s): only hack/live-checks.sh may build it", rel, shimPath)
+	}
+	if scanned < 100 {
+		t.Errorf("scanned %d sources and scripts, expected the module's whole tree", scanned)
+	}
+}
+
+// The scan itself, over a tree of its own: a script or a non-test source that names the shim is found, the live checks script and a test file are
+// not.
+func TestTheShimScanFindsAProductThatNamesIt(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, body string) {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("hack/live-checks.sh", "go build ./"+shimPath+"\n")
+	write("internal/x/x_test.go", "package x // "+shimPath+"\n")
+	write("hack/build-agents.sh", "go build ./cmd/hb-agent\n")
+	if _, named := namesOfTheShim(t, root); len(named) != 0 {
+		t.Fatalf("the allowed tree: %q named", named)
+	}
+	write("hack/build-agents.sh", "go build ./"+shimPath+"\n")
+	write(".github/workflows/release.yml", "run: go build ./"+shimPath+"\n")
+	write("cmd/hpcburst/main.go", "package main // "+shimPath+"\n")
+	if _, named := namesOfTheShim(t, root); strings.Join(named, " ") != ".github/workflows/release.yml cmd/hpcburst/main.go hack/build-agents.sh" {
+		t.Errorf("namesOfTheShim = %q, want the workflow, the command and the agents' build", named)
+	}
+}
+
+// namesOfTheShim reads every script, workflow and non-test source under root, but the shim's own and the spikes', and returns how many it read and
+// the ones that name the shim's path, sorted, the live checks script aside.
+func namesOfTheShim(t *testing.T, root string) (scanned int, named []string) {
+	t.Helper()
 	allowed := map[string]bool{"hack/live-checks.sh": true}
-	scanned := 0
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -93,14 +153,13 @@ func TestNoProductConfigurationNamesTheShim(t *testing.T) {
 			return err
 		}
 		if strings.Contains(string(b), shimPath) && !allowed[rel] {
-			t.Errorf("%s names the bulk row's test shim (%s): only hack/live-checks.sh may build it", rel, shimPath)
+			named = append(named, rel)
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scanned < 100 {
-		t.Errorf("scanned %d sources and scripts, expected the module's whole tree", scanned)
-	}
+	sort.Strings(named)
+	return scanned, named
 }

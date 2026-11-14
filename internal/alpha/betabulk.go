@@ -116,7 +116,7 @@ type BulkObs struct {
 	Attributed int `json:"attributed"`
 }
 
-// ShimObs is what the bulk row read of its test shim (internal/agent/enginedouble/shim) and the shipped agent the shim execs (issue #521, option
+// ShimObs is what the bulk row read of its test shim (the engine double's test-only main) and the shipped agent the shim execs (issue #521, option
 // (A); the science agent's rulings on #521). The two digests are the harness's: the shim it put in hb-agent's place and the shipped agent it staged.
 // The other three are read from what ran, never from the harness's own record: the Allocation's agent digest through the API, the product's record
 // of what the Provider staged, and the running processes' executables on the node (/proc/<pid>/exe, ExeDigestScript).

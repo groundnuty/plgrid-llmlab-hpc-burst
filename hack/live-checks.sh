@@ -68,8 +68,8 @@
 # rate while its token streams ran across the whole transfer), so its reading measures nothing. It is no NOT RUN: its job started, ran and spent the
 # slot, and the run was put to the test, where a NOT RUN's job never started or its row was never put to the test. Its marker names it in fixed
 # words, held to that row alone; judge prints "<row>: INVALID (not a NOT RUN: ...)", apart from PASS, FAIL and NOT RUN, and the row exits 3 like a
-# NOT RUN: not a failure, not a pass, run it again. Its text to post says why. A failure of any other check wins: the row is a FAIL. The row is pending in the tables, so --run refuses it
-# (exit 2) before any of this until it is made ready.
+# NOT RUN: not a failure, not a pass, run it again. Its text to post says why. A failure of any other check wins: the row is a FAIL. The row runs
+# through its test shim (issue #521, option (A)), which the script builds for it alone (build_test_shims), in host-dialed mode alone.
 # The keeper row on plgrid-now (beta-athena-now-keeper, issue #521) has one: the deployment's max-model-len does not hold a stream long enough to span
 # a controller restart's outcome at the engine's measured rate. Its marker names the rate and the context, numbers only, which judge prints; the run
 # killed no controller, and its jobs were cancelled by their tags. The row runs in host-dialed mode alone. It has a second, of a run that did start
@@ -230,7 +230,7 @@ reach-host-dialed-athena|cluster|internal/providerctl/conformance|^TestReachHost
 alpha-athena-now-nooverlap|cluster|internal/alpha|^TestAlphaAthenaNowNoOverlap$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml|host|ready
 beta-athena-now-router|cluster|internal/alpha|^TestBetaAthenaNowRouter$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml,hack/fetch-envoy.sh|host|ready
 beta-athena-now-keeper|cluster|internal/alpha|^TestBetaAthenaNowKeeper$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml|host|ready
-beta-athena-now-bulk|cluster|-|-|-|-|-|pending
+beta-athena-now-bulk|cluster|internal/alpha|^TestBetaAthenaNowBulk$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml|host|ready
 rehearsal|cluster|-|-|-|-|-|pending
 # END LIVE TESTS
 TABLE
@@ -313,6 +313,7 @@ alpha-athena-now-stage|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_
 alpha-athena-now-nooverlap|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:21:00|115|-|10
 beta-athena-now-router|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
 beta-athena-now-keeper|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
+beta-athena-now-bulk|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
 gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|32|-|10
 gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|25|-
 gpu-accounting-athena-now|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|32|-|10
@@ -342,6 +343,7 @@ alpha-athena-now-stage|internal/providerctl/conformance/stagehelper
 alpha-athena-now-nooverlap|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 beta-athena-now-router|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 beta-athena-now-keeper|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
+beta-athena-now-bulk|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent,internal/agent/enginedouble/shim
 rehearsal-part3|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 reach-host-dialed-helios|cmd/hb-agent
 reach-host-dialed-athena|cmd/hb-agent
@@ -363,6 +365,7 @@ alpha-athena-now-stage|1
 alpha-athena-now-nooverlap|2
 beta-athena-now-router|1
 beta-athena-now-keeper|1
+beta-athena-now-bulk|1
 gpu-accounting-helios|1
 gpu-accounting-athena|1
 gpu-accounting-athena-now|1
@@ -389,6 +392,7 @@ alpha-athena-now-stage|LIVE_OWNER_GO_ATHENA_NOW|50
 alpha-athena-now-nooverlap|LIVE_OWNER_GO_ATHENA_NOW|60
 beta-athena-now-router|LIVE_OWNER_GO_ATHENA_NOW|60
 beta-athena-now-keeper|LIVE_OWNER_GO_ATHENA_NOW|60
+beta-athena-now-bulk|LIVE_OWNER_GO_ATHENA_NOW|60
 gpu-accounting-athena-now|LIVE_OWNER_GO_ATHENA_NOW|20
 # END OWNER GO
 TABLE
@@ -457,6 +461,7 @@ alpha-athena-now-serve
 alpha-athena-now-nooverlap
 beta-athena-now-router
 beta-athena-now-keeper
+beta-athena-now-bulk
 gpu-accounting-helios
 gpu-accounting-athena
 gpu-accounting-athena-now
@@ -805,6 +810,10 @@ check_alpha_settings() {
   # The keeper row tests the relay keeper, which runs the relays of host-dialed mode alone (HBEP-6, The relay keeper): another mode has none.
   if [ "$name" = beta-athena-now-keeper ] && [ "$host_dialed" != 1 ]; then
     say "live-checks: $name runs in host-dialed mode alone (LIVE_DIALHOME_MODE=host-dialed): the relay keeper runs the relays of that mode"; bad=1
+  fi
+  # The bulk row reads the bulk path's buffer on the relays' ssh through the login node (internal/alpha, config.go): host-dialed mode alone.
+  if [ "$name" = beta-athena-now-bulk ] && [ "$host_dialed" != 1 ]; then
+    say "live-checks: $name runs in host-dialed mode alone (LIVE_DIALHOME_MODE=host-dialed): the bulk path's buffer is read on the relays' ssh through the login node"; bad=1
   fi
   if [ "$host_dialed" = 1 ]; then
     # No address and no key: the host dials the jobs through the login node (HBEP-6, Dial-home modes). An
@@ -1454,6 +1463,27 @@ prepare_cluster() {
 # (hack/build-agents.sh: the real agent, for each cpuArch), before the slot is taken (issue #305). The test finds them
 # through HPCBURST_CONF_AGENT_BUILDS. Nothing here holds the slot.
 HD_BUILD_DIR=""
+# build_test_shims <agent-builds> <out>: the bulk row's test shim (internal/agent/enginedouble/shim; issue #521, option (A)), one for each agent build
+# in <agent-builds>, as <out>/hb-agent-<cpuArch>. Each is built with the SHA-256 of the shipped agent beside it (-ldflags -X main.wantAgentDigest), the
+# agent the shim execs on the node, and as hack/build-agents.sh builds the agent: static, trimmed, for linux and the cpuArch's GOARCH, its levels
+# pinned. The test puts the shim in hb-agent's place in the stack's own copy of the agent builds, and stages the shipped agent itself; the shim is
+# built for this row alone, and no other script or product build names it.
+build_test_shims() {
+  local builds=$1 out=$2 f cpu d goarch
+  # shellcheck source=hack/cpu-arch.sh
+  . "$ROOT/hack/cpu-arch.sh" || return 1
+  mkdir -m 700 "$out" || return 1
+  for f in "$builds"/hb-agent-*; do
+    [ -f "$f" ] || continue
+    cpu=${f##*/hb-agent-}
+    goarch=$(go_arch "$cpu") || { echo "build_test_shims: no GOARCH for cpuArch $cpu" >&2; return 1; }
+    d=$(sha256sum < "$f") && d=${d%% *} || return 1
+    CGO_ENABLED=0 GOOS=linux GOARCH=$goarch GOAMD64=v1 GOARM64=v8.0 GOWORK=off GOENV=off GOEXPERIMENT= GOFIPS140=off \
+      with_build_lock go build -trimpath -buildvcs=false -ldflags "-X main.wantAgentDigest=$d" -o "$out/hb-agent-$cpu" ./internal/agent/enginedouble/shim || return 1
+  done
+  [ -n "$(ls "$out")" ] || { echo "build_test_shims: no agent build in $builds" >&2; return 1; }
+}
+
 prepare_host_dialed() {
   local n=$1 w
   w="$OUT/$n-build-$(date -u +%Y%m%dT%H%M%SZ)-$$"
@@ -1496,7 +1526,8 @@ prepare_alpha() {
     with_build_lock go build -o "$w/bin/" ./cmd/hpcburst ./cmd/hpcburst-controller ./cmd/hpcburst-front &&
     with_build_lock hack/build-agents.sh "$w/agent-builds" &&
     hack/fetch-frp.sh --agent-builds "$w/agent-builds" &&
-    { [ "$n" != beta-athena-now-router ] || hack/fetch-envoy.sh --agent-builds "$w/agent-builds"; } ) >"$OUT/$n-build.log" 2>&1 ||
+    { [ "$n" != beta-athena-now-router ] || hack/fetch-envoy.sh --agent-builds "$w/agent-builds"; } &&
+    { [ "$n" != beta-athena-now-bulk ] || build_test_shims "$w/agent-builds" "$w/test-shim"; } ) >"$OUT/$n-build.log" 2>&1 ||
     { say "$n: FAIL (a build step failed; see the build log in the output directory)"; return 1; }
   ALPHA_BUILD_DIR=$w
 }

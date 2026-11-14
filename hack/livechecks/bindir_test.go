@@ -15,8 +15,8 @@ import (
 )
 
 // stackRowCount is how many rows of alphaShapes start the stack, written out: the handover, the two no-overlaps, the two tunnel
-// hours, row A and the router and keeper rows (issue #521). A row added later must be added to this check, not left out of it.
-const stackRowCount = 8
+// hours, row A and the router, keeper and bulk rows (issue #521). A row added later must be added to this check, not left out of it.
+const stackRowCount = 9
 
 func stackRows(t *testing.T) []alphaShape {
 	t.Helper()

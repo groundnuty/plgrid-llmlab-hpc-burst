@@ -57,6 +57,8 @@ var alphaShapes = []alphaShape{
 	{"beta-athena-now-router", "TestBetaAthenaNowRouter", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:48:00, one job, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
 	// The keeper row on plgrid-now (issue #521): row A's shape, in host-dialed mode with the relay keeper.
 	{"beta-athena-now-keeper", "TestBetaAthenaNowKeeper", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:48:00, one job, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
+	// The bulk row on plgrid-now (issue #521): row A's shape, in host-dialed mode with the bulk path, through the test shim.
+	{"beta-athena-now-bulk", "TestBetaAthenaNowBulk", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:48:00, one job, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
 	// Row B on plgrid-now (issue #376): the same size, two jobs of 21 minutes in turn (athena-now.yaml's lead of 20 and a
 	// minute), each with its start wait of 10.
 	{"alpha-athena-now-nooverlap", "TestAlphaAthenaNowNoOverlap", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:21:00, at most 2 jobs at once, each of this shape, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
@@ -436,14 +438,14 @@ func TestAnAlphaRunBuildsBeforeTheSlotAndGivesTheTestItsEnvironment(t *testing.T
 			if s.hasQOS() {
 				want = append(want, "HPCBURST_ALPHA_QOS="+s.slot)
 			}
-			// The keeper row runs in host-dialed mode alone, which has no address: the harness gives it that mode (world.command).
-			if s.row == "beta-athena-now-keeper" {
+			// The keeper and bulk rows run in host-dialed mode alone, which has no address: the harness gives them that mode (world.command).
+			if hostDialedOnly(s.row) {
 				want = slices.DeleteFunc(want, func(x string) bool {
 					return strings.HasPrefix(x, "HPCBURST_ALPHA_DIALHOME_MODE=") || strings.HasPrefix(x, "HPCBURST_ALPHA_DIALHOME_ADDR=")
 				})
 				want = append(want, "HPCBURST_ALPHA_DIALHOME_MODE=host-dialed")
 				if strings.Contains(env, "HPCBURST_ALPHA_DIALHOME_ADDR") {
-					t.Errorf("an address reached the keeper row's test, which runs in host-dialed mode:\n%s", env)
+					t.Errorf("an address reached %s's test, which runs in host-dialed mode:\n%s", s.row, env)
 				}
 			}
 			for _, x := range want {
@@ -653,7 +655,7 @@ func TestASignalDuringAnAlphaRunRunsTheCleanup(t *testing.T) {
 }
 
 func TestPlanNamesTheAlphaRowsWhenTheStackChanges(t *testing.T) {
-	alphaRows := []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-athena", "tunnel-hour-helios", "alpha-athena-now-serve", "alpha-athena-now-nooverlap", "beta-athena-now-router", "beta-athena-now-keeper"}
+	alphaRows := []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-athena", "tunnel-hour-helios", "alpha-athena-now-serve", "alpha-athena-now-nooverlap", "beta-athena-now-router", "beta-athena-now-keeper", "beta-athena-now-bulk"}
 	// The rehearsal row (issue #193) builds and runs the same stack, on this host: it is a local row.
 	stackRows := append(append([]string{}, alphaRows...), "rehearsal-part3")
 	cases := []struct {
@@ -935,6 +937,8 @@ func TestTheRowsThatHoldTheOwnersSlotForHoursNeedTheOwnersGo(t *testing.T) {
 		{"beta-athena-now-router", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
 		// The keeper row on plgrid-now (issue #521) holds the slot as row A does: 10 + 48 + 2.
 		{"beta-athena-now-keeper", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
+		// The bulk row on plgrid-now (issue #521) holds the slot as row A does: 10 + 48 + 2.
+		{"beta-athena-now-bulk", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
 		// Row B on plgrid-now (issue #376): its first start wait, then 10 + 21 + 3 + 10 + 12 + 3 = 59 minutes, rounded up to ten.
 		{"alpha-athena-now-nooverlap", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
 		// The pre-staging row (issue #376): its start wait, then 10 + 30 + 2 = 42 minutes, rounded up to ten.

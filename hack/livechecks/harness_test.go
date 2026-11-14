@@ -255,7 +255,7 @@ func (w *world) env(extra []string) []string {
 // is the reaper: a signal sent to it is forwarded to the script, and its exit status is the
 // script's. noLeftoverProcess reads the reaper's report of this command.
 func (w *world) command(extra []string, args ...string) *exec.Cmd {
-	if !w.exactMode && w.settingsMode == "direct" && slices.Contains(args, "beta-athena-now-keeper") {
+	if !w.exactMode && w.settingsMode == "direct" && slices.ContainsFunc(args, hostDialedOnly) {
 		w.hostDialedInPlace()
 	}
 	report := filepath.Join(w.dir, "reports", strconv.Itoa(len(w.reports)+1))
@@ -538,4 +538,10 @@ func lines(s string) []string {
 		}
 	}
 	return out
+}
+
+// hostDialedOnly names the rows that run in host-dialed mode alone (the script refuses them in another): the keeper row, whose relay keeper runs that
+// mode's relays, and the bulk row, which reads the bulk path's buffer on the relays' ssh (issue #521). The harness gives them that mode.
+func hostDialedOnly(row string) bool {
+	return row == "beta-athena-now-keeper" || row == "beta-athena-now-bulk"
 }

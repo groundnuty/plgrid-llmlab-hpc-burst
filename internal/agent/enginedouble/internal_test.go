@@ -113,8 +113,23 @@ func TestPackageImportsAndImporters(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
 		t.Fatalf("the module root is not at %s: %v", root, err)
 	}
-	scanned, shimFiles := 0, 0
-	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+	scanned, shimFiles, bad := scanImporters(t, root, self)
+	for _, b := range bad {
+		t.Error(b)
+	}
+	if shimFiles == 0 {
+		t.Error("found no source of the shim, internal/agent/enginedouble/shim: the allowance would name nothing")
+	}
+	if scanned < 20 {
+		t.Errorf("scanned %d non-test sources of the module, expected many more", scanned)
+	}
+}
+
+// scanImporters reads every non-test source under root, but the double's own, and returns how many it read, how many are the shim's, and what is
+// wrong: a source that imports the double and is not the shim's main, or a source of the shim's that is not package main.
+func scanImporters(t *testing.T, root, self string) (scanned, shimFiles int, bad []string) {
+	t.Helper()
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -124,33 +139,60 @@ func TestPackageImportsAndImporters(t *testing.T) {
 		if d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
 			return nil
 		}
-		if dir, _ := filepath.Abs(filepath.Dir(p)); strings.HasSuffix(filepath.ToSlash(dir), "internal/agent/enginedouble") {
+		dir, _ := filepath.Abs(filepath.Dir(p))
+		if strings.HasSuffix(filepath.ToSlash(dir), "internal/agent/enginedouble") {
 			return nil
 		}
 		scanned++
-		dir, _ := filepath.Abs(filepath.Dir(p))
 		allowed := strings.HasSuffix(filepath.ToSlash(dir), "internal/agent/enginedouble/shim")
 		if allowed {
 			shimFiles++
 			if pkg := packageOf(t, p); pkg != "main" {
-				t.Errorf("%s is package %s: the one importer allowed is the shim's main", p, pkg)
+				bad = append(bad, p+" is package "+pkg+": the one importer allowed is the shim's main")
 			}
 		}
 		for _, path := range importsOf(t, p) {
 			if path == self && !allowed {
-				t.Errorf("%s imports the engine double: only _test.go files and the bulk row's shim may", p)
+				bad = append(bad, p+" imports the engine double: only _test.go files and the bulk row's shim may")
 			}
 		}
 		return nil
 	})
-	if shimFiles == 0 {
-		t.Error("found no source of the shim, internal/agent/enginedouble/shim: the allowance would name nothing")
-	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scanned < 20 {
-		t.Errorf("scanned %d non-test sources of the module, expected many more", scanned)
+	return scanned, shimFiles, bad
+}
+
+// The scan itself, over a tree of its own: the shim's main may import the double, a test file may, and any other source may not, a second main
+// included; a source of the shim's that is not package main is wrong too.
+func TestTheImporterScanAllowsTheShimAlone(t *testing.T) {
+	const self = "example.test/m/internal/agent/enginedouble"
+	root := t.TempDir()
+	write := func(rel, body string) {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	imp := "import _ \"" + self + "\"\n"
+	write("internal/agent/enginedouble/double.go", "package enginedouble\n")
+	write("internal/agent/enginedouble/shim/main.go", "package main\n\n"+imp)
+	write("internal/x/x_test.go", "package x\n\n"+imp)
+	write("internal/y/y.go", "package y\n")
+	_, shimFiles, bad := scanImporters(t, root, self)
+	if shimFiles != 1 || len(bad) != 0 {
+		t.Fatalf("the allowed tree: %d shim files, %q; want 1 and nothing wrong", shimFiles, bad)
+	}
+	write("cmd/other/main.go", "package main\n\n"+imp)
+	write("internal/agent/enginedouble/shim/lib.go", "package shimlib\n")
+	_, _, bad = scanImporters(t, root, self)
+	if len(bad) != 2 || !strings.Contains(strings.Join(bad, "\n"), "cmd/other/main.go imports the engine double") ||
+		!strings.Contains(strings.Join(bad, "\n"), "is package shimlib") {
+		t.Errorf("a second main importing the double and a shim source not main: %q; want both named", bad)
 	}
 }
 
