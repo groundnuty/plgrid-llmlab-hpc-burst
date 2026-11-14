@@ -372,6 +372,8 @@ var rows = []Row{
 	NowServeRow(),
 	// Row B of issue #376 (nownooverlap.go): two jobs in turn on the same slot, no-overlap mode on the one-slot path.
 	NowNoOverlapRow(),
+	// The router row of issue #521 (betarouter.go), beta's: Envoy's first run on a compute node, on row A's hold of the same slot.
+	BetaRouterRow(),
 }
 
 // The settings of the owner's go (Row.OwnerGo).

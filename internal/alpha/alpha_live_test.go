@@ -96,6 +96,16 @@ func TestAlphaAthenaNowServe(t *testing.T) {
 	runRow(t, "nowserve", "alpha-athena-now-serve")
 }
 
+// TestBetaAthenaNowRouter is the router row of issue #521 (beta's tracker, #522) on Athena plgrid-now under profiles/athena-now.yaml: Envoy's
+// first run on a compute node, run bare from the build staged by its pinned digest, the node's glibc, one request through the front, S13's
+// cases through the real path as a response-level reading on vLLM (not bytes), and one worker-rung restart with the router in front. A node
+// whose glibc is under 2.30 is NOT RUN, naming the version.
+//
+//livecheck:beta-athena-now-router
+func TestBetaAthenaNowRouter(t *testing.T) {
+	runRow(t, "betarouter", BetaRouterName)
+}
+
 // TestAlphaAthenaNowNoOverlap is row B of issue #376 on Athena plgrid-now under profiles/athena-now.yaml: HBEP-7's
 // no-overlap mode on the one-slot path, two jobs in turn, both warm, with a stream across the drain start, the
 // successor's Allocation only after the predecessor's job has left the slot, and the gap measured.

@@ -1,8 +1,10 @@
 package enginedouble
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -10,7 +12,7 @@ import (
 
 // completionRequest is the part of CompletionRequest
 // (vllm/entrypoints/openai/completion/protocol.py) the double reads: a prompt
-// that is a string, and the sampling fields the chat path accepts (seed and
+// in one of its four forms (promptOf), and the sampling fields the chat path accepts (seed and
 // the recorded parameters included), under the same names. The double does
 // not read the other fields (n, echo, stop, logprobs, suffix); it ignores
 // them.
@@ -36,16 +38,105 @@ type completionRequest struct {
 // alone, without the validator, took a null here for the rest of the context.
 const defaultCompletionMaxTokens = 16
 
-// promptText is the prompt as the double reads it: a JSON string.
-func promptText(raw json.RawMessage) (string, error) {
+// promptOf is the prompt as the double reads it, in the four forms vLLM's
+// CompletionRequest.prompt takes (completion/protocol.py, at v0.32.0:
+// list[int] | list[list[int]] | str | list[str]): a string, which the double
+// tokenizes; a list of token IDs, which are the prompt's tokens; and a batch,
+// a list of strings or of token-ID lists, which the double answers as its
+// first prompt, in one choice, as it answers one choice whatever n asks. text
+// is the prompt's text for the record ("" for token IDs). An empty list, or
+// an empty first prompt, has no tokens, which the handler refuses as vLLM
+// does. Any other form is a 400.
+func promptOf(raw json.RawMessage) (text string, ids []int32, err error) {
 	if len(raw) == 0 || string(raw) == "null" {
-		return "", errors.New("a completions request needs a prompt")
+		return "", nil, errors.New("a completions request needs a prompt")
 	}
+	bad := errors.New("the prompt must be a string, a list of strings, a list of token IDs or a list of token-ID lists: the double reads no other form")
 	var s string
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return "", errors.New("the prompt must be a string: the double reads no other form")
+	if json.Unmarshal(raw, &s) == nil {
+		_, ids = tokenize(s)
+		return s, ids, nil
 	}
-	return s, nil
+	var list []json.RawMessage
+	if json.Unmarshal(raw, &list) != nil {
+		return "", nil, bad
+	}
+	if len(list) == 0 {
+		return "", nil, nil
+	}
+	// Every element of the one form the first is (a null decodes into a Go string or number without an error, so the form is read off each
+	// element's first byte).
+	kind := jsonKind(list[0])
+	for _, e := range list {
+		if jsonKind(e) != kind {
+			return "", nil, bad
+		}
+	}
+	switch kind {
+	case '"':
+		var all []string
+		if json.Unmarshal(raw, &all) != nil {
+			return "", nil, bad
+		}
+		_, ids = tokenize(all[0])
+		return all[0], ids, nil
+	case '0':
+		var flat []int64
+		if json.Unmarshal(raw, &flat) != nil {
+			return "", nil, bad
+		}
+		if ids, ok := tokenIDs(flat); ok {
+			return "", ids, nil
+		}
+	case '[':
+		var nested [][]json.RawMessage
+		if json.Unmarshal(raw, &nested) != nil {
+			return "", nil, bad
+		}
+		var first []int32
+		for i, p := range nested {
+			flat := make([]int64, len(p))
+			for j, e := range p {
+				if jsonKind(e) != '0' || json.Unmarshal(e, &flat[j]) != nil {
+					return "", nil, bad
+				}
+			}
+			got, ok := tokenIDs(flat)
+			if !ok {
+				return "", nil, bad
+			}
+			if i == 0 {
+				first = got
+			}
+		}
+		return "", first, nil
+	}
+	return "", nil, bad
+}
+
+// jsonKind is the form of a JSON value by its first byte: '"' for a string, '0' for a number, '[' for an array, and the byte itself for any
+// other (null, true, false, an object).
+func jsonKind(v json.RawMessage) byte {
+	b := bytes.TrimSpace(v)
+	if len(b) == 0 {
+		return 0
+	}
+	if b[0] == '-' || (b[0] >= '0' && b[0] <= '9') {
+		return '0'
+	}
+	return b[0]
+}
+
+// tokenIDs are a prompt's token IDs as the double counts them, false for one that is negative or past int32.
+func tokenIDs(in []int64) ([]int32, bool) {
+	out := make([]int32, len(in))
+	for i, v := range in {
+		if v < 0 || v > math.MaxInt32 {
+			return nil, false
+		}
+		out[i] = int32(v)
+	}
+	return out, true
 }
 
 // completion is POST /v1/completions. It is the chat path with a prompt in
@@ -67,7 +158,7 @@ func (h *handler) completion(w http.ResponseWriter, r *http.Request) {
 		dflt := defaultCompletionMaxTokens
 		req.MaxTokens = &dflt
 	}
-	prompt, promptErr := promptText(req.Prompt) // "" when the prompt is not a string
+	prompt, promptIDs, promptErr := promptOf(req.Prompt) // prompt is "" for token IDs
 	// The record is the chat path's: a request that decoded is recorded when
 	// it ends, a refused one too, and errors-only answers after the decode.
 	rec := requestRecord(r, req.sampling, prompt)
@@ -86,7 +177,6 @@ func (h *handler) completion(w http.ResponseWriter, r *http.Request) {
 	if !h.modelExists(w, req.Model) {
 		return
 	}
-	_, promptIDs := tokenize(prompt)
 	rec.PromptTokens = len(promptIDs)
 	// A limit over the window is refused before the prompt is read, an empty
 	// one included (maxTokensOf).

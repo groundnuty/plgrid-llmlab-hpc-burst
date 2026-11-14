@@ -44,6 +44,10 @@ func (a *Agent) snapshot() agentapi.Report {
 			c := *w.exitCode
 			wr.ExitCode = &c
 		}
+		if w.phase == agentapi.PartExited && !w.exitedAt.IsZero() {
+			at := w.exitedAt.UTC()
+			wr.ExitedAt = &at
+		}
 		if w.phase == agentapi.PartRunning && w.health != nil {
 			h := cloneHealth(*w.health)
 			h.Time = h.Time.UTC()

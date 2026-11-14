@@ -618,6 +618,12 @@ func (f firstOnly) NowNoOverlap(_ context.Context, p Plan) (NowNoOverlapObs, err
 	return NowNoOverlapObs{}, err
 }
 
+func (f firstOnly) BetaRouter(_ context.Context, p Plan) (RouterObs, error) {
+	err := f.firstJobStarted(p)
+	f.after()
+	return RouterObs{}, err
+}
+
 // The first job's side of it, through Run: its deferred Close turns the NOT RUN into a failure that names the start, before any marker.
 func TestRunEndsAFailureWhenAFirstJobReadAsWaitingHadStartedByItsCancel(t *testing.T) {
 	row := rowOf("tunnel-hour-athena")

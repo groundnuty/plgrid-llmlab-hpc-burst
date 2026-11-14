@@ -105,6 +105,9 @@ type worker struct {
 	// wait is armed (restartReleased).
 	downAt    time.Time
 	waitArmed bool
+	// exitedAt is when the worker exited without being told to, or its start failed
+	// (WorkerReport.ExitedAt); zero otherwise.
+	exitedAt time.Time
 }
 
 func (w *worker) alive() bool {

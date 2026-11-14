@@ -21,6 +21,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	preExecChild()
 	Dispatch()
 	os.Exit(ReportLeaks(m.Run()))
 }
@@ -214,17 +215,28 @@ type watch struct {
 	// have seen sshd and ssh.
 	wantSSH bool
 
-	mu   sync.Mutex
-	seen map[int]seenProc
+	mu      sync.Mutex
+	seen    map[procKey]seenProc
+	samples int // how many samples the watcher has taken
 }
 
+// procKey names one process: its PID and its start time, so that a PID the kernel gives to another process is another record.
+type procKey struct {
+	pid   int
+	ticks uint64
+}
+
+// seenProc is one recorded process: its row, the name it had at the latest sample, and every name it had at a sample. A process sampled between
+// its fork and its exec still has its parent's name, and takes the name of the file it execs (issue #556), so the name is read at every sample,
+// never only the first.
 type seenProc struct {
-	row  procRow
-	comm string
+	row   procRow
+	comm  string
+	comms map[string]bool
 }
 
 func startWatch(t *testing.T, base string) *watch {
-	w := &watch{t: t, base: base, wantSSH: true, stop: make(chan struct{}), done: make(chan struct{}), seen: map[int]seenProc{}}
+	w := &watch{t: t, base: base, wantSSH: true, stop: make(chan struct{}), done: make(chan struct{}), seen: map[procKey]seenProc{}}
 	go func() {
 		defer close(w.done)
 		for {
@@ -239,16 +251,69 @@ func startWatch(t *testing.T, base string) *watch {
 	return w
 }
 
-func (w *watch) sample() {
-	rows := below(ownRow())
+func (w *watch) sample() { w.record(below(ownRow()), watchComm) }
+
+// watchComm is a process's name as /proc gives it, "" when it cannot be read (the package's readComm says "?").
+func watchComm(pid int) string {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/comm")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// record is one sample: each listed process recorded by its PID and start time, and its name read now, every time, with every name kept.
+func (w *watch) record(rows []procRow, comm func(pid int) string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.samples++
 	for _, r := range rows {
-		if _, ok := w.seen[r.pid]; !ok {
-			b, _ := os.ReadFile("/proc/" + strconv.Itoa(r.pid) + "/comm")
-			w.seen[r.pid] = seenProc{row: r, comm: strings.TrimSpace(string(b))}
+		k := procKey{r.pid, r.ticks}
+		p, ok := w.seen[k]
+		if !ok {
+			p = seenProc{row: r, comms: map[string]bool{}}
+		}
+		if c := comm(r.pid); c != "" {
+			p.comm = c
+			p.comms[c] = true
+		}
+		w.seen[k] = p
+	}
+}
+
+// samplesTaken is how many samples the watcher has taken.
+func (w *watch) samplesTaken() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.samples
+}
+
+// recorded is whether the watcher has recorded a process with this PID.
+func (w *watch) recorded(pid int) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for k := range w.seen {
+		if k.pid == pid {
+			return true
 		}
 	}
+	return false
+}
+
+// saw is whether the watcher recorded any process under the name, at any sample.
+func (w *watch) saw(comm string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.sawLocked(comm)
+}
+
+func (w *watch) sawLocked(comm string) bool {
+	for _, p := range w.seen {
+		if p.comms[comm] {
+			return true
+		}
+	}
+	return false
 }
 
 // finish runs after every other cleanup of the test.
@@ -259,11 +324,14 @@ func (w *watch) finish() {
 	defer w.mu.Unlock()
 	comms := map[string]bool{}
 	for _, p := range w.seen {
-		comms[p.comm] = true
+		for c := range p.comms {
+			comms[c] = true
+		}
 	}
 	// The watcher must have seen the processes it is there to find; a watcher
-	// that saw nothing would pass for any outcome.
-	if w.wantSSH && (!comms["sshd"] || !comms["ssh"]) {
+	// that saw nothing would pass for any outcome. Every name a process had at a
+	// sample counts (issue #556).
+	if w.wantSSH && (!w.sawLocked("sshd") || !w.sawLocked("ssh")) {
 		w.t.Errorf("the process watcher saw %v: it never saw sshd and ssh, so its \"nothing left\" proves nothing", keys(comms))
 	}
 	deadline := time.Now().Add(waitDeadline)
@@ -284,9 +352,9 @@ func (w *watch) finish() {
 // that name the test's directory.
 func (w *watch) survivors() []string {
 	var left []string
-	for pid, p := range w.seen {
+	for k, p := range w.seen {
 		if anyLive([]procRow{p.row}) {
-			left = append(left, strconv.Itoa(pid)+" "+p.comm)
+			left = append(left, strconv.Itoa(k.pid)+" "+p.comm)
 		}
 	}
 	for _, r := range liveProcs() {

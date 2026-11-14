@@ -75,6 +75,7 @@ func cloneReport(r agentapi.Report) agentapi.Report {
 func cloneWorkerReport(w agentapi.WorkerReport) agentapi.WorkerReport {
 	w.StartTime = clonePtr(w.StartTime, same[time.Time])
 	w.ExitCode = clonePtr(w.ExitCode, same[int])
+	w.ExitedAt = clonePtr(w.ExitedAt, same[time.Time])
 	w.Health = clonePtr(w.Health, func(h agentapi.Health) agentapi.Health {
 		h.MetricsReadAt = clonePtr(h.MetricsReadAt, same[time.Time])
 		h.RunningRequests = clonePtr(h.RunningRequests, same[int64])
