@@ -45,7 +45,10 @@ func TestRehashLineSaysTheNumbersOrWhyNot(t *testing.T) {
 		want string
 	}{
 		{"read", read, head + "4 of 5 listed files, 15400000000 bytes (15.40 GB) in 11.0 s, 1400 MB/s\n"},
-		{"too short for a rate", WarmObs{LogRead: true, Rehash: RehashObs{Read: true, Files: 1, Listed: 1, Bytes: 120}}, head + "1 of 1 listed files, 120 bytes (0.00 GB) in 0.0 s, too short for a rate\n"},
+		{"too short for a rate", WarmObs{LogRead: true, Rehash: RehashObs{Read: true, Files: 1, Listed: 1, Bytes: 120}}, head + "1 of 1 listed files, 120 bytes in 0 ms, too short for a rate\n"},
+		// A small checkpoint (a stand-in's) is shown in its own units, never as zeros: 9294 bytes in 20 ms.
+		{"small", WarmObs{LogRead: true, Rehash: RehashObs{Read: true, Files: 3, Listed: 3, Bytes: 9294, MS: 20}}, head + "3 of 3 listed files, 9294 bytes (9.29 kB) in 20 ms, 0.465 MB/s\n"},
+		{"tens of MB/s", WarmObs{LogRead: true, Rehash: RehashObs{Read: true, Files: 2, Listed: 2, Bytes: 52_000_000, MS: 2500}}, head + "2 of 2 listed files, 52000000 bytes (52.00 MB) in 2.5 s, 20.8 MB/s\n"},
 		{"a cold start", WarmObs{LogRead: true, Rehash: RehashObs{Read: true, Listed: 5}}, head + "none: a cold start, no listed file of 5 was present to rehash\n"},
 		{"no line", WarmObs{LogRead: true}, head + "not read: the agent's log holds no rehash line\n"},
 		{"no log", WarmObs{}, head + "not read: the agent's log was not read\n"},

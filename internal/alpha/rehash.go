@@ -82,7 +82,41 @@ func RehashWords(r RehashObs) string {
 	}
 	rate := "too short for a rate"
 	if r.MS > 0 {
-		rate = fmt.Sprintf("%.0f MB/s", float64(r.Bytes)/float64(r.MS)/1e3)
+		rate = rateWords(float64(r.Bytes) / float64(r.MS) / 1e3)
 	}
-	return fmt.Sprintf("%d of %d listed files, %d bytes (%.2f GB) in %.1f s, %s", r.Files, r.Listed, r.Bytes, float64(r.Bytes)/1e9, float64(r.MS)/1e3, rate)
+	return fmt.Sprintf("%d of %d listed files, %d bytes%s in %s, %s", r.Files, r.Listed, r.Bytes, sizeWords(r.Bytes), durationWords(r.MS), rate)
+}
+
+// sizeWords is a byte count in the unit its size calls for, in parentheses ("" under a kilobyte): a small checkpoint is
+// never shown as 0.00 GB.
+func sizeWords(b int64) string {
+	for _, u := range []struct {
+		unit string
+		of   float64
+	}{{"GB", 1e9}, {"MB", 1e6}, {"kB", 1e3}} {
+		if float64(b) >= u.of {
+			return fmt.Sprintf(" (%.2f %s)", float64(b)/u.of, u.unit)
+		}
+	}
+	return ""
+}
+
+// durationWords is milliseconds, in seconds from one second up, else in milliseconds: a short rehash is never 0.0 s.
+func durationWords(ms int64) string {
+	if ms >= 1000 {
+		return fmt.Sprintf("%.1f s", float64(ms)/1e3)
+	}
+	return fmt.Sprintf("%d ms", ms)
+}
+
+// rateWords is a rate in MB/s with as many digits as it needs to show three significant ones under 100: a slow or a small
+// rehash is never 0 MB/s.
+func rateWords(mbps float64) string {
+	switch {
+	case mbps >= 100:
+		return fmt.Sprintf("%.0f MB/s", mbps)
+	case mbps >= 10:
+		return fmt.Sprintf("%.1f MB/s", mbps)
+	}
+	return fmt.Sprintf("%.3g MB/s", mbps)
 }
