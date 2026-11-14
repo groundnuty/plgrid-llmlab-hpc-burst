@@ -36,8 +36,9 @@ var betaNowRows = []string{"beta-athena-now-router", "beta-athena-now-keeper"}
 // that iterate the script's cluster shapes run through the script and so cannot be pre-wired while the row is pending (the live table's line with its test
 // pattern and inputs, the shapes, plan stack, most-jobs, owner's-go and front-label tables; alpha_test.go's shape row, rows list and owner's-go note;
 // the dry faults and rows of alpha_dry_test.go; budget_test.go's stackRowTests; both maps of neverstarted_test.go; frontlabel_test.go's labelledRows;
-// bindir_test.go's stackRowCount; plan_test.go's three expected sets; betaNowRows above; the //livecheck: directive of the row's test; and the host-dialed
-// mode world.command gives the keeper row, which names that row alone).
+// bindir_test.go's stackRowCount; plan_test.go's three expected sets; betaNowRows above; the //livecheck: directive of the row's test; the host-dialed
+// mode world.command gives the keeper row, which names that row alone; and, for the bulk row, its INVALID through the script with the real test in dry
+// mode, exit 3 and the INVALID line, which betabulk_test.go cannot run while the row is pending).
 var pendingAlphaRows = []string{"beta-athena-now-bulk"}
 
 // builtRows are the package's rows the script runs: Rows() less the pending ones.

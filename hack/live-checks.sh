@@ -30,11 +30,11 @@
 #
 # Exit codes: 0 all passed; 1 a test failed, skipped, left a job behind or
 # timed out; 2 usage error, an unreadable range or a table of this script
-# that loads no rows; 3 refused or NOT RUN (a
+# that loads no rows; 3 refused, NOT RUN or INVALID (a
 # setting is missing, a file is not mode 600, the one-job slot is in use; or a
 # job that never started within its bound was cancelled by its tag, on any row: not a failure, try again later; or
-# the scheduler rejected the row's shape in the dry-run estimate, with or without --yes); 4 a cluster test
-# was not run because --yes was not given.
+# the scheduler rejected the row's shape in the dry-run estimate, with or without --yes; or the bulk row's run had no
+# saturation witness, below); 4 a cluster test was not run because --yes was not given.
 #
 # NOT RUN (one protocol for every cluster row; the science agent's ruling of 8 Nov 2026, #272): a job that never
 # started within its bound ends the row as NOT RUN, exit 3, whichever bound ran out and whether the row has a
@@ -63,6 +63,12 @@
 # The router row on plgrid-now (beta-athena-now-router, issue #521; beta's tracker is #522) has one: the compute node's glibc is older
 # than the 2.30 Envoy needs, read on the node or from the agent's own log of a refused start. Its marker names the version alone, which
 # judge prints; the run sent no request, and its jobs were cancelled by their tags.
+# The bulk row on plgrid-now (beta-athena-now-bulk, issue #521) has a verdict of its own by the same protocol, INVALID (the science agent's ruling on
+# #521): its run was judged, recorded and posted, nothing failed, and it has no saturation witness (the control's 64 MiB counted with its time and
+# rate while its token streams ran across the whole transfer), so its reading measures nothing. Its marker names it in fixed words, held to that row
+# alone; judge prints "<row>: INVALID (...)", apart from PASS, FAIL and NOT RUN, and the row exits 3 like a NOT RUN: not a failure, not a pass, run
+# it again. Its text to post says why. A failure of any other check wins: the row is a FAIL. The row is pending in the tables, so --run refuses it
+# (exit 2) before any of this until it is made ready.
 # The keeper row on plgrid-now (beta-athena-now-keeper, issue #521) has one: the deployment's max-model-len does not hold a stream long enough to span
 # a controller restart's outcome at the engine's measured rate. Its marker names the rate and the context, numbers only, which judge prints; the run
 # killed no controller, and its jobs were cancelled by their tags. The row runs in host-dialed mode alone.
@@ -1087,6 +1093,7 @@ not_run_verdict() {
   ! warm_marker || case $n in alpha-athena-now-serve|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1
   ! glibc_marker || [ "$n" = beta-athena-now-router ] || return 1
   ! keeper_marker || [ "$n" = beta-athena-now-keeper ] || return 1
+  ! invalid_marker || [ "$n" = beta-athena-now-bulk ] || return 1
   ! slot_marker || [ "$n" = alpha-athena-now-nooverlap ] || return 1
   ! lead_marker || case $n in alpha-athena-handover|alpha-helios-nooverlap|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1
   ! long_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac || return 1
@@ -1103,6 +1110,9 @@ warm_marker() { grep -q "the agent's own log did not show the warm start" "$REC_
 # GlibcTooOldError; issue #521): the router row's. glibc_reason is the version it carries in parentheses, "glibc 2.28", as row_a_reason
 # reads it, and nothing else of the node.
 glibc_marker() { grep -q "the compute node's glibc is older than the 2.30 Envoy needs" "$REC_DIR/not-run.txt" 2>/dev/null; }
+# invalid_marker: the marker says the bulk row's run has no saturation witness, so its reading measures nothing (internal/alpha, ErrInvalid and
+# InvalidNote; the science agent's ruling on #521): an INVALID, not a NOT RUN, which not_run_verdict holds to that row and judge prints as INVALID.
+invalid_marker() { grep -q "the run has no saturation witness, so its reading measures nothing" "$REC_DIR/not-run.txt" 2>/dev/null; }
 # keeper_marker: the run's NOT RUN marker says the deployment's max-model-len does not hold a stream long enough to span a controller restart's outcome
 # at the engine's measured rate (internal/alpha, NotRunNote, KeeperStreamTooShortError; issue #521): the keeper row's. keeper_reason is the numbers the
 # marker carries in parentheses, as lead_reason reads them, and nothing else.
@@ -1193,7 +1203,10 @@ judge() {
   if [ "$rc" = 124 ]; then say "$n: FAIL (timed out)"; return 1; fi
   if not_run_verdict "$n" "$rc" "${fail:-0}" "${skip:-0}" "$named"; then
     NOT_RUN=1
-    if second_job_marker; then
+    if invalid_marker; then
+      # Exit 3 like a NOT RUN, its own word: the run happened and measured nothing (NOT_RUN=1 carries the exit code).
+      say "$n: INVALID (the run has no saturation witness: a transfer's bytes, time and rate were not measured with its token streams running across the whole of it, so its reading measures nothing; the text to post says which; the run's other checks passed; not a failure, not a pass)"
+    elif second_job_marker; then
       say "$n: NOT RUN (the first job ran and the second never started $(second_job_bound "$n"), and was cancelled by its tag; not a failure)"
       late=$(sed -n -E 's/.*ReplacementLate for its deployment: (raised|not raised|unknown);.*/\1/p' "$REC_DIR/not-run.txt" 2>/dev/null | head -1)
       [ -z "$late" ] || say "$n: ReplacementLate for its deployment: $late (information, not a check)"
@@ -1231,7 +1244,7 @@ judge() {
 
 CONTROL_DIR=""
 REC_DIR=""
-NOT_RUN=0          # 1 when the run's test stopped on the row's start-wait bound
+NOT_RUN=0          # 1 when the run's test stopped on the row's start-wait bound, or ended NOT RUN or INVALID by its marker: exit 3
 
 # with_build_lock <command>...: runs the command under the shared build lock when LIVE_BUILD_LOCK names one.
 # Only builds take it; a test binary never runs while it is held.
