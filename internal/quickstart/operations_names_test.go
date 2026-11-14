@@ -72,6 +72,7 @@ var guideNames = map[string]string{
 	"NoProgress":           v1alpha1.ReasonNoProgress,
 	"PartExited":           v1alpha1.ReasonPartExited,
 	"RouterCheckFailing":   v1alpha1.ReasonRouterCheckFailing,
+	"KVSkew":               v1alpha1.ReasonKVSkew,
 	"RouterRestart":        v1alpha1.ReasonRouterRestart,
 	"ReportsMissing":       v1alpha1.ReasonReportsMissing,
 	"Reporting":            v1alpha1.ReasonReporting,
