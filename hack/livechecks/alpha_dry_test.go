@@ -189,6 +189,8 @@ var dryRows = []dryRow{
 	{"alpha-athena-now-serve", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", nowServeFaults, nil, nil},
 	{"alpha-athena-now-nooverlap", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", nowNoOverlapFaults, nil, nil},
 	{"beta-athena-now-router", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaRouterFaults, []string{"glibc-at-the-minimum"}, nil},
+	// The router row on Helios's GH200 (issue #566): the same faults, on the Helios shape and slot.
+	{"beta-helios-now-router", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaRouterFaults, []string{"glibc-at-the-minimum"}, nil},
 }
 
 func containsString(list []string, s string) bool {

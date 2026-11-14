@@ -969,16 +969,11 @@ func TestStandInBetaRouter(t *testing.T) {
 	}
 }
 
-// TestStandInBetaRouterOldGlibc is the router row's NOT RUN over the stand-in: the node's glibc, read by the probe, is 2.28 (the probe's
-// script is replaced, as a node with an older glibc would answer), and the run must end NOT RUN naming 2.28, at once, before the Instance is
-// ready, with no request sent through the front and the run's job cancelled by its tag (it never ended on its own: the cleanup's cancel did).
-//
 // TestStandInBetaHeliosRouter is the Helios router row's live steps over the stand-in, through Run (issue #566): the router row's, on the
 // Helios row's shape and its slot under the stand-in's one-GPU QOS, the real Envoy of the pin behind --instance-router envoy. The stand-in
 // runs on this host's architecture, so it proves the row's wiring, not the GH200 node or its arm64 builds; its glibc is this host's, above
 // 2.30, so the run is a pass, and its text to post names it.
 //
-//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
 //livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
 func TestStandInBetaHeliosRouter(t *testing.T) {
 	s := runRouterStandInRow(t, BetaHeliosRouterName, nil)
@@ -1026,6 +1021,11 @@ func TestStandInBetaHeliosRouterOldGlibc(t *testing.T) {
 	}
 }
 
+// TestStandInBetaRouterOldGlibc is the router row's NOT RUN over the stand-in: the node's glibc, read by the probe, is 2.28 (the probe's
+// script is replaced, as a node with an older glibc would answer), and the run must end NOT RUN naming 2.28, at once, before the Instance is
+// ready, with no request sent through the front and the run's job cancelled by its tag (it never ended on its own: the cleanup's cancel did).
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
 func TestStandInBetaRouterOldGlibc(t *testing.T) {
 	s := runRouterStandIn(t, func(lr *liveRun, _ *stack.Cluster) { lr.glibcScript = "echo 'glibc 2.28'\n" })
 	var g *GlibcTooOldError
