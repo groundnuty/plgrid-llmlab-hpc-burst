@@ -210,7 +210,7 @@ func restartParts(in v1alpha1.Instance) []string {
 // then 158, of 20"). It first waits, within a bound, until Envoy holds neither worker out, logging what it
 // held. Then, for each worker, it finds a key the front sends to the Instance and Envoy to that worker
 // (keyOn, which already reads each probe's landing from Envoy), and sends one more request in it, which
-// must land on that worker.
+// must land on that worker (landsOn).
 func (r *rig) eachWorkerTakes(in *v1alpha1.Instance, admin, what string) {
 	r.t.Helper()
 	last := ""
@@ -230,12 +230,35 @@ func (r *rig) eachWorkerTakes(in *v1alpha1.Instance, admin, what string) {
 	})
 	for _, w := range []string{"worker-0", "worker-1"} {
 		k := r.keyOn(in, admin, w, strings.ReplaceAll(what, " ", "-")+"-"+w)
+		r.landsOn(in, admin, k, w, what)
+	}
+}
+
+// landsOn sends a request in key k, pinned to worker w, and requires it to land on w. Keyless GET /health
+// probes also cross Envoy, to a random worker: the front's end-to-end probe every 2 s in the rehearsal, the
+// agent's router probe every 10 s (#573's review). So a read is decisive only when one side moved: w rose and
+// its sibling didn't is the request on w; w unchanged is the request on the sibling, a failure. Both rising is
+// a probe in the window, and the request is sent again, up to five times.
+func (r *rig) landsOn(in *v1alpha1.Instance, admin, k, w, what string) {
+	r.t.Helper()
+	other := map[string]string{"worker-0": "worker-1", "worker-1": "worker-0"}[w]
+	for try := 1; try <= 5; try++ {
 		before := hostStats(r.t, admin)
 		r.sendOn(in, k, what)
-		if after := hostStats(r.t, admin); after[w]["rq_success"] != before[w]["rq_success"]+1 {
-			r.t.Errorf("%s: a request in a key pinned to %s: its rq_success went %d -> %d, want one more", what, w, before[w]["rq_success"], after[w]["rq_success"])
+		after := hostStats(r.t, admin)
+		onW := after[w]["rq_success"] > before[w]["rq_success"]
+		onOther := after[other]["rq_success"] > before[other]["rq_success"]
+		switch {
+		case onW && !onOther:
+			return
+		case !onW:
+			r.t.Errorf("%s: a request in a key pinned to %s left its rq_success at %d, and %s's went %d -> %d: it landed on the sibling",
+				what, w, after[w]["rq_success"], other, before[other]["rq_success"], after[other]["rq_success"])
+			return
 		}
+		r.t.Logf("%s: both workers' counts rose during the request in %s's key (a probe in the window); sending again", what, w)
 	}
+	r.t.Errorf("%s: five reads in a row of the request in %s's key also counted a probe on its sibling: undecided", what, w)
 }
 
 // headerInstanceUID is the front's attribution header naming the Instance that answered (HBEP-5,
