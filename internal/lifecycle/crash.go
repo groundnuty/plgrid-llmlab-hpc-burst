@@ -10,12 +10,14 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
-// The crash-correlation event (HBEP-7, Health and restarts: Crash correlation; #539, from spike S18): a
-// worker exit the controller didn't ask for, within crashWindow after such an exit on another Instance
-// of the same ModelDeployment, raises a failing event CrashCorrelated, regarding the Instance whose exit
-// made the pair and related to the other. It is an event only: each Instance still restarts by its own
-// ladder. One Instance's own crash loop is not counted (that is RestartLoop's), and neither are two
-// workers of one Instance.
+// The crash-correlation event (HBEP-7, Health and restarts: Crash correlation; #539, from spike S18, as
+// amended by #550): a worker exit the controller didn't ask for, of a worker that was serving (its
+// Instance ready, and the worker verified and warmed up since its last start), within crashWindow after
+// such an exit on another Instance of the same ModelDeployment, raises a failing event CrashCorrelated,
+// regarding the Instance whose exit made the pair and related to the other. It is an event only: each
+// Instance still restarts by its own ladder. One Instance's own crash loop is not counted (that is
+// RestartLoop's), nor are two workers of one Instance, nor a failed start, which belongs to the
+// verification and provisioning loops.
 const (
 	crashWindow = 30 * time.Second
 	// crashKeep is how long an exit is kept to pair with, and its key to recognise it again, after it
@@ -33,17 +35,18 @@ type exitSeen struct {
 	paired bool      // it made a pair, and the event was raised for it
 }
 
-// correlateExits records the unrequested worker exits in the Instance's current report, each once, and
-// raises CrashCorrelated for each that makes a pair with an exit on another Instance of its
+// correlateExits records the unrequested exits of serving workers in the Instance's current report, each
+// once, and raises CrashCorrelated for each that makes a pair with an exit on another Instance of its
 // ModelDeployment within crashWindow. A requested stop is reported as stopped, never exited, so it never
-// counts, and nor does the router, which is not a worker.
+// counts, and nor does the router, which is not a worker. A stale Instance, of an earlier deployment of
+// the same name, never counts: it would pair with the new deployment's Instances.
 func (p *pass) correlateExits(in *v1alpha1.Instance, av agentView) {
-	if p.md == nil || av.report == nil {
+	if p.md == nil || av.report == nil || p.stale[in.UID] {
 		return
 	}
 	for i := range av.report.Workers {
 		w := &av.report.Workers[i]
-		if w.Phase != agentapi.PartExited {
+		if w.Phase != agentapi.PartExited || !servingWorker(in, w.Name) {
 			continue
 		}
 		at := av.reportAt
@@ -67,11 +70,23 @@ func (p *pass) correlateExits(in *v1alpha1.Instance, av agentView) {
 	}
 }
 
+// servingWorker reports whether worker w of Instance in was serving: the Instance ready and, with
+// several workers, w verified and warmed up at its current generation. With one worker, a ready Instance
+// is its worker verified and warmed up. It is read at the start of the pass that first sees the exit,
+// before the restart it causes changes either.
+func servingWorker(in *v1alpha1.Instance, w string) bool {
+	if in.Status.Phase != v1alpha1.InstanceReady {
+		return false
+	}
+	return !several(in) || workerWarmed(in, w)
+}
+
 // recordExit records e for ModelDeployment md, unless its process was recorded before. It returns the
 // pair e makes, the later exit first, when an exit on another Instance of md lies within crashWindow of
-// it (the nearest, if several) and the later of the two has made no pair yet; nil otherwise. e is the
-// later exit when it came after; when a report brings an earlier exit late, the later one is the
-// recorded exit, if it made no pair of its own.
+// it and the later of the two has made no pair yet: the nearest such exit, if several; nil otherwise. e
+// is the later exit when it came after; when a report brings an earlier exit late, the later one is the
+// recorded exit, if it made no pair of its own. Every deployment's exits are kept crashKeep after they
+// were first seen, and no longer, a deleted deployment's included.
 func (m *memory) recordExit(md types.UID, e *exitSeen) (later, earlier *exitSeen) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -84,29 +99,39 @@ func (m *memory) recordExit(md types.UID, e *exitSeen) (later, earlier *exitSeen
 			delete(m.exitKeys, k)
 		}
 	}
-	kept := m.exits[md][:0]
-	var near *exitSeen
+	for d, xs := range m.exits {
+		kept := xs[:0]
+		for _, x := range xs {
+			if e.seen.Sub(x.seen) <= crashKeep {
+				kept = append(kept, x)
+			}
+		}
+		if len(kept) == 0 {
+			delete(m.exits, d)
+		} else {
+			m.exits[d] = kept
+		}
+	}
+	var pair, pairEarlier *exitSeen
+	best := time.Duration(-1)
 	for _, x := range m.exits[md] {
-		if e.seen.Sub(x.seen) > crashKeep {
+		d := x.at.Sub(e.at).Abs()
+		if x.inst.UID == e.inst.UID || d > crashWindow {
 			continue
 		}
-		kept = append(kept, x)
-		d := x.at.Sub(e.at).Abs()
-		if x.inst.UID != e.inst.UID && d <= crashWindow && (near == nil || d < near.at.Sub(e.at).Abs()) {
-			near = x
+		l, ear := e, x
+		if x.at.After(e.at) {
+			l, ear = x, e
 		}
+		if l.paired || (best >= 0 && d >= best) {
+			continue
+		}
+		pair, pairEarlier, best = l, ear, d
 	}
-	m.exits[md] = append(kept, e)
-	if near == nil {
+	m.exits[md] = append(m.exits[md], e)
+	if pair == nil {
 		return nil, nil
 	}
-	later, earlier = e, near
-	if near.at.After(e.at) {
-		later, earlier = near, e
-	}
-	if later.paired {
-		return nil, nil
-	}
-	later.paired = true
-	return later, earlier
+	pair.paired = true
+	return pair, pairEarlier
 }

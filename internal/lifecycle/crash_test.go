@@ -17,8 +17,10 @@ import (
 
 var crashT0 = time.Date(2026, 11, 13, 22, 0, 0, 0, time.UTC)
 
+// crashInstance is a ready Instance of one worker: its worker serving (#550).
 func crashInstance(name string) *v1alpha1.Instance {
-	return &v1alpha1.Instance{ObjectMeta: metav1.ObjectMeta{Namespace: rigNS, Name: name, UID: types.UID("uid-" + name)}}
+	return &v1alpha1.Instance{ObjectMeta: metav1.ObjectMeta{Namespace: rigNS, Name: name, UID: types.UID("uid-" + name)},
+		Status: v1alpha1.InstanceStatus{Phase: v1alpha1.InstanceReady}}
 }
 
 // exitOf is an exit of worker w of Instance in, at at, of process pid.
@@ -53,6 +55,9 @@ func TestRecordExitPairsExitsOfTwoInstancesWithin30s(t *testing.T) {
 			want: []pairOut{{}, {"b", "a"}, {}}},
 		{name: "three in a row", exits: []*exitSeen{exitOf(a, "worker-0", 1, crashT0), exitOf(b, "worker-0", 2, crashT0.Add(10*time.Second)), exitOf(c, "worker-0", 3, crashT0.Add(20*time.Second))},
 			want: []pairOut{{}, {"b", "a"}, {"c", "b"}}},
+		// The nearest exit to C's (B's, 2 s after it) has paired already; A's, 8 s before it, still pairs.
+		{name: "a late exit whose nearest has paired", exits: []*exitSeen{exitOf(a, "worker-0", 1, crashT0), exitOf(b, "worker-0", 2, crashT0.Add(10*time.Second)), exitOf(c, "worker-0", 3, crashT0.Add(8*time.Second))},
+			want: []pairOut{{}, {"b", "a"}, {"c", "a"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newMemory(crashT0)
@@ -137,4 +142,82 @@ func TestCorrelateExitsReadsTheReports(t *testing.T) {
 			t.Errorf("events %+v, want none: a's worker was stopped as asked, and its router is not a worker", evs)
 		}
 	})
+}
+
+// A deleted deployment's exits are gone once crashKeep has passed, whatever deployment the next exit is
+// of: the tracker is bounded by time across every deployment.
+func TestRecordExitPrunesEveryDeployment(t *testing.T) {
+	m := newMemory(crashT0)
+	a, b, c := crashInstance("a"), crashInstance("b"), crashInstance("c")
+	m.recordExit("md-gone", exitOf(a, "worker-0", 1, crashT0))
+	m.recordExit("md-gone", exitOf(b, "worker-0", 2, crashT0.Add(time.Minute)))
+	live := exitOf(c, "worker-0", 3, crashT0.Add(crashKeep+2*time.Minute))
+	m.recordExit("md-live", live)
+	if xs, ok := m.exits["md-gone"]; ok {
+		t.Errorf("the deleted deployment keeps %d exits past crashKeep", len(xs))
+	}
+	for k := range m.exitKeys {
+		if k != live.key {
+			t.Errorf("exit key %q kept past crashKeep", k)
+		}
+	}
+	if len(m.exits["md-live"]) != 1 {
+		t.Errorf("the live deployment's exits: %d, want its one", len(m.exits["md-live"]))
+	}
+}
+
+// severalInstance is a ready Instance of two workers, worker-1 verified and, when warmed, warmed up at its
+// current generation.
+func severalInstance(t *testing.T, name string, warmed bool) *v1alpha1.Instance {
+	t.Helper()
+	in := crashInstance(name)
+	in.UID = newUID() // a verification record's name needs a UUID
+	two := int32(2)
+	in.Spec.Launch.Workers = &two
+	rec, err := v1alpha1.WorkerVerificationRecordName(in.UID, "worker-1", workerVerificationGeneration(in, "worker-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Status.Workers = []v1alpha1.InstanceWorker{{Name: "worker-1", Record: rec, Verdict: string(v1alpha1.VerdictPass), WarmedUp: warmed}}
+	return in
+}
+
+// Only a serving worker's exit counts (#550): its Instance ready and, with several workers, it verified and
+// warmed up since its last start. A failed start, an Instance verifying, and a stale Instance of an
+// earlier same-named deployment never count. Each case pairs a candidate exit with a serving one on
+// another Instance 5 s later.
+func TestCorrelateExitsCountsOnlyServingWorkers(t *testing.T) {
+	at := func(d time.Duration) *time.Time { v := crashT0.Add(d); return &v }
+	verifying := crashInstance("v")
+	verifying.Status.Phase = v1alpha1.InstanceVerifying
+	starting := crashInstance("s")
+	starting.Status.Phase = v1alpha1.InstanceStarting
+	failedStart := agentapi.WorkerReport{Name: "worker-0", Phase: agentapi.PartExited, ExitCode: ptrTo(127), ExitedAt: at(0)}
+	for _, c := range []struct {
+		name   string
+		in     *v1alpha1.Instance
+		worker agentapi.WorkerReport
+		stale  bool
+		want   int
+	}{
+		{"a serving worker", crashInstance("r"), exitedWorker("worker-0", 1, at(0)), false, 1},
+		{"an Instance verifying", verifying, exitedWorker("worker-0", 1, at(0)), false, 0},
+		{"a failed start", starting, failedStart, false, 0},
+		{"several workers, warmed", severalInstance(t, "w", true), exitedWorker("worker-1", 1, at(0)), false, 1},
+		{"several workers, not warmed", severalInstance(t, "n", false), exitedWorker("worker-1", 1, at(0)), false, 0},
+		{"a stale Instance, ready", crashInstance("o"), exitedWorker("worker-0", 1, at(0)), true, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p, rec := crashPass(crashT0, newMemory(crashT0))
+			p.stale = map[types.UID]bool{}
+			if c.stale {
+				p.stale[c.in.UID] = true
+			}
+			p.correlateExits(c.in, reportView(crashT0, []agentapi.WorkerReport{c.worker}, nil))
+			p.correlateExits(crashInstance("b"), reportView(crashT0.Add(5*time.Second), []agentapi.WorkerReport{exitedWorker("worker-0", 2, at(5*time.Second))}, nil))
+			if got := len(rec.Find(eventFailing, v1alpha1.ReasonCrashCorrelated)); got != c.want {
+				t.Errorf("%d CrashCorrelated events, want %d", got, c.want)
+			}
+		})
+	}
 }

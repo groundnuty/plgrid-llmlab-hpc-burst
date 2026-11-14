@@ -73,6 +73,8 @@ func TestExitsThatAreNoPairRaiseNoCrashCorrelated(t *testing.T) {
 			t.Errorf("events %+v, want none: the exits were 31 s apart", evs)
 		}
 	})
+	// The second crash comes while the Instance verifies again, so it is no serving worker's and is not
+	// recorded; the same-Instance rule itself is TestRecordExitPairsExitsOfTwoInstancesWithin30s's.
 	t.Run("one Instance's crash loop", func(t *testing.T) {
 		rg, ins, ags := crashRig(t, nil)
 		for k := 0; k < 2; k++ {
@@ -110,4 +112,102 @@ func TestExitsThatAreNoPairRaiseNoCrashCorrelated(t *testing.T) {
 			t.Errorf("events %+v, want none: no worker exited", evs)
 		}
 	})
+}
+
+// restartEvents counts the failing WorkerRestart and InstanceRestart events by Instance.
+func restartEvents(rg *rig) map[string]int {
+	n := map[string]int{}
+	for _, code := range []string{v1alpha1.ReasonWorkerRestart, v1alpha1.ReasonInstanceRestart} {
+		for _, e := range rg.rec.Find(eventFailing, code) {
+			n[e.Name]++
+		}
+	}
+	return n
+}
+
+// Two engines failing to START on a bad spec raise nothing, at any attempt (#550): their exits are failed
+// starts, never a serving worker's, though each pair of attempts comes within seconds. The exits are seen:
+// the controller restarts both Instances, generation after generation.
+func TestEnginesFailingToStartRaiseNoCrashCorrelatedAtAnyAttempt(t *testing.T) {
+	rg := newRig(t)
+	rg.engine = func(string) afake.Engine { return afake.Engine{StartFails: true} }
+	md := mdSpec("md")
+	md.Spec.Instances = 2
+	rg.create(md)
+	startUntil(rg, "md", 20*time.Minute, "both Instances restarted at least twice", func() bool {
+		n := restartEvents(rg)
+		twice := 0
+		for _, k := range n {
+			if k >= 2 {
+				twice++
+			}
+		}
+		return twice >= 2
+	})
+	if evs := crashEvents(rg); len(evs) != 0 {
+		t.Fatalf("CrashCorrelated %+v, want none: every exit was a failed start (restarts by Instance %v)", evs, restartEvents(rg))
+	}
+	if rg.readyCount("md") != 0 {
+		t.Fatalf("%d ready Instances: an engine that never starts can't serve, so the test proves nothing", rg.readyCount("md"))
+	}
+	t.Logf("restarts by Instance: %v; no CrashCorrelated", restartEvents(rg))
+}
+
+// A deployment deleted and recreated under the same name (#545's review): the old Instance, stale and
+// draining, has its worker crash within seconds of the new deployment's Instance failing to start. Neither
+// exit was a serving worker's of the new deployment, so no CrashCorrelated names it. (The serving rule
+// alone covers this scenario, since a stale Instance is draining; the stale guard's own discriminator is
+// TestCorrelateExitsCountsOnlyServingWorkers' stale case.)
+func TestARecreatedDeploymentsStaleInstanceNeverPairs(t *testing.T) {
+	rg := newRig(t)
+	// The first Allocation's engine runs requests all along, so its Instance stays draining once its
+	// deployment is gone; every later Allocation's engine fails to start.
+	first := ""
+	rg.engine = func(alloc string) afake.Engine {
+		if first == "" {
+			first = alloc
+		}
+		if alloc == first {
+			return afake.Engine{Health: afake.HealthPlainLoad()}
+		}
+		return afake.Engine{StartFails: true}
+	}
+	rg.create(mdSpec("md"))
+	rg.until(5*time.Minute, 10*time.Second, "ready", func() bool { return rg.readyCount("md") == 1 })
+	old := rg.instances("md")[0]
+	oldAlloc := old.Spec.AllocationRef.Name
+	if oldAlloc != first {
+		t.Fatalf("the ready Instance's Allocation %s is not the first one %s", oldAlloc, first)
+	}
+	if err := rg.c.Delete(rg.ctx, rg.md("md")); err != nil {
+		t.Fatal(err)
+	}
+	rg.create(mdSpec("md"))
+	var fresh *afake.Agent
+	rg.until(10*time.Minute, 5*time.Second, "the new Instance's first start failed", func() bool {
+		for _, a := range rg.allocations("md") {
+			if a.Name != oldAlloc {
+				if ra := rg.agents[a.Name]; ra != nil && len(ra.agent.Starts()) > 0 {
+					fresh = ra.agent
+					return true
+				}
+			}
+		}
+		return false
+	})
+	if ph := rg.instance(old.Name).Status.Phase; ph != v1alpha1.InstanceDraining {
+		t.Fatalf("the old Instance is %s when the new one's start failed, want draining: the test proves nothing", ph)
+	}
+	failedAt := fresh.Starts()[0].Time
+	rg.agentOf(oldAlloc).agent.CrashWorker(v1alpha1.WorkerName(0), 1)
+	if gap := rg.clock.Now().Sub(failedAt); gap > crashWindow {
+		t.Fatalf("the old worker crashed %s after the new start failed, past the window: the test proves nothing", gap)
+	}
+	for k := 0; k < 4; k++ {
+		rg.Step()
+		rg.clock.Advance(5 * time.Second)
+	}
+	if evs := crashEvents(rg); len(evs) != 0 {
+		t.Fatalf("CrashCorrelated %+v, want none: a stale draining Instance and a failed start", evs)
+	}
 }

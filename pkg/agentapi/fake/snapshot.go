@@ -45,6 +45,10 @@ func (a *Agent) workerReport(w *worker, now time.Time) agentapi.WorkerReport {
 		Generation:   w.generation,
 		EngineSocket: w.socket,
 	}
+	if w.pid == 0 {
+		// A start that failed: no process, so no PID and no start time (Engine.StartFails).
+		wr.StartTime = nil
+	}
 	if w.exitCode != nil {
 		code := *w.exitCode
 		wr.ExitCode = &code
