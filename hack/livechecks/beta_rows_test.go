@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -20,6 +21,10 @@ import (
 // path on GH200), is beta's. No alias ever ran those three, and none may.
 var betaRows = []string{"alpha-helios-nooverlap", "tunnel-hour-helios", "gpu-accounting-helios", "reach-helios", "reach-host-dialed-helios",
 	"conformance-helios", "conformance-helios-gh200", "real-engine"}
+
+// betaNowRows are the beta rows on plgrid-now (issue #521; beta's tracker is #522): built, ready in the script and runnable by their own
+// names, in no alias, and in the runbook's table as beta rows.
+var betaNowRows = []string{"beta-athena-now-router"}
 
 // plannedRows are #376's rows still named and not built: none, now that row B is P4's. Row A is P3's.
 var plannedRows = []string{}
@@ -47,7 +52,7 @@ func readAliases(t *testing.T) map[string][]string {
 // No alias stands for a beta row, and each stands for rows that exist and are ready: the aliases are alpha's.
 func TestNoAliasStandsForABetaRow(t *testing.T) {
 	beta := map[string]bool{}
-	for _, r := range betaRows {
+	for _, r := range append(append([]string{}, betaRows...), betaNowRows...) {
 		beta[r] = true
 	}
 	ready := map[string]bool{}
@@ -266,5 +271,61 @@ func TestTheRunbookIsInStepWithTheTables(t *testing.T) {
 	head := text[:strings.Index(text, "\n## What a run ends as")]
 	if strings.Contains(head, "-helios` and `-athena` rows") {
 		t.Error("the runbook's opening still says the aliases stand for a -helios and an -athena row")
+	}
+}
+
+// The beta rows on plgrid-now are built and ready in the script, runnable by their own names with the same gate as the alpha rows, in no
+// alias, and each has its line in the runbook's table as a beta row, its section of "The runs" and its line among the rows whose job
+// never starts (issue #521).
+func TestTheBetaRowsOnPlgridNowAreReadyInTheScriptAndInTheRunbook(t *testing.T) {
+	w := newWorld(t)
+	list := w.run(nil, "--list")
+	aliases := readAliases(t)
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), "docs", "alpha-runbook.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(b)
+	i := strings.Index(text, "\n## Alpha rows and beta rows\n")
+	if i < 0 {
+		t.Fatal("the runbook has no section \"Alpha rows and beta rows\"")
+	}
+	section := text[i+1:]
+	if j := strings.Index(section[3:], "\n## "); j >= 0 {
+		section = section[:j+3]
+	}
+	for _, r := range betaNowRows {
+		w.contains(list, r+"  cluster  ready  gate HPCBURST_ALPHA_ROW")
+		for alias, rows := range aliases {
+			if slices.Contains(rows, r) {
+				t.Errorf("the alias %s stands for %s, a beta row: a beta row is run by its own name", alias, r)
+			}
+		}
+		found := false
+		for _, l := range strings.Split(section, "\n") {
+			if strings.HasPrefix(l, "|") && strings.Contains(l, "`"+r+"`") {
+				found = true
+				for _, want := range []string{"**beta**", "built", "`ready`", "in no alias", "#522"} {
+					if !strings.Contains(l, want) {
+						t.Errorf("the runbook's table line of %s lacks %q: %s", r, want, l)
+					}
+				}
+			}
+		}
+		if !found {
+			t.Errorf("the runbook's table has no line for the beta row %s", r)
+		}
+		if !strings.Contains(text, "\n### `"+r+"`\n") {
+			t.Errorf("the runbook has no section for %s in \"The runs\"", r)
+		}
+		never := false
+		for _, l := range strings.Split(text, "\n") {
+			if strings.HasPrefix(l, "| `"+r+"` | start wait, 10 min") {
+				never = true
+			}
+		}
+		if !never {
+			t.Errorf("the runbook's table of the rows whose job never starts has no line for %s", r)
+		}
 	}
 }

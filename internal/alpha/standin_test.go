@@ -122,7 +122,7 @@ func standInRow(t *testing.T, name string) Row {
 	switch {
 	case strings.HasPrefix(name, "tunnel-hour-"):
 		r.Timing, r.Lease = standInTunnel, 12*time.Minute
-	case name == "alpha-athena-now-serve":
+	case name == "alpha-athena-now-serve", name == BetaRouterName:
 		r.Timing, r.Lease = standInNow, 14*time.Minute
 	case name == "alpha-athena-now-nooverlap":
 		// Row B: the pair's clock and lease, and each job's start wait scaled to 2 minutes, so that a successor held past it
@@ -225,21 +225,21 @@ func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)
 	if err := os.Mkdir(ctl, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if row.Name == "alpha-athena-now-serve" && reshape == nil {
+	if (row.Name == "alpha-athena-now-serve" || row.Name == BetaRouterName) && reshape == nil {
 		// plgrid-now's one job per user: a replacement's job could only pend behind the run's.
 		shape.Partitions = []fakeslurm.Partition{{Name: stack.Partition, GPUOnly: true, Slots: 1}}
 	}
-	if row.Name == "alpha-athena-now-serve" || row.Name == "alpha-athena-now-nooverlap" {
+	if row.Name == "alpha-athena-now-serve" || row.Name == "alpha-athena-now-nooverlap" || row.Name == BetaRouterName {
 		// athena-now.yaml sends plgrid-now a sandbox, which the pre-staging row's helper stages.
 		prof.Spec.Partitions[0].ImageFormat = v1alpha1.ImageFormatSandbox
 	}
 	hub := stack.StartHub(t)
 	engine, notReported := "token-delay="+standInTokenDelay.String(), map[string]bool(nil)
-	if row.Name == "alpha-athena-now-serve" {
+	if row.Name == "alpha-athena-now-serve" || row.Name == BetaRouterName {
 		engine, notReported = standInNowEngine, obscheck.DoubleNotReported
 	}
 	md := stack.ServedDeployment(stm, v1alpha1.EnvVar{Name: "HB_ENGINE_DOUBLE", Value: engine})
-	if strings.HasPrefix(row.Name, "tunnel-hour-") || row.Name == "alpha-athena-now-serve" {
+	if strings.HasPrefix(row.Name, "tunnel-hour-") || row.Name == "alpha-athena-now-serve" || row.Name == BetaRouterName {
 		// The live deployment's context (steps_live_test.go), so that a large body (MinLargeBody) fits under it.
 		for i, f := range md.Spec.Source.Served.Flags {
 			if f.Name == "max-model-len" {
@@ -247,8 +247,21 @@ func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)
 			}
 		}
 	}
+	// The router row runs the real Envoy of the pin, placed as an operator does with hack/fetch-envoy.sh --agent-builds, behind the
+	// stack's --instance-router envoy.
+	hostOpts := hostOptionsFor(row.Name)
+	envoyBin := ""
+	if row.Name == BetaRouterName {
+		envoyBin = testenv.EnvoyBinary(t)
+	}
 	return world{
-		name: "stand-in", bins: b, place: func(h *stack.Host) { h.PlaceAgentBuild(arch) },
+		name: "stand-in", bins: b, hostOpts: hostOpts, cpuArch: arch,
+		place: func(h *stack.Host) {
+			h.PlaceAgentBuild(arch)
+			if envoyBin != "" {
+				h.PlaceEnvoyBuild(arch, envoyBin)
+			}
+		},
 		dh: standInDirect, ports: standInPorts,
 		// The controller lists the checkpoint from the Hub double through HF_ENDPOINT, which up passes on to it.
 		env:     stack.CleanEnv("HF_ENDPOINT=" + hub.URL),
@@ -853,5 +866,213 @@ func TestStandInNowServeWarm(t *testing.T) {
 		if !files[f] {
 			t.Errorf("the agent's log has no %q line for %s", StagedPresentMatching, f)
 		}
+	}
+}
+
+// routerStandIn is one stand-in run of the router row through Run, with tweak applied to the live steps before it starts.
+type routerStandIn struct {
+	row      Row
+	cfg      Config
+	cl       *stack.Cluster
+	lr       *liveRun
+	prefix   string
+	failures []string
+	err      error
+}
+
+func runRouterStandIn(t *testing.T, tweak func(lr *liveRun, cl *stack.Cluster)) routerStandIn {
+	t.Helper()
+	if os.Getenv(envStandIn) != "1" {
+		t.Skipf("the stand-in proof of the live steps runs only with %s=1 (internal/alpha, standin_test.go)", envStandIn)
+	}
+	row := standInRow(t, BetaRouterName)
+	id, err := NewRunID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Row: row, StandIn: true, Out: filepath.Join(t.TempDir(), "out"), PendingMax: 2 * time.Minute, RunID: id, FrontLabel: standInFrontLabel}
+	t.Logf("%s: %s", row.Name, cfg.Mode())
+	rec, err := NewRecorder(cfg.Out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, cl := standInWorldShaped(t, row, nil)
+	lr := newLiveRun(t, cfg, w)
+	lr.stop = &stackStop{}
+	// The fake login's shell reads a file's last bytes, and no more; a stand-in run's log is short.
+	lr.agentLogFn = func(path string) string { return "tail -c 65536 " + path }
+	if tweak != nil {
+		tweak(lr, cl)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.PendingMax+25*time.Minute)
+	defer cancel()
+	failures, err := Run(ctx, cfg, lr, rec, t.Logf)
+	if perr := lr.stop.problem(); perr != nil {
+		t.Fatalf("the stack did not stop cleanly, whatever the run ended with: %v", perr)
+	}
+	return routerStandIn{row: row, cfg: cfg, cl: cl, lr: lr, prefix: TagPrefix(id), failures: failures, err: err}
+}
+
+// jobsOf are the fake cluster's jobs of the run.
+func (s routerStandIn) jobs() []fakeslurm.Job {
+	var ours []fakeslurm.Job
+	for _, j := range s.cl.Plat.Jobs() {
+		if strings.HasPrefix(j.Name, s.prefix) {
+			ours = append(ours, j)
+		}
+	}
+	return ours
+}
+
+// TestStandInBetaRouter is the router row's live steps over the stand-in, through Run: the real stack with --instance-router envoy and the
+// real Envoy of the pin on this host, behind it the engine double; the glibc read on this host, Envoy's process and executable digest read
+// through the fake cluster's srun, S13's 440 variants through the front against the double, one worker restart with the router in front.
+// This host's glibc is above 2.30, so the run is a pass and not NOT RUN; what the stand-in cannot show is Athena's node (the row's own
+// reading of it), and the double's answers are the double's, not vLLM's (it reads the four prompt forms vLLM reads, and refuses only what S13
+// says vLLM refuses: TestThroughTheDoubleS13sVariantsFailNothing). The cluster's own record of the job must show it ended by the stack's
+// release before the cleanup could, as row A's does.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInBetaRouter(t *testing.T) {
+	s := runRouterStandIn(t, nil)
+	post, _ := os.ReadFile(filepath.Join(s.cfg.Out, PostsFile))
+	t.Logf("%s's text to post:\n%s", s.row.Name, post)
+	if s.err != nil {
+		t.Fatalf("%s did not finish: %v", s.row.Name, s.err)
+	}
+	if len(s.failures) > 0 {
+		t.Fatalf("%s failed its verdict over the stand-in: %s", s.row.Name, Summary(s.failures))
+	}
+	if !strings.Contains(string(post), "RESPONSE-LEVEL reading on vLLM, not bytes") {
+		t.Errorf("the text to post does not name the Bytes as a response-level reading:\n%s", post)
+	}
+	ours := s.jobs()
+	if len(ours) != 1 {
+		t.Fatalf("the fake cluster holds %d jobs of the run, want the one", len(ours))
+	}
+	j, began := ours[0], s.lr.stop.began
+	if j.RestartCount != 0 || !j.Finished || (j.State != fakeslurm.Completed && j.State != fakeslurm.Cancelled) {
+		t.Errorf("the run's job has restart count %d, state %s and finished %t, want no requeue, an end by the agent's exit or a cancel, and finished", j.RestartCount, j.State, j.Finished)
+	}
+	if j.End.IsZero() || !j.End.Before(began) {
+		t.Errorf("the job ended at %s and Close began to stop the stack at %s: the stack's release did not end it before the cleanup could", j.End.Format(time.TimeOnly), began.Format(time.TimeOnly))
+	}
+	record, err := os.ReadFile(filepath.Join(s.cfg.Out, RecordFile))
+	if err != nil || !strings.Contains(string(record), "STAND-IN RUN") || strings.Contains(string(record), "LIVE RUN") {
+		t.Errorf("the record does not say the run was a stand-in one (%v)", err)
+	}
+}
+
+// TestStandInBetaRouterOldGlibc is the router row's NOT RUN over the stand-in: the node's glibc, read by the probe, is 2.28 (the probe's
+// script is replaced, as a node with an older glibc would answer), and the run must end NOT RUN naming 2.28, at once, before the Instance is
+// ready, with no request sent through the front and the run's job cancelled by its tag (it never ended on its own: the cleanup's cancel did).
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInBetaRouterOldGlibc(t *testing.T) {
+	s := runRouterStandIn(t, func(lr *liveRun, _ *stack.Cluster) { lr.glibcScript = "echo 'glibc 2.28'\n" })
+	var g *GlibcTooOldError
+	if !errors.Is(s.err, ErrGlibcTooOld) || !errors.As(s.err, &g) || g.Version != (GlibcVersion{2, 28}) || g.FromAgent || len(s.failures) != 0 {
+		t.Fatalf("failures %v, err %v; want the NOT RUN of a node whose glibc is 2.28, read on the node", s.failures, s.err)
+	}
+	for _, f := range []string{RecordFile, PostsFile} {
+		if _, err := os.Stat(filepath.Join(s.cfg.Out, f)); err == nil {
+			t.Errorf("%s was written for a run that sent nothing", f)
+		}
+	}
+	ours := s.jobs()
+	if len(ours) != 1 {
+		t.Fatalf("the fake cluster holds %d jobs of the run, want the one", len(ours))
+	}
+	if j := ours[0]; !j.Finished || j.End.IsZero() || j.TermAt.IsZero() {
+		t.Errorf("the run's job did not end by a cancel (finished %t, ended %s, TERM at %s): the NOT RUN left it", j.Finished, j.End.Format(time.TimeOnly), j.TermAt.Format(time.TimeOnly))
+	}
+}
+
+// TestStandInBetaRouterOldGlibcInTheAgentsLog is the same NOT RUN from the other side: the probe reads this host's glibc, above 2.30, and the
+// agent's own log of the job, which the steps read while the Instance is not yet ready, holds a refused router start naming 2.28. The older
+// reading counts, so the run ends NOT RUN naming 2.28 from the agent's log.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInBetaRouterOldGlibcInTheAgentsLog(t *testing.T) {
+	refusal := `time=2026-11-14T10:00:01Z level=ERROR msg="router did not start" router=envoy err="envoy refused: Envoy needs glibc 2.30 or later, and this node's glibc is 2.28: Envoy cannot run bare here"`
+	s := runRouterStandIn(t, func(lr *liveRun, cl *stack.Cluster) {
+		// The fake login's shell has tail and no echo: the agent's log it reads is a file of the cluster's own file system.
+		log := filepath.Join(cl.Scratch, "refused-start.log")
+		if err := os.WriteFile(log, []byte(refusal+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		lr.agentLogFn = func(string) string { return "tail -c 65536 " + log }
+	})
+	var g *GlibcTooOldError
+	if !errors.Is(s.err, ErrGlibcTooOld) || !errors.As(s.err, &g) || g.Version != (GlibcVersion{2, 28}) || !g.FromAgent || len(s.failures) != 0 {
+		t.Fatalf("failures %v, err %v; want the NOT RUN of a node whose glibc is 2.28, read from the agent's log", s.failures, s.err)
+	}
+}
+
+// A router row whose agent's log does not say what the row reads there fails its verdict: the flow reads the log and the verdict judges it.
+// The stack runs as in the passing stand-in and Envoy runs, but the agent's log the steps read is another file's. Without the line that says
+// the router serves the row fails with that; with a line that says the router did not start, and no clause naming a glibc (which would be the
+// NOT RUN), it fails with that. Neither is NOT RUN, and neither is a pass.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInBetaRouterFailsOnWhatTheAgentsLogSays(t *testing.T) {
+	for _, c := range []struct{ name, log, want string }{
+		{"no serving line", `time=2026-11-14T10:00:01Z level=INFO msg="allocation agent starting"`, "the agent's log does not say the router is serving"},
+		{"a start that failed for another reason", `time=2026-11-14T10:00:01Z level=ERROR msg="router did not start" router=envoy err="envoy refused: the bootstrap is refused"`,
+			"the agent's log says the router did not start"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := runRouterStandIn(t, func(lr *liveRun, cl *stack.Cluster) {
+				log := filepath.Join(cl.Scratch, "other-agent.log")
+				if err := os.WriteFile(log, []byte(c.log+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				lr.agentLogFn = func(string) string { return "tail -c 65536 " + log }
+			})
+			if s.err != nil {
+				t.Fatalf("the run ended with %v; want a failed verdict naming %q", s.err, c.want)
+			}
+			if !slices.Contains(s.failures, c.want) {
+				t.Errorf("failed checks %q do not hold %q", s.failures, c.want)
+			}
+		})
+	}
+}
+
+// routerLostAfterARestart is the run's API client reading an Instance that has a restart recorded as one whose router holds no worker
+// healthy: status.healthyWorkers 0, whatever the controller wrote. The row reads healthyWorkers when the Instance is ready, before any restart,
+// where this changes nothing, and again once it serves after the worker restart, where it is what the row must find. Everything else passes
+// through.
+type routerLostAfterARestart struct{ client.Client }
+
+func (c routerLostAfterARestart) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := c.Client.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	if in, ok := obj.(*v1alpha1.Instance); ok && len(in.Status.Restarts) > 0 {
+		zero := int32(0)
+		in.Status.HealthyWorkers = &zero
+	}
+	return nil
+}
+
+// TestStandInBetaRouterFailsWhenTheRouterHoldsNoWorkerAfterTheRestart: the router row reads status.healthyWorkers again once the Instance
+// serves after the worker restart, and a router that then holds no worker healthy fails it, naming that read. It is the read the flow makes
+// itself (healthyWithin), not the verdict's check alone: the same run with the healthy count read as 1 in the flow passes.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInBetaRouterFailsWhenTheRouterHoldsNoWorkerAfterTheRestart(t *testing.T) {
+	s := runRouterStandIn(t, func(lr *liveRun, _ *stack.Cluster) {
+		lr.wrapAPI = func(c client.Client) client.Client { return routerLostAfterARestart{c} }
+	})
+	if s.err != nil {
+		t.Fatalf("the run ended with %v; want a failed verdict", s.err)
+	}
+	const want = "status.healthyWorkers was not 1 once the Instance served again after the worker restart"
+	if !slices.Contains(s.failures, want) {
+		t.Errorf("failed checks %q do not hold %q", s.failures, want)
+	}
+	if slices.Contains(s.failures, "status.healthyWorkers was not 1 when the Instance was first ready") {
+		t.Errorf("the read at ready, before any restart, was changed too: %q", s.failures)
 	}
 }

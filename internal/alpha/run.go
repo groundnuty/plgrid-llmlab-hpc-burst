@@ -38,11 +38,16 @@ import (
 // stream long enough to tell a cut from an end can cross the drain start. Nothing was driven past the rate stream, and
 // the run's jobs are cancelled by their tags.
 //
+// A sixth is the router row's (issue #521; beta's tracker #522): the compute node's glibc is older than the 2.30 Envoy needs
+// (ErrGlibcTooOld), read on the node or from the agent's own log of a refused start, so Envoy cannot run bare there and the router
+// was never put to the test. The marker names the version alone, and the run's jobs are cancelled by their tags.
+//
 // A fifth is the tunnel rows' (issue #451; the science agent's ruling (b), 12 Nov 2026): the stream that fits the deployment's
 // max-model-len at the engine's measured rate is under the row's LongFloor (ErrLongTooShort), so the hour cannot hold the
 // long stream its check 2 asks for. Nothing was sent but the rate stream.
 func NotRun(_ Row, err error) bool {
-	return neverStarted(err) || errors.Is(err, ErrWarmUnshown) || errors.Is(err, ErrSlotTaken) || errors.Is(err, ErrLeadTooShort) || errors.Is(err, ErrLongTooShort)
+	return neverStarted(err) || errors.Is(err, ErrWarmUnshown) || errors.Is(err, ErrSlotTaken) || errors.Is(err, ErrLeadTooShort) || errors.Is(err, ErrLongTooShort) ||
+		errors.Is(err, ErrGlibcTooOld)
 }
 
 // neverStarted is whether err says a job of the run never started within a bound.
@@ -55,6 +60,15 @@ func neverStarted(err error) bool {
 // when it was the deployment's first end, which hack/live-checks.sh reads off the marker to name
 // that bound in its line (the wait in the queue otherwise); any other gives pendingMax.
 func NotRunNote(row Row, pendingMax time.Duration, err error) string {
+	if errors.Is(err, ErrGlibcTooOld) {
+		// The version only, numbers: hack/live-checks.sh reads the reason in parentheses.
+		reason := ""
+		var g *GlibcTooOldError
+		if errors.As(err, &g) {
+			reason = " (glibc " + g.Version.String() + ")"
+		}
+		return fmt.Sprintf("%s: %s%s; the run sent no request through the front; this run's jobs were cancelled by tag\n", row.Name, glibcTooOldWords, reason)
+	}
 	if errors.Is(err, ErrLeadTooShort) {
 		// The rate and the context, numbers only: hack/live-checks.sh reads the reason in parentheses (row_a_reason).
 		reason := ""
@@ -214,6 +228,14 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 			return VerifyNowNoOverlap(cfg.Row, o, j)
 		}
 		summary = func(f []string, j []provider.Job) string { return nowNoOverlapPost(cfg.Row, o, f, j, refused) }
+	case cfg.Row.Name == BetaRouterName:
+		o, serr := st.BetaRouter(ctx, plan)
+		if serr != nil {
+			return nil, serr
+		}
+		tags, obs = o.Tags, o
+		judge = func(j []provider.Job) []string { return VerifyBetaRouter(cfg.Row, o, j) }
+		summary = func(f []string, _ []provider.Job) string { return betaRouterPost(cfg.Row, o, f) }
 	case strings.HasPrefix(cfg.Row.Name, "alpha-athena-now-serve"):
 		o, serr := st.NowServe(ctx, plan)
 		if serr != nil {
