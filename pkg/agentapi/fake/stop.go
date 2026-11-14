@@ -10,6 +10,10 @@ import (
 // (agentapi.WorkerReport.ExitCode).
 const killedExitCode = -1
 
+// startFailedExitCode is the exit code the real agent reports for a start it could not make
+// (internal/agent's startFailedExitCode).
+const startFailedExitCode = 127
+
 // terminate carries out a stop instruction on one worker: a polite stop, with
 // TERM. An engine that honours it exits at once, with code 0. An engine that
 // ignores it (Engine.IgnoreTerm) is reported stopping until the grace has run

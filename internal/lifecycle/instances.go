@@ -425,6 +425,7 @@ func (p *pass) running(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) error 
 	if err != nil {
 		return err
 	}
+	p.correlateExits(in, av)
 	// Behind a router: the router's healthy count, from a current report (routerhealth.go).
 	if err := p.writeHealthyWorkers(in, av); err != nil {
 		return err

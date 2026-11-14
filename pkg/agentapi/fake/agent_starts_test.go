@@ -98,3 +98,34 @@ func TestTheAgentReadsTheImageFormatItWasSent(t *testing.T) {
 	r.step()
 	eq(t, "ImageFormat from an idle state's settings", r.a.ImageFormat(), agentapi.ImageFormatSandbox)
 }
+
+// A start that fails (Engine.StartFails) is reported as the real agent reports it: exited at once, with
+// no PID and no start time, exit code 127 and ExitedAt the attempt's time. It stays exited until the
+// worker's generation rises, and the next attempt fails too.
+func TestAFailedStartIsReportedAsTheRealAgentReportsIt(t *testing.T) {
+	r := newRig(t, fake.Engine{StartFails: true})
+	r.set(run(instance()))
+	r.step()
+	check := func(what string, gen int64, at time.Time) {
+		t.Helper()
+		rep, ok := r.a.LastReport()
+		if !ok || rep.Instance == nil || len(rep.Instance.Workers) != 1 {
+			t.Fatalf("%s: no worker in the report: %+v", what, rep.Instance)
+		}
+		w := rep.Instance.Workers[0]
+		if w.Phase != agentapi.PartExited || w.PID != 0 || w.StartTime != nil || w.ExitCode == nil || *w.ExitCode != 127 ||
+			w.ExitedAt == nil || !w.ExitedAt.Equal(at) || w.Generation != gen {
+			t.Errorf("%s: worker %+v, want exited at generation %d with no PID or start time, code 127, ExitedAt %s", what, w, gen, at)
+		}
+	}
+	check("the first start", 0, t0)
+	r.clk.Advance(30 * time.Second)
+	r.step()
+	check("thirty seconds on, the same generation", 0, t0)
+	r.set(run(instance(withWorkers(1))))
+	r.step()
+	check("the restart", 1, t0.Add(30*time.Second))
+	if n := len(r.a.Starts()); n != 2 {
+		t.Errorf("%d starts recorded, want 2", n)
+	}
+}

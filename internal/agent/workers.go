@@ -44,6 +44,7 @@ func (a *Agent) startWorker(in *instance, dw agentapi.DesiredWorker, instGen int
 		code := startFailedExitCode
 		w.phase = agentapi.PartExited
 		w.exitCode = &code
+		w.exitedAt = now
 		w.logTail = startFailureTail(err, a.keys)
 		return w
 	}
@@ -269,8 +270,9 @@ func (a *Agent) leaderExited(in *instance, g *procgroup.Group) {
 		return
 	}
 	w.phase = agentapi.PartExited
+	w.exitedAt = a.clock()
 	if w.downAt.IsZero() {
-		w.downAt = a.clock()
+		w.downAt = w.exitedAt
 	}
 	w.logTail = readLogTail(engineLogPath(a.o.LogDir, w.name), a.keys)
 	a.log.Warn("worker exited without being told to", "worker", w.name, "pid", g.PID(), "exitCode", code)
