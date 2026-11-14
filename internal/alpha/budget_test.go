@@ -58,6 +58,12 @@ func TestEachStackRowsWorstCaseIsItsWaitsAddedUp(t *testing.T) {
 		{"the bulk row on plgrid-now, 30", rowOf("beta-athena-now-bulk"), 30, 11 + 5 + 10 + 41 + 7 + 5 + 2 + 5, 115, 11 + 5 + 5 + 2 + 5},
 		{"the bulk row on plgrid-now, 2 h asked", rowOf("beta-athena-now-bulk"), 120, 11 + 5 + 10 + 41 + 7 + 5 + 2 + 5, 115, 11 + 5 + 5 + 2 + 5},
 		{"the keeper row on plgrid-now, 2 h asked", rowOf("beta-athena-now-keeper"), 120, 11 + 10 + 41 + 7 + 5 + 2 + 5, 115, 11 + 5 + 2 + 5},
+		// The router row on Helios (issue #566) is the router row's on the Helios clock: its wait in the queue, the 106-minute lease less
+		// the 15-minute drain window, the drain window and 5 for the job to end once the deployment goes, two catch-ups and 5 to close. Its
+		// run's deadline is its wait and its budget, 213.
+		{"the router row on Helios, 30", rowOf("beta-helios-now-router"), 30, 11 + 30 + 91 + 15 + 5 + 2 + 5, 30 + 213, 11 + 5 + 2 + 5},
+		// Asked to wait 2 h, its wait is capped a minute before the deployment's first end: 106 - 15 - 1 = 90.
+		{"the router row on Helios, its wait capped a minute before the first end", rowOf("beta-helios-now-router"), 120, 11 + 90 + 91 + 15 + 5 + 2 + 5, 120 + 213, 11 + 5 + 2 + 5},
 		// Row B on plgrid-now (issue #376): its start wait of 10, the predecessor's 21-minute lease and 5 for its job to be seen
 		// gone from the slot, 3 for the successor's Allocation and the successor's own start wait of 10, then 12 and 5 for it to
 		// be ready, 1 for the guard's last looks, the 7-minute drain window and 5 for the jobs to end once the deployment goes,

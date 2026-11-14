@@ -93,7 +93,7 @@ func (r Row) WorstCase(pendingMax time.Duration) time.Duration {
 		return StartupWait + first + (r.Lease - dw) + tm.MaxRequestDuration + dw + EndMargin + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout
 	case "alpha-helios-nooverlap":
 		return StartupWait + first + r.Lease + SuccessorWait(tm, pendingMax) + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout
-	case BetaRouterName, BetaKeeperName:
+	case BetaRouterName, BetaHeliosRouterName, BetaKeeperName:
 		return StartupWait + first + (r.Lease - dw) + dw + EndMargin + 2*stack.CatchUpWorstCase + CloseTimeout
 	case BetaBulkName:
 		// The router row's sum, and the staging of the shipped agent the test shim execs, before the deployment (issue #521, option (A)).

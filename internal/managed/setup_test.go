@@ -2,6 +2,7 @@ package managed
 
 import (
 	"errors"
+	appsv1 "k8s.io/api/apps/v1"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -35,6 +36,9 @@ func newSetupManager(t *testing.T, addErr error) *setupManager {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil { // the managed entries' identity records
 		t.Fatal(err)
 	}
 	return &setupManager{c: clientfake.NewClientBuilder().WithScheme(scheme).Build(), addErr: addErr}

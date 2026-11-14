@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	appsv1 "k8s.io/api/apps/v1"
 	"net"
 	"net/http"
 	"os"
@@ -263,6 +264,9 @@ func newEnv(t *testing.T, opts ...envOption) *env {
 
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil { // the managed entries' identity records
 		t.Fatal(err)
 	}
 	var labels map[string]string

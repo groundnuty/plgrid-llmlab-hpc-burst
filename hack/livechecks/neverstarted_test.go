@@ -54,6 +54,7 @@ var neverStartedBound = map[string]struct {
 	"beta-athena-now-router":     {notRunNowStartWait10, true},
 	"beta-athena-now-keeper":     {notRunNowStartWait10, true},
 	"beta-athena-now-bulk":       {notRunNowStartWait10, true},
+	"beta-helios-now-router":     {notRunPending30, true},
 	"alpha-athena-now-stage":     {notRunStartWait10, true},
 }
 
@@ -285,6 +286,7 @@ var cannotTellLine = map[string]string{
 	"beta-athena-now-router":     "FAIL (exit status 1)",
 	"beta-athena-now-keeper":     "FAIL (exit status 1)",
 	"beta-athena-now-bulk":       "FAIL (exit status 1)",
+	"beta-helios-now-router":     "FAIL (exit status 1)",
 	"alpha-athena-now-stage":     "FAIL (exit status 1)",
 }
 

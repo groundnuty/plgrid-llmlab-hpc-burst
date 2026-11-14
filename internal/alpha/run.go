@@ -310,9 +310,17 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 		refused = keeperEndedFirst(o)
 		judge = func(j []provider.Job) []string { return VerifyBetaKeeper(cfg.Row, o, j) }
 		summary = func(f []string, _ []provider.Job) string { return betaKeeperPost(cfg.Row, o, f) }
-	case cfg.Row.Name == BetaRouterName:
+	case IsRouterRow(cfg.Row.Name):
 		o, serr := st.BetaRouter(ctx, plan)
 		if serr != nil {
+			// The Helios router row posts its glibc on any outcome (issue #566): a node under the minimum is the reading it exists for.
+			// The run is still NOT RUN, with no record: it sent no request, and nothing else of it is judged.
+			var g *GlibcTooOldError
+			if cfg.Row.PostsGlibcNotRun && errors.As(serr, &g) {
+				if perr := rec.SaveText(PostsFile, InsertFrontLine(glibcNotRunPost(cfg.Row, g), cfg.FrontLabel)); perr != nil {
+					return nil, fmt.Errorf("the text to post of a node whose glibc is %s could not be written: %w", g.Version, perr)
+				}
+			}
 			return nil, serr
 		}
 		tags, obs = o.Tags, o

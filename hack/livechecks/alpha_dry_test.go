@@ -208,6 +208,8 @@ var dryRows = []dryRow{
 	{"beta-athena-now-keeper", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaKeeperFaults, []string{"window-at-the-floor"}, nil},
 	{"beta-athena-now-bulk", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaBulkFaults,
 		[]string{"control-at-the-rule", "control-no-stall", "bulk-at-the-rule", "bulk-above-the-rule", "bulk-small-margin"}, nil},
+	// The router row on Helios's GH200 (issue #566): the same faults, on the Helios shape and slot.
+	{"beta-helios-now-router", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaRouterFaults, []string{"glibc-at-the-minimum", "control-both-refuse", "control-ended-alike"}, nil},
 }
 
 func containsString(list []string, s string) bool {
