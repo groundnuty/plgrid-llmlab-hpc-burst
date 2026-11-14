@@ -83,7 +83,7 @@ type world struct {
 // (stack.InstanceRouter, `hpcburst up --instance-router envoy`), and no other row's do. The live world and the stand-in's both take them from
 // here, so that a row's router is one decision.
 func hostOptionsFor(name string) []stack.HostOption {
-	if name == BetaRouterName {
+	if IsRouterRow(name) {
 		return []stack.HostOption{stack.InstanceRouter}
 	}
 	return nil

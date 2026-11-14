@@ -55,6 +55,8 @@ var alphaShapes = []alphaShape{
 	{"alpha-athena-now-serve", "TestAlphaAthenaNowServe", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:48:00, one job, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
 	// The router row on plgrid-now (issue #521): row A's shape, with Envoy in front of the one worker.
 	{"beta-athena-now-router", "TestBetaAthenaNowRouter", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:48:00, one job, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
+	// The router row on Helios's GH200 (issue #566): tunnel-hour-helios's single job in QOS now, with the Helios rows' lease.
+	{"beta-helios-now-router", "TestBetaHeliosNowRouter", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 120000M, time limit 01:46:00, one job, no requeue", "now", "SEEDACCT-gh", true},
 	// Row B on plgrid-now (issue #376): the same size, two jobs of 21 minutes in turn (athena-now.yaml's lead of 20 and a
 	// minute), each with its start wait of 10.
 	{"alpha-athena-now-nooverlap", "TestAlphaAthenaNowNoOverlap", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:21:00, at most 2 jobs at once, each of this shape, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
@@ -407,8 +409,9 @@ func TestAnAlphaRunBuildsBeforeTheSlotAndGivesTheTestItsEnvironment(t *testing.T
 			}
 			// Envoy's build is fetched for the router row, whose Instances run behind it, and for no other row (issue #521): a row that
 			// does not start the router must not stage an Envoy it never runs.
-			if has := strings.Contains(joined, "fetch-envoy --agent-builds "); has != (s.row == "beta-athena-now-router") {
-				t.Errorf("%s: Envoy's build fetched before the test binary: %t, want %t:\n%s", s.row, has, s.row == "beta-athena-now-router", joined)
+			router := s.row == "beta-athena-now-router" || s.row == "beta-helios-now-router"
+			if has := strings.Contains(joined, "fetch-envoy --agent-builds "); has != router {
+				t.Errorf("%s: Envoy's build fetched before the test binary: %t, want %t:\n%s", s.row, has, router, joined)
 			}
 			env := w.stateFile("test-env-" + s.test)
 			for _, bad := range []string{"HPCBURST_ALPHA_DRY"} {
@@ -630,7 +633,7 @@ func TestASignalDuringAnAlphaRunRunsTheCleanup(t *testing.T) {
 }
 
 func TestPlanNamesTheAlphaRowsWhenTheStackChanges(t *testing.T) {
-	alphaRows := []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-athena", "tunnel-hour-helios", "alpha-athena-now-serve", "alpha-athena-now-nooverlap", "beta-athena-now-router"}
+	alphaRows := []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-athena", "tunnel-hour-helios", "alpha-athena-now-serve", "alpha-athena-now-nooverlap", "beta-athena-now-router", "beta-helios-now-router"}
 	// The rehearsal row (issue #193) builds and runs the same stack, on this host: it is a local row.
 	stackRows := append(append([]string{}, alphaRows...), "rehearsal-part3")
 	cases := []struct {
@@ -910,6 +913,8 @@ func TestTheRowsThatHoldTheOwnersSlotForHoursNeedTheOwnersGo(t *testing.T) {
 		{"alpha-athena-now-serve", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
 		// The router row on plgrid-now (issue #521) holds the slot as row A does: 10 + 48 + 2.
 		{"beta-athena-now-router", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
+		// The router row on Helios (issue #566) holds QOS now's GPU for its lease, MinLease's 106 minutes, rounded up to ten.
+		{"beta-helios-now-router", "LIVE_OWNER_GO_HELIOS_NOW", "may pend up to 30 min in the queue (then it is cancelled by its tag and the run is NOT RUN), then holds QOS now's GPU for about 1 h 50 min; the owner's go is needed (the development rule on #145)"},
 		// Row B on plgrid-now (issue #376): its first start wait, then 10 + 21 + 3 + 10 + 12 + 3 = 59 minutes, rounded up to ten.
 		{"alpha-athena-now-nooverlap", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
 		// The pre-staging row (issue #376): its start wait, then 10 + 30 + 2 = 42 minutes, rounded up to ten.

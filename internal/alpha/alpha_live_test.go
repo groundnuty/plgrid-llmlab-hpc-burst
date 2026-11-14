@@ -106,6 +106,16 @@ func TestBetaAthenaNowRouter(t *testing.T) {
 	runRow(t, "betarouter", BetaRouterName)
 }
 
+// TestBetaHeliosNowRouter is the router row on Helios's GH200 under profiles/helios.yaml (issue #566): the router row's steps and checks on
+// the Helios shape, with the linux-arm64 builds and Envoy's arm64 build staged by its pinned digest, so that the GH200 compute node's glibc
+// is read in the first minutes after Helios returns. A node whose glibc is under 2.30 is NOT RUN, naming the version, and that reading is
+// posted too: Apptainer is then the route.
+//
+//livecheck:beta-helios-now-router
+func TestBetaHeliosNowRouter(t *testing.T) {
+	runRow(t, "betarouter", BetaHeliosRouterName)
+}
+
 // TestAlphaAthenaNowNoOverlap is row B of issue #376 on Athena plgrid-now under profiles/athena-now.yaml: HBEP-7's
 // no-overlap mode on the one-slot path, two jobs in turn, both warm, with a stream across the drain start, the
 // successor's Allocation only after the predecessor's job has left the slot, and the gap measured.
