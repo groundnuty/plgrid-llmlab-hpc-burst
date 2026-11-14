@@ -957,11 +957,10 @@ func (s routerStandIn) jobs() []fakeslurm.Job {
 // TestStandInBetaRouter is the router row's live steps over the stand-in, through Run: the real stack with --instance-router envoy and the
 // real Envoy of the pin on this host, behind it the engine double; the glibc read on this host, Envoy's process and executable digest read
 // through the fake cluster's srun, S13's 440 variants through the front against the double, one worker restart with the router in front.
-// This host's glibc is above 2.30, so the run is not NOT RUN; what the stand-in cannot show is Athena's node (the row's own reading of it),
-// and the double's answers are the double's, not vLLM's. Its verdict fails on one check alone, the double's own limit: it reads a string
-// prompt only, so S13's six variants of the other prompt forms, valid for vLLM, are refused outside S13's groups, which the ruling (c) on
-// #521 fails (doublePromptFormsFailure; TestThroughTheDoubleOnlyThePromptFormsItCannotReadFail reads it without a stack). Every other check
-// passes. The cluster's own record of the job must show it ended by the stack's release before the cleanup could, as row A's does.
+// This host's glibc is above 2.30, so the run is a pass and not NOT RUN; what the stand-in cannot show is Athena's node (the row's own
+// reading of it), and the double's answers are the double's, not vLLM's (it reads the four prompt forms vLLM reads, and refuses only what S13
+// says vLLM refuses: TestThroughTheDoubleS13sVariantsFailNothing). The cluster's own record of the job must show it ended by the stack's
+// release before the cleanup could, as row A's does.
 //
 //livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
 func TestStandInBetaRouter(t *testing.T) {
@@ -971,8 +970,8 @@ func TestStandInBetaRouter(t *testing.T) {
 	if s.err != nil {
 		t.Fatalf("%s did not finish: %v", s.row.Name, s.err)
 	}
-	if !slices.Equal(s.failures, []string{doublePromptFormsFailure}) {
-		t.Fatalf("%s's verdict over the stand-in is %q, want only the double's prompt forms: %s", s.row.Name, s.failures, doublePromptFormsFailure)
+	if len(s.failures) > 0 {
+		t.Fatalf("%s failed its verdict over the stand-in: %s", s.row.Name, Summary(s.failures))
 	}
 	if !strings.Contains(string(post), "RESPONSE-LEVEL reading on vLLM, not bytes") {
 		t.Errorf("the text to post does not name the Bytes as a response-level reading:\n%s", post)
