@@ -1369,7 +1369,8 @@ jobs:
       # The bulk test alone. hack/rehearsal.sh's exit is the test's, which fails a mode whose control is
       # INVALID, so the step keeps going past it and the job's verdict is hack/bulkverdict's mapping of the
       # test's log (#563): it also fails a run that skipped the test, a selection that matched nothing, a
-      # failed build and processes left. Missing inputs fail the run itself (hack/rehearsal.sh sets
+      # failed build, processes left and a test that failed while both its modes passed. Each mode's verdict,
+      # figures and link rate go to the step summary, and an INVALID mode's warning carries its link rate. Missing inputs fail the run itself (hack/rehearsal.sh sets
       # HPCBURST_REQUIRE_FRP and HPCBURST_REQUIRE_SSHD, and HPCBURST_REHEARSAL=1, without which the test skips).
       - name: hack/rehearsal.sh
         run: |

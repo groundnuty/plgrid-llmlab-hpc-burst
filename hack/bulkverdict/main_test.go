@@ -54,7 +54,7 @@ func vlog(direct, hostDialed modeOut, extra ...string) string {
 		}
 		if o.verdict != "" {
 			b.WriteString("=== NAME  " + subtest(testName, m) + "\n")
-			b.WriteString("    bulk_test.go:101: " + m + ": gap p99 without the bulk path 90ms (300 gaps), with it 55ms (300 gaps)\n")
+			b.WriteString("    bulk_test.go:101: " + m + ": gap p99 without the bulk path 90ms (300 gaps), with it 55ms (300 gaps); the reply took 2s and 2s (32.0 and 32.5 MB/s through the link)\n")
 			b.WriteString("    bulk_test.go:106: " + o.verdict + "\n")
 			if !strings.HasPrefix(o.verdict, s4PassLine) {
 				modeFail = true
@@ -130,10 +130,18 @@ func TestTheJobMapsTheBulkTestsOutcomesAsRuled(t *testing.T) {
 		{"an error the parent test reported itself, beside two clean modes (a cleanup of its own)",
 			vlog(clean, clean, "=== NAME  "+testName, "    harness_test.go:80: a process of the test was left after it: frps"),
 			true, "reported 1 message(s) of its own", "", 0, 1},
+		{"the belt: the test failed while both its modes passed, with no message (a parent cleanup that fails it)",
+			strings.Replace(strings.Replace(vlog(clean, clean), "--- PASS: "+testName+" (", "--- FAIL: "+testName+" (", 1), "\nPASS\n", "\nFAIL\n", 1),
+			true, testName + " failed while both its modes passed", "", 0, 1},
 		{"processes left after the test",
 			vlog(clean, clean, "rehearsal.sh: processes left in hpcburst-rehearsal-1234.scope after the test returned (exit 0):"),
 			true, "processes left", "", 0, 1},
 		{"a panic", vlog(clean, clean, "panic: test timed out after 30m0s"), true, "panicked or timed out", "", 0, 1},
+		{"the test skipped (no HPCBURST_REHEARSAL=1): named as a skip, which go test passes",
+			"hack/rehearsal.sh: building the four binaries and the rehearsal test\n=== RUN   " + testName + "\n" +
+				"    harness_test.go:61: the one-host rehearsal runs the real stack, and only with HPCBURST_REHEARSAL=1 (hack/rehearsal.sh)\n" +
+				"--- SKIP: " + testName + " (0.00s)\nPASS\n",
+			true, testName + " skipped, so the bulk path was not tested: the one-host rehearsal runs the real stack", "", 0, 1},
 		{"the test never ran", "hack/rehearsal.sh: building the four binaries and the rehearsal test\ntesting: warning: no tests to run\nPASS\n",
 			true, "did not run", "", 0, 1},
 		{"a build that failed", "hack/rehearsal.sh: building the four binaries and the rehearsal test\n# github.com/x\n./a.go:1: syntax error\n",
@@ -186,6 +194,8 @@ func TestTheMapperReadsWhatTheTestWrites(t *testing.T) {
 		`t.Errorf("` + s4FailLine + `%s"`,
 		`t.Logf("` + s4PassLine + `%s"`,
 		"gap p99 %s without the bulk path, %s with it",
+		`"%s: gap p99 without the bulk path %s (%d gaps)`,
+		ratesFormat + `",`,
 		"s4PassMaxP99    = 75 * time.Millisecond",
 		`{"direct", portsBulkDirect}`,
 		"{string(agentapi.DialHomeHostDialed), portsBulkHostDialed}",
@@ -203,5 +213,44 @@ func TestTheMapperReadsWhatTheTestWrites(t *testing.T) {
 	}
 	if !strings.Contains(string(r), `echo "`+leftoverLine+` in $scope`) {
 		t.Errorf("hack/rehearsal.sh no longer reports processes left as %q", leftoverLine)
+	}
+}
+
+// The warning carries the link's rate, read from the mode's figures line, and the step summary has a row per mode with its verdict, figures
+// and rate, and the job's verdict (#563's ruling, as its delta review read it).
+func TestTheWarningCarriesTheRateAndTheSummaryEachModesVerdict(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("testdata", "one-invalid.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := judgeText(t, string(b))
+	if len(v.warnings) != 1 || !strings.HasSuffix(v.warnings[0], "; the link's rate 32.0 MB/s without the bulk path, 32.5 MB/s with it") {
+		t.Errorf("warnings %q: want direct's, ending with the link's rate", v.warnings)
+	}
+	sum := summary(v)
+	for _, want := range []string{
+		"| direct | INVALID: warns | 81.5ms | 51.5ms | 30ms | 32.0 MB/s without the bulk path, 32.5 MB/s with it |",
+		"| host-dialed | PASS | 101.5ms | 56.5ms | 45ms | 25.0 MB/s without the bulk path, 25.5 MB/s with it |",
+		"**The job passes.**",
+	} {
+		if !strings.Contains(sum, want) {
+			t.Errorf("the summary lacks %q:\n%s", want, sum)
+		}
+	}
+	// A failing job's summary names why, and a skip has its own row.
+	skip := judgeText(t, "=== RUN   "+testName+"\n    harness_test.go:61: only with HPCBURST_REHEARSAL=1\n--- SKIP: "+testName+" (0.00s)\nPASS\n")
+	if sum := summary(skip); !strings.Contains(sum, "| all | SKIPPED: the job fails |") || !strings.Contains(sum, "**The job fails:**\n- "+testName+" skipped") {
+		t.Errorf("a skip's summary:\n%s", sum)
+	}
+	// appendFile adds to what the job's summary already holds.
+	p := filepath.Join(t.TempDir(), "summary.md")
+	if err := os.WriteFile(p, []byte("earlier\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendFile(p, sum); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(p); string(got) != "earlier\n"+sum {
+		t.Errorf("the summary file holds %q", got)
 	}
 }
