@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -70,16 +71,24 @@ const (
 	envoyClustersPath = "/clusters?format=json"
 
 	// Worker health (HBEP-5, Worker health).
-	envoyHealthPath         = "/ready"
-	envoyHCInterval         = 5 * time.Second
-	envoyHCTimeout          = 2 * time.Second
-	envoyHCUnhealthy        = 2
-	envoyHCHealthy          = 1
-	envoyOutlier5xx         = 3
-	envoyEjectionBase       = 30 * time.Second
-	envoyEjectionMax        = 300 * time.Second
-	envoyMaxEjectionPercent = 100
-	envoyHealthCheckAddress = "127.0.0.1"
+	envoyHealthPath  = "/ready"
+	envoyHCInterval  = 5 * time.Second
+	envoyHCTimeout   = 2 * time.Second
+	envoyHCUnhealthy = 2
+	envoyHCHealthy   = 1
+	envoyOutlier5xx  = 3
+	// envoyOutlierLocalOrigin: a worker whose connection fails, resets before the request, or times out is
+	// ejected at once (HBEP-5, Worker health; the science agent's ruling on #561): on the engine's local
+	// socket that means a dead engine or a full accept queue. Envoy's local-origin errors are split from
+	// the engine's own 5xx, which still need envoyOutlier5xx in a row. Without it, ring_hash's bounded
+	// load walked requests, and their retries, to a dead worker not yet ejected: it holds no request, so
+	// it is never overloaded (#561).
+	envoyOutlierLocalOrigin   = 1
+	envoyEnforcingLocalOrigin = 100
+	envoyEjectionBase         = 30 * time.Second
+	envoyEjectionMax          = 300 * time.Second
+	envoyMaxEjectionPercent   = 100
+	envoyHealthCheckAddress   = "127.0.0.1"
 
 	// envoyHashBalanceFactor is ring_hash's bounded load, in percent of the mean (HBEP-5, Inside an
 	// Instance; the science agent's decision on #518, provisional until S2c tunes it): a worker above 1.25
@@ -92,9 +101,16 @@ const (
 	// on a failure to connect or a reset before the request was sent, to another worker. Such a request
 	// reached no engine, so the retry cannot run anything twice; nothing written to a worker is retried.
 	// It answers a request Envoy sends to a worker that has just died, before its next active check.
-	envoyRetryOn       = "connect-failure,reset-before-request"
-	envoyNumRetries    = 1
-	envoyPreviousHosts = "envoy.retry_host_predicates.previous_hosts"
+	envoyRetryOn = "connect-failure,reset-before-request"
+	// The retry's jittered back-off (HBEP-5, Worker health; #561): a 100 ms base and a 250 ms maximum, so
+	// the retry follows the ring's update after a dead worker's ejection, which reaches Envoy's worker
+	// threads a moment after the failure that caused it. With Envoy's default 25 ms base, measured on
+	// 1.40.2, a wave of 40 requests at a worker's death lost 8 of 1,600 to retries that beat the update;
+	// with 100 ms, none.
+	envoyRetryBackOffBase = 100 * time.Millisecond
+	envoyRetryBackOffMax  = 250 * time.Millisecond
+	envoyNumRetries       = 1
+	envoyPreviousHosts    = "envoy.retry_host_predicates.previous_hosts"
 	// envoyHostSelectionAttempts is how many times the retry's host selection may pick again when it
 	// lands on the worker that failed (previous_hosts). Under RING_HASH a pick can land on the same worker
 	// again. Measured on Envoy 1.40.2 with two workers, a request in the dead worker's session (#439): with
@@ -186,6 +202,11 @@ type (
 		NumRetries                    int                `json:"num_retries"`
 		RetryHostPredicate            []envoyNamedConfig `json:"retry_host_predicate"`
 		HostSelectionRetryMaxAttempts int                `json:"host_selection_retry_max_attempts"`
+		RetryBackOff                  envoyBackOff       `json:"retry_back_off"`
+	}
+	envoyBackOff struct {
+		BaseInterval string `json:"base_interval"`
+		MaxInterval  string `json:"max_interval"`
 	}
 	envoyTyped struct {
 		Type string `json:"@type"`
@@ -263,6 +284,9 @@ type (
 		MaxEjectionTime                        string `json:"max_ejection_time"`
 		MaxEjectionPercent                     uint32 `json:"max_ejection_percent"`
 		SuccessfulActiveHealthCheckUnejectHost bool   `json:"successful_active_health_check_uneject_host"`
+		SplitExternalLocalOriginErrors         bool   `json:"split_external_local_origin_errors"`
+		ConsecutiveLocalOriginFailure          uint32 `json:"consecutive_local_origin_failure"`
+		EnforcingConsecutiveLocalOriginFailure uint32 `json:"enforcing_consecutive_local_origin_failure"`
 	}
 	envoyHealthCheckConfig struct {
 		Address  envoySocketAddress `json:"address"`
@@ -287,6 +311,11 @@ const (
 
 // envoySeconds is a whole-second duration in Envoy's JSON form ("10800s").
 func envoySeconds(d time.Duration) string { return fmt.Sprintf("%ds", int64(d/time.Second)) }
+
+// envoyDuration is d as a protobuf Duration's JSON, for a value under a second: 100 ms is "0.1s".
+func envoyDuration(d time.Duration) string {
+	return strconv.FormatFloat(d.Seconds(), 'f', -1, 64) + "s"
+}
 
 // RenderEnvoyConfig renders the bootstrap. It refuses what it cannot render correctly; whether the
 // rendered bytes may run is the guard's decision (CheckEnvoyConfig).
@@ -333,6 +362,7 @@ func RenderEnvoyConfig(c EnvoyConfig) ([]byte, error) {
 									Cluster: envoyClusterName, Timeout: timeout, IdleTimeout: timeout,
 									HashPolicy: []envoyHashPolicy{{Header: map[string]string{"header_name": envoySessionHeader}}},
 									RetryPolicy: envoyRetryPolicy{RetryOn: envoyRetryOn, NumRetries: envoyNumRetries,
+										RetryBackOff:                  envoyBackOff{BaseInterval: envoyDuration(envoyRetryBackOffBase), MaxInterval: envoyDuration(envoyRetryBackOffMax)},
 										RetryHostPredicate:            []envoyNamedConfig{{Name: envoyPreviousHosts, TypedConfig: envoyTyped{Type: typePreviousHosts}}},
 										HostSelectionRetryMaxAttempts: envoyHostSelectionAttempts},
 								},
@@ -354,6 +384,8 @@ func RenderEnvoyConfig(c EnvoyConfig) ([]byte, error) {
 				OutlierDetection: envoyOutlier{
 					Consecutive5xx: envoyOutlier5xx, BaseEjectionTime: envoySeconds(envoyEjectionBase), MaxEjectionTime: envoySeconds(envoyEjectionMax),
 					MaxEjectionPercent: envoyMaxEjectionPercent, SuccessfulActiveHealthCheckUnejectHost: false,
+					SplitExternalLocalOriginErrors: true, ConsecutiveLocalOriginFailure: envoyOutlierLocalOrigin,
+					EnforcingConsecutiveLocalOriginFailure: envoyEnforcingLocalOrigin,
 				},
 				CircuitBreakers: envoyCircuitBreakers{Thresholds: []envoyThreshold{{
 					Priority: "DEFAULT", MaxConnections: envoyMaxThreshold, MaxPendingRequests: envoyMaxThreshold, MaxRequests: envoyMaxThreshold,

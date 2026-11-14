@@ -105,6 +105,8 @@ func TestEnvoyConfigCarriesHBEP5sSettings(t *testing.T) {
 		"retries":                        at(t, r, "retry_policy", "num_retries"),
 		"retry predicate":                at(t, r, "retry_policy", "retry_host_predicate", 0, "name"),
 		"retry picks":                    at(t, r, "retry_policy", "host_selection_retry_max_attempts"),
+		"retry back-off base":            at(t, r, "retry_policy", "retry_back_off", "base_interval"),
+		"retry back-off max":             at(t, r, "retry_policy", "retry_back_off", "max_interval"),
 		"lb_policy":                      c["lb_policy"],
 		"upstream idle":                  at(t, c, "typed_extension_protocol_options", "envoy.extensions.upstreams.http.v3.HttpProtocolOptions", "common_http_protocol_options", "idle_timeout"),
 		"max_connections":                at(t, c, "circuit_breakers", "thresholds", 0, "max_connections"),
@@ -127,6 +129,9 @@ func TestEnvoyConfigCarriesHBEP5sSettings(t *testing.T) {
 		"max ejection":                   at(t, c, "outlier_detection", "max_ejection_time"),
 		"max ejection percent":           at(t, c, "outlier_detection", "max_ejection_percent"),
 		"uneject on a passing check":     at(t, c, "outlier_detection", "successful_active_health_check_uneject_host"),
+		"local-origin errors apart":      at(t, c, "outlier_detection", "split_external_local_origin_errors"),
+		"ejected after local failures":   at(t, c, "outlier_detection", "consecutive_local_origin_failure"),
+		"local ejection enforced":        at(t, c, "outlier_detection", "enforcing_consecutive_local_origin_failure"),
 		"panic threshold":                at(t, c, "common_lb_config", "healthy_panic_threshold", "value"),
 		"bounded loads":                  at(t, c, "common_lb_config", "consistent_hashing_lb_config", "hash_balance_factor"),
 		"the number of top-level fields": float64(len(m)),
@@ -137,7 +142,10 @@ func TestEnvoyConfigCarriesHBEP5sSettings(t *testing.T) {
 			"admin": envoyRunDir + "/envoy-admin.sock", "admin mode": float64(0o600), "admin path": "/clusters?format=json",
 			"suppress_envoy_headers": true, "hash header": "x-session-id", "lb_policy": "RING_HASH", "upstream idle": "50s",
 			"retry on": "connect-failure,reset-before-request", "retries": float64(1), "retry predicate": "envoy.retry_host_predicates.previous_hosts",
-			"retry picks":     float64(20),
+			"retry picks": float64(20),
+			// HBEP-5 as #564 amends it (#561): the retry's back-off, and a dead worker ejected at once.
+			"retry back-off base": "0.1s", "retry back-off max": "0.25s",
+			"local-origin errors apart": true, "ejected after local failures": float64(1), "local ejection enforced": float64(100),
 			"max_connections": float64(4294967295), "max_pending_requests": float64(4294967295), "max_requests": float64(4294967295), "max_retries": float64(4294967295),
 			"worker-0's socket": envoyRunDir + "/worker-0.sock", "worker-0's name": "worker-0",
 			"the number of top-level fields": float64(2),
@@ -179,6 +187,18 @@ func TestEnvoyGuardRefusesEachFault(t *testing.T) {
 		}, "retry_host_predicate[0].name"},
 		{"a per-try timeout", func(m map[string]any) { retryOf(t, m)["per_try_timeout"] = "1s" }, "sets per_try_timeout"},
 		{"Envoy's one pick again", func(m map[string]any) { delete(retryOf(t, m), "host_selection_retry_max_attempts") }, "has no host_selection_retry_max_attempts"},
+		// The retry's back-off (#561): without it the retry can beat the ring's update after a dead
+		// worker's ejection, and land on it again.
+		{"no retry back-off, so Envoy's 25 ms", func(m map[string]any) { delete(retryOf(t, m), "retry_back_off") }, "has no retry_back_off"},
+		{"Envoy's 25 ms base", func(m map[string]any) {
+			retryOf(t, m)["retry_back_off"].(map[string]any)["base_interval"] = "0.025s"
+		}, "retry_back_off.base_interval is 0.025s"},
+		{"no back-off maximum, so ten times the base", func(m map[string]any) {
+			delete(retryOf(t, m)["retry_back_off"].(map[string]any), "max_interval")
+		}, "has no max_interval"},
+		{"a back-off maximum of 2.5 s", func(m map[string]any) {
+			retryOf(t, m)["retry_back_off"].(map[string]any)["max_interval"] = "2.5s"
+		}, "retry_back_off.max_interval is 2.5s"},
 		{"fewer picks again", func(m map[string]any) { retryOf(t, m)["host_selection_retry_max_attempts"] = 1 }, "host_selection_retry_max_attempts"},
 		{"a TCP listener on loopback", func(m map[string]any) {
 			at(t, m, "static_resources", "listeners", 0).(map[string]any)["address"] = map[string]any{"socket_address": map[string]any{"address": "127.0.0.1", "port_value": 0}}
@@ -271,6 +291,22 @@ func TestEnvoyGuardRefusesEachFault(t *testing.T) {
 		{"Envoy's default 10% ejection", func(m map[string]any) {
 			clusterOf(t, m)["outlier_detection"].(map[string]any)["max_ejection_percent"] = 10
 		}, "max_ejection_percent is 10"},
+		// A dead worker ejected at once (#561): a connection failure, reset or time-out apart from 5xx.
+		{"local-origin errors counted as 5xx", func(m map[string]any) {
+			clusterOf(t, m)["outlier_detection"].(map[string]any)["split_external_local_origin_errors"] = false
+		}, "split_external_local_origin_errors is false"},
+		{"no split of local-origin errors", func(m map[string]any) {
+			delete(clusterOf(t, m)["outlier_detection"].(map[string]any), "split_external_local_origin_errors")
+		}, "has no split_external_local_origin_errors"},
+		{"ejected after 3 connection failures", func(m map[string]any) {
+			clusterOf(t, m)["outlier_detection"].(map[string]any)["consecutive_local_origin_failure"] = 3
+		}, "consecutive_local_origin_failure is 3"},
+		{"Envoy's default 5 connection failures", func(m map[string]any) {
+			delete(clusterOf(t, m)["outlier_detection"].(map[string]any), "consecutive_local_origin_failure")
+		}, "has no consecutive_local_origin_failure"},
+		{"the local ejection not enforced", func(m map[string]any) {
+			clusterOf(t, m)["outlier_detection"].(map[string]any)["enforcing_consecutive_local_origin_failure"] = 0
+		}, "enforcing_consecutive_local_origin_failure is 0"},
 		{"a passing check unejects", func(m map[string]any) {
 			clusterOf(t, m)["outlier_detection"].(map[string]any)["successful_active_health_check_uneject_host"] = true
 		}, "successful_active_health_check_uneject_host is true"},
