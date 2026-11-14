@@ -66,8 +66,10 @@
 //
 // # Completions
 //
-// POST /v1/completions takes a prompt that is a string (any other form is a
-// 400, and so is a prompt of no tokens, as in vLLM), max_tokens, which is 16
+// POST /v1/completions takes a prompt in the four forms vLLM takes: a string,
+// a list of token IDs, and a batch, a list of strings or of token-ID lists,
+// which the double answers as its first prompt in one choice (any other form
+// is a 400, and so is a prompt of no tokens, as in vLLM), max_tokens, which is 16
 // when the request does not name it and 16 when it is null too, since vLLM
 // rewrites a null to the field's default (completion/protocol.py:63 and the
 // validator normalize_null_max_tokens, :430-436; a chat request's null is the
@@ -77,7 +79,7 @@
 // penalties, which are recorded and not sampled with). The key guard, the
 // model name check, the token counting and the generation rules above are the
 // chat path's, a seeded sampled request's repeatable output included, except
-// that a prompt has no template: prompt_tokens is the prompt's word count,
+// that a prompt has no template: prompt_tokens is the prompt's word count (its token IDs' count for token IDs),
 // with no TemplateOverhead. The reply is vLLM's CompletionResponse: object "text_completion",
 // choices[0].text (the tokens' words joined by a space), finish_reason,
 // stop_reason (null) and usage. A stream is vLLM's completion_stream_generator:

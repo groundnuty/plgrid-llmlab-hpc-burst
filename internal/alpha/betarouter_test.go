@@ -743,18 +743,11 @@ func TestEngineVersionOfReadsTheVerificationRecord(t *testing.T) {
 	}
 }
 
-// doublePromptFormsFailure is the one failed check S13's variants make through the engine double: the double reads a string prompt only
-// (internal/agent/enginedouble, promptText: "the double reads no other form"), where vLLM serves a list of strings and token IDs, so the six
-// variants of those prompt forms are valid variants refused outside S13's groups, which the ruling (c) fails. Written out from the cases' names.
-const doublePromptFormsFailure = "a valid variant outside S13's groups that a server may refuse was answered other than 200: " +
-	"completions/prompt-list-of-strings#plain 400 [outside S13's groups], completions/prompt-list-of-strings#stream 400 [outside S13's groups], " +
-	"completions/prompt-token-id-lists#plain 400 [outside S13's groups], completions/prompt-token-id-lists#stream 400 [outside S13's groups], " +
-	"completions/prompt-token-ids#plain 400 [outside S13's groups], completions/prompt-token-ids#stream 400 [outside S13's groups]"
-
-// Through the engine double, without a stack, S13's variants fail the reading on exactly the prompt forms the double cannot read, and on
-// nothing else: what the router stand-in's verdict says (TestStandInBetaRouter), read here where CI runs it. The answers come back in the
-// cases' order; the failed check names them by key.
-func TestThroughTheDoubleOnlyThePromptFormsItCannotReadFail(t *testing.T) {
+// Through the engine double, without a stack, every one of S13's variants is answered so that the reading fails nothing: the double reads
+// the four prompt forms vLLM reads (enginedouble, promptOf) and refuses only what S13 says vLLM refuses. It is what the router stand-in's
+// verdict says (TestStandInBetaRouter), read here where CI runs it. The control: the reading still fails a valid variant the double is made to
+// refuse outside S13's groups.
+func TestThroughTheDoubleS13sVariantsFailNothing(t *testing.T) {
 	cfg := enginedouble.DefaultConfig()
 	srv := httptest.NewServer(enginedouble.Handler(cfg))
 	defer srv.Close()
@@ -774,7 +767,14 @@ func TestThroughTheDoubleOnlyThePromptFormsItCannotReadFail(t *testing.T) {
 		}
 	}
 	b.Expected = b.Variants
-	if f := bytesChecks(b); !slices.Equal(f, []string{doublePromptFormsFailure}) {
-		t.Errorf("bytesChecks through the double = %q, want only %q", f, doublePromptFormsFailure)
+	if f := bytesChecks(b); len(f) != 0 {
+		t.Errorf("bytesChecks through the double = %q, want none", f)
+	}
+	if len(b.NonOK) != 0 || b.InvalidRefused != b.InvalidSent || b.InvalidSent != 2 {
+		t.Errorf("through the double: %d valid variants answered other than 200 (%v), %d of %d invalid ones refused; want none, and both", len(b.NonOK), b.NonOK, b.InvalidRefused, b.InvalidSent)
+	}
+	b.NonOK = append(b.NonOK, NonOKVariant{"completions/prompt-token-ids#plain", 400, ""})
+	if f := bytesChecks(b); len(f) != 1 {
+		t.Errorf("a refusal outside the groups added to the double's reading: bytesChecks = %q, want it named", f)
 	}
 }
