@@ -679,30 +679,60 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'betarouter.go@@		if a.Status >= 400 && a.Status < 500 && !a.PastBound {@@		if a.Status >= 400 && !a.PastBound {'
   'betarouter.go@@			if a.Chat {@@			if !a.Chat {'
   'betarouter.go@@			if a.Stream {@@			if !a.Stream {'
-  # #530's fix round: the science agent's ruling (c) on a valid variant answered other than 200, S13's refusal groups, the harness's own
-  # bound, the engine's version, and the glibc step's tries.
-  'betarouter.go@@func (v NonOKVariant) allowed() bool { return v.Group != "" && v.Status >= 400 && v.Status < 500 }@@func (v NonOKVariant) allowed() bool { return v.Status >= 400 && v.Status < 500 }'
-  'betarouter.go@@func (v NonOKVariant) allowed() bool { return v.Group != "" && v.Status >= 400 && v.Status < 500 }@@func (v NonOKVariant) allowed() bool { return v.Group != "" && v.Status >= 300 && v.Status < 500 }'
-  'betarouter.go@@		case v.Status >= 500:@@		case v.Status > 500:'
-  'betarouter.go@@	if len(fiveXX) > 0 {@@	if false {'
-  'betarouter.go@@	if len(outside) > 0 {@@	if false {'
-  'betarouter.go@@	if a.Valid && a.Status != 0 && a.Status != 200 {@@	if a.Status != 0 && a.Status != 200 {'
-  'betarouter.go@@	if a.Valid && a.Status != 0 && a.Status != 200 {@@	if a.Valid && a.Status != 200 {'
+  # #530's fix round: the harness's own bound, the engine's version, and the glibc step's tries.
   'betarouter.go@@	if a.PastBound {@@	if false {'
   'betarouter.go@@		case a.Status >= 500:@@		case a.Status >= 501:'
-  'betarouter.go@@			if g.covers(cv.Field) {@@			if g.covers(cv.Field) && false {'
-  'betarouter.go@@	{"a request chat_template", "a request `chat_template`", fieldIs("chat_template")},@@	{"a request chat_template", "a request `chat_template`", fieldIs("chat_template", "chat_template_kwargs")},'
-  'betarouter.go@@		return contentPart(f, "image_url", "input_audio", "file", "audio_url",@@		return contentPart(f, "image_url", "input_audio", "audio_url",'
-  'betarouter.go@@	{"the structural tags", "the structural tags", func(f string) bool { return strings.Contains(f, "structural_tag") }},@@	{"the structural tags", "the structural tags", func(f string) bool { return f == "structured_outputs.structural_tag" }},'
-  'betarouter.go@@return f == "prompt_embeds" || contentPart(f, "prompt_embeds") }},@@return f == "prompt_embeds" }},'
   'betarouter.go@@	if json.Unmarshal(raw, &d) != nil || !engineVersionRE.MatchString(d.EngineVersion) {@@	if json.Unmarshal(raw, &d) != nil {'
-  'betarouter.go@@	if len(by.NonOK) == 0 {@@	if true {'
-  'betarouter.go@@		if i == namedVariantsMax {@@		if i == namedVariantsMax+1 {'
-  'betarouter.go@@	slices.SortStableFunc(vs, func(x, y NonOKVariant) int { return strings.Compare(x.Key, y.Key) })@@	_ = vs'
   'betarouter_flow_test.go@@	for i := 1; i <= tries; i++ {@@	for i := 1; i < tries; i++ {'
-  'betarouter_flow_test.go@@		case res.ExitCode != 0:@@		case false:'
+  'betarouter_flow_test.go@@		case res.ExitCode != 0:
+			why = fmt.Sprintf("the srun step that runs getconf exited %d", res.ExitCode)@@		case false:
+			why = fmt.Sprintf("the srun step that runs getconf exited %d", res.ExitCode)'
   'betarouter_flow_test.go@@		logf("the node'"'"'s glibc, try %d of %d: %s", i, tries, why)@@		_ = why'
   'betarouter_flow_test.go@@	glibcProbeTries = 3@@	glibcProbeTries = 2'
+  # The direct-to-engine control (the ruling (a) on the router row, #522): each rule of the comparison, the fields set aside, the control's
+  # counts and its checks, the step's script, its parse, and the worker socket read from Envoy's configuration.
+  'routercontrol.go@@	case f.status != d.status:@@	case false:'
+  'routercontrol.go@@	case f.ending != d.ending:@@	case false:'
+  'routercontrol.go@@	case f.err != d.err:@@	case false:'
+  'routercontrol.go@@	case f.object != d.object || f.model != d.model:@@	case f.object != d.object:'
+  'routercontrol.go@@	case f.choices != d.choices:@@	case false:'
+  'routercontrol.go@@	case f.prompt != d.prompt:@@	case false:'
+  'routercontrol.go@@	case f.roleSeen != d.roleSeen || f.usage != d.usage:@@	case f.usage != d.usage:'
+  'routercontrol.go@@	case f.shape != d.shape:@@	case false:'
+  'routercontrol.go@@	"text": true, "content": true, "reasoning": true, "reasoning_content": true, "tool_calls": true, "function_call": true,@@	"text": true, "reasoning": true, "reasoning_content": true, "tool_calls": true, "function_call": true,'
+  'routercontrol.go@@	"text": true, "content": true, "reasoning": true, "reasoning_content": true, "tool_calls": true, "function_call": true,@@	"text": true, "content": true, "reasoning_content": true, "tool_calls": true, "function_call": true,'
+  'routercontrol.go@@	"finish_reason": true, "stop_reason": true,@@	"stop_reason": true,'
+  'routercontrol.go@@	"finish_reason": true, "stop_reason": true,@@	"finish_reason": true,'
+  'routercontrol.go@@	"system_fingerprint": true, "completion_tokens_details": true, "prompt_tokens_details": true,@@	"completion_tokens_details": true, "prompt_tokens_details": true,'
+  'routercontrol.go@@	"system_fingerprint": true, "completion_tokens_details": true, "prompt_tokens_details": true,@@	"system_fingerprint": true, "completion_tokens_details": true,'
+  'routercontrol.go@@	case stream && r.Status == 200:@@	case false:'
+  'routercontrol.go@@		if data == "[DONE]" {@@		if data == "[DONE]x" {'
+  'routercontrol.go@@		if v.Direct == nil {@@		if false {'
+  'routercontrol.go@@		if !ClassifyReply(d.Status, d.Body, v.Stream, d.Cut).Complete {@@		if false {'
+  'routercontrol.go@@		if d.Status != 200 || ErrorText(d, v.Stream) != "" {@@		if d.Status != 200 {'
+  'routercontrol.go@@	if !c.Read {
+		return []string{"the direct-to-engine control could not be read: " + c.Why}@@	if false {
+		return []string{"the direct-to-engine control could not be read: " + c.Why}'
+  'routercontrol.go@@	if !c.Read {
+		return "- the direct-to-engine control: not read (" + c.Why + ")\n"@@	if false {
+		return "- the direct-to-engine control: not read (" + c.Why + ")\n"'
+  'routercontrol.go@@	if c.Sent != b.Expected || c.Answered != c.Sent || len(c.Unanswered) > 0 {@@	if false {'
+  'routercontrol.go@@	if len(c.Differ) > 0 {
+		var ds []string
+		for i, d := range c.Differ {@@	if false {
+		var ds []string
+		for i, d := range c.Differ {'
+  'routercontrol.go@@	if len(socks) != 1 {@@	if len(socks) < 1 {'
+  'routercontrol.go@@		if rc != 7 {@@		if true {'
+  'routercontrol.go@@		replies[i] = &Reply{Status: code, Body: body, Cut: rc != 0}@@		replies[i] = &Reply{Status: code, Body: body}'
+  'routercontrol.go@@	if agentapi.CheckKey([]byte(key)) != nil {@@	if agentapi.CheckKey([]byte(key)) != nil && false {'
+  'routercontrol.go@@	if len(c.Alike) == 0 {@@	if true {'
+  'routercontrol.go@@var dataKeyed = map[string]bool{"top_logprobs": true, "prompt_logprobs": true}@@var dataKeyed = map[string]bool{"prompt_logprobs": true}'
+  'routercontrol.go@@var dataKeyed = map[string]bool{"top_logprobs": true, "prompt_logprobs": true}@@var dataKeyed = map[string]bool{"top_logprobs": true}'
+  'routercontrol.go@@	case map[string]any:
+		return "map"@@	case map[string]any:
+		return shapeOf(x)'
+
   'betarouter.go@@	case 502, 503, 504:@@	case 502, 503:'
   'betarouter.go@@		c.Complete = strings.Contains(text, "data: [DONE]")@@		c.Complete = true'
   'betarouter.go@@	if status == 0 || cut {@@	if status == 0 {'
