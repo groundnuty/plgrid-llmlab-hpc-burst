@@ -135,20 +135,22 @@ Each question ends Decided, with its source, or Open, with what decides it. A "L
     - The ID is `ComputeManaged` (`pkg/deploymentid/deploymentid.go:158`) over HBEP-3's managed object: `scheme`, `kind` `managed`, `platform`, `catalog_name`, `opaque` `"true"`, and `revision` only when the platform reports one. The catalog client takes an entry's string `revision` member as its revision (`internal/managed/client.go:41`), and LLMLab's entries have none (issue #69; HBEP-3, Amendments, 2026-10-31).
     - The platform is the Provider's platform label, and a Provider without one gets no catalog (`internal/managed/controller.go:439`). Provider names are arbitrary, so two Providers on LLMLab give one entry the same ID.
     - The catalog loop writes each entry's full ID as `managedID` in the Provider's `status.catalog` (`pkg/provider/catalog.go:102`; `api/v1alpha1/provider_types.go:219`).
-    - No identity record (an `id-` ControllerRevision) is written for it. Only a served deployment's classes get one (`internal/lifecycle/identity.go:375`), reached only for a served source (`internal/lifecycle/reconcile.go:189`).
-    - **That is a gap against HBEP-11's identity records,** which store each deployment ID's inputs. In alpha a managed entry's inputs live only in the Provider's `status.catalog`, which the catalog loop rewrites, so they're lost once the catalog drops the entry, while usage records still name its ID. HBEP-11 states the exception for alpha (amended by this PR), and the beta criteria close it (Graduation criteria).
-    - The front's `hpcburst-deployment-id` carries the ID's display form, with emitter `provider` (HBEP-5, The LLMLab route; `TestAttributionOnLLMLabReplies` in `internal/front/attribution_test.go`).
+    - **Its identity record** (science-agent rulings on #574's plan, 14 Nov 2026): the managed catalog controller writes `id-<12 hex>` with the canonical managed object and the full hash in `hpcburst-system`, the controllers' namespace, since the ID belongs to no namespace and no Provider. Labels: `record=identity`, the deployment ID's display form, the platform and the catalog name, with the full name in an annotation. It has no owner reference, so it outlives the entry and every Provider (HBEP-11, Identity records).
+      - It's written the first time the controller sees the entry, before the entry is published in `status.catalog`. A failed write fails the pass and leaves the status unchanged, so no entry is published without its record.
+      - Two Providers on one platform give one entry one ID, so one record.
+      - A record whose stored hash differs from the computed one leaves the entry out of `status.catalog`, with a `CatalogEntrySkipped` naming the record (HBEP-3, the collision rule).
+      - The release `v0.1.0-alpha.1` writes none, so an entry it dropped before an upgrade has no record.
   - **Open for beta: what is stored beside the ID.** The known fields, the rest marked "unknown", and a flag for a gateway's request changes (L-6.6) are not built.
     - Lean: keep them beside the ID, outside the hashed object, so `v1` IDs stay as issued. Adding them to the object would be a `v2` (Notes).
     - A probe decides the flag per managed platform: a fixed request whose prompt token count is known offline, compared with the count the platform's `usage` reports. An added prompt segment shows as a surplus.
-    - Where the record is kept follows the record fetch, an owner decision (below).
+    - The known fields and the flag, once decided, sit beside the record, outside the hashed object.
 - **How long records are kept.** HBEP-11 leaves the retention policy for identity, verification and accounting records here (HBEP-11, Records outlive deletion).
   - **In alpha there is none:** the records have no owner reference, so they're kept until an operator deletes them, as HBEP-11 says, and nothing deletes them on a schedule.
   - **Open: a policy,** decided with the record fetch below, since both turn on who reads the records and for how long.
 - **How a client fetches the record for an ID.** **Open: owner decision,** because an API path is hard to change. The options are an endpoint on the front, an export for a replication package, or both. Discussion with HBEP-5.
   - Today, identity and verification records are ControllerRevisions, read through the Kubernetes API under its RBAC and found by their `deployment-id` and `instance-uid` labels (HBEP-11, Ownership, records and deletion).
   - The same decision answers who may resolve an ID to its inputs, which HBEP-3 leaves here (HBEP-3, Security), and how records are exported, which HBEP-11 leaves here.
-  - A managed entry has no stored record to fetch yet (above).
+  - A managed entry's record sits in `hpcburst-system` (above); the fetch decision may copy records elsewhere without changing any ID.
 
 ## Design details
 
@@ -213,7 +215,7 @@ The mechanisms are decided and built under other HBEPs. Each item says where its
     - the listing rule: `pkg/hubfiles/link_test.go` and `pkg/hubfiles/redirect_test.go`.
 - **Beta:**
   - the render check, built and run in every verification (Open questions);
-  - the managed record: a managed entry's ID gets an immutable identity record, as a served deployment's does (HBEP-11), with what the open question decides beside it, and a change in what a managed platform serves raises an event (Risks);
+  - the managed record: a managed entry's ID has its immutable identity record (#574), with what the open question decides beside it, and a change in what a managed platform serves raises an event (Risks);
   - the rehash timed on Athena A100, Helios GH200 and Sano, with S7's fallback built where a platform breaks its budget;
   - the batch-shaping measurement run, and HBEP-3's decision on a `v2` recorded;
   - the record fetch built, as the owner decides;
@@ -292,7 +294,8 @@ Verification grows from www-2027's endpoint check, run on each new endpoint (hea
 - 2026-10-31: HBEP-7's settings comparison is by value (booleans, numbers, then strings), with a declared `auto` recorded as resolved. That also keeps open question 1's "verification works either way" true for `auto`.
 - 2026-10-31: the attribution log's retention noted from HBEP-8 becoming implementable: in alpha, the usage files, kept for the grant's life.
 - 2026-11-14: implementable. What other HBEPs and the code had decided is carried in, with its source: scheme `v1` fixed by the published release `v0.1.0-alpha.1`, so any change to the record is a `v2` and HBEP-3's call; HBEP-7's alpha checks, with a declared `auto` recorded as resolved; HBEP-5's choice under `model`; the managed entry's ID as issue #69 built it, with no stored record; HBEP-6's admission for who may claim an Instance. Design details point to where each mechanism is held, and the alpha criteria name the release's tests. Open: resolved settings and batch shaping as inputs, the rehash time beyond Helios x86, the render check, the managed record beyond its ID, and the record fetch (owner decision). From its review round (Astra and Fable, PR #555): a managed reply carries four headers, not six; the parallel sizes refuse `auto` as `max-model-len` does; a managed entry's missing identity record is a gap HBEP-11 now states, for beta to close; and records have no retention policy in alpha.
+- 2026-11-14: a managed entry's ID gets an identity record in `hpcburst-system` (for #574).
 
 ## Amendments
 
-None.
+- **2026-11-14: managed identity records** (Open questions, the managed entry; Graduation criteria). An amendment by the science agent's rulings on #574's plan: a managed entry's ID gets an immutable identity record in `hpcburst-system`, written before the entry is published, with a collision leaving the entry out of the catalog with `CatalogEntrySkipped`. Before, no record was written, as a gap against HBEP-11.
