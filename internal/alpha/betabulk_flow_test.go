@@ -29,6 +29,10 @@ func (r *liveRun) BetaBulk(ctx context.Context, p Plan) (BulkObs, error) {
 		return BulkObs{}, ErrNoShim
 	}
 	r.start(p)
+	if r.beforeJob != nil {
+		// The Provider's image is not staged: NOT RUN, and no job was submitted (the science agent's rulings on #579).
+		return BulkObs{}, r.beforeJob
+	}
 	in, err := r.firstReady(p)
 	if err != nil {
 		return BulkObs{}, err

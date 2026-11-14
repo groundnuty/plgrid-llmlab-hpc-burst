@@ -7,9 +7,12 @@ package livechecks
 // copy of them.
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/alpha"
 )
@@ -72,6 +75,91 @@ func TestTheBulkRowsInvalidThroughTheScript(t *testing.T) {
 			if p := w.postsOf(row); !strings.Contains(p, "INVALID") {
 				t.Errorf("the text to post does not say INVALID:\n%s", p)
 			}
+		}
+	}
+}
+
+// stopBulkRun starts the bulk row with the stub's staging of its shipped agent, signals the script once the test runs, and returns its output and
+// exit status: the test never reaches its own removal.
+func stopBulkRun(t *testing.T, w *world, extra ...string) (string, int) {
+	t.Helper()
+	cmd, out := w.start(append([]string{"STUB_ALPHA_MODE=stage-and-sleep"}, extra...), "--run", "beta-athena-now-bulk", "--yes")
+	w.waitFor("started")
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second):
+		t.Fatalf("the script did not stop after SIGTERM:\n%s", out.String())
+	}
+	w.noLeftoverProcess(cmd)
+	return out.String(), cmd.ProcessState.ExitCode()
+}
+
+// A bulk run stopped before its own removal (a signal, a timeout, a panic) leaves the shipped agent's directory: the script's cleanup removes it by
+// the exact path the test wrote, and says so by its digest alone (the science agent's condition 2; #579's review).
+func TestAStoppedBulkRunsStagedAgentIsRemovedByTheScript(t *testing.T) {
+	w := newAlphaWorld(t)
+	d := filepath.Join(w.state, "staging", "test-agent", strings.Repeat("ab", 32))
+	out, _ := stopBulkRun(t, w)
+	if _, err := os.Stat(d); !os.IsNotExist(err) {
+		t.Errorf("the staged agent's directory remains (%v):\n%s", err, out)
+	}
+	if !strings.Contains(out, "cleanup: removed the bulk row's staged shipped agent test-agent/abababababab…, which its stopped test had left") {
+		t.Errorf("the cleanup did not say it removed the staged agent:\n%s", out)
+	}
+	if strings.Contains(out, w.state) {
+		t.Errorf("the output names a path:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(d))); err != nil {
+		t.Errorf("the parent of the staged agent's directory went too: %v", err)
+	}
+}
+
+// The leftover check: a directory the removal could not take is named, and the row fails.
+func TestAStagedAgentTheScriptCannotRemoveIsNamed(t *testing.T) {
+	w := newAlphaWorld(t)
+	d := filepath.Join(w.state, "staging", "test-agent", strings.Repeat("ab", 32))
+	t.Cleanup(func() { _ = os.Chmod(d, 0o755) })
+	out, code := stopBulkRun(t, w, "STUB_TEST_AGENT_LOCK=1")
+	if !strings.Contains(out, "cleanup: the bulk row's staged shipped agent test-agent/abababababab… remains after its removal; remove it by hand") || code == 0 {
+		t.Errorf("exit %d; want a failure naming the staged agent that remains:\n%s", code, out)
+	}
+}
+
+// A path that is not <staging>/test-agent/<64 hex> is never removed: here the staging root itself, which the shape check refuses.
+func TestTheScriptRemovesNoPathButAStagedAgentsOwn(t *testing.T) {
+	w := newAlphaWorld(t)
+	root := filepath.Join(w.state, "staging")
+	out, code := stopBulkRun(t, w, "STUB_TEST_AGENT_PATH="+root)
+	if _, err := os.Stat(filepath.Join(root, "test-agent", strings.Repeat("ab", 32), "hb-agent")); err != nil {
+		t.Errorf("a path of another shape removed what lies under it: %v", err)
+	}
+	if !strings.Contains(out, "cleanup: the bulk row's staged shipped agent was named by a path that is not <staging>/test-agent/<digest>; nothing was removed") || code == 0 {
+		t.Errorf("exit %d; want the refusal and a failure:\n%s", code, out)
+	}
+}
+
+// The bulk row's NOT RUN for an image not staged: exit 3 and its line through the script, the test's own marker words; on another row a failure.
+func TestTheUnstagedImageNotRunThroughTheScript(t *testing.T) {
+	for _, c := range []struct {
+		row  string
+		code int
+	}{{"beta-athena-now-bulk", 3}, {"beta-athena-now-keeper", 1}} {
+		w := newAlphaWorld(t)
+		hostDialed(w)
+		note := alpha.NotRunNote(alpha.Row{Name: c.row}, 0, alpha.ErrNoStagedImage)
+		res := w.run([]string{"STUB_ALPHA_MODE=marker", "STUB_MARKER=" + note}, "--run", c.row, "--yes")
+		if res.code != c.code {
+			t.Fatalf("%s: exit %d, want %d:\n%s", c.row, res.code, c.code, res.out)
+		}
+		if c.code == 3 {
+			w.contains(res, c.row+": NOT RUN (the Provider's image for the deployment is not staged with a whole record, and the bulk row's test shim stages none: stage it first with alpha-athena-now-stage; no job was submitted; not a failure)")
+		} else if strings.Contains(res.out, c.row+": NOT RUN") {
+			t.Errorf("the marker on %s read as NOT RUN:\n%s", c.row, res.out)
 		}
 	}
 }

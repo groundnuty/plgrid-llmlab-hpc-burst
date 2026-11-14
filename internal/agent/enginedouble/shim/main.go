@@ -19,6 +19,9 @@
 // agent at <staging>/test-agent/<its digest>/hb-agent, outside the product's layout. Nothing comes from the job's
 // environment, which nothing in the product sets.
 //
+// Run as apptainer to pull or build an image, it refuses, exit 1: the double stages no image, so it can never put a fake one in the Provider's
+// shared cache (the science agent's rulings on #579); the Provider's real image must be staged before the run, which the row checks.
+//
 // It writes nothing to standard output, ever: a relay's standard output is the channel it hands over. A refusal is one
 // line on standard error and exit 1: a shim built without the agent's digest, one not run from the Provider's staging
 // layout, or a staged agent that is missing or whose digest differs. Nothing is executed then, so the job's agent never
@@ -53,6 +56,13 @@ const EnvApptainer = "HPCBURST_APPTAINER"
 var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func main() {
+	// The double stages no image (the science agent's rulings on #579): the agent's stager runs apptainer pull and build through the same knob as
+	// the engine, and a fake image put where the Provider's real one was would replace it in the shared cache. A refused build leaves stageImage to
+	// put the real image back.
+	if refusesStaging(os.Args) {
+		fmt.Fprintf(os.Stderr, "bulk-row test shim: refused: apptainer %s: the double stages no image; the Provider's real image must be staged first (the stage row)\n", os.Args[1])
+		os.Exit(1)
+	}
 	enginedouble.Dispatch()
 	exe, err := os.Executable()
 	if err != nil {
@@ -106,6 +116,11 @@ func stagingRoot(exe string) (string, error) {
 		return "", fmt.Errorf("not run from the Provider's staging layout, <staging>/%s", agentapi.StagedAgentPath("<digest>"))
 	}
 	return filepath.Dir(digestDir), nil
+}
+
+// refusesStaging reports whether argv is the shim run as apptainer to pull or build an image.
+func refusesStaging(argv []string) bool {
+	return len(argv) > 1 && filepath.Base(argv[0]) == "apptainer" && (argv[1] == "pull" || argv[1] == "build")
 }
 
 // engineRuns reports whether this argv is the agent's run, which starts the engine: not a relay, and not -version.

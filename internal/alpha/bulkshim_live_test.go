@@ -10,10 +10,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -133,6 +135,10 @@ func (r *liveRun) prestageAgent(ctx context.Context) {
 		t.Fatalf("the Provider's staging root, for the shipped agent: %v", err)
 	}
 	r.testAgentDir = paths.Staging + "/" + testAgentDir + "/" + s.agentDigest
+	// The exact path, for the script's exit when this test is stopped before its Close (TestAgentDirFile), written before anything is staged.
+	if err := os.WriteFile(filepath.Join(r.cfg.Out, TestAgentDirFile), []byte(r.testAgentDir+"\n"), 0o600); err != nil {
+		t.Fatalf("the shipped agent's path for the script's exit: %v", err)
+	}
 	if err := r.batch.EnsureFile(ctx, provider.File{Path: s.testAgentPath(), Content: s.agent, SHA256: s.agentDigest, Mode: 0o700}); err != nil {
 		t.Fatalf("staging the shipped agent the test shim execs: %v", err)
 	}
@@ -224,4 +230,114 @@ func readShimNode(ctx context.Context, run commandRunner, jobID string, command 
 		}
 	}
 	return agent, engine, apptainer, nil
+}
+
+// prepareShim is the bulk row's setup before its deployment: the Provider's image for the deployment must be staged with a whole record, read and
+// hashed (the science agent's rulings on #579), else the run is NOT RUN with no job submitted; then the shipped agent the shim execs is staged.
+func (r *liveRun) prepareShim(ctx context.Context) error {
+	t := r.t
+	t.Helper()
+	paths, err := r.batch.Paths(ctx)
+	if err != nil {
+		t.Fatalf("the Provider's staging root: %v", err)
+	}
+	digest := r.w.md.Spec.Source.Served.Engine.ImageDigest
+	format := partitionImageFormat(r.w.profile, r.cfg.Row.Partition)
+	rec := imageRecordPath(paths.Staging, digest, format)
+	sum, err := readImageRecord(ctx, r.tr, rec, digest, format)
+	if err != nil {
+		if errors.Is(err, ErrNoStagedImage) {
+			return err
+		}
+		t.Fatalf("the Provider's image record: %v", err)
+	}
+	r.imageRecord, r.imageRecordSum, r.imageDigest, r.imageFormat = rec, sum, digest, format
+	r.prestageAgent(ctx)
+	return nil
+}
+
+// partitionImageFormat is the image format the profile gives the partition, Apptainer's SIF when it names none.
+func partitionImageFormat(p v1alpha1.PlatformProfileSpec, partition string) agentapi.ImageFormat {
+	for _, part := range p.Partitions {
+		if part.Name == partition && part.ImageFormat != "" {
+			return agentapi.ImageFormat(part.ImageFormat)
+		}
+	}
+	return agentapi.ImageFormatSIF
+}
+
+// imageRecordPath is the record the agent's stager writes beside the image it staged for digest (internal/agent/stage): a sandbox's manifest, or
+// a SIF's sidecar.
+func imageRecordPath(staging, digest string, format agentapi.ImageFormat) string {
+	p := staging + "/" + agentapi.StagedImagePath(digest, format)
+	if format == agentapi.ImageFormatSandbox {
+		return p + ".manifest"
+	}
+	return p + ".sha256"
+}
+
+// manifestEnd is a whole sandbox manifest's last line, its count of entries (internal/agent/stage, writeManifest).
+var manifestEnd = regexp.MustCompile(`(^|\n)end\t[0-9]+\n$`)
+
+// readImageRecord reads the record of the image staged for digest on the login node: its SHA-256, when it is whole and for digest (a manifest ends
+// with its count; a SIF's sidecar names the digest), and ErrNoStagedImage otherwise. The sandbox's tree against its manifest is the agent's walk on
+// the node, not this. Only a transport failure is another error.
+func readImageRecord(ctx context.Context, run commandRunner, rec, digest string, format agentapi.ImageFormat) (string, error) {
+	res, err := run.Run(ctx, slurm.Command{Line: "sha256sum " + rec})
+	if err != nil {
+		return "", fmt.Errorf("reading the image's record: %w", err)
+	}
+	if res.ExitCode != 0 || len(res.Stdout) < 64 || !sha256Re.MatchString(string(res.Stdout[:64])) {
+		return "", ErrNoStagedImage
+	}
+	sum := string(res.Stdout[:64])
+	n := "64"
+	if format != agentapi.ImageFormatSandbox {
+		n = "4096"
+	}
+	res, err = run.Run(ctx, slurm.Command{Line: "tail -c " + n + " " + rec})
+	if err != nil {
+		return "", fmt.Errorf("reading the image's record: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return "", ErrNoStagedImage
+	}
+	if format == agentapi.ImageFormatSandbox {
+		if !manifestEnd.Match(res.Stdout) {
+			return "", ErrNoStagedImage
+		}
+		return sum, nil
+	}
+	var side struct {
+		Format string `json:"format"`
+		Image  string `json:"image"`
+	}
+	if json.Unmarshal(res.Stdout, &side) != nil || side.Format != "hpcburst-sif/1" || side.Image != digest {
+		return "", ErrNoStagedImage
+	}
+	return sum, nil
+}
+
+// imageRecordUnchanged is nil when the Provider's image record hashes as it did before the run: the double never replaced the image, nor did a
+// refused staging remove its record (the science agent's rulings on #579).
+func (r *liveRun) imageRecordUnchanged(ctx context.Context) error {
+	return recordUnchanged(ctx, r.tr, r.imageRecord, r.imageDigest, r.imageFormat, r.imageRecordSum)
+}
+
+// recordUnchanged is imageRecordUnchanged over a runner: the record read again (readImageRecord) against its SHA-256 before the run.
+func recordUnchanged(ctx context.Context, run commandRunner, rec, digest string, format agentapi.ImageFormat, before string) error {
+	sum, err := readImageRecord(ctx, run, rec, digest, format)
+	name := strings.TrimPrefix(digest, "sha256:")
+	if len(name) > 12 {
+		name = name[:12]
+	}
+	switch {
+	case errors.Is(err, ErrNoStagedImage):
+		return fmt.Errorf("the Provider's image record (the image of digest %s…) is gone or not whole after the run", name)
+	case err != nil:
+		return fmt.Errorf("the Provider's image record after the run: %w", err)
+	case sum != before:
+		return fmt.Errorf("the Provider's image record (the image of digest %s…) changed during the run: the image was staged again", name)
+	}
+	return nil
 }

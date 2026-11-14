@@ -294,6 +294,12 @@ type liveRun struct {
 	// testAgentDir is the shipped agent's directory the bulk row staged under the Provider's staging root, "" before any: Close removes it by
 	// this exact path on every exit.
 	testAgentDir string
+	// imageRecord is the Provider's image record the bulk row read before its deployment ("" before), with its SHA-256, the image's digest and
+	// format: Close reads it again (the science agent's rulings on #579).
+	imageRecord, imageRecordSum, imageDigest string
+	imageFormat                              agentapi.ImageFormat
+	// beforeJob is what stopped the bulk row's run before its deployment: its image not staged (ErrNoStagedImage), NOT RUN.
+	beforeJob error
 
 	// created is this host's time just before the deployment was created,
 	// from which the first clock runs, and clusterAtCreate the cluster's clock
@@ -419,8 +425,16 @@ func (r *liveRun) Close(ctx context.Context) error {
 		}
 	}
 	if r.testAgentDir != "" && r.batch != nil {
-		// The bulk row's staged shipped agent goes by its exact path, on every exit; the leftover check names it if it remains.
-		errs = append(errs, removeTestAgent(cctx, r.tr, r.testAgentDir))
+		// The bulk row's staged shipped agent goes by its exact path, on every exit; the leftover check names it if it remains. Once that has run,
+		// the script's exit has nothing to remove (TestAgentDirFile).
+		rerr := removeTestAgent(cctx, r.tr, r.testAgentDir)
+		errs = append(errs, rerr)
+		if rerr == nil {
+			_ = os.Remove(filepath.Join(r.cfg.Out, TestAgentDirFile))
+		}
+	}
+	if r.imageRecord != "" && r.tr != nil {
+		errs = append(errs, r.imageRecordUnchanged(cctx))
 	}
 	if r.w.shim != nil {
 		errs = append(errs, r.w.shim.buildsUnchanged())
@@ -510,10 +524,14 @@ func (r *liveRun) start(p Plan) {
 		return r.c.Get(ctx, client.ObjectKey{Name: r.w.provider}, &prov) == nil && v1alpha1.ProviderReady(&prov, time.Now())
 	})
 	if r.w.shim != nil {
-		// The shipped agent the bulk row's shim execs, staged before any job can start (issue #521, option (A)).
+		// The bulk row's setup (issue #521, option (A)): the Provider's image staged, then the shipped agent the shim execs, before any job.
 		sctx, scancel := context.WithTimeout(context.Background(), StageAgentWait)
-		r.prestageAgent(sctx)
+		err := r.prepareShim(sctx)
 		scancel()
+		if err != nil {
+			r.beforeJob = err
+			return
+		}
 	}
 	md := r.deployment(p.Row)
 	p.Logf("%s: the deployment's first end is %s after the cluster's clock read before its creation", p.Row.Name, md.Spec.EndTime.Sub(r.clusterAtCreate).Round(time.Second))

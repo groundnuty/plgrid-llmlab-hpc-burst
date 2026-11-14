@@ -33,6 +33,7 @@ package alpha
 // The post says so.
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -115,6 +116,20 @@ type BulkObs struct {
 	Responses  int `json:"responses"`
 	Attributed int `json:"attributed"`
 }
+
+// ErrNoStagedImage is what the bulk row's run returns, before any job is submitted, when the Provider's image for the deployment is not staged with a
+// whole record under the staging root (the science agent's rulings on #579): the test shim's double stages no image (it refuses apptainer pull and
+// build), so a run that would need one does not start. It is NOT RUN (NotRun), exit 3: stage the image first, with the stage row.
+var ErrNoStagedImage = errors.New(noStagedImageWords)
+
+// noStagedImageWords say what happened, in the marker, which hack/live-checks.sh reads (staged_image_marker). They name no path and no digest.
+const noStagedImageWords = "the Provider's image for the deployment is not staged with a whole record, and the bulk row's double stages none"
+
+// TestAgentDirFile is the bulk row's mode-600 file in the run's record directory that names the exact cluster path of the shipped agent's
+// directory it staged (test-agent/<digest>), written before the staging: hack/live-checks.sh's exit removes that directory by that path, and names
+// it if it remains, when the test was stopped before its own removal ran (a timeout, a signal, a panic; the science agent's condition 2, and #579's
+// review). The run deletes the file once its own removal has run. It is never posted nor kept as evidence.
+const TestAgentDirFile = "test-agent-dir"
 
 // ShimObs is what the bulk row read of its test shim (the engine double's test-only main) and the shipped agent the shim execs (issue #521, option
 // (A); the science agent's rulings on #521). The two digests are the harness's: the shim it put in hb-agent's place and the shipped agent it staged.

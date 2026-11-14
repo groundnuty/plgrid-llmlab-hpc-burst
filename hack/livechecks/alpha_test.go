@@ -148,6 +148,14 @@ case $mode in
   not-run-long-words) echo "$HPCBURST_ALPHA_ROW: the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate (at owner-private-host tokens/s with max-model-len 32768 the stream that fits is 1m47s, under the floor of 2m15s); the hour was not started; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   not-run-long-fit-words) echo "$HPCBURST_ALPHA_ROW: the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate (at 300 tokens/s with max-model-len 32768 the stream that fits is owner-private-host, under the floor of 2m15s); the hour was not started; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   sleep) leave; touch "$STUB_STATE/started"; exec sleep 3600 ;;
+  # The bulk row's staging of its shipped agent, then a stop before its own removal (internal/alpha, TestAgentDirFile): the directory, and the file
+  # naming its exact path (STUB_TEST_AGENT_PATH, or the stub's own staging), as the test writes it; then it waits to be signalled.
+  stage-and-sleep)
+    d=${STUB_TEST_AGENT_DIR:-$STUB_STATE/staging/test-agent/abababababababababababababababababababababababababababababababab}
+    mkdir -p "$d" && echo agent > "$d/hb-agent"
+    printf '%s\n' "${STUB_TEST_AGENT_PATH:-$d}" > "$HPCBURST_ALPHA_OUT/test-agent-dir"; chmod 600 "$HPCBURST_ALPHA_OUT/test-agent-dir"
+    [ -z "${STUB_TEST_AGENT_LOCK:-}" ] || chmod 555 "$d"
+    leave; touch "$STUB_STATE/started"; exec sleep 3600 ;;
   # A job of the run's own prefix whose tag was never written down (a watch that never delivered, a write that
   # failed), beside a job of another run's prefix; with untagged-not-run, the run ended NOT RUN with it pending.
   # The step dies mid-wait (the science agent's requirement on PR 255): the run's predecessor running and its successor

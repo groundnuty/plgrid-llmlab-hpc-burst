@@ -1060,9 +1060,43 @@ clean_cluster() {
   return 0
 }
 
+# clean_test_agent: the bulk row's staged shipped agent (issue #521, option (A); the science agent's condition 2), when its test was stopped before
+# it removed it itself: the test wrote the directory's exact cluster path to its record directory's test-agent-dir (internal/alpha,
+# TestAgentDirFile) before staging, and deletes that file once its own removal has run. The path must be <absolute>/test-agent/<64 hex>, never a
+# glob or a parent; it is removed by that path alone, and a directory whose agent is still there is named, by its digest's first 12 hex, never its
+# path. Returns 1 when it could not remove it.
+clean_test_agent() {
+  local f="${REC_DIR:+$REC_DIR/test-agent-dir}" d reply short
+  [ -n "$f" ] && [ -f "$f" ] && [ ! -L "$f" ] || return 0
+  d=$(head -n 1 "$f")
+  short=${d##*/}; short=${short:0:12}
+  if ! printf '%s\n' "$d" | grep -q -E -x '/[A-Za-z0-9._/-]+/test-agent/[0-9a-f]{64}'; then
+    say "cleanup: the bulk row's staged shipped agent was named by a path that is not <staging>/test-agent/<digest>; nothing was removed; check the staging directory by hand"
+    return 1
+  fi
+  if [ -z "$ACTIVE_HOST" ]; then
+    say "cleanup: the bulk row's staged shipped agent test-agent/$short… could not be removed: the run's host is not known; remove it by hand"
+    return 1
+  fi
+  reply=$(remote "$ACTIVE_HOST" <<EOS
+$(preamble d "$d")
+rm -rf -- "\$d"
+if test -f "\$d/hb-agent"; then echo "test-agent=left"; else echo "test-agent=gone"; fi
+EOS
+  ) || reply=""
+  if has_line "$reply" 'test-agent=gone'; then
+    rm -f "$f"
+    say "cleanup: removed the bulk row's staged shipped agent test-agent/$short…, which its stopped test had left"
+    return 0
+  fi
+  say "cleanup: the bulk row's staged shipped agent test-agent/$short… remains after its removal; remove it by hand"
+  return 1
+}
+
 on_signal() { INTERRUPTED=1; }
 on_exit() {
   local rc=$?
+  clean_test_agent || rc=1
   if [ -n "$ACTIVE_HOST" ]; then clean_cluster || rc=1; [ "$CLEAN_LEFT" -eq 0 ] || rc=1; fi
   [ -z "${CONTROL_DIR:-}" ] || rm -rf "$CONTROL_DIR"
   exit "$rc"
@@ -1107,6 +1141,7 @@ not_run_verdict() {
   ! glibc_marker || [ "$n" = beta-athena-now-router ] || return 1
   ! keeper_marker || [ "$n" = beta-athena-now-keeper ] || return 1
   ! invalid_marker || [ "$n" = beta-athena-now-bulk ] || return 1
+  ! staged_image_marker || [ "$n" = beta-athena-now-bulk ] || return 1
   ! keeper_ended_marker || [ "$n" = beta-athena-now-keeper ] || return 1
   ! slot_marker || [ "$n" = alpha-athena-now-nooverlap ] || return 1
   ! lead_marker || case $n in alpha-athena-handover|alpha-helios-nooverlap|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1
@@ -1127,6 +1162,9 @@ glibc_marker() { grep -q "the compute node's glibc is older than the 2.30 Envoy 
 # invalid_marker: the marker says the bulk row's run has no saturation witness, so its reading measures nothing (internal/alpha, ErrInvalid and
 # InvalidNote; the science agent's ruling on #521): an INVALID, not a NOT RUN, which not_run_verdict holds to that row and judge prints as INVALID.
 invalid_marker() { grep -q "the run has no saturation witness, so its reading measures nothing" "$REC_DIR/not-run.txt" 2>/dev/null; }
+# staged_image_marker: the marker says the Provider's image for the deployment is not staged with a whole record, so the bulk row's run, whose test
+# shim's double stages no image, submitted no job (internal/alpha, ErrNoStagedImage; the science agent's rulings on #579): a NOT RUN of that row alone.
+staged_image_marker() { grep -q "the Provider's image for the deployment is not staged with a whole record, and the bulk row's double stages none" "$REC_DIR/not-run.txt" 2>/dev/null; }
 # keeper_marker: the run's NOT RUN marker says the deployment's max-model-len does not hold a stream long enough to span a controller restart's outcome
 # at the engine's measured rate (internal/alpha, NotRunNote, KeeperStreamTooShortError; issue #521): the keeper row's. keeper_reason is the numbers the
 # marker carries in parentheses, as lead_reason reads them, and nothing else.
@@ -1242,6 +1280,8 @@ judge() {
       say "$n: NOT RUN (the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate: $(long_reason); the hour was not started, and the run's jobs were cancelled by tag; not a failure)"
     elif keeper_ended_marker; then
       say "$n: NOT RUN (the stream ended before the keeper's outcome and its margin: $(keeper_ended_reason); the controller was killed and the run's other checks passed; not a failure)"
+    elif staged_image_marker; then
+      say "$n: NOT RUN (the Provider's image for the deployment is not staged with a whole record, and the bulk row's test shim stages none: stage it first with alpha-athena-now-stage; no job was submitted; not a failure)"
     elif keeper_marker; then
       say "$n: NOT RUN (the deployment's max-model-len does not hold a stream long enough to span a controller restart at the engine's measured rate: $(keeper_reason); the controller was not killed, and the run's jobs were cancelled by tag; not a failure)"
     elif glibc_marker; then
@@ -1615,6 +1655,8 @@ run_cluster() {
   ACTIVE_HOST=$host
   t0=$(date +%s)
   execute_cluster "$n" || { [ "$NOT_RUN" = 1 ] || verdict=1; }
+  # The bulk row's staged shipped agent, when its test was stopped before it removed it: a failure of the row if it remains.
+  clean_test_agent || verdict=1
   clean_cluster || true
   t1=$(date +%s)
   slot_report "$n" "$t0" "$t1"

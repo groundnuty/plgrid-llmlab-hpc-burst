@@ -2,6 +2,8 @@ package alpha
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -190,5 +192,72 @@ func TestTheShimReadingsAreTheNodesOwn(t *testing.T) {
 	// A listing that cannot be taken is an error.
 	if _, _, _, err := readShimNode(context.Background(), cannedNode{listing: "garbage"}, "4242", command, x); err == nil {
 		t.Error("a listing that cannot be parsed read as a node")
+	}
+}
+
+// The image precondition and its check after the run, over a fake login holding the stager's records (the science agent's rulings on #579): a whole
+// manifest, or a SIF sidecar that names the digest, is read with its SHA-256; an absent, cut or foreign record is ErrNoStagedImage, NOT RUN; a record
+// changed or gone after the run is a failure naming the image, never its path.
+func TestTheImagePreconditionReadsTheRecord(t *testing.T) {
+	plat, sess, staging, _ := stagingSession(t)
+	digest := "sha256:" + strings.Repeat("12", 32)
+	manifest := "hpcburst-sandbox-manifest/1 " + digest + "\nD\t\".\"\nF\t2\t" + strings.Repeat("ab", 32) + "\t\"x\"\nend\t2\n"
+	sb := imageRecordPath(staging, digest, agentapi.ImageFormatSandbox)
+	if err := plat.WriteFile(sb, []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum, err := readImageRecord(context.Background(), sess, sb, digest, agentapi.ImageFormatSandbox)
+	if err != nil || sum != digestOf([]byte(manifest)) {
+		t.Fatalf("a whole manifest: %q, %v; want its SHA-256", sum, err)
+	}
+	if err := recordUnchanged(context.Background(), sess, sb, digest, agentapi.ImageFormatSandbox, sum); err != nil {
+		t.Errorf("an unchanged record: %v", err)
+	}
+	// A SIF's sidecar names its digest.
+	sif := imageRecordPath(staging, digest, agentapi.ImageFormatSIF)
+	if err := plat.WriteFile(sif, []byte(`{"format":"hpcburst-sif/1","image":"`+digest+`","size":1,"sha256":"`+strings.Repeat("cd", 32)+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readImageRecord(context.Background(), sess, sif, digest, agentapi.ImageFormatSIF); err != nil {
+		t.Errorf("a SIF sidecar for the digest: %v", err)
+	}
+	other := "sha256:" + strings.Repeat("34", 32)
+	if _, err := readImageRecord(context.Background(), sess, imageRecordPath(staging, other, agentapi.ImageFormatSIF), other, agentapi.ImageFormatSIF); !errors.Is(err, ErrNoStagedImage) {
+		t.Errorf("no record: %v, want ErrNoStagedImage", err)
+	}
+	if _, err := readImageRecord(context.Background(), sess, sif, other, agentapi.ImageFormatSIF); !errors.Is(err, ErrNoStagedImage) {
+		t.Errorf("a sidecar for another digest: %v, want ErrNoStagedImage", err)
+	}
+	// A manifest cut before its count is not whole.
+	if err := plat.WriteFile(sb, []byte(strings.TrimSuffix(manifest, "end\t2\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readImageRecord(context.Background(), sess, sb, digest, agentapi.ImageFormatSandbox); !errors.Is(err, ErrNoStagedImage) {
+		t.Errorf("a cut manifest: %v, want ErrNoStagedImage", err)
+	}
+	// After the run: a record changed (the image staged again), or gone (a refused build removes it), is a failure naming the image's digest.
+	if err := plat.WriteFile(sb, []byte(strings.Replace(manifest, "end\t2", "F\t1\t"+strings.Repeat("ef", 32)+"\t\"y\"\nend\t3", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordUnchanged(context.Background(), sess, sb, digest, agentapi.ImageFormatSandbox, sum); err == nil || !strings.Contains(err.Error(), "changed during the run") || !strings.Contains(err.Error(), strings.Repeat("12", 6)) || strings.Contains(err.Error(), staging) {
+		t.Errorf("a changed record: %v; want it named by its digest, no path", err)
+	}
+	if _, err := sess.Run(context.Background(), slurm.Command{Line: "rm -f " + sb}); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordUnchanged(context.Background(), sess, sb, digest, agentapi.ImageFormatSandbox, sum); err == nil || !strings.Contains(err.Error(), "is gone or not whole after the run") {
+		t.Errorf("a removed record: %v; want it named", err)
+	}
+}
+
+// The NOT RUN for an image not staged: NotRun, never Invalid, and its marker's fixed words with no path and no digest.
+func TestAnUnstagedImageIsNotRun(t *testing.T) {
+	row := BetaBulkRow()
+	if !NotRun(row, ErrNoStagedImage) || Invalid(row, ErrNoStagedImage) {
+		t.Fatal("ErrNoStagedImage is not a NOT RUN, or is also INVALID")
+	}
+	note := NotRunNote(row, 0, fmt.Errorf("setup: %w", ErrNoStagedImage))
+	if want := row.Name + ": " + noStagedImageWords + "; stage it first with the stage row; no job was submitted\n"; note != want {
+		t.Errorf("NotRunNote = %q, want %q", note, want)
 	}
 }

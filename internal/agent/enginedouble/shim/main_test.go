@@ -194,6 +194,24 @@ func TestTheBuiltShim(t *testing.T) {
 		t.Errorf("the shim as apptainer: %v, %q; want the double's Apptainer's exit 255", err, stderr.String())
 	}
 
+	// Run as apptainer to pull or build, it refuses before the double runs: exit 1, its own line, and no image written (the science agent's
+	// rulings on #579). The double's own Apptainer would write one.
+	for _, verb := range [][]string{{"pull", filepath.Join(tmp, "out.sif"), "docker://example.test/vllm@sha256:" + want}, {"build", "--sandbox", filepath.Join(tmp, "out.sandbox"), "docker://example.test/vllm@sha256:" + want}} {
+		cmd = exec.Command(link, verb...)
+		stdout.Reset()
+		stderr.Reset()
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err = cmd.Run()
+		if !errors.As(err, &ee) || ee.ExitCode() != 1 || !strings.Contains(stderr.String(), "refused: apptainer "+verb[0]+": the double stages no image") || stdout.Len() != 0 {
+			t.Errorf("the shim as apptainer %s: %v, stdout %q, stderr %q; want exit 1 and the refusal", verb[0], err, stdout.String(), stderr.String())
+		}
+	}
+	for _, out := range []string{"out.sif", "out.sandbox"} {
+		if _, err := os.Lstat(filepath.Join(tmp, out)); !os.IsNotExist(err) {
+			t.Errorf("a refused staging wrote %s (%v)", out, err)
+		}
+	}
+
 	// Built without the digest it refuses, with exit 1 and nothing on standard output.
 	plain := filepath.Join(tmp, "plain")
 	build(plain, "")
@@ -209,5 +227,22 @@ func TestTheBuiltShim(t *testing.T) {
 	err = cmd.Run()
 	if !errors.As(err, &ee) || ee.ExitCode() != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "built without the shipped agent's digest") {
 		t.Errorf("an unbaked shim: %v, stdout %q, stderr %q; want exit 1, a refusal and no output", err, stdout.String(), stderr.String())
+	}
+}
+
+func TestRefusesStaging(t *testing.T) {
+	for _, c := range []struct {
+		argv []string
+		want bool
+	}{
+		{[]string{"/x/apptainer", "pull", "out", "docker://i"}, true},
+		{[]string{"/x/apptainer", "build", "--sandbox", "out", "docker://i"}, true},
+		{[]string{"/x/apptainer", "exec", "image", "vllm"}, false},
+		{[]string{"/x/apptainer"}, false},
+		{[]string{"/x/hb-agent", "pull"}, false},
+	} {
+		if got := refusesStaging(c.argv); got != c.want {
+			t.Errorf("refusesStaging(%q) = %t, want %t", c.argv, got, c.want)
+		}
 	}
 }

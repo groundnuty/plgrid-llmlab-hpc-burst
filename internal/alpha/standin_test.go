@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1168,13 +1170,23 @@ type bulkStandIn struct {
 	row Row
 	w   world
 	// staged is the shipped agent's directory the run staged under the stand-in's staging root, a real path: "" when it staged none.
-	staged   string
-	failures []string
-	err      error
-	post     []byte
+	staged string
+	// cl is the stand-in cluster, and imagesBefore and imagesAfter its staged images' cache before and after the run (imagesOf).
+	cl                        *stack.Cluster
+	imagesBefore, imagesAfter map[string]string
+	failures                  []string
+	err                       error
+	post                      []byte
 }
 
 func runBulkStandIn(t *testing.T, tweak func(w *world)) bulkStandIn {
+	t.Helper()
+	return runBulkStandInStaged(t, true, tweak)
+}
+
+// runBulkStandInStaged is runBulkStandIn, with the Provider's image pre-staged first as the stage row stages it (preStage) when stage is set: the
+// test shim's double stages no image (the science agent's rulings on #579), so a run without it is NOT RUN.
+func runBulkStandInStaged(t *testing.T, stage bool, tweak func(w *world)) bulkStandIn {
 	t.Helper()
 	if os.Getenv(envStandIn) != "1" {
 		t.Skipf("the stand-in proof of the live steps runs only with %s=1 (internal/alpha, standin_test.go)", envStandIn)
@@ -1190,7 +1202,11 @@ func runBulkStandIn(t *testing.T, tweak func(w *world)) bulkStandIn {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w, _ := standInWorldShaped(t, row, nil)
+	w, cl := standInWorldShaped(t, row, nil)
+	if stage {
+		preStage(t, cl, w)
+	}
+	images := imagesOf(t, cl)
 	if tweak != nil {
 		tweak(&w)
 	}
@@ -1204,7 +1220,7 @@ func runBulkStandIn(t *testing.T, tweak func(w *world)) bulkStandIn {
 	}
 	post, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
 	t.Logf("%s's text to post:\n%s", row.Name, post)
-	return bulkStandIn{row: row, w: w, staged: lr.testAgentDir, failures: failures, err: err, post: post}
+	return bulkStandIn{row: row, w: w, staged: lr.testAgentDir, failures: failures, err: err, post: post, cl: cl, imagesBefore: images, imagesAfter: imagesOf(t, cl)}
 }
 
 // TestStandInBetaBulk is the bulk row's live steps over the stand-in, through Run: the real stack in host-dialed mode with the bulk path, the engine
@@ -1253,5 +1269,59 @@ func TestStandInBetaBulkWithoutTheBulkPathFails(t *testing.T) {
 		if !slices.Contains(s.failures, want) {
 			t.Errorf("failed checks %q do not hold %q", s.failures, want)
 		}
+	}
+}
+
+// imagesOf is the stand-in's staged images' cache, images/ under its staging root, every entry by its relative path, a file with its SHA-256, a
+// directory as "dir": what a run must leave as it found it.
+func imagesOf(t *testing.T, cl *stack.Cluster) map[string]string {
+	t.Helper()
+	root := filepath.Join(cl.Scratch, "stage", "images")
+	out := map[string]string{}
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return filepath.SkipDir
+			}
+			return err
+		}
+		rel, _ := filepath.Rel(root, p)
+		switch {
+		case d.IsDir():
+			out[rel] = "dir"
+		case d.Type().IsRegular():
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			out[rel] = digestOf(b)
+		default:
+			out[rel] = "other"
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// TestStandInBetaBulkWithoutTheStagedImageIsNotRun is the bulk row over the stand-in with the Provider's image never staged: the run is NOT RUN
+// before any job, as ruled (the science agent's rulings on #579), and the cache is as it was: nothing submitted, nothing staged.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInBetaBulkWithoutTheStagedImageIsNotRun(t *testing.T) {
+	s := runBulkStandInStaged(t, false, nil)
+	if !errors.Is(s.err, ErrNoStagedImage) || !NotRun(s.row, s.err) {
+		t.Fatalf("the run ended with %v; want NOT RUN for an image not staged (ErrNoStagedImage)", s.err)
+	}
+	if n := len(s.cl.Plat.Jobs()); n != 0 {
+		t.Errorf("%d job(s) were submitted; want none", n)
+	}
+	if !maps.Equal(s.imagesBefore, s.imagesAfter) {
+		t.Errorf("the images' cache changed: before %v, after %v", s.imagesBefore, s.imagesAfter)
+	}
+	if s.staged != "" {
+		t.Errorf("the shipped agent was staged for a run that never submitted a job")
 	}
 }
