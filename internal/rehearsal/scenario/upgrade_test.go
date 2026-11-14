@@ -181,6 +181,17 @@ func TestRehearsalUpgradeWithTheControllersRunning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The old processes run other files than the ones the new must run: else a "replacement" that left the
+	// old files in place, or a supervisor started by the first build, would pass every check below (the
+	// review of #560).
+	for _, c := range []struct {
+		name string
+		want fileID
+	}{{"controller", ctlID}, {"front", frontID}, {"supervisor", launcherID}} {
+		if got, err := exeIDOf(pins[c.name].PID); err != nil || got == c.want {
+			t.Fatalf("before the upgrade the old %s (pid %d) runs %v (%v): the very file the new one must run, %v, so the check after it proves nothing", c.name, pins[c.name].PID, got, err, c.want)
+		}
+	}
 	start := time.Now()
 	backup, log, err := r.h.UpgradeWith(second.HPCBurst, keeperNewerK3s)
 	if err != nil {
