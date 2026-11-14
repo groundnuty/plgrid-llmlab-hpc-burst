@@ -49,7 +49,8 @@ func (r *liveRun) BetaKeeper(ctx context.Context, p Plan) (KeeperObs, error) {
 	if err != nil {
 		return KeeperObs{}, err
 	}
-	o.Asked = n
+	o.Planned, o.Asked = fit, n
+	p.Logf("%s: the stream is planned at %s, %d tokens at %.0f tokens/s (the window %s and %s more, capped at what the context holds)", p.Row.Name, fit, n, o.Rate, KeeperWindow, KeeperStreamExtra)
 	jobID := r.ourJobFor(ctx, in, "the keeper's relays")
 	pr := keeperprobe.Probe{T: r.t, H: r.h, C: r.c, Ports: r.h.Ports, Provider: r.w.provider}
 	before := pr.Relays("before the restart", jobID)

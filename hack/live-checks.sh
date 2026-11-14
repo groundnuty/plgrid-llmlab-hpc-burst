@@ -65,7 +65,10 @@
 # judge prints; the run sent no request, and its jobs were cancelled by their tags.
 # The keeper row on plgrid-now (beta-athena-now-keeper, issue #521) has one: the deployment's max-model-len does not hold a stream long enough to span
 # a controller restart's outcome at the engine's measured rate. Its marker names the rate and the context, numbers only, which judge prints; the run
-# killed no controller, and its jobs were cancelled by their tags. The row runs in host-dialed mode alone.
+# killed no controller, and its jobs were cancelled by their tags. The row runs in host-dialed mode alone. It has a second, of a run that did start
+# (the science agent's ruling (b) on #543): nothing failed, but the stream did not outlast the keeper's outcome by the 30 s margin, so the run cannot
+# show a stream crossing the handover. Its marker names the times from the stream's first token, durations only, which judge prints; the controller
+# was killed, the run's other checks passed, and its text to post says NOT RUN with the times.
 # Row B on plgrid-now (alpha-athena-now-nooverlap, issue #376) has two of its own, judged the same way: a job that is not the
 # run's held the one-job slot between its two jobs (the owner's own work, which the run never touches; Q7), and either job's
 # warm start its agent's own log did not show. Its first job's start wait runs from the deployment's creation, its second's
@@ -1086,6 +1089,7 @@ not_run_verdict() {
   ! warm_marker || case $n in alpha-athena-now-serve|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1
   ! glibc_marker || [ "$n" = beta-athena-now-router ] || return 1
   ! keeper_marker || [ "$n" = beta-athena-now-keeper ] || return 1
+  ! keeper_ended_marker || [ "$n" = beta-athena-now-keeper ] || return 1
   ! slot_marker || [ "$n" = alpha-athena-now-nooverlap ] || return 1
   ! lead_marker || case $n in alpha-athena-handover|alpha-helios-nooverlap|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1
   ! long_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac || return 1
@@ -1106,6 +1110,18 @@ glibc_marker() { grep -q "the compute node's glibc is older than the 2.30 Envoy 
 # at the engine's measured rate (internal/alpha, NotRunNote, KeeperStreamTooShortError; issue #521): the keeper row's. keeper_reason is the numbers the
 # marker carries in parentheses, as lead_reason reads them, and nothing else.
 keeper_marker() { grep -q "does not hold a stream long enough to span a controller restart" "$REC_DIR/not-run.txt" 2>/dev/null; }
+# keeper_ended_marker: the run's NOT RUN marker says the keeper row's stream ended before the keeper's outcome and its margin (internal/alpha,
+# NotRunNote, KeeperStreamEndedFirstError; the ruling (b) on #543). keeper_ended_reason is the times it carries in parentheses, and nothing else.
+keeper_ended_marker() { grep -q "the stream ended before the keeper's outcome and its margin" "$REC_DIR/not-run.txt" 2>/dev/null; }
+keeper_ended_reason() {
+  local r
+  r=$(row_a_reason "the stream ended before the keeper's outcome and its margin")
+  if printf '%s\n' "$r" | grep -q -E -x "the outcome at [0-9hms.]+ after the stream opened, the stream's end at [0-9hms.]+, the margin [0-9hms.]+"; then
+    printf '%s' "$r"
+  else
+    printf 'the times could not be read from the marker'
+  fi
+}
 keeper_reason() {
   local r
   r=$(row_a_reason "the deployment's max-model-len does not hold a stream long enough to span a controller restart at the engine's measured rate")
@@ -1200,6 +1216,8 @@ judge() {
       say "$n: NOT RUN (no stream across the drain start that is long enough to tell a cut from an end fits the deployment's max-model-len at the engine's measured rate: $(lead_reason); the run opened no stream, and its jobs were cancelled by tag; not a failure)"
     elif long_marker; then
       say "$n: NOT RUN (the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate: $(long_reason); the hour was not started, and the run's jobs were cancelled by tag; not a failure)"
+    elif keeper_ended_marker; then
+      say "$n: NOT RUN (the stream ended before the keeper's outcome and its margin: $(keeper_ended_reason); the controller was killed and the run's other checks passed; not a failure)"
     elif keeper_marker; then
       say "$n: NOT RUN (the deployment's max-model-len does not hold a stream long enough to span a controller restart at the engine's measured rate: $(keeper_reason); the controller was not killed, and the run's jobs were cancelled by tag; not a failure)"
     elif glibc_marker; then

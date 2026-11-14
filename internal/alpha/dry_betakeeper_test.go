@@ -1,8 +1,8 @@
 package alpha
 
 // The keeper row (issue #521; betakeeper.go) over the fake cluster: one job, run on the manual clock; what the stack would show is stood in for.
-// Each fault departs from the healthy run in one way that must fail the row, or, for the window faults, end it NOT RUN
-// (TestAKeeperStreamTheContextCannotHoldIsNotRun).
+// Each fault departs from the healthy run in one way that must fail the row, or end it NOT RUN: the window faults
+// (TestAKeeperStreamTheContextCannotHoldIsNotRun) and a stream that does not outlast the outcome by the margin (the ruling (b) on #543).
 
 import (
 	"context"
@@ -33,7 +33,7 @@ func (d *drySteps) BetaKeeper(_ context.Context, p Plan) (KeeperObs, error) {
 	rate := 40.0
 	switch {
 	case d.fault("window-too-short"):
-		// A context that holds a stream of a minute: the window of 160 s does not fit.
+		// A context that holds a stream of a minute: the window of 100 s does not fit.
 		if _, err := FitKeeper(tm, 2400+PromptReserve, rate); err != nil {
 			if cerr := d.cancelTag(tag); cerr != nil {
 				return KeeperObs{}, cerr
@@ -46,14 +46,16 @@ func (d *drySteps) BetaKeeper(_ context.Context, p Plan) (KeeperObs, error) {
 			return KeeperObs{}, err
 		}
 	}
-	asked := int(rate * (KeeperWindow + time.Minute).Seconds())
+	// The plan, as FitKeeper makes it on a context that holds more: the window and KeeperStreamExtra, 130 s; the outcome lands 35 s after the kill.
+	planned := KeeperWindow + KeeperStreamExtra
+	asked := int(rate * planned.Seconds())
 	opened := ready.Add(time.Minute)
 	killed := opened.Add(KeeperKillAfter)
 	outcome := killed.Add(35 * time.Second)
-	stream := Stream{ID: "keeper", Opened: opened, Ended: outcome.Add(KeeperMargin + time.Minute), Complete: true, Tokens: asked}
+	stream := Stream{ID: "keeper", Opened: opened, Ended: opened.Add(planned), Complete: true, Tokens: asked}
 	rel := dryKeeperRelays()
 	obs := KeeperObs{
-		Deployment: d.deployment(), ReadyAt: ready, DrainStart: drain, Rate: rate, Asked: asked, Before: rel, After: rel,
+		Deployment: d.deployment(), ReadyAt: ready, DrainStart: drain, Rate: rate, Planned: planned, Asked: asked, Before: rel, After: rel,
 		KilledAt: killed, OutcomeAt: outcome, ControllerReplaced: true, LeaseBefore: 3, LeaseAfter: 4, HolderChanged: true, FenceAfter: 4,
 		AgentReported: true, AgentSame: true, RestartsBefore: 0, RestartsAfter: 0, Stream: stream, FrontCuts: 0, Responses: 4, Attributed: 4,
 	}
@@ -113,8 +115,21 @@ func (d *drySteps) BetaKeeper(_ context.Context, p Plan) (KeeperObs, error) {
 		obs.Stream.Ended = obs.Stream.Opened.Add(tm.MaxRequestDuration + time.Second)
 	case d.fault("opened-after-kill"):
 		obs.Stream.Opened = killed.Add(time.Second)
-	case d.fault("ends-at-the-outcome"):
-		obs.Stream.Ended = outcome.Add(KeeperMargin - time.Second)
+	case d.fault("outcome-at-90s"):
+		// An outcome 90 s after the kill on the 130 s plan: the stream outlasts it by exactly the margin, a pass.
+		obs.OutcomeAt = killed.Add(90 * time.Second)
+	case d.fault("outcome-at-60s"):
+		obs.OutcomeAt = killed.Add(60 * time.Second)
+	case d.fault("outcome-in-the-margin"):
+		// An outcome 100 s after the kill, inside the 2-minute bar: the stream ends 20 s after it, under the margin, NOT RUN.
+		obs.OutcomeAt = killed.Add(100 * time.Second)
+	case d.fault("ended-before-outcome"):
+		// The ruling's case: a stream of 100 s, and an outcome 90 s after the kill, when the stream has ended. NOT RUN.
+		obs.Stream.Ended, obs.OutcomeAt = opened.Add(100*time.Second), killed.Add(90*time.Second)
+	case d.fault("ended-before-outcome-and-cut"):
+		// The same, with the stream cut: the failure wins.
+		obs.Stream.Ended, obs.OutcomeAt = opened.Add(100*time.Second), killed.Add(90*time.Second)
+		obs.Stream.Complete, obs.Stream.CutBy = false, "tunnel"
 	case d.fault("front-cut"):
 		obs.FrontCuts = 1
 	case d.fault("front-cuts-unread"):
@@ -131,11 +146,15 @@ func (d *drySteps) BetaKeeper(_ context.Context, p Plan) (KeeperObs, error) {
 	return obs, nil
 }
 
-// betaKeeperCases are the keeper row's dry cases. The window faults that end NOT RUN are not here: Run returns their error and writes no verdict
-// (TestAKeeperStreamTheContextCannotHoldIsNotRun); a window at the floor is no failure.
+// betaKeeperCases are the keeper row's dry cases. The faults that end NOT RUN are not here: the window faults (Run returns their error and writes
+// no verdict; TestAKeeperStreamTheContextCannotHoldIsNotRun), and a stream that does not outlast the outcome by the margin
+// (TestAKeeperStreamThatEndedBeforeTheOutcomeIsNotRunThroughRun). A window at the floor, and an outcome 60 s or 90 s after the kill, are no failure.
 var betaKeeperCases = []dryCase{
 	{"", ""},
 	{"window-at-the-floor", ""},
+	{"outcome-at-60s", ""},
+	{"outcome-at-90s", ""},
+	{"ended-before-outcome-and-cut", "the stream across the restart was cut"},
 	{"not-ready", "the Instance was not seen ready"},
 	{"relays-unread-before", "the keeper's relays were not read before the restart"},
 	{"relays-unread-after", "the keeper's relays were not read after the restart"},
@@ -163,7 +182,6 @@ var betaKeeperCases = []dryCase{
 	{"short-stream", "the stream across the restart did not deliver exactly the tokens asked for"},
 	{"past-deadline", "the stream across the restart did not end within the deployment's deadline"},
 	{"opened-after-kill", "the stream was not open before the controller was killed"},
-	{"ends-at-the-outcome", "the stream did not flow on for the margin after the outcome"},
 	{"front-cut", "the front counted a cut during the restart"},
 	{"front-cuts-unread", "the front's cuts could not be counted"},
 	{"unattributed", "a response lacked its attribution headers"},
