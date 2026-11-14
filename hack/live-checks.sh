@@ -65,9 +65,10 @@
 # judge prints; the run sent no request, and its jobs were cancelled by their tags.
 # The bulk row on plgrid-now (beta-athena-now-bulk, issue #521) has a verdict of its own by the same protocol, INVALID (the science agent's ruling on
 # #521): its run was judged, recorded and posted, nothing failed, and it has no saturation witness (the control's 64 MiB counted with its time and
-# rate while its token streams ran across the whole transfer), so its reading measures nothing. Its marker names it in fixed words, held to that row
-# alone; judge prints "<row>: INVALID (...)", apart from PASS, FAIL and NOT RUN, and the row exits 3 like a NOT RUN: not a failure, not a pass, run
-# it again. Its text to post says why. A failure of any other check wins: the row is a FAIL. The row is pending in the tables, so --run refuses it
+# rate while its token streams ran across the whole transfer), so its reading measures nothing. It is no NOT RUN: its job started, ran and spent the
+# slot, and the run was put to the test, where a NOT RUN's job never started or its row was never put to the test. Its marker names it in fixed
+# words, held to that row alone; judge prints "<row>: INVALID (not a NOT RUN: ...)", apart from PASS, FAIL and NOT RUN, and the row exits 3 like a
+# NOT RUN: not a failure, not a pass, run it again. Its text to post says why. A failure of any other check wins: the row is a FAIL. The row is pending in the tables, so --run refuses it
 # (exit 2) before any of this until it is made ready.
 # The keeper row on plgrid-now (beta-athena-now-keeper, issue #521) has one: the deployment's max-model-len does not hold a stream long enough to span
 # a controller restart's outcome at the engine's measured rate. Its marker names the rate and the context, numbers only, which judge prints; the run
@@ -1205,7 +1206,7 @@ judge() {
     NOT_RUN=1
     if invalid_marker; then
       # Exit 3 like a NOT RUN, its own word: the run happened and measured nothing (NOT_RUN=1 carries the exit code).
-      say "$n: INVALID (the run has no saturation witness: a transfer's bytes, time and rate were not measured with its token streams running across the whole of it, so its reading measures nothing; the text to post says which; the run's other checks passed; not a failure, not a pass)"
+      say "$n: INVALID (not a NOT RUN: the job started, ran and spent the slot, and the run was put to the test; but it has no saturation witness: a transfer's bytes, time and rate were not measured with its token streams running across the whole of it, so its reading measures nothing; the text to post says which; the run's other checks passed; not a failure, not a pass)"
     elif second_job_marker; then
       say "$n: NOT RUN (the first job ran and the second never started $(second_job_bound "$n"), and was cancelled by its tag; not a failure)"
       late=$(sed -n -E 's/.*ReplacementLate for its deployment: (raised|not raised|unknown);.*/\1/p' "$REC_DIR/not-run.txt" 2>/dev/null | head -1)

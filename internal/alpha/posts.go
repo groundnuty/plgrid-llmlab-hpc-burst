@@ -39,10 +39,14 @@ func verdictLine(row Row, failures []string) string {
 	return fmt.Sprintf("%s: FAIL (posts to %s)\n- failed checks: %s", row.Name, row.PostsTo, Summary(failures))
 }
 
-// invalidVerdictLine is the head of an INVALID run's text (ErrInvalid): nothing failed, and why the reading measures nothing.
+// invalidVerdictLine is the head of an INVALID run's text (ErrInvalid): nothing failed, why the reading measures nothing, and that the run is
+// no NOT RUN: its job started, ran and spent the slot, where a NOT RUN's never started or the row was never put to the test.
 func invalidVerdictLine(row Row, why []string) string {
-	return fmt.Sprintf("%s: INVALID (posts to %s)\n- no saturation witness, so no reading: %s", row.Name, row.PostsTo, Summary(why))
+	return fmt.Sprintf("%s: INVALID (posts to %s)\n- no saturation witness, so no reading: %s\n- %s", row.Name, row.PostsTo, Summary(why), invalidNotNotRunWords)
 }
+
+// invalidNotNotRunWords tell an INVALID run from a NOT RUN, in its text to post.
+const invalidNotNotRunWords = "this is not a NOT RUN: the run's job started, ran and spent the slot, and the run was put to the test, but the test measured nothing it can be judged by; neither a pass nor a failure, so run it again"
 
 // watchResetsLine is the count of the run's watch resets, on every row that runs the stack.
 func watchResetsLine(n int) string { return fmt.Sprintf("- watch resets over the run: %d\n", n) }

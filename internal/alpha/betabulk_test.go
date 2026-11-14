@@ -307,6 +307,8 @@ func TestAnInvalidBulkRunPostsWhyAndNoFinding(t *testing.T) {
 	post := betaBulkPost(row, o, nil)
 	for _, want := range []string{
 		"beta-athena-now-bulk: INVALID (posts to #522)\n- no saturation witness, so no reading: " + why + "\n",
+		// Told from a NOT RUN in words (team-lead, #546): the job ran and spent the slot.
+		"\n- this is not a NOT RUN: the run's job started, ran and spent the slot, and the run was put to the test, but the test measured nothing it can be judged by; neither a pass nor a failure, so run it again\n",
 		"- the saturation witness: ABSENT (" + why + "): the gaps measure nothing, so there is no reading and no finding\n",
 	} {
 		if !strings.Contains(post, want) {
@@ -453,6 +455,9 @@ func TestTheBulkRowsInvalidRunsThroughRun(t *testing.T) {
 			}
 			if why := "\n- no saturation witness, so no reading: " + strings.Join(c.why, "; ") + "\n"; !strings.Contains(string(post), why) {
 				t.Errorf("the text to post lacks %q:\n%s", why, post)
+			}
+			if !strings.Contains(string(post), "\n- this is not a NOT RUN: the run's job started, ran and spent the slot") {
+				t.Errorf("the text to post does not tell the INVALID from a NOT RUN:\n%s", post)
 			}
 		})
 	}

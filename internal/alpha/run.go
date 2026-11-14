@@ -76,7 +76,7 @@ func Invalid(_ Row, err error) bool { return errors.Is(err, ErrInvalid) }
 
 // InvalidNote is the text of an INVALID run's marker (NotRunFile): the row and the fixed words, nothing the run read. The text to post says why.
 func InvalidNote(row Row) string {
-	return fmt.Sprintf("%s: %s; the run's other checks passed; the text to post says why; the run ended its deployment\n", row.Name, invalidWords)
+	return fmt.Sprintf("%s: %s; its job started, ran and spent the slot, so this is no NOT RUN; the run's other checks passed; the text to post says why; the run ended its deployment\n", row.Name, invalidWords)
 }
 
 // neverStarted is whether err says a job of the run never started within a bound.
