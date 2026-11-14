@@ -421,6 +421,12 @@ type WorkerReport struct {
 	// ExitCode is set once the process has exited, by itself or when stopped;
 	// -1 for a process killed by a signal.
 	ExitCode *int `json:"exitCode,omitempty"`
+	// ExitedAt is when the worker exited without being told to (Phase exited),
+	// by the agent's clock as it saw the process end, or its start fail;
+	// absent otherwise, and from an agent that predates it. HBEP-7's crash
+	// correlation judges its window on it, and on the exit's first sight when
+	// it is absent (#539).
+	ExitedAt *time.Time `json:"exitedAt,omitempty"`
 	// Generation is the worker's restart generation this process was started
 	// for.
 	Generation int64 `json:"generation"`

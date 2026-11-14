@@ -32,6 +32,10 @@ type memory struct {
 	generations map[types.UID]int64
 	collisions  map[types.UID]collisionMemo
 	lastSweep   time.Time
+	// exits are each ModelDeployment's recent unrequested worker exits, and exitKeys every exit
+	// recorded, by its key, with when it was first seen (crash.go).
+	exits    map[types.UID][]*exitSeen
+	exitKeys map[string]time.Time
 }
 
 // collisionMemo is a deployment's IDs computed with a display-form collision.
@@ -43,7 +47,8 @@ type collisionMemo struct {
 
 func newMemory(started time.Time) *memory {
 	return &memory{started: started, emitted: map[string]bool{}, repeats: map[string]time.Time{},
-		generations: map[types.UID]int64{}, collisions: map[types.UID]collisionMemo{}}
+		generations: map[types.UID]int64{}, collisions: map[types.UID]collisionMemo{},
+		exits: map[types.UID][]*exitSeen{}, exitKeys: map[string]time.Time{}}
 }
 
 // specChanged reports whether the deployment's spec generation differs from the
