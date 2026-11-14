@@ -188,7 +188,7 @@ var betaRouterCases = []dryCase{
 	{"bytes-router-made", "a response of the response-level reading was a failure the router or the path made"},
 	{"bytes-no-stream-200", "no streamed variant answered 200"},
 	{"bytes-no-chat-200", "no chat variant answered 200"},
-	{"bytes-refused-outside", "a valid variant outside S13's groups that a server may refuse was answered other than 200: chat/temperature#plain 400 [outside S13's groups]"},
+	{"bytes-refused-outside", "a valid variant of S13's cases was answered other than 200, which is allowed only as a 4xx in one of S13's groups that a server may refuse: chat/temperature#plain 400 [outside S13's groups]"},
 	{"bytes-5xx-in-group", "a valid variant of S13's cases was answered with a 5xx: completions/suffix#plain 500 [suffix]"},
 	{"bytes-past-bound", "a response of the response-level reading did not finish"},
 	{"unattributed", "a response lacked its attribution headers"},
