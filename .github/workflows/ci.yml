@@ -1242,16 +1242,18 @@ jobs:
   # and host-dialed mode, each mode once without the bulk path (the run's own control) and once with it. It is
   # judged by S4 as the science agent revised it for 4-vCPU hosted runners after the third hosted run (#448,
   # comment 6828152670; judgeS4): a run is valid when its control's gap p99 is at least 85 ms, and passes when
-  # the bulk path's is at most 75 ms and at least 30 ms below its control; an INVALID run fails the job, never
-  # a pass. It is the rehearsal job's setup with one test, without Envoy, in a job of its own, since its
-  # four stacks take about 19 minutes of hack/rehearsal.sh on a hosted runner and would take any other
-  # rehearsal job past half of its time limit (#295). Like the other rehearsal jobs, it is not one of the
-  # required checks.
+  # the bulk path's is at most 75 ms and at least 30 ms below its control. The job reads the test's outcome per
+  # mode as the science agent ruled on #563, (a) with the both-INVALID failure (hack/bulkverdict): it fails on
+  # an S4 FAIL, on any functional witness failing whatever the control, on a bulk p99 over 75 ms even beside an
+  # INVALID control, and on both modes INVALID; one mode INVALID, otherwise clean, warns with its figures and
+  # passes. It is the rehearsal job's setup with one test, without Envoy, in a job of its own, since its four
+  # stacks would take any other rehearsal job past half of its time limit (#295). Like the other rehearsal
+  # jobs, it is not one of the required checks.
   rehearsal-bulk:
     name: rehearsal-bulk
     runs-on: ubuntu-24.04
     # Compiling the four binaries and the test from scratch, then a run whose -test.timeout is 30
-    # minutes (hack/rehearsal.sh); about 19 minutes in all on a hosted runner (#448's hosted runs). The job
+    # minutes (hack/rehearsal.sh); about 19 minutes in all on #448's hosted runs, 9.5 on this job's first. The job
     # must outlive the test's timeout, so that its own waits give up and its clean-up runs before the job
     # is cancelled, and stay under half of its limit (#295).
     timeout-minutes: 50
@@ -1364,18 +1366,18 @@ jobs:
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$rt/bus" >> "$GITHUB_ENV"
           XDG_RUNTIME_DIR="$rt" DBUS_SESSION_BUS_ADDRESS="unix:path=$rt/bus" systemd-run --user --scope -q true
 
-      # The bulk test alone. A run that skipped it, or a selection that matched nothing, exits 0 from go
-      # test, so the step also requires the test's own PASS line: missing inputs (frp, sshd, the binaries)
-      # already fail it (hack/rehearsal.sh sets HPCBURST_REQUIRE_FRP and HPCBURST_REQUIRE_SSHD, and
-      # HPCBURST_REHEARSAL=1, without which the test skips).
+      # The bulk test alone. hack/rehearsal.sh's exit is the test's, which fails a mode whose control is
+      # INVALID, so the step keeps going past it and the job's verdict is hack/bulkverdict's mapping of the
+      # test's log (#563): it also fails a run that skipped the test, a selection that matched nothing, a
+      # failed build and processes left. Missing inputs fail the run itself (hack/rehearsal.sh sets
+      # HPCBURST_REQUIRE_FRP and HPCBURST_REQUIRE_SSHD, and HPCBURST_REHEARSAL=1, without which the test skips).
       - name: hack/rehearsal.sh
         run: |
           set -o pipefail
-          REHEARSAL_OUT="$RUNNER_TEMP/rehearsal" REHEARSAL_RUN='^TestBulk64MiBReplyBesideEightStreams$' bash hack/rehearsal.sh 2>&1 | tee "$RUNNER_TEMP/rehearsal-bulk.log"
-          if ! grep -q -E '^--- PASS: TestBulk64MiBReplyBesideEightStreams \(' "$RUNNER_TEMP/rehearsal-bulk.log"; then
-            echo "::error::TestBulk64MiBReplyBesideEightStreams did not pass: it skipped, or the selection matched nothing"
-            exit 1
-          fi
+          rc=0
+          REHEARSAL_OUT="$RUNNER_TEMP/rehearsal" REHEARSAL_RUN='^TestBulk64MiBReplyBesideEightStreams$' bash hack/rehearsal.sh 2>&1 | tee "$RUNNER_TEMP/rehearsal-bulk.log" || rc=$?
+          echo "hack/rehearsal.sh exited $rc; the job's verdict is S4's mapping, read from the test's log (#563)"
+          go run ./hack/bulkverdict "$RUNNER_TEMP/rehearsal-bulk.log"
 
   # The one-host rehearsal's third part (issue #193), on #146's rig: HBEP-5's 7,000-token stream
   # and attribution, HBEP-8's events and metrics, HBEP-3's requeue, HBEP-6's controller restart
