@@ -89,7 +89,7 @@ Each question ends Decided, with its source, or Open, with what decides it. A "L
 
 - **Declared or resolved values.**
   - **Decided** (HBEP-3, open question 1): scheme `v1` hashes the declared serving spec with the accelerator class and the per-file list. One spec on two GPU types gives two deployment IDs. Each Instance's resolved settings are kept in its verification records, beside the ID.
-  - **Decided for alpha: "auto" is not refused** (HBEP-7, Instance start, settings comparison; science-agent decision, 31 Oct 2026, PR #91). A declared `auto` is not compared, and the value the engine reports is recorded as resolved (`internal/lifecycle/judge.go:257`). The one exception is `max-model-len`, whose `auto` admission refuses (`api/v1alpha1/modeldeployment_types.go:138`). Verification works either way: it compares the Instance's reported settings with the declared ones.
+  - **Decided for alpha: "auto" is not refused** (HBEP-7, Instance start, settings comparison; science-agent decision, 31 Oct 2026, PR #91). A declared `auto` is not compared, and the value the engine reports is recorded as resolved (`internal/lifecycle/judge.go:257`). The exceptions are `max-model-len` and the parallel sizes (`tensor-parallel-size`, `pipeline-parallel-size`, `data-parallel-size`), whose `auto` admission refuses (`api/v1alpha1/modeldeployment_types.go:138`–`:139`; `TestParallelSizesArePlainPositiveIntegers`). Verification works either way: it compares the Instance's reported settings with the declared ones.
   - **Open: resolved settings as inputs.** HBEP-3's spike decides: one spec served on two accelerator classes, comparing resolved settings and outputs (HBEP-3, open question 1). If it refines the rule, that is scheme `v2` (Notes).
 - **Batch-shaping settings** (maximum sequences, prefill budget). They can change numerics slightly and are often tuned.
   - **Decided for `v1`:** they are capacity, not inputs (HBEP-3, open question 3, and its `v1` table). `TestPropertyNonInputsDoNotChangeID` (`pkg/deploymentid/property_test.go:157`) checks that `max-num-seqs` leaves the ID unchanged.
@@ -136,11 +136,15 @@ Each question ends Decided, with its source, or Open, with what decides it. A "L
     - The platform is the Provider's platform label, and a Provider without one gets no catalog (`internal/managed/controller.go:439`). Provider names are arbitrary, so two Providers on LLMLab give one entry the same ID.
     - The catalog loop writes each entry's full ID as `managedID` in the Provider's `status.catalog` (`pkg/provider/catalog.go:102`; `api/v1alpha1/provider_types.go:219`).
     - No identity record (an `id-` ControllerRevision) is written for it. Only a served deployment's classes get one (`internal/lifecycle/identity.go:375`), reached only for a served source (`internal/lifecycle/reconcile.go:189`).
+    - **That is a gap against HBEP-11's identity records,** which store each deployment ID's inputs. In alpha a managed entry's inputs live only in the Provider's `status.catalog`, which the catalog loop rewrites, so they're lost once the catalog drops the entry, while usage records still name its ID. HBEP-11 states the exception for alpha (amended by this PR), and the beta criteria close it (Graduation criteria).
     - The front's `hpcburst-deployment-id` carries the ID's display form, with emitter `provider` (HBEP-5, The LLMLab route; `TestAttributionOnLLMLabReplies` in `internal/front/attribution_test.go`).
   - **Open for beta: what is stored beside the ID.** The known fields, the rest marked "unknown", and a flag for a gateway's request changes (L-6.6) are not built.
     - Lean: keep them beside the ID, outside the hashed object, so `v1` IDs stay as issued. Adding them to the object would be a `v2` (Notes).
     - A probe decides the flag per managed platform: a fixed request whose prompt token count is known offline, compared with the count the platform's `usage` reports. An added prompt segment shows as a surplus.
     - Where the record is kept follows the record fetch, an owner decision (below).
+- **How long records are kept.** HBEP-11 leaves the retention policy for identity, verification and accounting records here (HBEP-11, Records outlive deletion).
+  - **In alpha there is none:** the records have no owner reference, so they're kept until an operator deletes them, as HBEP-11 says, and nothing deletes them on a schedule.
+  - **Open: a policy,** decided with the record fetch below, since both turn on who reads the records and for how long.
 - **How a client fetches the record for an ID.** **Open: owner decision,** because an API path is hard to change. The options are an endpoint on the front, an export for a replication package, or both. Discussion with HBEP-5.
   - Today, identity and verification records are ControllerRevisions, read through the Kubernetes API under its RBAC and found by their `deployment-id` and `instance-uid` labels (HBEP-11, Ownership, records and deletion).
   - The same decision answers who may resolve an ID to its inputs, which HBEP-3 leaves here (HBEP-3, Security), and how records are exported, which HBEP-11 leaves here.
@@ -160,7 +164,7 @@ The mechanisms are decided and built under other HBEPs. Each item says where its
   - Verification runs as its own controller in the lifecycle manager (HBEP-7, Controllers; HBEP-11).
 - **Who may claim to be an Instance.** HBEP-6, Admission: the server plugin. frps admits a login only with a live Allocation's credential, and a proxy only for the UID of an Instance placed on that Allocation. The Instance takes traffic only after verification.
 - **The Instance key.** The allocation agent generates it at Instance start and passes it to the engine through the environment (HBEP-7, The allocation agent, Keys). The front reads it from the controller's mode-600 file for that Instance UID (HBEP-5, Notes). It is never an ID input (HBEP-3, Deployment ID).
-- **Attribution.** HBEP-5, Attribution headers: six `hpcburst-*` headers on every response, and only the request ID and the emitter on an error the front raises before it chooses a target. Each usage record holds the same facts, keyed by request ID (HBEP-5, Usage records; HBEP-8, Usage records).
+- **Attribution.** HBEP-5, Attribution headers: six `hpcburst-*` headers on a response from an Instance of ours; four on a managed provider's reply, which has no Instance to name (`TestAttributionOnLLMLabReplies`); and only the request ID and the emitter on an error the front raises before it chooses a target. Each usage record holds the same facts, keyed by request ID (HBEP-5, Usage records; HBEP-8, Usage records).
 - **Managed catalog entries.** The ID and where it lives are under Open questions; HBEP-4 owns the catalog loop.
 - **Naming.** HBEP-3, Naming levels, and HBEP-5's choice under `model` (open question 4).
 
@@ -209,7 +213,7 @@ The mechanisms are decided and built under other HBEPs. Each item says where its
     - the listing rule: `pkg/hubfiles/link_test.go` and `pkg/hubfiles/redirect_test.go`.
 - **Beta:**
   - the render check, built and run in every verification (Open questions);
-  - the managed record: LLMLab's entries carry what the open question decides beside their ID, and a change in what a managed platform serves raises an event (Risks);
+  - the managed record: a managed entry's ID gets an immutable identity record, as a served deployment's does (HBEP-11), with what the open question decides beside it, and a change in what a managed platform serves raises an event (Risks);
   - the rehash timed on Athena A100, Helios GH200 and Sano, with S7's fallback built where a platform breaks its budget;
   - the batch-shaping measurement run, and HBEP-3's decision on a `v2` recorded;
   - the record fetch built, as the owner decides;
@@ -287,7 +291,7 @@ Verification grows from www-2027's endpoint check, run on each new endpoint (hea
 - 2026-10-31: HBEP-6, now implementable, decides for alpha who may claim an Instance's tunnel: frps's server plugin admits a login only with a live Allocation's credential, and a proxy only for the UID of an Instance placed on that Allocation. The Instance still takes traffic only after the controller's verification.
 - 2026-10-31: HBEP-7's settings comparison is by value (booleans, numbers, then strings), with a declared `auto` recorded as resolved. That also keeps open question 1's "verification works either way" true for `auto`.
 - 2026-10-31: the attribution log's retention noted from HBEP-8 becoming implementable: in alpha, the usage files, kept for the grant's life.
-- 2026-11-14: implementable. What other HBEPs and the code had decided is carried in, with its source: scheme `v1` fixed by the published release `v0.1.0-alpha.1`, so any change to the record is a `v2` and HBEP-3's call; HBEP-7's alpha checks, with a declared `auto` recorded as resolved; HBEP-5's choice under `model`; the managed entry's ID as issue #69 built it, with no stored record; HBEP-6's admission for who may claim an Instance. Design details point to where each mechanism is held, and the alpha criteria name the release's tests. Open: resolved settings and batch shaping as inputs, the rehash time beyond Helios x86, the render check, the managed record beyond its ID, and the record fetch (owner decision).
+- 2026-11-14: implementable. What other HBEPs and the code had decided is carried in, with its source: scheme `v1` fixed by the published release `v0.1.0-alpha.1`, so any change to the record is a `v2` and HBEP-3's call; HBEP-7's alpha checks, with a declared `auto` recorded as resolved; HBEP-5's choice under `model`; the managed entry's ID as issue #69 built it, with no stored record; HBEP-6's admission for who may claim an Instance. Design details point to where each mechanism is held, and the alpha criteria name the release's tests. Open: resolved settings and batch shaping as inputs, the rehash time beyond Helios x86, the render check, the managed record beyond its ID, and the record fetch (owner decision). From its review round (Astra and Fable, PR #555): a managed reply carries four headers, not six; the parallel sizes refuse `auto` as `max-model-len` does; a managed entry's missing identity record is a gap HBEP-11 now states, for beta to close; and records have no retention policy in alpha.
 
 ## Amendments
 
