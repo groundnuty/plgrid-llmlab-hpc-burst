@@ -13,10 +13,10 @@ package alpha
 //     /clusters, so Envoy is running and holds the worker healthy), before the engine is killed and again once it is back;
 //   - S13's cases through the real path, as a RESPONSE-LEVEL reading on real vLLM and not as bytes (the science agent's ruling
 //     on #521, answer 1): the engine's received bytes cannot be read from vLLM, so what is judged is that the router never makes
-//     a failure of its own. Exact bytes are CI's (#470, internal/agent/router_bytes_test.go). The post says so. A valid variant
-//     answered other than 200 is allowed only a 4xx, and only in one of S13's groups that a server may still refuse; any other,
-//     and any 5xx, fails the row, and every one is posted with its status and group, beside the engine's vLLM version (the
-//     science agent's ruling (c) on #521, comment 6869642260; refusalGroups);
+//     a failure of its own. Exact bytes are CI's (#470, internal/agent/router_bytes_test.go). The post says so. Each variant is
+//     also sent straight to the worker's engine socket on the node, and the row fails only where the two answers differ: a refusal
+//     the engine gives on both paths is the deployment's, posted with the engine's error (the science agent's ruling (a) on the
+//     router row, #522, comment 6874666948; routercontrol.go);
 //   - one restart at the worker rung, with the router in front: the gate of HBEP-7.
 //
 // NOT RUN, exit 3, never a pass and never a failure: a node whose glibc is under 2.30 (ErrGlibcTooOld), naming the version.
