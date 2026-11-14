@@ -170,26 +170,36 @@ func removeTestAgent(ctx context.Context, run commandRunner, dir string) error {
 }
 
 // shimReadings reads what ran through the shim: the agent digest the Instance's Allocation names, then, on the node, the executables of the job's
-// agent process, its engine and the Apptainer above the engine. A reading that cannot be taken is left empty, which the verdict names.
+// agent process, its engine and the Apptainer above the engine (shimObs). A reading that cannot be taken is left empty, which the verdict names.
 func (r *liveRun) shimReadings(ctx context.Context, p Plan, in v1alpha1.Instance, o *ShimObs) {
 	t := r.t
 	t.Helper()
 	s := r.w.shim
-	o.ShimDigest, o.AgentDigest = s.shimDigest, s.agentDigest
+	allocation := ""
 	var a v1alpha1.Allocation
 	cctx, cancel := stack.CallCtx(t)
 	err := r.c.Get(cctx, client.ObjectKey{Name: in.Spec.AllocationRef.Name, Namespace: in.Namespace}, &a)
 	cancel()
 	if err == nil && a.Spec.ForProvider.Batch != nil {
-		o.Allocation = a.Spec.ForProvider.Batch.AgentDigest
+		allocation = a.Spec.ForProvider.Batch.AgentDigest
 	}
 	jobID := r.ourJobFor(ctx, in, "the test shim on the node")
-	var err2 error
-	if o.AgentRunning, o.EngineRunning, o.ApptainerRunning, err2 = readShimNode(ctx, r.tr, jobID, in.Spec.Launch.Command, s.shimDigest); err2 != nil {
-		t.Fatalf("the test shim on the node: %v", err2)
+	obs, err := shimObs(ctx, s, allocation, r.tr, jobID, in.Spec.Launch.Command)
+	if err != nil {
+		t.Fatalf("the test shim on the node: %v", err)
 	}
+	*o = obs
 	p.Logf("%s: through the test shim: the Allocation names the shim %t; on the node the agent process ran the shipped agent %t, the engine the shim %t, its Apptainer the shim %t",
 		p.Row.Name, o.Allocation == s.shimDigest, o.AgentRunning == s.agentDigest, o.EngineRunning == s.shimDigest, o.ApptainerRunning == s.shimDigest)
+}
+
+// shimObs is the bulk row's ShimObs: the harness's two digests (what it built and staged), and beside them what ran, never taken from those two:
+// the agent digest the Allocation names, and the node's readings (readShimNode).
+func shimObs(ctx context.Context, s *testShim, allocation string, run commandRunner, jobID string, command []string) (ShimObs, error) {
+	o := ShimObs{ShimDigest: s.shimDigest, AgentDigest: s.agentDigest, Allocation: allocation}
+	var err error
+	o.AgentRunning, o.EngineRunning, o.ApptainerRunning, err = readShimNode(ctx, run, jobID, command, s.shimDigest)
+	return o, err
 }
 
 // readShimNode reads, on the job's node, the executables of the job's agent process, its engine (the shim's double, MatchesShimEngine) and the
@@ -279,8 +289,8 @@ func imageRecordPath(staging, digest string, format agentapi.ImageFormat) string
 // manifestEnd is a whole sandbox manifest's last line, its count of entries (internal/agent/stage, writeManifest).
 var manifestEnd = regexp.MustCompile(`(^|\n)end\t[0-9]+\n$`)
 
-// readImageRecord reads the record of the image staged for digest on the login node: its SHA-256, when it is whole and for digest (a manifest ends
-// with its count; a SIF's sidecar names the digest), and ErrNoStagedImage otherwise. The sandbox's tree against its manifest is the agent's walk on
+// readImageRecord reads the record of the image staged for digest on the login node: its SHA-256, when it is whole and for digest (a manifest's
+// first line names the digest and its last its count; a SIF's sidecar names the digest), and ErrNoStagedImage otherwise. The sandbox's tree against its manifest is the agent's walk on
 // the node, not this. Only a transport failure is another error.
 func readImageRecord(ctx context.Context, run commandRunner, rec, digest string, format agentapi.ImageFormat) (string, error) {
 	res, err := run.Run(ctx, slurm.Command{Line: "sha256sum " + rec})
@@ -304,6 +314,14 @@ func readImageRecord(ctx context.Context, run commandRunner, rec, digest string,
 	}
 	if format == agentapi.ImageFormatSandbox {
 		if !manifestEnd.Match(res.Stdout) {
+			return "", ErrNoStagedImage
+		}
+		// Its first line names the digest the tree was built from (internal/agent/stage, manifestHeader).
+		res, err = run.Run(ctx, slurm.Command{Line: "head -c 160 " + rec})
+		if err != nil {
+			return "", fmt.Errorf("reading the image's record: %w", err)
+		}
+		if res.ExitCode != 0 || !strings.HasPrefix(string(res.Stdout), "hpcburst-sandbox-manifest/1 "+digest+"\n") {
 			return "", ErrNoStagedImage
 		}
 		return sum, nil

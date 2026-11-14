@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -228,6 +229,13 @@ func TestTheImagePreconditionReadsTheRecord(t *testing.T) {
 	if _, err := readImageRecord(context.Background(), sess, sif, other, agentapi.ImageFormatSIF); !errors.Is(err, ErrNoStagedImage) {
 		t.Errorf("a sidecar for another digest: %v, want ErrNoStagedImage", err)
 	}
+	// A manifest of another image, whole, is not this one's.
+	if err := plat.WriteFile(sb, []byte(strings.Replace(manifest, digest, other, 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readImageRecord(context.Background(), sess, sb, digest, agentapi.ImageFormatSandbox); !errors.Is(err, ErrNoStagedImage) {
+		t.Errorf("a manifest of another digest: %v, want ErrNoStagedImage", err)
+	}
 	// A manifest cut before its count is not whole.
 	if err := plat.WriteFile(sb, []byte(strings.TrimSuffix(manifest, "end\t2\n")), 0o600); err != nil {
 		t.Fatal(err)
@@ -259,5 +267,52 @@ func TestAnUnstagedImageIsNotRun(t *testing.T) {
 	note := NotRunNote(row, 0, fmt.Errorf("setup: %w", ErrNoStagedImage))
 	if want := row.Name + ": " + noStagedImageWords + "; stage it first with the stage row; no job was submitted\n"; note != want {
 		t.Errorf("NotRunNote = %q, want %q", note, want)
+	}
+}
+
+// The row's central proof, at the level of the observation the verdict judges: when what ran is not what the harness built and staged, the node's
+// digests differing from the harness's own, the verdict fails on each reading. An observation that copied the harness's digests in place of the
+// node's would pass here, so this is what fails it (#579's review of the gap).
+func TestWhatRanNotWhatTheHarnessStagedFailsTheVerdict(t *testing.T) {
+	x := strings.Repeat("ab", 32) // the shim the harness built
+	y := strings.Repeat("cd", 32) // the shipped agent it staged
+	s := &testShim{shimDigest: x, agentDigest: y}
+	command := []string{"vllm", "serve", "/models/m"}
+	listing := "self 7\n" + strings.Join([]string{
+		"proc 100 1 500 1 0 o " + b64("/scratch/u/agent/"+x+"/hb-agent", "/scratch/u/alloc/t-1"),
+		"proc 110 100 502 0 1 j " + b64("/scratch/u/test-agent/y/shim-ab/apptainer", "exec", "image", "vllm", "serve", "/models/m"),
+		"proc 120 110 503 0 1 j " + b64("/scratch/u/agent/"+x+"/hb-agent", "serve", "/models/m"),
+	}, "\n") + "\nlisted\n"
+	double := DoubleObs{Name: "the double", Digest: x}
+	// The control: a node that ran what the harness staged passes.
+	good := cannedNode{listing: listing, digests: map[int]string{100: y, 110: x, 120: x}}
+	o, err := shimObs(context.Background(), s, x, good, "4242", command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := shimChecks(o, double); len(f) != 0 {
+		t.Fatalf("a node that ran what the harness staged fails: %q", f)
+	}
+	// A node whose agent, engine and Apptainer are other files: every reading fails, each in its words.
+	other := strings.Repeat("ef", 32)
+	bad := cannedNode{listing: listing, digests: map[int]string{100: other, 110: other, 120: other}}
+	o, err = shimObs(context.Background(), s, x, bad, "4242", command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := shimChecks(o, double)
+	for _, want := range []string{
+		"the job's agent process is not the shipped agent the harness staged (its executable, read on the node)",
+		"the engine is not the test shim's double (its executable, read on the node)",
+		"the Apptainer above the engine is not the test shim (its executable, read on the node)",
+	} {
+		if !slices.Contains(f, want) {
+			t.Errorf("the verdict says %q, want it to hold %q", f, want)
+		}
+	}
+	// The Allocation naming another build fails too, whatever the node says.
+	o, _ = shimObs(context.Background(), s, y, good, "4242", command)
+	if f := shimChecks(o, double); !slices.Contains(f, "the Allocation names another agent build than the test shim: the Provider did not stage the shim in hb-agent's place") {
+		t.Errorf("an Allocation naming the shipped agent: %q", f)
 	}
 }

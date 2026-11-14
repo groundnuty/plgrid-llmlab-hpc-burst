@@ -98,6 +98,26 @@ func (sh *shell) tail(args []string) int {
 	return 0
 }
 
+// head is "head -c <bytes> <path>": the file's first bytes, at most maxTailBytes, as tail's last.
+func (sh *shell) head(args []string) int {
+	if len(args) != 3 || args[0] != "-c" {
+		return sh.fail(2, "head: the fake supports only: head -c <bytes> <path>")
+	}
+	n, err := strconv.ParseInt(args[1], 10, 64)
+	if err != nil || n < 1 || n > maxTailBytes || strconv.FormatInt(n, 10) != args[1] {
+		return sh.fail(1, "head: invalid number of bytes: %q (the fake takes 1 to %d)", args[1], maxTailBytes)
+	}
+	b, ok, err := sh.p.fs.head(sh.path(args[2]), n)
+	switch {
+	case !ok:
+		return sh.fail(1, "head: cannot open %q for reading: No such file or directory", args[2])
+	case err != nil:
+		return sh.fail(1, "head: %s: %v", args[2], err)
+	}
+	sh.stdout.Write(b)
+	return 0
+}
+
 // setUmask is "umask <octal>": it holds for the rest of the line.
 func (sh *shell) setUmask(args []string) int {
 	if len(args) != 1 {
