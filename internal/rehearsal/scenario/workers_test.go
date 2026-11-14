@@ -30,8 +30,8 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
-// portsWorkers: #439's block is 30400-30419; hpcburst up takes base to base+12.
-var portsWorkers = stack.Ports{Base: 30400, ClientAddr: "127.0.0.1:30413", DialHomeListen: "127.0.0.1:30414"}
+// portsWorkers: #439's block is 28400-28419; hpcburst up takes base to base+12.
+var portsWorkers = stack.Ports{Base: 28400, ClientAddr: "127.0.0.1:28413", DialHomeListen: "127.0.0.1:28414"}
 
 // twoWorkersStartTimeout is the two-worker test's health.startTimeout: shorter than rehearsalTiming's
 // 4m, so step (e2), which waits one out, stays short; a start here reaches ready about a minute after

@@ -150,10 +150,10 @@ SL_ENV=(S2C_HOME="$T/h" IMAGE="$T/h/img" CHECKPOINT_DIR="$T/h/ckpt" VR_BIN="$T/h
 run_sl() { local name=$1; shift; env -u S2C_PRIVATE_SETTINGS "${SL_ENV[@]}" "$@" bash "$HERE/submit-line.sh" > "$T/$name.out" 2> "$T/$name.err"; RC=$?; OUT=$T/$name.out; ERR=$T/$name.err; }
 opts_of() { python3 -I "$T/lexcheck.py" < "$OUT"; }
 
-run_sl sl MODE=double PORT_BASE=30420 PLAN="B:1:rr B:1:envoy-bound" LOAD_ARGS="-sessions 4 -agents 0.5,0.3,0.2"
+run_sl sl MODE=double PORT_BASE=28420 PLAN="B:1:rr B:1:envoy-bound" LOAD_ARGS="-sessions 4 -agents 0.5,0.3,0.2"
 check "submit line: exit 0, one line, and the fake's lexer and option table accept it" '[[ $RC == 0 && $(wc -l < "$OUT") == 1 ]] && opts_of > "$T/sl.opts"'
 check "submit line: the options are exactly the contract's shape (plus --parsable and --wrap), with no account" '[[ $(grep -v "^wrap=" "$T/sl.opts" | sort) == "$SHAPE_WANT" ]]'
-check "submit line: the --wrap word carries the required variables, the optional ones that were set, and runs job.sh from the stage" 'w=$(grep "^wrap=" "$T/sl.opts"); [[ $w == *"S2C_HOME=\"$T/h\" IMAGE=\"$T/h/img\" CHECKPOINT_DIR=\"$T/h/ckpt\" VR_BIN=\"$T/h/vr\" "* && $w == *"MODE=\"double\""* && $w == *"PORT_BASE=\"30420\""* && $w == *"PLAN=\"B:1:rr B:1:envoy-bound\""* && $w == *"LOAD_ARGS=\"-sessions 4 -agents 0.5,0.3,0.2\""* && $w == *" bash $T/h/stage/scripts/job.sh" && $w != *RESULT_TAG* ]]'
+check "submit line: the --wrap word carries the required variables, the optional ones that were set, and runs job.sh from the stage" 'w=$(grep "^wrap=" "$T/sl.opts"); [[ $w == *"S2C_HOME=\"$T/h\" IMAGE=\"$T/h/img\" CHECKPOINT_DIR=\"$T/h/ckpt\" VR_BIN=\"$T/h/vr\" "* && $w == *"MODE=\"double\""* && $w == *"PORT_BASE=\"28420\""* && $w == *"PLAN=\"B:1:rr B:1:envoy-bound\""* && $w == *"LOAD_ARGS=\"-sessions 4 -agents 0.5,0.3,0.2\""* && $w == *" bash $T/h/stage/scripts/job.sh" && $w != *RESULT_TAG* ]]'
 run_sl slacct S2C_PRIVATE_SETTINGS="$T/settings.env"
 check "submit line: with S2C_PRIVATE_SETTINGS the account of the file is added as --account=<it>, and nothing else changes" '[[ $RC == 0 ]] && opts_of | grep -q -x "account=$SEED_ACCT" && [[ $(opts_of | grep -v -e "^wrap=" -e "^account=" | sort) == "$SHAPE_WANT" ]]'
 run_sl slstage STAGE="$T/h/other-stage"

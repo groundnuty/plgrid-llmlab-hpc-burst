@@ -140,7 +140,7 @@ func TestUpRefusesTheBulkPathWithoutAFront(t *testing.T) {
 			o := c.o
 			o.BulkPath, o.StateDir, o.ControllerBin = true, l.dir, ctl
 			if o.PortBase == 0 {
-				o.PortBase = 30320 // refused before any port is checked or bound
+				o.PortBase = 28320 // refused before any port is checked or bound
 			}
 			_, err = Up(context.Background(), o)
 			if err == nil || !strings.Contains(err.Error(), c.want) {
@@ -168,7 +168,7 @@ func TestUpRefusesTheBulkPathWithoutFrps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	o := UpOptions{BulkPath: true, StateDir: l.dir, PortBase: 30320, ControllerBin: fakeControllerBin(t),
+	o := UpOptions{BulkPath: true, StateDir: l.dir, PortBase: 28320, ControllerBin: fakeControllerBin(t),
 		Front: Front{Mode: string(agentapi.DialHomeHostDialed)}, FrontConfig: cfg, FrontBin: frontBin,
 		BinDir: t.TempDir()} // no frp-<version>/frps there
 	_, err = Up(context.Background(), o)
@@ -318,7 +318,7 @@ func TestAnUpgradeKeepsTheBulkPath(t *testing.T) {
 			if err := l.saveStoreVersion("v1.35.9+k3s1", "up"); err != nil {
 				t.Fatal(err)
 			}
-			ports, err := PortsFromBase(30020)
+			ports, err := PortsFromBase(28020)
 			if err != nil {
 				t.Fatal(err)
 			}

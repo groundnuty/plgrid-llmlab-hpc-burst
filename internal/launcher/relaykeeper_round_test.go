@@ -40,7 +40,7 @@ func TestAnUpgradeKeepsTheRelayKeeper(t *testing.T) {
 			if err := l.saveStoreVersion("v1.35.9+k3s1", "up"); err != nil {
 				t.Fatal(err)
 			}
-			ports, err := PortsFromBase(30020)
+			ports, err := PortsFromBase(28020)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -185,7 +185,7 @@ func TestUpRefusesTheKeeperWithoutPidfds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = Up(context.Background(), UpOptions{StateDir: l.dir, PortBase: 30020, RelayKeeper: true, ControllerBin: fakeControllerBin(t),
+	_, err = Up(context.Background(), UpOptions{StateDir: l.dir, PortBase: 28020, RelayKeeper: true, ControllerBin: fakeControllerBin(t),
 		Front: Front{Mode: string(agentapi.DialHomeHostDialed)}, Log: io.Discard})
 	if err == nil || !strings.Contains(err.Error(), "needs pidfds") {
 		t.Fatalf("up --relay-keeper without pidfds: %v; want refused", err)

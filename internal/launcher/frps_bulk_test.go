@@ -239,10 +239,10 @@ func TestWriteFrpsBulkFilesWritesTheFrontsBulkPluginOnlyWithAFront(t *testing.T)
 	}
 }
 
-// b448Base is a launcher base in #448's port block (30280-30359, IMPL-COMMON): a test that runs the
-// second frps binds its plugin stub at base+8 (30288) and frps-bulk at base+13 to base+15
-// (30293-30295), and nothing else of the block.
-const b448Base = 30280
+// b448Base is a launcher base in #448's port block (28280-28359, IMPL-COMMON): a test that runs the
+// second frps binds its plugin stub at base+8 (28288) and frps-bulk at base+13 to base+15
+// (28293-28295), and nothing else of the block.
+const b448Base = 28280
 
 // startFrpsBulk starts the real frps from the launcher's own frps-bulk file, edited by edit when it
 // is set, and waits for its web server. The caller serves the plugin at base+8 (startAdmitAll). It

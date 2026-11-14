@@ -67,7 +67,7 @@ func TestUpRefusesABadRouterBeforeAnythingStarts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			c.o.StateDir, c.o.PortBase = l.dir, 30360
+			c.o.StateDir, c.o.PortBase = l.dir, 28360
 			_, err = Up(context.Background(), c.o)
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("up: %v; want refused, naming %q", err, c.want)
@@ -135,7 +135,7 @@ func TestAnUpgradeKeepsTheRouter(t *testing.T) {
 			if err := l.saveStoreVersion("v1.35.9+k3s1", "up"); err != nil {
 				t.Fatal(err)
 			}
-			ports, err := PortsFromBase(30360)
+			ports, err := PortsFromBase(28360)
 			if err != nil {
 				t.Fatal(err)
 			}

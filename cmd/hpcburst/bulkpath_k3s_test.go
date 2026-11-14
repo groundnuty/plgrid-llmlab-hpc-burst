@@ -4,8 +4,8 @@ package main
 // supervisor on exactly base+13 to base+15, beside the first, the second certificate is issued for
 // the agent endpoint's key, and the first certificate, which an Allocation staged before the switch
 // verifies its token tunnel with, keeps its bytes, inode and modification time. down leaves nothing on
-// the block. The base, 30320, is in #448's port block (30280-30359, IMPL-COMMON): this test binds
-// 30320-30335 and the front's client listener at 30336.
+// the block. The base, 28320, is in #448's port block (28280-28359, IMPL-COMMON): this test binds
+// 28320-28335 and the front's client listener at 28336.
 
 import (
 	"crypto/sha256"
@@ -26,8 +26,8 @@ import (
 )
 
 const (
-	bulkUpBase       = 30320
-	bulkUpClientPort = 30336
+	bulkUpBase       = 28320
+	bulkUpClientPort = 28336
 )
 
 // certMark is a file's bytes' hash, inode and modification time: what changes when it is written.

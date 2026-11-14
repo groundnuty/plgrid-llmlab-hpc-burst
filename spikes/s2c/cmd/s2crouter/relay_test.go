@@ -63,7 +63,7 @@ func TestRelayMapRefusesNonLoopback(t *testing.T) {
 			t.Errorf("%q accepted", bad)
 		}
 	}
-	ps, err := parseRelayMap("127.0.0.1:30424=/r/worker-0.sock,127.0.0.1:30425=/r/worker-1.sock")
+	ps, err := parseRelayMap("127.0.0.1:28424=/r/worker-0.sock,127.0.0.1:28425=/r/worker-1.sock")
 	if err != nil || len(ps) != 2 || ps[1].socket != "/r/worker-1.sock" {
 		t.Fatalf("%v %v", ps, err)
 	}
