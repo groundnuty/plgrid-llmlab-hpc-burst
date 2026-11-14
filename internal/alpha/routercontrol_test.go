@@ -53,6 +53,13 @@ var (
 		"data: [DONE]\n\n"
 )
 
+// logprobsBody is a completions answer with logprobs, in vLLM's shape: two positions, their top_logprobs as given.
+func logprobsBody(first, second string) string {
+	return `{"id":"cmpl-1","object":"text_completion","created":1,"model":"m","choices":[{"index":0,"text":" Hello there","logprobs":{"text_offset":[0,6],` +
+		`"token_logprobs":[-0.1,-0.5],"tokens":[" Hello"," there"],"top_logprobs":[` + first + `,` + second + `]},"finish_reason":"length","stop_reason":null}],` +
+		`"usage":{"prompt_tokens":5,"total_tokens":7,"completion_tokens":2}}`
+}
+
 func ok(body string) Reply            { return Reply{Status: 200, Body: []byte(body)} }
 func status(s int, body string) Reply { return Reply{Status: s, Body: []byte(body)} }
 
@@ -77,7 +84,16 @@ func TestTheControlComparesWhatIsTheRequestsAndSetsAsideWhatIsTheSamplers(t *tes
 		{"no fingerprint on one path", ok(chatOK), ok(strings.Replace(chatOK, `,"system_fingerprint":"fp-1"`, ``, 1)), false, ""},
 		{"the prefix cache held part of the prompt on one path", ok(chatOK), ok(strings.Replace(chatOK, `"prompt_tokens_details":null`, `"prompt_tokens_details":{"cached_tokens":8}`, 1)), false, ""},
 		{"a reasoning field the sampler filled on one path", ok(chatOK), ok(strings.Replace(chatOK, `"reasoning":null`, `"reasoning":"so"`, 1)), false, ""},
+		// vLLM's completions logprobs: each position's top_logprobs keyed by the sampled tokens' text, which differ by send, and a
+		// position one entry wider where the sampled token was outside the top-k; prompt_logprobs keyed by token ids.
+		{"completions logprobs keyed by other tokens on the other path", ok(logprobsBody(`{" Hello":-0.1," Hi":-2.3," Hey":-3.0}`, `{" there":-0.5," you":-1.2," all":-2.2,"!":-4.4}`)),
+			ok(logprobsBody(`{" Hi":-0.2," Hello":-1.9," Yo":-2.7}`, `{" friend":-0.9," pal":-1.1," mate":-2.0}`)), false, ""},
+		{"prompt logprobs keyed by other token ids", ok(strings.Replace(chatOK, `"choices":`, `"prompt_logprobs":[null,{"791":{"logprob":-1.2,"rank":1,"decoded_token":"The"}}],"choices":`, 1)),
+			ok(strings.Replace(chatOK, `"choices":`, `"prompt_logprobs":[null,{"791":{"logprob":-1.2,"rank":1,"decoded_token":"The"},"578":{"logprob":-2.0,"rank":2,"decoded_token":"A"}}],"choices":`, 1)), false, ""},
 		// Differences, one rule at a time.
+		{"the router dropped the logprobs", ok(`{"id":"cmpl-1","object":"text_completion","created":1,"model":"m","choices":[{"index":0,"text":" Hello there","logprobs":null,"finish_reason":"length","stop_reason":null}],"usage":{"prompt_tokens":5,"total_tokens":7,"completion_tokens":2}}`),
+			ok(logprobsBody(`{" Hi":-0.2}`, `{" you":-0.3}`)), false, "the shape differs"},
+		{"a position's top_logprobs that is no map on one path", ok(logprobsBody(`{" Hi":-0.2}`, `null`)), ok(logprobsBody(`{" Hi":-0.2}`, `{" you":-0.3}`)), false, "the shape differs"},
 		{"a status", status(400, refusal), ok(chatOK), false, "status 400 through the router, 200 straight to the engine"},
 		{"a 502 the path made", status(502, "upstream connect error"), status(400, refusal), false, "status 502 through the router, 400"},
 		{"the error's text", status(400, refusal), status(400, refusal2), false, "the error differs"},

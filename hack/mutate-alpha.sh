@@ -724,6 +724,11 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'routercontrol.go@@		replies[i] = &Reply{Status: code, Body: body, Cut: rc != 0}@@		replies[i] = &Reply{Status: code, Body: body}'
   'routercontrol.go@@	if agentapi.CheckKey([]byte(key)) != nil {@@	if agentapi.CheckKey([]byte(key)) != nil && false {'
   'routercontrol.go@@	if len(c.Alike) == 0 {@@	if true {'
+  'routercontrol.go@@var dataKeyed = map[string]bool{"top_logprobs": true, "prompt_logprobs": true}@@var dataKeyed = map[string]bool{"prompt_logprobs": true}'
+  'routercontrol.go@@var dataKeyed = map[string]bool{"top_logprobs": true, "prompt_logprobs": true}@@var dataKeyed = map[string]bool{"top_logprobs": true}'
+  'routercontrol.go@@	case map[string]any:
+		return "map"@@	case map[string]any:
+		return shapeOf(x)'
 
   'betarouter.go@@	case 502, 503, 504:@@	case 502, 503:'
   'betarouter.go@@		c.Complete = strings.Contains(text, "data: [DONE]")@@		c.Complete = true'

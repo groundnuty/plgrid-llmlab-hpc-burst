@@ -932,10 +932,11 @@ func (s routerStandIn) jobs() []fakeslurm.Job {
 
 // TestStandInBetaRouter is the router row's live steps over the stand-in, through Run: the real stack with --instance-router envoy and the
 // real Envoy of the pin on this host, behind it the engine double; the glibc read on this host, Envoy's process and executable digest read
-// through the fake cluster's srun, S13's 440 variants through the front against the double, one worker restart with the router in front.
-// This host's glibc is above 2.30, so the run is a pass and not NOT RUN; what the stand-in cannot show is Athena's node (the row's own
-// reading of it), and the double's answers are the double's, not vLLM's (it reads the four prompt forms vLLM reads, and refuses only what S13
-// says vLLM refuses: TestThroughTheDoubleS13sVariantsFailNothing). The cluster's own record of the job must show it ended by the stack's
+// through the fake cluster's srun, S13's 440 variants through the front against the double and again straight to its socket (the
+// direct-to-engine control, by the fake cluster's srun and this host's curl), one worker restart with the router in front. This host's glibc
+// is above 2.30, so the run is a pass and not NOT RUN; what the stand-in cannot show is Athena's node (the row's own reading of it), and the
+// double's answers are the double's, not vLLM's (TestThroughTheDoubleTwoSendsOfEveryVariantAreAlike compares two sends of each variant to it
+// without a stack). The cluster's own record of the job must show it ended by the stack's
 // release before the cleanup could, as row A's does.
 //
 //livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
