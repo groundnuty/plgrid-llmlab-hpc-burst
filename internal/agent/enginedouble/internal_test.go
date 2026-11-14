@@ -80,8 +80,11 @@ func TestChildEnv(t *testing.T) {
 
 // The package is test support: its source may import only the standard
 // library and package agentapi, and no source of the module except its own
-// tests may import it. Both are read from the sources, so neither needs the
-// go tool or the network.
+// tests may import it, with one exception: the bulk row's test shim, the main
+// package internal/agent/enginedouble/shim, which is the double's program on a
+// node (issue #521, option (A)). Both are read from the sources, so neither
+// needs the go tool or the network. That no shipped binary reaches the double
+// or the shim is the shim's own test (its closure guard).
 func TestPackageImportsAndImporters(t *testing.T) {
 	const agentapi = "github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	const self = "github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/enginedouble"
@@ -110,7 +113,7 @@ func TestPackageImportsAndImporters(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
 		t.Fatalf("the module root is not at %s: %v", root, err)
 	}
-	scanned := 0
+	scanned, shimFiles := 0, 0
 	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -125,19 +128,44 @@ func TestPackageImportsAndImporters(t *testing.T) {
 			return nil
 		}
 		scanned++
+		dir, _ := filepath.Abs(filepath.Dir(p))
+		allowed := strings.HasSuffix(filepath.ToSlash(dir), "internal/agent/enginedouble/shim")
+		if allowed {
+			shimFiles++
+			if pkg := packageOf(t, p); pkg != "main" {
+				t.Errorf("%s is package %s: the one importer allowed is the shim's main", p, pkg)
+			}
+		}
 		for _, path := range importsOf(t, p) {
-			if path == self {
-				t.Errorf("%s imports the engine double: only _test.go files may", p)
+			if path == self && !allowed {
+				t.Errorf("%s imports the engine double: only _test.go files and the bulk row's shim may", p)
 			}
 		}
 		return nil
 	})
+	if shimFiles == 0 {
+		t.Error("found no source of the shim, internal/agent/enginedouble/shim: the allowance would name nothing")
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
 	if scanned < 20 {
 		t.Errorf("scanned %d non-test sources of the module, expected many more", scanned)
 	}
+}
+
+// packageOf is a source file's package name.
+func packageOf(t *testing.T, file string) string {
+	t.Helper()
+	src, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := parser.ParseFile(token.NewFileSet(), file, src, parser.PackageClauseOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsed.Name.Name
 }
 
 func importsOf(t *testing.T, file string) []string {

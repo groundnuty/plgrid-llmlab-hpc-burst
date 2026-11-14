@@ -35,12 +35,14 @@ package alpha
 import (
 	"fmt"
 	"math"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -306,4 +308,51 @@ func mbps(p BulkPhase) float64 {
 		return 0
 	}
 	return float64(p.ReplyBytes) / p.Took.Seconds() / 1e6
+}
+
+// The bulk row's node readings (issue #521, option (A); the science agent's rulings on #521): through the test shim, the job's agent process is
+// the shipped agent (the shim exec'd it, so its command line is the staged hb-agent's and its executable the shipped agent's file), and the
+// engine and the Apptainer above it are the shim itself, run as the engine double. Each is read off the node by its /proc/<pid>/exe
+// (ExeDigestScript), never from what the harness says it staged.
+
+// PickAgent is the job's agent among the listed processes: a process of the job whose program is hb-agent (by its argv[0]'s base name, the staged
+// path the batch bootstrap runs), that is not one of host-dialed mode's relays (hb-agent relay ...), and whose parent is no hb-agent. ok is false
+// unless exactly one process is.
+func PickAgent(procs []NodeProc) (NodeProc, bool) {
+	t := newProcTree(procs, nil, nil)
+	isAgent := func(p NodeProc) bool {
+		return len(p.Argv) > 0 && filepath.Base(p.Argv[0]) == agentapi.AgentBinaryName && !(len(p.Argv) > 1 && p.Argv[1] == "relay")
+	}
+	var found []NodeProc
+	for _, p := range procs {
+		if !isAgent(p) || !t.inJob(p) {
+			continue
+		}
+		if q, ok := t.parent(p); ok && isAgent(q) {
+			continue
+		}
+		found = append(found, p)
+	}
+	if len(found) != 1 {
+		return NodeProc{}, false
+	}
+	return found[0], true
+}
+
+// ApptainerAbove is the nearest ancestor of p that is Apptainer (its program, its starter or its runtime parent): for the bulk row's engine, the
+// double's Apptainer, which the shim runs under the name apptainer. ok is false when p has none.
+func ApptainerAbove(procs []NodeProc, p NodeProc) (NodeProc, bool) {
+	t := newProcTree(procs, nil, nil)
+	cur := p
+	for range len(procs) + 1 {
+		q, ok := t.parent(cur)
+		if !ok {
+			return NodeProc{}, false
+		}
+		if isApptainer(q.Argv) {
+			return q, true
+		}
+		cur = q
+	}
+	return NodeProc{}, false
 }

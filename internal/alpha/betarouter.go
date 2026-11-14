@@ -591,11 +591,12 @@ var (
 	sha256Hex  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
-// EnvoyDigestScript is the srun step that reads the SHA-256 of a running Envoy's executable: the process at the PID must still be the one
+// ExeDigestScript is the srun step that reads the SHA-256 of a running process's executable (the router row's Envoy; the bulk row's
+// agent and engine): the process at the PID must still be the one
 // listed (the same start time and command line, as the kill's helper checks), and then its /proc/<pid>/exe is read, which is the file the
 // kernel runs, not a path the agent says. It prints "digest <hex>", or one word: gone, changed or unreadable. The listed process's fields
 // are checked before they are written into the script.
-func EnvoyDigestScript(p NodeProc) (string, error) {
+func ExeDigestScript(p NodeProc) (string, error) {
 	if p.PID <= 0 || !digitsOnly.MatchString(p.Start) || !base64Only.MatchString(p.cmdline) {
 		return "", errors.New("the listed process's fields are not ones a script can carry")
 	}
@@ -614,8 +615,8 @@ echo "digest ${sum%% *}"
 `, nil
 }
 
-// ParseEnvoyDigest reads the digest off EnvoyDigestScript's output; false for any other word.
-func ParseEnvoyDigest(out []byte) (string, bool) {
+// ParseExeDigest reads the digest off ExeDigestScript's output; false for any other word.
+func ParseExeDigest(out []byte) (string, bool) {
 	f := strings.Fields(string(out))
 	if len(f) != 2 || f[0] != "digest" || !sha256Hex.MatchString(f[1]) {
 		return "", false
