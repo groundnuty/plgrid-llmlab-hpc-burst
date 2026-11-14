@@ -379,3 +379,59 @@ func TestParseWorkerVerificationRecordName(t *testing.T) {
 		}
 	}
 }
+
+// A managed catalog entry's identity record (HBEP-9; issue #574): id-<first 12 hex> in the namespace the
+// caller names, the kind, the display form and the platform as labels, the full catalog name in an
+// annotation, no model-deployment label and no owner reference. The ID is golden vector 03's committed hash,
+// whose catalog name holds characters a label value refuses: the record still builds.
+func TestNewManagedIdentityRecord(t *testing.T) {
+	const id = "8a2051bec23d0e78256b2a36f068add7f1513c353507cd8fcf2ca9b8a3d11d18" // vector 03's sha256.txt
+	const name = "example-ü-\U0001F600-27b"                                       // vector 03's catalog_name
+	data := []byte(`{"scheme":"v1"}`)
+	rec, err := NewManagedIdentityRecord("hb-records", "llmlab", name, id, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Name != "id-8a2051bec23d" || rec.Namespace != "hb-records" || rec.Revision != 1 || string(rec.Data.Raw) != string(data) {
+		t.Errorf("record = %+v", rec)
+	}
+	if len(rec.OwnerReferences) != 0 {
+		t.Errorf("an identity record must have no owner reference, got %v", rec.OwnerReferences)
+	}
+	want := map[string]string{LabelRecord: RecordIdentity, LabelDeploymentID: "8a2051bec23d", LabelPlatform: "llmlab"}
+	if len(rec.Labels) != len(want) {
+		t.Errorf("labels = %v, want %v", rec.Labels, want)
+	}
+	for k, v := range want {
+		if rec.Labels[k] != v {
+			t.Errorf("label %s = %q, want %q", k, rec.Labels[k], v)
+		}
+	}
+	if got := rec.Annotations[AnnotationCatalogName]; got != name || len(rec.Annotations) != 1 {
+		t.Errorf("annotations = %v, want only the full catalog name %q", rec.Annotations, name)
+	}
+	data[0] = 'X'
+	if rec.Data.Raw[0] != '{' {
+		t.Error("the record shares the caller's data slice")
+	}
+}
+
+func TestNewManagedIdentityRecordRefusesBadInput(t *testing.T) {
+	good := []byte(`{}`)
+	for name, call := range map[string]func() error{
+		"a display-form ID":   func() error { _, err := NewManagedIdentityRecord("ns", "llmlab", "x", goldenID[:12], good); return err },
+		"a malformed ID":      func() error { _, err := NewManagedIdentityRecord("ns", "llmlab", "x", "nothex", good); return err },
+		"no namespace":        func() error { _, err := NewManagedIdentityRecord("", "llmlab", "x", goldenID, good); return err },
+		"no platform":         func() error { _, err := NewManagedIdentityRecord("ns", "", "x", goldenID, good); return err },
+		"a platform no label": func() error { _, err := NewManagedIdentityRecord("ns", "llm lab/x", "x", goldenID, good); return err },
+		"no catalog name":     func() error { _, err := NewManagedIdentityRecord("ns", "llmlab", "", goldenID, good); return err },
+		"data that is not JSON": func() error {
+			_, err := NewManagedIdentityRecord("ns", "llmlab", "x", goldenID, []byte(`{`))
+			return err
+		},
+	} {
+		if call() == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+}

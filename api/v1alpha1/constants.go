@@ -171,6 +171,11 @@ func ProviderLeaseName(provider string) string { return "provider-" + provider }
 // annotation is the only place the full name survives (HBEP-11, API, Labels).
 const AnnotationModelDeployment = Group + "/model-deployment"
 
+// AnnotationCatalogName is on a managed catalog entry's identity record: the entry's catalog name, in full
+// (HBEP-9, the identity record of a managed catalog entry). It is no label: a catalog name may hold
+// characters a label value refuses, as golden vector 03's "example-ü-😀-27b" does.
+const AnnotationCatalogName = Group + "/catalog-name"
+
 // IdentityRecordPrefix starts the name of an identity record, a ControllerRevision
 // named id-<first 12 hex of the deployment ID> (HBEP-11).
 const IdentityRecordPrefix = "id-"
