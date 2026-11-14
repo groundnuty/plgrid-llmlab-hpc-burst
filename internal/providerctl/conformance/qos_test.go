@@ -208,13 +208,41 @@ func clock(t *testing.T, text string) time.Duration {
 	return d
 }
 
-// notAConformanceRun is a row of the script that TestConformance does not run: the alpha rows of issue #194, whose
-// leases are the deployments' (the accounting rows run through this harness and keep its 5-minute Allocations).
+// notAConformanceRun is a row of the script that TestConformance does not run: the stack rows internal/alpha runs (the alpha rows of
+// issue #194, the tunnel rows and beta's rows on plgrid-now of issue #521), whose leases are the deployments' (the accounting rows run
+// through this harness and keep its 5-minute Allocations). Their timeouts and requests are hack/livechecks's to check.
 func notAConformanceRun(name string) bool {
 	if name == alpha.NowStageRow().Name {
 		return false // the pre-staging row of issue #376 is a conformance run (nowstage_test.go)
 	}
+	for _, r := range alpha.Rows() {
+		if r.Name == name {
+			return true // a stack row by the package's own list, whatever its name: beta-athena-now-router, say (#521)
+		}
+	}
 	return strings.HasPrefix(name, "alpha-") || strings.HasPrefix(name, "tunnel-hour-")
+}
+
+// Every row internal/alpha runs is no conformance run, whatever its name (beta's rows of #521 begin "beta-"), and the rows this harness runs are:
+// the pre-staging row and the script's conformance, accounting and reach rows.
+func TestTheStackRowsAreNoConformanceRuns(t *testing.T) {
+	for _, r := range alpha.Rows() {
+		if !notAConformanceRun(r.Name) {
+			t.Errorf("%s is a row internal/alpha runs, but counts as a conformance run", r.Name)
+		}
+	}
+	harness := 0
+	for _, r := range readShapeRows(t) {
+		if r.name == alpha.NowStageRow().Name || strings.HasPrefix(r.name, "conformance-") || strings.HasPrefix(r.name, "gpu-accounting-") || strings.HasPrefix(r.name, "reach-") {
+			harness++
+			if notAConformanceRun(r.name) {
+				t.Errorf("%s is a row this harness runs, but counts as no conformance run", r.name)
+			}
+		}
+	}
+	if harness == 0 {
+		t.Fatal("the script's table has no row this harness runs: the control above checked nothing")
+	}
 }
 
 // Every conformance row of the script is a request the plugin accepts: its
@@ -226,7 +254,7 @@ func TestConformanceRowsPassTheRequestCheck(t *testing.T) {
 	seen := 0
 	for _, r := range readShapeRows(t) {
 		if r.profile == "-" || notAConformanceRun(r.name) {
-			continue // real-engine, and the alpha rows (issue #194): not conformance runs, with leases of their own
+			continue // real-engine, and the stack rows (issue #194; beta's, #521): not conformance runs, with leases of their own
 		}
 		seen++
 		t.Run(r.name, func(t *testing.T) {
