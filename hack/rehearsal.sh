@@ -12,7 +12,8 @@
 # bin/ (HPCBURST_BIN_DIR) and puts its frps and its x86_64 frpc in REHEARSAL_OUT/frp (HPCBURST_FRP_DIR).
 # The archive gives all three, so neither variable may be set. rehearsal.test is built from the checkout,
 # which is the tag's: the archive holds no test. A SHA256SUMS beside the archive is checked. The archive
-# has the one pinned k3s, so '^TestRehearsalKeeper', which needs k3s-1.35.9 too, does not run from it.
+# has the one pinned k3s, so '^TestRehearsal(Keeper|Upgrade)', which needs k3s-1.35.9 too, does not run from it,
+# nor does the upgrade test, which needs the second build too.
 #
 # Optional:
 #   REHEARSAL_UNPACK_ONLY=1 with REHEARSAL_ARCHIVE, unpack and stop: nothing is built or run
@@ -20,9 +21,10 @@
 #   REHEARSAL_RUN           a -test.run pattern (default '^TestRehearsal(Direct|SSH|HostDialed)$', issue #146's two
 #                           and #298's host-dialed mode;
 #                           '^TestRehearsalPart3$' runs issue #193's third part, about 8 minutes more;
-#                           '^TestRehearsalKeeper' runs #343's relay keeper tests and #553's stop order
-#                           on down, about 9 minutes,
-#                           which need HPCBURST_BIN_DIR to hold k3s-1.35.9/k3s too)
+#                           '^TestRehearsal(Keeper|Upgrade)' runs #343's relay keeper tests, #553's stop
+#                           order on down and #552's upgrade with the controllers running, about 13 minutes,
+#                           which need HPCBURST_BIN_DIR to hold k3s-1.35.9/k3s too, and the upgrade test the
+#                           second build, which this script makes unless REHEARSAL_PREBUILT is set)
 #   REHEARSAL_OUT           where the binaries go (default a new temporary directory)
 #   REHEARSAL_PREBUILT=1    run the binaries already in REHEARSAL_OUT instead of building them,
 #                           so the run can take a host's resource lock without a build inside it

@@ -1368,9 +1368,9 @@ jobs:
   rehearsal-keeper:
     name: rehearsal keeper
     runs-on: ubuntu-24.04
-    # Compiling the four binaries and the test from scratch, then a run of about 7 minutes whose
-    # -test.timeout is 25 minutes, so that the test's own waits give up and its clean-up runs
-    # before the job is cancelled.
+    # Compiling the four binaries (and the upgrade test's second build) and the test from scratch,
+    # then a run of about 13 minutes whose -test.timeout is 25 minutes, so that the test's own waits
+    # give up and its clean-up runs before the job is cancelled.
     timeout-minutes: 40
     env:
       # The k3s versions this job fetches; the cache key and the fetch step both read this list (see
@@ -1442,6 +1442,30 @@ jobs:
           bash hack/fetch-frp.sh "$RUNNER_TEMP/frp"
           echo "HPCBURST_FRP_DIR=$RUNNER_TEMP/frp" >> "$GITHUB_ENV"
 
+      # Envoy 1.40.2, for the upgrade test's --instance-router (issue #552), as the rehearsal job
+      # fetches it; HPCBURST_REQUIRE_ENVOY=1 makes a missing Envoy fail the test, not skip it.
+      - name: Restore the cached Envoy binary
+        id: envoy
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/envoy
+          key: envoy-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/fetch-envoy.sh', 'internal/agent/envoypin/envoy-pins.txt') }}
+
+      - name: Fetch the pinned Envoy binary
+        run: |
+          bash hack/fetch-envoy.sh "$RUNNER_TEMP/envoy"
+          {
+            echo "HPCBURST_ENVOY_DIR=$RUNNER_TEMP/envoy"
+            echo "HPCBURST_REQUIRE_ENVOY=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Save the Envoy binary to the cache
+        if: steps.envoy.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/envoy
+          key: ${{ steps.envoy.outputs.cache-primary-key }}
+
       - name: Save the pinned binaries to the cache
         if: steps.binaries.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1483,4 +1507,4 @@ jobs:
           XDG_RUNTIME_DIR="$rt" DBUS_SESSION_BUS_ADDRESS="unix:path=$rt/bus" systemd-run --user --scope -q true
 
       - name: hack/rehearsal.sh
-        run: REHEARSAL_OUT="$RUNNER_TEMP/rehearsal" REHEARSAL_RUN='^TestRehearsalKeeper' REHEARSAL_TIMEOUT=25m bash hack/rehearsal.sh
+        run: REHEARSAL_OUT="$RUNNER_TEMP/rehearsal" REHEARSAL_RUN='^TestRehearsal(Keeper|Upgrade)' REHEARSAL_TIMEOUT=25m bash hack/rehearsal.sh
