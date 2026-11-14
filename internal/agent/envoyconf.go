@@ -87,7 +87,6 @@ const (
 	envoyEnforcingLocalOrigin = 100
 	envoyEjectionBase         = 30 * time.Second
 	envoyEjectionMax          = 300 * time.Second
-	envoyMaxEjectionPercent   = 100
 	envoyHealthCheckAddress   = "127.0.0.1"
 
 	// envoyHashBalanceFactor is ring_hash's bounded load, in percent of the mean (HBEP-5, Inside an
@@ -312,6 +311,20 @@ const (
 // envoySeconds is a whole-second duration in Envoy's JSON form ("10800s").
 func envoySeconds(d time.Duration) string { return fmt.Sprintf("%ds", int64(d/time.Second)) }
 
+// envoyMaxEjectionPercent is outlier detection's max_ejection_percent for n workers (HBEP-5, Worker health;
+// the science agent's ruling on #565): ⌈100·(n−1)/n⌉, 50 for two and 88 for eight, and so 0 for a lone
+// worker, which the active health check alone judges. Envoy ejects a worker only while 100·(ejected+1)/n is
+// at most this (DetectorImpl::ejectHost), so outlier detection never takes the last worker out, now that one
+// connection failure ejects; a set that has all died is still taken out by the active check, with no panic
+// mode (healthy_panic_threshold 0), so the router answers 503 for none. Envoy's own default of 10% would keep
+// a failing worker in a small Instance; 100 would let one failure each eject every worker.
+func envoyMaxEjectionPercent(n int) uint32 {
+	if n <= 1 {
+		return 0
+	}
+	return uint32((100*(n-1) + n - 1) / n)
+}
+
 // envoyDuration is d as a protobuf Duration's JSON, for a value under a second: 100 ms is "0.1s".
 func envoyDuration(d time.Duration) string {
 	return strconv.FormatFloat(d.Seconds(), 'f', -1, 64) + "s"
@@ -383,7 +396,7 @@ func RenderEnvoyConfig(c EnvoyConfig) ([]byte, error) {
 				}},
 				OutlierDetection: envoyOutlier{
 					Consecutive5xx: envoyOutlier5xx, BaseEjectionTime: envoySeconds(envoyEjectionBase), MaxEjectionTime: envoySeconds(envoyEjectionMax),
-					MaxEjectionPercent: envoyMaxEjectionPercent, SuccessfulActiveHealthCheckUnejectHost: false,
+					MaxEjectionPercent: envoyMaxEjectionPercent(len(c.Workers)), SuccessfulActiveHealthCheckUnejectHost: false,
 					SplitExternalLocalOriginErrors: true, ConsecutiveLocalOriginFailure: envoyOutlierLocalOrigin,
 					EnforcingConsecutiveLocalOriginFailure: envoyEnforcingLocalOrigin,
 				},

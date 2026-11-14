@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -153,7 +154,7 @@ func TestEnvoyConfigCarriesHBEP5sSettings(t *testing.T) {
 			"unhealthy after": float64(2), "healthy after": float64(1), "check path": "/ready",
 			"check address": "127.0.0.1", "check port": float64(30160), "check Host": "worker-0",
 			"consecutive 5xx": float64(3), "base ejection": "30s", "max ejection": "300s",
-			"max ejection percent": float64(100), "uneject on a passing check": false, "panic threshold": float64(0), "bounded loads": float64(125),
+			"max ejection percent": float64(0), "uneject on a passing check": false, "panic threshold": float64(0), "bounded loads": float64(125),
 		}[name]
 		if got != want {
 			t.Errorf("%s = %v, want %v", name, got, want)
@@ -307,6 +308,9 @@ func TestEnvoyGuardRefusesEachFault(t *testing.T) {
 		{"the local ejection not enforced", func(m map[string]any) {
 			clusterOf(t, m)["outlier_detection"].(map[string]any)["enforcing_consecutive_local_origin_failure"] = 0
 		}, "enforcing_consecutive_local_origin_failure is 0"},
+		{"every worker ejectable, the lone one too", func(m map[string]any) {
+			clusterOf(t, m)["outlier_detection"].(map[string]any)["max_ejection_percent"] = 100
+		}, "max_ejection_percent is 100"},
 		{"a passing check unejects", func(m map[string]any) {
 			clusterOf(t, m)["outlier_detection"].(map[string]any)["successful_active_health_check_uneject_host"] = true
 		}, "successful_active_health_check_uneject_host is true"},
@@ -423,5 +427,40 @@ func TestTheRealEnvoyValidatesTheAgentsConfig(t *testing.T) {
 	bad := strings.Replace(string(raw), `"suppress_envoy_headers"`, `"suppress_envoy_headerz"`, 1)
 	if out, err := validate("bad.json", []byte(bad)); err == nil || !strings.Contains(out, "suppress_envoy_headerz") {
 		t.Fatalf("Envoy accepted a misspelt field: %v\n%s", err, out)
+	}
+}
+
+// Outlier detection may eject every worker but one: max_ejection_percent is ⌈100·(n−1)/n⌉ for n workers, 0
+// for a lone worker (HBEP-5, Worker health; the science agent's ruling on #565). Envoy ejects only while
+// 100·(ejected+1)/n is at most it, so the last worker standing is never ejected. The expectations are the
+// ruling's numbers, not the formula again.
+func TestTheEjectionPercentKeepsOneWorkerIn(t *testing.T) {
+	for _, c := range []struct {
+		workers int
+		want    float64
+	}{{1, 0}, {2, 50}, {3, 67}, {4, 75}, {8, 88}} {
+		cfg := envoyCfg()
+		cfg.Workers = nil
+		for i := 0; i < c.workers; i++ {
+			w := "worker-" + strconv.Itoa(i)
+			cfg.Workers = append(cfg.Workers, agent.EnvoyWorker{Name: w, Socket: envoyRunDir + "/" + w + ".sock"})
+		}
+		m := renderMap(t, cfg)
+		if got := at(t, clusterOf(t, m), "outlier_detection", "max_ejection_percent"); got != c.want {
+			t.Errorf("%d worker(s): max_ejection_percent %v, want %v", c.workers, got, c.want)
+		}
+		if err := agent.CheckEnvoyConfig(mustJSON(t, m), cfg); err != nil {
+			t.Errorf("%d worker(s): the agent's own config is refused: %v", c.workers, err)
+		}
+		// The value of another count of workers is refused: 100 always, and n=2's 50 for any other n.
+		for _, other := range []float64{100, 50} {
+			if other == c.want {
+				continue
+			}
+			clusterOf(t, m)["outlier_detection"].(map[string]any)["max_ejection_percent"] = other
+			if err := agent.CheckEnvoyConfig(mustJSON(t, m), cfg); err == nil || !strings.Contains(err.Error(), "max_ejection_percent") {
+				t.Errorf("%d worker(s): max_ejection_percent %v: the guard says %v, want a refusal naming it", c.workers, other, err)
+			}
+		}
 	}
 }

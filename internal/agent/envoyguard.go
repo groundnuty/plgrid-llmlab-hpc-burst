@@ -26,7 +26,8 @@ import (
 //   - the workers on Unix sockets, each named, each health-checked through the agent's readiness port
 //     with its own name as the check's Host;
 //   - the health checks, outlier detection and panic threshold at HBEP-5's values (Worker health),
-//     a connection failure, reset or time-out ejecting a worker at once (#561);
+//     a connection failure, reset or time-out ejecting a worker at once (#561), and ejection taking
+//     every worker but one, ⌈100·(n−1)/n⌉ percent (#565);
 //   - the route's retry: once, on connect-failure and reset-before-request only, to another worker,
 //     after a jittered back-off of 100 ms base and 250 ms maximum (#561);
 //   - ring_hash's bounded loads at the front's tight bound, hash_balance_factor 125 (HBEP-5).
@@ -40,7 +41,7 @@ func CheckEnvoyConfig(raw []byte, c EnvoyConfig) error {
 	if err := dec.Decode(&root); err != nil {
 		return refuse("the bootstrap is not JSON: %v", err)
 	}
-	g := guard{floor: EnvoyRouterTimeout, runDir: c.RunDir, readinessPort: c.ReadinessPort}
+	g := guard{floor: EnvoyRouterTimeout, runDir: c.RunDir, readinessPort: c.ReadinessPort, workers: len(c.Workers)}
 	top, err := g.object(root, "", "admin", "static_resources")
 	if err != nil {
 		return err
@@ -77,6 +78,7 @@ type guard struct {
 	floor         time.Duration
 	runDir        string
 	readinessPort int
+	workers       int // the config's workers: max_ejection_percent depends on them
 }
 
 // num checks a JSON number equal to want.
@@ -149,8 +151,8 @@ func (g guard) health(c map[string]any, at string) error {
 	if err := g.str(od["max_ejection_time"], oat+".max_ejection_time", envoySeconds(envoyEjectionMax)); err != nil {
 		return err
 	}
-	if err := g.num(od["max_ejection_percent"], oat+".max_ejection_percent", envoyMaxEjectionPercent); err != nil {
-		return refuse("%v: Envoy's default 10%% would keep a failing worker in a small Instance", err)
+	if err := g.num(od["max_ejection_percent"], oat+".max_ejection_percent", int64(envoyMaxEjectionPercent(g.workers))); err != nil {
+		return refuse("%v for %d worker(s): outlier detection may eject every worker but one (⌈100·(n−1)/n⌉, #565); Envoy's default 10%% would keep a failing worker in a small Instance", err, g.workers)
 	}
 	if u, ok := od["successful_active_health_check_uneject_host"].(bool); !ok || u {
 		return refuse("%s.successful_active_health_check_uneject_host is %v, want false: a passing check would bring back a worker that fails requests", oat, od["successful_active_health_check_uneject_host"])

@@ -252,3 +252,59 @@ func TestAWaveAtAWorkersDeathGetsNoServiceUnavailable(t *testing.T) {
 		t.Errorf("%d of %d requests failed; the allowance is two (P(3 or more) <= 7e-5 a wave on the fix's measured rate)", failed, n)
 	}
 }
+
+// TestBothWorkersFailingLeaveOneInTheRing: both workers are killed while Envoy still holds them healthy, and
+// both then fail a connection. Outlier detection ejects only ONE of them: with two workers its
+// max_ejection_percent is 50 (⌈100·(n−1)/n⌉; the science agent's ruling on #565), so it never takes the
+// last worker out. The active check then takes the other out (failed twice, at 5 s), and with no panic mode
+// the router answers 503 "no healthy upstream". At 100 (the value before #565) both would be ejected on
+// their first failures.
+func TestBothWorkersFailingLeaveOneInTheRing(t *testing.T) {
+	h := newHarness(t, harnessOptions{envoy: testenv.EnvoyBinary(t), baseEnv: []string{"CUDA_VISIBLE_DEVICES=0,1"}})
+	d := workersRouterState(h, 2)
+	h.set(d)
+	r := h.waitReport("Envoy holding both workers healthy", time.Minute, routerHolds(map[string]bool{"worker-0": true, "worker-1": true}))
+	key := r.Instance.Key
+	if key == "" {
+		t.Fatal("the report carries no Instance key")
+	}
+	s0, s1 := sessionOn(t, h, "worker-0"), sessionOn(t, h, "worker-1")
+	killInWindow(t, h, &d, 0)
+	if _, open := killWorker(t, h, "worker-1", d.Instance.Workers[1].Generation); !open {
+		t.Fatal("Envoy's check held worker-1 out before a request could reach it: the test proves nothing")
+	}
+	before := hostStats(t, h.runDir)
+	for _, w := range []string{"worker-0", "worker-1"} {
+		if heldOut(before[w]) {
+			t.Fatalf("Envoy held %s out before the requests (%v): the test proves nothing", w, before[w])
+		}
+	}
+	// Both dead: each request gets a 503. They only make each worker fail a connection.
+	c0, _ := chatIn(h, key, s0, 1)
+	c1, _ := chatIn(h, key, s1, 1)
+	after := hostStats(t, h.runDir)
+	ejected := 0
+	for _, w := range []string{"worker-0", "worker-1"} {
+		fails := after[w]["cx_connect_fail"] - before[w]["cx_connect_fail"]
+		if fails == 0 {
+			t.Fatalf("%s failed no connection (the requests got %d and %d): the test proves nothing", w, c0, c1)
+		}
+		if after[w]["health:failed_outlier_check"] == 1 {
+			ejected++
+		}
+		t.Logf("%s: %d connection failure(s), ejected %v", w, fails, after[w]["health:failed_outlier_check"] == 1)
+	}
+	if ejected != 1 {
+		t.Fatalf("%d workers ejected after both failed: want exactly one, so outlier detection never empties the Instance", ejected)
+	}
+	// The active check takes the other out. The ring without it reaches Envoy's worker threads a moment
+	// after /clusters shows it, so the 503 for no healthy worker is waited for, within a bound.
+	h.waitReport("Envoy holding neither worker healthy", time.Minute, routerHolds(map[string]bool{"worker-0": false, "worker-1": false}))
+	code, body := 0, ""
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		if code, body = chatIn(h, key, s0, 1); code == http.StatusServiceUnavailable && strings.Contains(body, "no healthy upstream") {
+			return
+		}
+	}
+	t.Errorf("a request with both workers out, for 10 s: %d %.160q, want Envoy's 503 no healthy upstream", code, body)
+}
