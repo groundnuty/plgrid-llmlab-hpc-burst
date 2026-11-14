@@ -104,7 +104,8 @@ func TestPercentileIsTheNearestRank(t *testing.T) {
 func goodBulkObs(row Row) BulkObs {
 	return BulkObs{Tags: []string{"tag-1"}, Deployment: row.Plan(), ReadyAt: time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC), Registered: 1,
 		Control: dryBulkPhase(150*time.Millisecond, 0), Bulk: dryBulkPhase(55*time.Millisecond, 1),
-		Double: DoubleObs{Name: "the double", Digest: strings.Repeat("0a", 32)}, Responses: 18, Attributed: 18}
+		Double: DoubleObs{Name: "the double", Digest: strings.Repeat("0a", 32)}, Shim: dryShimObs(strings.Repeat("0a", 32), strings.Repeat("0b", 32)),
+		Responses: 18, Attributed: 18}
 }
 
 // Each failed check, the broken path's and the double's, with its words and its boundary; none of them is also an INVALID, so a failure is never
@@ -117,6 +118,7 @@ func TestEachBulkCheckNamesItsOwnFailure(t *testing.T) {
 		f = append(f, phaseChecks("control", o.Control)...)
 		f = append(f, phaseChecks("bulk", o.Bulk)...)
 		f = append(f, doubleChecks(o.Double)...)
+		f = append(f, shimChecks(o.Shim, o.Double)...)
 		return f
 	}
 	if f, w := judge(goodBulkObs(row)), BulkInvalid(goodBulkObs(row)); len(f) != 0 || len(w) != 0 {
@@ -148,6 +150,18 @@ func TestEachBulkCheckNamesItsOwnFailure(t *testing.T) {
 		{"no double named", func(o *BulkObs) { o.Double.Name = "" }, "the engine double was not named with the SHA-256 of its binary"},
 		{"a digest of 63 characters", func(o *BulkObs) { o.Double.Digest = o.Double.Digest[:63] }, "the engine double was not named with the SHA-256 of its binary"},
 		{"an upper-case digest", func(o *BulkObs) { o.Double.Digest = strings.ToUpper(o.Double.Digest) }, "the engine double was not named with the SHA-256 of its binary"},
+		// Through the test shim (issue #521, option (A)): each reading of what ran, the Allocation's and the node's, must be the build it names.
+		{"the shim unnamed", func(o *BulkObs) { o.Shim.ShimDigest = "" }, "the test shim and the shipped agent were not named with their SHA-256"},
+		{"the shipped agent unnamed", func(o *BulkObs) { o.Shim.AgentDigest = strings.Repeat("0B", 32) }, "the test shim and the shipped agent were not named with their SHA-256"},
+		{"a double that is not the shim", func(o *BulkObs) { o.Double.Digest = strings.Repeat("0c", 32) }, "the engine double named is not the test shim, which is the double"},
+		{"the Allocation unread", func(o *BulkObs) { o.Shim.Allocation = "" }, "the agent digest the Allocation names was not read"},
+		{"the Provider staged another build", func(o *BulkObs) { o.Shim.Allocation = o.Shim.AgentDigest }, "the Allocation names another agent build than the test shim: the Provider did not stage the shim in hb-agent's place"},
+		{"the agent process not the shipped agent", func(o *BulkObs) { o.Shim.AgentRunning = o.Shim.ShimDigest }, "the job's agent process is not the shipped agent the harness staged (its executable, read on the node)"},
+		{"the agent process unread", func(o *BulkObs) { o.Shim.AgentRunning = "" }, "the executable of the job's agent process was not read on the node"},
+		{"the engine not the double", func(o *BulkObs) { o.Shim.EngineRunning = o.Shim.AgentDigest }, "the engine is not the test shim's double (its executable, read on the node)"},
+		{"the engine unread", func(o *BulkObs) { o.Shim.EngineRunning = "" }, "the executable of the engine was not read on the node"},
+		{"the Apptainer not the shim", func(o *BulkObs) { o.Shim.ApptainerRunning = strings.Repeat("0d", 32) }, "the Apptainer above the engine is not the test shim (its executable, read on the node)"},
+		{"the Apptainer unread", func(o *BulkObs) { o.Shim.ApptainerRunning = "" }, "the executable of the Apptainer above the engine was not read on the node"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			o := goodBulkObs(row)
@@ -509,15 +523,15 @@ type closeFails struct {
 
 func (c closeFails) Close(context.Context) error { return c.err }
 
-// The live flow refuses at once, before it touches the cluster, when the world cannot name the engine double and its digest: a real vLLM cannot be
-// held saturating the path, so a run that read the bulk path's buffer on one would read nothing.
-func TestTheBulkLiveFlowRefusesWithoutAStagedDouble(t *testing.T) {
+// The live flow refuses at once, before it touches the cluster, when the world has no test shim: the double reaches a job only through it, and a run
+// on a real engine would read nothing of the bulk path's buffer.
+func TestTheBulkLiveFlowRefusesWithoutTheShim(t *testing.T) {
 	r := &liveRun{} // nothing of it is touched before the refusal
-	if _, err := r.BetaBulk(context.Background(), Plan{}); !errors.Is(err, ErrNoStagedDouble) {
-		t.Fatalf("BetaBulk with no staged double = %v, want ErrNoStagedDouble", err)
+	if _, err := r.BetaBulk(context.Background(), Plan{}); !errors.Is(err, ErrNoShim) {
+		t.Fatalf("BetaBulk with no test shim = %v, want ErrNoShim", err)
 	}
-	if NotRun(BetaBulkRow(), ErrNoStagedDouble) {
-		t.Error("a refusal for want of a staged double ends the run NOT RUN: it is a failure of the setup, and the script holds the row pending so that it is never reached")
+	if NotRun(BetaBulkRow(), ErrNoShim) {
+		t.Error("a refusal for want of the shim ends the run NOT RUN: it is a failure of the setup")
 	}
 }
 

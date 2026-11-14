@@ -23,6 +23,8 @@ func alphaFixtureFiles() map[string]string {
 		"examples/modeldeployment-qwen25-instruct.yaml":        "kind: ModelDeployment\n",
 		"internal/providerctl/conformance/stagehelper/main.go": "package main\n\nfunc main() {}\n",
 		"hack/build-stage-helper.sh":                           "#!/bin/bash\n" + stageBuildStub + "\n",
+		// The bulk row's test shim (issue #521, option (A)), which its build line names beside the stack's binaries.
+		"internal/agent/enginedouble/shim/main.go": "package main\n\nfunc main() {}\n",
 	}
 }
 

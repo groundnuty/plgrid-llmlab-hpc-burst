@@ -22,7 +22,7 @@ const exampleFrontLabel = "the development host, outside Cyfronet's network (3.4
 // labelledRows are the rows whose text to post names where the front ran: the rows that write a posts.md.
 var labelledRows = []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-helios", "tunnel-hour-athena", "gpu-accounting-helios", "gpu-accounting-athena",
 	"gpu-accounting-athena-now", "alpha-athena-now-serve", "alpha-athena-now-nooverlap", "beta-athena-now-router", "beta-athena-now-keeper",
-	"beta-helios-now-router"}
+	"beta-athena-now-bulk", "beta-helios-now-router"}
 
 // The nine rows run their own compiled test in dry mode, through the script, and the text they wrote names the label
 // the settings gave: the second line, right after the verdict. With the label unset a row refuses, exit 3, naming the

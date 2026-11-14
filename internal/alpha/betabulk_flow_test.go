@@ -18,17 +18,21 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
-// ErrNoStagedDouble is what the bulk row's live steps return until the engine double can reach a cluster job: nothing in the platform profile, the
-// Provider or the batch script sets a job's environment, so a job's real apptainer runs the real engine, which cannot be held saturating the path.
-// A run that would read the bulk path's buffer on a real engine would read nothing, so it does not start.
-var ErrNoStagedDouble = errors.New("the bulk row's live run needs the engine double staged on the cluster, and the live world has no way to stage it yet: no job environment is set by the profile, the Provider or the batch script")
+// ErrNoShim is what the bulk row's live steps return when the world has no test shim: the engine double reaches a cluster job only as the shim in
+// hb-agent's place (issue #521, option (A)), since nothing in the product sets a job's environment, and a run on a real engine would read nothing of
+// the bulk path's buffer, so it does not start.
+var ErrNoShim = errors.New("the bulk row's live run goes through the test shim, which puts the engine double behind the shipped agent, and this world has none")
 
 // BetaBulk is the bulk row.
 func (r *liveRun) BetaBulk(ctx context.Context, p Plan) (BulkObs, error) {
-	if r.w.double.Digest == "" {
-		return BulkObs{}, ErrNoStagedDouble
+	if r.w.shim == nil {
+		return BulkObs{}, ErrNoShim
 	}
 	r.start(p)
+	if r.beforeJob != nil {
+		// The Provider's image is not staged: NOT RUN, and no job was submitted (the science agent's rulings on #579).
+		return BulkObs{}, r.beforeJob
+	}
 	in, err := r.firstReady(p)
 	if err != nil {
 		return BulkObs{}, err
@@ -50,6 +54,8 @@ func (r *liveRun) BetaBulk(ctx context.Context, p Plan) (BulkObs, error) {
 	// The control first, then the bulk path: the streams of each phase are their own, and each ends before the next begins.
 	o.Control = r.bulkPhase(p, "the control (a streamed reply, down the token transport)", key, true)
 	o.Bulk = r.bulkPhase(p, "the bulk path (a non-streamed reply)", key, false)
+	// What ran, while the job still runs: the Allocation's agent build, and on the node the agent, the engine and its Apptainer.
+	r.shimReadings(ctx, p, in, &o.Shim)
 	r.endDeployment(ctx, p)
 	tags, err := r.runTags()
 	if err != nil {

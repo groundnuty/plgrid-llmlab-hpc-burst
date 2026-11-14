@@ -33,14 +33,17 @@ package alpha
 // The post says so.
 
 import (
+	"errors"
 	"fmt"
 	"math"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -104,11 +107,46 @@ type BulkObs struct {
 	// Control and Bulk are the two phases.
 	Control BulkPhase `json:"control"`
 	Bulk    BulkPhase `json:"bulk"`
-	// Double names the engine double and its digest: the post says the engine was a double, and which.
+	// Double names the engine double and its digest: the post says the engine was a double, and which. Through the test shim the double's
+	// digest is the shim's: they are one binary.
 	Double DoubleObs `json:"double"`
+	// Shim is what the run read of the test shim and the shipped agent it execs (issue #521, option (A)).
+	Shim ShimObs `json:"shim"`
 	// Responses counts the responses the run received through the front, Attributed those with HBEP-5's attribution headers.
 	Responses  int `json:"responses"`
 	Attributed int `json:"attributed"`
+}
+
+// ErrNoStagedImage is what the bulk row's run returns, before any job is submitted, when the Provider's image for the deployment is not staged with a
+// whole record under the staging root (the science agent's rulings on #579): the test shim's double stages no image (it refuses apptainer pull and
+// build), so a run that would need one does not start. It is NOT RUN (NotRun), exit 3: stage the image first, with the stage row.
+var ErrNoStagedImage = errors.New(noStagedImageWords)
+
+// noStagedImageWords say what happened, in the marker, which hack/live-checks.sh reads (staged_image_marker). They name no path and no digest.
+const noStagedImageWords = "the Provider's image for the deployment is not staged with a whole record, and the bulk row's double stages none"
+
+// TestAgentDirFile is the bulk row's mode-600 file in the run's record directory that names the staging root the run resolved and the exact
+// cluster path of the shipped agent's directory it staged under it ("staging=<root>", "dir=<root>/test-agent/<digest>"), written before the staging: hack/live-checks.sh's exit removes that directory by that path, and names
+// it if it remains, when the test was stopped before its own removal ran (a timeout, a signal, a panic; the science agent's condition 2, and #579's
+// review). The run deletes the file once its own removal has run. It is never posted nor kept as evidence.
+const TestAgentDirFile = "test-agent-dir"
+
+// ShimObs is what the bulk row read of its test shim (the engine double's test-only main) and the shipped agent the shim execs (issue #521, option
+// (A); the science agent's rulings on #521). The two digests are the harness's: the shim it put in hb-agent's place and the shipped agent it staged.
+// The other three are read from what ran, never from the harness's own record: the Allocation's agent digest through the API, the product's record
+// of what the Provider staged, and the running processes' executables on the node (/proc/<pid>/exe, ExeDigestScript).
+type ShimObs struct {
+	// ShimDigest is the SHA-256 of the test shim the harness put in hb-agent's place in the stack's agent builds; AgentDigest the shipped agent's,
+	// which the harness staged on the cluster and which is built into the shim.
+	ShimDigest  string `json:"shimDigest"`
+	AgentDigest string `json:"agentDigest"`
+	// Allocation is the agent digest the run's Allocation names (spec.forProvider.batch.agentDigest): the build the Provider staged as hb-agent.
+	Allocation string `json:"allocation"`
+	// AgentRunning, EngineRunning and ApptainerRunning are the SHA-256 of the executables of the job's agent process, its engine and the Apptainer
+	// above the engine, read on the node; empty when one was not read.
+	AgentRunning     string `json:"agentRunning"`
+	EngineRunning    string `json:"engineRunning"`
+	ApptainerRunning string `json:"apptainerRunning"`
 }
 
 // DoubleObs names the engine double a row ran: what it is called in the post and the SHA-256 of its binary, 64 lowercase hex characters.
@@ -222,6 +260,61 @@ func doubleChecks(d DoubleObs) []string {
 	return nil
 }
 
+// shimChecks: the run went through the test shim as ruled (issue #521, option (A)). The Provider staged the shim as hb-agent (the Allocation names
+// it), the job's agent process is the shipped agent the harness staged (its executable, read on the node), and the engine and the Apptainer above it
+// are the shim, run as the double. A reading that differs, or was not taken, is a failure (the science agent's ruling (3) on #521): the run did not
+// run what it names.
+func shimChecks(s ShimObs, d DoubleObs) []string {
+	var f []string
+	if !sha256Re.MatchString(s.ShimDigest) || !sha256Re.MatchString(s.AgentDigest) {
+		return []string{"the test shim and the shipped agent were not named with their SHA-256"}
+	}
+	if d.Digest != s.ShimDigest {
+		f = append(f, "the engine double named is not the test shim, which is the double")
+	}
+	switch {
+	case s.Allocation == "":
+		f = append(f, "the agent digest the Allocation names was not read")
+	case s.Allocation != s.ShimDigest:
+		f = append(f, "the Allocation names another agent build than the test shim: the Provider did not stage the shim in hb-agent's place")
+	}
+	for _, r := range []struct{ what, got, want, not string }{
+		{"the job's agent process", s.AgentRunning, s.AgentDigest, "the shipped agent the harness staged"},
+		{"the engine", s.EngineRunning, s.ShimDigest, "the test shim's double"},
+		{"the Apptainer above the engine", s.ApptainerRunning, s.ShimDigest, "the test shim"},
+	} {
+		switch {
+		case r.got == "":
+			f = append(f, "the executable of "+r.what+" was not read on the node")
+		case r.got != r.want:
+			f = append(f, r.what+" is not "+r.not+" (its executable, read on the node)")
+		}
+	}
+	return f
+}
+
+// MatchesShimEngine tells the bulk row's engine among a job's processes (PickEngine): the shim's double runs the engine as the shim's own staged
+// file, <staging>/agent/<the shim's digest>/hb-agent, with the launch's arguments, a path among them its own (as the double rewrites one).
+func MatchesShimEngine(shimDigest string) func(argv, command []string) bool {
+	suffix := "/" + agentapi.StagedAgentPath(shimDigest)
+	return func(argv, command []string) bool {
+		if len(command) < 2 || len(argv) != len(command) || !strings.HasSuffix(argv[0], suffix) {
+			return false
+		}
+		for i := 1; i < len(command); i++ {
+			got, want := argv[i], command[i]
+			if got == want {
+				continue
+			}
+			gi, wi := strings.Index(got, "/"), strings.Index(want, "/")
+			if gi < 0 || wi < 0 || got[:gi] != want[:wi] {
+				return false
+			}
+		}
+		return true
+	}
+}
+
 // Findings are HBEP-6's open question 12's consequence, applied to the reading and never to the verdict: a control under the threshold, which has no
 // stall for the bulk path to remove (the science agent's ruling on #521, 1(b)); the bulk path's p99 at or above it, so the layout is no better than
 // one frpc on this path; or, beside a control that stalled, the bulk path under it but less than the margin below the control. The margin is a
@@ -256,6 +349,7 @@ func VerifyBetaBulk(row Row, o BulkObs, jobs []provider.Job) []string {
 	f = append(f, phaseChecks("control", o.Control)...)
 	f = append(f, phaseChecks("bulk", o.Bulk)...)
 	f = append(f, doubleChecks(o.Double)...)
+	f = append(f, shimChecks(o.Shim, o.Double)...)
 	if o.Responses <= 0 {
 		f = append(f, "the run recorded no response, so attribution is unchecked")
 	} else if o.Attributed != o.Responses {
@@ -276,6 +370,10 @@ func betaBulkPost(row Row, o BulkObs, failures []string) string {
 	}
 	fmt.Fprintf(&b, "%s\n%s\n- THE ENGINE WAS A DOUBLE, not vLLM: %s, SHA-256 %s; a real vLLM replies in a few KiB and cannot be held saturating the path (the science agent's ruling on #521)\n",
 		head, deploymentLine(o.Deployment), o.Double.Name, o.Double.Digest)
+	fmt.Fprintf(&b, "- the Provider staged the test shim, digest %s, in hb-agent's place, and the harness staged the shipped agent, digest %s; the shim is the double, so the double's digest is the shim's (the science agent's rulings on #521)\n",
+		o.Shim.ShimDigest, o.Shim.AgentDigest)
+	fmt.Fprintf(&b, "  - read from what ran: the Allocation names agent build %s; on the node the job's agent process ran %s, the engine %s and the Apptainer above it %s (each read from the running process's executable)\n",
+		orNotRead(o.Shim.Allocation), orNotRead(o.Shim.AgentRunning), orNotRead(o.Shim.EngineRunning), orNotRead(o.Shim.ApptainerRunning))
 	fmt.Fprintf(&b, "- the reading: %d token streams of 20 tokens/s beside a transfer of %d bytes; the streams' inter-token gap, p99 over the gaps that overlap the transfer\n", BulkStreams, BulkReplyBytes)
 	fmt.Fprintf(&b, "  - the control, the transfer down the token transport as a streamed reply: gap p99 %s (p50 %s) over %d gaps; the transfer took %s (%.1f MB/s)\n",
 		o.Control.P99, o.Control.P50, o.Control.Gaps, o.Control.Took.Round(time.Millisecond), mbps(o.Control))
@@ -300,10 +398,77 @@ func betaBulkPost(row Row, o BulkObs, failures []string) string {
 	return b.String()
 }
 
+// orNotRead is a digest, or "not read".
+func orNotRead(d string) string {
+	if d == "" {
+		return "not read"
+	}
+	return d
+}
+
 // mbps is a phase's transfer rate in MB/s (10^6 bytes a second), zero for a transfer that was not timed.
 func mbps(p BulkPhase) float64 {
 	if p.Took <= 0 {
 		return 0
 	}
 	return float64(p.ReplyBytes) / p.Took.Seconds() / 1e6
+}
+
+// The bulk row's node readings (issue #521, option (A); the science agent's rulings on #521): through the test shim, the job's agent process is
+// the shipped agent (the shim exec'd it, so its command line is the staged hb-agent's and its executable the shipped agent's file), and the
+// engine and the Apptainer above it are the shim itself, run as the engine double. Each is read off the node by its /proc/<pid>/exe
+// (ExeDigestScript), never from what the harness says it staged.
+
+// PickAgent is the job's agent among the listed processes: a process of the job whose program is hb-agent (by its argv[0]'s base name, the staged
+// path the batch bootstrap runs), that is not one of host-dialed mode's relays (hb-agent relay ...), and that has no hb-agent among its ancestors:
+// the shim's engine runs as the shim's own staged file, which is named hb-agent, under the agent. ok is false unless exactly one process is.
+func PickAgent(procs []NodeProc) (NodeProc, bool) {
+	t := newProcTree(procs, nil, nil)
+	isAgent := func(p NodeProc) bool {
+		return len(p.Argv) > 0 && filepath.Base(p.Argv[0]) == agentapi.AgentBinaryName && !(len(p.Argv) > 1 && p.Argv[1] == "relay")
+	}
+	var found []NodeProc
+	for _, p := range procs {
+		if !isAgent(p) || !t.inJob(p) {
+			continue
+		}
+		under := false
+		cur := p
+		for range len(procs) + 1 {
+			q, ok := t.parent(cur)
+			if !ok {
+				break
+			}
+			if isAgent(q) {
+				under = true
+				break
+			}
+			cur = q
+		}
+		if !under {
+			found = append(found, p)
+		}
+	}
+	if len(found) != 1 {
+		return NodeProc{}, false
+	}
+	return found[0], true
+}
+
+// ApptainerAbove is the nearest ancestor of p that is Apptainer (its program, its starter or its runtime parent): for the bulk row's engine, the
+// double's Apptainer, which the shim runs under the name apptainer. ok is false when p has none.
+func ApptainerAbove(procs []NodeProc, p NodeProc) (NodeProc, bool) {
+	t := newProcTree(procs, nil, nil)
+	cur := p
+	for range len(procs) + 1 {
+		q, ok := t.parent(cur)
+		if !ok {
+			return NodeProc{}, false
+		}
+		if isApptainer(q.Argv) {
+			return q, true
+		}
+		cur = q
+	}
+	return NodeProc{}, false
 }

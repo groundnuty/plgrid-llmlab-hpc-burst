@@ -26,7 +26,7 @@ var betaRows = []string{"alpha-helios-nooverlap", "tunnel-hour-helios", "gpu-acc
 
 // betaNowRows are the beta rows on plgrid-now (issue #521; beta's tracker is #522): built, ready in the script and runnable by their own
 // names, in no alias, and in the runbook's table as beta rows.
-var betaNowRows = []string{"beta-athena-now-router", "beta-athena-now-keeper"}
+var betaNowRows = []string{"beta-athena-now-router", "beta-athena-now-keeper", "beta-athena-now-bulk"}
 
 // pendingAlphaRows are the rows internal/alpha has and the script holds as pending (issue #521): built, judged and dry-run in the package, and
 // refused by the script with exit 2 ("is pending and cannot run yet") until the live path they need exists. beta-athena-now-bulk's needs the engine
@@ -39,7 +39,7 @@ var betaNowRows = []string{"beta-athena-now-router", "beta-athena-now-keeper"}
 // bindir_test.go's stackRowCount; plan_test.go's three expected sets; betaNowRows above; the //livecheck: directive of the row's test; the host-dialed
 // mode world.command gives the keeper row, which names that row alone; and, for the bulk row, its INVALID through the script with the real test in dry
 // mode, exit 3 and the INVALID line, which betabulk_test.go cannot run while the row is pending).
-var pendingAlphaRows = []string{"beta-athena-now-bulk"}
+var pendingAlphaRows = []string{}
 
 // builtRows are the package's rows the script runs: Rows() less the pending ones.
 func builtRows() []alpha.Row {
