@@ -110,7 +110,8 @@ var ErrKeeperStreamEndedFirst = errors.New(keeperStreamEndedFirstWords)
 // in parentheses, durations only.
 const keeperStreamEndedFirstWords = "the stream ended before the keeper's outcome and its margin"
 
-// KeeperStreamEndedFirstError is ErrKeeperStreamEndedFirst with the times, from the stream's first token: when the outcome landed and when the
+// KeeperStreamEndedFirstError is ErrKeeperStreamEndedFirst with the times, from when the stream was opened (Stream.Opened, its request's start,
+// before its first token): when the outcome landed and when the
 // stream ended.
 type KeeperStreamEndedFirstError struct{ Outcome, Ended time.Duration }
 

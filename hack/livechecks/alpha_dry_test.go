@@ -165,7 +165,7 @@ var betaRouterFaults = []string{"not-ready", "no-router-launch", "several-worker
 // betaKeeperFaults are the keeper row's failing faults (issue #521; internal/alpha, dry_betakeeper_test.go's betaKeeperCases). Its NOT RUN, a stream the
 // context cannot hold for the restart's window, is TestTheKeeperRowsNotRunThroughTheScript's; a window at the floor is no failure.
 var betaKeeperFaults = []string{"not-ready", "relays-unread-before", "relays-unread-after", "keeper-e-low", "controller-relays", "controller-relays-after", "relay-replaced-control",
-	"relay-replaced-serving", "relay-seq-changed", "keeper-e-changed", "not-killed", "outcome-unseen", "outcome-late", "same-controller", "same-holder", "lease-not-risen",
+	"relay-replaced-serving", "relay-seq-changed", "keeper-e-changed", "not-killed", "outcome-unseen", "outcome-late", "outcome-late-ended", "same-controller", "same-holder", "lease-not-risen",
 	"lease-jumped", "fence-not-followed", "agent-not-reported", "agent-registration-changed", "unreachable", "instance-restarted", "cut", "incomplete", "short-stream",
 	"past-deadline", "opened-after-kill", "ended-before-outcome-and-cut", "front-cut", "front-cuts-unread", "unattributed", "no-responses", "untagged", "wrong-partition",
 	"default-lease", "short-lease", "duplicate-tag", "extra-allocation"}
