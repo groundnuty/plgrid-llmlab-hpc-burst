@@ -82,6 +82,11 @@ var standInTunnel = Timing{MaxRequestDuration: 75 * time.Second, DrainMargin: 30
 var standInNow = Timing{MaxRequestDuration: 90 * time.Second, DrainMargin: 30 * time.Second, HandoverMargin: 30 * time.Second,
 	StartTimeout: 4 * time.Minute, ServeTokens: 3000}
 
+// standInKeeper is the keeper row's stand-in clock: row A's, with the request deadline of the live 5 minutes, so that a stream of the window's length
+// (two minutes and forty seconds and more) is under it.
+var standInKeeper = Timing{MaxRequestDuration: 5 * time.Minute, DrainMargin: 30 * time.Second, HandoverMargin: 30 * time.Second,
+	StartTimeout: 4 * time.Minute, ServeTokens: 3000}
+
 // standInNowEngine is row A's engine double: the stand-in's token delay, and no prefix-cache counter lines, so that two
 // engine gauges are not reported (HBEP-8, Unknown samples: not_reported) and the gauge check takes the double's set
 // (obscheck.DoubleNotReported), as the rehearsal's part 3 does (part3EngineModes); a live row takes a real vLLM's, none.
@@ -124,6 +129,10 @@ func standInRow(t *testing.T, name string) Row {
 		r.Timing, r.Lease = standInTunnel, 12*time.Minute
 	case name == "alpha-athena-now-serve", name == BetaRouterName:
 		r.Timing, r.Lease = standInNow, 14*time.Minute
+	case name == BetaKeeperName:
+		// The keeper row holds a stream across a controller restart, whose outcome takes about 35 s: a request deadline of the live 5 minutes, and a
+		// lease that holds the stream and the restart before the drain start.
+		r.Timing, r.Lease = standInKeeper, 20*time.Minute
 	case name == "alpha-athena-now-nooverlap":
 		// Row B: the pair's clock and lease, and each job's start wait scaled to 2 minutes, so that a successor held past it
 		// ends the stand-in in minutes (TestStandInNowNoOverlapSecondHeld).
@@ -225,21 +234,21 @@ func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)
 	if err := os.Mkdir(ctl, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if (row.Name == "alpha-athena-now-serve" || row.Name == BetaRouterName) && reshape == nil {
+	if (row.Name == "alpha-athena-now-serve" || row.Name == BetaRouterName || row.Name == BetaKeeperName) && reshape == nil {
 		// plgrid-now's one job per user: a replacement's job could only pend behind the run's.
 		shape.Partitions = []fakeslurm.Partition{{Name: stack.Partition, GPUOnly: true, Slots: 1}}
 	}
-	if row.Name == "alpha-athena-now-serve" || row.Name == "alpha-athena-now-nooverlap" || row.Name == BetaRouterName {
+	if row.Name == "alpha-athena-now-serve" || row.Name == "alpha-athena-now-nooverlap" || row.Name == BetaRouterName || row.Name == BetaKeeperName {
 		// athena-now.yaml sends plgrid-now a sandbox, which the pre-staging row's helper stages.
 		prof.Spec.Partitions[0].ImageFormat = v1alpha1.ImageFormatSandbox
 	}
 	hub := stack.StartHub(t)
 	engine, notReported := "token-delay="+standInTokenDelay.String(), map[string]bool(nil)
-	if row.Name == "alpha-athena-now-serve" || row.Name == BetaRouterName {
+	if row.Name == "alpha-athena-now-serve" || row.Name == BetaRouterName || row.Name == BetaKeeperName {
 		engine, notReported = standInNowEngine, obscheck.DoubleNotReported
 	}
 	md := stack.ServedDeployment(stm, v1alpha1.EnvVar{Name: "HB_ENGINE_DOUBLE", Value: engine})
-	if strings.HasPrefix(row.Name, "tunnel-hour-") || row.Name == "alpha-athena-now-serve" || row.Name == BetaRouterName {
+	if strings.HasPrefix(row.Name, "tunnel-hour-") || row.Name == "alpha-athena-now-serve" || row.Name == BetaRouterName || row.Name == BetaKeeperName {
 		// The live deployment's context (steps_live_test.go), so that a large body (MinLargeBody) fits under it.
 		for i, f := range md.Spec.Source.Served.Flags {
 			if f.Name == "max-model-len" {
@@ -1075,4 +1084,14 @@ func TestStandInBetaRouterFailsWhenTheRouterHoldsNoWorkerAfterTheRestart(t *test
 	if slices.Contains(s.failures, "status.healthyWorkers was not 1 when the Instance was first ready") {
 		t.Errorf("the read at ready, before any restart, was changed too: %q", s.failures)
 	}
+}
+
+// TestStandInBetaKeeper is the keeper row's live steps over the stand-in, through Run: the real stack in host-dialed mode with the relay keeper, the
+// engine double behind a fake Slurm reached through real ssh, the controller killed through its pinned pidfd while a stream of the window's length runs,
+// the next copy leading the Lease, the keeper accepting its epoch, the relays the same processes, the stream whole. The stand-in's controller is the
+// real one, and its Lease and the supervisor's restart are the real ones; the cluster, the engine and the login node are fakes.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInBetaKeeper(t *testing.T) {
+	runStandInIn(t, BetaKeeperName, standInHostDialed)
 }

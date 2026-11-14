@@ -24,7 +24,7 @@ var betaRows = []string{"alpha-helios-nooverlap", "tunnel-hour-helios", "gpu-acc
 
 // betaNowRows are the beta rows on plgrid-now (issue #521; beta's tracker is #522): built, ready in the script and runnable by their own
 // names, in no alias, and in the runbook's table as beta rows.
-var betaNowRows = []string{"beta-athena-now-router"}
+var betaNowRows = []string{"beta-athena-now-router", "beta-athena-now-keeper"}
 
 // plannedRows are #376's rows still named and not built: none, now that row B is P4's. Row A is P3's.
 var plannedRows = []string{}
@@ -320,7 +320,8 @@ func TestTheBetaRowsOnPlgridNowAreReadyInTheScriptAndInTheRunbook(t *testing.T) 
 		}
 		never := false
 		for _, l := range strings.Split(text, "\n") {
-			if strings.HasPrefix(l, "| `"+r+"` | start wait, 10 min") {
+			// The line lists the rows that share the bound, so the row is one of the names before its second cell.
+			if cells := strings.Split(l, "|"); len(cells) > 2 && strings.Contains(cells[1], "`"+r+"`") && strings.HasPrefix(strings.TrimSpace(cells[2]), "start wait, 10 min") {
 				never = true
 			}
 		}

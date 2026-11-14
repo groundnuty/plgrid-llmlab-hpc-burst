@@ -99,6 +99,9 @@ type Steps interface {
 	TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	// NowServe is row A on plgrid-now (issue #376; nowserve.go).
 	NowServe(ctx context.Context, p Plan) (NowServeObs, error)
+	// BetaKeeper is the keeper row on plgrid-now (issue #521; betakeeper.go). Beside what it saw it may return ErrKeeperStreamTooShort, which
+	// ends the run NOT RUN.
+	BetaKeeper(ctx context.Context, p Plan) (KeeperObs, error)
 	// BetaRouter is the router row on plgrid-now (issue #521; betarouter.go). Beside what it saw it may return ErrGlibcTooOld,
 	// which ends the run NOT RUN.
 	BetaRouter(ctx context.Context, p Plan) (RouterObs, error)

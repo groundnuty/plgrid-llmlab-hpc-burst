@@ -532,8 +532,8 @@ func TestOnlyTheRouterRowsStackRunsInstancesBehindEnvoy(t *testing.T) {
 		t.Fatalf("the router row's host options are %d, want exactly stack.InstanceRouter", len(opts))
 	}
 	for _, r := range slices.Concat(Rows(), AccountingRows(), ReachRows(), HostDialedRows(), StageRows()) {
-		if r.Name != BetaRouterName && len(hostOptionsFor(r.Name)) != 0 {
-			t.Errorf("%s has host options: only the router row runs Instances behind a router", r.Name)
+		if r.Name != BetaRouterName && r.Name != BetaKeeperName && len(hostOptionsFor(r.Name)) != 0 {
+			t.Errorf("%s has host options: only the router row runs Instances behind a router, and only the keeper row the relay keeper", r.Name)
 		}
 	}
 }
