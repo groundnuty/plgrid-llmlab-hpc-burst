@@ -125,8 +125,8 @@ var ErrNoStagedImage = errors.New(noStagedImageWords)
 // noStagedImageWords say what happened, in the marker, which hack/live-checks.sh reads (staged_image_marker). They name no path and no digest.
 const noStagedImageWords = "the Provider's image for the deployment is not staged with a whole record, and the bulk row's double stages none"
 
-// TestAgentDirFile is the bulk row's mode-600 file in the run's record directory that names the exact cluster path of the shipped agent's
-// directory it staged (test-agent/<digest>), written before the staging: hack/live-checks.sh's exit removes that directory by that path, and names
+// TestAgentDirFile is the bulk row's mode-600 file in the run's record directory that names the staging root the run resolved and the exact
+// cluster path of the shipped agent's directory it staged under it ("staging=<root>", "dir=<root>/test-agent/<digest>"), written before the staging: hack/live-checks.sh's exit removes that directory by that path, and names
 // it if it remains, when the test was stopped before its own removal ran (a timeout, a signal, a panic; the science agent's condition 2, and #579's
 // review). The run deletes the file once its own removal has run. It is never posted nor kept as evidence.
 const TestAgentDirFile = "test-agent-dir"

@@ -155,7 +155,7 @@ case $mode in
   stage-and-sleep)
     d=${STUB_TEST_AGENT_DIR:-$STUB_STATE/staging/test-agent/abababababababababababababababababababababababababababababababab}
     mkdir -p "$d" && echo agent > "$d/hb-agent"
-    printf '%s\n' "${STUB_TEST_AGENT_PATH:-$d}" > "$HPCBURST_ALPHA_OUT/test-agent-dir"; chmod 600 "$HPCBURST_ALPHA_OUT/test-agent-dir"
+    printf 'staging=%s\ndir=%s\n' "${STUB_TEST_AGENT_STAGING:-$STUB_STATE/staging}" "${STUB_TEST_AGENT_PATH:-$d}" > "$HPCBURST_ALPHA_OUT/test-agent-dir"; chmod 600 "$HPCBURST_ALPHA_OUT/test-agent-dir"
     [ -z "${STUB_TEST_AGENT_LOCK:-}" ] || chmod 555 "$d"
     leave; touch "$STUB_STATE/started"; exec sleep 3600 ;;
   # A job of the run's own prefix whose tag was never written down (a watch that never delivered, a write that

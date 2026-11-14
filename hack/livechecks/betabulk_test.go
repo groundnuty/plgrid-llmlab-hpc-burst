@@ -12,7 +12,6 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/alpha"
 )
@@ -88,13 +87,7 @@ func stopBulkRun(t *testing.T, w *world, extra ...string) (string, int) {
 	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case <-done:
-	case <-time.After(60 * time.Second):
-		t.Fatalf("the script did not stop after SIGTERM:\n%s", out.String())
-	}
+	_ = w.waitStopped(cmd, out) // bounded at stopBound (issue #494)
 	w.noLeftoverProcess(cmd)
 	return out.String(), cmd.ProcessState.ExitCode()
 }
@@ -130,16 +123,37 @@ func TestAStagedAgentTheScriptCannotRemoveIsNamed(t *testing.T) {
 	}
 }
 
-// A path that is not <staging>/test-agent/<64 hex> is never removed: here the staging root itself, which the shape check refuses.
+// A path that is not <staging>/test-agent/<64 hex>, plain and under the staging root the run recorded, is never removed, whatever it would reach: the
+// staging root itself, a "." or ".." segment, a doubled or trailing slash, another root than the recorded one, a relative path, a short leaf.
 func TestTheScriptRemovesNoPathButAStagedAgentsOwn(t *testing.T) {
-	w := newAlphaWorld(t)
-	root := filepath.Join(w.state, "staging")
-	out, code := stopBulkRun(t, w, "STUB_TEST_AGENT_PATH="+root)
-	if _, err := os.Stat(filepath.Join(root, "test-agent", strings.Repeat("ab", 32), "hb-agent")); err != nil {
-		t.Errorf("a path of another shape removed what lies under it: %v", err)
-	}
-	if !strings.Contains(out, "cleanup: the bulk row's staged shipped agent was named by a path that is not <staging>/test-agent/<digest>; nothing was removed") || code == 0 {
-		t.Errorf("exit %d; want the refusal and a failure:\n%s", code, out)
+	leaf := strings.Repeat("ab", 32)
+	for _, c := range []struct{ name, staging, dir string }{
+		{"the staging root", "", "{root}"},
+		{"a .. segment", "", "{root}/test-agent/../test-agent/" + leaf},
+		{"a . segment", "", "{root}/./test-agent/" + leaf},
+		{"a doubled slash", "", "{root}//test-agent/" + leaf},
+		{"a trailing slash", "", "{root}/test-agent/" + leaf + "/"},
+		{"another root than the recorded one", "{root}/other", "{root}/test-agent/" + leaf},
+		{"a recorded root with a .. segment", "{root}/x/..", "{root}/x/../test-agent/" + leaf},
+		{"a relative path", "staging", "staging/test-agent/" + leaf},
+		{"a short leaf", "", "{root}/test-agent/" + leaf[:63]},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newAlphaWorld(t)
+			root := filepath.Join(w.state, "staging")
+			sub := func(s string) string { return strings.ReplaceAll(s, "{root}", root) }
+			extra := []string{"STUB_TEST_AGENT_PATH=" + sub(c.dir)}
+			if c.staging != "" {
+				extra = append(extra, "STUB_TEST_AGENT_STAGING="+sub(c.staging))
+			}
+			out, code := stopBulkRun(t, w, extra...)
+			if _, err := os.Stat(filepath.Join(root, "test-agent", leaf, "hb-agent")); err != nil {
+				t.Errorf("a path of another shape removed what lies under it: %v", err)
+			}
+			if !strings.Contains(out, "cleanup: the bulk row's staged shipped agent was named by a path that is not <staging>/test-agent/<digest> under the staging root the run recorded; nothing was removed") || code == 0 {
+				t.Errorf("exit %d; want the refusal and a failure:\n%s", code, out)
+			}
+		})
 	}
 }
 

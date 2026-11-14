@@ -136,7 +136,7 @@ func (r *liveRun) prestageAgent(ctx context.Context) {
 	}
 	r.testAgentDir = paths.Staging + "/" + testAgentDir + "/" + s.agentDigest
 	// The exact path, for the script's exit when this test is stopped before its Close (TestAgentDirFile), written before anything is staged.
-	if err := os.WriteFile(filepath.Join(r.cfg.Out, TestAgentDirFile), []byte(r.testAgentDir+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(r.cfg.Out, TestAgentDirFile), []byte("staging="+paths.Staging+"\ndir="+r.testAgentDir+"\n"), 0o600); err != nil {
 		t.Fatalf("the shipped agent's path for the script's exit: %v", err)
 	}
 	if err := r.batch.EnsureFile(ctx, provider.File{Path: s.testAgentPath(), Content: s.agent, SHA256: s.agentDigest, Mode: 0o700}); err != nil {

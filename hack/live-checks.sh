@@ -1067,18 +1067,31 @@ clean_cluster() {
   return 0
 }
 
+# clean_abs_path <path>: whether the path is absolute and plain: no "." or ".." segment, no doubled slash, no trailing slash, only the characters
+# a staging path has. A remote removal takes no path but such a one.
+clean_abs_path() {
+  local p=$1
+  case $p in /*) ;; *) return 1 ;; esac
+  case $p in */ | *//*) return 1 ;; esac
+  case "$p/" in */./* | */../*) return 1 ;; esac
+  printf '%s\n' "$p" | grep -q -E -x '/[A-Za-z0-9._/-]+'
+}
+
 # clean_test_agent: the bulk row's staged shipped agent (issue #521, option (A); the science agent's condition 2), when its test was stopped before
-# it removed it itself: the test wrote the directory's exact cluster path to its record directory's test-agent-dir (internal/alpha,
-# TestAgentDirFile) before staging, and deletes that file once its own removal has run. The path must be <absolute>/test-agent/<64 hex>, never a
-# glob or a parent; it is removed by that path alone, and a directory whose agent is still there is named, by its digest's first 12 hex, never its
-# path. Returns 1 when it could not remove it.
+# it removed it itself: the test wrote the staging root it resolved and the directory's exact cluster path to its record directory's test-agent-dir
+# (internal/alpha, TestAgentDirFile; "staging=<root>" and "dir=<path>") before staging, and deletes that file once its own removal has run. Both
+# must be plain absolute paths (clean_abs_path), and the directory exactly <root>/test-agent/<64 hex> under the root the run recorded: never a
+# glob, a parent, or a path that climbs. It is removed by that path alone, and a directory whose agent is still there is named, by its digest's
+# first 12 hex, never its path. Returns 1 when it could not remove it.
 clean_test_agent() {
-  local f="${REC_DIR:+$REC_DIR/test-agent-dir}" d reply short
+  local f="${REC_DIR:+$REC_DIR/test-agent-dir}" d staging leaf reply short
   [ -n "$f" ] && [ -f "$f" ] && [ ! -L "$f" ] || return 0
-  d=$(head -n 1 "$f")
-  short=${d##*/}; short=${short:0:12}
-  if ! printf '%s\n' "$d" | grep -q -E -x '/[A-Za-z0-9._/-]+/test-agent/[0-9a-f]{64}'; then
-    say "cleanup: the bulk row's staged shipped agent was named by a path that is not <staging>/test-agent/<digest>; nothing was removed; check the staging directory by hand"
+  staging=$(sed -n 's/^staging=//p' "$f" | head -n 1)
+  d=$(sed -n 's/^dir=//p' "$f" | head -n 1)
+  leaf=${d##*/}
+  short=${leaf:0:12}
+  if ! clean_abs_path "$staging" || ! clean_abs_path "$d" || ! [[ $leaf =~ ^[0-9a-f]{64}$ ]] || [ "$d" != "$staging/test-agent/$leaf" ]; then
+    say "cleanup: the bulk row's staged shipped agent was named by a path that is not <staging>/test-agent/<digest> under the staging root the run recorded; nothing was removed; check the staging directory by hand"
     return 1
   fi
   if [ -z "$ACTIVE_HOST" ]; then
