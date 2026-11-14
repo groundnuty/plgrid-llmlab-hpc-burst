@@ -278,6 +278,10 @@ type liveRun struct {
 	agentLogFn func(path string) string
 	// glibcScript, when set, is what the router row's probe runs on the node in place of GlibcScript: a stand-in whose node has another glibc.
 	glibcScript string
+	// envoyConfig is the router row's Envoy configuration on the node, read off Envoy's own command line (its -c argument): where the
+	// direct-to-engine control finds the worker's socket. controlScript, when a test sets it, replaces the control's step script.
+	envoyConfig   string
+	controlScript func(script string) string
 	// allocsFn is the watch's Allocation versions, and boundedFn stack.BoundedDeadline, unless a test sets them.
 	allocsFn   func() []stack.AllocObservation
 	boundedFn  func(time.Duration) (time.Time, bool)
