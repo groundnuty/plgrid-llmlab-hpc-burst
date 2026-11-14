@@ -99,7 +99,7 @@ Problems:
 - **Warm capacity is forgotten.** Kept Allocations spend grant hours with nothing on them. Mitigation: every retention policy ends at a date, a grant's end, a deadline or an idle limit; the profile's `maxIdle` caps idle time where a platform needs it; and the inventory lists kept Allocations (HBEP-10).
 - **A repurpose inherits the old model's state.** Files staged for the old model, or another engine, are left in the Allocation. Mitigation: the new Instance passes the same verification as any other, against its own deployment's identity record (HBEP-9).
 - **Restart loops.** Mitigation: a bounded number of attempts per rung, with backoff, then a new allocation, then a degraded deployment and an event (HBEP-8).
-- **A poison request kills each restarted instance.** Mitigation: the front's retry guard (HBEP-5) and a crash-correlation event.
+- **A poison request kills each restarted instance.** Mitigation: the front retries a written request at most once (HBEP-5, open question 5), so a poison request kills at most two Instances per request to the front, and its give-up answer asks clients not to retry. Clients that retry anyway make new requests, which the crash-correlation event (Health and restarts) names.
 - **A restart runs a different spec.** An edited script reached an older job's restart. Mitigation: each Instance's launch (command line, environment, image digest and checkpoint) is fixed in its immutable spec when it is created, and every restart reuses it (Design details).
 - **Edits to pending jobs break them.** Mitigation: never edit a submitted allocation; cancel and resubmit.
 - **Our own jobs compete with each other.** Hedges, over-allocations and follow-ons of different deployments compete for the same nodes and per-user limits. Mitigation: plan per provider, within its per-user QOS limits from the profile (Provisioning, Per-user limits). A submission refused for a limit waits as `SubmitLimitReached` and fails nothing (HBEP-4, QOS limits).
@@ -484,12 +484,20 @@ An Instance runs several workers behind a router in beta (HBEP-3, HBEP-5). This 
   - only errors: over `errorOnlyWindow`, the engine answered requests and every answer was a server error;
   - no token progress: requests running, and the generated-token counter unchanged for `noProgressTimeout`. A request in prefill generates no token, so in alpha that time-out is 30 min, equal to the front's `idleTimeout`, and a prefill the front allows is never restarted (open question 6);
   - a part exits without being told to, whatever its exit code. A clean exit is a failure too (L-2.9);
-  - one worker at a full KV cache with requests waiting while another idles, for `kvSkewTimeout`. This needs several workers, so it is not in alpha.
+  - one worker at a full KV cache with requests waiting while another idles, for `kvSkewTimeout`. This needs several workers, so it is not in alpha. Read from each report's snapshot of all workers (science-agent ruling, 13 Nov 2026, for #518):
+    - **full:** the worker's KV-cache usage is 0.95 or more;
+    - **waiting:** it has a request waiting;
+    - **idles:** a sibling the router can route to (warmed up, admitted by the router and held healthy in the latest report) has no request running and none waiting;
+    - **not draining:** the worker's generated-token counter is unchanged;
+    - **held:** every report for `kvSkewTimeout` shows all of it. A report where it clears, or where either worker's gauge is missing or stale, starts the clock again.
+
+    A few heavy sessions can fill one worker while a sibling idles from load alone, since bounded loads don't spill them (HBEP-5), but a loaded worker still generates tokens. So the signal is a stuck worker that a sibling could relieve: it acts after `kvSkewTimeout` rather than waiting for `noProgressTimeout`. It enters at that worker's rung, and the Instance stays `ready`.
   - behind Envoy (beta), a worker that Envoy holds unhealthy for `health.failureThreshold` reports in a row, from the agent's report of Envoy's health checks (HBEP-5, Inside an Instance, Worker health).
     - **The ladder:** it enters at the worker rung, for that worker, not the router rung. The Instance stays `ready` while Envoy holds at least one other worker healthy, and only that worker restarts. Its rung-1 verification is what Envoy's check waits for before it takes traffic again: the agent serves each worker's readiness on loopback, 200 only for a verified worker whose engine's `/health` passes, and Envoy health-checks that.
     - **One restart per death:** while a worker's raised restart generation isn't yet applied, the worker raises no further signal, and its exit and Envoy-unhealthy signals count as one restart.
 
   Plain load never triggers a restart: long queues, high latency, or a full KV cache on the only worker with requests waiting.
+- **Crash correlation** (spike S18, #528; science-agent decision, 13 Nov 2026): a worker exit the controller didn't ask for, within 30 s after such an exit on another Instance of the same ModelDeployment, raises a `failing` event `CrashCorrelated`, regarding the Instance whose exit made the pair and related to the other. It's an event only: each Instance still restarts by its own ladder. In S18 it fired on every poison request that killed two or more Instances, the OpenAI SDK's retries included, and never on a cut tunnel. One Instance's own crash loop isn't counted, since that's the ladder's (`RestartLoop`). HBEP-8's Reasons table gains `CrashCorrelated` with the code that raises it.
 - **Only fresh gauges act** (science-agent ruling, 31 Oct 2026, for #87). The controller takes no gauge-based action unless the gauges are fresh. Such actions are the idle anchor (through a draining Instance's end, Handover), KV pressure, the only-errors signal and the no-progress signal. Fresh means each of three ages is within two probe intervals (`health.probeInterval`): the read at sampling (the sample's time minus `metricsReadAt`), the sample at the report, and the report since receipt, on the controller's clock (`Health.MetricsFresh`). Stale or missing gauges are unknown, so no such action is taken on them, and a zero running-request count from a stale or missing gauge never feeds the idle anchor. The no-progress signal compares two samples' counters only when `metricsReadAt` advanced between them, so a run of failed reads does not look like a stall.
 - **The alpha ladder:**
   1. restart the worker: the settings comparison and warm-up run again, with a new verification record;
@@ -878,6 +886,8 @@ The controller applies by policy what www-2027 operators did per job: holder bat
 - 2026-11-12: the bulk path, open question 12's contract (HBEP-6, The bulk path).
 - 2026-11-12: several workers: the GPU slice applies with several workers only, and several workers need the router flag (for #439).
 - 2026-11-13: deletion releases an empty Allocation at once, and a restarted worker's process waits for Envoy to hold it unhealthy (for #503, #439).
+- 2026-11-13: the KV-skew signal's thresholds are named (for #518).
+- 2026-11-13: the crash-correlation event is defined (S18, #528).
 
 ## Amendments
 
@@ -985,3 +995,5 @@ The controller applies by policy what www-2027 operators did per job: holder bat
   - An Allocation with no Instance whose ModelDeployment is being deleted is released at once, whatever its retention policy. #503 found a deleted deployment's job running on for its `ReleaseWhenIdle` idle limit (30 minutes in the example), holding GPUs and, on `plgrid-now`, the shared slot.
   - With several workers, a restarted worker's new process starts only once Envoy holds it unhealthy, or one check interval plus its timeout after the death. #439's stack test saw a restarted engine take a request before its verification.
   - Before, deletion followed the retention policy, and the new process could start while Envoy still routed to the worker.
+- **2026-11-13: the KV-skew signal's thresholds** (Health and restarts). An amendment by the science agent's rulings on #518's plan, corrected by #518's measurement: "full" is KV-cache usage at 0.95 or more, "waiting" a request waiting, "idles" a routable sibling with nothing running or waiting, and "not draining" the worker's generated-token counter unchanged, all held in every fresh report for `kvSkewTimeout`. The last condition is there because a few heavy sessions can fill one worker from load alone, even with bounded loads, and a loaded worker still generates tokens. Before, the thresholds were unnamed.
+- **2026-11-13: the crash-correlation event** (Risks; Health and restarts). An amendment by the science agent's decision on spike S18 (#528, PR #537): unrequested worker exits on two Instances of one deployment within 30 s raise a `failing` event `CrashCorrelated`. It's an event only. It was S18's candidate (ii), which fired on every poison request that killed two or more Instances and never on a cut tunnel. Before, the event was named as a mitigation and not defined.

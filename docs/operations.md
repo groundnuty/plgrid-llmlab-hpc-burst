@@ -133,7 +133,7 @@ hack/build-agents.sh "$STATE/agent-builds"
 hack/fetch-frp.sh --agent-builds "$STATE/agent-builds"
 ```
 
-With Instances behind a router (beta, opt-in: `hpcburst up --instance-router envoy`), `status` also checks `envoy-<cpuArch>` for each of those architectures, against the digest `internal/agent/envoypin/envoy-pins.txt` pins, since every job is then staged with it ([HBEP-5](../hbep/0005-llmlab-compatible-front/README.md), Inside an Instance). Fetch both architectures' builds with:
+With Instances behind a router (beta, opt-in: `hpcburst up --instance-router envoy`), `status` also checks `envoy-<cpuArch>` for each of those architectures, against the digest `internal/agent/envoypin/envoy-pins.txt` pins, since every job is then staged with it ([HBEP-5](../hbep/0005-llmlab-compatible-front/README.md), Inside an Instance; the procedure is [The router and several workers](#the-router-and-several-workers-beta)). Fetch both architectures' builds with:
 
 ```
 hack/fetch-envoy.sh --agent-builds "$STATE/agent-builds"
@@ -155,7 +155,7 @@ A ModelDeployment with a managed source (an entry LLMLab serves) gets none of th
 
 ### `SpecUnsupported`
 
-- **Means:** the spec asks for something alpha does not run. The message names it: a `data-parallel-size` above 1; a parallel size (`data-parallel-size`, `tensor-parallel-size` or `pipeline-parallel-size`), `max-num-seqs` or `max-model-len` that is not a positive integer; a `generation-config` other than `auto`, or `override-generation-config` or `hf-config-path`; an engine flag that the framework's launch sets itself; a missing `spec.workload`, or a workload value out of range; a workload shape that does not fit the declared `max-model-len`; a `leaseLimit` that does not parse; or a GPU count (`tensor-parallel-size` times `pipeline-parallel-size`) above the `gpusPerNode` or QOS GPU cap of every allowed Provider that is usable and not too short, when the Instance is first placed. A Provider that is unusable, or `PartitionTooShort`, does not count (`internal/lifecycle/handover.go`, `noProvider`). It is also set for a pending Instance, one created that still waits for its Allocation, whose own Provider can no longer host its GPU count, because the Provider's limits changed since: the message then starts "Instance <name> waits for its Allocation" (`internal/lifecycle/provision.go`, `ensureAllocation`).
+- **Means:** the spec asks for something alpha does not run. The message names it: a `data-parallel-size` above 1; a parallel size (`data-parallel-size`, `tensor-parallel-size` or `pipeline-parallel-size`), `max-num-seqs` or `max-model-len` that is not a positive integer; a `generation-config` other than `auto`, or `override-generation-config` or `hf-config-path`; an engine flag that the framework's launch sets itself; a missing `spec.workload`, or a workload value out of range; a workload shape that does not fit the declared `max-model-len`; a `leaseLimit` that does not parse; or a GPU count (`tensor-parallel-size` times `pipeline-parallel-size`) above the `gpusPerNode` or QOS GPU cap of every allowed Provider that is usable and not too short, when the Instance is first placed. A Provider that is unusable, or `PartitionTooShort`, does not count (`internal/lifecycle/handover.go`, `noProvider`). It is also set for a pending Instance, one created that still waits for its Allocation, whose own Provider can no longer host its GPU count, because the Provider's limits changed since: the message then starts "Instance <name> waits for its Allocation" (`internal/lifecycle/provision.go`, `ensureAllocation`). Beta, `spec.workersPerInstance` is refused too: above 1 on a host started without the router, above what a node's GPUs give, or beyond what a profile's restart ladder can keep ([The router and several workers](#the-router-and-several-workers-beta)).
 - **The controller** creates no Allocation for the deployment while it holds, replacements included. Instances already running serve until they drain.
 - **You:** edit the spec as the message says. For a GPU count, making a Provider that fits usable again also clears it, with no spec edit. The next pass reads it again ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Provisioning, and What the controller reads).
 
@@ -263,7 +263,23 @@ An Instance moves through `pending`, `starting`, `verifying`, `ready`, `draining
 
 Before each restart the controller emits a `failing` event `WorkerRestart` or `InstanceRestart`, which names the signal and says that requests in flight were cut. The ladder restarts the worker, then the whole Instance, each `restart.attemptsPerRung` times within `restart.window`, then gives up on the Allocation.
 
-Behind a router (beta, opt-in), the router's exit, or its probe failing while it holds a worker healthy, restarts only the router: a `failing` event `RouterRestart`, `status.healthyWorkers` set to 0 so the front routes nothing to the Instance, and the phase left `ready`. After `restart.attemptsPerRung` router restarts the ladder climbs to the whole Instance. A worker the router holds failing its check while verified is restarted at the worker rung, with the signal `RouterCheckFailing` ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Several workers).
+Behind a router (beta, opt-in), the router's exit, or its probe failing while it holds a worker healthy, restarts only the router: a `failing` event `RouterRestart`, `status.healthyWorkers` set to 0 so the front routes nothing to the Instance, and the phase left `ready`. After `restart.attemptsPerRung` router restarts the ladder climbs to the whole Instance. A worker the router holds failing its check while verified is restarted at the worker rung, with the signal `RouterCheckFailing` ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Several workers). Each is described below, and [The router and several workers](#the-router-and-several-workers-beta) is the procedure.
+
+### `RouterRestart`
+
+The controller raises a `failing` event `RouterRestart` regarding an Instance that runs behind a router (beta, opt-in; [The router and several workers](#the-router-and-several-workers-beta)). It is a `Warning` event, and it ends nothing: it is not one of the end reasons below.
+
+- **Means:** the Instance's router, Envoy, exited without being told to, or the agent's probe through it failed `health.failureThreshold` reports in a row while it held a worker healthy. The event's note names the signal, `PartExited` with the exit code or `ProbeFailing`, and the router's new generation, and says that its workers keep running and that requests in flight are cut. The Instance's `Healthy` condition is false with the same signal as its reason.
+- **The controller** writes `status.healthyWorkers` as 0 first, so the front routes nothing to the Instance, then records a `router` entry in `status.restarts` and raises the router's generation. The phase stays `ready` and nothing verifies again; `status.healthyWorkers` returns once the restarted router holds a worker healthy. It restarts the router `restart.attemptsPerRung` times within `restart.window`, `restart.backoff` apart. After that the ladder climbs to the whole Instance, with `InstanceRestart` events, and on to `RestartLoop`. The router's rung runs before the Instance is first ready too, bounded by `health.startTimeout` (`internal/lifecycle/routerhealth.go`, `routerRung`; [HBEP-7](../hbep/0007-lifecycle-controller/README.md), Several workers).
+- **You:** one event needs nothing. When they repeat, read the `Healthy` condition and the events (`hbk describe instance <instance>`), then the agent's log on the cluster: `job.err` in `<stagingDir>/alloc/<tag>/` holds `router exited without being told to` with the exit code, or `router did not start` with the reason. An exit code of 127 is a start that failed or was refused, a node whose glibc is older than 2.30 among them (the refusals in [the procedure](#the-router-and-several-workers-beta)).
+
+### `RouterCheckFailing`
+
+`RouterCheckFailing` is a health signal, not an event reason of its own. It is the signal behind a `failing` event `WorkerRestart` (or `InstanceRestart`) of an Instance that runs behind a router, and the reason of its `Healthy` condition while that restart runs.
+
+- **Means:** the router's active check of one worker failed `health.failureThreshold` reports in a row while that worker's current generation was verified. The restart's note says "the router held worker-<i> failing its active check for <n> reports in a row". Envoy's ejection of a worker alone is not a signal, and a restarted worker is unhealthy by design while it warms up: until the router first holds it healthy, `health.startTimeout` from its restart judges it, not this check.
+- **The controller** restarts that worker alone, at the worker rung, which counts its own `restart.attemptsPerRung` within `restart.window`. With several workers the Instance stays `ready` and routable on the others, and a worker that spends its rung takes the Instance to the whole-Instance rung. With one worker the Instance leaves `ready` for `verifying`, as in alpha (`internal/lifecycle/routerhealth.go`, `routerCheckSignal`; `workers_ready.go`, `workerRouterCheck`).
+- **You:** one needs nothing. When one worker repeats it, read its entry in `status.workers[]` (`verdict`, `warmedUp`) and the events: the engine on that node answers its health check badly, which restarts alone cannot mend, and the ladder ends in `RestartLoop` and a replacement.
 
 With several workers, a worker at a full KV cache with requests waiting and its token counter flat, while a sibling the router routes to idles, for `health.kvSkewTimeout` (2 min by default), is restarted at the worker rung with the signal `KVSkew`; the Instance stays `ready` on its siblings, and the stuck worker's in-flight requests are cut. A worker that is still generating tokens never raises it, however full: that is load, which Envoy's bounded loads spread ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Health and restarts; [HBEP-5](../hbep/0005-llmlab-compatible-front/README.md)).
 
@@ -460,6 +476,62 @@ On one frp session a large non-streamed reply holds an Instance's token streams 
   - A restart of frps-bulk drops only the bulk tunnels; requests take the token tunnels meanwhile.
   - An Allocation staged before the bulk path was turned on runs no bulk frpc, and all its requests take the token tunnel.
 - **Turn it off (rollback).** `hpcburst down`, then `hpcburst up` without `--bulk-path`. frps-bulk stops, and every request takes the token tunnel. An Allocation staged with the bulk block keeps trying its bulk frpc against a front that now serves only the first certificate: its TLS fails and it retries with backoff, never in a tight loop, and its token tunnel is unaffected. The second certificate stays on disk, so turning the bulk path on again reuses it.
+
+### The router and several workers (beta)
+
+An Instance runs one engine worker with nothing in front of it, unless you ask for more. Two beta features change that, and both are off unless you switch them on: the router, Envoy run in the job in front of the Instance's workers (`hpcburst up --instance-router envoy`), and several workers, copies of the engine's launch on the node's GPUs behind it (`spec.workersPerInstance`). Several workers always run behind the router. The quickstart's [router section](quickstart.md#beta-instances-behind-a-router) starts the host with the router; this section covers what to do next, what to read and how to turn both off ([HBEP-5](../hbep/0005-llmlab-compatible-front/README.md), Inside an Instance; [HBEP-7](../hbep/0007-lifecycle-controller/README.md), Several workers).
+
+- **Turn it on:** fetch Envoy's build into the agent builds, from a clone of the repository since the release archive does not ship it, then start the host with the flag. `up` refuses a second host, so stop a running one first, and give the new one **the same flags as before** ([Down and up across an upgrade](#down-and-up-across-an-upgrade)):
+
+  ```
+  hack/fetch-envoy.sh --agent-builds "$STATE/agent-builds"
+  bin/hpcburst down --state-dir "$STATE"
+  bin/hpcburst up --state-dir "$STATE" --bin-dir "$BIN" --manifests config/crd \
+    --front-config ~/.config/hpcburst/front.json \
+    --front-mode host-dialed --instance-router envoy
+  ```
+
+  - `up` and `status` then check `envoy-<cpuArch>` for each architecture ([The agent builds](#the-agent-builds)); a missing or wrong build is named with the fetch command above.
+  - A router is a property of each Instance, recorded when the controller creates it as `spec.launch.router`. Only Instances created after the host restarted with the flag get one, so a running Instance keeps what it was made with.
+  - Then ask for several workers on a ModelDeployment: `spec.workersPerInstance`, from 1 to 8, absent being 1. Each worker uses `tensor-parallel-size` times `pipeline-parallel-size` GPUs of the Instance's one node, and the Instance's Allocation asks for the count times that.
+
+    ```
+    hbk patch modeldeployment <name> --type=merge -p '{"spec":{"workersPerInstance":2}}'
+    ```
+
+    The count applies to Instances created after the change, a replacement at a handover or a scale-up. Running Instances keep their count, so a deployment can run mixed counts for a while.
+- **What is refused, and why.** A refusal is the deployment's `Degraded` reason [`SpecUnsupported`](#specunsupported), with its cause in the message. The controller creates no Allocation for the deployment while it holds, replacements included, and Instances already running serve until they drain. The node's glibc is the exception: the agent on the node refuses that one, so its cause is in the agent's log and the deployment shows only the effect.
+  - **Several workers on a host started without the router.** The message says "workersPerInstance <n> needs the lifecycle controller's --instance-router envoy". Several workers run behind a router, and a job is staged with Envoy only when the host was started with the flag. Start the host with it, as above, or set the count back to 1.
+  - **A count over what the node gives.** The Allocation's GPU count is `spec.workersPerInstance` times `tensor-parallel-size` times `pipeline-parallel-size`, on one node. It is refused on a Provider, never capped, above the partition's `gpusPerNode` or the QOS's `maxGpusPerUser`, and the message names the count, the limit and where the limit comes from: "above the <m> per node of partition <p>", or "above the maxGpusPerUser <q> of QOS <name> on Provider <provider>". With one GPU per worker the nodes hold at most 8 workers on Athena's A100 nodes and 4 on Helios's GH200 nodes, and fewer where the QOS the Provider submits under caps a user's GPUs: `plgrid-now` (`profiles/athena-now.yaml`) and Helios's QOS `now`, which the shipped Helios example submits under (`profiles/helios.yaml`), allow one, so no count above 1 fits under either. A Provider that names a QOS without that cap gets the node's count. It holds while every allowed Provider that is usable refuses; a Provider that fits, made usable, clears it ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Several workers, Sizing).
+  - **A profile whose restart ladder cannot fit the count.** Each worker's rung, the router's and the whole Instance's are kept in `status.restarts`, which holds 32 entries. A Provider whose profile sets `restart.attemptsPerRung` so that (workers + 2) times it is above 32 refuses the count: the message says "(workers + 2) x attempts". The default of 2 attempts fits all eight workers.
+  - **A node whose glibc is older than 2.30.** Envoy runs bare in the job, so before it starts the router the agent reads what the Envoy build needs and the node's glibc, and refuses an older node. The agent's log, which the job keeps as `job.err` in `<stagingDir>/alloc/<tag>/`, says `router did not start` with "Envoy needs glibc 2.30 or later, and this node's glibc is <version>: Envoy cannot run bare here". The controller sees the router part exit with code 127, the start-failed code, and treats it as the router's exit: `failing` events `RouterRestart` ([below](#routerrestart)) up to `restart.attemptsPerRung` times, then the whole Instance's restarts, then the Instance ends with `RestartLoop` and its Allocation is released. The replacement lands on a node of the same kind, so either turn the router off (below) or use a partition whose nodes have a newer glibc.
+- **What to read.** An Instance's own object holds both, in `status`:
+
+  ```
+  hbk get instance <instance> -o yaml
+  ```
+
+  - `status.healthyWorkers`: how many of its workers the router holds healthy and not ejected, from the agent's report of Envoy's `/clusters`. It is absent without a router and until the first report that carries the router's view. The front's cap for the Instance is `spec.launch.maxNumSeqs` times it, and an Instance at 0 is not eligible, so the front routes nothing to it.
+  - `status.workers[]`: one entry for each of its `spec.launch.workers`, written as each worker is verified, qualified and warmed up, and absent for an Instance of one worker, whose state is the Instance's own conditions. An entry has the worker's `name` (`worker-<i>`), the restart generation last verified in `verifiedGeneration`, its latest verification record in `record` and that record's verdict in `verdict`, whether its warm-up is done in `warmedUp`, and the generation at which the router first held it healthy in `routerAdmittedGeneration`.
+  - A worker's verification record is named `ver-<instance UID>-<worker>-<generation>`, and is read as in [`VerificationFailed`](#verificationfailed). With one worker it keeps its name, `ver-<instance UID>-<generation>`.
+  - A restart of one worker shows as a `failing` event `WorkerRestart` that names the worker, and a `worker-<i>` entry in `status.restarts`. The Instance stays `ready` on its other workers, and its own `Verified`, `Qualified` and `WarmedUp` conditions stay true while the worker verifies and warms up again. With one worker, a worker restart leaves `ready` for `verifying`, as in alpha.
+- **Turn it off (rollback).** `hpcburst down`, then `hpcburst up` without `--instance-router`, with the other flags as before:
+
+  ```
+  bin/hpcburst down --state-dir "$STATE"
+  bin/hpcburst up --state-dir "$STATE" --bin-dir "$BIN" --manifests config/crd \
+    --front-config ~/.config/hpcburst/front.json \
+    --front-mode host-dialed
+  ```
+
+  - New Instances get no router, and a deployment that asks for several workers gets no new Instance at all (next bullet). Running Instances keep `spec.launch.router` and `spec.launch.workers`, and their router and workers, until they end: the controller serves each from its own copy, whatever the host's flag, and its router rung still acts.
+  - Every deployment whose `spec.workersPerInstance` is above 1 turns `Degraded` with `SpecUnsupported` at once and gets no new Allocation, so an Instance that drains is not replaced. Set the count back before you restart the host, or right after:
+
+    ```
+    hbk patch modeldeployment <name> --type=merge -p '{"spec":{"workersPerInstance":null}}'
+    ```
+
+  - The Envoy builds stay in `agent-builds/`, and `status` stops checking for them. A later `up` with the flag reuses them.
 
 ### A controller restart
 

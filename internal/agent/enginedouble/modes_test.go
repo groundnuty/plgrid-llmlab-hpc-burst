@@ -37,6 +37,8 @@ func TestParseModes(t *testing.T) {
 		{"start-delay=1s,ignore-term", func(c *Config) { c.StartDelay, c.IgnoreTerm = time.Second, true }},
 		{"exit-after=2s", func(c *Config) { c.ExitAfter, c.ExitAfterSet = 2*time.Second, true }},
 		{"exit-after=2s:7", func(c *Config) { c.ExitAfter, c.ExitAfterSet, c.ExitCode = 2*time.Second, true, 7 }},
+		{"die-on=FAULT-F1,fail-on=FAULT-F2", func(c *Config) { c.DieOn, c.FailOn = "FAULT-F1", "FAULT-F2" }},
+		{"early-headers", func(c *Config) { c.EarlyHeaders = true }},
 	}
 	for _, tc := range cases {
 		want := d
@@ -51,6 +53,9 @@ func TestParseModes(t *testing.T) {
 func TestParseModesRefusesWhatItDoesNotKnow(t *testing.T) {
 	for in, why := range map[string]string{
 		"kv-lw":                     "unknown mode",
+		"die-on":                    "needs the marker",
+		"die-on=":                   "needs the marker",
+		"fail-on":                   "needs the marker",
 		"kv-low=3":                  "takes no value",
 		"slow-first":                "needs a duration",
 		"slow-first=fast":           "not a duration",

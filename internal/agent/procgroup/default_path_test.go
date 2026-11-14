@@ -39,25 +39,54 @@ func TestTheDefaultCommandIsUnchanged(t *testing.T) {
 const probeOutEnv = "HPCBURST_PROCGROUP_PROBE_OUT"
 
 // probe is what a started process reads of itself: its parent-death signal (prctl
-// PR_GET_PDEATHSIG; 0 when none), its PID, its process group and its session.
+// PR_GET_PDEATHSIG; 0 when none), and whether that was read on its initial thread, its PID, its
+// process group and its session.
 type probe struct {
 	Pdeathsig int `json:"pdeathsig"`
-	PID       int `json:"pid"`
-	Pgid      int `json:"pgid"`
-	Sid       int `json:"sid"`
+	// OnInitialThread: the thread that read Pdeathsig was the process's initial thread (gettid ==
+	// getpid). The kernel keeps the parent-death signal per thread, and a thread the process makes later
+	// starts with none (#532), so only the initial thread's is the one the starter set.
+	OnInitialThread bool `json:"on_initial_thread"`
+	PID             int  `json:"pid"`
+	Pgid            int  `json:"pgid"`
+	Sid             int  `json:"sid"`
+}
+
+// The probe's parent-death signal, read in init (#532). The kernel keeps it per thread, and a thread
+// made later starts with none, so it has to be read on the process's initial thread: during package
+// initialization the main goroutine is locked to that thread (runtime.main), while a test's goroutine
+// runs on whichever thread the scheduler gives it, which under load is often another one, where the
+// read gives 0. A probe that read it in the test body flaked on CI that way.
+var (
+	probeSig     int32
+	probeSigErr  error
+	probeSigTID  int
+	probeSigRead bool
+)
+
+func init() {
+	if os.Getenv(probeOutEnv) == "" {
+		return
+	}
+	var sig int32
+	if _, _, e := unix.Syscall(unix.SYS_PRCTL, unix.PR_GET_PDEATHSIG, uintptr(unsafe.Pointer(&sig)), 0); e != 0 {
+		probeSigErr = e
+	}
+	probeSig, probeSigTID, probeSigRead = sig, unix.Gettid(), true
 }
 
 // TestStartedProcessProbe is run only as the process TestTheStartedProcessHasTheDefaultAttributes
-// starts through procgroup, and returns at once otherwise. It writes what it reads of itself.
+// starts through procgroup, and returns at once otherwise. It writes what it reads of itself: the
+// parent-death signal as init read it on the initial thread, and the rest here.
 func TestStartedProcessProbe(t *testing.T) {
 	out := os.Getenv(probeOutEnv)
 	if out == "" {
 		return
 	}
-	var sig int32
-	if _, _, e := unix.Syscall(unix.SYS_PRCTL, unix.PR_GET_PDEATHSIG, uintptr(unsafe.Pointer(&sig)), 0); e != 0 {
-		t.Fatal(e)
+	if !probeSigRead || probeSigErr != nil {
+		t.Fatalf("the parent-death signal was not read in init: read %v, %v", probeSigRead, probeSigErr)
 	}
+	sig := probeSig
 	pgid, err := unix.Getpgid(0)
 	if err != nil {
 		t.Fatal(err)
@@ -66,7 +95,7 @@ func TestStartedProcessProbe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := json.Marshal(probe{Pdeathsig: int(sig), PID: os.Getpid(), Pgid: pgid, Sid: sid})
+	b, _ := json.Marshal(probe{Pdeathsig: int(sig), OnInitialThread: probeSigTID == os.Getpid(), PID: os.Getpid(), Pgid: pgid, Sid: sid})
 	if err := os.WriteFile(out, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -104,6 +133,9 @@ func TestTheStartedProcessHasTheDefaultAttributes(t *testing.T) {
 		var p probe
 		if err := json.Unmarshal(b, &p); err != nil {
 			t.Fatal(err)
+		}
+		if !p.OnInitialThread {
+			t.Errorf("ExitWithParent %v: the started process read its parent-death signal on a thread other than its initial one, where it is always 0 (#532)", c.guard)
 		}
 		if p.Pdeathsig != c.want {
 			t.Errorf("ExitWithParent %v: the started process's parent-death signal is %d, want %d", c.guard, p.Pdeathsig, c.want)

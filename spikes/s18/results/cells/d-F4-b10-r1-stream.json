@@ -1,0 +1,248 @@
+{
+  "cell": {
+    "name": "d-F4-b10-r1-stream",
+    "arm": "d",
+    "burst": 10,
+    "refill": 1,
+    "fault": "F4",
+    "stream": true,
+    "rps": 5,
+    "duration_ns": 253325511982,
+    "trials": 20,
+    "client_retries": false,
+    "n": 3,
+    "d1_ns": 1000000000,
+    "d2_ns": 5000000000,
+    "token_delay": "5ms",
+    "seed": 135
+  },
+  "Requests": 1298,
+  "Marked": 20,
+  "Fired": 20,
+  "Attempts": 1298,
+  "Success": 0.9807395993836672,
+  "SuccessMarked": 0,
+  "SuccessFired": 0,
+  "SuccessUnmarked": 0.9960876369327074,
+  "Duplicates": 20,
+  "ReExecutions": 0,
+  "Deaths": 40,
+  "Restarts": 40,
+  "TTFBFiredP50": 0,
+  "TTFBFiredP95": 0,
+  "TTFBUnmarkedP50": 6.260177,
+  "TTFBUnmarkedP95": 6.499823,
+  "CorrFront": 20,
+  "CorrFrontFalse": 0,
+  "CorrController": {
+    "10m0s": 39,
+    "2m0s": 39,
+    "30s": 33
+  },
+  "CorrContent": 20,
+  "CorrContentFalse": 0,
+  "FalseDeaths": 0,
+  "FalseStops": 0,
+  "poison": [
+    {
+      "base": "s18id-905d4a-13",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2256533
+    },
+    {
+      "base": "s18id-905d4a-166",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 1690631
+    },
+    {
+      "base": "s18id-905d4a-320",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 1518027
+    },
+    {
+      "base": "s18id-905d4a-346",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2067207
+    },
+    {
+      "base": "s18id-905d4a-372",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 1522106
+    },
+    {
+      "base": "s18id-905d4a-398",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 1685554
+    },
+    {
+      "base": "s18id-905d4a-549",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 1724291
+    },
+    {
+      "base": "s18id-905d4a-575",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 1626800
+    },
+    {
+      "base": "s18id-905d4a-602",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 1577175
+    },
+    {
+      "base": "s18id-905d4a-755",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 1680850
+    },
+    {
+      "base": "s18id-905d4a-781",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 1478895
+    },
+    {
+      "base": "s18id-905d4a-935",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 1822649
+    },
+    {
+      "base": "s18id-905d4a-961",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 1814179
+    },
+    {
+      "base": "s18id-905d4a-987",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 1406828
+    },
+    {
+      "base": "s18id-905d4a-1013",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 1537107
+    },
+    {
+      "base": "s18id-905d4a-1039",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 1511698
+    },
+    {
+      "base": "s18id-905d4a-1065",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 1330883
+    },
+    {
+      "base": "s18id-905d4a-1221",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 1697819
+    },
+    {
+      "base": "s18id-905d4a-1247",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 1803548
+    },
+    {
+      "base": "s18id-905d4a-1273",
+      "attempts": 1,
+      "deaths": 2,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 1331898
+    }
+  ]
+}

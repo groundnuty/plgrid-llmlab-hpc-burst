@@ -1,0 +1,248 @@
+{
+  "cell": {
+    "name": "c-F4-b10-r1-stream",
+    "arm": "c",
+    "burst": 10,
+    "refill": 1,
+    "fault": "F4",
+    "stream": true,
+    "rps": 5,
+    "duration_ns": 608021189807,
+    "trials": 20,
+    "client_retries": false,
+    "n": 3,
+    "d1_ns": 1000000000,
+    "d2_ns": 5000000000,
+    "token_delay": "5ms",
+    "seed": 133
+  },
+  "Requests": 3072,
+  "Marked": 20,
+  "Fired": 20,
+  "Attempts": 3072,
+  "Success": 0.004231770833333333,
+  "SuccessMarked": 0,
+  "SuccessFired": 0,
+  "SuccessUnmarked": 0.004259501965923985,
+  "Duplicates": 20,
+  "ReExecutions": 0,
+  "Deaths": 60,
+  "Restarts": 60,
+  "TTFBFiredP50": 0,
+  "TTFBFiredP95": 0,
+  "TTFBUnmarkedP50": 42.461984,
+  "TTFBUnmarkedP95": 42.996068,
+  "CorrFront": 20,
+  "CorrFrontFalse": 0,
+  "CorrController": {
+    "10m0s": 59,
+    "2m0s": 59,
+    "30s": 40
+  },
+  "CorrContent": 20,
+  "CorrContentFalse": 0,
+  "FalseDeaths": 0,
+  "FalseStops": 0,
+  "poison": [
+    {
+      "base": "s18id-6dd8c6-13",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2805165
+    },
+    {
+      "base": "s18id-6dd8c6-166",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2367966
+    },
+    {
+      "base": "s18id-6dd8c6-319",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2319593
+    },
+    {
+      "base": "s18id-6dd8c6-472",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2869300
+    },
+    {
+      "base": "s18id-6dd8c6-625",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2457030
+    },
+    {
+      "base": "s18id-6dd8c6-778",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2969472
+    },
+    {
+      "base": "s18id-6dd8c6-931",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2790041
+    },
+    {
+      "base": "s18id-6dd8c6-1084",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2980959
+    },
+    {
+      "base": "s18id-6dd8c6-1237",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2639816
+    },
+    {
+      "base": "s18id-6dd8c6-1390",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2468566
+    },
+    {
+      "base": "s18id-6dd8c6-1543",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2755319
+    },
+    {
+      "base": "s18id-6dd8c6-1696",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 3072197
+    },
+    {
+      "base": "s18id-6dd8c6-1849",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 3076473
+    },
+    {
+      "base": "s18id-6dd8c6-2002",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2560415
+    },
+    {
+      "base": "s18id-6dd8c6-2155",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2655940
+    },
+    {
+      "base": "s18id-6dd8c6-2308",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2778224
+    },
+    {
+      "base": "s18id-6dd8c6-2461",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2578994
+    },
+    {
+      "base": "s18id-6dd8c6-2614",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 3458649
+    },
+    {
+      "base": "s18id-6dd8c6-2767",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2867559
+    },
+    {
+      "base": "s18id-6dd8c6-2920",
+      "attempts": 1,
+      "deaths": 3,
+      "final_status": 502,
+      "corr_front": true,
+      "corr_controller": true,
+      "corr_content": true,
+      "death_span_ns": 2671904
+    }
+  ]
+}

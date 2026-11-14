@@ -256,11 +256,6 @@ type liveRun struct {
 	// what is left after it (standin_stop_test.go) are no part of a live row's Close. That look ends in time for the cancel of the jobs
 	// and the clean-ups after it (stopBy, stopReserve), or does not happen, which the stand-ins fail.
 	stop *stackStop
-	// requeueFn, when a test sets it, sends row A's requeue in place of scontrol requeuehold over the run's transport
-	// (requeue): the stand-in's fake Slurm takes no requeuehold (internal/slurm/fakeslurm, scontrol.go), so the stand-in
-	// of an accepted requeue sends it through the fake's own RequeueHold, as the rehearsal's part 3 does
-	// (internal/rehearsal/scenario, part3_requeue_test.go). The stand-in of a refused one leaves it unset.
-	requeueFn func(ctx context.Context, jobID string) (RequeueReply, error)
 	// agentLogFn, when a test sets it, is the command line that reads row A's agent log at the path, in place of
 	// agentLogLine: the stand-in's fake login shell has tail -c and no grep (internal/slurm/fakeslurm, builtins.go).
 	agentLogFn func(path string) string
@@ -528,7 +523,8 @@ func (r *liveRun) controllerWindow() time.Duration {
 // timeLimit is the time limit the controller gives the row's jobs
 // (internal/lifecycle, allocationTimeLimit): the shortest of the partition's
 // maxTime, the QOS limits' maxWall and the lease, in whole minutes. A job's
-// lease end is its start plus it.
+// lease end is its start plus it, or later by the time its configuration took
+// (TwoJobGuard.planned).
 func (r *liveRun) timeLimit() time.Duration {
 	t := r.t
 	t.Helper()

@@ -68,10 +68,9 @@ func (r Row) RunDeadline(pendingMax time.Duration) time.Duration {
 //     to be seen gone from the slot, the successor's Allocation (SuccessorAllocationWait) and its own start wait, then
 //     health.startTimeout and ReadyMargin for it to be ready, the guard's last looks, a drain window and EndMargin for the
 //     jobs to end once the deployment goes, two catch-ups (the result's and the deployment end's), Close.
-//   - Row A on plgrid-now (alpha-athena-now-serve): its start wait; every step to the requeue before the drain start,
-//     which the requeue's own check ends the run in failure past (now_flows_test.go); then the requeue's window
-//     (NowRequeueTail), a drain window and EndMargin for the job to end once the deployment goes, three catch-ups (the
-//     worker restart's, the requeue's result's and the deployment's end's), Close.
+//   - Row A on plgrid-now (alpha-athena-now-serve): its start wait; every step before the drain start; the events, read
+//     last (stack.WaitDeadline); then a drain window and EndMargin for the job to end once the deployment goes, two
+//     catch-ups (the worker restart's and the deployment's end's), Close.
 //
 // A catch-up on a path that then fails the row (whyGone) is not counted: nothing follows it.
 func (r Row) WorstCase(pendingMax time.Duration) time.Duration {
@@ -85,20 +84,12 @@ func (r Row) WorstCase(pendingMax time.Duration) time.Duration {
 	case "alpha-helios-nooverlap":
 		return StartupWait + first + r.Lease + SuccessorWait(tm, pendingMax) + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout
 	case "alpha-athena-now-serve":
-		return StartupWait + first + (r.Lease - dw) + NowRequeueTail(tm) + dw + EndMargin + 3*stack.CatchUpWorstCase + CloseTimeout
+		return StartupWait + first + (r.Lease - dw) + stack.WaitDeadline + dw + EndMargin + 2*stack.CatchUpWorstCase + CloseTimeout
 	case "alpha-athena-now-nooverlap":
 		return StartupWait + first + r.Lease + EndMargin + SuccessorAllocationWait + r.StartWait + tm.StartTimeout + ReadyMargin + lastLooks +
 			dw + EndMargin + 2*stack.CatchUpWorstCase + CloseTimeout
 	}
 	return StartupWait + first + (r.Lease - dw) + dw + EndMargin + stack.CatchUpWorstCase + CloseTimeout
-}
-
-// NowRequeueTail is what row A's requeue may take once the run has set the deployment's end, each wait to its end: the
-// drain seen (stack.WaitDeadline), the scontrol call (RequeueTimeout), the result (RequeueResultWait), the stream held
-// across the window to its end on a refused requeue (its deadline, and the client's 90 s past it, counted as 2 minutes),
-// and the events read last (stack.WaitDeadline).
-func NowRequeueTail(tm Timing) time.Duration {
-	return stack.WaitDeadline + RequeueTimeout + RequeueResultWait + tm.MaxRequestDuration + 2*time.Minute + stack.WaitDeadline
 }
 
 // Scaled is the waits the code adds past a row's bounds, with the margin (BudgetFactorPercent).

@@ -25,6 +25,10 @@ func (r *liveRun) NowNoOverlap(ctx context.Context, p Plan) (NowNoOverlapObs, er
 	}
 	o := NowNoOverlapObs{Deployment: r.observedDeployment(), PredecessorTag: r.tagOf(pre)}
 	end := r.nowNoOverlapSteps(ctx, p, pre, &o)
+	if r.guard != nil {
+		ps, ss := r.guard.LeaseSlacks()
+		o.PredecessorLeaseSlack, o.SuccessorLeaseSlack = LeaseSlackSeconds(ps), LeaseSlackSeconds(ss)
+	}
 	if stopsTheRun(end) {
 		return NowNoOverlapObs{}, end
 	}

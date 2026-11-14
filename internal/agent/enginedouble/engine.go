@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"hash/fnv"
+	"net/http"
 	"sync"
 	"time"
 )
@@ -14,6 +15,10 @@ type engine struct {
 	cfg    Config
 	sem    chan struct{} // MaxNumSeqs slots; nil: no cap
 	record func(LogEvent)
+	// die is the die-on mode's end: in the engine process (Main) dieNow, which ends it as a crash
+	// does; for a handler a test serves in its own process, an abort of this one reply, the
+	// connection closed with no byte written, while the handler goes on serving.
+	die func()
 
 	mu            sync.Mutex
 	running       int
@@ -80,6 +85,7 @@ func newEngine(cfg Config, record func(LogEvent)) *engine {
 	e := &engine{
 		cfg:       cfg,
 		record:    record,
+		die:       func() { panic(http.ErrAbortHandler) },
 		success:   map[string]int64{},
 		httpCount: map[httpKey]int64{},
 		shapes:    map[shapeKey]int{},
@@ -97,7 +103,9 @@ type slot struct {
 	e         *engine
 	kv        int64
 	generated int64 // tokens this request has generated
-	done      sync.Once
+	// headersSent: the early-headers mode sent the stream's status and headers when it was admitted.
+	headersSent bool
+	done        sync.Once
 }
 
 // admit waits for a free sequence slot, counting the request as waiting while

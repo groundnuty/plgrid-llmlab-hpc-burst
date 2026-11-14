@@ -1,0 +1,201 @@
+{
+ "cluster_statuses": [
+  {
+   "name": "workers",
+   "host_statuses": [
+    {
+     "address": {
+      "pipe": {
+       "path": "/run/s2c/worker-0.sock"
+      }
+     },
+     "stats": [
+      {
+       "name": "cx_connect_fail"
+      },
+      {
+       "value": "1",
+       "name": "cx_total"
+      },
+      {
+       "name": "rq_error"
+      },
+      {
+       "value": "3",
+       "name": "rq_success"
+      },
+      {
+       "name": "rq_timeout"
+      },
+      {
+       "value": "4",
+       "name": "rq_total"
+      },
+      {
+       "type": "GAUGE",
+       "value": "1",
+       "name": "cx_active"
+      },
+      {
+       "type": "GAUGE",
+       "name": "rq_active"
+      },
+      {
+       "type": "GAUGE",
+       "name": "rq_pending_active"
+      }
+     ],
+     "health_status": {
+      "eds_health_status": "HEALTHY"
+     },
+     "weight": 1,
+     "hostname": "worker-0",
+     "locality": {}
+    },
+    {
+     "address": {
+      "pipe": {
+       "path": "/run/s2c/worker-1.sock"
+      }
+     },
+     "stats": [
+      {
+       "name": "cx_connect_fail"
+      },
+      {
+       "name": "cx_total"
+      },
+      {
+       "name": "rq_error"
+      },
+      {
+       "name": "rq_success"
+      },
+      {
+       "name": "rq_timeout"
+      },
+      {
+       "name": "rq_total"
+      },
+      {
+       "type": "GAUGE",
+       "name": "cx_active"
+      },
+      {
+       "type": "GAUGE",
+       "name": "rq_active"
+      },
+      {
+       "type": "GAUGE",
+       "name": "rq_pending_active"
+      }
+     ],
+     "health_status": {
+      "eds_health_status": "HEALTHY"
+     },
+     "weight": 1,
+     "hostname": "worker-1",
+     "locality": {}
+    },
+    {
+     "address": {
+      "pipe": {
+       "path": "/run/s2c/worker-2.sock"
+      }
+     },
+     "stats": [
+      {
+       "name": "cx_connect_fail"
+      },
+      {
+       "value": "1",
+       "name": "cx_total"
+      },
+      {
+       "name": "rq_error"
+      },
+      {
+       "name": "rq_success"
+      },
+      {
+       "name": "rq_timeout"
+      },
+      {
+       "value": "1",
+       "name": "rq_total"
+      },
+      {
+       "type": "GAUGE",
+       "value": "1",
+       "name": "cx_active"
+      },
+      {
+       "type": "GAUGE",
+       "name": "rq_active"
+      },
+      {
+       "type": "GAUGE",
+       "name": "rq_pending_active"
+      }
+     ],
+     "health_status": {
+      "eds_health_status": "HEALTHY"
+     },
+     "weight": 1,
+     "hostname": "worker-2",
+     "locality": {}
+    },
+    {
+     "address": {
+      "pipe": {
+       "path": "/run/s2c/worker-3.sock"
+      }
+     },
+     "stats": [
+      {
+       "name": "cx_connect_fail"
+      },
+      {
+       "value": "1",
+       "name": "cx_total"
+      },
+      {
+       "name": "rq_error"
+      },
+      {
+       "value": "8",
+       "name": "rq_success"
+      },
+      {
+       "name": "rq_timeout"
+      },
+      {
+       "value": "9",
+       "name": "rq_total"
+      },
+      {
+       "type": "GAUGE",
+       "value": "1",
+       "name": "cx_active"
+      },
+      {
+       "type": "GAUGE",
+       "name": "rq_active"
+      },
+      {
+       "type": "GAUGE",
+       "name": "rq_pending_active"
+      }
+     ],
+     "health_status": {
+      "eds_health_status": "HEALTHY"
+     },
+     "weight": 1,
+     "hostname": "worker-3",
+     "locality": {}
+    }
+   ],
+   "observability_name": "workers"
+  }
+ ]
+}
