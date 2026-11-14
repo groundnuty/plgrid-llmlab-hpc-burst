@@ -11,7 +11,8 @@
 #            Go, with the pins of k3s, frps and frpc checked and `go version -m` of each host binary
 #            required to show the tag without +dirty. The same five steps as ci.yml install the Go.
 #   draft    gh release create --draft, with the archive and SHA256SUMS, the summary
-#            docs/releases/<tag>.md (--notes-file) and GitHub's generated notes (--generate-notes).
+#            docs/releases/<tag>.md (--notes-file) and GitHub's generated notes (--generate-notes),
+#            and --prerelease when the tag has a pre-release part (-alpha.N, -beta.N).
 #            Only on a tag push, and after check, ci and archive have all passed.
 # The owner publishes the draft by hand, after the rehearsal has run from its archive
 # (hack/rehearsal.sh, REHEARSAL_ARCHIVE). No tag is ever moved or deleted (HBEP-15, A failed release).
@@ -191,11 +192,20 @@ jobs:
           grep -F "  $archive" SHA256SUMS | sha256sum -c -
 
       # A DRAFT: nothing is published, and no tag or release is edited. gh is on the runner image.
+      # A tag with a pre-release part (-alpha.N, -beta.N, -rc.N) is drafted with --prerelease, so that
+      # once the owner publishes it, it never shows as the repository's latest release (HBEP-15,
+      # Releases). The check job has refused every tag that is not vMAJOR.MINOR.PATCH with an optional
+      # pre-release part and no build metadata, so the version core holds no hyphen, and a hyphen in the
+      # tag marks the pre-release part. The decision is inline, since no code of the repository runs here.
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG" --draft --verify-tag --generate-notes \
+          prerelease=()
+          if [[ $TAG == *-* ]]; then
+            prerelease+=(--prerelease)
+          fi
+          gh release create "$TAG" --draft --verify-tag --generate-notes ${prerelease[@]+"${prerelease[@]}"} \
             --notes-file "docs/releases/$TAG.md" \
             "$RUNNER_TEMP"/release/hpcburst-*-linux-amd64.tar.gz "$RUNNER_TEMP/release/SHA256SUMS"
