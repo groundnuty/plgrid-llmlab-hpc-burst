@@ -29,8 +29,12 @@ var portSyntax = []*regexp.Regexp{
 	regexp.MustCompile(`PortsFromBase\((\d{5})\)`),
 	regexp.MustCompile(`(?i)\bports?\b.*strconv\.Itoa\((\d{5})\)|strconv\.Itoa\((\d{5})\).*\bports?\b`),
 	regexp.MustCompile(`(?i)port\w*\s+is\s+(\d{5})\b`),
-	regexp.MustCompile(`\b(\d{5})-(\d{5})\b`),
+	blockRange,
 }
+
+// blockRange is a block written as a range. The range 30000-32767 itself is the hazard's own name ("the NodePort range (30000-32767)"),
+// not a block of ours, and is not read as one (#562's review on main with #560); any other range is.
+var blockRange = regexp.MustCompile(`\b(\d{5})-(\d{5})\b`)
 
 // portMap is a map literal of ints on a line that names ports ("Ports: map[agentapi.RelayChannel]int{...}"), and mapValue each value in it.
 var (
@@ -79,6 +83,9 @@ func nodePortHits(line string) []int {
 	var found []string
 	for _, re := range portSyntax {
 		for _, m := range re.FindAllStringSubmatch(line, -1) {
+			if re == blockRange && m[1] == strconv.Itoa(nodePortFirst) && m[2] == strconv.Itoa(nodePortLast) {
+				continue
+			}
 			found = append(found, m[1:]...)
 		}
 	}
@@ -177,6 +184,12 @@ func TestTheNodePortGuardCatchesEachPortSyntax(t *testing.T) {
 		{`}, "port_value is 30161"},`, 1},
 		{`// #448's block (30280-30359, IMPL-COMMON)`, 2},
 		{`// #448's block (28280-28359, IMPL-COMMON)`, 0},
+		// The hazard's own name is not a block; a block inside it still is, and so is a range that only starts or ends at its edge.
+		{`// below the NodePort range (30000-32767), whose ports the host's k3s can take`, 0},
+		{`// as a Kubernetes NodePort (30000-32767) of the host's own k3s does`, 0},
+		{`// a block of ours at 30040-30049 in a comment`, 2},
+		{`// 30000-30019, the old keeper block`, 2},
+		{`// 31000-32767`, 2},
 		{`	bulkUpBase       = 29999`, 0},
 		{`	bulkUpBase       = 32768`, 0},
 		{`exec sleep 31337`, 0},
