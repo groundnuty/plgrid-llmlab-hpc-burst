@@ -152,6 +152,9 @@ type rigSetup struct {
 	// instanceRouter runs up with --instance-router envoy and places Envoy's build beside the agent's
 	// (#454, router_test.go). Unset, up's arguments and the builds are as before.
 	instanceRouter bool
+	// bins, when set, changes the binaries up runs, given the rig's directory: the upgrade test (#552)
+	// runs its own copies of the controller and the front, which it replaces in place.
+	bins func(b stack.Binaries, dir string) stack.Binaries
 }
 
 func startRig(t *testing.T, mode string) *rig {
@@ -163,6 +166,9 @@ func startRigWith(t *testing.T, s rigSetup) *rig {
 	t.Helper()
 	b := requireRehearsal(t)
 	dir := stack.ShortDir(t)
+	if s.bins != nil {
+		b = s.bins(b, dir)
+	}
 	r := &rig{t: t, b: b, hub: stack.StartHub(t), ports: s.ports, tokenDelay: tokenDelay, dir: dir}
 	// The job's environment has no HF_ENDPOINT: the agent learns the Hub
 	// from agent.json, which the controller writes from its own (ruling of 1
