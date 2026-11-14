@@ -69,14 +69,14 @@ func TestControllerArgsWithKeeperAndBulk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ports, err := PortsFromBase(30020)
+	ports, err := PortsFromBase(28020)
 	if err != nil {
 		t.Fatal(err)
 	}
 	st := &State{Ports: ports, Front: Front{Mode: "host-dialed"}, RelayKeeper: true,
 		Controllers: &ControllerConfig{Binary: "/opt/hpcburst-controller"}, Frps: &FrpsRunConfig{Binary: "/opt/frp/frps", Version: "0.71.1"}}
 	sock := l.host(ports).RelayKeeperSocket()
-	line := []string{"--state-dir", l.dir, "--port-base", "30020", "--health-addr", ports.ControllerAddr(), "--front-mode", "host-dialed"}
+	line := []string{"--state-dir", l.dir, "--port-base", "28020", "--health-addr", ports.ControllerAddr(), "--front-mode", "host-dialed"}
 
 	set, err := st.supervisedSet(l)
 	if err != nil {

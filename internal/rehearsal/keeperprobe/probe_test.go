@@ -100,6 +100,36 @@ func TestRelayChildrenAreTheRelaysSshOfAProcess(t *testing.T) {
 	}
 }
 
+// A run names its Provider after itself, so the probe reads the Provider it is given, and the rehearsal's when it is given none.
+func TestThePartAndTheUpRelaysAreOfTheProviderTheProbeReads(t *testing.T) {
+	up := func(job string, ch agentapi.RelayChannel, pid int) wire.RelayState {
+		return wire.RelayState{JobID: job, Channel: ch, State: wire.StateUp, PID: pid, Epoch: 5, Seq: 2}
+	}
+	rep := wire.StatusReport{Providers: []wire.ProviderStatus{
+		{Provider: stack.ProviderName, Relays: []wire.RelayState{up("1", agentapi.RelayServing, 11)}},
+		{Provider: "alpha-0123456789", Relays: []wire.RelayState{up("1", agentapi.RelayControl, 21), up("1", agentapi.RelayServing, 22)}},
+	}}
+	if got := PartOf(rep, "alpha-0123456789").Provider; got != "alpha-0123456789" {
+		t.Errorf("PartOf(the run's Provider) is %q's", got)
+	}
+	if got := PartOf(rep, "someone-else").Provider; got != "" {
+		t.Errorf("PartOf(a Provider the report has none for) = %q's, want an empty part", got)
+	}
+	states, n := UpRelaysOf(rep, "alpha-0123456789", "1")
+	if len(states) != 2 || states[agentapi.RelayControl].PID != 21 || n[agentapi.RelayServing] != 1 {
+		t.Errorf("UpRelaysOf(the run's Provider) = %+v, %+v; want its two relays", states, n)
+	}
+	if states, _ := UpRelays(rep, "1"); len(states) != 1 || states[agentapi.RelayServing].PID != 11 {
+		t.Errorf("UpRelays reads %+v, want the rehearsal Provider's one relay", states)
+	}
+	if (Probe{}).provider() != stack.ProviderName || (Probe{Provider: "alpha-0123456789"}).provider() != "alpha-0123456789" {
+		t.Errorf("the probe reads %q by default and %q when named", (Probe{}).provider(), (Probe{Provider: "alpha-0123456789"}).provider())
+	}
+	if s := providersOf(rep); !strings.Contains(s, stack.ProviderName+": 1 relays") || !strings.Contains(s, "alpha-0123456789: 2 relays") {
+		t.Errorf("providersOf = %q, want each Provider the report has a part for, with its relays", s)
+	}
+}
+
 func TestProviderPartAndUpRelaysReadTheKeepersReport(t *testing.T) {
 	up := func(job string, ch agentapi.RelayChannel, pid int) wire.RelayState {
 		return wire.RelayState{JobID: job, Channel: ch, State: wire.StateUp, PID: pid, Epoch: 5, Seq: 2}

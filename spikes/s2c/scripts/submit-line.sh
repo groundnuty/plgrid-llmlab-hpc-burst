@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # submit-line.sh: prints the sbatch line of the S2c job (one line, to standard output). It contacts nothing.
 #
-#   S2C_HOME=<dir> IMAGE=<path> CHECKPOINT_DIR=<dir> VR_BIN=<path> [MODE=double PORT_BASE=30420 ...] \
+#   S2C_HOME=<dir> IMAGE=<path> CHECKPOINT_DIR=<dir> VR_BIN=<path> [MODE=double PORT_BASE=28420 ...] \
 #     spikes/s2c/scripts/submit-line.sh
 #
 # The line is "sbatch --parsable <the shape of shape.sh> --wrap='<env> bash <STAGE>/scripts/job.sh'", in the

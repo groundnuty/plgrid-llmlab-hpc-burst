@@ -176,6 +176,14 @@ func ConfigFromEnv(getenv func(string) string, mine ...string) (cfg Config, skip
 	default:
 		bad = append(bad, envMode+" must be direct, ssh or host-dialed")
 	}
+	// The keeper row tests the relay keeper, which runs the relays of host-dialed mode alone (HBEP-6, The relay keeper): another mode has none.
+	if row.Name == BetaKeeperName && cfg.DialHomeMode != "host-dialed" {
+		bad = append(bad, envMode+" must be host-dialed for "+BetaKeeperName+": the relay keeper runs the relays of host-dialed mode alone")
+	}
+	// The bulk row reads the bulk path on the relays' ssh through the login node, the path the criterion names (HBEP-6, Graduation criteria, Beta).
+	if row.Name == BetaBulkName && cfg.DialHomeMode != "host-dialed" {
+		bad = append(bad, envMode+" must be host-dialed for "+BetaBulkName+": the bulk path's real-path buffer is read on the relays' ssh through the login node")
+	}
 	// The script's shape and this package's row are one fact; a mismatch is a drift, not a setting.
 	if cfg.Profile != "" && cfg.Profile != row.ProfileName() {
 		bad = append(bad, "the script's profile differs from the row's")

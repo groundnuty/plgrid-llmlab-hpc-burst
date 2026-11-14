@@ -20,7 +20,7 @@ import (
 )
 
 func keeperArgs(extra ...string) []string {
-	return append([]string{"--state-dir", "/state", "--port-base", "30010", "--health-addr", "127.0.0.1:30016"}, extra...)
+	return append([]string{"--state-dir", "/state", "--port-base", "28010", "--health-addr", "127.0.0.1:28016"}, extra...)
 }
 
 func TestTheRelayKeeperSocketIsOptInAndHostDialedOnly(t *testing.T) {
@@ -39,8 +39,8 @@ func TestTheRelayKeeperSocketIsOptInAndHostDialedOnly(t *testing.T) {
 		want string
 	}{
 		{"no front mode", keeperArgs("--relay-keeper-socket", sock), "host-dialed only"},
-		{"direct mode", keeperArgs("--front-mode", "direct", "--front-addr", "front.example.org:30019", "--relay-keeper-socket", sock), "host-dialed only"},
-		{"ssh mode", keeperArgs("--front-mode", "ssh", "--front-addr", "front.example.org:30019", "--relay-keeper-socket", sock), "host-dialed only"},
+		{"direct mode", keeperArgs("--front-mode", "direct", "--front-addr", "front.example.org:28019", "--relay-keeper-socket", sock), "host-dialed only"},
+		{"ssh mode", keeperArgs("--front-mode", "ssh", "--front-addr", "front.example.org:28019", "--relay-keeper-socket", sock), "host-dialed only"},
 		{"relative path", keeperArgs("--front-mode", "host-dialed", "--relay-keeper-socket", "relaykeeper.sock"), "absolute"},
 		{"too long", keeperArgs("--front-mode", "host-dialed", "--relay-keeper-socket", "/"+strings.Repeat("s", agentapi.MaxRelaySocketPath)), "at most 107"},
 	} {
@@ -61,10 +61,10 @@ func TestTheRelayKeeperSocketIsOptInAndHostDialedOnly(t *testing.T) {
 // positive control, names the ports and the socket only.
 func TestRelaySettingsAreAlphasWithoutTheKeeperSocket(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", "/run/user/example")
-	host := agentapi.Host{StateDir: "/state", PortBase: 30010}
+	host := agentapi.Host{StateDir: "/state", PortBase: 28010}
 	front := &providerctl.FrontSettings{Mode: agentapi.DialHomeHostDialed}
-	ports := map[agentapi.RelayChannel]int{agentapi.RelayControl: 30013, agentapi.RelayServing: 30017}
-	controlDir := filepath.Join("/run/user/example", "hpcburst-ssh-"+strconv.Itoa(os.Geteuid())+"-30010")
+	ports := map[agentapi.RelayChannel]int{agentapi.RelayControl: 28013, agentapi.RelayServing: 28017}
+	controlDir := filepath.Join("/run/user/example", "hpcburst-ssh-"+strconv.Itoa(os.Geteuid())+"-28010")
 
 	alpha := wiring{host: host, front: front}.relaySettings()
 	want := &providerctl.RelaySettings{Ports: ports, Slots: hostdial.SharedSlots, ControlDir: controlDir}

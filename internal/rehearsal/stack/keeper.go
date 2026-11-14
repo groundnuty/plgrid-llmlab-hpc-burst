@@ -59,10 +59,17 @@ func (h *Host) UpAgain(extra ...string) (string, error) {
 // for the controller's /readyz.
 func (h *Host) UpgradeTo(v string) (backup, log string, err error) {
 	h.T.Helper()
-	stdout, stderr, over, err := runApart(Within(h.T, UpgradeTimeout), h.Env, h.B.HPCBurst,
+	return h.UpgradeWith(h.B.HPCBurst, v)
+}
+
+// UpgradeWith is UpgradeTo run by the hpcburst at path: an operator's upgrade with a new build of the
+// launcher, whose supervisor it starts (#552).
+func (h *Host) UpgradeWith(path, v string) (backup, log string, err error) {
+	h.T.Helper()
+	stdout, stderr, over, err := runApart(Within(h.T, UpgradeTimeout), h.Env, path,
 		"upgrade", "--state-dir", h.State, "--bin-dir", h.B.K3sDir, "--to", v, "--json")
 	if over {
-		err = errors.Join(err, pastBound(h.B.HPCBurst, UpgradeTimeout))
+		err = errors.Join(err, pastBound(path, UpgradeTimeout))
 	}
 	if err != nil {
 		return "", stdout + stderr, err

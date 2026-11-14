@@ -56,7 +56,7 @@ func (s shellJobs) ListByTag(_ context.Context, tag string) ([]provider.Job, err
 // #343's block, are never dialed.
 func shellOwner(t *testing.T, o hostdial.OwnerOptions) *hostdial.Owner {
 	t.Helper()
-	o.Ports = map[agentapi.RelayChannel]int{control: 30000, serving: 30001}
+	o.Ports = map[agentapi.RelayChannel]int{control: 28000, serving: 28001}
 	o.Epoch = epoch(1)
 	if o.Slots == nil {
 		o.Slots = hostdial.NewSlots(0)
