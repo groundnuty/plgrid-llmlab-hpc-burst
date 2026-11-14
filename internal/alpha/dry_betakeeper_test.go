@@ -87,6 +87,10 @@ func (d *drySteps) BetaKeeper(_ context.Context, p Plan) (KeeperObs, error) {
 	case d.fault("outcome-late"):
 		obs.OutcomeAt = killed.Add(KeeperOutcomeBound + time.Second)
 		obs.Stream.Ended = obs.OutcomeAt.Add(KeeperMargin + time.Minute)
+	case d.fault("outcome-late-ended"):
+		// An outcome past the 2-minute bar, with the stream already ended at its planned length: the bar's failure, never the NOT RUN of a
+		// stream that ended before the outcome (#543's delta review: a failure wins, pinned without composition).
+		obs.OutcomeAt = killed.Add(KeeperOutcomeBound + time.Second)
 	case d.fault("same-controller"):
 		obs.ControllerReplaced = false
 	case d.fault("same-holder"):
@@ -168,6 +172,7 @@ var betaKeeperCases = []dryCase{
 	{"not-killed", "the controller was not killed"},
 	{"outcome-unseen", "the outcome of the controller's restart was not seen within 2m0s"},
 	{"outcome-late", "the outcome of the controller's restart was not seen within 2m0s"},
+	{"outcome-late-ended", "the outcome of the controller's restart was not seen within 2m0s"},
 	{"same-controller", "the controller that leads after the kill is the one that was killed"},
 	{"same-holder", "the Provider's Lease has the holder it had before the kill"},
 	{"lease-not-risen", "the Provider's Lease's transitions did not rise by one across the restart"},

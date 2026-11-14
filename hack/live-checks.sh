@@ -74,7 +74,7 @@
 # a controller restart's outcome at the engine's measured rate. Its marker names the rate and the context, numbers only, which judge prints; the run
 # killed no controller, and its jobs were cancelled by their tags. The row runs in host-dialed mode alone. It has a second, of a run that did start
 # (the science agent's ruling (b) on #543): nothing failed, but the stream did not outlast the keeper's outcome by the 30 s margin, so the run cannot
-# show a stream crossing the handover. Its marker names the times from the stream's first token, durations only, which judge prints; the controller
+# show a stream crossing the handover. Its marker names the times from when the stream was opened (its request's start), durations only, which judge prints; the controller
 # was killed, the run's other checks passed, and its text to post says NOT RUN with the times.
 # Row B on plgrid-now (alpha-athena-now-nooverlap, issue #376) has two of its own, judged the same way: a job that is not the
 # run's held the one-job slot between its two jobs (the owner's own work, which the run never touches; Q7), and either job's

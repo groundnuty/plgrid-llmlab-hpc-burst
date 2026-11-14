@@ -351,6 +351,32 @@ func TestAKeeperStreamTheContextCannotHoldIsNotRun(t *testing.T) {
 	}
 }
 
+// A late outcome, past the 2-minute bar, after the stream had already ended is the bar's FAIL, never the NOT RUN of a stream that ended first:
+// Run returns the NOT RUN only when nothing failed (#543's delta review). The fixture's stream ends at its 130 s plan, before an outcome 2 min and
+// 1 s after the kill at 10 s.
+func TestALateOutcomeAfterTheStreamEndedIsAFailureNotANotRun(t *testing.T) {
+	if planEnd, outcome := KeeperWindow+KeeperStreamExtra, KeeperKillAfter+KeeperOutcomeBound+time.Second; !(planEnd < outcome) {
+		t.Fatalf("the fixture's stream ends at %s, not before the outcome at %s: the case would not have the stream ended first", planEnd, outcome)
+	}
+	row := BetaKeeperRow()
+	cfg := Config{Row: row, Dry: true, DryFault: "outcome-late-ended", Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
+	rec, err := NewRecorder(cfg.Out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failures, err := Run(context.Background(), cfg, newDrySteps(t, cfg, "betakeeper"), rec, t.Logf)
+	if err != nil || NotRun(row, err) || !slices.Contains(failures, "the outcome of the controller's restart was not seen within 2m0s") {
+		t.Fatalf("failures %v, err %v; want the bar's failure and no NOT RUN", failures, err)
+	}
+	if v := keeperRecordVerdict(t, cfg.Out); v != "fail" {
+		t.Errorf("the record's verdict is %q, want fail", v)
+	}
+	post, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
+	if !strings.HasPrefix(string(post), "beta-athena-now-keeper: FAIL (posts to #522)\n") || strings.Contains(string(post), "NOT RUN") {
+		t.Errorf("the text to post is not headed FAIL, or says NOT RUN:\n%s", post)
+	}
+}
+
 // The keeper row runs in host-dialed mode alone: the relay keeper runs the relays of that mode, and another mode has none to read.
 func TestTheKeeperRowRefusesAnotherDialHomeMode(t *testing.T) {
 	const row = BetaKeeperName
