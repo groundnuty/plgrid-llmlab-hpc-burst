@@ -99,11 +99,24 @@ func (b *bulkPath) lose(uid types.UID) {
 	b.prober.Reregistered(uid)
 }
 
+// bulkOutcome is what forwardBulk did with the request.
+type bulkOutcome int
+
+const (
+	bulkAnswered bulkOutcome = iota // it answered the client
+	bulkFellBack                    // its dial failed before any byte: the same target's token transport takes it
+	bulkHeld                        // a 5xx before any body byte, held for forward's retry (HBEP-5, open question 5)
+	bulkClosed                      // written and then closed before the response headers, for forward's retry
+)
+
 // forwardBulk sends the request through the target's bulk transport (HBEP-6, The bulk path). It
-// returns true when it answered the client. It returns false only after a dial that failed before
-// any byte was written: forward then sends the request through the same target's token transport,
-// as if the bulk path had not been tried, so the token send keeps HBEP-5's one resend.
-func (p *Proxy) forwardBulk(w http.ResponseWriter, r *http.Request, x *exchange, t *target, body []byte, rb requestBody, key string) bool {
+// answers the client, or returns bulkFellBack after a dial that failed before any byte was written:
+// forward then sends the request through the same target's token transport, as if the bulk path had
+// not been tried, so the token send keeps HBEP-5's one resend. A failure the front may still retry to
+// another Instance (a close before the headers, or a 5xx before any body byte, held unwritten) is
+// handed back to forward, which retries it as on the token path; a close still counts nothing toward
+// the pause.
+func (p *Proxy) forwardBulk(w http.ResponseWriter, r *http.Request, x *exchange, t *target, body []byte, rb requestBody, key string) (bulkOutcome, *http.Response, error) {
 	uid := t.inst.UID
 	// conn is the connection the attempt took and base its count of written bytes then: the
 	// request counts as sent on the bulk path only if some byte of it reached that connection
@@ -123,26 +136,31 @@ func (p *Proxy) forwardBulk(w http.ResponseWriter, r *http.Request, x *exchange,
 			// was written anywhere, so it counts neither as bulk nor as a fallback.
 			t.release()
 			p.failedBulkBeforeHeaders(w, x, t, err)
-			return true
+			return bulkAnswered, nil, nil
 		}
 		p.bulk.unregister(uid)
 		p.metrics.bulkFellBack()
 		p.bulk.log.Warn("the bulk transport could not be dialled; nothing was sent, and the request takes the token transport", "request", x.id, "target", t.key(), "error", err.Error())
-		return false
+		return bulkFellBack, nil, nil
 	}
 	if wrote {
 		p.metrics.bulkSent()
 	}
-	if err == nil {
+	switch {
+	case err == nil && p.retryable(x, t) && retryableStatus(resp.StatusCode):
+		return bulkHeld, resp, nil
+	case err == nil:
 		// Deferred, so a cut body's abort panic reports too, as on the token path.
 		defer p.reportOutcome(t, x)
 		p.relay(w, x, t, resp, rb, r.URL.Path)
 		t.release()
-		return true
+		return bulkAnswered, nil, nil
+	case p.retryable(x, t):
+		return bulkClosed, nil, err
 	}
 	t.release()
 	p.failedBulkBeforeHeaders(w, x, t, err)
-	return true
+	return bulkAnswered, nil, nil
 }
 
 // failedBulkBeforeHeaders answers a bulk request that failed after it was written, or was cut,

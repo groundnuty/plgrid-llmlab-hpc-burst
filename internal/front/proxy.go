@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -166,60 +167,187 @@ func (p *Proxy) authenticate(r *http.Request) (string, bool) {
 }
 
 // forward chooses a target, sends, and relays (HBEP-5, Request path steps 5
-// to 9). A request is sent once more only when no byte of it was written: a
-// connection that never opened goes to the next target on the ring, or to
-// the same one on a fresh connection when there is no other (open question
-// 5). Go's transport resends on its own only a request on a reused
-// connection that wrote nothing, since withOneReplay's GetBody refuses once
-// a byte was written, so neither path can send a byte twice.
+// to 9). A request is sent again in two ways, each at most once (open
+// question 5):
+//   - alpha's resend: a connection no byte of which was written (refused,
+//     timed out, or a reused idle connection closed before the write) goes to
+//     the next target on the ring, or to the same one on a fresh connection
+//     when there is no other. Go's transport resends on its own only a request
+//     on a reused connection that wrote nothing, since withOneReplay's GetBody
+//     refuses once a byte was written;
+//   - beta's retry: toward an Instance, a request written and then closed
+//     before the response headers, or answered with a 5xx before any body byte
+//     (not a 504), goes to another ready Instance, never the same one. The 5xx
+//     is held, not written, until the front has decided.
+//
+// Every target the request failed on is skipped by the next choice; alpha's
+// fallback to a fresh connection may take a target again only when its dial
+// failed, never one the request was written to.
 func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, x *exchange, n naming.Name, key string, body []byte, rb requestBody) {
-	var tried *target
-	exclude := ""
-	for attempt := 0; attempt < 2; attempt++ {
-		t, rerr := p.router.choose(x.ctx, n, key, exclude)
-		if rerr != nil && exclude != "" {
-			t, rerr = p.router.choose(x.ctx, n, key, "")
-		}
-		if rerr != nil {
-			if tried != nil {
-				p.unreachable(w, x, tried)
-				return
-			}
-			p.routeFail(w, x, rerr)
-			return
-		}
+	var written, unreached []string // the targets the request was written to and lost, and those a dial failed on
+	var lastUnreached *target
+	dialResent := false
+	t, rerr := p.router.choose(x.ctx, n, key, nil)
+	if rerr != nil {
+		p.routeFail(w, x, rerr)
+		return
+	}
+	for {
 		// Released exactly once however the request ends, including the
 		// http.ErrAbortHandler panic of a cut body (HBEP-5, Request path
 		// step 9); Release is idempotent, so the explicit calls stay.
 		defer t.release()
 		p.setTarget(x, t)
-		if p.bulk.takes(t, rb) && p.forwardBulk(w, r, x, t, body, rb, key) {
-			return
+		var held *http.Response // a 5xx before any body byte, not yet written
+		var err error
+		bulk := false // the failure came through the bulk transport: a close there counts nothing toward the pause
+		if p.bulk.takes(t, rb) {
+			var o bulkOutcome
+			switch o, held, err = p.forwardBulk(w, r, x, t, body, rb, key); o {
+			case bulkAnswered:
+				return
+			case bulkHeld, bulkClosed:
+				bulk = true
+			}
 		}
-		resp, err := p.send(x, r, t, body, rb, key)
-		if err == nil {
-			// Deferred, so a cut body's abort panic reports too.
+		var resp *http.Response
+		if !bulk {
+			resp, err = p.send(x, r, t, body, rb, key)
+		}
+		switch {
+		case bulk:
+		case err == nil && !(p.retryable(x, t) && retryableStatus(resp.StatusCode)):
+			// Only the attempt that answers the client defers its report:
+			// a deferred report reads the request's final record. Deferred,
+			// so a cut body's abort panic reports too.
 			defer p.reportOutcome(t, x)
 			p.relay(w, x, t, resp, rb, r.URL.Path)
 			t.release()
 			return
-		}
-		t.release()
-		if x.ctx.Err() != nil || !isDialError(err) {
+		case err == nil:
+			held = resp
+		case isDialError(err) && x.ctx.Err() == nil:
+			t.release()
+			// The front's own fence is not the target failing, so it
+			// doesn't count toward the pause: a dial aborted because the
+			// Instance registered again, or no transport left in the
+			// router's view (#371). The re-probe that follows decides
+			// whether the Instance takes traffic again.
+			if !isOwnFence(err) {
+				p.router.ReportConnect(t.key(), true)
+			}
+			p.log.Warn("no connection to the target; nothing was sent", "request", x.id, "target", t.key(), "error", err.Error())
+			if dialResent {
+				p.unreachable(w, x, t)
+				return
+			}
+			dialResent, lastUnreached = true, t
+			unreached = append(unreached, t.key())
+			// Once the request was written somewhere, it goes only to another
+			// Instance, never to a managed provider.
+			choose := p.router.choose
+			if len(written) > 0 {
+				choose = p.router.chooseInstance
+			}
+			next, rerr := choose(x.ctx, n, key, append(slices.Clip(written), unreached...))
+			if rerr != nil {
+				// No other target: the same one again on a fresh connection,
+				// but never one the request was written to.
+				next, rerr = choose(x.ctx, n, key, written)
+			}
+			if rerr != nil {
+				p.unreachable(w, x, lastUnreached)
+				return
+			}
+			t = next
+			continue
+		case !p.retryable(x, t):
+			t.release()
 			p.failedBeforeHeaders(w, x, t, err)
 			return
 		}
-		// The front's own fence is not the target failing, so it doesn't count
-		// toward the pause: a dial aborted because the Instance registered
-		// again, or no transport left in the router's view (#371). The re-probe
-		// that follows decides whether the Instance takes traffic again.
-		if !isOwnFence(err) {
+		// A written request lost before any response byte, retried once: the
+		// target is chosen before the failure is answered or the held 5xx
+		// closed, so with no other Instance ready the client gets the first
+		// failure as it came.
+		t.release()
+		// The failed Instance's idle and lease timers stop across the choice,
+		// so neither cuts a request bound elsewhere while it waits in the FIFO;
+		// the retry's target arms its own (setTarget, sendWith).
+		x.stopIdle()
+		x.armLease(func() (time.Time, bool) { return time.Time{}, false })
+		written = append(written, t.key())
+		next, rerr := p.router.chooseInstance(x.ctx, n, key, append(slices.Clip(written), unreached...))
+		if rerr != nil && rerr.code != codeCapacity && rerr.cutBy == "" && rerr.status != statusClientClosed {
+			// No other Instance ready: no retry, and no header, as alpha. The
+			// failed Instance's timers are its own again.
+			p.setTarget(x, t)
+			x.armIdle(p.cfg.IdleTimeout.D())
+			switch {
+			case held != nil:
+				defer p.reportOutcome(t, x)
+				p.relay(w, x, t, held, rb, r.URL.Path)
+			case bulk:
+				p.failedBulkBeforeHeaders(w, x, t, err)
+			default:
+				p.failedBeforeHeaders(w, x, t, err)
+			}
+			return
+		}
+		// The retry is decided. The failure counts toward its own Instance's
+		// pause once, here, but a close on the bulk transport, which takes the
+		// bulk registration away instead (HBEP-6, The bulk path); its answer is
+		// never written.
+		if bulk && held == nil {
+			p.bulk.lose(t.inst.UID)
+		} else {
 			p.router.ReportConnect(t.key(), true)
 		}
-		p.log.Warn("no connection to the target; nothing was sent", "request", x.id, "target", t.key(), "error", err.Error())
-		tried, exclude = t, t.key()
+		if held != nil {
+			_ = held.Body.Close()
+			p.log.Warn("the target answered a 5xx before any body byte; the request is sent once more, to another Instance", "request", x.id, "target", t.key(), "status", held.StatusCode)
+		} else {
+			p.log.Warn("the connection closed after the request was written, before the response headers; the request is sent once more, to another Instance", "request", x.id, "target", t.key(), "error", err.Error())
+		}
+		x.retried = true
+		if rerr != nil {
+			// Placed in the FIFO and not served within queueTimeout, or cut
+			// while it waited there: the front's answer, attributed to the
+			// front as before any target was chosen (Errors), not to the
+			// Instance that failed.
+			x.untarget()
+			p.routeFail(w, x, rerr)
+			return
+		}
+		t = next
 	}
-	p.unreachable(w, x, tried)
+}
+
+// retryable reports whether a written request that failed before any byte of
+// its response may still be retried (HBEP-5, open question 5): toward an
+// Instance, not cut by the client or by the front (a time-out is never
+// retried), and not retried before.
+func (p *Proxy) retryable(x *exchange, t *target) bool {
+	return t.inst != nil && x.ctx.Err() == nil && !x.retried
+}
+
+// retryableStatus reports whether a status that came before any body byte is
+// a failure the front retries: a 5xx, but not a 504, which leaves the engine
+// possibly still running the request.
+func retryableStatus(status int) bool {
+	return status >= 500 && status != http.StatusGatewayTimeout
+}
+
+// headerShouldRetry is set to "false" on a give-up answer after the front's
+// own retry, which the OpenAI SDK obeys and doesn't retry (HBEP-5, open
+// question 5).
+const headerShouldRetry = "X-Should-Retry"
+
+// giveUpAfterRetry reports whether an answer of status is a give-up after the
+// front's own retry: every final non-2xx once the retry was decided (#539,
+// Q2), whether the front raised it or the target answered it.
+func giveUpAfterRetry(x *exchange, status int) bool {
+	return x.retried && (status < 200 || status > 299)
 }
 
 // reportOutcome counts a relayed response toward the target's pause, by
@@ -431,6 +559,11 @@ func (p *Proxy) routeFail(w http.ResponseWriter, x *exchange, e *routeError) {
 func (p *Proxy) fail(w http.ResponseWriter, x *exchange, status int, code, detail, param, message string) {
 	h := w.Header()
 	x.attr.set(h)
+	if giveUpAfterRetry(x, status) && code != codeShuttingDown {
+		// A 503 shutting_down asks the client to send again, to a front that
+		// will be back (#539, Q2).
+		h.Set(headerShouldRetry, "false")
+	}
 	h.Set("Content-Type", "application/json")
 	x.rec.Status = status
 	if x.rec.Finish == nil {

@@ -63,6 +63,11 @@ type Behaviour struct {
 	// no response byte, as frps does with a request it accepted for a dead
 	// tunnel (HBEP-6).
 	CloseBeforeHeaders bool
+	// CloseAfterHold, when set, holds each request after its headers are read until the channel is
+	// closed, then closes the connection with no response byte, as CloseBeforeHeaders does at once: a
+	// test of the front's per-attempt timers (HBEP-5, open question 5) fails an attempt at a time it
+	// chooses on the front's clock.
+	CloseAfterHold chan struct{}
 	// Hold, when set, holds each request after its headers are read until
 	// the channel is closed or the request ends.
 	Hold chan struct{}
@@ -253,6 +258,14 @@ func (e *Engine) serve(w http.ResponseWriter, r *http.Request) {
 	if e.key != "" && r.Header.Get("Authorization") != "Bearer "+e.key {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{"message": "invalid key", "type": "auth", "code": 401}})
 		return
+	}
+	if b.CloseAfterHold != nil {
+		select {
+		case <-b.CloseAfterHold:
+		case <-r.Context().Done():
+			return
+		}
+		b.CloseBeforeHeaders = true
 	}
 	if b.CloseBeforeHeaders {
 		if hj, ok := w.(http.Hijacker); ok {

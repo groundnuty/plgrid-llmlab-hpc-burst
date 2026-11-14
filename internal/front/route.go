@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/balancer"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/inventory"
@@ -60,9 +61,21 @@ func errNoReadyTarget(model string) *routeError {
 }
 
 // choose resolves a parsed name to a target (HBEP-5, Request path steps 3 to
-// 6). exclude is a target the request already failed to reach, for the one
-// resend. It never widens to a broader level.
-func (r *Router) choose(ctx context.Context, n naming.Name, key, exclude string) (*target, *routeError) {
+// 6). exclude are the targets the request already failed on, for its resend
+// and its retry (open question 5). It never widens to a broader level.
+func (r *Router) choose(ctx context.Context, n naming.Name, key string, exclude []string) (*target, *routeError) {
+	return r.chooseAmong(ctx, n, key, exclude, true)
+}
+
+// chooseInstance is choose among Instances only, never a managed provider: a
+// request already written to an Instance is sent again only to another
+// Instance (HBEP-5, open question 5: "to another ready Instance"), never run
+// again on LLMLab.
+func (r *Router) chooseInstance(ctx context.Context, n naming.Name, key string, exclude []string) (*target, *routeError) {
+	return r.chooseAmong(ctx, n, key, exclude, false)
+}
+
+func (r *Router) chooseAmong(ctx context.Context, n naming.Name, key string, exclude []string, withManaged bool) (*target, *routeError) {
 	// A request waits for one rebuild, two at most under a barging reader
 	// (#417; lockFresh). The view it
 	// routes on may be a rebuild behind the transports: a target whose
@@ -94,7 +107,7 @@ func (r *Router) choose(ctx context.Context, n naming.Name, key, exclude string)
 	now := r.clk.Now()
 	var managed []*inventory.ManagedTarget
 	for _, t := range m.Managed {
-		if levelMatches(n, t.Provider, t.DisplayID) && t.Key != exclude && !r.pausedLocked(t.Key, now) {
+		if withManaged && levelMatches(n, t.Provider, t.DisplayID) && !slices.Contains(exclude, t.Key) && !r.pausedLocked(t.Key, now) {
 			managed = append(managed, t)
 		}
 	}
@@ -121,7 +134,7 @@ func (r *Router) choose(ctx context.Context, n naming.Name, key, exclude string)
 // Instance), and takes the first that can place the request. wait is the
 // first deployment on the walk that has an eligible Instance, all at their
 // caps.
-func (r *Router) chooseServed(m *inventory.Model, ring *balancer.Ring, groups map[string]*balancer.Group, n naming.Name, key, exclude string) (*target, *inventory.Deployment) {
+func (r *Router) chooseServed(m *inventory.Model, ring *balancer.Ring, groups map[string]*balancer.Group, n naming.Name, key string, exclude []string) (*target, *inventory.Deployment) {
 	if ring == nil || len(m.Served) == 0 {
 		return nil, nil
 	}
@@ -175,7 +188,7 @@ func (r *Router) chooseServed(m *inventory.Model, ring *balancer.Ring, groups ma
 
 // waitServed holds the request in the deployment's FIFO for at most
 // queueTimeout (HBEP-5, Load bound and cap).
-func (r *Router) waitServed(ctx context.Context, d *inventory.Deployment, g *balancer.Group, m *inventory.Model, n naming.Name, key, exclude string) (*target, *routeError) {
+func (r *Router) waitServed(ctx context.Context, d *inventory.Deployment, g *balancer.Group, m *inventory.Model, n naming.Name, key string, exclude []string) (*target, *routeError) {
 	byInst := map[string]*inventory.Instance{}
 	for _, i := range d.Members {
 		byInst[i.Key] = i
@@ -251,9 +264,9 @@ func chooseManaged(ts []*inventory.ManagedTarget, key string) *target {
 }
 
 // levelMatch is a request's filter on a deployment's members.
-func levelMatch(n naming.Name, exclude string) balancer.Match {
+func levelMatch(n naming.Name, exclude []string) balancer.Match {
 	return func(member string, a balancer.Attrs) bool {
-		return member != exclude && levelMatches(n, a.Provider, a.DisplayID)
+		return !slices.Contains(exclude, member) && levelMatches(n, a.Provider, a.DisplayID)
 	}
 }
 

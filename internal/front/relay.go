@@ -95,6 +95,9 @@ func (p *Proxy) relay(w http.ResponseWriter, x *exchange, t *target, resp *http.
 	for k, vs := range resp.Header {
 		h[k] = append([]string(nil), vs...)
 	}
+	if giveUpAfterRetry(x, resp.StatusCode) {
+		h.Set(headerShouldRetry, "false")
+	}
 	stripHop(h)
 	h.Del("Content-Length")
 	h.Del("Content-Encoding")

@@ -408,7 +408,7 @@ func (f *bulkFront) sessionFor(target string) string {
 	for i := 0; i < 256; i++ {
 		sid := fmt.Sprintf("session-%d", i)
 		key, _ := convkey.Key(http.Header{"X-Session-Id": {sid}}, f.cfg.SessionHeaders, []byte(`[{"role":"user","content":"hello"}]`))
-		tg, rerr := f.router.choose(context.Background(), n, key, "")
+		tg, rerr := f.router.choose(context.Background(), n, key, nil)
 		if rerr != nil {
 			f.t.Fatalf("choose: %s", rerr.message)
 		}
