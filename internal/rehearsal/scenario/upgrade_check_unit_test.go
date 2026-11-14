@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -198,20 +199,41 @@ func TestNewBackup(t *testing.T) {
 	}
 }
 
-// portsAnswered finds a port of the block that accepts a connection, and none in a block where nothing
-// listens.
+// portsAnswered dials every port of the block, base to base+16 (the client's at base+16 included), on
+// loopback, and lists the ones that accept, in order; none where nothing does. The dial is given, so this
+// knows exactly which ports answer: a real block of kernel ports holds whatever other tests listen on at
+// the time (#569: "portsAnswered = [36327 36337], want [36327]").
 func TestPortsAnswered(t *testing.T) {
+	var dialed []string
+	listening := map[string]bool{"127.0.0.1:28444": true, "127.0.0.1:28456": true}
+	got := portsAnsweredBy(stack.Ports{Base: 28440}, func(addr string) bool {
+		dialed = append(dialed, addr)
+		return listening[addr]
+	})
+	if len(dialed) != 17 || dialed[0] != "127.0.0.1:28440" || dialed[16] != "127.0.0.1:28456" {
+		t.Errorf("dialed %d addresses, %v … %v; want the 17 of 127.0.0.1:28440 to 127.0.0.1:28456", len(dialed), dialed[:min(1, len(dialed))], dialed[max(0, len(dialed)-1):])
+	}
+	if !slices.Equal(got, []int{28444, 28456}) {
+		t.Errorf("portsAnswered = %v, want [28444 28456], the two that accept", got)
+	}
+	if got := portsAnsweredBy(stack.Ports{Base: 28440}, func(string) bool { return false }); len(got) != 0 {
+		t.Errorf("portsAnswered = %v where nothing accepts, want none", got)
+	}
+}
+
+// The real dial finds a port that listens. Only that port is asserted: its neighbours are kernel ports
+// other tests may hold at the time.
+func TestPortsAnsweredFindsAListener(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer l.Close()
 	port := l.Addr().(*net.TCPAddr).Port
-	if port < 17 {
-		t.Skip("the kernel gave a port too low for a block before it")
+	if got := portsAnswered(stack.Ports{Base: port - 4}); !slices.Contains(got, port) {
+		t.Errorf("portsAnswered = %v, want it to hold %d, which listens", got, port)
 	}
-	got := portsAnswered(stack.Ports{Base: port - 4})
-	if len(got) != 1 || got[0] != port {
-		t.Errorf("portsAnswered = %v, want [%d], the one port that listens", got, port)
+	if !tcpAccepts(l.Addr().String()) {
+		t.Errorf("tcpAccepts(%s) is false for a listening port", l.Addr())
 	}
 }
