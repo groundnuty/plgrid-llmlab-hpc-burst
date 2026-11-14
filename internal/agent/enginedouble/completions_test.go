@@ -3,6 +3,7 @@ package enginedouble
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -364,8 +365,21 @@ func TestCompletionRefusals(t *testing.T) {
 	}{
 		{"no prompt", map[string]any{"model": "m"}, 400, "BadRequestError", "needs a prompt"},
 		{"a null prompt", map[string]any{"model": "m", "prompt": nil}, 400, "BadRequestError", "needs a prompt"},
-		{"a list of strings", map[string]any{"model": "m", "prompt": []string{"a b"}}, 400, "BadRequestError", "must be a string"},
 		{"a number", map[string]any{"model": "m", "prompt": 7}, 400, "BadRequestError", "must be a string"},
+		// The four forms vLLM reads are served (TestCompletionReadsEachPromptForm); anything else in a list is not one of them.
+		{"an object", map[string]any{"model": "m", "prompt": map[string]any{"a": 1}}, 400, "BadRequestError", "must be a string"},
+		{"strings and token IDs mixed", map[string]any{"model": "m", "prompt": []any{"a b", 1}}, 400, "BadRequestError", "must be a string"},
+		{"token IDs and strings mixed", map[string]any{"model": "m", "prompt": []any{1, "a"}}, 400, "BadRequestError", "must be a string"},
+		{"a null among strings", map[string]any{"model": "m", "prompt": []any{"a b", nil}}, 400, "BadRequestError", "must be a string"},
+		{"a list of a null", map[string]any{"model": "m", "prompt": []any{nil}}, 400, "BadRequestError", "must be a string"},
+		{"a negative token ID", map[string]any{"model": "m", "prompt": []any{1, -1}}, 400, "BadRequestError", "must be a string"},
+		{"a fraction for a token ID", map[string]any{"model": "m", "prompt": []any{1.5}}, 400, "BadRequestError", "must be a string"},
+		{"a token ID past int32", map[string]any{"model": "m", "prompt": []any{int64(1) << 31}}, 400, "BadRequestError", "must be a string"},
+		{"a list of lists of strings", map[string]any{"model": "m", "prompt": []any{[]any{"a"}}}, 400, "BadRequestError", "must be a string"},
+		{"a bad token ID in a later prompt of a batch", map[string]any{"model": "m", "prompt": []any{[]any{1, 2}, []any{-3}}}, 400, "BadRequestError", "must be a string"},
+		{"an empty list", map[string]any{"model": "m", "prompt": []any{}}, 400, "BadRequestError", "The decoder prompt cannot be empty"},
+		{"an empty first token-ID list", map[string]any{"model": "m", "prompt": []any{[]any{}, []any{1}}}, 400, "BadRequestError", "The decoder prompt cannot be empty"},
+		{"token IDs one over the context", map[string]any{"model": "m", "prompt": tokenIDPrompt(101), "max_tokens": 1}, 400, "BadRequestError", "your prompt contains at least 101 input tokens"},
 		{"an empty prompt", map[string]any{"model": "m", "prompt": ""}, 400, "BadRequestError", "The decoder prompt cannot be empty"},
 		{"a prompt of white space", map[string]any{"model": "m", "prompt": " \t\n"}, 400, "BadRequestError", "The decoder prompt cannot be empty"},
 		{"another model", completionBody(2, map[string]any{"model": "other"}), 404, "NotFoundError", "`other` does not exist"},
@@ -409,5 +423,47 @@ func TestCompletionRefusals(t *testing.T) {
 	}
 	if r := s.get("/v1/completions"); r.status != 405 {
 		t.Errorf("GET /v1/completions: HTTP %d, want 405", r.status)
+	}
+}
+
+// tokenIDPrompt is a prompt of n token IDs, 1 to n.
+func tokenIDPrompt(n int) []int {
+	ids := make([]int, n)
+	for i := range ids {
+		ids[i] = i + 1
+	}
+	return ids
+}
+
+// The double reads the four prompt forms vLLM's CompletionRequest takes (completion/protocol.py at v0.32.0: list[int] | list[list[int]] | str
+// | list[str]), plain and streamed: a string of words, counted by its words; token IDs, counted by their number; and a batch, of strings or of
+// token-ID lists, answered as its first prompt in one choice, so its prompt_tokens are the first prompt's. Each count differs from the
+// others', so that reading another prompt of a batch, or the words of the wrong form, shows.
+func TestCompletionReadsEachPromptForm(t *testing.T) {
+	s := serve(t, cfgFor())
+	for _, c := range []struct {
+		name   string
+		prompt any
+		tokens int
+	}{
+		{"a string", "a b c", 3},
+		{"a list of strings", []string{"a b c d", "e f"}, 4},
+		{"token IDs", tokenIDPrompt(5), 5},
+		{"a list of token-ID lists", [][]int{tokenIDPrompt(6), {7, 8}}, 6},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := s.completion(map[string]any{"model": "m", "prompt": c.prompt, "max_tokens": 2})
+			if got.Usage.PromptTokens != c.tokens || got.Usage.CompletionTokens != 2 || got.Choices[0].Index != 0 {
+				t.Errorf("usage %+v, choice index %d; want %d prompt tokens, 2 completion tokens, index 0", got.Usage, got.Choices[0].Index, c.tokens)
+			}
+			r := s.post("/v1/completions", map[string]any{"model": "m", "prompt": c.prompt, "max_tokens": 2, "stream": true,
+				"stream_options": map[string]any{"include_usage": true}})
+			if r.status != 200 || !bytes.HasSuffix(r.body, []byte("data: [DONE]\n\n")) {
+				t.Fatalf("streamed: HTTP %d %q", r.status, r.body)
+			}
+			if want := fmt.Sprintf(`"prompt_tokens":%d,`, c.tokens); !bytes.Contains(r.body, []byte(want)) {
+				t.Errorf("streamed: the usage chunk lacks %s: %s", want, r.body)
+			}
+		})
 	}
 }

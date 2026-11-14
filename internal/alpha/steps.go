@@ -99,6 +99,9 @@ type Steps interface {
 	TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	// NowServe is row A on plgrid-now (issue #376; nowserve.go).
 	NowServe(ctx context.Context, p Plan) (NowServeObs, error)
+	// BetaRouter is the router row on plgrid-now (issue #521; betarouter.go). Beside what it saw it may return ErrGlibcTooOld,
+	// which ends the run NOT RUN.
+	BetaRouter(ctx context.Context, p Plan) (RouterObs, error)
 	// NowNoOverlap is row B on plgrid-now (issue #376; nownooverlap.go). Beside what it saw it may return ErrSlotTaken
 	// or ErrSecondNotStarted, which leave the predecessor's part to judge.
 	NowNoOverlap(ctx context.Context, p Plan) (NowNoOverlapObs, error)
