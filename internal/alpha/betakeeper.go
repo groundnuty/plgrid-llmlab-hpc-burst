@@ -33,14 +33,19 @@ import (
 // BetaKeeperName is the keeper row's name in the script.
 const BetaKeeperName = "beta-athena-now-keeper"
 
-// The keeper row's window: the stream is opened, the controller is killed KeeperKillAfter after its first token, the outcome is waited for up to
-// KeeperOutcomeBound (the loopback rehearsal measured it at about 35 s, the Lease's expiry and the next copy's start), and the stream is still
-// flowing KeeperMargin after it. The stream is at least KeeperWindow long.
+// The keeper row's window and stream (the science agent's ruling (b) on #543, comment 6871229741 on #521): the stream is opened, the controller is
+// killed KeeperKillAfter after its first token, and the keeper's outcome must land within KeeperOutcomeBound of the kill, the verdict's bar. The
+// window sizes for an outcome of KeeperSizingOutcome (a margin over the 35 s the loopback rehearsal measured, the Lease's expiry and the next
+// copy's start), plus KeeperMargin of stream after it: KeeperWindow, the floor below which the context cannot hold the stream and the run is NOT
+// RUN. The two are apart so that the floor does not NOT RUN a healthy slot (#543's review: the bar as the floor's middle term left 2 s at Athena's
+// measured rate). The stream is planned at KeeperWindow plus KeeperStreamExtra, capped at what the context holds, never the whole context.
 const (
-	KeeperKillAfter    = 10 * time.Second
-	KeeperOutcomeBound = 2 * time.Minute
-	KeeperMargin       = 30 * time.Second
-	KeeperWindow       = KeeperKillAfter + KeeperOutcomeBound + KeeperMargin
+	KeeperKillAfter     = 10 * time.Second
+	KeeperOutcomeBound  = 2 * time.Minute
+	KeeperSizingOutcome = 60 * time.Second
+	KeeperMargin        = 30 * time.Second
+	KeeperWindow        = KeeperKillAfter + KeeperSizingOutcome + KeeperMargin
+	KeeperStreamExtra   = 30 * time.Second
 )
 
 // BetaKeeperRow is the keeper row: row A's hold of plgrid-now's one-job slot (one job, one GPU, a start wait of 10 minutes, a lease of 48 and
@@ -79,8 +84,8 @@ func (e *KeeperStreamTooShortError) Error() string {
 // Is makes the error ErrKeeperStreamTooShort.
 func (e *KeeperStreamTooShortError) Is(target error) bool { return target == ErrKeeperStreamTooShort }
 
-// FitKeeper is the length of the stream the keeper row holds across the restart: as long as max-model-len less PromptReserve holds at rate tokens
-// a second, rounded down to a whole second, capped at the row's LongCap, and at least the window. Under the window it is a
+// FitKeeper is the length of the stream the keeper row holds across the restart: KeeperWindow plus KeeperStreamExtra, capped at what max-model-len
+// less PromptReserve holds at rate tokens a second (rounded down to a whole second), and at least the window. Under the window it is a
 // *KeeperStreamTooShortError. A rate that is not a positive finite number is FitLong's plain error. It is FitLong's sizing, with the window as the floor.
 func FitKeeper(tm Timing, maxModelLen int, rate float64) (time.Duration, error) {
 	tm.LongFloor = KeeperWindow
@@ -89,7 +94,47 @@ func FitKeeper(tm Timing, maxModelLen int, rate float64) (time.Duration, error) 
 	if errors.As(err, &lt) {
 		return 0, &KeeperStreamTooShortError{Rate: lt.Rate, MaxModelLen: lt.MaxModelLen, Fit: lt.Fit, Floor: KeeperWindow}
 	}
-	return fit, err
+	if err != nil {
+		return 0, err
+	}
+	return min(fit, KeeperWindow+KeeperStreamExtra), nil
+}
+
+// ErrKeeperStreamEndedFirst ends a run of the keeper row NOT RUN when nothing failed but the stream did not outlast the keeper's outcome by the
+// margin (the ruling (b) on #543): an outcome inside the verdict's 2 minutes but past the window, after the stream ended or less than KeeperMargin
+// before its end, so the run cannot show a stream crossing the handover. It is never a pass, and a failure beside it wins. The controller was
+// killed, so the run is judged, recorded and posted (refused, in Run).
+var ErrKeeperStreamEndedFirst = errors.New(keeperStreamEndedFirstWords)
+
+// keeperStreamEndedFirstWords say what happened, in the marker, which hack/live-checks.sh reads (keeper_ended_marker). The marker adds the times
+// in parentheses, durations only.
+const keeperStreamEndedFirstWords = "the stream ended before the keeper's outcome and its margin"
+
+// KeeperStreamEndedFirstError is ErrKeeperStreamEndedFirst with the times, from the stream's first token: when the outcome landed and when the
+// stream ended.
+type KeeperStreamEndedFirstError struct{ Outcome, Ended time.Duration }
+
+func (e *KeeperStreamEndedFirstError) counts() string {
+	return fmt.Sprintf("the outcome at %s after the stream opened, the stream's end at %s, the margin %s", e.Outcome, e.Ended, KeeperMargin)
+}
+
+func (e *KeeperStreamEndedFirstError) Error() string {
+	return fmt.Sprintf("%v (%s)", ErrKeeperStreamEndedFirst, e.counts())
+}
+
+// Is makes the error ErrKeeperStreamEndedFirst.
+func (e *KeeperStreamEndedFirstError) Is(target error) bool {
+	return target == ErrKeeperStreamEndedFirst
+}
+
+// keeperEndedFirst is the run's NOT RUN when the stream did not outlast the keeper's outcome by KeeperMargin, nil otherwise or when either time
+// was not seen (the verdict's own checks fail those). Run returns it only when nothing failed.
+func keeperEndedFirst(o KeeperObs) error {
+	s := o.Stream
+	if o.OutcomeAt.IsZero() || s.Opened.IsZero() || s.Ended.IsZero() || s.Ended.Sub(o.OutcomeAt) >= KeeperMargin {
+		return nil
+	}
+	return &KeeperStreamEndedFirstError{Outcome: o.OutcomeAt.Sub(s.Opened).Round(time.Second), Ended: s.Ended.Sub(s.Opened).Round(time.Second)}
 }
 
 // RelayObs is one relay's ssh as the run read it: the process (its PID and its start time, which name one process and not a later one that
@@ -143,8 +188,9 @@ type KeeperObs struct {
 	Unreachable    bool `json:"unreachable"`
 	RestartsBefore int  `json:"restartsBefore"`
 	RestartsAfter  int  `json:"restartsAfter"`
-	// Stream is the stream held across the restart.
-	Stream Stream `json:"stream"`
+	// Planned is the stream's planned length (FitKeeper), Asked its tokens at the measured rate; Stream is the stream held across the restart.
+	Planned time.Duration `json:"planned"`
+	Stream  Stream        `json:"stream"`
 	// FrontCuts is how many cuts the front counted, at every hop, from before the kill to the stream's end; -1 when its metrics could not be read.
 	FrontCuts int `json:"frontCuts"`
 	// Responses counts the responses the run received through the front, Attributed those with HBEP-5's attribution headers.
@@ -245,8 +291,8 @@ func agentChecks(o KeeperObs) []string {
 	return f
 }
 
-// keeperStreamChecks: the stream asked for exactly Asked tokens and got them whole, opened before the kill and still flowing KeeperMargin after
-// the outcome, within the deployment's deadline, and the front counted no cut.
+// keeperStreamChecks: the stream asked for exactly Asked tokens and got them whole, opened before the kill, within the deployment's deadline, and
+// the front counted no cut. A stream that did not outlast the outcome by KeeperMargin is no failure but the run's NOT RUN (keeperEndedFirst).
 func keeperStreamChecks(row Row, o KeeperObs) []string {
 	tm := row.Clock()
 	s := o.Stream
@@ -265,9 +311,6 @@ func keeperStreamChecks(row Row, o KeeperObs) []string {
 	}
 	if !o.KilledAt.IsZero() && !s.Opened.Before(o.KilledAt) {
 		f = append(f, "the stream was not open before the controller was killed")
-	}
-	if !o.OutcomeAt.IsZero() && s.Ended.Sub(o.OutcomeAt) < KeeperMargin {
-		f = append(f, "the stream did not flow on for the margin after the outcome")
 	}
 	switch {
 	case o.FrontCuts < 0:
@@ -318,11 +361,23 @@ func betaKeeperPost(row Row, o KeeperObs, failures []string) string {
 		}
 		return "NOT the same"
 	}
+	head := verdictLine(row, failures)
+	if err := keeperEndedFirst(o); err != nil && len(failures) == 0 {
+		var e *KeeperStreamEndedFirstError
+		errors.As(err, &e)
+		head = fmt.Sprintf("%s: NOT RUN (posts to %s): %s (%s); the controller was killed and the run's other checks passed", row.Name, row.PostsTo, keeperStreamEndedFirstWords, e.counts())
+	}
+	actual := o.Stream.Ended.Sub(o.Stream.Opened).Round(time.Second)
 	fmt.Fprintf(&b, "%s\n%s\n- a controller restart (SIGKILL through a pinned pidfd) while a stream of %d tokens ran at the engine's own rate (measured %.0f tokens/s), under the %s deadline: the stream delivered %d tokens over %s, cut: %t, the front counted %d cuts\n",
-		verdictLine(row, failures), deploymentLine(o.Deployment), o.Asked, o.Rate, tm.MaxRequestDuration, o.Stream.Tokens,
-		o.Stream.Ended.Sub(o.Stream.Opened).Round(time.Second), o.Stream.CutBy != "", o.FrontCuts)
-	fmt.Fprintf(&b, "- the outcome: the next controller led and the keeper accepted its epoch %s after the kill; the Lease's transitions %d to %d; the keeper's E %d (above 2^31: %t)\n",
-		took, o.LeaseBefore, o.LeaseAfter, o.Before.KeeperEpoch, o.Before.KeeperEpoch >= KeeperEpochBase)
+		head, deploymentLine(o.Deployment), o.Asked, o.Rate, tm.MaxRequestDuration, o.Stream.Tokens, actual, o.Stream.CutBy != "", o.FrontCuts)
+	fmt.Fprintf(&b, "- the window: %s (%s to the kill, %s for the keeper's outcome, %s of stream after it); the stream planned at %s (the window and %s more, capped at what the context holds), actual %s\n",
+		KeeperWindow, KeeperKillAfter, KeeperSizingOutcome, KeeperMargin, o.Planned, KeeperStreamExtra, actual)
+	if !o.OutcomeAt.IsZero() && !o.Stream.Opened.IsZero() {
+		fmt.Fprintf(&b, "- the keeper's outcome landed %s after the stream opened and %s before the stream's end (the stream must outlast it by %s)\n",
+			o.OutcomeAt.Sub(o.Stream.Opened).Round(time.Second), o.Stream.Ended.Sub(o.OutcomeAt).Round(time.Second), KeeperMargin)
+	}
+	fmt.Fprintf(&b, "- the outcome: the next controller led and the keeper accepted its epoch %s after the kill (the bar: within %s); the Lease's transitions %d to %d; the keeper's E %d (above 2^31: %t)\n",
+		took, KeeperOutcomeBound, o.LeaseBefore, o.LeaseAfter, o.Before.KeeperEpoch, o.Before.KeeperEpoch >= KeeperEpochBase)
 	fmt.Fprintf(&b, "- the relays through the login node after the restart: control %s, serving %s; the controller ran %d relays of its own\n",
 		same(o.Before.Control, o.After.Control), same(o.Before.Serving, o.After.Serving), o.After.ControllerOwn)
 	fmt.Fprintf(&b, "- the agent: registration the same: %t, judged unreachable: %t, restarts before and after: %d and %d, a report held by the new controller: %t\n",

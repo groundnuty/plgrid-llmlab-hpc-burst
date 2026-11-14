@@ -495,6 +495,9 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'hack/live-checks.sh@@  printf '"'"'%s\n'"'"' "${state:-error}"@@  printf '"'"'%s\n'"'"' "$state"'
   # B3: the first job ran and the second never started is NOT RUN unless an earlier failure stands; its own bound.
   'hack/live-checks.sh@@    elif second_job_marker; then@@    elif false; then'
+  # The keeper row's second NOT RUN (the ruling (b) on #543): its marker held to the keeper row, and its own line.
+  'hack/live-checks.sh@@  ! keeper_ended_marker || [ "$n" = beta-athena-now-keeper ] || return 1@@  true'
+  'hack/live-checks.sh@@    elif keeper_ended_marker; then@@    elif false; then'
   'hack/live-checks.sh@@  ! second_job_marker || [ "${MOSTJOBS[$n]:-1}" -ge 2 ] || return 1@@  true'
   'hack/live-checks.sh@@second_job_marker() { grep -q "the first job ran and the second never started"@@second_job_marker() { grep -q "the second job ran and the first never started"'
   'hack/live-checks.sh@@    alpha-helios-nooverlap) printf "within %s of the first'"'"'s lease end" "$(fmt_pending "$(pending_max "$1")")" ;;@@    alpha-helios-nooverlap) printf "within 30 min of the first'"'"'s lease end" ;;'
@@ -746,7 +749,17 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'betakeeper.go@@	if o.Asked <= 0 || s.Tokens != o.Asked {@@	if o.Asked <= 0 || s.Tokens < o.Asked {'
   'betakeeper.go@@	if !s.Ended.After(s.Opened) || s.Ended.Sub(s.Opened) > tm.MaxRequestDuration {@@	if !s.Ended.After(s.Opened) || s.Ended.Sub(s.Opened) > tm.MaxRequestDuration+time.Minute {'
   'betakeeper.go@@	if !o.KilledAt.IsZero() && !s.Opened.Before(o.KilledAt) {@@	if !o.KilledAt.IsZero() && s.Opened.After(o.KilledAt) {'
-  'betakeeper.go@@	if !o.OutcomeAt.IsZero() && s.Ended.Sub(o.OutcomeAt) < KeeperMargin {@@	if !o.OutcomeAt.IsZero() && s.Ended.Sub(o.OutcomeAt) <= KeeperMargin {'
+  # The science agent's ruling (b) on #543: the window's outcome term, the stream's plan capped at the context, and the stream that must outlast the
+  # keeper's outcome by the margin, else NOT RUN.
+  'betakeeper.go@@	KeeperSizingOutcome = 60 * time.Second@@	KeeperSizingOutcome = 59 * time.Second'
+  'betakeeper.go@@	KeeperSizingOutcome = 60 * time.Second@@	KeeperSizingOutcome = 2 * time.Minute'
+  'betakeeper.go@@	return min(fit, KeeperWindow+KeeperStreamExtra), nil@@	return fit, nil'
+  'betakeeper.go@@	if o.OutcomeAt.IsZero() || s.Opened.IsZero() || s.Ended.IsZero() || s.Ended.Sub(o.OutcomeAt) >= KeeperMargin {@@	if o.OutcomeAt.IsZero() || s.Opened.IsZero() || s.Ended.IsZero() || s.Ended.Sub(o.OutcomeAt) > KeeperMargin {'
+  'betakeeper.go@@	if o.OutcomeAt.IsZero() || s.Opened.IsZero() || s.Ended.IsZero() || s.Ended.Sub(o.OutcomeAt) >= KeeperMargin {@@	if o.OutcomeAt.IsZero() || s.Opened.IsZero() || s.Ended.IsZero() || s.Ended.Sub(o.OutcomeAt) >= 0 {'
+  'betakeeper.go@@	if o.OutcomeAt.IsZero() || s.Opened.IsZero() || s.Ended.IsZero() || s.Ended.Sub(o.OutcomeAt) >= KeeperMargin {@@	if true {'
+  'betakeeper.go@@	if err := keeperEndedFirst(o); err != nil && len(failures) == 0 {@@	if err := keeperEndedFirst(o); false && err != nil {'
+  'run.go@@		refused = keeperEndedFirst(o)@@		refused = nil'
+  'run.go@@		errors.Is(err, ErrGlibcTooOld) || errors.Is(err, ErrKeeperStreamTooShort) || errors.Is(err, ErrKeeperStreamEndedFirst)@@		errors.Is(err, ErrGlibcTooOld) || errors.Is(err, ErrKeeperStreamTooShort)'
   'betakeeper.go@@	case o.FrontCuts < 0:@@	case false:'
   'betakeeper.go@@	case o.FrontCuts > 0:@@	case o.FrontCuts > 1:'
   'betakeeper.go@@	f = append(f, relaysChecks("before the restart", o.Before)...)@@	_ = relaysChecks'
@@ -1066,7 +1079,7 @@ compile_of() {
 # parent-death SIGKILL, which it asks for.
 rehearsal_tests='ExitedSSHD|ZeroRowSignalsNothing|BelowWalksNothing|Guard2Alone|SignalProcs|RefusalIsTheErrorOfClose|WithRelayEnvSelectsNothing|ReportLeaks|CloseReturnsWhen|BeforeItsParent|LeftTheTree|StillAliveAtItsDeadline|StillOutsideTheTree|RelayGuard|ForcedCommandDies|ForcedCommandExecs|GuardFailureIsLogged'
 # The tests of the script's kind.
-script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot|HostDialedMode|HandoverRowsLead|LeadMarkersReason|LeadMarkerOnARow|EveryStackRow|TheRowsThatStartNoStack|TunnelRowsLongStream|LongMarkersReason|LongMarkerOnARow|InvalidMarkerOnAnotherRow'
+script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot|HostDialedMode|HandoverRowsLead|LeadMarkersReason|LeadMarkerOnARow|EveryStackRow|TheRowsThatStartNoStack|TunnelRowsLongStream|LongMarkersReason|LongMarkerOnARow|InvalidMarkerOnAnotherRow|TheKeeperRowsNotRunsThroughTheScript|TheKeeperMarkerOnAnotherRow'
 # tests_of <path> [control|<names>]: the command that judges a mutant of path, in the array tests. With control, the same command with
 # no mutant: from the binaries kept at the baseline, the tree being as it was. With names (a regexp), that, for those tests alone, to
 # the end. The

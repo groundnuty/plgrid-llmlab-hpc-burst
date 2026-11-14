@@ -46,12 +46,16 @@ import (
 // window that spans a controller restart's outcome (ErrKeeperStreamTooShort), so the restart was never put to the test. Nothing was sent but
 // the rate stream, and the run's jobs are cancelled by their tags.
 //
+// An eighth is the keeper row's after its run (the science agent's ruling (b) on #543): nothing failed, but the stream did not outlast the keeper's
+// outcome by the margin (ErrKeeperStreamEndedFirst), so the handover was not shown crossing a stream. The controller was killed: the run is judged,
+// recorded and posted with the reason, as row A's warm start is, and with no failure it is NOT RUN.
+//
 // A fifth is the tunnel rows' (issue #451; the science agent's ruling (b), 12 Nov 2026): the stream that fits the deployment's
 // max-model-len at the engine's measured rate is under the row's LongFloor (ErrLongTooShort), so the hour cannot hold the
 // long stream its check 2 asks for. Nothing was sent but the rate stream.
 func NotRun(_ Row, err error) bool {
 	return neverStarted(err) || errors.Is(err, ErrWarmUnshown) || errors.Is(err, ErrSlotTaken) || errors.Is(err, ErrLeadTooShort) || errors.Is(err, ErrLongTooShort) ||
-		errors.Is(err, ErrGlibcTooOld) || errors.Is(err, ErrKeeperStreamTooShort)
+		errors.Is(err, ErrGlibcTooOld) || errors.Is(err, ErrKeeperStreamTooShort) || errors.Is(err, ErrKeeperStreamEndedFirst)
 }
 
 // ErrInvalid ends a run that ran and was judged with no failure, but whose reading measures nothing: the bulk row's run with no saturation witness
@@ -89,6 +93,15 @@ func neverStarted(err error) bool {
 // when it was the deployment's first end, which hack/live-checks.sh reads off the marker to name
 // that bound in its line (the wait in the queue otherwise); any other gives pendingMax.
 func NotRunNote(row Row, pendingMax time.Duration, err error) string {
+	if errors.Is(err, ErrKeeperStreamEndedFirst) {
+		// The times, durations only: hack/live-checks.sh reads the reason in parentheses.
+		reason := ""
+		var ke *KeeperStreamEndedFirstError
+		if errors.As(err, &ke) {
+			reason = " (" + ke.counts() + ")"
+		}
+		return fmt.Sprintf("%s: %s%s; the controller was killed and the run's other checks passed; this run's jobs were ended with its deployment\n", row.Name, keeperStreamEndedFirstWords, reason)
+	}
 	if errors.Is(err, ErrKeeperStreamTooShort) {
 		// The rate and the context, numbers only: hack/live-checks.sh reads the reason in parentheses.
 		reason := ""
@@ -290,6 +303,7 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 			return nil, serr
 		}
 		tags, obs = o.Tags, o
+		refused = keeperEndedFirst(o)
 		judge = func(j []provider.Job) []string { return VerifyBetaKeeper(cfg.Row, o, j) }
 		summary = func(f []string, _ []provider.Job) string { return betaKeeperPost(cfg.Row, o, f) }
 	case cfg.Row.Name == BetaRouterName:

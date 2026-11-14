@@ -1,7 +1,8 @@
 package livechecks
 
 // The keeper row on plgrid-now, beta-athena-now-keeper (issue #521), through the script. Its NOT RUNs are two: a job past the row's start wait, as on
-// every row, and a deployment whose max-model-len does not hold a stream long enough to span a controller restart's outcome at the engine's measured
+// every row, a stream that ended before the keeper's outcome and its margin (the ruling (b) on #543), and a deployment whose max-model-len does not
+// hold a stream long enough to span a controller restart's outcome at the engine's measured
 // rate. The second runs with the real row's test in dry mode (internal/alpha, dry_betakeeper_test.go), so what the script prints is what the test wrote:
 // exit 3, NOT RUN with the rate and the context and nothing else, never PASS or FAIL, a cleanup that leaves nothing, and no text to post, since the run
 // killed no controller. The row runs in host-dialed mode alone, which the script refuses to start it without. The lines are written out here from the
@@ -27,7 +28,7 @@ func TestTheKeeperRowsNotRunsThroughTheScript(t *testing.T) {
 	const row = "beta-athena-now-keeper"
 	for _, c := range []struct{ fault, line string }{
 		{"pend-past-bound", row + ": NOT RUN (a job did not start within 10 min of the deployment's creation, the row's start wait, and was cancelled by its tag; not a failure)"},
-		{"window-too-short", row + ": NOT RUN (the deployment's max-model-len does not hold a stream long enough to span a controller restart at the engine's measured rate: at 40 tokens/s with max-model-len 2912 the stream that fits is 1m0s, under the window of 2m40s; the controller was not killed, and the run's jobs were cancelled by tag; not a failure)"},
+		{"window-too-short", row + ": NOT RUN (the deployment's max-model-len does not hold a stream long enough to span a controller restart at the engine's measured rate: at 40 tokens/s with max-model-len 2912 the stream that fits is 1m0s, under the window of 1m40s; the controller was not killed, and the run's jobs were cancelled by tag; not a failure)"},
 	} {
 		t.Run(c.fault, func(t *testing.T) {
 			t.Parallel()
@@ -47,6 +48,27 @@ func TestTheKeeperRowsNotRunsThroughTheScript(t *testing.T) {
 			}
 		})
 	}
+	// The ruling (b) on #543, through the script with the real test in dry mode: a stream that ended before the keeper's outcome and its margin is NOT
+	// RUN, exit 3, with the times and nothing else, never PASS or FAIL; the controller was killed, so this one leaves a text to post.
+	t.Run("ended-before-outcome", func(t *testing.T) {
+		t.Parallel()
+		w := newAlphaWorld(t)
+		w.installDry(dryWrapper, real, realDir)
+		hostDialed(w)
+		res := w.run([]string{"STUB_DRY_FAULT=ended-before-outcome"}, "--run", row, "--yes")
+		if res.code != 3 {
+			t.Fatalf("exit %d, want 3:\n%s", res.code, res.out)
+		}
+		w.contains(res, row+": tests: 0 passed, 0 failed, 1 skipped",
+			row+": NOT RUN (the stream ended before the keeper's outcome and its margin: the outcome at 1m40s after the stream opened, the stream's end at 1m40s, the margin 30s; the controller was killed and the run's other checks passed; not a failure)",
+			"cleanup: left behind 0")
+		if strings.Contains(res.out, row+": FAIL") || strings.Contains(res.out, row+": PASS") {
+			t.Errorf("a NOT RUN run was also reported as a pass or a failure:\n%s", res.out)
+		}
+		if m, _ := filepath.Glob(filepath.Join(w.out(), row+"-*", "posts.md")); len(m) != 1 {
+			t.Errorf("a run that killed the controller left %d texts to post, want 1", len(m))
+		}
+	})
 	// The control: a window at exactly the floor is no NOT RUN and no failure, through the same script.
 	t.Run("window-at-the-floor", func(t *testing.T) {
 		t.Parallel()
@@ -67,16 +89,31 @@ func TestTheKeeperRowsNotRunsThroughTheScript(t *testing.T) {
 // the context prints no more than the fixed words, never what it also carried.
 func TestTheKeeperMarkerOnAnotherRowIsAFailureAndCarriesOnlyTheNumbers(t *testing.T) {
 	for _, row := range []string{"alpha-athena-now-serve", "beta-athena-now-router", "tunnel-hour-athena"} {
-		t.Run(row, func(t *testing.T) {
-			w := newAlphaWorld(t)
-			res := w.run([]string{"STUB_ALPHA_MODE=not-run-keeper"}, "--run", row, "--yes")
-			if res.code != 1 {
-				t.Fatalf("exit %d, want 1:\n%s", res.code, res.out)
-			}
-			if strings.Contains(res.out, row+": NOT RUN") {
-				t.Errorf("a keeper marker on %s read as NOT RUN:\n%s", row, res.out)
-			}
-		})
+		for _, mode := range []string{"not-run-keeper", "not-run-keeper-ended"} {
+			t.Run(row+"/"+mode, func(t *testing.T) {
+				w := newAlphaWorld(t)
+				res := w.run([]string{"STUB_ALPHA_MODE=" + mode}, "--run", row, "--yes")
+				if res.code != 1 {
+					t.Fatalf("exit %d, want 1:\n%s", res.code, res.out)
+				}
+				if strings.Contains(res.out, row+": NOT RUN") {
+					t.Errorf("a keeper marker on %s read as NOT RUN:\n%s", row, res.out)
+				}
+			})
+		}
+	}
+	// The second marker's parentheses holding more than the times print no more than the fixed words.
+	{
+		w := newAlphaWorld(t)
+		hostDialed(w)
+		res := w.run([]string{"STUB_ALPHA_MODE=not-run-keeper-ended-words"}, "--run", "beta-athena-now-keeper", "--yes")
+		if res.code != 3 {
+			t.Fatalf("exit %d, want 3:\n%s", res.code, res.out)
+		}
+		if strings.Contains(res.out, "host-x.example.org") {
+			t.Errorf("the script printed what the marker carried beside the times:\n%s", res.out)
+		}
+		w.contains(res, "the times could not be read from the marker")
 	}
 	w := newAlphaWorld(t)
 	hostDialed(w)

@@ -167,7 +167,7 @@ var betaRouterFaults = []string{"not-ready", "no-router-launch", "several-worker
 var betaKeeperFaults = []string{"not-ready", "relays-unread-before", "relays-unread-after", "keeper-e-low", "controller-relays", "controller-relays-after", "relay-replaced-control",
 	"relay-replaced-serving", "relay-seq-changed", "keeper-e-changed", "not-killed", "outcome-unseen", "outcome-late", "same-controller", "same-holder", "lease-not-risen",
 	"lease-jumped", "fence-not-followed", "agent-not-reported", "agent-registration-changed", "unreachable", "instance-restarted", "cut", "incomplete", "short-stream",
-	"past-deadline", "opened-after-kill", "ends-at-the-outcome", "front-cut", "front-cuts-unread", "unattributed", "no-responses", "untagged", "wrong-partition",
+	"past-deadline", "opened-after-kill", "ended-before-outcome-and-cut", "front-cut", "front-cuts-unread", "unattributed", "no-responses", "untagged", "wrong-partition",
 	"default-lease", "short-lease", "duplicate-tag", "extra-allocation"}
 
 // nowNoOverlapFaults are row B's failing faults (issue #376; internal/alpha, run_test.go's nowNoOverlapCases); its NOT RUNs

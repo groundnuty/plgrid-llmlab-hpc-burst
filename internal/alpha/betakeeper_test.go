@@ -2,6 +2,7 @@ package alpha
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
 	"os"
@@ -39,9 +40,17 @@ func TestTheKeeperEpochBaseIsRelaykeepers(t *testing.T) {
 }
 
 func TestTheKeeperWindowIsItsThreeParts(t *testing.T) {
-	// Written out, not derived: the window is 10 s to the kill, 2 minutes for the outcome and 30 s of margin.
-	if KeeperKillAfter != 10*time.Second || KeeperOutcomeBound != 2*time.Minute || KeeperMargin != 30*time.Second || KeeperWindow != 160*time.Second {
-		t.Errorf("the window is %s: the kill's offset %s, the outcome's bound %s and the margin %s; want 160 s, 10 s, 2 minutes and 30 s", KeeperWindow, KeeperKillAfter, KeeperOutcomeBound, KeeperMargin)
+	// Written out from the ruling (b) on #543, not derived: the window is 10 s to the kill, 60 s for the keeper's outcome and 30 s of margin, 100 s;
+	// the verdict's bar is 2 minutes; the stream is planned at the window and 30 s more.
+	if KeeperKillAfter != 10*time.Second || KeeperSizingOutcome != 60*time.Second || KeeperMargin != 30*time.Second || KeeperWindow != 100*time.Second {
+		t.Errorf("the window is %s: the kill's offset %s, the outcome's term %s and the margin %s; want 100 s, 10 s, 60 s and 30 s", KeeperWindow, KeeperKillAfter, KeeperSizingOutcome, KeeperMargin)
+	}
+	if KeeperOutcomeBound != 2*time.Minute || KeeperStreamExtra != 30*time.Second {
+		t.Errorf("the verdict's bar is %s and the stream's extra %s; want 2 minutes and 30 s", KeeperOutcomeBound, KeeperStreamExtra)
+	}
+	// The outcome's term is a margin over the 35 s the loopback rehearsal measured.
+	if KeeperSizingOutcome <= 35*time.Second {
+		t.Errorf("the window's outcome term %s is not over the 35 s the rehearsal measured", KeeperSizingOutcome)
 	}
 	// The loopback rehearsal measured the outcome at about 35 s after the SIGKILL; the bound has room for it more than three times over.
 	if KeeperOutcomeBound < 3*35*time.Second {
@@ -59,12 +68,18 @@ func TestFitKeeperSizesTheStreamToTheContextAndTheWindow(t *testing.T) {
 		want        time.Duration
 		notRun      bool
 	}{
-		// 160 s at 100 tokens/s is 16,000 tokens: a context of 16,000 + PromptReserve holds exactly the window.
-		{"exactly the window", 16000 + PromptReserve, rate, KeeperWindow, false},
-		{"one token under the window", 16000 + PromptReserve - 1, rate, 0, true},
+		// 100 s at 100 tokens/s is 10,000 tokens: a context of 10,000 + PromptReserve holds exactly the window.
+		{"exactly the window", 10000 + PromptReserve, rate, KeeperWindow, false},
+		{"one token under the window", 10000 + PromptReserve - 1, rate, 0, true},
 		{"a context that holds a minute", 6000 + PromptReserve, rate, 0, true},
-		{"the cap of the stream", 1 << 20, rate, tm.LongCap(), false},
-		{"between the window and the cap", 20000 + PromptReserve, rate, 200 * time.Second, false},
+		{"between the window and the plan", 11500 + PromptReserve, rate, 115 * time.Second, false},
+		// The plan is the window and 30 s more, 130 s: a larger context is not asked for whole.
+		{"exactly the plan", 13000 + PromptReserve, rate, 130 * time.Second, false},
+		{"a larger context", 1 << 20, rate, 130 * time.Second, false},
+		// Athena's slot (#543's review): 32768 at its measured 199 tokens/s fits 162 s, planned at 130 s, about 26,000 tokens; and a rate a few
+		// tokens a second higher, which the 160 s floor made NOT RUN, is planned the same.
+		{"Athena at 199 tokens/s", 32768, 199, 130 * time.Second, false},
+		{"Athena at 203 tokens/s", 32768, 203, 130 * time.Second, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			got, err := FitKeeper(tm, c.maxModelLen, c.rate)
@@ -98,7 +113,7 @@ func goodKeeperObs(row Row) KeeperObs {
 	return KeeperObs{
 		Tags: []string{"tag-1"}, Deployment: row.Plan(), ReadyAt: opened.Add(-time.Minute), DrainStart: opened.Add(30 * time.Minute), Rate: 40, Asked: 6400,
 		Before: rel, After: rel, KilledAt: killed, OutcomeAt: outcome, ControllerReplaced: true, LeaseBefore: 3, LeaseAfter: 4, HolderChanged: true, FenceAfter: 4,
-		AgentReported: true, AgentSame: true, Stream: Stream{ID: "k", Opened: opened, Ended: outcome.Add(KeeperMargin + time.Second), Complete: true, Tokens: 6400},
+		AgentReported: true, AgentSame: true, Planned: 160 * time.Second, Stream: Stream{ID: "k", Opened: opened, Ended: outcome.Add(KeeperMargin + time.Second), Complete: true, Tokens: 6400},
 		FrontCuts: 0, Responses: 3, Attributed: 3,
 	}
 }
@@ -159,7 +174,6 @@ func TestEachKeeperCheckNamesItsOwnFailure(t *testing.T) {
 		{"none asked", func(o *KeeperObs) { o.Asked = 0; o.Stream.Tokens = 0 }, "the stream across the restart did not deliver exactly the tokens asked for"},
 		{"past the deadline", func(o *KeeperObs) { o.Stream.Ended = o.Stream.Opened.Add(row.Clock().MaxRequestDuration + time.Second) }, "the stream across the restart did not end within the deployment's deadline"},
 		{"opened at the kill", func(o *KeeperObs) { o.Stream.Opened = o.KilledAt }, "the stream was not open before the controller was killed"},
-		{"ends inside the margin", func(o *KeeperObs) { o.Stream.Ended = o.OutcomeAt.Add(KeeperMargin - time.Nanosecond) }, "the stream did not flow on for the margin after the outcome"},
 		{"a front cut", func(o *KeeperObs) { o.FrontCuts = 1 }, "the front counted a cut during the restart"},
 		{"cuts unread", func(o *KeeperObs) { o.FrontCuts = -1 }, "the front's cuts could not be counted"},
 	} {
@@ -188,11 +202,94 @@ func TestEachKeeperCheckNamesItsOwnFailure(t *testing.T) {
 			t.Errorf("an outcome at exactly the bound fails: %q", f)
 		}
 	}
-	// The margin is a boundary: ending at exactly the margin passes.
+	// A stream that does not outlast the outcome by the margin fails no check: it is the run's NOT RUN (keeperEndedFirst), never a failure.
 	o := goodKeeperObs(row)
-	o.Stream.Ended = o.OutcomeAt.Add(KeeperMargin)
+	o.Stream.Ended = o.OutcomeAt.Add(KeeperMargin - time.Nanosecond)
 	if f := judge(o); len(f) != 0 {
-		t.Errorf("a stream that ends exactly at the margin fails: %q", f)
+		t.Errorf("a stream that ends inside the margin fails: %q", f)
+	}
+}
+
+// keeperEndedFirst (the ruling (b) on #543): the stream must outlast the keeper's outcome by the margin, else the run is NOT RUN, with the times
+// from the stream's first token; at exactly the margin it is not; an outcome or a stream end not seen is the verdict's to fail, not this.
+func TestAStreamThatDoesNotOutlastTheOutcomeByTheMarginIsNotRun(t *testing.T) {
+	row := BetaKeeperRow()
+	for _, c := range []struct {
+		name          string
+		outcome, end  time.Duration // after the stream opened; the kill is at 10 s
+		notRun        bool
+		wantOutcome   string
+		wantEndedSays string
+	}{
+		{"the ruling's case: an outcome 90 s after the kill, a 100 s stream ended first", 100 * time.Second, 100 * time.Second, true, "1m40s", "1m40s"},
+		{"a stream ended before the outcome", 100 * time.Second, 90 * time.Second, true, "1m40s", "1m30s"},
+		{"an outcome 90 s after the kill, the 130 s plan: exactly the margin", 100 * time.Second, 130 * time.Second, false, "", ""},
+		{"an outcome 100 s after the kill, the 130 s plan: inside the margin", 110 * time.Second, 130 * time.Second, true, "1m50s", "2m10s"},
+		{"one nanosecond inside the margin", 100 * time.Second, 130*time.Second - time.Nanosecond, true, "1m40s", "2m10s"},
+		{"an outcome 60 s after the kill, the 130 s plan", 70 * time.Second, 130 * time.Second, false, "", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			o := goodKeeperObs(row)
+			o.KilledAt = o.Stream.Opened.Add(KeeperKillAfter)
+			o.OutcomeAt, o.Stream.Ended = o.Stream.Opened.Add(c.outcome), o.Stream.Opened.Add(c.end)
+			err := keeperEndedFirst(o)
+			if (err != nil) != c.notRun {
+				t.Fatalf("keeperEndedFirst = %v, want NOT RUN %t", err, c.notRun)
+			}
+			if !c.notRun {
+				return
+			}
+			var e *KeeperStreamEndedFirstError
+			if !errors.Is(err, ErrKeeperStreamEndedFirst) || !errors.As(err, &e) || !NotRun(row, err) {
+				t.Fatalf("err = %v, want a KeeperStreamEndedFirstError that is NOT RUN", err)
+			}
+			if want := "the outcome at " + c.wantOutcome + " after the stream opened, the stream's end at " + c.wantEndedSays + ", the margin 30s"; e.counts() != want {
+				t.Errorf("counts = %q, want %q", e.counts(), want)
+			}
+		})
+	}
+	for _, unseen := range []func(o *KeeperObs){func(o *KeeperObs) { o.OutcomeAt = time.Time{} }, func(o *KeeperObs) { o.Stream.Ended = time.Time{} }} {
+		o := goodKeeperObs(row)
+		o.Stream.Ended = o.OutcomeAt
+		unseen(&o)
+		if err := keeperEndedFirst(o); err != nil {
+			t.Errorf("a time not seen is the run's NOT RUN: %v", err)
+		}
+	}
+}
+
+// Through Run, a stream that did not outlast the outcome by the margin is NOT RUN with nothing failed: the record says "not run", the text to post
+// is headed NOT RUN with the times, and the marker's note says them. A cut stream beside it is a failure, which wins (betaKeeperCases).
+func TestAKeeperStreamThatEndedBeforeTheOutcomeIsNotRunThroughRun(t *testing.T) {
+	row := BetaKeeperRow()
+	for _, c := range []struct{ fault, counts string }{
+		{"ended-before-outcome", "the outcome at 1m40s after the stream opened, the stream's end at 1m40s, the margin 30s"},
+		{"outcome-in-the-margin", "the outcome at 1m50s after the stream opened, the stream's end at 2m10s, the margin 30s"},
+	} {
+		t.Run(c.fault, func(t *testing.T) {
+			cfg := Config{Row: row, Dry: true, DryFault: c.fault, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
+			rec, err := NewRecorder(cfg.Out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			failures, err := Run(context.Background(), cfg, newDrySteps(t, cfg, "betakeeper"), rec, t.Logf)
+			if !errors.Is(err, ErrKeeperStreamEndedFirst) || !NotRun(row, err) || len(failures) != 0 {
+				t.Fatalf("failures %v, err %v; want the NOT RUN of a stream that ended before the outcome", failures, err)
+			}
+			if v := keeperRecordVerdict(t, cfg.Out); v != "not run" {
+				t.Errorf("the record's verdict is %q, want not run", v)
+			}
+			post, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
+			head := "beta-athena-now-keeper: NOT RUN (posts to #522): the stream ended before the keeper's outcome and its margin (" + c.counts + "); the controller was killed and the run's other checks passed\n"
+			if !strings.HasPrefix(string(post), head) {
+				t.Errorf("the text to post is not headed\n%q:\n%s", head, post)
+			}
+			note := NotRunNote(row, cfg.PendingMax, err)
+			want := "beta-athena-now-keeper: the stream ended before the keeper's outcome and its margin (" + c.counts + "); the controller was killed and the run's other checks passed; this run's jobs were ended with its deployment\n"
+			if note != want {
+				t.Errorf("the marker's note is\n%q\nwant\n%q", note, want)
+			}
+		})
 	}
 }
 
@@ -206,7 +303,9 @@ func TestTheKeeperPostSaysWhatWasSeenAndNamesNoProcess(t *testing.T) {
 		"a controller restart (SIGKILL through a pinned pidfd)",
 		"the stream delivered 6400 tokens",
 		"the front counted 0 cuts",
-		"35s after the kill",
+		"35s after the kill (the bar: within 2m0s)",
+		"- the window: 1m40s (10s to the kill, 1m0s for the keeper's outcome, 30s of stream after it); the stream planned at 2m40s (the window and 30s more, capped at what the context holds), actual 1m16s\n",
+		"- the keeper's outcome landed 45s after the stream opened and 31s before the stream's end (the stream must outlast it by 30s)\n",
 		"the Lease's transitions 3 to 4",
 		"control the same process at the same E and N, serving the same process at the same E and N",
 		"restarts before and after: 0 and 0",
@@ -241,7 +340,7 @@ func TestAKeeperStreamTheContextCannotHoldIsNotRun(t *testing.T) {
 		t.Fatalf("failures %v, err %v; want the NOT RUN of a stream the context cannot hold for the window", failures, err)
 	}
 	note := NotRunNote(row, cfg.PendingMax, err)
-	want := "beta-athena-now-keeper: the deployment's max-model-len does not hold a stream long enough to span a controller restart at the engine's measured rate (at 40 tokens/s with max-model-len 2912 the stream that fits is 1m0s, under the window of 2m40s); the controller was not killed; this run's jobs were cancelled by tag\n"
+	want := "beta-athena-now-keeper: the deployment's max-model-len does not hold a stream long enough to span a controller restart at the engine's measured rate (at 40 tokens/s with max-model-len 2912 the stream that fits is 1m0s, under the window of 1m40s); the controller was not killed; this run's jobs were cancelled by tag\n"
 	if note != want {
 		t.Errorf("the marker's note is\n%q\nwant\n%q", note, want)
 	}
@@ -300,4 +399,20 @@ func TestOnlyTheKeeperRowsStackRunsTheRelayKeeper(t *testing.T) {
 			}
 		}
 	}
+}
+
+// keeperRecordVerdict is the verdict a run's record holds.
+func keeperRecordVerdict(t *testing.T, out string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(out, RecordFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r struct {
+		Verdict string `json:"verdict"`
+	}
+	if err := json.Unmarshal(b, &r); err != nil {
+		t.Fatal(err)
+	}
+	return r.Verdict
 }
