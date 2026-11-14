@@ -47,7 +47,7 @@ func identityRunner(t *testing.T, ops *atomic.Int64) *OwnerRunner {
 		t.Fatal(err)
 	}
 	r, err := NewOwnerRunner(context.Background(), OwnerRunnerOptions{Epoch: EpochBase + 1,
-		Ports:  map[agentapi.RelayChannel]int{agentapi.RelayControl: 30002, agentapi.RelayServing: 30003},
+		Ports:  map[agentapi.RelayChannel]int{agentapi.RelayControl: 28002, agentapi.RelayServing: 28003},
 		SSHDir: filepath.Join(dir, "d"), SSHBinary: ssh,
 		MinBackoff: 50 * time.Millisecond, MaxBackoff: 200 * time.Millisecond, StopGrace: 2 * time.Second,
 		beforeOp: func(string, string) { ops.Add(1) }})

@@ -19,26 +19,77 @@ import (
 const nodePortFirst, nodePortLast = 30000, 32767
 
 // portSyntax are the ways the repo's tests and scripts write a port, each capturing the number: an address, an identifier with port or base in
-// its name given a value, the launcher's --port-base flag and PortsFromBase, an expectation that names a port, and a block written as a range.
+// its name given a value, the launcher's --port-base flag (a literal or strconv.Itoa of one) and PortsFromBase, strconv.Itoa of a number on a
+// line that names a port, an expectation that names a port, and a block written as a range. A map of ports and a tuple assignment are read by
+// portMapHits and tupleHits (#562's review).
 var portSyntax = []*regexp.Regexp{
 	regexp.MustCompile(`(?:127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\]):(\d{5})\b`),
 	regexp.MustCompile(`(?i)\w*(?:port|base)\w*"?\s*(?::=|=|:)\s*(?:float64\()?"?(\d{5})\b`),
-	regexp.MustCompile(`(?i)port-base"?,?\s*"?(\d{5})\b`),
+	regexp.MustCompile(`(?i)port-base"?,?\s*(?:strconv\.Itoa\()?"?(\d{5})\b`),
 	regexp.MustCompile(`PortsFromBase\((\d{5})\)`),
+	regexp.MustCompile(`(?i)\bports?\b.*strconv\.Itoa\((\d{5})\)|strconv\.Itoa\((\d{5})\).*\bports?\b`),
 	regexp.MustCompile(`(?i)port\w*\s+is\s+(\d{5})\b`),
 	regexp.MustCompile(`\b(\d{5})-(\d{5})\b`),
 }
 
+// portMap is a map literal of ints on a line that names ports ("Ports: map[agentapi.RelayChannel]int{...}"), and mapValue each value in it.
+var (
+	portMap  = regexp.MustCompile(`(?i)\bports?\b.*map\[[^\]]*\]int\{([^}]*)\}`)
+	mapValue = regexp.MustCompile(`:\s*(\d{5})\b`)
+	// tuple is an assignment of several values at once ("c.o.StateDir, c.o.PortBase = l.dir, 28360").
+	tuple = regexp.MustCompile(`^\s*([\w.]+(?:\s*,\s*[\w.]+)+)\s*:?=\s*(.+)$`)
+	// portName is an identifier with port or base in its name.
+	portName = regexp.MustCompile(`(?i)(?:port|base)`)
+	// fiveDigits is a value that is a five-digit number and nothing else.
+	fiveDigits = regexp.MustCompile(`^(\d{5})$`)
+)
+
+// portMapHits are the values of a map of ports on the line.
+func portMapHits(line string) []string {
+	var out []string
+	for _, m := range portMap.FindAllStringSubmatch(line, -1) {
+		for _, v := range mapValue.FindAllStringSubmatch(m[1], -1) {
+			out = append(out, v[1])
+		}
+	}
+	return out
+}
+
+// tupleHits are the values a tuple assignment gives the identifiers with port or base in their names, matched by position.
+func tupleHits(line string) []string {
+	m := tuple.FindStringSubmatch(line)
+	if m == nil {
+		return nil
+	}
+	names, values := strings.Split(m[1], ","), strings.Split(m[2], ",")
+	if len(names) != len(values) {
+		return nil
+	}
+	var out []string
+	for i, n := range names {
+		if v := fiveDigits.FindStringSubmatch(strings.TrimSpace(values[i])); v != nil && portName.MatchString(n) {
+			out = append(out, v[1])
+		}
+	}
+	return out
+}
+
 // nodePortHits are the numbers on a line, written as ports, that lie in the NodePort range.
 func nodePortHits(line string) []int {
-	var hits []int
+	var found []string
 	for _, re := range portSyntax {
 		for _, m := range re.FindAllStringSubmatch(line, -1) {
-			for _, g := range m[1:] {
-				if n, err := strconv.Atoi(g); err == nil && n >= nodePortFirst && n <= nodePortLast {
-					hits = append(hits, n)
-				}
-			}
+			found = append(found, m[1:]...)
+		}
+	}
+	found = append(append(found, portMapHits(line)...), tupleHits(line)...)
+	// Each value once per line: two syntaxes can read the same number ("--port-base", strconv.Itoa(N)).
+	var hits []int
+	seen := map[int]bool{}
+	for _, g := range found {
+		if n, err := strconv.Atoi(g); err == nil && n >= nodePortFirst && n <= nodePortLast && !seen[n] {
+			seen[n] = true
+			hits = append(hits, n)
 		}
 	}
 	return hits
@@ -131,6 +182,15 @@ func TestTheNodePortGuardCatchesEachPortSyntax(t *testing.T) {
 		{`exec sleep 31337`, 0},
 		{`// 32256 / 161 / 2 = 100.17 s`, 0},
 		{`want := []int32{2221, 35078, 31724, 88788}`, 0},
+		// #562's review: a map of ports, a tuple assignment, and strconv.Itoa.
+		{`	o.Ports = map[agentapi.RelayChannel]int{control: 30000, serving: 30001}`, 2},
+		{`		Ports:  map[agentapi.RelayChannel]int{agentapi.RelayControl: 28002, agentapi.RelayServing: 28003},`, 0},
+		{`	counts := map[string]int{"tokens": 30000}`, 0},
+		{`			c.o.StateDir, c.o.PortBase = l.dir, 30360`, 1},
+		{`			c.o.StateDir, c.o.Tokens = l.dir, 30360`, 0},
+		{`	r := cli(t, "up", "--state-dir", dir, "--port-base", strconv.Itoa(30020), "--controller-bin", bin,`, 1},
+		{`	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(30500)) // the port`, 1},
+		{`	s := strconv.Itoa(30500) // a count of tokens`, 0},
 	} {
 		if got := nodePortHits(c.line); len(got) != c.hits {
 			t.Errorf("%q: hits %v, want %d", c.line, got, c.hits)

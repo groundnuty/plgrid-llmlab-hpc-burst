@@ -80,7 +80,7 @@ func newTimeoutWorld(t *testing.T) *timeoutWorld {
 		o.Runner = func(e int64) (Runner, error) {
 			var err error
 			w.runner, err = NewOwnerRunner(context.Background(), OwnerRunnerOptions{Epoch: e,
-				Ports:  map[agentapi.RelayChannel]int{agentapi.RelayControl: 30002, agentapi.RelayServing: 30003},
+				Ports:  map[agentapi.RelayChannel]int{agentapi.RelayControl: 28002, agentapi.RelayServing: 28003},
 				SSHDir: filepath.Join(dir, "d"), SSHBinary: ssh, SSHLoginTimeout: timeoutBound,
 				Logger: slog.New(slog.NewTextHandler(w.log, nil))})
 			return w.runner, err
