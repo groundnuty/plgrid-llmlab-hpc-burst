@@ -13,7 +13,7 @@ Design decisions for this framework are made as HBEPs, modelled on Kubernetes En
 | [7](0007-lifecycle-controller/README.md) | Lifecycle controller | implementable | none |
 | [8](0008-observability-and-events/README.md) | Observability and events | implementable | none |
 | [9](0009-identity-and-attribution/README.md) | Identity and attribution | implementable | none |
-| [10](0010-agent-primitives/README.md) | Agent primitives | provisional | none |
+| [10](0010-agent-primitives/README.md) | Agent primitives | implementable | none |
 | [11](0011-kubernetes-control-plane/README.md) | Kubernetes as the control plane | implementable | none |
 | [15](0015-dependencies-and-provenance/README.md) | Dependencies and provenance | implementable | none |
 
