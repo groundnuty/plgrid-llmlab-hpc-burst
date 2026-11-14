@@ -26,8 +26,9 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
-// portsUpgrade is the upgrade test's block, 30440-30459 (IMPL-COMMON's table).
-var portsUpgrade = stack.Ports{Base: 30440, ClientAddr: "127.0.0.1:30453"}
+// portsUpgrade is the upgrade test's block, 30440-30459 (IMPL-COMMON's table). The client listens at
+// base+16, since the bulk path's second frps takes base+13 to base+15.
+var portsUpgrade = stack.Ports{Base: 30440, ClientAddr: "127.0.0.1:30456"}
 
 // upgradeEntries are the supervised processes of a host with the three up-time flags.
 var upgradeEntries = []string{"controller", "front", "frps", "frps-bulk", "relaykeeper"}
