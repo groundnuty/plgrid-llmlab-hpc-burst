@@ -12,7 +12,7 @@ import (
 
 // The crash-correlation event (HBEP-7, Health and restarts: Crash correlation; #539, from spike S18, as
 // amended by #550): a worker exit the controller didn't ask for, of a worker that was serving (its
-// Instance ready, and the worker verified and warmed up since its last start), within crashWindow after
+// Instance ready or draining, and the worker verified and warmed up since its last start), within crashWindow after
 // such an exit on another Instance of the same ModelDeployment, raises a failing event CrashCorrelated,
 // regarding the Instance whose exit made the pair and related to the other. It is an event only: each
 // Instance still restarts by its own ladder. One Instance's own crash loop is not counted (that is
@@ -39,7 +39,8 @@ type exitSeen struct {
 // once, and raises CrashCorrelated for each that makes a pair with an exit on another Instance of its
 // ModelDeployment within crashWindow. A requested stop is reported as stopped, never exited, so it never
 // counts, and nor does the router, which is not a worker. A stale Instance, of an earlier deployment of
-// the same name, never counts: it would pair with the new deployment's Instances.
+// the same name, never counts, though it drains and so serves: it would pair with the new deployment's
+// Instances.
 func (p *pass) correlateExits(in *v1alpha1.Instance, av agentView) {
 	if p.md == nil || av.report == nil || p.stale[in.UID] {
 		return
@@ -70,15 +71,20 @@ func (p *pass) correlateExits(in *v1alpha1.Instance, av agentView) {
 	}
 }
 
-// servingWorker reports whether worker w of Instance in was serving: the Instance ready and, with
-// several workers, w verified and warmed up at its current generation. With one worker, a ready Instance
-// is its worker verified and warmed up. It is read at the start of the pass that first sees the exit,
-// before the restart it causes changes either.
+// servingWorker reports whether worker w of Instance in was serving: the Instance ready or draining
+// (a draining Instance still serves its in-flight requests), and w verified and warmed up at its current
+// generation. With one worker the Instance's conditions are the worker's (verifiedWorker); with several,
+// its status.workers entry (workerWarmed). It is read at the start of the pass that first sees the exit,
+// before the restart it causes changes either. The drain's own stop of a worker is requested, reported
+// stopped, never exited, so it never counts.
 func servingWorker(in *v1alpha1.Instance, w string) bool {
-	if in.Status.Phase != v1alpha1.InstanceReady {
+	if in.Status.Phase != v1alpha1.InstanceReady && in.Status.Phase != v1alpha1.InstanceDraining {
 		return false
 	}
-	return !several(in) || workerWarmed(in, w)
+	if several(in) {
+		return workerWarmed(in, w)
+	}
+	return verifiedWorker(in)
 }
 
 // recordExit records e for ModelDeployment md, unless its process was recorded before. It returns the

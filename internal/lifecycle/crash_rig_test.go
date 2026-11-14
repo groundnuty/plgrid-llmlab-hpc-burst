@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	afake "github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi/fake"
 )
 
@@ -154,60 +155,115 @@ func TestEnginesFailingToStartRaiseNoCrashCorrelatedAtAnyAttempt(t *testing.T) {
 }
 
 // A deployment deleted and recreated under the same name (#545's review): the old Instance, stale and
-// draining, has its worker crash within seconds of the new deployment's Instance failing to start. Neither
-// exit was a serving worker's of the new deployment, so no CrashCorrelated names it. (The serving rule
-// alone covers this scenario, since a stale Instance is draining; the stale guard's own discriminator is
-// TestCorrelateExitsCountsOnlyServingWorkers' stale case.)
+// draining with requests in flight, so serving by #550's rule, has its worker crash 10 s before the new
+// deployment's ready Instance's worker does. The stale guard alone keeps them apart: no CrashCorrelated
+// names the new deployment.
 func TestARecreatedDeploymentsStaleInstanceNeverPairs(t *testing.T) {
 	rg := newRig(t)
-	// The first Allocation's engine runs requests all along, so its Instance stays draining once its
-	// deployment is gone; every later Allocation's engine fails to start.
-	first := ""
-	rg.engine = func(alloc string) afake.Engine {
-		if first == "" {
-			first = alloc
-		}
-		if alloc == first {
-			return afake.Engine{Health: afake.HealthPlainLoad()}
-		}
-		return afake.Engine{StartFails: true}
-	}
+	// Every engine runs requests all along, so the old Instance stays draining once its deployment is
+	// gone, and the new one still becomes ready.
+	rg.engine = func(string) afake.Engine { return afake.Engine{Health: afake.HealthPlainLoad()} }
 	rg.create(mdSpec("md"))
 	rg.until(5*time.Minute, 10*time.Second, "ready", func() bool { return rg.readyCount("md") == 1 })
 	old := rg.instances("md")[0]
 	oldAlloc := old.Spec.AllocationRef.Name
-	if oldAlloc != first {
-		t.Fatalf("the ready Instance's Allocation %s is not the first one %s", oldAlloc, first)
-	}
 	if err := rg.c.Delete(rg.ctx, rg.md("md")); err != nil {
 		t.Fatal(err)
 	}
 	rg.create(mdSpec("md"))
-	var fresh *afake.Agent
-	rg.until(10*time.Minute, 5*time.Second, "the new Instance's first start failed", func() bool {
-		for _, a := range rg.allocations("md") {
-			if a.Name != oldAlloc {
-				if ra := rg.agents[a.Name]; ra != nil && len(ra.agent.Starts()) > 0 {
-					fresh = ra.agent
-					return true
-				}
+	var fresh v1alpha1.Instance
+	rg.until(15*time.Minute, 10*time.Second, "the new deployment's Instance ready", func() bool {
+		for _, in := range rg.liveInstances("md") {
+			if in.Name != old.Name && in.Status.Phase == v1alpha1.InstanceReady {
+				fresh = in
+				return true
 			}
 		}
 		return false
 	})
-	if ph := rg.instance(old.Name).Status.Phase; ph != v1alpha1.InstanceDraining {
-		t.Fatalf("the old Instance is %s when the new one's start failed, want draining: the test proves nothing", ph)
+	if o := rg.instance(old.Name); o.Status.Phase != v1alpha1.InstanceDraining || !verifiedWorker(o) {
+		t.Fatalf("the old Instance is %s (verified and warmed %v) when the new one is ready, want draining and serving: the test proves nothing", o.Status.Phase, verifiedWorker(o))
 	}
-	failedAt := fresh.Starts()[0].Time
-	rg.agentOf(oldAlloc).agent.CrashWorker(v1alpha1.WorkerName(0), 1)
-	if gap := rg.clock.Now().Sub(failedAt); gap > crashWindow {
-		t.Fatalf("the old worker crashed %s after the new start failed, past the window: the test proves nothing", gap)
-	}
-	for k := 0; k < 4; k++ {
-		rg.Step()
-		rg.clock.Advance(5 * time.Second)
+	w := v1alpha1.WorkerName(0)
+	rg.agentOf(oldAlloc).agent.CrashWorker(w, 1)
+	startStep(rg, "md", 10*time.Second)
+	rg.agentOf(fresh.Spec.AllocationRef.Name).agent.CrashWorker(w, 1)
+	for k := 0; k < 3; k++ {
+		startStep(rg, "md", 10*time.Second)
 	}
 	if evs := crashEvents(rg); len(evs) != 0 {
-		t.Fatalf("CrashCorrelated %+v, want none: a stale draining Instance and a failed start", evs)
+		t.Fatalf("CrashCorrelated %+v, want none: the crashed draining Instance is the old deployment's", evs)
+	}
+	if n := restartEvents(rg)[fresh.Name]; n == 0 {
+		t.Fatalf("the new Instance's crash was never acted on (no restart): the test proves nothing")
+	}
+}
+
+// drainRig brings two Instances of "md", on engines e, to ready, scales the deployment to one, and returns
+// the rig, the Instance that drains and the one that stays.
+func drainRig(t *testing.T, e func() afake.Engine) (*rig, v1alpha1.Instance, v1alpha1.Instance) {
+	t.Helper()
+	rg, _, _ := crashRig(t, e)
+	rg.mutateMD("md", func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 1 })
+	var drained, kept v1alpha1.Instance
+	startUntil(rg, "md", 2*time.Minute, "one Instance draining or drained", func() bool {
+		for _, in := range rg.instances("md") {
+			if in.Status.Phase == v1alpha1.InstanceDraining || in.Status.Phase == v1alpha1.InstanceEnded {
+				drained = in
+			} else if in.Status.Phase == v1alpha1.InstanceReady {
+				kept = in
+			}
+		}
+		return drained.Name != "" && kept.Name != ""
+	})
+	return rg, drained, kept
+}
+
+// A draining Instance still serves its in-flight requests (#550 as revised): its worker killed, then the
+// ready Instance's 10 s later, pair.
+func TestADrainingEngineKilledThenAReadyOnePair(t *testing.T) {
+	rg, draining, ready := drainRig(t, func() afake.Engine { return afake.Engine{Health: afake.HealthPlainLoad()} })
+	if d := rg.instance(draining.Name); d.Status.Phase != v1alpha1.InstanceDraining {
+		t.Fatalf("the surplus Instance is %s, want draining (its engine runs requests): the test proves nothing", d.Status.Phase)
+	}
+	w := v1alpha1.WorkerName(0)
+	rg.agentOf(draining.Spec.AllocationRef.Name).agent.CrashWorker(w, 1)
+	startStep(rg, "md", 10*time.Second)
+	rg.agentOf(ready.Spec.AllocationRef.Name).agent.CrashWorker(w, 1)
+	for k := 0; k < 3; k++ {
+		startStep(rg, "md", 10*time.Second)
+	}
+	evs := crashEvents(rg)
+	if len(evs) != 1 || evs[0].Name != ready.Name || evs[0].RelatedName != draining.Name {
+		t.Fatalf("CrashCorrelated %+v, want one regarding %s, related to the draining %s", evs, ready.Name, draining.Name)
+	}
+}
+
+// The drain's own stop of its worker is requested, reported stopped, never exited: the ready Instance's
+// crash 10 s after it raises nothing.
+func TestTheDrainsOwnStopDoesNotPair(t *testing.T) {
+	rg, drained, ready := drainRig(t, nil)
+	startUntil(rg, "md", 2*time.Minute, "the surplus Instance drained and its worker stopped", func() bool {
+		rep, ok := rg.agentOf(drained.Spec.AllocationRef.Name).agent.LastReport()
+		if !ok || rep.Instance == nil {
+			return false
+		}
+		for _, w := range rep.Instance.Workers {
+			if w.Phase == agentapi.PartStopped {
+				return true
+			}
+		}
+		return false
+	})
+	if d := rg.instance(drained.Name); d.Status.Phase != v1alpha1.InstanceEnded || d.Status.EndReason != v1alpha1.ReasonDrained {
+		t.Fatalf("the surplus Instance is %s (%s), want ended Drained", d.Status.Phase, d.Status.EndReason)
+	}
+	startStep(rg, "md", 10*time.Second)
+	rg.agentOf(ready.Spec.AllocationRef.Name).agent.CrashWorker(v1alpha1.WorkerName(0), 1)
+	for k := 0; k < 3; k++ {
+		startStep(rg, "md", 10*time.Second)
+	}
+	if evs := crashEvents(rg); len(evs) != 0 {
+		t.Fatalf("CrashCorrelated %+v, want none: the drained worker was stopped as asked", evs)
 	}
 }

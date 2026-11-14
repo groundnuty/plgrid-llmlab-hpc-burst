@@ -17,10 +17,12 @@ import (
 
 var crashT0 = time.Date(2026, 11, 13, 22, 0, 0, 0, time.UTC)
 
-// crashInstance is a ready Instance of one worker: its worker serving (#550).
+// crashInstance is a ready Instance of one worker, verified and warmed up: its worker serving (#550).
 func crashInstance(name string) *v1alpha1.Instance {
 	return &v1alpha1.Instance{ObjectMeta: metav1.ObjectMeta{Namespace: rigNS, Name: name, UID: types.UID("uid-" + name)},
-		Status: v1alpha1.InstanceStatus{Phase: v1alpha1.InstanceReady}}
+		Status: v1alpha1.InstanceStatus{Phase: v1alpha1.InstanceReady, Conditions: []metav1.Condition{
+			{Type: v1alpha1.ConditionVerified, Status: metav1.ConditionTrue},
+			{Type: v1alpha1.ConditionWarmedUp, Status: metav1.ConditionTrue}}}}
 }
 
 // exitOf is an exit of worker w of Instance in, at at, of process pid.
@@ -182,9 +184,10 @@ func severalInstance(t *testing.T, name string, warmed bool) *v1alpha1.Instance 
 	return in
 }
 
-// Only a serving worker's exit counts (#550): its Instance ready and, with several workers, it verified and
-// warmed up since its last start. A failed start, an Instance verifying, and a stale Instance of an
-// earlier same-named deployment never count. Each case pairs a candidate exit with a serving one on
+// Only a serving worker's exit counts (#550): its Instance ready or draining, and it verified and warmed up
+// since its last start. A failed start, an Instance verifying, a worker not warmed since a restart, the
+// drain's own stop, and a stale Instance of an earlier same-named deployment, ready or draining, never
+// count. Each case pairs a candidate exit with a serving one on
 // another Instance 5 s later.
 func TestCorrelateExitsCountsOnlyServingWorkers(t *testing.T) {
 	at := func(d time.Duration) *time.Time { v := crashT0.Add(d); return &v }
@@ -192,6 +195,14 @@ func TestCorrelateExitsCountsOnlyServingWorkers(t *testing.T) {
 	verifying.Status.Phase = v1alpha1.InstanceVerifying
 	starting := crashInstance("s")
 	starting.Status.Phase = v1alpha1.InstanceStarting
+	draining := crashInstance("d")
+	draining.Status.Phase = v1alpha1.InstanceDraining
+	// A draining Instance whose worker restarted: WarmedUp Unknown until it warms up again.
+	drainingRestarted := crashInstance("dr")
+	drainingRestarted.Status.Phase = v1alpha1.InstanceDraining
+	drainingRestarted.Status.Conditions[1].Status = metav1.ConditionUnknown
+	staleDraining := crashInstance("od")
+	staleDraining.Status.Phase = v1alpha1.InstanceDraining
 	failedStart := agentapi.WorkerReport{Name: "worker-0", Phase: agentapi.PartExited, ExitCode: ptrTo(127), ExitedAt: at(0)}
 	for _, c := range []struct {
 		name   string
@@ -206,6 +217,10 @@ func TestCorrelateExitsCountsOnlyServingWorkers(t *testing.T) {
 		{"several workers, warmed", severalInstance(t, "w", true), exitedWorker("worker-1", 1, at(0)), false, 1},
 		{"several workers, not warmed", severalInstance(t, "n", false), exitedWorker("worker-1", 1, at(0)), false, 0},
 		{"a stale Instance, ready", crashInstance("o"), exitedWorker("worker-0", 1, at(0)), true, 0},
+		{"a draining Instance, warmed", draining, exitedWorker("worker-0", 1, at(0)), false, 1},
+		{"a draining Instance, not warmed since a restart", drainingRestarted, exitedWorker("worker-0", 1, at(0)), false, 0},
+		{"a stale Instance, draining", staleDraining, exitedWorker("worker-0", 1, at(0)), true, 0},
+		{"a draining Instance's worker stopped by its drain", draining, agentapi.WorkerReport{Name: "worker-0", Phase: agentapi.PartStopped, PID: 1, ExitCode: ptrTo(0)}, false, 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			p, rec := crashPass(crashT0, newMemory(crashT0))

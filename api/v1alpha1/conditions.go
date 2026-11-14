@@ -65,8 +65,8 @@ const (
 	// ReasonRestartLoop: three Allocations in a row in one class failed
 	// within restart.window; provisioning in that class pauses.
 	ReasonRestartLoop = "RestartLoop"
-	// ReasonCrashCorrelated: a serving worker (its Instance ready, the worker
-	// verified and warmed up since its last start) exited without being told to
+	// ReasonCrashCorrelated: a serving worker (its Instance ready or draining, the
+	// worker verified and warmed up since its last start) exited without being told to
 	// within 30 s after a serving worker of another Instance of the same
 	// ModelDeployment did: a request may be crashing every engine it reaches. A
 	// failed start never counts. An event only (HBEP-7, Health and restarts:
