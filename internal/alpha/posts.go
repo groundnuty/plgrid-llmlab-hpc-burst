@@ -39,6 +39,11 @@ func verdictLine(row Row, failures []string) string {
 	return fmt.Sprintf("%s: FAIL (posts to %s)\n- failed checks: %s", row.Name, row.PostsTo, Summary(failures))
 }
 
+// invalidVerdictLine is the head of an INVALID run's text (ErrInvalid): nothing failed, and why the reading measures nothing.
+func invalidVerdictLine(row Row, why []string) string {
+	return fmt.Sprintf("%s: INVALID (posts to %s)\n- no saturation witness, so no reading: %s", row.Name, row.PostsTo, Summary(why))
+}
+
 // watchResetsLine is the count of the run's watch resets, on every row that runs the stack.
 func watchResetsLine(n int) string { return fmt.Sprintf("- watch resets over the run: %d\n", n) }
 

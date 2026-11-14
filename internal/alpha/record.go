@@ -22,7 +22,9 @@ const (
 	PostsFile = "posts.md"
 	// NotRunFile is the marker of a run that ended as NOT RUN (NotRun): a job
 	// pended past the first clock and was cancelled by its tag. hack/live-checks.sh
-	// reads it, with the test's one top-level skip, as the protocol of #210.
+	// reads it, with the test's one top-level skip, as the protocol of #210. It
+	// is also the marker of the bulk row's INVALID run (Invalid, InvalidNote),
+	// which the script tells apart by its words and holds to that row.
 	NotRunFile = "not-run.txt"
 )
 

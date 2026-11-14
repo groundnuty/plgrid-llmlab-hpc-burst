@@ -1,8 +1,9 @@
 package alpha
 
 // The bulk row (issue #521; betabulk.go) over the fake cluster: one job, run on the manual clock; what the stack would show is stood in for. Each
-// fault departs from the healthy run in one way that must fail the row. A reading at or above the rule is no failure, a finding, and is a case of its
-// own (TestABulkReadingAtOrAboveTheRuleIsAFindingNeverAFailure).
+// fault departs from the healthy run in one way, and ends as the ruling says (the science agent, #521): a broken path FAILs (betaBulkCases), a run
+// with no saturation witness is INVALID (betaBulkInvalidCases, TestTheBulkRowsInvalidRunsThroughRun), and a control under 85 ms or a bulk reading at or
+// above it is a finding that passes (TestABulkReadingAtOrAboveTheRuleIsAFindingNeverAFailure).
 
 import (
 	"context"
@@ -57,7 +58,7 @@ func (d *drySteps) BetaBulk(_ context.Context, p Plan) (BulkObs, error) {
 	case d.fault("control-fallback"):
 		obs.Control.FallbackSent = 1
 	case d.fault("control-no-stall"):
-		obs.Control.P99 = BulkRule - time.Nanosecond
+		obs.Control.P99 = BulkRule - time.Nanosecond // a finding: no stall to remove on this path
 	case d.fault("control-at-the-rule"):
 		obs.Control.P99 = BulkRule // exactly the rule: the stall is there, the run is valid
 	case d.fault("bulk-at-the-rule"):
@@ -86,6 +87,15 @@ func (d *drySteps) BetaBulk(_ context.Context, p Plan) (BulkObs, error) {
 		obs.Control.Gaps = minGaps(obs.Control.Took) - 1
 	case d.fault("bulk-few-gaps"):
 		obs.Bulk.Gaps = minGaps(obs.Bulk.Took) - 1
+	case d.fault("control-untimed"):
+		obs.Control.Took = 0
+	case d.fault("control-cut"):
+		obs.Control.Cut = true
+	case d.fault("bulk-cut"):
+		obs.Bulk.Cut = true
+	case d.fault("invalid-and-cut"):
+		// No witness, and a stream cut beside it: the failure wins.
+		obs.Control.Gaps, obs.Control.StreamsDone = 0, BulkStreams-1
 	case d.fault("double-unnamed"):
 		obs.Double.Name = " "
 	case d.fault("double-digest-short"):
@@ -104,10 +114,12 @@ func (d *drySteps) BetaBulk(_ context.Context, p Plan) (BulkObs, error) {
 	return obs, nil
 }
 
-// betaBulkCases are the bulk row's dry cases. A control exactly at the rule is no failure.
+// betaBulkCases are the bulk row's dry cases that pass or fail. A control exactly at the threshold, or under it, passes (the second with a finding);
+// the faults that end INVALID are betaBulkInvalidCases.
 var betaBulkCases = []dryCase{
 	{"", ""},
 	{"control-at-the-rule", ""},
+	{"control-no-stall", ""},
 	{"bulk-at-the-rule", ""},
 	{"bulk-above-the-rule", ""},
 	{"bulk-small-margin", ""},
@@ -120,17 +132,15 @@ var betaBulkCases = []dryCase{
 	{"counter-unread", "the front's bulk counter could not be read"},
 	{"fallback", "a reply fell back to the token transport"},
 	{"control-fallback", "a reply fell back to the token transport"},
-	{"control-no-stall", "the control shows no stall: its gap p99 is under 85 ms"},
 	{"control-short-reply", "the control transfer did not deliver its 67108864 bytes with a 200"},
 	{"bulk-short-reply", "the bulk transfer did not deliver its 67108864 bytes with a 200"},
 	{"control-status", "the control transfer did not deliver its 67108864 bytes with a 200"},
 	{"bulk-status", "the bulk transfer did not deliver its 67108864 bytes with a 200"},
 	{"control-stream-cut", "a stream beside the control transfer was cut or did not finish with its tokens"},
 	{"bulk-stream-cut", "a stream beside the bulk transfer was cut or did not finish with its tokens"},
-	{"control-stream-short", "a stream beside the control transfer ended before it did: its gaps do not cover the transfer"},
-	{"bulk-stream-short", "a stream beside the bulk transfer ended before it did: its gaps do not cover the transfer"},
-	{"control-few-gaps", "too few gaps overlap the control transfer to measure it"},
-	{"bulk-few-gaps", "too few gaps overlap the bulk transfer to measure it"},
+	{"control-cut", "the control transfer's read was cut before its end"},
+	{"bulk-cut", "the bulk transfer's read was cut before its end"},
+	{"invalid-and-cut", "a stream beside the control transfer was cut or did not finish with its tokens"},
 	{"double-unnamed", "the engine double was not named with the SHA-256 of its binary"},
 	{"double-digest-short", "the engine double was not named with the SHA-256 of its binary"},
 	{"double-digest-upper", "the engine double was not named with the SHA-256 of its binary"},

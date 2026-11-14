@@ -2,6 +2,7 @@ package alpha
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -106,6 +107,8 @@ func goodBulkObs(row Row) BulkObs {
 		Double: DoubleObs{Name: "the double", Digest: strings.Repeat("0a", 32)}, Responses: 18, Attributed: 18}
 }
 
+// Each failed check, the broken path's and the double's, with its words and its boundary; none of them is also an INVALID, so a failure is never
+// reported as a run that measured nothing.
 func TestEachBulkCheckNamesItsOwnFailure(t *testing.T) {
 	row := BetaBulkRow()
 	judge := func(o BulkObs) []string {
@@ -113,12 +116,11 @@ func TestEachBulkCheckNamesItsOwnFailure(t *testing.T) {
 		f = append(f, pathChecks(o)...)
 		f = append(f, phaseChecks("control", o.Control)...)
 		f = append(f, phaseChecks("bulk", o.Bulk)...)
-		f = append(f, stallChecks(o)...)
 		f = append(f, doubleChecks(o.Double)...)
 		return f
 	}
-	if f := judge(goodBulkObs(row)); len(f) != 0 {
-		t.Fatalf("a good run fails: %q", f)
+	if f, w := judge(goodBulkObs(row)), BulkInvalid(goodBulkObs(row)); len(f) != 0 || len(w) != 0 {
+		t.Fatalf("a good run fails %q or is invalid %q", f, w)
 	}
 	for _, c := range []struct {
 		name string
@@ -134,16 +136,15 @@ func TestEachBulkCheckNamesItsOwnFailure(t *testing.T) {
 		{"the counter unread (control)", func(o *BulkObs) { o.Control.BulkSent = -1 }, "the front's bulk counter could not be read"},
 		{"a fallback on the bulk reply", func(o *BulkObs) { o.Bulk.FallbackSent = 1 }, "a reply fell back to the token transport"},
 		{"a fallback on the control", func(o *BulkObs) { o.Control.FallbackSent = 1 }, "a reply fell back to the token transport"},
-		{"a control one nanosecond under the rule", func(o *BulkObs) { o.Control.P99 = BulkRule - time.Nanosecond }, "the control shows no stall: its gap p99 is under 85 ms, so this run cannot show a stall for the bulk path to remove"},
 		{"a reply one byte short", func(o *BulkObs) { o.Bulk.ReplyBytes = BulkReplyBytes - 1 }, "the bulk transfer did not deliver its 67108864 bytes with a 200"},
 		{"a control reply one byte short", func(o *BulkObs) { o.Control.ReplyBytes = BulkReplyBytes - 1 }, "the control transfer did not deliver its 67108864 bytes with a 200"},
 		{"a 502 control", func(o *BulkObs) { o.Control.Status = 502 }, "the control transfer did not deliver its 67108864 bytes with a 200"},
+		{"a control read cut after its bytes", func(o *BulkObs) { o.Control.Cut = true }, "the control transfer's read was cut before its end"},
+		{"a bulk read cut after its bytes", func(o *BulkObs) { o.Bulk.Cut = true }, "the bulk transfer's read was cut before its end"},
 		{"a stream cut", func(o *BulkObs) { o.Bulk.StreamsDone = BulkStreams - 1 }, "a stream beside the bulk transfer was cut or did not finish with its tokens"},
 		{"a control stream cut", func(o *BulkObs) { o.Control.StreamsDone = BulkStreams - 1 }, "a stream beside the control transfer was cut or did not finish with its tokens"},
-		{"a stream that ended first", func(o *BulkObs) { o.Bulk.StreamsLong = BulkStreams - 1 }, "a stream beside the bulk transfer ended before it did: its gaps do not cover the transfer"},
-		{"a control stream that ended first", func(o *BulkObs) { o.Control.StreamsLong = BulkStreams - 1 }, "a stream beside the control transfer ended before it did: its gaps do not cover the transfer"},
-		{"one gap too few", func(o *BulkObs) { o.Bulk.Gaps = minGaps(o.Bulk.Took) - 1 }, "too few gaps overlap the bulk transfer to measure it"},
-		{"no transfer time", func(o *BulkObs) { o.Control.Took = 0 }, "too few gaps overlap the control transfer to measure it"},
+		// A cut stream did not end long either: the cut is the failure, and no witness check speaks for it.
+		{"a control stream cut that also ended first", func(o *BulkObs) { o.Control.StreamsDone, o.Control.StreamsLong = BulkStreams-1, BulkStreams-1 }, "a stream beside the control transfer was cut or did not finish with its tokens"},
 		{"no double named", func(o *BulkObs) { o.Double.Name = "" }, "the engine double was not named with the SHA-256 of its binary"},
 		{"a digest of 63 characters", func(o *BulkObs) { o.Double.Digest = o.Double.Digest[:63] }, "the engine double was not named with the SHA-256 of its binary"},
 		{"an upper-case digest", func(o *BulkObs) { o.Double.Digest = strings.ToUpper(o.Double.Digest) }, "the engine double was not named with the SHA-256 of its binary"},
@@ -154,46 +155,115 @@ func TestEachBulkCheckNamesItsOwnFailure(t *testing.T) {
 			if f := judge(o); !slices.Contains(f, c.want) {
 				t.Errorf("the checks say %q, want them to hold %q", f, c.want)
 			}
+			if w := BulkInvalid(o); len(w) != 0 {
+				t.Errorf("a broken path is also reported as a run with no witness: %q", w)
+			}
 		})
 	}
-	// Boundaries that pass: a control exactly at the rule is a run; gaps exactly at the minimum are enough.
-	o := goodBulkObs(row)
-	o.Control.P99 = BulkRule
-	o.Bulk.Gaps = minGaps(o.Bulk.Took)
-	if f := judge(o); len(f) != 0 {
-		t.Errorf("a control at the rule, or exactly the gaps needed, fails: %q", f)
+	// The control's p99 is no check (the ruling: 85 ms is the reading's threshold, not a validity bar): a control one nanosecond under it fails
+	// nothing and is no INVALID; nor is a control exactly at it, or exactly the gaps needed.
+	for _, c := range []struct {
+		name string
+		mut  func(o *BulkObs)
+	}{
+		{"a control one nanosecond under the threshold", func(o *BulkObs) { o.Control.P99 = BulkRule - time.Nanosecond }},
+		{"a control at the threshold", func(o *BulkObs) { o.Control.P99 = BulkRule }},
+		{"a control with no stall at all", func(o *BulkObs) { o.Control.P99 = 50 * time.Millisecond }},
+		{"exactly the gaps needed", func(o *BulkObs) { o.Bulk.Gaps, o.Control.Gaps = minGaps(o.Bulk.Took), minGaps(o.Control.Took) }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			o := goodBulkObs(row)
+			c.mut(&o)
+			if f, w := judge(o), BulkInvalid(o); len(f) != 0 || len(w) != 0 {
+				t.Errorf("fails %q or is invalid %q, want neither", f, w)
+			}
+		})
 	}
 }
 
-// A reading at or above the rule, or under it but not the margin below the control, is a finding and no failure: the verdict passes, the post says
-// FINDING, and the numbers it gives are the phases'.
+// The saturation witness's checks (BulkInvalid), each with its words and its boundary: the transfer timed, its streams across the whole of it, and
+// gaps enough. Each makes the run INVALID and fails nothing.
+func TestEachMissingWitnessNamesItselfAndFailsNothing(t *testing.T) {
+	row := BetaBulkRow()
+	for _, c := range []struct {
+		name string
+		mut  func(o *BulkObs)
+		want []string
+	}{
+		{"a control stream that ended first", func(o *BulkObs) { o.Control.StreamsLong = BulkStreams - 1 },
+			[]string{"a stream beside the control transfer ended before it did: its gaps do not cover the transfer"}},
+		{"a bulk stream that ended first", func(o *BulkObs) { o.Bulk.StreamsLong = BulkStreams - 1 },
+			[]string{"a stream beside the bulk transfer ended before it did: its gaps do not cover the transfer"}},
+		{"one control gap too few", func(o *BulkObs) { o.Control.Gaps = minGaps(o.Control.Took) - 1 },
+			[]string{"too few gaps overlap the control transfer to measure it"}},
+		{"one bulk gap too few", func(o *BulkObs) { o.Bulk.Gaps = minGaps(o.Bulk.Took) - 1 },
+			[]string{"too few gaps overlap the bulk transfer to measure it"}},
+		{"no control transfer time", func(o *BulkObs) { o.Control.Took = 0 },
+			[]string{"the control transfer was not timed, so it has no rate", "too few gaps overlap the control transfer to measure it"}},
+		{"a negative bulk transfer time", func(o *BulkObs) { o.Bulk.Took = -time.Millisecond },
+			[]string{"the bulk transfer was not timed, so it has no rate", "too few gaps overlap the bulk transfer to measure it"}},
+		{"both phases at once", func(o *BulkObs) { o.Control.StreamsLong, o.Bulk.Gaps = 0, 0 },
+			[]string{"a stream beside the control transfer ended before it did: its gaps do not cover the transfer", "too few gaps overlap the bulk transfer to measure it"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			o := goodBulkObs(row)
+			c.mut(&o)
+			if got := BulkInvalid(o); !slices.Equal(got, c.want) {
+				t.Errorf("BulkInvalid = %q, want %q", got, c.want)
+			}
+			// The run-level verdict with a real ledger is TestTheBulkRowsInvalidRunsThroughRun's.
+			if f := append(append(pathChecks(o), phaseChecks("control", o.Control)...), phaseChecks("bulk", o.Bulk)...); len(f) != 0 {
+				t.Errorf("a missing witness fails the row: %q", f)
+			}
+		})
+	}
+}
+
+// A control under the threshold, a bulk reading at or above it, or a bulk reading under it but less than the margin below a control that stalled, is a
+// finding and no failure: the verdict passes, the post has one FINDING line for each, and the words are the ruling's. Under the threshold the
+// control's own finding stands alone: the margin is a stalled control's.
 func TestABulkFindingNeverFailsTheRow(t *testing.T) {
 	row := BetaBulkRow()
+	const noStall = "under the 85ms threshold: no stall to remove on this path (HBEP-6, open question 12)"
 	for _, c := range []struct {
 		name          string
 		control, bulk time.Duration
-		finding       string
+		findings      []string
 	}{
-		{"the layout protects the streams", 150 * time.Millisecond, 55 * time.Millisecond, ""},
-		{"exactly the rule", 150 * time.Millisecond, BulkRule, "the bulk path's gap p99 is 85ms, at or above the 85ms rule"},
-		{"above the rule", 150 * time.Millisecond, 200 * time.Millisecond, "the bulk path's gap p99 is 200ms, at or above the 85ms rule"},
-		{"under the rule by a nanosecond and well below the control", 300 * time.Millisecond, BulkRule - time.Nanosecond, ""},
-		{"under the rule, less than the margin below the control", 100 * time.Millisecond, 80 * time.Millisecond, "under the rule but only 20ms below the control's 100ms"},
-		{"exactly the margin below the control", 100 * time.Millisecond, 70 * time.Millisecond, ""},
+		{"the layout protects the streams", 150 * time.Millisecond, 55 * time.Millisecond, nil},
+		{"exactly the rule", 150 * time.Millisecond, BulkRule, []string{"the bulk path's gap p99 is 85ms, at or above the 85ms rule"}},
+		{"above the rule", 150 * time.Millisecond, 200 * time.Millisecond, []string{"the bulk path's gap p99 is 200ms, at or above the 85ms rule"}},
+		{"under the rule by a nanosecond and well below the control", 300 * time.Millisecond, BulkRule - time.Nanosecond, nil},
+		{"under the rule, less than the margin below the control", 100 * time.Millisecond, 80 * time.Millisecond, []string{"under the rule but only 20ms below the control's 100ms"}},
+		{"exactly the margin below the control", 100 * time.Millisecond, 70 * time.Millisecond, nil},
+		{"a control exactly at the threshold, the margin below it", BulkRule, 55 * time.Millisecond, nil},
+		// A nanosecond under: the control's finding, and no margin one, though the bulk path is less than 30 ms below it.
+		{"a control a nanosecond under the threshold", BulkRule - time.Nanosecond, 55 * time.Millisecond, []string{"the control's gap p99 is 84.999999ms, " + noStall}},
+		{"a control with no stall and a bulk path just under it", 60 * time.Millisecond, 58 * time.Millisecond, []string{"the control's gap p99 is 60ms, " + noStall}},
+		{"a control with no stall and a bulk path above the rule", 50 * time.Millisecond, 120 * time.Millisecond,
+			[]string{"the control's gap p99 is 50ms, " + noStall, "the bulk path's gap p99 is 120ms, at or above the 85ms rule"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			o := goodBulkObs(row)
 			o.Control.P99, o.Bulk.P99 = c.control, c.bulk
-			got := o.Finding()
-			if (c.finding == "") != (got == "") || !strings.Contains(got, c.finding) {
-				t.Errorf("Finding = %q, want one holding %q", got, c.finding)
+			got := o.Findings()
+			if len(got) != len(c.findings) {
+				t.Fatalf("Findings = %q, want %d holding %q", got, len(c.findings), c.findings)
+			}
+			for i, want := range c.findings {
+				if !strings.Contains(got[i], want) {
+					t.Errorf("finding %d is %q, want one holding %q", i, got[i], want)
+				}
 			}
 			post := betaBulkPost(row, o, nil)
-			if has := strings.Contains(post, "FINDING (not a failure)"); has != (c.finding != "") {
-				t.Errorf("the post says FINDING: %t, want %t:\n%s", has, c.finding != "", post)
+			if n := strings.Count(post, "- FINDING (not a failure): "); n != len(c.findings) {
+				t.Errorf("the post has %d FINDING lines, want %d:\n%s", n, len(c.findings), post)
 			}
-			if !strings.Contains(post, "beta-athena-now-bulk: PASS (posts to #522)") {
+			if !strings.Contains(post, "beta-athena-now-bulk: PASS (posts to #522)\n") {
 				t.Errorf("a finding changed the verdict:\n%s", post)
+			}
+			if protects := strings.Contains(post, "the layout protects the token streams on this path"); protects != (len(c.findings) == 0) {
+				t.Errorf("the post says the layout protects the streams: %t, want %t:\n%s", protects, len(c.findings) == 0, post)
 			}
 		})
 	}
@@ -204,12 +274,17 @@ func TestTheBulkPostNamesTheDoubleAndItsDigestAndNoProcess(t *testing.T) {
 	o := goodBulkObs(row)
 	post := betaBulkPost(row, o, nil)
 	for _, want := range []string{
+		"beta-athena-now-bulk: PASS (posts to #522)\n",
 		"THE ENGINE WAS A DOUBLE, not vLLM: the double, SHA-256 " + o.Double.Digest,
-		"the control, the transfer down the token transport as a streamed reply: gap p99 150ms",
+		"the control, the transfer down the token transport as a streamed reply: gap p99 150ms (p50 52ms) over 480 gaps; the transfer took 3s (22.4 MB/s)",
 		"the bulk path, the same bytes as a non-streamed reply: gap p99 55ms",
 		"the front's bulk counter rose by 1, its fallback by 0",
-		"the difference, control less bulk path: 95ms; HBEP-6's rule is 85ms and S4's margin 30ms",
-		"the layout protects the token streams on this path",
+		"the difference, control less bulk path: 95ms; HBEP-6's threshold is 85ms (open question 12's reading, not a validity bar) and S4's margin 30ms",
+		// The ruling's answer 1: the control is accepted, and the post names its difference from S4's.
+		"- the control is not S4's: it is this same bulk-on stack carrying the 64 MiB down the token transport as a streamed reply, where S4's is a second stack with the bulk path off carrying it as a non-streamed reply (the science agent's ruling on #521)\n",
+		// The saturation witness, worked out by hand: 67108864 bytes in 3 s are 22.37 MB/s; 8 streams at 20 tokens a second give 480 gaps in 3 s, half of them 240.
+		"- the saturation witness: the control's 67108864 bytes counted at the front's client listener in 3s, 22.4 MB/s, with all 8 streams running across the transfer (480 gaps overlap it, at least 240 needed)\n",
+		"- the layout protects the token streams on this path: the control stalled them to at least 85ms, and the bulk path's p99 is under 85ms and at least 30ms below the control's\n",
 		"responses with attribution: 18 of 18",
 	} {
 		if !strings.Contains(post, want) {
@@ -218,6 +293,33 @@ func TestTheBulkPostNamesTheDoubleAndItsDigestAndNoProcess(t *testing.T) {
 	}
 	if p := betaBulkPost(row, o, []string{"x"}); !strings.Contains(p, "beta-athena-now-bulk: FAIL (posts to #522)") {
 		t.Errorf("a failed run's text lacks its verdict line:\n%s", p)
+	}
+}
+
+// A run with no saturation witness posts INVALID with why, the witness ABSENT with the same words, and no reading and no finding, even where the p99s
+// would make one; with a failure beside it, the failure's verdict wins.
+func TestAnInvalidBulkRunPostsWhyAndNoFinding(t *testing.T) {
+	row := BetaBulkRow()
+	o := goodBulkObs(row)
+	o.Control.StreamsLong = BulkStreams - 1
+	o.Bulk.P99 = 200 * time.Millisecond // a finding, were the run a measurement
+	const why = "a stream beside the control transfer ended before it did: its gaps do not cover the transfer"
+	post := betaBulkPost(row, o, nil)
+	for _, want := range []string{
+		"beta-athena-now-bulk: INVALID (posts to #522)\n- no saturation witness, so no reading: " + why + "\n",
+		"- the saturation witness: ABSENT (" + why + "): the gaps measure nothing, so there is no reading and no finding\n",
+	} {
+		if !strings.Contains(post, want) {
+			t.Errorf("the text to post lacks %q:\n%s", want, post)
+		}
+	}
+	for _, not := range []string{"PASS", "FAIL", "FINDING", "the layout protects", "counted at the front's client listener"} {
+		if strings.Contains(post, not) {
+			t.Errorf("an INVALID run's text says %q:\n%s", not, post)
+		}
+	}
+	if p := betaBulkPost(row, o, []string{"a reply fell back to the token transport"}); !strings.HasPrefix(p, "beta-athena-now-bulk: FAIL (posts to #522)\n") || strings.Contains(p, "INVALID") {
+		t.Errorf("a failure beside a missing witness is not the verdict:\n%s", p)
 	}
 }
 
@@ -265,27 +367,142 @@ func TestOnlyTheBulkRowsStackRunsTheBulkPath(t *testing.T) {
 	}
 }
 
-// A finding passes through Run: the verdict has no failure, the text to post says FINDING, and the record holds the phases.
+// A finding passes through Run: the verdict has no failure and no error, the record says pass, and the text to post says PASS with the finding's
+// words. A control under 85 ms is one of them (the ruling, 1(b)), never the failure it was before the ruling.
 func TestABulkReadingAtOrAboveTheRuleIsAFindingNeverAFailure(t *testing.T) {
-	row := BetaBulkRow()
-	for _, fault := range []string{"bulk-at-the-rule", "bulk-above-the-rule", "bulk-small-margin"} {
-		t.Run(fault, func(t *testing.T) {
-			cfg := Config{Row: row, Dry: true, DryFault: fault, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
-			rec, err := NewRecorder(cfg.Out)
-			if err != nil {
-				t.Fatal(err)
-			}
-			failures, err := Run(context.Background(), cfg, newDrySteps(t, cfg, "betabulk"), rec, t.Logf)
+	for _, c := range []struct{ fault, finding string }{
+		{"bulk-at-the-rule", "- FINDING (not a failure): the bulk path's gap p99 is 85ms, at or above the 85ms rule"},
+		{"bulk-above-the-rule", "- FINDING (not a failure): the bulk path's gap p99 is 200ms, at or above the 85ms rule"},
+		{"bulk-small-margin", "- FINDING (not a failure): the bulk path's gap p99 is 80ms, under the rule but only 20ms below the control's 100ms"},
+		{"control-no-stall", "- FINDING (not a failure): the control's gap p99 is 84.999999ms, under the 85ms threshold: no stall to remove on this path (HBEP-6, open question 12)\n"},
+	} {
+		t.Run(c.fault, func(t *testing.T) {
+			out, failures, err := runBulkDry(t, c.fault)
 			if err != nil || len(failures) != 0 {
 				t.Fatalf("failures %v, err %v; want a pass", failures, err)
 			}
-			post, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
-			if !strings.Contains(string(post), "beta-athena-now-bulk: PASS") || !strings.Contains(string(post), "FINDING (not a failure)") {
-				t.Errorf("the text to post does not say PASS with a FINDING:\n%s", post)
+			post, _ := os.ReadFile(filepath.Join(out, PostsFile))
+			if !strings.HasPrefix(string(post), "beta-athena-now-bulk: PASS (posts to #522)\n") || !strings.Contains(string(post), c.finding) {
+				t.Errorf("the text to post does not say PASS with %q:\n%s", c.finding, post)
+			}
+			if v := recordVerdict(t, out); v != "pass" {
+				t.Errorf("the record's verdict is %q, want pass", v)
 			}
 		})
 	}
 }
+
+// runBulkDry is one dry run of the bulk row with the fault, through Run: its record directory, its failed checks and its error.
+func runBulkDry(t *testing.T, fault string) (string, []string, error) {
+	t.Helper()
+	cfg := Config{Row: BetaBulkRow(), Dry: true, DryFault: fault, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
+	rec, err := NewRecorder(cfg.Out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failures, err := Run(context.Background(), cfg, newDrySteps(t, cfg, "betabulk"), rec, t.Logf)
+	return cfg.Out, failures, err
+}
+
+// recordVerdict is the verdict the run's record holds.
+func recordVerdict(t *testing.T, out string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(out, RecordFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r struct {
+		Verdict  string   `json:"verdict"`
+		Failures []string `json:"failures"`
+	}
+	if err := json.Unmarshal(b, &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.Verdict != "fail" && len(r.Failures) != 0 {
+		t.Errorf("the record's verdict is %q beside failures %q", r.Verdict, r.Failures)
+	}
+	return r.Verdict
+}
+
+// A run with no saturation witness and no failure is INVALID through Run: ErrInvalid with the witness's words, no failed check, never NOT RUN,
+// the record's verdict "invalid", and the text to post headed INVALID with why. Each fault takes one of the witness's checks away.
+func TestTheBulkRowsInvalidRunsThroughRun(t *testing.T) {
+	for _, c := range betaBulkInvalidCases {
+		t.Run(c.fault, func(t *testing.T) {
+			out, failures, err := runBulkDry(t, c.fault)
+			if len(failures) != 0 {
+				t.Fatalf("an INVALID run failed checks %q", failures)
+			}
+			var ie *InvalidError
+			if !errors.As(err, &ie) || !errors.Is(err, ErrInvalid) || !Invalid(BetaBulkRow(), err) {
+				t.Fatalf("err = %v, want an InvalidError", err)
+			}
+			if NotRun(BetaBulkRow(), err) {
+				t.Errorf("an INVALID run is also NOT RUN: %v", err)
+			}
+			if !slices.Equal(ie.Why, c.why) {
+				t.Errorf("why = %q, want %q", ie.Why, c.why)
+			}
+			if v := recordVerdict(t, out); v != "invalid" {
+				t.Errorf("the record's verdict is %q, want invalid", v)
+			}
+			// The head's two lines, with the front's line between them (InsertFrontLine).
+			post, _ := os.ReadFile(filepath.Join(out, PostsFile))
+			if !strings.HasPrefix(string(post), "beta-athena-now-bulk: INVALID (posts to #522)\n") {
+				t.Errorf("the text to post is not headed INVALID:\n%s", post)
+			}
+			if why := "\n- no saturation witness, so no reading: " + strings.Join(c.why, "; ") + "\n"; !strings.Contains(string(post), why) {
+				t.Errorf("the text to post lacks %q:\n%s", why, post)
+			}
+		})
+	}
+}
+
+// betaBulkInvalidCases are the bulk row's dry faults that end INVALID, each with the witness's words. They are not in betaBulkCases, whose runner
+// wants a pass or a failure with no error.
+var betaBulkInvalidCases = []struct {
+	fault string
+	why   []string
+}{
+	{"control-stream-short", []string{"a stream beside the control transfer ended before it did: its gaps do not cover the transfer"}},
+	{"bulk-stream-short", []string{"a stream beside the bulk transfer ended before it did: its gaps do not cover the transfer"}},
+	{"control-few-gaps", []string{"too few gaps overlap the control transfer to measure it"}},
+	{"bulk-few-gaps", []string{"too few gaps overlap the bulk transfer to measure it"}},
+	{"control-untimed", []string{"the control transfer was not timed, so it has no rate", "too few gaps overlap the control transfer to measure it"}},
+}
+
+// A close that fails after an INVALID run is a failure, never an INVALID: it may have left a job. The control: the same run whose close succeeds is
+// INVALID.
+func TestAFailedCloseAfterAnInvalidRunIsAFailure(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		closeErr error
+		invalid  bool
+	}{{"the close succeeds", nil, true}, {"the close fails", errors.New("the stack did not stop"), false}} {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := Config{Row: BetaBulkRow(), Dry: true, DryFault: "control-few-gaps", Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
+			rec, err := NewRecorder(cfg.Out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = Run(context.Background(), cfg, closeFails{newDrySteps(t, cfg, "betabulk"), c.closeErr}, rec, t.Logf)
+			if Invalid(cfg.Row, err) != c.invalid || NotRun(cfg.Row, err) {
+				t.Fatalf("err = %v: INVALID %t, want %t, and never NOT RUN", err, Invalid(cfg.Row, err), c.invalid)
+			}
+			if !c.invalid && (err == nil || !strings.Contains(err.Error(), "closing the steps after a run with no saturation witness: the stack did not stop")) {
+				t.Errorf("err = %v, want the close's failure named", err)
+			}
+		})
+	}
+}
+
+// closeFails is the dry steps with a close that returns err.
+type closeFails struct {
+	*drySteps
+	err error
+}
+
+func (c closeFails) Close(context.Context) error { return c.err }
 
 // The live flow refuses at once, before it touches the cluster, when the world cannot name the engine double and its digest: a real vLLM cannot be
 // held saturating the path, so a run that read the bulk path's buffer on one would read nothing.

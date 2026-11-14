@@ -52,6 +52,14 @@ func runRow(t *testing.T, family string, rows ...string) {
 		}
 		t.Skipf("NOT RUN: %s", strings.TrimSpace(note))
 	}
+	if Invalid(cfg.Row, err) {
+		// The bulk row's INVALID (ErrInvalid) by the same protocol, its own words in the marker: the run was judged, recorded and posted, nothing
+		// failed, and it has no saturation witness. hack/live-checks.sh reads it as INVALID on that row alone.
+		if merr := rec.SaveText(NotRunFile, InvalidNote(cfg.Row)); merr != nil {
+			t.Fatalf("%s: the run has no saturation witness, but the marker could not be written: %v", cfg.Row.Name, merr)
+		}
+		t.Skipf("INVALID: %v", err)
+	}
 	if err != nil {
 		t.Fatalf("%s did not finish: %v", cfg.Row.Name, err)
 	}
@@ -98,7 +106,8 @@ func TestAlphaAthenaNowServe(t *testing.T) {
 
 // TestBetaAthenaNowBulk is the bulk row of issue #521 (beta's tracker, #522) on Athena plgrid-now under profiles/athena-now.yaml, in host-dialed mode
 // with the bulk path, on the engine double: eight token streams beside a 64 MiB reply, once down the token transport as a streamed reply (the
-// control) and once as a non-streamed reply down the bulk path, and the streams' gap p99 read for each. A reading at or above 85 ms is a finding.
+// control) and once as a non-streamed reply down the bulk path, and the streams' gap p99 read for each. It fails on a broken path alone; a run with no
+// saturation witness is INVALID; a control under 85 ms, a bulk path at or above it, or a bulk path too little below a stalled control, is a finding.
 //
 //livecheck:none the row is pending in the script: its live path needs the engine double staged on the cluster (docs/alpha-runbook.md, beta-athena-now-bulk)
 func TestBetaAthenaNowBulk(t *testing.T) {

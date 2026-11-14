@@ -1,7 +1,7 @@
 package alpha
 
 // The bulk row's live flow (issue #521; betabulk.go): row A's world in host-dialed mode with the bulk path, on the engine double. Nothing here
-// judges: Run does (VerifyBetaBulk). The Instance ready; the front's registered bulk transports read; then two phases of the one measurement, the
+// judges: Run does (VerifyBetaBulk, BulkInvalid). The Instance ready; the front's registered bulk transports read; then two phases of the one measurement, the
 // control (the transfer down the token transport, as a streamed reply) and the bulk path (the same bytes as a non-streamed reply), each with eight
 // token streams open beside it; then the deployment goes and its job is seen ended.
 
@@ -94,7 +94,9 @@ func (r *liveRun) bulkPhase(p Plan, what, key string, streamed bool) BulkPhase {
 	n, status, err := r.drainTransfer(key, streamed)
 	end := time.Now()
 	bulk1, fb1 := r.frontSeries("hpcburst_front_bulk_requests_total", map[string]string{"path": "bulk"}), r.frontSeries("hpcburst_front_bulk_requests_total", map[string]string{"path": "fallback"})
-	ph := BulkPhase{ReplyBytes: n, Status: status, Took: end.Sub(start), BulkSent: counterDelta(bulk0, bulk1), FallbackSent: counterDelta(fb0, fb1)}
+	// The bytes are counted as they arrive through the front's client listener, timed from the send to the last byte: with the streams' cover below,
+	// the control's are the run's saturation witness (BulkInvalid). A read that ended with an error is a cut, whatever it delivered.
+	ph := BulkPhase{ReplyBytes: n, Status: status, Took: end.Sub(start), Cut: err != nil, BulkSent: counterDelta(bulk0, bulk1), FallbackSent: counterDelta(fb0, fb1)}
 	if err != nil {
 		p.Logf("%s: the transfer's read ended with %v after %d bytes", p.Row.Name, err, n)
 	}
