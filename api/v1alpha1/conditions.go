@@ -226,6 +226,10 @@ const (
 	// the worker's current generation is verified (HBEP-7, Several workers;
 	// `@hpc-burst-science-agent`, 12 Nov 2026, #429, Q5).
 	ReasonRouterCheckFailing = "RouterCheckFailing"
+	// ReasonKVSkew: with several workers, one worker at a full KV cache with
+	// requests waiting while a sibling the router routes to idles, for
+	// health.kvSkewTimeout (HBEP-7, Health and restarts; #518).
+	ReasonKVSkew = "KVSkew"
 )
 
 // ReasonRouterRestart is the reason of the router rung's failing event: the

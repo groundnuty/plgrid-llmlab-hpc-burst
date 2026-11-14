@@ -44,6 +44,7 @@ func (p *pass) readyWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, a
 	if err := p.admitWorkers(in, av); err != nil {
 		return err
 	}
+	p.advanceSkewClocks(in, alloc, av)
 	w, signal, msg := p.workerSignal(in, alloc, av, st)
 	if signal != "" {
 		return p.restartWorker(in, alloc, signal, w, st, msg)
@@ -139,6 +140,9 @@ func (p *pass) workerSignal(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, a
 		}
 		if sig, m := p.gaugeSignal(in, alloc, av, st, r); sig != "" {
 			return w, sig, w + ": " + m
+		}
+		if sig, m := p.kvSkewSignal(in, alloc, av, st, r); sig != "" {
+			return w, sig, m
 		}
 	}
 	return "", "", ""

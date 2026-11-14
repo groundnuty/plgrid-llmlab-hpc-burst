@@ -81,6 +81,13 @@ const (
 	envoyMaxEjectionPercent = 100
 	envoyHealthCheckAddress = "127.0.0.1"
 
+	// envoyHashBalanceFactor is ring_hash's bounded load, in percent of the mean (HBEP-5, Inside an
+	// Instance; the science agent's decision on #518, provisional until S2c tunes it): a worker above 1.25
+	// times the mean of the workers' active requests takes no new request, which moves on round the
+	// ring, so sessions don't pile onto one worker while a sibling idles. It is the front's own tight
+	// bound (c = 1.25).
+	envoyHashBalanceFactor = 125
+
 	// The route's retry (HBEP-5, Worker health; the science agent's ruling on #439, PR 4's finding): once,
 	// on a failure to connect or a reset before the request was sent, to another worker. Such a request
 	// reached no engine, so the retry cannot run anything twice; nothing written to a worker is retried.
@@ -233,7 +240,11 @@ type (
 		HealthCheckConfig envoyHealthCheckConfig `json:"health_check_config"`
 	}
 	envoyCommonLB struct {
-		HealthyPanicThreshold envoyPercent `json:"healthy_panic_threshold"`
+		HealthyPanicThreshold     envoyPercent        `json:"healthy_panic_threshold"`
+		ConsistentHashingLBConfig envoyConsistentHash `json:"consistent_hashing_lb_config"`
+	}
+	envoyConsistentHash struct {
+		HashBalanceFactor uint32 `json:"hash_balance_factor"`
 	}
 	envoyPercent struct {
 		Value float64 `json:"value"`
@@ -333,7 +344,8 @@ func RenderEnvoyConfig(c EnvoyConfig) ([]byte, error) {
 			}},
 			Clusters: []envoyCluster{{
 				Name: envoyClusterName, Type: "STATIC", LBPolicy: "RING_HASH", ConnectTimeout: envoySeconds(envoyConnectTimeout),
-				CommonLBConfig: envoyCommonLB{HealthyPanicThreshold: envoyPercent{Value: envoyHealthyPanicPercent}},
+				CommonLBConfig: envoyCommonLB{HealthyPanicThreshold: envoyPercent{Value: envoyHealthyPanicPercent},
+					ConsistentHashingLBConfig: envoyConsistentHash{HashBalanceFactor: envoyHashBalanceFactor}},
 				HealthChecks: []envoyHealthCheck{{
 					Timeout: envoySeconds(envoyHCTimeout), Interval: envoySeconds(envoyHCInterval), NoTrafficInterval: envoySeconds(envoyHCInterval),
 					UnhealthyThreshold: envoyHCUnhealthy, HealthyThreshold: envoyHCHealthy,
