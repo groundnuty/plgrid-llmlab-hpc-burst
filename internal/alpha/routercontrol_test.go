@@ -400,8 +400,36 @@ func TestControlOfCountsAStreamTheEngineEndedAlike(t *testing.T) {
 	if s := c.Alike[0].String(); s != "chat/x#stream 200 (BadRequestError: the reasoning parser is not set) [the stream ended by the engine's error event on both paths]" {
 		t.Errorf("listed as %q", s)
 	}
+	// The post carries it with the engine's error event's text, as the refusals are (the science agent, on #522).
+	if lines := controlLines(c); !strings.Contains(lines, "every one (1): chat/x#stream 200 (BadRequestError: the reasoning parser is not set) [the stream ended by the engine's error event on both paths]\n") ||
+		!strings.Contains(lines, "; 1 ended by the engine's own error event alike on both paths") {
+		t.Errorf("the post's control lines:\n%s", lines)
+	}
 	done := ok(stream1)
 	if d := ControlOf([]ControlVariant{{Key: "chat/x#stream", Stream: true, Front: front, Direct: &done}}); d.EndedAlike != 0 || len(d.Differ) != 1 {
 		t.Errorf("an error event through the router only: ended alike %d, differ %v; want 0 and the difference", d.EndedAlike, d.Differ)
+	}
+}
+
+// A cut is never alike: a direct answer cut short, by the step's curl bound or anything else on the harness's side, is not the engine's
+// answer, so the control counts it unanswered, a failure it names, and never excuses the front's cut beside it, which stays unfinished
+// and a failure the router or the path made.
+func TestADirectCutNeverExcusesAFrontCut(t *testing.T) {
+	frontCut := Reply{Status: 200, Body: []byte(strings.TrimSuffix(streamErr, "data: [DONE]\n\n")[:60]), Cut: true}
+	directCut := Reply{Status: 200, Body: []byte(streamErr[:60]), Cut: true}
+	c := ControlOf([]ControlVariant{{Key: "chat/x#stream", Stream: true, Front: frontCut, Direct: &directCut}})
+	if c.Answered != 0 || c.Compared != 0 || c.EndedAlike != 0 || len(c.Alike) != 0 || !slices.Equal(c.Unanswered, []string{"chat/x#stream"}) {
+		t.Fatalf("answered %d, compared %d, ended alike %d, alike %v, unanswered %v; want the variant unanswered and nothing alike",
+			c.Answered, c.Compared, c.EndedAlike, c.Alike, c.Unanswered)
+	}
+	if f := controlChecks(BytesObs{Expected: 1}, c); len(f) != 1 || !strings.Contains(f[0], "0 of 1 answered (chat/x#stream)") {
+		t.Errorf("controlChecks = %q, want the direct cut named", f)
+	}
+	var b BytesObs
+	b.Add(Answer{Chat: true, Stream: true, Valid: true, Key: "chat/x#stream", Status: frontCut.Status, Body: frontCut.Body, Cut: true})
+	b.Expected = 1
+	if f := bytesChecks(b, c.EndedAlike); !slices.Contains(f, "a response of the response-level reading did not finish") ||
+		!slices.Contains(f, "a response of the response-level reading was a failure the router or the path made") {
+		t.Errorf("bytesChecks = %q, want the front's cut unfinished and the path's", f)
 	}
 }
