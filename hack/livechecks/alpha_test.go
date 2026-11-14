@@ -8,6 +8,8 @@ package livechecks
 // run for real in dry mode (alpha_dry_test.go).
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -71,7 +73,11 @@ echo "go $1" >> "$STUB_STATE/events"
 out=""; prev=""
 for a in "$@"; do [ "$prev" = -o ] && out=$a; prev=$a; done
 case "$1" in
-  build) mkdir -p "$out" && for b in hpcburst hpcburst-controller hpcburst-front; do echo binary > "$out/$b"; done
+  build) case " $* " in
+           # The bulk row's test shim (build_test_shims): one file at -o, the digest it is built with in its argv (go-argv).
+           *enginedouble/shim*) mkdir -p "$(dirname "$out")" && echo shim > "$out" ;;
+           *) mkdir -p "$out" && for b in hpcburst hpcburst-controller hpcburst-front; do echo binary > "$out/$b"; done ;;
+         esac
          [ -z "${STUB_ROLL_AT_BUILD:-}" ] || echo "$STUB_NEXT_DATE" > "$LIVE_FAKE_DATE_FILE" ;;
   test) mkdir -p "$(dirname "$out")"; cp "$STUB_STATE/testbin.sh" "$out"; chmod +x "$out"
         # A conformance row's only build is the test binary's, so these hooks are its "during the builds": another job
@@ -215,6 +221,12 @@ func newAlphaWorldAt(t *testing.T, clock func() time.Time) *world {
 			t.Fatal(err)
 		}
 	}
+	// The bulk row's shim build (build_test_shims) maps a cpuArch to its GOARCH through the one table, which the fixture takes as it is.
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), "hack", "cpu-arch.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(w.repo, "hack", "cpu-arch.sh"), string(b), 0o644)
 	return w
 }
 
@@ -424,6 +436,19 @@ func TestAnAlphaRunBuildsBeforeTheSlotAndGivesTheTestItsEnvironment(t *testing.T
 			// does not start the router must not stage an Envoy it never runs.
 			if has := strings.Contains(joined, "fetch-envoy --agent-builds "); has != (s.row == "beta-athena-now-router") {
 				t.Errorf("%s: Envoy's build fetched before the test binary: %t, want %t:\n%s", s.row, has, s.row == "beta-athena-now-router", joined)
+			}
+			// The test shim is built for the bulk row alone (issue #521, option (A)), one for each agent build, each with the digest of the
+			// shipped agent beside it built in.
+			argv := w.stateFile("go-argv")
+			if has := strings.Contains(argv, "enginedouble/shim"); has != (s.row == "beta-athena-now-bulk") {
+				t.Errorf("%s: the test shim built: %t, want %t:\n%s", s.row, has, s.row == "beta-athena-now-bulk", argv)
+			}
+			if s.row == "beta-athena-now-bulk" {
+				for _, want := range []string{"-X main.wantAgentDigest=" + sha256Hex("agent\n"), "test-shim/hb-agent-x86_64", "test-shim/hb-agent-aarch64"} {
+					if !strings.Contains(argv, want) {
+						t.Errorf("the shim's builds lack %q:\n%s", want, argv)
+					}
+				}
 			}
 			env := w.stateFile("test-env-" + s.test)
 			for _, bad := range []string{"HPCBURST_ALPHA_DRY"} {
@@ -1219,4 +1244,10 @@ func TestTheScriptsLeaseBoundsArethePackagesBounds(t *testing.T) {
 			t.Errorf("%s = %s minutes, the package's bound is %d", name, got, int(want/time.Minute))
 		}
 	}
+}
+
+// sha256Hex is the SHA-256 of s, lowercase hex.
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }
