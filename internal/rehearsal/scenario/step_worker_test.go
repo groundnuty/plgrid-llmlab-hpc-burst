@@ -92,13 +92,18 @@ func (r *rig) eventReasons(name string) []string {
 // the rehearsal is the fake Apptainer, the engine's parent. So the leader is
 // stopped (SIGSTOP) before the engine is killed: requests then meet the dead
 // engine and get the agent's 5xx, while the controller sees a running worker
-// and keeps the Instance ready. pauseAfterFailures+1 requests go back to back;
-// the first pauseAfterFailures must be the primary's 5xx and the next must be
-// served by the other Instance, with the pause counter up, the primary still
-// ready on the watch and still registered at the front: only the pause can
-// have moved it. Then the leader continues, reaps the engine and exits, and
-// the controller restarts the worker; requests go one at a time until the
-// restarted primary serves the key again.
+// and keeps the Instance ready. pauseAfterFailures+1 requests go back to back.
+// With another Instance ready, the front holds each 5xx and retries the request
+// there once (HBEP-5, open question 5, decided for beta by #538): every one is
+// served whole by the other Instance, its one usage record names it, and none
+// carries x-should-retry, which only a give-up does. The primary's failures
+// still count toward its pause: the first pauseAfterFailures are retries, after
+// which the primary is paused and the last goes to the other Instance at once,
+// with the pause counter up, the primary still ready on the watch and still
+// registered at the front: only the pause can have moved it. Then the leader
+// continues, reaps the engine and exits, and the controller restarts the
+// worker; requests go one at a time until the restarted primary serves the key
+// again.
 func (r *rig) stepWorkerRestart(in *v1alpha1.Instance, key string) {
 	r.t.Helper()
 	defer r.stepTimer("d")()
@@ -166,7 +171,7 @@ func (r *rig) stepWorkerRestart(in *v1alpha1.Instance, key string) {
 	case !known || !reg:
 		r.t.Errorf("step (d): after the burst the front's probe no longer held Instance %s registered (known %v): the probe, not the pause, may have moved its key", in.Name, known)
 	case still.Status.Phase != v1alpha1.InstanceReady || left && !moved.At.After(parseRecordTime(outs[pauseAfterFailures].row.StartTime)):
-		r.t.Errorf("step (d): Instance %s left ready (%s; first seen %s at %s) before the request after the 5xx: the controller, not the pause, may have moved its key",
+		r.t.Errorf("step (d): Instance %s left ready (%s; first seen %s at %s) before the burst's last request: the controller, not the pause, may have moved its key",
 			in.Name, still.Status.Phase, moved.Phase, moved.At.Format(time.RFC3339Nano))
 	}
 	stack.WaitFor(r.t, stack.WaitDeadline, "the primary to serve again after a worker restart", func() bool {
@@ -195,59 +200,81 @@ func (r *rig) workerLeader(jobID, engine int) int {
 	return leader
 }
 
-// checkPause holds the burst to HBEP-5's pause: the first pauseAfterFailures
-// requests are the primary's own 5xx, the next is served by another Instance,
-// and the front counted a pause.
+// checkPause holds the burst to HBEP-5's retry and pause (open question 5;
+// Pauses): every request, the primary's key though it is, is served whole by
+// another Instance, with one usage record naming that Instance and no
+// x-should-retry: the first pauseAfterFailures as retries of the primary's held
+// 5xx, which the client never sees, the next at once, since the primary's
+// failures paused it; and the front counted the pause.
 func (r *rig) checkPause(in *v1alpha1.Instance, burst []outcome, pausesBefore, pausesAfter float64) {
 	r.t.Helper()
-	for i, o := range burst[:pauseAfterFailures] {
-		if o.row.Emitter != "instance" || o.row.InstanceUID != string(in.UID) || o.row.Status < 500 {
-			r.t.Errorf("step (d) burst request %d: record %+v, want the primary's own 5xx: %.300s", i, o.row, o.rp.Body)
+	for i, o := range burst {
+		if o.rp.Status != http.StatusOK || o.row.Emitter != "instance" || o.row.Status != http.StatusOK || o.row.InstanceUID == "" || o.row.InstanceUID == string(in.UID) {
+			r.t.Errorf("step (d) burst request %d: %d, record %+v; want another Instance's 200 (the primary's 5xx retried there, HBEP-5 open question 5): %.300s", i, o.rp.Status, o.row, o.rp.Body)
+		}
+		if v := o.rp.Header.Get("X-Should-Retry"); v != "" {
+			r.t.Errorf("step (d) burst request %d: x-should-retry %q on a success, want none", i, v)
 		}
 	}
-	next := burst[pauseAfterFailures]
-	if next.rp.Status != http.StatusOK || next.row.Emitter != "instance" || next.row.InstanceUID == "" || next.row.InstanceUID == string(in.UID) {
-		r.t.Errorf("step (d): the request after %d of the primary's 5xx in a row: %d, record %+v; want another Instance's 200 (HBEP-5, Pauses): %.300s",
-			pauseAfterFailures, next.rp.Status, next.row, next.rp.Body)
+	ids := burstIDs(burst)
+	for id, n := range recordCounts(r.fc.UsageRows(), ids) {
+		if n != 1 {
+			r.t.Errorf("step (d): request %s has %d usage records, want one: a retry is one request", id, n)
+		}
 	}
 	if pausesAfter <= pausesBefore {
-		r.t.Errorf("step (d): hpcburst_front_pauses_total stayed %v across %d of the primary's 5xx in a row", pausesAfter, pauseAfterFailures)
+		r.t.Errorf("step (d): hpcburst_front_pauses_total stayed %v across %d of the primary's failures in a row, each retried", pausesAfter, pauseAfterFailures)
 	}
-	r.t.Logf("step (d): the burst: %d of the primary's 5xx, then %s served it; pauses %v -> %v", pauseAfterFailures, next.row.Instance, pausesBefore, pausesAfter)
+	r.t.Logf("step (d): the burst: %d requests, all served by %s (the first %d retries of the primary's 5xx); pauses %v -> %v", len(burst), burst[len(burst)-1].row.Instance, pauseAfterFailures, pausesBefore, pausesAfter)
 }
 
-// checkOutage holds every request of the outage to HBEP-5 and the ruling of
-// 1 Nov 2026 (13:25Z, with a second routable Instance): each has a record
-// with its emitter; at most pauseAfterFailures of the primary's own 5xx come
-// in a row; every other is served, by the other Instance or by the primary
-// after its restart; and none is the front's own error, since the front's
-// no_ready_target applies only when the paused Instance is the only one.
+// burstIDs is the burst's request IDs.
+func burstIDs(burst []outcome) []string {
+	var ids []string
+	for _, o := range burst {
+		ids = append(ids, o.rp.ID)
+	}
+	return ids
+}
+
+// recordCounts is how many usage records each of ids has among rows.
+func recordCounts(rows []stack.UsageRow, ids []string) map[string]int {
+	n := map[string]int{}
+	for _, id := range ids {
+		n[id] = 0
+	}
+	for _, x := range rows {
+		if _, ok := n[x.RequestID]; ok {
+			n[x.RequestID]++
+		}
+	}
+	return n
+}
+
+// checkOutage holds every request of the outage to HBEP-5: each has a record
+// with its emitter, and each is served, by the other Instance (a retry of the
+// primary's 5xx while the primary was not yet paused, or at once while it was)
+// or by the primary after its restart. With another Instance ready none is the
+// primary's own 5xx, which the retry holds and never relays (open question 5),
+// and none is the front's own error, since the front's no_ready_target applies
+// only when the paused Instance is the only one.
 func (r *rig) checkOutage(in *v1alpha1.Instance, outs []outcome) {
 	r.t.Helper()
-	run, longest, fivexx, other, own := 0, 0, 0, 0, 0
+	other, own := 0, 0
 	for i, o := range outs {
 		row := o.row
 		switch {
 		case row.Emitter == "":
 			r.t.Errorf("step (d) request %d: its record has no emitter: %+v", i, row)
-		case row.Emitter == "instance" && row.InstanceUID == string(in.UID) && row.Status >= 500:
-			fivexx++
-			run++
-			longest = max(longest, run)
-			continue
 		case row.Emitter == "instance" && row.Status == http.StatusOK && row.InstanceUID == string(in.UID):
 			own++
 		case row.Emitter == "instance" && row.Status == http.StatusOK:
 			other++
 		default:
-			r.t.Errorf("step (d) request %d: record %+v, want the primary's 5xx or an Instance's 200 (a front row is no_ready_target, for a sole Instance): %.300s", i, row, o.rp.Body)
+			r.t.Errorf("step (d) request %d: record %+v, want an Instance's 200: with another Instance ready the primary's 5xx is retried, and a front row is no_ready_target, for a sole Instance: %.300s", i, row, o.rp.Body)
 		}
-		run = 0
 	}
-	r.t.Logf("step (d): %d of the primary's 5xx (longest run %d), %d served by another Instance, %d by the restarted primary", fivexx, longest, other, own)
-	if longest > pauseAfterFailures {
-		r.t.Errorf("step (d): %d of the primary's 5xx came in a row; the front pauses after %d (HBEP-5, Pauses)", longest, pauseAfterFailures)
-	}
+	r.t.Logf("step (d): %d served by another Instance, %d by the restarted primary", other, own)
 	r.checkNoGap(r.fc.UsageRows())
 }
 

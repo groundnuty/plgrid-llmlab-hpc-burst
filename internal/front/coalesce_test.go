@@ -170,7 +170,7 @@ func TestAReaderMidBurstWaitsAtMostOneRebuild(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		tg, err := f.router.choose(context.Background(), naming.Name{Model: "m-0", Level: naming.LevelModel}, "session-a", "")
+		tg, err := f.router.choose(context.Background(), naming.Name{Model: "m-0", Level: naming.LevelModel}, "session-a", nil)
 		done <- result{tg, err}
 	}()
 	waitRouterState(t, "the request to wait for the lock", func() bool { return f.router.waiting.Load() == 1 })
@@ -325,7 +325,7 @@ func TestInterleavedRegistrationsEndInTheLastStateAndKeepTheFence(t *testing.T) 
 				default:
 				}
 				i := rnd.Intn(n)
-				tg, rerr := h.router.choose(context.Background(), naming.Name{Model: fmt.Sprintf("m-%d", i), Level: naming.LevelModel}, "s", "")
+				tg, rerr := h.router.choose(context.Background(), naming.Name{Model: fmt.Sprintf("m-%d", i), Level: naming.LevelModel}, "s", nil)
 				if rerr != nil || tg == nil {
 					continue
 				}
