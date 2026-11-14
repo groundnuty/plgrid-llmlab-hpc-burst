@@ -11,6 +11,9 @@ import (
 	"sync"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/routerbytes/cases"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
@@ -41,13 +44,14 @@ func (r *liveRun) BetaRouter(ctx context.Context, p Plan) (RouterObs, error) {
 	if w := in.Spec.Launch.Workers; w != nil {
 		o.LaunchWorkers = *w
 	}
-	o.HealthyAtReady = healthyOf(r.current(in))
+	o.HealthyAtReady = r.healthyWithin(in)
+	o.EngineVersion = r.engineVersionOf(in)
 	r.envoyOf(ctx, p, first, &o)
 	key := r.fc.KeyFor(&in)
 	o.Rate = r.rate(key)
 	o.Bytes = r.bytesReading(ctx, p, key)
 	o.WorkerRestart = r.workerRestart(ctx, p, in)
-	o.HealthyAfterRestart = r.healthyAgain(in)
+	o.HealthyAfterRestart = r.healthyWithin(in)
 	r.endDeployment(ctx, p)
 	tags, err := r.runTags()
 	if err != nil {
@@ -68,9 +72,9 @@ func healthyOf(in v1alpha1.Instance) int {
 	return int(*in.Status.HealthyWorkers)
 }
 
-// healthyAgain is status.healthyWorkers once it is 1, or what it was when RouterHealthyWait ran out: the controller writes it from the
-// agent's next report of Envoy's /clusters, a moment after the Instance serves again.
-func (r *liveRun) healthyAgain(in v1alpha1.Instance) int {
+// healthyWithin is status.healthyWorkers once it is 1, or what it was when RouterHealthyWait ran out: the controller writes it from the
+// agent's next report of Envoy's /clusters, a moment after the Instance is first ready, and again after it serves again.
+func (r *liveRun) healthyWithin(in v1alpha1.Instance) int {
 	deadline := time.Now().Add(RouterHealthyWait)
 	for {
 		n := healthyOf(r.current(in))
@@ -147,22 +151,79 @@ func (r *liveRun) routerFirstReady(ctx context.Context, p Plan, o *RouterObs) (r
 	return ready, first, nil
 }
 
-// glibcProbe is one srun step in the run's job that asks the node for its glibc.
+// glibcProbeTries is how many times the run asks the node for its glibc before it fails naming the step, and glibcProbePause the pause
+// between two tries: a transient srun error must not become a verdict about the node 25 minutes later (#530's review).
+const (
+	glibcProbeTries = 3
+	glibcProbePause = 5 * time.Second
+)
+
+// glibcProbe is the srun step in the run's job that asks the node for its glibc, tried glibcProbeTries times. A step that still fails
+// fails the run at once, naming the step, its exit code and its error, as the listing of Envoy does.
 func (r *liveRun) glibcProbe(ctx context.Context, jobID string) GlibcRead {
 	line, err := SrunLine(jobID)
 	if err != nil {
-		return GlibcRead{}
+		r.t.Fatalf("the node's glibc: %v", err)
 	}
 	script := GlibcScript
 	if r.glibcScript != "" {
 		script = r.glibcScript // a stand-in's node with another glibc
 	}
-	res, err := r.tr.Run(ctx, slurm.Command{Line: line, Stdin: []byte(script), Timeout: srunTimeout})
-	if err != nil || res.ExitCode != 0 {
-		return GlibcRead{}
+	v, err := probeGlibc(ctx, r.tr.Run, line, script, glibcProbeTries, glibcProbePause, r.t.Logf)
+	if err != nil {
+		r.t.Fatalf("the node's glibc: %v", err)
 	}
-	v, ok := ParseGetconfGlibc(res.Stdout)
-	return GlibcRead{OK: ok, Version: v}
+	return GlibcRead{OK: true, Version: v}
+}
+
+// probeGlibc runs the glibc step up to tries times, pause apart, and returns the version of the first answer getconf's form parses. Each
+// failed try is logged with its exit code and its error; when every try failed, the error names the step and the last try's failure.
+func probeGlibc(ctx context.Context, run func(context.Context, slurm.Command) (slurm.Result, error), line, script string, tries int, pause time.Duration, logf func(string, ...any)) (GlibcVersion, error) {
+	var why string
+	for i := 1; i <= tries; i++ {
+		if i > 1 {
+			time.Sleep(pause)
+		}
+		res, err := run(ctx, slurm.Command{Line: line, Stdin: []byte(script), Timeout: srunTimeout})
+		switch {
+		case err != nil:
+			why = fmt.Sprintf("the srun step that runs getconf failed: %v (exit %d)", err, res.ExitCode)
+		case res.ExitCode != 0:
+			why = fmt.Sprintf("the srun step that runs getconf exited %d", res.ExitCode)
+		default:
+			if v, ok := ParseGetconfGlibc(res.Stdout); ok {
+				return v, nil
+			}
+			why = fmt.Sprintf("the srun step that runs getconf answered %q, not getconf's \"glibc <major>.<minor>\"", clip(res.Stdout, 80))
+		}
+		logf("the node's glibc, try %d of %d: %s", i, tries, why)
+	}
+	return GlibcVersion{}, fmt.Errorf("%s, in each of %d tries", why, tries)
+}
+
+// clip is at most n bytes of b, for a log line.
+func clip(b []byte, n int) string {
+	if len(b) > n {
+		return string(b[:n]) + "..."
+	}
+	return string(b)
+}
+
+// engineVersionOf is the engine's vLLM version as the Instance's verification record holds it (EngineVersionOf), "" when it was not read.
+func (r *liveRun) engineVersionOf(in v1alpha1.Instance) string {
+	x := r.current(in)
+	if x.Status.VerificationRecord == "" {
+		r.t.Logf("the engine's version: the Instance names no verification record")
+		return ""
+	}
+	var rec appsv1.ControllerRevision
+	cctx, cancel := stack.CallCtx(r.t)
+	defer cancel()
+	if err := r.c.Get(cctx, client.ObjectKey{Name: x.Status.VerificationRecord, Namespace: x.Namespace}, &rec); err != nil {
+		r.t.Logf("the engine's version: the verification record: %v", err)
+		return ""
+	}
+	return EngineVersionOf(rec.Data.Raw)
 }
 
 // agentGlibcRefusal is the node's glibc as the agent's own log of the job says it, when the log holds a refused router start.
@@ -257,8 +318,11 @@ func (r *liveRun) bytesReading(ctx context.Context, p Plan, key string) BytesObs
 				if rp.Header != nil {
 					r.keep(rp.Header)
 				}
+				// A response still awaited when the reading's own bound ran out was cut by the harness, not by the router.
+				past := rp.Err != nil && rctx.Err() != nil
 				mu.Lock()
-				obs.Add(v.Case.Endpoint == cases.Chat, v.Stream, v.Valid(), v.Key(), rp.Status, rp.Body, rp.Err != nil)
+				obs.Add(Answer{Chat: v.Case.Endpoint == cases.Chat, Stream: v.Stream, Valid: v.Valid(), Group: RefusalGroupOf(v.Case), Key: v.Key(),
+					Status: rp.Status, Body: rp.Body, Cut: rp.Err != nil, PastBound: past})
 				mu.Unlock()
 			}
 		}()
@@ -274,8 +338,8 @@ func (r *liveRun) bytesReading(ctx context.Context, p Plan, key string) BytesObs
 	}
 	close(work)
 	wg.Wait()
-	p.Logf("%s: S13's cases at the response level: %d of %d variants sent, %d answered completely (%d with 200, %d with 4xx, %d with 5xx), %d made by the router or the path",
-		p.Row.Name, obs.Variants, obs.Expected, obs.Complete, obs.Status200, obs.Status4xx, obs.Status5xx, obs.RouterMade)
+	p.Logf("%s: S13's cases at the response level: %d of %d variants sent, %d answered completely (%d with 200, %d with 4xx, %d with 5xx, %d other), %d made by the router or the path, %d awaited at the harness's bound; %d valid variants answered other than 200",
+		p.Row.Name, obs.Variants, obs.Expected, obs.Complete, obs.Status200, obs.Status4xx, obs.Status5xx, obs.StatusOther, obs.RouterMade, obs.PastBound, len(obs.NonOK))
 	if len(obs.Failed) > 0 {
 		p.Logf("%s: variants that did not finish or that the path failed (first %d): %s", p.Row.Name, len(obs.Failed), fmt.Sprint(obs.Failed))
 	}

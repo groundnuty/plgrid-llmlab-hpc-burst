@@ -3,6 +3,10 @@ package alpha
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,7 +16,10 @@ import (
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/enginedouble"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/routerbytes/cases"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 )
 
 // The router row's logic (betarouter.go), each check with its words written out and its boundary.
@@ -28,7 +35,8 @@ func goodRouterObs(row Row) RouterObs {
 		Envoy:          EnvoyObs{Procs: 1, PinnedDigest: pinnedDigestFixture, RunningDigest: pinnedDigestFixture, Serving: true},
 		Glibc:          GlibcReads{Probe: GlibcRead{OK: true, Version: GlibcVersion{2, 34}}},
 		Rate:           30,
-		Bytes:          BytesObs{Variants: 440, Expected: 440, Complete: 440, Status200: 400, Status4xx: 40, StreamOK: 190, NonStreamOK: 210, ChatOK: 250, CompletionsOK: 150},
+		Bytes:          dryRouterBytes(),
+		EngineVersion:  "0.32.0",
 		WorkerRestarts: 1, WorkerRestart: RestartTimes{}, Ladder: LadderObs{WorkerRestarts: 1}, Responses: 460, Attributed: 460,
 	}
 }
@@ -204,9 +212,25 @@ func TestEnvoyChecksNameEachWayItFails(t *testing.T) {
 }
 
 func TestBytesChecksRequireACompleteReadingOfEveryVariant(t *testing.T) {
-	good := BytesObs{Variants: 440, Expected: 440, Complete: 440, Status200: 400, Status4xx: 40, InvalidSent: 2, InvalidRefused: 2, StreamOK: 190, NonStreamOK: 210, ChatOK: 250, CompletionsOK: 150}
+	good := dryRouterBytes()
 	if f := bytesChecks(good); len(f) != 0 {
 		t.Fatalf("a good reading fails: %v", f)
+	}
+	// The ruling (c) on #521: the healthy fixture's dryRefusals refusals are each in one of S13's refusal groups, a 4xx, so none fails.
+	if len(good.NonOK) != dryRefusals {
+		t.Fatalf("the healthy fixture has %d valid variants answered other than 200, want %d", len(good.NonOK), dryRefusals)
+	}
+	for _, v := range good.NonOK {
+		if !v.allowed() {
+			t.Errorf("the healthy fixture's refusal %s is not one the ruling allows", v)
+		}
+	}
+	outside := func(n int) func(b *BytesObs) {
+		return func(b *BytesObs) {
+			for i := range n {
+				b.NonOK = append(b.NonOK, NonOKVariant{Key: fmt.Sprintf("chat/c%02d#plain", i), Status: 400})
+			}
+		}
 	}
 	for _, c := range []struct {
 		name string
@@ -224,6 +248,18 @@ func TestBytesChecksRequireACompleteReadingOfEveryVariant(t *testing.T) {
 		{"counts that do not add up", func(b *BytesObs) { b.Status4xx = 41 }, "the response-level reading's status counts do not add up"},
 		{"an invalid variant answered 200", func(b *BytesObs) { b.InvalidRefused = 1 }, "a variant S13 says vLLM refuses was not refused with a 4xx"},
 		{"no invalid variant sent", func(b *BytesObs) { b.InvalidSent, b.InvalidRefused = 0, 0 }, "a variant S13 says vLLM refuses was not refused with a 4xx"},
+		{"a valid variant outside the groups refused", func(b *BytesObs) {
+			b.NonOK = append(b.NonOK, NonOKVariant{"chat/temperature#plain", 400, ""})
+		}, "a valid variant outside S13's groups that a server may refuse was answered other than 200: chat/temperature#plain 400 [outside S13's groups]"},
+		{"a valid variant in a group answered 500", func(b *BytesObs) {
+			b.NonOK = append(b.NonOK, NonOKVariant{"completions/suffix#plain", 500, "suffix"})
+		}, "a valid variant of S13's cases was answered with a 5xx: completions/suffix#plain 500 [suffix]"},
+		{"a valid variant in a group answered with a 3xx", func(b *BytesObs) {
+			b.NonOK = append(b.NonOK, NonOKVariant{"chat/chat_template#plain", 302, "a request chat_template"})
+		}, "a valid variant outside S13's groups that a server may refuse was answered other than 200: chat/chat_template#plain 302 [a request chat_template]"},
+		{"eleven outside: ten named and the rest counted", outside(11),
+			"a valid variant outside S13's groups that a server may refuse was answered other than 200: chat/c00#plain 400 [outside S13's groups], chat/c01#plain 400 [outside S13's groups], chat/c02#plain 400 [outside S13's groups], chat/c03#plain 400 [outside S13's groups], chat/c04#plain 400 [outside S13's groups], chat/c05#plain 400 [outside S13's groups], chat/c06#plain 400 [outside S13's groups], chat/c07#plain 400 [outside S13's groups], chat/c08#plain 400 [outside S13's groups], chat/c09#plain 400 [outside S13's groups], and 1 more, named in the post"},
+		{"a status that is none of 200, 4xx and 5xx, uncounted", func(b *BytesObs) { b.Complete++ }, "the response-level reading's status counts do not add up"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			b := good
@@ -263,7 +299,9 @@ func TestBetaRouterPostNamesTheBytesAsAResponseLevelReading(t *testing.T) {
 		"beta-athena-now-router: PASS (posts to #522)",
 		"RESPONSE-LEVEL reading on vLLM, not bytes",
 		"exact bytes are CI's",
-		"440 of 440 variants sent",
+		"440 of 440 variants sent, 440 answered completely (400 with 200, 40 with 4xx, 0 with 5xx, 0 with another status), 0 failures made by the router or the path, 0 still awaited at the harness's own bound of 10m0s",
+		"- the engine's vLLM version: 0.32.0; S13's cases were enumerated against vLLM v0.32.0\n",
+		"- valid variants answered other than 200, every one (38; a 4xx is allowed only in one of S13's groups that a server may still refuse, the rest fail): chat/chat_template#plain 400 [a request chat_template]; chat/chat_template#stream 400 [a request chat_template]; chat/media_io_kwargs#plain 400 [mm_processor_kwargs and media_io_kwargs]; ",
 		"the compute node's glibc: 2.34 (Envoy needs 2.30)",
 		"status.healthyWorkers 1 when ready and 1 after the worker restart",
 	} {
@@ -273,6 +311,18 @@ func TestBetaRouterPostNamesTheBytesAsAResponseLevelReading(t *testing.T) {
 	}
 	if fail := betaRouterPost(row, o, []string{"x"}); !strings.Contains(fail, "beta-athena-now-router: FAIL (posts to #522)") {
 		t.Errorf("a failed run's text lacks its verdict line:\n%s", fail)
+	}
+	// Every valid variant answered other than 200 is posted, by key, status and group: all 38 here.
+	if n := strings.Count(post, " 400 ["); n != dryRefusals {
+		t.Errorf("the text to post names %d variants answered 400, want %d:\n%s", n, dryRefusals, post)
+	}
+	// None answered other than 200, and an engine version that was not read, say so.
+	o.Bytes.NonOK, o.EngineVersion = nil, ""
+	plain := betaRouterPost(row, o, nil)
+	for _, want := range []string{"- valid variants answered other than 200: none\n", "- the engine's vLLM version: not read; S13's cases were enumerated against vLLM v0.32.0\n"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("the text to post lacks %q:\n%s", want, plain)
+		}
 	}
 }
 
@@ -375,53 +425,77 @@ func TestClassifyReplyNamesWhatTheRouterMade(t *testing.T) {
 	}
 }
 
-// BytesObs.Add is where the reading's counts are made: each class of response in its own count, an invalid variant's refusal by its 4xx, a
-// failure by its key (up to FailedKept of them).
+// BytesObs.Add is where the reading's counts are made: each class of response in its own count, an invalid variant's refusal by its 4xx, every
+// valid variant answered other than 200 by its key, status and group, a failure by its key (up to FailedKept of them), and a response the
+// harness's own bound cut apart from the router's failures.
 func TestBytesObsAddCountsEachResponseInItsOwnPlace(t *testing.T) {
 	okJSON := []byte(`{"choices":[{"text":"hi"}]}`)
 	okStream := []byte("data: {\"x\":1}\n\ndata: [DONE]\n\n")
 	refusal := []byte(`{"error":{"message":"no"}}`)
+	ans := func(chat, stream, valid bool, key string, status int, body []byte, cut bool) Answer {
+		return Answer{Chat: chat, Stream: stream, Valid: valid, Key: key, Status: status, Body: body, Cut: cut}
+	}
 	var b BytesObs
 	// Two chat answers and one completions answer that are not streamed, and one streamed chat answer: every count different from its pair, so
 	// that a swap of chat with completions, or of streamed with not, shows.
-	b.Add(true, false, true, "c1", 200, okJSON, false)
-	b.Add(true, false, true, "c2", 200, okJSON, false)
-	b.Add(true, true, true, "c3", 200, okStream, false)
-	b.Add(false, false, true, "c4", 200, okJSON, false)
+	b.Add(ans(true, false, true, "c1", 200, okJSON, false))
+	b.Add(ans(true, false, true, "c2", 200, okJSON, false))
+	b.Add(ans(true, true, true, "c3", 200, okStream, false))
+	b.Add(ans(false, false, true, "c4", 200, okJSON, false))
 	want := BytesObs{Variants: 4, Complete: 4, Status200: 4, StreamOK: 1, NonStreamOK: 3, ChatOK: 3, CompletionsOK: 1}
-	if !equalBytes(b, want) {
+	if !equalBytes(b, want) || len(b.NonOK) != 0 {
 		t.Fatalf("after four answers: %+v, want %+v", b, want)
 	}
 	// An invalid variant refused with a 4xx: counted as sent and refused, as a 4xx, and no 200 of any mode.
-	b.Add(true, false, false, "bad", 400, refusal, false)
+	b.Add(ans(true, false, false, "bad", 400, refusal, false))
 	// An invalid one answered 200: sent, not refused.
-	b.Add(true, false, false, "bad2", 200, okJSON, false)
+	b.Add(ans(true, false, false, "bad2", 200, okJSON, false))
 	// An invalid one answered with a 5xx: sent, not refused, since vLLM refuses by a 4xx.
-	b.Add(true, false, false, "bad3", 500, refusal, false)
-	// A valid one the engine refuses with a 4xx of its own, and an engine's own 500: complete, not the router's.
-	b.Add(true, false, true, "v4xx", 422, refusal, false)
-	b.Add(false, false, true, "v500", 500, refusal, false)
+	b.Add(ans(true, false, false, "bad3", 500, refusal, false))
+	// A valid one the engine refuses with a 4xx of its own, in a refusal group, and an engine's own 500: complete, not the router's, and both
+	// kept with their status and group. An invalid variant's answers are not among them.
+	inGroup := ans(true, false, true, "v4xx", 422, refusal, false)
+	inGroup.Group = "suffix"
+	b.Add(inGroup)
+	b.Add(ans(false, false, true, "v500", 500, refusal, false))
 	if b.InvalidSent != 3 || b.InvalidRefused != 1 || b.Status4xx != 2 || b.Status5xx != 2 || b.Status200 != 5 || b.RouterMade != 0 || len(b.Failed) != 0 {
 		t.Errorf("after the refusals: %+v", b)
 	}
-	// A gateway status, no answer and a cut body are the router's or the path's, named by key; none of them is a complete 200.
-	b.Add(true, false, true, "gw", 503, []byte("no healthy upstream"), false)
-	b.Add(true, true, true, "none", 0, nil, false)
-	b.Add(false, true, true, "cut", 200, okStream[:10], true)
-	if b.RouterMade != 3 || len(b.Failed) != 3 || b.Failed[0] != "gw" || b.Failed[1] != "none" || b.Failed[2] != "cut" {
+	if wantNon := []NonOKVariant{{"v4xx", 422, "suffix"}, {"v500", 500, ""}}; !slices.Equal(b.NonOK, wantNon) {
+		t.Errorf("NonOK = %+v, want %+v", b.NonOK, wantNon)
+	}
+	// A whole answer with a status that is none of 200, 4xx and 5xx is counted apart, and kept as a valid variant's non-200.
+	b.Add(ans(true, false, true, "moved", 302, okJSON, false))
+	if b.StatusOther != 1 || b.NonOK[len(b.NonOK)-1] != (NonOKVariant{"moved", 302, ""}) {
+		t.Errorf("after a 302: StatusOther %d, NonOK %+v", b.StatusOther, b.NonOK)
+	}
+	// A gateway status, no answer and a cut body are the router's or the path's, named by key; none of them is a complete 200. The gateway's
+	// 503 is a valid variant's non-200; no answer, and a cut 200, are not.
+	b.Add(ans(true, false, true, "gw", 503, []byte("no healthy upstream"), false))
+	b.Add(ans(true, true, true, "none", 0, nil, false))
+	b.Add(ans(false, true, true, "cut", 200, okStream[:10], true))
+	if b.RouterMade != 3 || !slices.Equal(b.Failed, []string{"gw", "none", "cut"}) {
 		t.Errorf("after the failures: RouterMade %d, failed %v", b.RouterMade, b.Failed)
 	}
-	if b.Variants != 12 {
-		t.Errorf("Variants = %d, want the 4 answered, the 5 others and the 3 failures, 12", b.Variants)
+	if n := len(b.NonOK); n != 4 || b.NonOK[3] != (NonOKVariant{"gw", 503, ""}) {
+		t.Errorf("after the failures: NonOK %+v", b.NonOK)
+	}
+	// A response the reading's own bound cut is the harness's: counted apart, its key kept, never the router's, never a non-200.
+	b.Add(Answer{Chat: true, Valid: true, Key: "late", Status: 0, Cut: true, PastBound: true})
+	if b.PastBound != 1 || b.RouterMade != 3 || b.Failed[len(b.Failed)-1] != "late" || len(b.NonOK) != 4 {
+		t.Errorf("after a response past the bound: PastBound %d, RouterMade %d, failed %v, NonOK %d", b.PastBound, b.RouterMade, b.Failed, len(b.NonOK))
+	}
+	if b.Variants != 14 {
+		t.Errorf("Variants = %d, want the 4 answered, the 6 others, the 3 failures and the one past the bound, 14", b.Variants)
 	}
 	// An engine's own 5xx is complete, and counted apart from the 2xx and 4xx: the status counts add up to Complete.
-	if b.Status200+b.Status4xx+b.Status5xx != b.Complete {
-		t.Errorf("the status counts %d+%d+%d do not add up to Complete %d", b.Status200, b.Status4xx, b.Status5xx, b.Complete)
+	if b.Status200+b.Status4xx+b.Status5xx+b.StatusOther != b.Complete {
+		t.Errorf("the status counts %d+%d+%d+%d do not add up to Complete %d", b.Status200, b.Status4xx, b.Status5xx, b.StatusOther, b.Complete)
 	}
 	// Only FailedKept keys are kept.
 	var many BytesObs
 	for i := 0; i < FailedKept+5; i++ {
-		many.Add(true, false, true, "k", 0, nil, false)
+		many.Add(ans(true, false, true, "k", 0, nil, false))
 	}
 	if len(many.Failed) != FailedKept || many.RouterMade != FailedKept+5 {
 		t.Errorf("kept %d keys and counted %d failures, want %d and %d", len(many.Failed), many.RouterMade, FailedKept, FailedKept+5)
@@ -429,7 +503,7 @@ func TestBytesObsAddCountsEachResponseInItsOwnPlace(t *testing.T) {
 }
 
 func equalBytes(a, b BytesObs) bool {
-	return a.Variants == b.Variants && a.Complete == b.Complete && a.Status200 == b.Status200 && a.Status4xx == b.Status4xx && a.Status5xx == b.Status5xx &&
+	return a.Variants == b.Variants && a.Complete == b.Complete && a.Status200 == b.Status200 && a.Status4xx == b.Status4xx && a.Status5xx == b.Status5xx && a.StatusOther == b.StatusOther && a.PastBound == b.PastBound &&
 		a.StreamOK == b.StreamOK && a.NonStreamOK == b.NonStreamOK && a.ChatOK == b.ChatOK && a.CompletionsOK == b.CompletionsOK &&
 		a.InvalidSent == b.InvalidSent && a.InvalidRefused == b.InvalidRefused && a.RouterMade == b.RouterMade
 }
@@ -461,5 +535,246 @@ func TestOnlyTheRouterRowsStackRunsInstancesBehindEnvoy(t *testing.T) {
 		if r.Name != BetaRouterName && r.Name != BetaKeeperName && r.Name != BetaBulkName && len(hostOptionsFor(r.Name)) != 0 {
 			t.Errorf("%s has host options: only the router row runs Instances behind a router, the keeper row the relay keeper and the bulk row the bulk path", r.Name)
 		}
+	}
+}
+
+// The refusal groups are S13's own list (spikes/s13/README.md, "Valid requests a server may still refuse"): the README's bullets are read
+// here, and each group's anchor is in exactly one of them, and each bullet holds exactly one group's anchor. A group retyped from memory, or a
+// bullet S13 adds, fails.
+func TestTheRefusalGroupsAreS13sList(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(repoRootForTest(t), "spikes", "s13", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bullets []string
+	in := false
+	for _, l := range strings.Split(string(b), "\n") {
+		switch {
+		case strings.HasPrefix(l, "- **Valid requests a server may still refuse.**"):
+			in = true
+		case in && strings.HasPrefix(l, "  - "):
+			bullets = append(bullets, l)
+		case in && strings.HasPrefix(l, "    ") && len(bullets) > 0:
+			bullets[len(bullets)-1] += " " + strings.TrimSpace(l) // a bullet's continuation line
+		case in && len(bullets) > 0 && !strings.HasPrefix(l, "  "):
+			in = false
+		}
+	}
+	if len(bullets) != len(refusalGroups) {
+		t.Fatalf("S13's list has %d bullets, and refusalGroups %d groups:\n%s", len(bullets), len(refusalGroups), strings.Join(bullets, "\n"))
+	}
+	for _, g := range refusalGroups {
+		n := 0
+		for _, bl := range bullets {
+			if strings.Contains(bl, g.anchor) {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("group %q's anchor %q is in %d of S13's bullets, want exactly 1", g.name, g.anchor, n)
+		}
+	}
+	for _, bl := range bullets {
+		n := 0
+		for _, g := range refusalGroups {
+			if strings.Contains(bl, g.anchor) {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("S13's bullet %q holds %d groups' anchors, want exactly 1", bl, n)
+		}
+	}
+}
+
+// repoRootForTest is the module's root, from this package's directory.
+func repoRootForTest(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+		t.Fatalf("no go.mod at %s: %v", root, err)
+	}
+	return root
+}
+
+// Each refusal group holds S13's cases of its fields, and a case that sets a plain sampling field is in none. Written out from the README's
+// bullets and S13's case names, not from RefusalGroupOf.
+func TestEachRefusalGroupHoldsItsCasesAndAPlainCaseNone(t *testing.T) {
+	want := map[string]string{
+		"chat/chat_template":                         "a request chat_template",
+		"chat/mm_processor_kwargs":                   "mm_processor_kwargs and media_io_kwargs",
+		"chat/media_io_kwargs":                       "mm_processor_kwargs and media_io_kwargs",
+		"completions/prompt_embeds":                  "prompt_embeds",
+		"chat/msg/user-part-prompt_embeds":           "prompt_embeds",
+		"chat/priority":                              "a non-zero priority",
+		"completions/priority":                       "a non-zero priority",
+		"completions/suffix":                         "suffix",
+		"chat/msg/user-part-image_url":               "the media content parts",
+		"chat/msg/user-part-input_audio":             "the media content parts",
+		"chat/msg/user-part-file":                    "the media content parts",
+		"chat/msg/user-part-video_embeds":            "the media content parts",
+		"chat/msg/user-part-simple-audio":            "the media content parts",
+		"chat/response_format-structural_tag":        "the structural tags",
+		"chat/response_format-structural_tag-legacy": "the structural tags",
+		"chat/structured_outputs-structural_tag":     "the structural tags",
+		// In none: plain fields, text and non-media parts, and chat_template_kwargs, which is not the request chat_template.
+		"chat/temperature":                  "",
+		"completions/top_p":                 "",
+		"chat/minimal":                      "",
+		"chat/msg/user-part-text":           "",
+		"chat/msg/user-part-tool_reference": "",
+		"chat/msg/assistant-part-refusal":   "",
+		"chat/chat_template_kwargs":         "",
+	}
+	seen := map[string]bool{}
+	for _, c := range cases.All() {
+		g, ok := want[c.Key()]
+		if !ok {
+			continue
+		}
+		seen[c.Key()] = true
+		if got := RefusalGroupOf(c); got != g {
+			t.Errorf("%s is in group %q, want %q", c.Key(), got, g)
+		}
+	}
+	for k := range want {
+		if !seen[k] {
+			t.Errorf("S13's cases have no %s", k)
+		}
+	}
+	for _, g := range refusalGroups {
+		n := 0
+		for _, c := range cases.All() {
+			if RefusalGroupOf(c) == g.name {
+				n++
+			}
+		}
+		if n == 0 {
+			t.Errorf("group %q holds none of S13's cases", g.name)
+		}
+	}
+}
+
+// probeGlibc tries the step up to its tries, logs each failed try with its exit code and error, and fails naming the step when every try
+// failed: a transport error, a non-zero exit and an answer that is not getconf's are each a failed try, never a reading of the node.
+func TestProbeGlibcRetriesThenFailsNamingTheStep(t *testing.T) {
+	ok := slurm.Result{Stdout: []byte("glibc 2.34\n")}
+	for _, c := range []struct {
+		name    string
+		answers []func() (slurm.Result, error)
+		want    GlibcVersion
+		logs    int
+		err     string
+	}{
+		{"the first try", []func() (slurm.Result, error){func() (slurm.Result, error) { return ok, nil }}, GlibcVersion{2, 34}, 0, ""},
+		{"a transport error, then the answer", []func() (slurm.Result, error){
+			func() (slurm.Result, error) { return slurm.Result{}, errors.New("ssh: connection reset") },
+			func() (slurm.Result, error) { return ok, nil },
+		}, GlibcVersion{2, 34}, 1, ""},
+		{"a non-zero exit and a stray answer, then the answer", []func() (slurm.Result, error){
+			func() (slurm.Result, error) { return slurm.Result{ExitCode: 1}, nil },
+			func() (slurm.Result, error) {
+				return slurm.Result{Stdout: []byte("srun: error: Unable to create step")}, nil
+			},
+			func() (slurm.Result, error) { return ok, nil },
+		}, GlibcVersion{2, 34}, 2, ""},
+		{"three non-zero exits", []func() (slurm.Result, error){
+			func() (slurm.Result, error) { return slurm.Result{ExitCode: 1}, nil },
+			func() (slurm.Result, error) { return slurm.Result{ExitCode: 1}, nil },
+			func() (slurm.Result, error) { return slurm.Result{ExitCode: 137}, nil },
+		}, GlibcVersion{}, 3, "the srun step that runs getconf exited 137, in each of 3 tries"},
+		{"three transport errors", []func() (slurm.Result, error){
+			func() (slurm.Result, error) { return slurm.Result{}, errors.New("ssh: a") },
+			func() (slurm.Result, error) { return slurm.Result{}, errors.New("ssh: b") },
+			func() (slurm.Result, error) { return slurm.Result{ExitCode: 255}, errors.New("ssh: c") },
+		}, GlibcVersion{}, 3, "the srun step that runs getconf failed: ssh: c (exit 255), in each of 3 tries"},
+		{"three answers that are not getconf's", []func() (slurm.Result, error){
+			func() (slurm.Result, error) { return slurm.Result{Stdout: []byte("x")}, nil },
+			func() (slurm.Result, error) { return slurm.Result{Stdout: []byte("y")}, nil },
+			func() (slurm.Result, error) { return slurm.Result{Stdout: []byte("musl 1.2")}, nil },
+		}, GlibcVersion{}, 3, "the srun step that runs getconf answered \"musl 1.2\", not getconf's \"glibc <major>.<minor>\", in each of 3 tries"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			calls, logs := 0, 0
+			run := func(_ context.Context, cmd slurm.Command) (slurm.Result, error) {
+				if cmd.Line != "srun-line" || string(cmd.Stdin) != GlibcScript {
+					t.Errorf("the step ran %q with %q", cmd.Line, cmd.Stdin)
+				}
+				calls++
+				return c.answers[calls-1]()
+			}
+			v, err := probeGlibc(context.Background(), run, "srun-line", GlibcScript, glibcProbeTries, 0, func(string, ...any) { logs++ })
+			if c.err == "" {
+				if err != nil || v != c.want {
+					t.Fatalf("probeGlibc = %v, %v; want %v", v, err, c.want)
+				}
+			} else if err == nil || err.Error() != c.err {
+				t.Fatalf("probeGlibc's error = %v, want %q", err, c.err)
+			}
+			if calls != len(c.answers) || logs != c.logs {
+				t.Errorf("%d tries and %d log lines, want %d and %d", calls, logs, len(c.answers), c.logs)
+			}
+		})
+	}
+	if glibcProbeTries != 3 {
+		t.Errorf("glibcProbeTries = %d, want 3 (team-lead's two or three, #530's review)", glibcProbeTries)
+	}
+}
+
+// EngineVersionOf reads the verification record's engineVersion, and only a value of a version's shape: anything else is not posted.
+func TestEngineVersionOfReadsTheVerificationRecord(t *testing.T) {
+	for _, c := range []struct{ raw, want string }{
+		{`{"instance":"i","engineVersion":"0.32.0","imageDigest":"sha256:x"}`, "0.32.0"},
+		{`{"engineVersion":"0.32.1.dev3+gabc123"}`, "0.32.1.dev3+gabc123"},
+		{`{"instance":"i"}`, ""},
+		{`{"engineVersion":"0.32.0 on host-x"}`, ""},
+		{`{"engineVersion":"` + strings.Repeat("9", 41) + `"}`, ""},
+		{`not json`, ""},
+	} {
+		if got := EngineVersionOf([]byte(c.raw)); got != c.want {
+			t.Errorf("EngineVersionOf(%s) = %q, want %q", c.raw, got, c.want)
+		}
+	}
+	if S13VLLMVersion != "v0.32.0" {
+		t.Errorf("S13VLLMVersion = %q, want S13's v0.32.0 (spikes/s13/fields/vllm-v0.32.0.tsv)", S13VLLMVersion)
+	}
+}
+
+// doublePromptFormsFailure is the one failed check S13's variants make through the engine double: the double reads a string prompt only
+// (internal/agent/enginedouble, promptText: "the double reads no other form"), where vLLM serves a list of strings and token IDs, so the six
+// variants of those prompt forms are valid variants refused outside S13's groups, which the ruling (c) fails. Written out from the cases' names.
+const doublePromptFormsFailure = "a valid variant outside S13's groups that a server may refuse was answered other than 200: " +
+	"completions/prompt-list-of-strings#plain 400 [outside S13's groups], completions/prompt-list-of-strings#stream 400 [outside S13's groups], " +
+	"completions/prompt-token-id-lists#plain 400 [outside S13's groups], completions/prompt-token-id-lists#stream 400 [outside S13's groups], " +
+	"completions/prompt-token-ids#plain 400 [outside S13's groups], completions/prompt-token-ids#stream 400 [outside S13's groups]"
+
+// Through the engine double, without a stack, S13's variants fail the reading on exactly the prompt forms the double cannot read, and on
+// nothing else: what the router stand-in's verdict says (TestStandInBetaRouter), read here where CI runs it. The answers come back in the
+// cases' order; the failed check names them by key.
+func TestThroughTheDoubleOnlyThePromptFormsItCannotReadFail(t *testing.T) {
+	cfg := enginedouble.DefaultConfig()
+	srv := httptest.NewServer(enginedouble.Handler(cfg))
+	defer srv.Close()
+	var b BytesObs
+	for _, c := range cases.All() {
+		for _, v := range c.Variants() {
+			resp, err := http.Post(srv.URL+string(c.Endpoint), "application/json", strings.NewReader(string(AdaptBody(v.Body, cfg.ServedName))))
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.Add(Answer{Chat: c.Endpoint == cases.Chat, Stream: v.Stream, Valid: v.Valid(), Group: RefusalGroupOf(c), Key: v.Key(), Status: resp.StatusCode, Body: body})
+		}
+	}
+	b.Expected = b.Variants
+	if f := bytesChecks(b); !slices.Equal(f, []string{doublePromptFormsFailure}) {
+		t.Errorf("bytesChecks through the double = %q, want only %q", f, doublePromptFormsFailure)
 	}
 }
