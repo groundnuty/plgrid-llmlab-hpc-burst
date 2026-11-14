@@ -238,7 +238,7 @@ Decided for alpha (amended 2026-10-30, after S3's fix, PR #36):
 - has the API server keep events 7 days: it passes `--kube-apiserver-arg=event-ttl=168h`, where the default is 1 h. k3s passes the flag through, and kine, its SQLite datastore, deletes each event once the TTL has elapsed. kine starts each event's clock again when the host restarts, so an event lives at least 7 days (HBEP-8, Retention, with the sources);
 - backs up the store before every upgrade: an etcd snapshot, or a copy of the SQLite file;
 - upgrades the host one minor version at a time, as S3 tested;
-- on `down` and `upgrade`, stops the front first and waits for it to exit, then the tunnel processes and the controllers. The front then cuts its own requests as HBEP-5 says (a stream with `stream_cut`, detail `shutdown`; the rest with 503 `shutting_down`; each recorded with `cutBy: front_shutdown`) before frps closes their tunnels.
+- on `down` and `upgrade`, stops the front first and waits for it to exit, then the tunnel processes and the controllers. The front then lets its requests finish for up to 10 s and cuts the rest itself, as HBEP-5 says (a stream with `stream_cut`, detail `shutdown`; the rest with 503 `shutting_down`; each recorded with `cutBy: front_shutdown`), before frps closes their tunnels.
 
 ### Team option
 
