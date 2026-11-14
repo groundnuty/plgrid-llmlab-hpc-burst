@@ -24,12 +24,19 @@ package alpha
 // Headers are not compared at all: the front adds its attribution headers, and Envoy its own.
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // Reply is one path's answer to a variant: the status (0 for no answer), the body, and whether it was cut short.
@@ -285,3 +292,300 @@ func clipText(s string) string {
 
 // errorTextMax is the longest error text the post and a failed check carry.
 const errorTextMax = 160
+
+// ControlObs is the direct-to-engine control as the run read it.
+type ControlObs struct {
+	// Read says the control was made: the step ran on the node, found the worker's socket in Envoy's configuration, and the socket
+	// answered. Why says, naming the step, why it was not.
+	Read bool   `json:"read"`
+	Why  string `json:"why,omitempty"`
+	// Sent counts the variants sent straight to the engine, Answered those it answered completely, Compared those whose two answers were
+	// compared (answered completely on both paths).
+	Sent     int `json:"sent"`
+	Answered int `json:"answered"`
+	Compared int `json:"compared"`
+	// Unanswered names, by S13's key, the variants the engine did not answer completely straight from the node (at most FailedKept).
+	Unanswered []string `json:"unanswered,omitempty"`
+	// Differ is every variant whose two answers differ: the router's doing, or the path's. Alike is every variant answered other than 200
+	// alike on both paths: the deployment's own refusals, the engine's, listed.
+	Differ []VariantDiff  `json:"differ,omitempty"`
+	Alike  []AlikeVariant `json:"alike,omitempty"`
+}
+
+// VariantDiff is a variant answered differently through the router than straight to the engine: S13's key, the two statuses, and what
+// differs (CompareReplies).
+type VariantDiff struct {
+	Key    string `json:"key"`
+	Front  int    `json:"front"`
+	Direct int    `json:"direct"`
+	Why    string `json:"why"`
+}
+
+func (d VariantDiff) String() string { return d.Key + ": " + d.Why }
+
+// AlikeVariant is a variant answered other than 200, alike, on both paths: S13's key, the status, and the engine's error (ErrorText).
+type AlikeVariant struct {
+	Key    string `json:"key"`
+	Status int    `json:"status"`
+	Error  string `json:"error"`
+}
+
+func (a AlikeVariant) String() string {
+	if a.Error == "" {
+		return fmt.Sprintf("%s %d", a.Key, a.Status)
+	}
+	return fmt.Sprintf("%s %d (%s)", a.Key, a.Status, a.Error)
+}
+
+// ControlVariant is one variant as the control compares it: S13's key, whether it streams, and its two answers. Direct is absent (nil)
+// when the engine gave no answer straight from the node.
+type ControlVariant struct {
+	Key            string
+	Stream         bool
+	Front          Reply
+	Direct         *Reply
+	FrontPastBound bool
+}
+
+// ControlOf compares each variant's two answers, in the order of S13's keys. A variant the front never answered within the reading's own
+// bound is counted by the front's reading, not compared here; one the engine did not answer completely straight from the node is
+// unanswered, a failure the control names.
+func ControlOf(vs []ControlVariant) ControlObs {
+	c := ControlObs{Read: true}
+	sorted := slices.Clone(vs)
+	slices.SortStableFunc(sorted, func(x, y ControlVariant) int { return strings.Compare(x.Key, y.Key) })
+	for _, v := range sorted {
+		if v.Direct == nil {
+			c.unanswered(v.Key)
+			continue
+		}
+		c.Sent++
+		d := *v.Direct
+		if !ClassifyReply(d.Status, d.Body, v.Stream, d.Cut).Complete {
+			c.unanswered(v.Key)
+			continue
+		}
+		c.Answered++
+		if v.FrontPastBound {
+			continue
+		}
+		c.Compared++
+		if why := CompareReplies(v.Front, d, v.Stream); why != "" {
+			c.Differ = append(c.Differ, VariantDiff{Key: v.Key, Front: v.Front.Status, Direct: d.Status, Why: why})
+			continue
+		}
+		if d.Status != 200 || ErrorText(d, v.Stream) != "" {
+			c.Alike = append(c.Alike, AlikeVariant{Key: v.Key, Status: d.Status, Error: ErrorText(d, v.Stream)})
+		}
+	}
+	return c
+}
+
+func (c *ControlObs) unanswered(key string) {
+	if len(c.Unanswered) < FailedKept {
+		c.Unanswered = append(c.Unanswered, key)
+	}
+}
+
+// controlNamedMax is how many variants a failed check names; the post names every one.
+const controlNamedMax = 10
+
+// controlChecks: the control was made, the engine answered every variant straight from the node, and no variant was answered differently
+// through the router than straight to the engine (the ruling (a) on the router row, #522).
+func controlChecks(b BytesObs, c ControlObs) []string {
+	if !c.Read {
+		return []string{"the direct-to-engine control could not be read: " + c.Why}
+	}
+	var f []string
+	if c.Sent != b.Expected || c.Answered != c.Sent || len(c.Unanswered) > 0 {
+		f = append(f, fmt.Sprintf("the engine did not answer every variant completely straight from the node: %d of %d answered%s", c.Answered, b.Expected, keysNamed(c.Unanswered)))
+	}
+	if len(c.Differ) > 0 {
+		var ds []string
+		for i, d := range c.Differ {
+			if i == controlNamedMax {
+				ds = append(ds, fmt.Sprintf("and %d more, named in the post", len(c.Differ)-controlNamedMax))
+				break
+			}
+			ds = append(ds, d.String())
+		}
+		f = append(f, "a variant was answered differently through the router than straight to the engine: "+strings.Join(ds, "; "))
+	}
+	return f
+}
+
+func keysNamed(keys []string) string {
+	if len(keys) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(keys, ", ") + ")"
+}
+
+// ControlHow is how the control reached the engine, as the post says it (the ruling asks for it): from inside the run's own job, never
+// through product code.
+const ControlHow = "an srun --overlap step in the run's own job sent each variant with curl to the worker's engine socket named in Envoy's own configuration"
+
+// controlLines are the control's lines of the text to post: how it was made, its counts, every variant that differed, and every variant
+// answered other than 200 alike on both paths, the engine's own refusals with their errors.
+func controlLines(c ControlObs) string {
+	if !c.Read {
+		return "- the direct-to-engine control: not read (" + c.Why + ")\n"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "- the direct-to-engine control (%s): %d variants sent straight to the engine, %d answered completely, %d compared with the front's answer; %d answered differently through the router\n",
+		ControlHow, c.Sent, c.Answered, c.Compared, len(c.Differ))
+	if len(c.Differ) > 0 {
+		var ds []string
+		for _, d := range c.Differ {
+			ds = append(ds, d.String())
+		}
+		fmt.Fprintf(&b, "- answered differently through the router than straight to the engine, every one: %s\n", strings.Join(ds, "; "))
+	}
+	if len(c.Alike) == 0 {
+		b.WriteString("- answered other than 200 alike on both paths (the engine's own refusals under this deployment): none\n")
+	} else {
+		var as []string
+		for _, a := range c.Alike {
+			as = append(as, a.String())
+		}
+		fmt.Fprintf(&b, "- answered other than 200 alike on both paths (the engine's own refusals under this deployment), every one (%d): %s\n", len(c.Alike), strings.Join(as, "; "))
+	}
+	return b.String()
+}
+
+// WorkerSocketOf is the worker's engine socket on the node, read from Envoy's own configuration (internal/agent, envoyconf.go: each
+// cluster's endpoints, as pipe paths): the path Envoy routes to, so that the control reaches exactly Envoy's upstream. It is an error unless
+// the configuration names exactly one worker socket, a path of plain characters.
+func WorkerSocketOf(envoyJSON []byte) (string, error) {
+	var cfg struct {
+		StaticResources struct {
+			Clusters []struct {
+				LoadAssignment struct {
+					Endpoints []struct {
+						LbEndpoints []struct {
+							Endpoint struct {
+								Address struct {
+									Pipe *struct {
+										Path string `json:"path"`
+									} `json:"pipe"`
+								} `json:"address"`
+							} `json:"endpoint"`
+						} `json:"lb_endpoints"`
+					} `json:"endpoints"`
+				} `json:"load_assignment"`
+			} `json:"clusters"`
+		} `json:"static_resources"`
+	}
+	if err := json.Unmarshal(envoyJSON, &cfg); err != nil {
+		return "", fmt.Errorf("Envoy's configuration is not JSON: %w", err)
+	}
+	var socks []string
+	for _, c := range cfg.StaticResources.Clusters {
+		for _, e := range c.LoadAssignment.Endpoints {
+			for _, l := range e.LbEndpoints {
+				if p := l.Endpoint.Address.Pipe; p != nil && p.Path != "" {
+					socks = append(socks, p.Path)
+				}
+			}
+		}
+	}
+	if len(socks) != 1 {
+		return "", fmt.Errorf("Envoy's configuration names %d worker sockets, want the one worker's", len(socks))
+	}
+	if !plainPath.MatchString(socks[0]) {
+		return "", errors.New("the worker socket's path in Envoy's configuration has characters a step may not quote")
+	}
+	return socks[0], nil
+}
+
+// plainPath is a path the control's step may carry in single quotes as it is.
+var plainPath = regexp.MustCompile(`^/[A-Za-z0-9/._-]+$`)
+
+// ControlStepMinutes is the step's time limit on the node (srun --time), above ControlBound so that the step is never the one cut first.
+const ControlStepMinutes = 12
+
+// ControlBound bounds the whole direct reading: the step's run on the node, read from the host.
+const ControlBound = 10 * time.Minute
+
+// controlCurlMaxTime bounds each variant's request straight to the engine, inside the step.
+const controlCurlMaxTime = 60
+
+// ControlSrunLine is the control's step: an srun --overlap in the run's own job, as the other steps of the row, with a time limit that holds
+// the direct reading (SrunLine's is one minute).
+func ControlSrunLine(jobID string) (string, error) {
+	if _, err := SrunLine(jobID); err != nil {
+		return "", err
+	}
+	return "srun --overlap --jobid=" + jobID + " --ntasks=1 --time=" + strconv.Itoa(ControlStepMinutes) + " bash -s", nil
+}
+
+// ControlRequest is one variant as the step sends it: its endpoint and its body, as the front's reading sent it (AdaptBody).
+type ControlRequest struct {
+	Endpoint string
+	Body     []byte
+}
+
+// ControlScript is the control's step script, carried on the step's stdin with the bodies and the Instance key in it: nothing of them on
+// any command line. On the node it writes the key to a header file in a private temporary directory, removed on exit, and sends each
+// variant with curl to the worker's socket, one at a time, writing one line per variant: "R <index> <curl's exit> <status> <body,
+// base64>". It exits 21 without curl, 22 without base64, 23 without a temporary directory, and 24 when the socket is not a socket.
+func ControlScript(socket, key string, reqs []ControlRequest) (string, error) {
+	if !plainPath.MatchString(socket) {
+		return "", errors.New("the worker socket's path has characters the step may not quote")
+	}
+	if agentapi.CheckKey([]byte(key)) != nil {
+		return "", errors.New("the Instance's key is not of a key's form (agentapi.CheckKey), so the step does not carry it")
+	}
+	var b strings.Builder
+	b.WriteString("set -u\n")
+	b.WriteString("command -v curl >/dev/null 2>&1 || { echo 'control: curl is not on the node'; exit 21; }\n")
+	b.WriteString("command -v base64 >/dev/null 2>&1 || { echo 'control: base64 is not on the node'; exit 22; }\n")
+	b.WriteString("umask 077\nd=$(mktemp -d) || { echo 'control: no temporary directory'; exit 23; }\ntrap 'rm -rf \"$d\"' EXIT\n")
+	fmt.Fprintf(&b, "printf 'Authorization: Bearer %%s\\n' '%s' > \"$d/h\"\n", key)
+	fmt.Fprintf(&b, "sock='%s'\n[ -S \"$sock\" ] || { echo 'control: the worker socket is not a socket on the node'; exit 24; }\n", socket)
+	b.WriteString("while read -r i ep body; do\n")
+	b.WriteString("  : > \"$d/o\"\n")
+	b.WriteString("  printf '%s' \"$body\" | base64 -d > \"$d/b\" 2>/dev/null || { printf 'R %s 98 000 \\n' \"$i\"; continue; }\n")
+	fmt.Fprintf(&b, "  code=$(curl -sS -N --max-time %d --unix-socket \"$sock\" -H @\"$d/h\" -H 'Content-Type: application/json' --data-binary @\"$d/b\" -o \"$d/o\" -w '%%{http_code}' \"http://localhost$ep\" 2>/dev/null)\n", controlCurlMaxTime)
+	b.WriteString("  rc=$?\n  printf 'R %s %s %s %s\\n' \"$i\" \"$rc\" \"${code:-000}\" \"$(base64 -w0 < \"$d/o\" 2>/dev/null)\"\n")
+	b.WriteString("done <<'HB_CONTROL_VARIANTS'\n")
+	for i, r := range reqs {
+		if r.Endpoint != "/v1/chat/completions" && r.Endpoint != "/v1/completions" {
+			return "", fmt.Errorf("variant %d's endpoint %q is not one the control sends to", i, r.Endpoint)
+		}
+		fmt.Fprintf(&b, "%d %s %s\n", i, r.Endpoint, base64.StdEncoding.EncodeToString(r.Body))
+	}
+	b.WriteString("HB_CONTROL_VARIANTS\n")
+	return b.String(), nil
+}
+
+// ParseControl reads the step's lines: each variant's answer by its index, nil for one with no line. A curl that ended with an error is a
+// cut answer (its status, or 0 for none). connected says some variant reached the socket: a curl that could not connect (exit 7) for every
+// variant means the socket answered nothing.
+func ParseControl(out []byte, n int) (replies []*Reply, connected bool) {
+	replies = make([]*Reply, n)
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 4 || f[0] != "R" {
+			continue
+		}
+		i, err1 := strconv.Atoi(f[1])
+		rc, err2 := strconv.Atoi(f[2])
+		code, err3 := strconv.Atoi(f[3])
+		if err1 != nil || err2 != nil || err3 != nil || i < 0 || i >= n || replies[i] != nil {
+			continue
+		}
+		var body []byte
+		if len(f) > 4 {
+			body, err1 = base64.StdEncoding.DecodeString(f[4])
+			if err1 != nil {
+				continue
+			}
+		}
+		if rc != 7 {
+			connected = true
+		}
+		replies[i] = &Reply{Status: code, Body: body, Cut: rc != 0}
+	}
+	return replies, connected
+}

@@ -2,7 +2,8 @@ package alpha
 
 // The router row (issue #521; betarouter.go) over the fake cluster: one job, run on the manual clock; what the stack would show is
 // stood in for. Each fault departs from the healthy run in one way that must fail the row, or, for the glibc faults, end it NOT RUN
-// (TestARouterNodeWithAnOldGlibcIsNotRun). The healthy reading is made by Add from S13's own cases (dryRouterBytes).
+// (TestARouterNodeWithAnOldGlibcIsNotRun). The healthy reading and its direct-to-engine control are made from S13's own cases
+// (dryRouterReading).
 
 import (
 	"context"
@@ -12,44 +13,71 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/routerbytes/cases"
 )
 
-// dryRefusals is how many valid variants the healthy reading has refused with a 4xx: every one in one of S13's groups that a server may
-// still refuse, as the ruling (c) on #521 asks of the passing fixture.
+// dryRefusals is how many valid variants the healthy reading's engine refuses with a 400, alike on both paths: the deployment's own
+// refusals, which the direct-to-engine control lists and does not fail (the science agent's ruling (a) on the router row, #522).
 const dryRefusals = 38
 
-// dryRouterBytes is the healthy response-level reading, made by Add from S13's own cases: every variant answered whole; the 2 invalid ones
-// and the first dryRefusals valid ones in a refusal group with a 400; the rest with a 200. change, when set, alters one variant's answer
-// before Add counts it, for a fault.
-func dryRouterBytes(change ...func(a *Answer)) BytesObs {
-	okJSON, okStream, refusal := []byte(`{"choices":[{"text":"hi"}]}`), []byte("data: {\"x\":1}\n\ndata: [DONE]\n\n"), []byte(`{"error":{"message":"no"}}`)
+// dryEngineRefusal is the engine's refusal of a variant, written in vLLM's shape: the same on both paths.
+func dryEngineRefusal(key string) []byte {
+	return []byte(`{"error":{"message":"this deployment does not serve ` + key + `","type":"BadRequestError","param":null,"code":400}}`)
+}
+
+// dryAnswer is the engine's 200 to a variant, as one path received it: vLLM's shape, with what the sampler decides (the text, the id, the
+// counts of the completion) differing by path, as two sends of one body do, and the prompt's tokens the same.
+func dryAnswer(stream bool, path string) []byte {
+	if stream {
+		return []byte("data: {\"id\":\"c-" + path + "\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"" + path + "\"},\"finish_reason\":null}]}\n\n" +
+			"data: {\"id\":\"c-" + path + "\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"total_tokens\":11,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n")
+	}
+	return []byte(`{"id":"x-` + path + `","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"` + path +
+		`"},"finish_reason":"length"}],"usage":{"prompt_tokens":9,"total_tokens":17,"completion_tokens":8}}`)
+}
+
+// dryRouterReading is the healthy reading and its control, made from S13's own cases: every variant answered whole on both paths; the 2
+// invalid ones and the first dryRefusals valid ones (the temperature cases aside) refused alike by the engine; the rest answered 200 on both, the sampler's text
+// differing. front alters a variant's answer through the router before Add counts it, and direct its answer straight to the engine (nil
+// for none), for a fault.
+func dryRouterReading(front func(a *Answer), direct func(key string, r *Reply) *Reply) (BytesObs, ControlObs) {
 	var b BytesObs
+	var cvs []ControlVariant
 	refused := 0
 	for _, c := range cases.All() {
 		for _, v := range c.Variants() {
-			a := Answer{Chat: c.Endpoint == cases.Chat, Stream: v.Stream, Valid: v.Valid(), Group: RefusalGroupOf(c), Key: v.Key(), Status: 200, Body: okJSON}
-			if v.Stream {
-				a.Body = okStream
-			}
-			if !v.Valid() || (a.Group != "" && refused < dryRefusals) {
-				a.Status, a.Body = 400, refusal
+			a := Answer{Chat: c.Endpoint == cases.Chat, Stream: v.Stream, Valid: v.Valid(), Key: v.Key(), Status: 200, Body: dryAnswer(v.Stream, "front")}
+			d := &Reply{Status: 200, Body: dryAnswer(v.Stream, "direct")}
+			// The temperature cases, which the faults change, are answered 200 in the healthy reading.
+			if !v.Valid() || (refused < dryRefusals && !strings.Contains(v.Key(), "temperature")) {
+				a.Status, a.Body = 400, dryEngineRefusal(v.Key())
+				d = &Reply{Status: 400, Body: dryEngineRefusal(v.Key())}
 				if v.Valid() {
 					refused++
 				}
 			}
-			for _, ch := range change {
-				ch(&a)
+			if front != nil {
+				front(&a)
+			}
+			if direct != nil {
+				d = direct(v.Key(), d)
 			}
 			b.Add(a)
+			cvs = append(cvs, ControlVariant{Key: v.Key(), Stream: v.Stream, Front: Reply{Status: a.Status, Body: a.Body, Cut: a.Cut}, Direct: d, FrontPastBound: a.PastBound})
 		}
 	}
 	b.Expected = b.Variants
+	return b, ControlOf(cvs)
+}
+
+// dryRouterBytes is the healthy reading's front half, for the checks that read it alone.
+func dryRouterBytes() BytesObs {
+	b, _ := dryRouterReading(nil, nil)
 	return b
 }
 
-// answerTo sets the answer of the variant with the key, for a fault.
-func answerTo(key string, status int, body string) func(a *Answer) {
+// onKey is a change of one variant's answer through the router, for a fault.
+func onKey(key string, change func(a *Answer)) func(a *Answer) {
 	return func(a *Answer) {
 		if a.Key == key {
-			a.Status, a.Body = status, []byte(body)
+			change(a)
 		}
 	}
 }
@@ -92,8 +120,9 @@ func (d *drySteps) BetaRouter(_ context.Context, p Plan) (RouterObs, error) {
 		Deployment: d.deployment(), ReadyAt: ready, DrainStart: drain,
 		LaunchRouter: "envoy", HealthyAtReady: 1, HealthyAfterRestart: 1,
 		Envoy: EnvoyObs{Procs: 1, PinnedDigest: strings.Repeat("1d", 32), RunningDigest: strings.Repeat("1d", 32), Serving: true},
-		Glibc: glibc, Rate: 30, Bytes: dryRouterBytes(), WorkerRestarts: 1, Ladder: LadderObs{WorkerRestarts: 1}, Responses: 460, Attributed: 460,
+		Glibc: glibc, Rate: 30, WorkerRestarts: 1, Ladder: LadderObs{WorkerRestarts: 1}, Responses: 460, Attributed: 460,
 	}
+	obs.Bytes, obs.Control = dryRouterReading(nil, nil)
 	switch {
 	case d.fault("not-ready"):
 		obs.ReadyAt = time.Time{}
@@ -133,18 +162,47 @@ func (d *drySteps) BetaRouter(_ context.Context, p Plan) (RouterObs, error) {
 		obs.Bytes.StreamOK = 0
 	case d.fault("bytes-no-chat-200"):
 		obs.Bytes.ChatOK = 0
-	case d.fault("bytes-refused-outside"):
-		// The ruling's example: a 400 on a plain temperature case, in no group S13 says a server may refuse.
-		obs.Bytes = dryRouterBytes(answerTo("chat/temperature#plain", 400, `{"error":{"message":"no"}}`))
-	case d.fault("bytes-5xx-in-group"):
-		// A 5xx is never allowed, even to a variant in a refusal group.
-		obs.Bytes = dryRouterBytes(answerTo("completions/suffix#plain", 500, `{"error":{"message":"engine"}}`))
 	case d.fault("bytes-past-bound"):
-		obs.Bytes = dryRouterBytes(func(a *Answer) {
-			if a.Key == "chat/temperature#stream" {
-				a.Status, a.Body, a.Cut, a.PastBound = 0, nil, true, true
+		obs.Bytes, obs.Control = dryRouterReading(onKey("chat/temperature#stream", func(a *Answer) {
+			a.Status, a.Body, a.Cut, a.PastBound = 0, nil, true, true
+		}), nil)
+	// The control (the ruling (a) on the router row, #522).
+	case d.fault("control-router-alters"):
+		// Envoy refuses a variant the engine serves: the router's doing.
+		obs.Bytes, obs.Control = dryRouterReading(onKey("chat/temperature#plain", func(a *Answer) {
+			a.Status, a.Body = 400, dryEngineRefusal("chat/temperature#plain")
+		}), nil)
+	case d.fault("control-both-refuse"):
+		// The engine refuses a plain temperature case on both paths alike: the deployment's refusal, listed, no failure.
+		refuse := func(key string, r *Reply) *Reply {
+			if key == "chat/temperature#plain" {
+				return &Reply{Status: 400, Body: dryEngineRefusal(key)}
 			}
+			return r
+		}
+		obs.Bytes, obs.Control = dryRouterReading(onKey("chat/temperature#plain", func(a *Answer) {
+			a.Status, a.Body = 400, dryEngineRefusal("chat/temperature#plain")
+		}), refuse)
+	case d.fault("control-prompt-differs"):
+		obs.Bytes, obs.Control = dryRouterReading(onKey("chat/temperature#plain", func(a *Answer) {
+			a.Body = []byte(strings.Replace(string(a.Body), `"prompt_tokens":9`, `"prompt_tokens":10`, 1))
+		}), nil)
+	case d.fault("control-stream-ending"):
+		obs.Bytes, obs.Control = dryRouterReading(nil, func(key string, r *Reply) *Reply {
+			if key == "chat/temperature#stream" {
+				return &Reply{Status: 200, Body: []byte("data: {\"error\":{\"message\":\"engine error\",\"type\":\"InternalServerError\",\"param\":null,\"code\":500}}\n\ndata: [DONE]\n\n")}
+			}
+			return r
 		})
+	case d.fault("control-incomplete"):
+		obs.Bytes, obs.Control = dryRouterReading(nil, func(key string, r *Reply) *Reply {
+			if key == "chat/temperature#plain" {
+				return &Reply{Status: 200, Body: []byte(`{"id":`), Cut: true}
+			}
+			return r
+		})
+	case d.fault("control-unavailable"):
+		obs.Control = ControlObs{Why: "the srun step that sends the variants straight to the engine exited 21: control: curl is not on the node, in 3 tries or by its bound of 10m0s"}
 	case d.fault("unattributed"):
 		obs.Attributed = 459
 	case d.fault("no-responses"):
@@ -188,9 +246,13 @@ var betaRouterCases = []dryCase{
 	{"bytes-router-made", "a response of the response-level reading was a failure the router or the path made"},
 	{"bytes-no-stream-200", "no streamed variant answered 200"},
 	{"bytes-no-chat-200", "no chat variant answered 200"},
-	{"bytes-refused-outside", "a valid variant of S13's cases was answered other than 200, which is allowed only as a 4xx in one of S13's groups that a server may refuse: chat/temperature#plain 400 [outside S13's groups]"},
-	{"bytes-5xx-in-group", "a valid variant of S13's cases was answered with a 5xx: completions/suffix#plain 500 [suffix]"},
 	{"bytes-past-bound", "a response of the response-level reading did not finish"},
+	{"control-router-alters", "a variant was answered differently through the router than straight to the engine: chat/temperature#plain: status 400 through the router, 200 straight to the engine"},
+	{"control-both-refuse", ""},
+	{"control-prompt-differs", "a variant was answered differently through the router than straight to the engine: chat/temperature#plain: usage.prompt_tokens 10 through the router, 9 straight to the engine"},
+	{"control-stream-ending", "a variant was answered differently through the router than straight to the engine: chat/temperature#stream: the answer ended done through the router, error straight to the engine"},
+	{"control-incomplete", "the engine did not answer every variant completely straight from the node: 439 of 440 answered (chat/temperature#plain)"},
+	{"control-unavailable", "the direct-to-engine control could not be read: the srun step that sends the variants straight to the engine exited 21: control: curl is not on the node, in 3 tries or by its bound of 10m0s"},
 	{"unattributed", "a response lacked its attribution headers"},
 	{"no-responses", "no response, so attribution is unchecked"},
 	{"no-restart", "0 restarts at the worker rung, want 1"},

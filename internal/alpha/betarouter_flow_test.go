@@ -7,6 +7,7 @@ package alpha
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // BetaRouter is the router row: the Instance ready behind Envoy, what the node shows of Envoy and its glibc, one request through the
@@ -49,7 +51,10 @@ func (r *liveRun) BetaRouter(ctx context.Context, p Plan) (RouterObs, error) {
 	r.envoyOf(ctx, p, first, &o)
 	key := r.fc.KeyFor(&in)
 	o.Rate = r.rate(key)
-	o.Bytes = r.bytesReading(ctx, p, key)
+	var front []ControlVariant
+	var reqs []ControlRequest
+	o.Bytes, front, reqs = r.bytesReading(ctx, p, key)
+	o.Control = r.directControl(ctx, p, first, in, front, reqs)
 	o.WorkerRestart = r.workerRestart(ctx, p, in)
 	o.HealthyAfterRestart = r.healthyWithin(in)
 	r.endDeployment(ctx, p)
@@ -257,6 +262,7 @@ func (r *liveRun) envoyOf(ctx context.Context, p Plan, in v1alpha1.Instance, o *
 	envoys, contained := PickEnvoy(procs)
 	o.Envoy.Procs, o.Envoy.Contained = len(envoys), contained
 	if len(envoys) == 1 {
+		r.envoyConfig = envoyConfigArg(envoys[0].Argv)
 		script, err := EnvoyDigestScript(envoys[0])
 		if err != nil {
 			r.t.Fatalf("Envoy on the node: %v", err)
@@ -297,7 +303,7 @@ const bytesWorkers = 8
 // bytesReading sends every variant of S13's cases through the front once (AdaptBody), and reads each response (ClassifyReply). It is a
 // reading of the exchange on a real engine and never of bytes. The whole reading is bounded by BytesBound; a variant not answered by then
 // is one that did not finish.
-func (r *liveRun) bytesReading(ctx context.Context, p Plan, key string) BytesObs {
+func (r *liveRun) bytesReading(ctx context.Context, p Plan, key string) (BytesObs, []ControlVariant, []ControlRequest) {
 	var vs []cases.Variant
 	for _, c := range cases.All() {
 		vs = append(vs, c.Variants()...)
@@ -306,30 +312,44 @@ func (r *liveRun) bytesReading(ctx context.Context, p Plan, key string) BytesObs
 	rctx, cancel := context.WithTimeout(ctx, BytesBound)
 	defer cancel()
 	model := r.w.md.Spec.Model
-	work := make(chan cases.Variant)
+	// Each variant's front answer is kept by its place, and so is what was sent, so that the control sends the same bodies straight to the
+	// engine and compares the two answers.
+	front := make([]ControlVariant, len(vs))
+	reqs := make([]ControlRequest, len(vs))
+	for i, v := range vs {
+		front[i] = ControlVariant{Key: v.Key(), Stream: v.Stream}
+		reqs[i] = ControlRequest{Endpoint: string(v.Case.Endpoint), Body: AdaptBody(v.Body, model)}
+	}
+	type job struct {
+		i int
+		v cases.Variant
+	}
+	work := make(chan job)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for range bytesWorkers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for v := range work {
-				rp := r.fc.SendCtx(rctx, string(v.Case.Endpoint), string(AdaptBody(v.Body, model)), key)
+			for jb := range work {
+				v := jb.v
+				rp := r.fc.SendCtx(rctx, string(v.Case.Endpoint), string(reqs[jb.i].Body), key)
 				if rp.Header != nil {
 					r.keep(rp.Header)
 				}
 				// A response still awaited when the reading's own bound ran out was cut by the harness, not by the router.
 				past := rp.Err != nil && rctx.Err() != nil
 				mu.Lock()
-				obs.Add(Answer{Chat: v.Case.Endpoint == cases.Chat, Stream: v.Stream, Valid: v.Valid(), Group: RefusalGroupOf(v.Case), Key: v.Key(),
+				obs.Add(Answer{Chat: v.Case.Endpoint == cases.Chat, Stream: v.Stream, Valid: v.Valid(), Key: v.Key(),
 					Status: rp.Status, Body: rp.Body, Cut: rp.Err != nil, PastBound: past})
+				front[jb.i].Front, front[jb.i].FrontPastBound = Reply{Status: rp.Status, Body: rp.Body, Cut: rp.Err != nil}, past
 				mu.Unlock()
 			}
 		}()
 	}
-	for _, v := range vs {
+	for i, v := range vs {
 		select {
-		case work <- v:
+		case work <- job{i, v}:
 		case <-rctx.Done():
 		}
 		if rctx.Err() != nil {
@@ -338,10 +358,107 @@ func (r *liveRun) bytesReading(ctx context.Context, p Plan, key string) BytesObs
 	}
 	close(work)
 	wg.Wait()
-	p.Logf("%s: S13's cases at the response level: %d of %d variants sent, %d answered completely (%d with 200, %d with 4xx, %d with 5xx, %d other), %d made by the router or the path, %d awaited at the harness's bound; %d valid variants answered other than 200",
-		p.Row.Name, obs.Variants, obs.Expected, obs.Complete, obs.Status200, obs.Status4xx, obs.Status5xx, obs.StatusOther, obs.RouterMade, obs.PastBound, len(obs.NonOK))
+	p.Logf("%s: S13's cases at the response level: %d of %d variants sent, %d answered completely (%d with 200, %d with 4xx, %d with 5xx, %d other), %d made by the router or the path, %d awaited at the harness's bound",
+		p.Row.Name, obs.Variants, obs.Expected, obs.Complete, obs.Status200, obs.Status4xx, obs.Status5xx, obs.StatusOther, obs.RouterMade, obs.PastBound)
 	if len(obs.Failed) > 0 {
 		p.Logf("%s: variants that did not finish or that the path failed (first %d): %s", p.Row.Name, len(obs.Failed), fmt.Sprint(obs.Failed))
 	}
-	return obs
+	return obs, front, reqs
 }
+
+// envoyConfigArg is the configuration file on Envoy's command line, its -c argument; "" when there is none.
+func envoyConfigArg(argv []string) string {
+	for i, a := range argv {
+		if a == "-c" && i+1 < len(argv) {
+			return argv[i+1]
+		}
+	}
+	return ""
+}
+
+// directControl is the router row's direct-to-engine control (routercontrol.go; the science agent's ruling (a) on the router row, #522):
+// every variant the front's reading sent, sent again straight to the worker's engine socket from inside the run's own job, and the two
+// answers compared. Its failures to be made are named in Why, never a pass: the step that reads Envoy's configuration, the worker's socket in
+// it, the step that sends the variants (tried as the glibc probe is), a socket that answered nothing.
+func (r *liveRun) directControl(ctx context.Context, p Plan, first, in v1alpha1.Instance, front []ControlVariant, reqs []ControlRequest) ControlObs {
+	not := func(why string) ControlObs {
+		p.Logf("%s: the direct-to-engine control was not made: %s", p.Row.Name, why)
+		return ControlObs{Why: why}
+	}
+	if r.envoyConfig == "" || !filepath.IsAbs(r.envoyConfig) {
+		return not("Envoy's configuration was not named on its own command line")
+	}
+	key, err := agentapi.ReadKeyFile(agentapi.InstanceKeyPath(agentapi.Host{StateDir: r.h.State}.CredentialsDir(), string(in.UID)))
+	if err != nil {
+		return not("the Instance's key could not be read on the host")
+	}
+	jobID := r.ourJobFor(ctx, first, "the direct-to-engine control")
+	line, err := SrunLine(jobID)
+	if err != nil {
+		return not("the srun step: " + err.Error())
+	}
+	if !plainPath.MatchString(r.envoyConfig) {
+		return not("Envoy's configuration path has characters a step may not quote")
+	}
+	res, err := r.tr.Run(ctx, slurm.Command{Line: line, Stdin: []byte("cat '" + r.envoyConfig + "'\n"), Timeout: srunTimeout})
+	if err != nil || res.ExitCode != 0 {
+		return not(fmt.Sprintf("the srun step that reads Envoy's configuration on the node failed (exit %d, transport error %t)", res.ExitCode, err != nil))
+	}
+	sock, err := WorkerSocketOf(res.Stdout)
+	if err != nil {
+		return not(err.Error())
+	}
+	script, err := ControlScript(sock, key, reqs)
+	if err != nil {
+		return not(err.Error())
+	}
+	if r.controlScript != nil {
+		script = r.controlScript(script)
+	}
+	cline, err := ControlSrunLine(jobID)
+	if err != nil {
+		return not("the control's srun step: " + err.Error())
+	}
+	cctx, cancel := context.WithTimeout(ctx, ControlBound)
+	defer cancel()
+	var out []byte
+	var why string
+	for i := 1; i <= controlTries; i++ {
+		if i > 1 {
+			time.Sleep(controlPause)
+		}
+		res, err := r.tr.Run(cctx, slurm.Command{Line: cline, Stdin: []byte(script), Timeout: ControlBound})
+		switch {
+		case err != nil:
+			why = fmt.Sprintf("the srun step that sends the variants straight to the engine failed: %v (exit %d)", err, res.ExitCode)
+		case res.ExitCode != 0:
+			why = fmt.Sprintf("the srun step that sends the variants straight to the engine exited %d: %s", res.ExitCode, clip(res.Stdout, 120))
+		default:
+			out, why = res.Stdout, ""
+		}
+		if why == "" || cctx.Err() != nil {
+			break
+		}
+		p.Logf("%s: the direct-to-engine control, try %d of %d: %s", p.Row.Name, i, controlTries, why)
+	}
+	if why != "" {
+		return not(why + fmt.Sprintf(", in %d tries or by its bound of %s", controlTries, ControlBound))
+	}
+	replies, connected := ParseControl(out, len(reqs))
+	if !connected {
+		return not("the worker's engine socket answered no variant (curl could not connect to it)")
+	}
+	for i := range front {
+		front[i].Direct = replies[i]
+	}
+	c := ControlOf(front)
+	p.Logf("%s: the direct-to-engine control: %d sent, %d answered completely, %d compared; %d answered differently through the router, %d other than 200 alike on both paths",
+		p.Row.Name, c.Sent, c.Answered, c.Compared, len(c.Differ), len(c.Alike))
+	return c
+}
+
+// The control's step is tried as the glibc probe is: three times, five seconds apart.
+const (
+	controlTries = 3
+	controlPause = 5 * time.Second
+)
