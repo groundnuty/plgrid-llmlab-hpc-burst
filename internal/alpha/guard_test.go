@@ -618,6 +618,12 @@ func (f firstOnly) NowNoOverlap(_ context.Context, p Plan) (NowNoOverlapObs, err
 	return NowNoOverlapObs{}, err
 }
 
+func (f firstOnly) BetaBulk(_ context.Context, p Plan) (BulkObs, error) {
+	err := f.firstJobStarted(p)
+	f.after()
+	return BulkObs{}, err
+}
+
 func (f firstOnly) BetaKeeper(_ context.Context, p Plan) (KeeperObs, error) {
 	err := f.firstJobStarted(p)
 	f.after()

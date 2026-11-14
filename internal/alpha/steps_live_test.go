@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/linkemu"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/obscheck"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
@@ -56,6 +57,10 @@ type world struct {
 	// profile names it, which names the Envoy build and its pin.
 	hostOpts []stack.HostOption
 	cpuArch  string
+	// double names the engine double the world's jobs run as their engine, with the digest of its binary: empty where the engine is the real one.
+	double DoubleObs
+	// link is S17's shaped link a stand-in puts on the relays' ssh to the login node (the bulk row's), nil without it: its counters say what the replies took.
+	link *linkemu.Link
 	// objects are the PlatformProfile and the Provider.
 	objects []client.Object
 	// provider is the Provider's name, cluster the platform it is on, and qos
@@ -90,6 +95,9 @@ func hostOptionsFor(name string) []stack.HostOption {
 	case BetaKeeperName:
 		// The relay keeper runs the relays of host-dialed mode (hpcburst up --relay-keeper), which the row's config requires.
 		return []stack.HostOption{stack.RelayKeeper}
+	case BetaBulkName:
+		// The bulk path: a second frps and frpc for the non-streamed replies (hpcburst up --bulk-path), in host-dialed mode.
+		return []stack.HostOption{stack.BulkPath}
 	}
 	return nil
 }
@@ -99,6 +107,18 @@ func hostOptionsFor(name string) []stack.HostOption {
 // settings name.
 func livePorts(listen string) stack.Ports {
 	return stack.Ports{Base: 29700, ClientAddr: "127.0.0.1:29713", DialHomeListen: listen}
+}
+
+// portsFor are a row's ports out of the base block's: the bulk path grows up's block from 13 ports to 16, base+13 to base+15 (the second frps),
+// which the base block's client listener at base+13 would take, so the bulk row's is at base+16, still in #245's 29700-29719 (IMPL-COMMON).
+func portsFor(name string, p stack.Ports) stack.Ports {
+	if name == BetaBulkName {
+		p.ClientAddr = "127.0.0.1:29716"
+		if p.DialHomeListen != "" {
+			p.DialHomeListen = "127.0.0.1:29717"
+		}
+	}
+	return p
 }
 
 // liveSteps are the live run's steps over the real cluster of the row.
@@ -166,7 +186,7 @@ func liveWorld(cfg Config) (world, error) {
 			K3sDir: cfg.BinDir, Frps: filepath.Join(cfg.BinDir, "frps"), Frpc: filepath.Join(cfg.BinDir, "frpc"), Repo: repo},
 		place: func(h *stack.Host) { copyBuilds(h, builds) },
 		dh:    stack.DialHome{Mode: cfg.DialHomeMode, Addr: cfg.DialHomeAddr, KeyPath: cfg.DialHomeKey},
-		ports: livePorts(cfg.DialHomeListen), env: stack.CleanEnv(),
+		ports: portsFor(cfg.Row.Name, livePorts(cfg.DialHomeListen)), env: stack.CleanEnv(),
 		objects: []client.Object{&pp, prov}, provider: r.Cluster, cluster: r.Cluster, qos: r.QOS, md: &md, profile: pp.Spec,
 		controlDir: cfg.ControlDir, hostLock: cfg.HostLock, matchEngine: MatchesCommand, gpuModel: gpuModel, notReported: obscheck.VLLMNotReported,
 		hostOpts: hostOpts, cpuArch: cpuArch,
@@ -212,6 +232,7 @@ func (f failedSteps) NowNoOverlap(context.Context, Plan) (NowNoOverlapObs, error
 }
 func (f failedSteps) BetaRouter(context.Context, Plan) (RouterObs, error) { return RouterObs{}, f.err }
 func (f failedSteps) BetaKeeper(context.Context, Plan) (KeeperObs, error) { return KeeperObs{}, f.err }
+func (f failedSteps) BetaBulk(context.Context, Plan) (BulkObs, error)     { return BulkObs{}, f.err }
 func (f failedSteps) Ledger() Ledger                                      { return &BatchLedger{} }
 func (f failedSteps) Close(context.Context) error                         { return nil }
 func (f failedSteps) WatchResets() int                                    { return 0 }

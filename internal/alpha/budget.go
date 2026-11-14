@@ -89,7 +89,7 @@ func (r Row) WorstCase(pendingMax time.Duration) time.Duration {
 		return StartupWait + first + (r.Lease - dw) + tm.MaxRequestDuration + dw + EndMargin + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout
 	case "alpha-helios-nooverlap":
 		return StartupWait + first + r.Lease + SuccessorWait(tm, pendingMax) + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout
-	case BetaRouterName, BetaKeeperName:
+	case BetaRouterName, BetaKeeperName, BetaBulkName:
 		return StartupWait + first + (r.Lease - dw) + dw + EndMargin + 2*stack.CatchUpWorstCase + CloseTimeout
 	case "alpha-athena-now-serve":
 		return StartupWait + first + (r.Lease - dw) + stack.WaitDeadline + dw + EndMargin + 2*stack.CatchUpWorstCase + CloseTimeout

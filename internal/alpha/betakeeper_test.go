@@ -418,9 +418,11 @@ func TestOnlyTheKeeperRowsStackRunsTheRelayKeeper(t *testing.T) {
 	if len(opts) != 1 || reflect.ValueOf(opts[0]).Pointer() != reflect.ValueOf(stack.RelayKeeper).Pointer() {
 		t.Fatalf("the keeper row's host options are %d, want exactly stack.RelayKeeper", len(opts))
 	}
-	for _, o := range hostOptionsFor(BetaRouterName) {
-		if reflect.ValueOf(o).Pointer() == reflect.ValueOf(stack.RelayKeeper).Pointer() {
-			t.Error("the router row runs the relay keeper")
+	for _, name := range []string{BetaRouterName, BetaBulkName} {
+		for _, o := range hostOptionsFor(name) {
+			if reflect.ValueOf(o).Pointer() == reflect.ValueOf(stack.RelayKeeper).Pointer() {
+				t.Errorf("%s runs the relay keeper", name)
+			}
 		}
 	}
 }

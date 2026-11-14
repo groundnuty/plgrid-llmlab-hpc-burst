@@ -197,7 +197,7 @@ func TestTheFrontLabelTableIsTheRowsThatWriteAText(t *testing.T) {
 	}
 	got := block(t, string(b), "FRONT LABEL")
 	var want []string
-	for _, r := range append(alpha.Rows(), alpha.AccountingRows()...) {
+	for _, r := range append(builtRows(), alpha.AccountingRows()...) {
 		want = append(want, r.Name)
 	}
 	sort.Strings(got)

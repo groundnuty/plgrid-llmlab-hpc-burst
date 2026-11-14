@@ -58,6 +58,31 @@ func NotRun(_ Row, err error) bool {
 		errors.Is(err, ErrGlibcTooOld) || errors.Is(err, ErrKeeperStreamTooShort) || errors.Is(err, ErrKeeperStreamEndedFirst)
 }
 
+// ErrInvalid ends a run that ran and was judged with no failure, but whose reading measures nothing: the bulk row's run with no saturation witness
+// (betabulk.go, BulkInvalid; the science agent's ruling on #521, 1(a)). It is neither a pass nor a failure, and no NOT RUN: the row was put to
+// the test, and the test did not measure. Run judges the rest of the run first, writes the record (verdict "invalid") and the text to post (its
+// head INVALID, with why), and returns it only when nothing failed; a failure wins. runRow writes invalidWords to the marker (NotRunFile) and
+// skips once at the top level, and hack/live-checks.sh reads that, on the bulk row alone, as INVALID, exit 3 like a NOT RUN: not a failure,
+// not a pass, run it again.
+var ErrInvalid = errors.New(invalidWords)
+
+// invalidWords say what an INVALID run is, in the marker, which hack/live-checks.sh reads (invalid_marker).
+const invalidWords = "the run has no saturation witness, so its reading measures nothing"
+
+// InvalidError is ErrInvalid with why: the witness's checks that did not hold, in their words.
+type InvalidError struct{ Why []string }
+
+func (e *InvalidError) Error() string { return invalidWords + ": " + strings.Join(e.Why, "; ") }
+func (e *InvalidError) Unwrap() error { return ErrInvalid }
+
+// Invalid reports whether err ends the row's run as INVALID (ErrInvalid). It is never also NotRun: the two are told apart by the marker's words.
+func Invalid(_ Row, err error) bool { return errors.Is(err, ErrInvalid) }
+
+// InvalidNote is the text of an INVALID run's marker (NotRunFile): the row and the fixed words, nothing the run read. The text to post says why.
+func InvalidNote(row Row) string {
+	return fmt.Sprintf("%s: %s; its job started, ran and spent the slot, so this is no NOT RUN; the run's other checks passed; the text to post says why; the run ended its deployment\n", row.Name, invalidWords)
+}
+
 // neverStarted is whether err says a job of the run never started within a bound.
 func neverStarted(err error) bool {
 	return errors.Is(err, ErrNotStarted) || errors.Is(err, ErrQueueWaitPastEnd) || errors.Is(err, ErrSecondNotStarted)
@@ -180,6 +205,11 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 				err = fmt.Errorf("closing the steps after a job that did not start: %v (%v)", cerr, err)
 				return
 			}
+			if Invalid(cfg.Row, err) {
+				// The same for an INVALID run: a close that failed is a failure, never an INVALID.
+				err = fmt.Errorf("closing the steps after a run with no saturation witness: %v (%v)", cerr, err)
+				return
+			}
 			err = errors.Join(err, fmt.Errorf("closing the steps: %w", cerr))
 		}
 	}()
@@ -198,6 +228,8 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 		// refused is row A's NOT RUN (nowServeNotRun: a warm start the agent's log did not show): the
 		// rest of the run is judged, recorded and posted with the reason, and with no failure the run is NOT RUN.
 		refused error
+		// invalid is the bulk row's INVALID (ErrInvalid: no saturation witness), judged the same way: with no failure the run is INVALID.
+		invalid error
 	)
 	switch {
 	case strings.HasPrefix(cfg.Row.Name, "alpha-athena-handover"):
@@ -254,6 +286,17 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 			return VerifyNowNoOverlap(cfg.Row, o, j)
 		}
 		summary = func(f []string, j []provider.Job) string { return nowNoOverlapPost(cfg.Row, o, f, j, refused) }
+	case cfg.Row.Name == BetaBulkName:
+		o, serr := st.BetaBulk(ctx, plan)
+		if serr != nil {
+			return nil, serr
+		}
+		tags, obs = o.Tags, o
+		if why := BulkInvalid(o); len(why) > 0 {
+			invalid = &InvalidError{Why: why}
+		}
+		judge = func(j []provider.Job) []string { return VerifyBetaBulk(cfg.Row, o, j) }
+		summary = func(f []string, _ []provider.Job) string { return betaBulkPost(cfg.Row, o, f) }
 	case cfg.Row.Name == BetaKeeperName:
 		o, serr := st.BetaKeeper(ctx, plan)
 		if serr != nil {
@@ -308,6 +351,8 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 		verdict = "fail"
 	case refused != nil:
 		verdict = "not run"
+	case invalid != nil:
+		verdict = "invalid"
 	}
 	if serr := rec.SaveJSON(RecordFile, map[string]any{
 		"row": cfg.Row.Name, "mode": cfg.Mode(), "frontLabel": cfg.FrontLabel, "verdict": verdict, "failures": failures,
@@ -324,6 +369,9 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 	}
 	if refused != nil && len(failures) == 0 {
 		return nil, refused // a warm start or a slot was never put to the test and nothing else failed: NOT RUN, its reason posted
+	}
+	if invalid != nil && len(failures) == 0 {
+		return nil, invalid // the run measured nothing and nothing failed: INVALID, why posted
 	}
 	return failures, nil
 }
