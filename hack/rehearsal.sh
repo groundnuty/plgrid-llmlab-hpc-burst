@@ -80,6 +80,10 @@ elif [ "${REHEARSAL_PREBUILT:-0}" = 1 ]; then
 else
 	echo "building into $out"
 	go build -o "$out/" ./cmd/hpcburst ./cmd/hpcburst-controller ./cmd/hpcburst-front ./cmd/hb-agent
+	# A second build of the same commit, for the upgrade test (issue #552), which upgrades the
+	# controllers and the front to it. Go's build cache makes it cheap, and its files byte-identical
+	# to the first set's: the test tells them apart by inode, never by content.
+	go build -o "$out/second/" ./cmd/hpcburst ./cmd/hpcburst-controller ./cmd/hpcburst-front
 	go test -c -o "$out/rehearsal.test" ./internal/rehearsal/scenario
 fi
 if ! systemd-run --user --scope -q true; then
