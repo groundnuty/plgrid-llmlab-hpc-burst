@@ -62,7 +62,8 @@
 # refusal that was a NOT RUN until 13 Nov 2026 is gone with the step (#503).
 # The router row on plgrid-now (beta-athena-now-router, issue #521; beta's tracker is #522) has one: the compute node's glibc is older
 # than the 2.30 Envoy needs, read on the node or from the agent's own log of a refused start. Its marker names the version alone, which
-# judge prints; the run sent no request, and its jobs were cancelled by their tags.
+# judge prints; the run sent no request, and its jobs were cancelled by their tags. The router row on Helios's GH200
+# (beta-helios-now-router, issue #566) has the same, and posts the version too: its text to post is written, and judge says so.
 # The bulk row on plgrid-now (beta-athena-now-bulk, issue #521) has a verdict of its own by the same protocol, INVALID (the science agent's ruling on
 # #521): its run was judged, recorded and posted, nothing failed, and it has no saturation witness (the control's 64 MiB counted with its time and
 # rate while its token streams ran across the whole transfer), so its reading measures nothing. It is no NOT RUN: its job started, ran and spent the
@@ -141,7 +142,7 @@
 #   LIVE_TUNNEL_LEASE_MINUTES    optional, the tunnel rows' lease in minutes, 106 to 240 (default 137, the shape below): the owner's
 #                                choice when giving the go; the shape, the hold note and the test follow it
 #   LIVE_OWNER_GO_HELIOS_NOW     today's UTC date (YYYY-MM-DD), once the owner has said yes to the run: the rows that hold
-#                                QOS now's GPU for hours (alpha-helios-nooverlap, tunnel-hour-helios) refuse without it
+#                                QOS now's GPU for hours (alpha-helios-nooverlap, tunnel-hour-helios, beta-helios-now-router) refuse without it
 #   LIVE_OWNER_GO_ATHENA_NOW     the same for the deployment rows on Athena's one-job partition plgrid-now under
 #                                profiles/athena-now.yaml (alpha-athena-now-serve, alpha-athena-now-stage,
 #                                alpha-athena-now-nooverlap and gpu-accounting-athena-now; issue #376, Q6, citing the
@@ -231,6 +232,7 @@ alpha-athena-now-nooverlap|cluster|internal/alpha|^TestAlphaAthenaNowNoOverlap$|
 beta-athena-now-router|cluster|internal/alpha|^TestBetaAthenaNowRouter$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml,hack/fetch-envoy.sh|host|ready
 beta-athena-now-keeper|cluster|internal/alpha|^TestBetaAthenaNowKeeper$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml|host|ready
 beta-athena-now-bulk|cluster|-|-|-|-|-|pending
+beta-helios-now-router|cluster|internal/alpha|^TestBetaHeliosNowRouter$|HPCBURST_ALPHA_ROW|profiles/helios.yaml,examples/modeldeployment-qwen25-instruct.yaml,hack/fetch-envoy.sh|host,linux-arm64|ready
 rehearsal|cluster|-|-|-|-|-|pending
 # END LIVE TESTS
 TABLE
@@ -313,6 +315,7 @@ alpha-athena-now-stage|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_
 alpha-athena-now-nooverlap|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:21:00|115|-|10
 beta-athena-now-router|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
 beta-athena-now-keeper|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
+beta-helios-now-router|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|213|-C memfs
 gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|32|-|10
 gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|25|-
 gpu-accounting-athena-now|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|32|-|10
@@ -342,6 +345,7 @@ alpha-athena-now-stage|internal/providerctl/conformance/stagehelper
 alpha-athena-now-nooverlap|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 beta-athena-now-router|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 beta-athena-now-keeper|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
+beta-helios-now-router|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 rehearsal-part3|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 reach-host-dialed-helios|cmd/hb-agent
 reach-host-dialed-athena|cmd/hb-agent
@@ -363,6 +367,7 @@ alpha-athena-now-stage|1
 alpha-athena-now-nooverlap|2
 beta-athena-now-router|1
 beta-athena-now-keeper|1
+beta-helios-now-router|1
 gpu-accounting-helios|1
 gpu-accounting-athena|1
 gpu-accounting-athena-now|1
@@ -389,6 +394,7 @@ alpha-athena-now-stage|LIVE_OWNER_GO_ATHENA_NOW|50
 alpha-athena-now-nooverlap|LIVE_OWNER_GO_ATHENA_NOW|60
 beta-athena-now-router|LIVE_OWNER_GO_ATHENA_NOW|60
 beta-athena-now-keeper|LIVE_OWNER_GO_ATHENA_NOW|60
+beta-helios-now-router|LIVE_OWNER_GO_HELIOS_NOW|110
 gpu-accounting-athena-now|LIVE_OWNER_GO_ATHENA_NOW|20
 # END OWNER GO
 TABLE
@@ -457,6 +463,7 @@ alpha-athena-now-serve
 alpha-athena-now-nooverlap
 beta-athena-now-router
 beta-athena-now-keeper
+beta-helios-now-router
 gpu-accounting-helios
 gpu-accounting-athena
 gpu-accounting-athena-now
@@ -1095,7 +1102,7 @@ not_run_verdict() {
   [ -n "${HOST[$n]:-}" ] || return 1
   ! second_job_marker || [ "${MOSTJOBS[$n]:-1}" -ge 2 ] || return 1
   ! warm_marker || case $n in alpha-athena-now-serve|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1
-  ! glibc_marker || [ "$n" = beta-athena-now-router ] || return 1
+  ! glibc_marker || case $n in beta-athena-now-router|beta-helios-now-router) true ;; *) false ;; esac || return 1
   ! keeper_marker || [ "$n" = beta-athena-now-keeper ] || return 1
   ! invalid_marker || [ "$n" = beta-athena-now-bulk ] || return 1
   ! keeper_ended_marker || [ "$n" = beta-athena-now-keeper ] || return 1
@@ -1236,7 +1243,9 @@ judge() {
     elif keeper_marker; then
       say "$n: NOT RUN (the deployment's max-model-len does not hold a stream long enough to span a controller restart at the engine's measured rate: $(keeper_reason); the controller was not killed, and the run's jobs were cancelled by tag; not a failure)"
     elif glibc_marker; then
-      say "$n: NOT RUN (the compute node's glibc is older than the 2.30 Envoy needs ($(glibc_reason)); Envoy cannot run bare there; the run sent no request through the front, and the run's jobs were cancelled by tag; not a failure)"
+      posted=
+      [ ! -s "$REC_DIR/posts.md" ] || posted="; its text to post, with the version, is written"
+      say "$n: NOT RUN (the compute node's glibc is older than the 2.30 Envoy needs ($(glibc_reason)); Envoy cannot run bare there; the run sent no request through the front, and the run's jobs were cancelled by tag$posted; not a failure)"
     elif row_a_marker; then
       if warm_marker; then say "$n: NOT RUN (the agent's own log did not show the warm start: $(row_a_reason "the agent's own log did not show the warm start"); the run's other checks passed; not a failure)"; fi
       if slot_marker; then say "$n: NOT RUN (a job that is not the run's held the one-job slot between the row's two jobs: the owner's own work, left untouched; the run ended its deployment; the run's other checks passed; not a failure)"; fi
@@ -1496,7 +1505,7 @@ prepare_alpha() {
     with_build_lock go build -o "$w/bin/" ./cmd/hpcburst ./cmd/hpcburst-controller ./cmd/hpcburst-front &&
     with_build_lock hack/build-agents.sh "$w/agent-builds" &&
     hack/fetch-frp.sh --agent-builds "$w/agent-builds" &&
-    { [ "$n" != beta-athena-now-router ] || hack/fetch-envoy.sh --agent-builds "$w/agent-builds"; } ) >"$OUT/$n-build.log" 2>&1 ||
+    { case $n in beta-athena-now-router|beta-helios-now-router) hack/fetch-envoy.sh --agent-builds "$w/agent-builds" ;; esac; } ) >"$OUT/$n-build.log" 2>&1 ||
     { say "$n: FAIL (a build step failed; see the build log in the output directory)"; return 1; }
   ALPHA_BUILD_DIR=$w
 }

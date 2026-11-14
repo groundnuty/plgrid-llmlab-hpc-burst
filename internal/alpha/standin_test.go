@@ -130,7 +130,7 @@ func standInRow(t *testing.T, name string) Row {
 	switch {
 	case strings.HasPrefix(name, "tunnel-hour-"):
 		r.Timing, r.Lease = standInTunnel, 12*time.Minute
-	case name == "alpha-athena-now-serve", name == BetaRouterName:
+	case name == "alpha-athena-now-serve", IsRouterRow(name):
 		r.Timing, r.Lease = standInNow, 14*time.Minute
 	case name == BetaKeeperName:
 		// The keeper row holds a stream across a controller restart, whose outcome takes about 35 s: a request deadline of the live 5 minutes, and a
@@ -256,7 +256,7 @@ func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)
 	}
 	hub := stack.StartHub(t)
 	engine, notReported := "token-delay="+standInTokenDelay.String(), map[string]bool(nil)
-	if row.Name == "alpha-athena-now-serve" || row.Name == BetaRouterName || row.Name == BetaKeeperName {
+	if row.Name == "alpha-athena-now-serve" || IsRouterRow(row.Name) || row.Name == BetaKeeperName {
 		engine, notReported = standInNowEngine, obscheck.DoubleNotReported
 	}
 	if row.Name == BetaBulkName {
@@ -264,7 +264,7 @@ func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)
 		engine = "token-delay=" + BulkTokenDelay.String() + ",reply-bytes=" + strconv.Itoa(BulkReplyBytes)
 	}
 	md := stack.ServedDeployment(stm, v1alpha1.EnvVar{Name: "HB_ENGINE_DOUBLE", Value: engine})
-	if strings.HasPrefix(row.Name, "tunnel-hour-") || row.Name == "alpha-athena-now-serve" || row.Name == BetaRouterName || row.Name == BetaKeeperName {
+	if strings.HasPrefix(row.Name, "tunnel-hour-") || row.Name == "alpha-athena-now-serve" || IsRouterRow(row.Name) || row.Name == BetaKeeperName {
 		// The live deployment's context (steps_live_test.go), so that a large body (MinLargeBody) fits under it.
 		for i, f := range md.Spec.Source.Served.Flags {
 			if f.Name == "max-model-len" {
@@ -276,7 +276,7 @@ func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)
 	// stack's --instance-router envoy.
 	hostOpts := hostOptionsFor(row.Name)
 	envoyBin := ""
-	if row.Name == BetaRouterName {
+	if IsRouterRow(row.Name) {
 		envoyBin = testenv.EnvoyBinary(t)
 	}
 	double := DoubleObs{}
@@ -912,10 +912,16 @@ type routerStandIn struct {
 
 func runRouterStandIn(t *testing.T, tweak func(lr *liveRun, cl *stack.Cluster)) routerStandIn {
 	t.Helper()
+	return runRouterStandInRow(t, BetaRouterName, tweak)
+}
+
+// runRouterStandInRow is a router row's stand-in run, Athena's or Helios's (issue #566): the same steps, on the row's shape and slot.
+func runRouterStandInRow(t *testing.T, name string, tweak func(lr *liveRun, cl *stack.Cluster)) routerStandIn {
+	t.Helper()
 	if os.Getenv(envStandIn) != "1" {
 		t.Skipf("the stand-in proof of the live steps runs only with %s=1 (internal/alpha, standin_test.go)", envStandIn)
 	}
-	row := standInRow(t, BetaRouterName)
+	row := standInRow(t, name)
 	id, err := NewRunID()
 	if err != nil {
 		t.Fatal(err)
@@ -991,6 +997,58 @@ func TestStandInBetaRouter(t *testing.T) {
 	record, err := os.ReadFile(filepath.Join(s.cfg.Out, RecordFile))
 	if err != nil || !strings.Contains(string(record), "STAND-IN RUN") || strings.Contains(string(record), "LIVE RUN") {
 		t.Errorf("the record does not say the run was a stand-in one (%v)", err)
+	}
+}
+
+// TestStandInBetaHeliosRouter is the Helios router row's live steps over the stand-in, through Run (issue #566): the router row's, on the
+// Helios row's shape and its slot under the stand-in's one-GPU QOS, the real Envoy of the pin behind --instance-router envoy. The stand-in
+// runs on this host's architecture, so it proves the row's wiring, not the GH200 node or its arm64 builds; its glibc is this host's, above
+// 2.30, so the run is a pass, and its text to post names it.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInBetaHeliosRouter(t *testing.T) {
+	s := runRouterStandInRow(t, BetaHeliosRouterName, nil)
+	post, _ := os.ReadFile(filepath.Join(s.cfg.Out, PostsFile))
+	t.Logf("%s's text to post:\n%s", s.row.Name, post)
+	if s.err != nil {
+		t.Fatalf("%s did not finish: %v", s.row.Name, s.err)
+	}
+	if len(s.failures) > 0 {
+		t.Fatalf("%s failed its verdict over the stand-in: %s", s.row.Name, Summary(s.failures))
+	}
+	if !strings.HasPrefix(string(post), BetaHeliosRouterName+": PASS (posts to #522)\n") || !strings.Contains(string(post), "- the compute node's glibc: ") {
+		t.Errorf("the text to post is not the Helios row's pass with its glibc:\n%s", post)
+	}
+	if ours := s.jobs(); len(ours) != 1 {
+		t.Errorf("the fake cluster holds %d jobs of the run, want the one", len(ours))
+	}
+}
+
+// TestStandInBetaHeliosRouterOldGlibc is the Helios router row's NOT RUN over the stand-in, a node whose glibc the probe reads as 2.28:
+// NOT RUN as on Athena, its job ended by a cancel, no record; and, unlike Athena's, its text to post written, naming the version (issue
+// #566: the glibc is posted on any outcome).
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInBetaHeliosRouterOldGlibc(t *testing.T) {
+	s := runRouterStandInRow(t, BetaHeliosRouterName, func(lr *liveRun, _ *stack.Cluster) { lr.glibcScript = "echo 'glibc 2.28'\n" })
+	var g *GlibcTooOldError
+	if !errors.Is(s.err, ErrGlibcTooOld) || !errors.As(s.err, &g) || g.Version != (GlibcVersion{2, 28}) || g.FromAgent || len(s.failures) != 0 {
+		t.Fatalf("failures %v, err %v; want the NOT RUN of a node whose glibc is 2.28, read on the node", s.failures, s.err)
+	}
+	if _, err := os.Stat(filepath.Join(s.cfg.Out, RecordFile)); err == nil {
+		t.Errorf("a record was written for a run that sent nothing")
+	}
+	post, err := os.ReadFile(filepath.Join(s.cfg.Out, PostsFile))
+	if err != nil || !strings.HasPrefix(string(post), BetaHeliosRouterName+": NOT RUN (posts to #522): ") ||
+		!strings.Contains(string(post), "- the compute node's glibc: 2.28 (Envoy needs 2.30); read on the node: true, from the agent's log: false") {
+		t.Errorf("the text to post (%v) does not name the node's glibc of 2.28:\n%s", err, post)
+	}
+	ours := s.jobs()
+	if len(ours) != 1 {
+		t.Fatalf("the fake cluster holds %d jobs of the run, want the one", len(ours))
+	}
+	if j := ours[0]; !j.Finished || j.End.IsZero() || j.TermAt.IsZero() {
+		t.Errorf("the run's job did not end by a cancel (finished %t, ended %s, TERM at %s): the NOT RUN left it", j.Finished, j.End.Format(time.TimeOnly), j.TermAt.Format(time.TimeOnly))
 	}
 }
 

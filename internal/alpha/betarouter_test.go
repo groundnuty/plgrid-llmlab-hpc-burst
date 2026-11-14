@@ -3,6 +3,7 @@ package alpha
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -163,6 +164,25 @@ func TestGlibcOfTakesTheOlderReading(t *testing.T) {
 		if ok != c.ok || (ok && got.String() != c.want) {
 			t.Errorf("GlibcOf(%+v) = %v, %t; want %q, %t", c.r, got, ok, c.want, c.ok)
 		}
+	}
+}
+
+// The Helios router row (issue #566) is the Helios rows' shape and slot, written out: GH200 under QOS now, one GPU and one job, the
+// shortest lease an Instance's lead allows under helios.yaml's clock (106 minutes, past the 105-minute lead), the owner's go of QOS now, the
+// slot held for the lease, posting to beta's tracker; and only it of the two router rows posts its glibc on a NOT RUN.
+func TestTheHeliosRouterRowIsTheHeliosShapeAndSlot(t *testing.T) {
+	r := BetaHeliosRouterRow()
+	if r.Name != "beta-helios-now-router" || r.Cluster != "helios" || r.Partition != "plgrid-gpu-gh200" || r.QOS != "now" || r.GPUs != 1 || r.MostJobs != 1 {
+		t.Errorf("the row is %+v, want GH200 under QOS now, one GPU, one job", r)
+	}
+	if r.Lease != 106*time.Minute || r.Lease <= Lead() || r.SlotHold != r.Lease || r.StartWait != 0 {
+		t.Errorf("lease %s, slot hold %s, start wait %s; want 106 minutes, past the lead of %s, the slot held for the lease, no start wait", r.Lease, r.SlotHold, r.StartWait, Lead())
+	}
+	if r.OwnerGo != OwnerGoHeliosNow || r.PostsTo != BetaTracker || r.Budget != 213*time.Minute || !r.PostsGlibcNotRun || r.ProfileName() != "helios" {
+		t.Errorf("owner's go %q, posts to %q, budget %s, posts its glibc on a NOT RUN %t, profile %q", r.OwnerGo, r.PostsTo, r.Budget, r.PostsGlibcNotRun, r.ProfileName())
+	}
+	if !IsRouterRow(r.Name) || BetaRouterRow().PostsGlibcNotRun {
+		t.Error("the Helios row is not a router row, or the Athena row posts its glibc on a NOT RUN")
 	}
 }
 
@@ -367,6 +387,66 @@ func TestARouterNodeWithAnOldGlibcIsNotRun(t *testing.T) {
 	}
 }
 
+// The Helios router row posts its glibc on any outcome (issue #566): a GH200 node under 2.30 is NOT RUN as on Athena, with the same marker,
+// and its text to post is written as well, naming the version, the side that read it and the route, and nothing of the node. No record is
+// written: the run sent nothing to judge. The Athena row's NOT RUN posts nothing (TestARouterNodeWithAnOldGlibcIsNotRun).
+func TestTheHeliosRouterRowPostsAnOldGlibcItIsNotRunOn(t *testing.T) {
+	row := BetaHeliosRouterRow()
+	if !row.PostsGlibcNotRun || BetaRouterRow().PostsGlibcNotRun {
+		t.Fatalf("PostsGlibcNotRun: Helios %t, Athena %t; want the Helios row alone", row.PostsGlibcNotRun, BetaRouterRow().PostsGlibcNotRun)
+	}
+	for _, c := range []struct {
+		fault, version, side string
+		onNode               bool
+	}{
+		{"glibc-old-probe", "2.28", "on the node", true},
+		{"glibc-old-agent", "2.28", "from the agent's own log", false},
+		{"glibc-one-under", "2.29", "on the node", true},
+	} {
+		t.Run(c.fault, func(t *testing.T) {
+			cfg := Config{Row: row, Dry: true, DryFault: c.fault, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
+			rec, err := NewRecorder(cfg.Out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			failures, err := Run(context.Background(), cfg, newDrySteps(t, cfg, "betarouter"), rec, t.Logf)
+			if !errors.Is(err, ErrGlibcTooOld) || !NotRun(row, err) || len(failures) != 0 {
+				t.Fatalf("failures %v, err %v; want the NOT RUN of a node whose glibc is too old", failures, err)
+			}
+			want := "beta-helios-now-router: the compute node's glibc is older than the 2.30 Envoy needs (glibc " + c.version + "); the run sent no request through the front; this run's jobs were cancelled by tag\n"
+			if note := NotRunNote(row, cfg.PendingMax, err); note != want {
+				t.Errorf("the marker's note is\n%q\nwant\n%q", note, want)
+			}
+			if _, err := os.Stat(filepath.Join(cfg.Out, RecordFile)); err == nil {
+				t.Errorf("a record was written for a run that sent nothing")
+			}
+			post, err := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
+			if err != nil {
+				t.Fatalf("no text to post: %v", err)
+			}
+			head := "beta-helios-now-router: NOT RUN (posts to #522): the compute node's glibc is older than the 2.30 Envoy needs (glibc " + c.version +
+				", read " + c.side + "); Envoy cannot run bare on this node, so Apptainer is its route (HBEP-5:133); the run sent no request through the front, and its jobs were cancelled by tag\n"
+			line := fmt.Sprintf("- the compute node's glibc: %s (Envoy needs 2.30); read on the node: %t, from the agent's log: %t\n", c.version, c.onNode, !c.onNode)
+			if !strings.HasPrefix(string(post), head) || !strings.Contains(string(post), line) || !strings.Contains(string(post), FrontLine(testFrontLabel)) {
+				t.Errorf("the text to post is\n%s\nwant it headed\n%s\nwith the front's line and\n%s", post, head, line)
+			}
+		})
+	}
+	// At the minimum the Helios node is fine: no NOT RUN, and the run's text to post is the router row's.
+	cfg := Config{Row: row, Dry: true, DryFault: "glibc-at-the-minimum", Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
+	rec, err := NewRecorder(cfg.Out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failures, err := Run(context.Background(), cfg, newDrySteps(t, cfg, "betarouter"), rec, t.Logf); err != nil || len(failures) != 0 {
+		t.Fatalf("at the minimum: failures %v, err %v", failures, err)
+	}
+	if post, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile)); !strings.HasPrefix(string(post), "beta-helios-now-router: PASS (posts to #522)\n") ||
+		!strings.Contains(string(post), "- the compute node's glibc: 2.30 (Envoy needs 2.30)") {
+		t.Errorf("at the minimum the text to post is\n%s", post)
+	}
+}
+
 // AdaptBody changes S13's model name and bounds generation where the case sets none, and nothing else.
 func TestAdaptBodyChangesOnlyTheModelAndTheBound(t *testing.T) {
 	for _, c := range []struct{ name, in, model, want string }{
@@ -514,17 +594,31 @@ func TestHealthyOfIsTheCountOrMinusOneWhenAbsent(t *testing.T) {
 	}
 }
 
-// Only the router row's stack runs Instances behind Envoy: its host options are the router's alone, and every other row's are none. The live
-// world and the stand-in's both take them from hostOptionsFor.
+// Only the router rows' stacks run Instances behind Envoy, Athena's and Helios's (issue #566): their host options are the router's alone,
+// and every other row's are none. The live world and the stand-in's both take them from hostOptionsFor.
 func TestOnlyTheRouterRowsStackRunsInstancesBehindEnvoy(t *testing.T) {
-	opts := hostOptionsFor(BetaRouterName)
-	if len(opts) != 1 || reflect.ValueOf(opts[0]).Pointer() != reflect.ValueOf(stack.InstanceRouter).Pointer() {
-		t.Fatalf("the router row's host options are %d, want exactly stack.InstanceRouter", len(opts))
-	}
-	for _, r := range slices.Concat(Rows(), AccountingRows(), ReachRows(), HostDialedRows(), StageRows()) {
-		if r.Name != BetaRouterName && r.Name != BetaKeeperName && r.Name != BetaBulkName && len(hostOptionsFor(r.Name)) != 0 {
-			t.Errorf("%s has host options: only the router row runs Instances behind a router, the keeper row the relay keeper and the bulk row the bulk path", r.Name)
+	for _, name := range []string{BetaRouterName, BetaHeliosRouterName} {
+		opts := hostOptionsFor(name)
+		if len(opts) != 1 || reflect.ValueOf(opts[0]).Pointer() != reflect.ValueOf(stack.InstanceRouter).Pointer() {
+			t.Fatalf("%s's host options are %d, want exactly stack.InstanceRouter", name, len(opts))
 		}
+	}
+	routers := 0
+	for _, r := range slices.Concat(Rows(), AccountingRows(), ReachRows(), HostDialedRows(), StageRows()) {
+		switch {
+		case IsRouterRow(r.Name):
+			routers++
+		case r.Name == BetaKeeperName, r.Name == BetaBulkName:
+			// The keeper row's relay keeper and the bulk row's bulk path: their own options, not a router.
+			if opts := hostOptionsFor(r.Name); len(opts) != 1 || reflect.ValueOf(opts[0]).Pointer() == reflect.ValueOf(stack.InstanceRouter).Pointer() {
+				t.Errorf("%s's host options are %d, want its one option and no router", r.Name, len(opts))
+			}
+		case len(hostOptionsFor(r.Name)) != 0:
+			t.Errorf("%s has host options: only the router rows run Instances behind a router, the keeper row the relay keeper and the bulk row the bulk path", r.Name)
+		}
+	}
+	if routers != 2 {
+		t.Errorf("%d router rows among the rows, want Athena's and Helios's", routers)
 	}
 }
 

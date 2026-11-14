@@ -90,7 +90,7 @@ type world struct {
 // here, so that a row's router is one decision.
 func hostOptionsFor(name string) []stack.HostOption {
 	switch name {
-	case BetaRouterName:
+	case BetaRouterName, BetaHeliosRouterName:
 		return []stack.HostOption{stack.InstanceRouter}
 	case BetaKeeperName:
 		// The relay keeper runs the relays of host-dialed mode (hpcburst up --relay-keeper), which the row's config requires.
