@@ -194,8 +194,8 @@ var dryRows = []dryRow{
 	{"gpu-accounting-athena", confPkg, "HPCBURST_LIVECHECKS_CONF_TEST", accountingFaults, accountingPassing, nil},
 	// plgrid-now (issue #145): the Athena twin's job under the partition's own one-job slot, which the owner's job can hold.
 	{"gpu-accounting-athena-now", confPkg, "HPCBURST_LIVECHECKS_CONF_TEST", accountingFaults, accountingPassing, []string{"slot-held"}},
-	{"alpha-athena-now-serve", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", nowServeFaults, nil, nil},
-	{"alpha-athena-now-nooverlap", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", nowNoOverlapFaults, nil, nil},
+	{"alpha-athena-now-serve", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", nowServeFaults, []string{"rehash-cold", "rehash-unread"}, nil},
+	{"alpha-athena-now-nooverlap", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", nowNoOverlapFaults, []string{"rehash-cold", "rehash-unread"}, nil},
 	{"beta-athena-now-router", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaRouterFaults, []string{"glibc-at-the-minimum", "control-both-refuse"}, nil},
 	{"beta-athena-now-keeper", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaKeeperFaults, []string{"window-at-the-floor"}, nil},
 }

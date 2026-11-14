@@ -70,12 +70,19 @@ func rehashLine(job string, w WarmObs) string {
 		return head + "not read: the agent's log was not read\n"
 	case !r.Read:
 		return head + "not read: the agent's log holds no rehash line\n"
-	case r.Files == 0:
-		return head + fmt.Sprintf("none: a cold start, no listed file of %d was present to rehash\n", r.Listed)
+	}
+	return head + RehashWords(r) + "\n"
+}
+
+// RehashWords is a rehash that was read, as a text to post says it: the numbers and the rate they give, or, for a cold
+// start, why there are none, in words. The pre-staging row (internal/providerctl/conformance) says its helper's with it.
+func RehashWords(r RehashObs) string {
+	if r.Files == 0 {
+		return fmt.Sprintf("none: a cold start, no listed file of %d was present to rehash", r.Listed)
 	}
 	rate := "too short for a rate"
 	if r.MS > 0 {
 		rate = fmt.Sprintf("%.0f MB/s", float64(r.Bytes)/float64(r.MS)/1e3)
 	}
-	return head + fmt.Sprintf("%d of %d listed files, %d bytes (%.2f GB) in %.1f s, %s\n", r.Files, r.Listed, r.Bytes, float64(r.Bytes)/1e9, float64(r.MS)/1e3, rate)
+	return fmt.Sprintf("%d of %d listed files, %d bytes (%.2f GB) in %.1f s, %s", r.Files, r.Listed, r.Bytes, float64(r.Bytes)/1e9, float64(r.MS)/1e3, rate)
 }

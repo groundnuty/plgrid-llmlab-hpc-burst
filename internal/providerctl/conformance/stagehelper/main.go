@@ -29,10 +29,12 @@
 // It leaves one line of fixed words and numbers in <allocation directory>/
 // stage-result, written as stage-result.part and renamed:
 //
-//	outcome=ok image_seconds=N image_built=true|false checkpoint_seconds=N files=N mismatched=N
+//	outcome=ok image_seconds=N image_built=true|false checkpoint_seconds=N files=N mismatched=N rehash_files=N rehash_listed=N rehash_bytes=N rehash_ms=N
 //	outcome=error step=image|files|checkpoint|config
 //	outcome=signalled step=image|files|checkpoint|config
 //
+// The rehash fields are the stager's rehash of the files it found present before any download (issue #575): rehash_files=0
+// on a cold staging.
 // An error line names the step only; the error itself goes to standard error.
 // A step that failed once SIGTERM or SIGINT had come is the signalled line,
 // never an error line: Slurm sends TERM at the job's time limit, so the

@@ -70,7 +70,7 @@ const (
 
 // The helper's lines (stagehelper's result.line), and nothing else.
 var (
-	stageOKLine    = regexp.MustCompile(`^outcome=ok image_seconds=(\d+) image_built=(true|false) checkpoint_seconds=(\d+) files=(\d+) mismatched=(\d+)\n$`)
+	stageOKLine    = regexp.MustCompile(`^outcome=ok image_seconds=(\d+) image_built=(true|false) checkpoint_seconds=(\d+) files=(\d+) mismatched=(\d+) rehash_files=(\d+) rehash_listed=(\d+) rehash_bytes=(\d+) rehash_ms=(\d+)\n$`)
 	stageErrorLine = regexp.MustCompile(`^outcome=error step=(image|files|checkpoint|config)\n$`)
 	// stageSignalledLine is a step cut off by the signal: Slurm's TERM at the time limit, or a cancel.
 	stageSignalledLine = regexp.MustCompile(`^outcome=signalled step=(image|files|checkpoint|config)\n$`)
@@ -84,13 +84,17 @@ type stageResult struct {
 	imageSeconds, checkpointSeconds int
 	imageBuilt                      bool
 	files, mismatched               int
+	// rehash is the stager's rehash of the files it found present (issue #575): information for the text to post, never the verdict.
+	rehash alpha.RehashObs
 }
 
 // parseStageResult reads the helper's line; anything but one of its lines is an error.
 func parseStageResult(b []byte) (stageResult, error) {
 	if m := stageOKLine.FindSubmatch(b); m != nil {
 		n := func(i int) int { v, _ := strconv.Atoi(string(m[i])); return v }
-		return stageResult{present: true, ok: true, imageSeconds: n(1), imageBuilt: string(m[2]) == "true", checkpointSeconds: n(3), files: n(4), mismatched: n(5)}, nil
+		n64 := func(i int) int64 { v, _ := strconv.ParseInt(string(m[i]), 10, 64); return v }
+		return stageResult{present: true, ok: true, imageSeconds: n(1), imageBuilt: string(m[2]) == "true", checkpointSeconds: n(3), files: n(4), mismatched: n(5),
+			rehash: alpha.RehashObs{Read: true, Files: n(6), Listed: n(7), Bytes: n64(8), MS: n64(9)}}, nil
 	}
 	if m := stageErrorLine.FindSubmatch(b); m != nil {
 		return stageResult{present: true, step: string(m[1])}, nil
@@ -121,6 +125,12 @@ func stageVerdict(r stageResult, ran, limit time.Duration) (pass bool, why strin
 		return false, fmt.Sprintf("%d checkpoint files were present and did not match their identity", r.mismatched)
 	}
 	return true, ""
+}
+
+// stageRehashLine is the staging's rehash in the text to post (issue #575: HBEP-9's rehash time), from the helper's line: the
+// numbers, or a cold staging, the row's usual one, in words. It is information and changes no verdict.
+func stageRehashLine(r alpha.RehashObs) string {
+	return "- the checkpoint's rehash, from the stage helper's line (HBEP-9's rehash time; information, not a check): " + alpha.RehashWords(r) + "\n"
 }
 
 // stageExampleInputs are the served deployment's image and checkpoint, read as a ModelDeployment from the file row A
@@ -299,13 +309,15 @@ func stageBody(t testing.TB, w *world, rowName string) {
 		row.Name, verdict, row.PostsTo, row.Partition, qosUsed(w.s.qos, w.s.part.QOS), ran.Round(time.Second), limit)
 	if res.ok {
 		posts += fmt.Sprintf("- the sandbox image: built %t, in %d s; the checkpoint: %d files in %d s, %d mismatched\n", res.imageBuilt, res.imageSeconds, res.files, res.checkpointSeconds, res.mismatched)
+		posts += stageRehashLine(res.rehash)
 	}
 	if !pass {
 		posts += "- " + why + "\n"
 	}
 	w.p.save(alpha.PostsFile, []byte(posts))
-	w.p.save(alpha.RecordFile, []byte(fmt.Sprintf("{\"row\": %q, \"verdict\": %q, \"ranSeconds\": %d, \"result\": {\"present\": %t, \"ok\": %t, \"signalled\": %t, \"step\": %q, \"imageBuilt\": %t, \"imageSeconds\": %d, \"files\": %d, \"checkpointSeconds\": %d, \"mismatched\": %d}}\n",
-		row.Name, verdict, int(ran.Seconds()), res.present, res.ok, res.signalled, res.step, res.imageBuilt, res.imageSeconds, res.files, res.checkpointSeconds, res.mismatched)))
+	w.p.save(alpha.RecordFile, []byte(fmt.Sprintf("{\"row\": %q, \"verdict\": %q, \"ranSeconds\": %d, \"result\": {\"present\": %t, \"ok\": %t, \"signalled\": %t, \"step\": %q, \"imageBuilt\": %t, \"imageSeconds\": %d, \"files\": %d, \"checkpointSeconds\": %d, \"mismatched\": %d, \"rehash\": {\"files\": %d, \"listed\": %d, \"bytes\": %d, \"ms\": %d}}}\n",
+		row.Name, verdict, int(ran.Seconds()), res.present, res.ok, res.signalled, res.step, res.imageBuilt, res.imageSeconds, res.files, res.checkpointSeconds, res.mismatched,
+		res.rehash.Files, res.rehash.Listed, res.rehash.Bytes, res.rehash.MS)))
 	if !pass {
 		t.Fatalf("%s: %s", row.Name, why)
 	}
@@ -418,9 +430,23 @@ func TestTheStageRowsDryRunStagesWhereTheAgentStages(t *testing.T) {
 //livecheck:none a dry test on this host, no cluster
 func TestTheStageRowsVerdict(t *testing.T) {
 	limit := 30 * time.Minute
-	ok, err := parseStageResult([]byte("outcome=ok image_seconds=600 image_built=true checkpoint_seconds=40 files=10 mismatched=0\n"))
-	if err != nil || !ok.ok || ok.files != 10 || !ok.imageBuilt {
+	ok, err := parseStageResult([]byte("outcome=ok image_seconds=600 image_built=true checkpoint_seconds=40 files=10 mismatched=0 rehash_files=0 rehash_listed=10 rehash_bytes=0 rehash_ms=0\n"))
+	if err != nil || !ok.ok || ok.files != 10 || !ok.imageBuilt || ok.rehash != (alpha.RehashObs{Read: true, Listed: 10}) {
 		t.Fatalf("the ok line read as %+v, %v", ok, err)
+	}
+	// The rehash is information: a cold staging's words, a warm one's numbers, and the verdict the same either way.
+	if l := stageRehashLine(ok.rehash); l != "- the checkpoint's rehash, from the stage helper's line (HBEP-9's rehash time; information, not a check): none: a cold start, no listed file of 10 was present to rehash\n" {
+		t.Errorf("a cold staging's rehash line: %q", l)
+	}
+	warm, err := parseStageResult([]byte("outcome=ok image_seconds=2 image_built=false checkpoint_seconds=9 files=10 mismatched=0 rehash_files=9 rehash_listed=10 rehash_bytes=15400000000 rehash_ms=8800\n"))
+	if err != nil || warm.rehash != (alpha.RehashObs{Read: true, Files: 9, Listed: 10, Bytes: 15400000000, MS: 8800}) {
+		t.Fatalf("a warm ok line read as %+v, %v", warm, err)
+	}
+	if l := stageRehashLine(warm.rehash); !strings.HasSuffix(l, "9 of 10 listed files, 15400000000 bytes (15.40 GB) in 8.8 s, 1750 MB/s\n") {
+		t.Errorf("a warm staging's rehash line: %q", l)
+	}
+	if pass, why := stageVerdict(warm, 2*time.Minute, limit); !pass {
+		t.Errorf("a warm staging fails: %s", why)
 	}
 	if pass, why := stageVerdict(ok, 12*time.Minute, limit); !pass {
 		t.Errorf("an ok staging fails: %s", why)
@@ -451,7 +477,8 @@ func TestTheStageRowsVerdict(t *testing.T) {
 	if pass, _ := stageVerdict(mism, 12*time.Minute, limit); pass {
 		t.Error("a mismatched file passes")
 	}
-	for _, bad := range []string{"", "outcome=ok\n", "outcome=error step=/scratch\n", "outcome=signalled step=/scratch\n", "outcome=signalled\n", "outcome=ok image_seconds=1 image_built=true checkpoint_seconds=1 files=1 mismatched=0", "x\noutcome=error step=image\n"} {
+	for _, bad := range []string{"", "outcome=ok\n", "outcome=error step=/scratch\n", "outcome=signalled step=/scratch\n", "outcome=signalled\n", "outcome=ok image_seconds=1 image_built=true checkpoint_seconds=1 files=1 mismatched=0 rehash_files=0 rehash_listed=1 rehash_bytes=0 rehash_ms=0",
+		"outcome=ok image_seconds=1 image_built=true checkpoint_seconds=1 files=1 mismatched=0\n", "x\noutcome=error step=image\n"} {
 		if _, err := parseStageResult([]byte(bad)); err == nil {
 			t.Errorf("%q read as a line of the helper's", bad)
 		}

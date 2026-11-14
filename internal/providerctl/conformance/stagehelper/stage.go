@@ -59,6 +59,9 @@ type result struct {
 	imageBuilt        bool
 	checkpointSeconds int64
 	files, mismatched int
+	// rehash is the stager's rehash of the files it found present before any download (issue #575: HBEP-9's rehash time):
+	// a cold staging, the row's usual one, finds none.
+	rehash agent.RehashStat
 }
 
 // line is the one line of the result file: fixed words and numbers only.
@@ -69,8 +72,8 @@ func (r result) line() string {
 	case r.step != "":
 		return "outcome=error step=" + r.step
 	}
-	return fmt.Sprintf("outcome=ok image_seconds=%d image_built=%t checkpoint_seconds=%d files=%d mismatched=%d",
-		r.imageSeconds, r.imageBuilt, r.checkpointSeconds, r.files, r.mismatched)
+	return fmt.Sprintf("outcome=ok image_seconds=%d image_built=%t checkpoint_seconds=%d files=%d mismatched=%d rehash_files=%d rehash_listed=%d rehash_bytes=%d rehash_ms=%d",
+		r.imageSeconds, r.imageBuilt, r.checkpointSeconds, r.files, r.mismatched, r.rehash.Files, r.rehash.Listed, r.rehash.Bytes, r.rehash.Duration.Milliseconds())
 }
 
 // failed is a result that names the step, after the error went to stderr.
@@ -166,7 +169,7 @@ func stageAll(ctx context.Context, dir string, in inputs, getenv func(string) st
 	if err != nil {
 		return failed(stderr, stepCheckpoint, err)
 	}
-	res.files = len(ck.Files)
+	res.files, res.rehash = len(ck.Files), ck.Rehash
 	for _, f := range ck.Files {
 		if f.Outcome == agentapi.FileMismatch {
 			res.mismatched++

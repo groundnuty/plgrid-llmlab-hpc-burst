@@ -17,7 +17,7 @@ import (
 )
 
 // okLine is the success line: fixed words and numbers.
-var okLine = regexp.MustCompile(`^outcome=ok image_seconds=[0-9]+ image_built=(true|false) checkpoint_seconds=[0-9]+ files=[0-9]+ mismatched=[0-9]+$`)
+var okLine = regexp.MustCompile(`^outcome=ok image_seconds=[0-9]+ image_built=(true|false) checkpoint_seconds=[0-9]+ files=[0-9]+ mismatched=[0-9]+ rehash_files=[0-9]+ rehash_listed=[0-9]+ rehash_bytes=[0-9]+ rehash_ms=[0-9]+$`)
 
 func TestSuccessLineHasTheFixedForm(t *testing.T) {
 	hub := stack.StartHub(t)
@@ -33,7 +33,9 @@ func TestSuccessLineHasTheFixedForm(t *testing.T) {
 		t.Fatalf("result line %q is not the fixed form", line)
 	}
 	// The counts, against the double's own list (not against the staging).
-	for _, w := range []string{"image_built=true", "files=" + strconv.Itoa(len(files)), "mismatched=0"} {
+	// A first, cold run rehashes nothing: no listed file was present before its downloads (issue #575).
+	for _, w := range []string{"image_built=true", " files=" + strconv.Itoa(len(files)) + " ", "mismatched=0",
+		" rehash_files=0 rehash_listed=" + strconv.Itoa(len(files)) + " rehash_bytes=0 "} {
 		if !strings.Contains(line, w) {
 			t.Errorf("result line %q lacks %q", line, w)
 		}
@@ -56,8 +58,14 @@ func TestSecondRunDoesNotBuildAgain(t *testing.T) {
 			t.Fatalf("run %d exited %d: %s", i+1, code, errs)
 		}
 	}
-	if line := fx.result(t); !strings.Contains(line, "image_built=false") {
+	line := fx.result(t)
+	if !strings.Contains(line, "image_built=false") {
 		t.Errorf("the second run's line is %q, want image_built=false", line)
+	}
+	// The second run rehashes every listed file the first one staged (issue #575): as many as listed, some bytes.
+	m := regexp.MustCompile(` rehash_files=(\d+) rehash_listed=(\d+) rehash_bytes=(\d+) `).FindStringSubmatch(line)
+	if m == nil || m[1] != m[2] || m[1] == "0" || m[3] == "0" {
+		t.Errorf("the second run's line is %q, want every listed file rehashed, with their bytes", line)
 	}
 	if calls := apptainerCalls(t, fx); !slices.Equal(calls, []string{"build"}) {
 		t.Errorf("the fake Apptainer recorded %v over two runs, want one build", calls)
@@ -82,7 +90,7 @@ func TestMismatchedFileIsCountedAndNotReplaced(t *testing.T) {
 	if code, errs := fx.run(t, goodInputs()); code != 0 {
 		t.Fatalf("exit %d: %s", code, errs)
 	}
-	if line := fx.result(t); !strings.Contains(line, "outcome=ok") || !strings.HasSuffix(line, "mismatched=1") {
+	if line := fx.result(t); !strings.Contains(line, "outcome=ok") || !strings.Contains(line, " mismatched=1 ") {
 		t.Errorf("result line %q, want outcome=ok and mismatched=1", line)
 	}
 	got, err := os.ReadFile(filepath.Join(dir, "config.json"))
