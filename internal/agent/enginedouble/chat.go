@@ -1,6 +1,7 @@
 package enginedouble
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -328,6 +329,12 @@ func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
 	if len(req.Messages) == 0 {
 		writeError(w, http.StatusBadRequest, "BadRequestError", "messages must not be empty")
 		return
+	}
+	for i, m := range req.Messages {
+		if string(bytes.TrimSpace(m.Name)) == "null" {
+			writeError(w, http.StatusBadRequest, "BadRequestError", fmt.Sprintf("messages.%d.name: Input should be a valid string", i))
+			return
+		}
 	}
 	if !h.modelExists(w, req.Model) {
 		return

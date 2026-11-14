@@ -24,6 +24,12 @@ type Engine struct {
 	// is answered before then.
 	StartDelay time.Duration
 
+	// StartFails makes every worker's start fail, as the real agent reports a start it could not make
+	// (a missing cache directory, a refused exec): phase exited at once, no PID and no start time, exit
+	// code 127 and ExitedAt the time of the attempt. The start is still recorded (Starts), with PID 0.
+	// The worker stays exited until its generation rises, like any exited worker.
+	StartFails bool
+
 	// StagingDuration is how long staging takes. A new Instance is reported
 	// with Staging inProgress until the Agent's clock reaches the Step in which
 	// the Agent first took the Instance up (the first apply, after any earlier

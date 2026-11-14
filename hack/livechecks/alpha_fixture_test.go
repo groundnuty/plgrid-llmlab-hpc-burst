@@ -17,6 +17,7 @@ func alphaFixtureFiles() map[string]string {
 		"examples/provider-helios-gh200.yaml": "kind: Provider\n",
 		"hack/build-agents.sh":                "#!/bin/bash\n" + alphaBuildStub + "\n",
 		"hack/fetch-frp.sh":                   "#!/bin/bash\n" + alphaFetchStub + "\n",
+		"hack/fetch-envoy.sh":                 "#!/bin/bash\n" + alphaEnvoyStub + "\n",
 		// The plgrid-now rows of issue #376: row A's inputs, and the pre-staging row's helper package and build script.
 		"profiles/athena-now.yaml":                             "name: athena-now\n",
 		"examples/modeldeployment-qwen25-instruct.yaml":        "kind: ModelDeployment\n",
@@ -32,6 +33,10 @@ echo helper > "$1"`
 // The two scripts prepare_alpha runs: they record that they ran, with their arguments, and make what the run later looks for.
 const alphaBuildStub = `echo "build-agents $*" >> "$STUB_STATE/events"
 mkdir -p "$1" && echo agent > "$1/hb-agent-x86_64" && echo agent > "$1/hb-agent-aarch64"`
+
+// The router row's one more (issue #521): hack/fetch-envoy.sh --agent-builds DIR puts envoy-<cpuArch> beside the agent builds.
+const alphaEnvoyStub = `echo "fetch-envoy $*" >> "$STUB_STATE/events"
+mkdir -p "$2" && echo envoy > "$2/envoy-x86_64" && echo envoy > "$2/envoy-aarch64"`
 
 const alphaFetchStub = `echo "fetch-frp $*" >> "$STUB_STATE/events"
 mkdir -p "$2" && echo frpc > "$2/frpc-x86_64" && echo frpc > "$2/frpc-aarch64"`
