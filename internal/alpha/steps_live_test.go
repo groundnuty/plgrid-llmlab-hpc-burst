@@ -523,7 +523,8 @@ func (r *liveRun) controllerWindow() time.Duration {
 // timeLimit is the time limit the controller gives the row's jobs
 // (internal/lifecycle, allocationTimeLimit): the shortest of the partition's
 // maxTime, the QOS limits' maxWall and the lease, in whole minutes. A job's
-// lease end is its start plus it.
+// lease end is its start plus it, or later by the time its configuration took
+// (TwoJobGuard.planned).
 func (r *liveRun) timeLimit() time.Duration {
 	t := r.t
 	t.Helper()

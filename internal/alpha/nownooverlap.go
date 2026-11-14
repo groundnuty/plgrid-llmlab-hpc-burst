@@ -184,6 +184,28 @@ type NowNoOverlapObs struct {
 	WarmSuccessor   WarmObs `json:"warmSuccessor"`
 	// DeploymentEnded is true when the run ended its deployment at the row's end and saw every job of the run end.
 	DeploymentEnded bool `json:"deploymentEnded"`
+	// PredecessorLeaseSlack and SuccessorLeaseSlack are, in whole seconds, the most the job-count guard's looks listed
+	// each job's lease end past its start plus its time limit (TwoJobGuard.LeaseSlacks): the time Slurm took to
+	// configure it (issue #534). Nil when no look saw that job run.
+	PredecessorLeaseSlack *int64 `json:"predecessorLeaseSlackSeconds,omitempty"`
+	SuccessorLeaseSlack   *int64 `json:"successorLeaseSlackSeconds,omitempty"`
+}
+
+// LeaseSlackSeconds is a slack of TwoJobGuard.LeaseSlacks in whole seconds, as NowNoOverlapObs keeps it; nil stays nil.
+func LeaseSlackSeconds(d *time.Duration) *int64 {
+	if d == nil {
+		return nil
+	}
+	n := int64(*d / time.Second)
+	return &n
+}
+
+// slackWords is one job's slack in the text to post.
+func slackWords(n *int64) string {
+	if n == nil {
+		return "not seen running"
+	}
+	return fmt.Sprintf("%d s", *n)
 }
 
 // Gap is the time from the predecessor's drain start until its successor is ready; zero when either end was not seen.
@@ -341,6 +363,8 @@ func nowNoOverlapPost(row Row, o NowNoOverlapObs, failures []string, jobs []prov
 			fmt.Fprintf(&b, "- from the predecessor's job end to the successor's submission: %s; the successor's queue wait: %s\n", s.Round(time.Second), q.Round(time.Second))
 		}
 	}
+	fmt.Fprintf(&b, "- each job's lease end past its start plus its time limit, as the guard's looks listed it (at most %s taken): the predecessor's job %s, the successor's job %s\n",
+		MaxLeaseSlack, slackWords(o.PredecessorLeaseSlack), slackWords(o.SuccessorLeaseSlack))
 	fmt.Fprintf(&b, "- the slot between the jobs: %d reads (%d failed); a job outside the run seen in it: %t; the successor refused for the submit limit: %t\n",
 		o.Slot.Reads, o.Slot.Failed, o.Slot.ForeignSeen, o.Slot.Refused)
 	b.WriteString(warmLine("the predecessor's job", o.WarmPredecessor, !o.PredecessorReady.IsZero()))
