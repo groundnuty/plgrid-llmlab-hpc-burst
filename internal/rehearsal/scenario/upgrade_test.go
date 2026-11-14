@@ -10,6 +10,7 @@ package scenario_test
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -36,6 +37,22 @@ var upgradeEntries = []string{"controller", "front", "frps", "frps-bulk", "relay
 // upgradeRestartReasons are the events that would show the upgrade disturbed the Instance: a restart rung,
 // or a handover.
 var upgradeRestartReasons = []string{v1alpha1.ReasonWorkerRestart, v1alpha1.ReasonInstanceRestart, v1alpha1.ReasonRouterRestart, v1alpha1.EventReasonHandedOver}
+
+// portsAnswered lists the ports of the block (base to base+16, the client's included) that accept a TCP
+// connection before the stack starts: something else on this host takes them, though no listener of
+// ours exists yet, as a Kubernetes NodePort (30000-32767) of the host's own k3s does, below the socket
+// layer where a free-port check by listeners cannot see it.
+func portsAnswered(p stack.Ports) []int {
+	var out []int
+	for n := p.Base; n <= p.Base+16; n++ {
+		c, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(n)), 300*time.Millisecond)
+		if err == nil {
+			c.Close()
+			out = append(out, n)
+		}
+	}
+	return out
+}
 
 // startUpgradeRig is the keeper rig, on the upgrade test's ports, with the bulk path and the instance router
 // too, on k3s 1.35.9, running its own copies of the controller and the front.
@@ -121,6 +138,9 @@ func TestRehearsalUpgradeWithTheControllersRunning(t *testing.T) {
 		t.Fatalf("the upgrade test starts on k3s %s, missing from HPCBURST_BIN_DIR (hack/fetch-k3s.sh DIR %s %s): %v", keeperOlderK3s, keeperOlderK3s, keeperNewerK3s, err)
 	}
 	second := secondBuild(t)
+	if taken := portsAnswered(portsUpgrade); len(taken) > 0 {
+		t.Fatalf("ports %v of the upgrade test's block answer before its stack starts: something else on this host takes them (a NodePort of the host's k3s, say); the block must move", taken)
+	}
 	r := startUpgradeRig(t)
 	in, repl := r.keeperStart()
 	r.beforeDrain("upgrade", in)

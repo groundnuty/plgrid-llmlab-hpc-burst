@@ -4,6 +4,7 @@ package scenario_test
 // the bad one it exists to catch.
 
 import (
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/keeperprobe"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 )
 
 // startCopy starts a copy of sleep from path, ended at the test's end.
@@ -193,5 +195,23 @@ func TestNewBackup(t *testing.T) {
 	}
 	if _, err := newBackup(state, backupNames(state)); err == nil {
 		t.Error("newBackup found a new backup where none was made")
+	}
+}
+
+// portsAnswered finds a port of the block that accepts a connection, and none in a block where nothing
+// listens.
+func TestPortsAnswered(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	port := l.Addr().(*net.TCPAddr).Port
+	if port < 17 {
+		t.Skip("the kernel gave a port too low for a block before it")
+	}
+	got := portsAnswered(stack.Ports{Base: port - 4})
+	if len(got) != 1 || got[0] != port {
+		t.Errorf("portsAnswered = %v, want [%d], the one port that listens", got, port)
 	}
 }
