@@ -127,7 +127,7 @@ func TestAPidfdOwnerRefusesAKernelWithNoPidfd(t *testing.T) {
 	pidfdOpen = func(int, int) (int, error) { return -1, unix.ENOSYS }
 	t.Cleanup(func() { pidfdOpen = saved })
 	o := OwnerOptions{
-		Ports: map[agentapi.RelayChannel]int{agentapi.RelayControl: 30000, agentapi.RelayServing: 30001},
+		Ports: map[agentapi.RelayChannel]int{agentapi.RelayControl: 28000, agentapi.RelayServing: 28001},
 		Epoch: func(context.Context) (int64, error) { return 1, nil },
 	}
 	if _, err := NewOwner(o); err != nil {

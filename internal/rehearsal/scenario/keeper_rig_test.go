@@ -31,10 +31,10 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
-// portsKeeper are the keeper rehearsal's ports, in #343's block (30000-30039):
-// the launcher's 30020-30032 (the dial-home listener at its loopback default,
-// base+7) and the front's client listener 30033.
-var portsKeeper = stack.Ports{Base: 30020, ClientAddr: "127.0.0.1:30033"}
+// portsKeeper are the keeper rehearsal's ports, in #343's block (28000-28039):
+// the launcher's 28020-28032 (the dial-home listener at its loopback default,
+// base+7) and the front's client listener 28033.
+var portsKeeper = stack.Ports{Base: 28020, ClientAddr: "127.0.0.1:28033"}
 
 // keeperTiming is the keeper rehearsal's clock: a 25 min lease (under the
 // partition's 30 min), and a maxRequestDuration of 20 min, so an open stream

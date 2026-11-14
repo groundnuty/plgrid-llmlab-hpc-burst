@@ -24,12 +24,23 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
-// Probe is what the helpers read from: the test, the stack's host (its state directory and its status), the API client and the stack's ports.
+// Probe is what the helpers read from: the test, the stack's host (its state directory and its status), the API client and the stack's ports, and the
+// name of the Provider whose relays, Lease and fence are read: the rehearsal's (stack.ProviderName) when empty, and the run's own where a run names its
+// Provider after itself, as an alpha row's does (issue #521).
 type Probe struct {
-	T     stack.T
-	H     *stack.Host
-	C     client.Client
-	Ports stack.Ports
+	T        stack.T
+	H        *stack.Host
+	C        client.Client
+	Ports    stack.Ports
+	Provider string
+}
+
+// provider is the name of the Provider the probe reads.
+func (pr Probe) provider() string {
+	if pr.Provider != "" {
+		return pr.Provider
+	}
+	return stack.ProviderName
 }
 
 // keeperReport is the keeper's status report, read over its socket.
@@ -45,9 +56,12 @@ func (pr Probe) Report() wire.StatusReport {
 }
 
 // ProviderPart is the rehearsal Provider's part of a keeper report.
-func ProviderPart(rep wire.StatusReport) wire.ProviderStatus {
+func ProviderPart(rep wire.StatusReport) wire.ProviderStatus { return PartOf(rep, stack.ProviderName) }
+
+// PartOf is the named Provider's part of a keeper report, empty when the report has none.
+func PartOf(rep wire.StatusReport, provider string) wire.ProviderStatus {
 	for _, p := range rep.Providers {
-		if p.Provider == stack.ProviderName {
+		if p.Provider == provider {
 			return p
 		}
 	}
@@ -57,8 +71,13 @@ func ProviderPart(rep wire.StatusReport) wire.ProviderStatus {
 // UpRelays are the relays the keeper reports up for jobID, by channel, and
 // how many it reports up for each.
 func UpRelays(rep wire.StatusReport, jobID string) (map[agentapi.RelayChannel]wire.RelayState, map[agentapi.RelayChannel]int) {
+	return UpRelaysOf(rep, stack.ProviderName, jobID)
+}
+
+// UpRelaysOf is UpRelays for the named Provider.
+func UpRelaysOf(rep wire.StatusReport, provider, jobID string) (map[agentapi.RelayChannel]wire.RelayState, map[agentapi.RelayChannel]int) {
 	out, n := map[agentapi.RelayChannel]wire.RelayState{}, map[agentapi.RelayChannel]int{}
-	for _, rs := range ProviderPart(rep).Relays {
+	for _, rs := range PartOf(rep, provider).Relays {
 		if rs.JobID == jobID && rs.State == wire.StateUp && rs.PID != 0 {
 			out[rs.Channel] = rs
 			n[rs.Channel]++
@@ -138,13 +157,13 @@ func (pr Probe) Relays(what, jobID string) View {
 	v := View{Sup: sup, Keeper: keeper, Job: jobID, Relays: map[agentapi.RelayChannel]*Pin{}}
 	stack.WaitState(pr.T, stack.WaitDeadline, what+": both relays of job "+jobID+" up under the keeper, as its own ssh children", func() (bool, string) {
 		rep := pr.Report()
-		up, n := UpRelays(rep, jobID)
+		up, n := UpRelaysOf(rep, pr.provider(), jobID)
 		kids := RelayChildren(keeper.PID)
 		v.Epoch, v.States = rep.KeeperEpoch, up
 		for _, ch := range agentapi.RelayChannels {
 			rs, ok := up[ch]
 			if !ok || n[ch] != 1 {
-				return false, fmt.Sprintf("the keeper reports %d %s relays up for the job: %+v", n[ch], ch, ProviderPart(rep).Relays)
+				return false, fmt.Sprintf("the keeper reports %d %s relays up for the job: %+v (it reports on %s)", n[ch], ch, PartOf(rep, pr.provider()).Relays, providersOf(rep))
 			}
 			l, child := kids[rs.PID]
 			if !child || l.Job != jobID || l.Ch != ch || l.Epoch != rep.KeeperEpoch || rs.Epoch != rep.KeeperEpoch || l.Seq != rs.Seq {
@@ -185,7 +204,7 @@ func (pr Probe) Lease() (LeaseState, bool) {
 	var l coordinationv1.Lease
 	ctx, cancel := stack.CallCtx(pr.T)
 	defer cancel()
-	name := v1alpha1.ProviderLeaseName(stack.ProviderName)
+	name := v1alpha1.ProviderLeaseName(pr.provider())
 	if err := pr.C.Get(ctx, types.NamespacedName{Namespace: v1alpha1.ControllerNamespace, Name: name}, &l); err != nil {
 		return LeaseState{}, false
 	}
@@ -207,7 +226,7 @@ func (pr Probe) Fence() (int64, bool) {
 	if err != nil {
 		pr.T.Fatalf("the relay keeper's state file: %v", err)
 	}
-	f, ok := ks.Providers[stack.ProviderName]
+	f, ok := ks.Providers[pr.provider()]
 	return f.HighestEpoch, ok
 }
 
@@ -238,4 +257,14 @@ func (pr Probe) NewLeader(what string, old *Pin, was string) LeaseState {
 			fmt.Sprintf("Lease %+v, a new controller %v", l, fresh)
 	})
 	return l
+}
+
+// providersOf names the Providers a keeper report has a part for, and how many relays each reports: what a wait that finds none for the Provider it
+// reads says it saw instead.
+func providersOf(rep wire.StatusReport) string {
+	var parts []string
+	for _, p := range rep.Providers {
+		parts = append(parts, fmt.Sprintf("%s: %d relays", p.Provider, len(p.Relays)))
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
 }

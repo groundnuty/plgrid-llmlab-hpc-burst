@@ -27,7 +27,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
-// rowOutcome is how a row's test ends. From Run's result, as runRow (alpha_live_test.go) ends it: a skip for NOT RUN, a failure for an
+// rowOutcome is how a row's test ends. From Run's result, as runRow (alpha_live_test.go) ends it: a skip for NOT RUN or INVALID, a failure for an
 // error or a failed check. Any error the test reported besides, here the watch's clean-up at its end, fails the test whatever Run said,
 // and hack/live-checks.sh reads NOT RUN only from a skip with no failed test (not_run_verdict), PASS only from a pass.
 func rowOutcome(row Row, failures []string, err error, testErrs []string) string {
@@ -36,6 +36,8 @@ func rowOutcome(row Row, failures []string, err error, testErrs []string) string
 		return "FAIL"
 	case NotRun(row, err):
 		return "NOT RUN"
+	case Invalid(row, err):
+		return "INVALID"
 	case err != nil || len(failures) > 0:
 		return "FAIL"
 	}
@@ -85,6 +87,16 @@ func (s firstClockSteps) NowServe(_ context.Context, p Plan) (NowServeObs, error
 func (s firstClockSteps) NowNoOverlap(_ context.Context, p Plan) (NowNoOverlapObs, error) {
 	_, err := s.firstReady(p)
 	return NowNoOverlapObs{}, err
+}
+
+func (s firstClockSteps) BetaBulk(_ context.Context, p Plan) (BulkObs, error) {
+	_, err := s.firstReady(p)
+	return BulkObs{}, err
+}
+
+func (s firstClockSteps) BetaKeeper(_ context.Context, p Plan) (KeeperObs, error) {
+	_, err := s.firstReady(p)
+	return KeeperObs{}, err
 }
 
 func (s firstClockSteps) BetaRouter(_ context.Context, p Plan) (RouterObs, error) {

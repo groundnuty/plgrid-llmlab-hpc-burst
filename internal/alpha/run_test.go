@@ -68,6 +68,8 @@ var dryCases = map[string][]dryCase{
 	"tunnel-hour-athena":         tunnelCases,
 	"alpha-athena-now-serve":     nowServeCases,
 	"beta-athena-now-router":     betaRouterCases,
+	"beta-athena-now-keeper":     betaKeeperCases,
+	"beta-athena-now-bulk":       betaBulkCases,
 	"alpha-athena-now-nooverlap": nowNoOverlapCases,
 }
 
@@ -173,6 +175,10 @@ func familyOf(row string) string {
 		return "nowserve"
 	case row == BetaRouterName:
 		return "betarouter"
+	case row == BetaKeeperName:
+		return "betakeeper"
+	case row == BetaBulkName:
+		return "betabulk"
 	case strings.HasPrefix(row, "alpha-athena-now-nooverlap"):
 		return "nownooverlap"
 	case strings.HasPrefix(row, "alpha-athena"):
@@ -513,8 +519,8 @@ func neverStartedErrors() map[string]error {
 func stackRows(t *testing.T) []Row {
 	t.Helper()
 	out := Rows()
-	if len(out) != 7 {
-		t.Fatalf("the package runs %d stack rows, the table below was written for 7 (rows A and B on plgrid-now added, #376, and the router row, #521): add the new row's cases", len(out))
+	if len(out) != 9 {
+		t.Fatalf("the package runs %d stack rows, the table below was written for 9 (rows A and B on plgrid-now added, #376, and the router, keeper and bulk rows, #521): add the new row's cases", len(out))
 	}
 	return out
 }
@@ -523,7 +529,7 @@ func stackRows(t *testing.T) []Row {
 func allRows(t *testing.T) []Row {
 	t.Helper()
 	out := append(append(Rows(), AccountingRows()...), ReachRows()...)
-	if len(out) != 12 {
+	if len(out) != 14 {
 		t.Fatalf("there are %d rows, the table below was written for 11 (rows A and B on plgrid-now added, #376, and the accounting row on plgrid-now, #145): add the new row's cases", len(out))
 	}
 	return out

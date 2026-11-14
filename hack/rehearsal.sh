@@ -12,7 +12,8 @@
 # bin/ (HPCBURST_BIN_DIR) and puts its frps and its x86_64 frpc in REHEARSAL_OUT/frp (HPCBURST_FRP_DIR).
 # The archive gives all three, so neither variable may be set. rehearsal.test is built from the checkout,
 # which is the tag's: the archive holds no test. A SHA256SUMS beside the archive is checked. The archive
-# has the one pinned k3s, so '^TestRehearsalKeeper', which needs k3s-1.35.9 too, does not run from it.
+# has the one pinned k3s, so '^TestRehearsal(Keeper|Upgrade)', which needs k3s-1.35.9 too, does not run from it,
+# nor does the upgrade test, which needs the second build too.
 #
 # Optional:
 #   REHEARSAL_UNPACK_ONLY=1 with REHEARSAL_ARCHIVE, unpack and stop: nothing is built or run
@@ -20,8 +21,10 @@
 #   REHEARSAL_RUN           a -test.run pattern (default '^TestRehearsal(Direct|SSH|HostDialed)$', issue #146's two
 #                           and #298's host-dialed mode;
 #                           '^TestRehearsalPart3$' runs issue #193's third part, about 8 minutes more;
-#                           '^TestRehearsalKeeper' runs #343's relay keeper tests, about 7 minutes,
-#                           which need HPCBURST_BIN_DIR to hold k3s-1.35.9/k3s too)
+#                           '^TestRehearsal(Keeper|Upgrade)' runs #343's relay keeper tests, #553's stop
+#                           order on down and #552's upgrade with the controllers running, about 13 minutes,
+#                           which need HPCBURST_BIN_DIR to hold k3s-1.35.9/k3s too, and the upgrade test the
+#                           second build, which this script makes unless REHEARSAL_PREBUILT is set)
 #   REHEARSAL_OUT           where the binaries go (default a new temporary directory)
 #   REHEARSAL_PREBUILT=1    run the binaries already in REHEARSAL_OUT instead of building them,
 #                           so the run can take a host's resource lock without a build inside it
@@ -32,8 +35,8 @@
 #                           6444 and 10250. Without it, the test records whichever of them listen
 #                           and fails if that changes.
 # It binds 127.0.0.1 only, on ports 29500-29539 (issue #146's tests), 29780-29799 (#298's host-dialed
-# mode), 29680-29699 (issue #193's), 30020-30033 (#343's relay keeper tests), 30360-30379 (#454's
-# Instance behind Envoy), 30400-30419 (#439's two workers behind Envoy)
+# mode), 29680-29699 (issue #193's), 28020-28033 (#343's relay keeper tests), 28360-28379 (#454's
+# Instance behind Envoy), 28400-28419 (#439's two workers behind Envoy)
 # and kernel-chosen ones, and never touches a system k3s.
 #
 # The test starts k3s, the supervisor, the fake jobs and the sshds in sessions of their own, and
@@ -80,6 +83,10 @@ elif [ "${REHEARSAL_PREBUILT:-0}" = 1 ]; then
 else
 	echo "building into $out"
 	go build -o "$out/" ./cmd/hpcburst ./cmd/hpcburst-controller ./cmd/hpcburst-front ./cmd/hb-agent
+	# A second build of the same commit, for the upgrade test (issue #552), which upgrades the
+	# controllers and the front to it. Go's build cache makes it cheap, and its files byte-identical
+	# to the first set's: the test tells them apart by inode, never by content.
+	go build -o "$out/second/" ./cmd/hpcburst ./cmd/hpcburst-controller ./cmd/hpcburst-front
 	go test -c -o "$out/rehearsal.test" ./internal/rehearsal/scenario
 fi
 if ! systemd-run --user --scope -q true; then

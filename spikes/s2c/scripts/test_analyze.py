@@ -860,7 +860,7 @@ class RelayControlTest(unittest.TestCase):
                 for x in ttfts:
                     f.write(json.dumps({"ttft_ms": x, "latency_ms": x + 100, "prompt_tokens": 50, "cached_tokens": -1}) + "\n")
         with open(os.path.join(arm, "relay-counts.tsv"), "w") as f:
-            f.write("127.0.0.1:30422\t" + conns + "\n")
+            f.write("127.0.0.1:28422\t" + conns + "\n")
         return d
 
     def test_added_latency(self):

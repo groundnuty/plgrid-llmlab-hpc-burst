@@ -2,9 +2,9 @@ package front
 
 // The split on the real frp v0.71.1 (testenv.FrpBinaries; HBEP-6, The bulk path; #448, part 5):
 // the launcher's two frps, from its own renderers (frps, and frps-bulk with tcpMux off), a token
-// frpc and a bulk frpc, each through the production dial-home listener. Ports: base 30296 in
-// #448's block (30280-30359, IMPL-COMMON), so the plugin stub binds 30304, frps 30305-30307 and
-// frps-bulk 30309-30311; every other listener takes a kernel port. Everything binds 127.0.0.1.
+// frpc and a bulk frpc, each through the production dial-home listener. Ports: base 28296 in
+// #448's block (28280-28359, IMPL-COMMON), so the plugin stub binds 28304, frps 28305-28307 and
+// frps-bulk 28309-28311; every other listener takes a kernel port. Everything binds 127.0.0.1.
 
 import (
 	"bufio"
@@ -28,7 +28,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
-const bulkRigBase = 30296
+const bulkRigBase = 28296
 
 // bulkRig is the launcher's two frps on bulkRigBase, admitted by a stub plugin at both paths.
 type bulkRig struct {

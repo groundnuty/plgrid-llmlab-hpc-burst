@@ -36,9 +36,9 @@ func TestVersionSubcommandPrintsTheReleaseFromTheBuildInformation(t *testing.T) 
 func TestTheControllersOwnCommandLinesAreNotTheVersionCommand(t *testing.T) {
 	for _, args := range [][]string{
 		nil,
-		{"--state-dir", "/state", "--port-base", "30010", "--health-addr", "127.0.0.1:30016"},
+		{"--state-dir", "/state", "--port-base", "28010", "--health-addr", "127.0.0.1:28016"},
 		{"--version"},
-		{"relaykeeper", "--state-dir", "/state", "--port-base", "30010"},
+		{"relaykeeper", "--state-dir", "/state", "--port-base", "28010"},
 		{"relaykeeper", "version"},
 		{"--state-dir", "version"},
 	} {

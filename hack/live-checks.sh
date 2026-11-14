@@ -30,11 +30,11 @@
 #
 # Exit codes: 0 all passed; 1 a test failed, skipped, left a job behind or
 # timed out; 2 usage error, an unreadable range or a table of this script
-# that loads no rows; 3 refused or NOT RUN (a
+# that loads no rows; 3 refused, NOT RUN or INVALID (a
 # setting is missing, a file is not mode 600, the one-job slot is in use; or a
 # job that never started within its bound was cancelled by its tag, on any row: not a failure, try again later; or
-# the scheduler rejected the row's shape in the dry-run estimate, with or without --yes); 4 a cluster test
-# was not run because --yes was not given.
+# the scheduler rejected the row's shape in the dry-run estimate, with or without --yes; or the bulk row's run had no
+# saturation witness, below); 4 a cluster test was not run because --yes was not given.
 #
 # NOT RUN (one protocol for every cluster row; the science agent's ruling of 8 Nov 2026, #272): a job that never
 # started within its bound ends the row as NOT RUN, exit 3, whichever bound ran out and whether the row has a
@@ -63,6 +63,19 @@
 # The router row on plgrid-now (beta-athena-now-router, issue #521; beta's tracker is #522) has one: the compute node's glibc is older
 # than the 2.30 Envoy needs, read on the node or from the agent's own log of a refused start. Its marker names the version alone, which
 # judge prints; the run sent no request, and its jobs were cancelled by their tags.
+# The bulk row on plgrid-now (beta-athena-now-bulk, issue #521) has a verdict of its own by the same protocol, INVALID (the science agent's ruling on
+# #521): its run was judged, recorded and posted, nothing failed, and it has no saturation witness (the control's 64 MiB counted with its time and
+# rate while its token streams ran across the whole transfer), so its reading measures nothing. It is no NOT RUN: its job started, ran and spent the
+# slot, and the run was put to the test, where a NOT RUN's job never started or its row was never put to the test. Its marker names it in fixed
+# words, held to that row alone; judge prints "<row>: INVALID (not a NOT RUN: ...)", apart from PASS, FAIL and NOT RUN, and the row exits 3 like a
+# NOT RUN: not a failure, not a pass, run it again. Its text to post says why. A failure of any other check wins: the row is a FAIL. The row is pending in the tables, so --run refuses it
+# (exit 2) before any of this until it is made ready.
+# The keeper row on plgrid-now (beta-athena-now-keeper, issue #521) has one: the deployment's max-model-len does not hold a stream long enough to span
+# a controller restart's outcome at the engine's measured rate. Its marker names the rate and the context, numbers only, which judge prints; the run
+# killed no controller, and its jobs were cancelled by their tags. The row runs in host-dialed mode alone. It has a second, of a run that did start
+# (the science agent's ruling (b) on #543): nothing failed, but the stream did not outlast the keeper's outcome by the 30 s margin, so the run cannot
+# show a stream crossing the handover. Its marker names the times from when the stream was opened (its request's start), durations only, which judge prints; the controller
+# was killed, the run's other checks passed, and its text to post says NOT RUN with the times.
 # Row B on plgrid-now (alpha-athena-now-nooverlap, issue #376) has two of its own, judged the same way: a job that is not the
 # run's held the one-job slot between its two jobs (the owner's own work, which the run never touches; Q7), and either job's
 # warm start its agent's own log did not show. Its first job's start wait runs from the deployment's creation, its second's
@@ -216,6 +229,8 @@ reach-host-dialed-helios|cluster|internal/providerctl/conformance|^TestReachHost
 reach-host-dialed-athena|cluster|internal/providerctl/conformance|^TestReachHostDialed$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
 alpha-athena-now-nooverlap|cluster|internal/alpha|^TestAlphaAthenaNowNoOverlap$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml|host|ready
 beta-athena-now-router|cluster|internal/alpha|^TestBetaAthenaNowRouter$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml,hack/fetch-envoy.sh|host|ready
+beta-athena-now-keeper|cluster|internal/alpha|^TestBetaAthenaNowKeeper$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml|host|ready
+beta-athena-now-bulk|cluster|-|-|-|-|-|pending
 rehearsal|cluster|-|-|-|-|-|pending
 # END LIVE TESTS
 TABLE
@@ -297,6 +312,7 @@ alpha-athena-now-serve|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_
 alpha-athena-now-stage|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:30:00|60|-|10
 alpha-athena-now-nooverlap|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:21:00|115|-|10
 beta-athena-now-router|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
+beta-athena-now-keeper|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
 gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|32|-|10
 gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|25|-
 gpu-accounting-athena-now|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|32|-|10
@@ -325,6 +341,7 @@ alpha-athena-now-serve|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,c
 alpha-athena-now-stage|internal/providerctl/conformance/stagehelper
 alpha-athena-now-nooverlap|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 beta-athena-now-router|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
+beta-athena-now-keeper|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 rehearsal-part3|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 reach-host-dialed-helios|cmd/hb-agent
 reach-host-dialed-athena|cmd/hb-agent
@@ -345,6 +362,7 @@ alpha-athena-now-serve|1
 alpha-athena-now-stage|1
 alpha-athena-now-nooverlap|2
 beta-athena-now-router|1
+beta-athena-now-keeper|1
 gpu-accounting-helios|1
 gpu-accounting-athena|1
 gpu-accounting-athena-now|1
@@ -370,6 +388,7 @@ alpha-athena-now-serve|LIVE_OWNER_GO_ATHENA_NOW|60
 alpha-athena-now-stage|LIVE_OWNER_GO_ATHENA_NOW|50
 alpha-athena-now-nooverlap|LIVE_OWNER_GO_ATHENA_NOW|60
 beta-athena-now-router|LIVE_OWNER_GO_ATHENA_NOW|60
+beta-athena-now-keeper|LIVE_OWNER_GO_ATHENA_NOW|60
 gpu-accounting-athena-now|LIVE_OWNER_GO_ATHENA_NOW|20
 # END OWNER GO
 TABLE
@@ -437,6 +456,7 @@ tunnel-hour-athena
 alpha-athena-now-serve
 alpha-athena-now-nooverlap
 beta-athena-now-router
+beta-athena-now-keeper
 gpu-accounting-helios
 gpu-accounting-athena
 gpu-accounting-athena-now
@@ -782,6 +802,10 @@ check_alpha_settings() {
       *) say "live-checks: LIVE_DIALHOME_MODE must be direct, ssh or host-dialed"; bad=1 ;;
     esac
   fi
+  # The keeper row tests the relay keeper, which runs the relays of host-dialed mode alone (HBEP-6, The relay keeper): another mode has none.
+  if [ "$name" = beta-athena-now-keeper ] && [ "$host_dialed" != 1 ]; then
+    say "live-checks: $name runs in host-dialed mode alone (LIVE_DIALHOME_MODE=host-dialed): the relay keeper runs the relays of that mode"; bad=1
+  fi
   if [ "$host_dialed" = 1 ]; then
     # No address and no key: the host dials the jobs through the login node (HBEP-6, Dial-home modes). An
     # address that is set is refused, so a row cannot read as if it had one.
@@ -1072,6 +1096,9 @@ not_run_verdict() {
   ! second_job_marker || [ "${MOSTJOBS[$n]:-1}" -ge 2 ] || return 1
   ! warm_marker || case $n in alpha-athena-now-serve|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1
   ! glibc_marker || [ "$n" = beta-athena-now-router ] || return 1
+  ! keeper_marker || [ "$n" = beta-athena-now-keeper ] || return 1
+  ! invalid_marker || [ "$n" = beta-athena-now-bulk ] || return 1
+  ! keeper_ended_marker || [ "$n" = beta-athena-now-keeper ] || return 1
   ! slot_marker || [ "$n" = alpha-athena-now-nooverlap ] || return 1
   ! lead_marker || case $n in alpha-athena-handover|alpha-helios-nooverlap|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1
   ! long_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac || return 1
@@ -1088,6 +1115,34 @@ warm_marker() { grep -q "the agent's own log did not show the warm start" "$REC_
 # GlibcTooOldError; issue #521): the router row's. glibc_reason is the version it carries in parentheses, "glibc 2.28", as row_a_reason
 # reads it, and nothing else of the node.
 glibc_marker() { grep -q "the compute node's glibc is older than the 2.30 Envoy needs" "$REC_DIR/not-run.txt" 2>/dev/null; }
+# invalid_marker: the marker says the bulk row's run has no saturation witness, so its reading measures nothing (internal/alpha, ErrInvalid and
+# InvalidNote; the science agent's ruling on #521): an INVALID, not a NOT RUN, which not_run_verdict holds to that row and judge prints as INVALID.
+invalid_marker() { grep -q "the run has no saturation witness, so its reading measures nothing" "$REC_DIR/not-run.txt" 2>/dev/null; }
+# keeper_marker: the run's NOT RUN marker says the deployment's max-model-len does not hold a stream long enough to span a controller restart's outcome
+# at the engine's measured rate (internal/alpha, NotRunNote, KeeperStreamTooShortError; issue #521): the keeper row's. keeper_reason is the numbers the
+# marker carries in parentheses, as lead_reason reads them, and nothing else.
+keeper_marker() { grep -q "does not hold a stream long enough to span a controller restart" "$REC_DIR/not-run.txt" 2>/dev/null; }
+# keeper_ended_marker: the run's NOT RUN marker says the keeper row's stream ended before the keeper's outcome and its margin (internal/alpha,
+# NotRunNote, KeeperStreamEndedFirstError; the ruling (b) on #543). keeper_ended_reason is the times it carries in parentheses, and nothing else.
+keeper_ended_marker() { grep -q "the stream ended before the keeper's outcome and its margin" "$REC_DIR/not-run.txt" 2>/dev/null; }
+keeper_ended_reason() {
+  local r
+  r=$(row_a_reason "the stream ended before the keeper's outcome and its margin")
+  if printf '%s\n' "$r" | grep -q -E -x "the outcome at [0-9hms.]+ after the stream opened, the stream's end at [0-9hms.]+, the margin [0-9hms.]+"; then
+    printf '%s' "$r"
+  else
+    printf 'the times could not be read from the marker'
+  fi
+}
+keeper_reason() {
+  local r
+  r=$(row_a_reason "the deployment's max-model-len does not hold a stream long enough to span a controller restart at the engine's measured rate")
+  if printf '%s\n' "$r" | grep -q -E -x 'at [0-9]+ tokens/s with max-model-len [0-9]+ the stream that fits is [0-9hms.]+, under the window of [0-9hms.]+'; then
+    printf '%s' "$r"
+  else
+    printf 'the rate and the context could not be read from the marker'
+  fi
+}
 glibc_reason() {
   local r
   r=$(row_a_reason "the compute node's glibc is older than the 2.30 Envoy needs")
@@ -1165,7 +1220,10 @@ judge() {
   if [ "$rc" = 124 ]; then say "$n: FAIL (timed out)"; return 1; fi
   if not_run_verdict "$n" "$rc" "${fail:-0}" "${skip:-0}" "$named"; then
     NOT_RUN=1
-    if second_job_marker; then
+    if invalid_marker; then
+      # Exit 3 like a NOT RUN, its own word: the run happened and measured nothing (NOT_RUN=1 carries the exit code).
+      say "$n: INVALID (not a NOT RUN: the job started, ran and spent the slot, and the run was put to the test; but it has no saturation witness: a transfer's bytes, time and rate were not measured with its token streams running across the whole of it, so its reading measures nothing; the text to post says which; the run's other checks passed; not a failure, not a pass)"
+    elif second_job_marker; then
       say "$n: NOT RUN (the first job ran and the second never started $(second_job_bound "$n"), and was cancelled by its tag; not a failure)"
       late=$(sed -n -E 's/.*ReplacementLate for its deployment: (raised|not raised|unknown);.*/\1/p' "$REC_DIR/not-run.txt" 2>/dev/null | head -1)
       [ -z "$late" ] || say "$n: ReplacementLate for its deployment: $late (information, not a check)"
@@ -1173,6 +1231,10 @@ judge() {
       say "$n: NOT RUN (no stream across the drain start that is long enough to tell a cut from an end fits the deployment's max-model-len at the engine's measured rate: $(lead_reason); the run opened no stream, and its jobs were cancelled by tag; not a failure)"
     elif long_marker; then
       say "$n: NOT RUN (the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate: $(long_reason); the hour was not started, and the run's jobs were cancelled by tag; not a failure)"
+    elif keeper_ended_marker; then
+      say "$n: NOT RUN (the stream ended before the keeper's outcome and its margin: $(keeper_ended_reason); the controller was killed and the run's other checks passed; not a failure)"
+    elif keeper_marker; then
+      say "$n: NOT RUN (the deployment's max-model-len does not hold a stream long enough to span a controller restart at the engine's measured rate: $(keeper_reason); the controller was not killed, and the run's jobs were cancelled by tag; not a failure)"
     elif glibc_marker; then
       say "$n: NOT RUN (the compute node's glibc is older than the 2.30 Envoy needs ($(glibc_reason)); Envoy cannot run bare there; the run sent no request through the front, and the run's jobs were cancelled by tag; not a failure)"
     elif row_a_marker; then
@@ -1201,7 +1263,7 @@ judge() {
 
 CONTROL_DIR=""
 REC_DIR=""
-NOT_RUN=0          # 1 when the run's test stopped on the row's start-wait bound
+NOT_RUN=0          # 1 when the run's test stopped on the row's start-wait bound, or ended NOT RUN or INVALID by its marker: exit 3
 
 # with_build_lock <command>...: runs the command under the shared build lock when LIVE_BUILD_LOCK names one.
 # Only builds take it; a test binary never runs while it is held.

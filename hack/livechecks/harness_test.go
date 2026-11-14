@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -80,6 +81,11 @@ type world struct {
 	day      string
 	reports  map[*exec.Cmd]string // the reaper's report of each command built by command
 	leakSink errorfer             // tests only: where noLeak reports; nil means t
+	// settingsMode is the dial-home mode alphaSettings last wrote. exactMode says a test wants it as written for every row it runs: without it, a run
+	// of the keeper row (issue #521), which runs in host-dialed mode alone, is given that mode, so that the tests that run every alpha row
+	// in the fixture's direct mode judge what they are about and not the keeper row's refusal.
+	settingsMode string
+	exactMode    bool
 }
 
 // errorfer is the part of *testing.T that noLeak reports through.
@@ -249,10 +255,35 @@ func (w *world) env(extra []string) []string {
 // is the reaper: a signal sent to it is forwarded to the script, and its exit status is the
 // script's. noLeftoverProcess reads the reaper's report of this command.
 func (w *world) command(extra []string, args ...string) *exec.Cmd {
+	if !w.exactMode && w.settingsMode == "direct" && slices.Contains(args, "beta-athena-now-keeper") {
+		w.hostDialedInPlace()
+	}
 	report := filepath.Join(w.dir, "reports", strconv.Itoa(len(w.reports)+1))
 	cmd := reaperCommand(w.t, report, reaperOpts{grace: leftoverDeadline}, w.repo, w.env(extra), append([]string{filepath.Join(w.repo, "hack/live-checks.sh")}, args...)...)
 	w.reports[cmd] = report
 	return cmd
+}
+
+// hostDialedInPlace puts the settings file in host-dialed mode, which has no address, by editing the file as it stands: a test's own changes to its
+// other settings (the owner's go, the binary directory, the front's label) are kept.
+func (w *world) hostDialedInPlace() {
+	w.t.Helper()
+	b, err := os.ReadFile(w.settings)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	var out []string
+	for _, l := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
+		switch {
+		case strings.HasPrefix(l, "LIVE_DIALHOME_MODE="):
+			l = "LIVE_DIALHOME_MODE=host-dialed"
+		case strings.HasPrefix(l, "LIVE_DIALHOME_ADDR="):
+			continue
+		}
+		out = append(out, l)
+	}
+	write(w.t, w.settings, strings.Join(out, "\n")+"\n", 0o600)
+	w.settingsMode = "host-dialed"
 }
 
 func exitCode(err error) int {

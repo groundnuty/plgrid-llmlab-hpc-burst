@@ -28,7 +28,7 @@ func envoyCfg() agent.EnvoyConfig {
 	return agent.EnvoyConfig{
 		RunDir:        envoyRunDir,
 		Workers:       []agent.EnvoyWorker{{Name: "worker-0", Socket: envoyRunDir + "/worker-0.sock"}},
-		ReadinessPort: 30160, // only a number here: nothing binds it
+		ReadinessPort: 28160, // only a number here: nothing binds it
 	}
 }
 
@@ -152,7 +152,7 @@ func TestEnvoyConfigCarriesHBEP5sSettings(t *testing.T) {
 			"the number of top-level fields": float64(2),
 			"check timeout":                  "2s", "check interval": "5s", "check before traffic": "5s",
 			"unhealthy after": float64(2), "healthy after": float64(1), "check path": "/ready",
-			"check address": "127.0.0.1", "check port": float64(30160), "check Host": "worker-0",
+			"check address": "127.0.0.1", "check port": float64(28160), "check Host": "worker-0",
 			"consecutive 5xx": float64(3), "base ejection": "30s", "max ejection": "300s",
 			"max ejection percent": float64(0), "uneject on a passing check": false, "panic threshold": float64(0), "bounded loads": float64(125),
 		}[name]
@@ -205,7 +205,7 @@ func TestEnvoyGuardRefusesEachFault(t *testing.T) {
 			at(t, m, "static_resources", "listeners", 0).(map[string]any)["address"] = map[string]any{"socket_address": map[string]any{"address": "127.0.0.1", "port_value": 0}}
 		}, "must be a Unix socket"},
 		{"a TCP listener on every address", func(m map[string]any) {
-			at(t, m, "static_resources", "listeners", 0).(map[string]any)["address"] = map[string]any{"socket_address": map[string]any{"address": "0.0.0.0", "port_value": 30199}}
+			at(t, m, "static_resources", "listeners", 0).(map[string]any)["address"] = map[string]any{"socket_address": map[string]any{"address": "0.0.0.0", "port_value": 28199}}
 		}, "must be a Unix socket"},
 		{"a listener of mode 0644", func(m map[string]any) {
 			at(t, m, "static_resources", "listeners", 0, "address", "pipe").(map[string]any)["mode"] = 0o644
@@ -315,8 +315,8 @@ func TestEnvoyGuardRefusesEachFault(t *testing.T) {
 			clusterOf(t, m)["outlier_detection"].(map[string]any)["successful_active_health_check_uneject_host"] = true
 		}, "successful_active_health_check_uneject_host is true"},
 		{"a check of another port", func(m map[string]any) {
-			at(t, clusterOf(t, m), "load_assignment", "endpoints", 0, "lb_endpoints", 0, "endpoint", "health_check_config", "address", "socket_address").(map[string]any)["port_value"] = 30161
-		}, "port_value is 30161"},
+			at(t, clusterOf(t, m), "load_assignment", "endpoints", 0, "lb_endpoints", 0, "endpoint", "health_check_config", "address", "socket_address").(map[string]any)["port_value"] = 28161
+		}, "port_value is 28161"},
 		{"a check off loopback", func(m map[string]any) {
 			at(t, clusterOf(t, m), "load_assignment", "endpoints", 0, "lb_endpoints", 0, "endpoint", "health_check_config", "address", "socket_address").(map[string]any)["address"] = "0.0.0.0"
 		}, "address is 0.0.0.0"},

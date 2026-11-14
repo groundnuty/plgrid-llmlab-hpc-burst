@@ -55,6 +55,8 @@ var alphaShapes = []alphaShape{
 	{"alpha-athena-now-serve", "TestAlphaAthenaNowServe", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:48:00, one job, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
 	// The router row on plgrid-now (issue #521): row A's shape, with Envoy in front of the one worker.
 	{"beta-athena-now-router", "TestBetaAthenaNowRouter", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:48:00, one job, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
+	// The keeper row on plgrid-now (issue #521): row A's shape, in host-dialed mode with the relay keeper.
+	{"beta-athena-now-keeper", "TestBetaAthenaNowKeeper", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:48:00, one job, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
 	// Row B on plgrid-now (issue #376): the same size, two jobs of 21 minutes in turn (athena-now.yaml's lead of 20 and a
 	// minute), each with its start wait of 10.
 	{"alpha-athena-now-nooverlap", "TestAlphaAthenaNowNoOverlap", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:21:00, at most 2 jobs at once, each of this shape, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
@@ -114,8 +116,18 @@ case $mode in
   not-run-row-b-warm) echo "$HPCBURST_ALPHA_ROW: the agent's own log did not show the warm start (the successor's job: the agent's log of the job could not be read); the run's other checks passed; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   # The marker of the router row's NOT RUN (internal/alpha, NotRunNote, issue #521): a node whose glibc is under 2.30, on whatever row runs
   # it; the same with words where the version goes, which the script must not print.
+  # The marker of the keeper row's NOT RUN (internal/alpha, NotRunNote, issue #521): a stream the context cannot hold for the restart's window, on whatever
+  # row runs it; the same with words where the numbers go, which the script must not print.
+  not-run-keeper) echo "$HPCBURST_ALPHA_ROW: the deployment's max-model-len does not hold a stream long enough to span a controller restart at the engine's measured rate (at 40 tokens/s with max-model-len 2912 the stream that fits is 1m0s, under the window of 2m40s); the controller was not killed; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  not-run-keeper-words) echo "$HPCBURST_ALPHA_ROW: the deployment's max-model-len does not hold a stream long enough to span a controller restart at the engine's measured rate (at 40 tokens/s on host-x.example.org with max-model-len 2912); the controller was not killed; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  # The marker of the keeper row's second NOT RUN (internal/alpha, NotRunNote, the ruling (b) on #543): the stream ended before the keeper's outcome
+  # and its margin, on whatever row runs it; the same with words where the times go, which the script must not print.
+  not-run-keeper-ended) echo "$HPCBURST_ALPHA_ROW: the stream ended before the keeper's outcome and its margin (the outcome at 1m40s after the stream opened, the stream's end at 1m40s, the margin 30s); the controller was killed and the run's other checks passed; this run's jobs were ended with its deployment" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  not-run-keeper-ended-words) echo "$HPCBURST_ALPHA_ROW: the stream ended before the keeper's outcome and its margin (the outcome at 1m40s on host-x.example.org, the stream's end at 1m40s, the margin 30s); the controller was killed and the run's other checks passed; this run's jobs were ended with its deployment" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   not-run-glibc) echo "$HPCBURST_ALPHA_ROW: the compute node's glibc is older than the 2.30 Envoy needs (glibc 2.28); the run sent no request through the front; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   not-run-glibc-words) echo "$HPCBURST_ALPHA_ROW: the compute node's glibc is older than the 2.30 Envoy needs (glibc 2.28 on host-x.example.org); the run sent no request through the front; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  # A marker of the test's own words, STUB_MARKER, on whatever row runs it: the bulk row's INVALID (internal/alpha, InvalidNote), say.
+  marker) printf '%s' "$STUB_MARKER" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   # The marker of a first job that ran and a second that never started (internal/alpha, NotRunNote).
   not-run-second) echo "$HPCBURST_ALPHA_ROW: the first job ran and the second never started; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   # The marker of a handover row whose streams' lead does not fit the deployment's max-model-len (internal/alpha, NotRunNote, issue
@@ -183,6 +195,7 @@ func (w *world) alphaSettings(mutate func(m map[string]string)) {
 		if mutate != nil {
 			mutate(m)
 		}
+		w.settingsMode = m["LIVE_DIALHOME_MODE"]
 	})
 }
 
@@ -227,7 +240,7 @@ func TestTheScriptsShapesAreThePackagesRows(t *testing.T) {
 		f := strings.Split(l, "|")
 		shapes[f[0]] = f
 	}
-	all := append(alpha.Rows(), alpha.AccountingRows()...)
+	all := append(builtRows(), alpha.AccountingRows()...)
 	if len(all) != len(alphaShapes) {
 		t.Fatalf("the package has %d alpha rows, the test table %d", len(all), len(alphaShapes))
 	}
@@ -422,6 +435,16 @@ func TestAnAlphaRunBuildsBeforeTheSlotAndGivesTheTestItsEnvironment(t *testing.T
 				"HPCBURST_ALPHA_CREDENTIALS=" + filepath.Join(w.dir, s.host+".ssh"), "HPCBURST_ALPHA_BIN_DIR=" + filepath.Join(w.dir, "bindir")}
 			if s.hasQOS() {
 				want = append(want, "HPCBURST_ALPHA_QOS="+s.slot)
+			}
+			// The keeper row runs in host-dialed mode alone, which has no address: the harness gives it that mode (world.command).
+			if s.row == "beta-athena-now-keeper" {
+				want = slices.DeleteFunc(want, func(x string) bool {
+					return strings.HasPrefix(x, "HPCBURST_ALPHA_DIALHOME_MODE=") || strings.HasPrefix(x, "HPCBURST_ALPHA_DIALHOME_ADDR=")
+				})
+				want = append(want, "HPCBURST_ALPHA_DIALHOME_MODE=host-dialed")
+				if strings.Contains(env, "HPCBURST_ALPHA_DIALHOME_ADDR") {
+					t.Errorf("an address reached the keeper row's test, which runs in host-dialed mode:\n%s", env)
+				}
 			}
 			for _, x := range want {
 				if !strings.Contains(env, x) {
@@ -630,7 +653,7 @@ func TestASignalDuringAnAlphaRunRunsTheCleanup(t *testing.T) {
 }
 
 func TestPlanNamesTheAlphaRowsWhenTheStackChanges(t *testing.T) {
-	alphaRows := []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-athena", "tunnel-hour-helios", "alpha-athena-now-serve", "alpha-athena-now-nooverlap", "beta-athena-now-router"}
+	alphaRows := []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-athena", "tunnel-hour-helios", "alpha-athena-now-serve", "alpha-athena-now-nooverlap", "beta-athena-now-router", "beta-athena-now-keeper"}
 	// The rehearsal row (issue #193) builds and runs the same stack, on this host: it is a local row.
 	stackRows := append(append([]string{}, alphaRows...), "rehearsal-part3")
 	cases := []struct {
@@ -910,6 +933,8 @@ func TestTheRowsThatHoldTheOwnersSlotForHoursNeedTheOwnersGo(t *testing.T) {
 		{"alpha-athena-now-serve", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
 		// The router row on plgrid-now (issue #521) holds the slot as row A does: 10 + 48 + 2.
 		{"beta-athena-now-router", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
+		// The keeper row on plgrid-now (issue #521) holds the slot as row A does: 10 + 48 + 2.
+		{"beta-athena-now-keeper", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
 		// Row B on plgrid-now (issue #376): its first start wait, then 10 + 21 + 3 + 10 + 12 + 3 = 59 minutes, rounded up to ten.
 		{"alpha-athena-now-nooverlap", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
 		// The pre-staging row (issue #376): its start wait, then 10 + 30 + 2 = 42 minutes, rounded up to ten.
@@ -1004,7 +1029,7 @@ func TestTheScriptsSlotHoldIsThePackagesRoundedUp(t *testing.T) {
 		}
 		got[f[0]], key[f[0]] = f[2], f[1]
 	}
-	all := slices.Concat(alpha.Rows(), alpha.AccountingRows(), alpha.ReachRows(), alpha.HostDialedRows(), alpha.StageRows())
+	all := slices.Concat(builtRows(), alpha.AccountingRows(), alpha.ReachRows(), alpha.HostDialedRows(), alpha.StageRows())
 	for name := range got {
 		if _, ok := alpha.RowByName(name); !ok {
 			t.Errorf("the owner-go table names %s, which no package row is", name)
@@ -1092,7 +1117,7 @@ func TestTheScriptsMostJobsAreThePackagesRows(t *testing.T) {
 		}
 		got[f[0]] = f[1]
 	}
-	for _, r := range append(alpha.Rows(), alpha.AccountingRows()...) {
+	for _, r := range append(builtRows(), alpha.AccountingRows()...) {
 		if got[r.Name] != fmt.Sprint(r.MostJobs) {
 			t.Errorf("%s: the script allows %q jobs at once, the package's row %d", r.Name, got[r.Name], r.MostJobs)
 		}

@@ -268,3 +268,30 @@ func TestStartSupervisorWaitsForTheFront(t *testing.T) {
 		})
 	}
 }
+
+// The supervisor stops the front first and the rest after it (#553), so down's and upgrade's kill grace
+// for a host with a front must cover the two stops in a row: the front's kill grace, then the longest of
+// the others' (the controller's, which the relay keeper gets too; frps's general grace), and its normal
+// worst case, the front's stop budget then the controller's. A parallel bound, the longest single grace,
+// would SIGKILL the tree while the controller still released its Leases.
+func TestTheStopGracesCoverTheSerialStop(t *testing.T) {
+	st := &State{Controllers: &ControllerConfig{Binary: "/opt/hpcburst-controller"}, RelayKeeper: true}
+	keeper := st.keeperEntry(layout{dir: t.TempDir()})
+	if keeper == nil || keeper.TermGrace != controllerTermGrace {
+		t.Fatalf("the relay keeper's kill grace %v, want the controller's %s: the rest's bound below assumes it", keeper, controllerTermGrace)
+	}
+	rest := max(ControllerTermGrace, DefaultTermGrace)
+	for _, c := range []struct {
+		inner, outer       time.Duration
+		innerName, outerOf string
+	}{
+		{FrontTermGrace + rest, SupervisorGraceWithFront, "the front's kill grace and then the others'", "the least grace with a front"},
+		{FrontStopBudget + ControllerStopBudget, SupervisorGraceWithFront, "the front's stop budget and then the controller's", "the least grace with a front"},
+		{rest, SupervisorGrace, "the others' longest kill grace", "the least grace with no front"},
+		{SupervisorGraceWithFront, DefaultGrace, "the least grace with a front", "down's and upgrade's default grace"},
+	} {
+		if c.outer <= c.inner {
+			t.Errorf("%s (%s) is not longer than %s (%s)", c.outerOf, c.outer, c.innerName, c.inner)
+		}
+	}
+}

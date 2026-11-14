@@ -13,10 +13,10 @@ package alpha
 //     /clusters, so Envoy is running and holds the worker healthy), before the engine is killed and again once it is back;
 //   - S13's cases through the real path, as a RESPONSE-LEVEL reading on real vLLM and not as bytes (the science agent's ruling
 //     on #521, answer 1): the engine's received bytes cannot be read from vLLM, so what is judged is that the router never makes
-//     a failure of its own. Exact bytes are CI's (#470, internal/agent/router_bytes_test.go). The post says so. A valid variant
-//     answered other than 200 is allowed only a 4xx, and only in one of S13's groups that a server may still refuse; any other,
-//     and any 5xx, fails the row, and every one is posted with its status and group, beside the engine's vLLM version (the
-//     science agent's ruling (c) on #521, comment 6869642260; refusalGroups);
+//     a failure of its own. Exact bytes are CI's (#470, internal/agent/router_bytes_test.go). The post says so. Each variant is
+//     also sent straight to the worker's engine socket on the node, and the row fails only where the two answers differ: a refusal
+//     the engine gives on both paths is the deployment's, posted with the engine's error (the science agent's ruling (a) on the
+//     router row, #522, comment 6874666948; routercontrol.go);
 //   - one restart at the worker rung, with the router in front: the gate of HBEP-7.
 //
 // NOT RUN, exit 3, never a pass and never a failure: a node whose glibc is under 2.30 (ErrGlibcTooOld), naming the version.
@@ -29,12 +29,10 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/routerbytes/cases"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -211,9 +209,6 @@ type BytesObs struct {
 	RouterMade int `json:"routerMade"`
 	// PastBound counts the variants still awaited when BytesBound ran out: the harness's own bound, not a failure of the router.
 	PastBound int `json:"pastBound"`
-	// NonOK is every valid variant answered with a status other than 200, in the order answered: its key, its status and its S13 refusal
-	// group ("" outside them). The ruling (c) allows a 4xx in a group and fails the rest; the post names every one.
-	NonOK []NonOKVariant `json:"nonOK,omitempty"`
 	// StreamOK and CompletionsOK and ChatOK count the 200 answers by mode and by endpoint, so that a reading in which one of them
 	// never answered 200 is not a reading of it.
 	StreamOK      int `json:"streamOK"`
@@ -222,86 +217,9 @@ type BytesObs struct {
 	CompletionsOK int `json:"completionsOK"`
 }
 
-// NonOKVariant is a valid variant answered other than 200: S13's key, the status, and its refusal group ("" outside them).
-type NonOKVariant struct {
-	Key    string `json:"key"`
-	Status int    `json:"status"`
-	Group  string `json:"group,omitempty"`
-}
-
-// nonOKSorted is NonOK in the order of its keys: the variants are answered by several workers at once, and a post or a failed check names
-// them in one order whatever the order they came back in.
-func (b BytesObs) nonOKSorted() []NonOKVariant {
-	vs := slices.Clone(b.NonOK)
-	slices.SortStableFunc(vs, func(x, y NonOKVariant) int { return strings.Compare(x.Key, y.Key) })
-	return vs
-}
-
-// allowed is whether the ruling (c) allows the answer: a 4xx to a variant in one of S13's groups that a server may still refuse.
-func (v NonOKVariant) allowed() bool { return v.Group != "" && v.Status >= 400 && v.Status < 500 }
-
-func (v NonOKVariant) String() string {
-	g := v.Group
-	if g == "" {
-		g = "outside S13's groups"
-	}
-	return fmt.Sprintf("%s %d [%s]", v.Key, v.Status, g)
-}
-
-// refusalGroup is one group of S13's valid requests that a server may still refuse: the README bullet's subject as the post names it, a
-// phrase of that bullet (anchor) by which TestTheRefusalGroupsAreS13sList finds it, and which enumerated fields a case of it covers.
-type refusalGroup struct {
-	name, anchor string
-	covers       func(field string) bool
-}
-
-// refusalGroups are S13's "Valid requests a server may still refuse" (spikes/s13/README.md, the list under that bullet; line 147 when the
-// science agent ruled, comment 6869642260 on #521): valid requests that depend on how vLLM is started or on the model, not on the router.
-// A case is in a group when it covers one of the group's enumerated fields (cases.Cover.Field, the json_path of S13's
-// fields/vllm-v0.32.0.tsv). TestTheRefusalGroupsAreS13sList reads the README's list and holds each group to exactly one of its bullets.
-var refusalGroups = []refusalGroup{
-	{"a request chat_template", "a request `chat_template`", fieldIs("chat_template")},
-	{"mm_processor_kwargs and media_io_kwargs", "`mm_processor_kwargs` and `media_io_kwargs`", fieldIs("mm_processor_kwargs", "media_io_kwargs")},
-	// The completions field, and the chat content part of the same name, which vLLM serves under the same flag.
-	{"prompt_embeds", "`prompt_embeds` (`--enable-prompt-embeds`", func(f string) bool { return f == "prompt_embeds" || contentPart(f, "prompt_embeds") }},
-	{"a non-zero priority", "a non-zero `priority`", fieldIs("priority")},
-	{"suffix", "`suffix` (a model with fill-in-the-middle", fieldIs("suffix")},
-	// Every content part that carries media, by S13's own part names: images, audio, video, files and their embeddings.
-	{"the media content parts", "the media content parts", func(f string) bool {
-		return contentPart(f, "image_url", "input_audio", "file", "audio_url", "video_url", "image_embeds", "audio_embeds", "video_embeds",
-			"simple image", "simple audio", "simple video")
-	}},
-	{"the structural tags", "the structural tags", func(f string) bool { return strings.Contains(f, "structural_tag") }},
-}
-
-func fieldIs(names ...string) func(string) bool {
-	return func(f string) bool { return slices.Contains(names, f) }
-}
-
-// contentPart is whether an enumerated field belongs to a message content part of one of the types: "messages[].content[](<type>)...".
-func contentPart(field string, types ...string) bool {
-	for _, t := range types {
-		if strings.HasPrefix(field, "messages[].content[]("+t+")") {
-			return true
-		}
-	}
-	return false
-}
-
-// RefusalGroupOf is the S13 refusal group a case is in, "" when it is in none.
-func RefusalGroupOf(c *cases.Case) string {
-	for _, g := range refusalGroups {
-		for _, cv := range c.Covers {
-			if g.covers(cv.Field) {
-				return g.name
-			}
-		}
-	}
-	return ""
-}
-
 // S13VLLMVersion is the vLLM S13's cases were enumerated and validated against (spikes/s13/README.md; fields/vllm-v0.32.0.tsv). The post
-// names it beside the engine's own version, so that a reader can tell a version change from a router fault; a difference is no check.
+// names it beside the engine's own version, as information; the direct-to-engine control, not S13's own setup, says which refusals are the
+// engine's.
 const S13VLLMVersion = "v0.32.0"
 
 // engineVersionRE is the shape of a version the post may carry: what vLLM reports, "0.32.0" or "0.32.1.dev3+gabc123".
@@ -338,6 +256,9 @@ type RouterObs struct {
 	// Rate is the engine's measured rate, from the one request the run sent first, through the front.
 	Rate  float64  `json:"rate"`
 	Bytes BytesObs `json:"bytes"`
+	// Control is the direct-to-engine control: S13's variants straight to the worker's engine socket on the node, compared with the
+	// front's answers (routercontrol.go).
+	Control ControlObs `json:"control"`
 	// EngineVersion is the engine's vLLM version from the Instance's verification record, "" when it was not read: posted beside
 	// S13VLLMVersion, never judged.
 	EngineVersion string `json:"engineVersion"`
@@ -402,42 +323,10 @@ func bytesChecks(b BytesObs) []string {
 	if b.Status200+b.Status4xx+b.Status5xx+b.StatusOther != b.Complete {
 		f = append(f, "the response-level reading's status counts do not add up")
 	}
-	// The ruling (c): a valid variant is allowed a 4xx only in one of S13's refusal groups; any 5xx, and any other non-200, fails.
-	var fiveXX, outside []NonOKVariant
-	for _, v := range b.nonOKSorted() {
-		switch {
-		case v.Status >= 500:
-			fiveXX = append(fiveXX, v)
-		case !v.allowed():
-			outside = append(outside, v)
-		}
-	}
-	if len(fiveXX) > 0 {
-		f = append(f, "a valid variant of S13's cases was answered with a 5xx: "+namedVariants(fiveXX))
-	}
-	if len(outside) > 0 {
-		f = append(f, "a valid variant of S13's cases was answered other than 200, which is allowed only as a 4xx in one of S13's groups that a server may refuse: "+namedVariants(outside))
-	}
 	if b.InvalidSent <= 0 || b.InvalidRefused != b.InvalidSent {
 		f = append(f, "a variant S13 says vLLM refuses was not refused with a 4xx")
 	}
 	return f
-}
-
-// namedVariantsMax is how many variants a failed check names; the post names every one.
-const namedVariantsMax = 10
-
-// namedVariants names variants for a failed check: the first namedVariantsMax, and how many more the post names.
-func namedVariants(vs []NonOKVariant) string {
-	var parts []string
-	for i, v := range vs {
-		if i == namedVariantsMax {
-			parts = append(parts, fmt.Sprintf("and %d more, named in the post", len(vs)-namedVariantsMax))
-			break
-		}
-		parts = append(parts, v.String())
-	}
-	return strings.Join(parts, ", ")
 }
 
 // healthyChecks: the router holds the one worker healthy, before the kill and after it.
@@ -481,6 +370,7 @@ func VerifyBetaRouter(row Row, o RouterObs, jobs []provider.Job) []string {
 		f = append(f, "no request through the front was measured")
 	}
 	f = append(f, bytesChecks(o.Bytes)...)
+	f = append(f, controlChecks(o.Bytes, o.Control)...)
 	if o.Responses <= 0 {
 		f = append(f, "the run recorded no response, so attribution is unchecked")
 	} else if o.Attributed != o.Responses {
@@ -510,15 +400,7 @@ func betaRouterPost(row Row, o RouterObs, failures []string) string {
 		engine = "not read"
 	}
 	fmt.Fprintf(&b, "- the engine's vLLM version: %s; S13's cases were enumerated against vLLM %s\n", engine, S13VLLMVersion)
-	if len(by.NonOK) == 0 {
-		b.WriteString("- valid variants answered other than 200: none\n")
-	} else {
-		var vs []string
-		for _, v := range by.nonOKSorted() {
-			vs = append(vs, v.String())
-		}
-		fmt.Fprintf(&b, "- valid variants answered other than 200, every one (%d; a 4xx is allowed only in one of S13's groups that a server may still refuse, the rest fail): %s\n", len(by.NonOK), strings.Join(vs, "; "))
-	}
+	b.WriteString(controlLines(o.Control))
 	fmt.Fprintf(&b, "- responses with attribution: %d of %d; restarts at the worker rung: %d (measured engine rate %.0f tokens/s)\n", o.Attributed, o.Responses, o.WorkerRestarts, o.Rate)
 	b.WriteString(restartLine(o.WorkerRestart))
 	return b.String()
@@ -535,12 +417,12 @@ func envoyProcsWord(e EnvoyObs) string {
 const FailedKept = 20
 
 // Answer is one variant's response, as the live flow hands it to Add: chat says the variant went to the chat endpoint (else completions),
-// stream that it was streamed, valid that S13 says vLLM accepts it, group its S13 refusal group (RefusalGroupOf, "" for none), key names it,
+// stream that it was streamed, valid that S13 says vLLM accepts it, key names it,
 // and status, body and cut are what the front answered (status 0 is no answer, cut that the body ended early). PastBound says the response
 // was still awaited when the reading's own bound, BytesBound, ran out: the harness's bound, which is no failure the router made.
 type Answer struct {
 	Chat, Stream, Valid bool
-	Group, Key          string
+	Key                 string
 	Status              int
 	Body                []byte
 	Cut, PastBound      bool
@@ -562,9 +444,6 @@ func (b *BytesObs) Add(a Answer) {
 		return
 	}
 	cls := ClassifyReply(a.Status, a.Body, a.Stream, a.Cut)
-	if a.Valid && a.Status != 0 && a.Status != 200 {
-		b.NonOK = append(b.NonOK, NonOKVariant{Key: a.Key, Status: a.Status, Group: a.Group})
-	}
 	if cls.Complete {
 		b.Complete++
 		switch {

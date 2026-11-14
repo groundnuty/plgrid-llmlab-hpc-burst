@@ -26,7 +26,7 @@ var (
 // stackRowTests are the tests of the rows internal/alpha runs.
 var stackRowTests = map[string]string{"alpha-athena-handover": "TestAlphaAthenaHandover", "alpha-helios-nooverlap": "TestAlphaHeliosNoOverlap",
 	"tunnel-hour-helios": "TestTunnelHour", "tunnel-hour-athena": "TestTunnelHour", "alpha-athena-now-serve": "TestAlphaAthenaNowServe",
-	"alpha-athena-now-nooverlap": "TestAlphaAthenaNowNoOverlap", "beta-athena-now-router": "TestBetaAthenaNowRouter"}
+	"alpha-athena-now-nooverlap": "TestAlphaAthenaNowNoOverlap", "beta-athena-now-router": "TestBetaAthenaNowRouter", "beta-athena-now-keeper": "TestBetaAthenaNowKeeper"}
 
 // B5 and B6 of the review of PR 284: a row's timeout must let its bound fire first, so a test fails when it can fire
 // before them. The sum comes from the row's own bounds and the real waits, never from a number kept beside the table.
@@ -78,7 +78,7 @@ func TestEveryRowsTimeoutIsDerivedFromItsBounds(t *testing.T) {
 // must be above: the waits give up before the test's deadline, so a shorter timeout would cut one short and report what
 // the row's bound never decided.
 func TestEveryStackRowsTimeoutIsAboveItsWorstCase(t *testing.T) {
-	for _, row := range alpha.Rows() {
+	for _, row := range builtRows() {
 		test, ok := stackRowTests[row.Name]
 		if !ok {
 			t.Errorf("%s has no case here: name the test the row runs", row.Name)

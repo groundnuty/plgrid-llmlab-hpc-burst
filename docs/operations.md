@@ -587,7 +587,7 @@ squeue --me --noheader --format="%i %j"
 scancel <job-id>
 ```
 
-`hpcburst down --grace` and `hpcburst upgrade --grace` set how long each waits after SIGTERM before SIGKILL, 40 s by default; both refuse a grace too short for the front to flush its usage records.
+`hpcburst down --grace` and `hpcburst upgrade --grace` set how long each waits after SIGTERM before SIGKILL, 70 s by default: the front stops first, with up to 30 s to cut its requests and flush its usage records, then the controller and the relay keeper, with up to 34 s each to release their Leases and stop the relays. Both refuse a grace too short for that. A stop ends as soon as every process has exited.
 
 ### Where the accounting records are
 
