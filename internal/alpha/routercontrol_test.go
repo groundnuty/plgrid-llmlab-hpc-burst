@@ -41,6 +41,18 @@ const (
 		"data: [DONE]\n\n"
 )
 
+// oneChunk and twoChunks are two streams the sampler made of one request: one token, in the chunk that ends the stream; and two tokens, then
+// an empty chunk that ends it. Only where finish_reason falls tells them apart.
+var (
+	oneChunk = "data: {\"id\":\"c-3\",\"object\":\"chat.completion.chunk\",\"created\":3,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"c-3\",\"object\":\"chat.completion.chunk\",\"created\":3,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	twoChunks = "data: {\"id\":\"c-4\",\"object\":\"chat.completion.chunk\",\"created\":4,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"c-4\",\"object\":\"chat.completion.chunk\",\"created\":4,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"c-4\",\"object\":\"chat.completion.chunk\",\"created\":4,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+)
+
 func ok(body string) Reply            { return Reply{Status: 200, Body: []byte(body)} }
 func status(s int, body string) Reply { return Reply{Status: s, Body: []byte(body)} }
 
@@ -60,6 +72,7 @@ func TestTheControlComparesWhatIsTheRequestsAndSetsAsideWhatIsTheSamplers(t *tes
 		{"a stream that ended a chunk earlier on one path: finish_reason's place is the sampler's",
 			ok(stream1), ok(strings.Replace(stream1, `"delta":{"content":" you"},"finish_reason":"length"}]}`+"\n\n", `"delta":{"content":" you"},"finish_reason":null}]}`+"\n\n"+
 				"data: {\"id\":\"c-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n", 1)), true, ""},
+		{"one token on one path, its chunk ending the stream; two on the other, then a chunk that ends it", ok(oneChunk), ok(twoChunks), true, ""},
 		{"a stop string the sampler hit on one path", ok(chatOK), ok(strings.Replace(chatOK, `"stop_reason":null`, `"stop_reason":"\n\n"`, 1)), false, ""},
 		{"no fingerprint on one path", ok(chatOK), ok(strings.Replace(chatOK, `,"system_fingerprint":"fp-1"`, ``, 1)), false, ""},
 		{"the prefix cache held part of the prompt on one path", ok(chatOK), ok(strings.Replace(chatOK, `"prompt_tokens_details":null`, `"prompt_tokens_details":{"cached_tokens":8}`, 1)), false, ""},
