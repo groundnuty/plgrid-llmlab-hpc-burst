@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -40,6 +41,18 @@ const (
 		"data: [DONE]\n\n"
 )
 
+// oneChunk and twoChunks are two streams the sampler made of one request: one token, in the chunk that ends the stream; and two tokens, then
+// an empty chunk that ends it. Only where finish_reason falls tells them apart.
+var (
+	oneChunk = "data: {\"id\":\"c-3\",\"object\":\"chat.completion.chunk\",\"created\":3,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"c-3\",\"object\":\"chat.completion.chunk\",\"created\":3,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	twoChunks = "data: {\"id\":\"c-4\",\"object\":\"chat.completion.chunk\",\"created\":4,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"c-4\",\"object\":\"chat.completion.chunk\",\"created\":4,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"c-4\",\"object\":\"chat.completion.chunk\",\"created\":4,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+)
+
 func ok(body string) Reply            { return Reply{Status: 200, Body: []byte(body)} }
 func status(s int, body string) Reply { return Reply{Status: s, Body: []byte(body)} }
 
@@ -56,6 +69,14 @@ func TestTheControlComparesWhatIsTheRequestsAndSetsAsideWhatIsTheSamplers(t *tes
 		{"text, ids, created, the fingerprint, finish_reason, tool calls and the completion's counts are the sampler's", ok(chatOK), ok(chatOK2), false, ""},
 		{"a stream with other token text and ids, the same events", ok(stream1), ok(stream2), true, ""},
 		{"a stream that the engine ends with the same error event on both", ok(streamErr), ok(streamErr), true, ""},
+		{"a stream that ended a chunk earlier on one path: finish_reason's place is the sampler's",
+			ok(stream1), ok(strings.Replace(stream1, `"delta":{"content":" you"},"finish_reason":"length"}]}`+"\n\n", `"delta":{"content":" you"},"finish_reason":null}]}`+"\n\n"+
+				"data: {\"id\":\"c-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n", 1)), true, ""},
+		{"one token on one path, its chunk ending the stream; two on the other, then a chunk that ends it", ok(oneChunk), ok(twoChunks), true, ""},
+		{"a stop string the sampler hit on one path", ok(chatOK), ok(strings.Replace(chatOK, `"stop_reason":null`, `"stop_reason":"\n\n"`, 1)), false, ""},
+		{"no fingerprint on one path", ok(chatOK), ok(strings.Replace(chatOK, `,"system_fingerprint":"fp-1"`, ``, 1)), false, ""},
+		{"the prefix cache held part of the prompt on one path", ok(chatOK), ok(strings.Replace(chatOK, `"prompt_tokens_details":null`, `"prompt_tokens_details":{"cached_tokens":8}`, 1)), false, ""},
+		{"a reasoning field the sampler filled on one path", ok(chatOK), ok(strings.Replace(chatOK, `"reasoning":null`, `"reasoning":"so"`, 1)), false, ""},
 		// Differences, one rule at a time.
 		{"a status", status(400, refusal), ok(chatOK), false, "status 400 through the router, 200 straight to the engine"},
 		{"a 502 the path made", status(502, "upstream connect error"), status(400, refusal), false, "status 502 through the router, 400"},
@@ -314,5 +335,37 @@ func TestParseControlReadsEachPlaceOnce(t *testing.T) {
 	replies, connected := ParseControl([]byte(out), 3)
 	if !connected || replies[0] == nil || replies[0].Status != 200 || replies[1] != nil || replies[2] == nil || !replies[2].Cut || replies[2].Status != 0 {
 		t.Errorf("ParseControl = %+v, %+v, %+v (connected %t)", replies[0], replies[1], replies[2], connected)
+	}
+}
+
+// ControlOf: a variant the engine gave no answer straight from the node is unanswered, and so is one it did not answer completely; a
+// variant answered other than 200 alike on both paths is listed with the engine's error, and so is a 200 stream that the engine ended with
+// the same error event on both; a 200 alike is not listed; a variant the front's own bound cut is answered but not compared.
+func TestControlOfCountsAndListsEachVariant(t *testing.T) {
+	cut := Reply{Status: 200, Body: []byte(chatOK[:30]), Cut: true}
+	refused, okBoth, errStream := status(400, refusal), ok(chatOK), ok(streamErr)
+	c := ControlOf([]ControlVariant{
+		{Key: "d/none#plain", Front: okBoth, Direct: nil},
+		{Key: "c/cut#plain", Front: okBoth, Direct: &cut},
+		{Key: "b/refused#plain", Front: refused, Direct: &refused},
+		{Key: "a/stream-error#stream", Stream: true, Front: errStream, Direct: &errStream},
+		{Key: "e/fine#plain", Front: okBoth, Direct: &okBoth},
+		{Key: "f/late#plain", Front: Reply{Cut: true}, Direct: &okBoth, FrontPastBound: true},
+	})
+	if c.Sent != 5 || c.Answered != 4 || c.Compared != 3 || len(c.Differ) != 0 {
+		t.Errorf("sent %d, answered %d, compared %d, differ %v; want 5, 4, 3, none", c.Sent, c.Answered, c.Compared, c.Differ)
+	}
+	if want := []string{"c/cut#plain", "d/none#plain"}; !slices.Equal(c.Unanswered, want) {
+		t.Errorf("unanswered %v, want %v (in key order)", c.Unanswered, want)
+	}
+	want := []AlikeVariant{
+		{Key: "a/stream-error#stream", Status: 200, Error: "BadRequestError: the reasoning parser is not set"},
+		{Key: "b/refused#plain", Status: 400, Error: `BadRequestError: "auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set`},
+	}
+	if !slices.Equal(c.Alike, want) {
+		t.Errorf("alike %+v, want %+v", c.Alike, want)
+	}
+	if f := controlChecks(BytesObs{Expected: 6}, c); len(f) != 1 || !strings.Contains(f[0], "4 of 6 answered (c/cut#plain, d/none#plain)") {
+		t.Errorf("controlChecks = %q, want the unanswered named", f)
 	}
 }

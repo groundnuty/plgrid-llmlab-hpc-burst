@@ -16,12 +16,14 @@ package alpha
 //   - a 200 stream: how it ended ([DONE], an error event with its error, or cut) and the shape of its events (their objects, a role chunk,
 //     a usage chunk and its prompt_tokens, the choice indexes, the events' keys), never the token text.
 //
-// Set aside, by name (setAside): what differs between two sends of one body without the router doing anything. The per-request fields:
-// id, created, system_fingerprint, and the token-id fields a request asks to be returned. And what the sampler decides: the generated text
-// and reasoning (text, content, reasoning, reasoning_content), the tool calls and function call it made, finish_reason and stop_reason, and
-// the completion's counts (completion_tokens, total_tokens and both token-details objects, whose cached count follows the prefix cache).
-// S13's variants sample, and vLLM at temperature 0 is not batch-invariant either, so no token text is compared, even at temperature 0.
-// Headers are not compared at all: the front adds its attribution headers, and Envoy its own.
+// Values are compared only where named above; every other field is compared by its presence and its JSON type alone, so its value (an
+// id, a timestamp, a count of generated tokens) never is. Set aside even from the shape, by name (setAside), are the fields whose presence
+// or type itself follows what the sampler did or a cache: the generated text and reasoning (text, content, reasoning,
+// reasoning_content: a string or null), the tool calls and function call it made (there or not), finish_reason and stop_reason (null on
+// a stream's chunks until the one that ends it, which falls where the sampler stopped; stop_reason a string, a token or null), the
+// fingerprint (there or not), and both token-details objects (null, or an object once the prefix cache holds a part). S13's variants
+// sample, and vLLM at temperature 0 is not batch-invariant either, so no token text is compared, even at temperature 0. Headers are not
+// compared at all: the front adds its attribution headers, and Envoy its own.
 
 import (
 	"encoding/base64"
@@ -46,12 +48,12 @@ type Reply struct {
 	Cut    bool
 }
 
-// setAside are the keys whose values, and whose presence, the comparison ignores wherever they occur (see the file's comment).
+// setAside are the keys whose presence and type, as well as their values, the comparison ignores wherever they occur (see the file's
+// comment).
 var setAside = map[string]bool{
-	"id": true, "created": true, "system_fingerprint": true, "prompt_token_ids": true, "token_ids": true,
 	"text": true, "content": true, "reasoning": true, "reasoning_content": true, "tool_calls": true, "function_call": true,
 	"finish_reason": true, "stop_reason": true,
-	"completion_tokens": true, "total_tokens": true, "completion_tokens_details": true, "prompt_tokens_details": true,
+	"system_fingerprint": true, "completion_tokens_details": true, "prompt_tokens_details": true,
 }
 
 // replyView is what of a reply the comparison reads.
