@@ -101,6 +101,43 @@ type condWatch struct {
 	hist []condObs
 }
 
+// condWatchStart bounds how long the API server may take to start the condition watch (#549). A
+// server that accepts the request and never answers then fails the test at once, naming it, where it
+// once hung the package until go test's 10-minute timeout and lost every test after it.
+var condWatchStart = 30 * time.Second
+
+// openWatch starts a watch with open, giving up after within: past it, it cancels ctx, which ends the
+// stalled request, and returns an error naming the API server at host. A watch's context bounds its
+// whole stream, so the bound is a timer on open's return, not a deadline on ctx.
+func openWatch(ctx context.Context, cancel context.CancelFunc, host string, within time.Duration, open func(context.Context) (watch.Interface, error)) (watch.Interface, error) {
+	type result struct {
+		w   watch.Interface
+		err error
+	}
+	got := make(chan result, 1)
+	go func() {
+		w, err := open(ctx)
+		got <- result{w, err}
+	}()
+	timer := time.NewTimer(within)
+	defer timer.Stop()
+	select {
+	case r := <-got:
+		return r.w, r.err
+	case <-timer.C:
+	}
+	cancel()
+	// The cancelled request returns; a watch that started at the last moment is stopped.
+	select {
+	case r := <-got:
+		if r.w != nil {
+			r.w.Stop()
+		}
+	case <-time.After(10 * time.Second):
+	}
+	return nil, fmt.Errorf("the API server at %s did not start the watch within %s: it accepted the request and never answered (#549)", host, within)
+}
+
 func startCondWatch(t *testing.T, api *apiServer) *condWatch {
 	t.Helper()
 	wc, err := client.NewWithWatch(api.env.Config, client.Options{Scheme: api.client.Scheme()})
@@ -108,7 +145,9 @@ func startCondWatch(t *testing.T, api *apiServer) *condWatch {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	w, err := wc.Watch(ctx, &v1alpha1.InstanceList{}, client.InNamespace(tunnelNS))
+	w, err := openWatch(ctx, cancel, api.env.Config.Host, condWatchStart, func(ctx context.Context) (watch.Interface, error) {
+		return wc.Watch(ctx, &v1alpha1.InstanceList{}, client.InNamespace(tunnelNS))
+	})
 	if err != nil {
 		cancel()
 		t.Fatal(err)
