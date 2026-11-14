@@ -33,17 +33,23 @@ const (
 // FrontStopBudget and a margin of 4 s.
 const FrontTermGrace = FrontStopBudget + 4*time.Second
 
-// SupervisorGrace is the least grace the supervisor needs to stop: the longest kill grace it gives
-// a child (the controller's ControllerTermGrace; the front's FrontTermGrace when it runs one), and
-// 5 s for the supervisor to see the exits, write its record and exit. down kills the supervisor
-// sooner only when given a shorter --grace, and its children die with it (Pdeathsig).
-const SupervisorGrace = max(ControllerTermGrace, FrontTermGrace) + 5*time.Second
+// SupervisorGrace is the least grace the supervisor needs to stop the processes it stops together:
+// the longest kill grace it gives one of them (the controller's ControllerTermGrace, which the relay
+// keeper gets too; frps and the bulk frps get the general DefaultTermGrace), and 5 s for the supervisor
+// to see the exits, write its record and exit. It is a host's least grace when no front runs; with a
+// front, SupervisorGraceWithFront. down kills the supervisor sooner only when given a shorter --grace,
+// and its children die with it (Pdeathsig).
+const SupervisorGrace = max(ControllerTermGrace, DefaultTermGrace) + 5*time.Second
 
-// SupervisorGraceWithFront is the least grace down and upgrade accept for a host whose supervisor
-// runs a front: SupervisorGrace. A shorter --grace is refused (ErrGraceTooShort), since a killed
-// front loses usage records; DefaultGrace is longer. A host without a front accepts a shorter
-// grace: a controller killed before its stop ends leaves its Leases held until they expire.
-const SupervisorGraceWithFront = SupervisorGrace
+// SupervisorGraceWithFront is the least grace down and upgrade accept for a host whose supervisor runs a
+// front. The supervisor stops the front first and waits for it to exit, and only then the others
+// (HBEP-11, #553; runInStopOrder), so the bounds add: FrontTermGrace, then SupervisorGrace. Its normal
+// worst case, FrontStopBudget then ControllerStopBudget, fits inside. A shorter --grace is refused
+// (ErrGraceTooShort): down's SIGKILL of the supervisor's tree would kill the front before it flushed its
+// usage records, or the controller before it released its Leases. DefaultGrace is longer. A host without
+// a front accepts a shorter grace: a controller killed before its stop ends leaves its Leases held until
+// they expire.
+const SupervisorGraceWithFront = FrontTermGrace + SupervisorGrace
 
 // FrontBinName is the front's binary (issue #64, HBEP-5), looked for beside the running hpcburst
 // unless --front-bin names another.

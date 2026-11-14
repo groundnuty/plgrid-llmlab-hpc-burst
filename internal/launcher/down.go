@@ -12,10 +12,11 @@ import (
 	"time"
 )
 
-// DefaultGrace is how long down waits after SIGTERM before it sends SIGKILL. It is longer than
-// SupervisorGrace, the least the supervisor needs to let the controller, and the front when it
-// runs one, stop within their own kill graces.
-const DefaultGrace = 40 * time.Second
+// DefaultGrace is how long down and upgrade wait after SIGTERM before they send SIGKILL. It is longer
+// than SupervisorGraceWithFront, the least the supervisor needs to let the front stop first and then
+// the controller, the relay keeper and frps, each within its own kill grace (#553), and so longer than
+// SupervisorGrace too. A stop ends as soon as every process has exited: the grace bounds it.
+const DefaultGrace = 70 * time.Second
 
 // ErrGraceTooShort is returned by Down and Upgrade, before anything is stopped, when the grace is
 // shorter than SupervisorGraceWithFront and the supervisor runs a front.
