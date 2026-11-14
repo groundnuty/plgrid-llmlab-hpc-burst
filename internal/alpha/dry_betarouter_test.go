@@ -64,7 +64,9 @@ func dryRouterReading(front func(a *Answer), direct func(key string, r *Reply) *
 		}
 	}
 	b.Expected = b.Variants
-	return b, ControlOf(cvs)
+	c := ControlOf(cvs)
+	c.Took = 14 * time.Second
+	return b, c
 }
 
 // dryRouterBytes is the healthy reading's front half, for the checks that read it alone.

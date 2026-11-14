@@ -304,6 +304,8 @@ type ControlObs struct {
 	Sent     int `json:"sent"`
 	Answered int `json:"answered"`
 	Compared int `json:"compared"`
+	// Took is how long the step that sent the variants straight to the engine took, from the host: under ControlBound.
+	Took time.Duration `json:"took"`
 	// Unanswered names, by S13's key, the variants the engine did not answer completely straight from the node (at most FailedKept).
 	Unanswered []string `json:"unanswered,omitempty"`
 	// Differ is every variant whose two answers differ: the router's doing, or the path's. Alike is every variant answered other than 200
@@ -432,8 +434,8 @@ func controlLines(c ControlObs) string {
 		return "- the direct-to-engine control: not read (" + c.Why + ")\n"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "- the direct-to-engine control (%s): %d variants sent straight to the engine, %d answered completely, %d compared with the front's answer; %d answered differently through the router\n",
-		ControlHow, c.Sent, c.Answered, c.Compared, len(c.Differ))
+	fmt.Fprintf(&b, "- the direct-to-engine control (%s): %d variants sent straight to the engine in %s (its bound %s), %d answered completely, %d compared with the front's answer; %d answered differently through the router\n",
+		ControlHow, c.Sent, c.Took.Round(100*time.Millisecond), ControlBound, c.Answered, c.Compared, len(c.Differ))
 	if len(c.Differ) > 0 {
 		var ds []string
 		for _, d := range c.Differ {

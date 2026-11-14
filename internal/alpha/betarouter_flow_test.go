@@ -423,6 +423,7 @@ func (r *liveRun) directControl(ctx context.Context, p Plan, first, in v1alpha1.
 	defer cancel()
 	var out []byte
 	var why string
+	began := time.Now()
 	for i := 1; i <= controlTries; i++ {
 		if i > 1 {
 			time.Sleep(controlPause)
@@ -452,8 +453,9 @@ func (r *liveRun) directControl(ctx context.Context, p Plan, first, in v1alpha1.
 		front[i].Direct = replies[i]
 	}
 	c := ControlOf(front)
-	p.Logf("%s: the direct-to-engine control: %d sent, %d answered completely, %d compared; %d answered differently through the router, %d other than 200 alike on both paths",
-		p.Row.Name, c.Sent, c.Answered, c.Compared, len(c.Differ), len(c.Alike))
+	c.Took = time.Since(began)
+	p.Logf("%s: the direct-to-engine control: %d sent in %s, %d answered completely, %d compared; %d answered differently through the router, %d other than 200 alike on both paths",
+		p.Row.Name, c.Sent, c.Took.Round(100*time.Millisecond), c.Answered, c.Compared, len(c.Differ), len(c.Alike))
 	return c
 }
 

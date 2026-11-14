@@ -277,7 +277,7 @@ func TestBetaRouterPostNamesTheBytesAsAResponseLevelReading(t *testing.T) {
 		"exact bytes are CI's",
 		"440 of 440 variants sent, 440 answered completely (400 with 200, 40 with 4xx, 0 with 5xx, 0 with another status), 0 failures made by the router or the path, 0 still awaited at the harness's own bound of 10m0s",
 		"- the engine's vLLM version: 0.32.0; S13's cases were enumerated against vLLM v0.32.0\n",
-		"- the direct-to-engine control (" + ControlHow + "): 440 variants sent straight to the engine, 440 answered completely, 440 compared with the front's answer; 0 answered differently through the router\n",
+		"- the direct-to-engine control (" + ControlHow + "): 440 variants sent straight to the engine in 14s (its bound 10m0s), 440 answered completely, 440 compared with the front's answer; 0 answered differently through the router\n",
 		"- answered other than 200 alike on both paths (the engine's own refusals under this deployment), every one (40): ",
 		"the compute node's glibc: 2.34 (Envoy needs 2.30)",
 		"status.healthyWorkers 1 when ready and 1 after the worker restart",
