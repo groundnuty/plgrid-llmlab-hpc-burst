@@ -1,0 +1,32 @@
+hack/rehearsal.sh: building the four binaries and the rehearsal test
+ok       frp 0.71.1 (/tmp/frp)
+the test runs in hpcburst-rehearsal-1234.scope
+=== RUN   TestBulk64MiBReplyBesideEightStreams
+=== RUN   TestBulk64MiBReplyBesideEightStreams/direct
+=== RUN   TestBulk64MiBReplyBesideEightStreams/direct/control_without_the_bulk_path
+    bulk_test.go:145: the root k3s's listeners before the stack: ""
+    bulk_test.go:222: direct, bulk path false: gap p99 81.5ms over 340 gaps in the reply's window; the 67109237-byte reply took 2.1s (32.0 MB/s through the link, which carried 67600000 bytes)
+=== RUN   TestBulk64MiBReplyBesideEightStreams/direct/with_the_bulk_path
+    bulk_test.go:145: the root k3s's listeners before the stack: ""
+    bulk_test.go:222: direct, bulk path true: gap p99 51.5ms over 330 gaps in the reply's window; the 67109237-byte reply took 2.0s (32.5 MB/s through the link, which carried 67400000 bytes)
+=== NAME  TestBulk64MiBReplyBesideEightStreams/direct
+    bulk_test.go:101: direct: gap p99 without the bulk path 81.5ms (340 gaps), with it 51.5ms (330 gaps); the reply took 2.1s and 2.0s (32.0 and 32.5 MB/s through the link)
+    bulk_test.go:106: INVALID run, neither a pass nor a fail: gap p99 81.5ms without the bulk path, 51.5ms with it, 30ms apart: the control is under 85ms, so this run can't show a stall to remove
+=== RUN   TestBulk64MiBReplyBesideEightStreams/host-dialed
+=== RUN   TestBulk64MiBReplyBesideEightStreams/host-dialed/control_without_the_bulk_path
+    bulk_test.go:145: the root k3s's listeners before the stack: ""
+    bulk_test.go:222: host-dialed, bulk path false: gap p99 101.5ms over 430 gaps in the reply's window; the 67109237-byte reply took 2.7s (25.0 MB/s through the link, which carried 67800000 bytes)
+=== RUN   TestBulk64MiBReplyBesideEightStreams/host-dialed/with_the_bulk_path
+    bulk_test.go:145: the root k3s's listeners before the stack: ""
+    bulk_test.go:222: host-dialed, bulk path true: gap p99 56.5ms over 420 gaps in the reply's window; the 67109237-byte reply took 2.6s (25.5 MB/s through the link, which carried 67600000 bytes)
+=== NAME  TestBulk64MiBReplyBesideEightStreams/host-dialed
+    bulk_test.go:101: host-dialed: gap p99 without the bulk path 101.5ms (430 gaps), with it 56.5ms (420 gaps); the reply took 2.7s and 2.6s (25.0 and 25.5 MB/s through the link)
+    bulk_test.go:110: S4 passes: gap p99 101.5ms without the bulk path, 56.5ms with it, 45ms apart
+--- FAIL: TestBulk64MiBReplyBesideEightStreams (470.00s)
+    --- FAIL: TestBulk64MiBReplyBesideEightStreams/direct (233.00s)
+        --- PASS: TestBulk64MiBReplyBesideEightStreams/direct/control_without_the_bulk_path (116.00s)
+        --- PASS: TestBulk64MiBReplyBesideEightStreams/direct/with_the_bulk_path (117.00s)
+    --- PASS: TestBulk64MiBReplyBesideEightStreams/host-dialed (237.00s)
+        --- PASS: TestBulk64MiBReplyBesideEightStreams/host-dialed/control_without_the_bulk_path (118.00s)
+        --- PASS: TestBulk64MiBReplyBesideEightStreams/host-dialed/with_the_bulk_path (119.00s)
+FAIL

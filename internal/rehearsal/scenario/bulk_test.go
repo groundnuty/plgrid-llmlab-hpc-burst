@@ -75,7 +75,7 @@ type bulkRun struct {
 // gap within S17's figure while a 64 MiB non-streamed reply goes through, against the same run without
 // the bulk path.
 //
-//livecheck:none a hosted throwaway runs it (IMPL-COMMON: rehearsals on hosted runners)
+//livecheck:none CI's rehearsal-bulk job runs it (hack/rehearsal.sh; #558)
 func TestBulk64MiBReplyBesideEightStreams(t *testing.T) {
 	requireRehearsal(t) // skips the whole test without HPCBURST_REHEARSAL=1, before any judgement
 	for _, c := range []struct {
