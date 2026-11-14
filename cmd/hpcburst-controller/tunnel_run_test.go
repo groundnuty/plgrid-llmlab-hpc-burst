@@ -110,6 +110,14 @@ var condWatchStart = 30 * time.Second
 // stalled request, and returns an error naming the API server at host. A watch's context bounds its
 // whole stream, so the bound is a timer on open's return, not a deadline on ctx.
 func openWatch(ctx context.Context, cancel context.CancelFunc, host string, within time.Duration, open func(context.Context) (watch.Interface, error)) (watch.Interface, error) {
+	timer := time.NewTimer(within)
+	defer timer.Stop()
+	return openWatchUntil(ctx, cancel, host, within, timer.C, open)
+}
+
+// openWatchUntil is openWatch, giving up when expire fires; within names the bound in the error. A test
+// fires expire itself, so its stall is proven without a race against a wall-clock window.
+func openWatchUntil(ctx context.Context, cancel context.CancelFunc, host string, within time.Duration, expire <-chan time.Time, open func(context.Context) (watch.Interface, error)) (watch.Interface, error) {
 	type result struct {
 		w   watch.Interface
 		err error
@@ -119,12 +127,10 @@ func openWatch(ctx context.Context, cancel context.CancelFunc, host string, with
 		w, err := open(ctx)
 		got <- result{w, err}
 	}()
-	timer := time.NewTimer(within)
-	defer timer.Stop()
 	select {
 	case r := <-got:
 		return r.w, r.err
-	case <-timer.C:
+	case <-expire:
 	}
 	cancel()
 	// The cancelled request returns; a watch that started at the last moment is stopped.
