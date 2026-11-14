@@ -235,12 +235,16 @@ func TestEnvoyHasNoPanicMode(t *testing.T) {
 	}
 }
 
-// Outlier detection: a worker that answers 3 consecutive 5xx while its readiness passes is ejected
-// and gets nothing, and a passing check does not bring it back: it returns only when its ejection,
-// 30 s, ends. Control: successful_active_health_check_uneject_host true brings it back at the next
-// passing check, within one interval.
+// Outlier detection on a worker that answers 5xx while its readiness passes. With the agent's config a
+// lone worker is never ejected: max_ejection_percent is ⌈100·(n−1)/n⌉, 0 for one worker (the science
+// agent's ruling on #565), so the active check alone judges it, and it keeps getting requests. Allowed to
+// eject (max_ejection_percent 100, the agent's config otherwise), 3 consecutive 5xx eject the worker, and a
+// passing check does not bring it back: it returns only when its ejection, 30 s, ends. Control:
+// successful_active_health_check_uneject_host true brings it back at the next passing check, within one
+// interval. (With two workers and the agent's config, TestBothWorkersFailingLeaveOneInTheRing shows the
+// ejection of one of them.)
 func TestEnvoyEjectsAWorkerAfterThree5xx(t *testing.T) {
-	eject := func(t *testing.T, r *router, status *atomic.Int32) time.Duration {
+	fail3 := func(t *testing.T, r *router, status *atomic.Int32) {
 		t.Helper()
 		status.Store(http.StatusInternalServerError)
 		for i := 0; i < 3; i++ {
@@ -248,6 +252,10 @@ func TestEnvoyEjectsAWorkerAfterThree5xx(t *testing.T) {
 				t.Fatalf("5xx %d of 3: Envoy answered %d, want the worker's 500", i+1, s)
 			}
 		}
+	}
+	eject := func(t *testing.T, r *router, status *atomic.Int32) time.Duration {
+		t.Helper()
+		fail3(t, r, status)
 		r.waitWorker(t, "ejected", 30*time.Second)
 		status.Store(0)
 		if s, body := routerGet(t, r); s != http.StatusServiceUnavailable {
@@ -255,9 +263,26 @@ func TestEnvoyEjectsAWorkerAfterThree5xx(t *testing.T) {
 		}
 		return r.waitWorker(t, "healthy", 2*time.Minute)
 	}
-	t.Run("the agent's config", func(t *testing.T) {
+	allowed := func(m map[string]any) {
+		clusterOf(t, m)["outlier_detection"].(map[string]any)["max_ejection_percent"] = 100
+	}
+	t.Run("the agent's config: a lone worker is never ejected", func(t *testing.T) {
 		var status atomic.Int32
 		r := agentRouter(t, workerSpec{Status: &status})
+		fail3(t, r, &status)
+		// More 5xx still reach the worker, and Envoy never holds it ejected.
+		for i := 0; i < 3; i++ {
+			if s, _ := routerGet(t, r); s != http.StatusInternalServerError {
+				t.Fatalf("5xx %d after the first 3: Envoy answered %d, want the lone worker's own 500: it was ejected", i+1, s)
+			}
+		}
+		if got := r.workerState(t); got != "healthy" {
+			t.Errorf("Envoy holds the lone worker %s after 6 consecutive 5xx, want healthy: max_ejection_percent 0 never ejects it", got)
+		}
+	})
+	t.Run("ejection allowed: out for its 30 s", func(t *testing.T) {
+		var status atomic.Int32
+		r := controlRouter(t, workerSpec{Status: &status}, allowed)
 		back := eject(t, r, &status)
 		if back < 20*time.Second {
 			t.Errorf("the ejected worker was back after %v, through passing checks (every 5 s): want it out for its 30 s ejection", back)
@@ -267,6 +292,7 @@ func TestEnvoyEjectsAWorkerAfterThree5xx(t *testing.T) {
 	t.Run("control: a passing check unejects", func(t *testing.T) {
 		var status atomic.Int32
 		r := controlRouter(t, workerSpec{Status: &status}, func(m map[string]any) {
+			allowed(m)
 			clusterOf(t, m)["outlier_detection"].(map[string]any)["successful_active_health_check_uneject_host"] = true
 		})
 		back := eject(t, r, &status)
