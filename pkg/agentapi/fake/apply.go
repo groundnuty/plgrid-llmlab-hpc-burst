@@ -104,7 +104,12 @@ func (a *Agent) startWorker(dw agentapi.DesiredWorker, i agentapi.DesiredInstanc
 		instGen:    i.Generation,
 		socket:     socketDir + "/" + dw.Name + ".sock",
 	}
-	a.nextPID++
+	if a.engine.StartFails {
+		code := startFailedExitCode
+		w.phase, w.pid, w.start, w.exitCode, w.exitedAt = agentapi.PartExited, 0, time.Time{}, &code, now
+	} else {
+		a.nextPID++
+	}
 	a.starts = append(a.starts, Start{
 		Instance:           i.UID,
 		Worker:             dw.Name,

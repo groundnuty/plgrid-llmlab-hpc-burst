@@ -62,6 +62,10 @@ type exchange struct {
 	// toward the pause like an upstream cut.
 	failed bool
 
+	// retried: the front decided its one retry of a written request (HBEP-5, open question 5), so
+	// its give-up answers carry x-should-retry: false.
+	retried bool
+
 	headers     clock.Timer // streamHeadersTimeout, armed at the request's last byte
 	headersGen  int         // the attempt the headers timer belongs to
 	headersDone bool        // the attempt's headers came, or it ended
@@ -100,6 +104,27 @@ func (x *exchange) armIdle(d time.Duration) {
 		return
 	}
 	x.idle.Reset(d)
+}
+
+// untarget attributes the request to the front alone again, as before any
+// target was chosen: the attribution headers and the usage record's target
+// fields, for an answer the front raises after its retry left the failed
+// Instance and found no other (HBEP-5, Errors).
+func (x *exchange) untarget() {
+	x.attr = attribution{requestID: x.id, emitter: emitterFront}
+	x.rec.Emitter = emitterFront
+	x.rec.Provider, x.rec.ModelDeployment, x.rec.DeploymentID, x.rec.Instance, x.rec.InstanceUID = "", "", "", "", ""
+}
+
+// stopIdle stops the idle time-out between a failed attempt and the retry's write, which arms it
+// again (HBEP-5, open question 5: idleTimeout starts again at the retry's write), so a retry waiting
+// in the FIFO is not cut by the first attempt's timer.
+func (x *exchange) stopIdle() {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if x.idle != nil {
+		x.idle.Stop()
+	}
 }
 
 func (x *exchange) touch() {

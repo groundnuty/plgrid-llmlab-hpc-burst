@@ -65,6 +65,13 @@ const (
 	// ReasonRestartLoop: three Allocations in a row in one class failed
 	// within restart.window; provisioning in that class pauses.
 	ReasonRestartLoop = "RestartLoop"
+	// ReasonCrashCorrelated: a serving worker (its Instance ready or draining, the
+	// worker verified and warmed up since its last start) exited without being told to
+	// within 30 s after a serving worker of another Instance of the same
+	// ModelDeployment did: a request may be crashing every engine it reaches. A
+	// failed start never counts. An event only (HBEP-7, Health and restarts:
+	// Crash correlation; #539, #550).
+	ReasonCrashCorrelated = "CrashCorrelated"
 	// ReasonVerificationFailed: verification stopped provisioning in a class.
 	// The lifecycle controller (#61) sets it; this states its contract.
 	// A settings contradiction stops it until the serving spec changes; a
@@ -219,6 +226,10 @@ const (
 	// the worker's current generation is verified (HBEP-7, Several workers;
 	// `@hpc-burst-science-agent`, 12 Nov 2026, #429, Q5).
 	ReasonRouterCheckFailing = "RouterCheckFailing"
+	// ReasonKVSkew: with several workers, one worker at a full KV cache with
+	// requests waiting while a sibling the router routes to idles, for
+	// health.kvSkewTimeout (HBEP-7, Health and restarts; #518).
+	ReasonKVSkew = "KVSkew"
 )
 
 // ReasonRouterRestart is the reason of the router rung's failing event: the

@@ -16,6 +16,7 @@ const (
 	defaultFailureThreshold    = 3
 	defaultNoProgressTimeout   = 30 * time.Minute
 	defaultErrorOnlyWindow     = time.Minute
+	defaultKVSkewTimeout       = 2 * time.Minute
 	defaultAgentTimeout        = 2 * time.Minute
 	defaultRegistrationTimeout = 15 * time.Minute
 	defaultStartTimeout        = time.Hour
@@ -56,6 +57,7 @@ type settings struct {
 	failureThreshold    int32
 	noProgressTimeout   time.Duration
 	errorOnlyWindow     time.Duration
+	kvSkewTimeout       time.Duration
 	agentTimeout        time.Duration
 	registrationTimeout time.Duration
 	startTimeout        time.Duration
@@ -96,6 +98,7 @@ func resolveSettings(p v1alpha1.PlatformProfileSpec) (settings, error) {
 	s.probeInterval = d("health.probeInterval", h.ProbeInterval, defaultProbeInterval)
 	s.noProgressTimeout = d("health.noProgressTimeout", h.NoProgressTimeout, defaultNoProgressTimeout)
 	s.errorOnlyWindow = d("health.errorOnlyWindow", h.ErrorOnlyWindow, defaultErrorOnlyWindow)
+	s.kvSkewTimeout = d("health.kvSkewTimeout", h.KVSkewTimeout, defaultKVSkewTimeout)
 	s.agentTimeout = d("health.agentTimeout", h.AgentTimeout, defaultAgentTimeout)
 	s.registrationTimeout = d("health.registrationTimeout", h.RegistrationTimeout, defaultRegistrationTimeout)
 	s.startTimeout = d("health.startTimeout", h.StartTimeout, defaultStartTimeout)
