@@ -37,8 +37,9 @@ const WaitDeadline = 3 * time.Minute
 // every wait, request and command gives up. The deadline's panic skips
 // t.Cleanup, which is what stops the stack, so a run that is too slow must end
 // in t.Fatal early enough for the clean-up to run: hpcburst down within its
-// 40 s grace, the fake cluster's KILL of every job, and the ssh servers.
-const CleanupMargin = 2 * time.Minute
+// bound (DownTimeout), the fake cluster's KILL of every job, and the ssh
+// servers.
+const CleanupMargin = 3 * time.Minute
 
 // WaitCap is when the test's waits and bounded calls give up: CleanupMargin
 // before the test's deadline, or never when it has none.
@@ -180,10 +181,12 @@ func RootK3sAfter(before, after string) error {
 }
 
 // Bounds of the stack's commands. hpcburst up starts k3s and waits for it; down
-// stops everything within its 40 s grace and then k3s; status only reads.
+// stops the supervisor's tree and then k3s, each within its 70 s grace
+// (launcher.DefaultGrace: the front first, then the rest, #553) and 10 s more
+// for what it killed to be gone; status only reads.
 const (
 	UpTimeout     = 5 * time.Minute
-	DownTimeout   = 100 * time.Second
+	DownTimeout   = 2 * (70*time.Second + 10*time.Second)
 	StatusTimeout = 30 * time.Second
 )
 
