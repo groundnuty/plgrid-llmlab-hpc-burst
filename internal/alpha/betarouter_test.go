@@ -167,6 +167,25 @@ func TestGlibcOfTakesTheOlderReading(t *testing.T) {
 	}
 }
 
+// The Helios router row (issue #566) is the Helios rows' shape and slot, written out: GH200 under QOS now, one GPU and one job, the
+// shortest lease an Instance's lead allows under helios.yaml's clock (106 minutes, past the 105-minute lead), the owner's go of QOS now, the
+// slot held for the lease, posting to beta's tracker; and only it of the two router rows posts its glibc on a NOT RUN.
+func TestTheHeliosRouterRowIsTheHeliosShapeAndSlot(t *testing.T) {
+	r := BetaHeliosRouterRow()
+	if r.Name != "beta-helios-now-router" || r.Cluster != "helios" || r.Partition != "plgrid-gpu-gh200" || r.QOS != "now" || r.GPUs != 1 || r.MostJobs != 1 {
+		t.Errorf("the row is %+v, want GH200 under QOS now, one GPU, one job", r)
+	}
+	if r.Lease != 106*time.Minute || r.Lease <= Lead() || r.SlotHold != r.Lease || r.StartWait != 0 {
+		t.Errorf("lease %s, slot hold %s, start wait %s; want 106 minutes, past the lead of %s, the slot held for the lease, no start wait", r.Lease, r.SlotHold, r.StartWait, Lead())
+	}
+	if r.OwnerGo != OwnerGoHeliosNow || r.PostsTo != BetaTracker || r.Budget != 213*time.Minute || !r.PostsGlibcNotRun || r.ProfileName() != "helios" {
+		t.Errorf("owner's go %q, posts to %q, budget %s, posts its glibc on a NOT RUN %t, profile %q", r.OwnerGo, r.PostsTo, r.Budget, r.PostsGlibcNotRun, r.ProfileName())
+	}
+	if !IsRouterRow(r.Name) || BetaRouterRow().PostsGlibcNotRun {
+		t.Error("the Helios row is not a router row, or the Athena row posts its glibc on a NOT RUN")
+	}
+}
+
 func TestRouterRowIsRowAsHoldOfThePostedSlot(t *testing.T) {
 	r, a := BetaRouterRow(), NowServeRow()
 	if r.Name != "beta-athena-now-router" || r.PostsTo != "#522" {
