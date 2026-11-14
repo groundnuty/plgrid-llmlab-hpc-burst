@@ -31,8 +31,13 @@ var betaNowRows = []string{"beta-athena-now-router", "beta-athena-now-keeper"}
 // pendingAlphaRows are the rows internal/alpha has and the script holds as pending (issue #521): built, judged and dry-run in the package, and
 // refused by the script with exit 2 ("is pending and cannot run yet") until the live path they need exists. beta-athena-now-bulk's needs the engine
 // double staged on the cluster (docs/alpha-runbook.md, The runs). A tests that compares the script's tables with the package's rows leaves them out;
-// the one that lists the script's rows says they are pending and refused. Flipping a row to ready is removing it from this list and from the
-// script's pending cell.
+// the one that lists the script's rows says they are pending and refused. Removing a row from this list and from the script's pending cell is the LAST
+// step of making it ready, not the whole of it: the rest is the wiring the keeper row got in the commit that added it to the script, which the drift tests
+// that iterate the script's cluster shapes run through the script and so cannot be pre-wired while the row is pending (the live table's line with its test
+// pattern and inputs, the shapes, plan stack, most-jobs, owner's-go and front-label tables; alpha_test.go's shape row, rows list and owner's-go note;
+// the dry faults and rows of alpha_dry_test.go; budget_test.go's stackRowTests; both maps of neverstarted_test.go; frontlabel_test.go's labelledRows;
+// bindir_test.go's stackRowCount; plan_test.go's three expected sets; betaNowRows above; the //livecheck: directive of the row's test; and the host-dialed
+// mode world.command gives the keeper row, which names that row alone).
 var pendingAlphaRows = []string{"beta-athena-now-bulk"}
 
 // builtRows are the package's rows the script runs: Rows() less the pending ones.
