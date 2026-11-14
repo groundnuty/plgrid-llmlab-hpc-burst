@@ -17,7 +17,8 @@ package alpha
 //     a usage chunk and its prompt_tokens, the choice indexes, the events' keys), never the token text.
 //
 // Values are compared only where named above; every other field is compared by its presence and its JSON type alone, so its value (an
-// id, a timestamp, a count of generated tokens) never is. Set aside even from the shape, by name (setAside), are the fields whose presence
+// id, a timestamp, a count of generated tokens) never is. A map keyed by data (dataKeyed: the logprobs of each position, keyed by token)
+// is read as an opaque map, by neither its keys nor its size. Set aside even from the shape, by name (setAside), are the fields whose presence
 // or type itself follows what the sampler did or a cache: the generated text and reasoning (text, content, reasoning,
 // reasoning_content: a string or null), the tool calls and function call it made (there or not), finish_reason and stop_reason (null on
 // a stream's chunks until the one that ends it, which falls where the sampler stopped; stop_reason a string, a token or null), the
@@ -47,6 +48,14 @@ type Reply struct {
 	Body   []byte
 	Cut    bool
 }
+
+// dataKeyed are the keys whose value is a map keyed by data, or a list of such maps: completions' logprobs.top_logprobs, each position a
+// map from a token's text to its logprob, and prompt_logprobs, each position null or a map from a token's id to its logprob (vLLM
+// v0.32.0, completion/protocol.py and the logprob builders of the serving code). Their keys are tokens, which the sampler decides, so the
+// shape reads each such map as an opaque map, by neither its keys nor its number of entries: a position holds the top-k and, when the
+// sampled token is not among them, that token too, so its width is k or k+1. Chat's logprobs.content[].top_logprobs is a list of objects
+// with fixed keys (token, logprob, bytes), which an opaque reading compares no worse.
+var dataKeyed = map[string]bool{"top_logprobs": true, "prompt_logprobs": true}
 
 // setAside are the keys whose presence and type, as well as their values, the comparison ignores wherever they occur (see the file's
 // comment).
@@ -233,10 +242,14 @@ func shapeOf(x any) string {
 	case map[string]any:
 		var parts []string
 		for k, v := range t {
-			if setAside[k] {
+			switch {
+			case setAside[k]:
 				continue
+			case dataKeyed[k]:
+				parts = append(parts, k+":"+opaqueShape(v))
+			default:
+				parts = append(parts, k+":"+shapeOf(v))
 			}
-			parts = append(parts, k+":"+shapeOf(v))
 		}
 		sort.Strings(parts)
 		return "{" + strings.Join(parts, ",") + "}"
@@ -256,6 +269,22 @@ func shapeOf(x any) string {
 		return "null"
 	}
 	return "?"
+}
+
+// opaqueShape is a data-keyed value's shape (dataKeyed): an object is "map", whatever its keys, a list the union of its elements' opaque
+// shapes, and a scalar its JSON type.
+func opaqueShape(x any) string {
+	switch t := x.(type) {
+	case map[string]any:
+		return "map"
+	case []any:
+		elems := map[string]bool{}
+		for _, e := range t {
+			elems[opaqueShape(e)] = true
+		}
+		return "[" + joinKeys(elems) + "]"
+	}
+	return shapeOf(x)
 }
 
 func joinKeys(m map[string]bool) string {
