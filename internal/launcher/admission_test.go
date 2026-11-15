@@ -20,6 +20,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -320,5 +321,52 @@ func TestInstallAgentAccessClosesTheWindow(t *testing.T) {
 	order = nil
 	if _, err := installAgentAccess(context.Background(), steps(nil, nil), AgentAccessOptions{BeforeWait: func(context.Context) error { return errors.New("stop") }}); err == nil || slices.Contains(order, "wide") {
 		t.Errorf("a failing BeforeWait: order %v, %v, want an error and no wide role", order, err)
+	}
+}
+
+// ApplyManifests waits for each CRD to be Established, not for its kind to be served, so a probe made right
+// after it can fail with "no matches for kind" (the REST mapper's error) or a 404 (the dynamic client's)
+// while discovery lags (team-lead, from #603). That is "not yet": retried within the bound, never counted as
+// the policy being enforced, never a permanent failure. Only a refusal that names the probe's own policy is
+// enforcement.
+func TestAProbeOfAKindThatIsNotServedYetIsRetriedNeverCounted(t *testing.T) {
+	noMatch := func() error {
+		return &meta.NoKindMatchError{GroupKind: schema.GroupKind{Group: FrameworkGroup, Kind: "ModelDeployment"}, SearchedVersions: []string{"v1alpha1"}}
+	}
+	notFound := func() error {
+		return apierrors.NewNotFound(schema.GroupResource{Group: FrameworkGroup, Resource: "modeldeployments"}, "")
+	}
+	// One probe: not served is an error that says so, and is not a refusal.
+	for name, err := range map[string]error{"no match for the kind": noMatch(), "a 404": notFound()} {
+		p := admissionPolicy{guardDef: guardDef{name: CapacityGuardName}, attempt: func(context.Context, *rest.Config) error { return err }}
+		refused, perr := p.probe(context.Background(), nil)
+		if refused || !errors.Is(perr, errNotServedYet) {
+			t.Errorf("%s: refused %v, error %v, want not refused, with the not-served error", name, refused, perr)
+		}
+	}
+
+	// The wait: answers no-match and 404 a few times, then the policy's refusal. It returns only after the
+	// refusal, having probed once more than it was refused.
+	var tries int
+	answers := []error{noMatch(), notFound(), noMatch(), nil}
+	p := admissionPolicy{guardDef: guardDef{name: CapacityGuardName}, crd: "modeldeployments." + FrameworkGroup,
+		attempt: func(context.Context, *rest.Config) error {
+			tries++
+			if tries <= len(answers) {
+				return answers[tries-1]
+			}
+			return forbiddenBy(CapacityGuardName)
+		}}
+	un, err := waitAdmissionEnforced(context.Background(), nil, fakeCRDHost(p.crd), []admissionPolicy{p}, 10*time.Second, time.Millisecond, io.Discard)
+	if err != nil || len(un) != 0 || tries != len(answers)+1 {
+		t.Errorf("= %v, %v after %d probes, want success on the probe after the %d answers that were not a refusal (including one that was accepted)", un, err, tries, len(answers))
+	}
+
+	// No match until the bound: a failure that names the policy, not a success.
+	stuck := admissionPolicy{guardDef: guardDef{name: CapacityGuardName}, crd: "modeldeployments." + FrameworkGroup,
+		attempt: func(context.Context, *rest.Config) error { return noMatch() }}
+	_, err = waitAdmissionEnforced(context.Background(), nil, fakeCRDHost(stuck.crd), []admissionPolicy{stuck}, 50*time.Millisecond, time.Millisecond, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), CapacityGuardName) || !strings.Contains(err.Error(), "does not serve") {
+		t.Errorf("no match until the bound: %v, want a failure that names %s and says the kind is not served", err, CapacityGuardName)
 	}
 }

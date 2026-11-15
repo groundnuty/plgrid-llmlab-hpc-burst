@@ -32,6 +32,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -157,12 +158,35 @@ func ProbeAdmission(ctx context.Context, cfg *rest.Config, name string) (refused
 	return false, fmt.Errorf("%q is not one of the admission policies %v", name, AdmissionPolicyNames())
 }
 
+// errNotServedYet is what a probe reports while the API server does not serve the probe's kind yet.
+var errNotServedYet = errors.New("the API server does not serve the probe's kind yet")
+
+// probe makes the dry-run probe once. Only a refusal that names the policy itself counts as enforced.
+// A kind the API server does not serve yet is NOT: ApplyManifests waits for each CRD to be Established,
+// not for its kind to be served, so a probe made right after it can fail with "no matches for kind" (the
+// REST mapper's error) or a 404 (what the dynamic client gets for a resource that is not served) while
+// discovery lags. That is "not yet": the wait retries it within its bound, and it is never a success and
+// never a permanent failure (team-lead, from #603).
 func (p admissionPolicy) probe(ctx context.Context, cfg *rest.Config) (bool, error) {
 	err := p.attempt(ctx, cfg)
-	if apierrors.IsForbidden(err) && strings.Contains(err.Error(), "ValidatingAdmissionPolicy '"+p.name+"'") {
+	switch {
+	case isPolicyRefusal(err, p.name):
 		return true, nil
+	case isNotServed(err):
+		return false, fmt.Errorf("%w: %v", errNotServedYet, err)
 	}
 	return false, err
+}
+
+// isPolicyRefusal reports whether err is the API server's refusal by the named policy.
+func isPolicyRefusal(err error, policy string) bool {
+	return apierrors.IsForbidden(err) && strings.Contains(err.Error(), "ValidatingAdmissionPolicy '"+policy+"'")
+}
+
+// isNotServed reports whether err says the kind of the probe is not served (yet): the REST mapper's
+// no-match error, or a 404.
+func isNotServed(err error) bool {
+	return err != nil && (meta.IsNoMatchError(err) || apierrors.IsNotFound(err))
 }
 
 // probeCapacityGuard is the admin's dry-run create of a schema-valid ModelDeployment that carries an
