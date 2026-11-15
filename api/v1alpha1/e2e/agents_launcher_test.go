@@ -347,6 +347,37 @@ func TestIdentityStatus(t *testing.T) {
 		t.Errorf("the ServiceAccount with no file: %+v, want not valid, no kubeconfig and a detail saying so", g)
 	}
 
+	// The ServiceAccount called default, which a control plane with a ServiceAccount controller makes in
+	// every namespace, is not an identity unless a kubeconfig was written for it.
+	if _, err := adminCS.CoreV1().ServiceAccounts(agentsNamespace).Create(bg(), serviceAccount("default"), metav1.CreateOptions{}); err == nil {
+		t.Cleanup(func() {
+			_ = adminCS.CoreV1().ServiceAccounts(agentsNamespace).Delete(bg(), "default", metav1.DeleteOptions{})
+		})
+	} else if !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("create the ServiceAccount default: %v", err)
+	}
+	states, err = launcher.CheckIdentities(bg(), cfg, dir, ports)
+	must(t, err, "CheckIdentities with a default ServiceAccount")
+	for _, s := range states {
+		if s.Name == "default" {
+			t.Errorf("the default ServiceAccount is listed as an identity: %+v", s)
+		}
+	}
+	if _, err := launcher.IssueIdentity(bg(), cfg, dir, "default", true, bytes.NewBuffer(nil)); err != nil {
+		t.Fatalf("renew of default: %v", err)
+	}
+	states, err = launcher.CheckIdentities(bg(), cfg, dir, ports)
+	must(t, err, "CheckIdentities after a kubeconfig was written for default")
+	found := false
+	for _, s := range states {
+		if s.Name == "default" {
+			found = s.Valid
+		}
+	}
+	if !found {
+		t.Errorf("default has a kubeconfig now, and is not listed as valid: %+v", states)
+	}
+
 	// A failure to reach the API server is an error, not a list of identities that are not valid.
 	dead := *cfg
 	dead.Host = "https://127.0.0.1:1"

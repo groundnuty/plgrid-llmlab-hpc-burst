@@ -38,7 +38,7 @@ const IdentityTokenSeconds int64 = 30 * 24 * 60 * 60
 // Errors the command line tells apart. ErrIdentityName is a usage error, the others are refusals.
 var (
 	ErrIdentityName   = errors.New("an identity name must be a DNS-1123 label")
-	ErrIdentityExists = errors.New("the identity exists")
+	ErrIdentityExists = errors.New("identity already exists")
 	ErrNoIdentity     = errors.New("no such identity")
 )
 
@@ -133,7 +133,7 @@ func IssueIdentity(ctx context.Context, cfg *rest.Config, identitiesDir, name st
 	created := false
 	if renew {
 		if _, err := sas.Get(ctx, name, metav1.GetOptions{}); apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("%w: no ServiceAccount %s in %s; hpcburst identity add makes it", ErrNoIdentity, name, AgentsNamespace)
+			return nil, fmt.Errorf("%w (no ServiceAccount %s in %s): hpcburst identity add makes it", ErrNoIdentity, name, AgentsNamespace)
 		} else if err != nil {
 			return nil, fmt.Errorf("read the ServiceAccount %s: %w", name, err)
 		}
@@ -143,7 +143,7 @@ func IssueIdentity(ctx context.Context, cfg *rest.Config, identitiesDir, name st
 		}}
 		switch _, err := sas.Create(ctx, sa, metav1.CreateOptions{FieldManager: fieldManager}); {
 		case apierrors.IsAlreadyExists(err):
-			return nil, fmt.Errorf("%w: the ServiceAccount %s exists in %s; use hpcburst identity renew %s for a new token", ErrIdentityExists, name, AgentsNamespace, name)
+			return nil, fmt.Errorf("%w (the ServiceAccount %s is in %s): use hpcburst identity renew %s for a new token", ErrIdentityExists, name, AgentsNamespace, name)
 		case apierrors.IsNotFound(err):
 			return nil, fmt.Errorf("the namespace %s is not there: hpcburst up installs it, so start the host with this release first (%w)", AgentsNamespace, err)
 		case err != nil:

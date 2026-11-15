@@ -24,6 +24,9 @@ import (
 	"k8s.io/client-go/rest"
 )
 
+// defaultServiceAccount is the ServiceAccount the control plane makes in every namespace.
+const defaultServiceAccount = "default"
+
 // identityAskTimeout bounds each identity's one question to the API server.
 const identityAskTimeout = 10 * time.Second
 
@@ -71,7 +74,12 @@ func CheckIdentities(ctx context.Context, cfg *rest.Config, identitiesDir string
 	}
 	var names []string
 	for n := range hasSA {
-		names = append(names, n)
+		// Kubernetes makes a ServiceAccount called default in every namespace. No identity is issued
+		// for it, and only the admin could make a token for it: it is listed only when a kubeconfig
+		// was written for it.
+		if n != defaultServiceAccount || hasFile[n] {
+			names = append(names, n)
+		}
 	}
 	for n := range hasFile {
 		if !hasSA[n] {
