@@ -19,6 +19,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -134,4 +135,12 @@ func requireEnforced(t *testing.T) {
 // inHours returns a time h hours from now, rounded to the second as the API stores it.
 func inHours(h int) *metav1.Time {
 	return &metav1.Time{Time: time.Now().UTC().Add(time.Duration(h) * time.Hour).Truncate(time.Second)}
+}
+
+// dynamicOf is the admin's dynamic client.
+func dynamicOf(t *testing.T) dynamic.Interface {
+	t.Helper()
+	dyn, err := dynamic.NewForConfig(cfg)
+	must(t, err, "the admin's dynamic client")
+	return dyn
 }
