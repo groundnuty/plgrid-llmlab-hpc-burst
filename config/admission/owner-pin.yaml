@@ -1,0 +1,85 @@
+# The owner pin (HBEP-10, Owner and purpose and Confirm; issue #589, PR 3). It applies to EVERY
+# identity, the person and the controllers included, except where a validation says "an agent": the
+# owner of a ModelDeployment is fixed at its create, the owner of an Operation is whoever created it,
+# and a plan is confirmed only by that owner, only after the controller wrote it, and only by its id.
+#
+# hpcburst up installs the policy and its binding on every start and resets them to this file, then
+# waits until the API server refuses a dry-run probe (internal/launcher/admission.go). Only after that
+# does the agent role gain its writes. hpcburst status reports whether they are there.
+# This file is written by hand. hack/generate.sh does not touch it. The launcher embeds it
+# (config/admission/embed.go), so what up installs is this file.
+#
+# A confirm exists only by an UPDATE that follows a written plan (#593's review). The CRD refuses
+# spec.confirm at create too (an optionalOldSelf rule); the create validation here is the second layer,
+# and a test shows it with the CRD's rule taken out.
+#
+# Only the main resources are matched: the status subresource is the controllers', and the capacity
+# guard bounds an agent's write to it.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: hpcburst-owner-pin
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["hpcburst.groundnuty.github.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["modeldeployments", "operations"]
+  variables:
+    - name: op
+      expression: "request.operation"
+    - name: res
+      expression: "request.resource.resource"
+    - name: ownerKey
+      expression: "'hpcburst.groundnuty.github.io/owner'"
+    - name: purposeKey
+      expression: "'hpcburst.groundnuty.github.io/purpose'"
+    - name: isAgent
+      expression: "has(request.userInfo.groups) && request.userInfo.groups.exists(g, g == 'system:serviceaccounts:hpcburst-agents')"
+    - name: newAnnotations
+      expression: "has(object.metadata.annotations) ? object.metadata.annotations : {}"
+    # An Operation's confirm is being set: the old object has none, the new one has.
+    - name: confirmBeingSet
+      expression: "variables.res == 'operations' && variables.op == 'UPDATE' && has(object.spec.confirm) && !has(oldObject.spec.confirm)"
+  validations:
+    - expression: >-
+        variables.res != 'modeldeployments' || variables.op != 'CREATE' || !variables.isAgent ||
+        (variables.ownerKey in variables.newAnnotations && variables.newAnnotations[variables.ownerKey] == request.userInfo.username)
+      reason: Forbidden
+      message: "an agent's ModelDeployment carries the annotation hpcburst.groundnuty.github.io/owner set to the agent's own user name, as the API server reports it (HBEP-10, Owner and purpose)"
+    - expression: >-
+        variables.res != 'modeldeployments' || variables.op != 'UPDATE' ||
+        ((has(oldObject.metadata.annotations) && variables.ownerKey in oldObject.metadata.annotations) == (variables.ownerKey in variables.newAnnotations) &&
+        (!(variables.ownerKey in variables.newAnnotations) || variables.newAnnotations[variables.ownerKey] == oldObject.metadata.annotations[variables.ownerKey]))
+      reason: Forbidden
+      message: "the annotation hpcburst.groundnuty.github.io/owner is fixed at create: no identity changes, adds or removes it afterwards (HBEP-10, Owner and purpose)"
+    - expression: "!(variables.purposeKey in variables.newAnnotations) || size(variables.newAnnotations[variables.purposeKey]) <= 256"
+      reason: Forbidden
+      message: "the annotation hpcburst.groundnuty.github.io/purpose holds at most 256 characters (HBEP-10, Owner and purpose)"
+    - expression: "variables.res != 'operations' || variables.op != 'CREATE' || object.spec.owner == request.userInfo.username"
+      reason: Forbidden
+      message: "an Operation's spec.owner is the identity that creates it, as the API server reports the user name (HBEP-10, Owner and purpose)"
+    - expression: "variables.res != 'operations' || variables.op != 'CREATE' || !has(object.spec.confirm)"
+      reason: Forbidden
+      message: "an Operation is created without spec.confirm: the owner confirms by an update, after the controller has written a plan (HBEP-10, Confirm)"
+    - expression: "!variables.confirmBeingSet || request.userInfo.username == oldObject.spec.owner"
+      reason: Forbidden
+      message: "only an Operation's owner confirms its plan (HBEP-10, Confirm)"
+    - expression: "!variables.confirmBeingSet || (has(oldObject.status) && has(oldObject.status.plan))"
+      reason: Forbidden
+      message: "an Operation can be confirmed only after the controller wrote a plan in its status (HBEP-10, Confirm)"
+    - expression: >-
+        !variables.confirmBeingSet ||
+        (has(oldObject.status) && has(oldObject.status.plan) && object.spec.confirm.planID == oldObject.status.plan.id)
+      reason: Forbidden
+      message: "spec.confirm.planID is the id of the Operation's current plan, status.plan.id, as read with the resourceVersion of the update (HBEP-10, Confirm)"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: hpcburst-owner-pin
+spec:
+  policyName: hpcburst-owner-pin
+  validationActions: ["Deny"]
