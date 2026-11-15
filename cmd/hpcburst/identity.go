@@ -31,8 +31,7 @@ valid until then.`
 
 func cmdIdentity(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && (args[0] == "-h" || args[0] == "-help" || args[0] == "--help") {
-		fmt.Fprintln(stdout, identityUsage)
-		return exitOK
+		args = []string{"add", "-h"} // the flags of add and renew, which are the same, and exit 0, as guard does
 	}
 	if len(args) == 0 || (args[0] != "add" && args[0] != "renew") {
 		fmt.Fprintln(stderr, identityUsage)
