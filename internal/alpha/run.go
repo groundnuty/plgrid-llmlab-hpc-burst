@@ -83,6 +83,26 @@ func InvalidNote(row Row) string {
 	return fmt.Sprintf("%s: %s; its job started, ran and spent the slot, so this is no NOT RUN; the run's other checks passed; the text to post says why; the run ended its deployment\n", row.Name, invalidWords)
 }
 
+// ErrFinding ends the bulk row's run that ran, was judged with no failure and has the saturation witness, but whose bulk path's gap p99 is 30
+// ms or less below the control's (BulkObs.Protects; #584, the science agent's rulings of 15 Nov 2026, comments 6892006633 and 6892102151): the
+// layout doesn't protect the streams on this path, and HBEP-6's beta criterion, as #583 amends it, is not met. It is neither a pass, which would
+// record the criterion met, nor a failure, which is a broken path's. Run writes the record (verdict "finding") and the text to post (its head
+// FINDING, with the three numbers), and returns it only when nothing failed and the witness holds. runRow writes findingWords to FindingFile and
+// passes, and hack/live-checks.sh reads that, on the bulk row alone, as FINDING, exit 5: no caller reads it as passed.
+var ErrFinding = errors.New(findingWords)
+
+// findingWords say what a FINDING run is, in its marker, which hack/live-checks.sh reads (finding_marker).
+const findingWords = "the bulk path's gap p99 is 30 ms or less below the control's: the layout doesn't protect the streams on this path"
+
+// Finding reports whether err ends the row's run as FINDING (ErrFinding).
+func Finding(_ Row, err error) bool { return errors.Is(err, ErrFinding) }
+
+// FindingNote is the text of a FINDING run's marker (FindingFile): the row and the fixed words, nothing the run read. The text to post gives the
+// three numbers.
+func FindingNote(row Row) string {
+	return fmt.Sprintf("%s: %s; the run's other checks passed and its saturation witness held; the text to post gives the bulk path's gap p99, the control's and their difference\n", row.Name, findingWords)
+}
+
 // neverStarted is whether err says a job of the run never started within a bound.
 func neverStarted(err error) bool {
 	return errors.Is(err, ErrNotStarted) || errors.Is(err, ErrQueueWaitPastEnd) || errors.Is(err, ErrSecondNotStarted)
@@ -214,6 +234,11 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 				err = fmt.Errorf("closing the steps after a run with no saturation witness: %v (%v)", cerr, err)
 				return
 			}
+			if Finding(cfg.Row, err) {
+				// And for a FINDING: a close that failed is a failure, never a FINDING.
+				err = fmt.Errorf("closing the steps after a run whose bulk path did not protect the streams: %v (%v)", cerr, err)
+				return
+			}
 			err = errors.Join(err, fmt.Errorf("closing the steps: %w", cerr))
 		}
 	}()
@@ -234,6 +259,9 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 		refused error
 		// invalid is the bulk row's INVALID (ErrInvalid: no saturation witness), judged the same way: with no failure the run is INVALID.
 		invalid error
+		// finding is the bulk row's FINDING (ErrFinding: the witness holds, and the bulk path is 30 ms or less below the control): with no
+		// failure and no INVALID the run is a FINDING.
+		finding error
 	)
 	switch {
 	case strings.HasPrefix(cfg.Row.Name, "alpha-athena-handover"):
@@ -298,6 +326,8 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 		tags, obs = o.Tags, o
 		if why := BulkInvalid(o); len(why) > 0 {
 			invalid = &InvalidError{Why: why}
+		} else if !o.Protects() {
+			finding = ErrFinding
 		}
 		judge = func(j []provider.Job) []string { return VerifyBetaBulk(cfg.Row, o, j) }
 		summary = func(f []string, _ []provider.Job) string { return betaBulkPost(cfg.Row, o, f) }
@@ -365,6 +395,8 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 		verdict = "not run"
 	case invalid != nil:
 		verdict = "invalid"
+	case finding != nil:
+		verdict = "finding"
 	}
 	if serr := rec.SaveJSON(RecordFile, map[string]any{
 		"row": cfg.Row.Name, "mode": cfg.Mode(), "frontLabel": cfg.FrontLabel, "verdict": verdict, "failures": failures,
@@ -384,6 +416,9 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 	}
 	if invalid != nil && len(failures) == 0 {
 		return nil, invalid // the run measured nothing and nothing failed: INVALID, why posted
+	}
+	if finding != nil && len(failures) == 0 {
+		return nil, finding // the run measured, nothing failed, and the layout did not protect the streams: FINDING, its numbers posted
 	}
 	return failures, nil
 }

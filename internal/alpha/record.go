@@ -26,6 +26,10 @@ const (
 	// is also the marker of the bulk row's INVALID run (Invalid, InvalidNote),
 	// which the script tells apart by its words and holds to that row.
 	NotRunFile = "not-run.txt"
+	// FindingFile is the marker of the bulk row's FINDING run (Finding, FindingNote): judged with no failure, the witness held, and the bulk
+	// path 30 ms or less below the control. Its test passes, and hack/live-checks.sh reads the marker beside the pass as FINDING, exit 5, on that
+	// row alone (#584).
+	FindingFile = "finding.txt"
 )
 
 // tagRE is the shape of a tag the script accepts (hack/live-checks.sh, own_tags).

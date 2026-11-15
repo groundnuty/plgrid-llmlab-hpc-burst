@@ -199,6 +199,11 @@ func newFakeHost(t *testing.T) *fakeHost {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(h.profilesStatus)
 			fmt.Fprint(w, h.profilesBody)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/"+AgentsNamespace+"/serviceaccounts":
+			// status asks for the agents' ServiceAccounts (identity_status.go): an API server answers
+			// a list of a namespace it holds, here with none.
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"kind":"ServiceAccountList","apiVersion":"v1","metadata":{},"items":[]}`)
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/namespaces/kube-system/configmaps/hpcburst-launcher-probe":
 			w.Header().Set("Content-Type", "application/json")
 			if h.writeStatus != 0 {

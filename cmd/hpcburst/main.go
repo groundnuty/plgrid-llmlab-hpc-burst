@@ -7,6 +7,7 @@
 //	hpcburst upgrade --to V    move it one step up (next minor, or a newer patch) and verify every object is kept
 //	hpcburst restore --backup DIR  put a backup's store back (the host stopped): the only way down
 //	hpcburst down    [flags]   stop the recorded processes and confirm nothing listens
+//	hpcburst identity add|renew NAME [flags]   make an agent's identity, or give it a new token
 //	hpcburst version           print the binary's release from its build information
 //
 // "hpcburst version" prints one line, "hpcburst <tag> <commit> <time>[ dirty]" (internal/version
@@ -45,7 +46,7 @@ const (
 	exitStopped   = 3
 	exitBuilds    = 4
 	envBinDir     = "HPCBURST_BIN_DIR"
-	usageSummary  = "usage: hpcburst <up|status|upgrade|restore|down|guard|version> [flags]  (hpcburst <command> -h lists a command's flags)"
+	usageSummary  = "usage: hpcburst <up|status|upgrade|restore|down|guard|identity|version> [flags]  (hpcburst <command> -h lists a command's flags)"
 	stateDirUsage = "state directory (default $XDG_STATE_HOME/hpcburst, or ~/.local/state/hpcburst)"
 	binDirUsage   = "directory with the pinned k3s binaries, as hack/fetch-k3s.sh lays them out (default $" + envBinDir + ", or $XDG_CACHE_HOME/hpcburst/k3s, or ~/.cache/hpcburst/k3s)"
 )
@@ -76,6 +77,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return cmdRestore(args[1:], stdout, stderr)
 	case "guard":
 		return cmdGuard(ctx, args[1:], stdout, stderr)
+	case "identity":
+		return cmdIdentity(ctx, args[1:], stdout, stderr)
 	case "version":
 		return version.Command("hpcburst", args[1:], stdout, stderr)
 	case "supervise": // hidden: started by up
@@ -136,6 +139,9 @@ func fail(stderr io.Writer, err error) int {
 	fmt.Fprintf(stderr, "hpcburst: %v\n", err)
 	if errors.Is(err, launcher.ErrGraceTooShort) {
 		return exitUsage // a flag the host cannot honour: nothing was stopped
+	}
+	if errors.Is(err, launcher.ErrIdentityName) {
+		return exitUsage
 	}
 	return exitFail
 }
@@ -350,6 +356,7 @@ func printStatus(w io.Writer, r *launcher.StatusReport) {
 	printSupervision(w, r)
 	printAgentBuilds(w, r.AgentBuilds)
 	printCRDGuard(w, r.CRDGuard)
+	printAgents(w, r)
 	// One "front:" line. The address is where Instances dial home; the front itself is the process
 	// the supervisor runs. A host with no front process says so, with the address when one is recorded.
 	switch addr := r.Front != nil && r.Front.Set(); {
