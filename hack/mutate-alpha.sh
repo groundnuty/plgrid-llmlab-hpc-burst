@@ -1089,7 +1089,7 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'hack/live-checks.sh@@  unset HPCBURST_CONF_AGENT_BUILDS HPCBURST_ALPHA_AGENT_BIN@@  unset HPCBURST_CONF_AGENT_BUILDS'
   'hack/live-checks.sh@@reach-host-dialed-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|1|1Gi|00:05:00|25|-|10@@reach-host-dialed-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|1|1Gi|00:05:00|25|-'
   'hack/live-checks.sh@@reach-host-dialed-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|25|-C memfs|10@@reach-host-dialed-helios|helios|helios|plgrid-gpu-gh200|now|-|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|25|-C memfs|10'
-  'hack/live-checks.sh@@reach-host-dialed|reach-host-dialed-helios,reach-host-dialed-athena@@reach-host-dialed|reach-host-dialed-athena'
+  'hack/live-checks.sh@@reach-host-dialed|reach-host-dialed-athena@@reach-host-dialed|reach-athena'
   'hack/live-checks.sh@@reach-host-dialed-athena|cmd/hb-agent@@reach-host-dialed-athena|internal/slurm'
   # #444: every row that starts the stack checks LIVE_BIN_DIR's layout before the slot is read (check_bin_dir): the alpha rows' call (the
   # incident: only the rehearsal row checked), each of the three binaries, the executable bit, the setting named and never its value, every problem at once.
