@@ -22,9 +22,12 @@ type ApprovalPolicySpec struct {
 }
 
 // ApprovalScope is where an ApprovalPolicy applies (HBEP-10, Approval policy,
-// Resolution). Exactly one of its fields is set.
+// Resolution). Exactly one of its fields is set. A CEL rule names the namespace
+// field as __namespace__, since "namespace" is a reserved word of CEL: written
+// plainly, the API server types the field as dynamic and estimates every rule
+// that concatenates it as unbounded, which fails the CRD's cost budget.
 //
-// +kubebuilder:validation:XValidation:rule="((has(self.global) ? 1 : 0) + (has(self.provider) ? 1 : 0) + (has(self.namespace) ? 1 : 0) + (has(self.modelDeployment) ? 1 : 0)) == 1",message="a scope names exactly one of global, provider, namespace and modelDeployment"
+// +kubebuilder:validation:XValidation:rule="((has(self.global) ? 1 : 0) + (has(self.provider) ? 1 : 0) + (has(self.__namespace__) ? 1 : 0) + (has(self.modelDeployment) ? 1 : 0)) == 1",message="a scope names exactly one of global, provider, namespace and modelDeployment"
 type ApprovalScope struct {
 	// Global makes the policy the fallback for every target that no Provider or
 	// namespace policy covers. When set it is true: to set no global scope, name

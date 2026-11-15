@@ -157,8 +157,8 @@ spec:
                 - message: a scope names exactly one of global, provider, namespace
                     and modelDeployment
                   rule: '((has(self.global) ? 1 : 0) + (has(self.provider) ? 1 : 0)
-                    + (has(self.namespace) ? 1 : 0) + (has(self.modelDeployment) ?
-                    1 : 0)) == 1'
+                    + (has(self.__namespace__) ? 1 : 0) + (has(self.modelDeployment)
+                    ? 1 : 0)) == 1'
             required:
             - approvers
             - scope
