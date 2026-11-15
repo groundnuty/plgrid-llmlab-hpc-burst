@@ -1,0 +1,92 @@
+# The agents' namespace, the three ClusterRoles that bound them, and the two bindings that give
+# two of those roles to every agent (HBEP-10, Identities and roles; issue #589, PR 2).
+#
+# hpcburst up installs every object here on every start and resets each to this file: a role's
+# rules, a binding's subjects (a binding whose roleRef differs is deleted and made again, since
+# roleRef cannot change). hpcburst status reports whether they are this file's.
+# This file is written by hand. hack/generate.sh does not touch it. The launcher embeds it
+# (config/rbac/embed.go), so what up installs is this file.
+#
+# Each agent is a ServiceAccount in the namespace below, made by hpcburst identity add. The two
+# bindings name the GROUP system:serviceaccounts:hpcburst-agents, never a ServiceAccount: a binding
+# per agent would give the role to one outside the namespace too, and the admission policies of the
+# next step (PR 3) match this same group, so no identity can hold the agent role and be outside
+# them.
+#
+# The agent role holds no write that can lower capacity: no update or patch of a ModelDeployment,
+# no scale, no write of an Operation or an Approval. Those come with the admission policies that
+# bound them (PR 3). The agents never get: delete or deletecollection, any */status, serviceaccounts,
+# serviceaccounts/token, secrets, certificatesigningrequests, impersonate, RBAC or admission objects,
+# or writes to namespaces. The operator role is installed and bound to no one.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hpcburst-agents
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hpcburst-agent-read
+rules:
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["providers", "platformprofiles", "approvalpolicies"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hpcburst-agent
+rules:
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["modeldeployments", "allocations", "instances", "operations", "approvals"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["modeldeployments"]
+    verbs: ["create"]
+  - apiGroups: ["apps"]
+    resources: ["controllerrevisions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hpcburst-operator
+rules:
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["approvalpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hpcburst-agent-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hpcburst-agent-read
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: system:serviceaccounts:hpcburst-agents
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hpcburst-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hpcburst-agent
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: system:serviceaccounts:hpcburst-agents
