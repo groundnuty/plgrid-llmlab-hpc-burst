@@ -373,7 +373,7 @@ Every error the front raises has the body `{"error": {"message": <text>, "type":
 | `GET /v1/models/{name}` for a name the list does not show | 404 | `model_not_found` | | the front |
 | `GET /hpcburst/v1/deployments/{id}` for an ID with no identity record | 404 | `deployment_not_found` | | the front |
 | `GET /hpcburst/v1/deployments/{id}` for a display form two full IDs share | 409 | `deployment_ambiguous` | | the front; the message names the full IDs |
-| `GET /hpcburst/v1/deployments/{id}` when the records can't be read | 503, `Retry-After: 5` | `records_unavailable` | | the front |
+| `GET /hpcburst/v1/deployments/{id}` when the records can't be read, or a record found can't be read or re-canonicalised | 503, `Retry-After: 5` | `records_unavailable` | | the front |
 | The tunnel closed after the request was written, before the response headers, after the one retry | 502, `x-should-retry: false` | `upstream_closed` | `tunnel` | the front, and the target |
 | The tunnel closed after the request was written, before the response headers, with no other Instance ready to retry to | 502 | `upstream_closed` | `tunnel` | the front, and the target |
 | A stream fails after its headers were sent | one `data:` event with this body, then the end of the stream, never `[DONE]` | `stream_cut` | `upstream`, `deadline`, `idle`, `lease_end` or `shutdown` | the target, as in the headers already sent |
