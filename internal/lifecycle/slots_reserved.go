@@ -23,24 +23,37 @@ import (
 // its predecessors as takers, and their reservations are not counted against it. In no-overlap mode, where the
 // effective submit limit is 1, the slot its predecessor frees is held for the successor likewise, so it goes to
 // the successor before any other deployment's primary. On the one-slot path the successor is created only once
-// that slot is free (step 7, from the gap's carrier, nooverlap.go), so until then the carrier, the primary that
-// drained in the mode, holds it; a successor whose Allocation is not yet made (a pass cut short between the two
-// creates) holds its own.
+// that slot is free (step 7, from the gap's carrier, nooverlap.go), so until then the out-of-service carrier
+// holds it: the primary that drained in the mode, or a successor of it that failed before it was ready, whose
+// retry takes the slot. And any live Instance whose Allocation is not made yet (a pass cut short between the two
+// creates, by a failed create or a restart) holds its own, so a replacement made but not yet submitted never
+// loses its slot to another deployment (#599's review).
 //
 // The reserved slots are worked out under the Provider's lock, from reads made there, as the listed count is: so
 // the reservation is as atomic as the count (slots.go), and two workers never both see a slot left beyond it.
 
 // reservedSlot is one slot held for a handover on a Provider.
 type reservedSlot struct {
-	// key is the Allocation (namespace/name) the slot is held for: a primary's own, for its replacement; a
-	// no-overlap successor's own, for the slot its predecessor frees.
+	// key is the Allocation (namespace/name) the slot is held under: a primary's, for its replacement; a gap
+	// carrier's, for its successor; an Instance's own, for its Allocation not yet made.
 	key string
 	// deployment is the ModelDeployment (namespace/name) whose handover holds it.
 	deployment string
-	// successor is true for a no-overlap successor's slot held under its own Allocation's key: once that
-	// Allocation is reserved (an expectation) or listed, the slot is that, and no longer counted as reserved.
-	successor bool
+	kind       slotKind
 }
+
+// slotKind is why a slot is reserved.
+type slotKind int
+
+const (
+	// slotForReplacement is a serving primary's, for its replacement.
+	slotForReplacement slotKind = iota
+	// slotForSuccessor is an out-of-service gap carrier's, for the successor step 7 makes of it.
+	slotForSuccessor
+	// slotForOwnAllocation is a live Instance's, for its own Allocation not made yet: once that Allocation is
+	// reserved (an expectation) or listed, the slot is that, and no longer counted as reserved.
+	slotForOwnAllocation
+)
 
 // reservedOn returns the slots reserved on the Provider, from reads made under its lock: the Instances that carry
 // its label, and the ModelDeployments of the primaries among them. allocs are the Provider's Allocations the
@@ -49,12 +62,15 @@ type reservedSlot struct {
 //
 // A primary holds one when it is countable (not draining, ended or deleting), no countable Instance is its
 // predecessor, no live Instance names it as its predecessor, its Allocation on this Provider is Running, and its
-// deployment, not being deleted, serves past its drain start (servesPast). A gap's carrier holds one for its
-// successor, as gapCarriers reads it (nooverlap.go): an Instance that drained in no-overlap mode
-// (annotationNoOverlap, its drain begun), out of service, not being deleted, that no stamped successor names as
-// its predecessor yet, of a deployment that is not being deleted; its slot is keyed by its own Allocation, which
-// its successor's reservation takes (takersOf). A no-overlap successor holds one while its Allocation is not
-// listed.
+// deployment, not being deleted, serves past its drain start (servesPast). Each Instance step 7 would make a
+// no-overlap successor of holds one for that successor: the set is noOverlapCarriers' own, read by the same
+// helper (outOfServiceCarriers; nooverlap.go), the primary that drained in the mode or a successor of it that
+// failed before it was ready, when its deployment is not being deleted (a deleted deployment's pass makes no
+// successor). Its slot is keyed by its own Allocation, which its successor's reservation takes (takersOf). Every
+// countable Instance whose Allocation does not exist holds one under that Allocation's key: a pass cut short
+// between the Instance and its Allocation, by a failed create or a restart, keeps its slot. The Instances of a
+// deployment recreated under the same name are not told apart here (noOverlapCarriers drops them as stale),
+// since a carrier's name is random and a stale successor naming it is not a case that arises.
 func reservedOn(ctx context.Context, r client.Reader, provider string, profile *v1alpha1.PlatformProfileSpec, allocs map[string]*v1alpha1.Allocation) ([]reservedSlot, error) {
 	var il v1alpha1.InstanceList
 	if err := r.List(ctx, &il, client.MatchingLabels{v1alpha1.LabelProvider: provider}); err != nil {
@@ -63,42 +79,40 @@ func reservedOn(ctx context.Context, r client.Reader, provider string, profile *
 	sort.Slice(il.Items, func(i, j int) bool {
 		return il.Items[i].Namespace+"/"+il.Items[i].Name < il.Items[j].Namespace+"/"+il.Items[j].Name
 	})
-	countableNames, replaced, passed := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	insts := make([]*v1alpha1.Instance, len(il.Items))
+	countableNames, replaced := map[string]bool{}, map[string]bool{}
 	for i := range il.Items {
 		in := &il.Items[i]
+		insts[i] = in
 		if countable(in) {
 			countableNames[in.Namespace+"/"+in.Name] = true
 		}
-		pred := in.Annotations[v1alpha1.AnnotationPredecessor]
-		if pred != "" && !ended(in) {
+		if pred := in.Annotations[v1alpha1.AnnotationPredecessor]; pred != "" && !ended(in) {
 			replaced[in.Namespace+"/"+pred] = true
 		}
-		if pred != "" && in.Annotations[annotationNoOverlapGap] != "" {
-			passed[in.Namespace+"/"+pred] = true // a stamped successor carries the gap now (gapCarriers)
-		}
+	}
+	carriers := map[*v1alpha1.Instance]bool{}
+	for _, g := range outOfServiceCarriers(insts, func(*v1alpha1.Instance) bool { return true }) {
+		carriers[g.in] = true
 	}
 	mds := map[string]*v1alpha1.ModelDeployment{}
 	var out []reservedSlot
 	for i := range il.Items {
 		in := &il.Items[i]
 		allocKey := in.Namespace + "/" + in.Spec.AllocationRef.Name
-		if in.Annotations[annotationNoOverlap] != "" && !countable(in) && in.DeletionTimestamp.IsZero() && !passed[in.Namespace+"/"+in.Name] {
-			if _, began := drainBegan(in); began {
-				md, err := deploymentOf(ctx, r, in, mds)
-				if err != nil {
-					return nil, err
-				}
-				if md != nil && md.DeletionTimestamp.IsZero() {
-					out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name})
-				}
+		if carriers[in] {
+			md, err := deploymentOf(ctx, r, in, mds)
+			if err != nil {
+				return nil, err
+			}
+			if md != nil && md.DeletionTimestamp.IsZero() {
+				out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name, kind: slotForSuccessor})
 			}
 			continue
 		}
-		if in.Annotations[annotationNoOverlapSuccessor] != "" && countable(in) {
-			if _, ok := allocs[allocKey]; !ok {
-				out = append(out, reservedSlot{key: allocKey, deployment: deploymentKey(in), successor: true})
-				continue
-			}
+		if _, made := allocs[allocKey]; countable(in) && !made {
+			out = append(out, reservedSlot{key: allocKey, deployment: deploymentKey(in), kind: slotForOwnAllocation})
+			continue
 		}
 		if profile == nil || !countable(in) || replaced[in.Namespace+"/"+in.Name] {
 			continue
@@ -128,7 +142,7 @@ func reservedOn(ctx context.Context, r client.Reader, provider string, profile *
 		if err != nil || !servesPast(md, ds) {
 			continue
 		}
-		out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name})
+		out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name, kind: slotForReplacement})
 	}
 	return out, nil
 }
@@ -165,7 +179,7 @@ func deploymentOf(ctx context.Context, r client.Reader, in *v1alpha1.Instance, m
 }
 
 // counted returns the reserved slots a reservation or a count counts: not those held for key, the Allocation
-// being reserved, or for any of takers, whose slot the new Allocation takes, and not a successor's slot whose
+// being reserved, or for any of takers, whose slot the new Allocation takes, and not an Instance's own slot whose
 // Allocation is already expected (an expectation counts it). The deployments holding them come back too, in
 // order, each once, for the message.
 func counted(slots []reservedSlot, key string, takers []string, expected map[string]time.Time) (n int, by []string) {
@@ -178,7 +192,7 @@ func counted(slots []reservedSlot, key string, takers []string, expected map[str
 		if take[s.key] {
 			continue
 		}
-		if _, ok := expected[s.key]; s.successor && ok {
+		if _, ok := expected[s.key]; s.kind == slotForOwnAllocation && ok {
 			continue
 		}
 		n++
