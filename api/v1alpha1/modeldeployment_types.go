@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // CheckpointSpec names the checkpoint to serve. Its per-file SHA-256 list is
@@ -331,6 +332,21 @@ type ModelDeploymentSpec struct {
 	// +kubebuilder:validation:Maximum=8
 	WorkersPerInstance *int32 `json:"workersPerInstance,omitempty"`
 
+	// HedgeWidth is the most Providers one hedge spans at once (beta; HBEP-7,
+	// What the controller reads, and Hedging (beta)). A hedge is the
+	// Allocations submitted for one missing primary or one replacement, at most
+	// one per Provider. Absent is 2, the API server's default
+	// (HedgeWidthCount); with 1 nothing is hedged. A lower value applies to
+	// members added after it and cancels none, so lowering it releases
+	// nothing. It is capacity, not a deployment-ID input (HBEP-3), like
+	// instances.
+	//
+	// +optional
+	// +kubebuilder:default=2
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=8
+	HedgeWidth *int32 `json:"hedgeWidth,omitempty"`
+
 	// Providers says where the deployment may run.
 	Providers ProviderSelection `json:"providers"`
 
@@ -553,6 +569,67 @@ type ActiveDeploymentID struct {
 	Instances int32 `json:"instances"`
 }
 
+// ClassStartOutcomes is one accelerator class's last start-up outcomes, with
+// the rate shown as its two counts (HBEP-7, Hedging (beta), The start-up
+// failure rate).
+//
+// +kubebuilder:validation:XValidation:rule="self.count == (has(self.outcomes) ? size(self.outcomes) : 0)",message="count is the number of outcomes kept"
+// +kubebuilder:validation:XValidation:rule="self.failures == (has(self.outcomes) ? size(self.outcomes.filter(o, o.result == 'Failed')) : 0)",message="failures is the number of outcomes kept whose result is Failed"
+type ClassStartOutcomes struct {
+	// AcceleratorClass is the class the outcomes were recorded in.
+	AcceleratorClass `json:",inline"`
+
+	// Outcomes are the class's last MaxStartOutcomes start-up outcomes,
+	// oldest first, one per Allocation.
+	//
+	// +optional
+	// +listType=map
+	// +listMapKey=allocationUID
+	// +kubebuilder:validation:MaxItems=20
+	Outcomes []StartOutcome `json:"outcomes,omitempty"`
+
+	// Failures is how many of the outcomes kept are failures, and Count how
+	// many are kept: the rate is Failures of Count, known once Count is
+	// MaxStartOutcomes.
+	//
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=20
+	Failures int32 `json:"failures"`
+
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=20
+	Count int32 `json:"count"`
+}
+
+// StartOutcome is one Allocation's start-up outcome.
+//
+// +kubebuilder:validation:XValidation:rule="self.result == 'Failed' ? (has(self.reason) && size(self.reason) > 0) : !has(self.reason)",message="reason is set for a Failed outcome, and only for one"
+type StartOutcome struct {
+	// AllocationUID is the Allocation's UID, which counts its outcome once.
+	//
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	AllocationUID types.UID `json:"allocationUID"`
+
+	// Result is Ready, when the Allocation's first Instance became ready, or
+	// Failed, when it ended before ready for a start-up fault.
+	//
+	// +kubebuilder:validation:Enum=Ready;Failed
+	Result string `json:"result"`
+
+	// Reason is the Instance's end reason, for a Failed outcome: one of the
+	// Reason* values in conditions.go.
+	//
+	// +optional
+	// +kubebuilder:validation:MaxLength=128
+	Reason string `json:"reason,omitempty"`
+
+	// Time is when the outcome was decided: the Instance's ready time, or its
+	// end time.
+	Time metav1.Time `json:"time"`
+}
+
 // ClassStartToReady is one accelerator class's last measured start-to-ready
 // time.
 type ClassStartToReady struct {
@@ -602,6 +679,21 @@ type ModelDeploymentStatus struct {
 	// +listMapKey=cpuArch
 	// +kubebuilder:validation:MaxItems=64
 	StartToReady []ClassStartToReady `json:"startToReady,omitempty"`
+
+	// StartOutcomes keeps each accelerator class's last start-up outcomes
+	// (beta; HBEP-7, Hedging (beta), The start-up failure rate): one per
+	// Allocation of this deployment whose job started, a success when its
+	// first Instance became ready, a failure when that Instance ended before
+	// ready for a start-up fault. A class's rate is its failures over its
+	// outcomes once MaxStartOutcomes are kept, and unknown before. They are
+	// in status, so a restarted controller counts no Allocation twice.
+	//
+	// +optional
+	// +listType=map
+	// +listMapKey=gpuModel
+	// +listMapKey=cpuArch
+	// +kubebuilder:validation:MaxItems=64
+	StartOutcomes []ClassStartOutcomes `json:"startOutcomes,omitempty"`
 
 	// Instances is the number of Instances that exist and have not ended. It
 	// is the scale subresource's status count.

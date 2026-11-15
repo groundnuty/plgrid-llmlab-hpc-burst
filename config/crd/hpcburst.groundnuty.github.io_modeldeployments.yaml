@@ -67,6 +67,21 @@ spec:
                   replacement.
                 format: date-time
                 type: string
+              hedgeWidth:
+                default: 2
+                description: |-
+                  HedgeWidth is the most Providers one hedge spans at once (beta; HBEP-7,
+                  What the controller reads, and Hedging (beta)). A hedge is the
+                  Allocations submitted for one missing primary or one replacement, at most
+                  one per Provider. Absent is 2, the API server's default
+                  (HedgeWidthCount); with 1 nothing is hedged. A lower value applies to
+                  members added after it and cancels none, so lowering it releases
+                  nothing. It is capacity, not a deployment-ID input (HBEP-3), like
+                  instances.
+                format: int32
+                maximum: 8
+                minimum: 1
+                type: integer
               instances:
                 default: 1
                 description: |-
@@ -996,6 +1011,115 @@ spec:
                     - ReleaseWhenIdle
                     type: string
                 type: object
+              startOutcomes:
+                description: |-
+                  StartOutcomes keeps each accelerator class's last start-up outcomes
+                  (beta; HBEP-7, Hedging (beta), The start-up failure rate): one per
+                  Allocation of this deployment whose job started, a success when its
+                  first Instance became ready, a failure when that Instance ended before
+                  ready for a start-up fault. A class's rate is its failures over its
+                  outcomes once MaxStartOutcomes are kept, and unknown before. They are
+                  in status, so a restarted controller counts no Allocation twice.
+                items:
+                  description: |-
+                    ClassStartOutcomes is one accelerator class's last start-up outcomes, with
+                    the rate shown as its two counts (HBEP-7, Hedging (beta), The start-up
+                    failure rate).
+                  properties:
+                    count:
+                      format: int32
+                      maximum: 20
+                      minimum: 0
+                      type: integer
+                    cpuArch:
+                      description: CPUArch is the CPU architecture, for example "aarch64"
+                        or "x86_64".
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    failures:
+                      description: |-
+                        Failures is how many of the outcomes kept are failures, and Count how
+                        many are kept: the rate is Failures of Count, known once Count is
+                        MaxStartOutcomes.
+                      format: int32
+                      maximum: 20
+                      minimum: 0
+                      type: integer
+                    gpuModel:
+                      description: GPUModel is the GPU model. A partition without
+                        GPUs names "none".
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    outcomes:
+                      description: |-
+                        Outcomes are the class's last MaxStartOutcomes start-up outcomes,
+                        oldest first, one per Allocation.
+                      items:
+                        description: StartOutcome is one Allocation's start-up outcome.
+                        properties:
+                          allocationUID:
+                            description: AllocationUID is the Allocation's UID, which
+                              counts its outcome once.
+                            maxLength: 64
+                            minLength: 1
+                            type: string
+                          reason:
+                            description: |-
+                              Reason is the Instance's end reason, for a Failed outcome: one of the
+                              Reason* values in conditions.go.
+                            maxLength: 128
+                            type: string
+                          result:
+                            description: |-
+                              Result is Ready, when the Allocation's first Instance became ready, or
+                              Failed, when it ended before ready for a start-up fault.
+                            enum:
+                            - Ready
+                            - Failed
+                            type: string
+                          time:
+                            description: |-
+                              Time is when the outcome was decided: the Instance's ready time, or its
+                              end time.
+                            format: date-time
+                            type: string
+                        required:
+                        - allocationUID
+                        - result
+                        - time
+                        type: object
+                        x-kubernetes-validations:
+                        - message: reason is set for a Failed outcome, and only for
+                            one
+                          rule: 'self.result == ''Failed'' ? (has(self.reason) &&
+                            size(self.reason) > 0) : !has(self.reason)'
+                      maxItems: 20
+                      type: array
+                      x-kubernetes-list-map-keys:
+                      - allocationUID
+                      x-kubernetes-list-type: map
+                  required:
+                  - count
+                  - cpuArch
+                  - failures
+                  - gpuModel
+                  type: object
+                  x-kubernetes-validations:
+                  - message: count is the number of outcomes kept
+                    rule: 'self.count == (has(self.outcomes) ? size(self.outcomes)
+                      : 0)'
+                  - message: failures is the number of outcomes kept whose result
+                      is Failed
+                    rule: 'self.failures == (has(self.outcomes) ? size(self.outcomes.filter(o,
+                      o.result == ''Failed'')) : 0)'
+                maxItems: 64
+                type: array
+                x-kubernetes-list-map-keys:
+                - gpuModel
+                - cpuArch
+                x-kubernetes-list-type: map
               startToReady:
                 description: |-
                   StartToReady lists each accelerator class's last measured start-to-ready

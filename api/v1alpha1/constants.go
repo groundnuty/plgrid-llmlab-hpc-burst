@@ -116,6 +116,12 @@ const (
 	// (HBEP-7, Handover).
 	AnnotationPredecessor = Group + "/predecessor"
 
+	// AnnotationHedgeGroup is on every member of a hedge but its first (beta;
+	// HBEP-7, Hedging (beta)): the name of the hedge's first member. It is set
+	// in the member's create request and never changed, and the hedge is the
+	// first member and the live Instances that name it.
+	AnnotationHedgeGroup = Group + "/hedge-group"
+
 	// AnnotationRestartPrefix starts the key of a restart generation
 	// (RestartGenerationAnnotation).
 	AnnotationRestartPrefix = Group + "/restart-"
