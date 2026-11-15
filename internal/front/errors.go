@@ -31,8 +31,8 @@ const (
 	// with no identity record (HBEP-5's Errors table, as PR #580 amends it).
 	codeDeploymentNotFound = "deployment_not_found"
 	// codeDeploymentAmbiguous and codeRecordsUnavailable: a display form
-	// held by two full IDs, and records the front could not read. Proposed on
-	// #585, awaiting the science agent's rows in HBEP-5's Errors table.
+	// held by two full IDs, and records the front could not read (HBEP-5's
+	// Errors table, as PR #586 amends it).
 	codeDeploymentAmbiguous = "deployment_ambiguous"
 	codeRecordsUnavailable  = "records_unavailable"
 )

@@ -42,9 +42,11 @@ type deploymentAnswer struct {
 	DisplayID string `json:"displayID"`
 	// Scheme is the identity record's scheme.
 	Scheme string `json:"scheme"`
-	// Canonical is the identity record's canonical object as its RFC 8785 text, in a JSON string, so its
-	// SHA-256 is the full ID and a client checks an ID with one hash. The front re-canonicalises the stored
-	// object, which its writers' JSON encoder escaped (HBEP-9, the record fetch, as PR #586 amends it).
+	// Canonical is the identity record's canonical object as its RFC 8785 text, in a JSON string,
+	// re-canonicalised from the stored object, which its writers' JSON encoder escaped. The front serves a
+	// record by its stored hash and does not check it: a client verifies an ID by hashing this text, whose
+	// SHA-256 is the full ID for any record the controllers wrote (HBEP-9, the record fetch, as PR #586
+	// amends it).
 	Canonical string `json:"canonical"`
 	// IdentityRecords names every identity record that holds the ID: one per namespace that holds it,
 	// hpcburst-system for a managed entry's (HBEP-11, Identity records).
@@ -128,12 +130,18 @@ func (p *Proxy) serveDeployment(w http.ResponseWriter, x *exchange, id string) {
 			return
 		}
 		p.log.Warn("records not read", "request", x.id, "error", err.Error())
-		p.recordsUnavailable(w, x)
+		p.recordsUnavailable(w, x, "the records could not be read from the control plane; send the request again")
 		return
 	}
 	ans, ids, problems := resolveRecords(id, recs)
-	for _, pr := range problems {
-		p.log.Warn("record skipped", "request", x.id, "problem", pr)
+	if len(problems) > 0 {
+		// The front cannot vouch for what it could not read, and a 404 would say no such deployment
+		// exists (HBEP-9, the record fetch, as PR #586 amends it).
+		for _, pr := range problems {
+			p.log.Warn("record not read", "request", x.id, "problem", pr)
+		}
+		p.recordsUnavailable(w, x, "a record labelled with the deployment ID "+id+" could not be read: "+problems[0])
+		return
 	}
 	switch {
 	case len(ids) > 1:
@@ -158,16 +166,17 @@ func (p *Proxy) notFound(w http.ResponseWriter, x *exchange, id string) {
 	p.fail(w, x, http.StatusNotFound, codeDeploymentNotFound, "", "", "no identity record holds the deployment ID "+id)
 }
 
-// recordsUnavailable answers a request whose records could not be read: 503 records_unavailable, as
-// proposed on #585; HBEP-5's Errors table has no row for it yet.
-func (p *Proxy) recordsUnavailable(w http.ResponseWriter, x *exchange) {
+// recordsUnavailable answers a request whose records could not be read, or one of whose records could not
+// be read or re-canonicalised: 503 records_unavailable with Retry-After: 5 (HBEP-5's Errors table, as PR
+// #586 amends it).
+func (p *Proxy) recordsUnavailable(w http.ResponseWriter, x *exchange, message string) {
 	w.Header().Set("Retry-After", "5")
-	p.fail(w, x, http.StatusServiceUnavailable, codeRecordsUnavailable, "", "", "the records could not be read from the control plane; send the request again")
+	p.fail(w, x, http.StatusServiceUnavailable, codeRecordsUnavailable, "", "", message)
 }
 
 // ambiguous answers a display form that two identity records hold with different full IDs, as two
 // namespaces may (the collision rule is per namespace, HBEP-3): 409 deployment_ambiguous, naming the full
-// IDs, as proposed on #585; HBEP-5's Errors table has no row for it yet.
+// IDs (HBEP-5's Errors table, as PR #586 amends it).
 func (p *Proxy) ambiguous(w http.ResponseWriter, x *exchange, id string, ids []string) {
 	p.fail(w, x, http.StatusConflict, codeDeploymentAmbiguous, "", "",
 		fmt.Sprintf("the display form %s is held by %d deployment IDs (%s); ask for one by its full ID", id, len(ids), strings.Join(ids, ", ")))
@@ -227,22 +236,30 @@ type storedVerification struct {
 	Verdict      string `json:"verdict"`
 }
 
+// foundVerification is a verification record that read, and the full ID its data names.
+type foundVerification struct {
+	deploymentID string
+	entry        verificationEntry
+}
+
 // identityGroup is the identity records that hold one full ID.
 type identityGroup struct {
 	refs []recordRef
 	data map[recordRef]storedIdentity
 }
 
-// resolveRecords resolves id among the records labelled with its display form. A full ID names the records
-// that hold it. A display form names the one full ID its identity records hold; when they hold several, as
-// records in two namespaces may, it returns them all, sorted, and no answer. A verification record belongs
-// to the ID its data names, whatever namespace holds it. No answer and no IDs: no identity record holds the
-// ID. Records that do not read as the kind their labels say are skipped, each named in problems.
+// resolveRecords resolves id among the records labelled with its display form. Every record found is read
+// first: one that does not read as the kind its labels say, whichever ID it holds, is named in problems,
+// and then nothing is resolved, since the front cannot vouch for an answer beside a record it could not
+// read. A full ID names the records that hold it. A display form names the one full ID its identity records
+// hold; when they hold several, as records in two namespaces may, it returns them all, sorted, and no
+// answer. A verification record belongs to the ID its data names, whatever namespace holds it. No answer,
+// no IDs and no problems: no identity record holds the ID.
 func resolveRecords(id string, recs []appsv1.ControllerRevision) (*deploymentAnswer, []string, []string) {
 	display := id[:v1alpha1.DisplayIDLength]
 	var problems []string
 	groups := map[string]*identityGroup{}
-	var verifications []*appsv1.ControllerRevision
+	var verifications []foundVerification
 	for i := range recs {
 		rec := &recs[i]
 		if rec.Labels[v1alpha1.LabelDeploymentID] != display {
@@ -265,10 +282,18 @@ func resolveRecords(id string, recs []appsv1.ControllerRevision) (*deploymentAns
 			g.refs = append(g.refs, ref)
 			g.data[ref] = d
 		case v1alpha1.RecordVerification:
-			verifications = append(verifications, rec)
+			v, err := readVerification(rec, display)
+			if err != nil {
+				problems = append(problems, err.Error())
+				continue
+			}
+			verifications = append(verifications, v)
 		default:
 			problems = append(problems, fmt.Sprintf("record %s/%s is labelled as a %q record", rec.Namespace, rec.Name, rec.Labels[v1alpha1.LabelRecord]))
 		}
+	}
+	if len(problems) > 0 {
+		return nil, nil, problems
 	}
 	full := id
 	if len(id) == v1alpha1.DisplayIDLength {
@@ -279,16 +304,16 @@ func resolveRecords(id string, recs []appsv1.ControllerRevision) (*deploymentAns
 		slices.Sort(ids)
 		switch len(ids) {
 		case 0:
-			return nil, nil, problems
+			return nil, nil, nil
 		case 1:
 			full = ids[0]
 		default:
-			return nil, ids, problems
+			return nil, ids, nil
 		}
 	}
 	g := groups[full]
 	if g == nil {
-		return nil, nil, problems
+		return nil, nil, nil
 	}
 	slices.SortFunc(g.refs, func(a, b recordRef) int {
 		return strings.Compare(a.Namespace+"/"+a.Name, b.Namespace+"/"+b.Name)
@@ -296,20 +321,16 @@ func resolveRecords(id string, recs []appsv1.ControllerRevision) (*deploymentAns
 	first := g.data[g.refs[0]]
 	ans := &deploymentAnswer{ID: full, DisplayID: display, Scheme: first.Scheme, Canonical: first.text,
 		IdentityRecords: g.refs, Verifications: []verificationEntry{}}
-	for _, rec := range verifications {
-		e, err := readVerification(rec, full)
-		switch {
-		case err != nil:
-			problems = append(problems, err.Error())
-		case e != nil:
-			ans.Verifications = append(ans.Verifications, *e)
+	for _, v := range verifications {
+		if v.deploymentID == full {
+			ans.Verifications = append(ans.Verifications, v.entry)
 		}
 	}
 	slices.SortFunc(ans.Verifications, func(a, b verificationEntry) int {
 		return cmp.Or(strings.Compare(a.Namespace, b.Namespace), strings.Compare(a.InstanceUID, b.InstanceUID),
 			strings.Compare(a.Worker, b.Worker), cmp.Compare(a.Generation, b.Generation))
 	})
-	return ans, nil, problems
+	return ans, nil, nil
 }
 
 // readIdentity reads an identity record: named id-<display>, holding a full ID that starts with display and
@@ -337,32 +358,32 @@ func readIdentity(rec *appsv1.ControllerRevision, display string) (storedIdentit
 	return d, nil
 }
 
-// readVerification reads a verification record of full, or returns nil for a record of another ID under the
-// same display form. Its Instance UID is its label, which its name must agree with, and its generation its
-// revision, which its name holds too.
-func readVerification(rec *appsv1.ControllerRevision, full string) (*verificationEntry, error) {
+// readVerification reads a verification record labelled with display, of whichever full ID its data names,
+// which must be one of that display form. Its Instance UID is its label, which its name must agree with, and
+// its generation its revision, which its name holds too.
+func readVerification(rec *appsv1.ControllerRevision, display string) (foundVerification, error) {
 	where := rec.Namespace + "/" + rec.Name
 	var d storedVerification
 	if err := json.Unmarshal(rec.Data.Raw, &d); err != nil {
-		return nil, fmt.Errorf("verification record %s: data does not read: %v", where, err)
+		return foundVerification{}, fmt.Errorf("verification record %s: data does not read: %v", where, err)
 	}
-	if d.DeploymentID != full {
-		return nil, nil
+	if _, err := v1alpha1.IdentityRecordName(d.DeploymentID); err != nil || len(d.DeploymentID) != v1alpha1.FullIDLength || d.DeploymentID[:v1alpha1.DisplayIDLength] != display {
+		return foundVerification{}, fmt.Errorf("verification record %s names %q, not a full deployment ID of display form %s", where, d.DeploymentID, display)
 	}
 	uid, worker, gen, err := parseVerificationName(rec.Name)
 	if err != nil {
-		return nil, err
+		return foundVerification{}, err
 	}
 	switch label := rec.Labels[v1alpha1.LabelInstanceUID]; {
 	case label != uid:
-		return nil, fmt.Errorf("verification record %s is labelled with Instance UID %q, which its name does not hold", where, label)
+		return foundVerification{}, fmt.Errorf("verification record %s is labelled with Instance UID %q, which its name does not hold", where, label)
 	case gen != rec.Revision:
-		return nil, fmt.Errorf("verification record %s has revision %d, and its name generation %d", where, rec.Revision, gen)
+		return foundVerification{}, fmt.Errorf("verification record %s has revision %d, and its name generation %d", where, rec.Revision, gen)
 	case d.Verdict != string(v1alpha1.VerdictPass) && d.Verdict != string(v1alpha1.VerdictFail):
-		return nil, fmt.Errorf("verification record %s holds verdict %q, neither pass nor fail", where, d.Verdict)
+		return foundVerification{}, fmt.Errorf("verification record %s holds verdict %q, neither pass nor fail", where, d.Verdict)
 	}
-	return &verificationEntry{Namespace: rec.Namespace, Name: rec.Name, InstanceUID: uid, Worker: worker,
-		Generation: gen, Outcome: d.Verdict, Record: json.RawMessage(rec.Data.Raw)}, nil
+	return foundVerification{deploymentID: d.DeploymentID, entry: verificationEntry{Namespace: rec.Namespace, Name: rec.Name,
+		InstanceUID: uid, Worker: worker, Generation: gen, Outcome: d.Verdict, Record: json.RawMessage(rec.Data.Raw)}}, nil
 }
 
 // parseVerificationName reads an Instance's record name, ver-<uid>-<generation>, or a worker's,
