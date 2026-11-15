@@ -147,7 +147,9 @@ func WorkerName(i int) string { return "worker-" + strconv.Itoa(i) }
 func RestartGenerationAnnotation(part string) string { return AnnotationRestartPrefix + part }
 
 // ControllerNamespace holds the controllers' leader Leases (HBEP-11,
-// Controllers). The launcher creates it.
+// Controllers), and the identity records of managed catalog entries' IDs,
+// which belong to no namespace and no Provider (HBEP-9, the managed entry's
+// identity record). The launcher creates it.
 const ControllerNamespace = "hpcburst-system"
 
 // LeaseLifecycle is the name of the lifecycle controller's leader Lease
@@ -170,6 +172,11 @@ func ProviderLeaseName(provider string) string { return "provider-" + provider }
 // a record has no owner reference, so once the ModelDeployment is deleted this
 // annotation is the only place the full name survives (HBEP-11, API, Labels).
 const AnnotationModelDeployment = Group + "/model-deployment"
+
+// AnnotationCatalogName is on a managed catalog entry's identity record: the entry's catalog name, in full
+// (HBEP-9, the identity record of a managed catalog entry). It is no label: a catalog name may hold
+// characters a label value refuses, as golden vector 03's "example-ü-😀-27b" does.
+const AnnotationCatalogName = Group + "/catalog-name"
 
 // IdentityRecordPrefix starts the name of an identity record, a ControllerRevision
 // named id-<first 12 hex of the deployment ID> (HBEP-11).

@@ -55,7 +55,7 @@ import (
 // long stream its check 2 asks for. Nothing was sent but the rate stream.
 func NotRun(_ Row, err error) bool {
 	return neverStarted(err) || errors.Is(err, ErrWarmUnshown) || errors.Is(err, ErrSlotTaken) || errors.Is(err, ErrLeadTooShort) || errors.Is(err, ErrLongTooShort) ||
-		errors.Is(err, ErrGlibcTooOld) || errors.Is(err, ErrKeeperStreamTooShort) || errors.Is(err, ErrKeeperStreamEndedFirst)
+		errors.Is(err, ErrGlibcTooOld) || errors.Is(err, ErrKeeperStreamTooShort) || errors.Is(err, ErrKeeperStreamEndedFirst) || errors.Is(err, ErrNoStagedImage)
 }
 
 // ErrInvalid ends a run that ran and was judged with no failure, but whose reading measures nothing: the bulk row's run with no saturation witness
@@ -93,6 +93,10 @@ func neverStarted(err error) bool {
 // when it was the deployment's first end, which hack/live-checks.sh reads off the marker to name
 // that bound in its line (the wait in the queue otherwise); any other gives pendingMax.
 func NotRunNote(row Row, pendingMax time.Duration, err error) string {
+	if errors.Is(err, ErrNoStagedImage) {
+		// Fixed words: the bulk row's image precondition (the science agent's rulings on #579) names no path and no digest.
+		return fmt.Sprintf("%s: %s; stage it first with the stage row; no job was submitted\n", row.Name, noStagedImageWords)
+	}
 	if errors.Is(err, ErrKeeperStreamEndedFirst) {
 		// The times, durations only: hack/live-checks.sh reads the reason in parentheses.
 		reason := ""
@@ -306,9 +310,17 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 		refused = keeperEndedFirst(o)
 		judge = func(j []provider.Job) []string { return VerifyBetaKeeper(cfg.Row, o, j) }
 		summary = func(f []string, _ []provider.Job) string { return betaKeeperPost(cfg.Row, o, f) }
-	case cfg.Row.Name == BetaRouterName:
+	case IsRouterRow(cfg.Row.Name):
 		o, serr := st.BetaRouter(ctx, plan)
 		if serr != nil {
+			// The Helios router row posts its glibc on any outcome (issue #566): a node under the minimum is the reading it exists for.
+			// The run is still NOT RUN, with no record: it sent no request, and nothing else of it is judged.
+			var g *GlibcTooOldError
+			if cfg.Row.PostsGlibcNotRun && errors.As(serr, &g) {
+				if perr := rec.SaveText(PostsFile, InsertFrontLine(glibcNotRunPost(cfg.Row, g), cfg.FrontLabel)); perr != nil {
+					return nil, fmt.Errorf("the text to post of a node whose glibc is %s could not be written: %w", g.Version, perr)
+				}
+			}
 			return nil, serr
 		}
 		tags, obs = o.Tags, o

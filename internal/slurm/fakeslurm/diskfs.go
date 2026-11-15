@@ -182,6 +182,21 @@ func (d *diskFS) tail(p string, n int64) ([]byte, bool, error) {
 	return b, true, err
 }
 
+// head reads the first n bytes of the regular file at p, never more, whatever it grows to while it is read.
+func (d *diskFS) head(p string, n int64) ([]byte, bool, error) {
+	rel, ok := d.rel(p)
+	if !ok || !d.isFile(p) {
+		return nil, false, nil
+	}
+	f, err := d.openRegular(rel, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, false, nil // gone or swapped since the check: not a file
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, n))
+	return b, true, err
+}
+
 // write keeps an existing file's mode, as a shell redirection does; a new file
 // gets mode exactly, whatever the process umask is.
 func (d *diskFS) write(p string, content []byte, mode fs.FileMode, _ string) error {

@@ -42,6 +42,10 @@ const (
 	// SkipAmbiguousRevision: the name was listed twice with different
 	// revisions.
 	SkipAmbiguousRevision SkipCategory = "AmbiguousRevision"
+	// SkipCollision: the identity record of the entry's managed ID holds
+	// another ID (HBEP-3, the collision rule; HBEP-9, the managed entry's
+	// identity record). The ID is refused, so the entry is not published.
+	SkipCollision SkipCategory = "Collision"
 )
 
 // SkippedEntry is a listed entry the status cannot hold.

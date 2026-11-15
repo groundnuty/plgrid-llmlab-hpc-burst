@@ -51,6 +51,7 @@ var commands = map[string]command{
 	"printenv":  (*shell).printenv,
 	"sha256sum": (*shell).sha256sum,
 	"tail":      (*shell).tail,
+	"head":      (*shell).head,
 	"umask":     (*shell).setUmask,
 	"mkdir":     (*shell).mkdir,
 	"chmod":     (*shell).chmod,

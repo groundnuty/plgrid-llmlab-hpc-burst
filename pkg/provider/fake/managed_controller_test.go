@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	appsv1 "k8s.io/api/apps/v1"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +44,9 @@ func newManagedEnv(t *testing.T, opts ...func(*clientfake.ClientBuilder) *client
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil { // the managed entries' identity records
 		t.Fatal(err)
 	}
 	clock := NewClock(at(12, 0, 0))
@@ -262,5 +267,29 @@ func TestManagedCatalogFollowsTheListing(t *testing.T) {
 	e.wantCondition(v1alpha1.ConditionProviderReady, metav1.ConditionTrue, v1alpha1.ReasonCatalogRead)
 	if n := e.gw.Count("list-catalog"); n != 4 {
 		t.Fatalf("list-catalog logged %d times, want 4: one per Sync", n)
+	}
+}
+
+// The stand-in writes each entry's identity record as the real controller does (pkg/provider/managedrecord;
+// HBEP-9), in the controllers' namespace, before it publishes the entry, so the lifecycle controller's tests
+// that run it see the same records. The ID is the entry's own published managedID.
+func TestTheStandInWritesEachEntrysIdentityRecord(t *testing.T) {
+	e := newManagedEnv(t)
+	e.gw.SetCatalog(provider.CatalogEntry{Name: "example-27b", Revision: rev("2026-09")})
+	e.sync()
+	cat := e.provider().Status.Catalog
+	if len(cat) != 1 {
+		t.Fatalf("catalog %v, want its one entry", cat)
+	}
+	id := string(cat[0].ManagedID)
+	var rec appsv1.ControllerRevision
+	if err := e.c.Get(context.Background(), client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: "id-" + id[:12]}, &rec); err != nil {
+		t.Fatalf("the identity record of %s: %v", id, err)
+	}
+	var d struct {
+		SHA256 string `json:"sha256"`
+	}
+	if err := json.Unmarshal(rec.Data.Raw, &d); err != nil || d.SHA256 != id || len(rec.OwnerReferences) != 0 {
+		t.Errorf("record %s: sha256 %q (%v), owners %v; want %s and none", rec.Name, d.SHA256, err, rec.OwnerReferences, id)
 	}
 }

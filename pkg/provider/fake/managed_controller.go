@@ -13,6 +13,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/managedrecord"
 )
 
 // ManagedController is a stand-in for one managed Provider's controller, for
@@ -116,6 +117,12 @@ func (m *ManagedController) Sync(ctx context.Context) error {
 		if merge, merr = provider.MergeCatalog(prov.Status.Catalog, entries, platform, now); merr != nil {
 			return merr
 		}
+		// As the real controller: each entry's identity record first, in the controllers' namespace (HBEP-9).
+		kept, collided, rerr := managedrecord.EnsureCatalog(ctx, m.Client, m.Client, v1alpha1.ControllerNamespace, platform, merge.Catalog, v1alpha1.FieldManagerProvider)
+		if rerr != nil {
+			return fmt.Errorf("Provider %s: the catalog's identity records: %w", m.Provider, rerr)
+		}
+		merge.Catalog, merge.Skipped = kept, append(merge.Skipped, collided...)
 		prov.Status.Catalog, prov.Status.LastCatalogRead = merge.Catalog, mt(now)
 		provider.SetManagedReadiness(&prov.Status, prov.Generation, true, now)
 		setCondition(&prov, v1alpha1.ConditionCredentialsRejected, metav1.ConditionFalse, v1alpha1.ReasonKeyAccepted, "", now)

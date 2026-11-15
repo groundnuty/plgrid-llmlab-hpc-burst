@@ -75,6 +75,17 @@ func dryRouterBytes() BytesObs {
 	return b
 }
 
+// dryEngineErrorStream is a stream the engine ended with its own error event, in vLLM's shape: through the front with no [DONE] after the
+// event (the front drops it), straight from the engine with it.
+func dryEngineErrorStream(done bool) string {
+	s := "data: {\"id\":\"c-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"error\":{\"message\":\"the reasoning budget needs a reasoning parser\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}\n\n"
+	if done {
+		s += "data: [DONE]\n\n"
+	}
+	return s
+}
+
 // onKey is a change of one variant's answer through the router, for a fault.
 func onKey(key string, change func(a *Answer)) func(a *Answer) {
 	return func(a *Answer) {
@@ -203,6 +214,29 @@ func (d *drySteps) BetaRouter(_ context.Context, p Plan) (RouterObs, error) {
 			}
 			return r
 		})
+	case d.fault("control-ended-alike"):
+		// The engine ends a stream with its own error event, on both paths: through the front with no [DONE] after it, as the front passes
+		// it on; straight from the engine with its [DONE]. The control lists it alike; the reading's completeness check discounts it.
+		obs.Bytes, obs.Control = dryRouterReading(onKey("chat/temperature#stream", func(a *Answer) { a.Body = []byte(dryEngineErrorStream(false)) }),
+			func(key string, r *Reply) *Reply {
+				if key == "chat/temperature#stream" {
+					return &Reply{Status: 200, Body: []byte(dryEngineErrorStream(true))}
+				}
+				return r
+			})
+	case d.fault("control-ended-router-only"):
+		// The stream ends with an error event through the router only; straight from the engine it finishes.
+		obs.Bytes, obs.Control = dryRouterReading(onKey("chat/temperature#stream", func(a *Answer) { a.Body = []byte(dryEngineErrorStream(false)) }), nil)
+	case d.fault("control-both-cut"):
+		// The front's answer cut, and the direct one cut too, by the harness's own bound: never alike, so the front's cut fails as the
+		// path's, and the direct one as unanswered.
+		obs.Bytes, obs.Control = dryRouterReading(onKey("chat/temperature#stream", func(a *Answer) { a.Body, a.Cut = a.Body[:20], true }),
+			func(key string, r *Reply) *Reply {
+				if key == "chat/temperature#stream" {
+					return &Reply{Status: 200, Body: []byte(dryEngineErrorStream(true))[:20], Cut: true}
+				}
+				return r
+			})
 	case d.fault("control-unavailable"):
 		obs.Control = ControlObs{Why: "the srun step that sends the variants straight to the engine exited 21: control: curl is not on the node, in 3 tries or by its bound of 10m0s"}
 	case d.fault("unattributed"):
@@ -254,6 +288,9 @@ var betaRouterCases = []dryCase{
 	{"control-prompt-differs", "a variant was answered differently through the router than straight to the engine: chat/temperature#plain: usage.prompt_tokens 10 through the router, 9 straight to the engine"},
 	{"control-stream-ending", "a variant was answered differently through the router than straight to the engine: chat/temperature#stream: the answer ended done through the router, error straight to the engine"},
 	{"control-incomplete", "the engine did not answer every variant completely straight from the node: 439 of 440 answered (chat/temperature#plain)"},
+	{"control-ended-alike", ""},
+	{"control-ended-router-only", "a variant was answered differently through the router than straight to the engine: chat/temperature#stream: the answer ended error through the router, done straight to the engine"},
+	{"control-both-cut", "the engine did not answer every variant completely straight from the node: 439 of 440 answered (chat/temperature#stream)"},
 	{"control-unavailable", "the direct-to-engine control could not be read: the srun step that sends the variants straight to the engine exited 21: control: curl is not on the node, in 3 tries or by its bound of 10m0s"},
 	{"unattributed", "a response lacked its attribution headers"},
 	{"no-responses", "no response, so attribution is unchecked"},

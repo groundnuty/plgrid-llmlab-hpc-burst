@@ -263,14 +263,14 @@ func (r *liveRun) envoyOf(ctx context.Context, p Plan, in v1alpha1.Instance, o *
 	o.Envoy.Procs, o.Envoy.Contained = len(envoys), contained
 	if len(envoys) == 1 {
 		r.envoyConfig = envoyConfigArg(envoys[0].Argv)
-		script, err := EnvoyDigestScript(envoys[0])
+		script, err := ExeDigestScript(envoys[0])
 		if err != nil {
 			r.t.Fatalf("Envoy on the node: %v", err)
 		}
 		r.ourJobFor(ctx, in, "Envoy's executable") // again, right before it is read
 		res, err := r.tr.Run(ctx, slurm.Command{Line: line, Stdin: []byte(script), Timeout: srunTimeout})
 		if err == nil && res.ExitCode == 0 {
-			if d, ok := ParseEnvoyDigest(res.Stdout); ok {
+			if d, ok := ParseExeDigest(res.Stdout); ok {
 				o.Envoy.RunningDigest = d
 			}
 		}

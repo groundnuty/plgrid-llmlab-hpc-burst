@@ -340,9 +340,14 @@ type ControlObs struct {
 	// Unanswered names, by S13's key, the variants the engine did not answer completely straight from the node (at most FailedKept).
 	Unanswered []string `json:"unanswered,omitempty"`
 	// Differ is every variant whose two answers differ: the router's doing, or the path's. Alike is every variant answered other than 200
-	// alike on both paths: the deployment's own refusals, the engine's, listed.
+	// alike on both paths, or ended alike by the engine's own error event: the deployment's own refusals, the engine's, listed.
 	Differ []VariantDiff  `json:"differ,omitempty"`
 	Alike  []AlikeVariant `json:"alike,omitempty"`
+	// EndedAlike counts the variants among Alike whose answer through the front did not finish by the reading's rule (no [DONE]) and
+	// whose two answers are alike: a stream the engine ended with its own error event on both paths. The front passes that event on as the
+	// stream's one error event and drops the engine's [DONE] after it (internal/front, judge.go; the science agent, 31 Oct 2026), so the
+	// front's reading cannot call it finished; the control says it is the engine's, and the reading's completeness check discounts it.
+	EndedAlike int `json:"endedAlike"`
 }
 
 // VariantDiff is a variant answered differently through the router than straight to the engine: S13's key, the two statuses, and what
@@ -356,18 +361,24 @@ type VariantDiff struct {
 
 func (d VariantDiff) String() string { return d.Key + ": " + d.Why }
 
-// AlikeVariant is a variant answered other than 200, alike, on both paths: S13's key, the status, and the engine's error (ErrorText).
+// AlikeVariant is a variant answered other than 200, or ended by the engine's error event, alike on both paths: S13's key, the status, the
+// engine's error (ErrorText), and whether it ended the stream (a 200 that did not finish through the front, its error event the terminal).
 type AlikeVariant struct {
 	Key    string `json:"key"`
 	Status int    `json:"status"`
 	Error  string `json:"error"`
+	Ended  bool   `json:"ended,omitempty"`
 }
 
 func (a AlikeVariant) String() string {
-	if a.Error == "" {
-		return fmt.Sprintf("%s %d", a.Key, a.Status)
+	s := fmt.Sprintf("%s %d", a.Key, a.Status)
+	if a.Error != "" {
+		s = fmt.Sprintf("%s %d (%s)", a.Key, a.Status, a.Error)
 	}
-	return fmt.Sprintf("%s %d (%s)", a.Key, a.Status, a.Error)
+	if a.Ended {
+		s += " [the stream ended by the engine's error event on both paths]"
+	}
+	return s
 }
 
 // ControlVariant is one variant as the control compares it: S13's key, whether it streams, and its two answers. Direct is absent (nil)
@@ -407,8 +418,13 @@ func ControlOf(vs []ControlVariant) ControlObs {
 			c.Differ = append(c.Differ, VariantDiff{Key: v.Key, Front: v.Front.Status, Direct: d.Status, Why: why})
 			continue
 		}
+		ended := !ClassifyReply(v.Front.Status, v.Front.Body, v.Stream, v.Front.Cut).Complete
+		if ended {
+			c.EndedAlike++
+		}
+		// A stream ended alike carries the same error event on both paths, so its error lists it.
 		if d.Status != 200 || ErrorText(d, v.Stream) != "" {
-			c.Alike = append(c.Alike, AlikeVariant{Key: v.Key, Status: d.Status, Error: ErrorText(d, v.Stream)})
+			c.Alike = append(c.Alike, AlikeVariant{Key: v.Key, Status: d.Status, Error: ErrorText(d, v.Stream), Ended: ended})
 		}
 	}
 	return c
@@ -465,8 +481,8 @@ func controlLines(c ControlObs) string {
 		return "- the direct-to-engine control: not read (" + c.Why + ")\n"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "- the direct-to-engine control (%s): %d variants sent straight to the engine in %s (its bound %s), %d answered completely, %d compared with the front's answer; %d answered differently through the router\n",
-		ControlHow, c.Sent, c.Took.Round(100*time.Millisecond), ControlBound, c.Answered, c.Compared, len(c.Differ))
+	fmt.Fprintf(&b, "- the direct-to-engine control (%s): %d variants sent straight to the engine in %s (its bound %s), %d answered completely, %d compared with the front's answer; %d answered differently through the router; %d ended by the engine's own error event alike on both paths, which the front's reading cannot call finished (the front drops the engine's [DONE] after its error event)\n",
+		ControlHow, c.Sent, c.Took.Round(100*time.Millisecond), ControlBound, c.Answered, c.Compared, len(c.Differ), c.EndedAlike)
 	if len(c.Differ) > 0 {
 		var ds []string
 		for _, d := range c.Differ {

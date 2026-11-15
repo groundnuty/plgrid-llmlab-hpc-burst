@@ -108,8 +108,9 @@ func TestAlphaAthenaNowServe(t *testing.T) {
 // with the bulk path, on the engine double: eight token streams beside a 64 MiB reply, once down the token transport as a streamed reply (the
 // control) and once as a non-streamed reply down the bulk path, and the streams' gap p99 read for each. It fails on a broken path alone; a run with no
 // saturation witness is INVALID; a control under 85 ms, a bulk path at or above it, or a bulk path too little below a stalled control, is a finding.
+// The engine double reaches the job as the test shim in hb-agent's place, which execs the shipped agent the harness staged (issue #521, option (A)).
 //
-//livecheck:none the row is pending in the script: its live path needs the engine double staged on the cluster (docs/alpha-runbook.md, beta-athena-now-bulk)
+//livecheck:beta-athena-now-bulk
 func TestBetaAthenaNowBulk(t *testing.T) {
 	runRow(t, "betabulk", BetaBulkName)
 }
@@ -131,6 +132,16 @@ func TestBetaAthenaNowKeeper(t *testing.T) {
 //livecheck:beta-athena-now-router
 func TestBetaAthenaNowRouter(t *testing.T) {
 	runRow(t, "betarouter", BetaRouterName)
+}
+
+// TestBetaHeliosNowRouter is the router row on Helios's GH200 under profiles/helios.yaml (issue #566): the router row's steps and checks on
+// the Helios shape, with the linux-arm64 builds and Envoy's arm64 build staged by its pinned digest, so that the GH200 compute node's glibc
+// is read in the first minutes after Helios returns. A node whose glibc is under 2.30 is NOT RUN, naming the version, and that reading is
+// posted too: Apptainer is then the route.
+//
+//livecheck:beta-helios-now-router
+func TestBetaHeliosNowRouter(t *testing.T) {
+	runRow(t, "betarouter", BetaHeliosRouterName)
 }
 
 // TestAlphaAthenaNowNoOverlap is row B of issue #376 on Athena plgrid-now under profiles/athena-now.yaml: HBEP-7's

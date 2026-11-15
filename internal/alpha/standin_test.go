@@ -18,11 +18,11 @@ package alpha
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -129,7 +129,7 @@ func standInRow(t *testing.T, name string) Row {
 	switch {
 	case strings.HasPrefix(name, "tunnel-hour-"):
 		r.Timing, r.Lease = standInTunnel, 12*time.Minute
-	case name == "alpha-athena-now-serve", name == BetaRouterName:
+	case name == "alpha-athena-now-serve", IsRouterRow(name):
 		r.Timing, r.Lease = standInNow, 14*time.Minute
 	case name == BetaKeeperName:
 		// The keeper row holds a stream across a controller restart, whose outcome takes about 35 s: a request deadline of the live 5 minutes, and a
@@ -255,7 +255,7 @@ func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)
 	}
 	hub := stack.StartHub(t)
 	engine, notReported := "token-delay="+standInTokenDelay.String(), map[string]bool(nil)
-	if row.Name == "alpha-athena-now-serve" || row.Name == BetaRouterName || row.Name == BetaKeeperName {
+	if row.Name == "alpha-athena-now-serve" || IsRouterRow(row.Name) || row.Name == BetaKeeperName {
 		engine, notReported = standInNowEngine, obscheck.DoubleNotReported
 	}
 	if row.Name == BetaBulkName {
@@ -263,7 +263,7 @@ func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)
 		engine = "token-delay=" + BulkTokenDelay.String() + ",reply-bytes=" + strconv.Itoa(BulkReplyBytes)
 	}
 	md := stack.ServedDeployment(stm, v1alpha1.EnvVar{Name: "HB_ENGINE_DOUBLE", Value: engine})
-	if strings.HasPrefix(row.Name, "tunnel-hour-") || row.Name == "alpha-athena-now-serve" || row.Name == BetaRouterName || row.Name == BetaKeeperName {
+	if strings.HasPrefix(row.Name, "tunnel-hour-") || row.Name == "alpha-athena-now-serve" || IsRouterRow(row.Name) || row.Name == BetaKeeperName {
 		// The live deployment's context (steps_live_test.go), so that a large body (MinLargeBody) fits under it.
 		for i, f := range md.Spec.Source.Served.Flags {
 			if f.Name == "max-model-len" {
@@ -275,27 +275,37 @@ func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)
 	// stack's --instance-router envoy.
 	hostOpts := hostOptionsFor(row.Name)
 	envoyBin := ""
-	if row.Name == BetaRouterName {
+	if IsRouterRow(row.Name) {
 		envoyBin = testenv.EnvoyBinary(t)
 	}
-	double := DoubleObs{}
+	double, match := DoubleObs{}, standInEngineMatch(t)
+	place := func(h *stack.Host) {
+		h.PlaceAgentBuild(arch)
+		if envoyBin != "" {
+			h.PlaceEnvoyBuild(arch, envoyBin)
+		}
+	}
+	var shim *testShim
 	if row.Name == BetaBulkName {
-		// The stand-in's engine is the double: the fake apptainer links to this test binary, which serves as the engine (enginedouble.Install).
-		double = standInDouble(t)
+		// The bulk row runs as live does (issue #521, option (A)): the test shim in hb-agent's place in the stack's copy of an operator's agent
+		// builds, the shipped agent staged by the harness, and the engine the shim's double. The fake Apptainer the cluster's PATH has is never
+		// run: the shim names its own.
+		shim = standInShim(t, b, arch)
+		place = func(h *stack.Host) {
+			copyBuilds(h, shim.builds)
+			shim.place(h, arch)
+		}
+		double = DoubleObs{Name: "the engine double, run by the bulk row's test shim (internal/agent/enginedouble/shim)", Digest: shim.shimDigest}
+		match = MatchesShimEngine(shim.shimDigest)
 	}
 	return world{
-		name: "stand-in", bins: b, hostOpts: hostOpts, cpuArch: arch, double: double, link: link,
-		place: func(h *stack.Host) {
-			h.PlaceAgentBuild(arch)
-			if envoyBin != "" {
-				h.PlaceEnvoyBuild(arch, envoyBin)
-			}
-		},
-		dh: standInDirect, ports: portsFor(row.Name, standInPorts),
+		name: "stand-in", bins: b, hostOpts: hostOpts, cpuArch: arch, double: double, link: link, shim: shim,
+		place: place,
+		dh:    standInDirect, ports: portsFor(row.Name, standInPorts),
 		// The controller lists the checkpoint from the Hub double through HF_ENDPOINT, which up passes on to it.
 		env:     stack.CleanEnv("HF_ENDPOINT=" + hub.URL),
 		objects: []client.Object{prof, prov}, provider: stack.ProviderName, cluster: row.Cluster, qos: row.QOS, md: md, profile: prof.Spec,
-		controlDir: ctl, hostLock: filepath.Join(dir, "host.lock"), matchEngine: standInEngineMatch(t),
+		controlDir: ctl, hostLock: filepath.Join(dir, "host.lock"), matchEngine: match,
 		gpuModel: prof.Spec.Partitions[0].GPUModel, notReported: notReported,
 	}, cl
 }
@@ -940,10 +950,16 @@ type routerStandIn struct {
 
 func runRouterStandIn(t *testing.T, tweak func(lr *liveRun, cl *stack.Cluster)) routerStandIn {
 	t.Helper()
+	return runRouterStandInRow(t, BetaRouterName, tweak)
+}
+
+// runRouterStandInRow is a router row's stand-in run, Athena's or Helios's (issue #566): the same steps, on the row's shape and slot.
+func runRouterStandInRow(t *testing.T, name string, tweak func(lr *liveRun, cl *stack.Cluster)) routerStandIn {
+	t.Helper()
 	if os.Getenv(envStandIn) != "1" {
 		t.Skipf("the stand-in proof of the live steps runs only with %s=1 (internal/alpha, standin_test.go)", envStandIn)
 	}
-	row := standInRow(t, BetaRouterName)
+	row := standInRow(t, name)
 	id, err := NewRunID()
 	if err != nil {
 		t.Fatal(err)
@@ -1019,6 +1035,58 @@ func TestStandInBetaRouter(t *testing.T) {
 	record, err := os.ReadFile(filepath.Join(s.cfg.Out, RecordFile))
 	if err != nil || !strings.Contains(string(record), "STAND-IN RUN") || strings.Contains(string(record), "LIVE RUN") {
 		t.Errorf("the record does not say the run was a stand-in one (%v)", err)
+	}
+}
+
+// TestStandInBetaHeliosRouter is the Helios router row's live steps over the stand-in, through Run (issue #566): the router row's, on the
+// Helios row's shape and its slot under the stand-in's one-GPU QOS, the real Envoy of the pin behind --instance-router envoy. The stand-in
+// runs on this host's architecture, so it proves the row's wiring, not the GH200 node or its arm64 builds; its glibc is this host's, above
+// 2.30, so the run is a pass, and its text to post names it.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInBetaHeliosRouter(t *testing.T) {
+	s := runRouterStandInRow(t, BetaHeliosRouterName, nil)
+	post, _ := os.ReadFile(filepath.Join(s.cfg.Out, PostsFile))
+	t.Logf("%s's text to post:\n%s", s.row.Name, post)
+	if s.err != nil {
+		t.Fatalf("%s did not finish: %v", s.row.Name, s.err)
+	}
+	if len(s.failures) > 0 {
+		t.Fatalf("%s failed its verdict over the stand-in: %s", s.row.Name, Summary(s.failures))
+	}
+	if !strings.HasPrefix(string(post), BetaHeliosRouterName+": PASS (posts to #522)\n") || !strings.Contains(string(post), "- the compute node's glibc: ") {
+		t.Errorf("the text to post is not the Helios row's pass with its glibc:\n%s", post)
+	}
+	if ours := s.jobs(); len(ours) != 1 {
+		t.Errorf("the fake cluster holds %d jobs of the run, want the one", len(ours))
+	}
+}
+
+// TestStandInBetaHeliosRouterOldGlibc is the Helios router row's NOT RUN over the stand-in, a node whose glibc the probe reads as 2.28:
+// NOT RUN as on Athena, its job ended by a cancel, no record; and, unlike Athena's, its text to post written, naming the version (issue
+// #566: the glibc is posted on any outcome).
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInBetaHeliosRouterOldGlibc(t *testing.T) {
+	s := runRouterStandInRow(t, BetaHeliosRouterName, func(lr *liveRun, _ *stack.Cluster) { lr.glibcScript = "echo 'glibc 2.28'\n" })
+	var g *GlibcTooOldError
+	if !errors.Is(s.err, ErrGlibcTooOld) || !errors.As(s.err, &g) || g.Version != (GlibcVersion{2, 28}) || g.FromAgent || len(s.failures) != 0 {
+		t.Fatalf("failures %v, err %v; want the NOT RUN of a node whose glibc is 2.28, read on the node", s.failures, s.err)
+	}
+	if _, err := os.Stat(filepath.Join(s.cfg.Out, RecordFile)); err == nil {
+		t.Errorf("a record was written for a run that sent nothing")
+	}
+	post, err := os.ReadFile(filepath.Join(s.cfg.Out, PostsFile))
+	if err != nil || !strings.HasPrefix(string(post), BetaHeliosRouterName+": NOT RUN (posts to #522): ") ||
+		!strings.Contains(string(post), "- the compute node's glibc: 2.28 (Envoy needs 2.30); read on the node: true, from the agent's log: false") {
+		t.Errorf("the text to post (%v) does not name the node's glibc of 2.28:\n%s", err, post)
+	}
+	ours := s.jobs()
+	if len(ours) != 1 {
+		t.Fatalf("the fake cluster holds %d jobs of the run, want the one", len(ours))
+	}
+	if j := ours[0]; !j.Finished || j.End.IsZero() || j.TermAt.IsZero() {
+		t.Errorf("the run's job did not end by a cancel (finished %t, ended %s, TERM at %s): the NOT RUN left it", j.Finished, j.End.Format(time.TimeOnly), j.TermAt.Format(time.TimeOnly))
 	}
 }
 
@@ -1146,36 +1214,65 @@ func TestStandInBetaKeeper(t *testing.T) {
 	runStandInIn(t, BetaKeeperName, standInHostDialed)
 }
 
-// standInDouble names the engine double a stand-in run has: its own test binary, which the fake apptainer runs as the engine (enginedouble.Install),
-// and the SHA-256 of that binary as the run read it.
-func standInDouble(t *testing.T) DoubleObs {
+// standInShim builds the bulk row's test shim for the stand-in, as hack/live-checks.sh does for a live run: the shipped agent the stand-in runs is
+// built into it by its digest (-ldflags -X main.wantAgentDigest), CGO off, trimmed, for this host. The stand-in's operator agent builds are a
+// directory of the shipped agent and frpc under their build names, which the run must leave as it found them.
+func standInShim(t *testing.T, b stack.Binaries, arch string) *testShim {
 	t.Helper()
-	exe, err := os.Executable()
+	agent, err := os.ReadFile(b.Agent)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, err := os.Open(exe)
+	dir := stack.ShortDir(t)
+	builds := filepath.Join(dir, "agent-builds")
+	if err := os.Mkdir(builds, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for src, name := range map[string]string{b.Agent: agentapi.AgentBuildName(arch), b.Frpc: agentapi.FrpcBuildName(arch)} {
+		bs, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(builds, name), bs, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shimFile := filepath.Join(dir, "shim")
+	build := exec.Command("go", "build", "-trimpath", "-ldflags", "-X main.wantAgentDigest="+digestOf(agent), "-o", shimFile, "./internal/agent/enginedouble/shim")
+	build.Dir = filepath.Join("..", "..")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build the test shim: %v\n%s", err, out)
+	}
+	s, err := loadTestShim(shimFile, filepath.Join(builds, agentapi.AgentBuildName(arch)), builds)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		t.Fatal(err)
-	}
-	return DoubleObs{Name: "the engine double (internal/agent/enginedouble, run as the stand-in's own test binary)", Digest: hex.EncodeToString(h.Sum(nil))}
+	return s
 }
 
 // bulkStandIn is one stand-in run of the bulk row through Run, with tweak applied to the world before it starts.
 type bulkStandIn struct {
-	row      Row
-	w        world
-	failures []string
-	err      error
-	post     []byte
+	row Row
+	w   world
+	// staged is the shipped agent's directory the run staged under the stand-in's staging root, a real path: "" when it staged none.
+	staged string
+	// cl is the stand-in cluster, and imagesBefore and imagesAfter its staged images' cache before and after the run (imagesOf).
+	cl                        *stack.Cluster
+	imagesBefore, imagesAfter map[string]string
+	failures                  []string
+	err                       error
+	post                      []byte
 }
 
 func runBulkStandIn(t *testing.T, tweak func(w *world)) bulkStandIn {
+	t.Helper()
+	return runBulkStandInStaged(t, true, tweak)
+}
+
+// runBulkStandInStaged is runBulkStandIn, with the Provider's image pre-staged first as the stage row stages it (preStage) when stage is set: the
+// test shim's double stages no image (the science agent's rulings on #579), so a run without it is NOT RUN.
+func runBulkStandInStaged(t *testing.T, stage bool, tweak func(w *world)) bulkStandIn {
 	t.Helper()
 	if os.Getenv(envStandIn) != "1" {
 		t.Skipf("the stand-in proof of the live steps runs only with %s=1 (internal/alpha, standin_test.go)", envStandIn)
@@ -1191,7 +1288,11 @@ func runBulkStandIn(t *testing.T, tweak func(w *world)) bulkStandIn {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w, _ := standInWorldShaped(t, row, nil)
+	w, cl := standInWorldShaped(t, row, nil)
+	if stage {
+		preStage(t, cl, w)
+	}
+	images := imagesOf(t, cl)
 	if tweak != nil {
 		tweak(&w)
 	}
@@ -1205,7 +1306,7 @@ func runBulkStandIn(t *testing.T, tweak func(w *world)) bulkStandIn {
 	}
 	post, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
 	t.Logf("%s's text to post:\n%s", row.Name, post)
-	return bulkStandIn{row: row, w: w, failures: failures, err: err, post: post}
+	return bulkStandIn{row: row, w: w, staged: lr.testAgentDir, failures: failures, err: err, post: post, cl: cl, imagesBefore: images, imagesAfter: imagesOf(t, cl)}
 }
 
 // TestStandInBetaBulk is the bulk row's live steps over the stand-in, through Run: the real stack in host-dialed mode with the bulk path, the engine
@@ -1224,6 +1325,16 @@ func TestStandInBetaBulk(t *testing.T) {
 	}
 	if carried := s.w.link.Up.Load() + s.w.link.Down.Load(); carried < 2*BulkReplyBytes {
 		t.Errorf("the shaped link carried %d bytes, under the two replies' %d: a reply did not take the link", carried, 2*BulkReplyBytes)
+	}
+	// Through the test shim (issue #521, option (A)): the shipped agent was staged, and is gone after the run; the operator's builds are as they
+	// were (Close's checks, which fail the run otherwise); the post names both digests as ruled.
+	if s.staged == "" {
+		t.Error("the run staged no shipped agent for the test shim")
+	} else if _, err := os.Stat(s.staged); !os.IsNotExist(err) {
+		t.Errorf("the shipped agent's staging directory remains after the run (%v)", err)
+	}
+	if want := "the Provider staged the test shim, digest " + s.w.shim.shimDigest + ", in hb-agent's place, and the harness staged the shipped agent, digest " + s.w.shim.agentDigest; !strings.Contains(string(s.post), want) {
+		t.Errorf("the text to post does not say %q", want)
 	}
 	if !strings.Contains(string(s.post), "THE ENGINE WAS A DOUBLE, not vLLM") || !strings.Contains(string(s.post), s.w.double.Digest) {
 		t.Errorf("the text to post does not name the double and its digest:\n%s", s.post)
@@ -1244,5 +1355,59 @@ func TestStandInBetaBulkWithoutTheBulkPathFails(t *testing.T) {
 		if !slices.Contains(s.failures, want) {
 			t.Errorf("failed checks %q do not hold %q", s.failures, want)
 		}
+	}
+}
+
+// imagesOf is the stand-in's staged images' cache, images/ under its staging root, every entry by its relative path, a file with its SHA-256, a
+// directory as "dir": what a run must leave as it found it.
+func imagesOf(t *testing.T, cl *stack.Cluster) map[string]string {
+	t.Helper()
+	root := filepath.Join(cl.Scratch, "stage", "images")
+	out := map[string]string{}
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return filepath.SkipDir
+			}
+			return err
+		}
+		rel, _ := filepath.Rel(root, p)
+		switch {
+		case d.IsDir():
+			out[rel] = "dir"
+		case d.Type().IsRegular():
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			out[rel] = digestOf(b)
+		default:
+			out[rel] = "other"
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// TestStandInBetaBulkWithoutTheStagedImageIsNotRun is the bulk row over the stand-in with the Provider's image never staged: the run is NOT RUN
+// before any job, as ruled (the science agent's rulings on #579), and the cache is as it was: nothing submitted, nothing staged.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInBetaBulkWithoutTheStagedImageIsNotRun(t *testing.T) {
+	s := runBulkStandInStaged(t, false, nil)
+	if !errors.Is(s.err, ErrNoStagedImage) || !NotRun(s.row, s.err) {
+		t.Fatalf("the run ended with %v; want NOT RUN for an image not staged (ErrNoStagedImage)", s.err)
+	}
+	if n := len(s.cl.Plat.Jobs()); n != 0 {
+		t.Errorf("%d job(s) were submitted; want none", n)
+	}
+	if !maps.Equal(s.imagesBefore, s.imagesAfter) {
+		t.Errorf("the images' cache changed: before %v, after %v", s.imagesBefore, s.imagesAfter)
+	}
+	if s.staged != "" {
+		t.Errorf("the shipped agent was staged for a run that never submitted a job")
 	}
 }

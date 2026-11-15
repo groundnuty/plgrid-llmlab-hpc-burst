@@ -225,6 +225,10 @@ type Row struct {
 	// (alpha-helios-nooverlap) or on plgrid-now's one-job slot (alpha-athena-now-nooverlap, issue #376's row B;
 	// hbep/0007-lifecycle-controller/README.md:483). Row.Plan reads it; no row name does.
 	ReleaseWhenIdle bool
+	// PostsGlibcNotRun says the row writes a text to post when its run is NOT RUN on a compute node whose glibc is under the 2.30 Envoy
+	// needs (ErrGlibcTooOld): the version is the reading the row exists for. Only the Helios router row does (issue #566: its glibc is
+	// posted on any outcome); the Athena router row's NOT RUN posts nothing, as ruled on #521.
+	PostsGlibcNotRun bool
 }
 
 // ProfileName is the row's shipped platform profile: Profile, else its cluster's.
@@ -378,6 +382,8 @@ var rows = []Row{
 	BetaKeeperRow(),
 	// The bulk row of issue #521 (betabulk.go), beta's: the bulk path's real-path buffer, read from a loaded round trip, on the engine double.
 	BetaBulkRow(),
+	// The router row on Helios's GH200 (issue #566): its compute node's glibc, read when Helios returns.
+	BetaHeliosRouterRow(),
 }
 
 // The settings of the owner's go (Row.OwnerGo).

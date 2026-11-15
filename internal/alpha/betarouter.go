@@ -43,12 +43,30 @@ const BetaTracker = "#522"
 // BetaRouterName is the router row's name in the script.
 const BetaRouterName = "beta-athena-now-router"
 
+// BetaHeliosRouterName is the Helios router row's name in the script (issue #566).
+const BetaHeliosRouterName = "beta-helios-now-router"
+
+// IsRouterRow is whether the row is a router row: Envoy in front of its Instance (hpcburst up --instance-router envoy), the router
+// row's steps, verdict and text to post. The Athena row and the Helios one differ in their slot and their shape, not in what they ask.
+func IsRouterRow(name string) bool { return name == BetaRouterName || name == BetaHeliosRouterName }
+
 // BetaRouterRow is the router row: row A's hold of plgrid-now's one-job slot (one job, one GPU, a start wait of 10 minutes, a lease of
 // 48 and two minutes of cleanup, the owner's go of plgrid-now), under athena-now.yaml, posting to the beta tracker.
 func BetaRouterRow() Row {
 	r := NowServeRow()
 	r.Name, r.PostsTo = BetaRouterName, BetaTracker
 	return r
+}
+
+// BetaHeliosRouterRow is the router row on Helios's GH200 (issue #566), so that the compute node's glibc is read in the first minutes
+// after Helios returns: Helios's login node has glibc 2.28, under the 2.30 Envoy run bare needs (HBEP-5:133), and if the GH200 node is
+// too, Apptainer is the route. It is the Helios rows' shape and slot, tunnel-hour-helios's single job in QOS now: one GPU, the owner's go of
+// QOS now, the slot held for the lease, the live clock of profiles/helios.yaml, under which the lease is the shortest an Instance's
+// lead allows (MinLease: a cold GH200 start may take the hour of its start timeout). The run releases the slot as soon as it ends. Its
+// glibc is posted on any outcome, its NOT RUN included (PostsGlibcNotRun).
+func BetaHeliosRouterRow() Row {
+	return Row{Name: BetaHeliosRouterName, Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: MinLease(),
+		Budget: 213 * time.Minute, SlotHold: MinLease(), MostJobs: 1, PostsTo: BetaTracker, OwnerGo: OwnerGoHeliosNow, PostsGlibcNotRun: true}
 }
 
 // GlibcVersion is a glibc version, major and minor.
@@ -124,6 +142,15 @@ func (e *GlibcTooOldError) source() string {
 
 // Is makes the error ErrGlibcTooOld.
 func (e *GlibcTooOldError) Is(target error) bool { return target == ErrGlibcTooOld }
+
+// glibcNotRunPost is the text to post of a router row that posts its glibc on a NOT RUN (Row.PostsGlibcNotRun): the version, which side
+// read it, and what follows for the route; the version alone of the node, never its name, a path or a job.
+func glibcNotRunPost(row Row, g *GlibcTooOldError) string {
+	return fmt.Sprintf("%s: NOT RUN (posts to %s): %s (glibc %s, read %s); Envoy cannot run bare on this node, so Apptainer is its route "+
+		"(HBEP-5:133); the run sent no request through the front, and its jobs were cancelled by tag\n"+
+		"- the compute node's glibc: %s (Envoy needs %s); read on the node: %t, from the agent's log: %t\n",
+		row.Name, row.PostsTo, glibcTooOldWords, g.Version, g.source(), g.Version, MinEnvoyGlibc, !g.FromAgent, g.FromAgent)
+}
 
 // glibcTooOldWords is the marker's fact for a node under the minimum, read by hack/live-checks.sh.
 const glibcTooOldWords = "the compute node's glibc is older than the 2.30 Envoy needs"
@@ -297,13 +324,15 @@ func envoyChecks(e EnvoyObs) []string {
 	return f
 }
 
-// bytesChecks: the response-level reading is made, covers every variant, and the router made no failure of its own.
-func bytesChecks(b BytesObs) []string {
+// bytesChecks: the response-level reading is made, covers every variant, and the router made no failure of its own. endedAlike is how many
+// of the front's answers that did not finish the control found ended alike by the engine's own error event on both paths
+// (ControlObs.EndedAlike): the engine's ending, not the path's, so the completeness check discounts exactly those.
+func bytesChecks(b BytesObs, endedAlike int) []string {
 	var f []string
 	switch {
 	case b.Expected <= 0 || b.Variants != b.Expected:
 		return []string{"the response-level reading did not send every variant of S13's cases"}
-	case b.Complete != b.Variants:
+	case b.Complete+endedAlike != b.Variants:
 		f = append(f, "a response of the response-level reading did not finish")
 	}
 	if b.RouterMade > 0 {
@@ -369,7 +398,7 @@ func VerifyBetaRouter(row Row, o RouterObs, jobs []provider.Job) []string {
 	if o.Rate <= 0 {
 		f = append(f, "no request through the front was measured")
 	}
-	f = append(f, bytesChecks(o.Bytes)...)
+	f = append(f, bytesChecks(o.Bytes, o.Control.EndedAlike)...)
 	f = append(f, controlChecks(o.Bytes, o.Control)...)
 	if o.Responses <= 0 {
 		f = append(f, "the run recorded no response, so attribution is unchecked")
@@ -589,11 +618,12 @@ var (
 	sha256Hex  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
-// EnvoyDigestScript is the srun step that reads the SHA-256 of a running Envoy's executable: the process at the PID must still be the one
+// ExeDigestScript is the srun step that reads the SHA-256 of a running process's executable (the router row's Envoy; the bulk row's
+// agent and engine): the process at the PID must still be the one
 // listed (the same start time and command line, as the kill's helper checks), and then its /proc/<pid>/exe is read, which is the file the
 // kernel runs, not a path the agent says. It prints "digest <hex>", or one word: gone, changed or unreadable. The listed process's fields
 // are checked before they are written into the script.
-func EnvoyDigestScript(p NodeProc) (string, error) {
+func ExeDigestScript(p NodeProc) (string, error) {
 	if p.PID <= 0 || !digitsOnly.MatchString(p.Start) || !base64Only.MatchString(p.cmdline) {
 		return "", errors.New("the listed process's fields are not ones a script can carry")
 	}
@@ -612,8 +642,8 @@ echo "digest ${sum%% *}"
 `, nil
 }
 
-// ParseEnvoyDigest reads the digest off EnvoyDigestScript's output; false for any other word.
-func ParseEnvoyDigest(out []byte) (string, bool) {
+// ParseExeDigest reads the digest off ExeDigestScript's output; false for any other word.
+func ParseExeDigest(out []byte) (string, bool) {
 	f := strings.Fields(string(out))
 	if len(f) != 2 || f[0] != "digest" || !sha256Hex.MatchString(f[1]) {
 		return "", false

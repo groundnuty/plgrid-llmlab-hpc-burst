@@ -359,3 +359,34 @@ func TestFailedRepairPutsTheDamagedImageBack(t *testing.T) {
 		}
 	}
 }
+
+// A build the bulk row's test shim refuses (exit 1, as its apptainer refuses pull and build; the science agent's rulings on #579) puts the real
+// sandbox back where it was, its tree as it stood: the double never replaces the Provider's image. Its record does not come back: the stager
+// removes it before the build (stageImage), so the next run stages the image again. The bulk row detects that by the record's SHA-256, read before
+// and after its run.
+func TestARefusedBuildPutsTheSandboxBackWithoutItsRecord(t *testing.T) {
+	s, _, root := newStager(t, nil)
+	first := stageImage(t, s, agentapi.ImageFormatSandbox)
+	// The tree no longer matches its manifest, as on a node where the check fails.
+	if err := os.WriteFile(filepath.Join(first.Path, "extra"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scriptApptainer(t, root, "echo 'bulk-row test shim: refused: apptainer build: the double stages no image' >&2\nexit 1\n")
+	if _, err := s.Image(context.Background(), vllmImage, digest, agentapi.ImageFormatSandbox); err == nil {
+		t.Fatal("the build was refused but Image succeeded")
+	}
+	if b, err := os.ReadFile(filepath.Join(first.Path, "extra")); err != nil || string(b) != "x" {
+		t.Errorf("the real sandbox was not put back as it stood: %v", err)
+	}
+	if _, err := os.ReadFile(filepath.Join(first.Path, ".fake-sandbox")); err != nil {
+		t.Errorf("the real sandbox's own file is gone: %v", err)
+	}
+	if _, err := os.Lstat(first.Path + ".manifest"); !os.IsNotExist(err) {
+		t.Errorf("the record: %v; want it removed, as the stager removes it before a build", err)
+	}
+	for _, e := range imageEntries(t, s) {
+		if strings.Contains(e, ".tmp-") || strings.Contains(e, ".mismatch-") {
+			t.Errorf("left behind: %s", e)
+		}
+	}
+}

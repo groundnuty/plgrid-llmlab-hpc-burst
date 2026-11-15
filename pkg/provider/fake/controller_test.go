@@ -50,6 +50,9 @@ func newEnv(t *testing.T, opts ...func(*clientfake.ClientBuilder) *clientfake.Cl
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
+	if err := appsv1.AddToScheme(scheme); err != nil { // the managed entries' identity records
+		t.Fatal(err)
+	}
 	// A deleting Allocation gets its accounting record, a ControllerRevision.
 	if err := appsv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)

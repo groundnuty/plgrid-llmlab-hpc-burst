@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 var hexID = regexp.MustCompile(`^([0-9a-f]{12}|[0-9a-f]{64})$`)
@@ -109,6 +110,41 @@ func NewIdentityRecord(namespace, modelDeployment, deploymentID string, data []b
 		return nil, fmt.Errorf("an identity record needs the full deployment ID, got %q", deploymentID)
 	}
 	return newRecord(name, namespace, RecordIdentity, modelDeployment, deploymentID, "", data)
+}
+
+// NewManagedIdentityRecord returns the identity record of a managed catalog entry's deployment ID (HBEP-9,
+// the identity record of a managed catalog entry; HBEP-11, Identity records): a ControllerRevision named
+// id-<first 12 hex>, written once and never rewritten, with no owner reference, so it outlives the catalog
+// entry and every Provider that listed it. Its labels are the record kind, the ID's display form and the
+// platform, which is the Provider's platform label and so a valid label value; the full catalog name is in
+// AnnotationCatalogName. A managed ID belongs to no ModelDeployment, so the record has no
+// model-deployment label. The caller names the namespace.
+func NewManagedIdentityRecord(namespace, platform, catalogName, deploymentID string, data []byte) (*appsv1.ControllerRevision, error) {
+	name, err := IdentityRecordName(deploymentID)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case len(deploymentID) != FullIDLength:
+		return nil, fmt.Errorf("an identity record needs the full deployment ID, got %q", deploymentID)
+	case namespace == "":
+		return nil, fmt.Errorf("a managed identity record needs a namespace")
+	case platform == "" || len(validation.IsValidLabelValue(platform)) > 0:
+		return nil, fmt.Errorf("a managed identity record needs its platform as a label value, got %q", platform)
+	case catalogName == "":
+		return nil, fmt.Errorf("a managed identity record needs its catalog name")
+	case !json.Valid(data):
+		return nil, fmt.Errorf("record data is not valid JSON")
+	}
+	return &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: namespace,
+			Labels:      map[string]string{LabelRecord: RecordIdentity, LabelDeploymentID: deploymentID[:DisplayIDLength], LabelPlatform: platform},
+			Annotations: map[string]string{AnnotationCatalogName: catalogName},
+		},
+		Data:     runtime.RawExtension{Raw: append([]byte(nil), data...)},
+		Revision: 1,
+	}, nil
 }
 
 // NewVerificationRecord returns the record of one verification of an Instance:
