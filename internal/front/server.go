@@ -32,7 +32,11 @@ type Options struct {
 	// Kube, when set, is the client for the front's heartbeat Lease. Nil: the
 	// front keeps no Lease (a test, or a run without a control plane), and a
 	// usage failure raises no event, as it has no Lease to regard.
-	Kube       kubernetes.Interface
+	Kube kubernetes.Interface
+	// Records, when set, is the client GET /hpcburst/v1/deployments/{id}
+	// reads records with, uncached (records.go); nil uses Kube. The command
+	// gives it a clientset of its own (cmd/hpcburst-front/main.go).
+	Records    kubernetes.Interface
 	Recorder   Recorder
 	Transports Transports // nil: HBEP-6's Tunnel through frps, registered by the front's probe
 	// PathEvents receives the probe's results when the front builds its own
@@ -151,7 +155,11 @@ func Run(ctx context.Context, o Options) error {
 	if err != nil {
 		return err
 	}
-	proxy := NewProxy(ProxyOptions{Config: cfg, Host: o.Host, Clock: o.Clock, Router: router, Transports: o.Transports, Keys: keys, Sink: sink, Metrics: metrics, Log: o.Log})
+	records := o.Records
+	if records == nil {
+		records = o.Kube
+	}
+	proxy := NewProxy(ProxyOptions{Config: cfg, Host: o.Host, Clock: o.Clock, Router: router, Transports: o.Transports, Keys: keys, Sink: sink, Metrics: metrics, Log: o.Log, Records: records})
 	f := &Front{Router: router, Watch: watch, Proxy: proxy, Sink: sink, Metrics: metrics, Tunnel: tunnel}
 	if tunnel != nil {
 		var stop func()

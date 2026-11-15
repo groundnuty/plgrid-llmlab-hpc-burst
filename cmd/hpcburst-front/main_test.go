@@ -23,10 +23,10 @@ import (
 // TestRunRaisesPathProbeFailingThroughItsRecorder shows; a PathEvents set
 // here would bypass it.
 func TestOptionsSendThePathEventsToTheAPIServer(t *testing.T) {
-	cs := kubefake.NewSimpleClientset()
+	cs, records := kubefake.NewSimpleClientset(), kubefake.NewSimpleClientset()
 	rec := &front.MemoryRecorder{}
 	o := options(front.Config{}, agentapi.Host{StateDir: t.TempDir(), PortBase: 29440}, front.ModeSSH,
-		dynfake.NewSimpleDynamicClient(runtime.NewScheme()), cs, rec, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
+		dynfake.NewSimpleDynamicClient(runtime.NewScheme()), cs, records, rec, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 	if o.PathEvents != nil {
 		t.Errorf("PathEvents = %T, want unset so Run raises PathProbeFailing on the recorder", o.PathEvents)
 	}
@@ -35,6 +35,11 @@ func TestOptionsSendThePathEventsToTheAPIServer(t *testing.T) {
 	}
 	if o.Recorder != front.Recorder(rec) || o.Kube != cs {
 		t.Errorf("Recorder %v, Kube %v: want the command's recorder and API client", o.Recorder, o.Kube)
+	}
+	// The record fetch reads through a clientset of its own (#585); main.go
+	// says what that does and does not keep apart.
+	if o.Records != records || o.Records == o.Kube {
+		t.Errorf("Records %p, Kube %p: want the command's own record clientset", o.Records, o.Kube)
 	}
 }
 
