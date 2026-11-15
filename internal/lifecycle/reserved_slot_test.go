@@ -130,7 +130,7 @@ func TestReservedSlotHoldsBUntilAEnds(t *testing.T) {
 }
 
 // TestReservedSlotFollowsTheReplacementRule: a slot is reserved whenever the controller would create the primary's
-// replacement (the science agent's ruling on #598's plan, comment 6897017776; HBEP-7's erratum of 15 Nov 2026): its
+// replacement (the science agent's ruling on #598's plan, comment 6897017776; HBEP-7 as #601 amends it): its
 // deployment ends after the drain start, 09:50:20 here, or not at all. A deployment ending before the drain start, or
 // at it, gets no replacement, so no slot is reserved, and md-b's primary is created at once beside md-a's; one ending
 // a second after it, or later but before the hard end, gets a replacement, so its slot is reserved. The reservation
