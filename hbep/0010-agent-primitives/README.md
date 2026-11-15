@@ -261,6 +261,7 @@ The plan comes from the same code that executes: a `Scale` plan runs the control
 #### Confirm
 
 - The requester sets `confirm.planID` by an update carrying the `resourceVersion` it read with the plan. A re-plan in between moves that version, and the API server refuses the update with a conflict, so the requester reads the new plan. The executing deletes carry a UID precondition (`Preconditions`, [`pkg/apis/meta/v1/types.go`, lines 749–756](https://github.com/kubernetes/apimachinery/blob/v0.35.3/pkg/apis/meta/v1/types.go#L749-L756), accessed 2026-11-14), as the controller's releases already do (`internal/lifecycle/writes.go:111`).
+- **A confirm exists only by an update that follows a written plan.** The CRD refuses `confirm` at create; the owner pin refuses it at create too, and on update requires `oldObject.status.plan`; and the lifecycle controller refuses, as `Refused`, an Operation it finds confirmed with no plan it wrote, or with a plan ID it never wrote. So an agent can't create an Operation already confirmed with a plan ID it computed itself, though the ID's inputs are readable (science-agent ruling on #593's review, 15 Nov 2026).
 - An empty plan ID, or one that is not the current plan's, is refused.
 - Only the Operation's owner may confirm it. The owner policy refuses an update that sets `confirm` unless the requester is `oldObject.spec.owner`. That field was pinned to the Operation's creator at create and is immutable with the rest of the spec, so no other identity can make itself the owner, and one agent cannot run another's plan on its own word (L-14.3).
 - An Operation that is never confirmed never runs. A plan is the default, and running takes an explicit act that names the plan (L-11.6).
@@ -579,7 +580,9 @@ The primitives replace www-2027 practices: a shared gate on a common host (slots
 - 2026-11-15: two owner decisions (issue #10): where a Provider policy and a namespace-side policy both apply, both must approve; and the audit log is readable by whoever may read the launcher's state directory on the host.
 - 2026-11-15: errata: three admission policies, not two; open question 12 decided by the amendment following this HBEP; `Repurpose` comes with HBEP-7's beta repurposing, not at stable.
 - 2026-11-15: open question 13 decided: the durable log is HBEP-8's, at its beta, and this HBEP's subscriptions over it come at stable (an amendment, PR #588).
+- 2026-11-15: a confirm exists only by an update that follows a written plan (for #589).
 
 ## Amendments
 
 - **2026-11-15: the durable log is HBEP-8's** (Notes, S8; Open questions 13; Design details; Graduation criteria). An amendment by the science agent's decision of open question 13, in PR #588 beside the amendments this HBEP lists for other HBEPs. The durable log for events and usage is HBEP-8's and comes with HBEP-8's beta, since HBEP-5's beta needs it for usage records. This HBEP's subscriptions over it, with cursors and gap markers, come at stable. Before, this HBEP built the durable log itself, with its subscriptions, at stable.
+- **2026-11-15: no confirm at create** (Operations, Confirm). An amendment by the science agent's ruling on #593's review (#589): the CRD and the owner pin refuse `confirm` at create, the pin requires a written plan on update, and the controller refuses an Operation confirmed without a plan it wrote. Before, the set-once rule, which reads `oldSelf`, ran only on update, so an Operation could be created already confirmed with a precomputed plan ID, and a plan needing no approval would run with no one having seen it.
