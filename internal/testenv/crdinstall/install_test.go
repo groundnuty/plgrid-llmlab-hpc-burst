@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -120,24 +121,30 @@ func TestInstallCRDsCreatesWhatIsMissingAndUpdatesWhatExists(t *testing.T) {
 	}
 }
 
-// InstallAndWait installs and then waits: a control plane that establishes a CRD as it is created gets it served at once, and the wait's
-// own reads (WaitCRDsServed's tests) are what keep a CRD that is never Established from passing.
-func TestInstallAndWaitReturnsOnceTheInstalledCRDsAreServed(t *testing.T) {
+// InstallAndWait installs and then waits. The control plane here establishes a CRD only when it is read for the third time, after it was
+// created: InstallAndWait returns nil only once it has read it that often, so a version that installs and returns (the mutant "no wait")
+// is caught by the count of reads, and a CRD that is never Established is WaitCRDsServed's test, with a short bound.
+func TestInstallAndWaitWaitsUntilTheInstalledCRDsAreServed(t *testing.T) {
+	var gets atomic.Int32
 	cl := fake.NewClientBuilder().WithScheme(crdTestScheme(t)).WithStatusSubresource(&apiextensionsv1.CustomResourceDefinition{}).
 		WithInterceptorFuncs(interceptor.Funcs{
-			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-				if err := c.Create(ctx, obj, opts...); err != nil {
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if err := c.Get(ctx, key, obj, opts...); err != nil {
 					return err
 				}
+				// The first read is InstallCRDs' look for an existing CRD, which finds none. The CRD is created, then read by the wait.
 				crd, ok := obj.(*apiextensionsv1.CustomResourceDefinition)
-				if !ok {
-					return nil
+				if ok && gets.Add(1) == 3 {
+					establish(crd)
+					return c.Status().Update(ctx, crd)
 				}
-				establish(crd)
-				return c.Status().Update(ctx, crd)
+				return nil
 			},
 		}).Build()
 	if err := InstallAndWait(context.Background(), cl, []*apiextensionsv1.CustomResourceDefinition{widgetCRD()}); err != nil {
-		t.Errorf("InstallAndWait over a control plane that establishes at once: %v", err)
+		t.Fatalf("InstallAndWait: %v", err)
+	}
+	if n := gets.Load(); n < 3 {
+		t.Errorf("InstallAndWait returned after %d reads of the CRD, before the control plane established it (the third)", n)
 	}
 }
