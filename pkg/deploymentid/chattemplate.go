@@ -173,14 +173,35 @@ func entryString(entry map[string]json.RawMessage, key string) (string, error) {
 	return s, nil
 }
 
-// checkSurrogateEscapes scans JSON text that json.Unmarshal has already
-// accepted and refuses a \uD800-\uDFFF escape that is not half of a pair: a
-// high surrogate that no low surrogate escape follows, or a low one with no
-// high one before it. encoding/json turns such an escape into U+FFFD without
-// an error (RFC 8259 allows the escape, RFC 8785 section 3.2.2.2 leaves its
-// meaning to the parser). The scan tracks string state, so a backslash that
-// is itself escaped (\\ud800) is text, not an escape.
+// checkSurrogateEscapes refuses a chat_template whose JSON text has an
+// escaped surrogate that is not half of a pair (unpairedSurrogate).
 func checkSurrogateEscapes(where string, raw []byte) error {
+	switch p := unpairedSurrogate(raw); p {
+	case "":
+		return nil
+	case malformedEscape:
+		return invalidf("%s chat_template has %s", where, p)
+	default:
+		return invalidf("%s chat_template has %s; write the character itself or a surrogate pair", where, p)
+	}
+}
+
+// What unpairedSurrogate finds.
+const (
+	malformedEscape    = "a malformed \\u escape"
+	unpairedLowEscape  = "an unpaired low surrogate escape"
+	unpairedHighEscape = "an unpaired high surrogate escape"
+)
+
+// unpairedSurrogate scans JSON text and names a \uD800-\uDFFF escape that is
+// not half of a pair: a high surrogate that no low surrogate escape follows,
+// or a low one with no high one before it; "" when there is none.
+// encoding/json turns such an escape into U+FFFD without an error (RFC 8259
+// allows the escape, RFC 8785 section 3.2.2.2 leaves its meaning to the
+// parser). The scan tracks string state, so a backslash that is itself
+// escaped (\\ud800) is text, not an escape. Text the decoder would refuse
+// may scan clean; the decoder refuses it.
+func unpairedSurrogate(raw []byte) string {
 	inString := false
 	for i := 0; i < len(raw); i++ {
 		c := raw[i]
@@ -197,22 +218,20 @@ func checkSurrogateEscapes(where string, raw []byte) error {
 			u, ok := escapedUnit(raw, i)
 			switch {
 			case !ok:
-				return invalidf("%s chat_template has a malformed \\u escape", where)
+				return malformedEscape
 			case u >= 0xDC00 && u <= 0xDFFF:
-				return invalidf("%s chat_template has an unpaired low surrogate escape; "+
-					"write the character itself or a surrogate pair", where)
+				return unpairedLowEscape
 			case u >= 0xD800 && u <= 0xDBFF:
 				lo, ok := escapedUnit(raw, i+6)
 				if !ok || lo < 0xDC00 || lo > 0xDFFF {
-					return invalidf("%s chat_template has an unpaired high surrogate escape; "+
-						"write the character itself or a surrogate pair", where)
+					return unpairedHighEscape
 				}
 				i += 6 // the pair's second escape; the loop steps past its last digit
 			}
 			i += 5 // the escape's \u and four digits
 		}
 	}
-	return nil
+	return ""
 }
 
 // escapedUnit reads the \uXXXX escape that starts at raw[i], hex digits of

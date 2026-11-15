@@ -16,6 +16,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/deploymentid"
 )
 
 // The record fetch (HBEP-9, Open questions, how a client fetches the record for an ID; HBEP-5, Contract
@@ -39,9 +40,12 @@ type deploymentAnswer struct {
 	ID string `json:"id"`
 	// DisplayID is its display form, the first 12 hex characters (HBEP-3, Display form).
 	DisplayID string `json:"displayID"`
-	// Scheme and Canonical are the identity record's scheme and canonical object, as the record stores them.
-	Scheme    string          `json:"scheme"`
-	Canonical json.RawMessage `json:"canonical"`
+	// Scheme is the identity record's scheme.
+	Scheme string `json:"scheme"`
+	// Canonical is the identity record's canonical object as its RFC 8785 text, in a JSON string, so its
+	// SHA-256 is the full ID and a client checks an ID with one hash. The front re-canonicalises the stored
+	// object, which its writers' JSON encoder escaped (HBEP-9, the record fetch, as PR #586 amends it).
+	Canonical string `json:"canonical"`
 	// IdentityRecords names every identity record that holds the ID: one per namespace that holds it,
 	// hpcburst-system for a managed entry's (HBEP-11, Identity records).
 	IdentityRecords []recordRef `json:"identityRecords"`
@@ -144,7 +148,7 @@ func (p *Proxy) serveDeployment(w http.ResponseWriter, x *exchange, id string) {
 	x.rec.Status = http.StatusOK
 	w.WriteHeader(http.StatusOK)
 	enc := json.NewEncoder(w)
-	// The records' bytes pass as stored: no escaping of <, > or & is added.
+	// The verification records' data passes as stored: no escaping of <, > or & is added.
 	enc.SetEscapeHTML(false)
 	_ = enc.Encode(ans)
 }
@@ -207,12 +211,13 @@ func listRecords(ctx context.Context, c kubernetes.Interface, namespaces []strin
 	return out, nil
 }
 
-// storedIdentity is an identity record's data (internal/lifecycle's identityData, managedrecord's data):
-// the front reads the hash and passes the canonical object as stored.
+// storedIdentity is an identity record's data (internal/lifecycle's identityData, managedrecord's data),
+// and text, its canonical object's RFC 8785 text.
 type storedIdentity struct {
 	Scheme    string          `json:"scheme"`
 	SHA256    string          `json:"sha256"`
 	Canonical json.RawMessage `json:"canonical"`
+	text      string
 }
 
 // storedVerification is the part of a verification record's data the front reads (internal/lifecycle's
@@ -289,7 +294,7 @@ func resolveRecords(id string, recs []appsv1.ControllerRevision) (*deploymentAns
 		return strings.Compare(a.Namespace+"/"+a.Name, b.Namespace+"/"+b.Name)
 	})
 	first := g.data[g.refs[0]]
-	ans := &deploymentAnswer{ID: full, DisplayID: display, Scheme: first.Scheme, Canonical: first.Canonical,
+	ans := &deploymentAnswer{ID: full, DisplayID: display, Scheme: first.Scheme, Canonical: first.text,
 		IdentityRecords: g.refs, Verifications: []verificationEntry{}}
 	for _, rec := range verifications {
 		e, err := readVerification(rec, full)
@@ -308,7 +313,7 @@ func resolveRecords(id string, recs []appsv1.ControllerRevision) (*deploymentAns
 }
 
 // readIdentity reads an identity record: named id-<display>, holding a full ID that starts with display and
-// a canonical object.
+// a canonical object, which it writes as RFC 8785 text.
 func readIdentity(rec *appsv1.ControllerRevision, display string) (storedIdentity, error) {
 	var d storedIdentity
 	where := rec.Namespace + "/" + rec.Name
@@ -321,9 +326,14 @@ func readIdentity(rec *appsv1.ControllerRevision, display string) (storedIdentit
 	if _, err := v1alpha1.IdentityRecordName(d.SHA256); err != nil || len(d.SHA256) != v1alpha1.FullIDLength || d.SHA256[:v1alpha1.DisplayIDLength] != display {
 		return d, fmt.Errorf("identity record %s holds %q, not a full deployment ID of display form %s", where, d.SHA256, display)
 	}
-	if d.Scheme == "" || len(d.Canonical) == 0 || d.Canonical[0] != '{' {
+	canon, err := deploymentid.Canonicalize(d.Canonical)
+	if err != nil {
+		return d, fmt.Errorf("identity record %s: its canonical object has no RFC 8785 text: %v", where, err)
+	}
+	if d.Scheme == "" || canon[0] != '{' {
 		return d, fmt.Errorf("identity record %s holds no scheme or no canonical object", where)
 	}
+	d.text = string(canon)
 	return d, nil
 }
 

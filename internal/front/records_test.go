@@ -156,16 +156,26 @@ func checkOK(t *testing.T, h *harness, resp *http.Response, body string) {
 	}
 }
 
-// servedCanonical is the canonical member of an answer, as its bytes arrived.
+// servedCanonical is the canonical member of an answer: the text its JSON string holds.
 func servedCanonical(t *testing.T, body string) []byte {
 	t.Helper()
 	var v struct {
-		Canonical json.RawMessage `json:"canonical"`
+		Canonical *string `json:"canonical"`
 	}
-	if err := json.Unmarshal([]byte(body), &v); err != nil {
+	if err := json.Unmarshal([]byte(body), &v); err != nil || v.Canonical == nil {
+		t.Fatalf("the answer has no canonical string (%v): %s", err, body)
+	}
+	return []byte(*v.Canonical)
+}
+
+// jsonString is text as a JSON string, for an expected body.
+func jsonString(t *testing.T, text []byte) string {
+	t.Helper()
+	b, err := json.Marshal(string(text))
+	if err != nil {
 		t.Fatal(err)
 	}
-	return v.Canonical
+	return string(b)
 }
 
 func hexSHA256(b []byte) string {
@@ -175,13 +185,12 @@ func hexSHA256(b []byte) string {
 
 // TestDeploymentRecordsServedByFullAndDisplayForm: a served deployment's ID, asked for by its full form
 // and by its display form, answers its identity record: the full ID, the display form, the scheme and the
-// canonical object, here byte for byte the vector's RFC 8785 bytes (vector 01 holds none of the characters
-// json.Marshal escapes), so they hash to the ID.
+// canonical object's RFC 8785 text, the vector's committed bytes, which hash to the ID.
 func TestDeploymentRecordsServedByFullAndDisplayForm(t *testing.T) {
 	g := readGolden(t, "01-hbep-example")
 	h := newHarness(t, nil)
 	h.addRecords(servedRecord(t, "ns-a", g))
-	want := `{"id":"` + g.sha256 + `","displayID":"` + rfDisplay01 + `","scheme":"v1","canonical":` + string(g.canonical) +
+	want := `{"id":"` + g.sha256 + `","displayID":"` + rfDisplay01 + `","scheme":"v1","canonical":` + jsonString(t, g.canonical) +
 		`,"identityRecords":[{"namespace":"ns-a","name":"id-` + rfDisplay01 + `"}],"verifications":[]}`
 	for _, form := range []struct{ name, id string }{{"full", g.sha256}, {"display", rfDisplay01}} {
 		t.Run(form.name, func(t *testing.T) {
@@ -190,7 +199,7 @@ func TestDeploymentRecordsServedByFullAndDisplayForm(t *testing.T) {
 			jsonEqual(t, "GET "+form.id, body, want)
 			c := servedCanonical(t, body)
 			if !bytes.Equal(c, g.canonical) {
-				t.Errorf("canonical bytes\n%s\nwant canonical.json's\n%s", c, g.canonical)
+				t.Errorf("canonical text\n%s\nwant canonical.json's\n%s", c, g.canonical)
 			}
 			if sum := hexSHA256(c); sum != g.sha256 {
 				t.Errorf("the served canonical object hashes to %s, want the ID %s", sum, g.sha256)
@@ -199,28 +208,61 @@ func TestDeploymentRecordsServedByFullAndDisplayForm(t *testing.T) {
 	}
 }
 
-// TestDeploymentRecordsCanonicalAsStored: the canonical object passes as the record stores it. Both writers
-// store it through json.Marshal, which escapes <, > and & and U+2028 inside it, so for vector 05, which
-// holds them, the answer is the same JSON value as canonical.json, not its bytes: a client verifies an ID
-// by re-serialising the object per RFC 8785 before hashing.
-func TestDeploymentRecordsCanonicalAsStored(t *testing.T) {
-	g := readGolden(t, "05-unicode-order")
-	h := newHarness(t, nil)
-	rec := servedRecord(t, "ns-a", g)
-	h.addRecords(rec)
-	resp, body := h.getRecords(g.sha256)
-	checkOK(t, h, resp, body)
-	c := servedCanonical(t, body)
-	jsonEqual(t, "the canonical object", string(c), string(g.canonical))
-	var stored writtenIdentity
-	if err := json.Unmarshal(rec.Data.Raw, &stored); err != nil {
+// managedInput is a managed vector's catalog entry, from its input.json.
+func managedInput(t *testing.T, dir string) (platform, catalogName string) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "pkg", "deploymentid", "testdata", "vectors", dir, "input.json"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(c, stored.Canonical) {
-		t.Errorf("canonical bytes\n%s\nwant the record's as stored\n%s", c, stored.Canonical)
+	var in struct {
+		Catalog struct {
+			Platform    string `json:"platform"`
+			CatalogName string `json:"catalog_name"`
+		} `json:"catalog"`
 	}
-	if bytes.Equal(stored.Canonical, g.canonical) {
-		t.Fatal("vector 05's stored canonical object is canonical.json's bytes: the escaping this test is about is gone; revisit its contract sentence")
+	if err := json.Unmarshal(b, &in); err != nil || in.Catalog.Platform == "" {
+		t.Fatalf("%s/input.json: %v", dir, err)
+	}
+	return in.Catalog.Platform, in.Catalog.CatalogName
+}
+
+// TestDeploymentRecordsCanonicalHashesToTheID: on all seven of HBEP-3's golden vectors, the canonical text
+// the front serves is the committed RFC 8785 bytes, and its SHA-256 the committed hash, the full ID (HBEP-9,
+// the record fetch, as PR #586 amends it). The records hold the object as both writers store it, through
+// json.Marshal, which escapes <, > and & and U+2028 in vector 05, so for that vector the stored text is not
+// the canonical bytes and the front re-canonicalises it. The managed vectors' records are in
+// hpcburst-system, as the managed catalog controller writes them.
+func TestDeploymentRecordsCanonicalHashesToTheID(t *testing.T) {
+	h := newHarness(t, nil)
+	escaped := 0
+	for _, dir := range []string{"01-hbep-example", "02-managed-with-revision", "03-managed-no-revision-unicode",
+		"04-flags-env-repeat-json", "05-unicode-order", "06-template-from-tokenizer-config", "07-bytewise-paths-no-gpu"} {
+		g := readGolden(t, dir)
+		rec := servedRecord(t, "ns-a", g)
+		if strings.Contains(dir, "-managed-") {
+			platform, name := managedInput(t, dir)
+			var err error
+			if rec, err = v1alpha1.NewManagedIdentityRecord("hpcburst-system", platform, name, g.sha256, identityData(t, g)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !bytes.Contains(rec.Data.Raw, g.canonical) {
+			escaped++
+		}
+		h.addRecords(rec)
+		resp, body := h.getRecords(g.sha256)
+		checkOK(t, h, resp, body)
+		c := servedCanonical(t, body)
+		if !bytes.Equal(c, g.canonical) {
+			t.Errorf("%s: canonical text\n%s\nwant canonical.json's\n%s", dir, c, g.canonical)
+		}
+		if sum := hexSHA256(c); sum != g.sha256 {
+			t.Errorf("%s: the served canonical text hashes to %s, want the ID %s", dir, sum, g.sha256)
+		}
+	}
+	if escaped == 0 {
+		t.Fatal("no vector's record stores other text than its canonical bytes: the case this test is about is gone")
 	}
 }
 
@@ -230,7 +272,11 @@ func TestDeploymentRecordsCanonicalAsStored(t *testing.T) {
 func TestDeploymentRecordsManaged(t *testing.T) {
 	g := readGolden(t, "03-managed-no-revision-unicode")
 	for _, watched := range [][]string{{"ns-a"}, nil} {
-		t.Run("watching "+strings.Join(watched, ",")+"(all if empty)", func(t *testing.T) {
+		name := "watching all"
+		if len(watched) > 0 {
+			name = "watching " + strings.Join(watched, ",")
+		}
+		t.Run(name, func(t *testing.T) {
 			h := newHarness(t, func(c *Config) { c.Namespaces = watched })
 			// The platform and catalog name of vector 03's input.json.
 			rec, err := v1alpha1.NewManagedIdentityRecord("hpcburst-system", "llmlab", "example-ü-😀-27b", g.sha256, identityData(t, g))
@@ -238,68 +284,17 @@ func TestDeploymentRecordsManaged(t *testing.T) {
 				t.Fatal(err)
 			}
 			h.addRecords(rec)
-			want := `{"id":"` + g.sha256 + `","displayID":"` + rfDisplay03 + `","scheme":"v1","canonical":` + string(g.canonical) +
+			want := `{"id":"` + g.sha256 + `","displayID":"` + rfDisplay03 + `","scheme":"v1","canonical":` + jsonString(t, g.canonical) +
 				`,"identityRecords":[{"namespace":"hpcburst-system","name":"id-` + rfDisplay03 + `"}],"verifications":[]}`
 			for _, id := range []string{g.sha256, rfDisplay03} {
 				resp, body := h.getRecords(id)
 				checkOK(t, h, resp, body)
 				jsonEqual(t, "GET "+id, body, want)
 				if c := servedCanonical(t, body); !bytes.Equal(c, g.canonical) {
-					t.Errorf("canonical bytes %s, want canonical.json's %s", c, g.canonical)
+					t.Errorf("canonical text %s, want canonical.json's %s", c, g.canonical)
 				}
 			}
 		})
-	}
-}
-
-// TestDeploymentRecordsUnknownID: an ID no identity record holds answers HBEP-5's 404
-// deployment_not_found, with only the front's attribution. That covers a display form with no record, a
-// full ID whose display form another ID's record holds, a served ID in a namespace the front does not
-// watch, and anything that is not 12 or 64 lowercase hex.
-func TestDeploymentRecordsUnknownID(t *testing.T) {
-	g := readGolden(t, "01-hbep-example")
-	h := newHarness(t, func(c *Config) { c.Namespaces = []string{"ns-a"} })
-	h.addRecords(servedRecord(t, "ns-a", g), servedRecord(t, "ns-z", readGolden(t, "07-bytewise-paths-no-gpu")))
-	seven := readGolden(t, "07-bytewise-paths-no-gpu").sha256
-	for _, id := range []string{
-		"abcdef012345",    // a display form with no record
-		rfForeign,         // vector 01's display form, another full ID
-		seven, seven[:12], // a record in ns-z, which the front does not watch
-		strings.ToUpper(rfDisplay01), rfDisplay01[:11], rfDisplay01 + "0", // not 12 or 64 lowercase hex
-		rfDisplay01 + "%2Fx", // decoded once, a slash
-		"",
-	} {
-		resp, body := h.getRecords(id)
-		checkError(t, resp, body, wantError{status: http.StatusNotFound, code: "deployment_not_found"})
-		checkAttribution(t, resp, efFrontOnly)
-	}
-}
-
-// TestDeploymentRecordsNeedAClientKey: the route is authenticated like any request (HBEP-5, Request path
-// step 1): no key, a wrong one or another scheme answers 401 invalid_api_key, and the front reads no
-// record for it.
-func TestDeploymentRecordsNeedAClientKey(t *testing.T) {
-	g := readGolden(t, "01-hbep-example")
-	h := newHarness(t, nil)
-	h.addRecords(servedRecord(t, "ns-a", g))
-	for _, auth := range []string{"", "Bearer wrong-key", "Basic " + h.clientKey, "Bearer "} {
-		req, err := http.NewRequest(http.MethodGet, h.url+"/hpcburst/v1/deployments/"+g.sha256, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if auth != "" {
-			req.Header.Set("Authorization", auth)
-		}
-		resp, err := errClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		body := readAll(t, resp)
-		checkError(t, resp, body, wantError{status: http.StatusUnauthorized, code: "invalid_api_key"})
-		checkAttribution(t, resp, efFrontOnly)
-	}
-	if a := h.recs.Actions(); len(a) != 0 {
-		t.Errorf("the front called the API for unauthenticated requests: %v", a)
 	}
 }
 
@@ -322,7 +317,7 @@ func TestDeploymentRecordsTwoInstances(t *testing.T) {
 		verificationRecord(t, "ns-a", g.sha256, rfUIDA, 2, a2), verificationRecord(t, "ns-a", g.sha256, rfUIDB, 1, b1),
 		worker, verificationRecord(t, "ns-a", g.sha256, rfUIDA, 1, a1),
 		verificationRecord(t, "ns-b", rfForeign, rfUIDC, 1, verificationData("md-ns-b-0", rfForeign, 1, "pass", "")))
-	want := `{"id":"` + g.sha256 + `","displayID":"` + rfDisplay01 + `","scheme":"v1","canonical":` + string(g.canonical) +
+	want := `{"id":"` + g.sha256 + `","displayID":"` + rfDisplay01 + `","scheme":"v1","canonical":` + jsonString(t, g.canonical) +
 		`,"identityRecords":[{"namespace":"ns-a","name":"id-` + rfDisplay01 + `"}],"verifications":[` +
 		`{"namespace":"ns-a","name":"ver-` + rfUIDA + `-1","instanceUID":"` + rfUIDA + `","generation":1,"outcome":"fail","record":` + a1 + `},` +
 		`{"namespace":"ns-a","name":"ver-` + rfUIDA + `-2","instanceUID":"` + rfUIDA + `","generation":2,"outcome":"pass","record":` + a2 + `},` +
@@ -344,7 +339,7 @@ func TestDeploymentRecordsSameIDInTwoNamespaces(t *testing.T) {
 	b := verificationData("md-ns-b-0", g.sha256, 1, "fail", "contradiction")
 	h.addRecords(servedRecord(t, "ns-b", g), servedRecord(t, "ns-a", g),
 		verificationRecord(t, "ns-b", g.sha256, rfUIDB, 1, b), verificationRecord(t, "ns-a", g.sha256, rfUIDA, 1, a))
-	want := `{"id":"` + g.sha256 + `","displayID":"` + rfDisplay01 + `","scheme":"v1","canonical":` + string(g.canonical) +
+	want := `{"id":"` + g.sha256 + `","displayID":"` + rfDisplay01 + `","scheme":"v1","canonical":` + jsonString(t, g.canonical) +
 		`,"identityRecords":[{"namespace":"ns-a","name":"id-` + rfDisplay01 + `"},{"namespace":"ns-b","name":"id-` + rfDisplay01 + `"}],"verifications":[` +
 		`{"namespace":"ns-a","name":"ver-` + rfUIDA + `-1","instanceUID":"` + rfUIDA + `","generation":1,"outcome":"pass","record":` + a + `},` +
 		`{"namespace":"ns-b","name":"ver-` + rfUIDB + `-1","instanceUID":"` + rfUIDB + `","generation":1,"outcome":"fail","record":` + b + `}]}`

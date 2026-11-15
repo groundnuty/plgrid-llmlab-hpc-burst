@@ -96,10 +96,11 @@ func TestDeploymentRecordsOtherPathsAndMethods(t *testing.T) {
 }
 
 // TestRunServesDeploymentRecords: the front Run builds serves the route through its Records client, or
-// its Kube client when Records is unset, as the command's wiring gives it.
+// its Kube client when Records is unset, as the command's wiring gives it. With neither, every read fails:
+// 503 records_unavailable.
 func TestRunServesDeploymentRecords(t *testing.T) {
 	g := readGolden(t, "01-hbep-example")
-	for _, which := range []string{"records", "kube"} {
+	for _, which := range []string{"records", "kube", "none"} {
 		t.Run(which, func(t *testing.T) {
 			o := runOptions(t, "", agentapi.Host{StateDir: t.TempDir()}, "")
 			dial, err := listenFree()
@@ -108,9 +109,10 @@ func TestRunServesDeploymentRecords(t *testing.T) {
 			}
 			o.DialHomeListener = dial
 			cs := kubefake.NewSimpleClientset(servedRecord(t, "ns-a", g))
-			if which == "records" {
+			switch which {
+			case "records":
 				o.Records = cs
-			} else {
+			case "kube":
 				o.Kube = cs
 			}
 			ready := make(chan *Front, 1)
@@ -144,6 +146,10 @@ func TestRunServesDeploymentRecords(t *testing.T) {
 				t.Fatal(err)
 			}
 			body := readAll(t, resp)
+			if which == "none" {
+				checkError(t, resp, body, wantError{status: http.StatusServiceUnavailable, code: "records_unavailable", retryAfter: "5"})
+				return
+			}
 			var v struct {
 				ID string `json:"id"`
 			}
