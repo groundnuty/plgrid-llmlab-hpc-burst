@@ -33,6 +33,8 @@ type fileSystem interface {
 	// tail is at most the last n bytes of a file's content. found is false
 	// for anything but a file.
 	tail(p string, n int64) (content []byte, found bool, err error)
+	// head is the first n bytes of the file at p, the whole file when it is shorter; found is false when there is none.
+	head(p string, n int64) (content []byte, found bool, err error)
 	// write replaces a file's content and keeps its mode and owner, or
 	// creates the file with mode and owner.
 	write(p string, content []byte, mode fs.FileMode, owner string) error
@@ -81,6 +83,18 @@ func (f *fsState) tail(p string, n int64) ([]byte, bool, error) {
 	c := file.Content
 	if int64(len(c)) > n {
 		c = c[int64(len(c))-n:]
+	}
+	return append([]byte(nil), c...), true, nil
+}
+
+func (f *fsState) head(p string, n int64) ([]byte, bool, error) {
+	file := f.files[p]
+	if file == nil {
+		return nil, false, nil
+	}
+	c := file.Content
+	if int64(len(c)) > n {
+		c = c[:n]
 	}
 	return append([]byte(nil), c...), true, nil
 }

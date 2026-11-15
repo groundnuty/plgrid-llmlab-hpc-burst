@@ -124,18 +124,18 @@ func TestTheDigestStepReadsTheRunningExecutableOfARealProcess(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	script, err := EnvoyDigestScript(envoy)
+	script, err := ExeDigestScript(envoy)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, ok := ParseEnvoyDigest(runScriptHere(t, script))
+	got, ok := ParseExeDigest(runScriptHere(t, script))
 	if want := fileDigest(t, real); !ok || got != want {
 		t.Fatalf("the step read digest %q (ok %t), want the executable's own %s", got, ok, want)
 	}
 	// The process at the PID is not the one listed: a different start time says changed, and reads nothing.
 	other := envoy
 	other.Start = "1"
-	script, err = EnvoyDigestScript(other)
+	script, err = ExeDigestScript(other)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,14 +145,14 @@ func TestTheDigestStepReadsTheRunningExecutableOfARealProcess(t *testing.T) {
 	// A different command line says changed too.
 	other = envoy
 	other.cmdline = "ZWdn"
-	script, _ = EnvoyDigestScript(other)
+	script, _ = ExeDigestScript(other)
 	if out := strings.TrimSpace(string(runScriptHere(t, script))); out != "changed" {
 		t.Errorf("a process with another command line read %q, want changed", out)
 	}
 	// Fields a script cannot carry are refused before anything is written into one.
 	for _, bad := range []NodeProc{{PID: 0, Start: "1", cmdline: "YQ=="}, {PID: 1, Start: "1; echo x", cmdline: "YQ=="}, {PID: 1, Start: "1", cmdline: "a b"}, {PID: 1, Start: "", cmdline: "YQ=="}} {
-		if _, err := EnvoyDigestScript(bad); err == nil {
-			t.Errorf("EnvoyDigestScript accepted %+v", bad)
+		if _, err := ExeDigestScript(bad); err == nil {
+			t.Errorf("ExeDigestScript accepted %+v", bad)
 		}
 	}
 }
@@ -188,7 +188,7 @@ func TestTheDigestStepSaysGoneForAProcessThatEnded(t *testing.T) {
 	}
 	_ = cmd.Process.Kill()
 	_ = cmd.Wait()
-	script, err := EnvoyDigestScript(envoy)
+	script, err := ExeDigestScript(envoy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestTheDigestStepSaysGoneForAProcessThatEnded(t *testing.T) {
 	}
 }
 
-func TestParseEnvoyDigest(t *testing.T) {
+func TestParseExeDigest(t *testing.T) {
 	good := strings.Repeat("ab", 32)
 	for _, c := range []struct {
 		in string
@@ -213,9 +213,9 @@ func TestParseEnvoyDigest(t *testing.T) {
 		{"digest " + good + " extra\n", false},
 		{"", false},
 	} {
-		got, ok := ParseEnvoyDigest([]byte(c.in))
+		got, ok := ParseExeDigest([]byte(c.in))
 		if ok != c.ok || (ok && got != good) {
-			t.Errorf("ParseEnvoyDigest(%q) = %q, %t; want ok %t", c.in, got, ok, c.ok)
+			t.Errorf("ParseExeDigest(%q) = %q, %t; want ok %t", c.in, got, ok, c.ok)
 		}
 	}
 }

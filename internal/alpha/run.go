@@ -55,7 +55,7 @@ import (
 // long stream its check 2 asks for. Nothing was sent but the rate stream.
 func NotRun(_ Row, err error) bool {
 	return neverStarted(err) || errors.Is(err, ErrWarmUnshown) || errors.Is(err, ErrSlotTaken) || errors.Is(err, ErrLeadTooShort) || errors.Is(err, ErrLongTooShort) ||
-		errors.Is(err, ErrGlibcTooOld) || errors.Is(err, ErrKeeperStreamTooShort) || errors.Is(err, ErrKeeperStreamEndedFirst)
+		errors.Is(err, ErrGlibcTooOld) || errors.Is(err, ErrKeeperStreamTooShort) || errors.Is(err, ErrKeeperStreamEndedFirst) || errors.Is(err, ErrNoStagedImage)
 }
 
 // ErrInvalid ends a run that ran and was judged with no failure, but whose reading measures nothing: the bulk row's run with no saturation witness
@@ -93,6 +93,10 @@ func neverStarted(err error) bool {
 // when it was the deployment's first end, which hack/live-checks.sh reads off the marker to name
 // that bound in its line (the wait in the queue otherwise); any other gives pendingMax.
 func NotRunNote(row Row, pendingMax time.Duration, err error) string {
+	if errors.Is(err, ErrNoStagedImage) {
+		// Fixed words: the bulk row's image precondition (the science agent's rulings on #579) names no path and no digest.
+		return fmt.Sprintf("%s: %s; stage it first with the stage row; no job was submitted\n", row.Name, noStagedImageWords)
+	}
 	if errors.Is(err, ErrKeeperStreamEndedFirst) {
 		// The times, durations only: hack/live-checks.sh reads the reason in parentheses.
 		reason := ""

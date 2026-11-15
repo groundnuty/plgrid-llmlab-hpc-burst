@@ -8,6 +8,8 @@ package livechecks
 // run for real in dry mode (alpha_dry_test.go).
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -57,6 +59,8 @@ var alphaShapes = []alphaShape{
 	{"beta-athena-now-router", "TestBetaAthenaNowRouter", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:48:00, one job, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
 	// The keeper row on plgrid-now (issue #521): row A's shape, in host-dialed mode with the relay keeper.
 	{"beta-athena-now-keeper", "TestBetaAthenaNowKeeper", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:48:00, one job, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
+	// The bulk row on plgrid-now (issue #521): row A's shape, in host-dialed mode with the bulk path, through the test shim.
+	{"beta-athena-now-bulk", "TestBetaAthenaNowBulk", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:48:00, one job, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
 	// The router row on Helios's GH200 (issue #566): tunnel-hour-helios's single job in QOS now, with the Helios rows' lease.
 	{"beta-helios-now-router", "TestBetaHeliosNowRouter", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 120000M, time limit 01:46:00, one job, no requeue", "now", "SEEDACCT-gh", true},
 	// Row B on plgrid-now (issue #376): the same size, two jobs of 21 minutes in turn (athena-now.yaml's lead of 20 and a
@@ -71,7 +75,11 @@ echo "go $1" >> "$STUB_STATE/events"
 out=""; prev=""
 for a in "$@"; do [ "$prev" = -o ] && out=$a; prev=$a; done
 case "$1" in
-  build) mkdir -p "$out" && for b in hpcburst hpcburst-controller hpcburst-front; do echo binary > "$out/$b"; done
+  build) case " $* " in
+           # The bulk row's test shim (build_test_shims): one file at -o, the digest it is built with in its argv (go-argv).
+           *enginedouble/shim*) mkdir -p "$(dirname "$out")" && echo shim > "$out" ;;
+           *) mkdir -p "$out" && for b in hpcburst hpcburst-controller hpcburst-front; do echo binary > "$out/$b"; done ;;
+         esac
          [ -z "${STUB_ROLL_AT_BUILD:-}" ] || echo "$STUB_NEXT_DATE" > "$LIVE_FAKE_DATE_FILE" ;;
   test) mkdir -p "$(dirname "$out")"; cp "$STUB_STATE/testbin.sh" "$out"; chmod +x "$out"
         # A conformance row's only build is the test binary's, so these hooks are its "during the builds": another job
@@ -142,6 +150,14 @@ case $mode in
   not-run-long-words) echo "$HPCBURST_ALPHA_ROW: the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate (at owner-private-host tokens/s with max-model-len 32768 the stream that fits is 1m47s, under the floor of 2m15s); the hour was not started; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   not-run-long-fit-words) echo "$HPCBURST_ALPHA_ROW: the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate (at 300 tokens/s with max-model-len 32768 the stream that fits is owner-private-host, under the floor of 2m15s); the hour was not started; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   sleep) leave; touch "$STUB_STATE/started"; exec sleep 3600 ;;
+  # The bulk row's staging of its shipped agent, then a stop before its own removal (internal/alpha, TestAgentDirFile): the directory, and the file
+  # naming its exact path (STUB_TEST_AGENT_PATH, or the stub's own staging), as the test writes it; then it waits to be signalled.
+  stage-and-sleep)
+    d=${STUB_TEST_AGENT_DIR:-$STUB_STATE/staging/test-agent/abababababababababababababababababababababababababababababababab}
+    mkdir -p "$d" && echo agent > "$d/hb-agent"
+    printf 'staging=%s\ndir=%s\n' "${STUB_TEST_AGENT_STAGING:-$STUB_STATE/staging}" "${STUB_TEST_AGENT_PATH:-$d}" > "$HPCBURST_ALPHA_OUT/test-agent-dir"; chmod 600 "$HPCBURST_ALPHA_OUT/test-agent-dir"
+    [ -z "${STUB_TEST_AGENT_LOCK:-}" ] || chmod 555 "$d"
+    leave; touch "$STUB_STATE/started"; exec sleep 3600 ;;
   # A job of the run's own prefix whose tag was never written down (a watch that never delivered, a write that
   # failed), beside a job of another run's prefix; with untagged-not-run, the run ended NOT RUN with it pending.
   # The step dies mid-wait (the science agent's requirement on PR 255): the run's predecessor running and its successor
@@ -215,6 +231,12 @@ func newAlphaWorldAt(t *testing.T, clock func() time.Time) *world {
 			t.Fatal(err)
 		}
 	}
+	// The bulk row's shim build (build_test_shims) maps a cpuArch to its GOARCH through the one table, which the fixture takes as it is.
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), "hack", "cpu-arch.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(w.repo, "hack", "cpu-arch.sh"), string(b), 0o644)
 	return w
 }
 
@@ -426,6 +448,19 @@ func TestAnAlphaRunBuildsBeforeTheSlotAndGivesTheTestItsEnvironment(t *testing.T
 			if has := strings.Contains(joined, "fetch-envoy --agent-builds "); has != router {
 				t.Errorf("%s: Envoy's build fetched before the test binary: %t, want %t:\n%s", s.row, has, router, joined)
 			}
+			// The test shim is built for the bulk row alone (issue #521, option (A)), one for each agent build, each with the digest of the
+			// shipped agent beside it built in.
+			argv := w.stateFile("go-argv")
+			if has := strings.Contains(argv, "enginedouble/shim"); has != (s.row == "beta-athena-now-bulk") {
+				t.Errorf("%s: the test shim built: %t, want %t:\n%s", s.row, has, s.row == "beta-athena-now-bulk", argv)
+			}
+			if s.row == "beta-athena-now-bulk" {
+				for _, want := range []string{"-X main.wantAgentDigest=" + sha256Hex("agent\n"), "test-shim/hb-agent-x86_64", "test-shim/hb-agent-aarch64"} {
+					if !strings.Contains(argv, want) {
+						t.Errorf("the shim's builds lack %q:\n%s", want, argv)
+					}
+				}
+			}
 			env := w.stateFile("test-env-" + s.test)
 			for _, bad := range []string{"HPCBURST_ALPHA_DRY"} {
 				if strings.Contains(env, bad) {
@@ -439,14 +474,14 @@ func TestAnAlphaRunBuildsBeforeTheSlotAndGivesTheTestItsEnvironment(t *testing.T
 			if s.hasQOS() {
 				want = append(want, "HPCBURST_ALPHA_QOS="+s.slot)
 			}
-			// The keeper row runs in host-dialed mode alone, which has no address: the harness gives it that mode (world.command).
-			if s.row == "beta-athena-now-keeper" {
+			// The keeper and bulk rows run in host-dialed mode alone, which has no address: the harness gives them that mode (world.command).
+			if hostDialedOnly(s.row) {
 				want = slices.DeleteFunc(want, func(x string) bool {
 					return strings.HasPrefix(x, "HPCBURST_ALPHA_DIALHOME_MODE=") || strings.HasPrefix(x, "HPCBURST_ALPHA_DIALHOME_ADDR=")
 				})
 				want = append(want, "HPCBURST_ALPHA_DIALHOME_MODE=host-dialed")
 				if strings.Contains(env, "HPCBURST_ALPHA_DIALHOME_ADDR") {
-					t.Errorf("an address reached the keeper row's test, which runs in host-dialed mode:\n%s", env)
+					t.Errorf("an address reached %s's test, which runs in host-dialed mode:\n%s", s.row, env)
 				}
 			}
 			for _, x := range want {
@@ -656,7 +691,7 @@ func TestASignalDuringAnAlphaRunRunsTheCleanup(t *testing.T) {
 }
 
 func TestPlanNamesTheAlphaRowsWhenTheStackChanges(t *testing.T) {
-	alphaRows := []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-athena", "tunnel-hour-helios", "alpha-athena-now-serve", "alpha-athena-now-nooverlap", "beta-athena-now-router", "beta-athena-now-keeper", "beta-helios-now-router"}
+	alphaRows := []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-athena", "tunnel-hour-helios", "alpha-athena-now-serve", "alpha-athena-now-nooverlap", "beta-athena-now-router", "beta-athena-now-keeper", "beta-athena-now-bulk", "beta-helios-now-router"}
 	// The rehearsal row (issue #193) builds and runs the same stack, on this host: it is a local row.
 	stackRows := append(append([]string{}, alphaRows...), "rehearsal-part3")
 	cases := []struct {
@@ -938,6 +973,8 @@ func TestTheRowsThatHoldTheOwnersSlotForHoursNeedTheOwnersGo(t *testing.T) {
 		{"beta-athena-now-router", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
 		// The keeper row on plgrid-now (issue #521) holds the slot as row A does: 10 + 48 + 2.
 		{"beta-athena-now-keeper", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
+		// The bulk row on plgrid-now (issue #521) holds the slot as row A does: 10 + 48 + 2.
+		{"beta-athena-now-bulk", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
 		// The router row on Helios (issue #566) holds QOS now's GPU for its lease, MinLease's 106 minutes, rounded up to ten.
 		{"beta-helios-now-router", "LIVE_OWNER_GO_HELIOS_NOW", "may pend up to 30 min in the queue (then it is cancelled by its tag and the run is NOT RUN), then holds QOS now's GPU for about 1 h 50 min; the owner's go is needed (the development rule on #145)"},
 		// Row B on plgrid-now (issue #376): its first start wait, then 10 + 21 + 3 + 10 + 12 + 3 = 59 minutes, rounded up to ten.
@@ -1220,4 +1257,10 @@ func TestTheScriptsLeaseBoundsArethePackagesBounds(t *testing.T) {
 			t.Errorf("%s = %s minutes, the package's bound is %d", name, got, int(want/time.Minute))
 		}
 	}
+}
+
+// sha256Hex is the SHA-256 of s, lowercase hex.
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }

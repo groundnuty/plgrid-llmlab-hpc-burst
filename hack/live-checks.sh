@@ -69,8 +69,8 @@
 # rate while its token streams ran across the whole transfer), so its reading measures nothing. It is no NOT RUN: its job started, ran and spent the
 # slot, and the run was put to the test, where a NOT RUN's job never started or its row was never put to the test. Its marker names it in fixed
 # words, held to that row alone; judge prints "<row>: INVALID (not a NOT RUN: ...)", apart from PASS, FAIL and NOT RUN, and the row exits 3 like a
-# NOT RUN: not a failure, not a pass, run it again. Its text to post says why. A failure of any other check wins: the row is a FAIL. The row is pending in the tables, so --run refuses it
-# (exit 2) before any of this until it is made ready.
+# NOT RUN: not a failure, not a pass, run it again. Its text to post says why. A failure of any other check wins: the row is a FAIL. The row runs
+# through its test shim (issue #521, option (A)), which the script builds for it alone (build_test_shims), in host-dialed mode alone.
 # The keeper row on plgrid-now (beta-athena-now-keeper, issue #521) has one: the deployment's max-model-len does not hold a stream long enough to span
 # a controller restart's outcome at the engine's measured rate. Its marker names the rate and the context, numbers only, which judge prints; the run
 # killed no controller, and its jobs were cancelled by their tags. The row runs in host-dialed mode alone. It has a second, of a run that did start
@@ -231,7 +231,7 @@ reach-host-dialed-athena|cluster|internal/providerctl/conformance|^TestReachHost
 alpha-athena-now-nooverlap|cluster|internal/alpha|^TestAlphaAthenaNowNoOverlap$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml|host|ready
 beta-athena-now-router|cluster|internal/alpha|^TestBetaAthenaNowRouter$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml,hack/fetch-envoy.sh|host|ready
 beta-athena-now-keeper|cluster|internal/alpha|^TestBetaAthenaNowKeeper$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml|host|ready
-beta-athena-now-bulk|cluster|-|-|-|-|-|pending
+beta-athena-now-bulk|cluster|internal/alpha|^TestBetaAthenaNowBulk$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml|host|ready
 beta-helios-now-router|cluster|internal/alpha|^TestBetaHeliosNowRouter$|HPCBURST_ALPHA_ROW|profiles/helios.yaml,examples/modeldeployment-qwen25-instruct.yaml,hack/fetch-envoy.sh|host,linux-arm64|ready
 rehearsal|cluster|-|-|-|-|-|pending
 # END LIVE TESTS
@@ -315,6 +315,7 @@ alpha-athena-now-stage|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_
 alpha-athena-now-nooverlap|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:21:00|115|-|10
 beta-athena-now-router|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
 beta-athena-now-keeper|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
+beta-athena-now-bulk|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
 beta-helios-now-router|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|213|-C memfs
 gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|32|-|10
 gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|25|-
@@ -345,6 +346,7 @@ alpha-athena-now-stage|internal/providerctl/conformance/stagehelper
 alpha-athena-now-nooverlap|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 beta-athena-now-router|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 beta-athena-now-keeper|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
+beta-athena-now-bulk|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent,internal/agent/enginedouble/shim
 beta-helios-now-router|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 rehearsal-part3|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 reach-host-dialed-helios|cmd/hb-agent
@@ -367,6 +369,7 @@ alpha-athena-now-stage|1
 alpha-athena-now-nooverlap|2
 beta-athena-now-router|1
 beta-athena-now-keeper|1
+beta-athena-now-bulk|1
 beta-helios-now-router|1
 gpu-accounting-helios|1
 gpu-accounting-athena|1
@@ -394,6 +397,7 @@ alpha-athena-now-stage|LIVE_OWNER_GO_ATHENA_NOW|50
 alpha-athena-now-nooverlap|LIVE_OWNER_GO_ATHENA_NOW|60
 beta-athena-now-router|LIVE_OWNER_GO_ATHENA_NOW|60
 beta-athena-now-keeper|LIVE_OWNER_GO_ATHENA_NOW|60
+beta-athena-now-bulk|LIVE_OWNER_GO_ATHENA_NOW|60
 beta-helios-now-router|LIVE_OWNER_GO_HELIOS_NOW|110
 gpu-accounting-athena-now|LIVE_OWNER_GO_ATHENA_NOW|20
 # END OWNER GO
@@ -463,6 +467,7 @@ alpha-athena-now-serve
 alpha-athena-now-nooverlap
 beta-athena-now-router
 beta-athena-now-keeper
+beta-athena-now-bulk
 beta-helios-now-router
 gpu-accounting-helios
 gpu-accounting-athena
@@ -813,6 +818,10 @@ check_alpha_settings() {
   if [ "$name" = beta-athena-now-keeper ] && [ "$host_dialed" != 1 ]; then
     say "live-checks: $name runs in host-dialed mode alone (LIVE_DIALHOME_MODE=host-dialed): the relay keeper runs the relays of that mode"; bad=1
   fi
+  # The bulk row reads the bulk path's buffer on the relays' ssh through the login node (internal/alpha, config.go): host-dialed mode alone.
+  if [ "$name" = beta-athena-now-bulk ] && [ "$host_dialed" != 1 ]; then
+    say "live-checks: $name runs in host-dialed mode alone (LIVE_DIALHOME_MODE=host-dialed): the bulk path's buffer is read on the relays' ssh through the login node"; bad=1
+  fi
   if [ "$host_dialed" = 1 ]; then
     # No address and no key: the host dials the jobs through the login node (HBEP-6, Dial-home modes). An
     # address that is set is refused, so a row cannot read as if it had one.
@@ -1058,9 +1067,56 @@ clean_cluster() {
   return 0
 }
 
+# clean_abs_path <path>: whether the path is absolute and plain: no "." or ".." segment, no doubled slash, no trailing slash, only the characters
+# a staging path has. A remote removal takes no path but such a one.
+clean_abs_path() {
+  local p=$1
+  case $p in /*) ;; *) return 1 ;; esac
+  case $p in */ | *//*) return 1 ;; esac
+  case "$p/" in */./* | */../*) return 1 ;; esac
+  printf '%s\n' "$p" | grep -q -E -x '/[A-Za-z0-9._/-]+'
+}
+
+# clean_test_agent: the bulk row's staged shipped agent (issue #521, option (A); the science agent's condition 2), when its test was stopped before
+# it removed it itself: the test wrote the staging root it resolved and the directory's exact cluster path to its record directory's test-agent-dir
+# (internal/alpha, TestAgentDirFile; "staging=<root>" and "dir=<path>") before staging, and deletes that file once its own removal has run. Both
+# must be plain absolute paths (clean_abs_path), and the directory exactly <root>/test-agent/<64 hex> under the root the run recorded: never a
+# glob, a parent, or a path that climbs. It is removed by that path alone, and a directory whose agent is still there is named, by its digest's
+# first 12 hex, never its path. Returns 1 when it could not remove it.
+clean_test_agent() {
+  local f="${REC_DIR:+$REC_DIR/test-agent-dir}" d staging leaf reply short
+  [ -n "$f" ] && [ -f "$f" ] && [ ! -L "$f" ] || return 0
+  staging=$(sed -n 's/^staging=//p' "$f" | head -n 1)
+  d=$(sed -n 's/^dir=//p' "$f" | head -n 1)
+  leaf=${d##*/}
+  short=${leaf:0:12}
+  if ! clean_abs_path "$staging" || ! clean_abs_path "$d" || ! [[ $leaf =~ ^[0-9a-f]{64}$ ]] || [ "$d" != "$staging/test-agent/$leaf" ]; then
+    say "cleanup: the bulk row's staged shipped agent was named by a path that is not <staging>/test-agent/<digest> under the staging root the run recorded; nothing was removed; check the staging directory by hand"
+    return 1
+  fi
+  if [ -z "$ACTIVE_HOST" ]; then
+    say "cleanup: the bulk row's staged shipped agent test-agent/$short… could not be removed: the run's host is not known; remove it by hand"
+    return 1
+  fi
+  reply=$(remote "$ACTIVE_HOST" <<EOS
+$(preamble d "$d")
+rm -rf -- "\$d"
+if test -f "\$d/hb-agent"; then echo "test-agent=left"; else echo "test-agent=gone"; fi
+EOS
+  ) || reply=""
+  if has_line "$reply" 'test-agent=gone'; then
+    rm -f "$f"
+    say "cleanup: removed the bulk row's staged shipped agent test-agent/$short…, which its stopped test had left"
+    return 0
+  fi
+  say "cleanup: the bulk row's staged shipped agent test-agent/$short… remains after its removal; remove it by hand"
+  return 1
+}
+
 on_signal() { INTERRUPTED=1; }
 on_exit() {
   local rc=$?
+  clean_test_agent || rc=1
   if [ -n "$ACTIVE_HOST" ]; then clean_cluster || rc=1; [ "$CLEAN_LEFT" -eq 0 ] || rc=1; fi
   [ -z "${CONTROL_DIR:-}" ] || rm -rf "$CONTROL_DIR"
   exit "$rc"
@@ -1105,6 +1161,7 @@ not_run_verdict() {
   ! glibc_marker || case $n in beta-athena-now-router|beta-helios-now-router) true ;; *) false ;; esac || return 1
   ! keeper_marker || [ "$n" = beta-athena-now-keeper ] || return 1
   ! invalid_marker || [ "$n" = beta-athena-now-bulk ] || return 1
+  ! staged_image_marker || [ "$n" = beta-athena-now-bulk ] || return 1
   ! keeper_ended_marker || [ "$n" = beta-athena-now-keeper ] || return 1
   ! slot_marker || [ "$n" = alpha-athena-now-nooverlap ] || return 1
   ! lead_marker || case $n in alpha-athena-handover|alpha-helios-nooverlap|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1
@@ -1125,6 +1182,9 @@ glibc_marker() { grep -q "the compute node's glibc is older than the 2.30 Envoy 
 # invalid_marker: the marker says the bulk row's run has no saturation witness, so its reading measures nothing (internal/alpha, ErrInvalid and
 # InvalidNote; the science agent's ruling on #521): an INVALID, not a NOT RUN, which not_run_verdict holds to that row and judge prints as INVALID.
 invalid_marker() { grep -q "the run has no saturation witness, so its reading measures nothing" "$REC_DIR/not-run.txt" 2>/dev/null; }
+# staged_image_marker: the marker says the Provider's image for the deployment is not staged with a whole record, so the bulk row's run, whose test
+# shim's double stages no image, submitted no job (internal/alpha, ErrNoStagedImage; the science agent's rulings on #579): a NOT RUN of that row alone.
+staged_image_marker() { grep -q "the Provider's image for the deployment is not staged with a whole record, and the bulk row's double stages none" "$REC_DIR/not-run.txt" 2>/dev/null; }
 # keeper_marker: the run's NOT RUN marker says the deployment's max-model-len does not hold a stream long enough to span a controller restart's outcome
 # at the engine's measured rate (internal/alpha, NotRunNote, KeeperStreamTooShortError; issue #521): the keeper row's. keeper_reason is the numbers the
 # marker carries in parentheses, as lead_reason reads them, and nothing else.
@@ -1240,6 +1300,8 @@ judge() {
       say "$n: NOT RUN (the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate: $(long_reason); the hour was not started, and the run's jobs were cancelled by tag; not a failure)"
     elif keeper_ended_marker; then
       say "$n: NOT RUN (the stream ended before the keeper's outcome and its margin: $(keeper_ended_reason); the controller was killed and the run's other checks passed; not a failure)"
+    elif staged_image_marker; then
+      say "$n: NOT RUN (the Provider's image for the deployment is not staged with a whole record, and the bulk row's test shim stages none: stage it first with alpha-athena-now-stage; no job was submitted; not a failure)"
     elif keeper_marker; then
       say "$n: NOT RUN (the deployment's max-model-len does not hold a stream long enough to span a controller restart at the engine's measured rate: $(keeper_reason); the controller was not killed, and the run's jobs were cancelled by tag; not a failure)"
     elif glibc_marker; then
@@ -1463,6 +1525,27 @@ prepare_cluster() {
 # (hack/build-agents.sh: the real agent, for each cpuArch), before the slot is taken (issue #305). The test finds them
 # through HPCBURST_CONF_AGENT_BUILDS. Nothing here holds the slot.
 HD_BUILD_DIR=""
+# build_test_shims <agent-builds> <out>: the bulk row's test shim (internal/agent/enginedouble/shim; issue #521, option (A)), one for each agent build
+# in <agent-builds>, as <out>/hb-agent-<cpuArch>. Each is built with the SHA-256 of the shipped agent beside it (-ldflags -X main.wantAgentDigest), the
+# agent the shim execs on the node, and as hack/build-agents.sh builds the agent: static, trimmed, for linux and the cpuArch's GOARCH, its levels
+# pinned. The test puts the shim in hb-agent's place in the stack's own copy of the agent builds, and stages the shipped agent itself; the shim is
+# built for this row alone, and no other script or product build names it.
+build_test_shims() {
+  local builds=$1 out=$2 f cpu d goarch
+  # shellcheck source=hack/cpu-arch.sh
+  . "$ROOT/hack/cpu-arch.sh" || return 1
+  mkdir -m 700 "$out" || return 1
+  for f in "$builds"/hb-agent-*; do
+    [ -f "$f" ] || continue
+    cpu=${f##*/hb-agent-}
+    goarch=$(go_arch "$cpu") || { echo "build_test_shims: no GOARCH for cpuArch $cpu" >&2; return 1; }
+    d=$(sha256sum < "$f") && d=${d%% *} || return 1
+    CGO_ENABLED=0 GOOS=linux GOARCH=$goarch GOAMD64=v1 GOARM64=v8.0 GOWORK=off GOENV=off GOEXPERIMENT= GOFIPS140=off \
+      with_build_lock go build -trimpath -buildvcs=false -ldflags "-X main.wantAgentDigest=$d" -o "$out/hb-agent-$cpu" ./internal/agent/enginedouble/shim || return 1
+  done
+  [ -n "$(ls "$out")" ] || { echo "build_test_shims: no agent build in $builds" >&2; return 1; }
+}
+
 prepare_host_dialed() {
   local n=$1 w
   w="$OUT/$n-build-$(date -u +%Y%m%dT%H%M%SZ)-$$"
@@ -1505,7 +1588,8 @@ prepare_alpha() {
     with_build_lock go build -o "$w/bin/" ./cmd/hpcburst ./cmd/hpcburst-controller ./cmd/hpcburst-front &&
     with_build_lock hack/build-agents.sh "$w/agent-builds" &&
     hack/fetch-frp.sh --agent-builds "$w/agent-builds" &&
-    { case $n in beta-athena-now-router|beta-helios-now-router) hack/fetch-envoy.sh --agent-builds "$w/agent-builds" ;; esac; } ) >"$OUT/$n-build.log" 2>&1 ||
+    { case $n in beta-athena-now-router|beta-helios-now-router) hack/fetch-envoy.sh --agent-builds "$w/agent-builds" ;; esac; } &&
+    { [ "$n" != beta-athena-now-bulk ] || build_test_shims "$w/agent-builds" "$w/test-shim"; } ) >"$OUT/$n-build.log" 2>&1 ||
     { say "$n: FAIL (a build step failed; see the build log in the output directory)"; return 1; }
   ALPHA_BUILD_DIR=$w
 }
@@ -1593,6 +1677,8 @@ run_cluster() {
   ACTIVE_HOST=$host
   t0=$(date +%s)
   execute_cluster "$n" || { [ "$NOT_RUN" = 1 ] || verdict=1; }
+  # The bulk row's staged shipped agent, when its test was stopped before it removed it: a failure of the row if it remains.
+  clean_test_agent || verdict=1
   clean_cluster || true
   t1=$(date +%s)
   slot_report "$n" "$t0" "$t1"

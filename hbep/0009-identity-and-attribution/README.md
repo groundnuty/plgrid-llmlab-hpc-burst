@@ -146,11 +146,13 @@ Each question ends Decided, with its source, or Open, with what decides it. A "L
     - The known fields and the flag, once decided, sit beside the record, outside the hashed object.
 - **How long records are kept.** HBEP-11 leaves the retention policy for identity, verification and accounting records here (HBEP-11, Records outlive deletion).
   - **In alpha there is none:** the records have no owner reference, so they're kept until an operator deletes them, as HBEP-11 says, and nothing deletes them on a schedule.
-  - **Open: a policy,** decided with the record fetch below, since both turn on who reads the records and for how long.
-- **How a client fetches the record for an ID.** **Open: owner decision,** because an API path is hard to change. The options are an endpoint on the front, an export for a replication package, or both. Discussion with HBEP-5.
-  - Today, identity and verification records are ControllerRevisions, read through the Kubernetes API under its RBAC and found by their `deployment-id` and `instance-uid` labels (HBEP-11, Ownership, records and deletion).
-  - The same decision answers who may resolve an ID to its inputs, which HBEP-3 leaves here (HBEP-3, Security), and how records are exported, which HBEP-11 leaves here.
-  - A managed entry's record sits in `hpcburst-system` (above); the fetch decision may copy records elsewhere without changing any ID.
+  - **Open: a policy,** for when the records' storage needs one. The record fetch, decided without an export, sets none.
+- **How a client fetches the record for an ID.** **Decided** (owner decision, 14 Nov 2026, [issue #9](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/9#issuecomment-6882100720): "the end point on the front is perfectly acceptable. We don't want to over-engineer it."): an endpoint on the front, and no export bundle.
+  - **`GET /hpcburst/v1/deployments/{id}`,** under a framework prefix, so it can't collide with a route OpenAI adds under `/v1/`. `{id}` is the full ID or its 12-character display form, of a served deployment or a managed entry.
+  - **Authenticated like any request,** with a client key. Identity records aren't secret (Security), so any client may resolve an ID to its inputs. That answers HBEP-3's "who may resolve an ID" (HBEP-3, Security).
+  - **The answer:** a JSON object holding the identity record (the canonical object, the full ID and its display form) and the ID's verification records, each with its Instance UID, generation, outcome and resolved settings, read from the ControllerRevisions labelled with the ID (HBEP-11). An unknown ID answers 404 `deployment_not_found` (HBEP-5, Errors).
+  - **An export** for a replication package is a client saving that answer, which HBEP-11's "exporting records is HBEP-9's" now means.
+  - The front gains read access to ControllerRevisions labelled as identity or verification records, in every namespace that holds them, `hpcburst-system` included.
 
 ## Design details
 
@@ -197,7 +199,7 @@ The mechanisms are decided and built under other HBEPs. Each item says where its
 - Identity records are not secret, but must not leak local paths, user names or credentials; those are excluded by normalisation.
 - The attribution log holds request IDs, client key IDs, deployment and Instance IDs, never prompts or responses. Retention: in alpha the attribution log is the usage files, kept for the grant's life (HBEP-8, Usage records).
 - An Instance proves its identity to the controller over its dial-home channel (HBEP-6). Who may claim to be an Instance of a deployment is decided for alpha by HBEP-6 (Admission: the server plugin): a login needs a live Allocation's credential, and a proxy may claim only the UID of an Instance placed on that Allocation.
-- Who may read records: in alpha, whoever the Kubernetes API's RBAC lets read ControllerRevisions in the namespace (HBEP-11). Any wider access comes with the record fetch, the owner's decision (Open questions).
+- Who may read records: in alpha, whoever the Kubernetes API's RBAC lets read ControllerRevisions in the namespace (HBEP-11). With the record fetch, any client with a key reads them through the front (Open questions).
 
 ### Graduation criteria
 
@@ -218,7 +220,7 @@ The mechanisms are decided and built under other HBEPs. Each item says where its
   - the managed record: a managed entry's ID has its immutable identity record (#574), with what the open question decides beside it, and a change in what a managed platform serves raises an event (Risks);
   - the rehash timed on Athena A100, Helios GH200 and Sano, with S7's fallback built where a platform breaks its budget;
   - the batch-shaping measurement run, and HBEP-3's decision on a `v2` recorded;
-  - the record fetch built, as the owner decides;
+  - the record fetch built: `GET /hpcburst/v1/deployments/{id}` answers a served and a managed ID, by full ID and display form, with the identity record and the ID's verification records, and an unknown ID answers 404 `deployment_not_found`;
   - the whole Test plan passes on two GPU types.
 - **Stable:** the scheme in use and the attribution headers are frozen, with their golden vectors in CI (HBEP-3, HBEP-5).
 
@@ -295,7 +297,9 @@ Verification grows from www-2027's endpoint check, run on each new endpoint (hea
 - 2026-10-31: the attribution log's retention noted from HBEP-8 becoming implementable: in alpha, the usage files, kept for the grant's life.
 - 2026-11-14: implementable. What other HBEPs and the code had decided is carried in, with its source: scheme `v1` fixed by the published release `v0.1.0-alpha.1`, so any change to the record is a `v2` and HBEP-3's call; HBEP-7's alpha checks, with a declared `auto` recorded as resolved; HBEP-5's choice under `model`; the managed entry's ID as issue #69 built it, with no stored record; HBEP-6's admission for who may claim an Instance. Design details point to where each mechanism is held, and the alpha criteria name the release's tests. Open: resolved settings and batch shaping as inputs, the rehash time beyond Helios x86, the render check, the managed record beyond its ID, and the record fetch (owner decision). From its review round (Astra and Fable, PR #555): a managed reply carries four headers, not six; the parallel sizes refuse `auto` as `max-model-len` does; a managed entry's missing identity record is a gap HBEP-11 now states, for beta to close; and records have no retention policy in alpha.
 - 2026-11-14: a managed entry's ID gets an identity record in `hpcburst-system` (for #574).
+- 2026-11-14: the record fetch is decided: an endpoint on the front, `GET /hpcburst/v1/deployments/{id}` (owner decision).
 
 ## Amendments
 
 - **2026-11-14: managed identity records** (Open questions, the managed entry; Graduation criteria). An amendment by the science agent's rulings on #574's plan: a managed entry's ID gets an immutable identity record in `hpcburst-system`, written before the entry is published, with a collision leaving the entry out of the catalog with `CatalogEntrySkipped`. Before, no record was written, as a gap against HBEP-11.
+- **2026-11-14: the record fetch** (Open questions; Security; Graduation criteria). An amendment by the owner's decision of 14 Nov 2026 (issue #9): records are fetched through an endpoint on the front, `GET /hpcburst/v1/deployments/{id}`, authenticated like any request, with no export bundle. The path is the science agent's choice, under a framework prefix. Before, the fetch was open, an owner decision.
