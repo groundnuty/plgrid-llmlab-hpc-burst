@@ -231,6 +231,15 @@ func (p *pass) overlapOrDefer(in *v1alpha1.Instance) (overlapCheck, bool) {
 	return ov, true
 }
 
+// servesPast reports whether the deployment still serves after t: it has no end time, or its end time is after
+// t. replacements() replaces a primary only when its deployment serves past the primary's drain start, and the
+// reserved replacement slot is held for exactly such a primary (slots_reserved.go, reservedOn), through this one
+// test, so the two never disagree (the science agent's ruling on #598's plan, comment 6897017776: "a primary
+// holds a slot whenever the controller would create its replacement").
+func servesPast(md *v1alpha1.ModelDeployment, t time.Time) bool {
+	return md.Spec.EndTime == nil || md.Spec.EndTime.After(t)
+}
+
 // replacements gives every primary whose Allocation runs, that has no live
 // replacement, and whose replacement's planned time has come, one replacement;
 // it sets ReplacementLate when a replacement has not started by its
@@ -247,8 +256,8 @@ func (p *pass) replacements() error {
 		if !ok {
 			continue
 		}
-		if p.md.Spec.EndTime != nil && !p.md.Spec.EndTime.After(ds) {
-			continue // the deployment ends before this lease drains: no replacement
+		if !servesPast(p.md, ds) {
+			continue // the deployment ends before this lease drains: no replacement (the reserved slot's test too)
 		}
 		s2r := startToReady(p.md, pv.class)
 		repl := p.replacementOf(in)

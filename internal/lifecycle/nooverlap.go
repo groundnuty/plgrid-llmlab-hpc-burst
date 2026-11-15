@@ -120,7 +120,9 @@ func (p *pass) decideOverlap(in *v1alpha1.Instance) (overlapCheck, error) {
 	if repl := p.replacementOf(in); repl != nil {
 		skip = append(skip, in.Namespace+"/"+repl.Spec.AllocationRef.Name)
 	}
-	slotFree, slotWhy, err := p.slotFor(pv, skip)
+	// The primary's own reserved slot is held for this very replacement, which takes it (slots_reserved.go).
+	takers := []string{in.Namespace + "/" + in.Spec.AllocationRef.Name}
+	slotFree, slotWhy, err := p.slotFor(pv, skip, takers)
 	if err != nil {
 		return overlapCheck{}, err
 	}
@@ -145,7 +147,7 @@ func (p *pass) decideOverlap(in *v1alpha1.Instance) (overlapCheck, error) {
 		if err != nil {
 			continue
 		}
-		free, _, err := p.slotFor(q, skip)
+		free, _, err := p.slotFor(q, skip, takers)
 		if err != nil {
 			return overlapCheck{}, err
 		}
@@ -170,21 +172,26 @@ func (p *pass) reusableWarm(pv *providerView, params v1alpha1.BatchParameters) b
 }
 
 // slotFor reports whether the Provider's count leaves a free submit slot,
-// not counting the Allocations in skip, and if not, why, naming the Provider
-// and its limit.
-func (p *pass) slotFor(pv *providerView, skip []string) (bool, string, error) {
+// not counting the Allocations in skip nor the reserved slots of takers, and
+// if not, why, naming the Provider, its limit and the handovers whose
+// reserved slots are counted, if any.
+func (p *pass) slotFor(pv *providerView, skip, takers []string) (bool, string, error) {
 	lim := pv.limits.MaxSubmitPerUser
 	if lim == nil {
 		return true, "", nil
 	}
-	n, err := p.r.slots().count(p.ctx, p.r.Reader, pv.name, p.now, skip...)
+	q := slotAsk{provider: pv.name, takers: takers}
+	if pv.profile != nil {
+		q.profile = &pv.profile.Spec
+	}
+	n, reserved, by, err := p.r.slots().countAsk(p.ctx, p.r.Reader, q, p.now, skip...)
 	if err != nil {
 		return false, "", err
 	}
 	if n+1 <= int(*lim) {
 		return true, "", nil
 	}
-	return false, fmt.Sprintf("Provider %s has no free submit slot for a replacement: %d Allocations still holding a slot, at its %s", pv.name, n, submitLimitText(pv)), nil
+	return false, fmt.Sprintf("Provider %s has no free submit slot for a replacement: %d Allocations still holding a slot, at its %s%s", pv.name, n-reserved, submitLimitText(pv), reservedText(reserved, by)), nil
 }
 
 // capsExceeded returns why the predecessor's Allocation (pred) and its

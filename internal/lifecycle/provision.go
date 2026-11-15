@@ -154,8 +154,9 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 		// no two workers both pass the count (slots.go).
 		//
 		// The queued-successor mark is judged from this same read: whether the primary's Allocation
-		// still holds its slot is what the reservation's own list says (reserveSlotFor).
-		ok, holds, err := p.reserveSlotFor(pv, name, p.primaryAllocKey(o.primaryName(pred)))
+		// still holds its slot is what the reservation's own list says (reserveSlotFor). A replacement
+		// takes its predecessor's reserved slot (slots_reserved.go; HBEP-7, Per-user limits).
+		ok, holds, err := p.reserveSlotFor(pv, name, p.primaryAllocKey(o.primaryName(pred)), p.takersOf(pred))
 		if err != nil {
 			return false, err
 		}
@@ -444,7 +445,9 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 		}
 		holder = p.primaryAllocKey(primary)
 	}
-	ok, holds, err := p.reserveSlotFor(pv, name, holder)
+	// It takes the reserved slot of its predecessor's chain, and a no-overlap successor its own, which is held
+	// for it while its Allocation waits for the slot its predecessor frees (slots_reserved.go).
+	ok, holds, err := p.reserveSlotFor(pv, name, holder, p.takersOf(p.instanceNamed(in.Annotations[v1alpha1.AnnotationPredecessor])))
 	if err != nil {
 		return err
 	}
