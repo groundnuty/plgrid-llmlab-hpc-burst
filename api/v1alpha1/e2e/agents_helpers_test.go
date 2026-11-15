@@ -78,6 +78,18 @@ func clientsFromConfig(t *testing.T, cfg *rest.Config) (kubernetes.Interface, cl
 // roles are set to their narrow form at the end.
 func openAgentAccess(t *testing.T) {
 	t.Helper()
+	cleanUpPolicies(t)
+	writes, err := launcher.InstallAgentAccess(bg(), cfg, io.Discard, launcher.AgentAccessOptions{})
+	must(t, err, "open the agents' access")
+	if !writes {
+		t.Fatal("the agents' writes are off on a host that has every CRD")
+	}
+}
+
+// cleanUpPolicies records which of the three policies the host has now, and registers the end-of-test
+// removal of the others and the narrowing of the roles (see openAgentAccess).
+func cleanUpPolicies(t *testing.T) {
+	t.Helper()
 	before := map[string]bool{}
 	states, err := launcher.CheckAdmission(bg(), cfg)
 	must(t, err, "check the admission policies")
@@ -100,11 +112,6 @@ func openAgentAccess(t *testing.T) {
 			t.Errorf("clean-up: set the agents' role back to its narrow form: %v", err)
 		}
 	})
-	writes, err := launcher.InstallAgentAccess(bg(), cfg, io.Discard, launcher.AgentAccessOptions{})
-	must(t, err, "open the agents' access")
-	if !writes {
-		t.Fatal("the agents' writes are off on a host that has every CRD")
-	}
 }
 
 // installAgentRoles installs the namespace, the roles and the bindings with the agent role in its NARROW,
