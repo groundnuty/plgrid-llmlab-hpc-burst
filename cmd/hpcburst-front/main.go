@@ -88,6 +88,13 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The record fetch's own clientset: each clientset has its own client-side
+	// rate limit, so the record reads, which any client key may ask for, never
+	// queue the heartbeat Lease's renewals behind them (#585).
+	records, err := kubernetes.NewForConfig(rest)
+	if err != nil {
+		return err
+	}
 	rec, stopEvents, err := front.NewKubeRecorder(cs)
 	if err != nil {
 		return err
@@ -96,7 +103,7 @@ func run(args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	o := options(cfg, agentapi.Host{StateDir: *stateDir, PortBase: *portBase}, *mode, dyn, cs, rec, log, *health)
+	o := options(cfg, agentapi.Host{StateDir: *stateDir, PortBase: *portBase}, *mode, dyn, cs, records, rec, log, *health)
 	o.BulkPath = *bulkPath
 	return front.Run(ctx, o)
 }
@@ -104,9 +111,9 @@ func run(args []string) error {
 // options are Run's inputs in production. They set no Transports, so Run
 // builds HBEP-6's Tunnel and its probe, and no PathEvents, so the probe's
 // PathProbeFailing goes to the API server through rec (HBEP-6, Reporting).
-func options(cfg front.Config, host agentapi.Host, mode string, dyn dynamic.Interface, cs kubernetes.Interface, rec front.Recorder, log *slog.Logger, health string) front.Options {
+func options(cfg front.Config, host agentapi.Host, mode string, dyn dynamic.Interface, cs, records kubernetes.Interface, rec front.Recorder, log *slog.Logger, health string) front.Options {
 	return front.Options{
 		Config: cfg, Host: host, Mode: mode,
-		Clock: clock.Real{}, Dynamic: dyn, Kube: cs, Recorder: rec, Log: log, HealthAddr: health,
+		Clock: clock.Real{}, Dynamic: dyn, Kube: cs, Records: records, Recorder: rec, Log: log, HealthAddr: health,
 	}
 }
