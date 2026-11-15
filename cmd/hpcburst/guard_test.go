@@ -33,7 +33,7 @@ var (
 
 const (
 	guardObject = "hpcburst-protect-crds"
-	// providers.hpcburst.groundnuty.github.io is one of the five CRDs of config/crd.
+	// providers.hpcburst.groundnuty.github.io is one of the eight CRDs of config/crd.
 	frameworkCRD = "providers.hpcburst.groundnuty.github.io"
 )
 
@@ -64,8 +64,8 @@ func TestUpInstallsTheCRDGuardAndGuardRemoveRemovesIt(t *testing.T) {
 	if !up.CRDGuard {
 		t.Errorf("up did not say it installed the CRD deletion guard: %s", r.out)
 	}
-	if up.Applied != 5 {
-		t.Errorf("up applied %d manifests, want the 5 CRDs of %s: the guard is not one of --manifests's", up.Applied, crds)
+	if up.Applied != 8 {
+		t.Errorf("up applied %d manifests, want the 8 CRDs of %s: the guard is not one of --manifests's", up.Applied, crds)
 	}
 
 	cl := h.clients()
@@ -84,7 +84,7 @@ func TestUpInstallsTheCRDGuardAndGuardRemoveRemovesIt(t *testing.T) {
 
 	// A real delete of every framework CRD is refused with the guard's own reason, and each CRD is
 	// still there, with no deletion under way.
-	for _, name := range []string{"providers", "platformprofiles", "modeldeployments", "allocations", "instances"} {
+	for _, name := range []string{"providers", "platformprofiles", "modeldeployments", "allocations", "instances", "operations", "approvals", "approvalpolicies"} {
 		crd := name + ".hpcburst.groundnuty.github.io"
 		err := cl.dyn.Resource(crdGVR).Delete(ctx, crd, metav1.DeleteOptions{})
 		if !apierrors.IsForbidden(err) || !strings.Contains(err.Error(), "refusing to delete the custom resource definition "+crd) ||

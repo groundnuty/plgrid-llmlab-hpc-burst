@@ -114,8 +114,8 @@ func startAPIServer(t *testing.T) *apiServer {
 	if err != nil {
 		t.Fatalf("start the API server: %v", err)
 	}
-	if len(env.CRDs) != 5 {
-		t.Fatalf("installed %d CRDs, want the 5 of config/crd", len(env.CRDs))
+	if len(env.CRDs) != 8 {
+		t.Fatalf("installed %d CRDs, want the 8 of config/crd", len(env.CRDs))
 	}
 	s, err := providerScheme()
 	if err != nil {

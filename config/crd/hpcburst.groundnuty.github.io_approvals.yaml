@@ -1,0 +1,128 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: approvals.hpcburst.groundnuty.github.io
+spec:
+  group: hpcburst.groundnuty.github.io
+  names:
+    categories:
+    - hpcburst
+    kind: Approval
+    listKind: ApprovalList
+    plural: approvals
+    singular: approval
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.operation.name
+      name: Operation
+      type: string
+    - jsonPath: .spec.approver.username
+      name: Approver
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Approval is one approver's approval of one Operation's plan, in the
+          Operation's namespace (HBEP-10, Approvals). It has no status: the lifecycle
+          controller reads it and writes nothing to it. It is immutable once created.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ApprovalSpec is one approver's approval of one plan (HBEP-10, Approvals). The
+              spec is immutable once created. The approver pin, an admission policy, refuses
+              a create unless approver equals the requester's user name and groups, so an
+              approval is accepted only from the approver's own identity (HBEP-10,
+              Approvals; HBEP-11, Admission).
+            properties:
+              approver:
+                description: |-
+                  Approver is who approves: the user name and groups of the identity that
+                  created the Approval, pinned at admission.
+                properties:
+                  groups:
+                    description: |-
+                      Groups are the approver's groups as the API server reports them. A policy
+                      that names a group is satisfied by an approver whose recorded groups
+                      include it.
+                    items:
+                      maxLength: 1024
+                      type: string
+                    maxItems: 64
+                    type: array
+                  username:
+                    description: Username is the approver's user name as the API server
+                      reports it.
+                    maxLength: 1024
+                    minLength: 1
+                    type: string
+                required:
+                - username
+                type: object
+              operation:
+                description: |-
+                  Operation names the Operation the approval is for, by name and UID, so an
+                  Operation deleted and created again under the same name gets no approval
+                  from before.
+                properties:
+                  name:
+                    description: Name is the Operation's name.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  uid:
+                    description: UID is the Operation's UID.
+                    maxLength: 64
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                - uid
+                type: object
+              planID:
+                description: |-
+                  PlanID is the id of the plan approved (status.plan.id of the Operation). The
+                  lifecycle controller counts the Approval only while this is the frozen
+                  plan's id (HBEP-10, Approvals).
+                maxLength: 64
+                minLength: 1
+                type: string
+            required:
+            - approver
+            - operation
+            - planID
+            type: object
+            x-kubernetes-validations:
+            - message: 'an Approval''s spec is immutable: it is bound to one plan
+                and one approver; create a new Approval instead (HBEP-10, Approvals)'
+              rule: self == oldSelf
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}

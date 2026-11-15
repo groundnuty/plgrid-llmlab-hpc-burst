@@ -1,0 +1,859 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: operations.hpcburst.groundnuty.github.io
+spec:
+  group: hpcburst.groundnuty.github.io
+  names:
+    categories:
+    - hpcburst
+    kind: Operation
+    listKind: OperationList
+    plural: operations
+    singular: operation
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.action
+      name: Action
+      type: string
+    - jsonPath: .spec.modelDeploymentRef.name
+      name: Deployment
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Operation is one request to lower the capacity of one ModelDeployment, planned
+          before it runs, confirmed by its owner, and approved under the ApprovalPolicies
+          that apply (HBEP-10, Operations). Its name is its idempotency key. The
+          lifecycle controller plans and executes it. A status sent with a create is
+          dropped, because the status subresource is the only way to write it.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              OperationSpec is one request to lower the capacity of one ModelDeployment
+              (HBEP-10, Operations). The spec is immutable once created, except confirm,
+              which is set once; a CRD rule checks each field, and the presence of each
+              optional block, because a rule on a block alone never sees the block added or
+              removed. The owner pin, an admission policy, checks owner and confirm against
+              the requester (HBEP-10, Owner and purpose; Confirm).
+            properties:
+              action:
+                description: |-
+                  Action is what the Operation does. It is immutable (HBEP-10, Operations).
+                  Repurpose joins with HBEP-7's repurposing.
+                enum:
+                - Scale
+                - End
+                - Release
+                type: string
+                x-kubernetes-validations:
+                - message: 'spec.action is immutable: an Operation''s spec is immutable
+                    except confirm; create a new Operation for another action (HBEP-10,
+                    Operations)'
+                  rule: self == oldSelf
+              confirm:
+                description: |-
+                  Confirm is absent until the owner confirms the plan. The owner sets it once,
+                  with an update that carries the resourceVersion read with the plan, so a
+                  plan written in between turns the update into a conflict (HBEP-10,
+                  Confirm). It is the one field of the spec that may change.
+                properties:
+                  planID:
+                    description: |-
+                      PlanID is the id of the plan the owner confirms: status.plan.id as read
+                      with the resourceVersion of the same update. A wrong or empty id is
+                      refused (HBEP-10, Confirm).
+                    maxLength: 64
+                    minLength: 1
+                    type: string
+                required:
+                - planID
+                type: object
+              end:
+                description: |-
+                  End parameterises an End Operation. It is optional, since a plain End
+                  needs no block. It is immutable, and so is its presence.
+                properties:
+                  delete:
+                    description: |-
+                      Delete removes the ModelDeployment, which releases its started Allocations
+                      at once, instead of only setting its end time to now (HBEP-10, Operations;
+                      HBEP-7, Release).
+                    type: boolean
+                type: object
+                x-kubernetes-validations:
+                - message: 'spec.end is immutable: an Operation''s spec is immutable
+                    except confirm (HBEP-10, Operations)'
+                  rule: self == oldSelf
+              modelDeploymentRef:
+                description: |-
+                  ModelDeploymentRef names the one ModelDeployment the Operation acts on, in
+                  the Operation's own namespace by construction. An Operation covers one
+                  ModelDeployment (HBEP-10, Operations: One ModelDeployment per Operation).
+                  It is immutable.
+                properties:
+                  name:
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+                x-kubernetes-validations:
+                - message: 'spec.modelDeploymentRef is immutable: an Operation''s
+                    spec is immutable except confirm (HBEP-10, Operations)'
+                  rule: self == oldSelf
+              owner:
+                description: |-
+                  Owner is the requester, as the API server reports the user name. The owner
+                  pin, an admission policy, refuses a create whose owner is not the
+                  requester, and only the owner may confirm (HBEP-10, Owner and purpose;
+                  Confirm). It is immutable, so no identity can make itself the owner of
+                  another's Operation.
+                maxLength: 1024
+                minLength: 1
+                type: string
+                x-kubernetes-validations:
+                - message: 'spec.owner is immutable: an Operation''s owner is pinned
+                    to its creator (HBEP-10, Owner and purpose)'
+                  rule: self == oldSelf
+              release:
+                description: |-
+                  Release names the Allocations a Release Operation releases. Only a
+                  Release Operation sets it. It is immutable, and so is its presence.
+                properties:
+                  allocations:
+                    description: |-
+                      Allocations lists the Allocations to release by name. It holds at least one
+                      name, and each name once.
+                    items:
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    maxItems: 64
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                  selector:
+                    description: |-
+                      Selector picks the Allocations to release by label. The controller refuses
+                      a selector that matches nothing (HBEP-10, Operations).
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                type: object
+                x-kubernetes-validations:
+                - message: 'spec.release is immutable: an Operation''s spec is immutable
+                    except confirm (HBEP-10, Operations)'
+                  rule: self == oldSelf
+                - message: a Release names exactly one of allocations and selector
+                  rule: has(self.allocations) != has(self.selector)
+              scale:
+                description: |-
+                  Scale takes the ModelDeployment to fewer Instances. Only a Scale
+                  Operation sets it. It is immutable, and so is its presence.
+                properties:
+                  instances:
+                    description: |-
+                      Instances is the number of Instances the ModelDeployment is to have. The
+                      plan refuses a count that is not below spec.instances: raising the count is
+                      a direct edit (HBEP-10, Operations; the capacity guard). Zero is the
+                      shutdown case.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                required:
+                - instances
+                type: object
+                x-kubernetes-validations:
+                - message: 'spec.scale is immutable: an Operation''s spec is immutable
+                    except confirm (HBEP-10, Operations)'
+                  rule: self == oldSelf
+            required:
+            - action
+            - modelDeploymentRef
+            - owner
+            type: object
+            x-kubernetes-validations:
+            - message: 'confirm is set once: it cannot be changed or removed after
+                the owner confirmed a plan (HBEP-10, Confirm)'
+              rule: '!has(oldSelf.confirm) || (has(self.confirm) && self.confirm ==
+                oldSelf.confirm)'
+            - message: 'spec.scale cannot be added or removed after create: an Operation''s
+                spec is immutable except confirm (HBEP-10, Operations)'
+              rule: has(self.scale) == has(oldSelf.scale)
+            - message: 'spec.end cannot be added or removed after create: an Operation''s
+                spec is immutable except confirm (HBEP-10, Operations)'
+              rule: has(self.end) == has(oldSelf.end)
+            - message: 'spec.release cannot be added or removed after create: an Operation''s
+                spec is immutable except confirm (HBEP-10, Operations)'
+              rule: has(self.release) == has(oldSelf.release)
+            - message: a Scale Operation sets scale, and neither end nor release
+              rule: self.action != 'Scale' || (has(self.scale) && !has(self.end) &&
+                !has(self.release))
+            - message: an End Operation sets end, or nothing, and neither scale nor
+                release
+              rule: self.action != 'End' || (!has(self.scale) && !has(self.release))
+            - message: a Release Operation sets release, and neither scale nor end
+              rule: self.action != 'Release' || (has(self.release) && !has(self.scale)
+                && !has(self.end))
+          status:
+            description: |-
+              OperationStatus is what the lifecycle controller writes about an Operation.
+              It is the one writer, except the start estimate in a plan's cost, which the
+              Provider's controller fills in (HBEP-11, Controllers, Field managers). Status
+              needs no CRD rule: an agent has no write to the status subresource, and a
+              create's status is dropped.
+            properties:
+              committed:
+                description: |-
+                  Committed is the list of targets the controller acts on, written once, in
+                  the same status write that sets the phase to Executing. From then on the
+                  controller never plans again, and a restart resumes from this list (HBEP-10,
+                  Approval and execution).
+                items:
+                  description: |-
+                    CommittedTarget is one target the controller committed to act on (HBEP-10,
+                    Approval and execution).
+                  properties:
+                    effect:
+                      description: Effect is what the controller does to the target.
+                      enum:
+                      - CancelPending
+                      - DrainInstance
+                      - DrainLastReady
+                      - ReleaseKept
+                      - ReleaseStarted
+                      - Keep
+                      - SetEndTime
+                      - DeleteDeployment
+                      type: string
+                    generation:
+                      description: Generation is the target's metadata.generation
+                        at planning.
+                      format: int64
+                      type: integer
+                    kind:
+                      description: TargetKind is the kind of object a plan target
+                        names.
+                      enum:
+                      - Allocation
+                      - Instance
+                      - ModelDeployment
+                      type: string
+                    name:
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    uid:
+                      description: |-
+                        UID is a type that holds unique ID values, including UUIDs.  Because we
+                        don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                        intent and helps make sure that UIDs and names do not get conflated.
+                      maxLength: 64
+                      minLength: 1
+                      type: string
+                  required:
+                  - effect
+                  - generation
+                  - kind
+                  - name
+                  - uid
+                  type: object
+                maxItems: 256
+                type: array
+              conditions:
+                description: |-
+                  Conditions of the Operation: Executable, NoApprovalPolicy, and the reason
+                  an Operation was Refused (ConditionExecutable, ConditionNoApprovalPolicy).
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              finishedAt:
+                description: |-
+                  FinishedAt is when the Operation became Done, Stale or Refused. The
+                  controller removes the Operation 7 days later (HBEP-10, Operations,
+                  Removal).
+                format: date-time
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the spec generation the status
+                  describes.
+                format: int64
+                type: integer
+              phase:
+                description: Phase is where the Operation is (HBEP-10, Operations,
+                  Phases).
+                enum:
+                - Planning
+                - Planned
+                - AwaitingApproval
+                - Executing
+                - Done
+                - PartlyFailed
+                - Stale
+                - Refused
+                type: string
+              plan:
+                description: |-
+                  Plan is what the Operation would do, written without side effects. The
+                  owner confirms it by its id (HBEP-10, The plan).
+                properties:
+                  id:
+                    description: |-
+                      ID is opaque: 16 hex characters of SHA-256 over the plan's canonical form.
+                      Clients compare and quote it, and never parse it. It covers the action, the
+                      ModelDeployment's UID and generation, and each target's kind, name, UID,
+                      generation, effect and needsApproval, with the policies' name, UID and
+                      generation. Cost figures are left out, since they age (HBEP-10, The plan).
+                    maxLength: 64
+                    minLength: 1
+                    type: string
+                  modelDeployment:
+                    description: ModelDeployment is the deployment the plan was made
+                      for, by identity.
+                    properties:
+                      generation:
+                        description: Generation is the ModelDeployment's metadata.generation
+                          at planning.
+                        format: int64
+                        type: integer
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      uid:
+                        description: UID is the ModelDeployment's UID.
+                        maxLength: 64
+                        minLength: 1
+                        type: string
+                    required:
+                    - generation
+                    - name
+                    - uid
+                    type: object
+                  observedAt:
+                    description: ObservedAt is when the controller read the state
+                      the plan describes.
+                    format: date-time
+                    type: string
+                  targets:
+                    description: Targets are the objects the plan acts on, each with
+                      its effect.
+                    items:
+                      description: PlanTarget is one object a plan acts on (HBEP-10,
+                        The plan).
+                      properties:
+                        approvalRule:
+                          description: |-
+                            ApprovalRule says which row of HBEP-10's What needs approval table made the
+                            effect need approval.
+                          maxLength: 256
+                          type: string
+                        cost:
+                          description: |-
+                            Cost is the release cost of a target that lowers capacity, whether or not
+                            it needs approval (HBEP-10, The release cost).
+                          properties:
+                            estimateNow:
+                              description: |-
+                                EstimateNow is Slurm's estimate for the same job submitted now. It is
+                                advisory, and unknown until the estimate operation exists (HBEP-10, The
+                                release cost; Graduation, beta step 4).
+                              properties:
+                                advisory:
+                                  description: |-
+                                    Advisory marks a figure that is an estimate, not a fact: Slurm's estimates
+                                    swing by hours (HBEP-4, Risks).
+                                  type: boolean
+                                observedAt:
+                                  description: ObservedAt is when the inputs were
+                                    read.
+                                  format: date-time
+                                  type: string
+                                time:
+                                  description: Time is the value, when known.
+                                  format: date-time
+                                  type: string
+                                unknown:
+                                  description: Unknown is why the value is not known.
+                                  maxLength: 1024
+                                  type: string
+                              type: object
+                            gpuHoursLeft:
+                              description: GPUHoursLeft is LeaseLeft times the Allocation's
+                                GPUs.
+                              properties:
+                                gpuHours:
+                                  description: |-
+                                    GPUHours is the value as a decimal string with at most one decimal place,
+                                    such as "36.0": a string, so no float is compared or rounded on the way.
+                                  maxLength: 32
+                                  pattern: ^[0-9]+([.][0-9])?$
+                                  type: string
+                                observedAt:
+                                  description: ObservedAt is when the inputs were
+                                    read.
+                                  format: date-time
+                                  type: string
+                                unknown:
+                                  description: Unknown is why the value is not known.
+                                  maxLength: 1024
+                                  type: string
+                              type: object
+                            lastReady:
+                              description: |-
+                                LastReady is true when the target is the deployment's last ready Instance:
+                                the model then serves nothing on its own capacity until a new Allocation
+                                starts and its Instance is ready.
+                              type: boolean
+                            leaseLeft:
+                              description: LeaseLeft is a started Allocation's hard
+                                end minus observedAt.
+                              properties:
+                                advisory:
+                                  description: Advisory marks a figure that is an
+                                    estimate, not a fact.
+                                  type: boolean
+                                duration:
+                                  description: Duration is the value, when known.
+                                  type: string
+                                observedAt:
+                                  description: |-
+                                    ObservedAt is when the inputs were read: a figure is a snapshot, never
+                                    recomputed from the clock.
+                                  format: date-time
+                                  type: string
+                                unknown:
+                                  description: Unknown is why the value is not known.
+                                  maxLength: 1024
+                                  type: string
+                              type: object
+                            queueAge:
+                              description: QueueAge is a pending Allocation's observedAt
+                                minus its submit time.
+                              properties:
+                                advisory:
+                                  description: Advisory marks a figure that is an
+                                    estimate, not a fact.
+                                  type: boolean
+                                duration:
+                                  description: Duration is the value, when known.
+                                  type: string
+                                observedAt:
+                                  description: |-
+                                    ObservedAt is when the inputs were read: a figure is a snapshot, never
+                                    recomputed from the clock.
+                                  format: date-time
+                                  type: string
+                                unknown:
+                                  description: Unknown is why the value is not known.
+                                  maxLength: 1024
+                                  type: string
+                              type: object
+                            queueWaits:
+                              description: |-
+                                QueueWaits is the Provider's observed queue waits: what getting the
+                                capacity back costs (HBEP-4, Provider status).
+                              properties:
+                                count:
+                                  description: Count is how many waits the figures
+                                    come from.
+                                  format: int32
+                                  type: integer
+                                max:
+                                  description: Max is the longest observed wait.
+                                  type: string
+                                median:
+                                  description: Median of the observed waits.
+                                  type: string
+                                observedAt:
+                                  description: ObservedAt is when the Provider's status
+                                    was read.
+                                  format: date-time
+                                  type: string
+                                p90:
+                                  description: P90 is the 90th percentile of the observed
+                                    waits.
+                                  type: string
+                                unknown:
+                                  description: Unknown is why the waits are not known.
+                                  maxLength: 1024
+                                  type: string
+                              type: object
+                            startEstimate:
+                              description: |-
+                                StartEstimate is a pending Allocation's own estimate of its start. It is
+                                advisory.
+                              properties:
+                                advisory:
+                                  description: |-
+                                    Advisory marks a figure that is an estimate, not a fact: Slurm's estimates
+                                    swing by hours (HBEP-4, Risks).
+                                  type: boolean
+                                observedAt:
+                                  description: ObservedAt is when the inputs were
+                                    read.
+                                  format: date-time
+                                  type: string
+                                time:
+                                  description: Time is the value, when known.
+                                  format: date-time
+                                  type: string
+                                unknown:
+                                  description: Unknown is why the value is not known.
+                                  maxLength: 1024
+                                  type: string
+                              type: object
+                            startToReady:
+                              description: |-
+                                StartToReady is the class's last start-to-ready time, so the time to serve
+                                again is about the queue wait plus this.
+                              properties:
+                                advisory:
+                                  description: Advisory marks a figure that is an
+                                    estimate, not a fact.
+                                  type: boolean
+                                duration:
+                                  description: Duration is the value, when known.
+                                  type: string
+                                observedAt:
+                                  description: |-
+                                    ObservedAt is when the inputs were read: a figure is a snapshot, never
+                                    recomputed from the clock.
+                                  format: date-time
+                                  type: string
+                                unknown:
+                                  description: Unknown is why the value is not known.
+                                  maxLength: 1024
+                                  type: string
+                              type: object
+                          type: object
+                        effect:
+                          description: Effect is what the plan does to the target.
+                          enum:
+                          - CancelPending
+                          - DrainInstance
+                          - DrainLastReady
+                          - ReleaseKept
+                          - ReleaseStarted
+                          - Keep
+                          - SetEndTime
+                          - DeleteDeployment
+                          type: string
+                        generation:
+                          description: Generation is the target's metadata.generation
+                            at planning.
+                          format: int64
+                          type: integer
+                        kind:
+                          description: Kind is the target's kind.
+                          enum:
+                          - Allocation
+                          - Instance
+                          - ModelDeployment
+                          type: string
+                        name:
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        needsApproval:
+                          description: |-
+                            NeedsApproval is whether the effect needs an Approval (HBEP-10, What needs
+                            approval).
+                          type: boolean
+                        policies:
+                          description: |-
+                            Policies are the ApprovalPolicies that apply to the target, each recorded
+                            with its generation, so a change to a policy makes the plan stale at
+                            execution (HBEP-10, Approval policy).
+                          items:
+                            description: |-
+                              AppliedPolicy records one ApprovalPolicy a target needs an approval under
+                              (HBEP-10, Approval policy: "A plan records each policy it applied, with its
+                              generation").
+                            properties:
+                              approvers:
+                                description: Approvers are the policy's approvers
+                                  at planning.
+                                items:
+                                  description: |-
+                                    Approver is one party an ApprovalPolicy names: exactly one of a user, a group
+                                    and a ServiceAccount (HBEP-10, Approval policy). The rule that it names exactly
+                                    one is on ApprovalPolicySpec.Approvers, not on this type, because a plan's
+                                    status copies the approvers of each policy it applied (AppliedPolicy) and
+                                    status needs no rule.
+                                  properties:
+                                    group:
+                                      description: Group is a group name as the API
+                                        server reports it.
+                                      maxLength: 1024
+                                      minLength: 1
+                                      type: string
+                                    serviceAccount:
+                                      description: |-
+                                        ServiceAccount is a ServiceAccount, which is the user
+                                        "system:serviceaccount:<namespace>:<name>" to the API server. It names
+                                        both its namespace and its name.
+                                      properties:
+                                        name:
+                                          description: Name of the ServiceAccount.
+                                          maxLength: 253
+                                          minLength: 1
+                                          type: string
+                                        namespace:
+                                          description: Namespace of the ServiceAccount.
+                                          maxLength: 63
+                                          minLength: 1
+                                          type: string
+                                      required:
+                                      - name
+                                      - namespace
+                                      type: object
+                                    user:
+                                      description: User is a user name as the API
+                                        server reports it.
+                                      maxLength: 1024
+                                      minLength: 1
+                                      type: string
+                                  type: object
+                                maxItems: 64
+                                type: array
+                              generation:
+                                description: Generation is the ApprovalPolicy's metadata.generation
+                                  at planning.
+                                format: int64
+                                type: integer
+                              name:
+                                description: Name is the ApprovalPolicy's name.
+                                maxLength: 253
+                                minLength: 1
+                                type: string
+                              uid:
+                                description: UID is the ApprovalPolicy's UID.
+                                maxLength: 64
+                                minLength: 1
+                                type: string
+                            required:
+                            - generation
+                            - name
+                            - uid
+                            type: object
+                          type: array
+                        provider:
+                          description: |-
+                            Provider is the Provider of an Allocation, or of the Allocation an Instance
+                            runs on. A policy of Provider scope applies by it (HBEP-10, Approval
+                            policy).
+                          maxLength: 63
+                          type: string
+                        uid:
+                          description: |-
+                            UID is the target's UID. A target whose UID is gone when it is acted on
+                            counts as done (HBEP-10, Approval and execution).
+                          maxLength: 64
+                          minLength: 1
+                          type: string
+                      required:
+                      - effect
+                      - generation
+                      - kind
+                      - name
+                      - needsApproval
+                      - uid
+                      type: object
+                    maxItems: 256
+                    type: array
+                required:
+                - id
+                - modelDeployment
+                - observedAt
+                type: object
+              targets:
+                description: Targets holds one outcome per committed target (HBEP-10,
+                  The report).
+                items:
+                  description: TargetOutcome is the report of one committed target
+                    (HBEP-10, The report).
+                  properties:
+                    kind:
+                      description: TargetKind is the kind of object a plan target
+                        names.
+                      enum:
+                      - Allocation
+                      - Instance
+                      - ModelDeployment
+                      type: string
+                    lastTransitionTime:
+                      description: LastTransitionTime is when State last changed.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message says what failed.
+                      maxLength: 1024
+                      type: string
+                    name:
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    reason:
+                      description: Reason is the CamelCase code of a failure.
+                      maxLength: 256
+                      type: string
+                    state:
+                      description: State is done, failed (and retried with backoff)
+                        or not started.
+                      enum:
+                      - NotStarted
+                      - Done
+                      - Failed
+                      type: string
+                    uid:
+                      description: |-
+                        UID is a type that holds unique ID values, including UUIDs.  Because we
+                        don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                        intent and helps make sure that UIDs and names do not get conflated.
+                      maxLength: 64
+                      minLength: 1
+                      type: string
+                  required:
+                  - kind
+                  - lastTransitionTime
+                  - name
+                  - state
+                  - uid
+                  type: object
+                maxItems: 256
+                type: array
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

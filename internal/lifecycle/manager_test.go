@@ -87,8 +87,8 @@ func installTestCRDs(ctx context.Context, cfg *rest.Config) error {
 		return err
 	}
 	files, err := filepath.Glob(filepath.Join("..", "..", "config", "crd", "*.yaml"))
-	if err != nil || len(files) != 5 {
-		return fmt.Errorf("want the 5 committed CRDs in config/crd, found %d (%v)", len(files), err)
+	if err != nil || len(files) != 8 {
+		return fmt.Errorf("want the 8 committed CRDs in config/crd, found %d (%v)", len(files), err)
 	}
 	for _, f := range files {
 		raw, err := os.ReadFile(f)
