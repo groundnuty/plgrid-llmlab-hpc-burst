@@ -68,6 +68,13 @@ type StatusReport struct {
 	// the failure. An absent guard is a state, not a fault, as FrontAbsent is: hosts started before
 	// the guard existed run without it until their next start (issue #242).
 	CRDGuard *GuardState `json:"crd_guard,omitempty"`
+	// AgentRBAC is the state of the agents' namespace, roles and bindings (agents.go), asked of the API
+	// server like CRDGuard: nil when it was not asked. Roles that are not the manifest's are a state,
+	// not a fault: the next start resets them.
+	AgentRBAC *AgentRBACState `json:"agent_rbac,omitempty"`
+	// Identities are the agents' identities with each one's expiry and whether the API server accepts
+	// its token (identity_status.go). An expired or rejected one is a state, not a fault.
+	Identities []IdentityState `json:"identities,omitempty"`
 }
 
 // StatusOptions are the inputs of Status.
@@ -266,7 +273,30 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 	final()
 	// Last, so that it is asked only of a host that is healthy after every other check.
 	statusGuard(ctx, cfg, rep, bad)
+	statusAgents(ctx, cfg, l, st.Ports, rep, bad)
 	return rep, nil
+}
+
+// statusAgents sets rep.AgentRBAC and rep.Identities from the API server, under the same condition as
+// statusGuard: only for a host judged healthy by every other check. Roles that differ from the manifest,
+// and an identity whose token is expired or rejected, change nothing about the host's health; a failure to
+// ask does (HBEP-10, Identities and roles).
+func statusAgents(ctx context.Context, cfg *rest.Config, l layout, ports Ports, rep *StatusReport, bad func(string, ...any)) {
+	if rep.Health != Healthy || rep.Readyz == nil || !*rep.Readyz {
+		return
+	}
+	rs, err := CheckAgentRBAC(ctx, cfg)
+	if err != nil {
+		bad("the agents' roles could not be checked: %v", err)
+		return
+	}
+	rep.AgentRBAC = rs
+	ids, err := CheckIdentities(ctx, cfg, l.identitiesDir(), ports)
+	if err != nil {
+		bad("the agents' identities could not be checked: %v", err)
+		return
+	}
+	rep.Identities = ids
 }
 
 // statusGuard sets rep.CRDGuard from the API server, and only for a host judged healthy by every other

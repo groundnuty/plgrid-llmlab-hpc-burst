@@ -78,9 +78,12 @@ type UpReport struct {
 	RSSMiB     float64 `json:"rss_mib"`
 	Applied    int     `json:"manifests_applied"`
 	// CRDGuard is true when up installed the CRD deletion guard (guard.go); it does so on every start.
-	CRDGuard bool     `json:"crd_guard"`
-	Front    Front    `json:"front"`
-	Warnings []string `json:"warnings,omitempty"`
+	CRDGuard bool `json:"crd_guard"`
+	// AgentRBAC is true when up installed the agents' namespace, roles and bindings (agents.go); it
+	// does so on every start, after the guard and before the controllers.
+	AgentRBAC bool     `json:"agent_rbac"`
+	Front     Front    `json:"front"`
+	Warnings  []string `json:"warnings,omitempty"`
 	// SupervisorPID and ControllerBin are set when controllers run; ControllerHealth is the
 	// address of the lifecycle controller's /healthz.
 	SupervisorPID    int    `json:"supervisor_pid,omitempty"`
@@ -377,6 +380,14 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 		return abort("CRD deletion guard", err)
 	}
 	rep.CRDGuard = true
+	// The agents' namespace, roles and bindings go in on every start too (HBEP-10, Identities and
+	// roles; issue #589), reset to the manifest, after the guard and before the controllers.
+	if cfg, err := restConfig(l.kubeconfig(), ports, 30*time.Second); err != nil {
+		return abort("agent roles", err)
+	} else if err := InstallAgentRBAC(ctx, cfg, o.Log); err != nil {
+		return abort("agent roles", err)
+	}
+	rep.AgentRBAC = true
 	// The relay keeper's switch back, with k3s ready and before the controllers start (HBEP-6,
 	// Compatibility and upgrades).
 	if cfg, err := restConfig(l.kubeconfig(), ports, 30*time.Second); err != nil {
