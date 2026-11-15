@@ -77,8 +77,10 @@ func TestMutateAlphaEveryMutantsTextOccursExactlyOnce(t *testing.T) {
 	if starts := mutantStartLines(t); read < starts {
 		t.Fatalf("--check-anchors read %d mutants, but the list has %d lines that each start one: the harness read the list short", read, starts)
 	}
-	if code != 0 {
-		t.Fatalf("a mutant's text does not occur exactly once in its file, so it tests nothing (re-anchor it, replace it, or remove it with a reason):\n%s", out)
+	// The exit status, the summary's count and the lines that name a mutant each say it: a check that printed its findings and exited 0, or
+	// exited 1 and counted none, must not pass for a clean list.
+	if code != 0 || m[2] != "0" || strings.Contains(out, "BROKEN") {
+		t.Fatalf("a mutant's text does not occur exactly once in its file, so it tests nothing (re-anchor it, replace it, or remove it with a reason; exit %d):\n%s", code, out)
 	}
 }
 
