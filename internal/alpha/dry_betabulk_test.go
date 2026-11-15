@@ -2,8 +2,8 @@ package alpha
 
 // The bulk row (issue #521; betabulk.go) over the fake cluster: one job, run on the manual clock; what the stack would show is stood in for. Each
 // fault departs from the healthy run in one way, and ends as the ruling says (the science agent, #521): a broken path FAILs (betaBulkCases), a run
-// with no saturation witness is INVALID (betaBulkInvalidCases, TestTheBulkRowsInvalidRunsThroughRun), and a control under 85 ms or a bulk reading at or
-// above it is a finding that passes (TestABulkReadingAtOrAboveTheRuleIsAFindingNeverAFailure).
+// with no saturation witness is INVALID (betaBulkInvalidCases, TestTheBulkRowsInvalidRunsThroughRun), and every other reading passes with its plain
+// stated reading, above or below S17's 85 ms prediction (TestTheBulkRowsReadingsPassThroughRun; #584).
 
 import (
 	"context"
@@ -58,16 +58,16 @@ func (d *drySteps) BetaBulk(_ context.Context, p Plan) (BulkObs, error) {
 		obs.Bulk.FallbackSent = 1
 	case d.fault("control-fallback"):
 		obs.Control.FallbackSent = 1
-	case d.fault("control-no-stall"):
-		obs.Control.P99 = BulkRule - time.Nanosecond // a finding: no stall to remove on this path
-	case d.fault("control-at-the-rule"):
-		obs.Control.P99 = BulkRule // exactly the rule: the stall is there, the run is valid
-	case d.fault("bulk-at-the-rule"):
-		obs.Bulk.P99 = BulkRule // a finding, no failure
-	case d.fault("bulk-above-the-rule"):
+	case d.fault("control-under-the-prediction"):
+		obs.Control.P99 = BulkS17Prediction - time.Nanosecond // a plain reading, no failure
+	case d.fault("control-at-the-prediction"):
+		obs.Control.P99 = BulkS17Prediction
+	case d.fault("bulk-at-the-prediction"):
+		obs.Bulk.P99 = BulkS17Prediction
+	case d.fault("bulk-above-the-prediction"):
 		obs.Bulk.P99 = 200 * time.Millisecond
 	case d.fault("bulk-small-margin"):
-		obs.Control.P99, obs.Bulk.P99 = 100*time.Millisecond, 80*time.Millisecond // under the rule, but 20 ms apart
+		obs.Control.P99, obs.Bulk.P99 = 100*time.Millisecond, 80*time.Millisecond // 20 ms apart, under S4's margin
 	case d.fault("control-short-reply"):
 		obs.Control.ReplyBytes = BulkReplyBytes - 1
 	case d.fault("bulk-short-reply"):
@@ -123,14 +123,14 @@ func (d *drySteps) BetaBulk(_ context.Context, p Plan) (BulkObs, error) {
 	return obs, nil
 }
 
-// betaBulkCases are the bulk row's dry cases that pass or fail. A control exactly at the threshold, or under it, passes (the second with a finding);
-// the faults that end INVALID are betaBulkInvalidCases.
+// betaBulkCases are the bulk row's dry cases that pass or fail. Every reading passes, above or below S17's prediction, at or under S4's margin
+// (#584); the faults that end INVALID are betaBulkInvalidCases.
 var betaBulkCases = []dryCase{
 	{"", ""},
-	{"control-at-the-rule", ""},
-	{"control-no-stall", ""},
-	{"bulk-at-the-rule", ""},
-	{"bulk-above-the-rule", ""},
+	{"control-at-the-prediction", ""},
+	{"control-under-the-prediction", ""},
+	{"bulk-at-the-prediction", ""},
+	{"bulk-above-the-prediction", ""},
 	{"bulk-small-margin", ""},
 	{"not-ready", "the Instance was not seen ready"},
 	{"not-registered", "no Instance's bulk transport was registered at the front"},

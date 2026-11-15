@@ -172,8 +172,8 @@ var betaKeeperFaults = []string{"not-ready", "relays-unread-before", "relays-unr
 
 // nowNoOverlapFaults are row B's failing faults (issue #376; internal/alpha, run_test.go's nowNoOverlapCases); its NOT RUNs
 // are TestRowBsNotRunsThroughTheScript's.
-// betaBulkFaults are the bulk row's failing faults (issue #521; internal/alpha, dry_betabulk_test.go's betaBulkCases). Its findings pass; its INVALIDs
-// are TestTheBulkRowsInvalidThroughTheScript's.
+// betaBulkFaults are the bulk row's failing faults (issue #521; internal/alpha, dry_betabulk_test.go's betaBulkCases). Its readings pass, above and
+// below S17's 85 ms prediction, with no FINDING (#584); its INVALIDs are TestTheBulkRowsInvalidThroughTheScript's.
 var betaBulkFaults = []string{"not-ready", "not-registered", "front-without-bulk", "control-took-bulk", "bulk-never-engaged", "bulk-twice", "counter-unread",
 	"fallback", "control-fallback", "control-short-reply", "bulk-short-reply", "control-status", "bulk-status", "control-stream-cut", "bulk-stream-cut",
 	"control-cut", "bulk-cut", "invalid-and-cut", "double-unnamed", "double-digest-short", "double-digest-upper", "shim-not-staged", "shim-agent-not-shipped",
@@ -207,7 +207,7 @@ var dryRows = []dryRow{
 	{"beta-athena-now-router", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaRouterFaults, []string{"glibc-at-the-minimum", "control-both-refuse", "control-ended-alike"}, nil},
 	{"beta-athena-now-keeper", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaKeeperFaults, []string{"window-at-the-floor"}, nil},
 	{"beta-athena-now-bulk", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaBulkFaults,
-		[]string{"control-at-the-rule", "control-no-stall", "bulk-at-the-rule", "bulk-above-the-rule", "bulk-small-margin"}, nil},
+		[]string{"control-at-the-prediction", "control-under-the-prediction", "bulk-at-the-prediction", "bulk-above-the-prediction", "bulk-small-margin"}, nil},
 	// The router row on Helios's GH200 (issue #566): the same faults, on the Helios shape and slot.
 	{"beta-helios-now-router", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaRouterFaults, []string{"glibc-at-the-minimum", "control-both-refuse", "control-ended-alike"}, nil},
 }
