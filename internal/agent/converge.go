@@ -615,6 +615,11 @@ func (a *Agent) stagingDone(in *instance, gen int64, img ImageResult, ck Checkpo
 	in.fileResults = ck.Files
 	in.filesKey = filesKey(files)
 	in.stagingSeq++
+	// The rehash of the files staging found present, numbers only (issue #575: the alpha rows read it from this log for
+	// HBEP-9's open rehash time); files 0 is a cold start, nothing present to rehash.
+	r := ck.Rehash
+	// The alpha rows read it by this msg and these keys (internal/alpha, AgentRehashMsg and RehashOf; warmpin_test.go pins them).
+	a.log.Info("checkpoint rehashed", "uid", in.uid, "generation", gen, "files", r.Files, "listed", r.Listed, "bytes", r.Bytes, "ms", r.Duration.Milliseconds())
 }
 
 // LoadFormat returns the --load-format a launch's command passes, "" when it
