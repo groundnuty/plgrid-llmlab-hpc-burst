@@ -374,3 +374,39 @@ func TestAProbeOfAKindThatIsNotServedYetIsRetriedNeverCounted(t *testing.T) {
 		t.Errorf("no match until the bound: %v, want a failure that names %s and says the kind is not served", err, CapacityGuardName)
 	}
 }
+
+// A policy edited by hand to decide something else exists, and is not present: the fields the server does
+// not default are compared whole. The CRD guard's manifest sets no match condition, so an extra one was
+// always found; these policies set theirs, so an edit to a field they have must be found too.
+func TestCheckAdmissionFindsAPolicyEditedByHand(t *testing.T) {
+	for _, p := range admissionPolicies {
+		for _, tc := range []struct {
+			name  string
+			edit  func(spec map[string]any)
+			field string
+		}{
+			{"a failure policy that lets a write through", func(s map[string]any) { s["failurePolicy"] = "Ignore" }, "spec.failurePolicy"},
+			{"a match condition that is never true", func(s map[string]any) {
+				s["matchConditions"] = []any{map[string]any{"name": "never", "expression": "false"}}
+			}, "spec.matchConditions"},
+			{"validations that always pass", func(s map[string]any) {
+				s["validations"] = []any{map[string]any{"expression": "true", "reason": "Forbidden", "message": "x"}}
+			}, "spec.validations"},
+			{"a variable that is something else", func(s map[string]any) {
+				s["variables"] = []any{map[string]any{"name": "op", "expression": "'NEVER'"}}
+			}, "spec.variables"},
+		} {
+			policy, binding, _ := p.objects()
+			edited := policy.DeepCopy()
+			spec := edited.Object["spec"].(map[string]any)
+			tc.edit(spec)
+			f := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+				guardPolicyGVR: "ValidatingAdmissionPolicyList", guardBindingGVR: "ValidatingAdmissionPolicyBindingList",
+			}, edited, binding.DeepCopy())
+			st, err := p.check(context.Background(), f)
+			if err != nil || st.Present || !strings.Contains(st.Detail, tc.field) {
+				t.Errorf("%s with %s = %+v, %v, want absent, naming %s", p.name, tc.name, st, err, tc.field)
+			}
+		}
+	}
+}

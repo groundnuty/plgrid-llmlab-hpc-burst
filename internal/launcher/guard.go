@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -293,6 +294,11 @@ func (d guardDef) check(ctx context.Context, dyn dynamic.Interface) (*GuardState
 		if extra := extraKeys(p, wantPolicy); len(extra) > 0 {
 			missing = append(missing, fmt.Sprintf("the policy has spec fields the manifest does not set (%s), which can switch it off", strings.Join(extra, ", ")))
 		}
+		// The fields the server does not default are compared whole: a policy edited by hand to another
+		// match condition, failure policy or validation exists and decides nothing the manifest says.
+		if differ := differingFields(p, wantPolicy, "failurePolicy", "matchConditions", "variables", "validations"); len(differ) > 0 {
+			missing = append(missing, fmt.Sprintf("the policy's %s differ from the manifest's, so it no longer decides what the manifest says", strings.Join(differ, ", ")))
+		}
 	}
 	b, err := dyn.Resource(guardBindingGVR).Get(ctx, d.name, metav1.GetOptions{})
 	switch {
@@ -317,6 +323,22 @@ func (d guardDef) check(ctx context.Context, dyn dynamic.Interface) (*GuardState
 		return &GuardState{Detail: strings.Join(missing, "; ")}, nil
 	}
 	return &GuardState{Present: true}, nil
+}
+
+// differingFields names the spec fields among keys on which got and want differ, sorted as keys are given.
+// A field the manifest leaves out is compared as absent.
+func differingFields(got, want *unstructured.Unstructured, keys ...string) []string {
+	g, _, _ := unstructured.NestedMap(got.Object, "spec")
+	w, _, _ := unstructured.NestedMap(want.Object, "spec")
+	var out []string
+	for _, k := range keys {
+		gv, gok := g[k]
+		wv, wok := w[k]
+		if gok != wok || !apiequality.Semantic.DeepEqual(gv, wv) {
+			out = append(out, "spec."+k)
+		}
+	}
+	return out
 }
 
 // extraKeys names the top-level spec fields of got that want does not have, sorted.

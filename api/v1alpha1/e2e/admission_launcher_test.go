@@ -103,12 +103,12 @@ func TestLauncherInstallsChecksAndResetsTheAdmissionPolicies(t *testing.T) {
 		}
 		_, err := dyn.Resource(gvr).Patch(bg(), tc.policy, types.MergePatchType, []byte(tc.patch), metav1.PatchOptions{})
 		must(t, err, "weaken "+tc.policy+": "+tc.name)
-		// A merge patch cannot remove the match conditions the manifest has, so the capacity guard's
-		// "never true" replaces them: it matches no request at all.
+		// A merge patch replaces the list of match conditions the manifest has, so the "never true"
+		// one matches no request at all. CheckAdmission says the policy is not present, with a detail.
 		states, err := launcher.CheckAdmission(bg(), cfg)
 		must(t, err, "check after "+tc.name)
 		for _, s := range states {
-			if s.Name == tc.policy && (s.Present || s.Detail == "") && tc.res == "binding" {
+			if s.Name == tc.policy && (s.Present || s.Detail == "") {
 				t.Errorf("%s: CheckAdmission = %+v, want absent with a detail", tc.name, s)
 			}
 		}
