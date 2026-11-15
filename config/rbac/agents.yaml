@@ -13,9 +13,10 @@
 # next step (PR 3) match this same group, so no identity can hold the agent role and be outside
 # them.
 #
-# The agent role holds no write that can lower capacity: no update or patch of a ModelDeployment,
-# no scale, no write of an Operation or an Approval. Those come with the admission policies that
-# bound them (PR 3). The agents never get: delete or deletecollection, any */status, serviceaccounts,
+# The agent role is READ-ONLY in this PR: no create, update, patch or scale of a ModelDeployment, and
+# no write of an Operation or an Approval. Each write comes with the admission policies that bound it
+# (PR 3), so no state of the framework lets an agent lower capacity, or release it through an owner
+# reference at create. The agents never get: delete or deletecollection, any */status, serviceaccounts,
 # serviceaccounts/token, secrets, certificatesigningrequests, impersonate, RBAC or admission objects,
 # or writes to namespaces. The operator role is installed and bound to no one.
 apiVersion: v1
@@ -40,9 +41,6 @@ rules:
   - apiGroups: ["hpcburst.groundnuty.github.io"]
     resources: ["modeldeployments", "allocations", "instances", "operations", "approvals"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["hpcburst.groundnuty.github.io"]
-    resources: ["modeldeployments"]
-    verbs: ["create"]
   - apiGroups: ["apps"]
     resources: ["controllerrevisions"]
     verbs: ["get", "list", "watch"]

@@ -36,7 +36,7 @@ func TestLauncherInstallsResetsAndChecksTheAgentRoles(t *testing.T) {
 	const G = frameworkGroup
 	deleteAllocation := accessRow{G, "allocations", "", "default", "delete", false}
 	getProviders := accessRow{G, "providers", "", "", "get", true}
-	createMD := accessRow{G, "modeldeployments", "", "default", "create", true}
+	listMDs := accessRow{G, "modeldeployments", "", "default", "list", true} // the agent role's, and not the operator role's
 	deleteApprovalPolicy := accessRow{G, "approvalpolicies", "", "", "delete", false}
 	waitForAgentMatrix(t, a.cs, expectedAgentMatrix())
 
@@ -109,19 +109,19 @@ func TestLauncherInstallsResetsAndChecksTheAgentRoles(t *testing.T) {
 	waitUntilAllowed(t, a.cs, getProviders)
 	check(true, "")
 
-	// An extra subject on the agent binding: a user that is no agent now may create a
-	// ModelDeployment (a SubjectAccessReview by the admin for that user shows it), and after the install
+	// An extra subject on the agent binding: a user that is no agent now may list
+	// ModelDeployments (a SubjectAccessReview by the admin for that user shows it), and after the install
 	// may not.
 	bob := func() bool {
 		t.Helper()
 		r, err := adminCS.AuthorizationV1().SubjectAccessReviews().Create(bg(), &authorizationv1.SubjectAccessReview{Spec: authorizationv1.SubjectAccessReviewSpec{
-			User: "example-user", ResourceAttributes: &authorizationv1.ResourceAttributes{Namespace: "default", Verb: "create", Group: G, Resource: "modeldeployments"},
+			User: "example-user", ResourceAttributes: &authorizationv1.ResourceAttributes{Namespace: "default", Verb: "list", Group: G, Resource: "modeldeployments"},
 		}}, metav1.CreateOptions{})
 		must(t, err, "SubjectAccessReview")
 		return r.Status.Allowed
 	}
 	if bob() {
-		t.Fatal("before the edit a user outside the agents' group may create a ModelDeployment")
+		t.Fatal("before the edit a user outside the agents' group may list ModelDeployments")
 	}
 	var crb rbacv1.ClusterRoleBinding
 	must(t, c.Get(bg(), client.ObjectKey{Name: "hpcburst-agent"}, &crb), "read the agent binding")
@@ -142,10 +142,10 @@ func TestLauncherInstallsResetsAndChecksTheAgentRoles(t *testing.T) {
 		Subjects:   []rbacv1.Subject{{APIGroup: "rbac.authorization.k8s.io", Kind: "Group", Name: agentsGroup}},
 	}), "bind the agents' group to the operator role by hand")
 	waitUntilAllowed(t, a.cs, deleteApprovalPolicy) // the operator role's delete
-	waitUntilDenied(t, a.cs, createMD)              // and the agent role's create is gone
+	waitUntilDenied(t, a.cs, listMDs)               // and the agent role's read is gone
 	check(false, "ClusterRoleBinding hpcburst-agent has a roleRef that differs")
 	install()
-	waitUntilAllowed(t, a.cs, createMD)
+	waitUntilAllowed(t, a.cs, listMDs)
 	waitUntilDenied(t, a.cs, deleteApprovalPolicy)
 	check(true, "")
 	// Whatever the edits did, every row of the matrix is the expected one again.

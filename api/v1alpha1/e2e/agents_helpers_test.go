@@ -163,9 +163,11 @@ func expectedAgentMatrix() []accessRow {
 	for _, r := range []string{"providers", "platformprofiles", "approvalpolicies"} {
 		add(G, r, "", "", read...)
 	}
-	// hpcburst-agent: read the namespaced kinds, create ModelDeployments, and nothing else. No update,
-	// patch, scale or write of an Operation or an Approval: those come with PR 3's admission policies.
-	add(G, "modeldeployments", "", "default", "get", "list", "watch", "create")
+	// hpcburst-agent: READ-ONLY in this PR (the science agent's check of #595): no create, update, patch
+	// or scale of a ModelDeployment, and no write of an Operation or an Approval. A create carrying an
+	// owner reference to a short-lived object would be a garbage-collector release outside every guard,
+	// so each write comes with PR 3's admission policies that bound it.
+	add(G, "modeldeployments", "", "default", "get", "list", "watch")
 	for _, r := range []string{"allocations", "instances", "operations", "approvals"} {
 		add(G, r, "", "default", read...)
 	}
@@ -182,7 +184,7 @@ func expectedAgentMatrix() []accessRow {
 	rows = append(rows,
 		accessRow{G, "modeldeployments", "", "", "list", true},
 		accessRow{G, "allocations", "", "kube-system", "get", true},
-		accessRow{G, "modeldeployments", "", "kube-system", "create", true},
+		accessRow{G, "modeldeployments", "", "kube-system", "create", false},
 		accessRow{G, "allocations", "", "kube-system", "delete", false},
 	)
 

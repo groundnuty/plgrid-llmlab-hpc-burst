@@ -56,9 +56,11 @@ func TestAgentRolesMatrix(t *testing.T) {
 		t.Fatalf("the control authenticates as %q in %v, want an outsider of %s", u.Username, u.Groups, agentsGroup)
 	}
 	judge(t, "outsider "+ns, outCS, rows, func(accessRow) bool { return false })
-	md := newModelDeployment(ns, "outsider-md")
-	if err := outC.Create(bg(), md, client.DryRunAll); !apierrors.IsForbidden(err) {
-		t.Errorf("an outsider's create of a ModelDeployment: %v, want Forbidden, while an agent's is allowed", err)
+	// A real read beside the access reviews: an agent lists ModelDeployments, and the outsider may not.
+	var mds v1alpha1.ModelDeploymentList
+	must(t, agents[0].c.List(bg(), &mds, client.InNamespace(ns)), "an agent's list of ModelDeployments")
+	if err := outC.List(bg(), &mds, client.InNamespace(ns)); !apierrors.IsForbidden(err) {
+		t.Errorf("an outsider's list of ModelDeployments: %v, want Forbidden, while an agent's is allowed", err)
 	}
 }
 
@@ -130,8 +132,10 @@ func TestAgentRealRequests(t *testing.T) {
 		must(t, c.Delete(bg(), tc.obj.DeepCopyObject().(client.Object), client.DryRunAll), "the admin's dry-run delete of "+tc.resource)
 	}
 
-	// A ModelDeployment: delete and update are Forbidden in this PR (no write that can lower capacity),
-	// and create is allowed, as a dry run.
+	// A ModelDeployment: delete, update, patch and create are all Forbidden in this PR. The agent role is
+	// read-only until PR 3's admission policies bound each write (the science agent's check of #595: a
+	// create with an owner reference to a short-lived object is a garbage-collector release outside every
+	// guard).
 	forbidden("delete of a ModelDeployment", a.c.Delete(bg(), md.DeepCopy()), "delete", "modeldeployments")
 	mine := md.DeepCopy()
 	must(t, a.c.Get(bg(), objKey(md), mine), "read the ModelDeployment as an agent")
@@ -145,11 +149,14 @@ func TestAgentRealRequests(t *testing.T) {
 	must(t, c.Update(bg(), adminMD, client.DryRunAll), "the admin's dry-run update of a ModelDeployment")
 	must(t, c.Delete(bg(), md.DeepCopy(), client.DryRunAll), "the admin's dry-run delete of a ModelDeployment")
 
+	// A real create, not a dry run: if the role let it through, the object would exist.
 	fresh := newModelDeployment(ns, "md-created-by-a")
-	must(t, a.c.Create(bg(), fresh, client.DryRunAll), "an agent's dry-run create of a ModelDeployment")
+	forbidden("create of a ModelDeployment", a.c.Create(bg(), fresh), "create", "modeldeployments")
 	if err := c.Get(bg(), objKey(fresh), &v1alpha1.ModelDeployment{}); !apierrors.IsNotFound(err) {
-		t.Errorf("after a dry-run create the ModelDeployment exists: %v", err)
+		t.Errorf("after the refused create the ModelDeployment exists: %v", err)
 	}
+	// The admin's same create passes (a dry run), so the refusal is the agent's role.
+	must(t, c.Create(bg(), newModelDeployment(ns, "md-created-by-a"), client.DryRunAll), "the admin's dry-run create of a ModelDeployment")
 
 	// An agent mints no token: not for another agent's ServiceAccount, not for its own.
 	for _, target := range []string{b.name, a.name} {
