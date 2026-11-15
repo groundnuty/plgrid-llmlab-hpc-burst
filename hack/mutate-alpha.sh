@@ -6,6 +6,8 @@
 #   hack/mutate-alpha.sh --no-script  # leave out the mutants of hack/live-checks.sh (the slow ones)
 #   hack/mutate-alpha.sh --only <regexp>  # only the mutants whose line matches (egrep), to try a new one; exit 2, and
 #                                         # nothing run, for an expression that is not valid or matches no mutant
+#   hack/mutate-alpha.sh --check-anchors  # run nothing: only check that every mutant's text occurs exactly once in its file, and
+#                                         # name each that does not (issue #592); exit 1 if one does not. A CI test runs this
 #
 # Before the first mutant of each kind the tests of that kind run with no mutant, under the same command: if they fail, or do
 # not compile, the run stops (exit 2), since a test that already fails would count every mutant as killed (#285).
@@ -36,6 +38,7 @@ set -u -o pipefail
 cd "${MUTATE_ALPHA_ROOT:-$(dirname "$0")/..}" || exit 2   # the tree to mutate; the tests of this script point it at a throwaway module
 pkg=internal/alpha
 script_too=1; [ "${1:-}" != --no-script ] || script_too=0
+check_anchors=0; [ "${1:-}" != --check-anchors ] || check_anchors=1
 only=""; [ "${1:-}" != --only ] || only=${2:?--only needs a pattern}
 if [ -n "$only" ]; then
   # grep exits 2 for an expression it cannot read: that must not pass for "matches nothing".
@@ -46,6 +49,41 @@ declare -A saved=()
 restore() { for f in "${!saved[@]}"; do cp "${saved[$f]}" "$f"; done; rm -rf "$tmp"; }
 trap restore EXIT
 path_of() { case $1 in */*) printf '%s' "$1" ;; *) printf '%s/%s' "$pkg" "$1" ;; esac; }
+# parse_mutant <entry>: sets file, from (the anchor), to and path from one entry of the list. The run and --check-anchors both read an
+# entry through this, so the check can never read a list differently from the run.
+parse_mutant() { file=${1%%@@*}; rest=${1#*@@}; from=${rest%%@@*}; to=${rest#*@@}; path=$(path_of "$file"); }
+# anchor_edit apply <path> <from> <to> | anchor_edit check <records>: the one place that decides "the anchor must occur exactly once".
+# apply replaces that one occurrence of from in the file by to, and exits 1 and changes nothing for any other count. check reads
+# records (a file of NUL-ended path, anchor pairs), and for each anchor that does not occur exactly once prints "<index> <count>" (count -1:
+# the file cannot be read), then "checked <how many>" last; one process for all of them, so that it takes seconds. A mutant is applied,
+# and --check-anchors judged, by the same occurrences below.
+anchor_edit() {
+  python3 - "$@" <<'PY'
+import sys
+
+def occurrences(p, a, files={}):
+    if p not in files:
+        try:
+            files[p] = open(p).read()
+        except OSError:
+            files[p] = None
+    return -1 if files[p] is None else files[p].count(a)
+
+if sys.argv[1] == 'apply':
+    p, a, b = sys.argv[2:5]
+    if occurrences(p, a) != 1:
+        sys.exit(1)
+    s = open(p).read()
+    open(p, 'w').write(s.replace(a, b, 1))
+else:
+    recs = open(sys.argv[2]).read().split('\0')[:-1]
+    for i in range(0, len(recs), 2):
+        n = occurrences(recs[i], recs[i + 1])
+        if n != 1:
+            print(i // 2, n)
+    print('checked', len(recs) // 2)
+PY
+}
 keep() { [ -n "${saved[$1]:-}" ] || { saved[$1]="$tmp/$(printf '%s' "$1" | tr / _)"; cp "$1" "${saved[$1]}"; }; }
 build() { if [ -n "${MUTATE_ALPHA_BUILD_LOCK:-}" ]; then flock -o "$MUTATE_ALPHA_BUILD_LOCK" "$@"; else "$@"; fi; }
 # compile_tests <package> <binary>: the package's test binary, to one fixed path, under the build lock; on failure its first
@@ -121,7 +159,7 @@ mutants=(
   'liveobs.go@@end.Done && end.Finished && @@end.Finished && '
   'liveobs.go@@end.Finished && end.ErrorCode == ""@@end.ErrorCode == ""'
   'liveobs.go@@&& end.ErrorCode == ""@@'
-  'liveobs.go@@strings.HasPrefix(r.Part, "worker-")@@strings.HasPrefix(r.Part, "")'
+  'liveobs.go@@if strings.HasPrefix(r.Part, "worker-") {@@if strings.HasPrefix(r.Part, "") {'
   'liveobs.go@@if h.Get("Hpcburst-Request-Id") == "" {@@if false {'
   'liveobs.go@@deploymentIDRE.MatchString(h.Get("Hpcburst-Deployment-Id"))@@h.Get("Hpcburst-Deployment-Id") != ""'
   'liveobs.go@@h.Get("Hpcburst-Instance") != "" && uids@@uids'
@@ -130,13 +168,13 @@ mutants=(
   'liveobs.go@@if md.Spec.Providers.Selector != nil {@@if false {'
   'liveobs.go@@rp.Mode == v1alpha1.RetentionReleaseWhenIdle@@rp.Mode != v1alpha1.RetentionReleaseWhenIdle'
   'liveobs.go@@if e.Reason == "HandedOver" {@@if e.Reason != "" {'
-  'liveobs.go@@in.Status.Phase == v1alpha1.InstanceEnded && @@'
+  'liveobs.go@@handed[string(in.UID)] && in.Status.Phase == v1alpha1.InstanceEnded && @@handed[string(in.UID)] && '
   'liveobs.go@@in.Status.EndReason == v1alpha1.ReasonDrained {@@true {'
   'liveobs.go@@if c.Reason == v1alpha1.ReasonNoOverlapSlot {@@if c.Reason != "" {'
   'workerfault.go@@return "srun --overlap --jobid="@@return "srun --jobid="'
   'workerfault.go@@		if ended {@@		if false {'
   'workerfault.go@@if err := sc.Err(); err != nil || !ended {@@if err := sc.Err(); err != nil {'
-  'workerfault.go@@(f[4] != "0" && f[4] != "1")@@false'
+  'workerfault.go@@if !ok || err1 != nil ||@@if false && !ok || err1 != nil ||'
   'workerfault.go@@err4 != nil || pid <= 0@@err4 != nil || pid < 0'
   # #488: the engine whose Apptainer parent is hidden from the job's user (the listing's parent-hidden word, the rule, the shape's word, condition 4).
   'workerfault.go@@	if len(found) != 1 {@@	if len(found) < 1 {'
@@ -147,13 +185,17 @@ mutants=(
   'workerfault.go@@if [ "$ppid" -gt 0 ] && ! cat@@if [ "$ppid" -ge 0 ] && ! cat'
   'engineshape.go@@		case p.ParentHidden:@@		case p.ParentHidden && false:'
   'workerfault.go@@		if f[8] != "parent-hidden" {@@		if false {'
-  'workerfault.go@@strings.Contains(base, "apptainer")@@strings.Contains(base, "x-apptainer")'
-  'workerfault.go@@strings.HasPrefix(base, "starter")@@false'
-  'workerfault.go@@ok && parent.InJob && isApptainer(parent.Argv)@@ok && isApptainer(parent.Argv)'
-  'workerfault.go@@ok && parent.InJob && isApptainer(parent.Argv)@@ok && parent.InJob'
+  'engineshape.go@@strings.Contains(base, "apptainer")@@strings.Contains(base, "x-apptainer")'
+  'engineshape.go@@strings.HasPrefix(base, "starter")@@false'
+  'engineshape.go@@if !ok || !t.inJob(q) {@@if !ok {'
+  'engineshape.go@@			cur = q
+		default:
+			return false@@			cur = q
+		default:
+			return true'
   'workerfault.go@@if len(found) != 1 {@@if len(found) < 1 {'
   'workerfault.go@@== "killed "+strconv.Itoa(p.PID)@@!= "killed "+strconv.Itoa(p.PID)'
-  'workerfault.go@@if tr '"'"'\0'"'"' '"'"'\n'"'"' < "$d/environ" 2>/dev/null | grep -qx@@if tr '"'"'\0'"'"' '"'"'\n'"'"' < "$d/environ" 2>/dev/null | grep -q'
+  'workerfault.go@@grep -qx "SLURM_JOB_ID=$job"@@grep -q "SLURM_JOB_ID=$job"'
   'ledger.go@@if l == nil || l.Finder == nil {@@if l == nil {'
   'ledger.go@@if live == 0 && len(errs) == 0 {@@if live == 0 {'
   'config.go@@	if c.StandIn {@@	if false {'
@@ -304,7 +346,9 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'rows.go@@r.SlotHold = lease@@r.SlotHold = r.SlotHold'
   'config.go@@(strings.HasPrefix(row.Name, "tunnel-hour-") && getenv(envDry) != "1")@@false'  'hack/live-checks.sh@@gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|32|-|10@@gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|32|-'
   'hack/live-checks.sh@@gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|@@gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|-|'
-  'hack/live-checks.sh@@      [ "${SWAIT[$n]:--}" = - ] || wait=0@@      true'
+  'hack/live-checks.sh@@wait=$(( ($(pending_max "$n") + 59) / 60 ))
+      [ "${SWAIT[$n]:--}" = - ] || wait=0@@wait=$(( ($(pending_max "$n") + 59) / 60 ))
+      true'
   'hack/live-checks.sh@@    gpu-accounting-*|reach-*) [ "${SWAIT[$n]:--}" != - ] || export HPCBURST_CONF_PENDING_MAX_SECONDS@@    gpu-accounting-*|reach-*) export HPCBURST_CONF_PENDING_MAX_SECONDS'
   'hack/live-checks.sh@@reach-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:02:00|20|-C memfs|10@@reach-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:02:00|20|-C memfs'
   'hack/live-checks.sh@@reach-athena|athena|athena|plgrid-now|-|plgrid-now|@@reach-athena|athena|athena|plgrid-now|-|-|'
@@ -327,10 +371,10 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'workerfault.go@@	return arg == program || (strings.HasPrefix(arg, "/") && filepath.Base(arg) == program)@@	return arg == program || filepath.Base(arg) == program'
   'workerfault.go@@	if len(rest) != len(command) {@@	if len(rest) < len(command) {'
   'workerfault.go@@		if rest[i] != command[i] {@@		if false {'
-  'workerfault.go@@	pyFlagsRE = regexp.MustCompile(`^-[sSuEIBO]+$`)@@	pyFlagsRE = regexp.MustCompile(`^-`)'
+  'workerfault.go@@pyFlagsRE = regexp.MustCompile(`^-[bBdEIOPqRsSuv]+$`)@@pyFlagsRE = regexp.MustCompile(`^-`)'
   # nit: a process of the job by its cgroup too.
-  'workerfault.go@@  if grep -q "/job_$job/" "$d/cgroup" 2>/dev/null; then injob=1; fi@@  :'
-  'workerfault.go@@  if grep -q "/job_$job/" "$d/cgroup"@@  if grep -q "/job_$job" "$d/cgroup"'
+  'workerfault.go@@if printf '"'"'%s\n'"'"' "$cgs" | grep -Eq "/job_$job(/|\$)"; then cg=1; fi@@:'
+  'workerfault.go@@"/job_$job(/|\$)"@@"/job_$job"'
   # B3: the run's jobs are its prefix's, whatever the recorder holds.
   'ledger.go@@		if prefix != "" && strings.HasPrefix(name, prefix) {@@		if false {'
   'hack/live-checks.sh@@      { [ -n "$OWN_PREFIX" ] && [ "${name#"$OWN_PREFIX"}" != "$name" ]; }; then echo "$id"; fi@@      false; then echo "$id"; fi'
@@ -407,7 +451,7 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'rows.go@@	if t.UploadBody == 0 {@@	if false {'
   'rows.go@@	if t.UploadStreams == 0 {@@	if false {'
   'rows.go@@	fill(&t.UploadPause, l.UploadPause)@@'
-  'rows.go@@UploadBody: UploadBody, UploadStreams: UploadStreams, UploadPause: UploadPause}@@UploadBody: UploadBody, UploadStreams: UploadStreams}'
+  'rows.go@@UploadPause: UploadPause, ServeTokens: ServeStreamTokens}@@ServeTokens: ServeStreamTokens}'
   # B5: the two-job guard.
   'jobcount.go@@	if e := l.Clock.Add(g.TimeLimit - g.DrainWindow).Truncate(time.Second); e.After(g.end) {@@	if e := l.Clock.Add(g.TimeLimit).Truncate(time.Second); e.After(g.end) {'
   'jobcount.go@@e.After(g.end) {@@true {'
@@ -432,8 +476,8 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'guard_live_test.go@@	stack.WaitFor(r.t, d, what, guarded)@@	stack.WaitFor(r.t, d, what, cond); _ = guarded'
   'guard_live_test.go@@			if md.Spec.EndTime == nil || !md.Spec.EndTime.Time.Equal(end) {@@			if false {'
   # B7: the first clock, and a tunnel row's NOT RUN at its first end.
-  'jobcount.go@@		if c := timeLimit - drainWindow - time.Minute; c < pendingMax {@@		if c := timeLimit - drainWindow; c < pendingMax {'
-  'jobcount.go@@		if c := timeLimit - drainWindow - time.Minute; c < pendingMax {@@		if c := timeLimit - drainWindow - time.Minute; c <= pendingMax {'
+  'jobcount.go@@if c := timeLimit - drainWindow - time.Minute; c < wait {@@if c := timeLimit - drainWindow; c < wait {'
+  'jobcount.go@@if c := timeLimit - drainWindow - time.Minute; c < wait {@@if c := timeLimit - drainWindow - time.Minute; c <= wait {'
   'run.go@@		if ns.PastEnd {@@		if false {'
   'hack/live-checks.sh@@    elif first_end_marker; then@@    elif false; then'
   # #272: a job that never started within its bound is NOT RUN on every row. One mutant per bound sends it to FAIL (exit 1);
@@ -442,8 +486,12 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   # carries it), then a start wait (the conformance tests), then the rule by row that #230 had, which comes back:
   'run.go@@	return errors.Is(err, ErrNotStarted) || errors.Is(err, ErrQueueWaitPastEnd)@@	return errors.Is(err, ErrQueueWaitPastEnd)'
   'run.go@@	return errors.Is(err, ErrNotStarted) || errors.Is(err, ErrQueueWaitPastEnd)@@	return errors.Is(err, ErrNotStarted)'
-  'run.go@@func NotRun(_ Row, err error) bool { return neverStarted(err) }@@func NotRun(row Row, err error) bool { return row.SlotHold > 0 && neverStarted(err) }'
-  'run.go@@func NotRun(_ Row, err error) bool { return neverStarted(err) }@@func NotRun(row Row, err error) bool { return row.MostJobs == 1 && neverStarted(err) }'
+  'run.go@@func NotRun(_ Row, err error) bool {
+	return neverStarted(err) ||@@func NotRun(row Row, err error) bool {
+	return row.SlotHold > 0 && neverStarted(err) ||'
+  'run.go@@func NotRun(_ Row, err error) bool {
+	return neverStarted(err) ||@@func NotRun(row Row, err error) bool {
+	return row.MostJobs == 1 && neverStarted(err) ||'
   'jobcount.go@@	return target == ErrNotStarted || (e.PastEnd && target == ErrQueueWaitPastEnd)@@	return (target == ErrNotStarted && !e.PastEnd) || (e.PastEnd && target == ErrQueueWaitPastEnd && false)'
   'internal/providerctl/conformance/startwait_test.go@@	w.t.Skipf("%s", skip)@@	if w.s.startWait > 0 { w.t.Fatalf("%s", skip) }; w.t.Skipf("%s", skip)'
   'internal/providerctl/conformance/startwait_test.go@@	w.t.Skipf("%s", skip)@@	if w.s.startWait == 0 { w.t.Fatalf("%s", skip) }; w.t.Skipf("%s", skip)'
@@ -461,7 +509,7 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'hack/live-checks.sh@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|97|-|30@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|97|-|20'
   'hack/live-checks.sh@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|97|-|30@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|90|-|30'
   # The review of PR 284. B1, B2 and B4: a job that started, or that a read cannot tell about, is never NOT RUN.
-  'internal/providerctl/conformance/startwait_test.go@@			accountingNotFailed(w.t, last) // no job starts@@			_ = last // no job starts'
+  'internal/providerctl/conformance/startwait_test.go@@accountingNotFailed(w.t, last)@@_ = last'
   'internal/providerctl/conformance/startwait_test.go@@		if why := w.whyNotWaiting(last, acceptedID); why != "" {@@		if why := ""; why != "" {'
   'internal/providerctl/conformance/startwait_test.go@@	if o.StartTime != nil || o.Phase == v1alpha1.AllocationRunning || o.Phase == v1alpha1.AllocationEnded {@@	if false {'
   'internal/providerctl/conformance/startwait_test.go@@	if o.StartTime != nil || o.Phase == v1alpha1.AllocationRunning || o.Phase == v1alpha1.AllocationEnded {@@	if o.Phase == v1alpha1.AllocationRunning || o.Phase == v1alpha1.AllocationEnded {'
@@ -511,7 +559,7 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'guard_live_test.go@@	if waiting == 0 {@@	if false {'
   'run.go@@	if second != nil && len(failures) == 0 {@@	if second != nil {'
   'run.go@@	if second != nil && len(failures) == 0 {@@	if false {'
-  'run.go@@func stopsTheRun(err error) bool { return err != nil && !errors.Is(err, ErrSecondNotStarted) }@@func stopsTheRun(err error) bool { return err != nil }'
+  'run.go@@return err != nil && !errors.Is(err, ErrSecondNotStarted) && !errors.Is(err, ErrSlotTaken)@@return err != nil && !errors.Is(err, ErrSlotTaken)'
   'run.go@@				return handoverFirstJobChecks(cfg.Row, o, j)@@				return VerifyHandover(cfg.Row, o, j)'
   'run.go@@				return noOverlapFirstJobChecks(cfg.Row, o, j)@@				return VerifyNoOverlap(cfg.Row, o, j)'
   'run.go@@ || errors.Is(err, ErrSecondNotStarted)@@'
@@ -574,9 +622,9 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'live_flows_test.go@@r.successorOf(pre.Name, time.Until(ds)+LeadTimesFor(lead).SuccessorWaitEnds, nil)@@r.successorOf(pre.Name, time.Until(ds), nil)'
   # #447: the handover streams' lead sized to the deployment's max-model-len (handoverlead.go): the minimum, the floor (dropped, and inclusive), the
   # rounding down, the prompt's reserve, the successor wait's half lead, the NOT RUN, the context the live steps read, and the script's marker.
-  'handoverlead.go@@	return min(maxRequest/3, fit), nil@@	_ = fit; return maxRequest / 3, nil'
-  'handoverlead.go@@	if secs < LeadFloor.Seconds() {@@	if secs <= LeadFloor.Seconds() {'
-  'handoverlead.go@@	if secs < LeadFloor.Seconds() {@@	if secs < 0 {'
+  'handoverlead.go@@lead := min(maxRequest/3, fit)@@_ = fit; lead := maxRequest / 3'
+  'handoverlead.go@@if lead < LeadFloor {@@if lead <= LeadFloor {'
+  'handoverlead.go@@if lead < LeadFloor {@@if lead < 0 {'
   'handoverlead.go@@func wholeSeconds(secs float64) time.Duration { return time.Duration(secs) * time.Second }@@func wholeSeconds(secs float64) time.Duration { return time.Duration(math.Round(secs)) * time.Second }'
   'handoverlead.go@@const PromptReserve = 512@@const PromptReserve = 256'
   'handoverlead.go@@SuccessorWaitEnds: -lead - lead/2@@SuccessorWaitEnds: -lead'
@@ -584,7 +632,7 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'live_flows_test.go@@return FitLead(r.tm.MaxRequestDuration, r.maxModelLenOrDefault(), rate)@@return FitLead(r.tm.MaxRequestDuration, 32768, rate)'
   'hack/live-checks.sh@@  ! lead_marker || case $n in alpha-athena-handover|alpha-helios-nooverlap|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1@@  true'
   'hack/live-checks.sh@@    elif lead_marker; then@@    elif false; then'
-  'hack/live-checks.sh@@at [0-9]+ tokens/s with max-model-len@@at .+ tokens/s with max-model-len'
+  'hack/live-checks.sh@@at [0-9]+ tokens/s with max-model-len [0-9]+ the lead that fits is@@at .+ tokens/s with max-model-len [0-9]+ the lead that fits is'
   # #451: the tunnel hour's long stream sized to the context (longstream.go): the cap, the floor (dropped, and inclusive), the cap's formula,
   # the share check 2 asks of a shorter plan, the verdict reading the plan, the NOT RUN, the post's line, and the script's marker.
   'longstream.go@@	if c := tm.LongCap(); secs >= c.Seconds() {@@	if c := tm.LongCap(); false && secs >= c.Seconds() {'
@@ -603,8 +651,8 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'posts.go@@	b.WriteString(longPlanLine(o, tm))@@	b.WriteString("")'
   'hack/live-checks.sh@@  ! long_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac || return 1@@  true'
   'hack/live-checks.sh@@    elif long_marker; then@@    elif false; then'
-  'hack/live-checks.sh@@the stream that fits is [0-9hms.]+@@the stream that fits is .+'
-  'hack/live-checks.sh@@at [0-9]+ tokens/s with max-model-len [0-9]+ the stream that fits is@@at .+ tokens/s with max-model-len [0-9]+ the stream that fits is'
+  'hack/live-checks.sh@@the stream that fits is [0-9hms.]+, under the floor@@the stream that fits is .+, under the floor'
+  'hack/live-checks.sh@@at [0-9]+ tokens/s with max-model-len [0-9]+ the stream that fits is [0-9hms.]+, under the floor@@at .+ tokens/s with max-model-len [0-9]+ the stream that fits is [0-9hms.]+, under the floor'
   'hack/live-checks.sh@@        TMIN[$name]=$((v + 29))@@        TMIN[$name]=$((v + 28))'
   'hack/live-checks.sh@@tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|02:17:00|166|-C memfs@@tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|02:17:00|165|-C memfs'
   'hack/live-checks.sh@@tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|166|-@@tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|165|-'
@@ -765,13 +813,13 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'run.go@@			if cfg.Row.PostsGlibcNotRun && errors.As(serr, &g) {@@			if false && cfg.Row.PostsGlibcNotRun && errors.As(serr, &g) {'
   'run.go@@			if cfg.Row.PostsGlibcNotRun && errors.As(serr, &g) {@@			if errors.As(serr, &g) {'
   'run.go@@	case IsRouterRow(cfg.Row.Name):@@	case cfg.Row.Name == BetaRouterName:'
-  'budget.go@@	case BetaRouterName, BetaHeliosRouterName, BetaKeeperName, BetaBulkName:@@	case BetaRouterName, BetaKeeperName, BetaBulkName:'
+  'budget.go@@case BetaRouterName, BetaHeliosRouterName, BetaKeeperName:@@case BetaRouterName, BetaKeeperName:'
   'hack/live-checks.sh@@  ! glibc_marker || case $n in beta-athena-now-router|beta-helios-now-router) true ;; *) false ;; esac || return 1@@  ! glibc_marker || case $n in beta-athena-now-router) true ;; *) false ;; esac || return 1'
   'hack/live-checks.sh@@      [ ! -s "$REC_DIR/posts.md" ] || posted="; its text to post, with the version, is written"@@      true || posted="; its text to post, with the version, is written"'
-  'hack/live-checks.sh@@    { case $n in beta-athena-now-router|beta-helios-now-router) hack/fetch-envoy.sh --agent-builds "$w/agent-builds" ;; esac; } ) >"$OUT/$n-build.log" 2>&1 ||@@    { case $n in beta-athena-now-router) hack/fetch-envoy.sh --agent-builds "$w/agent-builds" ;; esac; } ) >"$OUT/$n-build.log" 2>&1 ||'
+  'hack/live-checks.sh@@{ case $n in beta-athena-now-router|beta-helios-now-router) hack/fetch-envoy.sh --agent-builds "$w/agent-builds" ;; esac; } &&@@{ case $n in beta-athena-now-router) hack/fetch-envoy.sh --agent-builds "$w/agent-builds" ;; esac; } &&'
   'betarouter.go@@const BetaTracker = "#522"@@const BetaTracker = "#376"'
   'betarouter.go@@RESPONSE-LEVEL reading on vLLM, not bytes (vLLM cannot show the bytes it received; exact bytes are CI'\''s)@@reading on vLLM (S13)'
-  'steps_live_test.go@@	if name == BetaRouterName {@@	if false {'
+  'steps_live_test.go@@case BetaRouterName, BetaHeliosRouterName:@@case BetaRouterName + "x", BetaHeliosRouterName + "x":'
   # #521, the keeper row (betakeeper.go): its window's floor and sizing, every check of its verdict with its boundary, the NOT RUN's marker, and the config's
   # host-dialed rule. The live flow's wiring is the stand-ins' (hack/mutate-alpha.sh cannot run them).
   'betakeeper.go@@	tm.LongFloor = KeeperWindow@@	tm.LongFloor = KeeperWindow / 2'
@@ -900,16 +948,16 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'steps_live_test.go@@	case BetaBulkName:@@	case "":'
   'steps_live_test.go@@		p.ClientAddr = "127.0.0.1:29716"@@		p.ClientAddr = "127.0.0.1:29713"'
   # #521, the bulk row's live flow, where the package's own test reaches it: the refusal for want of a staged double.
-  'betabulk_flow_test.go@@	if r.w.double.Digest == "" {@@	if false {'
+  'betabulk_flow_test.go@@if r.w.shim == nil {@@if false {'
   # The bulk row's INVALID marker is held to that row (the positive case cannot run through the script while the row is pending).
   'hack/live-checks.sh@@  ! invalid_marker || [ "$n" = beta-athena-now-bulk ] || return 1@@  true'
+  'betabulk_flow_test.go@@return BulkObs{}, ErrNoShim@@return BulkObs{}, nil'
   # #584, the bulk row's FINDING through the script: exit 5, never 0 or 1, and its marker held to that row's pass.
   'hack/live-checks.sh@@  [ "$verdict" -ne 0 ] || [ "$FINDING" != 1 ] || verdict=5@@  true'
   'hack/live-checks.sh@@  for c in 1 5 3 4 2; do@@  for c in 1 3 4 2; do'
   'hack/live-checks.sh@@  execute_cluster "$n" || { [ "$NOT_RUN" = 1 ] || [ "$FINDING" = 1 ] || verdict=1; }@@  execute_cluster "$n" || { [ "$NOT_RUN" = 1 ] || verdict=1; }'
   'hack/live-checks.sh@@      if [ "$n" = beta-athena-now-bulk ] && finding_marker; then@@      if finding_marker; then'
   'hack/live-checks.sh@@  ! finding_present || return 1 # a FINDING@@  true || return 1 # a FINDING'
-  'betabulk_flow_test.go@@	return BulkObs{}, ErrNoStagedDouble@@	return BulkObs{}, nil'
   # #521, the bulk row's per-stream judgment (StreamBeside).
   'betabulk.go@@	done = s.Complete && s.CutBy == "" && s.Tokens == BulkStreamTokens@@	done = s.Complete && s.CutBy == ""'
   'betabulk.go@@	done = s.Complete && s.CutBy == "" && s.Tokens == BulkStreamTokens@@	done = s.Complete && s.Tokens == BulkStreamTokens'
@@ -929,18 +977,18 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'budget.go@@	first, _ := FirstClock(r, pendingMax, r.Lease, dw)@@	first := pendingMax'
   'dry_test.go@@	d.tick(bound - time.Second)@@	d.tick(bound - time.Minute)'
   'alpha_live_test.go@@		if merr := rec.SaveText(NotRunFile, note); merr != nil {@@		if merr := error(nil); merr != nil {'
-  'run.go@@			if neverStarted(err) {@@			if false {'
+  'run.go@@if NotRun(cfg.Row, err) {@@if false {'
   'alpha_live_test.go@@	if NotRun(cfg.Row, err) {@@	if false {'
   'hack/live-checks.sh@@PENDING_MAX_NOW=1800@@PENDING_MAX_NOW=7200'
   'hack/live-checks.sh@@  elif [ "${SLOT[$1]:--}" != - ]; then printf '"'"'%s'"'"' "$PENDING_MAX_NOW"@@  elif false; then printf '"'"'%s'"'"' "$PENDING_MAX_NOW"'
   'hack/live-checks.sh@@  if [ -n "${LIVE_PENDING_MAX_SECONDS:-}" ]; then printf '"'"'%s'"'"' "$LIVE_PENDING_MAX_SECONDS"@@  if false; then printf '"'"'%s'"'"' "$LIVE_PENDING_MAX_SECONDS"'
   'hack/live-checks.sh@@  export HPCBURST_ALPHA_PENDING_MAX_SECONDS=$(pending_max "$n")@@  export HPCBURST_ALPHA_PENDING_MAX_SECONDS=${LIVE_PENDING_MAX_SECONDS:-7200}'
-  'hack/live-checks.sh@@"$(( ${TMIN[$n]} + ${MOSTJOBS[$n]:-1} * (($(pending_max "$n") + 59) / 60) ))" env_alpha@@"$(( ${TMIN[$n]} + ${MOSTJOBS[$n]:-1} * ${LIVE_PENDING_MAX_SECONDS:-7200} / 60 ))" env_alpha'
-  'hack/live-checks.sh@@"$(( ${TMIN[$n]} + ${MOSTJOBS[$n]:-1} * (($(pending_max "$n") + 59) / 60) ))" env_alpha@@"$(( ${TMIN[$n]} + ${MOSTJOBS[$n]:-1} * ($(pending_max "$n") / 60) ))" env_alpha'
-  'hack/live-checks.sh@@"$(( ${TMIN[$n]} + ${MOSTJOBS[$n]:-1} * (($(pending_max "$n") + 59) / 60) ))" env_alpha@@"$(( ${TMIN[$n]} + (($(pending_max "$n") + 59) / 60) ))" env_alpha'
+  'hack/live-checks.sh@@wait=$(( ${MOSTJOBS[$n]:-1} * (($(pending_max "$n") + 59) / 60) ))@@wait=$(( ${MOSTJOBS[$n]:-1} * ${LIVE_PENDING_MAX_SECONDS:-7200} / 60 ))'
+  'hack/live-checks.sh@@wait=$(( ${MOSTJOBS[$n]:-1} * (($(pending_max "$n") + 59) / 60) ))@@wait=$(( ${MOSTJOBS[$n]:-1} * ($(pending_max "$n") / 60) ))'
+  'hack/live-checks.sh@@wait=$(( ${MOSTJOBS[$n]:-1} * (($(pending_max "$n") + 59) / 60) ))@@wait=$(( (($(pending_max "$n") + 59) / 60) ))'
   'hack/live-checks.sh@@may pend up to $(fmt_pending "$(pending_max "$1")") in the queue@@may pend up to $((7200 / 60)) min in the queue'
   'hack/live-checks.sh@@was still pending after $(fmt_pending "$(pending_max "$n")") in the queue@@was still pending after 30 min in the queue'
-  'hack/live-checks.sh@@  say "$1: may pend up to $(fmt_pending "$(pending_max "$1")") in the queue (then it is cancelled by its tag and the run is NOT RUN), then holds QOS@@  say "$1: holds QOS'
+  'hack/live-checks.sh@@say "$1: $pend (then it is cancelled by its tag and the run is NOT RUN), then holds $what@@say "$1: holds $what'
   'hack/live-checks.sh@@elif [ "$1" -lt 60 ]; then printf '"'"'%d s'"'"' "$1"@@elif false; then printf '"'"'%d s'"'"' "$1"'
   'hack/live-checks.sh@@else printf '"'"'%d min %d s'"'"' $(($1 / 60)) $(($1 % 60)); fi@@else printf '"'"'%d min'"'"' $(($1 / 60)); fi'
   'hack/live-checks.sh@@if [ $(($1 % 60)) -eq 0 ]; then printf '"'"'%d min'"'"' $(($1 / 60))@@if [ $(($1 % 60)) -ge 0 ]; then printf '"'"'%d min'"'"' $(($1 / 60))'
@@ -1056,7 +1104,7 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'hack/live-checks.sh@@  unset HPCBURST_CONF_AGENT_BUILDS HPCBURST_ALPHA_AGENT_BIN@@  unset HPCBURST_CONF_AGENT_BUILDS'
   'hack/live-checks.sh@@reach-host-dialed-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|1|1Gi|00:05:00|25|-|10@@reach-host-dialed-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|1|1Gi|00:05:00|25|-'
   'hack/live-checks.sh@@reach-host-dialed-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|25|-C memfs|10@@reach-host-dialed-helios|helios|helios|plgrid-gpu-gh200|now|-|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|25|-C memfs|10'
-  'hack/live-checks.sh@@reach-host-dialed|reach-host-dialed-helios,reach-host-dialed-athena@@reach-host-dialed|reach-host-dialed-athena'
+  'hack/live-checks.sh@@reach-host-dialed|reach-host-dialed-athena@@reach-host-dialed|reach-athena'
   'hack/live-checks.sh@@reach-host-dialed-athena|cmd/hb-agent@@reach-host-dialed-athena|internal/slurm'
   # #444: every row that starts the stack checks LIVE_BIN_DIR's layout before the slot is read (check_bin_dir): the alpha rows' call (the
   # incident: only the rehearsal row checked), each of the three binaries, the executable bit, the setting named and never its value, every problem at once.
@@ -1142,6 +1190,36 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
 )
 # The mutants of a test of this script: a file with one mutant per line, in place of the list above.
 [ -z "${MUTATE_ALPHA_MUTANTS:-}" ] || mapfile -t mutants < "$MUTATE_ALPHA_MUTANTS"
+# --check-anchors: every mutant's anchor must occur exactly once in its file, as the run needs. It runs no mutant and no test, so it takes
+# seconds, and a CI test (hack/livechecks) runs it: a mutant whose anchor drifted under a later change would otherwise pass for a test of
+# nothing, and only a full run, which CI never makes, would show it.
+if [ "$check_anchors" = 1 ]; then
+  checked=0 bad=0 seen="" recs=$tmp/anchors.in
+  declare -a a_file=() a_path=() a_from=()
+  exec 3>"$recs"
+  for m in "${mutants[@]}"; do
+    parse_mutant "$m"
+    a_file[checked]=$file a_path[checked]=$path a_from[checked]=$from; checked=$((checked+1))
+    printf '%s\0%s\0' "$path" "$from" >&3
+  done
+  exec 3>&-
+  # A parse that read nothing would be a guard that guards nothing.
+  [ "$checked" -gt 0 ] || { echo "mutate-alpha: --check-anchors read no mutant, so nothing was checked" >&2; exit 2; }
+  while read -r a b; do
+    if [ "$a" = checked ]; then seen=$b; continue; fi
+    shown=${a_from[a]%%$'\n'*}; [ "$shown" = "${a_from[a]}" ] || shown="$shown ..."
+    if [ "$b" = -1 ]; then
+      echo "BROKEN   mutant $((a+1)), ${a_file[a]}: the file ${a_path[a]} cannot be read, so its text '$shown' occurs nowhere"
+    else
+      echo "BROKEN   mutant $((a+1)), ${a_file[a]}: the text '$shown' occurs $b times, not exactly once"
+    fi
+    bad=$((bad+1))
+  done < <(anchor_edit check "$recs")
+  # The checker's last line says how many it read: a checker that died halfway must not read as one that found nothing.
+  [ "$seen" = "$checked" ] || { echo "mutate-alpha: --check-anchors checked ${seen:-none} of $checked mutants, so nothing can be said" >&2; exit 2; }
+  echo "anchors: $checked mutants, $bad not exactly once"
+  [ "$bad" -eq 0 ]; exit
+fi
 here=$PWD
 # compile_of <path>: the test binaries that judge a mutant of path, from the tree as it is now; on failure $cerr says why.
 compile_of() {
@@ -1273,21 +1351,13 @@ red_with_no_mutant() {
 killed=0 survived=0 broken=0 total=0
 for m in "${mutants[@]}"; do
   [ -z "$only" ] || printf '%s\n' "$m" | grep -q -E -e "$only" || continue
-  file=${m%%@@*}; rest=${m#*@@}; from=${rest%%@@*}; to=${rest#*@@}
-  path=$(path_of "$file")
+  parse_mutant "$m"
   case $path in hack/live-checks.sh) [ "$script_too" = 1 ] || continue ;; esac
   total=$((total+1))
   keep "$path"
   cp "${saved[$path]}" "$path"
   baseline "$path"
-  if ! python3 - "$path" "$from" "$to" <<'PY'
-import sys
-p, a, b = sys.argv[1:4]
-s = open(p).read()
-if s.count(a) != 1:
-    sys.exit(1)
-open(p, 'w').write(s.replace(a, b, 1))
-PY
+  if ! anchor_edit apply "$path" "$from" "$to"
   then echo "BROKEN   $file: the text '$from' does not occur exactly once"; broken=$((broken+1)); continue; fi
   case $path in
     *.go|internal/providerctl/*)
