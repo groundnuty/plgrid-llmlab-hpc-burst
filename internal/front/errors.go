@@ -27,6 +27,14 @@ const (
 	// codeModelNotFound: GET /v1/models/{name} for a name with no
 	// ModelDeployment (@hpc-burst-science-agent, 31 Oct 2026).
 	codeModelNotFound = "model_not_found"
+	// codeDeploymentNotFound: GET /hpcburst/v1/deployments/{id} for an ID
+	// with no identity record (HBEP-5's Errors table, as PR #580 amends it).
+	codeDeploymentNotFound = "deployment_not_found"
+	// codeDeploymentAmbiguous and codeRecordsUnavailable: a display form
+	// held by two full IDs, and records the front could not read (HBEP-5's
+	// Errors table, as PR #586 amends it).
+	codeDeploymentAmbiguous = "deployment_ambiguous"
+	codeRecordsUnavailable  = "records_unavailable"
 )
 
 // statusClientClosed records a request whose client went away before an

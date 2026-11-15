@@ -1,0 +1,208 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: approvalpolicies.hpcburst.groundnuty.github.io
+spec:
+  group: hpcburst.groundnuty.github.io
+  names:
+    categories:
+    - hpcburst
+    kind: ApprovalPolicy
+    listKind: ApprovalPolicyList
+    plural: approvalpolicies
+    singular: approvalpolicy
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.scope.*
+      name: Scope
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ApprovalPolicy says who may approve an Operation's plan in one scope (HBEP-10,
+          Approval policy). It is cluster-scoped, so only cluster-wide RBAC can write it:
+          persons, never agents. It has no status.
+
+          There is one policy per scope, so its name derives from the scope, in a plain
+          form that CEL can check: "global", "provider.<p>", "namespace.<n>" or
+          "modeldeployment.<n>.<m>" (`@hpc-burst-science-agent`, 15 Nov 2026, the ruling
+          on question 7 of #589's plan; HBEP-10, Approval policy). A hashed long-value
+          name, which HBEP-11's long-value rule would give, needs SHA-256, which CEL does
+          not have. A ModelDeployment scope whose name would pass the 253 characters a
+          Kubernetes name holds is refused, since no policy can be named for it. The
+          lifecycle controller treats two policies of one scope as unapprovable, as a
+          backstop.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ApprovalPolicySpec says who may approve in one scope (HBEP-10, Approval
+              policy).
+            properties:
+              approvers:
+                description: |-
+                  Approvers are the users, groups and ServiceAccounts that may approve under
+                  this policy, in any mix. A ServiceAccount is a user to the API server, so an
+                  agent approves as a person does (HBEP-10, Approval policy).
+                items:
+                  description: |-
+                    Approver is one party an ApprovalPolicy names: exactly one of a user, a group
+                    and a ServiceAccount (HBEP-10, Approval policy). The rule that it names exactly
+                    one is on ApprovalPolicySpec.Approvers, not on this type, because a plan's
+                    status copies the approvers of each policy it applied (AppliedPolicy) and
+                    status needs no rule.
+                  properties:
+                    group:
+                      description: Group is a group name as the API server reports
+                        it.
+                      maxLength: 1024
+                      minLength: 1
+                      type: string
+                    serviceAccount:
+                      description: |-
+                        ServiceAccount is a ServiceAccount, which is the user
+                        "system:serviceaccount:<namespace>:<name>" to the API server. It names
+                        both its namespace and its name.
+                      properties:
+                        name:
+                          description: Name of the ServiceAccount.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        namespace:
+                          description: Namespace of the ServiceAccount.
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      - namespace
+                      type: object
+                    user:
+                      description: User is a user name as the API server reports it.
+                      maxLength: 1024
+                      minLength: 1
+                      type: string
+                  type: object
+                  x-kubernetes-validations:
+                  - message: an approver names exactly one of user, group and serviceAccount
+                    rule: '((has(self.user) ? 1 : 0) + (has(self.group) ? 1 : 0) +
+                      (has(self.serviceAccount) ? 1 : 0)) == 1'
+                maxItems: 64
+                minItems: 1
+                type: array
+              scope:
+                description: |-
+                  Scope is where the policy applies: exactly one of global, a Provider, a
+                  namespace or a ModelDeployment. There is one policy per scope.
+                properties:
+                  global:
+                    description: |-
+                      Global makes the policy the fallback for every target that no Provider or
+                      namespace policy covers. When set it is true: to set no global scope, name
+                      another one.
+                    type: boolean
+                    x-kubernetes-validations:
+                    - message: 'global is true when it is set: to scope a policy otherwise,
+                        omit global and name a provider, a namespace or a modelDeployment'
+                      rule: self == true
+                  modelDeployment:
+                    description: |-
+                      ModelDeployment names one ModelDeployment: the policy applies to it, and
+                      overrides its namespace's.
+                    properties:
+                      name:
+                        description: Name of the ModelDeployment.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      namespace:
+                        description: Namespace of the ModelDeployment.
+                        maxLength: 63
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    - namespace
+                    type: object
+                  namespace:
+                    description: |-
+                      Namespace is the name of a namespace: the policy applies to every
+                      ModelDeployment in it that has no policy of its own.
+                    maxLength: 63
+                    minLength: 1
+                    type: string
+                  provider:
+                    description: 'Provider is the name of a Provider: the policy applies
+                      to targets on it.'
+                    maxLength: 63
+                    minLength: 1
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: a scope names exactly one of global, provider, namespace
+                    and modelDeployment
+                  rule: '((has(self.global) ? 1 : 0) + (has(self.provider) ? 1 : 0)
+                    + (has(self.__namespace__) ? 1 : 0) + (has(self.modelDeployment)
+                    ? 1 : 0)) == 1'
+            required:
+            - approvers
+            - scope
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: 'the name of an ApprovalPolicy derives from its scope: global,
+            provider.<name>, namespace.<name> or modeldeployment.<namespace>.<name>
+            (HBEP-10, Approval policy)'
+          messageExpression: '''the name of an ApprovalPolicy derives from its scope:
+            this scope needs the name '' + (has(self.spec.scope.global) ? ''global''
+            : has(self.spec.scope.provider) ? ''provider.'' + self.spec.scope.provider
+            : has(self.spec.scope.__namespace__) ? ''namespace.'' + self.spec.scope.__namespace__
+            : has(self.spec.scope.modelDeployment) ? ''modeldeployment.'' + self.spec.scope.modelDeployment.__namespace__
+            + ''.'' + self.spec.scope.modelDeployment.name : ''none (the scope names
+            nothing)'') + '' (HBEP-10, Approval policy)'''
+          rule: 'has(self.spec.scope.global) ? self.metadata.name == ''global'' :
+            has(self.spec.scope.provider) ? self.metadata.name == ''provider.'' +
+            self.spec.scope.provider : has(self.spec.scope.__namespace__) ? self.metadata.name
+            == ''namespace.'' + self.spec.scope.__namespace__ : has(self.spec.scope.modelDeployment)
+            ? self.metadata.name == ''modeldeployment.'' + self.spec.scope.modelDeployment.__namespace__
+            + ''.'' + self.spec.scope.modelDeployment.name : true'
+        - message: 'a ModelDeployment scope whose policy name would pass 253 characters
+            is refused: no ApprovalPolicy can have it (HBEP-10, Approval policy)'
+          messageExpression: '''a ModelDeployment scope of namespace '' + self.spec.scope.modelDeployment.__namespace__
+            + '' and name '' + self.spec.scope.modelDeployment.name + '' would need
+            a policy name above the 253 characters a Kubernetes name holds: no ApprovalPolicy
+            can have this scope, so give its Provider or its namespace a policy instead
+            (HBEP-10, Approval policy)'''
+          rule: '!has(self.spec.scope.modelDeployment) || size(''modeldeployment.''
+            + self.spec.scope.modelDeployment.__namespace__ + ''.'' + self.spec.scope.modelDeployment.name)
+            <= 253'
+    served: true
+    storage: true
+    subresources: {}

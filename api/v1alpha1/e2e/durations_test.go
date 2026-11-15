@@ -30,7 +30,8 @@ type durationField struct {
 	create func(t *testing.T, d v1alpha1.Duration) error
 }
 
-// durationFields lists every Duration field of the five kinds that has a rule.
+// durationFields lists every Duration field of the kinds that has a rule. HBEP-10's
+// three kinds have none: their durations are status figures.
 func durationFields(ns string) []durationField {
 	var fields []durationField
 

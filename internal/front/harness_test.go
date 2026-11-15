@@ -18,6 +18,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	kubefake "k8s.io/client-go/kubernetes/fake"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
@@ -67,6 +68,9 @@ type harness struct {
 	clientKey string
 	snap      inventory.Snapshot
 	uid       int
+	// recs is the API the record fetch reads (records.go): a test adds the
+	// records it serves, and reads the calls made from its actions.
+	recs *kubefake.Clientset
 	// start is the harness clock's time at setup: t0 on the fake clock, the
 	// wall clock's reading on a real one. The default lease end counts from it.
 	start time.Time
@@ -100,7 +104,7 @@ func newHarnessOn(t *testing.T, real clock.Clock, edit func(*Config)) *harness {
 		clk = fake
 	}
 	h := &harness{t: t, clk: fake, start: clk.Now(), dir: dir, host: agentapi.Host{StateDir: filepath.Join(dir, "state"), PortBase: 29220},
-		trans: NewStaticTransports(), rec: &MemoryRecorder{}, logs: &syncBuffer{}, clientKey: "client-key-for-tests-0001"}
+		trans: NewStaticTransports(), rec: &MemoryRecorder{}, logs: &syncBuffer{}, clientKey: "client-key-for-tests-0001", recs: kubefake.NewSimpleClientset()}
 	keysPath := filepath.Join(dir, "client-keys.json")
 	writeMode600(t, keysPath, fmt.Sprintf(`{"keys":[{"id":"tester","key":%q}]}`, h.clientKey))
 	h.cfg = Config{DialHomeListen: "127.0.0.1:0", ClientKeysFile: keysPath, UsageDir: filepath.Join(dir, "usage")}.WithDefaults()
@@ -131,7 +135,7 @@ func newHarnessOn(t *testing.T, real clock.Clock, edit func(*Config)) *harness {
 	t.Cleanup(func() { h.memEvents.check(t) })
 	h.metrics = NewMetrics(h.sink, h.cfg.UsageDir, h.free.get, h.events)
 	h.router = NewRouter(h.cfg, clk, h.trans, KubeRecorder{R: eventcount.Events(h.memEvents, h.events, eventcount.ControllerFront)}, log, h.metrics)
-	h.proxy = NewProxy(ProxyOptions{Config: h.cfg, Host: h.host, Clock: clk, Router: h.router, Transports: h.trans, Keys: keys, Sink: h.sink, Metrics: h.metrics, Log: log})
+	h.proxy = NewProxy(ProxyOptions{Config: h.cfg, Host: h.host, Clock: clk, Router: h.router, Transports: h.trans, Keys: keys, Sink: h.sink, Metrics: h.metrics, Log: log, Records: h.recs})
 	ln, err := enginetest.Listen(testPortLo, testPortHi)
 	if err != nil {
 		t.Fatal(err)

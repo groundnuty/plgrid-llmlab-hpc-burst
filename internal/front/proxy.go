@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/client-go/kubernetes"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/clock"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/convkey"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/naming"
@@ -49,6 +51,9 @@ type Proxy struct {
 	beforeWrite func(requestID string)
 	// bulk is the bulk path's transport (bulk.go); nil without the bulk path.
 	bulk *bulkPath
+	// records reads the identity and verification records of
+	// GET /hpcburst/v1/deployments/{id} (records.go); nil: every read fails.
+	records kubernetes.Interface
 }
 
 // ProxyOptions are the inputs of NewProxy.
@@ -62,23 +67,31 @@ type ProxyOptions struct {
 	Sink       *usage.Sink
 	Metrics    *Metrics // nil: none
 	Log        *slog.Logger
+	// Records is the client that reads the records the record fetch answers
+	// (records.go), uncached.
+	Records kubernetes.Interface
 }
 
 // NewProxy returns the client listener's handler.
 func NewProxy(o ProxyOptions) *Proxy {
 	var d net.Dialer
 	return &Proxy{
-		cfg: o.Config, host: o.Host, clk: o.Clock, router: o.Router, keys: o.Keys, sink: o.Sink, metrics: o.Metrics, log: o.Log,
+		cfg: o.Config, host: o.Host, clk: o.Clock, router: o.Router, keys: o.Keys, sink: o.Sink, metrics: o.Metrics, log: o.Log, records: o.Records,
 		inst:    newInstanceTransports(o.Config, o.Transports),
 		managed: upstreamTransport(d.DialContext, o.Config, true),
 	}
 }
 
-// ServeHTTP routes the client listener: the contract under /v1/, 404 under
-// /agent/v1/ and everywhere else (HBEP-5, Listeners).
+// ServeHTTP routes the client listener: the contract under /v1/, the front's
+// own routes under /hpcburst/v1/ (records.go), 404 under /agent/v1/ and
+// everywhere else (HBEP-5, Listeners).
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.running.Add(1)
 	defer p.running.Done()
+	if strings.HasPrefix(r.URL.Path, frameworkPrefix) {
+		p.serveFramework(w, r)
+		return
+	}
 	if !strings.HasPrefix(r.URL.Path, "/v1/") {
 		// /agent/v1/ belongs to the dial-home listener only. Still attributed,
 		// since a response without the headers is a failure of the front,

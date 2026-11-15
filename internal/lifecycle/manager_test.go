@@ -87,9 +87,10 @@ func installTestCRDs(ctx context.Context, cfg *rest.Config) error {
 		return err
 	}
 	files, err := filepath.Glob(filepath.Join("..", "..", "config", "crd", "*.yaml"))
-	if err != nil || len(files) != 5 {
-		return fmt.Errorf("want the 5 committed CRDs in config/crd, found %d (%v)", len(files), err)
+	if err != nil || len(files) != 8 {
+		return fmt.Errorf("want the 8 committed CRDs in config/crd, found %d (%v)", len(files), err)
 	}
+	var crds []*apiextensionsv1.CustomResourceDefinition
 	for _, f := range files {
 		raw, err := os.ReadFile(f)
 		if err != nil {
@@ -102,8 +103,12 @@ func installTestCRDs(ctx context.Context, cfg *rest.Config) error {
 		if err := cl.Create(ctx, crd); err != nil {
 			return fmt.Errorf("create %s: %w", crd.Name, err)
 		}
+		crds = append(crds, crd)
 	}
-	return nil
+	// Creating a CRD returns before the API server serves it: wait until each is
+	// Established and its kind answers, or the rig's first Create can meet "no
+	// matches for kind" (waitCRDsServed).
+	return waitCRDsServed(ctx, cl, crds, 60*time.Second, 200*time.Millisecond)
 }
 
 func eventually(t *testing.T, limit time.Duration, what string, cond func() (bool, string)) {

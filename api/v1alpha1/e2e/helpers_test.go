@@ -75,8 +75,8 @@ func installCRDs(ctx context.Context, cl client.Client) error {
 	if err != nil {
 		return err
 	}
-	if len(files) != 5 {
-		return fmt.Errorf("want 5 CRD manifests in config/crd, found %d", len(files))
+	if len(files) != 8 {
+		return fmt.Errorf("want 8 CRD manifests in config/crd, found %d", len(files))
 	}
 	sort.Strings(files)
 	var crds []*apiextensionsv1.CustomResourceDefinition
@@ -124,7 +124,8 @@ func installCRDs(ctx context.Context, cl client.Client) error {
 		}
 		// Established is not served: list each kind until the API answers.
 		lists := []client.ObjectList{&v1alpha1.ProviderList{}, &v1alpha1.PlatformProfileList{},
-			&v1alpha1.ModelDeploymentList{}, &v1alpha1.AllocationList{}, &v1alpha1.InstanceList{}}
+			&v1alpha1.ModelDeploymentList{}, &v1alpha1.AllocationList{}, &v1alpha1.InstanceList{},
+			&v1alpha1.OperationList{}, &v1alpha1.ApprovalList{}, &v1alpha1.ApprovalPolicyList{}}
 		for _, l := range lists {
 			if err := cl.List(ctx, l); err != nil {
 				return false, nil

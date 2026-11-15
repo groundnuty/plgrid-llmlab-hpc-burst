@@ -42,7 +42,7 @@ This framework is designed by one owner and several software agents working in p
 | 3. Design | Further PRs fill in the design, the test plan and the readiness answers. Spikes answer open questions. | review (see Roles) |
 | 4. Implementable | The PR that sets `status: implementable`. | **approval.** Implementation may start once it is merged. |
 | 5. Build | Code PRs cite `HBEP-N` and the section they implement. | per PR (see Building from an HBEP) |
-| 6. Implemented | The PR that sets `status: implemented` and `stage: alpha` (or `none` for an HBEP without stages). | approval |
+| 6. Implemented | The PR that sets `status: implemented` and `stage: alpha`, or `stage: beta` for an HBEP whose Graduation criteria start at beta (or `none` for an HBEP without stages). | approval |
 | 7. Graduation | One PR per stage promotion (alpha → beta → stable), with evidence against the HBEP's Graduation criteria. | approval |
 
 - One PR may add several provisional HBEPs together.
@@ -260,6 +260,7 @@ N/A: a process HBEP has no stages. It is `implemented` once three HBEPs after it
 ## Implementation history
 
 - 2026-10-28: proposed as implementable (bootstrap), tracking issue #1. Revised after a fresh-context review.
+- 2026-11-15: an HBEP whose criteria start at beta records `implemented` at stage `beta` (owner decision, issue #1).
 
 ## Amendments
 
@@ -272,3 +273,4 @@ N/A: a process HBEP has no stages. It is `implemented` once three HBEPs after it
   - Branch protection requires a PR, but not code-owner review.
 - **2026-10-30: content rules.** The owner allowed naming the www-2027 project and its infrastructure tools (29 Oct 2026), so that provenance can be stated. No other project or study is named, and no study's results or data, credentials, addresses, job IDs, accounts or grants appear.
 - **2026-10-29: prior art and reuse.** The template gains a "Prior art and reuse" section, and HBEP-15 is to define the catalogue of field lessons and the dependency policy. Existing HBEPs add the section no later than the PR that makes them implementable.
+- **2026-11-15: beta as a first stage** (Lifecycle, step 6). An amendment by the owner's decision of 15 Nov 2026 ([issue #1](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/1#issuecomment-6901477286): "Yes, allow it"). An HBEP whose Graduation criteria start at beta, as HBEP-10's do since alpha shipped without it, records `implemented` with `stage: beta`. Nothing else in the process changes. Before, step 6 named only `stage: alpha` or `none`.
