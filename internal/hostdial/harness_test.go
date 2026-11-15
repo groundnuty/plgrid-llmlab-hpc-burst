@@ -328,6 +328,16 @@ func newWorld(t *testing.T, mods ...func(*worldConfig)) *world {
 			if b, err := os.ReadFile(filepath.Join(base, "n", "sshd.log")); err == nil {
 				t.Logf("sshd's log:\n%s", b)
 			}
+			// The job side's own log (its batch process's output): which relay sessions it took, replaced and ended, and which
+			// connections it closed for want of one, the lines that tell a dial's EOF from a relay's end (issue #590).
+			_ = filepath.WalkDir(base, func(p string, d os.DirEntry, err error) error {
+				if err == nil && !d.IsDir() && strings.HasPrefix(d.Name(), "slurm-") && strings.HasSuffix(d.Name(), ".out") {
+					if b, err := os.ReadFile(p); err == nil && len(b) > 0 {
+						t.Logf("the job side's log (%s):\n%s", d.Name(), b)
+					}
+				}
+				return nil
+			})
 		}
 	})
 	return w
@@ -568,20 +578,57 @@ func (c *conn) echo(p []byte, d time.Duration) error {
 
 func (c *conn) close() { _ = c.c.Close() }
 
-// roundTrip dials a job's channel, checks that the greeting names want, and
-// echoes p.
-func roundTrip(t *testing.T, j job, ch agentapi.RelayChannel, want string, p []byte) {
-	t.Helper()
-	c, err := dial(j, ch, 30*time.Second)
+// dialUntilGreeting dials a job's channel listener until a greeting comes back,
+// for at most bound. A connection closed with no greeting is what a dial gets
+// while the channel's relay is being replaced: the job side closes a connection
+// whose session ended or was replaced under it (job.go, join), or one that found
+// no session within its wait (acceptConns). The channel's real clients, the
+// control client and frpc, dial again (doc.go), and the greeting is the state a
+// test waits on: a relay whose PID has changed has an ssh, not yet a session
+// (issue #590). After bound it returns an error that names how many dials it made
+// and the last one's error, so a channel that never comes up still fails, with its
+// reason. attempts, when it is not nil, holds the number of dials started.
+func dialUntilGreeting(j job, ch agentapi.RelayChannel, bound time.Duration, attempts *atomic.Int64) (*conn, error) {
+	end := time.Now().Add(bound)
+	for n := 1; ; n++ {
+		if attempts != nil {
+			attempts.Store(int64(n))
+		}
+		c, err := dial(j, ch, min(30*time.Second, max(time.Until(end), time.Second)))
+		if err == nil {
+			return c, nil
+		}
+		if !time.Now().Before(end) {
+			return nil, fmt.Errorf("no greeting within %s over %d dials, the last: %w", bound, n, err)
+		}
+		time.Sleep(50 * time.Millisecond) // pacing between dials, not a wait for anything
+	}
+}
+
+// roundTripOver dials a job's channel until its greeting comes (dialUntilGreeting), checks that the
+// greeting names want, and echoes p, and returns what went wrong; attempts is dialUntilGreeting's. A test
+// that must not stop at the first failure, or that runs it beside another step, calls this: roundTrip
+// ends the test on its error.
+func roundTripOver(j job, ch agentapi.RelayChannel, want string, p []byte, attempts *atomic.Int64) error {
+	c, err := dialUntilGreeting(j, ch, time.Minute, attempts)
 	if err != nil {
-		t.Fatalf("job %s's %s listener: %v", j.id, ch, err)
+		return fmt.Errorf("job %s's %s listener: %w", j.id, ch, err)
 	}
 	defer c.close()
 	if c.greet != want {
-		t.Fatalf("job %s's %s listener reached the %q target, want %q", j.id, ch, c.greet, want)
+		return fmt.Errorf("job %s's %s listener reached the %q target, want %q", j.id, ch, c.greet, want)
 	}
 	if err := c.echo(p, 30*time.Second); err != nil {
-		t.Fatalf("job %s's %s channel: the echo of %d bytes: %v", j.id, ch, len(p), err)
+		return fmt.Errorf("job %s's %s channel: the echo of %d bytes: %w", j.id, ch, len(p), err)
+	}
+	return nil
+}
+
+// roundTrip is roundTripOver, ending the test on its error.
+func roundTrip(t *testing.T, j job, ch agentapi.RelayChannel, want string, p []byte) {
+	t.Helper()
+	if err := roundTripOver(j, ch, want, p, nil); err != nil {
+		t.Fatal(err)
 	}
 }
 
