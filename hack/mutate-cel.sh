@@ -50,6 +50,8 @@ allocations:$.spec.retentionPolicy#0|^TestAllocationRetentionPolicyRule$
 allocations:$.spec.retentionPolicy#1|^TestAllocationRetentionUntilGoesWithKeep$
 allocations:$.spec.retentionPolicy.idleLimit#0|^TestDurationsArePositiveAndFit$
 allocations:$.status.atProvider.submission#0|^TestAllocationPhasesAndSubmissionStates$
+approvalpolicies:$#0|^TestApprovalPolicyNameDerivesFromItsScope$
+approvalpolicies:$#1|^TestApprovalPolicyOfAScopeWithATooLongNameIsRefused$
 approvalpolicies:$.spec.approvers[]#0|^TestApprovalPolicyApproversNameExactlyOneKind$
 approvalpolicies:$.spec.scope#0|^TestApprovalPolicyNamesExactlyOneScope$
 approvalpolicies:$.spec.scope.global#0|^TestApprovalPolicyGlobalIsTrueWhenSet$

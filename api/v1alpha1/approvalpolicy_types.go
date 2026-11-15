@@ -4,6 +4,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// Notes on the CEL rules of this file (kept out of the kinds' doc comments,
+// which become the CRD's descriptions). Both are limits of the API server's rule
+// cost estimator, found by installing variants of the rules on a real API server:
+//   - "namespace" is a reserved word of CEL, so a rule names the field
+//     __namespace__. Written plainly, the API server types the field as dynamic
+//     and prices every rule that concatenates it as unbounded, which fails the
+//     CRD's cost budget.
+//   - A rule or message expression never uses string() on an integer: the
+//     estimator prices that as unbounded too. The messages put the size in words.
+
 // ApprovalPolicySpec says who may approve in one scope (HBEP-10, Approval
 // policy).
 type ApprovalPolicySpec struct {
@@ -22,10 +32,7 @@ type ApprovalPolicySpec struct {
 }
 
 // ApprovalScope is where an ApprovalPolicy applies (HBEP-10, Approval policy,
-// Resolution). Exactly one of its fields is set. A CEL rule names the namespace
-// field as __namespace__, since "namespace" is a reserved word of CEL: written
-// plainly, the API server types the field as dynamic and estimates every rule
-// that concatenates it as unbounded, which fails the CRD's cost budget.
+// Resolution). Exactly one of its fields is set.
 //
 // +kubebuilder:validation:XValidation:rule="((has(self.global) ? 1 : 0) + (has(self.provider) ? 1 : 0) + (has(self.__namespace__) ? 1 : 0) + (has(self.modelDeployment) ? 1 : 0)) == 1",message="a scope names exactly one of global, provider, namespace and modelDeployment"
 type ApprovalScope struct {
@@ -121,10 +128,22 @@ type ServiceAccountRef struct {
 // Approval policy). It is cluster-scoped, so only cluster-wide RBAC can write it:
 // persons, never agents. It has no status.
 //
+// There is one policy per scope, so its name derives from the scope, in a plain
+// form that CEL can check: "global", "provider.<p>", "namespace.<n>" or
+// "modeldeployment.<n>.<m>" (`@hpc-burst-science-agent`, 15 Nov 2026, the ruling
+// on question 7 of #589's plan; HBEP-10, Approval policy). A hashed long-value
+// name, which HBEP-11's long-value rule would give, needs SHA-256, which CEL does
+// not have. A ModelDeployment scope whose name would pass the 253 characters a
+// Kubernetes name holds is refused, since no policy can be named for it. The
+// lifecycle controller treats two policies of one scope as unapprovable, as a
+// backstop.
+//
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,categories=hpcburst
 // +kubebuilder:printcolumn:name="Scope",type=string,JSONPath=`.spec.scope.*`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:validation:XValidation:rule="has(self.spec.scope.global) ? self.metadata.name == 'global' : has(self.spec.scope.provider) ? self.metadata.name == 'provider.' + self.spec.scope.provider : has(self.spec.scope.__namespace__) ? self.metadata.name == 'namespace.' + self.spec.scope.__namespace__ : has(self.spec.scope.modelDeployment) ? self.metadata.name == 'modeldeployment.' + self.spec.scope.modelDeployment.__namespace__ + '.' + self.spec.scope.modelDeployment.name : true",message="the name of an ApprovalPolicy derives from its scope: global, provider.<name>, namespace.<name> or modeldeployment.<namespace>.<name> (HBEP-10, Approval policy)",messageExpression="'the name of an ApprovalPolicy derives from its scope: this scope needs the name ' + (has(self.spec.scope.global) ? 'global' : has(self.spec.scope.provider) ? 'provider.' + self.spec.scope.provider : has(self.spec.scope.__namespace__) ? 'namespace.' + self.spec.scope.__namespace__ : has(self.spec.scope.modelDeployment) ? 'modeldeployment.' + self.spec.scope.modelDeployment.__namespace__ + '.' + self.spec.scope.modelDeployment.name : 'none (the scope names nothing)') + ' (HBEP-10, Approval policy)'"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.scope.modelDeployment) || size('modeldeployment.' + self.spec.scope.modelDeployment.__namespace__ + '.' + self.spec.scope.modelDeployment.name) <= 253",message="a ModelDeployment scope whose policy name would pass 253 characters is refused: no ApprovalPolicy can have it (HBEP-10, Approval policy)",messageExpression="'a ModelDeployment scope of namespace ' + self.spec.scope.modelDeployment.__namespace__ + ' and name ' + self.spec.scope.modelDeployment.name + ' would need a policy name above the 253 characters a Kubernetes name holds: no ApprovalPolicy can have this scope, so give its Provider or its namespace a policy instead (HBEP-10, Approval policy)'"
 type ApprovalPolicy struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

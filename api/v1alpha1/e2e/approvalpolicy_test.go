@@ -221,3 +221,58 @@ func withApprovers(p *v1alpha1.ApprovalPolicy, approvers []v1alpha1.Approver) *v
 	p.Spec.Approvers = approvers
 	return p
 }
+
+// The name of a policy derives from its scope: `global`, `provider.<p>`,
+// `namespace.<n>` or `modeldeployment.<n>.<m>`. This is the rule
+// approvalpolicies:$#0. A name that is not the scope's is refused with a message
+// that says which name the scope needs; the right one is accepted.
+func TestApprovalPolicyNameDerivesFromItsScope(t *testing.T) {
+	named := func(scope v1alpha1.ApprovalScope, name string) *v1alpha1.ApprovalPolicy {
+		return withPolicyName(newApprovalPolicy(scope), name)
+	}
+	const need = "this scope needs the name "
+	runPolicyCases(t, []policyCase{
+		{"global, under another name", named(globalScope(), "example-policy"), need + "global (HBEP-10"},
+		{"global, under the Provider form", named(globalScope(), "provider.global"), need + "global (HBEP-10"},
+		{"a provider, under its bare name", named(providerScope(), "example-provider"), need + "provider.example-provider (HBEP-10"},
+		{"a provider, under another provider's name", named(providerScope(), "provider.another-provider"), need + "provider.example-provider (HBEP-10"},
+		{"a provider, under the namespace form", named(providerScope(), "namespace.example-provider"), need + "provider.example-provider (HBEP-10"},
+		{"a namespace, under its bare name", named(namespaceScope(), "example-team"), need + "namespace.example-team (HBEP-10"},
+		{"a namespace, under the Provider form", named(namespaceScope(), "provider.example-team"), need + "namespace.example-team (HBEP-10"},
+		{"a namespace, under another namespace's name", named(namespaceScope(), "namespace.another-team"), need + "namespace.example-team (HBEP-10"},
+		{"a deployment, under its namespace's name", named(deploymentScope(), "namespace.example-team"), need + "modeldeployment.example-team.example-md (HBEP-10"},
+		{"a deployment, with the name left out", named(deploymentScope(), "modeldeployment.example-team"), need + "modeldeployment.example-team.example-md (HBEP-10"},
+		{"a deployment, with namespace and name swapped", named(deploymentScope(), "modeldeployment.example-md.example-team"), need + "modeldeployment.example-team.example-md (HBEP-10"},
+		{"a deployment, with a dash for the dot", named(deploymentScope(), "modeldeployment.example-team-example-md"), need + "modeldeployment.example-team.example-md (HBEP-10"},
+	}, []policyCase{
+		{"global, named global", named(globalScope(), "global"), ""},
+		{"a provider, named provider.<p>", named(providerScope(), "provider.example-provider"), ""},
+		{"a namespace, named namespace.<n>", named(namespaceScope(), "namespace.example-team"), ""},
+		{"a deployment, named modeldeployment.<n>.<m>", named(deploymentScope(), "modeldeployment.example-team.example-md"), ""},
+		{"a deployment whose name holds a dot", named(v1alpha1.ApprovalScope{ModelDeployment: &v1alpha1.ScopedDeployment{
+			Namespace: "example-team", Name: "example.md"}}, "modeldeployment.example-team.example.md"), ""},
+	})
+}
+
+// A ModelDeployment scope whose policy name would pass 253 characters, the most
+// a Kubernetes name holds, is refused with a message that says so: no policy can
+// be named for it, so the scope cannot exist. This is the rule
+// approvalpolicies:$#1. A name of exactly 253 characters is accepted.
+func TestApprovalPolicyOfAScopeWithATooLongNameIsRefused(t *testing.T) {
+	const msg = "would need a policy name above the 253 characters"
+	// "modeldeployment." is 16 characters, "." is one more: with a one-character
+	// namespace the deployment's name has 253 - 18 = 235 characters at the limit.
+	scopeOf := func(nameLen int) v1alpha1.ApprovalScope {
+		return v1alpha1.ApprovalScope{ModelDeployment: &v1alpha1.ScopedDeployment{Namespace: "a", Name: strings.Repeat("b", nameLen)}}
+	}
+	atLimit := newApprovalPolicy(scopeOf(235))
+	if len(atLimit.Name) != 253 {
+		t.Fatalf("the fixture's policy name has %d characters, want 253", len(atLimit.Name))
+	}
+	over := withPolicyName(newApprovalPolicy(scopeOf(236)), "example-policy")
+	runPolicyCases(t, []policyCase{
+		{"a name that would have 254 characters", over, msg},
+	}, []policyCase{
+		{"a name of exactly 253 characters", atLimit, ""},
+	})
+}

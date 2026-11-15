@@ -30,6 +30,16 @@ spec:
           ApprovalPolicy says who may approve an Operation's plan in one scope (HBEP-10,
           Approval policy). It is cluster-scoped, so only cluster-wide RBAC can write it:
           persons, never agents. It has no status.
+
+          There is one policy per scope, so its name derives from the scope, in a plain
+          form that CEL can check: "global", "provider.<p>", "namespace.<n>" or
+          "modeldeployment.<n>.<m>" (`@hpc-burst-science-agent`, 15 Nov 2026, the ruling
+          on question 7 of #589's plan; HBEP-10, Approval policy). A hashed long-value
+          name, which HBEP-11's long-value rule would give, needs SHA-256, which CEL does
+          not have. A ModelDeployment scope whose name would pass the 253 characters a
+          Kubernetes name holds is refused, since no policy can be named for it. The
+          lifecycle controller treats two policies of one scope as unapprovable, as a
+          backstop.
         properties:
           apiVersion:
             description: |-
@@ -166,6 +176,33 @@ spec:
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: 'the name of an ApprovalPolicy derives from its scope: global,
+            provider.<name>, namespace.<name> or modeldeployment.<namespace>.<name>
+            (HBEP-10, Approval policy)'
+          messageExpression: '''the name of an ApprovalPolicy derives from its scope:
+            this scope needs the name '' + (has(self.spec.scope.global) ? ''global''
+            : has(self.spec.scope.provider) ? ''provider.'' + self.spec.scope.provider
+            : has(self.spec.scope.__namespace__) ? ''namespace.'' + self.spec.scope.__namespace__
+            : has(self.spec.scope.modelDeployment) ? ''modeldeployment.'' + self.spec.scope.modelDeployment.__namespace__
+            + ''.'' + self.spec.scope.modelDeployment.name : ''none (the scope names
+            nothing)'') + '' (HBEP-10, Approval policy)'''
+          rule: 'has(self.spec.scope.global) ? self.metadata.name == ''global'' :
+            has(self.spec.scope.provider) ? self.metadata.name == ''provider.'' +
+            self.spec.scope.provider : has(self.spec.scope.__namespace__) ? self.metadata.name
+            == ''namespace.'' + self.spec.scope.__namespace__ : has(self.spec.scope.modelDeployment)
+            ? self.metadata.name == ''modeldeployment.'' + self.spec.scope.modelDeployment.__namespace__
+            + ''.'' + self.spec.scope.modelDeployment.name : true'
+        - message: 'a ModelDeployment scope whose policy name would pass 253 characters
+            is refused: no ApprovalPolicy can have it (HBEP-10, Approval policy)'
+          messageExpression: '''a ModelDeployment scope of namespace '' + self.spec.scope.modelDeployment.__namespace__
+            + '' and name '' + self.spec.scope.modelDeployment.name + '' would need
+            a policy name above the 253 characters a Kubernetes name holds: no ApprovalPolicy
+            can have this scope, so give its Provider or its namespace a policy instead
+            (HBEP-10, Approval policy)'''
+          rule: '!has(self.spec.scope.modelDeployment) || size(''modeldeployment.''
+            + self.spec.scope.modelDeployment.__namespace__ + ''.'' + self.spec.scope.modelDeployment.name)
+            <= 253'
     served: true
     storage: true
     subresources: {}
