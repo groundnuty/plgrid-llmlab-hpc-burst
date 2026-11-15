@@ -60,6 +60,15 @@ func runRow(t *testing.T, family string, rows ...string) {
 		}
 		t.Skipf("INVALID: %v", err)
 	}
+	if Finding(cfg.Row, err) {
+		// The bulk row's FINDING (ErrFinding): the run was judged, recorded and posted, nothing failed, the witness held, and the bulk path was
+		// 30 ms or less below the control. The test passes beside its marker, which hack/live-checks.sh reads as FINDING, exit 5, on that row alone.
+		if merr := rec.SaveText(FindingFile, FindingNote(cfg.Row)); merr != nil {
+			t.Fatalf("%s: the layout did not protect the streams, but the marker could not be written: %v", cfg.Row.Name, merr)
+		}
+		t.Logf("FINDING: %s; the text to post is in %s", strings.TrimSpace(FindingNote(cfg.Row)), PostsFile)
+		return
+	}
 	if err != nil {
 		t.Fatalf("%s did not finish: %v", cfg.Row.Name, err)
 	}
@@ -107,7 +116,8 @@ func TestAlphaAthenaNowServe(t *testing.T) {
 // TestBetaAthenaNowBulk is the bulk row of issue #521 (beta's tracker, #522) on Athena plgrid-now under profiles/athena-now.yaml, in host-dialed mode
 // with the bulk path, on the engine double: eight token streams beside a 64 MiB reply, once down the token transport as a streamed reply (the
 // control) and once as a non-streamed reply down the bulk path, and the streams' gap p99 read for each. It fails on a broken path alone; a run with no
-// saturation witness is INVALID; a control under 85 ms, a bulk path at or above it, or a bulk path too little below a stalled control, is a finding.
+// saturation witness is INVALID; a bulk path 30 ms or less below the control is a FINDING, and more than 30 ms below a PASS, with 85 ms named
+// as S17's buffer prediction alone (#584).
 // The engine double reaches the job as the test shim in hb-agent's place, which execs the shipped agent the harness staged (issue #521, option (A)).
 //
 //livecheck:beta-athena-now-bulk
