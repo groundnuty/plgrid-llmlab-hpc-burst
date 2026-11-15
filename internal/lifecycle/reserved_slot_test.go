@@ -170,33 +170,36 @@ func TestReservedSlotFollowsTheReplacementRule(t *testing.T) {
 // TestReservedSlotGoesToTheNoOverlapSuccessorBeforeB: in no-overlap mode, under an effective submit limit of 1, the
 // slot the primary frees goes to its successor before md-b's primary. The one-slot path's timeline
 // (nooverlap_test.go): the primary drains at 09:50:20 with its stream in flight until 09:56:00, and its Allocation is
-// released 5 min after its end, so the successor's Allocation comes no earlier than 10:01:00. md-b waits throughout,
-// and still waits once the successor's Allocation holds the one slot.
+// released 5 min after its end, so the successor's Allocation comes no earlier than 10:01:00. The second deployment is
+// named ma-b to sort before the primary's, md, so its pass runs first in every Step (rig.reconcileAll): in the Step
+// whose Provider sync frees the slot, ma-b's pass meets the free slot before the successor's does, the order in which
+// only the successor's reserved slot keeps it. ma-b waits throughout, and still waits once the successor's Allocation
+// holds the one slot.
 func TestReservedSlotGoesToTheNoOverlapSuccessorBeforeB(t *testing.T) {
 	rg := noOverlapRig(t, oneSlotOpts(withBatchConfig(func(c *pfake.Config) { c.MaxSubmitPerUser, c.MaxGPUsPerUser = 1, 1 }))...)
 	p := noOverlapStart(rg)
-	rg.create(mdSpec("md-b"))
+	rg.create(mdSpec("ma-b"))
 	bWaits := func() {
-		if n := len(rg.allocations("md-b")); n != 0 {
-			t.Fatalf("at %s md-b has %d Allocations, want none: the one slot is %s's handover's", rg.clock.Now().Format(time.TimeOnly), n, hoMD)
+		if n := len(rg.allocations("ma-b")); n != 0 {
+			t.Fatalf("at %s ma-b has %d Allocations, want none: the one slot is %s's handover's", rg.clock.Now().Format(time.TimeOnly), n, hoMD)
 		}
 		if n := rg.slotHolders(); n > 1 {
 			t.Fatalf("at %s %d Allocations hold a slot, above the limit of 1", rg.clock.Now().Format(time.TimeOnly), n)
 		}
 	}
 	hoStepTo(rg, hoT(9, 50, 20), 5*time.Minute, bWaits)
-	// The gap: the successor waits for the primary's slot, which is reserved for it, and md-b's message names it.
+	// The gap: the successor waits for the primary's slot, which is reserved for it, and ma-b's message names it.
 	sawNamed := false
 	gap := func() {
 		bWaits()
-		c := rg.condition("md-b", v1alpha1.ConditionDegraded)
+		c := rg.condition("ma-b", v1alpha1.ConditionDegraded)
 		if c.Reason == v1alpha1.ReasonSubmitLimitReached && strings.Contains(c.Message, "reserved for the handovers of "+rigNS+"/"+hoMD) {
 			sawNamed = true
 		}
 	}
 	hoStepUntil(rg, hoT(10, 30, 0), 10*time.Second, func() bool { return rg.readyCount(hoMD) > 0 }, gap)
 	if !sawNamed {
-		t.Fatal("md-b's message never named the handover whose reserved slot held it")
+		t.Fatal("ma-b's message never named the handover whose reserved slot held it")
 	}
 	var succ *v1alpha1.Instance
 	for _, in := range rg.liveInstances(hoMD) {
@@ -207,7 +210,7 @@ func TestReservedSlotGoesToTheNoOverlapSuccessorBeforeB(t *testing.T) {
 	if succ == nil || succ.Status.Phase != v1alpha1.InstanceReady {
 		t.Fatalf("the primary's no-overlap successor %+v, want it ready in the freed slot", succ)
 	}
-	// Once the successor's Allocation holds the slot, md-b still waits.
+	// Once the successor's Allocation holds the slot, ma-b still waits.
 	hoStepTo(rg, rg.clock.Now().Add(time.Minute), 10*time.Second, bWaits)
 }
 
