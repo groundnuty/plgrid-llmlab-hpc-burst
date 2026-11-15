@@ -138,6 +138,10 @@ case $mode in
   not-run-glibc-words) echo "$HPCBURST_ALPHA_ROW: the compute node's glibc is older than the 2.30 Envoy needs (glibc 2.28 on host-x.example.org); the run sent no request through the front; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   # A marker of the test's own words, STUB_MARKER, on whatever row runs it: the bulk row's INVALID (internal/alpha, InvalidNote), say.
   marker) printf '%s' "$STUB_MARKER" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  # The bulk row's FINDING marker (internal/alpha, FindingNote; #584) in the test's own words, STUB_MARKER, beside a pass, on whatever row runs it;
+  # and the same marker beside a skip with STUB_NOTRUN as the NOT RUN marker.
+  finding-marker) printf '%s' "$STUB_MARKER" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/finding.txt"; echo "=== RUN   $t"; echo "--- PASS: $t (0.01s)"; echo PASS ;;
+  finding-and-not-run) printf '%s' "$STUB_MARKER" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/finding.txt"; printf '%s' "$STUB_NOTRUN" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   # The marker of a first job that ran and a second that never started (internal/alpha, NotRunNote).
   not-run-second) echo "$HPCBURST_ALPHA_ROW: the first job ran and the second never started; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   # The marker of a handover row whose streams' lead does not fit the deployment's max-model-len (internal/alpha, NotRunNote, issue
