@@ -319,6 +319,16 @@ func TestTheAgentsOwnMessagesAreItsCallSites(t *testing.T) {
 			t.Errorf("internal/agent logs no %s %q", c.level, c.msg)
 		}
 	}
+	// The rehash line (issue #575) with every key RehashOf reads.
+	if c, ok := find(agentCalls, "Info", AgentRehashMsg); !ok {
+		t.Errorf("internal/agent logs no Info %q", AgentRehashMsg)
+	} else {
+		for _, k := range []string{"files", "listed", "bytes", "ms"} {
+			if !slices.Contains(c.args, k) {
+				t.Errorf("internal/agent's %q line has no %s key: %q", AgentRehashMsg, k, c.args)
+			}
+		}
+	}
 	var first []string
 	for _, c := range main {
 		if c.pos < start.pos && c.level != "Error" {

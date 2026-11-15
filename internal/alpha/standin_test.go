@@ -27,7 +27,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -697,6 +696,23 @@ func TestStandInNowServe(t *testing.T) {
 	if !errors.Is(s.err, ErrWarmUnshown) {
 		t.Fatalf("%s ended with %v; want the NOT RUN of a warm start its cold agent log does not show, and nothing else", s.row.Name, s.err)
 	}
+	// The real agent's rehash line, read by the live flow (issue #575): a cold start rehashed nothing, and the post says so in words.
+	if rb, err := os.ReadFile(filepath.Join(s.cfg.Out, RecordFile)); err != nil {
+		t.Errorf("no record: %v", err)
+	} else {
+		var rec struct {
+			Observation NowServeObs `json:"observation"`
+		}
+		if err := json.Unmarshal(rb, &rec); err != nil {
+			t.Fatal(err)
+		}
+		if r := rec.Observation.Warm.Rehash; !r.Read || r.Files != 0 || r.Listed == 0 {
+			t.Errorf("the cold run's rehash read as %+v, want the agent's line with no file present", r)
+		}
+	}
+	if !strings.Contains(string(post), "rehash of the job, from its agent's own log (HBEP-9's rehash time; information, not a check): none: a cold start") {
+		t.Errorf("the cold run's text to post does not say its rehash found nothing to rehash")
+	}
 	var ours []fakeslurm.Job
 	for _, j := range cl.Plat.Jobs() {
 		if strings.HasPrefix(j.Name, s.prefix) {
@@ -788,8 +804,13 @@ func preStage(t *testing.T, cl *stack.Cluster, w world) {
 		return ok && j.Finished
 	})
 	line, err := os.ReadFile(filepath.Join(alloc, "stage-result"))
-	if err != nil || !regexp.MustCompile(`^outcome=ok image_seconds=\d+ image_built=true checkpoint_seconds=\d+ files=\d+ mismatched=0\n$`).Match(line) {
-		t.Fatalf("the pre-staging job left %q (%v), want a cold staging that ended ok", line, err)
+	if err != nil {
+		t.Fatalf("the pre-staging job left no result: %v", err)
+	}
+	// Read by the pre-staging row's own parser (ParseStageResult), so this reading cannot keep an old form of the line.
+	r, err := ParseStageResult(line)
+	if err != nil || !r.OK || !r.ImageBuilt || r.Mismatched != 0 || !r.Rehash.Read || r.Rehash.Files != 0 {
+		t.Fatalf("the pre-staging job left %q (%+v, %v), want a cold staging that ended ok, nothing rehashed", line, r, err)
 	}
 	t.Logf("pre-staged on the stand-in, as the pre-staging row stages: %s", strings.TrimSpace(string(line)))
 }
@@ -873,6 +894,13 @@ func TestStandInNowServeWarm(t *testing.T) {
 		t.Fatal(err)
 	}
 	o := rec.Observation
+	// The real agent's rehash line, read by the live flow (issue #575): every file the warm start found, with its bytes.
+	if r := o.Warm.Rehash; !r.Read || r.Files == 0 || r.Files != len(o.Warm.Files) || r.Bytes <= 0 || r.Listed < r.Files {
+		t.Errorf("the warm run's rehash read as %+v, want the agent's line with the %d files the warm start found and their bytes", r, len(o.Warm.Files))
+	}
+	if !strings.Contains(string(post), "rehash of the job, from its agent's own log (HBEP-9's rehash time; information, not a check): ") || !strings.Contains(string(post), " listed files, ") {
+		t.Errorf("the warm run's text to post does not carry its rehash's numbers")
+	}
 	want := standInHubFiles(t, hubURL)
 	got := append([]string(nil), o.Warm.Files...)
 	sort.Strings(got)
