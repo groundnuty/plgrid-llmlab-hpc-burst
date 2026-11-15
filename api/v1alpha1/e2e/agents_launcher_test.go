@@ -317,6 +317,20 @@ func TestIdentityStatus(t *testing.T) {
 	}
 	must(t, clientcmd.WriteToFile(*kc, wrongPath), "point the kubeconfig elsewhere")
 
+	// agent-ca: its kubeconfig holds a certificate authority that is not a certificate. It names this
+	// host's server, so restConfig takes it, and building the client fails. That is this identity's state
+	// ("unreadable: <why>"), and neither the other identities' nor the host's (#595's review, a nit).
+	badCA, _ := issue("agent-ca")
+	badCAPath := filepath.Join(dir, badCA+".kubeconfig")
+	kcCA, err := clientcmd.LoadFromFile(badCAPath)
+	must(t, err, "read the kubeconfig to corrupt its CA")
+	for _, cl := range kcCA.Clusters {
+		cl.CertificateAuthority = ""
+		cl.InsecureSkipTLSVerify = false // envtest's server is reached insecurely; a CA beside that flag is refused for another reason
+		cl.CertificateAuthorityData = []byte("-----BEGIN CERTIFICATE-----\nnot a certificate\n-----END CERTIFICATE-----\n")
+	}
+	must(t, clientcmd.WriteToFile(*kcCA, badCAPath), "corrupt the kubeconfig's CA")
+
 	var states []launcher.IdentityState
 	eventually(t, 60*time.Second, "the deleted ServiceAccount's token to be rejected", func() (bool, error) {
 		var err error
@@ -342,6 +356,11 @@ func TestIdentityStatus(t *testing.T) {
 	}
 	if g := byName[wrong]; g.Valid || !strings.Contains(g.Detail, "not at this launcher's") {
 		t.Errorf("the identity whose kubeconfig names another server: %+v, want not valid and refused as another server", g)
+	}
+	if g := byName[badCA]; g.Valid || !strings.HasPrefix(g.Detail, "unreadable: ") || g.Kubeconfig == "" {
+		t.Errorf("the identity whose kubeconfig has a corrupt CA: %+v, want not valid, with a detail that starts 'unreadable: '", g)
+	} else {
+		t.Logf("the corrupt CA is reported as %q", g.Detail)
 	}
 	if g := byName[nofile]; g.Valid || g.Kubeconfig != "" || !strings.Contains(g.Detail, "no kubeconfig file") {
 		t.Errorf("the ServiceAccount with no file: %+v, want not valid, no kubeconfig and a detail saying so", g)

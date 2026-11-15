@@ -16,12 +16,19 @@ import (
 	"testing"
 	"time"
 
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/discovery/cached/memory"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/restmapper"
+	"k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -42,6 +49,9 @@ type agent struct {
 	cfg        *rest.Config
 	cs         kubernetes.Interface
 	c          client.Client
+	dyn        dynamic.Interface
+	// scales is the scale client that kubectl scale uses: the scale subresource, through discovery.
+	scales scale.ScalesGetter
 }
 
 func (a *agent) username() string { return "system:serviceaccount:" + agentsNamespace + ":" + a.name }
@@ -58,24 +68,93 @@ func clientsFromConfig(t *testing.T, cfg *rest.Config) (kubernetes.Interface, cl
 	return cs, cl
 }
 
-// installAgentRoles installs the namespace, roles and bindings through the launcher's own function,
-// as up does, and sets them back to the manifest when the test ends.
+// openAgentAccess installs the three admission policies and the agent roles through the launcher's own
+// ordered step (launcher.InstallAgentAccess: the policies, the narrow role, the bounded wait until each
+// policy refuses its dry-run probe, the wide role), as up does. So an agent of a test never holds a write
+// before the policy that bounds it is enforced, and no case starts inside the activation window (plan
+// section 1). Policies the host had installed before are left alone at the end; the ones the test
+// installed are removed, and the end waits until the API server accepts their probes again, since the
+// owner and approver pins apply to every identity and would refuse the next test's Operations. The
+// roles are set to their narrow form at the end.
+func openAgentAccess(t *testing.T) {
+	t.Helper()
+	before := map[string]bool{}
+	states, err := launcher.CheckAdmission(bg(), cfg)
+	must(t, err, "check the admission policies")
+	for _, s := range states {
+		before[s.Name] = s.Present
+	}
+	t.Cleanup(func() {
+		for _, name := range launcher.AdmissionPolicyNames() {
+			if before[name] {
+				continue
+			}
+			removePolicy(t, name)
+		}
+		for _, name := range launcher.AdmissionPolicyNames() {
+			if !before[name] {
+				waitPolicyNotEnforced(t, name)
+			}
+		}
+		if err := launcher.InstallAgentRBACNarrow(bg(), cfg, io.Discard); err != nil {
+			t.Errorf("clean-up: set the agents' role back to its narrow form: %v", err)
+		}
+	})
+	writes, err := launcher.InstallAgentAccess(bg(), cfg, io.Discard, launcher.AgentAccessOptions{})
+	must(t, err, "open the agents' access")
+	if !writes {
+		t.Fatal("the agents' writes are off on a host that has every CRD")
+	}
+}
+
+// installAgentRoles installs the namespace, the roles and the bindings with the agent role in its NARROW,
+// read-only form, for the tests that judge identities and not writes, and sets them back to it at the end.
 func installAgentRoles(t *testing.T) {
 	t.Helper()
-	must(t, launcher.InstallAgentRBAC(bg(), cfg, io.Discard), "install the agents' roles")
+	must(t, launcher.InstallAgentRBACNarrow(bg(), cfg, io.Discard), "install the agents' roles")
 	t.Cleanup(func() {
-		if err := launcher.InstallAgentRBAC(bg(), cfg, io.Discard); err != nil {
+		if err := launcher.InstallAgentRBACNarrow(bg(), cfg, io.Discard); err != nil {
 			t.Errorf("clean-up: install the agents' roles again: %v", err)
 		}
 	})
 }
 
-// newAgents installs the roles and makes one identity per name with the launcher's identity function
+// removePolicy deletes the binding, then the policy, of one of the three. Gone is not an error.
+func removePolicy(t *testing.T, name string) {
+	t.Helper()
+	for _, o := range []client.Object{
+		&admissionregistrationv1.ValidatingAdmissionPolicyBinding{ObjectMeta: metav1.ObjectMeta{Name: name}},
+		&admissionregistrationv1.ValidatingAdmissionPolicy{ObjectMeta: metav1.ObjectMeta{Name: name}},
+	} {
+		if err := c.Delete(bg(), o); err != nil && !apierrors.IsNotFound(err) {
+			t.Errorf("clean-up: delete %T %s: %v", o, name, err)
+		}
+	}
+}
+
+// waitPolicyNotEnforced waits until the API server ACCEPTS the policy's dry-run probe: the policy is
+// gone for admission, which learns of a deletion after the call returns, too.
+func waitPolicyNotEnforced(t *testing.T, name string) {
+	t.Helper()
+	eventually(t, 60*time.Second, name+" to stop being enforced", func() (bool, error) {
+		refused, err := launcher.ProbeAdmission(bg(), cfg, name)
+		return !refused && err == nil, err
+	})
+}
+
+// newAgents opens the agents' access (openAgentAccess) and makes one identity per name with the launcher's identity function
 // (the kubeconfigs are written under a directory of the test), and removes the ServiceAccounts at the
 // end. Names get a unique suffix, so a host that other tests used has no clash.
 func newAgents(t *testing.T, prefixes ...string) []*agent {
 	t.Helper()
-	installAgentRoles(t)
+	openAgentAccess(t)
+	return issueAgents(t, prefixes...)
+}
+
+// issueAgents makes one identity per name with the launcher's identity function and removes the
+// ServiceAccounts at the end. It needs the agents' namespace, which every install of the roles makes.
+func issueAgents(t *testing.T, prefixes ...string) []*agent {
+	t.Helper()
 	dir := t.TempDir()
 	adminCS, _ := clientsFromConfig(t, cfg)
 	var out []*agent
@@ -90,9 +169,23 @@ func newAgents(t *testing.T, prefixes ...string) []*agent {
 		must(t, err, "read the kubeconfig of "+name)
 		a := &agent{name: name, kubeconfig: res.Kubeconfig, cfg: kc}
 		a.cs, a.c = clientsFromConfig(t, kc)
+		a.dyn, err = dynamic.NewForConfig(a.cfg)
+		must(t, err, "dynamic client of "+name)
+		a.scales = scaleClient(t, a.cfg)
 		out = append(out, a)
 	}
 	return out
+}
+
+// scaleClient is the client kubectl scale uses: the scale subresource through discovery.
+func scaleClient(t *testing.T, kc *rest.Config) scale.ScalesGetter {
+	t.Helper()
+	dc, err := discovery.NewDiscoveryClientForConfig(kc)
+	must(t, err, "discovery client")
+	mapper := restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(dc))
+	sc, err := scale.NewForConfig(kc, mapper, dynamic.LegacyAPIPathResolverFunc, scale.NewDiscoveryScaleKindResolver(dc))
+	must(t, err, "scale client")
+	return sc
 }
 
 // whoAmI asks the API server who the clientset's credential is (SelfSubjectReview).
@@ -163,18 +256,21 @@ func expectedAgentMatrix() []accessRow {
 	for _, r := range []string{"providers", "platformprofiles", "approvalpolicies"} {
 		add(G, r, "", "", read...)
 	}
-	// hpcburst-agent: READ-ONLY in this PR (the science agent's check of #595): no create, update, patch
-	// or scale of a ModelDeployment, and no write of an Operation or an Approval. A create carrying an
-	// owner reference to a short-lived object would be a garbage-collector release outside every guard,
-	// so each write comes with PR 3's admission policies that bound it.
-	add(G, "modeldeployments", "", "default", "get", "list", "watch")
-	for _, r := range []string{"allocations", "instances", "operations", "approvals"} {
+	// hpcburst-agent in its WIDE form (PR 3; HBEP-10, Identities and roles): create and update
+	// ModelDeployments, their scale subresource included; create Operations, and update them to confirm;
+	// create Approvals. Each write is bounded by an admission policy (admission_*_test.go), which up
+	// enforces before it applies the wide role. The narrow form, which up applies before, has none of
+	// these; allocations, instances and every */status stay read-only or closed whatever the form.
+	add(G, "modeldeployments", "", "default", "get", "list", "watch", "create", "update", "patch")
+	add(G, "operations", "", "default", "get", "list", "watch", "create", "update", "patch")
+	add(G, "approvals", "", "default", "get", "list", "watch", "create")
+	for _, r := range []string{"allocations", "instances"} {
 		add(G, r, "", "default", read...)
 	}
 	for _, r := range []string{"modeldeployments", "allocations", "instances", "operations", "approvals"} {
 		add(G, r, "status", "default") // never any */status
 	}
-	add(G, "modeldeployments", "scale", "default") // the scale subresource lowers capacity
+	add(G, "modeldeployments", "scale", "default", "get", "update", "patch")
 	add("apps", "controllerrevisions", "", "default", read...)
 	add("", "events", "", "default", read...)
 	add("events.k8s.io", "events", "", "default", read...)
@@ -184,7 +280,7 @@ func expectedAgentMatrix() []accessRow {
 	rows = append(rows,
 		accessRow{G, "modeldeployments", "", "", "list", true},
 		accessRow{G, "allocations", "", "kube-system", "get", true},
-		accessRow{G, "modeldeployments", "", "kube-system", "create", false},
+		accessRow{G, "modeldeployments", "", "kube-system", "create", true},
 		accessRow{G, "allocations", "", "kube-system", "delete", false},
 	)
 
