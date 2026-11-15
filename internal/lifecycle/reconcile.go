@@ -196,6 +196,9 @@ func (p *pass) run() error {
 	// An Instance's failure does not hold back the rest of the pass; it is
 	// returned at the end, so the key is retried with backoff.
 	instErr := p.instances()
+	// In beta, a hedge whose member became ready is resolved in the same pass (HBEP-7, Reconcile loop, step 6):
+	// before step 7 counts it, so its losers are out before anything is planned.
+	instErr = errors.Join(instErr, p.resolveHedges())
 	if err := p.clearDialHome(); err != nil {
 		return errors.Join(instErr, err)
 	}

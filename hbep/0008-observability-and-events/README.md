@@ -173,7 +173,7 @@ The API refuses a new event without `action` or `reason`, with either over 128 c
 | `failing` | `WorkerRestart`, `InstanceRestart`, `RouterRestart`, `CrashCorrelated`, `RestartLoop`, `RegistrationTimeout`, `StartTimeout`, `TunnelNotConnected`, `QualificationFailed`, `VerificationFailed`, `AllocationFailed`, `AllocationLost`, `AllocationRefused`, `Requeued`, `SubmittedAsOther`, `RelayEndedForGood`, `AllocationEndedEarly` | Instance | lifecycle controller |
 | `failing` | `HeartbeatMissed` | the stale observer's resource (Observers) | the component that judges it |
 | `failing` | `UsageWriteFailed` | the front's `Lease` | front |
-| `replaced` | `HandedOver` | Instance | lifecycle controller |
+| `replaced` | `HandedOver`, `HedgeLost` | Instance | lifecycle controller |
 | `ending-soon` | `NoReplacementReady` | Instance | lifecycle controller |
 
 - An event about a deployment caused by one Instance regards the ModelDeployment, with the Instance in `related`. `VerificationFailed`'s `degraded` event and `CapacityDropped`'s regard the Instance instead once the ModelDeployment is gone (`mdObject`, `internal/lifecycle/verify.go`), since nothing else is left to attach them to.
@@ -579,6 +579,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-12: erratum: `RouterRestart`, the router rung's `failing` event regarding an Instance, joins the Reasons table with the code that raises it (#429), as HBEP-7's Several workers says.
 - 2026-11-13: erratum: `CrashCorrelated`, the crash-correlation event's `failing` event regarding an Instance, with the other Instance in `related`, joins the Reasons table with the code that raises it (#539), as HBEP-7's Health and restarts says.
 - 2026-11-15: amendment following HBEP-10 (PR #582): `PlanStale` and `OperationPartlyFailed` proposed, outside the Reasons table until their code; an Operation's stop carries it in `related`; HBEP-10's subscriptions move to stable, and the durable log for events and usage stays in beta.
+- 2026-11-15: erratum: `HedgeLost`, the `replaced` event regarding each hedge loser's Instance, with the winner in `related`, joins the Reasons table with the code that raises it (#604), as HBEP-7's Hedging (beta) says.
 
 ## Amendments
 

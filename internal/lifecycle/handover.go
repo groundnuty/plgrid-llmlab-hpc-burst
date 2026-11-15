@@ -3,7 +3,6 @@ package lifecycle
 import (
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -12,25 +11,15 @@ import (
 
 func asUnsupported(err error, u **unsupported) bool { return errors.As(err, u) }
 
-// primaries returns the Instances that count towards capacity: not draining,
-// ended or deleting, and not the replacement of a predecessor that still
-// counts (HBEP-7, Reconcile loop, step 7).
+// primaries returns the Instances that count towards capacity, one per hedge:
+// not draining, ended or deleting, and not the replacement of a predecessor
+// that still counts (HBEP-7, Reconcile loop, step 7). The members of one hedge
+// count once, through its representative (hedge.go), so a two-member hedge for
+// one missing primary is one primary, and step 7 cancels no member of it.
 func (p *pass) primaries() []*v1alpha1.Instance {
-	counted := map[string]bool{}
-	for _, in := range p.insts {
-		if countable(in) && !p.stale[in.UID] {
-			counted[in.Name] = true
-		}
-	}
 	var out []*v1alpha1.Instance
-	for _, in := range p.insts {
-		if !countable(in) || p.stale[in.UID] {
-			continue
-		}
-		if pred := in.Annotations[v1alpha1.AnnotationPredecessor]; pred != "" && counted[pred] {
-			continue
-		}
-		out = append(out, in)
+	for _, g := range p.primaryHedges() {
+		out = append(out, hedgeRepresentative(g.members, p.allocOf))
 	}
 	return out
 }
@@ -151,59 +140,18 @@ func countUsable(pvs []*providerView) int {
 	return n
 }
 
-// scaleDown removes surplus primaries: pending Allocations first, newest first;
-// then Instances still starting, newest first; then ready primaries with the
-// nearest hard end, which drain. A surplus primary's replacement goes with it,
-// never promoted (HBEP-7, Reconcile loop, step 7; Release: scale-down).
+// scaleDown removes surplus primaries: pending ones first, newest first; then
+// Instances still starting, newest first; then ready primaries with the nearest
+// hard end, which drain. A surplus primary's replacement goes with it, never
+// promoted, and a hedge goes whole, each member by its own state (HBEP-7,
+// Reconcile loop, step 7; Release: scale-down; scaleDownTargets).
 func (p *pass) scaleDown(prim []*v1alpha1.Instance, surplus int) error {
-	rank := func(in *v1alpha1.Instance) int {
-		a := p.allocs[in.Spec.AllocationRef.Name]
-		switch {
-		case a == nil || a.Status.AtProvider.StartTime == nil:
-			return 0
-		case in.Status.Phase != v1alpha1.InstanceReady:
-			return 1
-		}
-		return 2
-	}
-	victims := append([]*v1alpha1.Instance(nil), prim...)
-	sort.SliceStable(victims, func(i, j int) bool {
-		a, b := victims[i], victims[j]
-		if ra, rb := rank(a), rank(b); ra != rb {
-			return ra < rb
-		}
-		if rank(a) == 2 {
-			return leaseBefore(a, b)
-		}
-		return b.CreationTimestamp.Before(&a.CreationTimestamp) // newest first
-	})
-	for _, in := range victims[:surplus] {
-		// A surplus primary's replacement goes with it, never promoted
-		// (step 7); a serving one drains like any surplus Instance (Release:
-		// scale-down).
-		if repl := p.replacementOf(in); repl != nil {
-			if err := p.removeSurplus(repl, "its predecessor was scaled down"); err != nil {
-				return err
-			}
-		}
-		if err := p.removeSurplus(in, "scaled down"); err != nil {
+	for _, t := range p.scaleDownTargets(prim, surplus) {
+		if err := p.applyScaleTarget(t); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-// removeSurplus takes one Instance out at scale-down (HBEP-7, Release): a
-// ready one drains and ends, and its Allocation then follows its retention
-// policy; one not yet serving ends at once, and its Allocation is cancelled
-// only when its job has not started.
-func (p *pass) removeSurplus(in *v1alpha1.Instance, why string) error {
-	if in.Status.Phase == v1alpha1.InstanceReady {
-		return p.startDrain(in)
-	}
-	a := p.allocs[in.Spec.AllocationRef.Name]
-	notStarted := a == nil || a.Status.AtProvider.StartTime == nil
-	return p.end(in, a, v1alpha1.ReasonDrained, why, notStarted)
 }
 
 func leaseBefore(a, b *v1alpha1.Instance) bool {

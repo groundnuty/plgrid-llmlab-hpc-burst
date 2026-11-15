@@ -284,7 +284,7 @@ const maxRestartsKept = 32
 // failed Instance counts towards its class's failure streak (HBEP-7, Restart
 // and provisioning loops).
 func failedEnd(in *v1alpha1.Instance) bool {
-	return ended(in) && in.Status.EndReason != v1alpha1.ReasonDrained && in.Status.EndTime != nil
+	return ended(in) && !cleanEnd(in.Status.EndReason) && in.Status.EndTime != nil
 }
 
 // classStreak returns the end times of the class's failed Instances since an
