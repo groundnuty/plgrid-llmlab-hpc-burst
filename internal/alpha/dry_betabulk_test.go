@@ -2,8 +2,9 @@ package alpha
 
 // The bulk row (issue #521; betabulk.go) over the fake cluster: one job, run on the manual clock; what the stack would show is stood in for. Each
 // fault departs from the healthy run in one way, and ends as the ruling says (the science agent, #521): a broken path FAILs (betaBulkCases), a run
-// with no saturation witness is INVALID (betaBulkInvalidCases, TestTheBulkRowsInvalidRunsThroughRun), and every other reading passes with its plain
-// stated reading, above or below S17's 85 ms prediction (TestTheBulkRowsReadingsPassThroughRun; #584).
+// with no saturation witness is INVALID (betaBulkInvalidCases, TestTheBulkRowsInvalidRunsThroughRun), a bulk path 30 ms or less below the control
+// is a FINDING (betaBulkFindingFaults, TestTheBulkRowsVerdictsThroughRun; #584), and more than 30 ms below passes, above or below S17's 85 ms
+// prediction alike.
 
 import (
 	"context"
@@ -68,6 +69,8 @@ func (d *drySteps) BetaBulk(_ context.Context, p Plan) (BulkObs, error) {
 		obs.Bulk.P99 = 200 * time.Millisecond
 	case d.fault("bulk-small-margin"):
 		obs.Control.P99, obs.Bulk.P99 = 100*time.Millisecond, 80*time.Millisecond // 20 ms apart, under S4's margin
+	case d.fault("bulk-past-the-margin"):
+		obs.Control.P99, obs.Bulk.P99 = 100*time.Millisecond, 69999*time.Microsecond // 30.001 ms apart, past S4's margin
 	case d.fault("control-short-reply"):
 		obs.Control.ReplyBytes = BulkReplyBytes - 1
 	case d.fault("bulk-short-reply"):
@@ -123,15 +126,12 @@ func (d *drySteps) BetaBulk(_ context.Context, p Plan) (BulkObs, error) {
 	return obs, nil
 }
 
-// betaBulkCases are the bulk row's dry cases that pass or fail. Every reading passes, above or below S17's prediction, at or under S4's margin
-// (#584); the faults that end INVALID are betaBulkInvalidCases.
+// betaBulkCases are the bulk row's dry cases that pass or fail. A bulk path more than 30 ms below the control passes, at or above S17's prediction
+// alike (#584); the faults that end INVALID are betaBulkInvalidCases, and those that end FINDING betaBulkFindingFaults.
 var betaBulkCases = []dryCase{
 	{"", ""},
-	{"control-at-the-prediction", ""},
-	{"control-under-the-prediction", ""},
 	{"bulk-at-the-prediction", ""},
-	{"bulk-above-the-prediction", ""},
-	{"bulk-small-margin", ""},
+	{"bulk-past-the-margin", ""},
 	{"not-ready", "the Instance was not seen ready"},
 	{"not-registered", "no Instance's bulk transport was registered at the front"},
 	{"front-without-bulk", "no Instance's bulk transport was registered at the front"},

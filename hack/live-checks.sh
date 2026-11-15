@@ -34,7 +34,9 @@
 # setting is missing, a file is not mode 600, the one-job slot is in use; or a
 # job that never started within its bound was cancelled by its tag, on any row: not a failure, try again later; or
 # the scheduler rejected the row's shape in the dry-run estimate, with or without --yes; or the bulk row's run had no
-# saturation witness, below); 4 a cluster test was not run because --yes was not given.
+# saturation witness, below); 4 a cluster test was not run because --yes was not given; 5 FINDING, the bulk row's run
+# that measured, failed nothing and held its saturation witness, but whose bulk path's gap p99 was 30 ms or less below
+# the control's (below): not a pass, so no caller reads it as one, and not a failure.
 #
 # NOT RUN (one protocol for every cluster row; the science agent's ruling of 8 Nov 2026, #272): a job that never
 # started within its bound ends the row as NOT RUN, exit 3, whichever bound ran out and whether the row has a
@@ -71,6 +73,11 @@
 # words, held to that row alone; judge prints "<row>: INVALID (not a NOT RUN: ...)", apart from PASS, FAIL and NOT RUN, and the row exits 3 like a
 # NOT RUN: not a failure, not a pass, run it again. Its text to post says why. A failure of any other check wins: the row is a FAIL. The row runs
 # through its test shim (issue #521, option (A)), which the script builds for it alone (build_test_shims), in host-dialed mode alone.
+# The bulk row has a fourth verdict, FINDING (#584; the science agent's rulings of 15 Nov 2026): a run that measured, failed nothing and held its
+# saturation witness, but whose bulk path's gap p99 was 30 ms or less below the control's, so the layout doesn't protect the streams on this path
+# and HBEP-6's beta criterion is not met. Its test passes beside a marker of its own, finding.txt in fixed words, held to that row alone; judge
+# prints "<row>: FINDING (...)", apart from PASS, FAIL, NOT RUN and INVALID, and the row exits 5: a PASS would record the criterion met. A
+# failure of any other check wins, and so does INVALID. Several rows' codes combine as worse() says: 1 over 5 over 3 over 4 over 2 over 0.
 # The keeper row on plgrid-now (beta-athena-now-keeper, issue #521) has one: the deployment's max-model-len does not hold a stream long enough to span
 # a controller restart's outcome at the engine's measured rate. Its marker names the rate and the context, numbers only, which judge prints; the run
 # killed no controller, and its jobs were cancelled by their tags. The row runs in host-dialed mode alone. It has a second, of a run that did start
@@ -1155,6 +1162,7 @@ not_run_verdict() {
   local n=$1 rc=$2 failed=$3 skipped=$4 named=$5
   [ "$named" = SKIP ] && [ "$rc" = 0 ] && [ "$failed" = 0 ] && [ "$skipped" = 1 ] || return 1
   [ -n "$REC_DIR" ] && [ -f "$REC_DIR/not-run.txt" ] && [ ! -L "$REC_DIR/not-run.txt" ] || return 1
+  ! finding_present || return 1 # a FINDING's marker beside a skip is no NOT RUN: the run is a failure
   [ -n "${HOST[$n]:-}" ] || return 1
   ! second_job_marker || [ "${MOSTJOBS[$n]:-1}" -ge 2 ] || return 1
   ! warm_marker || case $n in alpha-athena-now-serve|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1
@@ -1182,6 +1190,13 @@ glibc_marker() { grep -q "the compute node's glibc is older than the 2.30 Envoy 
 # invalid_marker: the marker says the bulk row's run has no saturation witness, so its reading measures nothing (internal/alpha, ErrInvalid and
 # InvalidNote; the science agent's ruling on #521): an INVALID, not a NOT RUN, which not_run_verdict holds to that row and judge prints as INVALID.
 invalid_marker() { grep -q "the run has no saturation witness, so its reading measures nothing" "$REC_DIR/not-run.txt" 2>/dev/null; }
+# finding_marker: the bulk row's FINDING marker beside its passing test (internal/alpha, ErrFinding and FindingNote; #584): a regular file, not a
+# link, in this run's record directory, in its fixed words. finding_present is any file of that name, which judge holds to the bulk row alone.
+finding_present() { [ -n "$REC_DIR" ] && { [ -e "$REC_DIR/finding.txt" ] || [ -L "$REC_DIR/finding.txt" ]; }; }
+finding_marker() {
+  [ -n "$REC_DIR" ] && [ -f "$REC_DIR/finding.txt" ] && [ ! -L "$REC_DIR/finding.txt" ] &&
+    grep -q "the bulk path's gap p99 is 30 ms or less below the control's: the layout doesn't protect the streams on this path" "$REC_DIR/finding.txt" 2>/dev/null
+}
 # staged_image_marker: the marker says the Provider's image for the deployment is not staged with a whole record, so the bulk row's run, whose test
 # shim's double stages no image, submitted no job (internal/alpha, ErrNoStagedImage; the science agent's rulings on #579): a NOT RUN of that row alone.
 staged_image_marker() { grep -q "the Provider's image for the deployment is not staged with a whole record, and the bulk row's double stages none" "$REC_DIR/not-run.txt" 2>/dev/null; }
@@ -1324,7 +1339,20 @@ judge() {
   fi
   if [ "$named" = SKIP ]; then say "$n: FAIL (skipped: its gate was not met, so nothing ran)"; return 1; fi
   if [ "${skip:-0}" != 0 ]; then say "$n: FAIL (a subtest was skipped, so part of the run did not happen)"; return 1; fi
-  if [ "$rc" = 0 ] && [ "$named" = PASS ] && [ "${fail:-0}" = 0 ]; then say "$n: PASS"; return 0; fi
+  if [ "$rc" = 0 ] && [ "$named" = PASS ] && [ "${fail:-0}" = 0 ]; then
+    # Only a cluster row has a record directory of its run: a local row never reads a marker (REC_DIR may be an earlier row's).
+    if [ -n "${HOST[$n]:-}" ] && finding_present; then
+      if [ "$n" = beta-athena-now-bulk ] && finding_marker; then
+        # Exit 5, its own word: the run measured and the criterion is not met (FINDING=1 carries the exit code).
+        FINDING=1
+        say "$n: FINDING (the run measured, its other checks passed and its saturation witness held, but the bulk path's gap p99 was 30 ms or less below the control's: the layout doesn't protect the streams on this path, and HBEP-6's beta criterion is not met; the text to post gives the three numbers; not a pass, not a failure)"
+        return 5
+      fi
+      say "$n: FAIL (a FINDING marker on a row that has no FINDING, or not in the bulk row's words)"
+      return 1
+    fi
+    say "$n: PASS"; return 0
+  fi
   [ "${fail:-0}" = 0 ] || say "$n: ${fail} test(s) failed; their names are in the log in the output directory"
   say "$n: FAIL (exit status $rc)"
   return 1
@@ -1335,6 +1363,7 @@ judge() {
 CONTROL_DIR=""
 REC_DIR=""
 NOT_RUN=0          # 1 when the run's test stopped on the row's start-wait bound, or ended NOT RUN or INVALID by its marker: exit 3
+FINDING=0          # 1 when the bulk row's run ended FINDING by its marker: exit 5
 
 # with_build_lock <command>...: runs the command under the shared build lock when LIVE_BUILD_LOCK names one.
 # Only builds take it; a test binary never runs while it is held.
@@ -1673,10 +1702,10 @@ run_cluster() {
       [[ $RUN_ID =~ ^[0-9a-f]{10}$ ]] || { release_run_lock; say "$n: FAIL (no run ID could be drawn)"; return 1; }
       OWN_PREFIX="hb-alpha-$RUN_ID-" ;;
   esac
-  JOBID=""; CLEAN_TRIES=0; NOT_RUN=0; TEST_STOPPED=0; RE_PENDING_JOB=""; RE_PENDING_BOUND=0
+  JOBID=""; CLEAN_TRIES=0; NOT_RUN=0; FINDING=0; TEST_STOPPED=0; RE_PENDING_JOB=""; RE_PENDING_BOUND=0
   ACTIVE_HOST=$host
   t0=$(date +%s)
-  execute_cluster "$n" || { [ "$NOT_RUN" = 1 ] || verdict=1; }
+  execute_cluster "$n" || { [ "$NOT_RUN" = 1 ] || [ "$FINDING" = 1 ] || verdict=1; }
   # The bulk row's staged shipped agent, when its test was stopped before it removed it: a failure of the row if it remains.
   clean_test_agent || verdict=1
   clean_cluster || true
@@ -1688,6 +1717,8 @@ run_cluster() {
   release_run_lock
   # Not run, with nothing left behind: exit 3, below a failure.
   [ "$verdict" -ne 0 ] || [ "$NOT_RUN" != 1 ] || verdict=3
+  # A FINDING, with nothing left behind: exit 5, below a failure.
+  [ "$verdict" -ne 0 ] || [ "$FINDING" != 1 ] || verdict=5
   return $verdict
 }
 
@@ -2238,10 +2269,10 @@ CONTROL_DIR=$(mktemp -d "${TMPDIR:-/tmp}/hbl.XXXXXX") || { say "live-checks: no 
 trap on_signal INT TERM HUP
 trap on_exit EXIT
 
-# worse <a> <b>: the more serious exit code: 1 (failed) over 3 (refused) over 4 (not run) over 2 over 0.
+# worse <a> <b>: the more serious exit code: 1 (failed) over 5 (FINDING) over 3 (refused) over 4 (not run) over 2 over 0.
 worse() {
   local c
-  for c in 1 3 4 2; do { [ "$1" = "$c" ] || [ "$2" = "$c" ]; } && { echo "$c"; return; }; done
+  for c in 1 5 3 4 2; do { [ "$1" = "$c" ] || [ "$2" = "$c" ]; } && { echo "$c"; return; }; done
   echo 0
 }
 

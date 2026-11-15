@@ -60,6 +60,15 @@ func runRow(t *testing.T, family string, rows ...string) {
 		}
 		t.Skipf("INVALID: %v", err)
 	}
+	if Finding(cfg.Row, err) {
+		// The bulk row's FINDING (ErrFinding): the run was judged, recorded and posted, nothing failed, the witness held, and the bulk path was
+		// 30 ms or less below the control. The test passes beside its marker, which hack/live-checks.sh reads as FINDING, exit 5, on that row alone.
+		if merr := rec.SaveText(FindingFile, FindingNote(cfg.Row)); merr != nil {
+			t.Fatalf("%s: the layout did not protect the streams, but the marker could not be written: %v", cfg.Row.Name, merr)
+		}
+		t.Logf("FINDING: %s; the text to post is in %s", strings.TrimSpace(FindingNote(cfg.Row)), PostsFile)
+		return
+	}
 	if err != nil {
 		t.Fatalf("%s did not finish: %v", cfg.Row.Name, err)
 	}

@@ -172,8 +172,9 @@ var betaKeeperFaults = []string{"not-ready", "relays-unread-before", "relays-unr
 
 // nowNoOverlapFaults are row B's failing faults (issue #376; internal/alpha, run_test.go's nowNoOverlapCases); its NOT RUNs
 // are TestRowBsNotRunsThroughTheScript's.
-// betaBulkFaults are the bulk row's failing faults (issue #521; internal/alpha, dry_betabulk_test.go's betaBulkCases). Its readings pass, above and
-// below S17's 85 ms prediction, with no FINDING (#584); its INVALIDs are TestTheBulkRowsInvalidThroughTheScript's.
+// betaBulkFaults are the bulk row's failing faults (issue #521; internal/alpha, dry_betabulk_test.go's betaBulkCases). A bulk path more than 30 ms
+// below the control passes, above or below S17's 85 ms prediction; 30 ms or less is a FINDING, exit 5 (dryFindings; #584); its INVALIDs are
+// TestTheBulkRowsFourVerdictsThroughTheScript's.
 var betaBulkFaults = []string{"not-ready", "not-registered", "front-without-bulk", "control-took-bulk", "bulk-never-engaged", "bulk-twice", "counter-unread",
 	"fallback", "control-fallback", "control-short-reply", "bulk-short-reply", "control-status", "bulk-status", "control-stream-cut", "bulk-stream-cut",
 	"control-cut", "bulk-cut", "invalid-and-cut", "double-unnamed", "double-digest-short", "double-digest-upper", "shim-not-staged", "shim-agent-not-shipped",
@@ -207,9 +208,15 @@ var dryRows = []dryRow{
 	{"beta-athena-now-router", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaRouterFaults, []string{"glibc-at-the-minimum", "control-both-refuse", "control-ended-alike"}, nil},
 	{"beta-athena-now-keeper", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaKeeperFaults, []string{"window-at-the-floor"}, nil},
 	{"beta-athena-now-bulk", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaBulkFaults,
-		[]string{"control-at-the-prediction", "control-under-the-prediction", "bulk-at-the-prediction", "bulk-above-the-prediction", "bulk-small-margin"}, nil},
+		[]string{"bulk-at-the-prediction", "bulk-past-the-margin"}, nil},
 	// The router row on Helios's GH200 (issue #566): the same faults, on the Helios shape and slot.
 	{"beta-helios-now-router", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaRouterFaults, []string{"glibc-at-the-minimum", "control-both-refuse", "control-ended-alike"}, nil},
+}
+
+// dryFindings are, per row, the variants of the stand-in that end FINDING: exit 5, the line, the test passed and a text to post headed FINDING.
+// Only the bulk row has the verdict (#584; internal/alpha, betabulk_test.go's betaBulkFindingFaults).
+var dryFindings = map[string][]string{
+	"beta-athena-now-bulk": {"control-at-the-prediction", "control-under-the-prediction", "bulk-above-the-prediction", "bulk-small-margin"},
 }
 
 func containsString(list []string, s string) bool {
@@ -245,13 +252,14 @@ func TestEveryAlphaRowPassesItsDryRunAndEveryFaultFailsIt(t *testing.T) {
 				shape = s
 			}
 		}
-		for _, fault := range append(append(append([]string{""}, d.passing...), d.notRun...), d.faults...) {
+		for _, fault := range append(append(append(append([]string{""}, d.passing...), d.notRun...), dryFindings[d.row]...), d.faults...) {
 			name := d.row + "/healthy"
 			if fault != "" {
 				name = d.row + "/" + fault
 			}
 			passes := fault == "" || containsString(d.passing, fault)
 			notRun := containsString(d.notRun, fault)
+			finding := containsString(dryFindings[d.row], fault)
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
 				w := newAlphaWorld(t)
@@ -269,6 +277,17 @@ func TestEveryAlphaRowPassesItsDryRunAndEveryFaultFailsIt(t *testing.T) {
 					}
 					if m, _ := filepath.Glob(filepath.Join(w.out(), d.row+"-*", "posts.md")); len(m) != 0 {
 						t.Errorf("a NOT RUN run left a text to post: %v", m)
+					}
+				} else if finding {
+					if res.code != 5 {
+						t.Fatalf("exit %d, want 5 (FINDING):\n%s", res.code, res.out)
+					}
+					w.contains(res, d.row+": tests: 1 passed, 0 failed, 0 skipped", d.row+": FINDING (", "cleanup: left behind 0")
+					if strings.Contains(res.out, d.row+": FAIL") || strings.Contains(res.out, d.row+": PASS") {
+						t.Errorf("a FINDING run was also reported as a pass or a failure:\n%s", res.out)
+					}
+					if p := w.postsOf(d.row); !strings.HasPrefix(p, d.row+": FINDING (posts to") {
+						t.Errorf("the text to post is not headed FINDING:\n%s", p)
 					}
 				} else if passes {
 					if res.code != 0 {

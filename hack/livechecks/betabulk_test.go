@@ -1,7 +1,7 @@
 package livechecks
 
-// The bulk row's INVALID (issue #521; the science agent's ruling on #521): a run judged, recorded and posted with no failure and no saturation
-// witness. Its test writes internal/alpha's InvalidNote to the marker and skips once, and the script reads that as INVALID on the bulk row alone.
+// The bulk row's INVALID (issue #521; the science agent's ruling on #521) and FINDING (#584): a run judged, recorded and posted with no failure and
+// no saturation witness, and one whose bulk path was 30 ms or less below the control. Its test writes internal/alpha's InvalidNote to the marker and skips once, and the script reads that as INVALID on the bulk row alone.
 // The row is ready since its test shim (option (A)): the positive case runs the real test in dry mode through the script, INVALID and exit 3 with its
 // text to post; the guard is that the marker on any other row is no INVALID and no NOT RUN but a failure, with the words the Go test writes, not a
 // copy of them.
@@ -46,36 +46,88 @@ func TestTheInvalidMarkerOnAnotherRowIsAFailure(t *testing.T) {
 	}
 }
 
-// The positive INVALID, now that the row can run: the real test in dry mode, with a control too short of gaps to measure the transfer, is judged,
-// recorded and posted, and the script reads it as INVALID, exit 3, apart from PASS, FAIL and NOT RUN. The control is the same run with its gaps: PASS.
-func TestTheBulkRowsInvalidThroughTheScript(t *testing.T) {
+// The bulk row's four verdicts and their exit codes, through the script with the real test in dry mode (#584, the science agent's rulings of 15
+// Nov 2026): PASS 0, FAIL 1, INVALID 3 and FINDING 5. Each says its own line and none of the others', and the text to post is headed with it. The
+// boundary is S4's 30 ms: exactly 30 ms below the control is a FINDING, 30.001 ms a PASS.
+func TestTheBulkRowsFourVerdictsThroughTheScript(t *testing.T) {
 	const row = "beta-athena-now-bulk"
 	real := realTestBinary(t, "HPCBURST_LIVECHECKS_ALPHA_TEST", alphaPkg)
 	realDir := filepath.Join(repoRoot(t), alphaPkg)
+	lines := map[string]string{"PASS": row + ": PASS", "FAIL": row + ": FAIL", "INVALID": row + ": INVALID (not a NOT RUN", "FINDING": row + ": FINDING ("}
 	for _, c := range []struct {
-		fault string
-		code  int
-		says  string
+		fault, verdict string
+		code           int
 	}{
-		{"", 0, row + ": PASS"},
-		{"control-few-gaps", 3, row + ": INVALID (not a NOT RUN"},
+		{"", "PASS", 0},
+		{"bulk-past-the-margin", "PASS", 0},
+		{"fallback", "FAIL", 1},
+		{"control-few-gaps", "INVALID", 3},
+		{"bulk-small-margin", "FINDING", 5},
+		{"control-at-the-prediction", "FINDING", 5},
 	} {
-		w := newAlphaWorld(t)
-		w.installDry(dryWrapper, real, realDir)
-		res := w.run([]string{"STUB_DRY_FAULT=" + c.fault}, "--run", row, "--yes")
-		if res.code != c.code {
-			t.Fatalf("fault %q: exit %d, want %d:\n%s", c.fault, res.code, c.code, res.out)
-		}
-		w.contains(res, c.says)
-		if c.code == 3 {
-			if strings.Contains(res.out, row+": FAIL") || strings.Contains(res.out, row+": PASS") || strings.Contains(res.out, row+": NOT RUN") {
-				t.Errorf("an INVALID run was also reported as a pass, a failure or a NOT RUN:\n%s", res.out)
+		t.Run(c.verdict+"/"+c.fault, func(t *testing.T) {
+			w := newAlphaWorld(t)
+			w.installDry(dryWrapper, real, realDir)
+			res := w.run([]string{"STUB_DRY_FAULT=" + c.fault}, "--run", row, "--yes")
+			if res.code != c.code {
+				t.Fatalf("fault %q: exit %d, want %d:\n%s", c.fault, res.code, c.code, res.out)
 			}
-			if p := w.postsOf(row); !strings.Contains(p, "INVALID") {
-				t.Errorf("the text to post does not say INVALID:\n%s", p)
+			w.contains(res, lines[c.verdict])
+			for v, l := range lines {
+				if v != c.verdict && strings.Contains(res.out, l) {
+					t.Errorf("a %s run also says %q:\n%s", c.verdict, l, res.out)
+				}
 			}
-		}
+			if strings.Contains(res.out, row+": NOT RUN") {
+				t.Errorf("a %s run also says NOT RUN:\n%s", c.verdict, res.out)
+			}
+			if p := w.postsOf(row); !strings.HasPrefix(p, row+": "+c.verdict+" (posts to") {
+				t.Errorf("the text to post is not headed %s:\n%s", c.verdict, p)
+			}
+		})
 	}
+}
+
+// The FINDING marker is the bulk row's alone, in the words the Go test writes (alpha.FindingNote, not a copy): on any other row it is a failure,
+// not a FINDING; on the bulk row in other words it is a failure; and beside a skip it is no NOT RUN but a failure. The controls first: the same
+// stub with no marker passes, and the bulk row with the real words is a FINDING, exit 5, so each failure below is the marker's.
+func TestTheFindingMarkerIsTheBulkRowsAlone(t *testing.T) {
+	run := func(t *testing.T, row string, env ...string) result {
+		t.Helper()
+		w := newAlphaWorld(t)
+		if hostDialedOnly(row) {
+			hostDialed(w)
+		}
+		return w.run(env, "--run", row, "--yes")
+	}
+	const bulk = "beta-athena-now-bulk"
+	note := func(row string) string { return alpha.FindingNote(alpha.Row{Name: row}) }
+	if res := run(t, bulk, "STUB_ALPHA_MODE=finding-marker", "STUB_MARKER="+note(bulk)); res.code != 5 || !strings.Contains(res.out, bulk+": FINDING (") {
+		t.Fatalf("the bulk row with its FINDING marker: exit %d, want 5 and FINDING:\n%s", res.code, res.out)
+	}
+	for _, row := range []string{"alpha-athena-now-serve", "beta-athena-now-router", "beta-athena-now-keeper", "tunnel-hour-athena"} {
+		t.Run(row, func(t *testing.T) {
+			if res := run(t, row, "STUB_ALPHA_MODE=pass"); res.code != 0 {
+				t.Fatalf("the control: exit %d, want 0:\n%s", res.code, res.out)
+			}
+			res := run(t, row, "STUB_ALPHA_MODE=finding-marker", "STUB_MARKER="+note(row))
+			if res.code != 1 || strings.Contains(res.out, row+": FINDING") || strings.Contains(res.out, row+": PASS") {
+				t.Errorf("a FINDING marker on %s: exit %d, want 1, and neither FINDING nor PASS:\n%s", row, res.code, res.out)
+			}
+		})
+	}
+	t.Run("the bulk row in other words", func(t *testing.T) {
+		res := run(t, bulk, "STUB_ALPHA_MODE=finding-marker", "STUB_MARKER="+bulk+": the layout was fine\n")
+		if res.code != 1 || strings.Contains(res.out, bulk+": FINDING") || strings.Contains(res.out, bulk+": PASS") {
+			t.Errorf("exit %d, want 1, and neither FINDING nor PASS:\n%s", res.code, res.out)
+		}
+	})
+	t.Run("beside a skip", func(t *testing.T) {
+		res := run(t, bulk, "STUB_ALPHA_MODE=finding-and-not-run", "STUB_MARKER="+note(bulk), "STUB_NOTRUN="+alpha.InvalidNote(alpha.BetaBulkRow()))
+		if res.code != 1 || strings.Contains(res.out, bulk+": INVALID") || strings.Contains(res.out, bulk+": FINDING") || strings.Contains(res.out, bulk+": NOT RUN") {
+			t.Errorf("exit %d, want 1, and no INVALID, FINDING or NOT RUN:\n%s", res.code, res.out)
+		}
+	})
 }
 
 // stopBulkRun starts the bulk row with the stub's staging of its shipped agent, signals the script once the test runs, and returns its output and

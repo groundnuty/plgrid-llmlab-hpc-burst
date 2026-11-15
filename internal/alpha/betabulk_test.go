@@ -233,37 +233,44 @@ func TestEachMissingWitnessNamesItselfAndFailsNothing(t *testing.T) {
 	}
 }
 
-// notPlain are the words of the FINDING #584 removed and of 85 ms as a bar: a post that holds one of them judges the reading against 85 ms.
-var notPlain = []string{"FINDING", "threshold", "85ms rule", "no better than one frpc", "no stall to remove", "the layout protects"}
+// notPlain are the words of 85 ms as a bar, which #584 removed: a post that holds one of them judges the reading against 85 ms.
+var notPlain = []string{"threshold", "85ms rule", "no better than one frpc", "no stall to remove", "at or above the 85ms"}
 
-// The reading is stated plainly whatever its figures (#584; HBEP-6's amendment #583): the bulk path's gap p99, the control's, their difference and
-// whether it is more than S4's 30 ms, with 85 ms named only as S17's buffer prediction. A reading above 85 ms and one below both PASS with no
-// FINDING, and so does every other reading of a valid run on a working path: the verdict is the checks' and the witness's alone. Each expected
-// line is written out here; the difference is the control's p99 less the bulk path's, and "more than" holds only past 30 ms, as #583 words the
-// criterion.
-func TestTheBulkReadingIsStatedPlainly(t *testing.T) {
+// The verdict follows S4's 30 ms margin and never 85 ms (#584, comment 6892006633; HBEP-6's beta criterion as #583 amends it): with the witness
+// and nothing failed, the bulk path's gap p99 more than 30 ms below the control's is a PASS, and 30 ms or less below is a FINDING, "the layout
+// doesn't protect the streams on this path". Readings above and below 85 ms both follow that rule. Every case posts the bulk path's p99, the
+// control's and their difference in one reading line, with 85 ms named only as S17's buffer prediction. Each expected line is written out here;
+// the difference is the control's p99 less the bulk path's.
+func TestTheBulkVerdictFollowsTheMarginNot85ms(t *testing.T) {
 	row := BetaBulkRow()
 	const tail = " S4's 30ms margin; S17's buffer prediction was 85ms (HBEP-6, open question 12)\n"
+	const pass, finding = "beta-athena-now-bulk: PASS (posts to #522)\n", "beta-athena-now-bulk: FINDING (posts to #522)\n"
+	const protects = "- the layout protects the streams on this path: the bulk path's gap p99 is more than S4's 30ms below the control's, HBEP-6's beta criterion (as #583 amends it)\n"
+	const doesnt = "- FINDING: the layout doesn't protect the streams on this path: the bulk path's gap p99 is not more than S4's 30ms below the control's, so HBEP-6's beta criterion (as #583 amends it) is not met here\n"
 	for _, c := range []struct {
 		name          string
 		control, bulk time.Duration
-		reading       string
+		head, reading string
 	}{
-		{"the bulk path above S17's prediction", 250 * time.Millisecond, 90 * time.Millisecond,
+		{"above S17's prediction, more than 30 ms below", 250 * time.Millisecond, 90 * time.Millisecond, pass,
 			"- the reading on this path: the bulk path's gap p99 90ms against the control's 250ms, control less bulk path 160ms, more than" + tail},
-		{"the bulk path below S17's prediction", 200 * time.Millisecond, 60 * time.Millisecond,
+		{"above S17's prediction, 30 ms or less below", 110 * time.Millisecond, 90 * time.Millisecond, finding,
+			"- the reading on this path: the bulk path's gap p99 90ms against the control's 110ms, control less bulk path 20ms, not more than" + tail},
+		{"below S17's prediction, more than 30 ms below", 200 * time.Millisecond, 60 * time.Millisecond, pass,
 			"- the reading on this path: the bulk path's gap p99 60ms against the control's 200ms, control less bulk path 140ms, more than" + tail},
-		{"the bulk path exactly at S17's prediction", 150 * time.Millisecond, 85 * time.Millisecond,
+		{"below S17's prediction, 30 ms or less below", 80 * time.Millisecond, 60 * time.Millisecond, finding,
+			"- the reading on this path: the bulk path's gap p99 60ms against the control's 80ms, control less bulk path 20ms, not more than" + tail},
+		{"exactly at S17's prediction", 150 * time.Millisecond, 85 * time.Millisecond, pass,
 			"- the reading on this path: the bulk path's gap p99 85ms against the control's 150ms, control less bulk path 65ms, more than" + tail},
-		{"exactly S4's margin below the control", 100 * time.Millisecond, 70 * time.Millisecond,
+		{"exactly 30 ms below: a FINDING", 100 * time.Millisecond, 70 * time.Millisecond, finding,
 			"- the reading on this path: the bulk path's gap p99 70ms against the control's 100ms, control less bulk path 30ms, not more than" + tail},
-		{"a nanosecond past S4's margin", 100 * time.Millisecond, 70*time.Millisecond - time.Nanosecond,
+		{"30.001 ms below: a PASS", 100 * time.Millisecond, 69999 * time.Microsecond, pass,
+			"- the reading on this path: the bulk path's gap p99 69.999ms against the control's 100ms, control less bulk path 30.001ms, more than" + tail},
+		{"a nanosecond past 30 ms: a PASS", 100 * time.Millisecond, 70*time.Millisecond - time.Nanosecond, pass,
 			"- the reading on this path: the bulk path's gap p99 69.999999ms against the control's 100ms, control less bulk path 30.000001ms, more than" + tail},
-		{"less than S4's margin below the control", 100 * time.Millisecond, 80 * time.Millisecond,
-			"- the reading on this path: the bulk path's gap p99 80ms against the control's 100ms, control less bulk path 20ms, not more than" + tail},
-		{"a control under S17's prediction", 60 * time.Millisecond, 58 * time.Millisecond,
+		{"a control under S17's prediction", 60 * time.Millisecond, 58 * time.Millisecond, finding,
 			"- the reading on this path: the bulk path's gap p99 58ms against the control's 60ms, control less bulk path 2ms, not more than" + tail},
-		{"the bulk path above the control", 50 * time.Millisecond, 120 * time.Millisecond,
+		{"the bulk path above the control", 50 * time.Millisecond, 120 * time.Millisecond, finding,
 			"- the reading on this path: the bulk path's gap p99 120ms against the control's 50ms, control less bulk path -70ms, not more than" + tail},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -272,14 +279,24 @@ func TestTheBulkReadingIsStatedPlainly(t *testing.T) {
 			f := append(pathChecks(o), phaseChecks("control", o.Control)...)
 			f = append(f, phaseChecks("bulk", o.Bulk)...)
 			if w := BulkInvalid(o); len(f) != 0 || len(w) != 0 {
-				t.Fatalf("fails %q or is invalid %q, want neither", f, w)
+				t.Fatalf("fails %q or is invalid %q, want neither: a FINDING is no failure and no INVALID", f, w)
 			}
 			post := betaBulkPost(row, o, nil)
-			if !strings.HasPrefix(post, "beta-athena-now-bulk: PASS (posts to #522)\n") {
-				t.Errorf("the reading changed the verdict:\n%s", post)
+			if !strings.HasPrefix(post, c.head) {
+				t.Errorf("the post's head is not %q:\n%s", c.head, post)
 			}
 			if n := strings.Count(post, "- the reading on this path: "); n != 1 || !strings.Contains(post, c.reading) {
 				t.Errorf("the post has %d reading lines, want exactly %q:\n%s", n, c.reading, post)
+			}
+			want, not := protects, doesnt
+			if c.head == finding {
+				want, not = doesnt, protects
+			}
+			if !strings.Contains(post, want) || strings.Contains(post, not) {
+				t.Errorf("the post lacks %q, or has %q:\n%s", want, not, post)
+			}
+			if c.head == pass && strings.Contains(post, "FINDING") {
+				t.Errorf("a PASS says FINDING:\n%s", post)
 			}
 			for _, w := range notPlain {
 				if strings.Contains(post, w) {
@@ -287,6 +304,16 @@ func TestTheBulkReadingIsStatedPlainly(t *testing.T) {
 				}
 			}
 		})
+	}
+	// A failure, or a missing witness, wins over a reading 30 ms or less below: FAIL or INVALID, never FINDING.
+	o := goodBulkObs(row)
+	o.Control.P99, o.Bulk.P99 = 100*time.Millisecond, 80*time.Millisecond
+	if p := betaBulkPost(row, o, []string{"a reply fell back to the token transport"}); !strings.HasPrefix(p, "beta-athena-now-bulk: FAIL (posts to #522)\n") || strings.Contains(p, "FINDING") {
+		t.Errorf("a failure beside a reading 30 ms or less below is not the verdict:\n%s", p)
+	}
+	o.Control.StreamsLong = BulkStreams - 1
+	if p := betaBulkPost(row, o, nil); !strings.HasPrefix(p, "beta-athena-now-bulk: INVALID (posts to #522)\n") || strings.Contains(p, "FINDING") {
+		t.Errorf("a missing witness beside a reading 30 ms or less below is not INVALID:\n%s", p)
 	}
 }
 
@@ -306,6 +333,7 @@ func TestTheBulkPostNamesTheDoubleAndItsDigestAndNoProcess(t *testing.T) {
 		// The saturation witness, worked out by hand: 67108864 bytes in 3 s are 22.37 MB/s; 8 streams at 20 tokens a second give 480 gaps in 3 s, half of them 240.
 		"- the saturation witness: the control's 67108864 bytes counted at the front's client listener in 3s, 22.4 MB/s, with all 8 streams running across the transfer (480 gaps overlap it, at least 240 needed)\n",
 		"- the reading on this path: the bulk path's gap p99 55ms against the control's 150ms, control less bulk path 95ms, more than S4's 30ms margin; S17's buffer prediction was 85ms (HBEP-6, open question 12)\n",
+		"- the layout protects the streams on this path: the bulk path's gap p99 is more than S4's 30ms below the control's, HBEP-6's beta criterion (as #583 amends it)\n",
 		"responses with attribution: 18 of 18",
 	} {
 		if !strings.Contains(post, want) {
@@ -390,33 +418,57 @@ func TestOnlyTheBulkRowsStackRunsTheBulkPath(t *testing.T) {
 	}
 }
 
-// The dry readings pass through Run, each with its plain reading and no FINDING: the verdict has no failure and no error, the record says pass,
-// and the text to post says PASS with the reading's line (#584). The dry run's control is 150 ms and its bulk path 55 ms; each fault moves one.
-func TestTheBulkRowsReadingsPassThroughRun(t *testing.T) {
+// betaBulkFindingFaults are the bulk row's dry faults that end FINDING: a valid control and a working path, the bulk path 30 ms or less below
+// the control. They are not in betaBulkCases, whose runner takes a nil error for a pass.
+var betaBulkFindingFaults = []string{"control-at-the-prediction", "control-under-the-prediction", "bulk-above-the-prediction", "bulk-small-margin"}
+
+// The bulk row's PASS and FINDING through Run (#584, the science agent's rulings of 15 Nov 2026): a PASS has no failure and no error, the record
+// says pass and the post's head PASS; a FINDING has no failure, ends with ErrFinding, the record says finding and the post's head FINDING, with
+// "the layout doesn't protect the streams on this path". Either posts the reading line with the three numbers. The dry run's control is 150 ms
+// and its bulk path 55 ms; each fault moves one, and exactly 30 ms apart (control-at-the-prediction) is a FINDING where 30.001 ms
+// (bulk-past-the-margin) is a PASS.
+func TestTheBulkRowsVerdictsThroughRun(t *testing.T) {
 	const tail = " S4's 30ms margin; S17's buffer prediction was 85ms (HBEP-6, open question 12)\n"
-	for _, c := range []struct{ fault, reading string }{
-		{"bulk-at-the-prediction", "- the reading on this path: the bulk path's gap p99 85ms against the control's 150ms, control less bulk path 65ms, more than" + tail},
-		{"bulk-above-the-prediction", "- the reading on this path: the bulk path's gap p99 200ms against the control's 150ms, control less bulk path -50ms, not more than" + tail},
-		{"bulk-small-margin", "- the reading on this path: the bulk path's gap p99 80ms against the control's 100ms, control less bulk path 20ms, not more than" + tail},
-		{"control-at-the-prediction", "- the reading on this path: the bulk path's gap p99 55ms against the control's 85ms, control less bulk path 30ms, not more than" + tail},
-		{"control-under-the-prediction", "- the reading on this path: the bulk path's gap p99 55ms against the control's 84.999999ms, control less bulk path 29.999999ms, not more than" + tail},
+	const doesnt = "- FINDING: the layout doesn't protect the streams on this path: the bulk path's gap p99 is not more than S4's 30ms below the control's, so HBEP-6's beta criterion (as #583 amends it) is not met here\n"
+	for _, c := range []struct{ fault, verdict, reading string }{
+		{"bulk-at-the-prediction", "pass", "- the reading on this path: the bulk path's gap p99 85ms against the control's 150ms, control less bulk path 65ms, more than" + tail},
+		{"bulk-past-the-margin", "pass", "- the reading on this path: the bulk path's gap p99 69.999ms against the control's 100ms, control less bulk path 30.001ms, more than" + tail},
+		{"bulk-above-the-prediction", "finding", "- the reading on this path: the bulk path's gap p99 200ms against the control's 150ms, control less bulk path -50ms, not more than" + tail},
+		{"bulk-small-margin", "finding", "- the reading on this path: the bulk path's gap p99 80ms against the control's 100ms, control less bulk path 20ms, not more than" + tail},
+		{"control-at-the-prediction", "finding", "- the reading on this path: the bulk path's gap p99 55ms against the control's 85ms, control less bulk path 30ms, not more than" + tail},
+		{"control-under-the-prediction", "finding", "- the reading on this path: the bulk path's gap p99 55ms against the control's 84.999999ms, control less bulk path 29.999999ms, not more than" + tail},
 	} {
 		t.Run(c.fault, func(t *testing.T) {
+			if (c.verdict == "finding") != slices.Contains(betaBulkFindingFaults, c.fault) {
+				t.Fatalf("the fault %q is a %s here and %t in betaBulkFindingFaults", c.fault, c.verdict, slices.Contains(betaBulkFindingFaults, c.fault))
+			}
 			out, failures, err := runBulkDry(t, c.fault)
-			if err != nil || len(failures) != 0 {
-				t.Fatalf("failures %v, err %v; want a pass", failures, err)
+			if len(failures) != 0 {
+				t.Fatalf("failures %v; want none", failures)
+			}
+			head := "beta-athena-now-bulk: PASS (posts to #522)\n"
+			if c.verdict == "finding" {
+				head = "beta-athena-now-bulk: FINDING (posts to #522)\n"
+				if !errors.Is(err, ErrFinding) || !Finding(BetaBulkRow(), err) || NotRun(BetaBulkRow(), err) || Invalid(BetaBulkRow(), err) {
+					t.Fatalf("err %v; want ErrFinding alone", err)
+				}
+			} else if err != nil {
+				t.Fatalf("err %v; want a pass", err)
 			}
 			post, _ := os.ReadFile(filepath.Join(out, PostsFile))
-			if !strings.HasPrefix(string(post), "beta-athena-now-bulk: PASS (posts to #522)\n") || !strings.Contains(string(post), c.reading) {
-				t.Errorf("the text to post does not say PASS with %q:\n%s", c.reading, post)
+			if !strings.HasPrefix(string(post), head) || !strings.Contains(string(post), c.reading) {
+				t.Errorf("the text to post does not say %q with %q:\n%s", head, c.reading, post)
+			}
+			if got := strings.Contains(string(post), doesnt); got != (c.verdict == "finding") {
+				t.Errorf("the post says the layout doesn't protect the streams: %t, want %t:\n%s", got, c.verdict == "finding", post)
 			}
 			for _, w := range notPlain {
 				if strings.Contains(string(post), w) {
 					t.Errorf("the text to post says %q:\n%s", w, post)
 				}
 			}
-			if v := recordVerdict(t, out); v != "pass" {
-				t.Errorf("the record's verdict is %q, want pass", v)
+			if v := recordVerdict(t, out); v != c.verdict {
+				t.Errorf("the record's verdict is %q, want %q", v, c.verdict)
 			}
 		})
 	}

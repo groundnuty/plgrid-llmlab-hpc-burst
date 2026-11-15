@@ -15,8 +15,8 @@ package alpha
 // The engine is the engine double, as ruled (the science agent, #521, answer 2): a real vLLM replies in a few KiB and cannot be held saturating
 // the path. The post names the double and its digest, and says the engine was a double.
 //
-// The verdict, as ruled (the science agent, #521, comments 6866007040 and 6866273454; #584): three outcomes, and the reading is stated plainly,
-// never judged against 85 ms, which is named only as S17's buffer prediction.
+// The verdict, as ruled (the science agent, #521, comments 6866007040 and 6866273454; #584, comment 6892006633): four outcomes, none tied to
+// 85 ms, which is named only as S17's buffer prediction; every post gives the bulk path's gap p99, the control's and their difference.
 //   - FAIL, on a broken path alone: the bulk path never engaged (the front's bulk counter did not rise by exactly one across the bulk reply, or no
 //     Instance's bulk transport was registered), a fallback to the token transport, the control on the bulk path, a stream cut or short, and a
 //     transfer short of its bytes, refused or cut. With the row's common checks (deployment, ledger, the Instance ready, the double named, every
@@ -24,9 +24,11 @@ package alpha
 //   - INVALID, a run with no saturation witness: the control's 64 MiB counted at the front's client listener, with its transfer time and achieved rate,
 //     while its eight streams ran across the whole transfer, so the path was loaded while the streams ran. The bulk phase's transfer needs the same
 //     cover to be read. Without it the reading measures nothing: the run is neither a pass nor a failure, and a failure beside it wins (Run, ErrInvalid).
-//   - PASS otherwise. The post states the reading: the bulk path's gap p99, the control's, their difference and whether it is more than S4's 30
-//     ms, with 85 ms named as S17's buffer prediction. The first live run (#522) read 257.2 ms against 87.2 ms, a direct A/B that answers what
-//     85 ms stood for, so no reading is a FINDING any more (the science agent's ruling of 14 Nov 2026, HBEP-6's amendment #583).
+//   - FINDING, a valid control and an unbroken path, but the bulk path's gap p99 30 ms or less below the control's: the layout doesn't protect
+//     the streams on this path. HBEP-6's beta criterion, as #583 amends it, is the bulk path lower by more than S4's 30 ms, so a PASS here
+//     would record the criterion met when it isn't (#584).
+//   - PASS: a valid control, and the bulk path's gap p99 more than 30 ms below the control's. The first live run (#522) read 257.2 ms against
+//     87.2 ms, a direct A/B that answers what 85 ms stood for, so 85 ms decides nothing (the science agent's ruling of 14 Nov 2026, #583).
 //
 // The control is not S4's (the ruling, answer 1): S4's is a second stack with the bulk path off, carrying a non-streamed reply down the token tunnel
 // (internal/rehearsal/scenario, bulk_test.go); this row has one job, so its control is the same bulk-on stack carrying the 64 MiB as a streamed reply.
@@ -315,13 +317,17 @@ func MatchesShimEngine(shimDigest string) func(argv, command []string) bool {
 	}
 }
 
+// Protects reports whether the bulk path's gap p99 is more than S4's margin below the control's: HBEP-6's beta criterion, as #583 amends it.
+// With the saturation witness and nothing failed, it is the difference between a PASS and a FINDING (#584).
+func (o BulkObs) Protects() bool { return o.Control.P99-o.Bulk.P99 > BulkMargin }
+
 // readingLine is the bulk row's stated reading, posted for a run with the saturation witness: the bulk path's gap p99, the control's, their
 // difference and whether the bulk path is more than S4's margin below the control (HBEP-6's beta criterion, as #583 words it), with 85 ms
 // named as S17's buffer prediction alone (#584). It judges nothing: the verdict is the checks' and the witness's.
 func (o BulkObs) readingLine() string {
 	diff := o.Control.P99 - o.Bulk.P99
 	than := "more than"
-	if diff <= BulkMargin {
+	if !o.Protects() {
 		than = "not more than"
 	}
 	return fmt.Sprintf("- the reading on this path: the bulk path's gap p99 %s against the control's %s, control less bulk path %s, %s S4's %s margin; S17's buffer prediction was %s (HBEP-6, open question 12)\n",
@@ -360,8 +366,12 @@ func betaBulkPost(row Row, o BulkObs, failures []string) string {
 	var b strings.Builder
 	why := BulkInvalid(o)
 	head := verdictLine(row, failures)
-	if len(failures) == 0 && len(why) > 0 {
+	switch {
+	case len(failures) > 0:
+	case len(why) > 0:
 		head = invalidVerdictLine(row, why)
+	case !o.Protects():
+		head = fmt.Sprintf("%s: FINDING (posts to %s)", row.Name, row.PostsTo)
 	}
 	fmt.Fprintf(&b, "%s\n%s\n- THE ENGINE WAS A DOUBLE, not vLLM: %s, SHA-256 %s; a real vLLM replies in a few KiB and cannot be held saturating the path (the science agent's ruling on #521)\n",
 		head, deploymentLine(o.Deployment), o.Double.Name, o.Double.Digest)
@@ -382,6 +392,14 @@ func betaBulkPost(row Row, o BulkObs, failures []string) string {
 		fmt.Fprintf(&b, "- the saturation witness: the control's %d bytes counted at the front's client listener in %s, %.1f MB/s, with all %d streams running across the transfer (%d gaps overlap it, at least %d needed)\n",
 			o.Control.ReplyBytes, o.Control.Took.Round(time.Millisecond), mbps(o.Control), BulkStreams, o.Control.Gaps, minGaps(o.Control.Took))
 		b.WriteString(o.readingLine())
+		// The judgement is a run's with nothing failed: a FAIL posts its reading and names no second verdict.
+		switch {
+		case len(failures) > 0:
+		case o.Protects():
+			fmt.Fprintf(&b, "- the layout protects the streams on this path: the bulk path's gap p99 is more than S4's %s below the control's, HBEP-6's beta criterion (as #583 amends it)\n", BulkMargin)
+		default:
+			fmt.Fprintf(&b, "- FINDING: the layout doesn't protect the streams on this path: the bulk path's gap p99 is not more than S4's %s below the control's, so HBEP-6's beta criterion (as #583 amends it) is not met here\n", BulkMargin)
+		}
 	}
 	fmt.Fprintf(&b, "- responses with attribution: %d of %d\n", o.Attributed, o.Responses)
 	return b.String()
