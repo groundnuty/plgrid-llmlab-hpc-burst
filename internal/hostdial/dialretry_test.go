@@ -122,7 +122,9 @@ func TestAControlDialAcrossAGenRestartIsRetriedUntilTheNewRelayGreets(t *testing
 	var attempts atomic.Int64
 	done := make(chan error, 1)
 	go func() { done <- roundTripOver(j, control, "control", payload(1000), &attempts) }()
-	waitFor(t, time.Minute, "a dial to end with no greeting and the next to begin", func() bool { return attempts.Load() >= 2 })
+	// With no relay of generation 2 yet, the round trip cannot end before the gate opens except by failing, which a dial that does not dial
+	// again does at once: so the wait ends on its error too, and the test fails with it, not a minute later.
+	waitFor(t, time.Minute, "a dial to end with no greeting and the next to begin", func() bool { return attempts.Load() >= 2 || len(done) > 0 })
 	close(gate)
 	if err := <-done; err != nil {
 		t.Fatalf("a round trip that dials again, with the relay of generation 2 let go: %v", err)
