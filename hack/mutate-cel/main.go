@@ -14,7 +14,8 @@
 //
 // where $ is the root of the schema and [] is an array's item schema.
 // Neutralising replaces the rule's expression with "true", so it admits
-// everything. The manifests are edited as parsed objects, never line by line:
+// everything, and clears optionalOldSelf, which the API server refuses on a rule
+// that does not use oldSelf. The manifests are edited as parsed objects, never line by line:
 // the YAML emitter wraps long strings across lines.
 package main
 
@@ -146,6 +147,10 @@ func neutralise(dir, outDir, id string) error {
 			return fmt.Errorf("rule %q is already \"true\"", id)
 		}
 		hit.v.Rule = "true"
+		// "true" does not use oldSelf, and the API server refuses a CRD whose rule sets
+		// optionalOldSelf without using it, so the mutant would not install and
+		// would look like a rule no test kills.
+		hit.v.OptionalOldSelf = nil
 	}
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
