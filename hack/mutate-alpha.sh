@@ -6,6 +6,8 @@
 #   hack/mutate-alpha.sh --no-script  # leave out the mutants of hack/live-checks.sh (the slow ones)
 #   hack/mutate-alpha.sh --only <regexp>  # only the mutants whose line matches (egrep), to try a new one; exit 2, and
 #                                         # nothing run, for an expression that is not valid or matches no mutant
+#   hack/mutate-alpha.sh --check-anchors  # run nothing: only check that every mutant's text occurs exactly once in its file, and
+#                                         # name each that does not (issue #592); exit 1 if one does not. A CI test runs this
 #
 # Before the first mutant of each kind the tests of that kind run with no mutant, under the same command: if they fail, or do
 # not compile, the run stops (exit 2), since a test that already fails would count every mutant as killed (#285).
@@ -36,6 +38,7 @@ set -u -o pipefail
 cd "${MUTATE_ALPHA_ROOT:-$(dirname "$0")/..}" || exit 2   # the tree to mutate; the tests of this script point it at a throwaway module
 pkg=internal/alpha
 script_too=1; [ "${1:-}" != --no-script ] || script_too=0
+check_anchors=0; [ "${1:-}" != --check-anchors ] || check_anchors=1
 only=""; [ "${1:-}" != --only ] || only=${2:?--only needs a pattern}
 if [ -n "$only" ]; then
   # grep exits 2 for an expression it cannot read: that must not pass for "matches nothing".
@@ -46,6 +49,41 @@ declare -A saved=()
 restore() { for f in "${!saved[@]}"; do cp "${saved[$f]}" "$f"; done; rm -rf "$tmp"; }
 trap restore EXIT
 path_of() { case $1 in */*) printf '%s' "$1" ;; *) printf '%s/%s' "$pkg" "$1" ;; esac; }
+# parse_mutant <entry>: sets file, from (the anchor), to and path from one entry of the list. The run and --check-anchors both read an
+# entry through this, so the check can never read a list differently from the run.
+parse_mutant() { file=${1%%@@*}; rest=${1#*@@}; from=${rest%%@@*}; to=${rest#*@@}; path=$(path_of "$file"); }
+# anchor_edit apply <path> <from> <to> | anchor_edit check <records>: the one place that decides "the anchor must occur exactly once".
+# apply replaces that one occurrence of from in the file by to, and exits 1 and changes nothing for any other count. check reads
+# records (a file of NUL-ended path, anchor pairs), and for each anchor that does not occur exactly once prints "<index> <count>" (count -1:
+# the file cannot be read), then "checked <how many>" last; one process for all of them, so that it takes seconds. A mutant is applied,
+# and --check-anchors judged, by the same occurrences below.
+anchor_edit() {
+  python3 - "$@" <<'PY'
+import sys
+
+def occurrences(p, a, files={}):
+    if p not in files:
+        try:
+            files[p] = open(p).read()
+        except OSError:
+            files[p] = None
+    return -1 if files[p] is None else files[p].count(a)
+
+if sys.argv[1] == 'apply':
+    p, a, b = sys.argv[2:5]
+    if occurrences(p, a) != 1:
+        sys.exit(1)
+    s = open(p).read()
+    open(p, 'w').write(s.replace(a, b, 1))
+else:
+    recs = open(sys.argv[2]).read().split('\0')[:-1]
+    for i in range(0, len(recs), 2):
+        n = occurrences(recs[i], recs[i + 1])
+        if n != 1:
+            print(i // 2, n)
+    print('checked', len(recs) // 2)
+PY
+}
 keep() { [ -n "${saved[$1]:-}" ] || { saved[$1]="$tmp/$(printf '%s' "$1" | tr / _)"; cp "$1" "${saved[$1]}"; }; }
 build() { if [ -n "${MUTATE_ALPHA_BUILD_LOCK:-}" ]; then flock -o "$MUTATE_ALPHA_BUILD_LOCK" "$@"; else "$@"; fi; }
 # compile_tests <package> <binary>: the package's test binary, to one fixed path, under the build lock; on failure its first
@@ -1115,6 +1153,36 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
 )
 # The mutants of a test of this script: a file with one mutant per line, in place of the list above.
 [ -z "${MUTATE_ALPHA_MUTANTS:-}" ] || mapfile -t mutants < "$MUTATE_ALPHA_MUTANTS"
+# --check-anchors: every mutant's anchor must occur exactly once in its file, as the run needs. It runs no mutant and no test, so it takes
+# seconds, and a CI test (hack/livechecks) runs it: a mutant whose anchor drifted under a later change would otherwise pass for a test of
+# nothing, and only a full run, which CI never makes, would show it.
+if [ "$check_anchors" = 1 ]; then
+  checked=0 bad=0 seen="" recs=$tmp/anchors.in
+  declare -a a_file=() a_path=() a_from=()
+  exec 3>"$recs"
+  for m in "${mutants[@]}"; do
+    parse_mutant "$m"
+    a_file[checked]=$file a_path[checked]=$path a_from[checked]=$from; checked=$((checked+1))
+    printf '%s\0%s\0' "$path" "$from" >&3
+  done
+  exec 3>&-
+  # A parse that read nothing would be a guard that guards nothing.
+  [ "$checked" -gt 0 ] || { echo "mutate-alpha: --check-anchors read no mutant, so nothing was checked" >&2; exit 2; }
+  while read -r a b; do
+    if [ "$a" = checked ]; then seen=$b; continue; fi
+    shown=${a_from[a]%%$'\n'*}; [ "$shown" = "${a_from[a]}" ] || shown="$shown ..."
+    if [ "$b" = -1 ]; then
+      echo "BROKEN   mutant $((a+1)), ${a_file[a]}: the file ${a_path[a]} cannot be read, so its text '$shown' occurs nowhere"
+    else
+      echo "BROKEN   mutant $((a+1)), ${a_file[a]}: the text '$shown' occurs $b times, not exactly once"
+    fi
+    bad=$((bad+1))
+  done < <(anchor_edit check "$recs")
+  # The checker's last line says how many it read: a checker that died halfway must not read as one that found nothing.
+  [ "$seen" = "$checked" ] || { echo "mutate-alpha: --check-anchors checked ${seen:-none} of $checked mutants, so nothing can be said" >&2; exit 2; }
+  echo "anchors: $checked mutants, $bad not exactly once"
+  [ "$bad" -eq 0 ]; exit
+fi
 here=$PWD
 # compile_of <path>: the test binaries that judge a mutant of path, from the tree as it is now; on failure $cerr says why.
 compile_of() {
@@ -1246,21 +1314,13 @@ red_with_no_mutant() {
 killed=0 survived=0 broken=0 total=0
 for m in "${mutants[@]}"; do
   [ -z "$only" ] || printf '%s\n' "$m" | grep -q -E -e "$only" || continue
-  file=${m%%@@*}; rest=${m#*@@}; from=${rest%%@@*}; to=${rest#*@@}
-  path=$(path_of "$file")
+  parse_mutant "$m"
   case $path in hack/live-checks.sh) [ "$script_too" = 1 ] || continue ;; esac
   total=$((total+1))
   keep "$path"
   cp "${saved[$path]}" "$path"
   baseline "$path"
-  if ! python3 - "$path" "$from" "$to" <<'PY'
-import sys
-p, a, b = sys.argv[1:4]
-s = open(p).read()
-if s.count(a) != 1:
-    sys.exit(1)
-open(p, 'w').write(s.replace(a, b, 1))
-PY
+  if ! anchor_edit apply "$path" "$from" "$to"
   then echo "BROKEN   $file: the text '$from' does not occur exactly once"; broken=$((broken+1)); continue; fi
   case $path in
     *.go|internal/providerctl/*)
