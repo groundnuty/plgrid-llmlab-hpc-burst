@@ -17,7 +17,7 @@ In alpha:
 - usage records are the front's synced JSON Lines files;
 - provider accounting is allocated GPU-hours and CPU-hours per Allocation, from the scheduler's accounting.
 
-A durable event log with subscriptions comes in beta, with HBEP-10.
+A durable event log comes in beta, and HBEP-10's subscriptions to it at stable.
 
 ## Motivation
 
@@ -57,7 +57,7 @@ A past project served models on several Slurm clusters behind its own fronts. It
 ### User stories
 
 - A researcher compares an instance on Helios with one on Athena by running and waiting requests, time per output token and time to first token, on one scale.
-- An agent subscribes to "ending soon" and starts a handover before an Allocation's hard end, instead of polling job lists. In alpha it watches the Instance's events, and re-reads status when it resumes.
+- An agent subscribes to "ending soon" and starts a handover before an Allocation's hard end, instead of polling job lists. Until HBEP-10's subscriptions come, at stable, it watches the Instance's events, and re-reads status when it resumes.
 - An agent operating overnight receives a `failing` event for one provider's reads, reason `HeartbeatMissed`. It does not read the silence as health.
 - At the end of a month, a researcher reads tokens served per model and per client key, and allocated GPU-hours per Allocation, from records kept while serving.
 - Before changing a routing setting, an operator compares per-session throughput, prefix-cache hit rate and time to first token before and after. The comparison cannot silently straddle an instance restart.
@@ -71,7 +71,7 @@ A past project served models on several Slurm clusters behind its own fronts. It
 - **Six types, many reasons.** The types are `started`, `ready`, `degraded`, `failing`, `ending-soon` and `replaced`, spelled as the lifecycle controller emits them (PR #88). They apply to any subject: an Allocation, Instance or ModelDeployment, and also an observer or controller. Everything finer is a CamelCase reason code. A stopped observer is `failing` with reason `HeartbeatMissed`. A restart, a missed submission or a repeated crash (HBEP-7) are reasons under `failing`, `degraded` or `replaced`. A new type is an amendment to this HBEP; a new reason is not.
 - **Events are typed.** Each has a type, a reason code, the resource's stable name, a time in UTC from the emitter's clock, and an optional message. Tools act on type and reason, never on the message.
 - **Status is the truth, events are best-effort.** An event can be merged with an earlier one, delayed or dropped (Design details, What the recorder merges and drops). A reader that must not miss a change reads status.
-- **Planned and unplanned stops differ.** An event for a stop that someone asked for names the actor and the operation (HBEP-10). A stop without them is a failure. In alpha the actor is the emitting controller, in the event's `reportingController`.
+- **Planned and unplanned stops differ.** An event for a stop that someone asked for names the actor and the operation (HBEP-10). A stop without them is a failure. In alpha the actor is the emitting controller, in the event's `reportingController`. In beta, an event for a stop that an Operation asked for keeps its existing reason, carries the Operation in `related`, and names it in the note (HBEP-10, Proposed event reasons).
 - **Usage records carry the request's own time,** not the time the record was written or copied.
 - **Provider accounting** comes from the platform's own accounting, per provider, never from the framework's logs. In alpha it is allocated time only, labelled "allocated, not billed". Billing formulas differ per cluster (some charge the largest of a core, GPU or memory share), so the formula is platform-profile data, open for beta. A pending Allocation with an unknown start is unknown, never "starting now".
 - **Contingencies stay on.** Every check here is on by default and cheap when idle, as for every contingency in this framework.
@@ -124,7 +124,7 @@ A past project served models on several Slurm clusters behind its own fronts. It
     - **Decided for alpha:** one `degraded` event with reason `ObservationGap`, from the lifecycle controller and the front, and status is the truth. The Provider managers emit none in alpha, since their recorder writes no `action` (open question 14). Its message names the gap's start, the observer's last heartbeat before the restart. S8's gap marker covers events evicted from a log; an observer's missed transitions were never published, so it still needs its own gap event. Source: the lean of this HBEP, confirmed by the science agent, 31 Oct 2026.
 11. **The event stream's store.**
     - **Decided for alpha:** Kubernetes Events (`events.k8s.io/v1`), best-effort, with status as the truth. Source: science agent, 31 Oct 2026.
-    - **Open (blocks beta):** JetStream for events and usage, with subscriptions and cursors, tied to HBEP-10, on S8's evidence.
+    - **Open (blocks beta):** JetStream for events and usage, on S8's evidence. HBEP-10's subscriptions and cursors over it come at stable (amended 2026-11-15; HBEP-10, Graduation criteria).
 12. **How an unknown sample is shown in Prometheus.**
     - **Decided for alpha:** an absent series plus an explicit gauge, `hpcburst_instance_metrics_unknown`, with the reason (Design details, Unknown samples). Source: proposed by this HBEP, 31 Oct 2026, from the comparison there; the science agent asked for one form to be chosen with its reason.
 13. **Whether the front serves while usage cannot be written.**
@@ -179,6 +179,7 @@ The API refuses a new event without `action` or `reason`, with either over 128 c
 - An event about a deployment caused by one Instance regards the ModelDeployment, with the Instance in `related`. `VerificationFailed`'s `degraded` event and `CapacityDropped`'s regard the Instance instead once the ModelDeployment is gone (`mdObject`, `internal/lifecycle/verify.go`), since nothing else is left to attach them to.
 - The managed catalog controller's events take these types too. Their reasons are the condition reasons it writes: `failing` for `FileRefused` and `NoCredentialsFile` (`CredentialsInvalid`), `KeyRejected` (`CredentialsRejected`), `Expired` (`CredentialsExpiring`) and `ReadsFailing` (`Ready`); `degraded` for `ExpiresWithinADay`, `CatalogEntrySkipped` and `CatalogTruncated`; and `ready` for `FileRead`, `KeyAccepted`, `NotExpiring` and `CatalogRead` when a failing or degraded condition clears.
 - The Provider controller's events are HBEP-4's diagnostics, untyped in alpha (open question 14). Among them is `RelayFailed`, a Warning regarding the Allocation (HBEP-6, Dial-home modes, host-dialed mode, What ends a relay): `onRelayFailed` raises it (`internal/providerctl/relayfailed.go`) when a relay ends for good other than by its job's end or, in alpha, by being superseded, after it marks the Allocation `RelayEndedForGood` and only while its copy leads. It carries no action, since it goes through crossplane-runtime's recorder as the others do.
+- **Proposed with HBEP-10's Operations** (beta). They join the table only with the code that raises them, since the table is checked against the code: `PlanStale`, of type `degraded`, regarding the Operation, when an approved or confirmed plan turns stale at execution; and `OperationPartlyFailed`, of type `failing`, regarding the Operation, when one of its targets fails. A plan waiting for approval raises no event; its Operation's phase shows it (HBEP-10, Proposed event reasons).
 
 **Repeating conditions.** An event for a condition that persists, such as `CatalogTruncated`, `CatalogEntrySkipped`, `UsageWriteFailed` or `HeartbeatMissed`, is emitted when the condition starts, and then at most once an hour while it lasts, never on every read. Merging cannot be relied on to bound such events (What the recorder merges and drops). The hourly gate is kept in memory, so a restart or a new leader emits it once more, which is "when it starts" for that process. For the managed catalog controller's Provider conditions, a condition that clears emits `ready` with the reason it writes (`FileRead`, `KeyAccepted`, `NotExpiring`, `CatalogRead`); the other repeating conditions show their end in status only. `CatalogEntrySkipped` is one condition per entry and skip category; at most 10 named skip events are emitted per Provider per hour, then one summary event per hour whose note names as many of the remaining entries as fit in its 1,024 bytes, ending with "…". The end of a skip or a truncation emits nothing, since neither sets a Provider condition (science-agent rulings, 31 Oct 2026, for #114).
 
@@ -454,12 +455,12 @@ Tests use the fake Slurm of spike S4, the engine double behind a real agent (`in
   - the launcher sets `event-ttl=168h`, and a usage file rotates across a UTC midnight.
 - **Beta:**
   - the Helios parts of alpha's criteria, on GH200 when it returns (owner decision, 11 Nov 2026);
-  - the durable log for events and usage, with HBEP-10's subscriptions (open question 11);
+  - the durable log for events and usage (open question 11);
   - typed Allocation events (open question 14);
   - the billing formula and per-grant totals (open questions 15 and 16);
   - OpenTelemetry's names (open question 1);
   - the observer tests pass on two batch providers.
-- **Stable:** the Test plan runs in CI, and a deployment's usage, events and accounting have been read for a whole month with no hand-run step.
+- **Stable:** the Test plan runs in CI; a deployment's usage, events and accounting have been read for a whole month with no hand-run step; and HBEP-10's subscriptions read the durable log (HBEP-10, Graduation criteria).
 
 ## Operational readiness
 
@@ -482,7 +483,7 @@ Tests use the fake Slurm of spike S4, the engine double behind a real agent (`in
 
 - Every reader must handle three outcomes, not two.
 - Per-instance series and per-request records add storage that a single-user setup must carry.
-- Alpha's events can be merged or dropped, so an agent that wants every transition must re-read status until HBEP-10's log exists.
+- Alpha's events can be merged or dropped, so an agent that wants every transition must re-read status until HBEP-10's subscriptions exist, at stable.
 
 ## Alternatives
 
@@ -520,7 +521,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 | Prometheus naming: one prefix, base units, `_total`, `_ratio` | [Prometheus naming practices](https://prometheus.io/docs/practices/naming/), accessed 2026-10-31 | Every `hpcburst_` name |
 | An info series per object, joined on an ID, so descriptive labels do not multiply series | kube-state-metrics' `*_info` series ([kubernetes/kube-state-metrics](https://github.com/kubernetes/kube-state-metrics)) | `hpcburst_instance_info` |
 | Records that outlive their object, one per fact, immutable | HBEP-11's identity and verification records (`ControllerRevision`) | The accounting record `acct-<UID>` |
-| Detect a gap when a cursor falls below the stream's first sequence | Synadia's JetStream check ([nats-unprocessed-critical](https://www.synadia.com/insights/checks/nats-unprocessed-critical)) | Beta: HBEP-10's gap marker. Alpha's `ObservationGap` covers an observer's own missed transitions |
+| Detect a gap when a cursor falls below the stream's first sequence | Synadia's JetStream check ([nats-unprocessed-critical](https://www.synadia.com/insights/checks/nats-unprocessed-critical)) | Stable: HBEP-10's gap marker. Alpha's `ObservationGap` covers an observer's own missed transitions |
 
 ### Field lessons answered
 
@@ -577,6 +578,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-12: the bulk path, open question 12's contract (HBEP-6, The bulk path).
 - 2026-11-12: erratum: `RouterRestart`, the router rung's `failing` event regarding an Instance, joins the Reasons table with the code that raises it (#429), as HBEP-7's Several workers says.
 - 2026-11-13: erratum: `CrashCorrelated`, the crash-correlation event's `failing` event regarding an Instance, with the other Instance in `related`, joins the Reasons table with the code that raises it (#539), as HBEP-7's Health and restarts says.
+- 2026-11-15: amendment following HBEP-10 (PR #582): `PlanStale` and `OperationPartlyFailed` proposed, outside the Reasons table until their code; an Operation's stop carries it in `related`; HBEP-10's subscriptions move to stable, and the durable log for events and usage stays in beta.
 
 ## Amendments
 
@@ -615,3 +617,8 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - **2026-11-11: alpha graduates on Athena alone** (Graduation criteria). An amendment by the owner's decision of 11 Nov 2026 ("Athena alone", recorded on #145 and approved on PR #373), with Helios GH200 down and no return date. Alpha's criteria now bind Athena, and their Helios parts not already met move to beta, to run when GH200 returns. A row on `plgrid-now` counts for `plgrid-gpu-a100` when it runs one job of one GPU within 1 h; the no-cut handover and S1's hour stay on `plgrid-gpu-a100`. Before, alpha needed both Helios and Athena.
 - **2026-11-12: several workers per Instance, for beta** (Engine gauges; Implementation status). An amendment, the science agent's design, with HBEP-7's Several workers section as its one home: the inventory names each of the Instance's workers, and a worker that reports no gauges shows as unknown. The router rung's `failing` reason, `RouterRestart`, joins the Reasons table in the change that raises it (#429), since the table is checked against the code. Before, only `worker-0` was named.
 - **2026-11-12: the bulk path** (Open questions 2). An amendment, the science agent's design: the tunnels carry only the front's routed requests and passthrough, the token tunnel and in beta the bulk tunnel. The bulk path's two front series are proposed in HBEP-6 (The bulk path). Before, there was one tunnel.
+- **2026-11-15: HBEP-10's reasons, and the durable log's stage** (Summary; User stories; Notes; Events; Open questions 11; Graduation criteria; Drawbacks; Prior art). An amendment following HBEP-10, made implementable by PR #582's review round. It takes the first of the two ways HBEP-10's open question 13 offers: this HBEP's criterion moves.
+  - **Proposed reasons** (HBEP-10, Proposed event reasons): `PlanStale`, `degraded`, and `OperationPartlyFailed`, `failing`, each regarding the Operation. They are named in prose only and join the Reasons table with the code that raises them, since #239's drift guard checks the table against the code. An event for a stop an Operation asked for keeps its reason, carries the Operation in `related` and names it in the note.
+  - **The durable log's stage.** Beta keeps the durable log for events and usage (open question 11). HBEP-10's subscriptions, cursors and gap markers over it move to stable, where HBEP-10 builds them.
+
+  Before, beta's criterion named "the durable log for events and usage, with HBEP-10's subscriptions", which HBEP-10 builds at stable, and HBEP-10's reasons were not named here.
