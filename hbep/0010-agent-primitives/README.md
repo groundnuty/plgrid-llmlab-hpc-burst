@@ -78,7 +78,7 @@ A past project ran a fleet of agents against several Slurm clusters, sharing one
 - **The inventory includes what does not match** (stable). Provider jobs that carry the framework's tag but have no owning resource, and resources whose provider job is gone, are listed as orphans.
 - **The inventory says how fresh each fact is.** Each provider fact carries when it was last observed, so a stale view looks stale.
 - **"Guaranteed delivery":** at least once, ordered per resource, durable across restarts, resumable from a cursor, each event with a unique ID for de-duplication. A subscriber that falls behind retention receives an explicit gap marker and must re-read status (HBEP-8, HBEP-11). Nothing is dropped silently, with one known exception: the lost-tail case below.
-- **How, from spike S8 (issue #25, PR #28).** Decided at this status change, and built at stable (Graduation criteria):
+- **How, from spike S8 (issue #25, PR #28).** Decided at this status change. The durable log itself is HBEP-8's, built with HBEP-8's beta for events and usage; this HBEP's subscriptions over it, with their cursors and gap markers, are built at stable (Graduation criteria; open question 13):
   - The log is embedded NATS JetStream with `sync_interval: always`, CloudEvents 1.0.2, and one subject per resource.
   - **Cursors are the subscriber's own.** Each subscriber keeps a cursor (stream sequence plus last event id) in the control plane and saves it after handling. A server-side durable consumer is not enough: S8 found that a message delivered, not acknowledged and then evicted vanishes from its state with no marker.
   - **Gaps and rewritten history are derived, not read from JetStream.**
@@ -155,7 +155,7 @@ Each question ends Decided, with its source, or Open, with what decides it. A "L
     - **Decided in part** (Kubernetes, and built code): an object's name can be reused once it is deleted; its UID never is. Allocation names carry a random suffix (`internal/lifecycle/provision.go:500`; HBEP-3, Allocation and job identity), records are named by UID (`ver-`, `acct-`; HBEP-11), and the controller deletes an Allocation with a UID precondition (`internal/lifecycle/writes.go:111`).
     - **Open. Lean (Design details builds it):** every plan, approval and release cause names its targets by namespace, name and UID, so a reused ModelDeployment name, which a person chooses, never matches an old record. What decides: this PR's review round.
 12. **How the grant's length is known.** **Decided** (the amendment following this HBEP, 15 Nov 2026): an optional grant end, `grantEnd`, in the Provider settings (HBEP-4, Provider settings; HBEP-11, API). Until a Provider records one, nothing is offered for deletion, so the retention holds without it. Which Provider's grant end applies when several hold one is open, for `hpcburst audit prune` at stable.
-13. **When subscriptions come, against HBEP-8's beta.** **Decided** (the science agent, 15 Nov 2026, by the amendment following this HBEP): subscriptions come at stable, with this HBEP's, and HBEP-8's beta keeps the durable log for events and usage without them. The owner's direction is to deliver what's usable first (#145), and the guard is that.
+13. **When subscriptions come, against HBEP-8's beta.** **Decided** (the science agent, 15 Nov 2026, by the amendment following this HBEP, which the owner may reverse by amendment): the durable log for events and usage is HBEP-8's, and comes with HBEP-8's beta, which HBEP-5's beta criterion "usage records go to HBEP-8's log" already needs. This HBEP's subscriptions, which read that log, come at stable. Neither of the two ways the merged text offered fitted alone, since the log has a beta consumer beside subscriptions. So the log and its subscriptions are split, and the guard comes first, as the owner's "deliver what we can" (#145) asks.
 
 ## Design details
 
@@ -176,7 +176,7 @@ The API server already holds identities, access control, admission, concurrency,
 | Audit | the API server's audit log, its policy and its rotation | the release cause |
 | Inventory | list calls with label selectors | the CLI's view |
 | Stable names | UIDs | none |
-| Subscriptions (stable) | list and watch from a `resourceVersion`, for level state | the durable log (S8), since a watch cannot resume past compaction (HBEP-11, Notes) |
+| Subscriptions (stable) | list and watch from a `resourceVersion`, for level state | cursors and gap markers over HBEP-8's durable log (S8; HBEP-8's beta), since a watch cannot resume past compaction (HBEP-11, Notes) |
 | Owner leases (stable) | the `Lease` kind's holder and duration | what expiry does |
 | Reservations (stable) | none | admission by booking at the front (HBEP-5) |
 
@@ -483,7 +483,7 @@ Stable:
   `Repurpose` comes with HBEP-7's beta repurposing, whenever that's built, as an Operation action (Repurposes).
 
   Beta is reached when the Test plan's beta rows pass on the single-user host with two agent identities and one person, and one approved `End` runs end to end on Athena, with its audit trail read back.
-- **Stable:** owner leases with expiry and take-over; the durable log with subscriptions (S8); orphans and freshness in the inventory; reservations; `hpcburst audit prune` with the grant end; and the whole Test plan across two providers, with two agents working at once.
+- **Stable:** owner leases with expiry and take-over; subscriptions over HBEP-8's durable log (S8); orphans and freshness in the inventory; reservations; `hpcburst audit prune` with the grant end; and the whole Test plan across two providers, with two agents working at once.
 
 ## Operational readiness
 
@@ -577,8 +577,9 @@ The primitives replace www-2027 practices: a shared gate on a common host (slots
 - 2026-11-14: implementable. The owner's decisions of 14 Nov 2026 on issue #10 folded in: approvers set globally and overridden per Provider, namespace and ModelDeployment, a person by default; no approval for a repurpose under policy; the audit kept for the grant, compressed when cold and deleted only after a person confirms; a tool server last, postponed. Design details written for beta on the Kubernetes API: agent identities and roles, the capacity guard, Operations with plans, release costs and confirms, ApprovalPolicy and Approvals, and the audit on the API server's log. S8's subscriptions decided for stable. Every other open question decided with its source, or left open with what decides it.
 - 2026-11-14: revised by its review round (Astra and Fable, PR #582): the capacity guard is an allowlist; every target that lowers capacity shows its cost, and a drain that its retention turns into an early release needs approval; an Operation's owner is `spec.owner`, and a ModelDeployment's owner annotation is immutable; execution commits its targets and never re-plans; a `Release` covers one ModelDeployment; the roles split for cluster-scoped reads; a Provider policy and a namespace policy both apply until the owner decides their order; the interface's record relabelled; and an HBEP-1 amendment listed for a first stage of beta.
 - 2026-11-15: two owner decisions (issue #10): where a Provider policy and a namespace-side policy both apply, both must approve; and the audit log is readable by whoever may read the launcher's state directory on the host.
-- 2026-11-15: errata: three admission policies, not two; open questions 12 and 13 decided by the amendment following this HBEP; `Repurpose` comes with HBEP-7's beta repurposing, not at stable; subscriptions read HBEP-8's beta durable log.
+- 2026-11-15: errata: three admission policies, not two; open question 12 decided by the amendment following this HBEP; `Repurpose` comes with HBEP-7's beta repurposing, not at stable.
+- 2026-11-15: open question 13 decided: the durable log is HBEP-8's, at its beta, and this HBEP's subscriptions over it come at stable (an amendment, PR #588).
 
 ## Amendments
 
-None.
+- **2026-11-15: the durable log is HBEP-8's** (Notes, S8; Open questions 13; Design details; Graduation criteria). An amendment by the science agent's decision of open question 13, in PR #588 beside the amendments this HBEP lists for other HBEPs. The durable log for events and usage is HBEP-8's and comes with HBEP-8's beta, since HBEP-5's beta needs it for usage records. This HBEP's subscriptions over it, with cursors and gap markers, come at stable. Before, this HBEP built the durable log itself, with its subscriptions, at stable.

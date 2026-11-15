@@ -100,7 +100,7 @@ Deployment options:
 1. **The API group and the kinds' names.** Decided: by the owner, 30 Oct 2026. Group `hpcburst.groundnuty.github.io`, version `v1alpha1`, and the kinds Provider, PlatformProfile, ModelDeployment, Allocation and Instance, as HBEP-3 names them. HBEP-10 adds three for beta: Operation, Approval and ApprovalPolicy (API).
 2. **The single-user host.** Decided (amended 2026-10-30, after S3's fix, PR #36): k3s as a plain user (`server --rootless --disable-agent`, SQLite). It passed S3's suite and budget with no system change. The assembled upstream stack stays the alternative, and kcp the fallback. Nothing else in this HBEP or in HBEP-3 depends on which one it is.
 3. **Where controllers run in the team option:** as pods on the cluster, or on a host that holds the provider credentials. Not needed for alpha: alpha is single-user, and its controllers run on the one host.
-4. **The store for HBEP-10's durable event log, for usage records and for metrics.** Not needed for alpha: status conditions are the level truth, and Kubernetes Events a best-effort mirror. The candidate for the event log is embedded NATS JetStream, outside the API store (spike S8, PR #28; HBEP-10). Usage records and metrics are HBEP-8's.
+4. **The store for HBEP-8's durable log, for usage records and for metrics.** Not needed for alpha: status conditions are the level truth, and Kubernetes Events a best-effort mirror. The candidate for the log is embedded NATS JetStream, outside the API store (spike S8, PR #28). The log is HBEP-8's, at its beta, for events and usage; HBEP-10's subscriptions read it at stable. Metrics are HBEP-8's.
 5. **How provider credentials are held.** Decided: for alpha, they are referenced, not stored. A Provider names a mode-600 file on the host, or a Secret in the team option. HBEP-1's content rules apply. Encryption at rest for the team option's Secrets is decided with question 3.
 6. **Replicas and leader election.** Not needed for alpha: one replica per controller, restarted by the launcher on failure. Each provider controller still takes its leader `Lease`. Several replicas come with the team option (question 3).
 7. **Which evaluated projects become components.** Decided: for the control plane, the Kubernetes API host (question 2), controller-runtime for our controllers, and crossplane-runtime under the Slurm provider (spike S4; HBEP-4). None of the other evaluated projects is a control-plane component; Alternatives says why.
@@ -276,7 +276,7 @@ A small k3s cluster. Controllers and the front may run as pods there; models nev
 
 ### Durable event log
 
-Not in alpha. Status conditions are the level truth, and Kubernetes Events are a best-effort mirror. The candidate is embedded NATS JetStream, outside the API store (S8, HBEP-10).
+Not in alpha. Status conditions are the level truth, and Kubernetes Events are a best-effort mirror. The candidate is embedded NATS JetStream, outside the API store (S8). It is HBEP-8's, built with HBEP-8's beta; HBEP-10's subscriptions over it come at stable.
 
 ### Test plan
 
