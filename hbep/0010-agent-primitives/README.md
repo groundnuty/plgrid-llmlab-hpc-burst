@@ -320,7 +320,7 @@ The scale of the stake: on Helios a 1-GPU short job under QOS `now` started at o
 ### Approval policy
 
 ApprovalPolicy is a cluster-scoped kind, so only cluster-wide RBAC can write it: persons, never agents (Identities and roles).
-- **`spec.scope`:** exactly one of `global`, a Provider's name, a namespace's name, or a ModelDeployment's namespace and name. One policy per scope (Lean: its name derives from the scope, with HBEP-11's long-value rule).
+- **`spec.scope`:** exactly one of `global`, a Provider's name, a namespace's name, or a ModelDeployment's namespace and name. One policy per scope. Its name is a plain form that the CRD's rules check: `global`, `provider.<p>`, `namespace.<n>`, or `modeldeployment.<n>.<m>`, with `<n>` the namespace and `<m>` the ModelDeployment (a namespace name holds no dot, so the first dot after the kind splits them). A ModelDeployment scope whose name would pass 253 characters is refused, with a message saying so. As a backstop, the lifecycle controller treats two policies of one scope as unapprovable (fail-closed): that scope's targets wait, with a condition that names both.
 - **`spec.approvers`:** users, groups and ServiceAccounts, in any mix. A ServiceAccount is a user to the API server, so an agent approves as a person does.
 - **Resolution** (Open questions 4, the owner's decision of 15 Nov 2026). For a target on Provider P, in namespace N, assigned to ModelDeployment M:
   - the namespace side is M's policy if it exists, else N's, since a ModelDeployment nests in its namespace;
@@ -580,6 +580,7 @@ The primitives replace www-2027 practices: a shared gate on a common host (slots
 - 2026-11-15: two owner decisions (issue #10): where a Provider policy and a namespace-side policy both apply, both must approve; and the audit log is readable by whoever may read the launcher's state directory on the host.
 - 2026-11-15: errata: three admission policies, not two; open question 12 decided by the amendment following this HBEP; `Repurpose` comes with HBEP-7's beta repurposing, not at stable.
 - 2026-11-15: open question 13 decided: the durable log is HBEP-8's, at its beta, and this HBEP's subscriptions over it come at stable (an amendment, PR #588).
+- 2026-11-15: erratum (the science agent's ruling on #589's plan, Q7): ApprovalPolicy names are plain forms that admission checks, in place of a hashed long-value name, which CEL cannot compute.
 - 2026-11-15: a confirm exists only by an update that follows a written plan (for #589).
 
 ## Amendments
