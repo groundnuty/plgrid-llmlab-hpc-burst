@@ -516,9 +516,11 @@ func (h *Host) waitCRDsServed() {
 	if err != nil {
 		h.T.Fatal(err)
 	}
+	start := time.Now()
 	if err := crdinstall.WaitCRDsServed(context.Background(), cl, crds, crdinstall.DefaultLimit, crdinstall.DefaultEvery); err != nil {
 		h.T.Fatalf("after hpcburst up: %v", err)
 	}
+	h.T.Logf("the %d CRDs of config/crd are Established and served, %s after the wait began", len(crds), time.Since(start).Round(time.Millisecond))
 }
 
 // Down runs hpcburst down with its default grace. It is also the clean-up, so
