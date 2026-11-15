@@ -174,7 +174,7 @@ mutants=(
   'workerfault.go@@return "srun --overlap --jobid="@@return "srun --jobid="'
   'workerfault.go@@		if ended {@@		if false {'
   'workerfault.go@@if err := sc.Err(); err != nil || !ended {@@if err := sc.Err(); err != nil {'
-  'workerfault.go@@if !ok || err1 != nil ||@@if err1 != nil ||'
+  'workerfault.go@@if !ok || err1 != nil ||@@if false && !ok || err1 != nil ||'
   'workerfault.go@@err4 != nil || pid <= 0@@err4 != nil || pid < 0'
   # #488: the engine whose Apptainer parent is hidden from the job's user (the listing's parent-hidden word, the rule, the shape's word, condition 4).
   'workerfault.go@@	if len(found) != 1 {@@	if len(found) < 1 {'
