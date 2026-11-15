@@ -139,8 +139,7 @@ Each question ends Decided, with its source, or Open, with what decides it. A "L
    - Repurposing is built with HBEP-7's beta. HBEP-7's beta criterion says "with HBEP-10's approvals"; it changes by amendment with that code.
 4. **Who may approve.**
    - **Decided** (owner, 14 Nov 2026): approvers are set globally, and overridden per Provider (site), per namespace and per ModelDeployment, the narrowest winning. An approver may be a person or an agent. The default is a person, the human operator.
-   - **Open: the order between a Provider and a namespace,** which do not nest. What decides: the owner.
-   - **Interim, until the owner decides** (the science agent, review round of PR #582): a ModelDeployment policy overrides its namespace's, since they nest, and global is the fallback. Where both a Provider policy and a namespace or ModelDeployment policy apply, the target needs an approval under each, so neither overrides the other (Design details, Approval policy).
+   - **Decided: a Provider and a namespace, which don't nest** (owner, 15 Nov 2026, asked in the science agent's terminal; issue #10): both must approve. A ModelDeployment policy overrides its namespace's, since they nest, and global is the fallback. Where both a Provider policy and a namespace or ModelDeployment policy apply, the target needs an approval under each, so neither overrides the other (Design details, Approval policy). With only the global policy beside a Provider policy, the Provider's applies alone, so the owner's example (an agent approving its own plans on Sano) holds.
    - At a grant's end, an approver approves an early termination or a scale-down. That is not an override of replacement before release, which applies only while desired capacity is kept (HBEP-3).
 5. **What an owner lease's expiry does.** Open, for stable. Lean: the resource becomes "orphaned", stops taking new Allocations and emits an event; release then needs the usual approval. Another identity may take the owner lease over. What decides: the owner, before stable's build.
 6. **The unit of a reservation.** Open, for stable. Lean: concurrent sessions on a deployment for a window; future capacity is a ModelDeployment with a start time. The front admits by booking, so HBEP-5 changes with it. What decides: the owner, with HBEP-5.
@@ -151,7 +150,7 @@ Each question ends Decided, with its source, or Open, with what decides it. A "L
 9. **How long idempotency keys are kept, and their scope.** Open. Lean (Design details builds it): the key is the Operation's name, so its scope is the namespace, where Kubernetes refuses a second object of one name. It is kept until the Operation is removed, 7 days after it finishes. What decides: beta's build, from the longest Operation's retries.
 10. **Audit retention and who may read it.**
     - **Decided** (owner, 14 Nov 2026): kept for the grant's length; deleted only after a person confirms; compressed when it is no longer in use, since grants last months.
-    - **Open: who may read it.** Lean: whoever may read the launcher's state directory, where the API server writes it: the person, and agents that share the person's Unix user (Security). What decides: the owner.
+    - **Decided: who may read it** (owner, 15 Nov 2026, asked in the science agent's terminal; issue #10): whoever may read the launcher's state directory on the host, where the API server writes it: the person, and agents that share the person's Unix user (Security).
 11. **Whether names are ever reused.**
     - **Decided in part** (Kubernetes, and built code): an object's name can be reused once it is deleted; its UID never is. Allocation names carry a random suffix (`internal/lifecycle/provision.go:500`; HBEP-3, Allocation and job identity), records are named by UID (`ver-`, `acct-`; HBEP-11), and the controller deletes an Allocation with a UID precondition (`internal/lifecycle/writes.go:111`).
     - **Open. Lean (Design details builds it):** every plan, approval and release cause names its targets by namespace, name and UID, so a reused ModelDeployment name, which a person chooses, never matches an old record. What decides: this PR's review round.
@@ -322,7 +321,7 @@ The scale of the stake: on Helios a 1-GPU short job under QOS `now` started at o
 ApprovalPolicy is a cluster-scoped kind, so only cluster-wide RBAC can write it: persons, never agents (Identities and roles).
 - **`spec.scope`:** exactly one of `global`, a Provider's name, a namespace's name, or a ModelDeployment's namespace and name. One policy per scope (Lean: its name derives from the scope, with HBEP-11's long-value rule).
 - **`spec.approvers`:** users, groups and ServiceAccounts, in any mix. A ServiceAccount is a user to the API server, so an agent approves as a person does.
-- **Resolution, an interim until the owner decides the order between a Provider and a namespace** (Open questions 4). For a target on Provider P, in namespace N, assigned to ModelDeployment M:
+- **Resolution** (Open questions 4, the owner's decision of 15 Nov 2026). For a target on Provider P, in namespace N, assigned to ModelDeployment M:
   - the namespace side is M's policy if it exists, else N's, since a ModelDeployment nests in its namespace;
   - the Provider side is P's policy, if it exists;
   - where both sides have a policy, the target needs an approval under each, so neither overrides the other;
@@ -575,6 +574,7 @@ The primitives replace www-2027 practices: a shared gate on a common host (slots
 - 2026-10-30: admin operations are Kubernetes API writes in alpha, as HBEP-5 now says.
 - 2026-11-14: implementable. The owner's decisions of 14 Nov 2026 on issue #10 folded in: approvers set globally and overridden per Provider, namespace and ModelDeployment, a person by default; no approval for a repurpose under policy; the audit kept for the grant, compressed when cold and deleted only after a person confirms; a tool server last, postponed. Design details written for beta on the Kubernetes API: agent identities and roles, the capacity guard, Operations with plans, release costs and confirms, ApprovalPolicy and Approvals, and the audit on the API server's log. S8's subscriptions decided for stable. Every other open question decided with its source, or left open with what decides it.
 - 2026-11-14: revised by its review round (Astra and Fable, PR #582): the capacity guard is an allowlist; every target that lowers capacity shows its cost, and a drain that its retention turns into an early release needs approval; an Operation's owner is `spec.owner`, and a ModelDeployment's owner annotation is immutable; execution commits its targets and never re-plans; a `Release` covers one ModelDeployment; the roles split for cluster-scoped reads; a Provider policy and a namespace policy both apply until the owner decides their order; the interface's record relabelled; and an HBEP-1 amendment listed for a first stage of beta.
+- 2026-11-15: two owner decisions (issue #10): where a Provider policy and a namespace-side policy both apply, both must approve; and the audit log is readable by whoever may read the launcher's state directory on the host.
 
 ## Amendments
 
