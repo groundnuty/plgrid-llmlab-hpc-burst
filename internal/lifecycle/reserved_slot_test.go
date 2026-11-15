@@ -380,3 +380,57 @@ func TestReservedSlotReadsAreBoundedWithTheList(t *testing.T) {
 	}
 	l.Unlock()
 }
+
+// TestReservedSlotKeepsACutShortSuccessorsSlotAcrossARestart: on the one-slot path, a pass that creates the
+// successor's Instance and stops before its Allocation (here the Allocation's create is dropped, with an invented UID
+// so the pass's credential step completes), followed by a controller restart, which loses the expectation, leaves the
+// successor holding its slot by its own reservation alone: ma-b, whose pass runs first in every Step, still waits, and
+// the successor's Allocation is created on the next pass (ensureAllocation), in that slot.
+func TestReservedSlotKeepsACutShortSuccessorsSlotAcrossARestart(t *testing.T) {
+	var armed, dropped atomic.Bool
+	drop := interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+		if a, ok := obj.(*v1alpha1.Allocation); ok && armed.Load() && a.Labels[v1alpha1.LabelModelDeployment] == hoMD && dropped.CompareAndSwap(false, true) {
+			a.UID = types.UID("00000000-0000-4000-8000-0000000000dd") // the create never reached the store
+			return nil
+		}
+		return c.Create(ctx, obj, opts...)
+	}}
+	rg := noOverlapRig(t, oneSlotOpts(withInterceptors(drop), withBatchConfig(func(c *pfake.Config) { c.MaxSubmitPerUser, c.MaxGPUsPerUser = 1, 1 }))...)
+	p := noOverlapStart(rg)
+	rg.create(mdSpec("ma-b"))
+	armed.Store(true)
+	restarted := false
+	each := func() {
+		if n := len(rg.allocations("ma-b")); n != 0 {
+			t.Fatalf("at %s ma-b has %d Allocations, want none: the one slot is %s's successor's", rg.clock.Now().Format(time.TimeOnly), n, hoMD)
+		}
+		if dropped.Load() && !restarted {
+			restarted = true
+			rg.restartController()
+		}
+	}
+	succReady := func() bool {
+		for _, in := range rg.liveInstances(hoMD) {
+			if in.Annotations[v1alpha1.AnnotationPredecessor] == p.Name && in.Status.Phase == v1alpha1.InstanceReady {
+				return true
+			}
+		}
+		return false
+	}
+	hoStepUntil(rg, hoT(10, 30, 0), 10*time.Second, succReady, each)
+	if !dropped.Load() || !restarted {
+		t.Fatal("the successor's Allocation was never dropped and the controller never restarted: the test proves nothing")
+	}
+	var succ *v1alpha1.Instance
+	for _, in := range rg.liveInstances(hoMD) {
+		if in.Annotations[v1alpha1.AnnotationPredecessor] == p.Name {
+			succ = &in
+		}
+	}
+	if succ == nil || succ.Status.Phase != v1alpha1.InstanceReady {
+		t.Fatalf("the primary's successor %+v, want it ready in the freed slot", succ)
+	}
+	if _, ok := rg.allocation(succ.Spec.AllocationRef.Name); !ok {
+		t.Fatalf("the successor's Allocation %s does not exist", succ.Spec.AllocationRef.Name)
+	}
+}
