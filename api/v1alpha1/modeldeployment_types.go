@@ -589,8 +589,8 @@ type ClassStartOutcomes struct {
 	Outcomes []StartOutcome `json:"outcomes,omitempty"`
 
 	// Failures is how many of the outcomes kept are failures, and Count how
-	// many are kept: the rate is Failures of Count, known once Count is
-	// MaxStartOutcomes.
+	// many are kept: the rate is Failures of Count, shown at any Count from 1
+	// ("1 of 4"), and unknown only with none.
 	//
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=20
@@ -684,9 +684,10 @@ type ModelDeploymentStatus struct {
 	// (beta; HBEP-7, Hedging (beta), The start-up failure rate): one per
 	// Allocation of this deployment whose job started, a success when its
 	// first Instance became ready, a failure when that Instance ended before
-	// ready for a start-up fault. A class's rate is its failures over its
-	// outcomes once MaxStartOutcomes are kept, and unknown before. They are
-	// in status, so a restarted controller counts no Allocation twice.
+	// ready for a start-up fault. A class keeps its latest MaxStartOutcomes,
+	// which bounds the list, and its rate is its failures over its outcomes,
+	// shown at any count from 1 and unknown only with none. They are in
+	// status, so a restarted controller counts no Allocation twice.
 	//
 	// +optional
 	// +listType=map
