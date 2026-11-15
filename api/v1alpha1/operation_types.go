@@ -40,8 +40,12 @@ type TargetState string
 // (HBEP-10, Operations). The spec is immutable once created, except confirm,
 // which is set once; a CRD rule checks each field, and the presence of each
 // optional block, because a rule on a block alone never sees the block added or
-// removed. The owner pin, an admission policy, checks owner and confirm against
-// the requester (HBEP-10, Owner and purpose; Confirm).
+// removed. A create that sets confirm is refused, since the set-once rule reads
+// the old object and so runs only on an update: the last rule here runs on a
+// create too (it takes the old value as optional), and without it an agent could
+// create an Operation already confirmed with a plan id it worked out itself. The
+// owner pin, an admission policy, checks owner and confirm against the requester
+// (HBEP-10, Owner and purpose; Confirm).
 //
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.confirm) || (has(self.confirm) && self.confirm == oldSelf.confirm)",message="confirm is set once: it cannot be changed or removed after the owner confirmed a plan (HBEP-10, Confirm)"
 // +kubebuilder:validation:XValidation:rule="has(self.scale) == has(oldSelf.scale)",message="spec.scale cannot be added or removed after create: an Operation's spec is immutable except confirm (HBEP-10, Operations)"
@@ -50,6 +54,7 @@ type TargetState string
 // +kubebuilder:validation:XValidation:rule="self.action != 'Scale' || (has(self.scale) && !has(self.end) && !has(self.release))",message="a Scale Operation sets scale, and neither end nor release"
 // +kubebuilder:validation:XValidation:rule="self.action != 'End' || (!has(self.scale) && !has(self.release))",message="an End Operation sets end, or nothing, and neither scale nor release"
 // +kubebuilder:validation:XValidation:rule="self.action != 'Release' || (has(self.release) && !has(self.scale) && !has(self.end))",message="a Release Operation sets release, and neither scale nor end"
+// +kubebuilder:validation:XValidation:rule="oldSelf.hasValue() || !has(self.confirm)",message="spec.confirm cannot be set when an Operation is created: the owner confirms by an update, after the controller has written a plan (HBEP-10, Confirm)",optionalOldSelf=true
 type OperationSpec struct {
 	// Action is what the Operation does. It is immutable (HBEP-10, Operations).
 	// Repurpose joins with HBEP-7's repurposing.
@@ -97,10 +102,11 @@ type OperationSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.owner is immutable: an Operation's owner is pinned to its creator (HBEP-10, Owner and purpose)"
 	Owner string `json:"owner"`
 
-	// Confirm is absent until the owner confirms the plan. The owner sets it once,
-	// with an update that carries the resourceVersion read with the plan, so a
-	// plan written in between turns the update into a conflict (HBEP-10,
-	// Confirm). It is the one field of the spec that may change.
+	// Confirm is absent until the owner confirms the plan, so a create that sets
+	// it is refused. The owner sets it once, with an update that carries the
+	// resourceVersion read with the plan, so a plan written in between turns the
+	// update into a conflict (HBEP-10, Confirm). It is the one field of the spec
+	// that may change.
 	//
 	// +optional
 	Confirm *OperationConfirm `json:"confirm,omitempty"`
@@ -136,6 +142,7 @@ type EndParameters struct {
 // matches by that name, so it releases no other deployment's Allocation.
 //
 // +kubebuilder:validation:XValidation:rule="has(self.allocations) != has(self.selector)",message="a Release names exactly one of allocations and selector"
+// +kubebuilder:validation:XValidation:rule="!has(self.selector) || (has(self.selector.matchLabels) && size(self.selector.matchLabels) > 0) || (has(self.selector.matchExpressions) && size(self.selector.matchExpressions) > 0)",message="an empty release selector would match every Allocation: name the Allocations, or give a selector with matchLabels or matchExpressions"
 type ReleaseParameters struct {
 	// Allocations lists the Allocations to release by name. It holds at least one
 	// name, and each name once.
@@ -148,8 +155,10 @@ type ReleaseParameters struct {
 	// +kubebuilder:validation:items:MaxLength=253
 	Allocations []string `json:"allocations,omitempty"`
 
-	// Selector picks the Allocations to release by label. The controller refuses
-	// a selector that matches nothing (HBEP-10, Operations).
+	// Selector picks the Allocations to release by label. It is not empty: an
+	// empty selector matches everything, so it names matchLabels or
+	// matchExpressions. The controller refuses a selector that matches nothing
+	// (HBEP-10, Operations).
 	//
 	// +optional
 	Selector *metav1.LabelSelector `json:"selector,omitempty"`

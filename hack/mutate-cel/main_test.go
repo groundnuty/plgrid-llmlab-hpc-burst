@@ -128,3 +128,67 @@ func TestNeutraliseRefusesWhatItCannotChange(t *testing.T) {
 		t.Error("an empty directory was accepted")
 	}
 }
+
+// A rule that takes the old value as optional (optionalOldSelf) runs on a create
+// too. Its neutralised form, "true", does not use oldSelf, and the API server
+// refuses a CRD that sets optionalOldSelf on such a rule, so the mutant must
+// clear the flag or it never installs.
+func TestNeutraliseClearsOptionalOldSelf(t *testing.T) {
+	const withFlag = `apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: widgets.example.invalid
+spec:
+  group: example.invalid
+  names: {kind: Widget, plural: widgets, singular: widget, listKind: WidgetList}
+  scope: Namespaced
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            x-kubernetes-validations:
+            - {rule: "oldSelf.hasValue() || !has(self.a)", message: "a is not set at create", optionalOldSelf: true}
+            properties:
+              a: {type: string}
+`
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "widgets.yaml"), []byte(withFlag), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	flag := func(dir string) (rule string, optional bool) {
+		t.Helper()
+		crds, err := load(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		all := rules(crds)
+		if len(all) != 1 {
+			t.Fatalf("%d rules, want 1", len(all))
+		}
+		return all[0].v.Rule, all[0].v.OptionalOldSelf != nil && *all[0].v.OptionalOldSelf
+	}
+	if rule, optional := flag(src); rule == "true" || !optional {
+		t.Fatalf("the fixture's rule is %q with optionalOldSelf %v, want the real rule with the flag set", rule, optional)
+	}
+	out := filepath.Join(t.TempDir(), "out")
+	if err := neutralise(src, out, "widgets:$.spec#0"); err != nil {
+		t.Fatal(err)
+	}
+	if rule, optional := flag(out); rule != "true" || optional {
+		t.Errorf("the neutralised rule is %q with optionalOldSelf %v, want \"true\" with the flag cleared", rule, optional)
+	}
+	// "-" neutralises nothing, so it keeps the flag: the baseline is the real rule.
+	same := filepath.Join(t.TempDir(), "same")
+	if err := neutralise(src, same, "-"); err != nil {
+		t.Fatal(err)
+	}
+	if rule, optional := flag(same); rule == "true" || !optional {
+		t.Errorf("under \"-\" the rule is %q with optionalOldSelf %v, want it unchanged", rule, optional)
+	}
+}

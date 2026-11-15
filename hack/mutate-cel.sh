@@ -103,12 +103,14 @@ operations:$.spec#3|^TestOperationSpecIsImmutable$
 operations:$.spec#4|^TestScaleOperationSetsScaleAndNothingElse$
 operations:$.spec#5|^TestEndOperationSetsEndOrNothingElse$
 operations:$.spec#6|^TestReleaseOperationSetsReleaseAndNothingElse$
+operations:$.spec#7|^TestOperationConfirmIsRefusedAtCreate$
 operations:$.spec.action#0|^TestOperationSpecIsImmutable$
 operations:$.spec.end#0|^TestOperationSpecIsImmutable$
 operations:$.spec.modelDeploymentRef#0|^TestOperationSpecIsImmutable$
 operations:$.spec.owner#0|^TestOperationSpecIsImmutable$
 operations:$.spec.release#0|^TestOperationSpecIsImmutable$
 operations:$.spec.release#1|^TestReleaseNamesAllocationsOrASelector$
+operations:$.spec.release#2|^TestReleaseSelectorIsNotEmpty$
 operations:$.spec.scale#0|^TestOperationSpecIsImmutable$
 platformprofiles:$.spec#0|^TestPlatformProfileTypedFields$
 platformprofiles:$.spec#1|^TestPartitionQOSIsListed$

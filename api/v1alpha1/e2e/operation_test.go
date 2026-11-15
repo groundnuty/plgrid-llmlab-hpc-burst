@@ -107,15 +107,28 @@ type opUpdate struct {
 	want string // refusals only: the rule's message
 }
 
-// updateOperation creates the case's Operation, reads it back and sends the
-// edited copy as an update. It returns the stored object before the edit and
-// the update's error.
-func updateOperation(t *testing.T, ns string, tc opUpdate) (*v1alpha1.Operation, error) {
+// confirmWith is a setup that confirms the plan with this id. An Operation
+// cannot be created already confirmed, so a case that starts from a confirmed
+// one confirms it by an update first.
+func confirmWith(planID string) func(*v1alpha1.Operation) {
+	return func(op *v1alpha1.Operation) { op.Spec.Confirm = &v1alpha1.OperationConfirm{PlanID: planID} }
+}
+
+// updateOperation creates the case's Operation, reads it back, runs setup (when
+// there is one) as an update that must be accepted, and sends the edited copy as
+// an update. It returns the stored object before the edit and the update's error.
+func updateOperation(t *testing.T, ns string, tc opUpdate, setup func(*v1alpha1.Operation)) (*v1alpha1.Operation, error) {
 	t.Helper()
 	op := tc.base(ns, uniq("op"))
 	must(t, c.Create(bg(), op), "create Operation")
 	stored := &v1alpha1.Operation{}
 	must(t, c.Get(bg(), objKey(op), stored), "get Operation")
+	if setup != nil {
+		prepared := stored.DeepCopy()
+		setup(prepared)
+		must(t, c.Update(bg(), prepared), "update Operation into the case's starting state")
+		must(t, c.Get(bg(), objKey(op), stored), "get Operation after the setup")
+	}
 	edited := stored.DeepCopy()
 	tc.edit(edited)
 	return stored, c.Update(bg(), edited)
@@ -125,10 +138,17 @@ func updateOperation(t *testing.T, ns string, tc opUpdate) (*v1alpha1.Operation,
 // still the one created; then each accepted update.
 func runOpUpdates(t *testing.T, refused, accepted []opUpdate) {
 	t.Helper()
+	runOpUpdatesAfter(t, nil, refused, accepted)
+}
+
+// runOpUpdatesAfter is runOpUpdates for cases that start from an Operation that
+// setup has first updated, as confirmWith does.
+func runOpUpdatesAfter(t *testing.T, setup func(*v1alpha1.Operation), refused, accepted []opUpdate) {
+	t.Helper()
 	ns := newNamespace(t)
 	for _, tc := range refused {
 		t.Run("refuse "+tc.name, func(t *testing.T) {
-			stored, err := updateOperation(t, ns, tc)
+			stored, err := updateOperation(t, ns, tc, setup)
 			requireRefused(t, err, tc.want)
 			got := &v1alpha1.Operation{}
 			must(t, c.Get(bg(), objKey(stored), got), "get Operation after the refused update")
@@ -139,7 +159,7 @@ func runOpUpdates(t *testing.T, refused, accepted []opUpdate) {
 	}
 	for _, tc := range accepted {
 		t.Run("accept "+tc.name, func(t *testing.T) {
-			_, err := updateOperation(t, ns, tc)
+			_, err := updateOperation(t, ns, tc, setup)
 			must(t, err, "update Operation")
 		})
 	}
@@ -251,6 +271,61 @@ func TestReleaseNamesAllocationsOrASelector(t *testing.T) {
 	})
 }
 
+// A Release selector, when there is one, names matchLabels or matchExpressions:
+// an empty selector matches every object, so it would ask for every Allocation of
+// the deployment. This is the rule operations:$.spec.release#2. The typed client
+// omits an empty map and an empty list, so the cases that write them go through
+// the unstructured client.
+func TestReleaseSelectorIsNotEmpty(t *testing.T) {
+	const msg = "name the Allocations, or give a selector with matchLabels or matchExpressions"
+	ns := newNamespace(t)
+	bySelector := func(selector map[string]any) *unstructured.Unstructured {
+		return &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": v1alpha1.GroupVersion.String(), "kind": "Operation",
+			"metadata": map[string]any{"name": uniq("op"), "namespace": ns},
+			"spec": map[string]any{
+				"action": "Release", "owner": opOwner, "modelDeploymentRef": map[string]any{"name": opDeployment},
+				"release": map[string]any{"selector": selector},
+			},
+		}}
+	}
+	expression := map[string]any{"key": "example", "operator": "In", "values": []any{"x"}}
+	for _, tc := range []struct {
+		name     string
+		selector map[string]any
+	}{
+		{"a selector with nothing in it", map[string]any{}},
+		{"a selector with an empty map and an empty list", map[string]any{"matchLabels": map[string]any{}, "matchExpressions": []any{}}},
+		{"a selector with an empty map", map[string]any{"matchLabels": map[string]any{}}},
+		{"a selector with an empty list", map[string]any{"matchExpressions": []any{}}},
+	} {
+		t.Run("refuse "+tc.name, func(t *testing.T) {
+			requireRefused(t, c.Create(bg(), bySelector(tc.selector)), msg)
+		})
+	}
+	for _, tc := range []struct {
+		name     string
+		selector map[string]any
+	}{
+		{"a selector with a label", map[string]any{"matchLabels": map[string]any{"example": "x"}}},
+		{"a selector with an expression", map[string]any{"matchExpressions": []any{expression}}},
+		{"a selector with a label and an expression", map[string]any{
+			"matchLabels": map[string]any{"example": "x"}, "matchExpressions": []any{expression}}},
+		{"a selector with a label and an empty list", map[string]any{
+			"matchLabels": map[string]any{"example": "x"}, "matchExpressions": []any{}}},
+	} {
+		t.Run("accept "+tc.name, func(t *testing.T) {
+			must(t, c.Create(bg(), bySelector(tc.selector)), "create Operation")
+		})
+	}
+	// The typed form of the first case: a non-nil selector with no fields.
+	t.Run("refuse an empty selector from the typed client", func(t *testing.T) {
+		op := newReleaseOperation(ns, uniq("op"))
+		op.Spec.Release = &v1alpha1.ReleaseParameters{Selector: &metav1.LabelSelector{}}
+		requireRefused(t, c.Create(bg(), op), msg)
+	})
+}
+
 // An empty allocations list, written as JSON, is refused: the typed client omits
 // an empty slice, so this goes through the unstructured client.
 func TestReleaseWithAnEmptyAllocationsListIsRefused(t *testing.T) {
@@ -285,19 +360,24 @@ func TestOperationSpecSchemaBounds(t *testing.T) {
 		{"no deployment name", withOperation(newOperation, func(op *v1alpha1.Operation) {
 			op.Spec.ModelDeploymentRef.Name = ""
 		}), "spec.modelDeploymentRef.name"},
-		{"an empty plan ID", withOperation(newOperation, func(op *v1alpha1.Operation) {
-			op.Spec.Confirm = &v1alpha1.OperationConfirm{}
-		}), "spec.confirm.planID"},
-		{"a plan ID of 65 characters", withOperation(newOperation, func(op *v1alpha1.Operation) {
-			op.Spec.Confirm = &v1alpha1.OperationConfirm{PlanID: strings.Repeat("a", 65)}
-		}), "spec.confirm.planID"},
 	}, []opCase{
 		{"an owner of 1024 characters", withOperation(newOperation, func(op *v1alpha1.Operation) {
 			op.Spec.Owner = strings.Repeat("a", 1024)
 		}), ""},
-		{"a plan ID of 64 characters", withOperation(newOperation, func(op *v1alpha1.Operation) {
-			op.Spec.Confirm = &v1alpha1.OperationConfirm{PlanID: strings.Repeat("a", 64)}
-		}), ""},
+	})
+}
+
+// A confirm names a plan: its id is not empty and has at most 64 characters.
+// The owner sets it by an update, since a create that sets it is refused.
+func TestOperationConfirmNamesAPlan(t *testing.T) {
+	const msg = "spec.confirm.planID"
+	runOpUpdates(t, []opUpdate{
+		{"an empty plan ID", newOperation, func(op *v1alpha1.Operation) { op.Spec.Confirm = &v1alpha1.OperationConfirm{} }, msg},
+		{"a plan ID of 65 characters", newOperation, func(op *v1alpha1.Operation) {
+			op.Spec.Confirm = &v1alpha1.OperationConfirm{PlanID: strings.Repeat("a", 65)}
+		}, msg},
+	}, []opUpdate{
+		{"a plan ID of 64 characters", newOperation, confirmWith(strings.Repeat("a", 64)), ""},
 	})
 }
 
@@ -357,26 +437,55 @@ func TestOperationSpecIsImmutable(t *testing.T) {
 
 // confirm is set once: the owner's first update that sets it is accepted, and
 // after that it cannot be changed or removed. This is the rule
-// operations:$.spec#0.
+// operations:$.spec#0. Every refusal starts from an Operation confirmed by an
+// update, since a create cannot set confirm (TestOperationConfirmIsRefusedAtCreate).
 func TestOperationConfirmIsSetOnce(t *testing.T) {
 	const msg = "confirm is set once"
-	confirmed := withOperation(newOperation, func(op *v1alpha1.Operation) {
-		op.Spec.Confirm = &v1alpha1.OperationConfirm{PlanID: opPlanID}
-	})
-	runOpUpdates(t, []opUpdate{
-		{"a changed plan ID", confirmed, func(op *v1alpha1.Operation) { op.Spec.Confirm.PlanID = opAnotherPlan }, msg},
-		{"a removed confirm", confirmed, func(op *v1alpha1.Operation) { op.Spec.Confirm = nil }, msg},
-		{"a changed plan ID on an End", withOperation(newEndOperation, func(op *v1alpha1.Operation) {
-			op.Spec.Confirm = &v1alpha1.OperationConfirm{PlanID: opPlanID}
-		}), func(op *v1alpha1.Operation) { op.Spec.Confirm.PlanID = opAnotherPlan }, msg},
+	runOpUpdatesAfter(t, confirmWith(opPlanID), []opUpdate{
+		{"a changed plan ID", newOperation, func(op *v1alpha1.Operation) { op.Spec.Confirm.PlanID = opAnotherPlan }, msg},
+		{"a removed confirm", newOperation, func(op *v1alpha1.Operation) { op.Spec.Confirm = nil }, msg},
+		{"a changed plan ID on an End", newEndOperation, func(op *v1alpha1.Operation) { op.Spec.Confirm.PlanID = opAnotherPlan }, msg},
+		{"a changed plan ID on a Release", newReleaseOperation, func(op *v1alpha1.Operation) { op.Spec.Confirm.PlanID = opAnotherPlan }, msg},
 	}, []opUpdate{
-		{"a first confirm", newOperation, func(op *v1alpha1.Operation) {
-			op.Spec.Confirm = &v1alpha1.OperationConfirm{PlanID: opPlanID}
-		}, ""},
-		{"a first confirm on an End", newEndOperation, func(op *v1alpha1.Operation) {
-			op.Spec.Confirm = &v1alpha1.OperationConfirm{PlanID: opPlanID}
-		}, ""},
-		{"the same confirm again", confirmed, func(op *v1alpha1.Operation) { op.Annotations = map[string]string{"example": "x"} }, ""},
+		{"the same confirm again", newOperation, func(op *v1alpha1.Operation) { op.Annotations = map[string]string{"example": "x"} }, ""},
+	})
+	runOpUpdates(t, nil, []opUpdate{
+		{"a first confirm", newOperation, confirmWith(opPlanID), ""},
+		{"a first confirm on an End", newEndOperation, confirmWith(opPlanID), ""},
+		{"a first confirm on a Release", newReleaseOperation, confirmWith(opPlanID), ""},
+	})
+}
+
+// A create that sets confirm is refused: the owner confirms by an update, after
+// the controller has written a plan (HBEP-10, Confirm: "absent until the owner
+// confirms"). The set-once rule reads the old object, so it runs only on an
+// update; this rule takes the old value as optional and runs on a create too. It
+// is the rule operations:$.spec#7. Without it an agent could work out a plan id
+// and create an Operation already confirmed, which would run, when no target
+// needs approval, with nobody having read the plan. The same create without
+// confirm is accepted, and so is the update that sets confirm for the first time.
+func TestOperationConfirmIsRefusedAtCreate(t *testing.T) {
+	const msg = "spec.confirm cannot be set when an Operation is created"
+	withConfirm := func(base func(ns, name string) *v1alpha1.Operation) func(ns, name string) *v1alpha1.Operation {
+		return withOperation(base, func(op *v1alpha1.Operation) { confirmWith(opPlanID)(op) })
+	}
+	runOpCases(t, []opCase{
+		{"a Scale created confirmed", withConfirm(newOperation), msg},
+		{"an End created confirmed", withConfirm(newEndOperation), msg},
+		{"a Release created confirmed", withConfirm(newReleaseOperation), msg},
+		{"a Scale created with a confirm of a bad plan ID", withOperation(newOperation, func(op *v1alpha1.Operation) {
+			op.Spec.Confirm = &v1alpha1.OperationConfirm{}
+		}), msg},
+	}, []opCase{
+		{"a Scale created unconfirmed", newOperation, ""},
+		{"an End created unconfirmed", newEndOperation, ""},
+		{"a Release created unconfirmed", newReleaseOperation, ""},
+	})
+	// The rule is for the create: the same Operation, confirmed by an update, is
+	// accepted, which is what the owner does after reading the plan.
+	runOpUpdates(t, nil, []opUpdate{
+		{"a first confirm by update", newOperation, confirmWith(opPlanID), ""},
+		{"a first confirm by update on an End", newEndOperation, confirmWith(opPlanID), ""},
 	})
 }
 
