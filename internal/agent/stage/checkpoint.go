@@ -53,11 +53,18 @@ func (s *Stager) Checkpoint(ctx context.Context, req agent.CheckpointRequest) (a
 	skip := skippedFiles(req.Files, req.LoadFormat)
 
 	present := make([]bool, len(req.Files))
+	res.Rehash.Listed = len(req.Files)
 	for i, f := range req.Files {
 		fi, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(f.Path)))
 		present[i] = err == nil && fi.Mode().IsRegular()
+		if present[i] {
+			res.Rehash.Files++
+			res.Rehash.Bytes += fi.Size()
+		}
 	}
+	began := time.Now()
 	sums, err := s.rehash(ctx, dir, req.Files, present)
+	res.Rehash.Duration = time.Since(began)
 	if err != nil {
 		return res, err
 	}
