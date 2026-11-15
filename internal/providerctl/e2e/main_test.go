@@ -12,7 +12,6 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -25,14 +24,13 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/wait"
-	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv/crdinstall"
 )
 
 var (
@@ -114,46 +112,11 @@ func run(m *testing.M) int {
 	return code
 }
 
-// installCRDs installs the committed CRDs and waits until they are served.
+// installCRDs installs the committed CRDs and waits until each is Established and its kind is served (crdinstall; issue #600).
 func installCRDs(ctx context.Context, cl client.Client) error {
-	files, err := filepath.Glob(filepath.Join("..", "..", "..", "config", "crd", "*.yaml"))
+	crds, err := crdinstall.ReadCRDs(filepath.Join("..", "..", "..", "config", "crd"))
 	if err != nil {
 		return err
 	}
-	if len(files) == 0 {
-		return fmt.Errorf("no CRD manifests in config/crd")
-	}
-	var names []string
-	for _, f := range files {
-		raw, err := os.ReadFile(f)
-		if err != nil {
-			return err
-		}
-		crd := &apiextensionsv1.CustomResourceDefinition{}
-		if err := utilyaml.NewYAMLOrJSONDecoder(bytes.NewReader(raw), 4096).Decode(crd); err != nil {
-			return fmt.Errorf("%s: %w", f, err)
-		}
-		if err := cl.Create(ctx, crd); err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("create %s: %w", crd.Name, err)
-		}
-		names = append(names, crd.Name)
-	}
-	return wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 60*time.Second, true, func(ctx context.Context) (bool, error) {
-		for _, n := range names {
-			got := &apiextensionsv1.CustomResourceDefinition{}
-			if err := cl.Get(ctx, client.ObjectKey{Name: n}, got); err != nil {
-				return false, nil
-			}
-			established := false
-			for _, cond := range got.Status.Conditions {
-				if cond.Type == apiextensionsv1.Established && cond.Status == apiextensionsv1.ConditionTrue {
-					established = true
-				}
-			}
-			if !established {
-				return false, nil
-			}
-		}
-		return true, nil
-	})
+	return crdinstall.InstallAndWait(ctx, cl, crds)
 }

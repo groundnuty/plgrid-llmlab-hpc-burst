@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv/crdinstall"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -431,6 +432,7 @@ type Host struct {
 	DownBound     time.Duration
 	downed        bool // hpcburst down has run
 	nameDownBound bool // NameDownBound
+	noAPIServer   bool // WithoutAPIServer
 	// upExtra is what the keeper rehearsal's options (keeper.go) append to up's
 	// arguments, and upArgs up's arguments without them, which UpAgain runs.
 	upExtra, upArgs []string
@@ -446,6 +448,10 @@ type HostOption func(*Host)
 // the command's own, and a down that ended well just as the bound passed is no
 // error.
 func NameDownBound(h *Host) { h.nameDownBound = true }
+
+// WithoutAPIServer says that the host's hpcburst is a double that starts no API server (a script that records its arguments), so StartHost
+// has no CRDs to wait for after up: it waits for them otherwise (waitCRDsServed).
+func WithoutAPIServer(h *Host) { h.noAPIServer = true }
 
 // StartHost runs hpcburst up in the given dial-home mode, with the front and
 // its client and dial-home listeners, and registers hpcburst down. frontTuning
@@ -491,7 +497,28 @@ func StartHost(t T, b Binaries, dir string, dh DialHome, env []string, ports Por
 	WaitFor(t, WaitDeadline, "the controller's /readyz", func() bool {
 		return HTTPStatus(ports.URL(6, "/readyz")) == http.StatusOK
 	})
+	if !h.noAPIServer {
+		h.waitCRDsServed()
+	}
 	return h
+}
+
+// waitCRDsServed waits, through up's kubeconfig, until every CRD of config/crd is Established and its kind is served. up waits for
+// Established alone (launcher.ApplyManifests), and a rig's first Create of a just-installed kind can meet "no matches for kind" while
+// the API server's discovery catches up (issue #600). It fails the test naming the first CRD or kind that is not served.
+func (h *Host) waitCRDsServed() {
+	h.T.Helper()
+	crds, err := crdinstall.ReadCRDs(filepath.Join(h.B.Repo, "config", "crd"))
+	if err != nil {
+		h.T.Fatal(err)
+	}
+	cl, err := crdinstall.NewClient(RestConfig(h.T, h.State))
+	if err != nil {
+		h.T.Fatal(err)
+	}
+	if err := crdinstall.WaitCRDsServed(context.Background(), cl, crds, crdinstall.DefaultLimit, crdinstall.DefaultEvery); err != nil {
+		h.T.Fatalf("after hpcburst up: %v", err)
+	}
 }
 
 // Down runs hpcburst down with its default grace. It is also the clean-up, so
