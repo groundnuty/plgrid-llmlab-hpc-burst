@@ -154,7 +154,10 @@ func IssueIdentity(ctx context.Context, cfg *rest.Config, identitiesDir, name st
 	}
 	res, err := issueToken(ctx, cs, cfg, identitiesDir, name, renew)
 	if err != nil && created {
-		if derr := sas.Delete(ctx, name, metav1.DeleteOptions{}); derr != nil && !apierrors.IsNotFound(derr) {
+		// With a context of its own: the failure may be that ctx ended.
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if derr := sas.Delete(rctx, name, metav1.DeleteOptions{}); derr != nil && !apierrors.IsNotFound(derr) {
 			err = fmt.Errorf("%w (and deleting the new ServiceAccount %s failed: %v; hpcburst identity renew %s completes it)", err, name, derr, name)
 		}
 	}
