@@ -175,8 +175,9 @@ Each question below had a proposed answer taken from operating LLM serving on Sl
    - Source: owner, 29 Oct 2026 (PR #14), for both.
    - Releasing an Allocation whose Instance failed follows the spec as well: a failed Instance's Allocation is released (Over-allocation and qualification, HBEP-3). So does releasing an Allocation with `RelayEndedForGood`, whatever its retention policy, since nothing placed on it can be reached (HBEP-6, What ends a relay; #304). Source: owner, 10 Nov 2026, asked whether the controller may release such a kept Allocation without asking: "Yes, release it" (recorded on PR #331).
    - **Why:** irreversible releases needed the owner's own word, and one cancellation relayed second-hand by mistake was caught only because the owner was asked directly. Resource steps that follow agreed rules (restarts, joins, step-downs) ran without asking.
-   - In alpha the controller takes no action that needs approval. Every action it takes follows the spec, and the single user changes the spec instead. HBEP-11 adds approval gates after alpha.
-   - **Not needed for alpha:** whether a repurpose under an agreed policy needs approval (HBEP-10).
+   - In alpha the controller takes no action that needs approval. Every action it takes follows the spec, and the single user changes the spec instead. From beta, HBEP-10's Operations and Approvals gate the actions outside the spec, with no webhook (HBEP-10, What needs approval; HBEP-11, Admission).
+   - **Decided** (the science agent, review round of PR #582, 14 Nov 2026; HBEP-10, open question 2): in an Operation's plan, draining an Instance whose Allocation its retention then releases before its hard end counts as releasing a started Allocation before its hard end, so it needs approval. That covers `ReleaseWhenIdle`, a keep date before the hard end, and the profile's `maxIdle`. The controller's own release under `ReleaseWhenIdle`, of an Allocation emptied under the agreed spec (a handover, a failure), with no Operation, still needs none. HBEP-10 (What needs approval) lists every effect a plan can have, with its leans for the rest.
+   - **Decided** (owner, 14 Nov 2026; HBEP-10, open question 3): a repurpose under question 7's rule needs no approval.
 9. **Spec change while serving.**
    - **Decided:** each class's new deployment ID rolls out make-before-break, like a handover, at the next natural handover by default. It rolls out at once only when it fixes a malfunction. Source: owner, 29 Oct 2026 (PR #14); HBEP-3, open question 7.
    - **Why:** a setting fix was applied at each stack's next restart and never as a restart of its own, so live work was not cut. Edits to files a live deployment's identity depends on held live work, so changes went into new files.
@@ -242,13 +243,15 @@ Each question below had a proposed answer taken from operating LLM serving on Sl
 ### Controllers
 
 - **The lifecycle controller** is one controller-runtime manager. Alpha runs one replica, which the launcher restarts when it exits (HBEP-11, open question 6). It takes a `Lease` named `lifecycle`, in the namespace `hpcburst-system`, which the launcher creates, as a guard against a stale second copy. Run with `--leader-elect=false`, a development and test mode, it holds no `Lease`. Its `/readyz` fails until its caches have synced and, with leader election on, it leads that `Lease`; its `/healthz` is liveness only (HBEP-8, Observers). Every write it makes, its agent endpoint's included, names the field manager `hpcburst-lifecycle` (HBEP-11).
-- **Its work queue is keyed per ModelDeployment.** Several workers run at once (four by default), and one key is never processed by two at once. It watches ModelDeployments, Allocations, Instances, Providers and PlatformProfiles. Each event maps to a ModelDeployment's key: an Allocation through its `model-deployment` label, an Instance through its owner, a Provider or PlatformProfile to every deployment that allows it.
+- **Its work queue is keyed per ModelDeployment.** Several workers run at once (four by default), and one key is never processed by two at once. It watches ModelDeployments, Allocations, Instances, Providers and PlatformProfiles. Each event maps to a ModelDeployment's key: an Allocation through its `model-deployment` label, an Instance through its owner, a Provider or PlatformProfile to every deployment that allows it. In beta it also follows Operations, each mapped to the key of the ModelDeployment it acts on, and Approvals, through their Operation (HBEP-10, Operations).
 - **What it writes:**
-  - Allocations: it creates and deletes them, and writes their `hpcburst.groundnuty.github.io/idle-since` annotation, the idle anchor (Retention). It also sets the queued-successor mark, the annotation `hpcburst.groundnuty.github.io/queued-successor` (proposed), in the create request of an Allocation that needs it, and never changes it after (Handover, No-overlap mode). The Provider's controller writes the status and the record's other annotations, and only reads the mark (HBEP-11);
+  - Allocations: it creates and deletes them, and writes their `hpcburst.groundnuty.github.io/idle-since` annotation, the idle anchor (Retention). It also sets the queued-successor mark, the annotation `hpcburst.groundnuty.github.io/queued-successor` (proposed), in the create request of an Allocation that needs it, and never changes it after (Handover, No-overlap mode). From beta, before each delete it writes the annotation `hpcburst.groundnuty.github.io/release-cause` (Release). The Provider's controller writes the status and the record's other annotations, and only reads the mark (HBEP-11);
   - Instances: it creates and deletes them, writes their phase, conditions, `status.leaseEnd`, `status.endTime`, `status.restarts` and `status.agent`, and writes restart generations as annotations. On every observe (Reconcile loop, step 3) it copies the Allocation's hard end into the Instance's `status.leaseEnd`, from which the front enforces the drain deadline (HBEP-5). A later hard end, once observed, is copied too, and moves the drain start;
   - Providers: only the condition `DialHomeUnreachable`, by server-side apply to the status under `hpcburst-lifecycle`, owning that one entry (The allocation agent; HBEP-4, open question 16);
   - identity records, and through its verification controller the verification records (HBEP-11);
   - ModelDeployment status, including each class's last measured start-to-ready time (Handover), and a managed source's status (Reconcile loop, step 1);
+  - in beta, a ModelDeployment's spec only to execute an Operation: a lower `spec.instances` for a `Scale`, and `spec.endTime` set to now, or the delete, for an `End` (Reconcile loop, Operations; HBEP-10);
+  - in beta, Operation status: the phase, the plan, the committed targets and the per-target outcomes. The Provider's controller fills in the start estimate (HBEP-10, The plan; HBEP-4, `Estimate`);
   - Events.
 - **It never calls a provider.** The Provider's controller acts on each Allocation (HBEP-4; open question 11).
 - **It serves the agent endpoint** for the allocation agents (The allocation agent).
@@ -286,11 +289,17 @@ One pass for one ModelDeployment. Every step is idempotent and re-reads what it 
 6. **Instances.** Advance each Instance through its phases (Instance start), apply the health rules (Health and restarts) and the drain deadline (Handover).
 7. **Capacity.** A primary Instance is one that is not draining or ended, and that has no predecessor still counted.
    - Fewer primaries than desired: create one Allocation and its Instance, in phase `pending`, per missing primary, within the Provider's per-user limits (Provisioning).
-   - More primaries than desired: scale down. Delete pending Allocations first, newest first; then drain the ready primaries with the nearest hard end. A surplus primary's replacement, if any, is deleted with it, never promoted.
+   - More primaries than desired: scale down. Delete pending Allocations first, newest first; then drain the ready primaries with the nearest hard end. A surplus primary's replacement, if any, is deleted with it, never promoted. While an Operation is `Executing` on the ModelDeployment, the scale-down takes that Operation's committed targets instead of choosing its own (Operations, below).
 8. **Replacements.** Every primary whose Allocation is `Running`, that has no live replacement, and whose replacement's planned submission time has come gets one (Handover), when an allowed Provider's per-user limits leave room for it. When none does, the deployment runs in no-overlap mode: on the one-slot path step 7 creates the successor once the slot is free, and on the queued path this step creates it at its planned time to pend behind the per-user cap (Handover, No-overlap mode).
 9. **Retention.** Apply each empty Allocation's retention policy (Retention), and place Instances on warm Allocations where question 14 allows.
 10. **Status.** Write the ready and desired counts, the current IDs, every ID that still has Instances, each class's last measured start-to-ready time, the conditions, and the generation reconciled with its time.
 11. **Requeue** the key at the earliest coming deadline (a drain start, a replacement's planned submission time or lateness deadline, a registration or start timeout, a retention end), and after 30 s at the latest.
+
+**Operations** (beta; HBEP-10, Operations). An Operation acts on one ModelDeployment and runs in that ModelDeployment's pass, so one worker holds the key, and executing a plan never races the controller's own handover. In the pass:
+- **Plan.** The controller writes the Operation's plan from the state the pass has read, with no side effects, using the code that executes: a `Scale` plan runs step 7's scale-down selection. It writes the Operation's status only when the plan or the phase changes.
+- **Commit.** Once the owner has confirmed the plan's ID and each target that needs approval has its Approvals, the pass recomputes the plan once. A different ID turns the Operation `Stale`, and nothing runs. Otherwise one status write records the targets, each with its UID, generation and effect, and sets `phase: Executing`. The controller never re-plans after that.
+- **Act.** The pass acts on exactly the committed targets, with a UID precondition on every delete. A `Scale` cancels or drains them and lowers `spec.instances` in the same pass. An `End` sets `spec.endTime` to now, or deletes the ModelDeployment, and step 4's shutdown applies, its committed targets being everything the shutdown takes (Release, approved early termination). A `Release` deletes the committed Allocations. A target already done is skipped, one whose UID is gone counts as done, and a failed one is retried with backoff.
+- **A restart** resumes from the committed targets in status, never from a new plan.
 
 ### Provisioning
 
@@ -549,12 +558,14 @@ Replacement before release (HBEP-3) applies only while the deployment keeps its 
 - Scale-down: the surplus instances drain and end, without replacement.
 - Shutdown at the deployment's end time: every instance drains and ends, and pending Allocations are cancelled, without replacement.
 - Deletion of the ModelDeployment: as shutdown, then the objects are removed (HBEP-11).
-- Approved early termination (HBEP-10): as shutdown, before the end time.
+- Approved early termination, an `End` Operation (HBEP-10): as shutdown, before the end time.
 - Repurposing: as scale-down for the old deployment, which is ending or scaling down. The Allocation then hosts the new deployment's Instance.
 - In every case, an Allocation left with no Instance follows its retention policy (Retention), except one with `RelayEndedForGood`, and one whose ModelDeployment is being deleted, which are released at once. A user who deletes a deployment releases its GPUs, whatever its policy: `ReleaseWhenIdle`'s idle limit, like `Keep`'s, is for a deployment that still exists.
 - A lease end is not a release: under the drain rule, an instance whose replacement is late drains and ends with its lease.
 
 Releasing an Allocation means deleting it. Its finalizer cancels every job with its tag (HBEP-4, HBEP-11).
+
+**The release cause** (beta; HBEP-10, Audit). Before each delete of an Allocation, the controller writes the annotation `hpcburst.groundnuty.github.io/release-cause` on it (HBEP-11): the rule followed, the reason it already computes for the delete (`internal/lifecycle/writes.go:106`), or the Operation's namespace, name and UID. The delete carries a UID precondition (`internal/lifecycle/writes.go:111`). So the audit log holds the cause before the delete, and a retention release names its policy with no approval asked.
 
 ### Retention
 
@@ -578,7 +589,7 @@ An operator, often an agent that needs throughput across several models, may mov
 2. starts an Instance of the new deployment in the same Allocation;
 3. verifies and warms it up before it takes traffic.
 
-The Allocation keeps its name, and the new Instance has the new deployment's ID. Conversions between models are this operation. Fit and cost: open question 7. Approval: HBEP-10. Not in alpha: an alpha Allocation stays with the ModelDeployment that created it.
+The Allocation keeps its name, and the new Instance has the new deployment's ID. Conversions between models are this operation. Fit and cost: open question 7. It is asked for by an Operation with action `Repurpose`: planned, its cost shown and confirmed like any other, with no approval (owner, 14 Nov 2026; HBEP-10, Repurposes). The controller refuses one that fails question 7's rule. Not in alpha: an alpha Allocation stays with the ModelDeployment that created it.
 
 ### Events and conditions
 
@@ -705,6 +716,7 @@ Against the fake Slurm of spike S4, through the Slurm plugin (HBEP-4). The fake 
 - No-overlap mode on the queued path, as on Helios, with a stream running at the drain start: the partition QOS allows 2,000 jobs and the Provider's QOS one GPU per user. The replacement is created at its planned time, accepted, and pends on the fake's GPU cap while the predecessor runs; it never starts before the predecessor's job ends, and no `ReplacementLate` is set. At the drain start the stream runs to its end with no cut, new requests get 503 `no_ready_target`, and the condition carries `NoOverlapSlot`. Once the predecessor's job ends, with `ReleaseWhenIdle` the idle limit after the stream, the replacement starts, and `NoOverlapSlot` clears when it is `ready`. A fixture without a GPU cap proves nothing here, since its replacement would start beside the predecessor.
 - `PartitionTooShort` at the boundary. On a profile with `drainWindow` 2 h 10 min, `handoverMargin` 30 min and `health.startTimeout` 1 h, and no `routing.maxRequestDuration`, the lead is 3 h 40 min. A time limit of 3 h 39 min and one of exactly 3 h 40 min each give `PartitionTooShort`, with no Allocation, and the message names the partition, the limit, its bound and the 3 h 40 min. One of 3 h 41 min gets an Allocation. With `routing.maxRequestDuration` 20 min the lead is 2 h, and the same three cases sit at 1 h 59 min, 2 h and 2 h 1 min. Athena's `plgrid-now`, 1 h, gives `PartitionTooShort` either way. With a second allowed Provider that fits, the Allocation goes there and the condition still names the first. The expected leads are worked out by hand. Cases only well inside or outside the boundary prove nothing here. Under the test profile `profiles/athena-now.yaml`, `plgrid-now` gets an Allocation.
 - A repurpose, once it is on: the old Instance drains, the new deployment's Instance starts in the same Allocation, and the front routes to it only after verification and warm-up. The Allocation keeps its name, and the deployment ID changes.
+- Operations and the release cause (beta): HBEP-10's Test plan rows for plans, confirms, stale plans, what needs approval, partial failure, restart and audit run against this controller. Every Allocation delete follows a write of its `release-cause` annotation, and one released under `ReleaseWhenIdle` with no Operation names that rule.
 
 On real providers (owner decision, 1 Nov 2026; Notes):
 - on Athena `plgrid-gpu-a100`, one deployment with a short `leaseLimit` and a short `routing.maxRequestDuration` (so its drain window fits the lease) completes one handover end to end through the front, with no request cut;
@@ -744,7 +756,7 @@ On real providers (owner decision, 1 Nov 2026; Notes):
   - over-allocation with k = 1 and ranking, against expected performance (open question 12);
   - restart thresholds from fault injection (open question 6);
   - Instances with several workers behind a router (HBEP-5);
-  - repurposing across models, with HBEP-10's approvals (open questions 7 and 8);
+  - repurposing across models, asked for by HBEP-10's `Repurpose` Operation, with no approval (open questions 7 and 8; owner, 14 Nov 2026);
   - the backfill limit and the lead-time question decided (open question 2), and Athena's idle question answered (open question 13).
 - **Stable:** the Test plan runs in CI, and one deployment has run to its end time across several handovers on two platforms with no hand-run step.
 
@@ -890,6 +902,7 @@ The controller applies by policy what www-2027 operators did per job: holder bat
 - 2026-11-13: the crash-correlation event is defined (S18, #528).
 - 2026-11-13: erratum: a worker's report carries its exit time (`ExitedAt`), set by the agent when it sees the worker exit without being told to; crash correlation's 30 s window is judged on it, and on the exit's first sight when an older agent omits it (#539).
 - 2026-11-14: `CrashCorrelated` counts only exits of workers that were serving, not failed starts (for #539).
+- 2026-11-15: amendment following HBEP-10 (PR #582): Operations run in their ModelDeployment's pass, and step 7's scale-down takes an executing Operation's committed targets; the release cause before each Allocation delete; a repurpose needs no approval; a drain that retention turns into an early release needs approval.
 
 ## Amendments
 
@@ -1000,3 +1013,9 @@ The controller applies by policy what www-2027 operators did per job: holder bat
 - **2026-11-13: the KV-skew signal's thresholds** (Health and restarts). An amendment by the science agent's rulings on #518's plan, corrected by #518's measurement: "full" is KV-cache usage at 0.95 or more, "waiting" a request waiting, "idles" a routable sibling with nothing running or waiting, and "not draining" the worker's generated-token counter unchanged, all held in every fresh report for `kvSkewTimeout`. The last condition is there because a few heavy sessions can fill one worker from load alone, even with bounded loads, and a loaded worker still generates tokens. Before, the thresholds were unnamed.
 - **2026-11-13: the crash-correlation event** (Risks; Health and restarts). An amendment by the science agent's decision on spike S18 (#528, PR #537): unrequested worker exits on two Instances of one deployment within 30 s raise a `failing` event `CrashCorrelated`. It's an event only. It was S18's candidate (ii), which fired on every poison request that killed two or more Instances and never on a cut tunnel. Before, the event was named as a mitigation and not defined.
 - **2026-11-14: crash correlation counts serving workers only** (Health and restarts). An amendment by the science agent's rulings on #545's review: an exit counts toward `CrashCorrelated` only if the worker was serving, with its Instance `ready` or draining and the worker verified and warmed up since its last start. A failed start reports an exit too, so without this, a two-Instance deployment whose engines both fail to start on a bad spec would raise it at every attempt, though S18's case is a request killing engines that were serving. A draining Instance still serves its requests in flight, so it counts. Before, any unrequested exit counted.
+- **2026-11-15: Operations, the release cause and approvals** (Open questions 8; Controllers; Reconcile loop, step 7 and Operations; Release; Repurposing; Test plan; Graduation criteria). An amendment following HBEP-10, made implementable by PR #582's review round, merged before the code of HBEP-10's beta.
+  - **Operations** (HBEP-10, Operations). An Operation runs in the pass of the ModelDeployment it acts on. The pass plans it with no side effects, from the code that executes; recomputes the plan once before execution, turning it `Stale` on a different ID; commits its targets in one status write; and then acts on exactly those, never re-planning, also after a restart. While one is `Executing`, step 7's scale-down takes its committed targets. The controller writes Operation status, and a ModelDeployment's `spec.instances`, `spec.endTime` or its delete, only to execute one.
+  - **The release cause** (HBEP-10, Audit). Before each Allocation delete the controller writes `hpcburst.groundnuty.github.io/release-cause`: the rule, the reason it computes, or the Operation.
+  - **Approvals** (open question 8). A repurpose under question 7's rule needs no approval (owner, 14 Nov 2026), and beta's repurposing is asked for by a `Repurpose` Operation. In an Operation's plan, a drain whose Allocation its retention then releases before its hard end needs approval, as a release of a started Allocation before its hard end (the science agent, review round of PR #582).
+
+  Before, an Operation and the release cause were not in this HBEP, a repurpose's approval was HBEP-10's open question, beta's repurposing was "with HBEP-10's approvals", and HBEP-11 was to add approval gates.
