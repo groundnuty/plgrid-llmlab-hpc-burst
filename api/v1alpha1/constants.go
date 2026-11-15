@@ -116,6 +116,12 @@ const (
 	// (HBEP-7, Handover).
 	AnnotationPredecessor = Group + "/predecessor"
 
+	// AnnotationReleaseCause is on an Allocation the lifecycle controller
+	// deletes, written before the delete: the rule followed and its subject,
+	// one line of at most 256 bytes (HBEP-7, Release, The release cause;
+	// HBEP-10, Audit).
+	AnnotationReleaseCause = Group + "/release-cause"
+
 	// AnnotationRestartPrefix starts the key of a restart generation
 	// (RestartGenerationAnnotation).
 	AnnotationRestartPrefix = Group + "/restart-"

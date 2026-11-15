@@ -63,7 +63,8 @@ func (p *pass) releaseEmpty(a *v1alpha1.Allocation) (bool, string, error) {
 		// Kept capacity that nothing can reach: no Instance placed on it
 		// could serve, and its job would hold its GPU until the policy's
 		// date (issue #304).
-		return true, "a relay ended for good: " + c.Message, nil
+		// The condition's message, the Provider controller's, stays out of the release cause.
+		return true, "a relay ended for good", nil
 	}
 	if obs.StartTime == nil {
 		// An Instance is created before its Allocation, so an unstarted
