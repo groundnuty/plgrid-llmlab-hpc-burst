@@ -372,6 +372,8 @@ Every error the front raises has the body `{"error": {"message": <text>, "type":
 | The front is stopping, before the first byte | 503, `Retry-After: 5` | `shutting_down` | `shutdown` | the front |
 | `GET /v1/models/{name}` for a name the list does not show | 404 | `model_not_found` | | the front |
 | `GET /hpcburst/v1/deployments/{id}` for an ID with no identity record | 404 | `deployment_not_found` | | the front |
+| `GET /hpcburst/v1/deployments/{id}` for a display form two full IDs share | 409 | `deployment_ambiguous` | | the front; the message names the full IDs |
+| `GET /hpcburst/v1/deployments/{id}` when the records can't be read | 503, `Retry-After: 5` | `records_unavailable` | | the front |
 | The tunnel closed after the request was written, before the response headers, after the one retry | 502, `x-should-retry: false` | `upstream_closed` | `tunnel` | the front, and the target |
 | The tunnel closed after the request was written, before the response headers, with no other Instance ready to retry to | 502 | `upstream_closed` | `tunnel` | the front, and the target |
 | A stream fails after its headers were sent | one `data:` event with this body, then the end of the stream, never `[DONE]` | `stream_cut` | `upstream`, `deadline`, `idle`, `lease_end` or `shutdown` | the target, as in the headers already sent |
@@ -671,6 +673,7 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
 - 2026-11-14: erratum: on stop, the front lets requests in flight finish for up to 10 s before it cuts the rest, as built from #95's review (for #552).
 - 2026-11-14: a worker whose connection fails is ejected at once, and the retry waits a 100 ms back-off (for #561).
 - 2026-11-14: the front answers `GET /hpcburst/v1/deployments/{id}` with an ID's records (HBEP-9, owner decision).
+- 2026-11-15: the record endpoint's 409 `deployment_ambiguous` and 503 `records_unavailable` rows (for #585).
 
 ## Amendments
 
@@ -735,3 +738,4 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
 - **2026-11-13: two edges of the one retry** (Open questions 5; Errors). An amendment by the science agent's rulings on #539's plan (Q2, Q3). A 503 `shutting_down` after the front's retry carries no `x-should-retry: false`, since it asks the client to send again to a front that will be back. An upstream's own 504 is a time-out, so it's passed through and never retried. Before, the retry text covered "a 5xx" and the header "any answer", which included both.
 - **2026-11-14: a dead worker is ejected at once, and the retry waits for the ring** (Inside an Instance, Worker health). An amendment by the science agent's ruling on #561, option D of e429's measurements on real Envoy 1.40.2. With bounded loads, a survivor counts as overloaded from its sixth request in flight, so the ring walked to a dead worker not yet ejected, and the retry landed there again: requests in a live worker's own sessions got 503 (22 of 24 runs). Now a connection failure, reset or time-out ejects the worker at once, while the engine's 5xx still need 3, and the retry waits a jittered 100 ms back-off for the ring's update. Measured: 0 of 1,600 lost in a 40-request wave, 0 of 23 in the deterministic case, with the bound's spill kept. Outlier detection may eject all workers but one (`max_ejection_percent` ⌈100 × (N − 1) ÷ N⌉, 0 for one worker), since one connection failure now ejects, so it never empties the Instance; the active health check still takes out a set that has all died (#565's review). Before, connection failures counted with 5xx toward 3, the retry used Envoy's default 25 ms back-off, and `max_ejection_percent` was 100.
 - **2026-11-14: the identity record endpoint** (Contract; Errors). An amendment by the owner's decision on HBEP-9's record fetch (issue #9): the front answers `GET /hpcburst/v1/deployments/{id}` with a deployment ID's identity record and verification records, and 404 `deployment_not_found` for an ID with none. Before, the front answered no such route.
+- **2026-11-15: the record endpoint's errors** (Errors). An amendment by the science agent's rulings on #585's plan: a display form two full IDs share answers 409 `deployment_ambiguous`, and a failed read of the records 503 `records_unavailable` with `Retry-After: 5`. Before, the endpoint had only its 404 row.
