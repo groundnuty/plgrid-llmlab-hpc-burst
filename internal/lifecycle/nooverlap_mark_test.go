@@ -189,7 +189,7 @@ func TestAStepSevenRetryWhileThePrimaryHoldsTheSlotIsMarked(t *testing.T) {
 // Allocation "still holds its slot as the slot count reads it": its phase is not Ended, its
 // deletion has not completed, and it is on the same Provider (README line 464). An Ended Allocation
 // whose job is still completing holds its slot too (#198; holdsSlot). The mark is
-// judged from the reservation's own list (slotTable.reserveFor), so it reads the Allocation the
+// judged from the reservation's own list (slotTable.reserveAsk), so it reads the Allocation the
 // way the count does: by its phase now, and by its immutable spec.providerConfigRef, never by the
 // mutable provider label (PR 214 review, Astra B1 and B2). The rig's primaries leave by deletion
 // and always carry the right label, so no scenario above has an Allocation that is Ended and
@@ -250,15 +250,17 @@ func TestTheMarkConditionReadsTheSlotCountsOwnList(t *testing.T) {
 				}
 			}
 			limit := int32(5)
-			ok, _, holds, err := newSlotTable().reserveFor(context.Background(), c, prov, rigNS+"/new", rigNS+"/alloc", &limit, time.Now)
+			a, err := newSlotTable().reserveAsk(context.Background(), c, slotAsk{provider: prov, key: rigNS + "/new", holder: rigNS + "/alloc", limit: &limit}, time.Now)
+			ok, holds := a.ok, a.holds
 			if err != nil || !ok {
-				t.Fatalf("reserveFor: ok %v, %v; want a free slot", ok, err)
+				t.Fatalf("reserveAsk: ok %v, %v; want a free slot", ok, err)
 			}
 			if holds != tc.want {
 				t.Errorf("the reservation's read says the Allocation holds its slot: %v, want %v", holds, tc.want)
 			}
 			// With no limit, a holder is still read; with neither, nothing is.
-			ok, _, holds, err = newSlotTable().reserveFor(context.Background(), c, prov, rigNS+"/new", rigNS+"/alloc", nil, time.Now)
+			a, err = newSlotTable().reserveAsk(context.Background(), c, slotAsk{provider: prov, key: rigNS + "/new", holder: rigNS + "/alloc"}, time.Now)
+			ok, holds = a.ok, a.holds
 			if err != nil || !ok || holds != tc.want {
 				t.Errorf("with no submit limit: ok %v, holds %v, %v; want ok and holds %v", ok, holds, err, tc.want)
 			}
