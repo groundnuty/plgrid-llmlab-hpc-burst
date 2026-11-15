@@ -412,12 +412,29 @@ func (p *pass) createAllocation(pv *providerView, name string, params v1alpha1.B
 // the slot under that name first: one this controller reserved before it
 // stopped is still held, and after a restart the slot is reserved anew. With
 // no free slot the Instance waits, and the deployment shows SubmitLimitReached.
+//
+// A replacement or successor (an Instance that names a predecessor) holds a slot while it waits
+// (slots_reserved.go), so one whose Allocation can never be made on its Provider, for a lasting cause, is
+// ended rather than left waiting for ever: its Provider dropped from the deployment's list or managed, a
+// partition too short for its lease (lastingCause), or its sizing refused. The primary's reserved slot then
+// returns, and replacements() plans it again, on its Provider first (HBEP-7, Provisioning, Per-user limits;
+// the science agent's ruling on #599). A Provider problem, which can pass, keeps it waiting, and so does a
+// deployment's first primary, which holds no slot while it waits.
 func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
+	if !p.canProvision() {
+		return nil
+	}
 	pv := p.pvOf(in.Labels)
-	if pv == nil || !pv.usable() || pv.tooShort != "" || !p.canProvision() {
+	name := in.Spec.AllocationRef.Name
+	handover := in.Annotations[v1alpha1.AnnotationPredecessor] != ""
+	if pv != nil && handover {
+		if reason, why := lastingCause(pv); reason != "" {
+			return p.end(in, nil, reason, fmt.Sprintf("its Allocation %s was never made and can't be: %s", name, why), true)
+		}
+	}
+	if pv == nil || !pv.usable() || pv.tooShort != "" {
 		return nil // retried on a later pass, when the Provider is usable again
 	}
-	name := in.Spec.AllocationRef.Name
 	params, err := partitionSizingFor(pv, in.Spec.Launch.GPUs, v1alpha1.LaunchWorkers(in.Spec.Launch), p.md.Spec.LeaseLimit)
 	if err != nil {
 		// The Provider's limits changed between the two creates (a zero GPU
@@ -426,6 +443,9 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 		// does, or the deployment shows AsDesired while the Instance waits for
 		// ever (review of PR 171, Astra B4).
 		var u *unsupported
+		if asUnsupported(err, &u) && handover {
+			return p.end(in, nil, v1alpha1.ReasonSpecUnsupported, fmt.Sprintf("its Allocation %s was never made and can't be: Provider %s refuses its sizing: %s", name, pv.name, u.msg), true)
+		}
 		if asUnsupported(err, &u) {
 			p.degrade(v1alpha1.ReasonSpecUnsupported, "Instance %s waits for its Allocation %s: %s", in.Name, name, u.msg)
 		} else {

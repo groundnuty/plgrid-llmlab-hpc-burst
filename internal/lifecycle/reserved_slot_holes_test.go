@@ -193,7 +193,8 @@ func TestReservedSlotKeepsAFailedSuccessorsSlotForItsRetry(t *testing.T) {
 	bWaits()
 }
 
-// fixedInstances is a client.Reader that lists a fixed set of Instances and reads one ModelDeployment.
+// fixedInstances is a client.Reader that lists a fixed set of Instances and no Allocation, and reads one
+// ModelDeployment.
 type fixedInstances struct {
 	client.Reader
 	insts []v1alpha1.Instance
@@ -209,9 +210,13 @@ func (f fixedInstances) Get(_ context.Context, key client.ObjectKey, obj client.
 }
 
 func (f fixedInstances) List(_ context.Context, list client.ObjectList, _ ...client.ListOption) error {
+	if al, ok := list.(*v1alpha1.AllocationList); ok {
+		al.Items = nil // no Allocation has been made
+		return nil
+	}
 	il, ok := list.(*v1alpha1.InstanceList)
 	if !ok {
-		return fmt.Errorf("fixedInstances lists only Instances, not %T", list)
+		return fmt.Errorf("fixedInstances lists only Instances and Allocations, not %T", list)
 	}
 	il.Items = nil
 	for _, in := range f.insts {

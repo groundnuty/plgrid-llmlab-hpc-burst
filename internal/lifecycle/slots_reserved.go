@@ -25,9 +25,11 @@ import (
 // the successor before any other deployment's primary. On the one-slot path the successor is created only once
 // that slot is free (step 7, from the gap's carrier, nooverlap.go), so until then the out-of-service carrier
 // holds it: the primary that drained in the mode, or a successor of it that failed before it was ready, whose
-// retry takes the slot. And any live Instance whose Allocation is not made yet (a pass cut short between the two
-// creates, by a failed create or a restart) holds its own, so a replacement made but not yet submitted never
-// loses its slot to another deployment (#599's review).
+// retry takes the slot. And a live replacement or successor whose Allocation is not made yet (a pass cut short
+// between the two creates, by a failed create or a restart) holds its own: the slot reserved for it passes to it
+// with its Instance and is used up once its Allocation is reserved or listed, so it never loses that slot to
+// another deployment (#599's review). A deployment's first primary, which no handover reserved a slot for, gives
+// its slot back when its creation fails, as HBEP-7 says (slots.go).
 //
 // The reserved slots are worked out under the Provider's lock, from reads made there, as the listed count is: so
 // the reservation is as atomic as the count (slots.go), and two workers never both see a slot left beyond it.
@@ -40,6 +42,21 @@ type reservedSlot struct {
 	// deployment is the ModelDeployment (namespace/name) whose handover holds it.
 	deployment string
 	kind       slotKind
+	// created and uid order the own slots of Instances that wait for their Allocations: the older takes a slot
+	// before the younger (before).
+	created time.Time
+	uid     string
+}
+
+// before reports whether s's Instance is older than o's: by creation time, then by UID. Of two replacements
+// waiting for their Allocations on a Provider with no slot for both, possible only after a leader hand-over
+// race, the older takes the slot and the younger waits, so neither waits for the other for ever (the science
+// agent's ruling on #599).
+func (s reservedSlot) before(o reservedSlot) bool {
+	if !s.created.Equal(o.created) {
+		return s.created.Before(o.created)
+	}
+	return s.uid < o.uid
 }
 
 // slotKind is why a slot is reserved.
@@ -50,8 +67,8 @@ const (
 	slotForReplacement slotKind = iota
 	// slotForSuccessor is an out-of-service gap carrier's, for the successor step 7 makes of it.
 	slotForSuccessor
-	// slotForOwnAllocation is a live Instance's, for its own Allocation not made yet: once that Allocation is
-	// reserved (an expectation) or listed, the slot is that, and no longer counted as reserved.
+	// slotForOwnAllocation is a live replacement's or successor's, for its own Allocation not made yet: once
+	// that Allocation is reserved (an expectation) or listed, the slot is that, and no longer counted as reserved.
 	slotForOwnAllocation
 )
 
@@ -67,8 +84,11 @@ const (
 // helper (outOfServiceCarriers; nooverlap.go), the primary that drained in the mode or a successor of it that
 // failed before it was ready, when its deployment is not being deleted (a deleted deployment's pass makes no
 // successor). Its slot is keyed by its own Allocation, which its successor's reservation takes (takersOf). Every
-// countable Instance whose Allocation does not exist holds one under that Allocation's key: a pass cut short
-// between the Instance and its Allocation, by a failed create or a restart, keeps its slot. The Instances of a
+// countable Instance that names a predecessor (a replacement or a successor) and whose Allocation does not exist
+// holds one under that Allocation's key: a handover cut short between the Instance and its Allocation, by a
+// failed create or a restart, keeps the slot reserved for it. An Instance with no predecessor, a deployment's
+// first primary or step 7's new one, holds none: no handover reserved its slot, and a failed creation of it gives
+// its slot back (HBEP-7, Slots are reserved atomically). The Instances of a
 // deployment recreated under the same name are not told apart here (noOverlapCarriers drops them as stale),
 // since a carrier's name is random and a stale successor naming it is not a case that arises.
 func reservedOn(ctx context.Context, r client.Reader, provider string, profile *v1alpha1.PlatformProfileSpec, allocs map[string]*v1alpha1.Allocation) ([]reservedSlot, error) {
@@ -110,8 +130,8 @@ func reservedOn(ctx context.Context, r client.Reader, provider string, profile *
 			}
 			continue
 		}
-		if _, made := allocs[allocKey]; countable(in) && !made {
-			out = append(out, reservedSlot{key: allocKey, deployment: deploymentKey(in), kind: slotForOwnAllocation})
+		if _, made := allocs[allocKey]; countable(in) && !made && in.Annotations[v1alpha1.AnnotationPredecessor] != "" {
+			out = append(out, reservedSlot{key: allocKey, deployment: deploymentKey(in), kind: slotForOwnAllocation, created: in.CreationTimestamp.Time, uid: string(in.UID)})
 			continue
 		}
 		if profile == nil || !countable(in) || replaced[in.Namespace+"/"+in.Name] {
@@ -187,6 +207,12 @@ func counted(slots []reservedSlot, key string, takers []string, expected map[str
 	for _, k := range takers {
 		take[k] = true
 	}
+	var self *reservedSlot
+	for i := range slots {
+		if slots[i].key == key && slots[i].kind == slotForOwnAllocation {
+			self = &slots[i]
+		}
+	}
 	seenBy := map[string]bool{}
 	for _, s := range slots {
 		if take[s.key] {
@@ -194,6 +220,9 @@ func counted(slots []reservedSlot, key string, takers []string, expected map[str
 		}
 		if _, ok := expected[s.key]; s.kind == slotForOwnAllocation && ok {
 			continue
+		}
+		if self != nil && s.kind == slotForOwnAllocation && self.before(s) {
+			continue // a younger waiting replacement yields to this older one
 		}
 		n++
 		if !seenBy[s.deployment] {
@@ -244,4 +273,20 @@ func (p *pass) instanceNamed(name string) *v1alpha1.Instance {
 		}
 	}
 	return nil
+}
+
+// lastingCause returns the reason and the words to end a waiting replacement with when its Provider can never
+// take its Allocation (ensureAllocation): the Provider dropped from the deployment's list or managed
+// (AllocationLost), or its partition too short for the lease (SpecUnsupported). "" for none: a Provider problem,
+// such as one not Ready, can pass, so the replacement waits.
+func lastingCause(pv *providerView) (reason, why string) {
+	switch {
+	case pv.extra:
+		return v1alpha1.ReasonAllocationLost, fmt.Sprintf("Provider %s is no longer in the deployment's list", pv.name)
+	case pv.managed:
+		return v1alpha1.ReasonAllocationLost, fmt.Sprintf("Provider %s is on a managed platform", pv.name)
+	case pv.tooShort != "":
+		return v1alpha1.ReasonSpecUnsupported, pv.tooShort
+	}
+	return "", ""
 }
