@@ -117,7 +117,7 @@ In these stories, `helios-a`, `helios-b` and `athena-a` are names an operator ga
 - **Identity record** (HBEP-9): the inputs behind one deployment ID, which never change. Beside it, each verification of an Instance of that ID, at start and after every restart that reverifies, writes its own verification record, which never changes either (HBEP-11).
 - **Front:** the LLMLab-compatible API endpoint (HBEP-5). Its client key is set by the operator (HBEP-5).
 - **Control plane:** Kubernetes API custom resources plus controllers (HBEP-11). Models run in provider jobs, not pods.
-- **Hedging:** submit early, on several providers if needed; keep the first Allocation whose Instance serves; cancel the pending losers (HBEP-7, open question 1; amended 2026-10-30). Hedging acts on pending Allocations; over-allocation acts on started ones.
+- **Hedging:** submit early, on several providers if needed; keep the first Allocation whose Instance serves; cancel the pending losers (HBEP-7, open question 1; amended 2026-10-30). Hedging acts on pending Allocations; over-allocation acts on started ones. The Allocations submitted for one missing primary or one replacement, at most one per provider, form one hedge; the first whose Instance serves is its winner, and the others are its losers (HBEP-7, Hedging; amended 2026-11-15).
 - **Over-allocation:** obtain N+k Allocations for N Instances, qualify each Instance, and keep the best N. The rest are released, or kept as warm capacity, per their retention policy (HBEP-7).
 - **Qualification:** the gate an Instance passes before it is kept: an identity check (HBEP-9) plus a short benchmark against the expected performance in its platform profile. It catches broken nodes, not only slow ones (HBEP-7).
 - **Retention policy:** what happens to an Allocation that hosts no Instance. Either it is kept as warm capacity, ready to host an Instance, until a date, a grant's end or a deadline; or it is released when idle. A kept Allocation still ends at its hard end. Keep is the default (HBEP-7, open question 13; amended 2026-10-30).
@@ -468,6 +468,7 @@ The resource model replaces state that www-2027 operators kept by hand: per-job 
 - 2026-10-31: amendment from the merged contracts (PR #71) and Hub listing (PR #68): the `Degraded` reason `IdentityUnresolved`, `engine.image` outside the ID, HBEP-9's listing rule, and no Allocation in alpha before a class has its ID.
 - 2026-10-31: amendment from the real LLMLab read (issue #69): open question 5's check before beta is done, and model and catalog names are field values only; "the hold is lifted exactly once" qualified with HBEP-4's known risk.
 - 2026-11-12: several workers per Instance, for beta (HBEP-7, Several workers).
+- 2026-11-15: the term hedge, with HBEP-7's hedging mechanism for beta.
 
 ## Amendments
 
@@ -494,3 +495,4 @@ The resource model replaces state that www-2027 operators kept by hand: per-job 
   - **LLMLab reports no revision,** so its catalog entries' canonical objects omit `revision` (Deployment ID; HBEP-4). The rule is unchanged.
   - **"Lifted exactly once" is qualified** (open question 13; Allocation and job identity) with the known risk HBEP-4 records from PR #96's review: a leader that stalls after its last re-read can release a later hold of the same job, after an administrator requeued it with a hold. Before, the guarantee had no exception.
 - **2026-11-12: several workers per Instance, for beta** (Resource model). An amendment, the science agent's design, with HBEP-7's Several workers section as its one home: the Instance's workers in beta are `spec.workersPerInstance` copies of one engine launch, and the count isn't a deployment-ID input (`data-parallel-size` above 1 stays refused, in prose: the engine-flag table is read by the CRD's tests, and its flag list is the CRD's). Before, the worker count had no source.
+- **2026-11-15: the hedge** (Vocabulary). An amendment with HBEP-7's hedging mechanism of the same day, under open question 9: the Allocations submitted for one missing primary or one replacement, at most one per provider, form one hedge, with its winner and its losers. HBEP-7 and HBEP-10 name hedge losers. Before, the vocabulary defined hedging but not the set it acts on.
