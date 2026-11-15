@@ -90,8 +90,8 @@ func TestDialUntilGreetingFailsNamingTheDialsAndTheLastErrorWhenNoGreetingComes(
 // The failing run's dial, made deterministic: a new generation's relay may not start (Target.BeforeStart), and the first generation's has ended,
 // so the job has no relay up, as it has between a relay's stop and its replacement's session. A single dial gets what CI's run got, a connection
 // closed with no greeting; the job side's wait is 2 s here, so that it does within seconds (when the old session was still held it ends with that
-// session instead). A dial that dials again takes the greeting of the generation 2 relay once the test lets it start, whatever number of dials that
-// took, and the channel carries bytes.
+// session instead). A round trip, which dials again, takes the greeting of the generation 2 relay once the test lets it start, whatever number of
+// dials that took, and the channel carries bytes.
 func TestAControlDialAcrossAGenRestartIsRetriedUntilTheNewRelayGreets(t *testing.T) {
 	w := newWorld(t)
 	j := w.submit("hb-relay-drt-0123456789ab", 2*time.Second)
@@ -120,27 +120,12 @@ func TestAControlDialAcrossAGenRestartIsRetriedUntilTheNewRelayGreets(t *testing
 		t.Fatalf("a single dial with no relay up ended with %v, want the failing run's \"no greeting: EOF\"", err)
 	}
 	var attempts atomic.Int64
-	type result struct {
-		c   *conn
-		err error
-	}
-	done := make(chan result, 1)
-	go func() {
-		c, err := dialUntilGreeting(j, control, time.Minute, &attempts)
-		done <- result{c, err}
-	}()
+	done := make(chan error, 1)
+	go func() { done <- roundTripOver(j, control, "control", payload(1000), &attempts) }()
 	waitFor(t, time.Minute, "a dial to end with no greeting and the next to begin", func() bool { return attempts.Load() >= 2 })
 	close(gate)
-	r := <-done
-	if r.err != nil {
-		t.Fatalf("a dial that dials again, with the relay of generation 2 let go: %v", r.err)
-	}
-	defer r.c.close()
-	if r.c.greet != "control" {
-		t.Errorf("the greeting is %q, want %q", r.c.greet, "control")
-	}
-	if err := r.c.echo(payload(1000), 30*time.Second); err != nil {
-		t.Errorf("the channel does not carry bytes after the dials: %v", err)
+	if err := <-done; err != nil {
+		t.Fatalf("a round trip that dials again, with the relay of generation 2 let go: %v", err)
 	}
 	if got := relayOf(own, j.tag, control); got.Gen != "2" || got.PID == 0 || got.PID == first.PID {
 		t.Errorf("the control relay is %+v, want a new process on generation 2", got)

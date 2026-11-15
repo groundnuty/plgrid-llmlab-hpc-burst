@@ -605,20 +605,30 @@ func dialUntilGreeting(j job, ch agentapi.RelayChannel, bound time.Duration, att
 	}
 }
 
-// roundTrip dials a job's channel until its greeting comes (dialUntilGreeting),
-// checks that the greeting names want, and echoes p.
-func roundTrip(t *testing.T, j job, ch agentapi.RelayChannel, want string, p []byte) {
-	t.Helper()
-	c, err := dialUntilGreeting(j, ch, time.Minute, nil)
+// roundTripOver dials a job's channel until its greeting comes (dialUntilGreeting), checks that the
+// greeting names want, and echoes p, and returns what went wrong; attempts is dialUntilGreeting's. A test
+// that must not stop at the first failure, or that runs it beside another step, calls this: roundTrip
+// ends the test on its error.
+func roundTripOver(j job, ch agentapi.RelayChannel, want string, p []byte, attempts *atomic.Int64) error {
+	c, err := dialUntilGreeting(j, ch, time.Minute, attempts)
 	if err != nil {
-		t.Fatalf("job %s's %s listener: %v", j.id, ch, err)
+		return fmt.Errorf("job %s's %s listener: %w", j.id, ch, err)
 	}
 	defer c.close()
 	if c.greet != want {
-		t.Fatalf("job %s's %s listener reached the %q target, want %q", j.id, ch, c.greet, want)
+		return fmt.Errorf("job %s's %s listener reached the %q target, want %q", j.id, ch, c.greet, want)
 	}
 	if err := c.echo(p, 30*time.Second); err != nil {
-		t.Fatalf("job %s's %s channel: the echo of %d bytes: %v", j.id, ch, len(p), err)
+		return fmt.Errorf("job %s's %s channel: the echo of %d bytes: %w", j.id, ch, len(p), err)
+	}
+	return nil
+}
+
+// roundTrip is roundTripOver, ending the test on its error.
+func roundTrip(t *testing.T, j job, ch agentapi.RelayChannel, want string, p []byte) {
+	t.Helper()
+	if err := roundTripOver(j, ch, want, p, nil); err != nil {
+		t.Fatal(err)
 	}
 }
 
