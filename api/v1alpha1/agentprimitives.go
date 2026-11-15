@@ -97,6 +97,11 @@ const (
 	// PlanEffectDrainLastReady drains the deployment's last ready Instance.
 	PlanEffectDrainLastReady PlanEffect = "DrainLastReady"
 
+	// PlanEffectEndStarting ends an Instance still starting on a started
+	// Allocation, at once; its Allocation then follows retention (HBEP-7,
+	// Reconcile loop, step 7). It has the approval rule of a drain.
+	PlanEffectEndStarting PlanEffect = "EndStarting"
+
 	// PlanEffectReleaseKept releases an Allocation that its retention policy
 	// keeps.
 	PlanEffectReleaseKept PlanEffect = "ReleaseKept"

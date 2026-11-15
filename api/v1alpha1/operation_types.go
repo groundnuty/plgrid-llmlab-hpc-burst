@@ -23,9 +23,12 @@ type OperationPhase string
 type TargetKind string
 
 // PlanEffect is what the plan does to one target (HBEP-10, Operations, The
-// plan; What needs approval).
+// plan; What needs approval). EndStarting is an Instance still starting on a
+// started Allocation, ended at once; its Allocation then follows retention
+// (HBEP-7, Reconcile loop, step 7). HBEP-10 does not name it (`@hpc-burst-science-agent`,
+// 15 Nov 2026, the ruling on question 10 of #589's plan).
 //
-// +kubebuilder:validation:Enum=CancelPending;DrainInstance;DrainLastReady;ReleaseKept;ReleaseStarted;Keep;SetEndTime;DeleteDeployment
+// +kubebuilder:validation:Enum=CancelPending;DrainInstance;DrainLastReady;EndStarting;ReleaseKept;ReleaseStarted;Keep;SetEndTime;DeleteDeployment
 type PlanEffect string
 
 // TargetState is where one committed target stands (HBEP-10, The report).

@@ -291,6 +291,7 @@ spec:
                       - CancelPending
                       - DrainInstance
                       - DrainLastReady
+                      - EndStarting
                       - ReleaseKept
                       - ReleaseStarted
                       - Keep
@@ -659,6 +660,7 @@ spec:
                           - CancelPending
                           - DrainInstance
                           - DrainLastReady
+                          - EndStarting
                           - ReleaseKept
                           - ReleaseStarted
                           - Keep

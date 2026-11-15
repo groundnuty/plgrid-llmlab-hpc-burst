@@ -502,12 +502,12 @@ func TestOperationStatusRefusesValuesOutsideItsEnums(t *testing.T) {
 	})
 }
 
-// allPlanEffects lists the effects of the first release, written out by hand
-// from HBEP-10 (Operations, The plan), so a constant that goes missing from the
-// enum fails here.
+// allPlanEffects lists the effects, written out by hand from HBEP-10
+// (Operations, The plan) and the science agent's ruling that adds EndStarting,
+// so a constant that goes missing from the enum fails here.
 func allPlanEffects() []v1alpha1.PlanEffect {
 	return []v1alpha1.PlanEffect{
-		"CancelPending", "DrainInstance", "DrainLastReady", "ReleaseKept", "ReleaseStarted", "Keep", "SetEndTime", "DeleteDeployment",
+		"CancelPending", "DrainInstance", "DrainLastReady", "EndStarting", "ReleaseKept", "ReleaseStarted", "Keep", "SetEndTime", "DeleteDeployment",
 	}
 }
 
@@ -599,5 +599,37 @@ func TestAgentPrimitiveKindsAreServedWithTheirSubresources(t *testing.T) {
 		if _, ok := got[name]; ok {
 			t.Errorf("%s is served: the kind has no status subresource", name)
 		}
+	}
+}
+
+// EndStarting is a plan effect: an Instance still starting on a started
+// Allocation, ended at once (HBEP-7, Reconcile loop, step 7). The status write
+// is the admin's, as the lifecycle controller's would be. The enum has no CEL
+// rule, so mutate-cel has no row for it; the near misses that are refused show
+// the accepted value is in the enum and not a field the schema leaves open.
+func TestPlanEffectEndStartingIsInTheEnum(t *testing.T) {
+	ns := newNamespace(t)
+	op := newOperation(ns, uniq("op"))
+	must(t, c.Create(bg(), op), "create Operation")
+	write := func(effect v1alpha1.PlanEffect) error {
+		got := &v1alpha1.Operation{}
+		must(t, c.Get(bg(), objKey(op), got), "get Operation")
+		got.Status = fullOperationStatus()
+		got.Status.Plan.Targets[0].Effect = effect
+		got.Status.Plan.Targets[0].Kind = v1alpha1.TargetKindInstance
+		got.Status.Committed[0].Effect = effect
+		return c.Status().Update(bg(), got)
+	}
+	must(t, write("EndStarting"), "write a plan with the effect EndStarting")
+	back := &v1alpha1.Operation{}
+	must(t, c.Get(bg(), objKey(op), back), "get Operation")
+	if got := back.Status.Plan.Targets[0].Effect; got != v1alpha1.PlanEffectEndStarting {
+		t.Errorf("the stored effect is %q, want EndStarting", got)
+	}
+	if got := back.Status.Committed[0].Effect; got != v1alpha1.PlanEffectEndStarting {
+		t.Errorf("the stored committed effect is %q, want EndStarting", got)
+	}
+	for _, near := range []v1alpha1.PlanEffect{"EndStart", "endStarting", "EndStartingNow", ""} {
+		requireRefused(t, write(near), "Unsupported value")
 	}
 }
