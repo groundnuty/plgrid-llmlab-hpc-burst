@@ -116,7 +116,8 @@ func TestAlphaAthenaNowServe(t *testing.T) {
 // TestBetaAthenaNowBulk is the bulk row of issue #521 (beta's tracker, #522) on Athena plgrid-now under profiles/athena-now.yaml, in host-dialed mode
 // with the bulk path, on the engine double: eight token streams beside a 64 MiB reply, once down the token transport as a streamed reply (the
 // control) and once as a non-streamed reply down the bulk path, and the streams' gap p99 read for each. It fails on a broken path alone; a run with no
-// saturation witness is INVALID; any other reading passes, stated plainly with 85 ms named as S17's buffer prediction alone (#584).
+// saturation witness is INVALID; a bulk path 30 ms or less below the control is a FINDING, and more than 30 ms below a PASS, with 85 ms named
+// as S17's buffer prediction alone (#584).
 // The engine double reaches the job as the test shim in hb-agent's place, which execs the shipped agent the harness staged (issue #521, option (A)).
 //
 //livecheck:beta-athena-now-bulk

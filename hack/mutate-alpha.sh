@@ -828,9 +828,9 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'config.go@@	if row.Name == BetaKeeperName && cfg.DialHomeMode != "host-dialed" {@@	if row.Name == BetaKeeperName && cfg.DialHomeMode == "direct" {'
   'steps_live_test.go@@	case BetaKeeperName:@@	case "":'
   # #521, the bulk row (betabulk.go): S17's figures written out, the gap windowing and the percentile, every check of the verdict with its boundary, the
-  # finding's two conditions, the double's naming, the config's host-dialed rule and the row's ports. The live flow's wiring is the stand-in's.
-  'betabulk.go@@	BulkRule   = 85 * time.Millisecond@@	BulkRule   = 86 * time.Millisecond'
-  'betabulk.go@@	BulkMargin = 30 * time.Millisecond@@	BulkMargin = 31 * time.Millisecond'
+  # PASS and FINDING by S4's 30 ms (#584), the double's naming, the config's host-dialed rule and the row's ports. The live flow's wiring is the stand-in's.
+  'betabulk.go@@	BulkS17Prediction = 85 * time.Millisecond@@	BulkS17Prediction = 86 * time.Millisecond'
+  'betabulk.go@@	BulkMargin        = 30 * time.Millisecond@@	BulkMargin        = 31 * time.Millisecond'
   'betabulk.go@@	BulkReplyBytes = 64 << 20@@	BulkReplyBytes = 32 << 20'
   'betabulk.go@@	BulkStreams      = 8@@	BulkStreams      = 7'
   'betabulk.go@@	BulkTokenDelay   = 50 * time.Millisecond@@	BulkTokenDelay   = 51 * time.Millisecond'
@@ -861,7 +861,8 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'run.go@@	if invalid != nil && len(failures) == 0 {@@	if invalid != nil {'
   'run.go@@func Invalid(_ Row, err error) bool { return errors.Is(err, ErrInvalid) }@@func Invalid(_ Row, err error) bool { return false }'
   'run.go@@			if Invalid(cfg.Row, err) {@@			if false {'
-  'betabulk.go@@	if len(failures) == 0 && len(why) > 0 {@@	if len(why) > 0 {'
+  'betabulk.go@@	case len(failures) > 0:
+	case len(why) > 0:@@	case len(why) > 0:'
   'betabulk.go@@		head = invalidVerdictLine(row, why)@@		_ = why'
   'betabulk.go@@	if len(why) > 0 {@@	if false {'
   'betabulk.go@@	if o.Registered < 1 {@@	if o.Registered < 0 {'
@@ -869,24 +870,32 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'betabulk.go@@	case o.Bulk.BulkSent < 0 || o.Control.BulkSent < 0:@@	case o.Bulk.BulkSent < 0:'
   'betabulk.go@@	case o.Bulk.BulkSent != 1:@@	case o.Bulk.BulkSent < 1:'
   'betabulk.go@@	if o.Bulk.FallbackSent != 0 || o.Control.FallbackSent != 0 {@@	if o.Bulk.FallbackSent != 0 {'
-  'betabulk.go@@	if o.Control.P99 < BulkRule {@@	if o.Control.P99 <= BulkRule {'
+  # #584, the bulk row's PASS and FINDING (the science agent's rulings of 15 Nov 2026): the boundary at exactly 30 ms, the head, the line that
+  # follows the reading, and 85 ms deciding nothing.
+  'betabulk.go@@func (o BulkObs) Protects() bool { return o.Control.P99-o.Bulk.P99 > BulkMargin }@@func (o BulkObs) Protects() bool { return o.Control.P99-o.Bulk.P99 >= BulkMargin }'
   'betabulk.go@@	if strings.TrimSpace(d.Name) == "" || !sha256Re.MatchString(d.Digest) {@@	if d.Name == "" || !sha256Re.MatchString(d.Digest) {'
   'betabulk.go@@	if strings.TrimSpace(d.Name) == "" || !sha256Re.MatchString(d.Digest) {@@	if strings.TrimSpace(d.Name) == "" {'
   'betabulk.go@@var sha256Re = regexp.MustCompile(`^[0-9a-f]{64}$`)@@var sha256Re = regexp.MustCompile(`^[0-9a-f]{63}`)'
-  'betabulk.go@@	case o.Bulk.P99 >= BulkRule:@@	case o.Bulk.P99 > BulkRule:'
-  'betabulk.go@@	case o.Control.P99 >= BulkRule && o.Control.P99-o.Bulk.P99 < BulkMargin:@@	case o.Control.P99 >= BulkRule && o.Control.P99-o.Bulk.P99 <= BulkMargin:'
-  'betabulk.go@@	case o.Control.P99 >= BulkRule && o.Control.P99-o.Bulk.P99 < BulkMargin:@@	case o.Control.P99-o.Bulk.P99 < BulkMargin:'
+  'betabulk.go@@	case !o.Protects():@@	case false && !o.Protects():'
+  'betabulk.go@@		case len(failures) > 0:
+		case o.Protects():@@		case o.Protects():'
+  'betabulk.go@@"- FINDING: the layout doesn'"'"'t protect the streams on this path:@@"- the layout doesn'"'"'t protect the streams on this path:'
   'betabulk.go@@	f = append(f, pathChecks(o)...)@@	_ = pathChecks'
   'betabulk.go@@	f = append(f, phaseChecks("control", o.Control)...)@@	_ = phaseChecks'
   'betabulk.go@@	f = append(f, phaseChecks("bulk", o.Bulk)...)@@	_ = phaseChecks'
-  'betabulk.go@@	f = append(f, doubleChecks(o.Double)...)@@	if o.Control.P99 < BulkRule { f = append(f, "the control shows no stall") }; f = append(f, doubleChecks(o.Double)...)'
-  'betabulk.go@@		f = append(f, fmt.Sprintf("the control'"'"'s gap p99 is %s, under the %s threshold: no stall to remove on this path (HBEP-6, open question 12)", o.Control.P99, BulkRule))@@		_ = f'
+  'betabulk.go@@	f = append(f, doubleChecks(o.Double)...)@@	if !o.Protects() { f = append(f, "the layout does not protect the streams") }; f = append(f, doubleChecks(o.Double)...)'
+  'betabulk.go@@S17'"'"'s buffer prediction was %s (HBEP-6, open question 12)@@HBEP-6'"'"'s threshold is %s (open question 12'"'"'s reading)'
   'betabulk.go@@	f = append(f, doubleChecks(o.Double)...)@@	_ = doubleChecks'
   'betabulk.go@@	if o.ReadyAt.IsZero() {@@	if false {'
   'betabulk.go@@	if o.Responses <= 0 {@@	if false {'
   'betabulk.go@@	} else if o.Attributed != o.Responses {@@	} else if false {'
   'betabulk.go@@THE ENGINE WAS A DOUBLE, not vLLM: %s, SHA-256 %s;@@the engine: %s, SHA-256 %s;'
-  'betabulk.go@@		if fs := o.Findings(); len(fs) > 0 {@@		if fs := []string(nil); len(fs) > 0 {'
+  'betabulk.go@@		b.WriteString(o.readingLine())@@		b.WriteString(o.readingLine()); if o.Bulk.P99 >= BulkS17Prediction { b.WriteString("- FINDING (not a failure): the bulk path'"'"'s gap p99 is at or above the 85ms rule\n") }'
+  # #584, the bulk row's FINDING in Run (run.go): its verdict, its error, and a failure beside it winning (#591's review).
+  'run.go@@		} else if !o.Protects() {@@		} else if false && !o.Protects() {'
+  'run.go@@		verdict = "finding"@@		verdict = "pass"'
+  'run.go@@func Finding(_ Row, err error) bool { return errors.Is(err, ErrFinding) }@@func Finding(_ Row, err error) bool { return false }'
+  'run.go@@	if finding != nil && len(failures) == 0 {@@	if finding != nil {'
   'config.go@@	if row.Name == BetaBulkName && cfg.DialHomeMode != "host-dialed" {@@	if false {'
   'steps_live_test.go@@	case BetaBulkName:@@	case "":'
   'steps_live_test.go@@		p.ClientAddr = "127.0.0.1:29716"@@		p.ClientAddr = "127.0.0.1:29713"'
@@ -894,6 +903,12 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'betabulk_flow_test.go@@	if r.w.double.Digest == "" {@@	if false {'
   # The bulk row's INVALID marker is held to that row (the positive case cannot run through the script while the row is pending).
   'hack/live-checks.sh@@  ! invalid_marker || [ "$n" = beta-athena-now-bulk ] || return 1@@  true'
+  # #584, the bulk row's FINDING through the script: exit 5, never 0 or 1, and its marker held to that row's pass.
+  'hack/live-checks.sh@@  [ "$verdict" -ne 0 ] || [ "$FINDING" != 1 ] || verdict=5@@  true'
+  'hack/live-checks.sh@@  for c in 1 5 3 4 2; do@@  for c in 1 3 4 2; do'
+  'hack/live-checks.sh@@  execute_cluster "$n" || { [ "$NOT_RUN" = 1 ] || [ "$FINDING" = 1 ] || verdict=1; }@@  execute_cluster "$n" || { [ "$NOT_RUN" = 1 ] || verdict=1; }'
+  'hack/live-checks.sh@@      if [ "$n" = beta-athena-now-bulk ] && finding_marker; then@@      if finding_marker; then'
+  'hack/live-checks.sh@@  ! finding_present || return 1 # a FINDING@@  true || return 1 # a FINDING'
   'betabulk_flow_test.go@@	return BulkObs{}, ErrNoStagedDouble@@	return BulkObs{}, nil'
   # #521, the bulk row's per-stream judgment (StreamBeside).
   'betabulk.go@@	done = s.Complete && s.CutBy == "" && s.Tokens == BulkStreamTokens@@	done = s.Complete && s.CutBy == ""'
@@ -1130,7 +1145,7 @@ compile_of() {
 # parent-death SIGKILL, which it asks for.
 rehearsal_tests='ExitedSSHD|ZeroRowSignalsNothing|BelowWalksNothing|Guard2Alone|SignalProcs|RefusalIsTheErrorOfClose|WithRelayEnvSelectsNothing|ReportLeaks|CloseReturnsWhen|BeforeItsParent|LeftTheTree|StillAliveAtItsDeadline|StillOutsideTheTree|RelayGuard|ForcedCommandDies|ForcedCommandExecs|GuardFailureIsLogged'
 # The tests of the script's kind.
-script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot|HostDialedMode|HandoverRowsLead|LeadMarkersReason|LeadMarkerOnARow|EveryStackRow|TheRowsThatStartNoStack|TunnelRowsLongStream|LongMarkersReason|LongMarkerOnARow|InvalidMarkerOnAnotherRow|TheKeeperRowsNotRunsThroughTheScript|TheKeeperMarkerOnAnotherRow|TheRouterRowsNotRunsThroughTheScript|TheHeliosRouterRowsNotRunsThroughTheScriptPostTheGlibc|TheGlibcMarkerOnAnotherRow'
+script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot|HostDialedMode|HandoverRowsLead|LeadMarkersReason|LeadMarkerOnARow|EveryStackRow|TheRowsThatStartNoStack|TunnelRowsLongStream|LongMarkersReason|LongMarkerOnARow|InvalidMarkerOnAnotherRow|TheKeeperRowsNotRunsThroughTheScript|TheKeeperMarkerOnAnotherRow|TheRouterRowsNotRunsThroughTheScript|TheHeliosRouterRowsNotRunsThroughTheScriptPostTheGlibc|TheGlibcMarkerOnAnotherRow|TheBulkRowsFourVerdictsThroughTheScript|TheFindingMarkerIsTheBulkRowsAlone'
 # tests_of <path> [control|<names>]: the command that judges a mutant of path, in the array tests. With control, the same command with
 # no mutant: from the binaries kept at the baseline, the tree being as it was. With names (a regexp), that, for those tests alone, to
 # the end. The

@@ -100,6 +100,9 @@ func (d *drySteps) BetaBulk(_ context.Context, p Plan) (BulkObs, error) {
 	case d.fault("invalid-and-cut"):
 		// No witness, and a stream cut beside it: the failure wins.
 		obs.Control.Gaps, obs.Control.StreamsDone = 0, BulkStreams-1
+	case d.fault("finding-and-cut"):
+		// A reading 20 ms apart, a FINDING on its own, and the bulk transfer cut beside it: the failure wins, never a FINDING (#591's review).
+		obs.Control.P99, obs.Bulk.P99, obs.Bulk.Cut = 100*time.Millisecond, 80*time.Millisecond, true
 	case d.fault("double-unnamed"):
 		obs.Double.Name = " "
 	case d.fault("double-digest-short"):
@@ -150,6 +153,7 @@ var betaBulkCases = []dryCase{
 	{"control-cut", "the control transfer's read was cut before its end"},
 	{"bulk-cut", "the bulk transfer's read was cut before its end"},
 	{"invalid-and-cut", "a stream beside the control transfer was cut or did not finish with its tokens"},
+	{"finding-and-cut", "the bulk transfer's read was cut before its end"},
 	{"double-unnamed", "the engine double was not named with the SHA-256 of its binary"},
 	{"double-digest-short", "the engine double was not named with the SHA-256 of its binary"},
 	{"double-digest-upper", "the engine double was not named with the SHA-256 of its binary"},

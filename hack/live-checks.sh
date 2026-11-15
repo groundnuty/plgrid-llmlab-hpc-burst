@@ -607,7 +607,7 @@ usage: hack/live-checks.sh --list
        hack/live-checks.sh --run <name>... [--yes]    runs only the named tests (a cluster test needs --yes);
                                                       tunnel-hour, gpu-accounting, reach and reach-host-dialed stand for their Athena row
 Settings: HPCBURST_LIVE_SETTINGS names a mode-600 KEY=VALUE file; the keys are listed in this script's header.
-Exit: 0 passed; 1 failed, skipped or left a job; 2 usage; 3 refused; 4 cluster test not run (no --yes).
+Exit: 0 passed; 1 failed, skipped or left a job; 2 usage; 3 refused; 4 cluster test not run (no --yes); 5 FINDING (the bulk row).
 USAGE
   exit "${1:-2}"
 }

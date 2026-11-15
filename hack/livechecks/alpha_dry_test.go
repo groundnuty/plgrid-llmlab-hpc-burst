@@ -177,7 +177,7 @@ var betaKeeperFaults = []string{"not-ready", "relays-unread-before", "relays-unr
 // TestTheBulkRowsFourVerdictsThroughTheScript's.
 var betaBulkFaults = []string{"not-ready", "not-registered", "front-without-bulk", "control-took-bulk", "bulk-never-engaged", "bulk-twice", "counter-unread",
 	"fallback", "control-fallback", "control-short-reply", "bulk-short-reply", "control-status", "bulk-status", "control-stream-cut", "bulk-stream-cut",
-	"control-cut", "bulk-cut", "invalid-and-cut", "double-unnamed", "double-digest-short", "double-digest-upper", "shim-not-staged", "shim-agent-not-shipped",
+	"control-cut", "bulk-cut", "invalid-and-cut", "finding-and-cut", "double-unnamed", "double-digest-short", "double-digest-upper", "shim-not-staged", "shim-agent-not-shipped",
 	"shim-engine-not-double", "shim-agent-unread", "unattributed", "no-responses", "untagged", "wrong-partition", "default-lease", "short-lease", "duplicate-tag",
 	"extra-allocation"}
 
