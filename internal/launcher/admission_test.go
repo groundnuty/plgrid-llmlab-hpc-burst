@@ -95,7 +95,9 @@ func TestAdmissionPoliciesAreWhatHBEP10Describes(t *testing.T) {
 }
 
 // request.subResource is absent on the main resource, and reading it errors (plan section 1, verified
-// against a real API server): every reference goes through has(), here and in every later edit.
+// against a real API server): every reference goes through has(), here and in every later edit. The one
+// form accepted is has(request.subResource) ? request.subResource : ..., where the read is under its own
+// guard; after that form and every has() are taken out, no reference may remain.
 func TestEverySubResourceReferenceGoesThroughHas(t *testing.T) {
 	const ref = "request.subResource"
 	checked := 0
@@ -109,21 +111,23 @@ func TestEverySubResourceReferenceGoesThroughHas(t *testing.T) {
 			}
 		}
 		for _, e := range exprs {
-			for rest := e; ; {
-				i := strings.Index(rest, ref)
-				if i < 0 {
-					break
-				}
-				checked++
-				if !strings.HasSuffix(rest[:i], "has(") {
-					t.Errorf("%s: %q reads %s outside has()", p.name, e, ref)
-				}
-				rest = rest[i+len(ref):]
+			if !strings.Contains(e, ref) {
+				continue
+			}
+			checked++
+			rest := strings.ReplaceAll(e, "has("+ref+") ? "+ref, "")
+			rest = strings.ReplaceAll(rest, "has("+ref+")", "")
+			if strings.Contains(rest, ref) {
+				t.Errorf("%s: %q reads %s outside has()", p.name, e, ref)
 			}
 		}
 	}
 	if checked == 0 {
 		t.Error("no policy reads request.subResource: the capacity guard must, to tell scale and status from the main resource")
+	}
+	// The check itself: an unguarded read is found.
+	if rest := strings.ReplaceAll("variables.x == "+ref, "has("+ref+")", ""); !strings.Contains(rest, ref) {
+		t.Error("the check does not find an unguarded read")
 	}
 }
 
