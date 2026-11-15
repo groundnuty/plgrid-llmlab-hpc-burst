@@ -40,7 +40,7 @@ func TestListProviderAllocationsCountsACompletingEndedAllocation(t *testing.T) {
 	mk("ended-completing", v1alpha1.AllocationEnded, true, rigProvider)
 	mk("failed-completing", v1alpha1.AllocationFailed, true, rigProvider)
 	mk("other-providers", v1alpha1.AllocationEnded, true, "example-other-provider")
-	seen, listed, err := listProviderAllocations(ctx, rg.c, rigProvider)
+	seen, listed, _, err := listProviderAllocations(ctx, rg.c, rigProvider)
 	if err != nil {
 		t.Fatal(err)
 	}
