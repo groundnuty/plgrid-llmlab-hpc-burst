@@ -35,8 +35,7 @@ type Options struct {
 	Kube kubernetes.Interface
 	// Records, when set, is the client GET /hpcburst/v1/deployments/{id}
 	// reads records with, uncached (records.go); nil uses Kube. The command
-	// gives it a clientset of its own, so the record reads have their own
-	// client-side rate limit and never delay the Lease's renewals.
+	// gives it a clientset of its own (cmd/hpcburst-front/main.go).
 	Records    kubernetes.Interface
 	Recorder   Recorder
 	Transports Transports // nil: HBEP-6's Tunnel through frps, registered by the front's probe

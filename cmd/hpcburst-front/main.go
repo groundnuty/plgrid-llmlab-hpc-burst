@@ -88,9 +88,12 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	// The record fetch's own clientset: each clientset has its own client-side
-	// rate limit, so the record reads, which any client key may ask for, never
-	// queue the heartbeat Lease's renewals behind them (#585).
+	// The record fetch's own clientset. It is not what keeps the record reads,
+	// which any client key may ask for, from queueing the Lease's renewals: with
+	// QPS unset, as here, client-go gives each API group's client a limiter of
+	// its own, and the records (apps/v1) and the Lease (coordination/v1) are
+	// different groups. It keeps them apart only if a QPS is set, which makes a
+	// clientset share one limiter across its groups (#585, PR #587's review).
 	records, err := kubernetes.NewForConfig(rest)
 	if err != nil {
 		return err

@@ -36,10 +36,10 @@ func TestOptionsSendThePathEventsToTheAPIServer(t *testing.T) {
 	if o.Recorder != front.Recorder(rec) || o.Kube != cs {
 		t.Errorf("Recorder %v, Kube %v: want the command's recorder and API client", o.Recorder, o.Kube)
 	}
-	// The record fetch reads through a clientset of its own, so its reads
-	// never take the Lease client's rate-limit tokens (#585).
+	// The record fetch reads through a clientset of its own (#585); main.go
+	// says what that does and does not keep apart.
 	if o.Records != records || o.Records == o.Kube {
-		t.Errorf("Records %p, Kube %p: want the command's own record clientset, apart from the Lease's", o.Records, o.Kube)
+		t.Errorf("Records %p, Kube %p: want the command's own record clientset", o.Records, o.Kube)
 	}
 }
 
