@@ -59,7 +59,7 @@ func releaseServingAndPending(t *testing.T, rg *rig, md *v1alpha1.ModelDeploymen
 // released and its job cancelled; the serving Instance is not drained.
 func TestReleaseScaleDownCancelsPendingAllocationFirst(t *testing.T) {
 	rg := newRig(t)
-	serving, pending, inst := releaseServingAndPending(t, rg, mdSpec("md"))
+	serving, pending, inst := releaseServingAndPending(t, rg, noOverAllocation(mdSpec("md")))
 	rg.mutateMD("md", func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 1 })
 	rg.until(2*time.Minute, 10*time.Second, "pending Allocation released", func() bool { return allocReleased(rg, pending.Name) })
 	rg.run(time.Hour, time.Minute)
