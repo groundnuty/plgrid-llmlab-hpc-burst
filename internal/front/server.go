@@ -171,9 +171,11 @@ func Run(ctx context.Context, o Options) error {
 		}
 	}()
 	if fwd != nil {
-		// Stopped before the sink is closed, so that nothing outlives Run. A record the sink writes
-		// while it closes stays in the files, and the next start copies it.
-		fctx, stopForwarder := context.WithCancel(ctx)
+		// It runs until Run returns, not until ctx ends: the requests still in flight at a stop write
+		// their records during the grace, and the log, which the launcher stops last, can still take
+		// them. It is stopped before the sink is closed, so that nothing outlives Run. A record the
+		// sink writes while it closes stays in the files, and the next start copies it.
+		fctx, stopForwarder := context.WithCancel(context.WithoutCancel(ctx))
 		var forwarding sync.WaitGroup
 		forwarding.Add(1)
 		go func() {

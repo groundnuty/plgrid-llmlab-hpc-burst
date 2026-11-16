@@ -71,9 +71,9 @@ type EntryHealth struct {
 	// Degraded names what is degraded while the process keeps serving, joined with "; ":
 	// DegradedUsage while its usage sink says failing, DegradedUsageLogBehind while the front's
 	// copy of its usage records in the durable log is behind (judgeUsageLog), and
-	// DegradedOpenFiles while its descriptors in use pass 80% of its soft limit. It is not a health problem: the report stays healthy and
-	// status exits 0, and only this process's line says degraded (@hpc-burst-science-agent,
-	// 31 Oct 2026; HBEP-8, Usage records, and HBEP-11).
+	// DegradedOpenFiles while its descriptors in use pass 80% of its soft limit. It is not a
+	// health problem: the report stays healthy and status exits 0, and only this process's line
+	// says degraded (@hpc-burst-science-agent, 31 Oct 2026; HBEP-8, Usage records, and HBEP-11).
 	Degraded string `json:"degraded,omitempty"`
 	Detail   string `json:"detail,omitempty"`
 	// Gate is why the process is not started while its start gate is closed (state gated): the
