@@ -20,9 +20,10 @@ type Stats struct {
 	SyncedKnown bool
 	// Synced is the last counter the sink has synced.
 	Synced uint64
-	// Unlogged is HBEP-8's hpcburst_usage_unlogged_records: Synced less Logged, never below 0, and
-	// the records passed over because their line is longer than a message, which the log lacks. It
-	// is 0 while LoggedKnown or SyncedKnown is false, which is not a reading of 0.
+	// Unlogged is HBEP-8's hpcburst_usage_unlogged_records: Synced less the position the files are
+	// read from (Logged, or the last record passed over if that is later), never below 0. It is the
+	// lag and nothing else: a record passed over is not in it. It is 0 while LoggedKnown or
+	// SyncedKnown is false, which is not a reading of 0.
 	Unlogged uint64
 	// BehindSince is when Unlogged last rose above 0 and has stayed there; zero while it is 0, or
 	// while Logged is unknown.
@@ -34,7 +35,8 @@ type Stats struct {
 	// FromChannel and FromFiles count the messages published from each source.
 	FromChannel, FromFiles uint64
 	// Skipped counts the records passed over because their line was longer than a message, each
-	// once; they stay in Unlogged until the front restarts.
+	// once. The files hold them and the front's log names them; they are not lag, so they are not in
+	// Unlogged or BehindSince.
 	Skipped uint64
 	// LastError is the latest failure, empty after a success.
 	LastError string
@@ -49,20 +51,19 @@ func (f *Forwarder) Stats() Stats {
 		FromChannel: f.fromChannel, FromFiles: f.fromFiles, Skipped: uint64(len(f.skippedSet)), LastError: f.lastErr}
 }
 
-// unloggedLocked is the synced counter less the logged one, with the records passed over added (the
-// log lacks them), and 0 while the logged or the synced counter is unknown: a gauge built from it
-// has no value then (Stats.LoggedKnown, Stats.SyncedKnown). A record passed over counts once: when
-// the position has moved past it, the difference no longer holds it, and when it has not, it is
-// not counted here.
+// unloggedLocked is the synced counter less the position the files are read from (the larger of the
+// stream's last counter and the last record passed over), and 0 while the logged or the synced
+// counter is unknown: a gauge built from it has no value then (Stats.LoggedKnown,
+// Stats.SyncedKnown). It is the lag only. A record passed over because its line is longer than a
+// message is not lag, since no amount of waiting copies it: it is counted once, in Stats.Skipped.
 func (f *Forwarder) unloggedLocked() uint64 {
 	if !f.loggedKnown || !f.syncedKnown {
 		return 0
 	}
-	n := uint64(len(f.skippedSet))
 	if pos := max(f.logged, f.skipPos); f.synced > pos {
-		n += f.synced - pos
+		return f.synced - pos
 	}
-	return n
+	return 0
 }
 
 // recomputeLocked keeps BehindSince: set when the unlogged count first rises above 0, cleared when
@@ -91,6 +92,14 @@ func (f *Forwarder) syncedNow() uint64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.synced
+}
+
+// syncedKnownNow reports whether the sink's position is known: its last counter at Open could be
+// read, or a batch has been synced since.
+func (f *Forwarder) syncedKnownNow() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.syncedKnown
 }
 
 // setUp marks the forwarder connected and clears its last error.

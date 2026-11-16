@@ -111,8 +111,9 @@ func (b *batcher) flush() error {
 
 // skip passes over a record whose line is longer than a message (a client's model name can be as
 // long as a request body): the log gets none of it, the files hold it, the error log names its
-// counter, and it stays in the unlogged count, since the log lacks it. The read position moves past
-// it, so the next look does not read it again.
+// counter, and it is counted once in Stats.Skipped. It is not lag, so it is not in the gauge: the
+// read position moves past it, so the next look does not read it again, and the record is neither
+// waited for nor re-counted.
 func (f *Forwarder) skip(counter uint64, size int) {
 	f.mu.Lock()
 	f.skippedSet[counter] = struct{}{}

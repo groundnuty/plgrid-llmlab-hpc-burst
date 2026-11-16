@@ -255,7 +255,7 @@ func (f *Forwarder) session(ctx context.Context) (served bool, err error) {
 			return false, fmt.Errorf("choose where to start in the usage files: %w", err)
 		}
 	}
-	if synced := f.syncedNow(); have && last > synced {
+	if synced, known := f.syncedNow(), f.syncedKnownNow(); have && known && last > synced {
 		f.log.Error("usage forwarder: the log holds counters past the last one in the usage files; records written now may carry counters the log already holds and are then not forwarded until the counters pass it",
 			"logged", last, "files", synced)
 	}

@@ -13,6 +13,7 @@ package forward
 import (
 	"bytes"
 	"encoding/json"
+	"log/slog"
 	"math/rand"
 	"os"
 	"strconv"
@@ -434,31 +435,32 @@ func TestAnIdlePollReadsTheFilesWhenTheChannelHasNothingToCarryWhatWasSynced(t *
 // maximum payload of 1 MiB. 150 records of 8,000 bytes are 1.2 MB, so they cannot go as one message
 // whatever their count: the forwarder cuts them by size. A record whose line alone is longer than a
 // message (a client's model name can be as long as a request body) is passed over, never stalling the
-// ones after it: the files hold it, the forwarder counts it, and so does the gauge, since the log
-// lacks that record. The long line here is in the MIDDLE of the file.
-func TestMessagesStayUnderAMiBAndALongLineInTheMiddleIsSkippedAndCounted(t *testing.T) {
+// ones after it: the files hold it and the forwarder counts it once, as skipped. It is not lag, so the
+// gauge returns to 0: one client-written line must not keep the front "behind" until a restart. The
+// long line here is in the MIDDLE of the file.
+func TestMessagesStayUnderAMiBAndALongLineInTheMiddleIsSkippedOnceAndIsNotLag(t *testing.T) {
 	dir := t.TempDir()
 	put(t, dir, "usage-2026-11-10.jsonl", lines(t, 1, 150, 8000)+line(t, 151, 2<<20)+lines(t, 152, 153, 100))
 	d := nodetest.NewDir(t, logPorts, bigCaps)
 	d.Start(t).Ready()
 	r := startForwarder(t, d, dir, func() uint64 { return 153 }, nil, nil)
-	r.awaitLogged(153)
+	r.awaitCaughtUp(153) // the gauge reads 0 with the long record passed over
 	want := append(usagetest.Range(1, 150), 152, 153)
 	msgs := usagetest.CheckStream(t, d, dir, want) // also fails on a message of 1 MiB or more
 	if len(msgs) < 2 {
 		t.Errorf("%d messages for 1.2 MB of records: they must be cut by size", len(msgs))
 	}
-	if s := r.fwd.Stats(); s.Skipped != 1 || s.Failures != 0 || s.Unlogged != 1 || s.Logged != 153 {
-		t.Errorf("skipped %d, failures %d, unlogged %d, logged %d; want 1, 0, 1 (the long record, which the log lacks), 153", s.Skipped, s.Failures, s.Unlogged, s.Logged)
+	if s := r.fwd.Stats(); s.Skipped != 1 || s.Failures != 0 || s.Unlogged != 0 || !s.BehindSince.IsZero() || s.Logged != 153 {
+		t.Errorf("skipped %d, failures %d, unlogged %d, behind since %v, logged %d; want 1, 0, 0 and no behindSince (a skipped record is not lag), 153", s.Skipped, s.Failures, s.Unlogged, s.BehindSince, s.Logged)
 	}
 }
 
 // A long line as a file's LAST line (review of PR #644: the failing case, since nothing after it
 // moves the position past it). Records 1 to 5 reach the log, record 6 is 2 MiB and does not; the
-// forwarder neither stalls nor reads it again, loggedCounter stays what the log holds (5), and the
-// gauge counts the one record the log lacks. A record the sink writes after it goes through, and the
-// gauge still counts the skipped one.
-func TestALongLineAsAFilesLastLineIsSkippedAndCountedAndLaterRecordsFlow(t *testing.T) {
+// forwarder neither stalls nor reads it again, loggedCounter stays what the log holds (5), the
+// record is counted once as skipped, and the gauge reads 0 and behindSince is empty: it is not lag. A
+// record the sink writes after it goes through.
+func TestALongLineAsAFilesLastLineIsSkippedOnceAndIsNotLagAndLaterRecordsFlow(t *testing.T) {
 	dir := t.TempDir()
 	put(t, dir, "usage-2026-11-10.jsonl", lines(t, 1, 5, 100)+line(t, 6, 2<<20))
 	d := nodetest.NewDir(t, logPorts, bigCaps)
@@ -469,8 +471,8 @@ func TestALongLineAsAFilesLastLineIsSkippedAndCountedAndLaterRecordsFlow(t *test
 		return s.Connected && s.Logged == 5 && s.Synced == 6 && s.Skipped == 1
 	})
 	usagetest.CheckStream(t, d, dir, usagetest.Range(1, 5))
-	if s := r.fwd.Stats(); s.Unlogged != 1 || s.Logged != 5 || s.Failures != 0 {
-		t.Errorf("unlogged %d, logged %d, failures %d; want 1, 5, 0: the long record counts, and loggedCounter is what the log holds", s.Unlogged, s.Logged, s.Failures)
+	if s := r.fwd.Stats(); s.Unlogged != 0 || !s.BehindSince.IsZero() || s.Logged != 5 || s.Failures != 0 {
+		t.Errorf("unlogged %d, behind since %v, logged %d, failures %d; want 0, none, 5, 0: the long record is not lag, and loggedCounter is what the log holds", s.Unlogged, s.BehindSince, s.Logged, s.Failures)
 	}
 
 	next := line(t, 7, 100)
@@ -478,8 +480,8 @@ func TestALongLineAsAFilesLastLineIsSkippedAndCountedAndLaterRecordsFlow(t *test
 	r.fwd.Offer(7, 7, []byte(next))
 	eventually(t, "record 7 in the log", func() bool { s := r.fwd.Stats(); return s.Logged == 7 && s.Synced == 7 })
 	usagetest.CheckStream(t, d, dir, append(usagetest.Range(1, 5), 7))
-	if s := r.fwd.Stats(); s.Unlogged != 1 || s.Skipped != 1 {
-		t.Errorf("unlogged %d, skipped %d after record 7; want 1 and 1: the skipped record is still not in the log", s.Unlogged, s.Skipped)
+	if s := r.fwd.Stats(); s.Unlogged != 0 || s.Skipped != 1 {
+		t.Errorf("unlogged %d, skipped %d after record 7; want 0 and 1: counted once, and no lag", s.Unlogged, s.Skipped)
 	}
 }
 
@@ -504,4 +506,39 @@ func TestAnUnknownSyncedCounterIsResolvedByTheFirstBatchWithNoHole(t *testing.T)
 	r.fwd.Offer(10, 10, []byte(line(t, 10, 100)))
 	r.awaitCaughtUp(10)
 	usagetest.CheckStream(t, d, dir, usagetest.Range(1, 10))
+}
+
+// The forwarder says the log is ahead of the files (an Error naming both counters) only when it knows
+// where the files end. With the sink's position unknown, its synced counter reads 0 and every stream
+// that holds anything is "ahead": the Error would fire at every session start, for nothing (review of
+// PR #644's delta). The control, with the position known and really behind the stream's, does say it,
+// so the absence below is the guard's and not a logger that logs nothing.
+func TestTheLogIsAheadOfTheFilesIsNotSaidWhileTheSinksPositionIsUnknown(t *testing.T) {
+	const ahead = "the log holds counters past"
+	dir := t.TempDir()
+	put(t, dir, "usage-2026-11-10.jsonl", lines(t, 1, 5, 100))
+	d := nodetest.NewDir(t, logPorts, bigCaps)
+	d.Start(t).Ready()
+	a := startForwarder(t, d, dir, func() uint64 { return 5 }, nil, nil)
+	a.awaitCaughtUp(5) // the stream now holds 1 to 5
+	usagetest.CheckStream(t, d, dir, usagetest.Range(1, 5))
+	a.stop()
+
+	for _, c := range []struct {
+		name    string
+		synced  func() (uint64, bool)
+		wantSay bool
+	}{
+		{"the control: the sink says it has synced 2, the stream holds 5", func() (uint64, bool) { return 2, true }, true},
+		{"the sink's position is unknown", func() (uint64, bool) { return 0, false }, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var buf logBuf
+			r := startForwarderRaw(t, d, dir, c.synced, func(o *Options) { o.Logger = slog.New(slog.NewTextHandler(&buf, nil)) }, nil)
+			r.awaitServing(1)
+			if got := strings.Contains(buf.String(), ahead); got != c.wantSay {
+				t.Errorf("the log says %q: %v, want %v; its output:\n%s", ahead, got, c.wantSay, buf.String())
+			}
+		})
+	}
 }

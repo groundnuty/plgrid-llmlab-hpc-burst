@@ -242,3 +242,21 @@ func (r *runner) awaitServing(sessions uint64) {
 	r.t.Helper()
 	eventually(r.t, "the forwarder to finish its first catch-up", func() bool { return r.fwd.caughtUp.Load() >= sessions })
 }
+
+// logBuf is a log sink a test can read while the forwarder writes to it.
+type logBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *logBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}

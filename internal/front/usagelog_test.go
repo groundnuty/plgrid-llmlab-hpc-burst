@@ -200,6 +200,18 @@ func (u *usageFront) write(n int) {
 	}
 }
 
+// skipped reads hpcburst_usage_skipped_total from GET /metrics, and whether the series is there.
+func (u *usageFront) skipped() (float64, bool) {
+	u.t.Helper()
+	resp, err := http.Get("http://" + u.health + "/metrics")
+	if err != nil {
+		u.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return find(u.t, parseSamples(u.t, string(b)), "hpcburst_usage_skipped_total")
+}
+
 // loggedIs is the state in which /healthz and /metrics both say the log holds counter n and the
 // front has nothing left to copy.
 func (u *usageFront) loggedIs(n uint64) bool {
@@ -347,8 +359,8 @@ func seedLongLastLine(t *testing.T, usageDir string) {
 // with the log on or off: the sink reads the files' last counter at Open for the forwarder, and that
 // read used to fail on such a line. Off, the front starts as before and serves; its records follow the
 // counter file's block. On, it starts, serves, copies what it can and says what it could not: the
-// stream holds 1-3 and the two new records and not the long one, each byte-equal to the files, and the
-// gauge counts the one record the log lacks.
+// stream holds 1-3 and the two new records and not the long one, each byte-equal to the files, the
+// long one is counted once as skipped, and the gauge reads 0: a client-written line is not lag.
 func TestAFrontStartsOverAUsageFileWhoseLastLineIsLongerThanAMiB(t *testing.T) {
 	t.Run("log off", func(t *testing.T) {
 		u := startUsageFront(t, func(o *Options) { seedLongLastLine(t, o.Config.UsageDir) })
@@ -372,14 +384,110 @@ func TestAFrontStartsOverAUsageFileWhoseLastLineIsLongerThanAMiB(t *testing.T) {
 		edit := withLog(d)
 		u := startUsageFront(t, func(o *Options) { seedLongLastLine(t, o.Config.UsageDir); edit(o) })
 		u.write(2)
-		u.await("the log to hold 1,002 and the long record to be counted", func() bool {
-			blk := u.healthz()
-			g, _ := u.gauge()
-			return blk.Log == "connected" && blk.LoggedCounter != nil && *blk.LoggedCounter == 1002 && g == 1
-		})
+		u.await("the log to hold 1,002 and the gauge to read 0", func() bool { return u.loggedIs(1002) })
 		usagetest.CheckStream(t, d, u.dir, []uint64{1, 2, 3, 1001, 1002})
-		if blk := u.healthz(); blk.State != "ok" || blk.LostRecords != 0 {
-			t.Errorf("usage = %+v; want state ok and no lost records: a long record is not a lost one", blk)
+		if g, ok := u.skipped(); !ok || g != 1 {
+			t.Errorf("hpcburst_usage_skipped_total = %v (present %v), want 1: the long record, once", g, ok)
+		}
+		if blk := u.healthz(); blk.State != "ok" || blk.LostRecords != 0 || blk.BehindSince != "" {
+			t.Errorf("usage = %+v; want state ok, no lost records and no behindSince: a long record is neither lost nor lag", blk)
+		}
+		if got := u.f.UsageLog.Stats().Skipped; got != 1 {
+			t.Errorf("the forwarder skipped %d records, want the one long one, once", got)
 		}
 	})
+}
+
+// While the sink's position is unknown (its Open could not read the files' last counter, which is
+// logged and never stops the front), the forwarder holds back and the exported series is ABSENT,
+// not 0: unknown is never 0 (HBEP-8, Unknown samples; review of PR #644's delta). Here the files hold
+// records 1 to 3 that the log lacks, so a 0 would say the opposite of the truth. The series is read
+// from the front's own /metrics, not from the forwarder. An older file is made unreadable for the
+// start, so that the read fails, and readable again once the front runs, so that the forwarder can
+// read the stream and the files; the first record the front then writes makes the position known,
+// the forwarder copies 1 to 3, and the series appears, at 0. The test cannot make a file unreadable
+// for root.
+func TestTheGaugeSeriesIsAbsentWhileTheSinksPositionIsUnknown(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("a file mode does not stop root from reading")
+	}
+	d := nodetest.NewDir(t, usageLogPorts, eventlog.Caps{Events: 1 << 20, Usage: 64 << 20})
+	d.Start(t).Ready()
+	var old string
+	u := startUsageFront(t, func(o *Options) {
+		dir := o.Config.UsageDir
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		old = filepath.Join(dir, "usage-2026-11-10.jsonl")
+		text := `{"counter":1,"requestID":"r1"}` + "\n" + `{"counter":2,"requestID":"r2"}` + "\n" + `{"counter":3,"requestID":"r3"}` + "\n"
+		for name, content := range map[string]string{old: text, filepath.Join(dir, "usage-2026-11-11.jsonl"): "", filepath.Join(dir, "counter"): "1000\n"} {
+			if err := os.WriteFile(name, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Chmod(old, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(old, 0o600) })
+		withLog(d)(o)
+	})
+	if err := os.Chmod(old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	u.await("the forwarder to read the log's last counter", func() bool {
+		blk := u.healthz()
+		return blk.Log == "connected" && blk.LoggedCounter != nil
+	})
+	if st := u.f.UsageLog.Stats(); st.SyncedKnown {
+		t.Fatalf("the sink's position is known (%+v): the test did not start from the state it is about", st)
+	}
+	if g, ok := u.gauge(); ok {
+		t.Errorf("hpcburst_usage_unlogged_records = %v while the sink's position is unknown, want no series", g)
+	}
+	if blk := u.healthz(); blk.BehindSince != "" {
+		t.Errorf("behindSince = %q while the position is unknown, want none", blk.BehindSince)
+	}
+
+	u.write(1)
+	u.await("the series to appear, at 0, once 1 to 3 and the new record are in the log", func() bool { return u.loggedIs(1001) })
+	usagetest.CheckStream(t, d, u.dir, []uint64{1, 2, 3, 1001})
+}
+
+// HBEP-8, The durable log, When it is down (the science agent's ruling on #644, 16 Nov 2026): a record
+// passed over for its length is counted ONCE, as a skip, in hpcburst_usage_skipped_total, which starts
+// at 0 on a front with the log; it is never lag, so the gauge and behindSince stay as they were, and
+// one client-written line does not keep `status` saying the copy is behind. The files hold the record.
+// Here the long record is written through the sink while the front runs: its batch reaches the
+// forwarder by the channel, the path a request takes.
+func TestAnOverLongRecordIsCountedOnceAsASkipAndIsNotLag(t *testing.T) {
+	d := nodetest.NewDir(t, usageLogPorts, eventlog.Caps{Events: 1 << 20, Usage: 64 << 20})
+	d.Start(t).Ready()
+	u := startUsageFront(t, withLog(d))
+	u.await("the forwarder to connect", func() bool { return u.healthz().Log == "connected" })
+	u.write(2)
+	u.await("records 1 and 2 in the log", func() bool { return u.loggedIs(2) })
+	if g, ok := u.skipped(); !ok || g != 0 {
+		t.Fatalf("hpcburst_usage_skipped_total = %v (present %v) before any skip, want a series at 0", g, ok)
+	}
+
+	long := usage.Record{RequestID: "long", RequestedModel: strings.Repeat("m", 2<<20), Path: "/v1/chat/completions", Status: 400}
+	if c, err := u.f.Sink.Write(long); err != nil || c != 3 {
+		t.Fatalf("Write of the long record = %d, %v; want counter 3 and no error", c, err)
+	}
+	u.await("the long record to be counted as skipped", func() bool { g, ok := u.skipped(); return ok && g == 1 })
+	if _, err := u.f.Sink.Write(usage.Record{RequestID: "after", Path: "/v1/chat/completions", Status: 200}); err != nil {
+		t.Fatal(err)
+	}
+	u.await("record 4 in the log and the gauge at 0", func() bool { return u.loggedIs(4) })
+	usagetest.CheckStream(t, d, u.dir, []uint64{1, 2, 4})
+	if g, ok := u.skipped(); !ok || g != 1 {
+		t.Errorf("hpcburst_usage_skipped_total = %v (present %v) after one long record and one more, want 1", g, ok)
+	}
+	if blk := u.healthz(); blk.BehindSince != "" || blk.State != "ok" {
+		t.Errorf("usage = %+v; want no behindSince and state ok: a skip is not lag", blk)
+	}
+	if rec := usagetest.FileLines(t, u.dir)[3]; len(rec) < 2<<20 {
+		t.Errorf("the files hold counter 3 at %d bytes, want the whole long record", len(rec))
+	}
 }

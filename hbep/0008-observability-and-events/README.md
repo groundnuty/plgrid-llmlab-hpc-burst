@@ -330,6 +330,8 @@ Prometheus's advice to export 0 for series that may exist ([instrumentation prac
 | `hpcburst_usage_records_total` | counter | records written and synced |
 | `hpcburst_usage_write_failures_total` | counter | records not written: a failed write or sync of their batch, or a failed counter-block reservation |
 | `hpcburst_usage_dir_free_bytes` | gauge | free space of `usageDir`'s file system |
+| `hpcburst_usage_unlogged_records` | gauge | records in the files the durable log doesn't hold yet; no value while the files' counter is unknown |
+| `hpcburst_usage_skipped_total` | counter | records the log can't take (over its size), skipped once; they stay in the files |
 
 No client key ID is a label: per-key usage is in the records.
 
@@ -556,7 +558,7 @@ What the code had to change to match this HBEP, as read on 31 Oct 2026. The PRs 
     - the gauge is a difference of counters, so a crash's gap counts as unlogged records while the forwarder is behind;
     - the 5 minutes are the front's own `behindSince`, read from its `/healthz`, against the launcher's clock;
     - R4's file sizes are the files' bytes, and the newest file alone is the set when it is over the cap;
-    - a record whose line is longer than a message (a client's model name can be as long as a request body, and the front records it before it checks it) is not copied: the files hold it, the front's log names its counter, and the gauge keeps counting it as unlogged, since the log lacks it, until the front restarts. Reading the files never stops the front: the sink's `Open` reads the last counter of a line of any length by its first bytes, and a read that fails leaves the forwarder with no reading of the sink's position (no gauge value) until the first batch is synced, never a failed start.
+    - a record whose line is longer than a message (a client's model name can be as long as a request body, and the front records it before it checks it) is not copied: the files hold it, the front's log names its counter, and it is counted once, in `hpcburst_usage_skipped_total` (a counter, at 0 from the start on a front with the log), never as lag: the gauge and `behindSince` mean a copy that is behind, and one client-written line does not set them (the science agent's ruling on #644, 16 Nov 2026). Reading the files never stops the front: the sink's `Open` reads the last counter of a line of any length by its first bytes, and a read that fails leaves the forwarder with no reading of the sink's position (no gauge value) until the first batch is synced, never a failed start.
 
 ### Test plan
 
@@ -786,6 +788,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-16: the science agent's decisions on the billing count, memory per GPU, records and the comparison.
 - 2026-11-16: revised by its Fable review (PR #621): the documented GH200 share is settled by the comparison's GH200 window, and the records' names rest on the owner's decision of 28 Oct 2026.
 - 2026-11-16: the durable log's build rulings for #625: no job ID in any note the log keeps; the forwarder on an empty stream starts within the cap; the store's size on disk for the floor; the log's copy is paired with its backup; ids and the deletion trigger fixed.
+- 2026-11-16: erratum: the forwarder's two metrics in the front's table (#644).
 
 ## Amendments
 
