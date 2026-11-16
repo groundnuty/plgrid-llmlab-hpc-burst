@@ -49,10 +49,25 @@ type bulkFront struct {
 }
 
 // newBulkFront serves one deployment, md-0 of model m-0, with n ready Instances md-0-<i>, with
-// TunnelConnected True, on both tunnels, and registers both transports with a first probe round.
-// noBulk builds the same front without the bulk path, as the control of the tests that need one.
-// edit, when set, changes the configuration first.
+// TunnelConnected True, on both tunnels, registers both transports with a first probe round, and
+// returns once every Instance can be routed to (waitRoutable). noBulk builds the same front without
+// the bulk path, as the control of the tests that need one. edit, when set, changes the
+// configuration first.
 func newBulkFront(t *testing.T, n int, noBulk bool, edit ...func(*Config)) *bulkFront {
+	t.Helper()
+	f := buildBulkFront(t, n, noBulk, edit...)
+	f.prober.Round(context.Background())
+	if !noBulk {
+		f.bulk.prober.Round(context.Background())
+	}
+	f.waitRoutable()
+	return f
+}
+
+// buildBulkFront is newBulkFront up to the probe rounds: the front, the Instances in the snapshot,
+// the router's view built from it, and no transport registered. A test that decides in what order
+// the transports register, and when the router's rebuilds end, starts here (bulk_routable_test.go).
+func buildBulkFront(t *testing.T, n int, noBulk bool, edit ...func(*Config)) *bulkFront {
 	t.Helper()
 	var e func(*Config)
 	if len(edit) > 0 {
@@ -109,19 +124,47 @@ func newBulkFront(t *testing.T, n int, noBulk bool, edit ...func(*Config)) *bulk
 		f.uids, f.keys = append(f.uids, uid), append(f.keys, "ns/"+name)
 	}
 	h.apply()
-	f.prober.Round(context.Background())
-	if !noBulk {
-		f.bulk.prober.Round(context.Background())
-	}
-	waitRouterState(t, "every Instance to be routable", func() bool {
-		for _, u := range f.uids {
-			if !f.tun.Registered(u) || (!noBulk && !f.bulk.tun.Registered(u)) {
-				return false
+	return f
+}
+
+// routableState says, for Instance i, what a request to it needs: its transport registered on the token
+// tunnel and on the bulk tunnel (when there is a bulk path), and the router's view of it, a member of its
+// group and eligible (routingOf).
+func (f *bulkFront) routableState(i int) (token, bulk, member, eligible bool) {
+	u := f.uids[i]
+	token = f.tun.Registered(u)
+	bulk = f.withoutBulk || f.bulk.tun.Registered(u)
+	member, eligible, _ = f.routingOf(u)
+	return token, bulk, member, eligible
+}
+
+// waitRoutable waits until every Instance can be routed to, in the router's own state and not only in the
+// tunnels': a registration reaches the router's view by a rebuild, and a request that comes while a rebuild
+// runs reads that rebuild's view, though a registration since has marked it stale (Router.lockFresh, #417:
+// the shipped one-rebuild bound). A fixture that stops at the registrations can send its first request to a
+// view that lacks an Instance, and the session goes to another one (issue #637). Each poll of routingOf takes
+// a fresh look, so a stale one is seen past on the next. It fails after failAfter, naming the first Instance
+// that is not routable, and why.
+func (f *bulkFront) waitRoutable() {
+	f.t.Helper()
+	for end := time.Now().Add(failAfter); ; time.Sleep(time.Millisecond) {
+		bad := -1
+		var token, bulk, member, eligible bool
+		for i := range f.uids {
+			token, bulk, member, eligible = f.routableState(i)
+			if !token || !bulk || !member || !eligible {
+				bad = i
+				break
 			}
 		}
-		return true
-	})
-	return f
+		if bad < 0 {
+			return
+		}
+		if time.Now().After(end) {
+			f.t.Fatalf("timed out after %s waiting for Instance %s to be routable: token transport registered %t, bulk transport registered %t, member of its group in the router's view %t, eligible %t",
+				failAfter, f.keys[bad], token, bulk, member, eligible)
+		}
+	}
 }
 
 // send posts body to path, with the extra headers hdr, and returns the status and which engine got
