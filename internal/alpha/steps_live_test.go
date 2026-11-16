@@ -79,7 +79,7 @@ type world struct {
 	// gpuModel is the gpu_model label of the Instance's info series, the row's
 	// partition's (HBEP-8, Engine gauges per Instance), and notReported the
 	// engine gauges the world's engine does not export (obscheck.GaugeView): a
-	// real vLLM's none (obscheck.VLLMNotReported, HBEP-8, Metrics), the stand-in's
+	// real vLLM's none (obscheck.VLLMNotReported, HBEP-8, Test plan), the stand-in's
 	// engine double's two prefix-cache counters (obscheck.DoubleNotReported).
 	gpuModel    string
 	notReported map[string]bool

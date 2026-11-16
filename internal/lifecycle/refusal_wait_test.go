@@ -3,8 +3,8 @@ package lifecycle
 // Issue #174, as re-scoped by `@hpc-burst-science-agent` on 1 Nov 2026: a
 // refused interval adds nothing to a queue wait. A queue wait is one recorded
 // job's wait from the scheduler's recorded submission to its start (HBEP-4,
-// Provider status, queueWaits), and a refusal records no job (HBEP-4, Notes,
-// "A limit refusal is no failure"). HBEP-7
+// Provider status, queueWaits), and a refusal records no job (HBEP-4, Amendments,
+// "2026-11-01: QOS limits", "A limit refusal is no failure"). HBEP-7
 // states the rule in Handover, No-overlap mode (PR #196, kept by PR #205), and
 // its Test plan item "Queue waits on the queued path" says: "A refused interval
 // before acceptance adds nothing to any wait, so a longer refusal gives a
