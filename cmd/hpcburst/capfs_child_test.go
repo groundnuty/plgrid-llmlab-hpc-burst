@@ -466,6 +466,39 @@ func TestAKilledServerLeavesADeadMountAndNoFusermount3(t *testing.T) {
 	writeVolume(t, v)
 }
 
+// A volume's own unmount leaves no fusermount3 behind either: the one auto_unmount keeps while the volume is mounted exits once the
+// unmount closes the socket, so a long run of the store-full tests does not pile up one per volume until the test binary ends.
+func TestAnUnmountedVolumeLeavesNoFusermount3(t *testing.T) {
+	capFuseOrSkip(t)
+	dir, err := os.MkdirTemp("", "cu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := mountCapVolume(dir, capChildLimit, capFsName, true)
+	if err != nil {
+		t.Fatalf("mount: %v", err)
+	}
+	t.Cleanup(func() {
+		capKillLeftFusermount3(t, v.mount)
+		if capUnmountIfDead(t, v.mount, capChildBound) {
+			if err := capRemoveDir(dir); err != nil {
+				t.Errorf("%v", err)
+			}
+		}
+	})
+	if pids := capFusermount3For(v.mount); len(pids) != 1 {
+		t.Fatalf("the mounted volume %s has %d fusermount3 processes, want the one auto_unmount keeps", v.mount, len(pids))
+	}
+	writeVolume(t, v)
+	if err := v.unmount(capChildBound); err != nil {
+		t.Fatalf("unmount: %v", err)
+	}
+	if capListed(v.mount) {
+		t.Fatalf("%s is still listed after its unmount", v.mount)
+	}
+	capWaitFor(t, capChildBound, "the volume's fusermount3 to exit after its unmount", func() bool { return len(capFusermount3For(v.mount)) == 0 })
+}
+
 // The state of the issue, and its repair by the sweep: a capfs server whose mount has no auto_unmount, killed with SIGKILL, leaves its
 // mount behind with a dead endpoint, and the next newCapVolume sweeps it.
 func TestTheNextCapVolumeSweepsAMountLeftByAKilledServer(t *testing.T) {
