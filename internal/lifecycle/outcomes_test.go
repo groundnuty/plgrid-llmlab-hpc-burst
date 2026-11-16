@@ -167,9 +167,10 @@ func TestRecordStartOutcomes(t *testing.T) {
 	add(20, false, v1alpha1.ReasonHedgeLost, "")
 	add(21, false, v1alpha1.ReasonDrained, "")
 	add(22, false, v1alpha1.ReasonVerificationFailed, "ver-contradiction")
-	// A second Instance on i00's Allocation, failed: not the Allocation's first, so it adds nothing.
+	// A second Instance on i00's Allocation, failed: not the Allocation's first, so it adds nothing. It is read before
+	// i00, so the first-Instance rule, not the Allocation's UID being kept, is what keeps it out.
 	second := outcomeInstance("i00-again", "a00", hoT(9, 0, 0), nil, ptrTo(hoT(9, 5, 0)), v1alpha1.ReasonRegistrationTimeout, "")
-	insts = append(insts, second)
+	insts = append([]*v1alpha1.Instance{second}, insts...)
 	causes := map[string]string{"ver-rehash": causeRehash, "ver-contradiction": causeContradiction}
 
 	p := outcomePass(insts, allocs, causes)
@@ -208,7 +209,7 @@ func TestRecordStartOutcomes(t *testing.T) {
 	}
 	// 19 outcomes: drop the last ready one.
 	var few v1alpha1.ModelDeploymentStatus
-	outcomePass(insts[1:20], allocs[1:20], causes).recordStartOutcomes(&few)
+	outcomePass(insts[2:21], allocs[1:20], causes).recordStartOutcomes(&few)
 	if f := few.StartOutcomes[0]; f.Count != 19 || f.Failures != 4 {
 		t.Fatalf("with 19 outcomes: %d of %d, want 4 of 19", f.Failures, f.Count)
 	}
