@@ -2,7 +2,7 @@ package front
 
 // The bound on the client's text in a usage record (recorded_text.go; issue #645). What is checked: the cut itself (where, and that it leaves valid
 // UTF-8), that the bound is the API's own limit and not a guess, that the numbers are the ones HBEP-5's amendment words (1,291 bytes of a name kept,
-// then a marker) and the science agent's ruling on the path (3,884), that a name or a path over the bound is recorded within it while every answer
+// then a marker; the decoded path at 1,302), that a name or a path over the bound is recorded within it while every answer
 // stays what it was, and that a name at the longest that can be routed is recorded whole.
 
 import (
@@ -55,16 +55,15 @@ func TestBoundedTextKeepsTheBoundThenTheMarker(t *testing.T) {
 	}
 }
 
-// The numbers are those HBEP-5's amendment and the science agent's ruling on #645 state, typed here: a model name is kept to 1,291 bytes, the longest name
-// the front can serve (a model's 256 characters of up to 4 bytes, "@", a 253-byte provider, "/" and a 12-character ID), and a path to the prefix of
-// GET /v1/models/<name> and 3 bytes for each of a name's bytes, which a client may percent-encode. A name of exactly the bound is whole, one byte more
-// keeps the bound and the marker.
+// The numbers are those HBEP-5's amendment states, typed here: a model name is kept to 1,291 bytes, the longest name the front can serve (a model's 256
+// characters of up to 4 bytes, "@", a 253-byte provider, "/" and a 12-character ID), and the decoded path to 1,302, the prefix of GET /v1/models/<name>
+// and that name. A text of exactly the bound is whole, one byte more keeps the bound and the marker.
 func TestTheBoundsAreTheAmendedNumbers(t *testing.T) {
 	if maxRoutableNameBytes != 1291 {
 		t.Errorf("the name bound is %d bytes, want 1,291", maxRoutableNameBytes)
 	}
-	if maxRecordedPathBytes != 3884 {
-		t.Errorf("the path bound is %d bytes, want 3,884: %q and 3 times 1,291", maxRecordedPathBytes, modelsPathPrefix)
+	if maxRecordedPathBytes != 1302 {
+		t.Errorf("the path bound is %d bytes, want 1,302: %q and 1,291", maxRecordedPathBytes, modelsPathPrefix)
 	}
 	name := strings.Repeat("n", 1291)
 	if got := boundedText(name, maxRoutableNameBytes); got != name {
@@ -73,12 +72,12 @@ func TestTheBoundsAreTheAmendedNumbers(t *testing.T) {
 	if got, want := boundedText(name+"n", maxRoutableNameBytes), name+cutMarker; got != want {
 		t.Errorf("a name of 1,292 bytes: %d bytes recorded, want its first 1,291 and the marker", len(got))
 	}
-	path := strings.Repeat("p", 3884)
+	path := strings.Repeat("p", 1302)
 	if got := boundedText(path, maxRecordedPathBytes); got != path {
-		t.Errorf("a path of 3,884 bytes: %d bytes recorded, want it whole", len(got))
+		t.Errorf("a path of 1,302 bytes: %d bytes recorded, want it whole", len(got))
 	}
 	if got, want := boundedText(path+"p", maxRecordedPathBytes), path+cutMarker; got != want {
-		t.Errorf("a path of 3,885 bytes: %d bytes recorded, want its first 3,884 and the marker", len(got))
+		t.Errorf("a path of 1,303 bytes: %d bytes recorded, want its first 1,302 and the marker", len(got))
 	}
 }
 
@@ -256,10 +255,10 @@ func percentEncoded(s string) string {
 }
 
 // The front takes the name of GET /v1/models/<name> from the path decoded once, so a client may percent-encode every byte of it, 3 bytes for each, and
-// the path bound allows for that (3,884 bytes, for a name of 1,291). What the record holds is the path DECODED (r.URL.Path), so it is whole well within
-// the bound: the longest model that is listed, 256 characters of 4 bytes each, fully percent-encoded, is SERVED, and recorded whole; a name of the
-// name bound's 1,291 bytes, whose fully encoded path is exactly the path bound, is answered 404 as an unlisted name and recorded whole, decoded; and an
-// encoded path whose decoded form is over the bound is recorded cut, at the decoded form.
+// the request line is then up to three times as long as the bound. What the record holds is the path DECODED (r.URL.Path), so the bound is enough:
+// the longest model that is listed, 256 characters of 4 bytes each, fully percent-encoded, is SERVED, and recorded whole, decoded; a name of the name
+// bound's 1,291 bytes, fully encoded, is answered 404 as an unlisted name and recorded whole, decoded, at the path bound; and an encoded path whose
+// decoded form is over the bound is recorded cut, at the decoded form.
 func TestTheLongestPathsAnsweredByANameAreRecordedWholeWhateverTheirEncoding(t *testing.T) {
 	h, model, _, _ := longestRoutableFix(t)
 	t.Run("the longest listed model, fully percent-encoded, is served", func(t *testing.T) {
@@ -273,11 +272,11 @@ func TestTheLongestPathsAnsweredByANameAreRecordedWholeWhateverTheirEncoding(t *
 			t.Errorf("path of %d bytes (a path of %d bytes was sent, encoded), want the decoded path whole, %d bytes", len(rec.Path), len(path), len(modelsPathPrefix+model))
 		}
 	})
-	t.Run("a name of the name bound, whose encoded path is the path bound", func(t *testing.T) {
+	t.Run("a name of the name bound, fully encoded", func(t *testing.T) {
 		name := strings.Repeat("n", maxRoutableNameBytes)
 		path := modelsPathPrefix + percentEncoded(name)
-		if len(path) != maxRecordedPathBytes {
-			t.Fatalf("the path built is %d bytes, want maxRecordedPathBytes, %d", len(path), maxRecordedPathBytes)
+		if want := len(modelsPathPrefix) + 3*maxRoutableNameBytes; len(path) != want || len(modelsPathPrefix+name) != maxRecordedPathBytes {
+			t.Fatalf("the path built is %d bytes (want %d on the wire) and its decoded form %d (want the path bound, %d)", len(path), want, len(modelsPathPrefix+name), maxRecordedPathBytes)
 		}
 		resp := h.errGet(path)
 		readAll(t, resp)

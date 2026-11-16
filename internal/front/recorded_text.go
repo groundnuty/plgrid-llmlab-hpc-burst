@@ -15,7 +15,7 @@ import (
 // the front keeps the whole name and path for the grammar, the routing and the answer, and only the record's copy is cut. The grammar itself
 // has no length limit (a name with no "@" is a valid model-level name whatever its length), so the bound comes from what can be routed to.
 // A longer name names nothing, and its answer, a 400 or a 503, is the same as it was. HBEP-5 (Usage records) words it: requestedModel as sent,
-// cut at 1,291 bytes with a marker at the cut, the longest name the front can serve; the path is cut at the bound derived below.
+// cut at 1,291 bytes with a marker at the cut, the longest name the front can serve, and the decoded path at "/v1/models/" and that name, 1,302.
 const (
 	// apiModelChars is the most characters spec.model of a ModelDeployment holds (api/v1alpha1, ModelDeploymentSpec.Model, MaxLength). Every
 	// name a request can be routed by has a model part from some ModelDeployment's spec.model, served or managed (internal/front/inventory).
@@ -27,12 +27,11 @@ const (
 	// deployment ID (naming.DisplayIDLength), the model's characters taking up to 4 bytes each in UTF-8. It is the number of bytes of a model name
 	// the record keeps, 1,291.
 	maxRoutableNameBytes = apiModelChars*utf8.UTFMax + 1 + apiProviderNameBytes + 1 + naming.DisplayIDLength
-	// modelsPathPrefix, percentEncodedBytes and the bound of the path (the science agent's ruling on #645): the front answers GET /v1/models/<name>
-	// and takes the name from the path decoded once, so a client may percent-encode every byte of it, 3 bytes for each. The record holds the path
-	// decoded (r.URL.Path), so it is within this bound with room to spare; a longer path can still be forwarded to an engine, and is recorded cut.
+	// modelsPathPrefix and the bound of the path: the longest path the front answers by a name is GET /v1/models/<name>. The front takes the name
+	// from the path decoded once, and the record holds the path decoded too (r.URL.Path), so a client that percent-encodes every byte of a name, 3
+	// bytes each, does not lengthen what is recorded. A longer path can still be forwarded to an engine, and is recorded cut.
 	modelsPathPrefix     = "/v1/models/"
-	percentEncodedBytes  = 3 // "%" and 2 hexadecimal digits
-	maxRecordedPathBytes = len(modelsPathPrefix) + percentEncodedBytes*maxRoutableNameBytes
+	maxRecordedPathBytes = len(modelsPathPrefix) + maxRoutableNameBytes
 	// cutMarker follows the bytes a recorded text keeps when it was cut, so that a reader sees it was.
 	cutMarker = "…[cut]"
 )
