@@ -56,7 +56,7 @@ func (c *Controller) readBack(ctx context.Context, p *pass, s *allocState, job p
 		Status:             corev1.ConditionTrue,
 		Reason:             v1alpha1.ReasonReadBackMismatch,
 		LastTransitionTime: metav1.NewTime(p.now),
-		Message:            "job " + job.ID + " was established with other settings than requested: " + strings.Join(diffs, "; "),
+		Message:            "the job was established with other settings than requested: " + strings.Join(diffs, "; "),
 	})
 	return nil
 }

@@ -248,7 +248,7 @@ func (e *external) mirror(a *v1alpha1.Allocation, prior *v1alpha1.AllocationObse
 	o.Phase = job.Phase
 	o.Held = job.Held()
 	o.Requeued = o.Requeued || job.Requeued // kept once seen
-	o.Reason = job.Reason
+	o.Reason = redactToken(job.Reason, id, "the job")
 	if o.Requeued {
 		o.Phase, o.Reason = v1alpha1.AllocationFailed, v1alpha1.ReasonRequeued
 	}
@@ -374,7 +374,11 @@ func (e *external) readBack(a *v1alpha1.Allocation, job provider.Job) bool {
 	if len(diffs) == 0 {
 		return true
 	}
-	msg := "job " + job.ID + " was established with other settings than requested: " + strings.Join(diffs, "; ")
+	// The message names no job ID: the lifecycle controller copies it into its
+	// SubmittedAsOther event on the Instance, which goes to the durable log in beta
+	// (HBEP-8, Allocation events, No job ID in a note; R2 of #625). The status
+	// holds the job's ID on its own.
+	msg := "the job was established with other settings than requested: " + strings.Join(diffs, "; ")
 	a.SetConditions(xpv2.Condition{Type: v1alpha1.ConditionSubmittedAsOther, Status: corev1.ConditionTrue,
 		Reason: v1alpha1.ReasonReadBackMismatch, Message: msg, LastTransitionTime: *mt(e.now())})
 	e.event(a, event.Warning("SubmittedAsOther", errors.New(msg)))
