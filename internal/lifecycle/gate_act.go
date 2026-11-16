@@ -94,6 +94,10 @@ func (p *pass) gateJudge(in *v1alpha1.Instance, sh shapes, ws []gateWorker) (gat
 	v := judgeGate(profile, key, measuresOf(names, tps), p.now, func(entry v1alpha1.ReferenceKey, date string) bool {
 		return p.referenceSuspended(entryRef{profile: profile.Name, key: entry, date: date})
 	})
+	if p.listFull() && v.status != v1alpha1.GateSuspended && v.status != v1alpha1.GateRecordOnly {
+		// No further entry could be suspended, so nothing is gated: the caps err toward recording only.
+		v = recordOnly(v.date, fmt.Sprintf("the deployment's list of suspended entries is full (%d), so the gate records only until a listing is lifted", maxSuspendedReferences))
+	}
 	var ref *entryRef
 	if v.entry != nil {
 		ref = &entryRef{profile: profile.Name, key: *v.entry, date: v.date}

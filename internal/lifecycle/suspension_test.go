@@ -120,9 +120,11 @@ func TestOneVerdictsCount(t *testing.T) {
 	}
 }
 
-// The record and the listing are bounded by the CRD's 32: the 33rd drops the oldest, so the status write is never
-// refused for its length.
-func TestTheRecordAndTheListingAreBoundedBy32DroppingTheOldest(t *testing.T) {
+// The caps err toward recording only (the science agent's ruling on #652). With the record full (32 entries each with
+// one miss), a 33rd entry's first miss suspends it at once and evicts nothing. With the listing full (32), a second
+// miss lists nothing, evicts no listing, and leaves the record as it was; the gate records only then (gateJudge), so
+// this is a guard, not a path.
+func TestTheCapsSuspendRatherThanEvict(t *testing.T) {
 	var misses []v1alpha1.ReferenceMiss
 	var listed []v1alpha1.SuspendedReference
 	for i := range 32 {
@@ -134,15 +136,19 @@ func TestTheRecordAndTheListingAreBoundedBy32DroppingTheOldest(t *testing.T) {
 	}
 	k := gateKey()
 	k.Sessions = 33
-	out, _, _, _ := countVerdict(misses, nil, entryRef{profile: profA, key: k, date: "2026-10-23"}, "Missed", inst("i33"), alloc("a33"), countNow)
-	if len(out) != 32 || out[0].Sessions != 2 || out[31].Sessions != 33 {
-		t.Fatalf("%d misses, the first with %d sessions and the last with %d; want 32, from 2 to 33", len(out), out[0].Sessions, out[len(out)-1].Sessions)
+	out, got, added, changed := countVerdict(misses, nil, entryRef{profile: profA, key: k, date: "2026-10-23"}, "Missed", inst("i33"), alloc("a33"), countNow)
+	if !changed || len(out) != 32 || out[0].Sessions != 1 || out[31].Sessions != 32 {
+		t.Errorf("the full record after a 33rd entry's first miss: changed %v, %d misses from %d to %d sessions; want it as it was, 32 from 1 to 32", changed, len(out), out[0].Sessions, out[len(out)-1].Sessions)
 	}
+	if len(got) != 1 || len(added) != 1 || got[0].Sessions != 33 || got[0].PlatformProfile != profA {
+		t.Errorf("listing %+v, want the 33rd entry suspended at once", got)
+	}
+
 	k.Sessions = 1
-	_, got, added, _ := countVerdict([]v1alpha1.ReferenceMiss{{PlatformProfile: profB, ReferenceKey: k, Date: "2026-10-23", InstanceUID: "i1", AllocationUID: "a1", Time: countNow}},
-		listed, entryRef{profile: profB, key: k, date: "2026-10-23"}, "Missed", inst("i2"), alloc("a2"), countNow)
-	if len(got) != 32 || len(added) != 1 || got[31].PlatformProfile != profB || got[0].Sessions != 2 {
-		t.Fatalf("%d listings and %d added, want 32 with profile B's listed last and the oldest (sessions 1) gone", len(got), len(added))
+	pending := []v1alpha1.ReferenceMiss{{PlatformProfile: profB, ReferenceKey: k, Date: "2026-10-23", InstanceUID: "i1", AllocationUID: "a1", Time: countNow}}
+	out, got, added, changed = countVerdict(pending, listed, entryRef{profile: profB, key: k, date: "2026-10-23"}, "Missed", inst("i2"), alloc("a2"), countNow)
+	if changed || len(added) != 0 || len(got) != 32 || got[0].Sessions != 1 || got[0].PlatformProfile != profA || len(out) != 1 || out[0].InstanceUID != "i1" {
+		t.Errorf("a second miss with the listing full: changed %v, %d added, %d listed (the first of %d sessions), record %+v; want nothing changed and no listing dropped", changed, len(added), len(got), got[0].Sessions, out)
 	}
 }
 

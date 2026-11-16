@@ -3,7 +3,6 @@ package lifecycle
 import (
 	"fmt"
 	"slices"
-	"sort"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -33,6 +32,11 @@ import (
 // restart.window, which prunes the ended Instances, and a controller restart. Three Instances on their retry in one
 // pass are judged one after the other, each reading the record the last one wrote, so the third reads the suspension
 // the second wrote, and two Allocations are released, never three.
+//
+// The two lists' caps err toward recording only (the science agent's ruling on #652): a Missed verdict that the full
+// record (32) can't hold suspends its entry at once rather than evict another entry's miss, and while the listing is
+// full (32) the gate records only for the deployment (gateJudge), with one event when it fills, and never drops a
+// listing to make room. Only a profile edit lifts a listing (liftSuspensions).
 
 // entryRef is one expected-performance entry as the run counts it: its profile, its key and its date.
 type entryRef struct {
@@ -57,7 +61,8 @@ func (p *pass) referenceSuspended(e entryRef) bool {
 	return p.md != nil && slices.ContainsFunc(p.md.Status.SuspendedReferences, e.isListed)
 }
 
-// maxReferenceMisses and maxSuspendedReferences are the two lists' bounds (the CRD's maxItems).
+// maxReferenceMisses and maxSuspendedReferences are the two lists' bounds (the CRD's maxItems). Neither list ever
+// drops an item to make room (countVerdict).
 const (
 	maxReferenceMisses     = 32
 	maxSuspendedReferences = 32
@@ -70,6 +75,7 @@ func (p *pass) recordVerdict(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, 
 	if w.ref == nil || p.md == nil || alloc == nil {
 		return nil
 	}
+	before := len(p.md.Status.SuspendedReferences)
 	misses, listed, added, changed := countVerdict(p.md.Status.ReferenceMisses, p.md.Status.SuspendedReferences, *w.ref, w.counts, in, alloc, metav1.NewTime(p.now))
 	if !changed {
 		return nil
@@ -80,13 +86,24 @@ func (p *pass) recordVerdict(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, 
 		return fmt.Errorf("record the throughput gate's %s verdict against the entry dated %s: %w", w.counts, w.ref.date, err)
 	}
 	p.announceSuspended(added)
+	if before < maxSuspendedReferences && len(listed) >= maxSuspendedReferences {
+		p.announceListFull()
+	}
 	return nil
+}
+
+// listFull reports whether the deployment's listing of suspended entries is at its cap: the gate then records only
+// for the deployment (gateJudge), since no further entry could be suspended.
+func (p *pass) listFull() bool {
+	return p.md != nil && len(p.md.Status.SuspendedReferences) >= maxSuspendedReferences
 }
 
 // countVerdict is recordVerdict's change, pure: the record and the listing after one verdict against the entry, the
 // listing it added (a suspension), and whether anything changed. A Passed verdict removes the entry's miss. A Missed
 // verdict is recorded once per Instance; one from another Allocation than the recorded miss suspends the entry, and
-// one from the same Allocation takes the recorded one's place. The bounds drop the oldest.
+// one from the same Allocation takes the recorded one's place. A first miss that the full record can't hold suspends
+// the entry at once. Neither list drops an item: with the listing full, nothing is listed and the record is left as
+// it was (gateJudge records only then, so no Missed verdict reaches here).
 func countVerdict(misses []v1alpha1.ReferenceMiss, listed []v1alpha1.SuspendedReference, e entryRef, verdict string,
 	in *v1alpha1.Instance, alloc *v1alpha1.Allocation, now metav1.Time) (_ []v1alpha1.ReferenceMiss, _, added []v1alpha1.SuspendedReference, changed bool) {
 	i := slices.IndexFunc(misses, e.isMiss)
@@ -103,27 +120,30 @@ func countVerdict(misses []v1alpha1.ReferenceMiss, listed []v1alpha1.SuspendedRe
 	if i >= 0 && misses[i].InstanceUID == in.UID {
 		return misses, listed, nil, false
 	}
-	if i >= 0 && misses[i].AllocationUID != alloc.UID {
-		r := v1alpha1.SuspendedReference{PlatformProfile: e.profile, ReferenceKey: e.key, Date: e.date, SuspendedTime: now}
-		listed = append(slices.Clone(listed), r)
-		if over := len(listed) - maxSuspendedReferences; over > 0 {
-			sort.SliceStable(listed, func(a, b int) bool { return listed[a].SuspendedTime.Before(&listed[b].SuspendedTime) })
-			listed = listed[over:]
+	suspend := func() ([]v1alpha1.ReferenceMiss, []v1alpha1.SuspendedReference, []v1alpha1.SuspendedReference, bool) {
+		if len(listed) >= maxSuspendedReferences {
+			return misses, listed, nil, false
 		}
-		return slices.Delete(slices.Clone(misses), i, i+1), listed, []v1alpha1.SuspendedReference{r}, true
+		r := v1alpha1.SuspendedReference{PlatformProfile: e.profile, ReferenceKey: e.key, Date: e.date, SuspendedTime: now}
+		out := misses
+		if i >= 0 {
+			out = slices.Delete(slices.Clone(misses), i, i+1)
+		}
+		return out, append(slices.Clone(listed), r), []v1alpha1.SuspendedReference{r}, true
+	}
+	if i >= 0 && misses[i].AllocationUID != alloc.UID {
+		return suspend()
 	}
 	m := v1alpha1.ReferenceMiss{PlatformProfile: e.profile, ReferenceKey: e.key, Date: e.date, InstanceUID: in.UID, AllocationUID: alloc.UID, Time: now}
-	out := slices.Clone(misses)
 	if i >= 0 {
+		out := slices.Clone(misses)
 		out[i] = m
 		return out, listed, nil, true
 	}
-	out = append(out, m)
-	if over := len(out) - maxReferenceMisses; over > 0 {
-		sort.SliceStable(out, func(a, b int) bool { return out[a].Time.Before(&out[b].Time) })
-		out = out[over:]
+	if len(misses) >= maxReferenceMisses {
+		return suspend()
 	}
-	return out, listed, nil, true
+	return append(slices.Clone(misses), m), listed, nil, true
 }
 
 // liftSuspensions is step 10's part of suspension: it removes each listing, and each recorded miss, whose profile no
@@ -184,6 +204,14 @@ func holds(prof *v1alpha1.PlatformProfile, key v1alpha1.ReferenceKey, date strin
 	return slices.ContainsFunc(prof.Spec.ExpectedPerformance, func(e v1alpha1.ExpectedPerformance) bool {
 		return e.Date == date && sameKey(e.ReferenceKey, key)
 	})
+}
+
+// announceListFull raises one degraded ReferenceSuspect event regarding the ModelDeployment when a write fills its
+// listing of suspended entries: from then on the gate records only for the deployment, until a profile edit lifts a
+// listing.
+func (p *pass) announceListFull() {
+	p.r.Recorder.Event(p.md, nil, eventDegraded, v1alpha1.ReasonReferenceSuspect,
+		fmt.Sprintf("the list of suspended expected-performance entries is full (%d): the throughput gate records only for this deployment until a listing is lifted by a profile edit", maxSuspendedReferences))
 }
 
 // announceSuspended raises the one degraded ReferenceSuspect event of each listing a write has added, regarding the
