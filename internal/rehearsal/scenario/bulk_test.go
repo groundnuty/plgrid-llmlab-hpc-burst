@@ -71,7 +71,7 @@ type bulkRun struct {
 	bulkSent   float64
 }
 
-// TestBulk64MiBReplyBesideEightStreams (HBEP-6:656): the bulk path keeps 8 token streams' inter-token
+// TestBulk64MiBReplyBesideEightStreams (HBEP-6, Test plan): the bulk path keeps 8 token streams' inter-token
 // gap within S17's figure while a 64 MiB non-streamed reply goes through, against the same run without
 // the bulk path.
 //
@@ -146,7 +146,7 @@ func measureBulk(t *testing.T, mode string, ports stack.Ports, bulkPath bool) bu
 	r.engineEnv = []v1alpha1.EnvVar{{Name: "HB_ENGINE_DOUBLE", Value: "token-delay=" + bulkTokenDelay.String() + ",reply-bytes=" + strconv.Itoa(bulkReplyBytes)}}
 	in := r.startServing(bulkPath)
 	key := r.fc.KeyFor(in)
-	// Without the bulk path (the control, HBEP-6:659's "bulk path off"), the real agent runs the
+	// Without the bulk path (the control, HBEP-6's Test plan, "bulk path off"), the real agent runs the
 	// token frpc alone: the controller wrote no bulk block. With it, the bulk frpc beside it.
 	r.waitFrpcs(in, 1, map[bool]int{true: 1, false: 0}[bulkPath])
 

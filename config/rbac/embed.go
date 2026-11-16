@@ -6,7 +6,15 @@ package rbac
 import _ "embed"
 
 // Agents is agents.yaml: the namespace the agents' ServiceAccounts live in, the ClusterRoles that
-// bound them, and the two ClusterRoleBindings that give two of those roles to the agents' group.
+// bound them (hpcburst-agent in its wide form, with the writes the admission policies bound), and the
+// two ClusterRoleBindings that give two of those roles to the agents' group.
 //
 //go:embed agents.yaml
 var Agents []byte
+
+// AgentsNarrow is agents-narrow.yaml: the read-only form of the ClusterRole hpcburst-agent, which up
+// applies before the admission policies are enforced; Agents holds the wide form (HBEP-10,
+// Identities and roles; issue #589).
+//
+//go:embed agents-narrow.yaml
+var AgentsNarrow []byte

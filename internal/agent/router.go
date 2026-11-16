@@ -27,6 +27,7 @@ const envoyReady = 60 * time.Second
 // routerKeepAliveVar is vLLM's keep-alive for idle client connections, which the workers behind a
 // router get at routerKeepAlive: above Envoy's 50 s upstream idle, so Envoy, which reuses
 // connections, closes them first (HBEP-5, Inside an Instance; L-2.5). vLLM v0.32.0 defaults it to 5 s.
+// Known issue KI-0002 (register/known-issues.yaml).
 const (
 	routerKeepAliveVar = "VLLM_HTTP_TIMEOUT_KEEP_ALIVE"
 	routerKeepAlive    = "120"

@@ -1,6 +1,6 @@
 package front
 
-// The bulk path's trap 4 on the real frp v0.71.1 (the plan of #448, part 6; HBEP-6:658): the front
+// The bulk path's trap 4 on the real frp v0.71.1 (the plan of #448, part 6; HBEP-6, Test plan): the front
 // with the bulk path over the launcher's two frps, a token frpc and a bulk frpc for one Instance,
 // each serving an engine double of its own, through the production dial-home listener. The bulk frpc
 // is killed through its pidfd after it carried a request, while frps-bulk's CloseProxy to the front's
@@ -184,7 +184,7 @@ func (r *realBulkFront) register(what string) {
 	})
 }
 
-// TestRealBulkFrpcKilledFallsBackOnce (trap 4, HBEP-6:658 as amended on #448): after the bulk
+// TestRealBulkFrpcKilledFallsBackOnce (trap 4, HBEP-6, Test plan, as amended on #448): after the bulk
 // transport carried a request, the bulk frpc is killed through its pidfd with frps-bulk's CloseProxy
 // held, so the front still has the bulk transport registered. frps deletes the proxy before it calls
 // the plugin, so a new bulk dial fails and the request falls back: served by the SAME Instance's
@@ -289,7 +289,7 @@ func TestRealBulkFrpcKilledFallsBackOnce(t *testing.T) {
 	}
 }
 
-// TestRealBulkEpochsAreSeparate (HBEP-6:657, on the real frp): both frps post to the front's plugins,
+// TestRealBulkEpochsAreSeparate (HBEP-6, Test plan, on the real frp): both frps post to the front's plugins,
 // the first to the token path and frps-bulk to the bulk path, as the launcher configures them. The
 // bulk frpc's kill (frps-bulk's CloseProxy) and its return (NewProxy) move only the bulk epoch, and
 // leave the token transport registered in its epoch; the token frpc's kill and return move only the
@@ -415,7 +415,7 @@ func drainSpare(t *testing.T, mux, web, pw, uid string) {
 	}
 }
 
-// TestRealBulkCutBeforeHeadersRaisesNoPause (trap 3 on the real frp, HBEP-6:661 and :517): the bulk
+// TestRealBulkCutBeforeHeadersRaisesNoPause (trap 3 on the real frp, HBEP-6, Test plan and The bulk path): the bulk
 // frpc, the test's own child, is stopped through its handle (SIGSTOP), so frps-bulk answers a new
 // CONNECT and then waits userConnTimeout (frp's default, 10 s; the launcher sets none) for a work
 // connection that never comes, and closes the user connection after the front wrote the request.

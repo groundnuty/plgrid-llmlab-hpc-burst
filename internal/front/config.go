@@ -87,7 +87,9 @@ func (d Duration) MarshalJSON() ([]byte, error) { return json.Marshal(time.Durat
 // D is the value as a time.Duration.
 func (d Duration) D() time.Duration { return time.Duration(d) }
 
-// HBEP-5's defaults (Parameters; Time-outs and keep-alive).
+// HBEP-5's defaults (Parameters; Time-outs and keep-alive). DefaultUpstreamIdleTimeout is below vLLM
+// v0.32.0's 5 s keep-alive, so the front drops an idle upstream connection before the engine closes
+// it: known issue KI-0001 (register/known-issues.yaml).
 const (
 	DefaultClientListen        = "127.0.0.1:8000"
 	DefaultMaxRequestDuration  = 2 * time.Hour

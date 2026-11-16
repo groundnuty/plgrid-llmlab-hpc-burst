@@ -63,6 +63,32 @@ func TestAccountingHoursUnknown(t *testing.T) {
 	}
 }
 
+// HBEP-8's billing row: a scheduler billing count of 3 for 5,400 s is 16,200
+// unit-seconds, which is 4.5 billed units (3 × 5,400 ÷ 3,600), while the same
+// job's 2 GPUs give 3.0 GPU-hours. The count is chosen to equal neither the GPU
+// nor the CPU count, so a method that read either would fail here.
+func TestAccountingBilledUnitSeconds(t *testing.T) {
+	a := AllocationAccounting{AllocatedCPUs: i32(16), AllocatedGPUs: i32(2), AllocatedBilling: i32(3), ElapsedSeconds: i64(5400)}
+	if s, ok := a.BilledUnitSeconds(); !ok || s != 16200 {
+		t.Errorf("BilledUnitSeconds = %d, %v; want 16200 (4.5 units)", s, ok)
+	}
+	if h, ok := a.GPUHours(); !ok || h != 3.0 {
+		t.Errorf("GPUHours = %v, %v; want 3.0", h, ok)
+	}
+	for name, u := range map[string]AllocationAccounting{
+		"no billing count": {AllocatedGPUs: i32(2), ElapsedSeconds: i64(5400)},
+		"no elapsed time":  {AllocatedBilling: i32(3)},
+	} {
+		if s, ok := u.BilledUnitSeconds(); ok {
+			t.Errorf("%s: BilledUnitSeconds = %d, known; want unknown", name, s)
+		}
+	}
+	zero := AllocationAccounting{AllocatedBilling: i32(0), ElapsedSeconds: i64(5400)}
+	if s, ok := zero.BilledUnitSeconds(); !ok || s != 0 {
+		t.Errorf("a known 0 billing: BilledUnitSeconds = %d, %v; want a known 0", s, ok)
+	}
+}
+
 func TestAccountingRecordName(t *testing.T) {
 	got, err := AccountingRecordName("0b8e3f7c-9d1a-4c52-8f60-2a4d6e8c1b57")
 	if err != nil || got != "acct-0b8e3f7c-9d1a-4c52-8f60-2a4d6e8c1b57" {

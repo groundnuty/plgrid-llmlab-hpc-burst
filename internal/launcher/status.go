@@ -72,6 +72,10 @@ type StatusReport struct {
 	// server like CRDGuard: nil when it was not asked. Roles that are not the manifest's are a state,
 	// not a fault: the next start resets them.
 	AgentRBAC *AgentRBACState `json:"agent_rbac,omitempty"`
+	// AdmissionPolicies is the state of the capacity guard, the owner pin and the approver pin
+	// (admission.go), asked of the API server like CRDGuard: empty when it was not asked. An absent
+	// policy is a state, not a fault, as an absent CRD guard is.
+	AdmissionPolicies []AdmissionState `json:"admission_policies,omitempty"`
 	// Identities are the agents' identities with each one's expiry and whether the API server accepts
 	// its token (identity_status.go). An expired or rejected one is a state, not a fault.
 	Identities []IdentityState `json:"identities,omitempty"`
@@ -280,6 +284,7 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 	final()
 	// Last, so that it is asked only of a host that is healthy after every other check.
 	statusGuard(ctx, cfg, rep, bad)
+	statusAdmission(ctx, cfg, rep, bad)
 	statusAgents(ctx, cfg, l, st.Ports, rep, bad)
 	return rep, nil
 }
@@ -304,6 +309,20 @@ func statusAgents(ctx context.Context, cfg *rest.Config, l layout, ports Ports, 
 		return
 	}
 	rep.Identities = ids
+}
+
+// statusAdmission sets rep.AdmissionPolicies from the API server, under the same condition as statusGuard.
+// An absent policy changes nothing about the host's health; a failure to ask does.
+func statusAdmission(ctx context.Context, cfg *rest.Config, rep *StatusReport, bad func(string, ...any)) {
+	if rep.Health != Healthy || rep.Readyz == nil || !*rep.Readyz {
+		return
+	}
+	ps, err := CheckAdmission(ctx, cfg)
+	if err != nil {
+		bad("the admission policies could not be checked: %v", err)
+		return
+	}
+	rep.AdmissionPolicies = ps
 }
 
 // statusGuard sets rep.CRDGuard from the API server, and only for a host judged healthy by every other

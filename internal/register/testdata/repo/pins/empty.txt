@@ -1,0 +1,1 @@
+# A hand-written fixture pins file with no version.

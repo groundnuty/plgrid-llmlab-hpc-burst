@@ -12,7 +12,7 @@ package alpha
 // its job is seen ended.
 //
 // There is no requeue of the run's own job (the science agent's ruling on #503, 13 Nov 2026, which corrects its ruling Q5
-// of 11 Nov on #376): the plugin submits --no-requeue (HBEP-4:195; HBEP-7's Provisioning), so a user's scontrol
+// of 11 Nov on #376): the plugin submits --no-requeue (HBEP-4, Core operations; HBEP-7's Provisioning), so a user's scontrol
 // requeuehold is refused by design ("Requested operation is presently disabled"), and a requeue is an administrator's act
 // on these clusters. A row that sent it could never pass. What a requeue does to an Instance, that it fails with reason
 // Requeued and its Allocation is released, stays covered on the fake Slurm (HBEP-7's Test plan, the second execution;
@@ -38,7 +38,7 @@ import (
 
 // The row's figures.
 const (
-	// ServeStreamTokens is HBEP-5's long stream (hbep/0005-llmlab-compatible-front/README.md:442), run at the engine's own
+	// ServeStreamTokens is HBEP-5's long stream (HBEP-5, Test plan, "Deadlines"), run at the engine's own
 	// rate with min_tokens so that its length is exact, under the deployment's deadline (the science agent's ruling Q4 on
 	// #376, mirroring the tunnel hour's of 2 Nov 2026). The 1 token/s wall-clock run stays local (internal/front).
 	ServeStreamTokens = 7000
@@ -250,10 +250,10 @@ func ladderChecks(l LadderObs) []string {
 
 // VerifyNowServe judges alpha-athena-now-serve.
 //
-//	hbep/0005-llmlab-compatible-front/README.md:442 and :488: the long stream through the front, attributed (Q4).
-//	hbep/0003-resource-model-and-naming/README.md:380, :332: the deployment ID under its tag.
-//	hbep/0008-observability-and-events/README.md:450-451: the events and the engine gauges.
-//	hbep/0007-lifecycle-controller/README.md:663: one restart at the worker rung (Q8: plgrid-now counts for it).
+//	HBEP-5, Graduation criteria and Test plan ("Deadlines", "Attribution"): the long stream through the front, attributed (Q4).
+//	HBEP-3, Graduation criteria and Allocation and job identity: the deployment ID under its tag.
+//	HBEP-8, Graduation criteria: the events and the engine gauges.
+//	HBEP-7, Graduation criteria: one restart at the worker rung (Q8: plgrid-now counts for it).
 func VerifyNowServe(row Row, o NowServeObs, jobs []provider.Job) []string {
 	// A climb of the restart ladder is named first: it is a cause, and the checks after it (a second Allocation, a job with no record,
 	// more than one restart) are its marks.
