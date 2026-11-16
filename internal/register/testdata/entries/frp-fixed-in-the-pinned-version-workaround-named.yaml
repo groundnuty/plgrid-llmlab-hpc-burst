@@ -1,0 +1,13 @@
+- id: KI-0001
+  symptom: an example tunnel binary drops a stream
+  component: frp
+  affected: 0.70.0
+  fixedIn: 0.71.1
+  workaround:
+    where: example/package, a setting
+    what: a longer time-out
+  test:
+    package: pkg/one
+    name: TestPlain
+  source:
+    - L-9.9

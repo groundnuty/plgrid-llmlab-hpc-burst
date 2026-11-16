@@ -124,6 +124,7 @@ operations:$.spec.scale#0|^TestOperationSpecIsImmutable$
 platformprofiles:$.spec#0|^TestPlatformProfileTypedFields$
 platformprofiles:$.spec#1|^TestPartitionQOSIsListed$
 platformprofiles:$.spec#2|^TestExpectedPerformanceKeyIsUnique$
+platformprofiles:$.spec#3|^TestGatewayOnlyOnAManagedProfile$
 platformprofiles:$.spec.drainMargin#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.drainWindow#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.expectedPerformance[].capacityFlags#0|^TestCapacityFlagsAlwaysHoldMaxNumSeqs$

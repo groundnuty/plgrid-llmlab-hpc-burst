@@ -1,0 +1,84 @@
+# The known-issues register (HBEP-4, Known-issues register; beta). Each entry is an upstream bug tied to
+# versions, with a workaround that is plain configuration and one regression test. No controller reads
+# this file: internal/register's TestKnownIssuesRegister does, and fails on a field that is missing or
+# unknown, an id used twice, a platform that profiles/ does not ship, a partition that platform's typed
+# list lacks, a test.name that is no test function, a version that does not parse, and an envoy or frp
+# entry whose pins file has reached its fixedIn while its workaround is still named.
+#
+# Fields (all required unless marked):
+#   id                       KI- and four digits; unique, never reused. A workaround's comment cites it.
+#   symptom                  one line: what a client, a log or a test sees.
+#   component                vllm, envoy, vllm-router, frp, apptainer, slurm or llmlab.
+#   affected                 one version, or a range such as ">=1.2.0,<1.4.0". Quote versions: an unquoted
+#                            two-part version is read as a number.
+#   fixedIn                  (optional) the first version that fixes it, once known.
+#   scope.platforms,         (optional) PlatformProfile names and partition names the workaround applies
+#   scope.partitions         to; partitions only with platforms. No scope: applies everywhere (engine-wide).
+#   workaround.where         a file and field, or a package and setting, on one line.
+#   workaround.what          the setting, on one line, or none once the workaround is removed: the PR that
+#                            reaches a binary entry's fixedIn writes none and keeps the entry and its test.
+#   test.package, test.name  the entry's one regression test: a Go package (a path from the repository
+#                            root) and a func Test...(t *testing.T) in its _test.go files.
+#   source                   a list of at least one upstream link, lesson ID or issue comment.
+#
+# The four entries below are the workarounds beta starts with, from HBEP-4's Known-issues register.
+
+- id: KI-0001
+  symptom: vLLM v0.32.0 closes a connection that has idled for 5 s, so a caller that reuses a connection idle for longer finds it closed
+  component: vllm
+  affected: "0.32.0"
+  workaround:
+    where: internal/front/config.go, upstreamIdleTimeout
+    what: the front drops its idle upstream connections after 4 s, below the engine's 5 s (HBEP-5, Time-outs and keep-alive)
+  test:
+    package: internal/front
+    name: TestKeepAliveIdleTimeoutIsBelowTheEngines
+  source:
+    - L-2.5
+
+- id: KI-0002
+  symptom: behind a router, vLLM v0.32.0's 5 s keep-alive closes a connection that Envoy, which reuses connections for up to 50 s, still sends on
+  component: vllm
+  affected: "0.32.0"
+  workaround:
+    where: internal/agent/router.go, the worker's VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+    what: the agent starts a worker behind a router with VLLM_HTTP_TIMEOUT_KEEP_ALIVE=120, above Envoy's 50 s upstream idle
+  test:
+    package: internal/agent
+    name: TestAWorkerBehindTheRouterGetsTheKeepAlive
+  source:
+    - L-2.5
+
+- id: KI-0003
+  symptom: Envoy's default route timeout of 15 s cuts a long stream, as vllm-router's default of 1,800 s did
+  component: envoy
+  affected: "1.40.2"
+  workaround:
+    where: internal/agent/envoyconf.go, the route's timeout
+    what: the agent sets the route's timeout, idle_timeout and the stream_idle_timeout to 10,800 s (HBEP-5, Time-outs and keep-alive)
+  test:
+    package: internal/agent
+    name: TestEnvoyRouteTimeoutOutlivesTheDefault
+  source:
+    - L-4.1
+
+- id: KI-0004
+  symptom: Apptainer 1.4.5 on Athena's A100 compute nodes cannot run a SIF image, while a sandbox directory built from the same image digest runs
+  component: apptainer
+  affected: "1.4.5"
+  scope:
+    platforms:
+      - athena
+      - athena-now
+    partitions:
+      - plgrid-gpu-a100
+      - plgrid-now
+  workaround:
+    where: profiles/athena.yaml and profiles/athena-now.yaml, partitions[].imageFormat
+    what: imageFormat is sandbox on both partitions, so the agent builds and runs a sandbox
+  test:
+    package: internal/lifecycle
+    name: TestShippedAthenaNowHoldsPlgridNowOnlyAndSendsASandbox
+  source:
+    - HBEP-4, open question 15
+    - issue #18, comment 6542078107 (spike S1, probe 2)

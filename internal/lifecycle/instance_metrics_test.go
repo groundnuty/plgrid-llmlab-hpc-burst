@@ -2,7 +2,9 @@ package lifecycle
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -89,9 +91,9 @@ func scrape(t *testing.T, rg *rig) exposition {
 	return scrapeCollectors(t, rg.collector(always))
 }
 
-// scrapeCollectors serves collectors as /metrics through a pedantic registry
-// and parses the text.
-func scrapeCollectors(t *testing.T, cs ...prometheus.Collector) exposition {
+// scrapeBody serves collectors as /metrics through a pedantic registry and
+// returns the text the handler served.
+func scrapeBody(t *testing.T, cs ...prometheus.Collector) []byte {
 	t.Helper()
 	reg := prometheus.NewPedanticRegistry()
 	reg.MustRegister(cs...)
@@ -105,8 +107,20 @@ func scrapeCollectors(t *testing.T, cs ...prometheus.Collector) exposition {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /metrics: %d", resp.StatusCode)
 	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+// scrapeCollectors serves collectors as /metrics through a pedantic registry
+// and parses the text.
+func scrapeCollectors(t *testing.T, cs ...prometheus.Collector) exposition {
+	t.Helper()
+	body := scrapeBody(t, cs...)
 	ex := exposition{types: map[string]string{}, help: map[string]string{}}
-	sc := bufio.NewScanner(resp.Body)
+	sc := bufio.NewScanner(bytes.NewReader(body))
 	for sc.Scan() {
 		line := sc.Text()
 		if f := strings.Fields(line); len(f) == 4 && f[0] == "#" && f[1] == "TYPE" {

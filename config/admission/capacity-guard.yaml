@@ -1,0 +1,159 @@
+# The capacity guard (HBEP-10, The capacity guard; issue #589, PR 3). An agent identity cannot lower
+# capacity by editing or deleting a ModelDeployment, nor by writing anything the controllers would act
+# on: an agent's update is accepted only if every change in it is on the allowlist (a higher
+# spec.instances, a later or removed spec.endTime, an edit of spec.source.served, a change of
+# spec.hedgeWidth either way, the purpose annotation, and kubectl's last-applied-configuration
+# annotation), and the rest must be unchanged.
+# The person and the controllers are outside the guard: its match condition is the agents' group.
+#
+# hpcburst up installs the policy and its binding on every start and resets them to this file, then
+# waits until the API server refuses a dry-run probe (internal/launcher/admission.go). Only after that
+# does the agent role gain its writes (config/rbac/agents.yaml); until then it is the read-only role of
+# config/rbac/agents-narrow.yaml. hpcburst status reports whether they are there.
+# This file is written by hand. hack/generate.sh does not touch it. The launcher embeds it
+# (config/admission/embed.go), so what up installs is this file.
+#
+# Every reference to request.subResource goes through has(): the field is absent on the main resource,
+# and reading it errors. Every validation names the operation and the resource it applies to first,
+# since object is null on a DELETE, oldObject is null on a CREATE, and the object of the scale
+# subresource is a Scale with spec.replicas and no spec.instances. A validation that errors still
+# denies (failurePolicy Fail), but with an evaluation error and not this file's message.
+#
+# Which validation answers when several fail: the first one in this file (the API server reports the
+# first denial). The messages name the Operation that does the same thing, where there is one.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: hpcburst-capacity-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["hpcburst.groundnuty.github.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["modeldeployments", "modeldeployments/scale", "modeldeployments/status"]
+      - apiGroups: ["hpcburst.groundnuty.github.io"]
+        apiVersions: ["*"]
+        operations: ["*"]
+        resources: ["allocations", "allocations/*", "instances", "instances/*", "operations/status"]
+      - apiGroups: ["hpcburst.groundnuty.github.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["operations"]
+  matchConditions:
+    - name: agents-only
+      expression: "has(request.userInfo.groups) && request.userInfo.groups.exists(g, g == 'system:serviceaccounts:hpcburst-agents')"
+  variables:
+    - name: op
+      expression: "request.operation"
+    - name: res
+      expression: "request.resource.resource"
+    - name: sub
+      expression: "has(request.subResource) ? request.subResource : ''"
+    # The main resource of a ModelDeployment, and of an Operation.
+    - name: mainMD
+      expression: "variables.res == 'modeldeployments' && variables.sub == ''"
+    - name: mainOp
+      expression: "variables.res == 'operations' && variables.sub == ''"
+    # What an allowed edit of a ModelDeployment may change among the annotations.
+    - name: editableAnnotations
+      expression: "['hpcburst.groundnuty.github.io/purpose', 'kubectl.kubernetes.io/last-applied-configuration']"
+    - name: newAnnotations
+      expression: "has(object.metadata.annotations) ? object.metadata.annotations : {}"
+    - name: oldAnnotations
+      expression: "has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}"
+    # Counts. A Scale object omits spec.replicas when it is 0.
+    - name: newReplicas
+      expression: "has(object.spec) && has(object.spec.replicas) ? object.spec.replicas : 0"
+    - name: oldReplicas
+      expression: "has(oldObject.spec) && has(oldObject.spec.replicas) ? oldObject.spec.replicas : 0"
+    - name: newInstances
+      expression: "has(object.spec.instances) ? object.spec.instances : 0"
+    - name: oldInstances
+      expression: "has(oldObject.spec.instances) ? oldObject.spec.instances : 0"
+    # Spec fields the allowlist handles by their own rules; every other field must be unchanged. hedgeWidth is
+    # allowlisted in both directions (HBEP-10, The capacity guard, as amended for #606): lowering it cancels
+    # nothing, and raising it reserves capacity, which the owner allowed. It needs its entry because the rule
+    # below refuses every field that is not named, a field added after this file included.
+    - name: ownRules
+      expression: "['instances', 'endTime', 'source', 'hedgeWidth']"
+  validations:
+    - expression: "variables.op != 'DELETE' || variables.res != 'modeldeployments'"
+      reason: Forbidden
+      message: "an agent cannot delete a ModelDeployment: plan it as an Operation of action End with delete: true (hpcburst end --delete; HBEP-10, The capacity guard)"
+    - expression: "variables.res != 'modeldeployments' || variables.sub != 'status'"
+      reason: Forbidden
+      message: "agents never write a ModelDeployment's status (HBEP-10, The capacity guard)"
+    - expression: "variables.op != 'CREATE' || !variables.mainMD || !has(object.metadata.ownerReferences) || size(object.metadata.ownerReferences) == 0"
+      reason: Forbidden
+      message: "an agent cannot create a ModelDeployment with ownerReferences: the garbage collector would delete it when its owner goes, which releases its Allocations (HBEP-10, The capacity guard)"
+    - expression: "variables.op != 'UPDATE' || variables.res != 'modeldeployments' || variables.sub != 'scale' || variables.newReplicas >= variables.oldReplicas"
+      reason: Forbidden
+      message: "an agent cannot lower a ModelDeployment's count with scale: a lower count is an Operation of action Scale (hpcburst scale; HBEP-10, The capacity guard)"
+    - expression: "variables.op != 'UPDATE' || !variables.mainMD || variables.newInstances >= variables.oldInstances"
+      reason: Forbidden
+      message: "an agent cannot lower spec.instances: a lower count is an Operation of action Scale (hpcburst scale; HBEP-10, The capacity guard)"
+    - expression: >-
+        variables.op != 'UPDATE' || !variables.mainMD || !has(object.spec.endTime) ||
+        (has(oldObject.spec.endTime) && timestamp(object.spec.endTime) >= timestamp(oldObject.spec.endTime))
+      reason: Forbidden
+      message: "an agent cannot set spec.endTime where there was none or move it earlier: an earlier end is an Operation of action End (hpcburst end; HBEP-10, The capacity guard)"
+    - expression: >-
+        variables.op != 'UPDATE' || !variables.mainMD ||
+        object.spec.source == oldObject.spec.source ||
+        (has(oldObject.spec.source.served) && has(object.spec.source.served) && !has(object.spec.source.managed) &&
+        object.spec.source.all(k, k == 'served' || (k in oldObject.spec.source && object.spec.source[k] == oldObject.spec.source[k])) &&
+        oldObject.spec.source.all(k, k == 'served' || k in object.spec.source))
+      reason: Forbidden
+      message: "an agent may edit spec.source.served only: spec.source must keep served and stay without managed, which shuts the deployment down (HBEP-10, The capacity guard)"
+    - expression: >-
+        variables.op != 'UPDATE' || !variables.mainMD ||
+        (object.spec.filter(k, !(k in variables.ownRules)).all(k, k in oldObject.spec && object.spec[k] == oldObject.spec[k]) &&
+        oldObject.spec.filter(k, !(k in variables.ownRules)).all(k, k in object.spec))
+      reason: Forbidden
+      message: "an agent may change only spec.instances (higher), spec.endTime (later), spec.source.served and spec.hedgeWidth: every other field of the spec must stay as it is (HBEP-10, The capacity guard)"
+    - expression: >-
+        variables.op != 'UPDATE' || !variables.mainMD ||
+        (has(object.metadata.labels) ? object.metadata.labels : {}) == (has(oldObject.metadata.labels) ? oldObject.metadata.labels : {})
+      reason: Forbidden
+      message: "an agent cannot change a ModelDeployment's labels (HBEP-10, The capacity guard)"
+    - expression: >-
+        variables.op != 'UPDATE' || !variables.mainMD ||
+        (has(object.metadata.finalizers) ? object.metadata.finalizers : []) == (has(oldObject.metadata.finalizers) ? oldObject.metadata.finalizers : [])
+      reason: Forbidden
+      message: "an agent cannot change a ModelDeployment's finalizers (HBEP-10, The capacity guard)"
+    - expression: >-
+        variables.op != 'UPDATE' || !variables.mainMD ||
+        (has(object.metadata.ownerReferences) ? object.metadata.ownerReferences : []) == (has(oldObject.metadata.ownerReferences) ? oldObject.metadata.ownerReferences : [])
+      reason: Forbidden
+      message: "an agent cannot change a ModelDeployment's ownerReferences: the garbage collector would delete it when its owner goes (HBEP-10, The capacity guard)"
+    - expression: >-
+        variables.op != 'UPDATE' || !variables.mainMD ||
+        (variables.newAnnotations.filter(k, !(k in variables.editableAnnotations)).all(k, k in variables.oldAnnotations && variables.newAnnotations[k] == variables.oldAnnotations[k]) &&
+        variables.oldAnnotations.filter(k, !(k in variables.editableAnnotations)).all(k, k in variables.newAnnotations))
+      reason: Forbidden
+      message: "an agent may edit only the purpose annotation of a ModelDeployment: every other annotation must stay as it is (HBEP-10, The capacity guard)"
+    - expression: "variables.res != 'allocations' && variables.res != 'instances' && !(variables.res == 'operations' && variables.sub == 'status')"
+      reason: Forbidden
+      message: "agents never write Allocations, Instances or an Operation's status; the lifecycle controller does (HBEP-10, The capacity guard)"
+    - expression: >-
+        variables.op != 'CREATE' || !variables.mainOp ||
+        ((!has(object.metadata.ownerReferences) || size(object.metadata.ownerReferences) == 0) &&
+        (!has(object.metadata.finalizers) || size(object.metadata.finalizers) == 0))
+      reason: Forbidden
+      message: "an agent cannot create an Operation with ownerReferences or finalizers: deleting an Operation mid-execution would hand the surplus to the controller's own selection (HBEP-10, The capacity guard)"
+    - expression: >-
+        variables.op != 'UPDATE' || !variables.mainOp ||
+        ((has(object.metadata.ownerReferences) ? object.metadata.ownerReferences : []) == (has(oldObject.metadata.ownerReferences) ? oldObject.metadata.ownerReferences : []) &&
+        (has(object.metadata.finalizers) ? object.metadata.finalizers : []) == (has(oldObject.metadata.finalizers) ? oldObject.metadata.finalizers : []))
+      reason: Forbidden
+      message: "an agent cannot change an Operation's ownerReferences or finalizers: deleting an Operation mid-execution would hand the surplus to the controller's own selection (HBEP-10, The capacity guard)"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: hpcburst-capacity-guard
+spec:
+  policyName: hpcburst-capacity-guard
+  validationActions: ["Deny"]

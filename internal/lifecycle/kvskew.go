@@ -10,11 +10,11 @@ import (
 
 // The KV-skew signal (HBEP-7, Health and restarts, by #520; #518): with several workers behind the
 // router, one worker at a full KV cache with requests waiting and its token counter flat, while a sibling
-// the router routes to idles, for health.kvSkewTimeout. Bounded loads don't spill a few heavy sessions off
-// one worker (HBEP-5), so load alone can fill it while a sibling idles, but a loaded worker still
-// generates tokens: a full worker whose counter is flat is stuck, and a sibling could relieve it. One
-// worker never raises it: only the several-workers path asks (workerSignal), and HBEP-7 says a full KV
-// cache on the only worker with requests waiting is plain load.
+// the router routes to idles, for health.kvSkewTimeout. The router's ring hash runs with no bounded load
+// (HBEP-5; #614), so a few heavy sessions stay on one worker, and load alone can fill it while a sibling
+// idles, but a loaded worker still generates tokens: a full worker whose counter is flat is stuck, and a
+// sibling could relieve it. One worker never raises it: only the several-workers path asks (workerSignal),
+// and HBEP-7 says a full KV cache on the only worker with requests waiting is plain load.
 
 // kvSkewFullAt is the KV-cache usage at or above which a worker is full (HBEP-7, by #520).
 const kvSkewFullAt = 0.95

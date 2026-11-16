@@ -13,8 +13,11 @@ import (
 
 // Provider accounting (HBEP-8, Provider accounting; HBEP-4, The Slurm dialect,
 // Allocated time). Alpha counts allocated time: the GPUs or CPUs the scheduler
-// allocated times the time they were allocated. Every number is "allocated, not
-// billed"; the billing formula is open and blocks beta.
+// allocated times the time they were allocated. Beta adds the scheduler's own
+// billing count times the elapsed hours, in the partition's billing unit, and
+// totals per grant and account (HBEP-8, Provider accounting, Billing). Every
+// number is "allocated, not billed" until a person-run comparison with a
+// center's report agrees.
 
 // AccountingBasisAllocated is the basis of every alpha accounting number.
 const AccountingBasisAllocated = "allocated"
@@ -25,7 +28,7 @@ const AccountingBasisAllocated = "allocated"
 // while the job has not started, so a pending Allocation's hours are unknown.
 // The numbers are allocated, not billed.
 //
-// The hours are derived: GPUHours and CPUHours.
+// The hours are derived: GPUHours, CPUHours and BilledUnitSeconds.
 type AllocationAccounting struct {
 	// AllocatedCPUs is the number of CPUs the scheduler allocated: the cpu
 	// entry of accounting's tres.allocated. Absent when accounting gave none.
@@ -42,6 +45,17 @@ type AllocationAccounting struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	AllocatedGPUs *int32 `json:"allocatedGPUs,omitempty"`
+
+	// AllocatedBilling is the scheduler's billing count for the job: the
+	// billing entry of accounting's tres.allocated, from the same read as
+	// AllocatedCPUs and AllocatedGPUs (beta; HBEP-8, Provider accounting,
+	// Billing). The scheduler computes it from the partition's billing weights.
+	// Absent when the entry is missing or does not fit, when the job was
+	// requeued, and until the read is made. Allocated, not billed.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	AllocatedBilling *int32 `json:"allocatedBilling,omitempty"`
 
 	// ElapsedSeconds is how long the job has been allocated: while it runs,
 	// from the scheduler's start time to ReadTime; once it has ended, the queue
@@ -75,6 +89,17 @@ func (a AllocationAccounting) CPUSeconds() (seconds int64, ok bool) {
 		return 0, false
 	}
 	return int64(*a.AllocatedCPUs) * *a.ElapsedSeconds, true
+}
+
+// BilledUnitSeconds returns the billed unit-seconds: AllocatedBilling times
+// ElapsedSeconds (beta; HBEP-8, Provider accounting, Billing). Over 3600 they
+// are the billed units, in the partition's billing unit. ok is false when
+// either is unknown. Allocated, not billed.
+func (a AllocationAccounting) BilledUnitSeconds() (unitSeconds int64, ok bool) {
+	if a.AllocatedBilling == nil || a.ElapsedSeconds == nil {
+		return 0, false
+	}
+	return int64(*a.AllocatedBilling) * *a.ElapsedSeconds, true
 }
 
 // GPUHours returns the allocated GPU-hours, GPUSeconds over 3600; allocated,
@@ -115,14 +140,23 @@ const (
 	AccountingFieldElapsedSeconds = "elapsedSeconds"
 	AccountingFieldStartTime      = "startTime"
 	AccountingFieldEndTime        = "endTime"
+
+	// The beta fields (HBEP-8, Provider accounting, Billing).
+	AccountingFieldAllocatedBilling = "allocatedBilling"
+	AccountingFieldBillingUnit      = "billingUnit"
+	AccountingFieldGrant            = "grant"
+	AccountingFieldAccount          = "account"
 )
 
 // AccountingRecordData is the data of an accounting record: what the Provider's
 // controller knew when the Allocation's last job had ended and its finalizer was
 // about to go (HBEP-8, Provider accounting). A field that was not known is
 // absent and named in Unknown, so a reader tells "unknown" from a field an
-// older version did not write. Hours are derived as for AllocationAccounting:
-// allocated, not billed.
+// older version did not write. A record written before the beta fields
+// (AllocatedBilling, BillingUnit, Grant and Account) has none of them and names
+// none of them in Unknown; it is never rewritten, so its billed units are
+// unknown. Hours are derived as for AllocationAccounting: allocated, not
+// billed.
 type AccountingRecordData struct {
 	// Provider is the Provider's name.
 	Provider string `json:"provider"`
@@ -143,6 +177,22 @@ type AccountingRecordData struct {
 	AllocatedGPUs  *int32 `json:"allocatedGPUs,omitempty"`
 	ElapsedSeconds *int64 `json:"elapsedSeconds,omitempty"`
 
+	// AllocatedBilling is as in AllocationAccounting (beta).
+	AllocatedBilling *int32 `json:"allocatedBilling,omitempty"`
+
+	// BillingUnit is the partition's billingUnit when the record was written
+	// (beta): what one unit of AllocatedBilling's count is.
+	BillingUnit BillingUnit `json:"billingUnit,omitempty"`
+
+	// Grant and Account are the Provider's grant and account when the record
+	// was written (beta; HBEP-8, Provider accounting, Billing), which the
+	// per-grant totals group by. They stay in the cluster's own records and on
+	// the host, never in a public artefact such as an issue, a PR, a CI log or
+	// a published document (`@hpc-burst-science-agent`, 16 Nov 2026, on the
+	// owner's Provider-settings decision of 28 Oct 2026).
+	Grant   string `json:"grant,omitempty"`
+	Account string `json:"account,omitempty"`
+
 	// StartTime and EndTime are the recorded job's start and end, from the
 	// scheduler (the latest execution's, for a requeued job).
 	StartTime *metav1.Time `json:"startTime,omitempty"`
@@ -154,6 +204,9 @@ type AccountingRecordData struct {
 	// Unknown names each field above that is absent because it was not known,
 	// in the order AllocatedCPUs, AllocatedGPUs, ElapsedSeconds, StartTime,
 	// EndTime. NewAccountingRecord fills it, so it always matches the fields.
+	// The beta fields join it, in their order above, with the code that fills
+	// them (#625); until then a record has none of them, as one written before
+	// them.
 	//
 	// +optional
 	Unknown []string `json:"unknown,omitempty"`

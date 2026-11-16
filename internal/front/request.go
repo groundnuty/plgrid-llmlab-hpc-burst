@@ -75,7 +75,7 @@ func newExchange(r *http.Request, clk clock.Clock, maxReq time.Duration) *exchan
 	x := &exchange{id: newRequestID(), start: clk.Now(), clk: clk}
 	x.ctx, x.cancel = context.WithCancelCause(r.Context())
 	x.attr = attribution{requestID: x.id, emitter: emitterFront}
-	x.rec = usage.Record{RequestID: x.id, StartTime: usage.Time(x.start), Path: r.URL.Path, Emitter: emitterFront}
+	x.rec = usage.Record{RequestID: x.id, StartTime: usage.Time(x.start), Path: boundedText(r.URL.Path, maxRecordedPathBytes), Emitter: emitterFront}
 	x.deadline = clk.AfterFunc(maxReq, func() { x.cancel(errCutDeadline) })
 	return x
 }

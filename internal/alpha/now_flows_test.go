@@ -31,7 +31,7 @@ import (
 // NowServe is alpha-athena-now-serve: the Instance ready; the long stream; the deployment ID under its tag; the
 // engine gauges; one worker-rung restart; HBEP-8's events once everything that raises them has happened; then the
 // deployment goes and its job is seen ended. There is no requeue of the run's own job: the plugin submits --no-requeue
-// (HBEP-4:195; HBEP-7's Provisioning), so a user's requeue of it is refused by design, and a requeue is an
+// (HBEP-4, Core operations; HBEP-7's Provisioning), so a user's requeue of it is refused by design, and a requeue is an
 // administrator's act on these clusters (the science agent's ruling on #503, 13 Nov 2026, which corrects its ruling of
 // 11 Nov on #376). What a requeue does to an Instance stays covered on the fake Slurm (HBEP-7's Test plan, the second
 // execution; internal/rehearsal/scenario, part 3).
@@ -259,10 +259,10 @@ func (r *liveRun) nowGauges(in v1alpha1.Instance) ObsCheck {
 }
 
 // nowEvents holds the run's events to HBEP-8 through obscheck. The expected set is written here from HBEP-8's Reasons
-// table (hbep/0008-observability-and-events/README.md:164-177) and HBEP-7's rules, for this row's steps, never from what
+// table (Events, "Reasons in alpha") and HBEP-7's rules, for this row's steps, never from what
 // the run emitted (issue #193, Verifications that prove nothing): the agent registered (started); the Instance verified,
 // qualified and warmed up (ready); its drain start under an hour away with no replacement ready, in a one-job row of a
-// 48-minute lease, from its ready on (ending-soon, HBEP-7:547); and the worker-rung restart (failing). Forbidden: a
+// 48-minute lease, from its ready on (ending-soon, HBEP-7, Events and conditions); and the worker-rung restart (failing). Forbidden: a
 // handover, since no replacement was ever ready. What else the run raised is not judged here beyond its form (obscheck.EventProblems holds every typed event
 // to HBEP-8's form). It waits, bounded, for every expected event, then reads the forbidden ones and the form once.
 func (r *liveRun) nowEvents(in v1alpha1.Instance) ObsCheck {

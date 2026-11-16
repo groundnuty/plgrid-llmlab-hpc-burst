@@ -9,9 +9,10 @@ import (
 	"time"
 )
 
-// The router's timeouts against Envoy's defaults, with the real Envoy 1.40.2 (HBEP-5, lines 117-122 and
-// 474-478). The agent sets each of the route's timeout and idle_timeout and the connection manager's
-// stream_idle_timeout to the front's maximum request duration plus 1 h (10,800 s), and Envoy's
+// The router's timeouts against Envoy's defaults, with the real Envoy 1.40.2 (HBEP-5: Open questions, the
+// Envoy candidate default's settings; Test plan, "Beta, the router", Deadlines). The agent sets each of the
+// route's timeout and idle_timeout and the connection manager's stream_idle_timeout to the front's maximum
+// request duration plus 1 h (10,800 s), and Envoy's
 // upstream connections idle out after 50 s. Each test runs the agent's own config, through StartEnvoy,
 // and then a control: Envoy's real default for the setting the agent changes, which the test shows to
 // cut what the agent's config lets through. The controls are the tests' own, never the agent's.

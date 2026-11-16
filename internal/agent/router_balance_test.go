@@ -1,14 +1,15 @@
 package agent_test
 
-// Bounded loads inside an Instance (HBEP-5, Inside an Instance; the science agent's decision on #518):
-// Envoy's ring_hash runs with hash_balance_factor 125. Envoy's bound, as measured on the pinned 1.40.2
-// with two workers, gives each host ceil(ceil((active + 1) × 1.25) / 2) slots, where active counts the
-// cluster's requests in flight, and a host above its slots takes no new request, which moves on round
-// the ring. So with every heavy session hashed to worker-1, sessions 1 to 5 stay on it (5 active: 7
-// slots of the cluster's, 4 of them worker-1's, and 4 is not above 4), and the 6th spills to the idle
-// worker-0 (5 active, 8 and 4 slots, and 5 is above 4). Measured twice, the same both times; the 7th
-// then goes to worker-1 and the 8th to worker-0. Without the bound every session would stay on
-// worker-1, filling it while its sibling idles.
+// No bounded load inside an Instance (HBEP-5, Inside an Instance; the science agent's ruling on #614, which
+// reverses its provisional bound of #518): ring_hash runs with no hash_balance_factor, so a session stays on the
+// worker its hash names, however many sessions that worker carries. With a bound of 125, as measured on the
+// pinned 1.40.2 with two workers, each host got ceil(ceil((active + 1) × 1.25) / 2) slots, where active counts the
+// cluster's requests in flight, and a host above its slots took no new request, which moved on round the
+// ring: with every heavy session hashed to worker-1, sessions 1 to 5 stayed on it and the 6th spilled to the
+// idle worker-0. The same walk sent a request, and its retry's pick, to a dead worker that Envoy still held
+// healthy, which holds no request and so is never over its share: 14 of 4,000 requests got a 503 with the
+// sibling healthy, in 100 waves at a worker's death pinned to 2 CPUs (#614). Without the bound, as the test
+// below shows, six heavy sessions all stay on worker-1.
 
 import (
 	"context"
@@ -108,7 +109,11 @@ func chat(t *testing.T, h *harness, key, s string, tokens int) int {
 	return resp.StatusCode
 }
 
-func TestAHeavySessionPastTheBoundSpillsToTheIdleSibling(t *testing.T) {
+// TestAHeavySessionNeverSpillsToTheIdleSibling: six heavy sessions hashed to worker-1, each sent once Envoy
+// shows the one before it active, all stay on worker-1 and worker-0 shows none. With the bound the 6th spilled
+// (the doc above), so this fails if a bounded load is put back: the guard's refusal of hash_balance_factor and
+// the render's test pin it as a config, and this as the behaviour.
+func TestAHeavySessionNeverSpillsToTheIdleSibling(t *testing.T) {
 	h := newHarness(t, harnessOptions{envoy: testenv.EnvoyBinary(t), baseEnv: []string{"CUDA_VISIBLE_DEVICES=0,1"}})
 	d := workersRouterState(h, 2)
 	d.Instance.Launch.Env = append(d.Instance.Launch.Env, agentapi.EnvVar{Name: "HB_ENGINE_DOUBLE", Value: "token-delay=50ms"})
@@ -128,8 +133,7 @@ func TestAHeavySessionPastTheBoundSpillsToTheIdleSibling(t *testing.T) {
 	// The agent's own probe through the router is quiesced (quiesceRouterProbe), and each read is tied to
 	// the sessions: Envoy's requests since then must number exactly the sessions sent, so the active
 	// requests read are those sessions and nothing else, and a probe can never be read as a spill (#524's
-	// review). The 5th or 6th is allowed for the first spill all the same, the bound's own arithmetic giving
-	// the 6th (the doc above).
+	// review).
 	var wg sync.WaitGroup
 	codes := make([]int, len(s))
 	firstSpill := 0
@@ -147,12 +151,12 @@ func TestAHeavySessionPastTheBoundSpillsToTheIdleSibling(t *testing.T) {
 		if a["worker-0"] > 0 && firstSpill == 0 {
 			firstSpill = i + 1
 		}
+		if a["worker-1"] != i+1 {
+			t.Errorf("after heavy session %d, worker-1 shows %d active, want all %d: a session left the worker its hash names", i+1, a["worker-1"], i+1)
+		}
 	}
-	switch {
-	case firstSpill == 0:
-		t.Errorf("none of %d heavy sessions hashed to worker-1 spilled to the idle worker-0: no bound", len(s))
-	case firstSpill < 5:
-		t.Errorf("the first spill came at heavy session %d; want none before the 5th, under the bound", firstSpill)
+	if firstSpill != 0 {
+		t.Errorf("heavy session %d, hashed to worker-1, went to the idle worker-0: ring_hash runs with a bounded load, and with none every session stays on its hashed worker (#614)", firstSpill)
 	}
 	wg.Wait()
 	for i, c := range codes {
