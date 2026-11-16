@@ -1,7 +1,6 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -15,8 +14,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/wait"
-	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -24,6 +21,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv/crdinstall"
 )
 
 // portBase is issue #69's block of the test host's ports, 29216-29219
@@ -117,22 +115,14 @@ func fail(format string, args ...any) int {
 
 // installProviderCRD applies the committed Provider and PlatformProfile CRDs
 // (the controller refuses a Provider whose profile is not managed) and waits
-// until the API serves both.
+// until each is Established and the API serves its kind (crdinstall; issue #600).
 func installProviderCRD(ctx context.Context, cl client.Client) error {
-	for _, name := range []string{"hpcburst.groundnuty.github.io_providers.yaml", "hpcburst.groundnuty.github.io_platformprofiles.yaml"} {
-		raw, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "crd", name))
-		if err != nil {
-			return err
-		}
-		crd := &apiextensionsv1.CustomResourceDefinition{}
-		if err := utilyaml.NewYAMLOrJSONDecoder(bytes.NewReader(raw), 4096).Decode(crd); err != nil {
-			return fmt.Errorf("decode %s: %w", name, err)
-		}
-		if err := cl.Create(ctx, crd); err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("create %s: %w", crd.Name, err)
-		}
+	dir := filepath.Join("..", "..", "..", "config", "crd")
+	crds, err := crdinstall.ReadCRDs(
+		filepath.Join(dir, "hpcburst.groundnuty.github.io_providers.yaml"),
+		filepath.Join(dir, "hpcburst.groundnuty.github.io_platformprofiles.yaml"))
+	if err != nil {
+		return err
 	}
-	return wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 60*time.Second, true, func(ctx context.Context) (bool, error) {
-		return cl.List(ctx, &v1alpha1.ProviderList{}) == nil && cl.List(ctx, &v1alpha1.PlatformProfileList{}) == nil, nil
-	})
+	return crdinstall.InstallAndWait(ctx, cl, crds)
 }

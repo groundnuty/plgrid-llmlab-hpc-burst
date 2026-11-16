@@ -158,7 +158,7 @@ func TestRigDownPastItsBoundSaysSo(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := startRigHost(t, stack.Binaries{HPCBurst: bin, K3sDir: dir, Repo: dir}, dir, stack.DialHome{Mode: "direct", Addr: "127.0.0.1:1"},
-		os.Environ(), stack.Ports{Base: n - 6, ClientAddr: "127.0.0.1:1", DialHomeListen: "127.0.0.1:1"})
+		os.Environ(), stack.Ports{Base: n - 6, ClientAddr: "127.0.0.1:1", DialHomeListen: "127.0.0.1:1"}, stack.WithoutAPIServer)
 	h.DownBound = 3 * time.Second
 	want := "hpcburst down: signal: killed\nhpcburst did not end within 3s\n"
 	if err := h.DownErr(); err == nil || err.Error() != want {
