@@ -128,7 +128,8 @@ func approvalBy(user, planID string, opUID types.UID, ns string, groups ...strin
 // Who counts: the policy names the approver as a user, a group of the approver's recorded groups, or a
 // ServiceAccount whose user name is system:serviceaccount:<namespace>:<name>.
 func TestWhoAPolicyNames(t *testing.T) {
-	policy := []v1alpha1.Approver{{User: userPerson}, {Group: "operators"}, {ServiceAccount: &v1alpha1.ServiceAccountRef{Namespace: "hpcburst-agents", Name: "agent-a"}}}
+	policy := []v1alpha1.Approver{{User: userPerson}, {Group: "operators"}, {ServiceAccount: &v1alpha1.ServiceAccountRef{Namespace: "hpcburst-agents", Name: "agent-a"}},
+		{ServiceAccount: &v1alpha1.ServiceAccountRef{Namespace: "team-ns", Name: "ci-bot"}}}
 	for _, tc := range []struct {
 		name string
 		by   v1alpha1.ApproverIdentity
@@ -137,6 +138,7 @@ func TestWhoAPolicyNames(t *testing.T) {
 		{"the named user", v1alpha1.ApproverIdentity{Username: userPerson}, true},
 		{"a member of the named group", v1alpha1.ApproverIdentity{Username: "someone", Groups: []string{"staff", "operators"}}, true},
 		{"the named ServiceAccount", v1alpha1.ApproverIdentity{Username: userAgentA}, true},
+		{"a ServiceAccount named with another namespace", v1alpha1.ApproverIdentity{Username: "system:serviceaccount:team-ns:ci-bot"}, true},
 		{"a ServiceAccount of the same name in another namespace", v1alpha1.ApproverIdentity{Username: "system:serviceaccount:other:agent-a"}, false},
 		{"a user whose name is the group's", v1alpha1.ApproverIdentity{Username: "operators"}, false},
 		{"another agent, B", v1alpha1.ApproverIdentity{Username: userAgentB, Groups: []string{"system:serviceaccounts:hpcburst-agents"}}, false},

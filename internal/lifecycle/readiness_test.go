@@ -128,6 +128,8 @@ func TestReadinessAsksForEveryWatchedKind(t *testing.T) {
 	want := []string{
 		"*v1alpha1.ModelDeployment", "*v1alpha1.Allocation", "*v1alpha1.Instance", "*v1alpha1.Provider",
 		"*v1alpha1.PlatformProfile", "*v1.ControllerRevision",
+		// HBEP-10's three kinds, which the Operations step reads (#589, PR 4).
+		"*v1alpha1.Operation", "*v1alpha1.Approval", "*v1alpha1.ApprovalPolicy",
 	}
 	kinds := []client.Object{}
 	for _, w := range lifecycleWatches(nil) {

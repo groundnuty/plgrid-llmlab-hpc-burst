@@ -122,3 +122,30 @@ func TestThePlanIDIsTheHashOfThePlanItSitsOn(t *testing.T) {
 		t.Error("another action keeps the ID")
 	}
 }
+
+// Whether a target needs approval is part of the ID, though no UID, generation or effect moves with it: the same
+// drain of the same Instance, under a retention that keeps its Allocation and under one that releases it early,
+// is two plans, since the second needs an approval the first does not.
+func TestWhetherATargetNeedsApprovalMovesTheID(t *testing.T) {
+	build := func(retention *v1alpha1.RetentionPolicy) *v1alpha1.OperationPlan {
+		// No ApprovalPolicy exists, so a target that needs approval records no policy either: needsApproval is the
+		// only thing that differs between the two plans.
+		f := newOpFixture(t, 2)
+		f.addInstance(instOpts{name: "r1", phase: v1alpha1.InstanceReady, started: true, hardEnd: tp(opHardEnd), retention: retention})
+		f.addInstance(instOpts{name: "r2", phase: v1alpha1.InstanceReady, started: true, hardEnd: tp(opHardEnd.Add(time.Hour)), created: time.Minute})
+		return mustPlan(t, f, opAt)
+	}
+	kept := build(nil)
+	released := build(&v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: durPtr("30m")})
+	for _, p := range []*v1alpha1.OperationPlan{kept, released} {
+		if len(p.Targets) != 2 || p.Targets[1].Effect != v1alpha1.PlanEffectDrainInstance {
+			t.Fatalf("both plans drain r1: %v", targetNames(p))
+		}
+	}
+	if kept.Targets[1].NeedsApproval == released.Targets[1].NeedsApproval {
+		t.Fatalf("the fixture should differ in needsApproval alone: %v and %v", kept.Targets[1].NeedsApproval, released.Targets[1].NeedsApproval)
+	}
+	if kept.ID == released.ID {
+		t.Error("two plans that differ in whether a target needs approval have one ID")
+	}
+}

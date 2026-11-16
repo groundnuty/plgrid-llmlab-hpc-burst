@@ -678,7 +678,7 @@ func (r *readiness) Start(ctx context.Context) error {
 	// Start every kind's informer without waiting, then wait for each of these informers itself:
 	// controller-runtime v0.23.1's cache.WaitForCacheSync waits only for the informers that exist,
 	// so on its own it passes with none of ours started or synced, and it would also wait for
-	// informers the controller does not watch. Starting them all first lets the six sync together.
+	// informers the controller does not watch. Starting them all first lets the nine sync together.
 	var synced []toolscache.InformerSynced
 	for _, k := range r.kinds {
 		inf, ok := r.startInformer(ctx, k)

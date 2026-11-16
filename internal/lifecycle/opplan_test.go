@@ -7,6 +7,7 @@ package lifecycle
 // reworded rule fails here and is noticed.
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -366,5 +367,38 @@ func TestRefusals(t *testing.T) {
 				t.Errorf("refusal %q does not contain %q", refusal, tc.want)
 			}
 		})
+	}
+}
+
+// The mapping of the controller's own effect to the plan's, by hand: a drain is the last ready one when no
+// Instance stays ready.
+func TestTheScaleEffectMapping(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		effect     scaleEffect
+		staysReady bool
+		want       v1alpha1.PlanEffect
+	}{
+		{"a pending Allocation is cancelled", effectCancelPending, true, v1alpha1.PlanEffectCancelPending},
+		{"a starting Instance ends, whoever stays", effectEndKeepAllocation, false, v1alpha1.PlanEffectEndStarting},
+		{"a drain while another stays ready", effectDrain, true, v1alpha1.PlanEffectDrainInstance},
+		{"a drain with none staying ready is the last ready one", effectDrain, false, v1alpha1.PlanEffectDrainLastReady},
+	} {
+		if got := scaleEffectOf(scaleTarget{effect: tc.effect}, tc.staysReady); got != tc.want {
+			t.Errorf("%s: %s, want %s", tc.name, got, tc.want)
+		}
+	}
+}
+
+// A plan larger than the 256 targets an Operation's status holds is refused, with the count, and not written
+// to fail on every pass: 129 pending Instances are 258 targets, an Instance and its Allocation each.
+func TestAPlanTooLargeForTheStatusIsRefused(t *testing.T) {
+	f := newOpFixture(t, 131)
+	for i := 0; i < 130; i++ {
+		f.addInstance(instOpts{name: fmt.Sprintf("p%03d", i), phase: v1alpha1.InstancePending, created: time.Duration(i) * time.Second, submit: tp(opT0.Add(10 * time.Minute))})
+	}
+	plan, refusal := f.plan(scaleOp(1))
+	if plan != nil || !strings.Contains(refusal, "the plan has 258 targets, more than the 256") {
+		t.Errorf("plan %v, refusal %q: want a refusal naming 258 targets", plan, refusal)
 	}
 }

@@ -30,6 +30,10 @@ const (
 // return the target's cause.
 func planCause(scaleTarget) string { return causeLowered }
 
+// maxPlanTargets is the most targets an Operation's status holds (the CRD's maxItems of status.plan.targets): a
+// larger plan is refused, since writing it would fail on every pass.
+const maxPlanTargets = 256
+
 // planRequest is what one planning reads besides the pass.
 type planRequest struct {
 	op *v1alpha1.Operation
@@ -82,6 +86,9 @@ func (p *pass) planOperation(req planRequest) (*v1alpha1.OperationPlan, string) 
 	}
 	if refusal != "" {
 		return nil, refusal
+	}
+	if len(b.targets) > maxPlanTargets {
+		return nil, fmt.Sprintf("the plan has %d targets, more than the %d an Operation's status holds: scale in steps, or release in groups", len(b.targets), maxPlanTargets)
 	}
 	sort.SliceStable(b.targets, func(i, j int) bool { return targetBefore(b.targets[i], b.targets[j]) })
 	plan := &v1alpha1.OperationPlan{
