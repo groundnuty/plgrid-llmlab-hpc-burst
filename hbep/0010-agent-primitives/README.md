@@ -215,6 +215,7 @@ A ValidatingAdmissionPolicy, `hpcburst-capacity-guard`, with `failurePolicy: Fai
 - a higher `spec.instances` (`:311`);
 - a later `spec.endTime`, or its removal (`:341`);
 - an edit of the serving spec, `spec.source.served` (`:304`), which stays present with `spec.source.managed` absent; it rolls out make-before-break (HBEP-3);
+- a change of `spec.hedgeWidth` (HBEP-7, Hedging), either way. Neither direction releases capacity: lowering it applies to later members only and cancels none, and raising it adds hedge members, which reserves capacity and costs grant hours on a started loser kept as a spare. The owner chose that cost over releases ("Keep it, as warm spare", 15 Nov 2026) and allowed reserving without asking ("Can always reserve the slots without my permission") (science-agent ruling on #606, 15 Nov 2026);
 - an edit of the purpose annotation.
 
 Everything else must be unchanged: in metadata, the owner references, the finalizers, the labels and every annotation but the purpose; in the spec, `spec.source` apart from the serving spec, `spec.routing`, `spec.retentionPolicy`, `spec.providers` and every other field. An agent's delete of a ModelDeployment is refused. At create, an agent may set any field: what it creates is the agreed spec.
@@ -582,8 +583,10 @@ The primitives replace www-2027 practices: a shared gate on a common host (slots
 - 2026-11-15: open question 13 decided: the durable log is HBEP-8's, at its beta, and this HBEP's subscriptions over it come at stable (an amendment, PR #588).
 - 2026-11-15: erratum (the science agent's ruling on #589's plan, Q7): ApprovalPolicy names are plain forms that admission checks, in place of a hashed long-value name, which CEL cannot compute.
 - 2026-11-15: a confirm exists only by an update that follows a written plan (for #589).
+- 2026-11-15: the capacity guard's allowlist admits an agent's change of `spec.hedgeWidth` (for #604, #589).
 
 ## Amendments
 
 - **2026-11-15: the durable log is HBEP-8's** (Notes, S8; Open questions 13; Design details; Graduation criteria). An amendment by the science agent's decision of open question 13, in PR #588 beside the amendments this HBEP lists for other HBEPs. The durable log for events and usage is HBEP-8's and comes with HBEP-8's beta, since HBEP-5's beta needs it for usage records. This HBEP's subscriptions over it, with cursors and gap markers, come at stable. Before, this HBEP built the durable log itself, with its subscriptions, at stable.
 - **2026-11-15: no confirm at create** (Operations, Confirm). An amendment by the science agent's ruling on #593's review (#589): the CRD and the owner pin refuse `confirm` at create, the pin requires a written plan on update, and the controller refuses an Operation confirmed without a plan it wrote. Before, the set-once rule, which reads `oldSelf`, ran only on update, so an Operation could be created already confirmed with a precomputed plan ID, and a plan needing no approval would run with no one having seen it.
+- **2026-11-15: agents may set `hedgeWidth`** (The capacity guard). An amendment by the science agent's ruling on #606 (#604, #589). An agent's change of `spec.hedgeWidth`, either way, is on the allowlist: lowering it cancels nothing, and raising it reserves capacity, at a grant-hour cost the owner has accepted. Before, the field didn't exist, and the fail-closed allowlist would have refused it.

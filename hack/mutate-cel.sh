@@ -96,6 +96,9 @@ modeldeployments:$.spec.source.served.flags[]#11|^TestEngineFlagsRefuseEveryPref
 modeldeployments:$.spec.source.served.flags[]#12|^TestMaxModelLenIsAPlainPositiveInteger$
 modeldeployments:$.spec.source.served.flags[]#13|^TestParallelSizesArePlainPositiveIntegers$
 modeldeployments:$.spec.workload.contextTokens#0|^TestContextTokensTypicalIsAtMostLongest$
+modeldeployments:$.status.startOutcomes[]#0|^TestStartOutcomesCountsAgree$
+modeldeployments:$.status.startOutcomes[]#1|^TestStartOutcomesCountsAgree$
+modeldeployments:$.status.startOutcomes[].outcomes[]#0|^TestStartOutcomeReasonOnlyForAFailure$
 operations:$.spec#0|^TestOperationConfirmIsSetOnce$
 operations:$.spec#1|^TestOperationSpecIsImmutable$
 operations:$.spec#2|^TestOperationSpecIsImmutable$

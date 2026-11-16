@@ -11,6 +11,9 @@ func TestNamesForTheLifecycleControllerAndTheFront(t *testing.T) {
 		EventReasonShapesFit:     "ShapesFit",
 		// HBEP-8's Reasons table spells it TunnelOrphaned.
 		EventReasonTunnelOrphaned: "TunnelOrphaned",
+		// HBEP-7, Hedging (beta): the hedge loser's end reason and replaced event's reason, and the hedge's annotation.
+		ReasonHedgeLost:      "HedgeLost",
+		AnnotationHedgeGroup: "hpcburst.groundnuty.github.io/hedge-group",
 	} {
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
