@@ -174,3 +174,45 @@ type SuspendedReference struct {
 	// SuspendedTime is when the second miss suspended it.
 	SuspendedTime metav1.Time `json:"suspendedTime"`
 }
+
+// InstanceGate is the throughput gate's record on one Instance (beta; HBEP-7,
+// The throughput gate). A first miss of a worker records its measurement in
+// Misses and restarts that worker at rung 1; the retry decides. With several
+// workers each worker is judged on its own measurement.
+type InstanceGate struct {
+	// Verdict is the gate's final verdict: GatePassed, GateMissed,
+	// GateSuspended or GateRecordOnly. It is absent while a retry is due.
+	//
+	// +optional
+	// +kubebuilder:validation:Enum=Passed;Missed;Suspended;RecordOnly
+	Verdict string `json:"verdict,omitempty"`
+
+	// ReferenceDate is the matched expected-performance entry's date.
+	//
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}$`
+	ReferenceDate string `json:"referenceDate,omitempty"`
+
+	// Misses are the measurements that missed, oldest first, one per worker
+	// and attempt: at most two a worker, the first and its retry's.
+	//
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=16
+	Misses []GateMiss `json:"misses,omitempty"`
+}
+
+// GateMiss is one measurement that missed the gate's limits.
+type GateMiss struct {
+	// Worker is the worker measured, worker-<i> (WorkerName); worker-0 for an
+	// Instance of one worker.
+	//
+	// +kubebuilder:validation:Pattern=`^worker-[0-9]+$`
+	Worker string `json:"worker"`
+
+	// Throughput is the worker's measurement.
+	Throughput Throughput `json:"throughput"`
+
+	// Time is when the gate judged it.
+	Time metav1.Time `json:"time"`
+}
