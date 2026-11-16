@@ -5,6 +5,8 @@ import (
 	"slices"
 	"time"
 
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -46,43 +48,56 @@ func (p *pass) desiredCount() int {
 }
 
 // keepRoom returns how many non-ready surplus Instances may be left alone on a Provider: k, the deployment's
-// overAllocation, less the deployment's warm Allocations there (Running, hosting no live Instance).
-func (p *pass) keepRoom() func(provider string) int {
-	k := 0
-	if p.md != nil {
-		k = int(p.md.Spec.OverAllocationCount())
+// overAllocation. The deployment's warm Allocations there (Running, hosting no live Instance) are not subtracted: a
+// warm Allocation counts toward k only in the extra's creation bound (PR 4), never in the trim of surplus that
+// already exists. A drained Instance's Allocation turns warm, and counting it here would have a later pass cancel a
+// pending surplus Instance that a lowering left alone, outside any plan's approval and at the cost of its queue age
+// (the science agent's ruling on #635, option B; HBEP-7 amendment #636).
+func (p *pass) keepRoom() int {
+	if p.md == nil {
+		return 0
 	}
-	warm := map[string]int{}
-	for _, a := range p.allocs {
-		if a.DeletionTimestamp.IsZero() && a.Status.AtProvider.Phase == v1alpha1.AllocationRunning && len(p.liveOn(a.Name)) == 0 {
-			warm[a.Labels[v1alpha1.LabelProvider]]++
-		}
+	return int(p.md.Spec.OverAllocationCount())
+}
+
+// frontAdmitsAt is when the front's probe has had its interval to admit an Instance that is ready: its Healthy
+// condition's last transition to True, which becomeReady writes and a restart resets (climb sets Healthy False), plus
+// frontProbeInterval. ok is false while Healthy is not True. It is measured from the transition and not from
+// status.readyTime, which becomeReady writes once and no restart resets: an Instance that was ready before, restarted
+// and re-ranked, would otherwise have its peer drain in the pass it became ready again, before the front routes to it
+// (HBEP-7, How it counts, What step 7 takes, 1).
+func frontAdmitsAt(in *v1alpha1.Instance) (time.Time, bool) {
+	c := apimeta.FindStatusCondition(in.Status.Conditions, v1alpha1.ConditionHealthy)
+	if c == nil || c.Status != metav1.ConditionTrue {
+		return time.Time{}, false
 	}
-	return func(provider string) int { return max(0, k-warm[provider]) }
+	return c.LastTransitionTime.Add(frontProbeInterval), true
 }
 
 // scaleUnit is one hedge that a scale-down takes: its representative, whether it is taken as over-allocation's own
-// trim (non-ready surplus beyond k, or a marked peer), and, for a marked peer, when its drain is due.
+// trim (non-ready surplus beyond k, or a marked peer), and, for a marked peer, when its drain is due: not before
+// notTo, and never while the Instance it made way for is not healthy (waiting).
 type scaleUnit struct {
-	rep    *v1alpha1.Instance
-	trim   bool
-	marked bool
-	notTo  time.Time
+	rep     *v1alpha1.Instance
+	trim    bool
+	marked  bool
+	waiting bool
+	notTo   time.Time
 }
 
 // scaleUnits is what step 7 takes when the deployment keeps desired primaries, the least advanced first.
 //
 // The surplus is every Instance the selection leaves out, the dropped primaries of a lowered count among them. A
-// ready one is taken, which drains it, the nearest hard end first. Of the others, up to keepRoom per Provider are
+// ready one is taken, which drains it, the nearest hard end first. Of the others, up to k per Provider are
 // left alone, taken in one fixed order that does not depend on desired (the selection's: most advanced, then the
 // earlier job start, then the older, then the UID), and the rest are taken: pending ones first, newest first, then
 // started ones. A surplus Instance with a live replacement is never left alone: it goes with its replacement, which
 // is never promoted (the science agent's ruling on #616's plan, Q4). A hedge with several live members is never left
 // alone either: it spans Providers, and k is counted per Provider. A marked peer is taken once the Instance it
-// made way for has been ready for the front's probe interval, and not before.
+// made way for has been healthy for the front's probe interval (frontAdmitsAt), and not before.
 func (p *pass) scaleUnits(desired int) []scaleUnit {
 	_, surplus := selectPrimaries(p.selection(nil), desired)
-	room := p.keepRoom()
+	k := p.keepRoom()
 	byName := map[string]*v1alpha1.Instance{}
 	for _, in := range p.insts {
 		byName[in.Name] = in
@@ -92,7 +107,7 @@ func (p *pass) scaleUnits(desired int) []scaleUnit {
 		if rep.Status.Phase == v1alpha1.InstanceReady || len(p.membersOf(rep)) > 1 || p.replaced(rep) {
 			continue
 		}
-		if prov := rep.Labels[v1alpha1.LabelProvider]; used[prov] < room(prov) {
+		if prov := rep.Labels[v1alpha1.LabelProvider]; used[prov] < k {
 			left[rep] = true
 			used[prov]++
 		}
@@ -105,8 +120,10 @@ func (p *pass) scaleUnits(desired int) []scaleUnit {
 		u := scaleUnit{rep: rep, trim: rep.Status.Phase != v1alpha1.InstanceReady}
 		if markedOut(rep, byName) {
 			u.trim, u.marked = true, true
-			if rt := byName[rep.Annotations[annotationRankedOut]].Status.ReadyTime; rt != nil {
-				u.notTo = rt.Add(frontProbeInterval)
+			if at, ok := frontAdmitsAt(byName[rep.Annotations[annotationRankedOut]]); ok {
+				u.notTo = at
+			} else {
+				u.waiting = true
 			}
 		}
 		out = append(out, u)
@@ -170,6 +187,9 @@ func (p *pass) scaleDownTargets(prim []*v1alpha1.Instance, surplus int) []scaleT
 	}
 	var out []scaleTarget
 	for _, u := range p.scaleUnits(max(now-surplus, 0)) {
+		if u.waiting {
+			continue // the Instance it made way for is not healthy: the drain waits for its next transition
+		}
 		if p.now.Before(u.notTo) {
 			p.at(u.notTo)
 			continue

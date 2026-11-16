@@ -86,6 +86,14 @@ func (p *pass) enterReady(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, rea
 	if !inSelection(surplus, in) || inSelection(chosen, in) {
 		return ready()
 	}
+	// A peer that carries the mark has already lost to the Instance the mark names: it is a candidate that restarted
+	// inside the front's window and re-passed. It never outranks. Were it ranked, a better re-measurement could mark
+	// the Instance that outranked it, and both would be ready and marked, both surplus, both drained, with no primary
+	// left. It ends RankedOut as it was going to, its Allocation kept, which also stops a peer and a candidate from
+	// outranking each other for ever.
+	if name := in.Annotations[annotationRankedOut]; name != "" {
+		return p.rankOut(in, alloc, p.instanceNamed(name))
+	}
 	provider := in.Labels[v1alpha1.LabelProvider]
 	var peers []*v1alpha1.Instance
 	for _, c := range chosen {
@@ -107,8 +115,9 @@ func (p *pass) enterReady(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, rea
 		return p.rankOut(in, alloc, peer)
 	}
 	// The writes go in this order, so the intent is durable before either Instance changes: the peer's mark, the
-	// candidate's becoming ready, then, once the front routes to the candidate, the peer's drain (step 7, through
-	// scaleDownTargets), and its RankedOut event (rankedOutPeer).
+	// candidate's becoming ready, then, once the front's probe has had its interval since the candidate became
+	// healthy (frontAdmitsAt), the peer's drain (step 7, through scaleDownTargets), and its RankedOut event
+	// (rankedOutPeer).
 	if peer.Annotations[annotationRankedOut] != in.Name {
 		if err := p.setMeta(peer, func(n *v1alpha1.Instance) {
 			if n.Annotations == nil {
@@ -122,8 +131,8 @@ func (p *pass) enterReady(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, rea
 	if err := ready(); err != nil {
 		return err
 	}
-	if rt := in.Status.ReadyTime; rt != nil {
-		p.at(rt.Add(frontProbeInterval))
+	if at, ok := frontAdmitsAt(in); ok {
+		p.at(at)
 	}
 	return nil
 }
@@ -137,6 +146,9 @@ func (p *pass) rankOut(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, peer *
 	if peer != nil {
 		related = peer
 		msg = fmt.Sprintf("Instance %s passed its checks on Provider %s and is not faster than Instance %s by more than 10%% in time per output token: it is kept as warm capacity", in.Name, in.Labels[v1alpha1.LabelProvider], peer.Name)
+		if in.Annotations[annotationRankedOut] == peer.Name {
+			msg = fmt.Sprintf("Instance %s passed its checks again on Provider %s after Instance %s outranked it: it is kept as warm capacity", in.Name, in.Labels[v1alpha1.LabelProvider], peer.Name)
+		}
 	}
 	if p.mem.once("ranked-out/" + string(in.UID)) {
 		p.r.Recorder.Event(in, related, eventReplaced, v1alpha1.ReasonRankedOut, msg)

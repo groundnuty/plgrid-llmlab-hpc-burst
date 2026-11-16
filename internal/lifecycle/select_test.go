@@ -33,6 +33,7 @@ func (f *selFx) add(name string, phase v1alpha1.InstancePhase, opts ...selOpt) *
 	in.Labels = map[string]string{v1alpha1.LabelProvider: "prov-a"}
 	a := &v1alpha1.Allocation{}
 	a.Name = in.Spec.AllocationRef.Name
+	a.UID = types.UID("auid-" + name)
 	a.Labels = map[string]string{v1alpha1.LabelProvider: "prov-a"}
 	for _, o := range opts {
 		o(in, a)
@@ -67,8 +68,31 @@ func hardEnd(t time.Time) selOpt {
 	return func(in *v1alpha1.Instance, _ *v1alpha1.Allocation) { e := metav1.NewTime(t); in.Status.LeaseEnd = &e }
 }
 
+// readyAt is when the Instance first became ready: status.readyTime, and its Healthy condition's transition to True,
+// which is what the front's window is measured from (frontAdmitsAt).
 func readyAt(t time.Time) selOpt {
-	return func(in *v1alpha1.Instance, _ *v1alpha1.Allocation) { r := metav1.NewTime(t); in.Status.ReadyTime = &r }
+	return func(in *v1alpha1.Instance, a *v1alpha1.Allocation) {
+		r := metav1.NewTime(t)
+		in.Status.ReadyTime = &r
+		healthyAt(t)(in, a)
+	}
+}
+
+// healthyAt sets the Instance's Healthy condition True, last transitioned at t, as a restart and the next ready leave
+// it, whatever status.readyTime says.
+func healthyAt(t time.Time) selOpt {
+	return func(in *v1alpha1.Instance, _ *v1alpha1.Allocation) {
+		in.Status.Conditions = slices.DeleteFunc(in.Status.Conditions, func(c metav1.Condition) bool { return c.Type == v1alpha1.ConditionHealthy })
+		in.Status.Conditions = append(in.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionHealthy, Status: metav1.ConditionTrue, LastTransitionTime: metav1.NewTime(t)})
+	}
+}
+
+// unhealthy sets the Instance's Healthy condition False.
+func unhealthy() selOpt {
+	return func(in *v1alpha1.Instance, _ *v1alpha1.Allocation) {
+		in.Status.Conditions = slices.DeleteFunc(in.Status.Conditions, func(c metav1.Condition) bool { return c.Type == v1alpha1.ConditionHealthy })
+		in.Status.Conditions = append(in.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionHealthy, Status: metav1.ConditionFalse})
+	}
 }
 
 // passedChecksOpt makes the three conditions True.

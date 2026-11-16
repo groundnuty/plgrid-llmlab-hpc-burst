@@ -103,20 +103,18 @@ func TestScaleDownLeavesUpToKAndNamesTheCause(t *testing.T) {
 		p := f.pass(1, 0)
 		wantTargets(t, "targets", p.scaleDownTargets(p.primaries(), 0), "X:endKeepAllocation:overAllocationTrim")
 	})
-	t.Run("a warm Allocation on the Provider uses the room", func(t *testing.T) {
-		f := newSelFx()
-		f.add("P", v1alpha1.InstanceReady, hardEnd(hoT(12, 10, 0)))
-		f.add("X", v1alpha1.InstancePending, createdAt(hoT(9, 5, 0)))
-		f.warmAlloc("warm-a", "prov-a")
-		p := f.pass(1, 1)
-		wantTargets(t, "targets", p.scaleDownTargets(p.primaries(), 0), "X:cancelPending:overAllocationTrim")
-		// A warm Allocation on another Provider uses none of it.
-		g := newSelFx()
-		g.add("P", v1alpha1.InstanceReady, hardEnd(hoT(12, 10, 0)))
-		g.add("X", v1alpha1.InstancePending, createdAt(hoT(9, 5, 0)))
-		g.warmAlloc("warm-b", "prov-b")
-		q := g.pass(1, 1)
-		wantTargets(t, "another Provider's warm Allocation", q.scaleDownTargets(q.primaries(), 0))
+	t.Run("a warm Allocation does not use the room: it counts toward k only in the extra's creation bound", func(t *testing.T) {
+		// The science agent's ruling on #635, option B: a drained Instance's Allocation turns warm, and counting it
+		// here would cancel a pending surplus Instance that a lowering left alone. Warm on the same Provider, or on
+		// another, X is left alone either way.
+		for _, prov := range []string{"prov-a", "prov-b"} {
+			f := newSelFx()
+			f.add("P", v1alpha1.InstanceReady, hardEnd(hoT(12, 10, 0)))
+			f.add("X", v1alpha1.InstancePending, createdAt(hoT(9, 5, 0)))
+			f.warmAlloc("warm", prov)
+			p := f.pass(1, 1)
+			wantTargets(t, "a warm Allocation on "+prov, p.scaleDownTargets(p.primaries(), 0))
+		}
 	})
 	t.Run("k counts per Provider", func(t *testing.T) {
 		f := newSelFx()
@@ -201,6 +199,32 @@ func TestScaleDownTakesTheReadySurplusAndNamesItsCause(t *testing.T) {
 		p.now = hoT(10, 0, 10)
 		wantTargets(t, "at +10 s", p.scaleDownTargets(prim, 0), "P:drain:overAllocationTrim")
 	})
+	t.Run("the window runs from the candidate's last transition to healthy, not from its first ready time", func(t *testing.T) {
+		// X first became ready at 10:00:00 (status.readyTime) and restarted, re-passed and became ready again, healthy
+		// from 10:20:00. P is marked for it. Measured from readyTime the drain would be due at once, 10:00:10; measured
+		// from the transition it is due at 10:20:10. At 10:20:05 it is not, and a pass is asked for at 10:20:10.
+		f := newSelFx()
+		f.add("P", v1alpha1.InstanceReady, hardEnd(hoT(12, 15, 0)), rankedOutBy("X"))
+		f.add("X", v1alpha1.InstanceReady, hardEnd(hoT(12, 10, 0)), readyAt(hoT(10, 0, 0)), healthyAt(hoT(10, 20, 0)))
+		p := f.pass(1, 1)
+		p.now = hoT(10, 20, 5)
+		prim := p.primaries()
+		sameNames(t, "primaries", prim, "X")
+		wantTargets(t, "at 10:20:05", p.scaleDownTargets(prim, 0))
+		if !p.next.Equal(hoT(10, 20, 10)) {
+			t.Errorf("next pass asked at %v, want 10:20:10", p.next)
+		}
+		p.now = hoT(10, 20, 10)
+		wantTargets(t, "at 10:20:10", p.scaleDownTargets(prim, 0), "P:drain:overAllocationTrim")
+	})
+	t.Run("a marked peer is not drained while the Instance it made way for is not healthy", func(t *testing.T) {
+		f := newSelFx()
+		f.add("P", v1alpha1.InstanceReady, hardEnd(hoT(12, 15, 0)), rankedOutBy("X"))
+		f.add("X", v1alpha1.InstanceReady, hardEnd(hoT(12, 10, 0)), readyAt(hoT(10, 0, 0)), unhealthy())
+		p := f.pass(1, 1)
+		p.now = hoT(11, 0, 0)
+		wantTargets(t, "an hour later, X not healthy", p.scaleDownTargets(p.primaries(), 0))
+	})
 	t.Run("a ready surplus that is no marked peer is lowered, not a trim, whatever the count it is read at", func(t *testing.T) {
 		f := newSelFx()
 		f.add("P1", v1alpha1.InstanceReady, hardEnd(hoT(12, 10, 0)))
@@ -228,15 +252,16 @@ func TestScaleDownCauseIsTheCurrentCountsMembership(t *testing.T) {
 }
 
 // TestScaleDownTargetsAreMonotoneWithASurplus: for a lower desired count, every target of a higher one is a target,
-// by Instance and by Allocation, with k, two Providers and a warm Allocation in play. instances 3, k 1:
+// by Instance and by Allocation, with k, two Providers and a warm Allocation in play (which counts for nothing here:
+// the science agent's ruling on #635, option B). instances 3, k 1:
 //
 //	A: P1 ready 12:10, P2 ready 12:20, P3 started 10:00, X pending created 09:10, and the warm Allocation warm-a
 //	B: Y passed, started 10:05, and Z pending created 09:20
 //
-// The order is P2, P1, Y, P3, X, Z. At 3 the chosen are P2, P1 and Y; A's room is k less the warm Allocation, 0,
-// so P3 and X are taken; B's room is 1, which the fixed order gives to the more advanced Z. At 2 the chosen are P2
-// and P1; Y joins Z in B's competition and, being more advanced, takes the room, so Z is taken too. At 1 P1 drains;
-// at 0 P2 does too. The sets, by hand: {X, P3}; {Z, X, P3}; {Z, X, P3, P1}; {Z, X, P3, P1, P2}.
+// The order is P2, P1, Y, P3, X, Z. At 3 the chosen are P2, P1 and Y; each Provider's room is k, 1: A's goes to the
+// more advanced P3, so X is taken; B's goes to Z, the only surplus there. At 2 the chosen are P2 and P1; Y joins Z in
+// B's competition and, being more advanced, takes the room, so Z is taken too; P3 still holds A's. At 1 P1 drains; at
+// 0 P2 does too. The sets, by hand: {X}; {X, Z}; {X, Z, P1}; {X, Z, P1, P2}.
 func TestScaleDownTargetsAreMonotoneWithASurplus(t *testing.T) {
 	f := newSelFx()
 	f.add("P1", v1alpha1.InstanceReady, hardEnd(hoT(12, 10, 0)))
@@ -250,10 +275,10 @@ func TestScaleDownTargetsAreMonotoneWithASurplus(t *testing.T) {
 	prim := p.primaries()
 	sameNames(t, "primaries", prim, "P2", "P1", "Y")
 	want := [][]string{
-		{"P3", "X"},
-		{"P3", "X", "Z"},
-		{"P3", "X", "Z", "P1"},
-		{"P3", "X", "Z", "P1", "P2"},
+		{"X"},
+		{"X", "Z"},
+		{"X", "Z", "P1"},
+		{"X", "Z", "P1", "P2"},
 	}
 	var prev []string
 	for s := 0; s <= 3; s++ {

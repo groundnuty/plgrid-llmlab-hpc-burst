@@ -71,11 +71,15 @@ func newRkRig(t *testing.T, noWait bool, opts ...rigOption) *rkRig {
 		if !ok {
 			d = h.defaultDelay
 		}
-		tp, ok := h.tpot[alloc]
-		if !ok {
-			tp = 20 * time.Millisecond
+		// The measurement is read at each round, so a row can change what a restarted worker measures (engineOf sets it).
+		round := func(n int32, req agentapi.WarmUpRequest) agentapi.WarmUpRound {
+			tp, ok := h.tpot[alloc]
+			if !ok {
+				tp = 20 * time.Millisecond
+			}
+			return rkWarmUp(tp)(n, req)
 		}
-		return afake.Engine{StartDelay: d, WarmUpRound: rkWarmUp(tp), Health: h.health[alloc]}
+		return afake.Engine{StartDelay: d, WarmUpRound: round, Health: h.health[alloc]}
 	}
 	return h
 }

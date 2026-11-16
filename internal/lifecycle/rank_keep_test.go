@@ -158,12 +158,83 @@ func rkScaleStart(h *rkRig, xScript pfake.Script, p2 pfake.Script, edit func(*v1
 	return p1, p2n, x
 }
 
+// TestAWarmAllocationDoesNotCancelAPendingSurplus: instances 3, with P1 and P2 ready and P3 pending, k 1. P1 starts at
+// 08:20:20 (a wait of 20 min from its submission at 08:00:20) and P2 at 08:10:40 (10 min from 08:00:40), so P2 has the
+// nearer hard end, 20:10:40 against 20:20:20; P3's job pends behind 3 h. At 09:00 instances is lowered to 1: P1, the
+// later hard end, is chosen, P2 drains (lowered), and P3, the one non-ready surplus Instance, is left alone with k = 1.
+// Once P2 has ended and its Allocation carries idle-since it is the deployment's warm Allocation, and for the next 10
+// minutes, 60 passes, none cancels P3: a warm Allocation counts toward k only in the extra's creation bound (PR 4),
+// never in the trim of surplus that exists (the science agent's ruling on #635, option B; HBEP-7 amendment #636).
+func TestAWarmAllocationDoesNotCancelAPendingSurplus(t *testing.T) {
+	h := newRkRig(t, false)
+	h.defaultDelay = rkNoDelay
+	h.batch.Enqueue(pfake.Script{QueueWait: 20 * time.Minute}, pfake.Script{QueueWait: 10 * time.Minute}, pfake.Script{QueueWait: 3 * time.Hour})
+	h.create(rkMD(nil))
+	h.tick(10 * time.Second)
+	h.tick(10 * time.Second) // 08:00:20: P1's job is submitted
+	h.mutateMD(hoMD, func(md *v1alpha1.ModelDeployment) { md.Spec.Instances = 2 })
+	h.tick(10 * time.Second)
+	h.tick(10 * time.Second) // 08:00:40: P2 is created and its job submitted
+	h.mutateMD(hoMD, func(md *v1alpha1.ModelDeployment) { md.Spec.Instances = 3 })
+	h.tick(10 * time.Second)
+	h.tick(10 * time.Second) // 08:01:00: P3 is created and its job submitted
+	ins := h.instances(hoMD)
+	if len(ins) != 3 {
+		t.Fatalf("%d Instances at 08:01:00, want P1, P2 and P3", len(ins))
+	}
+	p1, p2, p3 := ins[0].Name, ins[1].Name, ins[2].Name
+	for _, n := range []string{p1, p2, p3} {
+		h.alloc(n)
+	}
+	h.stepTo(rkAt(1, 0, 0), 10*time.Second, nil)
+	for _, n := range []string{p1, p2} {
+		if h.mustInstance(n).Status.Phase != v1alpha1.InstanceReady {
+			t.Fatalf("%s is %s at 01:00, want ready", n, h.mustInstance(n).Status.Phase)
+		}
+	}
+	if a, b := h.mustInstance(p1).Status.LeaseEnd, h.mustInstance(p2).Status.LeaseEnd; a == nil || b == nil || !b.Before(a) {
+		t.Fatalf("hard ends %v and %v, want P2's the nearer", a, b)
+	}
+	if h.mustInstance(p3).Status.Phase == v1alpha1.InstanceReady || ended(h.mustInstance(p3)) {
+		t.Fatalf("P3 is %s at 01:00, want pending", h.mustInstance(p3).Status.Phase)
+	}
+	h.mutateMD(hoMD, func(md *v1alpha1.ModelDeployment) { md.Spec.Instances = 1 })
+	pass := h.passOf(hoMD)
+	var got []string
+	for _, tg := range pass.scaleDownTargets(pass.primaries(), 0) {
+		got = append(got, tg.instance.Name+":"+string(tg.effect)+":"+string(tg.cause))
+	}
+	if want := []string{p2 + ":drain:lowered"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("targets %v, want %v", got, want)
+	}
+	h.until(10*time.Minute, 10*time.Second, "P2 ended and its Allocation warm", func() bool {
+		_, anchored := h.idleSince(p2)
+		return h.mustInstance(p2).Status.Phase == v1alpha1.InstanceEnded && anchored
+	})
+	if a, _ := h.allocation(h.alloc(p2)); a == nil || a.Status.AtProvider.Phase != v1alpha1.AllocationRunning || len(h.passOf(hoMD).liveOn(a.Name)) != 0 {
+		t.Fatalf("P2's Allocation %+v, want it running with no live Instance: the warm Allocation the row is about", a)
+	}
+	for i := range 60 {
+		h.tick(10 * time.Second)
+		if in := h.mustInstance(p3); ended(in) || !h.kept(p3) {
+			t.Fatalf("pass %d after P2's Allocation turned warm: P3 is %s (%s), Allocation kept %v, want it still pending", i+1, in.Status.Phase, in.Status.EndReason, h.kept(p3))
+		}
+	}
+	if got := h.submissions(); got != 3 {
+		t.Fatalf("%d submissions, want the three from before the lowering", got)
+	}
+	if h.mustInstance(p1).Status.Phase != v1alpha1.InstanceReady {
+		t.Fatal("P1 stopped serving")
+	}
+}
+
 // TestScaleDownWithASurplus: instances 2, P1 and P2 ready with hard ends 12:10 and 12:20 (HBEP clock), and the extra
 // X pending, at 01:00. Targets come from the pass as it reads the spec after the edit; each is "Instance:effect:cause".
 //
-//	instances lowered to 1: P1, the nearest hard end, drains with the lowered cause; X is left alone, pending, in that
-//	  pass. (Once P1 has drained, its Allocation is the deployment's warm Allocation and fills k: X is then beyond k
-//	  and is cancelled, as HBEP-7's bound says; the row looks at the pass of the lowering.)
+//	instances lowered to 1: P1, the nearest hard end, drains with the lowered cause; X is left alone, pending. Once P1
+//	  has drained, its Allocation is the deployment's warm Allocation; it counts toward k only in the extra's creation
+//	  bound, so X stays pending (the science agent's ruling on #635, option B; the row runs 3 min past the lowering, and
+//	  TestAWarmAllocationDoesNotCancelAPendingSurplus runs it with a third primary).
 //	overAllocation lowered to 0: X is cancelled with the trim cause (it is surplus beyond k = 0 at the current count),
 //	  and nothing drains.
 //	X started and not ready, overAllocation lowered to 0: X's Instance ends and its Allocation is kept, the trim cause.
@@ -178,7 +249,7 @@ func TestScaleDownWithASurplus(t *testing.T) {
 		targets func(p1, p2, x string) []string
 		after   func(t *testing.T, h *rkRig, p1, p2, x string)
 	}{
-		{"instances lowered to 1", long, 0, 10 * time.Second, func(md *v1alpha1.ModelDeployment) { md.Spec.Instances = 1 },
+		{"instances lowered to 1", long, 0, 3 * time.Minute, func(md *v1alpha1.ModelDeployment) { md.Spec.Instances = 1 },
 			func(p1, _, _ string) []string { return []string{p1 + ":drain:lowered"} },
 			func(t *testing.T, h *rkRig, p1, p2, x string) {
 				if in := h.mustInstance(p1); in.Status.Phase != v1alpha1.InstanceDraining && in.Status.Phase != v1alpha1.InstanceEnded {
