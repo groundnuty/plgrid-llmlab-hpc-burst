@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -155,21 +156,28 @@ func (n *capNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno
 	return 0
 }
 
-// newCapVolume mounts a volume of the given size and registers its unmount with the test.
-// Register it before the host's clean-up, so that the unmount runs after the host is stopped
-// (clean-ups run last-in first-out). If FUSE cannot be mounted it skips with the exact reason,
-// unless HPCBURST_REQUIRE_INTEGRATION=1, which turns that skip into a failure.
-func newCapVolume(t *testing.T, limit int64) *capVolume {
-	t.Helper()
-	dir, err := os.MkdirTemp("", "cv")
-	if err != nil {
-		t.Fatal(err)
-	}
+// capFsName is the file system name the volume's mount shows in /proc/self/mountinfo (its source), and capFsType the type. The sweep of dead
+// mounts (capfs_sweep_test.go) finds a mount by them, so the mount below and the sweep must agree.
+const (
+	capFsName = "hpcburst-capfs"
+	capFsType = "fuse.capfs"
+)
+
+// capMountError is the failure of the FUSE mount itself, as against a failure to prepare for it.
+type capMountError struct{ err error }
+
+func (e capMountError) Error() string { return e.err.Error() }
+func (e capMountError) Unwrap() error { return e.err }
+
+// mountCapVolume mounts a volume of the given size under dir, which it fills with a backing directory and a mount point, and returns it with its
+// server running in this process. newCapVolume mounts through it, and so does the child process of the sweep's tests, so that both mount exactly
+// alike. autoUnmount asks fusermount3 to unmount when the server dies (see capfs_sweep_test.go for what that does and does not do).
+func mountCapVolume(dir string, limit int64, autoUnmount bool) (*capVolume, error) {
 	v := &capVolume{backing: filepath.Join(dir, "backing"), mount: filepath.Join(dir, "mnt")}
 	v.limit.Store(limit)
 	for _, d := range []string{v.backing, v.mount} {
 		if err := os.Mkdir(d, 0o700); err != nil {
-			t.Fatal(err)
+			return nil, err
 		}
 	}
 	rootData := &fs.LoopbackRoot{Path: v.backing}
@@ -178,21 +186,52 @@ func newCapVolume(t *testing.T, limit int64) *capVolume {
 	}
 	var st syscall.Stat_t
 	if err := syscall.Stat(v.backing, &st); err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	rootData.Dev = uint64(st.Dev)
 	root := rootData.NewNode(rootData, nil, "", &st)
 	rootData.RootNode = root
-	srv, err := fs.Mount(v.mount, root, &fs.Options{MountOptions: fuse.MountOptions{FsName: "hpcburst-capfs", Name: "capfs"}})
+	mo := fuse.MountOptions{FsName: capFsName, Name: "capfs"}
+	if autoUnmount {
+		mo.Options = []string{"auto_unmount"}
+	}
+	srv, err := fs.Mount(v.mount, root, &fs.Options{MountOptions: mo})
+	if err != nil {
+		return nil, capMountError{err}
+	}
+	v.server = srv
+	return v, nil
+}
+
+// newCapVolume mounts a volume of the given size and registers its unmount with the test.
+// Register it before the host's clean-up, so that the unmount runs after the host is stopped
+// (clean-ups run last-in first-out). If FUSE cannot be mounted it skips with the exact reason,
+// unless HPCBURST_REQUIRE_INTEGRATION=1, which turns that skip into a failure.
+//
+// It first sweeps this user's capfs mounts whose server is dead (sweepDeadCapMounts): the server runs
+// in the test's own process, so a test that is killed leaves its mount with no one to serve it, and
+// the clean-up below never runs (issue #648).
+func newCapVolume(t *testing.T, limit int64) *capVolume {
+	t.Helper()
+	sweepDeadCapMounts(realSweepEnv(t.Logf))
+	dir, err := os.MkdirTemp("", "cv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := mountCapVolume(dir, limit, false)
 	if err != nil {
 		os.RemoveAll(dir)
+		var me capMountError
+		if !errors.As(err, &me) {
+			t.Fatal(err)
+		}
 		msg := "the store-full test needs a size-limited file system, and a user-level FUSE mount failed: " + err.Error()
 		if os.Getenv("HPCBURST_REQUIRE_INTEGRATION") == "1" {
 			t.Fatal(msg)
 		}
 		t.Skip("SKIPPED, NOT TESTED: " + msg)
 	}
-	v.server = srv
+	srv := v.server
 	t.Cleanup(func() {
 		deadline := time.Now().Add(30 * time.Second)
 		for {
