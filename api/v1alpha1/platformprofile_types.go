@@ -386,6 +386,18 @@ type PlatformProfileSpec struct {
 	// +kubebuilder:validation:MaxItems=8
 	QOS []QOSProfile `json:"qos,omitempty"`
 
+	// ExpectedPerformance are the throughput gate's references (beta; HBEP-4,
+	// Platform profile schema, Expected performance; HBEP-7, The throughput
+	// gate): each one reference measurement of one serving spec on one class,
+	// keyed on its deployment ID, capacity flags and concurrent shape. With no
+	// entry matching an Instance, the gate records only and never fails one.
+	// At most 32 entries, HBEP-4's proposal.
+	//
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=32
+	ExpectedPerformance []ExpectedPerformance `json:"expectedPerformance,omitempty"`
+
 	// HoldRelease says whether a plain user's sbatch --hold is honoured and
 	// that user can lift it. It is verified per platform. False runs the
 	// fallback mode of spike S4 (HBEP-7, open question 11).
