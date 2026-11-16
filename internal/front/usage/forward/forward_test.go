@@ -442,10 +442,11 @@ func TestAnIdlePollReadsTheFilesWhenTheChannelHasNothingToCarryWhatWasSynced(t *
 // HBEP-8, The durable log, Streams: a message holds up to 256 records and stays under nats-server's
 // maximum payload of 1 MiB. 150 records of 8,000 bytes are 1.2 MB, so they cannot go as one message
 // whatever their count: the forwarder cuts them by size. A record whose line alone is longer than a
-// message (a client's model name can be as long as a request body) is passed over, never stalling the
-// ones after it: the files hold it and the forwarder counts it once, as skipped. It is not lag, so the
-// gauge returns to 0: one client-written line must not keep the front "behind" until a restart. The
-// long line here is in the MIDDLE of the file.
+// message (files written before the front bounded the record's client text, HBEP-5, Usage records,
+// #649, may hold one) is passed over, never stalling the ones after it: the files hold it and the
+// forwarder counts it once, as skipped. It is not lag, so the gauge returns to 0: one client-written
+// line must not keep the front "behind" until a restart. The long line here is in the MIDDLE of the
+// file.
 func TestMessagesStayUnderAMiBAndALongLineInTheMiddleIsSkippedOnceAndIsNotLag(t *testing.T) {
 	dir := t.TempDir()
 	put(t, dir, "usage-2026-11-10.jsonl", lines(t, 1, 150, 8000)+line(t, 151, 2<<20)+lines(t, 152, 153, 100))

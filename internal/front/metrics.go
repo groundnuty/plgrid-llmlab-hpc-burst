@@ -104,7 +104,7 @@ func (m *Metrics) enableUsageLog(f *forward.Forwarder) {
 
 var (
 	descUnlogged = prometheus.NewDesc("hpcburst_usage_unlogged_records", "Usage records the sink has synced that the durable log does not hold yet: the last synced counter less the last counter the log holds. Absent until the forwarder has read the log's last counter and the sink's position is known.", nil, nil)
-	descSkipped  = prometheus.NewDesc("hpcburst_usage_skipped_total", "Usage records the forwarder did not copy to the durable log because their line is longer than a message (a client's model name can be as long as a request body), each counted once. The files hold them. They are not lag, so they are not in hpcburst_usage_unlogged_records.", nil, nil)
+	descSkipped  = prometheus.NewDesc("hpcburst_usage_skipped_total", "Usage records the forwarder did not copy to the durable log because their line is longer than a message (files written before the front bounded the record's client text, HBEP-5, Usage records, #649, may hold one), each counted once. The files hold them. They are not lag, so they are not in hpcburst_usage_unlogged_records.", nil, nil)
 )
 
 // usageLogCollector exports the gauge and the skip counter from one read of the forwarder at each

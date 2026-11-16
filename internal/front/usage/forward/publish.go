@@ -109,9 +109,11 @@ func (b *batcher) flush() error {
 	return err
 }
 
-// skip passes over a record whose line is longer than a message (a client's model name can be as
-// long as a request body): the log gets none of it, the files hold it, the error log names its
-// counter, and it is counted once in Stats.Skipped. It is not lag, so it is not in the gauge: the
+// skip passes over a record whose line is longer than a message, because a usage line can exceed the
+// log's message size: files written before the front bounded the record's client text (HBEP-5, Usage
+// records, #649) may hold one, so the forwarder skips such a line once and counts it. The log gets
+// none of it, the files hold it, the error log names its counter, and it is counted once in
+// Stats.Skipped. It is not lag, so it is not in the gauge: the
 // read position moves past it, so the next look does not read it again, and the record is neither
 // waited for nor re-counted.
 func (f *Forwarder) skip(counter uint64, size int) {

@@ -237,8 +237,8 @@ func TestMessageIDs(t *testing.T) {
 }
 
 // A line longer than the scan's bound is never read whole and never stops the scan (review of PR
-// #644: a client's model name can make a record as long as a request body, and such a line can be
-// the last one of a file). Its counter is read from its first bytes and handed to long with its size,
+// #644: a client's model name can make a record as long as a request body (before #649), and such a
+// line can be the last one of a file). Its counter is read from its first bytes and handed to long with its size,
 // the lines before and after it come out as always, and a file of such lines is read in the memory of
 // its buffer. Every fixture is hand-written: lines of 100 bytes, and one of 2 MiB or of 300 KB.
 func TestScanFilesPassesALongLineAndGoesOn(t *testing.T) {

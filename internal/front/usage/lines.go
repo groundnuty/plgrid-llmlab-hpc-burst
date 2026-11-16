@@ -10,8 +10,8 @@ import (
 )
 
 // maxLastLine bounds how much of a file's last line FileLastCounter reads. A usage record is under a
-// few kilobytes, but one can be as long as a request body (the requested model's name), and a line
-// past this is still read for its counter, from its first bytes.
+// few kilobytes, but one written before the front bounded the record's client text (#649) can be as
+// long as a request body, and a line past this is still read for its counter, from its first bytes.
 const maxLastLine = 1 << 20
 
 // counterPrefix is how every line the sink writes begins: Record's first member is its counter, and
