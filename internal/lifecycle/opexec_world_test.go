@@ -204,14 +204,6 @@ func (w *execWorld) tick() {
 	w.Step()
 }
 
-// ticks runs n rounds.
-func (w *execWorld) ticks(n int) {
-	w.t.Helper()
-	for i := 0; i < n; i++ {
-		w.tick()
-	}
-}
-
 func scaleTo(n int32) v1alpha1.OperationSpec {
 	return v1alpha1.OperationSpec{Action: v1alpha1.OperationActionScale, Scale: &v1alpha1.ScaleParameters{Instances: n}}
 }
@@ -398,5 +390,18 @@ func (w *execWorld) playCrossplane() {
 			}
 		}
 		return err != nil
+	}
+}
+
+// passRanAfterNow returns once a pass of the deployment's key has run after this call, which it shows with a fresh Operation
+// that is never confirmed: it reads Planned only when a pass has planned it. A negative check, that something did NOT
+// happen, needs it: an Approval that counts for nothing makes the controller write nothing, and a fixed count of rounds says
+// nothing about whether the pass that would have acted has run (IMPL-COMMON, timing tests wait on observable state). The
+// sentinel stays unconfirmed, and no check of the test reads it.
+func (w *execWorld) passRanAfterNow(md, sentinel string) {
+	w.t.Helper()
+	w.planOn(md, sentinel, endSpec(false))
+	if got := w.getOp(sentinel); got.Spec.Confirm != nil || got.Status.Phase != v1alpha1.OperationPhasePlanned {
+		w.t.Fatalf("the sentinel %s is %q with confirm %v, want Planned and unconfirmed", sentinel, got.Status.Phase, got.Spec.Confirm)
 	}
 }

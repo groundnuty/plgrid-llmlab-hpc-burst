@@ -45,7 +45,7 @@ func TestAReleaseOnTwoProvidersWhereOneCannotCancelReportsOneDoneAndOneFailedThe
 
 	w.plan("release", releaseSpec(kA, kB))
 	w.confirm("release")
-	w.ticks(2)
+	w.untilPhase("release", v1alpha1.OperationPhaseAwaitingApproval)
 	if got := w.getOp("release").Status.Phase; got != v1alpha1.OperationPhaseAwaitingApproval {
 		t.Fatalf("phase %q: releasing kept Allocations needs an approval", got)
 	}
@@ -131,7 +131,7 @@ func TestAReleaseOnTwoProvidersWhoseCancelsWorkIsDoneAndRaisesNoFailure(t *testi
 	w.playCrossplane()
 	w.plan("release", releaseSpec(kA, kB))
 	w.confirm("release")
-	w.ticks(2)
+	w.untilPhase("release", v1alpha1.OperationPhaseAwaitingApproval)
 	w.approve("release", "person", userPerson)
 	w.untilPhase("release", v1alpha1.OperationPhaseDone)
 	for _, o := range w.getOp("release").Status.Targets {

@@ -56,7 +56,7 @@ func TestAnApprovedOperationTurnsStaleWhenWhatItWasPlannedAgainstChanged(t *test
 			w := newExecWorld(t, tc.queue)
 			w.plan("scale", scaleTo(1))
 			w.confirm("scale")
-			w.ticks(2)
+			w.untilPhase("scale", v1alpha1.OperationPhaseAwaitingApproval)
 			if got := w.getOp("scale").Status.Phase; got != v1alpha1.OperationPhaseAwaitingApproval {
 				t.Fatalf("phase %q before the change, want AwaitingApproval", got)
 			}
@@ -117,7 +117,7 @@ func TestAnApprovedOperationTurnsStaleWhenWhatItWasPlannedAgainstChanged(t *test
 			// An approval added afterwards changes nothing.
 			rv := op.ResourceVersion
 			w.approve("scale", "late", userPerson)
-			w.ticks(3)
+			w.passRanAfterNow(hoMD, "sentinel-late")
 			if got := w.getOp("scale"); got.Status.Phase != v1alpha1.OperationPhaseStale || got.ResourceVersion != rv || len(got.Status.Committed) != 0 {
 				t.Errorf("after a later approval: phase %q, resourceVersion %s -> %s, committed %d: it changes nothing", got.Status.Phase, rv, got.ResourceVersion, len(got.Status.Committed))
 			}
@@ -137,7 +137,7 @@ func TestTwoConfirmedOperationsRunOneAtATimeAndTheSecondTurnsStale(t *testing.T)
 	w.plan("op-2", scaleTo(1))
 	w.confirm("op-1")
 	w.confirm("op-2")
-	w.ticks(2)
+	w.untilPhase("op-2", v1alpha1.OperationPhaseAwaitingApproval)
 	w.approve("op-1", "person", userPerson)
 	w.approve("op-2", "person", userPerson)
 	sbatches := w.submissions()
@@ -195,10 +195,10 @@ func TestCreatingAnOperationTwiceGivesOneOperationAndOneExecution(t *testing.T) 
 		t.Fatalf("%d Operations (%v), want one", len(l.Items), err)
 	}
 	w.confirm("scale")
-	w.ticks(2)
+	w.untilPhase("scale", v1alpha1.OperationPhaseAwaitingApproval)
 	w.approve("scale", "person", userPerson)
 	w.untilPhase("scale", v1alpha1.OperationPhaseDone)
-	w.ticks(5)
+	w.passRanAfterNow(hoMD, "sentinel")
 	if got := w.batch.Count("scancel"); got != 1 {
 		t.Errorf("%d scancel calls, want one: one Operation, one execution", got)
 	}
@@ -228,7 +228,7 @@ func TestTheOwnersSanoExampleEndToEnd(t *testing.T) {
 	// A's Scale on P: the targets are on Provider P, under its policy, which names A.
 	w.plan("scale-p", scaleTo(1))
 	w.confirm("scale-p")
-	w.ticks(2)
+	w.untilPhase("scale-p", v1alpha1.OperationPhaseAwaitingApproval)
 	if got := w.getOp("scale-p").Status.Phase; got != v1alpha1.OperationPhaseAwaitingApproval {
 		t.Fatalf("A's Scale on P is %q, want AwaitingApproval until it is approved", got)
 	}
@@ -241,12 +241,18 @@ func TestTheOwnersSanoExampleEndToEnd(t *testing.T) {
 	// A's Scale on Q: A's own approval, and B's, count under no policy of Q.
 	w.planOn(qMD, "scale-q", scaleTo(1))
 	w.confirm("scale-q")
-	w.ticks(2)
+	w.untilPhase("scale-q", v1alpha1.OperationPhaseAwaitingApproval)
 	w.approve("scale-q", "agent-a", userAgentA)
 	w.approve("scale-q", "agent-b", userAgentB)
-	w.ticks(5)
+	// A pass of Q's key must have run after both Approvals exist, since an Approval that counts for nothing makes the
+	// controller write nothing, and the Scale's own state cannot show it: a fresh Operation on Q that is never confirmed
+	// is the sentinel, and it reads Planned only once such a pass has run.
+	w.passRanAfterNow(qMD, "sentinel-q")
 	if op := w.getOp("scale-q"); op.Status.Phase != v1alpha1.OperationPhaseAwaitingApproval || len(op.Status.Committed) != 0 {
 		t.Fatalf("A's Scale on Q is %q with %d committed targets after A's and B's approvals, want it waiting for the person", op.Status.Phase, len(op.Status.Committed))
+	}
+	if c := condOf(w.getOp("scale-q"), v1alpha1.ConditionExecutable); c == nil || c.Reason != v1alpha1.ReasonAwaitingApproval || !strings.Contains(c.Message, "needs an approval under global") {
+		t.Fatalf("A's Scale on Q: Executable %+v after A's and B's approvals, want it still awaiting approval under the global policy", c)
 	}
 	if got := w.md(qMD).Spec.Instances; got != 2 {
 		t.Errorf("Q's deployment has %d Instances asked, want 2 while it waits", got)

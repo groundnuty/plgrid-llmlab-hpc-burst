@@ -7,6 +7,7 @@ package lifecycle
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -98,7 +99,7 @@ func TestAnApprovedScaleActsOnItsCommittedTargetsAndWritesTheSpec(t *testing.T) 
 		t.Fatalf("the plan is %v, want %v: P and its pending Allocation are what a Scale to one takes", got, want)
 	}
 	w.confirm("scale")
-	w.ticks(2)
+	w.untilPhase("scale", v1alpha1.OperationPhaseAwaitingApproval)
 	if op := w.getOp("scale"); op.Status.Phase != v1alpha1.OperationPhaseAwaitingApproval {
 		t.Fatalf("phase %q: cancelling a pending Allocation needs an approval, which nobody gave", op.Status.Phase)
 	}
@@ -170,7 +171,11 @@ func TestAnApprovedEndShutsDownAndItsCommitPassProvisionsNothing(t *testing.T) {
 	w := newExecWorld(t, 10*time.Hour)
 	w.restart(false)
 	w.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 3 })
-	w.ticks(3)
+	// The deployment asks for a third Instance, and with no front configured the controller says why it cannot make it.
+	w.until(time.Minute, 10*time.Second, "the controller to see the third Instance it cannot make", func() bool {
+		c := w.condition(hoMD, v1alpha1.ConditionDegraded)
+		return c.Status == "True" && strings.Contains(c.Message, v1alpha1.ReasonFrontNotConfigured)
+	})
 
 	planned := w.plan("end", endSpec(false))
 	want := map[string]v1alpha1.PlanEffect{
@@ -184,7 +189,7 @@ func TestAnApprovedEndShutsDownAndItsCommitPassProvisionsNothing(t *testing.T) {
 		t.Fatalf("the plan is %v, want %v", got, want)
 	}
 	w.confirm("end")
-	w.ticks(2)
+	w.untilPhase("end", v1alpha1.OperationPhaseAwaitingApproval)
 	if got := w.getOp("end").Status.Phase; got != v1alpha1.OperationPhaseAwaitingApproval {
 		t.Fatalf("phase %q, want AwaitingApproval", got)
 	}
@@ -250,7 +255,7 @@ func TestAnApprovedEndWithDeleteDeletesTheDeploymentAndWritesItsFinalReport(t *t
 		t.Fatalf("the plan's deployment target is %q, want DeleteDeployment", got)
 	}
 	w.confirm("end")
-	w.ticks(2)
+	w.untilPhase("end", v1alpha1.OperationPhaseAwaitingApproval)
 	w.approve("end", "person", userPerson)
 	w.untilPhase("end", v1alpha1.OperationPhaseDone)
 	op := w.getOp("end")
@@ -306,7 +311,7 @@ func TestAnApprovedReleaseDeletesItsAllocation(t *testing.T) {
 	keptUID := w.allocOrNil(kept).UID
 	w.plan("release", releaseSpec(kept))
 	w.confirm("release")
-	w.ticks(2)
+	w.untilPhase("release", v1alpha1.OperationPhaseAwaitingApproval)
 	if got := w.getOp("release").Status.Phase; got != v1alpha1.OperationPhaseAwaitingApproval {
 		t.Fatalf("phase %q: releasing an Allocation its retention keeps needs an approval", got)
 	}

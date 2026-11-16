@@ -63,7 +63,10 @@ func isDraining(in *v1alpha1.Instance) bool {
 func TestAfterTheLeaseEndsMoveTheControllersOwnSelectionTakesAnotherVictim(t *testing.T) {
 	w, insts, allocs := newThreeWorld(t)
 	w.moveLeaseEnd(allocs[0])
-	w.ticks(2) // the lifecycle controller reads the moved hard end into R1's lease end
+	w.until(time.Minute, 10*time.Second, "the controller to read the moved hard end into R1's lease end", func() bool {
+		l1, l2 := w.instance(insts[0]).Status.LeaseEnd, w.instance(insts[1]).Status.LeaseEnd
+		return l1 != nil && l2 != nil && l1.After(l2.Time)
+	})
 	w.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 2 })
 	w.until(2*time.Minute, 10*time.Second, "a drain", func() bool {
 		for _, n := range insts {
@@ -227,7 +230,7 @@ func TestAnApprovedScaleActsOnNothingBeforeItsSpecWriteLands(t *testing.T) {
 	}, nil)
 	w.plan("scale", scaleTo(1))
 	w.confirm("scale")
-	w.ticks(2)
+	w.untilPhase("scale", v1alpha1.OperationPhaseAwaitingApproval)
 	before, sbatches := w.objectNames(), w.submissions()
 	w.approve("scale", "person", userPerson)
 	for i := 1; i <= 3; i++ {
@@ -378,7 +381,7 @@ func TestAControllerKilledBetweenTheCauseAndTheDeleteReleasesOnce(t *testing.T) 
 	}
 	w.restart(true)
 	w.untilPhase("scale", v1alpha1.OperationPhaseDone)
-	w.ticks(5)
+	w.passRanAfterNow(hoMD, "sentinel")
 	if got := w.batch.Count("scancel"); got != 1 {
 		t.Errorf("%d scancel calls, want one: the Allocation is released once", got)
 	}
