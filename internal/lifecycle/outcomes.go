@@ -107,7 +107,8 @@ func (p *pass) specFault(in *v1alpha1.Instance) (fault, ok bool) {
 
 // recordStartOutcomes adds to the status each class's new start-up outcomes, from the pass's Instances and
 // Allocations: one per Allocation whose UID the class does not keep yet, read from its first Instance. A class keeps
-// its latest MaxStartOutcomes, oldest first, and its counts are set from them (classCounts). An outcome whose
+// its latest MaxStartOutcomes by the time each was decided, oldest first, so an outcome found again after it was
+// trimmed is trimmed again, and its counts are set from them (classCounts). An outcome whose
 // Allocation is gone before a pass recorded it is not recorded; a failure releases its Allocation, but the deletion
 // takes at least the pass that ends the Instance, which records it.
 func (p *pass) recordStartOutcomes(s *v1alpha1.ModelDeploymentStatus) {
@@ -162,6 +163,16 @@ func (p *pass) recordStartOutcomes(s *v1alpha1.ModelDeploymentStatus) {
 	}
 	for i := range s.StartOutcomes {
 		c := &s.StartOutcomes[i]
+		// Kept and new outcomes in one order, by the time each was decided (a tie on the Allocation's UID), before the
+		// oldest go. An outcome trimmed earlier whose Allocation still lives (a serving Instance, a warm spare) is found
+		// again each pass; ordered by its time it sorts to the head and is trimmed again, rather than coming back at
+		// the tail and pushing a newer one out (PR 650's review: the window would drift to Ready entries).
+		sort.SliceStable(c.Outcomes, func(a, b int) bool {
+			if !c.Outcomes[a].Time.Equal(&c.Outcomes[b].Time) {
+				return c.Outcomes[a].Time.Before(&c.Outcomes[b].Time)
+			}
+			return c.Outcomes[a].AllocationUID < c.Outcomes[b].AllocationUID
+		})
 		if over := len(c.Outcomes) - v1alpha1.MaxStartOutcomes; over > 0 {
 			c.Outcomes = append([]v1alpha1.StartOutcome(nil), c.Outcomes[over:]...)
 		}
