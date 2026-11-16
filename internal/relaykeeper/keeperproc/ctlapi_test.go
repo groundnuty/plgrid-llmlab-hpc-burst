@@ -38,6 +38,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv/crdinstall"
 )
 
 var quietOnce sync.Once
@@ -116,6 +117,15 @@ func startAPIServer(t *testing.T) *apiServer {
 	}
 	if len(env.CRDs) != 8 {
 		t.Fatalf("installed %d CRDs, want the 8 of config/crd", len(env.CRDs))
+	}
+	// envtest polls discovery for the CRDs' resources (up to 10 s); this adds that each is Established and that a list of its kind answers,
+	// the one rule for "served" the other rigs use (crdinstall; issue #600).
+	waiter, err := crdinstall.NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := crdinstall.WaitCRDsServed(context.Background(), waiter, env.CRDs, crdinstall.DefaultLimit, crdinstall.DefaultEvery); err != nil {
+		t.Fatal(err)
 	}
 	s, err := providerScheme()
 	if err != nil {

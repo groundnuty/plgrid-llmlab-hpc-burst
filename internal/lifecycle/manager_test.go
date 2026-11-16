@@ -15,7 +15,6 @@ package lifecycle
 // metrics server 127.0.0.1:29302 (#61's block).
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -38,12 +37,10 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/events"
@@ -54,6 +51,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/leaderlock"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv/crdinstall"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/deploymentid"
 )
@@ -75,40 +73,20 @@ const (
 )
 
 func installTestCRDs(ctx context.Context, cfg *rest.Config) error {
-	s, err := Scheme()
+	crds, err := crdinstall.ReadCRDs(filepath.Join("..", "..", "config", "crd"))
 	if err != nil {
 		return err
 	}
-	if err := apiextensionsv1.AddToScheme(s); err != nil {
-		return err
+	if len(crds) != 8 {
+		return fmt.Errorf("want the 8 committed CRDs in config/crd, found %d", len(crds))
 	}
-	cl, err := client.New(cfg, client.Options{Scheme: s})
+	cl, err := crdinstall.NewClient(cfg)
 	if err != nil {
 		return err
 	}
-	files, err := filepath.Glob(filepath.Join("..", "..", "config", "crd", "*.yaml"))
-	if err != nil || len(files) != 8 {
-		return fmt.Errorf("want the 8 committed CRDs in config/crd, found %d (%v)", len(files), err)
-	}
-	var crds []*apiextensionsv1.CustomResourceDefinition
-	for _, f := range files {
-		raw, err := os.ReadFile(f)
-		if err != nil {
-			return err
-		}
-		crd := &apiextensionsv1.CustomResourceDefinition{}
-		if err := utilyaml.NewYAMLOrJSONDecoder(bytes.NewReader(raw), 4096).Decode(crd); err != nil {
-			return fmt.Errorf("%s: %w", f, err)
-		}
-		if err := cl.Create(ctx, crd); err != nil {
-			return fmt.Errorf("create %s: %w", crd.Name, err)
-		}
-		crds = append(crds, crd)
-	}
-	// Creating a CRD returns before the API server serves it: wait until each is
-	// Established and its kind answers, or the rig's first Create can meet "no
-	// matches for kind" (waitCRDsServed).
-	return waitCRDsServed(ctx, cl, crds, 60*time.Second, 200*time.Millisecond)
+	// Creating a CRD returns before the API server serves it: wait until each is Established and its kind answers, or the rig's first
+	// Create can meet "no matches for kind" (#593's CI, PlatformProfile; issue #600).
+	return crdinstall.InstallAndWait(ctx, cl, crds)
 }
 
 func eventually(t *testing.T, limit time.Duration, what string, cond func() (bool, string)) {
