@@ -23,13 +23,17 @@ package main
 // descriptor is received at once with MSG_CMSG_CLOEXEC, so that no process this one starts later (k3s, the CLI, another mount's helper)
 // inherits it and keeps the connection open after the server has gone; go-fuse serves it through its /dev/fd/N mount point. And before
 // the mount, a watcher is started: this test binary again (capfsWatchMain), as this user, holding the read end of a close-on-exec pipe
-// whose write end only this process holds. When this process dies, however it dies (SIGKILL, a crash, a -test.timeout panic, a stopped
-// scope's SIGTERM), the pipe ends, and the watcher unmounts the mount with a plain fusermount3 -u, but only once a bounded stat of it
-// fails with ENOTCONN: a mount that answers, or does not, is left alone. The watcher ignores SIGTERM, SIGINT and SIGHUP, runs in its own
-// session, and gives up after capWatchMax, so it never lingers.
+// whose write end only this process holds. When this process dies (SIGKILL, a crash, a -test.timeout panic, a stopped scope's SIGTERM),
+// the pipe ends once the kernel has closed the process's descriptors, and the watcher unmounts the mount with a plain fusermount3 -u,
+// but only once a bounded stat of it fails with ENOTCONN: a mount that answers, or does not, is left alone. The watcher ignores SIGTERM,
+// SIGINT and SIGHUP, runs in its own session, and gives up after capWatchMax, so it never lingers.
 //
-// What it does not cover: a SIGKILL of the whole scope or cgroup kills the watcher too, and leaves the mount with a dead endpoint. The
-// sweep of dead mounts (capfs_sweep_test.go) removes those, at the next newCapVolume.
+// What it does not cover. A SIGKILL of the whole scope or cgroup kills the watcher too, and leaves the mount with a dead endpoint; the
+// sweep of dead mounts (capfs_sweep_test.go) removes those, at the next newCapVolume. And a process that cannot finish dying: a thread
+// of it waiting on its own mount for a request that its server had already read (a test hung on its volume, then killed) waits on
+// uninterruptibly, so the process's descriptors stay open, the pipe does not end, and the mount stays wedged until its connection is
+// aborted (/sys/fs/fuse/connections/N/abort); every other run's sweep reports it, and none touches it. That happened once, in a loaded
+// run on 16 Nov 2026, from the deadlock that capPollHack now prevents; the poll hack removes that cause, not every hang of that shape.
 
 import (
 	"bytes"

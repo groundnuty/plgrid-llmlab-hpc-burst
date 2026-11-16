@@ -16,7 +16,8 @@ package main
 // dead, and it is what wedged two sessions on 16 Nov 2026. So the sweep never stats a mount without a bound: the stat runs in a goroutine,
 // and one that has not returned in capStatTimeout is abandoned, and the mount reported wedged, with its FUSE connection. A wedged mount is
 // not touched, and newCapVolume fails the test on one, rather than run beside it. The abandoned stat waits in the kernel until the
-// connection ends or this process exits; the sweep does not start a second one on the same mount while it waits.
+// connection ends; when this process exits it gives up if no server has read its request yet, and otherwise holds the exit until the
+// connection ends. The sweep does not start a second one on the same mount while it waits.
 
 import (
 	"errors"
