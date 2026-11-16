@@ -372,6 +372,18 @@ type InstanceStatus struct {
 	// +optional
 	Throughput *Throughput `json:"throughput,omitempty"`
 
+	// Gate is the throughput gate's record of the Instance's first
+	// qualification and its retry (beta; HBEP-7, The throughput gate). It is
+	// absent until the gate first judges. Once Verdict is set, no later
+	// warm-up is gated: a restart's warm-up records its throughput and gates
+	// nothing, so a restart never releases an Allocation for throughput. It is
+	// kept in status, not derived from status.restarts, which are pruned to
+	// restart.window, so a restarted controller judges the retry as the retry
+	// and names the first measurement in a failure's message.
+	//
+	// +optional
+	Gate *InstanceGate `json:"gate,omitempty"`
+
 	// +optional
 	// +listType=map
 	// +listMapKey=type

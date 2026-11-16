@@ -94,6 +94,147 @@ spec:
                 - message: drainWindow must be a positive duration that fits Go's
                     time.Duration (above 0s, at most 2562047h)
                   rule: duration(self) > duration('0s')
+              expectedPerformance:
+                description: |-
+                  ExpectedPerformance are the throughput gate's references (beta; HBEP-4,
+                  Platform profile schema, Expected performance; HBEP-7, The throughput
+                  gate): each one reference measurement of one serving spec on one class,
+                  keyed on its deployment ID, capacity flags and concurrent shape. With no
+                  entry matching an Instance, the gate records only and never fails one.
+                  At most 32 entries, HBEP-4's proposal.
+                items:
+                  description: |-
+                    ExpectedPerformance is one reference measurement of one serving spec on one
+                    class, which the lifecycle controller's throughput gate reads (beta; HBEP-4,
+                    Expected performance). It comes from a reference run apart from serving,
+                    written into the profile by a person: no value is copied from a serving
+                    deployment's Instances, and the controller never derives one.
+                  properties:
+                    capacityFlags:
+                      additionalProperties:
+                        description: FlagValue is a capacity flag's value, as declared.
+                        maxLength: 64
+                        type: string
+                      description: |-
+                        CapacityFlags are the serving spec's declared flags that HBEP-3's table
+                        classes as capacity, with max-num-seqs always present, from the
+                        Instance's launch.maxNumSeqs. They are no deployment-ID inputs but move
+                        the figures, so they are part of the key, compared by value as
+                        verification compares settings (HBEP-7, Instance start).
+                      maxProperties: 16
+                      minProperties: 1
+                      type: object
+                      x-kubernetes-validations:
+                      - message: capacityFlags always holds max-num-seqs (HBEP-4,
+                          Expected performance)
+                        rule: '''max-num-seqs'' in self'
+                      - message: a capacity flag's name is 1 to 64 characters (HBEP-4,
+                          Expected performance)
+                        rule: self.all(k, size(k) >= 1 && size(k) <= 64)
+                    contextTokens:
+                      description: 'ContextTokens is each request''s context: contextTokens.typical.'
+                      format: int32
+                      minimum: 1
+                      type: integer
+                    date:
+                      description: |-
+                        Date is when it was measured, a calendar date (YYYY-MM-DD, UTC). An
+                        entry gates for 90 days from its date, then records only (HBEP-4,
+                        Ageing and refresh).
+                      maxLength: 10
+                      pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}$
+                      type: string
+                      x-kubernetes-validations:
+                      - message: date must be a real calendar date, YYYY-MM-DD
+                        rule: string(timestamp(self + 'T00:00:00Z')).startsWith(self)
+                    deploymentID:
+                      description: |-
+                        DeploymentID is the display form of the deployment ID measured, 12
+                        lowercase hex characters (HBEP-3). It carries the class, the
+                        checkpoint, the engine version, the image digest and every ID-input
+                        flag, so an entry holds for one class and one engine build.
+                      maxLength: 12
+                      minLength: 12
+                      pattern: ^[0-9a-f]{12}$
+                      type: string
+                    method:
+                      description: |-
+                        Method is how it was measured: the run, the launch, how many runs on
+                        how many nodes (HBEP-4, open question 7, the envelope).
+                      maxLength: 1024
+                      minLength: 1
+                      type: string
+                    outputTokens:
+                      description: |-
+                        OutputTokens is each request's output: outputTokens.typical. At least 2,
+                        since time per output token is taken over the tokens after the first.
+                      format: int32
+                      minimum: 2
+                      type: integer
+                    sessions:
+                      description: |-
+                        Sessions is the number of requests one worker ran at once: a worker's
+                        share of the deployment's targetSessions (HBEP-7, Several workers).
+                      format: int32
+                      maximum: 1024
+                      minimum: 1
+                      type: integer
+                    source:
+                      description: |-
+                        Source is where its record is: an issue comment, or the reference
+                        Instance's verification record.
+                      maxLength: 1024
+                      minLength: 1
+                      type: string
+                    timePerOutputToken:
+                      description: |-
+                        TimePerOutputToken is the mean time per output token over the settled
+                        warm-up round's concurrent requests: (total − time to first token) ÷
+                        (output tokens − 1) per request, as the agent's warm-up measures it.
+                      maxLength: 63
+                      pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                      type: string
+                      x-kubernetes-validations:
+                      - message: timePerOutputToken must be a positive duration that
+                          fits Go's time.Duration (above 0s, at most 2562047h)
+                        rule: duration(self) > duration('0s')
+                    timeToFirstToken:
+                      description: |-
+                        TimeToFirstToken is the mean time to the first token over the same
+                        requests.
+                      maxLength: 63
+                      pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                      type: string
+                      x-kubernetes-validations:
+                      - message: timeToFirstToken must be a positive duration that
+                          fits Go's time.Duration (above 0s, at most 2562047h)
+                        rule: duration(self) > duration('0s')
+                    tolerancePercent:
+                      default: 100
+                      description: |-
+                        TolerancePercent is the gate's allowance above each value: a
+                        measurement passes up to the value times (100 + tolerancePercent) ÷ 100,
+                        and time to first token also up to the value plus 100 ms (HBEP-7, The
+                        throughput gate, The limits). Absent is DefaultTolerancePercent.
+                      format: int32
+                      maximum: 400
+                      minimum: 10
+                      type: integer
+                  required:
+                  - capacityFlags
+                  - contextTokens
+                  - date
+                  - deploymentID
+                  - method
+                  - outputTokens
+                  - sessions
+                  - source
+                  - timePerOutputToken
+                  - timeToFirstToken
+                  type: object
+                maxItems: 32
+                type: array
+                x-kubernetes-list-type: atomic
               handoverMargin:
                 default: 30m
                 description: |-
@@ -647,6 +788,13 @@ spec:
                 its limits (HBEP-4, QOS limits)
               rule: '!has(self.partitions) || self.partitions.all(p, !has(p.qos) ||
                 (has(self.qos) && self.qos.exists(q, q.name == p.qos)))'
+            - message: expectedPerformance holds one entry per deploymentID, capacityFlags
+                and shape (sessions, contextTokens, outputTokens) (HBEP-4, Expected
+                performance)
+              rule: '!has(self.expectedPerformance) || self.expectedPerformance.all(a,
+                self.expectedPerformance.exists_one(b, a.deploymentID == b.deploymentID
+                && a.sessions == b.sessions && a.contextTokens == b.contextTokens
+                && a.outputTokens == b.outputTokens && a.capacityFlags == b.capacityFlags))'
           status:
             description: PlatformProfileStatus is the observed state of a PlatformProfile.
             properties:

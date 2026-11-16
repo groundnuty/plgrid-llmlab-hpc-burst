@@ -385,6 +385,89 @@ spec:
                   Allocation is released.
                 format: date-time
                 type: string
+              gate:
+                description: |-
+                  Gate is the throughput gate's record of the Instance's first
+                  qualification and its retry (beta; HBEP-7, The throughput gate). It is
+                  absent until the gate first judges. Once Verdict is set, no later
+                  warm-up is gated: a restart's warm-up records its throughput and gates
+                  nothing, so a restart never releases an Allocation for throughput. It is
+                  kept in status, not derived from status.restarts, which are pruned to
+                  restart.window, so a restarted controller judges the retry as the retry
+                  and names the first measurement in a failure's message.
+                properties:
+                  misses:
+                    description: |-
+                      Misses are the measurements that missed, oldest first, one per worker
+                      and attempt: at most two a worker, the first and its retry's.
+                    items:
+                      description: GateMiss is one measurement that missed the gate's
+                        limits.
+                      properties:
+                        throughput:
+                          description: Throughput is the worker's measurement.
+                          properties:
+                            targetSessions:
+                              description: TargetSessions is the number of concurrent
+                                sessions it was measured at.
+                              format: int32
+                              minimum: 1
+                              type: integer
+                            timePerOutputToken:
+                              description: TimePerOutputToken is the mean time per
+                                output token.
+                              maxLength: 63
+                              pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                              type: string
+                            timeToFirstToken:
+                              description: TimeToFirstToken is the mean time to the
+                                first token.
+                              maxLength: 63
+                              pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                              type: string
+                          required:
+                          - targetSessions
+                          - timePerOutputToken
+                          - timeToFirstToken
+                          type: object
+                        time:
+                          description: Time is when the gate judged it.
+                          format: date-time
+                          type: string
+                        worker:
+                          description: |-
+                            Worker is the worker measured, worker-<i> (WorkerName); worker-0 for an
+                            Instance of one worker.
+                          pattern: ^worker-[0-9]+$
+                          type: string
+                      required:
+                      - throughput
+                      - time
+                      - worker
+                      type: object
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  referenceDate:
+                    description: ReferenceDate is the matched expected-performance
+                      entry's date.
+                    maxLength: 10
+                    pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: referenceDate must be a real calendar date, YYYY-MM-DD
+                      rule: string(timestamp(self + 'T00:00:00Z')).startsWith(self)
+                  verdict:
+                    description: |-
+                      Verdict is the gate's final verdict: GatePassed, GateMissed,
+                      GateSuspended or GateRecordOnly. It is absent while a retry is due.
+                    enum:
+                    - Passed
+                    - Missed
+                    - Suspended
+                    - RecordOnly
+                    type: string
+                type: object
               healthyWorkers:
                 description: |-
                   HealthyWorkers is how many of the Instance's workers its router holds
