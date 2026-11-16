@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"slices"
 	"syscall"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -34,6 +36,11 @@ type ProfileReader struct {
 	UID *int
 	// Home expands "~/" in the credentials file; "" means os.UserHomeDir().
 	Home string
+	// DialHomeMode is the dial-home mode the launcher recorded for this
+	// process (HBEP-6, Dial-home modes); "" when no front is configured. Read
+	// checks it against the Provider's partition (checkDialHomeModes): only
+	// ssh and host-dialed are checked, so "" and direct never are.
+	DialHomeMode agentapi.DialHomeMode
 }
 
 var _ provider.ProfileReader = (*ProfileReader)(nil)
@@ -122,6 +129,7 @@ func (r *ProfileReader) Read(ctx context.Context, name string) (Validated, error
 					v.Profile.Partition = p
 					checkPartition(fmt.Sprintf("spec.partitions[%d]", i), p, bad)
 					checkPartitionQOS(fmt.Sprintf("spec.partitions[%d]", i), s, p, bad)
+					checkDialHomeModes(p, r.DialHomeMode, bad)
 				}
 			}
 			if !found {
@@ -173,6 +181,25 @@ func checkPartitionQOS(field string, s v1alpha1.PlatformProfileSpec, p v1alpha1.
 	}
 	if _, ok := v1alpha1.FindQOS(&s, p.QOS); !ok {
 		bad(field+".qos", "%q is not listed in the profile's qos", p.QOS)
+	}
+}
+
+// checkDialHomeModes checks, in beta, that a partition which lists dialHomeModes
+// lists the launcher's mode, when that mode is ssh or host-dialed (HBEP-4,
+// Core operations, ReadProfile; Platform profile schema, The remaining groups).
+// An absent list is never checked, and neither are direct, which rests on the
+// control-plane host's address and not on the platform, nor an empty mode. The
+// field is named by the partition's name, as the HBEP's check names it.
+func checkDialHomeModes(p v1alpha1.PartitionProfile, mode agentapi.DialHomeMode, bad func(string, string, ...any)) {
+	if len(p.DialHomeModes) == 0 {
+		return
+	}
+	if mode != agentapi.DialHomeSSH && mode != agentapi.DialHomeHostDialed {
+		return
+	}
+	if !slices.Contains(p.DialHomeModes, v1alpha1.ProfileDialHomeMode(mode)) {
+		bad(fmt.Sprintf("spec.partitions[%s].dialHomeModes", p.Name),
+			"lists %v; the launcher's dial-home mode is %s, which the partition is not measured to support", p.DialHomeModes, mode)
 	}
 }
 
