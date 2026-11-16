@@ -15,7 +15,6 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -132,31 +131,18 @@ func TestAgentRealRequests(t *testing.T) {
 		must(t, c.Delete(bg(), tc.obj.DeepCopyObject().(client.Object), client.DryRunAll), "the admin's dry-run delete of "+tc.resource)
 	}
 
-	// A ModelDeployment: delete, update, patch and create are all Forbidden in this PR. The agent role is
-	// read-only until PR 3's admission policies bound each write (the science agent's check of #595: a
-	// create with an owner reference to a short-lived object is a garbage-collector release outside every
-	// guard).
+	// A ModelDeployment: delete stays Forbidden by RBAC, whatever the role's form. Update, patch and create are
+	// allowed by RBAC since PR 3 and bounded by the admission policies, which admission_*_test.go judges with
+	// the agents' real tokens: a create that carries the agent's own owner annotation succeeds here, and
+	// the agent's delete of what it created is still Forbidden.
 	forbidden("delete of a ModelDeployment", a.c.Delete(bg(), md.DeepCopy()), "delete", "modeldeployments")
-	mine := md.DeepCopy()
-	must(t, a.c.Get(bg(), objKey(md), mine), "read the ModelDeployment as an agent")
-	mine.Spec.Instances = 1
-	forbidden("update of a ModelDeployment", a.c.Update(bg(), mine), "update", "modeldeployments")
-	forbidden("patch of a ModelDeployment", a.c.Patch(bg(), md.DeepCopy(), client.RawPatch(types.MergePatchType, []byte(`{"spec":{"instances":1}}`))), "patch", "modeldeployments")
 	unchanged(md)
-	adminMD := md.DeepCopy()
-	must(t, c.Get(bg(), objKey(md), adminMD), "read the ModelDeployment as the admin")
-	adminMD.Spec.Instances = 1
-	must(t, c.Update(bg(), adminMD, client.DryRunAll), "the admin's dry-run update of a ModelDeployment")
 	must(t, c.Delete(bg(), md.DeepCopy(), client.DryRunAll), "the admin's dry-run delete of a ModelDeployment")
-
-	// A real create, not a dry run: if the role let it through, the object would exist.
-	fresh := newModelDeployment(ns, "md-created-by-a")
-	forbidden("create of a ModelDeployment", a.c.Create(bg(), fresh), "create", "modeldeployments")
-	if err := c.Get(bg(), objKey(fresh), &v1alpha1.ModelDeployment{}); !apierrors.IsNotFound(err) {
-		t.Errorf("after the refused create the ModelDeployment exists: %v", err)
-	}
-	// The admin's same create passes (a dry run), so the refusal is the agent's role.
-	must(t, c.Create(bg(), newModelDeployment(ns, "md-created-by-a"), client.DryRunAll), "the admin's dry-run create of a ModelDeployment")
+	mine := newModelDeployment(ns, "md-created-by-a")
+	mine.Annotations = map[string]string{v1alpha1.AnnotationOwner: a.username()}
+	must(t, a.c.Create(bg(), mine), "an agent's create of a ModelDeployment with its own owner annotation")
+	forbidden("delete of a ModelDeployment the agent created", a.c.Delete(bg(), mine.DeepCopy()), "delete", "modeldeployments")
+	unchanged(mine)
 
 	// An agent mints no token: not for another agent's ServiceAccount, not for its own.
 	for _, target := range []string{b.name, a.name} {

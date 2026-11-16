@@ -1,0 +1,32 @@
+# The NARROW form of the ClusterRole hpcburst-agent: read-only (HBEP-10, Identities and roles; issue
+# #589, PR 3). It is the role of config/rbac/agents.yaml without the writes that the admission policies
+# bound (ModelDeployment create, update and patch; modeldeployments/scale; Operation create, update and
+# patch; Approval create).
+#
+# hpcburst up applies this form first, with the policies and before the wait for their enforcement,
+# so that no moment of up lets an agent's role grant a write before the policy that bounds it is
+# enforced. On a restart it narrows a role an earlier up widened, for the length of the wait: the safe
+# direction. It applies the wide form (agents.yaml) last. Where a policy cannot be probed (a CRD of the
+# probe's kind is absent), the role stays this form and up says so.
+# This file is written by hand, never derived from agents.yaml in code. hack/generate.sh does not touch
+# it. The launcher embeds it (config/rbac/embed.go), so what up installs is this file.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hpcburst-agent
+rules:
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["modeldeployments", "allocations", "instances", "operations", "approvals"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["controllerrevisions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch"]
