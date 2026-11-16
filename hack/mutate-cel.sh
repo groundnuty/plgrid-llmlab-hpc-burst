@@ -59,6 +59,7 @@ approvals:$.spec#0|^TestApprovalSpecIsImmutable$
 instances:$.spec#0|^TestInstanceSpecIsImmutable$
 instances:$.spec#1|^TestInstanceIdentityReference$
 instances:$.spec.launch#0|^TestInstanceLaunchCommandAgreesWithMaxNumSeqs$
+instances:$.status.gate.referenceDate#0|^TestDatesAreRealCalendarDates$
 modeldeployments:$.spec#0|^TestServedDeploymentNeedsAWorkload$
 modeldeployments:$.spec.leaseLimit#0|^TestDurationsArePositiveAndFit$
 modeldeployments:$.spec.providers#0|^TestModelDeploymentProvidersAndInstances$
@@ -98,7 +99,12 @@ modeldeployments:$.spec.source.served.flags[]#13|^TestParallelSizesArePlainPosit
 modeldeployments:$.spec.workload.contextTokens#0|^TestContextTokensTypicalIsAtMostLongest$
 modeldeployments:$.status.startOutcomes[]#0|^TestStartOutcomesCountsAgree$
 modeldeployments:$.status.startOutcomes[]#1|^TestStartOutcomesCountsAgree$
+modeldeployments:$.status.startOutcomes[]#2|^TestQualificationFailuresAgree$
 modeldeployments:$.status.startOutcomes[].outcomes[]#0|^TestStartOutcomeReasonOnlyForAFailure$
+modeldeployments:$.status.startOutcomes[].outcomes[].referenceDate#0|^TestDatesAreRealCalendarDates$
+modeldeployments:$.status.suspendedReferences[].capacityFlags#0|^TestCapacityFlagsAlwaysHoldMaxNumSeqs$
+modeldeployments:$.status.suspendedReferences[].capacityFlags#1|^TestCapacityFlagNamesAreOneTo64Characters$
+modeldeployments:$.status.suspendedReferences[].date#0|^TestDatesAreRealCalendarDates$
 operations:$.spec#0|^TestOperationConfirmIsSetOnce$
 operations:$.spec#1|^TestOperationSpecIsImmutable$
 operations:$.spec#2|^TestOperationSpecIsImmutable$
@@ -117,8 +123,14 @@ operations:$.spec.release#2|^TestReleaseSelectorIsNotEmpty$
 operations:$.spec.scale#0|^TestOperationSpecIsImmutable$
 platformprofiles:$.spec#0|^TestPlatformProfileTypedFields$
 platformprofiles:$.spec#1|^TestPartitionQOSIsListed$
+platformprofiles:$.spec#2|^TestExpectedPerformanceKeyIsUnique$
 platformprofiles:$.spec.drainMargin#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.drainWindow#0|^TestDurationsArePositiveAndFit$
+platformprofiles:$.spec.expectedPerformance[].capacityFlags#0|^TestCapacityFlagsAlwaysHoldMaxNumSeqs$
+platformprofiles:$.spec.expectedPerformance[].capacityFlags#1|^TestCapacityFlagNamesAreOneTo64Characters$
+platformprofiles:$.spec.expectedPerformance[].date#0|^TestDatesAreRealCalendarDates$
+platformprofiles:$.spec.expectedPerformance[].timePerOutputToken#0|^TestDurationsArePositiveAndFit$
+platformprofiles:$.spec.expectedPerformance[].timeToFirstToken#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.handoverMargin#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.health.agentTimeout#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.health.errorOnlyWindow#0|^TestDurationsArePositiveAndFit$
