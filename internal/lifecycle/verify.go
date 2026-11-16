@@ -74,7 +74,7 @@ func (p *pass) starting(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av ag
 			return p.failCheck(in, alloc, v1alpha1.ConditionQualified, msg)
 		}
 		if err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
-			cond(&s.Conditions, v1alpha1.ConditionQualified, metav1.ConditionTrue, v1alpha1.ReasonPassed, msg, in.Generation, now)
+			cond(&s.Conditions, v1alpha1.ConditionQualified, metav1.ConditionTrue, v1alpha1.ReasonPassed, qualifiedMessage(in, msg), in.Generation, now)
 		}); err != nil {
 			return err
 		}
@@ -90,10 +90,17 @@ func (p *pass) starting(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av ag
 		case warmUpRunning:
 			return nil
 		}
+		// The throughput gate judges the settled round in the write that records it, before the tunnel,
+		// router and ready gates below. It only records, so none of them waits on it (HBEP-7, The
+		// throughput gate). It is nil once the gate has given its verdict, which no later warm-up changes.
+		gate := p.gateRecord(in, sh, []*v1alpha1.Throughput{tp})
 		if err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
 			cond(&s.Conditions, v1alpha1.ConditionWarmedUp, metav1.ConditionTrue, v1alpha1.ReasonPassed, msg, in.Generation, now)
 			if tp != nil {
 				s.Throughput = tp
+			}
+			if gate != nil {
+				gate(s)
 			}
 		}); err != nil {
 			return err

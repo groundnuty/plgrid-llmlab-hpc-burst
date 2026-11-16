@@ -485,25 +485,9 @@ func tableAfter(lines []string, marker string) (header []string, rows [][]string
 	if start < 0 {
 		return nil, nil, 0, 0, fmt.Errorf("no table within three lines after %q", marker)
 	}
-	header = splitRow(lines[start])
-	if start+1 >= len(lines) {
-		return nil, nil, 0, 0, errors.New("the table ends after its header")
-	}
-	sep := splitRow(lines[start+1])
-	if len(sep) != len(header) {
-		return nil, nil, 0, 0, fmt.Errorf("the separator line has %d cells, the header %d", len(sep), len(header))
-	}
-	for _, c := range sep {
-		if !separatorCell.MatchString(c) {
-			return nil, nil, 0, 0, fmt.Errorf("the separator line has the cell %q", c)
-		}
-	}
-	end = start + 2
-	for ; end < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[end]), "|"); end++ {
-		rows = append(rows, splitRow(lines[end]))
-	}
-	if len(rows) == 0 {
-		return nil, nil, 0, 0, errors.New("the table has no row")
+	header, rows, end, err = readTable(lines, start)
+	if err != nil {
+		return nil, nil, 0, 0, err
 	}
 	// A blank line, then more table rows, is a table that goes on after a break.
 	for i := end; i < len(lines) && strings.TrimSpace(lines[i]) == ""; i++ {
@@ -512,6 +496,34 @@ func tableAfter(lines []string, marker string) (header []string, rows [][]string
 		}
 	}
 	return header, rows, start, end, nil
+}
+
+// readTable reads the Markdown table whose header is lines[start]: the header's
+// cells, the rows under its separator line, and end, the index of the first line
+// after the table. The separator line must have the header's cells, and there
+// must be at least one row. It checks nothing about what follows the table.
+func readTable(lines []string, start int) (header []string, rows [][]string, end int, err error) {
+	header = splitRow(lines[start])
+	if start+1 >= len(lines) {
+		return nil, nil, 0, errors.New("the table ends after its header")
+	}
+	sep := splitRow(lines[start+1])
+	if len(sep) != len(header) {
+		return nil, nil, 0, fmt.Errorf("the separator line has %d cells, the header %d", len(sep), len(header))
+	}
+	for _, c := range sep {
+		if !separatorCell.MatchString(c) {
+			return nil, nil, 0, fmt.Errorf("the separator line has the cell %q", c)
+		}
+	}
+	end = start + 2
+	for ; end < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[end]), "|"); end++ {
+		rows = append(rows, splitRow(lines[end]))
+	}
+	if len(rows) == 0 {
+		return nil, nil, 0, errors.New("the table has no row")
+	}
+	return header, rows, end, nil
 }
 
 func splitRow(line string) []string {
