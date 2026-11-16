@@ -131,11 +131,26 @@ type eventsRecorder struct {
 	controller string
 }
 
-// Events wraps client-go's events.k8s.io recorder: each Eventf call counts the
-// event under controller, with the reason, action and type it hands over, and
-// then hands it over. It panics on a nil recorder or Counter, or an empty
-// controller.
-func Events(inner events.EventRecorder, c *Counter, controller string) events.EventRecorder {
+// IDRecorder is the recorder Events returns: client-go's events.k8s.io
+// recorder, with a second method for an event that carries its own id (beta;
+// HBEP-8, The durable log, Streams, The event's id). A caller that holds only
+// an events.EventRecorder is unaffected.
+type IDRecorder interface {
+	events.EventRecorder
+	// EventfID raises the event as Eventf does and gives it the id. The id is
+	// the Nats-Msg-Id the durable log's publisher will store the event under;
+	// until PR E2 adds that publisher (#625) nothing reads it, so the call
+	// counts the event and hands it over exactly as Eventf does and drops the
+	// id. An event raised through Eventf gets a fresh UUID when the publisher
+	// exists.
+	EventfID(id string, regarding runtime.Object, related runtime.Object, eventtype, reason, action, note string, args ...interface{})
+}
+
+// Events wraps client-go's events.k8s.io recorder: each Eventf or EventfID call
+// counts the event under controller, with the reason, action and type it hands
+// over, and then hands it over. It panics on a nil recorder or Counter, or an
+// empty controller.
+func Events(inner events.EventRecorder, c *Counter, controller string) IDRecorder {
 	if inner == nil {
 		panic("eventcount: Events wraps no recorder")
 	}
@@ -145,6 +160,13 @@ func Events(inner events.EventRecorder, c *Counter, controller string) events.Ev
 
 // Eventf implements events.EventRecorder.
 func (r eventsRecorder) Eventf(regarding runtime.Object, related runtime.Object, eventtype, reason, action, note string, args ...interface{}) {
+	r.c.count(r.controller, reason, action, eventtype)
+	r.inner.Eventf(regarding, related, eventtype, reason, action, note, args...)
+}
+
+// EventfID implements IDRecorder: it counts and hands the event over exactly
+// as Eventf does. The id is unused until PR E2 adds the log's publisher.
+func (r eventsRecorder) EventfID(_ string, regarding runtime.Object, related runtime.Object, eventtype, reason, action, note string, args ...interface{}) {
 	r.c.count(r.controller, reason, action, eventtype)
 	r.inner.Eventf(regarding, related, eventtype, reason, action, note, args...)
 }

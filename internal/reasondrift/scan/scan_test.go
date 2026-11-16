@@ -39,12 +39,26 @@ var controllerWrapper = reasondrift.Wrapper{
 	},
 }
 
-// scanSynthetic scans the synthetic module with its wrapper listed, and the
-// given files added or replaced under internal/lifecycle.
+// typedWrapper is the synthetic module's third wrapper, the stand-in for the
+// Provider controller's typed helper (internal/providerctl, external.typed): its
+// EventfID call passes on its regarding object (parameter 0), its reason
+// (parameter 1) and the type it looked up in allocationEventType under that
+// reason. It has the shape of the entry the real helper's wrapper takes.
+var typedWrapper = reasondrift.Wrapper{
+	Func: "internal/providerctl.external.typed", Why: "hands the event to EventfID",
+	Forwards: []reasondrift.Forward{
+		{Arg: 1, Param: 0},
+		{Arg: 4, Param: 1},
+		{Arg: 5, Map: "internal/providerctl.allocationEventType", Param: 1},
+	},
+}
+
+// scanSynthetic scans the synthetic module with its wrappers listed, and the
+// given files added or replaced.
 func scanSynthetic(t *testing.T, files map[string]string, mutate func(*Options)) *reasondrift.Code {
 	t.Helper()
 	o := Options{
-		Root: syntheticRoot(t), Wrappers: []reasondrift.Wrapper{kubeWrapper, controllerWrapper},
+		Root: syntheticRoot(t), Wrappers: []reasondrift.Wrapper{kubeWrapper, controllerWrapper, typedWrapper},
 		ConditionSetters: []string{"{mod}/internal/managed.SetStatusCondition"},
 	}
 	if len(files) > 0 {
@@ -232,10 +246,12 @@ func TestResolvesEachWayAReasonArrives(t *testing.T) {
 	}
 	// The synthetic module has no other problem, and its wrappers are met,
 	// through the compiler's pointer-receiver wrapper of KubeRecorder.Event too.
+	// (The third is the typed helper of internal/providerctl, which the
+	// fixture adds: its call of EventfID is accepted and no problem.)
 	if n := len(code.Problems) - len(got); n != 0 {
 		t.Errorf("problems %+v, want only the two above", code.Problems)
 	}
-	if want := []string{controllerWrapper.Func, kubeWrapper.Func}; !slices.Equal(code.Wrappers, want) {
+	if want := []string{controllerWrapper.Func, kubeWrapper.Func, typedWrapper.Func}; !slices.Equal(code.Wrappers, want) {
 		t.Errorf("wrappers met %v, want %v", code.Wrappers, want)
 	}
 }
@@ -355,12 +371,13 @@ func TestANamedWrapperIsAcceptedOnlyIfItForwards(t *testing.T) {
 	if got := problemsOf(code, reasondrift.WrapperDoesNotForward); len(got) != 0 {
 		t.Errorf("a forwarding wrapper: wrapper problems %+v, want none", got)
 	}
-	if want := []string{controllerWrapper.Func, kubeWrapper.Func, relay.Func}; !slices.Equal(code.Wrappers, want) {
+	// (typedWrapper, the fixture's third, sorts after the others.)
+	if want := []string{controllerWrapper.Func, kubeWrapper.Func, relay.Func, typedWrapper.Func}; !slices.Equal(code.Wrappers, want) {
 		t.Errorf("wrappers met %v, want %v", code.Wrappers, want)
 	}
 	// A wrapper that is listed and is not in the code is not reported as met.
 	code = scanSynthetic(t, nil, withRelay)
-	if want := []string{controllerWrapper.Func, kubeWrapper.Func}; !slices.Equal(code.Wrappers, want) {
+	if want := []string{controllerWrapper.Func, kubeWrapper.Func, typedWrapper.Func}; !slices.Equal(code.Wrappers, want) {
 		t.Errorf("wrappers met %v, want %v", code.Wrappers, want)
 	}
 	// The call changes the argument: it is no longer parameter 1, unchanged.

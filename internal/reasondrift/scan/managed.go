@@ -139,7 +139,7 @@ func (s *scanner) reachableFrom(dir string) map[*ssa.Function]bool {
 // watched variable (the condition type), through the type-checker's constant
 // values.
 func watchedTypes(p *packages.Package) ([]string, error) {
-	lit, err := packageVar(p, "watched")
+	lit, err := packageVar(p, managedDir, "watched")
 	if err != nil {
 		return nil, err
 	}
@@ -165,37 +165,21 @@ func watchedTypes(p *packages.Package) ([]string, error) {
 	return out, nil
 }
 
+// managedDir is the package directory of the managed catalog controller.
+const managedDir = "internal/managed"
+
 // badActions reads internal/managed's badAction, the map from the reason of a
 // bad state to the type of its event.
 func badActions(p *packages.Package) (map[string]string, error) {
-	lit, err := packageVar(p, "badAction")
-	if err != nil {
-		return nil, err
-	}
-	out := map[string]string{}
-	for _, el := range lit.Elts {
-		kv, ok := el.(*ast.KeyValueExpr)
-		if !ok {
-			return nil, errors.New("an entry of internal/managed's badAction is not a key and a value")
-		}
-		k, kok := constString(p, kv.Key)
-		v, vok := constString(p, kv.Value)
-		if !kok || !vok {
-			return nil, fmt.Errorf("an entry of internal/managed's badAction is not a pair of string constants: %s", p.Fset.Position(kv.Pos()))
-		}
-		out[k] = v
-	}
-	if len(out) == 0 {
-		return nil, errors.New("internal/managed's badAction is empty")
-	}
-	return out, nil
+	return stringMap(p, managedDir, "badAction")
 }
 
-// packageVar finds the composite literal a package-level variable is initialized
-// with.
-func packageVar(p *packages.Package, name string) (*ast.CompositeLit, error) {
+// packageVar finds the composite literal a package-level variable of the package
+// in directory dir (p, as loaded, which is nil when it was not) is initialized
+// with. Its errors name the package and the variable.
+func packageVar(p *packages.Package, dir, name string) (*ast.CompositeLit, error) {
 	if p == nil {
-		return nil, errors.New("internal/managed was not loaded")
+		return nil, fmt.Errorf("%s was not loaded", dir)
 	}
 	for _, f := range p.Syntax {
 		for _, d := range f.Decls {
@@ -214,12 +198,12 @@ func packageVar(p *packages.Package, name string) (*ast.CompositeLit, error) {
 							return lit, nil
 						}
 					}
-					return nil, fmt.Errorf("internal/managed's %s is not initialized with a composite literal", name)
+					return nil, fmt.Errorf("%s's %s is not initialized with a composite literal", dir, name)
 				}
 			}
 		}
 	}
-	return nil, fmt.Errorf("internal/managed declares no %s", name)
+	return nil, fmt.Errorf("%s declares no %s", dir, name)
 }
 
 func constString(p *packages.Package, e ast.Expr) (string, bool) {
