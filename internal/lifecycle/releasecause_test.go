@@ -90,7 +90,7 @@ func TestEveryDeletePathWritesItsCause(t *testing.T) {
 				in := rg.instances("md")[0]
 				return in.Spec.AllocationRef.Name, "Instance " + in.Name + " failed: AllocationFailed"
 			}, 2 * time.Minute},
-		{"scale-down of a pending Instance", []pfake.Script{{}, {QueueWait: 10 * time.Hour}}, func(md *v1alpha1.ModelDeployment) { md.Spec.Instances = 2 },
+		{"scale-down of a pending Instance", []pfake.Script{{}, {QueueWait: 10 * time.Hour}}, func(md *v1alpha1.ModelDeployment) { noOverAllocation(md).Spec.Instances = 2 },
 			func(t *testing.T, rg *rig) (string, string) {
 				rg.until(5*time.Minute, 10*time.Second, "one ready", func() bool { return rg.readyCount("md") == 1 })
 				var pending v1alpha1.Instance
