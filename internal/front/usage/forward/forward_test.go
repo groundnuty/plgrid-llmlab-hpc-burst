@@ -107,8 +107,15 @@ func TestKilledMidBatchTheLogStillEndsWithEachCounterOnce(t *testing.T) {
 	d := nodetest.NewDir(t, logPorts, bigCaps)
 	var victim atomic.Pointer[nodetest.Proc]
 	var published atomic.Int64
+	// armed is closed once the test has recorded the log and seen its READY line. The forwarder
+	// connects as soon as the log listens, so without it the hook could count and kill before the
+	// test's Ready, which then reads the killed log as one that never started (CI on #644: the kill
+	// at publish 15 landed within Ready's 20 ms poll after the READY line). The hook waits on it, so
+	// the kill always lands after Ready, mid-catch-up, and once: the count only grows.
+	armed := make(chan struct{})
 	h := startHost(t, d, t.TempDir(), func(o *Options) { o.MaxLines = 25 }, func(f *Forwarder) {
 		f.beforePublish = func(first, last uint64) {
+			<-armed
 			switch published.Add(1) {
 			case int64(k):
 				// The kill races this publish: the message may be stored and acknowledged, stored and
@@ -130,6 +137,7 @@ func TestKilledMidBatchTheLogStillEndsWithEachCounterOnce(t *testing.T) {
 	p := d.Start(t)
 	victim.Store(p)
 	p.Ready()
+	close(armed)
 	p.WaitKilled() // the hook killed it, mid-catch-up
 	if got := published.Load(); got < int64(k) || got > int64(k)+1 {
 		t.Fatalf("%d publishes were attempted when the log was killed, want %d or %d of 60: the kill did not land mid-batch", got, k, k+1)
