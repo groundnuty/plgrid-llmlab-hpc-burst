@@ -267,7 +267,7 @@ func TestReviewScaleDownReleasesOnlyAnAllocationThatNeverStarted(t *testing.T) {
 		return afake.Engine{StartDelay: 30 * time.Minute} // the next stays starting
 	}
 	rg.batch.Enqueue(pfake.Script{}, pfake.Script{QueueWait: 2 * time.Minute}, pfake.Script{QueueWait: 10 * time.Hour})
-	md := mdSpec(hoMD)
+	md := noOverAllocation(mdSpec(hoMD))
 	md.Spec.Instances = 3
 	rg.create(md)
 	var serving, starting, waiting *v1alpha1.Instance

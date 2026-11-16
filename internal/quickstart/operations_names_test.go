@@ -155,13 +155,16 @@ var notCodeNames = map[string]string{
 	"KillWait":       "a Slurm setting",
 	"MessageTimeout": "a Slurm setting",
 	"Lease":          "a Kubernetes kind",
-	"Warning":        "a Kubernetes event type",
-	"MISSING":        "a build state hpcburst status prints",
-	"UNREADABLE":     "a build state hpcburst status prints",
-	"WRONG":          "a build state hpcburst status prints",
-	"MISMATCH":       "a build state hpcburst status prints",
-	"KiB":            "a unit hpcburst status prints",
-	"MiB":            "a unit hpcburst status prints",
+	// The kind of an admission policy: the API server's refusal by one names it ("ValidatingAdmissionPolicy
+	// 'hpcburst-capacity-guard' ... denied request"), and the guide quotes that wording.
+	"ValidatingAdmissionPolicy": "a Kubernetes kind",
+	"Warning":                   "a Kubernetes event type",
+	"MISSING":                   "a build state hpcburst status prints",
+	"UNREADABLE":                "a build state hpcburst status prints",
+	"WRONG":                     "a build state hpcburst status prints",
+	"MISMATCH":                  "a build state hpcburst status prints",
+	"KiB":                       "a unit hpcburst status prints",
+	"MiB":                       "a unit hpcburst status prints",
 }
 
 // degradedRanking is HBEP-7's ranking of the Degraded reasons (Events and conditions, The ranking),
