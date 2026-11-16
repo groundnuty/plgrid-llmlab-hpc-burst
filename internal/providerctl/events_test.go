@@ -388,3 +388,26 @@ func TestDeletingARunningAllocationRaisesJobEndedOnce(t *testing.T) {
 	}
 	checkNoJobID(t, e, id)
 }
+
+// The note of an Allocation refused for an invalid profile names the invalid
+// fields and never their messages: a message can carry a value of the Provider's
+// settings, such as its account, and the note goes to the durable log.
+func TestTheInvalidProfileNoteNamesFieldsOnly(t *testing.T) {
+	err := &provider.InvalidProfileError{Provider: "example", Fields: []provider.FieldError{
+		{Field: "provider.spec.account", Message: `"example-account-a1" contains a character that is not allowed`},
+		{Field: "provider.spec.credentialsRef.file", Message: "/home/example-user/creds: no such file"},
+	}}
+	got := invalidProfileNote(fmt.Errorf("make the profile: %w", err))
+	want := "the Provider's profile or settings are invalid at provider.spec.account, provider.spec.credentialsRef.file"
+	if got != want {
+		t.Errorf("note %q, want %q", got, want)
+	}
+	for _, leak := range []string{"example-account-a1", "/home/example-user", "no such file"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("note %q carries %q", got, leak)
+		}
+	}
+	if got := invalidProfileNote(fmt.Errorf("some other refusal")); got != "the Provider's profile or settings are invalid" {
+		t.Errorf("note %q for an error that is no InvalidProfileError", got)
+	}
+}

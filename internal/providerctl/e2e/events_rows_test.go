@@ -382,5 +382,19 @@ func TestAMovedHardEndRaisesHardEndNearAgain(t *testing.T) {
 	if n := r.count(key); n != 2 {
 		t.Fatalf("HardEndNear handed over %v times an hour before the new hard end, want 2", n)
 	}
-	r.waitEvents(a, want{"ending-soon", "HardEndNear"})
+	// The API holds both: the first names the old hard end, the second the moved
+	// one. The status write between the two changed the Allocation, so the
+	// recorder does not merge them.
+	evs := r.waitEvents(a, want{"ending-soon", "HardEndNear"})
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) && len(notesOf(evs, "HardEndNear")) < 2 {
+		time.Sleep(100 * time.Millisecond)
+		evs = r.apiEvents(a)
+	}
+	notes := strings.Join(notesOf(evs, "HardEndNear"), "\n")
+	for _, end := range []time.Time{hardEnd, moved} {
+		if want := end.UTC().Truncate(time.Second).Format(time.RFC3339); !strings.Contains(notes, want) {
+			t.Errorf("the API's HardEndNear notes %q do not name the hard end %s", notes, want)
+		}
+	}
 }
