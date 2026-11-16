@@ -89,6 +89,7 @@ func (p *pass) startingWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation
 	// Warm-up gates ready: each worker's warm-up is done for its verification generation, the agent having
 	// stopped its rounds once the desired state stopped asking.
 	var tps []*v1alpha1.Throughput
+	var ws []gateWorker
 	for _, w := range names {
 		c := workerResults(ir, in, w)
 		if c == nil || c.WarmUp == nil || !c.WarmUp.Done {
@@ -96,12 +97,23 @@ func (p *pass) startingWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation
 		}
 		_, _, tp := judgeWarmUp(c.WarmUp, share)
 		tps = append(tps, tp)
+		ws = append(ws, gateWorker{name: w, tp: tp, warm: c.WarmUp, record: workerEntry(in, w).Record})
 	}
-	// The throughput gate judges each worker's own measurement, never the mean written below, and only
-	// records (HBEP-7, The throughput gate; Several workers). Until it has given a verdict it judges
-	// again on a worker's later warm-up; the same measurements write nothing twice.
-	if gate := p.gateRecord(in, sh, tps); gate != nil {
-		if err := p.setStatus(in, gate); err != nil {
+	// The throughput gate judges each worker's own measurement, never the mean written below (HBEP-7, The
+	// throughput gate; Several workers). A worker's first miss restarts that worker alone, which warms up and
+	// is judged again with the others; a second miss of any worker fails the Instance. It gives no work once
+	// it has given its verdict.
+	work, err := p.gateJudge(in, sh, ws)
+	if err != nil {
+		return err
+	}
+	switch {
+	case work.fail != nil:
+		return p.failGate(in, alloc, work.fail)
+	case work.restart != nil:
+		return p.restartForGate(in, alloc, work.restart, st)
+	case work.record != nil:
+		if err := p.setStatus(in, work.record); err != nil {
 			return err
 		}
 	}

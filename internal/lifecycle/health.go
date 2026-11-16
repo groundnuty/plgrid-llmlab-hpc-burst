@@ -175,9 +175,24 @@ func (p *pass) restartWorker(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, 
 	return p.climb(in, alloc, signal, "", w, st, detail...)
 }
 
+// forceWorker is the force of a restart that takes worker's rung whatever it has spent: never the whole
+// Instance's rung, never RestartLoop. The throughput gate's retry takes it (HBEP-7, The throughput gate: its
+// restart is forced at the worker rung), so that a miss is always measured a second time. Unlike a failed rehash's
+// forced whole-Instance rung it is still spaced by restart.backoff, and it is recorded in status.restarts like any
+// other restart, so it counts for the signals after it.
+const forceWorker = "forced-worker"
+
 // climb is restart, whose worker rung is worker's. Its attempts are worker's own restarts, and the
 // whole-Instance rung's are the Instance's; with one worker, worker-0's are every worker restart.
 func (p *pass) climb(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal, force, worker string, st settings, detail ...string) error {
+	return p.climbWith(in, alloc, signal, force, worker, st, nil, detail...)
+}
+
+// climbWith is climb with also: a change to the Instance's status that is made in the very write that records the
+// restart, and only when the restart is made (a restart held back by restart.backoff writes nothing). The gate
+// records its first miss through it: a miss recorded apart from its restart would leave a window in which the same
+// measurement is judged as the retry.
+func (p *pass) climbWith(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal, force, worker string, st settings, also func(*v1alpha1.InstanceStatus), detail ...string) error {
 	msg := signal
 	if len(detail) > 0 && detail[0] != "" {
 		msg = detail[0]
@@ -203,7 +218,7 @@ func (p *pass) climb(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal, 
 			last = r.Time.Time
 		}
 	}
-	if !last.IsZero() && force == "" {
+	if !last.IsZero() && (force == "" || force == forceWorker) {
 		if next := last.Add(st.restartBackoff); p.now.Before(next) {
 			p.at(next)
 			return nil
@@ -214,6 +229,8 @@ func (p *pass) climb(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal, 
 	// Instance) starts the ladder there; a rung that is spent climbs on.
 	part := ""
 	switch {
+	case force == forceWorker:
+		part = worker // never climbs: the rung's attempts spent within the window do not matter
 	case force != v1alpha1.PartInstance && workerTries < st.attemptsPerRung:
 		part = worker
 	case instTries < st.attemptsPerRung:
@@ -262,6 +279,9 @@ func (p *pass) climb(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal, 
 			}
 		}
 		cond(&s.Conditions, v1alpha1.ConditionHealthy, metav1.ConditionFalse, signal, msg, in.Generation, now)
+		if also != nil {
+			also(s)
+		}
 	}); err != nil {
 		return err
 	}
