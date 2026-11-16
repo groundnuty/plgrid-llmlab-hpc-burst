@@ -10,6 +10,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -42,11 +43,53 @@ func TestLifecycleManagerReleasesItsLeaseOnEveryStop(t *testing.T) {
 	defer cancel()
 	cfg, cl := leaseControlPlane(t, ctx)
 	creds, builds := t.TempDir(), t.TempDir()
+	// The manager NewManager builds holds the removal controller of finished Operations (opttl.go) beside the lifecycle
+	// controller, so every one of these rounds starts and stops it too: it is the 200-round stop test that IMPL-COMMON
+	// (Controller work queues) asks of a new controller. Round 0 shows that it runs, with an Operation that finished
+	// eight days ago, which it deletes, and one that finished an hour ago, which it leaves.
+	old, young := seedFinishedOperations(t, ctx, cl)
 	for round := 0; round < stopRounds && !t.Failed(); round++ {
+		var during func()
+		if round == 0 {
+			during = func() { removalRuns(t, ctx, cl, old, young) }
+		}
 		stopRound(t, ctx, cl, round, round%2 == 1, Options{
 			CredentialsDir: creds, AgentBuildsDir: builds, LeaderElection: true,
 			Checkpoints: &stubSource{}, Registry: prometheus.NewRegistry(),
-		}, cfg, stopLimit)
+		}, cfg, stopLimit, during)
+	}
+}
+
+// seedFinishedOperations creates two Done Operations, one finished eight days ago and one an hour ago, and returns their keys.
+func seedFinishedOperations(t *testing.T, ctx context.Context, cl client.Client) (old, young client.ObjectKey) {
+	t.Helper()
+	mk := func(name string, ago time.Duration) client.ObjectKey {
+		op := &v1alpha1.Operation{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha1.ControllerNamespace}, Spec: v1alpha1.OperationSpec{
+			Action: v1alpha1.OperationActionEnd, ModelDeploymentRef: v1alpha1.ObjectReference{Name: "md"}, Owner: "example-owner"}}
+		if err := cl.Create(ctx, op); err != nil {
+			t.Fatalf("create Operation %s: %v", name, err)
+		}
+		finished := metav1.NewTime(time.Now().Add(-ago))
+		op.Status.Phase, op.Status.FinishedAt = v1alpha1.OperationPhaseDone, &finished
+		if err := cl.Status().Update(ctx, op); err != nil {
+			t.Fatalf("finish Operation %s: %v", name, err)
+		}
+		return client.ObjectKeyFromObject(op)
+	}
+	return mk("finished-8d-ago", 8*24*time.Hour), mk("finished-1h-ago", time.Hour)
+}
+
+// removalRuns waits until the removal controller has deleted the old Operation, and checks that the young one stays.
+func removalRuns(t *testing.T, ctx context.Context, cl client.Client, old, young client.ObjectKey) {
+	t.Helper()
+	eventually(t, time.Minute, "the removal controller deletes the Operation that finished eight days ago", func() (bool, string) {
+		var op v1alpha1.Operation
+		err := cl.Get(ctx, old, &op)
+		return apierrors.IsNotFound(err), fmt.Sprintf("still there: %v", err)
+	})
+	var op v1alpha1.Operation
+	if err := cl.Get(ctx, young, &op); err != nil {
+		t.Errorf("the Operation that finished an hour ago: %v, want it kept", err)
 	}
 }
 
@@ -88,7 +131,7 @@ func leaseControlPlane(t *testing.T, ctx context.Context) (*rest.Config, client.
 // against the control plane at cfg, with the elector's release read failing
 // when faulted. Its deferred stop runs on every path and waits once, bounded,
 // for the manager.
-func stopRound(t *testing.T, ctx context.Context, cl client.Client, round int, faulted bool, o Options, cfg *rest.Config, stopLimit time.Duration) {
+func stopRound(t *testing.T, ctx context.Context, cl client.Client, round int, faulted bool, o Options, cfg *rest.Config, stopLimit time.Duration, during func()) {
 	t.Helper()
 	f := leasefault.New(v1alpha1.ControllerNamespace, v1alpha1.LeaseLifecycle)
 	if faulted {
@@ -128,6 +171,9 @@ func stopRound(t *testing.T, ctx context.Context, cl client.Client, round int, f
 		}
 		return holder != "", "no holder"
 	})
+	if during != nil {
+		during()
+	}
 	stop()
 	stopped = true
 	select {
