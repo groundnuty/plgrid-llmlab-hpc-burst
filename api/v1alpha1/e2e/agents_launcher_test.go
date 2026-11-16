@@ -11,8 +11,15 @@ package e2e
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -331,6 +338,19 @@ func TestIdentityStatus(t *testing.T) {
 	}
 	must(t, clientcmd.WriteToFile(*kcCA, badCAPath), "corrupt the kubeconfig's CA")
 
+	// agent-ca2: a certificate authority that is a certificate, and not this server's. The client builds, the
+	// request fails at the TLS handshake (an answer that is not a 401), and that too is this identity's state.
+	otherCA, _ := issue("agent-ca2")
+	otherCAPath := filepath.Join(dir, otherCA+".kubeconfig")
+	kcOther, err := clientcmd.LoadFromFile(otherCAPath)
+	must(t, err, "read the kubeconfig to give it another CA")
+	for _, cl := range kcOther.Clusters {
+		cl.CertificateAuthority = ""
+		cl.InsecureSkipTLSVerify = false
+		cl.CertificateAuthorityData = selfSignedCA(t)
+	}
+	must(t, clientcmd.WriteToFile(*kcOther, otherCAPath), "give the kubeconfig another CA")
+
 	var states []launcher.IdentityState
 	eventually(t, 60*time.Second, "the deleted ServiceAccount's token to be rejected", func() (bool, error) {
 		var err error
@@ -361,6 +381,11 @@ func TestIdentityStatus(t *testing.T) {
 		t.Errorf("the identity whose kubeconfig has a corrupt CA: %+v, want not valid, with a detail that starts 'unreadable: '", g)
 	} else {
 		t.Logf("the corrupt CA is reported as %q", g.Detail)
+	}
+	if g := byName[otherCA]; g.Valid || !strings.HasPrefix(g.Detail, "unreadable: ") || !strings.Contains(g.Detail, "x509") {
+		t.Errorf("the identity whose request fails at the TLS handshake: %+v, want not valid, 'unreadable: ' with the x509 failure", g)
+	} else {
+		t.Logf("the wrong CA is reported as %q", g.Detail)
 	}
 	if g := byName[nofile]; g.Valid || g.Kubeconfig != "" || !strings.Contains(g.Detail, "no kubeconfig file") {
 		t.Errorf("the ServiceAccount with no file: %+v, want not valid, no kubeconfig and a detail saying so", g)
@@ -403,4 +428,19 @@ func TestIdentityStatus(t *testing.T) {
 	if states, err := launcher.CheckIdentities(bg(), &dead, dir, ports); err == nil {
 		t.Errorf("CheckIdentities with no API server: %v, want an error", states)
 	}
+}
+
+// selfSignedCA returns the PEM of a certificate authority that no server of this suite presents.
+func selfSignedCA(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	must(t, err, "generate a key")
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "example-unrelated-ca"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	must(t, err, "create the certificate")
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
