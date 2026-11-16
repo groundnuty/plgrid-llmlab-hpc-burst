@@ -658,8 +658,8 @@ func fullOperationStatus() v1alpha1.OperationStatus {
 		Phase:              v1alpha1.OperationPhasePartlyFailed,
 		ObservedGeneration: 1,
 		Conditions: []metav1.Condition{{
-			Type: v1alpha1.ConditionExecutable, Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonExecutionNotBuilt,
-			Message: "the controller plans Operations and does not execute them yet", LastTransitionTime: observed,
+			Type: v1alpha1.ConditionExecutable, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonExecuting,
+			Message: "1 of 1 committed targets failed and are retried with backoff", LastTransitionTime: observed,
 		}},
 		Plan: &v1alpha1.OperationPlan{
 			ID: opPlanID, ObservedAt: observed,

@@ -138,10 +138,9 @@ const (
 // Operation condition types and reasons (HBEP-10, Operations, Approval and
 // execution). The lifecycle controller writes them (HBEP-11, Controllers).
 const (
-	// ConditionExecutable says whether the Operation can run now. It is false
-	// with ReasonExecutionNotBuilt in the releases that plan Operations and do
-	// not execute them yet (HBEP-10, Graduation, beta step 1, built in stages:
-	// the kinds, the guard, planning, then execution).
+	// ConditionExecutable says whether the Operation can run now: true once its plan is committed and while its targets are
+	// carried out (ReasonExecuting), false while it waits for its owner, an approval or another Operation, and once it
+	// is finished (HBEP-10, Operations, Approval and execution).
 	ConditionExecutable = "Executable"
 
 	// ConditionSpecWritten is true once the spec change a committed Operation commits to (Scale's count, End's end time
@@ -155,9 +154,6 @@ const (
 	// Approval policy).
 	ConditionNoApprovalPolicy = "NoApprovalPolicy"
 
-	// ReasonExecutionNotBuilt is the reason of Executable=False in the releases
-	// that plan Operations and do not execute them.
-	ReasonExecutionNotBuilt = "ExecutionNotBuilt"
 	// ReasonNotConfirmed is the reason of Executable=False while a plan waits for its owner's confirm
 	// (phase Planned).
 	ReasonNotConfirmed = "NotConfirmed"
