@@ -554,3 +554,83 @@ func TestAPassedOverProviderRecordsNothing(t *testing.T) {
 		t.Fatalf("growth recorded Degraded reasons %+v", p.degraded)
 	}
 }
+
+// TestAnExtraGetsNoMember (#616; agreed with k616): a deployment of two Instances on A and B makes R and M on A at
+// 08:00:00, M pending 10 h. Its count is lowered to 1 before R's job starts at 08:00:10, so R is chosen and M is
+// surplus, left alone within overAllocation's k of 1. A then holds R's wait, so M's hedge time is at its submission,
+// 08:00:10: without the filter it would get a member on B at once. It gets none through 08:10:00, and M stays live.
+func TestAnExtraGetsNoMember(t *testing.T) {
+	h := newHedgeRig(t)
+	h.batch.Enqueue(pfake.Script{}, pfake.Script{QueueWait: 10 * time.Hour})
+	h.Step()
+	md := mdSpec(hoMD)
+	onBoth(md)
+	md.Spec.Instances = 2
+	h.create(md)
+	h.Step() // 08:00:00: R and M on A
+	onA := h.onProvider(hoMD, rigProvider)
+	if len(onA) != 2 {
+		t.Fatalf("%d Instances on A at 08:00:00, want R and M", len(onA))
+	}
+	h.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 1 })
+	var m string
+	stepUntilClock(h.rig, hoT(8, 10, 0), 10*time.Second, func() {
+		if n := len(h.onProvider(hoMD, hedgeB)); n != 0 {
+			t.Fatalf("at %s B has %d of the deployment's Instances: a surplus Instance's hedge grew", h.clock.Now().Format(time.TimeOnly), n)
+		}
+	})
+	for _, in := range h.onProvider(hoMD, rigProvider) {
+		if a, ok := h.allocation(in.Spec.AllocationRef.Name); ok && a.Status.AtProvider.StartTime == nil {
+			m = in.Name
+		}
+	}
+	if m == "" {
+		t.Fatal("no pending surplus Instance left on A at 08:10:00: the fixture has no extra, so the test proves nothing")
+	}
+}
+
+// TestASurplusHedgeGetsNoNewMember (#616; agreed with k616): hedgeWidth 3, and A, B and C allowed. A deployment of two
+// makes R and M1 on A at 08:00:00, M1 pending 10 h; as R's job starts at 08:00:10, M1's hedge gets M2 on B (pending 10
+// h). Its count is then lowered to 1, so R is chosen and M1's hedge is surplus, and the clock is moved to 08:30:10, past
+// M2's hedge time, 08:30:00 (C has no wait), with no pass in between. A pass's growth adds no third member on C.
+//
+// On main a surplus hedge of two never reaches growth: step 7, which runs first, takes it whole (#635's scaleUnits).
+// So growth is called on its own here, on the pass's state: the filter's contract, for when #616 keeps such a hedge.
+func TestASurplusHedgeGetsNoNewMember(t *testing.T) {
+	h := newHedgeRig(t)
+	h.addProvider("example-c", "gpu-c", 4*time.Hour, nil, nil)
+	h.batch.Enqueue(pfake.Script{}, pfake.Script{QueueWait: 10 * time.Hour})
+	h.b.batch.Enqueue(pfake.Script{QueueWait: 10 * time.Hour})
+	h.Step()
+	md := mdSpec(hoMD)
+	md.Spec.Providers.Names = []string{rigProvider, hedgeB, "example-c"}
+	md.Spec.Instances = 2
+	md.Spec.HedgeWidth = ptrTo(int32(3))
+	h.create(md)
+	h.Step() // 08:00:00
+	h.clock.Advance(10 * time.Second)
+	h.Step() // 08:00:10: R's job starts; M1's hedge gets M2 on B
+	onB := h.onProvider(hoMD, hedgeB)
+	if len(onB) != 1 || onB[0].Annotations[v1alpha1.AnnotationHedgeGroup] == "" {
+		t.Fatalf("B has %+v at 08:00:10, want M1's hedge member: the fixture has no hedge of two, so the test proves nothing", onB)
+	}
+	m1, m2 := onB[0].Annotations[v1alpha1.AnnotationHedgeGroup], onB[0].Name
+	h.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 1 })
+	h.clock.Advance(30 * time.Minute) // 08:30:10, no pass between
+	p := h.passOf(hoMD)
+	chosen := p.primaries()
+	if len(chosen) != 1 || hedgeKey(chosen[0]) == m1 {
+		t.Fatalf("the chosen primaries are %v, want R alone: M1's hedge must be surplus, or the test proves nothing", names(chosen))
+	}
+	if err := p.growHedges(); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(h.onProvider(hoMD, "example-c")); n != 0 {
+		t.Fatalf("C has %d of the deployment's Instances: growth added a member to a surplus hedge", n)
+	}
+	for _, n := range []string{m1, m2} {
+		if in := h.instancesByName()[n]; in == nil || ended(in) {
+			t.Fatalf("member %s of the surplus hedge is gone or ended: growth must not touch it", n)
+		}
+	}
+}

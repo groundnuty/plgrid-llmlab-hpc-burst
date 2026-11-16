@@ -142,8 +142,21 @@ func (p *pass) growHedges() error {
 		return nil
 	}
 	width := int(p.md.Spec.HedgeWidthCount())
+	// Only a need grows: a chosen primary's hedge, and a chosen primary's replacement hedge (selectPrimaries, through
+	// primaries). A surplus Instance's hedge, an extra's or a primary's own made surplus, keeps its members and gets
+	// no new one: the need it was for is met (#616; #635's Fable review, agreed with k616).
+	needs := map[string]bool{}
+	for _, c := range p.primaries() {
+		needs[hedgeKey(c)] = true
+		for _, r := range p.replacementMembers(c) {
+			needs[hedgeKey(r)] = true
+		}
+	}
 	var errs []error
 	for _, g := range groupHedges(p.insts, func(in *v1alpha1.Instance) bool { return countable(in) && !p.stale[in.UID] }) {
+		if !needs[g.key] {
+			continue
+		}
 		if len(g.members) >= width || hedgeWinner(g.members) != nil || p.hedgeFrozen(g) {
 			continue
 		}
