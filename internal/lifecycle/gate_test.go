@@ -71,6 +71,8 @@ func TestLaunchCapacityFlagsFromHandWrittenCommands(t *testing.T) {
 			gateFlags("max-num-seqs", "16", "gpu-memory-utilization", "0.8")},
 		{"max-num-seqs is launch.maxNumSeqs, not the command's", []string{"--max-num-seqs=32"}, 16,
 			gateFlags("max-num-seqs", "16")},
+		{"max-num-seqs is there when the command has none", []string{"--dtype=bfloat16"}, 16,
+			gateFlags("max-num-seqs", "16")},
 		{"a spelling with an underscore is the dashed name", []string{"--gpu_memory_utilization=0.7", "--max-num-seqs=16"}, 16,
 			gateFlags("max-num-seqs", "16", "gpu-memory-utilization", "0.7")},
 	} {
