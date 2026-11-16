@@ -16,7 +16,8 @@ import (
 //   - the listener is a mode-0600 Unix socket in the job's private directory, never a TCP port, and
 //     the admin likewise, allowing exactly /clusters?format=json (Q3), with no admin runtime layer;
 //   - the route's timeout and idle_timeout and the connection manager's stream_idle_timeout are each
-//     EnvoyRouterTimeout, 10,800 s, which the launch guard checks (Q7, as corrected);
+//     EnvoyRouterTimeout, 10,800 s, which the launch guard checks (Q7, as corrected), above Envoy
+//     1.40.2's 15 s default route timeout: known issue KI-0003 (register/known-issues.yaml);
 //   - the circuit breakers' three thresholds are Envoy's field maximum (Q8), since the front's cap
 //     governs and an overflow 503 would count toward the Instance's pause;
 //   - the router filter suppresses the x-envoy-* headers Envoy would add, so the workers see only
