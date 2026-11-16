@@ -245,6 +245,10 @@ func (v *capVolume) unmount(d time.Duration) error {
 		if err = capUnmount(v.mount, capUnmountTimeout); err == nil || time.Now().After(deadline) {
 			break
 		}
+		if !capListed(v.mount) {
+			err = nil // unmounted meanwhile, by someone else
+			break
+		}
 		time.Sleep(200 * time.Millisecond)
 	}
 	if err != nil {

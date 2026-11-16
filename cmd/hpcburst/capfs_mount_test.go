@@ -290,15 +290,22 @@ func startCapWatcher(point, logPath string, env ...string) (*capWatcher, error) 
 }
 
 // release ends the watcher's wait and waits at most d for it to exit. Release it only after the mount is unmounted: a watcher released
-// while the server still serves leaves the mount alone, but the mount is then unwatched.
+// while the server still serves leaves the mount alone, but the mount is then unwatched. A watcher that does not exit in time (its pipe
+// held open elsewhere, so it never sees the end) is killed, so that it does not wait out capWatchMax; it is this process's child, not
+// yet reaped, so its pid is still its own.
 func (cw *capWatcher) release(d time.Duration) error {
 	cw.pipe.Close()
 	select {
 	case <-cw.done:
 		return nil
 	case <-time.After(d):
-		return fmt.Errorf("the watcher of %s did not exit within %s of its pipe closing", cw.point, d)
 	}
+	_ = cw.cmd.Process.Kill()
+	select {
+	case <-cw.done:
+	case <-time.After(capUnmountTimeout):
+	}
+	return fmt.Errorf("the watcher of %s did not exit within %s of its pipe closing, and was killed", cw.point, d)
 }
 
 // capfsWatchMain is the watcher: it waits for its stdin to end, which happens when the process that started it is gone, then unmounts

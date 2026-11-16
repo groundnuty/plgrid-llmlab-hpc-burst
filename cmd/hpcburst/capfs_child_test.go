@@ -633,8 +633,9 @@ func startTestWatcher(t *testing.T, env ...string) (*capWatcher, string) {
 	return w, logPath
 }
 
-// The watcher's pipe ends only when this process lets go of it, or dies: its write end is close-on-exec, so a process started later
-// (k3s, the CLI) holds no end of it, which would keep the watcher waiting after this process has gone.
+// The watcher's pipe ends only when this process lets go of it, or dies: its write end is close-on-exec, so neither the watcher itself
+// (which would then wait on its own write end for good, as fusermount3 did on go-fuse's socket) nor a process started later (k3s, the
+// CLI) holds it; the watcher holds the read end, as its stdin, and nothing else of the pipe.
 func TestTheWatchersPipeReachesNoOtherProcess(t *testing.T) {
 	w, logPath := startTestWatcher(t)
 	fd := fileFd(t, w.pipe)
@@ -646,12 +647,24 @@ func TestTheWatchersPipeReachesNoOtherProcess(t *testing.T) {
 	if err := unix.Fstat(fd, &st); err != nil {
 		t.Fatal(err)
 	}
+	pipe := fmt.Sprintf("pipe:[%d]", st.Ino)
+	dir := fmt.Sprintf("/proc/%d/fd", w.cmd.Process.Pid) // its child, not yet reaped, so the pid is still the watcher's
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		target, err := os.Readlink(filepath.Join(dir, e.Name()))
+		if err == nil && target == pipe && e.Name() != "0" {
+			t.Errorf("the watcher holds its own pipe as fd %s, besides its stdin: it would never see the pipe end", e.Name())
+		}
+	}
 	for n, target := range capHelperFds(t) {
-		if target == fmt.Sprintf("pipe:[%d]", st.Ino) {
+		if target == pipe {
 			t.Errorf("a process started after the watcher holds its pipe as fd %s", n)
 		}
 	}
-	if err := w.release(capWatchTimeout); err != nil {
+	if err := w.release(capChildBound); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(logPath); !strings.Contains(string(b), "is not mounted: nothing to do") {
