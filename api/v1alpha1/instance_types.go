@@ -366,8 +366,12 @@ type InstanceStatus struct {
 	Agent *AgentRegistration `json:"agent,omitempty"`
 
 	// Throughput is the last warm-up round's time per output token and time to
-	// first token at the target sessions (HBEP-7, Instance start). In alpha it
-	// is recorded and gates nothing (HBEP-7, open question 12).
+	// first token at the target sessions (HBEP-7, Instance start). It is
+	// recorded after every warm-up. In beta the throughput gate judges each
+	// worker's own measurement against the platform profile's expected
+	// performance on the Instance's first qualification and on its retry after
+	// a miss, and a later warm-up only updates this field and gates nothing
+	// (Gate; HBEP-7, The throughput gate).
 	//
 	// +optional
 	Throughput *Throughput `json:"throughput,omitempty"`
@@ -498,7 +502,11 @@ type InstanceRestart struct {
 	Time metav1.Time `json:"time"`
 
 	// Signal is the malfunction signal that caused it: ReasonProbeFailing,
-	// ReasonErrorsOnly, ReasonNoProgress or ReasonPartExited.
+	// ReasonErrorsOnly, ReasonNoProgress or ReasonPartExited, or
+	// ThroughputMissed, the throughput gate's first miss of a worker, which
+	// restarts that worker at the worker rung, forced: it never climbs to the
+	// whole-Instance rung and never ends in RestartLoop, so the miss is always
+	// measured a second time (beta; HBEP-7, The throughput gate).
 	//
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=64
