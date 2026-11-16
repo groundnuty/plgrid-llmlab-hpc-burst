@@ -18,17 +18,21 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
 
-// The causes of a scale-down target: what made the controller's own selection take it.
+// The causes of a scale-down target: what made the controller's own selection take it (scaleCause).
 const (
-	causeLowered        = "lowered"
-	causeOverAllocation = "overAllocationTrim"
+	causeLowered        = string(scaleLowered)
+	causeOverAllocation = string(scaleOverAllocationTrim)
 )
 
-// planCause is the cause of a scale target, read through this one function. #635 (#616, PR 3) adds
-// scaleTarget.cause, where absent reads as lowered; until it merges, no target carries a cause, so every
-// target is a lowered one and goes through the approval table. The merge that brings #635 makes this
-// return the target's cause.
-func planCause(scaleTarget) string { return causeLowered }
+// planCause is the cause of a scale target, read through this one function: the typed cause #635 (#616, PR 3)
+// gives scaleTarget, where an absent cause reads as lowered. It is read on the Scale(N) path only, from the
+// planner's own call with a surplus (scale), never from step 7's call.
+func planCause(t scaleTarget) string {
+	if t.cause == "" {
+		return causeLowered
+	}
+	return string(t.cause)
+}
 
 // maxPlanTargets is the most targets an Operation's status holds (the CRD's maxItems of status.plan.targets): a
 // larger plan is refused, since writing it would fail on every pass.
@@ -62,8 +66,8 @@ func (p *pass) planOperation(req planRequest) (*v1alpha1.OperationPlan, string) 
 		return nil, fmt.Sprintf("ModelDeployment %s does not exist", p.key)
 	case !md.DeletionTimestamp.IsZero():
 		return nil, fmt.Sprintf("ModelDeployment %s is being deleted", p.key)
-	case md.Spec.Source.Managed != nil:
-		return nil, fmt.Sprintf("ModelDeployment %s has a managed source: the lifecycle controller provisions nothing for it, so there is nothing to scale, end or release", p.key)
+	case md.Spec.Source.Managed != nil && req.op.Spec.Action != v1alpha1.OperationActionEnd:
+		return nil, fmt.Sprintf("ModelDeployment %s has a managed source: the lifecycle controller provisions nothing for it, so there is nothing to scale or release; only an End is planned", p.key)
 	}
 	b := &planBuilder{p: p, req: req}
 	var refusal string
@@ -75,6 +79,10 @@ func (p *pass) planOperation(req planRequest) (*v1alpha1.OperationPlan, string) 
 		refusal = b.scale(spec.Scale.Instances)
 	case v1alpha1.OperationActionEnd:
 		del := spec.End != nil && spec.End.Delete
+		if md.Spec.Source.Managed != nil {
+			b.managedEnd(del)
+			break
+		}
 		b.shutdown(shutdownPlan{endsNow: !del, deleted: del, deployment: true})
 	case v1alpha1.OperationActionRelease:
 		if spec.Release == nil {
@@ -114,8 +122,12 @@ func (b *planBuilder) scale(n int32) string {
 	p := b.p
 	prim := p.primaries()
 	// The cause is read on this path only, from this call: step 7's own call can label a target
-	// overAllocationTrim after a person lowered the count directly.
+	// overAllocationTrim after a person lowered the count directly. The selection asks for a later pass
+	// (p.at) while a marked peer waits for the front's probe; a plan asks for none, so that wake-up is
+	// dropped here (step 7's own call makes it).
+	next := p.next
 	victims := p.scaleDownTargets(prim, max(len(prim)-int(n), 0))
+	p.next = next
 	taken := map[types.UID]bool{}
 	for _, t := range victims {
 		taken[t.instance.UID] = true
@@ -249,6 +261,23 @@ func (b *planBuilder) shutdown(s shutdownPlan) {
 		Kind: v1alpha1.TargetKindModelDeployment, Name: md.Name, UID: md.UID, Generation: md.Generation,
 		Effect: effect, ApprovalRule: rule,
 	})
+}
+
+// managedEnd plans the End of a managed-source ModelDeployment: ONE target, the deployment itself, since the
+// lifecycle controller provisions nothing for it and it holds no Instance or Allocation. HBEP-10 lets an agent
+// end any deployment through an Operation, and the capacity guard leaves it no other way. Whether it needs
+// approval is managedEndNeedsApproval's, the one place that says; its cost is the note noCapacityHeld, so the
+// actor sees what ending it does.
+func (b *planBuilder) managedEnd(del bool) {
+	md := b.p.md
+	effect := v1alpha1.PlanEffectSetEndTime
+	if del {
+		effect = v1alpha1.PlanEffectDeleteDeployment
+	}
+	t := b.target(v1alpha1.TargetKindModelDeployment, md.Name, md.UID, md.Generation, nil, effect, managedEndNeedsApproval, ruleManagedEnd)
+	at := metav1.NewTime(b.req.at)
+	t.Cost = &v1alpha1.ReleaseCost{GPUHoursLeft: &v1alpha1.GPUHoursFigure{Unknown: noCapacityHeld, ObservedAt: &at}}
+	b.targets = append(b.targets, t)
 }
 
 // allocationDead reports whether the Allocation's job is over, or nothing can reach it: the controller

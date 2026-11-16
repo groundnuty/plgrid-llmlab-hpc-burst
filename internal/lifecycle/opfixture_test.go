@@ -39,10 +39,12 @@ type opFixture struct {
 }
 
 // newOpFixture is a served ModelDeployment of n Instances (generation 3) and one Provider, sano, whose
-// class is H100 on x86_64.
+// class is H100 on x86_64. Its over-allocation is 0, so no surplus Instance is left alone and a Scale takes
+// every one it names; the fixtures of over-allocation's trim set k themselves (overAllocation).
 func newOpFixture(t *testing.T, n int32) *opFixture {
 	md := &v1alpha1.ModelDeployment{ObjectMeta: metav1.ObjectMeta{Name: opMD, Namespace: opNS, UID: "uid-md", Generation: 3}}
 	md.Spec.Instances = n
+	md.Spec.OverAllocation = new(int32)
 	md.Spec.Source.Served = &v1alpha1.ServingSpec{}
 	f := &opFixture{t: t, md: md, allocs: map[string]*v1alpha1.Allocation{}, pvs: map[string]*providerView{}}
 	f.addProvider("sano")
@@ -75,6 +77,10 @@ type instOpts struct {
 	provider  string
 	// submit is a pending Allocation's submit time; nil is unknown.
 	submit *time.Time
+	// rankedOut names the candidate that outranked this Instance: it carries the ranked-out mark (rank.go).
+	rankedOut string
+	// healthySince is when the Instance's Healthy condition last turned True; nil is no Healthy condition.
+	healthySince *time.Time
 }
 
 func (f *opFixture) addInstance(o instOpts) (*v1alpha1.Instance, *v1alpha1.Allocation) {
@@ -94,6 +100,17 @@ func (f *opFixture) addInstance(o instOpts) (*v1alpha1.Instance, *v1alpha1.Alloc
 	}
 	if o.pred != "" {
 		in.Annotations = map[string]string{v1alpha1.AnnotationPredecessor: o.pred}
+	}
+	if o.rankedOut != "" {
+		if in.Annotations == nil {
+			in.Annotations = map[string]string{}
+		}
+		in.Annotations[annotationRankedOut] = o.rankedOut
+	}
+	if o.healthySince != nil {
+		in.Status.Conditions = append(in.Status.Conditions, metav1.Condition{
+			Type: v1alpha1.ConditionHealthy, Status: metav1.ConditionTrue, LastTransitionTime: metav1.NewTime(*o.healthySince),
+		})
 	}
 	a := f.newAllocation(aname, o)
 	f.insts = append(f.insts, in)
@@ -139,9 +156,12 @@ func (f *opFixture) emptyAllocation(name string, retention *v1alpha1.RetentionPo
 	return a
 }
 
-// pass is the pass the planner reads.
+// overAllocation sets k, the deployment's extra Allocations per Provider.
+func (f *opFixture) overAllocation(k int32) { f.md.Spec.OverAllocation = &k }
+
+// pass is the pass the planner reads, at T0+1h: the pass's clock decides when a marked peer's drain is due.
 func (f *opFixture) pass() *pass {
-	return &pass{md: f.md, key: types.NamespacedName{Namespace: opNS, Name: opMD}, insts: f.insts, allocs: f.allocs, pvByName: f.pvs}
+	return &pass{md: f.md, key: types.NamespacedName{Namespace: opNS, Name: opMD}, insts: f.insts, allocs: f.allocs, pvByName: f.pvs, now: opAt}
 }
 
 func (f *opFixture) request(op *v1alpha1.Operation, at time.Time) planRequest {

@@ -318,7 +318,18 @@ func (p *pass) setOperationStatus(op *v1alpha1.Operation, mutate func(*v1alpha1.
 	return nil
 }
 
-// opsNamingKey is whether an Operation names the pass's ModelDeployment: Reconcile keeps requeueing the
-// key while one does, so a deleted deployment's Operation is still planned, and later executed and
-// reported.
-func (p *pass) opsNamingKey() bool { return len(p.ops) > 0 }
+// opsNamingKey is whether a NON-terminal Operation names the pass's ModelDeployment: Reconcile keeps requeueing
+// the key of a deleted deployment while one does, so it is still planned, and later executed and reported. A
+// terminal one (Done, Stale, Refused) holds the key no longer: nothing removes a finished Operation until PR 5, so
+// holding it would requeue a deleted deployment every 30 s for as long as its Operations exist. Not terminal is no
+// phase yet, Planned, AwaitingApproval, Executing and PartlyFailed.
+func (p *pass) opsNamingKey() bool {
+	for _, op := range p.ops {
+		switch op.Status.Phase {
+		case v1alpha1.OperationPhaseRefused, v1alpha1.OperationPhaseDone, v1alpha1.OperationPhaseStale:
+		default:
+			return true
+		}
+	}
+	return false
+}

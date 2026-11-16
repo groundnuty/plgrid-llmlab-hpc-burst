@@ -164,7 +164,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 	if p.md == nil && len(p.insts) == 0 && len(p.allocs) == 0 && !p.opsNamingKey() {
-		return ctrl.Result{}, nil // a deleted deployment with nothing left, and no Operation that names it: no more passes
+		return ctrl.Result{}, nil // a deleted deployment with nothing left, and no unfinished Operation that names it: no more passes
 	}
 	wait := maxRequeue
 	if !p.next.IsZero() {

@@ -45,20 +45,20 @@ func writesOf(calls []pfake.Call) map[string]int {
 	return out
 }
 
-// writeLog records every write of the lifecycle controller's client: its method, the object's type and name.
-type writeLog struct {
+// opWriteLog records every write of the lifecycle controller's client: its method, the object's type and name.
+type opWriteLog struct {
 	client.Client
 	mu     sync.Mutex
 	writes []string
 }
 
-func (w *writeLog) note(method string, obj client.Object) {
+func (w *opWriteLog) note(method string, obj client.Object) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.writes = append(w.writes, fmt.Sprintf("%s %T %s", method, obj, obj.GetName()))
 }
 
-func (w *writeLog) take() []string {
+func (w *opWriteLog) take() []string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	out := w.writes
@@ -66,47 +66,47 @@ func (w *writeLog) take() []string {
 	return out
 }
 
-func (w *writeLog) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+func (w *opWriteLog) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
 	w.note("Create", obj)
 	return w.Client.Create(ctx, obj, opts...)
 }
 
-func (w *writeLog) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+func (w *opWriteLog) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
 	w.note("Update", obj)
 	return w.Client.Update(ctx, obj, opts...)
 }
 
-func (w *writeLog) Patch(ctx context.Context, obj client.Object, p client.Patch, opts ...client.PatchOption) error {
+func (w *opWriteLog) Patch(ctx context.Context, obj client.Object, p client.Patch, opts ...client.PatchOption) error {
 	w.note("Patch", obj)
 	return w.Client.Patch(ctx, obj, p, opts...)
 }
 
-func (w *writeLog) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+func (w *opWriteLog) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
 	w.note("Delete", obj)
 	return w.Client.Delete(ctx, obj, opts...)
 }
 
-func (w *writeLog) DeleteAllOf(ctx context.Context, obj client.Object, opts ...client.DeleteAllOfOption) error {
+func (w *opWriteLog) DeleteAllOf(ctx context.Context, obj client.Object, opts ...client.DeleteAllOfOption) error {
 	w.note("DeleteAllOf", obj)
 	return w.Client.DeleteAllOf(ctx, obj, opts...)
 }
 
-func (w *writeLog) Status() client.SubResourceWriter {
-	return statusLog{w: w, SubResourceWriter: w.Client.Status()}
+func (w *opWriteLog) Status() client.SubResourceWriter {
+	return opStatusLog{w: w, SubResourceWriter: w.Client.Status()}
 }
 
-// statusLog records the status writes.
-type statusLog struct {
+// opStatusLog records the status writes.
+type opStatusLog struct {
 	client.SubResourceWriter
-	w *writeLog
+	w *opWriteLog
 }
 
-func (s statusLog) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+func (s opStatusLog) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 	s.w.note("Status.Update", obj)
 	return s.SubResourceWriter.Update(ctx, obj, opts...)
 }
 
-func (s statusLog) Patch(ctx context.Context, obj client.Object, p client.Patch, opts ...client.SubResourcePatchOption) error {
+func (s opStatusLog) Patch(ctx context.Context, obj client.Object, p client.Patch, opts ...client.SubResourcePatchOption) error {
 	s.w.note("Status.Patch", obj)
 	return s.SubResourceWriter.Patch(ctx, obj, p, opts...)
 }
@@ -127,6 +127,8 @@ func TestPlanningAnOperationOfEachActionHasNoSideEffect(t *testing.T) {
 	md := mdSpec(hoMD)
 	onBoth(md)
 	md.Spec.Instances = 2
+	// No over-allocation: with k = 1 a Scale to one leaves P2, the pending extra, alone, and its plan is empty.
+	md.Spec.OverAllocation = new(int32)
 	h.create(md)
 	h.until(5*time.Minute, 10*time.Second, "one ready Instance", func() bool { return h.readyCount(hoMD) == 1 })
 	var r, m1 string
@@ -173,7 +175,7 @@ func TestPlanningAnOperationOfEachActionHasNoSideEffect(t *testing.T) {
 	// windows are ten minutes, well before R's lease nears its end, when the controller makes R's replacement on its
 	// own (an hour of passes made one, and the test counted it as planning's).
 	h.run(5*time.Minute, 20*time.Second)
-	wl := &writeLog{Client: h.r.Client}
+	wl := &opWriteLog{Client: h.r.Client}
 	h.r.Client = wl
 	h.run(10*time.Minute, 30*time.Second)
 	ordinary := map[string]bool{}
@@ -265,10 +267,14 @@ func TestPlanningAnOperationOfEachActionHasNoSideEffect(t *testing.T) {
 			t.Errorf("%s: plan %v, want the %d targets %v", name, plan, len(targets), targets)
 			continue
 		}
-		for i, w := range targets {
-			g := plan.Targets[i]
-			if g.Kind != w.kind || g.Name != w.name || g.Effect != w.effect {
-				t.Errorf("%s target %d is %s %s %s, want %s %s %s", name, i, g.Kind, g.Name, g.Effect, w.kind, w.name, w.effect)
+		// The plan's order is by kind and name, and these names are the rig's random ones: compare as a set.
+		got := map[string]v1alpha1.PlanEffect{}
+		for _, g := range plan.Targets {
+			got[string(g.Kind)+" "+g.Name] = g.Effect
+		}
+		for _, w := range targets {
+			if e, ok := got[string(w.kind)+" "+w.name]; !ok || e != w.effect {
+				t.Errorf("%s: %s %s is %q in the plan (listed: %v), want %s", name, w.kind, w.name, e, ok, w.effect)
 			}
 		}
 		if op.Spec.Confirm != nil || op.Status.Phase != v1alpha1.OperationPhasePlanned {
@@ -289,9 +295,11 @@ func equalCounts(a, b map[string]int) bool {
 	return true
 }
 
-// A deleted ModelDeployment with nothing left is not reconciled again, unless an Operation names it: the key
-// stays alive, so the Operation is planned (here, Refused) and, in PR 5, reported.
-func TestTheKeyOfADeletedDeploymentStaysAliveWhileAnOperationNamesIt(t *testing.T) {
+// A deleted ModelDeployment with nothing left is not reconciled again, unless an UNFINISHED Operation names it.
+// An Operation on a deployment that is gone is Refused in its first pass, which is terminal: the key then stops
+// requeueing, though the Refused Operation stays (nothing removes a finished Operation until PR 5, and holding
+// the key for it would requeue a deleted deployment every 30 s for as long as it exists).
+func TestTheKeyOfADeletedDeploymentStopsWhenItsOperationsAreFinished(t *testing.T) {
 	rg := newRig(t)
 	key := client.ObjectKey{Namespace: rigNS, Name: "gone"}
 	res, err := rg.r.Reconcile(rg.ctx, ctrl.Request{NamespacedName: key})
@@ -302,8 +310,8 @@ func TestTheKeyOfADeletedDeploymentStaysAliveWhileAnOperationNamesIt(t *testing.
 	op.Spec.ModelDeploymentRef.Name = "gone"
 	rg.create(op)
 	res, err = rg.r.Reconcile(rg.ctx, ctrl.Request{NamespacedName: key})
-	if err != nil || res.RequeueAfter == 0 {
-		t.Fatalf("with an Operation naming it: result %+v, error %v, want the key requeued", res, err)
+	if err != nil || res.RequeueAfter != 0 {
+		t.Fatalf("with a Refused Operation naming it: result %+v, error %v, want no more passes", res, err)
 	}
 	var got v1alpha1.Operation
 	if err := rg.c.Get(rg.ctx, client.ObjectKeyFromObject(op), &got); err != nil {
@@ -311,5 +319,27 @@ func TestTheKeyOfADeletedDeploymentStaysAliveWhileAnOperationNamesIt(t *testing.
 	}
 	if got.Status.Phase != v1alpha1.OperationPhaseRefused {
 		t.Errorf("an Operation on a ModelDeployment that is gone is %q, want Refused", got.Status.Phase)
+	}
+}
+
+// The key stays alive while an Operation that is not finished names the deleted deployment: one in Executing,
+// whose status the test sets, as the admin does, is left alone by the planning step and requeues the key.
+func TestTheKeyOfADeletedDeploymentStaysAliveWhileAnUnfinishedOperationNamesIt(t *testing.T) {
+	rg := newRig(t)
+	key := client.ObjectKey{Namespace: rigNS, Name: "gone"}
+	op := opRigOp("scale", v1alpha1.OperationSpec{Action: v1alpha1.OperationActionScale, Scale: &v1alpha1.ScaleParameters{Instances: 0}})
+	op.Spec.ModelDeploymentRef.Name = "gone"
+	rg.create(op)
+	var got v1alpha1.Operation
+	if err := rg.c.Get(rg.ctx, client.ObjectKeyFromObject(op), &got); err != nil {
+		t.Fatal(err)
+	}
+	got.Status.Phase = v1alpha1.OperationPhaseExecuting
+	if err := rg.c.Status().Update(rg.ctx, &got); err != nil {
+		t.Fatal(err)
+	}
+	res, err := rg.r.Reconcile(rg.ctx, ctrl.Request{NamespacedName: key})
+	if err != nil || res.RequeueAfter == 0 {
+		t.Fatalf("with an Executing Operation naming it: result %+v, error %v, want the key requeued", res, err)
 	}
 }

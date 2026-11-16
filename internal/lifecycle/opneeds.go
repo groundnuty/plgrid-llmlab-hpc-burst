@@ -25,7 +25,20 @@ const (
 	ruleSetEndTime     = "Set the end time to now: the consequences are separate targets"
 	ruleDeleteMD       = "Delete the ModelDeployment: the consequences are separate targets"
 	ruleOverAllocation = "over-allocation's own trim under the agreed spec"
+	ruleManagedEnd     = "End a managed-source deployment: it holds no Allocation, so nothing is released"
 )
+
+// managedEndNeedsApproval is the ONE place that says whether ending a managed-source ModelDeployment needs
+// approval: the planner (managedEnd) reads only this, and nothing else hard-codes the answer. It is false: the
+// science agent's ruling on #589, 16 Nov: a managed-source deployment holds no Allocation; SetEndTime or
+// DeleteDeployment needs none by HBEP-10's table (https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/589#issuecomment-6917811994).
+// If a later ruling flips it, this value is the whole change, plus the literal of TestEndingAManagedDeploymentIsPlannedWithOneTarget.
+const managedEndNeedsApproval = false
+
+// noCapacityHeld is the cost's note of that one target, so the actor sees what ending it does: it frees
+// nothing. ReleaseCost has no field for a note, and this release adds none (api/ is not edited): it is the
+// Unknown text of GPUHoursLeft, the figure of what ending gives up.
+const noCapacityHeld = "no HPC capacity held"
 
 // releasesBeforeHardEnd is the structural test of the drain's row (HBEP-10, What needs approval): whether
 // the Allocation's retention would release it before its hard end once its Instances are gone. It never

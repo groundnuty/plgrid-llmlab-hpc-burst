@@ -144,15 +144,20 @@ func TestADrainWhileAnotherStaysReadyNeedsApprovalOnlyWhenRetentionReleasesEarly
 			f.setVariant(v)
 			f.addInstance(v.opts(instOpts{name: "r1", phase: v1alpha1.InstanceReady, started: true, hardEnd: tp(opHardEnd), created: 0}))
 			f.addInstance(v.opts(instOpts{name: "r2", phase: v1alpha1.InstanceReady, started: true, hardEnd: tp(opHardEnd.Add(time.Hour)), created: time.Minute}))
-			// With the hard end unknown in both, the creation order picks r1 (a known hard end ranks before an unknown one).
 			plan, refusal := f.plan(scaleOp(1))
 			rule := litDrainKept
 			if v.needs {
 				rule = litDrainReleased
 			}
+			// r1 has the nearest hard end, so it drains. With no hard end known in either, nothing separates them but
+			// age, and HBEP-7's order keeps the older one (How it counts: among equals, the older first): r2 drains.
+			drained := "r1"
+			if v.noHardEnd {
+				drained = "r2"
+			}
 			checkPlan(t, plan, refusal, []wantTarget{
-				{kind: tAlloc, name: "alloc-r1", effect: v1alpha1.PlanEffectKeep, needs: false, rule: litKeep + ", until " + v.keep},
-				{kind: tInst, name: "r1", effect: v1alpha1.PlanEffectDrainInstance, needs: v.needs, rule: rule, cost: true},
+				{kind: tAlloc, name: "alloc-" + drained, effect: v1alpha1.PlanEffectKeep, needs: false, rule: litKeep + ", until " + v.keep},
+				{kind: tInst, name: drained, effect: v1alpha1.PlanEffectDrainInstance, needs: v.needs, rule: rule, cost: true},
 			})
 		})
 	}
@@ -197,13 +202,16 @@ func TestCancellingAPendingAllocationNeedsApproval(t *testing.T) {
 }
 
 // A primary's replacement goes with it, never promoted: the pending replacement is cancelled, and the ready
-// primary that has the nearest hard end drains while the other stays ready.
+// primary that has the nearest hard end drains while the other stays ready. Both primaries have a replacement
+// pending: HBEP-7's order puts a ready Instance with a live replacement before one without, so with only r1
+// replaced the scale-down would keep r1 and drain r2.
 func TestAScaleDownTakesTheReplacementWithItsPrimary(t *testing.T) {
 	f := newOpFixture(t, 2)
 	f.withGlobalPolicy()
 	f.addInstance(instOpts{name: "r1", phase: v1alpha1.InstanceReady, started: true, hardEnd: tp(opHardEnd), created: 0})
 	f.addInstance(instOpts{name: "r2", phase: v1alpha1.InstanceReady, started: true, hardEnd: tp(opHardEnd.Add(time.Hour)), created: time.Minute})
 	f.addInstance(instOpts{name: "r1-repl", phase: v1alpha1.InstancePending, pred: "r1", created: 2 * time.Minute, submit: tp(opT0.Add(20 * time.Minute))})
+	f.addInstance(instOpts{name: "r2-repl", phase: v1alpha1.InstancePending, pred: "r2", created: 3 * time.Minute, submit: tp(opT0.Add(25 * time.Minute))})
 	plan, refusal := f.plan(scaleOp(1))
 	checkPlan(t, plan, refusal, []wantTarget{
 		{kind: tAlloc, name: "alloc-r1", effect: v1alpha1.PlanEffectKeep, needs: false, rule: litKeep + ", until 2026-11-16T13:00:00Z"},
