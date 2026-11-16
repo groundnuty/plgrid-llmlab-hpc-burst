@@ -158,7 +158,7 @@ func (p *pass) end(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, reason, ms
 		if s.EndTime == nil {
 			s.EndTime = &now
 		}
-		if reason != v1alpha1.ReasonDrained {
+		if !cleanEnd(reason) {
 			cond(&s.Conditions, v1alpha1.ConditionHealthy, metav1.ConditionFalse, reason, msg, in.Generation, now)
 		}
 	}); err != nil {
@@ -172,7 +172,7 @@ func (p *pass) end(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, reason, ms
 	// once), and with it what says the Allocation must go or since when it is
 	// idle (HBEP-7, Release; Retention, the idle anchor).
 	if release && alloc != nil {
-		if err := p.deleteAllocation(alloc, reason); err != nil {
+		if err := p.deleteAllocation(alloc, endCause(in, reason, msg)); err != nil {
 			return err
 		}
 	} else if err := p.anchorIfLast(alloc); err != nil {
@@ -186,7 +186,7 @@ func (p *pass) end(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, reason, ms
 // Release). It is read from the persisted end reason, so a release that failed
 // or was interrupted is made on a later pass.
 func releaseRequired(in *v1alpha1.Instance) bool {
-	return ended(in) && in.Status.EndReason != "" && in.Status.EndReason != v1alpha1.ReasonDrained
+	return ended(in) && in.Status.EndReason != "" && !cleanEnd(in.Status.EndReason)
 }
 
 // anchorIfLast writes the Allocation's idle-since anchor when it hosts no live
@@ -215,7 +215,8 @@ func (p *pass) anchorIfLast(alloc *v1alpha1.Allocation) error {
 // the record of what ran there, and is deleted once the Allocation is gone.
 func (p *pass) tombstone(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) error {
 	if alloc != nil && alloc.DeletionTimestamp.IsZero() && releaseRequired(in) && len(p.liveOn(alloc.Name)) == 0 {
-		if err := p.deleteAllocation(alloc, "resuming the release of a failed Instance's Allocation"); err != nil {
+		// The same cause as the release that failed or was cut short: the failure's reason.
+		if err := p.deleteAllocation(alloc, endCause(in, in.Status.EndReason, "")); err != nil {
 			return err
 		}
 	} else if err := p.anchorIfLast(alloc); err != nil {
@@ -569,7 +570,7 @@ func (p *pass) draining(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av ag
 func (p *pass) drainStep(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agentView) error {
 	if in.Status.LeaseEnd != nil {
 		if !p.now.Before(in.Status.LeaseEnd.Time) {
-			return p.end(in, alloc, v1alpha1.ReasonDrained, "the hard end came", false)
+			return p.end(in, alloc, drainEndReason(in), "the hard end came", false)
 		}
 		p.at(in.Status.LeaseEnd.Time)
 	}
@@ -580,7 +581,7 @@ func (p *pass) drainStep(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av a
 		began = p.mem.started // an Instance made draining before this record existed
 	}
 	if !av.unreachable && av.noRequestReadAfter(began.Add(time.Second)) {
-		return p.end(in, alloc, v1alpha1.ReasonDrained, "drained: no request runs", false)
+		return p.end(in, alloc, drainEndReason(in), "drained: no request runs", false)
 	}
 	return nil
 }
@@ -624,14 +625,17 @@ func (p *pass) handOver(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av ag
 	return p.draining(in, alloc, av)
 }
 
-// replacementOf returns the primary's live replacement, if any.
+// replacementOf returns the primary's live replacement, if any: the
+// representative of its replacement hedge (hedge.go), the most advanced
+// member, so a replacement reads as ready when any member is, and as started
+// when any member's job has started (HBEP-7, Handover; Hedging (beta), one
+// need, one count). replacementMembers returns every member.
 func (p *pass) replacementOf(in *v1alpha1.Instance) *v1alpha1.Instance {
-	for _, o := range p.insts {
-		if !ended(o) && o.Annotations[v1alpha1.AnnotationPredecessor] == in.Name {
-			return o
-		}
+	members := p.replacementMembers(in)
+	if len(members) == 0 {
+		return nil
 	}
-	return nil
+	return hedgeRepresentative(members, p.allocOf)
 }
 
 func isNotFound(err error) bool {

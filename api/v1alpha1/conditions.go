@@ -296,6 +296,20 @@ const (
 	// streak. It is also the reason of the replaced event raised for each
 	// hedge loser (HBEP-8, Reasons).
 	ReasonHedgeLost = "HedgeLost"
+	// ReasonRankedOut: the Instance was ranked below a peer, or had no peer to
+	// outrank, at its ranking point, or a candidate outranked it and it
+	// drained (beta; HBEP-7, Over-allocation and qualification (beta), The
+	// ranking point). It is no failure: like Drained and HedgeLost it releases
+	// nothing by itself and counts towards no failure streak, and its
+	// Allocation follows its retention policy as warm capacity. It is also the
+	// reason of the replaced event raised for it (HBEP-8, Reasons).
+	ReasonRankedOut = "RankedOut"
+	// ReasonReferenceSuspect: the reason of the degraded event raised when an
+	// expected-performance entry is suspended for a ModelDeployment, two
+	// Allocations in a row having missed it (beta; HBEP-7, The throughput
+	// gate, A suspect reference; HBEP-8, Reasons). It is an event reason only:
+	// no Degraded condition carries it.
+	ReasonReferenceSuspect = "ReferenceSuspect"
 	// ReasonVerificationFailed and ReasonRestartLoop, the Degraded reasons
 	// above, are end reasons too: an Instance whose verification failed, or
 	// whose restarts formed a loop, ends with that reason (HBEP-7, Instance

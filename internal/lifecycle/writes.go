@@ -3,6 +3,8 @@ package lifecycle
 import (
 	"fmt"
 	"strconv"
+	"strings"
+	"unicode/utf8"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -100,17 +102,66 @@ func (p *pass) removeDrainFinalizer(in *v1alpha1.Instance) error {
 	return p.setMeta(in, func(n *v1alpha1.Instance) { controllerutil.RemoveFinalizer(n, v1alpha1.FinalizerDrain) })
 }
 
+// maxReleaseCause bounds the release cause, in bytes.
+const maxReleaseCause = 256
+
+// releaseCause is why as one line of at most maxReleaseCause bytes, cut at a
+// character's boundary.
+func releaseCause(why string) string {
+	why = strings.Join(strings.Fields(why), " ")
+	if len(why) <= maxReleaseCause {
+		return why
+	}
+	cut := maxReleaseCause - len("…")
+	for cut > 0 && !utf8.RuneStart(why[cut]) {
+		cut--
+	}
+	return why[:cut] + "…"
+}
+
+// endCause is the release cause of an ended Instance's Allocation: a clean
+// end's words (a drain's, or a hedge loss's, "hedge lost to <winner>"), which
+// the controller writes, or a failure's reason alone. A failure's message can
+// carry text from outside the controller (Slurm's reason, a condition's
+// message, an agent's report), and a cause holds none: no path, no host and no
+// credential reaches it.
+func endCause(in *v1alpha1.Instance, reason, msg string) string {
+	if cleanEnd(reason) && msg != "" {
+		return fmt.Sprintf("Instance %s ended: %s", in.Name, msg)
+	}
+	return fmt.Sprintf("Instance %s failed: %s", in.Name, reason)
+}
+
 // deleteAllocation releases an Allocation: deleting it lets its finalizer
-// cancel every job with its tag (HBEP-7, Release). The UID precondition makes
-// sure a recreated object of the same name is not hit.
+// cancel every job with its tag (HBEP-7, Release). It is the only delete of an
+// Allocation (TestEveryAllocationDeleteWritesItsCause). It writes the release
+// cause first, an Update carrying the resourceVersion it read, and deletes only
+// once that write succeeded: a failed write leaves the Allocation in place, and
+// the next pass tries again, so no Allocation goes without its cause. The UID
+// precondition makes sure a recreated object of the same name is not hit.
 func (p *pass) deleteAllocation(a *v1alpha1.Allocation, why string) error {
 	if !a.DeletionTimestamp.IsZero() {
 		return nil
 	}
+	cause := releaseCause(why)
+	if a.Annotations[v1alpha1.AnnotationReleaseCause] != cause {
+		next := a.DeepCopy()
+		if next.Annotations == nil {
+			next.Annotations = map[string]string{}
+		}
+		next.Annotations[v1alpha1.AnnotationReleaseCause] = cause
+		if err := p.r.Client.Update(p.ctx, next, owner); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil // gone already
+			}
+			return fmt.Errorf("write the release cause of Allocation %s (%s): %w", a.Name, cause, err)
+		}
+		*a = *next
+	}
 	uid := a.UID
 	err := p.r.Client.Delete(p.ctx, a, client.Preconditions{UID: &uid})
 	if err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("release Allocation %s (%s): %w", a.Name, why, err)
+		return fmt.Errorf("release Allocation %s (%s): %w", a.Name, cause, err)
 	}
 	now := metav1.NewTime(p.now)
 	a.DeletionTimestamp = &now
