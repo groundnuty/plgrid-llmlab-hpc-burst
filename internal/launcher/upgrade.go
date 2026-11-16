@@ -180,6 +180,16 @@ func Upgrade(ctx context.Context, o UpgradeOptions) (*UpgradeReport, error) {
 		if err := startSupervisor(ctx, l, nst, argv, superviseStartTimeout, o.Log); err != nil {
 			return rep, fmt.Errorf("the new host is running and kept every object, but the controllers did not start again (hpcburst down, then up): %w", err)
 		}
+		// The restarted log can be held back for space although the upgrade passed its floor: that
+		// floor counts the store and the previous copy, not what the streams can still grow, which
+		// the start gate counts too. So upgrade warns as up does, rather than saying nothing (Fable's
+		// review of #639).
+		if nst.EventLog != nil {
+			if _, w := eventLogStartWarning(l); w != "" {
+				rep.Warnings = append(rep.Warnings, w)
+				logf(o.Log, "%s", w)
+			}
+		}
 	}
 	return rep, nil
 }

@@ -277,6 +277,35 @@ func TestEventLogStartsFirstComesBackAfterAKillAndStopsLast(t *testing.T) {
 // A log that the caps' bound keeps out (here a floor no disk reaches, 100 TB): up still exits 0, with a
 // warning that says why, the controller runs, status says "degraded: event log not started" with exit 0,
 // the token is written all the same, and upgrade refuses before anything stops, naming the sizes.
+// An upgrade that passes its floor can still leave the restarted log held back for space: the
+// upgrade's floor counts the store and the previous copy, the start gate also what the streams can
+// still grow. Upgrade then warns as up does, rather than exiting 0 saying nothing (Fable's review of
+// #639). Caps of 1 TiB each keep the log gated on any runner, while a 1 GB floor lets the upgrade,
+// with an empty store and no previous copy, go ahead.
+func TestEventLogGatedAfterAnUpgradeIsWarnedAbout(t *testing.T) {
+	h := newHost(t)
+	bin, _ := fakeController(t)
+	r := cli(t, h.upArgs(eventLogK3sBase, "--controller-bin", bin, "--version", "1.35.9", "--event-log",
+		"--event-log-floor", "1GB", "--event-log-events-cap", "1TiB", "--event-log-usage-cap", "1TiB")...)
+	if r.code != exitOK || !strings.Contains(r.err, "warning: the event log was not started") {
+		t.Fatalf("up exited %d, stderr %q; want 0 and the log held back for space", r.code, r.err)
+	}
+	u := cli(t, h.args("upgrade", "--bin-dir", h.binDir, "--to", "1.36.5")...)
+	if u.code != exitOK {
+		t.Fatalf("upgrade exited %d: %s; want it to pass its floor and run", u.code, u.err)
+	}
+	if !strings.Contains(u.err, "warning: the event log was not started") || !strings.Contains(u.err, "floor 1 GB") {
+		t.Errorf("upgrade's stderr %q; want up's warning, naming the floor", u.err)
+	}
+	if readState(t, h.dir).Version != "v1.36.5+k3s1" {
+		t.Error("the upgrade did not record the new release")
+	}
+	if lg := entryByName(supervisorEntries(t, h.dir), "eventlog"); lg == nil || lg.State != "gated" || lg.Proc != nil {
+		t.Errorf("the log's entry after the upgrade: %+v; want it gated, not running", lg)
+	}
+	noListener(t, 28496)
+}
+
 func TestEventLogRefusedForSpaceStartsTheHostWithoutItAndUpgradeRefuses(t *testing.T) {
 	h := newHost(t)
 	bin, _ := fakeController(t)

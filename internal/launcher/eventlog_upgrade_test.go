@@ -109,6 +109,10 @@ func TestStartSupervisorWithAGatedLogRunsTheControllersAndSaysWhy(t *testing.T) 
 			t.Errorf("the reason up reads from the record, %q, lacks %q", why, want)
 		}
 	}
+	// The warning up and upgrade both print comes from that record (Fable's review of #639).
+	if gotWhy, w := eventLogStartWarning(f.l); gotWhy != why || w != "warning: the event log was not started: "+why+"; the controllers and the front run without it, each emitter will raise EventsNotLogged once one publishes, and the supervisor starts the log once the space fits" {
+		t.Errorf("eventLogStartWarning = %q, %q; want the record's reason and up's warning line", gotWhy, w)
+	}
 	ctl := f.record().Entries[0]
 	if ctl.Name != controllerEntryName || ctl.State != entryRunning || ctl.Proc == nil {
 		t.Errorf("the controller's entry %+v: it must run although the log does not", ctl)
@@ -137,6 +141,9 @@ func TestStartSupervisorWithAGatedLogRunsTheControllersAndSaysWhy(t *testing.T) 
 	}
 	if why := eventLogNotStarted(f.l); why != "" {
 		t.Errorf("up would still warn: %q", why)
+	}
+	if why, w := eventLogStartWarning(f.l); why != "" || w != "" {
+		t.Errorf("up and upgrade would still warn: %q, %q", why, w)
 	}
 }
 

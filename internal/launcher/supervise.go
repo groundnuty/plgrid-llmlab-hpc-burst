@@ -443,15 +443,18 @@ func Supervise(ctx context.Context, o SuperviseOptions) error {
 		}
 		specs[i].StartGate = st.eventLogGate(l, disk)
 		barrier := newStartBarrier()
-		specs[i].settle = barrier.release
+		specs[i].settle = func() { barrier.release() }
 		for j := range specs {
 			if j != i {
 				specs[j].startAfter = barrier.ch
 			}
 		}
+		// The timer is the barrier's bound. It logs only when it is what releases the barrier, so a log
+		// that became healthy, was gated or exited in time leaves no line (Fable's review of #639).
 		timer := time.AfterFunc(o.EventLogStartWait, func() {
-			logf(o.Log, "%s: not healthy within %s: starting the controllers and the front without waiting for it", eventLogEntryName, o.EventLogStartWait)
-			barrier.release()
+			if barrier.release() {
+				logf(o.Log, "%s: not healthy within %s: starting the controllers and the front without waiting for it", eventLogEntryName, o.EventLogStartWait)
+			}
 		})
 		defer timer.Stop()
 	}
@@ -462,7 +465,7 @@ func Supervise(ctx context.Context, o SuperviseOptions) error {
 	return nil
 }
 
-// startBarrier is a one-shot signal: release closes ch, once.
+// startBarrier is a one-shot signal: release closes ch, once, and reports whether this call did.
 type startBarrier struct {
 	once sync.Once
 	ch   chan struct{}
@@ -470,7 +473,10 @@ type startBarrier struct {
 
 func newStartBarrier() *startBarrier { return &startBarrier{ch: make(chan struct{})} }
 
-func (s *startBarrier) release() { s.once.Do(func() { close(s.ch) }) }
+func (s *startBarrier) release() (released bool) {
+	s.once.Do(func() { close(s.ch); released = true })
+	return released
+}
 
 // runInStopOrder runs each spec's runner until ctx is done, then stops them in HBEP-11's order (on down
 // and upgrade, #553): the front first, waiting until its runner has returned, which is once its process

@@ -348,5 +348,16 @@ func eventLogNotStarted(l layout) string {
 	return ""
 }
 
+// eventLogStartWarning is the warning up and upgrade give when the start gate holds the log back for
+// space (HBEP-8, A log refused for space): why, read from the supervisor's record, and the line to
+// print. Both are "" while the log is not gated.
+func eventLogStartWarning(l layout) (why, warning string) {
+	why = eventLogNotStarted(l)
+	if why == "" {
+		return "", ""
+	}
+	return why, "warning: the event log was not started: " + why + "; the controllers and the front run without it, each emitter will raise EventsNotLogged once one publishes, and the supervisor starts the log once the space fits"
+}
+
 // eventLogGated reports whether e is the log's entry, held back by its start gate.
 func eventLogGated(e EntryRecord) bool { return e.Name == eventLogEntryName && e.State == entryGated }

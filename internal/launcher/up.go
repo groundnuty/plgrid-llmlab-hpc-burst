@@ -514,9 +514,8 @@ func startControllers(ctx context.Context, l layout, ports Ports, o UpOptions, s
 		rep.EventLogAddr = ports.EventLogAddr()
 		// The start gate may have kept the log back for space: the controllers and the front run,
 		// and up says so, where the supervisor wrote why (HBEP-8, A log refused for space).
-		if why := eventLogNotStarted(l); why != "" {
+		if why, w := eventLogStartWarning(l); why != "" {
 			rep.EventLogNotStarted = why
-			w := "warning: the event log was not started: " + why + "; the controllers and the front run without it, each emitter will raise EventsNotLogged once one publishes, and the supervisor starts the log once the space fits"
 			rep.Warnings = append(rep.Warnings, w)
 			logf(o.Log, "%s", w)
 		}
