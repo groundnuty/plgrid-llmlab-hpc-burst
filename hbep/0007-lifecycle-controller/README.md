@@ -695,7 +695,7 @@ The science agent's design, 16 Nov 2026, within the owner's decisions on open qu
 
 **How k adjusts** (open question 12: "adjust it from the measured qualification failure rate"; proposal for the measure).
 - **Recorded.** Each start-up outcome (Hedging, The width, `startOutcomes`) also keeps the gate's verdict when its Instance reached the gate: `Passed`, `Missed`, `Suspended`, or `RecordOnly` with no entry or an aged one (proposed), with the entry's `date`. It is an amendment to HBEP-11's API, as `startOutcomes` is. An Instance ranked out before `ready` adds a success, since it passed every check.
-- **The rate.** A class's qualification failure rate is its outcomes that failed in `verifying` (a rehash `VerificationFailed`, or `QualificationFailed`: a failed check, the gate, or a warm-up that didn't settle) over its outcomes, once 20 are kept, and unknown before. A platform's pools its partitions' classes, as the start-up rate does.
+- **The rate.** A class's qualification failure rate is its outcomes that failed in `verifying` (a rehash `VerificationFailed`, or `QualificationFailed`: a failed check, the gate, or a warm-up that didn't settle) over its outcomes, shown as "failures of count" from the first outcome and unknown only with none, as the start-up rate is. A platform's pools its partitions' classes, as the start-up rate does.
 - **Used.** Beta shows the rate with its count, beside the start-up rate, and k stays `overAllocation`. No rule for adjusting k is decided. Lean: k = ⌈N × f ÷ (1 − f)⌉ on a Provider with N primaries and rate f, so that N + k Allocations are expected to give N that pass.
 
 **Events and conditions.**
