@@ -110,6 +110,15 @@ spec:
                 description: Grant names the grant the account belongs to.
                 maxLength: 253
                 type: string
+              grantEnd:
+                description: |-
+                  GrantEnd is when the Provider's grant ends (beta; HBEP-4, Provider
+                  settings; HBEP-10, open question 12). Like the account and the grant it
+                  is a provider setting, never in a shipped profile. hpcburst accounting
+                  shows the time left to it, and HBEP-10's audit retention reads it.
+                  Absent, no grant end is recorded.
+                format: date-time
+                type: string
               platformProfileRef:
                 description: |-
                   PlatformProfileRef names the PlatformProfile of the provider's platform.

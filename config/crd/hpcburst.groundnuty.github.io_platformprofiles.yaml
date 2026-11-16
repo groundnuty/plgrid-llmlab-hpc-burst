@@ -235,6 +235,29 @@ spec:
                 maxItems: 32
                 type: array
                 x-kubernetes-list-type: atomic
+              gateway:
+                description: |-
+                  Gateway is a managed profile's gateway behaviour (beta; HBEP-4, The
+                  remaining groups): the status it returns when its capacity binds, and
+                  whether it rewrites requests. Only a managed profile may set it.
+                properties:
+                  overloadStatus:
+                    description: |-
+                      OverloadStatus is the HTTP status the gateway returns when its shared
+                      capacity binds, read passively from the front's usage records of real
+                      traffic routed to it (HBEP-5, open question 6). The framework never
+                      loads the shared gateway to provoke it.
+                    format: int32
+                    maximum: 599
+                    minimum: 400
+                    type: integer
+                  rewritesRequests:
+                    description: |-
+                      RewritesRequests says whether the gateway rewrites requests, which the
+                      managed catalog controller records beside each identity record of the
+                      platform (HBEP-9 decides the form, and its probe measures it).
+                    type: boolean
+                type: object
               handoverMargin:
                 default: 30m
                 description: |-
@@ -448,6 +471,18 @@ spec:
                     PartitionProfile is what the framework reads of one partition: its name and
                     its accelerator class (HBEP-11, API, PlatformProfile schema).
                   properties:
+                    billingUnit:
+                      description: |-
+                        BillingUnit is what one unit of the scheduler's billing count counts on
+                        this partition (beta; HBEP-4, Platform profile schema, The remaining
+                        groups): the Provider's controller copies it into each Allocation's
+                        accounting record, and the per-grant totals sum each unit apart (HBEP-8,
+                        Provider accounting, Billing). No default: absent is unknown, and a
+                        record's unit is then unknown.
+                      enum:
+                      - gpu-hour
+                      - cpu-hour
+                      type: string
                     cpuArch:
                       description: CPUArch is the CPU architecture, for example "aarch64"
                         or "x86_64".
@@ -461,6 +496,28 @@ spec:
                       maximum: 4096
                       minimum: 1
                       type: integer
+                    dialHomeModes:
+                      description: |-
+                        DialHomeModes are the platform-dependent dial-home modes measured to work
+                        on this partition, each at most once (beta; HBEP-4, The remaining groups;
+                        HBEP-6, Dial-home modes). When it is set and the launcher's mode is ssh or
+                        host-dialed, reading the profile fails unless the list holds that mode.
+                        Absent means no check, and a launcher in direct mode is never checked:
+                        direct rests on the control-plane host's address, not on the platform,
+                        so it is no profile value.
+                      items:
+                        description: |-
+                          ProfileDialHomeMode is a platform-dependent dial-home mode that a partition
+                          is measured to support (beta; HBEP-4, The remaining groups; HBEP-6,
+                          Dial-home modes). Its values are pkg/agentapi's DialHomeSSH and
+                          DialHomeHostDialed; direct is no profile value.
+                        enum:
+                        - ssh
+                        - host-dialed
+                        type: string
+                      maxItems: 2
+                      type: array
+                      x-kubernetes-list-type: set
                     gpuModel:
                       description: GPUModel is the GPU model. A partition without
                         GPUs names "none".
@@ -795,6 +852,9 @@ spec:
                 self.expectedPerformance.exists_one(b, a.deploymentID == b.deploymentID
                 && a.sessions == b.sessions && a.contextTokens == b.contextTokens
                 && a.outputTokens == b.outputTokens && a.capacityFlags == b.capacityFlags))'
+            - message: 'gateway is a managed gateway''s behaviour: only a managed
+                profile may set it (HBEP-4, The remaining groups)'
+              rule: '!has(self.gateway) || self.providerKind == ''managed'''
           status:
             description: PlatformProfileStatus is the observed state of a PlatformProfile.
             properties:

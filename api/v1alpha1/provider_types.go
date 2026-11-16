@@ -28,6 +28,15 @@ type ProviderSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	Grant string `json:"grant,omitempty"`
 
+	// GrantEnd is when the Provider's grant ends (beta; HBEP-4, Provider
+	// settings; HBEP-10, open question 12). Like the account and the grant it
+	// is a provider setting, never in a shipped profile. hpcburst accounting
+	// shows the time left to it, and HBEP-10's audit retention reads it.
+	// Absent, no grant end is recorded.
+	//
+	// +optional
+	GrantEnd *metav1.Time `json:"grantEnd,omitempty"`
+
 	// AllowedPartitions lists the platform partitions this provider may use.
 	//
 	// +optional

@@ -127,6 +127,81 @@ type PartitionProfile struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=64
 	QOS string `json:"qos,omitempty"`
+
+	// BillingUnit is what one unit of the scheduler's billing count counts on
+	// this partition (beta; HBEP-4, Platform profile schema, The remaining
+	// groups): the Provider's controller copies it into each Allocation's
+	// accounting record, and the per-grant totals sum each unit apart (HBEP-8,
+	// Provider accounting, Billing). No default: absent is unknown, and a
+	// record's unit is then unknown.
+	//
+	// +optional
+	BillingUnit BillingUnit `json:"billingUnit,omitempty"`
+
+	// DialHomeModes are the platform-dependent dial-home modes measured to work
+	// on this partition, each at most once (beta; HBEP-4, The remaining groups;
+	// HBEP-6, Dial-home modes). When it is set and the launcher's mode is ssh or
+	// host-dialed, reading the profile fails unless the list holds that mode.
+	// Absent means no check, and a launcher in direct mode is never checked:
+	// direct rests on the control-plane host's address, not on the platform,
+	// so it is no profile value.
+	//
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=2
+	DialHomeModes []ProfileDialHomeMode `json:"dialHomeModes,omitempty"`
+}
+
+// BillingUnit is what one unit of the scheduler's billing count counts on a
+// partition (beta; HBEP-4, Platform profile schema, The remaining groups;
+// HBEP-8, Provider accounting, Billing).
+//
+// +kubebuilder:validation:Enum=gpu-hour;cpu-hour
+type BillingUnit string
+
+// Billing units.
+const (
+	// BillingUnitGPUHour: one unit is a GPU-hour, as Cyfronet bills its GPU
+	// partitions.
+	BillingUnitGPUHour BillingUnit = "gpu-hour"
+	// BillingUnitCPUHour: one unit is a CPU-hour.
+	BillingUnitCPUHour BillingUnit = "cpu-hour"
+)
+
+// ProfileDialHomeMode is a platform-dependent dial-home mode that a partition
+// is measured to support (beta; HBEP-4, The remaining groups; HBEP-6,
+// Dial-home modes). Its values are pkg/agentapi's DialHomeSSH and
+// DialHomeHostDialed; direct is no profile value.
+//
+// +kubebuilder:validation:Enum=ssh;host-dialed
+type ProfileDialHomeMode string
+
+// Profile dial-home modes.
+const (
+	ProfileDialHomeSSH        ProfileDialHomeMode = "ssh"
+	ProfileDialHomeHostDialed ProfileDialHomeMode = "host-dialed"
+)
+
+// GatewayProfile is a managed gateway's behaviour that a reader needs (beta;
+// HBEP-4, Platform profile schema, The remaining groups). Each field is absent
+// until measured, and absent is unknown.
+type GatewayProfile struct {
+	// OverloadStatus is the HTTP status the gateway returns when its shared
+	// capacity binds, read passively from the front's usage records of real
+	// traffic routed to it (HBEP-5, open question 6). The framework never
+	// loads the shared gateway to provoke it.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=400
+	// +kubebuilder:validation:Maximum=599
+	OverloadStatus *int32 `json:"overloadStatus,omitempty"`
+
+	// RewritesRequests says whether the gateway rewrites requests, which the
+	// managed catalog controller records beside each identity record of the
+	// platform (HBEP-9 decides the form, and its probe measures it).
+	//
+	// +optional
+	RewritesRequests *bool `json:"rewritesRequests,omitempty"`
 }
 
 // QOSProfile is one Slurm QOS that a Provider's qos or a partition's qos names,
@@ -359,6 +434,7 @@ type JobNameRules struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.jobName) || !has(self.jobName.maxLength) || self.jobName.maxLength >= 56",message="jobName.maxLength must allow the job tag's 56 characters (HBEP-3, Allocation and job identity)"
 // +kubebuilder:validation:XValidation:rule="!has(self.partitions) || self.partitions.all(p, !has(p.qos) || (has(self.qos) && self.qos.exists(q, q.name == p.qos)))",message="every partition's qos must be listed in qos, so the plan knows its limits (HBEP-4, QOS limits)"
 // +kubebuilder:validation:XValidation:rule="!has(self.expectedPerformance) || self.expectedPerformance.all(a, self.expectedPerformance.exists_one(b, a.deploymentID == b.deploymentID && a.sessions == b.sessions && a.contextTokens == b.contextTokens && a.outputTokens == b.outputTokens && a.capacityFlags == b.capacityFlags))",message="expectedPerformance holds one entry per deploymentID, capacityFlags and shape (sessions, contextTokens, outputTokens) (HBEP-4, Expected performance)"
+// +kubebuilder:validation:XValidation:rule="!has(self.gateway) || self.providerKind == 'managed'",message="gateway is a managed gateway's behaviour: only a managed profile may set it (HBEP-4, The remaining groups)"
 type PlatformProfileSpec struct {
 	// ProviderKind is managed, batch or static: the kind of provider the
 	// platform offers (HBEP-3, Vocabulary, Provider). It is not the object's
@@ -538,6 +614,13 @@ type PlatformProfileSpec struct {
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="maxIdle must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
 	MaxIdle *Duration `json:"maxIdle,omitempty"`
+
+	// Gateway is a managed profile's gateway behaviour (beta; HBEP-4, The
+	// remaining groups): the status it returns when its capacity binds, and
+	// whether it rewrites requests. Only a managed profile may set it.
+	//
+	// +optional
+	Gateway *GatewayProfile `json:"gateway,omitempty"`
 
 	// Health holds HBEP-7's malfunction thresholds and start deadlines.
 	//
