@@ -335,3 +335,43 @@ func TestAnOverLongPathIsRecordedWithinTheBound(t *testing.T) {
 		t.Error("no record carries the marker of a cut text")
 	}
 }
+
+// The edges, through the front: a name of exactly the name bound, 1,291 bytes, is recorded whole, and one of 1,292 keeps its first 1,291 and the marker;
+// a decoded path of exactly the path bound, 1,302 bytes, is recorded whole, and one of 1,303 keeps its first 1,302 and the marker. So a change of either
+// number by one byte fails here, at the two call sites, whatever else holds. (The names break the grammar, 400, so that nothing needs to serve them; the
+// paths are off /v1/, 404, with no key.)
+func TestARecordedNameOrPathAtTheBoundIsWholeAndOneByteMoreIsCut(t *testing.T) {
+	s := newErrFix(t, nil, instanceOpts{}, "")
+	for name, c := range map[string]struct{ model, want string }{
+		"a name of 1,291 bytes": {strings.Repeat("a", 1290) + "@", strings.Repeat("a", 1290) + "@"},
+		"a name of 1,292 bytes": {strings.Repeat("a", 1291) + "@", strings.Repeat("a", 1291) + cutMarker},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp := s.post("/v1/chat/completions", errChatBody(c.model, false, "hello there"))
+			body := readAll(t, resp)
+			s.checkFrontError(t, resp, body, wantError{status: 400, code: "invalid_model_name", detail: "grammar"})
+			if rec := s.record(resp.Header.Get("hpcburst-request-id")); rec.RequestedModel != c.want {
+				t.Errorf("requestedModel of %d bytes for a name of %d, want %d bytes: %.40q...", len(rec.RequestedModel), len(c.model), len(c.want), rec.RequestedModel)
+			}
+		})
+	}
+	for name, c := range map[string]struct{ path, want string }{
+		"a decoded path of 1,302 bytes": {"/" + strings.Repeat("p", 1301), "/" + strings.Repeat("p", 1301)},
+		"a decoded path of 1,303 bytes": {"/" + strings.Repeat("p", 1302), "/" + strings.Repeat("p", 1301) + cutMarker},
+	} {
+		t.Run(name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, s.url+c.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := errClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			readAll(t, resp)
+			if rec := s.record(resp.Header.Get("hpcburst-request-id")); rec.Path != c.want {
+				t.Errorf("path of %d bytes for a path of %d, want %d bytes: %.40q...", len(rec.Path), len(c.path), len(c.want), rec.Path)
+			}
+		})
+	}
+}
