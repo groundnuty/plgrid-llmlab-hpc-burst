@@ -366,8 +366,9 @@ func sameSetting(name, got, want string) bool {
 // judgeQualify judges qualification (HBEP-7, Instance start): every check the
 // agent judges passed (the tool-call smoke test when tool calls are on); the
 // engine serves the deployment's model name; the KV capacity is at least
-// targetSessions times contextTokens.typical. Throughput gates nothing in
-// alpha.
+// targetSessions times contextTokens.typical. Throughput is judged after
+// warm-up, by the throughput gate (gate.go), so the message it returns holds the
+// checks' text only.
 func judgeQualify(q *agentapi.QualifyResult, sh shapes, model string) (bool, string) {
 	want := []agentapi.CheckName{agentapi.CheckHealth, agentapi.CheckChat, agentapi.CheckCorruption, agentapi.CheckBehaviour}
 	if sh.toolCalls {
@@ -405,7 +406,7 @@ func judgeQualify(q *agentapi.QualifyResult, sh shapes, model string) (bool, str
 	}
 	// The behaviour check's context is recorded in the Qualified condition,
 	// the only place an Instance's status has for it in v1alpha1.
-	msg := "every check passed; no throughput reference exists in alpha, so throughput is recorded and gates nothing (HBEP-7, open question 12)"
+	msg := "every check passed"
 	if i := slices.IndexFunc(q.Checks, func(c agentapi.CheckOutcome) bool { return c.Name == agentapi.CheckBehaviour }); i >= 0 && q.Checks[i].ContextTokens > 0 {
 		msg += fmt.Sprintf("; the behaviour check ran at %d context tokens", q.Checks[i].ContextTokens)
 	}
