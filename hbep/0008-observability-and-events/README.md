@@ -545,11 +545,18 @@ What the code had to change to match this HBEP, as read on 31 Oct 2026. The PRs 
   - **The drift guard's check** that every recorder is wrapped (`internal/reasondrift/scan`).
   - **The four-condition absence check** (`internal/eventcount/absence.go`), which the rehearsal's absence checks use (`internal/rehearsal/scenario`).
 - **Beta's designs (16 Nov 2026):** not yet. Still to come:
-  - **The durable log:** `hpcburst-controller eventlog` and its start checks; the launcher's `--event-log`, ports, token, supervision and backup (HBEP-11); the publisher beside the counting wrapper (`internal/eventcount`); and the usage forwarder with its gauge and `/healthz` fields (`internal/front/usage`).
+  - **The durable log:** `hpcburst-controller eventlog` and its start checks; the launcher's `--event-log`, ports, token, supervision and backup (HBEP-11); and the publisher beside the counting wrapper (`internal/eventcount`).
   - **Allocation events:** the Provider controller's `events.k8s.io` recorder and its map from reason to type, the typed events' notes without job IDs, and its managers' `ObservationGap`, and its cache index of Instances by `spec.allocationRef`, for the drain case (`internal/providerctl`). With each, its rows of the Reasons table and a shorter list of untyped Provider reasons (`internal/reasondrift/exceptions.go`). With `JobEnded`, the type `ended` joins the drift guard's `Actions` (`internal/reasondrift/docs.go`).
   - **The log's caps,** their launcher setting and `up`'s free-space check (HBEP-11).
   - **The OpenTelemetry check** of the mapping's first column.
   - **Billing** (amended 2026-11-16): the `billing` entry of the accounting read and `allocatedBilling` (`internal/slurm`; `api/v1alpha1/accounting.go`), the record's new fields, the profile's `billingUnit` (HBEP-4), and `hpcburst accounting` (`cmd/hpcburst`).
+  - **The usage forwarder (done in #625's usage change; erratum, 16 Nov 2026):** `internal/front/usage/forward` and the sink's post-sync hook (`usage.Options.Synced`, `usage.Stats.LastSynced`); the front's `/healthz` `usage.log`, `loggedCounter` and `behindSince`, `hpcburst_usage_unlogged_records` (`internal/front/metrics.go`), and `hpcburst status`'s "degraded: usage log behind" (`internal/launcher/status_controllers.go`). It reads what the HBEP leaves open as follows:
+    - a front started with no log says `log` `down` too, as the HBEP has it, and `status` tells it from a front whose log is down by the launcher's recorded `--event-log` choice;
+    - the gauge has no series until the forwarder has read the stream's last counter, since an unknown is not a 0 (Unknown samples), and `loggedCounter` is null then;
+    - the gauge is a difference of counters, so a crash's gap counts as unlogged records while the forwarder is behind;
+    - the 5 minutes are the front's own `behindSince`, read from its `/healthz`, against the launcher's clock;
+    - R4's file sizes are the files' bytes, and the newest file alone is the set when it is over the cap;
+    - a record whose line is longer than a message (a client's model name can be as long as a request body) is not copied, and the front's log names its counter: the files hold it.
 
 ### Test plan
 
