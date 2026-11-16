@@ -45,7 +45,8 @@ func TestRigKeeperOptionsAppendOnlyTheirFlags(t *testing.T) {
 		if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		h := startRigHost(t, stack.Binaries{HPCBurst: bin, K3sDir: dir, Repo: dir}, dir, stack.DialHome{Mode: "host-dialed"}, os.Environ(), ports, s.hostOptions()...)
+		h := startRigHost(t, stack.Binaries{HPCBurst: bin, K3sDir: dir, Repo: dir}, dir, stack.DialHome{Mode: "host-dialed"}, os.Environ(), ports,
+			append([]stack.HostOption{stack.WithoutAPIServer}, s.hostOptions()...)...)
 		alpha := []string{"up", "--state-dir", filepath.Join(dir, "st"), "--bin-dir", dir, "--port-base", strconv.Itoa(ports.Base), "--nice", "10",
 			"--manifests", filepath.Join(dir, "config", "crd"), "--controller-bin", "", "--front-config", filepath.Join(dir, "front.json"),
 			"--front-bin", "", "--frps-bin", "", "--front-mode", "host-dialed"}
