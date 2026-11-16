@@ -6,6 +6,7 @@ package lifecycle
 
 import (
 	"context"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -111,5 +112,66 @@ func TestAWinnerWhoseAllocationGoesInTheRig(t *testing.T) {
 		}
 		h.clock.Advance(10 * time.Second)
 		h.Step()
+	}
+}
+
+// TestAMemberJoinsANoOverlapGap: on the queued path, P's successor S is made marked at 09:19:40 and pends behind A's
+// GPU cap; P drains in no-overlap mode at 09:50:20, so the gap begins and Degraded is NoOverlapSlot. At 09:50:30 a
+// second Provider with room joins the deployment. S's start deadline has passed, so in the next pass its hedge gets a
+// member there, at once: it names P and S's hedge, and carries no no-overlap stamp, nor its Allocation the queued
+// mark. Once that member is ready it wins, and the gap ends: S ends HedgeLost and NoOverlapSlot clears.
+func TestAMemberJoinsANoOverlapGap(t *testing.T) {
+	rg := noOverlapQueuedRig(t)
+	p := noOverlapStart(rg)
+	hoStepTo(rg, hoT(9, 19, 20), 5*time.Minute, nil)
+	hoStepTo(rg, hoT(9, 19, 40), 10*time.Second, nil)
+	reps := hoRepl(rg, p.Name)
+	if len(reps) != 1 || reps[0].Annotations[annotationNoOverlapSuccessor] == "" {
+		t.Fatalf("P's replacements %+v, want one queued successor, marked", reps)
+	}
+	s := reps[0].Name
+	hoStepTo(rg, hoT(9, 50, 30), time.Minute, nil)
+	if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Reason != v1alpha1.ReasonNoOverlapSlot {
+		t.Fatalf("at 09:50:30 Degraded = %s %q, want NoOverlapSlot: the fixture has no gap, so the test proves nothing", c.Reason, c.Message)
+	}
+	rg.addProvider(stuckSecond, "gpu-long", 4*time.Hour, nil, nil)
+	rg.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Providers.Names = []string{rigProvider, stuckSecond} })
+	rg.clock.Advance(10 * time.Second)
+	rg.Step() // 09:50:40
+	if a, ok := rg.allocation(rg.instance(s).Spec.AllocationRef.Name); !ok || a.Status.AtProvider.StartTime != nil {
+		t.Fatalf("S's job has started by 09:50:40 (%+v): no member is due, so the test proves nothing", a)
+	}
+	var m *v1alpha1.Instance
+	for _, in := range rg.liveInstances(hoMD) {
+		if in.Labels[v1alpha1.LabelProvider] == stuckSecond {
+			m = &in
+		}
+	}
+	if m == nil {
+		t.Fatal("no member of S's hedge on the second Provider at 09:50:40")
+	}
+	if m.Annotations[v1alpha1.AnnotationPredecessor] != p.Name || m.Annotations[v1alpha1.AnnotationHedgeGroup] != s ||
+		m.Annotations[annotationNoOverlapSuccessor] != "" || m.Annotations[annotationNoOverlapGap] != "" {
+		t.Fatalf("the member's annotations %v: want predecessor %s, hedge-group %s, and no no-overlap stamp", m.Annotations, p.Name, s)
+	}
+	if a, ok := rg.allocation(m.Spec.AllocationRef.Name); !ok || a.Annotations[v1alpha1.AnnotationQueuedSuccessor] != "" {
+		t.Fatalf("the member's Allocation %+v: want it made, without the queued mark", a)
+	}
+	member := m.Name
+	hoStepUntil(rg, hoT(10, 30, 0), 10*time.Second, func() bool { return rg.instance(member).Status.Phase == v1alpha1.InstanceReady }, nil)
+	rg.clock.Advance(10 * time.Second)
+	rg.Step()
+	if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Reason == v1alpha1.ReasonNoOverlapSlot || strings.Contains(c.Message, "drained with no replacement") {
+		t.Fatalf("after the member is ready Degraded = %s %q: the gap should have ended", c.Reason, c.Message)
+	}
+	// S, pending, lost: it ended HedgeLost and its Allocation was cancelled, so its Instance may be gone already.
+	if in := rg.instancesByName()[s]; in != nil && in.Status.EndReason != v1alpha1.ReasonHedgeLost {
+		t.Fatalf("S is %s, ended for %q, want HedgeLost", in.Status.Phase, in.Status.EndReason)
+	}
+	if n := len(rg.rec.Find(eventReplaced, v1alpha1.ReasonHedgeLost)); n < 1 {
+		t.Fatal("no replaced HedgeLost event for S")
+	}
+	if g := rg.passOf(hoMD).gapCarriers(); len(g) != 0 {
+		t.Fatalf("%d gap carriers after the member won, want none", len(g))
 	}
 }
