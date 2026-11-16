@@ -221,7 +221,12 @@ func TestTheMarkReadsTheProviderFromTheReferenceNotTheLabel(t *testing.T) {
 // impossible, and the replacement goes onto the warm one at its planned time.
 func TestAReplacementPlacedOnAWarmAllocationCreatesAndMarksNothing(t *testing.T) {
 	log := &creationLog{}
-	qos := []v1alpha1.QOSProfile{{Name: "example-s2", MaxSubmitPerUser: i32(2)}}
+	// The warm Allocation comes from a scale-up at 09:00, which under HBEP-7's reserved replacement slot (#598)
+	// needs a third slot: maxSubmitPerUser 2 holds the primary's Allocation and the slot reserved for its
+	// replacement, so a second primary of any deployment waits. The QOS allows 3 until the warm Allocation is
+	// made, and 2 from then on, as an operator's edit would, so the primary's and the warm Allocation take both
+	// slots, the state this test is about.
+	qos := []v1alpha1.QOSProfile{{Name: "example-s2", MaxSubmitPerUser: i32(3)}}
 	rg := newRig(t, append(qosOpts(qos, "", "example-s2"), withMaxTime(4*time.Hour), withInterceptors(log.funcs()), withBatchConfig(func(c *pfake.Config) { c.MaxSubmitPerUser = 2 }))...)
 	p := *hoStart(rg, nil)
 	hoStepTo(rg, hoT(9, 0, 0), 5*time.Minute, nil)
@@ -238,6 +243,7 @@ func TestAReplacementPlacedOnAWarmAllocationCreatesAndMarksNothing(t *testing.T)
 	})
 	rg.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 1 })
 	rg.until(5*time.Minute, 10*time.Second, "one live Instance", func() bool { return len(rg.liveInstances(hoMD)) == 1 })
+	rg.setSubmitLimit("example-s2", 2)
 	before := len(log.allocations())
 	if before != 2 {
 		t.Fatalf("%d Allocations created before the replacement, want the primary's and the warm one", before)
