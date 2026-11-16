@@ -76,6 +76,10 @@ type StatusReport struct {
 	// (admission.go), asked of the API server like CRDGuard: empty when it was not asked. An absent
 	// policy is a state, not a fault, as an absent CRD guard is.
 	AdmissionPolicies []AdmissionState `json:"admission_policies,omitempty"`
+	// GlobalApprovalPolicy is the state of ApprovalPolicy/global (approvalpolicy.go), asked of the API server
+	// like AdmissionPolicies: nil when it was not asked. An absent policy or definition is a state, not a
+	// fault: with no policy a target that needs approval waits.
+	GlobalApprovalPolicy *GlobalPolicyState `json:"global_approval_policy,omitempty"`
 	// Identities are the agents' identities with each one's expiry and whether the API server accepts
 	// its token (identity_status.go). An expired or rejected one is a state, not a fault.
 	Identities []IdentityState `json:"identities,omitempty"`
@@ -278,6 +282,7 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 	// Last, so that it is asked only of a host that is healthy after every other check.
 	statusGuard(ctx, cfg, rep, bad)
 	statusAdmission(ctx, cfg, rep, bad)
+	statusGlobalPolicy(ctx, cfg, rep, bad)
 	statusAgents(ctx, cfg, l, st.Ports, rep, bad)
 	return rep, nil
 }
@@ -316,6 +321,22 @@ func statusAdmission(ctx context.Context, cfg *rest.Config, rep *StatusReport, b
 		return
 	}
 	rep.AdmissionPolicies = ps
+}
+
+// statusGlobalPolicy sets rep.GlobalApprovalPolicy from the API server, under the same condition as
+// statusAdmission. An absent policy, or an absent definition, changes nothing about the host's health; a
+// failure to ask does, and the state then says why it could not be read.
+func statusGlobalPolicy(ctx context.Context, cfg *rest.Config, rep *StatusReport, bad func(string, ...any)) {
+	if rep.Health != Healthy || rep.Readyz == nil || !*rep.Readyz {
+		return
+	}
+	gs, err := CheckGlobalPolicy(ctx, cfg)
+	if err != nil {
+		rep.GlobalApprovalPolicy = &GlobalPolicyState{Detail: "could not be read: " + err.Error()}
+		bad("the global approval policy could not be checked: %v", err)
+		return
+	}
+	rep.GlobalApprovalPolicy = gs
 }
 
 // statusGuard sets rep.CRDGuard from the API server, and only for a host judged healthy by every other
