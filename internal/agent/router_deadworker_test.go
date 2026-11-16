@@ -28,11 +28,20 @@ import (
 // and its health flags that are set, as "health:<flag>" = 1.
 func hostStats(t *testing.T, runDir string) map[string]map[string]int {
 	t.Helper()
+	out, err := hostStatsErr(runDir)
+	if err != nil {
+		t.Fatalf("Envoy's /clusters: %v", err)
+	}
+	return out
+}
+
+// hostStatsErr is hostStats returning its error, for a reader that is not the test's goroutine.
+func hostStatsErr(runDir string) (map[string]map[string]int, error) {
 	c := unixClient(filepath.Join(runDir, agent.EnvoyAdminSocket))
 	defer c.Transport.(*http.Transport).CloseIdleConnections()
 	resp, err := c.Get("http://admin/clusters?format=json")
 	if err != nil {
-		t.Fatalf("Envoy's /clusters: %v", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 	var doc struct {
@@ -48,7 +57,7 @@ func hostStats(t *testing.T, runDir string) map[string]map[string]int {
 		} `json:"cluster_statuses"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
-		t.Fatalf("Envoy's /clusters: %v", err)
+		return nil, err
 	}
 	out := map[string]map[string]int{}
 	for _, cl := range doc.Clusters {
@@ -70,7 +79,7 @@ func hostStats(t *testing.T, runDir string) map[string]map[string]int {
 			out[h.Hostname] = m
 		}
 	}
-	return out
+	return out, nil
 }
 
 // heldOut reports whether Envoy holds the worker out: failed by its active check, or ejected.
