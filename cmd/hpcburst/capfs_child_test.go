@@ -18,15 +18,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
 	"golang.org/x/sys/unix"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
@@ -497,6 +501,106 @@ func TestAnUnmountedVolumeLeavesNoFusermount3(t *testing.T) {
 		t.Fatalf("%s is still listed after its unmount", v.mount)
 	}
 	capWaitFor(t, capChildBound, "the volume's fusermount3 to exit after its unmount", func() bool { return len(capFusermount3For(v.mount)) == 0 })
+}
+
+// capDebugLog collects the lines of go-fuse's debug log, which its server writes from its own goroutines.
+type capDebugLog struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *capDebugLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, strings.Split(strings.TrimRight(string(p), "\n"), "\n")...)
+	return len(p), nil
+}
+
+func (l *capDebugLog) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.lines...)
+}
+
+// matching are the lines that re matches.
+func matching(lines []string, re *regexp.Regexp) []string {
+	var out []string
+	for _, l := range lines {
+		if re.MatchString(l) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// The poll hack (capPollHack) runs while the mount is made, its own POLL answered by go-fuse's server, and afterwards the kernel sends the
+// server no POLL, even for a file this process opens through Go's os package, which registers the file with epoll. Without the hack the
+// kernel sends one, and in a process that serves its own mount that is what deadlocked a loaded run (capfs_mount_test.go). The requests
+// are read from go-fuse's debug log, which names each one's opcode ("rx 12: POLL n1 ..."); the file's own CREATE and OPEN must show in
+// it, so that a log that missed the requests cannot pass.
+func TestThePollHackLeavesTheKernelNoPOLLToSend(t *testing.T) {
+	capFuseOrSkip(t)
+	dir, err := os.MkdirTemp("", "cp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbg := &capDebugLog{}
+	v, err := mountCapVolume(dir, capChildLimit, capFsName, true, func(o *fuse.MountOptions) {
+		o.Debug = true
+		o.Logger = log.New(dbg, "", 0)
+	})
+	if err != nil {
+		t.Fatalf("mount: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := v.unmount(capChildBound); err != nil {
+			t.Errorf("unmount %s: %v", v.mount, err)
+		}
+		capKillLeftFusermount3(t, v.mount)
+		if capUnmountIfDead(t, v.mount, capChildBound) {
+			if err := capRemoveDir(dir); err != nil {
+				t.Errorf("%v", err)
+			}
+		}
+	})
+	poll := regexp.MustCompile(`^rx \d+: POLL `)
+	before := dbg.snapshot()
+	if len(matching(before, poll)) == 0 {
+		t.Errorf("the server saw no POLL while the mount was made, so the poll hack did not run (%d debug lines)", len(before))
+	}
+	p := filepath.Join(v.mount, "opened")
+	err = capDo(capChildBound, "a write and a read of "+p+" through os", func() error {
+		f, err := os.Create(p)
+		if err != nil {
+			return err
+		}
+		if _, err := f.Write([]byte("x")); err != nil {
+			f.Close()
+			return err
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
+		f, err = os.Open(p)
+		if err != nil {
+			return err
+		}
+		_, err = io.ReadAll(f)
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	after := dbg.snapshot()[len(before):]
+	if polls := matching(after, poll); len(polls) != 0 {
+		t.Errorf("the kernel sent %d POLL requests for a file opened after the mount: %q", len(polls), polls)
+	}
+	if len(matching(after, regexp.MustCompile(`^rx \d+: (CREATE|OPEN) `))) == 0 {
+		t.Errorf("the debug log shows no CREATE or OPEN for %s, so it cannot show that no POLL came: %q", p, after)
+	}
 }
 
 // The state of the issue, and its repair by the sweep: a capfs server whose mount has no auto_unmount, killed with SIGKILL, leaves its

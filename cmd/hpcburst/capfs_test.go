@@ -177,8 +177,8 @@ func (e capMountError) Unwrap() error { return e.err }
 // mountCapVolume mounts a volume of the given size under dir, which it fills with a backing directory and a mount point, and returns it
 // with its server running in this process. The mount carries source as its name. newCapVolume mounts through it, and so does the child
 // process of the sweep's tests, so that both mount alike. autoUnmount passes fusermount3's auto_unmount (capfs_mount_test.go says what
-// it does, and does not do, on each version).
-func mountCapVolume(dir string, limit int64, source string, autoUnmount bool) (*capVolume, error) {
+// it does, and does not do, on each version). opts change go-fuse's mount options (a test turns on its debug log).
+func mountCapVolume(dir string, limit int64, source string, autoUnmount bool, opts ...func(*fuse.MountOptions)) (*capVolume, error) {
 	if real, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = real // mountinfo and fusermount3 name a mount point by its real path
 	}
@@ -206,7 +206,11 @@ func mountCapVolume(dir string, limit int64, source string, autoUnmount bool) (*
 	}
 	v.conn = conn
 	// go-fuse serves the descriptor through its /dev/fd/N mount point, and so never runs fusermount3 itself.
-	srv, err := fs.Mount(fmt.Sprintf("/dev/fd/%d", conn.fd), root, &fs.Options{MountOptions: fuse.MountOptions{FsName: source, Name: "capfs", MaxWrite: capMaxWrite}})
+	mo := fuse.MountOptions{FsName: source, Name: "capfs", MaxWrite: capMaxWrite}
+	for _, o := range opts {
+		o(&mo)
+	}
+	srv, err := fs.Mount(fmt.Sprintf("/dev/fd/%d", conn.fd), root, &fs.Options{MountOptions: mo})
 	if err != nil {
 		uerr := capUnmount(v.mount, capUnmountTimeout)
 		if uerr == nil {
