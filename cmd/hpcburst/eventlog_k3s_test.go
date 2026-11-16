@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -245,8 +246,9 @@ func TestEventLogStartsFirstComesBackAfterAKillAndStopsLast(t *testing.T) {
 		e := entryByName(supervisorEntries(t, h.dir), "eventlog")
 		return e != nil && e.State == "running" && e.Proc != nil && e.Proc.PID != lg.Proc.PID && e.Restarts == 1
 	})
-	if e := entryByName(supervisorEntries(t, h.dir), "eventlog"); e.LastExit == nil || e.LastExit.Detail != "signal: killed" {
-		t.Errorf("the log's last exit %+v, want signal: killed", e.LastExit)
+	restarted := entryByName(supervisorEntries(t, h.dir), "eventlog")
+	if restarted.LastExit == nil || restarted.LastExit.Detail != "signal: killed" {
+		t.Errorf("the log's last exit %+v, want signal: killed", restarted.LastExit)
 	}
 	waitFor(t, 30*time.Second, "status to report the log healthy again, with its three events", func() bool {
 		s, code := logStatusOf(t, h)
@@ -259,16 +261,21 @@ func TestEventLogStartsFirstComesBackAfterAKillAndStopsLast(t *testing.T) {
 	if d := cli(t, h.args("down")...); d.code != exitOK {
 		t.Fatalf("down exited %d: %s", d.code, d.err)
 	}
+	// The log was SIGKILLed and restarted above, so its first exit line is the killed process's:
+	// the order is read from the restarted log's own exit, by its PID, and from the stop's last stage
+	// lines, which down writes once.
 	log := fileOf(filepath.Join(h.dir, "logs", "supervisor.log"))
-	idx := func(sub string) int { return strings.Index(log, sub) }
-	ctlExit, logExit := idx("controller: pid "+itoa(ctl.Proc.PID)+" exited"), idx("eventlog: pid ")
-	for _, i := range []int{idx("stopping the tunnel processes and the controllers"), idx("stopping the event log last"), ctlExit} {
-		if i < 0 {
-			t.Fatalf("the supervisor's log lacks a line of the stop:\n%s", log)
-		}
+	idx := func(sub string) int { return strings.LastIndex(log, sub) }
+	stopCtl, stopLog := idx("stopping the tunnel processes and the controllers"), idx("stopping the event log last")
+	ctlExit := idx("controller: pid " + itoa(ctl.Proc.PID) + " exited")
+	logExit := idx("eventlog: pid " + itoa(restarted.Proc.PID) + " exited")
+	order := fmt.Sprintf("controllers' stage at byte %d, controller %d's exit at %d, the log's stage at %d, log %d's exit at %d",
+		stopCtl, ctl.Proc.PID, ctlExit, stopLog, restarted.Proc.PID, logExit)
+	if stopCtl < 0 || ctlExit < 0 || stopLog < 0 || logExit < 0 {
+		t.Fatalf("the supervisor's log lacks a line of the stop (%s):\n%s", order, log)
 	}
-	if !(idx("stopping the tunnel processes and the controllers") < idx("stopping the event log last") && ctlExit < idx("stopping the event log last") && logExit > ctlExit) {
-		t.Errorf("the log did not stop last:\n%s", log)
+	if !(stopCtl < ctlExit && ctlExit < stopLog && stopLog < logExit) {
+		t.Errorf("the log did not stop last (%s):\n%s", order, log)
 	}
 	noListener(t, 28496)
 	noListener(t, 28497)
@@ -394,8 +401,11 @@ func TestEventLogUpgradeCopiesItsStoreBesideTheBackupAndRestorePutsBothBack(t *t
 	for _, e := range ents {
 		names = append(names, e.Name())
 	}
+	// Compared as sorted sets: the listing's order is the file system's.
+	want := []string{"eventlog", filepath.Base(up.Backup)}
 	slices.Sort(names)
-	if want := []string{"eventlog", filepath.Base(up.Backup)}; !slices.Equal(names, want) {
+	slices.Sort(want)
+	if !slices.Equal(names, want) {
 		t.Errorf("backups/ holds %v, want exactly the SQLite backup and one log copy: %v", names, want)
 	}
 	if _, err := os.Stat(filepath.Join(h.dir, "backups", "eventlog", "jetstream")); err != nil {
