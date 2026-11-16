@@ -33,6 +33,7 @@ spec:
       # The partition's own QOS, as on plgrid-gpu-gh200 below: Slurm applies plgrid to every job here before the
       # job's QOS, so a Provider's qos now has its submit limit of 1 overridden by plgrid's 2000 (HBEP-4, QOS limits).
       qos: plgrid # facts.partitions[name=plgrid].qos, "plgrid" (scontrol show partition, 30 Oct 2026); its limits are typed in qos below
+      billingUnit: cpu-hour # facts.partitions[name=plgrid].tres_billing_weights, "cpu=1,mem=0.0005M": the scheduler weighs a CPU at 1, and the partition has no GPU (facts.partitions[name=plgrid].gres, "(none)"), so one unit of its billing counts a CPU-hour (HBEP-4, Platform profile schema, The remaining groups)
       # This is a CPU partition for conformance runs only. It hosts no Instance
       # (`@hpc-burst-science-agent`, 31 Oct 2026). gpusPerNode 0 makes the Slurm provider refuse
       # any request for a GPU here (internal/slurm CheckRequest; test TestShippedCPUPartitionRefusesGPUAllocations).
@@ -74,6 +75,10 @@ spec:
       # holds, since plgrid sets none: a second held submission under now was accepted while the first was
       # held (issue #94, comment 6558113194).
       qos: plgrid # scontrol show partition (issue #94, comment 6557416899); facts.slurm.qos and facts.partitions[name=plgrid-gpu-gh200].qos
+      billingUnit: gpu-hour # facts.partitions[name=plgrid-gpu-gh200].tres_billing_weights, "cpu=0.01388,mem=0.00000816993M,GRES/gpu=1": the scheduler weighs a GPU at 1; Cyfronet bills its GPU partitions by the GPU-hour (facts.other.billing, documented)
+      # dialHomeModes is absent: no dial-home mode is listed for any Helios partition. A mode enters a partition's list once its platform
+      # precondition is measured on that partition (HBEP-4, Platform profile schema, The remaining groups), and open question 16's relay checks have
+      # not run on GH200, so a launcher in either mode still reads this Provider (`@hpc-burst-science-agent`, #625, comment 6908815428).
 
   # The QOSes that a Provider's qos or a partition's qos names, with the limits the plan reads (HBEP-4, QOS
   # limits and Platform profile schema; `@hpc-burst-science-agent`, 1 Nov 2026). An absent limit is no limit

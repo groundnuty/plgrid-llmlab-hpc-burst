@@ -1,0 +1,5 @@
+# A hand-written fixture pins file: one version.
+#
+# version  arch   asset
+1.40.2     amd64  envoy-1.40.2-linux-x86_64     0000
+1.40.2     arm64  envoy-1.40.2-linux-aarch_64   0000

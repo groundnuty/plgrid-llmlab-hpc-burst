@@ -1,0 +1,9 @@
+# A hand-written fixture: a draft ships nothing, so its platform and partition are not shipped.
+apiVersion: hpcburst.groundnuty.github.io/v1alpha1
+kind: PlatformProfile
+metadata:
+  name: example-draft
+spec:
+  providerKind: batch
+  partitions:
+    - name: part-draft

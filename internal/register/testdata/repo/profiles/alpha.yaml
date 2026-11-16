@@ -1,0 +1,10 @@
+# A hand-written fixture: a batch platform with two typed partitions.
+apiVersion: hpcburst.groundnuty.github.io/v1alpha1
+kind: PlatformProfile
+metadata:
+  name: example-alpha
+spec:
+  providerKind: batch
+  partitions:
+    - name: part-one
+    - name: part-two
