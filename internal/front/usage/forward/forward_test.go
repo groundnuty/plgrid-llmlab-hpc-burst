@@ -429,3 +429,25 @@ func TestAnIdlePollReadsTheFilesWhenTheChannelHasNothingToCarryWhatWasSynced(t *
 	r.awaitCaughtUp(10)
 	usagetest.CheckStream(t, d, dir, usagetest.Range(1, 10))
 }
+
+// HBEP-8, The durable log, Streams: a message holds up to 256 records and stays under nats-server's
+// maximum payload of 1 MiB. 150 records of 8,000 bytes are 1.2 MB, so they cannot go as one message
+// whatever their count: the forwarder cuts them by size. A record whose line alone is longer than a
+// message (a client's model name can be as long as a request body) is passed over, never stalling the
+// ones after it: the files hold it, the forwarder counts it, and the gauge returns to 0.
+func TestMessagesStayUnderAMiBAndALineLongerThanOneIsSkipped(t *testing.T) {
+	dir := t.TempDir()
+	put(t, dir, "usage-2026-11-10.jsonl", lines(t, 1, 150, 8000)+line(t, 151, 1<<20+1000)+lines(t, 152, 153, 100))
+	d := nodetest.NewDir(t, logPorts, bigCaps)
+	d.Start(t).Ready()
+	r := startForwarder(t, d, dir, func() uint64 { return 153 }, nil, nil)
+	r.awaitCaughtUp(153)
+	want := append(usagetest.Range(1, 150), 152, 153)
+	msgs := usagetest.CheckStream(t, d, dir, want) // also fails on a message of 1 MiB or more
+	if len(msgs) < 2 {
+		t.Errorf("%d messages for 1.2 MB of records: they must be cut by size", len(msgs))
+	}
+	if s := r.fwd.Stats(); s.Skipped != 1 || s.Failures != 0 {
+		t.Errorf("skipped %d records and %d failures, want 1 and 0", s.Skipped, s.Failures)
+	}
+}
