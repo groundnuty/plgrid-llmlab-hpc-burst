@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -27,6 +28,8 @@ type opRig struct {
 	c   client.Client
 	r   *Reconciler
 	ctx context.Context
+	// stepped is the pass of the last step.
+	stepped *pass
 }
 
 func newOpRig(t *testing.T, f *opFixture, ops ...*v1alpha1.Operation) *opRig {
@@ -35,7 +38,8 @@ func newOpRig(t *testing.T, f *opFixture, ops ...*v1alpha1.Operation) *opRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := clientfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.Operation{})
+	b := clientfake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.Operation{}, &v1alpha1.ModelDeployment{}, &v1alpha1.Instance{}, &v1alpha1.Allocation{})
 	for _, op := range ops {
 		b = b.WithObjects(op)
 	}
@@ -45,17 +49,66 @@ func newOpRig(t *testing.T, f *opFixture, ops ...*v1alpha1.Operation) *opRig {
 	for _, a := range f.allocs {
 		b = b.WithObjects(a.DeepCopy())
 	}
+	// What an Operation writes when it executes (the spec, an Instance, an Allocation) is in the client too, and the
+	// fixture's objects carry the resourceVersion the client gave them, as objects the pass read do.
+	if f.md != nil {
+		b = b.WithObjects(f.md.DeepCopy())
+	}
+	for _, in := range f.insts {
+		b = b.WithObjects(in.DeepCopy())
+	}
 	c := b.Build()
-	return &opRig{t: t, f: f, c: c, r: &Reconciler{Client: c, Reader: c, Clock: SystemClock{}, Backend: &Backend{}}, ctx: context.Background()}
+	g := &opRig{t: t, f: f, c: c, r: &Reconciler{Client: c, Reader: c, Clock: SystemClock{}, Backend: &Backend{}, Recorder: &MemoryRecorder{}}, ctx: context.Background()}
+	g.syncVersions()
+	return g
 }
+
+// syncVersions copies the stored resourceVersions into the fixture's objects.
+func (g *opRig) syncVersions() {
+	g.t.Helper()
+	get := func(key types.NamespacedName, obj client.Object) {
+		if err := g.c.Get(g.ctx, key, obj); err != nil {
+			g.t.Fatal(err)
+		}
+	}
+	if g.f.md != nil {
+		var md v1alpha1.ModelDeployment
+		get(types.NamespacedName{Namespace: opNS, Name: opMD}, &md)
+		g.f.md.ResourceVersion = md.ResourceVersion
+	}
+	for _, in := range g.f.insts {
+		var cur v1alpha1.Instance
+		get(types.NamespacedName{Namespace: opNS, Name: in.Name}, &cur)
+		in.ResourceVersion = cur.ResourceVersion
+	}
+	for name, a := range g.f.allocs {
+		var cur v1alpha1.Allocation
+		get(types.NamespacedName{Namespace: opNS, Name: name}, &cur)
+		a.ResourceVersion = cur.ResourceVersion
+	}
+}
+
+// events are the events the step raised.
+func (g *opRig) events() []RecordedEvent { return g.r.Recorder.(*MemoryRecorder).Events() }
 
 // step runs the step once at now, as a pass over the fixture's current state.
 func (g *opRig) step(now time.Time) {
 	g.t.Helper()
 	p := g.f.pass()
 	p.r, p.ctx, p.now = g.r, g.ctx, now
+	p.mem = g.r.memory()
 	if err := p.operations(); err != nil {
 		g.t.Fatalf("the Operations step failed: %v", err)
+	}
+	// The spec the step wrote is the fixture's from here on, as the next pass reads it, and an Allocation that is gone
+	// is no longer listed.
+	g.f.md = p.md
+	g.stepped = p
+	for name := range g.f.allocs {
+		var cur v1alpha1.Allocation
+		if err := g.c.Get(g.ctx, types.NamespacedName{Namespace: opNS, Name: name}, &cur); apierrors.IsNotFound(err) {
+			delete(g.f.allocs, name)
+		}
 	}
 }
 
@@ -217,27 +270,28 @@ func TestAPassTouchesOnlyItsOwnDeploymentsOperations(t *testing.T) {
 	}
 }
 
-// A confirmed Operation's plan is frozen: nothing rewrites status.plan, whatever the state does. With no
-// target that needs approval it waits with Executable=False, reason ExecutionNotBuilt.
-func TestAConfirmedPlanIsFrozenAndWaitsAsNotBuilt(t *testing.T) {
+// A confirmed Operation's plan is frozen: nothing rewrites status.plan, whatever the state does, while the
+// Operation waits for an approval. Here the drains need one: both Allocations are released when idle.
+func TestAConfirmedPlanIsFrozenWhileItWaitsForAnApproval(t *testing.T) {
+	idle := &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: durPtr("30m")}
 	f := newOpFixture(t, 2)
 	f.withGlobalPolicy()
-	f.addInstance(instOpts{name: "r1", phase: v1alpha1.InstanceReady, started: true, hardEnd: tp(opHardEnd)})
-	f.addInstance(instOpts{name: "r2", phase: v1alpha1.InstanceReady, started: true, hardEnd: tp(opHardEnd.Add(time.Hour)), created: time.Minute})
+	f.addInstance(instOpts{name: "r1", phase: v1alpha1.InstanceReady, started: true, hardEnd: tp(opHardEnd), retention: idle})
+	f.addInstance(instOpts{name: "r2", phase: v1alpha1.InstanceReady, started: true, hardEnd: tp(opHardEnd.Add(time.Hour)), created: time.Minute, retention: idle})
 	g := newOpRig(t, f, opNamed("scale", scaleOp(1)))
 	g.step(opAt)
 	planned := g.op("scale")
-	if n := countNeeding(planned.Status.Plan); n != 0 {
-		t.Fatalf("%d targets need approval; this fixture's drain of a kept Allocation needs none", n)
+	if n := countNeeding(planned.Status.Plan); n == 0 {
+		t.Fatal("no target needs approval; this fixture's drain of an Allocation released when idle needs one")
 	}
 	g.confirm("scale", planned.Status.Plan.ID)
 	g.step(opAt.Add(time.Minute))
 	op := g.op("scale")
-	if op.Status.Phase != v1alpha1.OperationPhasePlanned {
-		t.Errorf("phase %q: nothing needs approval, so the phase stays what it was", op.Status.Phase)
+	if op.Status.Phase != v1alpha1.OperationPhaseAwaitingApproval {
+		t.Errorf("phase %q, want AwaitingApproval", op.Status.Phase)
 	}
-	if c := condOf(op, v1alpha1.ConditionExecutable); c == nil || c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonExecutionNotBuilt {
-		t.Errorf("Executable %+v, want False/ExecutionNotBuilt", c)
+	if c := condOf(op, v1alpha1.ConditionExecutable); c == nil || c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonAwaitingApproval {
+		t.Errorf("Executable %+v, want False/AwaitingApproval", c)
 	}
 	// The state changes after the confirm: the plan stays as the owner confirmed it.
 	f.allocs["alloc-r2"].Status.AtProvider.HardEnd = opTime(opHardEnd.Add(-time.Hour))
@@ -372,8 +426,8 @@ func TestAwaitingApprovalCountsTheApprovals(t *testing.T) {
 	// A's own Approval, under the Provider policy that names A, counts on Sano: every target is on Sano.
 	g.approve(userAgentA, id, "uid-scale")
 	phase, c = state()
-	if phase != v1alpha1.OperationPhaseAwaitingApproval || c.Reason != v1alpha1.ReasonExecutionNotBuilt {
-		t.Errorf("with A's approval: phase %q, Executable %+v, want every approval in: ExecutionNotBuilt", phase, c)
+	if phase != v1alpha1.OperationPhaseExecuting || c.Reason != v1alpha1.ReasonExecuting {
+		t.Errorf("with A's approval: phase %q, Executable %+v, want every approval in, so committed: Executing", phase, c)
 	}
 	if got := condOf(g.op("scale"), v1alpha1.ConditionNoApprovalPolicy); got != nil {
 		t.Errorf("NoApprovalPolicy %+v is set although policies apply", got)

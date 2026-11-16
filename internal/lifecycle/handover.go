@@ -35,6 +35,13 @@ func (p *pass) capacity() error {
 	}
 	prim := p.primaries()
 	desired := int(p.md.Spec.Instances)
+	// While a Scale Operation is Executing, the deployment keeps at most the Operation's count, whatever the spec says
+	// before its write has landed or after a person raised it: the committed targets are the Operation's to take, and
+	// step 7 takes nothing of its own (below; HBEP-10, Approval and execution).
+	scaling := p.executingScale()
+	if scaling != nil {
+		desired = min(desired, int(scaling.Spec.Scale.Instances))
+	}
 	// A missing primary whose predecessor drained in no-overlap mode, or whose
 	// predecessor was such a primary's successor that failed, is that
 	// predecessor's successor, marked, on its Provider first (HBEP-7,
@@ -59,6 +66,11 @@ func (p *pass) capacity() error {
 			}
 			break
 		}
+	}
+	if scaling != nil {
+		// The Operation's committed targets are acted on by the Operations step, before this one. The controller's own
+		// selection is never called here: it could pick another victim than the one that was approved.
+		return nil
 	}
 	// The chosen primaries are read again: the loop above made Instances, which the selection counts. The surplus,
 	// ready or not, is taken every pass, not only when the count is lowered (scaleDownTargets).

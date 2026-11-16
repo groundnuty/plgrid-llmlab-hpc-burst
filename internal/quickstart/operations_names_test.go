@@ -134,6 +134,11 @@ var guideNames = map[string]string{
 	// Reasoning models): pkg/agentapi's, as the agent reports it.
 	"ReasoningBudgetExhausted": agentapi.ReasonReasoningBudgetExhausted,
 
+	// An Operation's phase, and the reason of its degraded event (HBEP-10, Approval and execution; HBEP-8,
+	// Reasons in alpha).
+	"Stale":     string(v1alpha1.OperationPhaseStale),
+	"PlanStale": v1alpha1.ReasonPlanStale,
+
 	// Retention modes (HBEP-7, Retention).
 	"Keep":            string(v1alpha1.RetentionKeep),
 	"ReleaseWhenIdle": string(v1alpha1.RetentionReleaseWhenIdle),

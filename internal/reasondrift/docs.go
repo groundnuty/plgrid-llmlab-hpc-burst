@@ -28,7 +28,7 @@ var Actions = []string{"started", "ready", "degraded", "failing", "ending-soon",
 
 // Kinds are the kinds of object an event in alpha can regard (HBEP-8, Reasons
 // in alpha, Regarding column). A Regarding cell names its kinds by these words.
-var Kinds = []string{"Allocation", "Instance", "Lease", "ModelDeployment", "PlatformProfile", "Provider"}
+var Kinds = []string{"Allocation", "Instance", "Lease", "ModelDeployment", "Operation", "PlatformProfile", "Provider"}
 
 // TableEntry is one reason of HBEP-8's "Reasons in alpha" table under one
 // type: the kinds of object it regards in the table's rows, merged when the

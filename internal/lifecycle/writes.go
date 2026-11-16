@@ -143,6 +143,11 @@ func (p *pass) deleteAllocation(a *v1alpha1.Allocation, why string) error {
 	if !a.DeletionTimestamp.IsZero() {
 		return nil
 	}
+	// An Allocation that an Executing Operation committed to release is released for that Operation, whichever
+	// path of the pass deletes it: the cause is the Operation's alone (operationCause; HBEP-10, Audit).
+	if c, ok := p.operationCause(a); ok {
+		why = c
+	}
 	cause := releaseCause(why)
 	if a.Annotations[v1alpha1.AnnotationReleaseCause] != cause {
 		next := a.DeepCopy()
