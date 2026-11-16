@@ -80,7 +80,8 @@ func TestEventNotes(t *testing.T) {
 }
 
 // restOf returns skipped entries whose names are the given lengths, distinct
-// where the length allows and at most the 64 characters a note shows whole. A
+// where the length allows and at most 64 characters, within the 128 a note shows
+// whole, so every name is quoted whole as refSummary quotes it. A
 // length of 0 is the empty name (SkipEmptyName), and 1 is one character.
 func restOf(lengths ...int) []SkippedEntry {
 	var out []SkippedEntry
@@ -97,7 +98,8 @@ func restOf(lengths ...int) []SkippedEntry {
 	return out
 }
 
-// sixtyFours is n names of 64 characters, the longest a note shows whole.
+// sixtyFours is n names of 64 characters, which a note shows whole (it cuts a name
+// only above 128).
 func sixtyFours(n int) []int {
 	out := make([]int, n)
 	for i := range out {

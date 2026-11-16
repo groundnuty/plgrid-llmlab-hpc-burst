@@ -363,7 +363,7 @@ func TestSkippedEntriesAreCappedAtTenAnHourWithASummary(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("in the first hour: events = %+v, want the 10 first entries and the summary %+v", got, want)
 	}
-	// The summary names some of the remaining 15 and not all (13 fit), ends
+	// The summary names some of the remaining 15 and not all (6 fit), ends
 	// with an ellipsis, and is within the 1,024 bytes of a note.
 	sum := got[len(got)-1].Note
 	if len(sum) > 1024 || !strings.HasSuffix(sum, "\u2026") || !strings.Contains(sum, `"n15-`) || strings.Contains(sum, `"n16-`) {
