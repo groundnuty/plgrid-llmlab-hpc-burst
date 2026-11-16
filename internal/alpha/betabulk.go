@@ -337,7 +337,7 @@ func (o BulkObs) readingLine() string {
 // VerifyBetaBulk judges the bulk row: the failed checks, a broken path's and the row's common ones. The reading is no check, and a run with no
 // saturation witness is INVALID (BulkInvalid), which Run reports when this finds nothing.
 //
-//	hbep/0006-instance-reachability/README.md:146 and :711: the real path's buffer read from a loaded round trip.
+//	HBEP-6, Open questions ("Read on the real path") and Graduation criteria: the real path's buffer read from a loaded round trip.
 func VerifyBetaBulk(row Row, o BulkObs, jobs []provider.Job) []string {
 	f := deploymentChecks(row, o.Deployment)
 	lf, _ := ledgerChecks(row, o.Tags, jobs)

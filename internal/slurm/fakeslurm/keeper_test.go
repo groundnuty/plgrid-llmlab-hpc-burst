@@ -135,6 +135,48 @@ func TestABackgroundChildNamedWithANewlineEndsWhenItsHostIsKilled(t *testing.T) 
 	hostKilledLeavesNothing(t, "die-with-named-loop", newlineName+"\n")
 }
 
+// waitForComm polls /proc/<pid>/comm every 5 ms until it reads want, within bound. The kernel names a process
+// after its exec: a process that was only forked carries its parent's name until then (issue #619). It returns
+// the first name it read and the number of reads. It fails, naming the name it last read, when bound passes;
+// when the process is gone (an exec that failed leaves a zombie, whose comm reads on); and when tick, called
+// after each read that did not match, returns an error. A read after the bound always comes before it fails, so
+// a first read that misses is followed by at least one more, however long the first took: a process that took
+// its name between the last read in time and the bound is seen, and the number of reads does not depend on
+// the load.
+func waitForComm(pid int, want string, bound time.Duration, tick func(reads int, got string) error) (first string, reads int, err error) {
+	deadline := time.Now().Add(bound)
+	file := "/proc/" + strconv.Itoa(pid) + "/comm"
+	last := ""
+	final := false // the bound has passed: this read is the last
+	for {
+		b, rerr := os.ReadFile(file)
+		reads++
+		last = string(b)
+		if reads == 1 {
+			first = last
+		}
+		if rerr == nil && last == want {
+			return first, reads, nil
+		}
+		if procGone(pid) {
+			return first, reads, fmt.Errorf("process %d is gone, having been named %q at its last read of %s (%v), want %q", pid, last, file, rerr, want)
+		}
+		if tick != nil {
+			if terr := tick(reads, last); terr != nil {
+				return first, reads, terr
+			}
+		}
+		if final {
+			return first, reads, fmt.Errorf("process %d is named %q (%v) after %d reads within %s, want %q", pid, last, rerr, reads, bound, want)
+		}
+		if !time.Now().Before(deadline) {
+			final = true // read once more, now, before failing
+			continue
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // hostKilledLeavesNothing runs the helper host, kills it by SIGKILL once its
 // job's shell and loop run, and waits for nothing of the run to be left. A
 // non-empty comm is the kernel's name for the loop (with its newline), which
@@ -180,9 +222,21 @@ func hostKilledLeavesNothing(t *testing.T, mode, comm string) {
 		t.Fatalf("loop %d is not a background child of the batch shell %d in its session", loop, shell)
 	}
 	if comm != "" {
-		if got, err := os.ReadFile("/proc/" + strconv.Itoa(loop) + "/comm"); err != nil || string(got) != comm {
-			t.Fatalf("the loop %d is named %q (%v), want %q: the test would not cover a newline in the name", loop, got, err, comm)
+		// The batch shell writes the loop's PID the moment it forks it, so the ready file can come before the loop's
+		// exec has given it its name: it is the shell's name until then (issue #619). The loop's session, parent and
+		// working directory are set at the fork, so only its name needs the wait, on the name itself.
+		first, reads, err := waitForComm(loop, comm, waitDeadline, func(int, string) error {
+			select {
+			case err := <-exited:
+				return fmt.Errorf("the helper host ended: %v\n%s", err, log.String())
+			default:
+				return nil
+			}
+		})
+		if err != nil {
+			t.Fatalf("%v: the test would not cover a newline in the name", err)
 		}
+		t.Logf("the loop %d took the name %q after %d read(s) of /proc/%d/comm, the first of them %q", loop, comm, reads, loop, first)
 	}
 	// Both were alive, and the scan by directory finds them: a scan that found
 	// nothing would also report "none left" after the death.

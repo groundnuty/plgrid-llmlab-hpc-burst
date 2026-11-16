@@ -1,0 +1,45 @@
+# The approver pin (HBEP-10, Approvals; issue #589, PR 3). An Approval's create is accepted only if
+# spec.approver is the requester: the same user name, and the same set of groups (order ignored). So an
+# approval is accepted only from the approver's own identity, and a message saying that someone
+# approved is not one. It applies to every identity. Approvals are immutable (the CRD's rule), and
+# deleting one is a revocation that RBAC leaves to the person.
+#
+# hpcburst up installs the policy and its binding on every start and resets them to this file, then
+# waits until the API server refuses a dry-run probe (internal/launcher/admission.go). Only after that
+# does the agent role gain its writes. hpcburst status reports whether they are there.
+# This file is written by hand. hack/generate.sh does not touch it. The launcher embeds it
+# (config/admission/embed.go), so what up installs is this file.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: hpcburst-approver-pin
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["hpcburst.groundnuty.github.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE"]
+        resources: ["approvals"]
+  variables:
+    - name: requestGroups
+      expression: "has(request.userInfo.groups) ? request.userInfo.groups : []"
+    - name: approverGroups
+      expression: "has(object.spec.approver.groups) ? object.spec.approver.groups : []"
+  validations:
+    - expression: "object.spec.approver.username == request.userInfo.username"
+      reason: Forbidden
+      message: "an Approval's spec.approver.username is the requester's own user name, as the API server reports it (HBEP-10, Approvals)"
+    - expression: >-
+        variables.approverGroups.all(g, g in variables.requestGroups) &&
+        variables.requestGroups.all(g, g in variables.approverGroups)
+      reason: Forbidden
+      message: "an Approval's spec.approver.groups are the requester's own groups, as the API server reports them, in any order (HBEP-10, Approvals)"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: hpcburst-approver-pin
+spec:
+  policyName: hpcburst-approver-pin
+  validationActions: ["Deny"]

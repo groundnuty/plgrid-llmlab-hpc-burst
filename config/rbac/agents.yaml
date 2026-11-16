@@ -1,5 +1,5 @@
-# The agents' namespace, the three ClusterRoles that bound them, and the two bindings that give
-# two of those roles to every agent (HBEP-10, Identities and roles; issue #589, PR 2).
+# The agents' namespace, the three ClusterRoles that bound them, and the two bindings that give two of
+# those roles to every agent (HBEP-10, Identities and roles; issue #589, PRs 2 and 3).
 #
 # hpcburst up installs every object here on every start and resets each to this file: a role's
 # rules, a binding's subjects (a binding whose roleRef differs is deleted and made again, since
@@ -9,14 +9,20 @@
 #
 # Each agent is a ServiceAccount in the namespace below, made by hpcburst identity add. The two
 # bindings name the GROUP system:serviceaccounts:hpcburst-agents, never a ServiceAccount: a binding
-# per agent would give the role to one outside the namespace too, and the admission policies of the
-# next step (PR 3) match this same group, so no identity can hold the agent role and be outside
-# them.
+# per agent would give the role to one outside the namespace too, and the admission policies
+# (config/admission/capacity-guard.yaml) match this same group, so no identity can hold the agent role
+# and be outside them.
 #
-# The agent role is READ-ONLY in this PR: no create, update, patch or scale of a ModelDeployment, and
-# no write of an Operation or an Approval. Each write comes with the admission policies that bound it
-# (PR 3), so no state of the framework lets an agent lower capacity, or release it through an owner
-# reference at create. The agents never get: delete or deletecollection, any */status, serviceaccounts,
+# The role hpcburst-agent has TWO forms, applied in two phases, so that no moment of up lets an agent's
+# role grant a write before the policy that bounds it is enforced:
+#   - the NARROW form, config/rbac/agents-narrow.yaml: read-only. up applies it with the policies and
+#     keeps it until each policy has refused a dry-run probe, or for good where a probe cannot be made;
+#   - the WIDE form, in this file: the narrow rules plus the writes the policies bound. up applies it
+#     last, after the wait.
+# The two are hand-written, never derived from each other in code; a test states the difference
+# (the writes) by hand and compares it with both.
+#
+# The agents never get: delete or deletecollection, any */status, serviceaccounts,
 # serviceaccounts/token, secrets, certificatesigningrequests, impersonate, RBAC or admission objects,
 # or writes to namespaces. The operator role is installed and bound to no one.
 apiVersion: v1
@@ -41,6 +47,22 @@ rules:
   - apiGroups: ["hpcburst.groundnuty.github.io"]
     resources: ["modeldeployments", "allocations", "instances", "operations", "approvals"]
     verbs: ["get", "list", "watch"]
+  # The writes. Each is bounded by an admission policy (config/admission): the capacity guard bounds
+  # what an agent may change in a ModelDeployment, its count included, and an Operation's metadata; the
+  # owner pin fixes the owner and binds a confirm to the owner and the plan; the approver pin accepts an
+  # Approval only from the approver's own identity.
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["modeldeployments"]
+    verbs: ["create", "update", "patch"]
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["modeldeployments/scale"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["operations"]
+    verbs: ["create", "update", "patch"]
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["approvals"]
+    verbs: ["create"]
   - apiGroups: ["apps"]
     resources: ["controllerrevisions"]
     verbs: ["get", "list", "watch"]
