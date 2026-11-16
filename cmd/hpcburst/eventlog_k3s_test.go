@@ -33,9 +33,13 @@ import (
 
 const eventLogK3sBase = 28480
 
+// eventLogManifests is the framework's definitions: up starts a controller, even the fake one, only on a host
+// that has the Operation, Approval and ApprovalPolicy definitions it watches (#589).
+const eventLogManifests = "../../config/crd"
+
 // eventLogUpArgs is up with the log on, the test floor and the test caps, and the fake controller.
 func eventLogUpArgs(h *host, bin string, extra ...string) []string {
-	return h.upArgs(eventLogK3sBase, append([]string{"--json", "--controller-bin", bin, "--event-log",
+	return h.upArgs(eventLogK3sBase, append([]string{"--json", "--controller-bin", bin, "--manifests", eventLogManifests, "--event-log",
 		"--event-log-floor", "1GB", "--event-log-events-cap", "64MiB", "--event-log-usage-cap", "64MiB"}, extra...)...)
 }
 
@@ -292,7 +296,7 @@ func TestEventLogStartsFirstComesBackAfterAKillAndStopsLast(t *testing.T) {
 func TestEventLogGatedAfterAnUpgradeIsWarnedAbout(t *testing.T) {
 	h := newHost(t)
 	bin, _ := fakeController(t)
-	r := cli(t, h.upArgs(eventLogK3sBase, "--controller-bin", bin, "--version", "1.35.9", "--event-log",
+	r := cli(t, h.upArgs(eventLogK3sBase, "--controller-bin", bin, "--manifests", eventLogManifests, "--version", "1.35.9", "--event-log",
 		"--event-log-floor", "1GB", "--event-log-events-cap", "1TiB", "--event-log-usage-cap", "1TiB")...)
 	if r.code != exitOK || !strings.Contains(r.err, "warning: the event log was not started") {
 		t.Fatalf("up exited %d, stderr %q; want 0 and the log held back for space", r.code, r.err)
@@ -316,7 +320,7 @@ func TestEventLogGatedAfterAnUpgradeIsWarnedAbout(t *testing.T) {
 func TestEventLogRefusedForSpaceStartsTheHostWithoutItAndUpgradeRefuses(t *testing.T) {
 	h := newHost(t)
 	bin, _ := fakeController(t)
-	r := cli(t, h.upArgs(eventLogK3sBase, "--json", "--controller-bin", bin, "--version", "1.35.9", "--event-log",
+	r := cli(t, h.upArgs(eventLogK3sBase, "--json", "--controller-bin", bin, "--manifests", eventLogManifests, "--version", "1.35.9", "--event-log",
 		"--event-log-floor", "100TB", "--event-log-events-cap", "64MiB", "--event-log-usage-cap", "64MiB")...)
 	if r.code != exitOK {
 		t.Fatalf("up with a log the disk cannot hold exited %d, want 0: %s", r.code, r.err)

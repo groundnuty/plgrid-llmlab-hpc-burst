@@ -248,6 +248,14 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "agent roles: installed READ-ONLY: a policy could not be probed, so the agents' writes stay off until a later up\n")
 		}
 	}
+	switch rep.GlobalApprovalPolicy {
+	case launcher.GlobalPolicyCreated:
+		fmt.Fprintf(stdout, "global ApprovalPolicy: created, naming the admin kubeconfig's user as its approver\n")
+	case launcher.GlobalPolicyExists:
+		fmt.Fprintf(stdout, "global ApprovalPolicy: exists, left as it is\n")
+	case launcher.GlobalPolicyNoCRD:
+		fmt.Fprintf(stdout, "global ApprovalPolicy: not written, the definition does not exist\n")
+	}
 	printAgentBuilds(stdout, rep.AgentBuilds)
 	return done()
 }
@@ -379,6 +387,7 @@ func printStatus(w io.Writer, r *launcher.StatusReport) {
 	printAgentBuilds(w, r.AgentBuilds)
 	printCRDGuard(w, r.CRDGuard)
 	printAdmission(w, r.AdmissionPolicies)
+	printGlobalPolicy(w, r.GlobalApprovalPolicy)
 	printAgents(w, r)
 	// One "front:" line. The address is where Instances dial home; the front itself is the process
 	// the supervisor runs. A host with no front process says so, with the address when one is recorded.
@@ -427,6 +436,23 @@ func printAdmission(w io.Writer, ps []launcher.AdmissionState) {
 		} else {
 			fmt.Fprintf(w, "admission policy %s: ABSENT (%s): what it bounds is not bounded now; the next hpcburst up installs it\n", p.Name, p.Detail)
 		}
+	}
+}
+
+// printGlobalPolicy prints one line about ApprovalPolicy/global. Absent is a state, not a fault, but the line
+// says what it means: with no policy a target that needs approval waits.
+func printGlobalPolicy(w io.Writer, g *launcher.GlobalPolicyState) {
+	switch {
+	case g == nil:
+		// not asked: the reasons name a failure to ask
+	case g.Present && g.Detail != "":
+		fmt.Fprintf(w, "global ApprovalPolicy: present, but %s\n", g.Detail)
+	case g.Present:
+		fmt.Fprintf(w, "global ApprovalPolicy: approvers %s\n", strings.Join(g.Approvers, ", "))
+	case g.Detail != "":
+		fmt.Fprintf(w, "global ApprovalPolicy: %s\n", g.Detail)
+	default:
+		fmt.Fprintln(w, "no global ApprovalPolicy: a target that needs approval waits; the next hpcburst up writes one when the ApprovalPolicy definition exists")
 	}
 }
 
