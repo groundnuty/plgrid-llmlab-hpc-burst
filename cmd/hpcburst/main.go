@@ -154,7 +154,7 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&sd, "state-dir", "", stateDirUsage)
 	fs.StringVar(&bd, "bin-dir", "", binDirUsage)
 	fs.StringVar(&o.Version, "version", "", "k3s release to start (must be pinned): default the release that last wrote the store, or "+launcher.DefaultVersion+" for a new one; another release than the store's is refused (use upgrade or restore)")
-	fs.IntVar(&o.PortBase, "port-base", launcher.DefaultPortBase, "first of a block of 13 loopback ports, base to base+12, shared with the controller, the front and frps, all of which must be free before a start: base (apiserver), +1 (https), +2 (controller manager), +3 (the agent endpoint, the controller's server), +4 (the front's /healthz), +5 (reserved, never bound), +6 (the lifecycle controller's /healthz), +7 (the front's dial-home listener in ssh and host-dialed modes), +8 (the frps server plugin, the controller's), +9 to +11 (frps's bind, tcpmux and web ports), +12 (the lifecycle controller's /metrics); the restricted VM keys forward to +3 and +7, so another base needs new keys")
+	fs.IntVar(&o.PortBase, "port-base", launcher.DefaultPortBase, "first of a block of 13 loopback ports, base to base+12 (base+13 to base+15 with --bulk-path, base+16 and base+17 with --event-log), shared with the controller, the front and frps, all of which must be free before a start: base (apiserver), +1 (https), +2 (controller manager), +3 (the agent endpoint, the controller's server), +4 (the front's /healthz), +5 (reserved, never bound), +6 (the lifecycle controller's /healthz), +7 (the front's dial-home listener in ssh and host-dialed modes), +8 (the frps server plugin, the controller's), +9 to +11 (frps's bind, tcpmux and web ports), +12 (the lifecycle controller's /metrics); the restricted VM keys forward to +3 and +7, so another base needs new keys")
 	fs.StringVar(&o.Front.Mode, "front-mode", "", "how the jobs and this host reach each other: direct, ssh (restricted key), or host-dialed (this host dials the jobs through the login node, for a host that compute nodes cannot reach: it takes no --front-addr and no --front-key)")
 	fs.StringVar(&o.Front.Addr, "front-addr", "", "the front's address, host:port (ssh: host or host:port; the port defaults to 22); required for direct and ssh, and refused for host-dialed, which has no address because the host dials the jobs")
 	fs.StringVar(&o.Front.KeyPath, "front-key", "", "ssh mode: path of the restricted key (recorded, never read); refused for the other modes")
@@ -168,6 +168,10 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.InstanceRouter, "instance-router", "", "beta, opt-in: the router each new Instance runs in front of its worker, envoy; passed to the controller, and the agent builds then include Envoy's (hack/fetch-envoy.sh --agent-builds), which every job is staged with (unset: none, alpha)")
 	fs.BoolVar(&o.RelayKeeper, "relay-keeper", false, "beta, host-dialed mode only: run the relay keeper (the controller binary's relaykeeper subcommand) under the supervisor, so a controller restart cuts no host-dialed stream (HBEP-6); without it, up refuses while the keeper's state file shows it ran here and Allocations are running")
 	fs.BoolVar(&o.BulkPath, "bulk-path", false, "beta: run a second frps for the bulk path at base+13 to base+15, beside the first, and keep a second certificate for the agent endpoint's key naming bulk.dial-home.hpcburst.invalid, so an Instance's non-streamed replies can take a tunnel of their own (HBEP-6, The bulk path); needs frps")
+	fs.BoolVar(&o.EventLog, "event-log", false, "beta, opt-in: run HBEP-8's durable log (the controller binary's eventlog subcommand, an embedded NATS JetStream) under the supervisor, before the controllers and the front, stopped last; its two loopback ports are base+16 (clients) and base+17 (monitoring, its /healthz), and its store, configuration and token are in <state-dir>/eventlog (mode 700). It starts only when the free space on that file system, less what its streams and the upgrade's copy can still grow, stays at or above --event-log-floor; otherwise the controllers and the front start without it, loudly, and status says \"degraded: event log not started\" (exit 0). Recorded, and kept by upgrade; a change to a setting takes down, then up")
+	fs.Var(&o.EventLogEventsCap, "event-log-events-cap", "with --event-log: the events stream's cap in logical bytes, for example 2GiB (the default); a full events stream refuses new events and keeps every old one, and status says \"degraded: event log full\" (GiB, MiB are powers of 1,024, GB, MB of 1,000)")
+	fs.Var(&o.EventLogUsageCap, "event-log-usage-cap", "with --event-log: the usage stream's cap in logical bytes, for example 2GiB (the default); it is a rolling copy of the usage files, so at the cap its oldest records go")
+	fs.Var(&o.EventLogFloor, "event-log-floor", "with --event-log: the free space the log leaves on its store's file system, for example 15GB (the default): the log starts only when the free space, less what the streams (their caps less the store's size on disk) and the upgrade's copy (the caps less the previous copy's size) can still grow, is at least this; upgrade refuses to copy the store when it would leave less")
 	fs.BoolVar(&asJSON, "json", false, "print the result as JSON")
 	if code, done := parse(fs, args); done {
 		return code
@@ -213,6 +217,13 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	if rep.RelayKeeperSocket != "" {
 		fmt.Fprintf(stdout, "relay keeper: supervised, socket %s\n", rep.RelayKeeperSocket)
+	}
+	if rep.EventLogAddr != "" {
+		if rep.EventLogNotStarted != "" {
+			fmt.Fprintf(stdout, "event log: NOT STARTED (%s): the controllers and the front run without it; the supervisor starts it once the space fits (clients will connect at %s)\n", rep.EventLogNotStarted, rep.EventLogAddr)
+		} else {
+			fmt.Fprintf(stdout, "event log: supervised, clients at %s\n", rep.EventLogAddr)
+		}
 	}
 	if len(rep.FrpsPorts) > 0 {
 		fmt.Fprintf(stdout, "frps: supervised, loopback ports %v\n", rep.FrpsPorts)
@@ -523,6 +534,9 @@ func cmdRestore(args []string, stdout, stderr io.Writer) int {
 	}
 	if rep.Replaced != "" {
 		fmt.Fprintf(stdout, "the replaced store is in %s\n", rep.Replaced)
+	}
+	if rep.EventLog != "" {
+		fmt.Fprintf(stdout, "event log: %s\n", rep.EventLog)
 	}
 	return exitOK
 }

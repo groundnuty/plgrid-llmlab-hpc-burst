@@ -191,10 +191,10 @@ func TestAnExistingStreamWithAnotherSettingIsRefusedByName(t *testing.T) {
 		cfg  jetstream.StreamConfig
 		want []string
 	}{
-		"HB_EVENTS discard old":                       {jetstream.StreamConfig{Name: "HB_EVENTS", Subjects: []string{"hb.ev.>"}, Discard: jetstream.DiscardOld, MaxBytes: 1 << 20, Storage: jetstream.FileStorage}, []string{"HB_EVENTS", "discard"}},
-		"HB_USAGE discard new":                        {jetstream.StreamConfig{Name: "HB_USAGE", Subjects: []string{"hb.usage"}, Discard: jetstream.DiscardNew, MaxBytes: 1 << 20, Storage: jetstream.FileStorage}, []string{"HB_USAGE", "discard"}},
-		"HB_EVENTS with a max age and no compression": {jetstream.StreamConfig{Name: "HB_EVENTS", Subjects: []string{"hb.ev.>"}, Discard: jetstream.DiscardNew, MaxBytes: 1 << 20, MaxAge: time.Hour, Storage: jetstream.FileStorage}, []string{"max_age", "compression"}},
-		"HB_EVENTS on other subjects":                 {jetstream.StreamConfig{Name: "HB_EVENTS", Subjects: []string{"hb.other.>"}, Discard: jetstream.DiscardNew, MaxBytes: 1 << 20, Storage: jetstream.FileStorage, Compression: jetstream.S2Compression}, []string{"subjects"}},
+		"HB_EVENTS discard old":                       {jetstream.StreamConfig{Name: "HB_EVENTS", Subjects: []string{"hb.ev.>"}, Discard: jetstream.DiscardOld, MaxBytes: 1 << 19, Storage: jetstream.FileStorage}, []string{"HB_EVENTS", "discard"}},
+		"HB_USAGE discard new":                        {jetstream.StreamConfig{Name: "HB_USAGE", Subjects: []string{"hb.usage"}, Discard: jetstream.DiscardNew, MaxBytes: 1 << 19, Storage: jetstream.FileStorage}, []string{"HB_USAGE", "discard"}},
+		"HB_EVENTS with a max age and no compression": {jetstream.StreamConfig{Name: "HB_EVENTS", Subjects: []string{"hb.ev.>"}, Discard: jetstream.DiscardNew, MaxBytes: 1 << 19, MaxAge: time.Hour, Storage: jetstream.FileStorage}, []string{"max_age", "compression"}},
+		"HB_EVENTS on other subjects":                 {jetstream.StreamConfig{Name: "HB_EVENTS", Subjects: []string{"hb.other.>"}, Discard: jetstream.DiscardNew, MaxBytes: 1 << 19, Storage: jetstream.FileStorage, Compression: jetstream.S2Compression}, []string{"subjects"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			d := newLogDir(t, eventlog.Caps{Events: 1 << 20, Usage: 1 << 20})

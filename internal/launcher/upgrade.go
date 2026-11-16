@@ -21,6 +21,9 @@ type UpgradeOptions struct {
 
 	// supervisorArgv, set by tests only, replaces the supervisor's command line.
 	supervisorArgv []string
+	// disk, set by tests only, replaces the reads of the free space and the sizes behind the event
+	// log's floor (nil reads the file system).
+	disk diskReader
 }
 
 // noFrpsUpgradeWarning is printed when upgrade keeps a host whose record runs the controllers
@@ -95,6 +98,17 @@ func Upgrade(ctx context.Context, o UpgradeOptions) (*UpgradeReport, error) {
 	}
 	if err := checkGrace(st, o.Grace); err != nil {
 		return nil, err
+	}
+	// With the durable log, the upgrade replaces its copy of the store: refused before anything
+	// stops when the space that would leave is under the floor (HBEP-8, Retention, In the durable log).
+	if st.EventLog != nil {
+		disk := o.disk
+		if disk == nil {
+			disk = osDisk{}
+		}
+		if err := checkUpgradeFloor(disk, l, *st.EventLog); err != nil {
+			return nil, err
+		}
 	}
 	// Only a healthy host is upgraded: the snapshot below needs the API, and a host that is
 	// already sick would make the comparison meaningless.
@@ -204,6 +218,15 @@ func replaceHost(ctx context.Context, l layout, st *State, bin Binary, ops hostO
 		return nil, "", stopDur, 0, fmt.Errorf("the old host is stopped, but the store could not be backed up (nothing was started; hpcburst up starts %s again): %w", st.Version, err)
 	}
 	logf(log, "backed up the store to %s", backup)
+	// With the durable log, the copy of its store replaces the previous upgrade's, beside this backup,
+	// once the log has stopped (it stops last). A failed copy stops the upgrade here, before the new
+	// release is recorded: the live log store is only read.
+	if st.EventLog != nil {
+		if err := backupEventLog(l, backup, st.Version); err != nil {
+			return nil, backup, stopDur, 0, fmt.Errorf("the old host is stopped and the store is backed up to %s, but the event log's store could not be copied, so nothing else was changed (the live log store is untouched; to start the old release %s again, run hpcburst up --event-log, with the same --event-log-* sizes if you gave any): %w", backup, st.Version, err)
+		}
+		logf(log, "copied the event log's store to %s, beside that backup", l.eventLogCopyDir())
+	}
 	if err := l.saveStoreVersion(bin.Version.String(), "upgrade"); err != nil {
 		return nil, backup, stopDur, 0, fmt.Errorf("the old host is stopped and backed up to %s, but the new release could not be recorded: %w", backup, err)
 	}
@@ -215,6 +238,7 @@ func replaceHost(ctx context.Context, l layout, st *State, bin Binary, ops hostO
 	spec.relayKeeper = st.RelayKeeper
 	spec.bulkPath = st.BulkPath
 	spec.instanceRouter = st.InstanceRouter
+	spec.eventLog = st.EventLog
 	if st.frpsMissing() {
 		logf(log, "%s", noFrpsUpgradeWarning)
 	}

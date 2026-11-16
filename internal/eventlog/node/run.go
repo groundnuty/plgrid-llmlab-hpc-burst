@@ -122,6 +122,9 @@ func Run(ctx context.Context, o Options) error {
 		d, err := ensureStream(setup, js, wantConfig(st.name, caps), st.cap)
 		if err != nil {
 			stop()
+			if ctx.Err() != nil {
+				return nil // told to stop while it was starting: a clean stop, as after it serves
+			}
 			return fmt.Errorf("stream %s: %w", st.name, err)
 		}
 		diffs = append(diffs, d...)
