@@ -12,6 +12,7 @@ package lifecycle
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -54,14 +55,52 @@ func gateReleases(log *causeLog, prefix string) int {
 	return n
 }
 
+// gateReleased are the names of the Allocations whose name starts with prefix that were deleted with a
+// QualificationFailed release cause.
+func gateReleased(log *causeLog, prefix string) map[string]bool {
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	out := map[string]bool{}
+	for name, cause := range log.cause {
+		if strings.HasPrefix(name, prefix) && strings.HasSuffix(cause, "failed: "+v1alpha1.ReasonQualificationFailed) {
+			out[name] = true
+		}
+	}
+	return out
+}
+
+// verdicts keeps each Instance's final gate verdict, by name, as it is seen: ended Instances are pruned after
+// restart.window, so a row reads them while they exist.
+type verdicts map[string]string
+
+func (v verdicts) see(rg *rig, md string) {
+	for _, in := range rg.instances(md) {
+		if g := in.Status.Gate; g != nil && g.Verdict != "" {
+			v[in.Name] = g.Verdict
+		}
+	}
+}
+
+// count is how many of the named Instances have the verdict.
+func (v verdicts) count(names map[string]bool, verdict string) int {
+	n := 0
+	for name := range names {
+		if v[name] == verdict {
+			n++
+		}
+	}
+	return n
+}
+
 // A wrong entry and Instances placed on warm Allocations. W+1 Instances are ready with no entry (each records only),
 // then instances goes W+1 -> 1: W drain, and their Allocations are kept warm (retention Keep, the default, with no idle
 // limit). A wrong entry is then added (20 ms per output token, limit 40 ms; every warm-up measures 41 ms), and
 // instances goes back to W+1: W Instances are placed on the W warm Allocations in one pass, and each misses twice, on
 // its retry in one pass. A failure there adds no start-up outcome, since the Allocation already has one from its first
 // Instance; if the gate did not count it either, the fresh Allocations that replace them would be gated and released
-// as well, W+2 in all. With W = 3 the pass-local count must count the warm second misses it has made, or that pass
-// alone releases three. At most two Allocations are released for the entry, and the W+1 end ready.
+// as well, W+2 in all. With W = 3 the three are on their retry in one pass, and the third must read the suspension the
+// second's count wrote, or that pass alone releases three. Exactly two Allocations are released, both warm ones,
+// whose Instances record Missed; every other new Instance records Suspended, and the W+1 end ready.
 func TestGateAWrongEntryReleasesAtMostTwoWhenInstancesGoOnWarmAllocations(t *testing.T) {
 	for _, w := range []int{2, 3} {
 		t.Run(fmt.Sprintf("%d warm Allocations", w), func(t *testing.T) { warmAllocationsRow(t, w) })
@@ -100,15 +139,26 @@ func warmAllocationsRow(t *testing.T, w int) {
 	setEntries(rg, rigProfile, gateEntryFor(id))
 	rg.mutateMD("md", func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = all })
 	onWarm := map[string]metav1.Time{} // new Instances placed on a warm Allocation, by creation, seen while they exist
+	fresh := map[string]bool{}         // the other new Instances
+	seen := verdicts{}
 	seeWarm := func() {
 		for _, in := range rg.instances("md") {
-			if !before[in.Name] && warm[in.Spec.AllocationRef.Name] {
+			switch {
+			case before[in.Name]:
+			case warm[in.Spec.AllocationRef.Name]:
 				onWarm[in.Name] = in.CreationTimestamp
+			default:
+				fresh[in.Name] = true
 			}
 		}
+		seen.see(rg, "md")
 	}
 	startUntil(rg, "md", 4*time.Hour, "every Instance ready again", func() bool { seeWarm(); return rg.readyCount("md") == int(all) })
-	rg.run(time.Hour, 10*time.Second)
+	for end := rg.clock.Now().Add(time.Hour); rg.clock.Now().Before(end); {
+		rg.clock.Advance(10 * time.Second)
+		rg.Step()
+		seeWarm()
+	}
 
 	if len(onWarm) != w {
 		t.Fatalf("%d new Instances were placed on the warm Allocations, want %d: the row proves nothing", len(onWarm), w)
@@ -120,84 +170,147 @@ func warmAllocationsRow(t *testing.T, w int) {
 	if len(created) != 1 {
 		t.Fatalf("the warm Instances were created at %v, want one pass: their retries are not in one pass, so the row proves nothing", created)
 	}
-	if n := gateReleases(log, rigProvider+"-"); n > 2 {
-		t.Errorf("%d Allocations released for QualificationFailed against one wrong entry, want at most two (HBEP-7, At most two releases for one reference)", n)
+	released := gateReleased(log, rigProvider+"-")
+	if len(released) != 2 {
+		t.Errorf("%d Allocations released for QualificationFailed against one wrong entry, want exactly two (HBEP-7, At most two releases for one reference)", len(released))
+	}
+	for a := range released {
+		if !warm[a] {
+			t.Errorf("Allocation %s was released, want only warm ones: the warm misses were not counted", a)
+		}
+	}
+	warmNames := map[string]bool{}
+	for n := range onWarm {
+		warmNames[n] = true
+	}
+	if m, s := seen.count(warmNames, v1alpha1.GateMissed), seen.count(warmNames, v1alpha1.GateSuspended); m != 2 || s != w-2 {
+		t.Errorf("the warm Instances recorded %d Missed and %d Suspended, want 2 and %d", m, s, w-2)
+	}
+	if n := seen.count(fresh, v1alpha1.GateSuspended); n != len(fresh) || len(fresh) != 2 {
+		t.Errorf("%d of %d fresh Instances recorded Suspended, want both of 2", n, len(fresh))
 	}
 	if n := rg.readyCount("md"); n != int(all) {
 		t.Errorf("%d Instances ready an hour later, want %d", n, all)
 	}
+	if got := rg.md("md").Status.SuspendedReferences; len(got) != 1 || got[0].PlatformProfile != rigProfile || got[0].DeploymentID != id {
+		t.Errorf("suspendedReferences %+v, want the entry of %s listed", got, rigProfile)
+	}
 }
 
-// A miss lost with its pass (Fable's same root): the first Instance's second miss fails it and releases its Allocation,
-// and that pass's status write fails, so step 10 never records its outcome; the deployment's status writes keep
-// failing until the Allocation's delete has finished, so no later pass can record it either (an outcome needs its
-// Allocation). The miss is still the entry's first: the Instance itself is kept, with its verdict Missed, for
-// restart.window (30 min) after its end. The replacement misses twice too and is the second; the third records
-// Suspended. At most two releases.
+// A miss whose pass returns on a failed write (Fable's same root): the first Instance's second miss must count however
+// the deployment's status writes fail. In "the pass's last write fails", they fail from the Instance's failing write
+// on, so step 10 of that pass never records its outcome, and they keep failing until the Allocation's delete has
+// finished, so no later pass can record it either (an outcome needs its Allocation): the miss counts all the same,
+// since the gate recorded it in status.referenceMisses before it failed the Instance. In "the count's own write
+// fails", they fail from the first miss's restart on, for 30 minutes, which takes in the retry's judgement: the
+// Instance is then not failed, since its count could not be written, and is judged again once the writes succeed.
+// Either way the replacement misses twice too and is the second, and suspends the entry; the third records Suspended.
+// Exactly two releases.
 func TestGateAMissWhosePassWasLostStillCounts(t *testing.T) {
+	t.Run("the pass's last write fails", func(t *testing.T) { lostPassRow(t, false) })
+	t.Run("the count's own write fails", func(t *testing.T) { lostPassRow(t, true) })
+}
+
+func lostPassRow(t *testing.T, countWrite bool) {
 	log := newCauseLog()
 	f := log.funcs()
 	var mu sync.Mutex
-	failMD, failedOnce := false, false
+	failMD, triggered := false, false
 	f.SubResourceUpdate = func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 		mu.Lock()
-		if in, ok := obj.(*v1alpha1.Instance); ok && in.Status.EndReason == v1alpha1.ReasonQualificationFailed && !failedOnce {
-			failMD, failedOnce = true, true
+		if in, ok := obj.(*v1alpha1.Instance); ok && !triggered {
+			restarted := slices.ContainsFunc(in.Status.Restarts, func(r v1alpha1.InstanceRestart) bool { return r.Signal == signalThroughputMissed })
+			if (countWrite && restarted) || (!countWrite && in.Status.EndReason == v1alpha1.ReasonQualificationFailed) {
+				failMD, triggered = true, true
+			}
 		}
 		fail := failMD
 		mu.Unlock()
 		if _, ok := obj.(*v1alpha1.ModelDeployment); ok && fail {
 			return apierrors.NewServiceUnavailable("the deployment's status write fails")
 		}
-		return c.SubResource(sub).Update(ctx, obj, opts...)
+		if err := c.SubResource(sub).Update(ctx, obj, opts...); err != nil {
+			return err
+		}
+		return nil
 	}
 	rg := newRig(t, withInterceptors(f))
 	rg.engine = gateSequence(41 * time.Millisecond)
 	first, _ := gateEntries(rg, gateMD(), oneEntry())
 	alloc := rg.instance(first).Spec.AllocationRef.Name
-	// Rig.Step fails the test on any reconcile error; this loop steps as it does, and lets through only the
-	// injected status-write failure.
-	for end := rg.clock.Now().Add(time.Hour); ; {
+	// Rig.Step fails the test on any reconcile error; these loops step as it does, and let through only the injected
+	// status-write failure.
+	countFailed := 0
+	step := func() {
+		if err := stepLettingStatusFail(rg, "md"); err != nil && strings.Contains(err.Error(), "record the throughput gate's Missed verdict") {
+			countFailed++
+		}
+	}
+	if countWrite {
+		for end := rg.clock.Now().Add(time.Hour); !triggered; step() {
+			if !rg.clock.Now().Before(end) {
+				t.Fatal("the first miss's restart was never written: the row proves nothing")
+			}
+		}
+		for end := rg.clock.Now().Add(30 * time.Minute); rg.clock.Now().Before(end); step() {
+			if in := rg.instance(first); ended(in) {
+				t.Fatalf("the Instance ended %s while its count could not be written", in.Status.EndReason)
+			}
+		}
+		if countFailed == 0 {
+			t.Fatal("no count of a Missed verdict was tried while the writes failed: the retry was not judged, so the row proves nothing")
+		}
+		mu.Lock()
+		failMD = false
+		mu.Unlock()
+	}
+	for end := rg.clock.Now().Add(time.Hour); ; step() {
 		if _, ok := rg.allocation(alloc); !ok {
 			break
 		}
 		if !rg.clock.Now().Before(end) {
 			t.Fatalf("the first Instance's Allocation still exists at %s", rg.clock.Now().Format(time.RFC3339))
 		}
-		stepLettingStatusFail(rg, "md")
 	}
 	mu.Lock()
-	if !failedOnce {
+	if !triggered {
 		mu.Unlock()
-		t.Fatal("the first Instance never failed: the row proves nothing")
+		t.Fatal("the writes never failed: the row proves nothing")
 	}
 	failMD = false
 	mu.Unlock()
-	if outs := rg.md("md").Status.StartOutcomes; len(outs) != 0 {
+	if outs := rg.md("md").Status.StartOutcomes; !countWrite && len(outs) != 0 {
 		t.Fatalf("outcomes %+v recorded while the status writes failed: the row proves nothing", outs)
 	}
 	startUntil(rg, "md", 4*time.Hour, "an Instance ready", func() bool { return rg.readyCount("md") == 1 })
 	rg.run(time.Hour, 10*time.Second)
-	if n := gateReleases(log, rigProvider+"-"); n > 2 {
-		t.Errorf("%d Allocations released for QualificationFailed against one wrong entry, want at most two: the first miss was lost with its pass", n)
+	if n := gateReleases(log, rigProvider+"-"); n != 2 {
+		t.Errorf("%d Allocations released for QualificationFailed against one wrong entry, want exactly two: the first miss was lost with its pass", n)
+	}
+	for _, in := range rg.liveInstances("md") {
+		if g := in.Status.Gate; in.Status.Phase == v1alpha1.InstanceReady && (g == nil || g.Verdict != v1alpha1.GateSuspended) {
+			t.Errorf("the ready Instance %s has gate %+v, want Suspended", in.Name, g)
+		}
 	}
 }
 
 // stepLettingStatusFail is rig.Step for one deployment, which lets a reconcile fail on the injected status-write
-// fault and fails the test on any other error.
-func stepLettingStatusFail(rg *rig, md string) {
+// fault, returning its error, and fails the test on any other error.
+func stepLettingStatusFail(rg *rig, md string) error {
 	rg.t.Helper()
 	rg.clock.Advance(startTick)
 	if err := rg.prov.Sync(rg.ctx); err != nil {
 		rg.t.Fatalf("provider sync: %v", err)
 	}
 	rg.syncAgents()
-	if err := rg.reconcileOne(md); err != nil && !strings.Contains(err.Error(), "the deployment's status write fails") {
+	err := rg.reconcileOne(md)
+	if err != nil && !strings.Contains(err.Error(), "the deployment's status write fails") {
 		rg.t.Fatalf("reconcile %s at %s: %v", md, rg.clock.Now().Format(time.RFC3339), err)
 	}
 	if err := rg.r.checkHeartbeats(rg.ctx); err != nil {
 		rg.t.Fatalf("checkHeartbeats: %v", err)
 	}
+	return err
 }
 
 // The control for the key of a run: two Providers sharing ONE profile hold one entry, so their misses are one run. Each
@@ -221,8 +334,8 @@ func TestGateTwoProvidersSharingAProfileReleaseAtMostTwoInAll(t *testing.T) {
 	startUntil(rg, "md", 4*time.Hour, "an Instance ready on each Provider", func() bool { return rg.readyCount("md") == 2 })
 	rg.run(time.Hour, 10*time.Second)
 	a, b := gateReleases(log, rigProvider+"-"), gateReleases(log, bProvider+"-")
-	if a+b > 2 {
-		t.Errorf("%d releases on A and %d on B against one shared entry, want at most two in all", a, b)
+	if a+b != 2 {
+		t.Errorf("%d releases on A and %d on B against one shared entry, want exactly two in all", a, b)
 	}
 	if a+b == 0 {
 		t.Errorf("no release on either Provider: the entry gated nothing, so the row proves nothing")
@@ -274,8 +387,10 @@ func (rg *rig) addProviderWithProfile(name, profile, partition string, qos []v1a
 // Provider takes one Allocation at a time (a submit limit of 1, declared and enforced), and instances is 2, so the
 // first primary goes to A and the second to B. B's job is held in its queue by another user's job on B's GPU cap until
 // A's first failure, so B's pass comes between A's first and second failures: Missed (A), Passed (B), Missed (A). B's
-// pass is against another profile's entry; if it broke A's run, A's third Instance would be released too. A's entry is
-// suspended within two of A's releases, and listed.
+// pass is against another profile's entry; if it broke A's run, A's third Instance would be released too. Exactly two
+// of A's Allocations are released, A's entry is listed with A's profile, and A's next Instance records Suspended. B's
+// entry, with the same key and date, is not suspended: once A's is listed, B's job is ended by Slurm, and B's next
+// Instance is still gated and passes.
 func TestGateTwoProvidersOfOneClassSuspendAWrongEntryWithinTwoReleases(t *testing.T) {
 	log := newCauseLog()
 	qosA := []v1alpha1.QOSProfile{{Name: "example-a1", MaxSubmitPerUser: i32(1)}}
@@ -309,23 +424,50 @@ func TestGateTwoProvidersOfOneClassSuspendAWrongEntryWithinTwoReleases(t *testin
 	startUntil(rg, "md", 4*time.Hour, "an Instance ready on each Provider", func() bool { return rg.readyCount("md") == 2 })
 	rg.run(time.Hour, 10*time.Second)
 
-	if n := gateReleases(log, rigProvider+"-"); n > 2 {
-		t.Errorf("%d of A's Allocations released for QualificationFailed against A's wrong entry, want at most two: B's pass on its own profile's entry broke A's run", n)
+	if n := gateReleases(log, rigProvider+"-"); n != 2 {
+		t.Errorf("%d of A's Allocations released for QualificationFailed against A's wrong entry, want exactly two: B's pass on its own profile's entry broke A's run", n)
 	}
 	if n := gateReleases(log, bProvider+"-"); n != 0 {
 		t.Errorf("%d of B's Allocations released, want none: B's entry is right", n)
 	}
-	if got := rg.md("md").Status.SuspendedReferences; len(got) == 0 || got[0].Date != "2026-10-23" || got[0].DeploymentID != id {
-		t.Errorf("suspendedReferences %+v, want A's entry dated 2026-10-23 listed", got)
+	got := rg.md("md").Status.SuspendedReferences
+	if len(got) != 1 || got[0].PlatformProfile != rigProfile || got[0].Date != "2026-10-23" || got[0].DeploymentID != id {
+		t.Fatalf("suspendedReferences %+v, want A's entry alone, of profile %s, dated 2026-10-23", got, rigProfile)
+	}
+	onA := rg.onProvider("md", rigProvider)
+	if len(onA) != 1 || onA[0].Status.Gate == nil || onA[0].Status.Gate.Verdict != v1alpha1.GateSuspended {
+		t.Errorf("A's live Instances %d, the first's gate %+v, want one recording Suspended", len(onA), onA[0].Status.Gate)
+	}
+
+	// A later Instance on B, after A's suspension, is still gated against B's entry.
+	onB := rg.onProvider("md", bProvider)
+	if len(onB) != 1 {
+		t.Fatalf("%d live Instances on B, want 1", len(onB))
+	}
+	b1 := onB[0]
+	b.batch.CancelExternally(rg.allocOrNil(b1.Spec.AllocationRef.Name).Status.AtProvider.JobID)
+	var b2 *v1alpha1.Instance
+	startUntil(rg, "md", 4*time.Hour, "a later Instance on B judged", func() bool {
+		for _, in := range rg.onProvider("md", bProvider) {
+			if in.Name != b1.Name && in.Status.Gate != nil && in.Status.Gate.Verdict != "" {
+				b2 = &in
+				return true
+			}
+		}
+		return false
+	})
+	if g := b2.Status.Gate; g.Verdict != v1alpha1.GatePassed || g.ReferenceDate != "2026-10-23" {
+		t.Errorf("B's later Instance %s recorded %+v, want Passed against B's entry dated 2026-10-23: A's suspension stopped B's gate", b2.Name, g)
 	}
 }
 
 // One profile's two entries with one date, for two shapes: 8 sessions (20 ms per output token, limit 40 ms, which 41 ms
 // misses) and 16 sessions (30 ms, limit 60 ms, which 41 ms passes). The first Instance runs 8 sessions and fails. The
 // workload is then edited to 16 sessions: the second passes the other entry. Edited back to 8, and instances raised to
-// 2, the third and fourth run 8 sessions against the first entry. Its two most recent Passed or Missed outcomes are
+// 2, the third and fourth run 8 sessions against the first entry. Its two most recent Passed or Missed verdicts are
 // both Missed once the third fails, since the second's pass was against another key; were the run counted by date
-// alone, the pass would break it and the fourth would be released too. At most two releases.
+// alone, the pass would break it and the fourth would be released too. Exactly two releases, the 8-session entry is
+// listed alone, and the fourth records Suspended.
 func TestGateTwoShapesOfOneDateDoNotPoolIntoOneRun(t *testing.T) {
 	log := newCauseLog()
 	rg := newRig(t, withInterceptors(log.funcs()))
@@ -353,11 +495,16 @@ func TestGateTwoShapesOfOneDateDoNotPoolIntoOneRun(t *testing.T) {
 	})
 	startUntil(rg, "md", 4*time.Hour, "two Instances ready", func() bool { return rg.readyCount("md") == 2 })
 	rg.run(time.Hour, 10*time.Second)
-	if n := gateReleases(log, rigProvider+"-"); n > 2 {
-		t.Errorf("%d Allocations released for QualificationFailed against the 8-session entry, want at most two: a pass against the 16-session entry broke its run", n)
+	if n := gateReleases(log, rigProvider+"-"); n != 2 {
+		t.Errorf("%d Allocations released for QualificationFailed against the 8-session entry, want exactly two: a pass against the 16-session entry broke its run", n)
 	}
 	got := rg.md("md").Status.SuspendedReferences
-	if len(got) != 1 || got[0].Sessions != 8 || got[0].Date != "2026-10-23" {
-		t.Errorf("suspendedReferences %+v, want the 8-session entry dated 2026-10-23 alone", got)
+	if len(got) != 1 || got[0].PlatformProfile != rigProfile || got[0].Sessions != 8 || got[0].Date != "2026-10-23" {
+		t.Errorf("suspendedReferences %+v, want the 8-session entry of %s dated 2026-10-23 alone", got, rigProfile)
+	}
+	for _, in := range rg.liveInstances("md") {
+		if in.Name != second.Name && (in.Status.Gate == nil || in.Status.Gate.Verdict != v1alpha1.GateSuspended) {
+			t.Errorf("the fourth Instance %s has gate %+v, want Suspended", in.Name, in.Status.Gate)
+		}
 	}
 }

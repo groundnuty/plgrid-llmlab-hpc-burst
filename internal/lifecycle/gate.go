@@ -252,6 +252,9 @@ type gateVerdict struct {
 	status string
 	// date is the matched entry's date, empty when none matched.
 	date string
+	// entry is the matched entry's key, with Passed, Suspended and a miss: what the run toward its suspension counts
+	// against, with the profile and the date (suspension.go).
+	entry *v1alpha1.ReferenceKey
 	// text is the gate's part of the Qualified message for a final verdict.
 	text string
 	// missed names the workers over a limit, in worker order, for a miss; detail then holds every worker's
@@ -271,8 +274,9 @@ func judgeGate(profile *v1alpha1.PlatformProfile, key v1alpha1.ReferenceKey, ms 
 	if ref.entry == nil {
 		return recordOnly(ref.date, ref.why)
 	}
-	if suspended != nil && suspended(ref.entry.ReferenceKey, ref.date) {
-		return gateVerdict{status: v1alpha1.GateSuspended, date: ref.date,
+	entry := ref.entry.ReferenceKey
+	if suspended != nil && suspended(entry, ref.date) {
+		return gateVerdict{status: v1alpha1.GateSuspended, date: ref.date, entry: &entry,
 			text: fmt.Sprintf("records only: the entry dated %s is suspended for this deployment, since two Allocations in a row missed it", ref.date)}
 	}
 	limits, err := limitsOf(ref.entry)
@@ -291,9 +295,9 @@ func judgeGate(profile *v1alpha1.PlatformProfile, key v1alpha1.ReferenceKey, ms 
 	}
 	detail := strings.Join(parts, "; ")
 	if len(missed) == 0 {
-		return gateVerdict{status: v1alpha1.GatePassed, date: ref.date, text: fmt.Sprintf("passed the entry dated %s: %s", ref.date, detail)}
+		return gateVerdict{status: v1alpha1.GatePassed, date: ref.date, entry: &entry, text: fmt.Sprintf("passed the entry dated %s: %s", ref.date, detail)}
 	}
-	return gateVerdict{date: ref.date, missed: missed, detail: detail, limits: limits}
+	return gateVerdict{date: ref.date, entry: &entry, missed: missed, detail: detail, limits: limits}
 }
 
 // measurementText is one worker's measurement and the limits it was judged against, as the gate's messages print

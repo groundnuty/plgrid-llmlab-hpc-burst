@@ -107,6 +107,10 @@ func (p *pass) startingWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation
 	if err != nil {
 		return err
 	}
+	// A Passed or Missed verdict counts toward its entry's suspension before the Instance's own write.
+	if err := p.recordVerdict(in, alloc, work); err != nil {
+		return err
+	}
 	switch {
 	case work.fail != nil:
 		return p.failGate(in, alloc, work.fail)

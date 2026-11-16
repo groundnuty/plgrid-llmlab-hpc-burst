@@ -39,6 +39,11 @@ type gateWork struct {
 	restart *gateRestart
 	// fail is the second miss's failure.
 	fail *gateFail
+	// ref and counts are the entry and the verdict, Passed or Missed, that count toward the entry's suspension.
+	// recordVerdict writes the count before the Instance's own write (suspension.go); nil for work that counts
+	// nothing.
+	ref    *entryRef
+	counts string
 }
 
 // gateRestart is a first miss: the worker to restart, the message of its restart event, and the status change that
@@ -86,11 +91,25 @@ func (p *pass) gateJudge(in *v1alpha1.Instance, sh shapes, ws []gateWorker) (gat
 	for i, w := range ws {
 		names[i], tps[i] = w.name, w.tp
 	}
-	v := judgeGate(profile, key, measuresOf(names, tps), p.now, func(entry v1alpha1.ReferenceKey, date string) bool { return p.referenceSuspended(pv, entry, date) })
-	if v.status != "" {
-		return gateFinal(in, v, metav1.NewTime(p.now)), nil
+	v := judgeGate(profile, key, measuresOf(names, tps), p.now, func(entry v1alpha1.ReferenceKey, date string) bool {
+		return p.referenceSuspended(entryRef{profile: profile.Name, key: entry, date: date})
+	})
+	var ref *entryRef
+	if v.entry != nil {
+		ref = &entryRef{profile: profile.Name, key: *v.entry, date: v.date}
 	}
-	return p.gateMiss(in, v, ws), nil
+	if v.status != "" {
+		w := gateFinal(in, v, metav1.NewTime(p.now))
+		if v.status == v1alpha1.GatePassed {
+			w.ref, w.counts = ref, v1alpha1.GatePassed
+		}
+		return w, nil
+	}
+	w := p.gateMiss(in, v, ws)
+	if w.fail != nil {
+		w.ref, w.counts = ref, v1alpha1.GateMissed
+	}
+	return w, nil
 }
 
 // gateFinal is the work of a final verdict: Passed, Suspended or RecordOnly.

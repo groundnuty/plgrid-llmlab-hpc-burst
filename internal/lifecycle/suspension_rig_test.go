@@ -81,7 +81,7 @@ func suspectRig(t *testing.T, edit ...func(*v1alpha1.ModelDeployment)) (*rig, *c
 func TestGateSuspendsAnEntryThatTwoAllocationsInARowMissed(t *testing.T) {
 	rg, log, id := suspectRig(t)
 	md := rg.md("md")
-	if got := md.Status.SuspendedReferences; len(got) != 1 || got[0].Date != "2026-10-23" || !sameKey(got[0].ReferenceKey, suspectKey(id)) || got[0].SuspendedTime.IsZero() {
+	if got := md.Status.SuspendedReferences; len(got) != 1 || got[0].PlatformProfile != rigProfile || got[0].Date != "2026-10-23" || !sameKey(got[0].ReferenceKey, suspectKey(id)) || got[0].SuspendedTime.IsZero() {
 		t.Fatalf("suspendedReferences %+v in the pass of the second failure, want the entry dated 2026-10-23 with its key", got)
 	}
 	if got := md.Status.SuspendedReferences[0].ReferenceKey; got.DeploymentID != id || got.Sessions != 8 || got.ContextTokens != 1024 || got.OutputTokens != 128 || got.CapacityFlags["max-num-seqs"] != "16" {
@@ -212,34 +212,53 @@ func TestGateASuspensionSurvivesAControllerRestart(t *testing.T) {
 	}
 }
 
-// A failure, a pass, then a failure suspend nothing: the two most recent verdicts against the entry are Passed and
-// Missed. The history is seeded (Missed, then Passed, both against 2026-10-23); the Instance then fails twice against
-// the entry like any, and is released: no listing, no ReferenceSuspect, and the Instance is not Suspended.
+// A failure, a pass, then a failure suspend nothing: the pass removes the first miss from the record, so the two most
+// recent verdicts against the entry are Passed and Missed. The first Instance measures 41 ms twice and fails; its
+// replacement measures 30 ms and passes; a second Instance, with instances raised to 2, measures 41 ms twice and fails.
+// No listing, no ReferenceSuspect, and the record holds the last miss alone.
 func TestGateAFailureThenAPassThenAFailureSuspendNothing(t *testing.T) {
 	log := newCauseLog()
 	rg := newRig(t, withInterceptors(log.funcs()))
-	rg.engine = gateSequence(41 * time.Millisecond)
-	name, _ := gateEntries(rg, gateMD(), oneEntry())
-	seedOutcomes(rg, seeded("seed-1", 1, true, "Missed", "2026-10-23"), seeded("seed-2", 2, false, "Passed", "2026-10-23"))
-	startUntil(rg, "md", time.Hour, "the Instance failed its retry", func() bool { return ended(rg.instance(name)) })
-	in := rg.instance(name)
-	if in.Status.EndReason != v1alpha1.ReasonQualificationFailed || in.Status.Gate == nil || in.Status.Gate.Verdict != v1alpha1.GateMissed {
-		t.Fatalf("the Instance ended for %q with gate %+v, want QualificationFailed, Missed: a pass between them suspends nothing", in.Status.EndReason, in.Status.Gate)
+	knob := &gateKnob{tpot: 41 * time.Millisecond, ttft: 300 * time.Millisecond}
+	rg.engine = gateEngineOf(knob)
+	first, _ := gateEntries(rg, gateMD(), oneEntry())
+	startUntil(rg, "md", time.Hour, "the first Instance failed", func() bool { return ended(rg.instance(first)) })
+	if in := rg.instance(first); in.Status.EndReason != v1alpha1.ReasonQualificationFailed {
+		t.Fatalf("the first Instance ended for %q, want QualificationFailed", in.Status.EndReason)
 	}
+	knob.tpot = 30 * time.Millisecond
+	startUntil(rg, "md", time.Hour, "the replacement ready", func() bool { return rg.readyCount("md") == 1 })
+	if got := rg.md("md").Status.ReferenceMisses; len(got) != 0 {
+		t.Fatalf("referenceMisses %+v after the pass, want none: a Passed verdict removes the entry's miss", got)
+	}
+	knob.tpot = 41 * time.Millisecond
+	rg.mutateMD("md", func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 2 })
+	startUntil(rg, "md", time.Hour, "the second failure", func() bool { return gateReleases(log, rigProvider+"-") == 2 })
 	rg.clock.Advance(10 * time.Second)
 	rg.Step()
-	if got := rg.md("md").Status.SuspendedReferences; len(got) != 0 || len(suspectEvents(rg)) != 0 {
+	md := rg.md("md")
+	if got := md.Status.SuspendedReferences; len(got) != 0 || len(suspectEvents(rg)) != 0 {
 		t.Errorf("suspendedReferences %+v, %d events: a failure, a pass and a failure suspend nothing", got, len(suspectEvents(rg)))
+	}
+	if got := md.Status.ReferenceMisses; len(got) != 1 || got[0].PlatformProfile != rigProfile || got[0].Date != "2026-10-23" {
+		t.Errorf("referenceMisses %+v, want the last miss alone, of profile %s dated 2026-10-23", got, rigProfile)
 	}
 }
 
-// A failure, an Instance judged RecordOnly with no entry, then a failure against a new entry (another date) suspend
-// nothing: the new entry has one miss.
-func TestGateAFailureARecordOnlyAndAFailureAgainstANewEntrySuspendNothing(t *testing.T) {
+// A miss recorded against an entry's old date, then a failure against its new date, suspend nothing: the old date's
+// miss is another entry's, and step 10 lifts it once the profile no longer holds it. The record is seeded with the miss
+// a controller that ran before would have left (an Instance and an Allocation long gone); the profile's entry is
+// dated 2026-10-24, and the Instance fails against it like any.
+func TestGateAMissAgainstAnOldDateAndAFailureAgainstTheNewOneSuspendNothing(t *testing.T) {
 	rg := newRig(t)
 	rg.engine = gateSequence(41 * time.Millisecond)
-	name, _ := gateEntries(rg, gateMD(), oneEntry(func(e *v1alpha1.ExpectedPerformance) { e.Date = "2026-10-24" }))
-	seedOutcomes(rg, seeded("seed-1", 1, true, "Missed", "2026-10-23"), seeded("seed-2", 2, false, "RecordOnly", ""))
+	name, id := gateEntries(rg, gateMD(), oneEntry(func(e *v1alpha1.ExpectedPerformance) { e.Date = "2026-10-24" }))
+	md := rg.md("md")
+	md.Status.ReferenceMisses = []v1alpha1.ReferenceMiss{{PlatformProfile: rigProfile, ReferenceKey: suspectKey(id), Date: "2026-10-23",
+		InstanceUID: "seed-instance", AllocationUID: "seed-allocation", Time: metav1.NewTime(rg.clock.Now())}}
+	if err := rg.c.Status().Update(rg.ctx, md); err != nil {
+		t.Fatal(err)
+	}
 	startUntil(rg, "md", time.Hour, "the Instance failed its retry", func() bool { return ended(rg.instance(name)) })
 	in := rg.instance(name)
 	if in.Status.EndReason != v1alpha1.ReasonQualificationFailed || in.Status.Gate == nil || in.Status.Gate.Verdict != v1alpha1.GateMissed || in.Status.Gate.ReferenceDate != "2026-10-24" {
@@ -247,8 +266,12 @@ func TestGateAFailureARecordOnlyAndAFailureAgainstANewEntrySuspendNothing(t *tes
 	}
 	rg.clock.Advance(10 * time.Second)
 	rg.Step()
-	if got := rg.md("md").Status.SuspendedReferences; len(got) != 0 || len(suspectEvents(rg)) != 0 {
-		t.Errorf("suspendedReferences %+v, %d events: a new entry has one miss", got, len(suspectEvents(rg)))
+	got := rg.md("md").Status
+	if len(got.SuspendedReferences) != 0 || len(suspectEvents(rg)) != 0 {
+		t.Errorf("suspendedReferences %+v, %d events: the new entry has one miss", got.SuspendedReferences, len(suspectEvents(rg)))
+	}
+	if len(got.ReferenceMisses) != 1 || got.ReferenceMisses[0].Date != "2026-10-24" || got.ReferenceMisses[0].InstanceUID != in.UID {
+		t.Errorf("referenceMisses %+v, want the new entry's miss alone: the old date's is lifted", got.ReferenceMisses)
 	}
 }
 

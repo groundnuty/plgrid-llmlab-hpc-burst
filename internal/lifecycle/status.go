@@ -100,9 +100,10 @@ func (p *pass) writeStatus() error {
 	// Each class's start-up outcomes, beside its start-to-ready time (HBEP-7, Hedging (beta), The start-up failure
 	// rate; outcomes.go).
 	p.recordStartOutcomes(s)
-	// A suspect entry: the listing of entries two Allocations in a row missed, written in this pass when the second
-	// miss is recorded (HBEP-7, The throughput gate: a suspect reference; suspension.go).
-	suspended := p.updateSuspensions(s)
+	// A suspect entry: the gate's verdicts are counted, and an entry suspended, in the pass that judges them
+	// (recordVerdict); here a listing or a miss whose entry the profile no longer holds is removed (HBEP-7, The
+	// throughput gate: a suspect reference; suspension.go).
+	p.liftSuspensions(s)
 	s.Retention = &v1alpha1.RetentionStatus{EffectiveMode: md.Spec.RetentionPolicy.EffectiveMode()}
 	gen := md.Generation
 	if ready >= desired {
@@ -126,11 +127,7 @@ func (p *pass) writeStatus() error {
 		cond(&s.Conditions, v1alpha1.ConditionProgressing, metav1.ConditionTrue, v1alpha1.ReasonProvisioning, msg, gen, now)
 	}
 	s.ObservedGeneration, s.LastReconcileTime = gen, &now
-	if err := p.updateMDStatus(next); err != nil {
-		return err
-	}
-	p.announceSuspended(suspended)
-	return nil
+	return p.updateMDStatus(next)
 }
 
 func (p *pass) updateMDStatus(next *v1alpha1.ModelDeployment) error {
