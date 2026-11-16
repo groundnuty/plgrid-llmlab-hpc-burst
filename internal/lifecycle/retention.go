@@ -52,52 +52,106 @@ func (p *pass) retention() error {
 	return nil
 }
 
-// releaseEmpty decides whether an empty Allocation goes now, and why.
+// releaseEmpty decides whether an empty Allocation goes now, and why. The decision is retentionFate's, a
+// pure function; what stays here are the two side effects the old body made in the middle of it: the
+// idle anchor's annotation write (idleAnchor), made only once the earlier rules left the decision open, as
+// before, and the requeue (p.at).
 func (p *pass) releaseEmpty(a *v1alpha1.Allocation) (bool, string, error) {
+	view := p.retentionView(a)
+	release, at, why, needIdle := retentionFate(a, view, p.now, nil)
+	if needIdle {
+		idle, err := p.idleAnchor(a)
+		if err != nil {
+			return false, "", err
+		}
+		release, at, why, _ = retentionFate(a, view, p.now, &idle)
+	}
+	if !at.IsZero() {
+		p.at(at)
+	}
+	return release, why, nil
+}
+
+// fateView is what retention reads besides the Allocation: whether its deployment is gone or being
+// deleted, the deployment's end time, and the profile's maxIdle for the Allocation's Provider. A plan's
+// view differs from the pass's own where the Operation changes the deployment (End sets its end time to
+// now, or deletes it).
+type fateView struct {
+	// deleted: the deployment is gone, or is being deleted.
+	deleted bool
+	// endTime is the deployment's end time, nil when it has none.
+	endTime *time.Time
+	// maxIdle is the profile's idle limit that releases even a kept Allocation; nil when the Provider's
+	// profile sets none (or is not read).
+	maxIdle *time.Duration
+}
+
+// retentionView is the pass's view for an Allocation.
+func (p *pass) retentionView(a *v1alpha1.Allocation) fateView {
+	v := fateView{deleted: p.md == nil || !p.md.DeletionTimestamp.IsZero()}
+	if p.md != nil && p.md.Spec.EndTime != nil {
+		t := p.md.Spec.EndTime.Time
+		v.endTime = &t
+	}
+	if pv := p.pvOf(a.Labels); pv != nil && pv.profile != nil {
+		v.maxIdle = pv.settings.maxIdle
+	}
+	return v
+}
+
+// retentionFate is the pure decision of releaseEmpty: whether the empty Allocation a goes at now, why, and
+// at, the earliest later time at which the answer can change (the zero time when none can). at is set
+// also when release is true: the old body asked for a pass at the hard end before it ruled on idleness,
+// so a release by maxIdle still carried that request. emptiedAt is the idle anchor, when the Allocation
+// was emptied. Only the idleness rules read it, so a nil emptiedAt on a decision that needs it returns
+// needIdle with nothing decided: the caller computes the anchor (a write) and calls again. The rules, in
+// order, are HBEP-7's, Retention (see retention).
+func retentionFate(a *v1alpha1.Allocation, v fateView, now time.Time, emptiedAt *time.Time) (release bool, at time.Time, why string, needIdle bool) {
 	obs := a.Status.AtProvider
 	switch obs.Phase {
 	case v1alpha1.AllocationEnded, v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:
-		return true, fmt.Sprintf("its job is %s", obs.Phase), nil
+		return true, time.Time{}, fmt.Sprintf("its job is %s", obs.Phase), false
 	}
 	if c := a.GetCondition(v1alpha1.ConditionRelayEndedForGood); c.Status == "True" {
 		// Kept capacity that nothing can reach: no Instance placed on it
 		// could serve, and its job would hold its GPU until the policy's
 		// date (issue #304).
 		// The condition's message, the Provider controller's, stays out of the release cause.
-		return true, "a relay ended for good", nil
+		return true, time.Time{}, "a relay ended for good", false
 	}
 	if obs.StartTime == nil {
 		// An Instance is created before its Allocation, so an unstarted
 		// Allocation with no live Instance waits for nothing.
-		return true, "a pending Allocation with no Instance is cancelled", nil
+		return true, time.Time{}, "a pending Allocation with no Instance is cancelled", false
 	}
-	if p.md == nil || !p.md.DeletionTimestamp.IsZero() {
+	if v.deleted {
 		// A user who deletes a deployment releases its GPUs, whatever its policy (HBEP-7, Release; the science agent's ruling on
 		// #503, 13 Nov 2026): release-when-idle's limit, like keep's date, is for a deployment that still exists. Before this, only
 		// keep was cut by the deletion (keepUntil), and a release-when-idle job ran on for its whole idle limit, 30 minutes in the
 		// example, holding the owner's shared slot.
-		return true, "its deployment was deleted", nil
+		return true, time.Time{}, "its deployment was deleted", false
 	}
-	if obs.HardEnd != nil && !p.now.Before(obs.HardEnd.Time) {
-		return true, "its hard end passed", nil
+	if obs.HardEnd != nil && !now.Before(obs.HardEnd.Time) {
+		return true, time.Time{}, "its hard end passed", false
 	}
 	if obs.HardEnd != nil {
-		p.at(obs.HardEnd.Time)
+		at = obs.HardEnd.Time
 	}
-	idle, err := p.idleAnchor(a)
-	if err != nil {
-		return false, "", err
+	if emptiedAt == nil {
+		return false, time.Time{}, "", true
+	}
+	idle := *emptiedAt
+	later := func(t time.Time) {
+		if at.IsZero() || t.Before(at) {
+			at = t
+		}
 	}
 	pol := a.Spec.RetentionPolicy
-	var maxIdle *time.Duration
-	if pv := p.pvOf(a.Labels); pv != nil && pv.profile != nil {
-		maxIdle = pv.settings.maxIdle
-	}
-	if maxIdle != nil {
-		if t := idle.Add(*maxIdle); !p.now.Before(t) {
-			return true, fmt.Sprintf("idle for the profile's maxIdle %s", *maxIdle), nil
+	if v.maxIdle != nil {
+		if t := idle.Add(*v.maxIdle); !now.Before(t) {
+			return true, at, fmt.Sprintf("idle for the profile's maxIdle %s", *v.maxIdle), false
 		} else {
-			p.at(t)
+			later(t)
 		}
 	}
 	switch pol.EffectiveMode() {
@@ -109,22 +163,22 @@ func (p *pass) releaseEmpty(a *v1alpha1.Allocation) (bool, string, error) {
 				limit = d
 			}
 		}
-		if t := idle.Add(limit); !p.now.Before(t) {
-			return true, fmt.Sprintf("released when idle, after %s", limit), nil
+		if t := idle.Add(limit); !now.Before(t) {
+			return true, at, fmt.Sprintf("released when idle, after %s", limit), false
 		} else {
-			p.at(t)
+			later(t)
 		}
-		return false, "", nil
+		return false, at, "", false
 	default:
-		until := p.keepUntil(pol)
+		until := keepUntilOf(pol, v.endTime)
 		if until == nil {
-			return false, "", nil
+			return false, at, "", false
 		}
-		if !p.now.Before(*until) {
-			return true, fmt.Sprintf("kept until %s", until.UTC().Format(time.RFC3339)), nil
+		if !now.Before(*until) {
+			return true, at, fmt.Sprintf("kept until %s", until.UTC().Format(time.RFC3339)), false
 		}
-		p.at(*until)
-		return false, "", nil
+		later(*until)
+		return false, at, "", false
 	}
 }
 
@@ -177,18 +231,13 @@ func (p *pass) writeIdleSince(a *v1alpha1.Allocation, t *time.Time) error {
 	return nil
 }
 
-// keepUntil is the date a kept Allocation of a deployment that exists is kept
-// until: the policy's date, else the deployment's end time. Nil means until the
-// hard end. A deployment that is gone or being deleted never gets here: its empty
-// Allocation is released at once (releaseEmpty).
-func (p *pass) keepUntil(pol *v1alpha1.RetentionPolicy) *time.Time {
+// keepUntilOf is the date a kept Allocation of a deployment that exists is kept until: the policy's
+// date, else the deployment's end time. Nil means until the hard end. A deployment that is gone or being
+// deleted never gets here: its empty Allocation is released at once (retentionFate).
+func keepUntilOf(pol *v1alpha1.RetentionPolicy, endTime *time.Time) *time.Time {
 	if pol != nil && pol.Until != nil {
 		t := pol.Until.Time
 		return &t
 	}
-	if p.md != nil && p.md.Spec.EndTime != nil {
-		t := p.md.Spec.EndTime.Time
-		return &t
-	}
-	return nil
+	return endTime
 }
