@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
 )
 
 // writer is whoever sends a write: an agent with its real token, or the person (the admin) as a dry run,
@@ -478,4 +479,103 @@ func TestOwnerPinFixesTheOwnerAndBoundsThePurposeForEveryone(t *testing.T) {
 	tooLongMD.Annotations[v1alpha1.AnnotationPurpose] = long
 	requireDenied(t, "an agent's create with a 257-character purpose", a.c.Create(bg(), tooLongMD), ownerPin, tooLong)
 	requireDenied(t, "the person's create with a 257-character purpose", c.Create(bg(), tooLongMD.DeepCopy(), client.DryRunAll), ownerPin, tooLong)
+}
+
+// A ModelDeployment whose source is managed: the guard's source rule passes a source that is unchanged, so
+// the edits HBEP-10 allows go through (the purpose, a higher count), and the switch to a served source is
+// still refused (a managed deployment has no checkpoint or engine, and an agent's edit of spec.source may
+// only edit its served part).
+func TestCapacityGuardOnAManagedSourceDeployment(t *testing.T) {
+	a := newAgents(t, "agent-a", "agent-b")[0]
+	requireEnforced(t)
+	ns := newNamespace(t)
+	person := personWriter(t)
+	managed := func() *v1alpha1.ModelDeployment {
+		md := agentMD(a, ns, uniq("md-managed"))
+		md.Spec.Source = v1alpha1.ModelSource{Managed: &v1alpha1.ManagedCatalogEntry{Platform: "example-platform", CatalogName: "example-model"}}
+		return md
+	}
+	stored := createMD(t, a, managed())
+	requireAgentIdentity(t, a)
+
+	// The purpose, which HBEP-10 allows, and a higher count (harmless: a managed source provisions nothing).
+	requireAccepted(t, "agent A's purpose edit of a managed-source deployment", agentWriter(a).update(stored, func(m *v1alpha1.ModelDeployment) {
+		m.Annotations[v1alpha1.AnnotationPurpose] = "another reason"
+	}))
+	if got := storedMD(t, stored); got.Annotations[v1alpha1.AnnotationPurpose] != "another reason" {
+		t.Errorf("the purpose is %q after the accepted edit", got.Annotations[v1alpha1.AnnotationPurpose])
+	}
+	requireAccepted(t, "agent A's higher count on a managed-source deployment", agentWriter(a).update(stored, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 5 }))
+	if got := storedMD(t, stored); got.Spec.Instances != 5 {
+		t.Errorf("spec.instances = %d after the accepted raise, want 5", got.Spec.Instances)
+	}
+
+	// The switch from managed to served is refused, naming the guard, and the person's passes.
+	toServed := func(m *v1alpha1.ModelDeployment) {
+		m.Spec.Source = v1alpha1.ModelSource{Served: newModelDeployment(ns, "x").Spec.Source.Served}
+	}
+	requireDenied(t, "agent A's switch from managed to served", agentWriter(a).update(stored, toServed), capacityGuard, "edit spec.source.served only")
+	requireAccepted(t, "the person's same switch (a dry run)", person.update(stored, toServed))
+	if got := storedMD(t, stored); got.Spec.Source.Managed == nil || got.Spec.Source.Served != nil {
+		t.Errorf("the source after the refused switch: %+v, want managed", got.Spec.Source)
+	}
+	// A lower count and another label are refused on it as on any deployment: the rest of the rules stand.
+	requireDenied(t, "agent A's lower count on a managed-source deployment", agentWriter(a).update(stored, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 1 }), capacityGuard, "cannot lower spec.instances")
+}
+
+// The purpose limit is a ratchet: it applies when the purpose is set or changed. An object that carries a
+// longer purpose from before the pin stays updatable by everyone (the controllers included, whose update
+// would otherwise wedge), a purpose left as it is passes, and a new long purpose, or a changed long one, is
+// refused.
+func TestOwnerPinRatchetsThePurposeLimitForAnObjectCreatedBeforeIt(t *testing.T) {
+	states, err := launcher.CheckAdmission(bg(), cfg)
+	must(t, err, "check the admission policies")
+	for _, s := range states {
+		if s.Present {
+			t.Skipf("%s is installed on this host already: this test creates its object before the pins exist", s.Name)
+		}
+	}
+	ns := newNamespace(t)
+	long := strings.Repeat("q", 300)
+	otherLong := strings.Repeat("r", 300)
+	old := newModelDeployment(ns, uniq("md-long-purpose"))
+	old.Annotations = map[string]string{v1alpha1.AnnotationPurpose: long}
+	must(t, c.Create(bg(), old), "create a deployment with a 300-character purpose before the pins exist")
+
+	a := newAgents(t, "agent-a", "agent-b")[0]
+	requireEnforced(t)
+	const tooLong = "at most 256 characters"
+	read := func() *v1alpha1.ModelDeployment {
+		got := &v1alpha1.ModelDeployment{}
+		must(t, c.Get(bg(), client.ObjectKeyFromObject(old), got), "read the deployment")
+		return got
+	}
+
+	// An update that leaves the purpose as it is passes: a label, here, which only the person may add.
+	cur := read()
+	cur.Labels = map[string]string{"example": "label"}
+	must(t, c.Update(bg(), cur), "the person's update that leaves the 300-character purpose unchanged")
+	if got := read(); got.Labels["example"] != "label" || got.Annotations[v1alpha1.AnnotationPurpose] != long {
+		t.Errorf("after the accepted update: labels %v, purpose length %d, want the label and the same purpose", got.Labels, len(got.Annotations[v1alpha1.AnnotationPurpose]))
+	}
+	// Another 300-character purpose is a change, and is refused.
+	cur = read()
+	cur.Annotations[v1alpha1.AnnotationPurpose] = otherLong
+	requireDenied(t, "the person's change to another 300-character purpose", c.Update(bg(), cur), ownerPin, tooLong)
+	if got := read(); got.Annotations[v1alpha1.AnnotationPurpose] != long {
+		t.Errorf("the refused change was stored")
+	}
+	// A purpose that fits is accepted, and from then on the limit applies as usual.
+	cur = read()
+	cur.Annotations[v1alpha1.AnnotationPurpose] = "short"
+	must(t, c.Update(bg(), cur), "the person's change to a short purpose")
+	cur = read()
+	cur.Annotations[v1alpha1.AnnotationPurpose] = long
+	requireDenied(t, "the person's return to a 300-character purpose", c.Update(bg(), cur), ownerPin, tooLong)
+	// A create with 300 characters is refused, for an agent and for the person.
+	requireAgentIdentity(t, a)
+	fresh := agentMD(a, ns, uniq("md"))
+	fresh.Annotations[v1alpha1.AnnotationPurpose] = long
+	requireDenied(t, "agent A's create with a 300-character purpose", a.c.Create(bg(), fresh), ownerPin, tooLong)
+	requireDenied(t, "the person's create with a 300-character purpose", c.Create(bg(), fresh.DeepCopy(), client.DryRunAll), ownerPin, tooLong)
 }

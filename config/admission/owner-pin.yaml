@@ -55,9 +55,15 @@ spec:
         (!(variables.ownerKey in variables.newAnnotations) || variables.newAnnotations[variables.ownerKey] == oldObject.metadata.annotations[variables.ownerKey]))
       reason: Forbidden
       message: "the annotation hpcburst.groundnuty.github.io/owner is fixed at create: no identity changes, adds or removes it afterwards (HBEP-10, Owner and purpose)"
-    - expression: "!(variables.purposeKey in variables.newAnnotations) || size(variables.newAnnotations[variables.purposeKey]) <= 256"
+    # A policy has no ratchet of its own, so the limit applies only when the purpose is set or changed: an
+    # object that carries a longer purpose from before this pin stays updatable by everyone, the controllers
+    # included, and a purpose left as it is passes.
+    - expression: >-
+        !(variables.purposeKey in variables.newAnnotations) || size(variables.newAnnotations[variables.purposeKey]) <= 256 ||
+        (variables.op == 'UPDATE' && has(oldObject.metadata.annotations) && variables.purposeKey in oldObject.metadata.annotations &&
+        oldObject.metadata.annotations[variables.purposeKey] == variables.newAnnotations[variables.purposeKey])
       reason: Forbidden
-      message: "the annotation hpcburst.groundnuty.github.io/purpose holds at most 256 characters (HBEP-10, Owner and purpose)"
+      message: "the annotation hpcburst.groundnuty.github.io/purpose holds at most 256 characters, when it is set or changed (HBEP-10, Owner and purpose)"
     - expression: "variables.res != 'operations' || variables.op != 'CREATE' || object.spec.owner == request.userInfo.username"
       reason: Forbidden
       message: "an Operation's spec.owner is the identity that creates it, as the API server reports the user name (HBEP-10, Owner and purpose)"

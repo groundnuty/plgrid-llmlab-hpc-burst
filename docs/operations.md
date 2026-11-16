@@ -625,10 +625,10 @@ Three admission policies bound the agent role's writes (`config/admission/`; [HB
 | a lower count (`spec.instances`, or scale, to any count, 0 included) | refused: "a lower count is an Operation of action Scale" | create an Operation of action Scale (`hpcburst scale`, HBEP-10) |
 | a later `spec.endTime`, or its removal | accepted | |
 | an `endTime` set where there was none, or moved earlier | refused: "an earlier end is an Operation of action End" | an Operation of action End (`hpcburst end`) |
-| an edit of `spec.source.served` | accepted; it rolls out make-before-break | |
+| an edit of `spec.source.served`, or any write that leaves `spec.source` as it is (the purpose or a higher count of a deployment with a managed source) | accepted; an edit of the serving spec rolls out make-before-break | |
 | a change of `spec.hedgeWidth`, up or down | accepted: lowering it cancels nothing, and raising it reserves capacity, which the owner allowed (HBEP-10, The capacity guard) | |
 | `spec.source` switched to `managed`, or any other change of `spec.source` | refused: "an agent may edit spec.source.served only" | the person edits it |
-| the purpose annotation `hpcburst.groundnuty.github.io/purpose` (at most 256 characters) | accepted | |
+| the purpose annotation `hpcburst.groundnuty.github.io/purpose` (at most 256 characters, checked when it is set or changed: a longer purpose that an object carries from before the pin is left alone, so the object stays updatable) | accepted | |
 | `kubectl.kubernetes.io/last-applied-configuration`, beside any accepted edit | accepted: kubectl's client-side apply rewrites it on every apply | |
 | any other spec field (`model`, `providers`, `retentionPolicy`, `leaseLimit`, `workload`, `routing` including `maxRequestDuration`, and every field the CRD gains, unless the guard names it), a label, any other annotation, a finalizer, an owner reference | refused, each naming what it may not change | the person makes the change |
 | the owner annotation `hpcburst.groundnuty.github.io/owner` | refused for every identity, the person's too: it is fixed at create | |

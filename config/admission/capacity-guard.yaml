@@ -101,6 +101,7 @@ spec:
       message: "an agent cannot set spec.endTime where there was none or move it earlier: an earlier end is an Operation of action End (hpcburst end; HBEP-10, The capacity guard)"
     - expression: >-
         variables.op != 'UPDATE' || !variables.mainMD ||
+        object.spec.source == oldObject.spec.source ||
         (has(oldObject.spec.source.served) && has(object.spec.source.served) && !has(object.spec.source.managed) &&
         object.spec.source.all(k, k == 'served' || (k in oldObject.spec.source && object.spec.source[k] == oldObject.spec.source[k])) &&
         oldObject.spec.source.all(k, k == 'served' || k in object.spec.source))
