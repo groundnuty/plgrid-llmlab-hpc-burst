@@ -27,6 +27,10 @@ type RestoreReport struct {
 	// KeeperFencesCleared is whether the relay keeper's accepted Lease epochs were cleared: there
 	// was a keeper state file (HBEP-6, The relay keeper).
 	KeeperFencesCleared bool `json:"keeper_fences_cleared,omitempty"`
+	// EventLog says what became of the durable log's copy (HBEP-8, Backup and restore): restored when
+	// it sits beside this backup, and otherwise the live log store was left alone, and why. Empty when
+	// there is no copy.
+	EventLog string `json:"event_log,omitempty"`
 }
 
 // Restore puts a backup's store and server token back in place of the current ones, with the host
@@ -141,6 +145,14 @@ func Restore(o RestoreOptions) (*RestoreReport, error) {
 	logf(o.Log, "restored the store of k3s %s from %s", info.Version, src)
 	if rep.Replaced != "" {
 		logf(o.Log, "the store it replaced is in %s", rep.Replaced)
+	}
+	// The log's copy goes back only with the backup it sits beside (R5), after the API store, which
+	// is restored by now: a failure here names what is left to do.
+	if rep.EventLog, err = restoreEventLog(l, src, aside); err != nil {
+		return rep, fmt.Errorf("the API store is restored, but the event log's copy was not: %w", err)
+	}
+	if rep.EventLog != "" {
+		logf(o.Log, "%s", rep.EventLog)
 	}
 	return rep, nil
 }

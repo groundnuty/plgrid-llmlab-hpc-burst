@@ -67,6 +67,12 @@ type EntryHealth struct {
 	// 31 Oct 2026; HBEP-8, Usage records, and HBEP-11).
 	Degraded string `json:"degraded,omitempty"`
 	Detail   string `json:"detail,omitempty"`
+	// Gate is why the process is not started while its start gate is closed (state gated): the
+	// durable log, whose caps do not fit the disk (eventlog_status.go). Degraded says it too.
+	Gate string `json:"gate,omitempty"`
+	// Streams are the durable log's streams with their bytes and messages, read from nats-server's
+	// monitoring port while the log answers its /healthz; empty for every other process.
+	Streams []StreamHealth `json:"streams,omitempty"`
 }
 
 // DegradedUsage is EntryHealth.Degraded for a failing usage sink. Status prints it as "degraded:
@@ -124,7 +130,19 @@ func checkSupervision(l layout, st *State, sup *procHandle, rep *StatusReport, b
 		return
 	}
 	for _, e := range f.Entries {
+		if eventLogGated(e) {
+			// Not started on purpose, with the reason on record: degraded, never a fault (HBEP-8, A log
+			// refused for space). The host stays healthy and status exits 0.
+			rep.Controllers = append(rep.Controllers, gatedEventLogHealth(e))
+			continue
+		}
 		eh, problems := checkEntry(sup, supRec.PID, e)
+		if e.Name == eventLogEntryName && !eh.Running {
+			// A log that exited refusing its settings names them, from the file it wrote first.
+			if p := eventLogRefusalProblem(l); p != "" {
+				problems = append(problems, p)
+			}
+		}
 		if st.BulkPath && e.Name == frontEntryName && eh.HealthzOK != nil && *eh.HealthzOK {
 			checkFrontBulkPlugin(e.Health, &eh, func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) })
 		}
@@ -249,6 +267,9 @@ func checkEntry(sup *procHandle, supPID int, e EntryRecord) (EntryHealth, []stri
 	}
 	if ok && e.Name == frontEntryName {
 		checkFrontPlugin(e.Health, &eh, add)
+	}
+	if ok && e.Name == eventLogEntryName {
+		checkEventLogStreams(e.Health, &eh, add)
 	}
 	if ok {
 		// A failing usage sink is stated, never counted against health: the front keeps serving.

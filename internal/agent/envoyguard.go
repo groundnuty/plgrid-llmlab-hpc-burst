@@ -30,7 +30,8 @@ import (
 //     every worker but one, ⌈100·(n−1)/n⌉ percent (#565);
 //   - the route's retry: once, on connect-failure and reset-before-request only, to another worker,
 //     after a jittered back-off of 100 ms base and 250 ms maximum (#561);
-//   - ring_hash's bounded loads at the front's tight bound, hash_balance_factor 125 (HBEP-5).
+//   - ring_hash with no bounded load: the cluster's common_lb_config holds the panic threshold alone, so
+//     there is no hash_balance_factor and no consistent_hashing_lb_config (#614; HBEP-5, Inside an Instance).
 //
 // Each map is held to the keys the agent writes, so a field that is not checked here cannot be
 // added unnoticed. The first fault is returned, naming its place.
@@ -91,16 +92,12 @@ func (g guard) num(v any, at string, want int64) error {
 
 // health checks the cluster's worker health: the active check, outlier detection and no panic mode.
 func (g guard) health(c map[string]any, at string) error {
-	lb, err := g.object(c["common_lb_config"], at+".common_lb_config", "healthy_panic_threshold", "consistent_hashing_lb_config")
+	// Held to the panic threshold alone: a consistent_hashing_lb_config of any kind, a hash_balance_factor
+	// above all, is refused as a key the router does not allow. A bounded load walks a request off a worker
+	// past its share to a dead one that is not yet ejected, which holds no request, so is never past its share (#614).
+	lb, err := g.object(c["common_lb_config"], at+".common_lb_config", "healthy_panic_threshold")
 	if err != nil {
 		return err
-	}
-	ch, err := g.object(lb["consistent_hashing_lb_config"], at+".common_lb_config.consistent_hashing_lb_config", "hash_balance_factor")
-	if err != nil {
-		return err
-	}
-	if err := g.num(ch["hash_balance_factor"], at+".common_lb_config.consistent_hashing_lb_config.hash_balance_factor", envoyHashBalanceFactor); err != nil {
-		return refuse("%v: without bounded loads sessions pile onto one worker while a sibling idles (HBEP-5, Inside an Instance)", err)
 	}
 	pt, err := g.object(lb["healthy_panic_threshold"], at+".common_lb_config.healthy_panic_threshold", "value")
 	if err != nil {
@@ -161,7 +158,7 @@ func (g guard) health(c map[string]any, at string) error {
 		return refuse("%s.split_external_local_origin_errors is %v, want true: a dead worker's connection failures must eject it at once, apart from the engine's 5xx (#561)", oat, od["split_external_local_origin_errors"])
 	}
 	if err := g.num(od["consecutive_local_origin_failure"], oat+".consecutive_local_origin_failure", envoyOutlierLocalOrigin); err != nil {
-		return refuse("%v: a dead worker not yet ejected draws the bounded load's walk and the retry (#561)", err)
+		return refuse("%v: a dead worker not yet ejected draws its sessions' requests and their retries (#561)", err)
 	}
 	return g.num(od["enforcing_consecutive_local_origin_failure"], oat+".enforcing_consecutive_local_origin_failure", envoyEnforcingLocalOrigin)
 }

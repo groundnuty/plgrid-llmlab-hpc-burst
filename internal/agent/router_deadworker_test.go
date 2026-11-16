@@ -1,11 +1,12 @@
 package agent_test
 
-// A worker dies behind the real Envoy 1.40.2, with ring_hash's bounded load on (issue #561). A dead worker
-// that Envoy still holds healthy has no request active, so the bounded load never finds it overloaded:
-// once its sibling carries more than its share (from its sixth request in flight, with two workers), the
-// bounded load's walk sends requests there, and the retry's host selection lands there again on every pick.
-// HBEP-5 as #564 amends it: a connection failure ejects the worker at once, and the retry waits a back-off
-// of 100 ms base and 250 ms maximum, so it follows the ring's update.
+// A worker dies behind the real Envoy 1.40.2, ring_hash with no bounded load (issue #614; the science agent's
+// ruling, which reverses #518's provisional bound). A dead worker that Envoy still holds healthy has no request
+// active, so a bounded load never finds it overloaded: with the bound on, from a live worker's sixth request in
+// flight (two workers), the bound's walk sent requests there, and the retry's host selection landed there again
+// (#561). With no bound a request in a live worker's session stays on it, and only a session that hashes to
+// the dead worker reaches it, once. HBEP-5 as #564 amends it: a connection failure ejects the worker at once,
+// and the retry waits a back-off of 100 ms base and 250 ms maximum, so it follows the ring's update.
 
 import (
 	"context"
@@ -28,11 +29,20 @@ import (
 // and its health flags that are set, as "health:<flag>" = 1.
 func hostStats(t *testing.T, runDir string) map[string]map[string]int {
 	t.Helper()
+	out, err := hostStatsErr(runDir)
+	if err != nil {
+		t.Fatalf("Envoy's /clusters: %v", err)
+	}
+	return out
+}
+
+// hostStatsErr is hostStats returning its error, for a reader that is not the test's goroutine.
+func hostStatsErr(runDir string) (map[string]map[string]int, error) {
 	c := unixClient(filepath.Join(runDir, agent.EnvoyAdminSocket))
 	defer c.Transport.(*http.Transport).CloseIdleConnections()
 	resp, err := c.Get("http://admin/clusters?format=json")
 	if err != nil {
-		t.Fatalf("Envoy's /clusters: %v", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 	var doc struct {
@@ -48,7 +58,7 @@ func hostStats(t *testing.T, runDir string) map[string]map[string]int {
 		} `json:"cluster_statuses"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
-		t.Fatalf("Envoy's /clusters: %v", err)
+		return nil, err
 	}
 	out := map[string]map[string]int{}
 	for _, cl := range doc.Clusters {
@@ -70,7 +80,7 @@ func hostStats(t *testing.T, runDir string) map[string]map[string]int {
 			out[h.Hostname] = m
 		}
 	}
-	return out
+	return out, nil
 }
 
 // heldOut reports whether Envoy holds the worker out: failed by its active check, or ejected.
@@ -104,22 +114,24 @@ func chatIn(h *harness, key, session string, tokens int) (int, string) {
 
 // TestALiveWorkersOwnSessionNeverReachesItsDeadSibling: worker-1 is killed while Envoy still holds it
 // healthy; then 8 long requests in worker-0's OWN session, each sent once the one before is in flight or
-// has ended. From the sixth, worker-0 is over its bounded share, and the bounded load's walk sends the
-// request to worker-1, which holds no request.
+// has ended, and a request in worker-1's own session. With the bound on, worker-0 was over its share from
+// the sixth request, and the bound's walk sent that request to worker-1, which holds no request (#561): the
+// test was written to catch that. With no bound (#614) the 8 stay on worker-0, and only worker-1's own
+// session's request reaches the dead worker.
 //
-// It discriminates by MECHANISM, from Envoy's own counters, which are deterministic given the kill: the
-// walked request's first attempt is worker-1's first connection failure, which ejects it at once. Only a
-// retry that beat the ring's update can add a second, and nothing reaches an ejected worker after. So
-// worker-1 ends ejected with 1 or 2 connection failures. On the config before #561 a connection failure
-// counted as a 5xx, and 3 in a row ejected: worker-1 ends with 3 or more, or not ejected. Measured on the
-// shipped config: 3 to 5, in all 20 runs; with the first-failure ejection: 1, in all 40. (The admin's one allowed path, /clusters, shows each
-// worker's counters and health flags, but not the cluster's stats, such as the ejections by type.)
+// It checks the outcome with NO allowance, and the mechanism from Envoy's counters: worker-0 held up to
+// 5 or more at once (the load at which the bound walked), worker-1 failed a connection, and ended
+// ejected by its first or its second (a retry that beat the ring's update), not by the third of the 5xx
+// count of the config before #561. It cannot say that none of the 8 reached worker-1: the agent's probe
+// through the router, every 100 ms here and in no session, lands on either worker and fails the first
+// connection itself, so that the mechanism's failures are not tied to the requests. The test that a session
+// never leaves its worker is TestAHeavySessionNeverSpillsToTheIdleSibling, and the config's own pins
+// (TestTheRenderedRingHasNoBoundedLoad, the guard) hold the bound out.
 //
-// The outcome is checked with an allowance of one 503. On the fix only the walked request is exposed, to a
-// retry whose 0-100 ms back-off beats the ring's update, so two losses need two exposures, which this run
-// doesn't have. Measured: 0 losses in 23 runs of this case and 0 in 1,600 requests of the wave. The
-// allowance can't tell the shipped config, which lost exactly one request in 26 of its 27 failing runs (5
-// of 32 lost none): the mechanism does.
+// Measured on this config, pinned to 2 CPUs beside 2 spinners: worker-0 held 8 at once, and worker-1 failed
+// exactly 1 connection and ended ejected, in all 50 runs, with no request lost. On the config with the
+// bound, 0 losses in 23 runs of this case, and the allowance, which was one, could not tell it from the
+// shipped config before #561 (1 loss in 26 of its 27 failing runs).
 func TestALiveWorkersOwnSessionNeverReachesItsDeadSibling(t *testing.T) {
 	h := newHarness(t, harnessOptions{envoy: testenv.EnvoyBinary(t), baseEnv: []string{"CUDA_VISIBLE_DEVICES=0,1"}})
 	d := workersRouterState(h, 2)
@@ -171,7 +183,7 @@ func TestALiveWorkersOwnSessionNeverReachesItsDeadSibling(t *testing.T) {
 	t.Logf("the load began %s after the kill; worker-0 held up to %d at once; worker-1 failed %d connection(s), ejected %v",
 		began.Round(time.Millisecond), peak, fails, after["worker-1"]["health:failed_outlier_check"] == 1)
 	if peak < 5 || fails == 0 {
-		t.Fatalf("worker-0 held up to %d requests at once, and worker-1 failed %d connections: no request was walked to the dead worker, so the test proves nothing", peak, fails)
+		t.Fatalf("worker-0 held up to %d requests at once, and worker-1 failed %d connections: the load never built, or nothing reached the dead worker (its own session's request, or the agent's probe, is the first to), so the test proves nothing", peak, fails)
 	}
 	// The mechanism.
 	if after["worker-1"]["health:failed_outlier_check"] != 1 || fails > 2 {
@@ -181,7 +193,8 @@ func TestALiveWorkersOwnSessionNeverReachesItsDeadSibling(t *testing.T) {
 	if after["worker-0"]["cx_connect_fail"] != before["worker-0"]["cx_connect_fail"] {
 		t.Errorf("worker-0 failed %d connections: the live worker refused", after["worker-0"]["cx_connect_fail"]-before["worker-0"]["cx_connect_fail"])
 	}
-	// The outcome, with its allowance of one.
+	// The outcome, with no allowance (#614): no request in worker-0's session has a walk to the dead worker to
+	// lose to, and the one request that reaches it is retried to worker-0 after the ring's update.
 	lost := 0
 	for i := range codes {
 		if codes[i] != http.StatusOK {
@@ -193,8 +206,8 @@ func TestALiveWorkersOwnSessionNeverReachesItsDeadSibling(t *testing.T) {
 		lost++
 		t.Logf("a request in worker-1's session after the load: %d %.160q", code, body)
 	}
-	if lost > 1 {
-		t.Errorf("%d of %d requests failed with worker-1 dead; the allowance is one (a retry that beat the ring's update)", lost, n+1)
+	if lost > 0 {
+		t.Errorf("%d of %d requests failed with worker-1 dead and worker-0 healthy; the allowance is none (HBEP-5: no 503 while a sibling is healthy)", lost, n+1)
 	}
 }
 
@@ -204,11 +217,15 @@ func TestALiveWorkersOwnSessionNeverReachesItsDeadSibling(t *testing.T) {
 // update to worker-0. A wave is a race (many first attempts reach worker-1 before the ejection lands), so
 // its counters can't show the mechanism; TestALiveWorkersOwnSessionNeverReachesItsDeadSibling does.
 //
-// It allows two 503s. Measured on the fix: 0 losses in 1,600 requests (40 waves). The 95% upper bound on the
-// loss rate is then 3 in 1,600 (the rule of three), so a wave of 40 expects at most 0.075 losses, and
-// P(3 or more) <= 1 - e^-0.075 (1 + 0.075 + 0.075^2/2) = 7e-5. Measured on the config before #561: 3 or more
-// losses in 3 of 52 waves (6%); with only the first-failure ejection and Envoy's 25 ms back-off, in 1 of 40.
-// It guards the end-to-end outcome against a gross regression, and isn't the discriminator.
+// It allows NO 503 (HBEP-5: no 503 while a sibling is healthy; the science agent's ruling on #614). The
+// allowance was two, on #561's measure of 0 losses in 1,600 requests, taken with the CPUs free and with
+// ring_hash's bounded load on. Pinned to 2 CPUs beside 2 spinners, with the bound on, 100 waves lost 14 of
+// 4,000 requests (10 waves, up to 3 at one time), 14 of 1,266 retries going back to the dead worker: the bound's
+// walk steers a retry past a worker over its share, to the dead one, until the ejection reaches Envoy's worker
+// threads (median 24 ms after the wave began; the retry's back-off is 0 to 100 ms). With no bound, the same
+// 100 waves lost none (0 of 1,005 retries failed). TestWaveMeasure repeats the wave and records it per wave.
+// Measured on the config before #561: 3 or more losses in 3 of 52 waves (6%); with only the first-failure
+// ejection and Envoy's 25 ms back-off, in 1 of 40.
 func TestAWaveAtAWorkersDeathGetsNoServiceUnavailable(t *testing.T) {
 	h := newHarness(t, harnessOptions{envoy: testenv.EnvoyBinary(t), baseEnv: []string{"CUDA_VISIBLE_DEVICES=0,1"}})
 	d := workersRouterState(h, 2)
@@ -244,12 +261,14 @@ func TestAWaveAtAWorkersDeathGetsNoServiceUnavailable(t *testing.T) {
 		if codes[i] != http.StatusOK {
 			failed++
 			if failed <= 3 {
-				t.Logf("request %d of the wave, %s after worker-1's kill: %d %.160q", i, time.Since(killAt).Round(time.Millisecond), codes[i], bodies[i])
+				// The time is when this loop ran, after the whole wave: it says nothing of when the request failed
+				// (#614's CI log read three failures at one such moment as one event; TestWaveMeasure times each).
+				t.Logf("request %d of the wave, %s after worker-1's kill when this was printed: %d %.160q", i, time.Since(killAt).Round(time.Millisecond), codes[i], bodies[i])
 			}
 		}
 	}
-	if failed > 2 {
-		t.Errorf("%d of %d requests failed; the allowance is two (P(3 or more) <= 7e-5 a wave on the fix's measured rate)", failed, n)
+	if failed > 0 {
+		t.Errorf("%d of %d requests failed with worker-0 healthy; the allowance is none (HBEP-5: no 503 while a sibling is healthy)", failed, n)
 	}
 }
 
