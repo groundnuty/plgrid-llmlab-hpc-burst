@@ -73,13 +73,20 @@ const (
 )
 
 // reservedOn returns the slots reserved on the Provider, from reads made under its lock: the Instances that carry
-// its label, and the ModelDeployments of the primaries among them. allocs are the Provider's Allocations the
+// its label, the Instances on every Provider of each deployment with one among them (deploymentViews), and the
+// ModelDeployments of the primaries among them. Only the Instances on this Provider hold slots here, but whether
+// one is replaced, whether its predecessor still serves, a gap's chain and a hedge's winner are read across every
+// Provider (#617): a primary whose replacement went to another Provider holds no slot for it. allocs are the
+// Provider's Allocations the
 // count's own list returned (listProviderAllocations), by namespace/name; profile is the Provider's, for the
 // drain start, and with none no primary's slot is reserved. The slots come in a fixed order.
 //
 // A primary holds one when it is countable (not draining, ended or deleting), no countable Instance is its
 // predecessor, no live Instance names it as its predecessor, its Allocation on this Provider is Running, and its
-// deployment, not being deleted, serves past its drain start (servesPast). Each Instance step 7 would make a
+// deployment, not being deleted, serves past its drain start (servesPast). So does a hedge's winner whose
+// predecessor still serves on another Provider, from its win: it is ready, and its hedge's winner (hedgeWinner over
+// the hedge's countable members on every Provider), so another deployment's primary can't take the slot its own
+// replacement will need while it serves beside its predecessor (HBEP-7, Hedging (beta), Interactions). Each Instance step 7 would make a
 // no-overlap successor of holds one for that successor: the set is noOverlapCarriers' own, read by the same
 // helper (outOfServiceCarriers; nooverlap.go), the primary that drained in the mode or a successor of it that
 // failed before it was ready, when its deployment is not being deleted (a deleted deployment's pass makes no
@@ -96,29 +103,45 @@ func reservedOn(ctx context.Context, r client.Reader, provider string, profile *
 	if err := r.List(ctx, &il, client.MatchingLabels{v1alpha1.LabelProvider: provider}); err != nil {
 		return nil, fmt.Errorf("list Instances for Provider %s's reserved slots: %w", provider, err)
 	}
-	sort.Slice(il.Items, func(i, j int) bool {
-		return il.Items[i].Namespace+"/"+il.Items[i].Name < il.Items[j].Namespace+"/"+il.Items[j].Name
-	})
-	insts := make([]*v1alpha1.Instance, len(il.Items))
-	countableNames, replaced := map[string]bool{}, map[string]bool{}
-	for i := range il.Items {
-		in := &il.Items[i]
-		insts[i] = in
-		if countable(in) {
-			countableNames[in.Namespace+"/"+in.Name] = true
+	views, err := deploymentViews(ctx, r, il.Items)
+	if err != nil {
+		return nil, err
+	}
+	// Every read below but the slots' own is of the deployments' Instances on every Provider (#617): a primary
+	// whose replacement or hedge member is on another Provider is replaced all the same, and a gap's chain and a
+	// hedge's members may span Providers. Only the Instances on this Provider hold slots here.
+	countableNames, replaced, byName := map[string]bool{}, map[string]bool{}, map[string]*v1alpha1.Instance{}
+	var all, here []*v1alpha1.Instance
+	winners := map[*v1alpha1.Instance]bool{}
+	for _, v := range views {
+		for _, in := range v.insts {
+			all = append(all, in)
+			byName[in.Namespace+"/"+in.Name] = in
+			if countable(in) {
+				countableNames[in.Namespace+"/"+in.Name] = true
+			}
+			if pred := in.Annotations[v1alpha1.AnnotationPredecessor]; pred != "" && !ended(in) {
+				replaced[in.Namespace+"/"+pred] = true
+			}
+			if in.Labels[v1alpha1.LabelProvider] == provider {
+				here = append(here, in)
+			}
 		}
-		if pred := in.Annotations[v1alpha1.AnnotationPredecessor]; pred != "" && !ended(in) {
-			replaced[in.Namespace+"/"+pred] = true
+		// The winner rule, over each hedge's countable members on every Provider, as the pass reads it (hedge.go).
+		for _, g := range groupHedges(v.insts, countable) {
+			if w := hedgeWinner(g.members); w != nil {
+				winners[w] = true
+			}
 		}
 	}
+	sort.Slice(here, func(i, j int) bool { return here[i].Namespace+"/"+here[i].Name < here[j].Namespace+"/"+here[j].Name })
 	carriers := map[*v1alpha1.Instance]bool{}
-	for _, g := range outOfServiceCarriers(insts, func(*v1alpha1.Instance) bool { return true }) {
+	for _, g := range outOfServiceCarriers(all, func(*v1alpha1.Instance) bool { return true }) {
 		carriers[g.in] = true
 	}
 	mds := map[string]*v1alpha1.ModelDeployment{}
 	var out []reservedSlot
-	for i := range il.Items {
-		in := &il.Items[i]
+	for _, in := range here {
 		allocKey := in.Namespace + "/" + in.Spec.AllocationRef.Name
 		if carriers[in] {
 			md, err := deploymentOf(ctx, r, in, mds)
@@ -138,7 +161,13 @@ func reservedOn(ctx context.Context, r client.Reader, provider string, profile *
 			continue
 		}
 		if pred := in.Annotations[v1alpha1.AnnotationPredecessor]; pred != "" && countableNames[in.Namespace+"/"+pred] {
-			continue // a replacement whose predecessor still serves: the predecessor is the primary
+			// A replacement whose predecessor still serves: the predecessor is the primary, and holds the slot on its
+			// own Provider. Its hedge's winner on another Provider holds one here from its win (HBEP-7, Hedging (beta),
+			// Interactions, The winner's own slot; a hedge of one placed on another Provider too, the science agent's
+			// ruling on #604, Q4): the rule below applies to it as to a primary.
+			if pi := byName[in.Namespace+"/"+pred]; pi == nil || pi.Labels[v1alpha1.LabelProvider] == provider || !winners[in] {
+				continue
+			}
 		}
 		a := allocs[allocKey]
 		if a == nil || a.Status.AtProvider.Phase != v1alpha1.AllocationRunning {
@@ -163,6 +192,57 @@ func reservedOn(ctx context.Context, r client.Reader, provider string, profile *
 			continue
 		}
 		out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name, kind: slotForReplacement})
+	}
+	return out, nil
+}
+
+// deploymentView is one deployment's Instances on every Provider.
+type deploymentView struct {
+	key   string // namespace/the model-deployment label's value
+	insts []*v1alpha1.Instance
+}
+
+// deploymentViews reads, for each deployment with an Instance among onProvider, its Instances on every Provider,
+// by its model-deployment label in its namespace, one List per deployment (#617; shared with #616's selection).
+// An Instance of onProvider that its deployment's List does not show (one with no label, or a cache between the
+// two Lists) is kept as listed, so the reserved count never reads fewer Instances than the Provider's own List.
+// The views come in the order of their deployments' first Instance in onProvider.
+func deploymentViews(ctx context.Context, r client.Reader, onProvider []v1alpha1.Instance) ([]deploymentView, error) {
+	at := map[string]int{}
+	var out []deploymentView
+	for i := range onProvider {
+		in := &onProvider[i]
+		label := in.Labels[v1alpha1.LabelModelDeployment]
+		key := in.Namespace + "/" + label
+		if label == "" {
+			key = in.Namespace + "//" + in.Name // no deployment to read: a view of itself
+		}
+		j, ok := at[key]
+		if !ok {
+			j = len(out)
+			at[key] = j
+			v := deploymentView{key: key}
+			if label != "" {
+				var il v1alpha1.InstanceList
+				if err := r.List(ctx, &il, client.InNamespace(in.Namespace), client.MatchingLabels{v1alpha1.LabelModelDeployment: label}); err != nil {
+					return nil, fmt.Errorf("list Instances of deployment %s for the reserved slots: %w", key, err)
+				}
+				for k := range il.Items {
+					v.insts = append(v.insts, &il.Items[k])
+				}
+			}
+			out = append(out, v)
+		}
+		found := false
+		for _, o := range out[j].insts {
+			if o.Namespace == in.Namespace && o.Name == in.Name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out[j].insts = append(out[j].insts, in)
+		}
 	}
 	return out, nil
 }
