@@ -205,7 +205,7 @@ func (p *pass) warmAllocation(pv *providerView, params v1alpha1.BatchParameters)
 		obs := a.Status.AtProvider
 		if a.Labels[v1alpha1.LabelProvider] != pv.name || !a.DeletionTimestamp.IsZero() ||
 			obs.Phase != v1alpha1.AllocationRunning || obs.HardEnd == nil || len(p.liveOn(a.Name)) > 0 ||
-			obs.HardEnd.Sub(p.now) <= need || !fits(a, params) || p.releasePending(a) || relayEnded(a) {
+			obs.HardEnd.Sub(p.now) <= need || !fits(a, params) || p.releasePending(a) || relayEnded(a) || p.committedForRelease(a) {
 			continue
 		}
 		if len(p.r.Backend.registrations(a.UID)) > 0 {

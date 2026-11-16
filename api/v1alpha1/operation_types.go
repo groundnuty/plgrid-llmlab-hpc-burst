@@ -222,9 +222,10 @@ type OperationStatus struct {
 	// +kubebuilder:validation:MaxItems=256
 	Targets []TargetOutcome `json:"targets,omitempty"`
 
-	// FinishedAt is when the Operation became Done, Stale or Refused. The
-	// controller removes the Operation 7 days later (HBEP-10, Operations,
-	// Removal).
+	// FinishedAt is when the Operation became Done, Stale or Refused, or
+	// PartlyFailed with every failure final (HBEP-10, The report, as amended by
+	// #665: the science agent's ruling on #664, 16 Nov 2026). The controller
+	// removes the Operation 7 days later (HBEP-10, Operations, Removal).
 	//
 	// +optional
 	FinishedAt *metav1.Time `json:"finishedAt,omitempty"`
@@ -390,7 +391,10 @@ type TargetOutcome struct {
 	// +kubebuilder:validation:MaxLength=64
 	UID types.UID `json:"uid"`
 
-	// State is done, failed (and retried with backoff) or not started.
+	// State is done, failed or not started. A failed target is retried with
+	// backoff unless its failure is final, as when the target changed since the
+	// commit so that its approved effect cannot apply (HBEP-10, The report, as
+	// amended by #665).
 	State TargetState `json:"state"`
 
 	// Reason is the CamelCase code of a failure.

@@ -67,9 +67,10 @@ func (p *pass) capacity() error {
 			break
 		}
 	}
-	if scaling != nil {
-		// The Operation's committed targets are acted on by the Operations step, before this one. The controller's own
-		// selection is never called here: it could pick another victim than the one that was approved.
+	if p.holdsSelection() {
+		// An Executing Operation's committed targets are acted on by the Operations step, before this one. The controller's
+		// own selection is never called here, beside any Operation: it could pick another victim than the one that was
+		// approved, or one the Operation did not commit to (HBEP-7, step 7).
 		return nil
 	}
 	// The chosen primaries are read again: the loop above made Instances, which the selection counts. The surplus,
@@ -204,6 +205,9 @@ func servesPast(md *v1alpha1.ModelDeployment, t time.Time) bool {
 // Handover).
 func (p *pass) replacements() error {
 	for _, in := range p.primaries() {
+		if p.committedInstance(in) {
+			continue // an Executing Operation takes it: a drain that failed to start is retried, not replaced
+		}
 		a := p.allocs[in.Spec.AllocationRef.Name]
 		pv := p.pvOf(in.Labels)
 		if a == nil || a.Status.AtProvider.StartTime == nil || pv == nil || pv.profile == nil || !pv.hasClass {

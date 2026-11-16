@@ -187,20 +187,30 @@ func TestAReleaseCauseIsTheOperationsOnlyForAReleasingCommittedTarget(t *testing
 		name      string
 		effect    v1alpha1.PlanEffect
 		phase     v1alpha1.OperationPhase
+		queued    bool // the Allocation's job has not started
+		finished  bool
 		wantOwnOp bool
 	}{
-		{"a committed ReleaseStarted", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhaseExecuting, true},
-		{"a committed CancelPending", v1alpha1.PlanEffectCancelPending, v1alpha1.OperationPhasePartlyFailed, true},
-		{"a committed ReleaseKept", v1alpha1.PlanEffectReleaseKept, v1alpha1.OperationPhaseExecuting, true},
-		{"a committed Keep keeps retention's cause", v1alpha1.PlanEffectKeep, v1alpha1.OperationPhaseExecuting, false},
-		{"an Operation that is Done counts for nothing", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhaseDone, false},
+		{"a committed ReleaseStarted", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhaseExecuting, false, false, true},
+		{"a committed CancelPending of a job still queued", v1alpha1.PlanEffectCancelPending, v1alpha1.OperationPhasePartlyFailed, true, false, true},
+		{"a committed CancelPending whose job started: it is not the Operation's release", v1alpha1.PlanEffectCancelPending, v1alpha1.OperationPhaseExecuting, false, false, false},
+		{"a committed ReleaseKept", v1alpha1.PlanEffectReleaseKept, v1alpha1.OperationPhaseExecuting, false, false, true},
+		{"a committed Keep keeps retention's cause", v1alpha1.PlanEffectKeep, v1alpha1.OperationPhaseExecuting, false, false, false},
+		{"an Operation that is Done counts for nothing", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhaseDone, false, false, false},
+		{"a PartlyFailed Operation with a finish time counts for nothing", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhasePartlyFailed, false, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newOpFixture(t, 1)
 			a := f.emptyAllocation("alloc-k", nil)
+			if tc.queued {
+				a.Status.AtProvider.StartTime = nil
+			}
 			op := executingOp("rel", releaseOp(v1alpha1.ReleaseParameters{Allocations: []string{"alloc-k"}}),
 				[]v1alpha1.CommittedTarget{committedOf(v1alpha1.TargetKindAllocation, "alloc-k", tc.effect)})
 			op.Status.Phase = tc.phase
+			if tc.finished {
+				op.Status.FinishedAt = opTime(opAt)
+			}
 			g := newOpRig(t, f, op)
 			g.syncVersions()
 			p := f.pass()
@@ -279,5 +289,57 @@ func TestASpecIsNeverWrittenToAnotherDeploymentOfTheSameName(t *testing.T) {
 	}
 	if got := g.op("end"); got.Status.Phase != v1alpha1.OperationPhaseDone {
 		t.Errorf("phase %q: the target whose UID is gone counts as done", got.Status.Phase)
+	}
+}
+
+// The spec is written only while the deployment's generation is the plan's: a generation past it means the spec changed
+// since the plan, by this Operation's own write whose record did not land or by someone else, and neither is written over.
+// The cases are written out by hand: the plan's generation is 3, and a change of the spec moves it by one.
+func TestTheSpecIsWrittenOnlyWhileTheGenerationIsThePlans(t *testing.T) {
+	later := time.Date(2026, 11, 16, 23, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name          string
+		op            *v1alpha1.Operation
+		generation    int64
+		instances     int32
+		endTime       *time.Time
+		wantInstances int32
+		wantEnd       *time.Time
+	}{
+		{"Scale, nobody has touched the spec: written", scaleOp(1), 3, 3, nil, 1, nil},
+		{"Scale, this Operation's own write landed (generation 4, count 1): nothing to write", scaleOp(1), 4, 1, nil, 1, nil},
+		{"Scale, a person raised it after the plan (generation 4, count 2): not written over", scaleOp(1), 4, 2, nil, 2, nil},
+		{"Scale, our write landed and a person raised it (generation 5): not written over", scaleOp(1), 5, 2, nil, 2, nil},
+		{"Scale, a person edited something else after the plan (generation 4, count 3): not written", scaleOp(1), 4, 3, nil, 3, nil},
+		{"End, nobody has touched the spec: the end time is now", endOp(false), 3, 1, nil, 1, tp(opAt)},
+		{"End, our write landed (generation 4, end time now): nothing to write", endOp(false), 4, 1, tp(opAt), 1, tp(opAt)},
+		{"End, a person moved the end time later (generation 4): not written over", endOp(false), 4, 1, &later, 1, &later},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newOpFixture(t, tc.instances)
+			f.md.Generation, f.md.Spec.EndTime = tc.generation, nil
+			if tc.endTime != nil {
+				f.md.Spec.EndTime = opTime(*tc.endTime)
+			}
+			op := executingOp("op", tc.op, nil)
+			g := newOpRig(t, f, op)
+			g.step(opAt)
+			var md v1alpha1.ModelDeployment
+			if err := g.c.Get(g.ctx, types.NamespacedName{Namespace: opNS, Name: opMD}, &md); err != nil {
+				t.Fatal(err)
+			}
+			if md.Spec.Instances != tc.wantInstances {
+				t.Errorf("spec.instances is %d, want %d", md.Spec.Instances, tc.wantInstances)
+			}
+			switch {
+			case tc.wantEnd == nil && md.Spec.EndTime != nil:
+				t.Errorf("the end time is %v, want none", md.Spec.EndTime)
+			case tc.wantEnd != nil && (md.Spec.EndTime == nil || !md.Spec.EndTime.Time.Equal(*tc.wantEnd)):
+				t.Errorf("the end time is %v, want %v", md.Spec.EndTime, tc.wantEnd)
+			}
+			if got := g.op("op"); !isTrue(got.Status.Conditions, v1alpha1.ConditionSpecWritten) {
+				t.Errorf("SpecWritten is not recorded: %+v", got.Status.Conditions)
+			}
+		})
 	}
 }

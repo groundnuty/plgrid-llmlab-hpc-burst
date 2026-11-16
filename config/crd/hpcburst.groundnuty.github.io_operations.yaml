@@ -413,9 +413,10 @@ spec:
                 x-kubernetes-list-type: map
               finishedAt:
                 description: |-
-                  FinishedAt is when the Operation became Done, Stale or Refused. The
-                  controller removes the Operation 7 days later (HBEP-10, Operations,
-                  Removal).
+                  FinishedAt is when the Operation became Done, Stale or Refused, or
+                  PartlyFailed with every failure final (HBEP-10, The report, as amended by
+                  #665: the science agent's ruling on #664, 16 Nov 2026). The controller
+                  removes the Operation 7 days later (HBEP-10, Operations, Removal).
                 format: date-time
                 type: string
               observedGeneration:
@@ -853,8 +854,11 @@ spec:
                       maxLength: 256
                       type: string
                     state:
-                      description: State is done, failed (and retried with backoff)
-                        or not started.
+                      description: |-
+                        State is done, failed or not started. A failed target is retried with
+                        backoff unless its failure is final, as when the target changed since the
+                        commit so that its approved effect cannot apply (HBEP-10, The report, as
+                        amended by #665).
                       enum:
                       - NotStarted
                       - Done

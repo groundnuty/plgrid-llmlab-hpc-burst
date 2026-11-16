@@ -104,6 +104,9 @@ type pass struct {
 	// opsHold: an Executing Operation's spec write failed this pass, so nothing is created or replaced until it lands
 	// (opexec.go, applySpec).
 	opsHold bool
+	// commitUnknown: an Operation's commit write returned an error and the Operation could not be read again, so whether it
+	// landed is not known: no other Operation commits in this pass (afterCommitError).
+	commitUnknown bool
 	// opAllocs caches the Allocations an Operation's committed targets name, by UID, nil for one that is gone
 	// (opexec.go, committedAllocation).
 	opAllocs map[types.UID]*v1alpha1.Allocation
