@@ -163,7 +163,7 @@ func (p *Proxy) serveDeployment(w http.ResponseWriter, x *exchange, id string) {
 
 // notFound is HBEP-5's 404 deployment_not_found: no identity record holds the ID.
 func (p *Proxy) notFound(w http.ResponseWriter, x *exchange, id string) {
-	p.fail(w, x, http.StatusNotFound, codeDeploymentNotFound, "", "", "no identity record holds the deployment ID "+id)
+	p.fail(w, x, http.StatusNotFound, codeDeploymentNotFound, "", "", "no identity record holds the deployment ID "+echoedName(id))
 }
 
 // recordsUnavailable answers a request whose records could not be read, or one of whose records could not

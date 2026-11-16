@@ -191,15 +191,17 @@ func TestAnOverLongModelNameThatBreaksTheGrammarIsRecordedWithinTheBound(t *test
 }
 
 // A model name that is a valid name by the grammar, which sets no length, and that no deployment has, is answered as an unknown one is, 503
-// model_inactive not_attached, and recorded within the bound. The answer still carries the name, as before: this bounds the record only.
+// model_inactive not_attached, and recorded within the bound. The answer repeats a bounded copy of the name, the same 1,291 bytes and marker the
+// record keeps (echoed_text.go, issue #647): the first version of this test pinned that the answer carried the name whole, which was out of scope then
+// and is the change of #647. That every other part of the answer is as it was is echoed_text_test.go's.
 func TestAnOverLongModelNameThatNoDeploymentHasIsRecordedWithinTheBound(t *testing.T) {
 	s := newErrFix(t, nil, instanceOpts{}, "")
 	model := strings.Repeat("m", 5<<20) + "\nn"
 	resp := s.post("/v1/chat/completions", errChatBody(model, false, "hello there"))
 	body := readAll(t, resp)
 	s.checkFrontError(t, resp, body, wantError{status: 503, code: "model_inactive", detail: "not_attached", retryAfter: "30"})
-	if !strings.Contains(body, jsonEscaped(t, model)) {
-		t.Errorf("the answer does not carry the name whole (%d bytes of answer for a name of %d): the cut name was used for more than the record", len(body), len(model))
+	if want := jsonEscaped(t, strings.Repeat("m", maxRoutableNameBytes)+cutMarker); !strings.Contains(body, want) || len(body) > 4096 {
+		t.Errorf("the answer is %d bytes for a name of %d, want it to carry the name's first %d bytes and the marker and be small", len(body), len(model), maxRoutableNameBytes)
 	}
 	s.checkBoundedRecord(t, resp.Header.Get("hpcburst-request-id"), model, "")
 	if n := len(s.e.Requests()); n != 0 {
