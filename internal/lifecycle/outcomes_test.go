@@ -251,6 +251,20 @@ func TestRecordStartOutcomes(t *testing.T) {
 	if m.Count != 20 || m.Outcomes[0].AllocationUID != "u01" || m.Outcomes[19].AllocationUID != "u23" || m.Failures != 4 {
 		t.Fatalf("with a 21st: count %d, first %s, last %s, failures %d; want 20, u01, u23, 4", m.Count, m.Outcomes[0].AllocationUID, m.Outcomes[19].AllocationUID, m.Failures)
 	}
+	// The next pass, over the same Instances and Allocations, a00 still live (PR 650's review): u00, trimmed, is found
+	// again, sorts to the head by its time and is trimmed again. The list is unchanged, still oldest first.
+	next := more.DeepCopy()
+	outcomePass(insts, allocs, causes).recordStartOutcomes(next)
+	var was, now []string
+	for _, o := range m.Outcomes {
+		was = append(was, string(o.AllocationUID))
+	}
+	for _, o := range next.StartOutcomes[0].Outcomes {
+		now = append(now, string(o.AllocationUID))
+	}
+	if !slices.Equal(was, now) || next.StartOutcomes[0].Failures != 4 || next.StartOutcomes[0].Count != 20 {
+		t.Fatalf("a second pass changed the window: %v (failures %d of %d), was %v", now, next.StartOutcomes[0].Failures, next.StartOutcomes[0].Count, was)
+	}
 	// 19 outcomes: drop the last ready one.
 	var few v1alpha1.ModelDeploymentStatus
 	outcomePass(insts[2:21], allocs[1:20], causes).recordStartOutcomes(&few)
