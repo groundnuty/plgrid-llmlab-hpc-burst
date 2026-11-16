@@ -389,7 +389,7 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 	rep.CRDGuard = true
 	// The three admission policies and the agents' namespace, roles and bindings go in on every start
 	// too (HBEP-10; issue #589), reset to the manifests, after the CRD guard and before the controllers,
-	// in the order that closes the window: the policies, the agent role at its narrow (read-only) rules,
+	// in the order that closes the window: the agent role at its narrow (read-only) rules, then the policies,
 	// a bounded wait until each policy refuses its dry-run probe, and only then the wide rules, which
 	// grant the writes the policies bound. A probe that never refuses fails the start with the role still
 	// narrow; a policy that cannot be probed (its CRD is absent) leaves the role narrow with a warning.

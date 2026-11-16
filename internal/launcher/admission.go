@@ -12,9 +12,11 @@ package launcher
 // in one probe of the plan, 15 Nov 2026). So the window is closed, not shortened. InstallAgentAccess
 // does, in this order, what up needs between the CRD guard and the controllers:
 //
-//  1. the three policies, installed or reset;
-//  2. the agent role at its NARROW rules (config/rbac/agents-narrow.yaml), which are read-only. On a
-//     restart this narrows a role an earlier up widened, for the length of the wait, the safe direction;
+//  1. the agent role at its NARROW rules (config/rbac/agents-narrow.yaml), which are read-only. FIRST,
+//     before the policies are touched: on a restart it narrows the wide role an earlier up persisted, so
+//     a policy or a binding that was removed by hand (a hand-edit, a partial uninstall) leaves no moment
+//     in which the wide role meets a guard that is not there. The safe direction;
+//  2. the three policies, installed or reset;
 //  3. a bounded wait until each policy refuses its dry-run probe;
 //  4. only then, the agent role at its WIDE rules (config/rbac/agents.yaml).
 //
@@ -340,14 +342,18 @@ func waitAdmissionEnforced(ctx context.Context, cfg *rest.Config, dyn dynamic.In
 type AgentAccessOptions struct {
 	// EnforcementTimeout bounds the wait for the policies; zero means guardEnforcementTimeout (60 s).
 	EnforcementTimeout time.Duration
-	// BeforeWait, set by tests only, runs after the narrow role is applied and before the wait begins,
-	// and the wait does not begin until it returns: a test holds the window open in it, and looks at what
-	// an agent may do while the policies are not yet known to be enforced.
+	// AfterFirstStep, set by tests only, runs after the first step (the narrow role) and before the
+	// policies are touched: a test looks at what an agent may do on a host whose policies are not
+	// there, or not enforced, with the role already narrowed. The step goes on when it returns.
+	AfterFirstStep func(ctx context.Context) error
+	// BeforeWait, set by tests only, runs after the narrow role and the policies are applied and before the
+	// wait begins, and the wait does not begin until it returns: a test holds the window open in it, and
+	// looks at what an agent may do while the policies are not yet known to be enforced.
 	BeforeWait func(ctx context.Context) error
 }
 
 // InstallAgentAccess does what up needs between the CRD deletion guard and the controllers, in the order
-// that closes the window (see the top of this file): the policies, the narrow agent role, the bounded
+// that closes the window (see the top of this file): the narrow agent role, the policies, the bounded
 // wait, and only then the wide agent role. writes reports whether the wide role was applied. It is false
 // without an error when a policy could not be probed (a CRD of its kind is absent), and the role is then
 // still the narrow one; a probe that never refuses is an error naming the policy, with the role still
@@ -364,7 +370,8 @@ func InstallAgentAccess(ctx context.Context, cfg *rest.Config, log io.Writer, o 
 	}, o)
 }
 
-// agentAccessSteps are the four steps of InstallAgentAccess, so that a test can record their order.
+// agentAccessSteps are the four steps of InstallAgentAccess, so that a test can record their order: narrow,
+// policies, wait, wide.
 type agentAccessSteps struct {
 	policies func(ctx context.Context) error
 	narrow   func(ctx context.Context) error
@@ -374,10 +381,18 @@ type agentAccessSteps struct {
 }
 
 func installAgentAccess(ctx context.Context, st agentAccessSteps, o AgentAccessOptions) (writes bool, err error) {
-	if err := st.policies(ctx); err != nil {
+	// The narrow role goes first: a host that an earlier up left with the wide role, and whose policy or
+	// binding was then removed by hand, must never have the wide role and a missing guard together.
+	first, second := st.narrow, st.policies
+	if err := first(ctx); err != nil {
 		return false, err
 	}
-	if err := st.narrow(ctx); err != nil {
+	if o.AfterFirstStep != nil {
+		if err := o.AfterFirstStep(ctx); err != nil {
+			return false, err
+		}
+	}
+	if err := second(ctx); err != nil {
 		return false, err
 	}
 	if o.BeforeWait != nil {

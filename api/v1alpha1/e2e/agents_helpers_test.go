@@ -69,7 +69,7 @@ func clientsFromConfig(t *testing.T, cfg *rest.Config) (kubernetes.Interface, cl
 }
 
 // openAgentAccess installs the three admission policies and the agent roles through the launcher's own
-// ordered step (launcher.InstallAgentAccess: the policies, the narrow role, the bounded wait until each
+// ordered step (launcher.InstallAgentAccess: the narrow role, the policies, the bounded wait until each
 // policy refuses its dry-run probe, the wide role), as up does. So an agent of a test never holds a write
 // before the policy that bounds it is enforced, and no case starts inside the activation window (plan
 // section 1). Policies the host had installed before are left alone at the end; the ones the test

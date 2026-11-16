@@ -270,8 +270,10 @@ func TestWaitAdmissionEnforced(t *testing.T) {
 	})
 }
 
-// The window is closed, not shortened (team-lead, 15 Nov 2026): the policies, then the narrow role,
-// then the wait, and only then the wide role. Recorded step by step, so the order is what is judged.
+// The window is closed, not shortened (team-lead, 15 Nov 2026): the narrow role FIRST, then the policies,
+// then the wait, and only then the wide role (the Fable review of PR 3: a wide role that an earlier up
+// persisted, and a policy or binding removed by hand since, must meet the narrow role before anything
+// else). Recorded step by step, so the order is what is judged.
 func TestInstallAgentAccessClosesTheWindow(t *testing.T) {
 	var order []string
 	steps := func(unprobed []string, waitErr error) agentAccessSteps {
@@ -288,10 +290,14 @@ func TestInstallAgentAccessClosesTheWindow(t *testing.T) {
 		}
 	}
 	hook := func(context.Context) error { order = append(order, "held"); return nil }
+	afterFirst := func(context.Context) error { order = append(order, "after first"); return nil }
 
-	writes, err := installAgentAccess(context.Background(), steps(nil, nil), AgentAccessOptions{BeforeWait: hook})
-	if err != nil || !writes || !slices.Equal(order, []string{"policies", "narrow", "held", "wait 1m0s", "wide"}) {
-		t.Errorf("order %v, writes %v, %v, want policies, narrow, held, wait 1m0s, wide", order, writes, err)
+	writes, err := installAgentAccess(context.Background(), steps(nil, nil), AgentAccessOptions{BeforeWait: hook, AfterFirstStep: afterFirst})
+	if err != nil || !writes || !slices.Equal(order, []string{"narrow", "after first", "policies", "held", "wait 1m0s", "wide"}) {
+		t.Errorf("order %v, writes %v, %v, want narrow, after first, policies, held, wait 1m0s, wide", order, writes, err)
+	}
+	if writes, err = installAgentAccess(context.Background(), steps(nil, nil), AgentAccessOptions{}); err != nil || !writes || !slices.Equal(order, []string{"narrow", "policies", "wait 1m0s", "wide"}) {
+		t.Errorf("order without the hooks %v, writes %v, %v, want narrow, policies, wait 1m0s, wide", order, writes, err)
 	}
 	if _, err := installAgentAccess(context.Background(), steps(nil, nil), AgentAccessOptions{EnforcementTimeout: 3 * time.Second}); err != nil || !slices.Contains(order, "wait 3s") {
 		t.Errorf("order %v, %v, want the option's timeout to bound the wait", order, err)
@@ -308,7 +314,7 @@ func TestInstallAgentAccessClosesTheWindow(t *testing.T) {
 		t.Errorf("an unprobed policy: order %v, writes %v, %v, want no error and no wide role", order, writes, err)
 	}
 	// Each earlier step's failure stops the later ones.
-	for _, failAt := range []string{"policies", "narrow"} {
+	for _, failAt := range []string{"narrow", "policies"} {
 		st := steps(nil, nil)
 		boom := errors.New("boom")
 		if failAt == "policies" {
@@ -321,10 +327,15 @@ func TestInstallAgentAccessClosesTheWindow(t *testing.T) {
 			t.Errorf("%s failed: order %v, writes %v, %v, want the error and no wait or wide role", failAt, order, writes, err)
 		}
 	}
-	// A hook that fails stops the step before the wait.
+	// A hook that fails stops the step before the wait. A failing first-step hook stops it before the
+	// policies, with the narrow role already applied.
 	order = nil
 	if _, err := installAgentAccess(context.Background(), steps(nil, nil), AgentAccessOptions{BeforeWait: func(context.Context) error { return errors.New("stop") }}); err == nil || slices.Contains(order, "wide") {
 		t.Errorf("a failing BeforeWait: order %v, %v, want an error and no wide role", order, err)
+	}
+	steps(nil, nil)
+	if _, err := installAgentAccess(context.Background(), steps(nil, nil), AgentAccessOptions{AfterFirstStep: func(context.Context) error { order = append(order, "after first"); return errors.New("stop") }}); err == nil || !slices.Equal(order, []string{"narrow", "after first"}) {
+		t.Errorf("a failing AfterFirstStep: order %v, %v, want an error after the narrow role and nothing else", order, err)
 	}
 }
 

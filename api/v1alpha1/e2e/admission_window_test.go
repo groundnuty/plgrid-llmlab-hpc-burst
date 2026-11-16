@@ -2,10 +2,10 @@ package e2e
 
 // The window is closed, not shortened (issue #589, PR 3; team-lead, 15 Nov 2026). No moment of up may let
 // an agent's role grant a write before the policy that bounds it is enforced. The launcher's
-// InstallAgentAccess is up's step: the policies, the narrow (read-only) agent role, a bounded wait until
+// InstallAgentAccess is up's step: the narrow (read-only) agent role FIRST, the policies, a bounded wait until
 // each policy refuses its dry-run probe, and only then the wide role. These tests run that exported step
-// against a real API server with its test seam, which HOLDS the wait (the hook runs after the narrow role
-// is applied, and the wait does not begin until it returns), and ask the API server about agent A:
+// against a real API server with its test seam, which HOLDS the wait (the hook runs after the narrow role and the policies
+// are applied, and the wait does not begin until it returns), and ask the API server about agent A:
 //
 //   - while the wait is held, A's own SelfSubjectAccessReview shows ModelDeployment create and update, and
 //     modeldeployments/scale update, DENIED, and a real create with an owner reference and a real lower
@@ -290,4 +290,67 @@ func TestAProbeThatNeverRefusesFailsTheStepAndLeavesTheRoleNarrow(t *testing.T) 
 			})
 		}
 	}
+}
+
+// The narrow role goes FIRST (the Fable review of PR 3, a nit). A host whose role is wide, left by an
+// earlier up, and whose capacity guard's binding was then removed by hand has the wide role and no guard:
+// A's lower count is accepted (the hazard, shown as a dry run). The next up must narrow the role before it
+// touches the policies, so A is denied from the first step on, with the guard still not enforced; and again
+// in the hold, with the policies applied and the wait not begun. Then the wait runs, the probes refuse, the
+// wide role comes back, and the guard refuses the same write by name.
+func TestAWideRoleIsNarrowedBeforeAPolicyRemovedByHandIsTouched(t *testing.T) {
+	f := newWindowFixture(t)
+	writes, err := launcher.InstallAgentAccess(bg(), cfg, io.Discard, launcher.AgentAccessOptions{})
+	must(t, err, "open the writes first")
+	if !writes {
+		t.Fatal("the writes did not open")
+	}
+	for _, r := range f.rows {
+		waitUntilAllowed(t, f.a.cs, r)
+	}
+	must(t, c.Delete(bg(), bindingObject(capacityGuard)), "remove the capacity guard's binding by hand")
+	waitPolicyNotEnforced(t, capacityGuard)
+
+	dry := agentWriter(f.a)
+	dry.dry = true
+	lower := func() error {
+		requireAgentIdentity(t, f.a)
+		return dry.update(f.md, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 1 })
+	}
+	requireAccepted(t, "A's lower count (a dry run) on a host with the wide role and no guard binding: the hazard", lower())
+
+	afterFirst := func(context.Context) error {
+		for _, r := range f.rows {
+			waitUntilDenied(t, f.a.cs, r)
+		}
+		requireAll(t, f.a, f.rows, false, "after the first step, before the policies are touched")
+		if refused, _ := launcher.ProbeAdmission(bg(), cfg, capacityGuard); refused {
+			t.Error("the capacity guard is enforced after the first step: the hook ran after the policies, so the first step was not the narrow role's")
+		}
+		if err := lower(); !rbacRefused(err) {
+			t.Errorf("A's lower count after the first step: %v, want RBAC's refusal: the role is narrow while the guard is still missing", err)
+		}
+		return nil
+	}
+	beforeWait := func(context.Context) error {
+		states, err := launcher.CheckAdmission(bg(), cfg)
+		must(t, err, "check the policies in the hold")
+		for _, s := range states {
+			if !s.Present {
+				t.Errorf("in the hold the policy %s is not installed: %+v", s.Name, s)
+			}
+		}
+		requireAll(t, f.a, f.rows, false, "in the hold, with the policies applied and the wait not begun")
+		return nil
+	}
+	writes, err = launcher.InstallAgentAccess(bg(), cfg, io.Discard, launcher.AgentAccessOptions{AfterFirstStep: afterFirst, BeforeWait: beforeWait})
+	must(t, err, "the step on a host with a wide role and a missing binding")
+	if !writes {
+		t.Fatal("the step returned without opening the writes")
+	}
+	requireEnforced(t)
+	for _, r := range f.rows {
+		waitUntilAllowed(t, f.a.cs, r)
+	}
+	requireDenied(t, "A's lower count (a dry run) once the writes are open again", lower(), capacityGuard, "cannot lower spec.instances")
 }
