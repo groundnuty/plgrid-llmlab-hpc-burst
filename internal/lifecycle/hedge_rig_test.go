@@ -461,11 +461,11 @@ func TestALosersEndIsNoFailure(t *testing.T) {
 
 // TestAWinnerWhoseAllocationGoesResolvesNothing: a hedge's member that reads ready, but whose Allocation is being
 // deleted in the same pass, resolves nothing, so no loser ends beside a winner that no longer serves. The same pass
-// with the Allocation in place ends the loser.
+// with the Allocation in place, Running, ends the loser. M2's job runs on B, its engine slowed so it stays starting,
+// and its ready phase is forged in the pass's memory.
 func TestAWinnerWhoseAllocationGoesResolvesNothing(t *testing.T) {
 	h := newHedgeRig(t)
 	h.batch.Enqueue(pfake.Script{QueueWait: 10 * time.Hour})
-	h.b.batch.Enqueue(pfake.Script{QueueWait: 10 * time.Hour})
 	h.Step()
 	md := mdSpec(hoMD)
 	seededOnly(md)
@@ -473,6 +473,11 @@ func TestAWinnerWhoseAllocationGoesResolvesNothing(t *testing.T) {
 	h.Step()
 	m1 := h.onProvider(hoMD, rigProvider)[0].Name
 	m2 := h.seedHedgeMember(hoMD, m1, "", hedgeB)
+	h.slow[h.mustInstance(m2).Spec.AllocationRef.Name] = true
+	h.until(time.Minute, 10*time.Second, "M2's job running", func() bool {
+		a, ok := h.allocation(h.mustInstance(m2).Spec.AllocationRef.Name)
+		return ok && a.Status.AtProvider.Phase == v1alpha1.AllocationRunning
+	})
 	for _, goes := range []bool{true, false} {
 		p := h.passOf(hoMD)
 		var w *v1alpha1.Instance

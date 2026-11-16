@@ -194,7 +194,16 @@ func servesPast(md *v1alpha1.ModelDeployment, t time.Time) bool {
 // predecessor's drain start minus the class's start-to-ready time (HBEP-7,
 // Handover).
 func (p *pass) replacements() error {
+	hedges := map[string][]*v1alpha1.Instance{}
+	for _, g := range p.primaryHedges() {
+		hedges[g.key] = g.members
+	}
 	for _, in := range p.primaries() {
+		// A hedge of more than one live member with no winner yet is one need still being met: its replacement
+		// waits for the winner, so none is planned for a member that then loses (#611's review).
+		if m := hedges[hedgeKey(in)]; len(m) > 1 && hedgeWinner(m) == nil {
+			continue
+		}
 		a := p.allocs[in.Spec.AllocationRef.Name]
 		pv := p.pvOf(in.Labels)
 		if a == nil || a.Status.AtProvider.StartTime == nil || pv == nil || pv.profile == nil || !pv.hasClass {
