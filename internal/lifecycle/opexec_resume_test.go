@@ -100,6 +100,10 @@ func TestACommittedCancelPendingThatStartedAndTurnedReadyIsDrainedAndItsJobIsNot
 	if isExecuting(op) {
 		t.Error("a finished PartlyFailed Operation still holds the deployment's slot")
 	}
+	// OperationPartlyFailed is raised for a final failure as for a retried one, regarding the Operation, naming the reason.
+	if evs := w.partlyFailedEvents("scale"); len(evs) != 1 || !strings.Contains(evs[0].Message, reasonJobStartedSinceCommit) || evs[0].Type != "failing" {
+		t.Errorf("the OperationPartlyFailed events are %+v, want one, failing, naming %s", evs, reasonJobStartedSinceCommit)
+	}
 	// It frees the deployment: the next Operation is planned and not held back by it, and the Allocation stays with retention.
 	if a, ok := w.allocation(w.pendingAlloc); !ok || !a.DeletionTimestamp.IsZero() {
 		t.Errorf("P's Allocation after the Operation: %+v (found %v), want it kept, hosting nothing", a, ok)
