@@ -252,8 +252,19 @@ func (p *pass) loseHedge(key string, l, w *v1alpha1.Instance) error {
 }
 
 // hedgeProviders describes, for Progressing's message, each hedge that has more than one live member and no
-// winner yet: its Providers in the members' order (HBEP-7, Hedging (beta), Events and conditions).
+// winner yet: its Providers in the deployment's allowed order, so the message does not change with the order the
+// Instances are listed in (HBEP-7, Hedging (beta), Events and conditions).
 func (p *pass) hedgeProviders() []string {
+	rank := map[string]int{}
+	for i, pv := range p.providers {
+		rank[pv.name] = i
+	}
+	at := func(name string) int {
+		if i, ok := rank[name]; ok {
+			return i
+		}
+		return len(rank) // not allowed any more: after the allowed ones
+	}
 	var out []string
 	for _, g := range groupHedges(p.insts, func(in *v1alpha1.Instance) bool { return countable(in) && !p.stale[in.UID] }) {
 		if len(g.members) < 2 || hedgeWinner(g.members) != nil {
@@ -263,6 +274,12 @@ func (p *pass) hedgeProviders() []string {
 		for _, m := range g.members {
 			provs = append(provs, m.Labels[v1alpha1.LabelProvider])
 		}
+		sort.SliceStable(provs, func(i, j int) bool {
+			if at(provs[i]) != at(provs[j]) {
+				return at(provs[i]) < at(provs[j])
+			}
+			return provs[i] < provs[j]
+		})
 		out = append(out, fmt.Sprintf("hedge %s spans Providers %s", g.key, strings.Join(provs, ", ")))
 	}
 	return out

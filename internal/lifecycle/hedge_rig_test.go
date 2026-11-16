@@ -116,6 +116,14 @@ func (rg *rig) onProvider(md, prov string) []v1alpha1.Instance {
 	return out
 }
 
+// allocOrNil returns the named Allocation, or nil.
+func (rg *rig) allocOrNil(name string) *v1alpha1.Allocation {
+	if a, ok := rg.allocation(name); ok {
+		return a
+	}
+	return nil
+}
+
 // mustInstance returns the named Instance, or fails.
 func (rg *rig) mustInstance(name string) *v1alpha1.Instance {
 	rg.t.Helper()
@@ -561,9 +569,15 @@ func TestAHedgeIsLateOnlyWhenNoMemberStarted(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h := newHedgeRig(t)
-			_, _, r2 := replacementHedge(t, h, c.b)
+			_, r1, r2 := replacementHedge(t, h, c.b)
 			h.slow[h.mustInstance(r2).Spec.AllocationRef.Name] = true
 			hoStepTo(h.rig, hoT(9, 49, 20), 5*time.Minute, nil)
+			// The fixture's state, or the case proves nothing: R1 pends, and R2 has started, not ready, or pends too.
+			in1, in2 := h.mustInstance(r1), h.mustInstance(r2)
+			a2, _ := h.allocation(in2.Spec.AllocationRef.Name)
+			if ended(in1) || jobStarted(h.allocOrNil(in1.Spec.AllocationRef.Name)) || ended(in2) || in2.Status.Phase == v1alpha1.InstanceReady || jobStarted(a2) == c.late {
+				t.Fatalf("at 09:49:20 R1 is %s and R2 is %s (its job started %v): not the fixture this case needs", in1.Status.Phase, in2.Status.Phase, jobStarted(a2))
+			}
 			if n := len(h.rec.Find(eventDegraded, v1alpha1.ReasonReplacementLate)); n != 0 {
 				t.Fatalf("ReplacementLate before 09:49:30")
 			}
