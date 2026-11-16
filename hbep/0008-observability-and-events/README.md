@@ -17,7 +17,12 @@ In alpha:
 - usage records are the front's synced JSON Lines files;
 - provider accounting is allocated GPU-hours and CPU-hours per Allocation, from the scheduler's accounting.
 
-A durable event log comes in beta, and HBEP-10's subscriptions to it at stable.
+In beta (amended 2026-11-16):
+- a durable log, NATS JetStream embedded in a process of its own beside the controllers, keeps every typed event and a copy of every usage record for the grant. The usage files stay the record until the log is proven;
+- the Provider controller raises typed events on the Allocation itself;
+- OpenTelemetry's generative-AI conventions are a mapping from the `hpcburst_` names, not new names.
+
+HBEP-10's subscriptions read the log at stable.
 
 ## Motivation
 
@@ -70,7 +75,7 @@ A past project served models on several Slurm clusters behind its own fronts. It
 - **Every series belongs to one Instance** (HBEP-9 attribution), and to one engine process of it. An engine restart starts a new series, so a rate never goes negative and a comparison across a restart is visible as one.
 - **Six types, many reasons.** The types are `started`, `ready`, `degraded`, `failing`, `ending-soon` and `replaced`, spelled as the lifecycle controller emits them (PR #88). They apply to any subject: an Allocation, Instance or ModelDeployment, and also an observer or controller. Everything finer is a CamelCase reason code. A stopped observer is `failing` with reason `HeartbeatMissed`. A restart, a missed submission or a repeated crash (HBEP-7) are reasons under `failing`, `degraded` or `replaced`. A new type is an amendment to this HBEP; a new reason is not.
 - **Events are typed.** Each has a type, a reason code, the resource's stable name, a time in UTC from the emitter's clock, and an optional message. Tools act on type and reason, never on the message.
-- **Status is the truth, events are best-effort.** An event can be merged with an earlier one, delayed or dropped (Design details, What the recorder merges and drops). A reader that must not miss a change reads status.
+- **Status is the truth, events are best-effort.** An event can be merged with an earlier one, delayed or dropped (Design details, What the recorder merges and drops). A reader that must not miss a change reads status. In beta the durable log keeps every typed event it acknowledges, but an emitter can still fail to reach it (Design details, The durable log, When it is down), so status stays the truth.
 - **Planned and unplanned stops differ.** An event for a stop that someone asked for names the actor and the operation (HBEP-10). A stop without them is a failure. In alpha the actor is the emitting controller, in the event's `reportingController`. In beta, an event for a stop that an Operation asked for keeps its existing reason, carries the Operation in `related`, and names it in the note (HBEP-10, Proposed event reasons).
 - **Usage records carry the request's own time,** not the time the record was written or copied.
 - **Provider accounting** comes from the platform's own accounting, per provider, never from the framework's logs. In alpha it is allocated time only, labelled "allocated, not billed". Billing formulas differ per cluster (some charge the largest of a core, GPU or memory share), so the formula is platform-profile data, open for beta. A pending Allocation with an unknown start is unknown, never "starting now".
@@ -86,8 +91,8 @@ A past project served models on several Slurm clusters behind its own fronts. It
   - **Alpha** (HBEP-5): the front appends usage records to a local JSON Lines file. Each record is synced before the request is reported done to the sink's caller. Records that end together share one write and one sync, so they are batched only when they arrive faster than the disk syncs (Design details, Usage records).
   - **Counter:** each usage record carries a monotonic counter that the front persists apart from the log, in blocks, so a consumer can see a missing range after a crash.
   - **A crash leaves a gap that bounds the loss without counting it.** The gap holds the reserved counters that were never used and the records lost in the crash, and a reader cannot tell them apart. A clean stop leaves no gap of its own, but the counters of a batch that failed were assigned, so they still show as one, and so can a reservation whose persistence is uncertain (Design details, Usage records).
-  - **Beta:** spike S8 (issue #25, PR #28) measured NATS JetStream as the durable log, with `sync_interval: always`. One node acknowledged about 1,200 publishes per second on the test disk under `always`. S8 did not test power loss, a kernel crash or a front crash. Its findings are the beta design's evidence, with HBEP-10.
-- **A full disk.** The usage files and the control plane's SQLite store share the host's disk. With SQLite, a full disk stops writes (HBEP-11, Operational readiness 5), so the `failing` event for the usage failure may not be stored either. The failure counter and the front's readiness are the reliable signals (Design details, Usage records).
+  - **Beta** (Design details, The durable log): the files stay the record, and the front copies each synced record from them to the durable log. Spike S8 (issue #25, PR #28) measured NATS JetStream with `sync_interval: always` at about 860 acknowledged publishes per second for one publisher, and 950 to 1,360 for 8 or 32, on its test disk (S8, Results 5). It lost no acknowledged write to 30 SIGKILLs, and did not test power loss or a kernel crash. So the log is a copy until a power-loss test proves it.
+- **A full disk.** The usage files and the control plane's SQLite store share the host's disk. With SQLite, a full disk stops writes (HBEP-11, Operational readiness 5), so the `failing` event for the usage failure may not be stored either. The failure counter and the front's readiness are the reliable signals (Design details, Usage records). In beta the durable log shares the disk too. Its streams are capped and refuse new messages when full, so it cannot take more than its caps (Design details, Retention).
 - **Accounting sources lag or undercount,** as a report of finished jobs only does. The framework reads the scheduler's accounting, which counts running jobs. Where a center report and the scheduler's accounting differ, both are shown with the gap (beta).
 - **Managed providers are opaque.** LLMLab's periodic stalls show only in the front's time to first token.
 - **Series multiply with handovers.** Each handover adds a series per metric. Engine series carry only identity labels, and descriptive labels sit on one info series per Instance (Design details, Metrics). Retention and roll-up belong to whatever store the user picks.
@@ -98,7 +103,7 @@ A past project served models on several Slurm clusters behind its own fronts. It
 
 1. **Metric names and units.**
    - **Decided for alpha:** our own names, prefixed `hpcburst_`, with units in the name, following Prometheus's naming conventions. vLLM's names are mapped to them in the agent and the controller (Design details, Metrics). Source: science agent, 31 Oct 2026.
-   - **Open (blocks beta):** OpenTelemetry's conventions for generative AI, as names or as a mapping.
+   - **Decided for beta** (amended 2026-11-16): a mapping, not new names. Each `hpcburst_` metric and usage field with a counterpart in OpenTelemetry's generative-AI conventions is mapped to it, pinned to one commit, and the rest are named as having none (Design details, Metrics, OpenTelemetry). Every convention used is Development status, and this HBEP's names are read by tests and tools, so a rename would break them for names that may still change. The framework emits no spans in beta. Source: proposed by this amendment.
 2. **How engine metrics leave the job.**
    - **Decided for alpha:** in the agent's health reports (HBEP-7, The allocation agent), never by a scrape through the tunnel. The tunnels carry only the front's routed requests and its passthrough: the token tunnel, and in beta the bulk tunnel (HBEP-6, The bulk path). Source: HBEP-6 and HBEP-7.
    - Spike S9 asked whether a scrape through the front and tunnel shows a gone Instance as down. Alpha has no such scrape, and the unknown rule answers the rest, so S9 is not needed for alpha.
@@ -113,7 +118,7 @@ A past project served models on several Slurm clusters behind its own fronts. It
    - **Decided for alpha:** events are kept 7 days: the launcher sets k3s's apiserver `event-ttl` to 168 h (Design details, Retention; HBEP-11). Source: science agent, 31 Oct 2026.
    - **Decided for alpha:** usage records are kept for the grant's life. Rotation keeps every file, and nothing in the framework deletes one. Source: science agent, 31 Oct 2026.
    - **Not needed for alpha:** retention of a metrics store, since the framework keeps none.
-   - **Open (blocks beta):** event retention in HBEP-10's durable log, against the audit log's.
+   - **Decided for beta** (amended 2026-11-16): events in the durable log are kept for the grant, compressed once cold, and deleted only after a person confirms, as the audit log is. Usage records in the log are kept for the grant's life, as the files are. Each stream is capped and refuses new messages when full, rather than evicting. Kubernetes Events keep their 7 days (Design details, Retention). Source: the audit log's rule (owner, 14 Nov 2026; HBEP-10, open question 10), applied to events by this amendment; the caps are proposed by it.
 7. **Whether each client key can read its own usage through the front.**
    - **Not needed for alpha:** the operator reads the usage files on the host. Source: science agent, 31 Oct 2026.
 8. **The last level of liveness: an end-to-end probe from outside the front and control plane.**
@@ -122,16 +127,17 @@ A past project served models on several Slurm clusters behind its own fronts. It
    - **Decided for alpha:** live traffic only. Each usage record carries `firstTokenMs`, and the front exports their distribution. Alpha sends no probe requests for timing; HBEP-6's probe checks the path, not timing. Source: science agent, 31 Oct 2026.
 10. **What an observer that restarts emits.**
     - **Decided for alpha:** one `degraded` event with reason `ObservationGap`, from the lifecycle controller and the front, and status is the truth. The Provider managers emit none in alpha, since their recorder writes no `action` (open question 14). Its message names the gap's start, the observer's last heartbeat before the restart. S8's gap marker covers events evicted from a log; an observer's missed transitions were never published, so it still needs its own gap event. Source: the lean of this HBEP, confirmed by the science agent, 31 Oct 2026.
+    - **Decided for beta** (amended 2026-11-16): each Provider manager emits one too, regarding its `provider-<name>` `Lease`, since its Allocation events are typed (open question 14). The Reasons table's Emitter cell names it with that code. Source: proposed by this amendment.
 11. **The event stream's store.**
     - **Decided for alpha:** Kubernetes Events (`events.k8s.io/v1`), best-effort, with status as the truth. Source: science agent, 31 Oct 2026.
-    - **Open (blocks beta):** JetStream for events and usage, on S8's evidence. HBEP-10's subscriptions and cursors over it come at stable (amended 2026-11-15; HBEP-10, Graduation criteria).
+    - **Decided for beta** (amended 2026-11-16): NATS JetStream, embedded in a process of its own that the launcher supervises, with one stream for typed events and one for usage records, delivered at least once with a dedupe id; the usage files stay the record (Design details, The durable log). Source: spike S8 (PR #28) for the settings and the delivery; proposed by this amendment for the process, the streams' subjects and ids, and the files as the record. HBEP-10's subscriptions and cursors over it come at stable (amended 2026-11-15; HBEP-10, Graduation criteria).
 12. **How an unknown sample is shown in Prometheus.**
     - **Decided for alpha:** an absent series plus an explicit gauge, `hpcburst_instance_metrics_unknown`, with the reason (Design details, Unknown samples). Source: proposed by this HBEP, 31 Oct 2026, from the comparison there; the science agent asked for one form to be chosen with its reason.
 13. **Whether the front serves while usage cannot be written.**
     - **Decided for alpha:** it keeps serving, and the failure is loud: counted, raised as a `failing` event and stated in its readiness. Source: the science agent's lean, 31 Oct 2026, taken here.
 14. **Typed events for Allocations.**
     - **Decided for alpha:** an Allocation's lifecycle shows in its Instance's events, whose reasons name the Allocation's outcome (`AllocationFailed`, `AllocationLost`, `AllocationRefused`, `Requeued`, `SubmittedAsOther`, `RelayEndedForGood`, `AllocationEndedEarly`; HBEP-7). The Provider controller's own events (HBEP-4) keep crossplane-runtime's recorder, which writes no `action`; readers treat them as type "other" (Compatibility). Source: proposed by this HBEP, 31 Oct 2026.
-    - **Open (blocks beta):** typed events on the Allocation itself, from the Provider controller.
+    - **Decided for beta** (amended 2026-11-16): the Provider controller raises typed events on the Allocation itself, for its job's submission, lifted hold, start, nearing hard end, end and failures, through a recorder of `events.k8s.io` (Design details, Events, Allocation events). No note carries the job's ID. HBEP-4's other diagnostics stay untyped. Source: proposed by this amendment; each reason joins the Reasons table with its code.
 15. **The billing formula.**
     - **Open (blocks beta):** the platform profile's billing group (HBEP-4, open question 3). Alpha counts allocated time only.
 16. **A per-grant accounting ledger.**
@@ -178,8 +184,39 @@ The API refuses a new event without `action` or `reason`, with either over 128 c
 
 - An event about a deployment caused by one Instance regards the ModelDeployment, with the Instance in `related`. `VerificationFailed`'s `degraded` event and `CapacityDropped`'s regard the Instance instead once the ModelDeployment is gone (`mdObject`, `internal/lifecycle/verify.go`), since nothing else is left to attach them to.
 - The managed catalog controller's events take these types too. Their reasons are the condition reasons it writes: `failing` for `FileRefused` and `NoCredentialsFile` (`CredentialsInvalid`), `KeyRejected` (`CredentialsRejected`), `Expired` (`CredentialsExpiring`) and `ReadsFailing` (`Ready`); `degraded` for `ExpiresWithinADay`, `CatalogEntrySkipped` and `CatalogTruncated`; and `ready` for `FileRead`, `KeyAccepted`, `NotExpiring` and `CatalogRead` when a failing or degraded condition clears.
-- The Provider controller's events are HBEP-4's diagnostics, untyped in alpha (open question 14). Among them is `RelayFailed`, a Warning regarding the Allocation (HBEP-6, Dial-home modes, host-dialed mode, What ends a relay): `onRelayFailed` raises it (`internal/providerctl/relayfailed.go`) when a relay ends for good other than by its job's end or, in alpha, by being superseded, after it marks the Allocation `RelayEndedForGood` and only while its copy leads. It carries no action, since it goes through crossplane-runtime's recorder as the others do.
+- The Provider controller's events are HBEP-4's diagnostics, untyped in alpha (open question 14). Among them is `RelayFailed`, a Warning regarding the Allocation (HBEP-6, Dial-home modes, host-dialed mode, What ends a relay): `onRelayFailed` raises it (`internal/providerctl/relayfailed.go`) when a relay ends for good other than by its job's end or, in alpha, by being superseded, after it marks the Allocation `RelayEndedForGood` and only while its copy leads. It carries no action, since it goes through crossplane-runtime's recorder as the others do. In beta the Allocation's transitions are typed instead (Allocation events), and `RelayFailed` stays a diagnostic.
 - **Proposed with HBEP-10's Operations** (beta). They join the table only with the code that raises them, since the table is checked against the code: `PlanStale`, of type `degraded`, regarding the Operation, when an approved or confirmed plan turns stale at execution; and `OperationPartlyFailed`, of type `failing`, regarding the Operation, when one of its targets fails. A plan waiting for approval raises no event; its Operation's phase shows it (HBEP-10, Proposed event reasons).
+
+**Allocation events (beta)** (open question 14; proposed by the amendment of 16 Nov 2026). The Provider controller raises typed events regarding the Allocation through a second recorder, `events.k8s.io`'s, from its manager, with `reportingController` `hpcburst-provider`. The raised-events counter (controller `provider-<name>`) and the log's publisher (The durable log) wrap it. One map from reason to type is the only place their types are set, as in the managed catalog controller (`internal/managed`). Each is raised in the pass that first computes the change, before the status write that records it, as HBEP-7 orders a restart's event before its generation write. A failed write makes the next pass raise it again, under the same id in the log (The durable log, Streams).
+
+| Reason | Type | When | The note names |
+|---|---|---|---|
+| `JobSubmitted` | `started` | a submission's job is first recorded | the attempt, partition, QOS and time limit, and whether it is held |
+| `JobAdopted` | `started` | a job found by its tag is first recorded instead | the source it was found in, the partition and the time limit |
+| `HoldLifted` | `started` | the recorded job's hold is lifted, so it pends | the submit time |
+| `JobStarted` | `ready` | the job runs | the start time, hard end, queue wait, and allocated GPUs and CPUs |
+| `HardEndNear` | `ending-soon` | an hour before a running job's hard end, once per hard end | the hard end |
+| `JobEnded` | `replaced` | phase `Ended` as planned: `TIMEOUT` at the hard end, or any end while the Allocation is being deleted | the base state, the end time, and the release cause when one is written |
+| `AllocationEndedEarly` | `failing` | phase `Ended` otherwise: `COMPLETED` or `CANCELLED` before the hard end, with the Allocation not being deleted | the base state and the end time |
+| `AllocationFailed` | `failing` | phase `Failed`, other than a requeue | the base state and the scheduler's state reason |
+| `Requeued` | `failing` | a requeue is seen | the restart count and the base state |
+| `SubmittedAsOther` | `failing` | the read-back differs from what was submitted | the fields that differ |
+| `AllocationRefused` | `failing` | phase `Refused` | why |
+| `JobLost` | `failing` | phase `Lost` | absent since when, and `lostGrace` |
+| `JobReappeared` | `ready` | a `Lost` job shows again | the phase it shows, and since when it was absent |
+| `AdminHold` | `degraded` | the job carries an admin hold, a repeating condition | the state reason |
+| `JobCompleting` | `degraded` | the job has carried `COMPLETING` for 10 minutes, a repeating condition | the base state, and since when |
+
+- **The reasons.** `JobSubmitted`, `JobAdopted`, `HoldLifted`, `JobLost`, `JobReappeared` and `SubmittedAsOther` are the Provider controller's untyped reasons on `main` (`providerControllerEvents`, `internal/reasondrift/exceptions.go`), raised typed instead. `AllocationEndedEarly`, `AllocationFailed`, `Requeued` and `AllocationRefused` are the lifecycle controller's Instance reasons, now regarding the Allocation too. `JobStarted`, `HardEndNear`, `JobEnded`, `AdminHold` and `JobCompleting` are new. All are proposed. Each joins the Reasons table, with the Allocation in its Regarding cell, only with the code that raises it, since #239's drift guard checks the table against the code.
+- **Held and pending need no events of their own.** In hold mode a job is held from its submission, which `JobSubmitted` says, and pends from its lift, `HoldLifted`. In fallback mode it pends from its submission.
+- **The types.** None of the six names a planned end. `replaced` is already the type of planned ends (`HandedOver`, and HBEP-7's proposed `HedgeLost` for a cancelled hedge loser), so `JobEnded` takes it, though nothing may replace the job; the reason says what happened. A seventh type, `ended`, would fit better. It would change the vocabulary and the drift guard's six types (`Actions`, `internal/reasondrift/docs.go`), so it is not taken here. `JobReappeared` takes `ready`, as a cleared condition does (the managed catalog controller's `ready` events).
+- **Planned or not.** An end is planned when the job reached its hard end, or when the Allocation was being deleted: the lifecycle controller releases by deleting, and the finalizer cancels the job (HBEP-4, Two controllers). Otherwise the job was ended from outside the framework, or its agent exited early, which is a failure (Notes, Planned and unplanned stops). When the release cause names an Operation (HBEP-11, The Allocation's record), `JobEnded` carries it in `related` (HBEP-10, Proposed event reasons).
+- **No job ID in a note.** A note names the job's facts: states, times in UTC, partition, QOS and counts. It never names the job ID, which stays in the Allocation's annotation and status (HBEP-11, The Allocation's record) and in its `acct-` record. The log keeps events for the grant (Retention), and a note is what gets quoted. HBEP-4's untyped diagnostics drop the job ID from their notes too, naming jobs by role (the recorded job, a duplicate); status lists the duplicates' IDs (`status.atProvider.duplicates`).
+- **Repeating conditions.** `AdminHold` and `JobCompleting` follow the hourly gate (Repeating conditions), and their end shows in status only. Ten minutes are far past a normal cleanup: S7 saw the flag for one 2 s poll (HBEP-4, Graduation criteria). So a job still completing then is HBEP-4's stuck case (HBEP-4, Risks).
+- **`HardEndNear`** fires in the first pass at or after an hour before the hard end. Its in-memory gate is keyed by the hard end, so a hard end that moves later fires again before the new one, and a restart may fire it once more. It is the lease's own warning; `NoReplacementReady` stays the Instance's (open question 4).
+- **After a restart.** The first pass compares the job with the stored status, so a change made while the controller was down is announced late, and steps in between are not replayed. Each Provider manager raises one `ObservationGap` regarding its `provider-<name>` `Lease` once it holds it (Gaps after a restart).
+- **Counting.** These reasons' series in `hpcburst_events_raised_total` are created at 0 for each batch Provider, as the lifecycle controller's are (Raised events).
+- **RBAC.** The Provider controller's identity may create `events.k8s.io` Events in the Allocations' namespaces.
 
 **Repeating conditions.** An event for a condition that persists, such as `CatalogTruncated`, `CatalogEntrySkipped`, `UsageWriteFailed` or `HeartbeatMissed`, is emitted when the condition starts, and then at most once an hour while it lasts, never on every read. Merging cannot be relied on to bound such events (What the recorder merges and drops). The hourly gate is kept in memory, so a restart or a new leader emits it once more, which is "when it starts" for that process. For the managed catalog controller's Provider conditions, a condition that clears emits `ready` with the reason it writes (`FileRead`, `KeyAccepted`, `NotExpiring`, `CatalogRead`); the other repeating conditions show their end in status only. `CatalogEntrySkipped` is one condition per entry and skip category; at most 10 named skip events are emitted per Provider per hour, then one summary event per hour whose note names as many of the remaining entries as fit in its 1,024 bytes, ending with "…". The end of a skip or a truncation emits nothing, since neither sets a Provider condition (science-agent rulings, 31 Oct 2026, for #114).
 
@@ -212,7 +249,7 @@ So a test checks for at least one event of a type and reason on a resource, neve
 - **A probe failure is not a prober failure.** `PathProbeFailing` (`degraded`) says a path is bad (HBEP-6). `HeartbeatMissed` (`failing`) says the prober stopped.
 - **The front's `Lease`** gives front-level events a namespaced resource to regard, and gives the front a heartbeat. It follows Kubernetes' node heartbeats, where each kubelet renews its own `Lease` (Prior art). The front's recorder scheme registers `coordination.k8s.io/v1`, since client-go drops an event whose object reference it cannot build.
 
-**Gaps after a restart.** At start, the lifecycle controller and the front each read their `Lease`'s previous `renewTime` before taking the `Lease`. Once they hold it, each emits one `degraded` event with reason `ObservationGap`, regarding it, whose message names that `renewTime`, the gap's start. The Provider managers emit none in alpha (open question 14). A first start, with no previous `Lease`, emits none, and so does a lifecycle controller run with `--leader-elect=false`, which holds no `Lease` (Observers). Missed transitions are not replayed; status is the truth.
+**Gaps after a restart.** At start, the lifecycle controller and the front each read their `Lease`'s previous `renewTime` before taking the `Lease`. Once they hold it, each emits one `degraded` event with reason `ObservationGap`, regarding it, whose message names that `renewTime`, the gap's start. The Provider managers emit none in alpha (open question 14); in beta each emits one regarding its `provider-<name>` `Lease` (Allocation events). A first start, with no previous `Lease`, emits none, and so does a lifecycle controller run with `--leader-elect=false`, which holds no `Lease` (Observers). Missed transitions are not replayed; status is the truth.
 
 **Retention.** The launcher passes `--kube-apiserver-arg=event-ttl=168h` to k3s (HBEP-11, amendment of 31 Oct 2026). The facts behind it, all accessed 2026-10-31:
 - kube-apiserver keeps events for `event-ttl`, 1 h by default ([`pkg/controlplane/apiserver/options/options.go`, lines 129 and 162–163](https://github.com/k3s-io/kubernetes/blob/v1.36.5-k3s1/pkg/controlplane/apiserver/options/options.go#L129)). The same TTL backs `events.k8s.io` ([`pkg/registry/events/rest/storage_events.go`, line 55](https://github.com/k3s-io/kubernetes/blob/v1.36.5-k3s1/pkg/registry/events/rest/storage_events.go#L55); [`pkg/controlplane/instance.go`, line 434](https://github.com/k3s-io/kubernetes/blob/v1.36.5-k3s1/pkg/controlplane/instance.go#L434)) and is set on every event's key ([`pkg/registry/core/event/storage/storage.go`, lines 42–44](https://github.com/k3s-io/kubernetes/blob/v1.36.5-k3s1/pkg/registry/core/event/storage/storage.go#L42-L44)).
@@ -220,6 +257,14 @@ So a test checks for at least one event of a type and reason on a resource, neve
 - kine v0.16.5, which k3s v1.36.5+k3s1 uses ([`go.mod`, line 111](https://github.com/k3s-io/k3s/blob/v1.36.5%2Bk3s1/go.mod#L111)), grants a lease whose ID is its TTL ([`pkg/server/lease.go`, lines 13–19](https://github.com/k3s-io/kine/blob/v0.16.5/pkg/server/lease.go#L13-L19)), and deletes each leased key once its lease has elapsed ([`pkg/ttl/ttl.go`, lines 1–8 and 143–150](https://github.com/k3s-io/kine/blob/v0.16.5/pkg/ttl/ttl.go#L1-L8)).
 - **A restart restarts the clock.** kine computes each expiry as now plus the TTL when it first sees the key, and at its start it seeds every leased key that way (`ttl.go`, lines 103–117 and 168–180). So an event lives at least 7 days, and up to 7 days after the host's last restart.
 - **Store growth** is small at alpha scale. Merging seldom applies (above), so each emission counts as one stored object, of at most about 2 kB with its 1,024-byte note. Assume 20 Instance lifecycles a day at about 6 events each, and 20 persisting conditions emitted once an hour (Repeating conditions): about 600 events a day, under 10 MB over 7 days. Even 5,000 a day is about 70 MB. These are estimates, not measurements.
+
+**In the durable log (beta)** (open question 6; amended 2026-11-16). Per stream (The durable log):
+- **Events are kept for the grant,** by the audit log's rule (owner, 14 Nov 2026; HBEP-10, open question 10). The stream has no `MaxAge` and no `MaxMsgs`, and nothing in the framework deletes an event. `hpcburst eventlog prune` (proposed; stable, with HBEP-10's `hpcburst audit prune`) purges the events older than the grant's end only after a person confirms at a terminal, and none while no grant end is recorded (HBEP-10, open question 12).
+- **Usage records are kept for the grant's life,** as the files are (open question 6). Nothing deletes them, and no prune is offered.
+- **Compressed once cold.** Each stream sets `compression: s2`, nats-server's `StreamConfig.Compression`, whose values are `s2` and `none` ([`server/stream.go`, line 71](https://github.com/nats-io/nats-server/blob/v2.15.2/server/stream.go#L71); [`server/filestore.go`, lines 143–157](https://github.com/nats-io/nats-server/blob/v2.15.2/server/filestore.go#L143-L157)). The file store compresses a message block when it fills and the next starts: "We've now reached the end of this message block, if we want to compress blocks then now's the time to do it" (`filestore.go`, [lines 5271–5279](https://github.com/nats-io/nats-server/blob/v2.15.2/server/filestore.go#L5271-L5279)). It writes the compressed copy to a temporary file, syncs it and renames it over the block (lines 8123–8251). So only the block being written stays plain, as only the audit file being written does (HBEP-10, Audit). Accessed 2026-11-16. S8 did not run S2 under `sync_interval: always`; beta measures it (Test plan).
+- **Capped, never evicted** (proposed). Each stream has a `MaxBytes` and `discard: new`, under which nats-server returns "maximum bytes exceeded" once the limit is reached ([`server/store.go`, lines 51–52](https://github.com/nats-io/nats-server/blob/v2.15.2/server/store.go#L51-L52), accessed 2026-11-16). A full stream refuses new messages and keeps every old one. S8's `discard: old` would delete silently until HBEP-10's gap markers exist, at stable. The caps are launcher settings, proposed at 2 GiB for events and 16 GiB for usage. A full events stream counts its refusals as events not logged; a full usage stream leaves new records in the files alone (The durable log, When it is down). Retention per event class is HBEP-10's, at stable (HBEP-10, open question 8).
+- **Kubernetes Events keep their 7 days.** The log, not the API store, is where an event outlives `event-ttl`.
+- **Size.** Events: about 600 a day (above), of at most about 2 kB each, so about 1.2 MB a day and 0.45 GB a year before compression. Usage: the files' sizing (Usage records, Sizing), about 31 GB a year at the planning rate before compression, so the usage cap holds about half a year uncompressed. gzip shrank the synthetic records about 8 times; S2's ratio is measured in beta. These are estimates, not measurements.
 
 ### Metrics
 
@@ -316,6 +361,34 @@ No client key ID is a label: per-key usage is in the records.
      - **the observer, the gap emitter and the front's request path:** none on `main` (Code that differs). For these, absence is proven by a test hook that signals after the emitter's recorder call, or by a test that calls the emitting function itself and reads the counter after it returns.
   4. **Other sources of the same series are quiet:** for example, `HeartbeatMissed` from the observer shares `lifecycle`'s series with the reconciler's.
 
+**OpenTelemetry (beta)** (open question 1; proposed by the amendment of 16 Nov 2026). The framework keeps its `hpcburst_` names and states a mapping to OpenTelemetry's generative-AI semantic conventions:
+- **Every convention used is Development status.** The conventions left the main repository; its v1.45.0 page says "GenAI semantic conventions have moved to the OpenTelemetry GenAI semantic conventions repository" ([`docs/gen-ai/README.md`](https://github.com/open-telemetry/semantic-conventions/blob/v1.45.0/docs/gen-ai/README.md)). That repository has no release, so the mapping is pinned to its commit `e6658f14c9d9ea0760825f029cb82e7673f48fab` of 6 Nov 2026, whose metrics page has "**Status**: [Development]" ([`docs/gen-ai/gen-ai-metrics.md`, line 7](https://github.com/open-telemetry/semantic-conventions-genai/blob/e6658f14c9d9ea0760825f029cb82e7673f48fab/docs/gen-ai/gen-ai-metrics.md#L7)). Accessed 2026-11-16.
+- **These names are read by tests and tools,** and renaming one waits for a new API version (Compatibility). A Development name may still change, so a rename now could need a second.
+- **Units and buckets differ.** Prometheus names carry their unit and `_total`; OpenTelemetry's carry neither. The front's time-to-first-token buckets reach 7,200 s, past S2's first token after 1,100 s, while the convention advises buckets up to 10 s.
+- **No spans and no OpenTelemetry events in beta.** The framework does no tracing, and logs no prompts or responses (Non-goals). It ships no OpenTelemetry SDK or exporter; a collector that wants OpenTelemetry's names renames by the tables below.
+
+| `hpcburst_` metric | OpenTelemetry metric (instrument, unit) and its description | Differences |
+|---|---|---|
+| `hpcburst_front_time_to_first_token_seconds` | `gen_ai.server.time_to_first_token` (Histogram, `s`): "Time to generate first token for successful responses" ([`gen-ai-metrics.md`, line 485](https://github.com/open-telemetry/semantic-conventions-genai/blob/e6658f14c9d9ea0760825f029cb82e7673f48fab/docs/gen-ai/gen-ai-metrics.md#L485)) | measured at the front, so it includes the tunnel and the front's queue; it observes every request with a first token, one that fails later included; the buckets differ |
+| `hpcburst_instance_time_per_output_token_seconds` | `gen_ai.server.time_per_output_token` (Histogram, `s`): "Time per output token generated after the first token for successful responses" (line 356) | the engine's sum and count per worker, with no buckets (Engine gauges) |
+| `hpcburst_instance_generation_tokens_total` | none. `gen_ai.client.inference.usage.output_tokens` (Counter, `{token}`) counts a client's tokens per operation ([`gen-ai-token-metrics.md`, line 228](https://github.com/open-telemetry/semantic-conventions-genai/blob/e6658f14c9d9ea0760825f029cb82e7673f48fab/docs/gen-ai/gen-ai-token-metrics.md#L228)), not an engine's | |
+| every other `hpcburst_` series: running and waiting requests, preemptions, prefix-cache counters, KV-cache usage, the front's requests, cuts and pauses, the usage counters, the accounting, collector, relay and event series | none at the pinned commit | |
+
+| Label or usage field (HBEP-5, Usage records) | OpenTelemetry attribute ([`docs/registry/attributes/gen-ai.md`](https://github.com/open-telemetry/semantic-conventions-genai/blob/e6658f14c9d9ea0760825f029cb82e7673f48fab/docs/registry/attributes/gen-ai.md)) | Differences |
+|---|---|---|
+| the `endpoint` label; the field `path` | `gen_ai.operation.name`: `chat`, `text_completion` and `embeddings` for chat, completions and embeddings | `/v1/responses` has no value of its own; it maps to `chat` with `openai.api.type` `responses` ([`docs/gen-ai/openai.md`](https://github.com/open-telemetry/semantic-conventions-genai/blob/e6658f14c9d9ea0760825f029cb82e7673f48fab/docs/gen-ai/openai.md)), a choice of this HBEP; `models` and `other` have none |
+| `requestedModel` | `gen_ai.request.model` | as sent |
+| `promptTokens`, `completionTokens`, `cachedTokens` | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens` | ours are null when unknown (`countsSource: front_events`) |
+| `finish` | `gen_ai.response.finish_reasons` | ours is one value, theirs an array |
+| `firstTokenMs` | `gen_ai.response.time_to_first_chunk` | milliseconds; theirs is seconds |
+| `durationMs` | one observation of `gen_ai.server.request.duration` | milliseconds |
+| `errorCode`, else `status` | `error.type` | |
+| the `provider` label | none: `hpcburst.provider` | below |
+| the `model_deployment` and `instance_uid` labels | none: `hpcburst.model_deployment` and `hpcburst.instance_uid` | |
+
+- **`gen_ai.provider.name` is not our `provider`.** The convention's attribute "acts as a discriminator that identifies the GenAI telemetry format flavor specific to that provider" (`gen-ai-metrics.md`, the client metric's note [4]), and its well-known values name vendors, such as `openai` and `aws.bedrock`. Our `provider` names a grant on a platform (HBEP-3), so it maps to `hpcburst.provider`. The server metrics require `gen_ai.provider.name`; neither vLLM nor LLMLab has a well-known value, so the collector's configuration sets it.
+- **The check** (Test plan): every `hpcburst_` name in the first table's first column is one the front or the lifecycle controller exports. The OpenTelemetry columns are re-read against the pinned commit whenever the pin moves, by an amendment; nothing in CI fetches them.
+
 ### Usage records
 
 **The store in alpha** is the front's sink on the control-plane host, with HBEP-5's fields (HBEP-5, Usage records). It is also the attribution log (HBEP-9).
@@ -350,7 +423,55 @@ No client key ID is a label: per-key usage is in the records.
 
 - The alpha host's home file system is 98 GB. It had 37 GB free at 20:35 UTC on 31 Oct 2026, at 61% used, after reaching 99% earlier the same day (L-12.2).
 - At the planning rate a year of records fits in that space. At ten times the rate it fills in about six weeks. `hpcburst_usage_dir_free_bytes` shows the trend.
-- **Not needed for alpha:** compressing closed files, or moving them off the host. Both come with the durable log in beta.
+- **Not needed for alpha:** compressing closed files, or moving them off the host. In beta the durable log's copy is compressed (Retention, In the durable log), and the files stay plain, as the record, until the log becomes the record (The durable log).
+
+### The durable log (beta)
+
+Decided for beta (open question 11; amended 2026-11-16). Each part is marked by its source: spike S8 (issue #25, PR #28), an existing rule, or proposed by this amendment. Status stays the truth, and the usage files stay the record.
+
+**Where it runs** (proposed).
+- **One process,** `hpcburst-controller eventlog`, a subcommand of the controller binary, as the relay keeper is (HBEP-11, Single-user host). It embeds nats-server's `server` package, as S8's `jsnode` did, so its version is pinned in `go.mod`: nats-server v2.15.2, S8's, with nats.go v1.55.0 for the clients. v2.15.3 (11 Nov 2026) is untested here.
+- **The launcher starts it** with `hpcburst up --event-log` (proposed), before the controllers and the front, records the choice in its state and keeps it across `upgrade`, as it does the bulk path. It records the process by process ID plus start time, judges its liveness through a pidfd, restarts it when it exits, and stops it last (HBEP-11, Single-user host). Without `--event-log` no log runs, and nothing publishes.
+- **Loopback only:** clients at the port base + 16, and nats-server's monitoring at base + 17, whose `GET /healthz` is the health check. On a single server that check makes "sure the streams were recovered" ([`server/monitor.go`, lines 3577 and 3743](https://github.com/nats-io/nats-server/blob/v2.15.2/server/monitor.go#L3743), accessed 2026-11-16), so the launcher asks without `js-enabled-only`, which checks only that JetStream is on. The block grows to base..base+17, and +13 to +15 stay the bulk path's, used or not.
+- **Its store** is `<state>/eventlog/`, mode 700, on the host's disk.
+- **It checks what it parsed** (S8, Finding 8: a misspelt setting looks like the default until power fails). At start it reads back the options nats-server parsed, `SyncAlways` among them ([`server/opts.go`, lines 2715–2718](https://github.com/nats-io/nats-server/blob/v2.15.2/server/opts.go#L2715-L2718), accessed 2026-11-16), and each stream's configuration. It serves only when `sync_interval` is `always` and both streams have this HBEP's settings, creating a stream that is absent. Otherwise it exits naming every difference, and `hpcburst status` reports the log unhealthy.
+
+**Settings** (S8, Short answer): one file-backed replica, limits retention, `sync_interval: always`, a two-minute duplicate window with the event's id as `Nats-Msg-Id`, and direct get on. Retention differs from S8's `discard: old` (Retention, In the durable log).
+
+**Streams** (proposed, with S8's subject per resource):
+
+| Stream | Subjects | One message | Its `Nats-Msg-Id` | Writers |
+|---|---|---|---|---|
+| `HB_EVENTS` | `hb.ev.<kind>.<uid>`: the regarding object's kind in lower case, and its UID | one typed event, a CloudEvent 1.0.2 in structured JSON | the event's id | each controller and the front, for the events they raise |
+| `HB_USAGE` | `hb.usage` | up to 256 usage records, as the files' lines, byte for byte | `usage-<first counter>-<last counter>` | the front |
+
+- **Subjects by UID, not name.** A Kubernetes name may "contain only lowercase alphanumeric characters, '-' or '.'" ([Object Names and IDs](https://github.com/kubernetes/website/blob/8a342c522c21f05564881573fcca7d5910a2ebb5/content/en/docs/concepts/overview/working-with-objects/names.md), accessed 2026-11-16), and S8's layer refuses `.` in a subject. A reused name would also join an old object's history (HBEP-10, open question 11). A UID has neither problem.
+- **The envelope** (HBEP-10, Notes; S8): `specversion` `1.0`; `id`; `source` `/hpcburst/<controller>`, with the raised-events counter's `controller` value; `type` `io.hpcburst.event.v1`; `subject` `<kind>/<namespace>/<name>`, or `<kind>/<name>` for a cluster-scoped object; `time`, the event's `eventTime`; and `data` with the Kubernetes Event's fields: `action`, `reason`, `type`, `regarding` and `related` with their UIDs, `note` and `reportingController`. Both copies come from one recorder call, so they agree.
+- **The event's id** is a fresh UUID per recorder call, kept across publish retries. An Allocation event that marks a transition (Events, Allocation events) takes `<Allocation UID>/<reason>` instead, and `JobLost`, `JobReappeared` and `HardEndNear` add the time that marks them (`absentSince`, or the hard end). A transition raised again after a failed status write keeps its id.
+- **Only typed events.** An event without HBEP-8's type, crossplane-runtime's own and HBEP-4's diagnostics, stays in Kubernetes alone: its note is not bounded by this HBEP (Allocation events, No job ID in a note).
+- **Usage in batches** (S8, What this means for the HBEPs). Under `always` one node acknowledges about 1,000 publishes a second on S8's disk, so the front batches records when they arrive faster than a few hundred a second. At the planning rate, about 1.2 records a second (Usage records, Sizing), a message holds one. 256 records of 0.9 kB stay under nats-server's default maximum payload of 1 MiB ([`server/const.go`, line 94](https://github.com/nats-io/nats-server/blob/v2.15.2/server/const.go#L94), accessed 2026-11-16).
+
+**Who writes** (proposed).
+- **Events:** a publisher in the wrapper where each `events.k8s.io` recorder is built, beside the raised-events counter (`internal/eventcount`), so no emit site raises a typed event that skips the log. The wrapper hands the event to the Kubernetes recorder as before, and to a queue of 1,000 per process, from which a goroutine publishes and retries. The emit site never waits for the log.
+- **Usage:** the front's forwarder takes only what the sink has synced: from the sink after each sync, and from the files after a restart or an outage. So the log never holds a record the files lack, and serving never waits for the log.
+- **The token.** The launcher writes the log's configuration, mode 600, with a token, and the same token to `<state>/eventlog/token`, mode 600, which the controllers and the front read. The log refuses a client without it.
+
+**Delivery** (S8, Design of the layer, Publish; Findings 4 and 6): at least once, de-duplicated by `Nats-Msg-Id` within the two-minute window. S8 dropped an acknowledgement after the store, and the retry stored one copy. A retry after the window stores a second copy, so a reader de-duplicates by the event's id, and usage by its counter (HBEP-10, Notes). Exactly once is not claimed; S8 did not measure it.
+- **The usage forwarder resumes from the log** (proposed). At start, and after any failed or unacknowledged publish, it reads the stream's last message by direct get, and publishes from the next counter in the files. A retry therefore never duplicates a batch the stream already holds. The files are the record, so this also re-publishes a tail that a power loss took from the log. That is the lost-tail case HBEP-10 leaves undetectable for events (HBEP-10, Notes); usage cannot lose to it.
+
+**When it is down** (proposed).
+- **Usage loses nothing.** The files keep every record, as in alpha, and `Write` never depends on the log. The forwarder waits and catches up. `hpcburst_usage_unlogged_records`, a gauge, is the last synced counter minus the last counter the log acknowledged. `/healthz`'s `usage` block gains `log`, `connected` or `down`, and `loggedCounter`. `hpcburst status` reports the front as "degraded: usage log behind" while the log is down or the gauge has stayed above 0 for 5 minutes, with the exit code 0, as for a failing sink.
+- **Events can miss the log, never silently.** Kubernetes Events go on as in alpha. An event the queue cannot hold, or whose retries run out, is counted in `hpcburst_events_unlogged_total{controller}`. At the first loss after a success, and then at most once an hour while losses last (Repeating conditions), the emitter raises `degraded`, reason `EventsNotLogged` (proposed), regarding its own `Lease` (`lifecycle`, `front` or `provider-<name>`), with the count and since when in its note. It raises one more with its first publish after the log returns, so the log itself shows the span it lacks. `EventsNotLogged` joins the Reasons table with its code.
+- **A crash** loses the events still queued in that process; its next start's `ObservationGap` names the gap (Gaps after a restart).
+- **Nothing waits on the log.** A failed publish never fails a reconcile or a request.
+
+**Backup and restore** (proposed; HBEP-11, Single-user host).
+- Before each upgrade, once the log has stopped last, the launcher copies `<state>/eventlog/` beside its copy of the SQLite file. It refuses the upgrade when the file system lacks the space for the copy, naming both sizes.
+- `restore` puts both back. The log then ends at the backup's last message, and the events raised since are lost from it, as they are from the restored API store. Usage loses nothing: the forwarder re-publishes from the files every record after the restored stream's last counter. For HBEP-10's cursors (stable), a restore is rewritten history (S8, Finding 7), and the subscriber re-reads status.
+
+**Readers** (owner, 15 Nov 2026, for the audit log; HBEP-10, open question 10): whoever may read the launcher's state directory, where the store and the token live. That is the person, and agents that share the person's Unix user. Every client needs the token, and the listener is on loopback.
+
+**The files stay the record** (proposed). S8 did not test power loss or a kernel crash, the only cases where `sync_interval: always` differs from the default (S8, Unknown), while the files have their sync-before-done and counter-gap rules (Usage records). So in beta the log is a copy, and HBEP-5's beta criterion "usage records go to HBEP-8's log" is met by the forwarder. Making the log the record, and then compressing or dropping the files, is a later amendment. It needs a power-loss test of the log first (S8 names dm-flakey or a write-dropping FUSE passthrough), and a month in which the log and the files agree.
 
 ### Provider accounting
 
@@ -388,6 +509,10 @@ What the code had to change to match this HBEP, as read on 31 Oct 2026. The PRs 
   - **A test hook** signalling after the recorder call for the observer, the gap emitter and the front's request path.
   - **A drift-guard check** that every recorder is wrapped.
   - **PR #247's absence checks** meeting the four conditions.
+- **Beta's designs (16 Nov 2026):** not yet. Still to come:
+  - **The durable log:** `hpcburst-controller eventlog` and its start checks; the launcher's `--event-log`, ports, token, supervision and backup (HBEP-11); the publisher beside the counting wrapper (`internal/eventcount`); and the usage forwarder with its gauge and `/healthz` fields (`internal/front/usage`).
+  - **Allocation events:** the Provider controller's `events.k8s.io` recorder and its map from reason to type, its notes without job IDs, and its managers' `ObservationGap` (`internal/providerctl`). With each, its rows of the Reasons table and a shorter list of untyped Provider reasons (`internal/reasondrift/exceptions.go`).
+  - **The OpenTelemetry check** of the mapping's first column.
 
 ### Test plan
 
@@ -430,12 +555,29 @@ Tests use the fake Slurm of spike S4, the engine double behind a real agent (`in
 - **Accounting.** A pending Allocation has no `accounting`, and no gauge is exported for it. A running one's elapsed time follows the scheduler's start time. A requeued job's hours are unknown, on v0.0.40 and v0.0.42 alike, also when the reply shows only the last execution, and its record lists them as unknown. A running job polled ten times within a minute gets one status write. With the tag lookup succeeding and only the final accounting read failing, the record is written after `lostGrace` with unknowns, and the finalizer goes; with the lookup itself failing, the finalizer stays. Deleting an ended Allocation leaves `acct-<UID>` with its hours. An Allocation deleted while its job carries `COMPLETING` has no `acct-<UID>` until the flag clears, then exactly one, in HBEP-4's Helios shape (the job not listed, then read from accounting) and in its Athena shape (listed without the flag); a fixture whose jobs never carry the flag proves nothing here. A job whose final state came from the queue listing has the elapsed time `end_time − start_time`. When the final read does not come within `lostGrace`, the record is written with its elapsed time unknown, and the Allocation goes.
 - **A long reply with few chunks:** time per output token is the engine's value or absent, never 0.
 
+**Beta** (amended 2026-11-16). With `up --event-log` on the single-user host, the fake Slurm of S4, and the log's process killed with SIGKILL, as S8's harness killed its server:
+- **Events survive a log crash.** A test emitter raises 500 typed events about five objects, and the log is SIGKILLed at a random point and restarted on its store. When it is back within the publisher's retries, all 500 are in `HB_EVENTS`, each id once, on its object's subject, and `hpcburst_events_unlogged_total` stays 0. When it stays down past them, the stream holds every acknowledged one, the counter holds the rest, the two add up to at least 500 (an event whose acknowledgement was lost can be in both), and one `EventsNotLogged` follows the log's return, in the API and in the log. A test that never kills the log proves nothing, and nor does one that counts acknowledgements in the publisher's memory rather than reading the stream.
+- **A lost acknowledgement.** The acknowledgement of a stored event is dropped, as in S8's test, and the retry leaves one copy. A retry whose first publish never reached the store proves nothing.
+- **Usage while the log is down.** Records 1 to 1,000 are written and acknowledged by the log, and the gauge reads 0. The log is stopped, and records 1,001 to 1,500 are written: every `Write` returns nil, `/healthz` says `state` `ok` and `log` `down`, and the gauge reads 500. The log restarts; the forwarder reads the stream's last counter, 1,000, and publishes 1,001 to 1,500. The stream then holds 1 to 1,500, each counter once, each record's bytes equal to its line in the files, and the gauge reads 0. Killed mid-batch instead, the log still ends with each counter once. A test whose records were all published before the log went down proves nothing, and nor does one that compares the stream with what the forwarder held in memory rather than with the files.
+- **A lost tail.** A power loss is emulated, as S8 did, by restoring an older copy of the store: the stream ends at counter 400 while the files hold 1 to 1,500. The forwarder publishes 401 to 1,500, and the stream then matches the files.
+- **A full stream.** With a usage cap of a few messages, publishes are refused, the files keep every record, `Write` returns nil, the gauge rises and `hpcburst status` says "degraded: usage log behind". With the events cap reached, the refused events are counted as not logged. A cap tested with `discard: old` proves nothing, since its publishes keep succeeding while it deletes.
+- **Retention.** On a host started with a short test `event-ttl`, an event the API no longer lists is still in the log. The streams have no `MaxAge`, and their closed blocks are compressed. The S2 ratio is measured on 20,000 synthetic usage records (Usage records, Sizing) and 5,000 synthetic events, from the store's size against the raw bytes. A test that never lets the TTL pass proves nothing.
+- **Allocation events on the fake Slurm.** A held job has its hold lifted, starts, and runs to its time limit, with the fake clock passing an hour before its hard end. The API and the log each hold at least one event of `started` `JobSubmitted`, `started` `HoldLifted`, `ready` `JobStarted`, `ending-soon` `HardEndNear` and `replaced` `JobEnded`, regarding the Allocation, with `reportingController` `hpcburst-provider`. The fake job's ID is a synthetic value no other field holds, and no note of the Provider controller, typed or not, contains it. A test that reads only what the emitter returned, or the recorder's in-memory double, proves nothing; the raised-events counter shows absence, never presence.
+- **Allocation failures.** A job that fails gives `failing` `AllocationFailed`. A requeue gives `failing` `Requeued`. A job absent past `lostGrace` gives `failing` `JobLost`, and its return `ready` `JobReappeared`, with an id of its own. A job cancelled from outside before its hard end, with the Allocation not deleted, gives `failing` `AllocationEndedEarly`. Deleting a running Allocation gives `replaced` `JobEnded`, with its release cause in the note, and the Operation in `related` when the cause names one.
+- **A failed status write.** A client interceptor fails the status write after a `JobStarted`: the next pass raises it again, the log holds one copy under one id, and the API at least one.
+- **A restart between transitions.** The Provider manager stops while its job is held; the fake Slurm lifts the hold and starts the job; the manager restarts. It raises `JobStarted` at its first pass and one `ObservationGap` regarding `provider-<name>`. No `HoldLifted` is replayed.
+- **Repeating Allocation conditions.** An admin hold that lasts three hours, read every minute, gives at most four `AdminHold` events. A job that carries `COMPLETING` for 15 minutes gives one `JobCompleting`, at 10 minutes; one that carries it for 5 s gives none.
+- **A moved hard end.** A hard end moved 2 h later, after its `HardEndNear`, gives a second one an hour before the new end, under a different id.
+- **Series at 0.** A batch Provider's typed reasons read 0 on a serving copy before its first Allocation.
+- **The OpenTelemetry mapping.** Every `hpcburst_` name in the mapping's first column is exported by a serving lifecycle copy or by the front. A check against a list copied from the table proves nothing.
+
 ### Compatibility and upgrades
 
 - **Versions.** The vocabulary of types and reasons, the metric names and the usage fields are versioned with the API, `v1alpha1`. Within it, reasons, metrics and usage fields may be added; renaming or removing one waits for a new API version.
-- **Readers** treat an unknown reason as its type's generic case, and an event with no type (an empty `action`, as the Provider controller's) or an unknown type as "other", and keep working.
+- **Readers** treat an unknown reason as its type's generic case, and an event with no type (an empty `action`, as the Provider controller's in alpha, and its diagnostics' in beta) or an unknown type as "other", and keep working.
 - **Usage files.** A file written before rotation, `usage.jsonl`, is the newest file while no daily file exists (Usage records, Rotation), and then stays as it is; the counter file continues. A record gains fields only by addition, so an earlier reader skips the new ones.
 - **The event TTL** applies to events created after the flag is set. Events created before keep the TTL they were stored with.
+- **The durable log (beta).** The CloudEvent's `type` carries its version, `io.hpcburst.event.v1`, and its `data` gains fields only by addition. A reader of the log treats an unknown reason or type as readers of Events do. An earlier binary neither writes nor reads the log, and the store stays; `up` without `--event-log` runs as alpha. The Provider controller's typed events keep their reasons, so a reader that matched them as untyped still finds them.
 - LLMLab exposes no metrics, so there is no client contract to keep for them. Usage reporting inside responses follows HBEP-5.
 
 ### Security
@@ -444,6 +586,8 @@ Tests use the fake Slurm of spike S4, the engine double behind a real agent (`in
 - Events and metrics never carry credentials, keys or prompts. Metrics are served on loopback only, with no client key ID in any label.
 - Provider job IDs are Instance metadata (HBEP-3), and appear in accounting records, visible only to identities that can read the namespace's records (HBEP-11).
 - Events are readable by the identities that HBEP-11's RBAC lets list events in the namespace.
+- **No note of the Provider controller names a job ID** (beta; Events, Allocation events), so an event can be quoted without one.
+- **The durable log** (beta) listens on loopback and refuses a client without its token. Its configuration and token are mode 600 and its store mode 700, under the launcher's state directory, so its readers are the audit log's (The durable log, Readers).
 
 ### Graduation criteria
 
@@ -455,35 +599,38 @@ Tests use the fake Slurm of spike S4, the engine double behind a real agent (`in
   - the launcher sets `event-ttl=168h`, and a usage file rotates across a UTC midnight.
 - **Beta:**
   - the Helios parts of alpha's criteria, on GH200 when it returns (owner decision, 11 Nov 2026);
-  - the durable log for events and usage (open question 11);
-  - typed Allocation events (open question 14);
-  - the billing formula and per-grant totals (open questions 15 and 16);
-  - OpenTelemetry's names (open question 1);
+  - the durable log for events and usage (open question 11). Met when the Test plan's beta rows for the log pass with `up --event-log`, and a week on the alpha host, serving on Athena, shows in the log every typed event the API listed, and every usage record of the files, byte for byte, by counter;
+  - typed Allocation events (open question 14). Met when their reasons are in the Reasons table with their code, the drift guard passes, the fake-Slurm rows pass, and one real job on Athena shows `JobSubmitted`, `HoldLifted`, `JobStarted` and `JobEnded` regarding its Allocation, read from the API and from the log, with no job ID in a note;
+  - the billing formula and per-grant totals (open questions 15 and 16), from HBEP-4's billing group (HBEP-4, open question 3);
+  - OpenTelemetry's names (open question 1). Met by the mapping, pinned to a commit (Metrics, OpenTelemetry), and its check in the Test plan;
   - the observer tests pass on two batch providers.
 - **Stable:** the Test plan runs in CI; a deployment's usage, events and accounting have been read for a whole month with no hand-run step; and HBEP-10's subscriptions read the durable log (HBEP-10, Graduation criteria).
 
 ## Operational readiness
 
-1. **Working:** every observer's heartbeat is within its rule: each Provider's `lastSuccessfulStatusRead`, each Instance's last report, the front's probe ages, and the `front` and `lifecycle` `Lease`s. Both `/metrics` endpoints answer, and the serving lifecycle copy's has `hpcburst_collector_success` for `accounting` and for `instances`, each at 1. If no copy has them, no copy serves, which is not working. End to end, a request through the front appears in the usage file with its deployment and Instance, and in `hpcburst_front_requests_total`. A `HeartbeatMissed` event, an endpoint that does not answer, or a request missing from usage says it is not working.
-2. **Restart:** an observer re-reads the inventory and resumes, and the lifecycle controller and the front emit one `ObservationGap` each. Engine counters start new series under new generation labels. The usage counter resumes at the persisted block end. A crash, a failed batch or a reservation of uncertain persistence leaves a gap; a clean stop does not. Events in the store survive a k3s restart, with their TTL restarted.
+1. **Working:** every observer's heartbeat is within its rule: each Provider's `lastSuccessfulStatusRead`, each Instance's last report, the front's probe ages, and the `front` and `lifecycle` `Lease`s. Both `/metrics` endpoints answer, and the serving lifecycle copy's has `hpcburst_collector_success` for `accounting` and for `instances`, each at 1. If no copy has them, no copy serves, which is not working. End to end, a request through the front appears in the usage file with its deployment and Instance, and in `hpcburst_front_requests_total`. A `HeartbeatMissed` event, an endpoint that does not answer, or a request missing from usage says it is not working. In beta, with `--event-log`, the log's `/healthz` answers, the front's `usage.log` says `connected`, `hpcburst_usage_unlogged_records` returns to 0, and `hpcburst_events_unlogged_total` stays flat; an `EventsNotLogged` event says it is not working.
+2. **Restart:** an observer re-reads the inventory and resumes, and the lifecycle controller and the front emit one `ObservationGap` each. Engine counters start new series under new generation labels. The usage counter resumes at the persisted block end. A crash, a failed batch or a reservation of uncertain persistence leaves a gap; a clean stop does not. Events in the store survive a k3s restart, with their TTL restarted. In beta the log restarts from its store, the forwarder resumes after the stream's last counter, and each Provider manager emits one `ObservationGap` too.
 3. **Silent failure:**
    - a collector that cannot read: `hpcburst_collector_success` 0, with none of its series;
    - an observer that runs but reads nothing: its readings turn unknown, and the share of unknown samples is a query on `hpcburst_instance_metrics_unknown`. A display that draws an absent series as zero would hide this, so displays draw it distinctly;
    - a recorder that drops events: through a full queue, silently, or through a refused note or a store error, which it logs. The conditions still change, since status is the truth;
-   - a usage write that fails: the failure counter and `/healthz`.
+   - a usage write that fails: the failure counter and `/healthz`;
+   - in beta, an emitter that cannot reach the log: `hpcburst_events_unlogged_total` and `EventsNotLogged`; a forwarder behind: `hpcburst_usage_unlogged_records`; and a log started with a setting it did not parse as given: it refuses to serve (The durable log, Where it runs).
 4. **Provider limits:** accounting adds one `sacct -j` read per execution, after the job is first seen started (HBEP-4, Poll rate); its other fields come from existing reads, which are paced per platform profile (HBEP-4).
 5. **Capacity:**
    - a full KV cache: waiting requests and preemptions rise, and those are the signals;
    - a full disk: usage writes fail loudly, and the SQLite store stops writes, so events may not be stored (Risks; HBEP-11, Operational readiness 5; L-17.2). Sizing is in Usage records;
-   - the event store holds an estimated 10 MB or less over 7 days at alpha scale (Retention).
-6. **Idle cost:** no new process. Two loopback `/metrics` endpoints, built only when scraped; one `Lease` renewal every 10 s; heartbeat checks inside existing reconciles; one sync per batch of finished requests. Nothing runs on providers.
-7. **Rollback:** an earlier binary ignores the new status fields and emits fewer events; the usage files and accounting records stay. Removing the launcher's flag returns new events to 1 h. Serving does not depend on any metric or event.
+   - the event store holds an estimated 10 MB or less over 7 days at alpha scale (Retention);
+   - in beta, the log's streams are capped, proposed at 2 GiB for events and 16 GiB for usage, and refuse new messages when full (Retention, In the durable log).
+6. **Idle cost:** no new process in alpha; beta's `--event-log` adds one, whose memory beta measures. Two loopback `/metrics` endpoints, built only when scraped; one `Lease` renewal every 10 s; heartbeat checks inside existing reconciles; one sync per batch of finished requests. Nothing runs on providers.
+7. **Rollback:** an earlier binary ignores the new status fields and emits fewer events; the usage files and accounting records stay. Removing the launcher's flag returns new events to 1 h. Serving does not depend on any metric or event. In beta, `up` without `--event-log` stops nothing that serves, and the log's store stays.
 
 ## Drawbacks
 
 - Every reader must handle three outcomes, not two.
 - Per-instance series and per-request records add storage that a single-user setup must carry.
 - Alpha's events can be merged or dropped, so an agent that wants every transition must re-read status until HBEP-10's subscriptions exist, at stable.
+- Until the log is the record, beta stores usage twice, in the files and in the log, and runs one more process.
 
 ## Alternatives
 
@@ -492,6 +639,12 @@ Tests use the fake Slurm of spike S4, the engine double behind a real agent (`in
 - **Rebuilding usage from logs afterwards.** Possible, but slow, and only as complete as the logs.
 - **KV-cache utilisation as the load measure.** Simple, but it does not compare across attention implementations.
 - **JetStream as alpha's event and usage log.** S8 supports it, but it adds a process, and subscriptions and cursors that HBEP-10 has not designed. Kept for beta.
+- **A watcher that copies Kubernetes Events into the log.** One writer, but the log would inherit the recorder's merges, drops and full queue (Events), so it would be no more complete than the API store.
+- **The log as the usage record in beta.** One store, but S8 did not test power loss, so the files stay the record (The durable log).
+- **A pinned nats-server binary beside frps.** One more binary to pin and check; embedding pins the version in `go.mod`, as S8 ran it.
+- **Eviction by age or size** (`discard: old`, S8's setting). It deletes silently until HBEP-10's gap markers exist (Retention, In the durable log).
+- **OpenTelemetry's names as the framework's own.** Every convention used is Development status, and this HBEP's names are read by tests and tools (Metrics, OpenTelemetry).
+- **Untyped Allocation events for beta too.** No change, but readers would keep treating the Allocation's lifecycle as type "other" and read it from the Instance's events, which a kept Allocation with no Instance lacks.
 - **NaN for an unknown sample.** One value per series and no extra gauge, but it poisons or hides aggregates (Design details, Unknown samples).
 - **Scraping engines through the tunnel.** It would show the engine's own series, but HBEP-6's tunnel carries only routed requests, and a gone Instance would read as a stale series.
 
@@ -508,9 +661,9 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 | Kubernetes `Lease` | `coordination.k8s.io/v1`, in [kubernetes/kubernetes](https://github.com/kubernetes/kubernetes) | Apache-2.0 | Dependency: the front's heartbeat, and the controllers' leader `Lease`s read as theirs |
 | Prometheus client_golang | [prometheus/client_golang](https://github.com/prometheus/client_golang) v1.23.2 | Apache-2.0 | Dependency: the `/metrics` exposition of the front and the lifecycle controller |
 | vLLM metric names | [vllm-project/vllm](https://github.com/vllm-project/vllm) v0.32.0 | Apache-2.0 | Names read by the agent and mapped to `hpcburst_` names; no code |
-| NATS JetStream | [nats-io/nats-server](https://github.com/nats-io/nats-server) | Apache-2.0 | Beta, supported by spike S8 (PR #28) except for power loss, which was not tested: the durable log for events and usage records, with `sync_interval: always`, with HBEP-10 |
-| CloudEvents 1.0.2 and sdk-go | [cloudevents/sdk-go](https://github.com/cloudevents/sdk-go); [spec](https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md) | sdk-go Apache-2.0; spec Apache-2.0 | Beta candidate, no spike assigned: the envelope in HBEP-10's log. Not used in alpha |
-| OTel GenAI semantic conventions | [semantic-conventions-genai](https://github.com/open-telemetry/semantic-conventions-genai) | Apache-2.0 | Beta candidate (open question 1): names for front metrics, pinned to a commit; no code |
+| NATS JetStream, and its Go client | [nats-io/nats-server](https://github.com/nats-io/nats-server) v2.15.2, embedded; [nats-io/nats.go](https://github.com/nats-io/nats.go) v1.55.0 | Apache-2.0 | Dependency in beta, with `up --event-log`: the durable log for typed events and a copy of the usage records, with S8's settings (The durable log). Supported by spike S8 (PR #28) except for power loss, which was not tested |
+| CloudEvents 1.0.2 and sdk-go | [cloudevents/sdk-go](https://github.com/cloudevents/sdk-go) v2.16.2, as S8 used it; [spec](https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md) | sdk-go Apache-2.0; spec Apache-2.0 | Dependency in beta: the envelope of each event in the durable log, as S8 used it. Not used in alpha |
+| OTel GenAI semantic conventions | [open-telemetry/semantic-conventions-genai](https://github.com/open-telemetry/semantic-conventions-genai), commit `e6658f14c9d9ea0760825f029cb82e7673f48fab` (6 Nov 2026) | Apache-2.0 | Beta: a mapping from the `hpcburst_` names and usage fields, pinned to that commit (Metrics, OpenTelemetry). No code |
 | llm-d-inference-sim | [llm-d/llm-d-inference-sim](https://github.com/llm-d/llm-d-inference-sim) | Apache-2.0 | Not used in alpha: the repository's own engine double, built from a vLLM 0.32.0 capture, covers the metric tests |
 
 ### Designs and published work borrowed
@@ -579,6 +732,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-12: erratum: `RouterRestart`, the router rung's `failing` event regarding an Instance, joins the Reasons table with the code that raises it (#429), as HBEP-7's Several workers says.
 - 2026-11-13: erratum: `CrashCorrelated`, the crash-correlation event's `failing` event regarding an Instance, with the other Instance in `related`, joins the Reasons table with the code that raises it (#539), as HBEP-7's Health and restarts says.
 - 2026-11-15: amendment following HBEP-10 (PR #582): `PlanStale` and `OperationPartlyFailed` proposed, outside the Reasons table until their code; an Operation's stop carries it in `related`; HBEP-10's subscriptions move to stable, and the durable log for events and usage stays in beta.
+- 2026-11-16: amendment for beta's designs: the durable log (JetStream embedded in its own process, with the usage files kept as the record), retention per stream, typed Allocation events from the Provider controller, and OpenTelemetry's conventions as a mapping. HBEP-4 and HBEP-11 amended with it.
 
 ## Amendments
 
@@ -622,3 +776,11 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
   - **The durable log's stage.** Beta keeps the durable log for events and usage (open question 11). HBEP-10's subscriptions, cursors and gap markers over it move to stable, where HBEP-10 builds them.
 
   Before, beta's criterion named "the durable log for events and usage, with HBEP-10's subscriptions", which HBEP-10 builds at stable, and HBEP-10's reasons were not named here.
+- **2026-11-16: beta's designs** (Summary; Notes; Risks; Open questions 1, 6, 10, 11 and 14; Events, Allocation events, Gaps after a restart, Retention; Metrics, OpenTelemetry; Usage records, Sizing; The durable log; Code that differs; Test plan; Compatibility; Security; Graduation criteria; Operational readiness; Drawbacks; Alternatives; Prior art). An amendment, the science agent's design for HBEP-8's beta, merged before its code, with HBEP-4's and HBEP-11's amendments of the same day. Open questions 15 and 16 stay open, for HBEP-4's billing group.
+  - **The durable log** (open question 11): NATS JetStream v2.15.2, embedded in `hpcburst-controller eventlog`, which the launcher supervises with `up --event-log`, on loopback with a token. S8's settings, checked as parsed at start. A stream of typed events with subjects by UID, and a stream of usage records. At least once, with a dedupe id. The usage files stay the record, and the front forwards synced records from them, resuming after the stream's last counter. A copy of the store joins the upgrade's backup.
+  - **Retention** (open question 6): events in the log kept for the grant by the audit log's rule, compressed with S2 once cold; usage kept for the grant's life; each stream capped, refusing new messages when full. Kubernetes Events keep 7 days.
+  - **Allocation events** (open questions 10 and 14): fifteen typed reasons regarding the Allocation, raised by the Provider controller through an `events.k8s.io` recorder, with no job ID in any of its notes, and an `ObservationGap` from each Provider manager. The reasons, and `EventsNotLogged`, join the Reasons table with their code; the table is unchanged here.
+  - **OpenTelemetry** (open question 1): a mapping, pinned to commit `e6658f14c9d9ea0760825f029cb82e7673f48fab` of semantic-conventions-genai, not new names.
+  - **Erratum:** S8's rate under `always` was about 860 acknowledged publishes a second for one publisher, and 950 to 1,360 for 8 or 32 (S8, Results 5); the Risks said about 1,200.
+
+  Before, open questions 1, 11 and 14 and the log's event retention were open and blocked beta, the Provider controller's events were all untyped and several notes named job IDs, and compressing closed usage files was to come with the log.
