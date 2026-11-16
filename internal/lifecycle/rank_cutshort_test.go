@@ -20,6 +20,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
+	afake "github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi/fake"
 	pfake "github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/fake"
 )
 
@@ -69,6 +71,15 @@ func rkCutShort(t *testing.T, l *writeLog) (h *rkRig, p, x string) {
 	h = newRkRig(t, false, withInterceptors(l.funcs()))
 	p, x = h.start(nil, pfake.Script{QueueWait: 10 * time.Minute}, pfake.Script{QueueWait: rkXWait})
 	l.candidate = p
+	// X serves a stream from 00:45:00 to 00:47:00, so once marked it drains for two minutes before it ends.
+	busyFrom, busyTo := rkAt(0, 45, 0), rkAt(0, 47, 0)
+	h.health[h.alloc(x)] = func(now time.Time, proc afake.Process) agentapi.Health {
+		hl := afake.DefaultHealth(now, proc)
+		if !now.Before(busyFrom) && now.Before(busyTo) {
+			hl.RunningRequests, hl.GeneratedTokens = agentapi.Int64(4), agentapi.Int64(now.Unix())
+		}
+		return hl
+	}
 	h.engineOf(x, rk200, 24*time.Minute) // 08:15:20 + 24:00 + 40 s = 08:40:00
 	h.engineOf(p, rk179, 34*time.Minute) // 08:10:20 + 34:00 + 40 s = 08:45:00
 	h.stepTo(rkAt(0, 44, 50), 10*time.Second, nil)
@@ -157,6 +168,31 @@ func TestAFailedReadyWriteIsFinishedByTheNextPass(t *testing.T) {
 	}
 	if ph := hoPhase(h.rig, p); ph != v1alpha1.InstanceReady {
 		t.Fatalf("P is %s, want ready", ph)
+	}
+}
+
+// TestADrainingPeerKeepsItsMarkWhenItsCandidateRestarts: X drains from 00:45:10 with a stream in flight to 00:47:00.
+// P, which outranked it, has its worker exit at 00:45:20 and is restarted at rung 1, so it is no longer passed. X's
+// mark stays: a drain cannot be undone, and X ends RankedOut as it began, not Drained.
+func TestADrainingPeerKeepsItsMarkWhenItsCandidateRestarts(t *testing.T) {
+	l := &writeLog{}
+	h, p, x := rkCutShort(t, l)
+	h.tick(10 * time.Second) // 00:45:00: P is ready, X marked
+	h.stepTo(rkAt(0, 45, 10), 10*time.Second, nil)
+	if ph := hoPhase(h.rig, x); ph != v1alpha1.InstanceDraining {
+		t.Fatalf("X is %s at 00:45:10, want draining", ph)
+	}
+	h.agentOf(h.alloc(p)).agent.CrashWorker("worker-0", 1)
+	h.tick(10 * time.Second) // 00:45:20: P's part has exited and P restarts
+	if n := len(h.mustInstance(p).Status.Restarts); n != 1 {
+		t.Fatalf("P has %d restarts, want its rung-1 restart", n)
+	}
+	if got := h.mustInstance(x).Annotations[annotationRankedOut]; got != p {
+		t.Fatalf("X's mark %q after P restarted, want %q: X already drains", got, p)
+	}
+	h.until(5*time.Minute, 10*time.Second, "X ended", func() bool { return ended(h.mustInstance(x)) })
+	if xi := h.mustInstance(x); xi.Status.EndReason != v1alpha1.ReasonRankedOut {
+		t.Fatalf("X ended for %q, want RankedOut, the reason it began draining for", xi.Status.EndReason)
 	}
 }
 

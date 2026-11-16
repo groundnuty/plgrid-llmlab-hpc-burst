@@ -21,7 +21,8 @@ const rkNoDelay = time.Nanosecond
 
 // TestARankedOutAllocationIsKeptUnderItsPolicy: X is ranked out at 00:45 (18.0 ms against 20 ms) and its Allocation
 // carries idle-since 00:45, with the deployment's end time at 20:00 on the HBEP clock (04:00 the next day on the
-// rig's). Under Keep with no maxIdle it stays, past 15:50, with no approval. With a profile maxIdle of 30 min it is
+// rig's). Under Keep with no maxIdle it stays, to 15:50 (HBEP-7's row says to its hard end; P's replacement is planned
+// at 16:00:20 and is placed on this warm Allocation before any new submission, which ends its idleness), with no approval. With a profile maxIdle of 30 min it is
 // released at 01:15 (09:15:00), and under ReleaseWhenIdle with a 15 min idle limit at 01:00 (09:00:00), each with no
 // approval and a release cause that names the rule.
 func TestARankedOutAllocationIsKeptUnderItsPolicy(t *testing.T) {

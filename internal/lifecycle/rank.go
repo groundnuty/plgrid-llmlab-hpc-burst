@@ -159,14 +159,15 @@ func (p *pass) waitingAtRankingPoint(in *v1alpha1.Instance) bool {
 }
 
 // clearStaleMarks clears the ranked-out mark of a peer whose candidate is no longer going to be ready: gone, ended,
-// draining, or no longer passed (restarted, or failed a check), so a peer never drains without a ready successor
-// (step 6). A candidate that is ready, or has passed and waits, keeps its mark: its own pass through starting makes
+// draining, or no longer passed (restarted, or failed a check), so a peer never starts to drain without a ready
+// successor (step 6). A peer that already drains keeps its mark: the drain cannot be undone, and it ends RankedOut as
+// it began. A candidate that is ready, or has passed and waits, keeps its mark: its own pass through starting makes
 // it ready (enterReady, idempotent, the mark already written), which resumes an outranking a pass cut short.
 func (p *pass) clearStaleMarks() error {
 	var errs []error
 	for _, in := range p.insts {
 		name := in.Annotations[annotationRankedOut]
-		if name == "" || ended(in) {
+		if name == "" || ended(in) || in.Status.Phase == v1alpha1.InstanceDraining {
 			continue
 		}
 		if c := p.instanceNamed(name); c != nil && countable(c) && (c.Status.Phase == v1alpha1.InstanceReady || passedChecks(c)) {
