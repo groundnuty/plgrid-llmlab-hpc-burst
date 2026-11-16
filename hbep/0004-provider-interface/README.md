@@ -166,6 +166,7 @@ Problems this addresses, in general terms:
   - The reconciler runs with `managed.WithDeterministicExternalName(true)`, because the tag is a deterministic external name. Without it, a create interrupted before its outcome is recorded stops the reconciler before Observe, and the Allocation stays stuck until a person removes the annotation (S4: `spikes/s4/README.md`; `spikes/s4/cmd/provider-slurm/main.go`).
 - **The lifecycle controller** (HBEP-7) creates Allocations with their submission parameters, deletes them, and reads their status. It never calls a provider.
 - **The managed Provider's controller** runs the catalog loop under Managed provider in alpha.
+- **Events** (beta; amended 2026-11-16; HBEP-8, Events, Allocation events, which names the reasons and their types). A batch Provider's controller raises its Allocation's transitions as typed events regarding the Allocation, through a recorder of `events.k8s.io` beside crossplane-runtime's: the job's submission or adoption, the lifted hold, the start, the hard end an hour away, the end, and each failed, lost, refused or requeued outcome. A planned end takes HBEP-8's beta type `ended`: an end at or after the hard end, while the Allocation's Instance drains, or by a deletion asked for, judged as the lifecycle controller judges an Instance's end. So the controller reads that Instance's phase from its cache, by `spec.allocationRef`, and a deletion that follows a failure raises no end event (HBEP-8, Events, Allocation events, Planned or not). Its other events stay these diagnostics, untyped, through crossplane-runtime's recorder, with their notes as they are. The typed events' notes name no job ID, since they become CloudEvents in HBEP-8's log, which may be exported; the job ID stays in the Allocation's annotation and status (HBEP-11, The Allocation's record). Its identity may create `events.k8s.io` Events, and read Instances, in the Allocations' namespaces.
 
 ### Core operations
 
@@ -536,6 +537,7 @@ The register holds upstream bugs tied to versions. Each entry has one regression
 - A plugin acts with the user's credentials and can spend their grant, so irreversible actions go through approvals (HBEP-10). In alpha the lifecycle controller takes no action outside the spec (HBEP-7, open question 8).
 - Platform profiles hold no account names, grant names, host names or addresses. Accounts and grants are provider settings (open question 8).
 - Values placed into commands are checked against a safe pattern first (Transport).
+- In beta no typed Allocation event's note names a job ID (Two controllers, Events), since HBEP-8's durable log keeps them for the grant and may be exported. The untyped diagnostics stay in the cluster's own events, with their notes as they are.
 
 ### Graduation criteria
 
@@ -678,6 +680,8 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
 - 2026-11-15: amendment following HBEP-10 (PR #582): the proposed `estimate` operation, behind the flag "gives start estimates", and an optional grant end in the Provider settings.
 - 2026-11-15: erratum: open question 15's container-free launch is not needed for beta, as the beta criteria already said; every beta platform runs Apptainer.
 - 2026-11-16: expected performance's form and source, for beta: `expectedPerformance` keyed on the deployment ID, the capacity flags and the measured shape, with its envelope, from reference runs apart from serving, gating for 90 days (HBEP-7's amendment of the same day).
+- 2026-11-16: in beta the Provider's controller raises typed events on the Allocation, whose notes name no job ID (HBEP-8's amendment of the same day).
+- 2026-11-16: revised by its Fable review (PR #615): a planned end is judged as the lifecycle controller judges an Instance's, so the controller reads the Allocation's Instance.
 
 ## Amendments
 
@@ -771,3 +775,4 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
   - **The seed.** S94's GH200 figure is the one spike measurement by that method; it isn't shipped, and the first entry waits for a reference run on Athena.
 
   Before, the profile held no expected performance, and its form and source were open, blocking beta.
+- **2026-11-16: typed Allocation events** (Two controllers, Events; Security). An amendment with HBEP-8's of the same day, which names the reasons and their types, merged before the code. A batch Provider's controller raises its Allocation's transitions as typed events through an `events.k8s.io` recorder, and keeps its other diagnostics untyped, with their notes as they are. A planned end takes HBEP-8's beta type `ended`. The typed events' notes name no job ID (the science agent's decision, 16 Nov 2026: the rule covers these events only). Revised by its Fable review (PR #615): a planned end is judged as the lifecycle controller judges an Instance's, so the controller reads the Allocation's Instance from its cache, and may read Instances. Before, every event of the Provider's controller was untyped, and several notes named job IDs.
