@@ -6,6 +6,7 @@ package front
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -86,6 +87,16 @@ func TestTheNameBoundCoversTheLongestRoutableName(t *testing.T) {
 	}
 }
 
+// jsonEscaped is s as a JSON string holds it, without the quotes.
+func jsonEscaped(t *testing.T, s string) string {
+	t.Helper()
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b[1 : len(b)-1])
+}
+
 // usageLines returns the lines of the harness's usage files.
 func (h *harness) usageLines() []string {
 	h.t.Helper()
@@ -153,6 +164,9 @@ func TestAnOverLongModelNameThatNoDeploymentHasIsRecordedWithinTheBound(t *testi
 	resp := s.post("/v1/chat/completions", errChatBody(model, false, "hello there"))
 	body := readAll(t, resp)
 	s.checkFrontError(t, resp, body, wantError{status: 503, code: "model_inactive", detail: "not_attached", retryAfter: "30"})
+	if !strings.Contains(body, jsonEscaped(t, model)) {
+		t.Errorf("the answer does not carry the name whole (%d bytes of answer for a name of %d): the cut name was used for more than the record", len(body), len(model))
+	}
 	s.checkBoundedRecord(t, resp.Header.Get("hpcburst-request-id"), model, "")
 	if n := len(s.e.Requests()); n != 0 {
 		t.Errorf("the engine saw %d requests for a model no deployment has, want 0", n)
