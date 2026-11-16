@@ -71,7 +71,7 @@ func (p *pass) startingWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation
 			msgs = append(msgs, w+": "+msg)
 		}
 		if err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
-			cond(&s.Conditions, v1alpha1.ConditionQualified, metav1.ConditionTrue, v1alpha1.ReasonPassed, strings.Join(msgs, "; "), in.Generation, now)
+			cond(&s.Conditions, v1alpha1.ConditionQualified, metav1.ConditionTrue, v1alpha1.ReasonPassed, qualifiedMessage(in, strings.Join(msgs, "; ")), in.Generation, now)
 		}); err != nil {
 			return err
 		}
@@ -96,6 +96,14 @@ func (p *pass) startingWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation
 		}
 		_, _, tp := judgeWarmUp(c.WarmUp, share)
 		tps = append(tps, tp)
+	}
+	// The throughput gate judges each worker's own measurement, never the mean written below, and only
+	// records (HBEP-7, The throughput gate; Several workers). Until it has given a verdict it judges
+	// again on a worker's later warm-up; the same measurements write nothing twice.
+	if gate := p.gateRecord(in, sh, tps); gate != nil {
+		if err := p.setStatus(in, gate); err != nil {
+			return err
+		}
 	}
 	if !isTrue(in.Status.Conditions, v1alpha1.ConditionWarmedUp) {
 		if err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
@@ -233,7 +241,7 @@ func workersThroughput(tps []*v1alpha1.Throughput) *v1alpha1.Throughput {
 // workerStartSignal returns the malfunction of an Instance of several workers that is not ready yet, and
 // the worker whose rung it enters: a worker that exited at its current generations (a clean exit too;
 // L-2.9), or a start past health.startTimeout from its start instruction, or from its last restart,
-// taken by the worker that holds the start back (HBEP-7:469: the timeout judges that worker): the first
+// taken by the worker that holds the start back (HBEP-7, Several workers: the timeout judges that worker): the first
 // not yet warmed up, else the first the current router report does not hold healthy, else worker-0
 // (#498's review).
 func (p *pass) workerStartSignal(in *v1alpha1.Instance, av agentView, st settings) (string, string) {
