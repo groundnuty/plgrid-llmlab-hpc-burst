@@ -145,7 +145,8 @@ func (p *pass) starting(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av ag
 	if routed(in) && !routerAdmitsReady(in, av) {
 		return nil
 	}
-	return p.becomeReady(in, alloc)
+	// The ranking point: a chosen Instance becomes ready here, a surplus one waits or is ranked (rank.go).
+	return p.enterReady(in, alloc, func() error { return p.becomeReady(in, alloc) })
 }
 
 // startSignal returns the malfunction of an Instance that is not ready yet: a
@@ -168,6 +169,9 @@ func (p *pass) startSignal(in *v1alpha1.Instance, av agentView, st settings) str
 	if p.now.Before(deadline) {
 		p.at(deadline)
 		return ""
+	}
+	if p.waitingAtRankingPoint(in) {
+		return "" // a surplus Instance that passed waits for its ranking, which health.startTimeout does not judge
 	}
 	return v1alpha1.ReasonStartTimeout
 }

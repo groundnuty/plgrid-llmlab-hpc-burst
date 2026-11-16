@@ -280,7 +280,7 @@ func TestARemovedRowFails(t *testing.T) {
 func TestAnAddedRowFails(t *testing.T) {
 	md8, md7 := realDocs(t)
 	mutated := mutateRows(t, md8, "| `replaced` | `HandedOver`",
-		"| `replaced` | `HandedOver` (proposed in PR #88), `HedgeLost` | Instance | lifecycle controller |",
+		"| `replaced` | `HandedOver` (proposed in PR #88), `HedgeLost`, `RankedOut` | Instance | lifecycle controller |",
 		"| `failing` | `ReasonOfTheMutant` | Instance | lifecycle controller |")
 	want := []string{key(reasondrift.TableOnly, "failing", "ReasonOfTheMutant", "Instance", "")}
 	if got := leftover(t, mutated, md7, realScan(t)); !slices.Equal(got, want) {
@@ -694,7 +694,7 @@ func TestMutantsAreCaught(t *testing.T) {
 	// With rows for the first two, the code-only ones go, and a row for an event
 	// that is only built (B6) is not satisfied by it.
 	mutated := mutateRows(t, md8, "| `replaced` | `HandedOver`",
-		"| `replaced` | `HandedOver`, `HedgeLost` | Instance | lifecycle controller |",
+		"| `replaced` | `HandedOver`, `HedgeLost`, `RankedOut` | Instance | lifecycle controller |",
 		"| `failing` | `LiteralMutantReason`, `NamedMutantReason` | Instance | lifecycle controller |",
 		"| `degraded` | `ConstructedMutantReason` | Provider | managed catalog controller |")
 	got, n = compilerMade(leftover(t, mutated, md7, code))

@@ -126,11 +126,14 @@ func (p *pass) startingWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation
 	if routed(in) && !routerAdmitsReady(in, av) {
 		return nil
 	}
-	// The router holds every worker healthy: each is admitted, so its checks count from here (Q2).
-	if err := p.admitWorkers(in, av); err != nil {
-		return err
-	}
-	return p.becomeReady(in, alloc)
+	// The ranking point: a chosen Instance becomes ready here, a surplus one waits or is ranked (rank.go). The
+	// router holds every worker healthy: each is admitted, so its checks count from here (Q2).
+	return p.enterReady(in, alloc, func() error {
+		if err := p.admitWorkers(in, av); err != nil {
+			return err
+		}
+		return p.becomeReady(in, alloc)
+	})
 }
 
 // workerResults is worker w's check results at its current verification generation, from a process at
@@ -262,6 +265,9 @@ func (p *pass) workerStartSignal(in *v1alpha1.Instance, av agentView, st setting
 	if p.now.Before(deadline) {
 		p.at(deadline)
 		return "", ""
+	}
+	if p.waitingAtRankingPoint(in) {
+		return "", "" // a surplus Instance that passed waits for its ranking (startSignal)
 	}
 	for _, w := range names {
 		if !workerWarmed(in, w) {
