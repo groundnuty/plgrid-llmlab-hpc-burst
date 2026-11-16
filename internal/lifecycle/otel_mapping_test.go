@@ -27,12 +27,6 @@ import (
 
 const instanceOTelPrefix = "hpcburst_instance_"
 
-// instanceOTelLabels are the labels HBEP-8's Engine gauges section gives every
-// engine series, among those the mapping's second table maps to attributes: the
-// others of the section (worker, generation, worker_generation) have no mapping,
-// and the descriptive labels live on the info series.
-var instanceOTelLabels = []string{"instance_uid"}
-
 // otelRepoRoot finds the repository root from the package directory.
 func otelRepoRoot(t *testing.T) string {
 	t.Helper()
@@ -96,13 +90,13 @@ func TestOTelMappingInstanceNamesAreExported(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, l := range instanceOTelLabels {
+	for _, l := range reasondrift.OTelInstanceLabels {
 		if !slices.Contains(mapped, l) {
 			t.Errorf("the label %s is not among the labels %v that HBEP-8's mapping maps", l, mapped)
 		}
 	}
 	for _, n := range own {
-		problems, err := reasondrift.SeriesMissingLabels(body, n, instanceOTelLabels)
+		problems, err := reasondrift.SeriesMissingLabels(body, n, reasondrift.OTelInstanceLabels)
 		if err != nil {
 			t.Fatal(err)
 		}

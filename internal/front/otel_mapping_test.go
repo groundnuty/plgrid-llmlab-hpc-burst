@@ -30,10 +30,6 @@ import (
 
 const frontOTelPrefix = "hpcburst_front_"
 
-// frontOTelLabels are the labels HBEP-8's Front metrics table gives the time to
-// first token histogram, which the mapping's second table maps to attributes.
-var frontOTelLabels = []string{"provider", "model_deployment", "endpoint"}
-
 // otelRepoRoot finds the repository root from the package directory.
 func otelRepoRoot(t *testing.T) string {
 	t.Helper()
@@ -115,7 +111,7 @@ func TestOTelMappingFrontNamesAreExported(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, l := range frontOTelLabels {
+	for _, l := range reasondrift.OTelFrontLabels {
 		if !slices.Contains(mapped, l) {
 			t.Errorf("the label %s is not among the labels %v that HBEP-8's mapping maps", l, mapped)
 		}
@@ -130,7 +126,7 @@ func TestOTelMappingFrontNamesAreExported(t *testing.T) {
 			continue
 		}
 		histograms++
-		problems, err := reasondrift.SeriesMissingLabels(body, n, frontOTelLabels)
+		problems, err := reasondrift.SeriesMissingLabels(body, n, reasondrift.OTelFrontLabels)
 		if err != nil {
 			t.Fatal(err)
 		}

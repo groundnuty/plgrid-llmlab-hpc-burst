@@ -108,6 +108,22 @@ func TestParseOTelTableRefusals(t *testing.T) {
 		{"a name twice", func(s string) string {
 			return strings.Replace(s, "hpcburst_instance_beta_total", "hpcburst_front_alpha_seconds", 1)
 		}, "twice"},
+		// No row is skipped silently (Fable's note 1 on #633): a name outside
+		// backticks, or a row that names no metric and is not the prose row,
+		// would otherwise drop out of the export checks unseen.
+		{"a name outside backticks", func(s string) string {
+			return strings.Replace(s, "| `hpcburst_instance_beta_total` |", "| hpcburst_instance_beta_total |", 1)
+		}, "hpcburst_instance_beta_total is not backticked"},
+		{"a name outside backticks beside one in them", func(s string) string {
+			return strings.Replace(s, "| `hpcburst_instance_beta_total` |", "| `hpcburst_instance_beta_total` and hpcburst_instance_gamma_total |", 1)
+		}, "hpcburst_instance_gamma_total is not backticked"},
+		{"a row that names no metric", func(s string) string {
+			return strings.Replace(s, "| `hpcburst_instance_beta_total` |", "| the instance's beta series |", 1)
+		}, "row 2 names no backticked hpcburst_ metric"},
+		{"a second prose row", func(s string) string {
+			return strings.Replace(s, "| every other `hpcburst_` series: running and waiting requests | none at the pinned commit | |",
+				"| every other `hpcburst_` series: running and waiting requests | none at the pinned commit | |\n| every other `hpcburst_` series: more | none | |", 1)
+		}, "a second row that starts"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := ParseOTelTable([]byte(tc.edit(otelDoc)))
@@ -156,7 +172,19 @@ func TestParseOTelLabelsRefusals(t *testing.T) {
 		{"a label in upper case", func(s string) string { return strings.Replace(s, "the `provider` label", "the `Provider` label", 1) }, "is no label name"},
 		{"a group that is no list", func(s string) string {
 			return strings.Replace(s, "the `model_deployment` and `instance_uid` labels", "the `model_deployment` or `instance_uid` labels", 1)
-		}, "is no list of labels"},
+		}, "says label but is not one of the forms"},
+		// A group that says label in another form is refused, never read as a
+		// usage field, whose labels nobody would then check (Fable's note 4 on
+		// #633).
+		{"a label with a note after it", func(s string) string {
+			return strings.Replace(s, "the `provider` label |", "the `provider` label (HBEP-3) |", 1)
+		}, "says label but is not one of the forms"},
+		{"the word label first", func(s string) string {
+			return strings.Replace(s, "the `provider` label |", "label `provider` |", 1)
+		}, "says label but is not one of the forms"},
+		{"labels without the", func(s string) string {
+			return strings.Replace(s, "the `model_deployment` and `instance_uid` labels", "`model_deployment` and `instance_uid` labels", 1)
+		}, "says label but is not one of the forms"},
 		{"a label twice", func(s string) string { return strings.Replace(s, "the `provider` label", "the `endpoint` label", 1) }, "twice"},
 		{"no label at all", func(s string) string {
 			s = strings.Replace(s, "the `endpoint` label; the field `path`", "the field `path`", 1)
@@ -209,14 +237,46 @@ func TestParsesTheRealOTelMapping(t *testing.T) {
 			t.Errorf("the mapping names no %s series (it names %v), so that export check would read nothing", prefix, names)
 		}
 	}
+	// Every mapped label is required by one export check, and every label a
+	// check requires is mapped: the checks then prove each mapped label
+	// exported (Fable's note 4 on #633).
 	labels, err := LoadOTelLabels(repoRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"endpoint", "provider", "model_deployment", "instance_uid"} {
-		if !slices.Contains(labels, want) {
-			t.Errorf("the second table's labels %v lack %s", labels, want)
-		}
+	for _, p := range UnassignedOTelLabels(labels, OTelFrontLabels, OTelInstanceLabels) {
+		t.Error(p)
+	}
+}
+
+// TestUnassignedOTelLabels: a label the mapping newly maps, with no check that
+// requires it, is named; so is a label a check requires that the mapping does
+// not map. The new label is added to a copy of the real HBEP-8's second table.
+func TestUnassignedOTelLabels(t *testing.T) {
+	md := string(readHBEP8(t))
+	row := "| the `provider` label |"
+	if !strings.Contains(md, row) {
+		t.Fatalf("HBEP-8's second table has no row starting %q to add a label beside", row)
+	}
+	more := strings.Replace(md, row, "| the `worker` label | none | |\n"+row, 1)
+	labels, err := ParseOTelLabels([]byte(more))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := UnassignedOTelLabels(labels, OTelFrontLabels, OTelInstanceLabels)
+	if len(got) != 1 || !strings.Contains(got[0], "maps the label worker, which no export check requires") {
+		t.Errorf("a newly mapped label gives %q; want one line naming worker", got)
+	}
+	mapped, err := ParseOTelLabels([]byte(md))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = UnassignedOTelLabels(mapped, OTelFrontLabels, OTelInstanceLabels, []string{"worker"})
+	if len(got) != 1 || !strings.Contains(got[0], "requires the label worker, which the mapping does not map") {
+		t.Errorf("a required label the mapping lacks gives %q; want one line naming worker", got)
+	}
+	if got := UnassignedOTelLabels([]string{"a", "b"}, []string{"b"}, []string{"a"}); len(got) != 0 {
+		t.Errorf("a full assignment gives %q, want none", got)
 	}
 }
 

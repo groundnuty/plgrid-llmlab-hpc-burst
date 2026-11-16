@@ -48,7 +48,57 @@ var (
 	// labels, "the `a` label" or "the `a` and `b` labels", once each backticked
 	// token is replaced by X.
 	otelLabelGroup = regexp.MustCompile(`^the X(?:(?:, and |, | and )X)* labels?$`)
+	// otelLabelWord finds the word label or labels outside backticks: a group
+	// that has it names labels, and must have otelLabelGroup's shape, or the
+	// labels it names would be read as usage fields and checked by nobody.
+	otelLabelWord = regexp.MustCompile(`\blabels?\b`)
+	// otelBareName finds an hpcburst_ name outside backticks, which the parser
+	// would otherwise skip.
+	otelBareName = regexp.MustCompile(`\bhpcburst_[a-z0-9_]+`)
 )
+
+// otelCatchAll starts the first table's one prose row, the series that have no
+// OpenTelemetry counterpart: it names the prefix alone, and no metric.
+const otelCatchAll = "every other `hpcburst_` series"
+
+// OTelFrontLabels and OTelInstanceLabels are the labels of the mapping's second
+// table that each export check requires on the series it reads: the front's on
+// its mapped hpcburst_front_ histogram (HBEP-8, Front metrics), and the
+// lifecycle controller's on each mapped engine series (HBEP-8, Engine gauges;
+// the descriptive labels live on the info series). They are an assignment of
+// each mapped label to the check that proves it exported, not a copy of the
+// table: UnassignedOTelLabels sets them against the labels the table maps, both
+// ways, so a label the table newly maps fails until a check requires it, and a
+// label no longer mapped fails until it leaves these lists.
+var (
+	OTelFrontLabels    = []string{"provider", "model_deployment", "endpoint"}
+	OTelInstanceLabels = []string{"instance_uid"}
+)
+
+// UnassignedOTelLabels returns one line for each label the mapping maps that no
+// list in assigned requires, and for each label a list requires that the
+// mapping does not map; none means every mapped label is checked.
+func UnassignedOTelLabels(mapped []string, assigned ...[]string) []string {
+	owned := map[string]bool{}
+	for _, l := range assigned {
+		for _, label := range l {
+			owned[label] = true
+		}
+	}
+	var out []string
+	for _, label := range mapped {
+		if !owned[label] {
+			out = append(out, fmt.Sprintf("the mapping maps the label %s, which no export check requires: add it to OTelFrontLabels or OTelInstanceLabels", label))
+		}
+	}
+	for label := range owned {
+		if !slices.Contains(mapped, label) {
+			out = append(out, fmt.Sprintf("an export check requires the label %s, which the mapping does not map", label))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
 
 // LoadOTelNames reads HBEP-8 under the repository root and returns the
 // hpcburst_ names of the OpenTelemetry mapping's first column.
@@ -85,7 +135,9 @@ func LoadOTelLabels(root string) ([]string, error) {
 // before the next heading, a first header cell other than "`hpcburst_` metric",
 // a row of the wrong width, a first-column token that starts hpcburst_ and has
 // more after it but is no valid name (a typo that would drop out of the check),
-// a name twice, or no name at all, never an empty result.
+// an hpcburst_ name outside backticks, a row that names no metric and is not
+// the one prose row (otelCatchAll), a name twice, or no name at all, never an
+// empty result. No row is skipped silently.
 func ParseOTelTable(md []byte) ([]string, error) {
 	header, rows, _, err := otelFirstTable(strings.Split(string(md), "\n"))
 	if err != nil {
@@ -95,10 +147,15 @@ func ParseOTelTable(md []byte) ([]string, error) {
 		return nil, fmt.Errorf("the OpenTelemetry mapping's first table has the first header cell %q, want %q", header[0], otelNamesHeader)
 	}
 	var names []string
+	catchAll := false
 	for n, row := range rows {
 		if len(row) != len(header) {
 			return nil, fmt.Errorf("the OpenTelemetry mapping's first table, row %d has %d cells, want %d: %q", n+1, len(row), len(header), clip(strings.Join(row, "|")))
 		}
+		if bare := otelBareName.FindString(backticked.ReplaceAllString(row[0], "")); bare != "" {
+			return nil, fmt.Errorf("the OpenTelemetry mapping's first table, row %d: %s is not backticked, so the check would skip it: write it as `%s`", n+1, bare, bare)
+		}
+		found := 0
 		for _, m := range backticked.FindAllStringSubmatch(row[0], -1) {
 			tok := m[1]
 			switch {
@@ -107,9 +164,19 @@ func ParseOTelTable(md []byte) ([]string, error) {
 					return nil, fmt.Errorf("the OpenTelemetry mapping names %s twice", tok)
 				}
 				names = append(names, tok)
+				found++
 			case strings.HasPrefix(tok, "hpcburst_") && tok != "hpcburst_":
 				return nil, fmt.Errorf("the OpenTelemetry mapping's first table, row %d: %q is no metric name (hpcburst_ and lower case letters, digits and underscores)", n+1, tok)
 			}
+		}
+		if found == 0 {
+			if !strings.HasPrefix(row[0], otelCatchAll) {
+				return nil, fmt.Errorf("the OpenTelemetry mapping's first table, row %d names no backticked hpcburst_ metric and is not the row that starts %q: %q", n+1, otelCatchAll, clip(row[0]))
+			}
+			if catchAll {
+				return nil, fmt.Errorf("the OpenTelemetry mapping's first table, row %d: a second row that starts %q", n+1, otelCatchAll)
+			}
+			catchAll = true
 		}
 	}
 	if len(names) == 0 {
@@ -154,11 +221,11 @@ func ParseOTelLabels(md []byte) ([]string, error) {
 		for _, group := range splitGroups(row[0]) {
 			toks := backticked.FindAllStringSubmatch(group, -1)
 			shape := backticked.ReplaceAllString(group, "X")
-			if !strings.HasPrefix(shape, "the ") || !(strings.HasSuffix(shape, " label") || strings.HasSuffix(shape, " labels")) {
-				continue // a usage field
+			if !otelLabelWord.MatchString(shape) {
+				continue // a usage field: the group never says label
 			}
 			if !otelLabelGroup.MatchString(shape) {
-				return nil, fmt.Errorf("the OpenTelemetry mapping's second table, row %d: %q is no list of labels (\"the `a` label\", \"the `a` and `b` labels\")", n+1, group)
+				return nil, fmt.Errorf("the OpenTelemetry mapping's second table, row %d: %q says label but is not one of the forms read as labels, \"the `a` label\" or \"the `a` and `b` labels\" (\"the `a`, `b` and `c` labels\" too), so its labels would be checked by nobody", n+1, group)
 			}
 			for _, m := range toks {
 				if !otelLabel.MatchString(m[1]) {
