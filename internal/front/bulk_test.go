@@ -504,7 +504,7 @@ func TestBulkClosedBeforeHeadersRaisesNoPause(t *testing.T) {
 	}
 }
 
-// TestBulkIdleCutUnregistersWithoutPause (the plan's R5, HBEP-6:518): a bulk request that gets no
+// TestBulkIdleCutUnregistersWithoutPause (the plan's R5, HBEP-6, The bulk path): a bulk request that gets no
 // byte within idleTimeout, as on a frozen bulk work connection, is cut by the front as on the token
 // path (504, front_idle), and it also unregisters the bulk transport and re-probes it; the cut counts
 // nothing toward the pause.
