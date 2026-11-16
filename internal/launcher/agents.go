@@ -10,6 +10,13 @@ package launcher
 // A binding to the group, never one per agent, is the point: the RBAC subject and the admission
 // policies' match condition (PR 3) are then one predicate, so no identity can hold the agent role
 // and be outside the policies, and a ServiceAccount made by hand in another namespace gets nothing.
+//
+// The role hpcburst-agent has two forms, in two hand-written files (PR 3): the NARROW one, read-only
+// (config/rbac/agents-narrow.yaml), and the WIDE one with the writes the admission policies bound
+// (config/rbac/agents.yaml, the manifest). up applies the narrow one before the policies are known to be
+// enforced, and the wide one after (InstallAgentAccess in admission.go), so no moment lets an agent's
+// role grant a write before the policy that bounds it is enforced. InstallAgentRBAC applies the wide
+// form: call it only after the policies are enforced, as InstallAgentAccess does.
 
 import (
 	"bytes"
@@ -111,15 +118,68 @@ func sorted(s []string) []string {
 	return c
 }
 
-// InstallAgentRBAC makes the namespace, the roles and the bindings exist and be the manifest's, and
-// applies them with server-side apply, so repeating it is safe. Objects that exist already are set to
-// the manifest's rules and subjects first (resetAgentObjects); only then does the apply create what
-// is missing.
+// AgentRoleName is the ClusterRole that has a narrow and a wide form.
+const AgentRoleName = "hpcburst-agent"
+
+// agentNarrowRole decodes the embedded narrow form of the agent role and checks its shape: one
+// ClusterRole, named AgentRoleName.
+func agentNarrowRole() (*unstructured.Unstructured, error) {
+	objs, err := decodeManifests(bytes.NewReader(rbac.AgentsNarrow), "config/rbac/agents-narrow.yaml")
+	if err != nil {
+		return nil, err
+	}
+	if len(objs) != 1 || objs[0].GetKind() != "ClusterRole" || objs[0].GetAPIVersion() != "rbac.authorization.k8s.io/v1" || objs[0].GetName() != AgentRoleName {
+		return nil, fmt.Errorf("config/rbac/agents-narrow.yaml holds %d objects, want the one ClusterRole %s", len(objs), AgentRoleName)
+	}
+	return objs[0], nil
+}
+
+// narrowed returns a copy of m whose agent role is the narrow form. The namespace, the other roles and
+// the bindings are the manifest's, and m is not changed.
+func (m *agentManifest) narrowed() (*agentManifest, error) {
+	narrow, err := agentNarrowRole()
+	if err != nil {
+		return nil, err
+	}
+	out := &agentManifest{namespace: m.namespace, bindings: m.bindings}
+	for _, r := range m.roles {
+		if r.GetName() == AgentRoleName {
+			r = narrow
+		}
+		out.roles = append(out.roles, r)
+	}
+	return out, nil
+}
+
+// InstallAgentRBAC makes the namespace, the roles and the bindings exist and be the manifest's, the
+// agent role in its WIDE form, and applies them with server-side apply, so repeating it is safe. Objects
+// that exist already are set to the manifest's rules and subjects first (resetAgentObjects); only then
+// does the apply create what is missing. The wide role grants the writes the admission policies bound,
+// so it is applied after they are enforced: up goes through InstallAgentAccess (admission.go), which
+// does that. A caller that applies it alone opens the window that function closes.
 func InstallAgentRBAC(ctx context.Context, cfg *rest.Config, log io.Writer) error {
 	m, err := agentObjects()
 	if err != nil {
 		return err
 	}
+	return installAgentManifest(ctx, cfg, m, log)
+}
+
+// InstallAgentRBACNarrow is InstallAgentRBAC with the agent role in its NARROW form, which is read-only.
+// It also narrows a role that an earlier start widened.
+func InstallAgentRBACNarrow(ctx context.Context, cfg *rest.Config, log io.Writer) error {
+	wide, err := agentObjects()
+	if err != nil {
+		return err
+	}
+	m, err := wide.narrowed()
+	if err != nil {
+		return err
+	}
+	return installAgentManifest(ctx, cfg, m, log)
+}
+
+func installAgentManifest(ctx context.Context, cfg *rest.Config, m *agentManifest, log io.Writer) error {
 	dyn, mapper, err := newApplier(cfg)
 	if err != nil {
 		return err
@@ -219,9 +279,15 @@ func resetFields(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVer
 // AgentRBACState is what the API server says about the agents' namespace, roles and bindings.
 type AgentRBACState struct {
 	// Present is true when the namespace, the three roles and the two bindings exist and are the
-	// manifest's: the roles' rules, the bindings' roleRef and subjects.
+	// manifest's: the roles' rules, the bindings' roleRef and subjects. The agent role may be either of
+	// its two forms (the wide one in agents.yaml, or the narrow one in agents-narrow.yaml).
 	Present bool `json:"present"`
-	// Detail names what differs when Present is false.
+	// Writes is true when the agent role is the wide form, which grants the writes the admission policies
+	// bound. Present with Writes false is a host whose agents are read-only: up found no CRD to probe a
+	// policy with, or is in the middle of its wait.
+	Writes bool `json:"writes"`
+	// Detail names what differs when Present is false, and why the agents' writes are off when Present is
+	// true and Writes is not.
 	Detail string `json:"detail,omitempty"`
 }
 
@@ -240,7 +306,12 @@ func checkAgentRBAC(ctx context.Context, dyn dynamic.Interface) (*AgentRBACState
 	if err != nil {
 		return nil, err
 	}
+	narrow, err := agentNarrowRole()
+	if err != nil {
+		return nil, err
+	}
 	var diffs []string
+	writes, narrowForm := false, false
 	get := func(gvr schema.GroupVersionResource, want *unstructured.Unstructured) (*unstructured.Unstructured, error) {
 		cur, err := dyn.Resource(gvr).Get(ctx, want.GetName(), metav1.GetOptions{})
 		switch {
@@ -263,7 +334,14 @@ func checkAgentRBAC(ctx context.Context, dyn dynamic.Interface) (*AgentRBACState
 		if cur == nil {
 			continue
 		}
-		if !sameField(cur, want, "rules") {
+		switch {
+		case sameField(cur, want, "rules"):
+			if want.GetName() == AgentRoleName {
+				writes = true
+			}
+		case want.GetName() == AgentRoleName && sameField(cur, narrow, "rules"):
+			narrowForm = true
+		default:
 			diffs = append(diffs, fmt.Sprintf("the ClusterRole %s has rules that differ from the manifest's", want.GetName()))
 		}
 		if _, ok := cur.Object["aggregationRule"]; ok {
@@ -288,5 +366,8 @@ func checkAgentRBAC(ctx context.Context, dyn dynamic.Interface) (*AgentRBACState
 	if len(diffs) > 0 {
 		return &AgentRBACState{Detail: strings.Join(diffs, "; ")}, nil
 	}
-	return &AgentRBACState{Present: true}, nil
+	if narrowForm {
+		return &AgentRBACState{Present: true, Detail: "the ClusterRole " + AgentRoleName + " is the narrow, read-only form: the agents' writes are off until an up finds the ModelDeployment, Operation and Approval custom resource definitions and sees each admission policy refuse its probe"}, nil
+	}
+	return &AgentRBACState{Present: true, Writes: writes}, nil
 }

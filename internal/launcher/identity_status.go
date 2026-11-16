@@ -3,8 +3,9 @@ package launcher
 // What status says about the agents (HBEP-10, Identities and roles; issue #589, PR 2): whether their
 // namespace, roles and bindings are the manifest's (agents.go), and each identity's expiry and whether
 // the API server accepts its token. An expired or rejected identity is a reported state, never a host
-// failure: the host is as healthy as the other checks found it, and status exits 0. A failure to ask
-// the API server is a failure.
+// failure: the host is as healthy as the other checks found it, and status exits 0. So is one whose
+// kubeconfig cannot be used (a corrupt CA, say): "unreadable", with the reason. A failure to ask the
+// API server with the admin's own credential is a failure.
 
 import (
 	"context"
@@ -116,19 +117,22 @@ func CheckIdentities(ctx context.Context, cfg *rest.Config, identitiesDir string
 
 // askIdentity reads the identity's kubeconfig through restConfig, so one that names another server
 // is refused, takes the expiry from its token, and asks the API server who the token belongs to. It
-// sets is.Valid and is.Expires and returns why the identity is not valid, or "". A 401 is an answer.
-// Any other failure to ask is an error.
+// sets is.Valid and is.Expires and returns why the identity is not valid, or "". A 401 is an answer, and
+// so is any other failure of this one identity's own request: a corrupt CA in its kubeconfig, say, is
+// "unreadable: <why>", that identity's state, and no failure of the host (the docs promise a state per
+// identity; the admin's own requests, which listed the ServiceAccounts, are what say the API server is
+// there). An error is returned only when ctx itself is done, since then no answer says anything.
 func askIdentity(ctx context.Context, is *IdentityState, ports Ports) (why string, err error) {
 	cfg, err := restConfig(is.Kubeconfig, ports, identityAskTimeout)
 	if err != nil {
-		return err.Error(), nil
+		return "unreadable: " + err.Error(), nil
 	}
 	if exp, err := tokenExpiry(cfg.BearerToken); err == nil {
 		is.Expires = &exp
 	}
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
-		return "", err
+		return "unreadable: " + err.Error(), nil
 	}
 	review, err := cs.AuthenticationV1().SelfSubjectReviews().Create(ctx, &authenticationv1.SelfSubjectReview{}, metav1.CreateOptions{})
 	switch {
@@ -137,8 +141,10 @@ func askIdentity(ctx context.Context, is *IdentityState, ports Ports) (why strin
 			return fmt.Sprintf("the token expired at %s and the API server rejected it; hpcburst identity renew %s writes a new one", is.Expires.Format(time.RFC3339), is.Name), nil
 		}
 		return "the API server rejected the token (401); hpcburst identity renew " + is.Name + " writes a new one", nil
-	case err != nil:
+	case err != nil && ctx.Err() != nil:
 		return "", fmt.Errorf("ask the API server who the token is: %w", err)
+	case err != nil:
+		return "unreadable: " + err.Error(), nil
 	}
 	if got := review.Status.UserInfo.Username; got != IdentityUsername(is.Name) {
 		return fmt.Sprintf("the kubeconfig authenticates as %q, not as %q", got, IdentityUsername(is.Name)), nil

@@ -33,6 +33,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
@@ -226,6 +227,16 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if rep.CRDGuard {
 		fmt.Fprintf(stdout, "CRD deletion guard: installed (%s); remove it with hpcburst guard remove before you delete a framework CRD\n", launcher.GuardName)
 	}
+	if rep.Admission {
+		fmt.Fprintf(stdout, "admission policies: installed (%s)\n", strings.Join(launcher.AdmissionPolicyNames(), ", "))
+	}
+	if rep.AgentRBAC {
+		if rep.AgentWrites {
+			fmt.Fprintf(stdout, "agent roles: installed, with the writes the policies bound (every policy refused its probe first)\n")
+		} else {
+			fmt.Fprintf(stdout, "agent roles: installed READ-ONLY: a policy could not be probed, so the agents' writes stay off until a later up\n")
+		}
+	}
 	printAgentBuilds(stdout, rep.AgentBuilds)
 	return done()
 }
@@ -356,6 +367,7 @@ func printStatus(w io.Writer, r *launcher.StatusReport) {
 	printSupervision(w, r)
 	printAgentBuilds(w, r.AgentBuilds)
 	printCRDGuard(w, r.CRDGuard)
+	printAdmission(w, r.AdmissionPolicies)
 	printAgents(w, r)
 	// One "front:" line. The address is where Instances dial home; the front itself is the process
 	// the supervisor runs. A host with no front process says so, with the address when one is recorded.
@@ -392,6 +404,18 @@ func printCRDGuard(w io.Writer, g *launcher.GuardState) {
 		fmt.Fprintf(w, "CRD deletion guard: present (%s)\n", launcher.GuardName)
 	default:
 		fmt.Fprintf(w, "CRD deletion guard: ABSENT (%s): nothing stops a delete of a framework CRD, which would delete every resource of its kind; the next hpcburst up installs it\n", g.Detail)
+	}
+}
+
+// printAdmission prints one line for each of the three admission policies. Absent is a state, not a fault,
+// but the line says what it means: the agents' writes are not bounded.
+func printAdmission(w io.Writer, ps []launcher.AdmissionState) {
+	for _, p := range ps {
+		if p.Present {
+			fmt.Fprintf(w, "admission policy %s: present\n", p.Name)
+		} else {
+			fmt.Fprintf(w, "admission policy %s: ABSENT (%s): what it bounds is not bounded now; the next hpcburst up installs it\n", p.Name, p.Detail)
+		}
 	}
 }
 
