@@ -33,7 +33,7 @@ func (f *ctlFixture) statusOf() (rep *StatusReport, health string) {
 	}
 	defer sup.Close()
 	rep = &StatusReport{Health: Healthy}
-	checkSupervision(f.l, &st, sup, rep, func(format string, a ...any) {
+	checkSupervision(f.l, &st, sup, rep, time.Now, func(format string, a ...any) {
 		rep.Health = Unhealthy
 		rep.Reasons = append(rep.Reasons, fmt.Sprintf(format, a...))
 	})

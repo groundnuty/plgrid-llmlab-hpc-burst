@@ -330,6 +330,8 @@ Prometheus's advice to export 0 for series that may exist ([instrumentation prac
 | `hpcburst_usage_records_total` | counter | records written and synced |
 | `hpcburst_usage_write_failures_total` | counter | records not written: a failed write or sync of their batch, or a failed counter-block reservation |
 | `hpcburst_usage_dir_free_bytes` | gauge | free space of `usageDir`'s file system |
+| `hpcburst_usage_unlogged_records` | gauge | records in the files the durable log doesn't hold yet; no value while the files' counter is unknown |
+| `hpcburst_usage_skipped_total` | counter | records the log can't take (over its size), skipped once; they stay in the files |
 
 No client key ID is a label: per-key usage is in the records.
 
@@ -545,11 +547,18 @@ What the code had to change to match this HBEP, as read on 31 Oct 2026. The PRs 
   - **The drift guard's check** that every recorder is wrapped (`internal/reasondrift/scan`).
   - **The four-condition absence check** (`internal/eventcount/absence.go`), which the rehearsal's absence checks use (`internal/rehearsal/scenario`).
 - **Beta's designs (16 Nov 2026):** not yet. Still to come:
-  - **The durable log:** `hpcburst-controller eventlog` and its start checks; the launcher's `--event-log`, ports, token, supervision and backup (HBEP-11); the publisher beside the counting wrapper (`internal/eventcount`); and the usage forwarder with its gauge and `/healthz` fields (`internal/front/usage`).
+  - **The durable log:** `hpcburst-controller eventlog` and its start checks; the launcher's `--event-log`, ports, token, supervision and backup (HBEP-11); and the publisher beside the counting wrapper (`internal/eventcount`).
   - **Allocation events:** the Provider controller's `events.k8s.io` recorder and its map from reason to type, the typed events' notes without job IDs, and its managers' `ObservationGap`, and its cache index of Instances by `spec.allocationRef`, for the drain case (`internal/providerctl`). With each, its rows of the Reasons table and a shorter list of untyped Provider reasons (`internal/reasondrift/exceptions.go`). With `JobEnded`, the type `ended` joins the drift guard's `Actions` (`internal/reasondrift/docs.go`).
   - **The log's caps,** their launcher setting and `up`'s free-space check (HBEP-11).
   - **The OpenTelemetry check** of the mapping's first column.
   - **Billing** (amended 2026-11-16): the `billing` entry of the accounting read and `allocatedBilling` (`internal/slurm`; `api/v1alpha1/accounting.go`), the record's new fields, the profile's `billingUnit` (HBEP-4), and `hpcburst accounting` (`cmd/hpcburst`).
+  - **The usage forwarder (done in #625's usage change; erratum, 16 Nov 2026):** `internal/front/usage/forward` and the sink's post-sync hook (`usage.Options.Synced`, `usage.Stats.LastSynced`); the front's `/healthz` `usage.log`, `loggedCounter` and `behindSince`, `hpcburst_usage_unlogged_records` (`internal/front/metrics.go`), and `hpcburst status`'s "degraded: usage log behind" (`internal/launcher/status_controllers.go`). It reads what the HBEP leaves open as follows:
+    - a front started with no log says `log` `down` too, as the HBEP has it, and `status` tells it from a front whose log is down by the launcher's recorded `--event-log` choice;
+    - the gauge has no series until the forwarder has read the stream's last counter, since an unknown is not a 0 (Unknown samples), and `loggedCounter` is null then;
+    - the gauge is a difference of counters, so a crash's gap counts as unlogged records while the forwarder is behind;
+    - the 5 minutes are the front's own `behindSince`, read from its `/healthz`, against the launcher's clock;
+    - R4's file sizes are the files' bytes, and the newest file alone is the set when it is over the cap;
+    - a usage line can exceed the log's message size: files written before the front bounded the record's client text (HBEP-5, Usage records, #649) may hold one, so the forwarder skips such a line once and counts it. Such a line is not copied: the files hold it, the front's log names its counter, and it is counted once, in `hpcburst_usage_skipped_total` (a counter, at 0 from the start on a front with the log), never as lag: the gauge and `behindSince` mean a copy that is behind, and one client-written line does not set them (the science agent's ruling on #644, 16 Nov 2026). Reading the files never stops the front: the sink's `Open` reads the last counter of a line of any length by its first bytes, and a read that fails leaves the forwarder with no reading of the sink's position (no gauge value) until the first batch is synced, never a failed start.
 
 ### Test plan
 
@@ -783,6 +792,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-16: no path, user name, account or grant in a note the log keeps; a copied error gives the reason code and a fixed description (for #640).
 - 2026-11-16: `requestedModel` is cut at 1,291 bytes with a marker, as HBEP-5 records it (for #645).
 - 2026-11-16: the log's envelope `time` is the publishing wrapper's clock, within microseconds of the API's `eventTime` (for #625's PR E2).
+- 2026-11-16: erratum: the forwarder's two metrics in the front's table (#644).
 
 ## Amendments
 
