@@ -114,7 +114,10 @@ type pass struct {
 	// overlapErrs collects the failed no-overlap checks of the replacement
 	// rules (overlapOrDefer); run returns them at the end of the pass.
 	overlapErrs []error
-	next        time.Time
+	// suspectNow holds the entries the gate found suspended while it judged in this pass, by class and date, with the
+	// entry's own key: step 10 lists them (suspension.go).
+	suspectNow map[gateRef]v1alpha1.ReferenceKey
+	next       time.Time
 }
 
 // at asks for the next pass no later than t.
