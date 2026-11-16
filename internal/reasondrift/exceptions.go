@@ -44,6 +44,14 @@ var Wrappers = []Wrapper{
 		Forwards: []Forward{{Arg: 0, Param: 0}, {Arg: 1, Param: 1}, {Arg: 2, Param: 2}, {Arg: 3, Param: 3}, {Arg: 4, Param: 4}, {Arg: 5, Param: 5}},
 	},
 	{
+		Func: "internal/providerctl.external.typed", Why: "hands the event of a Provider controller's typed Allocation event to client-go's events.k8s.io recorder with the type it takes from allocationEventType, the one map from reason to type, keyed by the reason it was given; the callers of typed are the emit sites",
+		Forwards: []Forward{{Arg: 1, Param: 0}, {Arg: 4, Param: 1}, {Arg: 5, Map: "internal/providerctl.allocationEventType", Param: 1}},
+	},
+	{
+		Func: "internal/providerctl.external.typedUnmarked", Why: "as typed, for an event that marks no transition and so carries no id of its own (AdminHold, JobCompleting); the callers of typedUnmarked are the emit sites",
+		Forwards: []Forward{{Arg: 0, Param: 0}, {Arg: 3, Param: 1}, {Arg: 4, Map: "internal/providerctl.allocationEventType", Param: 1}},
+	},
+	{
 		Func: "internal/providerctl.createdFilter.Event", Why: "passes crossplane-runtime's own events on, minus one; event.Normal and event.Warning are the emit sites",
 		Forwards: []Forward{{Arg: 0, Param: 0}, {Arg: 1, Param: 1, Event: true}},
 	},
@@ -99,9 +107,8 @@ var Exceptions = append(providerControllerEvents(), []Entry{
 func providerControllerEvents() []Entry {
 	var out []Entry
 	for _, r := range []string{
-		"DuplicateJob", "HeldDuplicateCancelled", "HoldLifted", "JobAdopted", "JobCancelled", "JobLost",
-		"JobNameRewritten", "JobReappeared", "JobSubmitted", "RelayFailed", "SubmissionAbandoned", "SubmissionRejected",
-		"SubmissionUnknown", "SubmissionUnresolved", "SubmittedAsOther",
+		"DuplicateJob", "HeldDuplicateCancelled", "JobCancelled", "JobNameRewritten", "RelayFailed",
+		"SubmissionAbandoned", "SubmissionRejected", "SubmissionUnknown", "SubmissionUnresolved",
 	} {
 		out = append(out, Entry{
 			Kind: CodeOnly, Action: NoAction, Reason: r,

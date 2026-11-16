@@ -12,6 +12,7 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
@@ -175,9 +176,16 @@ type Options struct {
 	MaxConcurrentReconciles int
 	// Identity is written into the submission records it claims.
 	Identity string
-	// Log and Recorder; nil means none.
+	// Log and Recorder; nil means none. Recorder is crossplane-runtime's: the
+	// Provider's diagnostics go through it, untyped (HBEP-8, Events).
 	Log      logging.Logger
 	Recorder event.Recorder
+	// TypedRecorder raises the typed Allocation events (beta; HBEP-8, Allocation
+	// events), through client-go's events.k8s.io recorder wrapped by
+	// eventcount.Events, so each is counted under provider-<name> and carries its
+	// type in its action and its id for the durable log. nil means none is
+	// raised.
+	TypedRecorder eventcount.IDRecorder
 }
 
 func (o *Options) defaults() error {
@@ -213,6 +221,9 @@ func (o *Options) defaults() error {
 	}
 	if o.Recorder == nil {
 		o.Recorder = event.NewNopRecorder()
+	}
+	if o.TypedRecorder == nil {
+		o.TypedRecorder = &nopTypedRecorder{}
 	}
 	return nil
 }

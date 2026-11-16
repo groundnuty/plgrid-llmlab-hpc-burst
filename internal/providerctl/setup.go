@@ -2,6 +2,7 @@ package providerctl
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
@@ -75,7 +76,7 @@ func New(kube client.Client, reader client.Reader, scheme *runtime.Scheme, o Opt
 	if relays != nil {
 		relays.reader = reader
 	}
-	s := &shared{o: o, kube: kube, reader: reader, builds: &buildCache{}, relays: relays}
+	s := &shared{o: o, kube: kube, reader: reader, builds: &buildCache{}, relays: relays, draining: drainingIn(reader, false)}
 	s.h = &holder{o: &s.o}
 	opts := []managed.ReconcilerOption{
 		managed.WithExternalConnector(&connector{s: s}),
@@ -130,6 +131,13 @@ func Setup(mgr manager.Manager, o Options) error {
 		return err
 	}
 	name := c.shared.o.Provider
+	// Planned or not: the Instance of an Allocation is read from this manager's
+	// cache, by an index on spec.allocationRef.name (HBEP-8, Allocation events).
+	// The cache then holds the Instances too, one informer per Provider manager.
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &v1alpha1.Instance{}, instanceAllocationIndex, instanceAllocationName); err != nil {
+		return fmt.Errorf("index Instances by %s: %w", instanceAllocationIndex, err)
+	}
+	c.shared.draining = drainingIn(mgr.GetClient(), true)
 	err = builder.ControllerManagedBy(mgr).
 		Named("allocation-"+name).
 		For(&v1alpha1.Allocation{}, builder.WithPredicates(

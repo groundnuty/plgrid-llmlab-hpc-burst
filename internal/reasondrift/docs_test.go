@@ -56,7 +56,10 @@ func TestParsesTheRealHBEPs(t *testing.T) {
 		{"degraded", "TunnelOrphaned", []string{"Allocation", "Lease"}},
 		{"degraded", "ObservationGap", []string{"Lease"}},
 		{"failing", "UsageWriteFailed", []string{"Lease"}},
-{"failing", "AllocationEndedEarly", []string{"Instance"}},
+		// The Provider controller raises it regarding the Allocation too (beta, #625).
+		{"failing", "AllocationEndedEarly", []string{"Allocation", "Instance"}},
+		{"ended", "JobEnded", []string{"Allocation"}},
+		{"ending-soon", "HardEndNear", []string{"Allocation"}},
 		// The Regarding cell of HeartbeatMissed points at the Observers table,
 		// whose "Event when stale" column regards a Provider, an Instance and
 		// the Leases.

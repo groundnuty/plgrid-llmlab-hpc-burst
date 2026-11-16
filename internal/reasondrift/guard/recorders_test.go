@@ -34,10 +34,12 @@ func TestTheScanSawTheRecorders(t *testing.T) {
 	}
 	sort.Strings(got)
 	// The reconciler's recorder and the tunnel-state reader's, the batch
-	// Provider managers' (core/v1, through crossplane-runtime), the managed
+	// Provider managers' (core/v1, through crossplane-runtime, and events.k8s.io for
+	// the typed Allocation events), the managed
 	// Provider's, and the front's from its own broadcaster.
 	want := []string{
 		"cmd/hpcburst-controller.addTunnel GetEventRecorder Events",
+		"cmd/hpcburst-controller.wiring.setupBatch GetEventRecorder Events",
 		"cmd/hpcburst-controller.wiring.setupBatch GetEventRecorderFor Legacy",
 		"internal/front.NewKubeRecorder NewRecorder Events",
 		"internal/lifecycle.NewManager GetEventRecorder Events",

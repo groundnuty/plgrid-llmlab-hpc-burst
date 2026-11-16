@@ -424,9 +424,14 @@ func (w wiring) newProviderManager(provider string) (manager.Manager, error) {
 // (HBEP-8, Raised events). The count wraps the inner recorder, which
 // providerctl's created-event filter wraps in turn, so an event the filter
 // suppresses is not counted, and crossplane-runtime's WithAnnotations, which
-// builds a new APIRecorder over that inner recorder, keeps the count. A batch
-// Provider's series appear at its first event.
+// builds a new APIRecorder over that inner recorder, keeps the count. These
+// untyped series appear at the Provider's first event.
+//
+// The typed Allocation events (beta; HBEP-8, Allocation events) go through a
+// second recorder, client-go's events.k8s.io one, counted under the same
+// controller label with the type in the action.
 func (w wiring) setupBatch(pm manager.Manager, provider string) error {
+	controller := eventcount.ControllerProvider(provider)
 	return providerctl.Setup(pm, providerctl.Options{
 		Provider:       provider,
 		Profiles:       &slurm.ProfileReader{Reader: pm.GetClient()},
@@ -437,7 +442,12 @@ func (w wiring) setupBatch(pm manager.Manager, provider string) error {
 		Relays:         w.relaySettings(),
 		HubEndpoint:    w.hubEndpoint,
 		Log:            logging.NewLogrLogger(pm.GetLogger().WithName("provider").WithValues("provider", provider)),
-		Recorder:       event.NewAPIRecorder(eventcount.Legacy(pm.GetEventRecorderFor(v1alpha1.FieldManagerProvider), w.events, eventcount.ControllerProvider(provider))),
+		Recorder:       event.NewAPIRecorder(eventcount.Legacy(pm.GetEventRecorderFor(v1alpha1.FieldManagerProvider), w.events, controller)),
+		// The typed Allocation events (beta; HBEP-8, Allocation events): client-go's
+		// events.k8s.io recorder, counted under the same controller label with the
+		// type in the action, beside the legacy one above, which keeps the
+		// Provider's untyped diagnostics.
+		TypedRecorder: eventcount.Events(pm.GetEventRecorder(v1alpha1.FieldManagerProvider), w.events, controller),
 	})
 }
 

@@ -17,6 +17,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/lifecycle"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/managed"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/reasondrift"
 )
 
@@ -70,7 +71,7 @@ func TestTheSeriesAtZeroAreHBEP8s(t *testing.T) {
 	for _, e := range docs.Table {
 		table = append(table, e.Action+"/"+e.Reason)
 	}
-	diff(t, "the lifecycle controller and the front", pairs(lifecycle.RaisedEvents(), front.RaisedEvents()), table)
+	diff(t, "the lifecycle controller, the front and a batch Provider", pairs(lifecycle.RaisedEvents(), front.RaisedEvents(), providerctl.RaisedEvents()), table)
 	var catalog []string
 	for _, e := range docs.Managed {
 		catalog = append(catalog, e.Action+"/"+e.Reason)
