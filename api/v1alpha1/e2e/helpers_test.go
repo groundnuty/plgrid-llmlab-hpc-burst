@@ -1,15 +1,12 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand/v2"
 	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -22,10 +19,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
-	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv/crdinstall"
 )
 
 // Fixtures. The commit ID and the deployment ID are examples; the deployment ID
@@ -71,68 +68,14 @@ func validLaunch() v1alpha1.Launch {
 // installCRDs applies every CRD manifest under config/crd through the client,
 // waits until each is established, and waits until its resource is served.
 func installCRDs(ctx context.Context, cl client.Client) error {
-	files, err := filepath.Glob(filepath.Join(configDir("crd"), "*.yaml"))
+	crds, err := crdinstall.ReadCRDs(configDir("crd"))
 	if err != nil {
 		return err
 	}
-	if len(files) != 8 {
-		return fmt.Errorf("want 8 CRD manifests in config/crd, found %d", len(files))
+	if len(crds) != 8 {
+		return fmt.Errorf("want 8 CRD manifests in config/crd, found %d", len(crds))
 	}
-	sort.Strings(files)
-	var crds []*apiextensionsv1.CustomResourceDefinition
-	for _, f := range files {
-		raw, err := os.ReadFile(f)
-		if err != nil {
-			return err
-		}
-		crd := &apiextensionsv1.CustomResourceDefinition{}
-		if err := utilyaml.NewYAMLOrJSONDecoder(bytes.NewReader(raw), 4096).Decode(crd); err != nil {
-			return fmt.Errorf("%s: %w", f, err)
-		}
-		existing := &apiextensionsv1.CustomResourceDefinition{}
-		switch err := cl.Get(ctx, client.ObjectKeyFromObject(crd), existing); {
-		case apierrors.IsNotFound(err):
-			err = cl.Create(ctx, crd)
-			if err != nil {
-				return fmt.Errorf("create %s: %w", crd.Name, err)
-			}
-		case err != nil:
-			return err
-		default:
-			crd.ResourceVersion = existing.ResourceVersion
-			if err := cl.Update(ctx, crd); err != nil {
-				return fmt.Errorf("update %s: %w", crd.Name, err)
-			}
-		}
-		crds = append(crds, crd)
-	}
-	return wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 60*time.Second, true, func(ctx context.Context) (bool, error) {
-		for _, want := range crds {
-			got := &apiextensionsv1.CustomResourceDefinition{}
-			if err := cl.Get(ctx, client.ObjectKeyFromObject(want), got); err != nil {
-				return false, nil
-			}
-			established := false
-			for _, cond := range got.Status.Conditions {
-				if cond.Type == apiextensionsv1.Established && cond.Status == apiextensionsv1.ConditionTrue {
-					established = true
-				}
-			}
-			if !established {
-				return false, nil
-			}
-		}
-		// Established is not served: list each kind until the API answers.
-		lists := []client.ObjectList{&v1alpha1.ProviderList{}, &v1alpha1.PlatformProfileList{},
-			&v1alpha1.ModelDeploymentList{}, &v1alpha1.AllocationList{}, &v1alpha1.InstanceList{},
-			&v1alpha1.OperationList{}, &v1alpha1.ApprovalList{}, &v1alpha1.ApprovalPolicyList{}}
-		for _, l := range lists {
-			if err := cl.List(ctx, l); err != nil {
-				return false, nil
-			}
-		}
-		return true, nil
-	})
+	return crdinstall.InstallAndWait(ctx, cl, crds)
 }
 
 var nameSeq = rand.Uint32N(1 << 20)
