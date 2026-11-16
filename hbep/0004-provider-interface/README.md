@@ -166,7 +166,7 @@ Problems this addresses, in general terms:
   - The reconciler runs with `managed.WithDeterministicExternalName(true)`, because the tag is a deterministic external name. Without it, a create interrupted before its outcome is recorded stops the reconciler before Observe, and the Allocation stays stuck until a person removes the annotation (S4: `spikes/s4/README.md`; `spikes/s4/cmd/provider-slurm/main.go`).
 - **The lifecycle controller** (HBEP-7) creates Allocations with their submission parameters, deletes them, and reads their status. It never calls a provider.
 - **The managed Provider's controller** runs the catalog loop under Managed provider in alpha.
-- **Events** (beta; amended 2026-11-16; HBEP-8, Events, Allocation events, which names the reasons and their types). A batch Provider's controller raises its Allocation's transitions as typed events regarding the Allocation, through a recorder of `events.k8s.io` beside crossplane-runtime's: the job's submission or adoption, the lifted hold, the start, the hard end an hour away, the end, and each failed, lost, refused or requeued outcome. Its other events stay these diagnostics, untyped, through crossplane-runtime's recorder. No note of either names a job ID; the job ID stays in the Allocation's annotation and status (HBEP-11, The Allocation's record), and a note names jobs by role. Its identity may create `events.k8s.io` Events in the Allocations' namespaces.
+- **Events** (beta; amended 2026-11-16; HBEP-8, Events, Allocation events, which names the reasons and their types). A batch Provider's controller raises its Allocation's transitions as typed events regarding the Allocation, through a recorder of `events.k8s.io` beside crossplane-runtime's: the job's submission or adoption, the lifted hold, the start, the hard end an hour away, the end, and each failed, lost, refused or requeued outcome. A planned end takes HBEP-8's beta type `ended`. Its other events stay these diagnostics, untyped, through crossplane-runtime's recorder, with their notes as they are. The typed events' notes name no job ID, since they become CloudEvents in HBEP-8's log, which may be exported; the job ID stays in the Allocation's annotation and status (HBEP-11, The Allocation's record). Its identity may create `events.k8s.io` Events in the Allocations' namespaces.
 
 ### Core operations
 
@@ -518,7 +518,7 @@ The register holds upstream bugs tied to versions. Each entry has one regression
 - A plugin acts with the user's credentials and can spend their grant, so irreversible actions go through approvals (HBEP-10). In alpha the lifecycle controller takes no action outside the spec (HBEP-7, open question 8).
 - Platform profiles hold no account names, grant names, host names or addresses. Accounts and grants are provider settings (open question 8).
 - Values placed into commands are checked against a safe pattern first (Transport).
-- In beta no event note names a job ID (Two controllers, Events), since HBEP-8's durable log keeps events for the grant.
+- In beta no typed Allocation event's note names a job ID (Two controllers, Events), since HBEP-8's durable log keeps them for the grant and may be exported. The untyped diagnostics stay in the cluster's own events, with their notes as they are.
 
 ### Graduation criteria
 
@@ -659,7 +659,7 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
 - 2026-11-12: several workers per Instance, for beta (HBEP-7, Several workers).
 - 2026-11-15: amendment following HBEP-10 (PR #582): the proposed `estimate` operation, behind the flag "gives start estimates", and an optional grant end in the Provider settings.
 - 2026-11-15: erratum: open question 15's container-free launch is not needed for beta, as the beta criteria already said; every beta platform runs Apptainer.
-- 2026-11-16: in beta the Provider's controller raises typed events on the Allocation, and no event note names a job ID (HBEP-8's amendment of the same day).
+- 2026-11-16: in beta the Provider's controller raises typed events on the Allocation, whose notes name no job ID (HBEP-8's amendment of the same day).
 
 ## Amendments
 
@@ -746,4 +746,4 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
   - **`grantEnd`** (proposed; HBEP-10, open question 12): an optional, additive provider setting, the grant's end, which only HBEP-10's audit retention reads.
 
   Before, the estimate was not needed for alpha, "gives start estimates" was a candidate flag, and the Provider settings held no grant end.
-- **2026-11-16: typed Allocation events** (Two controllers, Events; Security). An amendment with HBEP-8's of the same day, which names the reasons and their types, merged before the code. A batch Provider's controller raises its Allocation's transitions as typed events through an `events.k8s.io` recorder, and keeps its other diagnostics untyped. No note of its events names a job ID. Before, every event of the Provider's controller was untyped, and several notes named job IDs.
+- **2026-11-16: typed Allocation events** (Two controllers, Events; Security). An amendment with HBEP-8's of the same day, which names the reasons and their types, merged before the code. A batch Provider's controller raises its Allocation's transitions as typed events through an `events.k8s.io` recorder, and keeps its other diagnostics untyped, with their notes as they are. A planned end takes HBEP-8's beta type `ended`. The typed events' notes name no job ID (the science agent's decision, 16 Nov 2026: the rule covers these events only). Before, every event of the Provider's controller was untyped, and several notes named job IDs.
