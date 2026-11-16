@@ -174,6 +174,10 @@ const (
 	// this one's plan is checked for staleness once the other has finished (HBEP-10, Approval and execution).
 	ReasonAnotherOperationExecuting = "AnotherOperationExecuting"
 
+	// ReasonOperationPartlyFailed is the reason of the failing event regarding an Operation one of whose committed targets
+	// failed: raised when it starts, then at most once an hour while it lasts (HBEP-8, Reasons in alpha).
+	ReasonOperationPartlyFailed = "OperationPartlyFailed"
+
 	// ReasonPlanStale is the reason of Executable=False on a Stale Operation, and the reason of the degraded event
 	// regarding it: the plan, recomputed once before it was committed, was no longer the plan that was approved
 	// (HBEP-10, Approval and execution; HBEP-8, Reasons in alpha).

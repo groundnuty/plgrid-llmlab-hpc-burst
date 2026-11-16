@@ -10,10 +10,13 @@ package lifecycle
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -305,4 +308,95 @@ func (w *execWorld) objectNames() map[string]bool {
 // Operation object the API server holds: "operation <namespace>/<name> <uid>", and not through the code that writes it.
 func operationCauseOf(op *v1alpha1.Operation) string {
 	return fmt.Sprintf("operation %s/%s %s", op.Namespace, op.Name, op.UID)
+}
+
+// newKeptTwoProvidersWorld is a deployment that holds one kept Allocation on each of two Providers, both started and
+// hosting no Instance, and one Instance serving: three primaries, two ready on A (R1 and R2) and a hedge of the third,
+// whose A member pends (M1) and whose B member has started with a slow engine (M2); then the person lowers the count to
+// one. The hedge goes whole, M1's pending Allocation is cancelled, M2 ends and keeps its started Allocation on B (kB), and
+// one of R1 and R2 drains, ends and keeps its Allocation on A (kA).
+func newKeptTwoProvidersWorld(t *testing.T) (w *execWorld, kA, kB string) {
+	t.Helper()
+	log := newCauseLog()
+	h := newHedgeRig(t, withInterceptors(log.funcs()))
+	h.batch.Enqueue(pfake.Script{}, pfake.Script{}, pfake.Script{QueueWait: 10 * time.Hour})
+	h.b.batch.Enqueue(pfake.Script{})
+	h.Step()
+	md := noOverAllocation(mdSpec(hoMD))
+	onBoth(md)
+	md.Spec.Instances = 3
+	h.create(md)
+	pol := globalPolicy(person)
+	h.create(&pol)
+	h.until(10*time.Minute, 10*time.Second, "two ready on A and a third pending", func() bool {
+		return h.readyCount(hoMD) == 2 && len(h.liveInstances(hoMD)) == 3
+	})
+	var m1 string
+	for _, in := range h.liveInstances(hoMD) {
+		if in.Status.Phase != v1alpha1.InstanceReady {
+			m1 = in.Name
+		}
+	}
+	m2 := h.seedHedgeMember(hoMD, m1, "", hedgeB)
+	kB = h.mustInstance(m2).Spec.AllocationRef.Name
+	h.slow[kB] = true
+	h.until(time.Minute, 10*time.Second, "B's member started", func() bool {
+		a, ok := h.allocation(kB)
+		return ok && a.Status.AtProvider.StartTime != nil
+	})
+	m1Alloc := h.mustInstance(m1).Spec.AllocationRef.Name
+	h.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 1 })
+	h.until(15*time.Minute, 10*time.Second, "the hedge and one ready Instance gone", func() bool {
+		return h.released(m1Alloc) && len(h.liveInstances(hoMD)) == 1 && ended(h.mustInstance(m2))
+	})
+	live := h.liveInstances(hoMD)[0]
+	for _, a := range h.allocations(hoMD) {
+		if a.Name != kB && a.Name != live.Spec.AllocationRef.Name && a.DeletionTimestamp.IsZero() {
+			kA = a.Name
+		}
+	}
+	for _, n := range []string{kA, kB} {
+		if a, ok := h.allocation(n); !ok || a.Status.AtProvider.StartTime == nil || !a.DeletionTimestamp.IsZero() {
+			t.Fatalf("Allocation %q should be started and kept: %+v %v", n, a, ok)
+		}
+	}
+	if kA == "" || h.allocOrNil(kA).Labels[v1alpha1.LabelProvider] != rigProvider || h.allocOrNil(kB).Labels[v1alpha1.LabelProvider] != hedgeB {
+		t.Fatalf("the kept Allocations are %q and %q, want one on each Provider", kA, kB)
+	}
+	w = &execWorld{hedgeRig: h, log: log, fc: &faultClient{Client: h.r.Client}}
+	h.r.Client = w.fc
+	return w, kA, kB
+}
+
+// playCrossplane makes the rig's Provider passes do what crossplane's managed reconciler does around the Provider
+// controller: a pass that failed to delete an Allocation leaves Synced=False with ReconcileError and the error's text,
+// and a pass that succeeded leaves Synced=True, so an Allocation whose delete is held by a failing cancel reads as the real
+// one does.
+func (w *execWorld) playCrossplane() {
+	w.syncHook = func(provider string, err error) bool {
+		var l v1alpha1.AllocationList
+		if lerr := w.c.List(w.ctx, &l); lerr != nil {
+			w.t.Fatal(lerr)
+		}
+		for i := range l.Items {
+			a := &l.Items[i]
+			if ref := a.Spec.ProviderConfigReference; ref == nil || ref.Name != provider || a.DeletionTimestamp.IsZero() {
+				continue
+			}
+			failed := err != nil && strings.Contains(err.Error(), "allocation "+a.Namespace+"/"+a.Name+":")
+			cur := a.GetCondition(xpv2.TypeSynced)
+			switch {
+			case failed:
+				a.SetConditions(xpv2.ReconcileError(err))
+			case cur.Status == corev1.ConditionFalse:
+				a.SetConditions(xpv2.ReconcileSuccess())
+			default:
+				continue
+			}
+			if uerr := w.c.Status().Update(w.ctx, a); uerr != nil {
+				w.t.Fatalf("write Synced of Allocation %s: %v", a.Name, uerr)
+			}
+		}
+		return err != nil
+	}
 }

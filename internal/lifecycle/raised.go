@@ -30,7 +30,7 @@ var raisedByLifecycle = map[string][]string{
 		v1alpha1.ReasonQualificationFailed, v1alpha1.ReasonVerificationFailed, v1alpha1.ReasonAllocationFailed,
 		v1alpha1.ReasonAllocationLost, v1alpha1.ReasonAllocationRefused, v1alpha1.ReasonRequeued,
 		string(v1alpha1.ConditionSubmittedAsOther), string(v1alpha1.ConditionRelayEndedForGood),
-		v1alpha1.ReasonAllocationEndedEarly, reasonHeartbeatMissed,
+		v1alpha1.ReasonAllocationEndedEarly, reasonHeartbeatMissed, v1alpha1.ReasonOperationPartlyFailed,
 	},
 	eventReplaced:   {v1alpha1.EventReasonHandedOver, v1alpha1.ReasonHedgeLost, v1alpha1.ReasonRankedOut},
 	eventEndingSoon: {v1alpha1.EventReasonNoReplacementReady},

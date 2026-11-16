@@ -183,8 +183,12 @@ func TestAKilledControllerResumesFromItsCommittedTargetsAndNothingElse(t *testin
 	if got := w.md(hoMD).Spec.Instances; got != 2 {
 		t.Errorf("spec.instances is %d, want 2: the resumed pass writes the spec the killed one did not", got)
 	}
-	if op = w.getOp("scale"); op.Status.Phase != v1alpha1.OperationPhaseExecuting || !isTrue(op.Status.Conditions, v1alpha1.ConditionSpecWritten) {
-		t.Errorf("phase %q, SpecWritten %v: Executing, with the spec written", op.Status.Phase, isTrue(op.Status.Conditions, v1alpha1.ConditionSpecWritten))
+	// R1's act fails on the controller's own write, so its target is Failed and the Operation PartlyFailed (HBEP-10, The
+	// report), with the spec written.
+	op = w.getOp("scale")
+	if o, ok := outcomeOf(op, r1); op.Status.Phase != v1alpha1.OperationPhasePartlyFailed || !isTrue(op.Status.Conditions, v1alpha1.ConditionSpecWritten) ||
+		!ok || o.State != v1alpha1.TargetStateFailed || o.Reason != reasonWriteFailed {
+		t.Errorf("phase %q, SpecWritten %v, R1's outcome %+v: want PartlyFailed with the spec written and R1 Failed with %s", op.Status.Phase, isTrue(op.Status.Conditions, v1alpha1.ConditionSpecWritten), o, reasonWriteFailed)
 	}
 
 	// The fault is gone: R1 drains, the Operation is Done, and R2 and R3 were never touched.

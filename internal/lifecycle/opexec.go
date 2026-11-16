@@ -115,15 +115,32 @@ func (p *pass) commitOperation(op *v1alpha1.Operation, plan *v1alpha1.OperationP
 }
 
 // executing is one pass over a committed Operation: the spec write, then every committed target, then the report.
-// A target's failure does not stop the others; the errors are returned joined, so the key is retried with backoff.
+// A target's failure does not stop the others; the errors are returned joined, so the key is retried with backoff, and
+// the report says which target failed (opreport.go).
 func (p *pass) executing(op *v1alpha1.Operation) error {
+	var errs []error
+	failed := map[types.UID]error{}
+	// What was already being deleted when this pass began: only such an Allocation can be reported as failing to go (a
+	// Synced=False it carried before its delete says nothing about the delete).
+	deleting := p.deletingBeforeThePass(op)
+	specOK := true
 	if err := p.applySpec(op); err != nil {
-		// Nothing is acted on, created or replaced until the spec has landed.
+		specOK = false
+		// Nothing is acted on, created or replaced until the spec has landed. An End's deployment target is the one that
+		// failed; a Scale has no deployment target, and stays Executing until the write lands.
 		p.opsHold = true
-		return err
+		errs = append(errs, err)
+		for _, t := range op.Status.Committed {
+			if t.Kind == v1alpha1.TargetKindModelDeployment {
+				failed[t.UID] = err
+			}
+		}
+	} else {
+		var actErrs []error
+		actErrs, failed = p.actOnCommitted(op)
+		errs = append(errs, actErrs...)
 	}
-	errs := p.actOnCommitted(op)
-	if err := p.report(op); err != nil {
+	if err := p.report(op, failed, deleting, specOK); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
@@ -200,9 +217,11 @@ func (p *pass) deleteDeployment(md *v1alpha1.ModelDeployment) error {
 }
 
 // actOnCommitted acts on every committed target by its effect: the Instances first, then the Allocations, so an
-// Allocation is released after what ran on it has ended. A target already done is skipped by its own act.
-func (p *pass) actOnCommitted(op *v1alpha1.Operation) []error {
+// Allocation is released after what ran on it has ended. A target already done is skipped by its own act. It returns
+// the errors, and the failed targets by UID with their error, which the report says.
+func (p *pass) actOnCommitted(op *v1alpha1.Operation) ([]error, map[types.UID]error) {
 	var errs []error
+	failed := map[types.UID]error{}
 	for _, kind := range []v1alpha1.TargetKind{v1alpha1.TargetKindInstance, v1alpha1.TargetKindAllocation} {
 		for _, t := range op.Status.Committed {
 			if t.Kind != kind {
@@ -210,10 +229,11 @@ func (p *pass) actOnCommitted(op *v1alpha1.Operation) []error {
 			}
 			if err := p.actOnTarget(op, t); err != nil {
 				errs = append(errs, fmt.Errorf("%s %s (%s): %w", t.Kind, t.Name, t.Effect, err))
+				failed[t.UID] = err
 			}
 		}
 	}
-	return errs
+	return errs, failed
 }
 
 // releasingEffect reports whether an Allocation target's effect releases the Allocation.

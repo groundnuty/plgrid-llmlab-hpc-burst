@@ -136,8 +136,12 @@ var guideNames = map[string]string{
 
 	// An Operation's phase, and the reason of its degraded event (HBEP-10, Approval and execution; HBEP-8,
 	// Reasons in alpha).
-	"Stale":     string(v1alpha1.OperationPhaseStale),
-	"PlanStale": v1alpha1.ReasonPlanStale,
+	"Stale":                 string(v1alpha1.OperationPhaseStale),
+	"PlanStale":             v1alpha1.ReasonPlanStale,
+	"PartlyFailed":          string(v1alpha1.OperationPhasePartlyFailed),
+	"Done":                  string(v1alpha1.OperationPhaseDone),
+	"NotStarted":            string(v1alpha1.TargetStateNotStarted),
+	"OperationPartlyFailed": v1alpha1.ReasonOperationPartlyFailed,
 
 	// Retention modes (HBEP-7, Retention).
 	"Keep":            string(v1alpha1.RetentionKeep),
@@ -164,6 +168,8 @@ var notCodeNames = map[string]string{
 	// 'hpcburst-capacity-guard' ... denied request"), and the guide quotes that wording.
 	"ValidatingAdmissionPolicy": "a Kubernetes kind",
 	"Warning":                   "a Kubernetes event type",
+	"Synced":                    "crossplane's condition type on a managed resource",
+	"ReconcileError":            "crossplane's reason of a Synced condition that is false",
 	"MISSING":                   "a build state hpcburst status prints",
 	"UNREADABLE":                "a build state hpcburst status prints",
 	"WRONG":                     "a build state hpcburst status prints",
