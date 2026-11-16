@@ -1,0 +1,67 @@
+# Each of these is fixed at or below any version the repository pins, and each names its workaround: none fails,
+# since only a binary pinned in a pins file (envoy, frp) fails by version.
+- id: KI-0001
+  symptom: an engine
+  component: vllm
+  affected: 0.31.0
+  fixedIn: 0.32.0
+  workaround:
+    where: example/package, a setting
+    what: the setting is 4 s
+  test:
+    package: pkg/one
+    name: TestPlain
+  source:
+    - L-9.9
+- id: KI-0002
+  symptom: a router
+  component: vllm-router
+  affected: 0.1.0
+  fixedIn: 0.1.1
+  workaround:
+    where: example/package, a setting
+    what: the setting is 4 s
+  test:
+    package: pkg/one
+    name: TestPlain
+  source:
+    - L-9.9
+- id: KI-0003
+  symptom: a site runtime
+  component: apptainer
+  affected: 1.4.5
+  fixedIn: 1.5.4
+  workaround:
+    where: example/package, a setting
+    what: the setting is 4 s
+  test:
+    package: pkg/one
+    name: TestPlain
+  source:
+    - L-9.9
+- id: KI-0004
+  symptom: a site scheduler
+  component: slurm
+  affected: 24.11.5
+  fixedIn: 25.5.0
+  workaround:
+    where: example/package, a setting
+    what: the setting is 4 s
+  test:
+    package: pkg/one
+    name: TestPlain
+  source:
+    - L-9.9
+- id: KI-0005
+  symptom: a gateway
+  component: llmlab
+  affected: 1.0.0
+  fixedIn: 1.0.1
+  workaround:
+    where: example/package, a setting
+    what: the setting is 4 s
+  test:
+    package: pkg/one
+    name: TestPlain
+  source:
+    - L-9.9

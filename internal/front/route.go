@@ -47,17 +47,17 @@ type routeError struct {
 }
 
 func errUnknownProvider(p string) *routeError {
-	return &routeError{status: http.StatusBadRequest, code: codeInvalidModelName, detail: "unknown_provider", message: "the model name names an unknown provider: " + p}
+	return &routeError{status: http.StatusBadRequest, code: codeInvalidModelName, detail: "unknown_provider", message: "the model name names an unknown provider: " + echoedName(p)}
 }
 
 func errNotAttached(model string) *routeError {
 	return &routeError{status: http.StatusServiceUnavailable, code: codeModelInactive, detail: "not_attached", retryAfter: "30",
-		message: "the model " + model + " is not active: no provider is attached to it"}
+		message: "the model " + echoedName(model) + " is not active: no provider is attached to it"}
 }
 
 func errNoReadyTarget(model string) *routeError {
 	return &routeError{status: http.StatusServiceUnavailable, code: codeModelInactive, detail: "no_ready_target", retryAfter: "30",
-		message: "the model " + model + " has no ready target at the requested level"}
+		message: "the model " + echoedName(model) + " has no ready target at the requested level"}
 }
 
 // choose resolves a parsed name to a target (HBEP-5, Request path steps 3 to
