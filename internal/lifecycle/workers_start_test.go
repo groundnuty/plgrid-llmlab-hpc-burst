@@ -356,7 +356,7 @@ func holdWorkerOne(hold *bool) func(*agentapi.RouterReport) {
 	}
 }
 
-// After a restart, a start past health.startTimeout judges the worker that holds it back (HBEP-7:469):
+// After a restart, a start past health.startTimeout judges the worker that holds it back (HBEP-7, Several workers):
 // with both workers warmed up and the router holding worker-1 failing, the timeout restarts worker-1, not
 // the healthy worker-0 (#498's review). The earlier restart, worker-0's, is what lets the timeout
 // restart rather than fail the Instance, as a first start's does.

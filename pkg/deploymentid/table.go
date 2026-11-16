@@ -48,6 +48,11 @@ type rule struct {
 	class  class
 	env    bool   // an environment variable; otherwise an engine flag
 	reason string // the table's reason column, for error messages
+	// capacity marks a flag whose reason column says "capacity": it moves the
+	// throughput without being an ID input, so an expected-performance entry
+	// is keyed on its value (IsCapacityFlag; HBEP-4, Expected performance).
+	// It changes no class and no ID.
+	capacity bool
 }
 
 // engineVLLM is the engine name that selects the vLLM table.
@@ -59,67 +64,67 @@ const engineVLLM = "vllm"
 // dashes. A name the table does not list is an input. Changing a row is a new
 // scheme version.
 var vllmV0320 = []rule{
-	{"dtype", classInput, false, "sets the arithmetic precision"},
-	{"quantization", classInput, false, "changes the weights the model computes with"},
-	{"kv-cache-dtype", classInput, false, "sets the precision of the attention cache"},
-	{"max-model-len", classInput, false, "bounds the tokens the model sees"},
-	{"tokenizer", classInput, false, "decides the tokens the model sees"},
-	{"tokenizer-mode", classInput, false, "decides the tokens the model sees"},
-	{"tokenizer-revision", classInput, false, "decides the tokens the model sees"},
-	{"trust-remote-code", classInput, false, "runs the checkpoint's own model code"},
-	{"load-format", classInput, false, "decides how weights load; dummy serves random weights"},
-	{"hf-overrides", classInput, false, "changes the model's configuration, RoPE scaling included"},
-	{"enforce-eager", classInput, false, "changes the compiled kernels, so the arithmetic"},
-	{"compilation-config", classInput, false, "changes the compiled kernels, so the arithmetic"},
-	{"attention-backend", classInput, false, "picks the attention kernels"},
-	{"tensor-parallel-size", classInput, false, "sets the arithmetic layout"},
-	{"pipeline-parallel-size", classInput, false, "sets the arithmetic layout"},
-	{"enable-expert-parallel", classInput, false, "sets the arithmetic layout"},
-	{"speculative-config", classInput, false, "changes how output tokens are computed"},
-	{"seed", classInput, false, "changes sampled outputs"},
-	{"generation-config", classInput, false, "sets the default sampling parameters"},
-	{"override-generation-config", classInput, false, "sets the default sampling parameters"},
-	{"tool-call-parser", classInput, false, "turns the model's tokens into the response's tool calls"},
-	{"enable-auto-tool-choice", classInput, false, "turns the model's tokens into the response's tool calls"},
-	{"reasoning-parser", classInput, false, "turns the model's tokens into the response's reasoning"},
-	{"chat-template-content-format", classInput, false, "changes how messages render into tokens"},
-	{"default-chat-template-kwargs", classInput, false, "changes how messages render into tokens"},
-	{"VLLM_USE_DEEP_GEMM", classInput, true, "picks the matrix kernels"},
+	{"dtype", classInput, false, "sets the arithmetic precision", false},
+	{"quantization", classInput, false, "changes the weights the model computes with", false},
+	{"kv-cache-dtype", classInput, false, "sets the precision of the attention cache", false},
+	{"max-model-len", classInput, false, "bounds the tokens the model sees", false},
+	{"tokenizer", classInput, false, "decides the tokens the model sees", false},
+	{"tokenizer-mode", classInput, false, "decides the tokens the model sees", false},
+	{"tokenizer-revision", classInput, false, "decides the tokens the model sees", false},
+	{"trust-remote-code", classInput, false, "runs the checkpoint's own model code", false},
+	{"load-format", classInput, false, "decides how weights load; dummy serves random weights", false},
+	{"hf-overrides", classInput, false, "changes the model's configuration, RoPE scaling included", false},
+	{"enforce-eager", classInput, false, "changes the compiled kernels, so the arithmetic", false},
+	{"compilation-config", classInput, false, "changes the compiled kernels, so the arithmetic", false},
+	{"attention-backend", classInput, false, "picks the attention kernels", false},
+	{"tensor-parallel-size", classInput, false, "sets the arithmetic layout", false},
+	{"pipeline-parallel-size", classInput, false, "sets the arithmetic layout", false},
+	{"enable-expert-parallel", classInput, false, "sets the arithmetic layout", false},
+	{"speculative-config", classInput, false, "changes how output tokens are computed", false},
+	{"seed", classInput, false, "changes sampled outputs", false},
+	{"generation-config", classInput, false, "sets the default sampling parameters", false},
+	{"override-generation-config", classInput, false, "sets the default sampling parameters", false},
+	{"tool-call-parser", classInput, false, "turns the model's tokens into the response's tool calls", false},
+	{"enable-auto-tool-choice", classInput, false, "turns the model's tokens into the response's tool calls", false},
+	{"reasoning-parser", classInput, false, "turns the model's tokens into the response's reasoning", false},
+	{"chat-template-content-format", classInput, false, "changes how messages render into tokens", false},
+	{"default-chat-template-kwargs", classInput, false, "changes how messages render into tokens", false},
+	{"VLLM_USE_DEEP_GEMM", classInput, true, "picks the matrix kernels", false},
 
-	{"model", classFrameworkPassed, false, "the framework passes it from checkpoint.repository"},
-	{"revision", classFrameworkPassed, false, "the framework passes it from checkpoint.revision"},
-	{"chat-template", classFrameworkPassed, false, "the framework passes the chat template itself"},
+	{"model", classFrameworkPassed, false, "the framework passes it from checkpoint.repository", false},
+	{"revision", classFrameworkPassed, false, "the framework passes it from checkpoint.revision", false},
+	{"chat-template", classFrameworkPassed, false, "the framework passes the chat template itself", false},
 
-	{"enable-prefix-caching", classNotInput, false, "capacity"},
-	{"max-num-seqs", classNotInput, false, "capacity: batch shaping"},
-	{"max-num-batched-tokens", classNotInput, false, "capacity: batch shaping"},
-	{"enable-chunked-prefill", classNotInput, false, "capacity: batch shaping"},
-	{"gpu-memory-utilization", classNotInput, false, "capacity: a memory budget"},
-	{"kv-cache-memory-bytes", classNotInput, false, "capacity: a memory budget"},
-	{"cpu-offload-gb", classNotInput, false, "capacity: a memory budget"},
-	{"host", classNotInput, false, "transport: where the engine listens"},
-	{"port", classNotInput, false, "transport: where the engine listens"},
-	{"uds", classNotInput, false, "transport: where the engine listens"},
-	{"served-model-name", classNotInput, false, "transport: the front maps model names"},
-	{"download-dir", classNotInput, false, "placement: paths, devices and how workers start"},
-	{"distributed-executor-backend", classNotInput, false, "placement: paths, devices and how workers start"},
-	{"CUDA_VISIBLE_DEVICES", classNotInput, true, "placement: paths, devices and how workers start"},
-	{"VLLM_CACHE_ROOT", classNotInput, true, "placement: paths, devices and how workers start"},
-	{"HF_HOME", classNotInput, true, "placement: paths, devices and how workers start"},
-	{"log-level", classNotInput, false, "logging: changes no output"},
-	{"disable-log-stats", classNotInput, false, "logging: changes no output"},
-	{"enable-log-requests", classNotInput, false, "logging: changes no output"},
-	{"VLLM_LOGGING_LEVEL", classNotInput, true, "logging: changes no output"},
+	{"enable-prefix-caching", classNotInput, false, "capacity", true},
+	{"max-num-seqs", classNotInput, false, "capacity: batch shaping", true},
+	{"max-num-batched-tokens", classNotInput, false, "capacity: batch shaping", true},
+	{"enable-chunked-prefill", classNotInput, false, "capacity: batch shaping", true},
+	{"gpu-memory-utilization", classNotInput, false, "capacity: a memory budget", true},
+	{"kv-cache-memory-bytes", classNotInput, false, "capacity: a memory budget", true},
+	{"cpu-offload-gb", classNotInput, false, "capacity: a memory budget", true},
+	{"host", classNotInput, false, "transport: where the engine listens", false},
+	{"port", classNotInput, false, "transport: where the engine listens", false},
+	{"uds", classNotInput, false, "transport: where the engine listens", false},
+	{"served-model-name", classNotInput, false, "transport: the front maps model names", false},
+	{"download-dir", classNotInput, false, "placement: paths, devices and how workers start", false},
+	{"distributed-executor-backend", classNotInput, false, "placement: paths, devices and how workers start", false},
+	{"CUDA_VISIBLE_DEVICES", classNotInput, true, "placement: paths, devices and how workers start", false},
+	{"VLLM_CACHE_ROOT", classNotInput, true, "placement: paths, devices and how workers start", false},
+	{"HF_HOME", classNotInput, true, "placement: paths, devices and how workers start", false},
+	{"log-level", classNotInput, false, "logging: changes no output", false},
+	{"disable-log-stats", classNotInput, false, "logging: changes no output", false},
+	{"enable-log-requests", classNotInput, false, "logging: changes no output", false},
+	{"VLLM_LOGGING_LEVEL", classNotInput, true, "logging: changes no output", false},
 
-	{"api-key", classNever, false, "a key"},
-	{"hf-token", classNever, false, "a key"},
-	{"HF_TOKEN", classNever, true, "a key"},
-	{"VLLM_API_KEY", classNever, true, "a key"},
-	{"S3_ACCESS_KEY_ID", classNever, true, "a key"},
-	{"S3_SECRET_ACCESS_KEY", classNever, true, "a key"},
+	{"api-key", classNever, false, "a key", false},
+	{"hf-token", classNever, false, "a key", false},
+	{"HF_TOKEN", classNever, true, "a key", false},
+	{"VLLM_API_KEY", classNever, true, "a key", false},
+	{"S3_ACCESS_KEY_ID", classNever, true, "a key", false},
+	{"S3_SECRET_ACCESS_KEY", classNever, true, "a key", false},
 
-	{"config", classRefused, false, "it reads further options from a file whose content the ID would not see; give each option as its own flag"},
-	{"lora-modules", classRefused, false, "it names other checkpoints without a pinned revision; refused in alpha"},
+	{"config", classRefused, false, "it reads further options from a file whose content the ID would not see; give each option as its own flag", false},
+	{"lora-modules", classRefused, false, "it names other checkpoints without a pinned revision; refused in alpha", false},
 }
 
 // vllmShortAliases are the short options of vLLM v0.32.0 that have a long
@@ -188,3 +193,20 @@ var tables = func() map[string]*table {
 	t.aliases = vllmShortAliases
 	return map[string]*table{engineVLLM: t}
 }()
+
+// IsCapacityFlag reports whether name is an engine flag that HBEP-3's table
+// classes as capacity: the flags whose value moves an Instance's throughput
+// without being a deployment-ID input, which an expected-performance entry is
+// keyed on (HBEP-4, Expected performance; HBEP-7, The throughput gate). The
+// name is read as a serving spec's flag name is, so max_num_seqs is
+// max-num-seqs; a spelling the library refuses (a prefix, a short option, a
+// "no-" form) and an unlisted name are not capacity flags. vLLM's table is the
+// only one in alpha.
+func IsCapacityFlag(name string) bool {
+	t := tables[engineVLLM]
+	base, err := t.resolveFlag(name)
+	if err != nil {
+		return false
+	}
+	return t.flags[base].capacity
+}

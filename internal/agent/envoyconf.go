@@ -81,21 +81,23 @@ const (
 	// envoyOutlierLocalOrigin: a worker whose connection fails, resets before the request, or times out is
 	// ejected at once (HBEP-5, Worker health; the science agent's ruling on #561): on the engine's local
 	// socket that means a dead engine or a full accept queue. Envoy's local-origin errors are split from
-	// the engine's own 5xx, which still need envoyOutlier5xx in a row. Without it, ring_hash's bounded
-	// load walked requests, and their retries, to a dead worker not yet ejected: it holds no request, so
-	// it is never overloaded (#561).
+	// the engine's own 5xx, which still need envoyOutlier5xx in a row. Without it a dead worker stayed in
+	// the ring through three failures, drawing its sessions' requests and their retries (#561).
 	envoyOutlierLocalOrigin   = 1
 	envoyEnforcingLocalOrigin = 100
 	envoyEjectionBase         = 30 * time.Second
 	envoyEjectionMax          = 300 * time.Second
 	envoyHealthCheckAddress   = "127.0.0.1"
 
-	// envoyHashBalanceFactor is ring_hash's bounded load, in percent of the mean (HBEP-5, Inside an
-	// Instance; the science agent's decision on #518, provisional until S2c tunes it): a worker above 1.25
-	// times the mean of the workers' active requests takes no new request, which moves on round the
-	// ring, so sessions don't pile onto one worker while a sibling idles. It is the front's own tight
-	// bound (c = 1.25).
-	envoyHashBalanceFactor = 125
+	// ring_hash runs with NO bounded load (no hash_balance_factor; the science agent's ruling on #614, which
+	// reverses #518's provisional bound). A bounded load walks a request off a worker that carries more than
+	// 1.25 times the mean of the workers' active requests, round the ring: a dead worker that Envoy still
+	// holds has no request active, so the walk, and the retry's pick, land on it. Measured on Envoy 1.40.2 with
+	// two workers, 100 waves of 40 requests at a worker's death, the process pinned to 2 CPUs: with the
+	// bound, 14 requests of 4,000 got a 503 with the sibling healthy (10 waves, 14 of 1,266 retries failed);
+	// without it, none (0 of 1,005 retries failed). A request in a session stays on its worker until
+	// the worker is out of the ring. Sessions that pile onto one worker are the KV-skew signal's
+	// (HBEP-7, #525), and the engine's caps.
 
 	// The route's retry (HBEP-5, Worker health; the science agent's ruling on #439, PR 4's finding): once,
 	// on a failure to connect or a reset before the request was sent, to another worker. Such a request
@@ -106,7 +108,9 @@ const (
 	// the retry follows the ring's update after a dead worker's ejection, which reaches Envoy's worker
 	// threads a moment after the failure that caused it. With Envoy's default 25 ms base, measured on
 	// 1.40.2, a wave of 40 requests at a worker's death lost 8 of 1,600 to retries that beat the update;
-	// with 100 ms, none.
+	// with 100 ms, none, with the CPUs free and the bounded load on. Pinned to 2 CPUs that bound's walk
+	// still sent 14 of 1,266 retries back to the dead worker (#614); without it, none of 1,005. So the
+	// back-off is the retry's wait for the ring, and the walk is no longer there to lose it.
 	envoyRetryBackOffBase = 100 * time.Millisecond
 	envoyRetryBackOffMax  = 250 * time.Millisecond
 	envoyNumRetries       = 1
@@ -261,11 +265,7 @@ type (
 		HealthCheckConfig envoyHealthCheckConfig `json:"health_check_config"`
 	}
 	envoyCommonLB struct {
-		HealthyPanicThreshold     envoyPercent        `json:"healthy_panic_threshold"`
-		ConsistentHashingLBConfig envoyConsistentHash `json:"consistent_hashing_lb_config"`
-	}
-	envoyConsistentHash struct {
-		HashBalanceFactor uint32 `json:"hash_balance_factor"`
+		HealthyPanicThreshold envoyPercent `json:"healthy_panic_threshold"`
 	}
 	envoyPercent struct {
 		Value float64 `json:"value"`
@@ -388,8 +388,7 @@ func RenderEnvoyConfig(c EnvoyConfig) ([]byte, error) {
 			}},
 			Clusters: []envoyCluster{{
 				Name: envoyClusterName, Type: "STATIC", LBPolicy: "RING_HASH", ConnectTimeout: envoySeconds(envoyConnectTimeout),
-				CommonLBConfig: envoyCommonLB{HealthyPanicThreshold: envoyPercent{Value: envoyHealthyPanicPercent},
-					ConsistentHashingLBConfig: envoyConsistentHash{HashBalanceFactor: envoyHashBalanceFactor}},
+				CommonLBConfig: envoyCommonLB{HealthyPanicThreshold: envoyPercent{Value: envoyHealthyPanicPercent}},
 				HealthChecks: []envoyHealthCheck{{
 					Timeout: envoySeconds(envoyHCTimeout), Interval: envoySeconds(envoyHCInterval), NoTrafficInterval: envoySeconds(envoyHCInterval),
 					UnhealthyThreshold: envoyHCUnhealthy, HealthyThreshold: envoyHCHealthy,

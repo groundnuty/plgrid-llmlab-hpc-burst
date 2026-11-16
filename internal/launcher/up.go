@@ -81,9 +81,16 @@ type UpReport struct {
 	CRDGuard bool `json:"crd_guard"`
 	// AgentRBAC is true when up installed the agents' namespace, roles and bindings (agents.go); it
 	// does so on every start, after the guard and before the controllers.
-	AgentRBAC bool     `json:"agent_rbac"`
-	Front     Front    `json:"front"`
-	Warnings  []string `json:"warnings,omitempty"`
+	AgentRBAC bool `json:"agent_rbac"`
+	// Admission is true when up installed the three admission policies (admission.go) and saw each
+	// refuse its dry-run probe, or could not probe one (AgentWrites is then false).
+	Admission bool `json:"admission_policies"`
+	// AgentWrites is true when up applied the agent role's wide rules, which grant the writes the
+	// admission policies bound, after each policy refused its probe. False means the agents are
+	// read-only (a warning says why).
+	AgentWrites bool     `json:"agent_writes"`
+	Front       Front    `json:"front"`
+	Warnings    []string `json:"warnings,omitempty"`
 	// SupervisorPID and ControllerBin are set when controllers run; ControllerHealth is the
 	// address of the lifecycle controller's /healthz.
 	SupervisorPID    int    `json:"supervisor_pid,omitempty"`
@@ -380,14 +387,23 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 		return abort("CRD deletion guard", err)
 	}
 	rep.CRDGuard = true
-	// The agents' namespace, roles and bindings go in on every start too (HBEP-10, Identities and
-	// roles; issue #589), reset to the manifest, after the guard and before the controllers.
+	// The three admission policies and the agents' namespace, roles and bindings go in on every start
+	// too (HBEP-10; issue #589), reset to the manifests, after the CRD guard and before the controllers,
+	// in the order that closes the window: the agent role at its narrow (read-only) rules, then the policies,
+	// a bounded wait until each policy refuses its dry-run probe, and only then the wide rules, which
+	// grant the writes the policies bound. A probe that never refuses fails the start with the role still
+	// narrow; a policy that cannot be probed (its CRD is absent) leaves the role narrow with a warning.
 	if cfg, err := restConfig(l.kubeconfig(), ports, 30*time.Second); err != nil {
 		return abort("agent roles", err)
-	} else if err := InstallAgentRBAC(ctx, cfg, o.Log); err != nil {
-		return abort("agent roles", err)
+	} else if writes, err := InstallAgentAccess(ctx, cfg, o.Log, AgentAccessOptions{}); err != nil {
+		return abort("admission policies and agent roles", err)
+	} else {
+		rep.Admission, rep.AgentRBAC, rep.AgentWrites = true, true, writes
+		if !writes {
+			rep.Warnings = append(rep.Warnings, agentWritesOffWarning)
+			logf(o.Log, "%s", agentWritesOffWarning)
+		}
 	}
-	rep.AgentRBAC = true
 	// The relay keeper's switch back, with k3s ready and before the controllers start (HBEP-6,
 	// Compatibility and upgrades).
 	if cfg, err := restConfig(l.kubeconfig(), ports, 30*time.Second); err != nil {
