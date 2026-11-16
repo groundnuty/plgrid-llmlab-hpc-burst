@@ -87,6 +87,9 @@ type StatusOptions struct {
 	NoAPI bool
 	// NoGCProbe skips the garbage-collector probe only.
 	NoGCProbe bool
+	// Now is the clock behind the front's "usage log behind" rule, which reads how long its unlogged
+	// records have stayed above none (HBEP-8, The durable log, When it is down). Nil is time.Now.
+	Now func() time.Time
 }
 
 func ptr(b bool) *bool { return &b }
@@ -192,7 +195,11 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 		rep.RSSMiB = rss
 	}
 	hostBad := rep.Health != Healthy // k3s's own state, before the controllers are judged
-	checkSupervision(l, st, sup, rep, bad)
+	now := o.Now
+	if now == nil {
+		now = time.Now
+	}
+	checkSupervision(l, st, sup, rep, now, bad)
 	checkFrpsNamesTheFront(l, st, bad)
 	checkFrpsBulkNamesTheFront(l, st, bad)
 	if statusStageHook != nil {

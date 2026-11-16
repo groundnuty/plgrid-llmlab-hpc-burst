@@ -19,6 +19,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/clock"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/inventory"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/usage"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/usage/forward"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -64,9 +65,14 @@ type Options struct {
 	// /~!frp to the second frps (dialhome_bulk.go). Off, the front is as before.
 	BulkPath bool
 	// EventLogTokenFile is the durable log's token file (beta; HBEP-8, The durable log; #625),
-	// passed only while the launcher runs the log. It is stored and not read yet: the usage
-	// forwarder that connects to the log with it is a later change.
+	// passed only while the launcher runs the log. With it the front runs the usage forwarder
+	// (internal/front/usage/forward), which copies each synced usage record into the log's HB_USAGE
+	// stream; without it the front keeps the files alone, as in alpha, and /healthz says the log is
+	// down. A file that does not hold a token is an error at the start.
 	EventLogTokenFile string
+	// EventLogAddr is the log's client address. Empty is Host's, 127.0.0.1:<port base + 16>, which is
+	// where the launcher starts it; a test with a log on a port of its own sets it.
+	EventLogAddr string
 }
 
 // stopFunc is stopServing's signature, for Options.stop.
@@ -82,6 +88,8 @@ type Front struct {
 	Proxy   *Proxy
 	Sink    *usage.Sink
 	Metrics *Metrics
+	// UsageLog is the usage forwarder, nil when the front runs without the durable log.
+	UsageLog *forward.Forwarder
 	// Tunnel is HBEP-6's transport, when the front built its own, and Prober
 	// its end-to-end probe.
 	Tunnel *Tunnel
@@ -140,9 +148,20 @@ func Run(ctx context.Context, o Options) error {
 	if err != nil {
 		return err
 	}
+	// With the durable log (beta; HBEP-8, The durable log), the forwarder takes each batch the sink
+	// has synced through the sink's hook. It is made first, since the hook is part of the sink's
+	// options, and it runs once the sink exists.
+	fwd, err := newUsageForwarder(o)
+	if err != nil {
+		return err
+	}
 	// Each failed batch is logged at Error; a record goes to the file of the
 	// UTC day of the front's clock.
-	sink, err := usage.OpenOptions(cfg.UsageDir, usage.Options{Logger: o.Log, Now: o.Clock.Now})
+	so := usage.Options{Logger: o.Log, Now: o.Clock.Now}
+	if fwd != nil {
+		so.Synced = fwd.Offer
+	}
+	sink, err := usage.OpenOptions(cfg.UsageDir, so)
 	if err != nil {
 		return fmt.Errorf("usage records: %w", err)
 	}
@@ -151,9 +170,22 @@ func Run(ctx context.Context, o Options) error {
 			o.Log.Error("usage sink", "error", err.Error())
 		}
 	}()
+	if fwd != nil {
+		// Stopped before the sink is closed, so that nothing outlives Run. A record the sink writes
+		// while it closes stays in the files, and the next start copies it.
+		fctx, stopForwarder := context.WithCancel(ctx)
+		var forwarding sync.WaitGroup
+		forwarding.Add(1)
+		go func() {
+			defer forwarding.Done()
+			fwd.Run(fctx, func() uint64 { return sink.Stats().LastSynced })
+		}()
+		defer func() { stopForwarder(); forwarding.Wait() }()
+	}
 	// The front's /metrics exports the raised-events counter its recorder
 	// counts into, with the front's series created at 0 (HBEP-8, Raised events).
 	metrics := NewMetrics(sink, cfg.UsageDir, o.FreeBytes, raisedEvents(o.Recorder))
+	metrics.enableUsageLog(fwd)
 	router := NewRouter(cfg, o.Clock, o.Transports, o.Recorder, o.Log, metrics)
 	watch, err := startWatch(ctx, o, router)
 	if err != nil {
@@ -164,7 +196,7 @@ func Run(ctx context.Context, o Options) error {
 		records = o.Kube
 	}
 	proxy := NewProxy(ProxyOptions{Config: cfg, Host: o.Host, Clock: o.Clock, Router: router, Transports: o.Transports, Keys: keys, Sink: sink, Metrics: metrics, Log: o.Log, Records: records})
-	f := &Front{Router: router, Watch: watch, Proxy: proxy, Sink: sink, Metrics: metrics, Tunnel: tunnel}
+	f := &Front{Router: router, Watch: watch, Proxy: proxy, Sink: sink, Metrics: metrics, UsageLog: fwd, Tunnel: tunnel}
 	if tunnel != nil {
 		var stop func()
 		f.Prober, stop = startProber(ctx, cfg, tunnel, o, watch)
@@ -440,12 +472,51 @@ type usageHealth struct {
 	Since string `json:"since"`
 	// Error is the latest failure; absent while the state is ok.
 	Error string `json:"error,omitempty"`
+	// Log is "connected" while the usage forwarder holds a connection to the durable log and its
+	// last look at the stream and its last publish succeeded, and "down" otherwise: until it has
+	// connected, while the log is unreachable, and always on a front started without the log
+	// (HBEP-8, The durable log, When it is down). The launcher's status tells the two apart by
+	// its own record of whether the log was asked for.
+	Log string `json:"log"`
+	// LoggedCounter is the last counter the log holds, as far as the forwarder knows; null until it
+	// has read it from the stream, and on a front without the log.
+	LoggedCounter *uint64 `json:"loggedCounter"`
+	// BehindSince is when the records not yet in the log last became more than none, in UTC, and
+	// absent while there are none: the launcher's status reports the front as behind once it is five
+	// minutes old.
+	BehindSince string `json:"behindSince,omitempty"`
 }
 
+// The usage member's log states.
+const (
+	usageLogConnected = "connected"
+	usageLogDown      = "down"
+)
+
 func usageHealthOf(st usage.Stats) usageHealth {
-	h := usageHealth{State: "ok", LostRecords: st.Lost, Since: usage.Time(st.Since)}
+	h := usageHealth{State: "ok", LostRecords: st.Lost, Since: usage.Time(st.Since), Log: usageLogDown}
 	if st.Err != nil {
 		h.State, h.Error = "failing", st.Err.Error()
+	}
+	return h
+}
+
+// withLog adds the durable log's side of the member from the usage forwarder, which is nil on a
+// front without the log: the member then keeps saying the log is down, with no logged counter.
+func (h usageHealth) withLog(fwd *forward.Forwarder) usageHealth {
+	if fwd == nil {
+		return h
+	}
+	fs := fwd.Stats()
+	if fs.Connected {
+		h.Log = usageLogConnected
+	}
+	if fs.LoggedKnown {
+		logged := fs.Logged
+		h.LoggedCounter = &logged
+	}
+	if !fs.BehindSince.IsZero() {
+		h.BehindSince = usage.Time(fs.BehindSince)
 	}
 	return h
 }
@@ -488,7 +559,7 @@ func healthHandler(f *Front, log *slog.Logger) http.Handler {
 		// logged and raises a UsageWriteFailed event (@hpc-burst-science-agent,
 		// 31 Oct 2026). usageError repeats the error at the top level.
 		if f.Sink != nil {
-			u := usageHealthOf(f.Sink.Stats())
+			u := usageHealthOf(f.Sink.Stats()).withLog(f.UsageLog)
 			body["usage"] = u
 			if u.Error != "" {
 				body["usageError"] = u.Error

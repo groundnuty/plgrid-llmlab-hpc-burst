@@ -60,7 +60,7 @@ func run(args []string) error {
 	health := fs.String("health-addr", "", "loopback host:port for GET /healthz")
 	kubeconfig := fs.String("kubeconfig", "", "the control plane's kubeconfig (default: <state-dir>/kubeconfig)")
 	bulkPath := fs.Bool("bulk-path", false, "beta: the bulk path (HBEP-6): split the dial-home listener by TLS server name, and send each non-streamed request through the Instance's bulk transport while it is registered; the launcher passes it with up --bulk-path")
-	eventLogTokenFile := fs.String("event-log-token-file", "", "the durable log's token file (beta; HBEP-8), which the launcher passes only while it runs the log; the address comes from --port-base. Accepted and stored, and not used yet: the usage forwarder that connects to the log is a later change")
+	eventLogTokenFile := fs.String("event-log-token-file", "", "the durable log's token file (beta; HBEP-8), which the launcher passes only while it runs the log; the address comes from --port-base. With it the front copies each synced usage record into the log's HB_USAGE stream; the usage files stay the record")
 	if err := fs.Parse(args); err != nil {
 		return usageError{err}
 	}

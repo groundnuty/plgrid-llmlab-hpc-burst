@@ -57,9 +57,8 @@ const (
 
 	minBackoff = 100 * time.Millisecond
 	maxBackoff = 2 * time.Second
-	// pollEvery is how often an idle forwarder compares what the sink has synced with what it
-	// published, as a safety net beside the channel.
-	pollEvery = 5 * time.Second
+	// DefaultPollEvery is Options.PollEvery's default.
+	DefaultPollEvery = 5 * time.Second
 	// warnEvery rate-limits the forwarder's repeated warnings about the same failure.
 	warnEvery = time.Minute
 )
@@ -80,6 +79,9 @@ type Options struct {
 	QueueBatches, MaxLines, MaxBytes int
 	// PublishTimeout and ConnectTimeout bound the waits on the log; 0 takes the default.
 	PublishTimeout, ConnectTimeout time.Duration
+	// PollEvery is how often an idle forwarder compares what the sink has synced with what it has
+	// published, a safety net beside the channel; 0 takes the default, 5 s.
+	PollEvery time.Duration
 }
 
 type batch struct {
@@ -141,6 +143,9 @@ func New(o Options) *Forwarder {
 	}
 	if o.ConnectTimeout <= 0 {
 		o.ConnectTimeout = DefaultConnectTimeout
+	}
+	if o.PollEvery <= 0 {
+		o.PollEvery = DefaultPollEvery
 	}
 	return &Forwarder{o: o, log: o.Logger, now: o.Now, ch: make(chan batch, o.QueueBatches), wake: make(chan struct{}, 1)}
 }
@@ -406,7 +411,7 @@ func parseID(id string) (first, last uint64, ok bool) {
 // published), and otherwise publish each batch the sink offers. It returns when a call fails or ctx
 // ends.
 func (f *Forwarder) serve(ctx context.Context, js jetstream.JetStream, maxBytes int) error {
-	poll := time.NewTicker(pollEvery)
+	poll := time.NewTicker(f.o.PollEvery)
 	defer poll.Stop()
 	catchUp, first := true, true
 	for {
@@ -432,7 +437,9 @@ func (f *Forwarder) serve(ctx context.Context, js jetstream.JetStream, maxBytes 
 			}
 		case <-f.wake:
 		case <-poll.C:
-			catchUp = f.syncedNow() > f.loggedNow()
+			// Records synced that the stream lacks, with nothing waiting in the channel to carry them
+			// (a batch in the channel is published by the next turn, and is not a reason to read the files).
+			catchUp = len(f.ch) == 0 && f.syncedNow() > f.loggedNow()
 		}
 	}
 }

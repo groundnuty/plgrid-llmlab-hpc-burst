@@ -18,8 +18,6 @@ import (
 	"log/slog"
 	"math/rand"
 	"os"
-	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +28,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventlog"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventlog/node/nodetest"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/usage"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/usage/usagetest"
 )
 
 var logPorts = nodetest.Ports{Client: 28510, Monitor: 28511}
@@ -202,120 +201,6 @@ func (h *host) write(n, workers int) (first, last uint64) {
 	return lo, hi
 }
 
-// fileLines reads every usage file in dir the plain way, with no help from the code under test:
-// each line, with its newline, by its counter.
-func fileLines(t *testing.T, dir string) map[uint64]string {
-	t.Helper()
-	names, err := usage.Files(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	byCounter := map[uint64]string{}
-	for _, name := range names {
-		b, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, l := range strings.SplitAfter(string(b), "\n") {
-			if l == "" {
-				continue
-			}
-			if !strings.HasSuffix(l, "\n") {
-				t.Fatalf("%s ends in a partial line %q", name, l)
-			}
-			var r struct{ Counter uint64 }
-			if err := json.Unmarshal([]byte(l), &r); err != nil {
-				t.Fatalf("%s: line %q: %v", name, l, err)
-			}
-			byCounter[r.Counter] = l
-		}
-	}
-	return byCounter
-}
-
-// counterRange is the counters from to to, inclusive: a literal expectation.
-func counterRange(from, to uint64) []uint64 {
-	var out []uint64
-	for c := from; c <= to; c++ {
-		out = append(out, c)
-	}
-	return out
-}
-
-// checkStream reads HB_USAGE through a fresh client and requires that it holds exactly the counters
-// want, each once and in order, and that each message is what its id says and holds the files' own
-// bytes for its lines. It returns the messages.
-func checkStream(t *testing.T, d *nodetest.Dir, usageDir string, want []uint64) []nodetest.Message {
-	t.Helper()
-	files := fileLines(t, usageDir)
-	msgs := d.ReadAll(t, eventlog.StreamUsage)
-	var got []uint64
-	for _, m := range msgs {
-		first, last, ok := parseID(m.ID)
-		if !ok {
-			t.Fatalf("message %d has the id %q, not usage-<first>-<last>", m.Seq, m.ID)
-		}
-		ls := strings.SplitAfter(string(m.Payload), "\n")
-		if ls[len(ls)-1] != "" {
-			t.Fatalf("message %d (%s) does not end in a newline", m.Seq, m.ID)
-		}
-		ls = ls[:len(ls)-1]
-		if len(ls) > 256 {
-			t.Errorf("message %d (%s) holds %d lines, over HBEP-8's 256", m.Seq, m.ID, len(ls))
-		}
-		if len(m.Payload) >= 1<<20 {
-			t.Errorf("message %d (%s) is %d bytes, not under 1 MiB", m.Seq, m.ID, len(m.Payload))
-		}
-		for i, l := range ls {
-			var r struct{ Counter uint64 }
-			if err := json.Unmarshal([]byte(l), &r); err != nil {
-				t.Fatalf("message %d (%s) line %d: %v", m.Seq, m.ID, i+1, err)
-			}
-			if f, ok := files[r.Counter]; !ok {
-				t.Errorf("message %d (%s) holds counter %d, which no file holds", m.Seq, m.ID, r.Counter)
-			} else if f != l {
-				t.Errorf("counter %d in message %d is not the file's line:\n log: %q\nfile: %q", r.Counter, m.Seq, l, f)
-			}
-			if i == 0 && r.Counter != first {
-				t.Errorf("message %d is id %s but its first line is counter %d", m.Seq, m.ID, r.Counter)
-			}
-			if i == len(ls)-1 && r.Counter != last {
-				t.Errorf("message %d is id %s but its last line is counter %d", m.Seq, m.ID, r.Counter)
-			}
-			got = append(got, r.Counter)
-		}
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("HB_USAGE holds counters %s, want %s", summary(got), summary(want))
-	}
-	return msgs
-}
-
-// summary prints a list of counters as runs, so a failure is readable.
-func summary(c []uint64) string {
-	if len(c) == 0 {
-		return "none"
-	}
-	var parts []string
-	start, prev := c[0], c[0]
-	flush := func() {
-		if start == prev {
-			parts = append(parts, strconv.FormatUint(start, 10))
-		} else {
-			parts = append(parts, fmt.Sprintf("%d-%d", start, prev))
-		}
-	}
-	for _, x := range c[1:] {
-		if x != prev+1 {
-			flush()
-			start = x
-		}
-		prev = x
-	}
-	flush()
-	return fmt.Sprintf("%s (%d in all)", strings.Join(parts, ","), len(c))
-}
-
 // awaitCaughtUp waits for the state in which the forwarder holds the log's whole copy: connected,
 // nothing unlogged, and `last` both the sink's last synced counter and the stream's last.
 func (r *runner) awaitCaughtUp(last uint64) {
@@ -364,7 +249,7 @@ func TestUsageWhileTheLogIsDown(t *testing.T) {
 	if s := h.fwd.Stats(); !s.BehindSince.IsZero() {
 		t.Fatalf("1,000 records logged, gauge 0, but BehindSince is %v", s.BehindSince)
 	}
-	checkStream(t, d, h.usageDir, counterRange(1, 1000))
+	usagetest.CheckStream(t, d, h.usageDir, usagetest.Range(1, 1000))
 
 	p.Stop()
 	h.awaitDown()
@@ -391,7 +276,7 @@ func TestUsageWhileTheLogIsDown(t *testing.T) {
 
 	d.Start(t).Ready()
 	h.awaitCaughtUp(1500)
-	checkStream(t, d, h.usageDir, counterRange(1, 1500))
+	usagetest.CheckStream(t, d, h.usageDir, usagetest.Range(1, 1500))
 	s = h.fwd.Stats()
 	if s.FromFiles == 0 {
 		t.Error("nothing was published from the files, yet records 1,001 to 1,500 reached the log")
@@ -453,7 +338,7 @@ func TestKilledMidBatchTheLogStillEndsWithEachCounterOnce(t *testing.T) {
 
 	d.Start(t).Ready()
 	h.awaitCaughtUp(1500)
-	checkStream(t, d, h.usageDir, counterRange(1, 1500))
+	usagetest.CheckStream(t, d, h.usageDir, usagetest.Range(1, 1500))
 	if s := h.fwd.Stats(); s.Failures == 0 {
 		t.Error("the kill never made a publish or a connection fail")
 	}
@@ -480,7 +365,7 @@ func TestALostTailIsPublishedFromTheFiles(t *testing.T) {
 	h.awaitConnected()
 	h.write(1100, 8)
 	h.awaitCaughtUp(1500)
-	checkStream(t, d, h.usageDir, counterRange(1, 1500))
+	usagetest.CheckStream(t, d, h.usageDir, usagetest.Range(1, 1500))
 
 	p.Stop()
 	h.awaitDown()
@@ -489,7 +374,7 @@ func TestALostTailIsPublishedFromTheFiles(t *testing.T) {
 	// The forwarder's last counter was 1,500, and the restored stream's is 400: it holds 1,500 again
 	// only after it has read the stream and published 401 to 1,500.
 	h.awaitCaughtUp(1500)
-	checkStream(t, d, h.usageDir, counterRange(1, 1500))
+	usagetest.CheckStream(t, d, h.usageDir, usagetest.Range(1, 1500))
 	if s := h.fwd.Stats(); s.FromFiles == 0 {
 		t.Error("nothing was published from the files, yet the restored stream lacked 401 to 1,500")
 	}
@@ -530,7 +415,9 @@ func TestTheUsageCapKeepsTheLatestTenRecordsAndNothingFails(t *testing.T) {
 	const msgSize, capBytes = 700, 10 * 700
 	d := nodetest.NewDir(t, logPorts, eventlog.Caps{Events: 1 << 20, Usage: capBytes})
 	d.Start(t).Ready()
-	h := startHost(t, d, t.TempDir(), nil, nil)
+	// The safety-net poll is set far off: a poll that fell between two Writes would read the files and
+	// could publish two records as one message.
+	h := startHost(t, d, t.TempDir(), func(o *Options) { o.PollEvery = time.Hour }, nil)
 	h.awaitConnected()
 	h.awaitServing(1) // from here each synced record is its own message, from the channel
 
@@ -548,7 +435,7 @@ func TestTheUsageCapKeepsTheLatestTenRecordsAndNothingFails(t *testing.T) {
 		t.Fatalf("HB_USAGE: %d messages, sequences %d to %d, %d bytes; want 10 messages, 21 to 30, %d bytes (10 x %d, worked by hand)",
 			st.Msgs, st.FirstSeq, st.LastSeq, st.Bytes, capBytes, msgSize)
 	}
-	msgs := checkStream(t, d, h.usageDir, counterRange(21, 30))
+	msgs := usagetest.CheckStream(t, d, h.usageDir, usagetest.Range(21, 30))
 	for _, m := range msgs {
 		if bytes.Count(m.Payload, []byte("\n")) != 1 {
 			t.Errorf("message %s holds more than one record", m.ID)
@@ -557,7 +444,7 @@ func TestTheUsageCapKeepsTheLatestTenRecordsAndNothingFails(t *testing.T) {
 	if s := h.fwd.Stats(); s.Failures != 0 || s.Unlogged != 0 || s.LastError != "" {
 		t.Errorf("failures %d, unlogged %d, last error %q: no publish may fail at the cap, and the gauge returns to 0", s.Failures, s.Unlogged, s.LastError)
 	}
-	if files := fileLines(t, h.usageDir); len(files) != 30 {
+	if files := usagetest.FileLines(t, h.usageDir); len(files) != 30 {
 		t.Errorf("the files hold %d records, want 1 to 30", len(files))
 	}
 }
@@ -589,9 +476,9 @@ func TestAnEmptyStreamStartsAtTheOldestFileOfTheNewestSetThatFits(t *testing.T) 
 		want     []uint64
 		firstPub uint64
 	}{
-		{"cap 1000", 1000, 0, counterRange(12, 18), 12},
-		{"cap 3000", 3000, 0, counterRange(1, 18), 1},
-		{"the newest file alone is over the cap", 250, 1, counterRange(18, 18), 16},
+		{"cap 1000", 1000, 0, usagetest.Range(12, 18), 12},
+		{"cap 3000", 3000, 0, usagetest.Range(1, 18), 1},
+		{"the newest file alone is over the cap", 250, 1, usagetest.Range(18, 18), 16},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -608,7 +495,7 @@ func TestAnEmptyStreamStartsAtTheOldestFileOfTheNewestSetThatFits(t *testing.T) 
 			if got := firstPub.Load(); got != c.firstPub {
 				t.Errorf("the first message begins at counter %d, want %d", got, c.firstPub)
 			}
-			checkStream(t, d, dir, c.want)
+			usagetest.CheckStream(t, d, dir, c.want)
 		})
 	}
 }
@@ -624,14 +511,14 @@ func TestACounterGapIsCrossedNotWaitedFor(t *testing.T) {
 	d.Start(t).Ready()
 	a := startForwarder(t, d, dir, func() uint64 { return 5 }, nil, nil)
 	a.awaitCaughtUp(5)
-	checkStream(t, d, dir, counterRange(1, 5))
+	usagetest.CheckStream(t, d, dir, usagetest.Range(1, 5))
 	a.stop()
 
 	put(t, dir, "usage-2026-11-11.jsonl", lines(t, 1001, 1003, 100))
 	b := startForwarder(t, d, dir, func() uint64 { return 1003 }, nil, nil)
 	b.awaitCaughtUp(1003)
-	want := append(counterRange(1, 5), counterRange(1001, 1003)...)
-	checkStream(t, d, dir, want)
+	want := append(usagetest.Range(1, 5), usagetest.Range(1001, 1003)...)
+	usagetest.CheckStream(t, d, dir, want)
 	if s := b.fwd.Stats(); s.Failures != 0 {
 		t.Errorf("%d failures while crossing the gap", s.Failures)
 	}
@@ -650,7 +537,7 @@ func TestTheFilesAreReadOnlyUpToWhatTheSinkSyncedAndOffersNeverDuplicate(t *test
 	d.Start(t).Ready()
 	r := startForwarder(t, d, dir, func() uint64 { return 6 }, nil, nil)
 	r.awaitCaughtUp(6)
-	checkStream(t, d, dir, counterRange(1, 6)) // the file also holds 7 to 10, not yet synced
+	usagetest.CheckStream(t, d, dir, usagetest.Range(1, 6)) // the file also holds 7 to 10, not yet synced
 
 	offer := func(from, to int) { r.fwd.Offer(uint64(from), uint64(to), []byte(lines(t, from, to, 100))) }
 	offer(7, 10)
@@ -661,7 +548,7 @@ func TestTheFilesAreReadOnlyUpToWhatTheSinkSyncedAndOffersNeverDuplicate(t *test
 	offer(3, 5)
 	offer(10, 12)
 	r.awaitCaughtUp(12)
-	msgs := checkStream(t, d, dir, counterRange(1, 12))
+	msgs := usagetest.CheckStream(t, d, dir, usagetest.Range(1, 12))
 	if last := msgs[len(msgs)-1].ID; last != "usage-11-12" {
 		t.Errorf("the last message is %s, want usage-11-12: the partly new batch must publish only its new lines", last)
 	}
@@ -669,17 +556,21 @@ func TestTheFilesAreReadOnlyUpToWhatTheSinkSyncedAndOffersNeverDuplicate(t *test
 
 // Many writers while the log is up and the queue is tiny: batches are dropped and the forwarder
 // moves between the channel and the files again and again. Each counter must still reach the log
-// once, with the files' own bytes, whichever path took it.
+// once, with the files' own bytes, whichever path took it. The safety-net poll is set far off, so a
+// dropped batch comes back only by the behind mark: without it the test would wait for a poll that
+// never comes. The drops are asserted, so a run that dropped nothing cannot pass.
 func TestTheChannelAndTheFilesNeverDuplicateOrLoseARecord(t *testing.T) {
 	d := nodetest.NewDir(t, logPorts, bigCaps)
 	d.Start(t).Ready()
-	h := startHost(t, d, t.TempDir(), func(o *Options) { o.QueueBatches, o.MaxLines = 2, 40 }, nil)
+	h := startHost(t, d, t.TempDir(), func(o *Options) { o.QueueBatches, o.MaxLines, o.PollEvery = 2, 40, time.Hour }, nil)
 	h.awaitConnected()
 	h.write(1200, 16)
 	h.awaitCaughtUp(1200)
-	checkStream(t, d, h.usageDir, counterRange(1, 1200))
+	usagetest.CheckStream(t, d, h.usageDir, usagetest.Range(1, 1200))
 	if s := h.fwd.Stats(); s.Failures != 0 {
 		t.Errorf("%d failures with the log up", s.Failures)
+	} else if s.Dropped == 0 || s.FromFiles == 0 || s.FromChannel == 0 {
+		t.Errorf("dropped %d batches, %d messages from the files, %d from the channel: the test did not move between the two", s.Dropped, s.FromFiles, s.FromChannel)
 	}
 }
 
@@ -700,7 +591,7 @@ func TestALogThatIsNotThereAtStartIsReachedLater(t *testing.T) {
 	}
 	d.Start(t).Ready()
 	h.awaitCaughtUp(50)
-	checkStream(t, d, h.usageDir, counterRange(1, 50))
+	usagetest.CheckStream(t, d, h.usageDir, usagetest.Range(1, 50))
 }
 
 // A forwarder with the wrong token never connects, and the log holds nothing from it.
@@ -717,4 +608,25 @@ func TestAWrongTokenNeverConnects(t *testing.T) {
 	if msgs := d.ReadAll(t, eventlog.StreamUsage); len(msgs) != 0 {
 		t.Errorf("the log holds %d messages from a client that was refused", len(msgs))
 	}
+}
+
+// The poll is a safety net beside the channel: records the sink synced that the stream lacks, with
+// nothing in the channel to carry them, are read from the files. A hole of that kind is made by hand
+// here, since the sink's own hook never leaves one: the sink's synced counter is moved past the log's
+// without a batch being offered.
+func TestAnIdlePollReadsTheFilesWhenTheChannelHasNothingToCarryWhatWasSynced(t *testing.T) {
+	dir := t.TempDir()
+	put(t, dir, "usage-2026-11-10.jsonl", lines(t, 1, 10, 100))
+	d := nodetest.NewDir(t, logPorts, bigCaps)
+	d.Start(t).Ready()
+	r := startForwarder(t, d, dir, func() uint64 { return 6 }, func(o *Options) { o.PollEvery = 20 * time.Millisecond }, nil)
+	r.awaitCaughtUp(6)
+	usagetest.CheckStream(t, d, dir, usagetest.Range(1, 6))
+
+	r.fwd.mu.Lock()
+	r.fwd.synced = 10
+	r.fwd.recomputeLocked()
+	r.fwd.mu.Unlock()
+	r.awaitCaughtUp(10)
+	usagetest.CheckStream(t, d, dir, usagetest.Range(1, 10))
 }
