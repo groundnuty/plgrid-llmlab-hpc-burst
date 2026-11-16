@@ -109,6 +109,12 @@ func (e *external) mirrorAccounting(a *v1alpha1.Allocation, job provider.Job, pr
 //     it the record is written with what is known, the missing fields unknown;
 //   - an Allocation that never had a job writes no record.
 //
+// Whatever the branch, the record also copies the Provider's grant and account
+// from its settings and the partition's billingUnit from the profile as read now
+// (beta; HBEP-8, Provider accounting, Billing); the billing count is the
+// accounting read's, unknown for a requeued job as its other counts are. Each
+// one missing is named in the record's unknown list.
+//
 // It reports false while it waits. The record is created if absent and never
 // rewritten: an AlreadyExists is success, and nothing here reads or updates
 // it. A failed create keeps the finalizer.
@@ -124,7 +130,8 @@ func (e *external) keepAccounting(ctx context.Context, a *v1alpha1.Allocation, r
 		}
 	}
 	p := a.Spec.ForProvider.Batch
-	data := v1alpha1.AccountingRecordData{Provider: e.s.o.Provider, Partition: p.Partition, Tag: name, JobIDs: jobIDs(jobs, rec.jobID)}
+	data := v1alpha1.AccountingRecordData{Provider: e.s.o.Provider, Partition: p.Partition, Tag: name, JobIDs: jobIDs(jobs, rec.jobID),
+		BillingUnit: e.billingUnit(p.Partition), Grant: e.v.Settings.Grant, Account: e.v.Settings.Account}
 	var read *v1alpha1.AllocationAccounting
 	requeued := o.Requeued
 	if recorded != nil {
@@ -168,12 +175,25 @@ func (e *external) keepAccounting(ctx context.Context, a *v1alpha1.Allocation, r
 	return true, e.createAccountingRecord(ctx, a, data)
 }
 
-// fillAccounting copies the counts and the elapsed time into the record; nil
-// leaves them unknown.
+// fillAccounting copies the counts, the billing count and the elapsed time into
+// the record; nil leaves them unknown.
 func fillAccounting(data *v1alpha1.AccountingRecordData, acct *v1alpha1.AllocationAccounting) {
 	if acct != nil {
 		data.AllocatedCPUs, data.AllocatedGPUs, data.ElapsedSeconds = acct.AllocatedCPUs, acct.AllocatedGPUs, acct.ElapsedSeconds
+		data.AllocatedBilling = acct.AllocatedBilling
 	}
+}
+
+// billingUnit is the billingUnit of the partition the job ran on, from the
+// profile this pass read now (beta; HBEP-8, Provider accounting, Billing): the
+// record copies what it is when the record is written. It is "" (unknown) when
+// the profile's entry for the Provider's partition is another partition, or
+// sets none.
+func (e *external) billingUnit(partition string) v1alpha1.BillingUnit {
+	if e.v.Profile.Partition.Name != partition {
+		return ""
+	}
+	return e.v.Profile.Partition.BillingUnit
 }
 
 // createAccountingRecord creates the Allocation's accounting record if it does

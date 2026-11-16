@@ -16,7 +16,8 @@ import (
 // files and finalizer go (HBEP-8, Provider accounting). It uses the jobs the
 // deleting pass already read (deletingJobs) and makes no Batch call. wait is
 // true when the finalizer is to be kept for the final read; err keeps it too.
-// It mirrors the real controller's step, with the same order of rules.
+// It mirrors the real controller's step, with the same order of rules. The
+// record also copies the Controller's Grant, Account and BillingUnit (beta).
 //
 // The recorded job is the one the job-ID annotation names, else the job
 // adoption would pick. With neither there is nothing to account, and no record
@@ -54,7 +55,8 @@ func (c *Controller) keepAccounting(ctx context.Context, p *pass, s *allocState,
 	if id == "" {
 		return false, nil
 	}
-	data := v1alpha1.AccountingRecordData{Provider: c.Provider, Tag: s.tag, JobIDs: jobIDsWith(jobs, id)}
+	data := v1alpha1.AccountingRecordData{Provider: c.Provider, Tag: s.tag, JobIDs: jobIDsWith(jobs, id),
+		BillingUnit: c.BillingUnit, Grant: c.Grant, Account: c.Account}
 	gpus := requestedGPUs(s)
 	if bp := s.a.Spec.ForProvider.Batch; bp != nil {
 		data.Partition = bp.Partition
@@ -132,11 +134,12 @@ func (c *Controller) waitForFinalRead(ctx context.Context, p *pass, s *allocStat
 	return p.now.Sub(s.prior.AbsentSince.Time) <= c.lostGrace(), nil
 }
 
-// fillAccounting copies the counts and the elapsed time into the record; nil
-// leaves them unknown.
+// fillAccounting copies the counts, the billing count and the elapsed time into
+// the record; nil leaves them unknown.
 func fillAccounting(data *v1alpha1.AccountingRecordData, acct *v1alpha1.AllocationAccounting) {
 	if acct != nil {
 		data.AllocatedCPUs, data.AllocatedGPUs, data.ElapsedSeconds = acct.AllocatedCPUs, acct.AllocatedGPUs, acct.ElapsedSeconds
+		data.AllocatedBilling = acct.AllocatedBilling
 	}
 }
 

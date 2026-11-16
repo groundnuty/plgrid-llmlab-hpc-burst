@@ -186,7 +186,7 @@ func TestDeletionWritesAKnownFinalFromTheStatus(t *testing.T) {
 	head := head(e, "alloc-a", "1001")
 	e.del("alloc-a")
 	deleteUntilGone(e, sl, "alloc-a", id) // 80 s at most, inside lostGrace
-	e.wantRecord("alloc-a", head+`,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":120,`+
+	e.wantRecord("alloc-a", head+`,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":120,`+acctBeta+
 		`"startTime":"2026-10-30T12:01:00Z","endTime":"2026-10-30T12:03:00Z","basis":"allocated"}`)
 }
 
@@ -238,7 +238,7 @@ func TestAnIncompleteFinalReadAtDeletionWaitsLostGrace(t *testing.T) {
 	if !e.gone("alloc-a") {
 		t.Fatal("the Allocation is still there after lostGrace")
 	}
-	e.wantRecord("alloc-a", head+`,"allocatedCPUs":8,"allocatedGPUs":1,`+
+	e.wantRecord("alloc-a", head+`,"allocatedCPUs":8,"allocatedGPUs":1,`+acctBeta+
 		`"startTime":"2026-10-30T12:01:00Z","endTime":"2026-10-30T12:02:00Z","basis":"allocated","unknown":["elapsedSeconds"]}`)
 }
 
@@ -278,6 +278,6 @@ func TestAFailedLookupAtDeletionKeepsTheFinalizer(t *testing.T) {
 	}
 	f.clear()
 	deleteUntilGone(e, sl, "alloc-a", id)
-	e.wantRecord("alloc-a", head+`,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":120,`+
+	e.wantRecord("alloc-a", head+`,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":120,`+acctBeta+
 		`"startTime":"2026-10-30T12:01:00Z","endTime":"2026-10-30T12:03:00Z","basis":"allocated"}`)
 }

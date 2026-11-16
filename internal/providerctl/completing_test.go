@@ -364,7 +364,7 @@ func TestAccountingSayingTerminalDoesNotClearTheFlagWhileTheListingShowsIt(t *te
 			if n := r.sl.Count("rm"); n != 1 {
 				t.Errorf("%d file removals after the flag cleared, want 1", n)
 			}
-			r.wantRecord("alloc-a", head+`,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":90,`+
+			r.wantRecord("alloc-a", head+`,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":90,`+acctBeta+
 				`"startTime":"2026-10-30T12:01:00Z","endTime":"2026-10-30T12:02:30Z","basis":"allocated"}`)
 		})
 	}
@@ -383,7 +383,7 @@ func TestAccountingSayingTerminalDoesNotClearTheFlagWhileTheListingShowsIt(t *te
 // restart count of 1, which deletion cancels, turning it CANCELLED with the
 // flag (HBEP-4, Adoption and cancel).
 func TestCompletingJobHoldsTheProtectionsUntilTheFlagClears(t *testing.T) {
-	const ended = `,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":90,` +
+	const ended = `,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":90,` + acctBeta +
 		`"startTime":"2026-10-30T12:01:00Z","endTime":"2026-10-30T12:02:30Z","basis":"allocated"}`
 	for _, shape := range bothShapes {
 		for _, c := range []struct {
@@ -487,8 +487,8 @@ func TestCompletingJobHoldsTheProtectionsUntilTheFlagClears(t *testing.T) {
 					// started again, so its start is unknown as well. The
 					// delete cancelled it at 12:03:10: 12:02:30 plus the
 					// poll's 40 s.
-					r.wantRecord("alloc-a", head+`,"endTime":"2026-10-30T12:03:10Z","basis":"allocated",`+
-						`"unknown":["allocatedCPUs","allocatedGPUs","elapsedSeconds","startTime"]}`)
+					r.wantRecord("alloc-a", head+`,`+acctNoCountsBeta+`"endTime":"2026-10-30T12:03:10Z","basis":"allocated",`+
+						`"unknown":["allocatedCPUs","allocatedGPUs","elapsedSeconds","startTime","allocatedBilling"]}`)
 					return
 				}
 				r.wantRecord("alloc-a", head+ended)

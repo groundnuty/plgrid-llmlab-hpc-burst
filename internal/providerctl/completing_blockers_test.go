@@ -90,7 +90,7 @@ func TestACompletingDuplicateHoldsTheDeletedAllocationAndItsSlot(t *testing.T) {
 			}
 			// One record, from the recorded job's final state (8 CPUs, 1 GPU, 90 s
 			// from 12:01:00 to 12:02:30), naming both jobs of the tag.
-			r.wantRecord("alloc-a", head+`,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":90,`+
+			r.wantRecord("alloc-a", head+`,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":90,`+acctBeta+
 				`"startTime":"2026-10-30T12:01:00Z","endTime":"2026-10-30T12:02:30Z","basis":"allocated"}`)
 		})
 	}

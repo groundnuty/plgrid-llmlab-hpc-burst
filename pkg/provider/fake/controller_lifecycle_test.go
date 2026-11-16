@@ -323,7 +323,7 @@ func TestQueueWaitCapDropsTheOldestAndNeverChurns(t *testing.T) {
 		t.Fatalf("after job 998 was observed again the waits changed to %v", got)
 	}
 	// A restarted controller reads the same persisted status and does the same.
-	e.ctl = &Controller{Client: e.c, Provider: testProvider, Batch: e.batch, Clock: e.clock}
+	e.ctl = e.newController()
 	e.syncAt(at(12, 23, 0))
 	if got := waitIDs(e.provider()); !reflect.DeepEqual(got, want) {
 		t.Fatalf("after a controller restart the waits changed to %v", got)

@@ -29,7 +29,7 @@ func minJobAgeFor(mode fakeslurm.NotListedMode) time.Duration {
 }
 
 func TestAccountingCannotHideTheFlagOfARenamedRecordedJob(t *testing.T) {
-	const ended = `,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":90,` +
+	const ended = `,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":90,` + acctBeta +
 		`"startTime":"2026-10-30T12:01:00Z","endTime":"2026-10-30T12:02:30Z","basis":"allocated"}`
 	for _, shape := range bothShapes {
 		t.Run(shape.name, func(t *testing.T) {
