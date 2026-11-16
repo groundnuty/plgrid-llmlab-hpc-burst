@@ -32,6 +32,8 @@ spec:
       memPerGpu: 128000Mi # facts.hardware.node_documented.value.proportional_ram_per_gpu_mb, 128000 (the node's 1024000 divided by its 8 GPUs)
       imageFormat: sandbox # facts.containers.apptainer_compute_nodes.value.plgrid-gpu-a100 (S1 probe 2: a SIF fails, a sandbox runs); also facts.partitions[name=plgrid-gpu-a100].image_format
       qos: plgrid # facts.partitions[name=plgrid-gpu-a100].qos, "plgrid" (scontrol show partition, 30 Oct 2026): the QOS Slurm applies to every job on this partition; its limit is typed in qos below
+      billingUnit: gpu-hour # facts.hardware.billing_weights, "cpu=0.0625, mem=0.0078125G, GRES/gpu=1 (every partition)": the scheduler weighs a GPU at 1 on every Athena partition, which is GPU-only, so one unit of its billing counts a GPU-hour (HBEP-4, Platform profile schema, The remaining groups)
+      dialHomeModes: [ssh, host-dialed] # ssh: facts.storage.home_readable_from_compute_nodes.value.plgrid-gpu-a100 (S1 probe 2: the home directory, where the dial-home key lives, is readable from a compute node). host-dialed: open question 16's three relay checks, measured on Athena's A100 nodes (#145)
 
     # plgrid-now (`@hpc-burst-science-agent`, 1 Nov 2026, issue #93):
     #   - It is for conformance runs and short checks only, and hosts no Instance. HBEP-7's PartitionTooShort
@@ -56,6 +58,10 @@ spec:
       memPerGpu: 128000Mi # facts.hardware.node_documented.value.proportional_ram_per_gpu_mb, 128000 (the node's 1024000 divided by its 8 GPUs), as for plgrid-gpu-a100
       imageFormat: sandbox # facts.containers.apptainer_compute_nodes.value.plgrid-gpu-a100 (S1 probe 2: a SIF fails, a sandbox runs), the same node type as plgrid-gpu-a100 (facts.partitions[name=plgrid-now].gres is "gpu:a100:8"). Probe 2 ran on plgrid-gpu-a100 only, so the first run on plgrid-now is the measurement (issue #376, `@hpc-burst-science-agent`, 11 Nov 2026)
       qos: plgrid-now # facts.partitions[name=plgrid-now].qos, "plgrid-now" (scontrol show partition): the QOS Slurm applies to every job on this partition; its limits are typed in qos below
+      billingUnit: gpu-hour # facts.hardware.billing_weights, "cpu=0.0625, mem=0.0078125G, GRES/gpu=1 (every partition)": the scheduler weighs a GPU at 1 on every Athena partition, which is GPU-only, so one unit of its billing counts a GPU-hour (HBEP-4, Platform profile schema, The remaining groups)
+      # host-dialed only, WITHOUT ssh, until probe 2 is recorded on plgrid-now itself (`@hpc-burst-science-agent`, #625, comment 6908815428):
+      # facts.storage.home_readable_from_compute_nodes.value holds plgrid-gpu-a100 only, and plgrid-now has not been measured.
+      dialHomeModes: [host-dialed] # host-dialed: open question 16's relay checks on Athena's A100 nodes (#145), and the host-dialed service this partition has served (issue #522)
 
   # The QOSes that a partition's qos or a Provider's qos names, with the limits the plan reads (HBEP-4,
   # QOS limits and Platform profile schema; `@hpc-burst-science-agent`, 1 Nov 2026). An absent limit is no
