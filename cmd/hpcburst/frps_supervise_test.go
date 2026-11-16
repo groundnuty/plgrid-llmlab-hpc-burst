@@ -88,7 +88,8 @@ func TestFrpsSupervision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := cli(t, h.upArgs(base, append(fa, "--json", "--controller-bin", ctl)...)...)
+	// --manifests config/crd: up starts the controller only on a host that has the definitions it watches.
+	r := cli(t, h.upArgs(base, append(fa, "--json", "--controller-bin", ctl, "--manifests", "../../config/crd")...)...)
 	if r.code != exitOK {
 		t.Fatalf("up exited %d: %s", r.code, r.err)
 	}
