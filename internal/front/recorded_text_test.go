@@ -1,12 +1,14 @@
 package front
 
 // The bound on the client's text in a usage record (recorded_text.go; issue #645). What is checked: the cut itself (where, and that it leaves valid
-// UTF-8), that the bound is the API's own limit and not a guess, that a name or a path over it is recorded within it while every answer stays what it
-// was, and that a name at the longest that can be routed is recorded whole.
+// UTF-8), that the bound is the API's own limit and not a guess, that the numbers are the ones HBEP-5's amendment words (1,291 bytes of a name kept,
+// then a marker) and the science agent's ruling on the path (3,884), that a name or a path over the bound is recorded within it while every answer
+// stays what it was, and that a name at the longest that can be routed is recorded whole.
 
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -20,9 +22,10 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/enginetest"
 )
 
-// A text at the bound is kept whole, one byte over is cut to the bound with the marker, and the cut never splits a character: for each of the
-// four places a 4-byte character can straddle the cut, the result is valid UTF-8 within the bound that begins as the text does.
-func TestBoundedTextCutsAtACharacterBoundary(t *testing.T) {
+// A text at the bound is kept whole. A longer one keeps its first max bytes, and the marker follows: for ASCII, exactly max bytes kept. The cut never
+// splits a character: where byte max is inside one, that character is left out, so the kept part is up to 3 bytes short of max, valid UTF-8 that begins
+// as the text does; where byte max starts a character, exactly max bytes are kept, whatever the characters' width.
+func TestBoundedTextKeepsTheBoundThenTheMarker(t *testing.T) {
 	const max = 64
 	for _, s := range []string{"", "m", strings.Repeat("a", max)} {
 		if got := boundedText(s, max); got != s {
@@ -30,21 +33,52 @@ func TestBoundedTextCutsAtACharacterBoundary(t *testing.T) {
 		}
 	}
 	over := strings.Repeat("a", max+1)
-	if got := boundedText(over, max); len(got) != max || !strings.HasSuffix(got, cutMarker) || !strings.HasPrefix(over, strings.TrimSuffix(got, cutMarker)) {
-		t.Errorf("one byte over the bound: %q, want %d bytes, the text's start and the marker", got, max)
+	if got, want := boundedText(over, max), strings.Repeat("a", max)+cutMarker; got != want {
+		t.Errorf("one byte over the bound: %q, want the first %d bytes and the marker, %q", got, max, want)
 	}
 	for _, wide := range []string{"é", "€", "𝔸"} { // 2, 3 and 4 bytes
 		for pad := 0; pad < utf8.UTFMax; pad++ { // the place in the character where the cut falls
-			s := strings.Repeat("a", pad+len(cutMarker)%utf8.UTFMax) + strings.Repeat(wide, 100)
+			s := strings.Repeat("a", pad) + strings.Repeat(wide, 100)
 			got := boundedText(s, max)
-			if !utf8.ValidString(got) || len(got) > max || !strings.HasSuffix(got, cutMarker) || !strings.HasPrefix(s, strings.TrimSuffix(got, cutMarker)) {
-				t.Errorf("%q characters, padded by %d: %q (valid %t, %d bytes), want valid UTF-8 within %d bytes, the text's start, and the marker", wide, pad, got, utf8.ValidString(got), len(got), max)
+			kept := strings.TrimSuffix(got, cutMarker)
+			if !utf8.ValidString(got) || !strings.HasSuffix(got, cutMarker) || !strings.HasPrefix(s, kept) || len(kept) > max || len(kept) < max-(utf8.UTFMax-1) {
+				t.Errorf("%q characters, padded by %d: %q (valid %t, %d bytes kept), want valid UTF-8, the text's start, between %d and %d bytes kept, and the marker", wide, pad, got, utf8.ValidString(got), len(kept), max-(utf8.UTFMax-1), max)
+			}
+			if utf8.RuneStart(s[max]) && len(kept) != max {
+				t.Errorf("%q characters, padded by %d: byte %d starts a character, and %d bytes are kept, want exactly %d", wide, pad, max, len(kept), max)
 			}
 		}
 	}
 	// Bytes that are not UTF-8 at all cost the marker and a few bytes of back-off, not the prefix.
-	if got := boundedText(strings.Repeat("\x80", 1000), max); len(got) < max-len(cutMarker)-utf8.UTFMax {
-		t.Errorf("1000 continuation bytes: %d bytes recorded, want about %d: the back-off to a character boundary is bounded", len(got), max)
+	if got := boundedText(strings.Repeat("\x80", 1000), max); len(got) < max-utf8.UTFMax+len(cutMarker) {
+		t.Errorf("1000 continuation bytes: %d bytes recorded, want about %d: the back-off to a character boundary is bounded", len(got), max+len(cutMarker))
+	}
+}
+
+// The numbers are those HBEP-5's amendment and the science agent's ruling on #645 state, typed here: a model name is kept to 1,291 bytes, the longest name
+// the front can serve (a model's 256 characters of up to 4 bytes, "@", a 253-byte provider, "/" and a 12-character ID), and a path to the prefix of
+// GET /v1/models/<name> and 3 bytes for each of a name's bytes, which a client may percent-encode. A name of exactly the bound is whole, one byte more
+// keeps the bound and the marker.
+func TestTheBoundsAreTheAmendedNumbers(t *testing.T) {
+	if maxRoutableNameBytes != 1291 {
+		t.Errorf("the name bound is %d bytes, want 1,291", maxRoutableNameBytes)
+	}
+	if maxRecordedPathBytes != 3884 {
+		t.Errorf("the path bound is %d bytes, want 3,884: %q and 3 times 1,291", maxRecordedPathBytes, modelsPathPrefix)
+	}
+	name := strings.Repeat("n", 1291)
+	if got := boundedText(name, maxRoutableNameBytes); got != name {
+		t.Errorf("a name of 1,291 bytes: %d bytes recorded, want it whole", len(got))
+	}
+	if got, want := boundedText(name+"n", maxRoutableNameBytes), name+cutMarker; got != want {
+		t.Errorf("a name of 1,292 bytes: %d bytes recorded, want its first 1,291 and the marker", len(got))
+	}
+	path := strings.Repeat("p", 3884)
+	if got := boundedText(path, maxRecordedPathBytes); got != path {
+		t.Errorf("a path of 3,884 bytes: %d bytes recorded, want it whole", len(got))
+	}
+	if got, want := boundedText(path+"p", maxRecordedPathBytes), path+cutMarker; got != want {
+		t.Errorf("a path of 3,885 bytes: %d bytes recorded, want its first 3,884 and the marker", len(got))
 	}
 }
 
@@ -105,21 +139,22 @@ func (h *harness) usageLines() []string {
 
 // maxUsageLine is far above what one record can be once its client text is bound (each of the two fields is JSON-escaped to at most 6 bytes a byte,
 // for a control character or "<") and far below what a client could make it.
-const maxUsageLine = 6*(maxRoutableNameBytes+maxRecordedPathBytes) + 4096
+const maxUsageLine = 6*(maxRoutableNameBytes+maxRecordedPathBytes+2*len(cutMarker)) + 4096
 
-// checkBoundedRecord fails unless the record of the request holds the text within its bound, cut with the marker and beginning as sent, and no usage
-// line is longer than maxUsageLine.
+// checkBoundedRecord fails unless the record of the request holds the first bytes of the text that its bound keeps, then the marker, and no usage line
+// is longer than maxUsageLine.
 func (h *harness) checkBoundedRecord(t *testing.T, id, sentModel, sentPath string) {
 	t.Helper()
 	rec := h.record(id)
 	if sentModel != "" {
-		if len(rec.RequestedModel) > maxRoutableNameBytes || !strings.HasSuffix(rec.RequestedModel, cutMarker) || !strings.HasPrefix(sentModel, strings.TrimSuffix(rec.RequestedModel, cutMarker)) || !utf8.ValidString(rec.RequestedModel) {
-			t.Errorf("requestedModel of %d bytes (a name of %d was sent): want at most %d, valid UTF-8, the start of the name and the marker", len(rec.RequestedModel), len(sentModel), maxRoutableNameBytes)
+		// The names these tests send are ASCII, so exactly the bound's bytes are kept, then the marker.
+		if len(rec.RequestedModel) != maxRoutableNameBytes+len(cutMarker) || !strings.HasSuffix(rec.RequestedModel, cutMarker) || !strings.HasPrefix(sentModel, strings.TrimSuffix(rec.RequestedModel, cutMarker)) || !utf8.ValidString(rec.RequestedModel) {
+			t.Errorf("requestedModel of %d bytes (a name of %d was sent): want its first %d bytes, valid UTF-8, and the marker", len(rec.RequestedModel), len(sentModel), maxRoutableNameBytes)
 		}
 	}
 	if sentPath != "" {
-		if len(rec.Path) > maxRecordedPathBytes || !strings.HasSuffix(rec.Path, cutMarker) || !strings.HasPrefix(sentPath, strings.TrimSuffix(rec.Path, cutMarker)) {
-			t.Errorf("path of %d bytes (a path of %d was sent): want at most %d, the start of the path and the marker", len(rec.Path), len(sentPath), maxRecordedPathBytes)
+		if len(rec.Path) != maxRecordedPathBytes+len(cutMarker) || !strings.HasSuffix(rec.Path, cutMarker) || !strings.HasPrefix(sentPath, strings.TrimSuffix(rec.Path, cutMarker)) {
+			t.Errorf("path of %d bytes (a path of %d was sent): want its first %d bytes and the marker", len(rec.Path), len(sentPath), maxRecordedPathBytes)
 		}
 	}
 	for _, l := range h.usageLines() {
@@ -173,16 +208,17 @@ func TestAnOverLongModelNameThatNoDeploymentHasIsRecordedWithinTheBound(t *testi
 	}
 }
 
-// A name at the longest that can be routed by, a model of the API's 256 characters of 4 bytes each, a provider of a Kubernetes object name's
-// longest and a 12-character deployment ID, is served and recorded WHOLE: the bound cuts nothing a request can be served under.
-func TestTheLongestRoutableNameIsServedAndRecordedWhole(t *testing.T) {
-	model := strings.Repeat("𝔸", apiModelChars)
-	provider := strings.Repeat("p", apiProviderNameBytes)
-	name := model + "@" + provider + "/" + efDeployDisplay
+// longestRoutableFix is a front that serves the longest name a request can be routed by: a model of the API's 256 characters of 4 bytes each, and a
+// provider of a Kubernetes object name's longest. name is the pinned form of it, model@provider/<12 hex>, maxRoutableNameBytes bytes.
+func longestRoutableFix(t *testing.T) (h *harness, model, provider, name string) {
+	t.Helper()
+	model = strings.Repeat("𝔸", apiModelChars)
+	provider = strings.Repeat("p", apiProviderNameBytes)
+	name = model + "@" + provider + "/" + efDeployDisplay
 	if len(name) != maxRoutableNameBytes {
 		t.Fatalf("the name built is %d bytes, want maxRoutableNameBytes, %d", len(name), maxRoutableNameBytes)
 	}
-	h := newHarness(t, nil)
+	h = newHarness(t, nil)
 	key := newKey(t)
 	e := enginetest.Start(t, enginetest.Options{PortLo: testPortLo, PortHi: testPortHi, Key: key, Clock: h.clk})
 	h.profile("helios-gh200", v1alpha1.PlatformBatch, "", "")
@@ -190,6 +226,13 @@ func TestTheLongestRoutableNameIsServedAndRecordedWhole(t *testing.T) {
 	h.servedMD("md", model, 1, provider)
 	h.instance("md", "md-0", provider, e, key, instanceOpts{deployID: efDeployID})
 	h.apply()
+	return h, model, provider, name
+}
+
+// A name at the longest that can be routed by, a model of the API's 256 characters of 4 bytes each, a provider of a Kubernetes object name's
+// longest and a 12-character deployment ID, is served and recorded WHOLE: the bound cuts nothing a request can be served under.
+func TestTheLongestRoutableNameIsServedAndRecordedWhole(t *testing.T) {
+	h, model, provider, name := longestRoutableFix(t)
 	for level, sent := range map[string]string{"model": model, "provider": model + "@" + provider, "pinned": name} {
 		resp := h.errPost("/v1/chat/completions", errChatBody(sent, false, "hello there"))
 		body := readAll(t, resp)
@@ -203,9 +246,58 @@ func TestTheLongestRoutableNameIsServedAndRecordedWhole(t *testing.T) {
 	}
 }
 
+// percentEncoded writes every byte of s as %XX, as a client may.
+func percentEncoded(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		fmt.Fprintf(&b, "%%%02X", s[i])
+	}
+	return b.String()
+}
+
+// The front takes the name of GET /v1/models/<name> from the path decoded once, so a client may percent-encode every byte of it, 3 bytes for each, and
+// the path bound allows for that (3,884 bytes, for a name of 1,291). What the record holds is the path DECODED (r.URL.Path), so it is whole well within
+// the bound: the longest model that is listed, 256 characters of 4 bytes each, fully percent-encoded, is SERVED, and recorded whole; a name of the
+// name bound's 1,291 bytes, whose fully encoded path is exactly the path bound, is answered 404 as an unlisted name and recorded whole, decoded; and an
+// encoded path whose decoded form is over the bound is recorded cut, at the decoded form.
+func TestTheLongestPathsAnsweredByANameAreRecordedWholeWhateverTheirEncoding(t *testing.T) {
+	h, model, _, _ := longestRoutableFix(t)
+	t.Run("the longest listed model, fully percent-encoded, is served", func(t *testing.T) {
+		path := modelsPathPrefix + percentEncoded(model)
+		resp := h.errGet(path)
+		body := readAll(t, resp)
+		if resp.StatusCode != http.StatusOK || !strings.Contains(body, jsonEscaped(t, model)) {
+			t.Fatalf("status %d for a path of %d bytes, want 200 and the model's entry: %.200s", resp.StatusCode, len(path), body)
+		}
+		if rec := h.record(resp.Header.Get("hpcburst-request-id")); rec.Path != modelsPathPrefix+model {
+			t.Errorf("path of %d bytes (a path of %d bytes was sent, encoded), want the decoded path whole, %d bytes", len(rec.Path), len(path), len(modelsPathPrefix+model))
+		}
+	})
+	t.Run("a name of the name bound, whose encoded path is the path bound", func(t *testing.T) {
+		name := strings.Repeat("n", maxRoutableNameBytes)
+		path := modelsPathPrefix + percentEncoded(name)
+		if len(path) != maxRecordedPathBytes {
+			t.Fatalf("the path built is %d bytes, want maxRecordedPathBytes, %d", len(path), maxRecordedPathBytes)
+		}
+		resp := h.errGet(path)
+		readAll(t, resp)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("status %d, want 404 model_not_found for a name no deployment has", resp.StatusCode)
+		}
+		if rec := h.record(resp.Header.Get("hpcburst-request-id")); rec.Path != modelsPathPrefix+name {
+			t.Errorf("path of %d bytes, want the decoded path whole, %d bytes", len(rec.Path), len(modelsPathPrefix+name))
+		}
+	})
+	t.Run("an encoded path that decodes to more than the bound is cut at the decoded form", func(t *testing.T) {
+		name := strings.Repeat("n", maxRecordedPathBytes+100)
+		resp := h.errGet(modelsPathPrefix + percentEncoded(name))
+		readAll(t, resp)
+		h.checkBoundedRecord(t, resp.Header.Get("hpcburst-request-id"), "", modelsPathPrefix+name)
+	})
+}
+
 // The path is the client's too, and it is recorded for a request with no key at all (HBEP-5 keeps one record per request): a path of nearly the
-// header limit is answered as a short one is and recorded within the bound. The longest path the front answers by a name, GET /v1/models/<name>, is
-// recorded whole.
+// header limit is answered as a short one is and recorded within the bound.
 func TestAnOverLongPathIsRecordedWithinTheBound(t *testing.T) {
 	s := newErrFix(t, nil, instanceOpts{}, "")
 	longPath := strings.Repeat("p", 900<<10)
@@ -239,20 +331,6 @@ func TestAnOverLongPathIsRecordedWithinTheBound(t *testing.T) {
 			t.Errorf("a long path: status %d, %d bytes, a short one: status %d, %d bytes, want the same", resp.StatusCode, len(body), shortResp.StatusCode, len(shortBody))
 		}
 		s.checkBoundedRecord(t, resp.Header.Get("hpcburst-request-id"), "", "/v1/"+longPath)
-	})
-	t.Run("the longest path answered by a name", func(t *testing.T) {
-		path := modelsPathPrefix + strings.Repeat("n", maxRoutableNameBytes)
-		if len(path) != maxRecordedPathBytes {
-			t.Fatalf("the path built is %d bytes, want maxRecordedPathBytes, %d", len(path), maxRecordedPathBytes)
-		}
-		resp := s.errGet(path)
-		readAll(t, resp)
-		if resp.StatusCode != http.StatusNotFound {
-			t.Fatalf("status %d, want 404 model_not_found for a name no deployment has", resp.StatusCode)
-		}
-		if rec := s.record(resp.Header.Get("hpcburst-request-id")); rec.Path != path {
-			t.Errorf("path of %d bytes, want the whole path, %d bytes", len(rec.Path), len(path))
-		}
 	})
 	if !bytes.Contains(readUsageFiles(t, s.cfg.UsageDir), []byte(cutMarker)) {
 		t.Error("no record carries the marker of a cut text")
