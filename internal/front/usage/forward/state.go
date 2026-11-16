@@ -14,10 +14,15 @@ type Stats struct {
 	LoggedKnown bool
 	// Logged is the last counter the stream holds as far as the forwarder knows.
 	Logged uint64
+	// SyncedKnown is false when the sink could not read the files' last counter at its Open and has
+	// synced no batch since: Synced is then 0, which is not a reading, and a gauge built from it has
+	// no value (unknown is never 0).
+	SyncedKnown bool
 	// Synced is the last counter the sink has synced.
 	Synced uint64
-	// Unlogged is Synced less Logged, never below 0: HBEP-8's hpcburst_usage_unlogged_records. It is
-	// 0 while LoggedKnown is false, which is not a reading of 0.
+	// Unlogged is HBEP-8's hpcburst_usage_unlogged_records: Synced less Logged, never below 0, and
+	// the records passed over because their line is longer than a message, which the log lacks. It
+	// is 0 while LoggedKnown or SyncedKnown is false, which is not a reading of 0.
 	Unlogged uint64
 	// BehindSince is when Unlogged last rose above 0 and has stayed there; zero while it is 0, or
 	// while Logged is unknown.
@@ -28,7 +33,8 @@ type Stats struct {
 	Dropped uint64
 	// FromChannel and FromFiles count the messages published from each source.
 	FromChannel, FromFiles uint64
-	// Skipped counts the records passed over because their line was longer than a message.
+	// Skipped counts the records passed over because their line was longer than a message, each
+	// once; they stay in Unlogged until the front restarts.
 	Skipped uint64
 	// LastError is the latest failure, empty after a success.
 	LastError string
@@ -38,25 +44,32 @@ type Stats struct {
 func (f *Forwarder) Stats() Stats {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return Stats{Connected: f.connected, LoggedKnown: f.loggedKnown, Logged: f.logged, Synced: f.synced,
+	return Stats{Connected: f.connected, LoggedKnown: f.loggedKnown, Logged: f.logged, SyncedKnown: f.syncedKnown, Synced: f.synced,
 		Unlogged: f.unloggedLocked(), BehindSince: f.behindSince, Failures: f.failures, Dropped: f.dropped,
-		FromChannel: f.fromChannel, FromFiles: f.fromFiles, Skipped: f.skipped, LastError: f.lastErr}
+		FromChannel: f.fromChannel, FromFiles: f.fromFiles, Skipped: uint64(len(f.skippedSet)), LastError: f.lastErr}
 }
 
-// unloggedLocked is the synced counter less the logged one, and 0 while the logged one is unknown:
-// a gauge built from it has no value then (Stats.LoggedKnown).
+// unloggedLocked is the synced counter less the logged one, with the records passed over added (the
+// log lacks them), and 0 while the logged or the synced counter is unknown: a gauge built from it
+// has no value then (Stats.LoggedKnown, Stats.SyncedKnown). A record passed over counts once: when
+// the position has moved past it, the difference no longer holds it, and when it has not, it is
+// not counted here.
 func (f *Forwarder) unloggedLocked() uint64 {
-	if !f.loggedKnown || f.synced <= f.logged {
+	if !f.loggedKnown || !f.syncedKnown {
 		return 0
 	}
-	return f.synced - f.logged
+	n := uint64(len(f.skippedSet))
+	if pos := max(f.logged, f.skipPos); f.synced > pos {
+		n += f.synced - pos
+	}
+	return n
 }
 
 // recomputeLocked keeps BehindSince: set when the unlogged count first rises above 0, cleared when
 // it falls to 0. It runs at each change of Synced or Logged, so the time is when the forwarder
 // fell behind, not when someone looked.
 func (f *Forwarder) recomputeLocked() {
-	if f.loggedKnown && f.unloggedLocked() > 0 {
+	if f.unloggedLocked() > 0 {
 		if f.behindSince.IsZero() {
 			f.behindSince = f.now()
 		}
@@ -67,7 +80,9 @@ func (f *Forwarder) recomputeLocked() {
 
 func (f *Forwarder) setLogged(n uint64) {
 	f.mu.Lock()
-	f.logged, f.loggedKnown = n, true
+	// A new look at the stream starts the files' scan over from what it holds: the records passed
+	// over are passed over again, and counted once.
+	f.logged, f.loggedKnown, f.skipPos = n, true, 0
 	f.recomputeLocked()
 	f.mu.Unlock()
 }

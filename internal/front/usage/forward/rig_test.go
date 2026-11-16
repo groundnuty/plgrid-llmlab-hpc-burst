@@ -93,6 +93,12 @@ type runner struct {
 // runs, its seams.
 func startForwarder(t *testing.T, d *nodetest.Dir, usageDir string, lastSynced func() uint64, opts func(*Options), seam func(*Forwarder)) *runner {
 	t.Helper()
+	return startForwarderRaw(t, d, usageDir, func() (uint64, bool) { return lastSynced(), true }, opts, seam)
+}
+
+// startForwarderRaw is startForwarder with the sink's own answer, which may be "not known".
+func startForwarderRaw(t *testing.T, d *nodetest.Dir, usageDir string, lastSynced func() (uint64, bool), opts func(*Options), seam func(*Forwarder)) *runner {
+	t.Helper()
 	o := Options{Addr: d.Ports.Addr(), Token: d.Token, Dir: usageDir, Logger: slog.New(slog.NewTextHandler(testWriter{t}, nil))}
 	if opts != nil {
 		opts(&o)
@@ -144,7 +150,10 @@ func startHost(t *testing.T, d *nodetest.Dir, usageDir string, opts func(*Option
 	r := &runner{t: t, fwd: f, cancel: cancel, done: make(chan struct{})}
 	go func() {
 		defer close(r.done)
-		f.Run(ctx, func() uint64 { return sink.Stats().LastSynced })
+		f.Run(ctx, func() (uint64, bool) {
+			st := sink.Stats()
+			return st.LastSynced, st.LastSyncedKnown
+		})
 	}()
 	h := &host{runner: r, usageDir: usageDir, sink: sink}
 	t.Cleanup(func() { r.stop(); _ = sink.Close() })
@@ -203,6 +212,17 @@ func (r *runner) awaitCaughtUp(last uint64) {
 	eventually(r.t, fmt.Sprintf("the forwarder to hold counter %d, caught up", last), func() bool {
 		s := r.fwd.Stats()
 		return s.Connected && s.LoggedKnown && s.Logged == last && s.Synced == last && s.Unlogged == 0
+	})
+}
+
+// awaitLogged waits for the stream to hold counter `last` as the sink's last: connected, and the
+// forwarder's logged and synced counters both `last`. It does not wait for the gauge to read 0, which
+// a record passed over keeps above it.
+func (r *runner) awaitLogged(last uint64) {
+	r.t.Helper()
+	eventually(r.t, fmt.Sprintf("the forwarder to hold counter %d", last), func() bool {
+		s := r.fwd.Stats()
+		return s.Connected && s.LoggedKnown && s.Logged == last && s.Synced == last
 	})
 }
 

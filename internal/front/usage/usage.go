@@ -204,8 +204,11 @@ type Sink struct {
 	failures uint64 // the batches and counter blocks that failed
 	records  uint64 // the records written and synced
 	lastSync uint64 // the last counter of the latest batch synced, or of the files' last whole line at Open
-	lost     uint64 // the records not written: those of a failed batch, or one that got no counter
-	since    time.Time
+	// lastSyncKnown is false from an Open that could not read the files' last counter until the first
+	// batch is synced: that batch's last counter is at least every counter before it.
+	lastSyncKnown bool
+	lost          uint64 // the records not written: those of a failed batch, or one that got no counter
+	since         time.Time
 
 	// Only the writer goroutine uses these after Open.
 	log  logFile // the open log: the file of day; nil until the first write when there is no daily file yet
@@ -262,9 +265,14 @@ func open(dir string, o Options, h hooks) (*Sink, error) {
 	if err := s.repairNewest(); err != nil {
 		return nil, err
 	}
-	// What the files hold at Open, whole lines after the repair, was synced by an earlier run.
-	if s.lastSync, err = LastCounter(dir); err != nil {
-		return nil, err
+	// What the files hold at Open, whole lines after the repair, was synced by an earlier run. It is
+	// the durable log's forwarder's bookkeeping, and the sink does not depend on it: a read that
+	// fails leaves it unknown (Stats.LastSyncedKnown), is logged, and never stops the front from
+	// starting, with the log or without it.
+	if n, err := LastCounter(dir); err != nil {
+		o.Logger.Warn("usage: the last counter in the usage files could not be read; the durable log's forwarder starts without it", "error", err)
+	} else {
+		s.lastSync, s.lastSyncKnown = n, true
 	}
 	go s.run()
 	return s, nil
@@ -423,7 +431,7 @@ func (s *Sink) flush(batch []pending) {
 		s.failedLocked(err, uint64(len(batch)))
 	} else {
 		s.records += uint64(len(batch))
-		s.lastSync = max(s.lastSync, last)
+		s.lastSync, s.lastSyncKnown = max(s.lastSync, last), true
 		if s.err != nil {
 			s.since = s.now() // the disk has recovered
 		}
@@ -573,13 +581,16 @@ type Stats struct {
 	// whole line the files held at Open (0 when they held none). The durable log's forwarder
 	// reads the files only up to it (HBEP-8, The durable log, Who writes).
 	LastSynced uint64
+	// LastSyncedKnown is false when Open could not read the files' last counter and no batch has been
+	// synced since: LastSynced is then 0, which is not a reading.
+	LastSyncedKnown bool
 }
 
 // Stats returns the sink's counts and state.
 func (s *Sink) Stats() Stats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return Stats{Records: s.records, Lost: s.lost, Failures: s.failures, Err: s.err, Since: s.since, LastSynced: s.lastSync}
+	return Stats{Records: s.records, Lost: s.lost, Failures: s.failures, Err: s.err, Since: s.since, LastSynced: s.lastSync, LastSyncedKnown: s.lastSyncKnown}
 }
 
 // Close writes what is queued and closes the log. It returns the error of the

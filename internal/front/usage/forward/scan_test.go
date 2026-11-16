@@ -49,7 +49,7 @@ func put(t *testing.T, dir, name, text string) {
 // scanned runs scanFiles and returns the counters it gave out, and the last it returned.
 func scanned(t *testing.T, dir string, after, upTo uint64) (got []uint64, last uint64, warned int) {
 	t.Helper()
-	last, err := scanFiles(dir, after, upTo, func(string, int) { warned++ }, func(c uint64, l []byte) error {
+	last, err := scanFiles(dir, after, upTo, 1<<20, func(string, int) { warned++ }, func(uint64, int) { t.Error("a line was long") }, func(c uint64, l []byte) error {
 		got = append(got, c)
 		return nil
 	})
@@ -120,7 +120,7 @@ func TestScanFilesGivesTheFilesBytes(t *testing.T) {
 	want := `{"counter":1,"zzz":"<raw & unescaped>","requestID":"é","extra":{"a":[1,2]}}` + "\n"
 	put(t, dir, "usage-2026-11-10.jsonl", want)
 	var got string
-	if _, err := scanFiles(dir, 0, 9, func(string, int) {}, func(c uint64, l []byte) error { got += string(l); return nil }); err != nil {
+	if _, err := scanFiles(dir, 0, 9, 1<<20, func(string, int) {}, func(uint64, int) {}, func(c uint64, l []byte) error { got += string(l); return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if got != want {
@@ -233,5 +233,73 @@ func TestMessageIDs(t *testing.T) {
 		if first != c.first || last != c.last || ok != c.ok {
 			t.Errorf("parseID(%q) = %d, %d, %v; want %d, %d, %v", c.id, first, last, ok, c.first, c.last, c.ok)
 		}
+	}
+}
+
+// A line longer than the scan's bound is never read whole and never stops the scan (review of PR
+// #644: a client's model name can make a record as long as a request body, and such a line can be
+// the last one of a file). Its counter is read from its first bytes and handed to long with its size,
+// the lines before and after it come out as always, and a file of such lines is read in the memory of
+// its buffer. Every fixture is hand-written: lines of 100 bytes, and one of 2 MiB or of 300 KB.
+func TestScanFilesPassesALongLineAndGoesOn(t *testing.T) {
+	const twoMiB = 2 << 20
+	for _, c := range []struct {
+		name      string
+		files     map[string]string
+		maxLine   int
+		upTo      uint64
+		want      []uint64
+		wantLongs map[uint64]int
+		wantLast  uint64
+	}{
+		{"in the middle of a file", map[string]string{"usage-2026-11-10.jsonl": lines(t, 1, 2, 100) + line(t, 3, twoMiB) + lines(t, 4, 5, 100)},
+			1 << 20, 99, []uint64{1, 2, 4, 5}, map[uint64]int{3: twoMiB}, 5},
+		{"as the last line of a file", map[string]string{"usage-2026-11-10.jsonl": lines(t, 1, 2, 100) + line(t, 3, twoMiB)},
+			1 << 20, 99, []uint64{1, 2}, map[uint64]int{3: twoMiB}, 3},
+		{"as the first line of a file", map[string]string{"usage-2026-11-10.jsonl": line(t, 1, twoMiB) + lines(t, 2, 3, 100)},
+			1 << 20, 99, []uint64{2, 3}, map[uint64]int{1: twoMiB}, 3},
+		{"as the last line of a file, with the next file after it", map[string]string{"usage-2026-11-10.jsonl": lines(t, 1, 2, 100) + line(t, 3, twoMiB), "usage-2026-11-11.jsonl": lines(t, 4, 5, 100)},
+			1 << 20, 99, []uint64{1, 2, 4, 5}, map[uint64]int{3: twoMiB}, 5},
+		{"two of them in a row", map[string]string{"usage-2026-11-10.jsonl": line(t, 1, twoMiB) + line(t, 2, twoMiB) + lines(t, 3, 3, 100)},
+			1 << 20, 99, []uint64{3}, map[uint64]int{1: twoMiB, 2: twoMiB}, 3},
+		{"one over the bound by a byte, and the bound itself is a line", map[string]string{"usage-2026-11-10.jsonl": line(t, 1, 1001) + line(t, 2, 1000)},
+			1000, 99, []uint64{2}, map[uint64]int{1: 1001}, 2},
+		{"longer than the buffer but within the bound, which is whole", map[string]string{"usage-2026-11-10.jsonl": line(t, 1, 300<<10) + lines(t, 2, 2, 100)},
+			1 << 20, 99, []uint64{1, 2}, nil, 2},
+		{"longer than the buffer and the bound, small bound", map[string]string{"usage-2026-11-10.jsonl": lines(t, 1, 1, 100) + line(t, 2, 300<<10) + lines(t, 3, 3, 100)},
+			1000, 99, []uint64{1, 3}, map[uint64]int{2: 300 << 10}, 3},
+		{"past what the sink synced it is not told", map[string]string{"usage-2026-11-10.jsonl": lines(t, 1, 2, 100) + line(t, 3, twoMiB)},
+			1 << 20, 2, []uint64{1, 2}, nil, 2},
+		{"with no newline it is not whole", map[string]string{"usage-2026-11-10.jsonl": lines(t, 1, 2, 100) + strings.TrimSuffix(line(t, 3, twoMiB), "\n")},
+			1 << 20, 99, []uint64{1, 2}, nil, 2},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, text := range c.files {
+				put(t, dir, name, text)
+			}
+			var got []uint64
+			longs := map[uint64]int{}
+			last, err := scanFiles(dir, 0, c.upTo, c.maxLine, func(string, int) { t.Error("a line had no counter") },
+				func(counter uint64, size int) { longs[counter] = size },
+				func(counter uint64, l []byte) error {
+					if len(l) > c.maxLine {
+						t.Errorf("counter %d was emitted whole at %d bytes, over the bound %d", counter, len(l), c.maxLine)
+					}
+					got = append(got, counter)
+					return nil
+				})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, c.want) || last != c.wantLast || (len(longs) != len(c.wantLongs)) {
+				t.Fatalf("scanFiles gave %v, long lines %v, last %d; want %v, %v, %d", got, longs, last, c.want, c.wantLongs, c.wantLast)
+			}
+			for n, size := range c.wantLongs {
+				if longs[n] != size {
+					t.Errorf("long line %d has size %d, want %d", n, longs[n], size)
+				}
+			}
+		})
 	}
 }

@@ -434,20 +434,74 @@ func TestAnIdlePollReadsTheFilesWhenTheChannelHasNothingToCarryWhatWasSynced(t *
 // maximum payload of 1 MiB. 150 records of 8,000 bytes are 1.2 MB, so they cannot go as one message
 // whatever their count: the forwarder cuts them by size. A record whose line alone is longer than a
 // message (a client's model name can be as long as a request body) is passed over, never stalling the
-// ones after it: the files hold it, the forwarder counts it, and the gauge returns to 0.
-func TestMessagesStayUnderAMiBAndALineLongerThanOneIsSkipped(t *testing.T) {
+// ones after it: the files hold it, the forwarder counts it, and so does the gauge, since the log
+// lacks that record. The long line here is in the MIDDLE of the file.
+func TestMessagesStayUnderAMiBAndALongLineInTheMiddleIsSkippedAndCounted(t *testing.T) {
 	dir := t.TempDir()
-	put(t, dir, "usage-2026-11-10.jsonl", lines(t, 1, 150, 8000)+line(t, 151, 1<<20+1000)+lines(t, 152, 153, 100))
+	put(t, dir, "usage-2026-11-10.jsonl", lines(t, 1, 150, 8000)+line(t, 151, 2<<20)+lines(t, 152, 153, 100))
 	d := nodetest.NewDir(t, logPorts, bigCaps)
 	d.Start(t).Ready()
 	r := startForwarder(t, d, dir, func() uint64 { return 153 }, nil, nil)
-	r.awaitCaughtUp(153)
+	r.awaitLogged(153)
 	want := append(usagetest.Range(1, 150), 152, 153)
 	msgs := usagetest.CheckStream(t, d, dir, want) // also fails on a message of 1 MiB or more
 	if len(msgs) < 2 {
 		t.Errorf("%d messages for 1.2 MB of records: they must be cut by size", len(msgs))
 	}
-	if s := r.fwd.Stats(); s.Skipped != 1 || s.Failures != 0 {
-		t.Errorf("skipped %d records and %d failures, want 1 and 0", s.Skipped, s.Failures)
+	if s := r.fwd.Stats(); s.Skipped != 1 || s.Failures != 0 || s.Unlogged != 1 || s.Logged != 153 {
+		t.Errorf("skipped %d, failures %d, unlogged %d, logged %d; want 1, 0, 1 (the long record, which the log lacks), 153", s.Skipped, s.Failures, s.Unlogged, s.Logged)
 	}
+}
+
+// A long line as a file's LAST line (review of PR #644: the failing case, since nothing after it
+// moves the position past it). Records 1 to 5 reach the log, record 6 is 2 MiB and does not; the
+// forwarder neither stalls nor reads it again, loggedCounter stays what the log holds (5), and the
+// gauge counts the one record the log lacks. A record the sink writes after it goes through, and the
+// gauge still counts the skipped one.
+func TestALongLineAsAFilesLastLineIsSkippedAndCountedAndLaterRecordsFlow(t *testing.T) {
+	dir := t.TempDir()
+	put(t, dir, "usage-2026-11-10.jsonl", lines(t, 1, 5, 100)+line(t, 6, 2<<20))
+	d := nodetest.NewDir(t, logPorts, bigCaps)
+	d.Start(t).Ready()
+	r := startForwarder(t, d, dir, func() uint64 { return 6 }, nil, nil)
+	eventually(t, "records 1 to 5 in the log, and the long one passed over", func() bool {
+		s := r.fwd.Stats()
+		return s.Connected && s.Logged == 5 && s.Synced == 6 && s.Skipped == 1
+	})
+	usagetest.CheckStream(t, d, dir, usagetest.Range(1, 5))
+	if s := r.fwd.Stats(); s.Unlogged != 1 || s.Logged != 5 || s.Failures != 0 {
+		t.Errorf("unlogged %d, logged %d, failures %d; want 1, 5, 0: the long record counts, and loggedCounter is what the log holds", s.Unlogged, s.Logged, s.Failures)
+	}
+
+	next := line(t, 7, 100)
+	put(t, dir, "usage-2026-11-10.jsonl", lines(t, 1, 5, 100)+line(t, 6, 2<<20)+next)
+	r.fwd.Offer(7, 7, []byte(next))
+	eventually(t, "record 7 in the log", func() bool { s := r.fwd.Stats(); return s.Logged == 7 && s.Synced == 7 })
+	usagetest.CheckStream(t, d, dir, append(usagetest.Range(1, 5), 7))
+	if s := r.fwd.Stats(); s.Unlogged != 1 || s.Skipped != 1 {
+		t.Errorf("unlogged %d, skipped %d after record 7; want 1 and 1: the skipped record is still not in the log", s.Unlogged, s.Skipped)
+	}
+}
+
+// The sink could not read the files' last counter at Open (it says so with LastSyncedKnown false),
+// so the forwarder has no reading of where the sink is: it connects, reads the stream, and holds
+// back: nothing is published, and the gauge has no value, since unknown is never 0. The first batch
+// the sink then syncs is at least every counter before it, so the forwarder reads the files up to it,
+// not just that batch: records 1 to 9, which only the files hold, reach the log with it.
+func TestAnUnknownSyncedCounterIsResolvedByTheFirstBatchWithNoHole(t *testing.T) {
+	dir := t.TempDir()
+	put(t, dir, "usage-2026-11-10.jsonl", lines(t, 1, 10, 100))
+	d := nodetest.NewDir(t, logPorts, bigCaps)
+	d.Start(t).Ready()
+	r := startForwarderRaw(t, d, dir, func() (uint64, bool) { return 0, false }, nil, nil)
+	r.awaitServing(1)
+	if s := r.fwd.Stats(); !s.Connected || s.SyncedKnown || s.Unlogged != 0 || s.Synced != 0 {
+		t.Errorf("unknown baseline: connected %v, synced known %v, synced %d, unlogged %d; want connected, not known, 0, 0", s.Connected, s.SyncedKnown, s.Synced, s.Unlogged)
+	}
+	if msgs := d.ReadAll(t, eventlog.StreamUsage); len(msgs) != 0 {
+		t.Fatalf("%d messages were published before the sink's position was known", len(msgs))
+	}
+	r.fwd.Offer(10, 10, []byte(line(t, 10, 100)))
+	r.awaitCaughtUp(10)
+	usagetest.CheckStream(t, d, dir, usagetest.Range(1, 10))
 }

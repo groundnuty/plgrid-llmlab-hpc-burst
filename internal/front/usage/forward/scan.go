@@ -25,14 +25,18 @@ var errStop = errors.New("scan: past the bound")
 //     never for the counter that was expected: nothing waits for a missing one;
 //   - a counter that does not rise above the last one given is skipped, so the batches' ids rise
 //     strictly, whatever a file holds;
+//   - a line longer than maxLine is never read whole (a client's model name can make a record as
+//     long as a request body): its counter is read from its first bytes and long is told it and its
+//     size, and the scan goes on after it, so such a line neither stops a catch-up nor costs its
+//     length in memory;
 //   - a final line with no newline is not whole, and is left: the sink may still be writing it, or
 //     may cut it back;
 //   - a line past upTo ends the scan, since upTo is the last counter the sink has synced and a
 //     later line is written, perhaps not synced (HBEP-8, The durable log, Who writes).
 //
 // warn is called once for each line it passes over because it carries no counter. It returns the
-// last counter it gave to emit, or `after` when it gave none.
-func scanFiles(dir string, after, upTo uint64, warn func(file string, line int), emit func(counter uint64, line []byte) error) (uint64, error) {
+// last counter it gave to emit or long, or `after` when it gave none.
+func scanFiles(dir string, after, upTo uint64, maxLine int, warn func(file string, line int), long func(counter uint64, size int), emit func(counter uint64, line []byte) error) (uint64, error) {
 	files, err := usage.Files(dir)
 	if err != nil {
 		return after, err
@@ -46,7 +50,7 @@ func scanFiles(dir string, after, upTo uint64, warn func(file string, line int),
 			return prev, err
 		}
 		var err error
-		prev, err = scanFile(path, prev, upTo, warn, emit)
+		prev, err = scanFile(path, prev, upTo, maxLine, warn, long, emit)
 		switch {
 		case errors.Is(err, errStop):
 			return prev, nil
@@ -59,21 +63,24 @@ func scanFiles(dir string, after, upTo uint64, warn func(file string, line int),
 	return prev, nil
 }
 
-// scanFile is scanFiles for one file. It returns the last counter it gave to emit, or prev.
-func scanFile(path string, prev, upTo uint64, warn func(file string, line int), emit func(counter uint64, line []byte) error) (uint64, error) {
+// scanBuffer is the read buffer of scanFile, and so the head it keeps of a line too long to read.
+const scanBuffer = 256 << 10
+
+// scanFile is scanFiles for one file. It returns the last counter it gave out, or prev.
+func scanFile(path string, prev, upTo uint64, maxLine int, warn func(file string, line int), long func(counter uint64, size int), emit func(counter uint64, line []byte) error) (uint64, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return prev, err
 	}
 	defer f.Close()
-	br := bufio.NewReaderSize(f, 256<<10)
+	br := bufio.NewReaderSize(f, scanBuffer)
 	for n := 1; ; n++ {
-		line, err := br.ReadBytes('\n')
+		line, size, whole, err := readLine(br, maxLine)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return prev, nil // a last line with no newline is not whole: left for the next look
-			}
 			return prev, err
+		}
+		if !whole {
+			return prev, nil // a last line with no newline is not whole: left for the next look
 		}
 		counter, ok := usage.LineCounter(line)
 		switch {
@@ -84,11 +91,52 @@ func scanFile(path string, prev, upTo uint64, warn func(file string, line int), 
 			// does not rise
 		case counter > upTo:
 			return prev, errStop
+		case size > maxLine:
+			long(counter, size)
+			prev = counter
 		default:
 			if err := emit(counter, line); err != nil {
 				return prev, err
 			}
 			prev = counter
+		}
+	}
+}
+
+// readLine reads one line, with its newline. A line of at most max bytes comes back whole; a longer
+// one comes back as its first bytes only (what the buffer held), with its true size, and the rest
+// is read past and dropped, so its length costs no memory. whole is false at the end of the file,
+// where a last line with no newline is not whole.
+func readLine(br *bufio.Reader, max int) (line []byte, size int, whole bool, err error) {
+	chunk, err := br.ReadSlice('\n')
+	if err == nil {
+		return chunk, len(chunk), true, nil // the usual case: a line inside the buffer
+	}
+	if !errors.Is(err, bufio.ErrBufferFull) {
+		if errors.Is(err, io.EOF) {
+			return nil, 0, false, nil
+		}
+		return nil, 0, false, err
+	}
+	// A line longer than the buffer: keep a copy of what has been read while it is within max, else
+	// only the head, and read on until the newline.
+	size = len(chunk)
+	head := append([]byte(nil), chunk...)
+	for {
+		chunk, err = br.ReadSlice('\n')
+		size += len(chunk)
+		if size <= max {
+			head = append(head, chunk...)
+		}
+		switch {
+		case err == nil:
+			return head, size, true, nil
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue
+		case errors.Is(err, io.EOF):
+			return nil, 0, false, nil
+		default:
+			return nil, 0, false, err
 		}
 	}
 }

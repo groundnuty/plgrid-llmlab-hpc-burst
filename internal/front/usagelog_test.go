@@ -320,3 +320,66 @@ func TestATokenFileThatIsNotATokenStopsTheStart(t *testing.T) {
 		})
 	}
 }
+
+// seedLongLastLine puts a usage directory in the state a client can leave it in (review of PR #644):
+// the front records a request's model name before it checks it, and a request may be 64 MiB, so a
+// record's line can be megabytes long. The newest file ends in such a line, counter 4, of 2 MiB;
+// before it are three ordinary records, and the counter file says a block ended at 1,000.
+func seedLongLastLine(t *testing.T, usageDir string) {
+	t.Helper()
+	if err := os.MkdirAll(usageDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for n := 1; n <= 3; n++ {
+		fmt.Fprintf(&b, `{"counter":%d,"requestID":"r%d"}`+"\n", n, n)
+	}
+	b.WriteString(`{"counter":4,"requestID":"` + strings.Repeat("m", 2<<20) + `"}` + "\n")
+	if err := os.WriteFile(filepath.Join(usageDir, "usage-2026-11-10.jsonl"), []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(usageDir, "counter"), []byte("1000\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A usage line over 1 MiB as the last line of the newest file must not stop the front from starting,
+// with the log on or off: the sink reads the files' last counter at Open for the forwarder, and that
+// read used to fail on such a line. Off, the front starts as before and serves; its records follow the
+// counter file's block. On, it starts, serves, copies what it can and says what it could not: the
+// stream holds 1-3 and the two new records and not the long one, each byte-equal to the files, and the
+// gauge counts the one record the log lacks.
+func TestAFrontStartsOverAUsageFileWhoseLastLineIsLongerThanAMiB(t *testing.T) {
+	t.Run("log off", func(t *testing.T) {
+		u := startUsageFront(t, func(o *Options) { seedLongLastLine(t, o.Config.UsageDir) })
+		u.write(2)
+		if blk := u.healthz(); blk.State != "ok" || blk.Log != "down" {
+			t.Errorf("usage = %+v; want state ok and, with no log, log down", blk)
+		}
+		files := usagetest.FileLines(t, u.dir)
+		for _, n := range []uint64{1, 2, 3, 4, 1001, 1002} {
+			if _, ok := files[n]; !ok {
+				t.Errorf("the files hold no counter %d: the front must serve and write after the long line", n)
+			}
+		}
+		if len(files[4]) < 2<<20 {
+			t.Errorf("the long record is %d bytes in the files, want it untouched at over 2 MiB", len(files[4]))
+		}
+	})
+	t.Run("log on", func(t *testing.T) {
+		d := nodetest.NewDir(t, usageLogPorts, eventlog.Caps{Events: 1 << 20, Usage: 64 << 20})
+		d.Start(t).Ready()
+		edit := withLog(d)
+		u := startUsageFront(t, func(o *Options) { seedLongLastLine(t, o.Config.UsageDir); edit(o) })
+		u.write(2)
+		u.await("the log to hold 1,002 and the long record to be counted", func() bool {
+			blk := u.healthz()
+			g, _ := u.gauge()
+			return blk.Log == "connected" && blk.LoggedCounter != nil && *blk.LoggedCounter == 1002 && g == 1
+		})
+		usagetest.CheckStream(t, d, u.dir, []uint64{1, 2, 3, 1001, 1002})
+		if blk := u.healthz(); blk.State != "ok" || blk.LostRecords != 0 {
+			t.Errorf("usage = %+v; want state ok and no lost records: a long record is not a lost one", blk)
+		}
+	})
+}

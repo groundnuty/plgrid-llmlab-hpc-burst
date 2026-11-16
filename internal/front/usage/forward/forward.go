@@ -113,7 +113,14 @@ type Forwarder struct {
 	dropped     uint64
 	fromChannel uint64
 	fromFiles   uint64
-	skipped     uint64
+	// skippedSet holds the counters of the records passed over because their line is longer than a
+	// message (a set, so that a rescan after a restored store counts one once), and skipPos the
+	// highest of them seen in the current session: the position the files are read from is the
+	// larger of it and logged, so a skipped line is not read again, while Logged stays what the
+	// stream holds.
+	skippedSet  map[uint64]struct{}
+	skipPos     uint64
+	syncedKnown bool // Synced holds a counter the sink synced, or the files' last at Open
 	lastErr     string
 	warnedAt    time.Time
 	warnedErr   string
@@ -145,7 +152,8 @@ func New(o Options) *Forwarder {
 	if o.PollEvery <= 0 {
 		o.PollEvery = DefaultPollEvery
 	}
-	return &Forwarder{o: o, log: o.Logger, now: o.Now, ch: make(chan batch, o.QueueBatches), wake: make(chan struct{}, 1)}
+	return &Forwarder{o: o, log: o.Logger, now: o.Now, ch: make(chan batch, o.QueueBatches), wake: make(chan struct{}, 1),
+		skippedSet: map[uint64]struct{}{}}
 }
 
 // Offer is the sink's hook (usage.Options.Synced): it takes a synced batch, the lines exactly as
@@ -153,9 +161,16 @@ func New(o Options) *Forwarder {
 // marks the forwarder behind, so that it reads the files. Offer takes ownership of lines.
 func (f *Forwarder) Offer(first, last uint64, lines []byte) {
 	f.mu.Lock()
-	f.synced = max(f.synced, last)
+	wasUnknown := !f.syncedKnown
+	f.synced, f.syncedKnown = max(f.synced, last), true
 	f.recomputeLocked()
 	f.mu.Unlock()
+	if wasUnknown {
+		// The sink could not read the files' last counter at Open, so the forwarder has not read
+		// the files up to anything: this batch's last counter is at least every one before it, and
+		// the files hold what the stream lacks below it. Read them, not just this batch.
+		f.behind.Store(true)
+	}
 	select {
 	case f.ch <- batch{first: first, last: last, lines: lines}:
 	default:
@@ -171,13 +186,17 @@ func (f *Forwarder) Offer(first, last uint64, lines []byte) {
 }
 
 // Run connects to the log and forwards until ctx ends. It returns once the connection is closed.
-// lastSynced reads the sink's Stats().LastSynced: what the files hold when Run starts counts as
-// synced, and every later batch arrives through Offer.
-func (f *Forwarder) Run(ctx context.Context, lastSynced func() uint64) {
-	f.mu.Lock()
-	f.synced = max(f.synced, lastSynced())
-	f.recomputeLocked()
-	f.mu.Unlock()
+// lastSynced reads the sink's Stats().LastSynced and LastSyncedKnown: what the files hold when Run
+// starts counts as synced, and every later batch arrives through Offer. When it is not known, the
+// forwarder holds no reading of the sink's position, and the gauge has no value, until the first
+// batch arrives.
+func (f *Forwarder) Run(ctx context.Context, lastSynced func() (uint64, bool)) {
+	if n, ok := lastSynced(); ok {
+		f.mu.Lock()
+		f.synced, f.syncedKnown = max(f.synced, n), true
+		f.recomputeLocked()
+		f.mu.Unlock()
+	}
 	defer func() {
 		f.mu.Lock()
 		f.connected = false
@@ -290,15 +309,17 @@ func (f *Forwarder) serve(ctx context.Context, js jetstream.JetStream, maxBytes 
 		case <-poll.C:
 			// Records synced that the stream lacks, with nothing waiting in the channel to carry them
 			// (a batch in the channel is published by the next turn, and is not a reason to read the files).
-			catchUp = len(f.ch) == 0 && f.syncedNow() > f.loggedNow()
+			catchUp = len(f.ch) == 0 && f.syncedNow() > f.posNow()
 		}
 	}
 }
 
-func (f *Forwarder) loggedNow() uint64 {
+// posNow is where the files are read from: after the stream's last counter and after the records
+// passed over in this session.
+func (f *Forwarder) posNow() uint64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.logged
+	return max(f.logged, f.skipPos)
 }
 
 // catchUp publishes what the files hold after the stream's last counter, up to the last counter the
@@ -315,14 +336,14 @@ func (f *Forwarder) catchUp(ctx context.Context, js jetstream.JetStream, maxByte
 			drained = true
 		}
 	}
-	after, bound := f.loggedNow(), f.syncedNow()
+	after, bound := f.posNow(), f.syncedNow()
 	if bound <= after {
 		return nil
 	}
 	b := f.newBatcher(ctx, js, maxBytes, sourceFiles)
-	_, err := scanFiles(f.o.Dir, after, bound, func(file string, line int) {
+	_, err := scanFiles(f.o.Dir, after, bound, maxBytes, func(file string, line int) {
 		f.log.Warn("usage forwarder: a line of a usage file has no counter and is not forwarded", "file", file, "line", line)
-	}, func(counter uint64, line []byte) error { return b.add(counter, line) })
+	}, f.skip, func(counter uint64, line []byte) error { return b.add(counter, line) })
 	if err != nil {
 		return fmt.Errorf("read the usage files after counter %d: %w", after, err)
 	}
@@ -333,7 +354,7 @@ func (f *Forwarder) catchUp(ctx context.Context, js jetstream.JetStream, maxByte
 // in messages of at most MaxLines lines and maxBytes bytes.
 func (f *Forwarder) publishBatch(ctx context.Context, js jetstream.JetStream, lines []byte, maxBytes int) error {
 	b := f.newBatcher(ctx, js, maxBytes, sourceChannel)
-	prev := f.loggedNow()
+	prev := f.posNow()
 	for rest := lines; len(rest) > 0; {
 		i := bytes.IndexByte(rest, '\n')
 		if i < 0 {
@@ -346,6 +367,10 @@ func (f *Forwarder) publishBatch(ctx context.Context, js jetstream.JetStream, li
 			continue
 		}
 		prev = counter
+		if len(line) > maxBytes {
+			f.skip(counter, len(line))
+			continue
+		}
 		if err := b.add(counter, line); err != nil {
 			return err
 		}

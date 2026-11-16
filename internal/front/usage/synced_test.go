@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -262,4 +263,97 @@ func bigFile(n int) string {
 		fmt.Fprintf(&b, `{"counter":%d,"requestID":"%080d"}`+"\n", i, i)
 	}
 	return b.String()
+}
+
+// longLine is a usage line of `size` bytes with its newline whose counter is n, in the form the sink
+// writes it: a record whose requested model's name is as long as the client made it. The front
+// records the name before it checks it, and a request may be 64 MiB, so such a line is real.
+func longLine(n, size int) string {
+	prefix := fmt.Sprintf(`{"counter":%d,"requestID":"`, n)
+	return prefix + strings.Repeat("m", size-len(prefix)-3) + "\"}\n"
+}
+
+// FileLastCounter and LastCounter never fail on a line of any length, and read its counter: it is
+// the record's first member. A last line over 1 MiB used to be an error, which stopped the sink from
+// opening and so the front from starting (review of PR #644).
+func TestLastCounterOfALineLongerThanAMiB(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		files map[string]string
+		want  uint64
+	}{
+		{"the last line is 3 MiB", map[string]string{"usage-2026-10-31.jsonl": bigFile(3) + longLine(77, 3<<20)}, 77},
+		{"the only line is 3 MiB", map[string]string{"usage-2026-10-31.jsonl": longLine(5, 3<<20)}, 5},
+		{"just over the bound", map[string]string{"usage-2026-10-31.jsonl": bigFile(2) + longLine(9, 1<<20+1)}, 9},
+		{"a long line that is not the last is not read at all", map[string]string{"usage-2026-10-31.jsonl": longLine(8, 3<<20) + bigFile(1)}, 1},
+		{"the newest file's long last line wins over an older file", map[string]string{"usage-2026-10-30.jsonl": bigFile(40), "usage-2026-10-31.jsonl": longLine(2001, 2<<20)}, 2001},
+		{"a long last line with no counter in its first bytes falls back to the older file, with no error",
+			map[string]string{"usage-2026-10-30.jsonl": bigFile(40), "usage-2026-10-31.jsonl": `{"requestID":"` + strings.Repeat("m", 3<<20) + "\"}\n"}, 40},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, text := range c.files {
+				writeFile(t, dir, name, text)
+			}
+			got, err := usage.LastCounter(dir)
+			if err != nil || got != c.want {
+				t.Errorf("LastCounter = %d, %v; want %d, nil", got, err, c.want)
+			}
+		})
+	}
+	t.Run("FileLastCounter says so itself", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "usage-2026-10-31.jsonl", bigFile(3)+longLine(77, 3<<20))
+		n, ok, err := usage.FileLastCounter(filepath.Join(dir, "usage-2026-10-31.jsonl"))
+		if err != nil || !ok || n != 77 {
+			t.Errorf("FileLastCounter = %d, %v, %v; want 77, true, nil", n, ok, err)
+		}
+	})
+}
+
+// The sink opens over a file whose last line is over 1 MiB, and serves: Open reads the files' last
+// counter for the durable log's forwarder, whether the log is on or not, and a line of that length
+// must not stop it (review of PR #644). The counter is the line's, 77, and the next record follows
+// the counter file's block as always.
+func TestOpenOverALastLineLongerThanAMiB(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, logName, bigFile(3)+longLine(77, 3<<20))
+	if err := os.WriteFile(filepath.Join(dir, "counter"), []byte("1000\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := sink(t, dir)
+	defer s.Close()
+	if st := s.Stats(); st.LastSynced != 77 || !st.LastSyncedKnown {
+		t.Errorf("LastSynced = %d (known %v), want 77, known", st.LastSynced, st.LastSyncedKnown)
+	}
+	if got := write(t, s, rec("after")); got != 1001 {
+		t.Errorf("the next counter is %d, want 1001", got)
+	}
+}
+
+// Open never fails on the forwarder's bookkeeping: when the files' last counter cannot be read at
+// all (here an older file the sink may not open, with the newest one empty so that the sink's own
+// repair has nothing to read), the sink opens and serves, LastSynced is unknown instead of 0, and the
+// first batch that is synced makes it known. The test cannot make a file unreadable for root.
+func TestOpenDoesNotFailWhenTheLastCounterCannotBeRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("a file mode does not stop root from reading")
+	}
+	dir := t.TempDir()
+	old := filepath.Join(dir, "usage-2026-10-30.jsonl")
+	writeFile(t, dir, "usage-2026-10-30.jsonl", `{"counter":3,"requestID":"x"}`+"\n")
+	writeFile(t, dir, logName, "")
+	if err := os.Chmod(old, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(old, 0o600) })
+	s := sink(t, dir)
+	defer s.Close()
+	if st := s.Stats(); st.LastSyncedKnown || st.LastSynced != 0 {
+		t.Errorf("LastSynced = %d, known %v; want it unknown (0, not known) when the files could not be read", st.LastSynced, st.LastSyncedKnown)
+	}
+	got := write(t, s, rec("r"))
+	if st := s.Stats(); !st.LastSyncedKnown || st.LastSynced != got {
+		t.Errorf("after counter %d was synced: LastSynced = %d, known %v; want %d, known", got, st.LastSynced, st.LastSyncedKnown, got)
+	}
 }

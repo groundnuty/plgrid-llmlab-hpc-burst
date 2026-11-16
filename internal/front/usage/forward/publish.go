@@ -82,17 +82,9 @@ func (f *Forwarder) newBatcher(ctx context.Context, js jetstream.JetStream, maxB
 	return &batcher{f: f, ctx: ctx, js: js, src: src, maxBytes: maxBytes}
 }
 
-// add takes one line, in rising counter order. A line longer than a message is passed over, after
-// what was collected before it is published: a client's model name can be as long as a request body,
-// the files hold the record, and the error log says so.
+// add takes one line, in rising counter order, of at most maxBytes: a longer one is the scan's or
+// publishBatch's to pass over (Forwarder.skip), never a message's.
 func (b *batcher) add(counter uint64, line []byte) error {
-	if len(line) > b.maxBytes {
-		if err := b.flush(); err != nil {
-			return err
-		}
-		b.f.skip(counter, len(line))
-		return nil
-	}
 	if b.lines > 0 && (b.lines >= b.f.o.MaxLines || len(b.buf)+len(line) > b.maxBytes) {
 		if err := b.flush(); err != nil {
 			return err
@@ -117,12 +109,14 @@ func (b *batcher) flush() error {
 	return err
 }
 
-// skip passes over a record whose line is longer than a message: the position moves past it, so the
-// next look does not read it again, and Stats.Skipped counts it.
+// skip passes over a record whose line is longer than a message (a client's model name can be as
+// long as a request body): the log gets none of it, the files hold it, the error log names its
+// counter, and it stays in the unlogged count, since the log lacks it. The read position moves past
+// it, so the next look does not read it again.
 func (f *Forwarder) skip(counter uint64, size int) {
 	f.mu.Lock()
-	f.skipped++
-	f.logged = max(f.logged, counter)
+	f.skippedSet[counter] = struct{}{}
+	f.skipPos = max(f.skipPos, counter)
 	f.recomputeLocked()
 	f.mu.Unlock()
 	f.log.Error("usage forwarder: a record is longer than a message and is not forwarded; the files hold it", "counter", counter, "bytes", size)

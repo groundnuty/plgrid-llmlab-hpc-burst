@@ -180,7 +180,10 @@ func Run(ctx context.Context, o Options) error {
 		forwarding.Add(1)
 		go func() {
 			defer forwarding.Done()
-			fwd.Run(fctx, func() uint64 { return sink.Stats().LastSynced })
+			fwd.Run(fctx, func() (uint64, bool) {
+				st := sink.Stats()
+				return st.LastSynced, st.LastSyncedKnown
+			})
 		}()
 		defer func() { stopForwarder(); forwarding.Wait() }()
 	}

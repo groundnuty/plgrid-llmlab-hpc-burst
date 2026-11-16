@@ -4,14 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 )
 
-// maxLastLine bounds how much of a file's last line LastCounter reads: a usage record is under a
-// few kilobytes, so a line past this is not one.
+// maxLastLine bounds how much of a file's last line FileLastCounter reads. A usage record is under a
+// few kilobytes, but one can be as long as a request body (the requested model's name), and a line
+// past this is still read for its counter, from its first bytes.
 const maxLastLine = 1 << 20
 
 // counterPrefix is how every line the sink writes begins: Record's first member is its counter, and
@@ -45,7 +45,10 @@ func LineCounter(line []byte) (n uint64, ok bool) {
 
 // FileLastCounter returns the counter of the last whole line of the file at path, the line before
 // its last newline. ok is false when the file holds no whole line, or its last one carries no
-// counter. It reads the end of the file only, so a file of any size costs one read.
+// counter. It reads the end of the file, and for a line past maxLastLine only its first bytes, so
+// no length of line is an error: a client can make the front write a record of any size up to its
+// request limit (its model name is recorded before it is checked), and such a line can be a file's
+// last. The counter is the record's first member, so the head of the line holds it.
 func FileLastCounter(path string) (n uint64, ok bool, err error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -64,10 +67,9 @@ func FileLastCounter(path string) (n uint64, ok bool, err error) {
 	if err != nil {
 		return 0, false, err
 	}
-	if end-1-start > maxLastLine {
-		return 0, false, fmt.Errorf("usage: the last line of %s is %d bytes, which no record is", path, end-1-start)
-	}
-	line := make([]byte, end-1-start)
+	// The whole line when it is a record's size, so a line the sink did not write still counts by
+	// the JSON fallback; only the head of a longer one, which only the sink's own form can parse.
+	line := make([]byte, min(end-1-start, maxLastLine))
 	if _, err := f.ReadAt(line, start); err != nil {
 		return 0, false, err
 	}
