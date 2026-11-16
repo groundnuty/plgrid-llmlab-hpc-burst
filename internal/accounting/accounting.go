@@ -72,8 +72,9 @@ type Group struct {
 	// Known and Unknown count the members whose figure is known and unknown.
 	// Members is their sum. An unknown member is a live Allocation that is still
 	// pending, a member whose billing count or elapsed time is unknown, a member
-	// whose unit is unknown, and a record written before the beta fields (it has
-	// no billing count and does not name it in its unknown list).
+	// whose unit is unknown (a record's own unit, never the profile's now), and a
+	// record written before the beta fields (it has no billing count and does
+	// not name it in its unknown list).
 	Known   int `json:"known"`
 	Unknown int `json:"unknown"`
 	Members int `json:"members"`
@@ -120,7 +121,13 @@ type member struct {
 //     and account and the unit of its partition in the Provider's PlatformProfile
 //     as they stand now: a grant has one name for its life, and a new grant is a
 //     new Provider (HBEP-8), so the Provider's are the record's. A Provider or a
-//     partition that is gone leaves them unknown.
+//     partition that is gone leaves them unknown. The profile's unit only PLACES
+//     a record whose own unit is unknown: the record counts as unknown and adds
+//     nothing to any sum, since the unit may have changed since it was written.
+//   - A group's grantEnd and days left are those of the Providers of its members,
+//     as their specs say now, whatever grant a record names: a record whose own
+//     grant differs from its Provider's current grant still shows that Provider's
+//     grantEnd.
 //   - A live Allocation's are the Provider's and its partition's, the same way.
 //     An Allocation that has a record (the deleting pass writes the record
 //     before the finalizer goes) counts once, by its record.
@@ -167,7 +174,12 @@ func (r resolver) record(d v1alpha1.AccountingRecordData) member {
 	m := r.place(d.Provider, d.Partition, d.Grant, d.Account, d.BillingUnit)
 	acct := v1alpha1.AllocationAccounting{AllocatedBilling: d.AllocatedBilling, ElapsedSeconds: d.ElapsedSeconds}
 	m.unitSecs, m.known = acct.BilledUnitSeconds()
-	m.known = m.known && m.key.unit != ""
+	// The record's own unit is the unit its count is in. The profile's unit now may
+	// have changed since the record was written, so a record without one (written
+	// before the field, or with it named unknown) is unknown, never summed under
+	// the profile's current unit: that would add one unit's hours to another's. It
+	// is still placed by the profile's unit now, so it is counted in a group.
+	m.known = m.known && d.BillingUnit != ""
 	return m
 }
 

@@ -26,12 +26,14 @@ import (
 const accountingUsage = `usage: hpcburst accounting [--state-dir DIR | --kubeconfig FILE] [--json]
 
 Totals the billed units of the kept accounting records and the live Allocations per grant and account, and
-prints the whole days left to a grant's grantEnd when its Provider sets one. A billed unit is the scheduler's
+prints the whole days left to a grant's grantEnd when a Provider of the line's members sets one (the earliest
+such grantEnd, as the Providers' specs say now: a record whose own grant differs from its Provider's current
+grant still shows that Provider's grant end). A billed unit is the scheduler's
 billing count for a job times its elapsed hours, in its partition's billing unit (GPU-hours or CPU-hours): the
 units are never added together, so a grant's GPU and CPU accounts are separate lines. Every figure is
 allocated, not billed. A line counts the members whose figure is unknown beside the sum of the known ones: a
-pending Allocation, a member with its billing count or elapsed time unknown, and a record written before
-those fields. It reads the API with the host's kubeconfig (<state-dir>/kubeconfig), or the one --kubeconfig
+pending Allocation, a member with its billing count, elapsed time or billing unit unknown, and a record
+written before those fields. It reads the API with the host's kubeconfig (<state-dir>/kubeconfig), or the one --kubeconfig
 names, and writes nothing. --json prints the same data.`
 
 // accountingHeading is the first line of the text report.

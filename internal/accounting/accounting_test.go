@@ -277,3 +277,38 @@ func TestParseRecord(t *testing.T) {
 		t.Error("a record that is not JSON was accepted")
 	}
 }
+
+// A record whose own billing unit is unknown, with its billing count known, is an
+// unknown member of its group and adds nothing to any unit's sum. The profile's
+// unit may have changed since the record was written, so it is never read as the
+// record's. Expectations by hand: in HBEP-8's row a1 gains one unknown member,
+// 7 members with 4 unknown and the same 7.0; and with the profile now saying
+// cpu-hour, a record of billing 2 for 3,600 s and no unit is placed in the
+// cpu-hour group as one unknown with 0.0 billed, while the record that names
+// gpu-hour keeps its 2.0 in the gpu-hour group.
+func TestARecordWithAnUnknownUnitIsUnknown(t *testing.T) {
+	noUnit := func(d *v1alpha1.AccountingRecordData) {
+		d.Grant, d.Account = "g1", "a1"
+		d.Unknown = []string{v1alpha1.AccountingFieldBillingUnit}
+	}
+	in := totalsRow()
+	in.Records = append(in.Records, rec("acct-nounit", "prov-a", "gpu-part", ptr.To(int32(2)), 3600, noUnit))
+	checkGroups(t, Summarize(in, now).Groups, []want{
+		{"g1", "a1", v1alpha1.BillingUnitGPUHour, 7.0, 3, 4, ptr.To(45)},
+		{"g1", "a2", v1alpha1.BillingUnitGPUHour, 48.0, 1, 0, nil},
+		{"g1", "c1", v1alpha1.BillingUnitCPUHour, 2.0, 1, 0, nil},
+	})
+
+	in = Inputs{
+		Providers: []v1alpha1.Provider{provider("prov-a", "g1", "a1", "prof-now", nil)},
+		Profiles:  []v1alpha1.PlatformProfile{profile("prof-now", "gpu-part", v1alpha1.BillingUnitCPUHour)}, // changed since the records
+		Records: []Record{
+			rec("acct-named", "prov-a", "gpu-part", ptr.To(int32(2)), 3600, beta("g1", "a1", v1alpha1.BillingUnitGPUHour)),
+			rec("acct-nounit", "prov-a", "gpu-part", ptr.To(int32(2)), 3600, noUnit),
+		},
+	}
+	checkGroups(t, Summarize(in, now).Groups, []want{
+		{"g1", "a1", v1alpha1.BillingUnitCPUHour, 0.0, 0, 1, nil},
+		{"g1", "a1", v1alpha1.BillingUnitGPUHour, 2.0, 1, 0, nil},
+	})
+}
