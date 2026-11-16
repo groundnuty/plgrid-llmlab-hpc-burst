@@ -180,6 +180,17 @@ func refusedMDCases() []guardCase {
 					m.Spec.RetentionPolicy = &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: ptr.To(v1alpha1.Duration("1h"))}
 				})
 			}},
+		// spec.overAllocation is refused for agents (the science agent's ruling on #616, Q12): it is not on the
+		// allowlist, in either direction. The person's same change passes.
+		{name: "spec.overAllocation lowered, 1 to 0 (HBEP-7; refused for agents)", policies: capacity, msg: rest,
+			run: func(w writer, md *v1alpha1.ModelDeployment) error {
+				return w.update(md, func(m *v1alpha1.ModelDeployment) { m.Spec.OverAllocation = ptr.To[int32](0) })
+			}},
+		{name: "spec.overAllocation raised, 0 to 1 (HBEP-7; refused for agents)", policies: capacity, msg: rest,
+			base: func(md *v1alpha1.ModelDeployment) { md.Spec.OverAllocation = ptr.To[int32](0) },
+			run: func(w writer, md *v1alpha1.ModelDeployment) error {
+				return w.update(md, func(m *v1alpha1.ModelDeployment) { m.Spec.OverAllocation = ptr.To[int32](1) })
+			}},
 		{name: "spec.providers changed", policies: capacity, msg: rest,
 			run: func(w writer, md *v1alpha1.ModelDeployment) error {
 				return w.update(md, func(m *v1alpha1.ModelDeployment) { m.Spec.Providers.Names = []string{"helios-a", "helios-b"} })

@@ -86,7 +86,9 @@ func withoutFixture(names, allowlisted []string, fixtures map[string]func(*v1alp
 var specChangeFixtures = map[string]func(*v1alpha1.ModelDeployment){
 	"model":              func(md *v1alpha1.ModelDeployment) { md.Spec.Model = "example-other-model" },
 	"workersPerInstance": func(md *v1alpha1.ModelDeployment) { md.Spec.WorkersPerInstance = ptr.To[int32](2) },
-	"providers":          func(md *v1alpha1.ModelDeployment) { md.Spec.Providers.Names = []string{"helios-a", "helios-b"} },
+	// Refused for agents: the science agent's ruling on #616 (Q12). Unlike hedgeWidth it is not allowlisted.
+	"overAllocation": func(md *v1alpha1.ModelDeployment) { md.Spec.OverAllocation = ptr.To[int32](0) },
+	"providers":      func(md *v1alpha1.ModelDeployment) { md.Spec.Providers.Names = []string{"helios-a", "helios-b"} },
 	"retentionPolicy": func(md *v1alpha1.ModelDeployment) {
 		md.Spec.RetentionPolicy = &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: ptr.To(v1alpha1.Duration("2h"))}
 	},
@@ -119,7 +121,7 @@ func TestSchemaCompletenessFindsAPropertyWithNoFixture(t *testing.T) {
 func TestEveryModelDeploymentSpecPropertyOutsideTheAllowlistIsRefusedForAnAgent(t *testing.T) {
 	specProps, sourceProps := crdSpecProperties(t)
 	// The population is the CRD's: these exist today, and the test must see them.
-	for _, want := range []string{"model", "source", "instances", "providers", "endTime", "retentionPolicy", "leaseLimit", "workload", "routing", "hedgeWidth"} {
+	for _, want := range []string{"model", "source", "instances", "providers", "endTime", "retentionPolicy", "leaseLimit", "workload", "routing", "hedgeWidth", "overAllocation"} {
 		if !slices.Contains(specProps, want) {
 			t.Fatalf("the CRD's spec properties %v lack %q: the test reads the wrong place", specProps, want)
 		}
