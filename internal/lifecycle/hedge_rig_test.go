@@ -277,10 +277,13 @@ func replacementHedge(t *testing.T, h *hedgeRig, b pfake.Script) (string, string
 
 // TestTheFirstToServeWinsAndAPendingLoserIsCancelled: P's replacement hedge has R1 on A, pending, and R2 on B, whose
 // job starts at once. In the pass that sees R2 ready, R1 ends with HedgeLost and its Allocation is deleted; a
-// replaced HedgeLost event regards R1, with no Approval asked for. P serves on until its drain start, 09:50:20, and
-// drains then, R2 serving in its place.
+// replaced HedgeLost event regards R1, with no Approval asked for. R1's Allocation goes with its release cause in the
+// store at the delete, read through the delete: "Instance R1 ended: hedge lost to R2, on Provider example-b (hedge
+// R1)", R1 being the hedge's first member. P serves on until its drain start, 09:50:20, and drains then, R2 serving
+// in its place.
 func TestTheFirstToServeWinsAndAPendingLoserIsCancelled(t *testing.T) {
-	h := newHedgeRig(t)
+	log := newCauseLog()
+	h := newHedgeRig(t, withInterceptors(log.funcs()))
 	p, r1, r2 := replacementHedge(t, h, pfake.Script{})
 	r1Alloc := h.mustInstance(r1).Spec.AllocationRef.Name
 	h.until(10*time.Minute, 10*time.Second, "R2 ready", func() bool { return h.mustInstance(r2).Status.Phase == v1alpha1.InstanceReady })
@@ -290,6 +293,10 @@ func TestTheFirstToServeWinsAndAPendingLoserIsCancelled(t *testing.T) {
 	}
 	if !h.released(r1Alloc) {
 		t.Fatalf("R1's pending Allocation %s was not deleted", r1Alloc)
+	}
+	want := "Instance " + r1 + " ended: hedge lost to " + r2 + ", on Provider " + hedgeB + " (hedge " + r1 + ")"
+	if got, deleted := log.deletedWith(r1Alloc); !deleted || got != want {
+		t.Fatalf("R1's Allocation was deleted %v with the stored release cause %q, want %q", deleted, got, want)
 	}
 	if n := len(h.rec.Find(eventReplaced, v1alpha1.ReasonHedgeLost)); n < 1 {
 		t.Fatal("no replaced event with reason HedgeLost")

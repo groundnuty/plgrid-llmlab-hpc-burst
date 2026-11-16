@@ -228,7 +228,9 @@ func (p *pass) resolveHedges() error {
 // Each raises replaced with reason HedgeLost, regarding the loser, with the winner related. No approval is asked:
 // cancelling a hedge loser needs none (HBEP-10, What needs approval).
 func (p *pass) loseHedge(key string, l, w *v1alpha1.Instance) error {
-	msg := fmt.Sprintf("hedge %s: Instance %s on Provider %s served first", key, w.Name, w.Labels[v1alpha1.LabelProvider])
+	// The words are the controller's own, so they are the release cause of a pending loser's Allocation too
+	// (endCause): "Instance <loser> ended: hedge lost to <winner>, ...".
+	msg := fmt.Sprintf("hedge lost to %s, on Provider %s (hedge %s)", w.Name, w.Labels[v1alpha1.LabelProvider], key)
 	if p.mem.once("hedge-lost/" + string(l.UID)) {
 		p.r.Recorder.Event(l, w, eventReplaced, v1alpha1.ReasonHedgeLost, msg)
 	}
