@@ -36,7 +36,7 @@ const (
 	synUser    = "example-user-x1"
 	synAccount = "example-account-a1"
 	synGrant   = "example-grant-g1"
-	synJob     = "7340211"
+	synJob     = "1234567"
 	synHome    = "/home/" + synUser
 )
 
@@ -119,11 +119,11 @@ func TestNoteTokenMatching(t *testing.T) {
 		{"a user as a path component", "open /home/example-user-x1/usage.jsonl: denied", []string{"path /home/example-user-x1/usage.jsonl", synUser}},
 		{"a bare user", "of example-user-x1, a user", []string{synUser}},
 		{"a user ending a sentence", "it was example-user-x1.", []string{synUser}},
-		{"a job as a whole token", "job 7340211 ended", []string{synJob}},
-		{"a job as a file's stem", "log 7340211.out", []string{synJob}},
-		{"a job inside a longer number", "at 17340211 and 73402110", nil},
-		{"a job inside a hex word", "request ab7340211cd", nil},
-		{"a job with a suffix is another word", "array 7340211_3", nil},
+		{"a job as a whole token", "job 1234567 ended", []string{synJob}},
+		{"a job as a file's stem", "log 1234567.out", []string{synJob}},
+		{"a job inside a longer number", "at 11234567 and 12345670", nil},
+		{"a job inside a hex word", "request ab1234567cd", nil},
+		{"a job with a suffix is another word", "array 1234567_3", nil},
 		{"a user inside a longer name", "example-user-x10 and zexample-user-x1", nil},
 		{"a Kubernetes name is not a path", "Instance ns/i-71 and Allocation team-a/al-a", nil},
 		{"a relative path with two slashes", "see a/b/c now", []string{"path a/b/c"}},

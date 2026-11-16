@@ -43,11 +43,11 @@ func TestTokenHelpers(t *testing.T) {
 // The relay's cause can name the job ("job <ID> is not running"): the RelayEndedForGood
 // message, which the lifecycle controller copies into its failing event, does not.
 func TestARelayFailedMessageNamesNoJobID(t *testing.T) {
-	const id = "7340211"
+	const id = "1234567"
 	for _, cause := range []string{
 		"srun refused the step: step limit reached for this job",
-		"more than 120 restarts of the control channel within 1h0m0s after sessions that came up; the last end: job 7340211 is Pending, not running yet",
-		"the relay line: job ID \"7340211\" is not a Slurm job ID",
+		"more than 120 restarts of the control channel within 1h0m0s after sessions that came up; the last end: job 1234567 is Pending, not running yet",
+		"the relay line: job ID \"1234567\" is not a Slurm job ID",
 	} {
 		msg := relayFailedMessage(agentapi.RelayControl, cause, id)
 		if containsToken(msg, id) {
@@ -58,10 +58,10 @@ func TestARelayFailedMessageNamesNoJobID(t *testing.T) {
 		}
 	}
 	// What is not the job ID stays: a count that holds its digits is no token.
-	if msg := relayFailedMessage(agentapi.RelayControl, "more than 7340211 restarts", id); containsToken(msg, id) {
+	if msg := relayFailedMessage(agentapi.RelayControl, "more than 1234567 restarts", id); containsToken(msg, id) {
 		t.Errorf("message %q: a count that equals the job ID is a token too, and goes", msg)
 	}
-	if msg := relayFailedMessage(agentapi.RelayControl, "73402110 restarts", id); !strings.Contains(msg, "73402110") {
+	if msg := relayFailedMessage(agentapi.RelayControl, "12345670 restarts", id); !strings.Contains(msg, "12345670") {
 		t.Errorf("message %q: a longer number that holds the digits was redacted", msg)
 	}
 }

@@ -25,7 +25,7 @@ const (
 	synUser    = "example-user-x1"
 	synAccount = "example-account-a1"
 	synGrant   = "example-grant-g1"
-	synJob     = "7340211"
+	synJob     = "1234567"
 	// synProxy is a proxy name that is a path under a synthetic home, with each synthetic value as one
 	// component.
 	synProxy = "/home/" + synUser + "/" + synAccount + "/" + synGrant + "/" + synJob + ".sock"
@@ -110,9 +110,9 @@ func TestNoteTokenMatching(t *testing.T) {
 	}{
 		{"a user as a path component", "proxy /home/example-user-x1/a.sock online", []string{"path /home/example-user-x1/a.sock", synUser}},
 		{"a bare user", "of example-user-x1, a user", []string{synUser}},
-		{"a job as a file's stem", "log 7340211.out", []string{synJob}},
-		{"a job inside a longer number", "at 17340211 and 73402110", nil},
-		{"a job with a suffix is another word", "array 7340211_3", nil},
+		{"a job as a file's stem", "log 1234567.out", []string{synJob}},
+		{"a job inside a longer number", "at 11234567 and 12345670", nil},
+		{"a job with a suffix is another word", "array 1234567_3", nil},
 		{"a user inside a longer name", "example-user-x10 and zexample-user-x1", nil},
 		{"a Kubernetes name is not a path", "Allocation team-a/al-a", nil},
 		{"a relative path with two slashes", "see a/b/c now", []string{"path a/b/c"}},

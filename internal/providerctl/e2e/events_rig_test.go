@@ -58,7 +58,7 @@ import (
 // Provider's account and grant, which no typed note may name. They are the
 // same shape as the real ones and none of them is real.
 const (
-	firstJobID = 7340211
+	firstJobID = 1234567
 	rowAccount = "example-account-a1"
 	rowGrant   = "example-grant-g1"
 	rowPart    = "example-gpu"
