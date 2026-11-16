@@ -591,6 +591,7 @@ type ActiveDeploymentID struct {
 //
 // +kubebuilder:validation:XValidation:rule="self.count == (has(self.outcomes) ? size(self.outcomes) : 0)",message="count is the number of outcomes kept"
 // +kubebuilder:validation:XValidation:rule="self.failures == (has(self.outcomes) ? size(self.outcomes.filter(o, o.result == 'Failed')) : 0)",message="failures is the number of outcomes kept whose result is Failed"
+// +kubebuilder:validation:XValidation:rule="(has(self.qualificationFailures) ? self.qualificationFailures : 0) == (has(self.outcomes) ? size(self.outcomes.filter(o, o.result == 'Failed' && has(o.reason) && (o.reason == 'VerificationFailed' || o.reason == 'QualificationFailed'))) : 0)",message="qualificationFailures is the number of outcomes kept whose result is Failed and whose reason is VerificationFailed or QualificationFailed, 0 when absent"
 type ClassStartOutcomes struct {
 	// AcceleratorClass is the class the outcomes were recorded in.
 	AcceleratorClass `json:",inline"`
@@ -672,7 +673,9 @@ type StartOutcome struct {
 	// Passed, Missed or Suspended verdict.
 	//
 	// +optional
+	// +kubebuilder:validation:MaxLength=10
 	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}$`
+	// +kubebuilder:validation:XValidation:rule="string(timestamp(self + 'T00:00:00Z')).startsWith(self)",message="referenceDate must be a real calendar date, YYYY-MM-DD"
 	ReferenceDate string `json:"referenceDate,omitempty"`
 }
 

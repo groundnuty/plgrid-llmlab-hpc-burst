@@ -64,6 +64,8 @@ type ReferenceKey struct {
 	// checkpoint, the engine version, the image digest and every ID-input
 	// flag, so an entry holds for one class and one engine build.
 	//
+	// +kubebuilder:validation:MinLength=12
+	// +kubebuilder:validation:MaxLength=12
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{12}$`
 	DeploymentID string `json:"deploymentID"`
 
@@ -153,7 +155,9 @@ type ExpectedPerformance struct {
 	// entry gates for 90 days from its date, then records only (HBEP-4,
 	// Ageing and refresh).
 	//
+	// +kubebuilder:validation:MaxLength=10
 	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}$`
+	// +kubebuilder:validation:XValidation:rule="string(timestamp(self + 'T00:00:00Z')).startsWith(self)",message="date must be a real calendar date, YYYY-MM-DD"
 	Date string `json:"date"`
 }
 
@@ -168,7 +172,9 @@ type SuspendedReference struct {
 
 	// Date is the suspended entry's date.
 	//
+	// +kubebuilder:validation:MaxLength=10
 	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}$`
+	// +kubebuilder:validation:XValidation:rule="string(timestamp(self + 'T00:00:00Z')).startsWith(self)",message="date must be a real calendar date, YYYY-MM-DD"
 	Date string `json:"date"`
 
 	// SuspendedTime is when the second miss suspended it.
@@ -190,7 +196,9 @@ type InstanceGate struct {
 	// ReferenceDate is the matched expected-performance entry's date.
 	//
 	// +optional
+	// +kubebuilder:validation:MaxLength=10
 	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}$`
+	// +kubebuilder:validation:XValidation:rule="string(timestamp(self + 'T00:00:00Z')).startsWith(self)",message="referenceDate must be a real calendar date, YYYY-MM-DD"
 	ReferenceDate string `json:"referenceDate,omitempty"`
 
 	// Misses are the measurements that missed, oldest first, one per worker
