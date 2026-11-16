@@ -225,6 +225,19 @@ func TestGateRecordsOnlyWithNoMatchingEntry(t *testing.T) {
 				return []v1alpha1.ExpectedPerformance{gateEntryFor(id), gateEntryFor(id, func(e *v1alpha1.ExpectedPerformance) { e.Date = "2026-10-20" })}
 			},
 			[]string{"records only", "2 entries match", "2026-10-20", "2026-10-23"}, ""},
+		{"two entries equal only by sameSetting, 0.9 and 0.90", []func(*v1alpha1.ModelDeployment){gateFlag("gpu-memory-utilization", "0.9")},
+			func(id string) []v1alpha1.ExpectedPerformance {
+				flags := func(util string) func(*v1alpha1.ExpectedPerformance) {
+					return func(e *v1alpha1.ExpectedPerformance) {
+						e.CapacityFlags = gateFlags("max-num-seqs", "16", "gpu-memory-utilization", util)
+					}
+				}
+				return []v1alpha1.ExpectedPerformance{
+					gateEntryFor(id, flags("0.9"), func(e *v1alpha1.ExpectedPerformance) { e.Date = "2026-10-20" }),
+					gateEntryFor(id, flags("0.90")),
+				}
+			},
+			[]string{"records only", "2 entries match", "2026-10-20", "2026-10-23"}, ""},
 		{"an entry with a date that does not parse", nil,
 			oneEntry(func(e *v1alpha1.ExpectedPerformance) { e.Date = "2026-13-45" }),
 			[]string{"no entry matches", `"2026-13-45"`}, ""},

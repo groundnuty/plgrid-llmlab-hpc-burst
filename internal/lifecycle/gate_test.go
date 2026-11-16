@@ -218,6 +218,33 @@ func TestMatchReferenceTwoEntriesNameEachDate(t *testing.T) {
 	}
 }
 
+// Two entries whose keys differ only by flag values that sameSetting reads as
+// equal (0.9 and 0.90) are both the Instance's match, so the gate records only:
+// the CRD's uniqueness rule compares those values as text and admits the pair,
+// and this is what covers it (HBEP-4: entries are unique by key, and a CRD
+// rule cannot compare values as sameSetting does).
+func TestMatchReferenceTwoEntriesEqualOnlyBySameSetting(t *testing.T) {
+	now := time.Date(2026, 11, 2, 8, 0, 0, 0, time.UTC)
+	key := func(util string) v1alpha1.ReferenceKey {
+		k := gateKey()
+		k.CapacityFlags = gateFlags("max-num-seqs", "16", "gpu-memory-utilization", util)
+		return k
+	}
+	a, b := gateFixtureEntry(key("0.9")), gateFixtureEntry(key("0.90"))
+	a.Date, b.Date = "2026-10-20", "2026-10-23"
+	for _, instance := range []string{"0.9", "0.90", "0.900"} {
+		ref := matchReference(gateProfile(a, b), key(instance), now)
+		if ref.entry != nil || ref.date != "" || !strings.Contains(ref.why, "2 entries match") || !strings.Contains(ref.why, "2026-10-20") || !strings.Contains(ref.why, "2026-10-23") {
+			t.Errorf("an Instance at %s: reference %+v, want no entry and a reason naming both dates", instance, ref)
+		}
+	}
+	// Control: with 0.85 as the second entry's value only the first matches.
+	c := gateFixtureEntry(key("0.85"))
+	if ref := matchReference(gateProfile(a, c), key("0.90"), now); ref.entry == nil || ref.entry.Date != "2026-10-20" {
+		t.Errorf("one entry equal and one different: reference %+v, want the equal entry", ref)
+	}
+}
+
 // A date that does not parse matches nothing, and the message names it; the
 // same key with a readable date still matches alone.
 func TestMatchReferenceUnreadableDateMatchesNothing(t *testing.T) {
