@@ -592,7 +592,8 @@ func TestAnExtraGetsNoMember(t *testing.T) {
 // TestASurplusHedgeGetsNoNewMember (#616; agreed with k616): hedgeWidth 3, and A, B and C allowed. A deployment of two
 // makes R and M1 on A at 08:00:00, M1 pending 10 h; as R's job starts at 08:00:10, M1's hedge gets M2 on B (pending 10
 // h). Its count is then lowered to 1, so R is chosen and M1's hedge is surplus, and the clock is moved to 08:30:10, past
-// M2's hedge time, 08:30:00 (C has no wait), with no pass in between. A pass's growth adds no third member on C.
+// M2's hedge time, 08:30:00 (C has no wait), with the Providers' controllers syncing every minute and no reconcile
+// pass in between. A pass's growth adds no third member on C, though C is usable and M1's hedge is due one.
 //
 // On main a surplus hedge of two never reaches growth: step 7, which runs first, takes it whole (#635's scaleUnits).
 // So growth is called on its own here, on the pass's state: the filter's contract, for when #616 keeps such a hedge.
@@ -616,11 +617,26 @@ func TestASurplusHedgeGetsNoNewMember(t *testing.T) {
 	}
 	m1, m2 := onB[0].Annotations[v1alpha1.AnnotationHedgeGroup], onB[0].Name
 	h.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 1 })
-	h.clock.Advance(30 * time.Minute) // 08:30:10, no pass between
+	// To 08:30:10 with no reconcile pass, the Providers' controllers syncing each minute so their heartbeats stay
+	// fresh: a Provider unsynced for 30 min reads unusable, and growth would have nowhere to go.
+	for range 30 {
+		h.clock.Advance(time.Minute)
+		if err := h.prov.Sync(h.ctx); err != nil {
+			t.Fatal(err)
+		}
+		for _, x := range h.extra {
+			if err := x.prov.Sync(h.ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	p := h.passOf(hoMD)
 	chosen := p.primaries()
 	if len(chosen) != 1 || hedgeKey(chosen[0]) == m1 {
 		t.Fatalf("the chosen primaries are %v, want R alone: M1's hedge must be surplus, or the test proves nothing", names(chosen))
+	}
+	if pv := p.pvByName["example-c"]; pv == nil || !pv.usable() {
+		t.Fatal("C is not usable at 08:30:10: growth could place nothing there anyway, so the test proves nothing")
 	}
 	if err := p.growHedges(); err != nil {
 		t.Fatal(err)
