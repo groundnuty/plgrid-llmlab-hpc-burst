@@ -163,6 +163,13 @@ type Options struct {
 	// Now is the clock that names a batch's file by its UTC day and times a
 	// failure. Nil is time.Now.
 	Now func() time.Time
+	// Synced, when set, is called by the writer goroutine after each batch that was written and
+	// synced, with the batch's first and last counter and the exact bytes written: each record's
+	// line with its newline, as the file holds it (HBEP-8, The durable log, Who writes: the
+	// forwarder takes only what the sink has synced). It runs before the batch's Writes return,
+	// so a Write that returned has been offered, and it must not block: a Write waits for it.
+	// The sink keeps no reference to lines after the call.
+	Synced func(first, last uint64, lines []byte)
 }
 
 // hooks are the seams the tests use to make the disk fail.
@@ -184,6 +191,7 @@ type Sink struct {
 	logger *slog.Logger
 	now    func() time.Time
 	h      hooks
+	synced func(first, last uint64, lines []byte)
 
 	mu       sync.Mutex
 	next     uint64 // the next counter to use
@@ -195,6 +203,7 @@ type Sink struct {
 	err      error  // the latest failure; nil once a batch succeeds
 	failures uint64 // the batches and counter blocks that failed
 	records  uint64 // the records written and synced
+	lastSync uint64 // the last counter of the latest batch synced, or of the files' last whole line at Open
 	lost     uint64 // the records not written: those of a failed batch, or one that got no counter
 	since    time.Time
 
@@ -247,10 +256,14 @@ func open(dir string, o Options, h hooks) (*Sink, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Sink{dir: dir, logger: o.Logger, now: o.Now, h: h, next: end + 1, blockEnd: end,
+	s := &Sink{dir: dir, logger: o.Logger, now: o.Now, h: h, synced: o.Synced, next: end + 1, blockEnd: end,
 		wake: make(chan struct{}, 1), done: make(chan struct{})}
 	s.since = s.now()
 	if err := s.repairNewest(); err != nil {
+		return nil, err
+	}
+	// What the files hold at Open, whole lines after the repair, was synced by an earlier run.
+	if s.lastSync, err = LastCounter(dir); err != nil {
 		return nil, err
 	}
 	go s.run()
@@ -403,12 +416,14 @@ func lineEnd(f *os.File, size int64) (int64, error) {
 // the Writes waiting on it. The outcome is recorded first, so that a Write
 // that returns an error already finds it in Err and Stats.
 func (s *Sink) flush(batch []pending) {
-	err := s.commit(batch)
+	lines, err := s.commit(batch)
+	first, last := batch[0].rec.Counter, batch[len(batch)-1].rec.Counter
 	s.mu.Lock()
 	if err != nil {
 		s.failedLocked(err, uint64(len(batch)))
 	} else {
 		s.records += uint64(len(batch))
+		s.lastSync = max(s.lastSync, last)
 		if s.err != nil {
 			s.since = s.now() // the disk has recovered
 		}
@@ -417,7 +432,9 @@ func (s *Sink) flush(batch []pending) {
 	s.mu.Unlock()
 	if err != nil {
 		s.logger.Error("usage: a batch of records was not written to the log", "error", err,
-			"records", len(batch), "firstCounter", batch[0].rec.Counter, "lastCounter", batch[len(batch)-1].rec.Counter)
+			"records", len(batch), "firstCounter", first, "lastCounter", last)
+	} else if s.synced != nil {
+		s.synced(first, last, lines)
 	}
 	for _, p := range batch {
 		p.done <- err
@@ -440,22 +457,25 @@ func (s *Sink) failedLocked(err error, n uint64) {
 // gap. A sync that fails leaves whole lines, and they are kept. The log is the
 // file of the UTC day of this write: the first batch after midnight opens the
 // next day's file and leaves the closed one as it is.
-func (s *Sink) commit(batch []pending) error {
+//
+// It returns the exact bytes it wrote, each record's line with its newline, when the batch was written and
+// synced; the bytes are the caller's to keep, as the sink uses its buffer for nothing more.
+func (s *Sink) commit(batch []pending) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	for _, p := range batch {
 		if err := enc.Encode(p.rec); err != nil {
-			return fmt.Errorf("usage: encode a record: %w", err)
+			return nil, fmt.Errorf("usage: encode a record: %w", err)
 		}
 	}
 	if s.torn {
 		// The partial line is still there; writing now would join it.
 		if err := s.cutBack(); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if err := s.rotate(); err != nil {
-		return err
+		return nil, err
 	}
 	n, err := s.log.Write(buf.Bytes())
 	if err == nil && n != buf.Len() {
@@ -466,13 +486,13 @@ func (s *Sink) commit(batch []pending) error {
 		if cerr := s.cutBack(); cerr != nil {
 			err = errors.Join(err, cerr)
 		}
-		return err
+		return nil, err
 	}
 	s.size += int64(n)
 	if err := s.log.Sync(); err != nil {
-		return fmt.Errorf("usage: sync the log: %w", err)
+		return nil, fmt.Errorf("usage: sync the log: %w", err)
 	}
-	return nil
+	return buf.Bytes(), nil
 }
 
 // rotate makes the log the file of the UTC day of this write, when it is not
@@ -548,13 +568,18 @@ type Stats struct {
 	// Since is when the sink entered its current state: Open, the first
 	// failure of a run of them, or the first batch that succeeded after one.
 	Since time.Time
+	// LastSynced is the last counter on disk as a synced record: the last counter of the
+	// latest batch that was written and synced, or, before one, the counter of the last
+	// whole line the files held at Open (0 when they held none). The durable log's forwarder
+	// reads the files only up to it (HBEP-8, The durable log, Who writes).
+	LastSynced uint64
 }
 
 // Stats returns the sink's counts and state.
 func (s *Sink) Stats() Stats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return Stats{Records: s.records, Lost: s.lost, Failures: s.failures, Err: s.err, Since: s.since}
+	return Stats{Records: s.records, Lost: s.lost, Failures: s.failures, Err: s.err, Since: s.since, LastSynced: s.lastSync}
 }
 
 // Close writes what is queued and closes the log. It returns the error of the
