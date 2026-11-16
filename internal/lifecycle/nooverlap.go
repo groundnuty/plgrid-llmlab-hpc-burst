@@ -120,7 +120,9 @@ func (p *pass) decideOverlap(in *v1alpha1.Instance) (overlapCheck, error) {
 	if repl := p.replacementOf(in); repl != nil {
 		skip = append(skip, in.Namespace+"/"+repl.Spec.AllocationRef.Name)
 	}
-	slotFree, slotWhy, err := p.slotFor(pv, skip)
+	// The primary's own reserved slot is held for this very replacement, which takes it (slots_reserved.go).
+	takers := []string{in.Namespace + "/" + in.Spec.AllocationRef.Name}
+	slotFree, slotWhy, err := p.slotFor(pv, skip, takers)
 	if err != nil {
 		return overlapCheck{}, err
 	}
@@ -145,7 +147,7 @@ func (p *pass) decideOverlap(in *v1alpha1.Instance) (overlapCheck, error) {
 		if err != nil {
 			continue
 		}
-		free, _, err := p.slotFor(q, skip)
+		free, _, err := p.slotFor(q, skip, takers)
 		if err != nil {
 			return overlapCheck{}, err
 		}
@@ -170,21 +172,26 @@ func (p *pass) reusableWarm(pv *providerView, params v1alpha1.BatchParameters) b
 }
 
 // slotFor reports whether the Provider's count leaves a free submit slot,
-// not counting the Allocations in skip, and if not, why, naming the Provider
-// and its limit.
-func (p *pass) slotFor(pv *providerView, skip []string) (bool, string, error) {
+// not counting the Allocations in skip nor the reserved slots of takers, and
+// if not, why, naming the Provider, its limit and the handovers whose
+// reserved slots are counted, if any.
+func (p *pass) slotFor(pv *providerView, skip, takers []string) (bool, string, error) {
 	lim := pv.limits.MaxSubmitPerUser
 	if lim == nil {
 		return true, "", nil
 	}
-	n, err := p.r.slots().count(p.ctx, p.r.Reader, pv.name, p.now, skip...)
+	q := slotAsk{provider: pv.name, takers: takers}
+	if pv.profile != nil {
+		q.profile = &pv.profile.Spec
+	}
+	n, reserved, by, err := p.r.slots().countAsk(p.ctx, p.r.Reader, q, p.now, skip...)
 	if err != nil {
 		return false, "", err
 	}
 	if n+1 <= int(*lim) {
 		return true, "", nil
 	}
-	return false, fmt.Sprintf("Provider %s has no free submit slot for a replacement: %d Allocations still holding a slot, at its %s", pv.name, n, submitLimitText(pv)), nil
+	return false, fmt.Sprintf("Provider %s has no free submit slot for a replacement: %d Allocations still holding a slot, at its %s%s", pv.name, n-reserved, submitLimitText(pv), reservedText(reserved, by)), nil
 }
 
 // capsExceeded returns why the predecessor's Allocation (pred) and its
@@ -252,40 +259,82 @@ type gapCarrier struct {
 // successor names as its predecessor no longer carries it; the successor does.
 // A queued successor not yet stamped (its predecessor has not drained)
 // carries nothing: a predecessor that fails first is a failure, not a gap.
+//
+// The reserved slot of a gap's successor (slots_reserved.go, reservedOn) reads
+// the same two helpers, gapPassed and gapOf, so the two never disagree about
+// which Instance carries a gap (#599's review).
 func (p *pass) gapCarriers() []gapCarrier {
-	passed := map[string]bool{}
-	for _, in := range p.insts {
-		if pred := in.Annotations[v1alpha1.AnnotationPredecessor]; pred != "" && !p.stale[in.UID] && in.Annotations[annotationNoOverlapGap] != "" {
-			passed[pred] = true
-		}
-	}
+	notStale := func(in *v1alpha1.Instance) bool { return !p.stale[in.UID] }
+	passed := gapPassed(p.insts, notStale)
 	var out []gapCarrier
 	for _, in := range p.insts {
-		if p.stale[in.UID] || passed[in.Name] {
+		if !notStale(in) {
 			continue
 		}
-		if why := in.Annotations[annotationNoOverlap]; why != "" {
-			if _, began := drainBegan(in); began && !countable(in) {
-				out = append(out, gapCarrier{in: in, drained: in.Name, why: why})
-			}
-			continue
-		}
-		why, drained := in.Annotations[annotationNoOverlapSuccessor], in.Annotations[annotationNoOverlapGap]
-		if why != "" && drained != "" && in.Status.ReadyTime == nil {
-			out = append(out, gapCarrier{in: in, drained: drained, why: why})
+		if g, ok := gapOf(in, passed); ok {
+			out = append(out, g)
 		}
 	}
 	return out
+}
+
+// gapPassed returns the Instances (namespace/name) that a stamped successor
+// names as its predecessor, among those keep keeps: they carry no gap any
+// more, the successor does (gapCarriers).
+func gapPassed(insts []*v1alpha1.Instance, keep func(*v1alpha1.Instance) bool) map[string]bool {
+	passed := map[string]bool{}
+	for _, in := range insts {
+		if pred := in.Annotations[v1alpha1.AnnotationPredecessor]; pred != "" && keep(in) && in.Annotations[annotationNoOverlapGap] != "" {
+			passed[in.Namespace+"/"+pred] = true
+		}
+	}
+	return passed
+}
+
+// gapOf reports whether in carries a gap, and which (gapCarriers): a primary
+// that drained in the mode and is out of service, or a stamped successor that
+// has not been ready, either not passed on to a successor of its own.
+func gapOf(in *v1alpha1.Instance, passed map[string]bool) (gapCarrier, bool) {
+	if passed[in.Namespace+"/"+in.Name] {
+		return gapCarrier{}, false
+	}
+	if why := in.Annotations[annotationNoOverlap]; why != "" {
+		if _, began := drainBegan(in); began && !countable(in) {
+			return gapCarrier{in: in, drained: in.Name, why: why}, true
+		}
+		return gapCarrier{}, false
+	}
+	why, drained := in.Annotations[annotationNoOverlapSuccessor], in.Annotations[annotationNoOverlapGap]
+	if why != "" && drained != "" && in.Status.ReadyTime == nil {
+		return gapCarrier{in: in, drained: drained, why: why}, true
+	}
+	return gapCarrier{}, false
 }
 
 // noOverlapCarriers returns the gap carriers that are out of service: each is
 // the predecessor of a missing primary, which step 7 creates as its successor,
 // marked, on its Provider first (HBEP-7, Handover, No-overlap mode, the
 // one-slot path), whether the carrier drained or is a successor that failed.
+//
+// The reserved slot held for each such successor (slots_reserved.go,
+// reservedOn) is read from the same helper, outOfServiceCarriers, so the
+// Instances step 7 makes successors of and those whose slot is held for them
+// are one set (#599's review).
 func (p *pass) noOverlapCarriers() []gapCarrier {
+	return outOfServiceCarriers(p.insts, func(in *v1alpha1.Instance) bool { return !p.stale[in.UID] })
+}
+
+// outOfServiceCarriers returns the gap carriers among the Instances keep keeps
+// that are out of service (gapPassed, gapOf, not countable): the predecessors
+// step 7 makes no-overlap successors of.
+func outOfServiceCarriers(insts []*v1alpha1.Instance, keep func(*v1alpha1.Instance) bool) []gapCarrier {
+	passed := gapPassed(insts, keep)
 	var out []gapCarrier
-	for _, g := range p.gapCarriers() {
-		if !countable(g.in) {
+	for _, in := range insts {
+		if !keep(in) {
+			continue
+		}
+		if g, ok := gapOf(in, passed); ok && !countable(g.in) {
 			out = append(out, g)
 		}
 	}
