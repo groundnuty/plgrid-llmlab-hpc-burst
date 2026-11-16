@@ -43,7 +43,7 @@ func (p *pass) starting(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av ag
 	// (the agent's contract), so it takes the whole-Instance rung at once
 	// rather than waiting for health.startTimeout.
 	if st2 := ir.Staging; st2 != nil && st2.Phase == agentapi.StagingFailed && ir.Generation == restartGeneration(in, v1alpha1.PartInstance) {
-		return p.restart(in, alloc, signalStaging, v1alpha1.PartInstance, st, "staging failed: "+st2.Message)
+		return p.restart(in, alloc, signalStaging, v1alpha1.PartInstance, st, stagingFailedNote)
 	}
 	if in.Status.Phase == v1alpha1.InstanceStarting && workerRunning(ir, in) {
 		if err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) { s.Phase = v1alpha1.InstanceVerifying }); err != nil {
@@ -206,7 +206,7 @@ func tunnelDown(in *v1alpha1.Instance) bool {
 func startTimeoutReason(in *v1alpha1.Instance, st settings) (string, string) {
 	if tunnelDown(in) {
 		c := apimeta.FindStatusCondition(in.Status.Conditions, v1alpha1.ConditionTunnelConnected)
-		return v1alpha1.ReasonTunnelNotConnected, fmt.Sprintf("not ready within %s of its start instruction or its last restart, and its tunnel is not connected (TunnelConnected %s, %s: %s)", st.startTimeout, c.Status, c.Reason, c.Message)
+		return v1alpha1.ReasonTunnelNotConnected, fmt.Sprintf("not ready within %s of its start instruction or its last restart, and its tunnel is not connected (TunnelConnected %s, %s)", st.startTimeout, c.Status, c.Reason)
 	}
 	return v1alpha1.ReasonStartTimeout, fmt.Sprintf("not ready within %s of its start instruction", st.startTimeout)
 }
@@ -302,7 +302,7 @@ func (p *pass) verified(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, v *ag
 	}
 	return p.failedVerification(in, alloc, name, data, st,
 		func() (bool, error) { return p.r.earlierRehashFailure(p.ctx, in, gen) },
-		func() error { return p.restart(in, alloc, signalVerifyRead, "", st, data.Message) })
+		func() error { return p.restart(in, alloc, signalVerifyRead, "", st, verificationNote(data.Cause)) })
 }
 
 // failedVerification acts on a failed verification record: a failed rehash restages through the
@@ -321,7 +321,8 @@ func (p *pass) failedVerification(in *v1alpha1.Instance, alloc *v1alpha1.Allocat
 			// (HBEP-7, Instance start).
 			return p.restart(in, alloc, signalRehash, v1alpha1.PartInstance, st)
 		}
-		return p.fail(in, alloc, v1alpha1.ReasonVerificationFailed, "the rehash failed again after restaging: "+data.Message)
+		return p.failNoted(in, alloc, v1alpha1.ReasonVerificationFailed, "the rehash failed again after restaging: "+data.Message,
+			"the rehash failed again after restaging: "+verificationNote(data.Cause))
 	case causeError:
 		// One failed engine read (a slow first request, a metrics read) is
 		// not a verdict on the engine: verify again after a worker restart,
@@ -332,7 +333,7 @@ func (p *pass) failedVerification(in *v1alpha1.Instance, alloc *v1alpha1.Allocat
 		lifts := stopLifts(data.Cause, true)
 		// The Instance caused it, so it is the event's related object (HBEP-8, Events; as for CapacityDropped).
 		p.r.Recorder.Event(p.mdObject(in), in, eventDegraded, v1alpha1.ReasonVerificationFailed,
-			fmt.Sprintf("Instance %s: %s; provisioning in its class stops until %s", in.Name, data.Message, lifts))
+			fmt.Sprintf("Instance %s: %s; provisioning in its class stops until %s", in.Name, verificationNote(data.Cause), lifts))
 		// Stop the class in this pass too: the record stops it in every later
 		// one (classBlocked), and this pass must not provision there either.
 		if pv := p.pvOf(in.Labels); pv != nil && pv.hasClass && p.ids[pv.class] != nil && string(p.ids[pv.class].id) == string(in.Spec.DeploymentID) {
@@ -340,7 +341,7 @@ func (p *pass) failedVerification(in *v1alpha1.Instance, alloc *v1alpha1.Allocat
 			p.degrade(v1alpha1.ReasonVerificationFailed, "provisioning in class %s/%s is stopped until %s: %s", pv.class.GPUModel, pv.class.CPUArch, lifts, data.Message)
 		}
 	}
-	return p.fail(in, alloc, v1alpha1.ReasonVerificationFailed, data.Message)
+	return p.failNoted(in, alloc, v1alpha1.ReasonVerificationFailed, data.Message, verificationNote(data.Cause))
 }
 
 func restartKind(in *v1alpha1.Instance) string {

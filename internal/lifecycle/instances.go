@@ -106,14 +106,29 @@ func (p *pass) allocationFailed(in *v1alpha1.Instance, alloc *v1alpha1.Allocatio
 		// controller starts no relay of that channel again (HBEP-6, What
 		// ends a relay), so the Instance cannot serve, and the Allocation
 		// is released at once, as for any failed Instance (HBEP-7, Release).
-		return true, p.fail(in, alloc, string(v1alpha1.ConditionRelayEndedForGood), fmt.Sprintf("Allocation %s: %s", alloc.Name, c.Message))
+		// The condition's message is the relay's own cause, which can carry a path
+		// or an ssh error: the status keeps it, and the logged note gives the reason
+		// code and a fixed description (HBEP-8, Allocation events, No job ID, path
+		// or name in a note).
+		return true, p.failNoted(in, alloc, string(v1alpha1.ConditionRelayEndedForGood), fmt.Sprintf("Allocation %s: %s", alloc.Name, c.Message),
+			fmt.Sprintf("a relay of Allocation %s ended for good; the Allocation's RelayEndedForGood condition has the cause", alloc.Name))
 	}
 	if reason != "" {
 		msg := fmt.Sprintf("Allocation %s is %s", alloc.Name, obs.Phase)
+		note := msg
 		if obs.Reason != "" {
 			msg += ": " + obs.Reason
+			// The Provider's status text can be an error of the profile reader, which
+			// names a credentials file's path: only a bare reason code, the scheduler's
+			// or the Provider's, is copied into the logged note, and anything longer
+			// is left to status.atProvider.reason.
+			if code := reasonCodeOf(obs.Reason); code != "" {
+				note += ": " + code
+			} else {
+				note += "; status.atProvider.reason has the reason"
+			}
 		}
-		return true, p.fail(in, alloc, reason, msg)
+		return true, p.failNoted(in, alloc, reason, msg, note)
 	}
 	if obs.Phase != v1alpha1.AllocationEnded {
 		return false, nil
@@ -138,13 +153,27 @@ func (p *pass) failCheck(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, typ,
 	}); err != nil {
 		return err
 	}
-	return p.fail(in, alloc, v1alpha1.ReasonQualificationFailed, msg)
+	// The check's message can carry what the engine answered, or an error of its
+	// own: the condition above keeps it, and the logged note says which check
+	// failed (HBEP-8, Allocation events, No job ID, path or name in a note).
+	return p.failNoted(in, alloc, v1alpha1.ReasonQualificationFailed, msg,
+		fmt.Sprintf("the Instance's %s check failed; its %s condition has the detail", typ, typ))
 }
 
 // fail ends a failing Instance with a failing event and releases its
 // Allocation at once, since nothing on it serves (HBEP-7, Release).
 func (p *pass) fail(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, reason, msg string) error {
-	p.r.Recorder.Event(in, nil, eventFailing, reason, msg)
+	return p.failNoted(in, alloc, reason, msg, msg)
+}
+
+// failNoted is fail with a note of its own for the event: msg goes to status (the
+// Instance's end message), note to the event, which the durable log keeps. A
+// failure whose message copies text from outside the controller (the Provider's
+// condition, an agent's check, an engine's error) logs the reason code and a
+// fixed description in note, never that text, and keeps the detail in status
+// (HBEP-8, Allocation events, No job ID, path or name in a note).
+func (p *pass) failNoted(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, reason, msg, note string) error {
+	p.r.Recorder.Event(in, nil, eventFailing, reason, note)
 	return p.end(in, alloc, reason, msg, true)
 }
 
@@ -417,7 +446,7 @@ func (p *pass) running(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) error 
 			// A second execution of the job: nothing from the first is reused
 			// (HBEP-7, Test plan; HBEP-3, open question 13).
 			return p.fail(in, alloc, v1alpha1.ReasonRequeued,
-				fmt.Sprintf("job %s registered again as agent %s with restart count %d: a requeue", reg.jobID, reg.agentInstanceID, reg.restartCount))
+				fmt.Sprintf("the job registered again as agent %s with restart count %d: a requeue", reg.agentInstanceID, reg.restartCount))
 		}
 	}
 	pv := p.pvOf(in.Labels)

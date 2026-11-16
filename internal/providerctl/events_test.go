@@ -1,13 +1,20 @@
 package providerctl
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
@@ -19,6 +26,11 @@ import (
 // HBEP-8 (Allocation events (beta); The durable log, Streams, The event's id).
 // The unit tests read the typed recorder's double, so they judge the decisions
 // and the ids; the rows that list the Events the API holds are in e2e.
+//
+// The ids are asserted on the double because eventcount's EventfID drops the id
+// before the API: an events.k8s.io Event holds none. Until the durable log's
+// publisher exists (PR E2, #625), the double is the only place an id can be read;
+// E2 verifies the STORED ids from the log itself, which is where an id is kept.
 
 func longAlloc(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.TimeLimit = "3h" }
 
@@ -409,5 +421,81 @@ func TestTheInvalidProfileNoteNamesFieldsOnly(t *testing.T) {
 	}
 	if got := invalidProfileNote(fmt.Errorf("some other refusal")); got != "the Provider's profile or settings are invalid" {
 		t.Errorf("note %q for an error that is no InvalidProfileError", got)
+	}
+}
+
+// A failed Instance List at a job's first end before its hard end fails the
+// pass and keeps the stored status: the planned-or-not decision needs it, and a
+// planned end must never be announced as a failure (nor a failure as planned) on
+// a guess. No end event is raised in that pass, and the next pass, with the List
+// working, raises the right one: JobEnded while an Instance of the Allocation
+// drains, AllocationEndedEarly while none does.
+func TestAFailedInstanceListAtAnEarlyEndKeepsTheStoredStatus(t *testing.T) {
+	for _, drains := range []bool{true, false} {
+		t.Run(fmt.Sprintf("drains=%v", drains), func(t *testing.T) {
+			e := newEnv(t)
+			var failing atomic.Bool
+			wc, ok := e.c.(client.WithWatch)
+			if !ok {
+				t.Fatal("the harness's client is not a WithWatch client")
+			}
+			reader := interceptor.NewClient(wc, interceptor.Funcs{
+				List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if _, isInstances := list.(*v1alpha1.InstanceList); isInstances && failing.Load() {
+						return errors.New("an injected failure of the Instance list")
+					}
+					return cl.List(ctx, list, opts...)
+				},
+			})
+			ctl, err := New(e.c, reader, e.c.Scheme(), e.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.ctl = ctl
+			e.newAlloc("a", longAlloc)
+			e.run("a", 4)
+			if ptPhase(e, "a") != v1alpha1.AllocationRunning {
+				t.Fatalf("phase %s, want Running", ptPhase(e, "a"))
+			}
+			if drains {
+				in := &v1alpha1.Instance{ObjectMeta: metav1.ObjectMeta{Name: "i", Namespace: testNS},
+					Spec: v1alpha1.InstanceSpec{AllocationRef: v1alpha1.ObjectReference{Name: "a"}}}
+				in.Status.Phase = v1alpha1.InstanceDraining
+				if err := e.c.Create(e.ctx, in); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := e.get("a").Status.AtProvider
+			e.clock.Advance(10 * time.Minute)
+			e.batch.CancelExternally(ptJobID(e, "a"))
+
+			failing.Store(true)
+			e.run("a", 1)
+			got := e.get("a")
+			synced := got.GetCondition(xpv2.TypeSynced)
+			if synced.Status != corev1.ConditionFalse || !strings.Contains(synced.Message, "to tell a planned end from an early one") {
+				t.Errorf("Synced is %s %q, want False with the failed list named", synced.Status, synced.Message)
+			}
+			if got.Status.AtProvider.Phase != before.Phase || got.Status.AtProvider.EndTime != nil || got.Status.AtProvider.Reason != before.Reason {
+				t.Errorf("the stored status moved: phase %s end %v reason %q, want phase %s, no end time and reason %q kept",
+					got.Status.AtProvider.Phase, got.Status.AtProvider.EndTime, got.Status.AtProvider.Reason, before.Phase, before.Reason)
+			}
+			if e.typed.has("JobEnded") || e.typed.has("AllocationEndedEarly") {
+				t.Fatalf("an end event was raised in the pass whose list failed: %v", e.typed.reasons())
+			}
+
+			failing.Store(false)
+			e.run("a", 1)
+			want, other := "AllocationEndedEarly", "JobEnded"
+			if drains {
+				want, other = other, want
+			}
+			if n := len(e.typed.of(want)); n != 1 || e.typed.has(other) {
+				t.Errorf("after the list works again: %d %s and %d %s, want one %s (all: %v)", n, want, len(e.typed.of(other)), other, want, e.typed.reasons())
+			}
+			if ph := ptPhase(e, "a"); ph != v1alpha1.AllocationEnded {
+				t.Errorf("phase %s after the list works again, want Ended", ph)
+			}
+		})
 	}
 }

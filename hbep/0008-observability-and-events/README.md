@@ -786,6 +786,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-16: revised by its Fable review (PR #621): the documented GH200 share is settled by the comparison's GH200 window, and the records' names rest on the owner's decision of 28 Oct 2026.
 - 2026-11-16: the durable log's build rulings for #625: no job ID in any note the log keeps; the forwarder on an empty stream starts within the cap; the store's size on disk for the floor; the log's copy is paired with its backup; ids and the deletion trigger fixed.
 - 2026-11-16: erratum: the typed Allocation events join the Reasons table with the code that raises them (#625).
+- 2026-11-16: erratum: `HoldLifted` is raised at the controller's own lift of the recorded job's hold, after the hold-lifted marker is written, not on a stored phase change from `Held` to `Pending`: in hold mode the hold lasts one listing read, so the stored phase is never `Held` and a phase rule would never fire. Its id's fact is the restart count, 0 at a lift (#625).
 
 ## Amendments
 

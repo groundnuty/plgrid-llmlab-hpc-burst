@@ -146,9 +146,11 @@ func TestEventsHaveTheirTypeInActionTheCodeAsReasonAndAShortNote(t *testing.T) {
 	}
 }
 
-// A message over 1,024 bytes is cut: a refused file whose path is 1,600
-// characters long makes the condition message longer than the API accepts.
-func TestEventNoteIsCutTo1024Bytes(t *testing.T) {
+// A path of 1,600 characters makes the condition message longer than a note may be (1,024 bytes), and
+// the note is the fixed description all the same: a path reaches the status and never the log (HBEP-8,
+// No job ID, path or name in a note). The cut to 1,024 bytes is provider.CutNote's, which package
+// provider's TestCutNote covers; before, this test saw the note cut to 1,024 bytes, the message's.
+func TestFileRefusedNoteIsShortWhateverTheFilesPath(t *testing.T) {
 	rec := &captureRecorder{}
 	e := newEnv(t, withModels(model("example-a")), withRecorder(rec))
 	long := "/" + strings.Repeat(strings.Repeat("d", 200)+"/", 8) + "credentials.json" // 1,617 bytes, absent
@@ -156,15 +158,16 @@ func TestEventNoteIsCutTo1024Bytes(t *testing.T) {
 	e.syncAt(at(12, 0, 0))
 	c := e.wantCondition(v1alpha1.ConditionCredentialsInvalid, "True", "FileRefused")
 	if len(c.Message) <= 1024 {
-		t.Fatalf("control: the condition message is %d bytes, want over 1024 for this test to cut anything", len(c.Message))
+		t.Fatalf("control: the condition message is %d bytes, want over 1024 for this test to show a path that stays out of the note", len(c.Message))
 	}
 	// The first pass with no successful read yet also turns Ready False.
 	evs := rec.take()
 	if want := []string{"Warning FileRefused failing", "Warning ReadsFailing failing"}; !slices.Equal(kinds(evs), want) {
 		t.Fatalf("events = %q, want %q", kinds(evs), want)
 	}
-	if n := len(evs[0].Note); n != 1024 {
-		t.Fatalf("the FileRefused note is %d bytes, want it cut to 1024", n)
+	const want = "CredentialsInvalid: the credentials file could not be read or was refused; the reason is in the Provider's CredentialsInvalid condition"
+	if evs[0].Note != want {
+		t.Fatalf("the FileRefused note is %q, want %q", evs[0].Note, want)
 	}
 }
 

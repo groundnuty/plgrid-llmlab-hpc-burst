@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -61,6 +62,13 @@ const (
 	rowAccount = "example-account-a1"
 	rowGrant   = "example-grant-g1"
 	rowPart    = "example-gpu"
+	// rowUser and rowHome are the login's user name and home on the synthetic
+	// cluster, and rowCredsPath a path under that home: none of them may reach a
+	// note the log keeps (HBEP-8, Allocation events, No job ID, path or name in a
+	// note).
+	rowUser      = "example-user-x1"
+	rowHome      = "/home/" + rowUser
+	rowCredsPath = rowHome + "/.hpcburst/creds-x1"
 )
 
 var rigSeq atomic.Int64
@@ -116,6 +124,19 @@ type evRig struct {
 type rigOpts struct {
 	// noHold makes the profile a fallback-mode one (no hold-release).
 	noHold bool
+	// badProfile makes the Provider's profile invalid in ways whose error text
+	// reaches the Allocation's status: a credentials file with a line whose
+	// keyword is a path under the synthetic home (the reader echoes a keyword it
+	// refuses), and an account with a space in it.
+	badProfile bool
+}
+
+// extraCredsLines is what the credentials file holds beyond the valid lines.
+func (o rigOpts) extraCredsLines() string {
+	if o.badProfile {
+		return rowCredsPath + " yes\n"
+	}
+	return ""
 }
 
 // start is the rows' fake time: a UTC date, never the real clock.
@@ -131,7 +152,7 @@ func newEvRig(t *testing.T, o rigOpts) *evRig {
 	key, creds := filepath.Join(r.home, "key"), filepath.Join(r.home, "creds")
 	for path, content := range map[string]string{
 		key:   "example key\n",
-		creds: "HostName login.example.org\nUser example-user\nIdentityFile " + key + "\n",
+		creds: "HostName login.example.org\nUser " + rowUser + "\nIdentityFile " + key + "\n" + o.extraCredsLines(),
 	} {
 		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
@@ -161,7 +182,7 @@ func newEvRig(t *testing.T, o rigOpts) *evRig {
 			GPUsPerNode: &gpus, MaxTime: &maxTime}},
 	}}
 	prov := &v1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: r.prov}, Spec: v1alpha1.ProviderSpec{
-		PlatformProfileRef: v1alpha1.ObjectReference{Name: pp.Name}, Account: rowAccount, Grant: rowGrant,
+		PlatformProfileRef: v1alpha1.ObjectReference{Name: pp.Name}, Account: r.account(o), Grant: rowGrant,
 		AllowedPartitions: []string{rowPart}, CredentialsRef: &v1alpha1.CredentialsReference{File: creds},
 	}}
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "evrows-"}}
@@ -178,7 +199,7 @@ func newEvRig(t *testing.T, o rigOpts) *evRig {
 	})
 
 	r.sl = fakeslurm.New(r.clock, fakeslurm.Config{FirstJobID: firstJobID, Partitions: []fakeslurm.Partition{{Name: rowPart, GPUOnly: true}}})
-	r.session = r.sl.Login(fakeslurm.Login{User: "example-user", Env: map[string]string{"HOME": "/home/example-user", "SCRATCH": "/scratch/example-user"}})
+	r.session = r.sl.Login(fakeslurm.Login{User: rowUser, Env: map[string]string{"HOME": rowHome, "SCRATCH": "/scratch/" + rowUser}})
 	r.faults = &lineFaults{inner: r.session}
 	r.typed = r.newTypedRecorder()
 	r.reg = newRegistry(r.counter)
@@ -208,6 +229,15 @@ func newEvRig(t *testing.T, o rigOpts) *evRig {
 	}
 	r.ctl = ctl
 	return r
+}
+
+// account is the Provider's account: the synthetic one, with a space in it for a
+// rig whose profile is invalid (the reader refuses it).
+func (r *evRig) account(o rigOpts) string {
+	if o.badProfile {
+		return rowAccount + " x"
+	}
+	return rowAccount
 }
 
 // options are the controller's: the profile read from the API, the Batch over
@@ -424,14 +454,21 @@ func (r *evRig) checkNotes(evs []eventsv1.Event, jobID int) {
 	token := fmt.Sprint(jobID)
 	for _, e := range evs {
 		for _, text := range []string{e.Note, e.Reason, e.Action} {
-			for _, bad := range []string{token, rowAccount, rowGrant} {
+			for _, bad := range []string{token, rowAccount, rowGrant, rowUser, rowHome, rowCredsPath} {
 				if tokenIn(text, bad) {
 					r.t.Errorf("the %s event's text %q names %q", e.Reason, text, bad)
 				}
 			}
+			if m := pathToken.FindString(text); m != "" {
+				r.t.Errorf("the %s event's text %q holds the path-looking token %q", e.Reason, text, m)
+			}
 		}
 	}
 }
+
+// pathToken finds a token that starts with a slash, as a path does, where it
+// begins a word: an object's namespace/name pair does not.
+var pathToken = regexp.MustCompile(`(^|[\s("'])/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*`)
 
 // ---- hpcburst_events_raised_total ----
 

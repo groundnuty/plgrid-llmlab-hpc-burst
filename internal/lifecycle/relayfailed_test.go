@@ -23,6 +23,7 @@ import (
 
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -76,8 +77,16 @@ func TestARelayEndedForGoodEndsAReadyInstanceAndIsReplaced(t *testing.T) {
 		t.Error("the next pass did not release the marked Allocation")
 	}
 	ev := rg.rec.Find("failing", relayCond)
-	if len(ev) != 1 || ev[0].Name != served.Name || !strings.Contains(ev[0].Message, "step limit") || !strings.Contains(ev[0].Message, old.Name) {
-		t.Errorf("failing/%s events %+v: want one, for %s, naming %s and the cause", relayCond, ev, served.Name, old.Name)
+	// The event goes to the durable log in beta, so its note is the reason code's
+	// fixed description naming the Allocation, never the relay's cause, which can
+	// quote a path (HBEP-8, Allocation events, No job ID, path or name in a note).
+	// The cause stays on the Instance's end message and the Allocation's condition.
+	if len(ev) != 1 || ev[0].Name != served.Name || strings.Contains(ev[0].Message, "step limit") ||
+		ev[0].Message != "a relay of Allocation "+old.Name+" ended for good; the Allocation's RelayEndedForGood condition has the cause" {
+		t.Errorf("failing/%s events %+v: want one, for %s, with the fixed description naming %s", relayCond, ev, served.Name, old.Name)
+	}
+	if healthy := apimeta.FindStatusCondition(in.Status.Conditions, "Healthy"); healthy == nil || !strings.Contains(healthy.Message, "step limit") {
+		t.Errorf("the Instance's Healthy condition %+v does not keep the relay's cause", healthy)
 	}
 	allocReplaced(t, rg, &old)
 }

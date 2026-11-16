@@ -15,7 +15,9 @@ package providerctl
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -68,7 +70,7 @@ func (e *external) transitions(a *v1alpha1.Allocation, prior *v1alpha1.Allocatio
 		// Refused is kept once set, and the rest of what the job did is not
 		// announced for an Allocation that is refused.
 		if prior.Phase != v1alpha1.AllocationRefused {
-			e.typed(a, v1alpha1.ReasonAllocationRefused, attemptFact(rec), "the Allocation is refused: "+redactJob(o.Reason, a), nil)
+			e.typed(a, v1alpha1.ReasonAllocationRefused, attemptFact(rec), "the Allocation is refused"+reasonSuffix(o.Reason), nil)
 		}
 		return
 	}
@@ -85,7 +87,7 @@ func (e *external) transitions(a *v1alpha1.Allocation, prior *v1alpha1.Allocatio
 			fmt.Sprintf("the job was requeued; its restart count is %d and its base state %s", o.RestartCount, baseState(job)), nil)
 	case o.Phase == v1alpha1.AllocationFailed && prior.Phase != v1alpha1.AllocationFailed && !o.Requeued:
 		e.typed(a, v1alpha1.ReasonAllocationFailed, factTime(job.EndTime),
-			fmt.Sprintf("the job failed in state %s: %s", baseState(job), redactJob(job.Reason, a)), nil)
+			"the job failed in state "+baseState(job)+reasonSuffix(job.Reason), nil)
 	}
 	if o.Phase == v1alpha1.AllocationEnded && prior.Phase != v1alpha1.AllocationEnded {
 		e.endedLive(a, job, drained)
@@ -97,7 +99,7 @@ func (e *external) transitions(a *v1alpha1.Allocation, prior *v1alpha1.Allocatio
 	}
 	if job.Hold == provider.HoldAdmin {
 		if e.s.gates.hourlyDue(gateAdminHold, a.UID, e.now()) {
-			e.typedUnmarked(a, evAdminHold, "the job is held by an administrator ("+redactJob(job.Reason, a)+"); the provider never lifts that hold", nil)
+			e.typedUnmarked(a, evAdminHold, "the job is held by an administrator"+reasonSuffix(job.Reason)+"; the provider never lifts that hold", nil)
 		}
 	} else {
 		e.s.gates.clearHourly(gateAdminHold, a.UID)
@@ -159,7 +161,7 @@ func (e *external) endedWhileDeleting(a *v1alpha1.Allocation, rec record, jobs [
 	note := fmt.Sprintf("the job ended in state %s at %s while the Allocation was being deleted", baseState(job), end)
 	var related runtime.Object
 	if cause := a.Annotations[v1alpha1.AnnotationReleaseCause]; cause != "" {
-		note += "; release cause: " + redactToken(cause, rec.jobID, "the job")
+		note += "; release cause: " + plainCause(cause, rec.jobID)
 		related = operationOf(cause)
 	}
 	e.typed(a, evJobEnded, end, note, related)
@@ -206,12 +208,32 @@ func timeOf(m *metav1.Time) *time.Time {
 	return &t
 }
 
-// redactJob returns s without the Allocation's recorded job ID, for text that
-// comes from outside the controller (the scheduler's state reason) and goes into
-// a note.
-func redactJob(s string, a *v1alpha1.Allocation) string {
-	for _, id := range recordedJobIDs(a) {
-		s = redactToken(s, id, "the job")
+// reasonSuffix is ": <reason>" for a scheduler's state reason that is one bare
+// word (NonZeroExitCode, JobHeldAdmin), and "" for anything else: a state reason
+// can carry a node list or free text, and a note names no text that comes from
+// outside the controller (HBEP-8, Allocation events, No job ID, path or name in a
+// note), so it stays in the Allocation's status.
+func reasonSuffix(reason string) string {
+	if reasonCode.MatchString(reason) {
+		return ": " + reason
 	}
-	return s
+	return ""
+}
+
+// reasonCode matches one bare word.
+var reasonCode = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,63}$`)
+
+// plainCause is the release cause as the note carries it. An Operation's
+// cause, in the form the executor writes, stays whole. Any other cause stays
+// when it is plain words, with the job ID taken out as a token, and a cause that
+// holds a path separator is not copied: a person's text can name a path, and a
+// note names none (HBEP-8, Allocation events, No job ID, path or name in a note).
+func plainCause(cause, jobID string) string {
+	if operationOf(cause) != nil {
+		return cause
+	}
+	if strings.ContainsAny(cause, `/\`) {
+		return "(not plain text; the Allocation's release-cause annotation has it)"
+	}
+	return redactToken(cause, jobID, "the job")
 }
