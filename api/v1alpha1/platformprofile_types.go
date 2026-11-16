@@ -358,6 +358,7 @@ type JobNameRules struct {
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.jobName) || !has(self.jobName.maxLength) || self.jobName.maxLength >= 56",message="jobName.maxLength must allow the job tag's 56 characters (HBEP-3, Allocation and job identity)"
 // +kubebuilder:validation:XValidation:rule="!has(self.partitions) || self.partitions.all(p, !has(p.qos) || (has(self.qos) && self.qos.exists(q, q.name == p.qos)))",message="every partition's qos must be listed in qos, so the plan knows its limits (HBEP-4, QOS limits)"
+// +kubebuilder:validation:XValidation:rule="!has(self.expectedPerformance) || self.expectedPerformance.all(a, self.expectedPerformance.exists_one(b, a.deploymentID == b.deploymentID && a.sessions == b.sessions && a.contextTokens == b.contextTokens && a.outputTokens == b.outputTokens && a.capacityFlags == b.capacityFlags))",message="expectedPerformance holds one entry per deploymentID, capacityFlags and shape (sessions, contextTokens, outputTokens) (HBEP-4, Expected performance)"
 type PlatformProfileSpec struct {
 	// ProviderKind is managed, batch or static: the kind of provider the
 	// platform offers (HBEP-3, Vocabulary, Provider). It is not the object's
@@ -385,6 +386,18 @@ type PlatformProfileSpec struct {
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=8
 	QOS []QOSProfile `json:"qos,omitempty"`
+
+	// ExpectedPerformance are the throughput gate's references (beta; HBEP-4,
+	// Platform profile schema, Expected performance; HBEP-7, The throughput
+	// gate): each one reference measurement of one serving spec on one class,
+	// keyed on its deployment ID, capacity flags and concurrent shape. With no
+	// entry matching an Instance, the gate records only and never fails one.
+	// At most 32 entries, HBEP-4's proposal.
+	//
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=32
+	ExpectedPerformance []ExpectedPerformance `json:"expectedPerformance,omitempty"`
 
 	// HoldRelease says whether a plain user's sbatch --hold is honoured and
 	// that user can lift it. It is verified per platform. False runs the

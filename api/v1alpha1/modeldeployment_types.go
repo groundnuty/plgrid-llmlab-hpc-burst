@@ -347,6 +347,22 @@ type ModelDeploymentSpec struct {
 	// +kubebuilder:validation:Maximum=8
 	HedgeWidth *int32 `json:"hedgeWidth,omitempty"`
 
+	// OverAllocation is k, the extra Allocations per Provider (beta; HBEP-7,
+	// What the controller reads, and Over-allocation and qualification (beta),
+	// k): one extra is created on each Provider where a pass creates new
+	// Allocations for missing primaries, its Instance qualified and ranked
+	// against that Provider's primaries, and the lowest ranked kept as warm
+	// capacity. Absent is 1, the API server's default (OverAllocationCount;
+	// owner, 29 Oct and 15 Nov 2026); 0 turns over-allocation off. Beta admits
+	// 0 and 1 only, since no rule adjusts k yet. It is capacity, not a
+	// deployment-ID input (HBEP-3), like instances.
+	//
+	// +optional
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
+	OverAllocation *int32 `json:"overAllocation,omitempty"`
+
 	// Providers says where the deployment may run.
 	Providers ProviderSelection `json:"providers"`
 
@@ -575,6 +591,7 @@ type ActiveDeploymentID struct {
 //
 // +kubebuilder:validation:XValidation:rule="self.count == (has(self.outcomes) ? size(self.outcomes) : 0)",message="count is the number of outcomes kept"
 // +kubebuilder:validation:XValidation:rule="self.failures == (has(self.outcomes) ? size(self.outcomes.filter(o, o.result == 'Failed')) : 0)",message="failures is the number of outcomes kept whose result is Failed"
+// +kubebuilder:validation:XValidation:rule="(has(self.qualificationFailures) ? self.qualificationFailures : 0) == (has(self.outcomes) ? size(self.outcomes.filter(o, o.result == 'Failed' && has(o.reason) && (o.reason == 'VerificationFailed' || o.reason == 'QualificationFailed'))) : 0)",message="qualificationFailures is the number of outcomes kept whose result is Failed and whose reason is VerificationFailed or QualificationFailed, 0 when absent"
 type ClassStartOutcomes struct {
 	// AcceleratorClass is the class the outcomes were recorded in.
 	AcceleratorClass `json:",inline"`
@@ -599,6 +616,20 @@ type ClassStartOutcomes struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=20
 	Count int32 `json:"count"`
+
+	// QualificationFailures is how many of the outcomes kept failed in
+	// verifying: a VerificationFailed, which is always a rehash or staging
+	// fault since a settings contradiction adds no outcome, or a
+	// QualificationFailed (a failed check, the throughput gate, or a warm-up
+	// that did not settle). The qualification failure rate is
+	// QualificationFailures of Count, shown at any Count from 1 and unknown
+	// only with none (beta; HBEP-7, Over-allocation and qualification (beta),
+	// How k adjusts). Absent is 0.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=20
+	QualificationFailures int32 `json:"qualificationFailures,omitempty"`
 }
 
 // StartOutcome is one Allocation's start-up outcome.
@@ -628,6 +659,24 @@ type StartOutcome struct {
 	// Time is when the outcome was decided: the Instance's ready time, or its
 	// end time.
 	Time metav1.Time `json:"time"`
+
+	// Gate is the throughput gate's verdict when the Instance reached the
+	// gate: GatePassed, GateMissed, GateSuspended or GateRecordOnly (beta;
+	// HBEP-7, Over-allocation and qualification (beta), How k adjusts,
+	// Recorded). Absent when the Instance never reached it.
+	//
+	// +optional
+	// +kubebuilder:validation:Enum=Passed;Missed;Suspended;RecordOnly
+	Gate string `json:"gate,omitempty"`
+
+	// ReferenceDate is the matched expected-performance entry's date, with a
+	// Passed, Missed or Suspended verdict.
+	//
+	// +optional
+	// +kubebuilder:validation:MaxLength=10
+	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}$`
+	// +kubebuilder:validation:XValidation:rule="string(timestamp(self + 'T00:00:00Z')).startsWith(self)",message="referenceDate must be a real calendar date, YYYY-MM-DD"
+	ReferenceDate string `json:"referenceDate,omitempty"`
 }
 
 // ClassStartToReady is one accelerator class's last measured start-to-ready
@@ -695,6 +744,20 @@ type ModelDeploymentStatus struct {
 	// +listMapKey=cpuArch
 	// +kubebuilder:validation:MaxItems=64
 	StartOutcomes []ClassStartOutcomes `json:"startOutcomes,omitempty"`
+
+	// SuspendedReferences are the expected-performance entries suspended for
+	// this deployment: the class's two most recent verdicts against one entry
+	// and its date, from two Allocations, were both Missed, so the gate
+	// records only against it (beta; HBEP-7, The throughput gate, A suspect
+	// reference). The listing is written in the pass that records the second
+	// miss, so it outlives the class's kept outcomes and a controller
+	// restart, and is removed once the profile's matching entry has another
+	// date or is gone.
+	//
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=32
+	SuspendedReferences []SuspendedReference `json:"suspendedReferences,omitempty"`
 
 	// Instances is the number of Instances that exist and have not ended. It
 	// is the scale subresource's status count.

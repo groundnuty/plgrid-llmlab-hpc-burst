@@ -14,6 +14,15 @@ func TestNamesForTheLifecycleControllerAndTheFront(t *testing.T) {
 		// HBEP-7, Hedging (beta): the hedge loser's end reason and replaced event's reason, and the hedge's annotation.
 		ReasonHedgeLost:      "HedgeLost",
 		AnnotationHedgeGroup: "hpcburst.groundnuty.github.io/hedge-group",
+		// HBEP-7, Over-allocation and qualification (beta): the ranked-out Instance's end reason and replaced event's
+		// reason, and the suspended expected-performance entry's degraded event's reason (HBEP-8's Reasons table).
+		ReasonRankedOut:        "RankedOut",
+		ReasonReferenceSuspect: "ReferenceSuspect",
+		// HBEP-7, The throughput gate: the gate's four verdicts, written on Instances and start-up outcomes.
+		GatePassed:     "Passed",
+		GateMissed:     "Missed",
+		GateSuspended:  "Suspended",
+		GateRecordOnly: "RecordOnly",
 	} {
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
