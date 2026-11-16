@@ -217,6 +217,26 @@ func fusermountCapfs(point, source string) (*capConn, error) {
 	return &capConn{point: point, fd: fd}, nil
 }
 
+// capPollHackName is go-fuse's pollHackName (fuse/poll.go): a file of the root that its server answers itself.
+const capPollHackName = ".go-fuse-epoll-hack"
+
+// capPollHack is go-fuse's pollHack (fuse/poll_unix.go), which its WaitMount runs, but not for a /dev/fd/N mount point. It opens the
+// server's own file and polls it once, so that the server answers the kernel's POLL with ENOSYS, after which the kernel sends no POLL
+// again. Without it, Go's runtime, which registers every file this process opens with epoll, has the kernel send a POLL for a file on
+// the mount, and when epoll has taken the last of GOMAXPROCS, no thread is left to answer it: the process deadlocks on its own mount,
+// which a loaded -count=50 run of these tests did once before this was added. The open is a raw one, as go-fuse's is, so that the
+// runtime does not register it with epoll itself; and it is bounded by d.
+func capPollHack(point string, d time.Duration) error {
+	return capDo(d, "the poll hack on "+point, func() error {
+		fd, err := syscall.Open(point+"/"+capPollHackName, syscall.O_RDONLY, 0)
+		if err != nil {
+			return err
+		}
+		_, _ = unix.Poll([]unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN | unix.POLLPRI | unix.POLLOUT}}, 0)
+		return syscall.Close(fd)
+	})
+}
+
 // capUnmountArgs are the arguments of an unmount: -u, a plain unmount, which fails with EBUSY while the mount is in use. Never -z, a lazy
 // unmount, which would detach a live mount from under its user.
 func capUnmountArgs(point string) []string { return []string{"-u", point} }

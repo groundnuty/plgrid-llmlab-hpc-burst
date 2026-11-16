@@ -222,6 +222,10 @@ func mountCapVolume(dir string, limit int64, source string, watch bool) (*capVol
 		return nil, capMountError{fmt.Errorf("serving the mount at %s: %w (its unmount: %v)", v.mount, err, uerr)}
 	}
 	v.server = srv
+	if err := capPollHack(v.mount, capMountTimeout); err != nil {
+		uerr := v.unmount(capUnmountTimeout)
+		return nil, capMountError{fmt.Errorf("the poll hack on %s: %w (its unmount: %v)", v.mount, err, uerr)}
+	}
 	return v, nil
 }
 

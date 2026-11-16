@@ -384,9 +384,8 @@ func TestAKilledServersMountIsUnmountedByItsWatcher(t *testing.T) {
 	c.write(t, "before-the-kill", "served")
 	c.kill(t)
 	capWaitFor(t, capChildBound, "the watcher to unmount the killed server's mount, before any sweep", func() bool { return !capListed(c.mount) })
-	if log := c.watchLog(); !strings.Contains(log, "unmounted "+c.mount) {
-		t.Errorf("the watcher's log does not say it unmounted %s: %q", c.mount, log)
-	}
+	// The watcher writes its line once fusermount3 -u has returned, so after the mount has gone: wait for it.
+	capWaitFor(t, capChildBound, "the watcher's log to say it unmounted "+c.mount, func() bool { return strings.Contains(c.watchLog(), "unmounted "+c.mount) })
 	writeVolume(t, newCapVolume(t, capChildLimit))
 }
 
