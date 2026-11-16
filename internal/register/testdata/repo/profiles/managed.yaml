@@ -1,0 +1,7 @@
+# A hand-written fixture: a managed platform has no partitions.
+apiVersion: hpcburst.groundnuty.github.io/v1alpha1
+kind: PlatformProfile
+metadata:
+  name: example-managed
+spec:
+  providerKind: managed

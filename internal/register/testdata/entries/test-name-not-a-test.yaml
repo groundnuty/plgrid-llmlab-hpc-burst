@@ -1,0 +1,36 @@
+- id: KI-0001
+  symptom: the first entry names a function with the wrong parameter list
+  component: vllm
+  affected: 0.32.0
+  workaround:
+    where: example/package, a setting
+    what: the setting is 4 s
+  test:
+    package: pkg/one
+    name: TestWrongSignature
+  source:
+    - L-9.9
+- id: KI-0002
+  symptom: the second entry names a method
+  component: vllm
+  affected: 0.32.0
+  workaround:
+    where: example/package, a setting
+    what: the setting is 4 s
+  test:
+    package: pkg/one
+    name: TestMethod
+  source:
+    - L-9.9
+- id: KI-0003
+  symptom: the third entry names a helper that is no test
+  component: vllm
+  affected: 0.32.0
+  workaround:
+    where: example/package, a setting
+    what: the setting is 4 s
+  test:
+    package: pkg/one
+    name: notATest
+  source:
+    - L-9.9

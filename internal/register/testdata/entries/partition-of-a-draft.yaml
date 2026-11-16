@@ -1,0 +1,17 @@
+- id: KI-0001
+  symptom: an example site runtime cannot run an image format
+  component: apptainer
+  affected: 1.4.5
+  scope:
+    platforms:
+      - example-alpha
+    partitions:
+      - part-draft
+  workaround:
+    where: profiles, a field
+    what: the field is set
+  test:
+    package: pkg/one
+    name: TestPlain
+  source:
+    - an issue comment
