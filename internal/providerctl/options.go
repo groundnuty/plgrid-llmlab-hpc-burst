@@ -186,6 +186,13 @@ type Options struct {
 	// type in its action and its id for the durable log. nil means none is
 	// raised.
 	TypedRecorder eventcount.IDRecorder
+	// Counter, when set, is the raised-events counter the TypedRecorder's wrapper
+	// counts into (the lifecycle copy's, which exports every Provider manager's
+	// series, since a manager binds no metrics port). Setup creates the typed
+	// series at 0 in it, under provider-<name>, once the Provider's controller is
+	// registered, so an event never raised shows a real 0 (HBEP-8, Raised
+	// events); ForgetSeries deletes them when the supervisor drops the Provider.
+	Counter *eventcount.Counter
 }
 
 func (o *Options) defaults() error {

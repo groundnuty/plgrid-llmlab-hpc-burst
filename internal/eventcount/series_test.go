@@ -76,5 +76,13 @@ func TestTheSeriesAtZeroAreHBEP8s(t *testing.T) {
 	for _, e := range docs.Managed {
 		catalog = append(catalog, e.Action+"/"+e.Reason)
 	}
-	diff(t, "a managed Provider", pairs(managed.RaisedEvents()), catalog)
+	// The managed manager's ObservationGap is the Reasons table's row, not the
+	// catalog bullet's: every Provider manager raises it (Gaps after a restart).
+	var managedSeries []eventcount.Series
+	for _, s := range managed.RaisedEvents() {
+		if s.Reason != providerctl.ReasonObservationGap {
+			managedSeries = append(managedSeries, s)
+		}
+	}
+	diff(t, "a managed Provider", pairs(managedSeries), catalog)
 }

@@ -87,10 +87,13 @@ var allocationEventType = map[string]string{
 // 0 under provider-<name> when its manager starts (HBEP-8, Raised events). The
 // drift guard checks the list against the emit sites.
 func RaisedEvents() []eventcount.Series {
-	out := make([]eventcount.Series, 0, len(allocationEventType))
+	out := make([]eventcount.Series, 0, len(allocationEventType)+1)
 	for reason, action := range allocationEventType {
 		out = append(out, eventcount.Series{Reason: reason, Action: action, Type: provider.EventKindOf(action)})
 	}
+	// ObservationGap, which each Provider manager raises at its start through the
+	// same recorder (gap.go), regarding its Lease.
+	out = append(out, eventcount.Series{Reason: reasonObservationGap, Action: eventDegraded, Type: provider.EventKindWarning})
 	sort.Slice(out, func(i, k int) bool { return out[i].Reason < out[k].Reason })
 	return out
 }

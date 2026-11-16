@@ -9,6 +9,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -69,6 +70,8 @@ func RaisedEvents() []eventcount.Series {
 		v1alpha1.ReasonExpired, v1alpha1.ReasonReadsFailing, v1alpha1.ReasonExpiresWithinADay} {
 		add(badAction[reason], reason)
 	}
+	// ObservationGap, which the manager raises at its start through providerctl.AddGapEmitter.
+	add(provider.EventActionDegraded, providerctl.ReasonObservationGap)
 	add(provider.EventActionDegraded, provider.EventCatalogEntrySkipped)
 	add(provider.EventActionDegraded, provider.EventCatalogTruncated)
 	for _, reason := range readyReasons {

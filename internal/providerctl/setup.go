@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 )
 
 // SupportedPolicies is the one management-policy set the reconciler accepts:
@@ -169,7 +170,35 @@ func Setup(mgr manager.Manager, o Options) error {
 			return err
 		}
 	}
-	return mgr.Add(c.status)
+	if err := mgr.Add(c.status); err != nil {
+		return err
+	}
+	// Each Provider manager raises one ObservationGap regarding its Lease once it
+	// holds it (HBEP-8, Gaps after a restart).
+	if err := AddGapEmitter(mgr, name, c.shared.o.TypedRecorder); err != nil {
+		return err
+	}
+	// The typed series are created at 0 only once the controller is set up, so a
+	// Setup that fails creates none (HBEP-8, Raised events).
+	if ctr := c.shared.o.Counter; ctr != nil {
+		ctr.Zero(eventcount.ControllerProvider(name), RaisedEvents())
+	}
+	return nil
+}
+
+// ForgetSeries returns the batch supervisor's Dropped hook (Supervisor.Dropped):
+// it deletes from events the typed series that Setup created at 0 for the
+// Provider, once the supervisor no longer runs it (deleted, or now of another
+// kind). Only those: the Provider's untyped series (action none) appear at its
+// first event, and a managed Provider of the same name counts under the same
+// controller label with series of its own. It panics on a nil counter.
+func ForgetSeries(events *eventcount.Counter) func(provider string) {
+	if events == nil {
+		panic("providerctl: ForgetSeries with no raised-events counter")
+	}
+	return func(provider string) {
+		events.Forget(eventcount.ControllerProvider(provider), RaisedEvents())
+	}
 }
 
 // controllerOptions are the Allocation controller's options.
