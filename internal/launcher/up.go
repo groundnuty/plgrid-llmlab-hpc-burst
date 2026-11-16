@@ -97,9 +97,13 @@ type UpReport struct {
 	// AgentWrites is true when up applied the agent role's wide rules, which grant the writes the
 	// admission policies bound, after each policy refused its probe. False means the agents are
 	// read-only (a warning says why).
-	AgentWrites bool     `json:"agent_writes"`
-	Front       Front    `json:"front"`
-	Warnings    []string `json:"warnings,omitempty"`
+	AgentWrites bool `json:"agent_writes"`
+	// GlobalApprovalPolicy is what up did about ApprovalPolicy/global (approvalpolicy.go):
+	// GlobalPolicyCreated, GlobalPolicyExists (left as it is) or GlobalPolicyNoCRD (nothing written, with a
+	// warning).
+	GlobalApprovalPolicy string   `json:"global_approval_policy"`
+	Front                Front    `json:"front"`
+	Warnings             []string `json:"warnings,omitempty"`
 	// SupervisorPID and ControllerBin are set when controllers run; ControllerHealth is the
 	// address of the lifecycle controller's /healthz.
 	SupervisorPID    int    `json:"supervisor_pid,omitempty"`
@@ -437,6 +441,20 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 			logf(o.Log, "%s", agentWritesOffWarning)
 		}
 	}
+	// The global ApprovalPolicy, when none exists (HBEP-10, Approval policy): with no policy at all a target
+	// that needs approval waits. An existing one is never changed. After the agent access, before the
+	// controllers, which watch it.
+	if cfg, err := restConfig(l.kubeconfig(), ports, 30*time.Second); err != nil {
+		return abort("global approval policy", err)
+	} else if outcome, err := EnsureGlobalApprovalPolicy(ctx, cfg, o.Log); err != nil {
+		return abort("global approval policy", err)
+	} else {
+		rep.GlobalApprovalPolicy = outcome
+		if outcome == GlobalPolicyNoCRD {
+			rep.Warnings = append(rep.Warnings, noApprovalPolicyCRDWarning)
+			logf(o.Log, "%s", noApprovalPolicyCRDWarning)
+		}
+	}
 	// The relay keeper's switch back, with k3s ready and before the controllers start (HBEP-6,
 	// Compatibility and upgrades).
 	if cfg, err := restConfig(l.kubeconfig(), ports, 30*time.Second); err != nil {
@@ -448,8 +466,13 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 		rep.Warnings = append(rep.Warnings, noControllerWarning)
 		logf(o.Log, "%s", noControllerWarning)
 	} else {
-		// In this order: the namespace the controllers' Leases live in, then the controllers.
+		// In this order: the definitions the controller watches, the namespace its Leases live in, then
+		// the controllers. Without Operation, Approval and ApprovalPolicy the controller's caches never
+		// sync, so it is not started.
 		cfg, err := restConfig(l.kubeconfig(), ports, 30*time.Second)
+		if err == nil {
+			err = CheckControllerCRDs(ctx, cfg, ctrlBin)
+		}
 		if err == nil {
 			err = ensureControllerNamespace(ctx, cfg)
 		}
