@@ -155,8 +155,13 @@ func TestEveryDeletePathWritesItsCause(t *testing.T) {
 	}
 }
 
-// TestAFailedCauseWriteDeletesNothing: when the release cause cannot be written, the Allocation is not deleted: the
-// pass fails, the Allocation stays with no deletion and no cause, and the next pass writes the cause and deletes it.
+// TestAFailedCauseWriteDeletesNothing: while no release cause can be written, no Allocation is deleted, by any rule.
+// A shutdown's end persists the Instance as ended before it releases, so when that release's cause fails to write,
+// retention, later in the same pass, finds the Allocation empty and tries its own release; that cause fails too, so
+// nothing goes, pass after pass, each failing with the write's error. Once writes succeed, the delete follows, and
+// it carries the cause the store held. Worked by hand: the Instance has ended for Drained, so its end no longer asks
+// for a release (releaseRequired), and retention releases the empty, pending Allocation with "a pending
+// Allocation with no Instance is cancelled".
 func TestAFailedCauseWriteDeletesNothing(t *testing.T) {
 	log := newCauseLog()
 	rg := newRig(t, withInterceptors(log.funcs()))
@@ -165,25 +170,35 @@ func TestAFailedCauseWriteDeletesNothing(t *testing.T) {
 	rg.create(mdSpec("md"))
 	rg.Step()
 	in := rg.instances("md")[0]
+	alloc := in.Spec.AllocationRef.Name
 	rg.mutateMD("md", func(m *v1alpha1.ModelDeployment) { now := metav1.NewTime(rg.clock.Now()); m.Spec.EndTime = &now })
 	log.mu.Lock()
-	log.failWrites = 1
+	log.failWrites = 1 << 20 // every cause write fails
+	log.mu.Unlock()
+	for pass := range 3 {
+		rg.clock.Advance(10 * time.Second)
+		if err := rg.reconcileOf("md"); err == nil || !strings.Contains(err.Error(), "write the release cause") {
+			t.Fatalf("pass %d, with every cause write failing, returned %v, want the write's error", pass, err)
+		}
+		if _, deleted := log.deletedWith(alloc); deleted {
+			t.Fatalf("pass %d deleted the Allocation though no release cause could be written", pass)
+		}
+		a, ok := rg.allocation(alloc)
+		if !ok || !a.DeletionTimestamp.IsZero() || a.Annotations[v1alpha1.AnnotationReleaseCause] != "" {
+			t.Fatalf("pass %d left the Allocation as %+v, want it in place, with no cause", pass, a)
+		}
+	}
+	log.mu.Lock()
+	log.failWrites = 0
 	log.mu.Unlock()
 	rg.clock.Advance(10 * time.Second)
-	if err := rg.reconcileOf("md"); err == nil || !strings.Contains(err.Error(), "write the release cause") {
-		t.Fatalf("the pass whose cause write failed returned %v, want the write's error", err)
-	}
-	if _, deleted := log.deletedWith(in.Spec.AllocationRef.Name); deleted {
-		t.Fatal("the Allocation was deleted though its release cause was not written")
-	}
-	a, ok := rg.allocation(in.Spec.AllocationRef.Name)
-	if !ok || !a.DeletionTimestamp.IsZero() || a.Annotations[v1alpha1.AnnotationReleaseCause] != "" {
-		t.Fatalf("the Allocation after the failed write: %+v, want it in place, with no cause", a)
-	}
-	rg.clock.Advance(10 * time.Second)
 	rg.Step()
-	if got, ok := log.deletedWith(in.Spec.AllocationRef.Name); !ok || got != "Instance "+in.Name+" ended: the deployment is shutting down" {
-		t.Fatalf("the next pass deleted it: %v, with the cause %q", ok, got)
+	got, ok := log.deletedWith(alloc)
+	if !ok {
+		t.Fatal("the Allocation was not deleted once its cause could be written")
+	}
+	if got != "a pending Allocation with no Instance is cancelled" {
+		t.Fatalf("the Allocation was deleted with the stored cause %q, want retention's, %q", got, "a pending Allocation with no Instance is cancelled")
 	}
 }
 
