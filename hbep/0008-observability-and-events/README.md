@@ -196,7 +196,7 @@ The API refuses a new event without `action` or `reason`, with either over 128 c
 | `HoldLifted` | `started` | the recorded job's hold is lifted, so it pends | the submit time |
 | `JobStarted` | `ready` | the job runs | the start time, hard end, queue wait, and allocated GPUs and CPUs |
 | `HardEndNear` | `ending-soon` | an hour before a running job's hard end, once per hard end | the hard end |
-| `JobEnded` | `replaced` | phase `Ended` as planned: `TIMEOUT` at the hard end, or any end while the Allocation is being deleted | the base state, the end time, and the release cause when one is written |
+| `JobEnded` | `replaced` | phase `Ended` as planned: by `TIMEOUT` at the hard end, or by any of its base states while the Allocation is being deleted | the base state, the end time, and the release cause when one is written |
 | `AllocationEndedEarly` | `failing` | phase `Ended` otherwise: `COMPLETED` or `CANCELLED` before the hard end, with the Allocation not being deleted | the base state and the end time |
 | `AllocationFailed` | `failing` | phase `Failed`, other than a requeue | the base state and the scheduler's state reason |
 | `Requeued` | `failing` | a requeue is seen | the restart count and the base state |
@@ -338,7 +338,7 @@ No client key ID is a label: per-key usage is in the records.
 - **Counting:**
   - The count rises in the same call that hands the event over, before the recorder's queue, so it is final once the emitting code has returned. The help text covers the events a recorder then drops.
   - The count is taken by a wrapper where each recorder is built, so no emit site can raise an event uncounted. Each copy of a manager has one counter, never a package-level one.
-  - **Series are created at 0** for every reason, action and type that `lifecycle`, `front` and a managed Provider can raise, so an event never raised shows a real 0 (Unknown samples, on counts of the framework's own events). A batch Provider's series appear at its first event.
+  - **Series are created at 0** for every reason, action and type that `lifecycle`, `front` and a managed Provider can raise, so an event never raised shows a real 0 (Unknown samples, on counts of the framework's own events). A batch Provider's untyped series appear at its first event.
 - **Export:**
   - The controller process's counts are on the lifecycle controller's `/metrics`, the Provider managers' included, since they bind no metrics port. Only the serving copy exports them, like the other `hpcburst_` series (Unknown samples); every controller that raises events in that process runs only on the copy that leads `lifecycle`.
   - The front's counts are on the front's own `/metrics`, which also gains the process collector's `process_start_time_seconds`.
