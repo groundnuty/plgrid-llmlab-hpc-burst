@@ -185,7 +185,7 @@ func (p *pass) gateFailure(in *v1alpha1.Instance, v gateVerdict, ws []gateWorker
 		first, _ := gateMissOf(in, w)
 		tp := workerOf(ws, w).tp
 		second = append(second, v1alpha1.GateMiss{Worker: w, Throughput: *tp, Time: metav1.NewTime(p.now)})
-		label := ""
+		label := "the Instance "
 		if len(ws) > 1 {
 			label = w + " "
 		}
