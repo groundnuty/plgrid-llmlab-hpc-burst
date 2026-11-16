@@ -287,16 +287,16 @@ func TestUnlistedNamesStayInputs(t *testing.T) {
 // name that sorts first.
 func TestPrefixRuleOnASyntheticTable(t *testing.T) {
 	tab, err := newTable([]rule{
-		{"ab", classNotInput, false, "capacity"},
-		{"abc", classNever, false, "a key"},
-		{"xa", classFrameworkPassed, false, "passed"},
-		{"xb", classNever, false, "a key"},
-		{"ya", classFrameworkPassed, false, "passed"},
-		{"yb", classFrameworkPassed, false, "passed"},
-		{"wa", classRefused, false, "refused"},
-		{"wb", classInput, false, "input"},
-		{"vq", classNotInput, false, "capacity"},
-		{"vr", classInput, false, "input"},
+		{"ab", classNotInput, false, "capacity", false},
+		{"abc", classNever, false, "a key", false},
+		{"xa", classFrameworkPassed, false, "passed", false},
+		{"xb", classNever, false, "a key", false},
+		{"ya", classFrameworkPassed, false, "passed", false},
+		{"yb", classFrameworkPassed, false, "passed", false},
+		{"wa", classRefused, false, "refused", false},
+		{"wb", classInput, false, "input", false},
+		{"vq", classNotInput, false, "capacity", false},
+		{"vr", classInput, false, "input", false},
 	})
 	if err != nil {
 		t.Fatal(err)

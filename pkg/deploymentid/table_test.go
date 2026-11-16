@@ -126,10 +126,10 @@ func TestClassify(t *testing.T) {
 }
 
 func TestNewTableRejectsDuplicates(t *testing.T) {
-	if _, err := newTable([]rule{{"a", classInput, false, ""}, {"a", classNotInput, false, ""}}); err == nil {
+	if _, err := newTable([]rule{{"a", classInput, false, "", false}, {"a", classNotInput, false, "", false}}); err == nil {
 		t.Error("a name listed twice in one namespace was accepted")
 	}
-	if _, err := newTable([]rule{{"a", classInput, false, ""}, {"a", classNotInput, true, ""}}); err != nil {
+	if _, err := newTable([]rule{{"a", classInput, false, "", false}, {"a", classNotInput, true, "", false}}); err != nil {
 		t.Errorf("the same name in the flag and variable namespaces was refused: %v", err)
 	}
 }
@@ -140,5 +140,35 @@ func TestUnsupportedEngineIsRefused(t *testing.T) {
 	_, err := Compute(spec, accel, files)
 	if !errors.Is(err, ErrUnsupportedEngine) {
 		t.Errorf("got %v, want ErrUnsupportedEngine", err)
+	}
+}
+
+// IsCapacityFlag answers for the seven flags whose reason column says
+// "capacity" (HBEP-3, the v1 table for vLLM), listed here by hand, and for no
+// other: not the transport flags, not an input, not a name the table does not
+// list. A name is read as a serving spec's flag name is.
+func TestIsCapacityFlag(t *testing.T) {
+	for _, name := range []string{
+		"enable-prefix-caching", "max-num-seqs", "max-num-batched-tokens", "enable-chunked-prefill",
+		"gpu-memory-utilization", "kv-cache-memory-bytes", "cpu-offload-gb",
+	} {
+		if !IsCapacityFlag(name) {
+			t.Errorf("IsCapacityFlag(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{
+		"host", "served-model-name", "dtype", "uds", // transport and an input: classed, but not capacity
+		"port", "log-level", "download-dir", "max-model-len", // other rows of the table
+		"some-future-flag", "", "max-num", // not listed; empty; a prefix of a capacity flag
+		"no-enable-prefix-caching", // the negated spelling is not a name
+		"HF_HOME",                  // an environment variable's name
+	} {
+		if IsCapacityFlag(name) {
+			t.Errorf("IsCapacityFlag(%q) = true, want false", name)
+		}
+	}
+	// The flag-name normalisation is the library's: an underscore is a dash.
+	if !IsCapacityFlag("max_num_seqs") {
+		t.Error(`IsCapacityFlag("max_num_seqs") = false, want true: vLLM reads "_" as "-"`)
 	}
 }

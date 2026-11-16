@@ -23,6 +23,17 @@ func TestNamesForTheLifecycleControllerAndTheFront(t *testing.T) {
 		GateMissed:     "Missed",
 		GateSuspended:  "Suspended",
 		GateRecordOnly: "RecordOnly",
+		// HBEP-4, The remaining groups (beta): the billing units and the profile's dial-home modes, as the
+		// shipped profiles spell them, and the accounting record's beta fields as its unknown list names them
+		// (HBEP-8, Provider accounting, Billing).
+		string(BillingUnitGPUHour):        "gpu-hour",
+		string(BillingUnitCPUHour):        "cpu-hour",
+		string(ProfileDialHomeSSH):        "ssh",
+		string(ProfileDialHomeHostDialed): "host-dialed",
+		AccountingFieldAllocatedBilling:   "allocatedBilling",
+		AccountingFieldBillingUnit:        "billingUnit",
+		AccountingFieldGrant:              "grant",
+		AccountingFieldAccount:            "account",
 	} {
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
