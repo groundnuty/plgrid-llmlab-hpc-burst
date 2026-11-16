@@ -1,10 +1,10 @@
 package main
 
 // The sweep of dead capfs mounts (issue #648). The size-limited file system of the store-full tests (capfs_test.go) is served by the
-// test's own process. Its mount is made with auto_unmount (capfs_mount_test.go), so fusermount3 unmounts it when that process dies. But a
-// stopped systemd scope kills fusermount3 with the test, and then the mount stays with no one to serve it: its endpoint is dead, a stat of
-// it fails with ENOTCONN ("transport endpoint is not connected"), an ordinary rm cannot remove it, and a later run or a removal of the
-// scratch directory trips on it.
+// test's own process. Its mount has a watcher (capfs_mount_test.go), which unmounts it when that process dies. But a SIGKILL of the whole
+// scope or cgroup kills the watcher with the test, and then the mount stays with no one to serve it: its endpoint is dead, a stat of it
+// fails with ENOTCONN ("transport endpoint is not connected"), an ordinary rm cannot remove it, and a later run or a removal of the
+// scratch directory trips on it. So does a mount made with no watcher, as some of the tests below make on purpose.
 //
 // newCapVolume sweeps those before it mounts. It reads /proc/self/mountinfo for THIS user's capfs mounts, and unmounts, with fusermount3
 // -u, only the ones whose endpoint is dead. It never touches a mount that answers, which belongs to someone's running test, nor another
@@ -289,9 +289,9 @@ func sweepDeadCapMounts(env sweepEnv) sweepResult {
 			if env.failsOnWedged(m) {
 				res.wedged = append(res.wedged, m)
 				res.report = append(res.report, line)
-				env.logf("capfs sweep: %s is wedged: left alone", line)
+				env.logf("capfs sweep: wedged, so left alone: %s", line)
 			} else {
-				env.logf("capfs sweep: %s is wedged, as the wedge test holds it: left alone", line)
+				env.logf("capfs sweep: wedged, as the wedge test holds it, so left alone: %s", line)
 			}
 		default:
 			env.logf("capfs sweep: %s could not be told dead or alive (%v): left alone", m.point, why)

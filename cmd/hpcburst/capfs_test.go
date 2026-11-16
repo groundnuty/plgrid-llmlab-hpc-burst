@@ -29,7 +29,7 @@ type capVolume struct {
 	limit   atomic.Int64 // bytes; grow raises it, as freeing space on a full disk would
 	enospc  atomic.Int64 // how many requests were refused, so a test can show the volume really was full
 	server  *fuse.Server
-	conn    *capConn // the mount's connection, and fusermount3, which watches it
+	watch   *capWatcher // unmounts the mount if this process dies while it is mounted; nil when the volume has none
 	mount   string
 
 	// frozen is the steady state of a full store (#180): once set, every write, allocation and
@@ -176,9 +176,9 @@ func (e capMountError) Unwrap() error { return e.err }
 
 // mountCapVolume mounts a volume of the given size under dir, which it fills with a backing directory and a mount point, and returns it
 // with its server running in this process. The mount carries source as its name. newCapVolume mounts through it, and so does the child
-// process of the sweep's tests, so that both mount alike. autoUnmount has fusermount3 unmount the mount when this process dies
-// (capfs_mount_test.go says what that covers).
-func mountCapVolume(dir string, limit int64, source string, autoUnmount bool) (*capVolume, error) {
+// process of the sweep's tests, so that both mount alike. watch starts a watcher first, which unmounts the mount if this process dies
+// while it is mounted, and logs to watch.log in dir (capfs_mount_test.go says what that covers).
+func mountCapVolume(dir string, limit int64, source string, watch bool) (*capVolume, error) {
 	if real, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = real // mountinfo and fusermount3 name a mount point by its real path
 	}
@@ -200,8 +200,16 @@ func mountCapVolume(dir string, limit int64, source string, autoUnmount bool) (*
 	rootData.Dev = uint64(st.Dev)
 	root := rootData.NewNode(rootData, nil, "", &st)
 	rootData.RootNode = root
-	conn, err := fusermountCapfs(v.mount, source, autoUnmount)
+	if watch {
+		w, err := startCapWatcher(v.mount, filepath.Join(dir, "watch.log"))
+		if err != nil {
+			return nil, err
+		}
+		v.watch = w
+	}
+	conn, err := fusermountCapfs(v.mount, source)
 	if err != nil {
+		v.releaseWatcher()
 		return nil, capMountError{err}
 	}
 	// go-fuse serves the descriptor through its /dev/fd/N mount point, and so never runs fusermount3 itself.
@@ -209,17 +217,27 @@ func mountCapVolume(dir string, limit int64, source string, autoUnmount bool) (*
 	if err != nil {
 		uerr := capUnmount(v.mount, capUnmountTimeout)
 		if uerr == nil {
-			_ = conn.closeComm(capUnmountTimeout)
+			v.releaseWatcher()
 		}
 		return nil, capMountError{fmt.Errorf("serving the mount at %s: %w (its unmount: %v)", v.mount, err, uerr)}
 	}
-	v.server, v.conn = srv, conn
+	v.server = srv
 	return v, nil
 }
 
+// releaseWatcher releases the volume's watcher, if it has one, once the mount is gone.
+func (v *capVolume) releaseWatcher() error {
+	if v.watch == nil {
+		return nil
+	}
+	w := v.watch
+	v.watch = nil
+	return w.release(capWatchTimeout)
+}
+
 // unmount unmounts the volume and stops its server, each step bounded by d: fusermount3 -u, retried while the mount is busy, then the
-// end of the server, then fusermount3's watcher, which exits once its socket closes. A mount that will not unmount keeps its socket open:
-// closed, it would have the watcher detach a live mount.
+// end of the server, then the release of its watcher, which finds the mount gone and exits. A mount that will not unmount keeps its
+// watcher, which would only leave a live mount alone.
 func (v *capVolume) unmount(d time.Duration) error {
 	deadline := time.Now().Add(d)
 	var err error
@@ -239,7 +257,7 @@ func (v *capVolume) unmount(d time.Duration) error {
 	case <-time.After(d):
 		return fmt.Errorf("the server of %s did not stop within %s of its unmount", v.mount, d)
 	}
-	return v.conn.closeComm(d)
+	return v.releaseWatcher()
 }
 
 // newCapVolume mounts a volume of the given size and registers its unmount with the test.
@@ -248,11 +266,11 @@ func (v *capVolume) unmount(d time.Duration) error {
 // unless HPCBURST_REQUIRE_INTEGRATION=1, which turns that skip into a failure.
 //
 // The server runs in the test's own process, so a test that is killed never runs the clean-up
-// (issue #648). Its mount is made with auto_unmount, so that fusermount3 unmounts it when the
-// process dies; and before it mounts, newCapVolume sweeps this user's capfs mounts whose endpoint
-// is dead, which a stopped scope leaves (sweepDeadCapMounts). A mount found wedged (open, but its
-// stat does not return) fails the test here, since any later stat of it, or a removal of its
-// directory, would block.
+// (issue #648). Its mount has a watcher, which unmounts it once the process is gone; and before
+// it mounts, newCapVolume sweeps this user's capfs mounts whose endpoint is dead, which a SIGKILL
+// of the whole scope leaves (sweepDeadCapMounts). A mount found wedged (open, but its stat does
+// not return) fails the test here, since any later stat of it, or a removal of its directory,
+// would block.
 func newCapVolume(t *testing.T, limit int64) *capVolume {
 	t.Helper()
 	if res := sweepDeadCapMounts(realSweepEnv(t.Logf)); res.failure() != "" {
