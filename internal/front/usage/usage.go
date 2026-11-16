@@ -2,7 +2,8 @@
 // HBEP-8): one JSON line per request, synced to disk before the next, with a
 // monotonic counter persisted apart from the log in blocks, so that records
 // lost in a crash show as a gap. A Write returns once its record is on disk. In alpha the records are also the
-// attribution log (HBEP-9). No record holds a prompt, a response or a key.
+// attribution log (HBEP-9). No record holds a prompt, a response or a key, and the front cuts the client's own text in a record (the
+// requested model, the path) at the longest it can be served under, so that no client can make a line long (internal/front, recorded_text.go).
 //
 // The records go to one file per UTC day, usage-YYYY-MM-DD.jsonl, named by the
 // day of the write. Every file is kept: nothing here deletes or rewrites one,
