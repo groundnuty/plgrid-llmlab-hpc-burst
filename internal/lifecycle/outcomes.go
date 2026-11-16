@@ -50,12 +50,14 @@ var endOutcome = map[string]string{
 // or it ended before ready with a reason that adds none. A ready Instance is a success at its ready time; an Instance
 // ranked out before ready a success at its end; one that ended before ready for a start-up fault a failure at its
 // end, with its end reason. A VerificationFailed end is a failure here; recordStartOutcomes drops one whose
-// verification record names a spec fault. It reads only the two objects.
+// verification record names a spec fault. Each outcome carries the throughput gate's verdict when its Instance has
+// one (gateOutcomeOf). It reads only the two objects.
 func startOutcomeOf(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) (v1alpha1.StartOutcome, bool) {
 	if alloc == nil || alloc.UID == "" || alloc.Status.AtProvider.StartTime == nil {
 		return v1alpha1.StartOutcome{}, false
 	}
 	o := v1alpha1.StartOutcome{AllocationUID: alloc.UID}
+	o.Gate, o.ReferenceDate = gateOutcomeOf(in)
 	if in.Status.ReadyTime != nil {
 		o.Result, o.Time = v1alpha1.StartOutcomeReady, *in.Status.ReadyTime
 		return o, true
@@ -72,6 +74,20 @@ func startOutcomeOf(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) (v1alpha1
 		return v1alpha1.StartOutcome{}, false
 	}
 	return o, true
+}
+
+// gateOutcomeOf is the throughput gate's verdict an outcome keeps (HBEP-7, How k adjusts, Recorded): the Instance's
+// final verdict, and the matched entry's date with a Passed, Missed or Suspended one. Empty for an Instance the gate
+// has not judged finally: one that never reached it, or one whose first miss awaits its retry.
+func gateOutcomeOf(in *v1alpha1.Instance) (verdict, date string) {
+	g := in.Status.Gate
+	if g == nil || g.Verdict == "" {
+		return "", ""
+	}
+	if g.Verdict == v1alpha1.GateRecordOnly {
+		return g.Verdict, ""
+	}
+	return g.Verdict, g.ReferenceDate
 }
 
 // classCounts returns a class's counts from its outcomes, the one place they come from: the failures, those of them
