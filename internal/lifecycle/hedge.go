@@ -3,7 +3,6 @@ package lifecycle
 import (
 	"errors"
 	"fmt"
-	"slices"
 	"sort"
 	"strings"
 
@@ -132,18 +131,21 @@ func hedgeRepresentative(members []*v1alpha1.Instance, allocOf func(*v1alpha1.In
 	return r
 }
 
-// cleanEnd reports whether an end reason is no failure: a drain, or a hedge loss. Neither releases the Allocation
-// by itself (releaseRequired), counts towards the class's failure streak (failedEnd) or marks the Instance
-// unhealthy (end).
+// cleanEnd reports whether an end reason is no failure: a drain, a hedge loss, or a ranking (beta; HBEP-7,
+// Over-allocation and qualification (beta), RankedOut is no failure). None releases the Allocation by itself
+// (releaseRequired), counts towards the class's failure streak (failedEnd) or marks the Instance unhealthy (end).
 func cleanEnd(reason string) bool {
-	return reason == v1alpha1.ReasonDrained || reason == v1alpha1.ReasonHedgeLost
+	return reason == v1alpha1.ReasonDrained || reason == v1alpha1.ReasonHedgeLost || reason == v1alpha1.ReasonRankedOut
 }
 
-// drainEndReason is the reason a drained Instance ends with: HedgeLost for a hedge loser that drained, else
-// Drained.
+// drainEndReason is the reason a drained Instance ends with: HedgeLost for a hedge loser that drained, RankedOut
+// for a peer a candidate outranked (the ranked-out mark, rank.go), else Drained.
 func drainEndReason(in *v1alpha1.Instance) string {
-	if in.Annotations[annotationHedgeLost] != "" {
+	switch {
+	case in.Annotations[annotationHedgeLost] != "":
 		return v1alpha1.ReasonHedgeLost
+	case in.Annotations[annotationRankedOut] != "":
+		return v1alpha1.ReasonRankedOut
 	}
 	return v1alpha1.ReasonDrained
 }
@@ -153,26 +155,9 @@ func (p *pass) allocOf(in *v1alpha1.Instance) *v1alpha1.Allocation {
 	return p.allocs[in.Spec.AllocationRef.Name]
 }
 
-// primaryCandidates are the Instances that count towards capacity, each member of a hedge apart: not draining,
-// ended or deleting, not stale, and not the replacement of a predecessor that still counts.
+// primaryCandidates are the Instances that count towards capacity, each member of a hedge apart (primaryCandidatesOf).
 func (p *pass) primaryCandidates() []*v1alpha1.Instance {
-	counted := map[string]bool{}
-	for _, in := range p.insts {
-		if countable(in) && !p.stale[in.UID] {
-			counted[in.Name] = true
-		}
-	}
-	var out []*v1alpha1.Instance
-	for _, in := range p.insts {
-		if !countable(in) || p.stale[in.UID] {
-			continue
-		}
-		if pred := in.Annotations[v1alpha1.AnnotationPredecessor]; pred != "" && counted[pred] {
-			continue
-		}
-		out = append(out, in)
-	}
-	return out
+	return primaryCandidatesOf(p.insts, p.stale)
 }
 
 // primaryHedges are the primaries' hedges: the candidates grouped by hedge.
@@ -307,6 +292,8 @@ type scaleTarget struct {
 	allocation *v1alpha1.Allocation
 	effect     scaleEffect
 	why        string
+	// cause is why step 7 takes it (scaleCause); absent reads as lowered.
+	cause scaleCause
 }
 
 // effectOf is a scale-down's effect on one Instance, by its own state.
@@ -320,69 +307,13 @@ func effectOf(in *v1alpha1.Instance, a *v1alpha1.Allocation) scaleEffect {
 	return effectCancelPending
 }
 
-// scaleDownTargets selects what a scale-down by surplus primaries takes, from the primaries prim (one per hedge,
-// as primaries returns them) (HBEP-7, Reconcile loop, step 7; Hedging (beta), Interactions, Operations). A hedge is
-// one primary, ranked by its most advanced member: pending hedges first, newest first by their first member's
-// creation; then starting ones, newest first; then ready ones with the nearest hard end. It goes whole: each member
-// is a target with its own effect, and its replacement hedge goes with it, never promoted, its members first.
-func (p *pass) scaleDownTargets(prim []*v1alpha1.Instance, surplus int) []scaleTarget {
-	if surplus <= 0 {
-		return nil
-	}
-	groups := map[string][]*v1alpha1.Instance{}
-	for _, g := range p.primaryHedges() {
-		groups[g.key] = g.members
-	}
-	membersOf := func(rep *v1alpha1.Instance) []*v1alpha1.Instance {
-		if m := groups[hedgeKey(rep)]; len(m) > 0 {
-			return m
-		}
-		return []*v1alpha1.Instance{rep}
-	}
-	rank := func(rep *v1alpha1.Instance) int {
-		best := 0
-		for _, m := range membersOf(rep) {
-			best = max(best, memberStage(m, p.allocOf(m)))
-		}
-		return best
-	}
-	first := func(rep *v1alpha1.Instance) *v1alpha1.Instance {
-		ms := slices.Clone(membersOf(rep))
-		sort.SliceStable(ms, func(i, j int) bool { return olderThan(ms[i], ms[j]) })
-		return ms[0]
-	}
-	victims := slices.Clone(prim)
-	sort.SliceStable(victims, func(i, j int) bool {
-		a, b := victims[i], victims[j]
-		if ra, rb := rank(a), rank(b); ra != rb {
-			return ra < rb
-		}
-		if rank(a) == 2 {
-			return leaseBefore(a, b)
-		}
-		fa, fb := first(a), first(b)
-		return fb.CreationTimestamp.Before(&fa.CreationTimestamp) // newest first
-	})
-	var out []scaleTarget
-	for _, rep := range victims[:min(surplus, len(victims))] {
-		for _, m := range membersOf(rep) {
-			for _, r := range p.replacementMembers(m) {
-				if countable(r) {
-					out = append(out, scaleTarget{instance: r, allocation: p.allocOf(r), effect: effectOf(r, p.allocOf(r)), why: "its predecessor was scaled down"})
-				}
-			}
-		}
-		for _, m := range membersOf(rep) {
-			out = append(out, scaleTarget{instance: m, allocation: p.allocOf(m), effect: effectOf(m, p.allocOf(m)), why: "scaled down"})
-		}
-	}
-	return out
-}
-
 // applyScaleTarget carries out one scale-down target (HBEP-7, Release: scale-down).
 func (p *pass) applyScaleTarget(t scaleTarget) error {
 	switch t.effect {
 	case effectDrain:
+		if t.instance.Annotations[annotationRankedOut] != "" {
+			p.rankedOutPeer(t.instance)
+		}
 		return p.startDrain(t.instance)
 	case effectEndKeepAllocation:
 		return p.end(t.instance, t.allocation, v1alpha1.ReasonDrained, t.why, false)

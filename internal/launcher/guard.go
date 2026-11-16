@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -43,11 +44,30 @@ var (
 	guardBindingGVR = schemaGVR("admissionregistration.k8s.io", "v1", "validatingadmissionpolicybindings")
 )
 
-// guardObjects decodes the embedded manifest and returns its policy and its binding. It refuses a
-// manifest that holds anything else, so that a change to the file that the launcher does not
-// understand stops here and not at a start.
+// guardDef is one admission guard as the launcher installs it: a ValidatingAdmissionPolicy and the
+// binding that makes it Deny, written in one embedded manifest, both named name. The launcher holds a
+// list of them (the CRD deletion guard here, the three policies of HBEP-10 in admission.go), and every
+// step below works on one def, so a policy is installed, reset and checked as the CRD guard is and not
+// by a copy of its code.
+type guardDef struct {
+	name     string
+	file     string // the manifest's path in the repository, for errors
+	manifest []byte
+}
+
+// crdGuardDef is the CRD deletion guard.
+var crdGuardDef = guardDef{name: GuardName, file: "config/admission/crd-deletion-guard.yaml", manifest: admission.CRDDeletionGuard}
+
+// guardObjects decodes the CRD guard's embedded manifest and returns its policy and its binding.
 func guardObjects() (policy, binding *unstructured.Unstructured, err error) {
-	objs, err := decodeManifests(bytes.NewReader(admission.CRDDeletionGuard), "config/admission/crd-deletion-guard.yaml")
+	return crdGuardDef.objects()
+}
+
+// objects decodes the embedded manifest and returns its policy and its binding. It refuses a manifest
+// that holds anything else, so that a change to the file that the launcher does not understand stops
+// here and not at a start.
+func (d guardDef) objects() (policy, binding *unstructured.Unstructured, err error) {
+	objs, err := decodeManifests(bytes.NewReader(d.manifest), d.file)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -58,35 +78,42 @@ func guardObjects() (policy, binding *unstructured.Unstructured, err error) {
 		case "ValidatingAdmissionPolicyBinding":
 			binding = o
 		default:
-			return nil, nil, fmt.Errorf("the guard manifest holds a %s %s, want only the policy and its binding", o.GetKind(), o.GetName())
+			return nil, nil, fmt.Errorf("the manifest %s holds a %s %s, want only the policy and its binding", d.file, o.GetKind(), o.GetName())
 		}
 	}
-	if len(objs) != 2 || policy == nil || binding == nil || policy.GetName() != GuardName || binding.GetName() != GuardName {
-		return nil, nil, fmt.Errorf("the guard manifest holds %d objects, want one ValidatingAdmissionPolicy and one ValidatingAdmissionPolicyBinding, both named %s", len(objs), GuardName)
+	if len(objs) != 2 || policy == nil || binding == nil || policy.GetName() != d.name || binding.GetName() != d.name {
+		return nil, nil, fmt.Errorf("the manifest %s holds %d objects, want one ValidatingAdmissionPolicy and one ValidatingAdmissionPolicyBinding, both named %s", d.file, len(objs), d.name)
 	}
 	return policy, binding, nil
 }
 
-// InstallGuard makes the guard exist and be the manifest's, and applies it with server-side apply,
+// InstallGuard makes the CRD guard exist and be the manifest's, and applies it with server-side apply,
 // policy first, so repeating it is safe. Objects that exist already are set to the manifest's spec
 // first (resetSpecs); only then does the apply create what is missing.
 func InstallGuard(ctx context.Context, cfg *rest.Config, log io.Writer) error {
-	policy, binding, err := guardObjects()
-	if err != nil {
-		return err
-	}
+	return installGuards(ctx, cfg, log, crdGuardDef)
+}
+
+// installGuards installs each def in turn, as InstallGuard does the CRD guard.
+func installGuards(ctx context.Context, cfg *rest.Config, log io.Writer, defs ...guardDef) error {
 	dyn, mapper, err := newApplier(cfg)
 	if err != nil {
 		return err
 	}
-	if err := resetSpecs(ctx, dyn, policy, binding); err != nil {
-		return err
-	}
-	for _, o := range []*unstructured.Unstructured{policy, binding} {
-		if err := applyOne(ctx, dyn, mapper, o); err != nil {
+	for _, d := range defs {
+		policy, binding, err := d.objects()
+		if err != nil {
 			return err
 		}
-		logf(log, "applied %s %s", o.GetKind(), o.GetName())
+		if err := resetSpecs(ctx, dyn, policy, binding); err != nil {
+			return err
+		}
+		for _, o := range []*unstructured.Unstructured{policy, binding} {
+			if err := applyOne(ctx, dyn, mapper, o); err != nil {
+				return err
+			}
+			logf(log, "applied %s %s", o.GetKind(), o.GetName())
+		}
 	}
 	return nil
 }
@@ -243,17 +270,23 @@ func CheckGuard(ctx context.Context, cfg *rest.Config) (*GuardState, error) {
 }
 
 func checkGuard(ctx context.Context, dyn dynamic.Interface) (*GuardState, error) {
-	wantPolicy, wantBinding, err := guardObjects()
+	return crdGuardDef.check(ctx, dyn)
+}
+
+// check asks the API server for the def's policy and binding. An error is a failure to ask, never an
+// absent guard.
+func (d guardDef) check(ctx context.Context, dyn dynamic.Interface) (*GuardState, error) {
+	wantPolicy, wantBinding, err := d.objects()
 	if err != nil {
 		return nil, err
 	}
 	var missing []string
-	p, err := dyn.Resource(guardPolicyGVR).Get(ctx, GuardName, metav1.GetOptions{})
+	p, err := dyn.Resource(guardPolicyGVR).Get(ctx, d.name, metav1.GetOptions{})
 	switch {
 	case apierrors.IsNotFound(err):
-		missing = append(missing, "the ValidatingAdmissionPolicy "+GuardName+" is not there")
+		missing = append(missing, "the ValidatingAdmissionPolicy "+d.name+" is not there")
 	case err != nil:
-		return nil, fmt.Errorf("read the ValidatingAdmissionPolicy %s: %w", GuardName, err)
+		return nil, fmt.Errorf("read the ValidatingAdmissionPolicy %s: %w", d.name, err)
 	default:
 		// The server fills defaults in the nested parts of a policy, so only its top-level fields are
 		// compared: one the manifest does not set (matchConditions, paramKind, variables) can switch the
@@ -261,16 +294,21 @@ func checkGuard(ctx context.Context, dyn dynamic.Interface) (*GuardState, error)
 		if extra := extraKeys(p, wantPolicy); len(extra) > 0 {
 			missing = append(missing, fmt.Sprintf("the policy has spec fields the manifest does not set (%s), which can switch it off", strings.Join(extra, ", ")))
 		}
+		// The fields the server does not default are compared whole: a policy edited by hand to another
+		// match condition, failure policy or validation exists and decides nothing the manifest says.
+		if differ := differingFields(p, wantPolicy, "failurePolicy", "matchConditions", "variables", "validations"); len(differ) > 0 {
+			missing = append(missing, fmt.Sprintf("the policy's %s differ from the manifest's, so it no longer decides what the manifest says", strings.Join(differ, ", ")))
+		}
 	}
-	b, err := dyn.Resource(guardBindingGVR).Get(ctx, GuardName, metav1.GetOptions{})
+	b, err := dyn.Resource(guardBindingGVR).Get(ctx, d.name, metav1.GetOptions{})
 	switch {
 	case apierrors.IsNotFound(err):
-		missing = append(missing, "the ValidatingAdmissionPolicyBinding "+GuardName+" is not there")
+		missing = append(missing, "the ValidatingAdmissionPolicyBinding "+d.name+" is not there")
 	case err != nil:
-		return nil, fmt.Errorf("read the ValidatingAdmissionPolicyBinding %s: %w", GuardName, err)
+		return nil, fmt.Errorf("read the ValidatingAdmissionPolicyBinding %s: %w", d.name, err)
 	default:
-		if name, _, _ := unstructured.NestedString(b.Object, "spec", "policyName"); name != GuardName {
-			missing = append(missing, fmt.Sprintf("the binding names the policy %q, want %q", name, GuardName))
+		if name, _, _ := unstructured.NestedString(b.Object, "spec", "policyName"); name != d.name {
+			missing = append(missing, fmt.Sprintf("the binding names the policy %q, want %q", name, d.name))
 		}
 		if actions, _, _ := unstructured.NestedStringSlice(b.Object, "spec", "validationActions"); !slices.Equal(actions, []string{"Deny"}) {
 			missing = append(missing, fmt.Sprintf("the binding's validationActions %v are not just Deny", actions))
@@ -285,6 +323,22 @@ func checkGuard(ctx context.Context, dyn dynamic.Interface) (*GuardState, error)
 		return &GuardState{Detail: strings.Join(missing, "; ")}, nil
 	}
 	return &GuardState{Present: true}, nil
+}
+
+// differingFields names the spec fields among keys on which got and want differ, sorted as keys are given.
+// A field the manifest leaves out is compared as absent.
+func differingFields(got, want *unstructured.Unstructured, keys ...string) []string {
+	g, _, _ := unstructured.NestedMap(got.Object, "spec")
+	w, _, _ := unstructured.NestedMap(want.Object, "spec")
+	var out []string
+	for _, k := range keys {
+		gv, gok := g[k]
+		wv, wok := w[k]
+		if gok != wok || !apiequality.Semantic.DeepEqual(gv, wv) {
+			out = append(out, "spec."+k)
+		}
+	}
+	return out
 }
 
 // extraKeys names the top-level spec fields of got that want does not have, sorted.
