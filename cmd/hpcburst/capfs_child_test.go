@@ -230,15 +230,20 @@ func containsInt(list []int, n int) bool {
 }
 
 // capUnmountIfDead is the tests' own clean-up of a mount they made: it waits up to d for the mount to go, and unmounts it while it is
-// dead, with a plain unmount, without the sweep. A mount that answers, or does not, is reported and left; the result says whether the
-// mount is gone.
+// dead, with a plain unmount, without the sweep. The unmount is retried until d has passed: right after a wedged mount's holder dies,
+// the stats it aborted may still be unwinding, and the unmount fails with EBUSY for a moment. A mount that answers, or does not, is
+// reported and left; the result says whether the mount is gone.
 func capUnmountIfDead(t *testing.T, point string, d time.Duration) bool {
 	t.Helper()
 	deadline := time.Now().Add(d)
 	for capListed(point) {
 		if errno, answered := capStatErrno(point, capChildBound); answered && errno == syscall.ENOTCONN {
 			if err := capUnmount(point, capUnmountTimeout); err != nil && capListed(point) {
-				t.Errorf("the test's own unmount of its dead mount: %v", err)
+				if time.Now().Before(deadline) {
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+				t.Errorf("the test's own unmount of its dead mount, retried for %s: %v", d, err)
 				return false
 			}
 			continue
