@@ -53,7 +53,7 @@ func TestUpgrade(t *testing.T) {
 	}
 	r := cli(t, h.upArgs(base, append(frpsArgs(t), "--version", "1.35.9", "--json",
 		"--front-mode", "ssh", "--front-addr", "front.example.test", "--front-key", keyFile,
-		"--manifests", "testdata/manifests", "--controller-bin", ctlBin, "--front-config", frontCfg, "--front-bin", frontBin)...)...)
+		"--manifests", manifestsWithControllerCRDs(t, "testdata/manifests"), "--controller-bin", ctlBin, "--front-config", frontCfg, "--front-bin", frontBin)...)...)
 	if r.code != exitOK {
 		t.Fatalf("up exited %d", r.code)
 	}
@@ -455,7 +455,7 @@ func TestInterruptedUpgradeKeepsTheSupervision(t *testing.T) {
 	if err := os.WriteFile(frontCfg, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if r := cli(t, h.upArgs(base, append(frpsArgs(t), "--version", "1.35.9", "--controller-bin", ctlBin, "--front-config", frontCfg, "--front-bin", frontBin)...)...); r.code != exitOK {
+	if r := cli(t, h.upArgs(base, append(frpsArgs(t), "--version", "1.35.9", "--controller-bin", ctlBin, "--manifests", "../../config/crd", "--front-config", frontCfg, "--front-bin", frontBin)...)...); r.code != exitOK {
 		t.Fatalf("up exited %d: %s", r.code, r.err)
 	}
 	oldK3s := readState(t, h.dir).Processes[0].PID

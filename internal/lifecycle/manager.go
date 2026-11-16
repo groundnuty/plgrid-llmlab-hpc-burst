@@ -419,7 +419,68 @@ func lifecycleWatches(c client.Client) []lifecycleWatch {
 			}
 			return deploymentsInNamespace(ctx, c, o.GetNamespace())
 		})},
+		// Operations (HBEP-10; #589): an Operation maps to the ModelDeployment it names, an Approval to its
+		// Operation's, and an ApprovalPolicy to every deployment that has an Operation still waiting for a
+		// confirm or an approval. All three are read by the Operations step, so their informers join the
+		// readiness check "caches" with the rest.
+		{&v1alpha1.Operation{}, handler.EnqueueRequestsFromMapFunc(operationToDeployment)},
+		{&v1alpha1.Approval{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
+			return approvalToDeployment(ctx, c, o)
+		})},
+		{&v1alpha1.ApprovalPolicy{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, _ client.Object) []reconcile.Request {
+			return deploymentsAwaitingApproval(ctx, c)
+		})},
 	}
+}
+
+// operationToDeployment maps an Operation to the ModelDeployment it names, in its own namespace.
+func operationToDeployment(_ context.Context, o client.Object) []reconcile.Request {
+	op, ok := o.(*v1alpha1.Operation)
+	if !ok || op.Spec.ModelDeploymentRef.Name == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: op.Namespace, Name: op.Spec.ModelDeploymentRef.Name}}}
+}
+
+// approvalToDeployment maps an Approval to the ModelDeployment of the Operation it names, through a read of
+// the Operation in the cache. An Approval whose Operation is not there maps to nothing: the Operation's own
+// watch brings its deployment's pass when it appears.
+func approvalToDeployment(ctx context.Context, c client.Client, o client.Object) []reconcile.Request {
+	ap, ok := o.(*v1alpha1.Approval)
+	if !ok {
+		return nil
+	}
+	var op v1alpha1.Operation
+	if err := c.Get(ctx, types.NamespacedName{Namespace: ap.Namespace, Name: ap.Spec.Operation.Name}, &op); err != nil {
+		return nil
+	}
+	return operationToDeployment(ctx, &op)
+}
+
+// deploymentsAwaitingApproval returns the ModelDeployment of every Operation that is not past the phases a
+// policy can change: one with no phase yet, Planning, Planned and AwaitingApproval. A policy that appears,
+// changes or goes changes who may approve, and what a plan lists.
+func deploymentsAwaitingApproval(ctx context.Context, c client.Client) []reconcile.Request {
+	var ops v1alpha1.OperationList
+	if err := c.List(ctx, &ops); err != nil {
+		return nil
+	}
+	seen := map[types.NamespacedName]bool{}
+	var out []reconcile.Request
+	for i := range ops.Items {
+		op := &ops.Items[i]
+		switch op.Status.Phase {
+		case "", v1alpha1.OperationPhasePlanning, v1alpha1.OperationPhasePlanned, v1alpha1.OperationPhaseAwaitingApproval:
+		default:
+			continue
+		}
+		k := types.NamespacedName{Namespace: op.Namespace, Name: op.Spec.ModelDeploymentRef.Name}
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, reconcile.Request{NamespacedName: k})
+		}
+	}
+	return out
 }
 
 // controllerOptions are the lifecycle controller's work-queue options.
@@ -617,7 +678,7 @@ func (r *readiness) Start(ctx context.Context) error {
 	// Start every kind's informer without waiting, then wait for each of these informers itself:
 	// controller-runtime v0.23.1's cache.WaitForCacheSync waits only for the informers that exist,
 	// so on its own it passes with none of ours started or synced, and it would also wait for
-	// informers the controller does not watch. Starting them all first lets the six sync together.
+	// informers the controller does not watch. Starting them all first lets the nine sync together.
 	var synced []toolscache.InformerSynced
 	for _, k := range r.kinds {
 		inf, ok := r.startInformer(ctx, k)

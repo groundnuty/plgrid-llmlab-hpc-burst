@@ -227,7 +227,9 @@ func TestControllerSupervision(t *testing.T) {
 	bin, ctlDir := fakeController(t)
 	c := h.clients // a method value: the clients exist once up has written the kubeconfig
 
-	r := cli(t, h.upArgs(base, append(frpsArgs(t), "--json", "--controller-bin", bin,
+	// The controller watches Operation, Approval and ApprovalPolicy, so up starts it only on a host that has
+	// their definitions: --manifests config/crd, once; the store keeps them across the later starts.
+	r := cli(t, h.upArgs(base, append(frpsArgs(t), "--json", "--controller-bin", bin, "--manifests", "../../config/crd",
 		"--front-mode", "direct", "--front-addr", "front.example.test:8443")...)...)
 	if r.code != exitOK {
 		t.Fatalf("up exited %d", r.code)

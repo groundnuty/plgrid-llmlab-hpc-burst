@@ -73,7 +73,14 @@ func runSupervisorHelper(dir string) {
 		fmt.Fprintln(os.Stderr, "supervise:", err)
 		os.Exit(1)
 	}
-	if err := Supervise(ctx, SuperviseOptions{StateDir: dir, Handoff: h, Log: os.Stderr}); err != nil {
+	// HBTEST_DISK_FILE names a JSON file that stands in for the disk the event log's start gate reads
+	// (diskFromFile): the tests that start the supervisor as a process of its own cannot reach its
+	// seam otherwise. It is read at each ask, so a test changes the free space by rewriting it.
+	opts := SuperviseOptions{StateDir: dir, Handoff: h, Log: os.Stderr}
+	if p := os.Getenv("HBTEST_DISK_FILE"); p != "" {
+		opts.disk, opts.GatePoll = fileDisk{p}, 50*time.Millisecond
+	}
+	if err := Supervise(ctx, opts); err != nil {
 		fmt.Fprintln(os.Stderr, "supervise:", err)
 		os.Exit(1)
 	}

@@ -166,3 +166,28 @@ func TestPrintStatusAdmissionPolicies(t *testing.T) {
 		t.Errorf("a report that did not ask prints about the policies:\n%s", out)
 	}
 }
+
+// The global ApprovalPolicy prints one line: its approvers, or that there is none, which is a state and not
+// a fault; a report that did not ask prints nothing; a policy that could not be read says why.
+func TestPrintStatusGlobalApprovalPolicy(t *testing.T) {
+	text := func(r *launcher.StatusReport) string {
+		var b bytes.Buffer
+		printStatus(&b, r)
+		return b.String()
+	}
+	out := text(&launcher.StatusReport{Health: launcher.Healthy, GlobalApprovalPolicy: &launcher.GlobalPolicyState{
+		Present: true, Approvers: []string{"user example-admin", "group example-group", "serviceAccount example-ns/example-sa"},
+	}})
+	if want := "global ApprovalPolicy: approvers user example-admin, group example-group, serviceAccount example-ns/example-sa\n"; !strings.Contains(out, want) {
+		t.Errorf("status lacks %q:\n%s", want, out)
+	}
+	if out := text(&launcher.StatusReport{Health: launcher.Healthy, GlobalApprovalPolicy: &launcher.GlobalPolicyState{}}); !strings.Contains(out, "no global ApprovalPolicy") || strings.Contains(out, "approvers") {
+		t.Errorf("an absent policy:\n%s", out)
+	}
+	if out := text(&launcher.StatusReport{Health: launcher.Unhealthy, GlobalApprovalPolicy: &launcher.GlobalPolicyState{Detail: "could not be read: example"}}); !strings.Contains(out, "global ApprovalPolicy: could not be read: example\n") || strings.Contains(out, "no global ApprovalPolicy") {
+		t.Errorf("a policy that could not be read:\n%s", out)
+	}
+	if out := text(&launcher.StatusReport{Health: launcher.Healthy}); strings.Contains(out, "ApprovalPolicy") {
+		t.Errorf("a report that did not ask prints about the policy:\n%s", out)
+	}
+}
