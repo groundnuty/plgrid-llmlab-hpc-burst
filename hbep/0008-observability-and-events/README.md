@@ -182,7 +182,7 @@ The API refuses a new event without `action` or `reason`, with either over 128 c
 | `failing` | `WorkerRestart`, `InstanceRestart`, `RouterRestart`, `CrashCorrelated`, `RestartLoop`, `RegistrationTimeout`, `StartTimeout`, `TunnelNotConnected`, `QualificationFailed`, `VerificationFailed`, `AllocationFailed`, `AllocationLost`, `AllocationRefused`, `Requeued`, `SubmittedAsOther`, `RelayEndedForGood`, `AllocationEndedEarly` | Instance | lifecycle controller |
 | `failing` | `HeartbeatMissed` | the stale observer's resource (Observers) | the component that judges it |
 | `failing` | `UsageWriteFailed` | the front's `Lease` | front |
-| `replaced` | `HandedOver`, `HedgeLost` | Instance | lifecycle controller |
+| `replaced` | `HandedOver`, `HedgeLost`, `RankedOut` | Instance | lifecycle controller |
 | `ending-soon` | `NoReplacementReady` | Instance | lifecycle controller |
 
 - An event about a deployment caused by one Instance regards the ModelDeployment, with the Instance in `related`. `VerificationFailed`'s `degraded` event and `CapacityDropped`'s regard the Instance instead once the ModelDeployment is gone (`mdObject`, `internal/lifecycle/verify.go`), since nothing else is left to attach them to.
@@ -778,6 +778,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-16: amendment for billing: the scheduler's `billing` count times the elapsed hours, in the profile's billing unit, and totals per grant and account, still "allocated, not billed" (HBEP-4's amendment of the same day).
 - 2026-11-16: the science agent's decisions on the billing count, memory per GPU, records and the comparison.
 - 2026-11-16: revised by its Fable review (PR #621): the documented GH200 share is settled by the comparison's GH200 window, and the records' names rest on the owner's decision of 28 Oct 2026.
+- 2026-11-16: erratum: `RankedOut`, the `replaced` event regarding each ranked-out Instance, with the Instance it ranked below, or that outranked it, in `related`, joins the Reasons table with the code that raises it (#616), as HBEP-7's Over-allocation and qualification (beta) says.
 
 ## Amendments
 
