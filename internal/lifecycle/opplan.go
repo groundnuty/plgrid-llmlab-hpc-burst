@@ -79,7 +79,7 @@ func (p *pass) planOperation(req planRequest) (*v1alpha1.OperationPlan, string) 
 		refusal = b.scale(spec.Scale.Instances)
 	case v1alpha1.OperationActionEnd:
 		del := spec.End != nil && spec.End.Delete
-		if md.Spec.Source.Managed != nil {
+		if md.Spec.Source.Managed != nil && b.holdsNothing() {
 			b.managedEnd(del)
 			break
 		}
@@ -219,13 +219,16 @@ type shutdownPlan struct {
 // and each is the last. An Allocation follows retention at the plan's time: with a delete, a started one is
 // released at once ("its deployment was deleted"); with the end time set to now, the keep date becomes
 // now unless the policy's until is later (keepUntilOf); a Scale to zero keeps the deployment's own end
-// time.
+// time. A kept one on which the plan takes no Instance needs approval when its retention then releases it
+// before its hard end (shutdownKeepNeeds); one on which it takes an Instance is asked through that
+// Instance's target, by the same test.
 func (b *planBuilder) shutdown(s shutdownPlan) {
 	p, md, at := b.p, b.p.md, b.req.at
 	base := fateView{deleted: s.deleted, endTime: endTimeOf(md)}
 	if s.endsNow {
 		base.endTime = &at
 	}
+	instanceTaken := map[string]bool{} // by Allocation: the plan takes an Instance on it
 	for _, in := range p.insts {
 		// An Instance that has ended, is draining already or is being deleted is on its way out, and a
 		// stale one belongs to an earlier deployment of the name: the shutdown takes nothing from them.
@@ -242,13 +245,14 @@ func (b *planBuilder) shutdown(s shutdownPlan) {
 		}
 		needs, rule := instanceNeeds(effect, a, b.view(a, base), s.endsNow)
 		b.addInstance(in, a, effect, needs, rule)
+		instanceTaken[in.Spec.AllocationRef.Name] = true
 	}
 	for _, name := range orderedKeys(p.allocs) {
 		a := p.allocs[name]
 		if !a.DeletionTimestamp.IsZero() || allocationDead(a) {
 			continue // the controller releases it itself, Operation or none
 		}
-		b.addFate(a, base, false)
+		b.addShutdownFate(a, base, s.endsNow, instanceTaken[name])
 	}
 	if !s.deployment {
 		return
@@ -263,9 +267,28 @@ func (b *planBuilder) shutdown(s shutdownPlan) {
 	})
 }
 
-// managedEnd plans the End of a managed-source ModelDeployment: ONE target, the deployment itself, since the
-// lifecycle controller provisions nothing for it and it holds no Instance or Allocation. HBEP-10 lets an agent
-// end any deployment through an Operation, and the capacity guard leaves it no other way. Whether it needs
+// holdsNothing reports whether the pass holds no Allocation and no live Instance of the deployment. A person
+// can switch a serving deployment's source to managed (the CRD has no transition rule), and what it held
+// stays: its Instances drain, and a started Allocation under keep is kept (#653's review, finding 1). Such a
+// deployment's End is planned as the shutdown, so a delete that would release a started Allocation at once
+// needs approval as on a served source: the science agent's ruling on #653, 16 Nov 2026, checks the premise
+// "a managed-source deployment holds no Allocation" rather than assume it. An Allocation being deleted counts
+// as held: the shutdown skips it.
+func (b *planBuilder) holdsNothing() bool {
+	if len(b.p.allocs) > 0 {
+		return false
+	}
+	for _, in := range b.p.insts {
+		if !ended(in) {
+			return false
+		}
+	}
+	return true
+}
+
+// managedEnd plans the End of a managed-source ModelDeployment that holds nothing (holdsNothing): ONE target,
+// the deployment itself, since the lifecycle controller provisions nothing for it. HBEP-10 lets an agent end
+// any deployment through an Operation, and the capacity guard leaves it no other way. Whether it needs
 // approval is managedEndNeedsApproval's, the one place that says; its cost is the note noCapacityHeld, so the
 // actor sees what ending it does.
 func (b *planBuilder) managedEnd(del bool) {
@@ -275,8 +298,7 @@ func (b *planBuilder) managedEnd(del bool) {
 		effect = v1alpha1.PlanEffectDeleteDeployment
 	}
 	t := b.target(v1alpha1.TargetKindModelDeployment, md.Name, md.UID, md.Generation, nil, effect, managedEndNeedsApproval, ruleManagedEnd)
-	at := metav1.NewTime(b.req.at)
-	t.Cost = &v1alpha1.ReleaseCost{GPUHoursLeft: &v1alpha1.GPUHoursFigure{Unknown: noCapacityHeld, ObservedAt: &at}}
+	t.Cost = &v1alpha1.ReleaseCost{Note: noCapacityHeld}
 	b.targets = append(b.targets, t)
 }
 
@@ -370,6 +392,23 @@ func (b *planBuilder) addFate(a *v1alpha1.Allocation, base fateView, trim bool) 
 	b.addAllocation(a, effect, needs, rule)
 }
 
+// addShutdownFate adds the Allocation target for what retention does with an Allocation the shutdown leaves:
+// released at once, by allocationNeeds' rule; or kept. A kept one on which the plan takes no Instance
+// (instanceTaken false) needs approval when its retention then releases it before its hard end
+// (shutdownKeepNeeds); one on which it takes an Instance is asked through that Instance's target.
+func (b *planBuilder) addShutdownFate(a *v1alpha1.Allocation, base fateView, endsNow, instanceTaken bool) {
+	v := b.view(a, base)
+	effect, until := allocationFate(a, v, b.req.at)
+	needs, rule := allocationNeeds(effect)
+	if effect == v1alpha1.PlanEffectKeep {
+		rule = ruleKeep + ", until " + keepDate(until)
+		if !instanceTaken {
+			needs, rule = shutdownKeepNeeds(a, v, endsNow, until)
+		}
+	}
+	b.addAllocation(a, effect, needs, rule)
+}
+
 // keepDate writes the date a kept Allocation is next looked at, or says it is kept until its hard end.
 func keepDate(t time.Time) string {
 	if t.IsZero() {
@@ -385,10 +424,11 @@ func (b *planBuilder) addInstance(in *v1alpha1.Instance, a *v1alpha1.Allocation,
 	b.targets = append(b.targets, t)
 }
 
-// addAllocation adds an Allocation target; only an effect that lowers capacity carries a cost.
+// addAllocation adds an Allocation target; only a target that lowers capacity carries a cost: every effect
+// but Keep, and a Keep that needs approval, since its retention then releases it before its hard end.
 func (b *planBuilder) addAllocation(a *v1alpha1.Allocation, effect v1alpha1.PlanEffect, needs bool, rule string) {
 	t := b.target(v1alpha1.TargetKindAllocation, a.Name, a.UID, a.Generation, a.Labels, effect, needs, rule)
-	if effect != v1alpha1.PlanEffectKeep {
+	if effect != v1alpha1.PlanEffectKeep || needs {
 		t.Cost = b.cost(a, a.Labels, false)
 	}
 	b.targets = append(b.targets, t)

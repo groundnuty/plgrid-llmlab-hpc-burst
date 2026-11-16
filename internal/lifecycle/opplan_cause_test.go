@@ -203,15 +203,46 @@ func TestEndingAManagedDeploymentIsPlannedWithOneTarget(t *testing.T) {
 			})
 			tg := plan.Targets[0]
 			c := tg.Cost
-			if c.GPUHoursLeft == nil || c.GPUHoursLeft.Unknown != "no HPC capacity held" || c.GPUHoursLeft.GPUHours != "" {
-				t.Errorf("the cost's note is %+v, want exactly %q as GPUHoursLeft's unknown text", c.GPUHoursLeft, "no HPC capacity held")
+			// The note is ReleaseCost's own field, and no figure is unknown: unknown stays for a figure that
+			// applies and cannot be observed (the science agent's ruling on #653, 16 Nov).
+			if c.Note != "no HPC capacity held" {
+				t.Errorf("the cost's note is %q, want exactly %q", c.Note, "no HPC capacity held")
 			}
-			if c.LeaseLeft != nil || c.QueueAge != nil || c.StartEstimate != nil || c.LastReady || c.QueueWaits != nil || c.EstimateNow != nil || c.StartToReady != nil {
-				t.Errorf("the cost holds a figure beside the note: %+v", c)
+			if c.GPUHoursLeft != nil || c.LeaseLeft != nil || c.QueueAge != nil || c.StartEstimate != nil || c.LastReady || c.QueueWaits != nil || c.EstimateNow != nil || c.StartToReady != nil {
+				t.Errorf("the cost holds a figure, known or unknown, beside the note: %+v", c)
 			}
 			if tg.UID != "uid-md" || tg.Generation != 3 || tg.Provider != "" || len(tg.Policies) != 0 {
 				t.Errorf("target %+v: want the deployment's own identity (uid-md, generation 3), no Provider and no policies", tg)
 			}
+		})
+	}
+}
+
+// A person switched a serving deployment to a managed source, and it still holds a started Allocation under
+// keep (#653's review, finding 1). Its End is the shutdown, not the one-target managed plan. Worked by hand
+// from HBEP-7's retention: with delete, a started Allocation of a deleted deployment is released at once;
+// without it, the end time becomes now (10:00), which is a keep policy's date when it names none, so the
+// Allocation is released at once too. Either way it is a release of a started Allocation before its 13:00
+// hard end: approval (HBEP-10's table), with its cost. The deployment's own target needs none.
+func TestEndingAManagedDeploymentThatStillHoldsAnAllocationNeedsApproval(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		op   *v1alpha1.Operation
+		md   wantTarget
+	}{
+		{"with delete", endOp(true), wantTarget{kind: tMD, name: "md", effect: v1alpha1.PlanEffectDeleteDeployment, needs: false, rule: litDeleteMD}},
+		{"without delete", endOp(false), wantTarget{kind: tMD, name: "md", effect: v1alpha1.PlanEffectSetEndTime, needs: false, rule: litSetEndTime}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newOpFixture(t, 1)
+			f.withGlobalPolicy()
+			f.emptyAllocation("kept", &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionKeep})
+			f.md.Spec.Source = v1alpha1.ModelSource{Managed: &v1alpha1.ManagedCatalogEntry{}}
+			plan, refusal := f.plan(tc.op)
+			checkPlan(t, plan, refusal, []wantTarget{
+				{kind: tAlloc, name: "kept", effect: v1alpha1.PlanEffectReleaseStarted, needs: true, rule: litReleaseStarted, cost: true},
+				tc.md,
+			})
 		})
 	}
 }

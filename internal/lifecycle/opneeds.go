@@ -22,6 +22,7 @@ const (
 	ruleEndReleased    = "End an Instance still starting, as a drain: its Allocation's retention then releases it before its hard end (ReleaseWhenIdle, a keep date before the hard end, or the profile's maxIdle)"
 	ruleEndKept        = "End an Instance still starting, as a drain: its Allocation is kept until its hard end"
 	ruleKeep           = "Keep an Allocation under its retention policy"
+	ruleKeepReleased   = "Release a started Allocation before its hard end: the shutdown keeps it for now, and its retention then releases it early (ReleaseWhenIdle, a keep date before the hard end, or the profile's maxIdle)"
 	ruleSetEndTime     = "Set the end time to now: the consequences are separate targets"
 	ruleDeleteMD       = "Delete the ModelDeployment: the consequences are separate targets"
 	ruleOverAllocation = "over-allocation's own trim under the agreed spec"
@@ -36,8 +37,8 @@ const (
 const managedEndNeedsApproval = false
 
 // noCapacityHeld is the cost's note of that one target, so the actor sees what ending it does: it frees
-// nothing. ReleaseCost has no field for a note, and this release adds none (api/ is not edited): it is the
-// Unknown text of GPUHoursLeft, the figure of what ending gives up.
+// nothing. It is ReleaseCost's note, not an unknown figure: no figure applies (the science agent's ruling
+// on #653, 16 Nov 2026).
 const noCapacityHeld = "no HPC capacity held"
 
 // releasesBeforeHardEnd is the structural test of the drain's row (HBEP-10, What needs approval): whether
@@ -102,6 +103,22 @@ func allocationNeeds(effect v1alpha1.PlanEffect) (bool, string) {
 		return true, ruleReleaseKept
 	}
 	return false, ruleKeep
+}
+
+// shutdownKeepNeeds is whether an Allocation that the shutdown KEEPS, and on which it takes no Instance,
+// needs approval, and the rule that says so (#653's review, finding 2; the science agent's ruling on #653,
+// 16 Nov 2026, https://github.com/groundnuty/plgrid-llmlab-hpc-burst/pull/653#issuecomment-6926424569). The
+// shutdown places nothing on it again, so a kept Allocation that its retention then releases before its hard
+// end is a release of a started Allocation before its hard end. The test is releasesBeforeHardEnd, the
+// drain's structural one, never the clock. An Allocation on which the plan takes an Instance is asked through
+// that Instance's target, by the same test; one whose Instance the plan does not take (draining already, or
+// ended in a failure) has no such target, and the clock would read it as kept. HBEP-10's no-approval row, the
+// controller's own release under ReleaseWhenIdle after its idle limit, is for a release with no Operation.
+func shutdownKeepNeeds(a *v1alpha1.Allocation, v fateView, endsNow bool, until time.Time) (bool, string) {
+	if releasesBeforeHardEnd(a, v, endsNow) {
+		return true, ruleKeepReleased + ", until " + keepDate(until)
+	}
+	return false, ruleKeep + ", until " + keepDate(until)
 }
 
 // allocationFate is what an Allocation that a plan empties becomes, by retention's own rules

@@ -33,6 +33,7 @@ const (
 	litSetEndTime     = "Set the end time to now: the consequences are separate targets"
 	litDeleteMD       = "Delete the ModelDeployment: the consequences are separate targets"
 	litKeep           = "Keep an Allocation under its retention policy"
+	litKeepReleased   = "Release a started Allocation before its hard end: the shutdown keeps it for now, and its retention then releases it early (ReleaseWhenIdle, a keep date before the hard end, or the profile's maxIdle)"
 )
 
 // checkPlan compares a plan's targets, in kind-then-name order, with the hand-written ones.
@@ -256,7 +257,10 @@ func TestEndingAServingDeploymentNeedsApproval(t *testing.T) {
 		})
 	})
 	t.Run("without delete, a policy date later than now", func(t *testing.T) {
-		// until 11:30, after the plan's 10:00: the Allocation is kept until then.
+		// until 11:30, after the plan's 10:00: the Allocation is kept until then. The plan takes its Instance,
+		// r1, so the approval is asked through r1's drain; the Allocation's own target needs none (the
+		// science agent's ruling on #653: the kept Allocation's own approval is for one with no plannable
+		// Instance).
 		plan, refusal := serving(&v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionKeep, Until: opTime(opT0.Add(150 * time.Minute))}).plan(endOp(false))
 		checkPlan(t, plan, refusal, []wantTarget{
 			{kind: tAlloc, name: "alloc-r1", effect: v1alpha1.PlanEffectKeep, needs: false, rule: litKeep + ", until 2026-11-16T11:30:00Z"},
@@ -289,6 +293,53 @@ func TestEndingAQueuedDeploymentCancelsAndEnds(t *testing.T) {
 		{kind: tInst, name: "s", effect: v1alpha1.PlanEffectEndStarting, needs: true, rule: litEndReleased, cost: true},
 		{kind: tMD, name: "md", effect: v1alpha1.PlanEffectSetEndTime, needs: false, rule: litSetEndTime},
 	})
+}
+
+// End and Scale(0) of a deployment whose one Instance the plan does not take: it is draining already (a
+// no-overlap handover), or it has ended in a failure. The plan has no Instance target to ask for approval,
+// so the started Allocation's own target must (#653's review, finding 2; the science agent's ruling on
+// #653, 16 Nov 2026: toward approval, whenever releasesBeforeHardEnd holds). Worked by hand: ReleaseWhenIdle
+// with a 30 minute limit, emptied at the plan's 10:00, is kept until 10:30 and then released, two and a half
+// hours before its 13:00 hard end, with nothing placed on it again: a release of a started Allocation before
+// its hard end, so approval, and its cost. The End's end time does not move a ReleaseWhenIdle date, so End
+// and Scale(0) keep it to the same 10:30. The control: under keep with no date, Scale(0) keeps it until its
+// hard end, which needs no approval and shows no cost.
+func TestAKeptAllocationWithNoInstanceTargetNeedsApprovalWhenReleasedEarly(t *testing.T) {
+	idle := &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: durPtr("30m")}
+	draining := func(f *opFixture, r *v1alpha1.RetentionPolicy) {
+		f.addInstance(instOpts{name: "x", phase: v1alpha1.InstanceDraining, started: true, hardEnd: tp(opHardEnd), retention: r})
+	}
+	failed := func(f *opFixture, r *v1alpha1.RetentionPolicy) {
+		in, _ := f.addInstance(instOpts{name: "x", phase: v1alpha1.InstanceEnded, started: true, hardEnd: tp(opHardEnd), retention: r})
+		in.Status.EndReason = v1alpha1.ReasonVerificationFailed
+	}
+	kept := wantTarget{kind: tAlloc, name: "alloc-x", effect: v1alpha1.PlanEffectKeep, needs: true, rule: litKeepReleased + ", until 2026-11-16T10:30:00Z", cost: true}
+	setEnd := wantTarget{kind: tMD, name: "md", effect: v1alpha1.PlanEffectSetEndTime, needs: false, rule: litSetEndTime}
+	for _, tc := range []struct {
+		name  string
+		setup func(*opFixture, *v1alpha1.RetentionPolicy)
+		r     *v1alpha1.RetentionPolicy
+		op    *v1alpha1.Operation
+		want  []wantTarget
+	}{
+		{"End, a draining Instance", draining, idle, endOp(false), []wantTarget{kept, setEnd}},
+		{"End, a failed Instance", failed, idle, endOp(false), []wantTarget{kept, setEnd}},
+		{"Scale(0), a draining Instance", draining, idle, scaleOp(0), []wantTarget{kept}},
+		{"Scale(0), a failed Instance", failed, idle, scaleOp(0), []wantTarget{kept}},
+		{"Scale(0), a draining Instance under keep, kept until its hard end", draining, &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionKeep}, scaleOp(0),
+			[]wantTarget{{kind: tAlloc, name: "alloc-x", effect: v1alpha1.PlanEffectKeep, needs: false, rule: litKeep + ", until 2026-11-16T13:00:00Z"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newOpFixture(t, 1)
+			f.withGlobalPolicy()
+			tc.setup(f, tc.r)
+			plan, refusal := f.plan(tc.op)
+			checkPlan(t, plan, refusal, tc.want)
+			if c := plan.Targets[0].Cost; tc.want[0].needs && (c == nil || c.LeaseLeft == nil || c.LeaseLeft.Duration == nil || c.LeaseLeft.Duration.Duration != 3*time.Hour) {
+				t.Errorf("the kept Allocation's cost %+v: want 3h of lease left, its 13:00 hard end minus the plan's 10:00", c)
+			}
+		})
+	}
 }
 
 // A Release of a kept empty Allocation needs approval; it names the Allocation, or a selector matches it,
