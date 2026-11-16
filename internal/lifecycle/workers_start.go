@@ -126,11 +126,14 @@ func (p *pass) startingWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation
 	if routed(in) && !routerAdmitsReady(in, av) {
 		return nil
 	}
-	// The router holds every worker healthy: each is admitted, so its checks count from here (Q2).
-	if err := p.admitWorkers(in, av); err != nil {
-		return err
-	}
-	return p.becomeReady(in, alloc)
+	// The ranking point: a chosen Instance becomes ready here, a surplus one waits or is ranked (rank.go). The
+	// router holds every worker healthy: each is admitted, so its checks count from here (Q2).
+	return p.enterReady(in, alloc, func() error {
+		if err := p.admitWorkers(in, av); err != nil {
+			return err
+		}
+		return p.becomeReady(in, alloc)
+	})
 }
 
 // workerResults is worker w's check results at its current verification generation, from a process at
@@ -238,7 +241,7 @@ func workersThroughput(tps []*v1alpha1.Throughput) *v1alpha1.Throughput {
 // workerStartSignal returns the malfunction of an Instance of several workers that is not ready yet, and
 // the worker whose rung it enters: a worker that exited at its current generations (a clean exit too;
 // L-2.9), or a start past health.startTimeout from its start instruction, or from its last restart,
-// taken by the worker that holds the start back (HBEP-7:469: the timeout judges that worker): the first
+// taken by the worker that holds the start back (HBEP-7, Several workers: the timeout judges that worker): the first
 // not yet warmed up, else the first the current router report does not hold healthy, else worker-0
 // (#498's review).
 func (p *pass) workerStartSignal(in *v1alpha1.Instance, av agentView, st settings) (string, string) {
@@ -262,6 +265,9 @@ func (p *pass) workerStartSignal(in *v1alpha1.Instance, av agentView, st setting
 	if p.now.Before(deadline) {
 		p.at(deadline)
 		return "", ""
+	}
+	if p.waitingAtRankingPoint(in) {
+		return "", "" // a surplus Instance that passed waits for its ranking (startSignal)
 	}
 	for _, w := range names {
 		if !workerWarmed(in, w) {

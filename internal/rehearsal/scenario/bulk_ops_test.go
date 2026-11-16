@@ -1,7 +1,7 @@
 package scenario_test
 
 // The bulk path's operations on the whole stack (HBEP-6, Operational readiness 2 and Test plan,
-// Teardown; #448, part 7): the two behaviours no lower level covers. The rest of HBEP-6:657-661 is
+// Teardown; #448, part 7): the two behaviours no lower level covers. The rest of HBEP-6's Test plan items for the bulk path is
 // tested in parts 2 to 6, with the real frp where it matters.
 
 import (
@@ -209,7 +209,7 @@ func TestTeardownLeavesNoBulkProxy(t *testing.T) {
 	}
 }
 
-// TestPreBulkAllocationKeepsItsTokenTunnel (HBEP-6:659 and :661): an Allocation staged before the bulk
+// TestPreBulkAllocationKeepsItsTokenTunnel (HBEP-6, Test plan): an Allocation staged before the bulk
 // path was turned on keeps its token tunnel and takes no bulk transport. The host starts without the
 // bulk path and its Instance serves; then down, and up --bulk-path on the same state. The launcher's
 // first certificate, which the Allocation's frpc trusts, has the same bytes; its real agent, whose

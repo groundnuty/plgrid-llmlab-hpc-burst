@@ -103,7 +103,7 @@ func TestPrintStatusAgents(t *testing.T) {
 		return b.String()
 	}
 	exp := time.Date(2026, 12, 15, 10, 0, 0, 0, time.UTC)
-	out := text(&launcher.StatusReport{Health: launcher.Healthy, AgentRBAC: &launcher.AgentRBACState{Present: true}, Identities: []launcher.IdentityState{
+	out := text(&launcher.StatusReport{Health: launcher.Healthy, AgentRBAC: &launcher.AgentRBACState{Present: true, Writes: true}, Identities: []launcher.IdentityState{
 		{Name: "agent-a", Kubeconfig: "/state/identities/agent-a.kubeconfig", Expires: &exp, Valid: true},
 		{Name: "agent-b", Kubeconfig: "/state/identities/agent-b.kubeconfig", Expires: &exp, Detail: "the API server rejected the token (401)"},
 		{Name: "agent-c", Detail: "no kubeconfig file"},
@@ -124,7 +124,70 @@ func TestPrintStatusAgents(t *testing.T) {
 			t.Errorf("status of different roles lacks %q:\n%s", want, out)
 		}
 	}
+	// The narrow, read-only form is present with the writes off, and the line says why.
+	out = text(&launcher.StatusReport{Health: launcher.Healthy, AgentRBAC: &launcher.AgentRBACState{Present: true, Detail: "the ClusterRole hpcburst-agent is the narrow, read-only form"}})
+	if want := "agent roles: present, WRITES OFF (the ClusterRole hpcburst-agent is the narrow, read-only form)"; !strings.Contains(out, want) {
+		t.Errorf("status of the narrow role lacks %q:\n%s", want, out)
+	}
+	// An identity whose kubeconfig cannot be used is one identity's state, and says why.
+	out = text(&launcher.StatusReport{Health: launcher.Healthy, AgentRBAC: &launcher.AgentRBACState{Present: true, Writes: true}, Identities: []launcher.IdentityState{
+		{Name: "agent-d", Kubeconfig: "/state/identities/agent-d.kubeconfig", Detail: "unreadable: unable to load root certificates"},
+	}})
+	if want := "agent identity agent-d: NOT VALID, expiry unknown (unreadable: unable to load root certificates)\n"; !strings.Contains(out, want) {
+		t.Errorf("status of an unreadable identity lacks %q:\n%s", want, out)
+	}
 	if out := text(&launcher.StatusReport{Health: launcher.Healthy}); strings.Contains(out, "agent ") {
 		t.Errorf("a report that did not ask the API server prints about the agents:\n%s", out)
+	}
+}
+
+// Each of the three admission policies prints one line, present or ABSENT with what is missing; a report
+// that did not ask prints none.
+func TestPrintStatusAdmissionPolicies(t *testing.T) {
+	text := func(r *launcher.StatusReport) string {
+		var b bytes.Buffer
+		printStatus(&b, r)
+		return b.String()
+	}
+	out := text(&launcher.StatusReport{Health: launcher.Healthy, AdmissionPolicies: []launcher.AdmissionState{
+		{Name: "hpcburst-capacity-guard", GuardState: launcher.GuardState{Present: true}},
+		{Name: "hpcburst-owner-pin", GuardState: launcher.GuardState{Detail: "the ValidatingAdmissionPolicyBinding hpcburst-owner-pin is not there"}},
+	}})
+	for _, want := range []string{
+		"admission policy hpcburst-capacity-guard: present\n",
+		"admission policy hpcburst-owner-pin: ABSENT (the ValidatingAdmissionPolicyBinding hpcburst-owner-pin is not there)",
+		"the next hpcburst up installs it",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status lacks %q:\n%s", want, out)
+		}
+	}
+	if out := text(&launcher.StatusReport{Health: launcher.Healthy}); strings.Contains(out, "admission policy") {
+		t.Errorf("a report that did not ask prints about the policies:\n%s", out)
+	}
+}
+
+// The global ApprovalPolicy prints one line: its approvers, or that there is none, which is a state and not
+// a fault; a report that did not ask prints nothing; a policy that could not be read says why.
+func TestPrintStatusGlobalApprovalPolicy(t *testing.T) {
+	text := func(r *launcher.StatusReport) string {
+		var b bytes.Buffer
+		printStatus(&b, r)
+		return b.String()
+	}
+	out := text(&launcher.StatusReport{Health: launcher.Healthy, GlobalApprovalPolicy: &launcher.GlobalPolicyState{
+		Present: true, Approvers: []string{"user example-admin", "group example-group", "serviceAccount example-ns/example-sa"},
+	}})
+	if want := "global ApprovalPolicy: approvers user example-admin, group example-group, serviceAccount example-ns/example-sa\n"; !strings.Contains(out, want) {
+		t.Errorf("status lacks %q:\n%s", want, out)
+	}
+	if out := text(&launcher.StatusReport{Health: launcher.Healthy, GlobalApprovalPolicy: &launcher.GlobalPolicyState{}}); !strings.Contains(out, "no global ApprovalPolicy") || strings.Contains(out, "approvers") {
+		t.Errorf("an absent policy:\n%s", out)
+	}
+	if out := text(&launcher.StatusReport{Health: launcher.Unhealthy, GlobalApprovalPolicy: &launcher.GlobalPolicyState{Detail: "could not be read: example"}}); !strings.Contains(out, "global ApprovalPolicy: could not be read: example\n") || strings.Contains(out, "no global ApprovalPolicy") {
+		t.Errorf("a policy that could not be read:\n%s", out)
+	}
+	if out := text(&launcher.StatusReport{Health: launcher.Healthy}); strings.Contains(out, "ApprovalPolicy") {
+		t.Errorf("a report that did not ask prints about the policy:\n%s", out)
 	}
 }

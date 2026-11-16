@@ -75,6 +75,10 @@ func printSupervision(w io.Writer, r *launcher.StatusReport) {
 		} else if c.OpenFilesUnknown != "" {
 			line += ", open files unknown (" + c.OpenFilesUnknown + ")"
 		}
+		// The durable log (HBEP-8): each stream's bytes and messages, against its cap.
+		for _, st := range c.Streams {
+			line += fmt.Sprintf(", %s %d messages %d bytes (cap %d)", st.Name, st.Messages, st.Bytes, st.MaxBytes)
+		}
 		if c.Degraded != "" {
 			line += ", degraded: " + c.Degraded
 		}

@@ -247,6 +247,13 @@ const (
 	FrpsBulkBindPortOffset   = 13
 	FrpsBulkTCPMuxPortOffset = 14
 	FrpsBulkWebPortOffset    = 15
+	// EventLogPortOffset and EventLogMonitorPortOffset are the durable log's client port and its
+	// nats-server monitoring port (beta; HBEP-8, The durable log; HBEP-11, Single-user host):
+	// base+16 and base+17, since base+13 to base+15 stay the bulk path's whether or not it runs.
+	// Only a launcher run with --event-log starts the log, so nothing binds them otherwise. The
+	// monitoring port's GET /healthz is the log's health check.
+	EventLogPortOffset        = 16
+	EventLogMonitorPortOffset = 17
 
 	// FrpsDirName is the launcher's frps directory under the state directory,
 	// which holds the web password file.
@@ -413,6 +420,29 @@ func (h Host) FrpsBulkWebAddr() string { return loopback(h.FrpsBulkWebPort()) }
 func (h Host) FrpsBulkWebPasswordFile() string {
 	return filepath.Join(h.StateDir, FrpsBulkDirName, FrpsWebPasswordFileName)
 }
+
+// EventLogPort is the durable log's client port: the port base plus EventLogPortOffset.
+func (h Host) EventLogPort() int { return h.PortBase + EventLogPortOffset }
+
+// EventLogAddr is "127.0.0.1:<EventLogPort>", where the controllers and the front connect to the
+// durable log, with the token in EventLogTokenFile (HBEP-8, The durable log).
+func (h Host) EventLogAddr() string { return loopback(h.EventLogPort()) }
+
+// EventLogMonitorPort is nats-server's monitoring port, the log's health: the port base plus
+// EventLogMonitorPortOffset.
+func (h Host) EventLogMonitorPort() int { return h.PortBase + EventLogMonitorPortOffset }
+
+// EventLogMonitorAddr is "127.0.0.1:<EventLogMonitorPort>", where the launcher asks GET /healthz
+// and GET /jsz.
+func (h Host) EventLogMonitorAddr() string { return loopback(h.EventLogMonitorPort()) }
+
+// EventLogDir is <state>/eventlog, mode 700: the durable log's store, its configuration, its token
+// and its caps (HBEP-8, The durable log, Where it runs).
+func (h Host) EventLogDir() string { return filepath.Join(h.StateDir, "eventlog") }
+
+// EventLogTokenFile is <state>/eventlog/token, mode 600: the log's token, which the launcher writes
+// and the controllers and the front read (--event-log-token-file). The log refuses a client without it.
+func (h Host) EventLogTokenFile() string { return filepath.Join(h.EventLogDir(), "token") }
 
 // RelayKeeperDir is <state>/relaykeeper, mode 700: the relay keeper's own
 // directory, which holds its state file, its process lock and its ssh

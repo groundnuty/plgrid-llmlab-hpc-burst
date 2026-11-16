@@ -267,7 +267,7 @@ func newRig(t *testing.T, opts ...rigOption) *rig {
 	}
 	c := clientfake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(prof, provider).
-		WithStatusSubresource(&v1alpha1.ModelDeployment{}, &v1alpha1.Instance{}, &v1alpha1.Allocation{}, &v1alpha1.Provider{}, &v1alpha1.PlatformProfile{}).
+		WithStatusSubresource(&v1alpha1.ModelDeployment{}, &v1alpha1.Instance{}, &v1alpha1.Allocation{}, &v1alpha1.Provider{}, &v1alpha1.PlatformProfile{}, &v1alpha1.Operation{}).
 		WithInterceptorFuncs(funcs).
 		Build()
 	bcfg := pfake.Config{Partitions: []pfake.Partition{{Name: rigPartition, GPUModel: rigGPU, GPUsPerNode: 4, MaxTime: cfg.maxTime}}}

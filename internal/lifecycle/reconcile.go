@@ -96,6 +96,8 @@ type pass struct {
 
 	allocs map[string]*v1alpha1.Allocation
 	insts  []*v1alpha1.Instance
+	// ops are the Operations that name this ModelDeployment, read by the Operations step (operations.go).
+	ops []*v1alpha1.Operation
 	// stale marks Instances an earlier ModelDeployment of this name owned.
 	stale map[types.UID]bool
 	// deferred: a placement waits for a warm Allocation's agent to register
@@ -161,8 +163,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err := r.sweepSecrets(ctx); err != nil {
 		return ctrl.Result{}, err
 	}
-	if p.md == nil && len(p.insts) == 0 && len(p.allocs) == 0 {
-		return ctrl.Result{}, nil // a deleted deployment with nothing left: no more passes
+	if p.md == nil && len(p.insts) == 0 && len(p.allocs) == 0 && !p.opsNamingKey() {
+		return ctrl.Result{}, nil // a deleted deployment with nothing left, and no unfinished Operation that names it: no more passes
 	}
 	wait := maxRequeue
 	if !p.next.IsZero() {
@@ -196,12 +198,18 @@ func (p *pass) run() error {
 	// An Instance's failure does not hold back the rest of the pass; it is
 	// returned at the end, so the key is retried with backoff.
 	instErr := p.instances()
+	// A peer whose candidate will no longer be ready is not outranked after all (step 6; rank.go).
+	instErr = errors.Join(instErr, p.clearStaleMarks())
 	// In beta, a hedge whose member became ready is resolved in the same pass (HBEP-7, Reconcile loop, step 6):
 	// before step 7 counts it, so its losers are out before anything is planned.
 	instErr = errors.Join(instErr, p.resolveHedges())
 	if err := p.clearDialHome(); err != nil {
 		return errors.Join(instErr, err)
 	}
+	// The Operations step (HBEP-7, Reconcile loop; HBEP-10): Operations that name this ModelDeployment are planned,
+	// and a confirmed one's approvals counted, with no side effect but their own status. It runs before step 7, and
+	// whether or not the deployment exists. Its failure does not hold back the rest of the pass.
+	instErr = errors.Join(instErr, p.operations())
 	if md != nil && md.Spec.Source.Served != nil && !p.shutdown {
 		if err := p.capacity(); err != nil {
 			return errors.Join(instErr, err)

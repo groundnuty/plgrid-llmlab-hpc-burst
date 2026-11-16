@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventlog"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -55,6 +56,14 @@ type UpOptions struct {
 	// "" is alpha: no router, and the controller's command line is as before. It needs a controller
 	// binary.
 	InstanceRouter string
+	// EventLog is up --event-log (beta, opt-in; HBEP-8, The durable log): the supervisor runs
+	// HBEP-8's durable log, hpcburst-controller's eventlog subcommand, before the controllers and the
+	// front, and stops it last. The three sizes set its caps (2 GiB a stream by default) and the
+	// free space it leaves on its store's file system (15 GB); they are recorded with the choice and
+	// kept by upgrade, and a change takes down, then up with the new value. Valid only with a
+	// controller binary. Without it no log runs and nothing publishes to one.
+	EventLog                                           bool
+	EventLogEventsCap, EventLogUsageCap, EventLogFloor ByteSize
 
 	// supervisorArgv, set by tests only, replaces the supervisor's command line.
 	supervisorArgv []string
@@ -81,9 +90,20 @@ type UpReport struct {
 	CRDGuard bool `json:"crd_guard"`
 	// AgentRBAC is true when up installed the agents' namespace, roles and bindings (agents.go); it
 	// does so on every start, after the guard and before the controllers.
-	AgentRBAC bool     `json:"agent_rbac"`
-	Front     Front    `json:"front"`
-	Warnings  []string `json:"warnings,omitempty"`
+	AgentRBAC bool `json:"agent_rbac"`
+	// Admission is true when up installed the three admission policies (admission.go) and saw each
+	// refuse its dry-run probe, or could not probe one (AgentWrites is then false).
+	Admission bool `json:"admission_policies"`
+	// AgentWrites is true when up applied the agent role's wide rules, which grant the writes the
+	// admission policies bound, after each policy refused its probe. False means the agents are
+	// read-only (a warning says why).
+	AgentWrites bool `json:"agent_writes"`
+	// GlobalApprovalPolicy is what up did about ApprovalPolicy/global (approvalpolicy.go):
+	// GlobalPolicyCreated, GlobalPolicyExists (left as it is) or GlobalPolicyNoCRD (nothing written, with a
+	// warning).
+	GlobalApprovalPolicy string   `json:"global_approval_policy"`
+	Front                Front    `json:"front"`
+	Warnings             []string `json:"warnings,omitempty"`
 	// SupervisorPID and ControllerBin are set when controllers run; ControllerHealth is the
 	// address of the lifecycle controller's /healthz.
 	SupervisorPID    int    `json:"supervisor_pid,omitempty"`
@@ -95,6 +115,11 @@ type UpReport struct {
 	FrpsPorts []int `json:"frps_ports,omitempty"`
 	// FrpsBulkPorts are the second frps's bind, tcpmux and web ports when up ran it (--bulk-path).
 	FrpsBulkPorts []int `json:"frps_bulk_ports,omitempty"`
+	// EventLogAddr is the durable log's client address when up ran it (--event-log). EventLogNotStarted
+	// is why the supervisor did not start it, when its start gate was closed: the caps do not fit the
+	// disk. The controllers and the front run without it, and up still exits 0, with a warning.
+	EventLogAddr       string `json:"event_log_addr,omitempty"`
+	EventLogNotStarted string `json:"event_log_not_started,omitempty"`
 	// RelayKeeperSocket is the relay keeper's socket when up ran it (--relay-keeper).
 	RelayKeeperSocket string `json:"relay_keeper_socket,omitempty"`
 	// AgentBuilds is the check of the builds the PlatformProfiles' partitions need (#158), made
@@ -141,6 +166,7 @@ func startAndWait(ctx context.Context, spec launchSpec, front Front, timeout tim
 	st.RelayKeeper = spec.relayKeeper
 	st.BulkPath = spec.bulkPath
 	st.InstanceRouter = spec.instanceRouter
+	st.EventLog = spec.eventLog
 	// Record before waiting: an interrupted or crashed start is then still cleaned up by down.
 	if err := spec.l.saveState(st); err != nil {
 		_, _ = stopRecorded(context.Background(), st, 10*time.Second, log)
@@ -238,6 +264,23 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 	if o.InstanceRouter != "" && ctrlBin == "" {
 		return nil, errors.New("a router was asked for (--instance-router), but no controller binary was found: the controller runs the Instances")
 	}
+	var eventLog *EventLogConfig
+	switch {
+	case o.EventLog:
+		if ctrlBin == "" {
+			return nil, errors.New("the event log was asked for (--event-log), but no controller binary was found: the log is the controller binary's eventlog subcommand")
+		}
+		cfg := EventLogConfig{Caps: eventlog.Caps{Events: int64(o.EventLogEventsCap), Usage: int64(o.EventLogUsageCap)}, Floor: int64(o.EventLogFloor)}.withDefaults()
+		if err := cfg.Validate(); err != nil {
+			return nil, fmt.Errorf("--event-log: %w", err)
+		}
+		if ports, err = ports.WithEventLog(); err != nil {
+			return nil, err
+		}
+		eventLog = &cfg
+	case o.EventLogEventsCap != 0 || o.EventLogUsageCap != 0 || o.EventLogFloor != 0:
+		return nil, errors.New("--event-log-events-cap, --event-log-usage-cap and --event-log-floor set the event log's sizes, and need --event-log")
+	}
 	if o.RelayKeeper && ctrlBin == "" {
 		return nil, errors.New("the relay keeper was asked for (--relay-keeper), but no controller binary was found: the keeper is the controller binary's relaykeeper subcommand")
 	}
@@ -332,6 +375,7 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 		spec.relayKeeper = o.RelayKeeper
 		spec.bulkPath = o.BulkPath
 		spec.instanceRouter = o.InstanceRouter
+		spec.eventLog = eventLog
 	}
 	st, readyzAt, readyAt, err := startAndWait(ctx, spec, front, o.ReadyTimeout, o.Log)
 	if err != nil {
@@ -380,14 +424,37 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 		return abort("CRD deletion guard", err)
 	}
 	rep.CRDGuard = true
-	// The agents' namespace, roles and bindings go in on every start too (HBEP-10, Identities and
-	// roles; issue #589), reset to the manifest, after the guard and before the controllers.
+	// The three admission policies and the agents' namespace, roles and bindings go in on every start
+	// too (HBEP-10; issue #589), reset to the manifests, after the CRD guard and before the controllers,
+	// in the order that closes the window: the agent role at its narrow (read-only) rules, then the policies,
+	// a bounded wait until each policy refuses its dry-run probe, and only then the wide rules, which
+	// grant the writes the policies bound. A probe that never refuses fails the start with the role still
+	// narrow; a policy that cannot be probed (its CRD is absent) leaves the role narrow with a warning.
 	if cfg, err := restConfig(l.kubeconfig(), ports, 30*time.Second); err != nil {
 		return abort("agent roles", err)
-	} else if err := InstallAgentRBAC(ctx, cfg, o.Log); err != nil {
-		return abort("agent roles", err)
+	} else if writes, err := InstallAgentAccess(ctx, cfg, o.Log, AgentAccessOptions{}); err != nil {
+		return abort("admission policies and agent roles", err)
+	} else {
+		rep.Admission, rep.AgentRBAC, rep.AgentWrites = true, true, writes
+		if !writes {
+			rep.Warnings = append(rep.Warnings, agentWritesOffWarning)
+			logf(o.Log, "%s", agentWritesOffWarning)
+		}
 	}
-	rep.AgentRBAC = true
+	// The global ApprovalPolicy, when none exists (HBEP-10, Approval policy): with no policy at all a target
+	// that needs approval waits. An existing one is never changed. After the agent access, before the
+	// controllers, which watch it.
+	if cfg, err := restConfig(l.kubeconfig(), ports, 30*time.Second); err != nil {
+		return abort("global approval policy", err)
+	} else if outcome, err := EnsureGlobalApprovalPolicy(ctx, cfg, o.Log); err != nil {
+		return abort("global approval policy", err)
+	} else {
+		rep.GlobalApprovalPolicy = outcome
+		if outcome == GlobalPolicyNoCRD {
+			rep.Warnings = append(rep.Warnings, noApprovalPolicyCRDWarning)
+			logf(o.Log, "%s", noApprovalPolicyCRDWarning)
+		}
+	}
 	// The relay keeper's switch back, with k3s ready and before the controllers start (HBEP-6,
 	// Compatibility and upgrades).
 	if cfg, err := restConfig(l.kubeconfig(), ports, 30*time.Second); err != nil {
@@ -399,8 +466,13 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 		rep.Warnings = append(rep.Warnings, noControllerWarning)
 		logf(o.Log, "%s", noControllerWarning)
 	} else {
-		// In this order: the namespace the controllers' Leases live in, then the controllers.
+		// In this order: the definitions the controller watches, the namespace its Leases live in, then
+		// the controllers. Without Operation, Approval and ApprovalPolicy the controller's caches never
+		// sync, so it is not started.
 		cfg, err := restConfig(l.kubeconfig(), ports, 30*time.Second)
+		if err == nil {
+			err = CheckControllerCRDs(ctx, cfg, ctrlBin)
+		}
 		if err == nil {
 			err = ensureControllerNamespace(ctx, cfg)
 		}
@@ -476,6 +548,16 @@ func startControllers(ctx context.Context, l layout, ports Ports, o UpOptions, s
 	}
 	if o.RelayKeeper {
 		rep.RelayKeeperSocket = l.host(ports).RelayKeeperSocket()
+	}
+	if st.EventLog != nil {
+		rep.EventLogAddr = ports.EventLogAddr()
+		// The start gate may have kept the log back for space: the controllers and the front run,
+		// and up says so, where the supervisor wrote why (HBEP-8, A log refused for space).
+		if why, w := eventLogStartWarning(l); why != "" {
+			rep.EventLogNotStarted = why
+			rep.Warnings = append(rep.Warnings, w)
+			logf(o.Log, "%s", w)
+		}
 	}
 	// A tunnel process whose hard limit on open files is below HBEP-6's figure is warned about,
 	// never refused: the limit is the host's to set (HBEP-11, Single-user host; #431).

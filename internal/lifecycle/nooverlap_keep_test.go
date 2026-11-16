@@ -192,7 +192,7 @@ func TestNoOverlapKeepHoldsTheSlotToTheHardEnd(t *testing.T) {
 			}
 		}
 		// The controller has made no successor Allocation either: the slot is
-		// held, so it waits (HBEP-7 line 464, 592).
+		// held, so it waits (HBEP-7, Handover and Provisioning).
 		if n := len(rg.allAllocations()); oldLive && n != 1 {
 			t.Fatalf("at %s %d Allocations while the old job is live, want only the old one: %+v", at, n, rg.allAllocations())
 		}
@@ -221,7 +221,7 @@ func TestNoOverlapKeepHoldsTheSlotToTheHardEnd(t *testing.T) {
 			}
 			// The hold: the Instance has ended, so a primary is missing and its successor is held back
 			// by the slot on every step, the first and the ones after the restart too; the message lists
-			// SubmitLimitReached each time (HBEP-7 line 314).
+			// SubmitLimitReached each time (HBEP-7, Provisioning).
 			if primaryEnded && oldLive && !strings.Contains(c.Message, v1alpha1.ReasonSubmitLimitReached+": ") {
 				t.Fatalf("at %s the successor is held back by the old job's slot, but Degraded %q does not list SubmitLimitReached (after the restart: %v)", at, c.Message, restarted)
 			}

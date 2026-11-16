@@ -134,7 +134,6 @@ func TestEnvoyConfigCarriesHBEP5sSettings(t *testing.T) {
 		"ejected after local failures":   at(t, c, "outlier_detection", "consecutive_local_origin_failure"),
 		"local ejection enforced":        at(t, c, "outlier_detection", "enforcing_consecutive_local_origin_failure"),
 		"panic threshold":                at(t, c, "common_lb_config", "healthy_panic_threshold", "value"),
-		"bounded loads":                  at(t, c, "common_lb_config", "consistent_hashing_lb_config", "hash_balance_factor"),
 		"the number of top-level fields": float64(len(m)),
 	} {
 		want := map[string]any{
@@ -154,10 +153,47 @@ func TestEnvoyConfigCarriesHBEP5sSettings(t *testing.T) {
 			"unhealthy after": float64(2), "healthy after": float64(1), "check path": "/ready",
 			"check address": "127.0.0.1", "check port": float64(28160), "check Host": "worker-0",
 			"consecutive 5xx": float64(3), "base ejection": "30s", "max ejection": "300s",
-			"max ejection percent": float64(0), "uneject on a passing check": false, "panic threshold": float64(0), "bounded loads": float64(125),
+			"max ejection percent": float64(0), "uneject on a passing check": false, "panic threshold": float64(0),
 		}[name]
 		if got != want {
 			t.Errorf("%s = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// The ring has no bounded load, whatever the number of workers (the science agent's ruling on #614): the rendered common_lb_config holds
+// the panic threshold and nothing else, and the bytes the agent writes name neither hash_balance_factor nor consistent_hashing_lb_config.
+func TestTheRenderedRingHasNoBoundedLoad(t *testing.T) {
+	for _, n := range []int{1, 2, 4, 8} {
+		cfg := envoyCfg()
+		cfg.Workers = nil
+		for i := 0; i < n; i++ {
+			name := "worker-" + strconv.Itoa(i)
+			cfg.Workers = append(cfg.Workers, agent.EnvoyWorker{Name: name, Socket: envoyRunDir + "/" + name + ".sock"})
+		}
+		raw, err := agent.RenderEnvoyConfig(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, banned := range []string{"hash_balance_factor", "consistent_hashing_lb_config"} {
+			if strings.Contains(string(raw), banned) {
+				t.Errorf("%d workers: the rendered bootstrap names %s: ring_hash would run with a bounded load", n, banned)
+			}
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatal(err)
+		}
+		lb := at(t, clusterOf(t, m), "common_lb_config").(map[string]any)
+		keys := make([]string, 0, len(lb))
+		for k := range lb {
+			keys = append(keys, k)
+		}
+		if len(keys) != 1 || keys[0] != "healthy_panic_threshold" {
+			t.Errorf("%d workers: common_lb_config has the keys %v, want healthy_panic_threshold alone", n, keys)
+		}
+		if err := agent.CheckEnvoyConfig(raw, cfg); err != nil {
+			t.Errorf("%d workers: the agent's own config is refused: %v", n, err)
 		}
 	}
 }
@@ -244,17 +280,19 @@ func TestEnvoyGuardRefusesEachFault(t *testing.T) {
 			at(t, clusterOf(t, m), "circuit_breakers", "thresholds", 0).(map[string]any)["max_requests"] = 1024
 		}, "max_requests is 1024"},
 		{"no circuit breakers", func(m map[string]any) { delete(clusterOf(t, m), "circuit_breakers") }, "has no circuit_breakers"},
-		// ring_hash's bounded loads at the front's tight bound (HBEP-5; #518): absent, sessions pile onto
-		// one worker while a sibling idles.
-		{"no bounded loads", func(m map[string]any) {
-			delete(at(t, clusterOf(t, m), "common_lb_config").(map[string]any), "consistent_hashing_lb_config")
-		}, "has no consistent_hashing_lb_config"},
-		{"another bound", func(m map[string]any) {
-			at(t, clusterOf(t, m), "common_lb_config", "consistent_hashing_lb_config").(map[string]any)["hash_balance_factor"] = 200
-		}, "hash_balance_factor"},
-		{"hashing by host name too", func(m map[string]any) {
-			at(t, clusterOf(t, m), "common_lb_config", "consistent_hashing_lb_config").(map[string]any)["use_hostname_for_hashing"] = true
-		}, "sets use_hostname_for_hashing"},
+		// ring_hash runs with no bounded load (the science agent's ruling on #614, which reverses #518's bound):
+		// common_lb_config holds the panic threshold alone, and any consistent_hashing_lb_config, a
+		// hash_balance_factor of any value above all, is refused. A bounded load walks a request, and the
+		// retry's pick, off a worker past its share to a dead one not yet ejected (#561, #614).
+		{"a bounded load of 125, #518's", func(m map[string]any) {
+			at(t, clusterOf(t, m), "common_lb_config").(map[string]any)["consistent_hashing_lb_config"] = map[string]any{"hash_balance_factor": 125}
+		}, "common_lb_config sets consistent_hashing_lb_config"},
+		{"a bounded load of 200", func(m map[string]any) {
+			at(t, clusterOf(t, m), "common_lb_config").(map[string]any)["consistent_hashing_lb_config"] = map[string]any{"hash_balance_factor": 200}
+		}, "common_lb_config sets consistent_hashing_lb_config"},
+		{"hashing by host name", func(m map[string]any) {
+			at(t, clusterOf(t, m), "common_lb_config").(map[string]any)["consistent_hashing_lb_config"] = map[string]any{"use_hostname_for_hashing": true}
+		}, "common_lb_config sets consistent_hashing_lb_config"},
 		{"Envoy's default of 3 parallel retries", func(m map[string]any) {
 			at(t, clusterOf(t, m), "circuit_breakers", "thresholds", 0).(map[string]any)["max_retries"] = 3
 		}, "max_retries is 3"},

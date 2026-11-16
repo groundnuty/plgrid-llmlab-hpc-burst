@@ -11,17 +11,16 @@ import (
 
 func asUnsupported(err error, u **unsupported) bool { return errors.As(err, u) }
 
-// primaries returns the Instances that count towards capacity, one per hedge:
-// not draining, ended or deleting, and not the replacement of a predecessor
-// that still counts (HBEP-7, Reconcile loop, step 7). The members of one hedge
-// count once, through its representative (hedge.go), so a two-member hedge for
-// one missing primary is one primary, and step 7 cancels no member of it.
+// primaries returns the deployment's chosen primaries, one per hedge: the spec.instances most advanced of the
+// Instances that count, in HBEP-7's order (selectPrimaries; Reconcile loop, step 7; Over-allocation and
+// qualification (beta), How it counts). An Instance counts when it is not draining, ended or deleting and is not the
+// replacement of a predecessor that still counts. The members of one hedge count once, through its representative
+// (hedge.go), so a two-member hedge for one missing primary is one primary, and step 7 cancels no member of it. The
+// rest are the deployment's surplus (scaleDownTargets): they are no primary, hold no reserved slot and get no
+// replacement. With no surplus these are the Instances that count, as in alpha.
 func (p *pass) primaries() []*v1alpha1.Instance {
-	var out []*v1alpha1.Instance
-	for _, g := range p.primaryHedges() {
-		out = append(out, hedgeRepresentative(g.members, p.allocOf))
-	}
-	return out
+	chosen, _ := selectPrimaries(p.selection(nil), p.desiredCount())
+	return chosen
 }
 
 func countable(in *v1alpha1.Instance) bool {
@@ -61,10 +60,9 @@ func (p *pass) capacity() error {
 			break
 		}
 	}
-	if len(prim) > desired {
-		return p.scaleDown(prim, len(prim)-desired)
-	}
-	return nil
+	// The chosen primaries are read again: the loop above made Instances, which the selection counts. The surplus,
+	// ready or not, is taken every pass, not only when the count is lowered (scaleDownTargets).
+	return p.scaleDown(p.primaries(), 0)
 }
 
 // noProvider explains why an Instance that is needed could not be placed.
@@ -140,11 +138,10 @@ func countUsable(pvs []*providerView) int {
 	return n
 }
 
-// scaleDown removes surplus primaries: pending ones first, newest first; then
-// Instances still starting, newest first; then ready primaries with the nearest
-// hard end, which drain. A surplus primary's replacement goes with it, never
-// promoted, and a hedge goes whole, each member by its own state (HBEP-7,
-// Reconcile loop, step 7; Release: scale-down; scaleDownTargets).
+// scaleDown takes what step 7 takes: the surplus the selection leaves over, ready Instances draining, the nearest
+// hard end first, and non-ready ones beyond k per Provider, pending ones first, newest first, then started ones. A
+// surplus primary's replacement goes with it, never promoted, and a hedge goes whole, each member by its own state
+// (HBEP-7, Reconcile loop, step 7; Release: scale-down; scaleDownTargets).
 func (p *pass) scaleDown(prim []*v1alpha1.Instance, surplus int) error {
 	for _, t := range p.scaleDownTargets(prim, surplus) {
 		if err := p.applyScaleTarget(t); err != nil {

@@ -36,6 +36,9 @@ type launchSpec struct {
 	// instanceRouter is State.InstanceRouter: the first durable record carries it, and an upgrade
 	// keeps it.
 	instanceRouter string
+	// eventLog is State.EventLog, up --event-log (beta; HBEP-8, The durable log): the first durable
+	// record carries it, and an upgrade keeps it. Nil: no log.
+	eventLog *EventLogConfig
 	// eventTTL and omitEventTTL are set by tests only. eventTTL replaces DefaultEventTTL, so that a
 	// test can see the API server expire an Event within minutes; omitEventTTL leaves the argument
 	// out, as the releases before it was added did, to start the host that an upgrade must bring up

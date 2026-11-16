@@ -252,7 +252,7 @@ An Operation is a namespaced kind: one request to lower capacity, planned before
 #### The plan
 
 The lifecycle controller writes `status.plan` without side effects:
-- **each target:** its kind, name, UID and generation; its effect: cancel a pending Allocation, drain an Instance, drain the deployment's last ready Instance, release a kept Allocation, or keep an Allocation under its policy; whether the effect needs approval (What needs approval), and if so, each ApprovalPolicy that applies, with its generation and approvers;
+- **each target:** its kind, name, UID and generation; its effect: cancel a pending Allocation, drain an Instance, drain the deployment's last ready Instance, end an Instance that is still starting on a started Allocation, release a kept Allocation, or keep an Allocation under its policy; whether the effect needs approval (What needs approval), and if so, each ApprovalPolicy that applies, with its generation and approvers;
 - **the release cost** of every target that lowers capacity, whether or not it needs approval (The release cost);
 - **the observation time** of every fact;
 - **`id`:** a hash over the targets' UIDs and generations, their effects, which of them need approval, and the policies that apply. Cost figures are left out, since they age; the CLI shows their age instead.
@@ -295,6 +295,7 @@ The plan comes from the same code that executes: a `Scale` plan runs the control
 | Release an Allocation that its retention policy keeps | yes | HBEP-7, open question 8 |
 | Drain an Instance whose Allocation its retention then releases before its hard end: under `ReleaseWhenIdle`, a keep date before the hard end, or the profile's `maxIdle` | yes: a release of a started Allocation before its hard end | the science agent, review round of PR #582 |
 | Drain an Instance while another stays ready, its Allocation kept until its hard end | no | |
+| End an Instance that is still starting on a started Allocation (a scale-down's rank 1, HBEP-7, Reconcile loop, step 7), its Allocation then following retention | the drain's rule: yes when retention then releases the Allocation before its hard end, as in the two rows above; no when it is kept until its hard end | the science agent, ruling on question 10 of #589's plan, 15 Nov 2026 |
 | The controller's own release, under `ReleaseWhenIdle` after its idle limit, of an Allocation emptied under the agreed spec (a handover, a failure), with no Operation | no: the policy agreed to it | HBEP-7, open question 8 |
 | Repurpose under the agreed policy | no | owner, 14 Nov 2026 |
 | Delete audit records | a person, outside any policy | owner, 14 Nov 2026 |
@@ -584,6 +585,7 @@ The primitives replace www-2027 practices: a shared gate on a common host (slots
 - 2026-11-15: erratum (the science agent's ruling on #589's plan, Q7): ApprovalPolicy names are plain forms that admission checks, in place of a hashed long-value name, which CEL cannot compute.
 - 2026-11-15: a confirm exists only by an update that follows a written plan (for #589).
 - 2026-11-15: the capacity guard's allowlist admits an agent's change of `spec.hedgeWidth` (for #604, #589).
+- 2026-11-16: erratum (the science agent's ruling on #589's plan, Q10): `EndStarting` joins the plan's effects and What needs approval, with the drain's rule. A scale-down ends an Instance that is still starting on a started Allocation (HBEP-7, Reconcile loop, step 7), which neither drains nor cancels a pending Allocation, and the effect list had no entry for it.
 - 2026-11-16: erratum: the events stream never evicts, so a gap marker marks a subscriber behind a confirmed prune (HBEP-8's amendment of the same day, revised by its Fable review, PR #615).
 
 ## Amendments
