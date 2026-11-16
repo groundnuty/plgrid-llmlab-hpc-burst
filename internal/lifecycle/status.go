@@ -113,7 +113,11 @@ func (p *pass) writeStatus() error {
 	if stable {
 		cond(&s.Conditions, v1alpha1.ConditionProgressing, metav1.ConditionFalse, v1alpha1.ReasonStable, "the desired Instances serve", gen, now)
 	} else {
-		cond(&s.Conditions, v1alpha1.ConditionProgressing, metav1.ConditionTrue, v1alpha1.ReasonProvisioning, fmt.Sprintf("%d Instances live, %d ready, %d desired", live, ready, desired), gen, now)
+		msg := fmt.Sprintf("%d Instances live, %d ready, %d desired", live, ready, desired)
+		if hs := p.hedgeProviders(); len(hs) > 0 {
+			msg += "; " + strings.Join(hs, "; ")
+		}
+		cond(&s.Conditions, v1alpha1.ConditionProgressing, metav1.ConditionTrue, v1alpha1.ReasonProvisioning, msg, gen, now)
 	}
 	s.ObservedGeneration, s.LastReconcileTime = gen, &now
 	return p.updateMDStatus(next)

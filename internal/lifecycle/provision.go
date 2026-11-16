@@ -88,6 +88,10 @@ type placeOpts struct {
 	// gapOf, when set with successorOf, names the primary that drained in the
 	// mode and is written as annotationNoOverlapGap: the gap has begun.
 	gapOf string
+	// hedgeGroup, when set, names the first member of the hedge the new
+	// Instance joins, written as AnnotationHedgeGroup in its create request
+	// (HBEP-7, Hedging (beta), How it is found).
+	hedgeGroup string
 }
 
 func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error) {
@@ -346,8 +350,14 @@ func (p *pass) createInstance(pv *providerView, cid *classID, pred *v1alpha1.Ins
 	}
 	// Beta, opt-in: the router the Instance runs for its life (#429).
 	in.Spec.Launch.Router = p.r.Config.InstanceRouter
+	if o.hedgeGroup != "" {
+		in.Annotations = map[string]string{v1alpha1.AnnotationHedgeGroup: o.hedgeGroup}
+	}
 	if pred != nil {
-		in.Annotations = map[string]string{v1alpha1.AnnotationPredecessor: pred.Name}
+		if in.Annotations == nil {
+			in.Annotations = map[string]string{}
+		}
+		in.Annotations[v1alpha1.AnnotationPredecessor] = pred.Name
 		if o.successorOf != "" {
 			in.Annotations[annotationNoOverlapSuccessor] = o.successorOf
 			if o.gapOf != "" {
