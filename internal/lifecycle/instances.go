@@ -172,13 +172,7 @@ func (p *pass) end(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, reason, ms
 	// once), and with it what says the Allocation must go or since when it is
 	// idle (HBEP-7, Release; Retention, the idle anchor).
 	if release && alloc != nil {
-		// The delete's why names the reason and its words (a hedge loser's name the hedge and the winner), the
-		// text HBEP-10's release cause records once it is written (HBEP-7, Release, The release cause).
-		why := reason
-		if msg != "" {
-			why = reason + ": " + msg
-		}
-		if err := p.deleteAllocation(alloc, why); err != nil {
+		if err := p.deleteAllocation(alloc, endCause(in, reason, msg)); err != nil {
 			return err
 		}
 	} else if err := p.anchorIfLast(alloc); err != nil {
@@ -221,7 +215,8 @@ func (p *pass) anchorIfLast(alloc *v1alpha1.Allocation) error {
 // the record of what ran there, and is deleted once the Allocation is gone.
 func (p *pass) tombstone(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) error {
 	if alloc != nil && alloc.DeletionTimestamp.IsZero() && releaseRequired(in) && len(p.liveOn(alloc.Name)) == 0 {
-		if err := p.deleteAllocation(alloc, "resuming the release of a failed Instance's Allocation"); err != nil {
+		// The same cause as the release that failed or was cut short: the failure's reason.
+		if err := p.deleteAllocation(alloc, endCause(in, in.Status.EndReason, "")); err != nil {
 			return err
 		}
 	} else if err := p.anchorIfLast(alloc); err != nil {

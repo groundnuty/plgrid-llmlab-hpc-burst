@@ -14,7 +14,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/discovery/cached/memory"
@@ -94,14 +96,36 @@ func decodeManifests(r io.Reader, name string) ([]*unstructured.Unstructured, er
 	}
 }
 
+// servedLimit bounds the wait for a CRD's kind to be served, and servedEvery is how often it looks.
+const (
+	servedLimit = 60 * time.Second
+	servedEvery = 200 * time.Millisecond
+)
+
 // ApplyManifests applies the manifests of dir to the host with server-side apply, so repeating
 // it is safe. CustomResourceDefinitions go first, and the rest waits until each CRD is
-// Established. It returns how many objects it applied. This is the hook for the framework's CRDs.
+// Established AND its kind is served (waitServed). It returns how many objects it applied. This
+// is the hook for the framework's CRDs.
 func ApplyManifests(ctx context.Context, cfg *rest.Config, dir string, log io.Writer) (int, error) {
 	objs, err := readManifests(dir)
 	if err != nil {
 		return 0, err
 	}
+	dyn, mapper, err := newApplier(cfg)
+	if err != nil {
+		return 0, err
+	}
+	return applyManifests(ctx, dyn, mapper, objs, log, servedLimit, servedEvery)
+}
+
+// applyManifests is ApplyManifests over the clients it is given: the CRDs go first, and no other
+// object is applied, and nothing after the manifests step runs, until every CRD is Established and
+// a list of its kind answers through the same discovery a later apply uses (issue #603). The
+// CRD's Established condition is set before the API server serves its kind: the discovery that
+// maps the kind, and the endpoint that lists it, can lag, and applyOne's own retry covers only
+// the first of them for the object it applies. The later steps of up (the Allocation list of the
+// relay keeper's guard, among them) have no such retry.
+func applyManifests(ctx context.Context, dyn dynamic.Interface, mapper meta.ResettableRESTMapper, objs []*unstructured.Unstructured, log io.Writer, limit, every time.Duration) (int, error) {
 	var crds, others []*unstructured.Unstructured
 	for _, o := range objs {
 		if isCRD(o) {
@@ -109,10 +133,6 @@ func ApplyManifests(ctx context.Context, cfg *rest.Config, dir string, log io.Wr
 		} else {
 			others = append(others, o)
 		}
-	}
-	dyn, mapper, err := newApplier(cfg)
-	if err != nil {
-		return 0, err
 	}
 	n := 0
 	for _, o := range crds {
@@ -127,6 +147,12 @@ func ApplyManifests(ctx context.Context, cfg *rest.Config, dir string, log io.Wr
 			return n, err
 		}
 	}
+	if err := waitServed(ctx, dyn, mapper, crds, limit, every); err != nil {
+		return n, err
+	}
+	if len(crds) > 0 {
+		logf(log, "the %d CustomResourceDefinitions are Established and their kinds are served", len(crds))
+	}
 	mapper.Reset()
 	for _, o := range others {
 		if err := applyOne(ctx, dyn, mapper, o); err != nil {
@@ -136,6 +162,70 @@ func ApplyManifests(ctx context.Context, cfg *rest.Config, dir string, log io.Wr
 		logf(log, "applied %s %s", o.GetKind(), o.GetName())
 	}
 	return n, nil
+}
+
+// servedKind is what a CRD says it serves: its group, the first version it serves, and its kind.
+type servedKind struct {
+	crd  string
+	kind schema.GroupVersionKind
+}
+
+// servedKinds reads, off each CRD manifest, the kind it will serve and the version to list it by.
+// A CRD that serves no version, or names no group or kind, is an error that names it.
+func servedKinds(crds []*unstructured.Unstructured) ([]servedKind, error) {
+	out := make([]servedKind, 0, len(crds))
+	for _, o := range crds {
+		group, _, _ := unstructured.NestedString(o.Object, "spec", "group")
+		kind, _, _ := unstructured.NestedString(o.Object, "spec", "names", "kind")
+		versions, _, _ := unstructured.NestedSlice(o.Object, "spec", "versions")
+		version := ""
+		for _, v := range versions {
+			m, _ := v.(map[string]any)
+			if served, _ := m["served"].(bool); served {
+				version, _ = m["name"].(string)
+				break
+			}
+		}
+		if group == "" || kind == "" || version == "" {
+			return nil, fmt.Errorf("CustomResourceDefinition %s names no group (%q), kind (%q) or served version (%q), so there is no kind to wait for", o.GetName(), group, kind, version)
+		}
+		out = append(out, servedKind{crd: o.GetName(), kind: schema.GroupVersionKind{Group: group, Version: version, Kind: kind}})
+	}
+	return out, nil
+}
+
+// waitServed returns once, for every CRD in crds, the mapper finds its kind in a fresh discovery
+// and a list of the mapped resource answers, or fails after limit with an error that names the
+// first CRD or kind that is not served yet. Established is not served: the Established condition
+// is set before the API server serves the kind, so a later apply or list can meet "no matches
+// for kind" or a 404 while discovery and the endpoint catch up (#589, #593's CI run; #600). Each
+// round resets the mapper first, so the discovery it asks is never one built before the CRD
+// existed, and it is the discovery applyOne maps through.
+func waitServed(ctx context.Context, dyn dynamic.Interface, mapper meta.ResettableRESTMapper, crds []*unstructured.Unstructured, limit, every time.Duration) error {
+	kinds, err := servedKinds(crds)
+	if err != nil {
+		return err
+	}
+	last := "no CRD checked yet"
+	check := func(ctx context.Context) (bool, error) {
+		mapper.Reset()
+		for _, k := range kinds {
+			mapping, err := mapper.RESTMapping(k.kind.GroupKind(), k.kind.Version)
+			if err != nil {
+				last = fmt.Sprintf("kind %s of CRD %s is not in discovery yet: %v", k.kind.Kind, k.crd, err)
+				return false, nil
+			}
+			if _, err := dyn.Resource(mapping.Resource).List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
+				last = fmt.Sprintf("kind %s of CRD %s is not served yet: %v", k.kind.Kind, k.crd, err)
+				return false, nil
+			}
+		}
+		return true, nil
+	}
+	if err := wait.PollUntilContextTimeout(ctx, every, limit, true, check); err != nil {
+		return fmt.Errorf("the CRDs were not served within %s: %s", limit, last)
+	}
+	return nil
 }
 
 // newApplier returns the dynamic client and the discovery-backed mapper that applyOne needs.
