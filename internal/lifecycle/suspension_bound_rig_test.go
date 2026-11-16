@@ -10,10 +10,14 @@ package lifecycle
 // QualificationFailed and asserts at most two.
 
 import (
+	"context"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -50,23 +54,31 @@ func gateReleases(log *causeLog, prefix string) int {
 	return n
 }
 
-// A wrong entry and Instances placed on warm Allocations. Three Instances are ready with no entry (each records only),
-// then instances goes 3 -> 1: two drain, and their Allocations are kept warm (retention Keep, the default, with no idle
+// A wrong entry and Instances placed on warm Allocations. W+1 Instances are ready with no entry (each records only),
+// then instances goes W+1 -> 1: W drain, and their Allocations are kept warm (retention Keep, the default, with no idle
 // limit). A wrong entry is then added (20 ms per output token, limit 40 ms; every warm-up measures 41 ms), and
-// instances goes back to 3: two Instances are placed on the two warm Allocations, each misses twice. A failure there
-// adds no start-up outcome, since the Allocation already has one from its first Instance; if the gate did not count it
-// either, the fresh Allocations that replace them would be gated and released as well, four in all. At most two
-// Allocations are released for the entry, and the three end ready.
+// instances goes back to W+1: W Instances are placed on the W warm Allocations in one pass, and each misses twice, on
+// its retry in one pass. A failure there adds no start-up outcome, since the Allocation already has one from its first
+// Instance; if the gate did not count it either, the fresh Allocations that replace them would be gated and released
+// as well, W+2 in all. With W = 3 the pass-local count must count the warm second misses it has made, or that pass
+// alone releases three. At most two Allocations are released for the entry, and the W+1 end ready.
 func TestGateAWrongEntryReleasesAtMostTwoWhenInstancesGoOnWarmAllocations(t *testing.T) {
+	for _, w := range []int{2, 3} {
+		t.Run(fmt.Sprintf("%d warm Allocations", w), func(t *testing.T) { warmAllocationsRow(t, w) })
+	}
+}
+
+func warmAllocationsRow(t *testing.T, w int) {
+	all := int32(w + 1)
 	log := newCauseLog()
 	rg := newRig(t, withInterceptors(log.funcs()))
 	rg.engine = gateSequence(41 * time.Millisecond)
-	rg.create(gateMD(func(md *v1alpha1.ModelDeployment) { md.Spec.Instances = 3 }))
-	startUntil(rg, "md", time.Hour, "three Instances ready with no entry", func() bool { return rg.readyCount("md") == 3 })
+	rg.create(gateMD(func(md *v1alpha1.ModelDeployment) { md.Spec.Instances = all }))
+	startUntil(rg, "md", time.Hour, "every Instance ready with no entry", func() bool { return rg.readyCount("md") == int(all) })
 	id := rg.instances("md")[0].Spec.DeploymentID.Display()
 
 	rg.mutateMD("md", func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 1 })
-	startUntil(rg, "md", time.Hour, "two Instances drained", func() bool { return len(rg.liveInstances("md")) == 1 })
+	startUntil(rg, "md", time.Hour, "the others drained", func() bool { return len(rg.liveInstances("md")) == 1 })
 	inUse := map[string]bool{}
 	for _, in := range rg.liveInstances("md") {
 		inUse[in.Spec.AllocationRef.Name] = true
@@ -77,8 +89,8 @@ func TestGateAWrongEntryReleasesAtMostTwoWhenInstancesGoOnWarmAllocations(t *tes
 			warm[a.Name] = true
 		}
 	}
-	if len(warm) != 2 {
-		t.Fatalf("%d warm Allocations after 3 -> 1 under Keep, want 2: the row proves nothing", len(warm))
+	if len(warm) != w {
+		t.Fatalf("%d warm Allocations after %d -> 1 under Keep, want %d: the row proves nothing", len(warm), all, w)
 	}
 	before := map[string]bool{}
 	for _, in := range rg.instances("md") {
@@ -86,26 +98,134 @@ func TestGateAWrongEntryReleasesAtMostTwoWhenInstancesGoOnWarmAllocations(t *tes
 	}
 
 	setEntries(rg, rigProfile, gateEntryFor(id))
-	rg.mutateMD("md", func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 3 })
-	onWarm := map[string]bool{} // new Instances placed on a warm Allocation, seen while they exist
+	rg.mutateMD("md", func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = all })
+	onWarm := map[string]metav1.Time{} // new Instances placed on a warm Allocation, by creation, seen while they exist
 	seeWarm := func() {
 		for _, in := range rg.instances("md") {
 			if !before[in.Name] && warm[in.Spec.AllocationRef.Name] {
-				onWarm[in.Name] = true
+				onWarm[in.Name] = in.CreationTimestamp
 			}
 		}
 	}
-	startUntil(rg, "md", 4*time.Hour, "three Instances ready again", func() bool { seeWarm(); return rg.readyCount("md") == 3 })
+	startUntil(rg, "md", 4*time.Hour, "every Instance ready again", func() bool { seeWarm(); return rg.readyCount("md") == int(all) })
 	rg.run(time.Hour, 10*time.Second)
 
-	if len(onWarm) != 2 {
-		t.Fatalf("%d new Instances were placed on the warm Allocations, want 2: the row proves nothing", len(onWarm))
+	if len(onWarm) != w {
+		t.Fatalf("%d new Instances were placed on the warm Allocations, want %d: the row proves nothing", len(onWarm), w)
+	}
+	created := map[time.Time]bool{}
+	for _, c := range onWarm {
+		created[c.Time] = true
+	}
+	if len(created) != 1 {
+		t.Fatalf("the warm Instances were created at %v, want one pass: their retries are not in one pass, so the row proves nothing", created)
 	}
 	if n := gateReleases(log, rigProvider+"-"); n > 2 {
 		t.Errorf("%d Allocations released for QualificationFailed against one wrong entry, want at most two (HBEP-7, At most two releases for one reference)", n)
 	}
-	if n := rg.readyCount("md"); n != 3 {
-		t.Errorf("%d Instances ready an hour later, want 3", n)
+	if n := rg.readyCount("md"); n != int(all) {
+		t.Errorf("%d Instances ready an hour later, want %d", n, all)
+	}
+}
+
+// A miss lost with its pass (Fable's same root): the first Instance's second miss fails it and releases its Allocation,
+// and that pass's status write fails, so step 10 never records its outcome; the deployment's status writes keep
+// failing until the Allocation's delete has finished, so no later pass can record it either (an outcome needs its
+// Allocation). The miss is still the entry's first: the Instance itself is kept, with its verdict Missed, for
+// restart.window (30 min) after its end. The replacement misses twice too and is the second; the third records
+// Suspended. At most two releases.
+func TestGateAMissWhosePassWasLostStillCounts(t *testing.T) {
+	log := newCauseLog()
+	f := log.funcs()
+	var mu sync.Mutex
+	failMD, failedOnce := false, false
+	f.SubResourceUpdate = func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+		mu.Lock()
+		if in, ok := obj.(*v1alpha1.Instance); ok && in.Status.EndReason == v1alpha1.ReasonQualificationFailed && !failedOnce {
+			failMD, failedOnce = true, true
+		}
+		fail := failMD
+		mu.Unlock()
+		if _, ok := obj.(*v1alpha1.ModelDeployment); ok && fail {
+			return apierrors.NewServiceUnavailable("the deployment's status write fails")
+		}
+		return c.SubResource(sub).Update(ctx, obj, opts...)
+	}
+	rg := newRig(t, withInterceptors(f))
+	rg.engine = gateSequence(41 * time.Millisecond)
+	first, _ := gateEntries(rg, gateMD(), oneEntry())
+	alloc := rg.instance(first).Spec.AllocationRef.Name
+	// Rig.Step fails the test on any reconcile error; this loop steps as it does, and lets through only the
+	// injected status-write failure.
+	for end := rg.clock.Now().Add(time.Hour); ; {
+		if _, ok := rg.allocation(alloc); !ok {
+			break
+		}
+		if !rg.clock.Now().Before(end) {
+			t.Fatalf("the first Instance's Allocation still exists at %s", rg.clock.Now().Format(time.RFC3339))
+		}
+		stepLettingStatusFail(rg, "md")
+	}
+	mu.Lock()
+	if !failedOnce {
+		mu.Unlock()
+		t.Fatal("the first Instance never failed: the row proves nothing")
+	}
+	failMD = false
+	mu.Unlock()
+	if outs := rg.md("md").Status.StartOutcomes; len(outs) != 0 {
+		t.Fatalf("outcomes %+v recorded while the status writes failed: the row proves nothing", outs)
+	}
+	startUntil(rg, "md", 4*time.Hour, "an Instance ready", func() bool { return rg.readyCount("md") == 1 })
+	rg.run(time.Hour, 10*time.Second)
+	if n := gateReleases(log, rigProvider+"-"); n > 2 {
+		t.Errorf("%d Allocations released for QualificationFailed against one wrong entry, want at most two: the first miss was lost with its pass", n)
+	}
+}
+
+// stepLettingStatusFail is rig.Step for one deployment, which lets a reconcile fail on the injected status-write
+// fault and fails the test on any other error.
+func stepLettingStatusFail(rg *rig, md string) {
+	rg.t.Helper()
+	rg.clock.Advance(startTick)
+	if err := rg.prov.Sync(rg.ctx); err != nil {
+		rg.t.Fatalf("provider sync: %v", err)
+	}
+	rg.syncAgents()
+	if err := rg.reconcileOne(md); err != nil && !strings.Contains(err.Error(), "the deployment's status write fails") {
+		rg.t.Fatalf("reconcile %s at %s: %v", md, rg.clock.Now().Format(time.RFC3339), err)
+	}
+	if err := rg.r.checkHeartbeats(rg.ctx); err != nil {
+		rg.t.Fatalf("checkHeartbeats: %v", err)
+	}
+}
+
+// The control for the key of a run: two Providers sharing ONE profile hold one entry, so their misses are one run. Each
+// Provider takes one Allocation at a time, and instances is 2, so one primary goes to each; every warm-up measures
+// 41 ms against the shared wrong entry (20 ms, limit 40 ms). At most two releases in all: a run kept per Provider would
+// give each Provider its own two.
+func TestGateTwoProvidersSharingAProfileReleaseAtMostTwoInAll(t *testing.T) {
+	log := newCauseLog()
+	qos := []v1alpha1.QOSProfile{{Name: "example-a1", MaxSubmitPerUser: i32(1)}, {Name: "example-b1", MaxSubmitPerUser: i32(1)}}
+	rg := newRig(t, append(qosOpts(qos, "", "example-a1"), withInterceptors(log.funcs()), withBatchConfig(func(c *pfake.Config) { c.MaxSubmitPerUser = 1 }))...)
+	rg.addProvider(bProvider, bPartition, 48*time.Hour, func(pp *v1alpha1.PartitionProfile) { pp.QOS = "example-b1" }, func(c *pfake.Config) { c.MaxSubmitPerUser = 1 })
+	rg.engine = gateSequence(41 * time.Millisecond)
+	rg.create(gateMD(func(md *v1alpha1.ModelDeployment) {
+		md.Spec.Instances = 2
+		md.Spec.Providers.Names = []string{rigProvider, bProvider}
+	}))
+	startUntil(rg, "md", 5*time.Minute, "one Instance on each Provider", func() bool {
+		return len(rg.onProvider("md", rigProvider)) == 1 && len(rg.onProvider("md", bProvider)) == 1
+	})
+	setEntries(rg, rigProfile, gateEntryFor(rg.instances("md")[0].Spec.DeploymentID.Display()))
+	startUntil(rg, "md", 4*time.Hour, "an Instance ready on each Provider", func() bool { return rg.readyCount("md") == 2 })
+	rg.run(time.Hour, 10*time.Second)
+	a, b := gateReleases(log, rigProvider+"-"), gateReleases(log, bProvider+"-")
+	if a+b > 2 {
+		t.Errorf("%d releases on A and %d on B against one shared entry, want at most two in all", a, b)
+	}
+	if a+b == 0 {
+		t.Errorf("no release on either Provider: the entry gated nothing, so the row proves nothing")
 	}
 }
 
