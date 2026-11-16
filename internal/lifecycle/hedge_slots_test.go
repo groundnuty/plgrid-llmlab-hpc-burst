@@ -59,6 +59,8 @@ func runningAlloc(name string) (string, *v1alpha1.Allocation) {
 //	  B: nothing, a member that hasn't won holds no slot of its own.
 //	P on A, ready; W, P's replacement, on B, ready and Running, its hedge's only member:
 //	  B: one slot for W's replacement, the winner's from its win.
+//	P on A, ready; W, P's replacement, on B, verifying in a restart after it won, Running:
+//	  B: one slot for W's replacement, still: the hedge's one member that has served stays its winner.
 //	P on A, ready; W on B ready since 08:01:10, and L, W's hedge member on C, ready since 08:01:00:
 //	  B: nothing, L is the winner, ready first.
 //	C, drained in no-overlap mode, ended, on A; S, its stamped successor, on B, pending:
@@ -86,6 +88,15 @@ func TestReservedSlotsReadTheDeploymentOnEveryProvider(t *testing.T) {
 			[]v1alpha1.Instance{crossInstance("p", provA, v1alpha1.InstanceReady, nil), crossInstance("w", provB, v1alpha1.InstanceReady, pred("p"))},
 			map[string][]string{provA: {"p"}, provB: {"w"}},
 			map[string][]string{provA: nil, provB: {"replacement:w"}}},
+		{"the winner in a restart",
+			func() []v1alpha1.Instance {
+				w := crossInstance("w", provB, v1alpha1.InstanceVerifying, pred("p"))
+				rt := metav1.NewTime(hoT(8, 1, 10))
+				w.Status.ReadyTime = &rt
+				return []v1alpha1.Instance{crossInstance("p", provA, v1alpha1.InstanceReady, nil), w}
+			}(),
+			map[string][]string{provA: {"p"}, provB: {"w"}},
+			map[string][]string{provB: {"replacement:w"}}},
 		{"a member that is ready but not the winner",
 			func() []v1alpha1.Instance {
 				l := crossInstance("l", "provider-c", v1alpha1.InstanceReady, map[string]string{v1alpha1.AnnotationPredecessor: "p", v1alpha1.AnnotationHedgeGroup: "w"})

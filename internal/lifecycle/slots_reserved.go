@@ -127,10 +127,14 @@ func reservedOn(ctx context.Context, r client.Reader, provider string, profile *
 				here = append(here, in)
 			}
 		}
-		// The winner rule, over each hedge's countable members on every Provider, as the pass reads it (hedge.go).
+		// The winner rule, over each hedge's countable members on every Provider, as the pass reads it (hedge.go). A
+		// resolved hedge's one member that has served stays its winner through a restart, which makes it verifying
+		// for a while, so its slot does not lapse for the restart's length (#627's review).
 		for _, g := range groupHedges(v.insts, countable) {
 			if w := hedgeWinner(g.members); w != nil {
 				winners[w] = true
+			} else if len(g.members) == 1 && g.members[0].Status.ReadyTime != nil {
+				winners[g.members[0]] = true
 			}
 		}
 	}

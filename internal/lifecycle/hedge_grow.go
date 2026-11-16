@@ -21,9 +21,11 @@ import (
 // Every input is in status, so a restarted controller adds the same members at the same times, and each pending
 // member's hedge time is a requeue deadline (step 11).
 
-// hedgeNeed is what a hedge is for: its first member, and the predecessor it replaces (nil for a missing
-// primary). predGone is set for a replacement hedge whose predecessor is gone: its deadline has passed.
+// hedgeNeed is what a hedge is for: its key (the first member's name, which every later member names, the first
+// member gone or not), its first live member, and the predecessor it replaces (nil for a missing primary). predGone
+// is set for a replacement hedge whose predecessor is gone: its deadline has passed.
 type hedgeNeed struct {
+	key      string
 	first    *v1alpha1.Instance
 	pred     *v1alpha1.Instance
 	predGone bool
@@ -45,7 +47,7 @@ func (p *pass) needOf(g hedgeGroup) hedgeNeed {
 			}
 		}
 	}
-	n := hedgeNeed{first: first}
+	n := hedgeNeed{key: g.key, first: first}
 	if name := first.Annotations[v1alpha1.AnnotationPredecessor]; name != "" {
 		n.pred = p.instanceNamed(name)
 		n.predGone = n.pred == nil
@@ -177,7 +179,9 @@ func (p *pass) growHedges() error {
 		for _, m := range g.members {
 			skip[m.Labels[v1alpha1.LabelProvider]] = true
 		}
-		if _, err := p.provisionWith(need.pred, placeOpts{hedgeGroup: need.first.Name, skipProviders: skip, quiet: true, caps: true}); err != nil {
+		// The new member names the hedge's key, never a surviving member's name: once the first member has left, a
+		// survivor's name would start a second hedge for the same need (#627's review).
+		if _, err := p.provisionWith(need.pred, placeOpts{hedgeGroup: need.key, skipProviders: skip, quiet: true, caps: true}); err != nil {
 			errs = append(errs, err)
 		}
 	}

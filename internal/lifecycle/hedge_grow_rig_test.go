@@ -411,3 +411,110 @@ func TestARestartAddsTheSameMember(t *testing.T) {
 		t.Fatalf("at 08:20:10 after a restart B has %d members, want 1", n)
 	}
 }
+
+// TestAGrownMemberKeepsTheHedgesKey (#627's review): A's waits all 10 h, so a missing primary's M1 on A gets M2 on B
+// (pending 10 h) in its first pass, 08:00:00. M1's job starts at 08:00:10 and fails 30 s later, so M2 is left, with B
+// having no wait observed: its hedge time is the deadline, 08:30:00, when M3 is made on A. M3 names the hedge's key,
+// M1, not M2, so M2 and M3 stay one primary: across ten passes both live, nothing is cancelled and nothing more made.
+func TestAGrownMemberKeepsTheHedgesKey(t *testing.T) {
+	h := newHedgeRig(t)
+	fail := 30 * time.Second
+	h.batch.Enqueue(pfake.Script{FailAfter: &fail}, pfake.Script{QueueWait: 10 * time.Hour})
+	h.b.batch.Enqueue(pfake.Script{QueueWait: 10 * time.Hour})
+	h.Step()
+	setWaits(h.rig, rigProvider, 20, 10*time.Hour)
+	md := mdSpec(hoMD)
+	onBoth(md)
+	h.create(md)
+	h.Step() // 08:00:00: M1 on A, M2 on B
+	m1 := h.onProvider(hoMD, rigProvider)[0].Name
+	if n := len(h.membersOn(hoMD, m1, hedgeB)); n != 1 {
+		t.Fatalf("B has %d members of M1's hedge at 08:00:00, want 1", n)
+	}
+	stepUntilClock(h.rig, hoT(8, 1, 0), 10*time.Second, nil)
+	if in := h.instancesByName()[m1]; in != nil && !ended(in) {
+		t.Fatalf("M1 is %s at 08:01:00, want failed: the test proves nothing", in.Status.Phase)
+	}
+	stepUntilClock(h.rig, hoT(8, 30, 0), time.Minute, nil)
+	onA := h.onProvider(hoMD, rigProvider)
+	if len(onA) != 1 || onA[0].Annotations[v1alpha1.AnnotationHedgeGroup] != m1 {
+		t.Fatalf("at 08:30:00 A has %+v, want one member, M3, naming the hedge's key %s", onA, m1)
+	}
+	m3 := onA[0].Name
+	known := map[string]bool{}
+	for _, in := range h.instances(hoMD) {
+		known[in.Name] = true
+	}
+	for range 10 {
+		h.clock.Advance(10 * time.Second)
+		h.Step()
+		if a, b := len(h.onProvider(hoMD, rigProvider)), len(h.onProvider(hoMD, hedgeB)); a != 1 || b != 1 {
+			t.Fatalf("at %s A has %d live and B %d, want M3 and M2", h.clock.Now().Format(time.TimeOnly), a, b)
+		}
+		if in := h.mustInstance(m3); ended(in) {
+			t.Fatalf("M3 ended (%s) at %s: the hedge read as two primaries", in.Status.EndReason, h.clock.Now().Format(time.TimeOnly))
+		}
+		// M1's failure tombstone goes at the end of its restart window; no Instance may appear.
+		for _, in := range h.instances(hoMD) {
+			if !known[in.Name] {
+				t.Fatalf("Instance %s appeared at %s: a member was made again", in.Name, h.clock.Now().Format(time.TimeOnly))
+			}
+		}
+	}
+}
+
+// TestAGrownReplacementMemberKeepsTheHedgesKey (#627's review): P on A (12 h lease); A's and B's waits all 10 h. At
+// 08:00:20 R1 is made on A and R2 on B (pending 1 h). R1's job starts at 08:00:30 and fails at 08:01:00; R2 is left,
+// its expected start (08:00:30 + 10 h) after the deadline, so R3 is made on A at once, naming the hedge's key, R1.
+// When R2 starts and wins, R3, pending, is that one hedge's loser and ends HedgeLost: no member stays beside P.
+func TestAGrownReplacementMemberKeepsTheHedgesKey(t *testing.T) {
+	h := newHedgeRig(t, withMaxTime(12*time.Hour))
+	fail := 30 * time.Second
+	h.batch.Enqueue(pfake.Script{}, pfake.Script{FailAfter: &fail}, pfake.Script{QueueWait: 10 * time.Hour})
+	h.b.batch.Enqueue(pfake.Script{QueueWait: time.Hour})
+	h.Step()
+	md := mdSpec(hoMD)
+	onBoth(md)
+	h.create(md)
+	h.clock.Advance(10 * time.Second)
+	h.Step() // 08:00:10: P
+	p := h.instances(hoMD)[0].Name
+	setWaits(h.rig, rigProvider, 20, 10*time.Hour)
+	setWaits(h.rig, hedgeB, 20, 10*time.Hour)
+	h.clock.Advance(10 * time.Second)
+	h.Step() // 08:00:20: R1 on A, R2 on B
+	var r1 string
+	for _, r := range hoRepl(h.rig, p) {
+		if r.Labels[v1alpha1.LabelProvider] == rigProvider {
+			r1 = r.Name
+		}
+	}
+	if r1 == "" || len(h.membersOn(hoMD, r1, hedgeB)) != 1 {
+		t.Fatalf("at 08:00:20 P's replacements are %+v, want R1 on A and its member on B", hoRepl(h.rig, p))
+	}
+	r2 := h.membersOn(hoMD, r1, hedgeB)[0].Name
+	var r3 string
+	h.until(5*time.Minute, 10*time.Second, "R3 on A", func() bool {
+		for _, in := range h.onProvider(hoMD, rigProvider) {
+			if in.Annotations[v1alpha1.AnnotationPredecessor] == p && in.Name != r1 {
+				r3 = in.Name
+				return true
+			}
+		}
+		return false
+	})
+	if g := h.mustInstance(r3).Annotations[v1alpha1.AnnotationHedgeGroup]; g != r1 {
+		t.Fatalf("R3 names hedge %q, want the hedge's key %s, not R2 %s", g, r1, r2)
+	}
+	h.until(90*time.Minute, time.Minute, "R2 ready", func() bool { return h.mustInstance(r2).Status.Phase == v1alpha1.InstanceReady })
+	h.clock.Advance(10 * time.Second)
+	h.Step()
+	if in := h.instancesByName()[r3]; in != nil && in.Status.EndReason != v1alpha1.ReasonHedgeLost {
+		t.Fatalf("R3 is %s, ended for %q, once R2 won; want HedgeLost", in.Status.Phase, in.Status.EndReason)
+	}
+	for _, in := range h.onProvider(hoMD, rigProvider) {
+		if in.Name != p {
+			t.Fatalf("Instance %s still serves on A beside P after R2 won", in.Name)
+		}
+	}
+}
