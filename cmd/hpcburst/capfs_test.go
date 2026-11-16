@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -28,6 +29,7 @@ type capVolume struct {
 	limit   atomic.Int64 // bytes; grow raises it, as freeing space on a full disk would
 	enospc  atomic.Int64 // how many requests were refused, so a test can show the volume really was full
 	server  *fuse.Server
+	conn    *capConn // the mount's connection, and fusermount3, which watches it
 	mount   string
 
 	// frozen is the steady state of a full store (#180): once set, every write, allocation and
@@ -156,11 +158,14 @@ func (n *capNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno
 	return 0
 }
 
-// capFsName is the file system name the volume's mount shows in /proc/self/mountinfo (its source), and capFsType the type. The sweep of dead
-// mounts (capfs_sweep_test.go) finds a mount by them, so the mount below and the sweep must agree.
+// capFsName is the file system name a volume's mount shows in /proc/self/mountinfo (its source), and capFsType its type. The sweep of
+// dead mounts (capfs_sweep_test.go) finds a mount by them, so the mount below and the sweep must agree. capFsWedgeName is the source of
+// the one mount a test wedges on purpose (TestTheSweepLeavesAWedgedMountAloneAndReturnsPromptly): a newCapVolume of another run on the
+// same machine sweeps it once it is dead, but does not fail on it while that test holds it wedged.
 const (
-	capFsName = "hpcburst-capfs"
-	capFsType = "fuse.capfs"
+	capFsName      = "hpcburst-capfs"
+	capFsWedgeName = "hpcburst-capfs-wedge"
+	capFsType      = "fuse.capfs"
 )
 
 // capMountError is the failure of the FUSE mount itself, as against a failure to prepare for it.
@@ -169,10 +174,14 @@ type capMountError struct{ err error }
 func (e capMountError) Error() string { return e.err.Error() }
 func (e capMountError) Unwrap() error { return e.err }
 
-// mountCapVolume mounts a volume of the given size under dir, which it fills with a backing directory and a mount point, and returns it with its
-// server running in this process. newCapVolume mounts through it, and so does the child process of the sweep's tests, so that both mount exactly
-// alike. autoUnmount asks fusermount3 to unmount when the server dies (see capfs_sweep_test.go for what that does and does not do).
-func mountCapVolume(dir string, limit int64, autoUnmount bool) (*capVolume, error) {
+// mountCapVolume mounts a volume of the given size under dir, which it fills with a backing directory and a mount point, and returns it
+// with its server running in this process. The mount carries source as its name. newCapVolume mounts through it, and so does the child
+// process of the sweep's tests, so that both mount alike. autoUnmount has fusermount3 unmount the mount when this process dies
+// (capfs_mount_test.go says what that covers).
+func mountCapVolume(dir string, limit int64, source string, autoUnmount bool) (*capVolume, error) {
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = real // mountinfo and fusermount3 name a mount point by its real path
+	}
 	v := &capVolume{backing: filepath.Join(dir, "backing"), mount: filepath.Join(dir, "mnt")}
 	v.limit.Store(limit)
 	for _, d := range []string{v.backing, v.mount} {
@@ -191,16 +200,46 @@ func mountCapVolume(dir string, limit int64, autoUnmount bool) (*capVolume, erro
 	rootData.Dev = uint64(st.Dev)
 	root := rootData.NewNode(rootData, nil, "", &st)
 	rootData.RootNode = root
-	mo := fuse.MountOptions{FsName: capFsName, Name: "capfs"}
-	if autoUnmount {
-		mo.Options = []string{"auto_unmount"}
-	}
-	srv, err := fs.Mount(v.mount, root, &fs.Options{MountOptions: mo})
+	conn, err := fusermountCapfs(v.mount, source, autoUnmount)
 	if err != nil {
 		return nil, capMountError{err}
 	}
-	v.server = srv
+	// go-fuse serves the descriptor through its /dev/fd/N mount point, and so never runs fusermount3 itself.
+	srv, err := fs.Mount(fmt.Sprintf("/dev/fd/%d", conn.fd), root, &fs.Options{MountOptions: fuse.MountOptions{FsName: source, Name: "capfs", MaxWrite: capMaxWrite}})
+	if err != nil {
+		uerr := capUnmount(v.mount, capUnmountTimeout)
+		if uerr == nil {
+			_ = conn.closeComm(capUnmountTimeout)
+		}
+		return nil, capMountError{fmt.Errorf("serving the mount at %s: %w (its unmount: %v)", v.mount, err, uerr)}
+	}
+	v.server, v.conn = srv, conn
 	return v, nil
+}
+
+// unmount unmounts the volume and stops its server, each step bounded by d: fusermount3 -u, retried while the mount is busy, then the
+// end of the server, then fusermount3's watcher, which exits once its socket closes. A mount that will not unmount keeps its socket open:
+// closed, it would have the watcher detach a live mount.
+func (v *capVolume) unmount(d time.Duration) error {
+	deadline := time.Now().Add(d)
+	var err error
+	for {
+		if err = capUnmount(v.mount, capUnmountTimeout); err == nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if err != nil {
+		return err
+	}
+	served := make(chan struct{})
+	go func() { v.server.Wait(); close(served) }()
+	select {
+	case <-served:
+	case <-time.After(d):
+		return fmt.Errorf("the server of %s did not stop within %s of its unmount", v.mount, d)
+	}
+	return v.conn.closeComm(d)
 }
 
 // newCapVolume mounts a volume of the given size and registers its unmount with the test.
@@ -208,19 +247,26 @@ func mountCapVolume(dir string, limit int64, autoUnmount bool) (*capVolume, erro
 // (clean-ups run last-in first-out). If FUSE cannot be mounted it skips with the exact reason,
 // unless HPCBURST_REQUIRE_INTEGRATION=1, which turns that skip into a failure.
 //
-// It first sweeps this user's capfs mounts whose server is dead (sweepDeadCapMounts): the server runs
-// in the test's own process, so a test that is killed leaves its mount with no one to serve it, and
-// the clean-up below never runs (issue #648).
+// The server runs in the test's own process, so a test that is killed never runs the clean-up
+// (issue #648). Its mount is made with auto_unmount, so that fusermount3 unmounts it when the
+// process dies; and before it mounts, newCapVolume sweeps this user's capfs mounts whose endpoint
+// is dead, which a stopped scope leaves (sweepDeadCapMounts). A mount found wedged (open, but its
+// stat does not return) fails the test here, since any later stat of it, or a removal of its
+// directory, would block.
 func newCapVolume(t *testing.T, limit int64) *capVolume {
 	t.Helper()
-	sweepDeadCapMounts(realSweepEnv(t.Logf))
+	if res := sweepDeadCapMounts(realSweepEnv(t.Logf)); res.failure() != "" {
+		t.Fatal(res.failure())
+	}
 	dir, err := os.MkdirTemp("", "cv")
 	if err != nil {
 		t.Fatal(err)
 	}
-	v, err := mountCapVolume(dir, limit, false)
+	v, err := mountCapVolume(dir, limit, capFsName, true)
 	if err != nil {
-		os.RemoveAll(dir)
+		if rerr := capRemoveDir(dir); rerr != nil {
+			t.Logf("%v", rerr)
+		}
 		var me capMountError
 		if !errors.As(err, &me) {
 			t.Fatal(err)
@@ -231,21 +277,29 @@ func newCapVolume(t *testing.T, limit int64) *capVolume {
 		}
 		t.Skip("SKIPPED, NOT TESTED: " + msg)
 	}
-	srv := v.server
 	t.Cleanup(func() {
-		deadline := time.Now().Add(30 * time.Second)
-		for {
-			err := srv.Unmount()
-			if err == nil || time.Now().After(deadline) {
-				if err != nil {
-					t.Errorf("unmount %s: %v", v.mount, err)
-				}
-				break
-			}
-			time.Sleep(200 * time.Millisecond)
+		if err := v.unmount(30 * time.Second); err != nil {
+			t.Errorf("unmount %s: %v", v.mount, err)
 		}
-		srv.Wait()
-		os.RemoveAll(dir)
+		if err := capRemoveDir(dir); err != nil {
+			t.Errorf("%v", err)
+		}
 	})
 	return v
+}
+
+// capRemoveDir removes dir, unless /proc/self/mountinfo lists a mount at or under it: a removal would stat that mount, and block for
+// good on a wedged one. Such a directory is left in place, and the error says why.
+func capRemoveDir(dir string) error {
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = real
+	}
+	data, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return fmt.Errorf("%s is left in place: /proc/self/mountinfo cannot be read to show that nothing is mounted under it: %w", dir, err)
+	}
+	if p, ok := mountedUnder(string(data), dir); ok {
+		return fmt.Errorf("%s is left in place: %s is still mounted", dir, p)
+	}
+	return os.RemoveAll(dir)
 }
