@@ -518,3 +518,39 @@ func TestAGrownReplacementMemberKeepsTheHedgesKey(t *testing.T) {
 		}
 	}
 }
+
+// TestAPassedOverProviderRecordsNothing: growth's search is quiet (HBEP-7, Hedging (beta), A Provider passed over).
+// B's QOS allows one job of ours, which another deployment's primary holds; a missing primary with A's waits all 10 h
+// is due its member on B. A pass's growth is refused there and records nothing for any condition: no submit-limit
+// words for B (noSlot) and no Degraded reason, from the pass's own state after growHedges.
+func TestAPassedOverProviderRecordsNothing(t *testing.T) {
+	h := newHedgeRigB(t, 4*time.Hour, &v1alpha1.QOSProfile{Name: "example-b1", MaxSubmitPerUser: ptrTo(int32(1))})
+	h.batch.Enqueue(pfake.Script{QueueWait: 10 * time.Hour})
+	h.Step()
+	other := mdSpec("md-x")
+	other.Spec.Providers.Names = []string{hedgeB}
+	h.create(other)
+	h.until(time.Minute, 10*time.Second, "md-x on B", func() bool { return len(h.allocations("md-x")) == 1 })
+	setWaits(h.rig, rigProvider, 20, 10*time.Hour)
+	md := mdSpec(hoMD)
+	onBoth(md)
+	h.create(md)
+	h.Step()
+	m1 := h.onProvider(hoMD, rigProvider)
+	if len(m1) != 1 || len(h.onProvider(hoMD, hedgeB)) != 0 {
+		t.Fatalf("A has %d and B %d of hoMD's Instances, want the missing primary on A alone", len(m1), len(h.onProvider(hoMD, hedgeB)))
+	}
+	p := h.passOf(hoMD)
+	if err := p.growHedges(); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(h.onProvider(hoMD, hedgeB)); n != 0 {
+		t.Fatalf("growth placed %d members on a full B", n)
+	}
+	if w, ok := p.noSlot[hedgeB]; ok {
+		t.Fatalf("growth recorded B for SubmitLimitReached: %q", w)
+	}
+	if len(p.degraded) != 0 {
+		t.Fatalf("growth recorded Degraded reasons %+v", p.degraded)
+	}
+}

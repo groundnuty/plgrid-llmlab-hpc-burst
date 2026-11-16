@@ -462,6 +462,11 @@ func (p *pass) reserveSlotFor(pv *providerView, name, holder string, takers []st
 	if err != nil || a.ok || quiet {
 		return a.ok, a.holds, err
 	}
+	if a.capsWhy != "" {
+		// Refused for the per-user caps, not the submit limit: no SubmitLimitReached words, and a Provider with
+		// no submit limit has none to name.
+		return false, a.holds, nil
+	}
 	if p.noSlot == nil {
 		p.noSlot = map[string]string{}
 	}

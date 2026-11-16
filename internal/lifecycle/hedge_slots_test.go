@@ -244,3 +244,31 @@ func TestAReplacementOnAnotherProviderFreesItsPredecessorsSlot(t *testing.T) {
 		t.Fatalf("md-c has %d Instances on A, want its primary: Degraded %s %q", onA, c.Reason, c.Message)
 	}
 }
+
+// TestACapsRefusalNamesNoSubmitLimit: B's QOS allows 4 jobs of ours and 1 GPU, and another deployment's primary holds
+// that GPU. A reservation for a 1-GPU Allocation that checks the caps is refused, and, outside growth's quiet search,
+// records no submit-limit words for B: the submit limit (1 of 4 taken) is not what refused it.
+func TestACapsRefusalNamesNoSubmitLimit(t *testing.T) {
+	h := newHedgeRigB(t, 4*time.Hour, &v1alpha1.QOSProfile{Name: "example-b1", MaxSubmitPerUser: ptrTo(int32(4)), MaxGPUsPerUser: ptrTo(int32(1))})
+	h.Step()
+	other := mdSpec("md-x")
+	other.Spec.Providers.Names = []string{hedgeB}
+	h.create(other)
+	h.until(time.Minute, 10*time.Second, "md-x on B", func() bool { return len(h.allocations("md-x")) == 1 })
+	md := mdSpec(hoMD)
+	onBoth(md)
+	h.create(md)
+	p := h.passOf(hoMD)
+	pv := p.pvByName[hedgeB]
+	if pv == nil {
+		t.Fatal("no view of B")
+	}
+	size := batch(1, 16, "120Gi")
+	ok, _, err := p.reserveSlotFor(pv, "caps-probe", "", nil, &size, false)
+	if err != nil || ok {
+		t.Fatalf("a 1-GPU reservation beside md-x's GPU under a cap of 1: ok %v, %v; want refused", ok, err)
+	}
+	if w, there := p.noSlot[hedgeB]; there {
+		t.Fatalf("a caps refusal recorded submit-limit words for B: %q", w)
+	}
+}
