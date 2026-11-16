@@ -113,8 +113,10 @@ func printAgents(w io.Writer, r *launcher.StatusReport) {
 	switch rs := r.AgentRBAC; {
 	case rs == nil:
 		return // not asked, or could not say: the reasons name the failure
-	case rs.Present:
+	case rs.Present && rs.Writes:
 		fmt.Fprintf(w, "agent roles: present (hpcburst-agent-read, hpcburst-agent and hpcburst-operator, in the manifest's form; the first two bound to the group %s)\n", launcher.AgentsGroup)
+	case rs.Present:
+		fmt.Fprintf(w, "agent roles: present, WRITES OFF (%s)\n", rs.Detail)
 	default:
 		fmt.Fprintf(w, "agent roles: DIFFER FROM THE MANIFEST (%s): what an agent may do is not what the framework installs; the next hpcburst up resets them\n", rs.Detail)
 	}

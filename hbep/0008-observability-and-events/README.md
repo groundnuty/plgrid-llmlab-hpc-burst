@@ -182,7 +182,7 @@ The API refuses a new event without `action` or `reason`, with either over 128 c
 | `failing` | `WorkerRestart`, `InstanceRestart`, `RouterRestart`, `CrashCorrelated`, `RestartLoop`, `RegistrationTimeout`, `StartTimeout`, `TunnelNotConnected`, `QualificationFailed`, `VerificationFailed`, `AllocationFailed`, `AllocationLost`, `AllocationRefused`, `Requeued`, `SubmittedAsOther`, `RelayEndedForGood`, `AllocationEndedEarly` | Instance | lifecycle controller |
 | `failing` | `HeartbeatMissed` | the stale observer's resource (Observers) | the component that judges it |
 | `failing` | `UsageWriteFailed` | the front's `Lease` | front |
-| `replaced` | `HandedOver`, `HedgeLost` | Instance | lifecycle controller |
+| `replaced` | `HandedOver`, `HedgeLost`, `RankedOut` | Instance | lifecycle controller |
 | `ending-soon` | `NoReplacementReady` | Instance | lifecycle controller |
 
 - An event about a deployment caused by one Instance regards the ModelDeployment, with the Instance in `related`. `VerificationFailed`'s `degraded` event and `CapacityDropped`'s regard the Instance instead once the ModelDeployment is gone (`mdObject`, `internal/lifecycle/verify.go`), since nothing else is left to attach them to.
@@ -386,7 +386,7 @@ No client key ID is a label: per-key usage is in the records.
 | Label or usage field (HBEP-5, Usage records) | OpenTelemetry attribute ([`docs/registry/attributes/gen-ai.md`](https://github.com/open-telemetry/semantic-conventions-genai/blob/e6658f14c9d9ea0760825f029cb82e7673f48fab/docs/registry/attributes/gen-ai.md)) | Differences |
 |---|---|---|
 | the `endpoint` label; the field `path` | `gen_ai.operation.name`: `chat`, `text_completion` and `embeddings` for chat, completions and embeddings | `/v1/responses` has no value of its own; it maps to `chat` with `openai.api.type` `responses` ([`docs/gen-ai/openai.md`](https://github.com/open-telemetry/semantic-conventions-genai/blob/e6658f14c9d9ea0760825f029cb82e7673f48fab/docs/gen-ai/openai.md)), a choice of this HBEP; `models` and `other` have none |
-| `requestedModel` | `gen_ai.request.model` | as sent |
+| `requestedModel` | `gen_ai.request.model` | as sent, cut at 1,291 bytes at a character boundary, with a marker (HBEP-5, Usage records) |
 | `promptTokens`, `completionTokens`, `cachedTokens` | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens` | ours are null when unknown (`countsSource: front_events`) |
 | `finish` | `gen_ai.response.finish_reasons` | ours is one value, theirs an array |
 | `firstTokenMs` | `gen_ai.response.time_to_first_chunk` | milliseconds; theirs is seconds |
@@ -778,8 +778,10 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-16: amendment for billing: the scheduler's `billing` count times the elapsed hours, in the profile's billing unit, and totals per grant and account, still "allocated, not billed" (HBEP-4's amendment of the same day).
 - 2026-11-16: the science agent's decisions on the billing count, memory per GPU, records and the comparison.
 - 2026-11-16: revised by its Fable review (PR #621): the documented GH200 share is settled by the comparison's GH200 window, and the records' names rest on the owner's decision of 28 Oct 2026.
+- 2026-11-16: erratum: `RankedOut`, the `replaced` event regarding each ranked-out Instance, with the Instance it ranked below, or that outranked it, in `related`, joins the Reasons table with the code that raises it (#616), as HBEP-7's Over-allocation and qualification (beta) says.
 - 2026-11-16: the durable log's build rulings for #625: no job ID in any note the log keeps; the forwarder on an empty stream starts within the cap; the store's size on disk for the floor; the log's copy is paired with its backup; ids and the deletion trigger fixed.
 - 2026-11-16: no path, user name, account or grant in a note the log keeps; a copied error gives the reason code and a fixed description (for #640).
+- 2026-11-16: `requestedModel` is cut at 1,291 bytes with a marker, as HBEP-5 records it (for #645).
 
 ## Amendments
 

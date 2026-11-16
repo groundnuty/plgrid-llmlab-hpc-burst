@@ -111,7 +111,7 @@ func TestNoOverlapCheckErrorDoesNotSkipRetentionOrStatus(t *testing.T) {
 	l := &listFailer{}
 	qos := []v1alpha1.QOSProfile{{Name: "example-s4", MaxSubmitPerUser: i32(4)}}
 	rg := newRig(t, append(qosOpts(qos, "", "example-s4"), withMaxTime(4*time.Hour), withInterceptors(l.funcs()))...)
-	rg.create(releaseWhenIdle5m(mdSpec(hoMD)))
+	rg.create(noOverAllocation(releaseWhenIdle5m(mdSpec(hoMD))))
 	for range 7 {
 		rg.clock.Advance(10 * time.Second)
 		rg.Step()
