@@ -14,6 +14,7 @@ package front
 // registrations and before its view is published, the other Instance registers, and the reader is released once the router counts it waiting.
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -145,6 +146,42 @@ func TestTheBulkFixtureWaitsForTheRoutersViewOfEveryInstance(t *testing.T) {
 			readAll(t, resp)
 			if scInstanceOf(resp) != f.keys[0] {
 				t.Errorf("the first request after waitRoutable: from %q, want %s, the session's home", scInstanceOf(resp), f.keys[0])
+			}
+		})
+	}
+}
+
+// The wait fails, naming the Instance and what it lacks, when an Instance is not routable within its bound. The bound is short: the test waits for
+// the failure, not for a time. Each condition is tested alone, on the second Instance, with the first routable: an Instance paused by failed
+// connections is registered on both tunnels and a member of its group, and not eligible, so only the router's part of the wait sees it; one whose
+// token transport or whose bulk transport lost its registration is named for that.
+func TestWaitRoutableFailsNamingTheInstanceItIsWaitingFor(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		break_ func(f *bulkFront)
+		want   []string
+	}{
+		{"paused", func(f *bulkFront) {
+			for i := 0; i < f.cfg.PauseAfterFailures; i++ {
+				f.router.ReportConnect(f.keys[1], true)
+			}
+		}, []string{"token transport registered true", "bulk transport registered true", "member of its group in the router's view true", "eligible false"}},
+		{"its token transport lost its registration", func(f *bulkFront) { f.tun.setRegistered(f.uids[1], false) },
+			[]string{"token transport registered false"}},
+		{"its bulk transport lost its registration", func(f *bulkFront) { f.bulk.unregister(f.uids[1]) },
+			[]string{"token transport registered true", "bulk transport registered false"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newBulkFront(t, 2, false)
+			c.break_(f)
+			msg := f.notRoutableWithin(50 * time.Millisecond)
+			for _, want := range append([]string{f.keys[1]}, c.want...) {
+				if !strings.Contains(msg, want) {
+					t.Errorf("%q does not say %q", msg, want)
+				}
+			}
+			if strings.Contains(msg, f.keys[0]) {
+				t.Errorf("%q names %s, which is routable", msg, f.keys[0])
 			}
 		})
 	}

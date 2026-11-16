@@ -147,7 +147,16 @@ func (f *bulkFront) routableState(i int) (token, bulk, member, eligible bool) {
 // that is not routable, and why.
 func (f *bulkFront) waitRoutable() {
 	f.t.Helper()
-	for end := time.Now().Add(failAfter); ; time.Sleep(time.Millisecond) {
+	if msg := f.notRoutableWithin(failAfter); msg != "" {
+		f.t.Fatal(msg)
+	}
+}
+
+// notRoutableWithin polls every millisecond until every Instance is routable, and returns "" then; after d it
+// returns what the first Instance that is not lacks: its key, and its state in the tunnels and in the router.
+func (f *bulkFront) notRoutableWithin(d time.Duration) string {
+	f.t.Helper()
+	for end := time.Now().Add(d); ; time.Sleep(time.Millisecond) {
 		bad := -1
 		var token, bulk, member, eligible bool
 		for i := range f.uids {
@@ -158,11 +167,11 @@ func (f *bulkFront) waitRoutable() {
 			}
 		}
 		if bad < 0 {
-			return
+			return ""
 		}
 		if time.Now().After(end) {
-			f.t.Fatalf("timed out after %s waiting for Instance %s to be routable: token transport registered %t, bulk transport registered %t, member of its group in the router's view %t, eligible %t",
-				failAfter, f.keys[bad], token, bulk, member, eligible)
+			return fmt.Sprintf("timed out after %s waiting for Instance %s to be routable: token transport registered %t, bulk transport registered %t, member of its group in the router's view %t, eligible %t",
+				d, f.keys[bad], token, bulk, member, eligible)
 		}
 	}
 }
