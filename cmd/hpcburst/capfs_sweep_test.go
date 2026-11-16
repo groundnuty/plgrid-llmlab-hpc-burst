@@ -1,10 +1,10 @@
 package main
 
 // The sweep of dead capfs mounts (issue #648). The size-limited file system of the store-full tests (capfs_test.go) is served by the
-// test's own process. Its mount has a watcher (capfs_mount_test.go), which unmounts it when that process dies. But a SIGKILL of the whole
-// scope or cgroup kills the watcher with the test, and then the mount stays with no one to serve it: its endpoint is dead, a stat of it
-// fails with ENOTCONN ("transport endpoint is not connected"), an ordinary rm cannot remove it, and a later run or a removal of the
-// scratch directory trips on it. So does a mount made with no watcher, as some of the tests below make on purpose.
+// test's own process. When that process is killed, its clean-up never runs, and since nothing else holds the connection
+// (capfs_mount_test.go), the kernel ends it: the mount stays with no one to serve it. Its endpoint is dead, a stat of it fails with
+// ENOTCONN ("transport endpoint is not connected"), an ordinary rm cannot remove it, and a later run or a removal of the scratch
+// directory trips on it. fusermount3's auto_unmount removes such a mount only from version 3.16 on.
 //
 // newCapVolume sweeps those before it mounts. It reads /proc/self/mountinfo for THIS user's capfs mounts, and unmounts, with fusermount3
 // -u, only the ones whose endpoint is dead. It never touches a mount that answers, which belongs to someone's running test, nor another

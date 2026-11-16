@@ -1,17 +1,17 @@
 package main
 
-// The mount, its watcher and the sweep against real FUSE mounts (issue #648; the sweep is capfs_sweep_test.go's, the mount and the
-// watcher capfs_mount_test.go's). A capfs server runs in a CHILD process, the test binary run again with HPCBURST_TEST_CAPFS_SERVER set
-// (TestMain), so that the test can end it the way a killed test ends: SIGKILL through a pidfd, which runs no clean-up. What is shown, on
-// real mounts: a killed server's mount is unmounted by its watcher; one with no watcher is left with a dead endpoint, and the next
-// newCapVolume sweeps it; a live mount of another process is touched by neither; a wedged one (open, unserved) is reported, with its
-// connection, and left alone, promptly; and neither the mount's descriptor nor the watcher's pipe reaches a process started later.
+// The mount and the sweep against real FUSE mounts (issue #648; the sweep is capfs_sweep_test.go's, the mount capfs_mount_test.go's). A
+// capfs server runs in a CHILD process, the test binary run again with HPCBURST_TEST_CAPFS_SERVER set (TestMain), so that the test can
+// end it the way a killed test ends: SIGKILL through a pidfd, which runs no clean-up. What is shown, on real mounts: a killed server
+// leaves its mount dead, never wedged, and no fusermount3 behind; the next newCapVolume sweeps a dead mount; a live mount of another
+// process is untouched; a wedged one (open, unserved) is reported, with its connection, and left alone, promptly; and neither the mount's
+// descriptor nor its socket reaches a process started later.
 //
 // No test touches a mount without a bound: every stat, read and write through one runs in a goroutine that is abandoned at its deadline,
 // and a directory is removed only once nothing is mounted under it (capRemoveDir). A child ends however the test ends: it exits when its
 // stdin closes, which it watches from before it mounts, and the kernel kills it when the test binary ends (testenv.StartDyingWithParent).
-// Each test cleans up its children and mounts itself: it closes the child's stdin, kills a child that does not exit, and unmounts its
-// own mount point if it is left dead, so a broken sweep or watcher leaves nothing behind.
+// Each test cleans up its children and mounts itself: it closes the child's stdin, kills a child that does not exit, kills a fusermount3
+// left for its mount point, and unmounts its own mount point if it is left dead, so a broken sweep leaves nothing behind.
 
 import (
 	"bytes"
@@ -22,7 +22,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -37,8 +36,8 @@ const (
 	// capfsServerEnv makes the test binary a capfs server instead of running tests: the value is the directory it makes its mount in.
 	// It serves until its stdin closes, then unmounts and exits; a SIGKILL ends it with no clean-up.
 	capfsServerEnv = "HPCBURST_TEST_CAPFS_SERVER"
-	// capfsServerWatchEnv, set to 1, gives the child's volume a watcher, as newCapVolume's has.
-	capfsServerWatchEnv = "HPCBURST_TEST_CAPFS_WITH_WATCHER"
+	// capfsServerAutoEnv, set to 1, mounts the child's volume with auto_unmount, as newCapVolume's is.
+	capfsServerAutoEnv = "HPCBURST_TEST_CAPFS_AUTO_UNMOUNT"
 	// capfsWedgeEnv, set to 1, makes the child mount (named capFsWedgeName) and then hold the descriptor without ever serving it: the
 	// mount is open, and a stat of it does not return, until the child exits, which leaves it dead.
 	capfsWedgeEnv = "HPCBURST_TEST_CAPFS_WEDGE"
@@ -59,7 +58,7 @@ func capfsServerMain(dir string) {
 			fmt.Fprintln(os.Stderr, "capfs server:", err)
 			os.Exit(3)
 		}
-		conn, err := fusermountCapfs(point, capFsWedgeName)
+		conn, err := fusermountCapfs(point, capFsWedgeName, false)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "capfs server:", err)
 			os.Exit(3)
@@ -69,7 +68,7 @@ func capfsServerMain(dir string) {
 		runtime.KeepAlive(conn) // exiting closes the descriptor, which ends the connection
 		os.Exit(0)
 	}
-	v, err := mountCapVolume(dir, capChildLimit, capFsName, os.Getenv(capfsServerWatchEnv) == "1")
+	v, err := mountCapVolume(dir, capChildLimit, capFsName, os.Getenv(capfsServerAutoEnv) == "1")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "capfs server:", err)
 		os.Exit(3)
@@ -176,6 +175,56 @@ func capMountAt(t *testing.T, point string) capMount {
 	return capMount{}
 }
 
+// capFusermount3For lists the pids of this user's fusermount3 processes whose arguments name the mount point: the one auto_unmount keeps
+// while its socket is open, or one left behind.
+func capFusermount3For(point string) []int {
+	ents, _ := os.ReadDir("/proc")
+	var pids []int
+	for _, e := range ents {
+		var pid int
+		if _, err := fmt.Sscanf(e.Name(), "%d", &pid); err != nil {
+			continue
+		}
+		if comm, _ := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid)); strings.TrimSpace(string(comm)) != "fusermount3" {
+			continue
+		}
+		cmdline, _ := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+		for _, arg := range strings.Split(string(cmdline), "\x00") {
+			if arg == point {
+				pids = append(pids, pid)
+				break
+			}
+		}
+	}
+	return pids
+}
+
+// capKillLeftFusermount3 kills, through a pidfd opened before its arguments are checked again, every fusermount3 still naming the mount
+// point, and fails the test for each: one left behind is a leak. The test's own clean-up runs it after its child has ended.
+func capKillLeftFusermount3(t *testing.T, point string) {
+	t.Helper()
+	for _, pid := range capFusermount3For(point) {
+		fd, err := unix.PidfdOpen(pid, 0)
+		if err != nil {
+			continue // gone already
+		}
+		if pids := capFusermount3For(point); containsInt(pids, pid) { // still that process, now pinned by the pidfd
+			_ = unix.PidfdSendSignal(fd, unix.SIGKILL, nil, 0)
+			t.Errorf("a fusermount3 (pid %d) was left for %s after its server ended, and was killed", pid, point)
+		}
+		unix.Close(fd)
+	}
+}
+
+func containsInt(list []int, n int) bool {
+	for _, x := range list {
+		if x == n {
+			return true
+		}
+	}
+	return false
+}
+
 // capUnmountIfDead is the tests' own clean-up of a mount they made: it waits up to d for the mount to go, and unmounts it while it is
 // dead, with a plain unmount, without the sweep. A mount that answers, or does not, is reported and left; the result says whether the
 // mount is gone.
@@ -202,8 +251,8 @@ func capUnmountIfDead(t *testing.T, point string, d time.Duration) bool {
 // HPCBURST_REQUIRE_INTEGRATION=1, fails) with newCapVolume's reason where FUSE cannot be mounted.
 func capFuseOrSkip(t *testing.T) { t.Helper(); newCapVolume(t, capChildLimit) }
 
-// capChildMode is how a child mounts: with a watcher, and wedged (mounted and never served).
-type capChildMode struct{ watch, wedge bool }
+// capChildMode is how a child mounts: with auto_unmount, and wedged (mounted and never served).
+type capChildMode struct{ auto, wedge bool }
 
 // capChild is a capfs server in a child process.
 type capChild struct {
@@ -218,12 +267,6 @@ type capChild struct {
 }
 
 func (c *capChild) output() string { b, _ := os.ReadFile(c.out); return string(b) }
-
-// watchLog is what the child's watcher wrote.
-func (c *capChild) watchLog() string {
-	b, _ := os.ReadFile(filepath.Join(c.dir, "watch.log"))
-	return string(b)
-}
 
 func (c *capChild) ended(d time.Duration) bool {
 	select {
@@ -256,8 +299,8 @@ func launchCapServer(t *testing.T, mode capChildMode) *capChild {
 	defer out.Close() // the child has its own copy
 	c.cmd = exec.Command(self)
 	c.cmd.Env = append(os.Environ(), capfsServerEnv+"="+dir)
-	if mode.watch {
-		c.cmd.Env = append(c.cmd.Env, capfsServerWatchEnv+"=1")
+	if mode.auto {
+		c.cmd.Env = append(c.cmd.Env, capfsServerAutoEnv+"=1")
 	}
 	if mode.wedge {
 		c.cmd.Env = append(c.cmd.Env, capfsWedgeEnv+"=1")
@@ -275,8 +318,8 @@ func launchCapServer(t *testing.T, mode capChildMode) *capChild {
 }
 
 // cleanUp ends the child and removes its mount and directory, whatever state the test left them in: it closes the child's stdin, which
-// makes it unmount and exit, kills it if it does not, and then unmounts a mount it left dead. One that is not dead is reported and left,
-// with its directory.
+// makes it unmount and exit, kills it if it does not, kills a fusermount3 left for its mount point, and then unmounts a mount it left
+// dead. One that is not dead is reported and left, with its directory.
 func (c *capChild) cleanUp(t *testing.T) {
 	c.stdin.Close()
 	if !c.ended(capChildBound) {
@@ -290,6 +333,13 @@ func (c *capChild) cleanUp(t *testing.T) {
 	if c.pidfd >= 0 {
 		unix.Close(c.pidfd)
 		c.pidfd = -1
+	}
+	if c.mode.auto { // its fusermount3 exits once the child's end of the socket has closed
+		end := time.Now().Add(capChildBound)
+		for len(capFusermount3For(c.mount)) > 0 && time.Now().Before(end) {
+			time.Sleep(50 * time.Millisecond)
+		}
+		capKillLeftFusermount3(t, c.mount)
 	}
 	if capUnmountIfDead(t, c.mount, capChildBound) {
 		if err := capRemoveDir(c.dir); err != nil {
@@ -359,8 +409,9 @@ func writeVolume(t *testing.T, v *capVolume) {
 	}
 }
 
-// killLeavingADeadMount starts a child whose mount has no watcher, shows its mount live, kills it, and returns once the test has seen
-// the state of the issue: the mount is still listed, and its endpoint is dead (a stat fails with ENOTCONN).
+// killLeavingADeadMount starts a child that mounts without auto_unmount (so that the mount is left on every fusermount3 version), shows
+// its mount live, kills it, and returns once the test has seen the state of the issue: the mount is still listed, and its endpoint is
+// dead (a stat fails with ENOTCONN).
 func killLeavingADeadMount(t *testing.T) *capChild {
 	t.Helper()
 	c := startCapServer(t, capChildMode{})
@@ -376,56 +427,47 @@ func killLeavingADeadMount(t *testing.T) *capChild {
 	return c
 }
 
-// The repair at the source: a server killed with SIGKILL through its pidfd has its mount unmounted by its watcher, with no sweep run,
-// and the next newCapVolume works.
-func TestAKilledServersMountIsUnmountedByItsWatcher(t *testing.T) {
+// The incident's repair: a server killed with SIGKILL through its pidfd, its mount made as newCapVolume makes it (with auto_unmount),
+// leaves no fusermount3 behind (the one auto_unmount keeps sees the socket close, and exits) and leaves its mount DEAD, never wedged: a
+// bounded stat fails at once with ENOTCONN, or the mount is gone. On fusermount3 3.16 and later, auto_unmount also unmounts it; before
+// 3.16 it cannot (capfs_mount_test.go), which is reported as not checked rather than skipped, since the launcher suite fails on any skip.
+// Either way the next newCapVolume leaves the mount gone, and works.
+func TestAKilledServerLeavesADeadMountAndNoFusermount3(t *testing.T) {
 	capFuseOrSkip(t)
-	c := startCapServer(t, capChildMode{watch: true})
+	c := startCapServer(t, capChildMode{auto: true})
+	if pids := capFusermount3For(c.mount); len(pids) != 1 {
+		t.Fatalf("the live auto_unmount mount %s has %d fusermount3 processes, want the one that stays while its socket is open", c.mount, len(pids))
+	}
 	c.write(t, "before-the-kill", "served")
 	c.kill(t)
-	capWaitFor(t, capChildBound, "the watcher to unmount the killed server's mount, before any sweep", func() bool { return !capListed(c.mount) })
-	// The watcher writes its line once fusermount3 -u has returned, so after the mount has gone: wait for it.
-	capWaitFor(t, capChildBound, "the watcher's log to say it unmounted "+c.mount, func() bool { return strings.Contains(c.watchLog(), "unmounted "+c.mount) })
-	writeVolume(t, newCapVolume(t, capChildLimit))
-}
-
-// A watcher whose pipe ends while its server still serves (a leaked write end that closed, or a parent that let go early) finds the
-// mount live, and leaves it: it is still listed, still answers, and its watcher has exited saying so.
-func TestAWatcherWhosePipeEndsLeavesALiveMountAlone(t *testing.T) {
-	capFuseOrSkip(t)
-	dir, err := os.MkdirTemp("", "cw")
-	if err != nil {
-		t.Fatal(err)
-	}
-	v, err := mountCapVolume(dir, capChildLimit, capFsName, true)
-	if err != nil {
-		t.Fatalf("mount: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := v.unmount(capChildBound); err != nil {
-			t.Errorf("unmount %s: %v", v.mount, err)
+	capWaitFor(t, capChildBound, "the killed server's fusermount3 to exit", func() bool { return len(capFusermount3For(c.mount)) == 0 })
+	capWaitFor(t, capChildBound, "the killed server's mount to be dead (ENOTCONN) or gone", func() bool {
+		if !capListed(c.mount) {
+			return true
 		}
-		if capUnmountIfDead(t, v.mount, capChildBound) {
-			if err := capRemoveDir(dir); err != nil {
-				t.Errorf("%v", err)
-			}
+		errno, answered := capStatErrno(c.mount, capChildBound)
+		if !answered {
+			t.Fatalf("a stat of the killed server's mount %s did not return within %s: it is wedged", c.mount, capChildBound)
 		}
+		return errno == syscall.ENOTCONN
 	})
-	if err := v.releaseWatcher(); err != nil {
-		t.Fatalf("%v", err)
+	switch major, minor, err := fusermountVersion(); {
+	case err != nil:
+		t.Logf("NOT CHECKED: whether auto_unmount unmounts the dead mount, since the helper's version is unknown: %v", err)
+	case major > 3 || major == 3 && minor >= 16:
+		capWaitFor(t, capChildBound, "fusermount3's auto_unmount to unmount the dead mount", func() bool { return !capListed(c.mount) })
+	default:
+		t.Logf("NOT CHECKED: that auto_unmount unmounts the dead mount. fusermount3 %d.%d, before 3.16, opens it as root, gets EACCES (no allow_other) and leaves it; the next newCapVolume sweeps it", major, minor)
 	}
-	if errno, answered := capStatErrno(v.mount, capChildBound); !capListed(v.mount) || !answered || errno != 0 {
-		t.Fatalf("the live mount %s was touched by its watcher: listed %t, stat answered %t, errno %v", v.mount, capListed(v.mount), answered, errno)
+	v := newCapVolume(t, capChildLimit)
+	if capListed(c.mount) {
+		t.Errorf("%s, the mount of the killed server, is still listed after newCapVolume", c.mount)
 	}
 	writeVolume(t, v)
-	log, _ := os.ReadFile(filepath.Join(filepath.Dir(v.mount), "watch.log"))
-	if !strings.Contains(string(log), v.mount+" answers") {
-		t.Errorf("the watcher's log does not say it left the live mount alone: %q", log)
-	}
 }
 
-// The state of the issue, and its repair by the sweep: a capfs server whose mount has no watcher, killed with SIGKILL, leaves its mount
-// behind with a dead endpoint, and the next newCapVolume sweeps it.
+// The state of the issue, and its repair by the sweep: a capfs server whose mount has no auto_unmount, killed with SIGKILL, leaves its
+// mount behind with a dead endpoint, and the next newCapVolume sweeps it.
 func TestTheNextCapVolumeSweepsAMountLeftByAKilledServer(t *testing.T) {
 	capFuseOrSkip(t)
 	dead := killLeavingADeadMount(t)
@@ -443,7 +485,7 @@ func TestTheNextCapVolumeSweepsAMountLeftByAKilledServer(t *testing.T) {
 // A live mount owned by another process is not touched by a new volume: it is still listed, still answers, and keeps what it held.
 func TestTheNextCapVolumeLeavesAnotherProcessesLiveMountAlone(t *testing.T) {
 	capFuseOrSkip(t)
-	live := startCapServer(t, capChildMode{watch: true})
+	live := startCapServer(t, capChildMode{auto: true})
 	live.write(t, "kept", "the other test's data")
 	v := newCapVolume(t, capChildLimit)
 	if errno, answered := capStatErrno(live.mount, capChildBound); !capListed(live.mount) || !answered || errno != 0 {
@@ -462,7 +504,7 @@ func TestTheNextCapVolumeLeavesAnotherProcessesLiveMountAlone(t *testing.T) {
 func TestTheSweepTakesTheDeadMountAndLeavesTheLiveOneOfAnotherChild(t *testing.T) {
 	capFuseOrSkip(t)
 	dead := killLeavingADeadMount(t)
-	live := startCapServer(t, capChildMode{watch: true})
+	live := startCapServer(t, capChildMode{auto: true})
 	live.write(t, "kept", "served")
 	var logged []string
 	res := sweepDeadCapMounts(realSweepEnv(func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }))
@@ -541,10 +583,11 @@ func TestTheSweepLeavesAWedgedMountAloneAndReturnsPromptly(t *testing.T) {
 	}
 }
 
-// The mount's descriptor is close-on-exec from the moment this process has it, so a process it starts later (k3s, the CLI, another
-// mount's helper) does not hold it, and cannot keep the connection open after the server has gone. The mount here is never served, and
-// is ended by closing the descriptor, which leaves it dead, for the test's own unmount.
-func TestTheMountsDescriptorIsCloseOnExec(t *testing.T) {
+// The mount's descriptor, and the socket an auto_unmount mount keeps, are close-on-exec from the moment this process has them, so a
+// process it starts later (k3s, the CLI, another mount's fusermount3) holds neither, and cannot keep the connection open, or keep
+// fusermount3 waiting, after the server has gone. The mount here is never served, and is ended by closing the descriptor, which leaves
+// it dead, for the test's own unmount, once fusermount3 has exited on the socket's close.
+func TestTheMountsDescriptorAndSocketAreCloseOnExec(t *testing.T) {
 	capFuseOrSkip(t)
 	dir, err := os.MkdirTemp("", "cx")
 	if err != nil {
@@ -557,31 +600,43 @@ func TestTheMountsDescriptorIsCloseOnExec(t *testing.T) {
 	if err := os.Mkdir(point, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	conn, err := fusermountCapfs(point, capFsWedgeName)
+	conn, err := fusermountCapfs(point, capFsWedgeName, true)
 	if err != nil {
 		t.Fatalf("mount: %v", err)
 	}
 	t.Cleanup(func() {
 		unix.Close(conn.fd) // ends the connection
+		if err := conn.closeComm(capChildBound); err != nil {
+			t.Errorf("%v", err)
+		}
+		capKillLeftFusermount3(t, point)
 		if capUnmountIfDead(t, point, capChildBound) {
 			if err := capRemoveDir(dir); err != nil {
 				t.Errorf("%v", err)
 			}
 		}
 	})
-	flags, err := unix.FcntlInt(uintptr(conn.fd), unix.F_GETFD, 0)
-	if err != nil || flags&unix.FD_CLOEXEC == 0 {
-		t.Errorf("the /dev/fuse descriptor (fd %d) has flags %#x (%v), want FD_CLOEXEC", conn.fd, flags, err)
+	commFd := fileFd(t, conn.helper.comm)
+	for name, fd := range map[string]int{"the /dev/fuse descriptor": conn.fd, "the socket": commFd} {
+		flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+		if err != nil || flags&unix.FD_CLOEXEC == 0 {
+			t.Errorf("%s (fd %d) has flags %#x (%v), want FD_CLOEXEC", name, fd, flags, err)
+		}
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(commFd, &st); err != nil {
+		t.Fatal(err)
 	}
 	for fd, target := range capHelperFds(t) {
-		if target == "/dev/fuse" {
-			t.Errorf("a process started after the mount holds /dev/fuse as its fd %s", fd)
+		if target == "/dev/fuse" || target == fmt.Sprintf("socket:[%d]", st.Ino) {
+			t.Errorf("a process started after the mount holds %s as its fd %s", target, fd)
 		}
 	}
 }
 
-// The mount's helper gets only its own end of the socket, as its fd 3, and not this process's end. This needs no FUSE: the helper here
-// is ls, listing its own descriptors.
+// The mount's helper gets only its own end of the socket, as its fd 3, and not this process's end, which it would otherwise hold open
+// itself, and so never see close (go-fuse's socketpair has no close-on-exec, which is what kept the incident's fusermount3 waiting for
+// good). This needs no FUSE: the helper here is ls, listing its own descriptors.
 func TestTheMountHelperGetsOnlyItsOwnEndOfTheSocket(t *testing.T) {
 	ls, err := exec.LookPath("ls")
 	if err != nil {
@@ -611,162 +666,6 @@ func TestTheMountHelperGetsOnlyItsOwnEndOfTheSocket(t *testing.T) {
 		if target == mine {
 			t.Errorf("the helper holds this process's end of the socket, %s, as its fd %s: %s", mine, fd, out.String())
 		}
-	}
-}
-
-// startTestWatcher starts a watcher of a mount point where nothing is mounted, with its log in a directory of the test's, and releases
-// it at the test's end. This needs no FUSE.
-func startTestWatcher(t *testing.T, env ...string) (*capWatcher, string) {
-	t.Helper()
-	dir := t.TempDir()
-	logPath := filepath.Join(dir, "watch.log")
-	w, err := startCapWatcher(filepath.Join(dir, "mnt"), logPath, env...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := w.release(capWatchTimeout); err != nil {
-			t.Errorf("%v", err)
-		}
-	})
-	return w, logPath
-}
-
-// The watcher's pipe ends only when this process lets go of it, or dies: its write end is close-on-exec, so neither the watcher itself
-// (which would then wait on its own write end for good, as fusermount3 did on go-fuse's socket) nor a process started later (k3s, the
-// CLI) holds it; the watcher holds the read end, as its stdin, and nothing else of the pipe.
-func TestTheWatchersPipeReachesNoOtherProcess(t *testing.T) {
-	w, logPath := startTestWatcher(t)
-	fd := fileFd(t, w.pipe)
-	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
-	if err != nil || flags&unix.FD_CLOEXEC == 0 {
-		t.Errorf("the watcher's pipe (fd %d) has flags %#x (%v), want FD_CLOEXEC", fd, flags, err)
-	}
-	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
-		t.Fatal(err)
-	}
-	pipe := fmt.Sprintf("pipe:[%d]", st.Ino)
-	dir := fmt.Sprintf("/proc/%d/fd", w.cmd.Process.Pid) // its child, not yet reaped, so the pid is still the watcher's
-	ents, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range ents {
-		target, err := os.Readlink(filepath.Join(dir, e.Name()))
-		if err == nil && target == pipe && e.Name() != "0" {
-			t.Errorf("the watcher holds its own pipe as fd %s, besides its stdin: it would never see the pipe end", e.Name())
-		}
-	}
-	for n, target := range capHelperFds(t) {
-		if target == pipe {
-			t.Errorf("a process started after the watcher holds its pipe as fd %s", n)
-		}
-	}
-	if err := w.release(capChildBound); err != nil {
-		t.Fatal(err)
-	}
-	if b, _ := os.ReadFile(logPath); !strings.Contains(string(b), "is not mounted: nothing to do") {
-		t.Errorf("the watcher's log: %q, want it to say that nothing is mounted", b)
-	}
-}
-
-// The watcher ignores SIGTERM, SIGINT and SIGHUP, so that a stopped scope, which sends SIGTERM to every process in it at once, does not
-// end it before the death of its parent does; and a SIGTERM sent to it then does not end it. It leads a session of its own, so that a
-// signal to the test's process group (timeout(1)'s SIGKILL after -k, say) does not reach it.
-func TestTheWatcherIgnoresTheSignalsOfAStoppedScope(t *testing.T) {
-	w, logPath := startTestWatcher(t)
-	pidfd, err := unix.PidfdOpen(w.cmd.Process.Pid, 0) // its child, not yet reaped, so the pid is still the watcher's
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer unix.Close(pidfd)
-	if sid, err := unix.Getsid(w.cmd.Process.Pid); err != nil || sid != w.cmd.Process.Pid {
-		t.Errorf("the watcher (pid %d) is in session %d (%v), want a session of its own", w.cmd.Process.Pid, sid, err)
-	}
-	want := uint64(1)<<(uint(syscall.SIGTERM)-1) | uint64(1)<<(uint(syscall.SIGINT)-1) | uint64(1)<<(uint(syscall.SIGHUP)-1)
-	status := fmt.Sprintf("/proc/%d/status", w.cmd.Process.Pid)
-	capWaitFor(t, capChildBound, "the watcher to ignore SIGTERM, SIGINT and SIGHUP (SigIgn in "+status+")", func() bool {
-		b, err := os.ReadFile(status)
-		if err != nil {
-			return false
-		}
-		for _, line := range strings.Split(string(b), "\n") {
-			if v, ok := strings.CutPrefix(line, "SigIgn:"); ok {
-				n, err := strconv.ParseUint(strings.TrimSpace(v), 16, 64)
-				return err == nil && n&want == want
-			}
-		}
-		return false
-	})
-	if err := unix.PidfdSendSignal(pidfd, unix.SIGTERM, nil, 0); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.release(capWatchTimeout); err != nil {
-		t.Fatal(err)
-	}
-	if !w.cmd.ProcessState.Success() {
-		t.Errorf("the watcher ended %v after a SIGTERM, want a clean exit", w.cmd.ProcessState)
-	}
-	if b, _ := os.ReadFile(logPath); !strings.Contains(string(b), "nothing to do") {
-		t.Errorf("the watcher's log: %q, want it to have gone on after the SIGTERM", b)
-	}
-}
-
-// A watcher whose pipe never ends gives up after its deadline, and leaves the mount as it is, so that a leaked write end does not keep it
-// alive for good.
-func TestAWatcherGivesUpAfterItsDeadline(t *testing.T) {
-	w, logPath := startTestWatcher(t, capfsWatchMaxEnv+"=1s")
-	select {
-	case <-w.done:
-	case <-time.After(capChildBound):
-		t.Fatalf("the watcher, given 1s, did not give up within %s", capChildBound)
-	}
-	if b, _ := os.ReadFile(logPath); !strings.Contains(string(b), "gives up") {
-		t.Errorf("the watcher's log: %q, want it to say it gave up", b)
-	}
-}
-
-// What a watcher does once its pipe has ended, for each state of the mount: only a dead one is unmounted; a live one is left at once; one
-// that is first unknown (the dying server's descriptor still closing) and then dead is unmounted; one that stays wedged is left after the
-// settle time; and one that is not mounted needs nothing.
-func TestTheWatcherUnmountsOnlyADeadMount(t *testing.T) {
-	// settle is long where the mount turns dead in time, so that a slow machine does not make the watcher give up first, and short where
-	// it never does.
-	for _, c := range []struct {
-		name      string
-		listed    bool
-		states    []capState
-		settle    time.Duration
-		unmounted bool
-		says      string
-	}{
-		{"dead", true, []capState{capDead}, time.Minute, true, "unmounted /m"},
-		{"live", true, []capState{capLive}, time.Minute, false, "answers"},
-		{"unknown, then dead", true, []capState{capUnknown, capWedged, capDead}, time.Minute, true, "unmounted /m"},
-		{"wedged", true, []capState{capWedged}, 300 * time.Millisecond, false, "was wedged"},
-		{"not mounted", false, nil, time.Minute, false, "not mounted"},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			var probes, unmounts int
-			says := capWatchAfterEnd("/m", c.settle,
-				func(string) bool { return c.listed && unmounts == 0 },
-				func(string) (capState, error) {
-					s := c.states[min(probes, len(c.states)-1)]
-					probes++
-					return s, errors.New("the probe's reason")
-				},
-				func(string) error { unmounts++; return nil })
-			if (unmounts == 1) != c.unmounted || unmounts > 1 {
-				t.Errorf("unmounted %d times, want %t", unmounts, c.unmounted)
-			}
-			if !strings.Contains(says, c.says) {
-				t.Errorf("the watcher says %q, want it to say %q", says, c.says)
-			}
-			if c.name == "live" && probes != 1 {
-				t.Errorf("the watcher probed a live mount %d times, want once: it leaves it at once", probes)
-			}
-		})
 	}
 }
 

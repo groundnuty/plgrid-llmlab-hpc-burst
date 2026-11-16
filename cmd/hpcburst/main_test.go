@@ -40,10 +40,6 @@ func TestMain(m *testing.M) {
 		main() // runs the command and exits
 		return
 	}
-	if point := os.Getenv(capfsWatchEnv); point != "" {
-		capfsWatchMain(point) // watches a capfs volume's mount for its server's death, and exits (capfs_mount_test.go)
-		return
-	}
 	if dir := os.Getenv(capfsServerEnv); dir != "" {
 		capfsServerMain(dir) // serves a capfs volume for the sweep's tests and exits (capfs_child_test.go)
 		return
