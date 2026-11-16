@@ -41,7 +41,7 @@ func Lead() time.Duration {
 // MinLease is the shortest leaseLimit that is longer than Lead, in whole minutes.
 func MinLease() time.Duration { return Lead() + time.Minute }
 
-// The hour of the tunnel rows (HBEP-6:354 and :375, ruled by the science agent on
+// The hour of the tunnel rows (HBEP-6, Test plan "One-hour runs" and Graduation criteria; ruled by the science agent on
 // 2 Nov 2026): an hour of one tunnel session staying healthy under real use, not
 // one stream an hour long. The front cuts a request at the deployment's
 // routing.maxRequestDuration (HBEP-5, Errors), so every request is within the
@@ -223,7 +223,7 @@ type Row struct {
 	// ReleaseWhenIdle says the row's deployment releases each job once its Instance has ended, after the live idle
 	// limit (Timing.IdleLimit): the no-overlap rows, whose successor waits on the predecessor's job, on Helios's GPU cap
 	// (alpha-helios-nooverlap) or on plgrid-now's one-job slot (alpha-athena-now-nooverlap, issue #376's row B;
-	// hbep/0007-lifecycle-controller/README.md:483). Row.Plan reads it; no row name does.
+	// HBEP-7, Handover). Row.Plan reads it; no row name does.
 	ReleaseWhenIdle bool
 	// PostsGlibcNotRun says the row writes a text to post when its run is NOT RUN on a compute node whose glibc is under the 2.30 Envoy
 	// needs (ErrGlibcTooOld): the version is the reading the row exists for. Only the Helios router row does (issue #566: its glibc is
@@ -354,7 +354,7 @@ type DeploymentSpec struct {
 // Plan is the deployment the row's scenario must apply: the row's Provider alone,
 // the shortest lease, the 5-minute request deadline, and for the no-overlap rows
 // (Row.ReleaseWhenIdle) ReleaseWhenIdle with a short idle limit
-// (hbep/0007-lifecycle-controller/README.md:483).
+// (HBEP-7, Handover).
 func (r Row) Plan() DeploymentSpec {
 	tm := r.Clock()
 	d := DeploymentSpec{Providers: []ProviderRef{{Name: r.Cluster, Cluster: r.Cluster}}, LeaseLimit: r.Lease, MaxRequestDuration: tm.MaxRequestDuration}
