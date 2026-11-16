@@ -32,7 +32,7 @@ var raisedByLifecycle = map[string][]string{
 		string(v1alpha1.ConditionSubmittedAsOther), string(v1alpha1.ConditionRelayEndedForGood),
 		v1alpha1.ReasonAllocationEndedEarly, reasonHeartbeatMissed,
 	},
-	eventReplaced:   {v1alpha1.EventReasonHandedOver},
+	eventReplaced:   {v1alpha1.EventReasonHandedOver, v1alpha1.ReasonHedgeLost},
 	eventEndingSoon: {v1alpha1.EventReasonNoReplacementReady},
 }
 

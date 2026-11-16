@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -115,9 +116,9 @@ func (p *pass) decideOverlap(in *v1alpha1.Instance) (overlapCheck, error) {
 	if err != nil {
 		return overlapCheck{beside: true}, nil
 	}
-	// The existing replacement, if any, already holds its own slot.
+	// The existing replacement, if any, already holds its own slot: every member of its hedge.
 	var skip []string
-	if repl := p.replacementOf(in); repl != nil {
+	for _, repl := range p.replacementMembers(in) {
 		skip = append(skip, in.Namespace+"/"+repl.Spec.AllocationRef.Name)
 	}
 	// The primary's own reserved slot is held for this very replacement, which takes it (slots_reserved.go).
@@ -413,17 +414,23 @@ func (p *pass) markNoOverlap(in *v1alpha1.Instance) error {
 		}
 	}
 	// The replacement that is not ready now is the primary's successor; the
-	// stamp is what keeps the gap open once the primary is gone.
-	if repl == nil || repl.Annotations[annotationNoOverlapGap] != "" {
-		return nil
+	// stamp is what keeps the gap open once the primary is gone. Every live
+	// member of its hedge is stamped, so none becomes a member that carries no
+	// gap (Hedging (beta)).
+	var errs []error
+	for _, m := range p.replacementMembers(in) {
+		if m.Annotations[annotationNoOverlapGap] != "" {
+			continue
+		}
+		errs = append(errs, p.setMeta(m, func(n *v1alpha1.Instance) {
+			if n.Annotations == nil {
+				n.Annotations = map[string]string{}
+			}
+			if n.Annotations[annotationNoOverlapSuccessor] == "" {
+				n.Annotations[annotationNoOverlapSuccessor] = why
+			}
+			n.Annotations[annotationNoOverlapGap] = in.Name
+		}))
 	}
-	return p.setMeta(repl, func(n *v1alpha1.Instance) {
-		if n.Annotations == nil {
-			n.Annotations = map[string]string{}
-		}
-		if n.Annotations[annotationNoOverlapSuccessor] == "" {
-			n.Annotations[annotationNoOverlapSuccessor] = why
-		}
-		n.Annotations[annotationNoOverlapGap] = in.Name
-	})
+	return errors.Join(errs...)
 }

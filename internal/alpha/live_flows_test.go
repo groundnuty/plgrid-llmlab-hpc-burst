@@ -211,7 +211,7 @@ func (r *liveRun) ourJob(ctx context.Context, in v1alpha1.Instance) string {
 
 // workerRestart is the worker-rung fault: it kills the engine of the
 // Instance's job on its node, by PID, and waits for the stack to restart the
-// worker and for the Instance to serve the key again (HBEP-7:637).
+// worker and for the Instance to serve the key again (HBEP-7, Graduation criteria).
 func (r *liveRun) workerRestart(ctx context.Context, p Plan, in v1alpha1.Instance) RestartTimes {
 	t := r.t
 	t.Helper()

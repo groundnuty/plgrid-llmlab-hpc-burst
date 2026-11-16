@@ -345,6 +345,17 @@ spec:
                       Provider's controller is its only writer; the record that outlives the
                       Allocation is the ControllerRevision acct-<Allocation UID>.
                     properties:
+                      allocatedBilling:
+                        description: |-
+                          AllocatedBilling is the scheduler's billing count for the job: the
+                          billing entry of accounting's tres.allocated, from the same read as
+                          AllocatedCPUs and AllocatedGPUs (beta; HBEP-8, Provider accounting,
+                          Billing). The scheduler computes it from the partition's billing weights.
+                          Absent when the entry is missing or does not fit, when the job was
+                          requeued, and until the read is made. Allocated, not billed.
+                        format: int32
+                        minimum: 0
+                        type: integer
                       allocatedCPUs:
                         description: |-
                           AllocatedCPUs is the number of CPUs the scheduler allocated: the cpu
