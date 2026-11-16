@@ -26,9 +26,10 @@ import (
 )
 
 // What HBEP-10 lets an agent change in a ModelDeployment's spec by its own rules: a higher count, a later
-// end, and the serving spec. Written here by hand; nothing else is allowed.
+// end, the serving spec, and the hedge width either way (as amended for #606). Written here by hand; nothing
+// else is allowed.
 var (
-	allowlistedSpecProperties   = []string{"instances", "endTime", "source"}
+	allowlistedSpecProperties   = []string{"instances", "endTime", "source", "hedgeWidth"}
 	allowlistedSourceProperties = []string{"served"}
 )
 
@@ -118,7 +119,7 @@ func TestSchemaCompletenessFindsAPropertyWithNoFixture(t *testing.T) {
 func TestEveryModelDeploymentSpecPropertyOutsideTheAllowlistIsRefusedForAnAgent(t *testing.T) {
 	specProps, sourceProps := crdSpecProperties(t)
 	// The population is the CRD's: these exist today, and the test must see them.
-	for _, want := range []string{"model", "source", "instances", "providers", "endTime", "retentionPolicy", "leaseLimit", "workload", "routing"} {
+	for _, want := range []string{"model", "source", "instances", "providers", "endTime", "retentionPolicy", "leaseLimit", "workload", "routing", "hedgeWidth"} {
 		if !slices.Contains(specProps, want) {
 			t.Fatalf("the CRD's spec properties %v lack %q: the test reads the wrong place", specProps, want)
 		}

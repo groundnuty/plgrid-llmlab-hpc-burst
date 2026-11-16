@@ -206,6 +206,14 @@ func acceptedMDCases() []guardCase {
 			}
 		}
 	}
+	hedgeWidth := func(n int32) func(t *testing.T, got *v1alpha1.ModelDeployment) {
+		return func(t *testing.T, got *v1alpha1.ModelDeployment) {
+			t.Helper()
+			if got.Spec.HedgeWidth == nil || *got.Spec.HedgeWidth != n {
+				t.Errorf("spec.hedgeWidth = %v after the write, want %d: it was accepted and did nothing", got.Spec.HedgeWidth, n)
+			}
+		}
+	}
 	return []guardCase{
 		{name: "a higher count through the object", check: instances(5),
 			run: func(w writer, md *v1alpha1.ModelDeployment) error {
@@ -265,6 +273,14 @@ func acceptedMDCases() []guardCase {
 					m.Spec.Instances = 4
 					m.Annotations["kubectl.kubernetes.io/last-applied-configuration"] = `{"spec":{"instances":4}}`
 				})
+			}},
+		{name: "spec.hedgeWidth raised, 2 to 3 (HBEP-10, as amended for #606)", check: hedgeWidth(3),
+			run: func(w writer, md *v1alpha1.ModelDeployment) error {
+				return w.update(md, func(m *v1alpha1.ModelDeployment) { m.Spec.HedgeWidth = ptr.To[int32](3) })
+			}},
+		{name: "spec.hedgeWidth lowered, 2 to 1 (HBEP-10, as amended for #606)", check: hedgeWidth(1),
+			run: func(w writer, md *v1alpha1.ModelDeployment) error {
+				return w.update(md, func(m *v1alpha1.ModelDeployment) { m.Spec.HedgeWidth = ptr.To[int32](1) })
 			}},
 		{name: "a no-op update", check: instances(3),
 			run: func(w writer, md *v1alpha1.ModelDeployment) error {

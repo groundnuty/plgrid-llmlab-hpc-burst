@@ -84,6 +84,7 @@ func agentMD(a *agent, ns, name string) *v1alpha1.ModelDeployment {
 	md.Spec.Routing = &v1alpha1.Routing{MaxRequestDuration: ptr.To(v1alpha1.Duration("30m"))}
 	md.Spec.RetentionPolicy = &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionKeep}
 	md.Spec.LeaseLimit = ptr.To(v1alpha1.Duration("8h"))
+	md.Spec.HedgeWidth = ptr.To[int32](2)
 	return md
 }
 

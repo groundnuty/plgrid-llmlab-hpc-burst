@@ -626,10 +626,11 @@ Three admission policies bound the agent role's writes (`config/admission/`; [HB
 | a later `spec.endTime`, or its removal | accepted | |
 | an `endTime` set where there was none, or moved earlier | refused: "an earlier end is an Operation of action End" | an Operation of action End (`hpcburst end`) |
 | an edit of `spec.source.served` | accepted; it rolls out make-before-break | |
+| a change of `spec.hedgeWidth`, up or down | accepted: lowering it cancels nothing, and raising it reserves capacity, which the owner allowed (HBEP-10, The capacity guard) | |
 | `spec.source` switched to `managed`, or any other change of `spec.source` | refused: "an agent may edit spec.source.served only" | the person edits it |
 | the purpose annotation `hpcburst.groundnuty.github.io/purpose` (at most 256 characters) | accepted | |
 | `kubectl.kubernetes.io/last-applied-configuration`, beside any accepted edit | accepted: kubectl's client-side apply rewrites it on every apply | |
-| any other spec field (`model`, `providers`, `retentionPolicy`, `leaseLimit`, `workload`, `routing` including `maxRequestDuration`, and every field the CRD gains), a label, any other annotation, a finalizer, an owner reference | refused, each naming what it may not change | the person makes the change |
+| any other spec field (`model`, `providers`, `retentionPolicy`, `leaseLimit`, `workload`, `routing` including `maxRequestDuration`, and every field the CRD gains, unless the guard names it), a label, any other annotation, a finalizer, an owner reference | refused, each naming what it may not change | the person makes the change |
 | the owner annotation `hpcburst.groundnuty.github.io/owner` | refused for every identity, the person's too: it is fixed at create | |
 | a delete or a collection delete | refused: "plan it as an Operation of action End with delete: true" (RBAC refuses it first, since the role has no `delete`) | an Operation of action End with `delete: true` (`hpcburst end --delete`) |
 | a create | accepted with the agent's own user name in the owner annotation (as the API server reports it, such as `system:serviceaccount:hpcburst-agents:agent-a`) and no `ownerReferences`; refused without the annotation or with another's, and with an owner reference (the garbage collector would delete the deployment when its owner goes, which releases its Allocations) | |
