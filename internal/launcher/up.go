@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventlog"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -55,6 +56,14 @@ type UpOptions struct {
 	// "" is alpha: no router, and the controller's command line is as before. It needs a controller
 	// binary.
 	InstanceRouter string
+	// EventLog is up --event-log (beta, opt-in; HBEP-8, The durable log): the supervisor runs
+	// HBEP-8's durable log, hpcburst-controller's eventlog subcommand, before the controllers and the
+	// front, and stops it last. The three sizes set its caps (2 GiB a stream by default) and the
+	// free space it leaves on its store's file system (15 GB); they are recorded with the choice and
+	// kept by upgrade, and a change takes down, then up with the new value. Valid only with a
+	// controller binary. Without it no log runs and nothing publishes to one.
+	EventLog                                           bool
+	EventLogEventsCap, EventLogUsageCap, EventLogFloor ByteSize
 
 	// supervisorArgv, set by tests only, replaces the supervisor's command line.
 	supervisorArgv []string
@@ -102,6 +111,11 @@ type UpReport struct {
 	FrpsPorts []int `json:"frps_ports,omitempty"`
 	// FrpsBulkPorts are the second frps's bind, tcpmux and web ports when up ran it (--bulk-path).
 	FrpsBulkPorts []int `json:"frps_bulk_ports,omitempty"`
+	// EventLogAddr is the durable log's client address when up ran it (--event-log). EventLogNotStarted
+	// is why the supervisor did not start it, when its start gate was closed: the caps do not fit the
+	// disk. The controllers and the front run without it, and up still exits 0, with a warning.
+	EventLogAddr       string `json:"event_log_addr,omitempty"`
+	EventLogNotStarted string `json:"event_log_not_started,omitempty"`
 	// RelayKeeperSocket is the relay keeper's socket when up ran it (--relay-keeper).
 	RelayKeeperSocket string `json:"relay_keeper_socket,omitempty"`
 	// AgentBuilds is the check of the builds the PlatformProfiles' partitions need (#158), made
@@ -148,6 +162,7 @@ func startAndWait(ctx context.Context, spec launchSpec, front Front, timeout tim
 	st.RelayKeeper = spec.relayKeeper
 	st.BulkPath = spec.bulkPath
 	st.InstanceRouter = spec.instanceRouter
+	st.EventLog = spec.eventLog
 	// Record before waiting: an interrupted or crashed start is then still cleaned up by down.
 	if err := spec.l.saveState(st); err != nil {
 		_, _ = stopRecorded(context.Background(), st, 10*time.Second, log)
@@ -245,6 +260,23 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 	if o.InstanceRouter != "" && ctrlBin == "" {
 		return nil, errors.New("a router was asked for (--instance-router), but no controller binary was found: the controller runs the Instances")
 	}
+	var eventLog *EventLogConfig
+	switch {
+	case o.EventLog:
+		if ctrlBin == "" {
+			return nil, errors.New("the event log was asked for (--event-log), but no controller binary was found: the log is the controller binary's eventlog subcommand")
+		}
+		cfg := EventLogConfig{Caps: eventlog.Caps{Events: int64(o.EventLogEventsCap), Usage: int64(o.EventLogUsageCap)}, Floor: int64(o.EventLogFloor)}.withDefaults()
+		if err := cfg.Validate(); err != nil {
+			return nil, fmt.Errorf("--event-log: %w", err)
+		}
+		if ports, err = ports.WithEventLog(); err != nil {
+			return nil, err
+		}
+		eventLog = &cfg
+	case o.EventLogEventsCap != 0 || o.EventLogUsageCap != 0 || o.EventLogFloor != 0:
+		return nil, errors.New("--event-log-events-cap, --event-log-usage-cap and --event-log-floor set the event log's sizes, and need --event-log")
+	}
 	if o.RelayKeeper && ctrlBin == "" {
 		return nil, errors.New("the relay keeper was asked for (--relay-keeper), but no controller binary was found: the keeper is the controller binary's relaykeeper subcommand")
 	}
@@ -339,6 +371,7 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 		spec.relayKeeper = o.RelayKeeper
 		spec.bulkPath = o.BulkPath
 		spec.instanceRouter = o.InstanceRouter
+		spec.eventLog = eventLog
 	}
 	st, readyzAt, readyAt, err := startAndWait(ctx, spec, front, o.ReadyTimeout, o.Log)
 	if err != nil {
@@ -492,6 +525,16 @@ func startControllers(ctx context.Context, l layout, ports Ports, o UpOptions, s
 	}
 	if o.RelayKeeper {
 		rep.RelayKeeperSocket = l.host(ports).RelayKeeperSocket()
+	}
+	if st.EventLog != nil {
+		rep.EventLogAddr = ports.EventLogAddr()
+		// The start gate may have kept the log back for space: the controllers and the front run,
+		// and up says so, where the supervisor wrote why (HBEP-8, A log refused for space).
+		if why, w := eventLogStartWarning(l); why != "" {
+			rep.EventLogNotStarted = why
+			rep.Warnings = append(rep.Warnings, w)
+			logf(o.Log, "%s", w)
+		}
 	}
 	// A tunnel process whose hard limit on open files is below HBEP-6's figure is warned about,
 	// never refused: the limit is the host's to set (HBEP-11, Single-user host; #431).

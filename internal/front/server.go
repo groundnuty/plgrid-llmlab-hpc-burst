@@ -63,6 +63,10 @@ type Options struct {
 	// serves the launcher's second certificate to the bulk server name and passes that name's
 	// /~!frp to the second frps (dialhome_bulk.go). Off, the front is as before.
 	BulkPath bool
+	// EventLogTokenFile is the durable log's token file (beta; HBEP-8, The durable log; #625),
+	// passed only while the launcher runs the log. It is stored and not read yet: the usage
+	// forwarder that connects to the log with it is a later change.
+	EventLogTokenFile string
 }
 
 // stopFunc is stopServing's signature, for Options.stop.

@@ -27,6 +27,8 @@
 # and, for the frps rig, 29252-29259. They run one at a time, except the two real-k3s event TTL tests
 # (internal/launcher/eventttl_k3s_test.go): those are parallel, one on each block, after the serial tests
 # of the package.
+# The durable log's tests (HBEP-8; #625) use 28480-28497, the launcher's block at base 28480 with the log's two
+# ports; the log process's own tests, in internal/eventlog/node, use 28500-28509.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
