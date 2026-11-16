@@ -500,11 +500,12 @@ spec:
                       description: |-
                         DialHomeModes are the platform-dependent dial-home modes measured to work
                         on this partition, each at most once (beta; HBEP-4, The remaining groups;
-                        HBEP-6, Dial-home modes). When it is set and the launcher's mode is ssh or
-                        host-dialed, reading the profile fails unless the list holds that mode.
-                        Absent means no check, and a launcher in direct mode is never checked:
-                        direct rests on the control-plane host's address, not on the platform,
-                        so it is no profile value.
+                        HBEP-6, Dial-home modes). The Slurm provider's ReadProfile is to check it
+                        (#625, a later PR; nothing reads it yet): when it is set and the
+                        launcher's mode is ssh or host-dialed, the read is to fail unless the list
+                        holds that mode. Absent means no check, and a launcher in direct mode is
+                        never to be checked: direct rests on the control-plane host's address,
+                        not on the platform, so it is no profile value.
                       items:
                         description: |-
                           ProfileDialHomeMode is a platform-dependent dial-home mode that a partition
