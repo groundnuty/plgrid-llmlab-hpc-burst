@@ -119,13 +119,14 @@ func releaseCause(why string) string {
 	return why[:cut] + "…"
 }
 
-// endCause is the release cause of an ended Instance's Allocation: a drain's
-// words, which the controller writes, or a failure's reason alone. A failure's
-// message can carry text from outside the controller (Slurm's reason, a
-// condition's message, an agent's report), and a cause holds none: no path, no
-// host and no credential reaches it.
+// endCause is the release cause of an ended Instance's Allocation: a clean
+// end's words (a drain's, or a hedge loss's, "hedge lost to <winner>"), which
+// the controller writes, or a failure's reason alone. A failure's message can
+// carry text from outside the controller (Slurm's reason, a condition's
+// message, an agent's report), and a cause holds none: no path, no host and no
+// credential reaches it.
 func endCause(in *v1alpha1.Instance, reason, msg string) string {
-	if reason == v1alpha1.ReasonDrained && msg != "" {
+	if cleanEnd(reason) && msg != "" {
 		return fmt.Sprintf("Instance %s ended: %s", in.Name, msg)
 	}
 	return fmt.Sprintf("Instance %s failed: %s", in.Name, reason)
