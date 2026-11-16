@@ -323,18 +323,18 @@ func TestSkippedRevisionChangingLengthGivesOneEventAnHour(t *testing.T) {
 // wantSkipped25 is the hand-written event of the i-th of 25 names that are
 // each 257 characters long, above the 253 the status holds.
 func wantSkipped25(i int) sentEvent {
-	shown := fmt.Sprintf("n%02d-", i) + strings.Repeat("n", 60) // the first 64 characters
+	shown := fmt.Sprintf("n%02d-", i) + strings.Repeat("n", 124) // the first 128 characters
 	return sentEvent{"Warning", "CatalogEntrySkipped", "degraded",
 		`catalog entry "` + shown + `..." skipped: a name of 257 characters, above 253`}
 }
 
 // wantSummary names the remaining 15 as far as 1,024 bytes allow: "n10-" to
-// "n22-", 13 names of 69 bytes each, after an 83-byte head, then an ellipsis
-// (83 + 13*69 + 12*2 + 5 = 1,009; a 14th would make 1,080).
+// "n15-", 6 names of 133 bytes each, after an 83-byte head, then an ellipsis
+// (83 + 6*133 + 5*2 + 5 = 896; a 7th would make 1,031).
 var wantSummary = func() sentEvent {
 	var named []string
-	for i := 10; i < 23; i++ {
-		named = append(named, fmt.Sprintf(`"n%02d-`, i)+strings.Repeat("n", 60)+`..."`)
+	for i := 10; i < 16; i++ {
+		named = append(named, fmt.Sprintf(`"n%02d-`, i)+strings.Repeat("n", 124)+`..."`)
 	}
 	return sentEvent{"Warning", "CatalogEntrySkipped", "degraded",
 		"15 more catalog entries skipped (at most 10 skipped entries are named in an hour): " + strings.Join(named, ", ") + ", …"}
@@ -366,8 +366,8 @@ func TestSkippedEntriesAreCappedAtTenAnHourWithASummary(t *testing.T) {
 	// The summary names some of the remaining 15 and not all (13 fit), ends
 	// with an ellipsis, and is within the 1,024 bytes of a note.
 	sum := got[len(got)-1].Note
-	if len(sum) > 1024 || !strings.HasSuffix(sum, "\u2026") || !strings.Contains(sum, `"n22-`) || strings.Contains(sum, `"n23-`) {
-		t.Fatalf("summary note of %d bytes: want at most 1024, an ellipsis, n22- named and n23- not: %q", len(sum), sum)
+	if len(sum) > 1024 || !strings.HasSuffix(sum, "\u2026") || !strings.Contains(sum, `"n15-`) || strings.Contains(sum, `"n16-`) {
+		t.Fatalf("summary note of %d bytes: want at most 1024, an ellipsis, n15- named and n16- not (6 names of 133 bytes fit, a 7th would make 1,031): %q", len(sum), sum)
 	}
 	// An hour on, the same again.
 	e.syncAt(at(13, 0, 0))
