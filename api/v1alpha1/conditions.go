@@ -290,6 +290,12 @@ const (
 	ReasonQualificationFailed = "QualificationFailed"
 	// ReasonDrained: the Instance drained and ended normally.
 	ReasonDrained = "Drained"
+	// ReasonHedgeLost: the Instance was a hedge's member and another member
+	// served first (beta; HBEP-7, Hedging (beta)). It is no failure: like
+	// Drained it releases nothing by itself and counts towards no failure
+	// streak. It is also the reason of the replaced event raised for each
+	// hedge loser (HBEP-8, Reasons).
+	ReasonHedgeLost = "HedgeLost"
 	// ReasonVerificationFailed and ReasonRestartLoop, the Degraded reasons
 	// above, are end reasons too: an Instance whose verification failed, or
 	// whose restarts formed a loop, ends with that reason (HBEP-7, Instance
